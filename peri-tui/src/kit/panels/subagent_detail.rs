@@ -26,7 +26,6 @@ use ratatui_kit::{
         layout::{Constraint, Rect},
         style::{Style, Stylize},
         text::{Line, Span},
-        widgets::{Scrollbar, ScrollbarOrientation, ScrollbarState},
     },
 };
 
@@ -154,25 +153,16 @@ impl Hook for DetailViewportHook {
         let top = clamp_detail_offset(*scroll, height, viewport.height as usize);
         *scroll = top;
         cache.draw(drawer, viewport, top);
-        if height > viewport.height as usize {
-            let semantic = peri_theme::atoms::THEME_ATOM.state().read().semantic;
-            let scrollbar = Scrollbar::new(ScrollbarOrientation::VerticalRight)
-                .begin_symbol(None)
-                .end_symbol(None)
-                .track_style(Style::default().fg(semantic.border.dim))
-                .thumb_style(Style::default().fg(semantic.text.muted));
-            let mut state = ScrollbarState::new(height)
-                .position(top)
-                .viewport_content_length(viewport.height as usize);
-            drawer.render_stateful_widget(
-                scrollbar,
-                Rect {
-                    width: outer.width,
-                    ..viewport
-                },
-                &mut state,
-            );
-        }
+        crate::kit::scrollbar_chrome::draw_scrollbar(
+            drawer,
+            Rect {
+                width: outer.width,
+                ..viewport
+            },
+            height,
+            top,
+            viewport.height as usize,
+        );
     }
 }
 

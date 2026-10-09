@@ -2,7 +2,7 @@ use super::super::tool_card::build_tool_card;
 use super::{CurrentTurn, TurnSegment};
 use crate::kit::tui_render_unit::{
     EntryStatus, FoldTarget, TuiAssistantBubble, TuiReasoningBlock, TuiRenderUnit, TuiSystemNote,
-    fold_for_status,
+    TuiUserBubble, fold_for_status,
 };
 use std::time::Instant;
 
@@ -285,6 +285,14 @@ impl CurrentTurn {
                                 level: level.clone(),
                                 content_hash: *content_hash,
                             }));
+                    }
+                }
+                TurnSegment::UserBubble { text } => {
+                    if self.cached_view_models.len() <= i {
+                        self.cached_view_models
+                            .push_back(TuiRenderUnit::TuiUserBubble(TuiUserBubble::new(
+                                text.clone(),
+                            )));
                     }
                 }
             }

@@ -1,10 +1,8 @@
 //! Props + 位置 Hook + 滚动条 Hook。
 
 use super::grid::GridSpec;
-use peri_theme::atoms::THEME_ATOM;
 use ratatui_kit::prelude::*; // Hook, ComponentDrawer, State, Props derive
 use ratatui_kit::ratatui::layout::Rect;
-use ratatui_kit::ratatui::style::{Modifier, Style};
 
 // ── 鼠标辅助 ─────────────────────────────────────────────────────────────
 
@@ -77,34 +75,14 @@ impl Hook for ScrollbarHook {
 
     fn post_component_draw(&mut self, drawer: &mut ComponentDrawer) {
         let f = *self.fields.read();
-        // 仅当内容超出视口时才渲染滚动条
-        if f.content_length <= f.viewport_length {
-            return;
-        }
-        let sem = THEME_ATOM.state().read().semantic;
-        let thumb_bg = sem.text.dim;
-        let scrollbar =
-            ratatui::widgets::Scrollbar::new(ratatui::widgets::ScrollbarOrientation::VerticalRight)
-                .thumb_symbol(" ")
-                .thumb_style(Style::default().fg(thumb_bg).bg(thumb_bg))
-                .track_symbol(None)
-                .begin_symbol(Some("▲"))
-                .begin_style(
-                    Style::default()
-                        .fg(sem.text.muted)
-                        .add_modifier(Modifier::BOLD),
-                )
-                .end_symbol(Some("▼"))
-                .end_style(
-                    Style::default()
-                        .fg(sem.text.muted)
-                        .add_modifier(Modifier::BOLD),
-                );
-        let mut state = ratatui::widgets::ScrollbarState::new(f.content_length)
-            .position(f.position)
-            .viewport_content_length(f.viewport_length);
         let area = self.outer.unwrap_or(drawer.area);
-        drawer.render_stateful_widget(scrollbar, area, &mut state);
+        crate::kit::scrollbar_chrome::draw_scrollbar(
+            drawer,
+            area,
+            f.content_length,
+            f.position,
+            f.viewport_length,
+        );
     }
 }
 

@@ -1,5 +1,59 @@
 use super::*;
 
+/// P0 regression: a newly submitted prompt must follow every visible entry
+/// from the previous turn, even when its terminal event has not arrived yet.
+#[test]
+#[serial]
+fn p0_new_prompt_follows_unarchived_previous_answer() {
+    let mut state = make_fold_test_state();
+    dispatch_and_notify(
+        &mut state,
+        &AcpEventData::LocalUserBubble { text: "q1".into() },
+    );
+    dispatch_and_notify(
+        &mut state,
+        &AcpEventData::TextChunk(TuiTextChunk {
+            text: "a1".into(),
+            message_id: None,
+            agent_id: None,
+        }),
+    );
+    dispatch_and_notify(
+        &mut state,
+        &AcpEventData::LocalUserBubble { text: "q2".into() },
+    );
+
+    let sequence: Vec<_> = VIEW_MODELS
+        .state()
+        .read()
+        .items
+        .iter()
+        .filter_map(|vm| match vm {
+            TuiRenderUnit::TuiUserBubble(b) => Some(format!("user:{}", b.text)),
+            TuiRenderUnit::TuiAssistantBubble(b) => Some(format!("assistant:{}", b.text)),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(sequence, ["user:q1", "assistant:a1", "user:q2"]);
+
+    dispatch_and_notify(&mut state, &AcpEventData::TurnDone);
+    let archived: Vec<_> = VIEW_MODELS
+        .state()
+        .read()
+        .items
+        .iter()
+        .filter_map(|vm| match vm {
+            TuiRenderUnit::TuiUserBubble(b) => Some(format!("user:{}", b.text)),
+            TuiRenderUnit::TuiAssistantBubble(b) => Some(format!("assistant:{}", b.text)),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(
+        archived, sequence,
+        "turn terminal must not reorder visible prompts"
+    );
+}
+
 // ── Slice 3：快照后处理流水线（turn divider / todo 摘要 / 工具分组）─────────
 
 /// §6.6 turn 边界 divider：上一 turn 结束后，新 turn 的 prompt 位于 committed

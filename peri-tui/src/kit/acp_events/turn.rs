@@ -5,9 +5,7 @@
 use super::*;
 use crate::kit::acp_types::CurrentTurn;
 use crate::kit::atoms::{PERI_CONFIG_HANDLE, RENDER_HEARTBEAT, THREAD_LOAD_TX};
-use crate::kit::tui_render_unit::{
-    TuiAssistantBubble, TuiReasoningBlock, TuiRenderUnit, TuiUserBubble,
-};
+use crate::kit::tui_render_unit::{TuiAssistantBubble, TuiReasoningBlock, TuiRenderUnit};
 
 pub(super) fn handle_turn_done(state: &mut BridgeState) {
     // H3: TurnDone 仅做两件事：
@@ -344,11 +342,7 @@ pub(super) fn handle_local_user_bubble(state: &mut BridgeState, text: &str) {
     // 判定的基准（注意 session replay 的 user_message_chunk 也走本变体，但 replay
     // 期间无 turn 运行、无 TurnInterrupted 到达，递增不会造成误判）。
     state.turn_generation = state.turn_generation.wrapping_add(1);
-    state
-        .committed
-        .push_back(TuiRenderUnit::TuiUserBubble(TuiUserBubble::new(
-            text.to_string(),
-        )));
+    state.push_user_bubble(text.to_string());
     state.publish_barrier();
     super::render::push_acp_state(state);
 }
@@ -380,14 +374,9 @@ pub(super) fn handle_user_input_delivered(
     {
         return;
     }
-    state.flush_current_turn();
     state.last_submitted_text = None;
     state.variant = 1;
-    state
-        .committed
-        .push_back(TuiRenderUnit::TuiUserBubble(TuiUserBubble::new(
-            content.text_content(),
-        )));
+    state.push_user_bubble(content.text_content());
     state.publish_barrier();
     super::render::push_acp_state(state);
 }

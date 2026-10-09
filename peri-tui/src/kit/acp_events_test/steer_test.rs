@@ -113,6 +113,91 @@ fn test_steer_delivered_reuses_chat_bubble_between_assistant_turns() {
     );
 }
 
+/// P0 regression: a running subagent keeps its parent turn open; a delivered
+/// prompt and the following answer must still stay in chronological order.
+#[test]
+#[serial]
+fn p0_delivered_prompt_follows_output_when_subagent_keeps_turn_open() {
+    let (mut state, _restore) = make_steer_bridge();
+    dispatch_and_notify(
+        &mut state,
+        &AcpEventData::TextChunk(TuiTextChunk {
+            text: "旧回答".into(),
+            message_id: None,
+            agent_id: None,
+        }),
+    );
+    dispatch_and_notify(
+        &mut state,
+        &AcpEventData::SubagentStarted {
+            agent_id: "child".into(),
+            agent_name: "coder".into(),
+            is_background: true,
+            parent_tool_call_id: None,
+        },
+    );
+    dispatch_and_notify(&mut state, &delivered());
+
+    let snapshot = VIEW_MODELS.state().read().clone();
+    let items = &snapshot.items;
+    let answer = items
+        .iter()
+        .position(|vm| matches!(vm, TuiRenderUnit::TuiAssistantBubble(b) if b.text == "旧回答"))
+        .unwrap();
+    let group = items
+        .iter()
+        .position(|vm| matches!(vm, TuiRenderUnit::TuiSubAgentGroup(_)))
+        .unwrap();
+    let prompt = items
+        .iter()
+        .position(|vm| matches!(vm, TuiRenderUnit::TuiUserBubble(b) if b.text == "新的输入"))
+        .unwrap();
+    assert!(
+        answer < group && group < prompt,
+        "delivered prompt must follow existing output"
+    );
+    assert!(
+        state
+            .current_turn
+            .subagents
+            .iter()
+            .any(|agent| agent.is_running)
+    );
+
+    dispatch_and_notify(
+        &mut state,
+        &AcpEventData::TextChunk(TuiTextChunk {
+            text: "新回答".into(),
+            message_id: None,
+            agent_id: None,
+        }),
+    );
+    dispatch_and_notify(
+        &mut state,
+        &AcpEventData::SubagentStopped {
+            agent_id: "child".into(),
+            result: String::new(),
+            is_error: false,
+        },
+    );
+    dispatch_and_notify(&mut state, &AcpEventData::TurnDone);
+    let archived = VIEW_MODELS.state().read().clone();
+    let prompt = archived
+        .items
+        .iter()
+        .position(|vm| matches!(vm, TuiRenderUnit::TuiUserBubble(b) if b.text == "新的输入"))
+        .unwrap();
+    let newer_answer = archived
+        .items
+        .iter()
+        .position(|vm| matches!(vm, TuiRenderUnit::TuiAssistantBubble(b) if b.text == "新回答"))
+        .unwrap();
+    assert!(
+        prompt < newer_answer,
+        "archived answer must remain after delivered prompt"
+    );
+}
+
 #[test]
 #[serial]
 fn test_steer_delivered_duplicate_only_adds_one_user_bubble() {

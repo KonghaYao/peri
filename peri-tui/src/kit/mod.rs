@@ -46,6 +46,7 @@ pub mod popup_overlay;
 pub mod popups;
 pub mod rewind_action;
 pub mod rewind_candidates;
+pub(crate) mod scrollbar_chrome;
 pub mod service_snapshot;
 pub mod session_boundary;
 pub mod setup_wizard;

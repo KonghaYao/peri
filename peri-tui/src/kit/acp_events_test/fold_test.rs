@@ -530,8 +530,8 @@ fn test_fold_pass_tool_manual_override_restores_user_modified() {
         },
     );
     let snap = VIEW_MODELS.state().read().clone();
-    // items = [UserBubble, ToolCard]——工具卡在 current_turn，LocalUserBubble append 到 committed
-    let t = tool_card_of(&snap, 1);
+    // 已结束的工具卡先归档，新 prompt 排在旧输出之后。
+    let t = tool_card_of(&snap, 0);
     assert_eq!(t.fold, FoldState::Expanded, "手动展开跨重建保持");
     assert!(
         t.user_modified,

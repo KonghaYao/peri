@@ -193,6 +193,8 @@ enum TurnSegment {
         level: TuiNoteLevel,
         content_hash: u64,
     },
+    /// A user input delivered while a running subagent keeps this turn open.
+    UserBubble { text: String },
 }
 
 impl CurrentTurn {

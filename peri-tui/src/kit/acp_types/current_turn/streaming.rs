@@ -173,4 +173,13 @@ impl CurrentTurn {
         self.active = true;
         self.invalidate_cache();
     }
+
+    /// Keep a delivered user prompt after the already visible assistant output
+    /// while a running subagent prevents the parent turn from being archived.
+    pub(crate) fn push_user_bubble(&mut self, text: String) {
+        self.flush_text_segment();
+        self.segments.push(TurnSegment::UserBubble { text });
+        self.active = true;
+        self.invalidate_cache();
+    }
 }

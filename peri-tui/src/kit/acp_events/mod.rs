@@ -231,6 +231,19 @@ impl BridgeState {
         self.current_turn.reset();
     }
 
+    /// Put a user prompt after all output already received from the preceding
+    /// turn. A live subagent keeps its container in current_turn, so in that
+    /// case the prompt joins the same chronological segment stream.
+    fn push_user_bubble(&mut self, text: String) {
+        self.flush_current_turn();
+        if self.current_turn.is_empty() {
+            self.committed
+                .push_back(TuiRenderUnit::TuiUserBubble(TuiUserBubble::new(text)));
+        } else {
+            self.current_turn.push_user_bubble(text);
+        }
+    }
+
     /// SystemNote 统一注入入口。封装 push_system_note → push_view_models → push_acp_state
     /// 三步操作，确保 SystemNote 按时序出现在 current_turn 内部。
     ///
