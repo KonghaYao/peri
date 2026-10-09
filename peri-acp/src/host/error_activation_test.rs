@@ -143,15 +143,16 @@ async fn model_failure_recovers_automatically(during_failure: bool) {
     failure.assert_async().await;
     recovery.assert_async().await;
     assert_eq!(recoveries.load(Ordering::SeqCst), 1);
-    let bodies = request_bodies.lock().unwrap();
-    assert_eq!(
-        serde_json::to_string(&bodies[0]["messages"])
-            .unwrap()
-            .matches("late task error")
-            .count(),
-        1
-    );
-    drop(bodies);
+    {
+        let bodies = request_bodies.lock().unwrap();
+        assert_eq!(
+            serde_json::to_string(&bodies[0]["messages"])
+                .unwrap()
+                .matches("late task error")
+                .count(),
+            1
+        );
+    }
     let history = harness
         .cfg
         .session_resources

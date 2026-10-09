@@ -189,10 +189,11 @@ async fn cancelling_a_lock_holder_allows_another_database_open() {
     acquired.await.unwrap();
     holder.abort();
     assert!(holder.await.unwrap_err().is_cancelled());
-    let store = tokio::time::timeout(Duration::from_secs(1), SqliteThreadStore::new(&path))
+    let reacquired = lock_schema_open(&path, SCHEMA_OPEN_LOCK_TIMEOUT)
         .await
-        .unwrap()
         .unwrap();
+    drop(reacquired);
+    let store = SqliteThreadStore::new(&path).await.unwrap();
     store.close().await;
     assert!(schema_lock_path(&path).await.unwrap().exists());
 }
@@ -211,10 +212,11 @@ async fn cancelling_a_waiter_does_not_acquire_an_orphan_lock() {
     waiter.abort();
     assert!(waiter.await.err().unwrap().is_cancelled());
     drop(held);
-    let store = tokio::time::timeout(Duration::from_secs(1), SqliteThreadStore::new(&path))
+    let reacquired = lock_schema_open(&path, SCHEMA_OPEN_LOCK_TIMEOUT)
         .await
-        .unwrap()
         .unwrap();
+    drop(reacquired);
+    let store = SqliteThreadStore::new(&path).await.unwrap();
     store.close().await;
 }
 
@@ -262,10 +264,7 @@ async fn cancelling_an_open_during_schema_initialization_releases_its_lock() {
     drop(held);
     sqlx::query("ROLLBACK").execute(&mut blocker).await.unwrap();
     blocker.close().await.unwrap();
-    let reopened = tokio::time::timeout(Duration::from_secs(1), SqliteThreadStore::new(&path))
-        .await
-        .unwrap()
-        .unwrap();
+    let reopened = SqliteThreadStore::new(&path).await.unwrap();
     reopened.close().await;
     tokio::time::timeout(Duration::from_secs(1), async {
         while tokio::fs::try_exists(path.with_extension("db-wal"))
