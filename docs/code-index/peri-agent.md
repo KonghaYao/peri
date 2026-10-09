@@ -64,6 +64,8 @@ Child 当前进程的晚到任务结果由 `session/subagent/child_runner.rs` �
 
 ## 子系统
 
+取消阶段 hook 的等待入口在 `agent/stages/middleware_runner.rs::run_interruptible_hook`；首轮 reminder 也经该 runner，批量审批取消保留逐调用结果数量。`agent/stages/middleware_cancel_test.rs` 覆盖真实 loop 在输入准备、启动闸门、Compact、Reason、最终回答后置 hook 中取消与下一轮执行，以及审批和首轮 reminder 中止；运行 `./scripts/cargo-rmcp-patched.sh test --locked -p peri-agent --lib -- middleware_runner::cancel_tests`。取消不跳过输入 reconcile、工具结果结算或持久化确认。
+
 Inbox 去重入口 `agent/stages/work_receive.rs` 使用 `SessionResources::load_work_delivery` 读取单条交付；保留 lifecycle / content / policy 冲突校验、稳定提交身份和失败后批次回队。不修改候选发现或 Unknown 写屏障；回归入口 `agent/stages/work_receive_test.rs`。
 
 ### 普通执行与历史加载

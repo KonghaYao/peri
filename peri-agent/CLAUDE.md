@@ -27,6 +27,7 @@
 ## 稳定不变量
 
 - `run_react_loop` 是阶段循环入口；退出判断保留在 Receive。
+- 阶段 middleware hook 的异步等待由 `middleware_runner` 与当前 turn cancel 竞争，取消返回 `Interrupted`；已完成的输入替换仍 reconcile，启动候选不提交。此边界不替代工具执行结算、事件排空或持久化 barrier，也不关闭 session 级 MCP 服务。
 - 只有当前 MQ 输入驱动执行；历史加载不重放旧模型请求、工具调用或委托。`resume_subagent` 是用户显式加载子会话历史并开始新 run。
 - 工具 `invocation_id` 是当前调用唯一身份，`tool_call_id` 是模型原始调用身份；子事件直接使用后者，不查持久执行账本。
 - 消息、模型回答与工具结果继续写 transcript；普通 flush 失败必须返回执行错误，不以队列接纳替代落库确认。

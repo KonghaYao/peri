@@ -746,6 +746,9 @@ pub async fn run_react_loop(context: StageContext, max_iterations: usize) -> Loo
                     middleware_runner::run_before_agent(&context, &receive_out.input_message_ids)
                         .await
                 {
+                    if matches!(e, crate::error::AgentError::Interrupted) {
+                        return LoopResult::Interrupted;
+                    }
                     tracing::warn!(error = %e, "[v2] before_agent hook failed");
                 }
             } else if let Err(error) =

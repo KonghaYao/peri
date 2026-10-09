@@ -20,7 +20,6 @@ use tokio_util::sync::CancellationToken;
 use tracing::error;
 
 use crate::agent::{
-    agent_context::AgentContext,
     async_tasks::TaskManager as AgentTaskManager,
     react::AgentInput,
     stages::{run_react_loop, LoopResult},
@@ -372,12 +371,7 @@ pub async fn build_and_execute_agent_v2(req: V2ExecuteRequest) -> ExecOutcome {
     // 在后（"加入到 user prompt"语义，不抢在用户输入前）。
     // 纯生成无记账：入队前失败/取消无副作用，下个首 turn 重新生成。
     if is_first_user_turn {
-        let mut cx = AgentContext::from_stage(&v2_out.context);
-        match v2_out
-            .context
-            .runtime
-            .middleware_chain
-            .run_first_turn_reminders(&mut cx)
+        match crate::agent::stages::middleware_runner::run_first_turn_reminders(&v2_out.context)
             .await
         {
             Ok(reminders) if !reminders.is_empty() => {
