@@ -109,7 +109,7 @@ core `ConfigSource::save(expected_revision, &PeriConfig)` 返回 accepted snapsh
 | MessageArea（消息流 + footer + keepgoing 按钮） | `message_area/mod.rs`（MessageArea :92） | 消息流渲染主组件；滚动/点击/选区事件注册；footer 行与 keepgoing 按钮命中 |
 | footer/spinner 行 | `message_area/footer.rs` | `build_footer_lines`（:100）：loading spinner / summary / todo 行 + `KeepGoingLayout`（:85）；防抖期按钮禁用样式 |
 | GridSpec 网格 | `message_area/grid.rs`（`grid_for` :75 / `line_width` :132）+ `layout.rs`（`center_band_area` :22 / `CenterBandHook` :42） | 断点（`Breakpoint` :31）与行首/续行前缀宽度；全部行渲染的对齐基准。content 触顶后整条带按 `left_pad` 居中（`band_width` = 前缀 + content + metadata gutter + 滚动条列 = 117），MessageArea / InputArea / StatusBar / BgTaskArea 都经 hook 把 `drawer.area` 收进该带，左右边缘互相对齐。例外：滚动条是窗口级 chrome（`props.rs::ScrollbarHook` :52），必须在 band hook **之前**注册以捕获收窄前的整幅矩形，渲染与命中测试（`scroll/event.rs`）共用它，锚在终端最右列 |
-| scroll 滚动引擎 | `message_area/scroll.rs` | `handle_event`（:516）；滚轮节流、拖拽选中、键盘滚动、吸底跟随（`should_follow_after_user_scroll` :378） |
+| scroll 滚动引擎 | `message_area/scroll.rs` + `scroll/{event,gesture,auto_follow}.rs` | `handle_event`；滚轮节流、拖拽选中、键盘滚动、吸底跟随；文本手势持有 Drag/Up pointer capture，拖出消息带或进入滚动条列仍收尾，越界终点夹到视口，Up 不受节流并更新复制终点；回归见 `scroll/gesture_test.rs` |
 | 语义选区 | `message_area/selection.rs` | 拖拽选区与语义复制（`map_slice_to_semantic` :469，复制时剥视觉前缀） |
 | markdown 渲染 | `markdown/`（convert.rs / code_block.rs / table.rs / scan.rs） | 文本 → 带样式的行渲染；代码块、表格、扫描 |
 | Markdown 解析测试 | `src/kit/markdown/{mod_test.rs,cache_test.rs,table_parse_test.rs,wrap_test.rs,image_parse_test.rs,profile_test.rs}` | 按基本解析、增量缓存、表格、Unicode 折行、图片与显式 release profile 分组；统一过滤 `kit::markdown::`，profile 用例默认 ignored |

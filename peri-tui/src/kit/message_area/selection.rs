@@ -481,8 +481,10 @@ fn split_line_spans_by_byte_range(
 /// 在独立线程中写入系统剪贴板，避免阻塞 tokio worker。
 pub(super) fn copy_to_clipboard(text: String) {
     std::thread::spawn(move || {
-        if let Ok(mut clipboard) = arboard::Clipboard::new() {
-            let _ = clipboard.set_text(&text);
+        let result = arboard::Clipboard::new().and_then(|mut clipboard| clipboard.set_text(&text));
+        match result {
+            Ok(()) => mark_copy_message(text.chars().count()),
+            Err(error) => tracing::error!(%error, "Failed to copy text to clipboard"),
         }
     });
 }

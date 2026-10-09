@@ -12,7 +12,7 @@ use super::hits::{CopyButtonHit, ImageHoverState, ImageLineHit, InteractionOptio
 use super::image_action::{hover_target_for, try_open_image};
 use super::props::ScrollbarFields;
 use super::scroll::{self, DragThrottle, ScrollThrottle, ScrollbarDragState};
-use super::selection::{self, copy_to_clipboard, mark_copy_message};
+use super::selection::{self, copy_to_clipboard};
 use crate::kit::atoms::{
     FOCUSED_ENTRY, IMAGE_HOVER, IMAGE_PREVIEW_HOVER, KEEPGOING_BLOCKED_UNTIL, RENDER_HEARTBEAT,
     SUBMIT_TX, VIEW_MODELS, ViewModelsSnapshot,
@@ -156,8 +156,7 @@ pub(super) fn register_copy_click(
         let text = copy_text_for_hit(&snapshot, hit);
         drop(snapshot);
         if let Some(text) = text {
-            copy_to_clipboard(text.clone());
-            mark_copy_message(text.chars().count());
+            copy_to_clipboard(text);
         }
         // 命中按钮（即使 VM 不匹配）也 Consumed——防止点击落到文本选区逻辑
         EventResult::Consumed
