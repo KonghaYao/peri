@@ -184,3 +184,33 @@ fn same_length_replacement_and_empty_slots_update_prefix() {
     assert_eq!(cache.prefix[1], 0);
     assert_eq!(cache.slots_for(0..cache.height()), 1..2);
 }
+
+#[test]
+#[serial_test::serial]
+fn detail_draw_shows_nested_record_in_terminal_buffer() {
+    let mut cache = DetailRenderCache::default();
+    cache.prepare(
+        &group("visible", "nested record"),
+        &GridSpec::with_content(58),
+        Arc::new(peri_theme::builtin::dark_theme()),
+        0,
+        vec![Line::from("coder"), Line::from("")],
+    );
+    let mut terminal = ratatui_kit::ratatui::Terminal::new(
+        ratatui_kit::ratatui::backend::TestBackend::new(60, 12),
+    )
+    .unwrap();
+    let frame = terminal
+        .draw(|frame| {
+            let mut drawer = ComponentDrawer::new(frame, Rect::new(0, 0, 60, 12));
+            cache.draw(&mut drawer, Rect::new(0, 1, 59, 10), 0);
+        })
+        .unwrap();
+    let rendered: String = frame
+        .buffer
+        .content()
+        .iter()
+        .map(|cell| cell.symbol())
+        .collect();
+    assert!(rendered.contains("nested record"), "{rendered}");
+}

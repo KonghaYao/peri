@@ -43,6 +43,7 @@ pub fn SubAgentDetailPanel(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
     hooks.use_hook(move || DetailViewportHook {
         cache: render_cache,
         scroll: sv,
+        outer: None,
     });
 
     // 选中 subagent：SELECTED_SUBAGENT_ID（消息区焦点分派写入）→ 候选源解析
@@ -129,17 +130,21 @@ pub fn SubAgentDetailPanel(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
 struct DetailViewportHook {
     cache: State<render_cache::DetailRenderCache>,
     scroll: State<usize>,
+    outer: Option<Rect>,
 }
 
 impl Hook for DetailViewportHook {
+    fn pre_component_draw(&mut self, drawer: &mut ComponentDrawer) {
+        // Border changes drawer.area while drawing its child. Capture the panel
+        // bounds before that happens so the viewport uses one border inset.
+        self.outer = Some(drawer.area);
+    }
+
     fn post_component_draw(&mut self, drawer: &mut ComponentDrawer) {
-        let outer = drawer.area;
-        let viewport = Rect {
-            y: outer.y.saturating_add(1),
-            height: outer.height.saturating_sub(2),
-            width: outer.width.saturating_sub(1),
-            ..outer
+        let Some(outer) = self.outer else {
+            return;
         };
+        let viewport = detail_viewport(outer);
         if viewport.is_empty() {
             return;
         }
@@ -173,6 +178,15 @@ impl Hook for DetailViewportHook {
 
 fn clamp_detail_offset(top: usize, height: usize, viewport_height: usize) -> usize {
     top.min(height.saturating_sub(viewport_height))
+}
+
+fn detail_viewport(outer: Rect) -> Rect {
+    Rect {
+        y: outer.y.saturating_add(1),
+        height: outer.height.saturating_sub(2),
+        width: outer.width.saturating_sub(1),
+        ..outer
+    }
 }
 
 #[cfg(test)]
@@ -270,11 +284,9 @@ fn find_live_detail_subagent(
 
 /// 解析选中 id 对应的 `BG_LIVE_DETAIL` task_id。
 ///
-/// 三种来源：id 本身就是 task_id（底栏行点击在行尚未绑定 agent 时的兜底，
-/// `bg_task_click.rs` 取 `BgDisplayEntry::id`）；id 是 bg 任务绑定的 agent_id
-/// （`BG_DISPLAY.linked_agent_id`，底栏行点击）；id 是组的 instance_id（消息区
-/// Enter），此时只认 live 明细记录的同一次运行——agent_id 在这一路径不可用，
-/// resume 复用 child_thread_id，按 agent_id 回查会把旧的那次运行当成当前运行。
+/// 三种来源：底栏行点击的 task_id；旧入口传入的 bg agent_id；消息区 Enter
+/// 写入的组 instance_id。后者只认 live 明细记录的同一次运行：resume 复用
+/// child_thread_id，按 agent_id 回查会把旧的那次运行当成当前运行。
 fn live_task_id_for(
     live: &std::collections::HashMap<String, crate::kit::atoms::BgLiveDetail>,
     display: &[BgDisplayEntry],

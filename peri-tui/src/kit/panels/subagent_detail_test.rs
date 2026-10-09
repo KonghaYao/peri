@@ -45,6 +45,14 @@ fn virtual_detail_offset_preserves_full_height_and_clamps_after_resize() {
 }
 
 #[test]
+fn detail_viewport_uses_panel_bounds_once() {
+    assert_eq!(
+        detail_viewport(Rect::new(4, 3, 60, 12)),
+        Rect::new(4, 4, 59, 10)
+    );
+}
+
+#[test]
 fn test_find_selected_subagent_none_when_no_selection() {
     let snap = ViewModelsSnapshot {
         items: im::Vector::from(vec![TuiRenderUnit::TuiSubAgentGroup(make_subagent(
@@ -350,6 +358,14 @@ fn test_resolve_selected_subagent_matches_selected_occurrence() {
         .expect("newer occurrence");
     assert_eq!(newer.instance_id, "task-new");
     assert_eq!(nested_texts(&newer), vec!["new run".to_string()]);
+
+    // 底栏点击使用 task_id；同一 agent 的旧行和新行各自打开自己的记录。
+    let older_row = resolve_selected_subagent(&snap, &live, &display, Some("task-old"))
+        .expect("older task row");
+    let newer_row = resolve_selected_subagent(&snap, &live, &display, Some("task-new"))
+        .expect("newer task row");
+    assert_eq!(nested_texts(&older_row), vec!["old run".to_string()]);
+    assert_eq!(nested_texts(&newer_row), vec!["new run".to_string()]);
 }
 
 /// 同步 subagent 不在 `BG_LIVE_DETAIL` 中——仍走 VIEW_MODELS 扫描（不得回归）。
