@@ -1,6 +1,75 @@
 //! Cancellation and dispatch resume behavior.
 
 use super::*;
+use crate::session::MessageSource;
+use peri_acp_types::tasks::TaskManager as _;
+
+#[tokio::test]
+async fn background_resume_without_custom_callback_wakes_parent() {
+    let store = MockSessionResources::new();
+    let thread_id = uuid::Uuid::now_v7().to_string();
+    preset_resumable_thread(&store, &thread_id, None).await;
+    let parent = Session::new(
+        Arc::from("/tmp/work"),
+        FrozenContext::builder().build(),
+        None,
+    );
+    let manager = Arc::new(TaskManager::new());
+    let mut config = resume_config(store.clone(), thread_id.clone());
+    config.run_mode = SubagentRunMode::Background;
+    config.task_manager = Some(manager.clone());
+    config.prompt = Some("resume-result-anchor".into());
+    let spawned = SessionFactory::resume_subagent(Some(&parent), config)
+        .await
+        .unwrap();
+    tokio::time::timeout(std::time::Duration::from_secs(2), async {
+        while !manager.is_execution_idle() {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("background resume must settle before checking its delivery");
+    assert_eq!(manager.active_count(), 0);
+    assert!(parent.queue().has_ensure_processing());
+    assert!(parent
+        .queue()
+        .has_pending_defer(&MessageSource::SubAgentComplete));
+    assert!(spawned.session.queue().is_empty());
+    let model = RecordingLLM::new();
+    let received = model.received.clone();
+    let built = build_v2_subagent_context(
+        Some(parent.clone()),
+        Box::new(crate::agent::model_bridge::AgentModelBridge::new(Arc::new(
+            model,
+        ))),
+        Arc::new(MiddlewareChain::new()),
+        Vec::new(),
+        Arc::new(|_| true),
+        None,
+        "/tmp/work",
+        CancellationToken::new(),
+        None,
+        None,
+        None,
+        None,
+        None,
+    );
+    assert!(matches!(
+        crate::agent::stages::run_react_loop(built.context, 2).await,
+        crate::agent::stages::LoopResult::Completed
+    ));
+    assert!(parent.queue().is_empty());
+    let requests = received.read();
+    assert_eq!(requests.len(), 1);
+    assert_eq!(
+        requests[0]
+            .iter()
+            .filter(|message| message.content().contains("echo: resume-result-anchor"))
+            .count(),
+        1
+    );
+    assert_eq!(spawned.child_thread_id, thread_id);
+}
 
 async fn dispatch_resume_fixture(
     config: SubagentResumeConfig,
