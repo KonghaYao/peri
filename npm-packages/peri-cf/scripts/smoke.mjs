@@ -30,6 +30,7 @@ function assert(condition, message) {
 async function connectSync(base, id) {
   const replica = new SessionDocReplica();
   const socket = new WebSocket(`${base.replace(/^http/, "ws")}/api/chats/${id}/sync`);
+  socket.binaryType = "arraybuffer";
   let current;
   let failure;
   const waiters = new Set();
@@ -45,7 +46,7 @@ async function connectSync(base, id) {
       if (frame.type === "snapshot") replica.applySnapshot(frame.snapshot);
       else replica.applyUpdate(frame.update);
       current = readSyncState(replica.chat, replica.session);
-      if (frame.delivery !== undefined) socket.send(encodeAckFrame(frame.delivery));
+      socket.send(encodeAckFrame(frame.delivery));
       for (const waiter of [...waiters]) {
         if (waiter.predicate(current)) { waiters.delete(waiter); waiter.resolve(current); }
       }

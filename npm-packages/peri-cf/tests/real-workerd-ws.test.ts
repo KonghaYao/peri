@@ -60,17 +60,20 @@ async function connect(autoAck = true) {
   sockets.push(socket);
   const frames: SyncFrame[] = [];
   const replica = new SessionDocReplica();
+  const received = { binary: 0, text: 0 };
   let closeCode: number | undefined;
   socket.addEventListener("message", (event) => {
+    if (typeof event.data === "string") received.text++;
+    else received.binary++;
     const frame = decodeSyncFrame(event.data);
     if (frame.type === "snapshot") replica.applySnapshot(frame.snapshot);
     else replica.applyUpdate(frame.update);
     frames.push(frame);
-    if (autoAck) socket.send(encodeAckFrame(frame.delivery!));
+    if (autoAck) socket.send(encodeAckFrame(frame.delivery));
   });
   socket.addEventListener("close", (event) => { closeCode = event.code; });
   socket.accept();
-  return { socket, frames, replica, state: () => readSyncState(replica.chat, replica.session), closeCode: () => closeCode };
+  return { socket, frames, replica, received, state: () => readSyncState(replica.chat, replica.session), closeCode: () => closeCode };
 }
 
 describe("actual workerd read-only WS delivery and hibernation", () => {
@@ -79,6 +82,8 @@ describe("actual workerd read-only WS delivery and hibernation", () => {
     expect(client.frames).toHaveLength(0);
     client.socket.send(encodeAuthFrame({ type: "auth", token }));
     await until(() => client.frames.length > 0);
+    expect(client.received.text).toBe(0);
+    expect(client.received.binary).toBeGreaterThan(0);
     await untilAsync(async () => (await stats()).attachments.every((attachment) => attachment.pending.length === 0));
     const before = await stats();
     expect(before.bufferedAmountType).toBe("undefined");
@@ -135,8 +140,8 @@ describe("actual workerd read-only WS delivery and hibernation", () => {
     const client = await connect(false);
     client.socket.send(encodeAuthFrame({ type: "auth", token }));
     await until(() => client.frames.length > 0);
-    client.socket.send(encodeAckFrame(client.frames[0]!.delivery!));
-    client.socket.send(encodeAckFrame(client.frames[0]!.delivery!));
+    client.socket.send(encodeAckFrame(client.frames[0]!.delivery));
+    client.socket.send(encodeAckFrame(client.frames[0]!.delivery));
     await until(() => client.closeCode() !== undefined);
     expect(client.closeCode()).toBe(4403);
     client.replica.destroy();

@@ -3,9 +3,10 @@ import { SessionDocs } from "../../@peri-sdk/src/state/session-docs";
 import { SessionDocSync, SessionDocReplica } from "../../@peri-sdk/src/sync";
 import { SessionViewStore } from "../../@peri-sdk/src/view/session-view";
 import { decodeAuthFrame, decodeSyncFrame, encodeAuthFrame, encodeSyncFrame,
-  decodeAckFrame, encodeAckFrame, MAX_AUTH_FRAME_CHARS, MAX_SYNC_FRAME_CHARS } from "../shared/sync";
+  decodeAckFrame, encodeAckFrame, FRAME_ACK, FRAME_UPDATE, SYNC_WIRE_VERSION,
+  MAX_ACK_FRAME_BYTES, MAX_AUTH_FRAME_BYTES, MAX_SYNC_FRAME_BYTES } from "../shared/sync";
 import { readSyncState } from "../shared/sync-state";
-import type { SyncFrame } from "../shared/sync";
+import type { SyncFramePayload } from "../shared/sync";
 
 const cleanups: (() => void | Promise<void>)[] = [];
 afterEach(async () => {
@@ -20,8 +21,9 @@ function pair() {
   return { docs, sync, replica };
 }
 
-function deliver(replica: SessionDocReplica, frame: SyncFrame) {
-  const decoded = decodeSyncFrame(encodeSyncFrame(frame));
+let delivery = 0;
+function deliver(replica: SessionDocReplica, frame: SyncFramePayload) {
+  const decoded = decodeSyncFrame(encodeSyncFrame({ ...frame, delivery: ++delivery }));
   if (decoded.type === "snapshot") replica.applySnapshot(decoded.snapshot);
   else replica.applyUpdate(decoded.update);
 }
@@ -33,14 +35,36 @@ function chunk(docs: SessionDocs, text: string) {
 }
 
 describe("SDK document sync wire boundary", () => {
-  test.each([0, -1, 1.5, Number.MAX_SAFE_INTEGER + 1])("rejects invalid ACK delivery %s", (delivery) => {
-    expect(() => encodeAckFrame(delivery)).toThrow();
-    expect(() => decodeAckFrame(JSON.stringify({ type: "ack", delivery }))).toThrow();
+  test.each([0, -1, 1.5, Number.MAX_SAFE_INTEGER + 1])("rejects invalid ACK delivery %s", (value) => {
+    expect(() => encodeAckFrame(value)).toThrow();
   });
 
-  test.each(['{"type":"ack","delivery":1,"update":"AA=="}', '{"type":"auth","token":"secret"}',
-    '{"type":"ack","delivery":"1"}', " ".repeat(129), new Uint8Array()])("ACK cannot carry credentials or writable document fields %s", (raw) => {
-    expect(() => decodeAckFrame(raw)).toThrow();
+  test("rejects a zero delivery inside a well-formed ACK frame", () => {
+    expect(() => decodeAckFrame(new Uint8Array([FRAME_ACK, SYNC_WIRE_VERSION, 0]))).toThrow();
+  });
+
+  test("ACK frames cannot carry credentials, writable document fields or trailing bytes", () => {
+    const ack = encodeAckFrame(1);
+    const writable = encodeSyncFrame({ type: "update", delivery: 1, update: {
+      protocol: 2, generation: "fixture", sequence: 0, chat: new Uint8Array([1]),
+    } });
+    for (const raw of [encodeAuthFrame({ type: "auth", token: "secret" }), writable, new Uint8Array([...ack, 0]),
+      new Uint8Array(MAX_ACK_FRAME_BYTES + 1), '{"type":"ack","delivery":1}', " ".repeat(129), new Uint8Array()])
+      expect(() => decodeAckFrame(raw)).toThrow();
+    expect(decodeAckFrame(ack)).toEqual({ type: "ack", delivery: 1 });
+  });
+
+  test("frames use an exact binary layout with tag, wire version and varuint delivery", () => {
+    expect(Array.from(encodeAckFrame(300))).toEqual([FRAME_ACK, SYNC_WIRE_VERSION, 0xac, 0x02]);
+    expect(Array.from(encodeAuthFrame({ type: "auth", token: "t" }))).toEqual([0x01, SYNC_WIRE_VERSION, 1, 0x74, 0]);
+    const snapshot = encodeSyncFrame({ type: "snapshot", delivery: 300, snapshot: { protocol: 2, generation: "g1",
+      sequence: 7, mode: "delta", chat: new Uint8Array([1, 2]), session: new Uint8Array([3]) } });
+    expect(Array.from(snapshot)).toEqual([0x02, SYNC_WIRE_VERSION, 0xac, 0x02, 2, 2, 0x67, 0x31, 7, 1, 2, 1, 2, 1, 3]);
+    expect(decodeSyncFrame(snapshot)).toEqual({ type: "snapshot", delivery: 300, snapshot: { protocol: 2,
+      generation: "g1", sequence: 7, mode: "delta", chat: new Uint8Array([1, 2]), session: new Uint8Array([3]) } });
+    const update = encodeSyncFrame({ type: "update", delivery: 1, update: { protocol: 2, generation: "g1",
+      sequence: 0, session: new Uint8Array([9]) } });
+    expect(Array.from(update)).toEqual([0x03, SYNC_WIRE_VERSION, 1, 2, 2, 0x67, 0x31, 0, 0b10, 1, 9]);
   });
 
   test("preserves transport delivery identity independently of SDK generation and sequence", () => {
@@ -109,7 +133,7 @@ describe("SDK document sync wire boundary", () => {
 
   test("rejects update sequence gaps then repairs from the last accepted vector", () => {
     const { docs, sync, replica } = pair();
-    const updates: SyncFrame[] = [];
+    const updates: SyncFramePayload[] = [];
     const connection = sync.subscribe((update) => { updates.push({ type: "update", update }); });
     deliver(replica, { type: "snapshot", snapshot: connection.snapshot });
     docs.acceptDeliveredUserInput("request-1", "Prompt");
@@ -169,24 +193,59 @@ describe("SDK document sync wire boundary", () => {
       expect(() => decodeAuthFrame(raw)).toThrow();
     });
 
-  test("bounds raw frames before JSON decoding", () => {
-    expect(() => decodeAuthFrame(" ".repeat(MAX_AUTH_FRAME_CHARS + 1))).toThrow();
-    expect(() => decodeSyncFrame(" ".repeat(MAX_SYNC_FRAME_CHARS + 1))).toThrow();
-    expect(() => decodeSyncFrame(new Uint8Array())).toThrow();
-  });
-
-  test.each(["%%%", "AA", "AB==", "AA===", "_A=="])("rejects noncanonical base64 %s", (encoded) => {
-    const raw = JSON.stringify({ type: "snapshot", snapshot: {
-      protocol: 2, generation: "fixture", sequence: 0, mode: "snapshot", chat: encoded, session: "",
+  test("accepts no text frames at all", () => {
+    const frame = encodeSyncFrame({ type: "update", delivery: 1, update: {
+      protocol: 2, generation: "fixture", sequence: 0, chat: new Uint8Array([1]),
     } });
-    expect(() => decodeSyncFrame(raw)).toThrow();
+    for (const raw of [new TextDecoder().decode(frame), JSON.stringify({ type: "update", chat: "AA==" })])
+      expect(() => decodeSyncFrame(raw)).toThrow();
   });
 
-  test("rejects oversized resume vectors and empty updates", () => {
+  test("bounds raw frames before decoding", () => {
+    expect(() => decodeAuthFrame(new Uint8Array(MAX_AUTH_FRAME_BYTES + 1))).toThrow();
+    expect(() => decodeSyncFrame(new Uint8Array(MAX_SYNC_FRAME_BYTES + 1))).toThrow();
+    expect(() => decodeSyncFrame(new Uint8Array())).toThrow();
+    expect(() => decodeSyncFrame(new Uint8Array([FRAME_UPDATE]))).toThrow();
+  });
+
+  test("rejects truncated, unknown, malformed and trailing frame bytes", () => {
+    const frame = encodeSyncFrame({ type: "update", delivery: 1, update: {
+      protocol: 2, generation: "fixture", sequence: 0, chat: new Uint8Array([7]),
+    } });
+    const unknownTag = new Uint8Array(frame);
+    unknownTag[0] = 0x09;
+    const unknownVersion = new Uint8Array(frame);
+    unknownVersion[1] = SYNC_WIRE_VERSION + 1;
+    const invalidUtf8 = new Uint8Array([FRAME_UPDATE, SYNC_WIRE_VERSION, 1, 2, 2, 0xc3, 0x28, 0, 1, 1, 0]);
+    const emptyMask = new Uint8Array([FRAME_UPDATE, SYNC_WIRE_VERSION, 1, 2, 2, 0x67, 0x31, 0, 0]);
+    const unknownMask = new Uint8Array([FRAME_UPDATE, SYNC_WIRE_VERSION, 1, 2, 2, 0x67, 0x31, 0, 0b100]);
+    const missingDocument = new Uint8Array([FRAME_UPDATE, SYNC_WIRE_VERSION, 1, 2, 2, 0x67, 0x31, 0, 0b01]);
+    const zeroDelivery = new Uint8Array([FRAME_UPDATE, SYNC_WIRE_VERSION, 0, 2, 2, 0x67, 0x31, 0, 0b01, 1, 7]);
+    const lengthBeyondFrame = new Uint8Array([FRAME_UPDATE, SYNC_WIRE_VERSION, 1, 2, 2, 0x67, 0x31, 0, 0b01, 9, 7]);
+    for (const raw of [frame.subarray(0, frame.byteLength - 1), new Uint8Array([...frame, 0]), unknownTag,
+      unknownVersion, invalidUtf8, emptyMask, unknownMask, missingDocument, zeroDelivery, lengthBeyondFrame])
+      expect(() => decodeSyncFrame(raw)).toThrow();
+  });
+
+  test("decodes ArrayBuffer input and views with a non-zero byte offset", () => {
+    const frame = encodeSyncFrame({ type: "snapshot", delivery: 4, snapshot: { protocol: 2, generation: "fixture",
+      sequence: 2, mode: "snapshot", chat: new Uint8Array([5]), session: new Uint8Array([6]) } });
+    const padded = new Uint8Array(frame.byteLength + 4);
+    padded.set(frame, 2);
+    const view = new Uint8Array(padded.buffer, 2, frame.byteLength);
+    expect(decodeSyncFrame(view)).toEqual(decodeSyncFrame(frame));
+    expect(decodeSyncFrame(padded.buffer.slice(2, 2 + frame.byteLength))).toEqual(decodeSyncFrame(frame));
+    expect(decodeSyncFrame(frame)).toMatchObject({ type: "snapshot", delivery: 4 });
+  });
+
+  test("rejects oversized resume vectors, oversized documents and empty updates", () => {
     expect(() => encodeAuthFrame({ type: "auth", token: "fixture", resume: {
       protocol: 2, generation: "fixture", chat: new Uint8Array(64 * 1024 + 1), session: new Uint8Array(),
     } })).toThrow();
-    expect(() => encodeSyncFrame({ type: "update", update: {
+    expect(() => encodeSyncFrame({ type: "snapshot", delivery: 1, snapshot: { protocol: 2, generation: "fixture",
+      sequence: 0, mode: "snapshot", chat: new Uint8Array(4 * 1024 * 1024 + 1), session: new Uint8Array(),
+    } })).toThrow();
+    expect(() => encodeSyncFrame({ type: "update", delivery: 1, update: {
       protocol: 2, generation: "fixture", sequence: 1,
     } })).toThrow();
   });

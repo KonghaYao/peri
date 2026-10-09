@@ -2,31 +2,32 @@ import { describe, expect, test } from "bun:test";
 import { ChatSessionCore } from "../worker/chat/session";
 import { fetchApi } from "../worker/api/router";
 import { SessionDocReplica, type JsonRpcNotification } from "../worker/sdk";
-import type { SyncSocket } from "../worker/chat/sync";
+import { ChatSockets, type SyncSocket } from "../worker/chat/sync";
 import type { AcpTransport, Chat, Env, SessionRecord, SessionState } from "../worker/types";
-import { decodeSyncFrame, encodeAckFrame, encodeAuthFrame, MAX_AUTH_FRAME_CHARS } from "../shared/sync";
+import { decodeSyncFrame, encodeAckFrame, encodeAuthFrame, encodeSyncFrame, FRAME_AUTH,
+  SYNC_WIRE_VERSION, MAX_AUTH_FRAME_BYTES } from "../shared/sync";
 import { readSyncState } from "../shared/sync-state";
 
 const chat: Chat = { id: "00000000-0000-4000-8000-000000000001", title: "Sync fixture", updatedAt: "2026-10-06T00:00:00.000Z" };
 
 class FixtureSocket implements SyncSocket {
-  readonly frames: string[] = [];
+  readonly frames: Uint8Array[] = [];
   readonly replica = new SessionDocReplica();
   readyState = 1;
   autoAck = true;
   deferClose = false;
   closed?: { code: number; reason: string };
+  deserializeAttachment?: () => unknown;
   private messages: ((event: { data: unknown }) => void)[] = [];
   private closures: (() => void)[] = [];
 
   accept(): void {}
-  send(message: string): void {
+  send(message: Uint8Array): void {
     const frame = decodeSyncFrame(message);
     if (frame.type === "snapshot") this.replica.applySnapshot(frame.snapshot);
     else this.replica.applyUpdate(frame.update);
     this.frames.push(message);
-    if (this.autoAck && frame.delivery !== undefined)
-      queueMicrotask(() => this.receive(encodeAckFrame(frame.delivery!)));
+    if (this.autoAck) queueMicrotask(() => this.receive(encodeAckFrame(frame.delivery)));
   }
   close(code: number, reason: string): void {
     this.closed = { code, reason };
@@ -168,10 +169,20 @@ describe("server read-only SDK document synchronization", () => {
     socket.close(1000, "Done");
   });
 
-  test.each(["wrong", "sync-secret-extra", "", "sync-secret\r\nx", "🙂"]) ("rejects invalid token %s without DB or snapshot access", async (token) => {
+  test.each(["wrong", "sync-secret-extra", "sync-secret\r\nx", "🙂"]) ("rejects invalid token %s without DB or snapshot access", async (token) => {
     const app = fixture();
     const { socket } = await app.connect();
-    socket.receive(JSON.stringify({ type: "auth", token }));
+    socket.receive(encodeAuthFrame({ type: "auth", token }));
+    await app.drain();
+    expect(socket.closed?.code).toBe(4401);
+    expect(app.reads()).toBe(0);
+    expect(app.repositoryReads()).toBe(0);
+    expect(socket.frames).toEqual([]);
+  });
+  test("rejects an empty token frame without DB or snapshot access", async () => {
+    const app = fixture();
+    const { socket } = await app.connect();
+    socket.receive(new Uint8Array([FRAME_AUTH, SYNC_WIRE_VERSION, 0, 0]));
     await app.drain();
     expect(socket.closed?.code).toBe(4401);
     expect(app.reads()).toBe(0);
@@ -179,8 +190,8 @@ describe("server read-only SDK document synchronization", () => {
     expect(socket.frames).toEqual([]);
   });
 
-  test.each(["{", JSON.stringify({ type: "update", chat: [] }), new Uint8Array([1])]) (
-    "rejects malformed or binary first frame", async (raw) => {
+  test.each(["{", JSON.stringify({ type: "update", chat: [] }), new Uint8Array([FRAME_AUTH]),
+    encodeAckFrame(1)]) ("rejects malformed, text or non-auth first frame", async (raw) => {
       const app = fixture(); const { socket } = await app.connect();
       socket.receive(raw); await app.drain();
       expect(socket.closed?.code).toBe(4401);
@@ -189,7 +200,7 @@ describe("server read-only SDK document synchronization", () => {
 
   test("closes oversized auth with 1009", async () => {
     const app = fixture(); const { socket } = await app.connect();
-    socket.receive(" ".repeat(MAX_AUTH_FRAME_CHARS + 1)); await app.drain();
+    socket.receive(new Uint8Array(MAX_AUTH_FRAME_BYTES + 1)); await app.drain();
     expect(socket.closed?.code).toBe(1009); expect(app.reads()).toBe(0);
   });
 
@@ -228,7 +239,10 @@ describe("server read-only SDK document synchronization", () => {
 
   test("authenticated client updates and repeated auth violate the read-only boundary", async () => {
     const app = fixture();
-    for (const raw of [JSON.stringify({ type: "update", chat: [] }), encodeAuthFrame({ type: "auth", token: "sync-secret" })]) {
+    const writable = encodeSyncFrame({ type: "update", delivery: 1, update: {
+      protocol: 2, generation: "fixture", sequence: 0, chat: new Uint8Array([1]),
+    } });
+    for (const raw of [writable, encodeAuthFrame({ type: "auth", token: "sync-secret" })]) {
       const socket = await authenticate(app);
       socket.receive(raw);
       expect(socket.closed?.code).toBe(4403);
@@ -316,6 +330,27 @@ describe("server read-only SDK document synchronization", () => {
     expect(socket.closed?.code).toBe(1011); expect(app.transport.stops).toBe(0);
     app.transport.finish(); await app.drain();
     expect(app.record()?.messages.at(-1)?.content).toContain("reply");
+  });
+
+  test("closes sockets restored from the removed Base64 protocol with 1008 instead of downgrading", () => {
+    const previous = new FixtureSocket();
+    previous.deserializeAttachment = () => ({ version: 1, chatId: chat.id, phase: "ready" });
+    const corrupt = new FixtureSocket();
+    corrupt.deserializeAttachment = () => ({ version: 2, chatId: "not-a-uuid" });
+    const current = new FixtureSocket();
+    current.deserializeAttachment = () => ({ version: 2, chatId: chat.id, phase: "ready", credential: "a".repeat(64),
+      nextDelivery: 1, acknowledged: 0, authDeadline: 0, pending: [] });
+    const env: Env = { APP_AUTH_TOKEN: "sync-secret", CHAT_SESSIONS: {
+      idFromName: (name) => name, get: () => ({ fetch: async () => new Response() }),
+    } };
+    new ChatSockets(env, {
+      storage: { async get() { return undefined; }, async put() {} }, waitUntil() {},
+      acceptWebSocket() {}, getWebSockets: () => [previous, corrupt, current],
+    }, async () => { throw new Error("Restoring sockets must not load documents"); },
+    () => { throw new Error("Restoring sockets must not open transports"); });
+    expect(previous.closed).toEqual({ code: 1008, reason: "Sync protocol upgraded; reload required" });
+    expect(corrupt.closed).toEqual({ code: 1011, reason: "Invalid restored connection" });
+    expect(current.closed).toBeUndefined();
   });
 });
 

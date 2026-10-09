@@ -1,6 +1,7 @@
 import { afterEach, describe, expect, spyOn, test } from 'bun:test';
 import { Y, SessionDocSync, type DocStateVector } from '@peri-code/sdk/view';
-import { decodeAuthFrame, decodeAckFrame, encodeSyncFrame, MAX_SYNC_FRAME_CHARS, type SyncState } from '../shared/sync';
+import { decodeAuthFrame, decodeAckFrame, encodeSyncFrame, MAX_SYNC_FRAME_BYTES, type SyncState,
+  type SyncFramePayload } from '../shared/sync';
 import { ChatSync, type SyncStatus } from '../web/api/sync';
 import { ChatSession, type ChatView } from '../web/chat/session';
 import { createChatQueries } from '../web/chat/queries';
@@ -18,19 +19,30 @@ class FakeWebSocket {
   onmessage: WebSocket['onmessage'] = null;
   onclose: WebSocket['onclose'] = null;
   onerror: WebSocket['onerror'] = null;
-  sent: string[] = [];
+  sent: Uint8Array[] = [];
+  binaryType: BinaryType = 'arraybuffer';
   closed = 0;
+  private delivery = 0;
 
   constructor(readonly url: string) {}
-  send(data: string) { this.sent.push(data); }
+  send(data: Uint8Array) { this.sent.push(data); }
   close() { this.closed++; }
   open() { this.onopen?.call(this as unknown as WebSocket, new Event('open')); }
-  message(data: unknown) {
-    this.onmessage?.call(this as unknown as WebSocket, { data } as MessageEvent);
+  // Frame payloads receive the delivery number a real server socket assigns; raw values pass through untouched.
+  message(data: unknown, delivery?: number) {
+    const payload = typeof data === 'object' && data !== null && !(data instanceof Uint8Array) && 'type' in data
+      ? encodeSyncFrame({ ...(data as SyncFramePayload), delivery: delivery ?? ++this.delivery })
+      : data;
+    this.onmessage?.call(this as unknown as WebSocket, { data: payload } as MessageEvent);
   }
   disconnect(code = 1006) {
     this.onclose?.call(this as unknown as WebSocket, { code } as CloseEvent);
   }
+}
+
+// Client-to-server traffic after the auth frame must be nothing but delivery acknowledgements.
+function acknowledgements(socket: FakeWebSocket) {
+  return socket.sent.slice(1).map(frame => decodeAckFrame(frame));
 }
 
 function transport() {
@@ -99,12 +111,12 @@ function producer(target = chat, content = 'partial') {
     snapshot(resume?: DocStateVector) {
       const peer = sync.subscribe(() => {}, { resume });
       peer.unsubscribe();
-      return encodeSyncFrame({ type: 'snapshot', snapshot: peer.snapshot });
+      return { type: 'snapshot', snapshot: peer.snapshot } satisfies SyncFramePayload;
     },
     update(change: () => void) {
       change();
       sync.flush();
-      return encodeSyncFrame({ type: 'update', update: updates.at(-1)! });
+      return { type: 'update', update: updates.at(-1)! } satisfies SyncFramePayload;
     },
     state(change: Record<string, unknown>) {
       metadata.set('state', { ...metadata.get('state') as object, ...change });
@@ -128,12 +140,12 @@ describe('read-only SDK Yjs WebSocket replica', () => {
     const client = replica();
     const socket = client.sockets[0];
     socket.open();
-    socket.message(JSON.stringify({ ...JSON.parse(server.snapshot()), delivery: 1 }));
+    socket.message(server.snapshot(), 1);
     expect(decodeAckFrame(socket.sent[1])).toEqual({ type: 'ack', delivery: 1 });
-    socket.message(JSON.stringify({ ...JSON.parse(server.update(() => server.text.insert(server.text.length, '!'))), delivery: 2 }));
+    socket.message(server.update(() => server.text.insert(server.text.length, '!')), 2);
     expect(client.states.at(-1)?.messages[0].content).toBe('partial!');
     expect(decodeAckFrame(socket.sent[2])).toEqual({ type: 'ack', delivery: 2 });
-    socket.message(JSON.stringify({ ...JSON.parse(server.update(() => server.state({ running: true }))), delivery: 4 }));
+    socket.message(server.update(() => server.state({ running: true })), 4);
     expect(socket.sent).toHaveLength(3);
     expect(client.statuses.at(-1)).toBe('failed');
   });
@@ -149,7 +161,7 @@ describe('read-only SDK Yjs WebSocket replica', () => {
     expect(client.statuses.at(-1)).toBe('synced');
     expect(client.states.at(-1)?.messages[0]).toEqual({ id: 'answer', role: 'assistant', content: 'partial',
       createdAt: chat.updatedAt, status: 'completed' });
-    expect(socket.sent).toHaveLength(1);
+    expect(acknowledgements(socket)).toEqual([{ type: 'ack', delivery: 1 }]);
   });
 
   test('observes chat-only text updates and session-only running/blocked/terminal changes without writing back', () => {
@@ -164,7 +176,7 @@ describe('read-only SDK Yjs WebSocket replica', () => {
     expect(client.states.at(-1)?.running).toBe(true);
     socket.message(server.update(() => server.state({ running: false, executionBlocked: true, error: 'stop failed' })));
     expect(client.states.at(-1)).toMatchObject({ running: false, executionBlocked: true, error: 'stop failed' });
-    expect(socket.sent).toHaveLength(1);
+    expect(acknowledgements(socket)).toEqual([1, 2, 3, 4].map(delivery => ({ type: 'ack', delivery })));
   });
 
   test('replaces both documents across generations and rebinds their observers', () => {
@@ -180,7 +192,7 @@ describe('read-only SDK Yjs WebSocket replica', () => {
     expect(client.states.at(-1)?.messages[0].content).toBe('replacement!');
     socket.message(second.update(() => second.state({ running: true })));
     expect(client.states.at(-1)?.running).toBe(true);
-    expect(socket.sent).toHaveLength(1);
+    expect(acknowledgements(socket)).toEqual([1, 2, 3, 4].map(delivery => ({ type: 'ack', delivery })));
   });
 
   test('actually detaches transaction observers from replaced docs and binds the new pair', () => {
@@ -223,12 +235,12 @@ describe('read-only SDK Yjs WebSocket replica', () => {
     expect(auth.resume?.protocol).toBe(2);
     expect(auth.resume?.chat).toBeInstanceOf(Uint8Array);
     const snapshot = server.snapshot(auth.resume);
-    expect(JSON.parse(snapshot).snapshot.mode).toBe('delta');
+    expect(snapshot.type === 'snapshot' && snapshot.snapshot.mode).toBe('delta');
     second.message(snapshot);
     expect(client.states.at(-1)?.messages[0].content).toBe('partial missed');
     expect(client.statuses.at(-1)).toBe('synced');
     expect(first.closed).toBe(1);
-    expect(second.sent).toHaveLength(1);
+    expect(acknowledgements(second)).toEqual([{ type: 'ack', delivery: 1 }]);
   });
 
   test('rejects sequence gaps, ignores stale socket events, and resumes rather than applying out of order', async () => {
@@ -248,7 +260,7 @@ describe('read-only SDK Yjs WebSocket replica', () => {
     second.open();
     second.message(server.snapshot(decodeAuthFrame(second.sent[0]).resume));
     const published = client.states.length;
-    late.call(first as unknown as WebSocket, { data: gap } as MessageEvent);
+    late.call(first as unknown as WebSocket, { data: encodeSyncFrame({ ...gap, delivery: 3 }) } as MessageEvent);
     expect(client.states).toHaveLength(published);
     expect(client.states.at(-1)?.messages[0].content).toBe('partial skipped next');
   });
@@ -264,7 +276,7 @@ describe('read-only SDK Yjs WebSocket replica', () => {
     const socket = client.sockets[1];
     socket.open();
     const snapshot = restarted.snapshot(decodeAuthFrame(socket.sent[0]).resume);
-    expect(JSON.parse(snapshot).snapshot.mode).toBe('snapshot');
+    expect(snapshot.type === 'snapshot' && snapshot.snapshot.mode).toBe('snapshot');
     socket.message(snapshot);
     socket.message(restarted.update(() => restarted.text.insert(restarted.text.length, '!')));
     expect(client.states.at(-1)?.messages[0].content).toBe('new generation!');
@@ -281,7 +293,7 @@ describe('read-only SDK Yjs WebSocket replica', () => {
     socket.message(update);
     socket.message(update);
     expect(client.states.at(-1)?.messages[0].content).toBe('partial!');
-    expect(socket.sent).toHaveLength(1);
+    expect(acknowledgements(socket)).toEqual([1, 2, 3].map(delivery => ({ type: 'ack', delivery })));
   });
 
   test.each([1008, 1009, 4401, 4403, 4404])('does not retry permanent close code %s', async code => {
@@ -320,8 +332,8 @@ describe('read-only SDK Yjs WebSocket replica', () => {
     expect(connection.sockets[0].closed).toBe(1);
   });
 
-  test.each(['invalid-json', '{}', new Uint8Array([1]), ' '.repeat(MAX_SYNC_FRAME_CHARS + 1)])(
-    'blocks invalid, binary or oversized frames', data => {
+  test.each(['invalid-json', '{}', new Uint8Array([1]), new Uint8Array(MAX_SYNC_FRAME_BYTES + 1)])(
+    'blocks text, malformed and oversized frames', data => {
       const client = replica();
       client.sockets[0].message(data);
       expect(client.statuses.at(-1)).toBe('failed');
@@ -353,7 +365,7 @@ describe('read-only SDK Yjs WebSocket replica', () => {
     socket.disconnect();
     client.client.dispose();
     client.client.dispose();
-    late.call(socket as unknown as WebSocket, { data: server.snapshot() } as MessageEvent);
+    late.call(socket as unknown as WebSocket, { data: encodeSyncFrame({ ...server.snapshot(), delivery: 1 }) } as MessageEvent);
     await new Promise(resolve => setTimeout(resolve, 8));
     expect(client.sockets).toHaveLength(1);
     expect(client.states).toHaveLength(1);
@@ -457,7 +469,7 @@ describe('chat commands and subscription lifecycle', () => {
     expect(client.session.view.historyReady).toBe(true);
     expect(client.commands).toEqual(['hello']);
     expect(client.stops).toEqual([]);
-    expect(socket.sent).toHaveLength(1);
+    expect(acknowledgements(socket)).toEqual([{ type: 'ack', delivery: 1 }]);
   });
 
   test('even an idle disconnected chat blocks new send until resynced', async () => {
@@ -549,7 +561,7 @@ describe('chat commands and subscription lifecycle', () => {
     client.sockets[1].open();
     client.sockets[1].message(other.snapshot());
     expect(await ready).toBe(true);
-    late.call(old as unknown as WebSocket, { data: producer().snapshot() } as MessageEvent);
+    late.call(old as unknown as WebSocket, { data: encodeSyncFrame({ ...producer().snapshot(), delivery: 1 }) } as MessageEvent);
     expect(client.session.view.selected?.id).toBe('other');
     expect(client.session.view.messages[0].content).toBe('other answer');
     expect(old.closed).toBe(1);

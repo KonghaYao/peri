@@ -1,6 +1,6 @@
 import { authenticatedApp } from "../api/app";
 import { logError } from "../api/http";
-import { decodeAckFrame, decodeAuthFrame, encodeSyncFrame, MAX_AUTH_FRAME_CHARS } from "../../shared/sync";
+import { decodeAckFrame, decodeAuthFrame, frameBytes, MAX_AUTH_FRAME_BYTES, type SyncFramePayload } from "../../shared/sync";
 import { HTTPException } from "hono/http-exception";
 import type { Env, SessionState } from "../types";
 import type { SessionDocSync } from "../sdk";
@@ -8,7 +8,7 @@ import type { DocStateVector } from "../../../@peri-sdk/src/sync";
 import type { WebSocketPair as WorkerWebSocketPair } from "@cloudflare/workers-types";
 import {
   attachmentSchema, acknowledgeDelivery, reserveDelivery, credentialFingerprint,
-  AUTH_TIMEOUT_MS, MAX_TOTAL_OUTSTANDING_BYTES, type SocketAttachment,
+  AUTH_TIMEOUT_MS, MAX_TOTAL_OUTSTANDING_BYTES, SYNC_ATTACHMENT_VERSION, type SocketAttachment,
 } from "./ws-delivery";
 
 declare const WebSocketPair: typeof WorkerWebSocketPair;
@@ -16,7 +16,7 @@ declare const WebSocketPair: typeof WorkerWebSocketPair;
 export interface SyncSocket {
   readonly readyState?: number;
   accept(): void;
-  send(message: string): void;
+  send(message: Uint8Array): void;
   close(code: number, reason: string): void;
   serializeAttachment?(value: unknown): void;
   deserializeAttachment?(): unknown;
@@ -51,15 +51,22 @@ authentication.get("/", () => new Response(null, { status: 204 }));
 
 export class ChatSockets {
   private readonly peers = new Map<SyncSocket, Peer>();
-  private readonly broadcast = new WeakMap<object, string>();
   private readonly hibernating: boolean;
 
   constructor(private readonly env: Env, private readonly state: HibernatingSessionState,
     private readonly load: (chatId: string) => Promise<SessionDocSync>, private readonly upgrade: UpgradeSocket) {
     this.hibernating = typeof state.acceptWebSocket === "function" && typeof state.getWebSockets === "function";
     for (const socket of state.getWebSockets?.() ?? []) {
-      const attachment = attachmentSchema.safeParse(socket.deserializeAttachment?.());
-      if (!attachment.success || this.peers.size >= 16) { socket.close(1011, "Invalid restored connection"); continue; }
+      const restored = socket.deserializeAttachment?.();
+      const attachment = attachmentSchema.safeParse(restored);
+      if (!attachment.success) {
+        // A version 1 attachment belongs to the removed Base64 wire protocol; reload instead of silently downgrading.
+        const version = (restored as { version?: unknown } | undefined)?.version;
+        socket.close(version === 1 ? 1008 : 1011, version === 1
+          ? "Sync protocol upgraded; reload required" : "Invalid restored connection");
+        continue;
+      }
+      if (this.peers.size >= 16) { socket.close(1011, "Too many sync connections"); continue; }
       const peer: Peer = { socket, attachment: attachment.data, closed: attachment.data.phase === "closing" };
       this.peers.set(socket, peer);
       this.arm(peer);
@@ -74,7 +81,7 @@ export class ChatSockets {
     if (this.peers.size >= 16) return Response.json({ error: "Too many sync connections" }, { status: 429 });
     const { socket, response } = this.upgrade();
     const peer: Peer = { socket, closed: false, attachment: {
-      version: 1, chatId: id, phase: "auth", nextDelivery: 1, acknowledged: 0,
+      version: SYNC_ATTACHMENT_VERSION, chatId: id, phase: "auth", nextDelivery: 1, acknowledged: 0,
       pending: [], authDeadline: Date.now() + AUTH_TIMEOUT_MS,
     } };
     this.peers.set(socket, peer);
@@ -138,11 +145,11 @@ export class ChatSockets {
   }
 
   private async authenticate(peer: Peer, data: unknown): Promise<void> {
-    if (typeof data === "string" && data.length > MAX_AUTH_FRAME_CHARS) {
-      this.close(peer, 1009, "Authentication frame is too large"); return;
-    }
+    const bytes = frameBytes(data);
+    if (!bytes) { this.close(peer, 4401, "Invalid authentication frame"); return; }
+    if (bytes.byteLength > MAX_AUTH_FRAME_BYTES) { this.close(peer, 1009, "Authentication frame is too large"); return; }
     let frame;
-    try { frame = decodeAuthFrame(data); }
+    try { frame = decodeAuthFrame(bytes); }
     catch (error) { logError("Peri sync authentication rejected", error); this.close(peer, 4401, "Invalid authentication frame"); return; }
     try {
       let authorized: Response;
@@ -188,20 +195,18 @@ export class ChatSockets {
     const sync = await this.load(peer.attachment.chatId);
     if (peer.closed) return;
     const subscription = sync.subscribe((update) => {
-      let encoded = this.broadcast.get(update);
-      if (!encoded) { encoded = encodeSyncFrame({ type: "update", update }); this.broadcast.set(update, encoded); }
-      this.send(peer, encoded);
+      this.send(peer, { type: "update", update });
     }, { resume, onError: (error) => { logError("Peri sync subscriber failed", error); this.close(peer, 1011, "Sync subscriber failed"); } });
     peer.unsubscribe = subscription.unsubscribe;
-    this.send(peer, encodeSyncFrame({ type: "snapshot", snapshot: subscription.snapshot }));
+    this.send(peer, { type: "snapshot", snapshot: subscription.snapshot });
   }
 
-  private send(peer: Peer, raw: string): void {
+  private send(peer: Peer, frame: SyncFramePayload): void {
     if (peer.closed || (peer.socket.readyState !== undefined && peer.socket.readyState !== 1))
       throw new Error("Sync socket is closed");
-    const encoded = reserveDelivery(peer.attachment, raw);
+    const encoded = reserveDelivery(peer.attachment, frame);
     const total = Array.from(this.peers.values()).reduce((sum, connection) =>
-      sum + connection.attachment.pending.reduce((bytes, frame) => bytes + frame.bytes, 0), 0);
+      sum + connection.attachment.pending.reduce((bytes, pending) => bytes + pending.bytes, 0), 0);
     if (total > MAX_TOTAL_OUTSTANDING_BYTES) throw new Error("Session sync delivery budget exhausted");
     this.persist(peer);
     this.arm(peer);

@@ -4,7 +4,7 @@ import { SessionDocReplica } from '@peri-code/sdk/view';
 
 export type { SyncState } from '../../shared/sync';
 export type SyncStatus = 'connecting' | 'synced' | 'disconnected' | 'failed';
-type Socket = Pick<WebSocket, 'onopen' | 'onmessage' | 'onclose' | 'onerror' | 'send' | 'close'>;
+type Socket = Pick<WebSocket, 'onopen' | 'onmessage' | 'onclose' | 'onerror' | 'send' | 'close' | 'binaryType'>;
 
 export interface ChatSyncOptions {
   chatId: string;
@@ -96,6 +96,7 @@ export class ChatSync {
     let socket: Socket;
     try { socket = (this.options.socket ?? (address => new WebSocket(address)))(url.href); }
     catch { this.reconnect(new Error('同步连接失败。')); return; }
+    socket.binaryType = 'arraybuffer';
     this.socket = socket;
     let receivedSnapshot = false;
     let delivery = 0;
@@ -112,9 +113,8 @@ export class ChatSync {
     socket.onmessage = event => {
       if (!current()) return;
       try {
-        if (typeof event.data !== 'string') throw new Error('同步帧必须是文本。');
         const frame = decodeSyncFrame(event.data);
-        if (frame.delivery !== undefined && frame.delivery !== delivery + 1)
+        if (frame.delivery !== delivery + 1)
           throw new Error('同步投递序列不连续。');
         this.applying = true;
         try {
@@ -131,10 +131,8 @@ export class ChatSync {
           }
         } finally { this.applying = false; }
         this.publish();
-        if (frame.delivery !== undefined) {
-          socket.send(encodeAckFrame(frame.delivery));
-          delivery = frame.delivery;
-        }
+        socket.send(encodeAckFrame(frame.delivery));
+        delivery = frame.delivery;
         clearTimeout(this.handshake);
         this.attempts = 0;
         this.report('synced');
