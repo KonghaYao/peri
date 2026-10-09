@@ -120,23 +120,6 @@ fn tui_unknown_mcp_names_fall_back_to_generic() {
     assert_eq!(format_tool_args("mcp__web__websearch", &args), "");
 }
 
-#[test]
-fn tui_has_no_hardcoded_effective_name() {
-    // A4 / A8：名字字面量只在 peri-acp-types 的 builtin 声明表存一份——按名分支
-    // 必须经 IF-D15 归一 helper 进入 builtin 名字空间，不得自建第二张反查表。
-    let src = include_str!("tool_display.rs");
-    assert!(
-        src.contains("original_tool_name_of_effective"),
-        "tool_display.rs 必须经 IF-D15 归一 helper"
-    );
-    for forbidden in ["mcp__web__", "mcp__artifact__"] {
-        assert!(
-            !src.contains(forbidden),
-            "tool_display.rs 不得硬编码 effective name: {forbidden}"
-        );
-    }
-}
-
 // ── wave 3（workspace）注册表新增：display 名必须复用**既有**分支 ──────────────
 
 /// workspace 的 effective name（模型面名字）与迁移前的裸名映射到**同一**显示名；

@@ -112,6 +112,7 @@ core `ConfigSource::save(expected_revision, &PeriConfig)` 返回 accepted snapsh
 | scroll 滚动引擎 | `message_area/scroll.rs` | `handle_event`（:516）；滚轮节流、拖拽选中、键盘滚动、吸底跟随（`should_follow_after_user_scroll` :378） |
 | 语义选区 | `message_area/selection.rs` | 拖拽选区与语义复制（`map_slice_to_semantic` :469，复制时剥视觉前缀） |
 | markdown 渲染 | `markdown/`（convert.rs / code_block.rs / table.rs / scan.rs） | 文本 → 带样式的行渲染；代码块、表格、扫描 |
+| Markdown 解析测试 | `src/kit/markdown/{mod_test.rs,cache_test.rs,table_parse_test.rs,wrap_test.rs,image_parse_test.rs,profile_test.rs}` | 按基本解析、增量缓存、表格、Unicode 折行、图片与显式 release profile 分组；统一过滤 `kit::markdown::`，profile 用例默认 ignored |
 | Assistant VM 共享 payload | `src/kit/tui_render_unit/{unit.rs,bubble.rs,shared_bubble_test.rs}` + `src/kit/acp_types/current_turn/{projection.rs,projection_test.rs}` | assistant 气泡通过 Arc 进入 im 快照，节点 COW 不深拷贝正文/推理；变更 fold/终态时显式复制，旧快照保持不可变。计量区分 source→VM 文本物化与气泡 Clone 的正文/推理字节；非 allocator/RSS 指标 |
 | Markdown 缓存生命周期 | `src/kit/markdown/{mod.rs,cache_lifecycle_test.rs,code_block.rs,code_block_test.rs}` | terminal full parse 释放流式原文 buffer；高亮缓存共享 Arc，按 32 条 / 4 MiB 高亮 payload 预算淘汰，超预算单项不入缓存；旧增量 convert API 只编入测试，生产 ConvertState 保留 |
 | Markdown 流式边界 | `src/kit/markdown/{boundary.rs,boundary_test.rs,mod.rs}` + `src/kit/message_area/{mod.rs,vm_cache.rs}` | 单次逐行扫描跨 fence 内部空行冻结已闭合代码块；后续只解析可变尾部，stable chunks 共享 Arc；引用、列表、表格与未闭合 fence 保守保留，terminal full parse 校正；尾部图片字节范围映射回完整输入；内外层 key 包含正文前景与代码背景，变化时从 parsed blocks 重物化 |
@@ -145,8 +146,9 @@ core `ConfigSource::save(expected_revision, &PeriConfig)` 返回 accepted snapsh
 | 功能 | 文件 | 入口/关键点 |
 | --- | --- | --- |
 | 通知消费与状态发布 | kit/acp_notifier.rs | `spawn_kit_notifier_with_client` / `forward_notification` / `handle_session_update` / `convert_agent_event`；commands/plan/spinner/context 保持同步发布后送 bridge，reverse 投递失败按 owner 结算；transport 关闭复位 loading + 断连提示 |
+| 通知契约测试 | `kit/acp_notifier_test.rs`、`acp_notifier_agent_test.rs`、`acp_notifier_lifecycle_test.rs`、`acp_notifier_projection_test.rs`、`acp_notifier_interaction_test.rs` | 分离标准流式消息、Agent DTO、transport 生命周期、commands/usage/plan 投影与交互 envelope；统一过滤 `kit::acp_notifier::`，忽略事件以有序 barrier 证明已消费，不以短暂无消息或通道关闭作通过证据 |
 | 标准 session/update 解码 | kit/acp_notifier/session_update.rs | `decode_commands` / `decode_stream_update` / `StreamUpdate`；纯解析返回事件及可选 spinner 计数；root 缺省 cacheReadTokens 只更新进度并保留旧 sample，显式零值在 input>0 时替换为零样本，字段可用但 input=0 或 cached>input 时清空；auxiliary/replay 不更新父 sample |
-| Cache coverage 提示 | kit/acp_events/turn.rs | `handle_cache_usage_updated` / `inject_cache_coverage_warning_if_needed` / `handle_turn_done`；配置开启时每次 root sample 在 0<cached/input<0.8 时即时注入提示，TurnDone 清 pending，不补发或撤销提示；wire 契约在 acp_notifier_test.rs，逐次提示在 acp_events_test/turn_archive_test.rs |
+| Cache coverage 提示 | kit/acp_events/turn.rs | `handle_cache_usage_updated` / `inject_cache_coverage_warning_if_needed` / `handle_turn_done`；配置开启时每次 root sample 在 0<cached/input<0.8 时即时注入提示，TurnDone 清 pending，不补发或撤销提示；wire 契约在 acp_notifier_projection_test.rs，逐次提示在 acp_events_test/turn_archive_test.rs |
 | Agent DTO 与 reverse wire | kit/acp_notifier/{agent_event,interaction}.rs | `decode_agent_event`；`handle_elicitation` / `handle_request_permission` / `parse_elicitation_questions`；reverse 将 owner、request ID、payload 封装为同一 envelope 后投递 |
 | 状态桥 | kit/acp_bridge.rs | `spawn_acp_bridge`：interaction 经 `AcpTuiClient::publish_if_owned` 后才同步写 UI；普通事件维护 `BridgeState` 并检测 BRIDGE_RESET_COUNTER |
 | 事件分派 | kit/acp_events/mod.rs | `dispatch_and_notify`（:301）；`SessionPhase`（:149）/`BridgeState`（:158） |
@@ -159,7 +161,8 @@ core `ConfigSource::save(expected_revision, &PeriConfig)` 返回 accepted snapsh
 | --- | --- | --- |
 | 全局 atoms | kit/atoms.rs | `ACP_STATE`（:220）/`VIEW_MODELS`（:249）/`SUBMIT_TX`（:256）/`CANCEL_TX`（:257）；`init_atoms`（:653） |
 | 消息累积模型入口 | kit/acp_types.rs + acp_types/{current_turn,tool_card,event_data}.rs | `acp_types.rs` re-export `CurrentTurn`、`ToolCardAccumulator`、`SubAgentAccumulator` 与 `AcpEventData`，canonical turn state 与生命周期在 current_turn.rs |
-| 主回合流式变更与子回合路由 | kit/acp_types/current_turn/{streaming,subagents}.rs | `append_text` / `append_reasoning` / `flush_text_segment` / `start_tool`；`start_subagent` / `stop_subagent` / `append_subagent_text` / `adopt_pending_subagent_group`；冻结边界与 rolling hash 保持同一 state，child 路由取最后一次 occurrence；分组不得挂在别的（尤其仍在 loading 的）Agent 卡片之下，且并发批次按身份配对不互换；回归见 `acp_types_test.rs::{test_subagent_group_pairs_by_parent_tool_call_id_not_arrival_order,test_late_agent_card_claims_group_by_parent_tool_call_id,test_identified_group_never_adopted_by_unrelated_agent_card,test_late_agent_card_adopts_early_subagent_group}` 与 `subagent_loading_test.rs::{test_concurrent_agent_calls_pair_by_parent_tool_call_id,test_late_agent_tool_card_adopts_early_subagent_group}` |
+| 主回合流式变更与子回合路由 | kit/acp_types/current_turn/{streaming,subagents}.rs | `append_text` / `append_reasoning` / `flush_text_segment` / `start_tool`；`start_subagent` / `stop_subagent` / `append_subagent_text` / `adopt_pending_subagent_group`；冻结边界与 rolling hash 保持同一 state，child 路由取最后一次 occurrence；分组不得挂在别的（尤其仍在 loading 的）Agent 卡片之下，且并发批次按身份配对不互换；回归见 `acp_types_subagent_test.rs::{test_subagent_group_pairs_by_parent_tool_call_id_not_arrival_order,test_late_agent_card_claims_group_by_parent_tool_call_id,test_identified_group_never_adopted_by_unrelated_agent_card,test_late_agent_card_adopts_early_subagent_group}` 与 `subagent_routing_test.rs::{test_concurrent_agent_calls_pair_by_parent_tool_call_id,test_late_agent_tool_card_adopts_early_subagent_group}` |
+| CurrentTurn 与事件消费测试 | `kit/acp_types_test.rs`、`acp_types_subagent_test.rs`、`acp_types_decode_test.rs`、`acp_events_test/{subagent_loading_test,subagent_routing_test}.rs` | 分离主 turn 分段、子 turn 归属、事件解码、loading 生命周期与子 Agent 卡片路由；工具计时/hash 用 `acp_types/current_turn/projection_test.rs` 的 paused Tokio 时钟验证，不重复真实 sleep 用例 |
 | 发布与稳定历史回归 | kit/publication_test.rs + kit/acp_events/fold.rs | 真实 dispatch → scheduler 验证主/子合帧、模式/reset/终态；FoldedHistory 按源结构身份/phase/override 失效，稳定历史折叠访问与工具全文 hash 为零 |
 | 回合渲染投影 | kit/acp_types/current_turn/projection.rs | `view_models` / `sync_cache` / `sync_segments` / `sync_trailing` / `pair_agent_tool_cards`；dirty 读取才投影，冻结片段复用、trailing 一次性消费 freeze，最后配对计数 |
 
@@ -208,7 +211,7 @@ core `ConfigSource::save(expected_revision, &PeriConfig)` 返回 accepted snapsh
 
 ## 跨模块契约（指向 architecture-contracts.md，不复制正文）
 
-工具卡的提前 start（空参数）与正式 start 按 `tool_id` 合并；主 turn 与后台 live detail 共用 `ToolCardAccumulator::upgrade_input`，升级输入不重置计时或终态。已停止的子 Agent 接收迟到工具 start 时仍可补全卡片，但不会重新激活子 turn；回归入口为 `acp_types_test.rs::test_stopped_subagent_late_tool_start_keeps_children_terminal` 与 `bg_task_live_test.rs::bg_tool_duplicate_start_upgrades_input_without_restarting`。
+工具卡的提前 start（空参数）与正式 start 按 `tool_id` 合并；主 turn 与后台 live detail 共用 `ToolCardAccumulator::upgrade_input`，升级输入不重置计时或终态。已停止的子 Agent 接收迟到工具 start 时仍可补全卡片，但不会重新激活子 turn；回归入口为 `acp_types_subagent_test.rs::test_stopped_subagent_late_tool_start_keeps_children_terminal` 与 `bg_task_live_test.rs::bg_tool_duplicate_start_upgrades_input_without_restarting`。
 
 TUI 生产时间入口统一经 `peri-time`：`kit/entry.rs` 的每日主题以显式 `HostLocal`
 日历日期判定；`kit/acp_bridge.rs` 的发布 deadline 与 `kit/service_snapshot.rs`、

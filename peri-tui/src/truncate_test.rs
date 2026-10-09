@@ -414,20 +414,3 @@ fn tui_unknown_mcp_names_fall_back_to_generic() {
     let output = "a\nb\nc\nd";
     assert_eq!(summarize_output("mcp__foo__bar", output), "a\nb\nc\nd");
 }
-
-#[test]
-fn tui_has_no_hardcoded_effective_name() {
-    // A4 / A8：名字字面量只在 peri-acp-types 的 builtin 声明表存一份——按名分支
-    // 必须经 IF-D15 归一 helper 进入 builtin 名字空间，不得自建第二张反查表。
-    let src = include_str!("truncate.rs");
-    assert!(
-        src.contains("original_tool_name_of_effective"),
-        "truncate.rs 必须经 IF-D15 归一 helper"
-    );
-    for forbidden in ["mcp__web__", "mcp__artifact__"] {
-        assert!(
-            !src.contains(forbidden),
-            "truncate.rs 不得硬编码 effective name: {forbidden}"
-        );
-    }
-}

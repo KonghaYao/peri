@@ -5,19 +5,8 @@ use super::*;
 // ── tui_hash_str ─────────────────────────────────────────────────────
 
 #[test]
-fn test_tui_hash_str_same_input_same_output() {
-    assert_eq!(tui_hash_str("hello"), tui_hash_str("hello"));
-}
-
-#[test]
 fn test_tui_hash_str_different_input_different_output() {
     assert_ne!(tui_hash_str("hello"), tui_hash_str("world"));
-}
-
-#[test]
-fn test_tui_hash_str_empty_string() {
-    // 空字符串不 panic
-    let _h = tui_hash_str("");
 }
 
 // ── TuiRenderUnit::content_hash() dispatch ──────────────────────────

@@ -41,7 +41,7 @@
 - **日志缺口性质**：错误在产生处被降级为成功事件（D），下游 `error!` 分支不可达；承载记录的 crate 结构上无日志能力。
 - **证据强度**：静态确认（依赖表、无日志宏、折叠为 `Ok`、retry observer 未触发、提醒无日志）。推断：用户可见"内容缺失"的具体程度取决于中断时机。条件性：**预算耗尽**（`mod.rs:869-874` 返回 `StreamRecoveryExhausted`）会落到 `v2_execute.rs:780-789` 的 fatal 分类，因此 `v2_execute.rs:629-636` 的 `error!` 会记录；本缺口的范围是**未耗尽的中断续跑路径**与源头诊断丢失，不是"耗尽也无日志"。
 - **修复方向**：在 `retry.rs` 的抑制分支保留可注入的诊断出口（`RetryObserver` 已有 `on_retry`，可复用一个"中断/抑制"观察点），或在 `peri-agent` 侧接收 `Interrupted` 时（`model_bridge.rs:375-413`）以 `warn!` 记录 `attempts/max_attempts` 与保留的 error；transport 细节需在 `interrupted_from()` 之前捕获，不能只靠 `provider + request_id`。
-- **验收标准**：制造"已出 delta 后中断"（可复用 `peri-agent/tests/stream_interruption_test.rs` 的 HTTP fixture 手法），断言默认 `info` 过滤下日志包含中断事件与尝试次数；断言非耗尽续跑与耗尽终态各自有一条可见记录；断言日志不含凭据/body。
+- **验收标准**：制造"已出 delta 后中断"，断言默认 `info` 过滤下每次中断出口恰好一条日志及实际尝试次数，覆盖续跑成功与耗尽终态。当前可执行入口为 `peri-agent/tests/stream_interruption_logs_test.rs`：独立捕获 observer / 无 observer 出口，逐字段对照收到的真实 transport 诊断，不假定 provider 身份；固定 HTTP fixture 的 key、prompt、delta 不应被额外作为请求/响应 dump 输出，这不代表诊断脱敏承诺，实际错误保真按 `ARC-SECRET-001`。恢复 wire 仍由 `peri-agent/tests/stream_interruption_test.rs` 验证；本条旧静态位置不作为现行缺口已复现的证据。
 
 ### P1-2 连续截断耗尽终态无日志（peri-agent）
 

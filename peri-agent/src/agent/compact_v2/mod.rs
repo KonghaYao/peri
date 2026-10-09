@@ -591,6 +591,22 @@ async fn run_full_or_degrade(
 mod projection_tests;
 
 #[cfg(test)]
+#[path = "projection_render_test.rs"]
+mod projection_render_tests;
+
+#[cfg(test)]
+#[path = "projection_restore_test.rs"]
+mod projection_restore_tests;
+
+#[cfg(test)]
+#[path = "projection_estimate_test.rs"]
+mod projection_estimate_tests;
+
+#[cfg(test)]
+#[path = "projection_tool_use_test.rs"]
+mod projection_tool_use_tests;
+
+#[cfg(test)]
 mod _test;
 
 #[cfg(test)]

@@ -36,7 +36,6 @@ fn duplicate_arc_is_charged_once_per_cache() {
     let once = cache.retained_bytes();
     cache.stable_chunks.push(Arc::clone(&chunk));
     assert_eq!(cache.retained_bytes(), once);
-    assert_eq!(cache.retained_bytes(), cache.retained_bytes());
 }
 
 #[test]

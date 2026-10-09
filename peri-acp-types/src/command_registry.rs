@@ -783,3 +783,11 @@ fn unregister_prefix_locked(
 #[cfg(test)]
 #[path = "command_registry_test.rs"]
 mod tests;
+
+#[cfg(test)]
+#[path = "command_registry_change_test.rs"]
+mod change_tests;
+
+#[cfg(test)]
+#[path = "command_registry_source_test.rs"]
+mod source_tests;

@@ -68,6 +68,8 @@ use peri_middlewares::mcp::{
 };
 use serde_json::{json, Map, Value};
 
+const FIXTURE_SESSION_ID: &str = "isolation-session";
+
 /// 每台 fixture server 的 stdio MCP 实现（node）：
 /// - 每个收到的 JSON-RPC 行按原样追加到**自己**的 wire 日志（`#recv <payload>`）；
 /// - `server/discover` 一律 -32601，让客户端 Auto 回退到 `initialize`
@@ -328,6 +330,9 @@ async fn isolation_fixture() -> IsolationFixture {
 
     let (tasks, spawner) = McpTaskOwner::new();
     let pool = Arc::new(McpClientPool::new_pending_with_spawner(spawner));
+    let manager: Arc<dyn peri_acp_types::tasks::TaskManager> =
+        Arc::new(peri_agent::agent::async_tasks::TaskManager::new());
+    pool.bind_session_task_manager(FIXTURE_SESSION_ID, &manager);
     let (status_tx, _status_rx) = tokio::sync::watch::channel(McpInitStatus::Pending);
     McpClientPool::run_initialize(pool.clone(), &cwd, &claude_home, status_tx, None).await;
 
@@ -346,7 +351,10 @@ async fn invoke_named(bridges: &[Box<dyn BaseTool>], name: &str) -> String {
         .find(|bridge| bridge.name() == name)
         .unwrap_or_else(|| panic!("工具列表里没有 {name}"));
     bridge
-        .invoke(json!({}), ToolContext::new(&[], "."))
+        .invoke(
+            json!({}),
+            ToolContext::new(&[], ".").with_session_identity(FIXTURE_SESSION_ID, "isolation-turn"),
+        )
         .await
         .unwrap_or_else(|error| panic!("{name} 调用失败: {error}"))
 }

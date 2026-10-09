@@ -58,6 +58,8 @@ Workspace 后台 Bash 当前运行时入口：`workspace/src/shell_tasks.rs` 持
 
 ## 验证
 
+文件工具测试位于 `workspace/src/filesystem/{read,edit,write,mod}_test.rs`：Read/Edit 的 Unix 权限失败保留实际诊断与原文件；Write 的提交失败不得创建目标目录；路径解析 fixture 使用独立临时目录。行为回归：`./scripts/cargo-rmcp-patched.sh test --locked -p peri-mcp-workspace --lib -- filesystem::`。Unix 权限用例需要非特权执行用户，不以非 Unix 空分支冒充通过。
+
 ```bash
 cargo test -p peri-mcp-config --lib
 cargo test -p peri-mcp-web --lib

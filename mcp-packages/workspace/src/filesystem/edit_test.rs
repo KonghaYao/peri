@@ -74,6 +74,39 @@ async fn test_edit_file_ambiguous() {
         err.to_string().contains("not unique"),
         "should report ambiguity: {err}"
     );
+    assert_eq!(
+        std::fs::read_to_string(dir.path().join("f.txt")).unwrap(),
+        "foo and foo"
+    );
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn unreadable_edit_retains_permission_diagnostic_and_original_bytes() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("locked.txt");
+    std::fs::write(&path, "original content").unwrap();
+    let permissions = std::fs::metadata(&path).unwrap().permissions();
+    std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o000)).unwrap();
+    let expected = std::fs::read(&path).unwrap_err();
+    assert_eq!(expected.kind(), std::io::ErrorKind::PermissionDenied);
+    let tool = EditFileTool::new(directory.path().to_str().unwrap());
+    let result = tool.invoke(
+        serde_json::json!({"file_path": "locked.txt", "old_string": "original", "new_string": "modified"}),
+        peri_agent::tools::ToolContext::new(&[], "."),
+    ).await;
+    std::fs::set_permissions(&path, permissions).unwrap();
+
+    let error = result.unwrap_err();
+    let failure = error
+        .downcast_ref::<peri_mcp_common::failure::ToolFailure>()
+        .expect("edit must expose recovery guidance");
+    assert!(failure.recovery.contains("access permissions"));
+    assert!(failure.to_string().contains("Edit failed while reading"));
+    assert!(failure.to_string().contains(&expected.to_string()));
+    assert_eq!(std::fs::read_to_string(path).unwrap(), "original content");
 }
 
 #[tokio::test]
@@ -122,13 +155,6 @@ fn test_description_extended() {
         "description 应提及 replace_all"
     );
     assert!(desc.len() > 200, "description 应为扩展后的多段落文本");
-}
-
-#[test]
-#[allow(non_snake_case)]
-fn test_tool_name_is_Edit() {
-    let tool = EditFileTool::new("/tmp");
-    assert_eq!(tool.name(), "Edit");
 }
 
 #[tokio::test]

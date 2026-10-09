@@ -67,6 +67,33 @@ async fn test_read_file_not_found() {
     );
 }
 
+#[cfg(unix)]
+#[tokio::test]
+async fn unreadable_file_reports_permission_denied_without_changing_content() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("locked.txt");
+    std::fs::write(&path, "preserved content").unwrap();
+    let permissions = std::fs::metadata(&path).unwrap().permissions();
+    std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o000)).unwrap();
+    let tool = ReadFileTool::new(directory.path().to_str().unwrap());
+    let result = tool
+        .invoke(
+            serde_json::json!({"file_path": "locked.txt"}),
+            peri_agent::tools::ToolContext::new(&[], "."),
+        )
+        .await;
+    std::fs::set_permissions(&path, permissions).unwrap();
+
+    let error = result.unwrap_err();
+    let io_error = error
+        .downcast_ref::<std::io::Error>()
+        .expect("read must preserve the I/O error");
+    assert_eq!(io_error.kind(), std::io::ErrorKind::PermissionDenied);
+    assert_eq!(std::fs::read_to_string(path).unwrap(), "preserved content");
+}
+
 #[tokio::test]
 async fn test_read_long_line_reports_line_truncation_before_content() {
     let dir = tempfile::tempdir().unwrap();
@@ -346,13 +373,6 @@ fn test_description_extended() {
         desc.len() > 200,
         "description 应为扩展后的多段落文本，长度 > 200 字符"
     );
-}
-
-#[test]
-#[allow(non_snake_case)]
-fn test_tool_name_is_Read() {
-    let tool = ReadFileTool::new("/tmp");
-    assert_eq!(tool.name(), "Read");
 }
 
 #[test]

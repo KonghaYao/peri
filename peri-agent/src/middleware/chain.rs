@@ -483,3 +483,15 @@ impl Default for MiddlewareChain {
 #[cfg(test)]
 #[path = "chain_test.rs"]
 mod tests;
+
+#[cfg(test)]
+#[path = "chain_model_test.rs"]
+mod model_tests;
+
+#[cfg(test)]
+#[path = "chain_prompt_test.rs"]
+mod prompt_tests;
+
+#[cfg(test)]
+#[path = "chain_reminder_test.rs"]
+mod reminder_tests;

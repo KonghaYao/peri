@@ -121,6 +121,7 @@ typed schema、默认值、领域合并、scope/revision/explain/update 归
 | --- | --- |
 | 命令契约 | `PromptStopReason`（command.rs:69）、`CommandContext`（:95）、`CommandFeedback`（:221）、`CommandResult`（:256）、`BgForkRequest`（:272）、`BgForkSpawner`（:301） |
 | handler 契约 | `CommandHandler`（command_handler.rs:30）、`CommandOutcome`（:15）；注册表 `command_registry` 顶层 re-export（lib.rs:38） |
+| 注册表测试 | `command_registry_test.rs` 覆盖路由、冲突与并发索引；`command_registry_change_test.rs` 覆盖注销和变更投影；`command_registry_source_test.rs` 覆盖发现、重连与旧 handle 拒绝；统一过滤 `command_registry::` |
 
 ### 其余契约模块（src/）
 

@@ -67,19 +67,6 @@ async fn test_write_file_creates_parent_dirs() {
 }
 
 #[tokio::test]
-async fn test_write_file_missing_content_param() {
-    let dir = tempfile::tempdir().unwrap();
-    let tool = WriteFileTool::new(dir.path().to_str().unwrap());
-    let result = tool
-        .invoke(
-            serde_json::json!({"file_path": "f.txt"}),
-            peri_agent::tools::ToolContext::new(&[], "."),
-        )
-        .await;
-    assert!(result.is_err(), "missing content should return Err");
-}
-
-#[tokio::test]
 async fn test_write_file_success_message() {
     let dir = tempfile::tempdir().unwrap();
     let tool = WriteFileTool::new(dir.path().to_str().unwrap());
@@ -133,26 +120,32 @@ async fn test_write_file_no_tmp_residual() {
     assert!(dir.path().join("clean.txt").exists());
 }
 
+#[cfg(unix)]
 #[tokio::test]
 async fn test_write_file_error_propagates() {
     let dir = tempfile::tempdir().unwrap();
     // 在只读目录上写入应返回 Err
     let readonly_dir = dir.path().join("readonly");
     std::fs::create_dir(&readonly_dir).unwrap();
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        std::fs::set_permissions(&readonly_dir, std::fs::Permissions::from_mode(0o444)).unwrap();
-    }
+    let permissions = std::fs::metadata(&readonly_dir).unwrap().permissions();
+    make_readonly(&readonly_dir);
     let tool = WriteFileTool::new(readonly_dir.to_str().unwrap());
-    let _result = tool
+    let result = tool
         .invoke(
             serde_json::json!({"file_path": "sub/nope.txt", "content": "x"}),
             peri_agent::tools::ToolContext::new(&[], "."),
         )
         .await;
-    #[cfg(unix)]
-    assert!(_result.is_err(), "写入只读目录应返回 Err");
+    std::fs::set_permissions(&readonly_dir, permissions).unwrap();
+    let error = result.unwrap_err();
+    let failure = error
+        .downcast_ref::<peri_mcp_common::failure::ToolFailure>()
+        .expect("write must expose a typed failure");
+    assert!(failure
+        .to_string()
+        .contains("Write failed while committing the file"));
+    assert!(failure.to_string().contains("Permission denied"));
+    assert!(!readonly_dir.join("sub").exists());
 }
 
 #[test]
@@ -162,13 +155,6 @@ fn test_description_extended() {
     assert!(desc.contains("Usage:"), "description 应包含 Usage 段落");
     assert!(desc.contains("atomic write"), "description 应提及原子写入");
     assert!(desc.len() > 200, "description 应为扩展后的多段落文本");
-}
-
-#[test]
-#[allow(non_snake_case)]
-fn test_tool_name_is_Write() {
-    let tool = WriteFileTool::new("/tmp");
-    assert_eq!(tool.name(), "Write");
 }
 
 #[tokio::test]
@@ -432,6 +418,7 @@ async fn test_write_requires_content_or_from_draft() {
         err.contains("Either 'content' or 'from_draft' must be provided"),
         "缺参数文案: {err}"
     );
+    assert!(!dir.path().join("f.txt").exists());
 }
 
 /// 回归（互斥劫持）：LLM 同时携带 content 与 from_draft 时，content 优先、

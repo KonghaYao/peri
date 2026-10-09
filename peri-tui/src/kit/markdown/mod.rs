@@ -552,6 +552,26 @@ pub fn parse_markdown_cached(
 mod tests;
 
 #[cfg(test)]
+#[path = "cache_test.rs"]
+mod cache_tests;
+
+#[cfg(test)]
+#[path = "table_parse_test.rs"]
+mod table_parse_tests;
+
+#[cfg(test)]
+#[path = "wrap_test.rs"]
+mod wrap_tests;
+
+#[cfg(test)]
+#[path = "image_parse_test.rs"]
+mod image_parse_tests;
+
+#[cfg(test)]
+#[path = "profile_test.rs"]
+mod profile_tests;
+
+#[cfg(test)]
 #[path = "cache_lifecycle_test.rs"]
 mod cache_lifecycle_tests;
 

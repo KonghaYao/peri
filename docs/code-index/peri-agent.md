@@ -72,6 +72,8 @@ Inbox 去重入口 `agent/stages/work_receive.rs` 使用 `SessionResources::load
 
 `tool_dispatch/execution.rs` 保留工具返回的 typed `UserRejected`；拒绝理由作为 error tool result 继续交给模型，不能被 boxed 字符串误分类为未知副作用。
 
+流中断集成回归分为 `tests/stream_interruption_test.rs`（续跑 HTTP wire、部分正文与耗尽终态）和 `tests/stream_interruption_logs_test.rs`（独立进程捕获 observer / 无 observer 日志，与实际 transport 诊断逐字段核对）。两者一起验证：`./scripts/cargo-rmcp-patched.sh test --locked -p peri-agent --test stream_interruption_test --test stream_interruption_logs_test`。
+
 ### RCRA 阶段（src/agent/stages/）
 
 | 功能 | 文件 | 入口/关键点 |
@@ -95,6 +97,7 @@ Full 摘要不改变模型思考配置和单次输出上限。首轮正文截断
 | --- | --- | --- |
 | 策略选择 + 触发编排 | compact_v2/mod.rs | `determine_compact_action`（:102）；`run_compact`（:125）；`CompactResult` |
 | 压力计算与计划 | compact_v2/planner.rs + projection.rs | `plan_micro` 只规划 visible own history；`estimate_projection_chars` 跳过 excluded，已隐藏历史无重复收益 |
+| 投影契约测试 | `compact_v2/projection_test.rs`、`projection_render_test.rs`、`projection_restore_test.rs`、`projection_estimate_test.rs`、`projection_tool_use_test.rs` | 分离 serde/provider 契约、模型视图、持久指令恢复、收益估算与非法 ToolUse action；统一过滤 `agent::compact_v2::projection`，legacy input 指令不得修改 canonical 参数 |
 | Micro 执行（按 round 截断） | compact_v2/micro.rs | `micro_compact` |
 | Smart 执行（废弃中，恒 false） | compact_v2/smart.rs | `smart_compact` |
 | Full 执行 | compact_v2/full.rs | `full_compact_inner` 从可见历史（含工具结果）生成结构化摘要，排除 own reminder 等旧历史，仅追加摘要；不从计算实例本机回读 Read/Skill 路径；回归 `full_report_test.rs` / `full_test.rs` / `full_continuation_test.rs`（摘要截断续写、失败保全及远端内容来源） |
@@ -112,6 +115,7 @@ Full 摘要不改变模型思考配置和单次输出上限。首轮正文截断
 | Stage 装配顺序与公开输入 | session/exec/stage_builder.rs | `StageBuildInput` / `build_stage_context`；保留主 Session → turn/EventBus → 父身份/host → collect_tools/catalog → StageContext 的顺序 |
 | beta flag 冻结值与装配透传 | `src/session/store.rs`（`FrozenContext::beta_flags`、builder `beta_flags()`）、`src/session/factory.rs`（`AssemblyContext::agent_default_run_in_background`）、`src/session/exec/stage_builder.rs`（`StageBuildInput` 同名字段）、`src/session/subagent/factory/context.rs`（子会话复制父冻结值） | 冻结载体成员 + 逐层透传 | 值只在 ACP 装配层由 flag id 解析为语义布尔；本层不读配置、不解析 flag 语义；空投影 = 全部 false（旧 blob 缺键同义）|
 | 模型缓存与生产链投影 | session/exec/stage_builder/agent.rs | `build_agent` / `TurnAssembly` / `project_assembly`；retry handler 先于模型工厂更新；生产 chain 包装一次，bridge provider 与 StageContext clone 同一 `Arc<MiddlewareChain>`；空 CLAUDE/skills 保留 `Some("")` 冻结缺席语义 |
+| 中间件链测试 | `middleware/chain_test.rs`、`chain_model_test.rs`、`chain_prompt_test.rs`、`chain_reminder_test.rs` | 工具审批/反馈、模型 hook、提示词段落/贡献与首轮提醒分别覆盖；统一过滤 `middleware::chain::`，失败与 Interrupted 保持类型并停止后续 hook |
 | 主 Session 与后台 owner | session/exec/stage_builder/session_setup.rs | `build_session`；同一 `FrozenSessionData` 构造 `SessionStore.frozen`，激活 persistence；session 级 cron bridge 与 print 级 CronOwner 分支、取消优先级不变 |
 | 父身份与子任务宿主 | session/exec/stage_builder/subagent_setup.rs | `attach_subagent_host` / `SubagentDependencies`；借用原 owner，移动后台事件发送端并注入同一冻结数据；必须早于 middleware `collect_tools` |
 | 工具视图与目录注册 | session/exec/stage_builder/tools.rs | `build_session_tool_view` / `register_tool_catalog`；disabled 剔除后 merge 当前链工具，同名有状态工具覆盖本地条目，不写宿主共享表；动态 catalog 注册失败沿 `StageBuildError` 返回；剔除面只认仍在 `MIDDLEWARE_TOOL_NAMES` 内的名字——已迁移裸名（web 2 + artifact 1 + cron 3 + workspace 7，共 13 项）不在表内，因此**不再被剔除**（builtin 能力以 `mcp__*` 存在于 MCP 目录，从不进 `shared_tools`；覆盖边界与反向断言见该文件模块注释与 `tools_test.rs::migrated_naked_names_are_no_longer_excluded`） |

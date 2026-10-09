@@ -174,6 +174,8 @@ scope 快照携 epoch；`taskClose`/`taskOpen` 按该 epoch 做 owner 端 CAS，
 
 ### MCP（src/mcp/）
 
+实例隔离 wire 回归位于 `tests/mcp_isolation_contract.rs`：工具调用 fixture 经 `bind_session_task_manager` 绑定真实 session owner，并以 `ToolContext::with_session_identity` 传递同一身份；不得绕过生产可信绑定校验。命令：`./scripts/cargo-rmcp-patched.sh test --locked -p peri-middlewares --test mcp_isolation_contract`。
+
 `client/subscription.rs` 从资源更新通知的 `_meta["peri/messageKind"]` 解析逐条调度类型：
 `info` 入队但不唤醒，`defer` 入队并唤醒；缺失或非法值沿用资源默认值。
 通用资源更新默认 `Defer`，builtin git ref 默认 `Info`。字段契约在

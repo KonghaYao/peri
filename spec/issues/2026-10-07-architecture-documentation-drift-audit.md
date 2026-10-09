@@ -130,7 +130,7 @@
 - 类型：文档/职责/路由漂移；按适用契约修正文档，不因此改变已批准目标。
 - 文档：`docs/design/micro-compact.md:108`、`docs/design/micro-compact.md:114`、`docs/design/micro-compact.md:126` 保留参数压缩描述。
 - 证据：`peri-agent/src/agent/compact_v2/planner.rs:270` 不生成 input 投影；`peri-agent/src/agent/compact_v2/projection.rs:366`、`peri-agent/src/agent/compact_v2/projection.rs:399` 保留 canonical 输入，遵循 `docs/standards/architecture-contracts.md:165`。
-- 影响/建议：可能诱导恢复已禁止行为。删除现行输入压缩叙述，区分 legacy directive 解码与当前 renderer 政策；核对 `peri-agent/src/agent/compact_v2/projection_test.rs:378` 的旧测试名称，实际断言在 `:420` 保持原参数。
+- 影响/建议：可能诱导恢复已禁止行为。删除现行输入压缩叙述，区分 legacy directive 解码与当前 renderer 政策；测试现已按职责拆分，`peri-agent/src/agent/compact_v2/projection_render_test.rs` 的 `legacy_tool_input_projection_preserves_selected_long_fields_and_tool_use` 明确验证保留原参数。
 
 ### P2-08. 诊断保真已获批准，但多份文档继续承诺全链路脱敏（B9）
 

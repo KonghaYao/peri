@@ -297,6 +297,22 @@ fn handle_session_update(
 mod tests;
 
 #[cfg(test)]
+#[path = "acp_notifier_agent_test.rs"]
+mod agent_tests;
+
+#[cfg(test)]
+#[path = "acp_notifier_lifecycle_test.rs"]
+mod lifecycle_tests;
+
+#[cfg(test)]
+#[path = "acp_notifier_projection_test.rs"]
+mod projection_tests;
+
+#[cfg(test)]
+#[path = "acp_notifier_interaction_test.rs"]
+mod interaction_tests;
+
+#[cfg(test)]
 mod execution_done_test {
     use super::*;
 

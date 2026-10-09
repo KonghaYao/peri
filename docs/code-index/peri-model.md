@@ -65,7 +65,7 @@ Emscripten 路径：`src/transport/http.rs` 复用 reqwest native/Hyper HTTP/SSE
 | --- | --- | --- |
 | 运行时配置/观测投影 | runtime/request.rs | `ModelRuntimeConfig`；`PreparedModelRequest::observe`（有界投影保留原始内容，`truncated_paths` 标记长度裁剪） |
 | 流编排 | runtime/stream.rs | `SseDecoderFactory`（:20）；`retrying_http_sse_stream`（:25）；`runtime_http_sse_stream`（:57）；`response_to_sse_stream`（:76）；HTTP、parser、同步 provider decoder 与 retry 只有一条实现路径 |
-| 取消 / 首字节 / SSE 终态回归 | runtime/stream_test.rs + openai_compatible/mod_test.rs | runtime 测试经 HttpResponse → 生产 SSE reader 验证取消、abort、connect/body/backoff/drop 和完成后坏尾帧；OpenAiModel::stream 覆盖缺失或纯空白 finish_reason、流内 error、JSON/UTF-8 坏帧在合并与分块时均保留断点；`peri-agent/tests/stream_interruption_test.rs` 经真实 HTTP 验证续跑请求含部分正文与提醒、无重复渲染和预算耗尽 |
+| 取消 / 首字节 / SSE 终态回归 | runtime/stream_test.rs + openai_compatible/mod_test.rs | runtime 测试经 HttpResponse → 生产 SSE reader 验证取消、abort、connect/body/backoff/drop 和完成后坏尾帧；OpenAiModel::stream 覆盖缺失或纯空白 finish_reason、流内 error、JSON/UTF-8 坏帧在合并与分块时均保留断点；`peri-agent/tests/stream_interruption_test.rs` 经真实 HTTP 验证续跑请求含部分正文与提醒、无重复渲染和预算耗尽；`peri-agent/tests/stream_interruption_logs_test.rs` 独立捕获各 observer 出口及无 observer 的日志，对照实际 transport 诊断，不假定底层错误携带 provider 身份 |
 | 重试 | runtime/retry.rs | `retrying_stream` :220；`RetryObserver` :202；`RetryObservation` :159 |
 | 错误模型 | runtime/error.rs | `ModelError` :202；`ProtocolErrorKind` :47；`TransportErrorKind` :7；`RetryErrorKind` :28 |
 
