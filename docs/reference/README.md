@@ -3,6 +3,7 @@
 本目录保存有长期使用价值、但不构成仓库设计或工程规则的资料。发生冲突时，服从
 代码、`docs/standards/` 与 `docs/design/`。
 
+- [Parallel Search MCP 示例](../../examples/parallel-search/README.md)：可选的匿名网页搜索与内容提取配置。
 - [mcp-ecosystem.md](mcp-ecosystem.md)：MCP 生态背景与外部互通参考。
 - [wasm-host-ecosystem.md](wasm-host-ecosystem.md)：Peri WASM 生态接入调查，涵盖协调、鉴权、实时同步、对象存储、模型网关与队列；候选方案不构成已批准设计。
 - [artifact-remote-storage.md](artifact-remote-storage.md)：artifact 上传的远程存储配置与对接契约（使用者视角）。

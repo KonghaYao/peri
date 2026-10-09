@@ -1,0 +1,19 @@
+{
+  "mcpServers": {
+    "parallel-search": {
+      "command": "node",
+      "args": [
+        "./node_modules/mcp-remote/dist/proxy.js",
+        "https://search.parallel.ai/mcp",
+        "--transport",
+        "http-only",
+        "--header",
+        "User-Agent: peri/parallel-search-example",
+        "--enable-proxy"
+      ],
+      "system_mcp": true,
+      "system_mcp_tools": [],
+      "system_mcp_timeout": 60000
+    }
+  }
+}
