@@ -198,6 +198,49 @@ fn p0_delivered_prompt_follows_output_when_subagent_keeps_turn_open() {
     );
 }
 
+/// P0 regression: canonical queue delivery must keep a running parent tool
+/// available for the later ToolEnded event.
+#[test]
+#[serial]
+fn p0_delivered_prompt_preserves_running_tool_result() {
+    let (mut state, _restore) = make_steer_bridge();
+    dispatch_and_notify(
+        &mut state,
+        &AcpEventData::ToolStarted(TuiToolStarted {
+            tool_id: "tool-1".into(),
+            tool_name: "Read".into(),
+            input_summary: "file.rs".into(),
+            raw_input: serde_json::json!({"path": "file.rs"}),
+            agent_id: None,
+        }),
+    );
+    dispatch_and_notify(&mut state, &delivered());
+    dispatch_and_notify(
+        &mut state,
+        &AcpEventData::ToolEnded(TuiToolEnded {
+            tool_id: "tool-1".into(),
+            output_summary: "file contents".into(),
+            is_error: false,
+            agent_id: None,
+        }),
+    );
+
+    let snapshot = VIEW_MODELS.state().read().clone();
+    let items = &snapshot.items;
+    let tool = items.iter().position(|vm| matches!(vm, TuiRenderUnit::TuiToolCard(card) if card.tool_id == "tool-1" && card.output_summary == "file contents"));
+    let prompt = items
+        .iter()
+        .position(|vm| matches!(vm, TuiRenderUnit::TuiUserBubble(b) if b.text == "新的输入"));
+    assert!(
+        tool.is_some(),
+        "delivered prompt must preserve the tool result"
+    );
+    assert!(
+        tool < prompt,
+        "delivered prompt must follow the previous tool"
+    );
+}
+
 #[test]
 #[serial]
 fn test_steer_delivered_duplicate_only_adds_one_user_bubble() {

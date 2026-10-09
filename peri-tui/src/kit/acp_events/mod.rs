@@ -201,7 +201,7 @@ impl BridgeState {
     ///
     /// 安全守卫：如果 current_turn 中存在正在运行的 SubAgentAccumulator，
     /// 跳过 flush 以避免清除容器——否则后续工具事件无法路由到已清除的容器，
-    /// 造成 SubAgentGroup 内部卡片空白（具体现象：外壳可见但内部工具条目缺失）。
+    /// 造成 SubAgentGroup 内部卡片空白。
     ///
     /// 注意：SystemNote（BudgetWarning/SystemNotification/CommandFeedback/
     /// AgentExecutionFailed）不再通过 flush-then-push 模式，
@@ -235,7 +235,17 @@ impl BridgeState {
     /// turn. A live subagent keeps its container in current_turn, so in that
     /// case the prompt joins the same chronological segment stream.
     fn push_user_bubble(&mut self, text: String) {
-        self.flush_current_turn();
+        // A tool result can still arrive after the next prompt is displayed.
+        // Preserve its accumulator until ToolEnded; TurnDone retains its normal
+        // flush behavior for tools that never emit an end event.
+        let has_running_tool = self
+            .current_turn
+            .tool_cards
+            .iter()
+            .any(|tool| tool.output_summary.is_none());
+        if !has_running_tool {
+            self.flush_current_turn();
+        }
         if self.current_turn.is_empty() {
             self.committed
                 .push_back(TuiRenderUnit::TuiUserBubble(TuiUserBubble::new(text)));
