@@ -2,7 +2,7 @@ import { HTTPException } from "hono/http-exception";
 import { Hono } from "hono";
 import { authenticatedApp } from "../api/app";
 import { normalizeChatId, errorResponse, logError } from "../api/http";
-import { jsonRequest } from "../api/json";
+import { boundedRequestBody, jsonRequest } from "../api/json";
 import { sendMessageBodySchema } from "../../shared/chat";
 import type { Env } from "../types";
 
@@ -20,7 +20,7 @@ export function createChatRoutes(handlers: ChatHandlers) {
   app.get("/api/chats/:id/resources", (context) => handlers.resources(normalizeChatId(context.req.param("id"))));
   app.post("/api/chats/:id/messages", ...jsonRequest(sendMessageBodySchema, "content must be a nonempty string of at most 32768 characters"),
     (context) => handlers.send(normalizeChatId(context.req.param("id")), context.req.valid("json").content, context.req.raw.signal));
-  app.post("/api/chats/:id/cancel", (context) => handlers.cancel(normalizeChatId(context.req.param("id"))));
+  app.post("/api/chats/:id/cancel", ...boundedRequestBody, (context) => handlers.cancel(normalizeChatId(context.req.param("id"))));
   for (const path of ["/api/chats/:id", "/api/chats/:id/messages", "/api/chats/:id/cancel", "/api/chats/:id/resources"]) {
     app.all(path, (context) => {
       normalizeChatId(context.req.param("id"));

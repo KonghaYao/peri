@@ -28,7 +28,7 @@
 | 前后端展示 DTO 的 Zod schema | `npm-packages/peri-cf/shared/sync.ts`（帧编解码与交付信用在 SDK） |
 | SDK view 到 UI 的共享展示转换 | `npm-packages/peri-cf/shared/sync-state.ts` |
 | Hono API、共享 middleware 与边界校验 | `npm-packages/peri-cf/worker/api/` |
-| Hono JSON 校验与实际字节上限 | `npm-packages/peri-cf/worker/api/json.ts` |
+| Hono JSON 校验与实际字节上限；取消请求在响应前有界消费 body | `npm-packages/peri-cf/worker/api/json.ts` |
 | 聊天 DO 路由、运行状态与 `session/cancel` 取消 | `npm-packages/peri-cf/worker/chat/routes.ts`、`session.ts` |
 | SDK ACP/Yjs 投影与持久展示恢复 | `npm-packages/peri-cf/worker/chat/projection.ts` |
 | WS 首帧鉴权、Hibernation 订阅恢复与 DO socket attachment | `npm-packages/peri-cf/worker/chat/sync.ts`、`ws-delivery.ts`（帧与交付信用来自 SDK），DO 事件入口 `worker/index.ts` |

@@ -121,6 +121,35 @@ describe("actual workerd read-only WS delivery and hibernation", () => {
     client.replica.destroy();
   }, 20_000);
 
+  test("取消在响应前读完分段请求体，且保持空请求体可用", async () => {
+    let finishBody!: () => void;
+    let bodyCancelled = false;
+    const body = new ReadableStream<Uint8Array>({
+      start(controller) {
+        controller.enqueue(new TextEncoder().encode("{"));
+        finishBody = () => { if (!bodyCancelled) { controller.enqueue(new TextEncoder().encode("}")); controller.close(); } };
+      },
+      cancel() { bodyCancelled = true; },
+    });
+    let responded = false;
+    const response = runtime.dispatchFetch(new URL(`/api/chats/${chatId}/cancel`, await runtime.ready), {
+      method: "POST", headers: { Authorization: `Bearer ${token}` }, body,
+    }).then((result) => { responded = true; return result; });
+    try {
+      await Bun.sleep(200);
+      expect(responded).toBe(false);
+    } finally { finishBody(); }
+    expect((await response).status).toBe(200);
+    expect(bodyCancelled).toBe(false);
+    expect((await command("cancel")).status).toBe(200);
+    for (const [size, status] of [[65_536, 200], [65_537, 413]] as const) {
+      const bounded = await runtime.dispatchFetch(new URL(`/api/chats/${chatId}/cancel`, await runtime.ready), {
+        method: "POST", headers: { Authorization: `Bearer ${token}` }, body: "x".repeat(size),
+      });
+      expect(bounded.status).toBe(status);
+    }
+  });
+
   test("native sockets without bufferedAmount evict unacknowledged peers by credit without stopping execution", async () => {
     const client = await connect(false);
     client.socket.send(encodeAuthFrame({ type: "auth", token }));
