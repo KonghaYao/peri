@@ -266,6 +266,116 @@ async fn bound_parent(
     (store, parent, cwd, repo, db)
 }
 
+/// [回归测试] 外部正文从冻结 owner 传到子请求，子身份历史不保存该正文；
+/// 冷/热恢复沿父快照复用，二级派生只从 owner 继承一次。
+#[tokio::test]
+async fn child_external_instructions_are_wire_only_across_resume_and_nested_fork() {
+    let (store, root, cwd, _repo, _db) = bound_parent("child-external-wire.db").await;
+    let parent = Session::new(
+        Arc::from(cwd.as_str()),
+        FrozenContext::builder()
+            .external_instructions("EXTERNAL_ONLY_SENTINEL")
+            .build(),
+        root.store().thread_id.clone(),
+    );
+    let model = CaptureModel::new("first done");
+    let first = SessionFactory::spawn_subagent(
+        Some(&parent),
+        child_config(
+            Arc::clone(&store),
+            Arc::clone(&model),
+            Arc::new(ContributionAssembler {
+                contribution: Arc::new(Mutex::new(None)),
+            }),
+            false,
+            &cwd,
+        ),
+    )
+    .await
+    .unwrap();
+    assert_eq!(
+        model
+            .last_system()
+            .matches("EXTERNAL_ONLY_SENTINEL")
+            .count(),
+        1
+    );
+    assert!(!first
+        .session
+        .transcript()
+        .read()
+        .visible_model_messages()
+        .unwrap()
+        .iter()
+        .any(|m| m.content().contains("EXTERNAL_ONLY_SENTINEL")));
+    let resumed_model = CaptureModel::new("resumed done");
+    let resume = resume_config_with(
+        Arc::clone(&store),
+        first.child_thread_id.clone(),
+        SubagentLlmSource::model(
+            Arc::clone(&resumed_model) as Arc<dyn peri_model::Model>,
+            "capture-model",
+        ),
+        SubagentRunMode::Sync,
+        None,
+        None,
+    );
+    let resumed = SessionFactory::resume_subagent(Some(&parent), resume)
+        .await
+        .unwrap();
+    assert_eq!(
+        resumed_model
+            .last_system()
+            .matches("EXTERNAL_ONLY_SENTINEL")
+            .count(),
+        1
+    );
+    assert!(!resumed
+        .session
+        .transcript()
+        .read()
+        .visible_model_messages()
+        .unwrap()
+        .iter()
+        .any(|m| m.content().contains("EXTERNAL_ONLY_SENTINEL")));
+    let grandchild_model = CaptureModel::new("grandchild done");
+    let inherited = resumed
+        .session
+        .transcript()
+        .read()
+        .visible_model_messages()
+        .unwrap();
+    let mut grandchild = child_config(
+        store,
+        Arc::clone(&grandchild_model),
+        Arc::new(ContributionAssembler {
+            contribution: Arc::new(Mutex::new(None)),
+        }),
+        true,
+        &cwd,
+    );
+    grandchild.parent_messages = inherited;
+    grandchild.system_prompt = Some("GRANDCHILD_IDENTITY_SENTINEL".into());
+    let second = SessionFactory::spawn_subagent(Some(&resumed.session), grandchild)
+        .await
+        .unwrap();
+    assert_eq!(
+        grandchild_model
+            .last_system()
+            .matches("EXTERNAL_ONLY_SENTINEL")
+            .count(),
+        1
+    );
+    assert!(!second
+        .session
+        .transcript()
+        .read()
+        .visible_model_messages()
+        .unwrap()
+        .iter()
+        .any(|m| m.content().contains("EXTERNAL_ONLY_SENTINEL")));
+}
+
 /// 定义型 spawn：身份恰一次（bridge base），贡献在 `before_agent` 后进入同一
 /// 请求；messages 不重复身份。
 #[tokio::test]

@@ -417,6 +417,8 @@ async fn run_prompt_attempt(
             // 注册 WorkflowTool，不得复用带 workflow 声明的主 prompt。
             // （16_workflow 已删除（C2）；H2：按 workflow 能力投影重建。）
             system_prompt: Some(workflow_system_prompt.clone()),
+            external_instructions: frozen.v2_frozen().external_instructions.clone(),
+            legacy_embedded_instructions: frozen.v2_frozen().legacy_embedded_instructions,
             broker: None,
             permission_mode: None,
             frozen_date: Some(frozen.date().to_string()),

@@ -10,7 +10,7 @@ use std::sync::Arc;
 use peri_agent::session::exec::executor::FrozenSessionData;
 use serde::{Deserialize, Serialize};
 
-const FROZEN_SNAPSHOT_VERSION: u64 = 1;
+const FROZEN_SNAPSHOT_VERSION: u64 = 2;
 
 #[derive(Debug, thiserror::Error)]
 pub(crate) enum FrozenSnapshotError {
@@ -21,9 +21,16 @@ pub(crate) enum FrozenSnapshotError {
 }
 
 #[derive(Serialize, Deserialize)]
-struct FrozenSnapshotEnvelope {
+struct FrozenSnapshotEnvelope<T> {
     version: u64,
-    data: FrozenSnapshotV1,
+    data: T,
+}
+
+#[derive(Serialize, Deserialize)]
+struct FrozenSnapshotV2 {
+    #[serde(flatten)]
+    legacy: FrozenSnapshotV1,
+    external_instructions: Option<String>,
 }
 
 #[derive(Serialize, Deserialize)]
@@ -75,51 +82,66 @@ pub(crate) fn encode_frozen_snapshot(
     frozen: &FrozenSessionData,
 ) -> Result<String, FrozenSnapshotError> {
     let meta = frozen.meta_harness();
-    let envelope = FrozenSnapshotEnvelope {
-        version: FROZEN_SNAPSHOT_VERSION,
-        data: FrozenSnapshotV1 {
-            system_prompt: frozen.system_prompt().to_string(),
-            claude_md: frozen.claude_md().unwrap_or_default().to_string(),
-            claude_local_md: frozen.claude_local_md().map(str::to_string),
-            skill_summary: frozen.skill_summary().unwrap_or_default().to_string(),
-            date: frozen.date().to_string(),
-            language: frozen.language().map(str::to_string),
-            meta_harness: MetaHarnessSnapshotV1 {
-                section_overrides: meta
-                    .section_overrides
-                    .iter()
-                    .map(|(key, value)| (key.clone(), value.to_string()))
-                    .collect(),
-                disabled_middlewares: meta.disabled_middlewares.iter().cloned().collect(),
-                built_in_subagents_enabled: meta.built_in_subagents_enabled,
-            },
-            beta_flags: BetaFlagsSnapshotV1 {
-                overrides: frozen
-                    .v2_frozen()
-                    .beta_flags
-                    .overrides()
-                    .map(|(id, value)| {
-                        (
-                            id.to_string(),
-                            BetaFlagValueSnapshotV1 {
-                                enabled: value.enabled,
-                                origin: match value.origin {
-                                    peri_acp_types::beta_flags::BetaFlagOrigin::Global => {
-                                        BetaFlagOriginSnapshotV1::Global
-                                    }
-                                    peri_acp_types::beta_flags::BetaFlagOrigin::Workspace => {
-                                        BetaFlagOriginSnapshotV1::Workspace
-                                    }
-                                },
-                            },
-                        )
-                    })
-                    .collect(),
-            },
-            runtime_env: frozen.runtime_env().cloned(),
+    let data = FrozenSnapshotV1 {
+        system_prompt: frozen.system_prompt().to_string(),
+        claude_md: frozen.claude_md().unwrap_or_default().to_string(),
+        claude_local_md: frozen.claude_local_md().map(str::to_string),
+        skill_summary: frozen.skill_summary().unwrap_or_default().to_string(),
+        date: frozen.date().to_string(),
+        language: frozen.language().map(str::to_string),
+        meta_harness: MetaHarnessSnapshotV1 {
+            section_overrides: meta
+                .section_overrides
+                .iter()
+                .map(|(key, value)| (key.clone(), value.to_string()))
+                .collect(),
+            disabled_middlewares: meta.disabled_middlewares.iter().cloned().collect(),
+            built_in_subagents_enabled: meta.built_in_subagents_enabled,
         },
+        beta_flags: BetaFlagsSnapshotV1 {
+            overrides: frozen
+                .v2_frozen()
+                .beta_flags
+                .overrides()
+                .map(|(id, value)| {
+                    (
+                        id.to_string(),
+                        BetaFlagValueSnapshotV1 {
+                            enabled: value.enabled,
+                            origin: match value.origin {
+                                peri_acp_types::beta_flags::BetaFlagOrigin::Global => {
+                                    BetaFlagOriginSnapshotV1::Global
+                                }
+                                peri_acp_types::beta_flags::BetaFlagOrigin::Workspace => {
+                                    BetaFlagOriginSnapshotV1::Workspace
+                                }
+                            },
+                        },
+                    )
+                })
+                .collect(),
+        },
+        runtime_env: frozen.runtime_env().cloned(),
     };
-    serde_json::to_string(&envelope).map_err(FrozenSnapshotError::Invalid)
+    if frozen.v2_frozen().legacy_embedded_instructions {
+        // Keep the old provenance intact. V2 null would incorrectly claim that this
+        // prompt has no external extension and permit unsafe derivative rendering.
+        serde_json::to_string(&FrozenSnapshotEnvelope { version: 1, data })
+            .map_err(FrozenSnapshotError::Invalid)
+    } else {
+        serde_json::to_string(&FrozenSnapshotEnvelope {
+            version: FROZEN_SNAPSHOT_VERSION,
+            data: FrozenSnapshotV2 {
+                legacy: data,
+                external_instructions: frozen
+                    .v2_frozen()
+                    .external_instructions
+                    .as_deref()
+                    .map(str::to_owned),
+            },
+        })
+        .map_err(FrozenSnapshotError::Invalid)
+    }
 }
 
 pub(crate) fn decode_frozen_snapshot(raw: &str) -> Result<FrozenSessionData, FrozenSnapshotError> {
@@ -128,11 +150,46 @@ pub(crate) fn decode_frozen_snapshot(raw: &str) -> Result<FrozenSessionData, Fro
         .get("version")
         .and_then(serde_json::Value::as_u64)
         .ok_or_else(|| invalid_snapshot("missing unsigned version"))?;
-    if version != FROZEN_SNAPSHOT_VERSION {
-        return Err(FrozenSnapshotError::UnsupportedVersion(version));
-    }
-    let envelope: FrozenSnapshotEnvelope = serde_json::from_value(value)?;
-    let data = envelope.data;
+    let (data, external_instructions, legacy_embedded_instructions) = match version {
+        1 => {
+            let envelope: FrozenSnapshotEnvelope<FrozenSnapshotV1> = serde_json::from_value(value)?;
+            let legacy = envelope.data.system_prompt.contains("<agent_instructions>");
+            (envelope.data, None, legacy)
+        }
+        2 => {
+            if value
+                .get("data")
+                .and_then(|data| data.get("external_instructions"))
+                .is_none()
+            {
+                return Err(invalid_snapshot("missing external_instructions in V2"));
+            }
+            let envelope: FrozenSnapshotEnvelope<FrozenSnapshotV2> = serde_json::from_value(value)?;
+            if envelope
+                .data
+                .external_instructions
+                .as_deref()
+                .is_some_and(|text| {
+                    text.len() > 64 * 1024
+                        || text.contains(
+                            peri_agent::agent::model_bridge::SYSTEM_PROMPT_DYNAMIC_BOUNDARY,
+                        )
+                })
+            {
+                return Err(invalid_snapshot("invalid external_instructions in V2"));
+            }
+            (
+                envelope.data.legacy,
+                envelope
+                    .data
+                    .external_instructions
+                    .filter(|text| !text.is_empty())
+                    .map(Arc::from),
+                false,
+            )
+        }
+        _ => return Err(FrozenSnapshotError::UnsupportedVersion(version)),
+    };
     let meta_harness = peri_acp_types::meta_harness::MetaHarnessState {
         section_overrides: data
             .meta_harness
@@ -151,6 +208,8 @@ pub(crate) fn decode_frozen_snapshot(raw: &str) -> Result<FrozenSessionData, Fro
     crate::prompt::section_validation::log_override_budget_audit(&meta_harness);
     let frozen = peri_agent::session::FrozenContext {
         system_prompt: Arc::from(data.system_prompt),
+        external_instructions,
+        legacy_embedded_instructions,
         claude_md: Arc::from(data.claude_md),
         skill_summary: Arc::from(data.skill_summary),
         date: Arc::from(data.date),

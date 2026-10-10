@@ -1,5 +1,56 @@
 use super::*;
 
+/// [回归测试] 外部指令在创建任何 thread 前完成准入，非法输入不得静默丢弃。
+#[tokio::test]
+async fn test_session_new_external_instructions_admission() {
+    let tmp = tempfile::TempDir::new().unwrap();
+    let peri_config = make_peri_config_with_provider(make_provider_config(
+        "a",
+        "openai",
+        "sk-openai-test",
+        "gpt-4o",
+    ));
+    let provider = LlmProvider::from_config(&peri_config).unwrap();
+    let cfg = make_server_config(peri_config, provider, &tmp).await;
+    let mut sessions = HashMap::new();
+    let transport: Arc<dyn crate::transport::AcpTransport> = Arc::new(MockTransport::default());
+    for invalid in [
+        json!(null),
+        json!(42),
+        json!("x".repeat(64 * 1024 + 1)),
+        json!(format!(
+            "a{}b",
+            peri_agent::agent::model_bridge::SYSTEM_PROMPT_DYNAMIC_BOUNDARY
+        )),
+    ] {
+        let error = handle_request(
+            "session/new",
+            &json!({"cwd": tmp.path().to_str().unwrap(), "_meta": {"peri.instructions": invalid}}),
+            &cfg,
+            &mut sessions,
+            &transport,
+        )
+        .await
+        .unwrap_err();
+        assert_eq!(error.code, -32602);
+        assert!(sessions.is_empty());
+    }
+    let created = handle_request(
+        "session/new",
+        &json!({"cwd": tmp.path().to_str().unwrap(), "_meta": {"peri.instructions": ""}}),
+        &cfg,
+        &mut sessions,
+        &transport,
+    )
+    .await
+    .unwrap();
+    let frozen = sessions[created["sessionId"].as_str().unwrap()]
+        .frozen
+        .as_ref()
+        .unwrap();
+    assert!(frozen.v2_frozen().external_instructions.is_none());
+}
+
 /// 生产形态宿主：bare workspace 装配（W5 后项目指令的唯一来源是 builtin
 /// `workspace` 实例的资源面，宿主本地已无扫描点；没有本装配就只剩 X4/J5 的空指令面）。
 ///
@@ -65,7 +116,17 @@ async fn test_session_load_cold_host_restores_original_frozen_prompt() {
         .unwrap()
         .system_prompt()
         .to_string();
-    assert!(original_prompt.contains("CUSTOM_AGENT_INSTRUCTIONS_V1"));
+    assert!(!original_prompt.contains("CUSTOM_AGENT_INSTRUCTIONS_V1"));
+    assert_eq!(
+        sessions[&session_id]
+            .frozen
+            .as_ref()
+            .unwrap()
+            .v2_frozen()
+            .external_instructions
+            .as_deref(),
+        Some("CUSTOM_AGENT_INSTRUCTIONS_V1")
+    );
     // W5：项目指令经 builtin `workspace` 资源面在创建期（P4）采集——夹具带生产形态
     // workspace 装配，指令快照必须非空且为创建时磁盘上的内容。
     let original_claude_md = sessions[&session_id]
@@ -125,6 +186,16 @@ async fn test_session_load_cold_host_restores_original_frozen_prompt() {
         "冷恢复逐字复用 frozen prompt"
     );
     assert_eq!(
+        restored_sessions[&session_id]
+            .frozen
+            .as_ref()
+            .unwrap()
+            .v2_frozen()
+            .external_instructions
+            .as_deref(),
+        Some("CUSTOM_AGENT_INSTRUCTIONS_V1")
+    );
+    assert_eq!(
         restored_claude_md, original_claude_md,
         "ARC-FROZEN-001：冷恢复的指令快照与创建期逐字一致"
     );
@@ -135,6 +206,26 @@ async fn test_session_load_cold_host_restores_original_frozen_prompt() {
     assert!(
         !restored_claude_md.contains("FROZEN_PROMPT_V2"),
         "冷恢复不得重读磁盘（改写的 V2 不得进入快照）: {restored_claude_md:?}"
+    );
+    let forked = handle_request(
+        "session/fork",
+        &json!({"sessionId": session_id, "cwd": tmp.path().to_str().unwrap()}),
+        &restarted,
+        &mut restored_sessions,
+        &transport,
+    )
+    .await
+    .unwrap();
+    let fork_id = forked["sessionId"].as_str().unwrap();
+    assert_eq!(
+        restored_sessions[fork_id]
+            .frozen
+            .as_ref()
+            .unwrap()
+            .v2_frozen()
+            .external_instructions
+            .as_deref(),
+        Some("CUSTOM_AGENT_INSTRUCTIONS_V1"),
     );
 }
 

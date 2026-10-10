@@ -55,6 +55,9 @@ pub(super) async fn spawn_subagent_impl(
     parent: Option<&Arc<Session>>,
     config: SubagentSpawnConfig,
 ) -> Result<SubagentSpawned, Box<dyn std::error::Error + Send + Sync>> {
+    if parent.is_some_and(|session| session.store().frozen.legacy_embedded_instructions) {
+        return Err("V1 frozen prompt contains embedded external instructions; create a new session before spawning a subagent".into());
+    }
     // 解构 config：字段分散使用，避免部分 move 后整体借用冲突
     let SubagentSpawnConfig {
         agent_name,

@@ -58,6 +58,12 @@
 - **Rule**：会话创建时冻结日期、项目指引、skills 摘要、MetaHarness 和 system prompt；同一会话及其 SubAgent 复用冻结数据，禁止中途重新读取而改变 prompt 前缀。项目指引（`peri-instruction://workspace/{main|local}`）、技能摘要与 MetaHarness 段落覆盖（`peri-meta://workspace/{section_id}`）的正文经 builtin `workspace` 实例的资源面在会话内容准入期读取后才随冻结提交；资源不可得时组件不得回落磁盘读取（本地技能、`.peri/meta` 均无宿主读盘兜底），段落覆盖的可选降级语义见 ARC-CAPABILITY-CLOSURE-001。冻结数据必须作为版本化 owner state 经 `ThreadStore` 专用接口持久化（不进入 `ThreadMeta` / list projection）：冷 `session/load` / `resume` 恢复原快照；未绑定 legacy 根会话缺失时只能用 `ThreadMeta.cwd` 构建，与 binding 在同一事务中原子 write-once 回填，竞争失败方必须重读 winner；已绑定会话缺失快照保持错误。未知未来版本、损坏快照、metadata/store 错误均 fail closed 且不得覆盖原 blob。`fork` 继承 source 的精确快照；new/fork 写快照失败须补偿删除新 thread，禁止留下无 frozen owner state 的可用会话。
 - **Verify**：`cargo test -p peri-acp --lib frozen_snapshot`、`cargo test -p peri-acp --lib test_session_load_cold_host_restores_original_frozen_prompt`、`cargo test -p peri-resources --lib frozen_snapshot`、`cargo test -p peri-middlewares --lib frozen_claude_md`；人工检查 `build_frozen_data`、`session/frozen_snapshot.rs`、session lifecycle 与 SubAgent `with_frozen_data` 调用。
 
+### ARC-EXTERNAL-INSTRUCTIONS-001
+
+- **Scope**：ACP `session/new`、冻结快照、主/子/Workflow System Prompt 与 provider wire。
+- **Rule**：`peri.instructions` 是会话级客户端 System 扩展，只由 `session/new` 准入；非字符串、超过 64 KiB 或包含保留缓存控制字的输入必须在创建 thread 前拒绝。空字符串为缺席；其余正文逐字冻结到 V2 快照的独立可空字段，字段缺失是损坏，不得嵌入内部 prompt 或 transcript。所有执行面先按各自能力投影内部 prompt，再由模型请求组合边界将外部段放在唯一缓存分界之后、逐请求贡献之前；provider wire 保留正文恰一次且不含控制字。V1 旧 prompt 含 `<agent_instructions>` 开始标记时，主 Agent 保留旧正文，派生重渲染必须拒绝；标记之后含保留控制字时主 Agent 也须在 provider 前拒绝。指令文本不授予工具、审批或能力关闭权限。
+- **Verify**：`cargo test -p peri-acp --lib external_instructions`、`cargo test -p peri-acp --lib frozen_snapshot`、`cargo test -p peri-agent --lib external_instructions`；检查新建、冷恢复、fork、主 override、子与 workflow 的最终 ModelRequest 及 Anthropic/OpenAI JSON，并确认子 transcript 不含外部正文。
+
 ### ARC-COMPACT-001
 
 - **Scope**：`peri-agent`、`peri-acp`、`peri-acp-types`、`peri-resources`。

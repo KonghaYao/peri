@@ -415,6 +415,9 @@ async fn test_bridge_empty_dynamic_contribution_preserves_base_system() {
     assert_eq!(provider_calls.load(Ordering::SeqCst), 1);
 }
 
+#[path = "model_bridge_external_test.rs"]
+mod external_tests;
+
 #[async_trait]
 impl Model for FakeModel {
     fn capabilities(&self) -> ModelCapabilities {

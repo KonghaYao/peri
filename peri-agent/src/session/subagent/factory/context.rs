@@ -59,6 +59,8 @@ pub(super) async fn build_subagent_session_v2(
     // 后的身份字节）。装配不重新探测、不复制父字节——父字节在 spawn/resume/cold
     // 三处入口就已换成子身份投影。
     let identity_system = frozen.system_prompt.to_string();
+    let external_instructions = frozen.external_instructions.clone();
+    let legacy_embedded_instructions = frozen.legacy_embedded_instructions;
     let cancel_arc: Arc<CancellationToken> = Arc::new(cancel_token.clone());
     let mut host = parent_host.as_deref().cloned().unwrap_or_default();
     let binding = host
@@ -140,6 +142,8 @@ pub(super) async fn build_subagent_session_v2(
     let contribution_chain = Arc::clone(&chain);
     let llm = llm.into_react_llm(
         &identity_system,
+        external_instructions,
+        legacy_embedded_instructions,
         Arc::new(move || contribution_chain.collect_prompt_contributions()),
         // 归一化：身份 System 随 transcript 持久化（spawn 6b 写入；旧会话的历史
         // 同形），模型投影吸收与身份逐字相同的那一条（恰一条），身份在请求面
@@ -189,6 +193,9 @@ pub(super) fn inherited_frozen_context(
 ) -> FrozenContext {
     FrozenContext {
         system_prompt: identity_system.map(Arc::from).unwrap_or_default(),
+        external_instructions: parent.and_then(|p| p.store().frozen.external_instructions.clone()),
+        legacy_embedded_instructions: parent
+            .is_some_and(|p| p.store().frozen.legacy_embedded_instructions),
         claude_md: frozen_claude_md
             .as_ref()
             .map(|s| Arc::from(s.as_str()))

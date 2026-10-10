@@ -56,6 +56,8 @@ pub(super) async fn build_and_execute_agent(
                 FrozenSessionData::from_frozen_parts(
                     crate::session::FrozenContext {
                         system_prompt: Arc::from(""),
+                        external_instructions: None,
+                        legacy_embedded_instructions: false,
                         claude_md: Arc::from(""),
                         skill_summary: Arc::from(""),
                         date: Arc::from(

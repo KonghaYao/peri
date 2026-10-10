@@ -3,7 +3,7 @@
 use super::{
     await_workflow_forwarder, requested_model,
     result::{reported_model, workflow_forwarder_dead_result},
-    tool_name_in, workflow_model_bridge,
+    select_workflow_system_prompt, tool_name_in, workflow_model_bridge,
 };
 use crate::agent::workflow::WorkflowAgentDefinition;
 
@@ -244,6 +244,8 @@ async fn workflow_bridge_reads_contributions_at_request_time() {
     let bridge = workflow_model_bridge(
         std::sync::Arc::clone(&model) as std::sync::Arc<dyn peri_model::Model>,
         "BASE_SYSTEM".to_string(),
+        None,
+        false,
         std::sync::Arc::clone(&chain),
         "workflow-session",
     );
@@ -282,4 +284,60 @@ async fn workflow_bridge_reads_contributions_at_request_time() {
         1,
         "贡献恰一次: {system}"
     );
+}
+
+/// [回归测试] 默认、agentType 与 fallback 渲染出的内部身份共用模型桥接
+/// 组合入口；外部冻结字段不在渲染器中拼接。
+#[tokio::test]
+async fn workflow_bridge_appends_external_after_each_internal_projection() {
+    let builder: crate::agent::workflow::WorkflowAgentPromptBuilder =
+        std::sync::Arc::new(|_, _, _, _| "AGENT_TYPE_INTERNAL".into());
+    let fallback: crate::agent::workflow::WorkflowSystemPromptFallback =
+        std::sync::Arc::new(|_, _, _| "FALLBACK_INTERNAL".into());
+    let cases = [
+        (None, Some("DEFAULT_INTERNAL"), "DEFAULT_INTERNAL"),
+        (
+            Some(WorkflowAgentDefinition::default()),
+            Some("DEFAULT_INTERNAL"),
+            "AGENT_TYPE_INTERNAL",
+        ),
+        (None, None, "FALLBACK_INTERNAL"),
+    ];
+    for (definition, frozen_default, expected_internal) in cases {
+        let internal = select_workflow_system_prompt(
+            definition.as_ref(),
+            frozen_default,
+            &builder,
+            &fallback,
+            "/tmp",
+            Some("2026-10-10"),
+            None,
+        );
+        assert_eq!(internal, expected_internal);
+        let chain = std::sync::Arc::new(crate::middleware::chain::MiddlewareChain::new());
+        let model = std::sync::Arc::new(WorkflowCaptureModel {
+            requests: std::sync::Mutex::new(Vec::new()),
+        });
+        let bridge = workflow_model_bridge(
+            std::sync::Arc::clone(&model) as std::sync::Arc<dyn peri_model::Model>,
+            internal,
+            Some(std::sync::Arc::from("WORKFLOW_EXTERNAL")),
+            false,
+            chain,
+            "workflow-session",
+        );
+        bridge
+            .generate_reasoning(&[crate::messages::BaseMessage::human("go")], &[], None)
+            .await
+            .unwrap();
+        let system = model.last_system();
+        assert_eq!(system.matches("WORKFLOW_EXTERNAL").count(), 1);
+        assert!(system.starts_with(expected_internal));
+        assert!(
+            system
+                .find(peri_model::prompt_cache::SYSTEM_PROMPT_DYNAMIC_BOUNDARY)
+                .unwrap()
+                < system.find("WORKFLOW_EXTERNAL").unwrap()
+        );
+    }
 }

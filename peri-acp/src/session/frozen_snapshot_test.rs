@@ -7,6 +7,8 @@ fn make_frozen() -> FrozenSessionData {
     disabled_middlewares.insert("WebMiddleware".to_string());
     let context = peri_agent::session::FrozenContext {
         system_prompt: Arc::from("system-v1"),
+        external_instructions: None,
+        legacy_embedded_instructions: false,
         claude_md: Arc::from("claude-v1"),
         skill_summary: Arc::from("skills-v1"),
         date: Arc::from("2026-09-01"),
@@ -40,6 +42,15 @@ fn test_frozen_snapshot_roundtrip_preserves_all_fields() {
     let original = make_frozen();
     // Act
     let raw = encode_frozen_snapshot(&original).unwrap();
+    assert_eq!(
+        serde_json::from_str::<serde_json::Value>(&raw).unwrap()["version"],
+        2
+    );
+    assert!(
+        serde_json::from_str::<serde_json::Value>(&raw).unwrap()["data"]
+            .get("external_instructions")
+            .is_some()
+    );
     let restored = decode_frozen_snapshot(&raw).unwrap();
     // Assert
     assert_eq!(restored.system_prompt(), original.system_prompt());
@@ -60,6 +71,59 @@ fn test_frozen_snapshot_roundtrip_preserves_all_fields() {
         .is_enabled(peri_acp_types::beta_flags::FULL_ASYNC_TOOLS));
     // H3：运行环境快照逐字段往返（platform / os_version / is_git_repo）。
     assert_eq!(restored.runtime_env(), original.runtime_env());
+}
+
+/// [回归测试] 客户端扩展必须作为 V2 独立字段逐字往返，不混入内部 prompt。
+#[test]
+fn test_frozen_snapshot_v2_external_instructions_roundtrip_and_required_field() {
+    let mut frozen = make_frozen();
+    let mut context = frozen.v2_frozen().clone();
+    context.external_instructions = Some(Arc::from("  {{date}}\r\n外部指令  "));
+    frozen = FrozenSessionData::from_frozen_parts(context, None);
+    let raw = encode_frozen_snapshot(&frozen).unwrap();
+    let restored = decode_frozen_snapshot(&raw).unwrap();
+    assert_eq!(restored.system_prompt(), "system-v1");
+    assert_eq!(
+        restored.v2_frozen().external_instructions.as_deref(),
+        Some("  {{date}}\r\n外部指令  ")
+    );
+    let mut damaged: serde_json::Value = serde_json::from_str(&raw).unwrap();
+    damaged["data"]
+        .as_object_mut()
+        .unwrap()
+        .remove("external_instructions");
+    assert!(matches!(
+        decode_frozen_snapshot(&damaged.to_string()),
+        Err(FrozenSnapshotError::Invalid(_))
+    ));
+    let mut damaged: serde_json::Value = serde_json::from_str(&raw).unwrap();
+    damaged["data"]["external_instructions"] =
+        serde_json::json!(peri_agent::agent::model_bridge::SYSTEM_PROMPT_DYNAMIC_BOUNDARY);
+    assert!(matches!(
+        decode_frozen_snapshot(&damaged.to_string()),
+        Err(FrozenSnapshotError::Invalid(_))
+    ));
+}
+
+#[test]
+fn test_frozen_snapshot_v1_embedded_instructions_keep_legacy_provenance() {
+    let mut value: serde_json::Value =
+        serde_json::from_str(&encode_frozen_snapshot(&make_frozen()).unwrap()).unwrap();
+    value["version"] = serde_json::json!(1);
+    value["data"]
+        .as_object_mut()
+        .unwrap()
+        .remove("external_instructions");
+    value["data"]["system_prompt"] =
+        serde_json::json!("BASE\n<agent_instructions>\nlegacy\n</agent_instructions>");
+    let restored = decode_frozen_snapshot(&value.to_string()).unwrap();
+    assert!(restored.v2_frozen().legacy_embedded_instructions);
+    assert_eq!(restored.v2_frozen().external_instructions, None);
+    assert_eq!(
+        serde_json::from_str::<serde_json::Value>(&encode_frozen_snapshot(&restored).unwrap())
+            .unwrap()["version"],
+        1
+    );
 }
 
 /// H3 旧数据策略：V1 旧 blob（无 `runtime_env` 键）仍可解码，结构化环境值
@@ -94,13 +158,13 @@ fn test_frozen_snapshot_v1_without_runtime_env_decodes_as_unavailable() {
 #[test]
 fn test_frozen_snapshot_future_version_fails_closed() {
     // Arrange
-    let raw = r#"{"version":2,"data":{}}"#;
+    let raw = r#"{"version":3,"data":{}}"#;
     // Act
     let error = decode_frozen_snapshot(raw)
         .err()
         .expect("future versions must fail closed");
     // Assert
-    assert!(matches!(error, FrozenSnapshotError::UnsupportedVersion(2)));
+    assert!(matches!(error, FrozenSnapshotError::UnsupportedVersion(3)));
 }
 
 #[test]

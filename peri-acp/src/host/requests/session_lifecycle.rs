@@ -132,7 +132,15 @@ pub(crate) async fn handle_new(
         .and_then(|meta| meta.get("peri.instructions"))
     {
         None => None,
-        Some(Value::String(value)) if value.len() <= 64 * 1024 => Some(value.clone()),
+        Some(Value::String(value)) if value.len() <= 64 * 1024 => {
+            if value.contains(peri_agent::agent::model_bridge::SYSTEM_PROMPT_DYNAMIC_BOUNDARY) {
+                return Err(AcpError::new(
+                    -32602,
+                    "peri.instructions contains reserved cache boundary",
+                ));
+            }
+            (!value.is_empty()).then(|| value.clone())
+        }
         Some(Value::String(_)) => {
             return Err(AcpError::new(-32602, "peri.instructions exceeds 64 KiB"));
         }

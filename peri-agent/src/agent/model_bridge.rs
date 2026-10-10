@@ -9,6 +9,10 @@ use peri_model::{
     ToolDefinition as ModelToolDefinition, ToolResult as ModelToolResult,
 };
 
+/// Reserved model transport seam exposed through the Agent boundary for ACP admission.
+pub const SYSTEM_PROMPT_DYNAMIC_BOUNDARY: &str =
+    peri_model::prompt_cache::SYSTEM_PROMPT_DYNAMIC_BOUNDARY;
+
 use crate::{
     agent::{
         compact_v2::projection::{ProviderCapabilities, ProviderProtocol},
@@ -28,6 +32,9 @@ use crate::{
 pub struct AgentModelBridge {
     model: Arc<dyn Model>,
     system: Option<String>,
+    external_instructions: Option<Arc<str>>,
+    legacy_embedded_instructions: bool,
+    derives_system_prompt: bool,
     system_contribution_provider: Option<SystemContributionProvider>,
     session_id: Option<String>,
     /// M3/H1 子身份归一化：模型投影中吸收与 base system 逐字相同的第一条
@@ -47,6 +54,9 @@ impl AgentModelBridge {
         Self {
             model,
             system: None,
+            external_instructions: None,
+            legacy_embedded_instructions: false,
+            derives_system_prompt: false,
             system_contribution_provider: None,
             session_id: None,
             absorb_system_message: false,
@@ -59,6 +69,19 @@ impl AgentModelBridge {
 
     pub fn with_system(mut self, system: impl Into<String>) -> Self {
         self.system = Some(system.into());
+        self
+    }
+
+    /// Freeze-owned client extension; never stored in the transcript or rendered template.
+    pub fn with_external_instructions(mut self, instructions: Option<Arc<str>>) -> Self {
+        self.external_instructions = instructions;
+        self
+    }
+
+    /// V1 snapshots with an embedded extension can only reuse their original main prompt.
+    pub fn with_legacy_prompt_provenance(mut self, embedded: bool, derives: bool) -> Self {
+        self.legacy_embedded_instructions = embedded;
+        self.derives_system_prompt = derives;
         self
     }
 
@@ -184,6 +207,18 @@ impl AgentModelBridge {
         messages: &[BaseMessage],
         tools: &[&dyn BaseTool],
     ) -> AgentResult<ModelRequest> {
+        if self.legacy_embedded_instructions {
+            if self.derives_system_prompt {
+                return Err(AgentError::LlmError("V1 frozen prompt contains embedded external instructions; create a new session before deriving an agent prompt".into()));
+            }
+            if self.system.as_deref().is_some_and(|prompt| {
+                prompt
+                    .split_once("<agent_instructions>")
+                    .is_some_and(|(_, tail)| tail.contains(SYSTEM_PROMPT_DYNAMIC_BOUNDARY))
+            }) {
+                return Err(AgentError::LlmError("V1 frozen external instructions contain a reserved cache boundary; create a new session".into()));
+            }
+        }
         // M3/H1：吸收与 base system 逐字相同的第一条 System 消息（持久子身份）。
         let absorbed = if self.absorb_system_message {
             self.system.as_deref().and_then(|system| {
@@ -202,9 +237,23 @@ impl AgentModelBridge {
             })?),
             None => None,
         };
-        let system = match dynamic.as_deref() {
-            Some(dynamic) => combine_system_prompt_with_dynamic(self.system.as_deref(), dynamic),
+        let base = match self.external_instructions.as_deref() {
+            Some(external) => {
+                let internal = self.system.as_deref().unwrap_or_default();
+                let prefix = if internal.matches(SYSTEM_PROMPT_DYNAMIC_BOUNDARY).count() == 1 {
+                    internal.to_owned()
+                } else {
+                    format!("{internal}{SYSTEM_PROMPT_DYNAMIC_BOUNDARY}")
+                };
+                Some(format!(
+                    "{prefix}\n\n<agent_instructions>\n{external}\n</agent_instructions>"
+                ))
+            }
             None => self.system.clone(),
+        };
+        let system = match dynamic.as_deref() {
+            Some(dynamic) => combine_system_prompt_with_dynamic(base.as_deref(), dynamic),
+            None => base,
         };
         if let Some(system) = system {
             messages.insert(0, ModelMessage::system_text(system));
@@ -503,12 +552,27 @@ impl ReactLLM for AgentModelBridge {
     fn estimate_request_tokens(&self, messages: &[BaseMessage], tools: &[&dyn BaseTool]) -> u64 {
         // 只读冻结前缀，不构建 provider 请求，也不第二次调用动态贡献 provider。
         // 冷启动尚未知动态后缀成本；后续有效 usage 会将其纳入权威基线。
-        crate::agent::token::estimate_request_tokens(messages, tools).saturating_add(
-            self.system
-                .as_ref()
-                .map(|system| (system.chars().count() as u64).div_ceil(4))
-                .unwrap_or(0),
-        )
+        crate::agent::token::estimate_request_tokens(messages, tools)
+            .saturating_add(
+                self.system
+                    .as_ref()
+                    .map(|system| (system.chars().count() as u64).div_ceil(4))
+                    .unwrap_or(0),
+            )
+            .saturating_add(
+                self.external_instructions
+                    .as_ref()
+                    .map(|external| {
+                        // The fixed wrapper and cache seam are request-owned text too.
+                        ((external.chars().count()
+                            + "\n\n<agent_instructions>\n\n</agent_instructions>"
+                                .chars()
+                                .count()
+                            + SYSTEM_PROMPT_DYNAMIC_BOUNDARY.len()) as u64)
+                            .div_ceil(4)
+                    })
+                    .unwrap_or(0),
+            )
     }
 
     async fn generate_reasoning(

@@ -71,10 +71,14 @@ impl SubagentLlmSource {
     pub(crate) fn into_react_llm(
         self,
         identity_system: &str,
+        external_instructions: Option<Arc<str>>,
+        legacy_embedded_instructions: bool,
         provider: crate::agent::model_bridge::SystemContributionProvider,
         normalize_persisted_identity: bool,
     ) -> Box<dyn ReactLLM + Send + Sync> {
         let mut bridge = crate::agent::model_bridge::AgentModelBridge::new(self.model)
+            .with_external_instructions(external_instructions)
+            .with_legacy_prompt_provenance(legacy_embedded_instructions, true)
             .with_system_contribution_provider(provider);
         if let Some(session_id) = self.session_id {
             bridge = bridge.with_session_id(session_id);
