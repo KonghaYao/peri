@@ -7,5 +7,5 @@ base_dir = "dist"
 
 [[rules]]
 type = "ESModule"
-globs = ["peri-wasm.js"]
+globs = ["peri-wasm.js", "wasm-host.js"]
 fallthrough = true

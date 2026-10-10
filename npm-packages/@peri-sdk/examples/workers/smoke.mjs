@@ -97,6 +97,12 @@ try {
   }
   if (!ready) throw new Error('Wrangler did not start');
 
+  // 0) peri-cf 形态：SDK 宿主 + 只注入 moduleFactory（workerd 的 import.meta.url 是 undefined）。
+  const sdkHost = await probe(`${url}/?host=sdk`);
+  if (sdkHost.protocolVersion !== 1 || !sdkHost.sessionId || sdkHost.closed !== true) {
+    throw new Error(`SDK host mismatch: ${JSON.stringify(sdkHost)}`);
+  }
+
   // 1) 队列路径：与 SDK Session.send 相同，投递与 turn 结束由 Peri 通知确认。
   const queued = await probe(url);
   if (!queued.sessionId || queued.turn !== 'queue' || queued.delivered !== true ||
@@ -119,7 +125,8 @@ try {
     throw new Error(`Model endpoint mismatch: ${JSON.stringify({ modelCalls, modelPaths })}`);
   }
   console.log(JSON.stringify({ passed: true, sessionId: queued.sessionId, modelCalls,
-    queueTurn: queued.turn, promptTurn: prompted.turn, persistedAcrossRestart: true }));
+    sdkHostImportMetaUrl: sdkHost.importMetaUrl, queueTurn: queued.turn, promptTurn: prompted.turn,
+    persistedAcrossRestart: true }));
 } catch (error) {
   if (log) {
     const tail = (await Bun.file(resolve(scratch, 'wrangler.log')).text()).slice(-5000);

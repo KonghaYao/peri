@@ -6,6 +6,9 @@
  *  - Turn：默认走 `session/input/{snapshot,enqueue}` 队列路径，与 SDK `Session.send` 相同；
  *    `?turn=prompt` 走 `session/prompt`，这是 SDK 之外的直连 turn 路径（peri-cf 也在用），不是遗留方法。
  *  - 取消：`session/cancel` 是通知，不是请求。
+ *  - `?host=sdk`：peri-cf 形态——调用 SDK 的 `startPeriWasmHost` 且**只注入 `moduleFactory`**，
+ *    不提供可解析的 `moduleUrl`。workerd 里 `import.meta.url` 是 undefined，SDK 不得在注入
+ *    factory 时再去解析产物 URL。
  *
  * 队列路径的执行由 Peri mailbox 调度：入队回执只说明已受理，turn 结束必须等
  * `peri/agent_event_done`，投递必须等 `peri/agent_event` 的 `user_input_delivered`。
@@ -13,6 +16,7 @@
  */
 import Module from './peri-wasm.js';
 import wasmModule from './peri_wasm.wasm';
+import { createNodeSchedulerPort, startPeriWasmHost } from './wasm-host.js';
 
 const CWD = '/workspace';
 const TURN_BUDGET_MS = 60_000;
@@ -120,6 +124,40 @@ async function closeSession(acp, sessionId, observe) {
   }
 }
 
+/** peri-cf 形态：宿主只注入 moduleFactory，没有可解析的产物 URL。 */
+async function probeSdkHost(env) {
+  const transport = await startPeriWasmHost({
+    configJson: JSON.stringify(hostConfig(env)),
+    moduleFactory: (options) => Module({
+      mainScriptUrlOrBlob: 'file:///bundle/peri-wasm.js',
+      instantiateWasm(imports, receiveInstance) {
+        WebAssembly.instantiate(wasmModule, imports).then(receiveInstance);
+      },
+      ...options,
+    }),
+    ports: { scheduler: createNodeSchedulerPort() },
+  });
+  try {
+    // transport.request<T> 的默认返回类型是 unknown，这里显式标注用到的响应字段。
+    const initialized = /** @type {{ protocolVersion?: number }} */ (await transport.request('initialize', {
+      protocolVersion: 1, clientCapabilities: { _meta: CAPABILITIES },
+    }));
+    const created = /** @type {{ sessionId?: string }} */ (await transport.request('session/new', { cwd: CWD, mcpServers: [] }));
+    const sessionId = created?.sessionId;
+    if (!sessionId) throw new Error(`session/new failed: ${JSON.stringify(created)}`);
+    await transport.request('session/close', { sessionId });
+    return Response.json({
+      host: 'sdk',
+      importMetaUrl: String(import.meta.url),
+      protocolVersion: initialized?.protocolVersion,
+      sessionId,
+      closed: true,
+    });
+  } finally {
+    await transport.close();
+  }
+}
+
 export default {
   async fetch(request_, env) {
     const url = new URL(request_.url);
@@ -135,6 +173,8 @@ export default {
     let acp;
     let sessionId;
     try {
+      // peri-cf 形态放在同一错误通道里，失败原因随响应体返回而不是 workerd 错误页。
+      if (url.searchParams.get('host') === 'sdk') return await probeSdkHost(env);
       const wasm = await loadModule(env);
       acp = await withTimeout(wasm.PeriWasmAcp.start(JSON.stringify(hostConfig(env))), 'start ACP');
       const initialized = await request(acp, 1, 'initialize', {
