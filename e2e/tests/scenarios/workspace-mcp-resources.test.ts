@@ -26,7 +26,7 @@ import { buildPeriForE2e } from "../../helpers/build.js";
  */
 import { afterEach, beforeAll, describe, expect, it } from "vitest";
 import { spawn } from "node:child_process";
-import { startStdioExecutionFixture } from "../../helpers/stdio-execution-fixture.js";
+import { startStdioAcpFixture } from "../../helpers/stdio-acp-fixture.js";
 import {
   FX_AGENT,
   FX_SERVER,
@@ -92,7 +92,7 @@ async function runStdio(
 ): Promise<StdioRun> {
   const serverRequests: StdioRun["serverRequests"] = [];
   const commandSnapshots: string[][] = [];
-  const fixture = await startStdioExecutionFixture({
+  const fixture = await startStdioAcpFixture({
     binary: PERI_BIN,
     cwd: world.work,
     home: world.home,
@@ -144,11 +144,18 @@ async function runStdio(
     }, 180_000);
     const failureEvidence = response.error ? await fixture.diagnostics() : "";
     expect(response.error,
-      `session/prompt must reach actual execution, not fail required preflight; ACP error=${JSON.stringify(response.error)}; stdio bridge=${failureEvidence}`,
+      `session/prompt 必须进入真实执行；ACP error=${JSON.stringify(response.error)}; stdio ACP=${failureEvidence}`,
     ).toBeUndefined();
+    expect(serverRequests.every((request) => request.method === "session/request_permission"),
+      "当前 ACP 不得请求旧 SDK 执行准入或其他未支持的反向方法",
+    ).toBe(true);
     await new Promise((resolve) => setTimeout(resolve, 500));
+    const closed = await fixture.call("session/close", { sessionId }, 60_000);
+    expect(closed.error, "session/close 必须正常结清当前会话").toBeUndefined();
     const exitCode = await fixture.close();
-    return { serverRequests, commandSnapshots, exitCode, diagnostics: await fixture.diagnostics() };
+    const diagnostics = await fixture.diagnostics();
+    expect(exitCode, `stdio ACP 必须正常退出；${diagnostics}`).toBe(0);
+    return { serverRequests, commandSnapshots, exitCode, diagnostics };
   } finally {
     await fixture.close();
   }
@@ -360,7 +367,7 @@ describe("workspace MCP resources：真实二进制验收（print / stdio）", (
     });
     const wire = await fixtureWireLines(w.fixtureLog);
     expect(messages.includes(SKILL_BODY_SENTINEL),
-      `关闭态不得注入技能正文; sentinel=${JSON.stringify(sentinelRequests)}; stdio bridge=${run.diagnostics}; fixture wire=${JSON.stringify(wire.slice(-12))}`,
+      `关闭态不得注入技能正文; sentinel=${JSON.stringify(sentinelRequests)}; stdio ACP=${run.diagnostics}; fixture wire=${JSON.stringify(wire.slice(-12))}`,
     ).toBe(false);
     expect(messages.includes('"name":"SkillTool"'), "关闭态不得产生 SkillTool 调用").toBe(false);
   });

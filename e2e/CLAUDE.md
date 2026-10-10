@@ -38,7 +38,7 @@ run-e2e.mjs → vitest worker → helpers/peri.ts → dev.sh → Peri TUI (tmux)
 | --- | --- |
 | 启动、输入、稳定等待、抓屏 | `helpers/peri.ts` |
 | 当前 Peri 二进制构建 | `helpers/build.ts`（统一 patched Cargo + `--locked`；不得用裸 Cargo 改写 lockfile） |
-| stdio 执行准入桥接 | `helpers/stdio-execution-fixture.ts`（真实 Peri + SDK 协议，隔离 registry；不是 SDK 独立测试或构建） |
+| stdio ACP 消费夹具 | `helpers/stdio-acp-fixture.ts`（e2e 自有 JSONL transport 直连真实 `peri acp`，隔离 HOME；不依赖 SDK sidecar、执行准入或 registry） |
 | Workflow 等待（磁盘 + 可选屏幕） | `helpers/workflow.ts` |
 | 后台任务完成与模型消费证据 | `helpers/bg-task-boundary.ts`（只读当前 threads/messages，canonical delivery 身份、直接父会话后续回答和 child 终态）；`tests/subagent/bg-task-area.test.ts` 用隔离 HOME 与本地模型重放核对真实请求中的一次结果，无需新用户输入，不依赖已删除的 Work 表 |
 | LLM Judge | `helpers/judge.ts` |
@@ -67,5 +67,7 @@ run-e2e.mjs → vitest worker → helpers/peri.ts → dev.sh → Peri TUI (tmux)
 - 详见上文 Scope：Judge 与发版门禁分离。
 
 ## Verify
+
+workspace resources 的 print/stdio 验收：`npm run e2e -- --file tests/scenarios/workspace-mcp-resources.test.ts --serial --retry 0`。用例经 `helpers/build.ts` 构建当前原生 Peri，使用临时 HOME/cwd、本地 SSE 与 Node MCP fixture；需要 Rust 构建环境及 e2e 的 Node 依赖，不需要 Bun、SDK 构建、WASM、sqld、wrangler 或真实模型凭据。stdio 用例保留 HITL 批准/拒绝和 workspace 关闭态覆盖，并检查 `session/close` 与进程正常退出；SDK 进程路径移除不等于这些行为退役。
 
 改完用例：`npm run e2e -- --file tests/... --serial --retry 0`。发版前：`npm run e2e:l0` 然后 `npm run e2e:release`。仓库根 `git diff --check`。
