@@ -4,7 +4,7 @@
 
 `Sandbox.transportFactory` 是必需的注入点，SDK 不启动 Peri 或 Workspace 进程。`bun run build` 构建 `peri-wasm` release 产物，并将 `peri-wasm.js` 与 `peri_wasm.wasm` 放入包内 `dist/wasm/`。模型请求仍由 Rust `peri-model` 发出，Agent 运行现有 RCRA loop。
 
-`@peri-code/sdk/wasm` 提供不依赖 Node/Bun 的 transport 与 loader；`instantiatePeriWasm({ moduleFactory, env, moduleOptions })` 支持静态 factory 和独立实例，环境仅在启动前注入，不读取宿主环境变量。`WasmAcpTransport.start({ module, configJson })` 可直接消费该实例，不能同时指定 `env` 或 `moduleUrl`。`startPeriWasmHost` 由主入口与 `/wasm-host` 共同导出；`/wasm-host` 额外提供 Node-compatible 网络/DNS/timer 端口与关闭证明。`/portable` 暴露准入规则、注册表、投影与 Store 读取，但准入摘要仍依赖 `node:crypto`，不能宣称纯浏览器支持。
+`@peri-code/sdk/wasm` 提供不依赖 Node/Bun 的 transport 与 loader；`instantiatePeriWasm({ moduleFactory, env, moduleOptions })` 支持静态 factory 和独立实例，环境在调用时取快照并仅在启动前注入，不读取宿主环境变量。**注入 `moduleFactory` 时 `moduleUrl` 既不解析也不要求可解析**——workerd 打包模块的 `import.meta.url` 是 `undefined`，这类宿主只能走 factory 入口；未注入 factory 而又无法解析产物 URL 时，错误会明确说明该约束而不是抛出裸 `TypeError`。`WasmAcpTransport.start({ module, configJson })` 可直接消费该实例，不能同时指定 `env` 或 `moduleUrl`。`startPeriWasmHost` 由主入口与 `/wasm-host` 共同导出；`/wasm-host` 额外提供 Node-compatible 网络/DNS/timer 端口与关闭证明。`/portable` 暴露准入规则、注册表、投影与 Store 读取，但准入摘要仍依赖 `node:crypto`，不能宣称纯浏览器支持。
 
 Bun SDK for Peri's ACP Host over a host-injected transport. `ManagedAgents.createAgent()` synchronously declares an Agent with one Session. `Session.start()` asynchronously claims their identities in the configured atomic KV, asks the injected transport factory for a connection, initializes ACP, and creates or loads the Session. Peri owns model execution and Session persistence.
 
@@ -194,6 +194,7 @@ same bounded `session/close` replay the SDK uses:
 | `/` (default) | `session/new` → `session/input/snapshot` → `session/input/enqueue` → wait for `user_input_delivered` and `peri/agent_event_done` → `session/close` |
 | `/?turn=prompt` | `session/new` → `session/prompt` → `session/close` |
 | `/?sessionId=<id>` | `session/list` → `session/load` → `session/close` |
+| `/?host=sdk` | SDK `startPeriWasmHost` 只注入 `moduleFactory`（peri-cf 形态）→ `initialize` → `session/new` → `session/close`；响应回带该运行时的 `import.meta.url`（workerd 为 `undefined`） |
 
 The queue path is the one `Session.send` uses; the input queue and the event channels are
 negotiated through `clientCapabilities._meta` at `initialize`. `session/prompt` is a current
