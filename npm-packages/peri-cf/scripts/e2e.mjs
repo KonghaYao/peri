@@ -1,6 +1,7 @@
 import { randomUUID } from 'node:crypto';
 import { setTimeout as delay } from 'node:timers/promises';
 import { configuration, loadPlaywright } from './e2e-config.mjs';
+import { decodeSyncFrame } from '../worker/sdk/index.ts';
 
 let stage = 'configuration';
 let browser;
@@ -55,7 +56,7 @@ function observe(page, token) {
     socket.on('socketerror', () => faults.add('websocket-error'));
     socket.on('framereceived', ({ payload }) => {
       try {
-        const frame = JSON.parse(String(payload));
+        const frame = decodeSyncFrame(payload);
         if (frame.type === 'snapshot') observation.snapshots++;
         else if (frame.type === 'update') observation.updates++;
         else faults.add('invalid-websocket-frame');
