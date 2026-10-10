@@ -534,6 +534,8 @@ fn workflow_context_with_disabled(disabled: &[&str]) -> WorkflowAgentContext {
         compact_config: None,
         cancel: None,
         system_prompt: None,
+        external_instructions: None,
+        legacy_embedded_instructions: false,
         broker: None,
         permission_mode: None,
         frozen_date: None,
