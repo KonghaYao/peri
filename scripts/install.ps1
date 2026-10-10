@@ -194,6 +194,60 @@ function Main {
         exit 1
     }
 
+    # Verify SHA-256. Per-asset <asset>.sha256 is published from this release on;
+    # older releases only ship the checksums.txt manifest (drop the fallback once
+    # those releases are gone).
+    step "Verifying checksum..."
+    $ChecksumAsset = $Release.assets | Where-Object { $_.name -eq "$AssetName.sha256" }
+    if ($ChecksumAsset) {
+        $ChecksumUrl = $ChecksumAsset.browser_download_url
+    } else {
+        $ChecksumsAsset = $Release.assets | Where-Object { $_.name -eq "checksums.txt" }
+        if (-not $ChecksumsAsset) {
+            error "No checksum published for $AssetName."
+            Remove-Item -Force $ZipPath -ErrorAction SilentlyContinue
+            exit 1
+        }
+        warn "Per-asset checksum missing; falling back to checksums.txt"
+        $ChecksumUrl = $ChecksumsAsset.browser_download_url
+    }
+
+    try {
+        $ChecksumPath = "$ZipPath.sha256"
+        Invoke-WebRequest -Uri (Get-DownloadUrl $ChecksumUrl) -OutFile $ChecksumPath
+    } catch {
+        error "Checksum download failed: $_"
+        Remove-Item -Force $ZipPath -ErrorAction SilentlyContinue
+        exit 1
+    }
+
+    $Expected = $null
+    foreach ($line in (Get-Content $ChecksumPath)) {
+        $parts = $line.Trim() -split '\s+'
+        if ($parts.Count -ge 2 -and $parts[1] -eq $AssetName) {
+            $Expected = $parts[0]
+            break
+        }
+    }
+    Remove-Item -Force $ChecksumPath -ErrorAction SilentlyContinue
+
+    if (-not $Expected -or $Expected -notmatch '^[0-9a-fA-F]{64}$') {
+        error "No valid checksum entry for $AssetName."
+        Remove-Item -Force $ZipPath -ErrorAction SilentlyContinue
+        exit 1
+    }
+
+    # PowerShell string comparison is case-insensitive; Get-FileHash returns uppercase hex.
+    $Actual = (Get-FileHash -Algorithm SHA256 -Path $ZipPath).Hash
+    if ($Actual -ne $Expected) {
+        error "Checksum mismatch for $AssetName."
+        error "  expected: $Expected"
+        error "  actual:   $Actual"
+        Remove-Item -Force $ZipPath -ErrorAction SilentlyContinue
+        exit 1
+    }
+    info "Checksum verified: $AssetName"
+
     # Extract
     step "Extracting..."
     try {
@@ -204,7 +258,8 @@ function Main {
     }
     Remove-Item -Force $ZipPath -ErrorAction SilentlyContinue
 
-    # Zip contains peri-<platform>.exe (e.g. peri-windows-x86_64.exe), find and rename to peri.exe
+    # Zip contains peri.exe; older releases shipped peri-<platform>.exe.
+    # Take the single .exe present and place it at peri.exe.
     $SourceExe = Get-ChildItem -Path $VersionDir -Recurse -Filter "*.exe" | Where-Object { $_.Name -notlike "unins*" } | Select-Object -First 1
     if (-not $SourceExe) {
         error "No .exe found in extracted archive."

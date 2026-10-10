@@ -10,6 +10,46 @@
 目标的 pull request。两个分支复用相同的分层检查、workspace 构建、测试和 Clippy。
 `main` 与 `pre-release/main` 均验证 Linux、macOS、Windows；Windows 使用 Git Bash 调用补丁脚本，并以原生 Cargo 构建。
 
+## 正式版发布
+
+`workflows/release-agent.yml` 由 `agent-v*` tag 触发；两个异构平台的手动构建工作流
+（`workflows/build-i386.yml`、`workflows/build-loongarch64.yml`）不接入 tag，产出各自的
+`peri-linux-i386.tar.gz`、`peri-linux-loongarch64.tar.gz` 与对应 `.sha256`。
+
+| 平台 | 资产 | Rust target |
+| --- | --- | --- |
+| Linux x86_64 / ARM64 / RISC-V | `peri-linux-<arch>.tar.gz` | `x86_64-unknown-linux-gnu`、`aarch64-unknown-linux-gnu`、`riscv64gc-unknown-linux-gnu` |
+| macOS Intel / Apple Silicon | `peri-macos-<arch>.tar.gz` | `x86_64-apple-darwin`、`aarch64-apple-darwin` |
+| Windows x86_64 | `peri-windows-x86_64.zip` | `x86_64-pc-windows-msvc` |
+
+归档根目录内直接放可执行文件 `peri`（Windows 为 `peri.exe`），不带平台后缀：mise 等
+安装器按归档内文件名暴露命令名，不剥离后缀。每个资产附带 `<asset>.sha256`
+（`<64-hex>  <资产名>` 格式，UTF-8/LF），并汇总 `checksums.txt`。
+发布 job 在创建 Release 前校验逐资产校验和与归档布局（`sha256sum --check`、`tar -tzf`
+与 `unzip -Z1` 的结果必须是 `peri` / `peri.exe`），布局回归会使该次发布失败。
+
+`scripts/install.sh`（macOS/Linux）与 `scripts/install.ps1`（Windows）按上述命名下载资产、
+校验 SHA-256（缺少校验和或校验失败即中止安装），再解包并建立 `peri` 命令链接；
+`peri update` 复用这两个脚本，不自带下载逻辑。旧 Release 兼容：≤ `agent-v3.19.x` 的
+归档内是 `peri-<platform>`、且只有 `checksums.txt`，脚本保留回退分支，待旧版本退场后删除。
+安装契约的离线验证：`python3 scripts/test-install.py`。
+
+### mise 安装
+
+mise 的 `github` backend 直接消费上述资产；tag 前缀 `agent-v` 由 `version_prefix` 剥离：
+
+```toml
+[tool_alias]
+peri = "github:KonghaYao/peri"
+
+[tools.peri]
+version = "latest"
+version_prefix = "agent-v"
+```
+
+`mise ls-remote peri` 输出 `3.19.4` 形式的版本号；`mise install` 选取对应平台资产，
+安装目录内暴露的命令名是 `peri`。
+
 ## 下一个大版本的构建产物
 
 `workflows/pre-release.yml` 在 `pre-release/main` 每次 push 时构建，也支持手动
@@ -48,7 +88,8 @@ WASM artifact 名为 `peri-beta-wasm32-unknown-emscripten-<sha>`，包含
 构建成功不代替独立的 CI 检查；合并保护仍需在仓库设置中配置 required checks。
 
 `release-agent.yml` 的 `agent-v*` tag 发布与两个异构平台的手动构建工作流
-维持原有触发条件，不自动接入 `pre-release/main`。
+维持原有触发条件，不自动接入 `pre-release/main`（正式版资产契约见
+[正式版发布](#正式版发布)）。
 
 ## 安装与更新 Beta
 
@@ -69,4 +110,5 @@ peri-beta --version
 使用 `--config-file` 和 `--db-path`。现有 `install.sh`、`install.ps1` 不变，
 它们选择的 `agent-*` Release 不包括 `peri-beta`。
 
-安装契约的离线验证：`python3 scripts/test-install-beta.py`。
+安装契约的离线验证：`python3 scripts/test-install-beta.py`（正式版为
+`python3 scripts/test-install.py`）。

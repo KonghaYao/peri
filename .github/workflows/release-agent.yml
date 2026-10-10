@@ -91,23 +91,36 @@ jobs:
               shell: bash
               run: ./scripts/cargo-rmcp-patched.sh build --locked -p peri-tui --release --target ${{ matrix.target }}
 
+            # 归档根目录内的可执行文件必须叫 peri / peri.exe：mise 等安装器按归档内
+            # 文件名暴露命令名，不剥离平台后缀。逐资产校验和按 <asset>.sha256 命名发布。
             - name: Package binaries (Unix)
               if: matrix.ext == ''
               run: |
-                  mkdir -p dist
-                  cp target/${{ matrix.target }}/release/peri dist/peri-${{ matrix.platform }}
-                  chmod +x dist/peri-${{ matrix.platform }}
-                  tar -czf dist/peri-${{ matrix.platform }}.tar.gz -C dist peri-${{ matrix.platform }}
-                  rm dist/peri-${{ matrix.platform }}
+                  mkdir -p dist/package
+                  cp "target/${{ matrix.target }}/release/peri" dist/package/peri
+                  chmod +x dist/package/peri
+                  tar -czf "dist/peri-${{ matrix.platform }}.tar.gz" -C dist/package peri
+                  rm -rf dist/package
+                  cd dist
+                  if command -v sha256sum >/dev/null 2>&1; then
+                      sha256sum "peri-${{ matrix.platform }}.tar.gz" > "peri-${{ matrix.platform }}.tar.gz.sha256"
+                  else
+                      shasum -a 256 "peri-${{ matrix.platform }}.tar.gz" > "peri-${{ matrix.platform }}.tar.gz.sha256"
+                  fi
 
             - name: Package binaries (Windows)
               if: matrix.ext == '.exe'
               shell: pwsh
               run: |
-                  New-Item -ItemType Directory -Force -Path dist
-                  Copy-Item "target/${{ matrix.target }}/release/peri.exe" "dist/peri-${{ matrix.platform }}.exe"
-                  Compress-Archive -Path "dist/peri-${{ matrix.platform }}.exe" -DestinationPath "dist/peri-${{ matrix.platform }}.zip"
-                  Remove-Item "dist/peri-${{ matrix.platform }}.exe"
+                  New-Item -ItemType Directory -Force -Path dist/package | Out-Null
+                  Copy-Item "target/${{ matrix.target }}/release/peri.exe" "dist/package/peri.exe"
+                  Compress-Archive -Path "dist/package/peri.exe" -DestinationPath "dist/peri-${{ matrix.platform }}.zip"
+                  Remove-Item -Recurse -Force dist/package
+                  Set-Location dist
+                  $asset = "peri-${{ matrix.platform }}.zip"
+                  $hash = (Get-FileHash -Algorithm SHA256 $asset).Hash.ToLower()
+                  # 显式写 LF：发布 job 用 GNU sha256sum --check 校验，CRLF 会解析失败
+                  [System.IO.File]::WriteAllText("$PWD/$asset.sha256", "$hash  $asset`n")
 
             - name: Upload artifacts
               uses: actions/upload-artifact@v4
@@ -136,10 +149,20 @@ jobs:
             - name: List artifacts
               run: ls -lR artifacts/
 
+            # 发布前核对归档布局与逐资产校验和；布局回归在此处失败，不进入 Release。
+            - name: Verify packages
+              run: |
+                  cd artifacts
+                  sha256sum --check peri-*.sha256
+                  for archive in peri-*.tar.gz; do
+                      test "$(tar -tzf "$archive")" = peri
+                  done
+                  test "$(unzip -Z1 peri-*.zip)" = peri.exe
+
             - name: Generate checksums
               run: |
                   cd artifacts
-                  sha256sum * > checksums.txt
+                  sha256sum peri-*.tar.gz peri-*.zip > checksums.txt
                   cat checksums.txt
 
             - name: Create Release

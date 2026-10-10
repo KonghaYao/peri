@@ -105,6 +105,9 @@ curl -fsSL https://raw.githubusercontent.com/konghayao/peri/main/scripts/install
 irm https://raw.githubusercontent.com/konghayao/peri/main/scripts/install.ps1 | iex
 ```
 
+Also installable with [mise](https://mise.jdx.dev/) through the `github:KonghaYao/peri` tool;
+see [release notes](.github/README.md#正式版发布) for the `version_prefix` entry.
+
 Follow the installer's PATH instructions, then run `peri` in your project. Complete model setup and restart Peri.
 
 ```bash
