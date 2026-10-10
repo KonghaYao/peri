@@ -911,13 +911,24 @@ async fn supervisor_close_orders_tick_before_server_task() {
         "server task 只能在 tick task 退出后收敛（先收敛 server 必然超时），实际: {outcome:?}"
     );
 
+    // 平台基线必须在 `close()` **返回之后**取样：关闭前的最后一次快照（`before`）与
+    // `close` 真正 `cancel()` 之间存在窗口，20ms 周期可能在这个窗口内**合法**触发一次；
+    // 拿它当「关闭后不再触发」的基线，会把合法的关闭前 tick 判成失败（Windows CI 上实际
+    // 发生过）。`close()` 返回时 tick task 已 cancel 且有界 join 完成（上面的 `Joined`
+    // 断言），此后不可能再有任何 tick，计数已进入平台。
+    let settled = ticks.load(Ordering::SeqCst);
+    assert!(
+        settled >= before,
+        "关闭不得让 tick 计数回退：before={before}, settled={settled}"
+    );
+
     // 关闭后 >2×interval 计数不再增长 ⇒ 「本代已无运行中的 tick」。`close(self)` 消费了
     // 监督者，关闭后的 `tick_is_finished()` 不可观测；它的可观察等价物正是上面两条
     // （`Joined` = 有界 join 完成）加上这里的计数平台。
     tokio::time::sleep(INTERVAL * 5).await;
     assert_eq!(
         ticks.load(Ordering::SeqCst),
-        before,
+        settled,
         "关闭后 tick 不得再触发（task 已 join）"
     );
 }
