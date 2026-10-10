@@ -32,6 +32,42 @@ fn test_websearch_parameters_required() {
     assert!(required.contains(&Value::String("query".to_string())));
 }
 
+/// 未配置实例 env 时沿用编译期默认后端且不带凭据（默认公共服务行为不变）。
+#[test]
+fn test_websearch_defaults_without_instance_env() {
+    let tool = WebSearchTool::new();
+    assert_eq!(tool.base_url, "https://tavily.claude-code-best.win");
+    assert_eq!(tool.token, None);
+}
+
+/// 实例 env 的取值语义：URL 覆盖默认值；token 缺省或空串 = 不发送凭据。
+#[test]
+fn test_websearch_instance_env_token_semantics() {
+    let env = std::collections::HashMap::from([(
+        "PERI_WEB_SEARCH_URL".to_string(),
+        "http://127.0.0.1:1".to_string(),
+    )]);
+    let tool = WebSearchTool::from_instance_env(&env);
+    assert_eq!(tool.base_url, "http://127.0.0.1:1");
+    assert_eq!(tool.token, None, "只配 URL 时不发送凭据");
+
+    let env =
+        std::collections::HashMap::from([("PERI_WEB_SEARCH_TOKEN".to_string(), String::new())]);
+    let tool = WebSearchTool::from_instance_env(&env);
+    assert_eq!(
+        tool.base_url, "https://tavily.claude-code-best.win",
+        "只配 token 时 URL 仍走默认值"
+    );
+    assert_eq!(tool.token, None, "空串 token 视为未配置");
+
+    let env = std::collections::HashMap::from([(
+        "PERI_WEB_SEARCH_TOKEN".to_string(),
+        "test-token-0000".to_string(),
+    )]);
+    let tool = WebSearchTool::from_instance_env(&env);
+    assert_eq!(tool.token.as_deref(), Some("test-token-0000"));
+}
+
 // --- format_search_results ---
 
 #[test]
@@ -261,7 +297,7 @@ mod real_http_round_trip {
         );
         assert!(
             !head.to_ascii_lowercase().contains("authorization"),
-            "web 侧工具不发任何 auth header（代码事实：invoke 不设 header）"
+            "未配置 token 时不发送任何 auth header（默认实例行为）"
         );
 
         // 响应体经生产 `TavilySearchResponse` 反序列化 → `format_search_results` 文本
@@ -280,6 +316,42 @@ mod real_http_round_trip {
             output.contains("2. **Learn Rust** (https://doc.rust-lang.org/book/)"),
             "content: null 的第二条仍须出标题行；实际: {output}"
         );
+    }
+
+    /// 实例 env 生效的端到端证据：`PERI_WEB_SEARCH_URL` 指向本地回环桩、
+    /// `PERI_WEB_SEARCH_TOKEN` 以 `Authorization: Bearer` 发送（凭据值由桩收到的请求头证明）。
+    #[tokio::test]
+    async fn test_websearch_instance_env_routes_to_endpoint_and_sends_bearer_token() {
+        let (base_url, head) = spawn_response_stub("HTTP/1.1 200 OK", SEARCH_OK_BODY).await;
+        let env = std::collections::HashMap::from([
+            ("PERI_WEB_SEARCH_URL".to_string(), base_url),
+            (
+                "PERI_WEB_SEARCH_TOKEN".to_string(),
+                "test-token-0000".to_string(),
+            ),
+        ]);
+        let tool = WebSearchTool::from_instance_env(&env);
+
+        let output = tool
+            .invoke(
+                serde_json::json!({"query": "rust programming"}),
+                ToolContext::new(&[], "."),
+            )
+            .await
+            .expect("200 + 合法响应体必须成功");
+
+        let head = head.await.expect("桩任务不得 panic");
+        assert!(
+            head.starts_with("POST /search "),
+            "请求必须打到实例 env 注入的端点；实际首行：{}",
+            head.lines().next().unwrap_or("<空>")
+        );
+        assert!(
+            head.to_ascii_lowercase()
+                .contains("authorization: bearer test-token-0000"),
+            "配置 token 后必须发送 Bearer 凭据"
+        );
+        assert!(output.contains("## Search Results"), "实际: {output}");
     }
 
     #[tokio::test]

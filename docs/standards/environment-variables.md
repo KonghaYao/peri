@@ -37,9 +37,13 @@ Compact 的三项环境变量在宿主装配时覆盖 `config.compact`；Agent �
 | `PERI_MACHINE_ID` | 当前机器的 session environment 身份覆盖；必须为 UUID，解析后规范化，首次初始化后进程内缓存；缺省使用本机 `~/.peri/machine-id`。 | `peri-resources/src/sessions/machine.rs` |
 | `PERI_ARTIFACTS_URL` | Artifact MCP 实例 `env` 中的上传服务地址；缺省使用内置公共服务。Peri 宿主只透传实例环境。 | `mcp-packages/artifact/src/client.rs` |
 | `PERI_ARTIFACTS_TOKEN` | Artifact MCP 实例 `env` 中的上传 token；缺省使用公共服务协议标识。宿主不解释、不记录值。 | 同上 |
+| `PERI_WEB_SEARCH_URL` | Web MCP 实例 `env` 中的搜索后端地址；缺省使用内置公共服务。Peri 宿主只透传实例环境。 | `mcp-packages/web/src/web_search.rs` |
+| `PERI_WEB_SEARCH_TOKEN` | Web MCP 实例 `env` 中搜索请求的可选 Bearer 凭据；缺省或空串时不发送 `Authorization`。宿主不解释、不记录值。 | 同上 |
+| `PERI_WEB_FETCH_URL` | Web MCP 实例 `env` 中的抓取后端地址；缺省使用内置公共服务。Peri 宿主只透传实例环境。 | `mcp-packages/web/src/web_fetch.rs` |
+| `PERI_WEB_FETCH_TOKEN` | Web MCP 实例 `env` 中抓取请求的可选 Bearer 凭据；缺省或空串时不发送 `Authorization`。宿主不解释、不记录值。 | 同上 |
 | `PERI_WORKFLOW_ALLOW_NPX_FALLBACK` | 固定版本 Workflow artifact 不可用时，值**恰为 `1`**才允许 npx 后备路径；缺省不允许（测试构建例外）。 | `peri-workflow/src/runner/artifact.rs` |
 
-支持 MCP Apps 的客户端应在启动 stdio ACP 子进程时传入 `PERI_MCP_APPS=1`，例如 `PERI_MCP_APPS=1 peri acp`。Artifact 连接信息经 `mcpServers.artifact.env` 传给内建实例，例如 `{"mcpServers":{"artifact":{"env":{"PERI_ARTIFACTS_URL":"${ARTIFACT_ENDPOINT}","PERI_ARTIFACTS_TOKEN":"${ARTIFACT_SECRET}"}}}}`；`${…}` 由 MCP 配置加载器展开。外部 Artifact MCP 子进程使用自己的 MCP `env` 配置，不需要 Peri 宿主解释这些字段。
+支持 MCP Apps 的客户端应在启动 stdio ACP 子进程时传入 `PERI_MCP_APPS=1`，例如 `PERI_MCP_APPS=1 peri acp`。Artifact 连接信息经 `mcpServers.artifact.env` 传给内建实例，例如 `{"mcpServers":{"artifact":{"env":{"PERI_ARTIFACTS_URL":"${ARTIFACT_ENDPOINT}","PERI_ARTIFACTS_TOKEN":"${ARTIFACT_SECRET}"}}}}`；Web 后端同理经 `mcpServers.web.env` 传给内建 `web` 实例（例如 `PERI_WEB_SEARCH_URL` / `PERI_WEB_FETCH_URL`）。`${…}` 由 MCP 配置加载器展开，因此 shell 变量可经该语法引用。外部 Artifact MCP 子进程使用自己的 MCP `env` 配置，不需要 Peri 宿主解释这些字段。
 
 ## Langfuse 与日志
 

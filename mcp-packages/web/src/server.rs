@@ -28,21 +28,30 @@ pub struct WebMcpServer {
 }
 
 impl WebMcpServer {
-    /// 生产构造：工具顺序与注册表声明顺序一致（`WebSearch` → `WebFetch`）。
+    /// 默认实例构造：工具顺序与注册表声明顺序一致（`WebSearch` → `WebFetch`）。
     pub fn new() -> Self {
+        Self::with_instance_env(&std::collections::HashMap::new())
+    }
+
+    /// MCP 实例环境构造；未提供的变量回退到编译期默认后端。
+    ///
+    /// 实例环境在连接建立时冻结，连接重建时由调用方再次提供（与 `artifact` 实例
+    /// 同一约定；凭据值不出现在 `ServerConfig`、工具描述或错误文本里）。
+    pub fn with_instance_env(env: &std::collections::HashMap<String, String>) -> Self {
         let tools: Vec<Arc<dyn BaseTool>> = vec![
-            Arc::new(WebSearchTool::new()),
-            Arc::new(WebFetchTool::new()),
+            Arc::new(WebSearchTool::from_instance_env(env)),
+            Arc::new(WebFetchTool::from_instance_env(env)),
         ];
         Self { tools }
     }
 
     /// 测试构造：注入替身工具（MCP 链路两侧都真实，只有工具结果是受控的）。
     ///
-    /// Web 两个工具的后端地址在生产恒为编译期常量；测试可经工具自身的
-    /// `#[cfg(test)] with_endpoint_for_test` 指向本地回环桩（真实 HTTP），该形态见
+    /// 真实工具的后端地址经实例 env（`PERI_WEB_SEARCH_URL` / `PERI_WEB_FETCH_URL`）
+    /// 指向本地回环桩（真实 HTTP），该形态见
     /// `web_test.rs::web_handler_tools_call_reaches_real_http_stub_over_wire`。
-    /// 本构造器提供的是「测试替身工具」路径；生产构造 [`Self::new`] 的工具集另有断言覆盖。
+    /// 本构造器提供的是「测试替身工具」路径；生产构造 [`Self::new`] /
+    /// [`Self::with_instance_env`] 的工具集另有断言覆盖。
     #[cfg(test)]
     pub(crate) fn with_tools(tools: Vec<Arc<dyn BaseTool>>) -> Self {
         Self { tools }

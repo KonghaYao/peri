@@ -7,8 +7,14 @@ use serde_json::Value;
 
 use super::web_common::WEB_CREDIBILITY_WARNING;
 
-/// Tavily 搜索后端地址
+/// Tavily 兼容搜索后端默认地址（MCP 实例 env 未提供时使用）。
 const TAVILY_BASE_URL: &str = "https://tavily.claude-code-best.win";
+
+/// MCP 实例 env 键：搜索后端根地址。
+const ENV_BASE_URL: &str = "PERI_WEB_SEARCH_URL";
+
+/// MCP 实例 env 键：可选的 Bearer 凭据（缺省或空串 = 不发送 `Authorization`）。
+const ENV_TOKEN: &str = "PERI_WEB_SEARCH_TOKEN";
 
 /// 请求总超时（生产路径的硬编码值；测试可注入短超时以复现超时分支）
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(30);
@@ -40,26 +46,48 @@ const WEBSEARCH_DESCRIPTION: &str = include_str!("descriptions/web_search.md");
 
 /// WebSearch 工具 — 通过 Tavily 兼容 API 搜索网页
 pub struct WebSearchTool {
-    /// Tavily 兼容后端根地址（生产恒为 [`TAVILY_BASE_URL`]；测试可注入本地桩）。
+    /// Tavily 兼容后端根地址（缺省 [`TAVILY_BASE_URL`]；测试可注入本地桩）。
     base_url: String,
+    /// Bearer 凭据；`None` = 不发送 `Authorization`（缺省行为）。
+    token: Option<String>,
     /// 请求总超时（生产恒为 [`REQUEST_TIMEOUT`]；测试可注入短超时）。
     timeout: Duration,
 }
 
 impl WebSearchTool {
+    /// 默认实例构造：使用编译期默认后端、无凭据。
     pub fn new() -> Self {
+        Self::from_instance_env(&std::collections::HashMap::new())
+    }
+
+    /// MCP 实例环境构造；只解释传给本 MCP 实例的环境，不读取宿主进程环境。
+    ///
+    /// 实例环境在连接建立时冻结，连接重建时由调用方再次提供：
+    /// `PERI_WEB_SEARCH_URL` 缺省为内置公共服务，`PERI_WEB_SEARCH_TOKEN`
+    /// 缺省（或空串）时不发送凭据。
+    pub fn from_instance_env(env: &std::collections::HashMap<String, String>) -> Self {
+        let base_url = env
+            .get(ENV_BASE_URL)
+            .cloned()
+            .unwrap_or_else(|| TAVILY_BASE_URL.into());
+        let token = env
+            .get(ENV_TOKEN)
+            .filter(|token| !token.is_empty())
+            .cloned();
         Self {
-            base_url: TAVILY_BASE_URL.to_string(),
+            base_url,
+            token,
             timeout: REQUEST_TIMEOUT,
         }
     }
 
     /// 测试构造：注入端点（本地回环桩），使搜索协议的 200 / 非 2xx 形态可在
-    /// 无网络条件下覆盖；生产路径只经 [`Self::new`]。
+    /// 无网络条件下覆盖；生产路径只经 [`Self::new`] / [`Self::from_instance_env`]。
     #[cfg(test)]
     pub(crate) fn with_endpoint_for_test(base_url: impl Into<String>) -> Self {
         Self {
             base_url: base_url.into(),
+            token: None,
             timeout: REQUEST_TIMEOUT,
         }
     }
@@ -68,7 +96,8 @@ impl WebSearchTool {
     ///
     /// 不采用 `tokio::test(start_paused = true)`：虚拟时钟需要 tokio 的 `test-util`
     /// feature，本 crate 未启用（`peri-agent` / `peri-tui` 在各自 dev-dependencies 里
-    /// 单独启用，本 crate 不加依赖）。生产路径只经 [`Self::new`]。
+    /// 单独启用，本 crate 不加依赖）。生产路径只经 [`Self::new`] /
+    /// [`Self::from_instance_env`]。
     #[cfg(test)]
     pub(crate) fn with_endpoint_and_timeout_for_test(
         base_url: impl Into<String>,
@@ -76,6 +105,7 @@ impl WebSearchTool {
     ) -> Self {
         Self {
             base_url: base_url.into(),
+            token: None,
             timeout,
         }
     }
@@ -179,9 +209,14 @@ impl BaseTool for WebSearchTool {
             "max_results": max_results,
         });
 
-        let resp = client
+        let mut request = client
             .post(format!("{}/search", self.base_url.trim_end_matches('/')))
-            .json(&body)
+            .json(&body);
+        if let Some(token) = &self.token {
+            request = request.bearer_auth(token);
+        }
+
+        let resp = request
             .send()
             .await
             .map_err(|e| format!("Search request failed: {e}"))?;

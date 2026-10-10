@@ -408,6 +408,16 @@ const STUB_SEARCH_BODY: &str = r#"{
 /// 桩返回的非 2xx 响应体：埋入可辨认串，用于证明它**不得**泄漏到模型面文本（§9 规则 7）。
 const STUB_ERROR_BODY: &str = r#"{"detail":"stub extract upstream is down"}"#;
 
+/// 桩返回的 /extract 成功响应体：同样只存在于桩里（`url` 字段被 serde 忽略）。
+const STUB_EXTRACT_OK_BODY: &str = r#"{
+    "results": [
+        {
+            "url": "https://example.test/page",
+            "raw_content": "stub extract content from local loopback stub"
+        }
+    ]
+}"#;
+
 /// 本地回环 HTTP 桩：接受一次连接，读到请求头后回一段固定原文响应；返回 `base_url`。
 async fn spawn_http_stub(status_line: &'static str, body: &'static str) -> String {
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
@@ -507,6 +517,51 @@ async fn web_handler_tools_call_reaches_real_http_stub_over_wire() {
     assert!(
         failure_text.contains("stub extract upstream is down"),
         "非 2xx 的实际响应体必须保留：{failure_text}"
+    );
+
+    pair.shutdown().await;
+}
+
+/// 实例 env 生效的端到端证据：`PERI_WEB_SEARCH_URL` / `PERI_WEB_FETCH_URL` 经生产
+/// `WebMcpServer::with_instance_env` 进入两个工具，`tools/call` 打到注入端点而非
+/// 编译期默认后端（结果文本逐字来自桩响应体）。
+#[tokio::test]
+async fn web_handler_with_instance_env_routes_tools_to_configured_endpoints() {
+    let search_base = spawn_http_stub("HTTP/1.1 200 OK", STUB_SEARCH_BODY).await;
+    let fetch_base = spawn_http_stub("HTTP/1.1 200 OK", STUB_EXTRACT_OK_BODY).await;
+    let env = std::collections::HashMap::from([
+        ("PERI_WEB_SEARCH_URL".to_string(), search_base),
+        ("PERI_WEB_FETCH_URL".to_string(), fetch_base),
+    ]);
+    let server = WebMcpServer::with_instance_env(&env);
+    let pair = connect(server).await;
+    let peer = pair.peer();
+
+    let search = complete(
+        peer.call_tool_once(call("WebSearch", json!({"query": "rust"})))
+            .await
+            .expect("工具级成功必须是协议成功"),
+    );
+    assert_eq!(search.is_error, Some(false));
+    let search_text = first_text(&search).expect("成功结果必须有文本块");
+    assert!(
+        search_text.contains("Stub Search Hit"),
+        "搜索结果必须来自实例 env 注入的端点：{search_text}"
+    );
+
+    let fetch = complete(
+        peer.call_tool_once(call(
+            "WebFetch",
+            json!({"url": "https://example.test/page"}),
+        ))
+        .await
+        .expect("工具级成功必须是协议成功"),
+    );
+    assert_eq!(fetch.is_error, Some(false));
+    let fetch_text = first_text(&fetch).expect("成功结果必须有文本块");
+    assert!(
+        fetch_text.contains("stub extract content from local loopback stub"),
+        "抓取结果必须来自实例 env 注入的端点：{fetch_text}"
     );
 
     pair.shutdown().await;

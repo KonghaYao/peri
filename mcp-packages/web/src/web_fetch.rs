@@ -7,8 +7,14 @@ use super::web_common::WEB_CREDIBILITY_WARNING;
 use peri_agent::agent::async_tasks::truncate_bytes;
 use peri_mcp_common::shell::persist_truncated_output;
 
-/// Tavily 抓取后端地址
+/// Tavily 兼容抓取后端默认地址（MCP 实例 env 未提供时使用）。
 const TAVILY_BASE_URL: &str = "https://tavily.claude-code-best.win";
+
+/// MCP 实例 env 键：抓取后端根地址。
+const ENV_BASE_URL: &str = "PERI_WEB_FETCH_URL";
+
+/// MCP 实例 env 键：可选的 Bearer 凭据（缺省或空串 = 不发送 `Authorization`）。
+const ENV_TOKEN: &str = "PERI_WEB_FETCH_TOKEN";
 
 /// 内容截断行数上限
 const MAX_CONTENT_LINES: usize = 2000;
@@ -36,25 +42,44 @@ struct TavilyExtractFailure {
 
 /// WebFetch 工具 — 通过 Tavily 兼容 API 抓取 URL 内容
 pub struct WebFetchTool {
-    /// Tavily 兼容后端根地址（生产恒为 [`TAVILY_BASE_URL`]；测试可注入本地桩）。
+    /// Tavily 兼容后端根地址（缺省 [`TAVILY_BASE_URL`]；测试可注入本地桩）。
     base_url: String,
+    /// Bearer 凭据；`None` = 不发送 `Authorization`（缺省行为）。
+    token: Option<String>,
 }
 
 const WEB_FETCH_DESCRIPTION: &str = include_str!("descriptions/web_fetch.md");
 
 impl WebFetchTool {
+    /// 默认实例构造：使用编译期默认后端、无凭据。
     pub fn new() -> Self {
-        Self {
-            base_url: TAVILY_BASE_URL.to_string(),
-        }
+        Self::from_instance_env(&std::collections::HashMap::new())
+    }
+
+    /// MCP 实例环境构造；只解释传给本 MCP 实例的环境，不读取宿主进程环境。
+    ///
+    /// 实例环境在连接建立时冻结，连接重建时由调用方再次提供：
+    /// `PERI_WEB_FETCH_URL` 缺省为内置公共服务，`PERI_WEB_FETCH_TOKEN`
+    /// 缺省（或空串）时不发送凭据。
+    pub fn from_instance_env(env: &std::collections::HashMap<String, String>) -> Self {
+        let base_url = env
+            .get(ENV_BASE_URL)
+            .cloned()
+            .unwrap_or_else(|| TAVILY_BASE_URL.into());
+        let token = env
+            .get(ENV_TOKEN)
+            .filter(|token| !token.is_empty())
+            .cloned();
+        Self { base_url, token }
     }
 
     /// 测试构造：注入端点（本地回环桩），使抓取协议的 200 / 非 2xx 形态可在
-    /// 无网络条件下覆盖；生产路径只经 [`Self::new`]。
+    /// 无网络条件下覆盖；生产路径只经 [`Self::new`] / [`Self::from_instance_env`]。
     #[cfg(test)]
     pub(crate) fn with_endpoint_for_test(base_url: impl Into<String>) -> Self {
         Self {
             base_url: base_url.into(),
+            token: None,
         }
     }
 }
@@ -162,9 +187,14 @@ impl BaseTool for WebFetchTool {
             "urls": [url]
         });
 
-        let resp = client
+        let mut request = client
             .post(format!("{}/extract", self.base_url.trim_end_matches('/')))
-            .json(&body)
+            .json(&body);
+        if let Some(token) = &self.token {
+            request = request.bearer_auth(token);
+        }
+
+        let resp = request
             .send()
             .await
             .map_err(|e| format!("Extract request failed: {e}"))?;

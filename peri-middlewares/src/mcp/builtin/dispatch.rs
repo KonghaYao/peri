@@ -216,7 +216,8 @@ impl ServerHandler for BuiltinServerHandler {
 /// `direct` / 保留名的唯一事实源仍是注册表（`peri_acp_types::builtin_mcp`）。
 ///
 /// 各实例的状态来源（全部取自同一 `ctx`，不经 `cwd` 推导）：
-/// - `web`：无额外状态；`ctx.cwd` 被忽略；
+/// - `web`：实例 `env` 透传给两个工具（由工具解释后端地址与可选凭据）；
+///   `ctx.cwd` 被忽略；
 /// - `artifact`：`ctx.cwd` 是相对路径解析根（不是安全沙箱）；
 /// - `cron`：`ctx.cron` 的 scheduler 以 `Arc` 克隆进 handler（A1：组合根同一份，
 ///   本工厂不新建第二份，也不挂 tick——tick 归 pool 的唯一 spawn 点 A32）；
@@ -246,7 +247,9 @@ pub(crate) fn builtin_server_handler_with_env(
     env: &std::collections::HashMap<String, String>,
 ) -> Option<BuiltinServerHandler> {
     match find(instance)?.name {
-        "web" => Some(BuiltinServerHandler::Web(WebMcpServer::new())),
+        "web" => Some(BuiltinServerHandler::Web(WebMcpServer::with_instance_env(
+            env,
+        ))),
         "artifact" => Some(BuiltinServerHandler::Artifact(
             ArtifactMcpServer::with_instance_env(Path::new(&ctx.cwd), env),
         )),

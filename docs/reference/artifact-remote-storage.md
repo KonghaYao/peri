@@ -33,15 +33,33 @@
 | `PERI_ARTIFACTS_URL` | 存储服务**基地址**。上传实际打向 `{该值}/upload`（结尾的 `/` 会被自动去掉） | 必填 |
 | `PERI_ARTIFACTS_TOKEN` | 以 `Authorization: Bearer <token>` 发送的凭据 | 按你的服务要求；不设置时回退到内置共享标识 |
 
-在**启动 Peri 之前**、同一个 shell 里设置：
+这两个变量在 **MCP 实例环境**中生效：写进 `mcpServers.artifact.env`（`~/.peri/settings.json` 的 `config.mcpServers` 或项目 `.mcp.json`，见 §7 的位置说明）。值里可以用 `${VAR}` 引用 shell 变量——Peri 宿主只透传实例环境，不直接读进程环境变量：
+
+```jsonc
+// ~/.peri/settings.json
+{
+  "config": {
+    "mcpServers": {
+      "artifact": {
+        "env": {
+          "PERI_ARTIFACTS_URL": "${ARTIFACT_ENDPOINT}",
+          "PERI_ARTIFACTS_TOKEN": "${ARTIFACT_SECRET}"
+        }
+      }
+    }
+  }
+}
+```
+
+然后在**启动 Peri 之前**、同一个 shell 里提供被引用的变量：
 
 ```bash
-export PERI_ARTIFACTS_URL="https://artifacts.example.internal"
-export PERI_ARTIFACTS_TOKEN="<你的服务签发的 token>"
+export ARTIFACT_ENDPOINT="https://artifacts.example.internal"
+export ARTIFACT_SECRET="<你的服务签发的 token>"
 peri
 ```
 
-生效时机：这两个变量在 Peri 建立 `artifact` 实例时读取一次（即启动新会话时）。**改完要重启 Peri**；会话中途改环境变量不会生效。
+生效时机：实例环境在 Peri 建立 `artifact` 实例连接时读取一次（即启动新会话时）。**改完要重启 Peri**；会话中途改环境变量不会生效。
 
 凭据纪律：不要把 token 写进仓库、配置模板或截图，也不要贴进 issue；用环境变量或机密管理器注入。Peri 不会把服务地址与 token 打印到工具输出或错误信息里。
 
@@ -91,7 +109,7 @@ X-TTL: 7d
 ```js
 // stub.mjs —— 只回链接、不真的存文件，够验证配置链路
 // 用法：node stub.mjs
-// 另开一个终端：PERI_ARTIFACTS_URL=http://127.0.0.1:8787 peri
+// 再按 §3 把 mcpServers.artifact.env 的 PERI_ARTIFACTS_URL 配成 http://127.0.0.1:8787，重启 peri
 import { createServer } from 'node:http'
 
 createServer((req, res) => {
@@ -155,7 +173,7 @@ curl -sS -X POST "$PERI_ARTIFACTS_URL/upload" \
 | `Upload error: ...` | 服务返回的错误文本；常见是 token 不匹配、超限、内容被策略拒绝 |
 | `Failed to parse response` | 服务返回了 HTML 错误页或空 body；按 §4 返回 JSON，并检查是否压缩了响应 |
 | 服务返回 401/403 但 Peri 没报错 | Peri 只看 body；请在 body 里写 `{"error": "..."}` |
-| 改了环境变量没变化 | 变量在启动时读取：重启 Peri |
+| 改了环境变量没变化 | 变量在建立实例连接时读取：重启 Peri；并确认配的是 `mcpServers.artifact.env`（§3），不是只 export 到 shell |
 | 上传成功但链接打不开 | `url` 由你的服务给出，Peri 不做代理也不托管内容；确认该地址真的对外可访问 |
 
 ## 7. 不需要这个能力时
@@ -189,4 +207,4 @@ export PERI_MCP_BUILTIN=off
 - Peri 只做「上传 + 展示链接」：**存储、过期回收、访问控制、内容审查都由你的服务负责**。
 - 默认公共服务的可用性、留存时长与配额不属于本项目的承诺；要可控就自建。
 - 上传内容是明文 HTTP body（HTTPS 由服务地址决定），不要在文件里塞密钥。
-- `artifact` 与本仓库的 Web 抓取能力无关：`WebSearch` / `WebFetch` 的后端是编译期固定的，不读这两个环境变量，也没有对应的用户配置项。
+- `artifact` 与 Web 抓取能力互相独立：`WebSearch` / `WebFetch` 不读本文的两个变量；它们的后端经内建 `web` 实例的 `env` 配置（`mcpServers.web.env` 中的 `PERI_WEB_SEARCH_URL` / `PERI_WEB_FETCH_URL`，各自可附带 `_TOKEN` 凭据）。
