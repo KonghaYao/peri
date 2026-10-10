@@ -12,11 +12,34 @@ export type { InteractionAnswer } from "../agent/interaction-responder";
 export { initializeAcpClient, ACP_PROTOCOL_VERSION } from "../agent/acp-handshake";
 export type { AcpInitializeOptions } from "../agent/acp-handshake";
 export { SessionDocs } from "../state/session-docs";
-export type { ToolPayloadRef } from "../state/tool-payloads";
+export type { SessionDocsOptions } from "../state/session-docs";
+export { CheckpointImportError, CHECKPOINT_VERSION, SUPPORTED_SCHEMA_VERSIONS } from "../state/checkpoint";
+export type {
+  DisplayCheckpoint, CheckpointBlock, CheckpointEntry, CheckpointToolCall, CheckpointTurn,
+  CheckpointInteraction, CheckpointImportErrorCode,
+} from "../state/checkpoint";
+export type { PublicError, PublicErrorCode } from "../state/doc-model";
+export { ToolPayloadCapacityError } from "../state/tool-payloads";
+export {
+  TOOL_PAYLOAD_INLINE_BYTES, TOOL_PAYLOAD_PREVIEW_CHARS, TOOL_PAYLOAD_MAX_BYTES,
+  SESSION_INLINE_PAYLOAD_BUDGET_BYTES, SESSION_EXTERNAL_PAYLOAD_BUDGET_BYTES,
+} from "../state/tool-payloads";
+export type { ToolPayloadBudgets, ToolPayloadRef } from "../state/tool-payloads";
+export { INTERACTION_HISTORY_LIMIT } from "../state/interaction-projection";
+export {
+  readPayload, limitPayloadReads, PayloadReadError,
+  VIEW_PAYLOAD_MAX_BYTES, VIEW_PAYLOAD_MAX_CONCURRENCY,
+} from "../view/payload-reader";
+export type {
+  ToolPayloadReader, ToolPayloadResponse, ToolPayloadReadRef, PayloadReadErrorCode, ReadPayloadOptions,
+} from "../view/payload-reader";
 export * from "../sync/index";
 export { EventStreamOverflowError } from "../transport/notification-budget";
-export { readSessionView, SessionViewStore } from "../view/session-view";
-export type { SessionView, EntryView, EntryBlockView, ToolView, PlanEntryView, TaskView, InteractionView, InputQueueView, SessionInfoView } from "../view/session-view";
+export { readSessionView, SessionViewStore, selectEntry, selectToolCall, selectTurn, selectPlanForTurn, selectPendingInteractions } from "../view/session-view";
+export type {
+  SessionView, SessionViewReadiness, EntryView, EntryBlockView, ToolView, TurnView, PlanEntryView, TaskView,
+  InteractionView, InteractionFieldView, InputQueueView, SessionInfoView,
+} from "../view/session-view";
 export type { AcpMcpServer, AgentOptions, PermissionRequest, ElicitationRequest, ElicitationDecision } from "../agent/types";
 export { AgentClaimConflictError } from "../kv/agent-claim-conflict-error";
 export { MemoryKV } from "../kv/memory-kv";

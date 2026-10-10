@@ -8,6 +8,12 @@ afterEach(() => {
 
 let fetchSpy: ReturnType<typeof spyOn<typeof globalThis, "fetch">> | undefined;
 
+function state(overrides: Record<string, unknown> = {}) {
+  return { chat, running: false, executionBlocked: false, readiness: "ready", entries: [],
+    toolCalls: [], turns: [], activeTurn: { turnId: null, status: null }, session: {}, tasks: [],
+    plans: { current: [], byTurn: {} }, interactions: [], pendingInteractions: [], inputQueue: null, ...overrides };
+}
+
 function respond(response: Response) {
   fetchSpy = spyOn(globalThis, "fetch").mockResolvedValue(response);
   return fetchSpy;
@@ -21,7 +27,7 @@ describe("ChatApi request boundary", () => {
     const signal = new AbortController().signal;
     expect(await new ChatApi("trusted-token").list(signal)).toEqual([chat]);
     const [path, options] = fetchMock.mock.calls[0];
-    expect(path).toBe("/api/chats");
+    expect(path).toBe("/api/v2/chats");
     expect(options?.cache).toBe("no-store");
     expect(options?.signal).toBe(signal);
     expect(new Headers(options?.headers).get("Authorization")).toBe("Bearer trusted-token");
@@ -31,7 +37,7 @@ describe("ChatApi request boundary", () => {
     const fetchMock = respond(Response.json(chat, { status: 201 }));
     expect(await new ChatApi("token").create()).toEqual(chat);
     const [path, options] = fetchMock.mock.calls[0];
-    expect(path).toBe("/api/chats");
+    expect(path).toBe("/api/v2/chats");
     expect(options?.method).toBe("POST");
     expect(JSON.parse(options?.body as string)).toEqual({});
     expect(new Headers(options?.headers).get("Content-Type")).toBe("application/json");
@@ -57,14 +63,16 @@ describe("ChatApi request boundary", () => {
     await expect(new ChatApi("token").create()).rejects.toThrow("新建会话响应格式不正确");
   });
 
-  test.each([{ status: "unknown" }, { error: 42 }, { role: "system" }])("rejects invalid detail messages via the shared schema", async (invalid) => {
-    respond(Response.json({ chat, messages: [{ id: "message", role: "assistant", content: "partial",
-      createdAt: chat.updatedAt, ...invalid }] }));
-    await expect(new ChatApi("token").detail(chat.id)).rejects.toThrow("会话历史格式不正确");
-  });
+  test.each([{ status: 42 }, { error: "boom" }, { kind: "note" }, { blocks: "text" }])(
+    "rejects invalid detail entries via the shared schema %j", async (invalid) => {
+      respond(Response.json(state({ entries: [{ entryId: "turn:1:assistant", id: "turn:1:assistant", kind: "message",
+        turnId: "turn:1", role: "assistant", status: "completed", createdAt: chat.updatedAt, createdAtSource: "observed",
+        completedAt: null, error: null, blocks: [{ blockId: "text:0", type: "text", text: "partial" }], ...invalid }] })));
+      await expect(new ChatApi("token").detail(chat.id)).rejects.toThrow("会话历史格式不正确");
+    });
 
   test("rejects detail for a different chat", async () => {
-    respond(Response.json({ chat, messages: [] }));
+    respond(Response.json(state()));
     await expect(new ChatApi("token").detail("other-chat")).rejects.toThrow("不匹配");
   });
 
@@ -72,7 +80,7 @@ describe("ChatApi request boundary", () => {
     const fetchMock = respond(Response.json({ cancelled: true }));
     await new ChatApi("token").cancel("chat/with spaces");
     const [path, options] = fetchMock.mock.calls[0];
-    expect(path).toBe("/api/chats/chat%2Fwith%20spaces/cancel");
+    expect(path).toBe("/api/v2/chats/chat%2Fwith%20spaces/cancel");
     expect(options?.method).toBe("POST");
     expect(new Headers(options?.headers).get("Authorization")).toBe("Bearer token");
   });
@@ -85,7 +93,7 @@ describe("ChatApi command acceptance", () => {
     await new ChatApi("token").send("chat/with spaces", "hello", signal);
     expect(fetchMock).toHaveBeenCalledTimes(1);
     const [path, options] = fetchMock.mock.calls[0];
-    expect(path).toBe("/api/chats/chat%2Fwith%20spaces/messages");
+    expect(path).toBe("/api/v2/chats/chat%2Fwith%20spaces/messages");
     expect(options?.method).toBe("POST");
     expect(options?.signal).toBe(signal);
     expect(JSON.parse(options?.body as string)).toEqual({ content: "hello" });

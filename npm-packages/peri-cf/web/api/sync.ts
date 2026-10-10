@@ -1,5 +1,5 @@
 import { decodeSyncFrame, encodeAuthFrame, encodeAckFrame, SessionDocReplica } from '@peri-code/sdk/view';
-import { readSyncState } from '../../shared/sync-state';
+import { readSyncState, UnsupportedSchemaError } from '../../shared/sync-state';
 import type { SyncState } from '../../shared/sync';
 
 export type { SyncState } from '../../shared/sync';
@@ -40,6 +40,8 @@ export class ChatSync {
 
   private publish() {
     const state = readSyncState(this.replica.chat, this.replica.session);
+    // 快照尚未完整：不发布空历史；副本本来就是空的。
+    if (state.readiness === 'not-ready') return;
     if (state.chat.id !== this.options.chatId) throw new Error('同步返回了不匹配的会话。');
     this.options.onState(state);
   }
@@ -90,7 +92,7 @@ export class ChatSync {
   private connect() {
     if (this.disposed) return;
     this.report('connecting');
-    const url = new URL(`/api/chats/${encodeURIComponent(this.options.chatId)}/sync`,
+    const url = new URL(`/api/v2/chats/${encodeURIComponent(this.options.chatId)}/sync`,
       this.options.origin ?? location.origin);
     url.protocol = url.protocol === 'https:' ? 'wss:' : 'ws:';
     let socket: Socket;
@@ -136,8 +138,9 @@ export class ChatSync {
         clearTimeout(this.handshake);
         this.attempts = 0;
         this.report('synced');
-      } catch {
-        this.fail(new Error('同步数据格式不正确，请重新加载会话。'));
+      } catch (error) {
+        // 不受支持的文档版本必须停用并提示升级，不伪装成格式错误、不循环 resume。
+        this.fail(error instanceof UnsupportedSchemaError ? error : new Error('同步数据格式不正确，请重新加载会话。'));
       }
     };
     socket.onclose = event => {

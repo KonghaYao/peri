@@ -257,7 +257,7 @@ try {
         const sessionId = body?.sessionId;
         const interactionId = body?.interactionId;
         const answer = parseInteractionAnswer(body);
-        if (typeof sessionId !== "string" || !sessionId || typeof interactionId !== "number" || !Number.isSafeInteger(interactionId) || interactionId < 1 || !answer)
+        if (typeof sessionId !== "string" || !sessionId || typeof interactionId !== "string" || !interactionId || !answer)
             return c.json({ error: "Invalid interaction response" }, 400);
         const opened = sessions.get(sessionId);
         if (!opened) return c.json({ error: "Session is not active" }, 404);

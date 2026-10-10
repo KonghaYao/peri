@@ -11,11 +11,11 @@ export function createApi(
   repositoryFactory: (env: Env, waitUntil: (promise: Promise<unknown>) => void) => ChatRepository,
 ): Hono<{ Bindings: Env }> {
   const app = authenticatedApp();
-  app.get("/api/chats", async (context) => {
+  app.get("/api/v2/chats", async (context) => {
     const repository = repositoryFactory(context.env, (promise) => context.executionCtx.waitUntil(promise));
     return context.json({ chats: await repository.list() });
   });
-  app.post("/api/chats", ...jsonRequest(createChatBodySchema, "title must be a nonempty string of at most 200 characters"), async (context) => {
+  app.post("/api/v2/chats", ...jsonRequest(createChatBodySchema, "title must be a nonempty string of at most 200 characters"), async (context) => {
     const { title } = context.req.valid("json");
     const repository = repositoryFactory(context.env, (promise) => context.executionCtx.waitUntil(promise));
     return context.json(await repository.create(title), 201);
@@ -26,7 +26,7 @@ export function createApi(
     const authorization = context.req.header("Authorization") ?? "";
     const instances = await collectChatInstances(chats, async (chatId) => {
       const session = context.env.CHAT_SESSIONS.get(context.env.CHAT_SESSIONS.idFromName(chatId));
-      const response = await session.fetch(new Request(new URL(`/api/chats/${encodeURIComponent(chatId)}/resources`, context.req.url), {
+      const response = await session.fetch(new Request(new URL(`/api/v2/chats/${encodeURIComponent(chatId)}/resources`, context.req.url), {
         headers: { Authorization: authorization },
       }));
       if (!response.ok) throw new Error(`Chat instance observation failed with HTTP ${response.status}`);
@@ -36,10 +36,12 @@ export function createApi(
   });
   app.all("/api/instances", () => { throw new HTTPException(405, { message: "Method not allowed" }); });
   for (const [path, method] of [
-    ["/api/chats/:id", "GET"],
-    ["/api/chats/:id/messages", "POST"],
-    ["/api/chats/:id/cancel", "POST"],
-    ["/api/chats/:id/resources", "GET"],
+    ["/api/v2/chats/:id", "GET"],
+    ["/api/v2/chats/:id/messages", "POST"],
+    ["/api/v2/chats/:id/cancel", "POST"],
+    ["/api/v2/chats/:id/resources", "GET"],
+    ["/api/v2/chats/:id/payloads/:refId", "GET"],
+    ["/api/v2/chats/:id/interactions/:interactionId", "POST"],
   ] as const) {
     app.on(method, path, async (context) => {
       const id = normalizeChatId(context.req.param("id"));
@@ -50,9 +52,14 @@ export function createApi(
       throw new HTTPException(405, { message: "Method not allowed" });
     });
   }
-  app.all("/api/chats", () => { throw new HTTPException(405, { message: "Method not allowed" }); });
+  app.all("/api/v2/chats", () => { throw new HTTPException(405, { message: "Method not allowed" }); });
+  // 版本化入口（P3 已批准）：旧 chat 路径在切换后返回明确的升级错误，不再承载新版消费面。
+  for (const path of ["/api/chats", "/api/chats/:id", "/api/chats/:id/messages", "/api/chats/:id/cancel",
+    "/api/chats/:id/resources", "/api/chats/:id/payloads/:refId", "/api/chats/:id/sync"] as const) {
+    app.all(path, () => Response.json({ error: "Client upgrade required", upgrade: true }, { status: 426, headers: { "Cache-Control": "no-store" } }));
+  }
   const frontdoor = new Hono<{ Bindings: Env }>();
-  frontdoor.get("/api/chats/:id/sync", async (context) => {
+  frontdoor.get("/api/v2/chats/:id/sync", async (context) => {
     const id = normalizeChatId(context.req.param("id"));
     if (context.req.header("Upgrade")?.toLowerCase() !== "websocket")
       return context.json({ error: "WebSocket upgrade required" }, 426, { "Cache-Control": "no-store" });

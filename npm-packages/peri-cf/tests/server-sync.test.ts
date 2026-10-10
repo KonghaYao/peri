@@ -6,6 +6,12 @@ import { SessionDocReplica, type JsonRpcNotification, decodeSyncFrame, encodeAck
 import { ChatSockets, type SyncSocket } from "../worker/chat/sync";
 import type { AcpTransport, Chat, Env, SessionRecord, SessionState } from "../worker/types";
 import { readSyncState } from "../shared/sync-state";
+import type { SyncState } from "../shared/sync";
+import type { StoredRecord } from "../worker/chat/record";
+
+function entryText(entry: { blocks: Array<{ type: string; text?: string }> } | undefined): string {
+  return entry ? entry.blocks.flatMap((block) => (block.type === "text" ? [block.text ?? ""] : [])).join("") : "";
+}
 
 const chat: Chat = { id: "00000000-0000-4000-8000-000000000001", title: "Sync fixture", updatedAt: "2026-10-06T00:00:00.000Z" };
 
@@ -86,16 +92,28 @@ class FixtureTransport implements AcpTransport {
 }
 
 function fixture(options: { record?: SessionRecord; closeFailure?: boolean; missing?: boolean } = {}) {
-  let record = structuredClone(options.record);
   let reads = 0;
   let repositoryReads = 0;
   let starts = 0;
   const jobs: Promise<unknown>[] = [];
   const sockets: FixtureSocket[] = [];
   const transport = new FixtureTransport();
+  const buckets = new Map<string, unknown>();
+  if (options.record) buckets.set("session", structuredClone(options.record));
   const state: SessionState = { storage: {
-    async get<Value>() { reads++; return structuredClone(record) as Value | undefined; },
-    async put<Value>(_key: string, value: Value) { record = structuredClone(value) as SessionRecord; },
+    async get<Value>(key: string) { reads++; return structuredClone(buckets.get(key)) as Value | undefined; },
+    async put(entries: Record<string, unknown>) {
+      for (const [key, value] of Object.entries(entries)) buckets.set(key, structuredClone(value));
+    },
+    async delete(keys: string[]) { let removed = false; for (const key of keys) removed = buckets.delete(key) || removed; return removed; },
+    async list(options: { prefix?: string } = {}) {
+      const result = new Map<string, unknown>();
+      for (const [key, value] of [...buckets].sort(([left], [right]) => left.localeCompare(right))) {
+        if (options.prefix && !key.startsWith(options.prefix)) continue;
+        result.set(key, structuredClone(value));
+      }
+      return result;
+    },
   }, waitUntil(job) { jobs.push(job); } };
   const repository = {
     async get() { repositoryReads++; return options.missing ? null : chat; },
@@ -110,19 +128,21 @@ function fixture(options: { record?: SessionRecord; closeFailure?: boolean; miss
   });
   if (options.closeFailure) transport.close = async () => { throw new Error("close failed"); };
   async function connect(resume?: Parameters<typeof encodeAuthFrame>[0]["resume"]) {
-    const response = await fetchApi(new Request(`https://app.invalid/api/chats/${chat.id}/sync`, {
+    const response = await fetchApi(new Request(`https://app.invalid/api/v2/chats/${chat.id}/sync`, {
       headers: { Upgrade: "websocket" },
     }), env, repository);
     const socket = sockets.at(-1)!;
     if (resume) socket.receive(encodeAuthFrame({ type: "auth", token: "sync-secret", resume }));
     return { socket, response };
   }
-  const command = (path = "messages") => core.fetch(new Request(`https://app.invalid/api/chats/${chat.id}/${path}`, {
+  const command = (path = "messages") => core.fetch(new Request(`https://app.invalid/api/v2/chats/${chat.id}/${path}`, {
     method: "POST", headers: { Authorization: "Bearer sync-secret", "Content-Type": "application/json" },
     ...(path === "messages" ? { body: JSON.stringify({ content: "Hello" }) } : {}),
   }));
   return { core, env, transport, connect, command, sockets, jobs,
-    reads: () => reads, repositoryReads: () => repositoryReads, starts: () => starts, record: () => record,
+    reads: () => reads, repositoryReads: () => repositoryReads, starts: () => starts,
+    record: () => (buckets.get("record") ?? buckets.get("session")) as StoredRecord | undefined,
+    buckets,
     drain: () => Promise.all(jobs) };
 }
 
@@ -230,7 +250,7 @@ describe("server read-only SDK document synchronization", () => {
   test("rejects URL tokens and non-upgrade requests without opening sockets", async () => {
     const app = fixture();
     for (const [suffix, headers, status] of [["?token=sync-secret", { Upgrade: "websocket" }, 400], ["", {}, 426]] as const) {
-      const response = await app.core.fetch(new Request(`https://app.invalid/api/chats/${chat.id}/sync${suffix}`, { headers }));
+      const response = await app.core.fetch(new Request(`https://app.invalid/api/v2/chats/${chat.id}/sync${suffix}`, { headers }));
       expect(response.status).toBe(status);
     }
     expect(app.sockets).toEqual([]); expect(app.reads()).toBe(0);
@@ -245,13 +265,13 @@ describe("server read-only SDK document synchronization", () => {
       const socket = await authenticate(app);
       socket.receive(raw);
       expect(socket.closed?.code).toBe(4403);
-      expect(socket.state().messages).toEqual([]);
+      expect(socket.state().entries).toEqual([]);
     }
   });
 
   test("syncs live SDK chunks and terminal state without embedding messages into metadata", async () => {
     const app = fixture(); const socket = await authenticate(app);
-    expect(socket.state()).toMatchObject({ chat, messages: [], running: false, executionBlocked: false });
+    expect(socket.state()).toMatchObject({ chat, entries: [], running: false, executionBlocked: false });
     expect((await app.command()).status).toBe(202);
     await until(() => app.starts() === 1);
     await Bun.sleep(5);
@@ -260,25 +280,43 @@ describe("server read-only SDK document synchronization", () => {
     app.transport.emit("foreign", { sessionId: "another-session" });
     app.transport.emit("old child", { _meta: { "peri.sourceAgentId": "child" } });
     app.transport.emit("child", { _meta: { peri: { sourceAgentId: "child" } } });
-    await until(() => socket.state().messages.at(-1)?.content === "root");
+    await until(() => entryText(socket.state().entries.at(-1)) === "root");
     const metadata = socket.replica.session.getMap("peri-cf").get("state");
     app.transport.emit(" tail");
-    await until(() => socket.state().messages.at(-1)?.content === "root tail");
+    await until(() => entryText(socket.state().entries.at(-1)) === "root tail");
     expect(socket.replica.session.getMap("peri-cf").get("state")).toEqual(metadata);
     expect(metadata).not.toHaveProperty("messages");
+    expect(metadata).not.toHaveProperty("entryMetadata");
     app.transport.finish(); await app.drain();
-    expect(socket.state().messages.map(({ content, status }) => ({ content, status }))).toEqual([
+    expect(socket.state().entries.map((entry) => ({ content: entryText(entry), status: entry.status }))).toEqual([
       { content: "Hello", status: "completed" }, { content: "root tail", status: "completed" },
     ]);
     expect(socket.state().running).toBe(false);
-    expect(app.record()?.messages).toEqual(socket.state().messages.map((message) => ({ ...message, status: message.status! })));
+    expect(app.record()?.checkpoint.entries.map((entry) => ({ id: entry.id, content: entryText(entry), status: entry.status })) ?? [])
+      .toEqual(socket.state().entries.map((entry) => ({ id: entry.id, content: entryText(entry), status: entry.status })));
+    socket.close(1000, "Done");
+  });
+
+  test("HTTP 首屏与 WS 实时返回同一 DTO 与同一批对象身份", async () => {
+    const app = fixture(); const socket = await authenticate(app);
+    await app.command(); await Bun.sleep(5);
+    app.transport.emit("hello");
+    app.transport.finish(); await app.drain();
+    const detail = await (await app.core.fetch(new Request(`https://app.invalid/api/v2/chats/${chat.id}`, {
+      headers: { Authorization: "Bearer sync-secret" },
+    }))).json() as SyncState;
+    // 首屏与推送都来自同一 SDK view 物化：条目身份、turn 与状态一致。
+    expect(detail.entries.map((entry) => entry.id)).toEqual(socket.state().entries.map((entry) => entry.id));
+    expect(detail.entries.map((entry) => entry.status)).toEqual(socket.state().entries.map((entry) => entry.status));
+    expect(detail.activeTurn).toEqual(socket.state().activeTurn);
+    expect(detail.readiness).toBe("ready");
     socket.close(1000, "Done");
   });
 
   test("disconnection leaves execution running and SDK state-vector resume repairs missed chunks", async () => {
     const app = fixture(); const socket = await authenticate(app);
     await app.command(); await Bun.sleep(5); app.transport.emit("first");
-    await until(() => socket.state().messages.at(-1)?.content === "first");
+    await until(() => entryText(socket.state().entries.at(-1)) === "first");
     const resume = socket.replica.stateVector();
     socket.close(1000, "Offline");
     app.transport.emit(" missed");
@@ -293,18 +331,20 @@ describe("server read-only SDK document synchronization", () => {
     await until(() => next.frames.length > 0);
     const frame = decodeSyncFrame(next.frames[0]!);
     expect(frame.type === "snapshot" && frame.snapshot.mode).toBe("delta");
-    expect(next.state().messages.at(-1)?.content).toBe("first missed");
+    expect(entryText(next.state().entries.at(-1))).toBe("first missed");
     expect((await app.command("cancel")).status).toBe(200); await app.drain();
-    expect(next.state().messages.at(-1)?.status).toBe("cancelled");
+    expect(next.state().entries.at(-1)?.status).toBe("cancelled");
     next.close(1000, "Done");
   });
 
-  test("application error overrides early SDK completion after an unconfirmed host close", async () => {
+  test("an unconfirmed host close blocks execution and reports the app error without rewriting the completed result", async () => {
     const app = fixture({ closeFailure: true });
     const socket = await authenticate(app); await app.command(); await Bun.sleep(5);
     app.transport.emit("partial"); app.transport.done(); app.transport.finish(); await app.drain();
     expect(socket.state()).toMatchObject({ running: false, executionBlocked: true, error: "close failed" });
-    expect(socket.state().messages.at(-1)).toMatchObject({ status: "error", error: "close failed", content: "partial" });
+    // 设计 4.4.7：模型已完成后的清理失败不改写生成结果；失败归应用级 error 与执行阻断。
+    expect(socket.state().entries.at(-1)).toMatchObject({ status: "completed", error: null });
+    expect(entryText(socket.state().entries.at(-1))).toBe("partial");
     expect((await app.command()).status).toBe(503);
     socket.close(1000, "Done");
   });
@@ -315,7 +355,12 @@ describe("server read-only SDK document synchronization", () => {
       { id: "assistant-1", role: "assistant", content: "saved partial", createdAt: chat.updatedAt, status: "cancelled" },
     ];
     const app = fixture({ record: { chat, messages } }); const socket = await authenticate(app);
-    expect(socket.state().messages).toEqual(messages); expect(app.starts()).toBe(0);
+    expect(socket.state().entries.map((entry) => ({ role: entry.role, content: entryText(entry), status: entry.status })))
+      .toEqual(messages.map(({ role, content, status }) => ({ role, content, status })));
+    // 旧记录转换后保留旧 id 与时间（展示身份来自 SDK Entry，值即旧行 id）。
+    expect(app.record()?.checkpoint.entries.map(({ id, createdAt }) => ({ id, createdAt })))
+      .toEqual(messages.map(({ id, createdAt }) => ({ id, createdAt })));
+    expect(app.starts()).toBe(0);
     socket.close(1000, "Done");
   });
 
@@ -328,7 +373,7 @@ describe("server read-only SDK document synchronization", () => {
     await until(() => !!socket.closed);
     expect(socket.closed?.code).toBe(1011); expect(app.transport.stops).toBe(0);
     app.transport.finish(); await app.drain();
-    expect(app.record()?.messages.at(-1)?.content).toContain("reply");
+    expect(entryText(app.record()?.checkpoint.entries.at(-1))).toContain("reply");
   });
 
   test("closes sockets restored from the removed Base64 protocol with 1008 instead of downgrading", () => {
@@ -343,7 +388,7 @@ describe("server read-only SDK document synchronization", () => {
       idFromName: (name) => name, get: () => ({ fetch: async () => new Response() }),
     } };
     new ChatSockets(env, {
-      storage: { async get() { return undefined; }, async put() {} }, waitUntil() {},
+      storage: { async get() { return undefined; }, async put() {}, async delete() { return false; }, async list() { return new Map(); } }, waitUntil() {},
       acceptWebSocket() {}, getWebSockets: () => [previous, corrupt, current],
     }, async () => { throw new Error("Restoring sockets must not load documents"); },
     () => { throw new Error("Restoring sockets must not open transports"); });

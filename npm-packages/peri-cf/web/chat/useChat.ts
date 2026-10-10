@@ -5,7 +5,7 @@ import { createChatQueries } from './queries';
 import { ChatSession, type ChatView } from './session';
 import type { Chat } from './types';
 
-const initialView: ChatView = { selected: null, messages: [], phase: 'idle', historyReady: true, error: '' };
+const initialView: ChatView = { selected: null, state: null, phase: 'idle', historyReady: true, error: '' };
 
 export function useChat(token: string) {
   const [view, setView] = useState(initialView);

@@ -2,7 +2,25 @@ import { afterEach, describe, expect, test } from 'bun:test';
 import { isCancelledError, QueryObserver } from '@tanstack/react-query';
 import { createChatQueries } from '../web/chat/queries';
 import type { ChatReadApi } from '../web/chat/queries';
-import type { Chat, ChatDetail } from '../web/chat/types';
+import type { Chat, SyncState } from '../web/chat/types';
+
+type FixtureEntry = { id: string; role: 'user' | 'assistant'; content: string; status?: string; error?: { code: string; message: string } };
+function state(chat: Chat, entries: FixtureEntry[] = [], extra: Partial<SyncState> = {}): SyncState {
+  return {
+    chat, running: false, executionBlocked: false, readiness: 'ready',
+    entries: entries.map((entry) => ({ entryId: `entry:${entry.id}`, id: entry.id, kind: 'message', turnId: 'turn:1',
+      role: entry.role, status: entry.status ?? 'completed', createdAt: chat.updatedAt, createdAtSource: 'observed',
+      completedAt: null, error: entry.error ?? null,
+      blocks: entry.content ? [{ blockId: 'text:0', type: 'text', text: entry.content }] : [] })),
+    toolCalls: [], turns: [], activeTurn: { turnId: null, status: null }, session: {}, tasks: [],
+    plans: { current: [], byTurn: {} }, interactions: [], pendingInteractions: [], inputQueue: null,
+    ...extra,
+  };
+}
+function firstText(value: SyncState): string {
+  const block = value.entries[0]?.blocks[0];
+  return block?.type === 'text' ? block.text : '';
+}
 
 const first: Chat = { id: 'first', title: '第一段思考', updatedAt: '2026-10-06T00:00:00Z' };
 const second: Chat = { id: 'second', title: '新的思考', updatedAt: '2026-10-06T01:00:00Z' };
@@ -18,7 +36,7 @@ function deferred<Value>() {
 function scope(overrides: Partial<ChatReadApi> = {}) {
   const queries = createChatQueries({
     list: async () => [first],
-    detail: async () => ({ chat: first, messages: [] }),
+    detail: async () => state(first),
     ...overrides,
   });
   scopes.push(queries);
@@ -32,10 +50,10 @@ afterEach(async () => {
 describe('chat QueryClient read ownership', () => {
   test('replica state replaces authoritative detail cache without HTTP refetch or delta accumulation', async () => {
     let reads = 0;
-    const queries = scope({ detail: async () => { reads++; return { chat: first, messages: [] }; } });
+    const queries = scope({ detail: async () => { reads++; return state(first); } });
     await queries.readHistory(first.id);
-    const detail: ChatDetail = { chat: { ...first, title: '同步标题' }, messages: [{ id: 'answer', role: 'assistant',
-      content: '完整投影', createdAt: first.updatedAt, status: 'completed' }] };
+    const detail: SyncState = state({ ...first, title: '同步标题' },
+      [{ id: 'answer', role: 'assistant', content: '完整投影' }]);
     queries.setHistory(detail);
     queries.mergeChat(detail.chat);
     expect(await queries.readHistory(first.id, undefined, false)).toEqual(detail);
@@ -147,18 +165,18 @@ describe('chat QueryClient read ownership', () => {
   });
 
   test('deduplicates concurrent fresh history reads', async () => {
-    const response = deferred<ChatDetail>();
+    const response = deferred<SyncState>();
     let attempts = 0;
     const queries = scope({ detail: () => { attempts++; return response.promise; } });
     const firstRead = queries.readHistory(first.id);
     const concurrentRead = queries.readHistory(first.id);
     expect(attempts).toBe(1);
-    response.resolve({ chat: first, messages: [] });
+    response.resolve(state(first));
     expect(await firstRead).toEqual(await concurrentRead);
   });
 
   test('passes navigation cancellation through QueryClient to the API signal', async () => {
-    const response = deferred<ChatDetail>();
+    const response = deferred<SyncState>();
     let receivedSignal: AbortSignal | undefined;
     const queries = scope({ detail: (_chatId, signal) => { receivedSignal = signal; return response.promise; } });
     const navigation = new AbortController();
@@ -166,14 +184,14 @@ describe('chat QueryClient read ownership', () => {
     navigation.abort();
     expect(receivedSignal?.aborted).toBe(true);
     expect(isCancelledError(await read)).toBe(true);
-    response.resolve({ chat: first, messages: [] });
+    response.resolve(state(first));
     await Promise.resolve();
     expect(queries.client.getQueryData(queries.history(first.id).queryKey)).toBeUndefined();
   });
 
   test('does not issue reads for already aborted navigation', async () => {
     let attempts = 0;
-    const queries = scope({ detail: async () => { attempts++; return { chat: first, messages: [] }; } });
+    const queries = scope({ detail: async () => { attempts++; return state(first); } });
     const navigation = new AbortController();
     navigation.abort();
     await expect(queries.readHistory(first.id, navigation.signal)).rejects.toThrow();
@@ -181,29 +199,28 @@ describe('chat QueryClient read ownership', () => {
   });
 
   test('cancelling one chat leaves a concurrent read of another chat intact', async () => {
-    const response = deferred<ChatDetail>();
+    const response = deferred<SyncState>();
     const queries = scope({ detail: chatId => chatId === first.id ? response.promise
-      : Promise.resolve({ chat: second, messages: [] }) });
+      : Promise.resolve(state(second)) });
     const navigation = new AbortController();
     const abandoned = queries.readHistory(first.id, navigation.signal).catch(error => error);
     const target = queries.readHistory(second.id);
     navigation.abort();
     expect(isCancelledError(await abandoned)).toBe(true);
     expect((await target).chat).toEqual(second);
-    response.resolve({ chat: first, messages: [] });
+    response.resolve(state(first));
   });
 
   test.each(['completed', 'cancelled'] as const)('forces fresh authoritative history after %s', async status => {
     let reads = 0;
-    const queries = scope({ detail: async () => ({
-      chat: first,
-      messages: [{ id: 'answer', role: 'assistant', content: ++reads === 1 ? '旧历史' : '服务端最新内容',
-        createdAt: first.updatedAt, status }],
-    }) });
-    expect((await queries.readHistory(first.id, undefined, false)).messages[0].content).toBe('旧历史');
-    expect((await queries.readHistory(first.id, undefined, false)).messages[0].content).toBe('旧历史');
+    const queries = scope({ detail: async () => state(first,
+      [{ id: 'answer', role: 'assistant', content: ++reads === 1 ? '旧历史' : '服务端最新内容', status }]) });
+    expect(firstText(await queries.readHistory(first.id, undefined, false))).toBe('旧历史');
+    expect(firstText(await queries.readHistory(first.id, undefined, false))).toBe('旧历史');
     expect(reads).toBe(1);
-    expect((await queries.readHistory(first.id)).messages[0]).toMatchObject({ content: '服务端最新内容', status });
+    const fresh = await queries.readHistory(first.id);
+    expect(fresh).toMatchObject({ entries: [{ status }] });
+    expect(firstText(fresh)).toBe('服务端最新内容');
     expect(reads).toBe(2);
   });
 
@@ -211,17 +228,17 @@ describe('chat QueryClient read ownership', () => {
     let reads = 0;
     const queries = scope({ detail: async () => {
       if (++reads > 1) throw new Error('历史暂不可用');
-      return { chat: first, messages: [] };
+      return state(first);
     } });
     await queries.readHistory(first.id);
     await expect(queries.readHistory(first.id)).rejects.toThrow('历史暂不可用');
     expect(reads).toBe(2);
-    expect(queries.client.getQueryData<ChatDetail>(queries.history(first.id).queryKey)).toEqual({ chat: first, messages: [] });
+    expect(queries.client.getQueryData<SyncState>(queries.history(first.id).queryKey)).toEqual(state(first));
   });
 
   test('isolates auth scopes even when chat query keys are identical', async () => {
     const oldScope = scope();
-    const newScope = scope({ list: async () => [second], detail: async () => ({ chat: second, messages: [] }) });
+    const newScope = scope({ list: async () => [second], detail: async () => state(second) });
     expect(oldScope.client).not.toBe(newScope.client);
     await oldScope.client.fetchQuery(oldScope.list);
     expect(newScope.client.getQueryData(newScope.list.queryKey)).toBeUndefined();
@@ -233,7 +250,7 @@ describe('chat QueryClient read ownership', () => {
   });
 
   test('retiring an auth scope aborts reads and clears both caches despite late API replies', async () => {
-    const response = deferred<ChatDetail>();
+    const response = deferred<SyncState>();
     let receivedSignal: AbortSignal | undefined;
     const oldScope = scope({ detail: (_chatId, signal) => { receivedSignal = signal; return response.promise; } });
     await oldScope.client.fetchQuery(oldScope.list);
@@ -243,7 +260,7 @@ describe('chat QueryClient read ownership', () => {
     expect(isCancelledError(await staleRead)).toBe(true);
     const newScope = scope({ list: async () => [second] });
     await newScope.client.fetchQuery(newScope.list);
-    response.resolve({ chat: first, messages: [] });
+    response.resolve(state(first));
     await Promise.resolve();
     expect(oldScope.client.getQueryCache().getAll()).toHaveLength(0);
     expect(newScope.client.getQueryData<Chat[]>(newScope.list.queryKey)).toEqual([second]);

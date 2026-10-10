@@ -82,9 +82,9 @@ describe("per-chat WASM instance observation", () => {
     expect(unreachable).toMatchObject({ observation: null, failure: "host-unreachable" });
     expect(untrusted).toMatchObject({ observation: null, failure: "invalid-observation" });
     expect(requests.map((entry) => [entry.chatId, entry.path, entry.authorization])).toEqual([
-      [chats[0].id, `/api/chats/${chats[0].id}/resources`, `Bearer ${token}`],
-      [chats[1].id, `/api/chats/${chats[1].id}/resources`, `Bearer ${token}`],
-      [chats[2].id, `/api/chats/${chats[2].id}/resources`, `Bearer ${token}`],
+      [chats[0].id, `/api/v2/chats/${chats[0].id}/resources`, `Bearer ${token}`],
+      [chats[1].id, `/api/v2/chats/${chats[1].id}/resources`, `Bearer ${token}`],
+      [chats[2].id, `/api/v2/chats/${chats[2].id}/resources`, `Bearer ${token}`],
     ]);
   });
 

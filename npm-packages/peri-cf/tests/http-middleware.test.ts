@@ -18,7 +18,7 @@ function fixture() {
     get() { throw new Error("No DO access is expected"); },
   } };
   const app = createApi(() => repository);
-  const send = (body: BodyInit | null, headers: Record<string, string> = {}) => app.fetch(new Request("https://app.test/api/chats", {
+  const send = (body: BodyInit | null, headers: Record<string, string> = {}) => app.fetch(new Request("https://app.test/api/v2/chats", {
     method: "POST", body, headers: { Authorization: "Bearer trusted-token", "Content-Type": "application/json", ...headers },
   }), env);
   return { calls, env, app, send };
@@ -51,8 +51,8 @@ describe("Hono authentication, bounded JSON and Zod boundary", () => {
   test("preserves method and missing-route semantics with no-store", async () => {
     const app = fixture();
     for (const [path, method, expectedStatus, expectedMessage] of [
-      ["/api/chats", "DELETE", 405, "Method not allowed"],
-      ["/api/chats/not-a-session", "GET", 404, "Not found"],
+      ["/api/v2/chats", "DELETE", 405, "Method not allowed"],
+      ["/api/v2/chats/not-a-session", "GET", 404, "Not found"],
       ["/api/unknown", "GET", 404, undefined],
     ] as const) {
       const response = await app.app.fetch(new Request(`https://app.test${path}`, {
@@ -67,7 +67,7 @@ describe("Hono authentication, bounded JSON and Zod boundary", () => {
 
   test("keeps failed WebSocket handshake responses uncached", async () => {
     const app = fixture();
-    const path = "https://app.test/api/chats/00000000-0000-4000-8000-000000000001/sync";
+    const path = "https://app.test/api/v2/chats/00000000-0000-4000-8000-000000000001/sync";
     const missingUpgrade = await app.app.fetch(new Request(path), app.env);
     expect(missingUpgrade.status).toBe(426);
     expect(missingUpgrade.headers.get("Cache-Control")).toBe("no-store");

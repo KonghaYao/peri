@@ -78,6 +78,9 @@ function producer(target = chat, content = 'partial') {
   const chatDoc = new Y.Doc();
   const sessionDoc = new Y.Doc();
   const root = chatDoc.getMap('root');
+  // 文档对必须带 schema 版本标记（真实生产端由 SDK DocModel 写入）。
+  root.set('schemaVersion', 3);
+  sessionDoc.getMap('root').set('schemaVersion', 2);
   const entry = new Y.Map<unknown>();
   const text = new Y.Text(content);
   const block = new Y.Map<unknown>();
@@ -101,8 +104,7 @@ function producer(target = chat, content = 'partial') {
   root.set('entries', entries);
   root.set('entryOrder', order);
   const metadata = sessionDoc.getMap('peri-cf');
-  metadata.set('state', { chat: target, running: false, executionBlocked: false,
-    entryMetadata: { entry: { id: 'answer', createdAt: target.updatedAt } } });
+  metadata.set('state', { chat: target, running: false, executionBlocked: false });
   const sync = new SessionDocSync(chatDoc, sessionDoc, { flushIntervalMs: 100_000 });
   const updates: Parameters<typeof sync.subscribe>[0] extends (update: infer Update) => unknown ? Update[] : never = [];
   const subscription = sync.subscribe(update => { updates.push(update); });
@@ -125,6 +127,23 @@ function producer(target = chat, content = 'partial') {
   };
 }
 
+function entryText(state: SyncState | undefined): string {
+  const entry = state?.entries[0];
+  return entry ? entry.blocks.flatMap((block) => (block.type === 'text' ? [block.text] : [])).join('') : '';
+}
+
+function historyState(chatId: string, content = 'HTTP history'): SyncState {
+  const target = { ...chat, id: chatId };
+  return {
+    chat: target, running: false, executionBlocked: false, readiness: 'ready',
+    entries: content ? [{ entryId: 'history', id: 'history', kind: 'message', turnId: 'turn:history',
+      role: 'assistant', status: 'completed', createdAt: target.updatedAt, createdAtSource: 'observed',
+      completedAt: null, error: null, blocks: [{ blockId: 'text:0', type: 'text', text: content }] }] : [],
+    toolCalls: [], turns: [], activeTurn: { turnId: null, status: null }, session: {}, tasks: [],
+    plans: { current: [], byTurn: {} }, interactions: [], pendingInteractions: [], inputQueue: null,
+  };
+}
+
 function replica() {
   const connection = transport();
   const states: SyncState[] = [];
@@ -144,7 +163,7 @@ describe('read-only SDK Yjs WebSocket replica', () => {
     socket.message(server.snapshot(), 1);
     expect(decodeAckFrame(socket.sent[1])).toEqual({ type: 'ack', delivery: 1 });
     socket.message(server.update(() => server.text.insert(server.text.length, '!')), 2);
-    expect(client.states.at(-1)?.messages[0].content).toBe('partial!');
+    expect(entryText(client.states.at(-1))).toBe('partial!');
     expect(decodeAckFrame(socket.sent[2])).toEqual({ type: 'ack', delivery: 2 });
     socket.message(server.update(() => server.state({ running: true })), 4);
     expect(socket.sent).toHaveLength(3);
@@ -154,14 +173,17 @@ describe('read-only SDK Yjs WebSocket replica', () => {
     const server = producer();
     const client = replica();
     const socket = client.sockets[0];
-    expect(socket.url).toBe('wss://example.test/api/chats/chat-1/sync');
+    expect(socket.url).toBe('wss://example.test/api/v2/chats/chat-1/sync');
     expect(socket.sent).toEqual([]);
     socket.open();
     expect(decodeAuthFrame(socket.sent[0])).toEqual({ type: 'auth', token: 'fixture-token' });
     socket.message(server.snapshot());
     expect(client.statuses.at(-1)).toBe('synced');
-    expect(client.states.at(-1)?.messages[0]).toEqual({ id: 'answer', role: 'assistant', content: 'partial',
-      createdAt: chat.updatedAt, status: 'completed' });
+    expect(client.states.at(-1)?.entries[0]).toEqual({
+      entryId: 'entry', id: 'entry', kind: 'message', turnId: 'turn', role: 'assistant', status: 'completed',
+      createdAt: null, createdAtSource: 'unknown', completedAt: null, error: null,
+      blocks: [{ blockId: 'text', type: 'text', text: 'partial' }],
+    });
     expect(acknowledgements(socket)).toEqual([{ type: 'ack', delivery: 1 }]);
   });
 
@@ -172,7 +194,7 @@ describe('read-only SDK Yjs WebSocket replica', () => {
     socket.open();
     socket.message(server.snapshot());
     socket.message(server.update(() => server.text.insert(server.text.length, ' answer')));
-    expect(client.states.at(-1)?.messages[0].content).toBe('partial answer');
+    expect(entryText(client.states.at(-1))).toBe('partial answer');
     socket.message(server.update(() => server.state({ running: true })));
     expect(client.states.at(-1)?.running).toBe(true);
     socket.message(server.update(() => server.state({ running: false, executionBlocked: true, error: 'stop failed' })));
@@ -188,9 +210,9 @@ describe('read-only SDK Yjs WebSocket replica', () => {
     socket.open();
     socket.message(first.snapshot());
     socket.message(second.snapshot());
-    expect(client.states.at(-1)?.messages[0].content).toBe('replacement');
+    expect(entryText(client.states.at(-1))).toBe('replacement');
     socket.message(second.update(() => second.text.insert(second.text.length, '!')));
-    expect(client.states.at(-1)?.messages[0].content).toBe('replacement!');
+    expect(entryText(client.states.at(-1))).toBe('replacement!');
     socket.message(second.update(() => second.state({ running: true })));
     expect(client.states.at(-1)?.running).toBe(true);
     expect(acknowledgements(socket)).toEqual([1, 2, 3, 4].map(delivery => ({ type: 'ack', delivery })));
@@ -238,7 +260,7 @@ describe('read-only SDK Yjs WebSocket replica', () => {
     const snapshot = server.snapshot(auth.resume);
     expect(snapshot.type === 'snapshot' && snapshot.snapshot.mode).toBe('delta');
     second.message(snapshot);
-    expect(client.states.at(-1)?.messages[0].content).toBe('partial missed');
+    expect(entryText(client.states.at(-1))).toBe('partial missed');
     expect(client.statuses.at(-1)).toBe('synced');
     expect(first.closed).toBe(1);
     expect(acknowledgements(second)).toEqual([{ type: 'ack', delivery: 1 }]);
@@ -254,7 +276,7 @@ describe('read-only SDK Yjs WebSocket replica', () => {
     server.update(() => server.text.insert(server.text.length, ' skipped'));
     const gap = server.update(() => server.text.insert(server.text.length, ' next'));
     first.message(gap);
-    expect(client.states.at(-1)?.messages[0].content).toBe('partial');
+    expect(entryText(client.states.at(-1))).toBe('partial');
     expect(client.statuses.at(-1)).toBe('disconnected');
     await until(() => client.sockets.length === 2);
     const second = client.sockets[1];
@@ -263,7 +285,7 @@ describe('read-only SDK Yjs WebSocket replica', () => {
     const published = client.states.length;
     late.call(first as unknown as WebSocket, { data: encodeSyncFrame({ ...gap, delivery: 3 }) } as MessageEvent);
     expect(client.states).toHaveLength(published);
-    expect(client.states.at(-1)?.messages[0].content).toBe('partial skipped next');
+    expect(entryText(client.states.at(-1))).toBe('partial skipped next');
   });
 
   test('resumes across a backend generation change by replacing documents with a full snapshot', async () => {
@@ -280,7 +302,7 @@ describe('read-only SDK Yjs WebSocket replica', () => {
     expect(snapshot.type === 'snapshot' && snapshot.snapshot.mode).toBe('snapshot');
     socket.message(snapshot);
     socket.message(restarted.update(() => restarted.text.insert(restarted.text.length, '!')));
-    expect(client.states.at(-1)?.messages[0].content).toBe('new generation!');
+    expect(entryText(client.states.at(-1))).toBe('new generation!');
     expect(client.statuses.at(-1)).toBe('synced');
   });
 
@@ -293,7 +315,7 @@ describe('read-only SDK Yjs WebSocket replica', () => {
     const update = server.update(() => server.text.insert(server.text.length, '!'));
     socket.message(update);
     socket.message(update);
-    expect(client.states.at(-1)?.messages[0].content).toBe('partial!');
+    expect(entryText(client.states.at(-1))).toBe('partial!');
     expect(acknowledgements(socket)).toEqual([1, 2, 3].map(delivery => ({ type: 'ack', delivery })));
   });
 
@@ -382,9 +404,7 @@ function workspace(overrides: Partial<ConstructorParameters<typeof ChatSession>[
   const commands: string[] = [];
   const stops: string[] = [];
   const views: ChatView[] = [];
-  const queries = createChatQueries({ list: async () => [chat], detail: async chatId => ({
-    chat: { ...chat, id: chatId }, messages: [{ id: 'history', role: 'assistant', content: 'HTTP history', createdAt: chat.updatedAt }],
-  }) });
+  const queries = createChatQueries({ list: async () => [chat], detail: async chatId => historyState(chatId) });
   const session = new ChatSession({
     create: async () => chat,
     send: async (_id, content) => { commands.push(content); },
@@ -411,7 +431,7 @@ describe('chat commands and subscription lifecycle', () => {
     const client = workspace();
     const ready = client.session.select(chat);
     await until(() => client.sockets.length === 1);
-    expect(client.session.view.messages[0].content).toBe('HTTP history');
+    expect(entryText(client.session.view.state ?? undefined)).toBe('HTTP history');
     expect(client.session.view.historyReady).toBe(false);
     expect(await client.session.send('too soon')).toBe(false);
     client.sockets[0].open();
@@ -419,7 +439,7 @@ describe('chat commands and subscription lifecycle', () => {
     expect(await ready).toBe(true);
     expect(client.session.view.historyReady).toBe(true);
     expect(client.queries.client.getQueryData(client.queries.history(chat.id).queryKey)).toMatchObject({
-      messages: [{ content: 'partial' }],
+      entries: [{ blocks: [{ type: 'text', text: 'partial' }] }],
     });
   });
 
@@ -450,7 +470,7 @@ describe('chat commands and subscription lifecycle', () => {
       server.entry.set('status', 'completed'); server.state({ running: false });
     }));
     expect(client.session.view.phase).toBe('idle');
-    expect(client.session.view.messages[0]).toMatchObject({ content: 'partial final', status: 'completed' });
+    expect(client.session.view.state?.entries[0]).toMatchObject({ status: 'completed', blocks: [{ type: 'text', text: 'partial final' }] });
     expect(client.commands).toEqual(['hello']);
   });
 
@@ -564,18 +584,18 @@ describe('chat commands and subscription lifecycle', () => {
     expect(await ready).toBe(true);
     late.call(old as unknown as WebSocket, { data: encodeSyncFrame({ ...producer().snapshot(), delivery: 1 }) } as MessageEvent);
     expect(client.session.view.selected?.id).toBe('other');
-    expect(client.session.view.messages[0].content).toBe('other answer');
+    expect(entryText(client.session.view.state ?? undefined)).toBe('other answer');
     expect(old.closed).toBe(1);
     expect(decodeAuthFrame(client.sockets[1].sent[0]).resume).toBeUndefined();
   });
 
   test('superseded HTTP navigation cannot install a socket or publish stale history', async () => {
-    const slow = deferred<{ chat: Chat; messages: [] }>();
+    const slow = deferred<SyncState>();
     let historyStarted = false;
     const connection = transport();
     const queries = createChatQueries({ list: async () => [], detail: id => {
       if (id === chat.id) { historyStarted = true; return slow.promise; }
-      return Promise.resolve({ chat: { ...chat, id }, messages: [] });
+      return Promise.resolve(historyState(id, ''));
     } });
     const session = new ChatSession({ create: async () => chat, send: async () => {}, cancel: async () => {} },
       queries, 'fixture-token', () => {}, connection);
@@ -591,7 +611,7 @@ describe('chat commands and subscription lifecycle', () => {
     connection.sockets[0].message(producer(target).snapshot());
     expect(await fresh).toBe(true);
     expect(await old).toBe(false);
-    slow.resolve({ chat, messages: [] });
+    slow.resolve(historyState(chat.id, ''));
     await Promise.resolve();
     expect(session.view.selected?.id).toBe('target');
     expect(connection.sockets).toHaveLength(1);

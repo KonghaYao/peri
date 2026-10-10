@@ -18,6 +18,8 @@ export type {
 
 export {
   BareHarnessConfig, SessionDocs, TursoStorage, SESSION_BY_ID_SQL, SESSION_LIST_SQL, initializeAcpClient,
+  CHECKPOINT_VERSION, SUPPORTED_SCHEMA_VERSIONS, CheckpointImportError,
+  InteractionResponder, parseInteractionAnswer, evaluateElicitationForm, validateElicitationContent,
   acknowledgeDelivery, credentialFingerprint, reserveDeliveryFrame, decodeAckFrame, decodeAuthFrame,
   decodeSyncFrame, encodeAckFrame, encodeAuthFrame, encodeSyncFrame, frameBytes, FRAME_ACK, FRAME_AUTH,
   FRAME_SNAPSHOT, FRAME_UPDATE, MAX_ACK_FRAME_BYTES, MAX_AUTH_FRAME_BYTES, MAX_SYNC_FRAME_BYTES,
@@ -26,7 +28,9 @@ export {
 export type {
   AckFrame, AuthFrame, DocSnapshot, DocStateVector, DocUpdate, JsonRpcNotification, PeriConfig,
   SessionStorage, SessionSummary, SyncFrame, SyncFramePayload, Transport,
+  DisplayCheckpoint, CheckpointBlock, CheckpointEntry, CheckpointToolCall, CheckpointTurn, CheckpointInteraction,
+  InteractionAnswer, InteractionCallbacks, PermissionRequest, ElicitationRequest, ElicitationDecision, FormField,
 } from "@peri-code/sdk/portable";
 
-export { SessionDocSync, SessionDocReplica, SessionViewStore } from "@peri-code/sdk/view";
-export type { SessionView, EntryView } from "@peri-code/sdk/view";
+export { SessionDocSync, SessionDocReplica, SessionViewStore, readSessionView } from "@peri-code/sdk/view";
+export type { SessionView, EntryView, ToolView, TurnView, InteractionView } from "@peri-code/sdk/view";

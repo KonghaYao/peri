@@ -2,6 +2,7 @@ import { afterAll, beforeAll, describe, expect, test } from "bun:test";
 import { Miniflare, convertV4MiniflareOptions, type WebSocket as MiniflareWebSocket } from "miniflare";
 import { SessionDocReplica, decodeSyncFrame, encodeAckFrame, encodeAuthFrame, type SyncFrame } from "../worker/sdk";
 import { readSyncState } from "../shared/sync-state";
+import type { SyncState } from '../shared/sync';
 
 const chatId = "00000000-0000-4000-8000-000000000001";
 const token = "workerd-test-token";
@@ -25,6 +26,14 @@ afterAll(async () => {
   await runtime?.dispose();
 });
 
+function entryText(entry: SyncState['entries'][number] | undefined): string {
+  return entry ? entry.blocks.flatMap((block) => (block.type === 'text' ? [block.text] : [])).join('') : '';
+}
+
+function lastText(state: SyncState | undefined): string {
+  return entryText(state?.entries.at(-1));
+}
+
 async function until(predicate: () => boolean, timeout = 4_000): Promise<void> {
   const deadline = Date.now() + timeout;
   while (!predicate()) {
@@ -47,14 +56,14 @@ async function stats(): Promise<{ identity: string; sockets: number; bufferedAmo
 }
 
 async function command(path: string, content = "fixture prompt") {
-  return runtime.dispatchFetch(new URL(`/api/chats/${chatId}/${path}`, await runtime.ready), { method: "POST",
+  return runtime.dispatchFetch(new URL(`/api/v2/chats/${chatId}/${path}`, await runtime.ready), { method: "POST",
     headers: { Authorization: `Bearer ${token}`, "Content-Type": "application/json" },
     ...(path === "messages" ? { body: JSON.stringify({ content }) } : {}),
   });
 }
 
 async function connect(autoAck = true) {
-  const response = await runtime.dispatchFetch(new URL(`/api/chats/${chatId}/sync`, await runtime.ready), { headers: { Upgrade: "websocket" } });
+  const response = await runtime.dispatchFetch(new URL(`/api/v2/chats/${chatId}/sync`, await runtime.ready), { headers: { Upgrade: "websocket" } });
   expect(response.status).toBe(101);
   const socket = response.webSocket!;
   sockets.push(socket);
@@ -100,22 +109,23 @@ describe("actual workerd read-only WS delivery and hibernation", () => {
     await until(() => client.frames.filter((frame) => frame.type === "snapshot").length >= 2);
     const snapshots = client.frames.filter((frame) => frame.type === "snapshot");
     expect(snapshots[1]!.snapshot.generation).not.toBe(oldGeneration);
-    await until(() => client.state().messages.at(-1)?.content.includes("piece") === true);
+    await until(() => lastText(client.state()).includes("piece"));
     expect((await command("cancel")).status).toBe(200);
     await until(() => !client.state().running);
-    expect(client.state().messages.at(-1)?.status).toBe("cancelled");
+    expect(client.state().entries.at(-1)?.status).toBe("cancelled");
     expect((await command("messages", "explicit continuation")).status).toBe(202);
-    await until(() => client.state().messages.length >= 4 && client.state().running);
+    await until(() => client.state().entries.length >= 4 && client.state().running);
     expect((await command("cancel")).status).toBe(200);
     await until(() => !client.state().running);
     expect((await stats()).cancels).toBe(2);
-    const history = client.state().messages;
+    const history = client.state().entries.map(entryText);
     const hostStarts = (await stats()).starts;
     await untilAsync(async () => (await stats()).attachments.every((attachment) => attachment.pending.length === 0));
     await runtime.unsafeEvictDurableObject("ws-contract", "TestSession", { name: "chat", webSockets: "hibernate" });
-    await runtime.dispatchFetch(new URL(`/api/chats/${chatId}`, await runtime.ready), { headers: { Authorization: `Bearer ${token}` } });
+    await runtime.dispatchFetch(new URL(`/api/v2/chats/${chatId}`, await runtime.ready), { headers: { Authorization: `Bearer ${token}` } });
     await until(() => client.frames.filter((frame) => frame.type === "snapshot").length >= 3);
-    expect(client.state().messages).toEqual(history);
+    // 旧记录持久化路径能重建文本；精确身份往返由 P3 checkpoint import 保证。
+    expect(client.state().entries.map(entryText)).toEqual(history);
     expect((await stats()).starts).toBe(hostStarts);
     client.socket.close(1000, "Done");
     client.replica.destroy();
@@ -132,7 +142,7 @@ describe("actual workerd read-only WS delivery and hibernation", () => {
       cancel() { bodyCancelled = true; },
     });
     let responded = false;
-    const response = runtime.dispatchFetch(new URL(`/api/chats/${chatId}/cancel`, await runtime.ready), {
+    const response = runtime.dispatchFetch(new URL(`/api/v2/chats/${chatId}/cancel`, await runtime.ready), {
       method: "POST", headers: { Authorization: `Bearer ${token}` }, body,
     }).then((result) => { responded = true; return result; });
     try {
@@ -143,7 +153,7 @@ describe("actual workerd read-only WS delivery and hibernation", () => {
     expect(bodyCancelled).toBe(false);
     expect((await command("cancel")).status).toBe(200);
     for (const [size, status] of [[65_536, 200], [65_537, 413]] as const) {
-      const bounded = await runtime.dispatchFetch(new URL(`/api/chats/${chatId}/cancel`, await runtime.ready), {
+      const bounded = await runtime.dispatchFetch(new URL(`/api/v2/chats/${chatId}/cancel`, await runtime.ready), {
         method: "POST", headers: { Authorization: `Bearer ${token}` }, body: "x".repeat(size),
       });
       expect(bounded.status).toBe(status);
@@ -158,10 +168,10 @@ describe("actual workerd read-only WS delivery and hibernation", () => {
     await until(() => client.closeCode() !== undefined);
     expect(client.closeCode()).toBe(1011);
     await Bun.sleep(1_100);
-    const response = await runtime.dispatchFetch(new URL(`/api/chats/${chatId}`, await runtime.ready), { headers: { Authorization: `Bearer ${token}` } });
-    const record = await response.json() as { messages: { status: string; content: string }[] };
-    expect(record.messages.at(-1)?.status).toBe("completed");
-    expect(record.messages.at(-1)?.content).toContain("piece");
+    const response = await runtime.dispatchFetch(new URL(`/api/v2/chats/${chatId}`, await runtime.ready), { headers: { Authorization: `Bearer ${token}` } });
+    const record = await response.json() as SyncState;
+    expect(record.entries.at(-1)?.status).toBe("completed");
+    expect(entryText(record.entries.at(-1))).toContain("piece");
     client.replica.destroy();
   }, 10_000);
 
@@ -186,4 +196,88 @@ describe("actual workerd read-only WS delivery and hibernation", () => {
     expect((await stats()).starts).toBe(starts);
     client.replica.destroy();
   }, 15_000);
+});
+
+describe("P5 closed-loop acceptance over real workerd storage", () => {
+  const authed = { Authorization: `Bearer ${token}` };
+  const json = { ...authed, "Content-Type": "application/json" };
+  const fixture = async (path: string, body: unknown = {}) =>
+    runtime.dispatchFetch(new URL(`/fixture/${path}`, await runtime.ready), { method: "POST", body: JSON.stringify(body) });
+
+  test("a tool payload lives in real DO storage and is served by the authenticated endpoint", async () => {
+    expect((await fixture("tool-result", { text: "P".repeat(6000) })).status).toBe(200);
+    const client = await connect();
+    client.socket.send(encodeAuthFrame({ type: "auth", token }));
+    await until(() => client.frames.length > 0);
+    expect((await command("messages")).status).toBe(202);
+    await untilAsync(async () => {
+      const tool = client.state().toolCalls.find((item) => item.toolCallId === "tool-1");
+      return tool?.resultRef !== undefined;
+    });
+    const ref = client.state().toolCalls.find((item) => item.toolCallId === "tool-1")!.resultRef!;
+    expect(ref.bytes).toBeGreaterThan(4096);
+    const path = new URL(`/api/v2/chats/${chatId}/payloads/${encodeURIComponent(ref.id)}`, await runtime.ready);
+    const response = await runtime.dispatchFetch(path, { headers: authed });
+    expect(response.status).toBe(200);
+    expect(response.headers.get("Cache-Control")).toBe("no-store");
+    const payload = await response.json() as { id: string; bytes: number; json: string };
+    expect(payload).toMatchObject({ id: ref.id, bytes: ref.bytes });
+    expect(JSON.parse(payload.json)).toMatchObject({ contentText: "big result" });
+    // 未鉴权 / 未知引用 / 其它会话不泄露。
+    expect((await runtime.dispatchFetch(path)).status).toBe(401);
+    const missing = new URL(`/api/v2/chats/${chatId}/payloads/missing-ref`, await runtime.ready);
+    expect((await runtime.dispatchFetch(missing, { headers: authed })).status).toBe(404);
+    const otherChat = new URL(`/api/v2/chats/00000000-0000-4000-8000-000000000099/payloads/${encodeURIComponent(ref.id)}`, await runtime.ready);
+    expect([404]).toContain((await runtime.dispatchFetch(otherChat, { headers: authed })).status);
+    client.socket.close(1000, "Done");
+  });
+
+  test("permission answers travel browser command → live responder → ACP response", async () => {
+    expect((await fixture("blocked")).status).toBe(200);
+    const client = await connect();
+    client.socket.send(encodeAuthFrame({ type: "auth", token }));
+    await until(() => client.frames.length > 0);
+    expect((await command("messages")).status).toBe(202);
+    const pending = fixture("permission", { toolCallId: "tool-1" });
+    await untilAsync(async () => client.state().pendingInteractions.length === 1);
+    const id = client.state().pendingInteractions[0]!.id;
+    const answerPath = new URL(`/api/v2/chats/${chatId}/interactions/${encodeURIComponent(id)}`, await runtime.ready);
+    const body = JSON.stringify({ kind: "permission", decision: "allow_once" });
+    const accepted = await runtime.dispatchFetch(answerPath, { method: "POST", headers: json, body });
+    expect(accepted.status).toBe(202);
+    expect(await (await pending).json()).toEqual({ result: { outcome: { outcome: "selected", optionId: "allow_once" } } });
+    await untilAsync(async () => client.state().pendingInteractions.length === 0);
+    expect(client.state().interactions.at(-1)).toMatchObject({ id, status: "resolved", outcome: "allow_once" });
+    // 重复回答与未经鉴权的回答都被拒绝。
+    expect((await runtime.dispatchFetch(answerPath, { method: "POST", headers: json, body })).status).toBe(409);
+    expect((await runtime.dispatchFetch(answerPath, { method: "POST", headers: { "Content-Type": "application/json" }, body })).status).toBe(401);
+    expect((await command("cancel"))).toBeDefined();
+    expect((await command("cancel")).status).toBe(200);
+    client.socket.close(1000, "Done");
+  });
+
+  test("an unconfirmed host close blocks the chat and expires pending interactions", async () => {
+    expect((await fixture("blocked")).status).toBe(200);
+    expect((await fixture("close-failure")).status).toBe(200);
+    const client = await connect();
+    client.socket.send(encodeAuthFrame({ type: "auth", token }));
+    await until(() => client.frames.length > 0);
+    expect((await command("messages", "third turn")).status).toBe(202);
+    const pending = fixture("permission", { toolCallId: "tool-9" });
+    await untilAsync(async () => client.state().pendingInteractions.length === 1);
+    const id = client.state().pendingInteractions[0]!.id;
+    // 取消请求成立以宿主关闭确认为准：未确认时命令以错误收尾（不伪装成功停止）。
+    expect((await command("cancel")).status).toBe(500);
+    await untilAsync(async () => client.state().executionBlocked === true);
+    // 断宿主：未决交互失效，回答被拒，后续命令保持阻断。
+    expect(client.state().pendingInteractions).toEqual([]);
+    expect(client.state().interactions.at(-1)).toMatchObject({ id, status: "expired" });
+    await expect(pending.then((response) => response.json()))
+      .resolves.toEqual({ result: { outcome: { outcome: "selected", optionId: "reject_once" } } });
+    const answerPath = new URL(`/api/v2/chats/${chatId}/interactions/${encodeURIComponent(id)}`, await runtime.ready);
+    expect((await runtime.dispatchFetch(answerPath, { method: "POST", headers: json,
+      body: JSON.stringify({ kind: "permission", decision: "allow_once" }) })).status).toBe(409);
+    expect((await command("messages", "after block")).status).toBe(503);
+    client.socket.close(1000, "Done");
+  }, 20_000);
 });

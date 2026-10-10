@@ -412,7 +412,7 @@
         renderMessages(view);
         if (wasAtBottom) scrollToLatest();
 
-        const status = view.session?.activeTurnInteractionStatus ?? view.activeTurnStatus ?? "空闲";
+        const status = view.session?.activeTurnInteractionStatus ?? view.activeTurn?.status ?? "空闲";
         const queued = view.inputQueue?.items?.filter((item) =>
           ["queued", "dispatching", "claimed"].includes(item.state)).length ?? 0;
         if (session) $("status").textContent = `已连接 · ${status}${queued ? ` · ${queued} 条待处理输入` : ""}`;

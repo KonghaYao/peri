@@ -1,18 +1,18 @@
 import { ChatApi, errorText } from '../api/client';
 import { ChatSync, type ChatSyncOptions, type SyncState, type SyncStatus } from '../api/sync';
 import type { createChatQueries } from './queries';
-import type { Chat, Message, Phase } from './types';
+import type { Chat, Phase } from './types';
 
 export interface ChatView {
   selected: Chat | null;
-  messages: Message[];
+  state: SyncState | null;
   phase: Phase;
   historyReady: boolean;
   error: string;
 }
 
 export class ChatSession {
-  view: ChatView = { selected: null, messages: [], phase: 'idle', historyReady: true, error: '' };
+  view: ChatView = { selected: null, state: null, phase: 'idle', historyReady: true, error: '' };
   private revision = 0;
   private selectionRequest = 0;
   private disposed = false;
@@ -54,10 +54,10 @@ export class ChatSession {
 
   private receive(state: SyncState) {
     this.state = state;
-    if (this.pending && (state.running || JSON.stringify(state.messages) !== this.baseline)) this.pending = false;
+    if (this.pending && (state.running || JSON.stringify(state.entries) !== this.baseline)) this.pending = false;
     this.queries.setHistory(state);
     this.queries.mergeChat(state.chat);
-    this.update({ selected: state.chat, messages: state.messages,
+    this.update({ selected: state.chat, state,
       error: state.error ?? (this.uncertain ? this.view.error : ''), phase: this.phase() });
   }
 
@@ -88,7 +88,7 @@ export class ChatSession {
       const controller = new AbortController();
       this.navigation = controller;
       const current = () => !this.disposed && this.revision === revision && !controller.signal.aborted;
-      this.update({ selected: chat, messages: [], historyReady: false, phase: 'loading', error: '' });
+      this.update({ selected: chat, state: null, historyReady: false, phase: 'loading', error: '' });
       try {
         if (!this.token) {
           this.update({ phase: 'idle', historyReady: true });
@@ -100,7 +100,7 @@ export class ChatSession {
         this.queries.mergeChat(target);
         const history = await this.queries.readHistory(target.id, controller.signal);
         if (!current()) return false;
-        this.update({ selected: history.chat, messages: history.messages, phase: 'syncing' });
+        this.update({ selected: history.chat, state: history, phase: 'syncing' });
         this.queries.mergeChat(history.chat);
         const ready = new Promise<boolean>(resolve => { this.releaseReady = resolve; });
         this.sync = new ChatSync({
@@ -124,7 +124,7 @@ export class ChatSession {
     const revision = this.revision;
     const chatId = this.view.selected.id;
     this.pending = true;
-    this.baseline = JSON.stringify(this.state?.messages ?? []);
+    this.baseline = JSON.stringify(this.state?.entries ?? []);
     this.update({ phase: 'streaming', error: '' });
     const command = Promise.resolve().then(() => this.api.send(chatId, content.trim()));
     this.command = command;

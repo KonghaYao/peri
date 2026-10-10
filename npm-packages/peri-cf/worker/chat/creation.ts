@@ -43,6 +43,7 @@ export async function createPeriSession(env: Env, title: string, startTransport:
         });
       throw error;
     }
+    // 会话创建阶段没有 prompt，也就不会有交互：保持最小默认拒绝（交互接线只在执行轮次内）。
     transport.setRequestHandler((method) => {
       if (method === "session/request_permission") return { outcome: { outcome: "cancelled" } };
       throw new Error("ACP client capability is not authorized");

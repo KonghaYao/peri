@@ -33,13 +33,13 @@ describe("HTTP runtime diagnostics", () => {
       async create() { throw new Error("Unexpected create"); },
       async get() { throw new Error("Unexpected get"); },
     };
-    const response = await createApi(() => repository).fetch(new Request("https://app.test/api/chats", {
+    const response = await createApi(() => repository).fetch(new Request("https://app.test/api/v2/chats", {
       headers: { Authorization: "Bearer synthetic-app-token" },
     }), env);
     expect(response.status).toBe(500);
     expect(response.headers.get("Cache-Control")).toBe("no-store");
     expect(await response.json()).toEqual({ error: `${failure.message}\nCaused by: ${cause.message}` });
-    expect(errorLog).toHaveBeenCalledWith("Peri API request failed", { method: "GET", path: "/api/chats" }, failure);
+    expect(errorLog).toHaveBeenCalledWith("Peri API request failed", { method: "GET", path: "/api/v2/chats" }, failure);
   });
 
   test("retains nested and aggregate causes without looping on circular causes", async () => {
@@ -110,7 +110,7 @@ describe("HTTP runtime diagnostics", () => {
     } };
     errorLog = spyOn(console, "error").mockImplementation(() => {});
     const app = createApi(() => { throw new Error("Unexpected repository access"); });
-    const path = "/api/chats/00000000-0000-4000-8000-000000000001/sync";
+    const path = "/api/v2/chats/00000000-0000-4000-8000-000000000001/sync";
     const response = await app.fetch(new Request(`https://app.test${path}`, {
       headers: { Upgrade: "websocket", Authorization: "Bearer synthetic-app-token" },
     }), upgradeEnv);
@@ -125,7 +125,7 @@ describe("HTTP runtime diagnostics", () => {
     errorLog = spyOn(console, "error").mockImplementation(() => {});
     const app = createApi(() => { throw new Error("Unexpected repository access"); });
     for (const authorization of [undefined, "Bearer synthetic-wrong-token", "Bearer synthetic-app-token extra"]) {
-      const response = await app.fetch(new Request("https://app.test/api/chats", {
+      const response = await app.fetch(new Request("https://app.test/api/v2/chats", {
         headers: authorization ? { Authorization: authorization } : {},
       }), env);
       expect(response.status).toBe(401);

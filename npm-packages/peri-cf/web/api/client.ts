@@ -1,15 +1,34 @@
-import { chatSchema, chatListSchema, chatDetailSchema, type Chat, type ChatDetail } from '../../shared/chat';
+import { chatSchema, chatListSchema, type Chat } from '../../shared/chat';
+import { syncStateSchema, type SyncState } from '../../shared/sync';
+import type { InteractionAnswer } from '@peri-code/sdk/view';
 
 export function errorText(error: unknown): string {
   return (error instanceof Error ? error.message : '请求失败，请稍后重试。')
     .replace(/[\u0000-\u0008\u000b-\u001f\u007f-\u009f]/g, '').slice(0, 512);
 }
 
+/** 交互回答：鉴权命令，直接结算 live reverse request；不写 Y.Doc。 */
+export async function submitInteractionAnswer(
+  token: string, chatId: string, interactionId: string, answer: InteractionAnswer,
+): Promise<void> {
+  const response = await fetch(`/api/v2/chats/${encodeURIComponent(chatId)}/interactions/${encodeURIComponent(interactionId)}`, {
+    method: 'POST', cache: 'no-store',
+    headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' },
+    body: JSON.stringify(answer),
+  });
+  if (response.ok) return;
+  const body = await response.json().catch(() => null) as { error?: unknown } | null;
+  const reason = typeof body?.error === 'string' ? body.error : `HTTP ${response.status}`;
+  if (response.status === 409) throw new Error('这个交互已经结算或失效，请刷新后重试。');
+  if (response.status === 401 || response.status === 403) throw new Error('身份验证失败，请在设置中检查访问令牌。');
+  throw new Error(`回答未能提交：${reason}`);
+}
+
 export class ChatApi {
   constructor(private readonly token: string) {}
 
   private async request(path: string, options: RequestInit = {}): Promise<Response> {
-    const response = await fetch(`/api/chats${path}`, {
+    const response = await fetch(`/api/v2/chats${path}`, {
       ...options,
       cache: 'no-store',
       headers: {
@@ -52,11 +71,12 @@ export class ChatApi {
     return result.data;
   }
 
-  async detail(chatId: string, signal?: AbortSignal): Promise<ChatDetail> {
+  async detail(chatId: string, signal?: AbortSignal): Promise<SyncState> {
     const payload: unknown = await (await this.request(`/${encodeURIComponent(chatId)}`, { signal })).json();
-    const result = chatDetailSchema.safeParse(payload);
+    const result = syncStateSchema.safeParse(payload);
     if (!result.success) throw new Error('会话历史格式不正确。');
     if (result.data.chat.id !== chatId) throw new Error('服务端返回了不匹配的会话。');
+    if (result.data.readiness === 'unsupported') throw new Error('会话使用了不受支持的数据版本，请刷新页面或升级应用后再继续。');
     return result.data;
   }
 

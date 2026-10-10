@@ -1,4 +1,4 @@
-import { lazy, Suspense, useCallback, useEffect, useRef, useState } from 'react';
+import { lazy, Suspense, useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import {
   Activity, ArrowRight, ArrowUp, BookOpen, ChevronDown, Code2, Feather, Menu, MessageSquare,
   PanelLeftClose, Plus, RefreshCw, Settings2, ShieldCheck, Sparkles, Square, X,
@@ -6,9 +6,11 @@ import {
 import { Settings } from './settings/Settings';
 import { readToken, saveToken, subscribeToken, type TokenSaveFailure } from './settings/tokenStorage';
 import { useChat } from './chat/useChat';
+import { httpPayloadReader, unavailablePayloadReader } from './chat/payloadReader';
 import type { Chat } from './chat/types';
 
 const MessageList = lazy(() => import('./chat/MessageList').then((module) => ({ default: module.MessageList })));
+const ChatPanels = lazy(() => import('./chat/Panels').then((module) => ({ default: module.ChatPanels })));
 const InstancesPanel = lazy(() => import('./instances/InstancesPanel').then((module) => ({ default: module.InstancesPanel })));
 
 const tokenFailureText: Record<TokenSaveFailure, string> = {
@@ -65,6 +67,11 @@ function Workspace({ token, onTokenChange }: { token: string; onTokenChange: (to
   const sidebarTrigger = useRef<HTMLButtonElement>(null);
   const chat = useChat(token);
   const running = ['streaming', 'cancelling', 'blocked'].includes(chat.phase);
+  // 浏览器全文读取：绑定当前会话与令牌；未就绪时由占位 reader 明确报告不可用。
+  const payloadReader = useMemo(
+    () => (chat.selected && token ? httpPayloadReader(chat.selected.id, token) : unavailablePayloadReader),
+    [chat.selected?.id, token],
+  );
   const busy = chat.phase !== 'idle' || submitting;
   const navigationDisabled = ['cancelling', 'syncing'].includes(chat.phase) || submitting;
 
@@ -176,8 +183,9 @@ function Workspace({ token, onTokenChange }: { token: string; onTokenChange: (to
             <button type="button" className="icon-button" aria-label="关闭错误提示" onClick={() => { setStorageError(''); chat.dismissError(); }}><X size={17} /></button>
           </div>}
           {chat.phase === 'loading' && !submitting ? <div className="loading-state" role="status"><RefreshCw className="spinning" size={22} /><p>正在加载会话…</p></div>
-            : chat.messages.length > 0 ? <Suspense fallback={<div role="status">正在加载消息…</div>}>
-              <MessageList messages={chat.messages} phase={chat.phase} chatId={chat.selected?.id} />
+            : (chat.state?.entries.length ?? 0) > 0 ? <Suspense fallback={<div role="status">正在加载消息…</div>}>
+              <ChatPanels state={chat.state} chatId={chat.selected?.id} token={token} />
+              <MessageList entries={chat.state?.entries ?? []} phase={chat.phase} chatId={chat.selected?.id} reader={payloadReader} />
             </Suspense>
               : <div className="welcome"><div className="welcome-symbol"><Sparkles size={33} strokeWidth={1.35} /></div>
                 <div className="welcome-eyebrow">一点好奇，无限可能</div><h1>今天，我们一起<br className="mobile-only" />探索什么？</h1><p className="welcome-description">一个问题、一闪灵感，或一件想完成的事。<br />从这里开始，把想法变成下一步。</p>

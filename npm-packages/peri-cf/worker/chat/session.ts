@@ -1,7 +1,10 @@
 import { HTTPException } from "hono/http-exception";
 import { logError, publicError } from "../api/http";
-import type { AcpTransport, ChatRepository, Env, SessionRecord, StartTransport } from "../types";
+import type { AcpTransport, ChatRepository, Env, StartTransport } from "../types";
 import { DeadlineError, PeriWasmHostStartupError, withDeadline, type PeriWasmHostCleanupOutcome } from "../sdk";
+import { ChatRecordStore, CHECKPOINT_INDEX_MAX_BYTES, INDEX_ADMISSION_HEADROOM_BYTES, RecordCapacityError,
+  emptyStoredRecord, recordBytes, type StoredRecord } from "./record";
+import { ChatInteractionQueue } from "./interactions";
 import { initializeTransport, WORKSPACE_CWD } from "./bootstrap";
 import { createChatRoutes } from "./routes";
 import { ChatProjection } from "./projection";
@@ -10,8 +13,11 @@ import { WasmResources } from "../wasm/resources";
 import { CF_WASM_CLEANUP_TIMEOUT_MS } from "../../shared/runtime-limits";
 import type { AgentResources } from "../../shared/resources";
 
-export const MAX_TRANSCRIPT_BYTES = 1_048_576;
 export const MAX_REPLY_BYTES = 524_288;
+/** 浏览器单次载荷下载上限（与 SDK 默认展示预算一致）；更大的结果需要流式下载（未实现）。 */
+export const MAX_PAYLOAD_RESPONSE_BYTES = 1_048_576;
+/** 索引接纳上限（已批准 1 MiB）：接近上限时拒绝新 turn。 */
+export const MAX_INDEX_BYTES = CHECKPOINT_INDEX_MAX_BYTES;
 /** ACP control requests and cancellation keep their own budgets; neither proves a stop on timeout. */
 export const ACP_CONTROL_TIMEOUT_MS = 20_000;
 export const CANCELLATION_TIMEOUT_MS = 65_000;
@@ -30,6 +36,8 @@ interface ActiveRun {
   cancelTimer?: ReturnType<typeof setTimeout>;
   startup: AbortController;
   startupCleanupConfirmed?: boolean;
+  /** 本轮执行的 live 交互登记表；轮次结束/宿主关闭时撤销。 */
+  interactions: ChatInteractionQueue;
 }
 
 function activeRun(): ActiveRun {
@@ -41,13 +49,15 @@ function activeRun(): ActiveRun {
   const cancelExpired = new Promise<never>((_, reject) => { expireCancel = reject; });
   void settlement.catch(() => {});
   void cancelExpired.catch(() => {});
-  return { promptWritten: false, cancelRequested: false, settlement, settle, cancelExpired, expireCancel, startup: new AbortController() };
+  return { promptWritten: false, cancelRequested: false, settlement, settle, cancelExpired, expireCancel,
+    startup: new AbortController(), interactions: new ChatInteractionQueue() };
 }
 
 export class ChatSessionCore {
-  private record?: SessionRecord;
+  private record?: StoredRecord;
   private ready?: Promise<void>;
   private readonly projection = new ChatProjection();
+  private readonly records: ChatRecordStore;
   private readonly sockets: ChatSockets;
   private startupBlock?: ActiveRun;
   private active?: ActiveRun;
@@ -58,6 +68,7 @@ export class ChatSessionCore {
   constructor(private readonly state: HibernatingSessionState, private readonly env: Env, private readonly startTransport: StartTransport,
     private readonly repository: Pick<ChatRepository, "get">,
     private readonly upgrade: UpgradeSocket = upgradeSocket) {
+    this.records = new ChatRecordStore(state.storage);
     this.sockets = new ChatSockets(env, state, async (id) => {
       await this.ensureSession(id);
       await this.projection.flush();
@@ -66,6 +77,8 @@ export class ChatSessionCore {
     this.routes = createChatRoutes({
       read: (id) => this.readChat(id),
       resources: (id) => this.readResources(id),
+      payload: (id, refId) => this.readPayload(id, refId),
+      interaction: (id, interactionId, body) => this.answerInteraction(id, interactionId, body),
       send: (id, content, signal) => this.sendMessage(id, content, signal),
       cancel: (id) => this.cancelMessage(id),
       sync: (id, request) => this.sockets.open(id, request),
@@ -73,21 +86,14 @@ export class ChatSessionCore {
   }
 
   private async restore(): Promise<void> {
-    this.record = await this.state.storage.get<SessionRecord>("session");
-    this.unavailable = this.record?.executionBlocked === true;
-    if (!this.record) return;
-    if (!this.record.running) { await this.projection.restore(this.record); return; }
-    this.unavailable = true;
-    this.record.executionBlocked = true;
-    for (const message of this.record.messages) {
-      if (message.status === "running") {
-        message.status = "error";
-        message.error = "Execution interrupted by host restart; not automatically resumed";
-      }
-    }
-    this.record.running = false;
-    await this.projection.restore(this.record);
-    await this.save();
+    const loaded = await this.records.load();
+    if (!loaded.record) return;
+    this.record = loaded.record;
+    this.unavailable = loaded.record.executionBlocked === true;
+    await this.projection.restoreCheckpoint(await this.records.hydrate(loaded.record));
+    // 重启打断属于宿主生命周期事实：展示为应用级 error（生成结果本身不改写；记录已在转换时收敛）。
+    if (loaded.source === "converted" && loaded.interrupted) this.projection.setRestartInterrupted();
+    await this.records.sweep();
   }
 
   async fetch(request: Request): Promise<Response> {
@@ -105,26 +111,56 @@ export class ChatSessionCore {
 
   webSocketError(socket: SyncSocket, error: unknown): void { this.sockets.error(socket, error); }
 
-  private async ensureSession(id: string, refresh = false): Promise<SessionRecord> {
+  private async ensureSession(id: string, refresh = false): Promise<StoredRecord> {
     await (this.ready ??= this.restore());
     if (this.record && this.record.chat.id !== id) throw new HTTPException(404, { message: "Chat not found" });
     if (!this.record || refresh) {
       const chat = await this.repository.get(id);
       if (!chat || chat.id !== id) throw new HTTPException(404, { message: "Chat not found" });
       if (this.record && this.record.chat.id !== id) throw new HTTPException(404, { message: "Chat not found" });
-      if (!this.record) {
-        this.record = { chat, messages: [] };
-        await this.projection.restore(this.record);
-      }
+      if (!this.record) this.record = emptyStoredRecord(chat);
       else this.record.chat = chat;
     }
+    this.projection.setRunState({ chat: this.record.chat, running: this.record.running, executionBlocked: this.unavailable });
     return this.record;
   }
 
+  /** 交互回答：浏览器经鉴权命令回答 pending 交互，直接结算 live reverse request；不写 Y.Doc。 */
+  private async answerInteraction(id: string, interactionId: string, body: unknown): Promise<Response> {
+    const record = await this.ensureSession(id);
+    const headers = { "Cache-Control": "no-store" };
+    const result = this.active?.interactions.answer(record.chat.id, interactionId, body) ?? "unknown";
+    if (result === "accepted") return Response.json({ accepted: true }, { status: 202, headers });
+    if (result === "invalid") throw new HTTPException(400, { message: "Invalid interaction response" });
+    if (result === "kind_mismatch") throw new HTTPException(400, { message: "Interaction kind does not match" });
+    // 迟到/重复/跨会话/已失效统一按不可回答处理。
+    throw new HTTPException(409, { message: "Interaction is not pending" });
+  }
+
+  /** 载荷全文读取（浏览器经鉴权端点）：失败码沿用 SDK 契约，未知引用不泄露其它会话存在性。 */
+  private async readPayload(id: string, refId: string): Promise<Response> {
+    await this.ensureSession(id);
+    const headers = { "Cache-Control": "no-store" };
+    const result = await this.records.readPayload(refId);
+    if (result.status === "unknown") {
+      return Response.json({ error: { code: "unavailable", message: "载荷引用不存在或已被回收" } }, { status: 404, headers });
+    }
+    if (result.status === "missing" || result.status === "mismatch") {
+      return Response.json({ error: { code: "integrity_error", message: "载荷分段缺失或字节数不符" } }, { status: 500, headers });
+    }
+    if (result.bytes > MAX_PAYLOAD_RESPONSE_BYTES) {
+      return Response.json({ error: { code: "too_large",
+        message: `载荷 ${result.bytes} 字节超过单次下载上限 ${MAX_PAYLOAD_RESPONSE_BYTES}，需要流式下载（未实现）` } },
+        { status: 413, headers });
+    }
+    return Response.json({ id: refId, bytes: result.bytes, json: result.json }, { headers });
+  }
+
   private async readChat(id: string): Promise<Response> {
-    const record = await this.ensureSession(id, true);
+    await this.ensureSession(id, true);
     await this.projection.flush();
-    return Response.json({ chat: record.chat, messages: record.messages });
+    // HTTP 首屏与 WS 推送共用同一 DTO 与身份（SDK view 物化）。
+    return Response.json(this.projection.state(), { headers: { "Cache-Control": "no-store" } });
   }
 
   private async readResources(id: string): Promise<Response> {
@@ -160,19 +196,17 @@ export class ChatSessionCore {
     const run = activeRun();
     this.active = run;
     try {
-      const nextRecord = { ...this.record!, messages: [...this.record!.messages,
-        { id: crypto.randomUUID(), role: "user", content, createdAt: new Date().toISOString(), status: "completed" },
-        { id: crypto.randomUUID(), role: "assistant", content: "", createdAt: new Date().toISOString(), status: "running" },
-      ] };
-      if (new TextEncoder().encode(JSON.stringify(nextRecord)).byteLength > MAX_TRANSCRIPT_BYTES)
-        throw new HTTPException(413, { message: "Chat history exceeds the 1 MiB admission limit; create a new chat" });
+      this.assertIndexHeadroom();
       this.record!.running = true;
+      // 先发布运行元数据再投影用户输入：否则副本会先看到条目而 running 仍为 false（误判轮次结束）。
+      this.projection.setRunState({ chat: this.record!.chat, running: true, executionBlocked: this.unavailable });
       await this.projection.start(content);
       await this.save();
       this.state.waitUntil(this.execute(run, content));
       return Response.json({ accepted: true }, { status: 202 });
     } catch (error) {
       this.active = undefined;
+      run.interactions.close();
       clearTimeout(run.cancelTimer);
       run.settle(new Error(publicError(error, this.env)));
       if (this.record?.running) {
@@ -212,9 +246,15 @@ export class ChatSessionCore {
       this.resources = resources;
       run.transport = await this.startHost(run, resources);
       const transport = run.transport;
-      transport.setRequestHandler((method) => {
-        if (method === "session/request_permission") return { outcome: { outcome: "cancelled" } };
-        throw new Error("ACP client capability is not authorized");
+      // 反向交互交由 SDK 投影处理：记录在 Yjs、回答经鉴权命令回灌；未接线的方法保持默认拒绝。
+      transport.setRequestHandler((method, params) => {
+        if (method !== "session/request_permission" && method !== "elicitation/create") {
+          throw new Error("ACP client capability is not authorized");
+        }
+        return this.projection.handleRequest(method, params, run.sessionId, {
+          onPermissionRequest: (request) => run.interactions.requestPermission(request),
+          onElicitation: (request) => run.interactions.requestElicitation(request),
+        });
       });
       await initializeTransport(transport);
       run.sessionId = this.record!.chat.id;
@@ -222,6 +262,8 @@ export class ChatSessionCore {
         cwd: WORKSPACE_CWD, mcpServers: [], sessionId: run.sessionId,
       }), 20_000, "ACP session/load");
       if (!loaded || typeof loaded !== "object") throw new Error("Invalid ACP session/load response");
+      this.projection.seedConfig(loaded);
+      this.projection.setTaskSnapshotRequester(() => transport.request("session/bg-tasks", { sessionId: run.sessionId! }));
       if (run.cancelRequested) {
         status = "cancelled";
       } else {
@@ -279,6 +321,7 @@ export class ChatSessionCore {
       }
     } finally {
       unsubscribe?.();
+      this.projection.setTaskSnapshotRequester(null);
       if (run.transport) {
         try {
           await withDeadline(run.transport.close(), 20_000, "ACP host close");
@@ -292,7 +335,10 @@ export class ChatSessionCore {
       }
       this.record!.running = false;
       try {
+        // 先让投影结算：abortAll 把未决交互置 expired 并中止信号，再兜底撤销 live 队列，
+        // 这样宿主关闭导致的挂起不会被记成用户拒绝。
         await this.projection.complete(failure !== undefined ? "error" : status, failure !== undefined ? publicError(failure, this.env) : undefined);
+        run.interactions.close();
         await this.save();
       } catch (error) {
         logError("Peri chat persistence failed", error);
@@ -314,9 +360,22 @@ export class ChatSessionCore {
     }
   }
 
+  /** 持久化展示材料：先写全部分段，再提交索引（写入顺序由记录适配器保证）。 */
   private async save(): Promise<void> {
     await this.projection.flush();
-    await this.state.storage.put("session", this.record!);
+    this.projection.setRunState({ chat: this.record!.chat, running: this.record!.running, executionBlocked: this.unavailable });
+    await this.records.commit({
+      chat: this.record!.chat, running: this.record!.running === true,
+      executionBlocked: this.unavailable, checkpoint: this.projection.checkpoint(),
+    });
+  }
+
+  /** 接纳预检：索引接近 1 MiB 上限时拒绝新 turn，避免写入被截断。 */
+  private assertIndexHeadroom(): void {
+    const indexBytes = recordBytes({ ...this.record!, checkpoint: this.projection.checkpoint() });
+    if (indexBytes + INDEX_ADMISSION_HEADROOM_BYTES > MAX_INDEX_BYTES) {
+      throw new HTTPException(413, { message: "Chat display index exceeds the 1 MiB admission limit; create a new chat" });
+    }
   }
 
   private async startHost(run: ActiveRun, resources: WasmResources): Promise<AcpTransport> {

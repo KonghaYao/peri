@@ -24,13 +24,17 @@
 | SPA 与同源 Worker 开发构建 | `npm-packages/peri-cf/vite.config.ts` |
 | Workers、DO 与静态资源绑定 | `npm-packages/peri-cf/wrangler.jsonc` |
 | Workers 业务入口 | `npm-packages/peri-cf/worker/index.ts` |
-| 前后端共享 Zod schema 与 DTO | `npm-packages/peri-cf/shared/chat.ts` |
-| 前后端展示 DTO 的 Zod schema | `npm-packages/peri-cf/shared/sync.ts`（帧编解码与交付信用在 SDK） |
-| SDK view 到 UI 的共享展示转换 | `npm-packages/peri-cf/shared/sync-state.ts` |
+| 前后端共享 Zod schema 与 DTO（Entry/Block/Tool/Turn/Interaction/任务/计划/队列，块式 `entries`） | `npm-packages/peri-cf/shared/chat.ts` |
+| SyncState（应用运行元数据 + SDK view 物化条目/工具/轮次/面板）Zod schema | `npm-packages/peri-cf/shared/sync.ts`（帧编解码与交付信用在 SDK） |
+| SDK view 到 UI 的共享展示转换（无 flatten、无 entryMetadata 回填；不支持 pair 抛 `UnsupportedSchemaError`） | `npm-packages/peri-cf/shared/sync-state.ts` |
 | Hono API、共享 middleware 与边界校验 | `npm-packages/peri-cf/worker/api/` |
 | Hono JSON 校验与实际字节上限；取消请求在响应前有界消费 body | `npm-packages/peri-cf/worker/api/json.ts` |
 | 聊天 DO 路由、运行状态与 `session/cancel` 取消 | `npm-packages/peri-cf/worker/chat/routes.ts`、`session.ts` |
-| SDK ACP/Yjs 投影与持久展示恢复 | `npm-packages/peri-cf/worker/chat/projection.ts` |
+| SDK ACP/Yjs 投影与持久展示恢复（`state()` 与 HTTP 首屏/WS 同 DTO；导入替换文档对） | `npm-packages/peri-cf/worker/chat/projection.ts` |
+| DO 记录适配（`recordVersion:2` 索引 + `payload:<id>:<n>` 1 MiB 分段、v1 转换与 `record:v1-backup`、孤儿/过期回收） | `npm-packages/peri-cf/worker/chat/record.ts` |
+| 载荷全文鉴权端点与版本化入口 | `worker/chat/routes.ts` + `worker/api/router.ts`（`/api/v2/chats/...`；旧 chat 路径 426） |
+| 反向交互往返（权限/提问） | ACP reverse request → `worker/chat/session.ts` 的 `setRequestHandler` → SDK 投影 → WS/view → 浏览器 `web/chat/Panels.tsx` + `interactionForm.ts` → 鉴权命令 `POST /api/v2/chats/:id/interactions/:interactionId` → `worker/chat/interactions.ts`（live 登记表）→ 原 ACP response；回答内容/令牌不进 Yjs |
+| 能力声明与任务/配置源 | `worker/chat/bootstrap.ts`（`peri.userInputQueue`、`peri.unstableEvent`）、加载后 `seedConfig` 与 `session/bg-tasks` 快照修复入口 |
 | WS 首帧鉴权、Hibernation 订阅恢复与 DO socket attachment | `npm-packages/peri-cf/worker/chat/sync.ts`、`ws-delivery.ts`（帧与交付信用来自 SDK），DO 事件入口 `worker/index.ts` |
 | 工作区 SDK 接线唯一入口（`/portable`、`/wasm-host`、`/view`） | `npm-packages/peri-cf/worker/sdk/index.ts` |
 | SDK 宿主的 Cloudflare 接线（模块注入、容量、实例观测） | `npm-packages/peri-cf/worker/wasm/` |
@@ -53,6 +57,8 @@
 | CF 专用构建、provenance 与原子准备（哈希范围 = peri-wasm 本地依赖闭包） | `npm-packages/peri-cf/scripts/{build-wasm,wasm-provenance,prepare-wasm}.ts` |
 | 构建 profile 产物对比（不测 runtime CPU） | `npm-packages/peri-cf/scripts/profile-wasm.ts` |
 | 原始诊断与独立展示限制 | `npm-packages/peri-cf/worker/api/http.ts` |
-| 行为测试 | `npm-packages/peri-cf/tests/` |
+| 行为测试 | `npm-packages/peri-cf/tests/`（真实 workerd：`real-workerd-ws.test.ts` 覆盖 WS 交付/休眠与 P5 闭环验收——载荷端点、权限往返、断宿主；`p3-migration-drill.test.ts` 覆盖迁移与回滚演练；`scripts/smoke.mjs` 为本机真实 WASM × workerd × sqld × 模型 fixture 闭环） |
 
 WASM 产物来源及协议验证入口参见 [Peri WASM 索引](peri-wasm.md)，通用 SDK 执行管理契约参见 [TS SDK 索引](peri-ts-sdk.md)。
+
+聊天展示对象契约见 [peri-cf 聊天对象契约](../design/peri-cf-chat-objects.md)；DO 展示持久化已按 P3 批准方案切换为 `recordVersion:2` 展示 checkpoint（含 7 天 `record:v1-backup` 回滚窗口），纯文本 `session` 键仅作迁移输入。

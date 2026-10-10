@@ -28,7 +28,7 @@ function assert(condition, message) {
 
 async function connectSync(base, id) {
   const replica = new SessionDocReplica();
-  const socket = new WebSocket(`${base.replace(/^http/, "ws")}/api/chats/${id}/sync`);
+  const socket = new WebSocket(`${base.replace(/^http/, "ws")}/api/v2/chats/${id}/sync`);
   socket.binaryType = "arraybuffer";
   let current;
   let failure;
@@ -173,7 +173,7 @@ try {
     await waitForPort(port, worker);
   }
   async function api(path, options = {}) {
-    const response = await fetch(`${base}/api/chats${path}`, {
+    const response = await fetch(`${base}/api/v2/chats${path}`, {
       ...options, signal: AbortSignal.timeout(60_000),
       headers: { Authorization: `Bearer ${token}`, "Content-Type": "application/json", ...options.headers },
     });
@@ -182,7 +182,7 @@ try {
   }
 
   await startWorker();
-  assert((await fetch(`${base}/api/chats`)).status === 401, "Unauthenticated API was not denied");
+  assert((await fetch(`${base}/api/v2/chats`)).status === 401, "Unauthenticated API was not denied");
   assert((await (await api("")).json()).chats.length === 0, "Fresh Turso Store did not return an empty list");
   const html = await (await fetch(base)).text();
   assert(html.includes('<div id="root"></div>'), "React SPA was not served");
@@ -192,6 +192,8 @@ try {
     "New ACP session was not queryable directly from Turso before its first prompt");
   await api(`/${chat.id}`);
   const renamedTitle = "Changed directly in Rust Store";
+  const entryText = (entry) => entry
+    ? entry.blocks.flatMap((block) => (block.type === "text" ? [block.text] : [])).join("") : "";
   const mutation = await fetch(`http://127.0.0.1:${sqlPort}/v2/pipeline`, {
     method: "POST", headers: { "Content-Type": "application/json" },
     body: JSON.stringify({ requests: [{ type: "execute", stmt: {
@@ -207,43 +209,48 @@ try {
   let synchronization = await connectSync(base, chat.id);
   async function turn(text, expected) {
     const before = await synchronization.wait(() => true);
-    const count = before.messages.length;
+    const count = before.entries.length;
     const response = await api(`/${chat.id}/messages`, { method: "POST", body: JSON.stringify({ content: text }) });
     assert(response.status === 202 && (await response.json()).accepted === true, "Expected JSON command acknowledgement");
-    const result = await synchronization.wait((state) => state.messages.length >= count + 2 && !state.running);
-    const assistant = result.messages.at(-1);
-    assert(assistant.status === "completed" && assistant.content.includes(expected) && !result.error,
+    // 两份 Y.Doc 无跨文档原子提交：以终态条目为准，不依赖 running 标志的帧顺序。
+    const terminal = (state) => {
+      const entry = state.entries.at(-1);
+      return state.entries.length >= count + 2 && entry && ["completed", "cancelled", "error"].includes(entry.status);
+    };
+    const result = await synchronization.wait(terminal);
+    const assistant = result.entries.at(-1);
+    assert(assistant.status === "completed" && entryText(assistant).includes(expected) && !result.error,
       `WASM synchronized turn failed: ${JSON.stringify(result)}`);
   }
   await turn("Reply once", "LOCAL_WASM_REPLY_1");
   let detail = await (await api(`/${chat.id}`)).json();
-  assert(detail.messages.length === 2 && detail.messages[1].status === "completed", "First turn did not persist");
+  assert(detail.entries.length === 2 && detail.entries[1].status === "completed", "First turn did not persist");
   synchronization.close();
   await stop(worker);
   worker = undefined;
   await startWorker();
   synchronization = await connectSync(base, chat.id);
-  assert((await synchronization.wait(() => true)).messages[1].content === "LOCAL_WASM_REPLY_1",
+  assert(entryText((await synchronization.wait(() => true)).entries[1]) === "LOCAL_WASM_REPLY_1",
     "Restarted DO did not synchronize persisted history");
   detail = await (await api(`/${chat.id}`)).json();
-  assert(detail.messages[1].content === "LOCAL_WASM_REPLY_1", "DO restart lost history");
+  assert(entryText(detail.entries[1]) === "LOCAL_WASM_REPLY_1", "DO restart lost history");
   await turn("Continue once", "LOCAL_WASM_REPLY_2");
   detail = await (await api(`/${chat.id}`)).json();
-  assert(detail.messages.length === 4 && detail.messages[3].status === "completed", "Second turn did not persist");
+  assert(detail.entries.length === 4 && detail.entries[3].status === "completed", "Second turn did not persist");
   const listed = await (await api("")).json();
   assert(listed.chats.some((item) => item.id === chat.id), "Turso session query lost chat after Worker restart");
   const cancellable = await api(`/${chat.id}/messages`, {
     method: "POST", body: JSON.stringify({ content: "Wait for cancellation" }),
   });
   assert(cancellable.status === 202, "Cancellation fixture command was not accepted");
-  await synchronization.wait((state) => state.running && state.messages.at(-1)?.content.includes("LOCAL_CANCEL_PARTIAL"));
+  await synchronization.wait((state) => entryText(state.entries.at(-1)).includes("LOCAL_CANCEL_PARTIAL"));
   await api(`/${chat.id}/cancel`, { method: "POST" });
-  detail = await synchronization.wait((state) => !state.running && state.messages.at(-1)?.status === "cancelled");
-  assert(detail.messages.length === 6 && detail.messages[5].content.includes("LOCAL_CANCEL_PARTIAL"),
+  detail = await synchronization.wait((state) => state.entries.at(-1)?.status === "cancelled");
+  assert(detail.entries.length === 6 && entryText(detail.entries[5]).includes("LOCAL_CANCEL_PARTIAL"),
     "Cancelled partial reply was not synchronized and preserved");
   await turn("Reply after cancellation", "LOCAL_WASM_REPLY_4");
   detail = await (await api(`/${chat.id}`)).json();
-  assert(detail.messages.length === 8 && detail.messages[7].status === "completed", "Chat remained blocked after confirmed cancellation");
+  assert(detail.entries.length === 8 && detail.entries[7].status === "completed", "Chat remained blocked after confirmed cancellation");
   assert(modelCalls === 4, `Unexpected primary model calls: ${modelCalls}`);
   console.log(JSON.stringify({ passed: true, runtime: "workerd", model: "local fixture", wasm: true, turns: 3,
     primaryModelCalls: modelCalls, predictionCalls, historyAfterRestart: true, acpContextAfterRestart: true,

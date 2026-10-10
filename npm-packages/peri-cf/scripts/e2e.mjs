@@ -151,7 +151,7 @@ try {
 
   async function resources(expectedPhase) {
     const observation = await page.evaluate(async ({ chatId, token }) => {
-      const response = await fetch(`/api/chats/${chatId}/resources`, {
+      const response = await fetch(`/api/v2/chats/${chatId}/resources`, {
         headers: { Authorization: `Bearer ${token}` },
       });
       return { status: response.status, cache: response.headers.get('Cache-Control'),

@@ -4,6 +4,11 @@ import { SessionDocs, SessionDocSync, decodeAuthFrame, decodeSyncFrame, encodeAu
   MAX_ACK_FRAME_BYTES, MAX_AUTH_FRAME_BYTES, MAX_SYNC_FRAME_BYTES, type SyncFramePayload } from "../worker/sdk";
 import { SessionDocReplica, SessionViewStore } from "@peri-code/sdk/view";
 import { readSyncState } from "../shared/sync-state";
+import type { SyncState } from "../shared/sync";
+
+function entryText(entry: SyncState["entries"][number] | undefined): string {
+  return entry ? entry.blocks.flatMap((block) => (block.type === "text" ? [block.text] : [])).join("") : "";
+}
 
 const cleanups: (() => void | Promise<void>)[] = [];
 afterEach(async () => {
@@ -146,42 +151,45 @@ describe("SDK document sync wire boundary", () => {
     expect(replica.stateVector()?.generation).toBe(sync.generation);
   });
 
-  test("preserves UI metadata as a read-only synchronized document projection", () => {
+  test("synchronizes app-owned run metadata while DTO identity comes from SDK entries", () => {
     const { docs, sync, replica } = pair();
     docs.acceptDeliveredUserInput("request-1", "Prompt");
     chunk(docs, "Reply");
-    const state = { chat: { id: "fixture", title: "Title", updatedAt: "now" },
-      running: true, executionBlocked: false, entryMetadata: {
-        "turn:request-1:user": { id: "stable-user", createdAt: "timestamp" },
-        "turn:request-1:assistant": { id: "stable-assistant", createdAt: "timestamp" },
-      } };
+    const state = { chat: { id: "fixture", title: "Title", updatedAt: "now" }, running: true, executionBlocked: false };
     docs.session.getMap("peri-cf").set("state", state);
     const connection = sync.subscribe(() => {});
     cleanups.push(connection.unsubscribe);
     deliver(replica, { type: "snapshot", snapshot: connection.snapshot });
     const projected = readSyncState(replica.chat, replica.session);
     expect(projected.chat).toEqual(state.chat);
-    expect(projected.messages.map((message) => message.content)).toEqual(["Prompt", "Reply"]);
-    expect(projected.messages.map((message) => message.id)).toEqual(["stable-user", "stable-assistant"]);
-    expect(projected.messages[1]?.status).toBe("running");
+    expect(projected.readiness).toBe("ready");
+    expect(projected.entries.map(entryText)).toEqual(["Prompt", "Reply"]);
+    // 身份与时间来自 SDK Entry：应用不再生成展示 id/时间。
+    expect(projected.entries.map((entry) => entry.id)).toEqual(["turn:request-1:user", "turn:request-1:assistant"]);
+    expect(projected.entries.map((entry) => entry.createdAtSource)).toEqual(["observed", "observed"]);
+    // DTO 直接透出 SDK 状态（streaming），不再映射成应用侧 running。
+    expect(projected.entries[1]?.status).toBe("streaming");
+    expect(typeof projected.entries[1]?.createdAt).toBe("string");
     expect(replica.session.getMap("peri-cf").get("state")).not.toHaveProperty("messages");
+    expect(replica.session.getMap("peri-cf").get("state")).not.toHaveProperty("entryMetadata");
   });
 
-  test("application settlement failures remain errors even after the SDK turn completed", () => {
+  test("an application settlement failure stays visible without rewriting the completed SDK result", () => {
     const { docs } = pair();
     docs.acceptDeliveredUserInput("request-1", "Prompt");
     chunk(docs, "Completed model output");
     docs.completeTurn("completed");
     docs.session.getMap("peri-cf").set("state", {
       chat: { id: "fixture", title: "Title", updatedAt: "now" },
-      running: false, executionBlocked: true, entryMetadata: {
-        "turn:request-1:assistant": { id: "assistant", createdAt: "now", error: "Host exit unconfirmed" },
-      },
+      running: false, executionBlocked: true, error: "Host exit unconfirmed",
     });
     const state = readSyncState(docs.chat, docs.session);
-    expect(state.messages[1]?.status).toBe("error");
-    expect(state.messages[1]?.content).toBe("Completed model output");
+    // 设计 4.4.7：模型结果不被清理失败改写；失败归应用级 error 与执行阻断。
+    expect(state.entries[1]?.status).toBe("completed");
+    expect(state.entries[1]?.error).toBeNull();
+    expect(entryText(state.entries[1])).toBe("Completed model output");
     expect(state.executionBlocked).toBe(true);
+    expect(state.error).toBe("Host exit unconfirmed");
   });
 
   test.each(["not json", "null", "[]", '{"type":"write","update":"AA=="}',

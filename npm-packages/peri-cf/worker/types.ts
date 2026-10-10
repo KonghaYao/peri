@@ -35,10 +35,13 @@ export interface Env {
   ASSETS?: { fetch(request: Request): Promise<Response> };
 }
 
+/** DO 存储端口的应用侧最小契约（与 DurableObjectStorage 的成组 put / 数组 delete / prefix list 对齐）。 */
 export interface SessionState {
   storage: {
     get<T>(key: string): Promise<T | undefined>;
-    put<T>(key: string, value: T): Promise<void>;
+    put(entries: Record<string, unknown>): Promise<void>;
+    delete(keys: string[]): Promise<boolean | void>;
+    list(options?: { prefix?: string; limit?: number }): Promise<Map<string, unknown>>;
   };
   waitUntil(promise: Promise<unknown>): void;
 }

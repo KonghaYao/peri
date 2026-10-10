@@ -9,6 +9,8 @@ import type { Env } from "../types";
 interface ChatHandlers {
   read(id: string): Promise<Response>;
   resources(id: string): Promise<Response>;
+  payload(id: string, refId: string): Promise<Response>;
+  interaction(id: string, interactionId: string, body: unknown): Promise<Response>;
   send(id: string, content: string, signal: AbortSignal): Promise<Response>;
   cancel(id: string): Promise<Response>;
   sync(id: string, request: Request): Response;
@@ -16,19 +18,26 @@ interface ChatHandlers {
 
 export function createChatRoutes(handlers: ChatHandlers) {
   const app = authenticatedApp();
-  app.get("/api/chats/:id", (context) => handlers.read(normalizeChatId(context.req.param("id"))));
-  app.get("/api/chats/:id/resources", (context) => handlers.resources(normalizeChatId(context.req.param("id"))));
-  app.post("/api/chats/:id/messages", ...jsonRequest(sendMessageBodySchema, "content must be a nonempty string of at most 32768 characters"),
+  app.get("/api/v2/chats/:id", (context) => handlers.read(normalizeChatId(context.req.param("id"))));
+  app.get("/api/v2/chats/:id/resources", (context) => handlers.resources(normalizeChatId(context.req.param("id"))));
+  app.get("/api/v2/chats/:id/payloads/:refId", (context) =>
+    handlers.payload(normalizeChatId(context.req.param("id")), context.req.param("refId")));
+  app.post("/api/v2/chats/:id/interactions/:interactionId", ...boundedRequestBody, async (context) => {
+    const body = await context.req.json().catch(() => null);
+    return handlers.interaction(normalizeChatId(context.req.param("id")), context.req.param("interactionId"), body);
+  });
+  app.post("/api/v2/chats/:id/messages", ...jsonRequest(sendMessageBodySchema, "content must be a nonempty string of at most 32768 characters"),
     (context) => handlers.send(normalizeChatId(context.req.param("id")), context.req.valid("json").content, context.req.raw.signal));
-  app.post("/api/chats/:id/cancel", ...boundedRequestBody, (context) => handlers.cancel(normalizeChatId(context.req.param("id"))));
-  for (const path of ["/api/chats/:id", "/api/chats/:id/messages", "/api/chats/:id/cancel", "/api/chats/:id/resources"]) {
+  app.post("/api/v2/chats/:id/cancel", ...boundedRequestBody, (context) => handlers.cancel(normalizeChatId(context.req.param("id"))));
+  for (const path of ["/api/v2/chats/:id", "/api/v2/chats/:id/messages", "/api/v2/chats/:id/cancel",
+    "/api/v2/chats/:id/resources", "/api/v2/chats/:id/payloads/:refId", "/api/v2/chats/:id/interactions/:interactionId"]) {
     app.all(path, (context) => {
       normalizeChatId(context.req.param("id"));
       throw new HTTPException(405, { message: "Method not allowed" });
     });
   }
   const frontdoor = new Hono<{ Bindings: Env }>();
-  frontdoor.get("/api/chats/:id/sync", (context) => handlers.sync(normalizeChatId(context.req.param("id")), context.req.raw));
+  frontdoor.get("/api/v2/chats/:id/sync", (context) => handlers.sync(normalizeChatId(context.req.param("id")), context.req.raw));
   frontdoor.onError((error, context) => {
     if (!(error instanceof HTTPException))
       logError("Peri sync upgrade failed", error);

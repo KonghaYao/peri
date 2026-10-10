@@ -1,6 +1,7 @@
 import * as Y from "yjs";
-import { DocModel } from "./doc-model";
+import { DocModel, isTerminal, publicError } from "./doc-model";
 import { TurnMachine } from "./turn-machine";
+import { ToolPayloadCapacityError } from "./tool-payloads";
 import { decodeMessagesJson, object, string, toolContentText, type RecordValue } from "./protocol";
 
 /** Live chat aggregation and canonical transcript replacement share entry identities. */
@@ -61,21 +62,29 @@ export class ChatProjection {
     private acceptAssistant(update: RecordValue, kind: "agent_message_chunk" | "agent_thought_chunk"): boolean {
         const content = object(update.content);
         const text = typeof content?.text === "string" ? content.text : null;
-        if (!text) return false;
+        if (!content || !text || (content.type !== undefined && content.type !== "text")) return false;
+        if (kind === "agent_thought_chunk" && [content.visibility, update.visibility, object(update._meta)?.visibility]
+            .some((visibility) => visibility !== undefined && visibility !== "summary")) return false;
         const replay = object(update._meta)?.periReplay === true;
         const messageId = string(update.messageId);
         // A terminal turn can only be followed by a user turn. Late chunks must not create a ghost turn.
         if (!this.turns.activeTurn() || !this.turns.writable()) return false;
+        if (messageId && !replay) {
+            for (const id of this.docs.turnEntries(this.turns.activeTurn()!)) {
+                const previous = this.docs.entries().get(id)!;
+                if (previous.get("messageId") === messageId && isTerminal(previous.get("status"))) return false;
+            }
+        }
         this.docs.transactBoth(() => {
             const turnId = this.turns.activeTurn()!;
             const info = this.docs.info();
             let entryId = string(info.get("activeAssistantEntryId")) ?? `${turnId}:assistant`;
-            let entry = this.docs.ensureEntry(entryId, turnId, "assistant");
+            let entry = this.docs.ensureEntry(entryId, turnId, "assistant", replay);
             const currentMessageId = string(entry.get("messageId"));
             if (messageId && currentMessageId && currentMessageId !== messageId) {
-                entry.set("status", "completed");
+                this.docs.finish(entry, "completed");
                 entryId = `${turnId}:assistant:${messageId}`;
-                entry = this.docs.ensureEntry(entryId, turnId, "assistant");
+                entry = this.docs.ensureEntry(entryId, turnId, "assistant", replay);
                 info.set("activeAssistantEntryId", entryId);
             }
             const type = kind === "agent_message_chunk" ? "text" : "reasoning";
@@ -85,7 +94,7 @@ export class ChatProjection {
             if (replay && messageId) entry.set("replayMessageId", messageId);
             if (replay) entry.set("replayEpoch", this.replayEpoch);
             if (entry.get("status") !== "streaming") entry.set("status", "streaming");
-            if (info.get("activeTurnStatus") !== "running") info.set("activeTurnStatus", "running");
+            this.turns.markRunning();
         });
         return true;
     }
@@ -94,29 +103,47 @@ export class ChatProjection {
         const id = string(update.toolCallId) ?? string(update.id);
         const turnId = this.turns.activeTurn();
         if (!id || !turnId || !this.turns.writable()) return false;
+        const replay = object(update._meta)?.periReplay === true;
+        const existing = this.docs.tools().get(id);
+        if (existing && existing.get("turnId") !== turnId) {
+            if (update.sessionUpdate === "tool_call") throw new Error("tool_id_reused");
+            return false;
+        }
+        // 无所属调用的补丁不能构造工具；新调用显式接纳，缺省状态保持 pending。
+        if (!existing && update.sessionUpdate === "tool_call_update") return false;
+        const oldStatus = existing?.get("status");
         const rawStatus = string(update.status);
-        const status = rawStatus === "completed" ? "completed"
+        const status = rawStatus === null ? String(oldStatus ?? "pending")
+            : rawStatus === "completed" ? "completed"
             : rawStatus === "failed" || rawStatus === "error" ? "error"
             : rawStatus === "cancelled" ? "cancelled"
-            : rawStatus === "pending" ? "pending" : "running";
-        const existing = this.docs.tools().get(id);
-        const oldStatus = existing?.get("status");
-        if ((oldStatus === "completed" || oldStatus === "error" || oldStatus === "cancelled") && oldStatus !== status) return false;
+            : rawStatus === "pending" || rawStatus === "awaiting_permission" ? rawStatus
+            : rawStatus === "in_progress" ? "running" : null;
+        if (!status || (isTerminal(oldStatus) && oldStatus !== status)) return false;
+        let payloadRejected = false;
+        const writePayload = (tool: Y.Map<unknown>, field: "arguments" | "result", value: unknown): void => {
+            try { this.docs.payloads.set(tool, field, value); }
+            catch (error) {
+                if (!(error instanceof ToolPayloadCapacityError)) throw error;
+                // 超出接纳预算：不写入该字段，前一个版本保持可读，并以公开容量错误报告。
+                payloadRejected = true;
+            }
+        };
         this.docs.chat.transact(() => {
-            const tool = this.docs.ensureTool(id, turnId, string(update.title) ?? string(update.name) ?? "Tool");
+            const tool = this.docs.ensureTool(id, turnId, string(update.title) ?? string(update.name) ?? "Tool", replay);
             const ownerId = string(tool.get("entryId"));
             const owner = ownerId ? this.docs.entries().get(ownerId) : undefined;
             const alreadyAttached = owner?.get("turnId") === turnId &&
                 (owner.get("blocks") as Y.Map<unknown>).has(`tool:${id}`);
             if (!alreadyAttached) {
                 const entryId = string(this.docs.info().get("activeAssistantEntryId")) ?? `${turnId}:assistant`;
-                this.docs.addToolBlock(this.docs.ensureEntry(entryId, turnId, "assistant"), id);
+                this.docs.addToolBlock(this.docs.ensureEntry(entryId, turnId, "assistant", replay), id);
             }
             const name = string(update.title) ?? string(update.name);
             if (name && tool.get("name") !== name) tool.set("name", name);
             const kind = string(update.kind);
             if (kind && tool.get("kind") !== kind) tool.set("kind", kind);
-            if (update.rawInput !== undefined) this.docs.payloads.set(tool, "arguments", update.rawInput);
+            if (update.rawInput !== undefined) writePayload(tool, "arguments", update.rawInput);
             if (status === "completed" || status === "error") {
                 const contentText = toolContentText(update.content);
                 const result: RecordValue = {};
@@ -124,9 +151,13 @@ export class ChatProjection {
                     ? "Tool execution failed" : contentText;
                 else if (status === "error") result.contentText = "Tool execution failed";
                 if (update.rawOutput !== undefined) result.rawOutput = update.rawOutput;
-                if (Object.keys(result).length) this.docs.payloads.set(tool, "result", result);
+                if (Object.keys(result).length) writePayload(tool, "result", result);
             }
-            if (tool.get("status") !== status) tool.set("status", status);
+            if (status === "completed" || status === "error" || status === "cancelled") this.docs.finish(tool, status, "tool_failed");
+            else if (tool.get("status") !== status) tool.set("status", status);
+            if (payloadRejected && object(tool.get("error"))?.code !== "tool_failed") {
+                tool.set("error", publicError("payload_too_large"));
+            }
         });
         return true;
     }
@@ -149,15 +180,15 @@ export class ChatProjection {
                     continue;
                 }
                 const entryId = `message:${message.id}`;
-                const entry = this.docs.ensureEntry(entryId, turnId, message.role);
+                const entry = this.docs.ensureEntry(entryId, turnId, message.role, true);
                 if (message.role === "assistant") lastAssistantEntryId = entryId;
                 entry.set("messageId", message.id);
-                entry.set("status", "completed");
+                this.docs.finish(entry, "completed");
                 for (const block of message.blocks) {
                     if (block.type === "text" || block.type === "reasoning") {
                         if (block.text) this.docs.appendText(entry, block.type, block.text);
                     } else if (block.type === "tool") {
-                        const tool = this.docs.ensureTool(block.id, turnId, block.name);
+                        const tool = this.docs.ensureTool(block.id, turnId, block.name, true);
                         if (block.arguments !== undefined) this.docs.payloads.set(tool, "arguments", block.arguments);
                         this.docs.addToolBlock(entry, block.id);
                     }
@@ -166,7 +197,8 @@ export class ChatProjection {
             for (const [id, tool] of this.docs.tools()) {
                 const outcome = completedTools.get(id);
                 // A tool_use without its matching tool result is incomplete, even in a canonical snapshot.
-                tool.set("status", outcome === undefined ? keepTurnOpen ? "running" : "cancelled" : outcome.failed ? "error" : "completed");
+                if (outcome === undefined && keepTurnOpen) tool.set("status", "running");
+                else this.docs.finish(tool, outcome === undefined ? "cancelled" : outcome.failed ? "error" : "completed", "tool_failed");
                 if (outcome) this.docs.payloads.set(tool, "result", { contentText: outcome.failed && !outcome.resultText.trim()
                     ? "Tool execution failed" : outcome.resultText });
             }
