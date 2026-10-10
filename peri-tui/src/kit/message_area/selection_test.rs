@@ -478,14 +478,17 @@ fn sel_env(
 fn test_extract_semantic_plain_middle_line() {
     crate::i18n::init(Some("en"));
     let grid = GridSpec::grid_for(120);
-    let vm = TuiRenderUnit::TuiAssistantBubble(TuiAssistantBubble {
-        started_at: None,
-        duration_ms: None,
-        text: "第一段\n\n第二段 with 中文".to_string(),
-        reasoning: None,
-        message_id: None,
-        content_hash: 0,
-    });
+    let vm = TuiRenderUnit::TuiAssistantBubble(
+        TuiAssistantBubble {
+            started_at: None,
+            duration_ms: None,
+            text: "第一段\n\n第二段 with 中文".to_string(),
+            reasoning: None,
+            message_id: None,
+            content_hash: 0,
+        }
+        .into(),
+    );
     let (slots, offsets, wm, vms) = sel_env(vm, &grid);
     let rendered_blank = crate::kit::text_selection::line_to_plain_text(&slots[0][2]);
     assert!(
@@ -642,14 +645,17 @@ fn test_extract_semantic_diff_strips_gutter_keeps_markers() {
 fn test_extract_semantic_partial_row_maps_to_semantic() {
     crate::i18n::init(Some("en"));
     let grid = GridSpec::grid_for(120);
-    let vm = TuiRenderUnit::TuiAssistantBubble(TuiAssistantBubble {
-        started_at: None,
-        duration_ms: None,
-        text: "prefix 你好".to_string(),
-        reasoning: None,
-        message_id: None,
-        content_hash: 0,
-    });
+    let vm = TuiRenderUnit::TuiAssistantBubble(
+        TuiAssistantBubble {
+            started_at: None,
+            duration_ms: None,
+            text: "prefix 你好".to_string(),
+            reasoning: None,
+            message_id: None,
+            content_hash: 0,
+        }
+        .into(),
+    );
     let (slots, offsets, wm, vms) = sel_env(vm, &grid);
     // 行 0 = leading 空行；行 1 = 正文（cont_prefix）——选区列 [1, 5) → 语义映射
     let text = extract_visual_range(
@@ -675,14 +681,17 @@ fn test_extract_semantic_partial_row_maps_to_semantic() {
 fn test_extract_without_view_models_keeps_plain() {
     crate::i18n::init(Some("en"));
     let grid = GridSpec::grid_for(120);
-    let vm = TuiRenderUnit::TuiAssistantBubble(TuiAssistantBubble {
-        started_at: None,
-        duration_ms: None,
-        text: "正文".to_string(),
-        reasoning: None,
-        message_id: None,
-        content_hash: 0,
-    });
+    let vm = TuiRenderUnit::TuiAssistantBubble(
+        TuiAssistantBubble {
+            started_at: None,
+            duration_ms: None,
+            text: "正文".to_string(),
+            reasoning: None,
+            message_id: None,
+            content_hash: 0,
+        }
+        .into(),
+    );
     let (slots, offsets, wm, _vms) = sel_env(vm, &grid);
     let text = extract_visual_range(
         &slots,
@@ -721,10 +730,22 @@ fn slot_index_fixture(slot_count: usize, lines_per_slot: usize) -> SlotIndex {
 #[test]
 fn test_slot_index_visual_and_logical_lookup_match_flatten_reference() {
     let index = slot_index_fixture(10, 7);
+    let maps: Vec<_> = (0..10)
+        .map(|slot| {
+            let lines = index.materialize(slot).unwrap();
+            build_wrap_map(
+                &(0..7)
+                    .map(|local| lines.line(local).unwrap().clone())
+                    .collect::<Vec<_>>(),
+                8,
+            )
+            .1
+        })
+        .collect();
     let flattened = concat_wrap_maps(
         &(0..10)
             .map(|slot| {
-                let map = index.wrap_maps[slot].as_slice();
+                let map = maps[slot].as_slice();
                 (map, slot * 7, slot)
             })
             .collect::<Vec<_>>(),
@@ -803,11 +824,11 @@ fn test_slot_index_equivalence_matrix_covers_empty_and_varied_wraps() {
             slots.push(Arc::new(lines));
             maps.push(Arc::new(map));
         }
-        let index = SlotIndex::new(slots, maps);
+        let index = SlotIndex::new(slots, maps.clone());
         let flattened = concat_wrap_maps(
             &(0..slot_count)
                 .map(|slot| {
-                    let map = index.wrap_maps[slot].as_slice();
+                    let map = maps[slot].as_slice();
                     (map, slot * lines_per_slot, slot)
                 })
                 .collect::<Vec<_>>(),
@@ -886,8 +907,7 @@ fn test_slot_lines_composite_shares_large_stable_part_without_flattening() {
 fn test_slot_index_scales_by_slots_not_logical_lines() {
     for slots in [10usize, 100, 1000] {
         let index = slot_index_fixture(slots, 20);
-        assert_eq!(index.logical_prefix.len(), slots + 1);
-        assert_eq!(index.visual_prefix.len(), slots + 1);
+        assert_eq!(index.slot_count(), slots);
         assert_eq!(index.total_logical(), slots * 20);
     }
 }

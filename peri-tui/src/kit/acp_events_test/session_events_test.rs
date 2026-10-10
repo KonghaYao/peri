@@ -2,6 +2,51 @@ use super::*;
 
 #[test]
 #[serial]
+fn test_transcript_publication_preserves_stable_history_and_resets_hint() {
+    crate::kit::atoms::init_atoms();
+    push_view_models_for_reset();
+    let mut state = make_fold_test_state();
+    state.phase = SessionPhase::PromptRunning;
+    state.committed = (0..256)
+        .map(|index| TuiRenderUnit::TuiUserBubble(TuiUserBubble::new(format!("history-{index}"))))
+        .collect();
+    dispatch_and_notify(
+        &mut state,
+        &AcpEventData::TextChunk(crate::kit::stream_data::TuiTextChunk {
+            text: "first 中文".into(),
+            message_id: None,
+            agent_id: None,
+        }),
+    );
+    let previous = VIEW_MODELS.state().read().generation;
+    dispatch_and_notify(
+        &mut state,
+        &AcpEventData::TextChunk(crate::kit::stream_data::TuiTextChunk {
+            text: "🙂 tail".into(),
+            message_id: None,
+            agent_id: None,
+        }),
+    );
+    let publication = crate::kit::atoms::TRANSCRIPT_PUBLICATION.get();
+    assert_eq!(publication.previous_generation, previous);
+    assert_eq!(
+        publication.generation,
+        VIEW_MODELS.state().read().generation
+    );
+    assert!(
+        publication.changed_from >= 255,
+        "unchanged history should not be scanned by render"
+    );
+    push_view_models_for_reset();
+    assert_eq!(
+        crate::kit::atoms::TRANSCRIPT_PUBLICATION.get().changed_from,
+        0
+    );
+    assert!(VIEW_MODELS.state().read().items.is_empty());
+}
+
+#[test]
+#[serial]
 fn test_replay_events_defer_publication_until_scheduler_boundary() {
     let mut state = make_fold_test_state();
     state.phase = SessionPhase::ReplayingHistory;

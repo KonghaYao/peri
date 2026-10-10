@@ -29,8 +29,8 @@ pub(super) fn handle_tool_started(state: &mut BridgeState, ts: &TuiToolStarted) 
             state.publish_barrier();
             // block 模式：ToolStarted 时已推送缓冲文本到视图，
             // 同步追踪变量，确保工具执行完毕后新 TextChunk 的块边界检测从正确位置开始。
-            state.last_pushed_text_len = state.current_turn.text.chars().count();
-            state.last_pushed_reasoning_len = state.current_turn.reasoning.chars().count();
+            state.last_pushed_text_len = state.current_turn.text.len();
+            state.last_pushed_reasoning_len = state.current_turn.reasoning.len();
         } else {
             // 同步 sub-agent: 路由到 SubAgentAccumulator
             let routed = state.current_turn.start_subagent_tool(
@@ -71,8 +71,8 @@ pub(super) fn handle_tool_started(state: &mut BridgeState, ts: &TuiToolStarted) 
             state.variant = 1;
             state.phase = SessionPhase::PromptRunning;
             state.publish_barrier();
-            state.last_pushed_text_len = state.current_turn.text.chars().count();
-            state.last_pushed_reasoning_len = state.current_turn.reasoning.chars().count();
+            state.last_pushed_text_len = state.current_turn.text.len();
+            state.last_pushed_reasoning_len = state.current_turn.reasoning.len();
         }
     } else {
         state
@@ -87,8 +87,8 @@ pub(super) fn handle_tool_started(state: &mut BridgeState, ts: &TuiToolStarted) 
         state.variant = 1;
         state.phase = SessionPhase::PromptRunning;
         state.publish_barrier();
-        state.last_pushed_text_len = state.current_turn.text.chars().count();
-        state.last_pushed_reasoning_len = state.current_turn.reasoning.chars().count();
+        state.last_pushed_text_len = state.current_turn.text.len();
+        state.last_pushed_reasoning_len = state.current_turn.reasoning.len();
     }
     super::render::push_acp_state(state);
 }
@@ -105,8 +105,8 @@ pub(super) fn handle_tool_ended(state: &mut BridgeState, te: &TuiToolEnded) {
             state.variant = 1;
             // bg 工具事件不触碰 phase（Issue 2026-08-12，同 ToolStarted）。
             state.publish_barrier();
-            state.last_pushed_text_len = state.current_turn.text.chars().count();
-            state.last_pushed_reasoning_len = state.current_turn.reasoning.chars().count();
+            state.last_pushed_text_len = state.current_turn.text.len();
+            state.last_pushed_reasoning_len = state.current_turn.reasoning.len();
             state.complete_todo_if_current(&te.tool_id, te.is_error)
         } else {
             let ended = state.current_turn.end_subagent_tool(
@@ -122,8 +122,8 @@ pub(super) fn handle_tool_ended(state: &mut BridgeState, te: &TuiToolEnded) {
             state.variant = 1;
             state.phase = SessionPhase::PromptRunning;
             state.publish_barrier();
-            state.last_pushed_text_len = state.current_turn.text.chars().count();
-            state.last_pushed_reasoning_len = state.current_turn.reasoning.chars().count();
+            state.last_pushed_text_len = state.current_turn.text.len();
+            state.last_pushed_reasoning_len = state.current_turn.reasoning.len();
             ended && state.complete_todo_if_current(&te.tool_id, te.is_error)
         }
     } else {
@@ -134,8 +134,8 @@ pub(super) fn handle_tool_ended(state: &mut BridgeState, te: &TuiToolEnded) {
         state.variant = 1;
         state.phase = SessionPhase::PromptRunning;
         state.publish_barrier();
-        state.last_pushed_text_len = state.current_turn.text.chars().count();
-        state.last_pushed_reasoning_len = state.current_turn.reasoning.chars().count();
+        state.last_pushed_text_len = state.current_turn.text.len();
+        state.last_pushed_reasoning_len = state.current_turn.reasoning.len();
         ended && state.complete_todo_if_current(&te.tool_id, te.is_error)
     };
 
@@ -169,18 +169,14 @@ pub(super) fn handle_replay_tool_started(
         tool_id: tool_id.to_string(),
         tool_name: tool_name.to_string(),
         input_summary: input_summary.to_string(),
-        output_summary: String::new(),
-        is_error: false,
-        is_running: true,
+        output_summary: crate::i18n::tr("msg-history-tool-result-missing"),
+        is_error: true,
+        is_running: false,
         running_duration_ms: None,
         completed_duration_ms: None,
-        // [G-Diff] replay 构造时无输出（is_running=true）——解析器按 skip 返回
-        // None；`ReplayToolEnded`（update_committed_tool_card）到达时再解析。
-        diff: super::super::acp_types::parse_tool_diff(tool_name, "", true, None),
+        diff: None,
         presentation: presentation.clone(),
-        // replay 构造的卡片按当前状态取表值（running → Preview）；
-        // [G1] hash 由 recompute_hash 单点计算。
-        fold: fold_for_status(FoldTarget::Tool, EntryStatus::Running),
+        fold: fold_for_status(FoldTarget::Tool, EntryStatus::Error),
         user_modified: false,
         tool_calls_count: 0,
         content_hash: 0,
@@ -207,8 +203,8 @@ pub(super) fn handle_replay_tool_ended(
 
 /// 在 `state.committed` 中按 `tool_id` 查找并更新 TuiToolCard。
 ///
-/// 用于 replay 场景：`ReplayToolStarted` 先 push 一张 is_running=true 的卡片，
-/// 后续 `ReplayToolEnded` 到达时更新 output + is_running=false。
+/// 用于 replay 场景：`ReplayToolStarted` 先 push 一张静态的结果缺失卡片，
+/// 后续 `ReplayToolEnded` 到达时以记录的结果替换展示状态。
 /// 如果找不到对应 tool_id，静默忽略。
 fn update_committed_tool_card(
     state: &mut BridgeState,
@@ -219,7 +215,6 @@ fn update_committed_tool_card(
     for i in 0..state.committed.len() {
         if let TuiRenderUnit::TuiToolCard(card) = &state.committed[i]
             && card.tool_id == tool_id
-            && card.is_running
         {
             let updated = TuiToolCard {
                 tool_id: card.tool_id.clone(),

@@ -2,6 +2,7 @@ use super::{
     TuiAskUserBlock, TuiAssistantBubble, TuiCollapsedGroup, TuiDivider, TuiSubAgentGroup,
     TuiSystemNote, TuiSystemReminder, TuiTodoSummary, TuiToolCard, TuiUserBubble,
 };
+use std::sync::Arc;
 
 // ---------------------------------------------------------------------------
 // Top-level enum
@@ -11,7 +12,7 @@ use super::{
 #[derive(Debug, Clone, PartialEq)]
 pub enum TuiRenderUnit {
     TuiUserBubble(TuiUserBubble),
-    TuiAssistantBubble(TuiAssistantBubble),
+    TuiAssistantBubble(Arc<TuiAssistantBubble>),
     TuiToolCard(TuiToolCard),
     TuiSystemNote(TuiSystemNote),
     TuiSystemReminder(TuiSystemReminder),
@@ -23,6 +24,10 @@ pub enum TuiRenderUnit {
     /// 由 push_view_models 从 `TODO_ITEMS` 派生，插在最终回答之前。
     TuiTodoSummary(TuiTodoSummary),
 }
+
+#[cfg(test)]
+#[path = "shared_bubble_test.rs"]
+mod shared_bubble_tests;
 
 impl TuiRenderUnit {
     /// 返回该 VM 内部存储的 content_hash。
@@ -42,15 +47,25 @@ impl TuiRenderUnit {
         }
     }
 
-    /// 该 VM 是否渲染运行中动画符号（tool running / subagent running /
-    /// reasoning running，§8.2）——渲染缓存需按动画帧强制重建，使 braille
-    /// 动画随壁钟 tick 推进（hash 可能跨秒才变化，不足以驱动 10Hz 动画）。
+    /// 该 VM 是否需要运行中刷新：工具与子 agent 按 braille 帧刷新，
+    /// reasoning 仅刷新秒级时长；具体节拍由 animation_period_frames 决定。
     pub fn is_animating(&self) -> bool {
+        self.animation_period_frames() != 0
+    }
+
+    pub(crate) fn animation_period_frames(&self) -> u64 {
         match self {
-            Self::TuiToolCard(d) => d.is_running,
-            Self::TuiSubAgentGroup(d) => d.is_running,
-            Self::TuiAssistantBubble(d) => d.reasoning.as_ref().is_some_and(|r| r.is_running),
-            _ => false,
+            Self::TuiToolCard(data) if data.is_running => 1,
+            Self::TuiSubAgentGroup(data) if data.is_running => 1,
+            Self::TuiAssistantBubble(data)
+                if data
+                    .reasoning
+                    .as_ref()
+                    .is_some_and(|reasoning| reasoning.is_running) =>
+            {
+                10
+            }
+            _ => 0,
         }
     }
 }

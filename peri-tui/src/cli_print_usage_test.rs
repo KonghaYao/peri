@@ -1,5 +1,33 @@
 use super::*;
 
+#[test]
+fn print_inline_settings_do_not_cross_contaminate_concurrent_loads() {
+    std::thread::scope(|scope| {
+        for (alias, provider_id) in [("sonnet", "first"), ("haiku", "second")] {
+            scope.spawn(move || {
+                let inline = format!(
+                    r#"{{"config":{{"active_alias":"{alias}","providers":[{{"id":"{provider_id}","type":"openai","apiKey":"test","models":{{"{alias}":"test-model"}}}}],"profiles":{{"{alias}":{{"provider":"{provider_id}","model":"test-model"}}}}}}}}"#
+                );
+                let source = load_print_config_source(Some(&inline)).unwrap();
+                let settings = source.loaded_merged();
+                assert_eq!(settings.config.active_alias, alias);
+                assert_eq!(settings.config.providers[0].id, provider_id);
+                assert!(peri_tui::app::agent::LlmProvider::from_source(&source).is_some());
+            });
+        }
+    });
+}
+
+#[test]
+fn print_inline_settings_failures_do_not_create_config_file() {
+    let before = std::env::temp_dir().join("peri-settings-override.json");
+    let existed_before = before.exists();
+    assert!(load_print_config_source(Some("not JSON")).is_err());
+    let source = load_print_config_source(Some(r#"{"config":{"providers":[]}}"#)).unwrap();
+    assert!(peri_tui::app::agent::LlmProvider::from_source(&source).is_none());
+    assert_eq!(before.exists(), existed_before);
+}
+
 fn usage_update(input: u64, output: u64, read: u64, creation: u64) -> Value {
     json!({"update": {"sessionUpdate": "usage_update", "_meta": {
         "inputTokens": input, "outputTokens": output,

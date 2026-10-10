@@ -49,6 +49,31 @@ fn delivered() -> AcpEventData {
 
 #[test]
 #[serial]
+fn input_delivery_without_a_current_run_does_not_start_loading() {
+    let (mut state, _restore) = make_steer_bridge();
+    dispatch_and_notify(&mut state, &delivered());
+    assert_eq!(state.committed.len(), 1);
+    assert_eq!(state.phase, SessionPhase::Idle);
+    assert!(!crate::kit::atoms::ACP_STATE.state().read().is_loading);
+}
+
+#[test]
+#[serial]
+fn input_delivery_preserves_loading_from_a_current_run_start() {
+    let (mut state, _restore) = make_steer_bridge();
+    dispatch_and_notify(
+        &mut state,
+        &AcpEventData::PromptSubmitted {
+            request_id: Some("current-run".into()),
+        },
+    );
+    dispatch_and_notify(&mut state, &delivered());
+    assert_eq!(state.phase, SessionPhase::PromptRunning);
+    assert!(crate::kit::atoms::ACP_STATE.state().read().is_loading);
+}
+
+#[test]
+#[serial]
 fn test_steer_delivered_reuses_chat_bubble_between_assistant_turns() {
     let (mut state, _restore) = make_steer_bridge();
     dispatch_and_notify(
@@ -85,6 +110,134 @@ fn test_steer_delivered_reuses_chat_bubble_between_assistant_turns() {
     assert!(
         matches!(&state.committed[2], TuiRenderUnit::TuiAssistantBubble(_)),
         "后续回答仍走原渲染"
+    );
+}
+
+/// P0 regression: a running subagent keeps its parent turn open; a delivered
+/// prompt and the following answer must still stay in chronological order.
+#[test]
+#[serial]
+fn p0_delivered_prompt_follows_output_when_subagent_keeps_turn_open() {
+    let (mut state, _restore) = make_steer_bridge();
+    dispatch_and_notify(
+        &mut state,
+        &AcpEventData::TextChunk(TuiTextChunk {
+            text: "旧回答".into(),
+            message_id: None,
+            agent_id: None,
+        }),
+    );
+    dispatch_and_notify(
+        &mut state,
+        &AcpEventData::SubagentStarted {
+            agent_id: "child".into(),
+            agent_name: "coder".into(),
+            is_background: true,
+            parent_tool_call_id: None,
+        },
+    );
+    dispatch_and_notify(&mut state, &delivered());
+
+    let snapshot = VIEW_MODELS.state().read().clone();
+    let items = &snapshot.items;
+    let answer = items
+        .iter()
+        .position(|vm| matches!(vm, TuiRenderUnit::TuiAssistantBubble(b) if b.text == "旧回答"))
+        .unwrap();
+    let group = items
+        .iter()
+        .position(|vm| matches!(vm, TuiRenderUnit::TuiSubAgentGroup(_)))
+        .unwrap();
+    let prompt = items
+        .iter()
+        .position(|vm| matches!(vm, TuiRenderUnit::TuiUserBubble(b) if b.text == "新的输入"))
+        .unwrap();
+    assert!(
+        answer < group && group < prompt,
+        "delivered prompt must follow existing output"
+    );
+    assert!(
+        state
+            .current_turn
+            .subagents
+            .iter()
+            .any(|agent| agent.is_running)
+    );
+
+    dispatch_and_notify(
+        &mut state,
+        &AcpEventData::TextChunk(TuiTextChunk {
+            text: "新回答".into(),
+            message_id: None,
+            agent_id: None,
+        }),
+    );
+    dispatch_and_notify(
+        &mut state,
+        &AcpEventData::SubagentStopped {
+            agent_id: "child".into(),
+            result: String::new(),
+            is_error: false,
+        },
+    );
+    dispatch_and_notify(&mut state, &AcpEventData::TurnDone);
+    let archived = VIEW_MODELS.state().read().clone();
+    let prompt = archived
+        .items
+        .iter()
+        .position(|vm| matches!(vm, TuiRenderUnit::TuiUserBubble(b) if b.text == "新的输入"))
+        .unwrap();
+    let newer_answer = archived
+        .items
+        .iter()
+        .position(|vm| matches!(vm, TuiRenderUnit::TuiAssistantBubble(b) if b.text == "新回答"))
+        .unwrap();
+    assert!(
+        prompt < newer_answer,
+        "archived answer must remain after delivered prompt"
+    );
+}
+
+/// P0 regression: canonical queue delivery must keep a running parent tool
+/// available for the later ToolEnded event.
+#[test]
+#[serial]
+fn p0_delivered_prompt_preserves_running_tool_result() {
+    let (mut state, _restore) = make_steer_bridge();
+    dispatch_and_notify(
+        &mut state,
+        &AcpEventData::ToolStarted(TuiToolStarted {
+            tool_id: "tool-1".into(),
+            tool_name: "Read".into(),
+            input_summary: "file.rs".into(),
+            raw_input: serde_json::json!({"path": "file.rs"}),
+            agent_id: None,
+        }),
+    );
+    dispatch_and_notify(&mut state, &delivered());
+    dispatch_and_notify(
+        &mut state,
+        &AcpEventData::ToolEnded(TuiToolEnded {
+            tool_id: "tool-1".into(),
+            output_summary: "file contents".into(),
+            is_error: false,
+            agent_id: None,
+        }),
+    );
+
+    let snapshot = VIEW_MODELS.state().read().clone();
+    let items = &snapshot.items;
+    let tool = items.iter().position(|vm| matches!(vm, TuiRenderUnit::TuiToolCard(card) if card.tool_id == "tool-1" && card.output_summary == "file contents"));
+    let prompt = items
+        .iter()
+        .position(|vm| matches!(vm, TuiRenderUnit::TuiUserBubble(b) if b.text == "新的输入"));
+    assert!(
+        tool.is_some(),
+        "delivered prompt must preserve the tool result"
+    );
+    assert!(
+        tool < prompt,
+        "delivered prompt must follow the previous tool"
     );
 }
 

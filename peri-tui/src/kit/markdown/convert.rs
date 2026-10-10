@@ -104,6 +104,7 @@ pub(crate) struct ConvertState {
 /// 追加、无闭合块）与以空行闭合的块仍命中增量续跑（O(delta)），正确性由
 /// `mod_test.rs` 的回归测试保障。若未来要优化该场景，需先证明块在追加下不变
 /// （如 fenced code block 以 `\n` 结尾时行可增长，不能仅按块类型判定稳定）。
+#[cfg(test)]
 pub(crate) fn rollback_trailing_unstable(
     blocks: &[ParsedBlock],
     state: &mut ConvertState,
@@ -691,6 +692,7 @@ fn replace_cell_tokens(
 /// §8.1 R3「正确性优先于增量性能」）。
 ///
 /// 无图片的流式路径不受影响：本检查为 NUL 预检快速路径（O(span 内容)）。
+#[cfg(test)]
 pub(crate) fn rollback_image_blocks(
     blocks: &[ParsedBlock],
     state: &mut ConvertState,
@@ -707,6 +709,7 @@ pub(crate) fn rollback_image_blocks(
 
 /// 块中是否含 side table 命中的图片 token（CodeBlock/Rule 不含——代码块内
 /// 图片语法不替换；Table 已由 `has_table_in_processed_blocks` 恒失效）。
+#[cfg(test)]
 fn block_contains_image(block: &ParsedBlock, lookup: &HashMap<&str, usize>) -> bool {
     match block {
         ParsedBlock::Paragraph(lines) => lines.iter().any(|l| line_contains_image(l, lookup)),
@@ -716,10 +719,12 @@ fn block_contains_image(block: &ParsedBlock, lookup: &HashMap<&str, usize>) -> b
     }
 }
 
+#[cfg(test)]
 fn line_contains_image(line: &Line<'static>, lookup: &HashMap<&str, usize>) -> bool {
     spans_contain_image(&line.spans, lookup)
 }
 
+#[cfg(test)]
 fn spans_contain_image(spans: &[Span<'static>], lookup: &HashMap<&str, usize>) -> bool {
     spans.iter().any(|span| {
         let content: &str = span.content.as_ref();

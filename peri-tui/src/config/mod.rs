@@ -22,7 +22,12 @@ pub fn save_effective(cfg: &PeriConfig) -> anyhow::Result<()> {
     let source = crate::kit::atoms::CONFIG_SOURCE_HANDLE
         .get()
         .ok_or_else(|| anyhow::anyhow!("CONFIG_SOURCE_HANDLE 未初始化（配置源缺失）"))?;
-    source.save(cfg)
+    let revision = source
+        .snapshot()
+        .ok_or_else(|| anyhow::anyhow!("configuration authority unavailable"))?
+        .revision();
+    source.save(revision, cfg)?;
+    Ok(())
 }
 
 #[cfg(test)]

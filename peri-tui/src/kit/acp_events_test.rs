@@ -31,6 +31,8 @@ mod diff_grouping_test;
 mod fold_test;
 #[path = "acp_events_test/group_incremental_test.rs"]
 mod group_incremental_test;
+#[path = "acp_events_test/history_runtime_test.rs"]
+mod history_runtime_test;
 #[path = "acp_events_test/input_buffer_test.rs"]
 mod input_buffer_test;
 #[path = "acp_events_test/interaction_test.rs"]
@@ -47,8 +49,12 @@ mod snapshot_test;
 mod steer_test;
 #[path = "acp_events_test/streaming_test.rs"]
 mod streaming_test;
+#[path = "acp_events_test/subagent_identity_test.rs"]
+mod subagent_identity_test;
 #[path = "acp_events_test/subagent_loading_test.rs"]
 mod subagent_loading_test;
+#[path = "acp_events_test/subagent_routing_test.rs"]
+mod subagent_routing_test;
 #[path = "acp_events_test/system_reminder_test.rs"]
 mod system_reminder_test;
 #[path = "acp_events_test/todo_skill_test.rs"]
@@ -112,6 +118,196 @@ fn make_fold_test_state() -> BridgeState {
     }
 }
 
+/// [回归测试] 迟到的 A 终态不能归档 B 的输出、关闭 B 的 loading 或 drain B 的输入。
+#[test]
+#[serial]
+fn test_old_agent_done_and_interrupted_do_not_settle_new_execution() {
+    let mut state = make_fold_test_state();
+    dispatch_and_notify(
+        &mut state,
+        &AcpEventData::PromptSubmitted {
+            request_id: Some("A".into()),
+        },
+    );
+    dispatch_and_notify(
+        &mut state,
+        &AcpEventData::TextChunk(TuiTextChunk {
+            text: "answer".into(),
+            message_id: None,
+            agent_id: None,
+        }),
+    );
+    dispatch_and_notify(
+        &mut state,
+        &AcpEventData::PromptSubmitted {
+            request_id: Some("B".into()),
+        },
+    );
+    dispatch_and_notify(
+        &mut state,
+        &AcpEventData::AgentDone {
+            request_id: Some("A".into()),
+        },
+    );
+    dispatch_and_notify(
+        &mut state,
+        &AcpEventData::TurnInterrupted {
+            reason: "cancelled".into(),
+            request_id: Some("A".into()),
+        },
+    );
+    assert_eq!(state.phase, SessionPhase::PromptRunning);
+    assert_eq!(state.current_request_id.as_deref(), Some("B"));
+    assert!(!state.current_turn.is_empty());
+    assert!(state.committed.is_empty());
+    dispatch_and_notify(
+        &mut state,
+        &AcpEventData::AgentDone {
+            request_id: Some("B".into()),
+        },
+    );
+    assert_eq!(state.phase, SessionPhase::Idle);
+    assert_eq!(state.committed.len(), 1);
+}
+
+/// [回归测试] A 的 prompt RPC 迟到错误只能复位 A，不能清除 B 的 loading。
+#[test]
+#[serial]
+fn test_late_prompt_failure_preserves_new_execution_loading() {
+    let mut state = make_fold_test_state();
+    dispatch_and_notify(
+        &mut state,
+        &AcpEventData::PromptSubmitted {
+            request_id: Some("A".into()),
+        },
+    );
+    dispatch_and_notify(
+        &mut state,
+        &AcpEventData::PromptSubmitted {
+            request_id: Some("B".into()),
+        },
+    );
+    dispatch_and_notify(
+        &mut state,
+        &AcpEventData::PromptFailed {
+            request_id: "A".into(),
+        },
+    );
+    assert_eq!(state.phase, SessionPhase::PromptRunning);
+    assert_eq!(state.current_request_id.as_deref(), Some("B"));
+    assert!(ACP_STATE.state().read().is_loading);
+    dispatch_and_notify(
+        &mut state,
+        &AcpEventData::PromptFailed {
+            request_id: "B".into(),
+        },
+    );
+    assert_eq!(state.phase, SessionPhase::Idle);
+    assert!(!ACP_STATE.state().read().is_loading);
+}
+
+#[test]
+#[serial]
+fn test_external_execution_terminal_preserves_pending_input_rollback_owner() {
+    let restore =
+        crate::kit::atoms::INPUT_RESTORE_TEXT.get_or_init(|| parking_lot::Mutex::new(None));
+    let previous_restore = restore.lock().take();
+    for cancelled in [false, true] {
+        let mut state = make_fold_test_state();
+        dispatch_and_notify(
+            &mut state,
+            &AcpEventData::LocalUserBubble {
+                text: "pending B".into(),
+            },
+        );
+        dispatch_and_notify(
+            &mut state,
+            &AcpEventData::ExecutionStarted {
+                request_id: "approval".into(),
+            },
+        );
+        assert!(
+            state
+                .last_submitted_text
+                .as_ref()
+                .unwrap()
+                .request_id
+                .is_none()
+        );
+        let approval_terminal = if cancelled {
+            AcpEventData::TurnInterrupted {
+                reason: "cancelled".into(),
+                request_id: Some("approval".into()),
+            }
+        } else {
+            AcpEventData::AgentDone {
+                request_id: Some("approval".into()),
+            }
+        };
+        dispatch_and_notify(&mut state, &approval_terminal);
+        assert!(restore.lock().is_none());
+        assert!(
+            state
+                .last_submitted_text
+                .as_ref()
+                .unwrap()
+                .request_id
+                .is_none()
+        );
+        dispatch_and_notify(
+            &mut state,
+            &AcpEventData::PromptSubmitted {
+                request_id: Some("B".into()),
+            },
+        );
+        dispatch_and_notify(
+            &mut state,
+            &AcpEventData::ExecutionStarted {
+                request_id: "A".into(),
+            },
+        );
+        let terminal = if cancelled {
+            AcpEventData::TurnInterrupted {
+                reason: "cancelled".into(),
+                request_id: Some("A".into()),
+            }
+        } else {
+            AcpEventData::AgentDone {
+                request_id: Some("A".into()),
+            }
+        };
+        dispatch_and_notify(&mut state, &terminal);
+        assert!(restore.lock().is_none());
+        assert_eq!(
+            state
+                .last_submitted_text
+                .as_ref()
+                .unwrap()
+                .request_id
+                .as_deref(),
+            Some("B")
+        );
+        assert_eq!(state.committed.len(), 1);
+        dispatch_and_notify(
+            &mut state,
+            &AcpEventData::ExecutionStarted {
+                request_id: "B".into(),
+            },
+        );
+        dispatch_and_notify(
+            &mut state,
+            &AcpEventData::TurnInterrupted {
+                reason: "cancelled".into(),
+                request_id: Some("B".into()),
+            },
+        );
+        assert_eq!(restore.lock().take().as_deref(), Some("pending B"));
+        assert!(state.last_submitted_text.is_none());
+        assert!(state.committed.is_empty());
+    }
+    *restore.lock() = previous_restore;
+}
+
 fn reasoning_of(snapshot: &ViewModelsSnapshot, idx: usize) -> &TuiReasoningBlock {
     match &snapshot.items[idx] {
         TuiRenderUnit::TuiAssistantBubble(b) => b.reasoning.as_ref().expect("应含 reasoning"),
@@ -140,6 +336,8 @@ fn test_subagent_stopped_removes_only_matching_active_agent() {
                 summary: task_id.into(),
                 started_at: String::new(),
                 pid: None,
+                revision: None,
+                status: None,
             }),
         );
         dispatch_and_notify(
@@ -148,6 +346,7 @@ fn test_subagent_stopped_removes_only_matching_active_agent() {
                 agent_id: agent_id.into(),
                 agent_name: "coder".into(),
                 is_background: true,
+                parent_tool_call_id: None,
             },
         );
     }
@@ -184,6 +383,8 @@ fn test_unknown_subagent_stopped_keeps_running_agents() {
             summary: "running".into(),
             started_at: String::new(),
             pid: None,
+            revision: None,
+            status: None,
         }),
     );
     dispatch_and_notify(
@@ -192,6 +393,7 @@ fn test_unknown_subagent_stopped_keeps_running_agents() {
             agent_id: "agent-running".into(),
             agent_name: "coder".into(),
             is_background: true,
+            parent_tool_call_id: None,
         },
     );
 

@@ -7,8 +7,21 @@ use super::*;
 fn test_ui_command_specs_non_empty() {
     let specs = ui_command_specs();
     assert!(!specs.is_empty(), "ui 域清单不得为空");
-    // PANELS（slash_command 非空，15 条）+ /setup = 16 条
-    assert_eq!(specs.len(), 16);
+    let panel_commands = PANELS
+        .iter()
+        .filter(|panel| !panel.slash_command.is_empty());
+    assert_eq!(specs.len(), panel_commands.clone().count() + 1);
+    for panel in panel_commands {
+        let spec = specs
+            .iter()
+            .find(|spec| spec.name == panel.slash_command)
+            .expect("每个有 slash 入口的面板必须注册 UI 命令");
+        assert_eq!(spec.description, panel.description);
+        assert_eq!(
+            resolve_ui_command(spec.name),
+            Some(UiCommandAction::OpenPanel(panel.kind))
+        );
+    }
 }
 
 #[test]

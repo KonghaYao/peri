@@ -5,9 +5,7 @@
 use super::*;
 use crate::kit::acp_types::CurrentTurn;
 use crate::kit::atoms::{PERI_CONFIG_HANDLE, RENDER_HEARTBEAT, THREAD_LOAD_TX};
-use crate::kit::tui_render_unit::{
-    TuiAssistantBubble, TuiReasoningBlock, TuiRenderUnit, TuiUserBubble,
-};
+use crate::kit::tui_render_unit::{TuiAssistantBubble, TuiReasoningBlock, TuiRenderUnit};
 
 pub(super) fn handle_turn_done(state: &mut BridgeState) {
     // H3: TurnDone 仅做两件事：
@@ -58,6 +56,16 @@ pub(super) fn handle_turn_done(state: &mut BridgeState) {
     // compact replay 必须先同步取得 load reservation，否则 drain 出来的首条
     // prompt 仍可能抢在异步 session/load consumer 前绑定旧 Stable session。
     super::render::drain_input_buffer();
+}
+
+pub(super) fn handle_agent_done(state: &mut BridgeState, request_id: &Option<String>) {
+    if request_id != &state.current_request_id {
+        return;
+    }
+    state.current_request_id = None;
+    let rollback = state.last_submitted_text.take();
+    handle_turn_done(state);
+    state.last_submitted_text = rollback.filter(|input| input.request_id != *request_id);
 }
 
 pub(super) fn handle_cache_usage_updated(
@@ -133,7 +141,16 @@ pub(super) fn handle_turn_interrupted(
     let id_mismatch = request_id
         .as_ref()
         .is_some_and(|rid| state.current_request_id.as_ref() != Some(rid));
-    let is_stale = id_mismatch || state.turn_generation > state.last_prompt_generation;
+    let rollback_mismatch = state
+        .last_submitted_text
+        .as_ref()
+        .is_some_and(|input| request_id.is_some() && input.request_id != *request_id);
+    let is_stale =
+        id_mismatch || rollback_mismatch || state.turn_generation > state.last_prompt_generation;
+    if id_mismatch {
+        return;
+    }
+    state.current_request_id = None;
     if is_stale {
         tracing::info!(
             turn_generation = state.turn_generation,
@@ -187,7 +204,7 @@ pub(super) fn handle_turn_interrupted(
     // [Slice 3] loading 提交只入队不发气泡，不设置 last_submitted_text——
     // 回滚不会误恢复排队中的输入）。
     if state.current_turn.is_empty() && state.last_submitted_text.is_some() {
-        let restore_text = state.last_submitted_text.take().unwrap();
+        let restore_text = state.last_submitted_text.take().unwrap().text;
         // 移除 committed 中最后一条用户气泡
         if let Some(last) = state.committed.last()
             && matches!(last, TuiRenderUnit::TuiUserBubble(_))
@@ -270,7 +287,15 @@ pub(super) fn handle_prompt_started(state: &mut BridgeState) {
 }
 
 pub(super) fn handle_prompt_submitted(state: &mut BridgeState, request_id: &Option<String>) {
-    // submit_consumer 在 prompt RPC 之前发出此事件，让 bridge 统一管理 loading 状态。
+    if let Some(input) = state.last_submitted_text.as_mut()
+        && input.request_id.is_none()
+    {
+        input.request_id = request_id.clone();
+    }
+    handle_execution_started(state, request_id);
+}
+
+pub(super) fn handle_execution_started(state: &mut BridgeState, request_id: &Option<String>) {
     state.phase = SessionPhase::PromptRunning;
     state.variant = 1;
     // Issue 2026-08-05: 记录"已真正发出 prompt RPC"时的代际快照——
@@ -309,16 +334,15 @@ pub(super) fn handle_session_replay_done(state: &mut BridgeState) {
 }
 
 pub(super) fn handle_local_user_bubble(state: &mut BridgeState, text: &str) {
-    state.last_submitted_text = Some(text.to_string());
+    state.last_submitted_text = Some(SubmittedInputRollback {
+        text: text.to_owned(),
+        request_id: None,
+    });
     // Issue 2026-08-05: 每次用户可见提交递增 turn 代际——这是 stale TurnInterrupted
     // 判定的基准（注意 session replay 的 user_message_chunk 也走本变体，但 replay
     // 期间无 turn 运行、无 TurnInterrupted 到达，递增不会造成误判）。
     state.turn_generation = state.turn_generation.wrapping_add(1);
-    state
-        .committed
-        .push_back(TuiRenderUnit::TuiUserBubble(TuiUserBubble::new(
-            text.to_string(),
-        )));
+    state.push_user_bubble(text.to_string());
     state.publish_barrier();
     super::render::push_acp_state(state);
 }
@@ -350,15 +374,9 @@ pub(super) fn handle_user_input_delivered(
     {
         return;
     }
-    state.flush_current_turn();
     state.last_submitted_text = None;
-    state.phase = SessionPhase::PromptRunning;
     state.variant = 1;
-    state
-        .committed
-        .push_back(TuiRenderUnit::TuiUserBubble(TuiUserBubble::new(
-            content.text_content(),
-        )));
+    state.push_user_bubble(content.text_content());
     state.publish_barrier();
     super::render::push_acp_state(state);
 }
@@ -374,6 +392,13 @@ pub(super) fn handle_loading_reset(state: &mut BridgeState) {
         state.phase = SessionPhase::Idle;
         state.publish_barrier();
         super::render::push_acp_state(state);
+    }
+}
+
+pub(super) fn handle_prompt_failed(state: &mut BridgeState, request_id: &str) {
+    if state.current_request_id.as_deref() == Some(request_id) {
+        state.current_request_id = None;
+        handle_loading_reset(state);
     }
 }
 
@@ -422,7 +447,7 @@ pub(super) fn handle_committed_assistant_text(
         content_hash: 0,
     };
     bubble.recompute_hash();
-    let vm = TuiRenderUnit::TuiAssistantBubble(bubble);
+    let vm = TuiRenderUnit::TuiAssistantBubble(bubble.into());
     state.committed.push_back(vm);
     // Replay publication 由 bridge scheduler 合帧；避免每条历史消息完整扫描 committed。
     super::render::push_acp_state(state);

@@ -1,5 +1,5 @@
 use std::sync::{Arc, Weak};
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 use parking_lot::Mutex;
 
@@ -12,7 +12,7 @@ use super::hits::{CopyButtonHit, ImageHoverState, ImageLineHit, InteractionOptio
 use super::image_action::{hover_target_for, try_open_image};
 use super::props::ScrollbarFields;
 use super::scroll::{self, DragThrottle, ScrollThrottle, ScrollbarDragState};
-use super::selection::{self, copy_to_clipboard, mark_copy_message};
+use super::selection::{self, copy_to_clipboard};
 use crate::kit::atoms::{
     FOCUSED_ENTRY, IMAGE_HOVER, IMAGE_PREVIEW_HOVER, KEEPGOING_BLOCKED_UNTIL, RENDER_HEARTBEAT,
     SUBMIT_TX, VIEW_MODELS, ViewModelsSnapshot,
@@ -92,7 +92,7 @@ pub(super) fn register_keepgoing_click(
             return EventResult::Ignored;
         }
         // 防抖：防抖期内按钮渲染为禁用样式，点击被吞掉但不触发提交
-        let now = Instant::now();
+        let now = peri_time::monotonic_now();
         let blocked = KEEPGOING_BLOCKED_UNTIL
             .state()
             .read()
@@ -108,7 +108,7 @@ pub(super) fn register_keepgoing_click(
         *KEEPGOING_BLOCKED_UNTIL.state().write() = Some(now + KEEPGOING_DEBOUNCE);
         // 防抖到期后清除阻塞并 bump 心跳触发重渲染，恢复可点击样式
         tokio::spawn(async move {
-            tokio::time::sleep(KEEPGOING_DEBOUNCE).await;
+            peri_time::sleep(KEEPGOING_DEBOUNCE).await;
             *KEEPGOING_BLOCKED_UNTIL.state().write() = None;
             RENDER_HEARTBEAT.set(RENDER_HEARTBEAT.get().wrapping_add(1));
         });
@@ -124,7 +124,7 @@ pub(super) fn register_keepgoing_click(
 // [Why 每次渲染重建] ratatui-kit 的 use_event_handler 闭包每帧重新注册（当帧值），
 // copy_buttons State 由渲染 body 后部 write_no_update 更新——事件分发时读到的
 // 是最近一帧的按钮位置（与 keepgoing 一致）。
-pub(super) fn register_md_copy_click(
+pub(super) fn register_copy_click(
     hooks: &mut Hooks,
     copy_buttons: State<Arc<Vec<CopyButtonHit>>>,
     view_models: AtomState<ViewModelsSnapshot>,
@@ -153,33 +153,33 @@ pub(super) fn register_md_copy_click(
         // 运行中 bubble 的 content_hash 每秒漂移，跨秒点击偶发拒绝）；
         // 其余类型沿用 content_hash。
         let snapshot = view_models.read();
-        let matched = snapshot
-            .items
-            .get(hit.slot_index)
-            .is_some_and(|vm| match vm {
-                TuiRenderUnit::TuiAssistantBubble(b) => {
-                    TuiAssistantBubble::stable_identity_hash(&b.text, b.reasoning.as_ref())
-                        == hit.vm_hash
-                }
-                _ => vm.content_hash() == hit.vm_hash,
-            });
-        let text = if matched {
-            match &snapshot.items[hit.slot_index] {
-                TuiRenderUnit::TuiAssistantBubble(d) => Some(d.text.clone()),
-                _ => None,
-            }
-        } else {
-            None
-        };
+        let text = copy_text_for_hit(&snapshot, hit);
         drop(snapshot);
         if let Some(text) = text {
-            copy_to_clipboard(text.clone());
-            mark_copy_message(text.chars().count());
+            copy_to_clipboard(text);
         }
         // 命中按钮（即使 VM 不匹配）也 Consumed——防止点击落到文本选区逻辑
         EventResult::Consumed
     });
 }
+
+fn copy_text_for_hit(snapshot: &ViewModelsSnapshot, hit: &CopyButtonHit) -> Option<String> {
+    let vm = snapshot.items.get(hit.slot_index)?;
+    let identity = match vm {
+        TuiRenderUnit::TuiAssistantBubble(data) => {
+            TuiAssistantBubble::stable_identity_hash(&data.text, data.reasoning.as_ref())
+        }
+        _ => vm.content_hash(),
+    };
+    if identity != hit.vm_hash {
+        return None;
+    }
+    super::render::copy_text_at(vm, hit.logical_idx)
+}
+
+#[cfg(test)]
+#[path = "handlers_copy_test.rs"]
+mod copy_tests;
 
 // ── `↓ New output` 指示器点击（§8.1：滚回底部并恢复跟随）──
 // [Why 注册顺序] 必须注册在 scroll handler（下方）之前：scroll::handle_event
@@ -375,7 +375,7 @@ pub(super) fn schedule_image_preview_hover(
     };
     let gate = Arc::downgrade(&gate);
     tokio::spawn(async move {
-        tokio::time::sleep(delay).await;
+        peri_time::sleep(delay).await;
         let Some(gate) = Weak::upgrade(&gate) else {
             return;
         };
@@ -513,7 +513,10 @@ pub(super) fn register_scroll_events(
         // [D3 §9] 语义复制：事件时点读快照 VM 列表（im::Vector clone O(1)，
         // 只读不改——与 parking_lot 读锁安全共存；选区提取需要 VM 类型
         // 分派语义文本，不能只靠已渲染行）。
-        let vms_snapshot = view_models_for_closure.read().items.clone();
+        let vms_snapshot = index_for_closure
+            .canonical_items()
+            .cloned()
+            .unwrap_or_else(|| view_models_for_closure.read().items.clone());
         scroll::handle_event(
             &event,
             area_rect,

@@ -30,11 +30,28 @@ pub(crate) static THEME_SET: LazyLock<ThemeSet> = LazyLock::new(ThemeSet::load_d
 // async 上下文会编译报错（CLAUDE.md 已记录）。
 type CacheValue = Option<Arc<Vec<Line<'static>>>>;
 
+#[cfg(test)]
+thread_local! {
+    static HIGHLIGHTED_BYTES: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+    static MEASURED_SPANS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
+const MAX_HIGHLIGHT_BYTES: usize = 256 * 1024;
+const MAX_HIGHLIGHT_LINE_BYTES: usize = 16 * 1024;
+const MAX_HIGHLIGHT_LINES: usize = 4096;
+
+struct CacheEntry {
+    value: CacheValue,
+    bytes: usize,
+}
+
 static HIGHLIGHT_CACHE: LazyLock<RwLock<HlCache>> = LazyLock::new(|| RwLock::new(HlCache::new()));
 
 struct HlCache {
     cap: usize,
-    entries: HashMap<(String, u64), CacheValue>,
+    byte_cap: usize,
+    bytes: usize,
+    entries: HashMap<(String, u64), CacheEntry>,
     /// LRU 顺序：末尾为最近访问，头部为最旧。
     order: Vec<(String, u64)>,
 }
@@ -43,6 +60,8 @@ impl HlCache {
     fn new() -> Self {
         Self {
             cap: 32,
+            byte_cap: 4 * 1024 * 1024,
+            bytes: 0,
             entries: HashMap::new(),
             order: Vec::with_capacity(33),
         }
@@ -50,27 +69,55 @@ impl HlCache {
 
     /// 查询并将 key 提升到 LRU 末尾。返回 Some(Clone) 表示命中，None 表示未命中。
     fn get(&mut self, key: &(String, u64)) -> Option<CacheValue> {
-        if let Some(v) = self.entries.get(key).cloned() {
+        if let Some(entry) = self.entries.get(key) {
+            let value = entry.value.clone();
             self.order.retain(|k| k != key);
             self.order.push(key.clone());
-            Some(v)
+            Some(value)
         } else {
             None
         }
     }
 
     /// 插入新条目；若已满则淘汰 order 头部最旧条目。
+    #[cfg(test)]
     fn insert(&mut self, key: (String, u64), val: CacheValue) {
-        if !self.entries.contains_key(&key)
-            && self.entries.len() >= self.cap
-            && let Some(evicted) = self.order.first().cloned()
-        {
-            self.entries.remove(&evicted);
+        let bytes = cache_value_bytes(&val);
+        self.insert_measured(key, val, bytes);
+    }
+
+    fn insert_measured(
+        &mut self,
+        key: (String, u64),
+        val: CacheValue,
+        bytes: usize,
+    ) -> Vec<CacheEntry> {
+        let mut retired = Vec::new();
+        if let Some(previous) = self.entries.remove(&key) {
+            self.bytes = self.bytes.saturating_sub(previous.bytes);
+            self.order.retain(|cached| cached != &key);
+            retired.push(previous);
+        }
+        if bytes > self.byte_cap {
+            retired.push(CacheEntry { value: val, bytes });
+            return retired;
+        }
+        while self.entries.len() >= self.cap || self.bytes.saturating_add(bytes) > self.byte_cap {
+            let Some(evicted) = self.order.first().cloned() else {
+                break;
+            };
+            if let Some(previous) = self.entries.remove(&evicted) {
+                self.bytes = self.bytes.saturating_sub(previous.bytes);
+                retired.push(previous);
+            }
             self.order.remove(0);
         }
-        self.entries.insert(key.clone(), val);
+        self.bytes += bytes;
+        self.entries
+            .insert(key.clone(), CacheEntry { value: val, bytes });
         self.order.retain(|k| k != &key);
         self.order.push(key);
+        retired
     }
 
     /// 清空缓存（测试辅助）。
@@ -78,25 +125,116 @@ impl HlCache {
     fn clear(&mut self) {
         self.entries.clear();
         self.order.clear();
+        self.bytes = 0;
     }
+}
+
+fn cache_value_bytes(value: &CacheValue) -> usize {
+    value.as_ref().map_or(0, |lines| {
+        lines.capacity() * std::mem::size_of::<Line<'static>>()
+            + lines
+                .iter()
+                .map(|line| {
+                    line.spans.capacity() * std::mem::size_of::<Span<'static>>()
+                        + line
+                            .spans
+                            .iter()
+                            .map(|span| {
+                                #[cfg(test)]
+                                MEASURED_SPANS.with(|count| count.set(count.get() + 1));
+                                match &span.content {
+                                    std::borrow::Cow::Owned(text) => text.capacity(),
+                                    std::borrow::Cow::Borrowed(_) => 0,
+                                }
+                            })
+                            .sum::<usize>()
+                })
+                .sum::<usize>()
+    })
 }
 
 // ── 代码块高亮 ──────────────────────────────────────────────────────
 
-pub(crate) fn highlight_code_block(lang: &str, raw_lines: &[String]) -> Option<Vec<Line<'static>>> {
+pub(crate) fn highlight_code_block(lang: &str, raw_lines: &[String]) -> CacheValue {
+    if !within_highlight_budget(raw_lines) {
+        return None;
+    }
     let key_hash = hash_raw_lines(raw_lines);
     let key = (lang.to_string(), key_hash);
 
     // 1. 查缓存：命中则直接 clone 返回
-    if let Some(cached) = HIGHLIGHT_CACHE.write().get(&key) {
-        return cached.map(|arc| (*arc).clone());
+    let cached = HIGHLIGHT_CACHE.write().get(&key);
+    if let Some(cached) = cached {
+        tracing::trace!(
+            event = "cache-work",
+            cache = "markdown-highlight",
+            outcome = "hit",
+            input_lines = raw_lines.len(),
+        );
+        return cached;
     }
 
     // 2. miss → 跑 syntect
-    let result = highlight_code_block_inner(lang, raw_lines);
-    let arc_result = result.clone().map(Arc::new);
-    HIGHLIGHT_CACHE.write().insert(key, arc_result);
+    let result = highlight_code_block_inner(lang, raw_lines).map(Arc::new);
+    let bytes = cache_value_bytes(&result);
+    let retired = HIGHLIGHT_CACHE
+        .write()
+        .insert_measured(key, result.clone(), bytes);
+    tracing::trace!(
+        event = "cache-work",
+        cache = "markdown-highlight",
+        outcome = "miss",
+        input_lines = raw_lines.len(),
+        measured_result_bytes = bytes,
+        retired_entries = retired.len(),
+    );
+    drop(retired);
     result
+}
+
+fn within_highlight_budget(raw_lines: &[String]) -> bool {
+    if raw_lines.len() > MAX_HIGHLIGHT_LINES {
+        tracing::debug!(
+            event = "skipped-budget",
+            work = "markdown-highlight",
+            cache_work = "bypassed",
+            reason = "line-count",
+            input_lines = raw_lines.len(),
+            max_lines = MAX_HIGHLIGHT_LINES,
+        );
+        return false;
+    }
+    let mut bytes = 0usize;
+    for (index, line) in raw_lines.iter().enumerate() {
+        if line.len() > MAX_HIGHLIGHT_LINE_BYTES {
+            tracing::debug!(
+                event = "skipped-budget",
+                work = "markdown-highlight",
+                cache_work = "bypassed",
+                reason = "line-bytes",
+                input_lines = raw_lines.len(),
+                inspected_lines = index + 1,
+                line_bytes = line.len(),
+                max_line_bytes = MAX_HIGHLIGHT_LINE_BYTES,
+            );
+            return false;
+        }
+        bytes = bytes.saturating_add(line.len());
+        if bytes > MAX_HIGHLIGHT_BYTES {
+            tracing::debug!(
+                event = "skipped-budget",
+                work = "markdown-highlight",
+                cache_work = "bypassed",
+                reason = "block-bytes",
+                input_lines = raw_lines.len(),
+                inspected_lines = index + 1,
+                inspected_bytes = bytes,
+                max_bytes = MAX_HIGHLIGHT_BYTES,
+            );
+            return false;
+        }
+    }
+    true
 }
 
 /// 与 `highlight_code_block` 同逻辑，但额外返回是否命中缓存（仅供测试断言）。
@@ -104,16 +242,22 @@ pub(crate) fn highlight_code_block(lang: &str, raw_lines: &[String]) -> Option<V
 pub(crate) fn highlight_code_block_with_hit(
     lang: &str,
     raw_lines: &[String],
-) -> (Option<Vec<Line<'static>>>, bool) {
+) -> (CacheValue, bool) {
+    if !within_highlight_budget(raw_lines) {
+        return (None, false);
+    }
     let key_hash = hash_raw_lines(raw_lines);
     let key = (lang.to_string(), key_hash);
 
     if let Some(cached) = HIGHLIGHT_CACHE.write().get(&key) {
-        return (cached.map(|arc| (*arc).clone()), true);
+        return (cached, true);
     }
-    let result = highlight_code_block_inner(lang, raw_lines);
-    let arc_result = result.clone().map(Arc::new);
-    HIGHLIGHT_CACHE.write().insert(key, arc_result);
+    let result = highlight_code_block_inner(lang, raw_lines).map(Arc::new);
+    let bytes = cache_value_bytes(&result);
+    let retired = HIGHLIGHT_CACHE
+        .write()
+        .insert_measured(key, result.clone(), bytes);
+    drop(retired);
     (result, false)
 }
 
@@ -129,6 +273,8 @@ fn highlight_code_block_inner(lang: &str, raw_lines: &[String]) -> Option<Vec<Li
 
     let mut result = Vec::with_capacity(raw_lines.len());
     for line_text in raw_lines {
+        #[cfg(test)]
+        HIGHLIGHTED_BYTES.with(|count| count.set(count.get() + line_text.len()));
         let ranges = highlighter.highlight_line(line_text, ss).ok()?;
         let spans: Vec<Span<'static>> = ranges
             .iter()
@@ -188,11 +334,11 @@ pub(crate) fn code_block_lines(
         // 单行代码块：inline code style
         if let Some(hl_lines) = highlighted {
             return hl_lines
-                .into_iter()
+                .iter()
                 .map(|line| {
                     let mut spans = Vec::with_capacity(line.spans.len());
-                    for span in line.spans {
-                        spans.push(Span::styled(span.content, patch_bg(span.style)));
+                    for span in &line.spans {
+                        spans.push(Span::styled(span.content.clone(), patch_bg(span.style)));
                     }
                     Line::from(spans)
                 })
@@ -210,11 +356,11 @@ pub(crate) fn code_block_lines(
 
     if let Some(hl_lines) = highlighted {
         hl_lines
-            .into_iter()
+            .iter()
             .map(|line| {
                 let mut spans = vec![prefix.clone()];
-                for span in line.spans {
-                    spans.push(Span::styled(span.content, patch_bg(span.style)));
+                for span in &line.spans {
+                    spans.push(Span::styled(span.content.clone(), patch_bg(span.style)));
                 }
                 Line::from(spans)
             })

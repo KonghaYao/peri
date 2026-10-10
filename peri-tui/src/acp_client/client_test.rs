@@ -270,3 +270,57 @@ async fn test_prompt_with_response_rejects_missing_stop_reason_and_releases_leas
     server.await.unwrap();
     client.close();
 }
+
+/// [上传式附件回归] 图片块必须原样进入 `session/prompt` 的 `message.content`。
+///
+/// TUI 的剪贴板图片不再落盘、不再经 `@image <path>` 文本，全部依赖这条 wire
+/// 形态上行；任何把 content 降级为字符串（或丢弃 block）的改动都会在此失败。
+#[tokio::test]
+async fn test_prompt_carries_image_blocks_on_the_wire() {
+    use peri_acp_types::messages::{ContentBlock, MessageContent};
+
+    let (client_transport, server_transport) = mpsc_transport_pair();
+    let (client, notification_tx, _notification_rx) = AcpTuiClient::new(client_transport);
+    client.lifecycle.force_stable("s1", false);
+    client.spawn_pump(notification_tx);
+
+    let content = MessageContent::blocks(vec![
+        ContentBlock::text("看这张图"),
+        ContentBlock::image_base64("image/png", "AQID"),
+    ]);
+    let expected = content.clone();
+
+    let server = tokio::spawn(async move {
+        let IncomingMessage::Request {
+            id, method, params, ..
+        } = server_transport.recv().await.unwrap()
+        else {
+            panic!("应收到 prompt 请求");
+        };
+        assert_eq!(method, "session/prompt");
+        let wire = params
+            .pointer("/message/content")
+            .expect("message.content 必须存在于 wire 参数");
+        assert!(
+            wire.is_array(),
+            "blocks 形态必须是数组（不得降级为字符串）: {wire}"
+        );
+        let decoded: MessageContent = serde_json::from_value(wire.clone()).unwrap();
+        assert_eq!(decoded, expected, "图片块必须逐字保留");
+        assert!(
+            matches!(
+                decoded.content_blocks().as_slice(),
+                [_, ContentBlock::Image { .. }]
+            ),
+            "第二个块必须是 image: {decoded:?}"
+        );
+        server_transport
+            .send_response(id, Ok(json!({"stopReason": "end_turn"})))
+            .await
+            .unwrap();
+    });
+
+    client.prompt(&content, None).await.unwrap();
+    server.await.unwrap();
+    client.close();
+}

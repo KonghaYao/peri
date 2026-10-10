@@ -193,26 +193,61 @@ impl AcpTuiClient {
                                     }
                                     continue;
                                 }
-                                if let AcpEvent::UserInputRunStarted {
+                                if let AcpEvent::ExecutionStarted {
+                                    generation,
+                                    request_id,
+                                }
+                                | AcpEvent::UserInputRunStarted {
                                     generation,
                                     request_id,
                                 } = &event
                                 {
-                                    if !user_input_queue.load(std::sync::atomic::Ordering::Acquire)
+                                    if generation.is_empty() || request_id.is_empty() {
+                                        continue;
+                                    }
+                                    let managed_start =
+                                        matches!(&event, AcpEvent::UserInputRunStarted { .. });
+                                    if managed_start
+                                        && !user_input_queue
+                                            .load(std::sync::atomic::Ordering::Acquire)
                                     {
                                         continue;
                                     }
                                     let _gate = lifecycle.operation_gate().lock().await;
-                                    let Some(claims) = lifecycle.open_user_input_run(
+                                    if !lifecycle
+                                        .matches_user_input_generation(&session_id, generation)
+                                    {
+                                        if managed_start
+                                            || lifecycle
+                                                .user_input_snapshot_identity(&session_id)
+                                                .is_some()
+                                        {
+                                            continue;
+                                        }
+                                        let Some((stable_session, local_generation)) =
+                                            lifecycle.stable_identity()
+                                        else {
+                                            continue;
+                                        };
+                                        if stable_session != session_id
+                                            || !lifecycle.bind_user_input_generation(
+                                                &session_id,
+                                                local_generation,
+                                                generation,
+                                            )
+                                        {
+                                            continue;
+                                        }
+                                    }
+                                    let Some(claims) = lifecycle.open_execution(
                                         &session_id,
                                         generation,
                                         request_id,
+                                        managed_start,
                                     ) else {
                                         continue;
                                     };
                                     Self::settle_claims(&transport, &notification_tx, claims).await;
-                                    // Publish while holding the session gate so a snapshot
-                                    // cannot project a newer run before this start.
                                     Self::deliver_ordinary(
                                         &lifecycle,
                                         &notification_tx,

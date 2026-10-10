@@ -3,15 +3,33 @@ use serde_json::json;
 
 use crate::{
     acp_client::AcpTuiClient,
-    kit::atoms::{HookSummary, McpInitPhase, McpServerSummary, McpStatusSnapshot, PluginSummary},
+    kit::atoms::{
+        CronJobSummary, HookSummary, McpInitPhase, McpServerSummary, McpStatusSnapshot,
+        PluginSummary,
+    },
 };
 
-#[derive(Default)]
 pub(super) struct SessionServices {
     pub hooks: Vec<HookSummary>,
     pub plugins: Vec<PluginSummary>,
     pub mcp_servers: Vec<McpServerSummary>,
     pub mcp: McpStatusSnapshot,
+    pub cron_jobs: Vec<CronJobSummary>,
+}
+
+impl Default for SessionServices {
+    fn default() -> Self {
+        Self {
+            hooks: Vec::new(),
+            plugins: Vec::new(),
+            mcp_servers: Vec::new(),
+            mcp: McpStatusSnapshot {
+                init_phase: McpInitPhase::Failed,
+                ..Default::default()
+            },
+            cron_jobs: Vec::new(),
+        }
+    }
 }
 
 #[derive(Deserialize)]
@@ -26,6 +44,11 @@ struct McpServers {
 }
 
 #[derive(Deserialize)]
+struct CronJobs {
+    jobs: Vec<peri_acp_types::cron::CronTaskInfo>,
+}
+
+#[derive(Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct McpServer {
     name: String,
@@ -35,13 +58,18 @@ struct McpServer {
     tools_count: usize,
 }
 
-pub(super) async fn query(client: &AcpTuiClient, session_id: &str) -> SessionServices {
+pub(super) async fn query(
+    client: &AcpTuiClient,
+    session_id: &str,
+    result: &mut SessionServices,
+) -> Option<String> {
     let params = json!({"sessionId":session_id});
-    let (plugins, mcp) = tokio::join!(
-        client.send_raw_request("plugin/list", params.clone()),
-        client.send_raw_request("mcp/list", params),
+    let (plugins, mcp, cron) = tokio::join!(
+        request(client, "plugin/list", params.clone()),
+        request(client, "mcp/list", params.clone()),
+        request(client, "cron/list", params),
     );
-    let mut result = SessionServices::default();
+    let mut errors = Vec::new();
     match plugins.and_then(|value| {
         serde_json::from_value::<Plugins>(value)
             .map_err(|error| peri_acp::transport::types::AcpError::new(-32603, error.to_string()))
@@ -57,7 +85,7 @@ pub(super) async fn query(client: &AcpTuiClient, session_id: &str) -> SessionSer
                 })
                 .collect();
         }
-        Err(error) => tracing::warn!(%error, "session plugin projection unavailable"),
+        Err(error) => errors.push(format!("plugin/list: {error}")),
     }
     match mcp.and_then(|value| {
         serde_json::from_value::<McpServers>(value)
@@ -86,7 +114,57 @@ pub(super) async fn query(client: &AcpTuiClient, session_id: &str) -> SessionSer
                 })
                 .collect();
         }
-        Err(_) => result.mcp.init_phase = McpInitPhase::Failed,
+        Err(error) => {
+            result.mcp.init_phase = McpInitPhase::Failed;
+            errors.push(format!("mcp/list: {error}"));
+        }
     }
-    result
+    match cron.and_then(|value| {
+        serde_json::from_value::<CronJobs>(value)
+            .map_err(|error| peri_acp::transport::types::AcpError::new(-32603, error.to_string()))
+    }) {
+        Ok(jobs) => {
+            result.cron_jobs = jobs
+                .jobs
+                .into_iter()
+                .map(|job| CronJobSummary {
+                    id: job.id,
+                    expression: job.expression,
+                    prompt: job.prompt,
+                    enabled: job.enabled,
+                    next_fire: job.next_fire,
+                })
+                .collect()
+        }
+        Err(error) => errors.push(format!("cron/list: {error}")),
+    }
+    if errors.is_empty() {
+        None
+    } else {
+        let detail = errors.join("; ");
+        tracing::warn!(session_id, %detail, "session service projection failed; retaining same-generation successful data");
+        Some(crate::i18n::tr_args(
+            "service-projection-failed",
+            &[("detail".into(), fluent_bundle::FluentValue::from(detail))],
+        ))
+    }
 }
+
+async fn request(
+    client: &AcpTuiClient,
+    method: &str,
+    params: serde_json::Value,
+) -> Result<serde_json::Value, peri_acp::transport::types::AcpError> {
+    peri_time::timeout(
+        std::time::Duration::from_secs(10),
+        client.send_raw_request(method, params),
+    )
+    .await
+    .map_err(|_| {
+        peri_acp::transport::types::AcpError::new(-32603, "service projection request timed out")
+    })?
+}
+
+#[cfg(test)]
+#[path = "session_services_test.rs"]
+mod tests;

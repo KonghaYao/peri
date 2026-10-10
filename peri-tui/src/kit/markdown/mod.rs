@@ -17,10 +17,12 @@
 //! - `convert`：convert_to_segments（块级分发）
 //! - `scan`：图片前置扫描 + 占位替换（P0，T2）
 
+mod boundary;
 mod code_block;
 mod convert;
 mod heading;
 mod list;
+mod memory;
 mod scan;
 mod span_style;
 mod table;
@@ -56,8 +58,7 @@ pub fn parse_markdown(
     // [图片前置扫描] sanitize 之后、rk_parse 之前：`![alt](url)` → 占位 token
     // （S1 §4 管线硬性约束）。Options 与 rk_parse 逐位一致（scan::md_options，
     // S3 §3.5 漂移风险）；side table 供 T3 convert 查表（token → ImageInfo）。
-    let (placeholder, image_infos) =
-        scan::replace_images(&sanitized, &scan::scan_images(&sanitized));
+    let (placeholder, image_infos) = preprocess_images(&sanitized);
     let parsed = rk_parse(&placeholder);
     #[cfg(test)]
     {
@@ -102,8 +103,7 @@ fn parse_markdown_piece(
         return (Vec::new(), Vec::new());
     }
     let sanitized = ensure_closed_code_fences(input);
-    let (placeholder, image_infos) =
-        scan::replace_images(&sanitized, &scan::scan_images(&sanitized));
+    let (placeholder, image_infos) = preprocess_images(&sanitized);
     let parsed = rk_parse(&placeholder);
     let theme = MarkdownTheme::from_palette(&palette);
     let lookup = convert::image_lookup(&image_infos);
@@ -118,6 +118,25 @@ fn parse_markdown_piece(
     (segments, parsed.blocks)
 }
 
+#[cfg(test)]
+thread_local! {
+    static IMAGE_SCANNED_BYTES: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
+fn preprocess_images(input: &str) -> (Cow<'_, str>, Vec<scan::ImageInfo>) {
+    if !input.contains("![") {
+        return (Cow::Borrowed(input), Vec::new());
+    }
+    #[cfg(test)]
+    IMAGE_SCANNED_BYTES.with(|count| count.set(count.get() + input.len()));
+    let images = scan::scan_images(input);
+    if images.is_empty() {
+        return (Cow::Borrowed(input), Vec::new());
+    }
+    let (placeholder, images) = scan::replace_images(input, &images);
+    (Cow::Owned(placeholder), images)
+}
+
 fn convert_parsed_piece(
     blocks: &[ParsedBlock],
     max_width: usize,
@@ -129,52 +148,7 @@ fn convert_parsed_piece(
 }
 
 fn stable_chunk_end(input: &str, start: usize) -> usize {
-    let mut end = start;
-    let mut cursor = start;
-    while let Some(relative) = input[cursor..].find("\n\n") {
-        let candidate_end = cursor + relative + 2;
-        let candidate = &input[end..candidate_end];
-        // References can retroactively resolve image/link syntax. Keep such regions mutable.
-        // Fences are frozen only when balanced inside the candidate.
-        let fences = candidate
-            .lines()
-            .filter(|line| line.trim_start().starts_with("```"))
-            .count();
-        // GFM 表格可省略前导竖线（`a | b` + `--- | ---`），仅按 starts_with('|')
-        // 判定会漏检：表格冻结进 stable 后渲染为空（stable 路径只处理 Text 段）
-        // → 内容丢失，且成为宽度变化时空 chunk 越界的触发源。
-        // 分隔行（字符集限于 `| - :` 与空白且含 `|`）是无前导竖线表格的可靠特征；
-        // 误判只损失缓存命中，不损失正确性（tail 路径可渲染全部段类型）。
-        let table_like = candidate.lines().any(|line| {
-            let trimmed = line.trim();
-            (trimmed.starts_with('|') && trimmed.matches('|').count() >= 2)
-                || (trimmed.contains('|')
-                    && trimmed.contains('-')
-                    && trimmed
-                        .chars()
-                        .all(|c| matches!(c, '|' | '-' | ':' | ' ' | '\t')))
-        });
-        let list_like = candidate.lines().any(|line| {
-            let trimmed = line.trim_start();
-            trimmed.starts_with("- ")
-                || trimmed.starts_with("* ")
-                || trimmed.starts_with("+ ")
-                || trimmed
-                    .split_once(". ")
-                    .is_some_and(|(number, _)| number.chars().all(|c| c.is_ascii_digit()))
-        });
-        if candidate.contains("![")
-            || (candidate.contains('[') && candidate.contains(']'))
-            || fences % 2 == 1
-            || table_like
-            || list_like
-        {
-            break;
-        }
-        end = candidate_end;
-        cursor = candidate_end;
-    }
-    end
+    boundary::stable_end(input, start)
 }
 
 /// Phase C：复用 immutable rendered chunks，仅 preprocess/parse/materialize 保守 mutable tail。
@@ -191,8 +165,17 @@ pub fn parse_markdown_chunks_cached(
     }
 
     let append_only = input.starts_with(cache.chunk_source.as_str());
-    let reusable =
-        append_only && cache.chunk_width == max_width as u16 && cache.chunk_palette == palette;
+    let sunken = peri_theme::atoms::THEME_ATOM
+        .state()
+        .read()
+        .semantic
+        .surface
+        .sunken;
+    let reusable = append_only
+        && cache.chunk_width == max_width as u16
+        && cache.chunk_palette == palette
+        && cache.chunk_base_fg == base_fg
+        && cache.chunk_sunken == Some(sunken);
     if append_only && !reusable && !cache.stable_chunk_blocks.is_empty() {
         cache.stable_chunks = cache
             .stable_chunk_blocks
@@ -228,7 +211,13 @@ pub fn parse_markdown_chunks_cached(
     }
 
     let tail_input = &input[cache.stable_source_end..];
-    let (tail, _) = parse_markdown_piece(tail_input, max_width, palette, base_fg);
+    let (mut tail, _) = parse_markdown_piece(tail_input, max_width, palette, base_fg);
+    for segment in &mut tail {
+        if let MarkdownSegment::Image(image) = segment {
+            image.byte_start += cache.stable_source_end;
+            image.byte_end += cache.stable_source_end;
+        }
+    }
     #[cfg(test)]
     if !tail_input.is_empty() {
         crate::kit::acp_bridge::observe_perf(crate::kit::acp_bridge::PerfCounter::TailParse, 1);
@@ -249,6 +238,8 @@ pub fn parse_markdown_chunks_cached(
     }
     cache.chunk_width = max_width as u16;
     cache.chunk_palette = palette;
+    cache.chunk_base_fg = base_fg;
+    cache.chunk_sunken = Some(sunken);
     RenderedMarkdown {
         stable: cache.stable_chunks.clone(),
         tail,
@@ -264,8 +255,7 @@ pub fn parse_markdown_terminal(
     cache: &mut MarkdownRenderCache,
 ) -> RenderedMarkdown {
     let full = parse_markdown(input, max_width, palette, base_fg);
-    cache.chunk_source.clear();
-    cache.chunk_source.push_str(input);
+    cache.chunk_source = String::new();
     cache.chunk_width = max_width as u16;
     cache.chunk_palette = palette;
     cache.stable_source_end = 0;
@@ -366,21 +356,41 @@ impl RenderedMarkdown {
 #[derive(Clone, Debug, Default)]
 pub struct MarkdownRenderCache {
     /// 旧增量 convert 路径的稳定 parser 输入。
+    #[cfg(test)]
     stable_text: String,
+    #[cfg(test)]
     stable_width: u16,
+    #[cfg(test)]
     stable_palette: Palette,
+    #[cfg(test)]
     stable_state: convert::ConvertState,
     /// Phase C：只在明确空行边界冻结的 rendered chunks。
     chunk_source: String,
     chunk_width: u16,
     chunk_palette: Palette,
+    chunk_base_fg: Color,
+    chunk_sunken: Option<Color>,
     stable_source_end: usize,
     stable_chunk_blocks: Vec<Vec<ratatui_kit_markdown::ParsedBlock>>,
     stable_chunks: Vec<Arc<Vec<MarkdownSegment>>>,
 }
 
 impl MarkdownRenderCache {
+    /// Deterministic retained-heap budget estimate, not allocator usage or RSS.
+    ///
+    /// Counts String/Vec capacities and recursively owned parser/render payloads,
+    /// including spare slots after `clear`. Each distinct stable Arc allocation is
+    /// charged once within this cache, in full even when shared with other owners;
+    /// its Vec header and estimated two-usize reference-count header are included.
+    /// Borrowed Cow text, inline cache storage, allocator metadata/rounding, global
+    /// highlight caches, external rendered tails and cfg(test)-only legacy state
+    /// are excluded. Arithmetic saturates rather than wrapping the budget.
+    pub fn retained_bytes(&self) -> usize {
+        memory::cache_retained_bytes(self)
+    }
+
     /// 是否有有效的稳定前缀（可复用）。
+    #[cfg(test)]
     fn has_stable_prefix(&self) -> bool {
         !self.stable_text.is_empty()
     }
@@ -413,6 +423,7 @@ impl MarkdownRenderCache {
 /// 调用方应将 cache 与 VM（AssistantBubble）一一绑定，避免跨 VM 复用。
 /// 在 message_area/mod.rs::VmCacheSlot 中嵌入。
 /// `base_fg` 作为普通段落文本的前景色（来自主题 `component.markdown.text`）。
+#[cfg(test)]
 pub fn parse_markdown_cached(
     input: &str,
     max_width: usize,
@@ -539,3 +550,39 @@ pub fn parse_markdown_cached(
 #[cfg(test)]
 #[path = "mod_test.rs"]
 mod tests;
+
+#[cfg(test)]
+#[path = "cache_test.rs"]
+mod cache_tests;
+
+#[cfg(test)]
+#[path = "table_parse_test.rs"]
+mod table_parse_tests;
+
+#[cfg(test)]
+#[path = "wrap_test.rs"]
+mod wrap_tests;
+
+#[cfg(test)]
+#[path = "image_parse_test.rs"]
+mod image_parse_tests;
+
+#[cfg(test)]
+#[path = "profile_test.rs"]
+mod profile_tests;
+
+#[cfg(test)]
+#[path = "cache_lifecycle_test.rs"]
+mod cache_lifecycle_tests;
+
+#[cfg(test)]
+#[path = "boundary_test.rs"]
+mod boundary_tests;
+
+#[cfg(test)]
+#[path = "memory_test.rs"]
+mod memory_tests;
+
+#[cfg(test)]
+#[path = "workload_test.rs"]
+mod workload_tests;

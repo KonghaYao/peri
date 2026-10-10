@@ -4,7 +4,7 @@
 use std::{
     path::Path,
     sync::atomic::{AtomicBool, Ordering},
-    time::{Duration, Instant},
+    time::Duration,
 };
 
 use anyhow::Context;
@@ -153,7 +153,7 @@ impl DownloadRun {
                 ],
             )
             .to_string(),
-            until: Instant::now() + Duration::from_secs(3),
+            until: peri_time::monotonic_now() + Duration::from_secs(3),
         });
         self.settled = true;
     }

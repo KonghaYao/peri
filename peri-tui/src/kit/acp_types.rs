@@ -35,5 +35,13 @@ use crate::kit::tui_render_unit::{EntryStatus, TuiRenderUnit};
 mod tests;
 
 #[cfg(test)]
+#[path = "acp_types_subagent_test.rs"]
+mod subagent_tests;
+
+#[cfg(test)]
+#[path = "acp_types_decode_test.rs"]
+mod decode_tests;
+
+#[cfg(test)]
 #[path = "acp_types/event_data_bg_test.rs"]
 mod event_data_bg_test;

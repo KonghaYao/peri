@@ -3,9 +3,9 @@
 #[cfg(test)]
 use super::*;
 use crate::app::service_registry::ProcessResourceMonitor;
+use crate::kit::atoms::McpInitPhase;
 use chrono::Utc;
 use peri_acp::transport::{AcpTransport, mpsc::mpsc_transport_pair, types::IncomingMessage};
-use peri_middlewares::cron::CronScheduler;
 use serde_json::{Value, json};
 use serial_test::serial;
 
@@ -17,6 +17,7 @@ fn reset_snapshot_atoms() {
     THREAD_LIST_PAGE_COUNT.set(1);
     THREAD_LIST_ERROR.set(None);
     THREAD_LIST.state().write().clear();
+    SERVICE_PROJECTION_ERROR.set(None);
 }
 
 fn isolated_refresh() -> SlowSnapshotRefresh {
@@ -49,6 +50,7 @@ fn entry_json(cwd: &str, title: &str) -> Value {
 async fn snapshot_client(cwd: &str) -> (AcpTuiClient, tokio::sync::mpsc::UnboundedReceiver<Value>) {
     let (transport, server) = mpsc_transport_pair();
     let (client, _, _) = AcpTuiClient::new(transport);
+    client.force_stable_for_test("00000000-0000-0000-0000-000000000003", false);
     let cwd = cwd.to_string();
     let (queries, rx) = tokio::sync::mpsc::unbounded_channel();
     tokio::spawn(async move {
@@ -69,6 +71,9 @@ async fn snapshot_client(cwd: &str) -> (AcpTuiClient, tokio::sync::mpsc::Unbound
                 "mcp/list" => {
                     assert_eq!(params["sessionId"], "00000000-0000-0000-0000-000000000003");
                     json!({"servers":[{"name":"target-mcp","transport":"stdio","connectionStatus":"connected","oauthStatus":"none","toolsCount":2}]})
+                }
+                "cron/list" => {
+                    json!({"jobs":[{"id":"job-1","expression":"*/5 * * * *","prompt":"test prompt","enabled":true,"next_fire":null}]})
                 }
                 "session/list" => {
                     queries.send(params).unwrap();
@@ -95,8 +100,13 @@ async fn project_history_uses_host_scope_and_actual_execution_path() {
     src.cwd = cwd.into();
     let mut slow = isolated_refresh();
     tick_once(&src, &mut slow).await.unwrap();
+    assert_eq!(*THREAD_LIST_ERROR.state().read(), None);
+    let project_query = tokio::time::timeout(Duration::from_secs(3), queries.recv())
+        .await
+        .expect("project scope query must be sent")
+        .unwrap();
     assert_eq!(
-        queries.recv().await.unwrap()["_meta"]["peri.sessionWorkspaceV1"]["scope"]["kind"],
+        project_query["_meta"]["peri.sessionWorkspaceV1"]["scope"]["kind"],
         "project"
     );
     let threads = THREAD_LIST.state().read().clone();
@@ -105,8 +115,12 @@ async fn project_history_uses_host_scope_and_actual_execution_path() {
     assert_eq!(threads[0].message_count, 3);
     THREAD_BROWSER_SCOPE.set(ThreadBrowserScope::Workspace);
     tick_once(&src, &mut slow).await.unwrap();
+    let workspace_query = tokio::time::timeout(Duration::from_secs(3), queries.recv())
+        .await
+        .expect("workspace scope query must be sent")
+        .unwrap();
     assert_eq!(
-        queries.recv().await.unwrap()["_meta"]["peri.sessionWorkspaceV1"]["scope"]["kind"],
+        workspace_query["_meta"]["peri.sessionWorkspaceV1"]["scope"]["kind"],
         "workspace"
     );
 }
@@ -172,9 +186,6 @@ fn make_minimal_source(client: Option<AcpTuiClient>) -> SnapshotSource {
         crate::config::PeriConfig::default(),
     ));
     let permission_mode = SharedPermissionMode::new(PermissionMode::Default);
-    let scheduler = Arc::new(Mutex::new(CronScheduler::new(
-        tokio::sync::mpsc::unbounded_channel().0,
-    )));
     let monitor = Arc::new(Mutex::new(ProcessResourceMonitor::new()));
 
     SnapshotSource {
@@ -182,9 +193,6 @@ fn make_minimal_source(client: Option<AcpTuiClient>) -> SnapshotSource {
         client,
         peri_config,
         permission_mode,
-        cron_scheduler: scheduler,
-        mcp_pool: None,
-        mcp_init_rx: None,
         resource_monitor: monitor,
         hooks: Vec::new(),
         plugins: Vec::new(),
@@ -209,7 +217,8 @@ async fn test_tick_once_writes_atoms() {
     assert_eq!(snap.cron_enabled, 0);
     assert_eq!(snap.mcp.total, 0);
     assert_eq!(snap.mcp.connected, 0);
-    assert_eq!(snap.mcp.init_phase, McpInitPhase::Pending);
+    assert_eq!(snap.mcp.init_phase, McpInitPhase::Failed);
+    assert!(SERVICE_PROJECTION_ERROR.state().read().is_some());
 }
 
 #[tokio::test]
@@ -229,27 +238,51 @@ async fn test_tick_once_empty_thread_list() {
 
 #[tokio::test]
 #[serial]
+async fn no_session_projection_preserves_only_labeled_startup_plugins_and_hooks() {
+    reset_snapshot_atoms();
+    let mut source = make_minimal_source(None);
+    source.hooks.push(HookSummary {
+        plugin_name: "startup-only".into(),
+        ..Default::default()
+    });
+    tick_once(&source, &mut isolated_refresh()).await.unwrap();
+    assert_eq!(HOOK_LIST.state().read()[0].plugin_name, "startup-only");
+    assert!(CRON_JOBS.state().read().is_empty());
+    assert!(MCP_SERVERS.state().read().is_empty());
+    assert_eq!(
+        SERVICE_PROJECTION_ERROR.state().read().as_deref(),
+        Some(crate::i18n::tr("service-projection-startup").as_str())
+    );
+    ACTIVE_SESSION_ID.set("session-without-client".into());
+    tick_once(&source, &mut isolated_refresh()).await.unwrap();
+    assert!(HOOK_LIST.state().read().is_empty());
+    assert!(PLUGIN_LIST.state().read().is_empty());
+    assert_eq!(
+        SERVICE_PROJECTION_ERROR.state().read().as_deref(),
+        Some(crate::i18n::tr("service-projection-no-client").as_str())
+    );
+}
+
+#[tokio::test]
+#[serial]
 async fn test_cron_tasks_collected() {
     reset_snapshot_atoms();
 
-    let src = make_minimal_source(None);
-    // 注册两个 cron 任务（一个 disabled）
-    {
-        let mut scheduler = src.cron_scheduler.lock();
-        let _ = scheduler.register("*/5 * * * *", "test prompt 1").unwrap();
-        let id2 = scheduler.register("*/10 * * * *", "test prompt 2").unwrap();
-        scheduler.toggle(&id2); // disable
-    }
+    let tmp = tempfile::tempdir().unwrap();
+    let (client, _queries) = snapshot_client(tmp.path().to_str().unwrap()).await;
+    let src = make_minimal_source(Some(client));
+    ACTIVE_SESSION_ID.set("00000000-0000-0000-0000-000000000003".into());
 
     let mut slow = isolated_refresh();
     let result = tick_once(&src, &mut slow).await;
     assert!(result.is_ok());
 
     let jobs = CRON_JOBS.state().read().clone();
-    assert_eq!(jobs.len(), 2);
+    assert_eq!(jobs.len(), 1);
+    assert_eq!(jobs[0].id, "job-1");
 
     let snap = SERVICE_SNAPSHOT.state().read().clone();
-    assert_eq!(snap.cron_total, 2);
+    assert_eq!(snap.cron_total, 1);
     assert_eq!(snap.cron_enabled, 1);
 }
 
@@ -528,8 +561,8 @@ mod startup {
     }
 
     async fn complete_session_snapshot(server: &MpscServerTransport, model: &str) {
-        // query 使用 join!，两条独立服务请求的先后顺序不属于契约。
-        for _ in 0..2 {
+        // query 使用 join!，独立服务请求的先后顺序不属于契约。
+        for _ in 0..3 {
             let message = tokio::time::timeout(Duration::from_millis(10), server.recv())
                 .await
                 .expect("必须在周期 tick 前查询会话服务")
@@ -541,6 +574,7 @@ mod startup {
             let value = match method.as_str() {
                 "plugin/list" => json!({"plugins":[],"hooks":[]}),
                 "mcp/list" => json!({"servers":[]}),
+                "cron/list" => json!({"jobs":[]}),
                 other => panic!("未知请求：{other}"),
             };
             server.send_response(id, Ok(value)).await.unwrap();

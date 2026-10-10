@@ -206,7 +206,7 @@ pub(super) fn handle_event(
     event: Event,
     area: Option<Rect>,
     discover: State<DiscoverState>,
-    operation_loading: State<Option<String>>,
+    operation: State<super::operation::OperationState>,
 ) -> EventResult {
     let local = get_discover_cache();
     let action = decide(&event, area, &discover.read(), &local);
@@ -239,15 +239,10 @@ pub(super) fn handle_event(
             }
         }
         SearchEffect::Install { item, scope } => {
-            *operation_loading.write() = Some("install".into());
-            if let Some(client) = ACP_CLIENT_HANDLE.get().cloned() {
-                let sid = client.current_session_id().unwrap_or_default();
-                tokio::spawn(async move {
-                    let _ = client.send_raw_request("plugin/install", serde_json::json!({
-                        "name": item.name, "marketplace": item.marketplace, "scope": scope, "sessionId": sid,
-                    })).await;
-                });
-            }
+            super::operation::dispatch(
+                super::operation::PluginOperation::install(item.name, item.marketplace, scope),
+                operation,
+            );
         }
     }
     EventResult::Consumed

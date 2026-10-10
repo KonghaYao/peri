@@ -1,7 +1,6 @@
 use super::super::tool_card::ToolCardAccumulator;
 use super::{CurrentTurn, TurnSegment};
 use crate::kit::tui_render_unit::{TuiNoteLevel, tui_hash_roll_update};
-use std::time::Instant;
 
 impl CurrentTurn {
     /// If text has grown since the last `AssistantText` segment, push a new
@@ -16,7 +15,7 @@ impl CurrentTurn {
         if current_text > self.last_text_flush || current_reasoning > self.last_reasoning_flush {
             let reasoning_duration_ms = self
                 .reasoning_started_at
-                .map(|t| t.elapsed().as_millis() as u64);
+                .map(|t| peri_time::elapsed_since(t).as_millis() as u64);
             // [Fix think-end] flush 把旧 trailing 变成新段：缓存尾部残留的是
             // flush 前的 trailing bubble（推理块 Running 形态），索引错位后
             // sync_cache 的 `len() <= i` 守卫会复用陈旧缓存——推理段恒 Running，
@@ -72,12 +71,13 @@ impl CurrentTurn {
             // 的换算不依赖本字段被清除，两套机制互不干扰）。
             self.trailing_reasoning_frozen_ms = self
                 .reasoning_started_at
-                .map(|t| t.elapsed().as_millis() as u64);
+                .map(|t| peri_time::elapsed_since(t).as_millis() as u64);
         }
         self.last_message_id = message_id.map(|s| s.to_string());
         self.text.push_str(t);
         self.open_text_hash = tui_hash_roll_update(self.open_text_hash, t);
-        self.text_started_at.get_or_insert_with(Instant::now);
+        self.text_started_at
+            .get_or_insert_with(peri_time::monotonic_now);
         self.active = true;
         self.invalidate_cache();
     }
@@ -97,7 +97,8 @@ impl CurrentTurn {
         self.last_message_id = message_id.map(|s| s.to_string());
         self.reasoning.push_str(t);
         self.open_reasoning_hash = tui_hash_roll_update(self.open_reasoning_hash, t);
-        self.reasoning_started_at.get_or_insert_with(Instant::now);
+        self.reasoning_started_at
+            .get_or_insert_with(peri_time::monotonic_now);
         self.active = true;
         self.invalidate_cache();
     }
@@ -106,6 +107,10 @@ impl CurrentTurn {
     ///
     /// Flushes any pending text as a segment BEFORE pushing the tool,
     /// so text spoken before the tool call appears in its own bubble.
+    ///
+    /// Agent 卡片晚于自己的子分组到达时（事件乱序，见
+    /// `adopt_pending_subagent_group`），在此认领待配对分组段——分组不得挂在
+    /// 别的（仍在 loading 的）Agent 调用之下。
     pub fn start_tool(&mut self, tool: ToolCardAccumulator) {
         // 防御：相同 tool_id 不应重复 start（同一轮内 tool_id 唯一）。
         // [Fix think-end] agent 侧提前 ToolStarted（工具块开始即发，参数尚未
@@ -118,24 +123,23 @@ impl CurrentTurn {
             .iter_mut()
             .find(|t| t.tool_id == tool.tool_id)
         {
-            if !tool.raw_input.is_null() && existing.raw_input.is_null() {
-                tracing::debug!(
-                    tool_id = %tool.tool_id,
-                    tool_name = %tool.tool_name,
-                    "CurrentTurn::start_tool: 提前 ToolStarted 升级 input"
-                );
-                existing.raw_input = tool.raw_input;
-                existing.input_summary = tool.input_summary;
-                existing.presentation = tool.presentation;
+            if existing.upgrade_input(tool) {
                 self.invalidate_cache();
             }
+            return;
+        }
+        if self.committed {
             return;
         }
         self.flush_text_segment();
         let idx = self.tool_cards.len();
         self.segments.push(TurnSegment::Tool { tool_idx: idx });
+        let is_agent_launcher = super::subagents::is_agent_launcher_tool(&tool.tool_name);
         self.tool_cards.push(tool);
-        self.active = true;
+        if is_agent_launcher {
+            self.adopt_pending_subagent_group(idx, self.segments.len() - 1);
+        }
+        self.active = !self.deactivated;
         self.invalidate_cache();
     }
 
@@ -144,18 +148,12 @@ impl CurrentTurn {
     /// Returns `true` only when this call transitions the matching card from running
     /// to finished. Unknown and duplicate end events are no-ops.
     pub fn end_tool(&mut self, tool_id: &str, output: String, is_error: bool) -> bool {
-        let Some(t) = self
-            .tool_cards
-            .iter_mut()
-            .find(|t| t.tool_id == tool_id && t.output_summary.is_none())
-        else {
+        let Some(t) = self.tool_cards.iter_mut().find(|t| t.tool_id == tool_id) else {
             return false;
         };
-        t.output_summary = Some(output);
-        t.is_error = is_error;
-        // [G-started_at] 完成时刻冻结时长——running→completed 不重建 accumulator，
-        // completed 显示用同源 started_at 的冻结差值（不再增长）。
-        t.completed_duration_ms = Some(t.started_at.elapsed().as_millis() as u64);
+        if !t.finish(output, is_error) {
+            return false;
+        }
         self.invalidate_cache();
         true
     }
@@ -172,6 +170,15 @@ impl CurrentTurn {
             level,
             content_hash,
         });
+        self.active = true;
+        self.invalidate_cache();
+    }
+
+    /// Keep a delivered user prompt after the already visible assistant output
+    /// while a running subagent prevents the parent turn from being archived.
+    pub(crate) fn push_user_bubble(&mut self, text: String) {
+        self.flush_text_segment();
+        self.segments.push(TurnSegment::UserBubble { text });
         self.active = true;
         self.invalidate_cache();
     }

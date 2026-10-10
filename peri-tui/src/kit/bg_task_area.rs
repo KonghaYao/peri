@@ -83,7 +83,7 @@ pub fn BgTaskArea(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
             return EventResult::Ignored;
         }
         let entries = atoms::BG_DISPLAY.state().read().clone();
-        let now = Instant::now();
+        let now = peri_time::monotonic_now();
         let active = visible_bg_display_entries(&entries, now);
         let sorted = sort_bg_display_rows(active);
         let Some(entry) = sorted.iter().find(|entry| entry.id == hit.task_id) else {
@@ -95,7 +95,7 @@ pub fn BgTaskArea(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
     });
 
     let entries = display.read();
-    let now = Instant::now();
+    let now = peri_time::monotonic_now();
 
     let active = visible_bg_display_entries(&entries, now);
     let sorted = sort_bg_display_rows(active);

@@ -22,6 +22,7 @@ pub(super) struct CopyButtonHit {
     /// 渲染时该 VM 的 content_hash——点击时校验索引仍指向同一 VM
     /// （Rewind / Reset 可能增删 items 导致索引错位）。
     pub(super) vm_hash: u64,
+    pub(super) logical_idx: usize,
 }
 
 /// [Slice 4 §6.8] interaction option 的屏幕点击区域（每帧由渲染 body 构建，
@@ -94,6 +95,7 @@ pub(crate) struct ImageHoverState {
 // 按钮行在 slot 内是唯一视觉行（copy_button_line 已保证不折行），
 // 屏幕行 = area.y + slot 视觉偏移 + 行内视觉偏移 - scroll_y。
 // 视口外的按钮不进入映射（点不到），避免列表随会话增长。
+#[allow(clippy::too_many_arguments)] // 每帧渲染上下文（视口几何 + slot 索引 + grid）与状态原子成组传入，与同文件其余 hit 更新函数签名同构，拆分无收益
 pub(super) fn update_copy_button_hits(
     copy_buttons: State<Arc<Vec<CopyButtonHit>>>,
     vm_caches: &State<Vec<VmCacheSlot>>,
@@ -101,7 +103,8 @@ pub(super) fn update_copy_button_hits(
     area_rect: Option<Rect>,
     vis_height: u16,
     scroll_y: usize,
-    slot_visual_starts: &[usize],
+    index: &super::selection::SlotIndex,
+    grid: GridSpec,
 ) {
     let mut hits: Vec<CopyButtonHit> = Vec::new();
     if let Some(area) = area_rect {
@@ -113,35 +116,40 @@ pub(super) fn update_copy_button_hits(
         // 事件时点按同口径比对。快照索引可能落后于 vm_caches（TOCTOU
         // 防御同 rebuild 阶段：越界回退 slot.content_hash）。
         let vms_guard = view_models.read();
-        for (slot_index, slot) in caches_read.iter().enumerate() {
-            let Some(btn) = &slot.copy_button else {
-                continue;
-            };
-            let Some(entry) = slot.wrap_map.get(btn.logical_idx) else {
-                continue;
-            };
-            let vis_row = slot_visual_starts
+        for slot_index in index.visible_slots(scroll_y, vis_height as usize) {
+            let slot = &caches_read[slot_index];
+            let extra = vms_guard
+                .items
                 .get(slot_index)
-                .copied()
-                .unwrap_or(0)
-                .saturating_add(entry.visual_start);
-            let row = area.y as i64 + vis_row as i64 - scroll_y as i64;
-            if row < area.y as i64 || row >= vp_end as i64 {
-                continue;
-            }
-            let hit_hash = match vms_guard.items.get(slot_index) {
-                Some(TuiRenderUnit::TuiAssistantBubble(b)) => {
-                    TuiAssistantBubble::stable_identity_hash(&b.text, b.reasoning.as_ref())
+                .map(|vm| super::render::subagent_error_buttons(vm, &grid))
+                .unwrap_or_default();
+            for btn in slot.copy_button.iter().chain(extra.iter()) {
+                let Some(entry) = slot.wrap_map.get(btn.logical_idx) else {
+                    continue;
+                };
+                let vis_row = index
+                    .slot_visual_start(slot_index)
+                    .unwrap_or(0)
+                    .saturating_add(entry.visual_start);
+                let row = area.y as i64 + vis_row as i64 - scroll_y as i64;
+                if row < area.y as i64 || row >= vp_end as i64 {
+                    continue;
                 }
-                _ => slot.content_hash,
-            };
-            hits.push(CopyButtonHit {
-                row: row as u16,
-                x_start: area.x.saturating_add(btn.x_start),
-                x_end: area.x.saturating_add(btn.x_end),
-                slot_index,
-                vm_hash: hit_hash,
-            });
+                let hit_hash = match vms_guard.items.get(slot_index) {
+                    Some(TuiRenderUnit::TuiAssistantBubble(b)) => {
+                        TuiAssistantBubble::stable_identity_hash(&b.text, b.reasoning.as_ref())
+                    }
+                    _ => slot.content_hash,
+                };
+                hits.push(CopyButtonHit {
+                    row: row as u16,
+                    x_start: area.x.saturating_add(btn.x_start),
+                    x_end: area.x.saturating_add(btn.x_end),
+                    slot_index,
+                    vm_hash: hit_hash,
+                    logical_idx: btn.logical_idx,
+                });
+            }
         }
     }
     *copy_buttons.write_no_update() = Arc::new(hits);
@@ -159,7 +167,7 @@ pub(super) fn update_image_line_hits(
     area_rect: Option<Rect>,
     vis_height: u16,
     scroll_y: usize,
-    slot_visual_starts: &[usize],
+    index: &super::selection::SlotIndex,
     grid: GridSpec,
 ) {
     let mut hits: Vec<ImageLineHit> = Vec::new();
@@ -167,14 +175,14 @@ pub(super) fn update_image_line_hits(
         let vp_end = area.y.saturating_add(vis_height);
         let caches_read = vm_caches.read();
         let content_x = area.x.saturating_add(grid.cont_prefix_width() as u16);
-        for (slot_index, slot) in caches_read.iter().enumerate() {
+        for slot_index in index.visible_slots(scroll_y, vis_height as usize) {
+            let slot = &caches_read[slot_index];
             for info in &slot.image_lines {
                 let Some(entry) = slot.wrap_map.get(info.logical_idx) else {
                     continue;
                 };
-                let vis_row = slot_visual_starts
-                    .get(slot_index)
-                    .copied()
+                let vis_row = index
+                    .slot_visual_start(slot_index)
                     .unwrap_or(0)
                     .saturating_add(entry.visual_start);
                 let row = area.y as i64 + vis_row as i64 - scroll_y as i64;
@@ -209,7 +217,7 @@ pub(super) fn update_interaction_hits(
     area_rect: Option<Rect>,
     vis_height: u16,
     scroll_y: usize,
-    slot_visual_starts: &[usize],
+    index: &super::selection::SlotIndex,
     focused_entry_atom: &AtomState<Option<FocusedEntry>>,
     interaction_option: &State<usize>,
 ) -> Option<(usize, usize)> {
@@ -222,7 +230,8 @@ pub(super) fn update_interaction_hits(
     if let Some(area) = area_rect {
         let vp_end = area.y.saturating_add(vis_height);
         let caches_read = vm_caches.read();
-        for (slot_index, slot) in caches_read.iter().enumerate() {
+        for slot_index in index.visible_slots(scroll_y, vis_height as usize) {
+            let slot = &caches_read[slot_index];
             let Some(il) = &slot.interaction else {
                 continue;
             };
@@ -230,9 +239,8 @@ pub(super) fn update_interaction_hits(
                 let Some(entry) = slot.wrap_map.get(*row_local) else {
                     continue;
                 };
-                let vis_row = slot_visual_starts
-                    .get(slot_index)
-                    .copied()
+                let vis_row = index
+                    .slot_visual_start(slot_index)
                     .unwrap_or(0)
                     .saturating_add(entry.visual_start);
                 let row = area.y as i64 + vis_row as i64 - scroll_y as i64;

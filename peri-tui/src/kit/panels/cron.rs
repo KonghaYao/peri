@@ -1,8 +1,6 @@
 //! ratatui-kit CronPanel component.
 //!
-//! S6c：cron 任务列表从 `CRON_JOBS` atom 读取（由 `service_snapshot` 后台任务
-//! 周期性从 ServiceRegistry.cron_scheduler 派生）。toggle/delete 操作 S11 解耦后
-//! 通过 AcpClient 触发（暂留 TODO）。
+//! Session-scoped Cron projection and ACP operations.
 
 use ratatui_kit::{
     crossterm::event::{Event, KeyCode, KeyEventKind, KeyModifiers, MouseButton, MouseEventKind},
@@ -17,11 +15,15 @@ use ratatui_kit::{
 
 use crate::app::panel_types::PanelKind;
 use crate::i18n;
-use crate::kit::atoms::{CRON_JOBS, CronJobSummary, LANG_VERSION};
+use crate::kit::atoms::{
+    CRON_ACTION_ERROR, CRON_JOBS, CronJobSummary, LANG_VERSION, SERVICE_PROJECTION_ERROR,
+};
 use crate::kit::list_nav::{next_selection, previous_selection, scroll_start_for_selected};
 use crate::kit::panel_mouse::{AreaTracker, ListLayout, hit_item, is_scrollbar_column};
 use fluent_bundle::FluentValue;
 use peri_theme::atoms::THEME_ATOM;
+
+mod actions;
 
 #[component]
 pub fn CronPanel(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
@@ -36,6 +38,8 @@ pub fn CronPanel(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
     let jobs: Vec<CronJobSummary> = jobs_store.read().clone();
     let _ = jobs_store; // StoreState 是 Copy，无需显式 drop
     let _ = hooks.use_atom(&LANG_VERSION);
+    let projection_error = hooks.use_atom(&SERVICE_PROJECTION_ERROR);
+    let action_error = hooks.use_atom(&CRON_ACTION_ERROR);
 
     // 面板绘制区域（上一帧）——鼠标点击行号反推
     let area;
@@ -162,6 +166,7 @@ pub fn CronPanel(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
     let is_confirming = *confirm_delete.read();
     let enabled_count = jobs.iter().filter(|e| e.enabled).count();
     let mut lines: Vec<Line<'_>> = Vec::new();
+    let errors = [projection_error.read().clone(), action_error.read().clone()];
 
     // Stats line
     if !jobs.is_empty() {
@@ -197,7 +202,10 @@ pub fn CronPanel(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
             Style::new().fg(theme_def.read().semantic.text.muted),
         )]));
     }
-    lines.push(Line::from(""));
+    lines.push(Line::from(Span::styled(
+        errors.into_iter().flatten().collect::<Vec<_>>().join("; "),
+        Style::new().fg(theme_def.read().semantic.status.warning),
+    )));
 
     // Task list
     if jobs.is_empty() {
@@ -309,22 +317,12 @@ pub fn CronPanel(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
 
 /// H1g：toggle cron 任务启用状态。service_snapshot 下次 tick 自动刷新 UI（≤2s）。
 fn cron_toggle(id: &str) {
-    use crate::kit::atoms::CRON_SCHEDULER_HANDLE;
-    if let Some(handle) = CRON_SCHEDULER_HANDLE.get() {
-        let mut scheduler = handle.lock();
-        scheduler.toggle(id);
-        tracing::info!(cron_id = id, "CronPanel: toggled");
-    }
+    actions::dispatch("cron/toggle", id);
 }
 
 /// H1g：删除 cron 任务。service_snapshot 下次 tick 自动刷新 UI（≤2s）。
 fn cron_remove(id: &str) {
-    use crate::kit::atoms::CRON_SCHEDULER_HANDLE;
-    if let Some(handle) = CRON_SCHEDULER_HANDLE.get() {
-        let mut scheduler = handle.lock();
-        let removed = scheduler.remove(id);
-        tracing::info!(cron_id = id, removed, "CronPanel: removed");
-    }
+    actions::dispatch("cron/remove", id);
 }
 
 fn close_panel() {

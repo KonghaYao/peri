@@ -7,7 +7,41 @@ use serde_json::{Value, json};
 
 use super::AcpTuiClient;
 
+#[cfg(test)]
+#[path = "cancel_test.rs"]
+mod cancel_tests;
+
+#[cfg(test)]
+#[path = "session_request_test.rs"]
+mod session_request_tests;
+
 impl AcpTuiClient {
+    pub(crate) fn stable_session_identity(&self) -> Option<(String, u64)> {
+        self.lifecycle.stable_identity()
+    }
+
+    pub(crate) async fn send_session_request(
+        &self,
+        identity: &(String, u64),
+        method: &str,
+        params: Value,
+    ) -> Result<Value, AcpError> {
+        {
+            let _operation = self.lifecycle.operation_gate().lock().await;
+            if self.lifecycle.stable_identity().as_ref() != Some(identity)
+                || params.get("sessionId").and_then(Value::as_str) != Some(identity.0.as_str())
+            {
+                return Err(AcpError::new(-32602, "session changed before request"));
+            }
+        }
+        peri_time::timeout(
+            std::time::Duration::from_secs(10),
+            self.transport.send_request(method, params),
+        )
+        .await
+        .map_err(|_| AcpError::new(-32603, "session RPC outcome unknown: timed out"))?
+    }
+
     /// Send a raw ACP request and return the response.
     /// Used for custom RPC methods like `workflow/list_runs`.
     pub async fn send_raw_request(&self, method: &str, params: Value) -> Result<Value, AcpError> {
@@ -35,13 +69,6 @@ impl AcpTuiClient {
             "clientCapabilities": { "_meta": caps.to_agent_meta() },
         });
         let result = self.transport.send_request("initialize", params).await?;
-        self.session_recovery.store(
-            result
-                .pointer("/agentCapabilities/_meta/peri.sessionRecoveryV1")
-                .and_then(Value::as_bool)
-                .unwrap_or(false),
-            std::sync::atomic::Ordering::Release,
-        );
         self.session_workspace.store(
             result
                 .pointer("/agentCapabilities/_meta/peri.sessionWorkspaceV1")
@@ -83,8 +110,9 @@ impl AcpTuiClient {
         request_id: Option<String>,
     ) -> Result<PromptResponse, AcpError> {
         let response = self.send_prompt(content, request_id).await?;
-        serde_json::from_value(response)
-            .map_err(|_| AcpError::new(-32603, "invalid session/prompt response"))
+        serde_json::from_value(response).map_err(|error| {
+            AcpError::new(-32603, format!("invalid session/prompt response: {error}"))
+        })
     }
 
     async fn send_prompt(
@@ -102,7 +130,12 @@ impl AcpTuiClient {
         if let Some(rid) = request_id {
             params["requestId"] = json!(rid);
         }
+        let session_id = params.get("sessionId").cloned();
+        let request_id = params.get("requestId").cloned();
         let result = self.transport.send_request("session/prompt", params).await;
+        if let Err(error) = &result {
+            tracing::warn!(session_id = ?session_id, request_id = ?request_id, code = error.code, error = %error.message, data = ?error.data, "session/prompt RPC failed");
+        }
         let _operation = self.lifecycle.operation_gate().lock().await;
         let claims = lease.finish();
         self.settle_claims_owned(claims).await;
@@ -133,7 +166,12 @@ impl AcpTuiClient {
         if let Some(rid) = request_id {
             params["requestId"] = json!(rid);
         }
+        let session_id = params.get("sessionId").cloned();
+        let request_id = params.get("requestId").cloned();
         let result = self.transport.send_request("session/prompt", params).await;
+        if let Err(error) = &result {
+            tracing::warn!(session_id = ?session_id, request_id = ?request_id, code = error.code, error = %error.message, data = ?error.data, "session/prompt RPC failed");
+        }
         let _operation = self.lifecycle.operation_gate().lock().await;
         let claims = lease.finish();
         self.settle_claims_owned(claims).await;
@@ -221,7 +259,6 @@ impl AcpTuiClient {
         Ok(())
     }
 
-    /// Cancel the currently running prompt.
     pub async fn cancel(&self) -> Result<(), AcpError> {
         let _operation = self.lifecycle.operation_gate().lock().await;
         let session_id = self
@@ -230,7 +267,7 @@ impl AcpTuiClient {
             .ok_or_else(|| AcpError::new(-32603, "no active session"))?;
         let managed_run = self
             .supports_user_input_queue()
-            .then(|| self.lifecycle.active_user_input_run())
+            .then(|| self.lifecycle.active_execution(true))
             .flatten();
         let claims = self.lifecycle.cancel_active_prompt();
         self.settle_claims_owned(claims).await;

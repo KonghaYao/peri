@@ -90,18 +90,11 @@ fn cancel_oauth(server_name: &str) {
     }
 }
 
-/// 复制文本到系统剪贴板（best-effort，失败仅记日志）。
 fn copy_to_clipboard(text: &str) -> bool {
-    match arboard::Clipboard::new() {
-        Ok(mut cb) => match cb.set_text(text.to_string()) {
-            Ok(()) => true,
-            Err(e) => {
-                tracing::warn!(error = %e, "OAuthPopup: 剪贴板写入失败");
-                false
-            }
-        },
-        Err(e) => {
-            tracing::warn!(error = %e, "OAuthPopup: 剪贴板打开失败");
+    match crate::kit::clipboard::copy_text(text) {
+        Ok(()) => true,
+        Err(error) => {
+            tracing::warn!(error = ?error, "OAuthPopup: 剪贴板写入失败");
             false
         }
     }
@@ -165,7 +158,7 @@ pub fn OAuthPopup(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
                 let h_copy = hint;
                 let s_copy = hint_seq;
                 tokio::spawn(async move {
-                    tokio::time::sleep(Duration::from_secs(3)).await;
+                    peri_time::sleep(Duration::from_secs(3)).await;
                     if *s_copy.read() == seq {
                         *h_copy.write() = None;
                     }

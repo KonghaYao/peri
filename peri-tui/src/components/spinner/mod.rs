@@ -30,7 +30,7 @@ impl SpinnerState {
         Self {
             mode,
             verb: verb::pick_verb(None),
-            start_time: Instant::now(),
+            start_time: peri_time::monotonic_now(),
             token_count: 0,
             last_summary_elapsed_ms: 0,
         }
@@ -51,7 +51,7 @@ impl SpinnerState {
         }
         // 从 Idle 切换到活跃状态时，重置计时器和总结记录
         if !was_active && self.mode != SpinnerMode::Idle {
-            self.start_time = Instant::now();
+            self.start_time = peri_time::monotonic_now();
             self.last_summary_elapsed_ms = 0;
         }
     }
@@ -65,7 +65,7 @@ impl SpinnerState {
     }
 
     pub fn elapsed_ms(&self) -> u64 {
-        self.start_time.elapsed().as_millis() as u64
+        peri_time::elapsed_since(self.start_time).as_millis() as u64
     }
 
     pub fn verb(&self) -> &str {
@@ -89,7 +89,7 @@ impl SpinnerState {
     pub fn reset(&mut self) {
         self.mode = SpinnerMode::Idle;
         self.verb = String::new();
-        self.start_time = Instant::now();
+        self.start_time = peri_time::monotonic_now();
         self.token_count = 0;
         self.last_summary_elapsed_ms = 0;
     }
@@ -113,7 +113,7 @@ impl SpinnerState {
     ) -> Vec<Line<'static>> {
         // 帧索引纯计算：50ms 一个 raw tick，每 2 raw tick 推进一帧。
         // 保留原 advance_tick 节奏（每帧 ~100ms）。
-        let elapsed_ms = self.start_time.elapsed().as_millis() as u64;
+        let elapsed_ms = peri_time::elapsed_since(self.start_time).as_millis() as u64;
         let raw_tick = elapsed_ms / 50;
         let frame_tick = raw_tick / 2;
         let frame = animation::tick_to_frame(frame_tick);

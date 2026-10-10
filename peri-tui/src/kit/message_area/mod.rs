@@ -9,7 +9,6 @@
 #![allow(clippy::needless_update)]
 
 use std::sync::Arc;
-use std::time::Instant;
 
 #[cfg(test)]
 use crate::kit::atoms::FocusedEntry;
@@ -18,6 +17,7 @@ use crate::kit::atoms::{
 };
 use crate::kit::layout::CenterBandHook;
 use crate::kit::text_selection::TextSelection;
+#[cfg(test)]
 use crate::kit::tui_render_unit::TuiRenderUnit;
 #[cfg(test)]
 use crate::kit::tui_render_unit::{FoldKey, FoldState};
@@ -25,7 +25,7 @@ use crate::kit::welcome::Welcome;
 use peri_theme::atoms::{PALETTE_ATOM, THEME_ATOM};
 use ratatui_kit::prelude::*;
 use ratatui_kit::ratatui::{
-    layout::{Constraint, Direction},
+    layout::{Constraint, Direction, Position},
     style::{Modifier, Style},
     text::{Line, Span, Text as RatText},
     widgets::{Block, Padding, Paragraph, Wrap},
@@ -41,13 +41,15 @@ mod no_color;
 mod props;
 pub(crate) mod render;
 pub(crate) mod scroll;
-mod selection;
+pub(crate) mod selection;
 #[cfg(test)]
 pub(crate) use selection::run_synthetic_slot_index;
 #[cfg(test)]
 pub(crate) fn measure_synthetic_wrap(lines: &[Line<'static>], width: u16) {
     let _ = selection::build_wrap_map(lines, width);
 }
+mod transcript;
+mod transcript_index;
 mod vm_cache;
 
 #[cfg(test)]
@@ -68,9 +70,7 @@ use self::image_action::{
     OpenImageError, build_open_command, build_open_command_with, try_open_image,
 };
 use self::no_color::strip_line_colors;
-use self::vm_cache::{
-    VmCacheSlot, palette_markdown_key, render_timing_enabled, total_visual_rows, trace_phase,
-};
+use self::vm_cache::{VmCacheSlot, read_render_snapshot, total_visual_rows, trace_phase};
 #[cfg(test)]
 use footer::KeepGoingLayout;
 use footer::build_footer_lines;
@@ -78,18 +78,16 @@ pub(crate) use footer::hash_todo_items;
 pub use footer::{TodoItem, TodoStatus};
 pub use props::MessageAreaProps;
 use props::{MsgAreaTracker, ScrollbarFields, ScrollbarHook};
-use render::vm_to_lines_cached_with_layout;
 #[cfg(test)]
 use scroll::GesturePending;
 use scroll::{DragThrottle, ScrollThrottle, ScrollbarDragState};
-use selection::{
-    SlotIndex, SlotLines, WrappedLineInfo, build_wrap_map, highlight_line_in_selection,
-};
+use selection::{WrappedLineInfo, build_wrap_map, highlight_line_in_selection};
 
 // ── 组件 ──────────────────────────────────────────────────────────────────
 
 #[component]
 pub fn MessageArea(props: &MessageAreaProps, mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
+    let frame_t0 = peri_time::monotonic_now();
     tracing::trace!(target: "frozen_diag", "MessageArea: update/body called");
     let view_models = hooks.use_atom(&VIEW_MODELS);
     let acp_state = hooks.use_atom(&crate::kit::atoms::ACP_STATE);
@@ -100,8 +98,6 @@ pub fn MessageArea(props: &MessageAreaProps, mut hooks: Hooks) -> impl Into<AnyE
     // 确保所有 Markdown 色值随主题更新。
     let _palette = hooks.use_atom(&PALETTE_ATOM);
     let theme = hooks.use_atom(&peri_theme::atoms::THEME_ATOM);
-    let current_palette_key =
-        palette_markdown_key(&_palette.read(), theme.read().semantic.surface.sunken);
     // 订阅 TERMINAL_CAPS：NO_COLOR 时对可见行做颜色剥离（§12，G3 视口级 pass）。
     // 启动时探测一次后不再变化；订阅仅为语义完整（切换不重渲染也无副作用）。
     let caps = hooks.use_atom(&crate::kit::atoms::TERMINAL_CAPS);
@@ -110,7 +106,7 @@ pub fn MessageArea(props: &MessageAreaProps, mut hooks: Hooks) -> impl Into<AnyE
     // 绝对路径显示/清除）。读取仍在渲染 body 视口循环（读副本，G3 视口级）。
     hooks.use_atom(&IMAGE_HOVER);
 
-    let snapshot = view_models.read();
+    let (snapshot, publication) = read_render_snapshot();
     let todo_items = todo_atom.read().clone();
     let is_loading = acp_state.read().is_loading;
 
@@ -137,13 +133,6 @@ pub fn MessageArea(props: &MessageAreaProps, mut hooks: Hooks) -> impl Into<AnyE
         band.set_grid(grid);
     }
 
-    // [PERI_RENDER_TIMING] 帧计时起点
-    let frame_t0 = if render_timing_enabled() {
-        Some(Instant::now())
-    } else {
-        None
-    };
-
     let vm_generation = snapshot.generation;
 
     // ── 按 VM 分片的渲染缓存 ──────────────────────────────────────────────────
@@ -151,13 +140,14 @@ pub fn MessageArea(props: &MessageAreaProps, mut hooks: Hooks) -> impl Into<AnyE
     // [TRAP] write_no_update 必须用——ratatui-kit ReactiveMutRef::Drop 无条件 wake()，
     // render body 内 write 会自激回路 100% CPU。
     let vm_caches: State<Vec<VmCacheSlot>> = hooks.use_state(Vec::new);
+    let transcript = hooks.use_state(transcript::Transcript::default);
 
     // ── Footer 行预计算：必须在 empty 分支之前调用，确保所有 hook 顺序一致 ──
     // keepgoing 防抖：KEEPGOING_BLOCKED_UNTIL 内的时间未过期 → 按钮禁用样式渲染
     let keepgoing_blocked = crate::kit::atoms::KEEPGOING_BLOCKED_UNTIL
         .state()
         .read()
-        .is_some_and(|until| Instant::now() < until);
+        .is_some_and(|until| peri_time::monotonic_now() < until);
     // 消息区位置追踪 + 视宽：build_footer_lines 需要 vis_width 判断按钮是否
     // 超宽换行（m4：换行后点击区域与实际渲染位置错位，超宽时跳过按钮渲染）。
     let area_hook = hooks.use_hook(MsgAreaTracker::new);
@@ -231,172 +221,57 @@ pub fn MessageArea(props: &MessageAreaProps, mut hooks: Hooks) -> impl Into<AnyE
 
     let vis_height = area_rect.map(|r| r.height).unwrap_or(60).max(1);
 
-    // ── 遍历每个 VM，按 (content_hash, vis_width) 命中判断 ──
-    // [Why] 流式期间只有最后一个 AssistantBubble 的 content_hash 变化（text 累积），
-    // 其余 committed VM hash 完全稳定——直接复用 Arc<Vec<Line>> 和 Arc<Vec<WrappedLineInfo>>。
-    // 单次成本从 O(N×W) 降至 O(W)。
-    //
-    // [Opt B] hash-only clone：只收集 content_hash (u64)，避免每帧全量 clone TuiRenderUnit。
-    // rebuild 阶段按需通过 snapshot 重读 VM 数据（流式期间只追加，索引有效）。
-    //
-    // [TRAP] 必须先提取 hashes 再 drop(snapshot)，否则 vm_caches.write_no_update 与
-    // view_models read guard 冲突。
-    //
-    // [Fix §15] [Slice 4 §6.8] pending interaction block 的 slot index 与
-    // item_hashes 同一次扫描派生（原独立 O(N) 循环合并——每帧至多一次全量
-    // 遍历；同一时刻至多一个 pending block（模态互斥），break 语义保留）。
-    let mut anchor_slot: Option<usize> = None;
-    // §8.2 动画帧：100ms 粒度壁钟 tick——running 类 VM 每帧重建以推进
-    // braille 动画（与 render.rs anim_tick 同公式同源）。
-    let anim_frame = std::time::SystemTime::now()
+    let anim_frame = peri_time::now_wall()
         .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| d.as_millis() as u64 / 100)
+        .map(|duration| duration.as_millis() as u64 / 100)
         .unwrap_or(0);
-    // running 类 VM 标记（tool/subagent/reasoning running）——与 hash 同一次
-    // 扫描派生，rebuild 判定按帧强制重建这些 slot。
-    let mut running_flags: Vec<bool> = Vec::with_capacity(snapshot.items.len());
-    let item_hashes: Vec<u64> = snapshot
-        .items
-        .iter()
-        .enumerate()
-        .map(|(i, vm)| {
-            if anchor_slot.is_none() && matches!(vm, TuiRenderUnit::TuiAskUserBlock(a) if a.pending)
-            {
-                anchor_slot = Some(i);
-            }
-            running_flags.push(vm.is_animating());
-            vm.content_hash()
-        })
-        .collect();
-    let items_len = item_hashes.len();
-    // [Slice 4 §6.8] pending 完成（结果回写 pending=false）后扫描不到 →
-    // anchor 自然清除。write_no_update 不触发自激重渲染；block 完成时
-    // push_view_models 的 generation 变化会触发 auto_follow effect。
-    if *anchor_slot_state.read() != anchor_slot {
-        *anchor_slot_state.write_no_update() = anchor_slot;
-    }
-    drop(snapshot);
-
-    // 同步 vm_caches 长度对齐 item_hashes
-    if vm_caches.read().len() != items_len {
-        vm_caches
-            .write_no_update()
-            .resize(items_len, VmCacheSlot::default());
-    }
-
-    // 第一阶段：检测哪些 slot 需要 rebuild（content_hash 或 vis_width 变化）
-    // [Opt B] 用 item_hashes (Vec<u64>) 替代 items_vec 迭代，避免持有 TuiRenderUnit clone。
-    let rebuild_indices: Vec<usize> = {
-        let caches_read = vm_caches.read();
-        item_hashes
-            .iter()
-            .enumerate()
-            .filter_map(|(i, hash)| {
-                let slot = &caches_read[i];
-                if slot.content_hash != *hash
-                    || slot.width != vis_width
-                    || slot.palette_key != current_palette_key
-                    || slot.lang_key != LANG_VERSION.get()
-                    // §8.2 running 类 VM 按动画帧强制重建（hash 可能跨秒才变）
-                    || (running_flags[i] && slot.anim_frame != anim_frame)
-                {
-                    Some(i)
-                } else {
-                    None
-                }
-            })
-            .collect()
+    let items_len = snapshot.items.len();
+    let context = crate::kit::entry_render_cache::EntryRenderContext {
+        theme: Arc::clone(&theme.read()),
+        language: LANG_VERSION.get(),
+        surface: crate::kit::entry_render_cache::EntrySurface::Message,
+        occurrence: BRIDGE_RESET_COUNTER.get(),
     };
-    // [PERI_RENDER_TIMING] hash 比对耗时
-    let t_hash = Instant::now();
     trace_phase(
-        "hash+detect",
-        frame_t0.unwrap_or(t_hash),
-        Some(&format!(
-            "items={items_len}, rebuilds={}",
-            rebuild_indices.len()
-        )),
+        "preparation",
+        frame_t0,
+        Some("body-before-prepare-including-vm-read"),
     );
-
-    // 第二阶段：rebuild 需要更新的 slot——只有这些 VM 调用 vm_to_lines + build_wrap_map
-    // [Phase 2] markdown_cache 在 slot 内部跨 rebuild 复用：即使 VM hash 变化（text 追加 token），
-    // cache 仍能命中上次 stable_text 前缀，仅处理新增 block。
-    // [Borrow] 单次 write_no_update 持锁整个 rebuild 循环——ratatui-kit State 仅在
-    // render body 单线程访问，无锁竞争。直接可变借用 slot.markdown_cache，避免 clone
-    // ConvertState（含 Vec<Line>，clone 成本高）。
-    //
-    // [Opt B] 仅 rebuild_indices 非空时才重新 read snapshot 获取 VM 引用。
-    // safe_len 防御 TOCTOU 索引越界（Rewind/Reset 可能缩短 items）。
-    if !rebuild_indices.is_empty() {
-        let snapshot2 = view_models.read();
-        let safe_len = snapshot2.items.len().min(items_len);
-        let mut caches = vm_caches.write_no_update();
-        for i in &rebuild_indices {
-            if *i >= safe_len {
-                continue; // TOCTOU 防御：跳过不可用索引，下帧重新同步
-            }
-            let vm = &snapshot2.items[*i];
-            let vm_hash = vm.content_hash();
-            let slot = &mut caches[*i];
-            let (lines, copy_button, interaction, image_lines) = vm_to_lines_cached_with_layout(
-                vm,
-                &grid,
-                &mut slot.markdown_cache,
-                Some(&mut slot.markdown_lines),
-                true,
-            );
-            let lines = Arc::new(lines);
-            let (_, wm) = slot.markdown_lines.build_slot_wrap_map(&lines, vis_width);
-            let visual_rows = wm.last().map(|e| e.visual_end).unwrap_or(0);
-            slot.content_hash = vm_hash;
-            slot.width = vis_width;
-            slot.palette_key = current_palette_key;
-            slot.lang_key = LANG_VERSION.get();
-            slot.anim_frame = anim_frame;
-            slot.lines = lines;
-            slot.wrap_map = Arc::new(wm);
-            slot.visual_rows = visual_rows;
-            slot.copy_button = copy_button;
-            slot.interaction = interaction;
-            slot.image_lines = image_lines;
-        }
-    }
-    // [PERI_RENDER_TIMING] rebuild 耗时（仅 rebuild_indices 非空时有意义）
-    let t_rebuild = Instant::now();
-    if !rebuild_indices.is_empty() {
-        trace_phase(
-            "rebuild",
-            t_hash,
-            Some(&format!("{} slots", rebuild_indices.len())),
-        );
-    }
-
-    // 第三阶段：构建 O(slot count) prefix index；slot-local lines/wrap map 保持 Arc 共享。
-    let mut slot_arcs = Vec::new();
-    let mut slot_wrap_maps = Vec::new();
-    let slot_index = {
-        let caches_read = vm_caches.read();
-        slot_arcs.reserve(caches_read.len());
-        slot_wrap_maps.reserve(caches_read.len());
-        for slot in caches_read.iter() {
-            let slot_lines = match slot.markdown_lines.stable_overlay() {
-                Some((stable_start, stable)) => {
-                    SlotLines::composite(Arc::clone(&slot.lines), stable_start, stable)
-                }
-                None => SlotLines::single(Arc::clone(&slot.lines)),
-            };
-            slot_arcs.push(slot_lines);
-            slot_wrap_maps.push(Arc::clone(&slot.wrap_map));
-        }
-        Arc::new(SlotIndex::new_with_overlays(slot_arcs, slot_wrap_maps))
-    };
+    let prepare_wait = peri_time::monotonic_now();
+    let mut transcript_guard = transcript.write_no_update();
+    let mut caches_guard = vm_caches.write_no_update();
+    let prepare_acquired = peri_time::monotonic_now();
+    vm_cache::trace_elapsed(
+        "prepare-lock-wait",
+        prepare_acquired.duration_since(prepare_wait),
+        None,
+    );
+    let prepare_start = peri_time::monotonic_now();
+    let slot_index = transcript_guard.prepare(
+        &snapshot,
+        &publication,
+        &mut caches_guard,
+        grid,
+        vis_width,
+        context,
+        anim_frame,
+        BRIDGE_RESET_COUNTER.get(),
+        scroll_state.read().offset(),
+        vis_height as usize,
+    );
+    let prepare_end = peri_time::monotonic_now();
+    *anchor_slot_state.write_no_update() = transcript_guard.anchor();
+    drop(caches_guard);
+    drop(transcript_guard);
+    let t_rebuild = peri_time::monotonic_now();
+    vm_cache::trace_elapsed(
+        "prepare",
+        prepare_end.duration_since(prepare_start),
+        Some("synchronous-transcript-derivation"),
+    );
     let total_logical_lines = slot_index.total_logical();
     let core_total_visual_rows = slot_index.total_visual();
     let num_slots = slot_index.slot_count();
-
-    let slot_visual_starts: Vec<usize> = (0..num_slots)
-        .filter_map(|slot| slot_index.slot_visual_start(slot))
-        .collect();
 
     // [Slice 4 §6.8] anchor 的视觉行范围（core 行）：slot 起始偏移 + slot 内
     // 视觉行数。供 auto_follow 的 anchor 分支对齐视口到 block 底部。
@@ -407,7 +282,7 @@ pub fn MessageArea(props: &MessageAreaProps, mut hooks: Hooks) -> impl Into<AnyE
     let anchor_visual_range: Option<(usize, usize)> = anchor_slot_state
         .read()
         .and_then(|slot| slot_index.slot_visual_range(slot));
-    let t_concat = Instant::now();
+    let t_concat = peri_time::monotonic_now();
     trace_phase(
         "concat",
         t_rebuild,
@@ -433,7 +308,7 @@ pub fn MessageArea(props: &MessageAreaProps, mut hooks: Hooks) -> impl Into<AnyE
 
     handlers::register_keepgoing_click(&mut hooks, keepgoing_rect);
 
-    handlers::register_md_copy_click(&mut hooks, copy_buttons, view_models);
+    handlers::register_copy_click(&mut hooks, copy_buttons, view_models);
 
     // ── 鼠标事件处理（滚动 + 文本拖拽选中复制）──
     // [TRAP] event_handler 闭包必须是 'static → 必须 move。但 concat_wrap_map_arc /
@@ -632,7 +507,14 @@ pub fn MessageArea(props: &MessageAreaProps, mut hooks: Hooks) -> impl Into<AnyE
         &follow_bottom,
     );
 
-    let vp_height = vis_height as usize;
+    let new_output_active = scroll::new_output_indicator_active(
+        *follow_bottom.read(),
+        scroll_y,
+        vis_height as usize,
+        core_total_visual_rows + footer_visual_rows,
+    );
+    // 指示器独占视口最后一行，正文裁剪预算扣除该行。
+    let vp_height = (vis_height as usize).saturating_sub(usize::from(new_output_active));
 
     // ── keepgoing 按钮屏幕位置（每帧更新）──
     // 必须在 scroll_y 计算之后、handler 使用之前；write_no_update 避免自激重渲染。
@@ -644,8 +526,29 @@ pub fn MessageArea(props: &MessageAreaProps, mut hooks: Hooks) -> impl Into<AnyE
             keepgoing_layout,
             core_total_visual_rows,
             scroll_y,
-            vis_height,
+            vp_height as u16,
         );
+    }
+
+    let warm_start = peri_time::monotonic_now();
+    let slot_index = transcript.write_no_update().warm_visible(
+        &snapshot,
+        &mut vm_caches.write_no_update(),
+        scroll_y,
+        vp_height,
+    );
+    trace_phase(
+        "viewport-warm",
+        warm_start,
+        Some("includes-local-cache-locks"),
+    );
+    drop(snapshot);
+    if vm_cache::render_timing_enabled() {
+        let transcript_guard = transcript.read();
+        tracing::info!(target: "perf.render", generation = vm_generation,
+            scanned = transcript_guard.scanned_slots, updated = transcript_guard.updated_slots,
+            evicted = transcript_guard.evictions, retained_bytes = transcript_guard.retained_bytes(),
+            invalidation = transcript_guard.invalidation, "transcript-work");
     }
 
     hits::update_copy_button_hits(
@@ -653,18 +556,19 @@ pub fn MessageArea(props: &MessageAreaProps, mut hooks: Hooks) -> impl Into<AnyE
         &vm_caches,
         &view_models,
         area_rect,
-        vis_height,
+        vp_height as u16,
         scroll_y,
-        &slot_visual_starts,
+        &slot_index,
+        grid,
     );
 
     hits::update_image_line_hits(
         image_rects,
         &vm_caches,
         area_rect,
-        vis_height,
+        vp_height as u16,
         scroll_y,
-        &slot_visual_starts,
+        &slot_index,
         grid,
     );
 
@@ -672,9 +576,9 @@ pub fn MessageArea(props: &MessageAreaProps, mut hooks: Hooks) -> impl Into<AnyE
         interaction_rects,
         &vm_caches,
         area_rect,
-        vis_height,
+        vp_height as u16,
         scroll_y,
-        &slot_visual_starts,
+        &slot_index,
         &focused_entry_atom,
         &interaction_option,
     );
@@ -761,6 +665,7 @@ pub fn MessageArea(props: &MessageAreaProps, mut hooks: Hooks) -> impl Into<AnyE
             .saturating_add(footer_lines.len()),
     );
 
+    let mut materialized: Option<(usize, Arc<selection::SlotLines>)> = None;
     if scroll_y < core_total_visual_rows && vp_core_start <= vp_core_end && core_len > 0 {
         let end = vp_core_end.min(core_len - 1);
         for i in vp_core_start..=end {
@@ -773,7 +678,16 @@ pub fn MessageArea(props: &MessageAreaProps, mut hooks: Hooks) -> impl Into<AnyE
                     slot_index: lookup.slot_index,
                 };
                 let local_idx = lookup.local_logical;
-                let line = slot_index.line(lookup.slot_index, local_idx).unwrap();
+                if materialized
+                    .as_ref()
+                    .is_none_or(|(slot, _)| *slot != lookup.slot_index)
+                {
+                    materialized = Some((
+                        lookup.slot_index,
+                        slot_index.materialize(lookup.slot_index).unwrap(),
+                    ));
+                }
+                let line = materialized.as_ref().unwrap().1.line(local_idx).unwrap();
                 let mut out = if in_sel {
                     let (_, _, sr, sc, er, ec) = sel_bounds.unwrap();
                     highlight_line_in_selection(line, &entry, sr, er, sc, ec, vis_width, sel_bg)
@@ -812,51 +726,29 @@ pub fn MessageArea(props: &MessageAreaProps, mut hooks: Hooks) -> impl Into<AnyE
         }
     }
 
-    // [Slice 2] §8.1 `↓ New output` 指示器——浏览态（用户滚离底部）且视口未到
-    // 真实内容底时，在视口末尾（有 footer 时插在 footer 之前）插入指示行。
-    // 视口附加行：不进 VmCacheSlot / wrap_map / total_visual_rows（G3 视口级）；
-    // NO_COLOR 剥离 pass（下方）天然覆盖（文本保留、颜色剥离）。
-    // [Why 内容底口径] total_visual_rows 含 SCROLL_PADDING 缓冲（不可见行），
-    // 判定以「真实内容底」= core + footer 视觉行数为准——滚到视觉底部即消失，
-    // 与粘性 follow 恢复（should_follow_after_user_scroll 扣缓冲）口径对齐。
-    let new_output_active = scroll::new_output_indicator_active(
-        *follow_bottom.read(),
-        scroll_y,
-        vp_height,
-        core_total_visual_rows + footer_visual_rows,
-    );
-    {
-        let mut rect = new_output_rect.write_no_update();
-        if new_output_active && let Some(area) = area_rect {
-            let arrow = if caps.read().unicode { "\u{2193}" } else { "v" };
-            let sem = THEME_ATOM.state().read().semantic;
-            let mut spans = vec![Span::raw(" ".repeat(grid.first_prefix_width()))];
-            spans.push(Span::styled(
-                format!("{arrow} {}", crate::i18n::tr("msg-new-output")),
-                Style::default()
-                    .fg(sem.status.running)
-                    .add_modifier(Modifier::BOLD),
-            ));
-            viewport_lines.push(Line::from(spans));
-            // 屏幕行 = area.y + 指示行在 viewport_lines 中的索引 - vp_first_offset
-            // （Paragraph::scroll 仅跳过首行的视觉偏移，viewport_lines 完整传入；
-            // 指示行是 push 后的末元素）。
-            let screen_row =
-                area.y as i64 + viewport_lines.len() as i64 - 1 - vp_first_offset as i64;
-            let vp_end = area.y as i64 + i64::from(vis_height);
-            *rect = if screen_row >= area.y as i64 && screen_row < vp_end {
-                let x_end = area
-                    .x
-                    .saturating_add(area.width)
-                    .max(area.x.saturating_add(1));
-                Some((screen_row as u16, area.x, x_end))
-            } else {
-                None
-            };
+    // 指示器是固定视口 chrome，不参与正文折行/scroll；绘制与点击共用末行。
+    let new_output_line = if new_output_active {
+        let arrow = if caps.read().unicode { "\u{2193}" } else { "v" };
+        let sem = THEME_ATOM.state().read().semantic;
+        let mut spans = vec![Span::raw(" ".repeat(grid.first_prefix_width()))];
+        spans.push(Span::styled(
+            format!("{arrow} {}", crate::i18n::tr("msg-new-output")),
+            Style::default()
+                .fg(sem.status.running)
+                .add_modifier(Modifier::BOLD),
+        ));
+        let line = Line::from(spans);
+        Some(if strip_color {
+            strip_line_colors(&line)
         } else {
-            *rect = None;
-        }
-    }
+            line
+        })
+    } else {
+        None
+    };
+    *new_output_rect.write_no_update() = area_rect
+        .filter(|area| new_output_active && area.height > 0)
+        .map(|area| (area.bottom() - 1, area.x, area.right()));
 
     if viewport_has_footer {
         viewport_lines.extend(footer_lines.iter().cloned());
@@ -869,7 +761,6 @@ pub fn MessageArea(props: &MessageAreaProps, mut hooks: Hooks) -> impl Into<AnyE
         }
     }
     // [PERI_RENDER_TIMING] 视口裁剪耗时
-    let t_viewport = Instant::now();
     trace_phase(
         "viewport",
         t_concat,
@@ -894,22 +785,38 @@ pub fn MessageArea(props: &MessageAreaProps, mut hooks: Hooks) -> impl Into<AnyE
     // View 的 area.width（= band 宽），内部 wrap 宽度 = band - 1 = vis_width，与
     // `total_visual_rows` / `wrap_map_cache` / `line_count(vis_width)` 的估算一致；
     // 带内最右 1 列为正文留白（滚动条另在窗口最右列，见 ScrollbarHook）。
-    // [PERI_RENDER_TIMING] 帧总耗时
     trace_phase(
-        "frame-total",
-        frame_t0.unwrap_or(t_viewport),
-        Some(&format!("gen={vm_generation}")),
+        "message-body-total",
+        frame_t0,
+        Some(&format!(
+            "gen={vm_generation}, excludes-widget-draw-and-terminal-flush"
+        )),
     );
+    render_viewport(viewport_lines, scroll_offset_y, new_output_line)
+}
+
+fn render_viewport(
+    viewport_lines: Vec<Line<'static>>,
+    scroll_offset_y: u16,
+    new_output_line: Option<Line<'static>>,
+) -> AnyElement<'static> {
     element!(
         View(
             flex_direction: Direction::Vertical,
             width: Constraint::Fill(1),
             height: Constraint::Fill(1),
         ) {
-            Text(text: Paragraph::new(RatText::from(viewport_lines))
-                .wrap(Wrap { trim: false })
-                .block(Block::default().padding(Padding::new(0, 1, 0, 0)))
-                .scroll((scroll_offset_y, 0)))
+            View(height: Constraint::Fill(1)) {
+                Text(text: Paragraph::new(RatText::from(viewport_lines))
+                    .wrap(Wrap { trim: false })
+                    .block(Block::default().padding(Padding::new(0, 1, 0, 0))),
+                    scroll: Position::new(scroll_offset_y, 0))
+            }
+            { new_output_line.map(|line| element!(
+                View(height: Constraint::Length(1)) {
+                    Text(text: line)
+                }
+            )) }
         }
     )
     .into_any()
@@ -918,3 +825,7 @@ pub fn MessageArea(props: &MessageAreaProps, mut hooks: Hooks) -> impl Into<AnyE
 #[cfg(test)]
 #[path = "mod_test.rs"]
 mod tests;
+
+#[cfg(test)]
+#[path = "viewport_test.rs"]
+mod viewport_tests;

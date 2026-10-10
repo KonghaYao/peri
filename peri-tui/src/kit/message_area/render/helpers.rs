@@ -92,7 +92,7 @@ pub(super) fn status_symbol_and_color(
 /// 动画 tick：100ms 粒度的壁钟帧序号（与 mod.rs 缓存重建的 anim_frame 同源）。
 /// 渲染层每次重绘取当前帧——running 行由缓存按帧强制重建驱动动画推进。
 fn anim_tick() -> u64 {
-    std::time::SystemTime::now()
+    peri_time::now_wall()
         .duration_since(std::time::UNIX_EPOCH)
         .map(|d| d.as_millis() as u64 / 100)
         .unwrap_or(0)

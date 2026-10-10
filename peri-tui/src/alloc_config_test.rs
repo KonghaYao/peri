@@ -1,10 +1,11 @@
 use super::*;
 
 // libtest uses System; an ordinary Vec does not exercise jemalloc here.
-#[cfg(not(target_os = "windows"))]
+// The fixture only exists where jemalloc is the global allocator (Linux/Unix).
+#[cfg(not(any(target_os = "windows", target_os = "macos")))]
 struct Allocation(*mut u8, std::alloc::Layout);
 
-#[cfg(not(target_os = "windows"))]
+#[cfg(not(any(target_os = "windows", target_os = "macos")))]
 impl Allocation {
     fn new(size: usize) -> Self {
         use std::alloc::GlobalAlloc;
@@ -17,7 +18,7 @@ impl Allocation {
     }
 }
 
-#[cfg(not(target_os = "windows"))]
+#[cfg(not(any(target_os = "windows", target_os = "macos")))]
 impl Drop for Allocation {
     fn drop(&mut self) {
         use std::alloc::GlobalAlloc;
@@ -69,13 +70,20 @@ fn test_alloc_collect_does_not_panic() {
     alloc_collect();
 }
 
-/// jemalloc stats 查询仅在非 Windows 平台有效（Windows stub 返回 None）
+/// 分配器统计查询在所有非 Windows 平台有效（Windows stub 返回 None）；
+/// macOS 系统分配器无 allocated 计数，该字段回退为 RSS。
 #[cfg(not(target_os = "windows"))]
 #[test]
 fn test_query_stats_returns_valid_data() {
     let stats = query_stats().expect("query_stats 应返回数据");
     assert!(stats.current_rss > 0, "RSS 应大于 0");
+    #[cfg(not(any(target_os = "windows", target_os = "macos")))]
     assert!(stats.current_allocated > 0, "jemalloc allocated 应大于 0");
+    #[cfg(target_os = "macos")]
+    assert_eq!(
+        stats.current_allocated, stats.current_rss,
+        "macOS 系统分配器无 allocated 计数，应回退为 RSS"
+    );
     // RSS excludes swapped/untouched pages; allocator allocated counts are not
     // a subset of resident bytes, and the two sources are sampled separately.
 }
@@ -90,7 +98,7 @@ fn test_rss_unit_contract_preserves_sysinfo_bytes_and_converts_to_mib() {
     assert_eq!(bytes_to_mib(1024 * 1024 - 1), 0);
 }
 
-#[cfg(not(target_os = "windows"))]
+#[cfg(not(any(target_os = "windows", target_os = "macos")))]
 #[test]
 fn test_concurrent_epoch_refresh_preserves_breakdown_invariants() {
     use std::sync::{Arc, Barrier};
@@ -152,7 +160,7 @@ fn test_concurrent_epoch_refresh_preserves_breakdown_invariants() {
 }
 
 /// [回归测试] 查询必须反映真实 jemalloc 分配/释放，不能重复返回旧 epoch 缓存。
-#[cfg(not(target_os = "windows"))]
+#[cfg(not(any(target_os = "windows", target_os = "macos")))]
 #[test]
 fn test_breakdown_refreshes_after_allocation_and_release() {
     if run_isolated_stats_test("test_breakdown_refreshes_after_allocation_and_release") {
@@ -179,7 +187,7 @@ fn test_breakdown_refreshes_after_allocation_and_release() {
 
 // Stats inequalities apply to a quiescent allocator. Other libtest cases must
 // not allocate in jemalloc while this test asserts those relationships.
-#[cfg(not(target_os = "windows"))]
+#[cfg(not(any(target_os = "windows", target_os = "macos")))]
 fn run_isolated_stats_test(name: &str) -> bool {
     const CHILD: &str = "PERI_ALLOC_STATS_TEST_CHILD";
     if std::env::var(CHILD).as_deref() == Ok(name) {
@@ -203,8 +211,8 @@ fn run_isolated_stats_test(name: &str) -> bool {
     true
 }
 
-/// jemalloc breakdown 查询仅在非 Windows 平台有效（Windows stub 返回 None）
-#[cfg(not(target_os = "windows"))]
+/// jemalloc breakdown 查询仅在 jemalloc 后端有效（macOS / Windows 返回 None）
+#[cfg(not(any(target_os = "windows", target_os = "macos")))]
 #[test]
 fn test_breakdown_shows_fragmentation() {
     if run_isolated_stats_test("test_breakdown_shows_fragmentation") {
@@ -243,7 +251,7 @@ fn test_breakdown_shows_fragmentation() {
     );
 }
 
-#[cfg(not(target_os = "windows"))]
+#[cfg(not(any(target_os = "windows", target_os = "macos")))]
 #[test]
 fn test_dump_stats() {
     // libtest 默认的 System 分配器不会出现在 jemalloc 统计里。

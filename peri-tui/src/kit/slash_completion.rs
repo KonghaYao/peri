@@ -89,6 +89,15 @@ pub struct SlashCompletionProps {
     pub items: Vec<SlashCompletionItem>,
     pub on_select: Arc<Mutex<Handler<'static, SlashCompletionItem>>>,
     pub on_cancel: Arc<Mutex<Handler<'static, ()>>>,
+    /// 无候选（列表空 / prefix 无匹配）时 Confirm 的落点：关闭弹窗后把 Enter
+    /// 交回**提交通道**（输入区 `submit_text` 落点）。
+    ///
+    /// [Why] 本组件在同一输入层、同优先级下晚于输入区注册；输入区的 Enter 提交
+    /// 分支带 `!slash_active` 守卫（peri-tui/src/kit/input_area.rs），事件只会被
+    /// 本组件消费一次——无候选时若只 `on_cancel`，用户按下的 Enter 与输入框内容
+    /// 会被静默吞掉（`/plugin` 打不开面板）。因此由弹窗自己回调提交，而不依赖
+    /// 「取消后再放行给输入区」（同层分发单趟，父组件不会二次收到该事件）。
+    pub on_submit: Arc<Mutex<Handler<'static, ()>>>,
 }
 
 /// 按 prefix 过滤 + 模糊打分排序（Phase 4 步骤 4 抽出为独立函数便于单测）。
@@ -114,6 +123,24 @@ fn filter_slash_items(items: &[SlashCompletionItem], prefix: &str) -> Vec<SlashC
     scored.into_iter().map(|(_, item)| item).collect()
 }
 
+/// Confirm（Enter）落点裁决（R5 修复：抽出为纯函数便于单测，同
+/// [`filter_slash_items`]）。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum ConfirmOutcome {
+    /// 有可选项：选中该下标（已按 item_count 钳制）。
+    Select(usize),
+    /// 无候选（列表空 / prefix 无匹配）：关弹窗 + 走提交通道，不吞输入。
+    Submit,
+}
+
+pub(crate) fn confirm_outcome(selection: usize, item_count: usize) -> ConfirmOutcome {
+    if item_count == 0 {
+        ConfirmOutcome::Submit
+    } else {
+        ConfirmOutcome::Select(clamp_selection(selection, item_count))
+    }
+}
+
 #[component]
 pub fn SlashCompletion(
     props: &SlashCompletionProps,
@@ -127,6 +154,7 @@ pub fn SlashCompletion(
     let filtered_for_handler = filtered.clone();
     let on_select = Arc::clone(&props.on_select);
     let on_cancel = Arc::clone(&props.on_cancel);
+    let on_submit = Arc::clone(&props.on_submit);
 
     // 弹窗绘制区域（上一帧）——鼠标点击行号反推
     let area;
@@ -206,20 +234,41 @@ pub fn SlashCompletion(
                     EventResult::Consumed
                 }
                 Some(InlineNavAction::Confirm) => {
-                    let selected = {
-                        let sel_idx = clamp_selection(*selection.read(), item_count);
-                        filtered_for_handler.get(sel_idx).cloned()
-                    };
-                    if let Some(item) = selected {
-                        let mut on_select = on_select
-                            .lock()
-                            .expect("SlashCompletion on_select poisoned");
-                        (*on_select)(item);
-                    } else {
-                        let mut on_cancel = on_cancel
-                            .lock()
-                            .expect("SlashCompletion on_cancel poisoned");
-                        (*on_cancel)(());
+                    // [TRAP] 裁决必须先在独立语句里算出：`match confirm_outcome(
+                    // *selection.read(), ..)` 会把 `read()` 的临时守卫存活到整个
+                    // match 体结束，而下面 on_select/on_cancel 会写回同一 atom
+                    // （SLASH_SELECTED_INDEX）——同线程 read→write 自锁，
+                    // 主线程卡在 parking_lot wait_for_readers，UI 永久冻结。
+                    let outcome = confirm_outcome(*selection.read(), item_count);
+                    match outcome {
+                        ConfirmOutcome::Select(idx) => {
+                            if let Some(item) = filtered_for_handler.get(idx).cloned() {
+                                let mut on_select = on_select
+                                    .lock()
+                                    .expect("SlashCompletion on_select poisoned");
+                                (*on_select)(item);
+                            } else {
+                                // 防御：钳制后下标仍越界（条目表在两帧之间收缩）
+                                let mut on_cancel = on_cancel
+                                    .lock()
+                                    .expect("SlashCompletion on_cancel poisoned");
+                                (*on_cancel)(());
+                            }
+                        }
+                        ConfirmOutcome::Submit => {
+                            // 无候选：先关弹窗（清 SLASH_HINT_ACTIVE，输入区守卫
+                            // 恢复），再走提交通道——Enter 不再被静默吞掉。
+                            {
+                                let mut on_cancel = on_cancel
+                                    .lock()
+                                    .expect("SlashCompletion on_cancel poisoned");
+                                (*on_cancel)(());
+                            }
+                            let mut on_submit = on_submit
+                                .lock()
+                                .expect("SlashCompletion on_submit poisoned");
+                            (*on_submit)(());
+                        }
                     }
                     EventResult::Consumed
                 }
@@ -398,6 +447,24 @@ mod tests {
         let hits = filter_slash_items(&items, "hello");
         assert_eq!(hits.len(), 1);
         assert_eq!(hits[0].fullname, "demo:hello");
+    }
+
+    /// 回归（空候选 Enter 吞输入）：弹窗激活但**无候选**（列表空 / prefix 无
+    /// 匹配，渲染 `common-no-matches`）时 Confirm 必须落到提交分支——只关弹窗
+    /// 会把这次 Enter 静默吞掉，`/plugin` 永远打不开面板。
+    #[test]
+    fn test_confirm_outcome_empty_items_submits() {
+        assert_eq!(confirm_outcome(0, 0), ConfirmOutcome::Submit);
+        // 上一轮列表残留的选中下标不得让空候选「命中」某一条目
+        assert_eq!(confirm_outcome(7, 0), ConfirmOutcome::Submit);
+    }
+
+    /// 有候选时 Confirm 仍是选中（含越界下标钳制），提交分支不得抢占。
+    #[test]
+    fn test_confirm_outcome_with_items_selects_clamped() {
+        assert_eq!(confirm_outcome(0, 2), ConfirmOutcome::Select(0));
+        assert_eq!(confirm_outcome(1, 2), ConfirmOutcome::Select(1));
+        assert_eq!(confirm_outcome(99, 2), ConfirmOutcome::Select(1));
     }
 
     /// 回归：既有 Panel/Command/Skill 映射不变（渲染行为除新增色外不变）。

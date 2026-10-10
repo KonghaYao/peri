@@ -1,6 +1,22 @@
 use super::diff::{TuiDiffBlock, diff_change_counts};
 use super::fold::FoldState;
 use super::hash::{tui_hash_combine, tui_hash_str};
+use std::fmt::Write;
+use std::hash::Hasher;
+
+#[derive(Default)]
+struct ToolHashWriter {
+    hasher: std::collections::hash_map::DefaultHasher,
+    bytes: usize,
+}
+
+impl Write for ToolHashWriter {
+    fn write_str(&mut self, text: &str) -> std::fmt::Result {
+        self.hasher.write(text.as_bytes());
+        self.bytes += text.len();
+        Ok(())
+    }
+}
 
 /// Tool invocation card -- name, summaries, optional diff.
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
@@ -99,7 +115,9 @@ impl TuiToolCard {
     pub fn recompute_hash(&mut self) {
         let duration_secs = self.running_duration_ms.map(|ms| ms / 1000);
         let completed_secs = self.completed_duration_ms.map(|ms| ms / 1000);
-        let hash_input = format!(
+        let mut hash_input = ToolHashWriter::default();
+        write!(
+            &mut hash_input,
             "{}|{}|{}|{}|{}|{}|{:?}|{:?}|{:?}|{:?}|{}",
             self.tool_id,
             self.tool_name,
@@ -112,14 +130,16 @@ impl TuiToolCard {
             self.presentation,
             self.fold,
             self.user_modified,
-        );
+        )
+        .expect("writing tool hash cannot fail");
         #[cfg(test)]
         {
             use crate::kit::acp_bridge::{PerfCounter, observe_perf};
             observe_perf(PerfCounter::ToolHashCalls, 1);
-            observe_perf(PerfCounter::ToolHashBytes, hash_input.len() as u64);
+            observe_perf(PerfCounter::ToolHashBytes, hash_input.bytes as u64);
         }
-        let mut h = tui_hash_str(&hash_input);
+        hash_input.hasher.write_u8(0xff);
+        let mut h = hash_input.hasher.finish();
         // [G-Diff] diff 定型于 tool-ended，此后不变——稳定摘要纳入 hash 保证
         // diff 变更（含路径/计数/截断）触发按 hash 分片的渲染缓存重建。
         h = tui_hash_combine(h, self.diff_code());
@@ -145,3 +165,7 @@ impl TuiToolCard {
 }
 
 tui_impl_partial_eq!(TuiToolCard: tool_id, tool_name, input_summary, output_summary, is_error, is_running, running_duration_ms, completed_duration_ms, diff, presentation, fold, user_modified);
+
+#[cfg(test)]
+#[path = "tool_card_test.rs"]
+mod tests;

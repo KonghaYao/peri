@@ -10,18 +10,22 @@ pub(super) fn handle_subagent_started(
     agent_id: &str,
     agent_name: &str,
     is_background: bool,
+    parent_tool_call_id: Option<String>,
 ) {
     tracing::info!(
         target: "tui.acp_events",
         agent_id = %agent_id,
         agent_name = %agent_name,
         is_background = %is_background,
+        parent_tool_call_id = ?parent_tool_call_id,
         existing_subagent_count = state.current_turn.subagent_ids().len(),
         "SubagentStarted: creating SubAgentGroup container"
     );
-    state
-        .current_turn
-        .start_subagent(agent_id.to_string(), agent_name.to_string());
+    state.current_turn.start_subagent(
+        agent_id.to_string(),
+        agent_name.to_string(),
+        parent_tool_call_id,
+    );
     // 仅后台 subagent 注册到 BG_AGENT_IDS——同步 subagent 不进入后台显示区域
     if is_background {
         BG_AGENT_IDS.state().write().insert(agent_id.to_string());
@@ -36,7 +40,9 @@ pub(super) fn handle_subagent_started(
         }
     }
     state.variant = 1;
-    state.phase = SessionPhase::PromptRunning;
+    if !is_background {
+        state.phase = SessionPhase::PromptRunning;
+    }
     state.publish_barrier();
     super::render::push_acp_state(state);
 }

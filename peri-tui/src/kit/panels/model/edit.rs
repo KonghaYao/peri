@@ -13,7 +13,7 @@ use crate::kit::atoms::{
     SERVICE_SNAPSHOT,
 };
 use fluent_bundle::FluentValue;
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 /// Effort 五级
 const EFFORT_LEVELS: &[&str] = &["low", "medium", "high", "xhigh", "max"];
@@ -254,7 +254,8 @@ fn project_model_change(snap: &PeriConfig, change: ModelChange) {
     }
     *s_handle.write() = svc;
     if switch_active {
-        *MODEL_HIGHLIGHT_UNTIL.state().write() = Some(Instant::now() + Duration::from_secs(2));
+        *MODEL_HIGHLIGHT_UNTIL.state().write() =
+            Some(peri_time::monotonic_now() + Duration::from_secs(2));
     }
 }
 
@@ -284,7 +285,7 @@ fn notify_save_result(result: Result<(), anyhow::Error>) {
         Ok(()) => {
             *NOTIFICATION.state().write() = Some(Notification {
                 message: i18n::tr("config-saved").to_string(),
-                until: Instant::now() + Duration::from_secs(1),
+                until: peri_time::monotonic_now() + Duration::from_secs(1),
             });
         }
         Err(e) => {
@@ -296,7 +297,7 @@ fn notify_save_result(result: Result<(), anyhow::Error>) {
                         FluentValue::from(e.to_string().as_str()),
                     )],
                 ),
-                until: Instant::now() + Duration::from_secs(2),
+                until: peri_time::monotonic_now() + Duration::from_secs(2),
             });
         }
     }

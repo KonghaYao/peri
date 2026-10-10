@@ -10,7 +10,7 @@
 //! - shutdown 信号触发时干净退出，不发残留请求
 
 use std::path::{Path, PathBuf};
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 use chrono::Local;
 use fluent_bundle::FluentValue;
@@ -31,8 +31,7 @@ use crate::kit::submit_request::{
     ExportMode, SessionControlRequest, SubmitRequest, ViewActionRequest,
 };
 
-/// cancel_consumer 中 cancel RPC 的超时上限。transport 死亡时 cancel 可能
-/// 挂起——超时后仍执行本地复位（兜底路径，Issue 2026-08-05 S4.2）。
+/// 取消通知的等待上限；超时不把未知结果当作已停止。
 const CANCEL_RPC_TIMEOUT_SECS: u64 = 2;
 
 /// 启动提交消费者后台任务。
@@ -63,6 +62,10 @@ pub fn spawn_submit_consumer(
                             break;
                         }
                         Some(request) => {
+                            let clear_session = matches!(
+                                &request,
+                                SubmitRequest::SessionControl(SessionControlRequest::Clear)
+                            );
                             // Issue 2026-08-06：每请求 spawn 分离 task，不再串行 await。
                             // 旧实现单飞阻塞在 prompt() RPC 上直到 turn 完成——挂起期间
                             // （await_wake，bg 任务活跃）RPC 会挂住，后续用户输入在
@@ -74,7 +77,9 @@ pub fn spawn_submit_consumer(
                             tokio::spawn(async move {
                                 if let Err(e) = handle_submit(&client, &cwd, request).await {
                                     error!(error = %e, "kit submit_consumer: prompt failed");
-                                    clear_loading_state();
+                                    if clear_session {
+                                        clear_loading_state();
+                                    }
                                 }
                             });
                         }
@@ -93,7 +98,9 @@ async fn handle_submit(
     request: SubmitRequest,
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     match request {
-        SubmitRequest::AgentText(text) => handle_agent_text_submit(acp_client, cwd, text).await,
+        SubmitRequest::AgentText { text, attachments } => {
+            handle_agent_text_submit(acp_client, cwd, text, attachments).await
+        }
         SubmitRequest::KeepGoing => handle_keepgoing_submit(acp_client, cwd).await,
         SubmitRequest::SessionControl(SessionControlRequest::Clear) => {
             handle_clear_submit(acp_client, cwd).await
@@ -146,15 +153,16 @@ async fn handle_agent_text_submit(
     acp_client: &AcpTuiClient,
     cwd: &str,
     text: String,
+    attachments: Vec<crate::kit::atoms::PendingAttachment>,
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     if acp_client.supports_user_input_queue() && !crate::kit::input_area::is_remote_command(&text) {
-        if let Err(error) = crate::kit::steer_state::enqueue(text, Vec::new()) {
+        if let Err(error) = crate::kit::steer_state::enqueue(text, attachments) {
             warn!(error = %error, "user input enqueue failed; draft retained for recovery");
         }
         return Ok(());
     }
     let trimmed = text.trim();
-    if trimmed.is_empty() {
+    if trimmed.is_empty() && attachments.is_empty() {
         return Ok(());
     }
 
@@ -163,11 +171,14 @@ async fn handle_agent_text_submit(
     // load, so a delayed producer cannot replace this first prompt's session.
     info!(cwd = %cwd, "kit submit_consumer: ensuring session");
     acp_client.ensure_session(cwd, None).await?;
+    let session_id = acp_client
+        .current_session_id()
+        .ok_or_else(|| std::io::Error::other("no active session after ensure"))?;
 
     // Issue 2026-08-05 返工：在发送 PromptSubmitted 之前生成本轮 prompt 的
     // request_id（uuid v7）——PromptSubmitted 事件与 prompt RPC 必须携带同一
     // id，bridge 才能把它记录为"当前 turn 的 id"，供 stale TurnInterrupted 配对。
-    let request_id = Some(uuid::Uuid::now_v7().to_string());
+    let request_id = uuid::Uuid::now_v7().to_string();
 
     // 通过 LOCAL_EVENT_TX 发送 PromptSubmitted 事件到 acp_bridge，
     // 由 bridge 统一管理 phase/variant/is_loading 状态。
@@ -175,9 +186,9 @@ async fn handle_agent_text_submit(
         if let Some(tx) = LOCAL_EVENT_TX.get() {
             let _ = tx.send(AcpEventWithEpoch {
                 event: AcpEventData::PromptSubmitted {
-                    request_id: request_id.clone(),
+                    request_id: Some(request_id.clone()),
                 },
-                active_session_id: String::new(),
+                active_session_id: session_id.clone(),
             });
         } else {
             warn!("LOCAL_EVENT_TX not initialized, PromptSubmitted event dropped");
@@ -192,9 +203,12 @@ async fn handle_agent_text_submit(
         "submit_consumer: emitted PromptSubmitted event, LOADING_EPOCH incremented, about to call prompt()",
     );
 
-    let content = MessageContent::text(trimmed.to_string());
-    acp_client.prompt(&content, request_id).await.map_err(|e| {
-        warn!(error = %e, "kit submit_consumer: prompt RPC failed");
+    // 上传式附件（图片 base64）与文本同一 content 上行；无附件时逐字等价于
+    // 原有的 MessageContent::text（不改变无附件提交的在线形态）。
+    let content = crate::kit::steer_state::content_with_attachments(trimmed, &attachments);
+    acp_client.prompt(&content, Some(request_id.clone())).await.map_err(|e| {
+        warn!(session_id = %session_id, request_id = %request_id, error = ?e, "kit submit_consumer: prompt RPC failed");
+        reset_failed_prompt(&session_id, &request_id);
         Box::new(e) as Box<dyn std::error::Error + Send + Sync>
     })?;
     Ok(())
@@ -220,16 +234,19 @@ async fn handle_keepgoing_submit(
     // Issue 2026-08-05 返工：keepgoing 同样生成 request_id（每次 keepgoing RPC
     // 都是新 turn）——修复 v1 在 keepgoing 场景（无 LocalUserBubble、代际不变）
     // 下 stale 判定失效的漏洞。
-    let request_id = Some(uuid::Uuid::now_v7().to_string());
+    let request_id = uuid::Uuid::now_v7().to_string();
+    let session_id = acp_client
+        .current_session_id()
+        .ok_or_else(|| std::io::Error::other("no active session for keepgoing"))?;
 
     // 与 handle_agent_text_submit 相同的 loading 状态切换：PromptSubmitted 事件
     // 由 bridge 统一管理 phase/variant/is_loading 状态。
     if let Some(tx) = LOCAL_EVENT_TX.get() {
         let _ = tx.send(AcpEventWithEpoch {
             event: AcpEventData::PromptSubmitted {
-                request_id: request_id.clone(),
+                request_id: Some(request_id.clone()),
             },
-            active_session_id: String::new(),
+            active_session_id: session_id.clone(),
         });
     } else {
         warn!("LOCAL_EVENT_TX not initialized, PromptSubmitted event dropped");
@@ -242,10 +259,11 @@ async fn handle_keepgoing_submit(
     );
 
     acp_client
-        .prompt(&MessageContent::text(""), request_id)
+        .prompt(&MessageContent::text(""), Some(request_id.clone()))
         .await
         .map_err(|e| {
-            warn!(error = %e, "kit submit_consumer: keepgoing prompt RPC failed");
+            warn!(session_id = %session_id, request_id = %request_id, error = ?e, "kit submit_consumer: keepgoing prompt RPC failed");
+            reset_failed_prompt(&session_id, &request_id);
             Box::new(e) as Box<dyn std::error::Error + Send + Sync>
         })?;
     Ok(())
@@ -289,7 +307,7 @@ fn execute_view_action(action: ViewActionRequest, acp_client: &AcpTuiClient, cwd
             };
             *NOTIFICATION.state().write() = Some(crate::kit::atoms::Notification {
                 message,
-                until: Instant::now() + Duration::from_secs(5),
+                until: peri_time::monotonic_now() + Duration::from_secs(5),
             });
             RENDER_HEARTBEAT.set(RENDER_HEARTBEAT.get().wrapping_add(1));
         }
@@ -373,18 +391,18 @@ fn lines_to_plain_text(lines: &[Line<'static>]) -> String {
 fn debug_export_path(cwd: &str) -> PathBuf {
     Path::new(cwd).join(format!(
         "peri-debug-export-{}.txt",
-        Local::now().format("%Y%m%d-%H%M%S")
+        chrono::DateTime::<Local>::from(peri_time::now_wall()).format("%Y%m%d-%H%M%S")
     ))
 }
 
-/// 清空 loading 状态——prompt 失败 / cancel / /clear 时兜底，防止 loading 永久卡死。
+/// `/clear` 失败时清空 loading 状态，防止旧会话 spinner 永久卡死。
 ///
 /// S4.2 双保险（Issue 2026-08-05）：
 /// 1. 直接写 ACP_STATE.is_loading=false——bridge 已退出（shutdown 路径）时
 ///    事件无人消费，直接写是唯一生效路径；
 /// 2. 注入 LocalLoadingReset 内部事件——bridge 存活时同步复位 phase（幂等），
 ///    否则后续任意事件触发 push_acp_state 会用 phase 重算 is_loading=true，
-///    造成取消后 loading 闪回 + 提交判定竞态（误入 INPUT_BUFFER）。
+///    造成 loading 闪回 + 提交判定竞态（误入 INPUT_BUFFER）。
 fn clear_loading_state() {
     {
         let ref_guard = ACP_STATE.state();
@@ -398,6 +416,22 @@ fn clear_loading_state() {
         });
     } else {
         warn!("LOCAL_EVENT_TX not initialized, LocalLoadingReset event dropped");
+    }
+}
+
+fn reset_failed_prompt(session_id: &str, request_id: &str) {
+    if let Some(tx) = LOCAL_EVENT_TX.get() {
+        let _ = tx.send(AcpEventWithEpoch {
+            event: AcpEventData::PromptFailed {
+                request_id: request_id.to_owned(),
+            },
+            active_session_id: session_id.to_owned(),
+        });
+    } else {
+        warn!(
+            session_id,
+            request_id, "LOCAL_EVENT_TX not initialized, prompt failure reset dropped"
+        );
     }
 }
 
@@ -430,27 +464,25 @@ pub fn spawn_cancel_consumer(
                             break;
                         }
                         Some(()) => {
-                            // Issue 2026-08-05 S4.2: 顺序——先 cancel RPC（带
-                            // 超时）再复位。cancel 完成前服务端仍在推流（流尾巴），
-                            // 若先复位，这些事件会把 bridge phase 拉回 PromptRunning
-                            // （loading 闪回）；cancel 完成后流已停止，复位才稳定。
-                            // timeout 防止 transport 死亡时 cancel 挂起阻塞复位
-                            // （兜底路径：transport 死 / prompt task panic 时
-                            // TurnInterrupted 永不到达，复位使 Ctrl+C 双击退出
-                            // 路径恢复可用，与服务端 TurnInterrupted 幂等）。
-                            let cancel_result = tokio::time::timeout(
+                            let pending = acp_client.cancel();
+                            tokio::pin!(pending);
+                            let cancel_result = peri_time::timeout(
                                 Duration::from_secs(CANCEL_RPC_TIMEOUT_SECS),
-                                acp_client.cancel(),
+                                pending.as_mut(),
                             )
                             .await;
-                            match cancel_result {
-                                Ok(Ok(())) => {}
-                                Ok(Err(e)) => tracing::warn!(%e, "cancel_consumer: cancel 失败"),
+                            let outcome = match cancel_result {
+                                Ok(result) => result,
                                 Err(_) => {
-                                    tracing::warn!("cancel_consumer: cancel RPC 超时，继续本地复位")
+                                    tracing::warn!("cancel_consumer: cancellation notification pending");
+                                    pending.await
                                 }
+                            };
+                            match outcome {
+                                Ok(()) => tracing::info!("cancel_consumer: cancellation notification sent"),
+                                Err(error) => tracing::warn!(%error, data = ?error.data,
+                                    "cancel_consumer: stop outcome unresolved"),
                             }
-                            clear_loading_state();
                         }
                     }
                 }

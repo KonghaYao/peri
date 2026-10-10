@@ -78,7 +78,7 @@ pub(super) fn handle_text_chunk(state: &mut BridgeState, tc: &TuiTextChunk) -> P
         state.phase = SessionPhase::PromptRunning;
     }
     super::render::push_acp_state(state);
-    stream_intent(state, first, routed_to_subagent, false)
+    stream_intent(state, first, routed_to_subagent, false, tc.text.len())
 }
 
 pub(super) fn handle_reasoning_chunk(
@@ -139,7 +139,7 @@ pub(super) fn handle_reasoning_chunk(
         state.phase = SessionPhase::PromptRunning;
     }
     super::render::push_acp_state(state);
-    stream_intent(state, first, routed_to_subagent, true)
+    stream_intent(state, first, routed_to_subagent, true, rc.text.len())
 }
 
 /// 子流沿现有 occurrence/segment 路由；不把主 Agent 的空字符串当子流首块。
@@ -171,8 +171,14 @@ fn stream_intent(
     first: bool,
     subagent: bool,
     reasoning: bool,
+    chunk_len: usize,
 ) -> PublicationIntent {
-    match current_streaming_mode() {
+    let mode = current_streaming_mode();
+    if mode != StreamingMode::Block {
+        state.last_pushed_text_len = 0;
+        state.last_pushed_reasoning_len = 0;
+    }
+    match mode {
         StreamingMode::None => PublicationIntent::Hidden,
         StreamingMode::Streaming => {
             if first {
@@ -197,8 +203,8 @@ fn stream_intent(
             } else {
                 (&state.current_turn.text, &mut state.last_pushed_text_len)
             };
-            if has_md_block_boundary_since(text, *pushed) {
-                *pushed = text.chars().count();
+            if has_md_block_boundary_since(text, *pushed, text.len().saturating_sub(chunk_len)) {
+                *pushed = text.len();
                 PublicationIntent::Immediate
             } else {
                 PublicationIntent::Hidden

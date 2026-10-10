@@ -133,7 +133,7 @@ pub(super) fn build_footer_lines(
         let prev_epoch = *last_epoch.read();
         if is_loading && prev_epoch != current_epoch {
             *last_epoch.write() = current_epoch;
-            *load_start.write() = Some(Instant::now());
+            *load_start.write() = Some(peri_time::monotonic_now());
             *spinner_state.write() = SpinnerState::new(SpinnerMode::Thinking);
             *was_loading.write() = true;
         }
@@ -143,12 +143,13 @@ pub(super) fn build_footer_lines(
             let mut ls = load_start.write();
             if is_loading {
                 if ls.is_none() {
-                    *ls = Some(Instant::now());
+                    *ls = Some(peri_time::monotonic_now());
                     *spinner_state.write() = SpinnerState::new(SpinnerMode::Thinking);
                 }
             } else {
-                *summary_elapsed_ms.write() =
-                    ls.map_or(0, |start| start.elapsed().as_millis() as u64);
+                *summary_elapsed_ms.write() = ls.map_or(0, |start| {
+                    peri_time::elapsed_since(start).as_millis() as u64
+                });
                 *ls = None;
             }
             *was_loading.write() = is_loading;

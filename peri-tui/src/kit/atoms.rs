@@ -75,6 +75,16 @@ impl Default for ViewModelsSnapshot {
     }
 }
 
+#[derive(Debug, Clone, Copy, Default)]
+pub(crate) struct TranscriptPublication {
+    pub(crate) generation: u64,
+    pub(crate) previous_generation: u64,
+    pub(crate) changed_from: usize,
+}
+
+pub(crate) static TRANSCRIPT_PUBLICATION: AtomStatic<TranscriptPublication> =
+    AtomStatic::new(TranscriptPublication::default);
+
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct ServiceSnapshot {
     pub cwd: String,
@@ -155,7 +165,9 @@ pub struct PluginSummary {
     pub commands_count: usize,
     pub agents_count: usize,
     pub mcp_count: usize,
-    pub install_scope: String,
+    pub install_scope: Option<String>,
+    pub toggle_supported: Option<bool>,
+    pub management_error: Option<String>,
     pub load_error: Option<String>,
 }
 
@@ -210,11 +222,67 @@ pub struct PredictionState {
     pub received_at: Option<Instant>,
 }
 
-#[derive(Debug, Clone, Default)]
+/// 待发送附件（图片）：base64 载荷 + MIME 类型。
+///
+/// [上传式] 剪贴板字节经 base64 直接随消息上行（`MessageContent::Blocks` 的 image
+/// block），不再落盘、不再插入 `@image <path>` 文本。
+///
+/// Debug 为手写实现：`base64_data` 是整张图的载荷，derive 会让任何 `{:?}`
+/// 打印出全量图片（日志 / tracing / panic 消息）。故只暴露长度。
+#[derive(Clone, Default, PartialEq, Eq)]
 pub struct PendingAttachment {
     pub label: String,
     pub media_type: String,
     pub base64_data: String,
+}
+
+impl PendingAttachment {
+    /// 以图片 MIME 与标准 base64 载荷构造待发送附件。
+    pub fn image(media_type: impl Into<String>, base64_data: impl Into<String>) -> Self {
+        let media_type = media_type.into();
+        Self {
+            label: media_type.clone(),
+            media_type,
+            base64_data: base64_data.into(),
+        }
+    }
+}
+
+impl std::fmt::Debug for PendingAttachment {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("PendingAttachment")
+            .field("label", &self.label)
+            .field("media_type", &self.media_type)
+            .field("base64_bytes", &self.base64_data.len())
+            .finish()
+    }
+}
+
+/// `INPUT_BUFFER` 排队项：loading 期间缓存的待提交输入。
+///
+/// 文本与附件必须一起出队——只存文本会在 drain 时静默丢弃用户已提交的图片。
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct BufferedInput {
+    pub text: String,
+    pub attachments: Vec<PendingAttachment>,
+}
+
+impl BufferedInput {
+    /// 纯文本排队项（无附件）。
+    pub fn text(text: impl Into<String>) -> Self {
+        Self {
+            text: text.into(),
+            attachments: Vec::new(),
+        }
+    }
+
+    /// 带附件的排队项。
+    pub fn with_attachments(text: impl Into<String>, attachments: Vec<PendingAttachment>) -> Self {
+        Self {
+            text: text.into(),
+            attachments,
+        }
+    }
 }
 
 /// 待发送附件（§10 composer footer `@ N files` 消费）。
@@ -257,13 +325,6 @@ pub static LOADING_EPOCH: AtomStatic<u64> = AtomStatic::new(|| 0u64);
 /// （成功、失败、超时或 future 被丢弃）；状态栏据此显示「正在准备会话」。这段
 /// 窗口里输入既不在待发送队列、也还没有发出请求，没有别的投影能说明正在做什么。
 pub static SESSION_PREPARING: AtomStatic<bool> = AtomStatic::new(|| false);
-/// 当前活跃会话的只读准入原因：`None` 表示本次准入持有执行所有权。
-///
-/// 执行所有权不可得（他处持有 / 待恢复 / 本节点只读）不再是准入错误：会话照常
-/// 进入、历史可读，但写入与执行仍被 host 挡住。状态栏据此说明这条会话说不了话
-/// 的原因——用户在提交时收到的拒绝来自 host 的同一道闸门。
-pub static SESSION_READ_ONLY: AtomStatic<Option<peri_acp_types::workspace::ReadOnlyAdmission>> =
-    AtomStatic::new(|| None);
 pub static VIEW_MODELS: AtomStatic<ViewModelsSnapshot> =
     AtomStatic::new(ViewModelsSnapshot::default);
 pub static MODEL_HIGHLIGHT_UNTIL: AtomStatic<Option<Instant>> = AtomStatic::new(|| None);
@@ -290,6 +351,7 @@ pub enum ThreadBrowserScope {
 pub static ACTIVE_EXECUTION_CWD: AtomStatic<Option<String>> = AtomStatic::new(|| None);
 pub static THREAD_BROWSER_SCOPE: AtomStatic<ThreadBrowserScope> =
     AtomStatic::new(ThreadBrowserScope::default);
+pub static THREAD_BROWSER_ARCHIVED: AtomStatic<bool> = AtomStatic::new(|| false);
 pub static THREAD_LIST_ERROR: AtomStatic<Option<String>> = AtomStatic::new(|| None);
 pub static THREAD_LIST_HAS_MORE: AtomStatic<bool> = AtomStatic::new(|| false);
 pub static THREAD_LIST_PAGE_COUNT: AtomStatic<u32> = AtomStatic::new(|| 1);
@@ -347,7 +409,8 @@ pub static INPUT_HISTORY: AtomStatic<VecDeque<String>> = AtomStatic::new(VecDequ
 pub static INPUT_HISTORY_INDEX: AtomStatic<Option<usize>> = AtomStatic::new(|| None);
 /// 进入历史模式时保存的用户当前输入文本草稿。
 pub static DRAFT: AtomStatic<Option<String>> = AtomStatic::new(|| None);
-pub static INPUT_BUFFER: AtomStatic<VecDeque<String>> = AtomStatic::new(VecDeque::new);
+/// loading 期间缓存的待提交输入（文本 + 附件，见 [`BufferedInput`]）。
+pub static INPUT_BUFFER: AtomStatic<VecDeque<BufferedInput>> = AtomStatic::new(VecDeque::new);
 /// 取消时需恢复到输入框的文本。TurnInterrupted 零产出时写入，input_area 消费后清空。
 /// 使用非 atom 存储（OnceLock + Mutex）避免 render body 中写 atom 产生自激回路。
 /// TurnInterrupted 写入后递增 RENDER_HEARTBEAT 触发重渲染，input_area 消费文本并清空。
@@ -437,17 +500,11 @@ pub static TUI_CONFIG_HANDLE: OnceLock<
 pub static PERMISSION_MODE_HANDLE: OnceLock<
     std::sync::Arc<peri_acp_types::permission::SharedPermissionMode>,
 > = OnceLock::new();
-pub static CRON_SCHEDULER_HANDLE: OnceLock<
-    std::sync::Arc<parking_lot::Mutex<peri_middlewares::cron::CronScheduler>>,
-> = OnceLock::new();
+pub static SERVICE_PROJECTION_ERROR: AtomStatic<Option<String>> = AtomStatic::new(|| None);
+pub static CRON_ACTION_ERROR: AtomStatic<Option<String>> = AtomStatic::new(|| None);
 /// ACP 客户端全局句柄——供 Plugin Panel 等面板调用 send_raw_request。
 /// 在 entry.rs 中 acp_client 就绪后 set。
 pub static ACP_CLIENT_HANDLE: OnceLock<std::sync::Arc<crate::acp_client::client::AcpTuiClient>> =
-    OnceLock::new();
-/// TUI 面板直读的 MCP 连接池句柄（`spawn_mcp_init` 创建后 set，C 类豁免）。
-/// OAuth 授权完成后（`handle_oauth_completed`）据此触发 reconnect——
-/// 从共享凭证文件恢复连接，面板状态随之刷新。
-pub static MCP_PANEL_POOL: OnceLock<std::sync::Arc<peri_middlewares::mcp::McpClientPool>> =
     OnceLock::new();
 /// i18n 语言版本计数器——语言切换时递增，订阅此 atom 的组件自动重渲染。
 /// LcRegistry 本体存于 thread_local!（FluentBundle !Send，无法进 static）。
@@ -612,6 +669,9 @@ pub use crate::kit::acp_types::BgTaskEntry;
 /// 活跃的后台任务列表（由 bg-task-started/completed/cancelled 事件维护）
 pub static BG_TASKS: AtomStatic<Vec<BgTaskEntry>> = AtomStatic::new(Vec::new);
 
+/// Last session task revision applied by the TUI; None is the legacy event path.
+pub static BG_TASK_REVISION: AtomStatic<Option<u64>> = AtomStatic::new(|| None);
+
 // ── Background Display Area (后台显示区域) ────────────────────────────────────
 
 #[derive(Debug, Clone, Default)]
@@ -624,6 +684,7 @@ pub struct BgTaskIdentity {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum BgLiveStatus {
+    Unobserved,
     Running,
     Succeeded,
     Failed,
@@ -650,12 +711,13 @@ pub struct BgLiveDetail {
     pub(crate) tool_cards: Vec<crate::kit::acp_types::ToolCardAccumulator>,
     pub(crate) subagent_result: Option<String>,
     pub(crate) subagent_is_error: bool,
+    pub(crate) stream: Option<crate::kit::bg_task_live::BgStream>,
 }
 
 impl Default for BgLiveDetail {
     fn default() -> Self {
         Self {
-            status: BgLiveStatus::Running,
+            status: BgLiveStatus::Unobserved,
             kind: String::new(),
             summary: String::new(),
             agent_id: None,
@@ -669,6 +731,7 @@ impl Default for BgLiveDetail {
             tool_cards: Vec::new(),
             subagent_result: None,
             subagent_is_error: false,
+            stream: None,
         }
     }
 }
@@ -725,8 +788,6 @@ pub static NOTIFICATION: AtomStatic<Option<Notification>> = AtomStatic::new(|| N
 /// 确认弹窗要执行的操作
 #[derive(Debug, Clone)]
 pub enum ConfirmAction {
-    /// 仅发起它的那次会话操作消费的一次性风险选择（dirty 解除）。
-    RiskChoice(std::sync::Arc<crate::kit::popups::confirm_popup::RiskConfirmation>),
     /// 切换到指定 thread_id
     ThreadSwitch(String),
     /// 用户确认拒绝回答 AskUser 提问

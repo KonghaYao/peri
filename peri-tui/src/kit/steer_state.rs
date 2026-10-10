@@ -36,10 +36,28 @@ struct SessionSteers {
     epoch: u64,
     snapshot: Option<UserInputQueueSnapshot>,
     pending: Vec<SteerCommand>,
+    queued_at: HashMap<String, peri_time::Instant>,
     recovered: Vec<RecoveredInput>,
     delivered: HashSet<String>,
     // 仅影响待发送区展示；正式聊天气泡仍由 Delivered 确认。
     direct_submissions: HashSet<String>,
+}
+
+impl SessionSteers {
+    fn reconcile_direct_submissions(&mut self) {
+        if let Some(snapshot) = &self.snapshot {
+            for item in &snapshot.items {
+                if item.state == UserInputState::Queued
+                    && !self.pending.iter().any(|command| {
+                        matches!(&command.kind, SteerCommandKind::Enqueue(input)
+                            if input.input_id == item.input_id)
+                    })
+                {
+                    self.direct_submissions.remove(&item.input_id);
+                }
+            }
+        }
+    }
 }
 
 #[derive(Clone, Debug)]
@@ -56,10 +74,28 @@ pub(crate) struct SteerState {
 }
 
 impl SteerState {
+    pub(crate) fn take_queue_wait(
+        &mut self,
+        command: &SteerCommand,
+    ) -> Option<std::time::Duration> {
+        self.sessions
+            .get_mut(&command.session_id)?
+            .queued_at
+            .remove(&command.command_id)
+            .map(|queued| queued.elapsed())
+    }
+
+    pub(crate) fn direct_submitting(&self, session_id: &str, epoch: u64) -> bool {
+        self.sessions
+            .get(session_id)
+            .is_some_and(|session| session.epoch == epoch && !session.direct_submissions.is_empty())
+    }
+
     pub(crate) fn reset_session(&mut self, session_id: &str, epoch: u64) {
         let session = self.sessions.entry(session_id.to_owned()).or_default();
         session.epoch = epoch;
         session.snapshot = None;
+        session.queued_at.clear();
         session.direct_submissions.clear();
         for recovered in &mut session.recovered {
             recovered.epoch = epoch;
@@ -94,12 +130,8 @@ impl SteerState {
             None if !establish => return false,
             _ => {}
         }
-        for item in &snapshot.items {
-            if item.state == UserInputState::Queued {
-                session.direct_submissions.remove(&item.input_id);
-            }
-        }
         session.snapshot = Some(snapshot);
+        session.reconcile_direct_submissions();
         true
     }
 
@@ -123,6 +155,10 @@ impl SteerState {
         {
             session.direct_submissions.insert(input.input_id.clone());
         }
+        session
+            .queued_at
+            .entry(command.command_id.clone())
+            .or_insert_with(peri_time::monotonic_now);
         session.pending.push(command);
     }
 
@@ -178,9 +214,11 @@ impl SteerState {
     pub(crate) fn settle(&mut self, command: &SteerCommand, receipt: UserInputQueueReceipt) {
         self.accept_snapshot(receipt.snapshot, command.epoch, true);
         let session = self.sessions.entry(command.session_id.clone()).or_default();
+        session.queued_at.remove(&command.command_id);
         session
             .pending
             .retain(|pending| pending.command_id != command.command_id);
+        session.reconcile_direct_submissions();
         if let Some(input) = receipt.taken_back
             && matches!(
                 command.kind,
@@ -205,6 +243,7 @@ impl SteerState {
     pub(crate) fn rebind_initial(&mut self, command: &SteerCommand, session_id: &str, epoch: u64) {
         let mut direct = false;
         if let Some(previous) = self.sessions.get_mut(&command.session_id) {
+            previous.queued_at.remove(&command.command_id);
             if let SteerCommandKind::Enqueue(input) = &command.kind {
                 direct = previous.direct_submissions.remove(&input.input_id);
             }
@@ -227,6 +266,7 @@ impl SteerState {
 
     pub(crate) fn reject(&mut self, command: &SteerCommand, definitely_rejected: bool) {
         let session = self.sessions.entry(command.session_id.clone()).or_default();
+        session.queued_at.remove(&command.command_id);
         if let SteerCommandKind::Enqueue(input) = &command.kind {
             // 超时/未知结果必须重新可见；明确拒绝则交给原稿恢复。
             session.direct_submissions.remove(&input.input_id);
@@ -305,15 +345,21 @@ impl SteerState {
             .as_ref()
             .into_iter()
             .flat_map(|snapshot| &snapshot.items)
+            .filter(|item| {
+                matches!(
+                    item.state,
+                    UserInputState::Queued | UserInputState::Dispatching | UserInputState::Claimed
+                )
+            })
             .filter(|item| !session.delivered.contains(&item.input_id))
             .filter(|item| !session.direct_submissions.contains(&item.input_id))
             .map(|item| SteerQueueItem {
                 id: item.input_id.clone(),
                 text: item.original_draft.clone(),
-                state: if item.state == UserInputState::Queued {
-                    SteerItemState::Queued
-                } else {
-                    SteerItemState::Dispatching
+                state: match item.state {
+                    UserInputState::Queued => SteerItemState::Queued,
+                    UserInputState::Claimed => SteerItemState::Claimed,
+                    _ => SteerItemState::Dispatching,
                 },
             })
             .collect();
@@ -324,8 +370,9 @@ impl SteerState {
         {
             match &command.kind {
                 SteerCommandKind::Enqueue(input) => {
-                    if !rows.iter().any(|row| row.id == input.input_id)
-                        && !session.delivered.contains(&input.input_id)
+                    if let Some(row) = rows.iter_mut().find(|row| row.id == input.input_id) {
+                        row.state = SteerItemState::Submitting;
+                    } else if !session.delivered.contains(&input.input_id)
                         && !session.direct_submissions.contains(&input.input_id)
                     {
                         rows.push(SteerQueueItem {
@@ -338,7 +385,7 @@ impl SteerState {
                 SteerCommandKind::Dispatch(ids) => {
                     for row in &mut rows {
                         if ids.contains(&row.id) {
-                            row.state = SteerItemState::Dispatching;
+                            row.state = SteerItemState::Publishing;
                         }
                     }
                 }
@@ -362,6 +409,49 @@ impl SteerState {
             });
         }
         rows
+    }
+
+    fn action_kind(
+        &self,
+        session_id: &str,
+        epoch: u64,
+        action: SteerQueueAction,
+        draft_is_empty: bool,
+    ) -> Option<SteerCommandKind> {
+        let snapshot = self.snapshot(session_id, epoch)?;
+        let rows = self.rows(session_id);
+        let queued = |id: &str| {
+            rows.iter()
+                .any(|row| row.id == id && row.state == SteerItemState::Queued)
+                && snapshot
+                    .items
+                    .iter()
+                    .any(|item| item.input_id == id && item.state == UserInputState::Queued)
+        };
+        match action {
+            SteerQueueAction::Dispatch { ids } => {
+                let ids: Vec<_> = ids.into_iter().filter(|id| queued(id)).collect();
+                (!ids.is_empty()).then_some(SteerCommandKind::Dispatch(ids))
+            }
+            SteerQueueAction::TakeBack { id }
+                if rows
+                    .iter()
+                    .any(|row| row.id == id && row.state.can_take_back())
+                    && snapshot.items.iter().any(|item| {
+                        item.input_id == id
+                            && matches!(
+                                item.state,
+                                UserInputState::Queued | UserInputState::Dispatching
+                            )
+                    }) =>
+            {
+                Some(SteerCommandKind::TakeBack {
+                    id,
+                    restore_draft: draft_is_empty,
+                })
+            }
+            _ => None,
+        }
     }
 }
 
@@ -400,7 +490,7 @@ pub(crate) fn enqueue(
     let epoch = atoms::BRIDGE_RESET_COUNTER.get();
     let input = UserInput {
         input_id: uuid::Uuid::now_v7().to_string(),
-        content: content_for_draft(&original_draft, &attachments),
+        content: content_with_attachments(&original_draft, &attachments),
         original_draft,
     };
     let command = SteerCommand {
@@ -423,24 +513,8 @@ pub(crate) fn act(action: SteerQueueAction, draft_is_empty: bool) {
     let epoch = atoms::BRIDGE_RESET_COUNTER.get();
     let atom = STEERS.state();
     let mut state = atom.write();
-    let rows = state.rows(&session_id);
-    let queued = |id: &str| {
-        rows.iter()
-            .any(|row| row.id == id && row.state == SteerItemState::Queued)
-    };
-    let kind = match action {
-        SteerQueueAction::Dispatch { ids } => {
-            let ids: Vec<_> = ids.into_iter().filter(|id| queued(id)).collect();
-            if ids.is_empty() {
-                return;
-            }
-            SteerCommandKind::Dispatch(ids)
-        }
-        SteerQueueAction::TakeBack { id } if queued(&id) => SteerCommandKind::TakeBack {
-            id,
-            restore_draft: draft_is_empty,
-        },
-        _ => return,
+    let Some(kind) = state.action_kind(&session_id, epoch, action, draft_is_empty) else {
+        return;
     };
     let command = SteerCommand {
         session_id: session_id.clone(),
@@ -466,11 +540,22 @@ fn send(command: SteerCommand) -> Result<(), String> {
         .map_err(|_| "user input consumer closed".to_owned())
 }
 
-fn content_for_draft(text: &str, attachments: &[PendingAttachment]) -> MessageContent {
+/// 由草稿文本 + 待发送附件构造提交内容：首个 text 块（非空时）+ 逐张 image 块。
+///
+/// 单一事实源：steer 入队（`enqueue`）与主提交路径（`submit_consumer`）共用，
+/// 避免两条提交路径的 content 形状漂移。空文本 + 有附件（图片-only 提交）不
+/// 产出空 text 块——provider 会拒收空 text block。
+pub(crate) fn content_with_attachments(
+    text: &str,
+    attachments: &[PendingAttachment],
+) -> MessageContent {
     if attachments.is_empty() {
         return MessageContent::text(text);
     }
-    let mut blocks = vec![ContentBlock::text(text)];
+    let mut blocks = Vec::with_capacity(attachments.len() + 1);
+    if !text.is_empty() {
+        blocks.push(ContentBlock::text(text));
+    }
     blocks.extend(attachments.iter().map(|attachment| {
         ContentBlock::image_base64(
             attachment.media_type.clone(),

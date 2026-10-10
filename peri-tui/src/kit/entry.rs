@@ -79,7 +79,11 @@ pub async fn run_kit_fullscreen(
     // 2b0. 从 AppConfig.extra 提取旧 TUI 键初始化 TuiConfig（向后兼容）
     {
         let cfg = app.services.peri_config.read();
-        let tui_config = crate::config::TuiConfig::from_extra(&cfg.config.extra);
+        let tui_config = app
+            .config_source
+            .snapshot()
+            .map(|snapshot| snapshot.ui().clone())
+            .unwrap_or_else(|| crate::config::TuiConfig::from_extra(&cfg.config.extra));
         let _ =
             atoms::TUI_CONFIG_HANDLE.set(std::sync::Arc::new(parking_lot::RwLock::new(tui_config)));
     }
@@ -107,7 +111,11 @@ pub async fn run_kit_fullscreen(
             .map(|h| h.read().daily_color)
             .unwrap_or(false);
         if daily_enabled {
-            let today = chrono::Local::now().format("%Y-%m-%d").to_string();
+            let today = peri_time::calendar_date(
+                peri_time::now_wall(),
+                peri_time::CalendarConvention::HostLocal,
+            )
+            .to_string();
             let needs_switch = atoms::TUI_CONFIG_HANDLE
                 .get()
                 .map(|h| {
@@ -171,9 +179,6 @@ pub async fn run_kit_fullscreen(
     // 2c. H1a: 把 SharedPermissionMode 句柄塞到全局 OnceLock，让 ConfigPanel
     //     提供无会话时的默认权限显示；当前会话权限经 ACP 读取和修改。
     let _ = atoms::PERMISSION_MODE_HANDLE.set(app.services.permission_mode.clone());
-    // 2d. H1g: 把 CronScheduler 共享句柄塞到全局 OnceLock，让 CronPanel
-    //     能直接 toggle/remove。service_snapshot 下次 tick 自动派生新列表。
-    let _ = atoms::CRON_SCHEDULER_HANDLE.set(app.services.cron.scheduler.clone());
 
     // 2e. I17-B：检测首次启动未配置 Provider，触发 SetupWizard 渲染。
     //     wizard 即使是引导界面也支持 Esc/q 退出（避免首次启动锁死）。
@@ -210,7 +215,7 @@ pub async fn run_kit_fullscreen(
                         };
                         *atoms::NOTIFICATION.state().write() = Some(atoms::Notification {
                             message: format!("⚠️ 内部错误：{}（详见日志）", summary),
-                            until: std::time::Instant::now() + std::time::Duration::from_secs(30),
+                            until: peri_time::monotonic_now() + std::time::Duration::from_secs(30),
                         });
                         atoms::RENDER_HEARTBEAT.set(atoms::RENDER_HEARTBEAT.get().wrapping_add(1));
                     }
@@ -228,7 +233,7 @@ pub async fn run_kit_fullscreen(
             loop {
                 tokio::select! {
                     _ = shutdown.cancelled() => break,
-                    _ = tokio::time::sleep(std::time::Duration::from_secs(5)) => {
+                    _ = peri_time::sleep(std::time::Duration::from_secs(5)) => {
                         atoms::RENDER_HEARTBEAT.set(
                             atoms::RENDER_HEARTBEAT.get().wrapping_add(1)
                         );
@@ -256,10 +261,10 @@ pub async fn run_kit_fullscreen(
             loop {
                 tokio::select! {
                     _ = shutdown.cancelled() => break,
-                    _ = tokio::time::sleep(std::time::Duration::from_millis(100)) => {
+                    _ = peri_time::sleep(std::time::Duration::from_millis(100)) => {
                         if atoms::ACP_STATE.state().read().is_loading {
-                            let since = *loading_since.get_or_insert_with(Instant::now);
-                            let frame = since.elapsed().as_millis() as u64 / 100;
+                            let since = *loading_since.get_or_insert_with(peri_time::monotonic_now);
+                            let frame = peri_time::elapsed_since(since).as_millis() as u64 / 100;
                             if last_frame != Some(frame) {
                                 last_frame = Some(frame);
                                 atoms::RENDER_HEARTBEAT.set(
@@ -457,7 +462,7 @@ pub async fn run_kit_fullscreen(
                                 "session-creation-failed",
                                 &[("error".into(), e.to_string().into())],
                             ),
-                            until: Instant::now() + std::time::Duration::from_secs(15),
+                            until: peri_time::monotonic_now() + std::time::Duration::from_secs(15),
                         });
                     }
                 }
@@ -592,7 +597,9 @@ fn build_snapshot_source(
                     commands_count: p.commands.len(),
                     agents_count: p.agents_dirs.len(),
                     mcp_count: p.mcp_servers.len(),
-                    install_scope: "user".to_string(),
+                    install_scope: None,
+                    toggle_supported: Some(false),
+                    management_error: Some("startup plugin projection is read-only".into()),
                     load_error: None,
                 })
                 .collect();
@@ -614,8 +621,7 @@ fn build_snapshot_source(
             .providers
             .iter()
             .map(|p| {
-                let env_key = format!("{}_API_KEY", p.provider_type.to_uppercase());
-                let has_api_key = !p.api_key.is_empty() || std::env::var(env_key).is_ok();
+                let has_api_key = !p.api_key.is_empty();
                 let base_url = if p.base_url.is_empty() {
                     None
                 } else {
@@ -637,9 +643,6 @@ fn build_snapshot_source(
         client,
         peri_config: s.peri_config.clone(),
         permission_mode: s.permission_mode.clone(),
-        cron_scheduler: s.cron.scheduler.clone(),
-        mcp_pool: s.mcp_pool.clone(),
-        mcp_init_rx: s.mcp_init_rx.clone(),
         resource_monitor: Arc::new(Mutex::new(ProcessResourceMonitor::new())),
         hooks,
         plugins,

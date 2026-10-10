@@ -13,10 +13,6 @@ use super::steer_state::{STEERS, SteerCommand, SteerCommandKind};
 use crate::acp_client::AcpTuiClient;
 
 const RECONCILE_INTERVAL: Duration = Duration::from_secs(5);
-/// 宿主对「本节点没有该会话的执行所有权」的拒绝码（`WorkspaceError` → ACP `-32010`）。
-const EXECUTION_OWNERSHIP_REQUIRED: i64 = -32010;
-/// 受理回执期限：只覆盖已发出请求的等待。
-const RECEIPT_TIMEOUT: Duration = Duration::from_secs(10);
 /// 准备阶段期限：会话创建包含工作区发现与服务端准入，比回执预算宽松。
 ///
 /// 两个阶段不共用期限：准备慢于回执预算时输入尚未发出，
@@ -56,11 +52,18 @@ pub(crate) fn spawn_steer_consumer(
     tokio::spawn(async move {
         let mut retries: VecDeque<SteerCommand> = VecDeque::new();
         let mut warned = HashSet::new();
-        let mut retry_tick = tokio::time::interval(RECONCILE_INTERVAL);
-        retry_tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+        let mut refresh_tasks = tokio::task::JoinSet::new();
+        let mut retry_tick = peri_time::interval(RECONCILE_INTERVAL);
+        retry_tick.set_missed_tick_behavior(peri_time::MissedTickBehavior::Delay);
         loop {
             let mut command = tokio::select! {
                 _ = shutdown.cancelled() => break,
+                result = refresh_tasks.join_next(), if !refresh_tasks.is_empty() => {
+                    if let Some(Err(error)) = result {
+                        tracing::error!(%error, "user input refresh task failed");
+                    }
+                    continue;
+                },
                 _ = retry_tick.tick() => {
                     let Some(command) = retries.pop_front().or_else(refresh_command) else {
                         continue;
@@ -72,6 +75,23 @@ pub(crate) fn spawn_steer_consumer(
                     None => break,
                 },
             };
+            if let Some(wait) = STEERS.state().write().take_queue_wait(&command) {
+                tracing::debug!(command_id = %command.command_id, stage = "queue", elapsed_ms = wait.as_millis() as u64, "user input timing");
+            }
+            if matches!(command.kind, SteerCommandKind::Refresh) {
+                if refresh_tasks.is_empty() {
+                    let refresh_client = client.clone();
+                    let refresh_cwd = cwd.clone();
+                    refresh_tasks.spawn(async move {
+                        if let Err(failure) =
+                            execute(&refresh_client, &mut command, &refresh_cwd).await
+                        {
+                            tracing::warn!(error = %failure.error, "user input refresh failed");
+                        }
+                    });
+                }
+                continue;
+            }
             let result = tokio::select! {
                 _ = shutdown.cancelled() => break,
                 result = execute(&client, &mut command, &cwd) => result,
@@ -94,14 +114,9 @@ pub(crate) fn spawn_steer_consumer(
                 if !matches!(command.kind, SteerCommandKind::Refresh)
                     && warned.insert(command.command_id.clone())
                 {
-                    let message = match (stage, ownership_denied_for_read_only_session(&error)) {
-                        // 只读会话不是「回执不明」：说清原因，原稿按确定拒绝还回 composer。
-                        (SteerStage::Admit, true) => crate::i18n::tr("steer-session-read-only"),
-                        _ => failure_notice(stage, rejected, &error),
-                    };
                     atoms::NOTIFICATION.set(Some(atoms::Notification {
-                        message,
-                        until: std::time::Instant::now() + FAILURE_NOTICE_DURATION,
+                        message: failure_notice(stage, rejected, &error),
+                        until: peri_time::monotonic_now() + FAILURE_NOTICE_DURATION,
                     }));
                 }
                 if !rejected && atoms::BRIDGE_RESET_COUNTER.get() == command.epoch {
@@ -156,20 +171,9 @@ fn reject_command(command: &mut SteerCommand, error: &AcpError) -> bool {
         command.epoch = epoch;
     }
     // 入队请求尚未发送时，会话准备失败是确定未受理；不能把原稿卡在未知回执中。
-    let rejected = not_admitted
-        || matches!(error.code, -32602..=-32600)
-        || ownership_denied_for_read_only_session(error);
+    let rejected = not_admitted || matches!(error.code, -32602..=-32600);
     STEERS.state().write().reject(command, rejected);
     rejected
-}
-
-/// 只读准入的会话上，宿主的 `-32010` 是确定结论（本会话没有执行所有权），不是「回执不明」。
-///
-/// 判据只是客户端已经持有的准入事实，不改分工：请求照发、结论由宿主的 `require_owner`
-/// 给出，这里只决定向上呈现的口径——不把只读会话的提交挂在「等待回执」上无限重投，
-/// 也不让原稿卡在待定态。
-fn ownership_denied_for_read_only_session(error: &AcpError) -> bool {
-    error.code == EXECUTION_OWNERSHIP_REQUIRED && atoms::SESSION_READ_ONLY.state().read().is_some()
 }
 
 /// 一次输入投递：先准备会话，再发送请求并等待受理回执。
@@ -181,10 +185,11 @@ async fn execute(
     command: &mut SteerCommand,
     cwd: &str,
 ) -> Result<(), SteerFailure> {
-    prepare(client, command, cwd).await?;
-    tokio::time::timeout(RECEIPT_TIMEOUT, admit(client, command))
-        .await
-        .unwrap_or_else(|_| Err(AcpError::new(-32603, "user input receipt timed out")))?;
+    let prepare_started = peri_time::monotonic_now();
+    let prepared = prepare(client, command, cwd).await;
+    tracing::debug!(command_id = %command.command_id, stage = "prepare", elapsed_ms = prepare_started.elapsed().as_millis() as u64, "user input timing");
+    prepared?;
+    admit(client, command).await?;
     Ok(())
 }
 
@@ -201,7 +206,7 @@ async fn prepare(
         return Ok(());
     }
     let session_id =
-        match tokio::time::timeout(PREPARE_TIMEOUT, client.ensure_session(cwd, None)).await {
+        match peri_time::timeout(PREPARE_TIMEOUT, client.ensure_session(cwd, None)).await {
             Ok(Ok(session_id)) => session_id,
             Ok(Err(error)) => {
                 return Err(SteerFailure {
@@ -261,6 +266,14 @@ async fn admit(client: &AcpTuiClient, command: &mut SteerCommand) -> Result<(), 
         _ => {
             let snapshot = client.user_input_snapshot(&command.session_id).await?;
             let generation = snapshot.generation.clone();
+            if atoms::ACTIVE_SESSION_ID.state().read().as_str() != command.session_id
+                || atoms::BRIDGE_RESET_COUNTER.get() != command.epoch
+            {
+                return Err(AcpError::new(
+                    -32602,
+                    "user input session changed during snapshot",
+                ));
+            }
             super::steer_state::establish_session_snapshot(snapshot);
             generation
         }
@@ -310,6 +323,14 @@ async fn admit(client: &AcpTuiClient, command: &mut SteerCommand) -> Result<(), 
                 .await?
         }
     };
+    if atoms::ACTIVE_SESSION_ID.state().read().as_str() != command.session_id
+        || atoms::BRIDGE_RESET_COUNTER.get() != command.epoch
+    {
+        return Err(AcpError::new(
+            -32603,
+            "user input session changed during receipt",
+        ));
+    }
     STEERS.state().write().settle(command, receipt);
     Ok(())
 }

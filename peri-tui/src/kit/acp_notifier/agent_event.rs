@@ -12,6 +12,9 @@ use tracing::debug;
 /// - 其他变体返回 `None`（不存在对应的 `AcpEventData` 或以其他通道覆盖）
 pub(super) fn decode_agent_event(event: AcpEvent) -> Option<AcpEventData> {
     match event {
+        AcpEvent::ExecutionStarted { request_id, .. } => {
+            Some(AcpEventData::ExecutionStarted { request_id })
+        }
         AcpEvent::UserInputRunStarted { request_id, .. } => Some(AcpEventData::PromptSubmitted {
             request_id: Some(request_id),
         }),
@@ -31,10 +34,12 @@ pub(super) fn decode_agent_event(event: AcpEvent) -> Option<AcpEventData> {
             agent_name,
             instance_id,
             is_background,
+            parent_tool_call_id,
         } => Some(AcpEventData::SubagentStarted {
             agent_id: instance_id,
             agent_name,
             is_background,
+            parent_tool_call_id,
         }),
         AcpEvent::SubagentStopped {
             instance_id,
@@ -206,5 +211,21 @@ pub(super) fn decode_agent_event(event: AcpEvent) -> Option<AcpEventData> {
             debug!("kit ACP notifier: AcpEvent variant not yet mapped to AcpEventData, dropping");
             None
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_execution_started_projects_loading_with_actual_request_identity() {
+        let decoded = decode_agent_event(AcpEvent::ExecutionStarted {
+            generation: "mailbox".into(),
+            request_id: "execution".into(),
+        });
+        assert!(matches!(decoded, Some(AcpEventData::ExecutionStarted {
+            request_id,
+        }) if request_id == "execution"));
     }
 }

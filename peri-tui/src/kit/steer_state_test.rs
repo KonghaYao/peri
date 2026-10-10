@@ -95,8 +95,118 @@ fn test_steer_pending_dispatch_disables_repeat_takeback() {
     ])));
     assert_eq!(
         state.rows("s")[0].state,
-        SteerItemState::Dispatching,
+        SteerItemState::Publishing,
         "发出意图后同条不得继续取回"
+    );
+}
+
+#[test]
+fn published_unclaimed_input_allows_only_atomic_takeback() {
+    let mut state = make_state();
+    let mut snapshot = make_snapshot(2);
+    snapshot.items[0].state = UserInputState::Dispatching;
+    state.accept_snapshot(snapshot, 1, true);
+    assert_eq!(state.rows("s")[0].state, SteerItemState::Dispatching);
+    assert!(matches!(
+        state.action_kind("s", 1, SteerQueueAction::TakeBack { id: "a".into() }, true),
+        Some(SteerCommandKind::TakeBack {
+            restore_draft: true,
+            ..
+        })
+    ));
+    assert!(
+        state
+            .action_kind(
+                "s",
+                1,
+                SteerQueueAction::Dispatch {
+                    ids: vec!["a".into()]
+                },
+                true
+            )
+            .is_none()
+    );
+    assert!(state.recover("s", 1, true).is_none());
+}
+
+#[test]
+fn claimed_snapshot_cannot_be_taken_back_or_republished() {
+    let mut state = make_state();
+    let mut snapshot = make_snapshot(2);
+    snapshot.items[0].state = UserInputState::Claimed;
+    state.accept_snapshot(snapshot, 1, true);
+    assert_eq!(state.rows("s")[0].state, SteerItemState::Claimed);
+    assert!(
+        state
+            .action_kind("s", 1, SteerQueueAction::TakeBack { id: "a".into() }, true)
+            .is_none()
+    );
+    assert!(
+        state
+            .action_kind(
+                "s",
+                1,
+                SteerQueueAction::Dispatch {
+                    ids: vec!["a".into()]
+                },
+                true
+            )
+            .is_none()
+    );
+}
+
+#[test]
+fn unknown_publication_or_withdrawal_keeps_original_command_and_no_recovery() {
+    for kind in [
+        SteerCommandKind::Dispatch(vec!["a".into()]),
+        SteerCommandKind::TakeBack {
+            id: "a".into(),
+            restore_draft: true,
+        },
+    ] {
+        let mut state = make_state();
+        let command = make_command(kind);
+        state.begin(command.clone());
+        state.reject(&command, false);
+        let mut snapshot = make_snapshot(2);
+        snapshot.items[0].state = UserInputState::Dispatching;
+        state.accept_snapshot(snapshot, 1, true);
+        assert!(
+            state
+                .action_kind("s", 1, SteerQueueAction::TakeBack { id: "a".into() }, true)
+                .is_none()
+        );
+        assert!(
+            state
+                .action_kind(
+                    "s",
+                    1,
+                    SteerQueueAction::Dispatch {
+                        ids: vec!["a".into()]
+                    },
+                    true
+                )
+                .is_none()
+        );
+        assert!(state.pending_command("s", &command.command_id).is_some());
+        assert!(state.recover("s", 1, true).is_none());
+    }
+}
+
+#[test]
+fn unknown_enqueue_does_not_enable_takeback_from_a_later_published_snapshot() {
+    let mut state = make_state();
+    let command = make_command(SteerCommandKind::Enqueue(make_input("a")));
+    state.begin(command.clone());
+    state.reject(&command, false);
+    let mut snapshot = make_snapshot(2);
+    snapshot.items[0].state = UserInputState::Dispatching;
+    state.accept_snapshot(snapshot, 1, true);
+    assert_eq!(state.rows("s")[0].state, SteerItemState::Submitting);
+    assert!(
+        state
+            .action_kind("s", 1, SteerQueueAction::TakeBack { id: "a".into() }, true)
+            .is_none()
     );
 }
 
@@ -255,7 +365,7 @@ fn test_steer_attachment_content_survives_roundtrip() {
         media_type: "image/png".to_owned(),
         base64_data: "AQID".to_owned(),
     }];
-    let content = content_for_draft("  image\n", &attachments);
+    let content = content_with_attachments("  image\n", &attachments);
     let recovered = attachments_from_content(&content);
     assert_eq!(
         content.text_content(),
@@ -331,6 +441,42 @@ fn test_steer_takeback_receipt_after_reload_remains_recoverable() {
 }
 
 #[test]
+fn test_steer_late_takeback_after_instance_change_recovers_without_replacing_snapshot() {
+    let mut state = make_state();
+    let command = make_command(SteerCommandKind::TakeBack {
+        id: "a".to_owned(),
+        restore_draft: true,
+    });
+    state.begin(command.clone());
+    state.reset_session("s", 2);
+    let mut snapshot = make_snapshot(1);
+    snapshot.generation = "new-instance".into();
+    snapshot.items.clear();
+    assert!(state.accept_snapshot(snapshot.clone(), 2, true));
+    assert!(state.resume_pending("s", 2).is_empty());
+
+    state.settle(
+        &command,
+        UserInputQueueReceipt {
+            snapshot: UserInputQueueSnapshot {
+                items: Vec::new(),
+                ..make_snapshot(2)
+            },
+            results: Vec::new(),
+            taken_back: Some(make_input("a")),
+        },
+    );
+
+    let current = state.snapshot("s", 2).unwrap();
+    assert_eq!(current.generation, snapshot.generation);
+    assert_eq!(current.revision, snapshot.revision);
+    assert!(current.items.is_empty());
+    assert!(state.pending_command("s", &command.command_id).is_none());
+    assert_eq!(state.recover("s", 2, true).unwrap().input_id, "a");
+    assert!(state.recover("s", 2, true).is_none());
+}
+
+#[test]
 fn test_steer_unknown_input_after_instance_change_stays_visible_without_retry() {
     let mut state = make_state();
     let command = make_command(SteerCommandKind::Enqueue(make_input("b")));
@@ -368,6 +514,11 @@ fn test_steer_idle_submission_skips_queue_until_delivery() {
     let command = make_command(SteerCommandKind::Enqueue(make_input("b")));
     state.begin(command.clone());
     assert!(state.rows("s").is_empty(), "空闲提交不应闪过待发送区");
+    assert!(state.direct_submitting("s", 1), "提交立即提供明确反馈");
+    assert!(
+        !state.direct_submitting("s", 2),
+        "旧 epoch 不能投影提交反馈"
+    );
     let input = make_input("b");
     snapshot.revision = 3;
     snapshot.active_request_id = Some("run".into());
@@ -386,7 +537,9 @@ fn test_steer_idle_submission_skips_queue_until_delivery() {
         },
     );
     assert!(state.rows("s").is_empty(), "直接投递回执也不应产生队列行");
+    assert!(state.direct_submitting("s", 1), "受理不等于正式送达");
     assert!(state.claim_delivery("s", "b"), "确认后仍须生成正式聊天气泡");
+    assert!(!state.direct_submitting("s", 1), "送达后立即撤掉反馈");
     assert!(!state.claim_delivery("s", "b"), "重复确认不得重复生成气泡");
 }
 
@@ -423,15 +576,63 @@ fn test_steer_idle_submission_rejected_recovers_draft() {
 }
 
 #[test]
-fn test_steer_idle_submission_queued_by_server_becomes_visible() {
+fn test_steer_idle_submission_snapshot_without_receipt_stays_direct() {
     let mut state = make_idle_state();
-    state.begin(make_command(SteerCommandKind::Enqueue(make_input("a"))));
+    let command = make_command(SteerCommandKind::Enqueue(make_input("a")));
+    state.begin(command.clone());
     state.accept_snapshot(make_snapshot(3), 1, false);
+    assert!(
+        state.rows("s").is_empty(),
+        "暂存通知不是排队回执，空闲提交不得闪过待发送区"
+    );
+    state.reject(&command, false);
     assert_eq!(
         state.rows("s")[0].state,
-        SteerItemState::Queued,
-        "竞争或取消退回后遵循服务端排队事实"
+        SteerItemState::Submitting,
+        "回执超时后才展示未决输入，且不能撤回或重发"
     );
+}
+
+#[test]
+fn test_steer_idle_submission_queued_receipt_exposes_real_queue() {
+    let mut state = make_idle_state();
+    let command = make_command(SteerCommandKind::Enqueue(make_input("a")));
+    state.begin(command.clone());
+    state.accept_snapshot(make_snapshot(3), 1, false);
+    state.settle(
+        &command,
+        UserInputQueueReceipt {
+            snapshot: make_snapshot(3),
+            results: Vec::new(),
+            taken_back: None,
+        },
+    );
+    assert_eq!(state.rows("s")[0].state, SteerItemState::Queued);
+    assert!(state.pending_command("s", "c").is_none());
+}
+
+#[test]
+fn test_steer_idle_submission_staged_snapshot_then_dispatch_skips_queue() {
+    let mut state = make_idle_state();
+    let command = make_command(SteerCommandKind::Enqueue(make_input("a")));
+    state.begin(command.clone());
+    state.accept_snapshot(make_snapshot(3), 1, false);
+    assert!(state.rows("s").is_empty());
+    let mut dispatched = make_snapshot(4);
+    dispatched.items[0].state = UserInputState::Dispatching;
+    dispatched.active_request_id = Some("run".into());
+    state.accept_snapshot(dispatched, 1, false);
+    state.settle(
+        &command,
+        UserInputQueueReceipt {
+            snapshot: make_snapshot(3),
+            results: Vec::new(),
+            taken_back: None,
+        },
+    );
+    assert!(state.rows("s").is_empty(), "旧回执不得恢复暂存行");
+    assert!(state.claim_delivery("s", "a"));
+    assert!(!state.claim_delivery("s", "a"));
 }
 
 #[test]
@@ -484,4 +685,28 @@ fn test_steer_idle_submission_reload_exposes_unconfirmed_input() {
         state.rows("s").iter().any(|row| row.id == "b"),
         "重载后未知输入应可见"
     );
+}
+
+/// 图片-only 提交（空文本 + 附件）不得产出空 text 块——provider 会拒收空
+/// text block；此时 content 只应含 image 块。
+#[test]
+fn test_attachment_only_content_has_no_empty_text_block() {
+    let attachments = vec![PendingAttachment::image("image/png", "AQID")];
+    let content = content_with_attachments("", &attachments);
+
+    let blocks = content.content_blocks();
+    assert_eq!(blocks.len(), 1, "空文本不得产出 text 块: {blocks:?}");
+    assert!(matches!(blocks[0], ContentBlock::Image { .. }));
+    assert_eq!(
+        attachments_from_content(&content)[0].base64_data,
+        "AQID",
+        "附件数据须完整可恢复"
+    );
+}
+
+/// 无附件时 content 形态与旧路径逐字一致（纯文本，不是单元素 block 数组）。
+#[test]
+fn test_content_without_attachments_stays_plain_text() {
+    let content = content_with_attachments("hello", &[]);
+    assert_eq!(content, MessageContent::text("hello"));
 }

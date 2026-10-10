@@ -172,9 +172,13 @@ async fn run_print(format: &str, scenario: ProviderScenario, bare: bool) -> std:
                 } else {
                     // step 0 请求工具，step 1 给出终答（工具结果已在上方断言）。
                     let tool_call = match (scenario, step) {
-                        (ProviderScenario::ReadFile, 0) => {
-                            Some(("read-big", "Read", json!({"file_path": big_file})))
-                        }
+                        (ProviderScenario::ReadFile, 0) => Some((
+                            "read-big",
+                            // v4：文件工具的模型面名字是 builtin `workspace` 实例的
+                            // effective name（裸名 `Read` 的提供面已删除）。
+                            "Read",
+                            json!({"file_path": big_file}),
+                        )),
                         (ProviderScenario::AskUser, 0) => Some((
                             "ask-user-question-1",
                             "AskUserQuestion",
@@ -321,8 +325,12 @@ async fn run_print(format: &str, scenario: ProviderScenario, bare: bool) -> std:
     .await
     .unwrap_or_else(|_| {
         panic!(
-            "the CLI must have reached the provider for every step: 期望 {expected_steps} 次，实到 {} 次",
-            served_steps.load(Ordering::SeqCst)
+            "the CLI must have reached the provider for every step: 期望 {expected_steps} 次，实到 {} 次; \
+             status: {}\nstdout:\n{}\nstderr:\n{}",
+            served_steps.load(Ordering::SeqCst),
+            output.status,
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr),
         )
     });
     provider.abort();
@@ -453,6 +461,9 @@ async fn standard_mode_answer_exits_process() {
 }
 
 /// [回归测试] 真实 CLI 经 Read 后继续请求，usage 尾帧穿过 ACP 到 stdout，进程自行退出。
+///
+/// v4 后文件工具由 builtin `workspace` 实例提供（`Read`）；
+/// `--bare` 同样保留这条基础能力路径。
 #[tokio::test]
 async fn streamed_multistep_usage_includes_final_provider_counts_and_exits() {
     let output = run_print("stream-json", ProviderScenario::ReadFile, true).await;
@@ -479,6 +490,8 @@ async fn streamed_multistep_usage_includes_final_provider_counts_and_exits() {
         );
     }
     assert_ne!(calls[0]["message"]["id"], calls[1]["message"]["id"]);
+    // 事件里的工具名是模型面 effective name（builtin `workspace` 实例），
+    // 不是迁移前的裸名 `Read`。
     assert!(events.iter().any(|event| event["type"] == "tool_use"
         && event["name"] == "Read"
         && event["id"] == "read-big"));

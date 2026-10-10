@@ -19,7 +19,6 @@ pub mod config;
 pub mod i18n;
 pub mod kit;
 pub mod launch;
-pub mod sync;
 pub mod thread;
 pub mod truncate;
 pub mod update;

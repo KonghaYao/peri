@@ -5,6 +5,7 @@ use crate::kit::tui_render_unit::{
     TuiToolPresentation,
 };
 use crate::truncate::truncate_by_width;
+use peri_acp_types::builtin_mcp::original_tool_name_of_effective;
 use peri_theme::atoms::THEME_ATOM;
 use ratatui_kit::ratatui::style::{Modifier, Style};
 use ratatui_kit::ratatui::text::{Line, Span};
@@ -124,6 +125,9 @@ fn render_tool_plan(
         status_symbol
     };
     let mut spans = first_prefix(grid, &symbol, Style::default().fg(symbol_color));
+    if data.is_error {
+        spans[1] = Span::styled(sym().error, Style::default().fg(symbol_color));
+    }
     let label = truncate_by_width(&plan.label, grid.content_width().max(1));
     let label_width = label.width();
     spans.push(Span::styled(
@@ -180,6 +184,16 @@ fn render_tool_plan(
     fit_summary_to_content(&mut spans, grid);
 
     let mut lines = vec![Line::from(spans)];
+    if data.is_error {
+        if data.fold != FoldState::Collapsed {
+            for text in super::error::preview_lines(&data.output_summary, grid.content_width(), 2) {
+                let mut spans = cont_prefix(grid, sem.accents.tool);
+                spans.push(Span::styled(text, Style::default().fg(sem.status.error)));
+                lines.push(Line::from(spans));
+            }
+        }
+        return lines;
+    }
     if data.fold != FoldState::Collapsed {
         for detail in plan.details {
             let mut spans = cont_prefix(grid, sem.accents.tool);
@@ -262,7 +276,10 @@ fn project_todo_tool(
 fn project_generic_tool(data: &TuiToolCard, grid: &GridSpec) -> ToolRenderPlan {
     let sem = THEME_ATOM.state().read().semantic;
     let content = grid.content_width();
-    let bash = data.tool_name == "Bash";
+    // builtin 一等工具的模型面名字是 effective name（`mcp__workspace__Bash`）：
+    // 按名判定先经 IF-D15 归一 helper 换回原始工具名，未命中回落原样。
+    let name = original_tool_name_of_effective(&data.tool_name).unwrap_or(data.tool_name.as_str());
+    let bash = name == "Bash";
     let mut completed_details = Vec::new();
     if bash {
         completed_details.push(Line::from(Span::styled(
@@ -442,11 +459,14 @@ fn render_diff_lines(diff: &TuiDiffBlock, grid: &GridSpec) -> Vec<Line<'static>>
 /// 完成工具头行后缀（历史行为保留）：Read `— N lines`；Glob/Grep `— N matches`；
 /// Edit/Write `· +N −M`（只保留 diff 计数——摘要文本含路径，与 header 的
 /// `input_summary` 重复，不再拼接）。错误态不加后缀（§6.4）。
+///
+/// 按名分支先经 IF-D15 归一 helper（effective name → 原始名），未命中回落原样。
 pub(super) fn completed_header_suffix(data: &TuiToolCard) -> String {
     if data.output_summary.is_empty() {
         return String::new();
     }
-    match data.tool_name.as_str() {
+    let name = original_tool_name_of_effective(&data.tool_name).unwrap_or(data.tool_name.as_str());
+    match name {
         "Read" => {
             let total_lines = data
                 .output_summary

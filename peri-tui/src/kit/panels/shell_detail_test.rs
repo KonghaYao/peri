@@ -13,6 +13,8 @@ fn shell_task(id: &str) -> BgTaskEntry {
         summary: "echo hi".to_string(),
         started_at: "2026-01-01T00:00:00Z".to_string(),
         pid: Some(42),
+        revision: None,
+        status: None,
     }
 }
 
@@ -26,6 +28,8 @@ fn test_resolve_shell_task_matches_kind_shell() {
             summary: "agent".to_string(),
             started_at: String::new(),
             pid: None,
+            revision: None,
+            status: None,
         },
     ];
     let t = resolve_shell_task(&tasks, Some("s1")).expect("shell row");

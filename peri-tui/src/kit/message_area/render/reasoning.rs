@@ -60,20 +60,7 @@ pub(super) fn render_reasoning_block(
         // Preview，Collapsed 只能来自用户覆盖——Space 切换必须有视觉反馈）。
         // 首行 icon 统一竖线（用户需求）；活动感由 running 色 + elapsed + tail
         // 增长承担（§8.2 动画帧不再用于 reasoning）。
-        let mut spans = first_prefix(grid, "\u{2502}", Style::default().fg(sem.status.running));
-        // 对齐工具卡片语言（§6.4 硬编码英文口径，避免中英混杂）；信息层级
-        // 低于工具——label 用 muted（工具 label 为 primary+bold），活动感由
-        // ◐（running 色）承担。
-        spans.push(Span::styled(
-            "Thinking…",
-            Style::default().fg(sem.text.muted),
-        ));
-        let used: usize = spans.iter().map(|s| s.content.width()).sum();
-        let elapsed = format!("{}s", reasoning.duration_secs());
-        if let Some(meta) = place_meta(grid, used, &elapsed, Style::default().fg(sem.text.dim)) {
-            spans.extend(meta);
-        }
-        lines.push(Line::from(spans));
+        lines.push(render_running_reasoning_header(reasoning, grid));
 
         let tail_max = match reasoning.fold {
             FoldState::Expanded => REASONING_BODY_MAX_LINES,
@@ -118,4 +105,25 @@ pub(super) fn render_reasoning_block(
         }
     }
     lines
+}
+
+pub(crate) fn render_running_reasoning_header(
+    reasoning: &TuiReasoningBlock,
+    grid: &GridSpec,
+) -> Line<'static> {
+    let sem = THEME_ATOM.state().read().semantic;
+    let mut spans = first_prefix(grid, "\u{2502}", Style::default().fg(sem.status.running));
+    // 对齐工具卡片语言（§6.4 硬编码英文口径，避免中英混杂）；信息层级
+    // 低于工具——label 用 muted（工具 label 为 primary+bold），活动感由
+    // ◐（running 色）承担。
+    spans.push(Span::styled(
+        "Thinking…",
+        Style::default().fg(sem.text.muted),
+    ));
+    let used: usize = spans.iter().map(|s| s.content.width()).sum();
+    let elapsed = format!("{}s", reasoning.duration_secs());
+    if let Some(meta) = place_meta(grid, used, &elapsed, Style::default().fg(sem.text.dim)) {
+        spans.extend(meta);
+    }
+    Line::from(spans)
 }

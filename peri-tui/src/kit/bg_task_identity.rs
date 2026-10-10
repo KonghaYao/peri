@@ -1,8 +1,6 @@
 //! Background task `task_id` ↔ `agent_id` 双键解析。
 
-use crate::kit::atoms::{
-    BG_AGENT_IDS, BG_DISPLAY, BG_TASK_IDENTITY, BgDisplayEntry, BgTaskIdentity,
-};
+use crate::kit::atoms::{BG_DISPLAY, BG_TASK_IDENTITY, BgDisplayEntry, BgTaskIdentity};
 
 pub fn is_unbound_agent_row(entry: &BgDisplayEntry) -> bool {
     entry.agent_type == "agent" && entry.linked_agent_id.is_none()
@@ -26,18 +24,7 @@ pub fn bind_linked_agent_on_subagent_started(agent_id: &str, agent_name: &str) -
 }
 
 pub fn resolve_subagent_id_for_display(entry: &BgDisplayEntry) -> Option<String> {
-    if let Some(linked) = entry.linked_agent_id.clone() {
-        return Some(linked);
-    }
-    if entry.agent_type != "agent" {
-        return None;
-    }
-    let agent_store = BG_AGENT_IDS.state();
-    let ids = agent_store.read();
-    if ids.len() == 1 {
-        return ids.iter().next().cloned();
-    }
-    None
+    (entry.agent_type == "agent").then(|| entry.id.clone())
 }
 
 pub fn task_id_for_agent_id(agent_id: &str) -> Option<String> {
@@ -46,6 +33,7 @@ pub fn task_id_for_agent_id(agent_id: &str) -> Option<String> {
         let display = display_store.read();
         if let Some(task_id) = display
             .iter()
+            .rev()
             .find(|e| e.linked_agent_id.as_deref() == Some(agent_id))
             .map(|e| e.id.clone())
         {

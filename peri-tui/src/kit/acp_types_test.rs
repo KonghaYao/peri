@@ -1,8 +1,4 @@
-//! Tests for acp_types
-
 use super::*;
-
-// -- CurrentTurn tests ----------------------------------------------------
 
 #[test]
 fn test_default_empty() {
@@ -12,14 +8,6 @@ fn test_default_empty() {
     assert!(ct.tool_cards.is_empty());
     assert!(!ct.active);
     assert!(ct.view_models().is_empty());
-}
-
-#[test]
-fn test_new_equals_default() {
-    let a = CurrentTurn::new();
-    let b = CurrentTurn::default();
-    assert_eq!(a.text, b.text);
-    assert_eq!(a.active, b.active);
 }
 
 #[test]
@@ -125,416 +113,12 @@ fn test_end_tool_unknown_id_is_noop() {
 }
 
 #[test]
-fn test_bash_timer_hash_changes_over_time() {
-    // [设计变更] ToolCard content_hash 现在纳入 duration（按秒向下取整）——
-    // 这是为了让按 hash 分片的渲染缓存每秒刷新一次 duration 文本。
-    // 此测试验证：跨秒后 content_hash 变化（触发缓存失效 + duration 文本更新）。
-    let mut ct = CurrentTurn::new();
-    ct.start_tool(ToolCardAccumulator::new(
-        "tc-bash".into(),
-        "Bash".into(),
-        "cargo test".into(),
-    ));
-
-    let first_hash = match &ct.view_models()[0] {
-        TuiRenderUnit::TuiToolCard(card) => {
-            assert!(card.is_running);
-            assert!(card.running_duration_ms.is_some());
-            card.content_hash
-        }
-        other => panic!("expected TuiToolCard, got {other:?}"),
-    };
-
-    std::thread::sleep(std::time::Duration::from_millis(1_100));
-    ct.invalidate_cache();
-
-    let second_hash = match &ct.view_models()[0] {
-        TuiRenderUnit::TuiToolCard(card) => {
-            assert!(card.is_running);
-            assert!(card.running_duration_ms.unwrap() >= 1_000);
-            card.content_hash
-        }
-        other => panic!("expected TuiToolCard, got {other:?}"),
-    };
-
-    // 跨秒后 duration_secs 从 0 变为 1，content_hash 必须变化
-    assert_ne!(
-        first_hash, second_hash,
-        "跨秒后 duration_secs 变化，content_hash 必须变化以触发缓存失效"
-    );
-}
-
-#[test]
-fn test_completed_bash_hash_stays_same() {
-    let mut ct = CurrentTurn::new();
-    ct.start_tool(ToolCardAccumulator::new(
-        "tc-bash".into(),
-        "Bash".into(),
-        "cargo test".into(),
-    ));
-    ct.end_tool("tc-bash", "ok".into(), false);
-
-    let first_hash = match &ct.view_models()[0] {
-        TuiRenderUnit::TuiToolCard(card) => {
-            assert!(!card.is_running);
-            assert_eq!(card.running_duration_ms, None);
-            card.content_hash
-        }
-        other => panic!("expected TuiToolCard, got {other:?}"),
-    };
-
-    std::thread::sleep(std::time::Duration::from_millis(1_100));
-    ct.invalidate_cache();
-
-    let second_hash = match &ct.view_models()[0] {
-        TuiRenderUnit::TuiToolCard(card) => {
-            assert!(!card.is_running);
-            assert_eq!(card.running_duration_ms, None);
-            card.content_hash
-        }
-        other => panic!("expected TuiToolCard, got {other:?}"),
-    };
-
-    assert_eq!(first_hash, second_hash);
-}
-
-#[test]
 fn test_deactivate() {
     let mut ct = CurrentTurn::new();
     ct.append_text("x", None);
     assert!(ct.active);
     ct.deactivate();
     assert!(!ct.active);
-}
-
-// -- AcpEventData decode tests -------------------------------------------
-
-#[test]
-fn test_current_turn_subagent_streaming_builds_nested_group() {
-    let mut ct = CurrentTurn::new();
-    ct.start_subagent("agent-1".into(), "researcher".into());
-    assert!(ct.append_subagent_text("agent-1", "hello"));
-    assert!(ct.start_subagent_tool(
-        "agent-1",
-        ToolCardAccumulator::new("tc-1".into(), "Read".into(), "path: foo.rs".into()),
-    ));
-    assert!(ct.end_subagent_tool("agent-1", "tc-1", "10 lines".into(), false));
-
-    let vms: Vec<_> = ct.view_models().iter().cloned().collect();
-    assert_eq!(vms.len(), 1);
-    match &vms[0] {
-        TuiRenderUnit::TuiSubAgentGroup(group) => {
-            assert_eq!(group.agent_id, "agent-1");
-            assert_eq!(group.agent_name, "researcher");
-            assert_eq!(group.view_models.len(), 2);
-        }
-        other => panic!("expected TuiSubAgentGroup, got {other:?}"),
-    }
-}
-
-/// [回归测试] 同一个 child thread 在当前主 turn 内恢复时会复用 agent_id。
-/// 已停止的旧分组必须保持封闭，新一轮 SubagentStarted 应创建并关联到新的
-/// Agent ToolCard；恢复后的事件只能进入新分组。
-#[test]
-fn test_current_turn_resumed_subagent_routes_to_new_agent_group() {
-    let mut ct = CurrentTurn::new();
-    ct.start_tool(ToolCardAccumulator::new(
-        "agent-call-1".into(),
-        "Agent".into(),
-        "start coder".into(),
-    ));
-    ct.start_subagent("child-1".into(), "coder".into());
-    assert!(ct.append_subagent_text("child-1", "before interruption"));
-    assert!(ct.start_subagent_tool(
-        "child-1",
-        ToolCardAccumulator::new("child-tool-1".into(), "Read".into(), "old.rs".into()),
-    ));
-    assert!(ct.end_subagent_tool("child-1", "child-tool-1", "old output".into(), false));
-    ct.stop_subagent("child-1", true, "model stream interrupted");
-    assert!(ct.end_tool("agent-call-1", "child_thread_id: child-1".into(), true));
-
-    ct.start_tool(ToolCardAccumulator::new(
-        "agent-call-2".into(),
-        "Agent".into(),
-        "continue child-1".into(),
-    ));
-    ct.start_subagent("child-1".into(), "coder".into());
-    assert!(ct.append_subagent_text("child-1", "after resume"));
-    assert!(ct.append_subagent_reasoning("child-1", "resumed reasoning"));
-    assert!(ct.start_subagent_tool(
-        "child-1",
-        ToolCardAccumulator::new("child-tool-2".into(), "Shell".into(), "cargo test".into()),
-    ));
-    assert!(ct.end_subagent_tool("child-1", "child-tool-2", "passed".into(), false));
-    ct.stop_subagent("child-1", false, "completed");
-
-    assert_ne!(
-        ct.subagents[0].instance_id, ct.subagents[1].instance_id,
-        "恢复 occurrence 必须获得新的 TUI instance_id"
-    );
-    assert_eq!(ct.subagents[0].agent_id, ct.subagents[1].agent_id);
-    assert_eq!(ct.subagents.len(), 2, "恢复应创建第二个可见分组");
-    assert_eq!(
-        ct.subagents[0].child_turn.text, "before interruption",
-        "旧失败分组不得接收恢复后的消息"
-    );
-    assert!(!ct.subagents[0].is_running);
-    assert_eq!(ct.subagents[1].child_turn.text, "after resume");
-    assert_eq!(ct.subagents[1].child_turn.reasoning, "resumed reasoning");
-    assert!(!ct.subagents[1].is_running);
-    assert!(!ct.subagents[1].is_error);
-    assert_eq!(ct.subagents[0].child_turn.tool_cards.len(), 1);
-    assert_eq!(
-        ct.subagents[0].child_turn.tool_cards[0].tool_id,
-        "child-tool-1"
-    );
-    assert_eq!(ct.subagents[1].child_turn.tool_cards.len(), 1);
-    assert_eq!(
-        ct.subagents[1].child_turn.tool_cards[0].tool_id,
-        "child-tool-2"
-    );
-    assert!(
-        ct.tool_cards.iter().all(|tool| tool.claimed_by_subagent),
-        "原始与恢复 Agent 调用都应关联各自的 Subagent 分组"
-    );
-
-    let vms = ct.view_models().clone();
-    assert_eq!(vms.len(), 4, "应按 Agent/分组/Agent/分组交错显示");
-    assert!(matches!(vms[0], TuiRenderUnit::TuiToolCard(_)));
-    assert!(matches!(vms[1], TuiRenderUnit::TuiSubAgentGroup(_)));
-    assert!(matches!(vms[2], TuiRenderUnit::TuiToolCard(_)));
-    assert!(matches!(vms[3], TuiRenderUnit::TuiSubAgentGroup(_)));
-}
-
-#[test]
-fn test_current_turn_subagent_unknown_route_returns_false() {
-    let mut ct = CurrentTurn::new();
-    assert!(!ct.append_subagent_text("missing", "hello"));
-    assert!(ct.view_models().is_empty());
-}
-
-/// [回归测试] ToolStarted 后无 ToolEnded 直接 SubagentStopped：
-/// stop_subagent 必须 deactivate child_turn，否则无 output_summary 的
-/// 工具卡保持 Running（is_running = turn_active && 无输出），渲染为永久进行中。
-#[test]
-fn test_stop_subagent_without_tool_ended_deactivates_child_turn() {
-    let mut ct = CurrentTurn::new();
-    ct.start_subagent("agent-1".into(), "researcher".into());
-    assert!(ct.start_subagent_tool(
-        "agent-1",
-        ToolCardAccumulator::new("tc-1".into(), "Read".into(), "path: foo.rs".into()),
-    ));
-    // 无 end_subagent_tool，直接 stop
-    ct.stop_subagent("agent-1", false, "");
-
-    let s = ct
-        .subagents
-        .iter_mut()
-        .find(|s| s.agent_id == "agent-1")
-        .expect("subagent 应存在");
-    assert!(
-        !s.child_turn.active,
-        "stop_subagent 后 child_turn 必须 deactivate（ToolStarted 无 ToolEnded 场景）"
-    );
-    let vms: Vec<_> = s.child_turn.view_models().iter().cloned().collect();
-    assert_eq!(vms.len(), 1, "child_turn 应仍保留工具卡");
-    match &vms[0] {
-        TuiRenderUnit::TuiToolCard(card) => {
-            assert!(
-                !card.is_running,
-                "ToolStarted 无 ToolEnded 时停止，tool card 不应保持 Running"
-            );
-        }
-        other => panic!("expected TuiToolCard, got {other:?}"),
-    }
-}
-
-#[test]
-fn test_decode_turn_done() {
-    let decoded = AcpEventData::decode("turn-done", serde_json::json!({}));
-    match decoded {
-        AcpEventData::TurnDone => {}
-        _ => panic!("expected TurnDone"),
-    }
-}
-
-#[test]
-fn test_decode_turn_interrupted() {
-    let data = serde_json::json!({"reason": "user cancelled"});
-    let decoded = AcpEventData::decode("turn-interrupted", data);
-    match decoded {
-        AcpEventData::TurnInterrupted { reason, request_id } => {
-            assert_eq!(reason, "user cancelled");
-            assert_eq!(request_id, None, "requestId 缺失时应为 None");
-        }
-        _ => panic!("expected TurnInterrupted"),
-    }
-}
-
-#[test]
-fn test_decode_turn_interrupted_with_request_id() {
-    let data = serde_json::json!({"reason": "user cancelled", "requestId": "rid-1"});
-    let decoded = AcpEventData::decode("turn-interrupted", data);
-    match decoded {
-        AcpEventData::TurnInterrupted { reason, request_id } => {
-            assert_eq!(reason, "user cancelled");
-            assert_eq!(request_id.as_deref(), Some("rid-1"));
-        }
-        _ => panic!("expected TurnInterrupted"),
-    }
-}
-
-#[test]
-fn test_decode_tool_count() {
-    let data = serde_json::json!({"count": 3});
-    let decoded = AcpEventData::decode("tool-count", data);
-    match decoded {
-        AcpEventData::ToolCount(tc) => assert_eq!(tc.count, 3),
-        _ => panic!("expected ToolCount"),
-    }
-}
-
-#[test]
-fn test_decode_budget_warning() {
-    let data = serde_json::json!({
-        "used": 85000,
-        "limit": 100000,
-        "threshold": "0.85"
-    });
-    let decoded = AcpEventData::decode("budget-warning", data);
-    match decoded {
-        AcpEventData::BudgetWarning(bw) => assert_eq!(bw.threshold, "0.85"),
-        _ => panic!("expected BudgetWarning"),
-    }
-}
-
-#[test]
-fn test_decode_system_notification() {
-    let data = serde_json::json!({"text": "model switched", "level": "info"});
-    let decoded = AcpEventData::decode("system-notification", data);
-    match decoded {
-        AcpEventData::SystemNotification(sn) => assert_eq!(sn.level, "info"),
-        _ => panic!("expected SystemNotification"),
-    }
-}
-
-#[test]
-fn test_decode_prediction() {
-    let data = serde_json::json!({"text": "fix typo"});
-    let decoded = AcpEventData::decode("prediction", data);
-    match decoded {
-        AcpEventData::Prediction(p) => assert_eq!(p.text, "fix typo"),
-        _ => panic!("expected Prediction"),
-    }
-}
-
-#[test]
-fn test_decode_file_suggestions() {
-    let data = serde_json::json!({"files": ["src/main.rs", "src/lib.rs"]});
-    let decoded = AcpEventData::decode("file-suggestions", data);
-    match decoded {
-        AcpEventData::FileSuggestions(fs) => assert_eq!(fs.files.len(), 2),
-        _ => panic!("expected FileSuggestions"),
-    }
-}
-
-#[test]
-fn test_decode_rewind_preview() {
-    let data = serde_json::json!({"files": [], "messages": []});
-    let decoded = AcpEventData::decode("rewind-preview", data);
-    match decoded {
-        AcpEventData::RewindPreview(rp) => assert!(rp.files.is_empty()),
-        _ => panic!("expected RewindPreview"),
-    }
-}
-
-#[test]
-fn test_decode_oauth_needed() {
-    let data = serde_json::json!({
-        "server_name": "github-mcp",
-        "auth_url": "https://github.com/login/oauth"
-    });
-    let decoded = AcpEventData::decode("oauth-needed", data);
-    match decoded {
-        AcpEventData::OauthNeeded(on) => assert_eq!(on.server_name, "github-mcp"),
-        _ => panic!("expected OauthNeeded"),
-    }
-}
-
-#[test]
-fn test_decode_subagent_started() {
-    let data = serde_json::json!({
-        "agent_id": "sa-1",
-        "agent_name": "file-searcher"
-    });
-    let decoded = AcpEventData::decode("subagent-started", data);
-    match decoded {
-        AcpEventData::SubagentStarted { agent_name, .. } => {
-            assert_eq!(agent_name, "file-searcher")
-        }
-        _ => panic!("expected SubagentStarted"),
-    }
-}
-
-#[test]
-fn test_decode_subagent_stopped() {
-    // legacy 通道缺省：无 result/is_error 字段 → 空字符串 / false（向后兼容）
-    let data = serde_json::json!({"agent_id": "sa-1"});
-    let decoded = AcpEventData::decode("subagent-stopped", data);
-    match decoded {
-        AcpEventData::SubagentStopped {
-            agent_id,
-            result,
-            is_error,
-        } => {
-            assert_eq!(agent_id, "sa-1");
-            assert_eq!(result, "", "legacy 缺省 result 应为空");
-            assert!(!is_error, "legacy 缺省 is_error 应为 false");
-        }
-        _ => panic!("expected SubagentStopped"),
-    }
-    // 显式字段（canonical 主通道 peri/agent_event）
-    let data = serde_json::json!({
-        "agent_id": "sa-2",
-        "result": "loop failed: llm error",
-        "is_error": true
-    });
-    let decoded = AcpEventData::decode("subagent-stopped", data);
-    match decoded {
-        AcpEventData::SubagentStopped {
-            agent_id,
-            result,
-            is_error,
-        } => {
-            assert_eq!(agent_id, "sa-2");
-            assert_eq!(result, "loop failed: llm error");
-            assert!(is_error);
-        }
-        _ => panic!("expected SubagentStopped"),
-    }
-}
-
-#[test]
-fn test_decode_unknown_event_name() {
-    let data = serde_json::json!({"foo": "bar"});
-    let decoded = AcpEventData::decode("future-event", data);
-    match decoded {
-        AcpEventData::Unknown { event, data } => {
-            assert_eq!(event, "future-event");
-            assert_eq!(data["foo"], "bar");
-        }
-        _ => panic!("expected Unknown"),
-    }
-}
-
-#[test]
-fn test_decode_malformed_data_falls_to_unknown() {
-    let data = serde_json::json!("not an object");
-    let decoded = AcpEventData::decode("future-event-xyz", data);
-    match decoded {
-        AcpEventData::Unknown { event, .. } => assert_eq!(event, "future-event-xyz"),
-        _ => panic!("expected Unknown for malformed data"),
-    }
 }
 
 // ── Segment interleaving tests ─────────────────────────────────────────
@@ -632,32 +216,6 @@ fn test_no_message_id_uses_tool_boundaries() {
     assert!(matches!(&vms[0], TuiRenderUnit::TuiAssistantBubble(_)));
     assert!(matches!(&vms[1], TuiRenderUnit::TuiToolCard(_)));
     assert!(matches!(&vms[2], TuiRenderUnit::TuiAssistantBubble(_)));
-}
-
-/// M1: SubAgentAccumulator content_hash 随 child VM 内容变化。
-/// 相同结构（1 个 child）但不同文本 → 不同 content_hash。
-#[test]
-fn test_subagent_content_hash_changes_with_child_content() {
-    let mut acc1 = SubAgentAccumulator::new("agent-1".into(), "worker".into());
-    acc1.append_text("hello");
-    let vm1 = acc1.view_model();
-    let hash1 = match &vm1 {
-        TuiRenderUnit::TuiSubAgentGroup(g) => g.content_hash,
-        _ => panic!("expected TuiSubAgentGroup"),
-    };
-
-    let mut acc2 = SubAgentAccumulator::new("agent-1".into(), "worker".into());
-    acc2.append_text("world");
-    let vm2 = acc2.view_model();
-    let hash2 = match &vm2 {
-        TuiRenderUnit::TuiSubAgentGroup(g) => g.content_hash,
-        _ => panic!("expected TuiSubAgentGroup"),
-    };
-
-    assert_ne!(
-        hash1, hash2,
-        "不同 child 内容应产出不同 content_hash（M1 修复前会相等）"
-    );
 }
 
 /// [回归测试] 每个 batch 的第一个工具调用应在完成后 is_running=false。
@@ -766,4 +324,108 @@ fn test_flush_segment_rebuilds_cached_reasoning_status() {
     );
     assert!(!reasoning.is_running, "冻结段不可处于 running");
     assert_eq!(bubble.text, "", "思考→工具（无正文）场景正文为空");
+}
+
+// ── wave 3（workspace）：effective name 与裸名的按名判定同口径 ────────────────
+
+/// workspace Edit / Write（effective name）与裸名同口径：完成态解析出 diff，
+/// 且 path hint 取自原始输入的 `file_path`（**不是**输出摘要里的路径文本）；
+/// error 态恒 `None`。归一入口失效 ⇒ effective name 走不到 Edit/Write 分支。
+#[test]
+fn workspace_edit_builds_diff() {
+    for (tool_name, is_error) in [
+        ("mcp__workspace__Edit", false),
+        ("Edit", false),
+        ("mcp__workspace__Write", false),
+        ("mcp__workspace__Edit", true),
+    ] {
+        let mut ct = CurrentTurn::new();
+        ct.start_tool(ToolCardAccumulator::with_input(
+            "tc-1".into(),
+            tool_name.into(),
+            "peri-tui/src/render.rs".into(),
+            serde_json::json!({ "file_path": "peri-tui/src/render.rs" }),
+            None,
+        ));
+        assert!(ct.end_tool("tc-1", "Added 3 lines to render.rs".into(), is_error));
+        let vm = ct.view_models();
+        let TuiRenderUnit::TuiToolCard(card) = &vm[0] else {
+            panic!("expected tool card for {tool_name}");
+        };
+        if is_error {
+            assert!(card.diff.is_none(), "{tool_name} error 态恒无 diff");
+            continue;
+        }
+        let diff = card
+            .diff
+            .as_ref()
+            .unwrap_or_else(|| panic!("{tool_name} 完成态必须解析出 diff"));
+        assert_eq!(
+            diff.path, "peri-tui/src/render.rs",
+            "{tool_name} path hint 必须取原始输入的 file_path"
+        );
+        assert_eq!((diff.adds, diff.dels), (3, 0), "{tool_name} 摘要行数计数");
+    }
+
+    // 未命中归一表（外部 / 未知 `mcp__*`）：保持保守语义，不得被当作 Edit/Write。
+    let mut ct = CurrentTurn::new();
+    ct.start_tool(ToolCardAccumulator::with_input(
+        "tc-2".into(),
+        "mcp__foo__Edit".into(),
+        "peri-tui/src/render.rs".into(),
+        serde_json::json!({ "file_path": "peri-tui/src/render.rs" }),
+        None,
+    ));
+    assert!(ct.end_tool("tc-2", "Added 3 lines to render.rs".into(), false));
+    let vm = ct.view_models();
+    let TuiRenderUnit::TuiToolCard(card) = &vm[0] else {
+        panic!("expected tool card for mcp__foo__Edit");
+    };
+    assert!(
+        card.diff.is_none(),
+        "未命中归一表的名字不得被当作 Edit/Write 解析 diff"
+    );
+}
+
+/// workspace Bash（effective name）同样被识别为「运行中的 Bash」——acp_bridge 的
+/// 1s tick 依赖此谓词；子 turn 递归分支沿用同一实现。
+#[test]
+fn has_running_bash_tool_matches_workspace_effective_name() {
+    for tool_name in ["mcp__workspace__Bash", "Bash"] {
+        let mut ct = CurrentTurn::new();
+        assert!(!ct.has_running_bash_tool(), "空 turn 不得命中");
+        ct.start_tool(ToolCardAccumulator::new(
+            "tc-1".into(),
+            tool_name.into(),
+            "cargo test".into(),
+        ));
+        assert!(ct.has_running_bash_tool(), "{tool_name} 运行中必须命中");
+        assert!(ct.end_tool("tc-1", "test result: ok".into(), false));
+        assert!(!ct.has_running_bash_tool(), "{tool_name} 完成后不得命中");
+    }
+
+    // 子 turn 递归分支：嵌套的 workspace Bash 同样命中。
+    let mut ct = CurrentTurn::new();
+    ct.start_subagent("agent-1".into(), "coder".into(), None);
+    assert!(ct.start_subagent_tool(
+        "agent-1",
+        ToolCardAccumulator::new(
+            "child-1".into(),
+            "mcp__workspace__Bash".into(),
+            "cargo test".into(),
+        ),
+    ));
+    assert!(
+        ct.has_running_bash_tool(),
+        "子 turn 的 workspace Bash 必须命中（递归分支同一实现）"
+    );
+
+    // 未命中归一表：外部 `mcp__*` 不参与判定（保守语义，与迁移前逐位一致）。
+    let mut ct = CurrentTurn::new();
+    ct.start_tool(ToolCardAccumulator::new(
+        "tc-2".into(),
+        "mcp__foo__Bash".into(),
+        "cargo test".into(),
+    ));
+    assert!(!ct.has_running_bash_tool());
 }

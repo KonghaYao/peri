@@ -42,7 +42,7 @@ pub(super) fn launch_search(
             tokio::select! {
                 biased;
                 _ = ticket.cancelled.cancelled() => return,
-                _ = tokio::time::sleep(Duration::from_millis(1)) => {}
+                _ = peri_time::sleep(Duration::from_millis(1)) => {}
             }
         }
     })

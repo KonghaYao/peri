@@ -24,6 +24,30 @@ use peri_tui::acp_client::{
 };
 use serde_json::{Value, json};
 
+fn load_print_config_source(
+    settings_path: Option<&str>,
+) -> Result<Arc<peri_tui::config::ConfigSource>> {
+    let source = match settings_path {
+        Some(path) => {
+            let p = std::path::Path::new(path);
+            if p.exists() {
+                peri_tui::config::ConfigSource::load_standalone(p.to_path_buf())?
+            } else {
+                let _: serde_json::Value = serde_json::from_str(path)
+                    .map_err(|e| anyhow::anyhow!("--settings 不是有效文件路径或 JSON: {e}"))?;
+                let cwd = std::env::current_dir()?;
+                peri_tui::config::ConfigSource::load_standalone_inline_at(
+                    &cwd,
+                    peri_tui::config::config_path(),
+                    path.to_owned(),
+                )?
+            }
+        }
+        None => peri_tui::config::ConfigSource::load_lenient(),
+    };
+    Ok(Arc::new(source))
+}
+
 /// -p 模式执行入口
 #[allow(clippy::too_many_arguments)]
 pub async fn run_print(
@@ -67,30 +91,13 @@ pub async fn run_print(
     // - --settings：指定文件整体生效（单文件来源，不合并全局/工作区）
     // - 默认：全局 + 工作区分层合并（load_lenient 保持迁移前
     //   `load().unwrap_or_default()` 的容错语义）
-    let config_source = match &settings_path {
-        Some(path) => {
-            let p = std::path::Path::new(path);
-            if p.exists() {
-                Arc::new(peri_tui::config::ConfigSource::load_standalone(
-                    p.to_path_buf(),
-                )?)
-            } else {
-                let v: serde_json::Value = serde_json::from_str(path)
-                    .map_err(|e| anyhow::anyhow!("--settings 不是有效文件路径或 JSON: {e}"))?;
-                let tmp = std::env::temp_dir().join("peri-settings-override.json");
-                std::fs::write(&tmp, serde_json::to_string_pretty(&v)?)?;
-                Arc::new(peri_tui::config::ConfigSource::load_standalone(tmp)?)
-            }
-        }
-        None => Arc::new(peri_tui::config::ConfigSource::load_lenient()),
-    };
+    let config_source = load_print_config_source(settings_path.as_deref())?;
     let peri_config = config_source.loaded_merged();
 
     // 构建 provider
-    let provider = peri_tui::app::agent::LlmProvider::from_config(&peri_config)
-        .or_else(peri_tui::app::agent::LlmProvider::from_env)
-        .ok_or_else(|| {
-            anyhow::anyhow!("未配置 LLM provider。请设置 ANTHROPIC_API_KEY 或 OPENAI_API_KEY")
+    let provider =
+        peri_tui::app::agent::LlmProvider::from_source(&config_source).ok_or_else(|| {
+            anyhow::anyhow!("未配置 LLM provider。请在 settings 中配置 provider 和模型档位")
         })?;
 
     // --model 覆盖
@@ -152,19 +159,34 @@ pub async fn run_print(
         config_source: config_source.clone(),
         permission_mode: shared_permission,
         session_resources: session_resources.clone(),
+        workspace_id: None,
         session_store_shutdown: Some(Box::new(session_store_shutdown)),
         cwd: cwd.clone(),
         bare,
         // print 无 tick 语义（迁移前 print 路径无每秒 tick，行为零变化）。
         drive_cron_tick: false,
+        // 顶层装配不构造 builtin 上下文：session 级 workspace 输入由每 session 的
+        // 会话环境装配产生（AW3-11）。
+        workspace_input: None,
+        // 顶层三路径（无会话上下文）不消费 flag：Bash 缺省恒为前台。
+        workspace_bash_default_run_in_background: false,
+        // 资源面输入同为会话级（见上）：顶层装配无会话消费者，保持未接线。
+        workspace_resources: None,
+        // 顶层装配无会话上下文：A24 关闭集恒为空集（会话装配才从 frozen 派生）。
+        builtin_closed: Default::default(),
+        // 宿主技能面关闭位与关闭集同源（会话级派生）：顶层装配恒为假。
+        skills_face_closed: false,
+        plugin_face_closed: false,
         // print 装配点无准备路径提供的插件聚合：按既有语义由装配面自行加载。
         prepared_plugins: None,
+        session_mcp_servers: None,
     })
     .await;
     let (client_transport, server_transport) = mpsc_transport_pair();
-    let host = peri_acp::host::spawn_acp_server(Arc::new(server_transport), host_config);
-
     let (acp_client, notification_tx, mut notification_rx) = AcpTuiClient::new(client_transport);
+    let server_transport = Arc::new(server_transport);
+    let host = peri_acp::host::spawn_acp_server(server_transport, host_config);
+
     acp_client.spawn_pump(notification_tx);
 
     let mut deployment = AcpDeployment::new(acp_client.clone(), host);

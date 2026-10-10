@@ -37,3 +37,28 @@ fn test_bg_task_completed_missing_preview_still_ok() {
         other => panic!("unexpected variant {other:?}"),
     }
 }
+
+#[test]
+fn test_bg_task_snapshot_accepts_session_envelope() {
+    let ev = AcpEventData::decode(
+        "bg-task-snapshot",
+        serde_json::json!({
+            "revision": 7,
+            "tasks": [{
+                "task_id": "t3",
+                "kind": "shell",
+                "summary": "sleep 1",
+                "started_at": "2026-10-03T00:00:00Z",
+                "pid": null
+            }]
+        }),
+    );
+    match ev {
+        AcpEventData::BgTaskSnapshot { tasks, revision } => {
+            assert_eq!(tasks.len(), 1);
+            assert_eq!(tasks[0].task_id, "t3");
+            assert_eq!(revision, Some(7));
+        }
+        other => panic!("unexpected variant {other:?}"),
+    }
+}

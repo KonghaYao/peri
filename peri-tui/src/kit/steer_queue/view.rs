@@ -90,12 +90,13 @@ pub(super) fn selections(items: &[SteerQueueItem], max_rows: usize) -> Vec<Selec
     if items.len() > max_rows {
         targets.push(Selection::Expand);
     }
-    for item in items
-        .iter()
-        .filter(|item| item.state == SteerItemState::Queued)
-    {
-        targets.push(Selection::Dispatch(item.id.clone()));
-        targets.push(Selection::TakeBack(item.id.clone()));
+    for item in items {
+        if item.state == SteerItemState::Queued {
+            targets.push(Selection::Dispatch(item.id.clone()));
+        }
+        if item.state.can_take_back() {
+            targets.push(Selection::TakeBack(item.id.clone()));
+        }
     }
     targets
 }
@@ -118,7 +119,11 @@ pub(super) fn validated_action(
         Selection::Dispatch(id) if queued(id) => Some(SteerQueueAction::Dispatch {
             ids: vec![id.clone()],
         }),
-        Selection::TakeBack(id) if queued(id) => {
+        Selection::TakeBack(id)
+            if items
+                .iter()
+                .any(|item| item.id == *id && item.state.can_take_back()) =>
+        {
             Some(SteerQueueAction::TakeBack { id: id.clone() })
         }
         _ => None,
@@ -251,7 +256,7 @@ impl QueueView {
                 frame.controls.push(Control {
                     area: Rect::new(area.right().saturating_sub(edit_width), y, edit_width, 1),
                     selection: Selection::TakeBack(item.id.clone()),
-                    enabled: item.state == SteerItemState::Queued,
+                    enabled: item.state.can_take_back(),
                 });
             }
         }
@@ -323,7 +328,12 @@ impl Widget for QueueView {
                         " {} ",
                         if matches!(
                             item_state,
-                            Some(SteerItemState::Submitting | SteerItemState::Dispatching)
+                            Some(
+                                SteerItemState::Submitting
+                                    | SteerItemState::Dispatching
+                                    | SteerItemState::Publishing
+                                    | SteerItemState::Claimed
+                            )
                         ) {
                             self.symbols.running
                         } else {
