@@ -1,15 +1,13 @@
-import { withDeadline } from "./deadline";
+import { initializeAcpClient, withDeadline } from "../sdk";
 import type { AcpTransport } from "../types";
 
 export const WORKSPACE_CWD = "/workspace";
 
+/** ACP capabilities this client declares; the host must not send events reserved to omitted ones. */
+const CLIENT_CAPABILITIES = { "peri.userInputQueue": true } as const;
+
 export async function initializeTransport(transport: AcpTransport): Promise<void> {
-  const initialized = await withDeadline(transport.request<{ protocolVersion: number }>("initialize", {
-    protocolVersion: 1, clientCapabilities: { _meta: {
-      "peri.executionProtocol": 1,
-      "peri.userInputQueue": true,
-    } },
-    clientInfo: { name: "peri-cf", version: "0.1.0" },
+  await withDeadline(initializeAcpClient(transport, {
+    clientName: "peri-cf", clientVersion: "0.1.0", capabilities: CLIENT_CAPABILITIES,
   }), 20_000, "ACP initialize");
-  if (initialized?.protocolVersion !== 1) throw new Error("Unsupported ACP protocol version");
 }

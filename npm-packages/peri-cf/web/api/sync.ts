@@ -1,6 +1,6 @@
-import { decodeSyncFrame, encodeAuthFrame, encodeAckFrame, type SyncState } from '../../shared/sync';
+import { decodeSyncFrame, encodeAuthFrame, encodeAckFrame, SessionDocReplica } from '@peri-code/sdk/view';
 import { readSyncState } from '../../shared/sync-state';
-import { SessionDocReplica } from '@peri-code/sdk/view';
+import type { SyncState } from '../../shared/sync';
 
 export type { SyncState } from '../../shared/sync';
 export type SyncStatus = 'connecting' | 'synced' | 'disconnected' | 'failed';

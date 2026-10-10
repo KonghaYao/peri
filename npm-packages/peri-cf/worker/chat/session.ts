@@ -1,22 +1,23 @@
 import { HTTPException } from "hono/http-exception";
 import { logError, publicError } from "../api/http";
-import type { AcpTransport, ChatRepository, Env, ExecutionDispatcher, SessionRecord, StartExecution, StartTransport } from "../types";
-import { ACP_CONTROL_TIMEOUT_MS, CANCELLATION_TIMEOUT_MS, DeadlineError, withDeadline } from "./deadline";
+import type { AcpTransport, ChatRepository, Env, SessionRecord, StartTransport } from "../types";
+import { DeadlineError, PeriWasmHostStartupError, withDeadline, type PeriWasmHostCleanupOutcome } from "../sdk";
 import { initializeTransport, WORKSPACE_CWD } from "./bootstrap";
 import { createChatRoutes } from "./routes";
 import { ChatProjection } from "./projection";
 import { ChatSockets, upgradeSocket, type UpgradeSocket, type SyncSocket, type HibernatingSessionState } from "./sync";
 import { WasmResources } from "../wasm/resources";
-import { WasmStartupError, type StartupCleanupOutcome } from "../wasm/lifecycle";
 import { CF_WASM_CLEANUP_TIMEOUT_MS } from "../../shared/runtime-limits";
 import type { AgentResources } from "../../shared/resources";
 
 export const MAX_TRANSCRIPT_BYTES = 1_048_576;
 export const MAX_REPLY_BYTES = 524_288;
+/** ACP control requests and cancellation keep their own budgets; neither proves a stop on timeout. */
+export const ACP_CONTROL_TIMEOUT_MS = 20_000;
+export const CANCELLATION_TIMEOUT_MS = 65_000;
 
 interface ActiveRun {
   transport?: AcpTransport;
-  execution?: ExecutionDispatcher;
   sessionId?: string;
   promptWritten: boolean;
   cancelRequested: boolean;
@@ -55,7 +56,7 @@ export class ChatSessionCore {
   private readonly routes: ReturnType<typeof createChatRoutes>;
 
   constructor(private readonly state: HibernatingSessionState, private readonly env: Env, private readonly startTransport: StartTransport,
-    private readonly startExecution: StartExecution, private readonly repository: Pick<ChatRepository, "get">,
+    private readonly repository: Pick<ChatRepository, "get">,
     private readonly upgrade: UpgradeSocket = upgradeSocket) {
     this.sockets = new ChatSockets(env, state, async (id) => {
       await this.ensureSession(id);
@@ -191,12 +192,9 @@ export class ChatSessionCore {
       run.expireCancel(new DeadlineError("ACP cancellation timed out; execution stop is not confirmed"));
     }, CANCELLATION_TIMEOUT_MS);
     if (!run.transport || !run.sessionId || !run.promptWritten) return;
-    run.cancelDelivery ??= withDeadline(run.execution!.stop(run.sessionId), ACP_CONTROL_TIMEOUT_MS, "ACP exact-target stop").then(async (paused) => {
-      if (paused) {
-        this.record!.pausedByStop = paused;
-        await this.save();
-      }
-    }).catch((error) => {
+    // 当前 ACP 的取消是有目标的会话级通知；停止是否成立仍以 prompt 结算与宿主关闭证据为准。
+    run.cancelDelivery ??= withDeadline(run.transport.notify("session/cancel", { sessionId: run.sessionId }),
+      ACP_CONTROL_TIMEOUT_MS, "ACP session/cancel").catch((error) => {
       run.cancelFailure = error;
       throw error;
     });
@@ -214,10 +212,7 @@ export class ChatSessionCore {
       this.resources = resources;
       run.transport = await this.startHost(run, resources);
       const transport = run.transport;
-      run.execution = this.startExecution(transport);
-      transport.setRequestHandler((method, params) => {
-        const admission = run.execution!.handle(method, params);
-        if (admission !== undefined) return admission;
+      transport.setRequestHandler((method) => {
         if (method === "session/request_permission") return { outcome: { outcome: "cancelled" } };
         throw new Error("ACP client capability is not authorized");
       });
@@ -230,11 +225,6 @@ export class ChatSessionCore {
       if (run.cancelRequested) {
         status = "cancelled";
       } else {
-        if (this.record!.pausedByStop) {
-          await withDeadline(run.execution.resume(run.sessionId, this.record!.pausedByStop), ACP_CONTROL_TIMEOUT_MS, "ACP resume after own stop");
-          delete this.record!.pausedByStop;
-          await this.save();
-        }
         unsubscribe = transport.subscribe((notification) => {
           if (protocolFailure) return;
           const params = notification.params as {
@@ -290,11 +280,8 @@ export class ChatSessionCore {
     } finally {
       unsubscribe?.();
       if (run.transport) {
-        run.execution?.seal();
         try {
           await withDeadline(run.transport.close(), 20_000, "ACP host close");
-          if (run.sessionId && run.execution)
-            await withDeadline(run.execution.stopAfterHostClose(run.sessionId), 20_000, "SDK execution settlement");
         } catch (error) {
           logError("Peri chat shutdown failed", error, { sessionId: run.sessionId, generationId: run.transport.generationId });
           this.unavailable = true;
@@ -340,13 +327,13 @@ export class ChatSessionCore {
       this.startupBlock = run;
       this.unavailable = true;
       this.record!.executionBlocked = true;
-      const eventualCleanup: Promise<StartupCleanupOutcome> = error instanceof WasmStartupError ? error.eventualCleanup :
+      const eventualCleanup: Promise<PeriWasmHostCleanupOutcome> = error instanceof PeriWasmHostStartupError ? error.eventualCleanup :
         starting.then(async (lateTransport) => {
           await lateTransport.close();
           return { confirmed: true };
-        }, (startupError) => startupError instanceof WasmStartupError ? startupError.eventualCleanup :
+        }, (startupError) => startupError instanceof PeriWasmHostStartupError ? startupError.eventualCleanup :
           { confirmed: false, error: startupError });
-      const cleanup = error instanceof WasmStartupError ? error.cleanup : eventualCleanup;
+      const cleanup = error instanceof PeriWasmHostStartupError ? error.cleanup : eventualCleanup;
       try {
         const outcome = await withDeadline(cleanup, CF_WASM_CLEANUP_TIMEOUT_MS + 100, "ACP startup cleanup observation");
         if (outcome.confirmed) this.confirmStartupCleanup(run);
@@ -362,7 +349,7 @@ export class ChatSessionCore {
     }
   }
 
-  private observeLateStartupCleanup(run: ActiveRun, cleanup: Promise<StartupCleanupOutcome>): void {
+  private observeLateStartupCleanup(run: ActiveRun, cleanup: Promise<PeriWasmHostCleanupOutcome>): void {
     const observation = withDeadline(cleanup, CF_WASM_CLEANUP_TIMEOUT_MS, "Late ACP startup cleanup observation")
       .then(async (outcome) => {
         if (!outcome.confirmed) { logError("Peri late startup cleanup unconfirmed", outcome.error); return; }

@@ -8,7 +8,7 @@ React + Vite 聊天前端，Hono / Cloudflare Workers API，TypeScript 通过 SD
 
 - `TursoChatRepository`：通过应用本地 `worker/sdk/index.ts` facade 引用 SDK 现有 `TursoStorage`，查询实际 `threads`。列表读取 `/workspace` 下的会话，ID、标题与更新时间来自 Rust Store，不另建目录索引或双写元数据。
 - `CHAT_SESSIONS`（Durable Objects）：按实际 ACP Session UUID 隔离消息展示与执行状态；`Chat.id` 就是 ACP Session ID，不另设 `periSessionId`。同一聊天不允许并发生成。首次读取/发送从 repository 获取会话元数据，执行只加载该实际 ID，不在聊天 DO 内创建另一个 Rust 会话；GET 每次刷新权威元数据，已有聊天的取消不依赖数据库读取。
-- 执行准入已接入平台无关的 SDK AdmissionCore 与聊天 DO 内的 durable execution registry/ledger，负责执行 ticket/admission，而不是用 `session/prompt` 绕过 SDK 准入。账本与 Rust Store 是不同持久化边界，没有跨存储原子事务；执行准入规则仍由 SDK 维护，Worker adapter 负责 DO 存储与 Host 生命周期接线。
+- 执行由 Rust Host 拥有：当前 ACP 没有执行准入协议，也没有精确停止/控制代次，本应用不再实现 ticket/admission、registry/ledger 或 typed Stop。应用负责的是宿主生命周期（启动、关闭确认、isolate 容量与实例观测）、`session/cancel` 取消通知与运行状态持久化；拒绝返回许可请求（`session/request_permission` 一律以 cancelled 应答），不把客户端反向能力当作执行通道。
 - `PERI_STORAGE_URL` / `PERI_STORAGE_TOKEN`：外部 Turso/libSQL，保存 Rust Store 的会话、消息及执行数据。TS 元数据查询与 Rust Host 使用同一 Store；聊天 DO 的展示消息和执行账本不替代 Rust Store。
 - `PERI_MACHINE_ID`：必须显式配置的稳定部署 UUID，用于 Rust Store 的机器身份；缺失或格式无效时拒绝启动，不再使用硬编码 fixture 身份。
 - `MODEL_BASE_URL` / `MODEL_API_KEY` / `MODEL_ID`：服务端模型配置，不能使用 `VITE_*` 暴露密钥。
@@ -42,18 +42,32 @@ React + Vite 聊天前端，Hono / Cloudflare Workers API，TypeScript 通过 SD
 
 在本目录执行命令。需要 Bun；首次构建 SDK 还需要 Rust `wasm32-unknown-emscripten` target 与 Emscripten 工具链，参见 [SDK README](../@peri-sdk/README.md) 及仓库 `scripts/cargo-wasm.sh`。WASM 产物必须与当前 SDK/Rust 协议一致，不应以陈旧产物代替重建。
 
-保留 SDK 既有 `dist/wasm.js` 公共 transport 入口；CF 二进制单独执行 `bun run build:wasm` 构建，不复用 SDK 的默认 WASM 二进制。该命令通过仓库 `scripts/cargo-wasm.sh` 构建 `peri-wasm --features cloudflare`，生成应用私有 `.cache/wasm/` 产物及 provenance。`prepare:wasm` 验证源码、锁文件、工具链、构建参数及产物哈希后原子发布；缺失、过期或混合产物直接失败，不会把旧二进制标记成当前源码。Rust 变更后重新执行 `build:wasm`。
+保留 SDK 既有 `dist/wasm.js` 公共 transport 入口；CF 二进制单独执行 `bun run build:wasm` 构建，不复用 SDK 的默认 WASM 二进制。该命令通过仓库 `scripts/cargo-wasm.sh` 构建 `peri-wasm --features cloudflare`，生成应用私有 `.cache/wasm/` 产物及 provenance。`prepare:wasm` 验证源码、锁文件、工具链、构建参数及产物哈希后原子发布；缺失、过期或混合产物直接失败，不会把旧二进制标记成当前源码。纳入哈希的 Rust 源码是 **`peri-wasm` 及其本地（path）依赖闭包**（由 workspace 成员的 `Cargo.toml` 派生，含 `workspace = true` 间接层），不再包含 `peri-tui` 等无关成员；`Cargo.toml`、`Cargo.lock`、`patches/`、`.cargo/`、仓库脚本与 `shared/runtime-limits.ts` 仍按文件哈希，所以这些输入或闭包内源码变更后仍需重新执行 `build:wasm`。
 
-应用的 `worker/sdk/index.ts` 是 workspace 内的窄 facade，直接引用 SDK 现有源码与 WASM transport，不要求新增 SDK 公共 `./workers` 入口或专用构建步骤；不是独立发布 SDK 的用法。执行准入 digest 使用原生 `node:crypto`，Workers 配置启用 `nodejs_compat`，不能以 browser crypto polyfill 替代。测试用 `Bun.build` 的 `target: "bun"` 保留原生 crypto 并执行准入行为；这不表示 Worker 会运行 Bun/stdio 主 SDK。Turso 查询始终显式传入服务端 token，不依赖 Bun 或 process 环境变量回退。
+应用只消费已发布 SDK 入口：`@peri-code/sdk/portable`（平台无关的投影、同步语义与 Store 读取）、`@peri-code/sdk/wasm-host`（SDK 拥有的 Emscripten 宿主启动与关闭证据）、`@peri-code/sdk/view`（浏览器副本与视图）；公开类型使用 type-only 导入，不加载主入口的 Bun 运行时。`worker/sdk/index.ts` 是唯一接线点，不再引用 `@peri-sdk/src`。测试用 `Bun.build` 的 `target: "bun"` 打包应用 facade，验证 SDK dist 入口在无 Bun/process 全局的 Node 环境下可用；这不表示 Worker 会运行 Bun/stdio 主 SDK。Turso 查询始终显式传入服务端 token，不依赖 Bun 或 process 环境变量回退。
+
+## SDK 消费边界与平台适配
+
+宿主生命周期由 SDK 承担：模块加载与注入、native 启停、回调与网络所有权、带截止时间的关闭与“已确认清理”证据都在 `startPeriWasmHost` 内实现，peri-cf 只观察 `onLifecycle` 事件（相位耗时、ready、closing、closed、failed、close-unconfirmed）并把它们映射到 isolate 容量与实例观测。同步帧编解码、交付信用与 token 指纹同样来自 SDK。应用保留的实现都属于 Cloudflare 平台适配，且都建立在 SDK 抽象之上：
+
+| 保留位置 | 为什么是宿主适配而不是自建底层实现 | 移除条件 |
+| --- | --- | --- |
+| `worker/wasm/host.ts`、`config.ts`、`budget.ts`、`resources.ts`、`generated/` | CF profile/feature 与静态 `WebAssembly.Module` 注入、isolate 容量预留、导出线性内存采样只对 Cloudflare 有意义；它们通过 SDK 的 `moduleFactory` / `ports` / `onLifecycle` 注入，不自行排序启动或关闭 | SDK 提供 CF 部署 profile 与容量/观测适配时 |
+| `worker/chat/ws-delivery.ts` | 持久化 socket attachment 的形状与唤醒恢复规则属于 DO Hibernation；帧与交付信用已在 SDK | DO Hibernation 由 SDK 直接支持时 |
+| `worker/api/`、`worker/index.ts`、`web/` | Hono/DO 路由、浏览器 Fetch 客户端与 token 存储是本应用产品边界，SDK 不定义应用 HTTP 面 | 不适用 |
+| `scripts/`、`vite.config.ts` | CF 产物 provenance、Workers glue 注入、Wrangler 与本地 smoke/E2E 属构建与验证工具，不是 Peri 运行时语义 | 不适用 |
+
+尚未由 SDK 提供、需要跨包协作的能力（详见交付报告「所需 SDK 能力清单」）：`/portable`、`/wasm-host` 入口与 `startPeriWasmHost`、同步 wire/交付、`initializeAcpClient` 的生命周期语义；`SESSION_LIST_SQL` / `SESSION_BY_ID_SQL` 等 Store 常量未公开，`tests/storage-turso-workers.test.ts` 仍需引用 SDK 源码；`dist/wasm-host.js` 以 bare `dns` / `net` 说明符输出，而 workerd 只保证 `node:` 前缀，本包在测试 fixture 中把两者标记为 external，正式 Worker 构建需要 SDK 保留前缀或声明 external。
+
+本包与 SDK 均未定义 `lint` script。验证入口仍为各自的 `typecheck`、`test`、`build`；SDK 的 `test` 会先执行 `build`，并写入 SDK `dist` 和仓库 `target`。若任务禁止包外写入，须报告该命令受阻，不绕过构建门禁冒充全量测试通过。
 
 ## 目录职责
 
-- `shared/`：Zod schema、SDK 同步帧的文本适配与 Yjs 展示边界转换；不重复实现 SDK 投影、序号或状态向量规则。
+- `shared/`：Zod schema（含 SDK 同步帧的类型边界）与 Yjs 展示边界转换；不重复实现 SDK 投影、序列号、状态向量、帧编解码或交付信用规则。
 - `worker/api/`：Hono app、HTTP 边界与可注入 repository 的路由入口。
-- `worker/chat/`：会话查询、ACP 创建、聊天 DO 生命周期、启动与聊天路由。
-- `worker/execution/`：SDK 准入/控制 dispatcher 和 DO 事务存储 adapter。
+- `worker/chat/`：会话查询、ACP 创建、聊天 DO 生命周期、启动、取消与聊天路由。
 - `worker/instances/`：实例监控页的只读聚合，按并发上限扇出读取各聊天 DO 的资源观测。
-- `worker/wasm/`：Host、配置与准备的 WASM 产物；`worker/sdk/` 是本地 SDK facade，`worker/types.ts` 保存应用契约。
+- `worker/wasm/`：SDK 宿主的 Cloudflare 接线（配置、容量、实例观测与已构建产物）；`worker/sdk/` 是唯一 SDK 接线点，`worker/types.ts` 保存应用契约。
 - `web/api/`：带 Bearer 鉴权的 HTTP 命令/查询与只读 WebSocket 同步客户端；`web/chat/` 管理聊天状态与消息展示，`web/settings/` 管理配置界面，`web/instances/` 是只读实例监控页。
 
 ## 库与自有逻辑
@@ -63,7 +77,7 @@ React + Vite 聊天前端，Hono / Cloudflare Workers API，TypeScript 通过 SD
 - 现有 SDK `SessionDocs` 负责 ACP → Yjs 投影，`SessionDocSync` 负责批处理、generation、sequence、状态向量补齐和慢订阅者预算，`SessionDocReplica` 校验并应用浏览器副本。使用 SDK 已有的只读复制协议，不引入可写回的通用协作文档服务，也不维护另一套文本 delta 聚合器。`lib0/buffer` 将 SDK 二进制更新转换为 Base64，WebSocket 仅承载这些帧；原 SSE 客户端和 `eventsource-parser` 已移除。
 - 展示文本直接读取 SDK view；session 文档的 `peri-cf` map 只保存聊天元数据、执行标志和展示 ID/时间/错误，不在每个增量重复保存完整消息数组。客户端不能写回 Yjs；生成和停止仍由鉴权 HTTP 命令进入服务端控制边界。
 - TanStack React Query 管理只读列表与历史缓存、加载及查询取消；客户端按认证工作区隔离，token 不进入 query key，切换 token 会卸载旧工作区并取消、清空旧缓存。禁用自动重试和自动重取；新建后显式刷新，历史导航强制查询权威结果。
-- 生成、exact-target Stop、等待停止确认和 own-stop Resume 保留显式领域状态机，不交给查询重试或缓存规则。Markdown 展示通过 React `lazy` / `Suspense` 按需加载，避免增加首屏负担。
+- 生成与取消保留显式领域状态机：`running` / `executionBlocked` 由服务端判定，取消必须等到宿主真实关闭；查询重试与缓存不改变执行状态。Markdown 展示通过 React `lazy` / `Suspense` 按需加载，避免增加首屏负担。
 
 创建未提交的 `.dev.vars`：
 
@@ -170,9 +184,9 @@ node scripts/test-cloudflare-fetch.mjs
 
 DO 的持久化不等于在途计算恢复：实例重启或断线不能承诺自动继续模型请求、无损重放或跨实例执行接管。Workers 的 WASM bundle、CPU、内存和连接限制需在实际部署套餐下验收。
 
-本应用的执行 adapter 面向根聊天会话的完整执行准入，不是通用 `ManagedAgents` / `Agent` SDK 宿主，也不提供 child runtime 或子 Agent 接管能力。执行器须先封闭新准入，并在确认 ACP Host 关闭后记录停止；未知是否停止不能因为 DO 有持久化账本就自动解锁或重新执行。
+本应用不实现执行准入或停止账本：执行归属 Rust Host，客户端只负责宿主生命周期与取消通知。应用不是通用 `ManagedAgents` / `Agent` SDK 宿主，也不提供 child runtime 或子 Agent 接管能力。取消以会话级 `session/cancel` 通知发出；只有 prompt 结算为 cancelled 且 ACP Host 关闭被确认时才算停止成立，未确认的关闭会阻塞该聊天的后续运行。
 
-运行中取消通过 SDK `SessionControl` 读取控制 snapshot，提交带 `{ turnId, attemptId }` 精确目标及 lifecycle/revision/control generation 的 typed Stop；结果未知时只解析原命令，拒绝或未知结果不算取消成功。启动中尚未发送 prompt 时只跳过本轮，不发送无目标的 Stop。
+运行中取消向宿主发送 `session/cancel`（会话级通知，不再携带 `{ turnId, attemptId }` 目标或控制代次）；取消成功以 prompt 以 `cancelled` 结算并且 ACP Host 关闭经确认为准。启动中尚未发送 prompt 时只跳过本轮，不发送任何通知。取消后的下一次显式发送是新的回合，没有 own-stop 恢复握手。
 
 取消接口等待执行收尾、ACP Host 关闭与消息落盘；成功不是仅提交 Stop。若 Host 关闭未确认，聊天会持久化为禁止继续执行，重新加载 DO 也不会绕过该状态；历史仍可读取。不要通过删除状态或重启强行认领未知是否停止的执行。
 
@@ -188,7 +202,7 @@ bun run build
 
 测试入口只在本包执行，不属于根 Cargo workspace 测试：
 
-- `tests/backend.test.ts`：真实 `fetchApi` / `ChatSessionCore`，注入线程 repository、模拟 ACP transport、fake execution dispatcher factory 和复制隔离的内存 DO storage；另有浏览器 `ChatApi` 经 Fetch 的 Request/Response 接入真实路由的闭环，无需监听本地端口。覆盖鉴权、创建/列表不访问 DO、GET 权威元数据刷新、load-only 实际会话身份、查询失败、数据库不可用时取消，以及 202、busy、部分回复、own-stop 恢复与原始错误因果链保留。fake dispatcher 不执行 SDK 准入规则，不能据此宣称 ticket/admission 或 durable ledger 已验证；这些规则由本包的真实 SDK 行为测试及实际 runtime smoke 验证。
+- `tests/backend.test.ts`：真实 `fetchApi` / `ChatSessionCore`，注入线程 repository、模拟 ACP transport（`session/cancel` 通知）和复制隔离的内存 DO storage；另有浏览器 `ChatApi` 经 Fetch 的 Request/Response 接入真实路由的闭环，无需监听本地端口。覆盖鉴权、创建/列表不访问 DO、GET 权威元数据刷新、load-only 实际会话身份、查询失败、数据库不可用时取消，以及 202、busy、部分回复、取消后再次显式发送与原始错误因果链保留。
 - `tests/web-api.test.ts`：直接执行前端 HTTP API，验证 Bearer、响应 schema、会话身份与 `202 {accepted:true}`；接受请求不等于生成完成，命令不重试。
 - `tests/sync-wire.test.ts`：真实 SDK producer/replica/view 经应用 wire 适配复制，覆盖 Unicode、状态向量 delta、序号缺口、新 generation 替换、应用收尾失败与帧大小/格式预算。
 - `tests/server-sync.test.ts`：真实 DO 核心与 SDK 同步，注入 socket seam，覆盖首帧鉴权前无文档/数据库访问、超时、连接上限、只读违规、背压、断线不取消、补齐与重建历史。
@@ -198,10 +212,10 @@ bun run build
 - `tests/repository.test.ts`：直接执行 `TursoChatRepository`，注入 SDK storage 的只读 seam 与 ACP 创建函数，验证工作区范围、实际会话 ID、存储顺序、标题与更新时间、重建后刷新、创建后可见性及错误传播；不是源文件文本断言。
 - `tests/session-creation.test.ts`：执行真实创建服务，注入 ACP transport，验证初始化协议、UUID、rename 回执、失败关闭、关闭未确认和反向能力拒绝；创建不发 prompt、不访问聊天 DO。
 - `tests/wasm-config.test.ts`：执行配置构建函数，验证外部 Turso、模型配置、必需变量和关闭工具能力。
-- `tests/execution.test.ts`：直接执行 DO execution storage adapter、WorkerExecution 与真实可移植 SDK 准入/控制服务。验证串行/回滚隔离 fixture、CAS 竞争、原命令 claim 重放、registry 重建、admit/entered/settle、seal、typed Stop 的精确目标、Unknown 解析原命令、拒绝结果及精确 generation 停止证明。Host 与控制 snapshot 是 fixture，只有模拟 close 成功才提供停止确认；不以账本存在代替真实 Host 退出证明，也不证明 Cloudflare 平台事务或真实 WASM 已验收。
 
-- `tests/execution-admission-core.test.ts`：从 SDK 迁入，执行共享准入规则、重建、冲突、预算与证据丢失行为，并实际加载应用 facade bundle 执行 admit/entered/settle，不以源码文本判断 crypto 可用。
-- `tests/storage-turso-workers.test.ts`：从 SDK 迁入，加载 facade bundle，在没有 Bun/process 全局的 Node 子进程里以显式 token 经原生 Fetch 查询本地 HTTP fixture，验证 canonical SQL、元数据、错误传播与连接关闭；不假设 SDK 支持 process 环境变量回退。
+- `tests/storage-turso-workers.test.ts`：从 SDK 迁入，加载 facade bundle，在没有 Bun/process 全局的 Node 子进程里以显式 token 经原生 Fetch 查询本地 HTTP fixture，验证 canonical SQL、元数据、错误传播与连接关闭；同时断言 SDK 只接受显式 `url`/`authToken`（不再有 `deployment()`、`engine`、`tokenEnv` 或环境回退），应用边界在缺少 Store 配置时继续拒绝查询。
+
+已删除的 `tests/execution.test.ts` 与 `tests/execution-admission-core.test.ts` 测的是 `peri/execution/admit|entered|settle` 与 `session/control*` 协议：这些协议已从当前 ACP Host 移除（`.rs` 与 SDK 均无引用），应用侧 adapter 随之删除；SDK 的准入核心仍由 SDK 自身测试覆盖。
 
 多数测试不启动真实 WASM 或 Cloudflare DO，也不调用远端模型或 Turso；原生 Fetch 测试会启动本地 HTTP fixture。`tests/real-workerd-ws.test.ts` 单独运行真实 workerd 和 Hibernation socket，但使用模拟 ACP transport，不证明真实 WASM。内存 DO fixture 不是平台持久性证明。真实运行时可参考 [SDK Workers 示例](../@peri-sdk/examples/workers/worker.js)，但该示例的结果不能代替本应用上线验收。覆盖范围与实际执行结果以 `tests/` 和命令输出为准；尚未验证真实模型上线，也不宣称生产完成。
 

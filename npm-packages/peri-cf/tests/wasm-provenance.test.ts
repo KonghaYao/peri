@@ -148,6 +148,53 @@ describe("CF WASM build provenance", () => {
     expect(() => assertSameInputs(setup.inputs, { ...setup.inputs, files })).toThrow("stale");
   });
 
+  test("hashes only the peri-wasm local dependency closure, never unrelated workspace members", async () => {
+    const setup = await fixture();
+    await setup.file("Cargo.toml", '[workspace]\nmembers=["peri-wasm","peri-tui"]\n');
+    await setup.file("peri-tui/Cargo.toml", '[package]\nname="peri-tui"\nversion="0.1.0"');
+    await setup.file("peri-tui/src/main.rs", "fn main() {}");
+    const before = await sourceChecksums(setup.root);
+    expect(Object.keys(before).some((name) => name.startsWith("peri-tui/"))).toBe(false);
+    expect(before["peri-wasm/src/lib.rs"]).toHaveLength(64);
+    await setup.file("peri-tui/src/main.rs", "fn main() { println!(); }");
+    expect(await sourceChecksums(setup.root)).toEqual(before);
+    await setup.file("peri-wasm/src/lib.rs", "changed in the CF WASM closure");
+    const after = await sourceChecksums(setup.root);
+    expect(after["peri-wasm/src/lib.rs"]).not.toBe(before["peri-wasm/src/lib.rs"]);
+    expect(() => assertSameInputs({ ...setup.inputs, files: before }, { ...setup.inputs, files: after })).toThrow("stale");
+  });
+
+  test("follows workspace-level path dependencies declared as workspace = true", async () => {
+    const setup = await fixture();
+    await setup.file("Cargo.toml", '[workspace]\nmembers=["peri-wasm"]\n[workspace.dependencies]\nhelper={path="crates/helper"}\n');
+    await setup.file("peri-wasm/Cargo.toml", '[package]\nname="peri-wasm"\nversion="0.1.0"\n[dependencies]\nhelper.workspace=true\n');
+    await setup.file("crates/helper/Cargo.toml", '[package]\nname="helper"\nversion="0.1.0"');
+    await setup.file("crates/helper/src/lib.rs", "pub fn helper() {}");
+    const before = await sourceChecksums(setup.root);
+    expect(before["crates/helper/src/lib.rs"]).toHaveLength(64);
+    await setup.file("crates/helper/src/lib.rs", "pub fn helper() { }");
+    const after = await sourceChecksums(setup.root);
+    expect(after["crates/helper/src/lib.rs"]).not.toBe(before["crates/helper/src/lib.rs"]);
+    expect(() => assertSameInputs({ ...setup.inputs, files: before }, { ...setup.inputs, files: after })).toThrow("stale");
+  });
+
+  test("fails loudly when the workspace does not declare peri-wasm", async () => {
+    const setup = await fixture();
+    await setup.file("Cargo.toml", '[workspace]\nmembers=["peri-tui"]\n');
+    await setup.file("peri-tui/Cargo.toml", '[package]\nname="peri-tui"\nversion="0.1.0"');
+    await expect(sourceChecksums(setup.root)).rejects.toThrow("has no peri-wasm member");
+  });
+
+  test("hashes the prebuilt bundle a closure crate embeds outside the Cargo graph", async () => {
+    const setup = await fixture();
+    const embedded = "npm-packages/@peri-workflow/dist/peri-workflow.js";
+    await setup.file(embedded, "// embedded workflow bundle");
+    const files = await sourceChecksums(setup.root);
+    expect(files[embedded]).toHaveLength(64);
+    await setup.file(embedded, "// changed embedded workflow bundle");
+    expect((await sourceChecksums(setup.root))[embedded]).not.toBe(files[embedded]);
+  });
+
   test("rejects source symlinks and mutations during build", async () => {
     const setup = await fixture();
     await setup.file("peri-wasm/src/lib.rs", "changed");

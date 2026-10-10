@@ -1,7 +1,6 @@
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
 import { Miniflare, convertV4MiniflareOptions, type WebSocket as MiniflareWebSocket } from "miniflare";
-import { decodeSyncFrame, encodeAckFrame, encodeAuthFrame, type SyncFrame } from "../shared/sync";
-import { SessionDocReplica } from "../worker/sdk";
+import { SessionDocReplica, decodeSyncFrame, encodeAckFrame, encodeAuthFrame, type SyncFrame } from "../worker/sdk";
 import { readSyncState } from "../shared/sync-state";
 
 const chatId = "00000000-0000-4000-8000-000000000001";
@@ -10,8 +9,9 @@ let runtime: Miniflare;
 const sockets: MiniflareWebSocket[] = [];
 
 beforeAll(async () => {
+  // workerd provides Node builtins through nodejs_compat; the bundler only has to keep them out of the fixture.
   const bundle = await Bun.build({ entrypoints: [new URL("./workerd-ws-fixture.ts", import.meta.url).pathname],
-    target: "browser", external: ["node:*"], minify: false });
+    target: "browser", external: ["node:*", "dns", "net"], minify: false });
   if (!bundle.success) throw new AggregateError(bundle.logs, "Workerd test fixture build failed");
   runtime = new Miniflare(convertV4MiniflareOptions({ name: "ws-contract", modules: true, script: await bundle.outputs[0]!.text(),
     compatibilityDate: "2026-10-01", compatibilityFlags: ["nodejs_compat"],
@@ -41,7 +41,7 @@ async function untilAsync(predicate: () => Promise<boolean>): Promise<void> {
   }
 }
 
-async function stats(): Promise<{ identity: string; sockets: number; bufferedAmountType: string; starts: number; resumes: number;
+async function stats(): Promise<{ identity: string; sockets: number; bufferedAmountType: string; starts: number; cancels: number;
   attachments: { pending: unknown[]; credential: string; nextDelivery: number }[] }> {
   return await (await runtime.dispatchFetch(new URL("/stats", await runtime.ready), { headers: { Authorization: `Bearer ${token}` } })).json() as Awaited<ReturnType<typeof stats>>;
 }
@@ -108,7 +108,7 @@ describe("actual workerd read-only WS delivery and hibernation", () => {
     await until(() => client.state().messages.length >= 4 && client.state().running);
     expect((await command("cancel")).status).toBe(200);
     await until(() => !client.state().running);
-    expect((await stats()).resumes).toBe(1);
+    expect((await stats()).cancels).toBe(2);
     const history = client.state().messages;
     const hostStarts = (await stats()).starts;
     await untilAsync(async () => (await stats()).attachments.every((attachment) => attachment.pending.length === 0));

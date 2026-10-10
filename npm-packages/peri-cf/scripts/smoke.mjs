@@ -1,6 +1,5 @@
 import { once } from "node:events";
-import { SessionDocReplica } from "@peri-code/sdk/view";
-import { encodeAuthFrame, encodeAckFrame, decodeSyncFrame } from "../shared/sync.ts";
+import { SessionDocReplica, encodeAuthFrame, encodeAckFrame, decodeSyncFrame } from "@peri-code/sdk/view";
 import { readSyncState } from "../shared/sync-state.ts";
 import { createServer, connect } from "node:net";
 import { mkdtemp, open, rm } from "node:fs/promises";

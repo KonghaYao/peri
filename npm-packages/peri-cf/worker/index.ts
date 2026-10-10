@@ -4,17 +4,13 @@ import { chatRepository } from "./chat/repository";
 import { createPeriSession } from "./chat/creation";
 import { createApi } from "./api/router";
 import type { Env } from "./types";
-import { WorkerExecution } from "./execution/dispatcher";
-import type { ExecutionStorage } from "./execution/storage";
 import type { ExecutionContext } from "@cloudflare/workers-types";
 import type { HibernatingSessionState } from "./chat/sync";
 
 export class ChatSession extends ChatSessionCore {
-  constructor(state: HibernatingSessionState & { storage: ExecutionStorage }, env: Env) {
-    super(state, env, startTransport, (transport) => {
-      if (!transport.generationId) throw new Error("WASM transport has no generation identity");
-      return new WorkerExecution(transport, state.storage, transport.generationId);
-    }, chatRepository(env, (title) => createPeriSession(env, title, startTransport, (promise) => state.waitUntil(promise))));
+  constructor(state: HibernatingSessionState, env: Env) {
+    super(state, env, startTransport,
+      chatRepository(env, (title) => createPeriSession(env, title, startTransport, (promise) => state.waitUntil(promise))));
   }
 }
 

@@ -1,5 +1,6 @@
 import { z } from "zod";
-import { encodeSyncFrame, type SyncFramePayload } from "../../shared/sync";
+
+/** Durable socket attachment owned by the chat Durable Object. Delivery credit rules live in the SDK. */
 
 /** Attachment schema revision; a bump invalidates sockets restored from an older wire protocol. */
 export const SYNC_ATTACHMENT_VERSION = 2;
@@ -29,27 +30,3 @@ export const attachmentSchema = z.object({
 });
 
 export type SocketAttachment = z.infer<typeof attachmentSchema>;
-
-export function reserveDelivery(attachment: SocketAttachment, frame: SyncFramePayload, now = Date.now()): Uint8Array<ArrayBuffer> {
-  const delivery = attachment.nextDelivery;
-  if (!Number.isSafeInteger(delivery + 1)) throw new Error("Delivery sequence exhausted");
-  const encoded = encodeSyncFrame({ ...frame, delivery });
-  const bytes = encoded.byteLength;
-  const outstanding = attachment.pending.reduce((total, pending) => total + pending.bytes, 0);
-  if (attachment.pending.length >= MAX_OUTSTANDING_FRAMES || outstanding + bytes > MAX_OUTSTANDING_BYTES)
-    throw new Error("Sync peer exceeded outstanding delivery credit");
-  attachment.pending.push({ delivery, bytes, deadline: now + DELIVERY_TIMEOUT_MS });
-  attachment.nextDelivery++;
-  return encoded;
-}
-
-export function acknowledgeDelivery(attachment: SocketAttachment, delivery: number): void {
-  if (attachment.pending[0]?.delivery !== delivery) throw new Error("Unexpected delivery acknowledgement");
-  attachment.pending.shift();
-  attachment.acknowledged = delivery;
-}
-
-export async function credentialFingerprint(token: string): Promise<string> {
-  const digest = await crypto.subtle.digest("SHA-256", new TextEncoder().encode(token));
-  return Array.from(new Uint8Array(digest), (byte) => byte.toString(16).padStart(2, "0")).join("");
-}

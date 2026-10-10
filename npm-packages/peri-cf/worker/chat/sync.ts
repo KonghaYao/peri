@@ -1,14 +1,14 @@
 import { authenticatedApp } from "../api/app";
 import { logError } from "../api/http";
-import { decodeAckFrame, decodeAuthFrame, frameBytes, MAX_AUTH_FRAME_BYTES, type SyncFramePayload } from "../../shared/sync";
+import { decodeAckFrame, decodeAuthFrame, frameBytes, MAX_AUTH_FRAME_BYTES, type SyncFramePayload,
+  acknowledgeDelivery, credentialFingerprint, reserveDeliveryFrame } from "../sdk";
 import { HTTPException } from "hono/http-exception";
 import type { Env, SessionState } from "../types";
-import type { SessionDocSync } from "../sdk";
-import type { DocStateVector } from "../../../@peri-sdk/src/sync";
+import type { SessionDocSync, DocStateVector } from "../sdk";
 import type { WebSocketPair as WorkerWebSocketPair } from "@cloudflare/workers-types";
 import {
-  attachmentSchema, acknowledgeDelivery, reserveDelivery, credentialFingerprint,
-  AUTH_TIMEOUT_MS, MAX_TOTAL_OUTSTANDING_BYTES, SYNC_ATTACHMENT_VERSION, type SocketAttachment,
+  attachmentSchema, AUTH_TIMEOUT_MS, DELIVERY_TIMEOUT_MS, MAX_OUTSTANDING_BYTES, MAX_OUTSTANDING_FRAMES,
+  MAX_TOTAL_OUTSTANDING_BYTES, SYNC_ATTACHMENT_VERSION, type SocketAttachment,
 } from "./ws-delivery";
 
 declare const WebSocketPair: typeof WorkerWebSocketPair;
@@ -204,7 +204,8 @@ export class ChatSockets {
   private send(peer: Peer, frame: SyncFramePayload): void {
     if (peer.closed || (peer.socket.readyState !== undefined && peer.socket.readyState !== 1))
       throw new Error("Sync socket is closed");
-    const encoded = reserveDelivery(peer.attachment, frame);
+    const encoded = reserveDeliveryFrame(peer.attachment, frame, { maxFrames: MAX_OUTSTANDING_FRAMES,
+      maxBytes: MAX_OUTSTANDING_BYTES, timeoutMs: DELIVERY_TIMEOUT_MS });
     const total = Array.from(this.peers.values()).reduce((sum, connection) =>
       sum + connection.attachment.pending.reduce((bytes, pending) => bytes + pending.bytes, 0), 0);
     if (total > MAX_TOTAL_OUTSTANDING_BYTES) throw new Error("Session sync delivery budget exhausted");

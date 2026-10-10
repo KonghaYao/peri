@@ -1,7 +1,8 @@
 import { afterEach, describe, expect, spyOn, test } from 'bun:test';
 import { Y, SessionDocSync, type DocStateVector } from '@peri-code/sdk/view';
-import { decodeAuthFrame, decodeAckFrame, encodeSyncFrame, MAX_SYNC_FRAME_BYTES, type SyncState,
-  type SyncFramePayload } from '../shared/sync';
+import { decodeAuthFrame, decodeAckFrame, encodeSyncFrame, MAX_SYNC_FRAME_BYTES,
+  type SyncFramePayload } from '@peri-code/sdk/view';
+import type { SyncState } from '../shared/sync';
 import { ChatSync, type SyncStatus } from '../web/api/sync';
 import { ChatSession, type ChatView } from '../web/chat/session';
 import { createChatQueries } from '../web/chat/queries';

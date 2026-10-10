@@ -1,11 +1,11 @@
 import { describe, expect, test } from "bun:test";
-import type { ControlCommand, ControlReceipt, ControlSnapshot, JsonRpcNotification } from "../worker/sdk";
+import type { JsonRpcNotification } from "../worker/sdk";
 import { ChatSessionCore, MAX_REPLY_BYTES, MAX_TRANSCRIPT_BYTES } from "../worker/chat/session";
 import { fetchApi } from "../worker/api/router";
-import type { AcpTransport, Chat, ChatRepository, Env, PausedSession, SessionRecord, SessionState } from "../worker/types";
+import type { AcpTransport, Chat, ChatRepository, Env, SessionRecord, SessionState } from "../worker/types";
 import type { AgentResources } from "../shared/resources";
 import { memoryInstance } from "./helpers/wasm";
-import { WasmStartupError } from "../worker/wasm/lifecycle";
+import { PeriWasmHostStartupError } from "../worker/sdk";
 
 interface TransportPlan {
   resources?: boolean;
@@ -16,8 +16,8 @@ interface TransportPlan {
   closeGate?: Promise<void>;
   startupGate?: Promise<void>;
   startup?: (signal?: AbortSignal) => Promise<void>;
-  resumeFailure?: Error;
-  stopReceiptGate?: Promise<void>;
+  cancelGate?: Promise<void>;
+  cancelFailure?: Error;
 }
 
 function barrier() {
@@ -26,48 +26,11 @@ function barrier() {
   return { promise, release };
 }
 
-const fixtureControl: ControlSnapshot = {
-  state: { lifecycle: 2, revision: 5, controlGeneration: 3, status: "active",
-    attempt: { turnId: "fixture-turn", attemptId: "fixture-attempt" } },
-  settlement: { status: "pending" },
-};
-
-function fakeDispatcher(transport: AcpTransport) {
-  return {
-    handle(_method: string, _params: unknown): Promise<unknown> | undefined { return undefined; },
-    seal(): void {},
-    async stop(sessionId: string): Promise<PausedSession> {
-      const { state } = await transport.request<ControlSnapshot>("session/control/state", { sessionId });
-      if (!state.attempt) throw new Error("No exact fixture target");
-      const receipt = await transport.request<ControlReceipt>("session/control", {
-        sessionId, commandId: "fixture-stop-command", expectedLifecycle: state.lifecycle,
-        expectedRevision: state.revision, expectedControlGeneration: state.controlGeneration,
-        action: { kind: "stop", target: state.attempt },
-      });
-      if (receipt.decision.kind !== "accepted") throw new Error("Fixture stop rejected");
-      return { lifecycle: receipt.state.lifecycle, controlGeneration: receipt.state.controlGeneration,
-        resumeCommandId: `resume:${receipt.commandId}` };
-    },
-    async resume(sessionId: string, marker: PausedSession): Promise<void> {
-      const { state } = await transport.request<ControlSnapshot>("session/control/state", { sessionId });
-      if (state.status !== "paused" || state.lifecycle !== marker.lifecycle || state.controlGeneration !== marker.controlGeneration)
-        throw new Error("Fixture pause authority changed");
-      const receipt = await transport.request<ControlReceipt>("session/control", {
-        sessionId, commandId: marker.resumeCommandId, expectedLifecycle: marker.lifecycle,
-        expectedRevision: state.revision, expectedControlGeneration: marker.controlGeneration,
-        action: { kind: "resume" },
-      });
-      if (receipt.decision.kind !== "accepted") throw new Error("Fixture resume rejected");
-    },
-    async stopAfterHostClose(_sessionId: string): Promise<void> {},
-  };
-}
-
 class FixtureTransport implements AcpTransport {
   readonly calls: { method: string; params?: unknown }[] = [];
   readonly promptStarted: Promise<void>;
   readonly closeStarted: Promise<void>;
-  readonly stopStarted: Promise<void>;
+  readonly cancelStarted: Promise<void>;
   closeRequested = false;
   closed = false;
   unsubscribed = false;
@@ -75,44 +38,19 @@ class FixtureTransport implements AcpTransport {
   private listeners = new Set<(notification: JsonRpcNotification) => void>();
   private markPromptStarted!: () => void;
   private markCloseStarted!: () => void;
-  private markStopStarted!: () => void;
+  private markCancelStarted!: () => void;
   private finishPrompt!: (result: { stopReason: string }) => void;
   private sessionId = "";
 
-  constructor(private readonly plan: TransportPlan = {}, readonly controlSnapshot = structuredClone(fixtureControl)) {
+  constructor(private readonly plan: TransportPlan = {}) {
     this.promptStarted = new Promise((resolve) => { this.markPromptStarted = resolve; });
     this.closeStarted = new Promise((resolve) => { this.markCloseStarted = resolve; });
-    this.stopStarted = new Promise((resolve) => { this.markStopStarted = resolve; });
+    this.cancelStarted = new Promise((resolve) => { this.markCancelStarted = resolve; });
   }
 
   async request<Result>(method: string, params?: unknown): Promise<Result> {
     this.calls.push({ method, params });
     if (method === "initialize") return { protocolVersion: 1 } as Result;
-    if (method === "session/control/state") return structuredClone(this.controlSnapshot) as Result;
-    if (method === "session/control") {
-      const command = params as ControlCommand;
-      const state = this.controlSnapshot.state;
-      expect(command.expectedLifecycle).toBe(state.lifecycle);
-      expect(command.expectedRevision).toBe(state.revision);
-      expect(command.expectedControlGeneration).toBe(state.controlGeneration);
-      if (command.action.kind === "stop") {
-        expect(command.action.target).toEqual(state.attempt!);
-        state.status = "paused";
-        state.attempt = null;
-        this.finishPrompt?.({ stopReason: "cancelled" });
-      } else if (command.action.kind === "resume") {
-        if (this.plan.resumeFailure) throw this.plan.resumeFailure;
-        state.status = "active";
-      } else throw new Error("Unexpected fixture control action");
-      state.revision++;
-      state.controlGeneration++;
-      if (command.action.kind === "stop") {
-        this.markStopStarted();
-        await this.plan.stopReceiptGate;
-      }
-      return { sessionId: command.sessionId, commandId: command.commandId,
-        decision: { kind: "accepted" }, state: structuredClone(state) } as Result;
-    }
     if (method === "session/load") {
       this.sessionId = (params as { sessionId: string }).sessionId;
       this.emit("historical replay");
@@ -124,8 +62,6 @@ class FixtureTransport implements AcpTransport {
   async sendRequest<Result>(method: string, params?: unknown): Promise<{ response: Promise<Result> }> {
     this.calls.push({ method, params });
     if (method !== "session/prompt") throw new Error(`Unexpected ACP send: ${method}`);
-    if (this.controlSnapshot.state.status !== "active") throw new Error("Fixture activation remains paused");
-    this.controlSnapshot.state.attempt = { turnId: "fixture-turn", attemptId: "fixture-attempt" };
     const response = new Promise<{ stopReason: string }>((resolve, reject) => {
       this.finishPrompt = resolve;
       this.emit("foreign session", { sessionId: "another-session" });
@@ -141,7 +77,12 @@ class FixtureTransport implements AcpTransport {
 
   async notify(method: string, params?: unknown): Promise<void> {
     this.calls.push({ method, params });
-    throw new Error(`Unexpected ACP notification: ${method}`);
+    if (method !== "session/cancel") throw new Error(`Unexpected ACP notification: ${method}`);
+    expect(params).toEqual({ sessionId: this.sessionId });
+    this.markCancelStarted();
+    if (this.plan.cancelFailure) throw this.plan.cancelFailure;
+    await this.plan.cancelGate;
+    this.finishPrompt?.({ stopReason: "cancelled" });
   }
 
   async *events(): AsyncIterable<JsonRpcNotification> {}
@@ -192,7 +133,6 @@ async function fixture(plan: TransportPlan = {}) {
   const cores = new Map<string, ChatSessionCore>();
   const work: Promise<unknown>[] = [];
   const transports = [new FixtureTransport(plan)];
-  const domainStates = new Map<string, ControlSnapshot>();
   let starts = 0;
   const startup = barrier();
   let objectLookups = 0;
@@ -221,8 +161,7 @@ async function fixture(plan: TransportPlan = {}) {
             startup.release();
             await plan.startup?.(signal);
             await plan.startupGate;
-            const transport = transports[starts] ?? new FixtureTransport(plan, domainStates.get(id));
-            domainStates.set(id, transport.controlSnapshot);
+            const transport = transports[starts] ?? new FixtureTransport(plan);
             transports[starts++] = transport;
             if (plan.resources && resources) {
               resources.attach(memoryInstance());
@@ -235,7 +174,7 @@ async function fixture(plan: TransportPlan = {}) {
               };
             }
             return transport;
-          }, fakeDispatcher, repository);
+          }, repository);
           cores.set(id, core);
         }
         return { fetch: (request: Request) => core!.fetch(request) };
@@ -478,29 +417,7 @@ describe("authenticated API routing with a thread repository and chat DO cores",
 });
 
 describe("chat execution, commands and persisted lifecycle", () => {
-  test("prompt completion cannot close the host before an accepted Stop receipt persists its pause marker", async () => {
-    const receipt = barrier();
-    const app = await fixture({ blocked: true, stopReceiptGate: receipt.promise });
-    const chat = await app.create();
-    const response = await app.request(`/api/chats/${chat.id}/messages`, "POST", { content: "First" });
-    await app.transports[0].promptStarted;
-    const cancellation = app.request(`/api/chats/${chat.id}/cancel`, "POST");
-    await app.transports[0].stopStarted;
-    expect((await app.request(`/api/chats/${chat.id}`)).status).toBe(200);
-    expect(app.records.get(chat.id)!.pausedByStop).toBeUndefined();
-    expect(app.records.get(chat.id)!.running).toBe(true);
-    expect(app.transports[0].closeRequested).toBe(false);
-    receipt.release();
-    expect((await cancellation).status).toBe(200);
-    expect(response.status).toBe(202);
-    await app.drain();
-    expect(app.transports[0].closed).toBe(true);
-    expect(app.records.get(chat.id)!.pausedByStop).toEqual({
-      lifecycle: 2, controlGeneration: 4, resumeCommandId: "resume:fixture-stop-command",
-    });
-  });
-
-  test("persists an own-stop marker and resumes only on the next explicit send, before its prompt", async () => {
+  test("cancel sends one session/cancel notification and a later explicit send runs a fresh turn", async () => {
     const plan: TransportPlan = { blocked: true };
     const app = await fixture(plan);
     const chat = await app.create();
@@ -508,51 +425,18 @@ describe("chat execution, commands and persisted lifecycle", () => {
     await app.transports[0].promptStarted;
     expect((await app.request(`/api/chats/${chat.id}/cancel`, "POST")).status).toBe(200);
     await first.text();
-    const marker = structuredClone(app.records.get(chat.id)!.pausedByStop);
-    expect(marker).toEqual({ lifecycle: 2, controlGeneration: 4, resumeCommandId: "resume:fixture-stop-command" });
-    app.cores.delete(chat.id);
-    expect((await app.request(`/api/chats/${chat.id}`)).status).toBe(200);
-    expect((await app.request("/api/chats")).status).toBe(200);
-    expect(app.transports).toHaveLength(1);
-    expect(app.records.get(chat.id)!.pausedByStop).toEqual(marker);
+    await app.drain();
+    expect(app.transports[0].calls.filter(({ method }) => method === "session/cancel"))
+      .toEqual([{ method: "session/cancel", params: { sessionId: chat.id } }]);
+    expect(app.records.get(chat.id)!.messages.at(-1)?.status).toBe("cancelled");
     plan.blocked = false;
-    const next = await app.request(`/api/chats/${chat.id}/messages`, "POST", { content: "Continue" });
-    expect(next.status).toBe(202);
+    expect((await app.request(`/api/chats/${chat.id}/messages`, "POST", { content: "Continue" })).status).toBe(202);
     await app.drain();
-    const calls = app.transports[1].calls;
-    const resumeIndex = calls.findIndex(({ method }) => method === "session/control");
-    expect(calls[resumeIndex].params).toEqual({ sessionId: chat.id, commandId: marker!.resumeCommandId,
-      expectedLifecycle: 2, expectedRevision: 6, expectedControlGeneration: 4, action: { kind: "resume" } });
-    expect(calls.findIndex(({ method }) => method === "session/load")).toBeLessThan(resumeIndex);
-    expect(resumeIndex).toBeLessThan(calls.findIndex(({ method }) => method === "session/prompt"));
-    expect(app.records.get(chat.id)!.pausedByStop).toBeUndefined();
+    const next = app.transports[1].calls;
+    expect(next.some(({ method }) => method === "session/cancel")).toBe(false);
+    expect(next.findIndex(({ method }) => method === "session/load"))
+      .toBeLessThan(next.findIndex(({ method }) => method === "session/prompt"));
     expect(app.records.get(chat.id)!.messages.at(-1)?.status).toBe("completed");
-  });
-
-  test("resume failure retains the own-stop marker and never sends the next prompt", async () => {
-    const app = await fixture({ blocked: true, resumeFailure: new Error("resume unavailable") });
-    const chat = await app.create();
-    const first = await app.request(`/api/chats/${chat.id}/messages`, "POST", { content: "First" });
-    await app.transports[0].promptStarted;
-    await app.request(`/api/chats/${chat.id}/cancel`, "POST");
-    await first.text();
-    const marker = structuredClone(app.records.get(chat.id)!.pausedByStop);
-    const next = await app.request(`/api/chats/${chat.id}/messages`, "POST", { content: "Continue" });
-    expect(next.status).toBe(202);
-    await app.drain();
-    expect(app.records.get(chat.id)!.pausedByStop).toEqual(marker);
-    expect(app.transports[1].calls.some(({ method }) => method === "session/prompt")).toBe(false);
-  });
-
-  test("does not resume an external pause without an own-stop marker", async () => {
-    const app = await fixture();
-    const chat = await app.create();
-    app.transports[0].controlSnapshot.state.status = "paused";
-    const response = await app.request(`/api/chats/${chat.id}/messages`, "POST", { content: "Continue" });
-    expect(response.status).toBe(202);
-    await app.drain();
-    expect(app.transports[0].calls.some(({ method }) => method === "session/control")).toBe(false);
-    expect(app.records.get(chat.id)!.pausedByStop).toBeUndefined();
   });
 
   test("repository outage does not prevent cancelling an already hydrated running chat", async () => {
@@ -600,7 +484,7 @@ describe("chat execution, commands and persisted lifecycle", () => {
     expect(response.status).toBe(202);
     await app.drain();
     expect(app.records.get(chat.id)!.messages.at(-1)).toMatchObject({ content: "partial", status: "error" });
-    expect(app.transports[0].calls.some(({ method }) => method === "session/control")).toBe(true);
+    expect(app.transports[0].calls.some(({ method }) => method === "session/cancel")).toBe(true);
   });
 
   test("cancel waits for confirmed transport close and durable settlement while the chat remains busy", async () => {
@@ -639,9 +523,9 @@ describe("chat execution, commands and persisted lifecycle", () => {
     expect(app.records.get(chat.id)!.messages.at(-1)?.status).toBe("error");
   });
 
-  test("remote Stop receipt taking more than five seconds still waits for confirmed shutdown", async () => {
+  test("a slow host cancel still waits for the prompt to settle and confirmed shutdown", async () => {
     const receipt = barrier();
-    const app = await fixture({ blocked: true, stopReceiptGate: receipt.promise });
+    const app = await fixture({ blocked: true, cancelGate: receipt.promise });
     const chat = await app.create();
     await app.request(`/api/chats/${chat.id}/messages`, "POST", { content: "Hello" });
     await app.transports[0].promptStarted;
@@ -659,7 +543,7 @@ describe("chat execution, commands and persisted lifecycle", () => {
     expect(app.records.get(chat.id)!.messages.at(-1)?.status).toBe("cancelled");
   }, 15_000);
 
-  test("cancel during startup waits and skips the prompt without sending a targetless Stop", async () => {
+  test("cancel during startup waits and skips the prompt without sending a cancelled turn", async () => {
     const starting = barrier();
     const app = await fixture({ startupGate: starting.promise });
     const chat = await app.create();
@@ -672,14 +556,14 @@ describe("chat execution, commands and persisted lifecycle", () => {
     expect(response.status).toBe(202);
     await app.drain();
     expect(app.transports[0].calls.some(({ method }) => method === "session/prompt")).toBe(false);
-    expect(app.transports[0].calls.some(({ method }) => method === "session/control/state" || method === "session/control")).toBe(false);
+    expect(app.transports[0].calls.some(({ method }) => method === "session/cancel")).toBe(false);
     expect(app.records.get(chat.id)!.messages.at(-1)?.status).toBe("cancelled");
   });
 
-  test("explicit Stop aborts cooperative startup and permits another run only after confirmed cleanup", async () => {
+  test("explicit cancel aborts cooperative startup and permits another run only after confirmed cleanup", async () => {
     const plan: TransportPlan = { startup: async (signal) => {
       await new Promise((resolve) => signal!.addEventListener("abort", resolve, { once: true }));
-      throw new WasmStartupError(signal!.reason, Promise.resolve({ confirmed: true }));
+      throw new PeriWasmHostStartupError(signal!.reason, Promise.resolve({ confirmed: true }));
     } };
     const app = await fixture(plan);
     const chat = await app.create();
@@ -697,7 +581,7 @@ describe("chat execution, commands and persisted lifecycle", () => {
 
   test("unconfirmed startup cleanup blocks every new run and remains blocked after reconstruction", async () => {
     const app = await fixture({ startup: async () => {
-      throw new WasmStartupError(new Error("startup original failure"), Promise.resolve({ confirmed: false, error: new Error("cleanup unconfirmed") }));
+      throw new PeriWasmHostStartupError(new Error("startup original failure"), Promise.resolve({ confirmed: false, error: new Error("cleanup unconfirmed") }));
     } });
     const chat = await app.create();
     await app.request(`/api/chats/${chat.id}/messages`, "POST", { content: "Hello" });
@@ -711,7 +595,7 @@ describe("chat execution, commands and persisted lifecycle", () => {
   test("actual late cleanup proof clears only its startup block, never replays the rejected prompt", async () => {
     const late = barrier();
     const plan: TransportPlan = { startup: async () => {
-      throw new WasmStartupError(new Error("startup delayed cleanup"), Promise.resolve({ confirmed: false }),
+      throw new PeriWasmHostStartupError(new Error("startup delayed cleanup"), Promise.resolve({ confirmed: false }),
         late.promise.then(() => ({ confirmed: true })));
     } };
     const app = await fixture(plan);
@@ -763,7 +647,7 @@ describe("chat execution, commands and persisted lifecycle", () => {
     expect((await (await app.request("/api/chats")).json() as { chats: Chat[] }).chats[0]).toEqual(chat);
   });
 
-  test("rejects concurrent prompts with 409 and cancellation delivers an exact-target typed Stop", async () => {
+  test("rejects concurrent prompts with 409 and cancellation delivers one session/cancel", async () => {
     const app = await fixture({ blocked: true, chunks: ["partial"] });
     const chat = await app.create();
     const response = await app.request(`/api/chats/${chat.id}/messages`, "POST", { content: "First" });
@@ -773,23 +657,20 @@ describe("chat execution, commands and persisted lifecycle", () => {
     expect(response.status).toBe(202);
     await app.drain();
     await app.drain();
-    expect(app.transports[0].calls.filter(({ method }) => method === "session/control")).toEqual([
-      { method: "session/control", params: { sessionId: chat.id, commandId: "fixture-stop-command",
-        expectedLifecycle: 2, expectedRevision: 5, expectedControlGeneration: 3,
-        action: { kind: "stop", target: { turnId: "fixture-turn", attemptId: "fixture-attempt" } } } },
-    ]);
+    expect(app.transports[0].calls.filter(({ method }) => method === "session/cancel"))
+      .toEqual([{ method: "session/cancel", params: { sessionId: chat.id } }]);
     expect(app.records.get(chat.id)!.messages.at(-1)).toMatchObject({ content: "partial", status: "cancelled" });
     expect(app.records.get(chat.id)!.messages).toHaveLength(2);
     expect(await (await app.request(`/api/chats/${chat.id}/cancel`, "POST")).json() as { cancelled: boolean }).toEqual({ cancelled: false });
   });
 
-  test("command response disconnect does not cancel ACP; explicit Stop preserves the partial reply", async () => {
+  test("command response disconnect does not cancel ACP; explicit cancel preserves the partial reply", async () => {
     const app = await fixture({ blocked: true, chunks: ["partial"] });
     const chat = await app.create();
     const response = await app.request(`/api/chats/${chat.id}/messages`, "POST", { content: "Hello" });
     await app.transports[0].promptStarted;
     await response.body!.cancel();
-    expect(app.transports[0].calls.some(({ method }) => method === "session/control")).toBe(false);
+    expect(app.transports[0].calls.some(({ method }) => method === "session/cancel")).toBe(false);
     expect(app.transports[0].closed).toBe(false);
     expect((await app.request(`/api/chats/${chat.id}/cancel`, "POST")).status).toBe(200);
     await app.drain();
@@ -858,7 +739,7 @@ describe("chat execution, commands and persisted lifecycle", () => {
     expect((await app.request(`/api/chats/${first.id}/cancel`, "POST")).status).toBe(200);
     await firstResponse.text();
     expect(app.records.get(second.id)!.running).toBe(true);
-    expect(app.transports[1].calls.some(({ method }) => method === "session/control")).toBe(false);
+    expect(app.transports[1].calls.some(({ method }) => method === "session/cancel")).toBe(false);
     expect((await app.request(`/api/chats/${second.id}/cancel`, "POST")).status).toBe(200);
     await secondResponse.text();
     expect(app.records.get(first.id)!.messages[0].content).toBe("First input");

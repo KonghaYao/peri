@@ -42,7 +42,9 @@ describe("ACP session creation without chat DO or execution dispatch", () => {
     const app = fixture();
     expect(await app.create()).toBe(sessionId);
     expect(app.calls.map(({ method }) => method)).toEqual(["initialize", "session/new", "session/rename"]);
-    expect(app.calls[0].params).toMatchObject({ protocolVersion: 1, clientCapabilities: { _meta: { "peri.executionProtocol": 1 } } });
+    expect(app.calls[0].params).toMatchObject({ protocolVersion: 1, clientCapabilities: { _meta: { "peri.userInputQueue": true } } });
+    expect((app.calls[0].params as { clientCapabilities: { _meta: Record<string, unknown> } }).clientCapabilities._meta)
+      .not.toHaveProperty("peri.executionProtocol");
     expect(app.calls[1].params).toEqual({ cwd: "/workspace", mcpServers: [] });
     expect(app.calls[2].params).toEqual({ sessionId, title: "Requested title" });
     expect(app.closeCalls()).toBe(1);

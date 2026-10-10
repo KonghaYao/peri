@@ -1,9 +1,8 @@
-import { DeadlineError, withDeadline } from "./deadline";
+import { DeadlineError, PeriWasmHostStartupError, withDeadline } from "../sdk";
 import { HTTPException } from "hono/http-exception";
 import { chatIdSchema } from "../../shared/chat";
 import { initializeTransport, WORKSPACE_CWD } from "./bootstrap";
 import type { AcpTransport, Env, StartTransport } from "../types";
-import { WasmStartupError } from "../wasm/lifecycle";
 import { WasmResources } from "../wasm/resources";
 import { WasmCapacityError } from "../wasm/budget";
 import { diagnosticMessage, logError } from "../api/http";
@@ -16,7 +15,7 @@ export async function createPeriSession(env: Env, title: string, startTransport:
   const starting = Promise.resolve().then(() => startTransport(env, resources, controller.signal));
   let failure: unknown;
   const cleanupStartup = async (error: unknown): Promise<void> => {
-    if (!(error instanceof WasmStartupError)) throw error;
+    if (!(error instanceof PeriWasmHostStartupError)) throw error;
     const outcome = await error.cleanup;
     if (!outcome.confirmed)
       throw new AggregateError([error, outcome.error], "Creation startup cleanup is unconfirmed");
@@ -34,8 +33,8 @@ export async function createPeriSession(env: Env, title: string, startTransport:
       if (error instanceof DeadlineError) {
         controller.abort(error);
         observeCleanup(starting.then((late) => withDeadline(late.close(), 20_000, "Late ACP host close"), cleanupStartup));
-      } else if (error instanceof WasmStartupError) observeCleanup(cleanupStartup(error));
-      if (error instanceof WasmStartupError && error.cause instanceof WasmCapacityError)
+      } else if (error instanceof PeriWasmHostStartupError) observeCleanup(cleanupStartup(error));
+      if (error instanceof PeriWasmHostStartupError && error.cause instanceof WasmCapacityError)
         throw new HTTPException(503, {
           message: "WASM isolate capacity is exhausted", cause: error,
           res: Response.json({ error: diagnosticMessage(error) }, {

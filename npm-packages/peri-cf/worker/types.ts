@@ -14,13 +14,6 @@ export interface SessionRecord {
   messages: Message[];
   running?: boolean;
   executionBlocked?: boolean;
-  pausedByStop?: PausedSession;
-}
-
-export interface PausedSession {
-  lifecycle: number;
-  controlGeneration: number;
-  resumeCommandId: string;
 }
 
 export interface ChatNamespace {
@@ -55,13 +48,3 @@ export interface AcpTransport extends Transport {
 }
 
 export type StartTransport = (env: Env, resources?: WasmResources, signal?: AbortSignal) => Promise<AcpTransport>;
-
-export interface ExecutionDispatcher {
-  handle(method: string, params: unknown): Promise<unknown> | undefined;
-  seal(): void;
-  stop(sessionId: string): Promise<PausedSession | void>;
-  resume(sessionId: string, paused: PausedSession): Promise<void>;
-  stopAfterHostClose(sessionId: string): Promise<void>;
-}
-
-export type StartExecution = (transport: AcpTransport) => ExecutionDispatcher;

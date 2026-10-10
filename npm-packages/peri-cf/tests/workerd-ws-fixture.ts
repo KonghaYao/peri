@@ -8,6 +8,7 @@ const chat = { id: "00000000-0000-4000-8000-000000000001", title: "Workerd WS fi
 class FixtureTransport implements AcpTransport {
   readonly generationId = crypto.randomUUID();
   readonly listeners = new Set<(notification: JsonRpcNotification) => void>();
+  cancels = 0;
   private finish!: (value: { stopReason: string }) => void;
   private readonly response = new Promise<{ stopReason: string }>((resolve) => { this.finish = resolve; });
   private stopped = false;
@@ -19,7 +20,11 @@ class FixtureTransport implements AcpTransport {
     void this.produce();
     return { response: this.response as Promise<Result> };
   }
-  async notify(): Promise<void> {}
+  async notify(method: string): Promise<void> {
+    if (method !== "session/cancel") throw new Error(`Unexpected ACP notification: ${method}`);
+    this.cancels++;
+    this.stop();
+  }
   async *events(): AsyncIterable<JsonRpcNotification> {}
   subscribe(listener: (notification: JsonRpcNotification) => void) {
     this.listeners.add(listener);
@@ -42,26 +47,18 @@ class FixtureTransport implements AcpTransport {
 
 export class TestSession extends ChatSessionCore {
   private readonly identity = crypto.randomUUID();
+  private readonly transports: FixtureTransport[];
 
   constructor(private readonly context: HibernatingSessionState, env: Env) {
-    let transport: FixtureTransport;
+    const transports: FixtureTransport[] = [];
     super(context, env, async () => {
       const starts = await context.storage.get<number>("host-starts") ?? 0;
       await context.storage.put("host-starts", starts + 1);
-      transport = new FixtureTransport();
+      const transport = new FixtureTransport();
+      transports.push(transport);
       return transport;
-    }, () => ({
-      handle() { return undefined; }, seal() {},
-      async stop() {
-        transport.stop();
-        return { lifecycle: 1, controlGeneration: 1, resumeCommandId: "own-stop" };
-      },
-      async resume() {
-        const resumes = await context.storage.get<number>("resumes") ?? 0;
-        await context.storage.put("resumes", resumes + 1);
-      },
-      async stopAfterHostClose() {},
-    }), { async get(id) { return id === chat.id ? chat : null; } });
+    }, { async get(id) { return id === chat.id ? chat : null; } });
+    this.transports = transports;
   }
 
   async fetch(request: Request): Promise<Response> {
@@ -72,7 +69,7 @@ export class TestSession extends ChatSessionCore {
         bufferedAmountType: sockets.length ? typeof Reflect.get(sockets[0]!, "bufferedAmount") : null,
         attachments: sockets.map((socket) => socket.deserializeAttachment!()),
         starts: await this.context.storage.get<number>("host-starts") ?? 0,
-        resumes: await this.context.storage.get<number>("resumes") ?? 0,
+        cancels: this.transports.reduce((total, transport) => total + transport.cancels, 0),
       });
     }
     return super.fetch(request);

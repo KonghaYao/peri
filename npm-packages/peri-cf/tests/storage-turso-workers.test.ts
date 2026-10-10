@@ -3,19 +3,23 @@ import { mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { pathToFileURL } from "node:url";
-import { TursoStorage, SessionControl, type SessionStorage, type SessionSummary } from "../worker/sdk";
-import { SESSION_BY_ID_SQL, SESSION_LIST_SQL } from "../../@peri-sdk/src/storage/session-summary";
+import { TursoStorage, SESSION_BY_ID_SQL, SESSION_LIST_SQL, type SessionStorage, type SessionSummary } from "../worker/sdk";
+import { chatRepository } from "../worker/chat/repository";
+import type { Env } from "../worker/types";
 
-test("local SDK facade preserves Store deployment defaults and explicit credential options", () => {
-  expect(SessionControl).toBeFunction();
-  const storage: SessionStorage = new TursoStorage({ url: "https://fixture.invalid" });
-  expect(storage.deployment()).toEqual({ args: ["--session-store", "https://fixture.invalid", "--session-store-engine", "turso"], env: {} });
-  expect(new TursoStorage({ url: "libsql://fixture.invalid", engine: "libsql", authToken: "fixture-explicit" }).deployment())
-    .toEqual({ args: ["--session-store", "libsql://fixture.invalid", "--session-store-engine", "libsql",
-      "--session-store-token-env", "PERI_SDK_TURSO_AUTH_TOKEN"], env: { PERI_SDK_TURSO_AUTH_TOKEN: "fixture-explicit" } });
-  expect(new TursoStorage({ url: "https://fixture.invalid", tokenEnv: "FIXTURE_TOKEN" }).deployment())
-    .toEqual({ args: ["--session-store", "https://fixture.invalid", "--session-store-engine", "turso",
-      "--session-store-token-env", "FIXTURE_TOKEN"], env: {} });
+test("Store access stays with the caller: explicit url plus optional token, no deployment or environment fallback", () => {
+  const storage: SessionStorage = new TursoStorage({ url: "https://fixture.invalid", authToken: "fixture-explicit" });
+  expect(storage).toHaveProperty("getSessions");
+  expect(storage).toHaveProperty("getSession");
+  // 部署参数（engine / tokenEnv / deployment()）与隐式环境凭证已从 SDK 契约移除：
+  // Store 位置与凭证由调用方显式传递，peri-cf 从部署环境读取后交给 WASM 启动对象。
+  expect("deployment" in storage).toBe(false);
+});
+
+test("the app Store boundary still refuses to query without explicit deployment configuration", async () => {
+  const repository = chatRepository({} as Env, async () => "session");
+  await expect(repository.list()).rejects.toThrow("Turso storage is not configured");
+  await expect(repository.get("session")).rejects.toThrow("Turso storage is not configured");
 });
 
 test("bundled Workers TursoStorage reads canonical metadata over native fetch without Bun or process globals", async () => {
@@ -64,16 +68,12 @@ test("bundled Workers TursoStorage reads canonical metadata over native fetch wi
       delete globalThis.localStorage;
       delete globalThis.sessionStorage;
       assert.equal(typeof globalThis.Bun, "undefined");
-      const { TursoStorage, SessionControl } = await import(${JSON.stringify(pathToFileURL(path).href)});
-      assert.equal(typeof SessionControl, "function");
+      const { TursoStorage } = await import(${JSON.stringify(pathToFileURL(path).href)});
       const url = ${JSON.stringify(server.url.origin)};
       const expected = ${JSON.stringify(expected)};
-      const preferred = new TursoStorage({ url, authToken: "fixture-explicit", tokenEnv: "FIXTURE_TOKEN" });
+      const preferred = new TursoStorage({ url, authToken: "fixture-explicit" });
       assert.deepEqual(await preferred.getSession(expected.id), expected);
       globalThis.process = undefined;
-      const empty = new TursoStorage({ url, authToken: "", tokenEnv: "FIXTURE_TOKEN" });
-      await assert.rejects(empty.getSessions(expected.cwd), /Session Storage credential is missing/);
-      await assert.rejects(empty.getSession(expected.id), /Session Storage credential is missing/);
       const explicit = new TursoStorage({ url, authToken: "fixture-worker" });
       assert.deepEqual(await explicit.getSessions(expected.cwd), [expected]);
       assert.deepEqual(await explicit.getSession(expected.id), expected);
@@ -82,6 +82,7 @@ test("bundled Workers TursoStorage reads canonical metadata over native fetch wi
       assert.equal(await explicit.getSession("fresh"), null);
       await assert.rejects(explicit.getSessions("failure"), /fixture query failed/);
       await assert.rejects(explicit.getSession("failure"), /fixture query failed/);
+      // 没有显式 token 时不得回退到宿主环境变量：匿名读取保持无 Authorization 头。
       const anonymous = new TursoStorage({ url });
       assert.equal(await anonymous.getSession("absent"), null);
       host.stdout.write("Workers native-fetch metadata checks passed");

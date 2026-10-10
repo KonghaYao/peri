@@ -1,12 +1,9 @@
 import { afterEach, describe, expect, test } from "bun:test";
-import { SessionDocs } from "../../@peri-sdk/src/state/session-docs";
-import { SessionDocSync, SessionDocReplica } from "../../@peri-sdk/src/sync";
-import { SessionViewStore } from "../../@peri-sdk/src/view/session-view";
-import { decodeAuthFrame, decodeSyncFrame, encodeAuthFrame, encodeSyncFrame,
+import { SessionDocs, SessionDocSync, decodeAuthFrame, decodeSyncFrame, encodeAuthFrame, encodeSyncFrame,
   decodeAckFrame, encodeAckFrame, FRAME_ACK, FRAME_UPDATE, SYNC_WIRE_VERSION,
-  MAX_ACK_FRAME_BYTES, MAX_AUTH_FRAME_BYTES, MAX_SYNC_FRAME_BYTES } from "../shared/sync";
+  MAX_ACK_FRAME_BYTES, MAX_AUTH_FRAME_BYTES, MAX_SYNC_FRAME_BYTES, type SyncFramePayload } from "../worker/sdk";
+import { SessionDocReplica, SessionViewStore } from "@peri-code/sdk/view";
 import { readSyncState } from "../shared/sync-state";
-import type { SyncFramePayload } from "../shared/sync";
 
 const cleanups: (() => void | Promise<void>)[] = [];
 afterEach(async () => {

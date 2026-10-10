@@ -1,11 +1,10 @@
 import { describe, expect, test } from "bun:test";
 import { ChatSessionCore } from "../worker/chat/session";
 import { fetchApi } from "../worker/api/router";
-import { SessionDocReplica, type JsonRpcNotification } from "../worker/sdk";
+import { SessionDocReplica, type JsonRpcNotification, decodeSyncFrame, encodeAckFrame, encodeAuthFrame,
+  encodeSyncFrame, FRAME_AUTH, SYNC_WIRE_VERSION, MAX_AUTH_FRAME_BYTES } from "../worker/sdk";
 import { ChatSockets, type SyncSocket } from "../worker/chat/sync";
 import type { AcpTransport, Chat, Env, SessionRecord, SessionState } from "../worker/types";
-import { decodeSyncFrame, encodeAckFrame, encodeAuthFrame, encodeSyncFrame, FRAME_AUTH,
-  SYNC_WIRE_VERSION, MAX_AUTH_FRAME_BYTES } from "../shared/sync";
 import { readSyncState } from "../shared/sync-state";
 
 const chat: Chat = { id: "00000000-0000-4000-8000-000000000001", title: "Sync fixture", updatedAt: "2026-10-06T00:00:00.000Z" };
@@ -56,7 +55,11 @@ class FixtureTransport implements AcpTransport {
     return (method === "initialize" ? { protocolVersion: 1 } : {}) as Result;
   }
   async sendRequest<Result>(): Promise<{ response: Promise<Result> }> { return { response: this.pending as Promise<Result> }; }
-  async notify(): Promise<void> {}
+  async notify(method: string): Promise<void> {
+    if (method !== "session/cancel") throw new Error(`Unexpected ACP notification: ${method}`);
+    this.stops++;
+    this.finish("cancelled");
+  }
   async *events(): AsyncIterable<JsonRpcNotification> {}
   subscribe(listener: (notification: JsonRpcNotification) => void): () => void {
     this.listeners.add(listener);
@@ -82,7 +85,7 @@ class FixtureTransport implements AcpTransport {
   }
 }
 
-function fixture(options: { record?: SessionRecord; closeFailure?: boolean; settlementFailure?: boolean; missing?: boolean } = {}) {
+function fixture(options: { record?: SessionRecord; closeFailure?: boolean; missing?: boolean } = {}) {
   let record = structuredClone(options.record);
   let reads = 0;
   let repositoryReads = 0;
@@ -101,11 +104,7 @@ function fixture(options: { record?: SessionRecord; closeFailure?: boolean; sett
   const env: Env = { APP_AUTH_TOKEN: "sync-secret", CHAT_SESSIONS: {
     idFromName(name) { return name; }, get() { return { fetch: (request: Request) => core.fetch(request) }; },
   } };
-  const core = new ChatSessionCore(state, env, async () => { starts++; return transport; }, () => ({
-    handle() { return undefined; }, seal() {},
-    async stop() { transport.stops++; transport.finish("cancelled"); }, async resume() {},
-    async stopAfterHostClose() { if (options.settlementFailure) throw new Error("settlement failed"); },
-  }), repository, () => {
+  const core = new ChatSessionCore(state, env, async () => { starts++; return transport; }, repository, () => {
     const socket = new FixtureSocket(); sockets.push(socket);
     return { socket, response: new Response(null, { status: 200 }) };
   });
@@ -300,12 +299,12 @@ describe("server read-only SDK document synchronization", () => {
     next.close(1000, "Done");
   });
 
-  test.each(["close", "settlement"]) ("application error overrides early SDK completion after %s failure", async (failure) => {
-    const app = fixture({ closeFailure: failure === "close", settlementFailure: failure === "settlement" });
+  test("application error overrides early SDK completion after an unconfirmed host close", async () => {
+    const app = fixture({ closeFailure: true });
     const socket = await authenticate(app); await app.command(); await Bun.sleep(5);
     app.transport.emit("partial"); app.transport.done(); app.transport.finish(); await app.drain();
-    expect(socket.state()).toMatchObject({ running: false, executionBlocked: true, error: `${failure} failed` });
-    expect(socket.state().messages.at(-1)).toMatchObject({ status: "error", error: `${failure} failed`, content: "partial" });
+    expect(socket.state()).toMatchObject({ running: false, executionBlocked: true, error: "close failed" });
+    expect(socket.state().messages.at(-1)).toMatchObject({ status: "error", error: "close failed", content: "partial" });
     expect((await app.command()).status).toBe(503);
     socket.close(1000, "Done");
   });
