@@ -33,34 +33,9 @@ pub(super) const CURRENT_SCHEMA_VERSION: i64 = 11;
 
 /// 会话事实表。
 pub(super) const THREADS_TABLE: &str = "threads";
-pub(super) const THREAD_COLUMN_NAMES: &[&str] = &[
-    "id",
-    "title",
-    "cwd",
-    "created_at",
-    "updated_at",
-    "message_count",
-    "parent_thread_id",
-    "snapshot_at_message_id",
-    "hidden",
-    "cancel_policy",
-    "config",
-    "frozen_context",
-    "inherited_context",
-    "agent_status",
-];
 
 /// canonical 历史表。
 pub(super) const MESSAGES_TABLE: &str = "messages";
-pub(super) const MESSAGE_COLUMN_NAMES: &[&str] = &[
-    "message_id",
-    "thread_id",
-    "role",
-    "content",
-    "truncated",
-    "excluded",
-    "projection",
-];
 
 /// 机器身份表：执行归属的一极，`workspaces.machine_id` 的引用目标。
 pub(super) const MACHINES_TABLE: &str = "machines";
@@ -276,10 +251,32 @@ pub(super) const CREATE_INDEXES: &[&str] = &[
     "CREATE INDEX IF NOT EXISTS idx_threads_updated ON threads(updated_at DESC, id DESC) WHERE hidden = 0 AND message_count > 0",
     "CREATE INDEX IF NOT EXISTS idx_threads_workspace_archived ON threads(workspace_id, archived, updated_at DESC, id DESC) WHERE parent_thread_id IS NULL AND message_count > 0",
 ];
-/// 重建绑定表后要补回的两条索引（索引随 DROP TABLE 一起消失）。
-pub(super) const BINDING_INDEXES: &[&str] = &[CREATE_INDEXES[1], CREATE_INDEXES[2]];
-/// 归属列建好之后要补的索引（`CREATE_INDEXES` 的末条）。
-pub(super) const THREAD_WORKSPACE_INDEX: &str = CREATE_INDEXES[4];
+
+/// 迁移期重建 `threads` 的暂存表（`threads_rebuild`）：`workspace_id` 必须落在 **NOT NULL**
+/// 上，而 SQLite 与远端执行器都不能把已有列改成 `NOT NULL`，只能重建。远端服务端的 SQL
+/// 能力边界里没有实测过 `ALTER TABLE ... RENAME`（现有远端迁移只用建表/删表/加列/插入/
+/// 更新），因此两端共用同一条重建路径：建暂存 → 搬入 → 删旧 → 建新 → 搬回 → 删暂存。
+///
+/// 暂存表的建表文本与 [`CREATE_THREADS_TABLE_SQL`] 同形（只有表名不同）但**不带**
+/// `IF NOT EXISTS`——重建只允许作用在本迁移刚删掉的位置：同名对象已存在时必须显式失败，
+/// 否则会把使用者的同名表当成暂存表搬空、再在最后一步删掉它。
+pub(super) const CREATE_REBUILD_THREADS_TABLE_SQL: &str = "CREATE TABLE threads_rebuild (
+    id TEXT PRIMARY KEY, title TEXT, cwd TEXT NOT NULL DEFAULT '',
+    created_at TEXT NOT NULL, updated_at TEXT NOT NULL, message_count INTEGER NOT NULL DEFAULT 0,
+    parent_thread_id TEXT, snapshot_at_message_id TEXT, hidden BOOLEAN NOT NULL DEFAULT 0,
+    cancel_policy TEXT NOT NULL DEFAULT 'cascade', config TEXT,
+    frozen_context TEXT, inherited_context TEXT, agent_status TEXT NOT NULL DEFAULT 'active',
+    workspace_id TEXT NOT NULL REFERENCES workspaces(id),
+    archived BOOLEAN NOT NULL DEFAULT 0 CHECK(archived IN (0, 1))
+)";
+
+/// 重建搬运：`threads` → 暂存表（列清单与当前 `threads` 形状一致，由
+/// `schema_shape_test::rebuild_statements_carry_the_canonical_threads_columns` 断言）。
+pub(super) const INSERT_THREADS_INTO_REBUILD_SQL: &str = "INSERT INTO threads_rebuild (id, title, cwd, created_at, updated_at, message_count, parent_thread_id, snapshot_at_message_id, hidden, cancel_policy, config, frozen_context, inherited_context, agent_status, workspace_id, archived) SELECT id, title, cwd, created_at, updated_at, message_count, parent_thread_id, snapshot_at_message_id, hidden, cancel_policy, config, frozen_context, inherited_context, agent_status, workspace_id, archived FROM threads";
+
+/// 重建搬运：新建的 `threads` ← 暂存表（列清单同上）。
+pub(super) const INSERT_REBUILD_INTO_THREADS_SQL: &str = "INSERT INTO threads (id, title, cwd, created_at, updated_at, message_count, parent_thread_id, snapshot_at_message_id, hidden, cancel_policy, config, frozen_context, inherited_context, agent_status, workspace_id, archived) SELECT id, title, cwd, created_at, updated_at, message_count, parent_thread_id, snapshot_at_message_id, hidden, cancel_policy, config, frozen_context, inherited_context, agent_status, workspace_id, archived FROM threads_rebuild";
+
 pub(super) const SELECT_OAUTH_CREDENTIAL_SQL: &str = "SELECT credentials_blob FROM mcp_oauth_credentials WHERE principal_id = ?1 AND workspace_id = ?2 AND server_key = ?3";
 pub(super) const UPSERT_OAUTH_CREDENTIAL_SQL: &str = "INSERT INTO mcp_oauth_credentials(principal_id, workspace_id, server_key, credentials_blob, updated_at) VALUES (?1, ?2, ?3, ?4, ?5) ON CONFLICT(principal_id, workspace_id, server_key) DO UPDATE SET credentials_blob = excluded.credentials_blob, updated_at = excluded.updated_at";
 pub(super) const DELETE_OAUTH_CREDENTIAL_SQL: &str = "DELETE FROM mcp_oauth_credentials WHERE principal_id = ?1 AND workspace_id = ?2 AND server_key = ?3";

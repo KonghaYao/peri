@@ -1,12 +1,12 @@
 use super::*;
-use crate::sessions::canonical::V10_CREATE_TABLES;
+use crate::sessions::canonical::{CREATE_INDEXES, V10_CREATE_TABLES};
 use crate::sessions::schema_cleanup::{
     LEGACY_BOUND_EXECUTION_SQL, LEGACY_EXECUTION_SQL, LEGACY_GOALS_SQL,
 };
 use peri_acp_types::messages::BaseMessage;
 use peri_acp_types::store::{serialize_persisted_payload, PersistedPayload};
 use peri_acp_types::workspace::WorkspaceError;
-use sqlx::{Connection, SqliteConnection};
+use sqlx::{AssertSqlSafe, Connection, SqliteConnection};
 
 async fn old_database() -> (tempfile::TempDir, SqliteConnection) {
     let directory = tempfile::tempdir().unwrap();
@@ -66,21 +66,23 @@ async fn history(
         .fetch_all(connection).await.unwrap()
 }
 
+/// 升级只重建 `threads` / `session_bindings` / `workspaces` / oauth：挂在**别的表**上的
+/// 扩展对象（列、表、索引、视图）原样保留，历史行与 rowid 不变。
+///
+/// 重建表上不承载数据的挂载对象不随表搬运：索引由迁移末尾整表重放 canonical 集合补回
+/// （见 `schema_v11_rebuild_replaces_the_index_set_on_threads`），触发器随重建消失。
+/// 载有数据的未知列没有去处，一律拒绝升级（见 `unknown_thread_columns_refuse_the_upgrade`）。
 #[tokio::test]
-async fn old_versions_upgrade_preserving_goal_extensions_thread_columns_and_history_rowids() {
+async fn old_versions_upgrade_preserving_goal_extensions_and_history_rowids() {
     for version in [10, 11] {
         let (directory, mut connection) = old_database().await;
         sqlx::raw_sql(
             "ALTER TABLE thread_goals ADD COLUMN extension TEXT;
             UPDATE thread_goals SET extension = 'goal extension';
-            ALTER TABLE threads ADD COLUMN extension_value TEXT;
-            UPDATE threads SET extension_value = 'thread extension' WHERE id = 'older';
             CREATE TABLE extension_goal_rows (id TEXT REFERENCES thread_goals(thread_id));
             INSERT INTO extension_goal_rows VALUES ('older');
             CREATE INDEX extension_goal_index ON thread_goals(objective);
-            CREATE VIEW extension_goal_view AS SELECT objective FROM thread_goals;
-            CREATE TRIGGER extension_goal_trigger AFTER UPDATE OF title ON threads
-                BEGIN UPDATE thread_goals SET extension = 'updated' WHERE thread_id = NEW.id; END;",
+            CREATE VIEW extension_goal_view AS SELECT objective FROM thread_goals;",
         )
         .execute(&mut connection)
         .await
@@ -111,28 +113,136 @@ async fn old_versions_upgrade_preserving_goal_extensions_thread_columns_and_hist
         .await
         .unwrap();
         assert_eq!(objects, after);
-        let retained: (String, String) = sqlx::query_as(
-            "SELECT t.extension_value, g.extension FROM threads t JOIN thread_goals g ON g.thread_id = t.id WHERE t.id = 'older'",
-        ).fetch_one(&mut *connection).await.unwrap();
-        assert_eq!(
-            retained,
-            ("thread extension".into(), "goal extension".into())
-        );
+        let retained: (String,) = sqlx::query_as("SELECT extension FROM thread_goals")
+            .fetch_one(&mut *connection)
+            .await
+            .unwrap();
+        assert_eq!(retained.0, "goal extension");
         let version: i64 = sqlx::query_scalar("PRAGMA user_version")
             .fetch_one(&mut *connection)
             .await
             .unwrap();
         assert_eq!(version, CURRENT_SCHEMA_VERSION);
         drop(connection);
-        store
-            .update_title(&"older".into(), "changed")
-            .await
-            .unwrap();
         let extension: String = sqlx::query_scalar("SELECT extension FROM thread_goals")
             .fetch_one(&store.database.pool)
             .await
             .unwrap();
-        assert_eq!(extension, "updated");
+        assert_eq!(extension, "goal extension");
+    }
+}
+
+/// `threads` 被重建：表上不承载数据的挂载对象随重建消失，索引以 canonical 集合为准
+/// （迁移末尾整表重放一次，补回 `DROP TABLE` 带走的那两条，也顺手清掉旧代留下的退役索引）。
+#[tokio::test]
+async fn schema_v11_rebuild_replaces_the_index_set_on_threads() {
+    let (directory, mut connection) = old_database().await;
+    sqlx::raw_sql(
+        "CREATE INDEX idx_threads_parent_thread_id ON threads(parent_thread_id);
+        CREATE TRIGGER extension_title_trigger AFTER UPDATE OF title ON threads
+            BEGIN UPDATE thread_goals SET status = 'paused' WHERE thread_id = NEW.id; END;",
+    )
+    .execute(&mut connection)
+    .await
+    .unwrap();
+    let before = history(&mut connection).await;
+    assert_eq!(
+        index_names(&mut connection, "threads").await,
+        vec!["idx_threads_parent_thread_id".to_owned()]
+    );
+    connection.close().await.unwrap();
+    let store = SqliteThreadStore::new(directory.path().join("threads.db"))
+        .await
+        .unwrap();
+    let mut connection = store.database.pool.acquire().await.unwrap();
+    let mut expected: Vec<String> = CREATE_INDEXES
+        .iter()
+        .filter(|statement| statement.contains(" ON threads("))
+        .map(|statement| canonical_index_name(statement))
+        .collect();
+    expected.sort();
+    assert_eq!(index_names(&mut connection, "threads").await, expected);
+    let (trigger,): (i64,) = sqlx::query_as(
+        "SELECT COUNT(*) FROM sqlite_schema WHERE type = 'trigger' AND tbl_name = 'threads'",
+    )
+    .fetch_one(&mut *connection)
+    .await
+    .unwrap();
+    assert_eq!(trigger, 0);
+    assert_eq!(before, history(&mut connection).await);
+}
+
+/// 本库已有的索引名（按名排序），用于断言迁移终点的索引集合。
+async fn index_names(connection: &mut SqliteConnection, table: &str) -> Vec<String> {
+    let rows: Vec<(String,)> = sqlx::query_as(AssertSqlSafe(format!(
+        "SELECT name FROM sqlite_schema WHERE type = 'index' AND tbl_name = '{table}'
+            AND name NOT LIKE 'sqlite_%' ORDER BY name"
+    )))
+    .fetch_all(connection)
+    .await
+    .unwrap();
+    rows.into_iter().map(|(name,)| name).collect()
+}
+
+/// 从 `CREATE INDEX IF NOT EXISTS <name> ON ...` 里取出索引名（canonical 的语句形态固定）。
+fn canonical_index_name(statement: &str) -> String {
+    statement
+        .split_whitespace()
+        .skip_while(|token| *token != "EXISTS")
+        .nth(1)
+        .expect("canonical index statement must name the index")
+        .to_owned()
+}
+
+/// 未知列载有数据、没有去处：升级必须**拒绝**（库保持原版本、字节不变），而不是把值搬丢。
+#[tokio::test]
+async fn unknown_thread_columns_refuse_the_upgrade() {
+    for version in [10, 11] {
+        let (directory, mut connection) = old_database().await;
+        sqlx::raw_sql(
+            "ALTER TABLE threads ADD COLUMN extension_value TEXT;
+            UPDATE threads SET extension_value = 'thread extension' WHERE id = 'older';",
+        )
+        .execute(&mut connection)
+        .await
+        .unwrap();
+        sqlx::raw_sql(sqlx::AssertSqlSafe(format!(
+            "PRAGMA user_version = {version}"
+        )))
+        .execute(&mut connection)
+        .await
+        .unwrap();
+        let before = history(&mut connection).await;
+        connection.close().await.unwrap();
+        let error = match SqliteThreadStore::new(directory.path().join("threads.db")).await {
+            Ok(_) => panic!("unknown columns on a rebuilt table must refuse the upgrade"),
+            Err(error) => error,
+        };
+        let message = format!("{error:#}");
+        // 版本 10 走搬迁路径：拒绝文案点名未知列（见 `storage_v11_migration`）。版本 11 由
+        // 写打开的探测直接判定形状不认识（错误类型只有分类），逐项原因落在日志里。
+        if version == 10 {
+            assert!(message.contains("extension_value"), "{message}");
+        }
+        let mut connection = SqliteConnection::connect_with(
+            &SqliteConnectOptions::new()
+                .filename(directory.path().join("threads.db"))
+                .foreign_keys(true),
+        )
+        .await
+        .unwrap();
+        let (stored,): (i64,) = sqlx::query_as("PRAGMA user_version")
+            .fetch_one(&mut connection)
+            .await
+            .unwrap();
+        assert_eq!(stored, version);
+        assert_eq!(before, history(&mut connection).await);
+        let (kept,): (String,) =
+            sqlx::query_as("SELECT extension_value FROM threads WHERE id = 'older'")
+                .fetch_one(&mut connection)
+                .await
+                .unwrap();
+        assert_eq!(kept, "thread extension");
     }
 }
 

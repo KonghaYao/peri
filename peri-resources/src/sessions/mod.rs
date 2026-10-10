@@ -22,6 +22,7 @@ pub(crate) use machine::set_explicit as set_explicit_machine_id;
 mod open;
 mod remote;
 mod schema_cleanup;
+mod schema_shape;
 mod storage_v2_plan;
 // `CredentialError` 只做 crate 内最小 re-export：分类（`classify_open_failure`）要按类型认出
 // 「凭证来源不可用」，但凭证类型不进公共 API，也不向消费侧暴露 SDK 类型或凭证值。

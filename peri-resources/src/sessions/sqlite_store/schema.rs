@@ -4,6 +4,7 @@ use super::database::SqliteSessionDatabase;
 #[cfg(test)]
 use super::SqliteThreadStore;
 use crate::sessions::canonical;
+use crate::sessions::schema_shape;
 use anyhow::Result;
 use peri_acp_types::workspace::WorkspaceError;
 use sqlx::{AssertSqlSafe, Connection, SqliteConnection};
@@ -110,25 +111,32 @@ pub(super) async fn inspect(connection: &mut SqliteConnection) -> Result<SchemaS
     Ok(SchemaState::Legacy)
 }
 
-/// 版本已是当前版本时的形状判定（fail-closed）：当前形状直接可用，压缩前的登记形状
-/// 走单条搬运，两者都不是就拒绝——不猜形状，也不把读不懂当成可用。
+/// 版本已是当前版本时的形状判定（fail-closed）：与 `sessions::schema_shape` 的同一份声明
+/// 逐项比对（远端只读探测与远端迁移批次用的是同一份声明）——当前形状直接可用，压缩前的
+/// 登记形状（搬运输入）走单条搬运，两者都不是就拒绝。不猜形状，也不把读不懂当成可用。
+/// 可选表（凭证、关闭意图）缺表不算漂移：前者保持缺失，后者由写打开幂等补齐。
 async fn current_shape(connection: &mut SqliteConnection) -> Result<SchemaState> {
-    let threads = column_names(connection, "threads").await?;
-    let bindings = column_names(connection, "session_bindings").await?;
-    if table_exists(connection, canonical::MACHINES_TABLE).await?
-        && threads.contains("workspace_id")
-        && bindings.contains("evidence_origin")
-    {
-        return Ok(SchemaState::Current);
-    }
-    if !threads.contains("workspace_id")
-        && bindings.contains("workspace_id")
-        && column_names(connection, "workspaces")
-            .await?
-            .contains("root")
-    {
+    let tables =
+        schema_shape::read_local_columns(&mut *connection, schema_shape::CURRENT_COLUMNS_SQL)
+            .await?;
+    let current_reason = match schema_shape::check_current_shape(&tables) {
+        Ok(()) => return Ok(SchemaState::Current),
+        Err(reason) => reason,
+    };
+    let tables =
+        schema_shape::read_local_columns(&mut *connection, schema_shape::INPUT_COLUMNS_SQL).await?;
+    let input_reason = schema_shape::check_input_shape(&tables)
+        .and_then(|()| schema_shape::check_dropped_shape(&tables));
+    if input_reason.is_ok() {
         return Ok(SchemaState::Version11);
     }
+    // 拒绝的原因要能回答「为什么」：错误类型本身不携带形状诊断（协议层只有分类），
+    // 因此把逐项漂移写进日志，而不是让它只活在代码里。
+    tracing::warn!(
+        current = %current_reason,
+        input = %input_reason.unwrap_err(),
+        "session database shape is not supported by this build"
+    );
     Err(WorkspaceError::UnsupportedDatabaseSchema.into())
 }
 

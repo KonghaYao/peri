@@ -191,6 +191,34 @@ async fn index_exists(connection: &mut SqliteConnection, name: &str) -> bool {
     row.is_some()
 }
 
+/// 迁移终点必须是 canonical 形状：逐表逐列（与远端判定同一份声明）且带齐 canonical 索引集。
+///
+/// 形状判定只看表/列；索引是派生对象，不在判定里，由这里显式断言「建齐」——搬运动过
+/// `threads` / `session_bindings`，`DROP TABLE` 会把旧索引一并带走。
+async fn assert_current_shape(connection: &mut SqliteConnection) {
+    let tables = crate::sessions::schema_shape::read_local_columns(
+        connection,
+        crate::sessions::schema_shape::CURRENT_COLUMNS_SQL,
+    )
+    .await
+    .unwrap();
+    crate::sessions::schema_shape::check_current_shape(&tables).unwrap();
+    for statement in crate::sessions::canonical::CREATE_INDEXES {
+        let name = canonical_index_name(statement);
+        assert!(index_exists(connection, &name).await, "{name}");
+    }
+}
+
+/// 从 `CREATE INDEX IF NOT EXISTS <name> ON ...` 里取出索引名（canonical 的语句形态固定）。
+fn canonical_index_name(statement: &str) -> String {
+    statement
+        .split_whitespace()
+        .skip_while(|token| *token != "EXISTS")
+        .nth(1)
+        .expect("canonical index statement must name the index")
+        .to_owned()
+}
+
 async fn assert_no_foreign_key_violation(connection: &mut SqliteConnection) {
     let violations: Vec<(String, i64, String, i64)> = sqlx::query_as("PRAGMA foreign_key_check")
         .fetch_all(&mut *connection)
@@ -234,6 +262,7 @@ async fn upgrades_the_registration_shape_preserving_execution_evidence() {
     migrate_local_v11(&mut connection).await.unwrap();
 
     assert_eq!(version_of(&mut connection).await, 11);
+    assert_current_shape(&mut connection).await;
     assert!(!table_exists(&mut connection, "session_environments").await);
     assert!(!table_exists(&mut connection, "legacy_execution_registrations").await);
     assert!(index_exists(&mut connection, "idx_bindings_project").await);
@@ -525,6 +554,9 @@ async fn released_schema_10_database_upgrades_through_the_store_once() {
         .await
         .unwrap();
     assert_eq!(version, 11);
+    let mut connection = store.database.pool.acquire().await.unwrap();
+    assert_current_shape(&mut connection).await;
+    drop(connection);
     let (cookie,): (i64,) = sqlx::query_as("PRAGMA schema_version")
         .fetch_one(&store.database.pool)
         .await

@@ -2,7 +2,8 @@
 //!
 //! 两种输入都走**同一条**搬运：正式发布的 ≤10 库（调用方先在本事务补齐到 V10 形状）与
 //! β 内部停在 11 的登记形状库（形状已经是 V10）。搬运把登记的 `workspaces` 与引用它的
-//! 绑定表整体换成当前形状：
+//! 绑定表整体换成当前形状，并把 `threads` 重建到 canonical 形状（`workspace_id NOT NULL`，
+//! 不只是加一个可空列——两种形状并存的库会让后续判定与读取各自漂移）：
 //!
 //! - 归属行按 `(machine_id, path)` 收敛，id 沿用旧登记 UUID（空闲时），旧登记的证据三列
 //!   随行搬过去；没有会话引用但登记仍存在的路径也保留一行（否则登记行会凭空消失）。
@@ -11,6 +12,10 @@
 //!   都说明改写会静默改绑：直接拒绝升级，库保持原版本。
 //! - 旧凭证只有 machine 作用域，无法证明 workspace 归属，不搬运（按当前形状重建）。
 //! - 压缩前独有的 `session_environments` 在搬运后删除。
+//!
+//! 改写之前先做形状判定（`sessions::schema_shape`，与远端批次同一份声明）：输入表的列必须落在
+//! 本构建认识的边界内（未知列没有去处，不能静默搬丢），要删除的压缩前对象必须与声明同形
+//! （同名的别的表不删）。判定不过即拒绝——库保持原版本，旧二进制仍可打开。
 //!
 //! 整段在一个事务里完成，提交前用 `foreign_key_check` 补齐校验，失败即回滚。
 //! 外键强制由调用方在**事务外**关闭（`PRAGMA foreign_keys` 在事务内是空操作）。
@@ -21,6 +26,7 @@ use anyhow::{bail, Result};
 use sqlx::{Connection, SqliteConnection};
 
 use crate::sessions::canonical;
+use crate::sessions::schema_shape;
 use crate::sessions::storage_v2_plan::{
     machine_identity, path_source_name, plan_binding_rows, plan_workspace_rows, read_local_plan,
     LegacyBindingRow,
@@ -57,6 +63,16 @@ async fn migrate_transaction(connection: &mut SqliteConnection) -> Result<()> {
 /// 读计划与旧绑定 → 重建归属与绑定 → 删掉压缩前独有的对象 → 推进版本。返回时
 /// `user_version` 已是当前版本。
 pub(super) async fn migrate_shape(connection: &mut SqliteConnection) -> Result<()> {
+    // 形状判定先于任何改写：输入形状必须落在本构建认识的边界内（未知列没有去处，不能静默
+    // 搬丢），要删除的压缩前对象必须与声明同形（同名的别的表不删）。判定不过即拒绝，
+    // 事务回滚后库保持原版本，旧二进制仍可打开。
+    let tables =
+        schema_shape::read_local_columns(&mut *connection, schema_shape::INPUT_COLUMNS_SQL).await?;
+    schema_shape::check_input_shape(&tables)
+        .map_err(|reason| anyhow::anyhow!("storage v11 migration refuses this shape: {reason}"))?;
+    let dropped = schema_shape::dropped_plan(&tables).map_err(|reason| {
+        anyhow::anyhow!("storage v11 migration refuses to drop this object: {reason}")
+    })?;
     // 退役对象先清：形状判定的失败要发生在任何改写之前（库保持原版本，旧二进制仍可打开）。
     // ≤10 路径的调用方在本事务开头已跑过一次，第二次是幂等的空操作。
     for statement in super::schema_cleanup::removal_plan(connection).await? {
@@ -133,6 +149,7 @@ pub(super) async fn migrate_shape(connection: &mut SqliteConnection) -> Result<(
         .await?;
     }
 
+    // 过渡列先可空：归属按行回填，随后重建表把它升到 canonical 的 `NOT NULL`。
     sqlx::query("ALTER TABLE threads ADD COLUMN workspace_id TEXT REFERENCES workspaces(id)")
         .execute(&mut *connection)
         .await?;
@@ -148,10 +165,7 @@ pub(super) async fn migrate_shape(connection: &mut SqliteConnection) -> Result<(
             .execute(&mut *connection)
             .await?;
     }
-    // 归属索引引用后补的列，必须在补列与回填之后建。
-    sqlx::query(canonical::THREAD_WORKSPACE_INDEX)
-        .execute(&mut *connection)
-        .await?;
+    rebuild_threads(connection).await?;
 
     sqlx::query(canonical::CREATE_BINDINGS_TABLE_SQL)
         .execute(&mut *connection)
@@ -171,27 +185,29 @@ pub(super) async fn migrate_shape(connection: &mut SqliteConnection) -> Result<(
         .execute(&mut *connection)
         .await?;
     }
-    for statement in canonical::BINDING_INDEXES {
-        // 语句文本来自 `canonical` 的静态清单，不含外部输入。
-        sqlx::query(sqlx::AssertSqlSafe(*statement))
+    // 压缩前独有的两张表：旧凭证只有 machine 作用域，无法证明属于哪个 Workspace；环境事实
+    // 与归属行合并之后也不再承载事实。两张表在删除前都已判定形状（见 `schema_shape`）。
+    for statement in &dropped {
+        // 语句文本来自 `schema_shape` 的静态清单，不含外部输入。
+        sqlx::query(sqlx::AssertSqlSafe((*statement).to_owned()))
             .execute(&mut *connection)
             .await?;
     }
-
-    // 旧凭证只有 machine 作用域，无法证明属于哪个 Workspace。
-    sqlx::query("DROP TABLE mcp_oauth_credentials")
-        .execute(&mut *connection)
-        .await?;
     sqlx::query(canonical::CREATE_OAUTH_CREDENTIALS_TABLE_SQL)
         .execute(&mut *connection)
         .await?;
     sqlx::query(canonical::CREATE_SESSION_CLOSE_INTENTS_TABLE_SQL)
         .execute(&mut *connection)
         .await?;
-    // 环境事实与归属行合并之后，压缩前独有的这张表不再承载任何事实。
-    sqlx::query("DROP TABLE session_environments")
-        .execute(&mut *connection)
-        .await?;
+    // 迁移终点必须带齐 canonical 索引集：`DROP TABLE` 会把旧表上的索引一并删掉，而输入库
+    // 也可能本来就缺索引（`user_version` 已是 11 的开发期库）。整表重放一次是幂等的，
+    // 也是「一个 schema、两种执行器」在索引上的同一份语句（远端批次末尾同样整表重放）。
+    for statement in canonical::CREATE_INDEXES {
+        // 语句文本来自 `canonical` 的静态清单，不含外部输入。
+        sqlx::query(sqlx::AssertSqlSafe(*statement))
+            .execute(&mut *connection)
+            .await?;
+    }
 
     let violations: Vec<(String, i64, String, i64)> = sqlx::query_as("PRAGMA foreign_key_check")
         .fetch_all(&mut *connection)
@@ -202,6 +218,38 @@ pub(super) async fn migrate_shape(connection: &mut SqliteConnection) -> Result<(
     sqlx::query("PRAGMA user_version = 11")
         .execute(&mut *connection)
         .await?;
+    Ok(())
+}
+
+/// 重建 `threads` 为 canonical 形状（`workspace_id` 落在 `NOT NULL` 上）。
+///
+/// 调用前 `workspace_id` 必须已逐行回填。无归属的会话行在重建后无法满足 `NOT NULL`，
+/// 因此这里先显式拒绝（库保持原版本），而不是让重建在搬到一半时失败。
+///
+/// 重建路径与远端批次逐条对应（`canonical` 的同一份文本）：建暂存 → 搬入 → 删旧 →
+/// 建新 → 搬回 → 删暂存。`DROP TABLE` 会把旧表上的索引一并删掉，索引由调用方在迁移末尾
+/// 整表重放 `canonical::CREATE_INDEXES` 补回。两端都不依赖 `ALTER TABLE ... RENAME`。
+pub(super) async fn rebuild_threads(connection: &mut SqliteConnection) -> Result<()> {
+    let (unassigned,): (i64,) =
+        sqlx::query_as("SELECT COUNT(*) FROM threads WHERE workspace_id IS NULL")
+            .fetch_one(&mut *connection)
+            .await?;
+    if unassigned != 0 {
+        bail!("{unassigned} sessions have no workspace assignment");
+    }
+    for statement in [
+        canonical::CREATE_REBUILD_THREADS_TABLE_SQL,
+        canonical::INSERT_THREADS_INTO_REBUILD_SQL,
+        "DROP TABLE threads",
+        canonical::CREATE_THREADS_TABLE_SQL,
+        canonical::INSERT_REBUILD_INTO_THREADS_SQL,
+        "DROP TABLE threads_rebuild",
+    ] {
+        // 语句文本来自 `canonical` 的静态清单，不含外部输入。
+        sqlx::query(sqlx::AssertSqlSafe(statement.to_owned()))
+            .execute(&mut *connection)
+            .await?;
+    }
     Ok(())
 }
 

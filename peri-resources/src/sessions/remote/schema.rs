@@ -6,16 +6,22 @@
 //! `PRAGMA user_version`（服务端直接拒绝，实测见母 issue §9.8 探测项 5b），版本标记只能落在
 //! 普通表的单行事实里（[`STORE_META_TABLE`]）。差异是**载体**，不是版本代数。
 //!
-//! 契约标签 [`STORE_CONTRACT`] 记的是形状代数，形状变化一次推进一代：`v2` 是统一前的
-//! `peri_sessions` 混合形状（schema 10|11），`v5` 是当前形状——执行登记并入 `workspaces`、
-//! 绑定表不再有指向登记表的外键、退役执行对象清空。契约不符的库被 [`acceptance`] /
+//! 契约标签 [`STORE_CONTRACT`] 记的是形状代数，形状变化一次推进一代：`v2` 是远端会话表形状的
+//! 上一代（schema 10|11，执行登记独立成表、绑定行指向登记表），`v5` 是当前形状——执行登记并入
+//! `workspaces`、绑定表不再有指向登记表的外键、退役执行对象清空。契约不符的库被 [`acceptance`] /
 //! [`matches_build`] 判为不认识——这是有意的 fail-closed：不迁移、不覆盖，也不按旧语义读写。
 //! 唯一升级来源是 [`PREVIOUS_STORE_CONTRACT`] 的 v2，由 `schema_upgrade` 一条批次升级到位，
 //! 保留目标与扩展对象并推进版本，store 身份与账本保持不变。
 //!
+//! 契约与版本只说「这是哪个代数的库」，**不说**这个库的表真的长成那个样子。打开路径因此在
+//! 身份读取之后再做一次**只读的形状探测**（[`shape_probe`]）：读得动的库必须与契约声明的
+//! 形状逐项相符，不符即拒绝——旧构建、被手工改过的库与同名的别的对象都拦在读写之前，
+//! 而不是让第一句读写以「列不存在」这类下游错误暴露。形状探测不是迁移依据：写打开的迁移
+//! 批次自己再读一次形状并在批内守着它（见 `schema_upgrade`）。
+//!
 //! 三条硬规则：
 //!
-//! - **读不写**：身份/版本读取只有 SELECT（`identity_read_plan` 可离线断言）。
+//! - **读不写**：身份/版本读取与形状探测只有 SELECT（`identity_read_plan` 可离线断言）。
 //! - **未知不覆盖**：版本高于本构建、契约不符或形状不可解释时一律拒绝，不做 DDL、
 //!   不猜列形状；初始化只在「确定不存在」时创建，已存在时读回而不改写。
 //! - **唯一身份**：`store_id` 由首次初始化竞争产生（元数据行主键），失败者读胜者，
@@ -24,11 +30,15 @@
 //!   或「读回里现在有身份」推导。只有本事务确切插入元数据行并提交才算创建——结果未知
 //!   （丢响应、超时）不产生创建事实。
 
+use std::collections::HashMap;
 use std::fmt;
 
+use peri_acp_types::session_resources::SessionResourceResult;
 use turso_serverless::Value;
 
+use super::mutation::incomplete_reply;
 use super::sql::{int_at, text_at, StatementSpec};
+use crate::sessions::schema_shape::{self, ActualColumn};
 
 /// 本构建写入并接受的远端 schema 版本：**与本机 `CURRENT_SCHEMA_VERSION` 同一个常量**。
 ///
@@ -38,11 +48,11 @@ pub(super) const REMOTE_SCHEMA_VERSION: i64 = crate::sessions::canonical::CURREN
 /// 远程存储契约标签：形状 + 语义代数，和版本一起决定「这是不是我们认识的那个库」。
 ///
 /// `v5` = 当前形状：执行登记并入 `workspaces`（`(machine_id, path)` 是唯一归属身份），绑定行的
-/// `workspace_id` 收敛到会话归属行，退役执行对象清空；`v2` 是统一前的混合形状
-/// （schema 10|11）。中间的 12..=18 是未发布的开发期形状，本构建一律不认识。
+/// `workspace_id` 收敛到会话归属行，退役执行对象清空；`v2` 是远端会话表形状的上一代
+/// （schema 10|11，执行登记独立成表）。中间的 12..=19 是未发布的开发期形状，本构建一律不认识。
 pub(super) const STORE_CONTRACT: &str = "peri.session.store/v5";
 
-/// 唯一升级来源：统一前的远端会话形状（schema 10|11），读得懂，写打开先完成一次性升级。
+/// 唯一升级来源：远端会话表形状的上一代（schema 10|11），读得懂，写打开先完成一次性升级。
 pub(super) const PREVIOUS_STORE_CONTRACT: &str = "peri.session.store/v2";
 
 /// 统一之前的远端会话表：出现它们说明这是一个**旧形状的库**（不是空库）。
@@ -217,6 +227,96 @@ pub(super) fn identity_read_plan() -> Vec<StatementSpec> {
         ),
         StatementSpec::bare(SELECT_META_SQL),
     ]
+}
+
+/// 打开路径要探测的形状代数：由契约与版本决定（[`shape_probe`]）。
+///
+/// 探测各用一条只读 SELECT 读回列形状（`schema_shape` 的同一份声明与判定；本机与远端共用），
+/// 判定不宽容：读得懂的库其形状必须与契约声明的代数逐项相符。
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) enum ShapeProbe {
+    /// 当前形状（`v5` + 11）：8 张 canonical 表逐表严格判定。
+    Current,
+    /// 迁移输入形状（`v2` + 10|11）：搬运输入的上下界，外加要删除对象的严格判定。
+    Input,
+}
+
+impl ShapeProbe {
+    /// 探测语句（只读、单条 SELECT；缺表在结果里没有行，由判定区分「缺表」与「空形状」）。
+    pub(super) fn sql(self) -> &'static str {
+        match self {
+            Self::Current => schema_shape::CURRENT_COLUMNS_SQL,
+            Self::Input => schema_shape::INPUT_COLUMNS_SQL,
+        }
+    }
+
+    /// 读回的列形状 → 判定结论（纯函数）。诊断只说明「哪张表/哪一列不符」，不含会话内容。
+    pub(super) fn check(self, tables: &HashMap<String, Vec<ActualColumn>>) -> StoreShapeRead {
+        // 声明里的表**一张都没有**：这不是「长得不一样」，而是会话形状还没建立——身份先于
+        // 会话表建立的库（只做过机制实测、或上一次打开在补齐 DDL 之前中断）就是这个样子。
+        // 它不是漂移，判成漂移会把写打开的补齐/升级路径连同空库分支一起关掉。
+        //
+        // 「部分表在」不在此列：补齐与迁移都是**一个**受管批（原子），半套表不可能是我们
+        // 中断留下的，只能来自别的构建或手工改动——那是不认识的形状，照样拒绝。
+        if tables.is_empty() {
+            return StoreShapeRead::Unbuilt;
+        }
+        let verdict = match self {
+            Self::Current => schema_shape::check_current_shape(tables),
+            Self::Input => schema_shape::check_input_shape(tables)
+                .and_then(|()| schema_shape::check_dropped_shape(tables)),
+        };
+        match verdict {
+            Ok(()) => StoreShapeRead::Consistent,
+            Err(detail) => StoreShapeRead::Drifted(detail),
+        }
+    }
+}
+
+/// 形状探测的结论。
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(super) enum StoreShapeRead {
+    /// 声明的会话表一张都没建（见 [`ShapeProbe::check`]）：写打开按各自契约补齐/升级，
+    /// 只读打开没有可读的事实。
+    Unbuilt,
+    /// 与契约声明的代数相符。
+    Consistent,
+    /// 与声明不符：带上**具体哪个判定失败**（诊断），调用方一律折算成拒绝。
+    Drifted(String),
+}
+
+/// 契约 + 版本 → 本次打开要探哪一份形状（`None` = 本构建不读这个库，没什么可探）。
+///
+/// 与 [`StoreSnapshot::readable`] 同一份判据：探测面与读取面永远一致，不会出现「读得动但
+/// 不探测」或「探测了却不读」的库。
+pub(super) fn shape_probe(snapshot: &StoreSnapshot) -> Option<ShapeProbe> {
+    if snapshot.matches_build() {
+        Some(ShapeProbe::Current)
+    } else if snapshot.readable() {
+        Some(ShapeProbe::Input)
+    } else {
+        None
+    }
+}
+
+/// 列形状读回（[`ShapeProbe::sql`] 的那条语句）→ 与 `schema_shape` 判定入口同形的逐表分组。
+///
+/// 四列 `(表名, 列名, NOT NULL, 主键)` 按读回顺序分组；形状不符的回复按不完整读上报——
+/// 「读不到」不会被当成「形状为空」。
+pub(super) fn decode_column_map(
+    rows: &[Vec<Value>],
+) -> SessionResourceResult<HashMap<String, Vec<ActualColumn>>> {
+    let malformed = || incomplete_reply("session shape probe returned a row it cannot explain");
+    let mut decoded = Vec::with_capacity(rows.len());
+    for row in rows {
+        decoded.push((
+            text_at(row, 0).ok_or_else(malformed)?.to_owned(),
+            text_at(row, 1).ok_or_else(malformed)?.to_owned(),
+            int_at(row, 2).ok_or_else(malformed)? != 0,
+            int_at(row, 3).ok_or_else(malformed)?,
+        ));
+    }
+    Ok(schema_shape::group_columns(decoded))
 }
 
 /// 初始化计划里元数据 INSERT 的下标：身份竞争发生在这一条。

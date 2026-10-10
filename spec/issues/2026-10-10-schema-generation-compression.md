@@ -49,10 +49,15 @@ machine_id, server_key)。V10 与 V11 的差异仅为退役对象是否已清理
 - 规划：`storage_v2_plan::{read_local_plan, plan_local_workspaces}` 保持不变；
   远端继续自读 + `plan_local_workspaces`（同现行 v12）。
 - machines：plan 中出现的 machine_id 全集（uuid 字面量 → '我的电脑'/known，否则
-  '旧机器'/legacy_unknown）+ 当前机器 `INSERT OR IGNORE`。
+  '旧机器'/legacy_unknown）+ 当前机器 `INSERT OR IGNORE`；规划用的**同一集合**也并入
+  当前机器（本机与远端一致）——没有会话引用的登记行因此落在当前机器上，不会因集合为空
+  被 `plan_workspace_rows` 静默跳过（登记证据丢失、版本照常推进）。
 - workspaces：plan.workspaces（id 沿用旧登记 UUID，同现行 v12 语义）。
 - threads：加 workspace_id（REFERENCES workspaces(id)）与 archived（DEFAULT 0）；
-  workspace_id ← plan.session_workspace_ids。
+  workspace_id ← plan.session_workspace_ids。加列后**整体重建**到 canonical 形状
+  （`workspace_id` 落在 `NOT NULL` 上，无归属的会话行拒绝升级）；重建表上不承载数据
+  的挂载对象不随表搬运（索引由末尾整表重放补回，触发器随重建消失），载有数据的未知
+  列没有去处、一律拒绝升级。
 - session_bindings：**重建**（新形状）。workspace_id ← 归属行 id
   （plan.session_workspace_ids[thread_id]）；discovery_snapshot ← 旧登记（旧
   workspaces 行，按旧 bindings.workspace_id 匹配）的 discovery；
@@ -60,7 +65,8 @@ machine_id, server_key)。V10 与 V11 的差异仅为退役对象是否已清理
   （fail-closed，沿用现行严格性）。schema_version / project_id / relative_cwd 原样。
 - mcp_oauth_credentials：DROP + 重建（不搬运；旧凭证是 machine 作用域，无法证明
   workspace 归属——沿用现行决策）。
-- session_environments：迁移完成后 DROP。
+- session_environments：迁移完成后 DROP（`IF EXISTS`——远端 v2 输入可能整表缺席，删除
+  语句必须对缺表幂等；同名异形仍由删除前的形状判定拦下）。
 - 退役对象：`schema_cleanup::removal_plan` + `execution_recovery_removal_plan`。
 
 ## 4. canonical.rs 收敛
@@ -86,9 +92,12 @@ machine_id, server_key)。V10 与 V11 的差异仅为退役对象是否已清理
 
 - `SchemaState` 收敛：`Empty / Legacy / Version2..10 / Version11`（旧内部形状）/
   `Current`。
-  - version == 11 的形状判定（fail-closed）：新形状特征（`machines` 表存在 &&
-    `threads` 有 `workspace_id` && `session_bindings` 有 `evidence_origin`）→
-    `Current`；V10 canonical 形状 → `Version11`（走升级）；其余 → 拒绝。
+  - version == 11 的形状判定（fail-closed）：**逐表逐列**比对一份共用声明
+    （`sessions/schema_shape.rs`，本机与远端同源）——列序列、NOT NULL、主键逐项相符 →
+    `Current`；压缩前登记形状（带上下界）→ `Version11`（走升级）；其余 → 拒绝，
+    逐项漂移原因写日志。`mcp_oauth_credentials` 与 `session_close_intents` 允许缺表
+    （前者保持缺失、凭证能力如实上报不可用；后者由写打开幂等补齐），存在时必须同形。
+    索引不参与判定：它是派生对象，由新建/迁移建齐、由测试断言。
   - version 12..19 → `UnsupportedSchemaVersion { found, supported: 11 }`。
 - `init_schema`：
   - `Current` → 幂等补齐（close_intents 表、当前机器行）。
@@ -99,11 +108,17 @@ machine_id, server_key)。V10 与 V11 的差异仅为退役对象是否已清理
 - 迁移模块：`storage_v2_migration.rs` + `storage_v19_migration.rs` 合并为
   `storage_v11_migration.rs`。结构：
   `PRAGMA foreign_keys = OFF` → `BEGIN IMMEDIATE` → removals（含 execution recovery）
-  → 补 `session_environments` + backfill（沿用现行保险）→ 读计划（read_local_plan）
+  → 补 `session_environments` + backfill（沿用现行保险）→ 形状判定（输入表上下界 +
+  待删对象同形，判定不过即拒绝）→ 读计划（read_local_plan）
   + 读旧 bindings 与登记 discovery → DROP `session_bindings`、DROP `workspaces` →
-  建 machines/workspaces + 插 → threads ALTER + UPDATE → 建新 bindings + INSERT
+  建 machines/workspaces + 插 → threads ALTER + UPDATE → **重建 `threads`**
+  （建暂存 → 搬入 → 删旧 → 建新 → 搬回 → 删暂存；`workspace_id` 落在 canonical 的
+  `NOT NULL` 上，无归属行即拒绝）→ 建新 bindings + INSERT
   （映射见 §3.3）→ oauth 重建 + close_intents → DROP `session_environments` →
-  `PRAGMA foreign_key_check` 无违规 → `user_version = 11` → COMMIT → FK ON。
+  **整表重放 `CREATE_INDEXES`** → `PRAGMA foreign_key_check` 无违规 →
+  `user_version = 11` → COMMIT → FK ON。
+- 重建表上不承载数据的挂载对象不随表搬运：索引由末尾整表重放补回，触发器随重建消失；
+  载有数据的未知列没有去处，一律拒绝升级（见 §3.3）。
 - 不引入 `legacy_execution_registrations` 中间名（直接重建，迁移过程内部也不出现
   登记表概念）。
 
@@ -115,9 +130,14 @@ machine_id, server_key)。V10 与 V11 的差异仅为退役对象是否已清理
   - `readable`：matches_build || (v2 && version ∈ {10, 11})。
   - `acceptance`：11 → Accept；10 → Upgradeable；> 11 → TooNew；其余 → Unusable。
   - v3/v4 契约、12..19 → 不可读 → `open_step` 拒绝（unrecognized remote store schema）。
+  - 打开时（含只读）用同一份形状声明做一次**只读探测**：v5 判当前形状、v2 判迁移输入
+    形状，判定不过即拒绝——不猜形状，也不在形状不明时读写。
 - `schema_upgrade.rs` 改写为单条迁移（`10|11 → 11`，契约推进 v2 → v5）：
   guards（对象数、逐对象定义、行数、meta 快照）→ 读取与规划（同现行 v12）→ 建新形状
-  + 搬运（规则同 §3.3）→ DROP 旧对象 → removals → 推进 `(11, v5)`。
+  + 搬运（规则同 §3.3，`threads` 同样走重建）→ **结果守卫**（重建链之后核对 `messages`
+  行数：父行检查被打开时 `DROP TABLE` 会隐式删除并级联清空历史，前置守卫看不到这一步）
+  → DROP 旧对象 → removals → 整表重放 `CREATE_INDEXES` → 推进 `(11, v5)`
+  （版本推进仍是批内末条）。
 - 删除 `schema_v12_upgrade.rs`、`schema_v14_upgrade.rs`、`schema_v19_upgrade.rs`。
 - 空库分支（v2 契约但无 canonical 表）→ 直接建当前形状 + 推进 `(11, v5)`。
 

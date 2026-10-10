@@ -330,7 +330,9 @@ async fn failed_migration_closes_connections_and_releases_initialization_lock() 
 #[tokio::test]
 async fn incompatible_schema_is_rejected_without_wal_or_database_changes() {
     let directory = tempfile::tempdir().unwrap();
-    for version in [0, CURRENT_SCHEMA_VERSION + 1] {
+    // 0 是「形状读不懂」的未知库；12..=19 是本次压缩掉的开发期代数（从未正式发布）。
+    // 两类都拒绝，且拒绝**不动库**：版本、数据行、库文件字节与侧车文件都保持原样。
+    for version in [0, 12, 13, 14, 15, 16, 17, 18, 19] {
         let path = directory.path().join(format!("unsupported-{version}.db"));
         let mut connection = sqlx::SqliteConnection::connect_with(
             &SqliteConnectOptions::new()
@@ -340,7 +342,9 @@ async fn incompatible_schema_is_rejected_without_wal_or_database_changes() {
         .await
         .unwrap();
         sqlx::raw_sql(AssertSqlSafe(format!(
-            "CREATE TABLE unrelated (value TEXT); PRAGMA user_version = {version};"
+            "CREATE TABLE unrelated (value TEXT);
+             INSERT INTO unrelated VALUES ('preserved row');
+             PRAGMA user_version = {version};"
         )))
         .execute(&mut connection)
         .await
@@ -359,6 +363,17 @@ async fn incompatible_schema_is_rejected_without_wal_or_database_changes() {
         assert_eq!(tokio::fs::read(&path).await.unwrap(), before);
         assert!(!path.with_extension("db-wal").exists());
         assert!(!path.with_extension("db-shm").exists());
+        let mut probe = sqlx::SqliteConnection::connect_with(
+            &SqliteConnectOptions::new().filename(&path).read_only(true),
+        )
+        .await
+        .unwrap();
+        let (value,): (String,) = sqlx::query_as("SELECT value FROM unrelated")
+            .fetch_one(&mut probe)
+            .await
+            .unwrap();
+        assert_eq!(value, "preserved row");
+        probe.close().await.unwrap();
         let held = lock_schema_open(&path, Duration::ZERO).await.unwrap();
         drop(held);
     }

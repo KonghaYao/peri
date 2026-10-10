@@ -259,6 +259,13 @@ impl RemoteStore {
         self.access
     }
 
+    /// 下发一段迁移批（`schema_upgrade` 的唯一出口）并**确认版本推进落地**。
+    ///
+    /// 收尾不变量：批次的末条语句是 `peri_store_meta` 的版本与契约推进，它必须影响 **1** 行。
+    /// 影响 0 行说明批内守卫挡住了推进（库其实还是旧代数，例如快照读完之后身份被改写），
+    /// 或者推进的 `WHERE` 没匹配上——两种都不能按成功上报，只能报不确定。索引重放一类
+    /// `IF NOT EXISTS` 语句因此排在推进**之前**（它们的行数是 0，放末尾会把这条判定变成
+    /// 「永远不成立」）。
     pub(super) async fn apply_schema_upgrade(
         &self,
         statements: Vec<StatementSpec>,
@@ -539,14 +546,21 @@ impl RemoteStore {
 
     /// 把这条连接的**父行检查**归位（`PRAGMA foreign_keys = OFF`）。
     ///
-    /// 为什么远端必须显式归位：canonical DDL 在 `session_bindings` 上声明了指向
-    /// `workspaces(id, project_id)` 的复合外键，而远端**不写** `projects` / `workspaces` 行——
-    /// 那是本机 workspace 证据（目录与 Git 对象身份），远端没有来源，也不得伪造。父行不在，
-    /// 外键就无从满足。服务端的 `PRAGMA foreign_keys` 是**跨连接共享的可变状态**（实测默认为 0，
-    /// 但别的连接可以打开它），所以每次写打开都归位一次，而不是假设它一直是 0。
+    /// 为什么远端要显式归位：canonical DDL 带 `REFERENCES`，而远端的数据面是在**没有强制**的
+    /// 前提下自己保证引用顺序的——远端确实会写 `machines` / `workspaces` 行（升级批次与新建
+    /// 会话都写），但不写 `projects` 行：那是本机 workspace 证据（目录与 Git 对象身份），远端
+    /// 没有来源，归属行上的 `project_id` 只是随行搬来的历史证据值。父行检查一旦被打开，
+    /// `workspaces.project_id` 这类指向缺席父行的写入会以约束失败收场；`DROP TABLE` 还会变成
+    /// **隐式删除 + 级联**——重建 `threads` 时 `messages.thread_id`（`ON DELETE CASCADE`）
+    /// 会连带清掉全部历史。
+    ///
+    /// 服务端的 `PRAGMA foreign_keys` 是**跨连接共享的可变状态**（实测默认为 0，但别的连接
+    /// 可以打开它），所以每次写打开都归位一次，而不是假设它一直是 0。
     ///
     /// 归位之后的引用完整性由数据面保证：父行先写、删除时显式先清子行
-    /// （[`crate::sessions::canonical::THREAD_CHILD_DELETES`]），远端引擎本来也提供不了级联。
+    /// （[`crate::sessions::canonical::THREAD_CHILD_DELETES`]）；远端迁移另有一条结果守卫
+    /// 核对重建之后历史行数没有变（`schema_upgrade::GUARD_MESSAGES_COUNT_SQL`），归位失效
+    /// 不会变成一次静默丢历史。
     ///
     /// 只发一条**不在事务里**的语句（PRAGMA 在事务内不生效）；失败按原分类上报。
     pub(super) async fn force_parent_checks_off(&self) -> SessionResourceResult<()> {

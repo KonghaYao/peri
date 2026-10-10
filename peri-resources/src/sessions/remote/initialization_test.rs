@@ -32,7 +32,7 @@ use super::mutation::{
 };
 use super::schema::{
     identity_read_plan, initialization_plan, inserted_meta_row, interpret_identity_read, StoreId,
-    StoreIdentityOutcome, StoreIdentityRead, StoreSnapshot, META_INSERT_INDEX,
+    StoreIdentityOutcome, StoreIdentityRead, StoreShapeRead, StoreSnapshot, META_INSERT_INDEX,
     REMOTE_SCHEMA_VERSION, STORE_CONTRACT,
 };
 use super::session_data::{open_step, open_verdict, OpenStep, StoreInitialization};
@@ -216,9 +216,13 @@ async fn only_the_winner_of_the_identity_race_creates_the_identity() {
         read_identity(&mut loser_conn).await,
         StoreIdentityRead::Uninitialized
     );
-    // 空库上的只读打开在建任何东西之前就被拒绝。
-    let refusal = open_step(StoreIdentityRead::Uninitialized, StoreAccess::ReadOnly)
-        .expect_err("read-only open of an empty store is refused");
+    // 空库上的只读打开在建任何东西之前就被拒绝（未初始化：没有可探的形状）。
+    let refusal = open_step(
+        StoreIdentityRead::Uninitialized,
+        None,
+        StoreAccess::ReadOnly,
+    )
+    .expect_err("read-only open of an empty store is refused");
     assert!(matches!(
         refusal.kind(),
         SessionResourceErrorKind::Unsupported
@@ -261,10 +265,15 @@ async fn a_store_that_already_has_an_identity_is_never_rebuilt() {
     let (minted, outcome) = initialize(&mut first).await.expect("first initializes");
     assert_eq!(outcome, StoreIdentityOutcome::Created(minted.clone()));
 
-    // 后来者读到的是已经存在的身份：本次打开没有建立任何东西。
+    // 后来者读到的是已经存在的身份：本次打开没有建立任何东西。会话表还没建（本夹具只建了
+    // 身份与账本）：写打开照旧补齐，只读打开拒绝（见 `session_open::accept_shape`）。
     let mut later = connect(&store_path).await;
-    let decision = open_step(read_identity(&mut later).await, StoreAccess::ReadWrite)
-        .expect("existing store is readable");
+    let decision = open_step(
+        read_identity(&mut later).await,
+        Some(StoreShapeRead::Unbuilt),
+        StoreAccess::ReadWrite,
+    )
+    .expect("existing store is readable");
     assert_eq!(decision, OpenStep::Existing(minted.clone()));
     let (id, initialization) = open_verdict(StoreIdentityOutcome::Existing(minted.clone()));
     assert_eq!(id, minted);

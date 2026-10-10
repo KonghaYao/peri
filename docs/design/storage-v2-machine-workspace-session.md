@@ -333,6 +333,16 @@ SQLite 的表重建在事务外处理外键开关并在提交前运行外键检�
 托管原子批守卫旧版本及 store 身份，响应未知不得当作迁移完成。失败时旧数据和
 版本保持原样；不能先清旧凭证再发现会话归属无法迁移。
 
+形状判定只有一份声明（`sessions/schema_shape.rs`，本机与远端共用）：当前形状
+逐表严格比对列序列、NOT NULL 与主键，`mcp_oauth_credentials` 与
+`session_close_intents` 允许缺表（前者保持缺失、凭证能力如实上报不可用，后者由写
+打开幂等补齐），存在时必须同形；迁移输入带上下界，未知列没有去处即拒绝升级
+（fail-closed）。远端在打开时（含只读）先用这份声明做一次只读形状探测，判定不过
+即拒绝，不发 DDL。搬运重建 `threads` 与 `session_bindings`：SQLite 与远端执行器
+都不能把已有列改成 NOT NULL，两端也不用 `ALTER TABLE ... RENAME`；重建表上不承载
+数据的挂载对象（索引、触发器）不随表搬运——索引由迁移末尾整表重放 canonical
+集合补回，索引是否齐全由测试断言，不参与形状判定。
+
 新根 Session 的持久化顺序是：取得 Machine → 发现 Workspace.path → 原子查找或
 创建 Workspace → 在创建 Session 的同一事务/托管批内确认 Workspace 归属并写入
 `threads.workspace_id`、执行快照和原有创建事实。远端保存后由进程内执行端口按远端快照复核绑定；执行所有权由 `peri-sdk` 管理；

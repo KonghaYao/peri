@@ -2,7 +2,7 @@
 
 use super::super::{
     mutation::{incomplete_reply, RemoteStore, StoreAccess},
-    schema::{self, StoreId, StoreIdentityOutcome, StoreIdentityRead},
+    schema::{self, StoreId, StoreIdentityOutcome, StoreIdentityRead, StoreShapeRead},
     sql::{int_at, StatementSpec},
 };
 use super::{unsupported_behavior, StoreInitialization};
@@ -42,22 +42,27 @@ pub(in crate::sessions::remote) enum OpenStep {
     NeedsInitialization,
 }
 
-/// 身份读取 + 访问意图 → 打开的下一步（纯函数，真引擎 seam 与生产共用）。
+/// 身份读取 + 形状探测 + 访问意图 → 打开的下一步（纯函数，真引擎 seam 与生产共用）。
 ///
-/// 三条拒绝路径都不猜：版本/契约不认识、元数据形状不可解释、只读打开遇上尚未初始化的
-/// store（没有 schema 就没有会话事实可读，也不越权建表）。
+/// 拒绝路径都不猜：版本/契约不认识、元数据形状不可解释、会话表形状与契约声明的代数**不符**、
+/// 只读打开遇上尚未初始化或**还没有会话表**的 store（没有会话事实可读，也不越权建表）。
 pub(in crate::sessions::remote) fn open_step(
     read: StoreIdentityRead,
+    shape: Option<StoreShapeRead>,
     access: StoreAccess,
 ) -> SessionResourceResult<OpenStep> {
     match read {
         StoreIdentityRead::Present(snapshot) if snapshot.matches_build() => {
+            accept_shape(shape, access)?;
             Ok(OpenStep::Existing(snapshot.store_id))
         }
-        StoreIdentityRead::Present(snapshot) if snapshot.readable() => match access {
-            StoreAccess::ReadOnly => Ok(OpenStep::Existing(snapshot.store_id)),
-            StoreAccess::ReadWrite => Ok(OpenStep::Upgrade(snapshot)),
-        },
+        StoreIdentityRead::Present(snapshot) if snapshot.readable() => {
+            accept_shape(shape, access)?;
+            match access {
+                StoreAccess::ReadOnly => Ok(OpenStep::Existing(snapshot.store_id)),
+                StoreAccess::ReadWrite => Ok(OpenStep::Upgrade(snapshot)),
+            }
+        }
         StoreIdentityRead::Present(_) => {
             Err(unsupported_behavior("unrecognized remote store schema"))
         }
@@ -71,6 +76,63 @@ pub(in crate::sessions::remote) fn open_step(
             StoreAccess::ReadWrite => Ok(OpenStep::NeedsInitialization),
         },
     }
+}
+
+/// 形状探测（只读、单条 SELECT）：契约与版本决定探哪一份声明（[`schema::shape_probe`]）。
+///
+/// 只发 SELECT——探测不写、不建表，也不改任何行；探测结果只服务本次打开的判定，**不是迁移
+/// 依据**：写打开的迁移批次自己再读一次形状并在批内守着它（见 `schema_upgrade`）。
+/// 本构建不读的库（契约/版本不认识，或元数据本身读不出身份）没有可探的形状，返回 `None`——
+/// 那一面的拒绝由身份读取单独给出。
+pub(in crate::sessions::remote) async fn probe_shape(
+    store: &RemoteStore,
+    read: &StoreIdentityRead,
+) -> SessionResourceResult<Option<StoreShapeRead>> {
+    let StoreIdentityRead::Present(snapshot) = read else {
+        return Ok(None);
+    };
+    let Some(probe) = schema::shape_probe(snapshot) else {
+        return Ok(None);
+    };
+    let rows = store.fetch_rows(&StatementSpec::bare(probe.sql())).await?;
+    Ok(Some(probe.check(&schema::decode_column_map(&rows)?)))
+}
+
+/// 形状判定：本构建读得动的库必须探测过，且形状要么相符、要么**还没建立**。
+///
+/// - `Consistent`：按契约声明的形状读写。
+/// - `Unbuilt`：会话表一张都没建，**写打开**照旧在打开路径上按各自契约补齐（本代库的幂等
+///   DDL）或升级（`v2` 库的空库分支）；**只读打开拒绝**——没有会话事实可读，也不越权建表，
+///   与「只读打开尚未初始化的 store」同一条规则。
+/// - `Drifted`：拒绝，并把**具体哪个判定失败**记进日志（[`refuse_drifted_shape`]）。
+fn accept_shape(shape: Option<StoreShapeRead>, access: StoreAccess) -> SessionResourceResult<()> {
+    match shape {
+        Some(StoreShapeRead::Consistent) => Ok(()),
+        Some(StoreShapeRead::Unbuilt) if access == StoreAccess::ReadWrite => Ok(()),
+        Some(StoreShapeRead::Unbuilt) => Err(unsupported_behavior(
+            "read-only open of a remote store without its session tables",
+        )),
+        Some(StoreShapeRead::Drifted(detail)) => Err(refuse_drifted_shape(&detail)),
+        // 读得动的库必须被探测过：调用点漏探是内部矛盾，不静默放行。
+        None => Err(SessionResourceError::new(
+            SessionResourceErrorKind::Internal {
+                detail: "remote session shape was not probed".to_owned(),
+            },
+        )),
+    }
+}
+
+/// 形状不符的拒绝：分类沿用「不认识的 store schema」（`Unsupported`），诊断走日志。
+///
+/// `SessionResourceErrorKind::Unsupported` 不携带 detail，而这一路最需要回答的正是「为什么
+/// 拒绝」——判定来源（`schema_shape`）给出的那句「哪张表/哪一列不符」按 `warn` 记录，
+/// 不含会话内容与绑定值。
+fn refuse_drifted_shape(detail: &str) -> SessionResourceError {
+    tracing::warn!(
+        detail,
+        "unrecognized remote store schema: session tables drifted from the shape their contract declares"
+    );
+    SessionResourceError::new(SessionResourceErrorKind::Unsupported)
 }
 
 /// 身份竞争的结论 → 权威身份 + 本次打开的初始化事实（首次登记资格的唯一映射）。

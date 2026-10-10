@@ -6,7 +6,7 @@
 
 use std::sync::{
     atomic::{AtomicBool, AtomicUsize, Ordering},
-    Arc,
+    Arc, Mutex,
 };
 
 use async_trait::async_trait;
@@ -20,9 +20,9 @@ use turso_serverless::{Error as SdkError, Value};
 use super::connection::RemoteTransport;
 use super::generation::ConnectionGate;
 use super::mutation::{RemoteStore, StoreAccess};
-use super::schema::{self, StoreIdentityRead, StoreSnapshot};
+use super::schema::{self, StoreIdentityRead, StoreShapeRead, StoreSnapshot};
 use super::schema_upgrade;
-use super::session_data::{open_step, OpenStep};
+use super::session_data::{open_step, probe_shape, OpenStep};
 use super::sql::StatementSpec;
 use crate::sessions::{
     canonical::{V10_CREATE_INDEXES, V10_CREATE_TABLES},
@@ -30,15 +30,17 @@ use crate::sessions::{
 };
 
 /// 压缩前形状（契约 `v2`，版本 10|11）的登记行数据；契约标签是升级来源。
-const PREVIOUS_CONTRACT: &str = "peri.session.store/v2";
-const DISCOVERY: &str = r#"{"root":"/tmp","common_dir":null,"private_dir":null}"#;
+pub(super) const PREVIOUS_CONTRACT: &str = "peri.session.store/v2";
+pub(super) const DISCOVERY: &str = r#"{"root":"/tmp","common_dir":null,"private_dir":null}"#;
 
-struct SqliteTransport {
-    pool: SqlitePool,
-    writes: AtomicUsize,
+pub(super) struct SqliteTransport {
+    pub(super) pool: SqlitePool,
+    pub(super) writes: AtomicUsize,
     fail_column_drop: AtomicBool,
     fail_recovery_drop: AtomicBool,
     change_schema: AtomicBool,
+    /// 批次下发前的并发写入（测试用 SQL 字面量）：模拟两批读取与批次之间别的连接改了库。
+    pub(super) before_batch: Mutex<Option<&'static str>>,
     drop_reply: AtomicBool,
     truncate_reply: AtomicBool,
 }
@@ -104,6 +106,15 @@ impl RemoteTransport for SqliteTransport {
         self.writes.fetch_add(1, Ordering::SeqCst);
         if self.change_schema.swap(false, Ordering::SeqCst) {
             sqlx::query("CREATE TABLE late_extension (id TEXT)")
+                .execute(&self.pool)
+                .await
+                .map_err(error_of)?;
+        }
+        // 守卫不跨 await（否则这个 future 不是 `Send`）。
+        let concurrent = self.before_batch.lock().unwrap().take();
+        if let Some(sql) = concurrent {
+            // 语句文本来自本文件的静态夹具，不含外部输入。
+            sqlx::raw_sql(sqlx::AssertSqlSafe(sql.to_owned()))
                 .execute(&self.pool)
                 .await
                 .map_err(error_of)?;
@@ -177,21 +188,28 @@ impl RemoteTransport for SqliteTransport {
     }
 }
 
-struct Fixture {
+pub(super) struct Fixture {
     _directory: tempfile::TempDir,
-    transport: Arc<SqliteTransport>,
-    snapshot: StoreSnapshot,
+    pub(super) transport: Arc<SqliteTransport>,
+    pub(super) snapshot: StoreSnapshot,
 }
 
 impl Fixture {
     /// 压缩前契约的库：登记语义的 `workspaces`、执行环境表、machine 作用域凭证，
     /// 外加迁移要清掉的退役对象（`thread_goals`、`execution_runs`、旧缓存列）。
-    async fn new() -> Self {
+    pub(super) async fn new() -> Self {
+        Self::new_with_foreign_keys(false).await
+    }
+
+    /// 连接级父行检查可打开的同款夹具：只给「`DROP TABLE` 的隐式删除真的会级联」这条失败
+    /// 模式当观察点用。远端服务端的读数默认是 0，夹具默认也保持 0；这里打开它是在本地把
+    /// 「归位失效」这一档变成可控实验，不是在声明远端会强制外键。
+    pub(super) async fn new_with_foreign_keys(enforce: bool) -> Self {
         let directory = tempfile::tempdir().unwrap();
         let options = sqlx::sqlite::SqliteConnectOptions::new()
             .filename(directory.path().join("remote.db"))
             .create_if_missing(true)
-            .foreign_keys(false);
+            .foreign_keys(enforce);
         let pool = SqlitePoolOptions::new()
             .max_connections(1)
             .connect_with(options)
@@ -245,6 +263,7 @@ impl Fixture {
             fail_column_drop: AtomicBool::new(false),
             fail_recovery_drop: AtomicBool::new(false),
             change_schema: AtomicBool::new(false),
+            before_batch: Mutex::new(None),
             drop_reply: AtomicBool::new(false),
             truncate_reply: AtomicBool::new(false),
         });
@@ -264,12 +283,12 @@ impl Fixture {
         RemoteStore::new(transport.clone(), access, gate.mint(), gate)
     }
 
-    fn store(&self, access: StoreAccess) -> RemoteStore {
+    pub(super) fn store(&self, access: StoreAccess) -> RemoteStore {
         Self::store_for(&self.transport, access)
     }
 
     /// 把夹具标成另一个代数与契约（构造拒绝面与 v11 输入）。
-    async fn declare(&self, version: i64, contract: &str) {
+    pub(super) async fn declare(&self, version: i64, contract: &str) {
         sqlx::query("UPDATE peri_store_meta SET schema_version = ?1, contract = ?2")
             .bind(version)
             .bind(contract)
@@ -278,14 +297,14 @@ impl Fixture {
             .unwrap();
     }
 
-    async fn version(&self) -> i64 {
+    pub(super) async fn version(&self) -> i64 {
         sqlx::query_scalar("SELECT schema_version FROM peri_store_meta")
             .fetch_one(&self.transport.pool)
             .await
             .unwrap()
     }
 
-    async fn contract(&self) -> String {
+    pub(super) async fn contract(&self) -> String {
         sqlx::query_scalar("SELECT contract FROM peri_store_meta")
             .fetch_one(&self.transport.pool)
             .await
@@ -293,15 +312,28 @@ impl Fixture {
     }
 
     /// 计数断言（语句由调用点给出，不含外部输入）。
-    async fn count(&self, sql: String) -> i64 {
+    pub(super) async fn count(&self, sql: String) -> i64 {
         sqlx::query_scalar(sqlx::AssertSqlSafe(sql))
             .fetch_one(&self.transport.pool)
             .await
             .unwrap()
     }
 
+    /// 只读读回一份形状声明并判定：语句与判定都是生产打开路径用的那一份。
+    pub(super) async fn shape_verdict(&self, probe: schema::ShapeProbe) -> StoreShapeRead {
+        let rows: Vec<Vec<Value>> = sqlx::query(probe.sql())
+            .fetch_all(&self.transport.pool)
+            .await
+            .unwrap()
+            .iter()
+            .map(values)
+            .collect();
+        let tables = schema::decode_column_map(&rows).unwrap();
+        probe.check(&tables)
+    }
+
     /// 升级前的旧事实：目标行、配置、旧缓存列都还在原位。
-    async fn assert_old_state(&self) {
+    pub(super) async fn assert_old_state(&self) {
         assert_eq!(self.version().await, 10);
         assert_eq!(self.contract().await, PREVIOUS_CONTRACT);
         let (goal,): (String,) = sqlx::query_as("SELECT objective FROM thread_goals")
@@ -321,10 +353,40 @@ impl Fixture {
     }
 }
 
-/// 退役的表与列在升级后消失，其余对象与行原样保留；版本与契约一次推进。
+/// 生产探测路径（`probe_shape`）的结论：真语句 + 真身份读取，与打开路径同一处接线。
+pub(super) async fn probed_shape(store: &RemoteStore) -> Option<StoreShapeRead> {
+    let read = store.read_identity().await.unwrap();
+    probe_shape(store, &read).await.unwrap()
+}
+
+/// 退役的表与列在升级后消失，其余对象与行原样保留；版本与契约一次推进；终点形状 == canonical。
 async fn assert_upgraded(fixture: &Fixture) {
     assert_eq!(fixture.version().await, schema::REMOTE_SCHEMA_VERSION);
     assert_eq!(fixture.contract().await, schema::STORE_CONTRACT);
+    // 升级终点必须逐列等于 canonical（生产判定入口判定，不看建表文本）。
+    assert_eq!(
+        fixture.shape_verdict(schema::ShapeProbe::Current).await,
+        StoreShapeRead::Consistent,
+        "升级终点的会话表形状必须逐列等于 canonical"
+    );
+    // `DROP TABLE` 把被重建表上的索引一并删掉：终点要带齐整份 canonical 索引集。
+    for index in [
+        "idx_messages_thread_id",
+        "idx_bindings_project",
+        "idx_bindings_workspace",
+        "idx_threads_updated",
+        "idx_threads_workspace_archived",
+    ] {
+        assert_eq!(
+            fixture
+                .count(format!(
+                    "SELECT COUNT(*) FROM sqlite_master WHERE type = 'index' AND name = '{index}'"
+                ))
+                .await,
+            1,
+            "{index} 必须在升级终点存在"
+        );
+    }
     assert_eq!(
         fixture
             .count("SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name = 'session_environments'".to_owned())
@@ -344,6 +406,14 @@ async fn assert_upgraded(fixture: &Fixture) {
             .await,
         0
     );
+    // 结果守卫不误报：父行检查关闭时重建链不动历史，行数与搬到之前一致。
+    assert_eq!(
+        fixture
+            .count("SELECT COUNT(*) FROM messages".to_owned())
+            .await,
+        1,
+        "重建链没有清掉历史消息"
+    );
 }
 
 #[tokio::test]
@@ -361,6 +431,7 @@ async fn upgrade_moves_a_released_store_to_the_current_generation_in_one_batch()
     assert!(matches!(
         open_step(
             StoreIdentityRead::Present(fixture.snapshot.clone()),
+            Some(fixture.shape_verdict(schema::ShapeProbe::Input).await),
             StoreAccess::ReadWrite
         )
         .unwrap(),
@@ -467,7 +538,12 @@ async fn upgrade_moves_a_released_store_to_the_current_generation_in_one_batch()
         1
     );
     assert!(matches!(
-        open_step(store.read_identity().await.unwrap(), StoreAccess::ReadWrite).unwrap(),
+        open_step(
+            store.read_identity().await.unwrap(),
+            probed_shape(&store).await,
+            StoreAccess::ReadWrite
+        )
+        .unwrap(),
         OpenStep::Existing(_)
     ));
     assert_eq!(
@@ -493,6 +569,7 @@ async fn upgrade_accepts_the_internal_version_11_shape() {
     assert!(matches!(
         open_step(
             StoreIdentityRead::Present(snapshot.clone()),
+            Some(fixture.shape_verdict(schema::ShapeProbe::Input).await),
             StoreAccess::ReadWrite
         )
         .unwrap(),
@@ -505,6 +582,10 @@ async fn upgrade_accepts_the_internal_version_11_shape() {
 
     assert_eq!(fixture.version().await, schema::REMOTE_SCHEMA_VERSION);
     assert_eq!(fixture.contract().await, schema::STORE_CONTRACT);
+    assert_eq!(
+        fixture.shape_verdict(schema::ShapeProbe::Current).await,
+        StoreShapeRead::Consistent
+    );
     assert_eq!(
         fixture
             .count(
@@ -534,6 +615,11 @@ async fn upgrade_builds_the_current_shape_for_an_identity_only_store() {
 
     assert_eq!(fixture.version().await, schema::REMOTE_SCHEMA_VERSION);
     assert_eq!(fixture.contract().await, schema::STORE_CONTRACT);
+    assert_eq!(
+        fixture.shape_verdict(schema::ShapeProbe::Current).await,
+        StoreShapeRead::Consistent,
+        "空库分支建出的形状也要逐列等于 canonical"
+    );
     let (identity,): (String,) = sqlx::query_as("SELECT store_id FROM peri_store_meta")
         .fetch_one(&fixture.transport.pool)
         .await
@@ -597,13 +683,17 @@ async fn upgrade_rejects_missing_history_columns_without_writing() {
     fixture.assert_old_state().await;
 }
 
-/// 拒绝面：未发布的中间代（12..19）、其他契约标签、更早的版本，一律不认识。
+/// 拒绝面：未发布的中间代（12..19 每一个）、其他契约标签、更早的版本，一律不认识。
 #[tokio::test]
 async fn upgrade_refuses_generations_and_contracts_outside_the_compatible_one() {
     for (version, contract) in [
         (9, PREVIOUS_CONTRACT),
         (12, PREVIOUS_CONTRACT),
+        (13, PREVIOUS_CONTRACT),
         (14, PREVIOUS_CONTRACT),
+        (15, PREVIOUS_CONTRACT),
+        (16, PREVIOUS_CONTRACT),
+        (17, PREVIOUS_CONTRACT),
         (18, PREVIOUS_CONTRACT),
         (19, PREVIOUS_CONTRACT),
         (10, "peri.session.store/v3"),
@@ -620,6 +710,24 @@ async fn upgrade_refuses_generations_and_contracts_outside_the_compatible_one() 
         else {
             panic!("missing identity")
         };
+        // 版本判定：12..19 都比本构建新，不认识就不迁移。
+        if version > schema::REMOTE_SCHEMA_VERSION {
+            assert_eq!(
+                schema::acceptance(version),
+                schema::SchemaAcceptance::TooNew,
+                "({version}, {contract}) 必须判成 TooNew"
+            );
+            assert!(!snapshot.readable());
+        }
+        // 身份读取之后 `open_step` 就拒绝：连形状探测都不做（`None`）。
+        for access in [StoreAccess::ReadOnly, StoreAccess::ReadWrite] {
+            let refused =
+                open_step(StoreIdentityRead::Present(snapshot.clone()), None, access).unwrap_err();
+            assert!(
+                matches!(refused.kind(), SessionResourceErrorKind::Unsupported),
+                "({version}, {contract}, {access:?}) 必须在打开路径被拒绝"
+            );
+        }
         let error = schema_upgrade::upgrade(&fixture.store(StoreAccess::ReadWrite), &snapshot)
             .await
             .unwrap_err();
@@ -768,6 +876,7 @@ async fn upgrade_reports_an_uncertain_reply_but_reopen_reads_the_committed_gener
         assert!(matches!(
             open_step(
                 reopened.read_identity().await.unwrap(),
+                probed_shape(&reopened).await,
                 StoreAccess::ReadWrite
             )
             .unwrap(),

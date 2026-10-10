@@ -225,6 +225,7 @@ async fn virtual_remote_cold_recovery_and_read_only_fallbacks() {
         fail_column_drop: AtomicBool::new(false),
         fail_recovery_drop: AtomicBool::new(false),
         change_schema: AtomicBool::new(false),
+        before_batch: Mutex::new(None),
         drop_reply: AtomicBool::new(false),
         truncate_reply: AtomicBool::new(false),
     });
@@ -358,6 +359,7 @@ async fn remote_only_cold_recovery_uses_saved_evidence_and_old_distinct_registra
         fail_column_drop: AtomicBool::new(false),
         fail_recovery_drop: AtomicBool::new(false),
         change_schema: AtomicBool::new(false),
+        before_batch: Mutex::new(None),
         drop_reply: AtomicBool::new(false),
         truncate_reply: AtomicBool::new(false),
     });

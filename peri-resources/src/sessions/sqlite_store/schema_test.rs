@@ -139,6 +139,10 @@ async fn compressed_dev_generations_are_refused_without_touching_the_database() 
 }
 
 /// [回归测试] 实际旧库包含 thread_goals，不能因额外业务表而拒绝启动。
+///
+/// 夹具里带一条 v9 代的退役索引 `idx_threads_parent_thread_id`：`threads` 在升级里被重建，
+/// 重建表上的索引以 canonical 声明为准（见 `schema_shape` 的边界说明），因此它随重建消失，
+/// 由这条测试显式记录，而不是靠实现的副作用。
 #[tokio::test]
 async fn test_legacy_with_goals_upgrades_preserving_goals_and_extensions() {
     let dir = tempfile::tempdir().unwrap();
@@ -164,9 +168,11 @@ async fn test_legacy_with_goals_upgrades_preserving_goals_and_extensions() {
         INSERT INTO extension_state VALUES ('state', 'preserved extension bytes');",
     ).execute(&mut connection).await.unwrap();
     let before = history_bytes(&mut connection).await;
-    let extra_schema: Vec<(String, Option<String>)> = sqlx::query_as(
-        "SELECT name, sql FROM sqlite_schema WHERE name IN ('extension_state', 'idx_threads_parent_thread_id') ORDER BY name",
-    ).fetch_all(&mut connection).await.unwrap();
+    let before_extension: Vec<(String, Option<String>)> =
+        sqlx::query_as("SELECT name, sql FROM sqlite_schema WHERE name = 'extension_state'")
+            .fetch_all(&mut connection)
+            .await
+            .unwrap();
     connection.close().await.unwrap();
     // 调用应用启动所用的 Resources 门面，复现相同的写打开入口。
     let (store, _facade) = crate::sessions::open_store_and_facade_for_tests(path.clone())
@@ -197,10 +203,21 @@ async fn test_legacy_with_goals_upgrades_preserving_goals_and_extensions() {
             .await
             .unwrap();
     assert_eq!(goals, 1);
-    let after_schema: Vec<(String, Option<String>)> = sqlx::query_as(
-        "SELECT name, sql FROM sqlite_schema WHERE name IN ('extension_state', 'idx_threads_parent_thread_id') ORDER BY name",
-    ).fetch_all(&mut connection).await.unwrap();
-    assert_eq!(after_schema, extra_schema);
+    let after_extension: Vec<(String, Option<String>)> =
+        sqlx::query_as("SELECT name, sql FROM sqlite_schema WHERE name = 'extension_state'")
+            .fetch_all(&mut connection)
+            .await
+            .unwrap();
+    assert_eq!(after_extension, before_extension);
+    // `threads` 被重建到 canonical 形状：旧代留下的退役索引随重建消失，索引集合以
+    // canonical 的声明为准（迁移末尾整表重放一次）。索引是派生对象，不承载数据。
+    let (retired,): (i64,) = sqlx::query_as(
+        "SELECT COUNT(*) FROM sqlite_schema WHERE name = 'idx_threads_parent_thread_id'",
+    )
+    .fetch_one(&mut connection)
+    .await
+    .unwrap();
+    assert_eq!(retired, 0);
     let (value,): (String,) =
         sqlx::query_as("SELECT value FROM extension_state WHERE key = 'state'")
             .fetch_one(&mut connection)

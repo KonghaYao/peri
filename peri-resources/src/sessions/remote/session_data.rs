@@ -86,7 +86,7 @@ pub(super) enum StoreInitialization {
 
 #[path = "session_open.rs"]
 mod session_open;
-pub(super) use session_open::{open_step, open_verdict, OpenStep};
+pub(super) use session_open::{open_step, open_verdict, probe_shape, OpenStep};
 use session_open::{refuse_legacy_shape, resolve_open_machine_id};
 
 /// 远端会话数据 adapter：一个已初始化（或已读回身份）的远程 store 上的会话行为。
@@ -125,8 +125,9 @@ impl RemoteSessionData {
     /// 插入元数据行并提交（`Created`）才是 `CreatedByThisOpen`。初始化结果未知（丢响应、
     /// 超时）会让本次打开直接失败：既不发身份，也不发创建事实。
     ///
-    /// 三条拒绝路径都不猜：版本/契约不认识、元数据形状不可解释、只读打开遇上尚未初始化的
-    /// store（没有 schema 就没有会话事实可读，也不越权建表）。
+    /// 四条拒绝路径都不猜：版本/契约不认识、元数据形状不可解释、会话表形状与契约声明的
+    /// 代数不符（[`probe_shape`]，只读）、只读打开遇上尚未初始化的 store（没有 schema 就
+    /// 没有会话事实可读，也不越权建表）。
     pub(super) async fn open(
         endpoint: &RemoteEndpoint,
         credential: &SessionStoreCredential,
@@ -149,7 +150,11 @@ impl RemoteSessionData {
             Arc::clone(&gate),
         ));
         let store = factory.connect().await?;
-        let (store_id, initialization) = match open_step(store.read_identity().await?, access)? {
+        // 打开路径的两份只读事实：身份（版本 + 契约 + store id）与**会话表形状**。后者按契约
+        // 声明的代数探测（只发 SELECT），读得动的库必须相符——形状不符即拒绝，不下发任何读写。
+        let read = store.read_identity().await?;
+        let shape = probe_shape(&store, &read).await?;
+        let (store_id, initialization) = match open_step(read, shape, access)? {
             OpenStep::Existing(store_id) => (store_id, StoreInitialization::Existing),
             OpenStep::Upgrade(snapshot) => {
                 schema_upgrade::upgrade(&store, &snapshot).await?;

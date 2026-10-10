@@ -1,6 +1,5 @@
 pub(super) const SCHEMA_OBJECTS_SQL: &str = "SELECT type, name, tbl_name, sql FROM sqlite_master WHERE substr(lower(name), 1, 7) <> 'sqlite_' ORDER BY type, name";
 pub(super) const THREAD_COLUMNS_SQL: &str = "SELECT name, type, \"notnull\", dflt_value, pk, hidden FROM pragma_table_xinfo('threads') ORDER BY cid";
-pub(super) const MESSAGE_COLUMNS_SQL: &str = "SELECT name, type, \"notnull\", dflt_value, pk, hidden FROM pragma_table_xinfo('messages') ORDER BY cid";
 #[cfg(test)]
 pub(super) const LEGACY_GOALS_SQL: &str = "CREATE TABLE thread_goals (
     thread_id TEXT PRIMARY KEY,

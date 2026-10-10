@@ -90,8 +90,9 @@
 //! 错误，因此 ① **不能**证明服务端连接已释放，也**不能**拿它证明任何未知的远端写没有执行。
 //!
 //! 重建**不**自动重发任何 mutation：重建只重核实 store 身份（只读检查），不带业务写入；
-//! 未决的收敛不由连接重建承担（本机锚点已随 v10 撤销）。`Unsupported` 只剩「只读打开尚未
-//! 初始化的 store」与「不认识的 store schema」两处——都是**拒绝**而不是未实现的行为。
+//! 未决的收敛不由连接重建承担（本机锚点已随 v10 撤销）。`Unsupported` 只剩三处——「只读打开
+//! 尚未初始化的 store」「不认识的 store schema（含会话表形状与契约声明的代数不符）」与
+//! 「只读打开还没有会话表的 store」——都是**拒绝**而不是未实现的行为。
 
 // 非测试构建里的未使用项只有两类，都按「同一个交付面」标注：**显式 cloud 探测/回环面**
 // （原始连接与参数绑定回环 `connection`、只读资格与终态封闭工具 `mutation::{apply_qualified,
@@ -121,6 +122,14 @@ mod schema_upgrade;
 #[cfg(test)]
 #[path = "schema_upgrade_test.rs"]
 mod schema_upgrade_tests;
+
+#[cfg(test)]
+#[path = "schema_probe_test.rs"]
+mod schema_probe_tests;
+
+#[cfg(test)]
+#[path = "schema_upgrade_input_test.rs"]
+mod schema_upgrade_input_tests;
 mod session_catalog;
 mod session_codec;
 mod session_data;
