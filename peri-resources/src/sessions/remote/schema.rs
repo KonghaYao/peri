@@ -7,10 +7,10 @@
 //! 普通表的单行事实里（[`STORE_META_TABLE`]）。差异是**载体**，不是版本代数。
 //!
 //! 契约标签 [`STORE_CONTRACT`] 记的是形状代数，形状变化一次推进一代：`v2` 是统一前的
-//! `peri_sessions` 混合形状，`v3` 是 canonical 形状（schema 12..=18），`v4` 起执行登记并入
-//! `workspaces`、绑定表不再有指向登记表的外键。契约不符的库被 [`acceptance`] /
+//! `peri_sessions` 混合形状（schema 10|11），`v5` 是当前形状——执行登记并入 `workspaces`、
+//! 绑定表不再有指向登记表的外键、退役执行对象清空。契约不符的库被 [`acceptance`] /
 //! [`matches_build`] 判为不认识——这是有意的 fail-closed：不迁移、不覆盖，也不按旧语义读写。
-//! 上一代 [`PREVIOUS_STORE_CONTRACT`] 与更早的 v2 由 `schema_upgrade` 逐级升级到位，
+//! 唯一升级来源是 [`PREVIOUS_STORE_CONTRACT`] 的 v2，由 `schema_upgrade` 一条批次升级到位，
 //! 保留目标与扩展对象并推进版本，store 身份与账本保持不变。
 //!
 //! 三条硬规则：
@@ -37,12 +37,13 @@ pub(super) const REMOTE_SCHEMA_VERSION: i64 = crate::sessions::canonical::CURREN
 
 /// 远程存储契约标签：形状 + 语义代数，和版本一起决定「这是不是我们认识的那个库」。
 ///
-/// `v4` = 执行登记并入 `workspaces`（`(machine_id, path)` 是唯一归属身份），绑定行的
-/// `workspace_id` 收敛到会话归属行；`v3` = 12..=18 的 canonical 形状；`v2` = 统一前的混合形状。
-pub(super) const STORE_CONTRACT: &str = "peri.session.store/v4";
+/// `v5` = 当前形状：执行登记并入 `workspaces`（`(machine_id, path)` 是唯一归属身份），绑定行的
+/// `workspace_id` 收敛到会话归属行，退役执行对象清空；`v2` 是统一前的混合形状
+/// （schema 10|11）。中间的 12..=18 是未发布的开发期形状，本构建一律不认识。
+pub(super) const STORE_CONTRACT: &str = "peri.session.store/v5";
 
-/// 上一代契约标签（schema 12..=18）：读得懂，写打开先完成一次性升级。
-pub(super) const PREVIOUS_STORE_CONTRACT: &str = "peri.session.store/v3";
+/// 唯一升级来源：统一前的远端会话形状（schema 10|11），读得懂，写打开先完成一次性升级。
+pub(super) const PREVIOUS_STORE_CONTRACT: &str = "peri.session.store/v2";
 
 /// 统一之前的远端会话表：出现它们说明这是一个**旧形状的库**（不是空库）。
 ///
@@ -109,12 +110,11 @@ impl StoreSnapshot {
             && matches!(acceptance(self.schema_version), SchemaAcceptance::Accept)
     }
 
-    /// 本构建的读取面是否覆盖这个库：本代直接读，上一代（12..=18）与更早的 v2（10|11）
-    /// 只读可用、写打开走一次性升级。代际之外的形状一律不认识。
+    /// 本构建的读取面是否覆盖这个库：本代直接读，统一前的 v2（10|11）只读可用、写打开走
+    /// 一次性升级。代际之外的形状一律不认识。
     pub(super) fn readable(&self) -> bool {
         self.matches_build()
-            || (self.contract == PREVIOUS_STORE_CONTRACT && matches!(self.schema_version, 12..=18))
-            || (self.contract == "peri.session.store/v2" && matches!(self.schema_version, 10 | 11))
+            || (self.contract == PREVIOUS_STORE_CONTRACT && matches!(self.schema_version, 10 | 11))
     }
 }
 
@@ -123,7 +123,7 @@ impl StoreSnapshot {
 pub(super) enum SchemaAcceptance {
     /// 本构建可读写。
     Accept,
-    /// 已识别的旧版（10..=18）：只读使用同一组查询，写打开先完成一次性升级。
+    /// 已识别的旧版（10）：只读使用同一组查询，写打开先完成一次性升级。
     Upgradeable,
     /// 高于本构建：拒绝，不迁移、不降级写入。
     TooNew,
@@ -134,7 +134,7 @@ pub(super) enum SchemaAcceptance {
 pub(super) fn acceptance(version: i64) -> SchemaAcceptance {
     if version == REMOTE_SCHEMA_VERSION {
         SchemaAcceptance::Accept
-    } else if (10..REMOTE_SCHEMA_VERSION).contains(&version) {
+    } else if version == 10 {
         SchemaAcceptance::Upgradeable
     } else if version > REMOTE_SCHEMA_VERSION {
         SchemaAcceptance::TooNew

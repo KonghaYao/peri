@@ -2,12 +2,9 @@ use super::super::failure::RemoteFailureClass;
 use super::super::schema::StoreId;
 use super::*;
 use crate::sessions::canonical::{
-    CREATE_V2_OAUTH_CREDENTIALS_TABLE_SQL,
-    DELETE_ALL_V2_OAUTH_CREDENTIALS_SQL as DELETE_ALL_OAUTH_CREDENTIALS_SQL,
-    DELETE_V2_OAUTH_CREDENTIAL_SQL as DELETE_OAUTH_CREDENTIAL_SQL,
-    LIST_V2_OAUTH_CREDENTIALS_SQL as LIST_OAUTH_CREDENTIALS_SQL,
-    SELECT_V2_OAUTH_CREDENTIAL_SQL as SELECT_OAUTH_CREDENTIAL_SQL,
-    UPSERT_V2_OAUTH_CREDENTIAL_SQL as UPSERT_OAUTH_CREDENTIAL_SQL,
+    CREATE_OAUTH_CREDENTIALS_TABLE_SQL, DELETE_ALL_OAUTH_CREDENTIALS_SQL,
+    DELETE_OAUTH_CREDENTIAL_SQL, LIST_OAUTH_CREDENTIALS_SQL, SELECT_OAUTH_CREDENTIAL_SQL,
+    UPSERT_OAUTH_CREDENTIAL_SQL,
 };
 use crate::sessions::data::SessionDataPort;
 use sqlx::{Connection, Row, SqliteConnection};
@@ -44,17 +41,17 @@ async fn database() -> SqliteConnection {
     let mut connection = SqliteConnection::connect("sqlite::memory:").await.unwrap();
     execute(
         &mut connection,
-        StatementSpec::bare(crate::sessions::canonical::CREATE_V2_MACHINES_TABLE_SQL),
+        StatementSpec::bare(crate::sessions::canonical::CREATE_MACHINES_TABLE_SQL),
     )
     .await;
     execute(
         &mut connection,
-        StatementSpec::bare(crate::sessions::canonical::CREATE_V2_PROJECTS_TABLE_SQL),
+        StatementSpec::bare(crate::sessions::canonical::CREATE_PROJECTS_TABLE_SQL),
     )
     .await;
     execute(
         &mut connection,
-        StatementSpec::bare(crate::sessions::canonical::CREATE_V2_WORKSPACES_TABLE_SQL),
+        StatementSpec::bare(crate::sessions::canonical::CREATE_WORKSPACES_TABLE_SQL),
     )
     .await;
     sqlx::query("INSERT INTO machines VALUES ('test-machine', 'Test', 'known')")
@@ -71,7 +68,7 @@ async fn database() -> SqliteConnection {
     }
     execute(
         &mut connection,
-        StatementSpec::bare(CREATE_V2_OAUTH_CREDENTIALS_TABLE_SQL),
+        StatementSpec::bare(CREATE_OAUTH_CREDENTIALS_TABLE_SQL),
     )
     .await;
     connection
@@ -386,7 +383,7 @@ fn writable_initialization_uses_shared_ddl() {
     let plan = super::super::session_schema::initialization_plan();
     assert!(plan
         .iter()
-        .any(|spec| spec.sql == CREATE_V2_OAUTH_CREDENTIALS_TABLE_SQL && spec.params.is_empty()));
+        .any(|spec| spec.sql == CREATE_OAUTH_CREDENTIALS_TABLE_SQL && spec.params.is_empty()));
 }
 
 #[tokio::test]

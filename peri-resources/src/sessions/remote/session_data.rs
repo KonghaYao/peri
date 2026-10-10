@@ -44,8 +44,6 @@ use super::credentials::SessionStoreCredential;
 use super::endpoint::RemoteEndpoint;
 use super::generation::{ConnectionFactory, ConnectionGate, RemoteConnectionFactory};
 use super::mutation::{RemoteStore, StoreAccess};
-#[cfg(test)]
-use super::schema;
 use super::schema::{StoreId, StoreIdentityRead};
 use super::schema_upgrade;
 use super::session_schema;
@@ -111,7 +109,9 @@ pub(super) struct RemoteSessionData {
     /// 连接代际门禁：哪一代已经不可信。
     gate: Arc<ConnectionGate>,
     store_id: StoreId,
-    pub(super) schema_version: i64,
+    /// 压缩前的形状（`v2` 契约，10|11）：只读打开下它没有当前形状的归属列与机器目录，
+    /// 读路径按老形状服务。写打开会先升级，升级后的实例不再带这一位。
+    pub(super) legacy_shape: bool,
     /// thread → root 解析缓存：父关系创建后不变（本 adapter 不提供改父行为），因此
     /// 同一条会话只需一次远端上溯；解析失败不缓存，避免把网络失败固化成事实。
     roots: RwLock<HashMap<ThreadId, ThreadId>>,
@@ -180,8 +180,9 @@ impl RemoteSessionData {
                 )])
                 .await?;
         }
-        let schema_version = match store.read_identity().await? {
-            StoreIdentityRead::Present(snapshot) => snapshot.schema_version,
+        let legacy_shape = match store.read_identity().await? {
+            // 只读打开不升级：压缩前的形状（v2 契约）此后按各自的读法服务。
+            StoreIdentityRead::Present(snapshot) => !snapshot.matches_build(),
             _ => {
                 return Err(unsupported_behavior(
                     "remote store identity missing after initialization",
@@ -195,7 +196,7 @@ impl RemoteSessionData {
                 factory,
                 gate,
                 store_id,
-                schema_version,
+                legacy_shape,
                 roots: RwLock::new(HashMap::new()),
             },
             initialization,
@@ -490,7 +491,8 @@ impl SessionDataPort for RemoteSessionData {
         self: Arc<Self>,
         workspace_id: peri_acp_types::workspace::WorkspaceId,
     ) -> Option<Arc<dyn peri_acp_types::oauth_credentials::OAuthCredentialPort>> {
-        if self.schema_version <= 11 {
+        // 压缩前的形状里凭证只有 machine 作用域，给不出 workspace 归属。
+        if self.legacy_shape {
             return None;
         }
         Some(Arc::new(super::oauth_credentials::RemoteOAuthCredentials(
@@ -501,7 +503,7 @@ impl SessionDataPort for RemoteSessionData {
 
     async fn machine_id_of(&self, id: &ThreadId) -> SessionResourceResult<Option<String>> {
         let store = self.store().await?;
-        if self.schema_version <= 11 {
+        if self.legacy_shape {
             let row = store
                 .fetch_row(&StatementSpec::new(
                     "SELECT machine_id FROM session_environments WHERE thread_id = ?1",
@@ -522,7 +524,7 @@ impl SessionDataPort for RemoteSessionData {
         &self,
         id: &ThreadId,
     ) -> SessionResourceResult<Option<peri_acp_types::workspace::WorkspaceId>> {
-        if self.schema_version <= 11 {
+        if self.legacy_shape {
             return Ok(None);
         }
         let store = self.store().await?;

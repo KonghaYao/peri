@@ -1,5 +1,5 @@
 use super::*;
-use crate::sessions::canonical::CREATE_TABLES;
+use crate::sessions::canonical::V10_CREATE_TABLES;
 use crate::sessions::schema_cleanup::{
     LEGACY_BOUND_EXECUTION_SQL, LEGACY_EXECUTION_SQL, LEGACY_GOALS_SQL,
 };
@@ -19,7 +19,7 @@ async fn old_database() -> (tempfile::TempDir, SqliteConnection) {
     )
     .await
     .unwrap();
-    for statement in CREATE_TABLES {
+    for statement in V10_CREATE_TABLES {
         sqlx::query(*statement)
             .execute(&mut connection)
             .await

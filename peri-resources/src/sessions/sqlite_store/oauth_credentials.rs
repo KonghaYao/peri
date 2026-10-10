@@ -57,7 +57,7 @@ impl OAuthCredentialPort for SqliteOAuthCredentialStore {
         validate_server_key(server_key)?;
         let (principal_id, workspace_id) = self.scope(false)?;
         let row: Option<(String,)> = sqlx::query_as(AssertSqlSafe(
-            canonical::SELECT_V2_OAUTH_CREDENTIAL_SQL,
+            canonical::SELECT_OAUTH_CREDENTIAL_SQL,
         ))
         .bind(principal_id)
         .bind(workspace_id)
@@ -82,7 +82,7 @@ impl OAuthCredentialPort for SqliteOAuthCredentialStore {
         validate_server_key(server_key)?;
         validate_credentials(credentials)?;
         let (principal_id, workspace_id) = self.scope(true)?;
-        sqlx::query(AssertSqlSafe(canonical::UPSERT_V2_OAUTH_CREDENTIAL_SQL))
+        sqlx::query(AssertSqlSafe(canonical::UPSERT_OAUTH_CREDENTIAL_SQL))
             .bind(principal_id)
             .bind(workspace_id)
             .bind(server_key)
@@ -100,7 +100,7 @@ impl OAuthCredentialPort for SqliteOAuthCredentialStore {
     async fn clear(&self, server_key: &str) -> OAuthCredentialResult<()> {
         validate_server_key(server_key)?;
         let (principal_id, workspace_id) = self.scope(true)?;
-        sqlx::query(AssertSqlSafe(canonical::DELETE_V2_OAUTH_CREDENTIAL_SQL))
+        sqlx::query(AssertSqlSafe(canonical::DELETE_OAUTH_CREDENTIAL_SQL))
             .bind(principal_id)
             .bind(workspace_id)
             .bind(server_key)
@@ -115,24 +115,22 @@ impl OAuthCredentialPort for SqliteOAuthCredentialStore {
 
     async fn clear_all(&self) -> OAuthCredentialResult<()> {
         let (principal_id, workspace_id) = self.scope(true)?;
-        sqlx::query(AssertSqlSafe(
-            canonical::DELETE_ALL_V2_OAUTH_CREDENTIALS_SQL,
-        ))
-        .bind(principal_id)
-        .bind(workspace_id)
-        .execute(&self.database.pool)
-        .await
-        .map_err(|error| {
-            tracing::error!(error = %error, source = ?error, "OAuth credential storage failed");
-            OAuthCredentialError::Unavailable
-        })?;
+        sqlx::query(AssertSqlSafe(canonical::DELETE_ALL_OAUTH_CREDENTIALS_SQL))
+            .bind(principal_id)
+            .bind(workspace_id)
+            .execute(&self.database.pool)
+            .await
+            .map_err(|error| {
+                tracing::error!(error = %error, source = ?error, "OAuth credential storage failed");
+                OAuthCredentialError::Unavailable
+            })?;
         Ok(())
     }
 
     async fn list(&self) -> OAuthCredentialResult<Vec<String>> {
         let (principal_id, workspace_id) = self.scope(false)?;
         let rows: Vec<(String,)> = sqlx::query_as(AssertSqlSafe(
-            canonical::LIST_V2_OAUTH_CREDENTIALS_SQL,
+            canonical::LIST_OAUTH_CREDENTIALS_SQL,
         ))
         .bind(principal_id)
         .bind(workspace_id)

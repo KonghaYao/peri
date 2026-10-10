@@ -124,7 +124,7 @@ workspace root，不要求也不校验真实文件系统事实：项目与工作
   locator 在 WASM 直接失败，不静默落回本机库。
 
 执行所有权唯一由 SDK 管理。当前 schema 由 Resources 的 canonical 常量定义，
-版本与迁移入口见 [Resources 索引](../code-index/peri-resources.md)。schema14 已移除 Store 的 `epoch + nonce` owner、
+版本与迁移入口见 [Resources 索引](../code-index/peri-resources.md)。当前形状已移除 Store 的 `epoch + nonce` owner、
 Peri 执行 lease 与 Workspace fencing 均已删除；binding/path 校验、事务与任务资源
 关闭不构成另一层执行权。实例消失不能从 Store 中有历史推断上次执行已完成，也不能
 自动重放结果未知的工具调用；跨实例接管的证据链由

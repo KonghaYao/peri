@@ -1,3 +1,9 @@
+//! 远端单条迁移（`v2` 契约 10|11 → 11|`v5`）的批次、守卫与拒绝面。
+//!
+//! 传输夹具是 SQLite 适配器扮演的「远端服务端」：外键关闭（远端服务端不强制外键），
+//! 迁移作为**一个受管批次**逐条语句执行，失败整批回滚。夹具的输入库手写压缩前形状，
+//! 不引用当前 `canonical` 的建表清单——升级实现改动时夹具不该跟着漂移。
+
 use std::sync::{
     atomic::{AtomicBool, AtomicUsize, Ordering},
     Arc,
@@ -16,122 +22,16 @@ use super::generation::ConnectionGate;
 use super::mutation::{RemoteStore, StoreAccess};
 use super::schema::{self, StoreIdentityRead, StoreSnapshot};
 use super::schema_upgrade;
-use super::schema_v12_upgrade;
 use super::session_data::{open_step, OpenStep};
 use super::sql::StatementSpec;
 use crate::sessions::{
-    canonical::CREATE_TABLES,
+    canonical::{V10_CREATE_INDEXES, V10_CREATE_TABLES},
     schema_cleanup::{LEGACY_EXECUTION_SQL, LEGACY_GOALS_SQL},
 };
 
-#[path = "schema_v18_test.rs"]
-mod v18_tests;
-
-#[tokio::test]
-async fn remote_v13_upgrade_drops_owner_tables_and_preserves_session_facts() {
-    let fixture = Fixture::new().await;
-    let store = fixture.store(StoreAccess::ReadWrite);
-    schema_upgrade::upgrade(&store, &fixture.snapshot)
-        .await
-        .unwrap();
-    let pool = &fixture.transport.pool;
-    fixture.declare_previous_generation(13).await;
-    sqlx::raw_sql(
-        "CREATE TABLE session_execution_owners(root_id TEXT PRIMARY KEY REFERENCES threads(id), epoch INTEGER NOT NULL, nonce TEXT NOT NULL, expires_at_unix INTEGER NOT NULL, released INTEGER NOT NULL);
-        CREATE TABLE session_execution_workspace_descriptors(root_id TEXT PRIMARY KEY REFERENCES session_execution_owners(root_id), owner_epoch INTEGER NOT NULL, endpoint TEXT NOT NULL, key_identity TEXT NOT NULL, agent_generation_id TEXT NOT NULL, unsupported_async_owners INTEGER NOT NULL);
-        INSERT INTO session_execution_owners VALUES ('session', 7, 'retired', 0, 0);
-        INSERT INTO session_execution_workspace_descriptors VALUES ('session', 7, 'retired', 'retired', 'retired', 0);
-        INSERT INTO session_close_intents VALUES ('session', 'now')",
-    )
-    .execute(pool)
-    .await
-    .unwrap();
-    let StoreIdentityRead::Present(snapshot) = store.read_identity().await.unwrap() else {
-        panic!("missing v13 identity")
-    };
-    assert!(matches!(
-        open_step(
-            StoreIdentityRead::Present(snapshot.clone()),
-            StoreAccess::ReadWrite
-        )
-        .unwrap(),
-        OpenStep::Upgrade(_)
-    ));
-    let before: (String, String, String) = sqlx::query_as("SELECT t.frozen_context,m.content,m.projection FROM threads t JOIN messages m ON m.thread_id=t.id WHERE t.id=?1")
-        .bind("session").fetch_one(pool).await.unwrap();
-    schema_upgrade::upgrade(&store, &snapshot).await.unwrap();
-    assert_eq!(fixture.version().await, schema::REMOTE_SCHEMA_VERSION);
-    assert_eq!(sqlx::query_scalar::<_, i64>("SELECT count(*) FROM sqlite_master WHERE name IN ('session_execution_owners','session_execution_workspace_descriptors')")
-        .fetch_one(pool).await.unwrap(), 0);
-    assert_eq!(
-        sqlx::query_scalar::<_, i64>(
-            "SELECT count(*) FROM session_close_intents WHERE thread_id=?1"
-        )
-        .bind("session")
-        .fetch_one(pool)
-        .await
-        .unwrap(),
-        1
-    );
-    let after: (String, String, String) = sqlx::query_as("SELECT t.frozen_context,m.content,m.projection FROM threads t JOIN messages m ON m.thread_id=t.id WHERE t.id=?1")
-        .bind("session").fetch_one(pool).await.unwrap();
-    assert_eq!(before, after);
-}
-
-#[tokio::test]
-async fn remote_v13_owner_removal_respects_read_only_and_reports_lost_commit() {
-    let fixture = Fixture::new().await;
-    let writable = fixture.store(StoreAccess::ReadWrite);
-    schema_upgrade::upgrade(&writable, &fixture.snapshot)
-        .await
-        .unwrap();
-    fixture.declare_previous_generation(13).await;
-    sqlx::raw_sql("CREATE TABLE session_execution_owners(root_id TEXT PRIMARY KEY)")
-        .execute(&fixture.transport.pool)
-        .await
-        .unwrap();
-    let StoreIdentityRead::Present(snapshot) = writable.read_identity().await.unwrap() else {
-        panic!("missing identity")
-    };
-    let read_only = fixture.store(StoreAccess::ReadOnly);
-    let error = schema_upgrade::upgrade(&read_only, &snapshot)
-        .await
-        .unwrap_err();
-    assert!(matches!(
-        error.kind(),
-        SessionResourceErrorKind::ReadOnlyStore
-    ));
-    assert_eq!(fixture.version().await, 13);
-    fixture.transport.drop_reply.store(true, Ordering::SeqCst);
-    assert!(schema_upgrade::upgrade(&writable, &snapshot)
-        .await
-        .unwrap_err()
-        .is_persistence_uncertain());
-    // 12..=18 → 19 是两步：丢失的回复属于第一步，已提交的版本停在 18，重开读到的就是
-    // 这个一致的中间态——再升级一次（带上重新读到的快照）就走完。
-    assert_eq!(fixture.version().await, 18);
-    assert!(matches!(
-        open_step(
-            writable.read_identity().await.unwrap(),
-            StoreAccess::ReadWrite
-        )
-        .unwrap(),
-        OpenStep::Upgrade(_)
-    ));
-    let StoreIdentityRead::Present(snapshot) = writable.read_identity().await.unwrap() else {
-        panic!("missing identity")
-    };
-    schema_upgrade::upgrade(&writable, &snapshot).await.unwrap();
-    assert_eq!(fixture.version().await, schema::REMOTE_SCHEMA_VERSION);
-    assert!(matches!(
-        open_step(
-            writable.read_identity().await.unwrap(),
-            StoreAccess::ReadWrite
-        )
-        .unwrap(),
-        OpenStep::Existing(_)
-    ));
-}
+/// 压缩前形状（契约 `v2`，版本 10|11）的登记行数据；契约标签是升级来源。
+const PREVIOUS_CONTRACT: &str = "peri.session.store/v2";
+const DISCOVERY: &str = r#"{"root":"/tmp","common_dir":null,"private_dir":null}"#;
 
 struct SqliteTransport {
     pool: SqlitePool,
@@ -203,7 +103,7 @@ impl RemoteTransport for SqliteTransport {
     ) -> turso_serverless::Result<Vec<u64>> {
         self.writes.fetch_add(1, Ordering::SeqCst);
         if self.change_schema.swap(false, Ordering::SeqCst) {
-            sqlx::query("CREATE TABLE late_extension (id TEXT REFERENCES thread_goals(thread_id))")
+            sqlx::query("CREATE TABLE late_extension (id TEXT)")
                 .execute(&self.pool)
                 .await
                 .map_err(error_of)?;
@@ -215,12 +115,11 @@ impl RemoteTransport for SqliteTransport {
             .map_err(error_of)?;
         let mut counts = Vec::new();
         for (index, statement) in statements.iter().enumerate() {
-            let fail_recovery = statement.sql == "DROP TABLE IF EXISTS session_control_state"
-                && self.fail_recovery_drop.swap(false, Ordering::SeqCst);
-            let result = if fail_recovery
-                || (statement.sql == "ALTER TABLE threads DROP COLUMN cached_context"
-                    && self.fail_column_drop.swap(false, Ordering::SeqCst))
-            {
+            let fail = (statement.sql == "ALTER TABLE threads DROP COLUMN cached_context"
+                && self.fail_column_drop.swap(false, Ordering::SeqCst))
+                || (statement.sql == "DROP TABLE IF EXISTS session_control_state"
+                    && self.fail_recovery_drop.swap(false, Ordering::SeqCst));
+            let result = if fail {
                 sqlx::query("ALTER TABLE threads DROP COLUMN absent_column")
                     .execute(&mut *transaction)
                     .await
@@ -284,154 +183,9 @@ struct Fixture {
     snapshot: StoreSnapshot,
 }
 
-/// v19 之前的执行登记表：v12 迁移由旧 `workspaces` 改名而来，v19 并入 `workspaces` 后删除。
-///
-/// 夹具的升级链会一路走到本构建的版本，而要构造「上一代的库」就得把这张表补回来——
-/// 形状必须与 v12 的输出一致（列名、唯一键），否则测的就不是 v12..=18 的库。
-const LEGACY_REGISTRATIONS_TABLE_SQL: &str = "CREATE TABLE legacy_execution_registrations (
-    id TEXT PRIMARY KEY, project_id TEXT NOT NULL REFERENCES projects(id),
-    root TEXT NOT NULL, root_identity TEXT NOT NULL, discovery TEXT NOT NULL,
-    UNIQUE(root, root_identity), UNIQUE(id, project_id))";
-
-#[tokio::test]
-async fn v11_to_v12_remote_batch_preserves_history_and_clears_machine_credentials() {
-    let directory = tempfile::tempdir().unwrap();
-    let pool = SqlitePoolOptions::new()
-        .max_connections(1)
-        .connect_with(
-            sqlx::sqlite::SqliteConnectOptions::new()
-                .filename(directory.path().join("remote-v11.db"))
-                .create_if_missing(true)
-                .foreign_keys(false),
-        )
-        .await
-        .unwrap();
-    for statement in CREATE_TABLES {
-        sqlx::query(*statement).execute(&pool).await.unwrap();
-    }
-    sqlx::query(schema::CREATE_STORE_META_SQL)
-        .execute(&pool)
-        .await
-        .unwrap();
-    let project = uuid::Uuid::new_v4().to_string();
-    let registration = uuid::Uuid::new_v4().to_string();
-    let machine = uuid::Uuid::new_v4().to_string();
-    let thread = uuid::Uuid::new_v4().to_string();
-    let discovery = serde_json::json!({
-        "root":"/repo", "root_identity":{"device":1,"inode":1},
-        "common_dir":null,"common_identity":null,"private_dir":null,"private_identity":null
-    })
-    .to_string();
-    sqlx::query(
-        "INSERT INTO peri_store_meta VALUES (0, 11, 'store-v11', 'peri.session.store/v2', 'now')",
-    )
-    .execute(&pool)
-    .await
-    .unwrap();
-    sqlx::query("INSERT INTO projects VALUES (?1, '/repo', 'object')")
-        .bind(&project)
-        .execute(&pool)
-        .await
-        .unwrap();
-    sqlx::query("INSERT INTO workspaces VALUES (?1, ?2, '/repo', 'object', ?3)")
-        .bind(&registration)
-        .bind(&project)
-        .bind(discovery)
-        .execute(&pool)
-        .await
-        .unwrap();
-    sqlx::query("INSERT INTO threads(id,cwd,created_at,updated_at,message_count,frozen_context) VALUES (?1,'/repo/src','now','now',1,'frozen')")
-        .bind(&thread).execute(&pool).await.unwrap();
-    sqlx::query("INSERT INTO session_bindings VALUES (?1,1,?2,?3,'src')")
-        .bind(&thread)
-        .bind(&project)
-        .bind(&registration)
-        .execute(&pool)
-        .await
-        .unwrap();
-    sqlx::query("INSERT INTO session_environments VALUES (?1,?2)")
-        .bind(&thread)
-        .bind(&machine)
-        .execute(&pool)
-        .await
-        .unwrap();
-    let mismatched_thread = uuid::Uuid::new_v4().to_string();
-    sqlx::query("INSERT INTO threads(id,cwd,created_at,updated_at,message_count,frozen_context) VALUES (?1,'/other/place','now','now',1,'frozen')")
-        .bind(&mismatched_thread).execute(&pool).await.unwrap();
-    sqlx::query("INSERT INTO session_bindings VALUES (?1,1,?2,?3,'wrong/relative')")
-        .bind(&mismatched_thread)
-        .bind(&project)
-        .bind(&registration)
-        .execute(&pool)
-        .await
-        .unwrap();
-    sqlx::query("INSERT INTO session_environments VALUES (?1,?2)")
-        .bind(&mismatched_thread)
-        .bind(&machine)
-        .execute(&pool)
-        .await
-        .unwrap();
-    sqlx::query("INSERT INTO messages(message_id,thread_id,role,content) VALUES ('message',?1,'user','history')")
-        .bind(&thread).execute(&pool).await.unwrap();
-    sqlx::query(
-        "INSERT INTO mcp_oauth_credentials VALUES ('local',?1,'server','old credential','now')",
-    )
-    .bind(&machine)
-    .execute(&pool)
-    .await
-    .unwrap();
-    let transport = Arc::new(SqliteTransport {
-        pool,
-        writes: AtomicUsize::new(0),
-        fail_column_drop: AtomicBool::new(false),
-        fail_recovery_drop: AtomicBool::new(false),
-        change_schema: AtomicBool::new(false),
-        drop_reply: AtomicBool::new(false),
-        truncate_reply: AtomicBool::new(false),
-    });
-    let store = Fixture::store_for(&transport, StoreAccess::ReadWrite);
-    let StoreIdentityRead::Present(snapshot) = store.read_identity().await.unwrap() else {
-        panic!("missing identity")
-    };
-    schema_v12_upgrade::upgrade(&store, &snapshot)
-        .await
-        .unwrap();
-    let row: (String, i64, String) = sqlx::query_as(
-        "SELECT t.cwd,t.archived,w.machine_id FROM threads t JOIN workspaces w ON w.id=t.workspace_id WHERE t.id=?1"
-    ).bind(&thread).fetch_one(&transport.pool).await.unwrap();
-    assert_eq!(row, ("/repo/src".into(), 0, machine));
-    let fallback: (String, String) = sqlx::query_as(
-        "SELECT w.path,w.path_source FROM threads t JOIN workspaces w ON w.id=t.workspace_id WHERE t.id=?1",
-    )
-    .bind(&mismatched_thread)
-    .fetch_one(&transport.pool)
-    .await
-    .unwrap();
-    assert_eq!(fallback, ("/other/place".into(), "unverified".into()));
-    let payload: (String,) = sqlx::query_as("SELECT content FROM messages WHERE thread_id=?1")
-        .bind(&thread)
-        .fetch_one(&transport.pool)
-        .await
-        .unwrap();
-    assert_eq!(payload.0, "history");
-    let credentials: (i64,) = sqlx::query_as("SELECT COUNT(*) FROM mcp_oauth_credentials")
-        .fetch_one(&transport.pool)
-        .await
-        .unwrap();
-    assert_eq!(credentials.0, 0);
-    let environments: (i64,) = sqlx::query_as(
-        "SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name = 'session_environments'",
-    )
-    .fetch_one(&transport.pool)
-    .await
-    .unwrap();
-    assert_eq!(environments.0, 0);
-    let upgraded = store.read_identity().await.unwrap();
-    assert!(matches!(upgraded, StoreIdentityRead::Present(snapshot)
-        if snapshot.schema_version == 12 && snapshot.contract == "peri.session.store/v3"));
-}
-
 impl Fixture {
+    /// 压缩前契约的库：登记语义的 `workspaces`、执行环境表、machine 作用域凭证，
+    /// 外加迁移要清掉的退役对象（`thread_goals`、`execution_runs`、旧缓存列）。
     async fn new() -> Self {
         let directory = tempfile::tempdir().unwrap();
         let options = sqlx::sqlite::SqliteConnectOptions::new()
@@ -443,8 +197,14 @@ impl Fixture {
             .connect_with(options)
             .await
             .unwrap();
-        for statement in CREATE_TABLES {
+        for statement in V10_CREATE_TABLES {
             sqlx::query(*statement).execute(&pool).await.unwrap();
+        }
+        for statement in V10_CREATE_INDEXES {
+            sqlx::raw_sql(sqlx::AssertSqlSafe((*statement).to_owned()))
+                .execute(&pool)
+                .await
+                .unwrap();
         }
         sqlx::query(schema::CREATE_STORE_META_SQL)
             .execute(&pool)
@@ -455,21 +215,30 @@ impl Fixture {
             .await
             .unwrap();
         sqlx::query(LEGACY_GOALS_SQL).execute(&pool).await.unwrap();
-        sqlx::raw_sql("ALTER TABLE threads ADD COLUMN cached_context TEXT;
+        sqlx::query(LEGACY_EXECUTION_SQL)
+            .execute(&pool)
+            .await
+            .unwrap();
+        // 语句文本来自本文件的静态夹具，不含外部输入。
+        sqlx::raw_sql(sqlx::AssertSqlSafe(format!(
+            "ALTER TABLE threads ADD COLUMN cached_context TEXT;
             ALTER TABLE threads ADD COLUMN context_cache_epoch INTEGER NOT NULL DEFAULT 0;
-            INSERT INTO peri_store_meta VALUES (0, 10, 'existing-store', 'peri.session.store/v2', 'original timestamp');
+            INSERT INTO peri_store_meta VALUES (0, 10, 'existing-store', '{PREVIOUS_CONTRACT}', 'original timestamp');
             INSERT INTO peri_op_ledger VALUES ('operation', 'append', 'digest', 'applied', 'receipt', 'original timestamp');
-            INSERT INTO threads (id, cwd, created_at, updated_at, config, cached_context, context_cache_epoch) VALUES ('session', '/tmp', '2020-01-01T00:00:00Z', '2020-01-01T00:00:00Z', '{\"model\":\"keep\"}', 'old cache', 5);
+            INSERT INTO threads (id, cwd, created_at, updated_at, config, cached_context, context_cache_epoch) VALUES ('session', '/tmp', '2020-01-01T00:00:00Z', '2020-01-01T00:00:00Z', '{{\"model\":\"keep\"}}', 'old cache', 5);
             INSERT INTO thread_goals VALUES ('session', 'goal', 'old goal', 'active', NULL, 0, 0, 1, 1);
-            INSERT INTO messages (rowid, message_id, thread_id, role, content, excluded, projection) VALUES (7, 'message', 'session', 'user', 'original content', 1, 'original projection')")
-            .execute(&pool).await.unwrap();
-        sqlx::raw_sql("INSERT INTO projects VALUES ('project', 'locator', 'identity');
-            INSERT INTO workspaces VALUES ('11111111-1111-4111-8111-111111111111', 'project', '/tmp', 'root identity', '{\"root\":\"/tmp\",\"common_dir\":null,\"private_dir\":null}');
+            INSERT INTO messages (rowid, message_id, thread_id, role, content, excluded, projection) VALUES (7, 'message', 'session', 'user', 'original content', 1, 'original projection');
+            INSERT INTO execution_runs VALUES ('session', 7, 0);
+            INSERT INTO projects VALUES ('project', 'locator', 'identity');
+            INSERT INTO workspaces VALUES ('11111111-1111-4111-8111-111111111111', 'project', '/tmp', 'root identity', '{DISCOVERY}');
             INSERT INTO session_bindings VALUES ('session', 1, 'project', '11111111-1111-4111-8111-111111111111', '');
             INSERT INTO session_environments VALUES ('session', 'original machine');
             INSERT INTO mcp_oauth_credentials VALUES ('principal', 'original machine', 'server', 'credential bytes', 'timestamp');
-            UPDATE threads SET frozen_context = 'frozen bytes', inherited_context = 'inherited bytes', snapshot_at_message_id = 'message', agent_status = 'done', hidden = 1, cancel_policy = 'detach', message_count = 1")
-            .execute(&pool).await.unwrap();
+            UPDATE threads SET frozen_context = 'frozen bytes', inherited_context = 'inherited bytes', snapshot_at_message_id = 'message', agent_status = 'done', hidden = 1, cancel_policy = 'detach', message_count = 1"
+        )))
+        .execute(&pool)
+        .await
+        .unwrap();
         let transport = Arc::new(SqliteTransport {
             pool,
             writes: AtomicUsize::new(0),
@@ -499,16 +268,11 @@ impl Fixture {
         Self::store_for(&self.transport, access)
     }
 
-    /// 把夹具退回上一代代数：真实 v12..=18 的库是「版本 12..=18 的元数据 + 执行登记表」，
-    /// 契约是 [`schema::PREVIOUS_STORE_CONTRACT`]。
-    async fn declare_previous_generation(&self, version: i64) {
-        sqlx::raw_sql(LEGACY_REGISTRATIONS_TABLE_SQL)
-            .execute(&self.transport.pool)
-            .await
-            .unwrap();
+    /// 把夹具标成另一个代数与契约（构造拒绝面与 v11 输入）。
+    async fn declare(&self, version: i64, contract: &str) {
         sqlx::query("UPDATE peri_store_meta SET schema_version = ?1, contract = ?2")
             .bind(version)
-            .bind(schema::PREVIOUS_STORE_CONTRACT)
+            .bind(contract)
             .execute(&self.transport.pool)
             .await
             .unwrap();
@@ -521,8 +285,25 @@ impl Fixture {
             .unwrap()
     }
 
+    async fn contract(&self) -> String {
+        sqlx::query_scalar("SELECT contract FROM peri_store_meta")
+            .fetch_one(&self.transport.pool)
+            .await
+            .unwrap()
+    }
+
+    /// 计数断言（语句由调用点给出，不含外部输入）。
+    async fn count(&self, sql: String) -> i64 {
+        sqlx::query_scalar(sqlx::AssertSqlSafe(sql))
+            .fetch_one(&self.transport.pool)
+            .await
+            .unwrap()
+    }
+
+    /// 升级前的旧事实：目标行、配置、旧缓存列都还在原位。
     async fn assert_old_state(&self) {
         assert_eq!(self.version().await, 10);
+        assert_eq!(self.contract().await, PREVIOUS_CONTRACT);
         let (goal,): (String,) = sqlx::query_as("SELECT objective FROM thread_goals")
             .fetch_one(&self.transport.pool)
             .await
@@ -540,12 +321,37 @@ impl Fixture {
     }
 }
 
+/// 退役的表与列在升级后消失，其余对象与行原样保留；版本与契约一次推进。
+async fn assert_upgraded(fixture: &Fixture) {
+    assert_eq!(fixture.version().await, schema::REMOTE_SCHEMA_VERSION);
+    assert_eq!(fixture.contract().await, schema::STORE_CONTRACT);
+    assert_eq!(
+        fixture
+            .count("SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name = 'session_environments'".to_owned())
+            .await,
+        0
+    );
+    assert_eq!(
+        fixture
+            .count("SELECT COUNT(*) FROM sqlite_master WHERE name IN ('execution_runs', 'thread_goals')".to_owned())
+            .await,
+        1,
+        "退役的执行表清掉，业务扩展表 thread_goals 保留"
+    );
+    assert_eq!(
+        fixture
+            .count("SELECT COUNT(*) FROM pragma_table_xinfo('threads') WHERE name IN ('cached_context', 'context_cache_epoch')".to_owned())
+            .await,
+        0
+    );
+}
+
 #[tokio::test]
-async fn remote_schema_upgrade_preserves_identity_ledger_config_and_rowid_history() {
+async fn upgrade_moves_a_released_store_to_the_current_generation_in_one_batch() {
     let fixture = Fixture::new().await;
     let retained_sql = "SELECT 'threads', json_array(id, title, cwd, created_at, updated_at, message_count, parent_thread_id, snapshot_at_message_id, hidden, cancel_policy, config, frozen_context, inherited_context, agent_status) FROM threads
         UNION ALL SELECT 'projects', json_array(id, locator, object_identity) FROM projects
-        UNION ALL SELECT 'bindings', json_array(thread_id, schema_version, project_id, workspace_id, relative_cwd) FROM session_bindings
+        UNION ALL SELECT 'bindings', json_array(thread_id, schema_version, project_id, relative_cwd) FROM session_bindings
         ORDER BY 1, 2";
     let before: Vec<(String, String)> = sqlx::query_as(retained_sql)
         .fetch_all(&fixture.transport.pool)
@@ -560,22 +366,64 @@ async fn remote_schema_upgrade_preserves_identity_ledger_config_and_rowid_histor
         .unwrap(),
         OpenStep::Upgrade(_)
     ));
+
     schema_upgrade::upgrade(&store, &fixture.snapshot)
         .await
         .unwrap();
-    assert_eq!(fixture.version().await, schema::REMOTE_SCHEMA_VERSION);
+
+    assert_upgraded(&fixture).await;
     let after: Vec<(String, String)> = sqlx::query_as(retained_sql)
         .fetch_all(&fixture.transport.pool)
         .await
         .unwrap();
     assert_eq!(after, before);
-    let environments: (i64,) = sqlx::query_as(
-        "SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name = 'session_environments'",
+    let workspace: (String, String, String, String, String) = sqlx::query_as(
+        "SELECT machine_id, path, path_source, project_id, identity FROM workspaces",
     )
     .fetch_one(&fixture.transport.pool)
     .await
     .unwrap();
-    assert_eq!(environments.0, 0);
+    assert_eq!(workspace.0, "original machine");
+    assert_eq!(workspace.1, "/tmp");
+    assert_eq!(workspace.2, "unverified");
+    assert_eq!(workspace.3, "project");
+    assert_eq!(workspace.4, "root identity");
+    let binding: (String, String, String) = sqlx::query_as(
+        "SELECT workspace_id, discovery_snapshot, evidence_origin FROM session_bindings",
+    )
+    .fetch_one(&fixture.transport.pool)
+    .await
+    .unwrap();
+    assert_eq!(binding.0, "11111111-1111-4111-8111-111111111111");
+    assert_eq!(binding.1, DISCOVERY);
+    assert_eq!(binding.2, "legacy_last_observation");
+    let thread: (String, i64) =
+        sqlx::query_as("SELECT workspace_id, archived FROM threads WHERE id = 'session'")
+            .fetch_one(&fixture.transport.pool)
+            .await
+            .unwrap();
+    assert_eq!(thread.0, binding.0);
+    assert_eq!(thread.1, 0);
+    let machines: Vec<(String, String)> =
+        sqlx::query_as("SELECT id, identity_kind FROM machines ORDER BY id")
+            .fetch_all(&fixture.transport.pool)
+            .await
+            .unwrap();
+    assert_eq!(machines.len(), 2);
+    assert!(machines
+        .iter()
+        .any(|(id, kind)| id == "original machine" && kind == "legacy_unknown"));
+    assert!(
+        machines.iter().any(|(_, kind)| kind == "known"),
+        "当前机器也要可查询"
+    );
+    assert_eq!(
+        fixture
+            .count("SELECT COUNT(*) FROM mcp_oauth_credentials".to_owned())
+            .await,
+        0,
+        "machine 作用域凭证无法证明 Workspace 归属"
+    );
     let (identity, timestamp, config): (String, String, String) = sqlx::query_as(
         "SELECT store_id, peri_store_meta.created_at, config FROM peri_store_meta, threads",
     )
@@ -609,30 +457,116 @@ async fn remote_schema_upgrade_preserves_identity_ledger_config_and_rowid_histor
             "original projection".into()
         )
     );
-    let (retired,): (i64,) =
-        sqlx::query_as("SELECT COUNT(*) FROM sqlite_master WHERE name = 'thread_goals'")
-            .fetch_one(&fixture.transport.pool)
-            .await
-            .unwrap();
-    assert_eq!(retired, 1);
-    let (columns,): (i64,) = sqlx::query_as("SELECT COUNT(*) FROM pragma_table_xinfo('threads') WHERE name IN ('cached_context', 'context_cache_epoch')").fetch_one(&fixture.transport.pool).await.unwrap();
-    assert_eq!(columns, 0);
+    assert_eq!(
+        fixture
+            .count(
+                "SELECT COUNT(*) FROM sqlite_master WHERE name = 'session_close_intents'"
+                    .to_owned()
+            )
+            .await,
+        1
+    );
     assert!(matches!(
         open_step(store.read_identity().await.unwrap(), StoreAccess::ReadWrite).unwrap(),
         OpenStep::Existing(_)
     ));
-    // 一次升级链的四段写批次各发一次：v10 → 11、11 → 12、12..=17 → 18、18 → 19。
-    assert_eq!(fixture.transport.writes.load(Ordering::SeqCst), 4);
+    assert_eq!(
+        fixture.transport.writes.load(Ordering::SeqCst),
+        1,
+        "整段迁移是一个受管批次"
+    );
 }
 
+/// 版本 11 的 `v2` 库（v4 内部用过、未正式发布）：形状就是搬运输入，同一条批次接纳。
 #[tokio::test]
-async fn remote_schema_upgrade_readonly_access_never_sends_a_mutation() {
+async fn upgrade_accepts_the_internal_version_11_shape() {
+    let fixture = Fixture::new().await;
+    fixture.declare(11, PREVIOUS_CONTRACT).await;
+    let StoreIdentityRead::Present(snapshot) = fixture
+        .store(StoreAccess::ReadWrite)
+        .read_identity()
+        .await
+        .unwrap()
+    else {
+        panic!("missing identity")
+    };
+    assert!(matches!(
+        open_step(
+            StoreIdentityRead::Present(snapshot.clone()),
+            StoreAccess::ReadWrite
+        )
+        .unwrap(),
+        OpenStep::Upgrade(_)
+    ));
+
+    schema_upgrade::upgrade(&fixture.store(StoreAccess::ReadWrite), &snapshot)
+        .await
+        .unwrap();
+
+    assert_eq!(fixture.version().await, schema::REMOTE_SCHEMA_VERSION);
+    assert_eq!(fixture.contract().await, schema::STORE_CONTRACT);
+    assert_eq!(
+        fixture
+            .count(
+                "SELECT COUNT(*) FROM sqlite_master WHERE name = 'session_environments'".to_owned()
+            )
+            .await,
+        0
+    );
+}
+
+/// 只有身份与账本的空库（v2 契约但一张 canonical 表都没有）：直接建当前形状，身份不换。
+#[tokio::test]
+async fn upgrade_builds_the_current_shape_for_an_identity_only_store() {
+    let fixture = Fixture::new().await;
+    sqlx::raw_sql(
+        "DROP TABLE thread_goals; DROP TABLE execution_runs; DROP TABLE messages; DROP TABLE threads;
+         DROP TABLE session_bindings; DROP TABLE session_environments; DROP TABLE workspaces; DROP TABLE projects;
+         DROP TABLE mcp_oauth_credentials",
+    )
+    .execute(&fixture.transport.pool)
+    .await
+    .unwrap();
+
+    schema_upgrade::upgrade(&fixture.store(StoreAccess::ReadWrite), &fixture.snapshot)
+        .await
+        .unwrap();
+
+    assert_eq!(fixture.version().await, schema::REMOTE_SCHEMA_VERSION);
+    assert_eq!(fixture.contract().await, schema::STORE_CONTRACT);
+    let (identity,): (String,) = sqlx::query_as("SELECT store_id FROM peri_store_meta")
+        .fetch_one(&fixture.transport.pool)
+        .await
+        .unwrap();
+    assert_eq!(identity, "existing-store");
+    let (columns,): (i64,) = sqlx::query_as("SELECT COUNT(*) FROM pragma_table_xinfo('threads')")
+        .fetch_one(&fixture.transport.pool)
+        .await
+        .unwrap();
+    assert_eq!(columns, 16);
+    for table in [
+        "machines",
+        "session_bindings",
+        "mcp_oauth_credentials",
+        "session_close_intents",
+    ] {
+        assert_eq!(
+            fixture
+                .count(format!(
+                    "SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name = '{table}'"
+                ))
+                .await,
+            1,
+            "{table}"
+        );
+    }
+}
+
+/// 只读访问不发写批次，旧状态原样。
+#[tokio::test]
+async fn upgrade_requires_a_writable_store() {
     let fixture = Fixture::new().await;
     let reader = fixture.store(StoreAccess::ReadOnly);
-    assert!(matches!(
-        open_step(reader.read_identity().await.unwrap(), StoreAccess::ReadOnly).unwrap(),
-        OpenStep::Existing(_)
-    ));
     let error = schema_upgrade::upgrade(&reader, &fixture.snapshot)
         .await
         .unwrap_err();
@@ -644,88 +578,9 @@ async fn remote_schema_upgrade_readonly_access_never_sends_a_mutation() {
     fixture.assert_old_state().await;
 }
 
+/// 历史表缺列：形状不是本构建认识的输入，拒绝且不发批次。
 #[tokio::test]
-async fn remote_schema_upgrade_completes_an_identity_only_initialization_without_replacing_identity(
-) {
-    let fixture = Fixture::new().await;
-    sqlx::raw_sql("DROP TABLE thread_goals; DROP TABLE messages; DROP TABLE threads; DROP TABLE session_bindings; DROP TABLE session_environments; DROP TABLE workspaces; DROP TABLE projects")
-        .execute(&fixture.transport.pool).await.unwrap();
-    schema_upgrade::upgrade(&fixture.store(StoreAccess::ReadWrite), &fixture.snapshot)
-        .await
-        .unwrap();
-    assert_eq!(fixture.version().await, schema::REMOTE_SCHEMA_VERSION);
-    let (identity,): (String,) = sqlx::query_as("SELECT store_id FROM peri_store_meta")
-        .fetch_one(&fixture.transport.pool)
-        .await
-        .unwrap();
-    assert_eq!(identity, "existing-store");
-    let (columns,): (i64,) = sqlx::query_as("SELECT COUNT(*) FROM pragma_table_xinfo('threads')")
-        .fetch_one(&fixture.transport.pool)
-        .await
-        .unwrap();
-    assert_eq!(columns, 16);
-}
-
-#[tokio::test]
-async fn remote_schema_upgrade_failed_drop_rolls_back_goals_columns_and_version() {
-    let fixture = Fixture::new().await;
-    fixture
-        .transport
-        .fail_column_drop
-        .store(true, Ordering::SeqCst);
-    schema_upgrade::upgrade(&fixture.store(StoreAccess::ReadWrite), &fixture.snapshot)
-        .await
-        .unwrap_err();
-    fixture.assert_old_state().await;
-    schema_upgrade::upgrade(&fixture.store(StoreAccess::ReadWrite), &fixture.snapshot)
-        .await
-        .unwrap();
-    assert_eq!(fixture.version().await, schema::REMOTE_SCHEMA_VERSION);
-}
-
-#[tokio::test]
-async fn remote_schema_upgrade_detects_dependencies_created_after_its_snapshot() {
-    let fixture = Fixture::new().await;
-    fixture
-        .transport
-        .change_schema
-        .store(true, Ordering::SeqCst);
-    schema_upgrade::upgrade(&fixture.store(StoreAccess::ReadWrite), &fixture.snapshot)
-        .await
-        .unwrap_err();
-    fixture.assert_old_state().await;
-    let (extensions,): (i64,) =
-        sqlx::query_as("SELECT COUNT(*) FROM sqlite_master WHERE name = 'late_extension'")
-            .fetch_one(&fixture.transport.pool)
-            .await
-            .unwrap();
-    assert_eq!(extensions, 1);
-}
-
-#[tokio::test]
-async fn remote_schema_upgrade_preserves_extended_goal_layout() {
-    let fixture = Fixture::new().await;
-    sqlx::query("ALTER TABLE thread_goals ADD COLUMN unknown_data TEXT")
-        .execute(&fixture.transport.pool)
-        .await
-        .unwrap();
-    sqlx::query("UPDATE thread_goals SET unknown_data = 'keep'")
-        .execute(&fixture.transport.pool)
-        .await
-        .unwrap();
-    schema_upgrade::upgrade(&fixture.store(StoreAccess::ReadWrite), &fixture.snapshot)
-        .await
-        .unwrap();
-    let (retained,): (String,) = sqlx::query_as("SELECT unknown_data FROM thread_goals")
-        .fetch_one(&fixture.transport.pool)
-        .await
-        .unwrap();
-    assert_eq!(retained, "keep");
-    assert_eq!(fixture.version().await, schema::REMOTE_SCHEMA_VERSION);
-}
-
-#[tokio::test]
-async fn remote_schema_upgrade_rejects_missing_history_columns_without_advancing_version() {
+async fn upgrade_rejects_missing_history_columns_without_writing() {
     let fixture = Fixture::new().await;
     sqlx::query("ALTER TABLE messages DROP COLUMN projection")
         .execute(&fixture.transport.pool)
@@ -742,9 +597,152 @@ async fn remote_schema_upgrade_rejects_missing_history_columns_without_advancing
     fixture.assert_old_state().await;
 }
 
+/// 拒绝面：未发布的中间代（12..19）、其他契约标签、更早的版本，一律不认识。
 #[tokio::test]
-async fn remote_schema_upgrade_lost_or_incomplete_reply_is_uncertain_and_reopen_reads_committed_version(
-) {
+async fn upgrade_refuses_generations_and_contracts_outside_the_compatible_one() {
+    for (version, contract) in [
+        (9, PREVIOUS_CONTRACT),
+        (12, PREVIOUS_CONTRACT),
+        (14, PREVIOUS_CONTRACT),
+        (18, PREVIOUS_CONTRACT),
+        (19, PREVIOUS_CONTRACT),
+        (10, "peri.session.store/v3"),
+        (11, "peri.session.store/v4"),
+        (10, "unknown-contract"),
+    ] {
+        let fixture = Fixture::new().await;
+        fixture.declare(version, contract).await;
+        let StoreIdentityRead::Present(snapshot) = fixture
+            .store(StoreAccess::ReadWrite)
+            .read_identity()
+            .await
+            .unwrap()
+        else {
+            panic!("missing identity")
+        };
+        let error = schema_upgrade::upgrade(&fixture.store(StoreAccess::ReadWrite), &snapshot)
+            .await
+            .unwrap_err();
+        assert!(
+            matches!(error.kind(), SessionResourceErrorKind::Unsupported),
+            "({version}, {contract}) 必须被拒绝"
+        );
+        assert_eq!(fixture.transport.writes.load(Ordering::SeqCst), 0);
+        assert_eq!(fixture.version().await, version);
+        assert_eq!(fixture.contract().await, contract);
+    }
+}
+
+/// 快照读完之后元数据被改写：批次开头的守卫让整批失败，库保持原样。
+#[tokio::test]
+async fn upgrade_guards_the_meta_snapshot_before_mutating() {
+    for mutation in [
+        "UPDATE peri_store_meta SET store_id = 'replacement-store'",
+        "UPDATE peri_store_meta SET contract = 'unknown-contract'",
+    ] {
+        let fixture = Fixture::new().await;
+        sqlx::query(mutation)
+            .execute(&fixture.transport.pool)
+            .await
+            .unwrap();
+        let before: (i64, String, String) =
+            sqlx::query_as("SELECT schema_version, store_id, contract FROM peri_store_meta")
+                .fetch_one(&fixture.transport.pool)
+                .await
+                .unwrap();
+        assert!(
+            schema_upgrade::upgrade(&fixture.store(StoreAccess::ReadWrite), &fixture.snapshot)
+                .await
+                .is_err()
+        );
+        let after: (i64, String, String) =
+            sqlx::query_as("SELECT schema_version, store_id, contract FROM peri_store_meta")
+                .fetch_one(&fixture.transport.pool)
+                .await
+                .unwrap();
+        assert_eq!(before, after);
+        assert_eq!(
+            fixture
+                .count("SELECT COUNT(*) FROM sqlite_master WHERE name = 'legacy_execution_registrations'".to_owned())
+                .await,
+            0
+        );
+    }
+}
+
+/// 快照读完之后多出一个对象：对象数守卫让整批失败，扩展对象留在库里。
+#[tokio::test]
+async fn upgrade_detects_objects_created_after_its_snapshot() {
+    let fixture = Fixture::new().await;
+    fixture
+        .transport
+        .change_schema
+        .store(true, Ordering::SeqCst);
+    assert!(
+        schema_upgrade::upgrade(&fixture.store(StoreAccess::ReadWrite), &fixture.snapshot)
+            .await
+            .is_err()
+    );
+    fixture.assert_old_state().await;
+    assert_eq!(
+        fixture
+            .count("SELECT COUNT(*) FROM sqlite_master WHERE name = 'late_extension'".to_owned())
+            .await,
+        1
+    );
+}
+
+/// 退役对象形状不认识（多一列）：拒绝，不猜内容。
+#[tokio::test]
+async fn upgrade_refuses_unknown_retired_shapes_without_writing() {
+    let fixture = Fixture::new().await;
+    sqlx::query("ALTER TABLE execution_runs ADD COLUMN extension_data TEXT")
+        .execute(&fixture.transport.pool)
+        .await
+        .unwrap();
+    let error = schema_upgrade::upgrade(&fixture.store(StoreAccess::ReadWrite), &fixture.snapshot)
+        .await
+        .unwrap_err();
+    assert!(matches!(
+        error.kind(),
+        SessionResourceErrorKind::Unsupported
+    ));
+    assert_eq!(fixture.transport.writes.load(Ordering::SeqCst), 0);
+    fixture.assert_old_state().await;
+}
+
+/// 批次中途失败：整批回滚，旧状态与版本保持，重试能成功。
+#[tokio::test]
+async fn upgrade_rolls_back_a_failed_batch_and_retries() {
+    let fixture = Fixture::new().await;
+    fixture
+        .transport
+        .fail_column_drop
+        .store(true, Ordering::SeqCst);
+    assert!(
+        schema_upgrade::upgrade(&fixture.store(StoreAccess::ReadWrite), &fixture.snapshot)
+            .await
+            .is_err()
+    );
+    fixture.assert_old_state().await;
+    assert_eq!(
+        fixture
+            .count("SELECT COUNT(*) FROM execution_runs".to_owned())
+            .await,
+        1,
+        "退役表在回滚后仍在"
+    );
+
+    schema_upgrade::upgrade(&fixture.store(StoreAccess::ReadWrite), &fixture.snapshot)
+        .await
+        .unwrap();
+
+    assert_upgraded(&fixture).await;
+}
+
+/// 回复丢失或行数不完整：结论是「不确定」，但库已经提交；重新读身份看到的就是真实代数。
+#[tokio::test]
+async fn upgrade_reports_an_uncertain_reply_but_reopen_reads_the_committed_generation() {
     for lost in [true, false] {
         let fixture = Fixture::new().await;
         if lost {
@@ -763,7 +761,9 @@ async fn remote_schema_upgrade_lost_or_incomplete_reply_is_uncertain_and_reopen_
             error.kind(),
             SessionResourceErrorKind::PersistenceUncertain { .. }
         ));
-        assert_eq!(fixture.version().await, 11);
+        // 单条批次已经提交：库停在当前代数，重开的结论是「本构建直接可用」。
+        assert_eq!(fixture.version().await, schema::REMOTE_SCHEMA_VERSION);
+        assert_eq!(fixture.contract().await, schema::STORE_CONTRACT);
         let reopened = fixture.store(StoreAccess::ReadWrite);
         assert!(matches!(
             open_step(
@@ -771,85 +771,10 @@ async fn remote_schema_upgrade_lost_or_incomplete_reply_is_uncertain_and_reopen_
                 StoreAccess::ReadWrite
             )
             .unwrap(),
-            OpenStep::Upgrade(_)
+            OpenStep::Existing(_)
         ));
         assert_eq!(fixture.transport.writes.load(Ordering::SeqCst), 1);
     }
-}
-
-#[tokio::test]
-async fn remote_schema_upgrade_removes_recognized_execution_table_but_keeps_ledger() {
-    let fixture = Fixture::new().await;
-    sqlx::query(LEGACY_EXECUTION_SQL)
-        .execute(&fixture.transport.pool)
-        .await
-        .unwrap();
-    sqlx::query("INSERT INTO execution_runs VALUES ('session', 7, 0), ('orphan', 9, 0)")
-        .execute(&fixture.transport.pool)
-        .await
-        .unwrap();
-    schema_upgrade::upgrade(&fixture.store(StoreAccess::ReadWrite), &fixture.snapshot)
-        .await
-        .unwrap();
-    assert_eq!(fixture.version().await, schema::REMOTE_SCHEMA_VERSION);
-    let (retired,): (i64,) = sqlx::query_as(
-        "SELECT COUNT(*) FROM sqlite_schema WHERE name IN ('execution_runs', 'thread_goals')",
-    )
-    .fetch_one(&fixture.transport.pool)
-    .await
-    .unwrap();
-    assert_eq!(retired, 1);
-    let (receipt,): (String,) =
-        sqlx::query_as("SELECT receipt FROM peri_op_ledger WHERE operation_id='operation'")
-            .fetch_one(&fixture.transport.pool)
-            .await
-            .unwrap();
-    assert_eq!(receipt, "receipt");
-}
-
-#[tokio::test]
-async fn remote_schema_upgrade_refuses_unknown_execution_state_without_writing() {
-    let fixture = Fixture::new().await;
-    sqlx::query("CREATE TABLE execution_runs (thread_id TEXT PRIMARY KEY, generation INTEGER NOT NULL, clean BOOLEAN NOT NULL, extension_data TEXT)")
-        .execute(&fixture.transport.pool).await.unwrap();
-    let error = schema_upgrade::upgrade(&fixture.store(StoreAccess::ReadWrite), &fixture.snapshot)
-        .await
-        .unwrap_err();
-    assert!(matches!(
-        error.kind(),
-        SessionResourceErrorKind::Unsupported
-    ));
-    assert_eq!(fixture.transport.writes.load(Ordering::SeqCst), 0);
-    fixture.assert_old_state().await;
-}
-
-#[tokio::test]
-async fn remote_schema_upgrade_rollback_restores_execution_rows_and_version() {
-    let fixture = Fixture::new().await;
-    sqlx::query(LEGACY_EXECUTION_SQL)
-        .execute(&fixture.transport.pool)
-        .await
-        .unwrap();
-    sqlx::query("INSERT INTO execution_runs VALUES ('session', 7, 0)")
-        .execute(&fixture.transport.pool)
-        .await
-        .unwrap();
-    fixture
-        .transport
-        .fail_column_drop
-        .store(true, Ordering::SeqCst);
-    assert!(
-        schema_upgrade::upgrade(&fixture.store(StoreAccess::ReadWrite), &fixture.snapshot)
-            .await
-            .is_err()
-    );
-    fixture.assert_old_state().await;
-    let execution: (String, i64, bool) =
-        sqlx::query_as("SELECT thread_id, generation, clean FROM execution_runs")
-            .fetch_one(&fixture.transport.pool)
-            .await
-            .unwrap();
-    assert_eq!(execution, ("session".to_owned(), 7, false));
 }
 
 // Full remote application behavior is tested with the same SQL transport fixture.

@@ -147,9 +147,9 @@ fn bigger_projections_extend_the_same_meta_source() {
 fn schema_ddl_matches_the_canonical_shape() {
     let plan = super::session_schema::initialization_plan();
     // 一条语句一个 spec：远端执行器的语句单元就是一条语句，多句拼一个请求只会执行第一条。
-    let expected: Vec<&str> = crate::sessions::canonical::CREATE_V2_TABLES
+    let expected: Vec<&str> = crate::sessions::canonical::CREATE_TABLES
         .iter()
-        .chain(crate::sessions::canonical::CREATE_V2_INDEXES.iter())
+        .chain(crate::sessions::canonical::CREATE_INDEXES.iter())
         .copied()
         .collect();
     let actual: Vec<&str> = plan.iter().map(|spec| spec.sql).collect();
@@ -193,10 +193,10 @@ fn schema_ddl_matches_the_canonical_shape() {
         .expect("索引段存在");
     assert_eq!(
         first_index,
-        crate::sessions::canonical::CREATE_V2_TABLES.len(),
+        crate::sessions::canonical::CREATE_TABLES.len(),
         "建表段在前、索引段在后"
     );
-    for index_sql in crate::sessions::canonical::CREATE_V2_INDEXES {
+    for index_sql in crate::sessions::canonical::CREATE_INDEXES {
         assert!(
             plan.iter().any(|spec| spec.sql == *index_sql),
             "v2 canonical index missing: {index_sql}"
@@ -588,12 +588,22 @@ async fn draft_revocation_cleans_environment_without_cascade_and_preserves_commi
     for sql in crate::sessions::canonical::CREATE_TABLES {
         sqlx::query(*sql).execute(&mut connection).await.unwrap();
     }
+    sqlx::query(
+        "INSERT INTO machines(id, name, identity_kind) VALUES ('machine', '测试机', 'known')",
+    )
+    .execute(&mut connection)
+    .await
+    .unwrap();
+    sqlx::query("INSERT INTO workspaces(id, machine_id, path, path_source) VALUES ('owner', 'machine', '/home/u/project', 'unverified')")
+        .execute(&mut connection)
+        .await
+        .unwrap();
     for (id, frozen, expected_deleted) in [("draft", None, 1), ("committed", Some("{}"), 0)] {
-        sqlx::query("INSERT INTO threads(id, created_at, updated_at, frozen_context) VALUES (?1, 'now', 'now', ?2)")
+        sqlx::query("INSERT INTO threads(id, created_at, updated_at, frozen_context, workspace_id) VALUES (?1, 'now', 'now', ?2, 'owner')")
             .bind(id).bind(frozen).execute(&mut connection).await.unwrap();
         sqlx::query("INSERT INTO messages(message_id, thread_id, role, content) VALUES (?1, ?1, 'human', '{}')")
             .bind(id).execute(&mut connection).await.unwrap();
-        sqlx::query("INSERT INTO session_bindings(thread_id, schema_version, project_id, workspace_id, relative_cwd) VALUES (?1, 1, 'project', 'workspace', '')")
+        sqlx::query("INSERT INTO session_bindings(thread_id, schema_version, project_id, workspace_id, relative_cwd, evidence_origin) VALUES (?1, 1, 'project', 'owner', '', 'creation_snapshot')")
             .bind(id).execute(&mut connection).await.unwrap();
         let statements = session_sql::revoke_draft_statements(id);
         assert_eq!(statements.len(), 3);

@@ -57,7 +57,7 @@ async fn registration_upgrade_fixture(path: &Path) {
     )
     .await
     .unwrap();
-    for statement in crate::sessions::canonical::CREATE_TABLES {
+    for statement in crate::sessions::canonical::V10_CREATE_TABLES {
         sqlx::raw_sql(AssertSqlSafe((*statement).to_owned()))
             .execute(&mut connection)
             .await
@@ -375,7 +375,7 @@ async fn read_only_open_never_creates_an_initialization_lock() {
     )
     .await
     .unwrap();
-    for statement in crate::sessions::canonical::CREATE_TABLES {
+    for statement in crate::sessions::canonical::V10_CREATE_TABLES {
         sqlx::raw_sql(AssertSqlSafe((*statement).to_owned()))
             .execute(&mut connection)
             .await

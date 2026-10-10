@@ -11,7 +11,7 @@ WASM 依赖图按平台排除 SQLx、进程执行、stdio 和本地工具 MCP pa
 | Emscripten 导出与 ACP Host 生命周期 | `peri-wasm/src/emscripten/acp.rs` |
 | 原始 ACP 帧桥 | `peri-acp/src/transport/wire_bridge.rs` |
 | WASM Host 装配 | `peri-acp/src/host/assemble.rs` |
-| 可写 Turso、schema v12 与虚拟执行资格 | `peri-resources/src/sessions/remote/{composition,environment,execution}.rs`、`storage_v2_plan.rs` |
+| 可写 Turso、当前 schema 与虚拟执行资格 | `peri-resources/src/sessions/remote/{composition,environment,execution}.rs`、`storage_v2_plan.rs` |
 | 模型 HTTP/SSE | `peri-model/src/transport/http.rs`、`runtime/retry.rs`；`cloudflare` feature 下原生 Fetch adapter 为 `transport/cloudflare.rs` |
 | 工具链 | `scripts/cargo-rmcp-patched.sh`、`scripts/cargo-wasm.sh` |
 | ACP 端到端验收 | `scripts/smoke-wasm-acp.mjs` |

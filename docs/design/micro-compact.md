@@ -297,7 +297,7 @@ MessageFlags {
 
 ### 7.2 批量写入
 
-旧版逐条持久化 `truncated` 标记产生多次写入；当前采用同事务批量投影更新。schema 11 已移除会话派生缓存及其失效接口，不再为历史变更维护缓存正文或 epoch。
+旧版逐条持久化 `truncated` 标记产生多次写入；当前采用同事务批量投影更新。当前形状已移除会话派生缓存及其失效接口，不再为历史变更维护缓存正文或 epoch。
 
 `PersistOp::ApplyCompactionBatch` 将本轮投影合为一个持久化行为；SQLite 数据面在同一事务内提交投影和更新时间，不再调用缓存失效接口。
 
@@ -365,7 +365,7 @@ SQLite 的 `projection TEXT` 列通过幂等迁移添加。恢复时 `load_messa
 | P1-2 | round 分组太简化 | `TurnGroup::collect()` + `ToolExchange` 配对 |
 | P1-3 | Micro 后跑 Full 白写标记 | dry-run → 不足时跳过 Micro apply |
 | P1-4 | 百分比触发没有回收目标 | `ContextPressure::target_reclaim_tokens()` |
-| P2-1 | 逐条写入与派生缓存维护 | `ApplyCompactionBatch` 同事务批量投影；schema 11 不维护派生缓存 |
+| P2-1 | 逐条写入与派生缓存维护 | `ApplyCompactionBatch` 同事务批量投影；当前形状不维护派生缓存 |
 
 ---
 

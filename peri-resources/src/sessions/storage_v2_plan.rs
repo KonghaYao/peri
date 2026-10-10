@@ -12,11 +12,18 @@ use sqlx::SqliteConnection;
 #[cfg(not(target_os = "emscripten"))]
 use super::discovery::Discovery;
 
+/// 旧登记（压缩前形状里 `workspaces` 的一行）：归属身份 + 最后观测证据。
+///
+/// 证据三列随归属行一起搬到当前形状；`discovery` 同时是绑定行的证据来源，
+/// 因此它不只是展示数据，缺失会让升级 fail-closed。
 #[derive(Clone, Debug)]
 pub(crate) struct LegacyRegistration {
     pub id: WorkspaceId,
     pub root: PathBuf,
     pub path_source: WorkspacePathSource,
+    pub project_id: String,
+    pub root_identity: String,
+    pub discovery: String,
 }
 
 #[derive(Clone, Debug)]
@@ -45,6 +52,14 @@ pub(crate) struct StorageV2Plan {
     pub session_workspace_ids: HashMap<ThreadId, WorkspaceId>,
 }
 
+/// 本机迁移输入：归属规划 + 规划所用的旧事实（会话与登记行）。
+#[derive(Clone, Debug)]
+pub(crate) struct LocalMigrationInput {
+    pub plan: StorageV2Plan,
+    pub sessions: Vec<LegacySession>,
+    pub registrations: Vec<LegacyRegistration>,
+}
+
 /// 旧表会话行：`(thread id, parent id, cwd, machine id, workspace id)`。
 #[cfg(not(target_os = "emscripten"))]
 type LegacySessionRow = (String, Option<String>, String, String, Option<String>);
@@ -52,13 +67,15 @@ type LegacySessionRow = (String, Option<String>, String, String, Option<String>)
 /// 在旧表仍完整时读取迁移输入。执行登记的 `discovery` 只是最后观测值，
 /// 这里仅用它判断路径来源，绝不把它标成创建时的执行快照。
 #[cfg(not(target_os = "emscripten"))]
-pub(crate) async fn read_local_plan(connection: &mut SqliteConnection) -> Result<StorageV2Plan> {
-    let registration_rows: Vec<(String, String, String)> =
-        sqlx::query_as("SELECT id, root, discovery FROM workspaces")
+pub(crate) async fn read_local_plan(
+    connection: &mut SqliteConnection,
+) -> Result<LocalMigrationInput> {
+    let registration_rows: Vec<(String, String, String, String, String)> =
+        sqlx::query_as("SELECT id, project_id, root, root_identity, discovery FROM workspaces")
             .fetch_all(&mut *connection)
             .await?;
     let mut registrations = Vec::with_capacity(registration_rows.len());
-    for (id, root, discovery) in registration_rows {
+    for (id, project_id, root, root_identity, discovery) in registration_rows {
         let observed: Discovery = serde_json::from_str(&discovery)?;
         if observed.root != Path::new(&root) {
             bail!("legacy execution registration root differs from discovery");
@@ -71,6 +88,9 @@ pub(crate) async fn read_local_plan(connection: &mut SqliteConnection) -> Result
             } else {
                 WorkspacePathSource::Unverified
             },
+            project_id,
+            root_identity,
+            discovery,
         });
     }
     let rows: Vec<LegacySessionRow> = sqlx::query_as(
@@ -98,7 +118,204 @@ pub(crate) async fn read_local_plan(connection: &mut SqliteConnection) -> Result
             derived_root: None,
         });
     }
-    plan_local_workspaces(&sessions, &registrations)
+    plan_local_workspaces(&sessions, &registrations).map(|plan| LocalMigrationInput {
+        plan,
+        sessions,
+        registrations,
+    })
+}
+
+/// 当前形状的归属行（迁移落库的完整内容）：归属身份 + 旧登记证据（可有可无）。
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct PlannedWorkspaceRow {
+    pub id: WorkspaceId,
+    pub machine_id: String,
+    pub path: PathBuf,
+    pub path_source: WorkspacePathSource,
+    pub project_id: Option<String>,
+    pub identity: Option<String>,
+    pub discovery: Option<String>,
+}
+
+/// 旧绑定行（迁移输入）。
+#[derive(Clone, Debug)]
+pub(crate) struct LegacyBindingRow {
+    pub thread_id: ThreadId,
+    pub schema_version: i64,
+    pub project_id: String,
+    /// 指向旧登记，不是归属行。
+    pub workspace_id: WorkspaceId,
+    pub relative_cwd: String,
+}
+
+/// 当前形状的绑定行：归属收敛到会话归属行，证据来自旧登记。
+#[derive(Clone, Debug)]
+pub(crate) struct PlannedBindingRow {
+    pub thread_id: ThreadId,
+    pub schema_version: i64,
+    pub project_id: String,
+    pub workspace_id: WorkspaceId,
+    pub relative_cwd: String,
+    pub discovery_snapshot: String,
+    pub evidence_origin: &'static str,
+}
+
+/// 压缩前形状的绑定证据来源：旧登记的最后观测，不是创建时的执行快照。
+pub(crate) const LEGACY_EVIDENCE_ORIGIN: &str = "legacy_last_observation";
+
+/// 旧机器 id 的展示名与身份种类：uuid 字面量是「已知机器」（本机铸造的 id），
+/// 其余是旧库留下的未知机器。规则与规划同源，两端搬运共用一份判定。
+pub(crate) fn machine_identity(machine_id: &str) -> (&'static str, &'static str) {
+    let known =
+        uuid::Uuid::parse_str(machine_id).is_ok_and(|parsed| parsed.to_string() == machine_id);
+    if known {
+        ("我的电脑", "known")
+    } else {
+        ("旧机器", "legacy_unknown")
+    }
+}
+
+/// `path_source` 的列取值：规则属于领域（归属来源的种类），两端写同一列时共用一份派生。
+pub(crate) fn path_source_name(source: WorkspacePathSource) -> &'static str {
+    match source {
+        WorkspacePathSource::Discovered => "discovered",
+        WorkspacePathSource::DerivedLegacy => "derived_legacy",
+        WorkspacePathSource::Unverified => "unverified",
+    }
+}
+
+/// 归属行的完整规划：规划出的归属行 + 旧登记的证据（同名登记优先，其次同路径的
+/// `id` 最小登记）+ 无会话引用但仍要保留的登记（`(machine_id, path)` 只能有一行，
+/// 因此同路径只并入 `id` 最小的一条）。
+///
+/// `machines` 是本次迁移会写进归属表的机器全集（本机含当前机器）：保留行取不到
+/// 会话归属时退到它的 `id` 最小者，与「没有会话引用时取该库的第一台机器」同义。
+pub(crate) fn plan_workspace_rows(
+    plan: &StorageV2Plan,
+    sessions: &[LegacySession],
+    registrations: &[LegacyRegistration],
+    machines: &std::collections::BTreeSet<String>,
+) -> Result<Vec<PlannedWorkspaceRow>> {
+    let by_id: HashMap<_, _> = registrations
+        .iter()
+        .map(|registration| (registration.id, registration))
+        .collect();
+    let mut by_root: HashMap<&Path, &LegacyRegistration> = HashMap::new();
+    for registration in registrations {
+        by_root
+            .entry(registration.root.as_path())
+            .and_modify(|current| {
+                if registration.id.to_string() < current.id.to_string() {
+                    *current = registration;
+                }
+            })
+            .or_insert(registration);
+    }
+
+    let mut rows = Vec::with_capacity(plan.workspaces.len());
+    for workspace in &plan.workspaces {
+        // 归属行的 id 可能沿用旧登记 UUID，也可能是铸造值（同一旧 UUID 被别的机器
+        // 占用时）；前者按 id 取证据，其余按路径取同一路径的最近观测。
+        let evidence = by_id
+            .get(&workspace.id)
+            .copied()
+            .or_else(|| by_root.get(workspace.path.as_path()).copied());
+        rows.push(PlannedWorkspaceRow {
+            id: workspace.id,
+            machine_id: workspace.machine_id.clone(),
+            path: workspace.path.clone(),
+            path_source: workspace.path_source,
+            project_id: evidence.map(|registration| registration.project_id.clone()),
+            identity: evidence.map(|registration| registration.root_identity.clone()),
+            discovery: evidence.map(|registration| registration.discovery.clone()),
+        });
+    }
+
+    let mut planned_ids: HashSet<WorkspaceId> = rows.iter().map(|row| row.id).collect();
+    let mut planned_paths: HashSet<PathBuf> = rows.iter().map(|row| row.path.clone()).collect();
+    for registration in registrations {
+        if planned_paths.contains(&registration.root) || planned_ids.contains(&registration.id) {
+            continue;
+        }
+        if by_root.get(registration.root.as_path()).map(|it| it.id) != Some(registration.id) {
+            continue;
+        }
+        let machine = bound_machine(registration.id, sessions, plan)
+            .or_else(|| machines.iter().next().cloned());
+        let Some(machine) = machine else {
+            continue;
+        };
+        planned_ids.insert(registration.id);
+        planned_paths.insert(registration.root.clone());
+        rows.push(PlannedWorkspaceRow {
+            id: registration.id,
+            machine_id: machine,
+            path: registration.root.clone(),
+            path_source: WorkspacePathSource::Unverified,
+            project_id: Some(registration.project_id.clone()),
+            identity: Some(registration.root_identity.clone()),
+            discovery: Some(registration.discovery.clone()),
+        });
+    }
+    Ok(rows)
+}
+
+/// 引用该登记的会话所属机器：取这些会话的归属行里 `id` 最小的一台。
+fn bound_machine(
+    registration_id: WorkspaceId,
+    sessions: &[LegacySession],
+    plan: &StorageV2Plan,
+) -> Option<String> {
+    let owner = sessions
+        .iter()
+        .filter(|session| session.execution_workspace_id == Some(registration_id))
+        .filter_map(|session| plan.session_workspace_ids.get(&session.id))
+        .min_by_key(|workspace_id| workspace_id.to_string())?;
+    plan.workspaces
+        .iter()
+        .find(|workspace| workspace.id == *owner)
+        .map(|workspace| workspace.machine_id.clone())
+}
+
+/// 绑定行的搬运：`workspace_id` 由旧登记收敛到**会话归属行**，证据取旧登记的
+/// `discovery`，来源标为最后观测。任一绑定落不到归属行、或其记录的根与归属行
+/// 不同路径，都说明改写会静默改绑，直接拒绝升级（fail-closed）。
+pub(crate) fn plan_binding_rows(
+    bindings: &[LegacyBindingRow],
+    plan: &StorageV2Plan,
+    registrations: &[LegacyRegistration],
+) -> Result<Vec<PlannedBindingRow>> {
+    let by_id: HashMap<_, _> = registrations
+        .iter()
+        .map(|registration| (registration.id, registration))
+        .collect();
+    let owners: HashMap<_, _> = plan
+        .workspaces
+        .iter()
+        .map(|workspace| (workspace.id, workspace.path.as_path()))
+        .collect();
+    let mut rows = Vec::with_capacity(bindings.len());
+    for binding in bindings {
+        let Some(owner) = plan.session_workspace_ids.get(&binding.thread_id) else {
+            bail!("legacy binding has no session workspace owner");
+        };
+        let Some(registration) = by_id.get(&binding.workspace_id) else {
+            bail!("legacy binding references a missing execution registration");
+        };
+        if owners.get(owner).copied() != Some(registration.root.as_path()) {
+            bail!("legacy binding root differs from its session workspace");
+        }
+        rows.push(PlannedBindingRow {
+            thread_id: binding.thread_id.clone(),
+            schema_version: binding.schema_version,
+            project_id: binding.project_id.clone(),
+            workspace_id: *owner,
+            relative_cwd: binding.relative_cwd.clone(),
+            discovery_snapshot: registration.discovery.clone(),
+            evidence_origin: LEGACY_EVIDENCE_ORIGIN,
+        });
+    }
+    Ok(rows)
 }
 
 /// 以旧登记保存的 root 或会话保存的 cwd 规划归属。缺失的旧登记不能由当前 pwd 补造。

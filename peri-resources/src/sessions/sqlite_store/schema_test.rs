@@ -1,6 +1,4 @@
 use super::*;
-use crate::sessions::data::SessionDataPort;
-use crate::sessions::sqlite_store::SqliteSessionData;
 // `SessionResources` 的方法只在 unix 子进程用例里调用（Windows 的 home_dir 不读 HOME）。
 #[cfg(unix)]
 use peri_acp_types::session_resources::SessionResources;
@@ -8,17 +6,53 @@ use peri_acp_types::{
     messages::BaseMessage,
     store::{serialize_persisted_payload, PersistedPayload, ThreadStore},
     thread::ThreadMeta,
-    workspace::{ScopedThreadQuery, ThreadScope},
+    workspace::{ScopedThreadQuery, ThreadScope, WorkspaceError},
 };
 use sqlx::{sqlite::SqliteConnectOptions, AssertSqlSafe, Connection};
 use std::path::Path;
-use std::sync::Arc;
+
+/// 已退役的运行时状态表：任何一个都不该出现在当前形状的库里。
+const RECOVERY_TABLES: &[&str] = &[
+    "session_work_commands",
+    "session_work_state",
+    "session_work_events",
+    "session_work_receipts",
+    "session_control_state",
+    "session_control_receipts",
+];
+
+async fn assert_no_recovery_tables(pool: &sqlx::SqlitePool) {
+    for table in RECOVERY_TABLES {
+        let count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM sqlite_schema WHERE name = ?1")
+            .bind(table)
+            .fetch_one(pool)
+            .await
+            .unwrap();
+        assert_eq!(count, 0, "{table}");
+    }
+}
 
 #[tokio::test]
-async fn v13_upgrade_drops_execution_owner_tables_and_preserves_close_intent() {
+async fn current_store_has_eight_business_tables_and_normal_history() {
     let directory = tempfile::tempdir().unwrap();
     let path = directory.path().join("threads.db");
     let store = SqliteThreadStore::new(&path).await.unwrap();
+    assert_no_recovery_tables(&store.database.pool).await;
+    let count: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*) FROM sqlite_schema WHERE type = 'table' AND name NOT LIKE 'sqlite_%'",
+    )
+    .fetch_one(&store.database.pool)
+    .await
+    .unwrap();
+    // 执行登记并入 `workspaces`：新建库只有八张业务表，没有登记表，也没有运行时状态表。
+    assert_eq!(count, 8);
+    let registrations: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*) FROM sqlite_schema WHERE type = 'table' AND name = 'legacy_execution_registrations'",
+    )
+    .fetch_one(&store.database.pool)
+    .await
+    .unwrap();
+    assert_eq!(registrations, 0);
     let id = store
         .create_thread(ThreadMeta::new_at(
             directory.path().to_string_lossy().into_owned(),
@@ -27,58 +61,81 @@ async fn v13_upgrade_drops_execution_owner_tables_and_preserves_close_intent() {
         .await
         .unwrap();
     store
-        .append_message(&id, BaseMessage::human("preserved"))
-        .await
-        .unwrap();
-    sqlx::raw_sql(
-        // v13 的形状里还有执行登记表（v12 起由旧 `workspaces` 改名而来，v19 删除）；
-        // 夹具从新建的库出发，必须把它补回来，否则「声明为 13 的库」并不具备 v13 形状。
-        "CREATE TABLE legacy_execution_registrations (
-            id TEXT PRIMARY KEY, project_id TEXT NOT NULL REFERENCES projects(id),
-            root TEXT NOT NULL, root_identity TEXT NOT NULL, discovery TEXT NOT NULL,
-            UNIQUE(root, root_identity), UNIQUE(id, project_id));
-         CREATE TABLE session_execution_owners(root_id TEXT PRIMARY KEY REFERENCES threads(id), epoch INTEGER, nonce TEXT, released INTEGER);
-         CREATE TABLE session_execution_workspace_descriptors(root_id TEXT PRIMARY KEY REFERENCES session_execution_owners(root_id), endpoint TEXT);
-         PRAGMA user_version = 13;",
-    ).execute(&store.database.pool).await.unwrap();
-    sqlx::query("INSERT INTO session_execution_owners VALUES (?1, 7, 'retired', 0)")
-        .bind(&id)
-        .execute(&store.database.pool)
-        .await
-        .unwrap();
-    sqlx::query("INSERT INTO session_execution_workspace_descriptors VALUES (?1, 'retired')")
-        .bind(&id)
-        .execute(&store.database.pool)
-        .await
-        .unwrap();
-    sqlx::query("INSERT INTO session_close_intents VALUES (?1, '2026-10-05T00:00:00Z')")
-        .bind(&id)
-        .execute(&store.database.pool)
+        .append_message(&id, BaseMessage::human("first"))
         .await
         .unwrap();
     store.close().await;
-
     let reopened = SqliteThreadStore::new(&path).await.unwrap();
-    let (retired,): (i64,) = sqlx::query_as("SELECT COUNT(*) FROM sqlite_schema WHERE name IN ('session_execution_owners', 'session_execution_workspace_descriptors')")
-        .fetch_one(&reopened.database.pool).await.unwrap();
-    assert_eq!(retired, 0);
-    let (version,): (i64,) = sqlx::query_as("PRAGMA user_version")
-        .fetch_one(&reopened.database.pool)
+    assert_eq!(
+        reopened.load_context(&id).await.unwrap()[0].content(),
+        "first"
+    );
+    reopened
+        .append_message(&id, BaseMessage::human("next"))
         .await
         .unwrap();
-    assert_eq!(version, CURRENT_SCHEMA_VERSION);
-    let data = SqliteSessionData::new(Arc::clone(&reopened.database));
-    assert!(data.is_session_closing(&id).await.unwrap());
-    assert_eq!(
-        reopened.load_messages(&id).await.unwrap()[0].content(),
-        "preserved"
-    );
-    data.finish_close(&id).await.unwrap();
+    let history = reopened.load_context(&id).await.unwrap();
+    assert_eq!(history.len(), 2);
+    assert_eq!(history[1].content(), "next");
     reopened.close().await;
-    let reopened = SqliteThreadStore::new(&path).await.unwrap();
-    let (retired,): (i64,) = sqlx::query_as("SELECT COUNT(*) FROM sqlite_schema WHERE name IN ('session_execution_owners', 'session_execution_workspace_descriptors')")
-        .fetch_one(&reopened.database.pool).await.unwrap();
-    assert_eq!(retired, 0);
+}
+
+/// 压缩掉的开发期代数（12..19）一律拒绝：不迁移、不改写，库留在原位由上一版二进制打开。
+#[tokio::test]
+async fn compressed_dev_generations_are_refused_without_touching_the_database() {
+    for version in 12..=19_i64 {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("threads.db");
+        let store = SqliteThreadStore::new(&path).await.unwrap();
+        let id = store
+            .create_thread(ThreadMeta::new_at(
+                directory.path().to_string_lossy().into_owned(),
+                peri_time::now_wall(),
+            ))
+            .await
+            .unwrap();
+        store
+            .append_message(&id, BaseMessage::human("preserved"))
+            .await
+            .unwrap();
+        sqlx::query(AssertSqlSafe(format!("PRAGMA user_version = {version}")))
+            .execute(&store.database.pool)
+            .await
+            .unwrap();
+        let before: Vec<(String, String, Option<String>)> =
+            sqlx::query_as("SELECT type, name, sql FROM sqlite_schema ORDER BY type, name")
+                .fetch_all(&store.database.pool)
+                .await
+                .unwrap();
+        store.close().await;
+
+        let error = match SqliteThreadStore::new(&path).await {
+            Ok(_) => panic!("unexpected upgrade of schema {version}"),
+            Err(error) => error,
+        };
+        assert!(matches!(
+            error.downcast_ref::<WorkspaceError>(),
+            Some(WorkspaceError::UnsupportedSchemaVersion { found, supported })
+                if *found == version && *supported == CURRENT_SCHEMA_VERSION
+        ));
+
+        let mut connection = SqliteConnection::connect_with(
+            &SqliteConnectOptions::new().filename(&path).read_only(true),
+        )
+        .await
+        .unwrap();
+        let after: Vec<(String, String, Option<String>)> =
+            sqlx::query_as("SELECT type, name, sql FROM sqlite_schema ORDER BY type, name")
+                .fetch_all(&mut connection)
+                .await
+                .unwrap();
+        assert_eq!(after, before, "{version}");
+        let (stored,): (i64,) = sqlx::query_as("PRAGMA user_version")
+            .fetch_one(&mut connection)
+            .await
+            .unwrap();
+        assert_eq!(stored, version);
+    }
 }
 
 /// [回归测试] 实际旧库包含 thread_goals，不能因额外业务表而拒绝启动。

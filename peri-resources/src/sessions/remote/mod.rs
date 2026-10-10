@@ -117,9 +117,6 @@ mod mutation;
 mod oauth_credentials;
 mod schema;
 mod schema_upgrade;
-mod schema_v12_upgrade;
-mod schema_v14_upgrade;
-mod schema_v19_upgrade;
 
 #[cfg(test)]
 #[path = "schema_upgrade_test.rs"]

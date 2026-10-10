@@ -123,7 +123,8 @@ impl RemoteSessionData {
         query: &ScopedThreadQuery,
         archived: bool,
     ) -> SessionResourceResult<ScopedThreadPage> {
-        if self.schema_version == 11 && archived {
+        // 压缩前的形状没有 `archived` 列：归档面在它上面恒为空，分页也走老形状的语句。
+        if self.legacy_shape && archived {
             return Ok(ScopedThreadPage {
                 entries: Vec::new(),
                 next_cursor: None,
@@ -131,7 +132,7 @@ impl RemoteSessionData {
         }
         let limit = query.limit.clamp(1, 200) as usize;
         let store = self.store().await?;
-        let statement = if self.schema_version == 11 {
+        let statement = if self.legacy_shape {
             session_sql::page_statement_v11(query)?
         } else {
             session_sql::page_statement_for_archive(query, archived)?

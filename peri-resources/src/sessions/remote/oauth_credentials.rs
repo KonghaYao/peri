@@ -11,8 +11,8 @@ use peri_acp_types::workspace::WorkspaceId;
 use turso_serverless::Value;
 
 use crate::sessions::canonical::{
-    DELETE_ALL_V2_OAUTH_CREDENTIALS_SQL, DELETE_V2_OAUTH_CREDENTIAL_SQL,
-    LIST_V2_OAUTH_CREDENTIALS_SQL, SELECT_V2_OAUTH_CREDENTIAL_SQL, UPSERT_V2_OAUTH_CREDENTIAL_SQL,
+    DELETE_ALL_OAUTH_CREDENTIALS_SQL, DELETE_OAUTH_CREDENTIAL_SQL, LIST_OAUTH_CREDENTIALS_SQL,
+    SELECT_OAUTH_CREDENTIAL_SQL, UPSERT_OAUTH_CREDENTIAL_SQL,
 };
 
 use super::ledger::{input_digest, OperationId, OperationIdentity};
@@ -44,7 +44,7 @@ fn statement(
 
 fn save_statement(principal: &str, workspace_id: &str, key: &str, payload: &str) -> StatementSpec {
     let mut spec = statement(
-        UPSERT_V2_OAUTH_CREDENTIAL_SQL,
+        UPSERT_OAUTH_CREDENTIAL_SQL,
         principal,
         workspace_id,
         Some(key),
@@ -146,7 +146,7 @@ impl OAuthCredentialPort for RemoteOAuthCredentials {
         let (principal, workspace_id) = scope(self.1);
         decode_load(
             self.read(statement(
-                SELECT_V2_OAUTH_CREDENTIAL_SQL,
+                SELECT_OAUTH_CREDENTIAL_SQL,
                 principal,
                 &workspace_id,
                 Some(server_key),
@@ -172,7 +172,7 @@ impl OAuthCredentialPort for RemoteOAuthCredentials {
         self.write(
             "clear_oauth_credentials",
             statement(
-                DELETE_V2_OAUTH_CREDENTIAL_SQL,
+                DELETE_OAUTH_CREDENTIAL_SQL,
                 principal,
                 &workspace_id,
                 Some(server_key),
@@ -186,7 +186,7 @@ impl OAuthCredentialPort for RemoteOAuthCredentials {
         self.write(
             "clear_all_oauth_credentials",
             statement(
-                DELETE_ALL_V2_OAUTH_CREDENTIALS_SQL,
+                DELETE_ALL_OAUTH_CREDENTIALS_SQL,
                 principal,
                 &workspace_id,
                 None,
@@ -199,7 +199,7 @@ impl OAuthCredentialPort for RemoteOAuthCredentials {
         let (principal, workspace_id) = scope(self.1);
         decode_list(
             self.read(statement(
-                LIST_V2_OAUTH_CREDENTIALS_SQL,
+                LIST_OAUTH_CREDENTIALS_SQL,
                 principal,
                 &workspace_id,
                 None,

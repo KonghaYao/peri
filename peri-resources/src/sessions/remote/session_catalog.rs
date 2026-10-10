@@ -11,9 +11,9 @@ impl RemoteSessionData {
         machine_id: &str,
         path: &str,
     ) -> SessionResourceResult<Option<peri_acp_types::workspace::WorkspaceId>> {
-        if self.schema_version <= 11 {
+        if self.legacy_shape {
             return Err(unsupported_behavior(
-                "workspace ownership requires schema 12",
+                "workspace ownership requires the current schema generation",
             ));
         }
         let row = self
@@ -39,8 +39,10 @@ impl RemoteSessionData {
     pub(super) async fn catalog_machines(
         &self,
     ) -> SessionResourceResult<Vec<peri_acp_types::workspace::MachineInfo>> {
-        if self.schema_version <= 11 {
-            return Err(unsupported_behavior("machine catalog requires schema 12"));
+        if self.legacy_shape {
+            return Err(unsupported_behavior(
+                "machine catalog requires the current schema generation",
+            ));
         }
         use peri_acp_types::workspace::{MachineIdentityKind, MachineInfo};
         let store = self.store().await?;
@@ -80,8 +82,10 @@ impl RemoteSessionData {
         &self,
         machine_id: &str,
     ) -> SessionResourceResult<Vec<peri_acp_types::workspace::WorkspaceInfo>> {
-        if self.schema_version <= 11 {
-            return Err(unsupported_behavior("workspace catalog requires schema 12"));
+        if self.legacy_shape {
+            return Err(unsupported_behavior(
+                "workspace catalog requires the current schema generation",
+            ));
         }
         use peri_acp_types::workspace::{WorkspaceInfo, WorkspacePathSource};
         let store = self.store().await?;
@@ -122,8 +126,10 @@ impl RemoteSessionData {
         machine_id: &str,
         name: &str,
     ) -> SessionResourceResult<()> {
-        if self.schema_version <= 11 {
-            return Err(unsupported_behavior("machine rename requires schema 12"));
+        if self.legacy_shape {
+            return Err(unsupported_behavior(
+                "machine rename requires the current schema generation",
+            ));
         }
         let name = name.trim();
         if name.is_empty() || name.len() > 200 {

@@ -11,7 +11,7 @@ impl RemoteSessionData {
         &self,
         id: &ThreadId,
     ) -> SessionResourceResult<Option<String>> {
-        if self.schema_version <= 11 {
+        if self.legacy_shape {
             return Ok(None);
         }
         let row = self

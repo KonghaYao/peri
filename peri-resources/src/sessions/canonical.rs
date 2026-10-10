@@ -24,7 +24,12 @@
 use peri_acp_types::{messages::BaseMessage, store::PersistedPayload};
 
 /// 两种会话数据 adapter 的同一 schema 版本。
-pub(super) const CURRENT_SCHEMA_VERSION: i64 = 19;
+///
+/// 压缩前 v4 内部用过 11..19 共 9 代，它们都没有进入正式发布（正式发布：agent-v3.19.x = 10、
+/// agent-v3.18.0 = 6）。合并进 main 时收敛为**紧接正式基线 10 的一代 11**：外部库只有
+/// 「≤10 的正式形状」与「10|11 的正式存储契约」两种输入，中间代形状不再被接受，
+/// 也不再有中间代对象与迁移代码（见 `spec/issues/2026-10-10-schema-generation-compression.md`）。
+pub(super) const CURRENT_SCHEMA_VERSION: i64 = 11;
 
 /// 会话事实表。
 pub(super) const THREADS_TABLE: &str = "threads";
@@ -57,33 +62,49 @@ pub(super) const MESSAGE_COLUMN_NAMES: &[&str] = &[
     "projection",
 ];
 
+/// 机器身份表：执行归属的一极，`workspaces.machine_id` 的引用目标。
+pub(super) const MACHINES_TABLE: &str = "machines";
+
 /// 不可变绑定引用的项目记录。
 pub(super) const PROJECTS_TABLE: &str = "projects";
 
-/// 不可变绑定引用的 workspace 记录。
+/// 归属表：`(machine_id, path)` 是唯一身份，证据列只描述当前占用该路径的对象。
 pub(super) const WORKSPACES_TABLE: &str = "workspaces";
 
 /// 不可变执行绑定。
 pub(super) const SESSION_BINDINGS_TABLE: &str = "session_bindings";
+
+/// 会话关闭意图。
+pub(super) const SESSION_CLOSE_INTENTS_TABLE: &str = "session_close_intents";
+
+/// 压缩前形状独有的执行环境表；当前形状不再有它（迁移完成后删除）。
 pub(super) const SESSION_ENVIRONMENTS_TABLE: &str = "session_environments";
 pub(super) const OAUTH_CREDENTIALS_TABLE: &str = "mcp_oauth_credentials";
-pub(super) const CREATE_OAUTH_CREDENTIALS_TABLE_SQL: &str =
-    "CREATE TABLE IF NOT EXISTS mcp_oauth_credentials (
-    principal_id TEXT NOT NULL,
-    machine_id TEXT NOT NULL,
-    server_key TEXT NOT NULL,
-    credentials_blob TEXT NOT NULL,
-    updated_at TEXT NOT NULL,
-    PRIMARY KEY (principal_id, machine_id, server_key)
-)";
+
+/// 迁移输入形状（正式基线 ≤10）的补齐语句：把每个会话的运行机器补进环境表。
+///
+/// 当前形状没有环境表，这条语句只服务「补齐到 V10 形状」这一步；规划不凭当前 cwd 猜测，
+/// 必须先有环境行才读得到机器归属。
 pub(super) const BACKFILL_ENVIRONMENTS_SQL: &str = "WITH RECURSIVE tree(thread_id, machine_id) AS (
     SELECT t.id, COALESCE(env.machine_id, ?1) FROM threads t
     LEFT JOIN session_environments env ON env.thread_id = t.id WHERE t.parent_thread_id IS NULL
     UNION ALL SELECT child.id, tree.machine_id FROM threads child JOIN tree ON child.parent_thread_id = tree.thread_id
 ) INSERT OR IGNORE INTO session_environments(thread_id, machine_id) SELECT thread_id, machine_id FROM tree";
 
-/// canonical 表清单（父表在前，与 [`CREATE_TABLES_SQL`] 的顺序一致）。
+/// 当前形状的表清单（父表在前，与 [`CREATE_TABLES`] 的顺序一致）。
 pub(super) const CANONICAL_TABLES: &[&str] = &[
+    MACHINES_TABLE,
+    PROJECTS_TABLE,
+    WORKSPACES_TABLE,
+    THREADS_TABLE,
+    MESSAGES_TABLE,
+    SESSION_BINDINGS_TABLE,
+    OAUTH_CREDENTIALS_TABLE,
+    SESSION_CLOSE_INTENTS_TABLE,
+];
+
+/// 迁移输入形状（正式基线 ≤10）的表清单：建表预检与补齐按它判定。
+pub(super) const V10_CANONICAL_TABLES: &[&str] = &[
     THREADS_TABLE,
     MESSAGES_TABLE,
     PROJECTS_TABLE,
@@ -93,23 +114,27 @@ pub(super) const CANONICAL_TABLES: &[&str] = &[
     OAUTH_CREDENTIALS_TABLE,
 ];
 
-/// 建表语句：本机新库与远端初始化下发的**同一份清单**，一条语句一个元素。
+/// 压缩前形状（迁移输入，正式基线 ≤10）的建表清单：登记语义的 `workspaces` + 执行环境表。
 ///
-/// 一条一个元素而不是拼成一段：远端执行器的语句单元就是一条语句（`StatementSpec`），
-/// 多条语句塞进一个请求里只有第一条会被解析——形状必须按执行器的最小单位给出，本机再把
-/// 它们合成一次 `raw_sql`（本机执行器支持多语句）。
-///
-/// 带 `IF NOT EXISTS`：本机旧库已存在这些表时是空操作（列由 `sqlite_store` 的迁移路径补齐），
-/// 远端重复打开时同样是空操作。`REFERENCES` 子句保留原样：本机读写在同一连接上打开
-/// `PRAGMA foreign_keys`，远端服务端不强制外键（读数恒为 0、且不可开启）——同一份 DDL 在两种
-/// 执行器上的差别是**强制与否**，不是形状。顺序即依赖顺序：父表在前。
-pub(super) const CREATE_ENVIRONMENTS_TABLE_SQL: &str =
+/// 与当前形状的清单分开命名：这些语句是**历史形状的快照**，迁移实现改动时它们不该跟着漂移
+/// ——`V10` 前缀即「正式基线 ≤10 的形状」，只在「补齐到 V10 形状」这一步使用。
+pub(super) const V10_CREATE_ENVIRONMENTS_TABLE_SQL: &str =
     "CREATE TABLE IF NOT EXISTS session_environments (
     thread_id TEXT PRIMARY KEY REFERENCES threads(id) ON DELETE CASCADE,
     machine_id TEXT NOT NULL
 )";
 
-pub(super) const CREATE_TABLES: &[&str] = &[
+pub(super) const V10_CREATE_OAUTH_CREDENTIALS_TABLE_SQL: &str =
+    "CREATE TABLE IF NOT EXISTS mcp_oauth_credentials (
+    principal_id TEXT NOT NULL,
+    machine_id TEXT NOT NULL,
+    server_key TEXT NOT NULL,
+    credentials_blob TEXT NOT NULL,
+    updated_at TEXT NOT NULL,
+    PRIMARY KEY (principal_id, machine_id, server_key)
+)";
+
+pub(super) const V10_CREATE_TABLES: &[&str] = &[
     "CREATE TABLE IF NOT EXISTS threads (
     id TEXT PRIMARY KEY, title TEXT, cwd TEXT NOT NULL DEFAULT '',
     created_at TEXT NOT NULL, updated_at TEXT NOT NULL, message_count INTEGER NOT NULL DEFAULT 0,
@@ -137,12 +162,12 @@ pub(super) const CREATE_TABLES: &[&str] = &[
     project_id TEXT NOT NULL, workspace_id TEXT NOT NULL, relative_cwd TEXT NOT NULL,
     FOREIGN KEY(workspace_id, project_id) REFERENCES workspaces(id, project_id)
 )",
-    CREATE_ENVIRONMENTS_TABLE_SQL,
-    CREATE_OAUTH_CREDENTIALS_TABLE_SQL,
+    V10_CREATE_ENVIRONMENTS_TABLE_SQL,
+    V10_CREATE_OAUTH_CREDENTIALS_TABLE_SQL,
 ];
 
-/// 索引语句：必须在建表**与旧库补列之后**执行（`idx_threads_updated` 引用后补的列）。
-pub(super) const CREATE_INDEXES: &[&str] = &[
+/// 压缩前形状的索引清单：必须在建表**与旧库补列之后**执行（`idx_threads_updated` 引用后补的列）。
+pub(super) const V10_CREATE_INDEXES: &[&str] = &[
     "CREATE INDEX IF NOT EXISTS idx_messages_thread_id ON messages(thread_id)",
     "CREATE INDEX IF NOT EXISTS idx_bindings_project ON session_bindings(project_id, thread_id)",
     "CREATE INDEX IF NOT EXISTS idx_bindings_workspace ON session_bindings(workspace_id, relative_cwd, thread_id)",
@@ -150,18 +175,30 @@ pub(super) const CREATE_INDEXES: &[&str] = &[
     "CREATE INDEX IF NOT EXISTS idx_session_environments_machine ON session_environments(machine_id, thread_id)",
 ];
 
-/// 存储 v2 的目标表定义。11→12 搬运在连接旧读写路径切换前由独立迁移夹具验证；
-/// 新库与远端初始化接线后也使用这些常量，避免两份目标 DDL 漂移。
-pub(super) const CREATE_V2_MACHINES_TABLE_SQL: &str = "CREATE TABLE IF NOT EXISTS machines (
+/// 当前形状的目标表定义：本机新库、迁移终点与远端初始化下发的是同一份 DDL。
+///
+/// 顺序即依赖顺序（父表在前）：`machines` → `projects` → `workspaces` → `threads` →
+/// `messages` → `session_bindings` → oauth → 关闭意图。
+pub(super) const CREATE_MACHINES_TABLE_SQL: &str = "CREATE TABLE IF NOT EXISTS machines (
     id TEXT PRIMARY KEY,
     name TEXT NOT NULL CHECK(length(trim(name)) > 0),
     identity_kind TEXT NOT NULL CHECK(identity_kind IN ('known', 'legacy_unknown'))
 )";
-/// v2 的 Project 表：与 [`CREATE_TABLES`] 里的同形，是 `workspaces.project_id` 的引用目标。
-pub(super) const CREATE_V2_PROJECTS_TABLE_SQL: &str = CREATE_TABLES[2];
-/// v2 的 Machine/path 归属表。v19 起同时承载「该路径最近一次观测」的执行证据：
-/// 归属键仍是 `(machine_id, path)`，证据列只描述**当前占用该路径的对象**，不参与身份。
-pub(super) const CREATE_V2_WORKSPACES_TABLE_SQL: &str = "CREATE TABLE IF NOT EXISTS workspaces (
+/// 当前 Machine 的登记行：即使尚无会话也应可查询，且不覆盖已有展示名。
+///
+/// 建当前形状的三条路径（本机新库、本机迁移终点、远端升级批次）下发同一条语句，
+/// 「当前机器叫什么」只有这一处定义。
+pub(super) const INSERT_CURRENT_MACHINE_SQL: &str =
+    "INSERT OR IGNORE INTO machines(id, name, identity_kind) VALUES (?1, '我的电脑', 'known')";
+
+/// Project 表：`workspaces.project_id` 的引用目标。
+pub(super) const CREATE_PROJECTS_TABLE_SQL: &str = "CREATE TABLE IF NOT EXISTS projects (
+    id TEXT PRIMARY KEY, locator TEXT NOT NULL, object_identity TEXT NOT NULL,
+    UNIQUE(locator, object_identity)
+)";
+/// Machine/path 归属表。它同时承载「该路径最近一次观测」的执行证据：
+/// 归属键是 `(machine_id, path)`，证据列只描述**当前占用该路径的对象**，不参与身份。
+pub(super) const CREATE_WORKSPACES_TABLE_SQL: &str = "CREATE TABLE IF NOT EXISTS workspaces (
     id TEXT PRIMARY KEY,
     machine_id TEXT NOT NULL REFERENCES machines(id),
     path TEXT NOT NULL,
@@ -171,8 +208,8 @@ pub(super) const CREATE_V2_WORKSPACES_TABLE_SQL: &str = "CREATE TABLE IF NOT EXI
     discovery TEXT,
     UNIQUE(machine_id, path)
 )";
-macro_rules! v2_threads_table_sql {
-    ($name:literal) => { concat!("CREATE TABLE IF NOT EXISTS ", $name, " (
+/// 会话事实表：归属由 `workspace_id` 唯一表达。
+pub(super) const CREATE_THREADS_TABLE_SQL: &str = "CREATE TABLE IF NOT EXISTS threads (
     id TEXT PRIMARY KEY, title TEXT, cwd TEXT NOT NULL DEFAULT '',
     created_at TEXT NOT NULL, updated_at TEXT NOT NULL, message_count INTEGER NOT NULL DEFAULT 0,
     parent_thread_id TEXT, snapshot_at_message_id TEXT, hidden BOOLEAN NOT NULL DEFAULT 0,
@@ -180,10 +217,17 @@ macro_rules! v2_threads_table_sql {
     frozen_context TEXT, inherited_context TEXT, agent_status TEXT NOT NULL DEFAULT 'active',
     workspace_id TEXT NOT NULL REFERENCES workspaces(id),
     archived BOOLEAN NOT NULL DEFAULT 0 CHECK(archived IN (0, 1))
-)") };
-}
-pub(super) const CREATE_V2_THREADS_TABLE_SQL: &str = v2_threads_table_sql!("threads");
-pub(super) const CREATE_V2_OAUTH_CREDENTIALS_TABLE_SQL: &str =
+)";
+/// 绑定表：workspace 归属由 `threads.workspace_id` 唯一表达，绑定行只保存自己的
+/// 不可变执行证据。没有指向归属表的外键——归属关系不靠外键维护（两端都不强制）。
+pub(super) const CREATE_BINDINGS_TABLE_SQL: &str = "CREATE TABLE IF NOT EXISTS session_bindings (
+    thread_id TEXT PRIMARY KEY REFERENCES threads(id) ON DELETE CASCADE,
+    schema_version INTEGER NOT NULL,
+    project_id TEXT NOT NULL, workspace_id TEXT NOT NULL, relative_cwd TEXT NOT NULL,
+    discovery_snapshot TEXT,
+    evidence_origin TEXT NOT NULL
+)";
+pub(super) const CREATE_OAUTH_CREDENTIALS_TABLE_SQL: &str =
     "CREATE TABLE IF NOT EXISTS mcp_oauth_credentials (
     principal_id TEXT NOT NULL,
     workspace_id TEXT NOT NULL REFERENCES workspaces(id),
@@ -192,125 +236,56 @@ pub(super) const CREATE_V2_OAUTH_CREDENTIALS_TABLE_SQL: &str =
     updated_at TEXT NOT NULL,
     PRIMARY KEY(principal_id, workspace_id, server_key)
 )";
-/// v19 的绑定表：workspace 归属由 `threads.workspace_id` 唯一表达，绑定行只保存
-/// 自己的不可变执行证据。不再有指向登记表的外键——那张表在 v19 起不存在。
-pub(super) const CREATE_V2_BINDINGS_TABLE_SQL: &str =
-    "CREATE TABLE IF NOT EXISTS session_bindings (
-    thread_id TEXT PRIMARY KEY REFERENCES threads(id) ON DELETE CASCADE,
-    schema_version INTEGER NOT NULL,
-    project_id TEXT NOT NULL, workspace_id TEXT NOT NULL, relative_cwd TEXT NOT NULL,
-    discovery_snapshot TEXT,
-    evidence_origin TEXT NOT NULL
-)";
-pub(super) const CREATE_V2_TABLES: &[&str] = &[
-    CREATE_V2_MACHINES_TABLE_SQL,
-    CREATE_V2_WORKSPACES_TABLE_SQL,
-    CREATE_V2_THREADS_TABLE_SQL,
-    CREATE_TABLES[1],
-    CREATE_V2_PROJECTS_TABLE_SQL,
-    CREATE_V2_BINDINGS_TABLE_SQL,
-    CREATE_V2_OAUTH_CREDENTIALS_TABLE_SQL,
+
+/// 建表语句：本机新库与远端初始化下发的**同一份清单**，一条语句一个元素。
+///
+/// 一条一个元素而不是拼成一段：远端执行器的语句单元就是一条语句（`StatementSpec`），
+/// 多条语句塞进一个请求里只有第一条会被解析——形状必须按执行器的最小单位给出，本机再把
+/// 它们合成一次 `raw_sql`（本机执行器支持多语句）。
+///
+/// 带 `IF NOT EXISTS`：本机旧库已存在这些表时是空操作（列由 `sqlite_store` 的迁移路径补齐），
+/// 远端重复打开时同样是空操作。`REFERENCES` 子句保留原样：本机读写在同一连接上打开
+/// `PRAGMA foreign_keys`，远端服务端不强制外键（读数恒为 0、且不可开启）——同一份 DDL 在两种
+/// 执行器上的差别是**强制与否**，不是形状。
+pub(super) const CREATE_TABLES: &[&str] = &[
+    CREATE_MACHINES_TABLE_SQL,
+    CREATE_PROJECTS_TABLE_SQL,
+    CREATE_WORKSPACES_TABLE_SQL,
+    CREATE_THREADS_TABLE_SQL,
+    "CREATE TABLE IF NOT EXISTS messages (
+    message_id TEXT PRIMARY KEY, thread_id TEXT NOT NULL REFERENCES threads(id) ON DELETE CASCADE,
+    role TEXT NOT NULL, content TEXT NOT NULL,
+    truncated BOOLEAN NOT NULL DEFAULT 0, excluded BOOLEAN NOT NULL DEFAULT 0, projection TEXT
+)",
+    CREATE_BINDINGS_TABLE_SQL,
+    CREATE_OAUTH_CREDENTIALS_TABLE_SQL,
     CREATE_SESSION_CLOSE_INTENTS_TABLE_SQL,
 ];
 
-/// v18 → v19：执行登记并入 `workspaces`，删除执行登记表。
-///
-/// 顺序即依赖顺序：补证据列 → 回填 → 并入无归属的登记 → 前置校验 → 重建绑定（去掉指向
-/// 登记表的外键并把 `workspace_id` 收敛到归属行）→ 删表 → 重建绑定索引。两端执行同一批
-/// 语句文本；本机在事务内逐条执行，远端作为一次受管批次下发。证据列的存在性由调用方先行
-/// 探测，已存在时跳过对应 ALTER（远端批次从 v18 一次性推进，无需探测）。
-pub(super) const ADD_WORKSPACES_PROJECT_COLUMN_SQL: &str =
-    "ALTER TABLE workspaces ADD COLUMN project_id TEXT REFERENCES projects(id)";
-pub(super) const ADD_WORKSPACES_IDENTITY_COLUMN_SQL: &str =
-    "ALTER TABLE workspaces ADD COLUMN identity TEXT";
-pub(super) const ADD_WORKSPACES_DISCOVERY_COLUMN_SQL: &str =
-    "ALTER TABLE workspaces ADD COLUMN discovery TEXT";
-/// 回填已存在的归属行：同一路径的登记证据整体搬到该行。同路径多条登记（目录对象被
-/// 替换过）按 `id` 取一条作为该路径的最近观测，不伪造先后顺序。
-pub(super) const BACKFILL_WORKSPACES_EVIDENCE_SQL: &str = "UPDATE workspaces SET
-    project_id = COALESCE(project_id, (SELECT r.project_id FROM legacy_execution_registrations r WHERE r.root = workspaces.path ORDER BY r.id LIMIT 1)),
-    identity = COALESCE(identity, (SELECT r.root_identity FROM legacy_execution_registrations r WHERE r.root = workspaces.path ORDER BY r.id LIMIT 1)),
-    discovery = COALESCE(discovery, (SELECT r.discovery FROM legacy_execution_registrations r WHERE r.root = workspaces.path ORDER BY r.id LIMIT 1))
-    WHERE EXISTS (SELECT 1 FROM legacy_execution_registrations r WHERE r.root = workspaces.path)";
-/// 回填没有归属行的登记：为本机已有的登记新建归属行，id 沿用旧登记 UUID（空闲时）。
-/// 机器归属取引用该登记的会话所属机器；没有会话引用时取该库的第一台机器。
-///
-/// 同路径只并入一条（`id` 最小的登记），否则 `UNIQUE(machine_id, path)` 会让整个升级
-/// 失败：同路径多条登记是「目录对象被替换过」的历史残留，归属行只能有一条。
-/// `id` 已被别的路径占用时跳过该行——这是手工改库才可能出现的形状，跳过只影响
-/// 该路径的展示分组，不阻塞升级。
-pub(super) const BACKFILL_MISSING_WORKSPACES_SQL: &str = "INSERT INTO workspaces(id, machine_id, path, path_source, project_id, identity, discovery)
-    SELECT r.id, COALESCE(
-        (SELECT w.machine_id FROM session_bindings b JOIN threads t ON t.id = b.thread_id JOIN workspaces w ON w.id = t.workspace_id WHERE b.workspace_id = r.id ORDER BY w.id LIMIT 1),
-        (SELECT id FROM machines ORDER BY id LIMIT 1)), r.root, 'unverified', r.project_id, r.root_identity, r.discovery
-    FROM legacy_execution_registrations r
-    WHERE r.id = (SELECT r2.id FROM legacy_execution_registrations r2 WHERE r2.root = r.root ORDER BY r2.id LIMIT 1)
-      AND NOT EXISTS (SELECT 1 FROM workspaces w WHERE w.path = r.root)
-      AND NOT EXISTS (SELECT 1 FROM workspaces w WHERE w.id = r.id)
-      AND EXISTS (SELECT 1 FROM machines)";
-/// 迁移前置校验 1：每条绑定都要能落到**会话的**归属行（`threads.workspace_id`）。
-/// 落不到就没有可搬运的归属，升级必须停在原版本而不是丢掉绑定。
-pub(super) const COUNT_BINDINGS_WITHOUT_OWNER_SQL: &str = "SELECT COUNT(*) FROM session_bindings b
-    LEFT JOIN threads t ON t.id = b.thread_id
-    LEFT JOIN workspaces owner ON owner.id = t.workspace_id
-    WHERE t.id IS NULL OR owner.id IS NULL";
-/// 迁移前置校验 2：绑定自己记录的根必须就是会话归属行的路径。
-///
-/// 绑定记录的是它创建时的执行根：v19 之前它指向执行登记（`legacy_execution_registrations`），
-/// 也可能已经指向归属行（远端写入的形状）。两种来源都用，结论必须与归属行同路径——
-/// 不同路径说明「绑定」与「会话归属」本来就不一致，改写成归属行会静默改绑，因此拒绝升级。
-pub(super) const COUNT_BINDINGS_AT_FOREIGN_ROOT_SQL: &str =
-    "SELECT COUNT(*) FROM session_bindings b
-    LEFT JOIN legacy_execution_registrations r ON r.id = b.workspace_id
-    LEFT JOIN workspaces recorded ON recorded.id = b.workspace_id
-    JOIN threads t ON t.id = b.thread_id
-    JOIN workspaces owner ON owner.id = t.workspace_id
-    WHERE COALESCE(r.root, recorded.path) IS NULL
-       OR COALESCE(r.root, recorded.path) <> owner.path";
-/// 重建绑定表去掉登记表外键：SQLite 不能删除约束，只能建新表搬运。
-/// 索引随旧表一起消失，随后由 [`CREATE_V2_INDEXES`] 的两条绑定索引重建。
-///
-/// 搬运同时把 `workspace_id` 收敛到归属行：v19 之前它指向执行登记，而登记 id 与
-/// 归属行 id 只在本机老库上恰好相同（v12 计划沿用旧 UUID）。收敛之后
-/// 「`threads.workspace_id` = `session_bindings.workspace_id`」成为不变式，绑定不再需要
-/// 二次查询才知道自己的归属；其余列（含 `discovery_snapshot`、`evidence_origin`）原样搬运。
-pub(super) const REBUILD_BINDINGS_WITHOUT_REGISTRATIONS_SQL: &[&str] = &[
-    "CREATE TABLE session_bindings_v19 (
-    thread_id TEXT PRIMARY KEY REFERENCES threads(id) ON DELETE CASCADE,
-    schema_version INTEGER NOT NULL,
-    project_id TEXT NOT NULL, workspace_id TEXT NOT NULL, relative_cwd TEXT NOT NULL,
-    discovery_snapshot TEXT,
-    evidence_origin TEXT NOT NULL
-)",
-    "INSERT INTO session_bindings_v19(thread_id, schema_version, project_id, workspace_id, relative_cwd, discovery_snapshot, evidence_origin)
-    SELECT b.thread_id, b.schema_version, b.project_id, t.workspace_id, b.relative_cwd, b.discovery_snapshot, b.evidence_origin
-    FROM session_bindings b JOIN threads t ON t.id = b.thread_id",
-    "DROP TABLE session_bindings",
-    "ALTER TABLE session_bindings_v19 RENAME TO session_bindings",
-    CREATE_V2_INDEXES[1],
-    CREATE_V2_INDEXES[2],
-];
-/// v19 删除的登记表。删除前必须已并入 `workspaces` 且绑定表已重建。
-pub(super) const DROP_LEGACY_REGISTRATIONS_SQL: &str = "DROP TABLE legacy_execution_registrations";
 /// 显式关闭已接纳的持久事实；不保存异步任务目录。
 pub(super) const CREATE_SESSION_CLOSE_INTENTS_TABLE_SQL: &str =
     "CREATE TABLE IF NOT EXISTS session_close_intents (
     thread_id TEXT PRIMARY KEY REFERENCES threads(id) ON DELETE CASCADE,
     requested_at TEXT NOT NULL
 )";
-pub(super) const CREATE_V2_INDEXES: &[&str] = &[
-    CREATE_INDEXES[0],
-    CREATE_INDEXES[1],
-    CREATE_INDEXES[2],
-    CREATE_INDEXES[3],
+/// 索引语句：必须在建表**与旧库补列之后**执行（`idx_threads_updated` 引用后补的列）。
+pub(super) const CREATE_INDEXES: &[&str] = &[
+    "CREATE INDEX IF NOT EXISTS idx_messages_thread_id ON messages(thread_id)",
+    "CREATE INDEX IF NOT EXISTS idx_bindings_project ON session_bindings(project_id, thread_id)",
+    "CREATE INDEX IF NOT EXISTS idx_bindings_workspace ON session_bindings(workspace_id, relative_cwd, thread_id)",
+    "CREATE INDEX IF NOT EXISTS idx_threads_updated ON threads(updated_at DESC, id DESC) WHERE hidden = 0 AND message_count > 0",
     "CREATE INDEX IF NOT EXISTS idx_threads_workspace_archived ON threads(workspace_id, archived, updated_at DESC, id DESC) WHERE parent_thread_id IS NULL AND message_count > 0",
 ];
-pub(super) const SELECT_V2_OAUTH_CREDENTIAL_SQL: &str = "SELECT credentials_blob FROM mcp_oauth_credentials WHERE principal_id = ?1 AND workspace_id = ?2 AND server_key = ?3";
-pub(super) const UPSERT_V2_OAUTH_CREDENTIAL_SQL: &str = "INSERT INTO mcp_oauth_credentials(principal_id, workspace_id, server_key, credentials_blob, updated_at) VALUES (?1, ?2, ?3, ?4, ?5) ON CONFLICT(principal_id, workspace_id, server_key) DO UPDATE SET credentials_blob = excluded.credentials_blob, updated_at = excluded.updated_at";
-pub(super) const DELETE_V2_OAUTH_CREDENTIAL_SQL: &str = "DELETE FROM mcp_oauth_credentials WHERE principal_id = ?1 AND workspace_id = ?2 AND server_key = ?3";
-pub(super) const DELETE_ALL_V2_OAUTH_CREDENTIALS_SQL: &str =
+/// 重建绑定表后要补回的两条索引（索引随 DROP TABLE 一起消失）。
+pub(super) const BINDING_INDEXES: &[&str] = &[CREATE_INDEXES[1], CREATE_INDEXES[2]];
+/// 归属列建好之后要补的索引（`CREATE_INDEXES` 的末条）。
+pub(super) const THREAD_WORKSPACE_INDEX: &str = CREATE_INDEXES[4];
+pub(super) const SELECT_OAUTH_CREDENTIAL_SQL: &str = "SELECT credentials_blob FROM mcp_oauth_credentials WHERE principal_id = ?1 AND workspace_id = ?2 AND server_key = ?3";
+pub(super) const UPSERT_OAUTH_CREDENTIAL_SQL: &str = "INSERT INTO mcp_oauth_credentials(principal_id, workspace_id, server_key, credentials_blob, updated_at) VALUES (?1, ?2, ?3, ?4, ?5) ON CONFLICT(principal_id, workspace_id, server_key) DO UPDATE SET credentials_blob = excluded.credentials_blob, updated_at = excluded.updated_at";
+pub(super) const DELETE_OAUTH_CREDENTIAL_SQL: &str = "DELETE FROM mcp_oauth_credentials WHERE principal_id = ?1 AND workspace_id = ?2 AND server_key = ?3";
+pub(super) const DELETE_ALL_OAUTH_CREDENTIALS_SQL: &str =
     "DELETE FROM mcp_oauth_credentials WHERE principal_id = ?1 AND workspace_id = ?2";
-pub(super) const LIST_V2_OAUTH_CREDENTIALS_SQL: &str = "SELECT server_key FROM mcp_oauth_credentials WHERE principal_id = ?1 AND workspace_id = ?2 ORDER BY server_key";
+pub(super) const LIST_OAUTH_CREDENTIALS_SQL: &str = "SELECT server_key FROM mcp_oauth_credentials WHERE principal_id = ?1 AND workspace_id = ?2 ORDER BY server_key";
 
 /// 删除一条 `threads` 行之前必须显式清理的子表：子表名 + 语句。
 ///

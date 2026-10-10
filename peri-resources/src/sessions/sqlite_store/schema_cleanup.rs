@@ -26,14 +26,6 @@ pub(super) async fn removal_plan(connection: &mut SqliteConnection) -> Result<Ve
         .map_err(|_| WorkspaceError::UnsupportedDatabaseSchema.into())
 }
 
-pub(super) async fn execution_recovery_removal_plan(
-    connection: &mut SqliteConnection,
-) -> Result<&'static [&'static str]> {
-    let objects = read_schema_objects(connection).await?;
-    schema_cleanup::execution_recovery_removal_plan(&objects)
-        .map_err(|_| WorkspaceError::UnsupportedDatabaseSchema.into())
-}
-
 async fn read_schema_objects(connection: &mut SqliteConnection) -> Result<Vec<SchemaObject>> {
     let rows: Vec<(String, String, String, Option<String>)> =
         sqlx::query_as(schema_cleanup::SCHEMA_OBJECTS_SQL)

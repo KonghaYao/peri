@@ -17,21 +17,29 @@ fn session(
     }
 }
 
+/// 登记行：规划只读 `id` / `root` / `path_source`，其余三列是搬运时的证据（这里给可辨认值）。
+fn registration(
+    id: WorkspaceId,
+    root: &str,
+    path_source: WorkspacePathSource,
+) -> LegacyRegistration {
+    LegacyRegistration {
+        id,
+        root: root.into(),
+        path_source,
+        project_id: format!("project-{id}"),
+        root_identity: r#"{"device":1,"inode":1}"#.to_owned(),
+        discovery: format!(r#"{{"root":{root:?}}}"#),
+    }
+}
+
 #[test]
 fn same_worktree_merges_and_children_inherit_without_losing_cwd() {
     let old_a = WorkspaceId::new();
     let old_b = WorkspaceId::new();
     let roots = [
-        LegacyRegistration {
-            id: old_a,
-            root: "/repo".into(),
-            path_source: WorkspacePathSource::Discovered,
-        },
-        LegacyRegistration {
-            id: old_b,
-            root: "/repo".into(),
-            path_source: WorkspacePathSource::Unverified,
-        },
+        registration(old_a, "/repo", WorkspacePathSource::Discovered),
+        registration(old_b, "/repo", WorkspacePathSource::Unverified),
     ];
     let sessions = [
         session("root-a", None, "machine-a", "/repo", Some(old_a)),
@@ -54,11 +62,7 @@ fn same_worktree_merges_and_children_inherit_without_losing_cwd() {
 #[test]
 fn old_workspace_id_shared_across_machines_is_split() {
     let old = WorkspaceId::new();
-    let roots = [LegacyRegistration {
-        id: old,
-        root: "/repo".into(),
-        path_source: WorkspacePathSource::Discovered,
-    }];
+    let roots = [registration(old, "/repo", WorkspacePathSource::Discovered)];
     let sessions = [
         session("a", None, "machine-a", "/repo", Some(old)),
         session("b", None, "machine-b", "/repo", Some(old)),
@@ -142,9 +146,9 @@ async fn reads_existing_local_registration_and_environment_without_git_probe() {
     )
     .await
     .unwrap();
-    for statement in crate::sessions::canonical::CREATE_TABLES
+    for statement in crate::sessions::canonical::V10_CREATE_TABLES
         .iter()
-        .chain(crate::sessions::canonical::CREATE_INDEXES)
+        .chain(crate::sessions::canonical::V10_CREATE_INDEXES)
     {
         sqlx::query(*statement)
             .execute(&mut connection)
@@ -174,7 +178,7 @@ async fn reads_existing_local_registration_and_environment_without_git_probe() {
         .bind(&project)
         .bind(root)
         .bind(identity)
-        .bind(discovery)
+        .bind(&discovery)
         .execute(&mut connection)
         .await
         .unwrap();
@@ -199,8 +203,18 @@ async fn reads_existing_local_registration_and_environment_without_git_probe() {
         .execute(&mut connection)
         .await
         .unwrap();
-    let plan = read_local_plan(&mut connection).await.unwrap();
-    assert_eq!(plan.workspaces.len(), 1);
-    assert_eq!(plan.workspaces[0].path, worktree);
-    assert_eq!(plan.session_workspace_ids[&id], registration);
+    let input = read_local_plan(&mut connection).await.unwrap();
+    assert_eq!(input.plan.workspaces.len(), 1);
+    assert_eq!(input.plan.workspaces[0].path, worktree);
+    assert_eq!(input.plan.session_workspace_ids[&id], registration);
+    // 计划之外的输入也一并读回：登记的归属证据与运行机器是搬运时要用的原始行。
+    assert_eq!(input.registrations.len(), 1);
+    assert_eq!(input.registrations[0].project_id, project);
+    assert_eq!(input.registrations[0].root_identity, identity);
+    assert_eq!(input.registrations[0].discovery, discovery);
+    assert_eq!(input.sessions.len(), 1);
+    assert_eq!(
+        input.sessions[0].machine_id,
+        "00000000-0000-4000-8000-000000000001"
+    );
 }

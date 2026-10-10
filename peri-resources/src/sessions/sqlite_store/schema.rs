@@ -3,7 +3,7 @@
 use super::database::SqliteSessionDatabase;
 #[cfg(test)]
 use super::SqliteThreadStore;
-use crate::sessions::canonical::{self, CREATE_INDEXES, CREATE_TABLES};
+use crate::sessions::canonical;
 use anyhow::Result;
 use peri_acp_types::workspace::WorkspaceError;
 use sqlx::{AssertSqlSafe, Connection, SqliteConnection};
@@ -14,7 +14,9 @@ pub(in crate::sessions) use crate::sessions::canonical::CURRENT_SCHEMA_VERSION;
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub(super) enum SchemaState {
+    /// 没有表：新库。
     Empty,
+    /// 旧版未设置 `user_version`：按必需列判定可升级。
     Legacy,
     Version2,
     Version3,
@@ -25,14 +27,10 @@ pub(super) enum SchemaState {
     Version8,
     Version9,
     Version10,
+    /// `user_version` 已是当前版本，但形状还是压缩前的登记形状（v4 内部用过）。
+    /// 名字取版本号：它与 [`Current`](Self::Current) 的差别是**形状**，不是代数。
     Version11,
-    Version12,
-    Version13,
-    Version14,
-    Version15,
-    Version16,
-    Version17,
-    Version18,
+    /// 当前形状。
     Current,
 }
 
@@ -51,15 +49,7 @@ pub(super) async fn inspect(connection: &mut SqliteConnection) -> Result<SchemaS
         .fetch_one(&mut *connection)
         .await?;
     match version {
-        v if v == CURRENT_SCHEMA_VERSION => return Ok(SchemaState::Current),
-        18 => return Ok(SchemaState::Version18),
-        17 => return Ok(SchemaState::Version17),
-        16 => return Ok(SchemaState::Version16),
-        15 => return Ok(SchemaState::Version15),
-        14 => return Ok(SchemaState::Version14),
-        13 => return Ok(SchemaState::Version13),
-        12 => return Ok(SchemaState::Version12),
-        11 => return Ok(SchemaState::Version11),
+        v if v == CURRENT_SCHEMA_VERSION => return current_shape(connection).await,
         10 => return Ok(SchemaState::Version10),
         9 => return Ok(SchemaState::Version9),
         8 => return Ok(SchemaState::Version8),
@@ -71,6 +61,7 @@ pub(super) async fn inspect(connection: &mut SqliteConnection) -> Result<SchemaS
         2 => return Ok(SchemaState::Version2),
         0 => {}
         // 拒绝时复述实际版本：报错要能回答「为什么不支持」，而不是只给结论。
+        // 压缩掉的 12..19 中间代（v4 内部用过、从未正式发布）也落在这里。
         other => {
             return Err(WorkspaceError::UnsupportedSchemaVersion {
                 found: other,
@@ -119,14 +110,39 @@ pub(super) async fn inspect(connection: &mut SqliteConnection) -> Result<SchemaS
     Ok(SchemaState::Legacy)
 }
 
+/// 版本已是当前版本时的形状判定（fail-closed）：当前形状直接可用，压缩前的登记形状
+/// 走单条搬运，两者都不是就拒绝——不猜形状，也不把读不懂当成可用。
+async fn current_shape(connection: &mut SqliteConnection) -> Result<SchemaState> {
+    let threads = column_names(connection, "threads").await?;
+    let bindings = column_names(connection, "session_bindings").await?;
+    if table_exists(connection, canonical::MACHINES_TABLE).await?
+        && threads.contains("workspace_id")
+        && bindings.contains("evidence_origin")
+    {
+        return Ok(SchemaState::Current);
+    }
+    if !threads.contains("workspace_id")
+        && bindings.contains("workspace_id")
+        && column_names(connection, "workspaces")
+            .await?
+            .contains("root")
+    {
+        return Ok(SchemaState::Version11);
+    }
+    Err(WorkspaceError::UnsupportedDatabaseSchema.into())
+}
+
 /// 升级路径的同名预检：canonical 表名上若已经立着**别的类型**的对象（例如同名 VIEW），
 /// `CREATE TABLE IF NOT EXISTS` 会静默跳过，把一个不是 canonical 形状的对象留在表的位置上。
 /// 这里显式拒绝，保持迁移的 fail-closed（与 v10 删除旧表前的形状校验同一思路）。
 ///
 /// 只覆盖表名（DDL 里的索引名同样是 `IF NOT EXISTS`，同名索引冲突不在本预检范围内）。
 /// 错误文案带上对象名与它的实际类型：报错要能回答「为什么不支持」。
-async fn ensure_canonical_names_hold_tables(connection: &mut SqliteConnection) -> Result<()> {
-    for table in canonical::CANONICAL_TABLES {
+async fn ensure_canonical_names_hold_tables(
+    connection: &mut SqliteConnection,
+    tables: &[&str],
+) -> Result<()> {
+    for table in tables {
         let existing: Option<(String,)> =
             sqlx::query_as("SELECT type FROM sqlite_schema WHERE name = ?1")
                 .bind(table)
@@ -159,90 +175,68 @@ impl SqliteSessionDatabase {
             sqlx::query(canonical::CREATE_SESSION_CLOSE_INTENTS_TABLE_SQL)
                 .execute(&mut *connection)
                 .await?;
-            sqlx::query("INSERT OR IGNORE INTO machines(id, name, identity_kind) VALUES (?1, '我的电脑', 'known')")
+            sqlx::query(canonical::INSERT_CURRENT_MACHINE_SQL)
                 .bind(crate::sessions::machine::current()?)
                 .execute(&mut *connection)
                 .await?;
             return Ok(());
         }
-        if state == SchemaState::Version18 {
-            return Self::remove_legacy_registrations_schema(&mut connection).await;
-        }
-        if matches!(
-            state,
-            SchemaState::Version12
-                | SchemaState::Version13
-                | SchemaState::Version14
-                | SchemaState::Version15
-                | SchemaState::Version16
-                | SchemaState::Version17
-        ) {
-            Self::remove_execution_owner_schema(&mut connection).await?;
-            return Self::remove_legacy_registrations_schema(&mut connection).await;
+        if state == SchemaState::Empty {
+            return Self::create_current_schema(&mut connection).await;
         }
         if state == SchemaState::Version11 {
-            super::storage_v2_migration::migrate_local_v2(&mut connection).await?;
-            Self::remove_execution_owner_schema(&mut connection).await?;
-            return Self::remove_legacy_registrations_schema(&mut connection).await;
+            // 压缩前的登记形状：形状本身就是搬运输入，直接走单条搬运。
+            return super::storage_v11_migration::migrate_local_v11(&mut connection).await;
         }
-        // 登记表重建要对被引用的父表执行 DROP TABLE：SQLite 对父表做隐式删除时会
-        // 立即检查外键，`defer_foreign_keys` 也挡不住。该 PRAGMA 只在事务外生效，
-        // 因此重建路径整段使用同一条连接：先关外键，提交前用 foreign_key_check 补齐
-        // 校验，最后恢复连接设置。
-        let rebuilding = state.needs_registration_rebuild();
-        if rebuilding {
-            sqlx::query("PRAGMA foreign_keys = OFF")
-                .execute(&mut *connection)
-                .await?;
-        }
-        let migrated = Self::migrate_schema(&mut connection, state).await;
-        if rebuilding {
-            let restored = sqlx::query("PRAGMA foreign_keys = ON")
-                .execute(&mut *connection)
-                .await;
-            migrated?;
-            restored?;
-        } else {
-            migrated?;
-        }
-        super::storage_v2_migration::migrate_local_v2(&mut connection).await?;
-        Self::remove_execution_owner_schema(&mut connection).await?;
-        Self::remove_legacy_registrations_schema(&mut connection).await
-    }
-
-    /// v18 → v19：把执行登记并入 `workspaces` 并删除登记表。`user_version` 与全部
-    /// DDL 在同一事务内提交；失败回滚后库仍是 18，可由上一版二进制打开。
-    async fn remove_legacy_registrations_schema(connection: &mut SqliteConnection) -> Result<()> {
-        super::storage_v19_migration::migrate_local_v19(connection).await
-    }
-
-    async fn remove_execution_owner_schema(connection: &mut SqliteConnection) -> Result<()> {
-        let mut tx = connection.begin_with("BEGIN IMMEDIATE").await?;
-        let removals = super::schema_cleanup::execution_recovery_removal_plan(&mut tx).await?;
-        let version: i64 = sqlx::query_scalar("PRAGMA user_version")
-            .fetch_one(&mut *tx)
+        // ≤10 与旧版库：先补齐到压缩前的形状，再走同一条搬运，两段同一个事务，版本只在
+        // 搬运完成后推进。搬运要 DROP 被引用的父表并重建绑定：SQLite 对父表做隐式删除时
+        // 会立即检查外键，`defer_foreign_keys` 也挡不住；该 PRAGMA 只在事务外生效，
+        // 因此整段使用同一条连接：先关外键，提交前用 foreign_key_check 补齐校验，
+        // 最后恢复连接设置。
+        sqlx::query("PRAGMA foreign_keys = OFF")
+            .execute(&mut *connection)
             .await?;
-        if version != 17 {
-            sqlx::query(canonical::CREATE_SESSION_CLOSE_INTENTS_TABLE_SQL)
-                .execute(&mut *tx)
-                .await?;
-            sqlx::query("DROP TABLE IF EXISTS session_execution_workspace_descriptors")
-                .execute(&mut *tx)
-                .await?;
-            sqlx::query("DROP TABLE IF EXISTS session_execution_owners")
+        let migrated = Self::migrate_schema(&mut connection, state).await;
+        let restored = sqlx::query("PRAGMA foreign_keys = ON")
+            .execute(&mut *connection)
+            .await;
+        migrated?;
+        restored?;
+        Ok(())
+    }
+
+    /// 空库：直接建当前形状并推进版本。没有可搬运的旧事实，也就不经过搬运路径。
+    async fn create_current_schema(connection: &mut SqliteConnection) -> Result<()> {
+        ensure_canonical_names_hold_tables(connection, canonical::CANONICAL_TABLES).await?;
+        let mut tx = connection.begin_with("BEGIN IMMEDIATE").await?;
+        // 建表语句来自 `sessions::canonical`：本机新库与远端初始化下发的是同一份清单
+        // （逐条执行，两边执行器的语句单元相同），形状不可能各自漂移。
+        for statement in canonical::CREATE_TABLES {
+            // 语句文本来自 `canonical` 的静态清单，不含外部输入。
+            sqlx::raw_sql(AssertSqlSafe((*statement).to_owned()))
                 .execute(&mut *tx)
                 .await?;
         }
-        for statement in removals {
-            sqlx::query(*statement).execute(&mut *tx).await?;
+        for statement in canonical::CREATE_INDEXES {
+            sqlx::raw_sql(AssertSqlSafe((*statement).to_owned()))
+                .execute(&mut *tx)
+                .await?;
         }
-        sqlx::query("PRAGMA user_version = 18")
+        // 当前 Machine 即使尚无 Session 也应可查询。不能覆盖已有展示名。
+        sqlx::query(canonical::INSERT_CURRENT_MACHINE_SQL)
+            .bind(crate::sessions::machine::current()?)
+            .execute(&mut *tx)
+            .await?;
+        sqlx::query("PRAGMA user_version = 11")
             .execute(&mut *tx)
             .await?;
         tx.commit().await?;
         Ok(())
     }
 
+    /// 旧版（`Legacy`、2..10）：在本事务内补齐到压缩前的形状（建表、补列、键放宽、
+    /// 退役对象清理），再执行单条搬运。调用方已关闭外键强制并在提交后恢复。
+    /// 失败回滚后库保持原版本，可由上一版二进制继续打开。
     async fn migrate_schema(connection: &mut SqliteConnection, state: SchemaState) -> Result<()> {
         let mut tx = connection.begin_with("BEGIN IMMEDIATE").await?;
         let removals = super::schema_cleanup::removal_plan(&mut tx).await?;
@@ -252,13 +246,11 @@ impl SqliteSessionDatabase {
             sqlx::query("ALTER TABLE session_bindings DROP COLUMN revision")
                 .execute(&mut *tx)
                 .await?;
-        } else if matches!(state, SchemaState::Empty | SchemaState::Legacy) {
-            // 建表语句来自 `sessions::canonical`：本机新库与远端初始化下发的是同一份清单
-            // （逐条执行，两边执行器的语句单元相同），形状不可能各自漂移。旧库（表已存在）
-            // 在这里是空操作，列由下面的补列循环补齐。
-            ensure_canonical_names_hold_tables(&mut tx).await?;
+        }
+        {
+            ensure_canonical_names_hold_tables(&mut tx, canonical::V10_CANONICAL_TABLES).await?;
             // 标识符与列定义均来自 `canonical` 的静态清单，不含外部输入。
-            for statement in CREATE_TABLES {
+            for statement in canonical::V10_CREATE_TABLES {
                 sqlx::raw_sql(AssertSqlSafe((*statement).to_owned()))
                     .execute(&mut *tx)
                     .await?;
@@ -300,7 +292,7 @@ impl SqliteSessionDatabase {
                 }
             }
             // 索引在建表与补列之后：`idx_threads_updated` 引用后补的列。
-            for statement in CREATE_INDEXES {
+            for statement in canonical::V10_CREATE_INDEXES {
                 sqlx::raw_sql(AssertSqlSafe((*statement).to_owned()))
                     .execute(&mut *tx)
                     .await?;
@@ -331,24 +323,19 @@ impl SqliteSessionDatabase {
         for statement in removals {
             sqlx::query(statement).execute(&mut *tx).await?;
         }
-        sqlx::query(AssertSqlSafe(canonical::CREATE_OAUTH_CREDENTIALS_TABLE_SQL))
-            .execute(&mut *tx)
-            .await?;
-        // 环境事实与 schema 版本同一事务提交。未来的 Machine/Workspace 归属回填
-        // 必须能使用这些行，不能先留下已推进版本而缺少环境归属的半升级库。
-        sqlx::query(AssertSqlSafe(canonical::CREATE_ENVIRONMENTS_TABLE_SQL))
-            .execute(&mut *tx)
-            .await?;
-        sqlx::query("CREATE INDEX IF NOT EXISTS idx_session_environments_machine ON session_environments(machine_id, thread_id)")
-            .execute(&mut *tx)
-            .await?;
-        sqlx::query(AssertSqlSafe(canonical::BACKFILL_ENVIRONMENTS_SQL))
-            .bind(crate::sessions::machine::current()?)
-            .execute(&mut *tx)
-            .await?;
-        sqlx::query("PRAGMA user_version = 11")
-            .execute(&mut *tx)
-            .await?;
+        sqlx::query(AssertSqlSafe(
+            canonical::V10_CREATE_OAUTH_CREDENTIALS_TABLE_SQL,
+        ))
+        .execute(&mut *tx)
+        .await?;
+        sqlx::query(AssertSqlSafe(
+            canonical::CREATE_SESSION_CLOSE_INTENTS_TABLE_SQL,
+        ))
+        .execute(&mut *tx)
+        .await?;
+        // 单条搬运：补齐环境事实 → 重建归属与绑定 → 删掉压缩前独有的对象 → 推进版本。
+        // 与上面的形状补齐同一个事务：不能先留下已推进版本而形状未收敛的半升级库。
+        super::storage_v11_migration::migrate_shape(&mut tx).await?;
         tx.commit().await?;
         Ok(())
     }
@@ -586,7 +573,3 @@ async fn migrate_identity_values(connection: &mut SqliteConnection) -> Result<()
 #[cfg(test)]
 #[path = "schema_test.rs"]
 mod tests;
-
-#[cfg(test)]
-#[path = "schema_v18_test.rs"]
-mod v18_tests;
