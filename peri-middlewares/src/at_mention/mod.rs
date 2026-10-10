@@ -6,7 +6,7 @@ use std::sync::Arc;
 use crate::workspace_io::{WorkspaceFileReader, WorkspaceMentionContent};
 use async_trait::async_trait;
 use peri_agent::{
-    error::AgentResult,
+    error::{AgentError, AgentResult},
     messages::{BaseMessage, ContentBlock},
     middleware::r#trait::Middleware,
 };
@@ -19,8 +19,12 @@ const WORKSPACE_MENTION_REQUEST: &str = "workspace/readMention";
 /// Workspace 实现不遵守预算时，模型可见正文仍不超界。数值是**界**，
 /// 不是实测最优值。
 const MAX_MENTION_CONTENT_BYTES: usize = 32 * 1024;
-/// 一批输入（可含多条 Human）累计注入预算：多个合法文件不得无限累加。
+/// 一批输入（可含多条 Human）累计注入预算，包含合成消息的全部序列化字节。
 const MAX_BATCH_MENTION_BYTES: usize = 128 * 1024;
+/// 限制合成的工具调用和结果条目数量，避免大量短路径绕过字节预算。
+const MAX_BATCH_MENTION_ITEMS: usize = 32;
+/// 为整批省略摘要预留空间；摘要长度与路径无关。
+const OMITTED_SUMMARY_RESERVE_BYTES: usize = 512;
 
 /// AtMentionMiddleware — 解析用户消息中的 @path 提及，注入 Workspace 读取结果
 ///
@@ -43,8 +47,8 @@ const MAX_BATCH_MENTION_BYTES: usize = 128 * 1024;
 ///
 /// - 单项正文超过 [`MAX_MENTION_CONTENT_BYTES`]：按 UTF-8 边界截断，截断处
 ///   给出显式说明与可继续读取的行号（行内无法按行续读时明确说明）；
-/// - 单批累计超过 [`MAX_BATCH_MENTION_BYTES`]：**不读**剩余提及，改为注入
-///   显式「未载入（预算已用尽）」回执，不静默裁掉内容；
+/// - 单批累计超过 [`MAX_BATCH_MENTION_BYTES`] 或条目上限：**不读**剩余提及，
+///   用一条有界摘要说明未载入数量，不静默裁掉内容；
 /// - 读取失败（Workspace 关闭 / 断连 / 路径不存在）不注入、不回落本机磁盘，
 ///   只记 debug。
 pub struct AtMentionMiddleware {
@@ -92,25 +96,37 @@ fn batch_inputs(state: &dyn hook_state::BeforeInputState) -> Vec<String> {
         .collect()
 }
 
-/// 一批 mention 的累计注入预算（批内所有输入消息共享，UTF-8 字节计）。
+/// 一批 mention 的累计注入预算（批内所有输入消息共享，JSON 字节计）。
 struct BatchBudget {
-    remaining: usize,
+    used_bytes: usize,
+    used_items: usize,
+    omitted: usize,
 }
 
 impl BatchBudget {
     fn new() -> Self {
         Self {
-            remaining: MAX_BATCH_MENTION_BYTES,
+            used_bytes: 0,
+            used_items: 0,
+            omitted: 0,
         }
     }
 
-    /// 剩余预算；耗尽时调用方必须产出显式「未载入」回执而不是静默跳过。
-    fn remaining(&self) -> usize {
-        self.remaining
+    fn remaining_bytes(&self) -> usize {
+        (MAX_BATCH_MENTION_BYTES - OMITTED_SUMMARY_RESERVE_BYTES).saturating_sub(self.used_bytes)
+    }
+
+    fn can_add_item(&self) -> bool {
+        self.used_items < MAX_BATCH_MENTION_ITEMS && self.remaining_bytes() > 0
     }
 
     fn spend(&mut self, bytes: usize) {
-        self.remaining = self.remaining.saturating_sub(bytes);
+        self.used_bytes += bytes;
+        self.used_items += 1;
+    }
+
+    fn omit(&mut self) {
+        self.omitted = self.omitted.saturating_add(1);
     }
 }
 
@@ -206,6 +222,21 @@ impl AtMentionMiddleware {
         for text in inputs {
             self.prepare_mentions(state, &text, &mut budget).await?;
         }
+        if budget.omitted > 0 {
+            let summary = BaseMessage::ai(format!(
+                "本批还有 {} 个 @mention 未载入（注入预算或条目上限已用尽）；请用 Read 工具按需读取。",
+                budget.omitted
+            ));
+            // 摘要不含路径，序列化后也必须落在预留空间内。
+            let bytes = serialized_message_bytes(&summary)?;
+            if bytes > OMITTED_SUMMARY_RESERVE_BYTES {
+                return Err(AgentError::MiddlewareError {
+                    middleware: self.name().to_string(),
+                    reason: "@mention 省略摘要超出预留字节预算".to_string(),
+                });
+            }
+            state.append_input_message(summary);
+        }
         Ok(())
     }
 
@@ -220,17 +251,18 @@ impl AtMentionMiddleware {
             return Ok(());
         }
 
-        // 每项过预算闸门：预算耗尽的提及**不读**（限制实际读取量），改为
-        // 显式「未载入」回执，与成功项一一配对。
-        let mut items: Vec<(parser::AtMention, MentionOutcome)> =
-            Vec::with_capacity(mentions.len());
+        // 每项过预算闸门：正文、路径和合成消息开销都必须计入整批上限。
+        let mut items: Vec<(parser::AtMention, MentionOutcome, String)> =
+            Vec::with_capacity(mentions.len().min(MAX_BATCH_MENTION_ITEMS));
         for mention in mentions {
-            if budget.remaining() == 0 {
-                tracing::warn!(
-                    path = %mention.path,
-                    "workspace mention 批次注入预算已用尽，未读取该提及（显式未载入回执）"
-                );
-                items.push((mention, MentionOutcome::BudgetExhausted));
+            if !budget.can_add_item() {
+                budget.omit();
+                continue;
+            }
+            let id = format!("call_{}", uuid::Uuid::new_v4().simple());
+            let minimum = mention_messages(&mention, &id, "");
+            if serialized_pair_bytes(&minimum)? >= budget.remaining_bytes() {
+                budget.omit();
                 continue;
             }
             let result = self
@@ -239,10 +271,23 @@ impl AtMentionMiddleware {
                 .await;
             match result {
                 Ok(content) => {
-                    let per_item = budget.remaining().min(MAX_MENTION_CONTENT_BYTES);
-                    let rendered = render_mention_body(&content, per_item);
-                    budget.spend(rendered.text.len());
-                    items.push((mention, MentionOutcome::Loaded(rendered)));
+                    let mut body_limit = budget.remaining_bytes().min(MAX_MENTION_CONTENT_BYTES);
+                    loop {
+                        let rendered = render_mention_body(&content, body_limit);
+                        let outcome = MentionOutcome::Loaded(rendered);
+                        let pair = mention_messages(&mention, &id, &outcome.render(&mention));
+                        let bytes = serialized_pair_bytes(&pair)?;
+                        if bytes <= budget.remaining_bytes() {
+                            budget.spend(bytes);
+                            items.push((mention, outcome, id));
+                            break;
+                        }
+                        if body_limit == 0 {
+                            budget.omit();
+                            break;
+                        }
+                        body_limit = body_limit.saturating_sub(bytes - budget.remaining_bytes());
+                    }
                 }
                 Err(error) => {
                     tracing::debug!(path = %mention.path, %error, "workspace mention read skipped");
@@ -254,32 +299,17 @@ impl AtMentionMiddleware {
             return Ok(());
         }
 
-        // 生成 call_id
-        let call_ids: Vec<String> = (0..items.len())
-            .map(|_| format!("call_{}", uuid::Uuid::new_v4().simple()))
-            .collect();
-
         // 构造 ToolUse blocks
         let tool_use_blocks: Vec<ContentBlock> = items
             .iter()
-            .zip(call_ids.iter())
-            .map(|((mention, _), id)| {
-                let mut input = serde_json::json!({ "path": mention.path });
-                if let Some(line_start) = mention.line_start {
-                    input["lineStart"] = serde_json::json!(line_start);
-                }
-                if let Some(line_end) = mention.line_end {
-                    input["lineEnd"] = serde_json::json!(line_end);
-                }
-                ContentBlock::tool_use(id.clone(), WORKSPACE_MENTION_REQUEST, input)
-            })
+            .map(|(mention, _, id)| mention_tool_use(mention, id))
             .collect();
 
         // 追加 Ai 消息
         state.append_input_message(BaseMessage::ai_from_blocks(tool_use_blocks));
 
         // 追加 ToolResult 消息
-        for (id, (mention, outcome)) in call_ids.iter().zip(items.iter()) {
+        for (mention, outcome, id) in &items {
             state.append_input_message(BaseMessage::tool_result(
                 id.clone(),
                 outcome.render(mention),
@@ -294,8 +324,6 @@ impl AtMentionMiddleware {
 enum MentionOutcome {
     /// 已读取（可能按预算截断）。
     Loaded(TrimmedContent),
-    /// 本批注入预算已用尽：不读、不假装成功，给显式未载入回执。
-    BudgetExhausted,
 }
 
 impl MentionOutcome {
@@ -309,12 +337,38 @@ impl MentionOutcome {
                 };
                 format!("{prefix}\n{}", trimmed.text)
             }
-            Self::BudgetExhausted => format!(
-                "→ {}\n... (本批 @mention 注入预算已用尽，未载入该文件；请用 Read 工具按需读取)",
-                mention.path
-            ),
         }
     }
+}
+
+fn mention_tool_use(mention: &parser::AtMention, id: &str) -> ContentBlock {
+    let mut input = serde_json::json!({ "path": mention.path });
+    if let Some(line_start) = mention.line_start {
+        input["lineStart"] = serde_json::json!(line_start);
+    }
+    if let Some(line_end) = mention.line_end {
+        input["lineEnd"] = serde_json::json!(line_end);
+    }
+    ContentBlock::tool_use(id.to_string(), WORKSPACE_MENTION_REQUEST, input)
+}
+
+fn mention_messages(
+    mention: &parser::AtMention,
+    id: &str,
+    result: &str,
+) -> (BaseMessage, BaseMessage) {
+    (
+        BaseMessage::ai_from_blocks(vec![mention_tool_use(mention, id)]),
+        BaseMessage::tool_result(id.to_string(), result.to_string()),
+    )
+}
+
+fn serialized_message_bytes(message: &BaseMessage) -> AgentResult<usize> {
+    Ok(serde_json::to_vec(message)?.len())
+}
+
+fn serialized_pair_bytes(pair: &(BaseMessage, BaseMessage)) -> AgentResult<usize> {
+    Ok(serialized_message_bytes(&pair.0)? + serialized_message_bytes(&pair.1)?)
 }
 
 #[cfg(test)]

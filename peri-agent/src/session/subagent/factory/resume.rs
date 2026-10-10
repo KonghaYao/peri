@@ -208,14 +208,20 @@ pub(super) async fn resume_subagent_impl(
     let frozen_date = parent
         .map(|p| p.store().frozen.date.to_string())
         .or(frozen_date_cfg);
-    // H1 恢复面：身份不在此注入 base system——子身份已随其
-    // `FrozenContext.system_prompt` 在创建时定格，旧 v1 transcript 里的身份
-    // System 消息仍是该子会话自己的持久事实（M3 metadata 通道已随执行恢复
-    // 移除，本分支不再重写历史）。故 identity 传 `None`：bridge 不设 base
-    // system，身份在请求投影中只来自 transcript 恰好一次。
+    // Spawn puts the child's identity first in its own persisted history. Only
+    // hidden child threads use that convention; legacy/non-child history has no
+    // typed identity marker and its first System must remain ordinary history.
+    // For older hidden children, the first own System is the compatible identity
+    // slot. A future typed payload can remove this historical convention.
+    let identity = (meta.hidden && meta.parent_thread_id.is_some())
+        .then(|| loaded.first().and_then(PersistedPayload::as_message))
+        .flatten()
+        .and_then(|message| {
+            matches!(message, BaseMessage::System { .. }).then(|| message.content().to_owned())
+        });
     let frozen = inherited_frozen_context(
         parent,
-        None,
+        identity.as_deref(),
         &frozen_claude_md,
         &frozen_skill_summary,
         &frozen_date,
@@ -260,9 +266,7 @@ pub(super) async fn resume_subagent_impl(
         context_budget,
         compact_llm,
         Some(agent_id_from_child_thread(&thread_id)),
-        // 无 base system 可吸收：归一化只对「bridge 注入身份 + transcript 同文」
-        // 的 v2 创建路径生效（见 spawn）。
-        false,
+        identity.is_some(),
     )
     .await?;
 

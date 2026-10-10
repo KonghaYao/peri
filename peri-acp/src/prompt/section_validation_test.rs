@@ -284,3 +284,24 @@ fn escaped_braces_render_as_literals() {
         "已知占位符照常替换: {rendered}"
     );
 }
+
+/// [回归测试] 插入值中的占位符形状必须保持字面量，不能被后续替换轮次重解析。
+#[test]
+fn inserted_cwd_is_not_parsed_as_a_template() {
+    let sections = vec![section(
+        "07_custom",
+        PromptSectionZone::Uncached,
+        1,
+        "目录：{{cwd}}；日期：{{date}}；转义：\\{{date}}",
+    )];
+    let cwd = "/workspace/{{date}}/{{platform}}";
+    let rendered = PromptTemplate::new(&MetaHarnessState::default(), &sections).render(
+        &PromptEnv::local_probe(cwd, "2026-01-01"),
+        &AgentCatalogProvider::new(),
+    );
+    assert!(
+        rendered
+            .contains("目录：/workspace/{{date}}/{{platform}}；日期：2026-01-01；转义：{{date}}"),
+        "模板 token 应替换一次，插入值与转义 token 应保持原文：{rendered}"
+    );
+}

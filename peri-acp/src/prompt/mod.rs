@@ -374,13 +374,8 @@ impl PromptTemplate {
             );
         }
         let agents = format_available_agents(agent_catalog, self.built_in_subagents_enabled);
-        let mut rendered = escape_literal_braces(&result);
-        for name in KNOWN_PLACEHOLDERS {
-            let Some(value) = placeholder_value(name, env, &agents) else {
-                continue;
-            };
-            rendered = rendered.replace(&format!("{{{{{name}}}}}"), &value);
-        }
+        let escaped = escape_literal_braces(&result);
+        let rendered = render_placeholders_once(&escaped, env, &agents);
         restore_literal_braces(&rendered)
     }
 }
@@ -450,6 +445,29 @@ fn escape_literal_braces(text: &str) -> String {
 fn restore_literal_braces(text: &str) -> String {
     text.replace(LITERAL_OPEN_BRACE, "{{")
         .replace(LITERAL_CLOSE_BRACE, "}}")
+}
+
+/// 只扫描模板原文一次：插入的 cwd、目录等值即使含 `{{date}}` 也保持字面量。
+fn render_placeholders_once(template: &str, env: &PromptEnv, agents: &str) -> String {
+    let mut rendered = String::with_capacity(template.len());
+    let mut remaining = template;
+    while let Some(start) = remaining.find("{{") {
+        rendered.push_str(&remaining[..start]);
+        let token_start = &remaining[start + 2..];
+        let Some(end) = token_start.find("}}") else {
+            rendered.push_str(&remaining[start..]);
+            return rendered;
+        };
+        let name = &token_start[..end];
+        if let Some(value) = placeholder_value(name, env, agents) {
+            rendered.push_str(&value);
+        } else {
+            rendered.push_str(&remaining[start..start + 2 + end + 2]);
+        }
+        remaining = &token_start[end + 2..];
+    }
+    rendered.push_str(remaining);
+    rendered
 }
 
 /// 单个占位符的渲染值；`None` = 该值在冻结输入中不可用（保持原文并 warn）。

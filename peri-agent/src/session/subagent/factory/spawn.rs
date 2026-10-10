@@ -59,7 +59,7 @@ pub(super) async fn spawn_subagent_impl(
     let SubagentSpawnConfig {
         agent_name,
         prompt,
-        parent_messages,
+        mut parent_messages,
         cancel_policy,
         max_iterations,
         fork_directive_kind,
@@ -119,6 +119,40 @@ pub(super) async fn spawn_subagent_impl(
         .map(|p| p.store().frozen.date.to_string())
         .or(frozen_date_cfg);
     let frozen_claude_local_md = frozen_claude_local_md_cfg;
+
+    // Child identity is persisted as an ordinary System entry for resume, but it
+    // belongs to the parent child session, not to a fork's inherited conversation.
+    // Match its canonical ID in the parent's own region so unrelated System
+    // messages (including identical text from another source) remain intact.
+    let parent_is_child = if parent.is_some() && !parent_messages.is_empty() {
+        if let (Some(store), Some(parent_id)) = (&session_resources, &parent_thread_id) {
+            let meta = store.load_session_meta(parent_id).await?;
+            meta.hidden && meta.parent_thread_id.is_some()
+        } else {
+            false
+        }
+    } else {
+        false
+    };
+    if let Some(parent) = parent.filter(|_| parent_is_child) {
+        let transcript = parent.transcript();
+        let transcript = transcript.read();
+        let identity = parent.store().frozen.system_prompt.as_ref();
+        if !identity.is_empty() {
+            let identity_id = transcript
+                .entries()
+                .iter()
+                .skip(transcript.ancestor_len())
+                .filter_map(|entry| entry.as_message())
+                .find(|message| {
+                    matches!(message, BaseMessage::System { .. }) && message.content() == identity
+                })
+                .map(BaseMessage::id);
+            if let Some(identity_id) = identity_id {
+                parent_messages.retain(|message| message.id() != identity_id);
+            }
+        }
+    }
 
     // cancel token：Cascade = 父 cancel 传播（parent 优先，回退 config 注入的
     // 父 token；均缺失时新建），Independent = 新建（与迁移前语义一致）

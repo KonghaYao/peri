@@ -362,8 +362,9 @@ async fn fork_child_request_keeps_single_identity_with_parent_ancestors() {
     );
 }
 
-/// live resume：身份从子会话持久历史读回（spawn 写入的起始 System），贡献仍由
-/// 恢复后的子链在请求时提供。
+/// live resume：身份从子会话持久历史恢复为 bridge base，贡献仍由恢复后的
+/// 子链在请求时提供。
+/// [回归测试] 仅检查计数会漏掉 identity 落在 dynamic boundary 后面的顺序错误。
 #[tokio::test]
 async fn resumed_child_request_reads_persisted_identity_and_fresh_contributions() {
     let (store, parent, cwd, _repo, _db) = bound_parent("child-wire-resume.db").await;
@@ -406,6 +407,11 @@ async fn resumed_child_request_reads_persisted_identity_and_fresh_contributions(
 
     let system = second.last_system();
     assert_eq!(
+        system,
+        first.last_system(),
+        "恢复前后请求的 system 顺序与字节应一致"
+    );
+    assert_eq!(
         system.matches("CHILD_IDENTITY_SENTINEL").count(),
         1,
         "恢复身份恰一次（来自持久历史）: {system}"
@@ -419,6 +425,115 @@ async fn resumed_child_request_reads_persisted_identity_and_fresh_contributions(
         system.matches("CHILD_IDENTITY_SENTINEL").count(),
         0,
         "身份不得因恢复丢失: {system}"
+    );
+}
+
+/// [回归测试] 子 Agent 再 fork 时，只继承对话，不继承父子会话自己的身份。
+#[tokio::test]
+async fn nested_fork_request_excludes_parent_child_identity() {
+    let (store, root, cwd, _repo, _db) = bound_parent("child-wire-nested-fork.db").await;
+    let first_model = CaptureModel::new("first done");
+    let first = SessionFactory::spawn_subagent(
+        Some(&root),
+        child_config(
+            Arc::clone(&store),
+            first_model,
+            Arc::new(ContributionAssembler {
+                contribution: Arc::new(Mutex::new(None)),
+            }),
+            false,
+            &cwd,
+        ),
+    )
+    .await
+    .unwrap();
+    let inherited = first
+        .session
+        .transcript()
+        .read()
+        .visible_model_messages()
+        .unwrap();
+    assert!(inherited.iter().any(|message| {
+        matches!(message, BaseMessage::System { .. })
+            && message.content() == "CHILD_IDENTITY_SENTINEL"
+    }));
+    let second_model = CaptureModel::new("second done");
+    let mut config = child_config(
+        store,
+        Arc::clone(&second_model),
+        Arc::new(ContributionAssembler {
+            contribution: Arc::new(Mutex::new(None)),
+        }),
+        true,
+        &cwd,
+    );
+    config.parent_messages = inherited;
+    config.system_prompt = Some("GRANDCHILD_IDENTITY_SENTINEL".into());
+    let second = SessionFactory::spawn_subagent(Some(&first.session), config)
+        .await
+        .unwrap();
+    assert!(!second.interrupted);
+    let system = second_model.last_system();
+    assert_eq!(
+        system,
+        format!(
+            "GRANDCHILD_IDENTITY_SENTINEL{}\n\nCHILD_SKILLS_AND_DEFERRED",
+            peri_model::prompt_cache::SYSTEM_PROMPT_DYNAMIC_BOUNDARY
+        )
+    );
+    let request = second_model.requests.lock().unwrap();
+    let systems: Vec<_> = request
+        .last()
+        .unwrap()
+        .messages
+        .iter()
+        .filter(|message| matches!(message, peri_model::ModelMessage::System { .. }))
+        .collect();
+    assert_eq!(systems.len(), 1, "孙 Agent 请求只能有自己的 System block");
+}
+
+/// [回归测试] Root 的同文 System 属于普通历史，不可按文本误判为子身份。
+#[tokio::test]
+async fn fork_from_root_preserves_own_system_even_when_it_matches_frozen_prompt() {
+    let (store, root, cwd, _repo, _db) = bound_parent("child-wire-root-system.db").await;
+    let root = Session::new(
+        Arc::from(cwd.as_str()),
+        FrozenContext::builder()
+            .system_prompt("ROOT_SYSTEM_SENTINEL")
+            .build(),
+        root.store().thread_id.clone(),
+    );
+    let root_system = BaseMessage::system("ROOT_SYSTEM_SENTINEL");
+    root.transcript().write().append(root_system.clone());
+    let model = CaptureModel::new("done");
+    let mut config = child_config(
+        store,
+        Arc::clone(&model),
+        Arc::new(ContributionAssembler {
+            contribution: Arc::new(Mutex::new(None)),
+        }),
+        true,
+        &cwd,
+    );
+    config.parent_messages = vec![root_system, BaseMessage::human("root task")];
+    let spawned = SessionFactory::spawn_subagent(Some(&root), config)
+        .await
+        .unwrap();
+    assert!(!spawned.interrupted);
+    let system = model.last_system();
+    assert!(system.contains("ROOT_SYSTEM_SENTINEL"));
+    assert!(system.contains("CHILD_IDENTITY_SENTINEL"));
+    let request = model.requests.lock().unwrap();
+    assert_eq!(
+        request
+            .last()
+            .unwrap()
+            .messages
+            .iter()
+            .filter(|message| matches!(message, peri_model::ModelMessage::System { .. }))
+            .count(),
+        2,
+        "root 的普通 System 必须保留在 fork 历史里"
     );
 }
 

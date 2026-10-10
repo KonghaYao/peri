@@ -75,6 +75,10 @@ async fn test_resume_subagent_legacy_history_starts_a_fresh_run_without_runtime_
     meta.parent_thread_id = Some("other-parent".to_string()); // 与父 session 不一致
     store.create_legacy_thread(meta).await.unwrap();
     store.update_thread_status(&id, "done").await.unwrap();
+    store
+        .append_message(&id, BaseMessage::system("LEGACY_SYSTEM_NOT_CHILD_IDENTITY"))
+        .await
+        .unwrap();
 
     let parent = Session::new(
         Arc::from("/tmp/work"),
@@ -99,6 +103,10 @@ async fn test_resume_subagent_legacy_history_starts_a_fresh_run_without_runtime_
         .unwrap();
     assert_eq!(resumed.child_thread_id, id);
     assert!(!resumed.interrupted);
+    assert!(
+        resumed.session.store().frozen.system_prompt.is_empty(),
+        "非 hidden legacy 历史的首条 System 不得升级为子身份"
+    );
     assert_eq!(calls.read().len(), 1);
     let statuses = store.statuses();
     assert_eq!(

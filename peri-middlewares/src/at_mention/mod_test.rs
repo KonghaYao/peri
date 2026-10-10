@@ -267,15 +267,15 @@ async fn oversized_multiline_content_reports_resume_line() {
     assert!(output.len() < MAX_MENTION_CONTENT_BYTES + 512);
 }
 
-/// 整批累计超预算：后续提及**不读**，改为显式「未载入」回执（不静默裁掉）。
+/// [回归测试] 整批累计超预算时，包含工具调用和路径的完整消息有界；
+/// 后续提及不读，并用一条摘要说明省略数量。
 #[tokio::test]
 async fn batch_budget_stops_reads_and_reports_not_loaded() {
     let dir = tempdir().unwrap();
     let reads = Arc::new(AtomicUsize::new(0));
-    // 每项 20 KiB：前 6 项吃掉 120 KiB，接近 128 KiB 的整批预算；第 8 项必然
-    // 只能用剩余预算，最后一项在预算耗尽后不读。
+    // 每项 20 KiB：若只计算正文，后续大量路径和回执仍能无限追加。
     let body = "z".repeat(20 * 1024);
-    let entries: Vec<(String, String)> = (0..8)
+    let entries: Vec<(String, String)> = (0..20)
         .map(|index| (format!("f{index}.txt"), body.clone()))
         .collect();
     let refs: Vec<(&str, &str)> = entries
@@ -284,7 +284,7 @@ async fn batch_budget_stops_reads_and_reports_not_loaded() {
         .collect();
     let mw = AtMentionMiddleware::new(counting_reader(&refs, &reads));
     let (ctx, _fixture) = context_with(dir.path(), mw).await;
-    let mention = (0..8)
+    let mention = (0..20)
         .map(|index| format!("@f{index}.txt"))
         .collect::<Vec<_>>()
         .join(" ");
@@ -298,37 +298,104 @@ async fn batch_budget_stops_reads_and_reports_not_loaded() {
 
     let transcript = ctx.session.transcript.read();
     let messages = transcript.visible_messages();
-    // 每个提及都有一对调用 + 结果（成功或显式回执），不留静默缺口。
     let tool_use_count: usize = messages
         .iter()
         .filter(|message| message.has_tool_calls())
         .map(|message| message.tool_calls().len())
         .sum();
-    assert_eq!(tool_use_count, 8, "8 个提及各配对一次假调用");
+    assert!(tool_use_count < 20, "预算耗尽后不再合成每项调用");
     let result_count = messages
         .iter()
         .filter(|message| matches!(message, BaseMessage::Tool { .. }))
         .count();
-    assert_eq!(result_count, 8, "8 个提及各一条结果（成功或未载入回执）");
+    assert_eq!(result_count, tool_use_count, "每次调用仍有对应结果");
     let injected_bytes: usize = messages[1..]
         .iter()
-        .map(|message| message.content().len())
+        .map(|message| serde_json::to_vec(message).unwrap().len())
         .sum();
     assert!(
-        injected_bytes < MAX_BATCH_MENTION_BYTES + 4096,
+        injected_bytes <= MAX_BATCH_MENTION_BYTES,
         "整批注入必须落在批预算内：{injected_bytes}"
     );
     assert!(
-        reads.load(Ordering::SeqCst) < 8,
+        reads.load(Ordering::SeqCst) < 20,
         "预算闸门必须先于读取，实际读取量必须受限：{}",
         reads.load(Ordering::SeqCst)
     );
     assert!(
         messages
             .iter()
-            .any(|message| message.content().contains("注入预算已用尽，未载入该文件")),
-        "预算耗尽的提及必须给出显式未载入回执"
+            .any(|message| message.content().contains("个 @mention 未载入")),
+        "预算耗尽的提及必须给出显式省略摘要"
     );
+}
+
+/// [回归测试] 多条 Human 共享条目上限，短路径不能生成无界工具消息。
+#[tokio::test]
+async fn batch_item_limit_counts_across_inputs() {
+    let dir = tempdir().unwrap();
+    let reads = Arc::new(AtomicUsize::new(0));
+    let entries: Vec<(String, String)> = (0..50)
+        .map(|index| (format!("f{index}.txt"), "ok".to_string()))
+        .collect();
+    let refs: Vec<(&str, &str)> = entries
+        .iter()
+        .map(|(path, content)| (path.as_str(), content.as_str()))
+        .collect();
+    let mw = AtMentionMiddleware::new(counting_reader(&refs, &reads));
+    let (ctx, _fixture) = context_with(dir.path(), mw).await;
+    for range in [0..25, 25..50] {
+        let mentions = range
+            .map(|index| format!("@f{index}.txt"))
+            .collect::<Vec<_>>()
+            .join(" ");
+        ctx.session.queue.push(QueuedMessage::prompt(
+            MessageSource::UserInput,
+            BaseMessage::human(mentions),
+        ));
+    }
+    let ids = receive(&ctx).await;
+    run_before_agent(&ctx, &ids).await.unwrap();
+
+    let transcript = ctx.session.transcript.read();
+    let messages = transcript.visible_messages();
+    let calls: usize = messages
+        .iter()
+        .map(|message| message.tool_calls().len())
+        .sum();
+    assert_eq!(calls, MAX_BATCH_MENTION_ITEMS);
+    assert_eq!(reads.load(Ordering::SeqCst), MAX_BATCH_MENTION_ITEMS);
+    assert!(messages
+        .iter()
+        .any(|message| message.content().contains("18 个 @mention 未载入")));
+    let injected_bytes: usize = messages[2..]
+        .iter()
+        .map(|message| serde_json::to_vec(message).unwrap().len())
+        .sum();
+    assert!(injected_bytes <= MAX_BATCH_MENTION_BYTES);
+}
+
+/// [回归测试] 极长路径的回执和工具参数也计入预算，不能额外放大模型上下文。
+#[tokio::test]
+async fn long_path_is_omitted_without_workspace_read() {
+    let dir = tempdir().unwrap();
+    let reads = Arc::new(AtomicUsize::new(0));
+    let path = "p".repeat(MAX_BATCH_MENTION_BYTES);
+    let mw = AtMentionMiddleware::new(counting_reader(&[], &reads));
+    let (ctx, _fixture) = context_with(dir.path(), mw).await;
+    ctx.session.queue.push(QueuedMessage::prompt(
+        MessageSource::UserInput,
+        BaseMessage::human(format!("@\"{path}\"")),
+    ));
+    let ids = receive(&ctx).await;
+    run_before_agent(&ctx, &ids).await.unwrap();
+
+    let transcript = ctx.session.transcript.read();
+    let messages = transcript.visible_messages();
+    assert_eq!(reads.load(Ordering::SeqCst), 0);
+    assert_eq!(messages.len(), 2);
+    assert!(messages[1].content().contains("1 个 @mention 未载入"));
+    assert!(serde_json::to_vec(messages[1]).unwrap().len() <= MAX_BATCH_MENTION_BYTES);
 }
 
 /// 同一 loop 的中途批次：只处理本批新输入，不重读历史。
