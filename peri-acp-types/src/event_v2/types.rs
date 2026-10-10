@@ -49,6 +49,9 @@ impl fmt::Display for TurnErrorReason {
 /// critical 通道有界，满时降级丢弃。所有变体强制携带 `turn_id` 和 `agent_id`。
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum RenderEvent {
+    /// Execution is awaiting asynchronous work; its owner remains alive.
+    /// Ordered before subsequent output, which resumes the loading projection.
+    TurnSuspended { turn_id: TurnId, agent_id: AgentId },
     /// 用户输入已进入 canonical transcript，与后续 assistant 输出保持 FIFO。
     UserInputDelivered {
         turn_id: TurnId,
@@ -89,8 +92,6 @@ pub enum RenderEvent {
     ///
     /// `output` 携带工具输出文本（成功）或错误信息（失败）。与 v1
     /// `ExecutorEvent::ToolEnd` 字段对齐，便于 共享协议映射 透传到 TUI。
-    /// 注意：emit 时机在 error_suggest 注入之前，故 TUI 看到的是原始输出
-    /// （不含建议文本），与 v1 行为一致。
     ToolEnded {
         turn_id: TurnId,
         agent_id: AgentId,
@@ -142,6 +143,7 @@ impl RenderEvent {
     pub fn turn_id(&self) -> TurnId {
         match self {
             Self::TextChunk { turn_id, .. }
+            | Self::TurnSuspended { turn_id, .. }
             | Self::UserInputDelivered { turn_id, .. }
             | Self::ThinkingChunk { turn_id, .. }
             | Self::ToolStarted { turn_id, .. }
@@ -156,6 +158,7 @@ impl RenderEvent {
     pub fn agent_id(&self) -> AgentId {
         match self {
             Self::TextChunk { agent_id, .. }
+            | Self::TurnSuspended { agent_id, .. }
             | Self::UserInputDelivered { agent_id, .. }
             | Self::ThinkingChunk { agent_id, .. }
             | Self::ToolStarted { agent_id, .. }
@@ -195,7 +198,7 @@ pub enum StateEvent {
     ProtocolEvent {
         turn_id: TurnId,
         agent_id: AgentId,
-        event: ExecutorEvent,
+        event: Box<ExecutorEvent>,
     },
     /// 状态快照（轻量级元数据，用于状态同步与 UI 刷新）
     ///
@@ -244,15 +247,6 @@ pub enum StateEvent {
         agent_id: AgentId,
         text: String,
     },
-    /// Turn 已挂起等待异步事件（bg agent/cron/workflow）。
-    ///
-    /// Agent 在 idle/await_wake 路径中 emit 此事件，TUI 收到后：
-    /// - 归档 current_turn 到 committed（flush）
-    /// - 设置 is_loading = false（停止 loading spinner）
-    /// - Agent 保持存活（await_wake 阻塞）
-    ///
-    /// bg callback 到达时新 turn 的 TextChunk/ToolStarted 事件自动恢复 loading。
-    TurnSuspended { turn_id: TurnId, agent_id: AgentId },
 }
 
 impl StateEvent {
@@ -264,8 +258,7 @@ impl StateEvent {
             | Self::UserInputQueueChanged { turn_id, .. }
             | Self::StateSnapshot { turn_id, .. }
             | Self::GoalSnapshot { turn_id, .. }
-            | Self::SyntheticUserMessage { turn_id, .. }
-            | Self::TurnSuspended { turn_id, .. } => *turn_id,
+            | Self::SyntheticUserMessage { turn_id, .. } => *turn_id,
         }
     }
 
@@ -277,8 +270,7 @@ impl StateEvent {
             | Self::UserInputQueueChanged { agent_id, .. }
             | Self::StateSnapshot { agent_id, .. }
             | Self::GoalSnapshot { agent_id, .. }
-            | Self::SyntheticUserMessage { agent_id, .. }
-            | Self::TurnSuspended { agent_id, .. } => *agent_id,
+            | Self::SyntheticUserMessage { agent_id, .. } => *agent_id,
         }
     }
 }
@@ -402,6 +394,12 @@ pub enum ObserveEvent {
         child_agent_id: AgentId,
         agent_name: String,
         is_background: bool,
+        /// 发起本次子 Agent 的父 Agent 工具调用 id（Agent 工具调用的 tool_call_id）。
+        ///
+        /// 身份事实源是父侧持久化 `InvocationIntent.tool_call_id`；消费方据此把子 Agent 与
+        /// 其父工具卡片精确配对，不再依赖事件到达顺序（并发批次下顺序不可判定）。
+        /// None = 发起方未提供（/bg 命令等无工具调用上下文的路径）。
+        parent_tool_call_id: Option<String>,
     },
     /// 子 Agent 结束
     SubagentStop {

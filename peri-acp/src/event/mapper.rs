@@ -250,7 +250,6 @@ pub fn map_event(event: &ExecutorEvent, context_window: u32, caps: &PeriCaps) ->
         | ExecutorEvent::CompactCompleted { .. }
         | ExecutorEvent::RewindCompleted { .. }
         | ExecutorEvent::AgentExecutionFailed { .. }
-        | ExecutorEvent::LspDiagnostics { .. }
         | ExecutorEvent::BgToolStep { .. }
         | ExecutorEvent::WorkflowProgress(_)
         | ExecutorEvent::SessionStarted { .. }
@@ -289,3 +288,7 @@ fn stop_reason_wire(reason: &peri_model::StopReason) -> String {
 #[cfg(test)]
 #[path = "mapper_test.rs"]
 mod tests;
+
+#[cfg(test)]
+#[path = "failure_wire_test.rs"]
+mod failure_wire_tests;

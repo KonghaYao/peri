@@ -38,7 +38,7 @@ pub struct UserInputQueueItem {
 #[serde(rename_all = "camelCase")]
 pub struct UserInputQueueSnapshot {
     pub session_id: String,
-    /// 内存 mailbox 实例身份，重建会话后更换。
+    /// 当前进程内队列身份；重建实例后更换。
     pub generation: String,
     pub revision: u64,
     /// 已绑定真实执行的队列 run；仅预留、尚未启动时为空。
@@ -96,7 +96,7 @@ pub struct UserInputItemResult {
 #[serde(rename_all = "camelCase")]
 pub struct UserInputQueueReceipt {
     pub snapshot: UserInputQueueSnapshot,
-    /// 命令首次裁决的结果；重试时可与最新 snapshot 的状态不同。
+    /// 当前队列命令的逐条状态裁决。
     pub results: Vec<UserInputItemResult>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub taken_back: Option<UserInput>,

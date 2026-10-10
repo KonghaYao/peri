@@ -359,6 +359,14 @@ pub struct ReminderFilter {
     pub minimum_severity: Option<ReminderSeverity>,
     pub default_include: bool,
     pub allow_diagnostic_only: bool,
+    /// 是否放行引擎**在出口就地投影**的 Legacy 显示通知。
+    ///
+    /// 这类通知由 `compact_reminder::legacy_compact_reminders` 从已持久化的
+    /// 旧格式正文投影而来，携带显式受众、恒为 Configurable，且
+    /// [`TrustedSystemReminderFactory::construct`] 禁止生产者构造 Legacy 类别。
+    /// 默认 `false`：面向生产者的过滤保持 fail closed，文本解析出的内容不能借
+    /// 该开关提权。
+    pub allow_legacy_projection: bool,
 }
 
 impl Default for ReminderFilter {
@@ -373,6 +381,7 @@ impl Default for ReminderFilter {
             minimum_severity: None,
             default_include: true,
             allow_diagnostic_only: false,
+            allow_legacy_projection: false,
         }
     }
 }
@@ -385,11 +394,21 @@ impl ReminderFilter {
     /// At each filter dimension, exclusion wins over inclusion. A decision at a higher-precedence
     /// dimension is final; lower-precedence dimensions cannot override it.
     pub fn allows(&self, reminder: &TrustedSystemReminder, audience: ReminderAudience) -> bool {
-        let reminder = reminder.as_reminder();
+        self.allows_dto(reminder.as_reminder(), audience)
+    }
+
+    /// 与 [`Self::allows`] 共用同一条投递判定，供只持有 canonical DTO 的出口
+    /// （模型投影、ACP live/replay、stdio、文本 fallback）强制调用。
+    ///
+    /// 本函数不建立信任：`TrustedSystemReminder` 仍是生产者侧的本地证明类型，
+    /// 这里只复用同一套受众/优先级规则，避免各出口各自实现一份过滤。
+    pub fn allows_dto(&self, reminder: &SystemReminder, audience: ReminderAudience) -> bool {
         if !reminder.audiences.contains(audience) {
             return false;
         }
-        if reminder.validate().is_err() || reminder.category == ReminderCategory::Legacy {
+        if reminder.validate().is_err()
+            || (reminder.category == ReminderCategory::Legacy && !self.allow_legacy_projection)
+        {
             return false;
         }
         if reminder.delivery == ReminderDelivery::Required {
@@ -434,6 +453,29 @@ fn filter_decision(excluded: bool, included: bool) -> Option<bool> {
     excluded
         .then_some(false)
         .or_else(|| included.then_some(true))
+}
+
+/// 目标受众是否可以收到这条 canonical reminder（默认偏好下的单一投递规则）。
+///
+/// 模型投影、ACP live/replay、stdio 与文本 fallback 等出口都必须先调用本函数
+/// （或等价地 [`ReminderFilter::allows_dto`]），再决定是否编码/下发；`Required`
+/// 只在声明受众内不可被普通偏好屏蔽，不是广播。
+pub fn reminder_delivered_to(reminder: &SystemReminder, audience: ReminderAudience) -> bool {
+    ReminderFilter::default().allows_dto(reminder, audience)
+}
+
+/// 出口（模型请求 / 客户端 wire）的统一投递判定。
+///
+/// 与 [`reminder_delivered_to`] 是同一条受众/投递优先级规则，唯一差异是放行
+/// 引擎在出口就地投影的 Legacy 显示通知（见
+/// [`ReminderFilter::allow_legacy_projection`]）：这些通知来自已持久化正文的
+/// 兼容投影、恒为 Configurable，不能借此获得 Required 或进入未声明受众。
+pub fn reminder_egress_allowed(reminder: &SystemReminder, audience: ReminderAudience) -> bool {
+    ReminderFilter {
+        allow_legacy_projection: true,
+        ..Default::default()
+    }
+    .allows_dto(reminder, audience)
 }
 
 /// Diagnostic allowlist projection. Content and routing/control fields are intentionally absent.

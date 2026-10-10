@@ -14,13 +14,13 @@ use std::sync::{Arc, Mutex};
 use async_trait::async_trait;
 use peri_acp_types::{
     event::ExecutorEvent,
-    messages::{BaseMessage, ContentBlock, ToolCallRequest},
+    messages::{BaseMessage, ContentBlock, MessageContent, ToolCallRequest},
 };
 
 use super::super::{
     CommandContext, CommandHandler, CommandOutcome, CommandResult, FeedbackChannel, FeedbackLevel,
 };
-use super::{extract_file_changes, revert_files, validate_tool_pairing, RewindCommand};
+use super::{extract_file_changes, validate_tool_pairing, FileChange, RewindCommand};
 use crate::session::executor::PromptStopReason;
 
 // ── Mock EventSink ────────────────────────────────────────────────────────
@@ -285,245 +285,109 @@ fn test_extract_file_changes_deduplicates_by_id() {
     assert_eq!(changes.len(), 2, "两个不同 id 的调用各计一次");
 }
 
-// ── revert_files 测试：Write 分支 ──────────────────────────────────────────
+// ── N9：builtin `workspace` effective name 归一 ────────────────────────────
 
+/// 正向：模型面名字 `mcp__workspace__Write` / `mcp__workspace__Edit` 经归一后
+/// 必须被收集（两种消息格式各一条断言），且内容与裸名路径一致。
 #[test]
-fn test_revert_files_write_removes_file_from_cwd() {
-    // Arrange: 在临时目录写入文件，然后通过 revert_files 删除
-    let dir = tempfile::tempdir().expect("创建临时目录失败");
-    let cwd = dir.path().to_string_lossy().to_string();
-    let file_path = "created_by_write.txt";
-    let full = dir.path().join(file_path);
-    std::fs::write(&full, "some content").expect("写入文件失败");
-    assert!(full.exists(), "前置条件：文件应存在");
-
-    // 构造 Write 变更（通过 extract_file_changes 走解析路径）
-    let msgs = vec![make_ai_write_call(file_path, "some content")];
-    let changes = extract_file_changes(&msgs);
-
-    // Act
-    let mut warnings = Vec::new();
-    revert_files(&changes, &cwd, &mut warnings);
-
-    // Assert: 文件应被 remove_file 删除（非 git 目录，git checkout 失败仅 debug）
-    assert!(!full.exists(), "Write 恢复应删除文件");
-    // 不应产生警告（git checkout 失败只 debug，不进入 warnings）
-    assert!(
-        warnings.is_empty(),
-        "Write 分支删除成功后不应有警告，实际: {:?}",
-        warnings
-    );
-}
-
-#[test]
-fn test_revert_files_write_missing_file_is_silent() {
-    // Arrange: 目标文件不存在，Write 分支应静默处理
-    let dir = tempfile::tempdir().expect("创建临时目录失败");
-    let cwd = dir.path().to_string_lossy().to_string();
-    let file_path = "never_existed.txt";
-    let msgs = vec![make_ai_write_call(file_path, "content")];
-    let changes = extract_file_changes(&msgs);
-
-    // Act
-    let mut warnings = Vec::new();
-    revert_files(&changes, &cwd, &mut warnings);
-
-    // Assert: 文件不存在时 remove_file 失败仅 debug，不应进入 warnings
-    assert!(
-        warnings.is_empty(),
-        "不存在的文件删除失败应静默，实际: {:?}",
-        warnings
-    );
-}
-
-// ── revert_files 测试：Edit 分支 ───────────────────────────────────────────
-
-#[test]
-fn test_revert_files_edit_replaces_new_string_with_old_string_ascii() {
-    // Arrange: 文件中包含 new_string，Edit 恢复应把它替换回 old_string
-    let dir = tempfile::tempdir().expect("创建临时目录失败");
-    let cwd = dir.path().to_string_lossy().to_string();
-    let file_path = "edit_target.txt";
-    let full = dir.path().join(file_path);
-    // 当前文件内容：已应用过 Edit，包含 new_string
-    std::fs::write(&full, "hello new world").expect("写入文件失败");
-
-    let msgs = vec![make_ai_edit_call(file_path, "old", "new")];
-    let changes = extract_file_changes(&msgs);
-
-    // Act
-    let mut warnings = Vec::new();
-    revert_files(&changes, &cwd, &mut warnings);
-
-    // Assert: new_string 被替换回 old_string
-    let reverted = std::fs::read_to_string(&full).expect("读取恢复后的文件失败");
-    assert_eq!(
-        reverted, "hello old world",
-        "Edit 恢复应把 new_string 替换回 old_string"
-    );
-    assert!(warnings.is_empty(), "成功恢复不应有警告");
-}
-
-#[test]
-fn test_revert_files_edit_cjk_utf8_boundary_no_panic() {
-    // 回归测试 p1-w5a（commit 6d76824d）：
-    // Edit 分支在 CJK 多字节字符场景下，旧实现用 &content[..idx] 字节切片
-    // 会在非 char boundary 上 panic。新实现用 content.replacen。
-    //
-    // 这里 new_string 是中文（每字符 3 字节），old_string 也是中文，
-    // 且 new_string 出现在文件中靠前位置，验证 replacen 路径不 panic。
-    //
-    // Arrange
-    let dir = tempfile::tempdir().expect("创建临时目录失败");
-    let cwd = dir.path().to_string_lossy().to_string();
-    let file_path = "cjk_edit.txt";
-    let full = dir.path().join(file_path);
-    // 当前内容包含中文 new_string
-    std::fs::write(&full, "开始新内容结束").expect("写入文件失败");
-
-    let msgs = vec![make_ai_edit_call(file_path, "旧内容", "新内容")];
-    let changes = extract_file_changes(&msgs);
-
-    // Act: 不应 panic
-    let mut warnings = Vec::new();
-    revert_files(&changes, &cwd, &mut warnings);
-
-    // Assert: "新内容" 被替换回 "旧内容"
-    let reverted = std::fs::read_to_string(&full).expect("读取恢复后的文件失败");
-    assert_eq!(reverted, "开始旧内容结束", "CJK 字符的 Edit 恢复应正确替换");
-}
-
-#[test]
-fn test_revert_files_edit_cjk_multibyte_replacement_roundtrip() {
-    // 进一步回归保护：覆盖更复杂的多字节混合场景。
-    // 文件含 emoji（4 字节）+ CJK（3 字节）+ ASCII（1 字节），
-    // 验证 replacen 在混合字节宽度下正确工作。
-    //
-    // Arrange
-    let dir = tempfile::tempdir().expect("创建临时目录失败");
-    let cwd = dir.path().to_string_lossy().to_string();
-    let file_path = "mixed_edit.txt";
-    let full = dir.path().join(file_path);
-    std::fs::write(&full, "prefix 🚀新内容suffix").expect("写入文件失败");
-
-    let msgs = vec![make_ai_edit_call(file_path, "旧内容", "新内容")];
-    let changes = extract_file_changes(&msgs);
-
-    // Act
-    let mut warnings = Vec::new();
-    revert_files(&changes, &cwd, &mut warnings);
-
-    // Assert
-    let reverted = std::fs::read_to_string(&full).expect("读取恢复后的文件失败");
-    assert_eq!(
-        reverted, "prefix 🚀旧内容suffix",
-        "混合字节宽度场景的 Edit 恢复应正确"
-    );
-}
-
-#[test]
-fn test_revert_files_edit_new_string_not_found_emits_warning() {
-    // Arrange: 文件内容不含 new_string
-    let dir = tempfile::tempdir().expect("创建临时目录失败");
-    let cwd = dir.path().to_string_lossy().to_string();
-    let file_path = "no_match.txt";
-    let full = dir.path().join(file_path);
-    std::fs::write(&full, "completely different content").expect("写入文件失败");
-    let original = std::fs::read_to_string(&full).unwrap();
-
-    let msgs = vec![make_ai_edit_call(file_path, "old", "new")];
-    let changes = extract_file_changes(&msgs);
-
-    // Act
-    let mut warnings = Vec::new();
-    revert_files(&changes, &cwd, &mut warnings);
-
-    // Assert: 应产生警告，文件内容不变
-    assert!(!warnings.is_empty(), "new_string 未找到应产生警告");
-    assert!(
-        warnings.iter().any(|w| w.contains("未找到 new_string")),
-        "警告应包含 '未找到 new_string'，实际: {:?}",
-        warnings
-    );
-    let after = std::fs::read_to_string(&full).unwrap();
-    assert_eq!(after, original, "未匹配时文件内容不应改变");
-}
-
-#[test]
-fn test_revert_files_edit_missing_file_emits_warning() {
-    // Arrange: 目标文件不存在
-    let dir = tempfile::tempdir().expect("创建临时目录失败");
-    let cwd = dir.path().to_string_lossy().to_string();
-    let file_path = "missing_file.txt";
-    let msgs = vec![make_ai_edit_call(file_path, "old", "new")];
-    let changes = extract_file_changes(&msgs);
-
-    // Act
-    let mut warnings = Vec::new();
-    revert_files(&changes, &cwd, &mut warnings);
-
-    // Assert: 读取失败应产生警告
-    assert!(!warnings.is_empty(), "文件不存在应产生警告");
-    assert!(
-        warnings.iter().any(|w| w.contains("Edit 恢复读取失败")),
-        "警告应包含读取失败信息，实际: {:?}",
-        warnings
-    );
-}
-
-#[test]
-fn test_revert_files_reverse_order_applied() {
-    // 验证逆序遍历：构造同一文件的两次 Edit（先 A→B，再 B→C），
-    // 当 extract 顺序为 [A→B, B→C] 时，revert 应先撤销 B→C（得到 B），
-    // 再撤销 A→B（得到 A）。最终文件回到 A。
-    //
-    // Arrange
-    let dir = tempfile::tempdir().expect("创建临时目录失败");
-    let cwd = dir.path().to_string_lossy().to_string();
-    let file_path = "double_edit.txt";
-    let full = dir.path().join(file_path);
-    // 当前内容为 C（已应用 A→B→C）
-    std::fs::write(&full, "C").expect("写入文件失败");
-
-    // 按历史顺序：先 A→B，再 B→C（两次 Edit 必须用不同 ToolUse id，
-    // 去重后仍视为两个独立调用，逆序撤销才能生效）
-    let msg1 = BaseMessage::ai_with_tool_calls(
+fn rewind_collects_workspace_effective_write_and_edit() {
+    // Arrange: OpenAI 格式（仅 tool_calls 路径）的 effective Write
+    let write_args = serde_json::json!({
+        "file_path": "src/ws_write.rs",
+        "content": "hello",
+    });
+    let openai_msg = BaseMessage::ai_with_tool_calls(
         "推理中...",
         vec![ToolCallRequest::new(
-            "call_edit_r1",
-            "Edit",
-            serde_json::json!({
-                "file_path": file_path,
-                "old_string": "A",
-                "new_string": "B",
-            }),
+            "call_ws_write",
+            "mcp__workspace__Write",
+            write_args,
         )],
     );
-    let msg2 = BaseMessage::ai_with_tool_calls(
-        "推理中...",
-        vec![ToolCallRequest::new(
-            "call_edit_r2",
-            "Edit",
-            serde_json::json!({
-                "file_path": file_path,
-                "old_string": "B",
-                "new_string": "C",
-            }),
-        )],
-    );
-    let changes = extract_file_changes(&[msg1, msg2]);
 
     // Act
-    let mut warnings = Vec::new();
-    revert_files(&changes, &cwd, &mut warnings);
+    let openai_changes = extract_file_changes(&[openai_msg]);
 
-    // Assert: 逆序撤销后应回到 A
-    let reverted = std::fs::read_to_string(&full).expect("读取文件失败");
+    // Assert: 归一命中 ⇒ 收集为 Write，file_path 逐字保留
     assert_eq!(
-        reverted, "A",
-        "逆序撤销应回到初始内容 A，实际: {}",
-        reverted
+        openai_changes.len(),
+        1,
+        "`mcp__workspace__Write` 应被归一为 Write 并收集"
     );
+    assert!(
+        matches!(
+            &openai_changes[0],
+            FileChange::Write { path, .. } if path.as_str() == "src/ws_write.rs"
+        ),
+        "应为 Write 变体且 path == src/ws_write.rs"
+    );
+
+    // Arrange: Anthropic 格式的 effective Edit——只填 content blocks（tool_calls 留空），
+    // 让 ToolUse 路径独立承载断言：`ai_from_blocks` 会把 ToolUse 同步进 tool_calls，
+    // tool_calls 路径会先收集，从而掩盖 ToolUse 路径的归一失效（破坏实验已验证）。
+    let edit_input = serde_json::json!({
+        "file_path": "src/ws_edit.rs",
+        "old_string": "old text",
+        "new_string": "new text",
+    });
+    let anthropic_msg = BaseMessage::ai(MessageContent::Blocks(vec![ContentBlock::tool_use(
+        "toolu_ws_edit",
+        "mcp__workspace__Edit",
+        edit_input,
+    )]));
+
+    // Act
+    let anthropic_changes = extract_file_changes(&[anthropic_msg]);
+
+    // Assert: 归一命中 ⇒ 收集为 Edit（仅 ToolUse 路径，产出 1 条），old/new 保留
+    assert_eq!(
+        anthropic_changes.len(),
+        1,
+        "`mcp__workspace__Edit` 应被归一为 Edit 并收集（仅 ToolUse 路径）"
+    );
+    assert!(
+        matches!(
+            &anthropic_changes[0],
+            FileChange::Edit { path, old_string, new_string }
+                if path.as_str() == "src/ws_edit.rs"
+                    && old_string == "old text"
+                    && new_string == "new text"
+        ),
+        "应为 Edit 变体且 path/old_string/new_string 逐字来自 arguments"
+    );
+}
+
+/// 反例：未注册实例的 `mcp__foo__Write` 不得被归一命中 ⇒ 不收集（保守语义：
+/// 未知 / 外部 `mcp__*` 不按 Write/Edit 处理）。
+#[test]
+fn rewind_ignores_unknown_effective_names() {
+    let args = serde_json::json!({"file_path": "a.txt", "content": "hello"});
+
+    // OpenAI 格式：未注册实例名 + 大小写近似名（纯查表区分大小写）
+    for name in ["mcp__foo__Write", "mcp__workspace__write"] {
+        let openai_msg = BaseMessage::ai_with_tool_calls(
+            "推理中...",
+            vec![ToolCallRequest::new("call_unknown", name, args.clone())],
+        );
+        let changes = extract_file_changes(&[openai_msg]);
+        assert!(
+            changes.is_empty(),
+            "`{name}` 未命中归一表，不得被收集（保守语义）"
+        );
+
+        // Anthropic 格式：同批断言，两格式行为不得分裂（只填 content blocks，
+        // 让 ToolUse 路径独立承载断言，不被 tool_calls 路径掩盖）
+        let anthropic_msg = BaseMessage::ai(MessageContent::Blocks(vec![ContentBlock::tool_use(
+            "toolu_unknown",
+            name,
+            args.clone(),
+        )]));
+        let changes = extract_file_changes(&[anthropic_msg]);
+        assert!(
+            changes.is_empty(),
+            "`{name}`（ToolUse 路径）未命中归一表，不得被收集"
+        );
+    }
 }
 
 // ── validate_tool_pairing 测试 ────────────────────────────────────────────
@@ -789,38 +653,27 @@ async fn test_execute_head_truncation_returns_empty() {
     );
 }
 
+/// [回归测试] Workspace 能力缺失时不得修改计算宿主同名文件或裁剪历史。
 #[tokio::test]
-async fn test_execute_revert_files_true_invokes_file_removal() {
-    // 场景：revert_files=true，被移除消息含 Write 工具调用，
-    // 应删除 Write 创建的文件。
-    //
-    // Arrange
-    let dir = tempfile::tempdir().expect("创建临时目录失败");
-    let cwd = dir.path().to_string_lossy().to_string();
-    let file_rel = "tail_written.txt";
-    let full = dir.path().join(file_rel);
-    // 模拟 Write 已执行：文件存在
-    std::fs::write(&full, "created").expect("写入文件失败");
-    assert!(full.exists());
-
+async fn test_execute_revert_files_requires_trusted_workspace() {
+    let dir = tempfile::tempdir().unwrap();
+    let full = dir.path().join("tail_written.txt");
+    std::fs::write(&full, "host-only").unwrap();
     let sink = Arc::new(MockEventSink::new());
-    let m1 = BaseMessage::human("请创建文件");
-    let m2 = make_ai_write_call(file_rel, "created"); // 这条及之后将被移除
-    let target_id = m2.id().as_uuid().to_string();
-    let history = vec![m1.clone(), m2];
-    // revert_files 缺省 = true（现状 serde default_true 语义，ArgsSchema 形态
-    // 下不传 --no-revert-files 即回退文件）
-    let args = target_id.clone();
-    let ctx = make_ctx(sink.clone(), history, cwd, args);
-    let cmd = RewindCommand;
-
-    // Act
-    let result = execute_rewind_cmd(&cmd, ctx).await;
-
-    // Assert: 文件被删除，保留 m1
-    assert!(!full.exists(), "revert_files=true 应删除 Write 创建的文件");
-    assert_eq!(result.messages.len(), 1);
-    assert_eq!(result.messages[0].id(), m1.id());
+    let first = BaseMessage::human("before");
+    let write = make_ai_write_call("tail_written.txt", "remote-content");
+    let target = write.id().as_uuid().to_string();
+    let ctx = make_ctx(
+        sink.clone(),
+        vec![first, write],
+        dir.path().display().to_string(),
+        target,
+    );
+    let result = execute_rewind_cmd(&RewindCommand, ctx).await;
+    assert_eq!(result.messages.len(), 2);
+    assert_eq!(result.feedback.unwrap().level, FeedbackLevel::Error);
+    assert_eq!(std::fs::read_to_string(full).unwrap(), "host-only");
+    assert!(sink.events().is_empty());
 }
 
 #[tokio::test]

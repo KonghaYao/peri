@@ -18,7 +18,9 @@ pub type HandleToken = std::sync::Arc<dyn std::any::Any + Send + Sync>;
 pub enum ServerDiscoveryState {
     /// 发现任务已 spawn（防每轮重复 spawn）
     Started { handle: HandleToken },
-    /// 已发现（或已尝试失败——失败置空条目，不重试；重连才重扫）
+    /// 发现失败；不自动重试，重连才重扫。
+    Failed { handle: HandleToken },
+    /// 已发现（空条目表示合法空目录）。
     Discovered {
         handle: HandleToken,
         entries: Vec<SkillMetadata>,
@@ -29,6 +31,7 @@ impl ServerDiscoveryState {
     fn handle(&self) -> &HandleToken {
         match self {
             ServerDiscoveryState::Started { handle }
+            | ServerDiscoveryState::Failed { handle }
             | ServerDiscoveryState::Discovered { handle, .. } => handle,
         }
     }
@@ -42,9 +45,26 @@ pub struct Projection {
     pub removed_any: bool,
 }
 
+/// origin 感知查找的结果（W2）：同名的多个 origin 命中必须由调用方消歧，
+/// 不得静默取任一（规范：名称不保证唯一，冲突 MUST 消歧、不得静默丢弃）。
+#[derive(Debug, Clone)]
+pub enum SkillLookup {
+    /// 唯一命中。
+    Found(Box<SkillMetadata>),
+    /// 多 origin / 多条目命中；按 `(server, 注册名)` 稳定排序。
+    Ambiguous(Vec<SkillMetadata>),
+    /// 无命中。
+    Missing,
+}
+
 struct RegistryInner {
     servers: BTreeMap<String, ServerDiscoveryState>,
     on_change: Option<std::sync::Arc<dyn Fn() + Send + Sync>>,
+    /// 系统来源 origin 的 server 键（`ConfigSource::Builtin` 等本机受信实例）。
+    ///
+    /// W4b：由宿主装配/发现面按**连接事实**标注（不是名字自称，也不是资源文本
+    /// 自称——X6/X7），投递面据它区分「system 摘要」与「非 system 延迟发现」。
+    system_origins: std::collections::BTreeSet<String>,
 }
 
 /// Session 级 MCP skill 远端注册表。
@@ -58,8 +78,35 @@ impl McpSkillRegistry {
             inner: parking_lot::RwLock::new(RegistryInner {
                 servers: BTreeMap::new(),
                 on_change: None,
+                system_origins: std::collections::BTreeSet::new(),
             }),
         }
+    }
+
+    /// 标注系统来源 origin 的 server 键集合（宿主装配/发现面调用；幂等）。
+    ///
+    /// 只记录**键**：调用方据连接事实（`ConfigSource::Builtin { .. }` /
+    /// session 系统的实例）判定，不得按 server 自报名或资源 scheme 判定。
+    /// 传入的键会整体替换旧集合（关闭/卸载来源在下次调用时自然消失）。
+    pub fn mark_system_origins(&self, names: &[String]) {
+        let mut guard = self.inner.write();
+        guard.system_origins = names.iter().cloned().collect();
+    }
+
+    /// 该 server 键是否为系统来源（见 [`Self::mark_system_origins`]）。
+    pub fn is_system_origin(&self, server: &str) -> bool {
+        self.inner.read().system_origins.contains(server)
+    }
+
+    /// 系统来源的当前技能（system 摘要投递面；`Started`/空来源不产出）。
+    pub fn system_skills(&self) -> Vec<SkillMetadata> {
+        let guard = self.inner.read();
+        guard
+            .servers
+            .iter()
+            .filter(|(server, _)| guard.system_origins.contains(*server))
+            .flat_map(|(_, state)| entries_of(state))
+            .collect()
     }
 
     /// before_agent 投影：比对 connected（name, handle）列表。
@@ -163,7 +210,9 @@ impl McpSkillRegistry {
                 ServerDiscoveryState::Discovered { entries, .. } => {
                     entries.iter().map(|e| e.name.to_lowercase()).collect()
                 }
-                ServerDiscoveryState::Started { .. } => Default::default(),
+                ServerDiscoveryState::Started { .. } | ServerDiscoveryState::Failed { .. } => {
+                    Default::default()
+                }
             };
             let new_names: std::collections::BTreeSet<String> =
                 entries.iter().map(|e| e.name.to_lowercase()).collect();
@@ -180,6 +229,26 @@ impl McpSkillRegistry {
         if let Some(cb) = cb {
             cb();
         }
+    }
+
+    /// 仅当前正在发现的同代连接可发布失败；旧任务不得覆盖重连结果。
+    pub fn mark_discovery_failed(&self, server: &str, handle: HandleToken) {
+        let mut guard = self.inner.write();
+        if matches!(guard.servers.get(server), Some(ServerDiscoveryState::Started { handle: current }) if std::sync::Arc::ptr_eq(current, &handle))
+        {
+            guard
+                .servers
+                .insert(server.to_string(), ServerDiscoveryState::Failed { handle });
+        }
+    }
+
+    /// 目录是否含读取失败的来源；不得将其空投影当作合法空目录。
+    pub fn discovery_failed(&self) -> bool {
+        self.inner
+            .read()
+            .servers
+            .values()
+            .any(|state| matches!(state, ServerDiscoveryState::Failed { .. }))
     }
 
     /// 读取面热更新回写（resource_tool 恢复成功后调用）：仅当该 server
@@ -249,6 +318,93 @@ impl McpSkillRegistry {
         guard.servers.values().flat_map(entries_of).collect()
     }
 
+    /// origin 感知查找（W2：跨 server 同名**不得**静默偏爱首中）。
+    ///
+    /// 按序尝试三种形态，命中集非空即返回：
+    /// 1. 全名 `mcp__<server>__<skill>`（小写精确）；
+    /// 2. 别名 `<server>:<skill>`（rsplit_once(':')，后缀非空）；
+    /// 3. **裸 skill 名**：全名的末段（`mcp__<server>__` 之后）大小写不敏感相等
+    ///    ——裸名跨 origin 命中时返回 [`SkillLookup::Ambiguous`]。
+    ///
+    /// 命中按 `(server, 注册名)` 稳定排序（指令面可复现），同 server 同 URI 的
+    /// 重复条目去重。
+    pub fn lookup(&self, name: &str) -> SkillLookup {
+        let guard = self.inner.read();
+        let needle = name.to_lowercase();
+        let mut hits = collect_exact(&guard.servers, &needle);
+        if hits.is_empty() {
+            // 别名：<server>:<skill> → mcp__<server>__<skill>（与 find 同源拼名）。
+            if let Some((prefix, suffix)) = name.rsplit_once(':') {
+                if !suffix.is_empty() {
+                    let full = mcp_skill_name(prefix, suffix).to_lowercase();
+                    hits = collect_exact(&guard.servers, &full);
+                }
+            }
+        }
+        if hits.is_empty() {
+            hits = collect_by_bare_name(&guard.servers, &needle);
+        }
+        resolve_hits(hits)
+    }
+
+    /// 全名 / `<server>:<skill>` 别名的歧义感知版（**不含**裸名回退）。
+    ///
+    /// 消费面在需要保持既有解析口径（不做跨 origin 裸名兜底）时用它；
+    /// 裸名跨 origin 消歧由 [`lookup`](Self::lookup) 提供。
+    pub fn lookup_exact(&self, name: &str) -> SkillLookup {
+        let guard = self.inner.read();
+        let needle = name.to_lowercase();
+        let mut hits = collect_exact(&guard.servers, &needle);
+        if hits.is_empty() {
+            if let Some((prefix, suffix)) = name.rsplit_once(':') {
+                if !suffix.is_empty() {
+                    let full = mcp_skill_name(prefix, suffix).to_lowercase();
+                    hits = collect_exact(&guard.servers, &full);
+                }
+            }
+        }
+        resolve_hits(hits)
+    }
+
+    /// 命令形态查找的歧义感知版（`{server}:{skill}`；覆盖 plugin 多冒号 server
+    /// 的末段匹配，语义与 [`find_by_command`](Self::find_by_command) 同源）。
+    ///
+    /// 命中多个 server（末段相同或完整名相同且都持有该 skill）→
+    /// [`SkillLookup::Ambiguous`]；单命中 → `Found`。
+    pub fn lookup_by_command(&self, name: &str) -> SkillLookup {
+        let Some((prefix, skill)) = name.rsplit_once(':') else {
+            return SkillLookup::Missing;
+        };
+        if skill.is_empty() {
+            return SkillLookup::Missing;
+        }
+        let skill = skill.to_lowercase();
+        let prefix = prefix.to_lowercase();
+        let guard = self.inner.read();
+        let mut hits: Vec<SkillMetadata> = Vec::new();
+        for (server, state) in &guard.servers {
+            if !matches!(state, ServerDiscoveryState::Discovered { .. }) {
+                continue;
+            }
+            let trail = server
+                .rsplit(':')
+                .next()
+                .unwrap_or(server.as_str())
+                .to_lowercase();
+            if trail != prefix && server.to_lowercase() != prefix {
+                continue;
+            }
+            let want = mcp_skill_name(server, &skill).to_lowercase();
+            if let Some(entry) = entries_of(state)
+                .into_iter()
+                .find(|e| e.name.to_lowercase() == want)
+            {
+                hits.push(entry);
+            }
+        }
+        resolve_hits(hits)
+    }
+
     /// 单 server 的技能（条目顺序；未发现/Started → 空）。
     pub fn skills_of(&self, server: &str) -> Vec<SkillMetadata> {
         let guard = self.inner.read();
@@ -257,6 +413,18 @@ impl McpSkillRegistry {
             .get(server)
             .map(entries_of)
             .unwrap_or_default()
+    }
+
+    /// 是否仍有 server 的发现任务在进行（`Started` 未收口）。
+    ///
+    /// 区分「目录为空」与「目录尚未就绪」；失败另由 `discovery_failed` 表达。
+    /// 而发现未收口时的空投影不能当成功返回（L2：未就绪不返回假空成功）。
+    pub fn discovery_in_progress(&self) -> bool {
+        let guard = self.inner.read();
+        guard
+            .servers
+            .values()
+            .any(|state| matches!(state, ServerDiscoveryState::Started { .. }))
     }
 
     /// 按全名查找（小写精确匹配 `mcp__<server>__<skill>`）；未命中再试
@@ -358,7 +526,85 @@ impl Default for McpSkillRegistry {
 fn entries_of(state: &ServerDiscoveryState) -> Vec<SkillMetadata> {
     match state {
         ServerDiscoveryState::Discovered { entries, .. } => entries.clone(),
-        ServerDiscoveryState::Started { .. } => Vec::new(),
+        ServerDiscoveryState::Started { .. } | ServerDiscoveryState::Failed { .. } => Vec::new(),
+    }
+}
+
+/// 条目所属 origin 的 server 名（`SkillOrigin::Mcp`；本地条目 → 空串）。
+fn entry_server(entry: &SkillMetadata) -> &str {
+    match &entry.origin {
+        Some(crate::skills::SkillOrigin::Mcp { server, .. }) => server.as_str(),
+        _ => "",
+    }
+}
+
+/// 命中集 → [`SkillLookup`]：去重（server + 注册名）、按 `(server, name)`
+/// 排序；恰好一条 → `Found`，多条 → `Ambiguous`，空 → `Missing`。
+fn resolve_hits(mut hits: Vec<SkillMetadata>) -> SkillLookup {
+    hits.sort_by(|a, b| {
+        entry_server(a)
+            .cmp(entry_server(b))
+            .then_with(|| a.name.cmp(&b.name))
+    });
+    hits.dedup_by(|a, b| entry_server(a) == entry_server(b) && a.name == b.name);
+    match hits.len() {
+        0 => SkillLookup::Missing,
+        1 => SkillLookup::Found(Box::new(hits.remove(0))),
+        _ => SkillLookup::Ambiguous(hits),
+    }
+}
+
+/// 全名精确（小写）的全部命中（跨 server，BTreeMap 键序）。
+fn collect_exact(
+    servers: &BTreeMap<String, ServerDiscoveryState>,
+    needle: &str,
+) -> Vec<SkillMetadata> {
+    let mut hits = Vec::new();
+    for state in servers.values() {
+        if let ServerDiscoveryState::Discovered { entries, .. } = state {
+            for entry in entries {
+                if entry.name.to_lowercase() == *needle {
+                    hits.push(entry.clone());
+                }
+            }
+        }
+    }
+    hits
+}
+
+/// 裸 skill 名（全名 `mcp__<server>__<skill>` 的 `<skill>` 段）大小写不敏感
+/// 相等的全部命中；不含 `mcp__` 形态的名字（非注册名段）不算命中。
+fn collect_by_bare_name(
+    servers: &BTreeMap<String, ServerDiscoveryState>,
+    needle: &str,
+) -> Vec<SkillMetadata> {
+    let mut hits = Vec::new();
+    for state in servers.values() {
+        if let ServerDiscoveryState::Discovered { entries, .. } = state {
+            for entry in entries {
+                let Some(segment) = bare_skill_segment(&entry.name) else {
+                    continue;
+                };
+                if segment.to_lowercase() == *needle {
+                    hits.push(entry.clone());
+                }
+            }
+        }
+    }
+    hits
+}
+
+/// `mcp__<server>__<skill>` → `<skill>`；非该形态返回 `None`。
+///
+/// server 段自身可含 `__`（server 名不受限）；`<skill>` 是最后一个 `__` 之后
+/// 的段，与 [`mcp_skill_name`] 的拼名规则一致。
+pub fn bare_skill_segment(full_name: &str) -> Option<&str> {
+    let rest = full_name.strip_prefix("mcp__")?;
+    let (_, skill) = rest.rsplit_once("__")?;
+    if skill.is_empty() {
+        None
+    } else {
+        Some(skill)
     }
 }
 
@@ -391,3 +637,7 @@ pub fn mcp_skill_name(server: &str, skill: &str) -> String {
 #[cfg(test)]
 #[path = "mcp_skills_test.rs"]
 mod tests;
+
+#[cfg(test)]
+#[path = "mcp_skills_failure_test.rs"]
+mod failure_tests;

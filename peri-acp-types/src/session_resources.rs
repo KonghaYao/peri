@@ -2,7 +2,7 @@
 //!
 //! 业务侧（Agent / ACP / Controller / TUI）只依赖本 trait 的行为语义，注入的是
 //! `Arc<dyn SessionResources>`。数据的持久化位置（本机 SQLite / Turso Cloud）与
-//! 本机执行事实（发现、绑定、owner、dirty、排空）由资源内部两面分别实现，
+//! 本机执行事实（发现、绑定、排空）由资源内部两面分别实现，
 //! 数据端口不向业务暴露事务、CAS、SQL batch、连接或补偿令牌。
 //!
 //! 三条必须成立的约束：
@@ -25,10 +25,10 @@ use async_trait::async_trait;
 
 use crate::messages::MessageId;
 use crate::store::{CompactionChange, InheritedContext, MessageFlags, PersistedPayload};
+use crate::system_reminder::TrustedSystemReminder;
 use crate::thread::{AgentStatus, CancelPolicy, ThreadId, ThreadMeta};
 use crate::workspace::{
-    ReadOnlyAdmission, RecoveryRequiredDetails, ResetDirtyRequest, ResolvedWorkspace,
-    ScopedThreadPage, ScopedThreadQuery, SessionBinding, SessionExecutionLease, WorkspaceError,
+    ResolvedWorkspace, ScopedThreadPage, ScopedThreadQuery, SessionBinding, WorkspaceError,
 };
 
 // ─── 能力与准入 ────────────────────────────────────────────────────────────────
@@ -60,13 +60,9 @@ pub enum ExecutionAvailability {
     BindingMissing,
     /// 绑定的工作目录在本机不可用或已变化。
     WorkspaceUnavailable,
-    /// 执行所有权在别处。
-    OwnedElsewhere,
-    /// 上次执行未干净收尾：需要按精确代际确认后解除。
-    Dirty(RecoveryRequiredDetails),
     /// 存在无法证明终态的持久化写入：先收敛再执行。
     PersistencePending,
-    /// 本次打开只读，无法取得执行所有权。
+    /// 本次打开只读，无法写入会话。
     ReadOnlyStore,
     /// 本机执行在该后端不支持。
     Unsupported,
@@ -115,7 +111,7 @@ impl FrozenSnapshotBytes {
 
 /// 新会话的初始 metadata。
 ///
-/// 不携带 `message_count` / `updated_at` / `cached_context` / `context_cache_epoch`：
+/// 不携带 `message_count` / `updated_at`：
 /// 这些是行为维护的派生事实，构建方给值只会制造第二个真相。
 #[derive(Clone, Debug)]
 pub struct NewSessionMeta {
@@ -137,6 +133,22 @@ pub struct NewSession {
     /// 不可变执行绑定。
     pub binding: SessionBinding,
     pub frozen: FrozenSnapshotBytes,
+}
+
+/// 未发布创建（J2 两阶段）：身份/绑定已保存、运行句柄已登记，frozen 尚未提交。
+///
+/// 与 [`NewSession`] 的唯一区别是**没有 frozen**：内容准入（资源读取后定稿）发生在取得
+/// 执行所有权之后，因此第一阶段只能写「除 frozen 以外」的全部事实。草稿不对外可见
+/// （列表按 `message_count > 0` 过滤），cold load 命中半写草稿按 typed 错误 fail-closed，
+/// 清理判据见 [`SessionResources::discard_incomplete_initialization`]。
+#[derive(Clone, Debug)]
+pub struct NewSessionDraft {
+    pub thread_id: ThreadId,
+    /// RFC3339 创建时间，构建时生成一次。
+    pub created_at: String,
+    pub meta: NewSessionMeta,
+    /// 不可变执行绑定。
+    pub binding: SessionBinding,
 }
 
 /// fork 目标：目标身份 + source 截止点 + 已完成 ID 重映射的 payload/flags。
@@ -187,12 +199,14 @@ pub enum BindingState {
 
 /// 会话 frozen 快照的状态。
 #[derive(Clone, Debug, PartialEq, Eq)]
+///
+/// 未知版本**不在这里表达**：格式知识属于 ACP 侧解码器
+/// （`FrozenSnapshotError::UnsupportedVersion`），存储层只区分「有字节」与
+/// 「legacy 缺失」，不为制造枚举用法去理解 snapshot 格式。
 pub enum FrozenState {
     Present(FrozenSnapshotBytes),
     /// legacy 会话尚未持久化快照；由既有 legacy 规则决定能否补齐。
     LegacyAbsent,
-    /// 存在快照但本构建读不懂（版本/形状不支持）——不是「缺失」。
-    Unsupported,
 }
 
 /// 绑定复核的力度：两次复核的差别只在是否重跑一次完整发现。
@@ -283,7 +297,7 @@ pub enum SessionResourceErrorKind {
     Unsupported,
     /// 本次打开只有读权限。
     ReadOnlyStore,
-    /// 本机 workspace / binding / owner 语义，保持 [`WorkspaceError`] 的分类。
+    /// 本机 workspace / binding 语义，保持 [`WorkspaceError`] 的分类。
     Workspace(WorkspaceError),
     /// 记录存在但无法解释（损坏、格式不可读）。
     Corrupt {
@@ -298,9 +312,17 @@ pub enum SessionResourceErrorKind {
     PersistenceUncertain {
         thread_id: Option<ThreadId>,
     },
+
     /// 数据已完整保存，但执行准入失败：不是「确定未创建」。
     SavedButNotAdmitted {
         thread_id: ThreadId,
+    },
+    /// 现有状态与本次请求冲突（一次性提交重复调用、对已定稿草稿撤销、清理判据不成立）。
+    ///
+    /// 与 [`Self::InvalidInput`] 分开：输入本身合法，冲突来自存储里已经成立的事实，
+    /// 调用方据此知道「不要重试，先重读」。
+    Conflict {
+        detail: String,
     },
     Internal {
         detail: String,
@@ -319,6 +341,14 @@ pub struct SessionResourceError {
 
 /// 会话行为的统一返回类型。
 pub type SessionResourceResult<T> = std::result::Result<T, SessionResourceError>;
+
+/// Readback of an uncertain close-intent removal.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum CloseSettlement {
+    Pending,
+    Finished,
+    Unknown,
+}
 
 impl SessionResourceError {
     pub fn new(kind: SessionResourceErrorKind) -> Self {
@@ -340,6 +370,13 @@ impl SessionResourceError {
         Self::new(SessionResourceErrorKind::SavedButNotAdmitted { thread_id })
     }
 
+    /// 本次请求与已成立的存储事实冲突（不覆盖、不删除、不重试）。
+    pub fn conflict(detail: impl Into<String>) -> Self {
+        Self::new(SessionResourceErrorKind::Conflict {
+            detail: detail.into(),
+        })
+    }
+
     pub fn kind(&self) -> &SessionResourceErrorKind {
         &self.kind
     }
@@ -359,26 +396,6 @@ impl SessionResourceError {
     pub fn workspace_error(&self) -> Option<&WorkspaceError> {
         match &self.kind {
             SessionResourceErrorKind::Workspace(error) => Some(error),
-            _ => None,
-        }
-    }
-
-    /// 只读准入原因：本次没能取得执行所有权，但历史仍可按只读会话进入。
-    ///
-    /// 三种既有 workspace 原因原样保留；只读存储（[`SessionResourceErrorKind::ReadOnlyStore`]）
-    /// 归入同一集合——「本节点给不出执行所有权、历史可读」是同一件事，消费侧的降级路径
-    /// 因此不必按错误种类分支。
-    ///
-    /// 不在本集合内的原因不降级：`ReadOnlyStore` 的 workspace 变体（连会话都还没有的
-    /// 登记失败）与 `PersistenceUncertain`（终态未证明）都保持原样上报。
-    pub fn read_only_admission(&self) -> Option<ReadOnlyAdmission> {
-        match &self.kind {
-            SessionResourceErrorKind::Workspace(error) => {
-                ReadOnlyAdmission::from_workspace_error(error)
-            }
-            SessionResourceErrorKind::ReadOnlyStore => {
-                Some(ReadOnlyAdmission::ExecutionLeaseRequired)
-            }
             _ => None,
         }
     }
@@ -411,6 +428,9 @@ impl std::fmt::Display for SessionResourceError {
             SessionResourceErrorKind::SavedButNotAdmitted { .. } => {
                 ("session data was saved but execution admission failed", "")
             }
+            SessionResourceErrorKind::Conflict { detail } => {
+                ("state conflicts with request", detail.as_str())
+            }
             SessionResourceErrorKind::Internal { detail } => {
                 ("internal storage error", detail.as_str())
             }
@@ -436,6 +456,26 @@ impl std::error::Error for SessionResourceError {
 
 // ─── 门面 ──────────────────────────────────────────────────────────────────────
 
+/// 未发布创建的句柄（J2 两阶段的第二阶段）：frozen 一次性提交，或整条草稿被撤销。
+///
+/// 语义（与失败补偿矩阵同源）：
+///
+/// - 提交是 **write-once CAS**：仅当这条 identity 从未提交过 frozen 时生效；重复调用返回
+///   typed 冲突（[`SessionResourceErrorKind::Conflict`]），不覆盖已提交字节；
+/// - 提交前检查未决持久化，执行唯一性由 peri-sdk 负责；
+/// - [`Self::abandon`] 只撤销**未提交**的草稿（幂等）；已提交 frozen 的草稿必须拒绝删除
+///   ——那会销毁一个「已定稿、未发布」的合法中间态；
+#[async_trait]
+pub trait SessionInitialization: Send + Sync {
+    fn thread_id(&self) -> &ThreadId;
+
+    /// 一次性提交 frozen：仅当该 identity 从未提交过；重复调用返回 typed 冲突，不覆盖。
+    async fn commit_frozen(&self, frozen: &FrozenSnapshotBytes) -> SessionResourceResult<()>;
+
+    /// 撤销未发布的创建（幂等）；已提交后调用返回 typed 冲突，不删除。
+    async fn abandon(self: Arc<Self>) -> SessionResourceResult<()>;
+}
+
 /// 子会话 resume 认领 handle。
 ///
 /// 认领期间的 active/原状态/终态由资源内部保存，调用方只提交领域结果，不拼补偿
@@ -444,9 +484,10 @@ impl std::error::Error for SessionResourceError {
 pub trait ChildResumeClaim: Send + Sync {
     /// 认领成功并开始运行。
     async fn mark_running(&self) -> SessionResourceResult<()>;
-    /// 移交后台执行（仍属本次认领）。
+    /// 移交后台执行（仍属本次认领）；完成后调用方才可放行后台执行。
     async fn hand_off_to_background(&self) -> SessionResourceResult<()>;
     /// 认领后准备失败：恢复到认领前的状态，不留 active 残留。
+    /// 移交失败或移交后启动被取消也可补偿，但调用方须确保后台执行尚未放行。
     async fn mark_failed(&self) -> SessionResourceResult<()>;
     /// 认领终止（取消/宿主退出）：恢复到认领前的状态。
     async fn mark_terminated(&self) -> SessionResourceResult<()>;
@@ -457,11 +498,23 @@ pub trait ChildResumeClaim: Send + Sync {
 /// 每个方法都要么满足后置条件，要么在产生副作用前返回明确失败；没有默认实现可用
 /// 来冒充成功。实现者必须同时保证：
 ///
-/// - mutation 先检查本 root 的有效 owner 与未决持久化，再落盘；
+/// - mutation 先检查访问权限与未决持久化，再落盘；
 /// - `AccessMode::ReadOnly` 下所有 mutation 返回 [`SessionResourceErrorKind::ReadOnlyStore`]；
 /// - 结果不确定时返回 [`SessionResourceError::persistence_uncertain`]，不得重试后伪装成功。
 #[async_trait]
 pub trait SessionResources: Send + Sync {
+    fn oauth_credentials(
+        &self,
+    ) -> Option<std::sync::Arc<dyn crate::oauth_credentials::OAuthCredentialPort>> {
+        None
+    }
+    /// 返回已绑定单个 Workspace 的 OAuth 能力；调用方须先取得可信会话归属。
+    fn oauth_credentials_for_workspace(
+        &self,
+        _workspace_id: crate::workspace::WorkspaceId,
+    ) -> Option<std::sync::Arc<dyn crate::oauth_credentials::OAuthCredentialPort>> {
+        None
+    }
     // ── 能力与准入 ──
 
     /// 本次打开的权限、后端能力面；给定 `session` 时附带该会话的执行资格。
@@ -482,18 +535,10 @@ pub trait SessionResources: Send + Sync {
         workspace: &ResolvedWorkspace,
     ) -> SessionResourceResult<()>;
 
-    /// 取得本机执行所有权（唯一 owner）。
-    ///
-    /// 他处持有、dirty 未解除、存在未决持久化或本次只读时明确拒绝，不降级为成功。
-    async fn acquire_execution(
-        &self,
-        id: &ThreadId,
-        workspace: &ResolvedWorkspace,
-    ) -> SessionResourceResult<Arc<dyn SessionExecutionLease>>;
+    /// 清除已完成资源排空的会话关闭意图。
+    async fn finish_close(&self, id: &ThreadId) -> SessionResourceResult<()>;
 
-    /// 解除精确代际的本机 dirty；永远不解除未决持久化，也不接受把普通 dirty 映射成 reset。
-    async fn reset_dirty_execution(&self, request: &ResetDirtyRequest)
-        -> SessionResourceResult<()>;
+    async fn close_settlement(&self, id: &ThreadId) -> SessionResourceResult<CloseSettlement>;
 
     // ── 创建与接纳 ──
 
@@ -502,17 +547,37 @@ pub trait SessionResources: Send + Sync {
     /// 数据已保存但准入失败时返回
     /// [`SessionResourceError::saved_but_not_admitted`]，不得报告成「确定未创建」；
     /// 未发布创建的撤销由门面内部承担（见 [`Self::abandon_initialization`]）。
-    async fn create_session(
-        &self,
-        input: &NewSession,
-    ) -> SessionResourceResult<Arc<dyn SessionExecutionLease>>;
+    /// 同 ID 的不可变创建事实一致时可重复准入，不覆盖历史、配置、标题、状态或 frozen；
+    /// binding、创建时间、cwd、父关系、快照截止点或 frozen 不一致时拒绝。
+    async fn create_session(&self, input: &NewSession) -> SessionResourceResult<()>;
 
     /// 撤销本次尚未发布的创建（不是通用 rollback，不修改既有 source 会话）。
-    async fn abandon_initialization(
+    ///
+    /// 语义由**入口**决定：本方法是 write-once 完整创建（fork 等一次性创建）的失败补偿
+    /// ——目标创建即带 frozen、可由 source 重生成，撤销就是把它整条删掉，不叠加「未提交
+    /// frozen」判据。两阶段草稿的撤销走
+    /// [`SessionInitialization::abandon`]（那里的 `frozen IS NULL` 判据约束已定稿草稿）。
+    async fn abandon_initialization(&self, id: &ThreadId) -> SessionResourceResult<()>;
+
+    /// 未发布创建的第一阶段：保存身份/绑定（frozen 暂空）并取得初始化句柄。
+    ///
+    /// 内容准入（资源读取后定稿 frozen）分成两段：本方法返回
+    /// 的句柄给出 [`SessionInitialization::commit_frozen`] 与
+    /// [`SessionInitialization::abandon`] 两个终局动作，二者互斥且各自一次性。
+    ///
+    /// 未提交的草稿不出现在列表；初始化提交不认领执行所有权。
+    async fn begin_initialization(
         &self,
-        id: &ThreadId,
-        lease: &Arc<dyn SessionExecutionLease>,
-    ) -> SessionResourceResult<()>;
+        draft: &NewSessionDraft,
+    ) -> SessionResourceResult<Arc<dyn SessionInitialization>>;
+
+    /// 半写草稿的检测与清理（崩溃恢复，不会自动删除「已提交未发布」的会话）。
+    ///
+    /// 判据：绑定已成立 **且** `frozen IS NULL`（与 legacy「无绑定且无 frozen」互斥）；
+    /// 无未决写时才删除。已提交 frozen 的会话返回 typed 冲突
+    /// ——它已有定稿快照，可按 ID 重新建立执行准入，
+    /// 不在这里被销毁。
+    async fn discard_incomplete_initialization(&self, id: &ThreadId) -> SessionResourceResult<()>;
 
     /// 接纳已确认的本机 legacy 会话：binding 与缺失的 frozen 一起成立。
     ///
@@ -538,11 +603,9 @@ pub trait SessionResources: Send + Sync {
     /// [`SessionResourceErrorKind::NotFound`]，损坏与版本不支持是错误，不冒充状态。
     async fn load_session_binding(&self, id: &ThreadId) -> SessionResourceResult<BindingState>;
 
-    /// 按会话 identity 复核绑定并给出执行目录；不取得执行所有权。
+    /// 按会话 ID 读取保存的工作区定位信息，不做目录归属认领或改绑。
     ///
-    /// 绑定缺失、绑定指向的本机登记已不存在或当前目录与记录不一致时明确失败，
-    /// 不降级成「没有绑定」，也不在复核中改绑。`check` 决定复核力度，见
-    /// [`BindingRecheck`]。
+    /// 目录存在性属于工具执行资格，不阻断历史定位；不依赖调用方当前目录。
     async fn validate_bound_workspace(
         &self,
         id: &ThreadId,
@@ -558,12 +621,65 @@ pub trait SessionResources: Send + Sync {
 
     /// 小型 metadata 投影；不加载历史或大快照。
     async fn load_session_meta(&self, id: &ThreadId) -> SessionResourceResult<ThreadMeta>;
+    async fn session_environment_id(
+        &self,
+        _id: &ThreadId,
+    ) -> SessionResourceResult<Option<String>> {
+        Ok(None)
+    }
+    async fn session_workspace_id(
+        &self,
+        _id: &ThreadId,
+    ) -> SessionResourceResult<Option<crate::workspace::WorkspaceId>> {
+        Ok(None)
+    }
+
+    async fn list_machines(&self) -> SessionResourceResult<Vec<crate::workspace::MachineInfo>> {
+        Err(SessionResourceError::new(
+            SessionResourceErrorKind::Unsupported,
+        ))
+    }
+
+    async fn list_workspaces(
+        &self,
+        _machine_id: &str,
+    ) -> SessionResourceResult<Vec<crate::workspace::WorkspaceInfo>> {
+        Err(SessionResourceError::new(
+            SessionResourceErrorKind::Unsupported,
+        ))
+    }
+
+    async fn rename_machine(&self, _machine_id: &str, _name: &str) -> SessionResourceResult<()> {
+        Err(SessionResourceError::new(
+            SessionResourceErrorKind::Unsupported,
+        ))
+    }
 
     /// 按 scope/cursor/limit 分页列举；过滤在数据端完成。
     async fn list_sessions(
         &self,
         query: &ScopedThreadQuery,
     ) -> SessionResourceResult<ScopedThreadPage>;
+
+    async fn list_archived_sessions(
+        &self,
+        _query: &ScopedThreadQuery,
+    ) -> SessionResourceResult<ScopedThreadPage> {
+        Err(SessionResourceError::new(
+            SessionResourceErrorKind::Unsupported,
+        ))
+    }
+
+    /// 将根 Session 移入或移出归档；不会改动历史与活动时间。
+    async fn set_session_archived(
+        &self,
+        _id: &ThreadId,
+        _archived: bool,
+    ) -> SessionResourceResult<()> {
+        Err(SessionResourceError::new(
+            SessionResourceErrorKind::Unsupported,
+        ))
+    }
 
     /// 直接子会话 metadata。
     async fn list_children(&self, parent: &ThreadId) -> SessionResourceResult<Vec<ThreadMeta>>;
@@ -583,24 +699,32 @@ pub trait SessionResources: Send + Sync {
         payloads: &[PersistedPayload],
     ) -> SessionResourceResult<()>;
 
-    /// 保存 fork 目标快照；source 不变。
-    async fn save_fork(
+    /// 按稳定消息 ID 原子落下终态提醒；同一内容的重放只返回 false。
+    /// 同 ID 的不同内容必须失败，不可把它当作已交付。
+    async fn append_reminder_if_absent(
         &self,
-        fork: &ForkSnapshot,
-    ) -> SessionResourceResult<Arc<dyn SessionExecutionLease>>;
+        id: &ThreadId,
+        message_id: MessageId,
+        reminder: &TrustedSystemReminder,
+    ) -> SessionResourceResult<bool>;
 
-    /// 保存 child：继承区与父子关系一起成立，沿用已存在的 root owner。
+    /// 接纳显式关闭；提交后恢复的 runtime 必须禁止新任务准入。
+    async fn mark_session_closing(&self, id: &ThreadId) -> SessionResourceResult<()>;
+
+    /// 读取显式关闭意图；Agent 意外断连不产生该事实。
+    async fn is_session_closing(&self, id: &ThreadId) -> SessionResourceResult<bool>;
+
+    /// 保存 fork 目标快照；source 不变。
+    async fn save_fork(&self, fork: &ForkSnapshot) -> SessionResourceResult<()>;
+
+    /// 保存 child：继承区与父子关系一起成立。
     ///
     /// 父子关系在快照里出现两次（[`ChildSnapshot::parent_id`] 与
     /// [`NewSessionMeta::parent_thread_id`]），实现必须在写入前要求两者一致；不一致、
     /// 自指父关系、把自己当根都必须拒绝，且拒绝不留任何写入（详见 `ChildSnapshot` 不变量）。
-    async fn save_child(
-        &self,
-        child: &ChildSnapshot,
-        lease: &Arc<dyn SessionExecutionLease>,
-    ) -> SessionResourceResult<()>;
+    async fn save_child(&self, child: &ChildSnapshot) -> SessionResourceResult<()>;
 
-    /// 在有效根 owner 下串行认领 child resume。
+    /// 在 root 执行树内串行认领 child resume。
     async fn claim_child_resume(
         &self,
         child: &ThreadId,

@@ -60,7 +60,7 @@ async fn test_notification() {
 /// （code / message / data 逐字段一致，RequestId 经 router 配对）。
 ///
 /// 模拟能力协商未开启的客户端：error response 不经任何私有事件/能力判定，
-/// 仅凭响应本身即可感知 turn failure（spec/issues/2026-08-18-acp-error-handler.md
+/// 仅凭响应本身即可感知 turn failure（spec/history/2026-08.md 2026-08-18 条目
 /// 必测矩阵「capability 未协商的 fatal」）。
 #[tokio::test]
 async fn test_error_response_roundtrip_preserves_code_message_data() {

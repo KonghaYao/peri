@@ -27,6 +27,16 @@ impl ReplaySender for CollectSender {
         self.updates.lock().unwrap().push(notif.update);
         Ok(())
     }
+
+    async fn send_system_reminder(
+        &self,
+        _session_id: &str,
+        _reminder: &peri_acp_types::system_reminder::SystemReminder,
+        _caps: &PeriCaps,
+    ) -> Result<(), ReplayError> {
+        // 本 fixture 只收集标准 SessionUpdate；结构化 reminder 由专用测试 sender 覆盖。
+        Ok(())
+    }
 }
 
 async fn collect_replay(history: Vec<BaseMessage>) -> Vec<SessionUpdate> {

@@ -10,7 +10,7 @@
 //! attach 调用点与 `ServerLoop` 在 setup 响应之后的调用同款（`mcp/connect` 只带
 //! `serverId`，必须在客户端拿到会话结果之后才发得出去）。
 //!
-//! 池与服务的注入理由：非 bare 工作区装配面才会构造 MCP 池（`host/assemble.rs`），
+//! 池与服务的注入理由：非 bare 工作区装配面才会构造 ACP MCP 服务（bare 池仅含 workspace）（`host/assemble.rs`），
 //! 而拉起真实外部 server 不适合测试——这里注入同一份装配产物，装配面自身由
 //! `host/assemble.rs` 的既有测试覆盖。
 
@@ -133,7 +133,9 @@ async fn acp_declared_server_reaches_the_session_tool_face_and_disconnects_on_cl
     cfg.workspace_assembly = Some(crate::host::assemble::WorkspaceAssembly {
         startup_cwd: cwd.to_str().unwrap().to_owned(),
         bare: true,
+        drive_cron_tick: false,
         mcp_profile: McpCapabilityProfile::disabled(),
+        capabilities: Default::default(),
     });
 
     let peer = Arc::new(FakeClientHost::default());
@@ -154,6 +156,12 @@ async fn acp_declared_server_reaches_the_session_tool_face_and_disconnects_on_cl
         mcp_spawner,
         McpCapabilityProfile::disabled(),
     ));
+    // 夹具补生产步骤：生产装配给每个会话池 spawn `run_initialize`
+    // （`peri-acp/src/host/assemble.rs`），初始化收口即发布「零 server」的目录事实；
+    // 本夹具手工造的池没有这一代，会话关闭前的 workspace task scope 对账
+    // （`wait_for_task_owner_catalog`）会一直等到超时。`mark_initialized` 正是
+    // 生产「空配置」终态（`peri-middlewares/src/mcp/initialize.rs` 的空集合分支）。
+    pool.mark_initialized();
     {
         let environment = Arc::get_mut(
             sessions

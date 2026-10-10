@@ -4,6 +4,7 @@
 use std::collections::HashMap;
 use std::sync::Arc;
 
+use super::continuation::{cancel_arms_continuation, cancel_should_schedule_continuation};
 use crate::dispatch::commands::{build_available_commands_update, register_ui_entries};
 use crate::dispatch::config_update;
 use crate::session::executor::ContinuationRequest;
@@ -16,10 +17,7 @@ use peri_acp_types::PeriCaps;
 use serde_json::Value;
 use tracing::{debug, info};
 
-use super::{
-    continuation::cancel_arms_continuation, continuation::cancel_should_schedule_continuation,
-    AcpServerConfig, SessionState,
-};
+use super::{AcpServerConfig, SessionState};
 use crate::provider::LlmProvider;
 
 // ── Notification dispatch ────────────────────────────────────────────────────
@@ -36,13 +34,8 @@ pub(crate) fn handle_notification(
         "session/cancel" => {
             let session_id = extract_session_id(params, "");
             if let Some(state) = sessions.get_mut(session_id) {
-                // 多读者 + 单 writer lease：cancel 是写入操作，仅 writer 可发起。
-                // 协议无客户端身份字段，writer 恒为 session 创建方（"default"）——
-                // 观察者（非 writer）的 cancel 请求被忽略（只读）。
-                if !state.lease.is_writer("default") {
-                    debug!(session_id = %session_id, "Cancel ignored: read-only observer");
-                    return None;
-                }
+                let environment = state.environment.clone();
+                let cfg = environment.as_ref().map(|env| &env.cfg).unwrap_or(cfg);
                 let targeted =
                     params.get("requestId").is_some() || params.get("generation").is_some();
                 if targeted {
@@ -62,7 +55,15 @@ pub(crate) fn handle_notification(
                     // Legacy cancellation also revokes a ticket still waiting for its prompt lock.
                     mailbox.stop();
                 }
-                let token = state.cancel_token.as_ref()?;
+                state.continuation_epoch += 1;
+                if let Some(runtime) = cfg.session_manager.get_session(session_id) {
+                    runtime.activation.suppress();
+                }
+                state.continuation_mq_steering_pending = false;
+                let Some(token) = state.cancel_token.as_ref() else {
+                    state.continuation_armed = false;
+                    return None;
+                };
                 token.cancel();
                 // 置位内部续跑标记（只影响当前被取消的 prompt）：被取消 prompt
                 // 的独立 bg agent 结果完成时，continuation scheduler 原子 take
@@ -208,7 +209,13 @@ pub(crate) async fn send_config_option_update(
         "sessionId": session_id,
         "update": update_value,
     });
-    let _ = transport.send_notification("session/update", payload).await;
+    super::diagnostics::send_session_update(
+        transport,
+        session_id,
+        "config_options_update",
+        payload,
+    )
+    .await;
 }
 
 /// Push an `AvailableCommandsUpdate` notification for the given session.
@@ -299,7 +306,13 @@ pub(crate) async fn send_available_commands_update(
                 "sessionId": sid,
                 "update": update_value,
             });
-            let _ = tx.send_notification("session/update", payload).await;
+            super::diagnostics::send_session_update(
+                tx.as_ref(),
+                &sid,
+                "available_commands_update",
+                payload,
+            )
+            .await;
         });
     })));
 
@@ -316,7 +329,13 @@ pub(crate) async fn send_available_commands_update(
         "sessionId": session_id,
         "update": update_value,
     });
-    let _ = transport.send_notification("session/update", payload).await;
+    super::diagnostics::send_session_update(
+        transport.as_ref(),
+        session_id,
+        "available_commands_update",
+        payload,
+    )
+    .await;
 }
 
 /// Push a `SessionInfoUpdate` notification after prompt/compact completes,
@@ -336,7 +355,7 @@ pub(crate) async fn send_session_info_update_with_title(
     title: Option<&str>,
 ) {
     use agent_client_protocol::schema::v1::SessionInfoUpdate;
-    let mut info = SessionInfoUpdate::new().updated_at(chrono::Utc::now().to_rfc3339());
+    let mut info = SessionInfoUpdate::new().updated_at(peri_time::now_utc_rfc3339());
     if let Some(t) = title {
         info = info.title(t.to_string());
     }
@@ -352,6 +371,7 @@ pub(crate) async fn send_session_info_update_with_title(
         "sessionId": session_id,
         "update": update_value,
     });
-    let _ = transport.send_notification("session/update", payload).await;
+    super::diagnostics::send_session_update(transport, session_id, "session_info_update", payload)
+        .await;
 }
 // test

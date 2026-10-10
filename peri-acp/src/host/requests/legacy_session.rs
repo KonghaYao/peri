@@ -1,109 +1,237 @@
 //! On-demand compatibility for unbound roots. Listing and history replay do not enter here.
+//!
+//! M5：legacy 首次接纳的顺序是「执行资格 → 仅资源 bootstrap → 读取指引/技能/覆盖
+//! 文档 → 定稿 frozen → 原子 write-once 接纳（frozen+binding）→ 发布」。bootstrap
+//! 只装配资源环境（MCP 池 + builtin workspace 实例），**不运行 Agent / 项目 hook**；
+//! 竞争输家不改写既有字节，按 winner 的持久字节重新定格输入。
+
+use std::collections::HashMap;
+use std::sync::Arc;
 
 use peri_acp_types::{
     session_resources::{BindingState, FrozenSnapshotBytes, FrozenState},
     thread::ThreadMeta,
-    workspace::{ResolvedWorkspace, WorkspaceError},
+    workspace::ResolvedWorkspace,
 };
-use std::path::Path;
 
 use super::{decode_frozen_snapshot, AcpError, AcpServerConfig};
 use crate::host::prepared::PreparedSessionInputs;
-use crate::host::workspace::{resource_error, workspace_error};
+use crate::host::requests::session_lifecycle::enabled_meta_sections;
+use crate::host::workspace::{resource_error, workspace_error, SessionEnvironment};
+
+/// legacy 首次接纳的定稿结果：已按接纳后（或 winner）的字节构建的准备输入。
+pub(super) struct LegacyAdoption {
+    pub(super) prepared: PreparedSessionInputs,
+    /// 阶段一已装配并 activate 的环境（与 `prepared` 的 frozen 同源）。竞争者胜出
+    /// 且字节一致时复用，避免第二次装配；否则为 None（调用方按 winner 输入装配）。
+    pub(super) environment: Option<Arc<SessionEnvironment>>,
+}
 
 pub(super) async fn resolve_saved_workspace(
     cfg: &AcpServerConfig,
     meta: &ThreadMeta,
 ) -> Result<ResolvedWorkspace, AcpError> {
-    if meta.parent_thread_id.is_some() {
-        return Err(workspace_error(WorkspaceError::ExecutionLeaseRequired));
-    }
-    if !Path::new(&meta.cwd).is_absolute() {
-        return Err(workspace_error(WorkspaceError::Unavailable));
-    }
     cfg.session_resources
-        .resolve_workspace(Path::new(&meta.cwd))
+        .validate_bound_workspace(
+            &meta.id,
+            peri_acp_types::session_resources::BindingRecheck::Recorded,
+        )
         .await
         .map_err(resource_error)
 }
 
+/// 读取接纳后的持久 frozen 字节（write-once 后唯一事实源）。
+async fn persisted_frozen_bytes(
+    resources: &Arc<dyn peri_acp_types::session_resources::SessionResources>,
+    id: &str,
+) -> Result<String, AcpError> {
+    let snapshot = resources
+        .load_session_snapshot(&id.to_owned())
+        .await
+        .map_err(resource_error)?;
+    match snapshot.frozen {
+        FrozenState::Present(bytes) => Ok(bytes.into_string()),
+        FrozenState::LegacyAbsent => Err(AcpError::new(
+            -32603,
+            "Legacy adoption did not commit a frozen snapshot",
+        )),
+    }
+}
+
+/// 读失败时排空已装配的环境，绝不留下未接纳的半成品（也不重冻覆盖既有字节）。
+/// 保留原始错误原因；清理失败显式并入错误，不吞也不替换为无上下文的新错误。
+async fn drain_on_failure(
+    environment: Option<&Arc<SessionEnvironment>>,
+    error: AcpError,
+) -> AcpError {
+    if let Some(environment) = environment {
+        if !environment.shutdown().await {
+            return AcpError::new(
+                -32603,
+                format!(
+                    "{}; additionally the legacy bootstrap environment did not confirm shutdown; nothing was adopted",
+                    error.message
+                ),
+            );
+        }
+    }
+    error
+}
+
 /// 恢复前的 legacy 准备：已绑定会话返回 `None`。
 ///
-/// 绑定分类与 frozen 状态来自门面的一次一致读取：只有本机确认的 legacy
-/// （[`BindingState::LegacyConfirmed`]）才进入接纳，外来登记、缺登记与损坏不会被
-/// 解释成「没有 legacy」。无 frozen 的 legacy 会话按保存的绝对 cwd 只读定格一份完整
-/// 准备输入——插件发现走严格只读入口，不生成合成清单、不写插件缓存。
+/// 绑定分类与 frozen 状态来自门面的一次一致读取。调用方先确认机器环境可执行（
+/// 只读存储与远端执行环境在更早的资格检查被拒，不会走到本函数）。无 frozen 的
+/// legacy 会话按保存的 cwd 接纳：先装配资源环境并读取内容，再以**定稿 frozen +
+/// binding** 作为一次 write-once 接纳；竞争输家读取 winner 字节重新定格。
 pub(super) async fn prepare_for_restore(
     cfg: &AcpServerConfig,
     session_id: &str,
     expected_cwd: Option<&str>,
-) -> Result<Option<PreparedSessionInputs>, AcpError> {
+    effective_servers: HashMap<String, peri_acp_types::plugin::McpServerConfig>,
+) -> Result<Option<LegacyAdoption>, AcpError> {
     let resources = cfg.session_resources.clone();
     let id = session_id.to_owned();
-    let mut snapshot = resources
+    let snapshot = resources
         .load_session_snapshot(&id)
         .await
         .map_err(resource_error)?;
     let meta = snapshot.meta.clone();
-    // 本机 legacy 的证据是「保存的绝对 cwd 落在已登记 workspace 之下」。新库/新节点
-    // 上该目录尚未登记，Missing 因此先按保存路径解析登记一次再复判——不把「尚未登记」
-    // 直接当成本机 legacy，已绑定会话也不为这一轮多跑发现。
-    let workspace = match snapshot.binding {
-        BindingState::Bound(_) => return Ok(None),
-        BindingState::LegacyConfirmed => resolve_saved_workspace(cfg, &meta).await?,
-        BindingState::Missing => {
-            let workspace = resolve_saved_workspace(cfg, &meta).await?;
-            snapshot = resources
-                .load_session_snapshot(&id)
-                .await
-                .map_err(resource_error)?;
-            if !matches!(snapshot.binding, BindingState::LegacyConfirmed) {
-                return Err(workspace_error(WorkspaceError::Unavailable));
-            }
-            workspace
-        }
-        // 外来会话或本机登记缺失：历史可读，但不能按 legacy 自动接纳。
-        BindingState::ExternalOrUnregistered => {
-            return Err(workspace_error(WorkspaceError::Unavailable))
-        }
-    };
-    if let Some(expected) = expected_cwd {
-        // 与绑定比对的是「同一目录」，不需要为此再解析登记（那会多跑一轮完整发现）。
-        crate::host::workspace::expect_directory(expected, &workspace).await?;
+    if matches!(snapshot.binding, BindingState::Bound(_)) {
+        return Ok(None);
     }
-    let (frozen, prepared) = match snapshot.frozen {
+    let _ = expected_cwd;
+    // 执行资格（本机可用执行目录）先于任何读取：异机/远端执行环境在此失败，
+    // 不会去读本机同名路径。
+    let workspace = resolve_saved_workspace(cfg, &meta).await?;
+    let workspace_cwd = workspace.cwd.to_string_lossy().into_owned();
+    match snapshot.frozen {
+        // frozen 已存在但绑定缺失：接纳只补绑定并保持既有字节（write-once），随后
+        // 按 winner 字节重新定格输入（不重建、不覆盖）。未知版本的唯一错误权威是
+        // 解码器（`FrozenSnapshotError::UnsupportedVersion`），存储层不表达它。
         FrozenState::Present(bytes) => {
             decode_frozen_snapshot(bytes.as_str()).map_err(workspace_error)?;
-            (bytes, None)
+            resources
+                .adopt_legacy_session(&id, &meta.cwd, &workspace, &bytes)
+                .await
+                .map_err(resource_error)?;
+            let persisted = persisted_frozen_bytes(&resources, &id).await?;
+            let mut prepared =
+                PreparedSessionInputs::prepare_restore(cfg, &workspace_cwd, &persisted)?;
+            prepared.session_mcp_servers = effective_servers;
+            Ok(Some(LegacyAdoption {
+                prepared,
+                environment: None,
+            }))
         }
         FrozenState::LegacyAbsent => {
-            // Legacy sessions never captured this state. Freeze from their saved cwd once,
-            // as the pre-3.15 compatibility path did; never use the caller's terminal cwd.
-            let workspace_cwd = workspace.cwd.to_string_lossy().into_owned();
-            let prepared = PreparedSessionInputs::prepare_legacy(cfg, &meta.cwd, &workspace_cwd)?;
-            (
-                FrozenSnapshotBytes::new(prepared.frozen_encoded.clone()),
-                Some(prepared),
-            )
+            let mut prepared =
+                PreparedSessionInputs::prepare_legacy_deferred(cfg, &meta.cwd, &workspace_cwd)?;
+            // 有效 servers（持久 owner 声明 + 本次请求一致性校验后的结果）必须在
+            // bootstrap 之前定格：环境的会话 MCP 池只在装配时消费一次（OnceLock），
+            // 事后写入 prepared 不会再生效。
+            prepared.session_mcp_servers = effective_servers.clone();
+            // 仅资源 bootstrap：装配会话环境（MCP 池 + builtin 实例）并 activate，
+            // 不运行 Agent / 项目 hook，也不把临时候选冻结成最终空快照。
+            let environment =
+                match SessionEnvironment::assemble_prepared_without_frozen(cfg, &prepared, &id)
+                    .await
+                {
+                    Ok(environment) => environment,
+                    Err(error) => return Err(error),
+                };
+            if let Some(environment) = &environment {
+                environment.activate();
+            }
+            if environment.is_none() {
+                // 显式缺口：无资源面（无 session-scoped workspace）时项目指引与技能
+                // 摘要不可得——保持空值并留信号，不回落磁盘（X4/J5）。
+                tracing::warn!(
+                    cwd = %workspace_cwd,
+                    "legacy 首次接纳无资源环境：项目指令与技能摘要不可得（不回落磁盘）"
+                );
+            }
+            // bootstrap 之后的每一步（读取 → 定稿 → 接纳 → winner 重读）都必须在
+            // 失败时排空已激活环境：候选环境由本作用域唯一持有，成功路径才把所有权
+            // 交给调用方。
+            let mut environment = environment;
+            let outcome: Result<LegacyAdoption, AcpError> = async {
+                // 内容准入（与 session/new 的 P4 同源）：覆盖文档 / 技能目录 / 项目指令。
+                let enabled_sections = match environment.as_ref() {
+                    Some(env) => enabled_meta_sections(&env.cfg),
+                    None => enabled_meta_sections(cfg),
+                };
+                let docs = match environment.as_ref() {
+                    Some(env) if !enabled_sections.is_empty() => {
+                        env.read_meta_docs(&enabled_sections).await?
+                    }
+                    _ => HashMap::new(),
+                };
+                let skill_catalog = match environment.as_ref() {
+                    Some(env) => env.read_workspace_skill_catalog().await?,
+                    None => Vec::new(),
+                };
+                let instructions = match environment.as_ref() {
+                    Some(env) => env.read_workspace_instructions().await?,
+                    None => Default::default(),
+                };
+                let build_cfg: &AcpServerConfig = match environment.as_ref() {
+                    Some(env) => &env.cfg,
+                    None => cfg,
+                };
+                prepared.build_frozen_after_activation(
+                    build_cfg,
+                    docs,
+                    &skill_catalog,
+                    &instructions,
+                )?;
+                let candidate = prepared.frozen_encoded.clone().ok_or_else(|| {
+                    AcpError::new(-32603, "Legacy frozen candidate bytes are missing")
+                })?;
+                let candidate_bytes = FrozenSnapshotBytes::new(candidate);
+                let legacy = prepared.legacy.as_ref().ok_or_else(|| {
+                    AcpError::new(-32603, "Legacy adoption inputs are missing")
+                })?;
+                let saved_cwd = legacy.saved_cwd.to_str().ok_or_else(|| {
+                    AcpError::new(-32603, "Legacy saved cwd is not valid UTF-8")
+                })?;
+                // 原子 write-once 接纳：frozen 与 binding 一起成立；已有绑定/字节的
+                // 竞争输家不改写 winner。
+                resources
+                    .adopt_legacy_session(&id, saved_cwd, &workspace, &candidate_bytes)
+                    .await
+                    .map_err(resource_error)?;
+                let persisted = persisted_frozen_bytes(&resources, &id).await?;
+                if persisted == candidate_bytes.as_str() {
+                    let environment = environment.take();
+                    return Ok(LegacyAdoption {
+                        prepared,
+                        environment,
+                    });
+                }
+                // 竞争输家：丢弃本次候选环境（排空确认），按 winner 的持久字节重新
+                // 定格（装配交回调用方，用 winner 输入做第二次装配）。
+                if let Some(environment) = environment.take() {
+                    if !environment.shutdown().await {
+                        return Err(AcpError::new(
+                            -32603,
+                            "legacy adoption lost the race and bootstrap resources did not confirm shutdown",
+                        ));
+                    }
+                }
+                let mut prepared =
+                    PreparedSessionInputs::prepare_restore(cfg, &workspace_cwd, &persisted)?;
+                prepared.session_mcp_servers = effective_servers;
+                Ok(LegacyAdoption {
+                    prepared,
+                    environment: None,
+                })
+            }
+            .await;
+            match outcome {
+                Ok(adoption) => Ok(Some(adoption)),
+                Err(error) => Err(drain_on_failure(environment.as_ref(), error).await),
+            }
         }
-        // 有快照但本构建读不懂：不是「缺失」，不能按 legacy 规则重冻覆盖既有字节。
-        FrozenState::Unsupported => {
-            return Err(AcpError::new(
-                -32603,
-                "Session frozen snapshot is not readable by this build",
-            ))
-        }
-    };
-    // 接纳在门面的一次行为里完成（binding 与缺失的 frozen 一起成立）；登记的保存目录
-    // 来自准备输入（legacy 只按保存的绝对 cwd 记录事实）。
-    let recorded_cwd = prepared
-        .as_ref()
-        .and_then(|inputs| inputs.legacy.as_ref())
-        .map(|legacy| legacy.saved_cwd.to_string_lossy().into_owned())
-        .unwrap_or_else(|| meta.cwd.clone());
-    resources
-        .adopt_legacy_session(&id, &recorded_cwd, &workspace, &frozen)
-        .await
-        .map_err(resource_error)?;
-    Ok(prepared)
+    }
 }

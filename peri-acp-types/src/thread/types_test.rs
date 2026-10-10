@@ -1,37 +1,61 @@
 //! ThreadMeta 强类型字段与枚举测试。
 //!
 //! 覆盖：
-//! - 默认值（new/default_for_db/反序列化缺字段）
+//! - 默认值（new_at/default_for_db_at/反序列化缺字段）
 //! - 强类型枚举 CancelPolicy / AgentStatus 的 FromStr/Display/as_str
 //! - 非法字符串不静默 fallback 的硬约束
 use super::*;
 
 #[test]
+fn metadata_preserves_config_and_discards_retired_cache_fields_from_old_json() {
+    let mut meta = ThreadMeta::new_at("/tmp/test", std::time::SystemTime::UNIX_EPOCH);
+    meta.config = Some(r#"{"model":"useful"}"#.into());
+    let mut json = serde_json::to_value(&meta).unwrap();
+    json["cached_context"] = serde_json::json!("obsolete");
+    json["context_cache_epoch"] = serde_json::json!(7);
+    let decoded: ThreadMeta = serde_json::from_value(json).unwrap();
+    assert_eq!(decoded.config, meta.config);
+    let json = serde_json::to_value(decoded).unwrap();
+    assert_eq!(json["config"], r#"{"model":"useful"}"#);
+    assert!(json.get("cached_context").is_none());
+    assert!(json.get("context_cache_epoch").is_none());
+}
+
+#[test]
 fn test_thread_meta_default_values() {
-    // new() 创建的根线程应具有正确的默认值
-    let meta = ThreadMeta::new("/tmp/test");
+    // new_at() 创建的根线程应具有正确的默认值
+    let meta = ThreadMeta::new_at("/tmp/test", std::time::SystemTime::UNIX_EPOCH);
     assert_eq!(meta.parent_thread_id, None);
     assert_eq!(meta.snapshot_at_message_id, None);
     assert!(!meta.hidden);
     assert_eq!(meta.cancel_policy, CancelPolicy::Cascade);
     assert_eq!(meta.config, None);
-    assert_eq!(meta.cached_context, None);
     assert_eq!(meta.agent_status, AgentStatus::Active);
+    assert_eq!(
+        meta.created_at,
+        chrono::DateTime::<chrono::Utc>::from(std::time::SystemTime::UNIX_EPOCH)
+    );
+    assert_eq!(meta.updated_at, meta.created_at);
     assert!(meta.is_root());
 }
 
 #[test]
 fn test_thread_meta_default_for_db_uses_typed_defaults() {
-    // default_for_db 应填充强类型默认值（DB 读路径占位）
-    let meta = ThreadMeta::default_for_db();
+    // default_for_db_at 应填充强类型默认值（DB 读路径占位）
+    let meta = ThreadMeta::default_for_db_at(std::time::SystemTime::UNIX_EPOCH);
     assert_eq!(meta.cancel_policy, CancelPolicy::Cascade);
     assert_eq!(meta.agent_status, AgentStatus::Active);
+    assert_eq!(
+        meta.created_at,
+        chrono::DateTime::<chrono::Utc>::from(std::time::SystemTime::UNIX_EPOCH)
+    );
+    assert_eq!(meta.updated_at, meta.created_at);
 }
 
 #[test]
 fn test_thread_meta_is_root() {
     // parent_thread_id 为 None 时是根 agent
-    let mut meta = ThreadMeta::new("/tmp/test");
+    let mut meta = ThreadMeta::new_at("/tmp/test", std::time::SystemTime::UNIX_EPOCH);
     assert!(meta.is_root());
 
     // 设置 parent_thread_id 后不是根 agent
@@ -49,14 +73,13 @@ fn test_thread_meta_deserialize_defaults() {
     assert!(!meta.hidden);
     assert_eq!(meta.cancel_policy, CancelPolicy::Cascade);
     assert_eq!(meta.config, None);
-    assert_eq!(meta.cached_context, None);
     assert_eq!(meta.agent_status, AgentStatus::Active);
 }
 
 #[test]
 fn test_thread_meta_serialize_roundtrip_typed_fields() {
     // 强类型字段经 JSON 往返后应保持等价
-    let meta = ThreadMeta::new("/tmp");
+    let meta = ThreadMeta::new_at("/tmp", std::time::SystemTime::UNIX_EPOCH);
     let json = serde_json::to_string(&meta).unwrap();
     let back: ThreadMeta = serde_json::from_str(&json).unwrap();
     assert_eq!(back.cancel_policy, meta.cancel_policy);

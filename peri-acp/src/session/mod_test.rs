@@ -15,7 +15,7 @@ use peri_acp_types::command::{CommandHandler, CommandOutcome};
 use crate::provider::{
     LlmProvider, PeriConfig, ProfileConfig, Profiles, ProviderConfig, ProviderModels,
 };
-use crate::session::SessionManager;
+use crate::session::{SessionManager, TaskManagerFactory};
 use peri_middlewares::prelude::{PermissionMode, SharedPermissionMode};
 
 // ── 辅助函数 ──────────────────────────────────────────────────────────────────
@@ -38,44 +38,6 @@ async fn make_session_manager(tmp: &tempfile::TempDir) -> SessionManager {
     make_manager_with_cron_option(tmp, None).await
 }
 
-/// 构造关闭 `SkillsMiddleware` 的 SessionManager，用于验证 MetaHarness 对
-/// slash 路由的关闭面也生效，避免 `/skill` 绕过 middleware 装配。
-async fn make_session_manager_skills_disabled(tmp: &tempfile::TempDir) -> SessionManager {
-    let session_resources =
-        peri_agent::resources::open_session_resources_with(Some(tmp.path().join("threads.db")))
-            .await
-            .unwrap();
-    let mut peri_config = PeriConfig::default();
-    peri_config.config.active_alias = "sonnet".to_string();
-    peri_config.config.providers = vec![make_provider_config("a", "gpt-4o")];
-    peri_config.config.profiles = Profiles {
-        sonnet: ProfileConfig {
-            provider: "a".to_string(),
-            ..Default::default()
-        },
-        ..Default::default()
-    };
-    peri_config.config.meta_harness = Some(std::collections::HashMap::from([(
-        "SkillsMiddleware".to_string(),
-        false,
-    )]));
-    let provider = LlmProvider::from_config(&peri_config).unwrap();
-    SessionManager::new(
-        session_resources,
-        provider,
-        Arc::new(peri_config),
-        SharedPermissionMode::new(PermissionMode::Bypass),
-        None,
-        None,
-        None,
-        None,
-        None,
-        Arc::new(peri_middlewares::host_ports::SkillsProvider),
-        Vec::new(),
-        Vec::new(),
-    )
-}
-
 /// 构造带 cron scheduler 的 SessionManager（session 级 cron bridge 测试用）。
 ///
 /// scheduler 的 primary tx 直接丢弃（同 TUI `cron_state.rs:13` 模式）——
@@ -84,24 +46,53 @@ async fn make_session_manager_with_cron(
     tmp: &tempfile::TempDir,
 ) -> (
     SessionManager,
-    Arc<parking_lot::Mutex<peri_middlewares::cron::CronScheduler>>,
+    Arc<parking_lot::Mutex<peri_mcp_cron::CronScheduler>>,
     tokio::sync::mpsc::UnboundedReceiver<peri_acp_types::cron::CronContinuationRequest>,
 ) {
-    let scheduler = Arc::new(parking_lot::Mutex::new(
-        peri_middlewares::cron::CronScheduler::new(tokio::sync::mpsc::unbounded_channel().0),
-    ));
+    let scheduler = Arc::new(parking_lot::Mutex::new(peri_mcp_cron::CronScheduler::new(
+        tokio::sync::mpsc::unbounded_channel().0,
+    )));
     let manager = make_manager_with_cron_option(tmp, Some(scheduler.clone())).await;
     let (continuation_tx, continuation_rx) = tokio::sync::mpsc::unbounded_channel();
     manager.bind_cron_continuation(continuation_tx);
     (manager, scheduler, continuation_rx)
 }
 
+async fn persist_cron_session(manager: &SessionManager, tmp: &tempfile::TempDir, session_id: &str) {
+    use peri_acp_types::session_resources::{FrozenSnapshotBytes, NewSession, NewSessionMeta};
+    use peri_acp_types::workspace::SessionBinding;
+
+    let workspace = manager
+        .session_resources()
+        .resolve_workspace(tmp.path())
+        .await
+        .unwrap();
+    manager
+        .session_resources()
+        .create_session(&NewSession {
+            thread_id: session_id.into(),
+            created_at: peri_time::now_utc_rfc3339(),
+            meta: NewSessionMeta {
+                title: None,
+                cwd: workspace.cwd.to_string_lossy().into_owned(),
+                parent_thread_id: None,
+                hidden: false,
+                cancel_policy: Default::default(),
+                snapshot_at_message_id: None,
+            },
+            binding: SessionBinding::from_workspace(&workspace),
+            frozen: FrozenSnapshotBytes::new(r#"{"v":1}"#),
+        })
+        .await
+        .unwrap();
+}
+
 /// 同 make_session_manager，仅 SessionManager::new 末参按需传入 cron scheduler。
 async fn make_manager_with_cron_option(
     tmp: &tempfile::TempDir,
-    cron_scheduler: Option<Arc<parking_lot::Mutex<peri_middlewares::cron::CronScheduler>>>,
+    cron_scheduler: Option<Arc<parking_lot::Mutex<peri_mcp_cron::CronScheduler>>>,
 ) -> SessionManager {
-    make_manager_inner(tmp, cron_scheduler, Vec::new()).await
+    make_manager_inner(tmp, cron_scheduler, Vec::new(), None).await
 }
 
 /// Phase 6 B2：构造带插件命令静态条目的 SessionManager（cron 无）。
@@ -109,14 +100,30 @@ async fn make_manager_with_plugin_entries(
     tmp: &tempfile::TempDir,
     plugin_entries: Vec<RouteEntry>,
 ) -> SessionManager {
-    make_manager_inner(tmp, None, plugin_entries).await
+    make_manager_inner(tmp, None, plugin_entries, None).await
 }
 
-/// 通用构造：cron scheduler + 插件命令静态条目可组合注入。
+/// AW3-11：注入**真实** per-session `TaskManager` 工厂，使「工厂产出」与
+/// 「外部携带」两条 manager 来源在用例里可辨识（`Arc::ptr_eq` / 判型）。
+async fn make_manager_with_task_manager_factory(tmp: &tempfile::TempDir) -> SessionManager {
+    make_manager_inner(
+        tmp,
+        None,
+        Vec::new(),
+        Some(Arc::new(|| {
+            Arc::new(peri_agent::agent::async_tasks::TaskManager::new())
+                as Arc<dyn peri_acp_types::tasks::TaskManager>
+        })),
+    )
+    .await
+}
+
+/// 通用构造：cron scheduler + 插件命令静态条目 + per-session TaskManager 工厂可组合注入。
 async fn make_manager_inner(
     tmp: &tempfile::TempDir,
-    cron_scheduler: Option<Arc<parking_lot::Mutex<peri_middlewares::cron::CronScheduler>>>,
+    cron_scheduler: Option<Arc<parking_lot::Mutex<peri_mcp_cron::CronScheduler>>>,
     plugin_entries: Vec<RouteEntry>,
+    task_manager_factory: Option<TaskManagerFactory>,
 ) -> SessionManager {
     let session_resources =
         peri_agent::resources::open_session_resources_with(Some(tmp.path().join("threads.db")))
@@ -140,15 +147,14 @@ async fn make_manager_inner(
         SharedPermissionMode::new(PermissionMode::Bypass),
         None,
         cron_scheduler.map(|s| {
-            Arc::new(peri_middlewares::cron::CronSchedulerPortHandle(s))
+            Arc::new(peri_mcp_cron::CronSchedulerPortHandle(s))
                 as Arc<dyn peri_acp_types::cron::CronSchedulerPort>
         }),
         None, // MCP 订阅端口（测试无）
         None, // Dynamic MCP（测试无）
-        None, // 无 bg 场景：fallback NoopTaskManager
-        Arc::new(peri_middlewares::host_ports::SkillsProvider),
+        task_manager_factory,
+        Arc::new(peri_middlewares::host_ports::AgentCatalogProvider::new()),
         plugin_entries,
-        Vec::new(), // plugin skill roots（C1；测试无）
     )
 }
 
@@ -226,9 +232,8 @@ async fn make_manager_with_mcp_subscription(
         mcp_subscription,
         None, // Dynamic MCP（测试无）
         None, // 无 bg 场景：fallback NoopTaskManager
-        Arc::new(peri_middlewares::host_ports::SkillsProvider),
+        Arc::new(peri_middlewares::host_ports::AgentCatalogProvider::new()),
         Vec::new(), // plugin 命令条目（Phase 6 B2；测试无）
-        Vec::new(), // plugin skill roots（C1；测试无）
     )
 }
 
@@ -286,7 +291,7 @@ async fn test_build_frozen_data_返回非空system_prompt() {
     let tmp = tempfile::TempDir::new().unwrap();
     let mgr = make_session_manager(&tmp).await;
 
-    let frozen = mgr.build_frozen_data(tmp.path().to_str().unwrap(), &[], &[]);
+    let frozen = mgr.build_frozen_data(tmp.path().to_str().unwrap());
     assert!(
         !frozen.system_prompt().is_empty(),
         "frozen system_prompt 不应为空"
@@ -352,6 +357,7 @@ async fn test_ensure_session_subscribes_cron_before_first_turn() {
     let (mgr, scheduler, mut continuation_rx) = make_session_manager_with_cron(&tmp).await;
     let session_id = "test-cron-before-first-turn";
 
+    persist_cron_session(&mgr, &tmp, session_id).await;
     mgr.ensure_session(session_id, "/tmp");
 
     let task_id = scheduler
@@ -381,6 +387,7 @@ async fn test_cron_bridge_survives_turn_error() {
     let tmp = tempfile::TempDir::new().unwrap();
     let (mgr, scheduler, mut continuation_rx) = make_session_manager_with_cron(&tmp).await;
     let session_id = "test-cron-turn-error";
+    persist_cron_session(&mgr, &tmp, session_id).await;
     mgr.ensure_session(session_id, "/tmp");
     assert!(mgr.cron_bridge_for(session_id));
 
@@ -426,6 +433,7 @@ async fn test_cron_bridge_idle_trigger_forwards_continuation_without_early_enque
     let tmp = tempfile::TempDir::new().unwrap();
     let (mgr, scheduler, mut continuation_rx) = make_session_manager_with_cron(&tmp).await;
     let session_id = "test-cron-idle";
+    persist_cron_session(&mgr, &tmp, session_id).await;
     mgr.ensure_session(session_id, "/tmp");
     assert!(mgr.cron_bridge_for(session_id));
 
@@ -673,254 +681,8 @@ async fn test_mcp_skill_registry_lifecycle_released_on_close() {
     );
 }
 
-// ─── MetaHarness 冻结状态（设计 §2.3）───────────────────────────────────────
-
-use std::collections::HashMap;
-
-fn mh_cfg(entries: &[(&str, bool)]) -> HashMap<String, bool> {
-    entries.iter().map(|(k, v)| (k.to_string(), *v)).collect()
-}
-
-fn default_state() -> peri_acp_types::meta_harness::MetaHarnessState {
-    peri_acp_types::meta_harness::MetaHarnessState::default()
-}
-
-#[test]
-fn build_meta_harness_state_empty_config_is_default() {
-    let state = super::frozen::build_meta_harness_state(None, HashMap::new());
-    assert_eq!(state, default_state());
-    let state = super::frozen::build_meta_harness_state(Some(&HashMap::new()), HashMap::new());
-    assert_eq!(state, default_state());
-}
-
-#[test]
-fn build_meta_harness_state_can_disable_built_in_subagents() {
-    let state = super::frozen::build_meta_harness_state(
-        Some(&mh_cfg(&[("BuiltInSubagents", false)])),
-        HashMap::new(),
-    );
-    assert!(!state.built_in_subagents_enabled);
-}
-
-#[test]
-fn build_meta_harness_state_section_true_with_doc_enters_overrides() {
-    let mut docs = HashMap::new();
-    docs.insert("01_intro".to_string(), "custom intro".to_string());
-    let state = super::frozen::build_meta_harness_state(Some(&mh_cfg(&[("01_intro", true)])), docs);
-    assert_eq!(
-        state.section_overrides.get("01_intro").map(|s| s.as_ref()),
-        Some("custom intro")
-    );
-    assert!(state.disabled_middlewares.is_empty());
-}
-
-#[test]
-fn build_meta_harness_state_section_true_without_doc_warns_and_ignores() {
-    let state = super::frozen::build_meta_harness_state(
-        Some(&mh_cfg(&[("01_intro", true)])),
-        HashMap::new(),
-    );
-    assert!(
-        state.section_overrides.is_empty(),
-        "文档缺失时忽略覆盖（保持内置段落）"
-    );
-}
-
-#[test]
-fn build_meta_harness_state_section_false_does_not_override() {
-    let mut docs = HashMap::new();
-    docs.insert("01_intro".to_string(), "custom intro".to_string());
-    let state =
-        super::frozen::build_meta_harness_state(Some(&mh_cfg(&[("01_intro", false)])), docs);
-    assert!(
-        state.section_overrides.is_empty(),
-        "section + false = 显式不覆盖，即使文档存在"
-    );
-}
-
-#[test]
-fn build_meta_harness_state_middleware_false_enters_disabled() {
-    let state = super::frozen::build_meta_harness_state(
-        Some(&mh_cfg(&[("WebMiddleware", false)])),
-        HashMap::new(),
-    );
-    assert!(state.disabled_middlewares.contains("WebMiddleware"));
-    assert!(state.section_overrides.is_empty());
-}
-
-#[test]
-fn build_meta_harness_state_middleware_true_not_disabled() {
-    let state = super::frozen::build_meta_harness_state(
-        Some(&mh_cfg(&[("WebMiddleware", true)])),
-        HashMap::new(),
-    );
-    assert!(
-        state.disabled_middlewares.is_empty(),
-        "middleware + true = 显式恢复装配"
-    );
-}
-
-#[test]
-fn build_meta_harness_state_mixed_entries() {
-    let mut docs = HashMap::new();
-    docs.insert("01_intro".to_string(), "intro".to_string());
-    docs.insert("05_using_tools".to_string(), "tools".to_string());
-    let state = super::frozen::build_meta_harness_state(
-        Some(&mh_cfg(&[
-            ("01_intro", true),
-            ("05_using_tools", false),
-            ("WebMiddleware", false),
-            ("FilesystemMiddleware", true),
-        ])),
-        docs,
-    );
-    assert_eq!(state.section_overrides.len(), 1, "仅 true+文档存在 进入");
-    assert!(state.section_overrides.contains_key("01_intro"));
-    assert!(!state.section_overrides.contains_key("05_using_tools"));
-    assert_eq!(state.disabled_middlewares.len(), 1);
-    assert!(state.disabled_middlewares.contains("WebMiddleware"));
-    assert!(!state.disabled_middlewares.contains("FilesystemMiddleware"));
-}
-
-/// 集成：build_frozen_data 应用段落覆盖 + middleware 关闭集合到冻结载体；
-/// 主 prompt 与 SubAgent 无 workflow prompt 共用同一覆盖。
-#[tokio::test]
-async fn test_build_frozen_data_applies_meta_harness_state() {
-    let tmp = tempfile::TempDir::new().unwrap();
-    let cwd = tmp.path().to_str().unwrap().to_string();
-    // .peri/meta/01_intro.md 与 .peri/meta/05_using_tools.md
-    let meta_dir = std::path::Path::new(&cwd).join(".peri").join("meta");
-    std::fs::create_dir_all(&meta_dir).unwrap();
-    std::fs::write(meta_dir.join("01_intro.md"), "CUSTOM-INTRO-BODY").unwrap();
-    std::fs::write(meta_dir.join("05_using_tools.md"), "CUSTOM-TOOLS-BODY").unwrap();
-
-    let session_resources =
-        peri_agent::resources::open_session_resources_with(Some(tmp.path().join("threads.db")))
-            .await
-            .unwrap();
-    let mut peri_config = PeriConfig::default();
-    peri_config.config.active_alias = "sonnet".to_string();
-    peri_config.config.providers = vec![make_provider_config("a", "gpt-4o")];
-    peri_config.config.profiles = Profiles {
-        sonnet: ProfileConfig {
-            provider: "a".to_string(),
-            ..Default::default()
-        },
-        ..Default::default()
-    };
-    peri_config.config.meta_harness = Some(mh_cfg(&[
-        ("01_intro", true),
-        ("05_using_tools", true),
-        ("WebMiddleware", false),
-    ]));
-    let provider = LlmProvider::from_config(&peri_config).unwrap();
-    let mgr = SessionManager::new(
-        session_resources,
-        provider,
-        Arc::new(peri_config),
-        SharedPermissionMode::new(PermissionMode::Bypass),
-        None,
-        None,
-        None,
-        None,
-        None,
-        Arc::new(peri_middlewares::host_ports::SkillsProvider),
-        Vec::new(), // plugin 命令条目（Phase 6 B2；测试无）
-        Vec::new(), // plugin skill roots（C1；测试无）
-    );
-
-    let frozen = mgr.build_frozen_data(&cwd, &[], &[]);
-    let state = frozen.meta_harness();
-    assert_eq!(
-        state.section_overrides.get("01_intro").map(|s| s.as_ref()),
-        Some("CUSTOM-INTRO-BODY"),
-        "冻结状态包含段落覆盖"
-    );
-    assert_eq!(
-        state
-            .section_overrides
-            .get("05_using_tools")
-            .map(|s| s.as_ref()),
-        Some("CUSTOM-TOOLS-BODY")
-    );
-    assert!(
-        state.disabled_middlewares.contains("WebMiddleware"),
-        "冻结状态包含关闭集合"
-    );
-    // 主 prompt 应用覆盖（SubAgent / fork / workflow agent 直接复用主
-    // prompt——子面向字段已随 C5 移除，无独立断言对象）
-    assert!(
-        frozen.system_prompt().contains("CUSTOM-INTRO-BODY"),
-        "主 prompt 应用覆盖"
-    );
-    // accessor 与 v2_frozen 返回同一状态（单事实源）
-    assert_eq!(
-        frozen.meta_harness(),
-        &frozen.v2_frozen().meta_harness,
-        "accessor 与 FrozenContext 字段一致"
-    );
-}
-
-/// 冻结语义：构造后修改/删除 .peri/meta 文件，已构造的 frozen data 不变；
-/// 新建（重新 build_frozen_data）才看到新内容。
-#[tokio::test]
-async fn test_frozen_data_does_not_reread_meta_docs() {
-    let tmp = tempfile::TempDir::new().unwrap();
-    let cwd = tmp.path().to_str().unwrap().to_string();
-    let meta_dir = std::path::Path::new(&cwd).join(".peri").join("meta");
-    std::fs::create_dir_all(&meta_dir).unwrap();
-    std::fs::write(meta_dir.join("01_intro.md"), "V1-BODY").unwrap();
-
-    let session_resources =
-        peri_agent::resources::open_session_resources_with(Some(tmp.path().join("threads.db")))
-            .await
-            .unwrap();
-    let mut peri_config = PeriConfig::default();
-    peri_config.config.active_alias = "sonnet".to_string();
-    peri_config.config.providers = vec![make_provider_config("a", "gpt-4o")];
-    peri_config.config.profiles = Profiles {
-        sonnet: ProfileConfig {
-            provider: "a".to_string(),
-            ..Default::default()
-        },
-        ..Default::default()
-    };
-    peri_config.config.meta_harness = Some(mh_cfg(&[("01_intro", true)]));
-    let provider = LlmProvider::from_config(&peri_config).unwrap();
-    let mgr = SessionManager::new(
-        session_resources,
-        provider,
-        Arc::new(peri_config),
-        SharedPermissionMode::new(PermissionMode::Bypass),
-        None,
-        None,
-        None,
-        None,
-        None,
-        Arc::new(peri_middlewares::host_ports::SkillsProvider),
-        Vec::new(), // plugin 命令条目（Phase 6 B2；测试无）
-        Vec::new(), // plugin skill roots（C1；测试无）
-    );
-
-    let frozen = mgr.build_frozen_data(&cwd, &[], &[]);
-    assert!(frozen.system_prompt().contains("V1-BODY"));
-
-    // 删除文件并重建：已构造的 frozen 不变；新 build 才看到变化（无覆盖）
-    std::fs::remove_file(meta_dir.join("01_intro.md")).unwrap();
-    assert!(
-        frozen.system_prompt().contains("V1-BODY"),
-        "已冻结的 prompt 不因磁盘变化而变（ARC-FROZEN-001）"
-    );
-    let frozen2 = mgr.build_frozen_data(&cwd, &[], &[]);
-    assert!(
-        !frozen2.system_prompt().contains("V1-BODY"),
-        "新会话（新 build）才反映变更"
-    );
-    assert!(
-        frozen2.meta_harness().section_overrides.is_empty(),
-        "文档删除后新冻结状态无覆盖"
-    );
-}
+#[path = "mod_meta_harness_test.rs"]
+mod meta_harness_tests;
 
 /// 占位 handler：测试只断言路由层（注册 / 解析 / 投影），不触发执行。
 struct TestHandler;
@@ -932,10 +694,14 @@ impl CommandHandler for TestHandler {
     }
 }
 
-// ─── Phase 6 B2/C1：会话创建注册本地 skills（core 域）+ 插件静态命令 ────
+// ─── Phase 6 B2/F6：会话创建命令面（内置 + 插件；技能命令由 MCP 发现投影）──
 
 /// 写入本地 skill fixture：`{cwd}/.claude/skills/{dir}/SKILL.md`
-/// （frontmatter name 可含任意字符串——含冒号形态由词法校验兜底）。
+///
+/// W4b（F6/J5）后它只作为**反例**存在：宿主命令面不再扫盘，`.claude/skills`
+/// 由一个 MCP 通道（builtin `workspace` 实例）提供，`core:{skill}` 裸名命令由
+/// 发现完成后的 registry 投影写入（`peri-middlewares/src/mcp/skill_discovery.rs`
+/// 的 `project_core_skill_commands`）。
 fn write_local_skill(cwd: &std::path::Path, dir: &str, skill_name: &str) {
     let dir_path = cwd.join(".claude").join("skills").join(dir);
     std::fs::create_dir_all(&dir_path).unwrap();
@@ -946,145 +712,39 @@ fn write_local_skill(cwd: &std::path::Path, dir: &str, skill_name: &str) {
     .unwrap();
 }
 
-/// C1：本地 skill 注册为 `core:{name}`（第一等级显式形态，kind = Skill），
-/// 裸名快捷匹配可用（第一等级裸名 alias_index 登记）。
+/// F6：会话构造**不**扫盘注册技能命令——磁盘上有 SKILL.md 也不产生 `core:hello`。
+///
+/// 技能命令面改由 MCP 发现异步投影（本用例锁死「构造期零技能 FS 读取」这一半；
+/// 投影正例见 `peri-middlewares` 的 `skill_discovery` 用例与
+/// `requests_skill_resources_test.rs` 的端到端用例）。
 #[tokio::test]
-async fn test_session_creation_registers_local_skills_core_domain() {
+async fn test_session_creation_does_not_scan_disk_for_skill_commands() {
     let tmp = tempfile::TempDir::new().unwrap();
     write_local_skill(tmp.path(), "hello", "hello");
     let mgr = make_session_manager(&tmp).await;
     mgr.ensure_session("s1", tmp.path().to_str().unwrap());
 
     let reg = mgr.command_registry_for("s1").expect("session 注册表存在");
-    let resolved = reg.resolve("/hello").expect("裸名命中本地 skill");
-    assert_eq!(resolved.entry.fullname, "core:hello");
-    assert_eq!(resolved.entry.kind, CommandEntryKind::Skill);
-    assert_eq!(resolved.entry.description, "test skill hello");
-
-    let resolved = reg.resolve("/core:hello").expect("全名命中");
-    assert_eq!(resolved.entry.kind, CommandEntryKind::Skill);
-}
-
-#[tokio::test]
-async fn test_session_creation_registers_builtin_skill_alias() {
-    let tmp = tempfile::TempDir::new().unwrap();
-    let mgr = make_session_manager(&tmp).await;
-    mgr.ensure_session("s1", tmp.path().to_str().unwrap());
-
-    let reg = mgr.command_registry_for("s1").expect("session 注册表存在");
-    let resolved = reg.resolve("/ptc").expect("builtin alias 应命中");
-
-    assert_eq!(resolved.entry.fullname, "core:programmatic-tool-calling");
-    assert_eq!(resolved.entry.kind, CommandEntryKind::Skill);
-}
-
-/// MetaHarness 关闭 SkillsMiddleware 时，本地 skill 不得进入命令注册表；否则
-/// slash 路由会经 AgentPassthrough 绕开 middleware 的装配期开关。
-#[tokio::test]
-async fn test_session_creation_does_not_register_skills_when_disabled() {
-    let tmp = tempfile::TempDir::new().unwrap();
-    write_local_skill(tmp.path(), "hello", "hello");
-    let mgr = make_session_manager_skills_disabled(&tmp).await;
-    mgr.ensure_session("s1", tmp.path().to_str().unwrap());
-
-    let reg = mgr.command_registry_for("s1").expect("session 注册表存在");
-    assert!(reg.resolve("/hello").is_none());
-    assert!(reg.resolve("/core:hello").is_none());
-}
-
-/// C1 冲突裁决：内置 compact 先注册 → 同名 skill 被拒 + 告警，注册表保持
-/// 内置条目（不覆盖、不静默；冲突纯拒绝 + 装配顺序即优先级）。
-#[tokio::test]
-async fn test_session_creation_core_conflict_keeps_builtin() {
-    let tmp = tempfile::TempDir::new().unwrap();
-    write_local_skill(tmp.path(), "compact", "compact");
-    let mgr = make_session_manager(&tmp).await;
-    mgr.ensure_session("s1", tmp.path().to_str().unwrap());
-
-    let reg = mgr.command_registry_for("s1").expect("session 注册表存在");
-    let snap = reg.snapshot();
-    let compact = snap
-        .iter()
-        .find(|e| e.fullname == "core:compact")
-        .expect("内置 core:compact 存在");
-    assert_eq!(
-        compact.kind,
-        CommandEntryKind::Command,
-        "同名 skill 被拒，注册表保持内置条目"
+    assert!(
+        reg.resolve("/hello").is_none(),
+        "构造期不得从磁盘注册裸名技能命令"
     );
     assert!(
-        !snap
-            .iter()
-            .any(|e| e.fullname == "core:compact" && e.kind == CommandEntryKind::Skill),
-        "Skill 形态的 core:compact 不得存在（不覆盖）"
+        reg.resolve("/core:hello").is_none(),
+        "构造期不得从磁盘注册 core 域技能命令"
     );
-    let resolved = reg.resolve("/compact").expect("裸名命中内置");
-    assert_eq!(resolved.entry.kind, CommandEntryKind::Command);
-}
-
-/// C1 名称规范化：扫描时将 skill 名中的冒号改为连字符，使其能注册为
-/// `core:{name}` 第一等级显式形态，裸名快捷匹配可用。
-#[tokio::test]
-async fn test_session_creation_normalizes_skill_name_with_colon() {
-    let tmp = tempfile::TempDir::new().unwrap();
-    write_local_skill(tmp.path(), "namespaced", "foo:bar");
-    let mgr = make_session_manager(&tmp).await;
-    mgr.ensure_session("s1", tmp.path().to_str().unwrap());
-
-    let reg = mgr.command_registry_for("s1").expect("session 注册表存在");
-    let resolved = reg.resolve("/foo-bar").expect("规范化名称应可解析");
-    assert_eq!(resolved.entry.fullname, "core:foo-bar");
-    assert_eq!(resolved.entry.kind, CommandEntryKind::Skill);
-    assert!(
-        reg.resolve("/foo:bar").is_none(),
-        "原始冒号名称不再作为命令注册"
-    );
-}
-
-/// B2 集成：会话创建注册插件静态命令 `plugin:{plugin}:{cmd}`（kind =
-/// Command，provenance = Plugin{name} + Connected），第二等级完整形态可解析。
-#[tokio::test]
-async fn test_session_creation_registers_plugin_commands() {
-    let tmp = tempfile::TempDir::new().unwrap();
-    let plugin_entry = RouteEntry {
-        fullname: "plugin:ecc:deploy".into(),
-        aliases: vec![],
-        description: "deploy command".into(),
-        kind: CommandEntryKind::Command,
-        category: None,
-        args_schema: None,
-        handler: Arc::new(TestHandler),
-        provenance: CommandProvenance {
-            source: CommandSource::Plugin { name: "ecc".into() },
-            lifecycle: CommandLifecycle::Connected,
-        },
-    };
-    let mgr = make_manager_with_plugin_entries(&tmp, vec![plugin_entry]).await;
-    mgr.ensure_session("s1", tmp.path().to_str().unwrap());
-
-    let reg = mgr.command_registry_for("s1").expect("session 注册表存在");
-    let resolved = reg.resolve("/plugin:ecc:deploy").expect("插件命令命中");
-    assert_eq!(resolved.entry.kind, CommandEntryKind::Command);
-    assert_eq!(resolved.entry.description, "deploy command");
+    // 内置命令照常注册（命令面本身可用）。
     assert_eq!(
-        resolved.entry.provenance.source,
-        CommandSource::Plugin { name: "ecc".into() },
-        "provenance = 剥离 plugin: 前缀的插件名"
+        reg.resolve("/compact").unwrap().entry.kind,
+        CommandEntryKind::Command
     );
-    assert_eq!(
-        resolved.entry.provenance.lifecycle,
-        CommandLifecycle::Connected
-    );
-    // 第二等级不登记裸名（deploy 不可解析）。
-    assert!(reg.resolve("/deploy").is_none());
 }
 
-/// B2 注册顺序：内置 → 本地 skills → 插件（先注册者占键）。插件与内置/
-/// skill 键空间不相交（plugin: 域 vs core: 域），冲突裁决仅按键唯一性。
+/// B2 注册顺序：内置 → 插件（先注册者占键）；技能命令由发现面后写，
+/// core 域同名冲突在内置侧纯拒绝。
 #[tokio::test]
-async fn test_session_creation_register_order_builtin_skill_plugin() {
+async fn test_session_creation_register_order_builtin_then_plugin() {
     let tmp = tempfile::TempDir::new().unwrap();
-    write_local_skill(tmp.path(), "hello", "hello");
     let mgr = make_manager_with_plugin_entries(
         &tmp,
         vec![RouteEntry {
@@ -1105,17 +765,119 @@ async fn test_session_creation_register_order_builtin_skill_plugin() {
     mgr.ensure_session("s1", tmp.path().to_str().unwrap());
 
     let reg = mgr.command_registry_for("s1").expect("session 注册表存在");
-    // 内置（core:compact）与 skill（core:hello）、插件（plugin:ecc:deploy）共存。
+    // 内置（core:compact）与插件（plugin:ecc:deploy）共存。
     assert_eq!(
         reg.resolve("/compact").unwrap().entry.kind,
         CommandEntryKind::Command
     );
     assert_eq!(
-        reg.resolve("/hello").unwrap().entry.kind,
-        CommandEntryKind::Skill
-    );
-    assert_eq!(
         reg.resolve("/plugin:ecc:deploy").unwrap().entry.kind,
         CommandEntryKind::Command
     );
+}
+
+/// F6 冲突裁决（registry 层，不依赖磁盘）：内置 compact 先注册 → 同名
+/// `core:compact` 技能条目被纯拒绝，注册表保持内置条目（不覆盖、不静默）。
+#[tokio::test]
+async fn test_builtin_command_wins_over_same_name_skill_projection() {
+    let tmp = tempfile::TempDir::new().unwrap();
+    let mgr = make_session_manager(&tmp).await;
+    mgr.ensure_session("s1", tmp.path().to_str().unwrap());
+    let reg = mgr.command_registry_for("s1").expect("session 注册表存在");
+
+    // 发现面投影形态：`core:{skill}` + kind = Skill + source = Core
+    let (removed, added) = reg.reconcile(
+        &[],
+        vec![RouteEntry {
+            fullname: "core:compact".into(),
+            aliases: vec![],
+            description: "same-name skill".into(),
+            kind: CommandEntryKind::Skill,
+            category: None,
+            args_schema: None,
+            handler: Arc::new(TestHandler),
+            provenance: CommandProvenance {
+                source: CommandSource::Core,
+                lifecycle: CommandLifecycle::Connected,
+            },
+        }],
+    );
+    assert_eq!(
+        (removed, added),
+        (0, 0),
+        "同名技能条目必须被拒（不覆盖内置）"
+    );
+
+    let snap = reg.snapshot();
+    let compact = snap
+        .iter()
+        .find(|e| e.fullname == "core:compact")
+        .expect("内置 core:compact 存在");
+    assert_eq!(
+        compact.kind,
+        CommandEntryKind::Command,
+        "注册表保持内置条目"
+    );
+    assert!(
+        !snap
+            .iter()
+            .any(|e| e.fullname == "core:compact" && e.kind == CommandEntryKind::Skill),
+        "Skill 形态的 core:compact 不得存在（不覆盖）"
+    );
+    let resolved = reg.resolve("/compact").expect("裸名命中内置");
+    assert_eq!(resolved.entry.kind, CommandEntryKind::Command);
+}
+
+// ── AW3-11：per-session TaskManager 的携带路径 ────────────────────────────────
+
+/// `ensure_session_with_task_manager` 携带的 manager 必须**原样**成为会话持有的
+/// `AcpSession::task_manager`（同一 `Arc`，不是复制、不是重新工厂化）；`None` 路径
+/// 仍走装配注入的工厂——两条来源在同一个 manager 上可辨识。
+#[tokio::test]
+async fn ensure_session_with_task_manager_keeps_the_same_arc() {
+    let tmp = tempfile::TempDir::new().unwrap();
+    let mgr = make_manager_with_task_manager_factory(&tmp).await;
+    let carried: Arc<dyn peri_acp_types::tasks::TaskManager> =
+        Arc::new(peri_agent::agent::async_tasks::TaskManager::new());
+
+    mgr.ensure_session_with_task_manager("aw3-11-carried", "/tmp", Some(Arc::clone(&carried)));
+    let stored = Arc::clone(&mgr.get_session("aw3-11-carried").unwrap().task_manager);
+    assert!(
+        Arc::ptr_eq(&stored, &carried),
+        "会话持有的必须是送进来的同一份 Arc"
+    );
+    assert!(
+        !stored
+            .as_any()
+            .is::<peri_acp_types::tasks::NoopTaskManager>(),
+        "携带路径不得退化成 Noop"
+    );
+
+    // 既有签名（delegate 到 `None`）不变：走工厂，与携带的那份非同一实例。
+    mgr.ensure_session("aw3-11-factory", "/tmp");
+    let from_factory = Arc::clone(&mgr.get_session("aw3-11-factory").unwrap().task_manager);
+    assert!(
+        !Arc::ptr_eq(&from_factory, &carried),
+        "None 路径必须走工厂，不得复用外部携带的 manager"
+    );
+    assert!(
+        !from_factory
+            .as_any()
+            .is::<peri_acp_types::tasks::NoopTaskManager>(),
+        "工厂已注入 ⇒ 不得 fallback NoopTaskManager"
+    );
+}
+
+/// 未注入工厂时 `None` 路径仍是既有的 `NoopTaskManager` fallback（行为不变）。
+#[tokio::test]
+async fn ensure_session_without_factory_still_falls_back_to_noop() {
+    let tmp = tempfile::TempDir::new().unwrap();
+    let mgr = make_session_manager(&tmp).await;
+    mgr.ensure_session("aw3-11-noop", "/tmp");
+    assert!(mgr
+        .get_session("aw3-11-noop")
+        .unwrap()
+        .task_manager
+        .as_any()
+        .is::<peri_acp_types::tasks::NoopTaskManager>());
 }

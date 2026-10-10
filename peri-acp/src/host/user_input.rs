@@ -94,7 +94,6 @@ pub(super) async fn publish_run_started(
         None,
     )
     .await;
-    // The client must open reverse-interaction admission before Agent can request HITL.
     loop {
         match subscriber.try_recv() {
             Ok(Some(message)) if message.envelope.session_id == session_id => {
@@ -244,7 +243,7 @@ pub(super) fn schedule_mailbox(
                 });
                 let result = super::prompt_dispatch::dispatch_prompt_turn_with_input(
                     params,
-                    true,
+                    super::PromptOrigin::QueuedUser,
                     None,
                     &sessions,
                     &prompt_locks,

@@ -18,6 +18,7 @@ pub enum BgTaskKind {
     Shell,
     Agent,
     Workflow,
+    Mcp,
 }
 
 /// 后台任务注册表事件（registry → executor 事件推送通道）
@@ -45,6 +46,96 @@ pub enum BgRegistryEvent {
         task_id: String,
         reason: String,
     },
+    Updated {
+        task_id: String,
+        status: String,
+    },
+}
+
+/// One change in a session task stream. Subscribe before reading a snapshot,
+/// then discard changes at or below its revision.
+#[derive(Debug, Clone)]
+pub struct TaskChange {
+    pub revision: u64,
+    pub event: BgRegistryEvent,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct TaskRecord {
+    pub task_id: String,
+    pub kind: BgTaskKind,
+    pub summary: String,
+    pub started_at: String,
+    pub status: String,
+    pub duration_ms: u64,
+    pub output_preview: Option<String>,
+    /// 投递归属（直接发起会话）；`None` = 未记录（本地 owner 任务或测试投影）。
+    /// 快照/增量事件携带它，root 面板据此归属子会话发起的任务（只读投影）。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub initiator_session_id: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct TaskSnapshot {
+    pub revision: u64,
+    pub tasks: Vec<TaskRecord>,
+}
+
+pub type ExternalCancelFn =
+    Arc<dyn Fn() -> Pin<Box<dyn Future<Output = Result<(), String>> + Send>> + Send + Sync>;
+/// Terminal delivery hook. Delivery is durable and confirmed before the task
+/// projection publishes a terminal state, so it cannot be a synchronous
+/// fire-and-forget call: callers await the returned future and keep the task
+/// unsettled when it fails.
+pub type ExternalNotifyFn = Arc<
+    dyn Fn(
+            &BackgroundTaskResult,
+            crate::messages::MessageId,
+        ) -> Pin<Box<dyn Future<Output = Result<(), String>> + Send>>
+        + Send
+        + Sync,
+>;
+
+/// Terminal-reminder route into the session that initiated a current task.
+///
+/// Local routes may acknowledge synchronous queue acceptance. Asynchronous
+/// routes must be awaited by their owner before acknowledging delivery.
+pub trait TaskTerminalDelivery: Send + Sync {
+    /// Accept a reminder synchronously, or explicitly reject this capability.
+    /// Failure leaves the task unsettled; it must not start detached delivery.
+    fn accept(
+        &self,
+        _delivery_id: crate::messages::MessageId,
+        _reminder: &crate::system_reminder::TrustedSystemReminder,
+        _source: crate::session::MessageSource,
+    ) -> Result<(), String> {
+        Err("terminal route requires owner-awaited asynchronous delivery".into())
+    }
+
+    fn deliver<'a>(
+        &'a self,
+        delivery_id: crate::messages::MessageId,
+        reminder: &'a crate::system_reminder::TrustedSystemReminder,
+        source: crate::session::MessageSource,
+    ) -> Pin<Box<dyn Future<Output = Result<(), String>> + Send + 'a>>;
+}
+
+/// Identity is supplied by the trusted connection adapter, never tool input.
+pub struct ExternalTaskRegistration {
+    /// Session that owns the task projection, scope and recovery reconciliation.
+    pub session_id: String,
+    /// Session that initiated the tool call. A known initiator is immutable;
+    /// discovery without one cannot replace its route. An unknown initiator
+    /// is unroutable and never implies delivery to a parent or root session.
+    pub initiator_session_id: Option<String>,
+    pub owner_identity: String,
+    pub owner_task_id: String,
+    pub kind: BgTaskKind,
+    pub summary: String,
+    /// Owner creation timestamp (RFC3339); absent only when the owner omits it.
+    pub started_at: Option<String>,
+    pub cancel: ExternalCancelFn,
+    pub on_terminal: ExternalNotifyFn,
 }
 
 /// 后台任务注册请求（middleware / workflow 发起面 → `TaskManager::register` 的
@@ -63,8 +154,10 @@ pub struct BgTaskRegistration {
     pub kill: Option<Box<dyn FnOnce() + Send + Sync>>,
 }
 
-/// bg 完成回调（TaskManager 完成收尾时通知调用方）。
-pub type OnBgCompleteFn = Arc<dyn Fn(&BackgroundTaskResult, BgTaskKind) + Send + Sync>;
+/// 确认终态已发布到接收方；失败或 panic 时 owner 保留原结果，不能提前完成任务。
+/// `Ok(())` 确认接纳，不表示 Receive 或模型已经处理。
+pub type OnBgCompleteFn =
+    Arc<dyn Fn(&BackgroundTaskResult, BgTaskKind) -> Result<(), String> + Send + Sync>;
 
 /// Cleanup evidence for a session's background execution scope.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -83,15 +176,15 @@ pub trait ExternalExecutionGuard: Send {
 
 /// 后台 shell 启动结果（`TaskManager::spawn_shell` 返回值）。
 ///
-/// 工具层将 task_id / pid / 日志路径回显给 LLM：LLM 可通过另一个 shell
-/// 执行 `kill <pid>` 终止任务，凭 task_id 在 Tasks 面板监控状态与输出预览，
-/// 或经 Read 工具实时读取输出日志文件。
+/// 这是执行环境侧的产品：pid 与输出日志路径供宿主/面板与本地执行环境使用。
+/// 经 MCP Tasks 暴露给模型时，模型面回执只携带 opaque task id（`mcp-` 前缀，
+/// 见 `McpToolBridge`）；完成提醒携带退出信息与输出文件引用，不承诺 pid。
 #[derive(Debug, Clone)]
 pub struct BgShellHandle {
     /// 任务标识（`shell-{uuid v7}`）。
     pub task_id: String,
     /// OS 进程 PID（Unix 下为进程组组长：`kill -- -{pid}` 可杀整组含子进程，
-    /// 与 Agent 层 `kill_process_group_escalating` 语义一致）。
+    /// 本地执行环境取消会先 TERM，再有界等待并升级 KILL）。
     /// `None` = 进程 spawn 失败（任务注册后立即按失败收尾，失败通知仍会到达）。
     pub pid: Option<u32>,
     /// stdout 实时输出日志文件路径（运行期间持续追加，agent 可用 Read 读取；
@@ -104,10 +197,72 @@ pub struct BgShellHandle {
 /// 后台任务管理接口（跨层面：ACP session 生命周期、/bg 并发预检、
 /// middleware 的 shell 发起与完成收尾使用）。
 ///
-/// 实现与完整方法面（registry 簿记、进程 spawn 等）留在 peri-agent
-/// `TaskManager`（per-session 聚合根）；本 trait 只承载跨层需要的操作，
+/// 生命周期实现（registry 簿记、准入、完成与关闭证据）留在 peri-agent
+/// `TaskManager`；shell 执行与输出由注入的执行环境承担。本 trait 只承载跨层操作，
 /// `Arc<dyn TaskManager>` 由 Agent 层实现、经装配注入到 ACP / middlewares。
 pub trait TaskManager: std::any::Any + Send + Sync {
+    fn restore_external_terminal(
+        &self,
+        _request: ExternalTaskRegistration,
+        _terminal_transition_id: &str,
+        _result: BackgroundTaskResult,
+    ) -> Pin<Box<dyn Future<Output = Result<String, String>> + Send + '_>> {
+        Box::pin(async { Err("external terminal restoration is unavailable".into()) })
+    }
+    fn external_task_ids(&self) -> Vec<String> {
+        Vec::new()
+    }
+    fn has_unsettled_external(&self) -> bool {
+        false
+    }
+    fn mark_external_lost(&self, _task_id: &str) -> bool {
+        false
+    }
+    fn mark_external_running(&self, _task_id: &str) -> bool {
+        false
+    }
+    fn snapshot(&self) -> TaskSnapshot {
+        TaskSnapshot {
+            revision: 0,
+            tasks: Vec::new(),
+        }
+    }
+    fn subscribe_events(&self) -> tokio::sync::broadcast::Receiver<TaskChange> {
+        let (tx, rx) = tokio::sync::broadcast::channel(1);
+        drop(tx);
+        rx
+    }
+    fn register_external(&self, _request: ExternalTaskRegistration) -> Result<String, String> {
+        Err("external tasks are unavailable".into())
+    }
+    fn settle_external(
+        &self,
+        _task_id: &str,
+        _terminal_transition_id: &str,
+        _result: BackgroundTaskResult,
+    ) -> Pin<Box<dyn Future<Output = Result<bool, String>> + Send + '_>> {
+        Box::pin(async { Err("external terminal delivery is unavailable".into()) })
+    }
+
+    /// Terminal give-up for an external task whose owner stays unobservable for
+    /// the whole bounded retry window. Delivers one final, explicitly marked
+    /// reminder and settles the projection, so a lost task can neither stay
+    /// active forever nor disappear silently. Returns whether a terminal record
+    /// was published.
+    fn abandon_external(
+        &self,
+        _task_id: &str,
+        _reason: &str,
+    ) -> Pin<Box<dyn Future<Output = Result<bool, String>> + Send + '_>> {
+        Box::pin(async { Ok(false) })
+    }
+    fn cancel_async(
+        &self,
+        task_id: &str,
+    ) -> Pin<Box<dyn Future<Output = Result<(), String>> + Send + '_>> {
+        let task_id = task_id.to_owned();
+        Box::pin(async move { self.cancel(&task_id) })
+    }
     /// Record actual external drain without changing notification delivery or UI state.
     /// Call only after the registered execution and its children have joined.
     fn confirm_external_execution_stopped(&self, _task_id: &str) {}
@@ -140,8 +295,21 @@ pub trait TaskManager: std::any::Any + Send + Sync {
     /// middleware 发起面调用，错误语义经 String 表达——并发上限 / 注册失败）。
     fn register(&self, request: BgTaskRegistration) -> Result<(), String>;
 
-    /// 标记任务完成（result 注入事件载荷）。
+    /// 仅结算无需通知接收方的 execution-only 任务，或已确认交付的外部任务。
+    /// 需要通知接收方的 owned 任务必须使用 settle_completed。
     fn complete(&self, task_id: &str, result: BackgroundTaskResult) -> bool;
+
+    /// 需要通知接收方的 owned 任务统一由 owner 执行交付后结算。
+    /// 交付失败保持 delivery_pending；重复已完成结算返回 false。
+    fn settle_completed(
+        &self,
+        task_id: &str,
+        result: BackgroundTaskResult,
+        delivery: OnBgCompleteFn,
+    ) -> Result<bool, String>;
+
+    /// 重试保留的结果，返回已成功交付的数量，不重跑任务执行。
+    fn retry_pending_deliveries(&self) -> usize;
 
     /// 取消任务（ACP session/cancel_task 定位转发；错误语义经 String 表达，
     /// ACP 侧包 context 为协议错误）。
@@ -161,8 +329,24 @@ pub trait TaskManager: std::any::Any + Send + Sync {
         Err("task manager does not support owned execution".into())
     }
 
-    fn begin_external_execution(&self) -> Result<Box<dyn ExternalExecutionGuard>, String> {
+    /// Keep an external call inside this session's execution evidence until the
+    /// caller proves cleanup. `scope` identifies the external owner (for
+    /// example the MCP server name, or `workspace` for injected shell
+    /// execution) so a conclusive reconciliation of that owner can clear only
+    /// its own uncertainty.
+    fn begin_external_execution(
+        &self,
+        _scope: &str,
+    ) -> Result<Box<dyn ExternalExecutionGuard>, String> {
         Err("task manager does not support external execution ownership".into())
+    }
+
+    /// Clear uncertainty recorded for `scope` after a conclusive reconciliation
+    /// (for example a fully applied task snapshot for that owner). Returns how
+    /// many records were cleared. Callers must hold real evidence; without it
+    /// the scope must stay non-idle.
+    fn resolve_external_execution_evidence(&self, _scope: &str) -> usize {
+        0
     }
 
     /// Stop admission and await actual cleanup. A cancellation request is not completion.
@@ -171,8 +355,8 @@ pub trait TaskManager: std::any::Any + Send + Sync {
         Box::pin(async { TaskShutdownReport::Incomplete })
     }
 
-    /// 启动后台 shell 任务（run_in_background 路径；进程 spawn / 进程组 /
-    /// 超时 / 输出收集 / 完成收尾全部在 Agent 层完成）。
+    /// 启动后台 shell 任务（run_in_background 路径；Agent 管理准入和生命周期，
+    /// 注入的执行环境管理进程 spawn / 进程组 / 超时 / 输出收集）。
     ///
     /// 返回 [`BgShellHandle`]（task_id + 进程 PID）：工具层回显给 LLM，
     /// 使 LLM 能经另一个 shell 杀进程组（`kill -- -{pid}`）或凭 task_id 监控。
@@ -229,6 +413,19 @@ impl TaskManager for NoopTaskManager {
         false
     }
 
+    fn settle_completed(
+        &self,
+        _task_id: &str,
+        _result: BackgroundTaskResult,
+        _delivery: OnBgCompleteFn,
+    ) -> Result<bool, String> {
+        Err("task completion delivery is unavailable".into())
+    }
+
+    fn retry_pending_deliveries(&self) -> usize {
+        0
+    }
+
     fn cancel(&self, _task_id: &str) -> Result<(), String> {
         Err("no task manager configured".to_string())
     }
@@ -244,14 +441,14 @@ impl TaskManager for NoopTaskManager {
         _command: String,
         _cwd: String,
         _timeout_ms: Option<u64>,
-        _on_bg_complete: Option<Arc<dyn Fn(&BackgroundTaskResult, BgTaskKind) + Send + Sync>>,
+        _on_bg_complete: Option<OnBgCompleteFn>,
     ) -> Result<BgShellHandle, Box<dyn std::error::Error + Send + Sync>> {
         Err("no task manager configured".into())
     }
 
     fn finalize_bg_shell(
         &self,
-        _on_bg_complete: &Option<Arc<dyn Fn(&BackgroundTaskResult, BgTaskKind) + Send + Sync>>,
+        _on_bg_complete: &Option<OnBgCompleteFn>,
         _task_id: String,
         _prompt_summary: String,
         _success: bool,

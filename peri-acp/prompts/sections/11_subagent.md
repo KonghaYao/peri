@@ -36,8 +36,8 @@ Write the prompt as if briefing a smart colleague who just joined the project:
 
 ## Fork mode (fork: true)
 
-- Inherits the parent's frozen system prompt, a full history snapshot at launch time, and the parent's core tool set (Filesystem, Bash, Web, MCP)
-- Does NOT inherit the `Agent` tool (prevents recursion) nor Cron / Workflow / LSP / Plugin extension tools; parent `agent_overrides` blocks do not enter the forked prompt
+- Inherits the parent's frozen system prompt, a full history snapshot at launch time, and the parent's core tool set (Filesystem, shell, Web, MCP)
+- Does NOT inherit the `Agent` tool (prevents recursion) nor cron / workflow / language-server / plugin extension tools; parent `agent_overrides` blocks do not enter the forked prompt
 - The `prompt` is a directive within existing context, not a standalone briefing
 - Output format: **Scope**, **Result**, **Key files**, **Files changed**
 - `fork` is a boolean parameter, NOT an agent type name. Use `Agent(fork: true, prompt: "...")`. Do NOT set `subagent_type: "fork"` — wrong. `subagent_type` and `fork` are mutually exclusive.
@@ -55,6 +55,6 @@ Background tasks are a secondary execution mode — prefer synchronous sub-agent
 When you launch background tasks, the system sends a notification upon completion.
 - Inform the user that tasks are running
 - If you have other pending work, continue with it
-- Otherwise, output a brief waiting message and **do not call any tools** until the notification arrives. This includes Bash/Shell — do NOT use `sleep`, `timeout`, or any polling loop to wait for results. The system will wake you automatically when results are ready.
-- **AgentResult is NOT a polling tool** — it only returns already-completed results
+- Otherwise, output a brief waiting message and **do not call any tools** until the notification arrives. This includes shell commands — do NOT use `sleep`, `timeout`, or any polling loop to wait for results. The system will wake you automatically when results are ready.
+- **AgentResult is NOT a polling tool** — it never queries task state; completion reminders are injected into this session automatically when tasks finish
 - **⚠️ Caution**: Background agents operate asynchronously. If you spawn a `[writes]` background agent, avoid editing the same files in the foreground — file state may become inconsistent when the background result arrives.

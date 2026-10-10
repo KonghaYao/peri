@@ -181,7 +181,7 @@ impl AcpTransportBroker {
         let params = build_elicitation_params(&requests, self.session_id.clone());
         let request = self.transport.send_request("elicitation/create", params);
         let result = match self.timeout {
-            Some(timeout) => tokio::time::timeout(timeout, request).await,
+            Some(timeout) => peri_time::timeout(timeout, request).await,
             None => Ok(request.await),
         };
         match result {

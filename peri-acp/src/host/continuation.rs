@@ -2,11 +2,11 @@
 //!
 //! # 背景
 //!
-//! bg subagent 独立运行时，主 session/prompt 被 `session/cancel` 取消后，
-//! executor 的 `on_bg_complete` 闭包仍会把 bg 结果**先** route 到 SessionInbox
-//! （Defer + wake），**再**通过 [`ContinuationRequest`] 通知本 scheduler。
-//! 此时主 agent 已不在 loop 中，必须由本 scheduler 自动发起一次内部续跑，
-//! 让父 agent 消费 deferred callback。
+//! bg subagent 的完成结果进入 SessionInbox（Defer + wake）后，session 级
+//! activation listener 把待消费工作转为 [`ContinuationRequest`]。
+//! 主 prompt 自然结束后允许内部续跑；`session/cancel` 则仅保留一次已授权的
+//! 独立 bg agent 结果续跑。dispatch 收尾再次检查队列，覆盖结束与投递竞态。
+//! scheduler 复用主 prompt 执行路径，让父 agent 消费 deferred callback。
 //!
 //! # 语义约束
 //!
@@ -35,17 +35,20 @@
 use std::sync::Arc;
 
 use crate::session::executor::ContinuationRequest;
-use peri_acp_types::cron::{CronContinuationRequest, CronTrigger};
-use peri_acp_types::session::{MessageKind, MessageSource, QueuedMessage};
+use peri_acp_types::cron::{
+    cron_trigger_reminder, CronContinuationRequest, CronTrigger, CronTriggerReminderError,
+};
+use peri_acp_types::session::{MessageKind, MessageQueue, MessageSource, QueuedMessage};
 use peri_acp_types::system_reminder::{
     ReminderAudience, ReminderAudiences, ReminderCategory, ReminderDelivery, ReminderSeverity,
-    ReminderSource, SystemReminder, TrustedSystemReminderFactory, SYSTEM_REMINDER_VERSION,
+    ReminderSource, SystemReminder, TrustedSystemReminder, TrustedSystemReminderFactory,
+    SYSTEM_REMINDER_VERSION,
 };
 use peri_acp_types::tasks::BgTaskKind;
 use serde_json::Value;
 use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
-use tracing::info;
+use tracing::{info, warn};
 
 use super::{
     dispatch_prompt_turn,
@@ -128,11 +131,12 @@ pub(crate) fn continuation_dispatchable(
     epoch: u64,
     has_pending_subagent_defer: bool,
     has_pending_mq: bool,
+    mq_steering: bool,
 ) -> bool {
     if !continuation_still_valid(state, epoch) {
         return false;
     }
-    if state.continuation_mq_steering_pending {
+    if mq_steering {
         return has_pending_mq;
     }
     has_pending_subagent_defer
@@ -167,39 +171,52 @@ pub(crate) async fn run_cron_continuation_scheduler(
         let cfg = Arc::clone(&cfg);
         let transport = Arc::clone(&transport);
         let cont_tx = Arc::clone(&cont_tx);
-        let _ = task_spawner.spawn(
+        let spawn_session = req.session_id.clone();
+        let admitted = task_spawner.spawn(
             HostTaskOwnerKind::Session,
             HostTaskKind::ContinuationTurn,
             async move {
-                let Ok(permission_mode) = scheduled_permission_mode(&cfg, &sessions, &req.session_id).await else {
-                    return;
-                };
-                let broker = super::prompt::build_transport_broker(&transport, &req.session_id);
-                if !super::prompt::approve_scheduled_trigger(
-                    permission_mode.as_ref(),
-                    Some(&broker),
-                    &req.trigger.task_id,
-                    &req.trigger.prompt,
-                )
-                .await
-                {
-                    info!(session_id = %req.session_id, task_id = %req.trigger.task_id, "cron trigger rejected");
-                    return;
+                let environment = sessions.lock().await.get(&req.session_id).and_then(|state| state.environment.clone());
+                let deployment = environment.as_ref().map(|env| &env.cfg).unwrap_or(&cfg);
+                match super::execution::approve_schedule(&req, &sessions, &locks, deployment, &transport).await {
+                    Ok(true) => {}
+                    Ok(false) => {
+                        info!(session_id = %req.session_id, task_id = %req.trigger.task_id, "cron trigger rejected or cancelled");
+                        return;
+                    }
+                    Err(error) => {
+                        tracing::error!(session_id = %req.session_id, code = error.code, error = %error.message, "cron approval failed");
+                        return;
+                    }
                 }
                 let epoch = {
                     let mut sessions = sessions.lock().await;
                     let Some(state) = sessions.get_mut(&req.session_id) else { return };
-                    if super::workspace::require_owner(state).is_err()
-                        || !enqueue_cron_trigger(&cfg, &req.session_id, &req.trigger)
-                    {
+                    let Some(current_inbox) = deployment.session_manager.v2_queue_for(&req.session_id) else { return };
+                    if !current_inbox.subscribe_wake().same_channel(&req.inbox.subscribe_wake()) { return; }
+                    if state.closing {
                         return;
+                    }
+                    // M13：本次触发必须可观察地被接纳或拒绝，不得静默丢触发。
+                    // 拒绝即不执行任务指令——超长提示绝不截断后照常执行。
+                    match enqueue_cron_trigger(&current_inbox, &req.trigger) {
+                        CronTriggerAdmission::Delivered => {}
+                        CronTriggerAdmission::Rejected { reason } => {
+                            warn!(
+                                session_id = %req.session_id,
+                                task_id = %req.trigger.task_id,
+                                %reason,
+                                "cron trigger rejected: task instruction was not executed"
+                            );
+                            return;
+                        }
                     }
                     state.continuation_mq_steering_pending = true;
                     state.continuation_epoch
                 };
-                let _ = dispatch_prompt_turn(
+                let result = dispatch_prompt_turn(
                     continuation_params(&req.session_id),
-                    true,
+                    super::PromptOrigin::Scheduled,
                     Some(epoch),
                     &sessions,
                     &locks,
@@ -208,6 +225,9 @@ pub(crate) async fn run_cron_continuation_scheduler(
                     cont_tx.as_ref(),
                 )
                 .await;
+                if let Err(error) = result {
+                    tracing::error!(session_id = %req.session_id, code = error.code, error = %error.message, "cron dispatch failed");
+                }
                 super::user_input::schedule_mailbox(
                     &req.session_id,
                     &sessions,
@@ -218,6 +238,9 @@ pub(crate) async fn run_cron_continuation_scheduler(
                 );
             },
         );
+        if let Err(error) = admitted {
+            tracing::error!(session_id = %spawn_session, error = ?error, "cron task admission failed");
+        }
     }
 }
 
@@ -232,7 +255,12 @@ pub(crate) async fn scheduled_permission_mode(
         let state = sessions
             .get(session_id)
             .ok_or_else(|| crate::transport::types::AcpError::new(-32602, "session not found"))?;
-        super::workspace::require_owner(state)?;
+        if state.closing {
+            return Err(crate::transport::types::AcpError::new(
+                -32010,
+                "Session is closing",
+            ));
+        }
         state
             .environment
             .as_ref()
@@ -247,38 +275,91 @@ pub(crate) async fn scheduled_permission_mode(
     Ok(permission_mode)
 }
 
-fn enqueue_cron_trigger(cfg: &AcpServerConfig, session_id: &str, trigger: &CronTrigger) -> bool {
-    let Some(queue) = cfg.session_manager.v2_queue_for(session_id) else {
-        return false;
-    };
-    let reminder = TrustedSystemReminderFactory::for_producer()
+/// 一次 cron 触发的准入结果；调用方必须能观察到拒绝（不得静默丢触发）。
+#[derive(Debug, PartialEq, Eq)]
+pub(super) enum CronTriggerAdmission {
+    Delivered,
+    Rejected { reason: String },
+}
+
+/// 把一次 cron 触发投递进会话队列。
+///
+/// - delivery_id 由 task + 本次 firing 身份派生：同一 firing 的重试/重复发布
+///   只投递一次，新触发（新 firing_id）即使文案相同也各自投递一次。
+/// - 超出可承载预算的历史任务不会 panic，也不会被静默截断后照常执行：
+///   改为投递一条可观察的失败通知（Tui/Automation 受众，不唤醒模型推理），
+///   失败证据随持久化投递保留。
+pub(super) fn enqueue_cron_trigger(
+    queue: &MessageQueue,
+    trigger: &CronTrigger,
+) -> CronTriggerAdmission {
+    match cron_trigger_reminder(&trigger.task_id, &trigger.firing_id, &trigger.prompt) {
+        Ok(reminder) => {
+            let delivery_id =
+                peri_acp_types::cron::cron_firing_delivery_id(&trigger.task_id, &trigger.firing_id);
+            queue.push(QueuedMessage::system_reminder_with_delivery_id(
+                MessageKind::Defer,
+                MessageSource::CronTrigger,
+                reminder,
+                delivery_id,
+            ));
+            CronTriggerAdmission::Delivered
+        }
+        Err(error) => {
+            let notice = undeliverable_cron_reminder(trigger, &error);
+            match notice {
+                Some(notice) => queue.push(QueuedMessage::system_reminder(
+                    MessageKind::Info,
+                    MessageSource::CronTrigger,
+                    notice,
+                )),
+                None => warn!(
+                    task_id = %trigger.task_id,
+                    firing_id = %trigger.firing_id,
+                    %error,
+                    "cron trigger is undeliverable and its failure notice could not be built"
+                ),
+            }
+            warn!(
+                task_id = %trigger.task_id,
+                firing_id = %trigger.firing_id,
+                prompt_bytes = trigger.prompt.len(),
+                %error,
+                "cron trigger rejected: task instruction was not executed"
+            );
+            CronTriggerAdmission::Rejected {
+                reason: error.to_string(),
+            }
+        }
+    }
+}
+
+/// 可观察的投递失败通知：正文只含事件身份与限制摘要，不含原始（可能超长）指令。
+fn undeliverable_cron_reminder(
+    trigger: &CronTrigger,
+    error: &CronTriggerReminderError,
+) -> Option<TrustedSystemReminder> {
+    TrustedSystemReminderFactory::for_producer()
         .construct(SystemReminder {
             version: SYSTEM_REMINDER_VERSION,
-            category: ReminderCategory::Task,
+            category: ReminderCategory::Lifecycle,
             source: ReminderSource("cron".into()),
-            kind: "triggered".into(),
-            severity: ReminderSeverity::Info,
+            kind: "trigger_undeliverable".into(),
+            severity: ReminderSeverity::Warning,
             delivery: ReminderDelivery::Required,
-            audiences: ReminderAudiences(vec![
-                ReminderAudience::Model,
-                ReminderAudience::Tui,
-                ReminderAudience::Automation,
-                ReminderAudience::Diagnostics,
-            ]),
+            audiences: ReminderAudiences(vec![ReminderAudience::Tui, ReminderAudience::Automation]),
             body: format!(
-                "<goal-message>Cron task {} triggered: {}</goal-message>",
-                trigger.task_id, trigger.prompt
+                "Cron task {} could not be delivered and was not executed: {}",
+                trigger.task_id, error
             ),
-            summary: Some(format!("Cron task {} triggered", trigger.task_id)),
-            metadata: serde_json::json!({ "task_id": trigger.task_id }),
+            summary: Some(format!("Cron task {} undeliverable", trigger.task_id)),
+            metadata: serde_json::json!({
+                "task_id": trigger.task_id,
+                "firing_id": trigger.firing_id,
+                "prompt_bytes": trigger.prompt.len(),
+            }),
         })
-        .expect("cron reminder mapping must be valid");
-    queue.push(QueuedMessage::system_reminder(
-        MessageKind::Defer,
-        MessageSource::CronTrigger,
-        reminder,
-    ));
-    true
+        .ok()
 }
 
 /// 运行 per-session continuation scheduler（由 `run_acp_server` spawn）。
@@ -305,7 +386,21 @@ pub(crate) async fn run_continuation_scheduler(
         let epoch = {
             let mut sessions = sessions.lock().await;
             match sessions.get_mut(&req.session_id) {
-                Some(state) => take_continuation_for_request(state, &req),
+                Some(state) => {
+                    let local = state
+                        .environment
+                        .as_ref()
+                        .map(|env| &env.cfg)
+                        .unwrap_or(&cfg);
+                    if state.closing
+                        || (req.mq_steering
+                            && !super::activation::mq_allowed(local, &req.session_id))
+                    {
+                        None
+                    } else {
+                        take_continuation_for_request(state, &req)
+                    }
+                }
                 None => None,
             }
         };
@@ -324,7 +419,7 @@ pub(crate) async fn run_continuation_scheduler(
         let cfg2 = Arc::clone(&cfg);
         let transport2 = Arc::clone(&transport);
         let cont_tx2 = cont_tx.clone();
-        let _ = task_spawner.spawn(
+        let admitted = task_spawner.spawn(
             HostTaskOwnerKind::Session,
             HostTaskKind::ContinuationTurn,
             async move {
@@ -334,9 +429,11 @@ pub(crate) async fn run_continuation_scheduler(
                 // dispatch_prompt_turn 在获取同一把 prompt lock 后校验 epoch 和
                 // SubAgentComplete Defer，避免本处预先持锁后再次获取导致死锁。
                 let params = continuation_params(&session_id);
-                let _ = dispatch_prompt_turn(
+                let result = dispatch_prompt_turn(
                     params,
-                    true,
+                    super::PromptOrigin::Continuation {
+                        mq_steering: req.mq_steering,
+                    },
                     Some(epoch),
                     &sessions2,
                     &locks2,
@@ -345,6 +442,9 @@ pub(crate) async fn run_continuation_scheduler(
                     cont_tx2.as_ref(),
                 )
                 .await;
+                if let Err(error) = result {
+                    tracing::error!(session_id = %session_id, code = error.code, error = %error.message, "continuation dispatch failed");
+                }
                 super::user_input::schedule_mailbox(
                     &session_id,
                     &sessions2,
@@ -355,6 +455,9 @@ pub(crate) async fn run_continuation_scheduler(
                 );
             },
         );
+        if let Err(error) = admitted {
+            tracing::error!(session_id = %req.session_id, error = ?error, "continuation task admission failed");
+        }
     }
 }
 

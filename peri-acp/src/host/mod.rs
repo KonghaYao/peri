@@ -5,14 +5,9 @@
 //! back through the transport. ACP Host = 部署单元（`docs/top-level.md` §7/§19）：
 //! 由 cli/TUI 作为部署装配点启动，TUI 进程不再持有控制面。
 //!
-//! **Cancel architecture**: `session/prompt` execution is spawned into a
-//! background tokio task so the main server loop remains responsive to
-//! `session/cancel` notifications. Sessions are shared via
+//! Prompt execution is owned by a background task. Sessions are shared via
 //! `Arc<tokio::sync::Mutex<HashMap>>`.
 //!
-//! **多读者 + 单 writer lease**（[`lease`]）：每个 session 的 writer 唯一
-//! （可提交输入/取消），观察者只读。策略先行，协议级扩展另立 issue。
-
 use std::{
     collections::{BTreeMap, HashMap},
     sync::Arc,
@@ -25,12 +20,11 @@ pub use crate::session::state_builders::{
 use peri_acp_types::command::command_route::RouteEntry;
 use peri_acp_types::cron::CronSchedulerPort;
 use peri_acp_types::hooks::SettingsHooksPort;
-use peri_acp_types::interaction::ChannelState;
 use peri_acp_types::messages::BaseMessage;
 use peri_acp_types::permission::SharedPermissionMode;
 use peri_acp_types::plugin::PluginManagerPort;
 use peri_acp_types::ports::{
-    LspPoolPort, McpPoolPort, McpTaskOwnerPort, SkillsPort, ToolSearchPort, WorkflowMiddlewarePort,
+    AgentCatalogPort, McpPoolPort, McpTaskOwnerPort, ToolSearchPort, WorkflowMiddlewarePort,
 };
 use tokio_util::sync::CancellationToken;
 
@@ -41,17 +35,47 @@ pub(crate) mod compact_config;
 mod connection;
 mod lifecycle;
 mod workspace;
+#[cfg(not(target_os = "emscripten"))]
+mod workspace_resources;
 pub use lifecycle::{spawn_acp_server, AcpHostHandle, AcpHostShutdownReport};
+mod activation;
 mod continuation;
 pub mod controller_ports;
+mod diagnostics;
+mod execution;
 #[cfg(test)]
 #[path = "executor_flow_test.rs"]
 mod executor_flow_tests;
-pub mod lease;
+
+#[cfg(test)]
+#[path = "executor_flow_beta_flag_test.rs"]
+mod executor_flow_beta_flag_tests;
 mod mcp_apps;
+// V-02（W4）的 host seam 断言：首个 LLM 请求的三个冻结 effective name、能力关闭的
+// 首个请求面、`PERI_MCP_BUILTIN=off` 语义、启动 fatal 投影、BLOCKED 缺口复证。
+// 模块名参与 `cargo test` 过滤（`host::mcp_v4_builtin`），故不沿用 `mod tests`。
+#[cfg(test)]
+#[path = "mcp_v4_builtin_test.rs"]
+mod mcp_v4_builtin;
 #[cfg(test)]
 #[path = "mcp_v4_startup_test.rs"]
 mod mcp_v4_startup_tests;
+// wave 1 的 host 侧 wire 夹具（主 plan A10）：node 脚本含 wire 日志与 `tools/call`
+// 分支 + 复刻的工具调用 model 替身。owner 序列 V-06（W0 建 + 录迁移前基线）→
+// V-02（W4 复用）。模块名参与 `cargo test` 过滤（`host::mcp_v4_wire_fixture`），
+// 故不沿用 `mod tests`。文件名必须保留 `_test.rs` 后缀：本夹具经引用业务 crate
+// （`peri_middlewares` / `peri_model`）验证行为，靠 `scripts/check-layer-imports.sh`
+// 的测试文件豁免（`*_test.rs`）才不构成越层 import。
+#[cfg(test)]
+#[path = "mcp_v4_wire_fixture_test.rs"]
+mod mcp_v4_wire_fixture;
+// wave 2 的**终态**用例（H-04 / V-03）：自带「生产同构的 builtin host」夹具 —— pool →
+// `BuiltinInstanceContext` 注入 → `run_initialize`（A33 的顺序），并驱动真实装配面
+// （`assemble_server_config`）验证配置合并早于 handler 构造、多 cwd 退化登记与
+// host shutdown 有界关闭。
+#[cfg(test)]
+#[path = "mcp_v4_wave2_test.rs"]
+mod mcp_v4_wave2;
 mod notify;
 mod oauth_delivery;
 mod prediction;
@@ -67,6 +91,7 @@ mod requests;
 mod server_loop;
 mod shutdown;
 pub mod stage_builder;
+#[cfg(not(target_os = "emscripten"))]
 pub mod stdio;
 mod task_scope;
 #[cfg(test)]
@@ -74,13 +99,20 @@ mod task_scope;
 mod unify_wire_baseline_tests;
 mod user_input;
 pub mod workflow_agent;
+// wave 3（AW3-11 session 级 seam）**发送端**用例：会话环境装配产出的 per-session
+// `TaskManager` + session 级 `on_bg_complete` 送进 builtin `workspace` 实例上下文，
+// 并在会话登记处保持同一 `Arc`；回调经 inbox 把 Shell 完成投为 `Defer` 并唤醒。
+// 模块名参与 `cargo test` 过滤（`host::workspace_seam`），故不沿用 `mod tests`。
+#[cfg(test)]
+#[path = "workspace_seam_test.rs"]
+mod workspace_seam;
 
 pub(crate) use continuation::{
     run_continuation_scheduler, run_cron_continuation_scheduler, CronContinuationContext,
 };
 pub(crate) use notify::{extract_session_id, handle_notification, send_session_info_update};
 pub(crate) use prompt::run_prompt;
-pub(crate) use prompt_dispatch::dispatch_prompt_turn;
+pub(crate) use prompt_dispatch::{dispatch_prompt_turn, PromptOrigin};
 pub(crate) use requests::handle_request;
 
 // ── Session state ────────────────────────────────────────────────────────────
@@ -92,13 +124,16 @@ pub(crate) struct SessionState {
     pub(crate) session_id: String,
     pub(crate) thread_id: String,
     pub(crate) cwd: String,
-    pub(crate) execution_owner: Option<Arc<dyn peri_acp_types::workspace::SessionExecutionLease>>,
     pub(crate) environment: Option<Arc<workspace::SessionEnvironment>>,
     pub(crate) closing: bool,
     pub(crate) history: Vec<BaseMessage>,
     /// Canonical persisted history; `history` is a compatibility projection for legacy commands.
     pub(crate) history_payloads: Vec<peri_acp_types::store::PersistedPayload>,
     pub(crate) cancel_token: Option<CancellationToken>,
+    pub(crate) continuation_armed: bool,
+    pub(crate) continuation_epoch: u64,
+    pub(crate) continuation_in_flight: bool,
+    pub(crate) continuation_mq_steering_pending: bool,
     // ── Frozen session data (populated at creation, immutable thereafter) ──
     pub(crate) frozen: Option<crate::session::executor::FrozenSessionData>,
     /// Recall items from previous turn (injected as <system-reminder> in next user message).
@@ -107,33 +142,11 @@ pub(crate) struct SessionState {
     pub(crate) agent_pool: crate::session::agent_pool::AgentPool,
     /// Session 级 WorkflowMiddleware（session/new 时创建，跨 turn 复用）。
     pub(crate) workflow_middleware: Option<Arc<dyn WorkflowMiddlewarePort>>,
-    /// Session 级 LSP 服务器池（session/new 时创建，跨 turn 复用；H1）。
-    pub(crate) lsp_pool: Option<Arc<dyn LspPoolPort>>,
     // ── Prediction 写入的会话元数据（MVP：仅存储，不展示）──
     /// 预测生成的会话标题（未来 /rename 与标题栏显示使用）。
     pub(crate) title: Option<String>,
     /// 预测生成的会话标签（未来按标签检索使用）。
     pub(crate) tags: Vec<String>,
-    // ── 内部 AsyncContinuation 调度状态（private，仅 scheduler/notify 访问）──
-    /// 被取消 prompt 的续跑标记：`session/cancel` 置位（只影响当前 prompt，
-    /// 即 cancel 时正在运行的那一轮）；bg agent 完成通知到达 scheduler 后
-    /// 原子 take，只运行一次。用户显式新 prompt 清除未运行的标记。
-    continuation_armed: bool,
-    /// prompt 代际计数：每次用户显式 prompt 递增。continuation 在 take 之后、
-    /// 获取 prompt lock 之后校验代际未变——用户新 prompt 可清掉已排队但
-    /// 尚未运行的 continuation。
-    continuation_epoch: u64,
-    /// 当前是否有 continuation 在执行（dispatch_prompt_turn 置位、结束时清除，
-    /// 与 pool 取出/归还同一临界区）。`session/cancel` 取消的是续跑本身时
-    /// 排除置位 armed——否则会形成"取消续跑 → 再续跑"的自动链式续跑。
-    continuation_in_flight: bool,
-    /// 下一次 continuation dispatch 按 MQ steering 校验（非 SubAgentComplete）。
-    continuation_mq_steering_pending: bool,
-    /// 多读者 + 单 writer lease：session 创建方（writer）唯一可提交输入/取消。
-    ///
-    /// 协议无客户端身份字段（`clientId` 属协议级扩展，另立 issue），writer 恒为
-    /// `"default"`；prompt/cancel 入口经 [`lease::WriterLease::is_writer`] 校验。
-    pub(crate) lease: lease::WriterLease,
 }
 
 // ── Server config ────────────────────────────────────────────────────────────
@@ -167,23 +180,26 @@ pub struct AcpServerConfig {
         Option<tokio::sync::mpsc::UnboundedSender<crate::event::oauth::HostOAuthEvent>>,
     pub(crate) oauth_event_rx:
         Option<tokio::sync::mpsc::UnboundedReceiver<crate::event::oauth::HostOAuthEvent>>,
-    pub channel_state: Option<Arc<ChannelState>>,
     pub plugin_skill_roots: Vec<peri_acp_types::skills::SkillRoot>,
     /// 插件命令静态条目（Phase 6 B2：`plugin_data.all_commands` 经
     /// `plugin_route_entries` 预转；会话创建时 register_all，注册顺序 =
     /// 内置 → 本地 skills（C1）→ 插件（本字段）→ 动态注入（发现管线异步））。
     pub plugin_command_entries: Vec<RouteEntry>,
-    pub plugin_agent_dirs: Vec<std::path::PathBuf>,
+    /// 插件来源闭合位（M6）：由 frozen/session-local 策略派生，随装配注入。
+    ///
+    /// 消费面是**命令面的运行期刷新**（`requests/plugin.rs` 的 install /
+    /// uninstall RPC）——关闭的会话不得经一次管理 RPC 重新拿到可执行插件命令；
+    /// 与 `plugin_command_entries` 同批决定，不在 RPC 里回读配置。
+    pub plugin_face_closed: bool,
     pub plugin_hooks: Vec<peri_acp_types::hooks::RegisteredHook>,
     /// 仅插件 hooks（不含 settings hooks；`plugin/list` 命令面数据源——
     /// TUI hooks 面板经 ACP 拿数据，M-TUI 收口）。
     pub plugin_hooks_only: Vec<peri_acp_types::hooks::RegisteredHook>,
     pub plugin_loaded: Vec<peri_acp_types::plugin::LoadedPlugin>,
     pub hook_groups: Vec<Vec<peri_acp_types::hooks::RegisteredHook>>,
-    pub plugin_lsp_servers: Vec<peri_acp_types::lsp::LspServerConfig>,
     pub tool_search_index: Arc<dyn ToolSearchPort>,
     /// Skills 扫描端口（available-commands / agents 扫描经此访问）。
-    pub skills: Arc<dyn SkillsPort>,
+    pub agent_catalog: Arc<dyn AgentCatalogPort>,
     /// 插件管理端口（plugin/* 命令面经此访问）。
     pub plugin_manager: Arc<dyn PluginManagerPort>,
     /// Settings hooks 加载端口（hook 组装配经此访问）。
@@ -246,7 +262,7 @@ pub(crate) type PromptLocks = Arc<tokio::sync::Mutex<HashMap<String, Arc<tokio::
 /// **内部 AsyncContinuation**：spawn 一个 per-session coalesce 的 continuation
 /// scheduler（见 [`run_continuation_scheduler`]）。被取消的 prompt 若有独立 bg
 /// agent 结果完成（executor `on_bg_complete` 闭包已先 route 到 SessionInbox），
-/// scheduler 原子 take `SessionState::continuation_armed` 后通过与用户 prompt
+/// scheduler 合并 MQ 通知并重验持久控制状态后通过与用户 prompt
 /// 相同的执行路径（pool / prompt lock / run_prompt 后处理）发起一次内部续跑。
 pub async fn run_acp_server(
     transport: Arc<dyn crate::transport::AcpTransport>,
@@ -324,9 +340,9 @@ async fn run_acp_server_inner(
             CronContinuationContext {
                 sessions: sessions.clone(),
                 prompt_locks: prompt_locks.clone(),
+                cont_tx: Arc::clone(&cont_tx),
                 cfg: Arc::clone(&cfg),
                 transport: Arc::clone(&transport),
-                cont_tx: Arc::clone(&cont_tx),
                 task_spawner: continuation_spawner,
                 shutdown: continuation_shutdown,
             },

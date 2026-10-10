@@ -2,14 +2,21 @@
 
 use std::sync::Arc;
 
+use super::continuation;
+use crate::dispatch::prompt::extract_and_validate_run_prompt_params;
 use peri_acp_types::messages::BaseMessage;
 use serde_json::Value;
 
-use super::{
-    continuation, extract_session_id, run_prompt, AcpServerConfig, PromptLocks, SharedSessions,
-};
-use crate::dispatch::prompt::extract_and_validate_run_prompt_params;
+use super::{extract_session_id, run_prompt, AcpServerConfig, PromptLocks, SharedSessions};
 use crate::transport::types::AcpError;
+
+#[derive(Clone, Copy)]
+pub(crate) enum PromptOrigin {
+    User,
+    QueuedUser,
+    Continuation { mq_steering: bool },
+    Scheduled,
+}
 
 /// 用户 prompt 与内部 AsyncContinuation 的**共享执行路径**。
 ///
@@ -17,13 +24,11 @@ use crate::transport::types::AcpError;
 /// （history 持久化 / cancel 回滚 / recall 回写）、prediction fork。continuation
 /// 不发送 ACP response（无 request id），且不触发 prediction。
 ///
-/// 用户显式新 prompt 会清除未运行的 continuation：置位前先
-/// `continuation_armed = false` 并递增 `continuation_epoch`（scheduler 在
-/// 获取 prompt lock 后校验代际，见 continuation.rs）。
+/// 用户 prompt 与当前运行态的内部续跑共享同一序列化入口。
 #[allow(clippy::too_many_arguments)]
 pub(crate) async fn dispatch_prompt_turn(
     params: Value,
-    is_continuation: bool,
+    origin: PromptOrigin,
     continuation_epoch: Option<u64>,
     sessions: &SharedSessions,
     prompt_locks: &PromptLocks,
@@ -33,7 +38,7 @@ pub(crate) async fn dispatch_prompt_turn(
 ) -> Result<Value, AcpError> {
     dispatch_prompt_turn_with_input(
         params,
-        is_continuation,
+        origin,
         continuation_epoch,
         sessions,
         prompt_locks,
@@ -48,7 +53,7 @@ pub(crate) async fn dispatch_prompt_turn(
 #[allow(clippy::too_many_arguments)]
 pub(crate) async fn dispatch_prompt_turn_with_input(
     params: Value,
-    is_continuation: bool,
+    origin: PromptOrigin,
     continuation_epoch: Option<u64>,
     sessions: &SharedSessions,
     prompt_locks: &PromptLocks,
@@ -57,6 +62,7 @@ pub(crate) async fn dispatch_prompt_turn_with_input(
     cont_tx: &tokio::sync::mpsc::UnboundedSender<crate::session::executor::ContinuationRequest>,
     input_ticket: Option<super::user_input::UserInputRun>,
 ) -> Result<Value, AcpError> {
+    let is_continuation = !matches!(origin, PromptOrigin::User);
     let prompt_session_id = extract_session_id(&params, "").to_string();
     let environment = sessions
         .lock()
@@ -69,26 +75,20 @@ pub(crate) async fn dispatch_prompt_turn_with_input(
         let state = sessions
             .get(&prompt_session_id)
             .ok_or_else(|| AcpError::new(-32602, "session not found"))?;
-        super::workspace::require_owner(state)?;
+        if state.closing {
+            return Err(AcpError::new(-32010, "Session is closing"));
+        }
+        if cfg
+            .session_manager
+            .get_session(&prompt_session_id)
+            .is_some_and(|session| session.cancel_token.is_cancelled())
+        {
+            return Err(AcpError::new(-32010, "Session runtime is no longer active"));
+        }
     }
     // 等待 session 锁之前的先行检查：只复核已记录证据，让绑定已失效的提交立刻失败，
     // 而不是先排队等锁。本次准入的权威复核在取得锁之后（见下方 validate_expected）。
     super::workspace::reassert_expected(cfg, &prompt_session_id, None).await?;
-
-    // 多读者 + 单 writer lease：prompt 是写入操作，仅 writer 可提交。
-    // 协议无客户端身份字段，writer 恒为 session 创建方（"default"）——
-    // 未来引入 clientId 后此处按请求方判定即可（见 lease 模块文档）。
-    {
-        let sessions = sessions.lock().await;
-        if let Some(state) = sessions.get(&prompt_session_id) {
-            if !state.lease.is_writer("default") {
-                return Err(AcpError::new(
-                    -32603,
-                    "read-only observer cannot submit prompt",
-                ));
-            }
-        }
-    }
 
     // 用户显式新 prompt 清掉未运行的 continuation（scheduler 的原子 take 与
     // epoch 校验保证不会重复/过期执行）。必须在等待 prompt lock 前递增代际，
@@ -98,6 +98,7 @@ pub(crate) async fn dispatch_prompt_turn_with_input(
         let mut sessions = sessions.lock().await;
         if let Some(state) = sessions.get_mut(&prompt_session_id) {
             state.continuation_armed = false;
+            state.continuation_mq_steering_pending = false;
             state.continuation_epoch += 1;
         }
     }
@@ -147,17 +148,32 @@ pub(crate) async fn dispatch_prompt_turn_with_input(
         let state = sessions
             .get(&prompt_session_id)
             .ok_or_else(|| AcpError::new(-32602, "session not found"))?;
-        super::workspace::require_owner(state)?;
+        if state.closing {
+            return Err(AcpError::new(-32010, "Session is closing"));
+        }
+        if cfg
+            .session_manager
+            .get_session(&prompt_session_id)
+            .is_some_and(|session| session.cancel_token.is_cancelled())
+        {
+            return Err(AcpError::new(-32010, "Session runtime is no longer active"));
+        }
     }
     super::workspace::validate_expected(cfg, &prompt_session_id, None).await?;
-
-    // AsyncContinuation 与用户 prompt 竞争时，必须在持有同一 prompt lock 后
-    // 校验代际与 pending callback：此时不会与 Receive 的 drain_all 并发，确认
-    // 的 Defer 会由随后的 continuation 消费。无 callback 则不构建 agent 空跑。
     if let Some(epoch) = continuation_epoch {
+        #[cfg(test)]
+        admission_gate::wait(&prompt_session_id).await;
         let dispatchable = {
-            let sessions = sessions.lock().await;
-            sessions.get(&prompt_session_id).is_some_and(|state| {
+            let mut sessions = sessions.lock().await;
+            sessions.get_mut(&prompt_session_id).is_some_and(|state| {
+                if state.closing
+                    || cfg
+                        .session_manager
+                        .get_session(&prompt_session_id)
+                        .is_none_or(|runtime| runtime.cancel_token.is_cancelled())
+                {
+                    return false;
+                }
                 let (has_subagent, has_mq) = cfg
                     .session_manager
                     .get_session(&prompt_session_id)
@@ -170,7 +186,25 @@ pub(crate) async fn dispatch_prompt_turn_with_input(
                         )
                     })
                     .unwrap_or((false, false));
-                continuation::continuation_dispatchable(state, epoch, has_subagent, has_mq)
+                let mq_steering = matches!(
+                    origin,
+                    PromptOrigin::Scheduled | PromptOrigin::Continuation { mq_steering: true }
+                );
+                let dispatchable =
+                    continuation::continuation_dispatchable(
+                        state,
+                        epoch,
+                        has_subagent,
+                        has_mq,
+                        mq_steering,
+                    ) && (!matches!(origin, PromptOrigin::Continuation { mq_steering: true })
+                        || super::activation::mq_allowed(cfg, &prompt_session_id));
+                if dispatchable {
+                    state.continuation_in_flight = true;
+                    state.continuation_mq_steering_pending = false;
+                    state.cancel_token = Some(tokio_util::sync::CancellationToken::new());
+                }
+                dispatchable
             })
         };
         if !dispatchable {
@@ -180,11 +214,8 @@ pub(crate) async fn dispatch_prompt_turn_with_input(
             );
             return Ok(serde_json::Value::Null);
         }
-        let mut sessions = sessions.lock().await;
-        if let Some(state) = sessions.get_mut(&prompt_session_id) {
-            state.continuation_in_flight = true;
-            state.continuation_mq_steering_pending = false;
-        }
+        #[cfg(test)]
+        admission_gate::wait(&format!("{prompt_session_id}:committed")).await;
     }
 
     // Extract AgentPool from session, wrap in Arc<Mutex> for
@@ -220,13 +251,10 @@ pub(crate) async fn dispatch_prompt_turn_with_input(
         super::prediction::spawn_prediction(transport, &prompt_session_id, sessions, cfg);
     }
 
-    // Restore AgentPool back into session (still inside the per-session prompt
-    // lock — see the take-out comment above) and clear the continuation in-flight
-    // marker. Both writes are unconditional after run_prompt returns, so every
-    // non-panic path restores the pool and clears the marker.
-    let mq_steering_reschedule = {
+    {
         let mut sessions = sessions.lock().await;
         if let Some(state) = sessions.get_mut(&prompt_session_id) {
+            state.continuation_in_flight = false;
             if result.is_err() {
                 // Early assembly/controller errors may precede finish_prompt_turn.
                 // The prompt lock still identifies this attempt as the sole writer.
@@ -235,32 +263,59 @@ pub(crate) async fn dispatch_prompt_turn_with_input(
             if let Ok(mutex) = Arc::try_unwrap(pool_arc) {
                 state.agent_pool = mutex.into_inner();
             }
-            state.continuation_in_flight = false;
-            let pending = state.continuation_mq_steering_pending;
-            let needs_mq = cfg
-                .session_manager
-                .get_session(&prompt_session_id)
-                .map(|session| session.v2_message_queue.needs_mq_continuation())
-                .unwrap_or(false);
-            if pending && !needs_mq {
-                state.continuation_mq_steering_pending = false;
-            }
-            pending && needs_mq
-        } else {
-            false
         }
-    };
-    if mq_steering_reschedule {
-        let _ = cont_tx.send(crate::session::executor::ContinuationRequest {
-            session_id: prompt_session_id.clone(),
-            kind: peri_acp_types::tasks::BgTaskKind::Agent,
-            mq_steering: true,
-        });
-        tracing::debug!(
-            session_id = %prompt_session_id,
-            "continuation: rescheduled MQ steering after in-flight turn ended"
-        );
     }
 
+    let continuation_request = {
+        let mut sessions = sessions.lock().await;
+        sessions.get_mut(&prompt_session_id).and_then(|state| {
+            state.continuation_mq_steering_pending = false;
+            let queue = cfg.session_manager.v2_queue_for(&prompt_session_id)?;
+            super::activation::pending_request(
+                &prompt_session_id,
+                state,
+                &queue,
+                super::activation::mq_allowed(cfg, &prompt_session_id),
+            )
+        })
+    };
+    if let Some(request) = continuation_request {
+        if cont_tx.send(request).is_err() {
+            tracing::error!(session_id = %prompt_session_id, "continuation scheduling failed: channel closed");
+        }
+    }
     result
+}
+
+#[cfg(test)]
+pub(crate) mod admission_gate {
+    use std::collections::HashMap;
+    use std::sync::{Arc, LazyLock, Mutex};
+    use tokio::sync::Notify;
+
+    #[derive(Default)]
+    pub(crate) struct Gate {
+        pub(crate) entered: Notify,
+        pub(crate) release: Notify,
+    }
+
+    static GATES: LazyLock<Mutex<HashMap<String, Arc<Gate>>>> =
+        LazyLock::new(|| Mutex::new(HashMap::new()));
+
+    pub(crate) fn install(session_id: &str) -> Arc<Gate> {
+        let gate = Arc::new(Gate::default());
+        GATES
+            .lock()
+            .unwrap()
+            .insert(session_id.into(), gate.clone());
+        gate
+    }
+
+    pub(super) async fn wait(session_id: &str) {
+        let gate = GATES.lock().unwrap().remove(session_id);
+        if let Some(gate) = gate {
+            gate.entered.notify_one();
+            gate.release.notified().await;
+        }
+    }
 }

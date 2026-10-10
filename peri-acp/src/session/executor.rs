@@ -14,6 +14,19 @@
 //! 本模块保留共享类型与入口的协议化路径（EventSink / Langfuse 观测 /
 //! SessionManager 编排均在 ACP 层），执行细节在 peri-agent。
 
+/// 冻结期项目指令快照（W5/E15）：内容准入期（P4）从 builtin `workspace` 实例的
+/// `peri-instruction://workspace/{main|local}` 读取；`None` = 该文档不存在或指令面
+/// 不适用（未装配/被关闭/未连接），**不回落磁盘**（X4/J5）。
+///
+/// `main` 已由 provider 完成 `@import` 展开（深度 3、环防护、越界拒绝），
+/// `local` 为 `CLAUDE.local.md` 原文；两者的组合顺序与分隔由宿主 adapter
+/// （`AgentsMdMiddleware`）保持迁移前语义（main 与 local 之间以空行分隔）。
+#[derive(Debug, Clone, Default)]
+pub struct FrozenInstructions {
+    pub main: Option<String>,
+    pub local: Option<String>,
+}
+
 pub use peri_agent::session::exec::executor::{
     execute_prediction, extract_prediction_text, is_keepgoing, parse_prediction_actions,
     run_session_loop, AutoClassifierFactory, ContinuationRequest, FrozenFallbackBuilder,

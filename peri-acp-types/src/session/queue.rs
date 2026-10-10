@@ -1,13 +1,18 @@
-//! Queue payload 与 Prompt/Defer/Info 调度语义。
+//! Queue payload、独立消息策略与有序 Receive 接纳。
 
-use crate::{messages::BaseMessage, system_reminder::TrustedSystemReminder};
+use super::{ExecutionBinding, MessageDisposition, MessagePolicy};
+use crate::{
+    messages::{BaseMessage, MessageId},
+    system_reminder::TrustedSystemReminder,
+};
 use parking_lot::Mutex;
 use serde::{Deserialize, Serialize};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::{collections::VecDeque, sync::Arc};
 
 // ─── MessageKind ─────────────────────────────────────────────────────────────
 
-/// 消息 Kind — 控制循环唤醒行为
+/// 消息展示标签；运行调度以 MessagePolicy 为准。
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum MessageKind {
@@ -20,7 +25,7 @@ pub enum MessageKind {
 }
 
 impl MessageKind {
-    /// 是否能唤醒新 turn
+    /// 此展示标签的默认策略；显式策略可覆盖，不能用于运行调度。
     pub fn wakes_up(self) -> bool {
         matches!(self, Self::Prompt | Self::Defer)
     }
@@ -52,6 +57,9 @@ pub enum MessageSource {
     DynamicMcpNotification,
     /// Hook 系统注入
     SystemInjected,
+    /// Hook 的显式停止意图（continue:false）：经 Receive 唯一出口停止当前 run，
+    /// 不按可唤醒消息处理，也不发起额外模型请求。
+    HookStopIntent,
     /// 工具失败警告
     ToolFailureWarning,
     /// 工作流完成
@@ -76,6 +84,10 @@ pub struct QueuedMessage {
     pub source: MessageSource,
     /// 实际消息内容
     pub payload: QueuedPayload,
+    /// Stable canonical ID for an owner-confirmed terminal reminder.
+    pub delivery_id: Option<MessageId>,
+    pub policy: MessagePolicy,
+    pub admission_sequence: Option<u64>,
 }
 
 impl QueuedMessage {
@@ -84,11 +96,48 @@ impl QueuedMessage {
     }
 
     pub fn with_payload(kind: MessageKind, source: MessageSource, payload: QueuedPayload) -> Self {
+        let mut policy = match kind {
+            MessageKind::Prompt | MessageKind::Defer => MessagePolicy::ensure_processing(),
+            MessageKind::Info => MessagePolicy::passive(),
+        };
+        if let QueuedPayload::SystemReminder(reminder) = &payload {
+            policy.model_visible = reminder
+                .as_reminder()
+                .audiences
+                .0
+                .contains(&crate::system_reminder::ReminderAudience::Model);
+        }
         Self {
             kind,
             source,
             payload,
+            delivery_id: None,
+            policy,
+            admission_sequence: None,
         }
+    }
+
+    pub fn with_policy(mut self, mut policy: MessagePolicy) -> Self {
+        if let QueuedPayload::SystemReminder(reminder) = &self.payload {
+            policy.model_visible &= reminder
+                .as_reminder()
+                .audiences
+                .0
+                .contains(&crate::system_reminder::ReminderAudience::Model);
+        }
+        self.policy = policy;
+        self
+    }
+
+    pub fn system_reminder_with_delivery_id(
+        kind: MessageKind,
+        source: MessageSource,
+        reminder: TrustedSystemReminder,
+        delivery_id: MessageId,
+    ) -> Self {
+        let mut message = Self::system_reminder(kind, source, reminder);
+        message.delivery_id = Some(delivery_id);
+        message
     }
 
     pub fn system_reminder(
@@ -126,14 +175,22 @@ impl QueuedMessage {
 
 /// 会话级临时收件箱（v2）
 ///
-/// 内部用 `Arc<Mutex<VecDeque>>` 保证线程安全。`Notify` 用于异步等待新消息。
+/// 消息与唤醒状态由同一个共享 owner 持有，所有发布入口使用同一信号。
 ///
 /// RCRA 循环中 Receive 阶段通过 [`Self::drain_all`] 一次性消费全部三类消息；
 /// 循环退出后通过 [`Self::has_wake_up`] 检测是否需重新激活。
 #[derive(Debug, Clone)]
 pub struct MessageQueue {
-    inner: Arc<Mutex<VecDeque<QueuedMessage>>>,
-    notify: Arc<tokio::sync::Notify>,
+    state: Arc<MailboxState>,
+}
+
+#[derive(Debug)]
+struct MailboxState {
+    messages: Mutex<VecDeque<QueuedMessage>>,
+    wake: tokio::sync::Notify,
+    wake_version: tokio::sync::watch::Sender<u64>,
+    next_sequence: AtomicU64,
+    suppressed: Mutex<Vec<QueuedMessage>>,
 }
 
 impl Default for MessageQueue {
@@ -146,46 +203,158 @@ impl MessageQueue {
     /// 创建空队列
     pub fn new() -> Self {
         Self {
-            inner: Arc::new(Mutex::new(VecDeque::new())),
-            notify: Arc::new(tokio::sync::Notify::new()),
+            state: Arc::new(MailboxState {
+                messages: Mutex::new(VecDeque::new()),
+                wake: tokio::sync::Notify::new(),
+                wake_version: tokio::sync::watch::channel(0).0,
+                next_sequence: AtomicU64::new(1),
+                suppressed: Mutex::new(Vec::new()),
+            }),
         }
     }
 
-    /// 推入一条消息，唤醒等待者
-    pub fn push(&self, msg: QueuedMessage) {
+    /// 发布消息；Prompt/Defer 唤醒等待者，Info 只保留到下次消费。
+    pub fn push(&self, mut msg: QueuedMessage) {
+        let should_wake = msg.policy.notifies_execution();
         {
-            let mut inner = self.inner.lock();
+            let mut inner = self.state.messages.lock();
+            if msg.admission_sequence.is_none() {
+                msg.admission_sequence =
+                    Some(self.state.next_sequence.fetch_add(1, Ordering::Relaxed));
+            }
             inner.push_back(msg);
         }
-        self.notify.notify_one();
+        if should_wake {
+            self.state.wake.notify_waiters();
+            self.state
+                .wake_version
+                .send_modify(|version| *version = version.saturating_add(1));
+        }
     }
 
     /// 批量推入消息；空列表为 no-op
-    pub fn push_batch(&self, msgs: Vec<QueuedMessage>) {
+    pub fn push_batch(&self, mut msgs: Vec<QueuedMessage>) {
         if msgs.is_empty() {
             return;
         }
+        let should_wake = msgs
+            .iter()
+            .any(|message| message.policy.notifies_execution());
         {
-            let mut inner = self.inner.lock();
+            let mut inner = self.state.messages.lock();
+            for message in &mut msgs {
+                if message.admission_sequence.is_none() {
+                    message.admission_sequence =
+                        Some(self.state.next_sequence.fetch_add(1, Ordering::Relaxed));
+                }
+            }
             inner.extend(msgs);
+            inner
+                .make_contiguous()
+                .sort_by_key(|message| message.admission_sequence);
         }
-        self.notify.notify_one();
+        if should_wake {
+            self.state.wake.notify_waiters();
+            self.state
+                .wake_version
+                .send_modify(|version| *version = version.saturating_add(1));
+        }
+    }
+
+    pub fn subscribe_wake(&self) -> tokio::sync::watch::Receiver<u64> {
+        self.state.wake_version.subscribe()
+    }
+
+    /// 非破坏性等待可执行消息，注册通知后再检查状态以避免丢唤醒。
+    pub async fn await_wake(&self) {
+        loop {
+            let notified = self.state.wake.notified();
+            tokio::pin!(notified);
+            notified.as_mut().enable();
+            if self.has_wake_up() {
+                return;
+            }
+            notified.await;
+        }
+    }
+
+    pub async fn await_wake_for_run(&self, execution: &ExecutionBinding) {
+        loop {
+            let notified = self.state.wake.notified();
+            tokio::pin!(notified);
+            notified.as_mut().enable();
+            if self.has_required_for_run(execution) {
+                return;
+            }
+            notified.await;
+        }
     }
 
     /// 排空队列中的全部消息（Prompt + Info + Defer）
     ///
     /// RCRA 循环的 Receive 阶段调用，一次性消费全部类型。
     pub fn drain_all(&self) -> Vec<QueuedMessage> {
-        let mut inner = self.inner.lock();
-        let drained: Vec<_> = std::mem::take(&mut *inner).into();
-        drop(inner);
-        self.notify.notify_one();
-        drained
+        let mut inner = self.state.messages.lock();
+        std::mem::take(&mut *inner).into()
+    }
+
+    pub fn drain_batch(&self, limit: usize) -> Vec<QueuedMessage> {
+        let mut inner = self.state.messages.lock();
+        let count = inner.len().min(limit);
+        inner.drain(..count).collect()
+    }
+
+    pub fn suppress(&self, message: QueuedMessage) {
+        self.state.suppressed.lock().push(message);
+    }
+
+    pub fn suppressed_messages(&self) -> Vec<QueuedMessage> {
+        self.state.suppressed.lock().clone()
+    }
+
+    pub fn has_required_for_run(&self, execution: &ExecutionBinding) -> bool {
+        self.state
+            .messages
+            .lock()
+            .iter()
+            .any(|message| message.policy.disposition(execution) == MessageDisposition::Process)
+    }
+
+    pub fn has_ensure_processing(&self) -> bool {
+        self.state
+            .messages
+            .lock()
+            .iter()
+            .any(|message| message.policy.ensures_processing())
+    }
+
+    /// Returns the last admission sequence published before this snapshot.
+    pub fn admission_watermark(&self) -> u64 {
+        let _messages = self.state.messages.lock();
+        self.state.next_sequence.load(Ordering::Relaxed) - 1
+    }
+
+    /// Checks for model-visible processing obligations admitted after a failed attempt's inputs.
+    pub fn has_ensure_processing_after(&self, watermark: u64) -> bool {
+        self.state.messages.lock().iter().any(|message| {
+            message.policy.ensures_processing()
+                && message
+                    .admission_sequence
+                    .is_some_and(|sequence| sequence > watermark)
+        })
+    }
+
+    pub fn has_required(&self) -> bool {
+        self.state
+            .messages
+            .lock()
+            .iter()
+            .any(|message| message.policy.requirement == super::MessageRequirement::Required)
     }
 
     /// 与 Receive 领取共享同一锁，仅撤出尚未被领取的指定用户输入。
     pub fn withdraw_user_inputs(&self, ids: &[crate::messages::MessageId]) -> Vec<QueuedMessage> {
-        let mut inner = self.inner.lock();
+        let mut inner = self.state.messages.lock();
         let mut withdrawn = Vec::new();
         let mut kept = VecDeque::with_capacity(inner.len());
         for message in inner.drain(..) {
@@ -201,41 +370,41 @@ impl MessageQueue {
         withdrawn
     }
 
-    /// 是否有能唤醒循环的消息（Prompt 或 Defer）
+    /// 是否有要求新执行处理的消息。
     pub fn has_wake_up(&self) -> bool {
-        self.inner.lock().iter().any(|m| m.kind.wakes_up())
+        self.has_ensure_processing()
     }
 
-    /// 队列中是否存在指定来源的 pending Defer（wake-able 延迟结果）。
-    ///
-    /// AsyncContinuation 用：`session/cancel` 时确认 SubAgentComplete Defer 是否
-    /// 已入队（race 兜底——bg 完成通知可能已在 cancel 前置位前被 scheduler 跳过），
-    /// continuation scheduler 在真正 dispatch 前确认 Defer 尚未被消费（跳过空跑）。
-    /// 仅匹配 `MessageKind::Defer`：Prompt/Info 均不计入。
+    /// 按来源查询 required 消息，仅用于诊断；不授予来源调度权。
     pub fn has_pending_defer(&self, source: &MessageSource) -> bool {
-        self.inner
+        self.state
+            .messages
             .lock()
             .iter()
-            .any(|m| m.kind == MessageKind::Defer && &m.source == source)
+            .any(|message| message.policy.ensures_processing() && &message.source == source)
     }
 
-    /// 是否仍需在本 session 内消费 MQ（含 Info / Defer / Prompt）。
+    /// 是否仍需建立执行处理 required MQ 消息。
     pub fn needs_mq_continuation(&self) -> bool {
-        !self.is_empty()
+        self.has_ensure_processing()
     }
 
     /// 队列是否为空
     pub fn is_empty(&self) -> bool {
-        self.inner.lock().is_empty()
+        self.state.messages.lock().is_empty()
     }
 
     /// 队列长度
     pub fn len(&self) -> usize {
-        self.inner.lock().len()
+        self.state.messages.lock().len()
     }
 
     /// 清空队列（rewind 操作时调用）
     pub fn clear(&self) {
-        self.inner.lock().clear();
+        self.state.messages.lock().clear();
     }
 }
+
+#[cfg(test)]
+#[path = "queue_wake_test.rs"]
+mod wake_tests;

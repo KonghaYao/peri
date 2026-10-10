@@ -89,7 +89,7 @@ struct RawPersistedEnvelope {
 #[serde(tag = "type", rename_all = "snake_case")]
 enum RawPersistedPayload {
     Message {
-        message: BaseMessage,
+        message: Box<BaseMessage>,
     },
     SystemReminder {
         id: MessageId,
@@ -123,7 +123,7 @@ pub fn deserialize_persisted_payload(input: &str) -> Result<PersistedPayload> {
         anyhow::bail!("unsupported persisted payload version {}", envelope.version);
     }
     match envelope.payload {
-        RawPersistedPayload::Message { message } => Ok(PersistedPayload::Message(message)),
+        RawPersistedPayload::Message { message } => Ok(PersistedPayload::Message(*message)),
         RawPersistedPayload::SystemReminder { id, reminder } => {
             let reminder = serde_json::to_vec(&reminder)?;
             let reminder = decode_system_reminder_json(&reminder)?;
@@ -284,22 +284,6 @@ pub trait ThreadStore: Send + Sync {
         Err(crate::workspace::WorkspaceError::Unsupported.into())
     }
 
-    async fn acquire_execution_lease(
-        &self,
-        _id: &ThreadId,
-    ) -> Result<std::sync::Arc<dyn crate::workspace::SessionExecutionLease>> {
-        Err(crate::workspace::WorkspaceError::Unsupported.into())
-    }
-
-    /// 用户明确接受残留执行及未知副作用风险后，仅解除指定 dirty 代际。
-    /// 必须持有稳定 OS 独占锁并以事务 CAS 校验；不更改 binding/frozen。
-    async fn reset_dirty_execution(
-        &self,
-        _target: &crate::workspace::RecoveryRequiredDetails,
-    ) -> Result<()> {
-        Err(crate::workspace::WorkspaceError::Unsupported.into())
-    }
-
     /// 创建新 thread，返回分配的 ThreadId
     async fn create_thread(&self, meta: ThreadMeta) -> Result<ThreadId>;
 
@@ -417,7 +401,7 @@ pub trait ThreadStore: Send + Sync {
             .collect())
     }
 
-    /// 加载 thread 的完整上下文（含祖先链 + 缓存）
+    /// 加载 thread 的完整上下文（含祖先链）
     async fn load_context(&self, thread_id: &ThreadId) -> Result<Vec<BaseMessage>>;
 
     /// 列举指定父 thread 的直接子 thread
@@ -429,10 +413,7 @@ pub trait ThreadStore: Send + Sync {
     /// 更新 thread 的 agent_status 字段
     async fn update_thread_status(&self, id: &ThreadId, status: &str) -> Result<()>;
 
-    /// 清除 thread 的 cached_context
-    async fn invalidate_context_cache(&self, thread_id: &ThreadId) -> Result<()>;
-
-    /// 按 message_id 列表精确删除消息，并刷新 cached_context。
+    /// 按 message_id 列表精确删除消息，并刷新派生计数。
     async fn delete_messages(&self, thread_id: &ThreadId, message_ids: &[MessageId]) -> Result<()>;
 
     /// 更新消息的 compact 标记（truncated / excluded / projection directive）
@@ -479,13 +460,6 @@ pub trait ThreadStore: Send + Sync {
     ) -> Result<()> {
         let _ = (thread_id, message_id);
         Ok(()) // 默认 no-op
-    }
-
-    /// H6: 获取 context cache epoch 值。
-    ///
-    /// 每次 compact 提交后递增，用于检测 context_cache 是否因 compact 变更而失效。
-    async fn get_context_cache_epoch(&self, _thread_id: &ThreadId) -> Result<u64> {
-        Ok(0) // 默认无 epoch 支持
     }
 }
 

@@ -9,6 +9,7 @@ use std::sync::Arc;
 use peri_acp_types::event_data::{
     PluginActionResult, PluginSearchResult, PluginSnapshot, PluginSnapshotEntry,
 };
+use peri_acp_types::plugin::PluginManagerPort;
 use peri_acp_types::PeriCaps;
 use serde_json::Value;
 
@@ -50,27 +51,36 @@ fn refresh_plugin_command_entries(
         .filter(|e| e.fullname.to_lowercase().starts_with("plugin:"))
         .map(|e| e.fullname.clone())
         .collect();
-    // 重载：与装配面同源（`load_enabled_plugins` → all_commands 聚合）；
-    // 无 session 上下文（session_cwd = None）时仅用户级 enabledPlugins。
-    let fresh_commands = match peri_middlewares::plugin::load_enabled_plugins(
-        claude_dir,
-        session_cwd.map(Path::new),
-    ) {
-        Ok(plugins) => plugins
-            .iter()
-            .flat_map(|p| p.commands.clone())
-            .collect::<Vec<_>>(),
-        Err(e) => {
-            tracing::warn!(
-                error = %e,
-                "插件重载失败：plugin 域清空（保留空 plugin 域），不阻塞 RPC 回包"
-            );
-            Vec::new()
+    // M6：插件来源闭合位取自冻结/session-local 策略（装配期随
+    // `AcpServerConfig` 注入）——关闭的会话不得经一次 install/uninstall RPC
+    // 重新拿到可执行插件命令。关闭时只走「注销 stale、注册空」，
+    // **不读插件目录**，RPC 回包与快照形状不变。
+    let fresh_commands = if cfg.plugin_face_closed {
+        tracing::info!(
+            session_id,
+            "插件来源注入面已关闭：install/uninstall 后命令域保持为空（注销 stale，不注册）"
+        );
+        Vec::new()
+    } else {
+        // 重载：与装配面同源（`enabled_plugin_commands` → all_commands 聚合）；
+        // 无 session 上下文（session_cwd = None）时仅用户级 enabledPlugins。
+        match cfg
+            .plugin_manager
+            .enabled_plugin_commands(claude_dir, session_cwd.map(Path::new))
+        {
+            Ok(commands) => commands,
+            Err(e) => {
+                tracing::warn!(
+                    error = %e,
+                    "插件重载失败：plugin 域清空（保留空 plugin 域），不阻塞 RPC 回包"
+                );
+                Vec::new()
+            }
         }
     };
     let (removed, added) = command_registry.reconcile(
         &stale,
-        peri_middlewares::plugin::plugin_route_entries(&fresh_commands),
+        cfg.plugin_manager.plugin_route_entries(&fresh_commands),
     );
     tracing::info!(
         session_id,
@@ -94,28 +104,29 @@ pub(super) async fn handle_install(
         .get("marketplace")
         .and_then(|v| v.as_str())
         .ok_or_else(|| AcpError::new(-32602, "missing 'marketplace'"))?;
-    let scope_str = params
-        .get("scope")
-        .and_then(|v| v.as_str())
-        .unwrap_or("user");
-    let scope = match scope_str {
-        "project" => peri_acp_types::plugin::InstallScope::Project,
-        "local" => peri_acp_types::plugin::InstallScope::Local,
-        _ => peri_acp_types::plugin::InstallScope::User,
-    };
+    let scope_str = request_scope(params)?;
+    let scope = parse_scope(scope_str)?;
     let session_id = params
         .get("sessionId")
         .and_then(|v| v.as_str())
         .unwrap_or("");
 
-    let claude_dir = peri_middlewares::plugin::claude_home();
+    let claude_dir = cfg.plugin_manager.claude_home();
     let cache_dir = cfg.plugin_manager.cache_dir();
 
     let caps = cfg.session_manager.get_caps(session_id);
+    let project_dir = toggle_project_dir(scope, session_id, sessions)?;
 
     match cfg
         .plugin_manager
-        .install(name, marketplace, scope, &cache_dir, &claude_dir)
+        .install(
+            name,
+            marketplace,
+            scope,
+            &cache_dir,
+            &claude_dir,
+            project_dir,
+        )
         .await
     {
         Ok(installed) => {
@@ -132,7 +143,10 @@ pub(super) async fn handle_install(
             let _ = push_plugin_snapshot(
                 transport.as_ref(),
                 session_id,
-                &cfg.plugin_manager.snapshot(&claude_dir),
+                &cfg.plugin_manager.snapshot(
+                    &claude_dir,
+                    sessions.get(session_id).map(|state| Path::new(&state.cwd)),
+                ),
                 &caps,
             )
             .await;
@@ -151,6 +165,7 @@ pub(super) async fn handle_install(
             Ok(serde_json::json!({ "success": true, "plugin": installed.id }))
         }
         Err(e) => {
+            tracing::error!(session_id, name, marketplace, scope = scope_str, error = %e, "Plugin install failed");
             let _ = push_plugin_action_result(
                 transport.as_ref(),
                 session_id,
@@ -162,6 +177,40 @@ pub(super) async fn handle_install(
             )
             .await;
             Err(AcpError::new(-32603, e.to_string()))
+        }
+    }
+}
+
+pub(super) async fn handle_marketplace_add(
+    params: &Value,
+    cfg: &AcpServerConfig,
+) -> Result<Value, AcpError> {
+    let source = params
+        .get("source")
+        .and_then(Value::as_str)
+        .ok_or_else(|| AcpError::new(-32602, "missing 'source'"))?;
+    match cfg.plugin_manager.marketplace_add(source).await {
+        Ok(name) => Ok(serde_json::json!({"success": true, "name": name})),
+        Err(error) => {
+            tracing::error!(method = "marketplace/add", %error, "Marketplace operation failed");
+            Err(AcpError::new(-32603, error))
+        }
+    }
+}
+
+pub(super) async fn handle_marketplace_remove(
+    params: &Value,
+    cfg: &AcpServerConfig,
+) -> Result<Value, AcpError> {
+    let name = params
+        .get("name")
+        .and_then(Value::as_str)
+        .ok_or_else(|| AcpError::new(-32602, "missing 'name'"))?;
+    match cfg.plugin_manager.marketplace_remove(name).await {
+        Ok(()) => Ok(serde_json::json!({"success": true})),
+        Err(error) => {
+            tracing::error!(method = "marketplace/remove", marketplace_name = name, %error, "Marketplace operation failed");
+            Err(AcpError::new(-32603, error))
         }
     }
 }
@@ -181,11 +230,17 @@ pub(super) async fn handle_uninstall(
         .and_then(|v| v.as_str())
         .unwrap_or("");
 
-    let claude_dir = peri_middlewares::plugin::claude_home();
+    let scope = parse_scope(request_scope(params)?)?;
+    let claude_dir = cfg.plugin_manager.claude_home();
 
     let caps = cfg.session_manager.get_caps(session_id);
+    let project_dir = mutation_project_dir(scope, session_id, sessions)?;
 
-    match cfg.plugin_manager.uninstall(plugin_id, &claude_dir).await {
+    match cfg
+        .plugin_manager
+        .uninstall(plugin_id, scope, &claude_dir, project_dir)
+        .await
+    {
         Ok(()) => {
             let _ = push_plugin_action_result(
                 transport.as_ref(),
@@ -200,7 +255,10 @@ pub(super) async fn handle_uninstall(
             let _ = push_plugin_snapshot(
                 transport.as_ref(),
                 session_id,
-                &cfg.plugin_manager.snapshot(&claude_dir),
+                &cfg.plugin_manager.snapshot(
+                    &claude_dir,
+                    sessions.get(session_id).map(|state| Path::new(&state.cwd)),
+                ),
                 &caps,
             )
             .await;
@@ -219,6 +277,7 @@ pub(super) async fn handle_uninstall(
             Ok(serde_json::json!({ "success": true }))
         }
         Err(e) => {
+            tracing::error!(session_id, plugin_id, error = %e, "Plugin uninstall failed");
             let _ = push_plugin_action_result(
                 transport.as_ref(),
                 session_id,
@@ -237,6 +296,7 @@ pub(super) async fn handle_uninstall(
 pub(super) async fn handle_toggle(
     params: &Value,
     cfg: &AcpServerConfig,
+    sessions: &HashMap<String, SessionState>,
     transport: &Arc<dyn crate::transport::AcpTransport>,
 ) -> Result<Value, AcpError> {
     let plugin_id = params
@@ -247,25 +307,19 @@ pub(super) async fn handle_toggle(
         .get("enable")
         .and_then(|v| v.as_bool())
         .unwrap_or(true);
-    let scope_str = params
-        .get("scope")
-        .and_then(|v| v.as_str())
-        .unwrap_or("user");
-    let scope = match scope_str {
-        "project" => peri_acp_types::plugin::InstallScope::Project,
-        "local" => peri_acp_types::plugin::InstallScope::Local,
-        _ => peri_acp_types::plugin::InstallScope::User,
-    };
+    let scope_str = request_scope(params)?;
+    let scope = parse_scope(scope_str)?;
     let session_id = params
         .get("sessionId")
         .and_then(|v| v.as_str())
         .unwrap_or("");
 
-    let claude_dir = peri_middlewares::plugin::claude_home();
+    let claude_dir = cfg.plugin_manager.claude_home();
+    let project_dir = toggle_project_dir(scope, session_id, sessions)?;
 
     let result = cfg
         .plugin_manager
-        .set_enabled(plugin_id, scope, &claude_dir, enable);
+        .set_enabled(plugin_id, scope, &claude_dir, project_dir, enable);
 
     let caps = cfg.session_manager.get_caps(session_id);
 
@@ -285,13 +339,17 @@ pub(super) async fn handle_toggle(
             let _ = push_plugin_snapshot(
                 transport.as_ref(),
                 session_id,
-                &cfg.plugin_manager.snapshot(&claude_dir),
+                &cfg.plugin_manager.snapshot(
+                    &claude_dir,
+                    sessions.get(session_id).map(|state| Path::new(&state.cwd)),
+                ),
                 &caps,
             )
             .await;
             Ok(serde_json::json!({ "success": true }))
         }
         Err(e) => {
+            tracing::error!(session_id, plugin_id, scope = scope_str, error = %e, "Plugin toggle failed");
             let action = if enable { "enable" } else { "disable" };
             let _ = push_plugin_action_result(
                 transport.as_ref(),
@@ -306,6 +364,64 @@ pub(super) async fn handle_toggle(
             Err(AcpError::new(-32603, e.to_string()))
         }
     }
+}
+
+fn toggle_project_dir<'session>(
+    scope: peri_acp_types::plugin::InstallScope,
+    session_id: &str,
+    sessions: &'session HashMap<String, SessionState>,
+) -> Result<Option<&'session Path>, AcpError> {
+    if scope == peri_acp_types::plugin::InstallScope::User {
+        return Ok(None);
+    }
+    let state = sessions
+        .get(session_id)
+        .ok_or_else(|| AcpError::new(-32602, "plugin scope requires an active session"))?;
+    if state.closing {
+        return Err(AcpError::new(-32010, "Session is closing"));
+    }
+    let cwd = Path::new(&state.cwd);
+    if !cwd.is_absolute() || !cwd.is_dir() {
+        return Err(AcpError::new(
+            -32602,
+            "session execution directory is invalid",
+        ));
+    }
+    Ok(Some(cwd))
+}
+
+fn parse_scope(scope: &str) -> Result<peri_acp_types::plugin::InstallScope, AcpError> {
+    match scope {
+        "user" => Ok(peri_acp_types::plugin::InstallScope::User),
+        "project" => Ok(peri_acp_types::plugin::InstallScope::Project),
+        "local" => Ok(peri_acp_types::plugin::InstallScope::Local),
+        _ => Err(AcpError::new(-32602, "invalid or unsupported plugin scope")),
+    }
+}
+
+fn request_scope(params: &Value) -> Result<&str, AcpError> {
+    match params.get("scope") {
+        None => Ok("user"),
+        Some(value) => value
+            .as_str()
+            .ok_or_else(|| AcpError::new(-32602, "plugin scope must be a string")),
+    }
+}
+
+fn mutation_project_dir<'session>(
+    scope: peri_acp_types::plugin::InstallScope,
+    session_id: &str,
+    sessions: &'session HashMap<String, SessionState>,
+) -> Result<Option<&'session Path>, AcpError> {
+    if !session_id.is_empty() {
+        let state = sessions
+            .get(session_id)
+            .ok_or_else(|| AcpError::new(-32602, "session not found"))?;
+        if state.closing {
+            return Err(AcpError::new(-32010, "Session is closing"));
+        }
+    }
+    toggle_project_dir(scope, session_id, sessions)
 }
 
 pub(super) async fn handle_search(
@@ -323,7 +439,7 @@ pub(super) async fn handle_search(
         .unwrap_or("");
 
     let cache_dir = cfg.plugin_manager.cache_dir();
-    let results = search_marketplace_plugins(query, &cache_dir);
+    let results = search_marketplace_plugins(cfg.plugin_manager.as_ref(), query, &cache_dir);
 
     let caps = cfg.session_manager.get_caps(session_id);
     let _ = push_plugin_search_result(transport.as_ref(), session_id, query, &results, &caps).await;
@@ -340,6 +456,7 @@ pub(super) async fn handle_search(
 pub(super) async fn handle_update(
     params: &Value,
     cfg: &AcpServerConfig,
+    sessions: &HashMap<String, SessionState>,
     transport: &Arc<dyn crate::transport::AcpTransport>,
 ) -> Result<Value, AcpError> {
     let plugin_id = params
@@ -351,14 +468,16 @@ pub(super) async fn handle_update(
         .and_then(|v| v.as_str())
         .unwrap_or("");
 
-    let claude_dir = peri_middlewares::plugin::claude_home();
+    let scope = parse_scope(request_scope(params)?)?;
+    let claude_dir = cfg.plugin_manager.claude_home();
     let cache_dir = cfg.plugin_manager.cache_dir();
 
     let caps = cfg.session_manager.get_caps(session_id);
+    let project_dir = mutation_project_dir(scope, session_id, sessions)?;
 
     match cfg
         .plugin_manager
-        .update(plugin_id, &cache_dir, &claude_dir)
+        .update(plugin_id, scope, &cache_dir, &claude_dir, project_dir)
         .await
     {
         Ok(updated) => {
@@ -375,13 +494,17 @@ pub(super) async fn handle_update(
             let _ = push_plugin_snapshot(
                 transport.as_ref(),
                 session_id,
-                &cfg.plugin_manager.snapshot(&claude_dir),
+                &cfg.plugin_manager.snapshot(
+                    &claude_dir,
+                    sessions.get(session_id).map(|state| Path::new(&state.cwd)),
+                ),
                 &caps,
             )
             .await;
             Ok(serde_json::json!({ "success": true, "plugin": updated.id }))
         }
         Err(e) => {
+            tracing::error!(session_id, plugin_id, error = %e, "Plugin update failed");
             let _ = push_plugin_action_result(
                 transport.as_ref(),
                 session_id,
@@ -503,6 +626,7 @@ async fn push_plugin_search_result(
 }
 
 fn search_marketplace_plugins(
+    plugin_manager: &dyn PluginManagerPort,
     query: &str,
     cache_dir: &std::path::Path,
 ) -> Vec<PluginSnapshotEntry> {
@@ -517,9 +641,7 @@ fn search_marketplace_plugins(
                 .unwrap_or_default()
                 .to_string_lossy()
                 .to_string();
-            let Some(manifest_path) =
-                peri_middlewares::plugin::marketplace::find_marketplace_json(&mp_dir)
-            else {
+            let Some(manifest_path) = plugin_manager.find_marketplace_json(&mp_dir) else {
                 continue;
             };
             let marketplace_matches = mp_name.to_lowercase().contains(&query_lower);
@@ -569,17 +691,35 @@ fn search_marketplace_plugins(
 
 /// Session-local display projection; excludes MCP credentials and plugin option values.
 pub(super) fn handle_session_snapshot(cfg: &AcpServerConfig) -> Result<Value, AcpError> {
+    let claude_dir = cfg.plugin_manager.claude_home();
+    let snapshot = cfg.plugin_manager.snapshot(&claude_dir, None);
     let plugins = cfg
         .plugin_loaded
         .iter()
         .map(|plugin| {
+            let scope = cfg.plugin_manager.installation_scope(&claude_dir, plugin);
+            let (install_scope, management_error) = match scope {
+                Ok(Some(scope)) => (Some(format!("{scope:?}").to_lowercase()), None),
+                Ok(None) => (None, Some("plugin source has no writable installation record".to_string())),
+                Err(error) => {
+                    tracing::error!(plugin = %plugin.name, %error, "Plugin scope resolution failed");
+                    (None, Some(error))
+                }
+            };
+            let host_entry = snapshot.iter().find(|entry| {
+                entry.name == plugin.name && entry.marketplace == plugin.marketplace
+                    && Path::new(&entry.root) == plugin.install_path
+            });
+            let load_error = host_entry.and_then(|entry| entry.load_error.clone());
             serde_json::json!({
                 "name": plugin.name, "version": plugin.version, "enabled": true,
                 "root": plugin.install_path, "description": plugin.manifest.description.clone(),
                 "marketplace": plugin.marketplace, "author": null,
                 "skills_count": plugin.skills_roots.len(), "commands_count": plugin.commands.len(),
                 "agents_count": plugin.agents_dirs.len(), "mcp_count": plugin.mcp_servers.len(),
-                "install_scope": "session", "load_error": null,
+                "source": "session", "install_scope": install_scope,
+                "toggle_supported": install_scope.is_some(), "load_error": load_error,
+                "management_error": management_error,
             })
         })
         .collect::<Vec<_>>();

@@ -8,7 +8,7 @@ use crate::{
     session::{event_sink::TransportEventSink, executor},
     transport::types::AcpError,
 };
-use agent_client_protocol::schema::v1::{PromptResponse, StopReason};
+use agent_client_protocol::schema::v1::{Meta, PromptResponse, StopReason};
 use peri_acp_types::interaction::{
     ApprovalDecision, ApprovalItem, InteractionContext, InteractionResponse, UserInteractionBroker,
 };
@@ -28,14 +28,12 @@ use super::SharedSessions;
 
 // ── Prompt execution (spawned into background task) ──────────────────────────
 
-// ── ACP 结果投影（spec/issues/2026-08-18-acp-error-handler.md D2）─────────────
+// ── ACP 结果投影（spec/history/2026-08.md 2026-08-18 条目 D2）─────────────
 
 /// fatal turn failure 的稳定 JSON-RPC server error code。
 ///
 /// 取自 JSON-RPC 2.0 保留段 server error（`-32000..=-32099`）的首值，语义为
-/// "agent turn execution failed"。具名常量替代调用点 magic number；`data`
-/// 只携带稳定 allowlist 分类和可选 HTTP status，不包含 provider payload 或
-/// 内部错误链（D2/D5）。
+/// "agent turn execution failed"。`data` 保留稳定分类与完整诊断。
 pub const ACP_TURN_EXECUTION_FAILED_CODE: i64 = -32000;
 
 /// [`ExecutionFailureKind`] → JSON-RPC server error code 的穷尽映射。
@@ -53,9 +51,9 @@ const fn execution_failure_kind_code(kind: ExecutionFailureKind) -> i64 {
 /// Agent→ACP 结果边界的窄映射：`ExecutionFailure` → 传输层 `AcpError`。
 ///
 /// - `code`：按 [`execution_failure_kind_code`] 穷尽映射；
-/// - `message`：直接使用 failure 的脱敏 public message（非空由
+/// - `message`：直接使用 failure 的错误信息（非空由
 ///   [`ExecutionFailure::internal`] 保证，空输入回落稳定 fallback）；
-/// - `data`：稳定 allowlist `kind`，LLM HTTP 错误额外携带 `status`。
+/// - `data`：稳定 `kind`、HTTP `status` 与完整 `diagnostic`。
 pub(crate) fn execution_failure_to_acp_error(failure: &ExecutionFailure) -> AcpError {
     let mut data = serde_json::Map::new();
     data.insert(
@@ -67,40 +65,17 @@ pub(crate) fn execution_failure_to_acp_error(failure: &ExecutionFailure) -> AcpE
             data.insert("status".to_string(), Value::from(status));
         }
     }
-    if let Some(diagnostic) = &failure.diagnostic {
-        let mut projection = serde_json::Map::new();
-        projection.insert(
-            "category".to_string(),
-            Value::String(diagnostic.category_name().to_string()),
+    if let Some(category) = &failure.error_category {
+        data.insert(
+            "error_category".to_string(),
+            Value::String(category.clone()),
         );
-        if let Some(status) = diagnostic.status() {
-            projection.insert("status".to_string(), Value::from(status));
-        }
-        if let Some(provider) = diagnostic.provider() {
-            projection.insert("provider".to_string(), Value::String(provider.to_string()));
-        }
-        if let Some(request_id) = diagnostic.request_id() {
-            projection.insert(
-                "request_id".to_string(),
-                Value::String(request_id.to_string()),
-            );
-        }
-        if let Some(transport) = diagnostic.transport() {
-            projection.insert(
-                "transport".to_string(),
-                Value::String(transport.to_string()),
-            );
-        }
-        if let Some(protocol) = diagnostic.protocol() {
-            projection.insert("protocol".to_string(), Value::String(protocol.to_string()));
-        }
-        if let Some(attempts) = diagnostic.retry_attempts() {
-            projection.insert("retry_attempts".to_string(), Value::from(attempts));
-        }
-        if let Some(kind) = diagnostic.retry_kind() {
-            projection.insert("retry_kind".to_string(), Value::String(kind.to_string()));
-        }
-        data.insert("diagnostic".to_string(), Value::Object(projection));
+    }
+    if !failure.causes.is_empty() {
+        data.insert("causes".to_string(), serde_json::json!(failure.causes));
+    }
+    if let Some(diagnostic) = &failure.diagnostic {
+        data.insert("diagnostic".to_string(), serde_json::json!(diagnostic));
     }
     AcpError {
         code: execution_failure_kind_code(failure.kind),
@@ -122,6 +97,7 @@ pub(crate) fn execution_failure_to_acp_error(failure: &ExecutionFailure) -> AcpE
 fn prompt_wire_response(
     failure: Option<&ExecutionFailure>,
     stop_reason: executor::PromptStopReason,
+    pending_tasks: u32,
 ) -> Result<Value, AcpError> {
     if let Some(failure) = failure {
         return Err(execution_failure_to_acp_error(failure));
@@ -132,7 +108,17 @@ fn prompt_wire_response(
         executor::PromptStopReason::MaxTokens => StopReason::MaxTokens,
         executor::PromptStopReason::EndTurn => StopReason::EndTurn,
     };
-    let resp = PromptResponse::new(acp_stop_reason);
+    let mut resp = PromptResponse::new(acp_stop_reason);
+    // §7.3 有界等待摘要：turn 退出时仍有未结算任务才附加标记，
+    // 无未结算任务时响应保持原形（不产生 `_meta`）。
+    if pending_tasks > 0 {
+        let mut meta = Meta::new();
+        meta.insert(
+            "peri".to_owned(),
+            serde_json::json!({ "pendingTasks": pending_tasks }),
+        );
+        resp.meta = Some(meta);
+    }
     serde_json::to_value(resp).map_err(|e| AcpError::new(-32603, format!("Serialize failed: {e}")))
 }
 
@@ -190,7 +176,7 @@ pub(crate) async fn approve_scheduled_trigger(
 
 #[allow(clippy::too_many_arguments)] // Shared host execution wiring plus optional Agent-owned input ticket.
 pub(crate) async fn run_prompt(
-    params: Value,
+    mut params: Value,
     sessions: &SharedSessions,
     deployment: &super::AcpServerConfig,
     transport: &Arc<dyn crate::transport::AcpTransport>,
@@ -199,6 +185,54 @@ pub(crate) async fn run_prompt(
     continuation: bool,
     input_ticket: Option<super::user_input::UserInputRun>,
 ) -> Result<Value, AcpError> {
+    let notifications = super::execution::ExecutionNotifications::from_params(&mut params)?;
+    let session_id = super::extract_session_id(&params, "").to_owned();
+    let attempt_activation = deployment
+        .session_manager
+        .get_session(&session_id)
+        .map(|runtime| {
+            (
+                Arc::clone(&runtime.activation),
+                runtime.v2_message_queue.admission_watermark(),
+            )
+        });
+    let result = run_prompt_attempt(
+        params,
+        sessions,
+        deployment,
+        transport,
+        pool,
+        cont_tx,
+        continuation,
+        input_ticket,
+        &notifications,
+        attempt_activation.as_ref(),
+    )
+    .await;
+    if result.is_err() {
+        if let Some((activation, watermark)) = &attempt_activation {
+            activation.record_failed_attempt(*watermark);
+        }
+        notifications
+            .finish_early(&session_id, "error", deployment, transport)
+            .await;
+    }
+    result
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn run_prompt_attempt(
+    params: Value,
+    sessions: &SharedSessions,
+    deployment: &super::AcpServerConfig,
+    transport: &Arc<dyn crate::transport::AcpTransport>,
+    pool: Arc<parking_lot::Mutex<crate::session::agent_pool::AgentPool>>,
+    cont_tx: Option<tokio::sync::mpsc::UnboundedSender<executor::ContinuationRequest>>,
+    continuation: bool,
+    input_ticket: Option<super::user_input::UserInputRun>,
+    notifications: &super::execution::ExecutionNotifications,
+    attempt_activation: Option<&(Arc<crate::session::SessionActivation>, u64)>,
+) -> Result<Value, AcpError> {
     // Borrow deployment services; turn-owned callbacks clone only their existing handles.
     // Provider/config snapshots remain below, after the session snapshot is captured.
     let provider = &deployment.provider;
@@ -206,16 +240,13 @@ pub(crate) async fn run_prompt(
     let permission_mode = &deployment.permission_mode;
     let cron_scheduler = deployment.cron_scheduler.clone();
     let plugin_skill_roots = deployment.plugin_skill_roots.as_slice();
-    let plugin_agent_dirs = deployment.plugin_agent_dirs.as_slice();
     let plugin_loaded = deployment.plugin_loaded.as_slice();
     let hook_groups = deployment.hook_groups.as_slice();
     let mcp_pool = deployment.mcp_pool.clone();
     let dynamic_mcp = deployment.dynamic_mcp.clone();
-    let channel_state = deployment.channel_state.clone();
     let tool_search_index = deployment.tool_search_index.clone();
-    let skills = deployment.skills.clone();
+    let agent_catalog = deployment.agent_catalog.clone();
     let shared_tools = deployment.shared_tools.clone();
-    let plugin_lsp_servers = deployment.plugin_lsp_servers.as_slice();
     let session_resources = deployment.session_resources.clone();
     let controller = &deployment.controller;
     let langfuse_session = deployment.langfuse_session.clone();
@@ -246,7 +277,14 @@ pub(crate) async fn run_prompt(
     // Create cancel token and register in sessions.
     // `AgentCancellationToken` 即 `tokio_util::sync::CancellationToken` 别名
     // （peri-agent re-export；ACP 协议面直接使用底层类型，不经业务 crate）。
-    let cancel = tokio_util::sync::CancellationToken::new();
+    let cancel = {
+        let sessions = sessions.lock().await;
+        sessions
+            .get(&session_id)
+            .filter(|state| continuation && state.continuation_in_flight)
+            .and_then(|state| state.cancel_token.clone())
+            .unwrap_or_default()
+    };
     let managed_input = input_ticket.is_some();
     let input_attempt = match &input_ticket {
         Some(run) => {
@@ -272,39 +310,25 @@ pub(crate) async fn run_prompt(
             transport,
         )
         .await?;
+    } else {
+        notifications
+            .start(
+                &session_id,
+                user_input_mailbox.generation(),
+                deployment,
+                transport,
+            )
+            .await?;
     }
-    {
+    // Read session data under lock, then release immediately.
+    let (cwd, history_payloads, is_empty, thread_id, frozen, incoming_recalls, workflow_middleware) = {
         let mut sessions = sessions.lock().await;
         let state = sessions
             .get_mut(&session_id)
             .ok_or_else(|| AcpError::new(-32602, "session not found"))?;
         state.cancel_token = Some(cancel.clone());
-    }
-
-    // Read session data under lock, then release immediately.
-    let (
-        cwd,
-        history,
-        history_payloads,
-        is_empty,
-        thread_id,
-        frozen,
-        incoming_recalls,
-        workflow_middleware,
-        lsp_pool,
-        execution_owner,
-    ) = {
-        let mut sessions = sessions.lock().await;
-        let state = sessions
-            .get_mut(&session_id)
-            .ok_or_else(|| AcpError::new(-32602, "session not found"))?;
         (
             state.cwd.clone(),
-            state
-                .history_payloads
-                .iter()
-                .filter_map(|payload| payload.as_message().cloned())
-                .collect::<Vec<_>>(),
             state.history_payloads.clone(),
             state.history_payloads.is_empty(),
             state.thread_id.clone(),
@@ -312,12 +336,20 @@ pub(crate) async fn run_prompt(
             // 后台 continuation 保留 recall；队列承载的新用户输入仍消费 recall。
             take_recall_for_turn(&mut state.recall_items, continuation && !managed_input),
             state.workflow_middleware.clone(),
-            state.lsp_pool.clone(),
-            // 执行所有权投影：child 保存（save_child）需要调用方证明自己持有本会话
-            // root 的活 owner；只读准入的会话为 None，那时不落任何 child。
-            state.execution_owner.clone(),
         )
     };
+    let history = history_payloads
+        .iter()
+        .filter_map(|payload| payload.as_message().cloned())
+        .collect::<Vec<_>>();
+    if let Some(sender) = &cont_tx {
+        if !continuation || managed_input {
+            if let Some(runtime) = session_manager.get_session(&session_id) {
+                runtime.activation.allow();
+            }
+        }
+        super::activation::ensure_listener(&session_id, sessions, deployment, sender)?;
+    }
     let broker = build_transport_broker(transport, &session_id);
     let event_sink = Arc::new(TransportEventSink::new(
         Arc::clone(transport),
@@ -327,13 +359,34 @@ pub(crate) async fn run_prompt(
     let provider_snapshot = provider.read().clone();
     let peri_config_snapshot = Arc::new(peri_config.read().clone());
 
+    // 同源收口（ARC-FROZEN-001）：可执行会话必然
+    // 带有创建/恢复时定格的 frozen。缺失时 **fail-closed** —— 既不按当前配置/目录重冻
+    // （那会把本轮的目录状态冒充成历史冻结输入），也不带着空冻结继续跑；宿主必须显式
+    // 修复这条会话（重新 load 或删除），而不是让一次静默降级改掉系统提示词。
+    let Some(frozen) = frozen else {
+        return Err(AcpError::new(
+            -32603,
+            "Session has no frozen snapshot; refusing to rebuild it from the current state",
+        ));
+    };
+
     // MetaHarness：从会话冻结数据投影（ARC-FROZEN-001——禁止从每 turn 的
-    // 当前配置重建；frozen None（print mode 等防御路径）回落默认空状态）。
-    // 设计 §2.5-2.6：装配与 workflow 渲染统一消费冻结状态。
-    let meta_harness = frozen
-        .as_ref()
-        .map(|f| f.meta_harness().clone())
-        .unwrap_or_default();
+    // 当前配置重建）。设计 §2.5-2.6：装配与 workflow 渲染统一消费冻结状态。
+    let meta_harness = frozen.meta_harness().clone();
+    // H2：workflow agent 链能力事实 + 按能力投影的 system prompt（本 turn 级
+    // 构造点的 broker/permission_mode 恒 None ⇒ 审批通道无效）。基础段 / 语言
+    // 与冻结决策同源，运行环境消费冻结快照（H3）。
+    let workflow_capabilities = crate::host::workflow_agent::workflow_capabilities(
+        &meta_harness.disabled_middlewares,
+        false,
+        false,
+    );
+    let workflow_system_prompt = crate::host::workflow_agent::project_workflow_system_prompt(
+        &frozen,
+        &workflow_capabilities,
+        agent_catalog.as_ref(),
+        &cwd,
+    );
 
     // Create workflow executor (enables Workflow tool for multi-agent orchestration)
     // GAP-05: inject frozen data so workflow agents reuse SubAgent infra
@@ -342,16 +395,14 @@ pub(crate) async fn run_prompt(
     let workflow_executor = peri_agent::agent::workflow::create_executor(
         peri_agent::agent::workflow::WorkflowAgentContext {
             cwd: cwd.clone(),
-            frozen_claude_md: frozen
-                .as_ref()
-                .and_then(|f| f.claude_md().map(|s| s.to_string())),
-            frozen_claude_local_md: frozen
-                .as_ref()
-                .and_then(|f| f.claude_local_md().map(|s| s.to_string())),
-            frozen_skill_summary: frozen
-                .as_ref()
-                .and_then(|f| f.skill_summary().map(|s| s.to_string())),
+            frozen_claude_md: frozen.claude_md().map(|s| s.to_string()),
+            frozen_claude_local_md: frozen.claude_local_md().map(|s| s.to_string()),
+            frozen_skill_summary: frozen.skill_summary().map(|s| s.to_string()),
+            // W4b（F4/J5）：workflow agent 的技能来源 = 会话级 MCP registry
+            // （与主链同一份）；会话未登记时为 None（技能面为空，不回落磁盘）。
+            mcp_skill_registry: session_manager.mcp_skill_registry_for(&session_id),
             session_id: Some(session_id.clone()),
+            session_resources: Some(deployment.session_resources.clone()),
             compact_config: {
                 let mut cc = peri_config_snapshot
                     .config
@@ -364,26 +415,30 @@ pub(crate) async fn run_prompt(
             cancel: Some(cancel.clone()),
             // 无 16_workflow 版本（P2-2026-08-02）：workflow agent 链不
             // 注册 WorkflowTool，不得复用带 workflow 声明的主 prompt。
-            // （16_workflow 已删除（C2），主 prompt 即子面向唯一版本。）
-            system_prompt: frozen.as_ref().map(|f| f.system_prompt().to_string()),
+            // （16_workflow 已删除（C2）；H2：按 workflow 能力投影重建。）
+            system_prompt: Some(workflow_system_prompt.clone()),
+            external_instructions: frozen.v2_frozen().external_instructions.clone(),
+            legacy_embedded_instructions: frozen.v2_frozen().legacy_embedded_instructions,
             broker: None,
             permission_mode: None,
-            frozen_date: frozen.as_ref().map(|f| f.date().to_string()),
-            frozen_language: frozen
-                .as_ref()
-                .and_then(|f| f.language().map(|s| s.to_string())),
+            frozen_date: Some(frozen.date().to_string()),
+            frozen_language: frozen.language().map(|s| s.to_string()),
             progress_tx: None,
             subagent_ctx_builder: None,
             agent_prompt_builder: crate::host::workflow_agent::build_workflow_agent_prompt_builder(
-                Arc::clone(&skills),
+                Arc::clone(&agent_catalog),
                 meta_harness.clone(),
+                workflow_capabilities,
+                frozen.runtime_env().cloned(),
             ),
             model_factory: crate::host::workflow_agent::build_model_factory(provider, peri_config),
             middleware_factory: Arc::clone(workflow_middleware_factory),
             system_prompt_fallback:
                 crate::host::workflow_agent::build_workflow_system_prompt_fallback(
-                    Arc::clone(&skills),
+                    Arc::clone(&agent_catalog),
                     meta_harness.clone(),
+                    workflow_capabilities,
+                    frozen.runtime_env().cloned(),
                 ),
             forwarder_launcher: crate::host::workflow_agent::build_workflow_forwarder_launcher(),
             publish_hook: Some(crate::host::workflow_agent::build_publish_hook(controller)),
@@ -406,7 +461,6 @@ pub(crate) async fn run_prompt(
     } else {
         provider_snapshot.context_window()
     };
-    let claude_md_excludes = peri_config_snapshot.config.claude_md_excludes.clone();
     let language = peri_config_snapshot.config.language.clone();
     let mut compact_config = peri_config_snapshot
         .config
@@ -470,15 +524,11 @@ pub(crate) async fn run_prompt(
     let tool_invocation_resolver: Arc<dyn peri_agent::tools::ToolInvocationResolver> =
         Arc::new(peri_middlewares::tool_search::ExecuteExtraToolResolver::default());
 
-    // 防御性 frozen 构建器（turn.frozen=None 回落；生产不可达）
-    let frozen_fallback_builder: Option<executor::FrozenFallbackBuilder> = {
-        let sm = session_manager.clone();
-        let roots = plugin_skill_roots.to_vec();
-        let dirs = plugin_agent_dirs.to_vec();
-        Some(Arc::new(move |cwd, _language| {
-            sm.build_frozen_data(cwd, &roots, &dirs)
-        }))
-    };
+    // 同源收口（§6.4）：宿主**不**注入 frozen 构建器。曾经的 `FrozenFallbackBuilder`
+    // 会在 `turn.frozen=None` 时按当前目录/配置重冻一份，那是同源规则的第三入口；
+    // 现在本入口在此前已对缺 frozen 的会话 fail-closed（见上文 `let Some(frozen)`），
+    // 因此不存在「静默重冻」这条路径。
+    let frozen_fallback_builder: Option<executor::FrozenFallbackBuilder> = None;
 
     let session_mcp_capability = dynamic_mcp
         .as_ref()
@@ -494,7 +544,6 @@ pub(crate) async fn run_prompt(
         provider_model_name,
         provider_fp,
         effective_context_window,
-        claude_md_excludes,
         language,
         compact_config,
         get_cached_llm,
@@ -508,14 +557,11 @@ pub(crate) async fn run_prompt(
         cancel,
         broker,
         permission_mode: permission_mode.clone(),
-        session_access: Some(
-            Arc::new(session_manager) as Arc<dyn peri_acp_types::session::SessionAccessPort>
-        ),
+        session_access: Some(Arc::new(session_manager.clone())
+            as Arc<dyn peri_acp_types::session::SessionAccessPort>),
         session_resources: Some(session_resources.clone()),
-        execution_owner,
         thread_id: Some(thread_id.clone()),
         plugin_skill_roots: plugin_skill_roots.to_vec(),
-        plugin_agent_dirs: plugin_agent_dirs.to_vec(),
         plugin_loaded: plugin_loaded.to_vec(),
         hook_groups: hook_groups.to_vec(),
         cron_scheduler,
@@ -523,12 +569,9 @@ pub(crate) async fn run_prompt(
         dynamic_mcp,
         session_mcp_capability,
         dynamic_mcp_projection,
-        channel_state,
         tool_search_index,
-        skills,
+        agent_catalog,
         shared_tools,
-        lsp_servers: plugin_lsp_servers.to_vec(),
-        lsp_pool,
         workflow_executor: Some(workflow_executor),
         workflow_middleware,
         event_publisher,
@@ -570,7 +613,7 @@ pub(crate) async fn run_prompt(
         event_sink,
         content,
         continuation,
-        frozen,
+        frozen: Some(frozen),
         history,
         history_payloads: history_payloads.clone(),
         incoming_recalls,
@@ -592,6 +635,16 @@ pub(crate) async fn run_prompt(
         .await
         .map_err(|e| AcpError::new(-32603, format!("run_session failed: {e}")))?;
     let result = handle.take_result();
+    notifications.mark_terminal();
+    if !result.ok || result.failure.is_some() {
+        if let Some((activation, watermark)) = attempt_activation {
+            if result.stop_reason == executor::PromptStopReason::Cancelled {
+                activation.suppress();
+            } else {
+                activation.record_failed_attempt(*watermark);
+            }
+        }
+    }
     if let Some(run) = &input_ticket {
         run.mark_terminal_delivered();
     }
@@ -612,8 +665,6 @@ pub(crate) async fn run_prompt(
     .await
 }
 
-// Durable progress is independent of the terminal status. This boundary also owns wire
-// projection so that cancellation/error responses can never bypass canonical state adoption.
 pub(super) async fn finish_prompt_turn(
     sessions: &SharedSessions,
     session_id: &str,
@@ -650,7 +701,11 @@ pub(super) async fn finish_prompt_turn(
     }
     // Fatal failures still use the standard JSON-RPC error; cancellation/max-iterations
     // retain their existing PromptResponse stop reasons after state cleanup.
-    prompt_wire_response(result.failure.as_ref(), result.stop_reason)
+    prompt_wire_response(
+        result.failure.as_ref(),
+        result.stop_reason,
+        result.pending_tasks,
+    )
 }
 
 /// [AsyncContinuation] 读取本轮 recall 的策略：

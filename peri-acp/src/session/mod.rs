@@ -29,7 +29,10 @@ pub mod state_builders;
 pub use peri_agent::session::async_router::AsyncRouter;
 
 pub use dynamic_mcp::SessionDynamicMcpNotificationSink;
-pub(crate) use frozen::build_collected_sections;
+pub(crate) use frozen::{
+    build_collected_sections, build_collected_sections_with_capabilities, build_meta_harness_state,
+    subagent_chain_capabilities, workflow_chain_capabilities,
+};
 pub use retry_events::RetryEventForwarder;
 
 #[cfg(test)]
@@ -50,7 +53,6 @@ use peri_acp_types::mcp_skills::McpSkillRegistry;
 use peri_acp_types::messages::BaseMessage;
 use peri_acp_types::permission::SharedPermissionMode;
 use peri_acp_types::session_resources::SessionResources;
-use peri_acp_types::skills::SkillRoot;
 use peri_acp_types::thread::ThreadId;
 use tokio_util::sync::CancellationToken;
 
@@ -65,6 +67,10 @@ use peri_acp_types::session::AgentRuntime;
 /// 只持有契约 `peri_acp_types::tasks::TaskManager`。
 pub type TaskManagerFactory =
     Arc<dyn Fn() -> Arc<dyn peri_acp_types::tasks::TaskManager> + Send + Sync>;
+
+mod activation;
+
+pub(crate) use activation::SessionActivation;
 
 pub struct AcpSession {
     pub session_id: String,
@@ -93,6 +99,7 @@ pub struct AcpSession {
     ///
     /// 内部 `Arc<Mutex<VecDeque>> + Arc<Notify>`，clone 共享底层。
     pub v2_message_queue: peri_acp_types::session::MessageQueue,
+    pub(crate) activation: Arc<SessionActivation>,
     /// Session-level inbox (await-wake wrapper around v2_message_queue).
     ///
     /// Created lazily on first access via `SessionManager::session_inbox_for`.
@@ -111,6 +118,9 @@ pub struct AcpSession {
     /// 后台任务管理器（Agent 层 per-session 聚合：registry + bg shell 执行；
     /// 随 session 创建/销毁，close_session 时 cancel_all 取消 owned 任务）
     pub task_manager: Arc<dyn peri_acp_types::tasks::TaskManager>,
+    /// The ACP task event stream is bound once per session runtime.
+    pub(crate) task_events_started: std::sync::atomic::AtomicBool,
+    pub(crate) task_events_cancel: CancellationToken,
     /// idle-suspended 标志：executor 在 await_wake 挂起期间置 true（跨 turn
     /// 持久，Arc 共享）。宿主 `dispatch_prompt_turn` 据此把挂起期间到达的
     /// 用户 prompt 注入 inbox 唤醒 loop（而非在 prompt lock 上阻塞）。
@@ -161,12 +171,10 @@ struct SessionManagerInner {
     /// Deployment-level Dynamic MCP state machine port.
     pub dynamic_mcp: Option<Arc<dyn peri_acp_types::ports::DynamicMcpDeploymentPort>>,
     /// Skills 扫描端口（装配注入；frozen 数据构建的 agents/skills 扫描经此访问）。
-    pub skills: Arc<dyn peri_acp_types::ports::SkillsPort>,
+    pub agent_catalog: Arc<dyn peri_acp_types::ports::AgentCatalogPort>,
     /// 插件命令静态条目（Phase 6 B2 预转；会话创建时按
     /// 内置 → 本地 skills（C1）→ 插件 顺序 register_all）。
     pub plugin_command_entries: Vec<RouteEntry>,
-    /// 插件 skill roots（C1 本地 skills 扫描参数；与 host cfg 同源）。
-    pub plugin_skill_roots: Vec<SkillRoot>,
     /// 后台任务管理器工厂（装配注入面）：每次 session 创建时调用一次，产出
     /// per-session 的 `Arc<dyn TaskManager>`（Agent 层 per-session 聚合）。
     /// None = 未注入时 fallback `NoopTaskManager`（print 等无 bg 场景）。
@@ -187,6 +195,7 @@ impl AcpSession {
             mailbox.invalidate();
         }
         self.user_input_events_cancel.cancel();
+
         if let Some(projection) = self.dynamic_mcp_projection.lock().take() {
             projection.close();
         }
@@ -221,9 +230,8 @@ impl SessionManager {
         mcp_subscription: Option<Arc<dyn peri_acp_types::mcp::McpSubscriptionPort>>,
         dynamic_mcp: Option<Arc<dyn peri_acp_types::ports::DynamicMcpDeploymentPort>>,
         task_manager_factory: Option<TaskManagerFactory>,
-        skills: Arc<dyn peri_acp_types::ports::SkillsPort>,
+        agent_catalog: Arc<dyn peri_acp_types::ports::AgentCatalogPort>,
         plugin_command_entries: Vec<RouteEntry>,
-        plugin_skill_roots: Vec<SkillRoot>,
     ) -> Self {
         Self {
             inner: Arc::new(SessionManagerInner {
@@ -239,9 +247,8 @@ impl SessionManager {
                 cron_continuation_tx: parking_lot::Mutex::new(None),
                 mcp_subscription,
                 dynamic_mcp,
-                skills,
+                agent_catalog,
                 plugin_command_entries,
-                plugin_skill_roots,
                 task_manager_factory,
             }),
         }
@@ -253,7 +260,8 @@ impl SessionManager {
         inner.caps_registry = Arc::clone(&host.inner.caps_registry);
         *inner.pending_caps.lock() = host.inner.pending_caps.lock().clone();
         *inner.cron_continuation_tx.lock() = host.inner.cron_continuation_tx.lock().clone();
-        inner.cron_scheduler = host.inner.cron_scheduler.clone();
+        // The bridge keeps this environment's scheduler: sharing the host scheduler
+        // would disconnect MCP registrations and broadcast across sessions.
     }
 
     /// 使用指定 session_id 创建会话（用于 session/load 和 session/resume）
@@ -302,6 +310,7 @@ impl SessionManager {
     /// Transfer the removed record to the host's retryable exit context.
     pub(crate) fn take_for_close(&self, session_id: &str) -> Option<AcpSession> {
         self.inner.sessions.remove(session_id).map(|(_, session)| {
+            session.task_events_cancel.cancel();
             if let Some(port) = &session.mcp_subscription {
                 port.unregister_inbox(session_id);
             }
@@ -313,11 +322,13 @@ impl SessionManager {
     /// cooperatively unwinding prompt.
     pub(crate) fn pre_close_session(&self, session_id: &str) {
         if let Some(session) = self.inner.sessions.get(session_id) {
+            session.task_events_cancel.cancel();
             if let Some(mailbox) = &session.user_input_mailbox {
                 mailbox.invalidate();
             }
             session.user_input_events_cancel.cancel();
-            peri_acp_types::session::cancel_all_agents(session.active_agents.values());
+
+            peri_acp_types::session::cancel_cascade_agents(session.active_agents.values());
             session.cancel_token.cancel();
             session.task_manager.cancel_all();
         }
@@ -396,9 +407,26 @@ impl SessionManager {
     /// TUI/stdio 调用方仍自行维护 history/frozen/agent_pool 等字段，
     /// SessionManager 只负责 active_agents / goal_state 维度。
     pub fn ensure_session(&self, session_id: &str, cwd: &str) {
+        self.ensure_session_with_task_manager(session_id, cwd, None)
+    }
+
+    /// [`Self::ensure_session`] 的携带外部 `TaskManager` 变体（AW3-11）。
+    ///
+    /// 会话环境装配（`SessionEnvironment::assemble`）先产出 per-session manager 并
+    /// 经 builtin 上下文送进 pool 的 `workspace` 实例，登记 `AcpSession` 时传入**同一
+    /// 份** `Arc`，使「送进 builtin 的 == 会话持有的」可观察（`Arc::ptr_eq`）。
+    /// `None` 与 [`Self::ensure_session`] 完全同语义：走装配注入的工厂，未注入则
+    /// fallback `NoopTaskManager`。
+    pub fn ensure_session_with_task_manager(
+        &self,
+        session_id: &str,
+        cwd: &str,
+        task_manager: Option<Arc<dyn peri_acp_types::tasks::TaskManager>>,
+    ) {
         if !self.inner.sessions.contains_key(session_id) {
             let thread_id = ThreadId::from(session_id.to_string());
-            let session = self.build_session(session_id, thread_id, cwd);
+            let session =
+                self.build_session_with_task_manager(session_id, thread_id, cwd, task_manager);
             self.inner.sessions.insert(session_id.to_string(), session);
         }
         // 在 session 发布边界立即订阅，避免首个 turn 前到点的 trigger 丢失。

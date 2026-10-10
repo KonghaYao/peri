@@ -54,6 +54,36 @@ pub struct TransportEventSink {
 }
 
 impl TransportEventSink {
+    pub(crate) async fn push_execution_started(
+        &self,
+        session_id: &str,
+        generation: String,
+        request_id: String,
+    ) -> Result<(), crate::transport::types::AcpError> {
+        let caps = self.caps_registry.get(session_id).map(|caps| caps.clone());
+        if !caps.is_some_and(|caps| caps.agent_event || caps.user_input_queue) {
+            return Ok(());
+        }
+        let event = crate::event::AcpEvent::ExecutionStarted {
+            generation,
+            request_id,
+        };
+        let event_json = serde_json::to_string(&event).map_err(|error| {
+            crate::transport::types::AcpError::new(
+                -32603,
+                format!("execution start serialization failed: {error}"),
+            )
+        })?;
+        self.transport
+            .send_notification(
+                "peri/agent_event",
+                json!({
+                    "sessionId": session_id, "event_json": event_json,
+                }),
+            )
+            .await
+    }
+
     pub(crate) async fn push_user_input_started(
         &self,
         session_id: &str,
@@ -130,6 +160,22 @@ impl EventSink for TransportEventSink {
         reminder: &peri_acp_types::system_reminder::SystemReminder,
         replay: bool,
     ) {
+        // H8：客户端出口必须先按目标受众过滤；结构化事件与文本 fallback 使用
+        // 同一条规则，fallback 不得绕过过滤下发 Model-only 内容。
+        if !peri_acp_types::system_reminder::reminder_egress_allowed(
+            reminder,
+            peri_acp_types::system_reminder::ReminderAudience::Tui,
+        ) {
+            tracing::debug!(
+                session_id = %session_id,
+                source = %reminder.source,
+                kind = %reminder.kind,
+                delivery = ?reminder.delivery,
+                replay,
+                "system reminder is not addressed to the client audience; nothing is sent"
+            );
+            return;
+        }
         let caps = self
             .caps_registry
             .get(session_id)
@@ -236,9 +282,6 @@ impl EventSink for TransportEventSink {
             }
         }
 
-        // Privacy-safe GUI activity channel. This is intentionally independent
-        // from legacy `peri/agent_event`: the mapper has already removed raw
-        // messages, summaries, paths, outputs, errors and URLs before transport.
         if caps.agent_activity {
             if let Some(activity) = map_agent_activity(event) {
                 if let Err(error) = self

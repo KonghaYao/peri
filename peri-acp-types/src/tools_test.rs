@@ -2,6 +2,18 @@
 
 use super::*;
 
+#[test]
+fn tool_context_keeps_model_call_identity_independent_from_invocation() {
+    let context = ToolContext::new(&[], "/tmp");
+    assert!(context.tool_call_id.is_none());
+    assert!(context.invocation_id.is_none());
+    assert!(context.session_resources.is_none());
+    let context = context.with_tool_call_id("model-call");
+    assert_eq!(context.tool_call_id.as_deref(), Some("model-call"));
+    assert!(context.invocation_id.is_none());
+    assert!(!context.cancellation.is_cancelled());
+}
+
 // -- ToolDescription serde roundtrip（P0 数据结构序列化） ----------------------
 
 #[test]

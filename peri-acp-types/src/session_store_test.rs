@@ -1,5 +1,5 @@
 //! 会话存储部署参数的确定性测试：默认值、构造归一、两类定位输入的语义区分与
-//! `Debug` 不泄密。
+//! `Debug` 保留运行配置。
 
 use std::path::PathBuf;
 
@@ -79,33 +79,32 @@ fn local_path_keeps_non_utf8_bytes() {
 }
 
 #[test]
-fn debug_does_not_echo_locator_or_credential_name() {
+fn debug_preserves_locator_and_credential_name() {
     let deployment = SessionStoreDeployment::from_locator("turso://sentinel-db-sentinel.turso.io")
         .with_credential_env("PERI_SENTINEL_TOKEN_NAME");
     let rendered = format!("{deployment:?}");
 
-    assert!(rendered.contains("<configured>"));
+    assert!(rendered.contains("Locator"));
     assert!(rendered.contains("ReadWrite"));
-    assert!(!rendered.contains("sentinel-db-sentinel"));
-    assert!(!rendered.contains("PERI_SENTINEL_TOKEN_NAME"));
+    assert!(rendered.contains("sentinel-db-sentinel"));
+    assert!(rendered.contains("PERI_SENTINEL_TOKEN_NAME"));
 }
 
 #[test]
 fn debug_marks_default_local() {
     let rendered = format!("{:?}", SessionStoreDeployment::default_local());
-    assert!(rendered.contains("<default-local>"));
-    assert!(rendered.contains("engine_configured: false"));
+    assert!(rendered.contains("Default"));
+    assert!(rendered.contains("engine: None"));
 }
 
-/// 本机路径也不回显取值（路径含用户环境），只标形态。
 #[test]
-fn debug_does_not_echo_local_path_value() {
+fn debug_preserves_local_path_value() {
     let deployment =
         SessionStoreDeployment::local_path(PathBuf::from("/sentinel-home-sentinel/threads.db"));
     let rendered = format!("{deployment:?}");
     let locator_debug = format!("{:?}", deployment.locator());
 
-    assert!(rendered.contains("<local-path>"));
-    assert!(!rendered.contains("sentinel-home-sentinel"));
-    assert!(!locator_debug.contains("sentinel-home-sentinel"));
+    assert!(rendered.contains("LocalPath"));
+    assert!(rendered.contains("sentinel-home-sentinel"));
+    assert!(locator_debug.contains("sentinel-home-sentinel"));
 }

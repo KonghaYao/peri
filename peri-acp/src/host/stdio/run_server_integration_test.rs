@@ -13,10 +13,9 @@
 //! 与统一 prompt 路径兼容（§7 #1/#2 合并分支）。
 //!
 //! 批 3 Step 5 测试迁移：原 `host/stdio/session/create_test.rs` 的
-//! load/resume/fork 会话级 LSP 池断言（H1）与 session/new MCP 发现预热
-//! smoke 迁入本文件——经 `run_acp_server_with_sessions`（外部注入共享
-//! session map）驱动统一路径，断言从「handler 直调 + StdioContext 内窥」改为
-//! 「wire 驱动 + 共享 map 内窥」（`test_delete_removes_thread_*` 与 prewarm
+//! session/new MCP 发现预热 smoke 迁入本文件——经 `run_acp_server_with_sessions`
+//! （外部注入共享 session map）驱动统一路径，断言从「handler 直调 + StdioContext
+//! 内窥」改为「wire 驱动 + 共享 map 内窥」（`test_delete_removes_thread_*` 与 prewarm
 //! smoke 的 load 变体在 `host/requests_test.rs` 已有等价覆盖，不重复）。
 
 use std::sync::Arc;
@@ -61,15 +60,19 @@ async fn test_stdio_assembly_uses_input_cwd_workspace() {
     let _guard = StdioStartupGuard;
     crate::provider::set_global_config_path(Some(global_path));
 
-    let assembled = assemble_stdio_config(crate::host::stdio::StdioInput {
-        cwd: input_workspace.to_string_lossy().into_owned(),
-        permission_mode: peri_acp_types::permission::SharedPermissionMode::new(
-            peri_acp_types::permission::PermissionMode::Bypass,
-        ),
-        session_store: peri_acp_types::session_store::SessionStoreDeployment::local_path(
-            tmp.path().join("threads.db"),
-        ),
-    })
+    let assembled = assemble_stdio_config(
+        crate::host::stdio::StdioInput {
+            cwd: input_workspace.to_string_lossy().into_owned(),
+            settings_stdin: false,
+            permission_mode: peri_acp_types::permission::SharedPermissionMode::new(
+                peri_acp_types::permission::PermissionMode::Bypass,
+            ),
+            session_store: peri_acp_types::session_store::SessionStoreDeployment::local_path(
+                tmp.path().join("threads.db"),
+            ),
+        },
+        None,
+    )
     .await
     .unwrap();
 
@@ -111,17 +114,15 @@ async fn make_server_config(
     provider: LlmProvider,
     tmp: &tempfile::TempDir,
 ) -> AcpServerConfig {
-    make_server_config_with(peri_config, provider, tmp, Vec::new(), None, None).await
+    make_server_config_with(peri_config, provider, tmp, None, None).await
 }
 
-/// 同 [`make_server_config`]，另注入 `plugin_lsp_servers`（H1 会话级 LSP 池
-/// 测试）与 `mcp_pool`（MCP 发现预热 smoke 测试）——与迁移前
+/// 同 [`make_server_config`]，另注入 `mcp_pool`（MCP 发现预热 smoke 测试）——与迁移前
 /// `create_test.rs::make_stdio_context` 的「装配后显式替换」等价的参数化形态。
 async fn make_server_config_with(
     peri_config: PeriConfig,
     provider: LlmProvider,
     tmp: &tempfile::TempDir,
-    lsp_servers: Vec<peri_acp_types::lsp::LspServerConfig>,
     mcp_pool: Option<Arc<dyn peri_acp_types::ports::McpPoolPort>>,
     task_manager_factory: Option<crate::session::TaskManagerFactory>,
 ) -> AcpServerConfig {
@@ -149,8 +150,7 @@ async fn make_server_config_with(
                     as Arc<dyn peri_acp_types::tasks::TaskManager>
             }))
         }),
-        Arc::new(peri_middlewares::host_ports::SkillsProvider),
-        Vec::new(),
+        Arc::new(peri_middlewares::host_ports::AgentCatalogProvider::new()),
         Vec::new(),
     );
     let (host_task_owner, host_task_spawner) = crate::host::task_scope::HostTaskOwner::new();
@@ -172,17 +172,15 @@ async fn make_server_config_with(
         dynamic_mcp: None,
         oauth_event_tx: None,
         oauth_event_rx: None,
-        channel_state: None,
         plugin_skill_roots: Vec::new(),
         plugin_command_entries: Vec::new(),
-        plugin_agent_dirs: Vec::new(),
+        plugin_face_closed: false,
         plugin_hooks: Vec::new(),
         plugin_hooks_only: Vec::new(),
         plugin_loaded: Vec::new(),
         hook_groups: Vec::new(),
-        plugin_lsp_servers: lsp_servers,
         tool_search_index: Arc::new(peri_middlewares::tool_search::ToolSearchIndex::new()),
-        skills: Arc::new(peri_middlewares::host_ports::SkillsProvider),
+        agent_catalog: Arc::new(peri_middlewares::host_ports::AgentCatalogProvider::new()),
         plugin_manager: Arc::new(peri_middlewares::host_ports::PluginManager),
         settings_hooks: Arc::new(peri_middlewares::host_ports::SettingsHooksLoader),
         shared_tools: Arc::new(parking_lot::RwLock::new(BTreeMap::new())),
@@ -257,41 +255,9 @@ async fn test_config(tmp: &tempfile::TempDir) -> AcpServerConfig {
     make_server_config(peri_config, provider, tmp).await
 }
 
-/// 最小 LSP 服务器配置（`command: "true"` 立即可退出的假服务器；与迁移前
-/// `create_test.rs::make_lsp_config` 同构）。
-fn make_lsp_config() -> peri_acp_types::lsp::LspServerConfig {
-    peri_acp_types::lsp::LspServerConfig {
-        name: "test-lsp".to_string(),
-        command: "true".to_string(),
-        args: Vec::new(),
-        env: None,
-        extension_to_language: std::collections::HashMap::new(),
-        initialization_options: None,
-        disabled: None,
-        max_restarts: None,
-        startup_timeout: None,
-        source: None,
-    }
-}
-
-/// 带 `plugin_lsp_servers` 注入的测试配置（H1 会话级 LSP 池断言）。
-async fn test_config_with_lsp(
-    tmp: &tempfile::TempDir,
-    lsp_servers: Vec<peri_acp_types::lsp::LspServerConfig>,
-) -> AcpServerConfig {
-    let peri_config = make_peri_config_with_provider(make_provider_config(
-        "a",
-        "openai",
-        "sk-openai-test",
-        "gpt-4o",
-    ));
-    let provider = LlmProvider::from_config(&peri_config).unwrap();
-    make_server_config_with(peri_config, provider, tmp, lsp_servers, None, None).await
-}
-
-/// 带 pending `mcp_pool` 注入的测试配置（MCP 发现预热 smoke：pool 存在但
+/// 带已初始化空 `mcp_pool` 的测试配置（MCP 发现预热 smoke：pool 存在但
 /// 无已连接 server）。
-async fn test_config_with_pending_mcp_pool(tmp: &tempfile::TempDir) -> AcpServerConfig {
+async fn test_config_with_empty_mcp_pool(tmp: &tempfile::TempDir) -> AcpServerConfig {
     let peri_config = make_peri_config_with_provider(make_provider_config(
         "a",
         "openai",
@@ -299,121 +265,13 @@ async fn test_config_with_pending_mcp_pool(tmp: &tempfile::TempDir) -> AcpServer
         "gpt-4o",
     ));
     let provider = LlmProvider::from_config(&peri_config).unwrap();
-    let pool: Arc<dyn peri_acp_types::ports::McpPoolPort> =
-        Arc::new(peri_middlewares::mcp::McpClientPool::new_pending());
-    make_server_config_with(peri_config, provider, tmp, Vec::new(), Some(pool), None).await
-}
-
-#[derive(Default)]
-struct RecordingTaskManager {
-    cancel_all_calls: std::sync::atomic::AtomicUsize,
-}
-
-impl peri_acp_types::tasks::TaskManager for RecordingTaskManager {
-    fn is_execution_idle(&self) -> bool {
-        true
-    }
-    fn shutdown(
-        &self,
-    ) -> std::pin::Pin<
-        Box<
-            dyn std::future::Future<Output = peri_acp_types::tasks::TaskShutdownReport> + Send + '_,
-        >,
-    > {
-        self.cancel_all();
-        Box::pin(async { peri_acp_types::tasks::TaskShutdownReport::Complete })
-    }
-    fn as_any(&self) -> &dyn std::any::Any {
-        self
-    }
-
-    fn set_event_sender(
-        &self,
-        _sender: tokio::sync::mpsc::UnboundedSender<peri_acp_types::tasks::BgRegistryEvent>,
-        _session_id: String,
-    ) {
-    }
-
-    fn active_count(&self) -> usize {
-        0
-    }
-
-    fn register(&self, _request: peri_acp_types::tasks::BgTaskRegistration) -> Result<(), String> {
-        Ok(())
-    }
-
-    fn complete(
-        &self,
-        _task_id: &str,
-        _result: peri_acp_types::event::BackgroundTaskResult,
-    ) -> bool {
-        true
-    }
-
-    fn cancel(&self, _task_id: &str) -> Result<(), String> {
-        Ok(())
-    }
-
-    fn cancel_all(&self) {
-        self.cancel_all_calls
-            .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
-    }
-
-    fn spawn_shell(
-        &self,
-        _command: String,
-        _cwd: String,
-        _timeout_ms: Option<u64>,
-        _on_bg_complete: Option<peri_acp_types::tasks::OnBgCompleteFn>,
-    ) -> Result<peri_acp_types::tasks::BgShellHandle, Box<dyn std::error::Error + Send + Sync>>
-    {
-        Err("recording task manager does not spawn".into())
-    }
-
-    fn finalize_bg_shell(
-        &self,
-        _on_bg_complete: &Option<peri_acp_types::tasks::OnBgCompleteFn>,
-        _task_id: String,
-        _prompt_summary: String,
-        _success: bool,
-        _output: String,
-        _duration_ms: u64,
-        _timed_out: bool,
-        _shell_output: Option<peri_acp_types::event::ShellOutput>,
-    ) {
-    }
-}
-
-struct RecordingLspPool {
-    entered: std::sync::Mutex<Option<tokio::sync::oneshot::Sender<()>>>,
-    release: Arc<tokio::sync::Notify>,
-    shutdown_calls: std::sync::atomic::AtomicUsize,
-}
-
-#[async_trait::async_trait]
-impl peri_acp_types::ports::LspPoolPort for RecordingLspPool {
-    fn as_any(&self) -> &dyn std::any::Any {
-        self
-    }
-
-    async fn shutdown(&self) {
-        self.shutdown_calls
-            .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
-        if let Some(entered) = self.entered.lock().unwrap().take() {
-            let _ = entered.send(());
-        }
-        self.release.notified().await;
-    }
-}
-
-struct EofTaskDropSignal(Option<tokio::sync::oneshot::Sender<()>>);
-
-impl Drop for EofTaskDropSignal {
-    fn drop(&mut self) {
-        if let Some(sender) = self.0.take() {
-            let _ = sender.send(());
-        }
-    }
+    let pool = Arc::new(peri_middlewares::mcp::McpClientPool::new_pending());
+    pool.set_builtin_available(false).unwrap();
+    let (status_tx, _) = tokio::sync::watch::channel(peri_middlewares::mcp::McpInitStatus::Pending);
+    peri_middlewares::mcp::McpClientPool::run_initialize_bare(pool.clone(), tmp.path(), status_tx)
+        .await;
+    let pool: Arc<dyn peri_acp_types::ports::McpPoolPort> = pool;
+    make_server_config_with(peri_config, provider, tmp, Some(pool), None).await
 }
 
 /// 发送 initialize（id=1）并读取响应，断言 protocolVersion/agentCapabilities。
@@ -474,7 +332,7 @@ async fn send_request_and_read_result(
     }
 }
 
-/// 等待宿主在 stdin EOF 后优雅退出（LSP pool shutdown 钩子后返回）。
+/// 等待宿主在 stdin EOF 后优雅退出。
 async fn await_server_exit(server_task: tokio::task::JoinHandle<()>, input: DuplexStream) {
     drop(input);
     tokio::time::timeout(std::time::Duration::from_secs(10), server_task)
@@ -489,15 +347,12 @@ async fn create_bound_thread_fixture(cfg: &AcpServerConfig, session_id: &str, cw
         .resolve_workspace(std::path::Path::new(cwd))
         .await
         .unwrap();
-    let frozen = cfg.session_manager.build_frozen_data(
-        workspace.cwd.to_str().unwrap(),
-        &cfg.plugin_skill_roots,
-        &cfg.plugin_agent_dirs,
-    );
+    let frozen = cfg
+        .session_manager
+        .build_frozen_data(workspace.cwd.to_str().unwrap());
     let encoded = crate::session::frozen_snapshot::encode_frozen_snapshot(&frozen).unwrap();
     // 门面一次完成 binding/frozen 保存与执行准入，再按正常收尾标 clean。
-    let lease = cfg
-        .session_resources
+    cfg.session_resources
         .create_session(&peri_acp_types::session_resources::NewSession {
             thread_id: session_id.to_owned(),
             created_at: chrono::Utc::now().to_rfc3339(),
@@ -514,7 +369,6 @@ async fn create_bound_thread_fixture(cfg: &AcpServerConfig, session_id: &str, cw
         })
         .await
         .unwrap();
-    lease.mark_clean().await.unwrap();
 }
 
 // ── 测试 ──────────────────────────────────────────────────────────────────
@@ -623,8 +477,16 @@ async fn test_initialize_and_session_new_over_stdio_transport() {
         "configOptions 存在: {resp}"
     );
 
-    let line = read_line(&mut output_read).await;
-    let notif: Value = serde_json::from_str(&line).unwrap();
+    let notif: Value = loop {
+        let line = read_line(&mut output_read).await;
+        let notification: Value = serde_json::from_str(&line).unwrap();
+        if notification["method"] == "session/update" {
+            break notification;
+        }
+        assert_eq!(notification["method"], "peri/unstable_event");
+        assert_eq!(notification["params"]["event"], "bg-task-snapshot");
+        assert_eq!(notification["params"]["sessionId"], session_id);
+    };
     assert_eq!(notif["method"], "session/update", "通知 method: {notif}");
     assert_eq!(
         notif["params"]["sessionId"], session_id,
@@ -639,146 +501,12 @@ async fn test_initialize_and_session_new_over_stdio_transport() {
         "availableCommands 数组存在: {notif}"
     );
 
-    // ── EOF → 宿主优雅退出（LSP pool shutdown 钩子后返回）──
+    // ── EOF → 宿主优雅退出 ──
     drop(input_write);
     tokio::time::timeout(std::time::Duration::from_secs(10), server_task)
         .await
         .expect("run_acp_server 应在 stdin EOF 后退出")
         .expect("server task 不应 panic");
-}
-
-#[tokio::test]
-async fn test_transport_eof_closes_sessions_and_drains_host_tasks() {
-    let tmp = tempfile::TempDir::new().unwrap();
-    let peri_config = make_peri_config_with_provider(make_provider_config(
-        "a",
-        "openai",
-        "sk-openai-test",
-        "gpt-4o",
-    ));
-    let provider = LlmProvider::from_config(&peri_config).unwrap();
-    let task_manager = Arc::new(RecordingTaskManager::default());
-    let task_manager_factory: crate::session::TaskManagerFactory = {
-        let task_manager = Arc::clone(&task_manager);
-        Arc::new(move || Arc::clone(&task_manager) as Arc<dyn peri_acp_types::tasks::TaskManager>)
-    };
-    let cfg = make_server_config_with(
-        peri_config,
-        provider,
-        &tmp,
-        Vec::new(),
-        None,
-        Some(task_manager_factory),
-    )
-    .await;
-    let manager = cfg.session_manager.clone();
-    manager
-        .new_session_with_id("manager-only", tmp.path().to_str().unwrap())
-        .await
-        .unwrap();
-
-    let host_shutdown = cfg.host_task_spawner.shutdown_token();
-    let (host_started_tx, host_started_rx) = tokio::sync::oneshot::channel();
-    let (host_dropped_tx, host_dropped_rx) = tokio::sync::oneshot::channel();
-    cfg.host_task_spawner
-        .spawn(
-            crate::host::task_scope::HostTaskOwnerKind::Host,
-            crate::host::task_scope::HostTaskKind::LegacyCancelHook,
-            async move {
-                let _drop_signal = EofTaskDropSignal(Some(host_dropped_tx));
-                let _ = host_started_tx.send(());
-                host_shutdown.cancelled().await;
-            },
-        )
-        .unwrap();
-
-    let local_cancel = tokio_util::sync::CancellationToken::new();
-    let local_cancel_observer = local_cancel.clone();
-    let lsp_release = Arc::new(tokio::sync::Notify::new());
-    let (lsp_entered_tx, lsp_entered_rx) = tokio::sync::oneshot::channel();
-    let lsp = Arc::new(RecordingLspPool {
-        entered: std::sync::Mutex::new(Some(lsp_entered_tx)),
-        release: Arc::clone(&lsp_release),
-        shutdown_calls: std::sync::atomic::AtomicUsize::new(0),
-    });
-    let (transport, mut input, mut output) = duplex_transport();
-    let sessions = Arc::new(tokio::sync::Mutex::new(std::collections::HashMap::from([
-        (
-            "local-only".to_string(),
-            crate::host::SessionState {
-                session_id: "local-only".to_string(),
-                thread_id: "local-only".to_string(),
-                cwd: tmp.path().to_string_lossy().into_owned(),
-                execution_owner: None,
-                environment: None,
-                closing: false,
-                history: Vec::new(),
-                history_payloads: Vec::new(),
-                cancel_token: Some(local_cancel),
-                frozen: None,
-                recall_items: Vec::new(),
-                agent_pool: crate::session::agent_pool::AgentPool::new(),
-                workflow_middleware: None,
-                lsp_pool: Some(Arc::clone(&lsp) as Arc<dyn peri_acp_types::ports::LspPoolPort>),
-                title: None,
-                tags: Vec::new(),
-                continuation_armed: false,
-                continuation_epoch: 0,
-                continuation_in_flight: false,
-                continuation_mq_steering_pending: false,
-                lease: crate::host::lease::WriterLease::acquired("default"),
-            },
-        ),
-    ])));
-    let server_task = tokio::spawn(host::run_acp_server_with_sessions(
-        Arc::new(transport),
-        cfg,
-        sessions.clone(),
-    ));
-
-    host_started_rx.await.unwrap();
-    send_initialize(&mut input, &mut output).await;
-    drop(input);
-    lsp_entered_rx
-        .await
-        .expect("EOF must reach the local-only LSP shutdown");
-
-    host_dropped_rx
-        .await
-        .expect("accepted host task must settle before LSP shutdown");
-    assert!(local_cancel_observer.is_cancelled());
-    assert!(
-        task_manager
-            .cancel_all_calls
-            .load(std::sync::atomic::Ordering::SeqCst)
-            >= 1,
-        "manager-only TaskManager must receive pre-close cancellation"
-    );
-    assert!(manager.get_session("manager-only").is_none());
-
-    let lock_sessions = Arc::clone(&sessions);
-    let (lock_acquired_tx, lock_acquired_rx) = tokio::sync::oneshot::channel();
-    tokio::spawn(async move {
-        let _guard = lock_sessions.lock().await;
-        let _ = lock_acquired_tx.send(());
-    });
-    tokio::time::timeout(std::time::Duration::from_secs(1), lock_acquired_rx)
-        .await
-        .expect("SharedSessions must be acquirable while LSP shutdown is awaiting")
-        .unwrap();
-    lsp_release.notify_one();
-    tokio::time::timeout(std::time::Duration::from_secs(10), server_task)
-        .await
-        .expect("run_acp_server must finish after controlled LSP release")
-        .expect("server task must not panic");
-
-    assert!(sessions.lock().await.is_empty());
-    assert!(manager.session_ids().is_empty());
-    assert_eq!(
-        lsp.shutdown_calls.load(std::sync::atomic::Ordering::SeqCst),
-        1,
-        "local-only LSP must be shut down exactly once"
-    );
 }
 
 /// `session/prompt` wire 形态（stdio `PromptRequest`：`prompt` 块数组）在统一
@@ -834,379 +562,14 @@ async fn test_prompt_wire_shape_unknown_session_returns_error() {
     await_server_exit(server_task, input_write).await;
 }
 
-// ── 批 3 Step 5 迁移：会话级 LSP 池（H1）与 MCP 发现预热（原 create_test.rs）──
-//
-// 原断言经 `run_acp_server_with_sessions`（外部注入共享 session map）驱动
-// 统一路径：wire 请求 + map 内窥，语义与迁移前（handler 直调 + StdioContext
-// 内窥）等价。`test_delete_removes_thread_*` 与 prewarm smoke 的 load 变体
-// 已在 `host/requests_test.rs` 有等价覆盖，不重复迁移。
-
-/// session/load 分支创建会话级 LSP 池（H1：跨 turn 复用；此前置 None 走临时
-/// 实例路径，LSP 服务器子进程跨 turn 泄漏）。
-#[tokio::test]
-async fn test_load_creates_session_scoped_lsp_pool() {
-    let tmp = tempfile::TempDir::new().unwrap();
-    let cfg = test_config_with_lsp(&tmp, vec![make_lsp_config()]).await;
-    create_bound_thread_fixture(&cfg, "load-test-session", tmp.path().to_str().unwrap()).await;
-    let (transport, mut input_write, mut output_read) = duplex_transport();
-    let transport: Arc<dyn AcpTransport> = Arc::new(transport);
-    let sessions = Arc::new(tokio::sync::Mutex::new(std::collections::HashMap::new()));
-    let server_task = tokio::spawn(host::run_acp_server_with_sessions(
-        transport,
-        cfg,
-        sessions.clone(),
-    ));
-
-    send_initialize(&mut input_write, &mut output_read).await;
-    let result = send_request_and_read_result(
-        &mut input_write,
-        &mut output_read,
-        2,
-        "session/load",
-        json!({ "sessionId": "load-test-session", "cwd": tmp.path().to_str().unwrap() }),
-    )
-    .await;
-    assert!(
-        result["modes"].is_object() && result["configOptions"].is_array(),
-        "load 响应应含 modes/configOptions: {result}"
-    );
-
-    let sessions = sessions.lock().await;
-    let info = sessions
-        .get("load-test-session")
-        .expect("load 应注册 session");
-    assert!(
-        info.lsp_pool.is_some(),
-        "load 分支应创建会话级 LSP 池（H1 跨 turn 复用）"
-    );
-    drop(sessions);
-    await_server_exit(server_task, input_write).await;
-}
-
-/// session/resume 分支（新 session）同样创建会话级 LSP 池。
-#[tokio::test]
-async fn test_resume_creates_session_scoped_lsp_pool() {
-    let tmp = tempfile::TempDir::new().unwrap();
-    let cfg = test_config_with_lsp(&tmp, vec![make_lsp_config()]).await;
-    create_bound_thread_fixture(&cfg, "resume-test-session", tmp.path().to_str().unwrap()).await;
-    let (transport, mut input_write, mut output_read) = duplex_transport();
-    let transport: Arc<dyn AcpTransport> = Arc::new(transport);
-    let sessions = Arc::new(tokio::sync::Mutex::new(std::collections::HashMap::new()));
-    let server_task = tokio::spawn(host::run_acp_server_with_sessions(
-        transport,
-        cfg,
-        sessions.clone(),
-    ));
-
-    send_initialize(&mut input_write, &mut output_read).await;
-    let _result = send_request_and_read_result(
-        &mut input_write,
-        &mut output_read,
-        2,
-        "session/resume",
-        json!({ "sessionId": "resume-test-session", "cwd": tmp.path().to_str().unwrap() }),
-    )
-    .await;
-
-    let sessions = sessions.lock().await;
-    let info = sessions
-        .get("resume-test-session")
-        .expect("resume 应注册 session");
-    assert!(
-        info.lsp_pool.is_some(),
-        "resume 分支应创建会话级 LSP 池（H1 跨 turn 复用）"
-    );
-    drop(sessions);
-    await_server_exit(server_task, input_write).await;
-}
-
-/// session/fork 分支创建的新 session 同样携带会话级 LSP 池。
-#[tokio::test]
-async fn test_fork_creates_session_scoped_lsp_pool() {
-    let tmp = tempfile::TempDir::new().unwrap();
-    let cfg = test_config_with_lsp(&tmp, vec![make_lsp_config()]).await;
-    let session_resources = Arc::clone(&cfg.session_resources);
-    let (transport, mut input_write, mut output_read) = duplex_transport();
-    let transport: Arc<dyn AcpTransport> = Arc::new(transport);
-    let sessions = Arc::new(tokio::sync::Mutex::new(std::collections::HashMap::new()));
-    // 前置：注册带非空 canonical history 的 source session。
-    let source_message = peri_acp_types::messages::BaseMessage::human("hello");
-    let source_message_id = source_message.id();
-    let source_payload = peri_acp_types::store::PersistedPayload::Message(source_message.clone());
-    let source_thread_id = "fork-source-session".to_string();
-    create_bound_thread_fixture(&cfg, &source_thread_id, tmp.path().to_str().unwrap()).await;
-    let workspace = cfg
-        .session_resources
-        .validate_bound_workspace(
-            &source_thread_id,
-            peri_acp_types::session_resources::BindingRecheck::Recorded,
-        )
-        .await
-        .unwrap();
-    let owner = cfg
-        .session_resources
-        .acquire_execution(&source_thread_id, &workspace)
-        .await
-        .unwrap();
-    cfg.session_manager.ensure_session(
-        &source_thread_id,
-        std::fs::canonicalize(tmp.path()).unwrap().to_str().unwrap(),
-    );
-    cfg.session_resources
-        .append_history(&source_thread_id, std::slice::from_ref(&source_payload))
-        .await
-        .unwrap();
-    let source_frozen = cfg.session_manager.build_frozen_data(
-        tmp.path().to_str().unwrap(),
-        &cfg.plugin_skill_roots,
-        &cfg.plugin_agent_dirs,
-    );
-    sessions.lock().await.insert(
-        "fork-source-session".to_string(),
-        crate::host::SessionState {
-            session_id: "fork-source-session".to_string(),
-            thread_id: source_thread_id,
-            cwd: std::fs::canonicalize(tmp.path())
-                .unwrap()
-                .to_str()
-                .unwrap()
-                .to_owned(),
-            execution_owner: Some(owner),
-            environment: None,
-            closing: false,
-            history: vec![source_message],
-            history_payloads: vec![source_payload],
-            cancel_token: None,
-            frozen: Some(source_frozen),
-            recall_items: Vec::new(),
-            agent_pool: crate::session::agent_pool::AgentPool::new(),
-            workflow_middleware: None,
-            lsp_pool: None,
-            title: None,
-            tags: Vec::new(),
-            continuation_armed: false,
-            continuation_epoch: 0,
-            continuation_in_flight: false,
-            continuation_mq_steering_pending: false,
-            // 会话创建方即 writer（§6；测试源 session 同样建立 lease）
-            lease: crate::host::lease::WriterLease::acquired("default"),
-        },
-    );
-    let server_task = tokio::spawn(host::run_acp_server_with_sessions(
-        transport,
-        cfg,
-        sessions.clone(),
-    ));
-
-    send_initialize(&mut input_write, &mut output_read).await;
-    let result = send_request_and_read_result(
-        &mut input_write,
-        &mut output_read,
-        2,
-        "session/fork",
-        json!({ "sessionId": "fork-source-session", "cwd": tmp.path().to_str().unwrap() }),
-    )
-    .await;
-    let forked_id = result["sessionId"]
-        .as_str()
-        .expect("fork 响应应含新 sessionId: {result}")
-        .to_string();
-    assert_ne!(forked_id, "fork-source-session");
-
-    let sessions = sessions.lock().await;
-    let forked = sessions.get(&forked_id).expect("fork 应注册新 session");
-    assert!(
-        forked.lsp_pool.is_some(),
-        "fork 分支应创建会话级 LSP 池（H1 跨 turn 复用）"
-    );
-    assert_eq!(forked.history_payloads.len(), 1);
-    let forked_message_id = forked.history_payloads[0].id();
-    assert_ne!(forked_message_id, source_message_id);
-    assert_eq!(
-        forked
-            .history
-            .first()
-            .expect("fork history projection")
-            .id(),
-        forked_message_id,
-        "fork SessionState 必须采用持久化复制后的新消息 ID"
-    );
-    let stored_fork = session_resources
-        .load_session_snapshot(&forked_id)
-        .await
-        .unwrap()
-        .payloads;
-    assert_eq!(stored_fork.len(), 1);
-    assert_eq!(stored_fork[0].id(), forked_message_id);
-    drop(sessions);
-    await_server_exit(server_task, input_write).await;
-}
-
-/// 无 LSP 配置时 load 分支不创建池（与 create_session_lsp_pool 的 None 语义
-/// 一致，装配面不注册 LSP 中间件）。
-#[tokio::test]
-async fn test_load_without_lsp_config_has_no_pool() {
-    let tmp = tempfile::TempDir::new().unwrap();
-    let cfg = test_config(&tmp).await; // plugin_lsp_servers = []
-    create_bound_thread_fixture(&cfg, "no-lsp-session", tmp.path().to_str().unwrap()).await;
-    let (transport, mut input_write, mut output_read) = duplex_transport();
-    let transport: Arc<dyn AcpTransport> = Arc::new(transport);
-    let sessions = Arc::new(tokio::sync::Mutex::new(std::collections::HashMap::new()));
-    let server_task = tokio::spawn(host::run_acp_server_with_sessions(
-        transport,
-        cfg,
-        sessions.clone(),
-    ));
-
-    send_initialize(&mut input_write, &mut output_read).await;
-    let _result = send_request_and_read_result(
-        &mut input_write,
-        &mut output_read,
-        2,
-        "session/load",
-        json!({ "sessionId": "no-lsp-session", "cwd": tmp.path().to_str().unwrap() }),
-    )
-    .await;
-
-    let sessions = sessions.lock().await;
-    let info = sessions.get("no-lsp-session").expect("load 应注册 session");
-    assert!(
-        info.lsp_pool.is_none(),
-        "无 LSP 配置时不应创建池（与 new 分支一致）"
-    );
-    drop(sessions);
-    await_server_exit(server_task, input_write).await;
-}
-
-/// session/new 预热 MCP skill 发现 smoke：pool 存在但无已连接 server（pending）
-/// 时 prewarm 空跑不 panic、响应正常（已连接 server 的发现行为由 middleware
-/// 层单测覆盖）。
-#[tokio::test]
-async fn test_new_prewarms_mcp_discovery_smoke() {
-    let tmp = tempfile::TempDir::new().unwrap();
-    let cfg = test_config_with_pending_mcp_pool(&tmp).await;
-    let (transport, mut input_write, mut output_read) = duplex_transport();
-    let transport: Arc<dyn AcpTransport> = Arc::new(transport);
-    let sessions = Arc::new(tokio::sync::Mutex::new(std::collections::HashMap::new()));
-    let server_task = tokio::spawn(host::run_acp_server_with_sessions(
-        transport,
-        cfg,
-        sessions.clone(),
-    ));
-
-    send_initialize(&mut input_write, &mut output_read).await;
-    let result = send_request_and_read_result(
-        &mut input_write,
-        &mut output_read,
-        2,
-        "session/new",
-        json!({ "cwd": tmp.path().to_str().unwrap() }),
-    )
-    .await;
-    assert!(
-        result["sessionId"].as_str().is_some_and(|s| !s.is_empty()),
-        "session/new 应返回 sessionId: {result}"
-    );
-    // prewarm 空跑路径（pending pool 无已连接 server）不 panic
-
-    await_server_exit(server_task, input_write).await;
-}
-
-/// `session/rename` 经 stdio wire 完整链路：initialize → session/new →
-/// session/rename。通知先于响应（`handle_rename` 中
-/// `send_session_info_update_with_title` 在响应返回前推送），通知携带
-/// `SessionInfoUpdate.title`，响应往返 `{sessionId, title}`，thread store
-/// 持久化标题——证明 stdio 与 TUI 共用统一 host 后 rename RPC 对 stdio 生效
-/// （请求注册于 `host/requests.rs`）。
-#[tokio::test]
-async fn test_rename_over_stdio_transport() {
-    let tmp = tempfile::TempDir::new().unwrap();
-    let cfg = test_config(&tmp).await;
-    let session_resources = Arc::clone(&cfg.session_resources);
-    let (transport, mut input_write, mut output_read) = duplex_transport();
-    let transport: Arc<dyn AcpTransport> = Arc::new(transport);
-    let server_task = tokio::spawn(host::run_acp_server(transport, cfg));
-
-    send_initialize(&mut input_write, &mut output_read).await;
-
-    // ── session/new ──
-    let cwd = tmp.path().to_str().unwrap();
-    write_line(
-        &mut input_write,
-        &json!({
-            "jsonrpc": "2.0",
-            "id": 2,
-            "method": "session/new",
-            "params": { "cwd": cwd }
-        })
-        .to_string(),
-    )
-    .await;
-    let line = read_line(&mut output_read).await;
-    let resp: Value = serde_json::from_str(&line).unwrap();
-    assert_eq!(resp["id"], 2, "session/new RequestId 往返: {resp}");
-    assert!(resp.get("error").is_none(), "session/new 不应报错: {resp}");
-    let session_id = resp["result"]["sessionId"]
-        .as_str()
-        .expect("session/new 返回非空 sessionId")
-        .to_string();
-    // 消费 session/new 后的 available_commands_update 通知
-    let line = read_line(&mut output_read).await;
-    let notif: Value = serde_json::from_str(&line).unwrap();
-    assert_eq!(notif["method"], "session/update", "通知 method: {notif}");
-
-    // ── session/rename ──
-    write_line(
-        &mut input_write,
-        &json!({
-            "jsonrpc": "2.0",
-            "id": 3,
-            "method": "session/rename",
-            "params": { "sessionId": session_id, "title": "stdio 命名会话" }
-        })
-        .to_string(),
-    )
-    .await;
-
-    // 通知先于响应（handle_rename 在返回前推送 SessionInfoUpdate）
-    let line = read_line(&mut output_read).await;
-    let notif: Value = serde_json::from_str(&line).unwrap();
-    assert_eq!(
-        notif["method"], "session/update",
-        "rename 通知 method: {notif}"
-    );
-    assert_eq!(notif["params"]["sessionId"], session_id);
-    assert_eq!(
-        notif["params"]["update"]["sessionUpdate"], "session_info_update",
-        "SessionInfoUpdate 判别字符串: {notif}"
-    );
-    assert_eq!(notif["params"]["update"]["title"], "stdio 命名会话");
-
-    // 响应往返 {sessionId, title}
-    let line = read_line(&mut output_read).await;
-    let resp: Value = serde_json::from_str(&line).unwrap();
-    assert_eq!(resp["id"], 3, "rename RequestId 往返: {resp}");
-    assert!(resp.get("error").is_none(), "rename 不应报错: {resp}");
-    assert_eq!(resp["result"]["sessionId"], session_id, "响应: {resp}");
-    assert_eq!(resp["result"]["title"], "stdio 命名会话", "响应: {resp}");
-
-    // 持久化：thread store 标题已更新
-    let meta = session_resources
-        .load_session_meta(&session_id)
-        .await
-        .unwrap();
-    assert_eq!(meta.title.as_deref(), Some("stdio 命名会话"));
-
-    // ── EOF → 宿主优雅退出 ──
-    drop(input_write);
-    tokio::time::timeout(std::time::Duration::from_secs(10), server_task)
-        .await
-        .expect("run_acp_server 应在 stdin EOF 后退出")
-        .expect("server task 不应 panic");
-}
+#[path = "run_server_rename_test.rs"]
+mod rename_tests;
 
 #[path = "langfuse_shutdown_test.rs"]
 mod langfuse_shutdown_tests;
 
 #[path = "session_store_shutdown_test.rs"]
 mod session_store_shutdown_tests;
+
+#[path = "run_server_session_resources_test.rs"]
+mod session_resources_tests;

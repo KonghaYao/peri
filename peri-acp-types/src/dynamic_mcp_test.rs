@@ -108,7 +108,7 @@ fn strict_transport_and_name_validation_fails_closed() {
 }
 
 #[test]
-fn sensitive_http_headers_require_secret_refs() {
+fn http_headers_accept_literal_content_and_secret_refs() {
     let config = DynamicMcpConfig {
         url: Some("https://example.invalid/mcp".to_string()),
         headers: BTreeMap::from([(
@@ -117,25 +117,65 @@ fn sensitive_http_headers_require_secret_refs() {
         )]),
         ..Default::default()
     };
-    assert!(config.canonicalize().is_err());
+    assert!(config.canonicalize().is_ok());
 }
 
 #[test]
-fn safe_summary_removes_url_query_and_preserves_only_secret_reference_identity() {
-    let config = DynamicMcpConfig {
-        url: Some("https://example.invalid/mcp?token=inline-leak".to_string()),
-        headers: BTreeMap::from([(
-            "Authorization".to_string(),
-            DynamicMcpHeaderValue::Secret(secret("example-token")),
-        )]),
-        ..Default::default()
+fn public_dynamic_action_summary_preserves_url_and_request_data() {
+    let input = json!({
+        "method": "load",
+        "params": {
+            "name": "example",
+            "config": {
+                "url": "https://inline-user:inline-password@example.invalid/mcp?token=inline-query#inline-fragment",
+                "headers": {"Authorization": {"secretRef": "example-token"}}
+            }
+        }
+    });
+    let action = DynamicMcpAction::from_tool_input(input)
+        .unwrap()
+        .canonicalize()
+        .unwrap();
+    let CanonicalDynamicMcpAction::Load(request) = action else {
+        panic!("public load input must canonicalize to a load action");
+    };
+
+    // Basic-auth URLs remain accepted and intact for transport use.
+    assert!(matches!(
+        &request.config.transport,
+        CanonicalDynamicMcpTransport::StreamableHttp { url, .. }
+            if url == "https://inline-user:inline-password@example.invalid/mcp?token=inline-query#inline-fragment"
+    ));
+
+    // This public projection is consumed by DynamicMcpTool's approval input.
+    let serialized = serde_json::to_string(&request.config.safe_summary()).unwrap();
+    assert!(serialized.contains("https://inline-user:inline-password@example.invalid/mcp?token=inline-query#inline-fragment"));
+    for secret in [
+        "inline-user",
+        "inline-password",
+        "inline-query",
+        "inline-fragment",
+    ] {
+        assert!(serialized.contains(secret), "summary lost {secret}");
     }
-    .canonicalize()
-    .unwrap();
+    assert!(serialized.contains("example-token"));
+}
+
+#[test]
+fn summary_preserves_malformed_canonical_url_for_diagnostics() {
+    let config = CanonicalDynamicMcpConfig {
+        transport: CanonicalDynamicMcpTransport::StreamableHttp {
+            url: "not-a-url?token=inline-secret#fragment".to_string(),
+            headers: BTreeMap::new(),
+        },
+        timeout_ms: 1_000,
+        subscriptions: None,
+    };
 
     let serialized = serde_json::to_string(&config.safe_summary()).unwrap();
-    assert!(!serialized.contains("inline-leak"));
-    assert!(serialized.contains("example-token"));
+    assert!(serialized.contains("not-a-url"));
+    assert!(serialized.contains("inline-secret"));
+    assert!(serialized.contains("fragment"));
 }
 
 #[test]

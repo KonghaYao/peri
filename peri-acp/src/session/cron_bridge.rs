@@ -21,6 +21,7 @@ impl SessionCronBridge {
     /// approval must happen before a trigger becomes model input.
     pub fn start(
         session_id: String,
+        inbox: peri_acp_types::session::MessageQueue,
         scheduler: &Arc<dyn CronSchedulerPort>,
         continuation_tx: mpsc::UnboundedSender<CronContinuationRequest>,
     ) -> Self {
@@ -36,6 +37,7 @@ impl SessionCronBridge {
                         Some(trigger) => {
                             if continuation_tx.send(CronContinuationRequest {
                                 session_id: session_id.clone(),
+                                inbox: inbox.clone(),
                                 trigger,
                             }).is_err() {
                                 break;

@@ -169,7 +169,15 @@ impl BackgroundTaskResult {
                 text.push_str(&format!("\nstderr 输出文件：{path}"));
             }
             if shell.complete {
-                text.push_str("\n完整输出已保存到文件系统。需要检查结果时，请使用 Read 工具按需读取；大文件分段读取。");
+                // 指引指代 builtin 文件工具时必须用**模型面名字**（裸名已无提供面）；
+                // 查表未命中的兜底不含工具名，不得回落到裸名。
+                let read_lead = crate::builtin_mcp::effective_name_of("workspace", "Read")
+                    .map_or("请按需读取输出文件".to_string(), |name| {
+                        format!("请使用 `{name}` 工具按需读取")
+                    });
+                text.push_str(&format!(
+                    "\n完整输出已保存到文件系统。需要检查结果时，{read_lead}；大文件分段读取。"
+                ));
             } else {
                 text.push_str("\n输出文件不完整或不可用，请检查文件路径和错误信息后再读取。");
             }
@@ -274,6 +282,12 @@ mod tests {
         assert!(notification.len() < 2_000);
         assert!(!notification.contains("secret"));
         assert!(!notification.contains(&"x".repeat(1_000)));
+        // 读取指引必须指**模型面名字**（裸名已无提供面）：逐字断言冻结字面量，
+        // 不用查表派生期望值（与实现同源派生会在「归一改坏」时自洽通过）。
+        assert!(
+            notification.contains("请使用 `Read` 工具按需读取"),
+            "通知必须用模型面名字引导读取: {notification}"
+        );
         let mut legacy = serde_json::to_value(&result).expect("serialize");
         legacy
             .as_object_mut()
@@ -575,7 +589,7 @@ pub enum ExecutorEvent {
     MessageAdded(crate::messages::BaseMessage),
     /// Turn 已挂起等待异步事件（bg agent/cron/workflow）。
     ///
-    /// v2 `StateEvent::TurnSuspended` 经 v1 兼容映射（`events_v2::state_event_to_executor`）
+    /// v2 `RenderEvent::TurnSuspended` 经协议映射（`event_v2::render_event_to_executor`）
     /// 转换为本变体；TUI 收到后归档 current_turn、停止 loading spinner。
     ///
     /// `turn_id` / `agent_id` 为 v2 事件透传的身份字段（v1 其余变体无身份字段，
@@ -638,6 +652,13 @@ pub enum ExecutorEvent {
         instance_id: String,
         /// 是否为后台模式（run_in_background）
         is_background: bool,
+        /// 发起本次子 agent 的父 Agent 工具调用 id（tool_call_id）。
+        ///
+        /// 由父侧持久化 `InvocationIntent.tool_call_id` 透传（`ObserveEvent::SubagentStart`
+        /// 同名字段）；消费方按它把子分组与父 Agent 工具卡片精确配对，不依赖
+        /// 事件到达顺序。None = 发起路径没有工具调用上下文（/bg 等）。
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        parent_tool_call_id: Option<String>,
     },
     /// 子 agent 执行完成
     SubagentStopped {
@@ -700,12 +721,6 @@ pub enum ExecutorEvent {
     },
     /// Todo 列表更新
     TodoUpdate(Vec<TodoEntry>),
-    /// LSP 诊断更新
-    LspDiagnostics {
-        errors: usize,
-        warnings: usize,
-        files_with_errors: usize,
-    },
 
     /// 后台 agent 工具调用进度通知（轻量级，仅用于 TUI bg_agent_bar 实时计数）
     BgToolStep {

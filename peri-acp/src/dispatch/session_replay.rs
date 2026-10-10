@@ -262,18 +262,20 @@ fn extract_text(content: &PeriMessageContent) -> String {
 }
 
 /// Abstraction over how to send a `SessionNotification`.
+///
+/// `send_system_reminder` 是**必需**方法：replay 出口不得继承默认 no-op 冒充
+/// 成功。每个 sender 必须显式决定（按 H8 受众规则过滤后）结构化事件或客户端
+/// 摘要怎么下发；不承载该通道的实现也必须写出显式理由而不是静默吞掉。
 #[async_trait::async_trait]
 pub trait ReplaySender: Send + Sync {
     async fn send(&self, notif: SessionNotification) -> Result<(), ReplayError>;
 
     async fn send_system_reminder(
         &self,
-        _session_id: &str,
-        _reminder: &peri_acp_types::system_reminder::SystemReminder,
-        _caps: &PeriCaps,
-    ) -> Result<(), ReplayError> {
-        Ok(())
-    }
+        session_id: &str,
+        reminder: &peri_acp_types::system_reminder::SystemReminder,
+        caps: &PeriCaps,
+    ) -> Result<(), ReplayError>;
 }
 
 #[derive(Debug, thiserror::Error)]
