@@ -22,13 +22,13 @@
 
 pub mod agent;
 pub mod error;
-pub mod error_suggest;
 pub mod goal;
 pub mod hitl;
 pub mod interaction;
 pub mod messages;
 pub mod metrics;
 pub mod middleware;
+#[cfg(not(target_os = "emscripten"))]
 pub mod resources;
 pub mod session;
 pub mod telemetry;

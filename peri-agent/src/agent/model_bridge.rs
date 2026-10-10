@@ -9,6 +9,10 @@ use peri_model::{
     ToolDefinition as ModelToolDefinition, ToolResult as ModelToolResult,
 };
 
+/// Reserved model transport seam exposed through the Agent boundary for ACP admission.
+pub const SYSTEM_PROMPT_DYNAMIC_BOUNDARY: &str =
+    peri_model::prompt_cache::SYSTEM_PROMPT_DYNAMIC_BOUNDARY;
+
 use crate::{
     agent::{
         compact_v2::projection::{ProviderCapabilities, ProviderProtocol},
@@ -20,6 +24,7 @@ use crate::{
         BaseMessage, ContentBlock, DocumentSource, ImageSource, MessageContent, MessageId,
         ToolCallRequest,
     },
+    middleware::PromptContributionError,
     tools::BaseTool,
 };
 
@@ -27,20 +32,34 @@ use crate::{
 pub struct AgentModelBridge {
     model: Arc<dyn Model>,
     system: Option<String>,
+    external_instructions: Option<Arc<str>>,
+    legacy_embedded_instructions: bool,
+    derives_system_prompt: bool,
     system_contribution_provider: Option<SystemContributionProvider>,
     session_id: Option<String>,
+    /// M3/H1 子身份归一化：模型投影中吸收与 base system 逐字相同的第一条
+    /// System 消息（历史本体与持久化不变；仅影响请求投影）。
+    absorb_system_message: bool,
 }
 
 /// 构造模型请求时同步读取当前 middleware prompt contribution 的 provider。
-pub(crate) type SystemContributionProvider = Arc<dyn Fn() -> String + Send + Sync>;
+///
+/// 返回当前贡献（非空贡献已按 `\n\n` 连接）或带来源的准入错误——provider
+/// 边界负责把错误显式上抛，不静默剥离非法内容（M1）。
+pub(crate) type SystemContributionProvider =
+    Arc<dyn Fn() -> Result<String, PromptContributionError> + Send + Sync>;
 
 impl AgentModelBridge {
     pub fn new(model: Arc<dyn Model>) -> Self {
         Self {
             model,
             system: None,
+            external_instructions: None,
+            legacy_embedded_instructions: false,
+            derives_system_prompt: false,
             system_contribution_provider: None,
             session_id: None,
+            absorb_system_message: false,
         }
     }
 
@@ -50,6 +69,19 @@ impl AgentModelBridge {
 
     pub fn with_system(mut self, system: impl Into<String>) -> Self {
         self.system = Some(system.into());
+        self
+    }
+
+    /// Freeze-owned client extension; never stored in the transcript or rendered template.
+    pub fn with_external_instructions(mut self, instructions: Option<Arc<str>>) -> Self {
+        self.external_instructions = instructions;
+        self
+    }
+
+    /// V1 snapshots with an embedded extension can only reuse their original main prompt.
+    pub fn with_legacy_prompt_provenance(mut self, embedded: bool, derives: bool) -> Self {
+        self.legacy_embedded_instructions = embedded;
+        self.derives_system_prompt = derives;
         self
     }
 
@@ -67,6 +99,18 @@ impl AgentModelBridge {
 
     pub fn with_session_id(mut self, session_id: impl Into<String>) -> Self {
         self.session_id = Some(session_id.into());
+        self
+    }
+
+    /// M3/H1 子身份归一化：开启后，模型投影丢弃与 base system 逐字相同的第一条
+    /// System 消息（恰一条）。
+    ///
+    /// 子会话的 own history 起始处持久化一条身份 System（spawn 写入；v1 子会话
+    /// 的历史同形），而 H1 起的身份由 bridge base system 注入。该规则按**内容
+    /// 相等**定向吸收，不过滤其它 System 消息（命令反馈 / 预测指令等保持原样），
+    /// 也不修改 transcript 本体与持久化数据（历史仍可读）。
+    pub(crate) fn with_absorbed_system_message(mut self, enabled: bool) -> Self {
+        self.absorb_system_message = enabled;
         self
     }
 
@@ -96,6 +140,14 @@ impl AgentModelBridge {
     }
 
     pub(crate) fn convert_messages(messages: &[BaseMessage]) -> AgentResult<Vec<ModelMessage>> {
+        Self::convert_messages_skipping(messages, None)
+    }
+
+    /// 转换消息；`skip` 为需要在投影中吸收（丢弃）的下标（M3 归一化，至多一条）。
+    fn convert_messages_skipping(
+        messages: &[BaseMessage],
+        skip: Option<usize>,
+    ) -> AgentResult<Vec<ModelMessage>> {
         let mut tool_names = BTreeMap::new();
         for message in messages {
             if let BaseMessage::Ai { tool_calls, .. } = message {
@@ -107,7 +159,9 @@ impl AgentModelBridge {
 
         messages
             .iter()
-            .map(|message| match message {
+            .enumerate()
+            .filter(|(index, _)| Some(*index) != skip)
+            .map(|(_, message)| match message {
                 BaseMessage::System { content, .. } => Ok(ModelMessage::System {
                     content: convert_content(content)?,
                 }),
@@ -153,14 +207,53 @@ impl AgentModelBridge {
         messages: &[BaseMessage],
         tools: &[&dyn BaseTool],
     ) -> AgentResult<ModelRequest> {
-        let mut messages = Self::convert_messages(messages)?;
-        let dynamic = self
-            .system_contribution_provider
-            .as_ref()
-            .map(|provider| provider());
-        let system = match dynamic.as_deref() {
-            Some(dynamic) => combine_system_prompt_with_dynamic(self.system.as_deref(), dynamic),
+        if self.legacy_embedded_instructions {
+            if self.derives_system_prompt {
+                return Err(AgentError::LlmError("V1 frozen prompt contains embedded external instructions; create a new session before deriving an agent prompt".into()));
+            }
+            if self.system.as_deref().is_some_and(|prompt| {
+                prompt
+                    .split_once("<agent_instructions>")
+                    .is_some_and(|(_, tail)| tail.contains(SYSTEM_PROMPT_DYNAMIC_BOUNDARY))
+            }) {
+                return Err(AgentError::LlmError("V1 frozen external instructions contain a reserved cache boundary; create a new session".into()));
+            }
+        }
+        // M3/H1：吸收与 base system 逐字相同的第一条 System 消息（持久子身份）。
+        let absorbed = if self.absorb_system_message {
+            self.system.as_deref().and_then(|system| {
+                messages.iter().position(|message| {
+                    matches!(message, BaseMessage::System { .. }) && message.content() == system
+                })
+            })
+        } else {
+            None
+        };
+        let mut messages = Self::convert_messages_skipping(messages, absorbed)?;
+        let dynamic = match self.system_contribution_provider.as_ref() {
+            Some(provider) => Some(provider().map_err(|error| AgentError::MiddlewareError {
+                middleware: error.middleware().to_string(),
+                reason: error.to_string(),
+            })?),
+            None => None,
+        };
+        let base = match self.external_instructions.as_deref() {
+            Some(external) => {
+                let internal = self.system.as_deref().unwrap_or_default();
+                let prefix = if internal.matches(SYSTEM_PROMPT_DYNAMIC_BOUNDARY).count() == 1 {
+                    internal.to_owned()
+                } else {
+                    format!("{internal}{SYSTEM_PROMPT_DYNAMIC_BOUNDARY}")
+                };
+                Some(format!(
+                    "{prefix}\n\n<agent_instructions>\n{external}\n</agent_instructions>"
+                ))
+            }
             None => self.system.clone(),
+        };
+        let system = match dynamic.as_deref() {
+            Some(dynamic) => combine_system_prompt_with_dynamic(base.as_deref(), dynamic),
+            None => base,
         };
         if let Some(system) = system {
             messages.insert(0, ModelMessage::system_text(system));
@@ -250,6 +343,7 @@ impl AgentModelBridge {
         &self,
         request: ModelRequest,
         streaming: Option<StreamingContext>,
+        prepared: Option<peri_model::PreparedModelCall>,
     ) -> AgentResult<Reasoning> {
         let model_name = self.model_name();
         // 本条 AI 消息的稳定身份：一次 LLM 调用 = 一条 assistant 消息。流式
@@ -261,11 +355,16 @@ impl AgentModelBridge {
             .as_ref()
             .map(|context| context.cancel.clone())
             .unwrap_or_default();
-        let mut stream = self
-            .model
-            .stream(request, cancellation.clone())
-            .await
-            .map_err(map_model_error)?;
+        let mut stream = match prepared {
+            Some(prepared) => prepared
+                .start(cancellation.clone())
+                .map_err(map_model_error)?,
+            None => self
+                .model
+                .stream(request, cancellation.clone())
+                .await
+                .map_err(map_model_error)?,
+        };
 
         // [Fix think-end] 本消息内是否已提前 emit ToolStarted：工具块开始
         // （Anthropic `content_block_start`，即 thinking 结束）时首个带
@@ -371,6 +470,19 @@ impl AgentModelBridge {
                     attempts,
                     max_attempts,
                 })) => {
+                    if !error.interruption_logged() {
+                        let diagnostic = error
+                            .interruption_diagnostic()
+                            .cloned()
+                            .unwrap_or_else(|| error.diagnostic());
+                        crate::session::retry_events::log_interruption(
+                            &diagnostic,
+                            attempts,
+                            max_attempts,
+                            self.session_id.as_deref(),
+                            streaming.as_ref().map(|context| context.turn_id),
+                        );
+                    }
                     // 正文为空（只收到思考或半截工具）时不制造 assistant 消息：空
                     // 消息不是规范历史，且会被 provider 拒绝（Anthropic 对空 text
                     // block 返回 400）。此时仅靠续跑提醒继续。
@@ -419,15 +531,48 @@ impl AgentModelBridge {
 
 #[async_trait]
 impl ReactLLM for AgentModelBridge {
+    fn prepare_reasoning(
+        &self,
+        messages: &[BaseMessage],
+        tools: &[&dyn BaseTool],
+    ) -> AgentResult<peri_model::PreparedModelCall> {
+        self.model
+            .prepare_stream(self.build_request(messages, tools)?)
+            .map_err(map_model_error)
+    }
+
+    async fn generate_prepared_reasoning(
+        &self,
+        prepared: peri_model::PreparedModelCall,
+        streaming: Option<StreamingContext>,
+    ) -> AgentResult<Reasoning> {
+        self.generate_from_request(ModelRequest::default(), streaming, Some(prepared))
+            .await
+    }
     fn estimate_request_tokens(&self, messages: &[BaseMessage], tools: &[&dyn BaseTool]) -> u64 {
         // 只读冻结前缀，不构建 provider 请求，也不第二次调用动态贡献 provider。
         // 冷启动尚未知动态后缀成本；后续有效 usage 会将其纳入权威基线。
-        crate::agent::token::estimate_request_tokens(messages, tools).saturating_add(
-            self.system
-                .as_ref()
-                .map(|system| (system.chars().count() as u64).div_ceil(4))
-                .unwrap_or(0),
-        )
+        crate::agent::token::estimate_request_tokens(messages, tools)
+            .saturating_add(
+                self.system
+                    .as_ref()
+                    .map(|system| (system.chars().count() as u64).div_ceil(4))
+                    .unwrap_or(0),
+            )
+            .saturating_add(
+                self.external_instructions
+                    .as_ref()
+                    .map(|external| {
+                        // The fixed wrapper and cache seam are request-owned text too.
+                        ((external.chars().count()
+                            + "\n\n<agent_instructions>\n\n</agent_instructions>"
+                                .chars()
+                                .count()
+                            + SYSTEM_PROMPT_DYNAMIC_BOUNDARY.len()) as u64)
+                            .div_ceil(4)
+                    })
+                    .unwrap_or(0),
+            )
     }
 
     async fn generate_reasoning(
@@ -437,7 +582,7 @@ impl ReactLLM for AgentModelBridge {
         streaming: Option<StreamingContext>,
     ) -> AgentResult<Reasoning> {
         let request = self.build_request(messages, tools)?;
-        self.generate_from_request(request, streaming).await
+        self.generate_from_request(request, streaming, None).await
     }
 
     async fn generate_reasoning_with_observed_body(
@@ -453,7 +598,7 @@ impl ReactLLM for AgentModelBridge {
             .prepare_request(&request)
             .ok()
             .map(|prepared| prepared.body().as_value().clone());
-        let reasoning = self.generate_from_request(request, streaming).await?;
+        let reasoning = self.generate_from_request(request, streaming, None).await?;
         Ok((reasoning, observed_body))
     }
 

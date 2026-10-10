@@ -16,8 +16,8 @@ pub(crate) struct FullBudgetProbe {
 
 /// 同一工作单元最多接受两次未恢复预算的 Full 后观测。
 ///
-/// 第二次 Full 仍可能回收第一次的文件 re-inject 或进一步缩短摘要，故保留
-/// 一次重试。本状态不推断不可压缩 token 下限，也不修改控制消息生命周期。
+/// 第二次 Full 仍可能进一步缩短摘要，故保留一次重试。
+/// 本状态不推断不可压缩 token 下限，也不修改控制消息生命周期。
 #[derive(Debug, Default)]
 pub(crate) struct CompactBudgetRecovery {
     full_generation: u64,
@@ -34,7 +34,7 @@ impl CompactBudgetRecovery {
         before_entries_len: usize,
     ) {
         // 此时 Full 已排除旧消息；新 work 检查保留这些刚被压缩的原消息，
-        // 但不计入 Full 自己追加的摘要、文件和 skills。
+        // 但不计入 Full 自己追加的摘要。
         if self.has_new_work(transcript, before_entries_len, false) {
             self.unrecovered_observations = 0;
         }

@@ -8,7 +8,7 @@ use peri_acp_types::system_reminder::{
     ReminderSource, SystemReminder, TrustedSystemReminderFactory, SYSTEM_REMINDER_VERSION,
 };
 use peri_acp_types::thread::CancelPolicy;
-use peri_acp_types::workspace::{SessionBinding, SessionExecutionLease, SESSION_BINDING_VERSION};
+use peri_acp_types::workspace::{SessionBinding, SESSION_BINDING_VERSION};
 use peri_agent::agent::compact_v2::CompactConfig;
 use peri_agent::agent::react::{ReactLLM, Reasoning, StreamingContext, ToolCall};
 use peri_agent::agent::stages::{run_react_loop, LoopResult, StageContext};
@@ -205,7 +205,6 @@ struct BoundSession {
     session: Arc<Session>,
     resources: Arc<dyn SessionResources>,
     thread_id: String,
-    _lease: Arc<dyn SessionExecutionLease>,
     _repo: tempfile::TempDir,
     _db: tempfile::TempDir,
 }
@@ -246,14 +245,15 @@ async fn make_bound_session() -> BoundSession {
             .unwrap(),
     );
     let workspace = resources.resolve_workspace(repo.path()).await.unwrap();
+    let cwd = workspace.cwd.to_string_lossy().into_owned();
     let thread_id = uuid::Uuid::now_v7().to_string();
-    let lease = resources
+    resources
         .create_session(&NewSession {
             thread_id: thread_id.clone(),
             created_at: "2026-09-28T00:00:00Z".into(),
             meta: NewSessionMeta {
                 title: Some("pressure adversarial".into()),
-                cwd: repo.path().to_string_lossy().into_owned(),
+                cwd: cwd.clone(),
                 parent_thread_id: None,
                 hidden: false,
                 cancel_policy: CancelPolicy::default(),
@@ -271,7 +271,7 @@ async fn make_bound_session() -> BoundSession {
         .await
         .unwrap();
     let session = Session::new(
-        Arc::from(repo.path().to_string_lossy().as_ref()),
+        Arc::from(cwd.as_str()),
         FrozenContext::builder().build(),
         Some(thread_id.clone()),
     );
@@ -285,7 +285,6 @@ async fn make_bound_session() -> BoundSession {
         session,
         resources,
         thread_id,
-        _lease: lease,
         _repo: repo,
         _db: db,
     }

@@ -60,7 +60,7 @@ impl SubagentRegistry {
         let stop = SubagentStopInfo {
             result: result.to_string(),
             is_error,
-            stop_time: chrono::Utc::now().to_rfc3339(),
+            stop_time: peri_time::now_utc_rfc3339(),
         };
         let Some(sa) = self.by_agent_id.get_mut(child_agent_id) else {
             tracing::warn!(
@@ -231,7 +231,7 @@ fn finish_observation(
     let stop = sa.stop.take().unwrap_or_else(|| SubagentStopInfo {
         result: String::new(),
         is_error: true,
-        stop_time: chrono::Utc::now().to_rfc3339(),
+        stop_time: peri_time::now_utc_rfc3339(),
     });
     let output = if stop.result.is_empty() {
         deferred.unwrap_or_default()
@@ -259,7 +259,7 @@ fn finish_observation(
 }
 
 /// 两个 rfc3339 字符串取较晚者(解析失败回退前者)。
-/// 时间均为 `Utc::now().to_rfc3339()` 生成,解析后比较避免字符串字典序
+/// 时间均由 `peri_time::now_utc_rfc3339()` 生成，解析后比较避免字符串字典序
 /// 在"整秒无小数 vs 带小数"时误判。
 fn later_rfc3339(a: &str, b: &str) -> String {
     match (

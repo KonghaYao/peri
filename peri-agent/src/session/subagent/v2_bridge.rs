@@ -11,12 +11,15 @@ use crate::agent::events_v2::{
 use crate::agent::react::ReactLLM;
 use crate::agent::stages::{SharedToolMap, StageContext};
 use crate::agent::{CompactConfig, ContextBudget};
-use crate::error_suggest::{ErrorSuggestRegistry, ToolRegistrySnapshot};
 use crate::middleware::chain::MiddlewareChain;
 use crate::session::tool_catalog::SessionToolCatalog;
 use crate::session::turn::TurnId;
 use crate::session::{FrozenContext, MessageQueue, Session};
 use crate::tools::{BaseTool, DirectToolInvocationResolver, ToolInvocationResolver};
+
+#[cfg(test)]
+#[path = "session_wait_test.rs"]
+mod session_wait_tests;
 
 // ─── v2 桥接（自 peri-middlewares/src/subagent/v2_bridge.rs 迁移） ──────────
 
@@ -50,12 +53,16 @@ pub fn agent_id_from_child_thread(child_thread_id: &str) -> AgentId {
 /// `agent_id` 为父视角归属身份：`parent_agent_id` 未注入（/bg、测试路径）时以
 /// `child_agent_id` 占位——v1 协议化映射（`observe_event_to_executor`）不消费
 /// 该字段，仅 v2 emit（Langfuse tracer 归属）需要真实父身份。
+///
+/// `parent_tool_call_id` 为发起本次子 agent 的父 Agent 工具调用 id（父侧
+/// `ToolContext.tool_call_id`）；当前 invocation_id 不用于卡片配对。
 pub(crate) fn build_subagent_start_v2(
     turn_id: TurnId,
     parent_agent_id: Option<AgentId>,
     child_agent_id: AgentId,
     agent_name: &str,
     is_background: bool,
+    parent_tool_call_id: Option<String>,
 ) -> ObserveEvent {
     ObserveEvent::SubagentStart {
         turn_id,
@@ -63,6 +70,7 @@ pub(crate) fn build_subagent_start_v2(
         child_agent_id,
         agent_name: agent_name.to_string(),
         is_background,
+        parent_tool_call_id,
     }
 }
 
@@ -71,6 +79,7 @@ pub(crate) fn build_subagent_start_v2(
 /// `parent_agent_id` 为 None（未注入/测试路径）时不 emit，仅 tracing warn——
 /// 防脏数据：缺父身份的事件会让 tracer 无法归属，宁可走 incomplete 分支。
 /// （v1 协议化直发不依赖本函数：`forward_subagent_start_v1` 独立于父身份。）
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn emit_subagent_start_v2(
     event_bus: &Arc<EventBus>,
     turn_id: TurnId,
@@ -78,6 +87,7 @@ pub(crate) fn emit_subagent_start_v2(
     child_agent_id: AgentId,
     agent_name: &str,
     is_background: bool,
+    parent_tool_call_id: Option<String>,
 ) {
     if parent_agent_id.is_none() {
         tracing::warn!(
@@ -94,6 +104,7 @@ pub(crate) fn emit_subagent_start_v2(
         child_agent_id,
         agent_name,
         is_background,
+        parent_tool_call_id,
     ));
 }
 
@@ -227,15 +238,13 @@ pub(super) fn forward_subagent_stop_v1(
 pub fn build_v2_subagent_context(
     session: Option<Arc<Session>>,
     llm: Box<dyn ReactLLM + Send + Sync>,
-    chain: MiddlewareChain,
+    chain: Arc<MiddlewareChain>,
     tools: Vec<Arc<dyn BaseTool>>,
-    tool_filter: Arc<dyn Fn(&str) -> bool + Send + Sync>,
+    tool_filter: crate::session::tool_catalog::ToolFilter,
     session_mcp_capability: Option<Arc<dyn peri_acp_types::ports::SessionMcpCapabilityPort>>,
     cwd: &str,
     cancel_token: CancellationToken,
     tool_invocation_resolver: Option<Arc<dyn ToolInvocationResolver>>,
-    error_suggest_registry: Option<Arc<ErrorSuggestRegistry>>,
-    tool_registry_snapshot: Option<ToolRegistrySnapshot>,
     compact_config: Option<CompactConfig>,
     context_budget: Option<ContextBudget>,
     compact_llm: Option<Arc<dyn peri_model::Model>>,
@@ -253,6 +262,7 @@ pub fn build_v2_subagent_context(
         }
     };
 
+    let host = session.subagent_host();
     let turn = session.start_turn();
     let transcript = session.transcript();
     let queue_clone = session.queue().clone();
@@ -261,6 +271,16 @@ pub fn build_v2_subagent_context(
     let mut tools_map: std::collections::BTreeMap<String, Arc<dyn BaseTool>> =
         std::collections::BTreeMap::new();
     for tool in tools {
+        tools_map.insert(tool.name().to_string(), tool);
+    }
+    for tool in chain.collect_tools(cwd) {
+        let tool: Arc<dyn BaseTool> = Arc::from(tool);
+        if let Some(winner) = tools_map.values().find(|existing| {
+            crate::session::tool_catalog::tool_names_conflict(existing.as_ref(), tool.as_ref())
+        }) {
+            crate::session::tool_catalog::warn_tool_collision(winner.as_ref(), tool.as_ref());
+            continue;
+        }
         tools_map.insert(tool.name().to_string(), tool);
     }
     let combined_shared_tools: SharedToolMap = Arc::new(RwLock::new(tools_map.clone()));
@@ -276,10 +296,12 @@ pub fn build_v2_subagent_context(
     // 身份键统一（C1）：child_thread_id → AgentId；None（测试路径）内部生成。
     let resolved_agent_id = agent_id.unwrap_or_default();
 
-    let session_context = Arc::new(RwLock::new(std::collections::HashMap::new()));
+    let mut session_values = std::collections::HashMap::new();
+    if let Some(session_id) = &session.store().thread_id {
+        session_values.insert("session_id".into(), session_id.clone());
+    }
+    let session_context = Arc::new(RwLock::new(session_values));
     let v2_llm: Arc<dyn ReactLLM + Send + Sync> = Arc::from(llm);
-
-    let snapshot = tool_registry_snapshot.unwrap_or_default();
 
     let mut builder = StageContext::builder(turn, transcript, queue_clone)
         .with_agent_id(resolved_agent_id)
@@ -289,14 +311,38 @@ pub fn build_v2_subagent_context(
         .with_tool_invocation_resolver(tool_invocation_resolver.unwrap_or_else(|| {
             Arc::new(DirectToolInvocationResolver) as Arc<dyn ToolInvocationResolver>
         }))
-        .with_middleware_chain(Arc::new(chain))
+        .with_middleware_chain(chain)
         .with_event_bus(Arc::clone(&event_bus_arc))
-        .with_session_context(session_context)
-        .with_tool_registry_snapshot(snapshot);
+        .with_session_context(session_context);
 
-    if let Some(reg) = error_suggest_registry {
-        builder = builder.with_error_suggest_registry(reg);
+    if let Some(manager) = host.and_then(|host| host.task_manager.clone()) {
+        let wait = crate::agent::async_tasks::handoff::BoundedWait::new(
+            crate::agent::async_tasks::handoff::HANDOFF_MAX_WAIT,
+        );
+        builder = builder
+            .with_idle_waiting()
+            .with_idle_registry(manager.registry().subscribe_activity())
+            .with_idle_should_wait({
+                let manager = Arc::clone(&manager);
+                let wait = Arc::clone(&wait);
+                Arc::new(move || wait.should_wait(manager.active_count() > 0))
+            })
+            .with_handoff_deadline({
+                let wait = Arc::clone(&wait);
+                Arc::new(move || wait.deadline())
+            })
+            .with_pending_handoff(Arc::new(move || {
+                if !wait.take_due() {
+                    return None;
+                }
+                let tasks = manager.pending_handoff_tasks();
+                (!tasks.is_empty()).then(|| crate::agent::async_tasks::handoff::PendingHandoff {
+                    tasks,
+                    waited: wait.waited(),
+                })
+            }));
     }
+
     if let Some(budget) = context_budget {
         builder = builder.with_context_budget(budget);
     }
@@ -332,13 +378,11 @@ pub trait SubagentV2ContextBuilder: Send + Sync {
         &self,
         session: Option<Arc<Session>>,
         llm: Box<dyn ReactLLM + Send + Sync>,
-        chain: MiddlewareChain,
+        chain: Arc<MiddlewareChain>,
         tools: Vec<Arc<dyn BaseTool>>,
         cwd: &str,
         cancel_token: CancellationToken,
         tool_invocation_resolver: Option<Arc<dyn ToolInvocationResolver>>,
-        error_suggest_registry: Option<Arc<ErrorSuggestRegistry>>,
-        tool_registry_snapshot: Option<ToolRegistrySnapshot>,
         compact_config: Option<CompactConfig>,
         context_budget: Option<ContextBudget>,
         compact_llm: Option<Arc<dyn peri_model::Model>>,
@@ -355,13 +399,11 @@ impl SubagentV2ContextBuilder for DefaultSubagentV2ContextBuilder {
         &self,
         session: Option<Arc<Session>>,
         llm: Box<dyn ReactLLM + Send + Sync>,
-        chain: MiddlewareChain,
+        chain: Arc<MiddlewareChain>,
         tools: Vec<Arc<dyn BaseTool>>,
         cwd: &str,
         cancel_token: CancellationToken,
         tool_invocation_resolver: Option<Arc<dyn ToolInvocationResolver>>,
-        error_suggest_registry: Option<Arc<ErrorSuggestRegistry>>,
-        tool_registry_snapshot: Option<ToolRegistrySnapshot>,
         compact_config: Option<CompactConfig>,
         context_budget: Option<ContextBudget>,
         compact_llm: Option<Arc<dyn peri_model::Model>>,
@@ -377,8 +419,6 @@ impl SubagentV2ContextBuilder for DefaultSubagentV2ContextBuilder {
             cwd,
             cancel_token,
             tool_invocation_resolver,
-            error_suggest_registry,
-            tool_registry_snapshot,
             compact_config,
             context_budget,
             compact_llm,

@@ -1,14 +1,10 @@
-//! 统一 v2 MessageQueue 入队：优先经 [`InboxHandle`] 以触发 `await_wake`。
+//! 统一 v2 mailbox 发布，由 queue 同源地管理消息与唤醒。
 
 use peri_acp_types::session::QueuedMessage;
 
 use super::capabilities::QueueState;
 
-/// 将消息写入会话级队列；有 inbox 时走 `InboxHandle::push`（Defer/Prompt 会 wake）。
+/// 发布到会话级 mailbox，保留消息类型的调度语义。
 pub fn enqueue_v2_message(state: &dyn QueueState, msg: QueuedMessage) {
-    if let Some(inbox) = state.inbox_handle() {
-        inbox.push(msg);
-    } else {
-        state.v2_queue().push(msg);
-    }
+    state.enqueue_v2_message(msg);
 }

@@ -1,7 +1,162 @@
 use super::*;
 use peri_acp_types::tasks::{TaskManager as TaskManagerPort, TaskShutdownReport};
-#[cfg(unix)]
-use std::sync::Arc;
+
+#[derive(Clone, Default)]
+struct LogBuffer(std::sync::Arc<parking_lot::Mutex<Vec<u8>>>);
+
+impl std::io::Write for LogBuffer {
+    fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+        self.0.lock().extend_from_slice(bytes);
+        Ok(bytes.len())
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        Ok(())
+    }
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn async_tasks_owner_drop_and_cancel_join_panic_are_logged() {
+    use crate::agent::async_tasks::{BackgroundTask, BackgroundTaskStatus, BgCancelHandle};
+    let logs = LogBuffer::default();
+    let writer = logs.clone();
+    let subscriber = tracing_subscriber::fmt()
+        .with_max_level(tracing::Level::INFO)
+        .without_time()
+        .with_ansi(false)
+        .with_writer(move || writer.clone())
+        .finish();
+    let _capture = tracing::subscriber::set_default(subscriber);
+    // 该 callsite 被同二进制多个并行用例共用，而 tracing 的 callsite 兴趣缓存是全局的：
+    // 无订阅者线程抢先完成首次注册时缓存即为 never，生产 warn 会被静默丢弃。注册只发生
+    // 一次，因此重建缓存后用全新 manager 重试即可收敛（新 scope 的 guard id 恒为 1）。
+    let manager = {
+        let mut attempts = 0u32;
+        loop {
+            tracing::callsite::rebuild_interest_cache();
+            let candidate = TaskManager::new();
+            drop(candidate.begin_external_execution("test-owner").unwrap());
+            let captured = String::from_utf8(logs.0.lock().clone()).unwrap();
+            if captured.contains("scope=test-owner id=1") {
+                break candidate;
+            }
+            attempts += 1;
+            assert!(
+                attempts < 32,
+                "owner drop 的 warn 始终未落到本订阅者；captured:\n{captured}"
+            );
+            tokio::task::yield_now().await;
+        }
+    };
+    assert!(!manager.is_execution_idle());
+    manager.resolve_external_execution_evidence("test-owner");
+
+    // 直接注册未捕获 panic 的 handle，验证取消等待层，而非后台包装层。
+    let handle = tokio::spawn(async { panic!("取消等待测试 panic") });
+    manager
+        .register_with_kind(BackgroundTask {
+            id: "cancel-panic-task".into(),
+            agent_name: "fixture".into(),
+            prompt_summary: "task".into(),
+            status: BackgroundTaskStatus::Running,
+            started_at: peri_time::monotonic_now(),
+            chrono_started_at: peri_time::now_wall().into(),
+            kind: BgTaskKind::Agent,
+            cancel_handle: BgCancelHandle::Abort(handle),
+            cancel_token: None,
+            pid: None,
+            output_preview: None,
+            agent_inbox: None,
+            initiator_session_id: None,
+            owner_session_id: None,
+            owner_identity: None,
+        })
+        .unwrap();
+    manager.cancel("cancel-panic-task").unwrap();
+    assert_eq!(manager.shutdown().await, TaskShutdownReport::Complete);
+    assert!(manager.is_execution_idle());
+    let text = String::from_utf8(logs.0.lock().clone()).unwrap();
+    for (message, field) in [
+        (
+            "external execution scope still uncertain after owner drop",
+            "scope=test-owner id=1",
+        ),
+        (
+            "bg task cancel: execution join failed",
+            "task_id=cancel-panic-task is_panic=true",
+        ),
+    ] {
+        let line = text
+            .lines()
+            .find(|line| line.contains(message))
+            .expect(&text);
+        assert!(line.contains("WARN"), "{line}");
+        assert!(line.contains(field), "{line}");
+        std::io::Write::write_all(&mut std::io::stdout(), format!("{line}\n").as_bytes()).unwrap();
+    }
+}
+
+#[derive(Default)]
+struct RecordingShellExecutor {
+    request: std::sync::Mutex<Option<(String, String, Option<u64>)>>,
+}
+
+impl ShellExecutor for RecordingShellExecutor {
+    fn cancel_callback(
+        &self,
+        _pid: u32,
+        _registry: std::sync::Arc<BackgroundTaskRegistry>,
+    ) -> Option<Box<dyn FnOnce() + Send + Sync>> {
+        None
+    }
+
+    fn spawn(
+        &self,
+        _registry: std::sync::Arc<BackgroundTaskRegistry>,
+        mut ownership: Box<dyn peri_acp_types::tasks::ExternalExecutionGuard>,
+        command: String,
+        cwd: String,
+        timeout_ms: Option<u64>,
+        _on_bg_complete: Option<peri_acp_types::tasks::OnBgCompleteFn>,
+    ) -> Result<BgShellHandle, Box<dyn std::error::Error + Send + Sync>> {
+        *self.request.lock().unwrap() = Some((command, cwd, timeout_ms));
+        ownership.confirm_stopped();
+        Err("execution environment rejected request".into())
+    }
+}
+
+#[tokio::test]
+async fn injected_shell_environment_receives_request_without_local_execution() {
+    let executor = std::sync::Arc::new(RecordingShellExecutor::default());
+    let manager = TaskManager::with_shell_executor(executor.clone());
+    let error = manager
+        .spawn_shell(
+            "remote-command".into(),
+            "remote-workspace".into(),
+            Some(37),
+            None,
+        )
+        .unwrap_err();
+    assert_eq!(error.to_string(), "execution environment rejected request");
+    assert_eq!(
+        executor.request.lock().unwrap().as_ref(),
+        Some(&("remote-command".into(), "remote-workspace".into(), Some(37)))
+    );
+    assert_eq!(manager.shutdown().await, TaskShutdownReport::Complete);
+}
+
+#[tokio::test]
+async fn missing_shell_environment_is_rejected_without_admitting_work() {
+    let manager = TaskManager::new();
+    let error = manager
+        .spawn_shell("true".into(), "unused".into(), None, None)
+        .unwrap_err();
+    assert!(error
+        .to_string()
+        .contains("execution environment is not configured"));
+    assert_eq!(manager.active_count(), 0);
+    assert_eq!(manager.shutdown().await, TaskShutdownReport::Complete);
+}
 
 #[tokio::test]
 async fn test_shutdown_signals_owned_work_and_waits_for_its_cleanup() {
@@ -47,94 +202,56 @@ async fn test_shutdown_waits_for_owned_completion_and_closes_admission() {
 #[tokio::test]
 async fn test_shutdown_cannot_report_clean_after_abandoned_external_execution() {
     let manager = TaskManager::new();
-    let owner = manager.begin_external_execution().unwrap();
+    let owner = manager.begin_external_execution("workspace").unwrap();
     drop(owner);
     assert_eq!(manager.shutdown().await, TaskShutdownReport::Incomplete);
     assert_eq!(manager.shutdown().await, TaskShutdownReport::Incomplete);
+}
+
+// [回归测试] 取消/超时的 MCP 调用只污染它自己的执行 scope；按 scope 的对账证据
+// 可以恢复，其他 owner 的未结清证据不得被顺带清除（历史故障：单一 uncertain
+// 布尔永久置位，会话无法 close / fork 永久被拒）。
+#[tokio::test]
+async fn test_external_uncertainty_clears_only_with_scope_evidence() {
+    let manager = TaskManager::new();
+    drop(TaskManagerPort::begin_external_execution(&manager, "workspace").unwrap());
+    drop(TaskManagerPort::begin_external_execution(&manager, "web").unwrap());
+    assert!(!TaskManagerPort::is_execution_idle(&manager));
+    assert_eq!(
+        TaskManagerPort::resolve_external_execution_evidence(&manager, "workspace"),
+        1
+    );
+    assert!(
+        !TaskManagerPort::is_execution_idle(&manager),
+        "非 workspace 的证据不能清除其他 owner 的不确定"
+    );
+    assert_eq!(
+        TaskManagerPort::resolve_external_execution_evidence(&manager, "web"),
+        1
+    );
+    assert!(TaskManagerPort::is_execution_idle(&manager));
+}
+
+// 证据清除后，关闭必须能重新走到 Complete（不能永久 Incomplete）。
+#[tokio::test]
+async fn test_evidenced_reconciliation_restores_clean_shutdown() {
+    let manager = TaskManager::new();
+    drop(TaskManagerPort::begin_external_execution(&manager, "workspace").unwrap());
+    assert_eq!(manager.shutdown().await, TaskShutdownReport::Incomplete);
+    assert_eq!(
+        TaskManagerPort::resolve_external_execution_evidence(&manager, "workspace"),
+        1
+    );
+    assert_eq!(manager.shutdown().await, TaskShutdownReport::Complete);
 }
 
 #[tokio::test]
 async fn test_shutdown_accepts_confirmed_external_cleanup() {
     let manager = TaskManager::new();
-    let mut owner = manager.begin_external_execution().unwrap();
+    let mut owner = manager.begin_external_execution("workspace").unwrap();
     owner.confirm_stopped();
     drop(owner);
     assert_eq!(manager.shutdown().await, TaskShutdownReport::Complete);
-}
-
-/// 启动失败且 registry 已满时，必须同步报错，不能承诺不存在的完成通知。
-#[tokio::test]
-async fn test_failed_shell_spawn_with_full_registry_returns_error() {
-    let manager = TaskManager::new();
-    for index in 0..BackgroundTaskRegistry::SHELL_LIMIT {
-        manager
-            .register(BgTaskRegistration {
-                task_id: format!("occupied-{index}"),
-                kind: BgTaskKind::Shell,
-                summary: "capacity fixture".into(),
-                pid: None,
-                kill: Some(Box::new(|| {})),
-            })
-            .unwrap();
-    }
-    let fixture = tempfile::tempdir().unwrap();
-    let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
-    let result = manager.spawn_shell(
-        "echo never-started".into(),
-        fixture
-            .path()
-            .join("missing-cwd")
-            .to_string_lossy()
-            .into_owned(),
-        None,
-        Some(std::sync::Arc::new(move |result, _| {
-            tx.send(result.clone()).unwrap();
-        })),
-    );
-    assert_eq!(manager.active_count(), BackgroundTaskRegistry::SHELL_LIMIT);
-    for index in 0..BackgroundTaskRegistry::SHELL_LIMIT {
-        let id = format!("occupied-{index}");
-        manager.cancel(&id).unwrap();
-        manager.confirm_external_execution_stopped(&id);
-    }
-    assert_eq!(manager.shutdown().await, TaskShutdownReport::Complete);
-    assert!(
-        rx.try_recv().is_err(),
-        "unregistered failure has no callback"
-    );
-    let error = result.expect_err("spawn failure must be returned synchronously");
-    assert!(error.to_string().contains("Failed to spawn"));
-}
-
-#[cfg(unix)]
-#[tokio::test]
-async fn test_shutdown_joins_cancelled_background_shell() {
-    let manager = TaskManager::new();
-    let cwd = tempfile::tempdir().unwrap();
-    let (events, mut receiver) = tokio::sync::mpsc::unbounded_channel();
-    manager.set_event_sender(events, "session".into());
-    let shell = manager
-        .spawn_shell(
-            "sleep 60".into(),
-            cwd.path().to_str().unwrap().into(),
-            None,
-            None,
-        )
-        .unwrap();
-    assert!(shell.pid.is_some());
-    assert!(matches!(
-        receiver.recv().await,
-        Some(BgRegistryEvent::Started { .. })
-    ));
-    assert_eq!(manager.shutdown().await, TaskShutdownReport::Complete);
-    assert!(manager
-        .spawn_shell(
-            "true".into(),
-            cwd.path().to_str().unwrap().into(),
-            None,
-            None
-        )
-        .is_err());
 }
 
 #[tokio::test]
@@ -152,109 +269,4 @@ async fn test_shutdown_does_not_treat_kill_request_as_external_completion() {
     )
     .unwrap();
     assert_eq!(manager.shutdown().await, TaskShutdownReport::Incomplete);
-}
-
-#[cfg(unix)]
-#[tokio::test]
-async fn test_shutdown_immediately_after_shell_spawn_keeps_cleanup_owned() {
-    let manager = TaskManager::new();
-    let cwd = tempfile::tempdir().unwrap();
-    manager
-        .spawn_shell(
-            "sleep 60".into(),
-            cwd.path().to_str().unwrap().into(),
-            None,
-            None,
-        )
-        .unwrap();
-    assert_eq!(manager.shutdown().await, TaskShutdownReport::Complete);
-}
-
-#[cfg(unix)]
-#[tokio::test]
-async fn test_timed_out_shell_can_close_cleanly() {
-    let manager = TaskManager::new();
-    let cwd = tempfile::tempdir().unwrap();
-    let (complete, completed) = tokio::sync::oneshot::channel();
-    let complete = std::sync::Mutex::new(Some(complete));
-    manager
-        .spawn_shell(
-            "sleep 60".into(),
-            cwd.path().to_str().unwrap().into(),
-            Some(20),
-            Some(Arc::new(move |result, _| {
-                assert!(result.timed_out);
-                if let Some(tx) = complete.lock().unwrap().take() {
-                    let _ = tx.send(());
-                }
-            })),
-        )
-        .unwrap();
-    tokio::time::timeout(std::time::Duration::from_secs(5), completed)
-        .await
-        .unwrap()
-        .unwrap();
-    assert_eq!(manager.shutdown().await, TaskShutdownReport::Complete);
-}
-
-#[cfg(unix)]
-#[tokio::test]
-async fn test_shutdown_reaps_child_owned_by_dropped_shell_guard() {
-    let manager = TaskManager::new();
-    let mut execution = ShellExecutionGuard::new(Some(manager.begin_external_execution().unwrap()));
-    let mut command = shell_command("exec sleep 60", &[]);
-    execution.prepare(&mut command).unwrap();
-    let child = command.spawn().unwrap();
-    let pid = i32::try_from(child.id().unwrap()).unwrap();
-    execution.attach_owned(child).unwrap();
-
-    let mut shutdown = manager.shutdown();
-    assert!(futures::poll!(&mut shutdown).is_pending());
-    drop(execution);
-    assert_eq!(shutdown.await, TaskShutdownReport::Complete);
-    // Complete 必须证明进程组已消失，而且 Child 已被回收而非仅收到 kill。
-    assert_eq!(unsafe { libc::kill(-pid, 0) }, -1);
-    assert_eq!(
-        std::io::Error::last_os_error().raw_os_error(),
-        Some(libc::ESRCH)
-    );
-    assert_eq!(
-        unsafe { libc::waitpid(pid, std::ptr::null_mut(), libc::WNOHANG) },
-        -1
-    );
-    assert_eq!(
-        std::io::Error::last_os_error().raw_os_error(),
-        Some(libc::ECHILD)
-    );
-}
-
-#[cfg(unix)]
-#[tokio::test]
-async fn test_rejected_promoted_task_settles_registered_process_after_cleanup() {
-    let manager = Arc::new(TaskManager::new());
-    let mut execution = ShellExecutionGuard::new(Some(manager.begin_external_execution().unwrap()));
-    let mut command = shell_command("sleep 60", &[]);
-    command.process_group(0).kill_on_drop(true);
-    execution.prepare(&mut command).unwrap();
-    let mut child = command.spawn().unwrap();
-    execution.attach(&child).unwrap();
-    manager
-        .register(BgTaskRegistration {
-            task_id: "promoted".into(),
-            kind: BgTaskKind::Shell,
-            summary: "shell".into(),
-            pid: child.id(),
-            kill: None,
-        })
-        .unwrap();
-    execution.track_registration(manager.clone(), "promoted".into());
-    let mut shutdown = manager.shutdown();
-    assert!(futures::poll!(&mut shutdown).is_pending());
-    assert!(manager
-        .spawn_owned(Box::pin(async move {
-            let _ = child.wait().await;
-            execution.confirm_stopped();
-        }))
-        .is_err());
-    assert_eq!(shutdown.await, TaskShutdownReport::Complete);
 }

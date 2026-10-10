@@ -14,12 +14,16 @@ use peri_resources::sessions::SqliteThreadStore;
 #[tokio::test]
 async fn test_hidden_child_executor_restores_ancestor_and_own_flags_separately() {
     let dir = tempfile::tempdir().unwrap();
+    let cwd = dir.path().to_str().unwrap();
     let store = Arc::new(
         SqliteThreadStore::new(dir.path().join("child.db"))
             .await
             .unwrap(),
     );
-    let parent_id = store.create_thread(ThreadMeta::new("/tmp")).await.unwrap();
+    let parent_id = store
+        .create_thread(ThreadMeta::new_at(cwd, peri_time::now_wall()))
+        .await
+        .unwrap();
     let parent = BaseMessage::human("parent snapshot");
     store
         .append_messages(&parent_id, std::slice::from_ref(&parent))
@@ -33,7 +37,7 @@ async fn test_hidden_child_executor_restores_ancestor_and_own_flags_separately()
         .update_message_flags(&parent.id(), &parent_flags)
         .await
         .unwrap();
-    let mut meta = ThreadMeta::new("/tmp");
+    let mut meta = ThreadMeta::new_at(cwd, peri_time::now_wall());
     meta.parent_thread_id = Some(parent_id.clone());
     meta.snapshot_at_message_id = Some(parent.id().as_uuid().to_string());
     meta.hidden = true;
@@ -62,7 +66,7 @@ async fn test_hidden_child_executor_restores_ancestor_and_own_flags_separately()
         .await
         .unwrap();
     let session = Session::new(
-        Arc::from("/tmp"),
+        Arc::from(cwd),
         FrozenContext::builder().build(),
         Some(child_id.clone()),
     );

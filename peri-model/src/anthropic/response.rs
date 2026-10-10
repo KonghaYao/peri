@@ -13,6 +13,15 @@ pub(super) fn decode_completed_response(
     value: &Value,
     request_id: Option<String>,
 ) -> ModelResult<ModelResponse> {
+    decode_completed_response_inner(value, request_id)
+        .map_err(|error| error.with_body(value.to_string()))
+}
+
+#[cfg(test)]
+fn decode_completed_response_inner(
+    value: &Value,
+    request_id: Option<String>,
+) -> ModelResult<ModelResponse> {
     let content = value
         .get("content")
         .and_then(Value::as_array)
@@ -74,8 +83,8 @@ pub(super) fn decode_content_blocks(
                     .and_then(Value::as_str)
                     .ok_or_else(provider_protocol_error)?;
                 let arguments = block.get("input").cloned().unwrap_or(Value::Null);
-                let arguments =
-                    JsonObject::from_value(arguments).map_err(|_| provider_protocol_error())?;
+                let arguments = JsonObject::from_value(arguments)
+                    .map_err(|error| provider_protocol_error().with_error(&error))?;
                 let tool_call = ToolCall::new(id, name, arguments);
                 content.push(ContentBlock::ToolUse {
                     tool_call: tool_call.clone(),
@@ -135,6 +144,10 @@ pub(super) fn stop_reason(value: Option<&str>) -> StopReason {
     }
 }
 
+#[track_caller]
 pub(super) fn provider_protocol_error() -> ModelError {
-    ModelError::protocol(crate::ProtocolErrorKind::Provider)
+    ModelError::protocol(crate::ProtocolErrorKind::Provider).with_message(format!(
+        "invalid provider payload at {}",
+        std::panic::Location::caller()
+    ))
 }

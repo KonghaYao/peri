@@ -65,7 +65,7 @@ impl SubagentRegistry {
             return SubagentStartOutcome::Duplicate;
         }
         // 占位登记:防 Stop/重复 Start 竞态;join 成功后补 obs 字段
-        let now = chrono::Utc::now().to_rfc3339();
+        let now = peri_time::now_utc_rfc3339();
         self.by_agent_id.insert(
             child_agent_id.to_string(),
             ActiveSubagent {
@@ -104,7 +104,7 @@ impl SubagentRegistry {
         SubagentStartOutcome::Pending
     }
 
-    /// 尝试 join 指定 child 的 pending Start。成功 → 冻结父 span、创建 obs 字段、
+    /// 尝试 join 指定 child 的 pending Start。成功 → 冻结父 span、缓存开始快照、
     /// 取出 gate 事件;若 Stop 与父 ToolEnded 均已到 → 立即关闭。
     pub(super) fn try_join(&mut self, child_agent_id: &str) -> Option<SubagentStartOutcome> {
         // 已被标记 incomplete(如缓存溢出)的 child 不再 join
@@ -160,7 +160,7 @@ impl SubagentRegistry {
                 .get(&key)
                 .map(|i| i.parent_stage_span_id.clone())
                 .unwrap_or_default(),
-            start_time: chrono::Utc::now().to_rfc3339(),
+            start_time: peri_time::now_utc_rfc3339(),
             agent_name: sp.agent_name.clone(),
             input: input.clone(),
         };

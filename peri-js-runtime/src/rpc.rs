@@ -1,4 +1,3 @@
-use std::fmt;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 
@@ -12,23 +11,12 @@ use tokio::task::JoinHandle;
 
 use crate::{JsRuntimeError, ResourceKind, Result};
 
-#[derive(Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct JsonRpcError {
     pub code: i32,
     pub message: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub data: Option<Value>,
-}
-
-impl fmt::Debug for JsonRpcError {
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        formatter
-            .debug_struct("JsonRpcError")
-            .field("code", &self.code)
-            .field("message", &"[REDACTED]")
-            .field("data", &self.data.as_ref().map(|_| "[REDACTED]"))
-            .finish()
-    }
 }
 
 pub enum ParsedMessage {
@@ -194,7 +182,7 @@ impl RpcChannel {
 
 pub fn parse_message(raw: &str) -> Result<ParsedMessage> {
     let value: Value = serde_json::from_str(raw)
-        .map_err(|_| JsRuntimeError::Rpc("malformed JSON-RPC frame".into()))?;
+        .map_err(|error| JsRuntimeError::Rpc(format!("malformed JSON-RPC frame: {error}")))?;
     if value.get("jsonrpc").and_then(Value::as_str) != Some("2.0") {
         return Err(JsRuntimeError::Rpc("malformed JSON-RPC frame".into()));
     }
@@ -206,7 +194,9 @@ pub fn parse_message(raw: &str) -> Result<ParsedMessage> {
             .cloned()
             .map(serde_json::from_value)
             .transpose()
-            .map_err(|_| JsRuntimeError::Rpc("malformed JSON-RPC error response".into()))?;
+            .map_err(|error| {
+                JsRuntimeError::Rpc(format!("malformed JSON-RPC error response: {error}"))
+            })?;
         return Ok(ParsedMessage::Response {
             id,
             result: value.get("result").cloned(),

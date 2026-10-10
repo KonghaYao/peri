@@ -1,0 +1,4 @@
+/target/
+/.wrangler/
+/workerd/dist/
+/workerd/.wrangler/

@@ -209,7 +209,7 @@ pub(super) async fn run_writer(
 
     let mut pending_appends: Vec<PersistedPayload> = Vec::new();
     let mut pending_reserved = Reservation::default();
-    let mut window_start: std::time::Instant = std::time::Instant::now();
+    let mut window_start: std::time::Instant = peri_time::monotonic_now();
 
     loop {
         // 失败后的积压仅用于 barrier 诊断，不能继续驱动批处理定时器。
@@ -218,7 +218,7 @@ pub(super) async fn run_writer(
             rx.recv().await
         } else {
             let remaining = APPEND_BATCH_WINDOW.saturating_sub(window_start.elapsed());
-            match tokio::time::timeout(remaining, rx.recv()).await {
+            match peri_time::timeout(remaining, rx.recv()).await {
                 Ok(op) => op,
                 Err(_) => {
                     // 窗口到期：批量落库后继续等待
@@ -240,7 +240,7 @@ pub(super) async fn run_writer(
         match op {
             Some(PersistOp::Append { payload, reserved }) => {
                 if pending_appends.is_empty() {
-                    window_start = std::time::Instant::now();
+                    window_start = peri_time::monotonic_now();
                 }
                 pending_reserved.merge(reserved);
                 pending_appends.push(payload);

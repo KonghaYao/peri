@@ -3,6 +3,7 @@ use std::future::Future;
 use std::pin::Pin;
 
 use super::drop_telemetry::LangfuseDropRegistry;
+use super::turn_traces::TurnTraceRegistry;
 
 /// Langfuse session 抽象，让 tracer 可注入 fake session 跑单测。
 pub trait LangfuseSessionLike: Send + Sync {
@@ -14,4 +15,6 @@ pub trait LangfuseSessionLike: Send + Sync {
     fn session_id(&self) -> &str;
     /// 查询安全的背压丢弃计数；实现不得返回事件 payload。
     fn drop_registry(&self) -> &LangfuseDropRegistry;
+    /// sid → 活跃 turn trace 注册表；指标出口按指标自带的 sid 取活跃 trace。
+    fn turn_traces(&self) -> &TurnTraceRegistry;
 }

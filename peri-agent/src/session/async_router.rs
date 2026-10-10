@@ -3,9 +3,8 @@
 //! L5：自 `peri-acp/src/session/async_router.rs` 物理迁入（仅依赖 peri-acp-types，
 //! 干净迁入；ACP 侧保留 re-export 桥）。
 //!
-//! Replaces the executor's direct push to the raw `v2_message_queue` with a
-//! unified path through [`InboxHandle`], so that [`SessionInbox::await_wake`] is
-//! properly triggered when the agent is idle.
+//! Projects terminal results into the queue-owned mailbox. All publication
+//! paths share its wake signal; reminder severity does not decide scheduling.
 //!
 //! Two routing targets:
 //! - **Background task results** (`route_bg_result`): completion notifications
@@ -14,11 +13,13 @@
 //! - **Workflow events** (`route_workflow_event`): completion notifications from
 //!   the workflow middleware subscriber, pushed as `Defer` + `MessageSource::WorkflowComplete`.
 //!
-//! Both use `Defer` semantics: consumed by `drain_all` during the Receive stage
-//! (RCRA), or detectable by `drain_for_end` for external callers.
+//! Both use `Defer` semantics and stable delivery identities for Receive deduplication.
 
 use peri_acp_types::event::BackgroundTaskResult;
-use peri_acp_types::session::{InboxHandle, MessageKind, MessageSource};
+use peri_acp_types::session::{
+    InboxHandle, MessageKind, MessagePolicy, MessageQueue, MessageSource, QueuedMessage,
+    SessionInbox,
+};
 use peri_acp_types::system_reminder::{
     ReminderCategory, ReminderDelivery, ReminderSeverity, TrustedSystemReminder,
 };
@@ -38,6 +39,7 @@ pub(crate) fn background_result_reminder(
         BgTaskKind::Agent => "subagent",
         BgTaskKind::Shell => "shell",
         BgTaskKind::Workflow => "workflow",
+        BgTaskKind::Mcp => "mcp",
     };
     try_trusted_reminder(
         ReminderCategory::Task,
@@ -69,6 +71,7 @@ pub(crate) fn background_result_reminder(
             "success": result.success,
             "timed_out": result.timed_out,
             "child_thread_id": result.child_thread_id,
+            "subagent_failure": result.subagent_failure,
         }),
     ).unwrap_or_else(|error| {
         tracing::error!(task_id = %result.task_id, %error, "background completion notification rejected");
@@ -85,7 +88,8 @@ pub(crate) fn background_result_reminder(
             ReminderDelivery::Configurable,
             format!("后台任务 {task_id} 已结束，但详细结果通知未通过校验。请检查运行日志。"),
             Some("Background completion notification rejected".into()),
-            json!({"task_id": task_id, "success": result.success, "timed_out": result.timed_out}),
+            json!({"task_id": task_id, "success": result.success, "timed_out": result.timed_out,
+                "subagent_failure": result.subagent_failure}),
         )
     })
 }
@@ -101,6 +105,10 @@ pub struct AsyncRouter {
 }
 
 impl AsyncRouter {
+    pub fn for_queue(queue: &MessageQueue) -> Self {
+        Self::new(SessionInbox::new(std::sync::Arc::new(queue.clone())).handle())
+    }
+
     /// Create a new AsyncRouter from the given inbox handle.
     ///
     /// The handle is typically obtained from `SessionInbox::handle()` during
@@ -132,10 +140,21 @@ impl AsyncRouter {
             BgTaskKind::Agent => MessageSource::SubAgentComplete,
             BgTaskKind::Shell => MessageSource::ShellComplete,
             BgTaskKind::Workflow => MessageSource::WorkflowComplete,
+            BgTaskKind::Mcp => MessageSource::DynamicMcpNotification,
         };
         let reminder = background_result_reminder(result, kind);
-        self.inbox
-            .push_system_reminder(MessageKind::Defer, source, reminder);
+        self.inbox.push(
+            QueuedMessage::system_reminder_with_delivery_id(
+                MessageKind::Defer,
+                source,
+                reminder,
+                crate::agent::async_tasks::delivery::terminal_delivery_id(
+                    &result.task_id,
+                    "terminal",
+                ),
+            )
+            .with_policy(MessagePolicy::ensure_processing()),
+        );
         debug!(
             task_id = %result.task_id,
             agent_name = %result.agent_name,
@@ -269,10 +288,14 @@ impl AsyncRouter {
                 "tool_calls_count": tool_calls_count,
             }),
         );
-        self.inbox.push_system_reminder(
-            MessageKind::Defer,
-            MessageSource::WorkflowComplete,
-            reminder,
+        self.inbox.push(
+            QueuedMessage::system_reminder_with_delivery_id(
+                MessageKind::Defer,
+                MessageSource::WorkflowComplete,
+                reminder,
+                crate::agent::async_tasks::delivery::terminal_delivery_id(run_id, "terminal"),
+            )
+            .with_policy(MessagePolicy::ensure_processing()),
         );
     }
 }

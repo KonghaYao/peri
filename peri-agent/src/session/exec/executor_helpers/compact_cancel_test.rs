@@ -12,8 +12,7 @@ use peri_acp_types::session_resources::{
 };
 use peri_acp_types::store::{CompactionChange, PersistedPayload};
 use peri_acp_types::workspace::{
-    ResolvedWorkspace, ScopedThreadPage, ScopedThreadQuery, SessionBinding, SessionExecutionLease,
-    SESSION_BINDING_VERSION,
+    ResolvedWorkspace, ScopedThreadPage, ScopedThreadQuery, SessionBinding, SESSION_BINDING_VERSION,
 };
 use peri_resources::sessions::SessionResourcesImpl;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
@@ -68,34 +67,35 @@ impl SessionResources for ControlledStore {
         self.inner.validate_session(id, workspace).await
     }
 
-    async fn acquire_execution(
+    async fn finish_close(&self, id: &ThreadId) -> SessionResourceResult<()> {
+        self.inner.finish_close(id).await
+    }
+
+    async fn close_settlement(
         &self,
         id: &ThreadId,
-        workspace: &ResolvedWorkspace,
-    ) -> SessionResourceResult<Arc<dyn SessionExecutionLease>> {
-        self.inner.acquire_execution(id, workspace).await
+    ) -> SessionResourceResult<peri_acp_types::session_resources::CloseSettlement> {
+        self.inner.close_settlement(id).await
     }
 
-    async fn reset_dirty_execution(
-        &self,
-        request: &peri_acp_types::workspace::ResetDirtyRequest,
-    ) -> SessionResourceResult<()> {
-        self.inner.reset_dirty_execution(request).await
-    }
-
-    async fn create_session(
-        &self,
-        input: &NewSession,
-    ) -> SessionResourceResult<Arc<dyn SessionExecutionLease>> {
+    async fn create_session(&self, input: &NewSession) -> SessionResourceResult<()> {
         self.inner.create_session(input).await
     }
 
-    async fn abandon_initialization(
+    async fn abandon_initialization(&self, id: &ThreadId) -> SessionResourceResult<()> {
+        self.inner.abandon_initialization(id).await
+    }
+
+    async fn begin_initialization(
         &self,
-        id: &ThreadId,
-        lease: &Arc<dyn SessionExecutionLease>,
-    ) -> SessionResourceResult<()> {
-        self.inner.abandon_initialization(id, lease).await
+        draft: &peri_acp_types::session_resources::NewSessionDraft,
+    ) -> SessionResourceResult<Arc<dyn peri_acp_types::session_resources::SessionInitialization>>
+    {
+        self.inner.begin_initialization(draft).await
+    }
+
+    async fn discard_incomplete_initialization(&self, id: &ThreadId) -> SessionResourceResult<()> {
+        self.inner.discard_incomplete_initialization(id).await
     }
 
     async fn adopt_legacy_session(
@@ -167,19 +167,31 @@ impl SessionResources for ControlledStore {
         self.inner.append_history(id, payloads).await
     }
 
-    async fn save_fork(
+    async fn append_reminder_if_absent(
         &self,
-        fork: &ForkSnapshot,
-    ) -> SessionResourceResult<Arc<dyn SessionExecutionLease>> {
+        id: &ThreadId,
+        message_id: peri_acp_types::messages::MessageId,
+        reminder: &peri_acp_types::system_reminder::TrustedSystemReminder,
+    ) -> SessionResourceResult<bool> {
+        self.inner
+            .append_reminder_if_absent(id, message_id, reminder)
+            .await
+    }
+
+    async fn mark_session_closing(&self, id: &ThreadId) -> SessionResourceResult<()> {
+        self.inner.mark_session_closing(id).await
+    }
+
+    async fn is_session_closing(&self, id: &ThreadId) -> SessionResourceResult<bool> {
+        self.inner.is_session_closing(id).await
+    }
+
+    async fn save_fork(&self, fork: &ForkSnapshot) -> SessionResourceResult<()> {
         self.inner.save_fork(fork).await
     }
 
-    async fn save_child(
-        &self,
-        child: &ChildSnapshot,
-        lease: &Arc<dyn SessionExecutionLease>,
-    ) -> SessionResourceResult<()> {
-        self.inner.save_child(child, lease).await
+    async fn save_child(&self, child: &ChildSnapshot) -> SessionResourceResult<()> {
+        self.inner.save_child(child).await
     }
 
     async fn claim_child_resume(
@@ -314,8 +326,7 @@ impl CommandHandler for PipelineHandler {
 struct Case {
     _dir: tempfile::TempDir,
     _repo: tempfile::TempDir,
-    /// 持有执行所有权：门面上的写入要求本 root 有活 owner。
-    _lease: Arc<dyn SessionExecutionLease>,
+    /// 初始化会话资源，供 compact 的持久化与取消路径使用。
     store: Arc<ControlledStore>,
     thread_id: ThreadId,
     history: Vec<BaseMessage>,
@@ -363,7 +374,7 @@ async fn run_case(mode: CommitMode, pause: HandlerPause, pre_cancel: bool) -> Ca
         },
         frozen: FrozenSnapshotBytes::new("{\"version\":1,\"manual\":true}"),
     };
-    let lease = inner.create_session(&session).await.unwrap();
+    inner.create_session(&session).await.unwrap();
     let history = vec![
         BaseMessage::human("old manual question"),
         BaseMessage::ai("old manual answer"),
@@ -444,12 +455,11 @@ async fn run_case(mode: CommitMode, pause: HandlerPause, pre_cancel: bool) -> Ca
     Case {
         _dir: dir,
         _repo: repo,
-        _lease: lease,
         store,
         thread_id,
         history,
         report_id,
-        result,
+        result: *result,
         done_count: sink.push_done_count(),
         done_reasons,
     }

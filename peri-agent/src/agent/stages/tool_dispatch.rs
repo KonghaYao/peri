@@ -9,8 +9,7 @@
 //! 不变量（与 v1 一致）：
 //! - **延迟写入**：before_tool / after_tool 期间 transcript 不含本轮 AI 消息
 //! - **deferred_error**：多工具并发循环不在中途返回，先收集所有错误
-//! - **error_suggest 注入**：在 run_after_tool 之后、写 transcript 之前；只修改 output 文本
-//! - **ToolEnd emit 时机**：在 error_suggest 注入之前 emit
+//! - **ToolEnd emit 时机**：工具完成即刻 emit，早于 after_tool 后处理
 
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -138,11 +137,11 @@ pub async fn dispatch_tools(
             ));
             continue;
         }
-        match ctx
+        let resolved = ctx
             .runtime
             .tool_invocation_resolver
-            .resolve(call, &all_tools)
-        {
+            .resolve_model(call, &all_tools);
+        match resolved {
             Ok(invocation) => invocations.push(invocation),
             Err(error) => resolution_errors.push((
                 call.clone(),
@@ -151,6 +150,16 @@ pub async fn dispatch_tools(
         }
     }
     for (call, result) in &resolution_errors {
+        // 结算路径的逐条记录点：解析失败的工具不进入 policy/invoke，执行路径的
+        // `tool call failed`（tool_dispatch/execution.rs）覆盖不到它们，只能在
+        // 这里补齐，否则错误只以事件（ToolEnded{is_error:true}）离开进程。
+        //
+        tracing::warn!(
+            tool_call_id = %call.id,
+            tool = %call.name,
+            reason = %result.output,
+            "tool call resolution failed"
+        );
         if should_emit_settled_tool_render(call) {
             emit_settled_tool_render(ctx, call, result);
         }
@@ -190,6 +199,7 @@ pub async fn dispatch_tools(
         cancel,
         ai_msg_id,
         &ai_msg,
+        None,
     )
     .await?;
 
@@ -216,7 +226,7 @@ pub async fn dispatch_tools(
         tx.commit_staged();
     }
 
-    // 只计入已提交的最外层结果，包括错误结果；PTC 内部调用没有独立 transcript
+    // 只计入已提交的工具结果，包括错误结果。
     // 提交，不在这里重复计量。先记账再运行后置 hook，确保 hook 失败也不丢增长。
     {
         let mut tracker = ctx.compact.token_tracker.write();

@@ -55,6 +55,7 @@ pub struct InterceptRequest<'a> {
     pub auxiliary_model: &'a Option<Arc<dyn peri_model::Model>>,
     // ── 异步服务 ──
     pub task_manager: &'a Arc<dyn TaskManager>,
+    pub mcp_pool: Option<Arc<dyn peri_acp_types::ports::McpPoolPort>>,
     // ── 注入面（L5 依赖反转）──
     /// 命令注册表查找（ACP 协议面注册表；`None` = 未注册，fall-through）。
     pub command_lookup: CommandLookupFn,
@@ -106,7 +107,7 @@ pub async fn emit_command_feedback(
 /// - [`InterceptOutcome::PassThrough`]：未命中 / 词法非法 / 非 Immediate：
 ///   fall through 进 agent 管线（不报错，设计 §78）
 pub enum InterceptOutcome {
-    Handled(PromptResult),
+    Handled(Box<PromptResult>),
     Inject(String),
     PassThrough,
 }
@@ -175,7 +176,7 @@ pub async fn intercept_immediate_command(req: InterceptRequest<'_>) -> Intercept
                 req.event_sink
                     .push_done(req.session_id, "end_turn", None)
                     .await;
-                return InterceptOutcome::Handled(PromptResult {
+                return InterceptOutcome::Handled(Box::new(PromptResult {
                     persisted_payloads: req.history_payloads.clone(),
                     messages: result.messages,
                     ok: true,
@@ -183,8 +184,9 @@ pub async fn intercept_immediate_command(req: InterceptRequest<'_>) -> Intercept
                     history_replaced_by_compaction: false,
                     persistence_inconsistent: false,
                     recall_items: Vec::new(),
+                    pending_tasks: 0,
                     failure: None,
-                });
+                }));
             }
         },
         None => None,
@@ -196,6 +198,12 @@ pub async fn intercept_immediate_command(req: InterceptRequest<'_>) -> Intercept
         std::any::TypeId::of::<CompactionCommitState>(),
         Arc::new(commit_state.clone()),
     );
+    if let Some(pool) = req.mcp_pool.clone() {
+        deps.insert(
+            std::any::TypeId::of::<Arc<dyn peri_acp_types::ports::McpPoolPort>>(),
+            Arc::new(pool),
+        );
+    }
     let mut ctx = CommandContext::new(
         req.session_id.to_string(),
         req.history.to_vec(),
@@ -308,7 +316,7 @@ pub async fn intercept_immediate_command(req: InterceptRequest<'_>) -> Intercept
                     .cloned()
                     .map(peri_acp_types::store::PersistedPayload::Message),
             );
-            InterceptOutcome::Handled(PromptResult {
+            InterceptOutcome::Handled(Box::new(PromptResult {
                 persisted_payloads,
                 messages: result.messages,
                 ok: !persistence_inconsistent,
@@ -316,8 +324,9 @@ pub async fn intercept_immediate_command(req: InterceptRequest<'_>) -> Intercept
                 history_replaced_by_compaction,
                 persistence_inconsistent,
                 recall_items: Vec::new(),
+                pending_tasks: 0,
                 failure,
-            })
+            }))
         }
         CommandOutcome::Inject(payload) => InterceptOutcome::Inject(payload),
         CommandOutcome::Delegate(_) => {

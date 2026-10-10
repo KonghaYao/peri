@@ -89,21 +89,18 @@ pub(super) fn build_request(
 }
 
 pub(super) fn messages_endpoint(endpoint: &Url) -> ModelResult<Url> {
-    if !matches!(endpoint.scheme(), "http" | "https")
-        || endpoint.host_str().is_none()
-        || !endpoint.username().is_empty()
-        || endpoint.password().is_some()
-    {
+    if !matches!(endpoint.scheme(), "http" | "https") || endpoint.host_str().is_none() {
         return Err(ModelError::protocol(
             crate::ProtocolErrorKind::InvalidEndpoint,
         ));
     }
     let mut endpoint = endpoint.clone();
-    endpoint.set_query(None);
-    endpoint.set_fragment(None);
-    let mut path_segments = endpoint
-        .path_segments_mut()
-        .map_err(|_| ModelError::protocol(crate::ProtocolErrorKind::InvalidEndpoint))?;
+    let mut path_segments = endpoint.path_segments_mut().map_err(|_| {
+        ModelError::protocol_with_summary(
+            crate::ProtocolErrorKind::InvalidEndpoint,
+            "URL has no hierarchical path",
+        )
+    })?;
     path_segments.pop_if_empty();
     path_segments.push("v1");
     path_segments.push("messages");

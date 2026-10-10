@@ -261,6 +261,25 @@ pub struct StreamingContext {
 /// ReAct LLM trait
 #[async_trait::async_trait]
 pub trait ReactLLM: Send + Sync {
+    fn prepare_reasoning(
+        &self,
+        _messages: &[BaseMessage],
+        _tools: &[&dyn BaseTool],
+    ) -> crate::error::AgentResult<peri_model::PreparedModelCall> {
+        Err(crate::error::AgentError::LlmError(
+            "prepared model call is unsupported".into(),
+        ))
+    }
+
+    async fn generate_prepared_reasoning(
+        &self,
+        _prepared: peri_model::PreparedModelCall,
+        _streaming: Option<StreamingContext>,
+    ) -> crate::error::AgentResult<Reasoning> {
+        Err(crate::error::AgentError::LlmError(
+            "prepared model call is unsupported".into(),
+        ))
+    }
     async fn generate_reasoning(
         &self,
         messages: &[BaseMessage],
@@ -331,6 +350,23 @@ pub trait ReactLLM: Send + Sync {
 /// Blanket impl：允许将 Box<dyn ReactLLM + Send + Sync> 直接用于 v2 stages
 #[async_trait::async_trait]
 impl ReactLLM for Box<dyn ReactLLM + Send + Sync> {
+    fn prepare_reasoning(
+        &self,
+        messages: &[BaseMessage],
+        tools: &[&dyn BaseTool],
+    ) -> crate::error::AgentResult<peri_model::PreparedModelCall> {
+        (**self).prepare_reasoning(messages, tools)
+    }
+
+    async fn generate_prepared_reasoning(
+        &self,
+        prepared: peri_model::PreparedModelCall,
+        streaming: Option<StreamingContext>,
+    ) -> crate::error::AgentResult<Reasoning> {
+        (**self)
+            .generate_prepared_reasoning(prepared, streaming)
+            .await
+    }
     async fn generate_reasoning(
         &self,
         messages: &[BaseMessage],

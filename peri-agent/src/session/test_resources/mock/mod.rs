@@ -1,10 +1,10 @@
 //! `#[cfg(test)]` 内存门面替身：只实现测试真正观察的行为，其余行为直接 panic。
 //!
 //! 用它而不是造假：`unimplemented` 的条目一旦被某个测试用到就会立刻失败，不会把
-//! 「没覆盖」伪装成「通过」。需要真实 owner/绑定/事务语义的测试请用
+//! 「没覆盖」伪装成「通过」。需要真实绑定/事务语义的测试请用
 //! [`TestSession`](super::test_resources::TestSession)（真实 `SessionResourcesImpl`）。
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 
@@ -12,8 +12,8 @@ use async_trait::async_trait;
 use peri_acp_types::messages::{BaseMessage, MessageId};
 use peri_acp_types::session_resources::{
     AccessMode, BindingRecheck, BindingState, ChildResumeClaim, ChildSnapshot, DataCapabilities,
-    ExecutionAvailability, ForkSnapshot, FrozenSnapshotBytes, FrozenState, NewSession,
-    NewSessionMeta, PersistenceRecovery, RewindBoundary, SessionAvailability, SessionMetaPatch,
+    ForkSnapshot, FrozenSnapshotBytes, FrozenState, NewSession, NewSessionMeta,
+    PersistenceRecovery, RewindBoundary, SessionAvailability, SessionMetaPatch,
     SessionResourceError, SessionResourceErrorKind, SessionResourceResult, SessionResources,
     SessionSnapshot,
 };
@@ -94,14 +94,14 @@ fn fixture_frozen() -> String {
 
 /// 只有数据、没有 meta 记录的 id 的默认 meta（写入即登记的替身里不会出现「无 meta」）。
 fn default_meta_for(id: &ThreadId) -> ThreadMeta {
-    let mut meta = ThreadMeta::new("/test");
+    let mut meta = ThreadMeta::new_at("/test", peri_time::now_wall());
     meta.id = id.clone();
     meta
 }
 
 /// 由 `NewSessionMeta` 构造替身登记的 `ThreadMeta`（隐藏标记保留调用方意图）。
 fn child_meta(id: &ThreadId, meta: &NewSessionMeta, hidden: bool) -> ThreadMeta {
-    let mut thread = ThreadMeta::new(&meta.cwd);
+    let mut thread = ThreadMeta::new_at(&meta.cwd, peri_time::now_wall());
     thread.id = id.clone();
     thread.title = meta.title.clone();
     thread.parent_thread_id = meta.parent_thread_id.clone();
@@ -118,6 +118,7 @@ pub(crate) struct MockSessionResources {
     ///
     /// `Arc` 共享给认领 handle：`mark_running` 等写入在 trait 方法返回后仍要落回同一份事实。
     regions: Arc<Mutex<HashMap<ThreadId, Region>>>,
+    closing: Mutex<HashSet<ThreadId>>,
     /// 登记顺序（`threads()` 断言用；HashMap 无序）。
     order: Mutex<Vec<ThreadId>>,
     injection: Mutex<Injection>,
@@ -150,37 +151,11 @@ pub(crate) struct MockSessionResources {
     history_read_only: AtomicBool,
 }
 
-/// 替身执行所有权：identity + `mark_clean` 置位的 clean 标记，不做 OS 预留。
-pub(crate) struct MockExecutionLease {
-    thread_id: ThreadId,
-    clean: AtomicBool,
-}
-
-impl MockExecutionLease {
-    fn new(thread_id: impl Into<ThreadId>) -> Self {
-        Self {
-            thread_id: thread_id.into(),
-            clean: AtomicBool::new(false),
-        }
-    }
-}
-
-#[async_trait]
-impl peri_acp_types::workspace::SessionExecutionLease for MockExecutionLease {
-    fn thread_id(&self) -> &ThreadId {
-        &self.thread_id
-    }
-
-    async fn mark_clean(&self) -> anyhow::Result<()> {
-        self.clean.store(true, Ordering::SeqCst);
-        Ok(())
-    }
-}
-
 impl MockSessionResources {
     pub(crate) fn new() -> Arc<Self> {
         Arc::new(Self {
             regions: Arc::new(Mutex::new(HashMap::new())),
+            closing: Mutex::new(HashSet::new()),
             order: Mutex::new(Vec::new()),
             injection: Mutex::new(Injection::default()),
             writable: true,
@@ -264,31 +239,18 @@ impl MockSessionResources {
             })
     }
 
-    /// 夹具：登记一条**已绑定**会话（有 workspace 绑定与 frozen 快照），返回其执行所有权。
+    /// 夹具：登记一条**已绑定**会话（有 workspace 绑定与 frozen 快照）。
     ///
     /// 生产前置条件是「父会话有绑定与已持久化 frozen」，而 `create_thread` 登记的是无绑定
     /// 会话（legacy 语义）；需要 bound 语义的用例显式调用本方法，不靠替身默认值。
-    pub(crate) fn register_bound_session(
-        &self,
-        id: &str,
-        cwd: &str,
-    ) -> Arc<dyn peri_acp_types::workspace::SessionExecutionLease> {
-        let mut meta = ThreadMeta::new(cwd);
+    pub(crate) fn register_bound_session(&self, id: &str, cwd: &str) {
+        let mut meta = ThreadMeta::new_at(cwd, peri_time::now_wall());
         meta.id = id.to_owned();
         self.with_region(&id.to_owned(), |region| {
             region.binding = Some(fixture_binding(cwd));
             region.frozen = Some(fixture_frozen());
             region.meta = Some(meta);
         });
-        Arc::new(MockExecutionLease::new(id.to_owned()))
-    }
-
-    /// 替身发出的执行所有权句柄（`save_child` 等需要 owner 的用例注入用）。
-    pub(crate) fn lease(
-        &self,
-        id: &str,
-    ) -> Arc<dyn peri_acp_types::workspace::SessionExecutionLease> {
-        Arc::new(MockExecutionLease::new(id.to_owned()))
     }
 
     /// 状态写入入口：只在值真的变化时记录并唤醒等待者。
@@ -357,7 +319,7 @@ fn write_status_shared(
         let mut meta = region
             .meta
             .clone()
-            .unwrap_or_else(|| ThreadMeta::new("/test"));
+            .unwrap_or_else(|| ThreadMeta::new_at("/test", peri_time::now_wall()));
         meta.id = id.clone();
         meta.agent_status = status;
         region.meta = Some(meta);
@@ -425,6 +387,8 @@ impl MockResumeClaim {
 // ── 子模块（按职责拆分；内部细节见各自文件头）────────────────────────────
 /// 夹具便利方法：镜像迁移前 `ThreadStore` 的常用测试调用形态。
 mod fixtures;
+/// `peri_model::Model` 形态的假模型助手（生产 bridge 装配的测试入口）。
+pub(crate) mod model;
 /// 故障注入与观察入口（只覆盖被测试的行为）。
 mod observe;
 /// `SessionResources` 门面替身：逐个方法实现契约语义。

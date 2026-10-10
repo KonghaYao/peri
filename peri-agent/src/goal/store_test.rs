@@ -5,7 +5,7 @@ use super::*;
 #[tokio::test]
 async fn test_in_memory_store_save_and_load() {
     let store = InMemoryGoalStore::new();
-    let goal = ThreadGoal::new("测试目标".to_string(), Some(100_000));
+    let goal = ThreadGoal::new_at("测试目标".to_string(), Some(100_000), peri_time::now_wall());
 
     store.save("thread-1", goal.clone()).await.unwrap();
 
@@ -23,8 +23,8 @@ async fn test_in_memory_store_load_missing_returns_none() {
 #[tokio::test]
 async fn test_in_memory_store_overwrite_on_save() {
     let store = InMemoryGoalStore::new();
-    let goal1 = ThreadGoal::new("目标 1".to_string(), None);
-    let goal2 = ThreadGoal::new("目标 2".to_string(), None);
+    let goal1 = ThreadGoal::new_at("目标 1".to_string(), None, peri_time::now_wall());
+    let goal2 = ThreadGoal::new_at("目标 2".to_string(), None, peri_time::now_wall());
 
     store.save("thread-1", goal1).await.unwrap();
     store.save("thread-1", goal2).await.unwrap();
@@ -36,7 +36,7 @@ async fn test_in_memory_store_overwrite_on_save() {
 #[tokio::test]
 async fn test_in_memory_store_delete() {
     let store = InMemoryGoalStore::new();
-    let goal = ThreadGoal::new("待删除".to_string(), None);
+    let goal = ThreadGoal::new_at("待删除".to_string(), None, peri_time::now_wall());
     store.save("thread-1", goal).await.unwrap();
 
     store.delete("thread-1").await.unwrap();
@@ -53,7 +53,7 @@ async fn test_in_memory_store_concurrent_access() {
     for i in 0..10 {
         let s = Arc::clone(&store);
         handles.push(tokio::spawn(async move {
-            let goal = ThreadGoal::new(format!("目标 {}", i), None);
+            let goal = ThreadGoal::new_at(format!("目标 {}", i), None, peri_time::now_wall());
             s.save(&format!("thread-{}", i), goal).await.unwrap();
         }));
     }

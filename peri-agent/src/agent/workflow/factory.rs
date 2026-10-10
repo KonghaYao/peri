@@ -1,7 +1,7 @@
 //! Workflow agent 装配注入端口（p1-wa 收口）。
 //!
 //! §0 边 8（Agent 禁入 Middleware）：workflow agent 执行体（`agent.rs`）所需的
-//! 中间件链 / 工具列表 / error_suggest / tool resolver 装配全部经本端口参数化，
+//! 中间件链 / 工具列表 / tool resolver 装配全部经本端口参数化，
 //! 由实现方（`peri-middlewares`，§0 Middleware → Agent 声明边）构造具体实例，
 //! ACP 宿主装配点（`assemble.rs` / `stdio/init.rs`，经 TUI 部署装配点注入）
 //! 负责把实现 upcast 为端口后注入 [`crate::agent::workflow::WorkflowAgentContext`]。
@@ -15,7 +15,6 @@ use peri_acp_types::agents::AgentOverrides;
 use peri_acp_types::ports::WorkflowMiddlewarePort;
 use peri_acp_types::workflow::{AgentExecutor, ProgressEvent, WorkflowTaskResult};
 
-use crate::error_suggest::{ErrorSuggestRegistry, ToolRegistrySnapshot};
 use crate::middleware::r#trait::Middleware;
 use crate::tools::{BaseTool, ToolInvocationResolver};
 
@@ -49,9 +48,19 @@ pub struct WorkflowAgentDefinition {
 /// `peri-middlewares` 实现（`assembly::WorkflowAgentMiddlewareFactory`）；
 /// 方法面 = workflow agent 执行体所需的全部中间件/工具装配，返回类型一律为
 /// Agent 层/契约层类型（实现方经 re-export 构造，不产生 ACP/Middleware 依赖）。
+///
+/// W5：`resolve_agent_definition` 改为异步——Agent 定义的唯一来源是 MCP
+/// `resources/read`（builtin `workspace` 实例的 `agent://…/agent.md`），正文
+/// 读取是异步 I/O，不允许 `block_on`（ARC-MIDDLEWARE-CAPABILITY-001）。
+#[async_trait::async_trait]
 pub trait WorkflowMiddlewareFactory: Send + Sync {
-    /// 按普通 subagent 的同一优先级解析 `agentType`。
-    fn resolve_agent_definition(
+    fn mcp_pool(&self) -> Option<Arc<dyn peri_acp_types::ports::McpPoolPort>> {
+        None
+    }
+
+    /// 按普通 subagent 的同一优先级（E13 project → builtin → plugin）解析
+    /// `agentType`（本地来源经 builtin `workspace` 实例的资源面读取）。
+    async fn resolve_agent_definition(
         &self,
         agent_type: &str,
         cwd: &str,
@@ -63,11 +72,15 @@ pub trait WorkflowMiddlewareFactory: Send + Sync {
     /// `disabled` 为装配期关闭的 middleware 名集合（源自父会话冻结状态
     /// `WorkflowAgentContext::meta_harness_disabled`，设计 §2.5）——关闭的
     /// middleware 连坐，其工具不进入列表。
+    /// `mcp_skill_registry` = 会话级 MCP skill registry（W4b/F4）：workflow agent
+    /// 的技能目录与正文只来自它（本地扫描已删除，J5）；None = 未装配技能面，
+    /// 技能工具为空，不回落磁盘。
     fn build_tools(
         &self,
         cwd: &str,
         disabled: &std::collections::HashSet<String>,
         execution_manager: Option<Arc<dyn peri_acp_types::tasks::TaskManager>>,
+        mcp_skill_registry: Option<Arc<peri_acp_types::mcp_skills::McpSkillRegistry>>,
     ) -> Vec<Box<dyn BaseTool>>;
 
     /// 为 agent.md 的 `allowedWriteDirs` 创建最小权限的 SandboxWrite 工具。
@@ -92,14 +105,6 @@ pub trait WorkflowMiddlewareFactory: Send + Sync {
     /// 构造 tool invocation resolver（迁移前语义 =
     /// `ExecuteExtraToolResolver::default()`）。
     fn build_tool_resolver(&self) -> Arc<dyn ToolInvocationResolver>;
-
-    /// 构造 error_suggest registry + tool registry snapshot（迁移前语义 =
-    /// `build_default_registry()` + `build_tool_registry_snapshot()`）。
-    fn build_error_suggest(
-        &self,
-        cwd: &str,
-        tool_names: &[String],
-    ) -> (Arc<ErrorSuggestRegistry>, ToolRegistrySnapshot);
 
     /// 构造 session 级 workflow 中间件实例（`WorkflowMiddleware` upcast 为端口；
     /// 创建点仍在宿主装配面，本方法只做实例化）。

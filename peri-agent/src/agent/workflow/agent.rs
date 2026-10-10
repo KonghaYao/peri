@@ -5,7 +5,7 @@
 //! `run_react_loop` 执行并返回结果。
 //!
 //! 复用 SubAgent v2 基础设施：workflow agent 携带 frozen CLAUDE.md / skills
-//! 并经过完整中间件链（Filesystem/Terminal/Web），+ error_suggest wiring。
+//! 并经过完整中间件链（Filesystem/Terminal/Web）。
 //!
 //! # 依赖反转（p1-wa 收口）
 //!
@@ -14,7 +14,7 @@
 //!
 //! - 模型构造（provider alias 解析 / AgentPool 缓存 / retry observer 烘焙）
 //!   → [`WorkflowModelFactory`]（ACP 宿主构造）
-//! - 中间件链 / 工具 / error_suggest / tool resolver 装配
+//! - 中间件链 / 工具 / tool resolver 装配
 //!   → [`WorkflowMiddlewareFactory`]（peri-middlewares 实现，ACP 宿主注入）
 //! - system prompt fallback 渲染 → [`WorkflowSystemPromptFallback`]（ACP 宿主）
 //! - EventBus forwarder 启动（v2 → v1 映射 + biased select 不变量单点）
@@ -51,6 +51,7 @@ use crate::session::{
     subagent::{DefaultSubagentV2ContextBuilder, SubagentV2ContextBuilder},
 };
 
+mod execution;
 mod observation;
 mod result;
 
@@ -79,9 +80,15 @@ pub struct WorkflowAgentContext {
     pub frozen_claude_local_md: Option<String>,
     /// Frozen skills summary，None = 无 skills。
     pub frozen_skill_summary: Option<String>,
+    /// 会话级 MCP skill registry（W4b/F4：workflow agent 的技能目录与正文来源，
+    /// 与主链同一份；None = 未装配技能面 → 两个技能工具为空、预载报缺口，
+    /// 不回落磁盘，J5）。
+    pub mcp_skill_registry: Option<Arc<peri_acp_types::mcp_skills::McpSkillRegistry>>,
 
-    /// Session ID（用于 compact 事件和日志）
+    /// 宿主绑定的调用方会话 ID（compact 事件和日志关联）。
+    /// 仅由会话装配注入，不得取自 workflow 参数或模型工具输入。
     pub session_id: Option<String>,
+    pub session_resources: Option<Arc<dyn peri_acp_types::session_resources::SessionResources>>,
     /// Compact 配置（None = 不启用自动 compact）
     pub compact_config: Option<CompactConfig>,
     /// 取消令牌（None = workflow agent 创建内部 token）
@@ -90,6 +97,9 @@ pub struct WorkflowAgentContext {
     /// 标准 system prompt（session/new 时冻结的 build_system_prompt() 输出）。
     /// None = 回退到注入的 [`WorkflowSystemPromptFallback`] 运行时构建。
     pub system_prompt: Option<String>,
+    /// Frozen ACP extension, composed only at the model request boundary.
+    pub external_instructions: Option<Arc<str>>,
+    pub legacy_embedded_instructions: bool,
     /// HITL broker + 共享权限模式。两者均 Some 时启用审批；
     /// 任一为 None 时 Bypass（自主后台 agent 默认行为）。
     pub broker: Option<Arc<dyn UserInteractionBroker>>,
@@ -170,10 +180,14 @@ pub fn create_default_executor(
         frozen_claude_md: None,
         frozen_claude_local_md: None,
         frozen_skill_summary: None,
+        mcp_skill_registry: None,
         session_id: None,
+        session_resources: None,
         compact_config: None,
         cancel: None,
         system_prompt: None,
+        external_instructions: None,
+        legacy_embedded_instructions: false,
         broker: None,
         permission_mode: None,
         frozen_date: None,
@@ -241,13 +255,14 @@ impl AgentExecutor for WorkflowAgentExecutor {
             "Workflow agent: starting execution"
         );
 
-        let started_at = std::time::Instant::now();
+        let started_at = peri_time::monotonic_now();
 
         let agent_definition = match params.agent_type.as_deref() {
             Some(agent_type) => match self
                 .ctx
                 .middleware_factory
                 .resolve_agent_definition(agent_type, &self.ctx.cwd)
+                .await
             {
                 Ok(definition) => Some(definition),
                 Err(detail) => {
@@ -323,20 +338,28 @@ impl AgentExecutor for WorkflowAgentExecutor {
         // skills——workflow agent 无 plugin_skill_roots）。
         // MetaHarness：disabled 集合源自父会话冻结状态（WorkflowAgentContext
         // 字段，装配实现据此连坐过滤——设计 §2.5）。
+        let task_manager = Arc::new(crate::agent::async_tasks::TaskManager::new());
         let mut tools = self.ctx.middleware_factory.build_tools(
             &self.ctx.cwd,
             &self.ctx.meta_harness_disabled,
-            self.execution_manager.get().cloned(),
+            Some(task_manager.clone()),
+            self.ctx.mcp_skill_registry.clone(),
         );
 
         // 3. agent definition 工具边界优先，再叠加 workflow allowedTools。
         if let Some(definition) = agent_definition.as_ref() {
-            if let Some(allowed) = definition.allowed_tools.as_ref() {
-                tools.retain(|tool| tool_name_in(allowed, tool.name()));
-            }
-            if !definition.disallowed_tools.is_empty() {
-                tools.retain(|tool| !tool_name_in(&definition.disallowed_tools, tool.name()));
-            }
+            let filter = crate::session::tool_catalog::ToolFilterPolicy::canonical(
+                definition.allowed_tools.clone(),
+                Vec::new(),
+            );
+            tools.retain(|tool| {
+                filter(tool.as_ref())
+                    && definition
+                        .allowed_tools
+                        .as_ref()
+                        .is_none_or(|allowed| tool_name_in(allowed, tool.name()))
+                    && !tool_name_in(&definition.disallowed_tools, tool.name())
+            });
             if !definition.allowed_write_dirs.is_empty()
                 && definition
                     .allowed_tools
@@ -358,27 +381,24 @@ impl AgentExecutor for WorkflowAgentExecutor {
             .as_ref()
             .filter(|allowed| !allowed.is_empty())
         {
-            tools.retain(|tool| tool_name_in(allowed, tool.name()));
+            let filter = crate::session::tool_catalog::ToolFilterPolicy::canonical(
+                Some(allowed.clone()),
+                Vec::new(),
+            );
+            tools.retain(|tool| tool_name_in(allowed, tool.name()) && filter(tool.as_ref()));
         }
 
         // 4. 指定 agent type 时按相同的 subagent overrides 渲染 prompt；否则
         // 继续复用 session 冻结的默认 subagent prompt。
-        let system_prompt = if let Some(definition) = agent_definition.as_ref() {
-            (self.ctx.agent_prompt_builder)(
-                definition.prompt_overrides.as_ref(),
-                &self.ctx.cwd,
-                self.ctx.frozen_date.as_deref(),
-                self.ctx.frozen_language.as_deref(),
-            )
-        } else {
-            self.ctx.system_prompt.clone().unwrap_or_else(|| {
-                (self.ctx.system_prompt_fallback)(
-                    &self.ctx.cwd,
-                    self.ctx.frozen_date.as_deref(),
-                    self.ctx.frozen_language.as_deref(),
-                )
-            })
-        };
+        let system_prompt = select_workflow_system_prompt(
+            agent_definition.as_ref(),
+            self.ctx.system_prompt.as_deref(),
+            &self.ctx.agent_prompt_builder,
+            &self.ctx.system_prompt_fallback,
+            &self.ctx.cwd,
+            self.ctx.frozen_date.as_deref(),
+            self.ctx.frozen_language.as_deref(),
+        );
 
         // 5. 构建中间件链（端口装配；frozen data / HITL 语义自 ctx 读取）
         let mut chain = MiddlewareChain::new();
@@ -389,7 +409,7 @@ impl AgentExecutor for WorkflowAgentExecutor {
                 .as_ref()
                 .map(|definition| definition.skill_names.as_slice())
                 .unwrap_or_default(),
-            self.execution_manager.get().cloned(),
+            Some(task_manager.clone()),
         ) {
             chain.add(mw);
         }
@@ -408,29 +428,30 @@ impl AgentExecutor for WorkflowAgentExecutor {
             .map(|t| Arc::from(t) as Arc<dyn crate::tools::BaseTool>)
             .collect();
 
-        // 收集中间件 prompt_contribution，合并到 system_prompt
-        let contributions = chain.collect_prompt_contributions();
-        let system_prompt = if contributions.is_empty() {
-            system_prompt
-        } else {
-            format!("{system_prompt}\n\n{contributions}")
+        // M4：贡献改由请求时 provider 读取（`before_agent` 已填充链内缓存后
+        // 才在 ModelRequest 构造时收集）——与主链/子链同一语义：统一
+        // `combine_system_prompt_with_dynamic` 组合、分隔符与 reserved marker
+        // 校验由收集器/组合边界负责，不再手工拼接；Skills 在 `before_agent`
+        // 生成的贡献因此不再被提前收集漏掉。
+        let execution = match execution::WorkflowExecution::prepare(&self.ctx, &params).await {
+            Ok(execution) => execution,
+            Err(detail) => {
+                return AgentRunResult::Dead {
+                    reason: Some("execution-blocked".into()),
+                    detail: Some(detail),
+                };
+            }
         };
-
-        // 构造 AgentModelBridge（现在 system_prompt 已就绪）
-        let mut base_llm =
-            AgentModelBridge::from_arc(base_model).with_system(system_prompt.clone());
-        if let Some(ref sid) = self.ctx.session_id {
-            base_llm = base_llm.with_session_id(sid);
-        }
-        let llm: Box<dyn crate::agent::react::ReactLLM + Send + Sync> = Box::new(base_llm);
-
-        // error_suggest wiring（与 SubAgentBuilder.with_error_suggest() 等价；
-        // .claude/agents/ 目录存在性检查在端口实现内）
-        let all_tool_names: Vec<String> = tools_arc.iter().map(|t| t.name().to_string()).collect();
-        let (error_suggest_registry, snapshot) = self
-            .ctx
-            .middleware_factory
-            .build_error_suggest(&self.ctx.cwd, &all_tool_names);
+        // bridge 与 StageContext 共享同一条链：请求时 provider 读取当前贡献。
+        let chain = Arc::new(chain);
+        let llm = workflow_model_bridge(
+            base_model,
+            system_prompt.clone(),
+            self.ctx.external_instructions.clone(),
+            self.ctx.legacy_embedded_instructions,
+            Arc::clone(&chain),
+            &execution.session_id,
+        );
 
         // 构造 v2 StageContext（workflow agent 无 parent_messages）
         // agent_id=None：workflow 无 child_thread_id，内部 AgentId::new() 兜底（C1）
@@ -439,20 +460,51 @@ impl AgentExecutor for WorkflowAgentExecutor {
             .subagent_ctx_builder
             .clone()
             .unwrap_or_else(|| Arc::new(DefaultSubagentV2ContextBuilder));
+        let session_id = execution.session_id.clone();
+        let session = crate::session::Session::new_with_cancel_and_queue(
+            Arc::from(self.ctx.cwd.as_str()),
+            crate::session::FrozenContext::builder().build(),
+            Some(session_id.clone()),
+            Arc::new(cancel_token.clone()),
+            crate::session::MessageQueue::new(),
+        );
+        {
+            let transcript = session.transcript();
+            let mut transcript = transcript.write();
+            *transcript = std::mem::take(&mut *transcript)
+                .with_persistence(execution.resources.clone(), session_id.clone());
+        }
+        let mcp_pool = self.ctx.middleware_factory.mcp_pool();
+        session.set_subagent_host(crate::session::subagent::SubagentHost {
+            task_manager: Some(task_manager.clone()),
+            mcp_pool: mcp_pool.clone(),
+            session_resources: Some(execution.resources.clone()),
+            ..Default::default()
+        });
+        // 在线 admission + 订阅收件：本会话的工具任务由自己的 TaskManager 拥有，
+        // 必须在首次 MCP 工具调用前按自身地址登记 Inbox/TaskManager（与子会话
+        // `subagent/factory/context.rs` 同一步）。未登记时
+        // `begin_external_task_execution` 会以 "session task manager unavailable"
+        // 拒绝每个工具调用，scope 也无从签发。
+        if let Some(pool) = &mcp_pool {
+            let inbox =
+                peri_acp_types::session::SessionInbox::new(Arc::new(session.queue().clone()));
+            pool.bind_agent_session(&session_id, inbox.handle(), task_manager.clone());
+        }
         let v2_ctx = ctx_builder.build(
-            None, // workflow agent 无预创建 session（内部自建）
+            Some(session),
             llm,
-            chain,
+            Arc::clone(&chain),
             tools_arc,
             &self.ctx.cwd,
             cancel_token.clone(),
             Some(self.ctx.middleware_factory.build_tool_resolver()),
-            Some(error_suggest_registry),
-            Some(snapshot),
             compact_config,
             context_budget,
             compact_llm,
-            None, // workflow 无 child_thread_id，内部 AgentId::new() 兜底（C1）
+            Some(crate::session::subagent::agent_id_from_child_thread(
+                &session_id,
+            )),
         );
 
         // EventBus forwarder（v2 → v1 ExecutorEvent，转发给 event_handler）。
@@ -498,10 +550,27 @@ impl AgentExecutor for WorkflowAgentExecutor {
             BaseMessage::human(params.prompt.clone()),
         ));
 
+        let mut execution_guard = match peri_acp_types::tasks::TaskManager::begin_external_execution(
+            task_manager.as_ref(),
+            "workflow-agent",
+        ) {
+            Ok(guard) => guard,
+            Err(detail) => {
+                drop(context);
+                let _ = await_workflow_forwarder(event_bus, forwarder_handle).await;
+                return AgentRunResult::Dead {
+                    reason: Some("execution-blocked".into()),
+                    detail: Some(detail),
+                };
+            }
+        };
         // 7. 运行 v2 ReAct 循环
-        let loop_result = run_react_loop(context, max_iterations).await;
+        let mut loop_result = run_react_loop(context, max_iterations).await;
+        if let Err(error) = crate::session::subagent::flush_session_history(&session).await {
+            loop_result = crate::agent::stages::LoopResult::Error(error);
+        }
         let forwarder_result = await_workflow_forwarder(event_bus, forwarder_handle).await;
-
+        let forwarded = forwarder_result.is_ok();
         let projected = result::project_run_result(
             loop_result,
             forwarder_result,
@@ -511,6 +580,9 @@ impl AgentExecutor for WorkflowAgentExecutor {
             &model_name,
             started_at,
         );
+        if forwarded {
+            execution_guard.confirm_stopped();
+        }
 
         // 保持 final event 消费与统计提取之后的终态钩子；flush 仍为 fire-and-forget。
         if let Some(ref hooks) = self.ctx.langfuse_hooks {
@@ -537,10 +609,65 @@ async fn await_workflow_forwarder(
 /// 工作流与 agent.md 的工具名匹配沿用 subagent 的大小写无关语义。
 /// 单独的 `*` 表示保留全部候选工具；随后仍由 disallowedTools 过滤。
 fn tool_name_in(names: &[String], tool_name: &str) -> bool {
+    use peri_acp_types::builtin_mcp::original_tool_name_of_effective;
+
+    // 只按注册表归一 builtin，外部 MCP 工具保留完整身份。两侧都归一，
+    // 让旧 agent.md 声明与模型面的 effective name 表达同一能力边界。
+    let original = original_tool_name_of_effective(tool_name).unwrap_or(tool_name);
     matches!(names, [wildcard] if wildcard == "*")
-        || names
-            .iter()
-            .any(|name| name.eq_ignore_ascii_case(tool_name))
+        || names.iter().any(|name| {
+            name.eq_ignore_ascii_case(tool_name)
+                || original_tool_name_of_effective(name)
+                    .unwrap_or(name)
+                    .eq_ignore_ascii_case(original)
+        })
+}
+
+/// 构造 workflow agent 的模型边界（M4）。
+///
+/// base system 为按 workflow 能力投影后的冻结输入；动态贡献**在每次
+/// `ModelRequest` 构造时**从同一条链读取（`before_agent` 已填充缓存），组合
+/// 统一走 `combine_system_prompt_with_dynamic`（M1 权威，分隔符与 reserved
+/// marker 校验不在此重复实现）。
+pub(crate) fn workflow_model_bridge(
+    base_model: Arc<dyn peri_model::Model>,
+    system_prompt: String,
+    external_instructions: Option<Arc<str>>,
+    legacy_embedded_instructions: bool,
+    chain: Arc<MiddlewareChain>,
+    session_id: &str,
+) -> Box<dyn crate::agent::react::ReactLLM + Send + Sync> {
+    let contribution_chain = Arc::clone(&chain);
+    Box::new(
+        AgentModelBridge::from_arc(base_model)
+            .with_system(system_prompt)
+            .with_external_instructions(external_instructions)
+            .with_legacy_prompt_provenance(legacy_embedded_instructions, true)
+            .with_system_contribution_provider(Arc::new(move || {
+                contribution_chain.collect_prompt_contributions()
+            }))
+            .with_session_id(session_id),
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn select_workflow_system_prompt(
+    definition: Option<&super::factory::WorkflowAgentDefinition>,
+    frozen_default: Option<&str>,
+    agent_prompt_builder: &super::factory::WorkflowAgentPromptBuilder,
+    fallback: &super::factory::WorkflowSystemPromptFallback,
+    cwd: &str,
+    date: Option<&str>,
+    language: Option<&str>,
+) -> String {
+    match definition {
+        Some(definition) => {
+            agent_prompt_builder(definition.prompt_overrides.as_ref(), cwd, date, language)
+        }
+        None => frozen_default
+            .map(str::to_owned)
+            .unwrap_or_else(|| fallback(cwd, date, language)),
+    }
 }
 
 #[cfg(test)]

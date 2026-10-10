@@ -1,4 +1,6 @@
 mod model;
+pub(crate) mod prepared;
+pub use prepared::PreparedModelCall;
 mod types;
 
 pub use crate::runtime::{ModelError, ModelResult};

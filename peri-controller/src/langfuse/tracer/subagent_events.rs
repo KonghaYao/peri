@@ -118,8 +118,9 @@ impl LangfuseTracer {
             .collect()
     }
 
-    /// SubagentStart:驱动 AGENT obs 创建(join 成功后 emit ObservationCreate open),
-    /// 并重放该 child 被注册闸门缓存的内容事件。
+    /// SubagentStart：join 成功后仅缓存身份、开始时间、输入及 parent，
+    /// 并重放该 child 被注册闸门缓存的内容事件。结束双信号齐备或 turn-end 兜底时，
+    /// 一次导出含开始和结束时间的完整 ObservationCreate，不导出 open 观测。
     pub(crate) fn on_subagent_start(
         &mut self,
         parent_agent_id: &str,
@@ -139,7 +140,7 @@ impl LangfuseTracer {
         self.handle_join_outcome(outcome);
     }
 
-    /// SubagentStop:驱动 AGENT obs 关闭(两信号齐备时 emit ObservationUpdate + flush)
+    /// SubagentStop:两信号齐备时导出完整 AGENT observation 并 flush。
     pub(crate) fn on_subagent_stop(
         &mut self,
         parent_agent_id: &str,
@@ -158,17 +159,16 @@ impl LangfuseTracer {
         }
     }
 
-    /// 处理 join 结果:emit AGENT obs open → 重放 gate 事件 → 可能立即关闭
+    /// 处理 join 结果：保留注册表中的开始快照，重放 gate 事件并按需关闭。
     pub(super) fn handle_join_outcome(&mut self, outcome: registry::SubagentStartOutcome) {
         let registry::SubagentStartOutcome::Joined {
-            obs,
+            obs: _,
             replayed,
             immediately_close,
         } = outcome
         else {
             return; // Pending / Duplicate 无 obs 动作
         };
-        self.emit_subagent_obs_start(&obs);
         for ev in replayed {
             match ev {
                 GateEvent::StageStarted {
@@ -187,7 +187,15 @@ impl LangfuseTracer {
                     messages,
                     tools,
                 } => {
-                    self.on_llm_start_inner(&agent_id, step, &messages, &tools);
+                    self.on_llm_start_snapshot_inner(&agent_id, step, messages, tools);
+                }
+                GateEvent::LlmRequestPayload {
+                    agent_id,
+                    step,
+                    body,
+                } => {
+                    self.generation
+                        .on_llm_request_payload(&agent_id, step, body);
                 }
                 GateEvent::ToolStart {
                     agent_id,
@@ -212,56 +220,12 @@ impl LangfuseTracer {
         }
     }
 
-    /// AGENT obs 创建(open):ObservationCreate,无 end_time。
-    /// start 时刻 = Start join 时刻(≤ 最早 child 事件,17ms 空壳场景不复现)。
-    fn emit_subagent_obs_start(&self, obs: &registry::AgentObsStart) {
-        let body = ObservationBody {
-            id: Some(obs.observation_id.clone()),
-            trace_id: Some(self.trace_id.clone()),
-            r#type: ObservationType::Agent,
-            name: Some(format!("subagent-{}", obs.agent_name)),
-            start_time: Some(obs.start_time.clone()),
-            end_time: None,
-            completion_start_time: None,
-            parent_observation_id: Some(obs.parent_observation_id.clone()),
-            input: obs.input.clone(),
-            output: None,
-            // 与 ErrorTurn span 的 metadata 格式对齐(trace_id == turn_id)
-            metadata: Some(serde_json::json!({
-                "is_synthetic": false,
-                "was_sampled": true,
-                "turn_id": self.trace_id.clone(),
-            })),
-            model: None,
-            model_parameters: None,
-            usage: None,
-            level: None,
-            status_message: None,
-            version: Some(VERSION.to_string()),
-            environment: None,
-            session_id: Some(self.session_id.clone()),
-        };
-        let event = IngestionEvent::ObservationCreate {
-            id: new_uuid(),
-            timestamp: now_rfc3339(),
-            body,
-            metadata: None,
-        };
-        try_add_or_warn_via_session(
-            &*self.session,
-            event,
-            &self.trace_id,
-            "SubAgent ObservationCreate",
-        );
-    }
-
-    /// AGENT obs 关闭:flush child tool_batch + ObservationUpdate(带 end_time/output)。
+    /// AGENT obs 关闭：仅导出一次包含完整输入、输出和时间的 ObservationCreate。
     /// end 时刻 = Stop 时刻;output = Stop result(空则父工具 deferred_output)。
     pub(super) fn emit_subagent_close(&mut self, closed: registry::ClosedSubagent) {
         // 兜底:关闭该 subagent 仍活跃的 stage(StageEnded 可能因事件流截断/
         // 乱序丢失,span 不发送则工具 batch 的 parent 悬空成孤儿;subagent
-        // 关闭后不可能再有新 stage,立即补发是安全的)。重复发送无害
-        // (Langfuse 按同 id upsert,以较晚 end_time 为准)。
+        // 关闭后不可能再有新 stage,立即补发是安全的)。
         if let Some(handle) = self.stages.take_active(&closed.agent_id) {
             self.emit_stage_span_close(&handle, StageStatus::Done, None);
         }
@@ -302,7 +266,7 @@ impl LangfuseTracer {
             end_time: Some(closed.stop_time),
             completion_start_time: None,
             parent_observation_id: Some(closed.parent_observation_id),
-            input: closed.input.clone(),
+            input: closed.input,
             output: Some(output),
             metadata: Some(metadata),
             model: None,
@@ -314,7 +278,7 @@ impl LangfuseTracer {
             environment: None,
             session_id: Some(self.session_id.clone()),
         };
-        let event = IngestionEvent::ObservationUpdate {
+        let event = IngestionEvent::ObservationCreate {
             id: new_uuid(),
             timestamp: now_rfc3339(),
             body,
@@ -324,7 +288,7 @@ impl LangfuseTracer {
             &*self.session,
             event,
             &self.trace_id,
-            "SubAgent ObservationUpdate",
+            "SubAgent ObservationCreate",
         );
     }
 }

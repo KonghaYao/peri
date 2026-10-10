@@ -14,6 +14,9 @@ fn make_task(id: &str) -> BackgroundTask {
         pid: None,
         output_preview: None,
         agent_inbox: None,
+        initiator_session_id: None,
+        owner_session_id: None,
+        owner_identity: None,
     }
 }
 
@@ -145,4 +148,24 @@ async fn test_registry_cancel_wins_completion_claim_and_suppresses_late_complete
     }
     assert!(saw_cancelled);
     assert!(!saw_completed);
+}
+
+#[tokio::test]
+async fn snapshot_and_events_join_without_missing_a_fast_completion() {
+    let registry = BackgroundTaskRegistry::new();
+    let mut changes = registry.subscribe_events();
+    registry.register_with_kind(make_task("fast")).unwrap();
+    assert!(registry.complete("fast", result("fast")));
+    let snapshot = registry.snapshot();
+    assert_eq!(snapshot.revision, 2);
+    assert_eq!(snapshot.tasks.len(), 1);
+    assert_eq!(snapshot.tasks[0].status, "completed");
+    assert_eq!(registry.active_count(), 0);
+    assert!(changes.recv().await.unwrap().revision <= snapshot.revision);
+    assert!(changes.recv().await.unwrap().revision <= snapshot.revision);
+
+    registry.register_with_kind(make_task("later")).unwrap();
+    let change = changes.recv().await.unwrap();
+    assert!(change.revision > snapshot.revision);
+    assert!(matches!(change.event, BgRegistryEvent::Started { .. }));
 }

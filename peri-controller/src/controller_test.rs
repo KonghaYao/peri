@@ -315,6 +315,36 @@ async fn bypass_consumer_subscribes_same_branch() {
     assert_eq!(controller.pop_events().len(), 1, "弹出队列独立于订阅者");
 }
 
+#[tokio::test]
+async fn publish_event_preserves_source_message_id_when_session_is_unregistered() {
+    let controller = Controller::new(temp_facade().await);
+    let mut sub = controller.subscribe();
+    let source = UnstampedEvent::new(
+        "turn-1",
+        "agent-1",
+        Some("message-1".into()),
+        EventDeliveryClass::Broadcast,
+    );
+
+    controller.publish_event(
+        "late-session",
+        &source,
+        peri_acp_types::event::ExecutorEvent::SystemNotification {
+            text: "late event".into(),
+            level: "info".into(),
+        },
+    );
+
+    let popped = controller.pop_events();
+    assert_eq!(popped.len(), 1);
+    assert_eq!(popped[0].envelope.message_id.as_deref(), Some("message-1"));
+    assert_eq!(popped[0].envelope.turn_id, "turn-1");
+    assert!(popped[0].event.is_some());
+
+    let received = sub.recv().await.expect("event should reach subscribers");
+    assert_eq!(received.envelope.message_id.as_deref(), Some("message-1"));
+}
+
 // ─── sessions 存储通道（既有访问路径不回归） ───────────────────────────────────
 
 #[tokio::test]

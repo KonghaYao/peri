@@ -69,6 +69,20 @@ fn test_context_pressure_target_tokens() {
 }
 
 #[test]
+fn test_context_pressure_reserve_above_u32_range_saturates_target_to_zero() {
+    let pressure = ContextPressure {
+        estimated_tokens: 20_000,
+        context_window: 16_000,
+        output_reserve: u32::MAX,
+        predicted_tool_growth: 1,
+        safety_buffer: 0,
+        cache_hit_rate: 0.0,
+    };
+
+    assert_eq!(pressure.target_tokens(), 0);
+}
+
+#[test]
 fn test_micro_compact_plan_meets_target() {
     let plan = MicroCompactPlan {
         policy_version: 1,

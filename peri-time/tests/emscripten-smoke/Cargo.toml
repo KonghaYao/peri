@@ -1,0 +1,13 @@
+[package]
+name = "peri-time-emscripten-smoke"
+version = "0.1.0"
+edition = "2021"
+
+# Keep this runtime fixture out of the root workspace test matrix.
+[workspace]
+
+[dependencies]
+peri-time = { path = "../.." }
+tokio = { version = "=1.53.1", default-features = false }
+wasm-bindgen = "=0.2.129"
+wasm-bindgen-futures = "=0.4.79"

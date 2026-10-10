@@ -1,13 +1,12 @@
 use peri_acp_types::session::{MessageKind, MessageSource, QueuedMessage};
 
-use crate::agent::session::{InboxHandle, SessionInbox};
+use crate::agent::session::SessionInbox;
 use crate::messages::{BaseMessage, MessageContent};
 use crate::middleware::state::MiddlewareState;
 use crate::session::MessageQueue;
 
 struct TestState {
     queue: MessageQueue,
-    inbox: Option<InboxHandle>,
     messages: Vec<BaseMessage>,
 }
 
@@ -40,21 +39,24 @@ impl MiddlewareState for TestState {
     fn v2_queue(&self) -> &MessageQueue {
         &self.queue
     }
-    fn inbox_handle(&self) -> Option<&InboxHandle> {
-        self.inbox.as_ref()
-    }
 }
 
-#[test]
-fn enqueue_v2_message_uses_inbox_when_present() {
+#[tokio::test]
+async fn enqueue_v2_message_wakes_registered_consumer_without_extra_handle() {
     let queue = MessageQueue::new();
     let inbox = SessionInbox::new(std::sync::Arc::new(queue.clone()));
-    let handle = inbox.handle();
     let state = TestState {
         queue: queue.clone(),
-        inbox: Some(handle.clone()),
         messages: Vec::new(),
     };
+    let waiting = inbox.await_wake();
+    tokio::pin!(waiting);
+    futures::future::poll_fn(|context| {
+        use std::future::Future;
+        assert!(waiting.as_mut().poll(context).is_pending());
+        std::task::Poll::Ready(())
+    })
+    .await;
     let msg = QueuedMessage::new(
         MessageKind::Defer,
         MessageSource::GoalSteering,
@@ -63,14 +65,16 @@ fn enqueue_v2_message_uses_inbox_when_present() {
     state.enqueue_v2_message(msg);
     assert_eq!(queue.len(), 1);
     assert!(queue.has_wake_up());
+    tokio::time::timeout(std::time::Duration::from_secs(1), waiting)
+        .await
+        .expect("middleware publication must wake the shared mailbox");
 }
 
 #[test]
-fn enqueue_v2_message_falls_back_to_raw_queue() {
+fn enqueue_v2_message_publishes_without_a_consumer() {
     let queue = MessageQueue::new();
     let state = TestState {
         queue: queue.clone(),
-        inbox: None,
         messages: Vec::new(),
     };
     let msg = QueuedMessage::new(

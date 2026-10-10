@@ -45,6 +45,9 @@ fn make_task(id: &str) -> BackgroundTask {
         pid: None,
         output_preview: None,
         agent_inbox: None,
+        initiator_session_id: None,
+        owner_session_id: None,
+        owner_identity: None,
     }
 }
 
@@ -57,13 +60,10 @@ async fn test_idle_loop_exits_when_registry_completes_without_queue_message() {
         FrozenContext::builder().build(),
         None,
     );
-    let inbox = Arc::new(crate::agent::session::SessionInbox::new(Arc::new(
-        session.queue().clone(),
-    )));
     let suspended = Arc::new(TestAtomicBool::new(false));
     let turn = session.start_turn();
     let context = StageContext::builder(turn, session.transcript(), session.queue().clone())
-        .with_idle_inbox(inbox)
+        .with_idle_waiting()
         .with_idle_should_wait({
             let manager = Arc::clone(&manager);
             Arc::new(move || manager.active_count() > 0)
@@ -114,13 +114,10 @@ async fn test_idle_loop_cancel_returns_interrupted_and_clears_suspended() {
         FrozenContext::builder().build(),
         None,
     );
-    let inbox = Arc::new(crate::agent::session::SessionInbox::new(Arc::new(
-        session.queue().clone(),
-    )));
     let suspended = Arc::new(TestAtomicBool::new(false));
     let turn = session.start_turn();
     let context = StageContext::builder(turn, session.transcript(), session.queue().clone())
-        .with_idle_inbox(inbox)
+        .with_idle_waiting()
         .with_idle_should_wait({
             let manager = Arc::clone(&manager);
             Arc::new(move || manager.active_count() > 0)
@@ -169,7 +166,7 @@ async fn test_idle_loop_consumes_queued_completion_before_terminal_registry_chec
         .with_llm(Arc::new(FinalAnswerLlm {
             calls: Arc::clone(&llm_called),
         }))
-        .with_idle_inbox(inbox)
+        .with_idle_waiting()
         .with_idle_should_wait({
             let manager = Arc::clone(&manager);
             let handle = handle.clone();

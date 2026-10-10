@@ -283,6 +283,75 @@ async fn test_dispatch_rejects_duplicate_and_empty_ids_before_policy_or_invoke()
     );
 }
 
+#[tokio::test]
+async fn test_dispatch_batch_cardinality_error_stops_before_tool_execution() {
+    struct CountingTool(Arc<std::sync::atomic::AtomicUsize>);
+    #[async_trait::async_trait]
+    impl BaseTool for CountingTool {
+        fn name(&self) -> &str {
+            "Read"
+        }
+        fn description(&self) -> &str {
+            ""
+        }
+        fn parameters(&self) -> serde_json::Value {
+            json!({})
+        }
+        async fn invoke(
+            &self,
+            _input: serde_json::Value,
+            _ctx: crate::tools::ToolContext<'_>,
+        ) -> Result<String, Box<dyn std::error::Error + Send + Sync>> {
+            self.0.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            Ok("unexpected execution".to_string())
+        }
+    }
+
+    struct MissingBatchResult;
+    #[async_trait::async_trait]
+    impl Middleware for MissingBatchResult {
+        fn name(&self) -> &str {
+            "MissingBatchResult"
+        }
+        async fn before_tools_batch(
+            &self,
+            _state: &mut dyn hook_state::BeforeToolState,
+            _calls: &[ToolCall],
+        ) -> Vec<crate::error::AgentResult<ToolCall>> {
+            Vec::new()
+        }
+    }
+
+    let invoked = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let mut ctx = make_test_ctx();
+    ctx.runtime.tools.write().insert(
+        "Read".to_string(),
+        Arc::new(CountingTool(Arc::clone(&invoked))),
+    );
+    let mut chain = MiddlewareChain::new();
+    chain.add(Box::new(MissingBatchResult));
+    ctx.runtime.middleware_chain = Arc::new(chain);
+    let reasoning = Reasoning::with_tools("", vec![ToolCall::new("call_1", "Read", json!({}))]);
+    let catalog = ctx
+        .runtime
+        .tool_catalog
+        .pin_working_tools(&ctx.runtime.tools.read())
+        .unwrap();
+
+    let error = match dispatch_tools(&ctx, &reasoning, &catalog, &CancellationToken::new()).await {
+        Ok(_) => panic!("批量规模错配必须让 dispatch 失败，而不是继续执行工具"),
+        Err(error) => error,
+    };
+
+    assert!(matches!(
+        error,
+        AgentError::MiddlewareError { middleware, reason }
+            if middleware == "MissingBatchResult"
+                && reason == "before_tools_batch returned 0 results for 1 calls"
+    ));
+    assert_eq!(invoked.load(std::sync::atomic::Ordering::Relaxed), 0);
+}
+
 fn make_test_ctx() -> StageContext {
     let turn = TurnContext::new(
         std::sync::Arc::from("/tmp"),
@@ -382,6 +451,140 @@ async fn test_resolution_error_emits_tool_started_and_ended() {
     assert!(started, "resolution error must emit ToolStarted");
     assert!(ended, "resolution error must emit ToolEnded");
 }
+
+// ── 结算路径逐条日志（本文件专用内联最小捕获，不引入公共测试工具/依赖）──────
+//
+// `dispatch_tools` 由测试线程 await，`warn!` 就发生在该线程，线程局部
+// `set_default` 即可捕获；`with_max_level(INFO)` 复现生产默认过滤起点
+// （`telemetry/subscriber.rs` 的 `EnvFilter::new("info,...")`），从而证明
+// 这些记录在默认可见级别下出现。
+//
+
+#[derive(Clone, Default)]
+struct LogCapture(Arc<parking_lot::Mutex<Vec<u8>>>);
+
+impl std::io::Write for LogCapture {
+    fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+        self.0.lock().extend_from_slice(bytes);
+        Ok(bytes.len())
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        Ok(())
+    }
+}
+
+impl LogCapture {
+    fn text(&self) -> String {
+        String::from_utf8_lossy(self.0.lock().as_slice()).into_owned()
+    }
+
+    /// 只取结算路径的逐条记录行，避免其它 `warn!` 干扰计数。
+    fn resolution_log_lines(&self) -> Vec<String> {
+        self.text()
+            .lines()
+            .filter(|line| line.contains("tool call resolution failed"))
+            .map(str::to_string)
+            .collect()
+    }
+
+    fn subscriber(&self) -> impl tracing::Subscriber + Send + Sync {
+        let sink = self.clone();
+        tracing_subscriber::fmt()
+            .without_time()
+            .with_ansi(false)
+            .with_max_level(tracing::Level::INFO)
+            .with_writer(move || sink.clone())
+            .finish()
+    }
+}
+
+#[tokio::test]
+async fn test_malformed_tool_ids_log_per_call_at_default_level() {
+    let capture = LogCapture::default();
+    let _subscriber = tracing::subscriber::set_default(capture.subscriber());
+
+    // 畸形 ID 在 resolver 之前结算，空工具表即可复现。
+    let ctx = make_test_ctx();
+    let reasoning = Reasoning::with_tools(
+        "",
+        vec![
+            ToolCall::new("dup", "Read", json!({})),
+            ToolCall::new("dup", "Bash", json!({})),
+            ToolCall::new("", "Read", json!({})),
+        ],
+    );
+    let catalog = ctx
+        .runtime
+        .tool_catalog
+        .pin_working_tools(&ctx.runtime.tools.read())
+        .unwrap();
+    let outcome = dispatch_tools(&ctx, &reasoning, &catalog, &CancellationToken::new())
+        .await
+        .expect("malformed calls should settle as tool errors");
+    assert_eq!(outcome.results.len(), 3);
+
+    let lines = capture.resolution_log_lines();
+    assert_eq!(lines.len(), 3, "每条结算错误都必须有独立记录: {lines:?}");
+    assert_eq!(
+        lines.iter().filter(|line| line.contains("dup")).count(),
+        2,
+        "重复 ID 的两条调用各自记录，而不是合并: {lines:?}"
+    );
+    assert!(
+        lines
+            .iter()
+            .any(|line| line.contains("dup") && line.contains("tool=Read")),
+        "{lines:?}"
+    );
+    assert!(
+        lines
+            .iter()
+            .any(|line| line.contains("dup") && line.contains("tool=Bash")),
+        "{lines:?}"
+    );
+    let empty_id_line = lines
+        .iter()
+        .find(|line| line.contains("tool=Read") && !line.contains("dup"))
+        .unwrap_or_else(|| panic!("空 ID 缺少逐条记录: {lines:?}"));
+    assert!(empty_id_line.contains("tool_call_id="), "{empty_id_line}");
+    assert!(
+        empty_id_line.contains("reason=malformed tool call id"),
+        "{empty_id_line}"
+    );
+}
+
+#[tokio::test]
+async fn test_resolver_failure_logs_per_call_at_default_level() {
+    let capture = LogCapture::default();
+    let _subscriber = tracing::subscriber::set_default(capture.subscriber());
+
+    // BestEffortFixture：`ensure()` 返回 Ok(None)，进入 resolver 兜底分支。
+    let ctx = make_test_ctx();
+    let reasoning = Reasoning::with_tools(
+        "",
+        vec![ToolCall::new("missing-1", "NotARealTool", json!({}))],
+    );
+    let catalog = ctx
+        .runtime
+        .tool_catalog
+        .pin_working_tools(&ctx.runtime.tools.read())
+        .unwrap();
+    dispatch_tools(&ctx, &reasoning, &catalog, &CancellationToken::new())
+        .await
+        .expect("unknown tool should settle as error");
+
+    let lines = capture.resolution_log_lines();
+    assert_eq!(lines.len(), 1, "{lines:?}");
+    let line = &lines[0];
+    assert!(line.contains("tool_call_id=missing-1"), "{line}");
+    assert!(line.contains("tool=NotARealTool"), "{line}");
+    assert!(
+        line.contains("reason=Tool not found: NotARealTool"),
+        "{line}"
+    );
+}
+
 /// Both properties are real API fields: approval must describe the same input
 /// that the target receives, including any approved change to `path`.
 async fn assert_dual_path_schema_survives_dispatch(approved_path: Option<&str>, wrapped: bool) {
@@ -630,7 +833,7 @@ async fn test_dispatch_emits_fast_completion_before_atomic_batch_commit() {
         }
         async fn after_tools_batch(
             &self,
-            state: &mut dyn hook_state::StateView,
+            state: &mut dyn hook_state::AfterToolsBatchState,
             _results: &[(ToolCall, ToolResult)],
         ) -> AgentResult<()> {
             self.0.lock().push(("after_batch", state.messages().len()));

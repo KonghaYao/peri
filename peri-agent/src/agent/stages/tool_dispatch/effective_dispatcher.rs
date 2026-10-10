@@ -1,4 +1,4 @@
-//! PTC adapter over the same pinned catalog and invocation pipeline as Act.
+//! Effective tool dispatch over the same pinned catalog and invocation pipeline as Act.
 //! Nested calls project effective target identity but do not commit transcript
 //! messages or settle the outer batch's hooks/failure counter.
 
@@ -14,18 +14,28 @@ use crate::messages::{BaseMessage, ToolCallRequest};
 use crate::session::tool_catalog::SessionToolCatalogSnapshot;
 use crate::tools::{
     EffectiveToolCall, EffectiveToolDefinition, EffectiveToolDispatcher, EffectiveToolError,
-    EffectiveToolErrorCode, ToolOutput, RUN_PTC_CODE_TOOL_NAME,
+    EffectiveToolErrorCode, ToolOutput,
 };
 
 #[derive(Clone)]
 pub(super) struct StageEffectiveToolDispatcher {
     context: StageContext,
     catalog: Arc<SessionToolCatalogSnapshot>,
+    model_tool_call_id: Option<String>,
 }
 
 impl StageEffectiveToolDispatcher {
     pub(super) fn new(context: StageContext, catalog: Arc<SessionToolCatalogSnapshot>) -> Self {
-        Self { context, catalog }
+        Self {
+            context,
+            catalog,
+            model_tool_call_id: None,
+        }
+    }
+
+    pub(super) fn with_tool_call_id(mut self, tool_call_id: String) -> Self {
+        self.model_tool_call_id = Some(tool_call_id);
+        self
     }
 
     async fn dispatch_result(
@@ -33,12 +43,6 @@ impl StageEffectiveToolDispatcher {
         call: EffectiveToolCall,
         cancel: CancellationToken,
     ) -> Result<ToolResult, EffectiveToolError> {
-        if call.tool_name.eq_ignore_ascii_case(RUN_PTC_CODE_TOOL_NAME) {
-            return Err(EffectiveToolError::new(
-                EffectiveToolErrorCode::ToolFailed,
-                format!("{RUN_PTC_CODE_TOOL_NAME} cannot recursively invoke itself"),
-            ));
-        }
         let event_invocation_id = call
             .parent_invocation_id
             .as_deref()
@@ -72,6 +76,7 @@ impl StageEffectiveToolDispatcher {
             &cancel,
             ai_message.id(),
             &ai_message,
+            self.model_tool_call_id.as_deref(),
         )
         .await
         .map_err(effective_tool_error)?;
@@ -138,12 +143,19 @@ impl EffectiveToolDispatcher for StageEffectiveToolDispatcher {
         })
     }
 
+    fn admitted_mcp_tool_name(&self, server: &str, wire_name: &str) -> Option<String> {
+        self.catalog.tools.iter().find_map(|(name, entry)| {
+            (entry.tool.mcp_server_name() == Some(server)
+                && entry.tool.mcp_tool_name() == Some(wire_name))
+            .then(|| name.clone())
+        })
+    }
+
     fn tools(&self) -> Vec<EffectiveToolDefinition> {
         self.catalog
             .tools
             .values()
             .map(|entry| &entry.tool)
-            .filter(|tool| tool.name() != RUN_PTC_CODE_TOOL_NAME)
             .map(|tool| EffectiveToolDefinition {
                 name: tool.name().to_string(),
                 description: tool.description().to_string(),

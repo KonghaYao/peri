@@ -547,7 +547,7 @@ async fn startup_gate_commit_failure_is_attributed_to_staging_middleware() {
         crate::session::tool_catalog::SessionToolCatalog::with_filter(
             std::collections::BTreeMap::new(),
             None,
-            Arc::new(|name| name != "mcp__system__lookup"),
+            Arc::new(|tool| tool.name() != "mcp__system__lookup"),
         ),
     );
     ctx.runtime.tool_catalog = Arc::clone(&catalog);

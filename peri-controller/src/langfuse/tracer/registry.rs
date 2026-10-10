@@ -6,8 +6,8 @@
 //!   事件的 parent 归属(表 1)
 //! - `invocations`:(父AgentId, ToolCallId) → [`SubagentInvocation`],Agent 工具调用
 //!   与 child 的关联(表 2)
-//! - 生命周期由 `ObserveEvent::SubagentStart`(创建 AGENT obs)与 `SubagentStop`
-//!   (关闭)驱动;`ToolEnded` 不再关闭 subagent;`on_turn_end` 仅兜底
+//! - `ObserveEvent::SubagentStart` 缓存开始快照；`SubagentStop` 与父 `ToolEnded`
+//!   双信号齐备后导出完整终态，`on_turn_end` 兜底且不重复导出。
 //! - 事件乱序经"注册闸门"有界缓存 + parent-first 重放;未知/丢失一律进入
 //!   [`SubagentStatus::Incomplete`] 诊断分支,禁止静默挂主 agent
 
@@ -178,7 +178,7 @@ impl SubagentRegistry {
         } else {
             // 未知 agent(Start 从未到达):插入占位记录(orphan 标记,不产生 obs,
             // 后续内容事件归属 Unknown 继续走闸门/丢弃)
-            let now = chrono::Utc::now().to_rfc3339();
+            let now = peri_time::now_utc_rfc3339();
             self.by_agent_id.insert(
                 child_agent_id.to_string(),
                 ActiveSubagent {
@@ -210,6 +210,18 @@ impl SubagentRegistry {
 #[cfg(test)]
 #[path = "registry_test.rs"]
 mod tests;
+
+#[cfg(test)]
+#[path = "registry/lifecycle_tracer_test.rs"]
+mod lifecycle_tracer_test;
+
+#[cfg(test)]
+#[path = "registry/registration_tracer_test.rs"]
+mod registration_tracer_test;
+
+#[cfg(test)]
+#[path = "registry/parallel_tracer_test.rs"]
+mod parallel_tracer_test;
 
 #[cfg(test)]
 #[path = "registry_lifecycle_test.rs"]

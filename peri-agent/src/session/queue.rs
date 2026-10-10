@@ -5,7 +5,8 @@
 //! Receive 阶段通过 `drain_all` 一次性消费，循环退出后 `has_wake_up` 检测激活。
 
 pub use peri_acp_types::session::{
-    MessageKind, MessageQueue, MessageSource, QueuedMessage, QueuedPayload,
+    ExecutionBinding, MessageActivation, MessageDisposition, MessageKind, MessagePolicy,
+    MessageQueue, MessageRequirement, MessageSource, QueuedMessage, QueuedPayload,
 };
 
 #[cfg(test)]

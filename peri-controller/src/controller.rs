@@ -160,8 +160,8 @@ impl Subscription {
 ///   （Resources 侧打开后传入）
 /// - Runtime 编排器（pick Runtime 的目标源）：部署装配点经
 ///   [`Controller::with_runtime`] 注入；缺省为空实例（生产接线随 L5 落地）
-/// - 装配注入端口（pick 目标源）：mcp 池 / cron 调度器 / 工具检索索引 /
-///   LSP 服务器配置，宿主装配点构造具体实现后 upcast 注入（3.0 批 2 波 2；
+/// - 装配注入端口（pick 目标源）：mcp 池 / cron 调度器 / 工具检索索引，
+///   宿主装配点构造具体实现后 upcast 注入（3.0 批 2 波 2；
 ///   消费方为执行装配，随 L5 落位）
 /// - 事件协议化前分支（弹出队列 + 订阅广播）
 pub struct Controller {
@@ -176,8 +176,6 @@ pub struct Controller {
     cron_scheduler: Option<Arc<dyn peri_acp_types::cron::CronSchedulerPort>>,
     /// 工具检索索引端口（pick 目标源；缺省未注入）。
     tool_search: Option<Arc<dyn peri_acp_types::ports::ToolSearchPort>>,
-    /// LSP 服务器配置（pick 目标源；缺省空）。
-    lsp_servers: Vec<peri_acp_types::lsp::LspServerConfig>,
     /// 弹出队列发送端（pop_events 消费；有界满丢弃）。
     events_tx: mpsc::Sender<EventMessage>,
     /// 弹出队列接收端（控制面第五步 pop events）。
@@ -200,7 +198,6 @@ impl Controller {
             mcp_pool: None,
             cron_scheduler: None,
             tool_search: None,
-            lsp_servers: Vec::new(),
             events_tx,
             events_rx: Mutex::new(events_rx),
             subscribers,
@@ -243,15 +240,6 @@ impl Controller {
         self
     }
 
-    /// 注入 LSP 服务器配置（pick LSP 配置的目标源）。
-    pub fn with_lsp_servers(
-        mut self,
-        lsp_servers: Vec<peri_acp_types::lsp::LspServerConfig>,
-    ) -> Self {
-        self.lsp_servers = lsp_servers;
-        self
-    }
-
     /// pick MCP 客户端池（控制面资源取用；未注入返回 `None`）。
     pub fn pick_mcp_pool(&self) -> Option<Arc<dyn peri_acp_types::ports::McpPoolPort>> {
         self.mcp_pool.clone()
@@ -265,11 +253,6 @@ impl Controller {
     /// pick 工具检索索引（控制面资源取用；未注入返回 `None`）。
     pub fn pick_tool_search(&self) -> Option<Arc<dyn peri_acp_types::ports::ToolSearchPort>> {
         self.tool_search.clone()
-    }
-
-    /// pick LSP 服务器配置（控制面资源取用；未注入返回空）。
-    pub fn pick_lsp_servers(&self) -> Vec<peri_acp_types::lsp::LspServerConfig> {
-        self.lsp_servers.clone()
     }
 
     /// Controller 侧 sessions 访问通道。
@@ -420,14 +403,18 @@ impl Controller {
         let runtime = Arc::clone(&self.runtime);
         let envelope = match runtime.stamp(session_id, source) {
             Ok(stamped) => stamped,
-            Err(_) => EventEnvelope::new(
-                session_id.to_string(),
-                peri_acp_types::identity::SessionEpoch::initial(),
-                source.turn_id.clone(),
-                source.agent_id.clone(),
-                peri_acp_types::identity::SessionSeq::initial(),
-                source.delivery_class,
-            ),
+            Err(_) => {
+                let mut envelope = EventEnvelope::new(
+                    session_id.to_string(),
+                    peri_acp_types::identity::SessionEpoch::initial(),
+                    source.turn_id.clone(),
+                    source.agent_id.clone(),
+                    peri_acp_types::identity::SessionSeq::initial(),
+                    source.delivery_class,
+                );
+                envelope.message_id = source.message_id.clone();
+                envelope
+            }
         };
         self.publish_message(EventMessage::new(envelope, Some(event)));
     }

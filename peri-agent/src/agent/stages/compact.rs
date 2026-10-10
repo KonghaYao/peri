@@ -77,17 +77,9 @@ async fn compact_core(input: CompactInput) -> (crate::error::AgentResult<Compact
             }
         };
 
-        // 禁用检查（v2 stage 入口显式判定，替代已删除的 CompactMiddleware::is_disabled）
-        // v1 曾通过 before_model 钩子判定；v2 必须在 stage 入口显式检查，
-        // 否则 DISABLE_COMPACT/DISABLE_AUTO_COMPACT 会被忽略。
-        let is_disabled = std::env::var("DISABLE_COMPACT").is_ok()
-            || std::env::var("DISABLE_AUTO_COMPACT").is_ok()
-            || !config.auto_compact_enabled;
-        if is_disabled {
-            tracing::trace!(
-                step,
-                "Compact 已禁用（env 或 config.auto_compact_enabled=false）"
-            );
+        // The host resolves config and environment overrides before running the loop.
+        if !config.auto_compact_enabled {
+            tracing::trace!(step, "Compact 已禁用（config.auto_compact_enabled=false）");
             break 'compact_core Ok(CompactOutput { compacted: false });
         }
 
@@ -391,9 +383,7 @@ async fn compact_core(input: CompactInput) -> (crate::error::AgentResult<Compact
                 let guard = ctx.session.transcript.read();
                 let visible: Vec<crate::messages::BaseMessage> =
                     guard.visible_messages().into_iter().cloned().collect();
-                // 从最后几条消息提取 re_inject 元信息（CompactFileInfo / Skills 名称）
-                // 注：run_compact 内 re_inject_v2 已把 [最近读取的文件: ...] / [激活的 Skill 指令: ...]
-                // 追加到 transcript 末尾，可直接用 extract_file_info / extract_skill_names 解析
+                // Full 只追加摘要；已有消息中的元信息仍由类型层提取。
                 let combined_files = crate::agent::compact_v2::extract_file_info(&visible);
                 let combined_skills = crate::agent::compact_v2::extract_skill_names(&visible);
                 (visible, combined_files, combined_skills)
@@ -476,7 +466,7 @@ async fn compact_core(input: CompactInput) -> (crate::error::AgentResult<Compact
 }
 
 // An unacknowledged durable commit must stop the loop before Reason can consume the
-// old in-memory history. Phase 8 carries this state to the host for cold recovery.
+// old in-memory history. Phase 8 reports this state for explicit history reload.
 fn uncertain_compaction_error(ctx: &super::StageContext) -> crate::error::AgentError {
     ctx.runtime
         .event_bus

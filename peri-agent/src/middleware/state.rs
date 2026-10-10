@@ -17,6 +17,10 @@ use crate::{
 /// object-safe：无 `Clone`/`'static` 约束、无泛型方法（`impl Into<String>` 改为 `String`）。
 /// 各生命周期的公开能力由 `capabilities` 组合，适配器不持有新的 owner。
 pub trait MiddlewareState: Send + Sync {
+    fn execution_binding(&self) -> Option<peri_acp_types::session::ExecutionBinding> {
+        None
+    }
+
     fn cwd(&self) -> &str;
 
     fn messages(&self) -> &[BaseMessage];
@@ -49,18 +53,9 @@ pub trait MiddlewareState: Send + Sync {
         false
     }
 
-    /// 会话级 inbox 句柄（middleware 注入 Defer/Prompt 时应经此 wake `await_wake`）。
-    fn inbox_handle(&self) -> Option<&peri_acp_types::session::InboxHandle> {
-        None
-    }
-
-    /// 写入会话队列；有 inbox 时经 `InboxHandle::push` 唤醒 idle loop。
+    /// 发布到同一会话 mailbox，由消息类型统一决定唤醒。
     fn enqueue_v2_message(&self, msg: crate::session::QueuedMessage) {
-        if let Some(inbox) = self.inbox_handle() {
-            inbox.push(msg);
-        } else {
-            self.v2_queue().push(msg);
-        }
+        self.v2_queue().push(msg);
     }
 
     /// 返回当前 turn 的本地工具视图（stage_builder 每 turn 构建，含当前链
@@ -70,8 +65,12 @@ pub trait MiddlewareState: Send + Sync {
     /// `Some(&StageContext.runtime.tools)`。背景：宿主级 `shared_tools`
     /// 生产路径写入点归零后恒为空表（`MIDDLEWARE_TOOL_NAMES` 注释），
     /// `ToolSearchMiddleware` 等消费方必须经此读取本地视图，否则 deferred
-    /// tool 索引永不构建（issue 2026-08-15-workflow-deferred-tool-missing）。
+    /// tool 索引永不构建（issue 2026-08-15-workflow-deferred-tool-missing，已归档至
+    /// `spec/history/2026-08.md`）。
     fn local_tools(&self) -> Option<&crate::agent::stages::SharedToolMap> {
+        None
+    }
+    fn tool_source(&self, _name: &str) -> Option<crate::session::tool_catalog::ToolSource> {
         None
     }
 }

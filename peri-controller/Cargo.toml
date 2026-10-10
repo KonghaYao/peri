@@ -5,7 +5,9 @@ edition.workspace = true
 description = "Controller layer — control plane (lite params / run Session / cancel forward / event pop) + Langfuse bridge (event-stream bypass consumer)"
 
 [dependencies]
+peri-time = { path = "../peri-time" }
 peri-acp-types = { path = "../peri-acp-types" }
+peri-config.workspace = true
 # 层依赖（§0 依赖规则）：Controller → Runtime（run Session / cancel 定位转发）、
 # Controller → Resources（pick Resources）均为声明边。
 peri-runtime = { path = "../peri-runtime" }

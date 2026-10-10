@@ -1,25 +1,24 @@
 use super::*;
-use chrono::Utc;
 
 #[test]
 fn test_thread_goal_new_生成有效_goal_id() {
-    let goal = ThreadGoal::new("完成 PR review".to_string(), None);
+    let at = std::time::SystemTime::UNIX_EPOCH + std::time::Duration::from_secs(1_234);
+    let goal = ThreadGoal::new_at("完成 PR review".to_string(), None, at);
     assert_eq!(goal.objective, "完成 PR review");
     assert_eq!(goal.status, GoalStatus::Active);
     assert_eq!(goal.token_budget, None);
     assert!(!goal.goal_id.is_empty());
-    assert!(goal.created_at <= Utc::now());
-}
-
-#[test]
-fn test_thread_goal_with_budget() {
-    let goal = ThreadGoal::new("重构模块".to_string(), Some(200_000));
-    assert_eq!(goal.token_budget, Some(200_000));
+    assert_eq!(goal.created_at, chrono::DateTime::<chrono::Utc>::from(at));
+    assert_eq!(goal.updated_at, goal.created_at);
 }
 
 #[test]
 fn test_thread_goal_serde_roundtrip() {
-    let goal = ThreadGoal::new("测试序列化".to_string(), Some(100_000));
+    let goal = ThreadGoal::new_at(
+        "测试序列化".to_string(),
+        Some(100_000),
+        peri_time::now_wall(),
+    );
     let json = serde_json::to_string(&goal).unwrap();
     let deserialized: ThreadGoal = serde_json::from_str(&json).unwrap();
     assert_eq!(deserialized.objective, goal.objective);

@@ -31,6 +31,7 @@ mod tests {
             batch_max_events: 50,
             batch_flush_interval_secs: 10,
             user_id: None,
+            ..Default::default()
         }
     }
 
@@ -109,7 +110,9 @@ mod tests {
 
         tracer.on_turn_start("turn_err");
         let _handle = tracer.on_turn_end(peri_acp_types::session::TurnTelemetryOutcome::Failed {
-            failure: peri_acp_types::session::ExecutionFailure::internal("SomeError"),
+            failure: Box::new(peri_acp_types::session::ExecutionFailure::internal(
+                "SomeError",
+            )),
         });
 
         tokio::task::yield_now().await;
@@ -132,11 +135,10 @@ mod tests {
     }
 
     // ── SubAgent e2e 测试 ──────────────────────────────────────────────────
-    // 阶段②(registry)语义:AGENT obs 生命周期由 SubagentStart(create)/
-    // SubagentStop(close)驱动;ToolEnded 不关 child;on_turn_end 仅兜底。
+    // Start 缓存开始记录，Stop 与 ToolEnded 双信号齐备后一次导出完整 Create。
     // 事件经 LangfuseBridge 注入(与生产 forwarder 路径同构)。
 
-    /// Fork 子 agent:Start join 创建 AGENT obs(open),Stop 关闭(update)。
+    /// Fork 子 agent：Start join 缓存记录，两信号齐备后导出完整 Create。
     /// 验证:AGENT obs 存在、类型为 Agent、有父 observation、内部工具有记录。
     #[tokio::test]
     async fn test_e2e_fork_subagent_emits_observation_create() {
@@ -157,13 +159,14 @@ mod tests {
             name: "Agent".to_string(),
             input: serde_json::json!({"task": "读取文件内容"}),
         });
-        // SubagentStart:join → AGENT obs create(open)
+        // SubagentStart:join → AGENT obs 开始快照缓存
         bridge.process_observe_event(&ObserveEvent::SubagentStart {
             turn_id,
             agent_id: main_id,
             child_agent_id: child_id,
             agent_name: "fork".to_string(),
             is_background: false,
+            parent_tool_call_id: None,
         });
 
         // 子 agent 内部执行
@@ -269,17 +272,17 @@ mod tests {
             );
         }
 
-        // 断言 3:AGENT obs 关闭(ObservationUpdate,Stop 驱动)
-        let sa_updates = events
+        // 断言 3:AGENT obs 关闭(ObservationCreate,Stop 驱动)
+        let sa_completions = events
             .iter()
             .filter(|e| {
-                matches!(e, IngestionEvent::ObservationUpdate { body, .. }
+                matches!(e, IngestionEvent::ObservationCreate { body, .. }
                     if body.name.as_deref().is_some_and(|n| n.starts_with("subagent-")))
             })
             .count();
         assert_eq!(
-            sa_updates, 1,
-            "fork 子 agent：Stop 后应有恰好 1 个 AGENT ObservationUpdate"
+            sa_completions, 1,
+            "fork 子 agent：Stop 后应有恰好 1 个 AGENT ObservationCreate"
         );
 
         // 断言 4:子 agent 内部 Read 工具 observation 存在
@@ -295,7 +298,7 @@ mod tests {
     }
 
     /// BG 子 agent:Start join 创建 AGENT obs,Stop 永不到达 → on_turn_end 兜底
-    /// 关闭(ObservationUpdate + incomplete_reason)。验证:父 ToolEnded 不关闭,
+    /// 关闭(ObservationCreate + incomplete_reason)。验证:父 ToolEnded 不关闭,
     /// 兜底关闭存在且 metadata 携带 incomplete_reason。
     #[tokio::test]
     async fn test_e2e_bg_subagent_defers_until_turn_end() {
@@ -321,6 +324,7 @@ mod tests {
             child_agent_id: child_id,
             agent_name: "bg".to_string(),
             is_background: true,
+            parent_tool_call_id: None,
         });
         // 父 ToolEnded:只结束父工具记录,不关闭 AGENT obs
         bridge.process_render_event(&RenderEvent::ToolEnded {
@@ -366,7 +370,7 @@ mod tests {
             duration_ms: 5,
         });
 
-        // 父 ToolEnded 后、turn_end 前:AGENT obs 已 create(open)但未关闭
+        // 父 ToolEnded 后、turn_end 前：AGENT obs 仍只缓存、不导出。
         {
             let mid = session.events_snapshot();
             let creates = mid
@@ -376,15 +380,10 @@ mod tests {
                         if body.name.as_deref().is_some_and(|n| n.starts_with("subagent-")))
                 })
                 .count();
-            assert_eq!(creates, 1, "Start join 后 AGENT obs 应已创建(open)");
-            let updates = mid
-                .iter()
-                .filter(|e| {
-                    matches!(e, IngestionEvent::ObservationUpdate { body, .. }
-                        if body.name.as_deref().is_some_and(|n| n.starts_with("subagent-")))
-                })
-                .count();
-            assert_eq!(updates, 0, "Stop 未到时 AGENT obs 不应关闭");
+            assert_eq!(
+                creates, 0,
+                "Start join 只缓存完整开始记录，不导出未完成观测"
+            );
         }
 
         // Turn 结束——兜底关闭 bg 子 agent
@@ -394,20 +393,20 @@ mod tests {
         tokio::task::yield_now().await;
         let events = session.events_snapshot();
 
-        // 断言 1:兜底关闭存在(ObservationUpdate)
-        let sa_updates: Vec<_> = events
+        // 断言 1:兜底关闭存在(ObservationCreate)
+        let sa_completions: Vec<_> = events
             .iter()
             .filter(|e| {
-                matches!(e, IngestionEvent::ObservationUpdate { body, .. }
+                matches!(e, IngestionEvent::ObservationCreate { body, .. }
                     if body.name.as_deref().is_some_and(|n| n.starts_with("subagent-")))
             })
             .collect();
         assert_eq!(
-            sa_updates.len(),
+            sa_completions.len(),
             1,
-            "BG 子 agent：turn_end 兜底应有恰好 1 个 AGENT ObservationUpdate"
+            "BG 子 agent：turn_end 兜底应有恰好 1 个 AGENT ObservationCreate"
         );
-        if let IngestionEvent::ObservationUpdate { body, .. } = sa_updates[0] {
+        if let IngestionEvent::ObservationCreate { body, .. } = sa_completions[0] {
             assert_eq!(body.r#type, ObservationType::Agent);
             assert!(body.end_time.is_some(), "兜底关闭应带 end_time");
             assert!(
@@ -459,6 +458,7 @@ mod tests {
             child_agent_id: child_id,
             agent_name: "child".to_string(),
             is_background: false,
+            parent_tool_call_id: None,
         });
         // 子 agent 内部
         bridge.process_observe_event(&ObserveEvent::StageStarted {

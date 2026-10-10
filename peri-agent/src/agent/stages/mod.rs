@@ -7,15 +7,20 @@
 //! Receive 是循环入口，也是退出判断点：队列空 + 无 idle 等待时退出。
 
 pub mod act;
+mod async_context;
 pub mod compact;
 mod compact_progress;
+mod context_builder;
 pub mod middleware_runner;
+mod null_llm;
+mod queue_to_transcript;
 pub mod reason;
 pub mod receive;
 pub mod tool_dispatch;
+pub use null_llm::NullReactLLM;
 
 use std::collections::{BTreeMap, HashMap};
-use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
+use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::Arc;
 
 use parking_lot::RwLock;
@@ -26,13 +31,14 @@ use crate::agent::events::{Stage, StageStatus};
 use crate::agent::events_v2::{EventBus, ObserveEvent};
 use crate::agent::react::ReactLLM;
 use crate::agent::token::ContextBudget;
-use crate::error_suggest::{ErrorSuggestRegistry, ToolRegistrySnapshot};
 use crate::messages::BaseMessage;
 use crate::middleware::chain::MiddlewareChain;
 use crate::session::tool_catalog::{SessionToolCatalog, SessionToolCatalogSnapshot};
 use crate::session::turn::TurnContext;
 use crate::session::{MessageQueue, MessageTranscript, QueuedMessage};
 use crate::tools::{BaseTool, DirectToolInvocationResolver, ToolInvocationResolver};
+
+pub use async_context::AsyncContext;
 
 /// 共享工具注册表类型别名（避免 clippy::type_complexity）
 pub type SharedToolMap = Arc<RwLock<BTreeMap<String, Arc<dyn BaseTool>>>>;
@@ -78,8 +84,6 @@ pub struct RuntimeServices {
     pub event_bus: Arc<EventBus>,
     /// Deferred tools 外部注册表（ExecuteExtraTool 代理执行用）
     pub shared_tools: Option<SharedToolMap>,
-    pub error_suggest_registry: Option<Arc<ErrorSuggestRegistry>>,
-    pub tool_registry_snapshot: Arc<ToolRegistrySnapshot>,
 }
 
 /// Compact 系统上下文（含跨阶段计数器）
@@ -97,25 +101,6 @@ pub struct CompactContext {
     /// Compact 连续失败计数（run_compact 内部递增/重置，仅用于 Compact 降级跳过决策）
     pub compact_consecutive_failures: Arc<AtomicU32>,
     pub(crate) budget_recovery: Arc<parking_lot::Mutex<compact_progress::CompactBudgetRecovery>>,
-}
-
-/// 异步传输控制（run_react_loop idle 等待及完成提醒的只读后台活动判断）
-#[derive(Clone)]
-pub struct AsyncContext {
-    pub idle_inbox: Option<Arc<crate::agent::session::SessionInbox>>,
-    pub idle_should_wait: Option<Arc<dyn Fn() -> bool + Send + Sync>>,
-    /// Registry lifecycle signal. This is only a wake source; Receive re-checks
-    /// the registry's active count after every notification.
-    pub idle_registry: Option<tokio::sync::watch::Receiver<u64>>,
-    /// 会话级 idle-suspended 标志（宿主 SessionAccessPort 注入的共享 Arc）。
-    ///
-    /// run_react_loop 在 await_wake 挂起期间置 true、醒来/取消时复位。
-    /// 宿主 `dispatch_prompt_turn` 读取此标志把挂起期间到达的用户 prompt
-    /// 注入 inbox（Prompt + wake），让挂起的 loop 立即醒来消费，而不是在
-    /// per-session prompt lock 上阻塞至当前 turn 完成。
-    pub idle_suspended_flag: Option<Arc<AtomicBool>>,
-    /// 与 session inbox 同源的 push 句柄；middleware 经此入队以唤醒 `await_wake`。
-    pub inbox_handle: Option<crate::agent::session::InboxHandle>,
 }
 
 // ─── 阶段间共享上下文 ───────────────────────────────────────────────────────
@@ -143,9 +128,10 @@ pub struct StageContext {
 }
 
 impl StageContext {
-    /// 兼容旧测试：仅传会话实体时构造 minimal context（运行时字段需要单独填充）
+    /// 测试最小上下文：仅传会话实体，运行时依赖按测试行为填充。
     ///
     /// **注意**：此构造函数仅用于单元测试。生产代码请用 `StageContextBuilder`。
+    #[cfg(test)]
     pub fn new(
         turn: TurnContext,
         transcript: Arc<RwLock<MessageTranscript>>,
@@ -162,7 +148,6 @@ impl StageContext {
         let compact_fail = Arc::new(AtomicU32::new(0));
         let sctx = Arc::new(RwLock::new(std::collections::HashMap::new()));
         let rbuf = Arc::new(RwLock::new(Vec::new()));
-        let tool_snapshot = Arc::new(ToolRegistrySnapshot::default());
         Self {
             session: SessionHandle {
                 turn: turn_arc,
@@ -180,8 +165,6 @@ impl StageContext {
                 middleware_chain: mw_chain,
                 event_bus: ebus,
                 shared_tools: None,
-                error_suggest_registry: None,
-                tool_registry_snapshot: tool_snapshot,
             },
             compact: CompactContext {
                 context_budget: None,
@@ -195,11 +178,13 @@ impl StageContext {
                 budget_recovery: Arc::new(parking_lot::Mutex::new(Default::default())),
             },
             async_ctx: AsyncContext {
-                idle_inbox: None,
+                idle_wait_enabled: false,
                 idle_should_wait: None,
+                pending_handoff: None,
+                handoff_deadline: None,
                 idle_registry: None,
                 idle_suspended_flag: None,
-                inbox_handle: None,
+                hook_stop_requested: None,
             },
             goal_controller: None,
             recall_buffer: rbuf,
@@ -229,8 +214,6 @@ impl StageContext {
                 middleware_chain: Arc::new(MiddlewareChain::new()),
                 event_bus: Arc::new(EventBus::new(Default::default()).0),
                 shared_tools: None,
-                error_suggest_registry: None,
-                tool_registry_snapshot: Arc::new(ToolRegistrySnapshot::default()),
             },
             compact: CompactContext {
                 context_budget: None,
@@ -246,11 +229,13 @@ impl StageContext {
                 budget_recovery: Arc::new(parking_lot::Mutex::new(Default::default())),
             },
             async_ctx: AsyncContext {
-                idle_inbox: None,
+                idle_wait_enabled: false,
                 idle_should_wait: None,
+                pending_handoff: None,
+                handoff_deadline: None,
                 idle_registry: None,
                 idle_suspended_flag: None,
-                inbox_handle: None,
+                hook_stop_requested: None,
             },
             goal_controller: None,
         }
@@ -258,7 +243,7 @@ impl StageContext {
 
     /// 便捷访问：当前 turn_id
     pub fn turn_id(&self) -> crate::session::turn::TurnId {
-        self.session.turn.turn_id
+        self.session.turn.turn_id()
     }
 
     /// 便捷访问：当前 cwd
@@ -278,32 +263,6 @@ impl StageContext {
     }
 }
 
-/// 空 ReactLLM——用于未配置 LLM 的测试场景
-///
-/// 调用时返回 Interrupted 错误，避免 stub 默认行为掩盖生产配置缺失。
-#[derive(Debug, Default, Clone, Copy)]
-pub struct NullReactLLM;
-
-#[async_trait::async_trait]
-impl ReactLLM for NullReactLLM {
-    async fn generate_reasoning(
-        &self,
-        _messages: &[BaseMessage],
-        _tools: &[&dyn BaseTool],
-        _streaming: Option<crate::agent::react::StreamingContext>,
-    ) -> crate::error::AgentResult<crate::agent::react::Reasoning> {
-        Err(crate::error::AgentError::Interrupted)
-    }
-
-    fn model_name(&self) -> String {
-        "null".to_string()
-    }
-
-    fn provider_capabilities(&self) -> crate::agent::compact_v2::projection::ProviderCapabilities {
-        crate::agent::compact_v2::projection::ProviderCapabilities::default()
-    }
-}
-
 // ─── StageContextBuilder ────────────────────────────────────────────────────
 
 /// StageContext 构建器
@@ -316,146 +275,6 @@ pub struct StageContextBuilder {
     compact: CompactContext,
     async_ctx: AsyncContext,
     goal_controller: Option<Arc<dyn peri_acp_types::goal::GoalController>>,
-}
-
-impl StageContextBuilder {
-    pub fn with_llm(mut self, llm: Arc<dyn ReactLLM + Send + Sync>) -> Self {
-        self.runtime.llm = llm;
-        self
-    }
-
-    pub fn with_tools(mut self, tools: SharedToolMap) -> Self {
-        // `with_tools` is a builder convenience seam; production installs its
-        // validated session catalog explicitly with `with_tool_catalog`.
-        self.runtime.tool_catalog = Arc::new(
-            SessionToolCatalog::try_new(tools.read().clone(), None)
-                .unwrap_or_else(|_| SessionToolCatalog::new(BTreeMap::new(), None)),
-        );
-        self.runtime.tools = tools;
-        self
-    }
-
-    pub fn with_tool_catalog(mut self, catalog: Arc<SessionToolCatalog>) -> Self {
-        self.runtime.tool_catalog = catalog;
-        self
-    }
-
-    pub fn with_tool_invocation_resolver(
-        mut self,
-        resolver: Arc<dyn ToolInvocationResolver>,
-    ) -> Self {
-        self.runtime.tool_invocation_resolver = resolver;
-        self
-    }
-
-    pub fn with_middleware_chain(mut self, chain: Arc<MiddlewareChain>) -> Self {
-        self.runtime.middleware_chain = chain;
-        self
-    }
-
-    pub fn with_event_bus(mut self, bus: Arc<EventBus>) -> Self {
-        self.runtime.event_bus = bus;
-        self
-    }
-
-    pub fn with_context_budget(mut self, budget: ContextBudget) -> Self {
-        self.compact.context_budget = Some(budget);
-        self
-    }
-
-    pub fn with_compact_config(mut self, config: CompactConfig) -> Self {
-        self.compact.compact_config = Some(config);
-        self
-    }
-
-    pub fn with_compact_llm(mut self, llm: Arc<dyn peri_model::Model>) -> Self {
-        self.compact.compact_llm = Some(llm);
-        self
-    }
-
-    pub fn with_shared_tools(mut self, shared: SharedToolMap) -> Self {
-        self.runtime.shared_tools = Some(shared);
-        self
-    }
-
-    pub fn with_error_suggest_registry(mut self, registry: Arc<ErrorSuggestRegistry>) -> Self {
-        self.runtime.error_suggest_registry = Some(registry);
-        self
-    }
-
-    pub fn with_tool_registry_snapshot(mut self, snapshot: ToolRegistrySnapshot) -> Self {
-        self.runtime.tool_registry_snapshot = Arc::new(snapshot);
-        self
-    }
-
-    pub fn with_agent_id(mut self, agent_id: AgentId) -> Self {
-        self.session.agent_id = agent_id;
-        self
-    }
-
-    pub fn with_session_context(mut self, ctx: Arc<RwLock<HashMap<String, String>>>) -> Self {
-        self.session.session_context = ctx;
-        self
-    }
-
-    pub fn with_compact_pre_hook(mut self, hook: Arc<dyn Fn() + Send + Sync>) -> Self {
-        self.compact.compact_pre_hook = Some(hook);
-        self
-    }
-
-    pub fn with_compact_post_hook(mut self, hook: Arc<dyn Fn(bool, usize) + Send + Sync>) -> Self {
-        self.compact.compact_post_hook = Some(hook);
-        self
-    }
-
-    pub fn with_idle_inbox(mut self, inbox: Arc<crate::agent::session::SessionInbox>) -> Self {
-        self.async_ctx.idle_inbox = Some(inbox);
-        self
-    }
-
-    pub fn with_idle_registry(mut self, receiver: tokio::sync::watch::Receiver<u64>) -> Self {
-        self.async_ctx.idle_registry = Some(receiver);
-        self
-    }
-
-    pub fn with_inbox_handle(mut self, handle: crate::agent::session::InboxHandle) -> Self {
-        self.async_ctx.inbox_handle = Some(handle);
-        self
-    }
-
-    /// 设置 idle 时是否应该 await_wake 的判断 closure。
-    /// 返回 true → 主 agent 有未完成异步任务，需要 await_wake 等结果续跑。
-    /// 返回 false → 直接退出 loop，避免正常对话 loading 卡死。
-    pub fn with_idle_should_wait(mut self, probe: Arc<dyn Fn() -> bool + Send + Sync>) -> Self {
-        self.async_ctx.idle_should_wait = Some(probe);
-        self
-    }
-
-    /// 设置会话级 idle-suspended 标志（await_wake 挂起期间置 true；宿主
-    /// `dispatch_prompt_turn` 据此把挂起期间到达的用户 prompt 注入 inbox）。
-    pub fn with_idle_suspended_flag(mut self, flag: Arc<AtomicBool>) -> Self {
-        self.async_ctx.idle_suspended_flag = Some(flag);
-        self
-    }
-
-    pub fn with_goal_controller(
-        mut self,
-        controller: Arc<dyn peri_acp_types::goal::GoalController>,
-    ) -> Self {
-        self.goal_controller = Some(controller);
-        self
-    }
-
-    pub fn build(self) -> StageContext {
-        StageContext {
-            session: self.session,
-            runtime: self.runtime,
-            compact: self.compact,
-            async_ctx: self.async_ctx,
-            goal_controller: self.goal_controller,
-            recall_buffer: Arc::new(RwLock::new(Vec::new())),
-        }
-    }
 }
 
 // ─── Compact 阶段类型 ────────────────────────────────────────────────────────
@@ -486,8 +305,13 @@ pub struct ReceiveOutput {
     pub consumed_count: usize,
     /// 本轮消费的可驱动语义续跑消息数量（Prompt / Defer）
     pub wake_up_count: usize,
+    /// 预算不足而保留在队列中的后续新增 EnsureProcessing 输入数量。
+    pub budget_deferred_count: usize,
     /// 本次消费的非空用户 Human 消息身份，供首次输入准备精准处理。
     pub input_message_ids: Vec<crate::messages::MessageId>,
+    /// 本轮消费到 hook 的显式停止意图（`continue:false`）：循环必须经 Receive
+    /// 唯一退出口结束，不得再发起额外模型请求。
+    pub stop_requested: bool,
 }
 
 // ─── Reason 阶段类型 ─────────────────────────────────────────────────────────
@@ -531,29 +355,7 @@ pub struct ActOutput {
 
 // ─── 工具函数 ────────────────────────────────────────────────────────────────
 
-/// Writes drained queue payloads into the transcript without inferring semantics from scheduling.
-pub fn append_messages_to_transcript(
-    transcript: &mut MessageTranscript,
-    messages: Vec<QueuedMessage>,
-) {
-    use crate::session::QueuedPayload;
-
-    for msg in messages {
-        match msg.payload {
-            QueuedPayload::Message(message) => {
-                if msg.kind == crate::session::MessageKind::Prompt
-                    && message.message_content().is_empty()
-                {
-                    continue;
-                }
-                transcript.append(message);
-            }
-            QueuedPayload::SystemReminder(reminder) => {
-                transcript.append_system_reminder(reminder);
-            }
-        }
-    }
-}
+pub use queue_to_transcript::append_messages_to_transcript;
 
 // ─── 控制流编排 ──────────────────────────────────────────────────────────────
 
@@ -586,11 +388,14 @@ fn enqueue_stream_interruption_continuation(context: &StageContext) {
         Some("模型流中断，正在继续。".into()),
         serde_json::json!({"reason": "stream_interrupted"}),
     );
-    context.session.queue.push(QueuedMessage::system_reminder(
-        MessageKind::Defer,
-        MessageSource::SystemInjected,
-        reminder,
-    ));
+    context.session.queue.push(
+        QueuedMessage::system_reminder(MessageKind::Defer, MessageSource::SystemInjected, reminder)
+            .with_policy(
+                peri_acp_types::session::MessagePolicy::continue_current_run(
+                    context.session.turn.execution_binding(),
+                ),
+            ),
+    );
 }
 
 fn enqueue_truncation_continuation(context: &StageContext) {
@@ -607,11 +412,14 @@ fn enqueue_truncation_continuation(context: &StageContext) {
         Some("Model response was truncated; continuing.".into()),
         serde_json::json!({"stop_reason": "max_tokens"}),
     );
-    context.session.queue.push(QueuedMessage::system_reminder(
-        MessageKind::Defer,
-        MessageSource::SystemInjected,
-        reminder,
-    ));
+    context.session.queue.push(
+        QueuedMessage::system_reminder(MessageKind::Defer, MessageSource::SystemInjected, reminder)
+            .with_policy(
+                peri_acp_types::session::MessagePolicy::continue_current_run(
+                    context.session.turn.execution_binding(),
+                ),
+            ),
+    );
 }
 
 /// 执行单个 ReAct 阶段：emit StageStarted → 调用阶段函数 → emit StageEnded → Ok/Err 分发。
@@ -624,7 +432,7 @@ where
     F: FnOnce() -> Fut,
     Fut: std::future::Future<Output = crate::error::AgentResult<T>>,
 {
-    let start = std::time::Instant::now();
+    let start = peri_time::monotonic_now();
     context
         .runtime
         .event_bus
@@ -679,15 +487,15 @@ where
 pub async fn run_react_loop(context: StageContext, max_iterations: usize) -> LoopResult {
     let mut loop_state = LoopState::default();
     let mut semantic_iterations = 0usize;
-    let mut mq_steering_tail_passes = 0usize;
+    let execution = context.session.turn.execution_binding();
+    let initial_input_watermark = context.session.queue.admission_watermark();
     // Keep one receiver for the lifetime of this loop so its observed version
     // advances across idle retries. StageContext clones are short-lived stage
     // inputs and must not own the receive cursor.
     let mut idle_registry = context.async_ctx.idle_registry.clone();
-    const MAX_MQ_STEERING_TAIL_PASSES: usize = 8;
     const MAX_TRUNCATION_CONTINUATIONS: usize = 2;
 
-    'steering_tail: loop {
+    'receive_retry: loop {
         'rcra: loop {
             // 检查 cancel
             if context.session.turn.is_cancelled() {
@@ -696,9 +504,12 @@ pub async fn run_react_loop(context: StageContext, max_iterations: usize) -> Loo
 
             // ── Receive（循环入口，也是退出判断点）──
             let receive_out = match run_stage(&context, Stage::Receive, || async {
-                receive::run_receive(ReceiveInput {
-                    context: context.clone(),
-                })
+                receive::run_receive_with_budget(
+                    ReceiveInput {
+                        context: context.clone(),
+                    },
+                    (semantic_iterations >= max_iterations).then_some(initial_input_watermark),
+                )
                 .await
             })
             .await
@@ -707,13 +518,29 @@ pub async fn run_react_loop(context: StageContext, max_iterations: usize) -> Loo
                 Err(e) => return e,
             };
 
+            // Hook 显式停止意图（PostToolBatch `continue:false`）：Receive 是循环的
+            // 唯一退出口；消费到停止意图直接以 Completed 结束，不再发起模型请求。
+            if receive_out.stop_requested {
+                if let Some(flag) = &context.async_ctx.hook_stop_requested {
+                    flag.store(true, Ordering::Release);
+                }
+                tracing::info!(
+                    consumed = receive_out.consumed_count,
+                    "Receive: hook stop intent consumed; exiting run without further model request"
+                );
+                return LoopResult::Completed;
+            }
+
             // 退出判断：本轮没有可唤醒消息且上一轮无工具调用 → 检查是否该退出。
             // Info 只做状态维护，虽被 Receive 消费，但不能单独驱动 Compact → Reason → Act。
             // 工具调用结果写入 transcript 而非队列：has_tool_calls=true 时
             // wake_up_count=0 是正常状态——继续循环让 LLM 处理工具结果。
-            if receive_out.wake_up_count == 0 && !loop_state.has_tool_calls {
+            if receive_out.wake_up_count == 0
+                && receive_out.budget_deferred_count == 0
+                && !loop_state.has_tool_calls
+            {
                 // 竞态保护：退出前再检查一次队列是否有新消息到达
-                if context.session.queue.has_wake_up() {
+                if context.session.queue.has_required_for_run(&execution) {
                     tracing::debug!("Receive: consumed=0 but queue has wake-up, continue");
                     continue;
                 }
@@ -728,111 +555,135 @@ pub async fn run_react_loop(context: StageContext, max_iterations: usize) -> Loo
                     }
                 }
 
-                // idle_should_wait 逻辑：队列空 → 如有 idle_inbox 且有未完成异步任务，等异步事件续跑。
                 let should_wait = context
                     .async_ctx
                     .idle_should_wait
                     .as_ref()
                     .map(|probe| probe())
                     .unwrap_or(false);
-                if should_wait {
-                    if let Some(inbox) = &context.async_ctx.idle_inbox {
+                if should_wait && context.async_ctx.idle_wait_enabled {
+                    if let Some(mailbox) = &context.session.user_input_mailbox {
+                        mailbox.enter_idle();
+                    }
+                    // loading 期间的队首输入在 idle 边界交接，直接回 Receive，
+                    // 不先发布一个并未真正等待的 TurnSuspended。
+                    if context.session.queue.has_required_for_run(&execution) {
                         if let Some(mailbox) = &context.session.user_input_mailbox {
-                            mailbox.enter_idle();
+                            mailbox.leave_idle();
                         }
-                        // loading 期间的队首输入在 idle 边界交接，直接回 Receive，
-                        // 不先发布一个并未真正等待的 TurnSuspended。
-                        if context.session.queue.has_wake_up() {
+                        continue;
+                    }
+                    tracing::debug!("Receive: queue empty, awaiting wake (idle_should_wait=true)");
+                    // 置 idle-suspended 标志：宿主 dispatch_prompt_turn 据此把
+                    // 挂起期间到达的用户 prompt 注入 inbox（而非在 prompt lock
+                    // 上阻塞至当前 turn 完成——bg 任务活跃时可能长达数分钟）。
+                    if let Some(flag) = &context.async_ctx.idle_suspended_flag {
+                        flag.store(true, Ordering::Release);
+                    }
+                    context.runtime.event_bus.emit_render(
+                        crate::agent::events_v2::RenderEvent::TurnSuspended {
+                            turn_id: context.turn_id(),
+                            agent_id: context.session.agent_id,
+                        },
+                    );
+                    let cancel_fut = context.session.turn.cancel_token.cancelled();
+                    tokio::pin!(cancel_fut);
+                    // 有界等待：界本身必须能唤醒挂起的 loop，否则只有偶发
+                    // 唤醒（任务注册/终态/取消）才会重新求值，界形同虚设。
+                    // 到点走 continue → Receive 退出求值 → 写交接。
+                    let handoff_deadline = context
+                        .async_ctx
+                        .handoff_deadline
+                        .as_ref()
+                        .and_then(|probe| probe());
+                    let deadline_tick = async move {
+                        match handoff_deadline {
+                            Some(deadline) => tokio::time::sleep_until(deadline).await,
+                            None => std::future::pending::<()>().await,
+                        }
+                    };
+                    tokio::pin!(deadline_tick);
+                    let registry_wait = async {
+                        if let Some(receiver) = idle_registry.as_mut() {
+                            if receiver.changed().await.is_err() {
+                                // The TaskManager is normally retained by
+                                // idle_should_wait. If it is dropped, do
+                                // not turn a closed watch channel into a
+                                // busy loop.
+                                std::future::pending::<()>().await;
+                            }
+                        } else {
+                            std::future::pending::<()>().await;
+                        }
+                    };
+                    tokio::pin!(registry_wait);
+                    tokio::select! {
+                        biased;
+                        _ = &mut cancel_fut => {
+                            // 醒来：无论由注入 prompt 还是 bg Defer 触发，先复位
+                            // 标志——后续 Receive 会 drain 队列并继续本 turn。
+                            if let Some(flag) = &context.async_ctx.idle_suspended_flag {
+                                flag.store(false, Ordering::Release);
+                            }
                             if let Some(mailbox) = &context.session.user_input_mailbox {
                                 mailbox.leave_idle();
                             }
-                            continue;
+                            return LoopResult::Interrupted;
                         }
-                        tracing::debug!(
-                            "Receive: queue empty, awaiting wake (idle_should_wait=true)"
-                        );
-                        // 置 idle-suspended 标志：宿主 dispatch_prompt_turn 据此把
-                        // 挂起期间到达的用户 prompt 注入 inbox（而非在 prompt lock
-                        // 上阻塞至当前 turn 完成——bg 任务活跃时可能长达数分钟）。
-                        if let Some(flag) = &context.async_ctx.idle_suspended_flag {
-                            flag.store(true, Ordering::Release);
-                        }
-                        context.runtime.event_bus.emit_state(
-                            crate::agent::events_v2::StateEvent::TurnSuspended {
-                                turn_id: context.turn_id(),
-                                agent_id: context.session.agent_id,
-                            },
-                        );
-                        let cancel_fut = context.session.turn.cancel_token.cancelled();
-                        tokio::pin!(cancel_fut);
-                        let registry_wait = async {
-                            if let Some(receiver) = idle_registry.as_mut() {
-                                if receiver.changed().await.is_err() {
-                                    // The TaskManager is normally retained by
-                                    // idle_should_wait. If it is dropped, do
-                                    // not turn a closed watch channel into a
-                                    // busy loop.
-                                    std::future::pending::<()>().await;
-                                }
-                            } else {
-                                std::future::pending::<()>().await;
+                        _ = context.session.queue.await_wake_for_run(&execution) => {
+                            // 醒来：无论由注入 prompt 还是 bg Defer 触发，先复位
+                            // 标志——后续 Receive 会 drain 队列并继续本 turn。
+                            if let Some(flag) = &context.async_ctx.idle_suspended_flag {
+                                flag.store(false, Ordering::Release);
                             }
-                        };
-                        tokio::pin!(registry_wait);
-                        tokio::select! {
-                            biased;
-                            _ = &mut cancel_fut => {
-                                // 醒来：无论由注入 prompt 还是 bg Defer 触发，先复位
-                                // 标志——后续 Receive 会 drain 队列并继续本 turn。
-                                if let Some(flag) = &context.async_ctx.idle_suspended_flag {
-                                    flag.store(false, Ordering::Release);
-                                }
-                                if let Some(mailbox) = &context.session.user_input_mailbox {
-                                    mailbox.leave_idle();
-                                }
+                            if let Some(mailbox) = &context.session.user_input_mailbox {
+                                mailbox.leave_idle();
+                            }
+                            if context.session.turn.is_cancelled() {
                                 return LoopResult::Interrupted;
                             }
-                            _ = inbox.await_wake() => {
-                                // 醒来：无论由注入 prompt 还是 bg Defer 触发，先复位
-                                // 标志——后续 Receive 会 drain 队列并继续本 turn。
-                                if let Some(flag) = &context.async_ctx.idle_suspended_flag {
-                                    flag.store(false, Ordering::Release);
-                                }
-                                if let Some(mailbox) = &context.session.user_input_mailbox {
-                                    mailbox.leave_idle();
-                                }
-                                if context.session.turn.is_cancelled() {
-                                    return LoopResult::Interrupted;
-                                }
-                                tracing::debug!(
-                                    turn_id = %context.session.turn.turn_id,
-                                    queue_len_after_wake = context.session.queue.len(),
-                                    "run_react_loop: idle inbox woken, continue to Receive"
-                                );
-                                // 醒来直接 continue 回 Receive——下一轮 Receive 用 drain_all()
-                                // 统一处理所有消息（Prompt + Info + Defer），不再需要 post-wake drain_for_end
-                                continue;
+                            tracing::debug!(
+                                turn_id = %context.session.turn.turn_id(),
+                                queue_len_after_wake = context.session.queue.len(),
+                                "run_react_loop: idle inbox woken, continue to Receive"
+                            );
+                            // 醒来直接 continue 回 Receive——下一轮 Receive 用 drain_all()
+                            // 统一处理所有消息（Prompt + Info + Defer），不再需要 post-wake drain_for_end
+                            continue;
+                        }
+                        _ = &mut deadline_tick => {
+                            if let Some(flag) = &context.async_ctx.idle_suspended_flag {
+                                flag.store(false, Ordering::Release);
                             }
-                            _ = &mut registry_wait => {
-                                if let Some(flag) = &context.async_ctx.idle_suspended_flag {
-                                    flag.store(false, Ordering::Release);
-                                }
-                                if let Some(mailbox) = &context.session.user_input_mailbox {
-                                    mailbox.leave_idle();
-                                }
-                                tracing::debug!(
-                                    turn_id = %context.session.turn.turn_id,
-                                    queue_len_after_wake = context.session.queue.len(),
-                                    "run_react_loop: registry activity changed, continue to Receive"
-                                );
-                                // The signal carries no task result. Receive must
-                                // re-check the queue and registry state itself.
-                                continue;
+                            if let Some(mailbox) = &context.session.user_input_mailbox {
+                                mailbox.leave_idle();
                             }
+                            tracing::debug!(
+                                turn_id = %context.session.turn.turn_id(),
+                                "run_react_loop: bounded wait deadline reached, re-evaluate exit"
+                            );
+                            // 到点必须回到退出判断，由 pending_handoff 写交接记录。
+                            continue;
+                        }
+                        _ = &mut registry_wait => {
+                            if let Some(flag) = &context.async_ctx.idle_suspended_flag {
+                                flag.store(false, Ordering::Release);
+                            }
+                            if let Some(mailbox) = &context.session.user_input_mailbox {
+                                mailbox.leave_idle();
+                            }
+                            tracing::debug!(
+                                turn_id = %context.session.turn.turn_id(),
+                                queue_len_after_wake = context.session.queue.len(),
+                                "run_react_loop: registry activity changed, continue to Receive"
+                            );
+                            // The signal carries no task result. Receive must
+                            // re-check the queue and registry state itself.
+                            continue;
                         }
                     }
                 }
-                if !context.session.queue.is_empty() {
+                if context.session.queue.has_required_for_run(&execution) {
                     tracing::debug!(
                         queue_len = context.session.queue.len(),
                         "run_react_loop: queue has pending messages, continue Receive"
@@ -854,6 +705,20 @@ pub async fn run_react_loop(context: StageContext, max_iterations: usize) -> Loo
                     queue_len = context.session.queue.len(),
                     "run_react_loop: exit (queue empty, no idle wait)"
                 );
+                // 有界等待到期：仍有未结算任务时写可观测交接后结束本轮，
+                // 不再无限等待（结果由 scope owner 对账后在 resume/下一轮可见）。
+                if let Some(handoff) = context
+                    .async_ctx
+                    .pending_handoff
+                    .as_ref()
+                    .and_then(|probe| probe())
+                {
+                    crate::agent::async_tasks::handoff::write_pending_handoff(
+                        &context.session,
+                        &handoff,
+                    )
+                    .await;
+                }
                 break 'rcra;
             }
 
@@ -864,6 +729,8 @@ pub async fn run_react_loop(context: StageContext, max_iterations: usize) -> Loo
                 tracing::warn!(
                     max_iterations,
                     semantic_iterations,
+                    budget_deferred_count = receive_out.budget_deferred_count,
+                    initial_input_watermark,
                     "ReAct v2 循环达到最大语义迭代次数"
                 );
                 return LoopResult::Error(crate::error::AgentError::MaxIterationsExceeded(
@@ -884,6 +751,9 @@ pub async fn run_react_loop(context: StageContext, max_iterations: usize) -> Loo
                     middleware_runner::run_before_agent(&context, &receive_out.input_message_ids)
                         .await
                 {
+                    if matches!(e, crate::error::AgentError::Interrupted) {
+                        return LoopResult::Interrupted;
+                    }
                     tracing::warn!(error = %e, "[v2] before_agent hook failed");
                 }
             } else if let Err(error) =
@@ -982,6 +852,14 @@ pub async fn run_react_loop(context: StageContext, max_iterations: usize) -> Loo
             if truncated_without_tools {
                 loop_state.consecutive_truncations += 1;
                 if loop_state.consecutive_truncations > MAX_TRUNCATION_CONTINUATIONS {
+                    // 终态在 v2_execute 被分类为 failure=None（stop_reason=MaxTokens、
+                    // turn_status=Error），该路径没有 fatal error!；此处是缺口唯一的可见记录点。
+                    tracing::warn!(
+                        attempts = loop_state.consecutive_truncations,
+                        max_continuations = MAX_TRUNCATION_CONTINUATIONS,
+                        model = %context.runtime.llm.model_name(),
+                        "连续无工具截断耗尽续跑预算，终止本轮"
+                    );
                     return LoopResult::Error(crate::error::AgentError::OutputTruncated {
                         attempts: loop_state.consecutive_truncations,
                     });
@@ -994,23 +872,19 @@ pub async fn run_react_loop(context: StageContext, max_iterations: usize) -> Loo
             continue;
         }
 
-        if mq_steering_tail_passes < MAX_MQ_STEERING_TAIL_PASSES
-            && context.session.queue.needs_mq_continuation()
-        {
-            mq_steering_tail_passes += 1;
+        if context.session.queue.has_required_for_run(&execution) {
             loop_state.has_tool_calls = false;
-            tracing::debug!(
-                pass = mq_steering_tail_passes,
-                queue_len = context.session.queue.len(),
-                "run_react_loop: MQ steering tail re-entry"
-            );
-            continue 'steering_tail;
+            continue 'receive_retry;
         }
         return LoopResult::Completed;
     }
 }
 
 // ─── Tests ───────────────────────────────────────────────────────────────────
+
+#[cfg(test)]
+#[path = "execution_policy_test.rs"]
+mod execution_policy_tests;
 
 #[cfg(test)]
 #[path = "stages_test.rs"]
@@ -1027,3 +901,7 @@ mod budget_recovery_integration_tests;
 #[cfg(test)]
 #[path = "terminal_wake_test.rs"]
 mod terminal_wake_tests;
+
+#[cfg(test)]
+#[path = "bounded_wait_exit_test.rs"]
+mod bounded_wait_exit_tests;

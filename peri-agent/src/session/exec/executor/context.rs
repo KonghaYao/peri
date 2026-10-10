@@ -1,14 +1,13 @@
 use std::sync::Arc;
 
 use peri_acp_types::{
-    interaction::{ChannelState, UserInteractionBroker},
+    interaction::UserInteractionBroker,
     messages::{BaseMessage, MessageContent},
     session::SessionAccessPort,
 };
 use tokio_util::sync::CancellationToken as AgentCancellationToken;
 
 use crate::agent::langfuse_bridge::LangfuseBridgeLike;
-use crate::agent::react::ReactLLM;
 use crate::session::exec::stage_builder::CachedLlmInstances;
 use crate::tools::ToolInvocationResolver;
 
@@ -102,6 +101,14 @@ impl FrozenSessionData {
     pub fn meta_harness(&self) -> &peri_acp_types::meta_harness::MetaHarnessState {
         &self.v2_frozen.meta_harness
     }
+
+    /// 冻结运行环境快照（H3）；`None` = 旧快照缺少结构化环境值（unavailable）。
+    ///
+    /// 单一事实源为 `v2_frozen.runtime_env`——渲染面只消费该快照，不在调用时
+    /// 重新探测（ARC-FROZEN-001）。
+    pub fn runtime_env(&self) -> Option<&peri_acp_types::frozen::FrozenRuntimeEnv> {
+        self.v2_frozen.runtime_env.as_ref()
+    }
 }
 
 /// Langfuse 遥测注入面（L5：ACP 宿主从 `LangfuseSession` 构造；None = 禁用）。
@@ -117,9 +124,13 @@ pub type LangfuseBridgeFactory =
 /// auto-classifier LLM 构造闭包（stage 装配注入面）。
 pub type AutoClassifierFactory =
     Arc<dyn Fn() -> Arc<tokio::sync::Mutex<Box<dyn peri_model::Model>>> + Send + Sync>;
-/// 子 agent LLM 工厂（支持 SubAgent LLM 缓存复用；stage 装配注入面）。
+/// 子 agent 模型工厂（支持 SubAgent LLM 缓存复用；stage 装配注入面）。
+///
+/// H1：只产出模型来源（[`SubagentLlmSource`]），不封装 `AgentModelBridge`——
+/// bridge 由有子链可用的一方（Agent 层 session factory）在子链装配点统一装
+/// with_system 身份与请求时 contribution provider。
 pub type SubagentLlmFactory =
-    Arc<dyn Fn(Option<&str>) -> Box<dyn ReactLLM + Send + Sync> + Send + Sync>;
+    Arc<dyn Fn(Option<&str>) -> crate::session::subagent::SubagentLlmSource + Send + Sync>;
 /// 防御性 frozen 构建器（ACP 宿主渲染面构造；turn.frozen=None 时回落）。
 pub type FrozenFallbackBuilder = Arc<dyn Fn(&str, Option<&str>) -> FrozenSessionData + Send + Sync>;
 /// turn 结束 Langfuse 钩子（返回 flush JoinHandle，drop = fire-and-forget）。
@@ -164,8 +175,6 @@ pub struct SessionContext {
     pub provider_fp: String,
     /// 生效上下文窗口（原 `provider.context_window()` / `context_1m()` 计算）。
     pub effective_context_window: u32,
-    /// CLAUDE.md excludes（原 `peri_config.config.claude_md_excludes`）。
-    pub claude_md_excludes: Option<Vec<String>>,
     /// `turn.frozen=None` 时构造最小 snapshot 的语言回退。
     /// production stage/render/subagent 必须从 `FrozenSessionData` 派生语言。
     pub language: Option<String>,
@@ -199,14 +208,11 @@ pub struct SessionContext {
     pub session_access: Option<Arc<dyn SessionAccessPort>>,
     /// 会话资源门面：transcript/subagent 的唯一会话行为入口（会话存储不再有第二个句柄）。
     pub session_resources: Option<Arc<dyn peri_acp_types::session_resources::SessionResources>>,
-    /// 本会话 root 的执行所有权（ACP SessionState 投影）：child 保存/认领的前置证明。
     /// 只读准入或无执行权的会话为 None——那时不得落任何 child。
-    pub execution_owner: Option<Arc<dyn peri_acp_types::workspace::SessionExecutionLease>>,
     pub thread_id: Option<String>,
 
     // ── middleware: middleware chain resources ─────────────────────────────
     pub plugin_skill_roots: Vec<peri_acp_types::skills::SkillRoot>,
-    pub plugin_agent_dirs: Vec<std::path::PathBuf>,
     pub plugin_loaded: Vec<peri_acp_types::plugin::LoadedPlugin>,
     pub hook_groups: Vec<Vec<peri_acp_types::hooks::RegisteredHook>>,
     pub cron_scheduler: Option<Arc<dyn peri_acp_types::cron::CronSchedulerPort>>,
@@ -215,16 +221,13 @@ pub struct SessionContext {
     pub session_mcp_capability: Option<Arc<dyn peri_acp_types::ports::SessionMcpCapabilityPort>>,
     pub dynamic_mcp_projection:
         Arc<parking_lot::Mutex<Option<Arc<dyn peri_acp_types::ports::SessionMcpProjectionLease>>>>,
-    pub channel_state: Option<Arc<ChannelState>>,
     pub tool_search_index: Arc<dyn peri_acp_types::ports::ToolSearchPort>,
-    /// Skills 扫描端口（prompt 渲染 available_agents / frozen 构造经此访问）。
-    pub skills: Arc<dyn peri_acp_types::ports::SkillsPort>,
+    /// Agent 候选目录端口（prompt 渲染 `{{available_agents}}` 经此访问；
+    /// W5：实现是会话级 MCP Agent registry 的只读投影，不再扫盘）。
+    pub agent_catalog: Arc<dyn peri_acp_types::ports::AgentCatalogPort>,
     pub shared_tools: Arc<
         parking_lot::RwLock<std::collections::BTreeMap<String, Arc<dyn crate::tools::BaseTool>>>,
     >,
-    pub lsp_servers: Vec<peri_acp_types::lsp::LspServerConfig>,
-    /// 会话级 LSP 服务器池端口（复用，None = 构造临时实例）。
-    pub lsp_pool: Option<Arc<dyn peri_acp_types::ports::LspPoolPort>>,
 
     // ── workflow: workflow agents ──────────────────────────────────────────
     pub workflow_executor: Option<Arc<dyn peri_acp_types::workflow::AgentExecutor>>,
@@ -271,24 +274,6 @@ pub struct SessionContext {
     /// 构造——生产不可达，print mode 已走 session/new 构建，None 时回落
     /// 最小 FrozenSessionData）。
     pub frozen_fallback_builder: Option<FrozenFallbackBuilder>,
-}
-
-/// Per-turn computed configuration derived from [`SessionContext`].
-///
-/// Built once at the top of [`run_session_loop`], passed by reference to
-/// [`build_and_execute_agent`] to avoid recomputing and to keep the agent
-/// builder function signature manageable.
-#[allow(dead_code)]
-struct TurnConfig<'a> {
-    cwd: &'a str,
-    frozen: Option<&'a FrozenSessionData>,
-    language: Option<String>,
-    cancel: &'a AgentCancellationToken,
-    permission_mode: &'a Arc<peri_acp_types::permission::SharedPermissionMode>,
-    broker: &'a Arc<dyn UserInteractionBroker>,
-    session_start_source: Option<String>,
-    auxiliary_model: Option<Arc<dyn peri_model::Model>>,
-    effective_context_window: u32,
 }
 
 /// Per-turn data passed alongside [`SessionContext`] to [`run_session_loop`].

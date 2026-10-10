@@ -1,10 +1,29 @@
 use crate::middleware::capabilities as hook_state;
 use crate::{
     agent::react::{AgentOutput, Reasoning, ToolCall, ToolResult},
-    error::AgentResult,
+    error::{AgentError, AgentResult},
     middleware::{prompt_sections::PromptSection, r#trait::Middleware},
     tools::BaseTool,
 };
+use peri_model::prompt_cache::SYSTEM_PROMPT_DYNAMIC_BOUNDARY;
+
+/// 动态 prompt 贡献的准入错误（M1）：带来源 middleware 名，调用方可定位。
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+pub enum PromptContributionError {
+    /// 贡献正文含 reserved cache boundary token——继续拼接会产生歧义请求
+    /// （重复控制字），必须在组合边界显式失败而不是剥离内容。
+    #[error("middleware '{middleware}' 的 prompt_contribution 含 reserved cache boundary token")]
+    ReservedBoundaryToken { middleware: String },
+}
+
+impl PromptContributionError {
+    /// 贡献来源 middleware 名（结构化诊断字段）。
+    pub fn middleware(&self) -> &str {
+        match self {
+            Self::ReservedBoundaryToken { middleware } => middleware,
+        }
+    }
+}
 
 /// 中间件链 - 按顺序执行所有中间件
 ///
@@ -133,8 +152,9 @@ impl MiddlewareChain {
     /// 中间件的 batch 实现可将多个 tool call 合并处理（如 HITL 批量审批）。
     /// 当所有中间件都使用默认逐条实现时，效果等同于逐个调用 `run_before_tool`。
     ///
-    /// 返回结果按输入顺序一一对应。若某个中间件返回非 `ToolRejected` 错误，
-    /// 链式处理中断，后续中间件不再执行，其余位置填充相同错误。
+    /// 每个结果按顺序对应一个尚未拒绝的调用。若返回数量不符，本轮所有尚未拒绝
+    /// 的调用都变为 `MiddlewareError`，且后续中间件不再执行；此前的拒绝或错误保留。
+    /// 对数量匹配的返回，错误仍按单个调用传播，后续中间件只处理保持成功的调用。
     pub async fn run_before_tools_batch(
         &self,
         state: &mut dyn hook_state::BeforeToolState,
@@ -153,13 +173,34 @@ impl MiddlewareChain {
 
             let batch_results = middleware.before_tools_batch(state, &current_calls).await;
 
+            if batch_results.len() != current_calls.len() {
+                let reason = format!(
+                    "before_tools_batch returned {} results for {} calls",
+                    batch_results.len(),
+                    current_calls.len()
+                );
+                tracing::error!(
+                    middleware = middleware.name(),
+                    expected = current_calls.len(),
+                    actual = batch_results.len(),
+                    "middleware returned an invalid batch result count"
+                );
+                for result in results.iter_mut().filter(|result| result.is_ok()) {
+                    *result = Err(AgentError::MiddlewareError {
+                        middleware: middleware.name().to_string(),
+                        reason: reason.clone(),
+                    });
+                }
+                break;
+            }
+
             // 将 batch 结果按位置回写（消费结果，避免 AgentError::Clone 要求）
             let mut batch_iter = batch_results.into_iter();
             for result in results.iter_mut() {
                 if result.is_ok() {
-                    if let Some(batch_result) = batch_iter.next() {
-                        *result = batch_result;
-                    }
+                    *result = batch_iter
+                        .next()
+                        .expect("batch result count was validated above");
                 }
             }
         }
@@ -186,7 +227,7 @@ impl MiddlewareChain {
     /// 每个中间件按注册顺序依次执行，遇错即停。
     pub async fn run_after_tools_batch(
         &self,
-        state: &mut dyn hook_state::StateView,
+        state: &mut dyn hook_state::AfterToolsBatchState,
         results: &[(ToolCall, ToolResult)],
     ) -> AgentResult<()> {
         for middleware in &self.middlewares {
@@ -399,15 +440,37 @@ impl MiddlewareChain {
 
     // ── 声明式 Prompt 贡献 ──
 
-    /// 收集所有中间件当前的 prompt_contribution，顺序拼接为单个 String。
+    /// 收集所有中间件当前的 prompt_contribution，非空贡献以空行（`\n\n`）连接。
     ///
     /// 主 Agent bridge 在 `before_agent` 后构造每个 `ModelRequest` 时调用一次；
-    /// 只有返回 `Some` 的中间件会被包含，各段之间直接拼接（调用方负责分隔符）。
-    pub fn collect_prompt_contributions(&self) -> String {
-        self.middlewares
-            .iter()
-            .filter_map(|m| m.prompt_contribution())
-            .collect()
+    /// 只有返回 `Some` 的中间件会被包含。分隔符由本收集器统一负责——调用方不再
+    /// 补分隔符，也不手工复制组合算法（M1 单一权威）。
+    ///
+    /// 校验（M1）：贡献正文不得含 reserved cache boundary token
+    /// （[`SYSTEM_PROMPT_DYNAMIC_BOUNDARY`]）；非法贡献返回带来源
+    /// （middleware 名）的错误，由 provider 边界显式失败——不静默剥离内容，
+    /// 也不继续构造歧义请求（provider 侧重复 marker 的 fail-closed 缓存关闭
+    /// 防线保持不变）。
+    pub fn collect_prompt_contributions(&self) -> Result<String, PromptContributionError> {
+        let mut collected = String::new();
+        for middleware in &self.middlewares {
+            let Some(contribution) = middleware.prompt_contribution() else {
+                continue;
+            };
+            if contribution.is_empty() {
+                continue;
+            }
+            if contribution.contains(SYSTEM_PROMPT_DYNAMIC_BOUNDARY) {
+                return Err(PromptContributionError::ReservedBoundaryToken {
+                    middleware: middleware.name().to_string(),
+                });
+            }
+            if !collected.is_empty() {
+                collected.push_str("\n\n");
+            }
+            collected.push_str(&contribution);
+        }
+        Ok(collected)
     }
 }
 
@@ -420,3 +483,15 @@ impl Default for MiddlewareChain {
 #[cfg(test)]
 #[path = "chain_test.rs"]
 mod tests;
+
+#[cfg(test)]
+#[path = "chain_model_test.rs"]
+mod model_tests;
+
+#[cfg(test)]
+#[path = "chain_prompt_test.rs"]
+mod prompt_tests;
+
+#[cfg(test)]
+#[path = "chain_reminder_test.rs"]
+mod reminder_tests;

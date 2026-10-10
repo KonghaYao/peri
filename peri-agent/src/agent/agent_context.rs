@@ -82,6 +82,10 @@ impl<'a> AgentContext<'a> {
 }
 
 impl MiddlewareState for AgentContext<'_> {
+    fn execution_binding(&self) -> Option<peri_acp_types::session::ExecutionBinding> {
+        Some(self.ctx.session.turn.execution_binding())
+    }
+
     fn cwd(&self) -> &str {
         &self.ctx.session.turn.cwd
     }
@@ -141,12 +145,17 @@ impl MiddlewareState for AgentContext<'_> {
             .is_some_and(|probe| probe())
     }
 
-    fn inbox_handle(&self) -> Option<&peri_acp_types::session::InboxHandle> {
-        self.ctx.async_ctx.inbox_handle.as_ref()
-    }
-
     fn local_tools(&self) -> Option<&crate::agent::stages::SharedToolMap> {
         Some(&self.ctx.runtime.tools)
+    }
+    fn tool_source(&self, name: &str) -> Option<crate::session::tool_catalog::ToolSource> {
+        self.ctx
+            .runtime
+            .tool_catalog
+            .snapshot()
+            .tools
+            .get(name)
+            .map(|entry| entry.source.clone())
     }
 }
 

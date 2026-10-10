@@ -30,86 +30,6 @@ fn test_ancestor_flags_can_restore_but_cannot_mutate() {
     assert!(transcript.flags(own_id).excluded, "own区域仍允许压缩");
 }
 
-/// [回归测试] 内部 Compact 文本仅在模型出口包装，数据库原始内容和 ID 保持不变。
-#[test]
-fn test_legacy_compact_model_projection_preserves_storage() {
-    let text = "[最近读取的文件: /a.rs]\nfn main() { /* </system-reminder> */ }";
-    let mut transcript = MessageTranscript::new();
-    let id = transcript.append(BaseMessage::human(text));
-    let view = transcript.visible_model_messages().unwrap();
-    assert_eq!(view[0].id(), id);
-    assert!(view[0].content().starts_with("<system-reminder>"));
-    assert!(view[0].content().contains("&lt;/system-reminder&gt;"));
-    assert_eq!(transcript.get(id).unwrap().message().content(), text);
-    transcript.set_excluded(id, true);
-    assert!(transcript.visible_model_messages().unwrap().is_empty());
-}
-
-#[test]
-fn reminder_entry_preserves_stable_identity_without_placeholder_state() {
-    use peri_acp_types::system_reminder::{
-        ReminderAudience, ReminderAudiences, ReminderCategory, ReminderDelivery, ReminderSeverity,
-        ReminderSource, SystemReminder, TrustedSystemReminderFactory, SYSTEM_REMINDER_VERSION,
-    };
-    let reminder = TrustedSystemReminderFactory::for_producer()
-        .construct(SystemReminder {
-            version: SYSTEM_REMINDER_VERSION,
-            category: ReminderCategory::Task,
-            source: ReminderSource("identity_test".into()),
-            kind: "done".into(),
-            severity: ReminderSeverity::Info,
-            delivery: ReminderDelivery::Configurable,
-            audiences: ReminderAudiences(vec![ReminderAudience::Model]),
-            body: "non-empty".into(),
-            summary: None,
-            metadata: serde_json::json!({}),
-        })
-        .unwrap();
-    let mut transcript = MessageTranscript::new();
-    let id = transcript.append_system_reminder(reminder);
-    let entry = transcript.get(id).unwrap();
-
-    assert_eq!(entry.id(), id);
-    assert!(entry.as_message().is_none());
-    assert_eq!(entry.project_message().unwrap().id(), id);
-    assert!(!entry.project_message().unwrap().content().is_empty());
-}
-
-#[test]
-fn test_system_reminder_projects_once_as_human() {
-    use peri_acp_types::system_reminder::{
-        encode_system_reminder, ReminderAudience, ReminderAudiences, ReminderCategory,
-        ReminderDelivery, ReminderSeverity, ReminderSource, SystemReminder,
-        TrustedSystemReminderFactory, SYSTEM_REMINDER_VERSION,
-    };
-
-    let reminder = TrustedSystemReminderFactory::for_producer()
-        .construct(SystemReminder {
-            version: SYSTEM_REMINDER_VERSION,
-            category: ReminderCategory::Task,
-            source: ReminderSource("test".into()),
-            kind: "completed".into(),
-            severity: ReminderSeverity::Info,
-            delivery: ReminderDelivery::Configurable,
-            audiences: ReminderAudiences(vec![ReminderAudience::Model]),
-            body: "already <system-reminder> text".into(),
-            summary: None,
-            metadata: serde_json::json!({}),
-        })
-        .unwrap();
-    let expected = encode_system_reminder(&reminder).unwrap();
-    let mut transcript = MessageTranscript::new();
-    transcript.append_system_reminder(reminder);
-
-    let projected = transcript.visible_model_messages().unwrap();
-    assert!(matches!(&projected[0], BaseMessage::Human { .. }));
-    assert_eq!(projected[0].content(), expected);
-    assert_eq!(
-        projected[0].content().matches("</system-reminder>").count(),
-        1
-    );
-}
-
 use std::sync::Arc;
 
 use peri_acp_types::store::CompactionChange;
@@ -181,12 +101,12 @@ async fn test_flush_persistence_makes_appends_visible() {
 /// 已经进入内存但未落库的内容不会被说成已保存。
 #[tokio::test]
 async fn test_flush_persistence_failure_is_sticky() {
-    let mut session = TestSession::open().await;
-    let mut transcript =
-        MessageTranscript::new().with_persistence(session.resources(), session.thread_id.clone());
+    let session = TestSession::open().await;
+    let mut transcript = MessageTranscript::new().with_persistence(
+        session.read_only_resources().await,
+        session.thread_id.clone(),
+    );
     transcript.append(make_human("cannot be persisted"));
-    // 丢弃执行所有权：此后写入按 LeaseRequired 真实失败（不是 mock 假装失败）
-    session.release_lease();
 
     let error = transcript.flush_persistence().await.unwrap_err();
     let repeated = transcript.flush_persistence().await.unwrap_err();
@@ -937,4 +857,105 @@ fn test_projection_directive_none_when_not_set() {
         !json.contains("projection"),
         "JSON 应不含 projection 字段（skip_serializing_if）"
     );
+}
+
+/// H8：模型投影与客户端快照各自按目标 audience 过滤，且持久化 canonical
+/// reminder 不受影响。
+fn reminder_with(
+    kind: &str,
+    delivery: peri_acp_types::system_reminder::ReminderDelivery,
+    audiences: Vec<peri_acp_types::system_reminder::ReminderAudience>,
+) -> peri_acp_types::system_reminder::TrustedSystemReminder {
+    use peri_acp_types::system_reminder::{
+        ReminderAudiences, ReminderCategory, ReminderSeverity, ReminderSource, SystemReminder,
+        TrustedSystemReminderFactory, SYSTEM_REMINDER_VERSION,
+    };
+    TrustedSystemReminderFactory::for_producer()
+        .construct(SystemReminder {
+            version: SYSTEM_REMINDER_VERSION,
+            category: ReminderCategory::Guidance,
+            source: ReminderSource("audience_test".into()),
+            kind: kind.into(),
+            severity: ReminderSeverity::Info,
+            delivery,
+            audiences: ReminderAudiences(audiences),
+            body: format!("body of {kind}"),
+            summary: None,
+            metadata: serde_json::json!({}),
+        })
+        .unwrap()
+}
+
+#[test]
+fn audience_matrix_splits_model_projection_from_client_snapshot() {
+    use peri_acp_types::system_reminder::{ReminderAudience, ReminderDelivery};
+
+    let mut transcript = MessageTranscript::new();
+    transcript.append(BaseMessage::human("user turn"));
+    let client_only_id = transcript.append_system_reminder(reminder_with(
+        "client_only",
+        ReminderDelivery::Required,
+        vec![ReminderAudience::Tui],
+    ));
+    let model_only_id = transcript.append_system_reminder(reminder_with(
+        "model_only",
+        ReminderDelivery::Configurable,
+        vec![ReminderAudience::Model],
+    ));
+    let both_id = transcript.append_system_reminder(reminder_with(
+        "both",
+        ReminderDelivery::Configurable,
+        vec![ReminderAudience::Model, ReminderAudience::Tui],
+    ));
+
+    let model = transcript.visible_model_messages().unwrap();
+    let model_ids: Vec<_> = model.iter().map(BaseMessage::id).collect();
+    assert!(
+        !model_ids.contains(&client_only_id),
+        "Tui-only 提醒不得进入模型推理"
+    );
+    assert!(model_ids.contains(&model_only_id));
+    assert!(model_ids.contains(&both_id));
+
+    let snapshot = transcript.visible_snapshot();
+    let snapshot_ids: Vec<_> = snapshot.iter().map(BaseMessage::id).collect();
+    assert!(
+        !snapshot_ids.contains(&model_only_id),
+        "Model-only 内容不得出现在客户端 wire 上"
+    );
+    assert!(snapshot_ids.contains(&client_only_id));
+    assert!(snapshot_ids.contains(&both_id));
+
+    for id in [client_only_id, model_only_id, both_id] {
+        assert!(
+            matches!(transcript.get(id), Some(TranscriptEntry::Reminder { .. })),
+            "过滤只发生在出口，持久化保留 canonical reminder"
+        );
+    }
+}
+
+#[test]
+fn diagnostic_only_reminders_reach_neither_model_nor_client() {
+    use peri_acp_types::system_reminder::{ReminderAudience, ReminderDelivery};
+
+    let mut transcript = MessageTranscript::new();
+    let id = transcript.append_system_reminder(reminder_with(
+        "diagnostic",
+        ReminderDelivery::DiagnosticOnly,
+        vec![ReminderAudience::Model, ReminderAudience::Tui],
+    ));
+
+    let model_ids: Vec<_> = transcript
+        .visible_model_messages()
+        .unwrap()
+        .iter()
+        .map(BaseMessage::id)
+        .collect();
+    let snapshot_ids: Vec<_> = transcript
+        .visible_snapshot()
+        .iter()
+        .map(BaseMessage::id)
+        .collect();
+    assert!(!model_ids.contains(&id));
+    assert!(!snapshot_ids.contains(&id));
 }

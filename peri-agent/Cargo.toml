@@ -6,7 +6,7 @@ description = "Rust Agent framework with middleware system, aligned with @langgr
 license = "Apache-2.0"
 
 [dependencies]
-peri-process = { path = "../peri-process" }
+peri-time = { path = "../peri-time" }
 anyhow.workspace = true
 async-trait.workspace = true
 chrono.workspace = true
@@ -17,20 +17,22 @@ thiserror.workspace = true
 futures.workspace = true
 tokio.workspace = true
 uuid.workspace = true
+sha2.workspace = true
 tracing.workspace = true
 tracing-subscriber.workspace = true
 tracing-appender.workspace = true
 tokio-util.workspace = true
-sqlx = { workspace = true }
 parking_lot.workspace = true
 peri-model = { path = "../peri-model" }
 peri-acp-types = { path = "../peri-acp-types" }
-peri-resources = { path = "../peri-resources" }
 sysinfo.workspace = true
-libc = "0.2"
-fuzzy-matcher = "0.3"
 
 [dev-dependencies]
+libc = "0.2"
 tokio = { workspace = true, features = ["test-util"] }
 tempfile.workspace = true
 url.workspace = true
+
+[target.'cfg(not(target_os = "emscripten"))'.dependencies]
+tokio = { workspace = true, features = ["full"] }
+peri-resources = { path = "../peri-resources" }

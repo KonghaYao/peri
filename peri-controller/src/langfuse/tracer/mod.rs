@@ -7,7 +7,7 @@
 //! - `turn.rs`：turn 生命周期编排与最终 flush；所有观测先同步入队。
 //! - `turn_fallback.rs`：遗留 stage/generation 的收尾投影。
 //! - `turn_error.rs`：稳定错误分类和未采样错误 turn 的观测投影。
-//! - `event_builder.rs`：基础设施层，统一时间戳、UUID、try_add + warn 样板。
+//! - `event_builder.rs`：基础设施层，统一时间戳、UUID、入队与丢弃计数。
 //! - `usage.rs`：TokenUsage → langfuse_usage_details 转换 + 重试 metadata 组装。
 //! - `sampling.rs`：采样决策器。
 //! - `stages.rs`：ReAct 5 阶段 Span 管理。
@@ -44,7 +44,7 @@ mod usage;
 use super::config::LangfuseConfig;
 use super::session_like::LangfuseSessionLike;
 use crate::langfuse::tracer::stages::StageHandle;
-use event_builder::{new_uuid, now_rfc3339, try_add_or_warn_via_session, VERSION};
+pub(crate) use event_builder::{new_uuid, now_rfc3339, try_add_or_warn_via_session, VERSION};
 use langfuse_client::types::{EventBody, ObservationLevel};
 use langfuse_client::IngestionEvent;
 use peri_agent::agent::events_v2::TurnErrorReason;
@@ -216,3 +216,6 @@ impl LangfuseTracer {
 #[cfg(test)]
 #[path = "tracer_test.rs"]
 mod tests;
+
+#[cfg(test)]
+mod production_observation_test;

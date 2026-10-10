@@ -7,13 +7,26 @@ use super::v2_bridge::build_subagent_stop_v2;
 use crate::agent::events::ExecutorEvent;
 use crate::agent::events_v2::{observe_event_to_executor, EventBus};
 use crate::session::factory::DeregisterRuntimeFn;
-use crate::session::turn::TurnId;
+use crate::session::TurnContext;
 use peri_acp_types::session_resources::{SessionMetaPatch, SessionResources};
 use peri_acp_types::thread::{AgentStatus, ThreadId};
 
 // The loop has released its producers before this seam. A cleanup guard must
 // only retain a Weak<EventBus>, otherwise closing the stream would deadlock.
 // Join failure is execution failure, even when the model already finished.
+pub(crate) async fn flush_session_history(
+    session: &crate::session::Session,
+) -> crate::error::AgentResult<()> {
+    let sender = session.transcript().read().persist_tx_handle();
+    if let Some(sender) = sender {
+        if let Err(error) = crate::session::MessageTranscript::flush_via_tx(&sender).await {
+            tracing::error!(session_id = ?session.store().thread_id, %error, "session history flush failed");
+            return Err(error.into());
+        }
+    }
+    Ok(())
+}
+
 pub(super) async fn drain_subagent_events(
     event_bus: Arc<EventBus>,
     forwarder: tokio_util::task::AbortOnDropHandle<Option<crate::agent::events_v2::ObserveEvent>>,
@@ -67,7 +80,7 @@ impl Drop for DeregisterGuard {
 /// 排空，遥测可以保持 incomplete，不能宣称取消后仍能保证 v2 Stop 交付。
 pub(crate) struct BgStopEmitV2 {
     pub(crate) event_bus: Weak<EventBus>,
-    pub(crate) turn_id: TurnId,
+    pub(crate) turn: Arc<TurnContext>,
     pub(crate) parent_agent_id: Option<AgentId>,
     pub(crate) child_agent_id: AgentId,
     pub(crate) agent_name: String,
@@ -103,7 +116,7 @@ impl Drop for BgCleanupGuard {
             // 单一 v2 事件构造：v2 发射（parent 身份存在时）+ v1 协议化直发
             // （sender 存在时）。ObserveEvent 身份透传：child_agent_id → instance_id。
             let ev = build_subagent_stop_v2(
-                stop.turn_id,
+                stop.turn.turn_id(),
                 stop.parent_agent_id,
                 stop.child_agent_id,
                 &stop.agent_name,
@@ -145,7 +158,7 @@ pub(crate) async fn on_subagent_stop_handler(
 ) {
     // 1. lifecycle hook（闭包由 middlewares 构造，内部触发 RegisteredHook）
     if let Some(ref on_stop) = on_subagent_stop {
-        on_stop(agent_id, cwd, output_summary, is_error);
+        on_stop(child_thread_id, agent_id, cwd, output_summary, is_error);
     }
     // 3. 终态状态（仅 sync 路径有此步骤）：定向 patch 只写状态，不覆盖并发标题/计数。
     if let Some(ref store) = session_resources {
@@ -154,7 +167,7 @@ pub(crate) async fn on_subagent_stop_handler(
         } else {
             AgentStatus::Done
         };
-        let _ = store
+        if let Err(error) = store
             .update_session_meta(
                 &ThreadId::from(child_thread_id),
                 &SessionMetaPatch {
@@ -162,7 +175,10 @@ pub(crate) async fn on_subagent_stop_handler(
                     ..Default::default()
                 },
             )
-            .await;
+            .await
+        {
+            tracing::warn!(thread_id = %child_thread_id, %error, "subagent terminal status write failed");
+        }
     }
 }
 

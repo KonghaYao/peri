@@ -5,20 +5,92 @@ use peri_acp_types::identity::AgentId;
 use peri_acp_types::thread::CancelPolicy;
 use tokio_util::sync::CancellationToken;
 
-use crate::agent::async_tasks::{BgTaskKind, TaskManager};
+use crate::agent::async_tasks::TaskManager;
 use crate::agent::events::{AgentEventHandler, ExecutorEvent};
 use crate::agent::react::ReactLLM;
 use crate::agent::{CompactConfig, ContextBudget, LangfuseBridgeLike};
-use crate::error_suggest::{ErrorSuggestRegistry, ToolRegistrySnapshot};
 use crate::messages::BaseMessage;
 use crate::middleware::chain::MiddlewareChain;
 use crate::session::factory::{DeregisterRuntimeFn, RegisterRuntimeFn};
 use crate::session::Session;
 use crate::tools::{BaseTool, ToolInvocationResolver};
 use peri_acp_types::session_resources::SessionResources;
-use peri_acp_types::workspace::SessionExecutionLease;
 
 // ─── 意图类型 ────────────────────────────────────────────────────────────────
+
+/// 子 Agent 模型来源（H1）：ACP 模型工厂只负责模型解析与创建。
+///
+/// `AgentModelBridge` 的统一装配点在有子链可用的 Agent 层 session factory
+/// （[`build_subagent_session_v2`](super::factory::context)）——身份 system 与
+/// 请求时 `collect_prompt_contributions()` provider 在那里一次装上，定义型 /
+/// fork、前台 / 后台、live resume 与冷恢复共用，不再由工厂预先封装 bridge。
+///
+/// 没有旁路变体：所有调用方（生产与测试）都提供 `peri_model::Model`，身份与
+/// 请求时 contribution provider 的装配对二者一致。
+pub struct SubagentLlmSource {
+    model: Arc<dyn peri_model::Model>,
+    model_name: String,
+    session_id: Option<String>,
+}
+
+impl SubagentLlmSource {
+    /// 生产构造：只做模型解析结果投影；`model_name` 由工厂从解析出的 provider
+    /// 提供（`peri_model::Model` 无名称接口），供持久化 metadata 与恢复核对。
+    pub fn model(model: Arc<dyn peri_model::Model>, model_name: impl Into<String>) -> Self {
+        Self {
+            model,
+            model_name: model_name.into(),
+            session_id: None,
+        }
+    }
+
+    pub fn with_session_id(mut self, session_id: impl Into<String>) -> Self {
+        self.session_id = Some(session_id.into());
+        self
+    }
+
+    pub fn model_name(&self) -> &str {
+        &self.model_name
+    }
+
+    /// hook 槽位等**无子链**的消费方入口：只做 plain bridge（仅 session id），
+    /// 不参与子身份 / 请求时 contribution 装配。
+    ///
+    /// 这**不是**子 Agent 装配旁路：子链一律经 [`Self::into_react_llm`] 装身份与
+    /// provider；本入口仅服务 hook 的独立 LLM 消费者。
+    pub fn into_plain_bridge(self) -> Box<dyn ReactLLM + Send + Sync> {
+        let mut bridge = crate::agent::model_bridge::AgentModelBridge::new(self.model);
+        if let Some(session_id) = self.session_id {
+            bridge = bridge.with_session_id(session_id);
+        }
+        Box::new(bridge)
+    }
+
+    /// 在子链装配点转成最终 ReactLLM：装 bridge（身份 + 请求时贡献 provider）。
+    #[allow(clippy::type_complexity)]
+    pub(crate) fn into_react_llm(
+        self,
+        identity_system: &str,
+        external_instructions: Option<Arc<str>>,
+        legacy_embedded_instructions: bool,
+        provider: crate::agent::model_bridge::SystemContributionProvider,
+        normalize_persisted_identity: bool,
+    ) -> Box<dyn ReactLLM + Send + Sync> {
+        let mut bridge = crate::agent::model_bridge::AgentModelBridge::new(self.model)
+            .with_external_instructions(external_instructions)
+            .with_legacy_prompt_provenance(legacy_embedded_instructions, true)
+            .with_system_contribution_provider(provider);
+        if let Some(session_id) = self.session_id {
+            bridge = bridge.with_session_id(session_id);
+        }
+        if !identity_system.trim().is_empty() {
+            bridge = bridge
+                .with_system(identity_system)
+                .with_absorbed_system_message(normalize_persisted_identity);
+        }
+        Box::new(bridge)
+    }
+}
 
 /// Fork 指令类型，决定 fork agent 使用的 system directive 模板
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -55,10 +127,13 @@ pub enum SubagentRunMode {
 }
 
 /// 子 agent 生命周期 hook 触发闭包（middlewares 构造，内部触发 RegisteredHook）。
-/// 参数：(agent_name, cwd)。
-pub type SubagentLifecycleStart = Arc<dyn Fn(&str, &str) + Send + Sync>;
-/// 参数：(agent_name, cwd, result, is_error)。
-pub type SubagentLifecycleStop = Arc<dyn Fn(&str, &str, &str, bool) + Send + Sync>;
+///
+/// 参数：(child_thread_id, agent_name, cwd)。`child_thread_id` 是子会话的真实
+/// 身份（= v2 `child_agent_id`），hook 载荷的 `agent_id` 即来自它——不能用
+/// agent 名代替（同名 agent 的多次执行必须可区分）。
+pub type SubagentLifecycleStart = Arc<dyn Fn(&str, &str, &str) + Send + Sync>;
+/// 参数：(child_thread_id, agent_name, cwd, result, is_error)。
+pub type SubagentLifecycleStop = Arc<dyn Fn(&str, &str, &str, &str, bool) + Send + Sync>;
 
 // ─── 子链装配（依赖反转，ARC-MIDDLEWARE-001） ───────────────────────────────
 
@@ -82,11 +157,20 @@ pub struct SubagentChainContext {
 
 /// 子 agent 中间件链装配器：由中间件层提供实现。
 ///
-/// 链序（AgentsMd→Skills→[SkillPreload]→Todo）是行为契约，实现方必须保持
+/// 链序（AgentsMd→Skills→[SkillPreload]→Todo→[ToolSearch]）是行为契约，实现方必须保持
 /// `peri-middlewares/src/subagent/tool/mod.rs` 的 `build_subagent_middlewares`
 /// 顺序（ARC-MIDDLEWARE-001）。
 pub trait SubagentChainAssembler: Send + Sync {
     fn assemble(&self, ctx: &SubagentChainContext) -> MiddlewareChain;
+
+    fn bind_tools(
+        &self,
+        _session: &Arc<Session>,
+        tools: Vec<Arc<dyn BaseTool>>,
+        _tool_filter: crate::session::tool_catalog::ToolFilter,
+    ) -> Vec<Arc<dyn BaseTool>> {
+        tools
+    }
 }
 
 // ─── 父侧运行时宿主 ──────────────────────────────────────────────────────────
@@ -97,18 +181,16 @@ pub trait SubagentChainAssembler: Send + Sync {
 #[derive(Clone, Default)]
 #[allow(clippy::type_complexity)]
 pub struct SubagentHost {
+    pub close_state: Arc<super::close::SubagentCloseState>,
+    pub mcp_pool: Option<Arc<dyn peri_acp_types::ports::McpPoolPort>>,
     /// 会话资源门面（生产路径非 None；None 仅测试/遗留路径，跳过落库）
     pub session_resources: Option<Arc<dyn SessionResources>>,
-    /// 本会话 root 的执行所有权：`save_child` 需要调用方证明自己持有这条 owner
-    /// （门面据此拒绝「借别人的所有权写」）。None = 无执行权，子会话不落库。
-    pub execution_owner: Option<Arc<dyn SessionExecutionLease>>,
     /// 后台任务管理器（per-session 聚合）
     pub task_manager: Option<Arc<TaskManager>>,
     /// 后台任务完成事件通道（bg pump，独立于主 event pump）
     pub bg_event_sender: Option<tokio::sync::mpsc::UnboundedSender<ExecutorEvent>>,
-    /// bg 完成同步回调（registry.complete 之前调用，推送 Defer 到主 agent MQ）
-    pub on_bg_complete:
-        Option<Arc<dyn Fn(&crate::agent::events::BackgroundTaskResult, BgTaskKind) + Send + Sync>>,
+    /// bg 完成同步回调（registry.complete 之前调用，推送 Defer 到本会话 MQ）
+    pub on_bg_complete: Option<peri_acp_types::tasks::OnBgCompleteFn>,
     /// 子 agent 启动注册回调（active_agents）
     pub register_runtime: Option<RegisterRuntimeFn>,
     /// 子 agent 结束注销回调
@@ -117,8 +199,6 @@ pub struct SubagentHost {
     pub langfuse_bridge: Option<Arc<dyn LangfuseBridgeLike>>,
     /// Frozen CLAUDE.local.md（父 session 冻结数据中唯一不在 FrozenContext 的字段）
     pub frozen_claude_local_md: Option<Arc<String>>,
-    /// Frozen system prompt（fork 路径复用以避免重建；父 session 冻结的 subagent 版本）
-    pub frozen_system_prompt: Option<Arc<String>>,
     /// 父线程 ID 回退值：被 [`parent_thread_id_of`] 在 spawn 写盘读取
     /// （主 session `store().thread_id` 恒 None 时是本链的权威值，由 executor
     /// 以 `ctx.thread_id` 注入；生产路径为 spawn_subagent 从 parent session
@@ -159,20 +239,20 @@ pub struct SubagentSpawnConfig {
     /// agent 定义声明的 skills（SkillPreload 装配输入）
     pub skill_names: Vec<String>,
     // ── 装配产物 ──
-    /// SubAgent LLM（ReactLLM 实现/装饰器）
-    pub llm: Box<dyn ReactLLM + Send + Sync>,
+    /// SubAgent 模型来源（H1）：bridge（身份 + 请求时贡献）由 Agent 层
+    /// session factory 在子链装配点构造，工厂不预先封装。
+    pub llm: SubagentLlmSource,
     /// 子 agent 中间件链装配器（middlewares 实现，链序契约 ARC-MIDDLEWARE-001）
     pub chain_assembler: Arc<dyn SubagentChainAssembler>,
     /// 过滤后的工具集（agent 定义路径按 tools/disallowed_tools 过滤）
     pub tools: Vec<Arc<dyn BaseTool>>,
     /// Canonical child policy, reapplied after every capability generation refresh.
-    pub tool_filter: Arc<dyn Fn(&str) -> bool + Send + Sync>,
-    /// SubAgent system prompt（注入 transcript 起始处）
+    pub tool_filter: crate::session::tool_catalog::ToolFilter,
+    /// SubAgent 身份 system（H1/M3）：子能力投影后的身份字节，装配时随子
+    /// `FrozenContext.system_prompt` 定格，由 bridge base system 注入每次请求；
+    /// 同时作为子会话 own history 起始的 System 消息持久化（恢复路径据此读回，
+    /// 恢复不重注入）。请求投影按内容相等吸收 transcript 中该条，身份恰一次。
     pub system_prompt: Option<String>,
-    /// 错误感知建议注册表（可选）
-    pub error_suggest_registry: Option<Arc<ErrorSuggestRegistry>>,
-    /// 工具注册表快照（None 用 default）
-    pub tool_registry_snapshot: Option<ToolRegistrySnapshot>,
     /// deferred 工具解析器（None = DirectToolInvocationResolver；middlewares 传
     /// ExecuteExtraToolResolver 保持包装层语义）
     pub tool_invocation_resolver: Option<Arc<dyn ToolInvocationResolver>>,
@@ -185,8 +265,6 @@ pub struct SubagentSpawnConfig {
     // ── 运行时通道 ──
     /// 会话资源门面（None = 不落库，仅测试/遗留路径）
     pub session_resources: Option<Arc<dyn SessionResources>>,
-    /// 本会话 root 的执行所有权（`save_child` 的前置证明；None = 不落库）
-    pub execution_owner: Option<Arc<dyn SessionExecutionLease>>,
     /// 父 agent 事件 handler（同步路径事件转发 / 重试事件追踪）
     pub event_handler: Option<Arc<dyn AgentEventHandler>>,
     /// bg 任务完成事件发送通道（bg pump）
@@ -194,8 +272,7 @@ pub struct SubagentSpawnConfig {
     /// 后台任务管理器（Background 模式必填）
     pub task_manager: Option<Arc<TaskManager>>,
     /// bg 完成同步回调
-    pub on_bg_complete:
-        Option<Arc<dyn Fn(&crate::agent::events::BackgroundTaskResult, BgTaskKind) + Send + Sync>>,
+    pub on_bg_complete: Option<peri_acp_types::tasks::OnBgCompleteFn>,
     /// Langfuse bridge
     pub langfuse_bridge: Option<Arc<dyn LangfuseBridgeLike>>,
     /// 生命周期 hook 触发闭包（middlewares 构造）
@@ -209,6 +286,11 @@ pub struct SubagentSpawnConfig {
     /// 父 agent 事件侧 AgentId（v2 SubagentStart/Stop 的 agent_id 字段；
     /// None = /bg 命令等无 Langfuse tracer 路径 → 不 emit v2 Start/Stop）
     pub parent_agent_id: Option<AgentId>,
+    /// 发起本次子 agent 的父 Agent 模型 tool-call 身份。
+    ///
+    /// 来源是父侧 `ToolContext.tool_call_id`；不查询旧执行账本。
+    /// 不能以当前工具 invocation_id 替代模型卡片身份。
+    pub parent_tool_call_id: Option<String>,
     // ── 父侧数据回退（parent 为 None 时使用；parent 存在时被覆盖） ──
     /// 父 cancel token（Cascade 时取其 child_token；parent 存在时从 parent 读取）
     pub cancel_token: Option<CancellationToken>,
@@ -246,6 +328,7 @@ pub struct SubagentFailure {
     child_thread_id: String,
     agent_name: String,
     error: crate::error::AgentError,
+    execution_finished: bool,
 }
 
 impl SubagentFailure {
@@ -258,7 +341,22 @@ impl SubagentFailure {
             child_thread_id: child_thread_id.into(),
             agent_name: agent_name.into(),
             error,
+            execution_finished: false,
         }
+    }
+
+    pub(super) fn completed(
+        child_thread_id: impl Into<String>,
+        agent_name: impl Into<String>,
+        error: crate::error::AgentError,
+    ) -> Self {
+        let mut failure = Self::new(child_thread_id, agent_name, error);
+        failure.execution_finished = true;
+        failure
+    }
+
+    pub(crate) fn execution_finished(&self) -> bool {
+        self.execution_finished
     }
 
     pub fn child_thread_id(&self) -> &str {
@@ -285,29 +383,15 @@ impl SubagentFailure {
         }
     }
 
-    /// Project only the child identity and validated model facts for a parent
-    /// canonical result. Raw AgentError causes never cross this boundary.
     pub fn safe_failure(&self) -> Option<peri_acp_types::error::SafeSubagentFailure> {
-        let diagnostic = self.diagnostic()?;
-        peri_acp_types::error::SafeSubagentFailure::new(
-            &self.child_thread_id,
-            peri_acp_types::error::SafeModelErrorDiagnostic::from_model(diagnostic),
-        )
+        Self::safe_failure_from_error(&self.child_thread_id, &self.error)
     }
 
     pub fn safe_failure_from_error(
         child_thread_id: &str,
         error: &crate::error::AgentError,
     ) -> Option<peri_acp_types::error::SafeSubagentFailure> {
-        let diagnostic = match error {
-            crate::error::AgentError::ModelError(error) => error.diagnostic(),
-            crate::error::AgentError::StreamRecoveryExhausted { source, .. } => source.diagnostic(),
-            _ => return None,
-        };
-        peri_acp_types::error::SafeSubagentFailure::new(
-            child_thread_id,
-            peri_acp_types::error::SafeModelErrorDiagnostic::from_model(diagnostic),
-        )
+        peri_acp_types::error::SafeSubagentFailure::from_agent_error(child_thread_id, error)
     }
 
     pub fn public_message(&self) -> String {
@@ -317,16 +401,7 @@ impl SubagentFailure {
 
 impl std::fmt::Display for SubagentFailure {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        // The typed diagnostic travels separately through canonical facts. Keep
-        // the boxed error's compatibility text free of even safe identities so
-        // legacy string consumers cannot accidentally turn it into a payload.
-        let message = match &self.error {
-            crate::error::AgentError::ModelError(error) => error
-                .http_status_code()
-                .map(|status| format!("An LLM API error occurred (HTTP {status})."))
-                .unwrap_or_else(|| "An LLM API error occurred.".to_string()),
-            _ => self.public_message(),
-        };
+        let message = self.public_message();
         write!(
             formatter,
             "child_thread_id: {}\n{} execution failed: {}",
@@ -368,21 +443,18 @@ pub struct SubagentResumeConfig {
     /// 最大 ReAct 迭代次数
     pub max_iterations: usize,
     // ── 装配产物 ──
-    /// SubAgent LLM（ReactLLM 实现/装饰器）
-    pub llm: Box<dyn ReactLLM + Send + Sync>,
+    /// SubAgent 模型来源（H1）：bridge（身份 + 请求时贡献）由 Agent 层
+    /// session factory 在子链装配点构造，工厂不预先封装。
+    pub llm: SubagentLlmSource,
     /// 子 agent 中间件链装配器（middlewares 实现，链序契约 ARC-MIDDLEWARE-001）
     pub chain_assembler: Arc<dyn SubagentChainAssembler>,
     /// 过滤后的工具集（恢复路径由 tool 层按 title 重新应用过滤）
     pub tools: Vec<Arc<dyn BaseTool>>,
     /// Canonical child policy, reapplied after every capability generation refresh.
-    pub tool_filter: Arc<dyn Fn(&str) -> bool + Send + Sync>,
+    pub tool_filter: crate::session::tool_catalog::ToolFilter,
     /// deferred 工具解析器（None = DirectToolInvocationResolver；middlewares 传
     /// ExecuteExtraToolResolver 保持包装层语义）
     pub tool_invocation_resolver: Option<Arc<dyn ToolInvocationResolver>>,
-    /// 错误感知建议注册表（可选）
-    pub error_suggest_registry: Option<Arc<ErrorSuggestRegistry>>,
-    /// 工具注册表快照（None 用 default）
-    pub tool_registry_snapshot: Option<ToolRegistrySnapshot>,
     /// auto-compact 阈值配置（None = 不启用）
     pub compact_config: Option<CompactConfig>,
     /// 上下文预算（None = 不追踪 token 使用率）
@@ -402,8 +474,7 @@ pub struct SubagentResumeConfig {
     /// 后台任务管理器（Background 模式必填）
     pub task_manager: Option<Arc<TaskManager>>,
     /// bg 完成同步回调
-    pub on_bg_complete:
-        Option<Arc<dyn Fn(&crate::agent::events::BackgroundTaskResult, BgTaskKind) + Send + Sync>>,
+    pub on_bg_complete: Option<peri_acp_types::tasks::OnBgCompleteFn>,
     /// Langfuse bridge
     pub langfuse_bridge: Option<Arc<dyn LangfuseBridgeLike>>,
     /// 生命周期 hook 触发闭包（middlewares 构造）
@@ -417,6 +488,9 @@ pub struct SubagentResumeConfig {
     /// 父 agent 事件侧 AgentId（v2 SubagentStart/Stop 的 agent_id 字段；
     /// None = /bg 命令等无 Langfuse tracer 路径 → 不 emit v2 Start/Stop）
     pub parent_agent_id: Option<AgentId>,
+    /// 发起本次恢复的父 Agent 模型 tool-call 身份。语义同
+    /// [`SubagentSpawnConfig::parent_tool_call_id`]，不是工具运行 invocation_id。
+    pub parent_tool_call_id: Option<String>,
     // ── 父侧数据回退（parent 为 None 时使用；parent 存在时被覆盖） ──
     /// 父 cancel token（Cascade 时取其 child_token；parent 存在时从 parent 读取）
     pub cancel_token: Option<CancellationToken>,

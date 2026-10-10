@@ -12,7 +12,7 @@
 //!    remain as public APIs for external flush paths (executor helpers, tests).
 //! 2. Pushers from Agent/ACP layer use `InboxHandle` (cloneable, `Send + Sync`).
 //! 3. TUI should NOT have access to `InboxHandle` — all async events
-//!    (cron/channel/workflow/bg_results) flow through Agent/ACP layer →
+//!    (cron/workflow/bg_results) flow through Agent/ACP layer →
 //!    `InboxHandle::push` → `MessageQueue` → `await_wake` → Receive's `drain_all`.
 
 pub use peri_acp_types::session::{InboxHandle, SessionInbox};

@@ -18,6 +18,7 @@ fn make_bridge() -> (
         batch_max_events: 50,
         batch_flush_interval_secs: 10,
         user_id: None,
+        ..Default::default()
     };
     let tracer = crate::langfuse::tracer::LangfuseTracer::new(
         session.clone(),
@@ -48,6 +49,7 @@ fn test_from_observe_event_subagent_start_stop_mapping() {
         child_agent_id: child,
         agent_name: "code-reviewer".to_string(),
         is_background: true,
+        parent_tool_call_id: None,
     };
     match UnifiedLangfuseEvent::from_observe_event(start) {
         Some(UnifiedLangfuseEvent::SubagentStart {
@@ -184,6 +186,7 @@ fn test_bridge_like_process_observe_start_stop() {
         child_agent_id: child,
         agent_name: "plan".to_string(),
         is_background: false,
+        parent_tool_call_id: None,
     });
     assert_eq!(bridge.active_subagent_count(), 1);
 
