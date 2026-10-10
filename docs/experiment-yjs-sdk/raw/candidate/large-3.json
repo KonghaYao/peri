@@ -1,0 +1,89 @@
+{
+  "scenario": "large",
+  "sample": 3,
+  "root": "/tmp/peri-yjs-sdk-candidate-round2",
+  "api": "candidate",
+  "workload": {
+    "version": 1,
+    "tools": 12000,
+    "toolsPerAssistant": 10,
+    "inputDataBytes": 960,
+    "resultTextBytes": 4096,
+    "resultDataBytes": 4096,
+    "asyncUpdates": 128,
+    "streamChunks": 16384,
+    "chunkBytes": 1024,
+    "largeResultBytes": 1048576
+  },
+  "startedAt": "2026-10-04T16:32:34.482Z",
+  "status": "passed",
+  "budget": {
+    "timeoutMs": 120000,
+    "maxRssBytes": 2147483648
+  },
+  "environment": {
+    "bun": "1.4.2",
+    "yjs": "13.6.33",
+    "platform": "darwin",
+    "release": "25.5.0",
+    "arch": "arm64",
+    "cpu": "Apple M5 Pro",
+    "totalMemoryBytes": 51539607552
+  },
+  "sourceSha256": "3f5cbc18561d8c6a5997683b49aae5c182295c8bd0217918f507289bd847731e",
+  "dependencyLockSha256": "acf7c28963e8fbb65317a543683d400cec43ece64de3603777f6ef1510e0e367",
+  "generatorSha256": "5fe3c36d10ea9b148deb605559b4bb5724d78bfd9fb672ef134291cd01856a66",
+  "harnessVersion": 2,
+  "projection": {
+    "completedTools": 1,
+    "rawPayloadBytes": 1049635,
+    "projectionMs": 0.6817920000000015,
+    "batch1000Ms": [
+      0.6817920000000015
+    ]
+  },
+  "progress": {
+    "stage": "complete",
+    "elapsedMs": 18.654249999999998
+  },
+  "memory": {
+    "rssBytes": 58212352,
+    "peakRssBytes": 58212352,
+    "heapUsedBytes": 5697571,
+    "finalRssBytes": 58212352,
+    "processPeakRssBytes": 58212352
+  },
+  "completeMs": 0.08554199999999668,
+  "snapshot": {
+    "encoding": "v2",
+    "chatBytes": 2509,
+    "sessionBytes": 268,
+    "totalBytes": 2777,
+    "encodeMs": 0.6850420000000028,
+    "applyMs": 0.8553749999999987
+  },
+  "validation": {
+    "exact": true,
+    "verifiedTools": 1,
+    "verifiedAssistantMessages": 1,
+    "onDemandReads": 1,
+    "onDemandReadBytes": 1048634,
+    "referencedPayloadBytes": 1048634,
+    "activeTurnStatus": "completed"
+  },
+  "alternativeCodec": {
+    "encoding": "v1",
+    "chatBytes": 2794,
+    "sessionBytes": 288,
+    "totalBytes": 3082,
+    "encodeMs": 0.17720800000000025,
+    "purpose": "same candidate documents encoded as V1 to separate hot payload isolation from codec"
+  },
+  "elapsedMs": 18.656457999999997,
+  "process": {
+    "exitCode": 0,
+    "reason": null,
+    "externalPeakRssBytes": 0,
+    "stderr": ""
+  }
+}

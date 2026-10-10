@@ -225,7 +225,13 @@ agent 侧收到 `peri/mcp/app` 时按序校验，任一失败按 §8 返回：
 4. **状态合法**：业务 request 仅在 active 状态允许；notification 不产生 response。
 5. **tool 可调用**：tool 属于绑定 server，且 `_meta.ui.visibility` 包含 `"app"`；未声明 visibility 时按规范默认值处理。
 6. **capability 已启用**：当前 ACP connection 声明 Apps/UI capability，且对应 MCP connection profile 已向 server 传播并完成协商。
-7. **权限路径有效**：App 工具调用进入 canonical invocation/HITL seam；不得直接调用低层 MCP peer 绕过审批。
+7. **权限路径有效**：App 工具调用进入 canonical invocation/HITL seam；不得直接调用低层 MCP peer 绕过审批，稳定规则见 ARC-MCP-APPS-001。
+
+现行模型签发 lease 保存 Act 阶段的 canonical dispatcher，后续 App 调用复用该审批
+路径。宿主 `peri/mcp/invoke`（含重开 UI 后重新调用）没有可用的 canonical 审批上下文时
+返回 `policy_denied`，不调用 MCP server、不签发 lease；不能以 pool 直调、历史审批、
+工具白名单或“会话空闲”替代当前调用的授权。恢复该入口必须接入同一审批能力，
+不创建独立的默认批准路径。
 
 `ui/initialize` 属于下游 Web Host ↔ App 的协议握手，Peri 不以 `appInfo.name` 推导授权。Peri session 应由下游针对已发现的 `{serverId, resourceUri, tool binding}` 显式创建/绑定，并将随后 payload 限制在该绑定内。
 
@@ -377,7 +383,7 @@ sequenceDiagram
 
 ### 9.9 可观测性与测试断言
 
-不记录 prompt、工具参数中的 secret、HTML 正文、OAuth token 或完整用户数据。允许记录不可逆的 `serverId`（若其本身不含敏感信息）、resource URI 的 scheme/host 摘要、App session hash、方法名、方向、耗时、结果大小和错误类别。
+诊断保留原始 `serverId`、resource URI、方法名、方向、耗时、结果大小、错误类别与实际失败原因，不因 token、路径或 URL 形状遮蔽内容。诊断不要求无条件记录所有 prompt、HTML 或完整成功结果；长度/级别和访问管理遵循 ARC-SECRET-001，App session 及资源权限隔离不变。
 
 最小测试矩阵：
 

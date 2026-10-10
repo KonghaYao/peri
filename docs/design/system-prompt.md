@@ -8,17 +8,22 @@
 
 ## 1. 设计边界
 
-System Prompt 由两部分组成：会话级冻结的 base prompt，以及每次模型请求读取的
-middleware contribution。两者都独立于 Transcript，不得伪装成 user/system 消息
-写入对话历史。
+System Prompt 由内部冻结 base、可选的会话级外部系统指令，以及每次模型请求读取的
+middleware contribution 组成。三者有独立来源；外部指令与 contribution 不得作为
+普通消息写入 Transcript。
 
-- base prompt 在 `session/new` 时随日期、项目指引、skill 摘要与 MetaHarness 状态
-  一起冻结和持久化；load、resume、fork 与 SubAgent 复用同一 owner snapshot；
+- base prompt 在 `session/new` 时随日期、运行环境快照（platform / OS 版本 /
+  是否 Git 仓库）、项目指引、skill 摘要与 MetaHarness 状态一起冻结和持久化；
+  load、resume、fork 与 SubAgent 复用同一 owner snapshot；旧快照缺少结构化
+  运行环境值时按 unavailable 显式标记，不重探本地值冒充；
 - middleware contribution 由当前 session 的同一条生产链提供，在 `before_agent`
   完成能力目录准备后，于构造 `ModelRequest` 时同步读取；
+- 外部系统通过 ACP `session/new` 的 `_meta["peri.instructions"]` 添加会话级扩展。
+  它不改变工具、审批或能力关闭事实；正文独立于内部渲染产物冻结并持久化；
 - contribution 只能追加到冻结 base 之后，不能重写缓存前缀，也不能绕过当前
   session-local capability policy；
-- System Prompt 不进入 Transcript，Compact 与 rewind 不修改它。
+- 主会话的组合 System Prompt 不进入 Transcript，Compact 与 rewind 不修改冻结字段；
+  子 Agent 的内部身份可留在其 own history，模型投影会吸收该历史副本。
 
 ## 2. 所有权与段落来源
 
@@ -27,11 +32,18 @@ middleware 缺席时，其工具、hook 和段落必须同时消失；不能保�
 说明。生产链与条件装配以 `peri-agent/src/session/factory.rs::production_blueprint`
 及 `peri-middlewares/src/assembly.rs` 为准。
 
+段落可见性按**执行面能力事实**投影（`peri-agent` 的 `SectionCapabilities` +
+`peri-middlewares::prompt_policy`），事实来自真实装配结果或由其装配条件投影，
+主链 / 子链 / workflow 共用同一策略；不维护第二份按执行类型硬编码的排除表。
+除持有者是否存在，还要检查**有效模式**：例如 `PermissionMiddleware::disabled()`
+（无 broker、无 mode）不声明审批段。子链没有基础段持有者时，基础段由会话冻结
+模板继承，不因“子链收集为空”而得到空 system。
+
 MetaHarness 在冻结期按 section ID 替换持有者提供的段落内容，并按 middleware 名关闭
 整个能力。section ID 与 middleware 名清单的代码事实源是
 `peri-acp-types/src/meta_harness.rs`。运行时不得另建平行清单。
 
-未被 middleware 持有的兼容段必须显式 feature-gate；当前 `15_channel` 的 gate 恒关闭。
+所有段落由 middleware 持有，是否装配持有者决定段落可见性；channel 已退役，不保留无持有者的兼容段或独立 feature gate。
 新增能力时必须同时确定：段落所有者、session-local 开关、工具/route/event/TUI 暴露面
 以及 SubAgent/Workflow 继承语义。
 
@@ -43,8 +55,11 @@ flowchart LR
     SECTIONS[middleware-owned sections] --> FREEZE
     ENV[cwd + date + language] --> FREEZE
     FREEZE --> BASE[frozen base prompt]
+    EXT[ACP peri.instructions] --> FREEZE
+    FREEZE --> EXTERNAL[frozen external field]
     CHAIN[current middleware chain] --> CONTRIB[request-time contributions]
     BASE --> COMBINE[combine_system_prompt_with_dynamic]
+    EXTERNAL --> COMBINE
     CONTRIB --> COMBINE
     COMBINE --> REQUEST[ModelRequest]
 ```
@@ -53,9 +68,32 @@ flowchart LR
 ARC-FROZEN-001 的 CAS 回填路径恢复；未知版本、损坏数据或存储错误必须 fail closed。
 fork 继承 source snapshot 的精确字节，不能以当前磁盘内容重新生成。
 
+外部正文仅在新会话准入：缺席或空字符串为无扩展；非字符串、超过 64 KiB 或包含
+`SYSTEM_PROMPT_DYNAMIC_BOUNDARY` 完整控制字须以 invalid-params 拒绝，不能创建
+可用 thread。接受后按字面值冻结，花括号、标签、空白与换行不作模板、导入或段落
+解析。V2 frozen snapshot 显式保存 `external_instructions` 字段（可为 `null`，缺失
+视为损坏）；冷 load/resume、普通 fork 与子 Agent 从同一份 owner snapshot 继承，
+不从现有 prompt 文本反解析。
+
+模型请求的唯一组合顺序是：**内部静态段 → 唯一缓存分界 → 内部动态段 → 外部
+指令段 → 逐请求 contribution**。外部段的固定标签保护正文边缘空白；正文在
+provider JSON 的 system text 中作为连续子串恰好出现一次，transport 控制字不进
+wire。内部模板为空、没有 contribution 时，也须在外部段之前生成分界。主 Agent
+override、子 Agent 和 workflow 各自按能力投影内部身份，随后由模型桥接层附加
+同一外部字段；子身份持久历史只存内部身份，Compact/继承历史不复制外部正文。
+
+V1 冻结快照没有独立来源字段。普通主 Agent 保留旧 prompt 原字节；若其中有
+`<agent_instructions>` 开始标记，需要重渲染的 override、子 Agent 或 workflow
+明确拒绝并要求新会话。该标记之后若含保留缓存控制字，主 Agent 也须在 provider
+前拒绝，防止 adapter 移除正文。V1 标记不能用来恢复可信外部字段；V1 无标记
+仍按历史主 Agent 语义运行。
+
 request-time contribution provider 返回 owned `String`，不得持锁跨越模型 await。空
 contribution 必须保持 base prompt 字节不变。贡献顺序按 production chain 顺序，任何
-依赖 `HashMap` 迭代生成 prompt 的实现都违反 ARC-SERIAL-001。
+依赖 `HashMap` 迭代生成 prompt 的实现都违反 ARC-SERIAL-001。收集器
+（`MiddlewareChain::collect_prompt_contributions`）是分隔符与准入校验的唯一权威：
+非空贡献以空行连接，含 reserved boundary token 的贡献返回带来源的错误，调用方
+不补分隔符、不手工复制组合算法、不静默剥离内容。
 
 ## 4. 缓存边界 transport
 
@@ -64,6 +102,12 @@ cached/uncached seam 的唯一控制字。`combine_system_prompt_with_dynamic` �
 contribution 放在边界之后；provider 在构造 wire request 前必须消费控制字，wire 上
 不得泄漏。
 
+- `Cached` 段只接收纯静态模板：不得含任何模板占位符（构造期显式失败）；段落
+  id 与 `(zone, order)` 必须唯一，冲突在构造期显式失败并指出来源；
+- MetaHarness 段落覆盖在冻结准入点校验（单段 / 总字节预算、reserved 控制字、
+  未知 `{{name}}` 占位符、空覆盖）：非法覆盖拒绝应用并保留内置段，结构化诊断
+  按段落 + 错误类别记录；旧 snapshot 正文不自动改写，重渲染时同样按“拒绝应用、
+  保留内置”降级；字面花括号用 `\{{` / `\}}` 转义；
 - 支持显式 cache breakpoint 的 adapter 只在恰有一个控制字时拆分静态/动态 system
   block；重复控制字全部剥离并对显式缓存 fail closed；
 - 不支持显式 breakpoint 的 adapter 只做字节守恒剥离，不宣称控制 provider 的隐式

@@ -12,11 +12,21 @@ pre-commit:
 
     check:
       glob: "*.rs"
-      run: cargo check
+      run: ./scripts/cargo-rmcp-patched.sh check --locked
 
+    # A3 收窄：clippy 只跑本次改动直接涉及的 crate
+    # （scripts/precommit-changed-crates.sh 产出 -p 参数；脚本内含边界规则）。
+    # check 保持全量（类型门不放松）；全量 clippy 由 CI 兜底。
+    # 无 crate 命中时直接通过、不调用 cargo。
     clippy:
       glob: "*.rs"
-      run: cargo clippy -- -W clippy::all
+      run: |
+        changed_crates="$(bash scripts/precommit-changed-crates.sh)"
+        if [ -z "$changed_crates" ]; then
+          echo "[clippy] 改动未命中任何 workspace crate，跳过（全量 clippy 见 CI）"
+          exit 0
+        fi
+        ./scripts/cargo-rmcp-patched.sh clippy --locked $changed_crates -- -W clippy::all
 
     typos:
       run: typos
@@ -31,7 +41,7 @@ pre-commit:
       run: bash scripts/check-layer-imports.sh
 
     # doc-tests 不在 pre-commit 中运行——cargo check/clippy 不编译 doc test，
-    # 显式验证用: cargo test --workspace --doc
+    # 显式验证用: ./scripts/cargo-rmcp-patched.sh test --locked --workspace --doc
 
     # security-audit:
     #   run: cargo audit

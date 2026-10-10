@@ -1,0 +1,85 @@
+{
+  "scenario": "tools",
+  "sample": 3,
+  "root": "/tmp/peri-yjs-sdk-baseline-567640f1837771442628970a56ce68c5a8f8e256",
+  "api": "legacy",
+  "workload": {
+    "version": 1,
+    "tools": 12000,
+    "toolsPerAssistant": 10,
+    "inputDataBytes": 960,
+    "resultTextBytes": 4096,
+    "resultDataBytes": 4096,
+    "asyncUpdates": 128,
+    "streamChunks": 16384,
+    "chunkBytes": 1024,
+    "largeResultBytes": 1048576
+  },
+  "startedAt": "2026-10-04T15:49:44.528Z",
+  "status": "passed",
+  "budget": {
+    "timeoutMs": 120000,
+    "maxRssBytes": 2147483648
+  },
+  "environment": {
+    "bun": "1.4.2",
+    "yjs": "13.6.33",
+    "platform": "darwin",
+    "release": "25.5.0",
+    "arch": "arm64",
+    "cpu": "Apple M5 Pro",
+    "totalMemoryBytes": 51539607552
+  },
+  "sourceSha256": "ce4e0419196957af166a48c333e53cbaff2db5d50b733258b07436ed3a6cfbd1",
+  "progress": {
+    "stage": "complete",
+    "elapsedMs": 2267.429875
+  },
+  "memory": {
+    "rssBytes": 1383874560,
+    "peakRssBytes": 1383874560,
+    "heapUsedBytes": 503069064,
+    "finalRssBytes": 1383874560,
+    "processPeakRssBytes": 1383874560
+  },
+  "projection": {
+    "completedTools": 12000,
+    "rawPayloadBytes": 111050670,
+    "projectionMs": 1810.8721950000106,
+    "batch1000Ms": [
+      26.00579799999994,
+      38.25503299999998,
+      57.60158100000005,
+      80.40465899999936,
+      100.60762400000064,
+      131.37084700000133,
+      167.43664900000283,
+      176.99913300000117,
+      197.03807599999936,
+      247.47353600000224,
+      264.1609299999982,
+      323.51832900000545
+    ]
+  },
+  "completeMs": 8.097500000000082,
+  "snapshot": {
+    "encoding": "v1",
+    "chatBytes": 115984647,
+    "sessionBytes": 330,
+    "totalBytes": 115984977,
+    "encodeMs": 179.66504200000008,
+    "applyMs": 122.93150000000014
+  },
+  "validation": {
+    "exact": true,
+    "verifiedTools": 12000,
+    "activeTurnStatus": "completed"
+  },
+  "elapsedMs": 2267.432625,
+  "process": {
+    "exitCode": 0,
+    "reason": null,
+    "externalPeakRssBytes": 1278017536,
+    "stderr": ""
+  }
+}

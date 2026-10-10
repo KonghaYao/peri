@@ -1,5 +1,5 @@
 /** Real old-schema database → ACP → TUI. No model or judge requests. */
-import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { afterEach, beforeAll, beforeEach, describe, expect, it } from "vitest";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
@@ -8,19 +8,20 @@ import { DatabaseSync } from "node:sqlite";
 import { execFileSync } from "node:child_process";
 import { TmuxTester } from "tui-tester";
 import { PROJECT_ROOT, sendPrompt } from "../../helpers/peri.js";
+import { buildPeriForE2e } from "../../helpers/build.js";
 
 /**
- * 写打开时把旧库升级到的目标版本，事实源是 `schema.rs` 里的 `PRAGMA user_version`
- * （设计 §8：读写打开在同一事务内升级；只读打开不升级）。旧库升级到「当前版本」
- * 是契约本身，写死字面量会在下一次 schema 升版时变成假失败。
+ * 写打开时把旧库升级到的目标版本，事实源是 `canonical.rs` 里的 `CURRENT_SCHEMA_VERSION`
+ * 常量声明（写入处只引用该常量；设计 §8：读写打开在同一事务内升级；只读打开不升级）。
+ * 旧库升级到「当前版本」是契约本身，写死字面量会在下一次 schema 升版时变成假失败。
  */
 const CURRENT_SCHEMA_VERSION = (() => {
   const source = fs.readFileSync(
-    path.join(PROJECT_ROOT, "peri-resources/src/sessions/sqlite_store/schema.rs"),
+    path.join(PROJECT_ROOT, "peri-resources/src/sessions/canonical.rs"),
     "utf8",
   );
-  const match = /PRAGMA user_version = (\d+)/.exec(source);
-  if (!match) throw new Error("schema.rs 未声明 PRAGMA user_version");
+  const match = /CURRENT_SCHEMA_VERSION:\s*i64\s*=\s*(\d+)/.exec(source);
+  if (!match) throw new Error("canonical.rs 未声明 CURRENT_SCHEMA_VERSION 常量");
   return Number(match[1]);
 })();
 
@@ -33,8 +34,12 @@ describe("legacy history upgrade", () => {
   let missingId: string;
   let tester: TmuxTester | undefined;
 
+  beforeAll(async () => {
+    await buildPeriForE2e();
+  }, 610_000);
+
   beforeEach(() => {
-    directory = fs.mkdtempSync(path.join(os.tmpdir(), "peri-history-upgrade-"));
+    directory = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), "peri-history-upgrade-")));
     saved = path.join(directory, "saved-project");
     fs.mkdirSync(saved);
     fs.mkdirSync(path.join(directory, ".peri/threads"), { recursive: true });
@@ -70,10 +75,10 @@ describe("legacy history upgrade", () => {
     }
   });
 
-  async function launch(args: string[] = [], cwd = saved) {
+  async function launch(args: string[] = [], cwd = saved, size = { cols: 140, rows: 45 }) {
     tester = new TmuxTester({
       command: [path.join(PROJECT_ROOT, "target/debug/peri"), `--config-file=${settings}`, ...args],
-      cwd, size: { cols: 140, rows: 45 },
+      cwd, size,
       env: {
         HOME: directory, XDG_CONFIG_HOME: path.join(directory, "config"),
         XDG_CACHE_HOME: path.join(directory, "cache"), XDG_DATA_HOME: path.join(directory, "data"),
@@ -122,11 +127,16 @@ describe("legacy history upgrade", () => {
     await ui.resize(size);
     // tmux changes its buffer size before the application redraws. A complete
     // panel border at the new width proves that clicks use the resized frame.
-    await expect.poll(async () => {
-      const { lines } = await ui.captureScreen();
-      return lines.some(line => /^─+$/.test(line) && line.length === size.cols)
-        && lines.some(line => line.includes("Enter") && line.includes("Esc"));
-    }, { timeout: 5_000 }).toBe(true);
+    try {
+      await expect.poll(async () => {
+        const { lines } = await ui.captureScreen();
+        return lines.some(line => /^─+$/.test(line) && line.length === size.cols)
+          && lines.some(line => line.includes("Enter") && line.includes("Esc"));
+      }, { timeout: 5_000 }).toBe(true);
+    } catch (error) {
+      const capture = await captureLayout(ui, `resize-failed-${size.cols}x${size.rows}`);
+      throw new Error(`${String(error)}\nResized panel ${size.cols}x${size.rows}:\n${capture.text}`);
+    }
   }
 
   it("lists upgraded history and previews a missing directory without binding it, including after reopening the upgraded database", async () => {
@@ -151,7 +161,14 @@ describe("legacy history upgrade", () => {
 
   it.each(["-c", "-r"])("%s restores old history through the actual startup path", async flag => {
     const ui = await launch(flag === "-c" ? [flag] : [flag, oldId], flag === "-c" ? saved : directory);
-    await ui.waitForText("LEGACY_RESTORED_MESSAGE", { timeout: 20_000, interval: 100 });
+    try {
+      await ui.waitForText("LEGACY_RESTORED_MESSAGE", { timeout: 20_000, interval: 100 });
+    } catch (error) {
+      const capture = await captureLayout(ui, `startup-${flag.slice(1)}-failed`);
+      const log = fs.existsSync(path.join(directory, "peri.log"))
+        ? fs.readFileSync(path.join(directory, "peri.log"), "utf8") : "";
+      throw new Error(`${String(error)}\nScreen:\n${capture.text}\nPeri log:\n${log.slice(-12_000)}`);
+    }
     expect(row("SELECT COUNT(*) AS n FROM session_bindings WHERE thread_id = ?", oldId)?.n).toBe(1);
     expect(row("SELECT frozen_context FROM threads WHERE id = ?", oldId)?.frozen_context).toBeTypeOf("string");
     expect(row("SELECT message_count FROM threads WHERE id = ?", oldId)?.message_count).toBe(1);
@@ -229,11 +246,24 @@ describe("legacy history upgrade", () => {
     const db = new DatabaseSync(database);
     const id = randomUUID();
     const messageId = randomUUID();
-    db.prepare("INSERT INTO threads (id,title,cwd,created_at,updated_at,message_count) VALUES (?,?,?,'2026-09-04T00:00:00Z','2026-09-04T00:00:00Z',1)")
-      .run(id, "NEW_HEAD_FROM_REFRESH", saved);
-    db.prepare("INSERT INTO messages (message_id,thread_id,role,content) VALUES (?,?,'user',?)")
-      .run(messageId, id, JSON.stringify({ role: "user", id: messageId, content: "new head" }));
-    db.close();
+    db.exec("PRAGMA foreign_keys = ON; BEGIN IMMEDIATE;");
+    try {
+      const inserted = db.prepare(`INSERT INTO threads
+        (id,title,cwd,created_at,updated_at,message_count,workspace_id)
+        SELECT ?,?,t.cwd,'2026-09-04T00:00:00Z','2026-09-04T00:00:00Z',1,t.workspace_id
+        FROM threads t JOIN workspaces w ON w.id = t.workspace_id
+        WHERE t.id = ? AND w.path = ?`)
+        .run(id, "NEW_HEAD_FROM_REFRESH", oldId, saved);
+      expect(inserted.changes).toBe(1);
+      db.prepare("INSERT INTO messages (message_id,thread_id,role,content) VALUES (?,?,'user',?)")
+        .run(messageId, id, JSON.stringify({ role: "user", id: messageId, content: "new head" }));
+      db.exec("COMMIT;");
+    } catch (error) {
+      db.exec("ROLLBACK;");
+      throw error;
+    } finally {
+      db.close();
+    }
     await ui.waitForText("NEW_HEAD_FROM_REFRESH", { timeout: 6_000, interval: 100 });
     await ui.waitForPattern(/>\s*HISTORY_ROW_030/, { timeout: 5_000, interval: 100 });
 
@@ -290,11 +320,19 @@ describe("legacy history upgrade", () => {
     const db = new DatabaseSync(database);
     db.exec("DELETE FROM messages; DELETE FROM threads;");
     db.close();
-    const ui = await launch();
+    const ui = await launch([], saved, { cols: 60, rows: 18 });
     await ui.waitForText("AI operating system", { timeout: 20_000, interval: 100 });
-    await ui.resize({ cols: 60, rows: 18 });
     await sendPrompt(ui, "/threads");
     await ui.waitForText("No conversations yet", { timeout: 10_000, interval: 100 });
+    try {
+      await expect.poll(async () => {
+        const capture = await ui.captureScreen();
+        return capture.lines.some(line => line.includes("Enter") && line.includes("Esc"));
+      }, { timeout: 5_000 }).toBe(true);
+    } catch (error) {
+      const capture = await captureLayout(ui, "empty-failed-60x18");
+      throw new Error(`${String(error)}\nEmpty panel 60x18:\n${capture.text}`);
+    }
     const capture = await captureLayout(ui, "empty-60x18");
     expect(capture.lines.some(line => line.includes("Enter") && line.includes("Esc"))).toBe(true);
     expect(capture.text).not.toContain("id:");

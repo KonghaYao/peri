@@ -15,15 +15,13 @@ export interface ThreadRow {
   hidden: number;
   cancel_policy: string | null;
   config: string | null;
-  cached_context: string | null;
   frozen_context: string | null;
   inherited_context: string | null;
   agent_status: string | null;
-  context_cache_epoch: number | null;
 }
 
 /** Thread metadata used by list/reporting paths; excludes potentially large context blobs. */
-export type ThreadSummary = Omit<ThreadRow, "config" | "cached_context" | "frozen_context" | "inherited_context">;
+export type ThreadSummary = Omit<ThreadRow, "config" | "frozen_context" | "inherited_context">;
 
 export interface MessageRow {
   message_id: string;

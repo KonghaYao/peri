@@ -42,9 +42,31 @@ Auto-follow effect 将纯内部记账用无通知写入，真实滚动/follow �
 
 ## Transcript slot index
 
-消息区每帧构建仅随 VM slot 数量增长的 logical/visual prefix index。Global visual 或 logical 坐标先定位 slot，再查询 slot-local lines/wrap map；production 不构建 transcript-wide aggregate wrap map。
+消息区维护持久 logical/visual 树索引；publication 提供带前后 generation 的变化后缀提示，
+连续版本只更新变化 slot。版本不连续、reset、历史结构变化或全局布局失效允许完整重建，
+不能把不可靠提示用于跳过正确性失效。无变化帧复用历史索引，活动动画仅访问可见集合；
+本地折叠与 bridge 发布在同一 VIEW_MODELS 写锁内递增已发布版本；bridge 不得仅递增
+私有计数而与本地版本碰撞。构建期间前驱发生变化时，变化提示不匹配则完整失效。
+Global visual 或 logical 坐标先定位 slot，再查询 slot-local 行高映射。
+production 不构建 transcript-wide aggregate wrap map。
 
 Selection、semantic copy、hover/focus、entry click、scroll、anchor、auto-follow、viewport、footer 与 image 坐标均消费同一 slot index。计数使用 `usize` 和饱和边界；文本映射保持 Unicode 字符边界与终端显示宽度语义。
+
+轻量索引保留每 logical line 的视觉前缀和不可变 canonical 来源，不强持有可淘汰的 Lines。
+旧 frame/handler 保留旧布局版本，冷区选择与复制按 slot 临时重建，完成即释放。
+冷加载、全局失效及轻量索引容量仍随历史内容增长，不是整会话 O(1) 内存承诺。
+
+## 共享 entry 渲染与缓存预算
+
+主消息与 SubAgent 详情使用同一 `EntryRenderCache`，以内容、完整 GridSpec、主题 identity、
+语言、occurrence 与 surface 管理失效；解析、布局和动画装饰分别更新。
+详情以真实视口绘制，完整 `usize` 高度与虚拟滚动目标参与既有面板鼠标仲裁，不创建全历史
+ScrollView buffer，也不通过截断内容伪造视口优化。
+
+主消息可淘汰派生缓存预算为 16 MiB，详情为 8 MiB；计量包括解析块、owned 文本、
+Lines 与 wrap map 的 retained capacity，同缓存共享 Arc 去重，跨缓存保守计入。
+这是一致的预算估算而非 allocator/RSS 实测；canonical 历史、轻量高度索引、全局高亮缓存、
+可见超大工作集及复制暂态单列。淘汰清除整个重型 entry，不改变高度、锚点或完整内容。
 
 ## 条件策略
 

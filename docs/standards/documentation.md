@@ -14,9 +14,9 @@
 
 ### DOC-LOADER-001
 
-- **Scope**：`AgentsMdMiddleware` 与模块文档。
-- **Rule**：两条加载路径都不向父目录递归继承。主会话冻结入口 `read_frozen_content` 只检查 cwd 下的 `AGENTS.md`、`CLAUDE.md`、`.claude/AGENTS.md`；普通 middleware 查找还会追加用户级 `~/.claude/AGENTS.md` 和调用方提供的额外路径。两者均选取首个匹配；选中的 `CLAUDE.md` 支持受深度和循环检测约束的 `@import`。模块文件应按任务显式读取 `../docs/standards/`，不得用 import 把整套规范加入默认上下文。
-- **Verify**：人工检查 `peri-middlewares/src/agents_md/mod.rs` 的 `read_frozen_content`、`candidate_paths`、`find_file` 与 `resolve_imports`；检查模块 `CLAUDE.md` 没有批量导入 standards。
+- **Scope**：项目指令与段落覆盖文档的来源（`AgentsMdMiddleware` 与模块文档）。
+- **Rule**：文档读取不向父目录递归继承。主会话项目指令由 builtin `workspace` 实例按 `peri-instruction://workspace/{main|local}` 资源提供：主文档候选是 cwd 下的 `AGENTS.md` → `CLAUDE.md` → `.claude/AGENTS.md`（取首个存在；选中文件为空即视为不存在且不试后继），`CLAUDE.local.md` 独立成 local 资源；`@import` 展开（深度上限 3、防环、越界保留占位符并 warn）与 excludes 都在 provider 侧，宿主 `AgentsMdMiddleware` 只注入冻结正文、自身不读盘、不可得时不回落磁盘。段落覆盖文档同样经资源面读取（`peri-meta://workspace/{section_id}`，语义见 [meta-harness 设计](../design/meta-harness.md)），不可得时 warn 并保持内置段落。模块文件应按任务显式读取 `../docs/standards/`，不得用 import 把整套规范加入默认上下文。
+- **Verify**：人工检查 `mcp-packages/workspace/src/resources/instructions.rs`（候选优先级、`@import`、excludes）、`mcp-packages/workspace/src/resources/meta.rs`（段落覆盖来源）与 `peri-middlewares/src/agents_md/mod.rs`（纯 adapter、无 `std::fs`）；检查模块 `CLAUDE.md` 没有批量导入 standards。
 
 ### DOC-STABLE-001
 
@@ -33,8 +33,8 @@
 ### DOC-HISTORY-001
 
 - **Scope**：已关闭 issue、调查报告、实施记录与复盘。
-- **Rule**：`spec/issues/` 只保留仍需实施或验收的工作；关闭前把稳定规则、设计或代码入口更新到对应事实源，随后删除过程文档。完整历史由 Git 保留；`spec/global/problems.md` 只做主题检索路由，不复制逐 issue 摘要。
-- **Verify**：检查 active issue 状态与对应事实源；确认 `spec/archive-issues/`、`spec/reviews/` 和逐 issue 历史副本未重新进入当前文档集。
+- **Rule**：`spec/issues/` 只保留仍需实施或验收的工作；关闭前把稳定规则、设计或代码入口更新到对应事实源，随后删除过程文档。完整历史由 Git 保留；`spec/global/problems.md` 只做主题检索路由，不复制逐 issue 摘要。历史 issue 可按月压缩为 `spec/history/` 月志：普通条目一行式摘要，定级事故（P0/P1/P2）可附少量描述；月志只作检索与回顾，不构成现行事实。
+- **Verify**：检查 active issue 状态与对应事实源；确认 `spec/archive-issues/`、`spec/reviews/` 未重新进入当前文档集；`spec/history/` 只含压缩月志（不复制逐 issue 全文），每条可经 Git 历史定位原文。
 
 ### DOC-DESIGN-001
 

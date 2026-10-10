@@ -1,7 +1,7 @@
 # TUI Chat 与 Tool Activity Workbench 目标设计
 
-> 状态：已批准目标设计；实施进度见
-> [`spec/issues/2026-08-10-chat-redesign-slice2-onwards.md`](../../spec/issues/2026-08-10-chat-redesign-slice2-onwards.md)
+> 状态：已批准目标设计；历史实施进度记录见
+> [2026-08 历史日志](../../spec/history/2026-08.md)（2026-08-10 条目）
 > 范围：`peri-tui` 的 transcript、tool activity、Inspector、阻塞交互、焦点、鼠标与滚动
 > 边界：新增事件、详情请求或终态语义必须遵守 `ARC-EVENT-001` 与 `ARC-BOUNDARY-001`
 
@@ -113,7 +113,6 @@ Presenter 管线固定为：
 | `Agent` / `AgentResult` | 委派身份、模式与终态 | nested activity、thread/task provenance |
 | `SearchExtraTools` / `ExecuteExtraTool` | discovery 或 requested target | wrapper、resolved/effective target、审批 provenance |
 | Cron / `Workflow` | schedule/run 身份与状态 | phase、agent、log、result、可用操作 |
-| `LSP` | operation、path/query、count | locations、diagnostics、server、完整性 |
 | MCP resource / 动态 MCP tool | 外部 server/tool/resource 边界 | 调用时冻结 descriptor、content type 与结果 |
 | 未知工具 | 友好名称、参数数量、明确状态 | 有界脱敏 metadata；不推断 effect 或安全性 |
 
@@ -132,14 +131,16 @@ scroll/follow；切换调用时以 identity/revision 重新验证，不显示旧
 ACP、受 session/owner/tool/revision 约束，并可被取消。TUI 不自行从任意本地路径读取详情，
 也不建立第二套持久化。
 
-所有层级都必须：
+所有层级都必须区分成功业务摘要与运行时诊断。下述摘要策略不是全链路脱敏或
+结果防泄漏保证；错误、日志、Debug 和遥测遵循 ARC-SECRET-001 保留实际诊断：
 
 - 显示 `complete / truncated / partial / unavailable`；未知省略量不得伪造计数；
-- 应用同一 redaction policy，默认隐藏 token、password、cookie、authorization、私钥和
-  连接串字段；
+- 成功业务摘要只投影展示所需字段，不主动收集凭据；不得按字段名或内容形状
+  遮蔽实际错误或原因链，诊断视图不承诺隐藏凭据；
 - 清理 ANSI 控制序列、OSC 8、双向控制符和终端 escape；外部 Markdown/HTML 按不可信文本
   处理；
-- copy 再次执行脱敏和控制字符清理，不复制 gutter、fold marker 或视觉省略符；
+- copy 保持当前视图的诊断内容保真并清理控制字符，不复制 gutter、fold marker
+  或视觉省略符；
 - 大输出使用分页、line index 或 viewport virtualization，不复制进每个 ViewModel clone。
 
 ## 交互路由与审批安全

@@ -6,6 +6,10 @@
 
 ## 状态归属
 
+2026-10-07 裁决：待发送队列、发布/领取关系和当前 run ticket 只属于当前进程；不保存 durable Work 命令或恢复发布代际，不承诺重启恢复未发送内容。已提交的 canonical 历史照常持久化。当前发送/取回/取消的身份校验与交互行为保留；实施状态见[剥离计划](../../spec/issues/2026-10-07-remove-execution-recovery-plan.md)。
+
+可靠 Inbox 的撤回、Receive 领取及重新发布统一见 [RCRA 消息权威 §8.5](rcra-message-activation.md#85-用户输入撤回与重发)。实现通过同一 Work reducer 持久保存草稿与发布命令；稳定 input ID 与发布代际分离，不因旧代际重试恢复已撤回义务。本轮持久草稿与选择发布回归尚待主线验证。
+
 Agent 会话的 `UserInputMailbox` 是投递生命周期的唯一 owner，宿主持有跨 turn 的共享实例。
 它保留待发送内容、稳定输入身份、命令回执及运行 ticket；ACP 定位会话、检查能力和写权限，
 执行 Agent 给出的准入决定；TUI 只保存编辑器草稿、未确认请求及服务端投影。
@@ -17,19 +21,21 @@ Agent 会话的 `UserInputMailbox` 是投递生命周期的唯一 owner，宿主
 空闲提交同样遵循队首顺序；一次交接占用本次 idle，即使 Receive 尚未开始，也不会追加第二条。
 单条与全部立即发送使用同一个指定 ID 集合的操作，只提前处理选中内容。
 
+`StageUserInput` 只保存完整草稿，不创建 delivery、required obligation 或 SDK 候选。显式发送用一个 `PublishStagedUserInputs` 原子提交选中的完整集合，后到草稿不能加入；自动 idle 发布同一入口但只选择队首一条。发布绑定当前 lifecycle、revision、control generation 与 exact attempt；Unknown 保留原整批命令，不能换身份重建。显式选择可以中止原 exact attempt 的处理责任，沿同一 reducer 的 abandon 规则保留外部结果；停止后的显式发送通过统一 typed Resume 裁决恢复控制状态，不在 Rust 创建执行租约。
+
 ```text
 Queued → Dispatching → Claimed → Delivered
    └──→ Withdrawn
 Dispatching → Queued：仅在已从 MQ 撤出且确认未领取时
 ```
 
-Receive 与 Stop 在同一 MQ 锁下裁决领取/撤出，随后回报 Mailbox。写入 canonical transcript
+Receive 与 Stop 在 Store 原子裁决领取/撤出，MQ 仅投影已确认结果，随后回报 Mailbox。写入 canonical transcript
 才算 Delivered；仅入队或交接给 MQ 不能当作用户消息出现在聊天区。
 
 ## 交互与投递
 
 - 标题为“待发送”（英文 Pending）；空队列完全隐藏，一条一行，无左侧序号；默认最多展示 5 条，可展开其余条目。
-- 空闲且无其他待发输入时，本地直接提交不展示待发送行，收到 Delivered 后直接显示原聊天气泡；首次会话绑定保持此展示。服务端确认 Queued、回执失败或会话重载时恢复可见投影，未确认请求与原稿仍按既有规则保留。该展示区分不改变服务端准入与聊天确认边界。
+- 空闲且无其他待发输入时，本地直接提交不展示待发送行，输入框顶边立即显示“正在提交…”；收到 Delivered 后显示原聊天气泡并结束提交反馈，拒绝、未知回执或会话边界变化按实际状态恢复反馈与原稿。首次会话绑定保持此展示。服务端确认 Queued、回执失败或会话重载时恢复可见投影，未确认请求与原稿仍按既有规则保留。Submitting 仅是本地投递反馈，不代表正式交付；该展示区分不改变服务端准入与聊天确认边界。
 - 队列透明背景，仅使用输入框既有主题上边线；统一字符 `↑` 单发、`⇈` 全发、`↶` 取回，
   ASCII 环境使用相应降级符号，不使用 emoji。
 - 单发 B 允许越过 A；随后再发 A 时按 B、A 接收，其余等待项保持相对顺序。
@@ -46,8 +52,9 @@ Receive 与 Stop 在同一 MQ 锁下裁决领取/撤出，随后回报 Mailbox�
 选中内容执行到 idle 后，普通待发内容恢复逐条调度。跨 turn 的自动启动仍须等待
 transcript flush 与事件 forwarder 收尾，确认自然成功；同一 attempt 的 idle 唤醒经既有 inbox 进行。
 用户 Stop 取消尚未开始的 ticket，保留待办，并只回收明确未被 Receive 领取的内容。
-执行失败不视作自然完成；持久化状态不确定时冻结当前 generation，要求重新加载。
-用户再次提交、显式继续或立即发送可以恢复停止后的处理。
+执行失败不视作自然完成；当前消息写入失败显式报错，不以旧 Work 恢复状态冻结新输入。
+用户再次提交、显式继续或立即发送可以恢复停止后的处理：恢复由再次提交的那条输入带动，
+它在空闲时按新任务发布并自动解除暂停；暂停之前入队的待办不因此自动发布，仍按逐条调度交接。
 
 ## ACP 与事件
 

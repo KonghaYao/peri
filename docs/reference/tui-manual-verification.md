@@ -49,7 +49,6 @@
 | `/plugins` | Plugins |
 | `/cron` | Cron |
 | `/workflow` | Workflow |
-| `/betas` | Betas |
 | `/login` | Login |
 | `/threads` | Threads |
 
@@ -116,7 +115,6 @@
 - [ ] Plugins
 - [ ] Cron
 - [ ] Workflow
-- [ ] Betas
 - [ ] Login
 - [ ] Threads
 

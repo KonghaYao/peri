@@ -1,0 +1,5 @@
+APP_AUTH_TOKEN="replace-with-a-long-random-token"
+MODEL_API_KEY="replace-with-your-provider-key"
+PERI_STORAGE_URL="libsql://your-database.turso.io"
+PERI_STORAGE_TOKEN="replace-with-your-turso-token"
+PERI_MACHINE_ID="replace-with-a-persistent-deployment-uuid"

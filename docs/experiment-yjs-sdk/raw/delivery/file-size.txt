@@ -1,0 +1,20 @@
+📊 大文件扫描：源码阈值 1000 行 / 测试阈值 1000 行
+
+❌ 源码超阈值（Top 30）：
+    1119  peri-middlewares/src/mcp/client/subscription_tasks.rs
+    1069  peri-agent/src/agent/stages/mod.rs
+
+❌ 测试超阈值（Top 30）：
+    3876  peri-tui/src/kit/message_area/render_test.rs
+    2022  peri-tui/src/kit/markdown/mod_test.rs
+    1429  peri-tui/src/kit/acp_notifier_test.rs
+    1427  peri-agent/src/session/exec/executor_helpers_test.rs
+    1422  peri-agent/src/agent/compact_v2/projection_test.rs
+    1407  peri-model/src/anthropic/mod_test.rs
+    1347  peri-acp-types/src/command_registry_test.rs
+    1254  peri-agent/src/middleware/chain_test.rs
+    1115  peri-tui/src/kit/message_area/mod_test.rs
+    1054  peri-tui/src/kit/tui_render_unit_test.rs
+    1025  peri-acp/src/event/mapper_test.rs
+
+共扫描 1974 个文件，超阈值 13 个（源码 2 / 测试 11）

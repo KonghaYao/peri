@@ -1,0 +1,80 @@
+{
+  "scenario": "stream",
+  "sample": 1,
+  "root": "/tmp/peri-yjs-sdk-baseline-567640f1837771442628970a56ce68c5a8f8e256",
+  "api": "legacy",
+  "workload": {
+    "version": 1,
+    "tools": 12000,
+    "toolsPerAssistant": 10,
+    "inputDataBytes": 960,
+    "resultTextBytes": 4096,
+    "resultDataBytes": 4096,
+    "asyncUpdates": 128,
+    "streamChunks": 16384,
+    "chunkBytes": 1024,
+    "largeResultBytes": 1048576
+  },
+  "startedAt": "2026-10-04T15:50:01.891Z",
+  "status": "passed",
+  "budget": {
+    "timeoutMs": 120000,
+    "maxRssBytes": 2147483648
+  },
+  "environment": {
+    "bun": "1.4.2",
+    "yjs": "13.6.33",
+    "platform": "darwin",
+    "release": "25.5.0",
+    "arch": "arm64",
+    "cpu": "Apple M5 Pro",
+    "totalMemoryBytes": 51539607552
+  },
+  "sourceSha256": "ce4e0419196957af166a48c333e53cbaff2db5d50b733258b07436ed3a6cfbd1",
+  "initialSnapshot": {
+    "jsonBytes": 341,
+    "applyMs": 0.4448330000000027
+  },
+  "progress": {
+    "stage": "complete",
+    "elapsedMs": 239.993084
+  },
+  "memory": {
+    "rssBytes": 277184512,
+    "peakRssBytes": 277184512,
+    "heapUsedBytes": 103265256,
+    "finalRssBytes": 277184512,
+    "processPeakRssBytes": 277184512
+  },
+  "stream": {
+    "completedChunks": 16384,
+    "frames": 16389,
+    "jsonBytes": 25189286,
+    "updateBytes": 17703875,
+    "applyMs": 53.24667699999779,
+    "projectionMs": 189.9321570000001,
+    "framing": "JSON event bodies; excludes SSE/HTTP/TCP overhead",
+    "projectionIncludesSynchronousTransportAndApply": true
+  },
+  "completeMs": 0.28716700000001083,
+  "validation": {
+    "bytes": 16777216,
+    "sha256": "732dd2b3f284d2273326b8acf57f014a895f513bfc79770eb963226aeaef8cb6",
+    "expectedSha256": "732dd2b3f284d2273326b8acf57f014a895f513bfc79770eb963226aeaef8cb6",
+    "exact": true,
+    "activeTurnStatus": "completed"
+  },
+  "capabilities": {
+    "resume": "not supported by baseline demo bridge",
+    "slowConsumer": "not supported",
+    "versionedPayloadRead": "not supported",
+    "duplicateOutOfOrder": "not evaluated through bridge; Yjs primitive support is separate"
+  },
+  "elapsedMs": 239.99541700000003,
+  "process": {
+    "exitCode": 0,
+    "reason": null,
+    "externalPeakRssBytes": 260374528,
+    "stderr": ""
+  }
+}

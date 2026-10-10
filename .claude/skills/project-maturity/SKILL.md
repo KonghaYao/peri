@@ -415,9 +415,9 @@ Reference 文件包含的内容：
 
 ### 数据收集效率
 
-- **所有 Bash 命令并行执行**：不要串行执行 10 个 Bash 调用。在一次响应中同时发出多个独立命令。
-- **使用 Glob 而非 find**：找文件用 Glob，不用 Bash find
-- **使用 Grep 而非 grep**：搜索内容用 Grep 工具，不用 Bash grep
+- **所有 `Bash` 命令并行执行**：不要串行执行 10 个 `Bash` 调用。在一次响应中同时发出多个独立命令。
+- **使用 `Glob` 而非 find**：找文件用 `Glob`，不用 `Bash` find
+- **使用 `Grep` 而非 grep**：搜索内容用 `Grep`，不用 `Bash` grep
 - **大输出用专用工具**：目录遍历用 `folder_operations`，不用 `ls -R`
 
 ### 评分公平性

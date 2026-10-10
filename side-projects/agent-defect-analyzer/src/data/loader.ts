@@ -13,7 +13,7 @@ const REQUIRED: Record<string, string[]> = {
   messages: ["message_id", "thread_id", "role", "content"],
 };
 const OPTIONAL: Record<string, string[]> = {
-  threads: ["parent_thread_id", "snapshot_at_message_id", "hidden", "cancel_policy", "config", "cached_context", "frozen_context", "inherited_context", "agent_status", "context_cache_epoch"],
+  threads: ["parent_thread_id", "snapshot_at_message_id", "hidden", "cancel_policy", "config", "frozen_context", "inherited_context", "agent_status"],
   messages: ["truncated", "excluded", "projection"],
 };
 
@@ -245,12 +245,12 @@ export class DataLoader {
   private threadColumns(): string {
     const has = (n: string) => this.capabilities.columns.threads?.includes(n);
     const c = (n: string, fallback: string) => has(n) ? `t.${n}` : `${fallback} AS ${n}`;
-    return ["t.id", "t.title", "t.cwd", "t.created_at", "t.updated_at", "t.message_count", c("parent_thread_id", "NULL"), c("snapshot_at_message_id", "NULL"), c("hidden", "0"), c("cancel_policy", "NULL"), c("config", "NULL"), c("cached_context", "NULL"), c("frozen_context", "NULL"), c("inherited_context", "NULL"), c("agent_status", "NULL"), c("context_cache_epoch", "NULL")].join(", ");
+    return ["t.id", "t.title", "t.cwd", "t.created_at", "t.updated_at", "t.message_count", c("parent_thread_id", "NULL"), c("snapshot_at_message_id", "NULL"), c("hidden", "0"), c("cancel_policy", "NULL"), c("config", "NULL"), c("frozen_context", "NULL"), c("inherited_context", "NULL"), c("agent_status", "NULL")].join(", ");
   }
   private threadSummaryColumns(): string {
     const has = (n: string) => this.capabilities.columns.threads?.includes(n);
     const c = (n: string, fallback: string) => has(n) ? `t.${n}` : `${fallback} AS ${n}`;
-    return ["t.id", "t.title", "t.cwd", "t.created_at", "t.updated_at", "t.message_count", c("parent_thread_id", "NULL"), c("snapshot_at_message_id", "NULL"), c("hidden", "0"), c("cancel_policy", "NULL"), c("agent_status", "NULL"), c("context_cache_epoch", "NULL")].join(", ");
+    return ["t.id", "t.title", "t.cwd", "t.created_at", "t.updated_at", "t.message_count", c("parent_thread_id", "NULL"), c("snapshot_at_message_id", "NULL"), c("hidden", "0"), c("cancel_policy", "NULL"), c("agent_status", "NULL")].join(", ");
   }
   private messageColumns(): string {
     const has = (n: string) => this.capabilities.columns.messages?.includes(n);

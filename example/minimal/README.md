@@ -16,7 +16,8 @@ All entries below are configured under `config.meta_harness` in `.peri/settings.
 The Boolean value has different meanings depending on the field category:
 
 - **Prompt section:** `true` replaces the built-in section with `.peri/meta/<field>.md`; `false` keeps the built-in section.
-- **Middleware:** `true` keeps the middleware enabled; `false` removes the middleware, including its tools, hooks, and prompt contributions.
+- **Middleware:** `true` keeps the middleware enabled; `false` removes the middleware, including its tools, hooks, and prompt contributions. Keys here are chain slot names (the value returned by the middleware's `name()`) — except the builtin instance policy keys listed below.
+- **Builtin instance policy key:** `false` closes that built-in MCP instance's tool face for this session only. The instance, its handler, its state (cron scheduler and its 1s tick) and its readiness are **kept** — a policy close is not a physical shutdown.
 - **Policy:** the value directly enables or disables the named policy.
 
 ### Prompt section overrides
@@ -34,7 +35,20 @@ The Boolean value has different meanings depending on the field category:
 | `persona` | `true` | Replaces the generated persona section with `.peri/meta/persona.md`. |
 | `language` | `true` | Replaces the generated language section with `.peri/meta/language.md`. |
 
-### Middleware controls
+### Middleware and builtin instance controls
+
+**Note**: `WebMiddleware` / `ArtifactMiddleware` / `CronMiddleware` are no longer middleware
+slots, and `WorkspaceMiddleware` is the fourth key of the same kind (it replaces the removed
+`FilesystemMiddleware` / `TerminalMiddleware` slot names). Web, artifact, cron and file/shell
+capabilities are provided by the built-in in-process MCP instances
+(`web` / `artifact` / `cron` / `workspace`); these four keys are their close keys
+(`BUILTIN_INSTANCE_POLICY_KEYS`), so the rows below stay valid, and old configs using the three
+former slot names are still recognized.
+
+`cron` tools are always **deferred** (`mcp__cron__cron_register` /
+`mcp__cron__cron_list` / `mcp__cron__cron_remove`): the model reaches them
+through `SearchExtraTools` → `ExecuteExtraTool`, so closing that instance only shrinks the
+deferred catalog and its search results.
 
 | Field | Current value | Meaning |
 | --- | ---: | --- |
@@ -47,12 +61,11 @@ The Boolean value has different meanings depending on the field category:
 | `SkillPreloadMiddleware` | `false` | Disables automatic preloading of selected skills into the session. |
 | `AtMentionMiddleware` | `false` | Disables `@`-mention processing and related context injection. |
 | `ImageMiddleware` | `false` | Disables image attachment handling and image-related prompt contributions. |
-| `FilesystemMiddleware` | `false` | Disables direct filesystem tools supplied by Peri. |
+| `WorkspaceMiddleware` | `false` | Closes the built-in `workspace` instance's tool face (`mcp__workspace__Read` / `mcp__workspace__Write` / `mcp__workspace__Edit` / `mcp__workspace__Glob` / `mcp__workspace__Grep` / `mcp__workspace__folder_operations` / `mcp__workspace__Bash`, direct tools). These seven are the only filesystem and shell tools on the chain; external MCP servers and the subagent `WriteSandbox` tool are not affected by this key. |
 | `GitAttributionMiddleware` | `false` | Disables automatic Git attribution instructions and behavior. |
-| `TerminalMiddleware` | `false` | Disables terminal and shell execution tools supplied by Peri. |
-| `WebMiddleware` | `false` | Disables web search and web fetch tools. |
+| `WebMiddleware` | `false` | Closes the built-in `web` instance's tool face (`mcp__web__WebSearch` / `mcp__web__WebFetch`, direct tools). |
 | `TodoMiddleware` | `false` | Disables the todo-list tool and its task-tracking behavior. |
-| `CronMiddleware` | `false` | Disables scheduled-task discovery and registration tools. |
+| `CronMiddleware` | `false` | Closes the built-in `cron` instance's tool face (`mcp__cron__cron_register` / `mcp__cron__cron_list` / `mcp__cron__cron_remove`, deferred). The instance, its scheduler and its 1s tick keep running. |
 | `HookMiddleware` | `false` | Disables configured lifecycle hooks. |
 | `PermissionMiddleware` | `false` | Disables tool approval hooks and removes the permission/HITL approval prompt section. |
 | `HumanInTheLoopMiddleware` | `false` | Disables the `AskUserQuestion` tool and its user-question guidance. This is separate from tool approval. |
@@ -60,8 +73,7 @@ The Boolean value has different meanings depending on the field category:
 | `McpMiddleware` | `true` | Enables MCP server connections, resources, and MCP-provided tools. Project MCP servers are configured in `.mcp.json`. |
 | `WorkflowMiddleware` | `false` | Disables workflow registration and workflow execution tools. |
 | `ToolSearch` | `true` | Enables `SearchExtraTools` and `ExecuteExtraTool`, allowing deferred tools such as MCP tools to be discovered and invoked on demand. |
-| `ArtifactMiddleware` | `false` | Disables the public artifact upload tool. |
-| `LspMiddleware` | `false` | Disables Language Server Protocol tools and diagnostics integration. |
+| `ArtifactMiddleware` | `false` | Closes the built-in `artifact` instance's tool face (`mcp__artifact__artifact`, a direct tool). |
 | `GoalMiddleware` | `false` | Disables goal-management prompt content and tools. |
 
 ### Policy controls

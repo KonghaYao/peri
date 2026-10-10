@@ -1,8 +1,7 @@
+import { buildPeriForE2e } from "../../helpers/build.js";
 /** 空 HOME → 真实配置向导 → 首条模型请求；只使用本地 SSE，无真实凭据。 */
 import { afterEach, beforeAll, beforeEach, describe, expect, it } from "vitest";
 import { createServer, type Server } from "node:http";
-import { execFile } from "node:child_process";
-import { promisify } from "node:util";
 import { mkdir, mkdtemp, readFile, readdir, rm, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
@@ -26,11 +25,7 @@ describe("首次 setup 的保存与运行时交接", () => {
   beforeAll(async () => {
     // The standard E2E runner does not build; compile before changing HOME so
     // this suite always exercises current sources, with the real toolchain cache.
-    await promisify(execFile)("cargo", ["build", "-p", "peri-tui", "--bin", "peri"], {
-      cwd: PROJECT_ROOT,
-      timeout: 600_000,
-      maxBuffer: 8 * 1024 * 1024,
-    });
+    await buildPeriForE2e();
   }, 610_000);
 
   beforeEach(async () => {

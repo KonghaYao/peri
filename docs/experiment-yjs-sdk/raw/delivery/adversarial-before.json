@@ -1,0 +1,22 @@
+{
+  "provenance": "Transcribed from independently observed Bun stdout before the two fixes; no performance measurement.",
+  "findings": [
+    {
+      "attack": "subscribe during close in admission flush",
+      "admitted": true,
+      "error": "",
+      "chatListeners": 0
+    },
+    {
+      "attack": "unsubscribe inside rejecting async sender",
+      "unhandledRejections": [
+        "Error: transport already aborted"
+      ]
+    },
+    {
+      "attack": "reentrant subscribe while pending both docs",
+      "replicaText": "AB",
+      "sessionVersion": 2
+    }
+  ]
+}

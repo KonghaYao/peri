@@ -8,6 +8,8 @@
 
 命令 = 用户以 `/` 前缀显式声明的**确定性路由请求**。与自然语言 prompt 的区别在于路由权归属：slash 命令的路由目标由用户显式声明，在 agent 的模糊解释之前被确定性拦截。
 
+当前 skill 命令的来源投影按连接身份决定：builtin 与受信 WorkspaceRemote 的 skill 仅注册 `core:{skill}`，显示为 `/skill`；普通外部 MCP skill 注册 `{server}:{skill}`。`McpServerConfig.system_mcp` 是启动与工具准入配置，不决定此来源身份。`SkillsMiddleware` 关闭时撤下系统 skill 命令，并禁用主 Agent 的 slash token 自动预载；系统来源旧 `/server:skill` 输入不再激活 skill。下文的三段 `mcp:server:skill` 属于命令系统目标词法，尚未落地，不能用作当前 skill 命令的入口。
+
 **command 系统是机制，不是内容**：它提供词法解析、路由表、路由裁决、冲突规则、发现推送；不拥有任何具体命令。命令由所属层（TUI / ACP / Agent / 插件 / 用户 / 外部系统）声明并注册，内置命令只是"预注册的路由表条目"。
 
 ## 架构全貌

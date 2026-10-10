@@ -85,6 +85,51 @@ github_api() {
     curl -fsSL ${auth_header:-} "${url}" 2>/dev/null
 }
 
+# --- SHA-256 verification (sha256sum or shasum) ---
+# 校验和文件为 "<64-hex>  <文件名>" 行；逐资产 <asset>.sha256 与旧版 checksums.txt 清单通用。
+verify_checksum() {
+    local archive="$1"
+    local checksum_file="$2"
+    local expected_name="$3"
+    local checksum_tool expected_digest actual_digest hash name extra
+
+    if command -v sha256sum >/dev/null 2>&1; then
+        checksum_tool=sha256sum
+    elif command -v shasum >/dev/null 2>&1; then
+        checksum_tool=shasum
+    else
+        error "Install sha256sum or shasum to verify downloads."
+        return 1
+    fi
+
+    expected_digest=""
+    while read -r hash name extra; do
+        if [[ "${name}" == "${expected_name}" ]]; then
+            expected_digest="${hash}"
+            break
+        fi
+    done < <(tr -d '\r' < "${checksum_file}")
+
+    if [[ ! "${expected_digest}" =~ ^[[:xdigit:]]{64}$ ]]; then
+        error "No valid checksum entry for ${expected_name} in $(basename "${checksum_file}")."
+        return 1
+    fi
+
+    if [[ "${checksum_tool}" == sha256sum ]]; then
+        actual_digest=$(sha256sum "${archive}" | cut -d' ' -f1)
+    else
+        actual_digest=$(shasum -a 256 "${archive}" | cut -d' ' -f1)
+    fi
+
+    if [[ "${actual_digest}" != "${expected_digest}" ]]; then
+        error "Checksum mismatch for ${expected_name}."
+        error "  expected: ${expected_digest}"
+        error "  actual:   ${actual_digest}"
+        return 1
+    fi
+    info "Checksum verified: ${expected_name}"
+}
+
 # --- Cleanup Old Versions ---
 cleanup_old_versions() {
     local install_dir="$1"
@@ -185,8 +230,8 @@ main() {
 
     info "Found release: ${VERSION_TAG}"
 
-    # Find matching asset
-    ASSET_DOWNLOAD_URL=$(echo "${RELEASE_JSON}" | tr ',' '\n' | grep -F '"browser_download_url"' | grep -F "${ASSET_NAME}" | head -1 | cut -d'"' -f4)
+    # Find matching asset（按精确文件名匹配，避免命中同前缀的 <asset>.sha256 校验和文件）
+    ASSET_DOWNLOAD_URL=$(echo "${RELEASE_JSON}" | tr ',' '\n' | grep -F '"browser_download_url"' | grep -F "/${ASSET_NAME}\"" | head -1 | cut -d'"' -f4 || true)
 
     if [[ -z "${ASSET_DOWNLOAD_URL}" ]]; then
         error "No binary found for platform '${PLATFORM}'."
@@ -204,6 +249,7 @@ main() {
 
     TARGET="${VERSION_DIR}/peri"
     TARBALL="${VERSION_DIR}/${ASSET_NAME}"
+    CHECKSUM_FILE="${VERSION_DIR}/${ASSET_NAME}.sha256"
 
     # Download tarball
     FINAL_URL=$(get_download_url "${ASSET_DOWNLOAD_URL}")
@@ -217,6 +263,30 @@ main() {
         exit 1
     }
 
+    # 校验 SHA-256：逐资产 <asset>.sha256 自本版本起发布；旧 Release 只有 checksums.txt
+    # 清单（待旧版本退场后可删除回退分支）。
+    step "Verifying checksum..."
+    if ! curl -fSL "$(get_download_url "${ASSET_DOWNLOAD_URL}.sha256")" -o "${CHECKSUM_FILE}" 2>/dev/null; then
+        CHECKSUMS_URL=$(echo "${RELEASE_JSON}" | tr ',' '\n' | grep -F '"browser_download_url"' | grep -F '/checksums.txt"' | head -1 | cut -d'"' -f4 || true)
+        if [[ -z "${CHECKSUMS_URL}" ]]; then
+            error "No checksum published for ${ASSET_NAME}."
+            rm -f "${TARBALL}"
+            exit 1
+        fi
+        warn "Per-asset checksum missing; falling back to checksums.txt"
+        curl -fSL "$(get_download_url "${CHECKSUMS_URL}")" -o "${CHECKSUM_FILE}" || {
+            error "Checksum download failed."
+            rm -f "${TARBALL}"
+            exit 1
+        }
+    fi
+
+    if ! verify_checksum "${TARBALL}" "${CHECKSUM_FILE}" "${ASSET_NAME}"; then
+        rm -f "${TARBALL}" "${CHECKSUM_FILE}"
+        exit 1
+    fi
+    rm -f "${CHECKSUM_FILE}"
+
     # Extract tarball
     step "Extracting..."
     tar -xzf "${TARBALL}" -C "${VERSION_DIR}" || {
@@ -225,10 +295,11 @@ main() {
     }
     rm -f "${TARBALL}"
 
-    # Tarball contains peri-<platform> (e.g., peri-macos-aarch64), rename to peri
+    # 正式归档在根目录直接放 peri（mise 标准：安装器按归档内文件名暴露命令名，不剥离
+    # 平台后缀）；兼容 ≤ agent-v3.19.x 的旧布局 peri-<platform>，待旧版本退场后可删除。
     if [[ ! -f "${TARGET}" ]]; then
-        EXTRACTED=$(ls "${VERSION_DIR}"/peri-* 2>/dev/null | head -1)
-        if [[ -f "${EXTRACTED}" ]]; then
+        EXTRACTED=$(ls "${VERSION_DIR}"/peri-* 2>/dev/null | head -1 || true)
+        if [[ -n "${EXTRACTED}" && -f "${EXTRACTED}" ]]; then
             mv "${EXTRACTED}" "${TARGET}"
         else
             error "No binary found in extracted tarball."
@@ -243,6 +314,7 @@ main() {
 
     # Create symlink for convenience
     LINK="${INSTALL_DIR}/peri"
+    BIN_LINK="${LINK}"
     rm -f "${LINK}"
     ln -sf "${TARGET}" "${LINK}"
 
@@ -251,7 +323,6 @@ main() {
 
     # --- PATH Setup ---
     if [[ "${PERI_NO_PATH_HINT:-}" != "1" ]]; then
-        BIN_LINK="${INSTALL_DIR}/peri"
         SHELL_PROFILE=""
         case "${SHELL:-}" in
             */zsh)  SHELL_PROFILE="${HOME}/.zshrc" ;;
@@ -291,7 +362,7 @@ main() {
     if command -v node &>/dev/null; then
         info "node found — bundled workflow runner is ready"
     else
-        warn "node not found. Install Node.js for workflow and PTC support:"
+        warn "node not found. Install Node.js for workflow support:"
         echo "    https://nodejs.org/"
         echo ""
     fi

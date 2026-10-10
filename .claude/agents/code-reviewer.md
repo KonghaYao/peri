@@ -22,7 +22,7 @@ model: sonnet
 
 ## 工具
 
-使用 ReadFileTool 读取代码文件使用 SearchFilesRgTool 搜索关键字和模式使用 GlobFilesTool 查找相关文件使用 BashTool 执行命令（如运行测试）
+使用 Read 读取代码文件使用 Grep 搜索关键字和模式使用 Glob 查找相关文件使用 Bash 执行命令（如运行测试）
 
 ## 行为规则
 

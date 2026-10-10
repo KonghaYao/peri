@@ -1,0 +1,393 @@
+{
+  "root": "/tmp/peri-yjs-sdk-final-round3",
+  "api": "candidate",
+  "workload": {
+    "version": 1,
+    "tools": 12000,
+    "toolsPerAssistant": 10,
+    "inputDataBytes": 960,
+    "resultTextBytes": 4096,
+    "resultDataBytes": 4096,
+    "asyncUpdates": 128,
+    "streamChunks": 16384,
+    "chunkBytes": 1024,
+    "largeResultBytes": 1048576
+  },
+  "runs": [
+    {
+      "scenario": "combined",
+      "sample": 1,
+      "root": "/tmp/peri-yjs-sdk-final-round3",
+      "api": "candidate",
+      "workload": {
+        "version": 1,
+        "tools": 12000,
+        "toolsPerAssistant": 10,
+        "inputDataBytes": 960,
+        "resultTextBytes": 4096,
+        "resultDataBytes": 4096,
+        "asyncUpdates": 128,
+        "streamChunks": 16384,
+        "chunkBytes": 1024,
+        "largeResultBytes": 1048576
+      },
+      "startedAt": "2026-10-04T17:03:33.473Z",
+      "status": "passed",
+      "budget": {
+        "timeoutMs": 120000,
+        "maxRssBytes": 2147483648
+      },
+      "environment": {
+        "bun": "1.4.2",
+        "yjs": "13.6.33",
+        "platform": "darwin",
+        "release": "25.5.0",
+        "arch": "arm64",
+        "cpu": "Apple M5 Pro",
+        "totalMemoryBytes": 51539607552
+      },
+      "sourceSha256": "96800d1a6c1be32cb460a8b85be68788a8410f5bc5215dd4eb3d8c5e16ebbb67",
+      "dependencyLockSha256": "acf7c28963e8fbb65317a543683d400cec43ece64de3603777f6ef1510e0e367",
+      "generatorSha256": "5fe3c36d10ea9b148deb605559b4bb5724d78bfd9fb672ef134291cd01856a66",
+      "harnessVersion": 3,
+      "progress": {
+        "stage": "complete",
+        "elapsedMs": 939.6168329999999
+      },
+      "memory": {
+        "rssBytes": 1939341312,
+        "peakRssBytes": 1939341312,
+        "heapUsedBytes": 856701672,
+        "finalRssBytes": 1939341312,
+        "processPeakRssBytes": 1939341312
+      },
+      "projection": {
+        "completedTools": 12000,
+        "rawPayloadBytes": 111050670,
+        "projectionMs": 141.38214299999945,
+        "batch1000Ms": [
+          17.51431600000008,
+          12.170005000000053,
+          12.557384000000098,
+          12.596669999999875,
+          9.195461999999921,
+          12.20479800000004,
+          8.961501000000169,
+          12.764877999999527,
+          9.645422999999937,
+          11.658501000000172,
+          10.276371000000182,
+          11.836833999999385
+        ]
+      },
+      "initialSnapshot": {
+        "encoding": "v2",
+        "jsonBytes": 30745880,
+        "updateBytes": 23059316,
+        "applyMs": 91.11233299999998,
+        "totalMs": 164.051834
+      },
+      "initialHistory": {
+        "exact": true,
+        "verifiedTools": 12000,
+        "verifiedAssistantMessages": 1200,
+        "onDemandReads": 12000,
+        "onDemandReadBytes": 98964890,
+        "referencedPayloadBytes": 98964890
+      },
+      "stream": {
+        "frames": 513,
+        "jsonBytes": 22443213,
+        "updateBytes": 16796906,
+        "applyMs": 10.174583000000098,
+        "completedChunks": 16384,
+        "projectionMs": 159.41301499999201,
+        "publications": 257,
+        "unchangedToolIdentity": 257,
+        "endToEndMs": 327.61966699999994,
+        "completionFrames": 1,
+        "yieldEveryChunks": 64,
+        "options": {
+          "flushIntervalMs": 16,
+          "maxBatchBytes": 65536,
+          "maxBatchUpdates": 256,
+          "maxSubscriberBytes": 4194304
+        },
+        "timing": "from first stream chunk through completion, flush, close, replica apply and view microtasks; excludes history seed, initial snapshot and full content validation",
+        "framing": "actual demo SSE adapter encode/decode, incremental doc payload bytes and JSON bodies; initial snapshot separately recorded; excludes HTTP/SSE/TCP"
+      },
+      "validation": {
+        "bytes": 16777216,
+        "sha256": "732dd2b3f284d2273326b8acf57f014a895f513bfc79770eb963226aeaef8cb6",
+        "expectedSha256": "732dd2b3f284d2273326b8acf57f014a895f513bfc79770eb963226aeaef8cb6",
+        "exact": true,
+        "activeTurnStatus": "completed",
+        "history": {
+          "exact": true,
+          "verifiedTools": 12000,
+          "verifiedAssistantMessages": 1200,
+          "onDemandReads": 12000,
+          "onDemandReadBytes": 98964890,
+          "referencedPayloadBytes": 98964890
+        }
+      },
+      "elapsedMs": 939.621958,
+      "process": {
+        "exitCode": 0,
+        "reason": null,
+        "externalPeakRssBytes": 1781940224,
+        "stderr": ""
+      }
+    },
+    {
+      "scenario": "combined",
+      "sample": 2,
+      "root": "/tmp/peri-yjs-sdk-final-round3",
+      "api": "candidate",
+      "workload": {
+        "version": 1,
+        "tools": 12000,
+        "toolsPerAssistant": 10,
+        "inputDataBytes": 960,
+        "resultTextBytes": 4096,
+        "resultDataBytes": 4096,
+        "asyncUpdates": 128,
+        "streamChunks": 16384,
+        "chunkBytes": 1024,
+        "largeResultBytes": 1048576
+      },
+      "startedAt": "2026-10-04T17:03:34.455Z",
+      "status": "passed",
+      "budget": {
+        "timeoutMs": 120000,
+        "maxRssBytes": 2147483648
+      },
+      "environment": {
+        "bun": "1.4.2",
+        "yjs": "13.6.33",
+        "platform": "darwin",
+        "release": "25.5.0",
+        "arch": "arm64",
+        "cpu": "Apple M5 Pro",
+        "totalMemoryBytes": 51539607552
+      },
+      "sourceSha256": "96800d1a6c1be32cb460a8b85be68788a8410f5bc5215dd4eb3d8c5e16ebbb67",
+      "dependencyLockSha256": "acf7c28963e8fbb65317a543683d400cec43ece64de3603777f6ef1510e0e367",
+      "generatorSha256": "5fe3c36d10ea9b148deb605559b4bb5724d78bfd9fb672ef134291cd01856a66",
+      "harnessVersion": 3,
+      "progress": {
+        "stage": "complete",
+        "elapsedMs": 912.102208
+      },
+      "memory": {
+        "rssBytes": 1941110784,
+        "peakRssBytes": 1941110784,
+        "heapUsedBytes": 844296808,
+        "finalRssBytes": 1941110784,
+        "processPeakRssBytes": 1941110784
+      },
+      "projection": {
+        "completedTools": 12000,
+        "rawPayloadBytes": 111050670,
+        "projectionMs": 148.74334600000185,
+        "batch1000Ms": [
+          20.26754200000002,
+          14.255073999999787,
+          12.90035999999985,
+          13.097947000000062,
+          10.00927600000017,
+          11.77858300000021,
+          9.389079000000407,
+          12.106336999999854,
+          9.59048299999995,
+          12.94298000000029,
+          9.738284000000846,
+          12.66740100000041
+        ]
+      },
+      "initialSnapshot": {
+        "encoding": "v2",
+        "jsonBytes": 30745880,
+        "updateBytes": 23059316,
+        "applyMs": 79.99879199999998,
+        "totalMs": 157.39420900000002
+      },
+      "initialHistory": {
+        "exact": true,
+        "verifiedTools": 12000,
+        "verifiedAssistantMessages": 1200,
+        "onDemandReads": 12000,
+        "onDemandReadBytes": 98964890,
+        "referencedPayloadBytes": 98964890
+      },
+      "stream": {
+        "frames": 513,
+        "jsonBytes": 22443213,
+        "updateBytes": 16796906,
+        "applyMs": 10.809042000000773,
+        "completedChunks": 16384,
+        "projectionMs": 151.5961020000014,
+        "publications": 257,
+        "unchangedToolIdentity": 257,
+        "endToEndMs": 316.34566700000005,
+        "completionFrames": 1,
+        "yieldEveryChunks": 64,
+        "options": {
+          "flushIntervalMs": 16,
+          "maxBatchBytes": 65536,
+          "maxBatchUpdates": 256,
+          "maxSubscriberBytes": 4194304
+        },
+        "timing": "from first stream chunk through completion, flush, close, replica apply and view microtasks; excludes history seed, initial snapshot and full content validation",
+        "framing": "actual demo SSE adapter encode/decode, incremental doc payload bytes and JSON bodies; initial snapshot separately recorded; excludes HTTP/SSE/TCP"
+      },
+      "validation": {
+        "bytes": 16777216,
+        "sha256": "732dd2b3f284d2273326b8acf57f014a895f513bfc79770eb963226aeaef8cb6",
+        "expectedSha256": "732dd2b3f284d2273326b8acf57f014a895f513bfc79770eb963226aeaef8cb6",
+        "exact": true,
+        "activeTurnStatus": "completed",
+        "history": {
+          "exact": true,
+          "verifiedTools": 12000,
+          "verifiedAssistantMessages": 1200,
+          "onDemandReads": 12000,
+          "onDemandReadBytes": 98964890,
+          "referencedPayloadBytes": 98964890
+        }
+      },
+      "elapsedMs": 912.106416,
+      "process": {
+        "exitCode": 0,
+        "reason": null,
+        "externalPeakRssBytes": 1762590720,
+        "stderr": ""
+      }
+    },
+    {
+      "scenario": "combined",
+      "sample": 3,
+      "root": "/tmp/peri-yjs-sdk-final-round3",
+      "api": "candidate",
+      "workload": {
+        "version": 1,
+        "tools": 12000,
+        "toolsPerAssistant": 10,
+        "inputDataBytes": 960,
+        "resultTextBytes": 4096,
+        "resultDataBytes": 4096,
+        "asyncUpdates": 128,
+        "streamChunks": 16384,
+        "chunkBytes": 1024,
+        "largeResultBytes": 1048576
+      },
+      "startedAt": "2026-10-04T17:03:35.400Z",
+      "status": "passed",
+      "budget": {
+        "timeoutMs": 120000,
+        "maxRssBytes": 2147483648
+      },
+      "environment": {
+        "bun": "1.4.2",
+        "yjs": "13.6.33",
+        "platform": "darwin",
+        "release": "25.5.0",
+        "arch": "arm64",
+        "cpu": "Apple M5 Pro",
+        "totalMemoryBytes": 51539607552
+      },
+      "sourceSha256": "96800d1a6c1be32cb460a8b85be68788a8410f5bc5215dd4eb3d8c5e16ebbb67",
+      "dependencyLockSha256": "acf7c28963e8fbb65317a543683d400cec43ece64de3603777f6ef1510e0e367",
+      "generatorSha256": "5fe3c36d10ea9b148deb605559b4bb5724d78bfd9fb672ef134291cd01856a66",
+      "harnessVersion": 3,
+      "progress": {
+        "stage": "complete",
+        "elapsedMs": 945.160208
+      },
+      "memory": {
+        "rssBytes": 1849491456,
+        "peakRssBytes": 1849491456,
+        "heapUsedBytes": 760116293,
+        "finalRssBytes": 1849491456,
+        "processPeakRssBytes": 1849491456
+      },
+      "projection": {
+        "completedTools": 12000,
+        "rawPayloadBytes": 111050670,
+        "projectionMs": 149.77172900000005,
+        "batch1000Ms": [
+          19.409872999999997,
+          13.790784999999964,
+          12.264544000000043,
+          12.636669000000452,
+          10.22291999999976,
+          11.623497000000143,
+          11.293580999999733,
+          11.57171100000042,
+          11.59045700000047,
+          11.961628999999306,
+          12.189555999999868,
+          11.216506999999893
+        ]
+      },
+      "initialSnapshot": {
+        "encoding": "v2",
+        "jsonBytes": 30745880,
+        "updateBytes": 23059316,
+        "applyMs": 92.51070900000002,
+        "totalMs": 168.85708300000002
+      },
+      "initialHistory": {
+        "exact": true,
+        "verifiedTools": 12000,
+        "verifiedAssistantMessages": 1200,
+        "onDemandReads": 12000,
+        "onDemandReadBytes": 98964890,
+        "referencedPayloadBytes": 98964890
+      },
+      "stream": {
+        "frames": 513,
+        "jsonBytes": 22443213,
+        "updateBytes": 16796906,
+        "applyMs": 10.324744000000805,
+        "completedChunks": 16384,
+        "projectionMs": 157.66037400000312,
+        "publications": 257,
+        "unchangedToolIdentity": 257,
+        "endToEndMs": 339.749041,
+        "completionFrames": 1,
+        "yieldEveryChunks": 64,
+        "options": {
+          "flushIntervalMs": 16,
+          "maxBatchBytes": 65536,
+          "maxBatchUpdates": 256,
+          "maxSubscriberBytes": 4194304
+        },
+        "timing": "from first stream chunk through completion, flush, close, replica apply and view microtasks; excludes history seed, initial snapshot and full content validation",
+        "framing": "actual demo SSE adapter encode/decode, incremental doc payload bytes and JSON bodies; initial snapshot separately recorded; excludes HTTP/SSE/TCP"
+      },
+      "validation": {
+        "bytes": 16777216,
+        "sha256": "732dd2b3f284d2273326b8acf57f014a895f513bfc79770eb963226aeaef8cb6",
+        "expectedSha256": "732dd2b3f284d2273326b8acf57f014a895f513bfc79770eb963226aeaef8cb6",
+        "exact": true,
+        "activeTurnStatus": "completed",
+        "history": {
+          "exact": true,
+          "verifiedTools": 12000,
+          "verifiedAssistantMessages": 1200,
+          "onDemandReads": 12000,
+          "onDemandReadBytes": 98964890,
+          "referencedPayloadBytes": 98964890
+        }
+      },
+      "elapsedMs": 945.164083,
+      "process": {
+        "exitCode": 0,
+        "reason": null,
+        "externalPeakRssBytes": 1674788864,
+        "stderr": ""
+      }
+    }
+  ]
+}

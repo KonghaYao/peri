@@ -1,0 +1,189 @@
+name: Build Next Major
+
+on:
+    push:
+        branches: [pre-release/main]
+    workflow_dispatch:
+
+permissions:
+    contents: read
+
+concurrency:
+    group: ${{ github.workflow }}-${{ github.ref }}
+    cancel-in-progress: false
+
+env:
+    CARGO_TERM_COLOR: always
+
+jobs:
+    build:
+        name: Build (${{ matrix.target }})
+        if: github.ref == 'refs/heads/pre-release/main'
+        runs-on: ${{ matrix.os }}
+        timeout-minutes: 90
+        defaults:
+            run:
+                shell: bash
+        strategy:
+            fail-fast: false
+            matrix:
+                include:
+                    - os: ubuntu-latest
+                      target: x86_64-unknown-linux-gnu
+                      platform: linux-x86_64
+                    - os: macos-latest
+                      target: aarch64-apple-darwin
+                      platform: macos-aarch64
+
+        steps:
+            - name: Checkout repository
+              uses: actions/checkout@v7
+
+            - name: Install Rust toolchain
+              uses: dtolnay/rust-toolchain@stable
+              with:
+                  targets: ${{ matrix.target }}
+
+            - name: Cache cargo registry
+              uses: actions/cache@v4
+              with:
+                  path: |
+                      ~/.cargo/registry/index
+                      ~/.cargo/registry/cache
+                      ~/.cargo/git/db
+                  key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}
+                  restore-keys: ${{ runner.os }}-cargo-
+
+            - name: Cache build artifacts
+              uses: actions/cache@v4
+              with:
+                  path: target
+                  key: ${{ runner.os }}-${{ matrix.target }}-build-${{ hashFiles('**/Cargo.lock') }}
+                  restore-keys: |
+                      ${{ runner.os }}-${{ matrix.target }}-build-
+                      ${{ runner.os }}-${{ matrix.target }}-
+
+            - name: Build agent-tui (Linux)
+              if: runner.os == 'Linux'
+              run: ./scripts/cargo-rmcp-patched.sh build --locked -p peri-tui --bin peri --release --target ${{ matrix.target }}
+
+            - name: Build agent-tui (non-Linux)
+              if: runner.os != 'Linux'
+              run: ./scripts/cargo-rmcp-patched.sh build --locked -p peri-tui --release --target ${{ matrix.target }}
+
+            - name: Package binary
+              env:
+                  PLATFORM: ${{ matrix.platform }}
+                  TARGET: ${{ matrix.target }}
+              run: |
+                  mkdir -p dist/package
+                  cp "target/${TARGET}/release/peri" dist/package/peri-beta
+                  chmod +x dist/package/peri-beta
+                  tar -czf "dist/peri-beta-${PLATFORM}.tar.gz" -C dist/package peri-beta
+                  (
+                      cd dist
+                      shasum -a 256 "peri-beta-${PLATFORM}.tar.gz" > "peri-beta-${PLATFORM}.tar.gz.sha256"
+                  )
+                  rm -rf dist/package
+
+            - name: Upload artifacts
+              uses: actions/upload-artifact@v4
+              with:
+                  name: peri-beta-${{ matrix.platform }}-${{ github.sha }}
+                  path: dist/
+                  if-no-files-found: error
+                  compression-level: 0
+                  retention-days: 14
+
+    wasm:
+        name: Build (wasm32-unknown-emscripten)
+        if: github.ref == 'refs/heads/pre-release/main'
+        runs-on: ubuntu-24.04
+        timeout-minutes: 90
+        env:
+            MISE_ENV: wasm
+        defaults:
+            run:
+                shell: bash
+        steps:
+            - name: Checkout repository
+              uses: actions/checkout@v7
+              with:
+                  persist-credentials: false
+
+            - name: Install WASM build tools
+              uses: jdx/mise-action@v4
+              with:
+                  cache: false
+
+            - name: Cache Rust build
+              uses: Swatinem/rust-cache@v2
+              with:
+                  key: next-major-wasm32-unknown-emscripten
+
+            - name: Build peri-wasm
+              run: mise exec -- ./scripts/cargo-wasm.sh build --locked --release -p peri-wasm --target wasm32-unknown-emscripten
+
+            - name: Package WASM module
+              run: |
+                  output=target/wasm32-unknown-emscripten/release
+                  test -s "$output/peri-wasm.js"
+                  test -s "$output/peri_wasm.wasm"
+                  mkdir -p dist
+                  tar -czf dist/peri-beta-wasm32-unknown-emscripten.tar.gz -C "$output" peri-wasm.js peri_wasm.wasm
+                  (cd dist && sha256sum peri-beta-wasm32-unknown-emscripten.tar.gz > peri-beta-wasm32-unknown-emscripten.tar.gz.sha256)
+
+            - name: Upload WASM artifact
+              uses: actions/upload-artifact@v4
+              with:
+                  name: peri-beta-wasm32-unknown-emscripten-${{ github.sha }}
+                  path: |
+                      dist/peri-beta-wasm32-unknown-emscripten.tar.gz
+                      dist/peri-beta-wasm32-unknown-emscripten.tar.gz.sha256
+                  if-no-files-found: error
+                  compression-level: 0
+                  retention-days: 14
+
+    publish:
+        name: Publish peri-beta
+        needs: [build, wasm]
+        runs-on: ubuntu-24.04
+        permissions:
+            contents: write
+        defaults:
+            run:
+                shell: bash
+        steps:
+            - name: Download beta artifacts
+              uses: actions/download-artifact@v4
+              with:
+                  pattern: peri-beta-*-${{ github.sha }}
+                  path: dist
+                  merge-multiple: true
+
+            - name: Verify all packages
+              run: |
+                  for platform in linux-x86_64 macos-aarch64; do
+                      (cd dist && sha256sum --check "peri-beta-${platform}.tar.gz.sha256")
+                      test "$(tar -tzf "dist/peri-beta-${platform}.tar.gz")" = peri-beta
+                  done
+                  (cd dist && sha256sum --check peri-beta-wasm32-unknown-emscripten.tar.gz.sha256)
+                  test "$(tar -tzf dist/peri-beta-wasm32-unknown-emscripten.tar.gz)" = "$(printf 'peri-wasm.js\nperi_wasm.wasm')"
+
+            - name: Publish rolling beta prerelease
+              env:
+                  GH_TOKEN: ${{ github.token }}
+                  GH_REPO: ${{ github.repository }}
+              run: |
+                  printf 'Development build from pre-release/main.\n\nCommit: %s\nRun: %s/actions/runs/%s\n' \
+                    "$GITHUB_SHA" "$GITHUB_SERVER_URL/$GITHUB_REPOSITORY" "$GITHUB_RUN_ID" > notes.md
+                  if gh release view peri-beta --json isPrerelease --jq '.isPrerelease' > prerelease.txt; then
+                      test "$(cat prerelease.txt)" = true
+                      gh release upload peri-beta dist/* --clobber
+                      gh api --method PATCH "repos/$GITHUB_REPOSITORY/git/refs/tags/peri-beta" \
+                        -f sha="$GITHUB_SHA" -F force=true
+                      gh release edit peri-beta --title 'Peri Beta' --prerelease --latest=false --notes-file notes.md
+                  else
+                      gh release create peri-beta dist/* --target "$GITHUB_SHA" \
+                        --title 'Peri Beta' --prerelease --latest=false --notes-file notes.md
+                  fi

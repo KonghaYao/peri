@@ -65,8 +65,7 @@ export class ViewerDataAdapter implements ViewerDataSource {
     const c = (name: string, fallback: string) => field(this.columns, "threads", name, fallback);
     return ["t.id", "t.title", "t.cwd", "t.created_at", "t.updated_at", "t.message_count",
       c("parent_thread_id", "NULL"), c("snapshot_at_message_id", "NULL"), c("hidden", "0"),
-      c("cancel_policy", "NULL"), c("agent_status", "NULL"),
-      c("context_cache_epoch", "NULL")].join(", ");
+      c("cancel_policy", "NULL"), c("agent_status", "NULL")].join(", ");
   }
 
   private messageColumns(): string {

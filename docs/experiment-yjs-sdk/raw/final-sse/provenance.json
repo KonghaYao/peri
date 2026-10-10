@@ -1,0 +1,22 @@
+{
+  "sourceSha256": "96800d1a6c1be32cb460a8b85be68788a8410f5bc5215dd4eb3d8c5e16ebbb67",
+  "generatorSha256": "5fe3c36d10ea9b148deb605559b4bb5724d78bfd9fb672ef134291cd01856a66",
+  "dependencyLockSha256": "acf7c28963e8fbb65317a543683d400cec43ece64de3603777f6ef1510e0e367",
+  "harnessFilesSha256": {
+    "npm-packages/@peri-sdk/benchmarks/candidate-stream.ts": "a805dc49dc7afabd4dc3751bb836e7918c60998a55a449f9a6924c79f3227314",
+    "npm-packages/@peri-sdk/benchmarks/codec-probe.ts": "64d490446e4ae6b0f117d994a4f64573429b53712ba7edea42d0385023b200b7",
+    "npm-packages/@peri-sdk/benchmarks/combined.ts": "2da87a94907ce93f2ae8fff05b0bd6578940585e336d576631c21fd05f9f2daf",
+    "npm-packages/@peri-sdk/benchmarks/harness.ts": "d2b38d27caba553a040ad792a54f2f6d968c60c41950657b41d4414978c4794e",
+    "npm-packages/@peri-sdk/benchmarks/run.ts": "be5d045d1f63aec3d84b858708f69b00aac4ea16d01ac26ea3d27ea092e79081",
+    "npm-packages/@peri-sdk/benchmarks/scenarios.ts": "886458965b2675cf96121c3111a4d9ed9aaefd858d427670ccb83630cb24d435",
+    "npm-packages/@peri-sdk/benchmarks/validation.ts": "e73cdab6d7cd0dcfdc0f1c349246f07666d18ef003febd5894928b0ef4c278d9",
+    "npm-packages/@peri-sdk/benchmarks/workloads.ts": "5fe3c36d10ea9b148deb605559b4bb5724d78bfd9fb672ef134291cd01856a66"
+  },
+  "harnessArchive": "../final-combined/harness.tar.gz",
+  "harnessArchiveSha256": "1ee3a4a8e0bf3ded9a5b7da3b6d73341f3d9a2caac0615814b90341a41189627",
+  "sourceArchive": "../final/frozen-source.tar.gz",
+  "baselineCommit": null,
+  "samplingRoot": "/tmp/peri-yjs-sdk-final-round3",
+  "overlapWithOtherCpuTasks": false,
+  "scope": "actual demo JSON/base64 adapter paths; no HTTP/network or JSON.parse simulation"
+}

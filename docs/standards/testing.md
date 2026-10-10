@@ -38,6 +38,8 @@ mod tests;        // 或 mod foo_tests;（见下）
 
 模块名参与 `cargo test -- <过滤词>` 匹配，因此当某个测试文件是 canonical 命令的命中目标时，模块名必须让该过滤词成立：过滤 `mcp::mcp_v4_seam` 的文件要挂成 `mod mcp_v4_seam_tests;`，沿用 `mod tests;` 会让过滤词命中不到（`cargo test` 仍以 0 tests 退出 0）。
 
+过滤词同时必须是**精确**模块路径：过宽前缀会连带命中同目录的其他测试模块（例：`mcp::builtin` 会一并命中 `mcp::builtin_apply_tests`、`mcp::builtin_runtime_tests` 与 `mcp::builtin::tests`），使命令覆盖范围与意图不符；需要单个模块时写完整路径（如 `mcp::builtin::tests`）。
+
 ---
 
 ## 二、测试优先级分层
@@ -218,15 +220,23 @@ fn make_ids() -> (TurnId, AgentId) {
     (TurnId::new(), AgentId::new())
 }
 
-// 中等 mock：手写 trait impl（具体 suggester）
-struct MockBashCommandSuggester;
-impl ErrorSuggester for MockBashCommandSuggester {
-    fn suggest(&self, _ctx: &ErrorContext) -> Option<Suggestion> {
-        Some(Suggestion { summary: "来自 MockBashCommandSuggester".into(), details: None })
+// 中等 mock：手写 trait impl（具体工具）
+struct StubTool;
+#[async_trait::async_trait]
+impl BaseTool for StubTool {
+    fn name(&self) -> &str { "Stub" }
+    fn description(&self) -> &str { "返回固定输出" }
+    fn parameters(&self) -> serde_json::Value { serde_json::json!({}) }
+    async fn invoke(
+        &self,
+        _input: serde_json::Value,
+        _ctx: ToolContext<'_>,
+    ) -> Result<String, Box<dyn std::error::Error + Send + Sync>> {
+        Ok("fixed".into())
     }
 }
-// 注：实际 suggester 共 7 个（BashCommand / GlobPattern / Path / Range / Subagent / Regex / JsonSchema），
-// 测试时按需 mock 具体类型即可。
+// 需要锁某个契约方法时再单独覆盖即可（如 execution_test.rs 的 `LimitedTool`
+// 只覆盖 `output_char_limit()` 来锁截断行为）。
 
 // 复杂 mock（如 LLM）：手写 trait impl + 返回固定/echo 数据
 struct EchoLLM;
@@ -307,6 +317,15 @@ cargo test -p peri-theme
 # 单测过滤
 cargo test -p <crate> --lib -- <test_name>
 
+# 资源面重点路由（workspace resources W1/W4b/W5；只列实际可执行入口，见各 crate 索引）
+cargo test -p peri-acp-types --lib -- workspace_resources
+cargo test -p peri-mcp-workspace --lib -- resources
+cargo test -p peri-middlewares --lib -- mcp::skill_activation
+cargo test -p peri-middlewares --lib -- mcp::skill_discovery::core_face_tests
+cargo test -p peri-middlewares --lib -- mcp::agent_registry
+cargo test -p peri-acp --lib -- host::requests::tests::skill_resources
+cargo test -p peri-acp --lib -- host::requests::tests::meta_resources
+
 # 集成测试目标（crate 根 tests/，只访问 crate 的 pub API）
 cargo test -p <crate> --test <target>
 
@@ -360,5 +379,3 @@ npm run e2e:release:strict  # 发版且不容忍首轮 flake
 | langfuse-client | 客户端、类型、batcher |
 | peri-workflow | runner、protocol、registry |
 | peri-js-runtime | JS host、RPC、artifact 安装与 invocation 生命周期 |
-| peri-lsp | 诊断、池、编解码 |
-| peri-web-pty | PTY session、WebSocket、HTTP |

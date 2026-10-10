@@ -1,0 +1,92 @@
+{
+  "scenario": "stream",
+  "sample": 1,
+  "root": "/tmp/peri-yjs-sdk-final-round3",
+  "api": "candidate",
+  "workload": {
+    "version": 1,
+    "tools": 12000,
+    "toolsPerAssistant": 10,
+    "inputDataBytes": 960,
+    "resultTextBytes": 4096,
+    "resultDataBytes": 4096,
+    "asyncUpdates": 128,
+    "streamChunks": 16384,
+    "chunkBytes": 1024,
+    "largeResultBytes": 1048576
+  },
+  "startedAt": "2026-10-04T16:51:23.735Z",
+  "status": "passed",
+  "budget": {
+    "timeoutMs": 120000,
+    "maxRssBytes": 2147483648
+  },
+  "environment": {
+    "bun": "1.4.2",
+    "yjs": "13.6.33",
+    "platform": "darwin",
+    "release": "25.5.0",
+    "arch": "arm64",
+    "cpu": "Apple M5 Pro",
+    "totalMemoryBytes": 51539607552
+  },
+  "sourceSha256": "96800d1a6c1be32cb460a8b85be68788a8410f5bc5215dd4eb3d8c5e16ebbb67",
+  "dependencyLockSha256": "acf7c28963e8fbb65317a543683d400cec43ece64de3603777f6ef1510e0e367",
+  "generatorSha256": "5fe3c36d10ea9b148deb605559b4bb5724d78bfd9fb672ef134291cd01856a66",
+  "harnessVersion": 2,
+  "initialSnapshot": {
+    "encoding": "v2",
+    "mode": "snapshot",
+    "updateBytes": 199,
+    "jsonBytes": 388,
+    "applyMs": 0.5673330000000014
+  },
+  "progress": {
+    "stage": "complete",
+    "elapsedMs": 203.035
+  },
+  "memory": {
+    "rssBytes": 266551296,
+    "peakRssBytes": 266551296,
+    "heapUsedBytes": 142511970,
+    "finalRssBytes": 266551296,
+    "processPeakRssBytes": 266551296
+  },
+  "stream": {
+    "completedChunks": 16384,
+    "encoding": "v2",
+    "frames": 265,
+    "jsonBytes": 22408849,
+    "updateBytes": 16788326,
+    "applyMs": 7.3789679999997055,
+    "projectionMs": 156.67283099999833,
+    "endToEndMs": 169.10608299999998,
+    "options": {
+      "flushIntervalMs": 16,
+      "maxBatchBytes": 65536,
+      "maxBatchUpdates": 256,
+      "maxSubscriberBytes": 4194304
+    },
+    "flushCalls": 266,
+    "nonEmptyFlushCalls": 265,
+    "completionFlushFrames": 1,
+    "framing": "native binary doc payloads plus equivalent demo SSE JSON/base64 body bytes; excludes transport headers and undefined binary envelope serialization",
+    "projectionIncludesSynchronousTransportAndApply": "only threshold-triggered synchronous flushes; deferred tail accounted in endToEndMs",
+    "timing": "endToEndMs includes input generation, user, all accepts, completion, explicit flush, close and replica apply; excludes initial snapshot and final validation"
+  },
+  "completeMs": 0.5736670000000004,
+  "validation": {
+    "bytes": 16777216,
+    "sha256": "732dd2b3f284d2273326b8acf57f014a895f513bfc79770eb963226aeaef8cb6",
+    "expectedSha256": "732dd2b3f284d2273326b8acf57f014a895f513bfc79770eb963226aeaef8cb6",
+    "exact": true,
+    "activeTurnStatus": "completed"
+  },
+  "elapsedMs": 203.03645799999998,
+  "process": {
+    "exitCode": 0,
+    "reason": null,
+    "externalPeakRssBytes": 0,
+    "stderr": ""
+  }
+}

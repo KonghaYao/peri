@@ -1,5 +1,7 @@
 # peri-acp 协议设计
 
+> 已批准变更（2026-10-07，实施中）：移除持久执行恢复及 Work query/resolve、SDK admission/entered/settlement 和 durable control 协议。普通 prompt、输入队列与取消不依赖这些能力；history list/load/resume/replay 保留。状态见[剥离计划](../../spec/issues/2026-10-07-remove-execution-recovery-plan.md)，撤销接口明确 method-not-found，不保留成功 shim。
+
 > 状态：现行设计
 >
 > 本文是 wire 语义说明；当前实现入口以 `docs/code-index/peri-acp.md` 为准，跨层不变量以 `docs/standards/architecture-contracts.md` 为准。
@@ -24,11 +26,11 @@ TUI 的所有主动行为通过标准 ACP JSON-RPC 方法调用。不定义自�
 
 | 方法 | 参数 | 返回值 | 语义 |
 |------|------|--------|------|
-| `session/new` | `{ cwd?, model?, permission_mode? }` | `{ session_id }` | 创建新会话 |
-| `session/load` | `{ session_id }` | `{ session_id }` | 恢复历史会话（历史经 `session/update` 重放） |
+| `session/new` | `{ cwd?, mcpServers? }` | `{ sessionId, ... }` | 创建新会话；可返回 modes、models、configOptions 等协商字段 |
+| `session/load` | `{ sessionId, cwd?, mcpServers? }` | `{ ... }` | 加载指定会话并重放历史；响应可含 modes、models、configOptions，不创建新身份 |
 | `session/resume` | `{ sessionId, cwd? }` | `{}` | 复用已有 session_id 继续会话；经统一 host lifecycle handler 处理 |
-| `session/close` | `{ session_id }` | `{}` | 关闭会话 |
-| `session/fork` | `{ source_session_id }` | `{ new_session_id }` | 复制当前会话到新线程 |
+| `session/close` | `{ sessionId }` | `{}` | 关闭会话 |
+| `session/fork` | `{ sessionId, cwd?, mcpServers? }` | `{ sessionId, ... }` | 指定源会话并复制到新线程；返回值中的 sessionId 是新身份 |
 | `session/list` | `{ cwd? }` | `{ sessions: SessionInfo[] }` | 列出会话（可按 cwd 过滤） |
 | `session/rename` | `{ sessionId, title }` | `{ sessionId, title }` | 重命名会话并持久化标题 |
 
@@ -39,26 +41,13 @@ TUI 的所有主动行为通过标准 ACP JSON-RPC 方法调用。不定义自�
 - `session/list` 的 `_meta["peri.sessionWorkspaceV1"]` 承载 `ScopedThreadQuery`，
   返回相同扩展键中的 `threads` 与 `nextCursor`。scope 支持项目、工作区、精确目录
   和全局；普通 `cwd` 字段仍表示精确目录。
-- new/load/resume/fork 的响应扩展投影绑定；请求 cwd 与保存的 binding 不符时拒绝。
-  能力未协商不改变旧标准字段解释，也不能允许错误目录执行。
-- `session/load` 的只读准入：执行所有权不可得（他处持有 / 待恢复的精确代际 / 本节点
-  不提供所有权）时仍返回成功，在 `_meta["peri.sessionWorkspaceV1"].read_only` 携带
-  `ReadOnlyAdmission`，进程日志记 warning；未协商该能力的客户端同样进入，只是拿不到这个标记。
-  待恢复的精确代际只在协商了 `peri.sessionRecoveryV1` 的连接上停住（客户端确认后调用
-  `peri/session_reset_dirty`），没有确认交互的连接由宿主直接解除该代际并取得所有权。
-  只读准入不改变独占：写入与执行仍要 owner，`session/fork` 不接受降级。
-- ~~会话存储准入由 initialize 的 `peri.sessionStoreRegistrationV1` 显式协商：
-  `peri/session_store_status` 返回本机对当前存储的接纳裁决，`peri/session_register_store`
-  在用户显式接受风险时登记。~~ **已撤销**（2026-09-27 用户裁决）：不再有本机登记、准入
-  裁决与跨安装来源判定，因此这两条方法与 `peri.sessionStoreRegistrationV1` 都不再存在
-  （原语义、`StoreNotRegistered` / `StoreRegisteredFromDifferentOrigin` 两条拒绝原因见
-  `spec/issues/2026-09-26-session-store-remote-backend.md` 的历史记录）。**现行语义是
-  「配置即用」**：配置里指到哪个会话存储就直接用哪个，不要求先登记；远端库与本地库是
-  同一种存储模式，两者存储模式一致（schema/SQL 统一是后续工作）。
-- `session/metadata` 读取轻量标题与当前会话配置投影；不做逐 tick Git 发现。
+- new/load/resume/fork 的响应扩展投影绑定。按 ID load/resume 使用保存的 binding，
+  请求 cwd 不作为路径认领或 mismatch 拒绝门槛；保存目录、机器环境与绑定完整性
+  仍参与执行准入，不能在当前宿主同名目录静默装配另一环境。
+- `session/load` / `session/resume` 不取得或校验执行所有权，不返回所有权只读准入或前任 owner 警告。唯一执行者与跨实例协调由 `peri-sdk` 管理；Peri 保留环境、绑定、frozen 与持久化完整性检查，历史通过独立只读入口查询。
 
-类型事实源为 `peri-acp-types::workspace`；身份、恢复和执行锁约束见
-[会话工作区设计](session-workspace-identity.md)。
+类型事实源为 `peri-acp-types::workspace`；身份、恢复与执行准入约束见
+[会话身份与工作区设计](session-id-environment.md)。
 
 ### 2.2 交互
 
@@ -86,10 +75,23 @@ TUI 的所有主动行为通过标准 ACP JSON-RPC 方法调用。不定义自�
 | 方法 | 参数 | 返回值 | 语义 |
 |------|------|--------|------|
 | `plugin/search` | `{ query, sessionId? }` | `{ results }` | 搜索插件市场 |
-| `plugin/install` | `{ name, marketplace, scope?, sessionId? }` | `{}` | 安装插件 |
-| `plugin/uninstall` | `{ name, sessionId? }` | `{}` | 卸载插件 |
-| `plugin/toggle` | `{ name, enabled, sessionId? }` | `{}` | 启用/禁用插件 |
-| `plugin/update` | `{ pluginId, sessionId? }` | `{ success, plugin }` | 更新插件（结果同时推送 `plugin-action-result` / `plugin-snapshot` 通知） |
+| `marketplace/add` | `{ source, sessionId? }` | `{ success, name }` | 宿主全局 marketplace catalog 注册与刷新，经 PluginManagerPort 持久化；读取、刷新或保存失败返回 -32603 并记录日志 |
+| `marketplace/remove` | `{ name, sessionId? }` | `{ success }` | 宿主全局 marketplace catalog 删除，经 PluginManagerPort 持久化并清理宿主缓存；不删除本地源目录；读取或保存失败返回 -32603 并记录日志 |
+| `marketplace/refresh` | `{ name, sessionId? }` | `{ success, pluginCount }` | 按宿主 catalog 名称刷新；失败返回 -32603 |
+| `plugin/list` | `{ sessionId? }` | `{ plugins, hooks }` | 当前会话装配插件投影，不扩展为宿主所有安装插件；来源与可写安装范围分开 |
+| `plugin/install` | `{ name, marketplace, scope?, sessionId? }` | `{ success, plugin }` | scope 仅 user/project/local，缺省 user；未知值或非字符串返回 -32602；project/local 必须取有效 session 的绝对执行目录 |
+| `plugin/uninstall` | `{ pluginId, scope?, sessionId? }` | `{ success }` | scope 缺省 user；显式安装范围贯穿生产端口与 installer，以 ID + scope + projectPath 精确匹配唯一记录；校验在记录修改前完成 |
+| `plugin/toggle` | `{ pluginId, enable, scope, sessionId? }` | `{ success }` | 宿主统一持久化启用/禁用；project/local scope 必须取有效 session 的执行目录，不回退用户级配置 |
+| `cron/list` | `{ sessionId }` | `{ jobs }` | 查询实际会话环境的定时任务；无能力显式报错 |
+| `cron/toggle` | `{ sessionId, id }` | `{ id, success }` | 切换会话环境中的任务；校验 session/environment/workspace scope |
+| `cron/remove` | `{ sessionId, id }` | `{ id, success }` | 删除会话环境中的任务；不存在或不可用显式失败 |
+| `plugin/update` | `{ pluginId, scope?, sessionId? }` | `{ success, plugin }` | scope 缺省 user；与卸载共用精确安装身份，不根据 session cwd 猜范围；结果同时推送 `plugin-action-result` / `plugin-snapshot` 通知 |
+
+`marketplace/add`、`marketplace/remove`、`marketplace/refresh` 操作宿主全局 catalog，不按 project 或 session 重定位配置；可选 `sessionId` 仅供客户端响应 ticket 生命周期关联。TUI 经统一 PluginOperation 展示 pending/error，成功响应后刷新本地只读浏览缓存；服务端错误不被吞掉。
+
+`plugin/list` 的 `source="session"` 只表示展示来源，不能作为写入 scope。`install_scope` 从匹配插件 ID（name + marketplace）及安装根的真实记录核实，只返回 user/project/local 或 null；`toggle_supported` 表示是否核实可写范围，不能确认（含同根多范围歧义、无安装记录的 managed 来源）时为 false，并提供 `management_error`。宿主 snapshot 的 `load_error` 保留为独立加载诊断，不用管理错误覆盖；不返回 pluginConfigs 或 MCP 配置正文。toggle 的生产端口还核对请求 scope/cwd 对应的安装记录，不能通过手填 user scope 获得未记录来源的写权限。
+
+ACP install/update/uninstall 的 project/local 目录只来自受信 session 状态，不读取请求自带 project_dir，不回落进程 cwd。所有管理动作使用明确 InstallScope；update/uninstall 的外部请求缺省 user。CLI install/update/uninstall/enable/disable 统一解析 scope（缺省 user），仅 project/local 获取 CLI 进程真实 current_dir 作为 host-local 受信上下文；无法获取或目录无效时失败，不回退 user。user 范围的 projectPath 固定为空，无 session 可用，即使带 project session 也不选择项目记录；project/local 仅匹配受信 cwd 下同 ID、同 scope 的记录，不回退其他范围。同 ID 的 user/project 或 project/local 记录可以并存，选择一条不会修改另一条的安装记录、配置或独立 root。精确身份无记录或出现多条匹配均 fail closed；project/local 卸载不删除用户 pluginConfigs。目录缺失/非绝对、失效 session、关闭中 session 在复制或修改安装记录前失败；此校验不是跨文件事务保证，后续 I/O 失败仍可能留下部分成果，MCP 配置变更仍需下次装配。
 
 ### 2.5 后台任务、工作流与 rewind
 
@@ -97,7 +99,7 @@ TUI 的所有主动行为通过标准 ACP JSON-RPC 方法调用。不定义自�
 
 | 方法 | 参数 | 返回值 | 语义 |
 |------|------|--------|------|
-| `session/cancel-bg-task` | `{ sessionId, taskId }` | `{ success }` | 取消后台任务（会话不存在时如实报错） |
+| `session/cancel-bg-task` | `{ sessionId, taskId }` | `{ success }` | 会话任务取消入口；owner 路由与结果语义见 [Session 异步任务架构](session-async-tasks.md) |
 | `workflow/list_runs` | `{ sessionId }` | `{ runs }` | 列出工作流运行快照 |
 | `workflow/kill_agent` | `{ sessionId, runId, agentId }` | `{ killed }` | 终止运行中的工作流 agent |
 | `workflow/kill_run` | `{ sessionId, runId }` | `{ killed }` | 终止整个工作流运行 |
@@ -147,6 +149,8 @@ ACP 事件映射 / EventSink
 ---
 
 ## 4. 事件目录
+
+`peri/agent_event` 的 `ExecutionStarted` DTO 包含 `generation`（当前 session mailbox 代际）与 `request_id`（实际宿主 attempt 的非空身份）。它先于该 attempt 的权限请求与提问送达；对应 `peri/agent_event_done.requestId` 只关闭相同身份。该开始事件不要求用户输入队列能力开启，不代表输入已 claim。内部 continuation 与定时审批也遵循此契约；定时审批和之后执行各有独立身份。managed 用户输入仍使用原有 `UserInputRunStarted`，两者归约到同一客户端执行生命周期。
 
 ### 4.1 流式事件（高频，每秒数十次）
 

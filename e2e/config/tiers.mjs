@@ -14,7 +14,7 @@ export const TIERS = {
     id: "l0",
     label: "L0 PR 冒烟",
     description:
-      "串行、无 retry；偏确定性用例（视口/工具卡/面板冻结），约 5～8 分钟。",
+      "串行、无 retry；全部用例不依赖真实模型/凭据/外部网络（TEST-HERMETIC-001）；约 3～4 分钟。",
     files: [
       "tests/scenarios/legacy-history-upgrade.test.ts",
       "tests/scenarios/fresh-setup.test.ts",
@@ -22,10 +22,10 @@ export const TIERS = {
       "tests/scenarios/workspace-no-git.test.ts",
       "tests/scenarios/workspace-slow-git.test.ts",
       "tests/scenarios/workspace-directory-moved.test.ts",
+      "tests/scenarios/workspace-mcp-resources.test.ts",
       "tests/smoke/viewport-40x8.test.ts",
       "tests/panels/plugin-uninstall-no-freeze.test.ts",
       "tests/tool-cards/first-tool-stuck-running.test.ts",
-      "tests/tool-cards/header-suffix-and-error.test.ts",
       "tests/tool-cards/edit-diff.test.ts",
     ],
     parallel: 1,

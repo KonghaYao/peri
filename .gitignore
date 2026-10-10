@@ -39,6 +39,7 @@ build/Release
 
 # Dependency directories
 node_modules/
+.wrangler/
 jspm_packages/
 
 # Snowpack dependency directory (https://snowpack.dev/)
@@ -164,6 +165,9 @@ claude-blog-cn
 *.py
 !scripts/test-i386.py
 !scripts/test-loongarch64.py
+!scripts/test-install-beta.py
+!scripts/test-install.py
+!scripts/test-cargo-patches.py
 build
 .tmp
 tmp/

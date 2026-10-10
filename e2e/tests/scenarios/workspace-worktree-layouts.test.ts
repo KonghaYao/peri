@@ -1,8 +1,9 @@
+import { buildPeriForE2e } from "../../helpers/build.js";
 /**
  * 主仓库 / linked worktree / 独立 clone / 子目录四种布局的执行目录与项目归属。
  *
  * 只使用本地 SSE 模型端点，无真实凭据、无外部 API。回归
- * `spec/issues/2026-09-17-p0-workspace-validation-blocks-input.md` 的验收条件第 5 项：
+ * `spec/history/2026-09.md`（2026-09-17 条目） 的验收条件第 5 项：
  * Git 项目聚合、checkout 识别与执行目录在真实 TUI 上仍按设计分离——项目按 common dir
  * 聚合，工作区按 checkout 区分，会话的执行目录是启动目录本身。
  *
@@ -36,11 +37,7 @@ describe("仓库布局下的执行目录与项目归属", () => {
 
   beforeAll(async () => {
     // 控制面脚本不构建 binary；本用例必须跑当前源码。
-    await execFileAsync("cargo", ["build", "-p", "peri-tui", "--bin", "peri"], {
-      cwd: PROJECT_ROOT,
-      timeout: 600_000,
-      maxBuffer: 8 * 1024 * 1024,
-    });
+    await buildPeriForE2e();
   }, 610_000);
 
   beforeEach(async () => {
@@ -186,6 +183,7 @@ describe("仓库布局下的执行目录与项目归属", () => {
     root: string;
     locator: string;
     cwd: string;
+    current_path: string;
   }> {
     const rows = await query<{
       project_id: string;
@@ -194,12 +192,15 @@ describe("仓库布局下的执行目录与项目归属", () => {
       root: string;
       locator: string;
       cwd: string;
+      current_path: string;
     }>(
-      `SELECT b.project_id, b.workspace_id, b.relative_cwd, w.root, p.locator, t.cwd
+      // v19 起工作区根与归属路径是同一行上的同一列：绑定的归属就是会话行的 workspace_id。
+      `SELECT b.project_id, b.workspace_id, b.relative_cwd, w.path AS root, p.locator, t.cwd,
+              w.path AS current_path
        FROM session_bindings b
-       JOIN workspaces w ON w.id = b.workspace_id
-       JOIN projects p ON p.id = b.project_id
        JOIN threads t ON t.id = b.thread_id
+       JOIN workspaces w ON w.id = t.workspace_id
+       JOIN projects p ON p.id = b.project_id
        ORDER BY t.created_at DESC, t.rowid DESC LIMIT 1`,
     );
     expect(rows, "每次进入都应有新建的绑定").toHaveLength(1);
@@ -238,6 +239,7 @@ describe("仓库布局下的执行目录与项目归属", () => {
       await prompt("LAYOUTS_SUBDIRECTORY_INPUT", 1, "子目录会话");
       const fromSubdirectory = await latestBinding();
       expect(fromSubdirectory.root, "子目录属于仓库根工作区").toBe(await realpath(repo));
+      expect(fromSubdirectory.current_path).toBe(await realpath(repo));
       expect(fromSubdirectory.relative_cwd, "cwd 相对工作区根").toBe("sub");
       expect(fromSubdirectory.cwd, "会话的执行目录是启动目录本身").toBe(await realpath(sub));
       expect(
@@ -252,6 +254,7 @@ describe("仓库布局下的执行目录与项目归属", () => {
       expect(fromWorktree.root, "worktree 的工作区根是 worktree 路径").toBe(
         await realpath(worktree),
       );
+      expect(fromWorktree.current_path).toBe(await realpath(worktree));
       expect(fromWorktree.relative_cwd, "worktree 根目录没有子路径").toBe("");
       expect(fromWorktree.project_id, "同一仓库的 worktree 属于同一项目").toBe(
         fromSubdirectory.project_id,
@@ -269,6 +272,7 @@ describe("仓库布局下的执行目录与项目归属", () => {
       await prompt("LAYOUTS_CLONE_INPUT", 3, "独立 clone 会话");
       const fromClone = await latestBinding();
       expect(fromClone.root, "clone 是独立工作区").toBe(await realpath(clone));
+      expect(fromClone.current_path).toBe(await realpath(clone));
       expect(fromClone.project_id, "clone 不与源仓库共用项目").not.toBe(
         fromSubdirectory.project_id,
       );
@@ -282,6 +286,11 @@ describe("仓库布局下的执行目录与项目归属", () => {
       expect(projects, "仓库与 clone 各一个项目").toHaveLength(2);
       const workspaces = await query<{ id: string }>("SELECT id FROM workspaces");
       expect(workspaces, "子目录与 worktree 各占一个工作区，clone 是第三个").toHaveLength(3);
+      const currentWorkspaces = await query<{ path: string }>("SELECT path FROM workspaces");
+      expect(currentWorkspaces).toHaveLength(3);
+      expect(currentWorkspaces.map((workspace) => workspace.path).sort()).toEqual(
+        [await realpath(repo), await realpath(worktree), await realpath(clone)].sort(),
+      );
       const threads = await query<{ cwd: string }>(
         "SELECT cwd FROM threads ORDER BY created_at, rowid",
       );

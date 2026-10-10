@@ -102,6 +102,24 @@ test("supports old required-only schema with nullable optional projections", () 
   loader.close();
 });
 
+test("reads schema 11 configuration and message projections without retired cache columns", () => {
+  const path = dbWith(`PRAGMA user_version=11;
+    CREATE TABLE threads(id TEXT PRIMARY KEY,title TEXT,cwd TEXT,created_at TEXT,updated_at TEXT,message_count INTEGER,parent_thread_id TEXT,snapshot_at_message_id TEXT,hidden INTEGER,cancel_policy TEXT,config TEXT,frozen_context TEXT,inherited_context TEXT,agent_status TEXT);
+    CREATE TABLE messages(message_id TEXT PRIMARY KEY,thread_id TEXT,role TEXT,content TEXT,truncated INTEGER,excluded INTEGER,projection TEXT);
+    INSERT INTO threads VALUES ('t1','title','/tmp','2026-01-01','2026-01-01',1,NULL,NULL,0,'default','{"model":"retained"}',NULL,NULL,'done');
+    INSERT INTO messages VALUES ('m1','t1','user','{"role":"user","content":"hi"}',1,1,NULL);`);
+  const loader = new DataLoader(path);
+  try {
+    const thread = loader.loadThreadsByIds(["t1"])[0];
+    expect(thread?.config).toBe('{"model":"retained"}');
+    expect(thread).not.toHaveProperty("cached_context");
+    expect(thread).not.toHaveProperty("context_cache_epoch");
+    expect(loader.loadMessages("t1")[0]).toMatchObject({ role: "user", truncated: 1, excluded: 1, sequence: 1 });
+  } finally {
+    loader.close();
+  }
+});
+
 test("read-only loader and snapshot transaction", () => {
   const path = dbWith(`CREATE TABLE threads(id TEXT PRIMARY KEY,title TEXT,cwd TEXT,created_at TEXT,updated_at TEXT,message_count INTEGER, parent_thread_id TEXT, hidden INTEGER);
     CREATE TABLE messages(message_id TEXT PRIMARY KEY,thread_id TEXT,role TEXT,content TEXT,excluded INTEGER);

@@ -84,10 +84,10 @@ Plan delivery. Coordinate agents. Delegate tasks.
 
 **The essentials, included.**
 
-Streaming Markdown · Compaction · LSP · Langfuse<br>
+Streaming Markdown · Compaction · Langfuse<br>
 Skills & hooks · Plugins · Model profiles<br>
 Rewind · Fork · Resume<br>
-**Terminal · Headless · ACP · Web PTY**
+**Terminal · Headless · ACP**
 
 </div>
 
@@ -105,6 +105,9 @@ curl -fsSL https://raw.githubusercontent.com/konghayao/peri/main/scripts/install
 irm https://raw.githubusercontent.com/konghayao/peri/main/scripts/install.ps1 | iex
 ```
 
+Also installable with [mise](https://mise.jdx.dev/) through the `github:KonghaYao/peri` tool;
+see [release notes](.github/README.md#正式版发布) for the `version_prefix` entry.
+
 Follow the installer's PATH instructions, then run `peri` in your project. Complete model setup and restart Peri.
 
 ```bash
@@ -116,12 +119,33 @@ peri update                  # Update Peri
 
 Tool calls are auto-approved by default. For approval prompts, use `--permission-mode default`.
 
+### Next-major beta
+
+Available for macOS / Linux (x86_64 and ARM64) after the first successful
+`pre-release/main` build publishes the `peri-beta` prerelease.
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/konghayao/peri/pre-release/main/scripts/install-beta.sh | bash
+export PATH="$HOME/.local/bin:$PATH"
+peri-beta --version
+peri-beta                    # Start beta in your project
+```
+
+Installs `peri-beta` in `~/.local/bin` without replacing `peri`. Add the PATH export
+to `~/.zshrc` or `~/.bashrc` to make it permanent. Rerun the installer to update
+beta; do not use `peri-beta update`, which uses the stable installer.
+Set `PERI_BETA_INSTALL_DIR` to use a different installation directory.
+
+Beta and stable share `~/.peri` configuration and sessions by default. Use
+`--config-file` and `--db-path` for data isolation.
+See [beta installation notes](.github/README.md#安装与更新-beta) for details.
+
 <details>
 <summary><strong>Configuration & runtime notes</strong></summary>
 
 - `/login`: providers · `/model`: model profiles · `/threads`: saved sessions.
 - Settings: `~/.peri/settings.json` (`--config-file`). Sessions: `~/.peri/threads/threads.db` (`--db-path`).
-- ACP client: `peri acp --cwd /path/to/project`. Browser terminal: `peri web --host 127.0.0.1`.
+- ACP client: `peri acp --cwd /path/to/project`.
 - Workflows require Node.js. Extensions may need other dependencies.
 - Claude Code compatibility varies by feature. Caching depends on your provider and workload.
 - Coordination uses skills and a shared runtime. MetaHarness changes apply to new sessions; MCP Apps needs a compatible host.

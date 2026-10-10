@@ -1,0 +1,13 @@
+{"progress":{"stage":"project_tools","completed":1000,"elapsedMs":41.987917},"memory":{"rssBytes":92880896,"peakRssBytes":92880896,"heapUsedBytes":13520777}}
+{"progress":{"stage":"project_tools","completed":2000,"elapsedMs":83.53758400000001},"memory":{"rssBytes":145653760,"peakRssBytes":145653760,"heapUsedBytes":28206851}}
+{"progress":{"stage":"project_tools","completed":3000,"elapsedMs":140.292542},"memory":{"rssBytes":168411136,"peakRssBytes":168411136,"heapUsedBytes":39593157}}
+{"progress":{"stage":"project_tools","completed":4000,"elapsedMs":222.45554199999998},"memory":{"rssBytes":189693952,"peakRssBytes":189693952,"heapUsedBytes":52375385}}
+{"progress":{"stage":"project_tools","completed":5000,"elapsedMs":326.687042},"memory":{"rssBytes":212189184,"peakRssBytes":212189184,"heapUsedBytes":63422054}}
+{"progress":{"stage":"project_tools","completed":6000,"elapsedMs":458.662084},"memory":{"rssBytes":232472576,"peakRssBytes":232472576,"heapUsedBytes":74866463}}
+{"progress":{"stage":"project_tools","completed":7000,"elapsedMs":620.2514590000001},"memory":{"rssBytes":405979136,"peakRssBytes":405979136,"heapUsedBytes":106210016}}
+{"progress":{"stage":"project_tools","completed":8000,"elapsedMs":819.7108340000001},"memory":{"rssBytes":466206720,"peakRssBytes":466206720,"heapUsedBytes":118046850}}
+{"progress":{"stage":"project_tools","completed":9000,"elapsedMs":1021.7107090000001},"memory":{"rssBytes":487604224,"peakRssBytes":487604224,"heapUsedBytes":128729530}}
+{"progress":{"stage":"project_tools","completed":10000,"elapsedMs":1266.963834},"memory":{"rssBytes":511639552,"peakRssBytes":511639552,"heapUsedBytes":143198754}}
+{"progress":{"stage":"project_tools","completed":11000,"elapsedMs":1561.8529999999998},"memory":{"rssBytes":538689536,"peakRssBytes":538689536,"heapUsedBytes":151884916}}
+{"progress":{"stage":"project_tools","completed":12000,"elapsedMs":1925.487292},"memory":{"rssBytes":549912576,"peakRssBytes":549912576,"heapUsedBytes":163724802}}
+{"resultFile":"/Users/konghayao/code/ai/docs/experiment-yjs-sdk/raw/baseline/view-2.json","status":"passed","elapsedMs":5049.284667}

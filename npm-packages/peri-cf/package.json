@@ -1,0 +1,47 @@
+{
+  "name": "@peri-code/peri-cf",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "Peri WASM chat on Cloudflare Workers and Durable Objects",
+  "scripts": {
+    "build:wasm": "bun scripts/build-wasm.ts",
+    "wasm:profiles": "bun scripts/profile-wasm.ts",
+    "prepare:wasm": "bun scripts/prepare-wasm.ts",
+    "dev": "bun run build && bun scripts/local-preview.ts",
+    "dev:hmr": "bun run prepare:wasm && vite",
+    "build": "bun run prepare:wasm && vite build",
+    "preview": "bun scripts/local-preview.ts",
+    "typecheck": "tsc --noEmit",
+    "test": "bun test tests web",
+    "test:e2e": "node scripts/e2e.mjs",
+    "smoke:local": "bun run build && bun scripts/smoke.mjs",
+    "deploy": "bun run build && wrangler deploy",
+    "cf:typegen": "wrangler types"
+  },
+  "dependencies": {
+    "@peri-code/sdk": "file:../@peri-sdk",
+    "@tanstack/react-query": "^5.104.1",
+    "hono": "^4.13.13",
+    "lib0": "^0.2.119",
+    "lucide-react": "^1.54.0",
+    "react": "^19.3.0",
+    "react-dom": "^19.3.0",
+    "react-markdown": "^10.1.0",
+    "remark-gfm": "^4.0.1",
+    "yjs": "^13.6.33",
+    "zod": "^4.6.5"
+  },
+  "devDependencies": {
+    "@cloudflare/vite-plugin": "^1.63.1",
+    "@cloudflare/workers-types": "5.20261009.1",
+    "@types/bun": "^1.4.2",
+    "@types/react": "^19.3.0",
+    "@types/react-dom": "^19.3.0",
+    "@vitejs/plugin-react": "^6.1.2",
+    "miniflare": "5.20261006.1-alpha",
+    "typescript": "^7.0.2",
+    "vite": "^8.3.4",
+    "wrangler": "4.149.0"
+  }
+}

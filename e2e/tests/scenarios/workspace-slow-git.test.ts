@@ -1,8 +1,9 @@
+import { buildPeriForE2e } from "../../helpers/build.js";
 /**
  * 慢 Git 的端到端：每次 Git 调用固定等待时，仓库目录仍能建会话并发送输入。
  *
  * 只使用本地 SSE 模型端点，无真实凭据、无外部 API。补上
- * `spec/issues/2026-09-17-p0-workspace-validation-blocks-input.md` 修复记录第 11 条
+ * `spec/history/2026-09.md`（2026-09-17 条目） 修复记录第 11 条
  * 的遗留「慢响应只在 resources 层用假 Git 验证，没有走 TUI / ACP 路径」：
  * 验收条件第 7 项要求「慢准备不造成输入丢失」，这属于跨层结论，不能只由
  * 单进程单元测试代表。
@@ -16,7 +17,7 @@ import { afterEach, beforeAll, beforeEach, describe, expect, it } from "vitest";
 import { createServer, type Server } from "node:http";
 import { execFile, execFileSync } from "node:child_process";
 import { promisify } from "node:util";
-import { mkdir, mkdtemp, readdir, readFile, rm, stat, symlink, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, readdir, readFile, realpath, rm, stat, symlink, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import { DatabaseSync } from "node:sqlite";
@@ -66,6 +67,11 @@ describe("慢 Git 的工作区发现", () => {
       }
     }
     await symlink(process.execPath, path.join(bin, "node")).catch(() => {});
+    const { stdout } = await execFileAsync("/bin/sh", ["-c", "command -v bun"]);
+    const bun = await realpath(stdout.trim());
+    expect(path.isAbsolute(bun)).toBe(true);
+    await rm(path.join(bin, "bun"), { force: true });
+    await symlink(bun, path.join(bin, "bun"));
     const real = execFileSync("/bin/sh", ["-c", "command -v git"], { encoding: "utf8" }).trim();
     await writeFile(
       path.join(bin, "git"),
@@ -77,11 +83,7 @@ describe("慢 Git 的工作区发现", () => {
 
   beforeAll(async () => {
     // 控制面脚本不构建 binary；本用例必须跑当前源码。
-    await execFileAsync("cargo", ["build", "-p", "peri-tui", "--bin", "peri"], {
-      cwd: PROJECT_ROOT,
-      timeout: 600_000,
-      maxBuffer: 8 * 1024 * 1024,
-    });
+    await buildPeriForE2e();
   }, 610_000);
 
   beforeEach(async () => {
@@ -220,7 +222,12 @@ describe("慢 Git 的工作区发现", () => {
     return content.slice(offset).split("\n").filter((line) => line.trim() !== "");
   }
 
-  /** 等到 Git 调用安静下来：启动期的发现与 git_watch 轮询都可能还在进行。 */
+  /**
+   * 等到 Git 调用安静下来：启动期的发现可能还在进行。
+   *
+   * Git Watch 自 v4 wave 4 起不再是轮询/周期采样——git ref 只在**成功的 workspace 工具
+   * 调用后**被采样（且无订阅者时不采样），因此本用例的「git 安静」前提仍然成立。
+   */
   async function waitForQuietGit(quietMs = 1_200, timeoutMs = 30_000): Promise<void> {
     const started = Date.now();
     let last = await logOffset();
@@ -315,6 +322,8 @@ describe("慢 Git 的工作区发现", () => {
     expect(observed.common_dir, "慢 Git 的仓库布局必须被识别").not.toBeNull();
     expect(observed.private_dir).not.toBeNull();
     expect(observed.root.endsWith("slow-repository"), `观测根应是仓库根：${observed.root}`).toBe(true);
+    expect(observed.root).toBe(await realpath(work));
+    expect(await query("SELECT path FROM workspaces")).toEqual([{ path: await realpath(work) }]);
     expect(await query("SELECT id FROM projects")).toHaveLength(1);
     expect(await query("SELECT thread_id FROM session_bindings")).toHaveLength(1);
 
@@ -323,8 +332,10 @@ describe("慢 Git 的工作区发现", () => {
     const counts = await query<{ role: string; n: number }>(
       "SELECT role, COUNT(*) AS n FROM messages GROUP BY role ORDER BY role",
     );
+    // 首轮注入的 MCP 能力概览 reminder（system_reminder）按 canonical 契约持久化，仅首轮一条
     expect(counts).toEqual([
       { role: "assistant", n: 1 },
+      { role: "system_reminder", n: 1 },
       { role: "user", n: 1 },
     ]);
   }, 180_000);

@@ -1,0 +1,85 @@
+{
+  "scenario": "tools",
+  "sample": 2,
+  "root": "/tmp/peri-yjs-sdk-baseline-567640f1837771442628970a56ce68c5a8f8e256",
+  "api": "legacy",
+  "workload": {
+    "version": 1,
+    "tools": 12000,
+    "toolsPerAssistant": 10,
+    "inputDataBytes": 960,
+    "resultTextBytes": 4096,
+    "resultDataBytes": 4096,
+    "asyncUpdates": 128,
+    "streamChunks": 16384,
+    "chunkBytes": 1024,
+    "largeResultBytes": 1048576
+  },
+  "startedAt": "2026-10-04T15:49:42.181Z",
+  "status": "passed",
+  "budget": {
+    "timeoutMs": 120000,
+    "maxRssBytes": 2147483648
+  },
+  "environment": {
+    "bun": "1.4.2",
+    "yjs": "13.6.33",
+    "platform": "darwin",
+    "release": "25.5.0",
+    "arch": "arm64",
+    "cpu": "Apple M5 Pro",
+    "totalMemoryBytes": 51539607552
+  },
+  "sourceSha256": "ce4e0419196957af166a48c333e53cbaff2db5d50b733258b07436ed3a6cfbd1",
+  "progress": {
+    "stage": "complete",
+    "elapsedMs": 2310.427459
+  },
+  "memory": {
+    "rssBytes": 1513734144,
+    "peakRssBytes": 1513734144,
+    "heapUsedBytes": 529631083,
+    "finalRssBytes": 1513734144,
+    "processPeakRssBytes": 1513734144
+  },
+  "projection": {
+    "completedTools": 12000,
+    "rawPayloadBytes": 111050670,
+    "projectionMs": 1872.7206889999945,
+    "batch1000Ms": [
+      25.10425399999993,
+      35.761587000000446,
+      53.303337,
+      75.09374900000029,
+      101.78646499999925,
+      145.78617000000048,
+      163.75949799999876,
+      212.06457299999738,
+      228.4080859999998,
+      258.8883579999997,
+      279.8767029999999,
+      292.88790899999844
+    ]
+  },
+  "completeMs": 7.932792000000063,
+  "snapshot": {
+    "encoding": "v1",
+    "chatBytes": 115783032,
+    "sessionBytes": 330,
+    "totalBytes": 115783362,
+    "encodeMs": 173.975416,
+    "applyMs": 104.00037500000008
+  },
+  "validation": {
+    "exact": true,
+    "verifiedTools": 12000,
+    "activeTurnStatus": "completed"
+  },
+  "elapsedMs": 2310.430459,
+  "process": {
+    "exitCode": 0,
+    "reason": null,
+    "externalPeakRssBytes": 1140473856,
+    "stderr": ""
+  }
+}

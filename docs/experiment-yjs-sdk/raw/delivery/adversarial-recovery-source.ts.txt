@@ -1,0 +1,38 @@
+import * as Y from '/Users/konghayao/code/ai/peri-v4p3/npm-packages/@peri-sdk/node_modules/yjs/dist/yjs.mjs';
+import { SessionDocSync } from '/Users/konghayao/code/ai/peri-v4p3/npm-packages/@peri-sdk/src/sync/session-doc-sync';
+import { SessionDocReplica } from '/Users/konghayao/code/ai/peri-v4p3/npm-packages/@peri-sdk/src/sync/session-doc-replica';
+import { SessionDocs } from '/Users/konghayao/code/ai/peri-v4p3/npm-packages/@peri-sdk/src/state/session-docs';
+import { readSessionView } from '/Users/konghayao/code/ai/peri-v4p3/npm-packages/@peri-sdk/src/view/session-view';
+import assert from 'node:assert/strict';
+const chat=new Y.Doc(), session=new Y.Doc(), sync=new SessionDocSync(chat,session,{maxSubscriberBytes:64}), replica=new SessionDocReplica();
+let error:Error|undefined;
+replica.applySnapshot(sync.subscribe(frame=>replica.applyUpdate(frame),{onError:e=>error=e}).snapshot);
+chat.getText('text').insert(0,'x'.repeat(1024)); sync.flush();
+assert.equal(error?.name,'SyncBackpressureError');
+const resumed=sync.subscribe(frame=>replica.applyUpdate(frame),{resume:replica.stateVector()}); replica.applySnapshot(resumed.snapshot);
+assert.equal(replica.chat.getText('text').toString(),'x'.repeat(1024));
+resumed.unsubscribe();
+let operations=0;
+for(let i=0;i<60;i++){
+ chat.getMap('root').set('k'+i, 'v'+i); session.getMap('root').set('k'+i, 's'+i);
+ if(i%3===0){chat.getMap('root').delete('k'+(i-1));session.getMap('root').delete('k'+(i-2));}
+ const next=sync.subscribe(frame=>replica.applyUpdate(frame),{resume:replica.stateVector()});replica.applySnapshot(next.snapshot);next.unsubscribe();
+ assert.deepEqual(replica.chat.getMap('root').toJSON(), chat.getMap('root').toJSON());assert.deepEqual(replica.session.getMap('root').toJSON(), session.getMap('root').toJSON());operations++;
+}
+await sync.close();replica.destroy();chat.destroy();session.destroy();
+const docs=new SessionDocs();
+const notification=(sessionUpdate:string, fields:Record<string,unknown>)=>({jsonrpc:'2.0' as const,method:'session/update',params:{sessionId:'s',update:{sessionUpdate,...fields}}});
+docs.acceptDeliveredUserInput('u','go');
+const ids:string[]=[];
+for(let i=0;i<30;i++){
+ const content='version'+i+'☃'.repeat(2500);
+ docs.accept(notification('tool_call_update',{toolCallId:'t',status:'completed',rawOutput:content}));
+ const view=readSessionView(docs.chat,docs.session);
+ const block=view.entries[1]!.blocks[0]!;
+ assert.equal(block.type,'tool_call');if(block.type!=='tool_call')throw Error();
+ const id=block.tool!.resultRef!.id;ids.push(id);
+ assert.deepEqual(JSON.parse(docs.readPayload(id)!),{rawOutput:content});
+ for(const old of ids.slice(0,-1))assert.equal(docs.readPayload(old),undefined);
+}
+docs.destroy();for(const id of ids)assert.equal(docs.readPayload(id),undefined);
+console.log(JSON.stringify({oversizedFrame:'explicit backpressure; full resume exact',offlineBothDocCycles:operations,payloadVersions:ids.length,retiredVersions:'all unavailable, never wrong data'}));

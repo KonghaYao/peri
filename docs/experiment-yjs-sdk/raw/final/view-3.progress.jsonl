@@ -1,0 +1,13 @@
+{"progress":{"stage":"project_tools","completed":1000,"elapsedMs":36.062875000000005},"memory":{"rssBytes":108380160,"peakRssBytes":108380160,"heapUsedBytes":16241432}}
+{"progress":{"stage":"project_tools","completed":2000,"elapsedMs":53.568000000000005},"memory":{"rssBytes":143540224,"peakRssBytes":143540224,"heapUsedBytes":33890320}}
+{"progress":{"stage":"project_tools","completed":3000,"elapsedMs":69.808959},"memory":{"rssBytes":172343296,"peakRssBytes":172343296,"heapUsedBytes":51175741}}
+{"progress":{"stage":"project_tools","completed":4000,"elapsedMs":86.18570899999999},"memory":{"rssBytes":222527488,"peakRssBytes":222543872,"heapUsedBytes":65027953}}
+{"progress":{"stage":"project_tools","completed":5000,"elapsedMs":99.914625},"memory":{"rssBytes":311033856,"peakRssBytes":311033856,"heapUsedBytes":65027953}}
+{"progress":{"stage":"project_tools","completed":6000,"elapsedMs":115.88125},"memory":{"rssBytes":331038720,"peakRssBytes":331038720,"heapUsedBytes":100372550}}
+{"progress":{"stage":"project_tools","completed":7000,"elapsedMs":131.675334},"memory":{"rssBytes":364462080,"peakRssBytes":364462080,"heapUsedBytes":135042248}}
+{"progress":{"stage":"project_tools","completed":8000,"elapsedMs":145.581209},"memory":{"rssBytes":379699200,"peakRssBytes":379699200,"heapUsedBytes":135042248}}
+{"progress":{"stage":"project_tools","completed":9000,"elapsedMs":160.71625},"memory":{"rssBytes":418021376,"peakRssBytes":418021376,"heapUsedBytes":169660268}}
+{"progress":{"stage":"project_tools","completed":10000,"elapsedMs":174.6255},"memory":{"rssBytes":429801472,"peakRssBytes":429801472,"heapUsedBytes":169660268}}
+{"progress":{"stage":"project_tools","completed":11000,"elapsedMs":190.505042},"memory":{"rssBytes":468418560,"peakRssBytes":468418560,"heapUsedBytes":204186797}}
+{"progress":{"stage":"project_tools","completed":12000,"elapsedMs":205.218209},"memory":{"rssBytes":487882752,"peakRssBytes":487882752,"heapUsedBytes":204186797}}
+{"resultFile":"/Users/konghayao/code/ai/peri-v4p3/docs/experiment-yjs-sdk/raw/final/view-3.json","status":"passed","elapsedMs":463.907167}

@@ -1,0 +1,15 @@
+{"progress":{"stage":"project_tools","completed":1000,"elapsedMs":42.079249999999995},"memory":{"rssBytes":93831168,"peakRssBytes":93831168,"heapUsedBytes":13543519}}
+{"progress":{"stage":"project_tools","completed":2000,"elapsedMs":98.60179099999999},"memory":{"rssBytes":147849216,"peakRssBytes":147849216,"heapUsedBytes":28314909}}
+{"progress":{"stage":"project_tools","completed":3000,"elapsedMs":155.724166},"memory":{"rssBytes":169361408,"peakRssBytes":169361408,"heapUsedBytes":39744908}}
+{"progress":{"stage":"project_tools","completed":4000,"elapsedMs":236.845125},"memory":{"rssBytes":189612032,"peakRssBytes":189612032,"heapUsedBytes":52594383}}
+{"progress":{"stage":"project_tools","completed":5000,"elapsedMs":340.867291},"memory":{"rssBytes":211189760,"peakRssBytes":211189760,"heapUsedBytes":63717435}}
+{"progress":{"stage":"project_tools","completed":6000,"elapsedMs":472.402375},"memory":{"rssBytes":230785024,"peakRssBytes":230785024,"heapUsedBytes":75212672}}
+{"progress":{"stage":"project_tools","completed":7000,"elapsedMs":628.6320410000001},"memory":{"rssBytes":396230656,"peakRssBytes":396230656,"heapUsedBytes":106572712}}
+{"progress":{"stage":"project_tools","completed":8000,"elapsedMs":798.305416},"memory":{"rssBytes":466518016,"peakRssBytes":466518016,"heapUsedBytes":118413714}}
+{"progress":{"stage":"project_tools","completed":9000,"elapsedMs":1007.585958},"memory":{"rssBytes":488062976,"peakRssBytes":488062976,"heapUsedBytes":129118948}}
+{"progress":{"stage":"project_tools","completed":10000,"elapsedMs":1235.212166},"memory":{"rssBytes":512573440,"peakRssBytes":512573440,"heapUsedBytes":143594983}}
+{"progress":{"stage":"project_tools","completed":11000,"elapsedMs":1493.0783330000002},"memory":{"rssBytes":539983872,"peakRssBytes":539983872,"heapUsedBytes":152294625}}
+{"progress":{"stage":"project_tools","completed":12000,"elapsedMs":1776.687625},"memory":{"rssBytes":550305792,"peakRssBytes":550305792,"heapUsedBytes":164170448}}
+{"progress":{"stage":"combined_snapshot_applied","elapsedMs":2099.018625},"memory":{"rssBytes":1310457856,"peakRssBytes":1310457856,"heapUsedBytes":578504799}}
+{"progress":{"stage":"combined_stream","completed":2048,"elapsedMs":2535.183875},"memory":{"rssBytes":2000011264,"peakRssBytes":2000011264,"heapUsedBytes":792515505}}
+{"resultFile":"/Users/konghayao/code/ai/peri-v4p3/docs/experiment-yjs-sdk/raw/baseline-combined/combined-3.json","status":"truncated","elapsedMs":2659.0195}

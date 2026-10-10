@@ -1,0 +1,4 @@
+{"progress":{"stage":"project_tools","completed":1,"elapsedMs":13.588167},"memory":{"rssBytes":48005120,"peakRssBytes":48037888,"heapUsedBytes":2833408}}
+{"progress":{"stage":"snapshot_encode","elapsedMs":14.915958000000002},"memory":{"rssBytes":48660480,"peakRssBytes":48660480,"heapUsedBytes":2984960}}
+{"progress":{"stage":"snapshot_apply","elapsedMs":16.504917},"memory":{"rssBytes":54509568,"peakRssBytes":54509568,"heapUsedBytes":5223631}}
+{"resultFile":"/Users/konghayao/code/ai/peri-v4p3/docs/experiment-yjs-sdk/raw/baseline-enhanced/large-2.json","status":"passed","elapsedMs":18.566249999999997}

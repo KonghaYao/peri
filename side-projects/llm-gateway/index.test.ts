@@ -2,7 +2,7 @@ import { describe, test, expect, beforeEach, mock } from "bun:test";
 import {
   loadConfig,
   resolveUrl,
-  sanitizeHeaders,
+  headersForLog,
   createHandler,
   proxyRequest,
   resetReqCounter,
@@ -98,38 +98,36 @@ describe("resolveUrl", () => {
   });
 });
 
-// ---------- sanitizeHeaders ----------
-
-describe("sanitizeHeaders", () => {
-  test("脱敏 authorization 和 api-key", () => {
+describe("headersForLog", () => {
+  test("完整保留 authorization 和 api-key", () => {
     const h = new Headers({
       authorization: "Bearer sk-very-long-secret-key-1234567890",
       "x-api-key": "ant-very-long-secret-key-1234567890",
       "content-type": "application/json",
     });
-    const safe = sanitizeHeaders(h);
-    expect(safe["authorization"]).toBe("Bearer sk-ve…");
-    expect(safe["x-api-key"]).toBe("ant-very-lon…");
+    const safe = headersForLog(h);
+    expect(safe["authorization"]).toBe(h.get("authorization")!);
+    expect(safe["x-api-key"]).toBe(h.get("x-api-key")!);
     expect(safe["content-type"]).toBe("application/json");
   });
 
-  test("脱敏 cookie", () => {
+  test("完整保留 cookie", () => {
     const h = new Headers({ cookie: "session=abcdef1234567890" });
-    const safe = sanitizeHeaders(h);
-    expect(safe["cookie"]).toBe("session=abcd…");
+    const safe = headersForLog(h);
+    expect(safe["cookie"]).toBe("session=abcdef1234567890");
   });
 
   test("普通 header 不脱敏", () => {
     const h = new Headers({ "content-type": "application/json", accept: "*/*" });
-    const safe = sanitizeHeaders(h);
+    const safe = headersForLog(h);
     expect(safe["content-type"]).toBe("application/json");
     expect(safe["accept"]).toBe("*/*");
   });
 
-  test("api_key 格式也脱敏", () => {
+  test("完整保留 api-key", () => {
     const h = new Headers({ "api-key": "secret-value-12345" });
-    const safe = sanitizeHeaders(h);
-    expect(safe["api-key"]).toBe("secret-value…");
+    const safe = headersForLog(h);
+    expect(safe["api-key"]).toBe("secret-value-12345");
   });
 });
 
