@@ -1,4 +1,3 @@
-import { closeCommand, controlResponse } from "../test/control-fixture";
 import { describe, expect, test } from "bun:test";
 import * as Y from "yjs";
 import { SessionDocs } from "../src/state/session-docs";
@@ -397,7 +396,7 @@ describe("ACP to Yjs session documents", () => {
     const root = docs.session.getMap<unknown>("root");
     const tasks = root.get("tasks") as Y.Map<Y.Map<unknown>>;
     expect(tasks.get("bg-1")?.get("kind")).toBe("background");
-    expect(tasks.get("bg-1")?.get("status")).toBe("awaiting_input");
+    expect(tasks.get("bg-1")?.get("status")).toBe("unobserved:awaiting_input");
     expect((root.get("taskOrder") as Y.Array<string>).toArray()).toEqual(["bg-1"]);
   });
 
@@ -489,7 +488,6 @@ class ReplayTransport implements Transport {
   failLoad = false;
 
   async request<T>(method: string, params?: unknown): Promise<T> {
-    if (method.startsWith("session/control")) return controlResponse(method, params) as T;
     this.calls.push({ method, params });
     if (method === "initialize") return { protocolVersion: 1 } as T;
     if (method === "session/new") return { sessionId: "s1" } as T;
@@ -512,6 +510,7 @@ class ReplayTransport implements Transport {
       return {} as T;
     }
     if (method === "session/input/snapshot") return { generation: "generation-1" } as T;
+    if (method === "session/close") return {} as T;
     throw new Error(`Unexpected ACP request: ${method}`);
   }
 
@@ -532,7 +531,6 @@ class ReplayTransport implements Transport {
 }
 
 const replayStorage = {
-  deployment: () => ({ args: [], env: {} }),
   getSessions: async () => [],
   getSession: async (id: string) => ({ id, cwd: "/tmp/workspace", title: null, messageCount: 0, createdAt: "now", updatedAt: "now" }),
 };
@@ -572,7 +570,7 @@ test("Session projects load replay and later live ACP events without a stream co
     clientCapabilities?: { _meta?: Record<string, unknown> };
   };
   expect(initialize.clientCapabilities?._meta?.["peri.replay"]).toBe(true);
-  await agent.close(closeCommand);
+  await agent.close();
   expect(textOf(entries(agent.docs)[3]!, "text")).toBe("New answer");
   expect(entries(agent.docs)[3]!.get("status")).toBe("cancelled");
   expect(info.get("activeTurnStatus")).toBe("cancelled");
@@ -609,5 +607,5 @@ test("real mailbox delivery creates the user entry before assistant output", asy
   expect(entries(agent.docs).map((entry) => entry.get("role"))).toEqual(["user", "assistant"]);
   expect(textOf(entries(agent.docs)[0]!, "text")).toBe("Implement the feature");
   expect(textOf(entries(agent.docs)[1]!, "text")).toBe("Done");
-  await agent.close(closeCommand);
+  await agent.close();
 });

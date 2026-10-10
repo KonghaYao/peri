@@ -3,15 +3,23 @@
   "version": "0.0.0",
   "private": true,
   "type": "module",
-  "description": "Peri ACP host SDK with stdio and Emscripten WASM transports",
+  "description": "Peri ACP host SDK over host-injected transports, including the Emscripten WASM host",
   "exports": {
     ".": {
       "types": "./dist/sdk/index.d.ts",
       "import": "./dist/index.js"
     },
+    "./portable": {
+      "types": "./dist/portable.d.ts",
+      "import": "./dist/portable.js"
+    },
     "./wasm": {
       "types": "./dist/wasm.d.ts",
       "import": "./dist/wasm.js"
+    },
+    "./wasm-host": {
+      "types": "./dist/wasm-host.d.ts",
+      "import": "./dist/wasm-host.js"
     },
     "./view": {
       "types": "./dist/view/index.d.ts",
@@ -29,7 +37,6 @@
     "test": "bun run build && bun test",
     "dev": "bun run examples/demo/demo.ts",
     "db:dev": "mise exec -- sqld --no-welcome --http-listen-addr 127.0.0.1:8081 --db-path ../../target/peri-sdk-local-turso",
-    "demo": "bun run examples/demo/demo.ts",
     "demo:wasm": "bun run examples/demo/demo-wasm.ts",
     "test:wasm": "bun run build && bun test tests/wasm-acp-integration.test.ts tests/wasm-transport.test.ts",
     "smoke:workers": "bun examples/workers/smoke.mjs"
@@ -43,6 +50,7 @@
   "dependencies": {
     "@microsoft/fetch-event-source": "2.0.1",
     "@tursodatabase/serverless": "1.4.0",
+    "lib0": "^0.2.119",
     "yjs": "^13.6.33"
   }
 }

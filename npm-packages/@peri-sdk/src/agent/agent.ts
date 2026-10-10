@@ -4,14 +4,12 @@ import { Session } from "./session";
 import type { AgentOptions } from "./types";
 import type { SessionSummary } from "../storage/session-summary";
 import { SessionDocs } from "../state/session-docs";
-import { realpathSync } from "node:fs";
-import type { CommandExpectation, ControlReceipt, CloseOptions } from "./session-control";
+import type { CloseOptions } from "./session-close";
 
 export class Agent {
     readonly id: string;
     readonly session: Session;
     readonly claims: AgentClaims;
-    private readonly requestedPath?: string;
     private currentDocs: SessionDocs;
 
     constructor(
@@ -19,11 +17,6 @@ export class Agent {
         kv: AtomicManagedAgentKv,
     ) {
         this.id = options.id;
-        if (options.path) {
-            // Keep Store list filtering and ACP setup on the same canonical cwd.
-            try { this.requestedPath = realpathSync(options.path); }
-            catch { this.requestedPath = options.path; } // A remote path need not exist on this host.
-        }
         this.claims = new AgentClaims(kv, options.sandbox.id, options.id);
         this.currentDocs = new SessionDocs();
         this.session = new Session(this);
@@ -33,8 +26,9 @@ export class Agent {
         return this.currentDocs;
     }
 
+    /** 已建立会话的持久 cwd 优先；调用方传入的 path 原样使用，不做本机解析。 */
     get path(): string | undefined {
-        return this.session.path ?? this.requestedPath;
+        return this.session.path ?? this.options.path;
     }
 
     /** Discard a partial history replay before Session.start can be retried. */
@@ -86,7 +80,7 @@ export class Agent {
         return this.options.sandbox.getSessions(path);
     }
 
-    close(command: CommandExpectation, options?: CloseOptions): Promise<ControlReceipt> {
-        return this.session.close(command, options);
+    close(options?: CloseOptions): Promise<void> {
+        return this.session.close(options);
     }
 }

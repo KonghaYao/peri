@@ -1,5 +1,4 @@
-/** ACP JSON-RPC over one trusted stdio process. Settings use a pre-ACP frame. */
-import type { PeriConfig } from "../config/peri-config";
+/** ACP JSON-RPC frames over a host-injected transport. */
 export type JsonRpcNotification = {
   jsonrpc: "2.0";
   method: string;
@@ -24,12 +23,3 @@ export interface Transport {
   setRequestHandler(handler: ReverseRequestHandler): void;
   close(): Promise<void>;
 }
-
-export type StdioTransportOptions = {
-  command: string;
-  args?: string[];
-  cwd?: string;
-  env?: Record<string, string | undefined>;
-  /** Omit to let Peri load its normal global/workspace configuration. */
-  settings?: PeriConfig;
-};

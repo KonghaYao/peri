@@ -1,4 +1,3 @@
-import { closeCommand, controlResponse } from "../test/control-fixture";
 import { expect, test } from "bun:test";
 import * as Y from "yjs";
 import { SessionDocs } from "../src/state/session-docs";
@@ -60,10 +59,10 @@ test("Session asks Peri for a task snapshot after a missed notification", async 
     private listeners = new Set<(event: JsonRpcNotification) => void>();
     snapshotCalls = 0;
     async request<T>(method: string, _params?: unknown): Promise<T> {
-    if (method.startsWith("session/control")) return controlResponse(method, _params) as T;
       if (method === "initialize") return { protocolVersion: 1 } as T;
       if (method === "session/load") return {} as T;
       if (method === "session/input/snapshot") return { generation: "g1" } as T;
+      if (method === "session/close") return {} as T;
       if (method === "session/bg-tasks") {
         this.snapshotCalls++;
         return { revision: 5, tasks: [{
@@ -89,7 +88,6 @@ test("Session asks Peri for a task snapshot after a missed notification", async 
   const sandbox = new Sandbox({
     id: "ws", transportFactory: () => transport,
     storage: {
-      deployment: () => ({ args: [], env: {} }),
       getSessions: async () => [],
       getSession: async (id) => ({ id, cwd: "/tmp/ws", title: null, messageCount: 0, createdAt: "now", updatedAt: "now" }),
     },
@@ -120,5 +118,5 @@ test("Session asks Peri for a task snapshot after a missed notification", async 
     agent.docs.accept = originalAccept;
     console.error = originalLog;
   }
-  await agent.close(closeCommand);
+  await agent.close();
 });

@@ -1,16 +1,16 @@
-export { loadPeriWasm } from "../wasm/loader";
+export { instantiatePeriWasm, loadPeriWasm } from "../wasm/loader";
+export type { NativeWasmAcp, PeriWasmInstantiateOptions, PeriWasmModule, PeriWasmModuleFactory } from "../wasm/loader";
 export { Agent } from "../agent/agent";
 export { SendReceipt } from "../agent/send-receipt";
 export { BareHarnessConfig } from "../config/bare-harness-config";
 export type { MetaHarnessKey, PeriConfig } from "../config/peri-config";
 export { Session } from "../agent/session";
-export { SessionCloseIncompleteError, SessionCloseUnknownError, SessionControlNotAppliedError, SessionControlBlockedError } from "../agent/session-control";
-export type {
-    ExecutionBinding, ControlAction, ControlCommand, ControlState, ControlReceipt, ControlRejection,
-    ControlResolution, ControlSnapshot, CommandExpectation, StopCommand, CloseOptions,
-} from "../agent/session-control";
+export { SessionCloseIncompleteError } from "../agent/session-close";
+export type { CloseOptions } from "../agent/session-close";
 export { InteractionResponder, parseInteractionAnswer } from "../agent/interaction-responder";
 export type { InteractionAnswer } from "../agent/interaction-responder";
+export { initializeAcpClient, ACP_PROTOCOL_VERSION } from "../agent/acp-handshake";
+export type { AcpInitializeOptions } from "../agent/acp-handshake";
 export { SessionDocs } from "../state/session-docs";
 export type { ToolPayloadRef } from "../state/tool-payloads";
 export * from "../sync/index";
@@ -26,20 +26,18 @@ export { ManagedAgents } from "../managed/managed-agents";
 export type { ManagedAgentsOptions } from "../managed/managed-agents";
 export { Sandbox } from "../sandbox/sandbox";
 export type { HttpWorkspace, SandboxOptions } from "../sandbox/sandbox";
-export type { WorkspaceMcpProcessOptions } from "../sandbox/workspace-mcp-process";
-export { SqliteFileStorage } from "../storage/sqlite-file-storage";
 export { TursoStorage } from "../storage/turso-storage";
 export type { SessionStorage } from "../storage/types";
 export type { SessionSummary } from "../storage/session-summary";
-export { StdioTransport } from "../transport/stdio-transport";
+export { SESSION_BY_ID_SQL, SESSION_LIST_SQL } from "../storage/session-summary";
 export { RpcError } from "../transport/rpc-error";
 export * from "../execution/index";
-export type {
-  JsonRpcNotification,
-  ReverseRequestHandler,
-  StdioTransportOptions,
-  Transport,
-} from "../transport/types";
+export type { JsonRpcNotification, ReverseRequestHandler, Transport } from "../transport/types";
 
 export { WasmAcpTransport } from "../transport/wasm-transport";
 export type { WasmAcpTransportOptions } from "../transport/wasm-transport";
+export { DEFAULT_WASM_HOST_CLEANUP_TIMEOUT_MS, PeriWasmHostStartupError, startPeriWasmHost } from "../wasm/host";
+export type {
+  PeriWasmHostCleanupOutcome, PeriWasmHostDiagnosticKind, PeriWasmHostLifecycleEvent,
+  PeriWasmHostOptions, PeriWasmHostPhase, PeriWasmHostPorts,
+} from "../wasm/host";

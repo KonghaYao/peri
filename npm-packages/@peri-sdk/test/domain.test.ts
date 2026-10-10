@@ -1,4 +1,3 @@
-import { closeCommand, controlResponse } from "./control-fixture";
 import { describe, expect, test } from "bun:test";
 import { AgentClaimConflictError } from "../src/kv/agent-claim-conflict-error";
 import { MemoryKV } from "../src/kv/memory-kv";
@@ -14,7 +13,6 @@ const storedSession = (cwd: string, id = "existing") => ({
   id, title: null, cwd, messageCount: 0, createdAt: "now", updatedAt: "now",
 });
 const storage = (cwd: string): SessionStorage => ({
-  deployment: () => ({ args: [], env: {} }),
   getSessions: async () => [storedSession(cwd)],
   getSession: async (id) => storedSession(cwd, id),
 });
@@ -52,7 +50,6 @@ test("Agent lists Sessions from Sandbox storage without starting ACP", async () 
   const sandbox = new Sandbox({
     id: "workspace-1",
     storage: {
-      deployment: () => ({ args: [], env: {} }),
       getSessions: async (cwd) => {
         queriedCwd = cwd;
         return [{ id: "session-1", title: null, cwd, messageCount: 0, createdAt: "now", updatedAt: "now" }];
@@ -76,7 +73,6 @@ class FakeTransport implements Transport {
   newSessionId = "session-1";
 
   async request<T>(method: string, params?: unknown): Promise<T> {
-    if (method.startsWith("session/control")) return controlResponse(method, params) as T;
     this.calls.push({ method, params });
     if (method === this.failOn) throw new Error(`failed: ${method}`);
     switch (method) {
@@ -84,12 +80,12 @@ class FakeTransport implements Transport {
       case "session/new": return { sessionId: this.newSessionId } as T;
       case "session/load": return {} as T;
       case "session/input/snapshot": return { generation: "generation-1" } as T;
-      case "session/work/query": return { control: { lifecycle: 1, revision: 0, controlGeneration: 0, status: "active", attempt: null }, work: null } as T;
       case "session/input/enqueue":
         await this.enqueueGate;
-        return { results: [{ inputId: (params as any).inputId, state: "queued" }], workReceipts: [{ decision: { kind: "accepted" } }] } as T;
-      case "session/input/dispatch": return { results: [{ inputId: (params as any).inputIds[0], state: "dispatching" }], workReceipts: [{ decision: { kind: "accepted" } }] } as T;
-      case "session/input/takeback": return { takenBack: { inputId: (params as any).inputId } } as T;
+        return { results: [{ inputId: (params as any).inputId, state: "queued" }] } as T;
+      case "session/input/dispatch": return { results: [{ inputId: (params as any).inputIds[0], state: "dispatching" }] } as T;
+      case "session/input/takeback": return { results: [{ inputId: (params as any).inputId, state: "withdrawn" }] } as T;
+      case "session/close": return {} as T;
       case "session/list": return { sessions: [{ sessionId: "session-1" }] } as T;
       default: throw new Error(`unexpected method: ${method}`);
     }
@@ -119,17 +115,14 @@ function declaration(manager: ManagedAgents, id = "agent-1", transport = new Fak
       transportFactory: () => { created++; return transport; },
     }),
     instructions: "Be helpful",
-    execution: { database: `/tmp/peri-domain-test-${crypto.randomUUID()}.db` },
   });
   return { agent, transport, get created() { return created; } };
 }
 
 describe("ManagedAgents lifecycle", () => {
-  test("loading routes durable recovery through SDK work query without a second publication", async () => {
+  test("loading a Session never republishes or dispatches old input", async () => {
     const { agent, transport } = declaration(new ManagedAgents({ kv: new MemoryClaims() }));
     await agent.session.start("existing");
-    await agent.session.ensureProcessing("recovery");
-    expect(transport.calls.some((call) => call.method === "session/work/query")).toBe(true);
     expect(transport.calls.some((call) => call.method === "session/input/enqueue" || call.method === "session/input/dispatch")).toBe(false);
     expect(transport.closed).toBe(false);
   });
@@ -214,7 +207,7 @@ describe("ManagedAgents lifecycle", () => {
     const first = declaration(firstManager);
     await first.agent.session.start(null);
     expect(kv.owners.size).toBe(2);
-    await firstManager.closeAgent("agent-1", closeCommand);
+    await firstManager.closeAgent("agent-1");
     expect(first.transport.closed).toBe(true);
     expect(kv.owners.size).toBe(0);
     const second = declaration(new ManagedAgents({ kv }));
@@ -270,7 +263,7 @@ describe("ManagedAgents lifecycle", () => {
     expect(receipt.isSent).toBe(true);
   });
 
-  test("repeated unknown execution preserves publication rather than withdrawing it", async () => {
+  test("queue churn on a pending send neither withdraws nor force-dispatches it", async () => {
     const { agent, transport } = declaration(new ManagedAgents({ kv: new MemoryClaims() }));
     const session = await agent.session.start(null);
     const receipt = session.send("hello");
@@ -291,7 +284,7 @@ describe("ManagedAgents lifecycle", () => {
     const { agent } = declaration(manager);
     const session = await agent.session.start(null);
     const result = Promise.resolve(session.send("hello"));
-    await manager.closeAgent("agent-1", closeCommand);
+    await manager.closeAgent("agent-1");
     await expect(result).rejects.toThrow("closed before user input was delivered");
   });
 
@@ -338,7 +331,16 @@ describe("ManagedAgents lifecycle", () => {
     const second = await iterator.next();
     expect(second.value.method).toBe("peri/agent_event");
     await iterator.return?.();
-    await manager.closeAgent("agent-1", closeCommand);
+    await manager.closeAgent("agent-1");
+  });
+
+  test("cancel sends the session-scoped ACP notification without touching execution state", async () => {
+    const manager = new ManagedAgents({ kv: new MemoryClaims() });
+    const { agent, transport } = declaration(manager);
+    const session = await agent.session.start(null);
+    await session.cancel();
+    expect(transport.calls.at(-1)).toEqual({ method: "session/cancel", params: { sessionId: "session-1" } });
+    await manager.closeAgent("agent-1");
   });
 
   test("raw stream overflow leaves projection current and allows a new live diagnostic stream", async () => {
@@ -355,7 +357,7 @@ describe("ManagedAgents lifecycle", () => {
     const current = session.stream()[Symbol.asyncIterator]();
     const next = current.next(); emit("agent_message_chunk", "tail");
     expect((await next).value.params.update.content.text).toBe("tail");
-    await current.return?.(); await manager.closeAgent(agent.id, closeCommand);
+    await current.return?.(); await manager.closeAgent(agent.id);
   });
 
   test("ACP setup serializes HTTP headers and stdio env as named entries", async () => {

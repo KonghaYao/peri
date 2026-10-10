@@ -17,19 +17,19 @@ const workspaceId = "workspaceId";
 const sandbox = new Sandbox({
     id: workspaceId,
     storage,
-    stdio: {
-        command: "peri",
-        settings: { config: { ...config, active_alias: "sonnet" } },
-    },
     workspace: { url: "https://<workspace-host>/mcp" },
+    // 执行装配由宿主提供：WASM 部署用 startPeriWasmHost，其他部署注入自有 transport。
+    // SDK 不启动 Peri 或 Workspace 进程，也不再接受 stdio / workspaceProcess 选项。
+    transportFactory: (path) => startPeriWasmHost({
+        moduleUrl: new URL("./peri-wasm.js", import.meta.url),
+        configJson: JSON.stringify({ cwd: path, settings: { config: { ...config, active_alias: "sonnet" } } }),
+    }),
 });
 // HTTP Workspace 的会话级 MCP 声明由 Sandbox 合入，Peri 作为 MCP client 连接。
 const workspace = sandbox.getWorkspace()
-// 本地 Transport 的启动输入；以后换 WS Transport 时，Agent / Session 接口不用改。
-// 本地 Transport 在 ACP 开始前，经子进程 stdin 写入 4 字节大端长度 + settings JSON。
-// 现有 Peri 不接受 workspaceId 作为 machineId；此 id 目前只用于 SDK 的 KV 占位作用域。
-// Sandbox 在 Session.start 时启动 Transport，并使用构造时传入的 Storage。
-// ACP 顺序：启动进程 → initialize → session/new 或 session/load。
+// ACP 顺序：装配 WASM Host → initialize → session/new 或 session/load。
+// settings 与 storage 经 WASM 启动对象一次性交给 Peri；凭证由调用方显式传入。
+// 现有 Peri 不接受 workspaceId 作为 machineId；此 id 只用于 SDK 的 KV 占位作用域。
 // session/new: { cwd: agent.path, mcpServers: [{ type: "http", name: "workspace",
 //   url: workspace.url, headers: [] }], _meta: { "peri.instructions": instructions } }。
 // 其他 mcpServers 也在会话 setup 数组中传递；加载已有会话时会重传同一声明。
@@ -38,7 +38,7 @@ const workspace = sandbox.getWorkspace()
 // ManagedAgents 同步登记 Agent 声明；一个 Agent 只绑定一个 Session。
 // 宿主注入共享 unjs KV；其占位适配器必须提供原子 claim-if-absent。
 // createAgent 不占位；异步 start 才按 Agent/Session 身份占位，先到先得，后来者报错。
-// Transport 工厂也只在 start 时调用；Sandbox 的进程重试由 Sandbox 自己负责。
+// transportFactory 只在 start 时调用一次；每个 Session 装配一个独立 WASM 实例。
 const managedAgents = new ManagedAgents({ kv: managedAgentKv });
 const requestedSessionId: string | null = null; // 业务请求传已有 ID 时恢复，否则新建。
 const agent = managedAgents.createAgent({
@@ -72,28 +72,19 @@ console.log("is sent", command.isSent);
 command.forceSend(); // 请求立即派发；是否执行及何时执行由 Peri 裁决。
 await command;
 
-// 场景 4：显式 Stop 精确执行并持久暂停；Resume 后才允许执行新输入。
-const stopState = (await session.controlState()).state;
-if (!stopState.attempt) throw new Error("Session has no exact execution to stop");
-await session.stop({
-    commandId: crypto.randomUUID(), expectedLifecycle: stopState.lifecycle,
-    expectedRevision: stopState.revision, expectedControlGeneration: stopState.controlGeneration,
-    target: stopState.attempt,
-});
-const resumeState = (await session.controlState()).state;
-await session.resume({
-    commandId: crypto.randomUUID(), expectedLifecycle: resumeState.lifecycle,
-    expectedRevision: resumeState.revision, expectedControlGeneration: resumeState.controlGeneration,
-});
+// 场景 4：取消是会话级 ACP 通知；未完成 turn 的收敛由 Peri 决定。
+// SDK 不再暴露 stop/pause/resume/reopen 或执行准入：这些方法对应的 ACP 协议已移除。
+await session.cancel();
+const inbox = session.docs.session.getMap<unknown>("root").get("session") as { get(key: string): unknown } | undefined;
+console.log("queue state", inbox?.get("inputQueue"));
+// 队列中尚未派发的输入可以被撤回；已派发的输入只能等 Peri 收敛。
+await session.takeBack(followup.inputId).catch(() => {});
 await session.send("换一个更小的问题");
 
 // 场景 5：另一实例同时 start 同一 Agent/Session 时，KV 占位失败并明确报冲突。
-// 场景 6：服务不再需要此 Agent 时显式关闭；当前 Session 随 Agent 关闭，Store 中的会话数据仍保留，Sandbox 独立管理 Workspace 生命周期。
+// 场景 6：服务不再需要此 Agent 时显式关闭。close 发送 session/close 并在预算内重放，
+// 直到 Peri 的 CloseCoordinator 结算；超时抛 SessionCloseIncompleteError 并保留 claims。
+// Store 中的会话数据仍保留，Workspace 由部署方独立管理。
 async function releaseAgent() {
-    const { state } = await session.controlState();
-    const closeCommand = {
-        commandId: crypto.randomUUID(), expectedLifecycle: state.lifecycle,
-        expectedRevision: state.revision, expectedControlGeneration: state.controlGeneration,
-    };
-    await managedAgents.closeAgent(agent.id, closeCommand);
+    await managedAgents.closeAgent(agent.id, { drainTimeoutMs: 10_000 });
 }

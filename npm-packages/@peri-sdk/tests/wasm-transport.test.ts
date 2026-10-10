@@ -1,6 +1,6 @@
 import { expect, test } from "bun:test";
-import { closeCommand, controlResponse } from "../test/control-fixture";
 import { WasmAcpTransport } from "../src/transport/wasm-transport";
+import { startPeriWasmHost } from "../src/wasm/host";
 import type { NativeWasmAcp } from "../src/wasm/loader";
 
 function framePort() {
@@ -29,6 +29,44 @@ function framePort() {
   };
   return { port, sent, push };
 }
+
+test("注入 WASM 模块直接启动 ACP 并仅在关闭完成后提供停止证明", async () => {
+  const wire = framePort();
+  let config: string | undefined;
+  const module = { PeriWasmAcp: { start: async (value: string) => { config = value; return wire.port; } } };
+  const transport = await WasmAcpTransport.start({ module, configJson: "{}" });
+  expect(config).toBe("{}");
+  expect(await transport.executionStopped()).toBe(false);
+  await transport.close();
+  expect(await transport.executionStopped()).toBe(true);
+  await expect(WasmAcpTransport.start({ module, configJson: "{}", env: {} }))
+    .rejects.toThrow("cannot be combined");
+  await expect(WasmAcpTransport.start({ module, configJson: "{}", moduleUrl: "file:///unused.js" }))
+    .rejects.toThrow("cannot be combined");
+});
+
+test("宿主 factory 接收显式环境，关闭依次等待 native、网络和释放", async () => {
+  const wire = framePort();
+  const order: string[] = [];
+  const close = wire.port.close;
+  wire.port.close = async () => { order.push("native"); await close(); };
+  wire.port.free = () => { order.push("free"); };
+  const transport = await startPeriWasmHost({
+    configJson: "{}", env: { INSTANCE: "host" },
+    moduleFactory: async (options) => {
+      const module = { ENV: {} as Record<string, string>, PeriWasmAcp: { start: async () => wire.port } };
+      for (const hook of options.preRun as Array<(value: typeof module) => void>) hook(module);
+      expect(module.ENV).toEqual({ INSTANCE: "host" });
+      return module;
+    },
+    ports: { network: {
+      module: {}, close() { order.push("network"); }, async drain() { order.push("drain"); },
+    } },
+  });
+  await transport.close();
+  expect(order).toEqual(["native", "network", "drain", "free", "network"]);
+  expect(await transport.executionStopped()).toBe(true);
+});
 
 test("WASM frame port preserves ACP requests, notifications and reverse requests", async () => {
   const wire = framePort();
@@ -69,8 +107,12 @@ test("existing Agent and Session APIs run over an injected WASM frame port", asy
   const { MemoryKV } = await import("../src/kv/memory-kv");
   const wire = framePort();
   const methods: string[] = [];
+  const sendFrame = wire.port.send;
   wire.port.send = async (frame) => {
+    await sendFrame(frame);
     const request = JSON.parse(frame) as { id?: number; method: string; params?: Record<string, unknown> };
+    // 通知没有 id：宿主只回响应，不把 notification 当请求处理。
+    if (request.id === undefined) return;
     methods.push(request.method);
     let result: unknown;
     switch (request.method) {
@@ -78,8 +120,7 @@ test("existing Agent and Session APIs run over an injected WASM frame port", asy
       case "session/new": result = { sessionId: "s1" }; break;
       case "session/input/snapshot": result = { generation: "g1" }; break;
       case "session/input/enqueue": result = { results: [{ inputId: request.params?.inputId, state: "delivered" }] }; break;
-      case "session/control":
-      case "session/control/state": result = controlResponse(request.method, request.params); break;
+      case "session/close": result = {}; break;
       default: throw new Error(`Unexpected ACP request ${request.method}`);
     }
     wire.push({ jsonrpc: "2.0", id: request.id, result });
@@ -93,8 +134,12 @@ test("existing Agent and Session APIs run over an injected WASM frame port", asy
     const receipt = agent.session.send("question");
     await receipt;
     expect(receipt.isSent).toBe(true);
+    await agent.session.cancel();
     expect(methods).toEqual(["initialize", "session/new", "session/input/snapshot", "session/input/enqueue"]);
-  } finally { await manager.closeAll(new Map([[agent.id, closeCommand]])); }
+    const notifications = wire.sent.map((frame) => JSON.parse(frame) as { method?: string; params?: unknown })
+      .filter((frame) => frame.id === undefined);
+    expect(notifications).toEqual([{ jsonrpc: "2.0", method: "session/cancel", params: { sessionId: "s1" } }]);
+  } finally { await manager.closeAll(); }
 });
 
 test("WASM receive failure settles pending requests and closes native port once", async () => {

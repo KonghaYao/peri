@@ -1,5 +1,5 @@
 import { expect, test } from "bun:test";
-import type { ControlState } from "../src/agent/session-control";
+import type { ControlState } from "../src/execution/types";
 import { ExecutionCoordinator } from "../src/execution/coordinator";
 import { MemoryExecutionRegistry } from "../src/execution/memory-registry";
 import type { ExecutionTicket, RunnableWork } from "../src/execution/types";

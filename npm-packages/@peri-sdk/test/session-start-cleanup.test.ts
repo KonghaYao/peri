@@ -1,10 +1,10 @@
-import { closeCommand, controlResponse } from "./control-fixture";
-import { expect, spyOn, test } from "bun:test";
+import { expect, test } from "bun:test";
 import { Agent } from "../src/agent/agent";
 import { AgentClaimConflictError } from "../src/kv/agent-claim-conflict-error";
 import { MemoryKV } from "../src/kv/memory-kv";
 import { Sandbox } from "../src/sandbox/sandbox";
 import type { JsonRpcNotification, Transport } from "../src/transport/types";
+import { RpcError } from "../src/transport/rpc-error";
 
 function gate() {
   let resolve!: () => void;
@@ -24,11 +24,15 @@ class FakeTransport implements Transport {
   closeGate?: Promise<void>;
   loadResponse: unknown = {};
   loadEvents: JsonRpcNotification[] = [];
+  failCloseCommand = false;
+  readonly closeCommandError = new RpcError(-32010, "Session close incomplete: prompt is still active");
 
   async request<Response>(method: string, params?: unknown): Promise<Response> {
     this.calls.push({ method, params });
-    if (method.startsWith("session/control")) return controlResponse(method, params) as Response;
-    if (method === "initialize") await this.startupGate;
+    if (method === "initialize") {
+      await this.startupGate;
+      return { protocolVersion: 1 } as Response;
+    }
     if (method === "session/input/snapshot") {
       if (this.failStartup) throw this.startupError;
       return { generation: "generation-1" } as Response;
@@ -40,8 +44,8 @@ class FakeTransport implements Transport {
     }
     if (method === "session/input/dispatch") return {
       results: [{ inputId: "new-input", state: "queued" }],
-      workReceipts: [{ decision: { kind: "accepted" } }],
     } as Response;
+    if (method === "session/close" && this.failCloseCommand) throw this.closeCommandError;
     return {} as Response;
   }
 
@@ -69,19 +73,10 @@ class FakeTransport implements Transport {
   }
 }
 
-class FakeSandbox extends Sandbox {
-  readonly registrations: Array<{ id: string; transport: Transport }> = [];
-
-  override async registerSessionTransport(id: string, transport: Transport): Promise<void> {
-    this.registrations.push({ id, transport });
-  }
-}
-
 function setup(transport = new FakeTransport(), kv = new MemoryKV()) {
-  const sandbox = new FakeSandbox({
+  const sandbox = new Sandbox({
     id: "workspace",
     storage: {
-      deployment: () => ({ args: [], env: {} }),
       getSessions: async () => [],
       getSession: async (id) => ({
         id, cwd: "/persisted/workspace", title: null, messageCount: 0,
@@ -116,7 +111,7 @@ test("startup cleanup failure retains both claims and reports both causes until 
   transport.failStartup = false;
   const replacement = create();
   await replacement.session.start("existing");
-  await replacement.close(closeCommand);
+  await replacement.close();
 });
 
 test("successful startup cleanup preserves the original error and allows retry", async () => {
@@ -128,7 +123,7 @@ test("successful startup cleanup preserves the original error and allows retry",
   expect(transport.closeCalls).toBe(1);
   transport.failStartup = false;
   await agent.session.start(null);
-  await agent.close(closeCommand);
+  await agent.close();
 });
 
 test("transport creation failure releases claims without a transport and allows retry", async () => {
@@ -140,9 +135,9 @@ test("transport creation failure releases claims without a transport and allows 
   sandbox.createTransport = async () => transport;
   const replacement = create();
   await replacement.session.start("existing");
-  await replacement.close(closeCommand);
+  await replacement.close();
   await agent.session.start("existing");
-  await agent.close(closeCommand);
+  await agent.close();
 });
 
 test("concurrent close shares cleanup, retains claims on rejection and retries once", async () => {
@@ -151,8 +146,8 @@ test("concurrent close shares cleanup, retains claims on rejection and retries o
   const closing = gate();
   transport.closeGate = closing.promise;
   transport.failClose = true;
-  const first = agent.close(closeCommand);
-  const second = agent.close(closeCommand);
+  const first = agent.close();
+  const second = agent.close();
   expect(second).toBe(first);
   await Bun.sleep(0);
   expect(transport.closeCalls).toBe(1);
@@ -161,15 +156,15 @@ test("concurrent close shares cleanup, retains claims on rejection and retries o
   closing.resolve();
   await expect(first).rejects.toBe(transport.cleanupError);
   transport.failClose = false;
-  const retry = agent.close(closeCommand);
-  expect(agent.close(closeCommand)).toBe(retry);
+  const retry = agent.close();
+  expect(agent.close()).toBe(retry);
   await retry;
   expect(transport.closeCalls).toBe(2);
-  await agent.close(closeCommand);
+  await agent.close();
   expect(transport.closeCalls).toBe(2);
   const replacement = create();
   await replacement.session.start("existing");
-  await replacement.close(closeCommand);
+  await replacement.close();
 });
 
 for (const failStartup of [false, true]) {
@@ -185,7 +180,7 @@ for (const failStartup of [false, true]) {
     if (failStartup) await agent.session.cleanupStartup();
     else {
       expect(() => agent.session.cleanupStartup()).toThrow("established Session");
-      await agent.close(closeCommand);
+      await agent.close();
     }
     expect(transport.closeCalls).toBe(1);
     expect(transport.listeners.size).toBe(0);
@@ -193,16 +188,15 @@ for (const failStartup of [false, true]) {
 }
 
 for (const loadResponse of [{}, { _meta: { "peri.sessionWorkspaceV1": { read_only: true } } }]) {
-  test(`load registers the claimed transport regardless of legacy ownership metadata: ${JSON.stringify(loadResponse)}`, async () => {
-    const { agent, sandbox, transport } = setup();
+  test(`load accepts legacy workspace metadata without claiming ownership: ${JSON.stringify(loadResponse)}`, async () => {
+    const { agent, transport } = setup();
     transport.loadResponse = loadResponse;
     await agent.session.start("existing");
-    expect(sandbox.registrations).toEqual([{ id: "existing", transport }]);
     expect(agent.session.path).toBe("/persisted/workspace");
     expect(transport.calls.find((call) => call.method === "session/load")?.params).toEqual({
       cwd: "/persisted/workspace", mcpServers: [], sessionId: "existing",
     });
-    await agent.close(closeCommand);
+    await agent.close();
   });
 }
 
@@ -224,7 +218,7 @@ test("failed startup cleanup shares retries and retains claims until confirmed",
   transport.failStartup = false;
   const replacement = create();
   await replacement.session.start("existing");
-  await replacement.close(closeCommand);
+  await replacement.close();
 });
 
 test("claim release failure remains cleanup-pending without closing a confirmed transport twice", async () => {
@@ -251,14 +245,14 @@ test("claim release failure remains cleanup-pending without closing a confirmed 
   transport.failStartup = false;
   const replacement = create();
   await replacement.session.start("existing");
-  await replacement.close(closeCommand);
+  await replacement.close();
 });
 
 test("invalid session id leaves the session retryable", async () => {
   const { agent } = setup();
   await expect(agent.session.start("")).rejects.toThrow("nonempty");
   await agent.session.start(null);
-  await agent.close(closeCommand);
+  await agent.close();
 });
 
 test("loading history preserves the transcript without activating old execution", async () => {
@@ -273,11 +267,11 @@ test("loading history preserves the transcript without activating old execution"
       _meta: { periReplay: true, periMessageId: "old-assistant" },
     } } },
   ];
-  const activation = spyOn(agent.session, "ensureProcessing").mockResolvedValue({ status: "idle" });
   try {
     await agent.session.start("existing");
     await Bun.sleep(0);
-    expect(activation).not.toHaveBeenCalled();
+    expect(transport.calls.some((call) => call.method === "session/input/enqueue" ||
+      call.method === "session/input/dispatch" || call.method === "session/cancel")).toBe(false);
     expect(JSON.stringify(agent.docs.chat.toJSON())).toContain("old question");
     expect(JSON.stringify(agent.docs.chat.toJSON())).toContain("old answer");
     const info = agent.docs.session.getMap("root").get("session") as { get(key: string): unknown };
@@ -285,43 +279,24 @@ test("loading history preserves the transcript without activating old execution"
     expect(transport.calls.map((call) => call.method)).toEqual([
       "initialize", "session/load", "session/input/snapshot",
     ]);
-  } finally {
-    activation.mockRestore();
-    await agent.close(closeCommand);
-  }
+  } finally { await agent.close(); }
 });
 
-test("current matching work notification still activates a loaded session", async () => {
+test("an unobserved work notification is not part of the current ACP surface", async () => {
   const { agent, transport } = setup();
-  const activation = spyOn(agent.session, "ensureProcessing").mockResolvedValue({ status: "idle" });
-  try {
-    await agent.session.start("existing");
-    expect(activation).not.toHaveBeenCalled();
-    transport.emit({ method: "session/work/available", params: { sessionId: "other" } });
-    expect(activation).not.toHaveBeenCalled();
-    transport.emit({ method: "session/work/available", params: { sessionId: "existing" } });
-    expect(activation).toHaveBeenCalledTimes(1);
-    expect(activation).toHaveBeenCalledWith("notification");
-  } finally {
-    activation.mockRestore();
-    await agent.close(closeCommand);
-  }
+  await agent.session.start("existing");
+  transport.emit({ method: "session/work/available", params: { sessionId: "existing" } });
+  await Bun.sleep(0);
+  expect(transport.calls.map((call) => call.method)).toEqual(["initialize", "session/load", "session/input/snapshot"]);
+  await agent.close();
 });
 
-test("explicit new input still activates a loaded session after accepted publication", async () => {
+test("explicit dispatch sends the queue command for the loaded generation", async () => {
   const { agent, transport } = setup();
-  const activation = spyOn(agent.session, "ensureProcessing").mockResolvedValue({ status: "idle" });
-  try {
-    await agent.session.start("existing");
-    expect(activation).not.toHaveBeenCalled();
-    await agent.session.dispatch("new-input");
-    expect(activation).toHaveBeenCalledTimes(1);
-    expect(activation).toHaveBeenCalledWith("send");
-    expect(transport.calls.find((call) => call.method === "session/input/dispatch")?.params).toEqual({
-      sessionId: "existing", generation: "generation-1", commandId: "new-input:dispatch", inputIds: ["new-input"],
-    });
-  } finally {
-    activation.mockRestore();
-    await agent.close(closeCommand);
-  }
+  await agent.session.start("existing");
+  await agent.session.dispatch("new-input");
+  expect(transport.calls.find((call) => call.method === "session/input/dispatch")?.params).toEqual({
+    sessionId: "existing", generation: "generation-1", commandId: "new-input:dispatch", inputIds: ["new-input"],
+  });
+  await agent.close();
 });

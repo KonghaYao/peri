@@ -1,4 +1,4 @@
-import { loadPeriWasm, type NativeWasmAcp } from "../wasm/loader";
+import { loadPeriWasm, type NativeWasmAcp, type PeriWasmModule } from "../wasm/loader";
 import { JsonRpcTransport } from "./json-rpc-transport";
 
 export interface WasmAcpTransportOptions {
@@ -6,6 +6,8 @@ export interface WasmAcpTransportOptions {
   configJson: string;
   moduleUrl?: string | URL;
   env?: Readonly<Record<string, string>>;
+  /** 已初始化的独立模块；环境与宿主能力在实例化时注入。 */
+  module?: PeriWasmModule;
 }
 
 /** ACP over the in-process Emscripten port. No ACP method is handled here. */
@@ -24,7 +26,9 @@ export class WasmAcpTransport extends JsonRpcTransport {
   async executionStopped(): Promise<boolean> { return this.terminated; }
 
   static async start(options: WasmAcpTransportOptions): Promise<WasmAcpTransport> {
-    const wasm = await loadPeriWasm(options.moduleUrl, options.env);
+    if (options.module && (options.moduleUrl !== undefined || options.env !== undefined))
+      throw new TypeError("Injected WASM module cannot be combined with moduleUrl or env");
+    const wasm = options.module ?? await loadPeriWasm(options.moduleUrl, options.env);
     if (!wasm.PeriWasmAcp?.start)
       throw new Error("peri-wasm artifact does not expose the ACP Host port; rebuild peri-wasm");
     return new WasmAcpTransport(await wasm.PeriWasmAcp.start(options.configJson));

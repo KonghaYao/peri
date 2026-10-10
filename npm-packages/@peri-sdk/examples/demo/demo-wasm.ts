@@ -23,7 +23,6 @@ import { DemoSessionNotFoundError } from "./demo-session-not-found-error";
 import { SessionDocStream, decodeResume } from "./session-doc-stream";
 import { streamSessionDocuments } from "./session-sse";
 import { SessionEventLog } from "./session-event-log";
-import { shutdownCommands } from "./session-control-command";
 
 const workspace = await realpath(Bun.env.PERI_WORKSPACE!);
 const html = await readFile(resolve(import.meta.dir, "demo.html"), "utf8");
@@ -49,7 +48,6 @@ const sessionViewJs = await sessionView.outputs[0]!.text();
 
 const storage: SessionStorage = new TursoStorage({
     url: databaseUrl,
-    engine: "libsql",
     // Peri currently requires a nonempty remote credential even for local sqld without auth.
     authToken: "local-dev",
 });
@@ -285,6 +283,5 @@ try {
         result.value.interactions.close();
         await result.value.docs.close();
     }
-    const agents = opened.flatMap((result) => result.status === "fulfilled" ? [result.value.agent] : []);
-    await manager.closeAll(await shutdownCommands(agents));
+    await manager.closeAll();
 }

@@ -1,5 +1,5 @@
-/** Bun HTTP demo with one Peri Agent per Session. */
-import { readFile, realpath } from "node:fs/promises";
+/** Bun HTTP demo：每个 Session 使用独立 WASM 实例，不启动 Peri 或 Workspace 子进程。 */
+import { readFile } from "node:fs/promises";
 import { resolve } from "node:path";
 import { Hono } from "hono";
 import { streamSSE } from "hono/streaming";
@@ -17,13 +17,21 @@ import {
     type AgentOptions,
     type SessionStorage,
 } from "../../src/sdk/index";
+import { startPeriWasmHost } from "../../src/wasm-host";
 import { DemoSessionNotFoundError } from "./demo-session-not-found-error";
 import { SessionDocStream, decodeResume } from "./session-doc-stream";
 import { streamSessionDocuments } from "./session-sse";
 import { SessionEventLog } from "./session-event-log";
-import { shutdownCommands } from "./session-control-command";
 
-const workspace = await realpath(Bun.env.PERI_WORKSPACE!);
+const workspace = Bun.env.PERI_WORKSPACE;
+if (!workspace) throw new Error("PERI_WORKSPACE is required");
+const workspaceMcpUrl = Bun.env.PERI_WORKSPACE_MCP_URL;
+if (!workspaceMcpUrl) throw new Error("PERI_WORKSPACE_MCP_URL is required; provide an external HTTP Workspace");
+const wasmModuleUrl = Bun.env.PERI_WASM_MODULE_URL ?? resolve(import.meta.dir, "../../dist/wasm/peri-wasm.js");
+const wasmEnv = Object.fromEntries(
+    Object.entries(Bun.env).filter((entry): entry is [string, string] =>
+        entry[0].startsWith("LANGFUSE_") && entry[1] !== undefined),
+);
 const html = await readFile(resolve(import.meta.dir, "demo.html"), "utf8");
 const databaseUrl = Bun.env.PERI_DEMO_TURSO_URL ?? "http://127.0.0.1:8081";
 const databaseEndpoint = new URL(databaseUrl);
@@ -46,7 +54,6 @@ const sessionViewJs = await sessionView.outputs[0]!.text();
 
 const storage: SessionStorage = new TursoStorage({
     url: databaseUrl,
-    engine: "libsql",
     // Peri currently requires a nonempty remote credential even for local sqld without auth.
     authToken: "local-dev",
 });
@@ -97,11 +104,17 @@ const config = {
 const sandbox = new Sandbox({
     id: "demo-workspace",
     storage,
-    stdio: { command: Bun.env.PERI_BIN ?? "peri", settings: config },
-    workspaceProcess: {
-        command: Bun.env.PERI_BIN ?? "peri",
-        bind: Bun.env.PERI_WORKSPACE_BIND ?? "127.0.0.1:8765",
-    },
+    workspace: { url: workspaceMcpUrl },
+    transportFactory: (path) => startPeriWasmHost({
+        moduleUrl: wasmModuleUrl,
+        env: wasmEnv,
+        configJson: JSON.stringify({
+            cwd: path,
+            settings: config,
+            storage: { url: databaseUrl, authToken: "local-dev" },
+            machineId: Bun.env.PERI_WASM_MACHINE_ID ?? "00000000-0000-4000-8000-000000000001",
+        }),
+    }),
 });
 const manager = new ManagedAgents({ kv: new MemoryKV() });
 const agentOptions: Pick<AgentOptions, "instructions" | "mcpServers"> = {
@@ -162,7 +175,7 @@ try {
     } catch {
         throw new Error("Local Session Store is unavailable; run `bun run db:dev` or check PERI_DEMO_TURSO_URL");
     }
-    const workspaceMcp = await sandbox.startWorkspace(workspace);
+    const workspaceMcp = sandbox.getWorkspace();
     const app = new Hono();
     app.use("*", logger());
     app.onError((error, c) => {
@@ -272,7 +285,5 @@ try {
         result.value.interactions.close();
         await result.value.docs.close();
     }
-    const agents = opened.flatMap((result) => result.status === "fulfilled" ? [result.value.agent] : []);
-    await manager.closeAll(await shutdownCommands(agents));
-    await sandbox.closeWorkspace();
+    await manager.closeAll();
 }

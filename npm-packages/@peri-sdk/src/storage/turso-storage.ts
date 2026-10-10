@@ -2,31 +2,12 @@ import { connect } from "@tursodatabase/serverless";
 import { SESSION_BY_ID_SQL, SESSION_LIST_SQL, sessionSummary, type SessionRow, type SessionSummary } from "./session-summary";
 import type { SessionStorage } from "./types";
 
+/** 显式传入的 Store 位置与凭证；不从宿主环境或 CLI 部署参数推断。 */
 export class TursoStorage implements SessionStorage {
-  constructor(
-    private readonly options: {
-      url: string;
-      engine?: "turso" | "libsql";
-      authToken?: string;
-      tokenEnv?: string;
-    },
-  ) {}
-
-  deployment(): ReturnType<SessionStorage["deployment"]> {
-    const { url, engine = "turso", authToken, tokenEnv = "PERI_SDK_TURSO_AUTH_TOKEN" } =
-      this.options;
-    const args = ["--session-store", url, "--session-store-engine", engine];
-    if (authToken || this.options.tokenEnv)
-      args.push("--session-store-token-env", tokenEnv);
-    return { args, env: authToken ? { [tokenEnv]: authToken } : {} };
-  }
+  constructor(private readonly options: { url: string; authToken?: string }) {}
 
   async getSessions(cwd: string): Promise<SessionSummary[]> {
-    const token = this.options.authToken ??
-      (this.options.tokenEnv ? Bun.env[this.options.tokenEnv] : undefined);
-    if (this.options.tokenEnv && !token)
-      throw new Error("Session Storage credential is missing");
-    const connection = connect({ url: this.options.url, authToken: token });
+    const connection = connect({ url: this.options.url, authToken: this.options.authToken });
     try {
       let rows: SessionRow[];
       try {
@@ -43,11 +24,7 @@ export class TursoStorage implements SessionStorage {
   }
 
   async getSession(id: string): Promise<SessionSummary | null> {
-    const token = this.options.authToken ??
-      (this.options.tokenEnv ? Bun.env[this.options.tokenEnv] : undefined);
-    if (this.options.tokenEnv && !token)
-      throw new Error("Session Storage credential is missing");
-    const connection = connect({ url: this.options.url, authToken: token });
+    const connection = connect({ url: this.options.url, authToken: this.options.authToken });
     try {
       let rows: SessionRow[];
       try {

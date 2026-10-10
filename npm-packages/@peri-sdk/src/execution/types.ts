@@ -1,10 +1,19 @@
-import type { ControlState, ExecutionBinding } from "../agent/session-control";
+/** 精确执行身份：一个 turn 内的某次 attempt。 */
+export type ExecutionBinding = { turnId: string; attemptId: string };
+/** 执行域控制状态；由准入后端持久化，SDK 不再自带控制协议端点。 */
+export type ControlState = {
+    lifecycle: number;
+    revision: number;
+    controlGeneration: number;
+    status: "active" | "paused" | "closing" | "closed";
+    attempt: ExecutionBinding | null;
+};
 
 export type InstanceDescriptor = {
     instanceId: string;
     generationId: string;
-    proofRoute: { kind: "stdioSupervisor" | "wasmHost" | "external"; reference: string;
-        hostIdentity?: string; dispatcherPid?: number; periPid?: number };
+    /** 实例停止证据的来源；进程 PID 证明不属于 SDK 契约。 */
+    proofRoute: { kind: "wasmHost" | "external"; reference: string };
 };
 export type InstanceStoppedProof = {
     kind: "instanceStopped";

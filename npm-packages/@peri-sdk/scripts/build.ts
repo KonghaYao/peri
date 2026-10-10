@@ -27,13 +27,6 @@ const result = await Bun.build({
   external: ["yjs"],
 });
 if (!result.success) throw new Error(`SDK bundle failed: ${result.logs.join("; ")}`);
-const dispatcher = await Bun.build({
-  entrypoints: [resolve(packageRoot, "src/execution/sidecar.ts")],
-  outdir: resolve(output, "execution"),
-  target: "bun",
-  format: "esm",
-});
-if (!dispatcher.success) throw new Error(`SDK execution dispatcher bundle failed: ${dispatcher.logs.join("; ")}`);
 const browser = await Bun.build({
   entrypoints: [resolve(packageRoot, "src/wasm.ts")],
   outdir: output,
@@ -49,6 +42,22 @@ const view = await Bun.build({
   external: ["yjs"],
 });
 if (!view.success) throw new Error(`Session view bundle failed: ${view.logs.join("; ")}`);
+const portable = await Bun.build({
+  entrypoints: [resolve(packageRoot, "src/portable.ts")],
+  outdir: output,
+  target: "bun",
+  format: "esm",
+  external: ["yjs"],
+});
+if (!portable.success) throw new Error(`Portable SDK bundle failed: ${portable.logs.join("; ")}`);
+const host = await Bun.build({
+  entrypoints: [resolve(packageRoot, "src/wasm-host.ts")],
+  outdir: output,
+  target: "node",
+  external: ["dns", "net", "node:dns", "node:net"],
+  format: "esm",
+});
+if (!host.success) throw new Error(`WASM host bundle failed: ${host.logs.join("; ")}`);
 await run(resolve(packageRoot, "node_modules/.bin/tsc"), ["--noEmit", "false", "--emitDeclarationOnly", "--declaration", "--outDir", "dist"], packageRoot);
 
 await mkdir(wasmOutput, { recursive: true });

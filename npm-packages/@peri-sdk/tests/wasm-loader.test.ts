@@ -3,7 +3,7 @@ import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { pathToFileURL } from "node:url";
-import { loadPeriWasm } from "../src/wasm/loader";
+import { instantiatePeriWasm, loadPeriWasm, type PeriWasmModule } from "../src/wasm/loader";
 
 const root = mkdtempSync(join(tmpdir(), "peri-wasm-loader-"));
 afterAll(() => rmSync(root, { recursive: true, force: true }));
@@ -23,6 +23,37 @@ const injectionUrl = moduleUrl("injection");
 const conflictUrl = moduleUrl("conflict");
 const invalidUrl = moduleUrl("invalid");
 const missingEnvironmentUrl = moduleUrl("missing-env", false);
+
+test("独立 WASM 实例不共享相同 URL 的环境或缓存", async () => {
+  const first = await instantiatePeriWasm({ moduleUrl: injectionUrl, env: { INSTANCE: "first" } });
+  const second = await instantiatePeriWasm({ moduleUrl: injectionUrl, env: { INSTANCE: "second" } });
+  expect(first).not.toBe(second);
+  expect(first.ENV).toEqual({ INSTANCE: "first" });
+  expect(second.ENV).toEqual({ INSTANCE: "second" });
+});
+
+test("注入 factory 不加载文件并保留 preRun 与环境快照", async () => {
+  const env = { INSTANCE: "original" };
+  let hooks = 0;
+  const loading = instantiatePeriWasm({
+    moduleUrl: "file:///missing-peri-artifact.js", env,
+    moduleOptions: { preRun: () => { hooks++; } },
+    moduleFactory: async (options) => {
+      await Promise.resolve();
+      const module: PeriWasmModule = { ENV: {}, PeriWasmAcp: { start: async () => { throw new Error("unused"); } } };
+      for (const hook of options.preRun as Array<(module: PeriWasmModule) => void>) hook(module);
+      return module;
+    },
+  });
+  env.INSTANCE = "changed";
+  expect((await loading).ENV).toEqual({ INSTANCE: "original" });
+  expect(hooks).toBe(1);
+});
+
+test("非法 preRun 不被静默丢弃", async () => {
+  await expect(instantiatePeriWasm({ moduleUrl: injectionUrl, moduleOptions: { preRun: [42] } }))
+    .rejects.toThrow("Invalid WASM preRun hooks");
+});
 
 test("WASM loader injects a copy of deployment environment before startup", async () => {
   const url = injectionUrl;

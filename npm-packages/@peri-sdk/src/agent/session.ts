@@ -1,44 +1,44 @@
 import type { Agent } from "./agent";
 import { SendReceipt } from "./send-receipt";
 import type { JsonRpcNotification, Transport } from "../transport/types";
-import { SessionExecution } from "../execution/session-execution";
-import { ExecutionDataLossError } from "../execution/types";
-import type { ActivationSource } from "../execution/types";
-import type { AdmissionResult } from "../execution/coordinator";
 import type { SessionDocs } from "../state/session-docs";
 import { EventQueue } from "../transport/event-queue";
-import {
-    SessionControl, controlCommandIdentity,
-    type CommandExpectation, type StopCommand, type ControlAction,
-    type ControlCommand, type ControlReceipt, type ControlResolution, type ControlSnapshot, type CloseOptions,
-} from "./session-control";
-import { drainClose, closeDrainBudget } from "./close-drain";
+import { initializeAcpClient } from "./acp-handshake";
+import { closeDrainBudget, closeUntilSettled, type CloseOptions } from "./session-close";
 
+/** `session/input/*` 的队列身份、条目状态与回执；执行调度归 Rust Agent mailbox。 */
 type QueueSnapshot = {
     generation: string;
     revision?: number;
     activeRequestId?: string;
     items?: Array<{ inputId: string; state: string }>;
 };
-type QueueReceipt = { results: Array<{ inputId: string; state: string }>; workReceipts?: Array<{ decision: { kind: string } }> };
+type QueueReceipt = {
+    results: Array<{ inputId: string; state: string }>;
+    snapshot?: QueueSnapshot;
+};
 type SessionState = "declared" | "starting" | "active" | "cleanup-pending" | "closed";
 type PendingDelivery = {
     resolve: () => void;
     reject: (error: Error) => void;
 };
 
+/** 一次 `session/new` 或 `session/load` 得到的会话身份。 */
+type SessionSetup = { modes?: unknown; configOptions?: unknown[]; sessionId?: string };
+
+/**
+ * 单个 Session 的 ACP 客户端。传输由嵌入方注入（WASM Host 或自定义 transport），
+ * SDK 只按 ACP 方法语义驱动：输入队列、取消通知、显式关闭与会话文档投影。
+ */
 export class Session {
     private state: SessionState = "declared";
     private transport?: Transport;
-    private execution?: SessionExecution;
     private sessionId?: string;
     private currentPath?: string;
     private generation?: string;
     private startPromise?: Promise<Session>;
-    private closePromise?: Promise<ControlReceipt>;
+    private closing?: Promise<void>;
     private startupCleanupPromise?: Promise<void>;
-    private readonly controls = new SessionControl();
-    private settledClose?: { command: ControlCommand; receipt: ControlReceipt };
     private notifications = new EventQueue(() => {});
     private unsubscribe?: () => void;
     private streamOpen = false;
@@ -61,7 +61,7 @@ export class Session {
     get isClosed(): boolean { return this.state === "closed"; }
 
     start(requestedSessionId: string | null): Promise<Session> {
-        if (this.closePromise || this.startupCleanupPromise)
+        if (this.closing || this.startupCleanupPromise)
             throw new Error("Session cannot start while closing");
         if (this.state !== "declared")
             throw new Error(`Session cannot start from ${this.state}`);
@@ -72,15 +72,12 @@ export class Session {
         return this.startPromise;
     }
 
-    private async startOnce(
-        requestedSessionId: string | null,
-    ): Promise<Session> {
+    private async startOnce(requestedSessionId: string | null): Promise<Session> {
         const claims = this.agent.claims;
         let transport: Transport | undefined;
         try {
             await claims.claimAgent();
-            if (requestedSessionId !== null)
-                await claims.claimSession(requestedSessionId);
+            if (requestedSessionId !== null) await claims.claimSession(requestedSessionId);
             const path = requestedSessionId === null
                 ? this.agent.path
                 : (await this.agent.options.sandbox.getSession(requestedSessionId))?.cwd;
@@ -89,125 +86,73 @@ export class Session {
                 : `Session not found: ${requestedSessionId}`);
             transport = await this.agent.options.sandbox.createTransport(path);
             this.transport = transport;
-            transport.setRequestHandler((method, params) => {
-                if ((method === "peri/execution/admit" || method === "peri/execution/entered") && (this.closePromise || this.controls.executionBlocked))
-                    return { status: "blocked", reason: "sessionDomainControlBlocksAdmission" };
-                if (method === "peri/execution/admit" || method === "peri/execution/settle" || method === "peri/execution/entered")
-                    return this.executionRuntime().handle(method, params);
-                return this.docs.handleRequest(method, params, this.sessionId, this.agent.options);
-            });
+            transport.setRequestHandler((method, params) => this.docs.handleRequest(method, params, this.sessionId, this.agent.options));
             let replayTurnPending = false;
             this.unsubscribe = transport.subscribe((event) => {
-                if (event.method === "session/work/available") {
-                    const sessionId = (event.params as { sessionId?: string } | undefined)?.sessionId;
-                    if (sessionId && sessionId === this.sessionId) void this.ensureProcessing("notification").catch((error) => {
-                        console.error("SDK work admission failed", error);
-                    });
-                    return;
-                }
-                const rawEvent =
-                    event.method === "session/update" ||
-                    event.method === "peri/agent_event";
-                const stateEvent =
-                    rawEvent ||
+                const rawEvent = event.method === "session/update" || event.method === "peri/agent_event";
+                const stateEvent = rawEvent ||
                     event.method === "peri/agent_event_done" ||
                     event.method === "peri/unstable_event";
                 if (!stateEvent) return;
-                if (
-                    this.sessionId &&
-                    (event.params as { sessionId?: string } | undefined)
-                        ?.sessionId !== this.sessionId
-                )
-                    return;
+                if (this.sessionId && (event.params as { sessionId?: string } | undefined)?.sessionId !== this.sessionId) return;
                 if (event.method === "session/update") {
                     const update = (event.params as { update?: { sessionUpdate?: string; _meta?: { periReplay?: boolean } } } | undefined)?.update;
-                    if (
-                        update?.sessionUpdate === "user_message_chunk" ||
-                        update?.sessionUpdate === "agent_message_chunk" ||
-                        update?.sessionUpdate === "agent_thought_chunk" ||
-                        update?.sessionUpdate === "tool_call" ||
-                        update?.sessionUpdate === "tool_call_update"
-                    ) {
+                    if (update?.sessionUpdate === "user_message_chunk" || update?.sessionUpdate === "agent_message_chunk" ||
+                        update?.sessionUpdate === "agent_thought_chunk" || update?.sessionUpdate === "tool_call" ||
+                        update?.sessionUpdate === "tool_call_update")
                         replayTurnPending = update._meta?.periReplay === true;
-                    }
                 } else if (event.method === "peri/agent_event_done") {
                     replayTurnPending = false;
                 }
                 try {
                     this.docs.accept(event);
                 } catch (error) {
-                    // State projection must not suppress delivery handling or the raw ACP stream.
+                    // 投影失败不得吞掉交付处理或原始 ACP 事件流。
                     console.error("Failed to project ACP notification into SessionDocs", error);
                 }
                 if (!rawEvent) return;
                 this.acceptDeliveryEvent(event);
                 this.notifications.push(event);
             });
-            await transport.request("initialize", {
-                protocolVersion: 1,
-                clientCapabilities: {
-                    _meta: {
-                        "peri.userInputQueue": true,
-                        "peri.executionProtocol": 1,
-                        "peri.agentEvent": true,
-                        "peri.sessionWorkspaceV1": true,
-                        "peri.agentEventDone": true,
-                        "peri.replay": true,
-                        "peri.tokenStats": true,
-                        "peri.planEntryActiveForm": true,
-                        "peri.unstableEvent": true,
-                    },
+            await initializeAcpClient(transport, {
+                capabilities: {
+                    "peri.userInputQueue": true,
+                    "peri.agentEvent": true,
+                    "peri.sessionWorkspaceV1": true,
+                    "peri.agentEventDone": true,
+                    "peri.replay": true,
+                    "peri.tokenStats": true,
+                    "peri.planEntryActiveForm": true,
+                    "peri.unstableEvent": true,
                 },
             });
-            const mcpServers = this.agent.mcpServers();
-            const params = {
-                cwd: path,
-                mcpServers,
-            };
+            const params = { cwd: path, mcpServers: this.agent.mcpServers() };
             let id: string;
             if (requestedSessionId === null) {
-                const response = await transport.request<{ sessionId: string; modes?: unknown; configOptions?: unknown[] }>(
-                    "session/new",
-                    {
-                        ...params,
-                        ...(this.agent.options.instructions
-                            ? {
-                                  _meta: {
-                                      "peri.instructions":
-                                          this.agent.options.instructions,
-                                  },
-                              }
-                            : {}),
-                    },
-                );
-                id = response.sessionId;
+                const created = await transport.request<SessionSetup>("session/new", {
+                    ...params,
+                    ...(this.agent.options.instructions
+                        ? { _meta: { "peri.instructions": this.agent.options.instructions } }
+                        : {}),
+                });
+                id = created.sessionId ?? "";
                 if (!id) throw new Error("Peri returned no sessionId");
-                this.docs.seedConfig(response);
+                this.docs.seedConfig(created);
                 await claims.claimSession(id);
             } else {
-                const loaded = await transport.request<{ modes?: unknown; configOptions?: unknown[] }>("session/load", {
-                    ...params,
-                    sessionId: requestedSessionId,
-                });
+                const loaded = await transport.request<SessionSetup>("session/load", { ...params, sessionId: requestedSessionId });
                 this.docs.seedConfig(loaded);
-                // ACP completes history replay before the load response. It has no
-                // replay turn-done notification, so close only a replay-only turn.
+                // ACP 在 load 响应前完成历史回放，且没有独立的回放 turn-done 通知。
                 if (replayTurnPending) this.docs.completeTurn();
                 id = requestedSessionId;
             }
-            await this.agent.options.sandbox.registerSessionTransport(id, transport);
-            const snapshot = await transport.request<QueueSnapshot>(
-                "session/input/snapshot",
-                { sessionId: id },
-            );
-            if (!snapshot.generation)
-                throw new Error("Peri returned no input queue generation");
+            const snapshot = await transport.request<QueueSnapshot>("session/input/snapshot", { sessionId: id });
+            if (!snapshot.generation) throw new Error("Peri returned no input queue generation");
             this.docs.seedInputQueue(snapshot);
-            this.transport = transport;
             this.sessionId = id;
             this.currentPath = path;
             this.generation = snapshot.generation;
-            this.docs.setTaskSnapshotRequester(() => this.transport!.request("session/bg-tasks", { sessionId: id }));
+            this.docs.setTaskSnapshotRequester(() => this.activeTransport().request("session/bg-tasks", { sessionId: id }));
             this.state = "active";
             return this;
         } catch (error) {
@@ -218,7 +163,7 @@ export class Session {
             this.notifications = new EventQueue(() => {});
             this.agent.discardFailedSessionDocs();
             try {
-                await this.cleanupExecution();
+                await this.releaseResources();
             } catch (cleanupError) {
                 throw new AggregateError(
                     [error, cleanupError],
@@ -231,25 +176,24 @@ export class Session {
         }
     }
 
-    private async cleanupExecution(): Promise<void> {
-        if (this.transport) {
-            await this.transport.close();
-            await this.execution?.joinOwnedCalls();
-            const native = this.transport as Transport & { executionStopped?: () => Promise<boolean> };
-            if (this.execution && this.sessionId && this.settledClose && await native.executionStopped?.())
-                await this.execution.recordStopped();
-            this.execution?.close();
-            this.execution = undefined;
-            this.transport = undefined;
+    private async releaseResources(): Promise<void> {
+        const transport = this.transport;
+        if (transport) {
+            // 关闭未确认时保留引用，重试必须能再次尝试同一个 transport。
+            await transport.close();
+            if (this.transport === transport) this.transport = undefined;
         }
         await this.agent.claims.release();
     }
 
     private activeTransport(): Transport {
-        if (this.closePromise || this.state !== "active" || !this.transport)
+        if (this.closing || this.state !== "active" || !this.transport)
             throw new Error("Session is not active");
-        if (this.controls.executionBlocked)
-            throw new Error("Session execution is blocked by domain control");
+        return this.transport;
+    }
+
+    private domainTransport(): Transport {
+        if (!this.transport) throw new Error("Session has no transport");
         return this.transport;
     }
 
@@ -259,27 +203,12 @@ export class Session {
         return new SendReceipt(this, text);
     }
 
-    private executionRuntime(): SessionExecution {
-        if (!this.execution) this.execution = new SessionExecution(this.activeTransport(), this.agent.options.execution);
-        return this.execution;
-    }
-
-    ensureProcessing(source: ActivationSource = "inboxScan"): Promise<AdmissionResult> {
-        if (this.closePromise || this.state !== "active" || this.controls.executionBlocked)
-            return Promise.resolve({ status: "blocked", reason: "sessionDomainControlBlocksAdmission" });
-        return this.executionRuntime().activate(this.id, source);
-    }
-
     trackInput(inputId: string, text: string): void {
         this.pendingInputText.set(inputId, text);
     }
 
     waitForDelivery(inputId: string): Promise<void> {
-        return new Promise((resolve, reject) =>
-            this.pendingDeliveries.set(inputId, {
-                resolve, reject,
-            }),
-        );
+        return new Promise((resolve, reject) => this.pendingDeliveries.set(inputId, { resolve, reject }));
     }
 
     confirmDelivery(inputId: string): void {
@@ -297,105 +226,76 @@ export class Session {
         const pending = this.pendingDeliveries.get(inputId);
         if (!pending) return;
         this.pendingDeliveries.delete(inputId);
-        pending.reject(
-            error instanceof Error ? error : new Error(String(error)),
-        );
+        pending.reject(error instanceof Error ? error : new Error(String(error)));
     }
 
     private acceptDeliveryEvent(event: JsonRpcNotification): void {
         if (event.method !== "peri/agent_event") return;
-        const eventJson = (event.params as { event_json?: unknown } | undefined)
-            ?.event_json;
+        const eventJson = (event.params as { event_json?: unknown } | undefined)?.event_json;
         if (typeof eventJson !== "string") return;
         let parsed: unknown;
-        try {
-            parsed = JSON.parse(eventJson);
-        } catch {
-            return;
-        }
+        try { parsed = JSON.parse(eventJson); }
+        catch { return; }
         if (!parsed || typeof parsed !== "object") return;
-        const payload = parsed as {
-            type?: string;
-            value?: {
-                input_id?: string;
-                generation?: string;
-            };
-        };
+        const payload = parsed as { type?: string; value?: { input_id?: string; generation?: string } };
         const value = payload.value;
         if (!value) return;
-        if (
-            payload.type === "user_input_delivered" &&
-            value.generation === this.generation &&
-            typeof value.input_id === "string"
-        )
+        if (payload.type === "user_input_delivered" && value.generation === this.generation &&
+            typeof value.input_id === "string")
             this.confirmDelivery(value.input_id);
     }
 
-    async enqueue(inputId: string, text: string): Promise<string> {
-        const receipt = await this.activeTransport().request<QueueReceipt>(
-            "session/input/enqueue",
-            {
-                sessionId: this.id,
-                generation: this.generation,
-                commandId: `${inputId}:enqueue`,
-                inputId,
-                content: text,
-                originalDraft: text,
-            },
-        );
-        const state = receipt.results.find(
-            (item) => item.inputId === inputId,
-        )?.state;
+    private queueReceiptState(receipt: QueueReceipt, inputId: string): string {
+        const state = receipt.results.find((item) => item.inputId === inputId)?.state;
         if (!state || state === "unknown" || state === "withdrawn")
             throw new Error(`Input not accepted: ${state ?? "missing"}`);
-        if (state !== "delivered") this.requirePublication(receipt);
-        if (state !== "delivered") this.activatePublishedInput(inputId, "send");
+        if (receipt.snapshot) this.docs.seedInputQueue(receipt.snapshot);
         return state;
     }
 
+    /** 入队即由 Rust mailbox 决定调度；SDK 不另行申请执行准入。 */
+    async enqueue(inputId: string, text: string): Promise<string> {
+        const receipt = await this.activeTransport().request<QueueReceipt>("session/input/enqueue", {
+            sessionId: this.id,
+            generation: this.generation,
+            commandId: `${inputId}:enqueue`,
+            inputId,
+            content: text,
+            originalDraft: text,
+        });
+        return this.queueReceiptState(receipt, inputId);
+    }
+
     async dispatch(inputId: string): Promise<void> {
-        const receipt = await this.activeTransport().request<QueueReceipt>(
-            "session/input/dispatch",
-            {
-                sessionId: this.id,
-                generation: this.generation,
-                commandId: `${inputId}:dispatch`,
-                inputIds: [inputId],
-            },
-        );
-        const state = receipt.results.find(
-            (item) => item.inputId === inputId,
-        )?.state;
-        if (!state || state === "unknown" || state === "withdrawn")
-            throw new Error(`Input not dispatched: ${state ?? "missing"}`);
-        if (state !== "delivered") this.requirePublication(receipt);
-        this.activatePublishedInput(inputId, "send");
+        const receipt = await this.activeTransport().request<QueueReceipt>("session/input/dispatch", {
+            sessionId: this.id,
+            generation: this.generation,
+            commandId: `${inputId}:dispatch`,
+            inputIds: [inputId],
+        });
+        this.queueReceiptState(receipt, inputId);
     }
 
-    private activatePublishedInput(inputId: string, source: ActivationSource): void {
-        if (this.closePromise || this.state !== "active" || this.controls.executionBlocked) return;
-        void this.ensureProcessing(source).then((result) => {
-            if (result.status === "disaster") this.rejectDelivery(inputId, new ExecutionDataLossError(result.disaster));
-            else if (result.status === "unknown" || result.status === "blocked")
-                this.rejectDelivery(inputId, new Error(`Execution admission ${result.status}: ${result.reason}`));
-        }, (error) => this.rejectDelivery(inputId, error));
-    }
-
-    private requirePublication(receipt: QueueReceipt): void {
-        if (!receipt.workReceipts?.length || receipt.workReceipts.some((work) => work.decision?.kind !== "accepted"))
-            throw new Error("Required input publication has no verified accepted domain receipt");
-    }
-
+    /** 撤回队列中尚未派发的输入；`withdrawn` 是本次撤回成功的结果状态。 */
     async takeBack(inputId: string): Promise<void> {
-        await this.activeTransport().request("session/input/takeback", {
+        const receipt = await this.activeTransport().request<QueueReceipt>("session/input/takeback", {
             sessionId: this.id,
             generation: this.generation,
             commandId: `${inputId}:takeback`,
             inputId,
         });
+        const state = receipt.results.find((item) => item.inputId === inputId)?.state;
+        if (receipt.snapshot) this.docs.seedInputQueue(receipt.snapshot);
+        if (!state || state === "unknown")
+            throw new Error(`Input not taken back: ${state ?? "missing"}`);
     }
 
-    /** Raw ACP notifications for this Session: session/update and peri/agent_event. */
+    /** 当前 ACP 的取消是一次会话级通知；未完成 turn 的收敛由 Peri 决定。 */
+    async cancel(): Promise<void> {
+        await this.activeTransport().notify("session/cancel", { sessionId: this.id });
+    }
+
+    /** 原始 ACP 通知：session/update 与 peri/agent_event。 */
     async *stream(): AsyncIterable<JsonRpcNotification> {
         this.activeTransport();
         if (this.streamOpen)
@@ -406,11 +306,7 @@ export class Session {
                 const next = await this.notifications.next();
                 if (next.done) break;
                 const event = next.value;
-                if (
-                    event &&
-                    (event.params as { sessionId?: string } | undefined)
-                        ?.sessionId === this.id
-                )
+                if (event && (event.params as { sessionId?: string } | undefined)?.sessionId === this.id)
                     yield event;
             }
         } finally {
@@ -420,107 +316,33 @@ export class Session {
         }
     }
 
-    private controlTransport(): Transport {
-        if (this.state !== "active" || !this.transport)
-            throw new Error("Session has no active domain transport");
-        return this.transport;
-    }
-
-    private command(expectation: CommandExpectation, action: ControlAction): ControlCommand {
-        return { ...expectation, sessionId: this.id, action };
-    }
-
-    async control(command: ControlCommand): Promise<ControlReceipt> {
-        if (this.closePromise) throw new Error("Session domain Close is in progress");
-        if (command.sessionId !== this.id)
-            throw new Error("Control command targets a different Session");
-        const receipt = await this.controls.apply(this.controlTransport(), command);
-        if (receipt.decision.kind === "accepted" && this.execution) await this.execution.observeControl(this.id, receipt.state);
-        return receipt;
-    }
-
-    stop({ target, ...expectation }: StopCommand): Promise<ControlReceipt> {
-        return this.control(this.command(expectation, { kind: "stop", target }));
-    }
-
-    pause(expectation: CommandExpectation): Promise<ControlReceipt> {
-        return this.control(this.command(expectation, { kind: "pause" }));
-    }
-
-    resume(expectation: CommandExpectation): Promise<ControlReceipt> {
-        return this.control(this.command(expectation, { kind: "resume" }));
-    }
-
-    async reopen(expectation: CommandExpectation): Promise<ControlReceipt> {
-        const receipt = await this.control(this.command(expectation, { kind: "reopen" }));
-        if (receipt.decision.kind === "accepted") {
-            const snapshot = await this.controlTransport().request<QueueSnapshot>("session/input/snapshot", { sessionId: this.id });
-            if (!snapshot.generation) throw new Error("Reopen has no verified input publication generation");
-            this.generation = snapshot.generation;
-            this.docs.seedInputQueue(snapshot);
+    close(options: CloseOptions = {}): Promise<void> {
+        if (this.state === "closed") return Promise.resolve();
+        closeDrainBudget(options);
+        if (!this.closing) {
+            this.closing = Promise.resolve()
+                .then(() => this.closeOnce(options))
+                .finally(() => { this.closing = undefined; });
+            void this.closing.catch(() => {});
         }
-        return receipt;
+        return this.closing;
     }
 
-    resolveControl(command: ControlCommand): Promise<ControlResolution> {
-        if (command.sessionId !== this.id)
-            throw new Error("Control command targets a different Session");
-        return this.controls.resolve(this.controlTransport(), command);
-    }
-
-    controlState(): Promise<ControlSnapshot> {
-        return this.controls.snapshot(this.controlTransport(), this.id);
-    }
-
-    close(expectation: CommandExpectation, options: CloseOptions = {}): Promise<ControlReceipt> {
-        if (!expectation) throw new TypeError("Domain Close requires a stable command");
-        const drainOptions = { ...options };
-        closeDrainBudget(drainOptions);
-        const command = this.command(expectation, { kind: "close" });
-        if (this.settledClose) {
-            if (controlCommandIdentity(command) !== controlCommandIdentity(this.settledClose.command))
-                throw new Error("Transport shutdown can only retry the settled Close command");
-            if (this.state === "closed") return Promise.resolve(this.settledClose.receipt);
-        }
-        if (!this.closePromise) {
-            this.closingCommand = controlCommandIdentity(command);
-            this.closePromise = Promise.resolve().then(() => this.closeOnce(command, drainOptions)).finally(() => {
-                this.closePromise = undefined;
-            });
-        } else if (this.closingCommand !== controlCommandIdentity(command)) {
-            throw new Error("A different Close command is already in progress");
-        }
-        return this.closePromise;
-    }
-
-    private closingCommand?: string;
-
-    private async closeOnce(command: ControlCommand, options: CloseOptions): Promise<ControlReceipt> {
-        const receipt = this.settledClose?.receipt ?? await drainClose(command, {
-            apply: () => this.controls.apply(this.controlTransport(), command),
-            resolve: () => this.controls.resolve(this.controlTransport(), command),
-            snapshot: () => this.controlState(),
-            isUnresolved: () => this.controls.isUnresolved(command.commandId),
-        }, options);
-        if (!this.settledClose) {
-            this.settledClose = { command, receipt };
-        }
-        this.execution?.beginRetirement();
+    private async closeOnce(options: CloseOptions): Promise<void> {
+        const transport = this.domainTransport();
+        const sessionId = this.id;
+        await closeUntilSettled(() => transport.request("session/close", { sessionId }), options);
         this.state = "cleanup-pending";
         this.docs.setTaskSnapshotRequester(null);
-        await this.cleanupExecution();
+        await this.releaseResources();
         this.docs.completeTurn("cancelled");
         this.unsubscribe?.();
+        this.unsubscribe = undefined;
         this.streamEnded = true;
-        for (const inputId of this.pendingDeliveries.keys()) {
-            this.rejectDelivery(
-                inputId,
-                new Error("Session closed before user input was delivered"),
-            );
-        }
+        for (const inputId of this.pendingDeliveries.keys())
+            this.rejectDelivery(inputId, new Error("Session closed before user input was delivered"));
         await this.notifications.return();
         this.state = "closed";
-        return receipt;
     }
 
     cleanupStartup(): Promise<void> {
@@ -529,7 +351,7 @@ export class Session {
         if (this.state === "starting")
             throw new Error("Wait for Session startup to finish before cleanupStartup");
         if (!this.startupCleanupPromise) {
-            this.startupCleanupPromise = this.cleanupExecution().then(() => {
+            this.startupCleanupPromise = this.releaseResources().then(() => {
                 this.state = "declared";
             }).finally(() => { this.startupCleanupPromise = undefined; });
         }

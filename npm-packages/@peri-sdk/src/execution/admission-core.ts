@@ -1,7 +1,7 @@
 import { createHash } from "node:crypto";
 import { provesInstance, sameTicket, validateTicket } from "./registry-model";
 import type { AdmissionResult } from "./coordinator";
-import type { ControlState } from "../agent/session-control";
+import type { ControlState } from "./types";
 import type { AttemptStoppedProof, ExecutionAction, ExecutionDisaster, ExecutionMutation, ExecutionRecord, ExecutionRegistry, ExecutionResolution, ExecutionTicket, InstanceDescriptor, InstanceProofProvider, InstanceStoppedProof } from "./types";
 
 export type AdmissionRequestRecord = { digest: string; ticket: ExecutionTicket };

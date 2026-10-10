@@ -16,7 +16,9 @@ async function freePort() {
   const server = createServer();
   server.listen(0, '127.0.0.1');
   await once(server, 'listening');
-  const port = server.address().port;
+  const address = server.address();
+  if (!address || typeof address === 'string') throw new Error('no TCP port');
+  const port = address.port;
   await new Promise((done) => server.close(done));
   return port;
 }
@@ -95,14 +97,29 @@ try {
   }
   if (!ready) throw new Error('Wrangler did not start');
 
-  const run = await probe(url);
-  if (!run.sessionId || run.stopReason !== 'end_turn' || run.notifications === 0 ||
-      modelCalls === 0 || modelPaths.some((path) => path !== '/v1/chat/completions')) {
-    throw new Error(`ACP prompt mismatch: ${JSON.stringify({ run, modelCalls, modelPaths })}`);
+  // 1) 队列路径：与 SDK Session.send 相同，投递与 turn 结束由 Peri 通知确认。
+  const queued = await probe(url);
+  if (!queued.sessionId || queued.turn !== 'queue' || queued.delivered !== true ||
+      queued.stopReason !== 'end_turn' || queued.closed !== true || queued.notifications === 0 ||
+      !queued.events?.includes('user_input_delivered')) {
+    throw new Error(`ACP queue turn mismatch: ${JSON.stringify(queued)}`);
   }
-  const restored = await probe(`${url}/?sessionId=${encodeURIComponent(run.sessionId)}`);
-  if (!restored.listed || !restored.loaded) throw new Error(`ACP restore mismatch: ${JSON.stringify(restored)}`);
-  console.log(JSON.stringify({ passed: true, sessionId: run.sessionId, modelCalls, persistedAcrossRestart: true }));
+  // 2) 直连 turn 路径：session/prompt 仍是当前有效方法（peri-cf 在用）。
+  const prompted = await probe(`${url}/?turn=prompt`);
+  if (!prompted.sessionId || prompted.stopReason !== 'end_turn' || prompted.closed !== true ||
+      prompted.notifications === 0) {
+    throw new Error(`ACP prompt turn mismatch: ${JSON.stringify(prompted)}`);
+  }
+  // 3) 冷恢复：已结算关闭的会话仍可列表与加载。
+  const restored = await probe(`${url}/?sessionId=${encodeURIComponent(queued.sessionId)}`);
+  if (!restored.listed || !restored.loaded || restored.closed !== true) {
+    throw new Error(`ACP restore mismatch: ${JSON.stringify(restored)}`);
+  }
+  if (modelCalls === 0 || modelPaths.some((path) => path !== '/v1/chat/completions')) {
+    throw new Error(`Model endpoint mismatch: ${JSON.stringify({ modelCalls, modelPaths })}`);
+  }
+  console.log(JSON.stringify({ passed: true, sessionId: queued.sessionId, modelCalls,
+    queueTurn: queued.turn, promptTurn: prompted.turn, persistedAcrossRestart: true }));
 } catch (error) {
   if (log) {
     const tail = (await Bun.file(resolve(scratch, 'wrangler.log')).text()).slice(-5000);
