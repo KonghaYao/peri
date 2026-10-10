@@ -18,7 +18,7 @@ Emscripten 最小入口见 [`peri-wasm`](peri-wasm.md)：复用本 crate 的 `ru
 
 ## 架构速览
 
-Child 当前进程的晚到任务结果由 `session/subagent/child_runner.rs` 保留消费责任，后台与前台委派共享该 runner；bounded idle 退出不直接等价于委派成果完成。`background.rs` 对事件转发失败继续可靠发布失败终态并结算，不保留已退出 worker 的假 Running。挂起事件在 `RenderEvent` FIFO 中，与恢复后的输出保持顺序；子 Agent forwarder 不将自己的挂起投影到父 Agent。定向入口 `session::subagent::child_runner::tests`、`session::subagent::tests::bound_and_tail_cases` 与 `agent::subagent_event_forwarder`。
+Child 当前进程的晚到任务结果由 `session/subagent/child_runner.rs` 保留消费责任，后台与前台委派共享该 runner；bounded idle 退出不直接等价于委派成果完成。Child 准备自然结束但仍持有运行中的 Shell 时，runner 使 RCRA 跳过通用 bounded idle，向当前执行投递一次 Required SystemReminder，提供 Shell 任务 ID 与状态；是否等待或用 Bash 结束进程由模型决定，任务归属不转移。`background.rs` 对事件转发失败继续可靠发布失败终态并结算，不保留已退出 worker 的假 Running。挂起事件在 `RenderEvent` FIFO 中，与恢复后的输出保持顺序；子 Agent forwarder 不将自己的挂起投影到父 Agent。定向入口 `session::subagent::child_runner::tests`、`session::subagent::tests::bound_and_tail_cases` 与 `agent::subagent_event_forwarder`。
 
 后台完成回调 `session/bg_complete.rs` 使用 `TaskTerminalDelivery::accept` 同步确认当前队列接纳，成功后 TaskManager 立即结算，不再启动 detached 投递任务并保留虚假的 Completing。异步 delivery 仍由其 owner await，不能通过同步回调伪造成功；失败保留原结果供重试。回归入口 `session::bg_complete::tests`；宿主晚到激活见 ACP 代码索引。
 

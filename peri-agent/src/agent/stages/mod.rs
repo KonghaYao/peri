@@ -184,6 +184,7 @@ impl StageContext {
                 handoff_deadline: None,
                 idle_registry: None,
                 idle_suspended_flag: None,
+                hook_stop_requested: None,
             },
             goal_controller: None,
             recall_buffer: rbuf,
@@ -234,6 +235,7 @@ impl StageContext {
                 handoff_deadline: None,
                 idle_registry: None,
                 idle_suspended_flag: None,
+                hook_stop_requested: None,
             },
             goal_controller: None,
         }
@@ -519,6 +521,9 @@ pub async fn run_react_loop(context: StageContext, max_iterations: usize) -> Loo
             // Hook 显式停止意图（PostToolBatch `continue:false`）：Receive 是循环的
             // 唯一退出口；消费到停止意图直接以 Completed 结束，不再发起模型请求。
             if receive_out.stop_requested {
+                if let Some(flag) = &context.async_ctx.hook_stop_requested {
+                    flag.store(true, Ordering::Release);
+                }
                 tracing::info!(
                     consumed = receive_out.consumed_count,
                     "Receive: hook stop intent consumed; exiting run without further model request"

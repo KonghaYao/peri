@@ -25,6 +25,8 @@ pub struct AsyncContext {
     /// 注入 inbox（Prompt + wake），让挂起的 loop 立即醒来消费，而不是在
     /// per-session prompt lock 上阻塞至当前 turn 完成。
     pub idle_suspended_flag: Option<Arc<AtomicBool>>,
+    /// Child runner observes a hook's explicit stop before considering a shell reminder.
+    pub hook_stop_requested: Option<Arc<AtomicBool>>,
 }
 
 impl StageContextBuilder {
