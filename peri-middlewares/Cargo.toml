@@ -8,36 +8,31 @@ license = "Apache-2.0"
 [dependencies]
 peri-agent = { path = "../peri-agent" }
 peri-acp-types = { path = "../peri-acp-types" }
+peri-time = { path = "../peri-time" }
+peri-config = { path = "../peri-config" }
 peri-model = { path = "../peri-model" }
-peri-js-runtime = { path = "../peri-js-runtime" }
-peri-process = { path = "../peri-process" }
 anyhow.workspace = true
 async-trait.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 thiserror.workspace = true
 futures.workspace = true
-tokio = { workspace = true, features = ["process"] }
+tokio.workspace = true
 # P5.1: SubAgent stub 需要 tokio_util::sync::CancellationToken（原 v1 AgentCancellationToken 别名）。
 # 与 peri-agent 共享同一 tokio-util 依赖（feature unification 自动合并 sync feature）。
 tokio-util = { workspace = true }
 glob = "0.3"
-walkdir = "2.5"
-ignore = "0.4"
 gray_matter = "0.3"
 dirs-next.workspace = true
 serde_yaml.workspace = true
 chrono.workspace = true
 uuid.workspace = true
-croner = "3"
 tracing.workspace = true
 parking_lot.workspace = true
-fs2 = "0.4"
+fuzzy-matcher = "0.3"
 tempfile.workspace = true
-grep = "0.4"
-rmcp = { version = "3.1.4", features = [
+rmcp = { workspace = true, features = [
     "client",
-    "transport-child-process",
     "transport-streamable-http-client-reqwest",
     "auth",
 ] }
@@ -52,9 +47,9 @@ sha2.workspace = true
 image = { version = "0.25", default-features = false, features = ["png", "jpeg", "webp"] }
 base64 = { version = "0.23.1", features = ["alloc"] }
 ipnet = "2.10"
-pulldown-cmark = { version = "0.13.4", default-features = false, features = ["html"] }
 peri-resources = { path = "../peri-resources" }
-lsp-types.workspace = true
+peri-mcp-core.workspace = true
+peri-mcp-credentials.workspace = true
 cacache = { version = "13.1.0", default-features = false, features = ["tokio-runtime"] }
 
 
@@ -62,3 +57,17 @@ cacache = { version = "13.1.0", default-features = false, features = ["tokio-run
 tempfile.workspace = true
 filetime = "0.2"
 serial_test.workspace = true
+# 测试面虚拟时钟（`tokio::time::pause`）：R29 的桥层 120s 期限不真等 120 秒。
+# 与 peri-agent / peri-tui 的既有写法同形（dev-dependencies，resolver = "2" 下不进入生产构建）。
+tokio = { workspace = true, features = ["test-util"] }
+
+[target.'cfg(not(target_os = "emscripten"))'.dependencies]
+peri-mcp-common.workspace = true
+tokio = { workspace = true, features = ["full"] }
+peri-js-runtime = { path = "../peri-js-runtime" }
+peri-process = { path = "../peri-process" }
+peri-mcp-web.workspace = true
+peri-mcp-artifact.workspace = true
+peri-mcp-cron.workspace = true
+peri-mcp-workspace.workspace = true
+rmcp = { workspace = true, features = ["transport-child-process"] }

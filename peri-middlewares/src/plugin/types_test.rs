@@ -13,9 +13,7 @@ fn test_plugin_manifest_minimal() {
     assert!(manifest.skills.is_none());
     assert!(manifest.hooks.is_none());
     assert!(manifest.mcp_servers.is_none());
-    assert!(manifest.lsp_servers.is_none());
     assert!(manifest.output_styles.is_none());
-    assert!(manifest.channels.is_none());
     assert!(manifest.options.is_none());
     assert!(manifest.settings.is_none());
 }
@@ -37,9 +35,7 @@ fn test_plugin_manifest_full() {
                     "args": ["server.js"]
                 }
             },
-            "lspServers": [{"name": "test-lsp", "command": "test-lsp-binary", "args": []}],
             "outputStyles": ["compact"],
-            "channels": [{"name": "test-channel", "mcpServer": "test-server"}],
             "options": [{"name": "opt1", "description": "Option 1", "type": "string", "default": "val1"}],
             "settings": {"key": "value"}
         }"#;
@@ -59,8 +55,6 @@ fn test_plugin_manifest_full() {
         }
         McpServerEntry::FilePath(_) => panic!("expected Config variant"),
     }
-    assert_eq!(manifest.lsp_servers.as_ref().unwrap().len(), 1);
-    assert_eq!(manifest.channels.as_ref().unwrap().len(), 1);
     assert_eq!(manifest.options.as_ref().unwrap().len(), 1);
 }
 
@@ -139,10 +133,10 @@ fn test_installed_plugins_claude_code_object_format() {
     let json = r#"{
             "version": 2,
             "plugins": {
-                "typescript-lsp@claude-plugins-official": [
+                "sample-plugin@claude-plugins-official": [
                     {
                         "scope": "user",
-                        "installPath": "/Users/test/.claude/plugins/cache/claude-plugins-official/typescript-lsp/1.0.0",
+                        "installPath": "/Users/test/.claude/plugins/cache/claude-plugins-official/sample-plugin/1.0.0",
                         "version": "1.0.0",
                         "installedAt": "2026-04-03T11:48:01.555Z",
                         "gitCommitSha": "abc123"
@@ -168,12 +162,12 @@ fn test_installed_plugins_claude_code_object_format() {
     assert_eq!(plugins[0].name, "frontend-design");
     assert_eq!(plugins[0].version, "7ed523140f50");
 
-    assert_eq!(plugins[1].id, "typescript-lsp@claude-plugins-official");
-    assert_eq!(plugins[1].name, "typescript-lsp");
+    assert_eq!(plugins[1].id, "sample-plugin@claude-plugins-official");
+    assert_eq!(plugins[1].name, "sample-plugin");
     assert_eq!(plugins[1].marketplace, "claude-plugins-official");
     assert_eq!(plugins[1].version, "1.0.0");
     assert_eq!(plugins[1].scope, InstallScope::User);
-    assert!(plugins[1].install_path.ends_with("typescript-lsp/1.0.0"));
+    assert!(plugins[1].install_path.ends_with("sample-plugin/1.0.0"));
 }
 
 #[test]
@@ -276,9 +270,7 @@ fn test_plugin_manifest_serialization_roundtrip() {
         skills: Some(vec!["/skill".into()]),
         hooks: None,
         mcp_servers: None,
-        lsp_servers: None,
         output_styles: None,
-        channels: None,
         options: None,
         settings: None,
         extra: serde_json::json!({}),
@@ -451,6 +443,26 @@ fn test_plugin_manifest_unknown_field_stored_in_extra() {
     // extra 非空，含未知字段
     assert!(manifest.extra.is_object());
     assert_eq!(manifest.extra["unknownSetting"].as_str().unwrap(), "yes");
+}
+
+#[test]
+fn retired_channels_are_only_opaque_manifest_metadata() {
+    for channels in [
+        serde_json::json!([{"name": "legacy", "mcpServer": "legacy-server"}]),
+        serde_json::json!("not a channel declaration"),
+    ] {
+        let value = serde_json::json!({"name": "p", "channels": channels});
+        let manifest: PluginManifest = serde_json::from_value(value.clone()).unwrap();
+
+        assert_eq!(manifest.extra["channels"], value["channels"]);
+        assert!(manifest.mcp_servers.is_none());
+        assert!(manifest.commands.is_none());
+        assert!(manifest.hooks.is_none());
+        assert_eq!(
+            serde_json::to_value(&manifest).unwrap()["channels"],
+            value["channels"]
+        );
+    }
 }
 
 #[test]

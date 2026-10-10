@@ -1,14 +1,11 @@
 //! Public builders and parent-host fallback access for the single tool owner.
 use super::SubagentChainAssemblerImpl;
-use crate::{agent_define::AgentOverrides, hooks::types::RegisteredHook, mcp::McpAgentRegistry};
+use crate::{hooks::types::RegisteredHook, mcp::McpAgentRegistry};
 use parking_lot::RwLock;
+use peri_acp_types::agents::AgentOverrides;
 use peri_acp_types::identity::AgentId;
 use peri_agent::session::subagent::SubagentHost;
-use peri_agent::{
-    agent::{events::AgentEventHandler, react::ReactLLM},
-    messages::BaseMessage,
-    tools::BaseTool,
-};
+use peri_agent::{agent::events::AgentEventHandler, messages::BaseMessage, tools::BaseTool};
 use std::sync::Arc;
 use tokio_util::sync::CancellationToken as AgentCancellationToken;
 
@@ -17,10 +14,13 @@ impl super::SubAgentTool {
     pub fn new(
         parent_tools: Arc<Vec<Arc<dyn BaseTool>>>,
         event_handler: Option<Arc<dyn AgentEventHandler>>,
-        llm_factory: Arc<dyn Fn(Option<&str>) -> Box<dyn ReactLLM + Send + Sync> + Send + Sync>,
+        llm_factory: Arc<
+            dyn Fn(Option<&str>) -> peri_agent::session::subagent::SubagentLlmSource + Send + Sync,
+        >,
         parent_cwd: String,
     ) -> Self {
         Self {
+            inherited_tool_filter: Arc::new(|_| true),
             parent_tools,
             event_handler,
             llm_factory,
@@ -29,19 +29,23 @@ impl super::SubAgentTool {
             cancel: None,
             parent_messages: None,
             registered_hooks: Arc::new(Vec::new()),
+            lifecycle_dispatcher: Arc::new(std::sync::OnceLock::new()),
             child_handler_factory: None,
             parent_agent_id: Arc::new(RwLock::new(None)),
             parent_session: Arc::new(RwLock::new(None)),
             host: SubagentHost::default(),
-            plugin_agent_dirs: Arc::new(Vec::new()),
             mcp_agent_registry: None,
             broker: None,
-            chain_assembler: Arc::new(SubagentChainAssemblerImpl),
+            chain_assembler: Arc::new(SubagentChainAssemblerImpl::new()),
+            default_run_in_background: false,
         }
     }
 
-    pub(crate) fn with_plugin_agent_dirs(mut self, dirs: Arc<Vec<std::path::PathBuf>>) -> Self {
-        self.plugin_agent_dirs = dirs;
+    /// 注入 `run_in_background` 的有效缺省（middleware 装配参数；会话内冻结）。
+    ///
+    /// 未注入 = `false`：与 flag 引入前逐位一致。
+    pub(crate) fn with_default_run_in_background(mut self, default: bool) -> Self {
+        self.default_run_in_background = default;
         self
     }
 
@@ -52,6 +56,17 @@ impl super::SubAgentTool {
     ) -> Self {
         self.mcp_agent_registry = registry;
         self.broker = broker;
+        self
+    }
+
+    /// 注入会话级 MCP skill registry（W4b/F5）：子链的技能目录与正文只来自该
+    /// registry（`skills:` 预载按名查它；未命中=缺口，不回落磁盘）。装配器随之
+    /// 携带同一份 Arc。
+    pub(crate) fn with_mcp_skills(
+        mut self,
+        registry: Option<Arc<peri_acp_types::mcp_skills::McpSkillRegistry>>,
+    ) -> Self {
+        self.chain_assembler = Arc::new(super::SubagentChainAssemblerImpl::with_registry(registry));
         self
     }
 
@@ -132,18 +147,6 @@ impl super::SubAgentTool {
         self
     }
 
-    /// 注入本会话 root 的执行所有权（child 保存的前置证明）。
-    ///
-    /// 生产路径经 `parent_session` 的 host 携带；工具自身 host 只在测试/遗留回退里
-    /// 显式注入，且必须与 `session_resources`、`parent_thread_id` 出自同一条会话。
-    pub fn with_execution_owner(
-        mut self,
-        lease: Arc<dyn peri_acp_types::workspace::SessionExecutionLease>,
-    ) -> Self {
-        self.host.execution_owner = Some(lease);
-        self
-    }
-
     #[allow(clippy::type_complexity)]
     pub fn with_register_runtime(
         mut self,
@@ -172,23 +175,8 @@ impl super::SubAgentTool {
         self
     }
 
-    /// 注入 main agent 捕获的 frozen system prompt（fork 路径复用以避免重建）。
-    pub fn with_frozen_system_prompt(mut self, sp: Arc<String>) -> Self {
-        self.host.frozen_system_prompt = Some(sp);
-        self
-    }
-
     /// 设置 bg 完成时的同步回调（测试/遗留回退；生产路径经 parent_session 的 host）。
-    pub fn with_on_bg_complete(
-        mut self,
-        cb: Arc<
-            dyn Fn(
-                    &peri_agent::agent::events::BackgroundTaskResult,
-                    peri_agent::agent::async_tasks::BgTaskKind,
-                ) + Send
-                + Sync,
-        >,
-    ) -> Self {
+    pub fn with_on_bg_complete(mut self, cb: peri_acp_types::tasks::OnBgCompleteFn) -> Self {
         self.host.on_bg_complete = Some(cb);
         self
     }

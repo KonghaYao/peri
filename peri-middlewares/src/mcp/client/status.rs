@@ -1,34 +1,26 @@
 //! 连接状态写入、面板快照与初始化/运行中通知投影。
 
 use super::{ClientStatus, McpClientHandle, McpClientPool, OAuthStatus, ServerInfo};
+use peri_acp_types::plugin::ConfigSource;
 use std::sync::Arc;
 
-/// 供状态与日志使用的 MCP 错误文本清洗：移除 URL query，遮蔽常见凭据键值。
-/// 不应将原始底层错误链直接投影到 UI 或日志。
-pub fn redact_mcp_error(input: &str) -> String {
-    let mut output = String::with_capacity(input.len());
-    for token in input.split_whitespace() {
-        let token = if let Some((prefix, _)) = token.split_once('?') {
-            if prefix.starts_with("http://") || prefix.starts_with("https://") {
-                format!("{prefix}?…")
+/// 传输形态三分类（IF-D11）：builtin 身份来自运行时标记 `source`，其余保持既有推断。
+///
+/// 三处调用点（`server_infos` / `all_server_infos` 的 handle 行与 config-only 行）共用
+/// 本 helper：`Builtin → "builtin"`；非 builtin 时 `url.is_some() → "http"`，否则
+/// `"stdio"`——非 builtin 分支与引入本 helper 前**逐位一致**
+/// （`tests/mcp_isolation_contract.rs` 的 `"stdio"` 断言不因本改动变化）。
+fn transport_type_of(source: Option<&ConfigSource>, url: Option<&str>) -> &'static str {
+    match source {
+        Some(ConfigSource::Builtin { .. }) => "builtin",
+        _ => {
+            if url.is_some() {
+                "http"
             } else {
-                token.to_string()
+                "stdio"
             }
-        } else {
-            token.to_string()
-        };
-        let lower = token.to_ascii_lowercase();
-        if ["token=", "password=", "secret=", "api_key=", "apikey="]
-            .iter()
-            .any(|key| lower.contains(key))
-        {
-            output.push_str("[redacted]");
-        } else {
-            output.push_str(&token);
         }
-        output.push(' ');
     }
-    output.trim_end().to_string()
 }
 
 pub(super) fn mcp_status_label(status: &ClientStatus) -> &'static str {
@@ -45,7 +37,7 @@ pub(super) fn mcp_error_summary(status: &ClientStatus) -> Option<String> {
     let ClientStatus::Failed(reason) = status else {
         return None;
     };
-    let summary = redact_mcp_error(reason.lines().next().unwrap_or_default().trim());
+    let summary = reason.trim();
     let summary: String = summary.chars().take(160).collect();
     (!summary.is_empty()).then_some(summary)
 }
@@ -97,7 +89,6 @@ impl McpClientPool {
                 source,
                 url,
                 skills_capable: false,
-                channel_capable: false,
             });
             pool.advance_handle_generation(&handle);
             pool.clients.write().insert(name.to_string(), handle);
@@ -145,7 +136,6 @@ impl McpClientPool {
                 source,
                 url,
                 skills_capable: false,
-                channel_capable: false,
             });
             pool.advance_handle_generation(&handle);
             pool.clients.write().insert(name.to_string(), handle);
@@ -169,7 +159,7 @@ impl McpClientPool {
                 name: h.name.clone(),
                 version: h.version.clone(),
                 cache_version: h.cache_version.clone(),
-                transport_type: if h.url.is_some() { "http" } else { "stdio" }.to_string(),
+                transport_type: transport_type_of(h.source.as_ref(), h.url.as_deref()).to_string(),
                 status: h.status.clone(),
                 status_label: mcp_status_label(&h.status).to_string(),
                 error_summary: mcp_error_summary(&h.status),
@@ -200,7 +190,7 @@ impl McpClientPool {
                 name: h.name.clone(),
                 version: h.version.clone(),
                 cache_version: h.cache_version.clone(),
-                transport_type: if h.url.is_some() { "http" } else { "stdio" }.to_string(),
+                transport_type: transport_type_of(h.source.as_ref(), h.url.as_deref()).to_string(),
                 status: h.status.clone(),
                 status_label: mcp_status_label(&h.status).to_string(),
                 error_summary: mcp_error_summary(&h.status),
@@ -221,7 +211,8 @@ impl McpClientPool {
                     version: None,
                     cache_version: None,
                     name: name.clone(),
-                    transport_type: if sc.url.is_some() { "http" } else { "stdio" }.to_string(),
+                    transport_type: transport_type_of(sc.source.as_ref(), sc.url.as_deref())
+                        .to_string(),
                     status: ClientStatus::Uninitialized,
                     status_label: "uninitialized".to_string(),
                     error_summary: None,

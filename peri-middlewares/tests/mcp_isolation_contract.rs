@@ -17,6 +17,12 @@
 //!   wire 上使用的是该 server 的原始工具名；
 //! - **无隐式跨 MCP 调用**：调用 A 不会在 B 的 wire 上产生任何请求，也不出现二次调用。
 //!
+//! 最后一条用例（`instances_have_independent_transport_task_and_state`，I01 / §8 第 15 行）
+//! 走**另一条路径**：不做 `PERI_MCP_BUILTIN=off`，而是按生产装配步骤注入上下文后让真实
+//! builtin `cron` 连上，断言其 transport / server task / 状态对象与 stdio server 互不共享，
+//! 以及 close / reconnect / pool shutdown 的收敛面（与上面四条 stdio 用例**不同**，见其
+//! 函数文档）。
+//!
 //! # PARTIAL —— 这些断言**不能**支撑「契约 5 完成」（主 plan §8 的 PARTIAL 分级）
 //!
 //! - **凭据隔离：未验证（UNVERIFIED）**。`McpClientHandle` 没有 credential 字段，
@@ -26,9 +32,25 @@
 //! - **capability root 隔离：未验证（UNVERIFIED）**。`McpClientPool::capability_profile`
 //!   是 pool-wide 字段且非 public，`McpConnectionKey` 亦非 public，本文件无法读取或比较
 //!   它们（因此也**未**断言 capability root 不共享）。
-//! - **五个目标 MCP 未迁移**。Workspace / Artifact / Web / Cron / LSP 五个生产实例尚不存在，
-//!   本文件只覆盖「已落地连接的局部隔离」（两台 fixture），不代表契约 5 全文，也不代表
-//!   契约 2/3/4（ready gate、direct 注入、空数组语义分别由 B-07 / D-02 负责）。
+//! - **注册表内实例已实迁**。`web` / `artifact` / `cron` / `workspace` 均已
+//!   落地为真实 builtin 实例。本文件的
+//!   `instances_have_independent_transport_task_and_state` 走**真实 builtin cron**；
+//!   其余四条仍只覆盖两台 stdio fixture 的「已落地连接局部隔离」。两者都不代表契约 5
+//!   全文，也不代表契约 2/3/4（ready gate、direct 注入、空数组语义分别由 B-07 / D-02 负责）。
+//!
+//! # builtin 路径的可达面（I01 落点核查）
+//!
+//! 三个「handler 级」seam 是 `pub(crate)`，外部集成目标**不可达**：
+//! `mcp::builtin::dispatch::builtin_server_handler`、
+//! `mcp::builtin::runtime::spawn_builtin_transport_with_handler|with_context|with_tap`、
+//! `mcp::client::McpClientPool::spawn_builtin_transport`（模块 `mcp::builtin` 自身是
+//! `pub(crate) mod`，`mcp::client::transport` 是私有 `mod`）。
+//!
+//! 这**不构成缺口**：生产装配面本来就只经公开面注入 builtin 状态，因此真实 builtin
+//! cron 在本文件里可完整驱动 —— `peri_middlewares::assembly::{BuiltinInstanceContext,
+//! CronInstanceInput}` +
+//! `McpClientPool::{set_builtin_instance_context, run_initialize, reconnect, set_disabled,
+//! remove_server, shutdown}` 全部是 `pub`。本文件**未**为测试放宽任何生产符号可见性。
 
 use std::{
     collections::BTreeSet,
@@ -39,14 +61,14 @@ use std::{
 
 use peri_acp_types::ports::McpPoolPort;
 use peri_agent::tools::{BaseTool, ToolContext};
-use peri_middlewares::{
-    mcp::{
-        build_tool_bridges, ClientStatus, McpClientHandle, McpClientPool, McpInitStatus,
-        McpTaskOwner, McpToolBridge,
-    },
-    process_env::{self, EnvLockFile},
+use peri_mcp_common::process_env::{self, EnvLockFile};
+use peri_middlewares::mcp::{
+    build_tool_bridges, ClientStatus, McpClientHandle, McpClientPool, McpInitStatus, McpTaskOwner,
+    McpToolBridge,
 };
 use serde_json::{json, Map, Value};
+
+const FIXTURE_SESSION_ID: &str = "isolation-session";
 
 /// 每台 fixture server 的 stdio MCP 实现（node）：
 /// - 每个收到的 JSON-RPC 行按原样追加到**自己**的 wire 日志（`#recv <payload>`）；
@@ -134,19 +156,42 @@ fn effective_name(instance: Instance) -> String {
     format!("mcp__{}__{}", instance.server, instance.tool)
 }
 
-/// 临时 HOME：`run_initialize` 走的是生产加载路径，会读真实的 `~/.peri/settings.json`
+/// builtin 默认层注入的紧急闸门（A2）。`peri-middlewares` 内该常量是 `pub(crate)`，
+/// 集成测试侧按字面量使用；语义 = off 时**不注入**任何 builtin 实例。
+const BUILTIN_INJECTION_ENV: &str = "PERI_MCP_BUILTIN";
+
+/// 夹具 env：临时 `HOME` + `PERI_MCP_BUILTIN` 取值由夹具指定。
+///
+/// `run_initialize` 走的是生产加载路径，会读真实的 `~/.peri/settings.json`
 /// 与凭证存储；不隔离就会去启动开发者本机配置的 MCP server（可能带真实凭据）。
-/// 进程级互斥沿用仓库既有 `EnvLockFile`（`Drop` 复原 `HOME` 时仍持锁）。
+/// `PERI_MCP_BUILTIN=off` 停用 builtin 默认层注入：stdio 用例测的是两台 fixture stdio
+/// server 之间的隔离，注入 `web` / `artifact` 会让 pool 变成四台（off 语义本身由本文件
+/// 新增的 `builtin_injection_off_*` 用例断言，见 §5 R28）。builtin 用例（I01）反过来要求
+/// **缺省注入**（变量缺失 ⇒ 注入全部已实现实例），因此取值是夹具参数而不是常量。
+/// 进程级互斥沿用仓库既有 `EnvLockFile`（`Drop` 复原 env 时仍持锁）。
 struct EnvIsolation {
     _lock: EnvLockFile,
-    previous: Option<OsString>,
+    previous: Vec<(&'static str, Option<OsString>)>,
 }
 
 impl EnvIsolation {
+    /// stdio 夹具口径：`PERI_MCP_BUILTIN=off`（builtin 默认层零注入）。
     fn set(home: &Path) -> Self {
+        Self::set_with_builtin_env(home, Some("off"))
+    }
+
+    /// `builtin_env = None` ⇒ **移除**该变量（缺省语义 = 注入全部已实现 builtin 实例）。
+    fn set_with_builtin_env(home: &Path, builtin_env: Option<&str>) -> Self {
         let lock = process_env::lock().expect("process env lock");
-        let previous = std::env::var_os("HOME");
+        let previous = ["HOME", BUILTIN_INJECTION_ENV]
+            .into_iter()
+            .map(|key| (key, std::env::var_os(key)))
+            .collect();
         std::env::set_var("HOME", home);
+        match builtin_env {
+            Some(value) => std::env::set_var(BUILTIN_INJECTION_ENV, value),
+            None => std::env::remove_var(BUILTIN_INJECTION_ENV),
+        }
         Self {
             _lock: lock,
             previous,
@@ -156,9 +201,11 @@ impl EnvIsolation {
 
 impl Drop for EnvIsolation {
     fn drop(&mut self) {
-        match self.previous.take() {
-            Some(home) => std::env::set_var("HOME", home),
-            None => std::env::remove_var("HOME"),
+        for (key, value) in self.previous.drain(..) {
+            match value {
+                Some(value) => std::env::set_var(key, value),
+                None => std::env::remove_var(key),
+            }
         }
     }
 }
@@ -283,8 +330,11 @@ async fn isolation_fixture() -> IsolationFixture {
 
     let (tasks, spawner) = McpTaskOwner::new();
     let pool = Arc::new(McpClientPool::new_pending_with_spawner(spawner));
+    let manager: Arc<dyn peri_acp_types::tasks::TaskManager> =
+        Arc::new(peri_agent::agent::async_tasks::TaskManager::new());
+    pool.bind_session_task_manager(FIXTURE_SESSION_ID, &manager);
     let (status_tx, _status_rx) = tokio::sync::watch::channel(McpInitStatus::Pending);
-    McpClientPool::run_initialize(pool.clone(), &cwd, &claude_home, status_tx, None, None).await;
+    McpClientPool::run_initialize(pool.clone(), &cwd, &claude_home, status_tx, None).await;
 
     IsolationFixture {
         _dir: dir,
@@ -301,7 +351,10 @@ async fn invoke_named(bridges: &[Box<dyn BaseTool>], name: &str) -> String {
         .find(|bridge| bridge.name() == name)
         .unwrap_or_else(|| panic!("工具列表里没有 {name}"));
     bridge
-        .invoke(json!({}), ToolContext::new(&[], "."))
+        .invoke(
+            json!({}),
+            ToolContext::new(&[], ".").with_session_identity(FIXTURE_SESSION_ID, "isolation-turn"),
+        )
         .await
         .unwrap_or_else(|error| panic!("{name} 调用失败: {error}"))
 }
@@ -539,3 +592,74 @@ async fn disabling_one_instance_leaves_the_other_transport_intact() {
 
     fixture.shutdown().await;
 }
+
+/// `PERI_MCP_BUILTIN=off`（A2 的紧急闸门）在夹具侧的可观察断言：默认层**零注入**。
+///
+/// 这是 §5 R28 登记的、本文件唯一新增的断言（既有三条用例只复跑、断言一字不改）。
+/// 观察量是三个同源的公开投影：client 目录、宿主投影（面板 / `mcp/list`）与 deferred
+/// 工具目录——off 时它们都**恰为两台 fixture stdio server**，且都不含注册表里的任一
+/// builtin 实例。off 的运维语义是「没有 Web/Artifact 能力」（middleware 提供面已删除，
+/// 不存在回退到旧实现的路径）：本用例只断言能力面为零，不断言「退回到某个实现」。
+#[tokio::test]
+async fn builtin_injection_off_leaves_pool_with_exactly_the_fixture_servers() {
+    let mut fixture = isolation_fixture().await;
+
+    // 非空守卫：注册表为空会让「不含 builtin 实例」退化成永远成立的空断言。
+    let builtin_instances: Vec<&str> = peri_acp_types::builtin_mcp::BUILTIN_MCP_INSTANCES
+        .iter()
+        .map(|instance| instance.name)
+        .collect();
+    assert!(
+        !builtin_instances.is_empty(),
+        "builtin 注册表为空，本用例的「零注入」失去可证伪性"
+    );
+
+    let mut client_names: Vec<String> = fixture
+        .pool
+        .get_all_clients()
+        .iter()
+        .map(|handle| handle.name.clone())
+        .collect();
+    client_names.sort();
+    assert_eq!(
+        client_names,
+        vec![INSTANCE_A.server.to_string(), INSTANCE_B.server.to_string()],
+        "off 时 pool 恰有两台夹具 server"
+    );
+
+    let mut info_names: Vec<String> = fixture
+        .pool
+        .all_server_infos()
+        .iter()
+        .map(|info| info.name.clone())
+        .collect();
+    info_names.sort();
+    assert_eq!(
+        info_names, client_names,
+        "宿主投影（面板 / `mcp/list`）必须与 client 目录同源"
+    );
+
+    let mut bridge_names: Vec<String> = build_tool_bridges(&fixture.pool)
+        .iter()
+        .map(|bridge| bridge.name().to_string())
+        .collect();
+    bridge_names.sort();
+    assert_eq!(
+        bridge_names,
+        vec![effective_name(INSTANCE_A), effective_name(INSTANCE_B)],
+        "off 时 deferred 工具目录里不得出现任何 builtin 工具"
+    );
+
+    for instance in builtin_instances {
+        assert!(
+            !client_names.iter().any(|name| name == instance)
+                && !info_names.iter().any(|name| name == instance),
+            "off 时不得注入 builtin 实例 {instance}（零注入，不是回退到旧实现）"
+        );
+    }
+
+    fixture.shutdown().await;
+}
+
+#[path = "mcp_isolation_contract/builtin.rs"]
+mod builtin_contract;

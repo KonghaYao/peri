@@ -41,7 +41,7 @@ impl OAuthCallbackServer {
     }
 
     pub async fn wait_for_code(mut self) -> Result<(String, String), CallbackError> {
-        let result = tokio::time::timeout(
+        let result = peri_time::timeout(
             std::time::Duration::from_secs(CALLBACK_TIMEOUT_SECS),
             self.wait_inner(),
         )

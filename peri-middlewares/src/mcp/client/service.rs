@@ -1,8 +1,7 @@
 //! rmcp service 适配与连接能力声明。
 
-use crate::mcp::channel_handler::ChannelHandler;
 use rmcp::{
-    model::{ClientCapabilities, Implementation, InitializeRequestParams},
+    model::{ClientCapabilities, Implementation, InitializeRequestParams, TASKS_EXTENSION_ID},
     service::{Peer, QuitReason, RoleClient, RunningService},
 };
 use std::sync::Arc;
@@ -18,7 +17,6 @@ impl McpServiceOwner {
     pub(crate) fn new(service: McpServiceWrapper) -> Self {
         let cancellation = match &service {
             McpServiceWrapper::Default(service) => Some(service.cancellation_token()),
-            McpServiceWrapper::Channel(service) => Some(service.cancellation_token()),
             _ => None,
         };
         Self {
@@ -62,10 +60,9 @@ impl Drop for McpServiceOwner {
     }
 }
 
-/// Wrapper for RunningService that can hold either handler type
+/// Wrapper for RunningService and its close lifecycle
 pub(crate) enum McpServiceWrapper {
     Default(RunningService<RoleClient, InitializeRequestParams>),
-    Channel(RunningService<RoleClient, Arc<ChannelHandler>>),
     Closing(tokio::task::JoinHandle<Result<QuitReason, tokio::task::JoinError>>),
     Closed,
     Shared(McpServiceHandle),
@@ -149,18 +146,17 @@ impl McpServiceWrapper {
         // rmcp's timed close consumes its internal join handle before awaiting it.
         // Keep our own worker handle across timeout/cancellation so retry still waits
         // for the original protocol service and transport cleanup.
-        if matches!(self, Self::Default(_) | Self::Channel(_)) {
+        if matches!(self, Self::Default(_)) {
             let service = std::mem::replace(self, Self::Closed);
             *self = Self::Closing(tokio::spawn(async move {
                 match service {
                     Self::Default(service) => service.cancel().await,
-                    Self::Channel(service) => service.cancel().await,
                     _ => unreachable!(),
                 }
             }));
         }
         match self {
-            Self::Closing(handle) => match tokio::time::timeout(timeout, handle).await {
+            Self::Closing(handle) => match peri_time::timeout(timeout, handle).await {
                 Ok(result) => {
                     *self = Self::Closed;
                     match result {
@@ -172,7 +168,7 @@ impl McpServiceWrapper {
             },
             Self::Closed => Ok(Some(QuitReason::Closed)),
             Self::Shared(service) => Box::pin(service.owner.close_with_timeout(timeout)).await,
-            Self::Default(_) | Self::Channel(_) => unreachable!(),
+            Self::Default(_) => unreachable!(),
             #[cfg(test)]
             McpServiceWrapper::Controlled(svc) => svc.close().await,
         }
@@ -181,7 +177,6 @@ impl McpServiceWrapper {
     pub fn peer(&self) -> &Peer<RoleClient> {
         match self {
             McpServiceWrapper::Default(svc) => svc.peer(),
-            McpServiceWrapper::Channel(svc) => svc.peer(),
             McpServiceWrapper::Shared(service) => &service.peer,
             McpServiceWrapper::Closing(_) | McpServiceWrapper::Closed => {
                 panic!("closing service has no active protocol peer")
@@ -206,6 +201,7 @@ pub(crate) fn mcpp_client_info_for_profile(
     if let Some(extension) = profile.ui_extension() {
         extensions.insert(crate::mcp::apps::MCP_UI_EXTENSION.to_string(), extension);
     }
+    extensions.insert(TASKS_EXTENSION_ID.to_string(), serde_json::Map::new());
     let mut capabilities = ClientCapabilities::default();
     capabilities.extensions = Some(extensions);
     InitializeRequestParams::new(capabilities, Implementation::from_build_env())
@@ -224,7 +220,10 @@ pub(crate) fn peer_cache_version(peer: &Peer<RoleClient>) -> Option<String> {
 }
 
 /// SEP-2640 Skills 扩展标识（capabilities.extensions 键）。
-pub(crate) const SKILLS_EXTENSION_ID: &str = "io.modelcontextprotocol/skills";
+///
+/// W4b：常量的单一事实源在契约层（provider 侧在同一键上声明能力），本处只做
+/// 别名，避免两侧各写一份字符串而静默漂移。
+pub(crate) const SKILLS_EXTENSION_ID: &str = peri_acp_types::skills::SKILLS_EXTENSION_ID;
 
 /// 检测 peer 的 server capabilities 是否声明 Skills 扩展（SEP-2640）。
 ///

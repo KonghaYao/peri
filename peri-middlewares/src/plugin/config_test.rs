@@ -268,7 +268,7 @@ fn test_plugins_dir_uses_claude_home() {
 /// 断言跨平台可复现，不必等到 Windows CI。
 #[test]
 fn test_claude_home_prefers_absolute_home_env() {
-    let _process_env = crate::process_env::lock().expect("process env lock");
+    let _process_env = peri_mcp_common::process_env::lock().expect("process env lock");
     let home = tempdir().unwrap();
     let previous = std::env::var_os("HOME");
     std::env::set_var("HOME", home.path());

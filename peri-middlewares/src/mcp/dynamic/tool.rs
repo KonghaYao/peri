@@ -10,7 +10,6 @@ use peri_agent::middleware::r#trait::Middleware;
 use serde_json::{json, Value};
 
 pub const DYNAMIC_MCP_TOOL_NAME: &str = "DynamicMCP";
-
 #[derive(Debug, thiserror::Error)]
 #[error("Dynamic MCP operation failed: {0}")]
 struct DynamicMcpToolError(String);
@@ -55,10 +54,11 @@ impl Middleware for DynamicMcpMiddleware {
     }
 
     fn collect_tools(&self, _cwd: &str) -> Vec<Box<dyn BaseTool>> {
-        vec![Box::new(DynamicMcpTool::new(
+        let tool = DynamicMcpTool::new(
             self.tool.session_id.clone(),
             Arc::clone(&self.tool.deployment),
-        ))]
+        );
+        vec![Box::new(tool)]
     }
 }
 
@@ -92,11 +92,11 @@ impl BaseTool for BoundDynamicMcpTool {
             .execute(&self.session_id, self.action.clone())
             .await
             .and_then(|response| {
-                serde_json::to_string(&response).map_err(|_| {
+                serde_json::to_string(&response).map_err(|error| {
                     peri_acp_types::dynamic_mcp::DynamicMcpFailure::new(
                         peri_acp_types::dynamic_mcp::DynamicMcpErrorCode::Internal,
                         peri_acp_types::dynamic_mcp::DynamicMcpOperationState::Failed,
-                        "Dynamic MCP response serialization failed",
+                        format!("Dynamic MCP response serialization failed: {error}"),
                     )
                 })
             })
@@ -138,7 +138,6 @@ impl BaseTool for DynamicMcpTool {
         });
         let common_config = json!({
             "timeoutMs": {"type": "integer", "minimum": 1},
-            "protocolVersion": {"type": "string", "enum": ["2026-07-28"]},
             "subscriptions": subscriptions
         });
         let mut stdio_properties = common_config.as_object().unwrap().clone();

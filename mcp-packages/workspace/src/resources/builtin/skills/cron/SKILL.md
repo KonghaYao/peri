@@ -1,0 +1,70 @@
+---
+name: cron
+description: >
+  Scheduled tasks (cron). Use when the user asks for recurring, periodic, or
+  scheduled tasks — reminders, periodic reports, or anything that should run at
+  a fixed interval ("every day at 9am", "每 5 分钟", "every Monday").
+  Also use when managing existing scheduled tasks via mcp__cron__cron_list /
+  mcp__cron__cron_remove.
+userInvocable: true
+---
+
+# Scheduled Tasks (Cron)
+
+You have access to scheduled task tools (`mcp__cron__cron_register`, `mcp__cron__cron_list`, `mcp__cron__cron_remove`) for registering recurring automated tasks using standard 5-field cron expressions (`minute hour day_of_month month day_of_week`).
+
+These three tools are **deferred**: they are not in your direct tool list. Discover them with `SearchExtraTools` (e.g. search for `cron`), then invoke them by their full name with `ExecuteExtraTool`.
+
+## When to Use
+
+- The user asks for a recurring/periodic task: reminders, periodic reports, status checks, polling.
+- The user asks to manage existing scheduled tasks (list, remove).
+- The user's phrasing implies "every X", "每天/每周/每月", "at 9am daily", etc.
+
+Do NOT register a cron task just because the user mentions a time — only when they explicitly want it to repeat automatically.
+
+## Tools
+
+| Tool | Purpose |
+| --- | --- |
+| `mcp__cron__cron_register(expression, prompt)` | Register a new scheduled task. `prompt` is the user message submitted when the task fires. |
+| `mcp__cron__cron_list()` | List all registered tasks with status, next fire time, and prompt. |
+| `mcp__cron__cron_remove(id)` | Remove a task by its ID (shown by `mcp__cron__cron_list`). |
+
+If `SearchExtraTools` returns no `mcp__cron__*` tool, the built-in `cron` instance is disabled for this session (MetaHarness `CronMiddleware: false`, the `{"cron": {"disabled": true}}` config entry, or `PERI_MCP_BUILTIN=off`); tell the user instead of trying to work around it.
+
+## Cron Expression Format
+
+Standard 5-field cron expression:
+
+```
+minute hour day_of_month month day_of_week
+```
+
+Examples:
+
+- `*/5 * * * *` — every 5 minutes
+- `0 9 * * *` — every day at 09:00
+- `0 9 * * 1-5` — weekdays at 09:00
+- `30 8 1 * *` — the 1st of each month at 08:30
+
+Use `mcp__cron__cron_list` to verify the registered task and its next fire time after registering.
+
+## Safety
+
+`mcp__cron__cron_register` schedules future agent turns that fire without further user confirmation — treat it like delegating execution authority. Before registering:
+
+- Confirm the user explicitly asked for a recurring task. Do not register cron tasks speculatively or "to be helpful."
+- Prefer prompts that read or report over prompts that write, delete, commit, or run destructive commands. A cron that fires `git push --force` overnight is a footgun.
+- State the schedule and the exact prompt you are about to register, then wait for confirmation if there is any ambiguity.
+- Avoid tight intervals (e.g. `* * * * *`) unless the user asked for them — they burn tokens fast and can flood the session.
+
+In approval mode, `mcp__cron__cron_register` always prompts the user before registering (`mcp__cron__cron_list` and `mcp__cron__cron_remove` do not require approval).
+
+If a call fails, the returned text names the tool and preserves its actual diagnostic, including expression or path details when present. Use the diagnostic and any recovery guidance to correct the input before retrying.
+
+## Workflow
+
+1. Confirm the user wants a recurring task, and pin down the schedule + what the prompt should do.
+2. Translate the schedule into a 5-field cron expression.
+3. Call `mcp__cron__cron_register`, then `mcp__cron__cron_list` to confirm the task and its next fire time.

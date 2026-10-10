@@ -35,7 +35,7 @@ fn resolve_extra_tool_target(
             tool: EXECUTE_EXTRA_TOOL_NAME.to_string(),
             reason,
         })?;
-    let target = DirectToolInvocationResolver.resolve_target(&target_name, tools)?;
+    let target = DirectToolInvocationResolver.resolve_model_target(&target_name, tools)?;
     let normalized = peri_agent::tools::normalize_params(params, Some(target.as_ref()));
     Ok((target, normalized))
 }
@@ -47,7 +47,10 @@ impl ToolInvocationResolver for ExecuteExtraToolResolver {
         tools: &BTreeMap<String, Arc<dyn BaseTool>>,
     ) -> AgentResult<CanonicalToolInvocation> {
         let outer = self.direct.resolve(raw_call, tools)?;
-        if outer.target.name() != EXECUTE_EXTRA_TOOL_NAME {
+        if outer.target.name() != EXECUTE_EXTRA_TOOL_NAME
+            || outer.target.mcp_server_name().is_some()
+            || outer.target.namespace() != Some("meta")
+        {
             return Ok(outer);
         }
 

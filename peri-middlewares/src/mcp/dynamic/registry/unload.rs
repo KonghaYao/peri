@@ -156,7 +156,7 @@ impl DynamicMcpRegistry {
             .filter(|entry| entry.instance == instance)
             .and_then(|entry| entry.active.clone());
         let result = if let Some(active) = &active {
-            match tokio::time::timeout(self.drain_timeout, active.gate.drain()).await {
+            match peri_time::timeout(self.drain_timeout, active.gate.drain()).await {
                 Ok(()) => active.close().await,
                 Err(_) => Err(Self::failure(
                     DynamicMcpErrorCode::ShutdownIncomplete,

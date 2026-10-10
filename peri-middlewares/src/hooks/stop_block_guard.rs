@@ -49,9 +49,11 @@ impl StopBlockGuard {
             *count = 0;
             return GuardDecision::ForceFinish;
         }
+        // 只记录次数与字节数：Block 正文会作为 system-reminder 反馈给模型，
+        // 但不属于诊断日志内容。
         tracing::info!(
             count = *count,
-            reason = %reason,
+            reason_bytes = reason.len(),
             "Stop hook blocked: injecting reason as system-reminder (Human) and continuing"
         );
         GuardDecision::Block {
@@ -77,6 +79,10 @@ impl Default for StopBlockGuard {
     }
 }
 
+#[cfg(test)]
+#[path = "stop_block_guard_test.rs"]
+mod tests;
+
 /// 构造 Stop hook block 的反馈正文。
 ///
 /// canonical envelope 由 middleware producer 构造；本状态机仅负责正文，不接触 state。
@@ -85,4 +91,23 @@ pub fn format_stop_block_feedback_no_wrapper(reason: &str, count: u32) -> String
         "<stop_hook_feedback>\nThe Stop hook blocked because: {}\nPlease address this feedback and continue your work.\n(Block {}/8)\n</stop_hook_feedback>",
         reason, count
     )
+}
+
+/// 构造 PostToolBatch hook block 的反馈正文（工具结果已提交，反馈用于修正）。
+pub fn format_post_tool_batch_feedback_no_wrapper(reason: &str, count: u32) -> String {
+    format!(
+        "<post_tool_batch_hook_feedback>\nThe PostToolBatch hook blocked because: {}\nThe tool results above are already committed; address this feedback before continuing.\n(Block {}/8)\n</post_tool_batch_hook_feedback>",
+        reason, count
+    )
+}
+
+/// 构造 PostToolBatch `continue:false` 的停止意图正文（客户端可诊断，不进模型）。
+pub fn format_post_tool_batch_stop_intent(stop_reason: Option<&str>) -> String {
+    match stop_reason {
+        Some(reason) => format!(
+            "<post_tool_batch_hook_stop>\nThe PostToolBatch hook stopped this run: {reason}\n</post_tool_batch_hook_stop>"
+        ),
+        None => "<post_tool_batch_hook_stop>\nThe PostToolBatch hook stopped this run.\n</post_tool_batch_hook_stop>"
+            .to_string(),
+    }
 }

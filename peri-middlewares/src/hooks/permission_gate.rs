@@ -12,6 +12,7 @@
 //! - Default: 敏感工具始终弹窗
 
 use crate::permission::PermissionMode;
+use peri_agent::middleware::capabilities::BoundToolOrigin;
 
 /// 判断当前权限模式下，给定工具是否会触发权限对话框。
 ///
@@ -43,9 +44,27 @@ pub fn should_fire_permission_request(
     tool_name: &str,
     requires_approval: fn(&str) -> bool,
 ) -> bool {
-    let is_sensitive = requires_approval(tool_name);
+    should_fire_permission_request_for_origin(mode, tool_name, requires_approval, None)
+}
+
+/// Bound source prevents a raw external MCP tool from inheriting builtin approval exemptions.
+pub fn should_fire_permission_request_for_origin(
+    mode: PermissionMode,
+    tool_name: &str,
+    requires_approval: fn(&str) -> bool,
+    origin: Option<&BoundToolOrigin>,
+) -> bool {
+    let external = crate::permission::is_external_mcp(origin);
+    let is_sensitive = external || requires_approval(tool_name);
     if !is_sensitive {
         return false;
     }
+    if external && mode == PermissionMode::AcceptEdit {
+        return true;
+    }
     needs_permission_dialog(mode, tool_name)
 }
+
+#[cfg(test)]
+#[path = "permission_gate_test.rs"]
+mod tests;

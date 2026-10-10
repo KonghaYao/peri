@@ -10,6 +10,7 @@ fn make_registered(event: HookEvent, hook: HookType) -> RegisteredHook {
         matcher: None,
         plugin_name: "test-plugin".to_string(),
         plugin_id: "test-plugin-id".to_string(),
+        plugin_source: None,
         plugin_root: PathBuf::from("/tmp/test-plugin"),
         plugin_data_dir: PathBuf::from("/tmp/test-plugin-data"),
         plugin_options: HashMap::new(),
@@ -533,44 +534,54 @@ async fn test_permission_request_fires_in_default_mode() {
 #[cfg(unix)]
 #[tokio::test]
 async fn test_async_hook_receives_correct_event_name() {
-    let marker_path = "/tmp/peri_async_hook_event_marker";
-    let _ = std::fs::remove_file(marker_path);
-
-    // Hook that writes hook_event_name from stdin JSON to a file
-    let marker = marker_path.to_string();
+    let directory = tempfile::tempdir().unwrap();
+    let marker_path = directory.path().join("hook-input.json");
+    let pending_path = directory.path().join("hook-input.pending");
     let hook: HookType = serde_json::from_value(serde_json::json!({
-            "type": "command",
-            "command": format!("python3 -c \"import json,sys; d=json.load(sys.stdin); open('{}','w').write(d['hook_event_name'])\"", marker),
-            "async": true
-        }))
-        .unwrap();
+        "type": "command",
+        "command": format!(
+            "cat > '{}' && mv '{}' '{}'",
+            pending_path.display(), pending_path.display(), marker_path.display()
+        ),
+        "async": true
+    }))
+    .unwrap();
 
     let registered = make_registered(HookEvent::PermissionRequest, hook);
     let mw = make_middleware_hitl(vec![registered]);
 
     let tool_call = ToolCall::new("c1", "Write", serde_json::json!({"path": "/tmp/test"}));
 
-    let _ = mw
+    let result = mw
         .before_tool(
             &mut peri_agent::agent::state::AgentState::new(std::env::temp_dir().to_str().unwrap()),
             &tool_call,
         )
         .await;
+    assert!(
+        result.is_ok(),
+        "Async hook must not reject the tool: {result:?}"
+    );
 
-    tokio::time::sleep(std::time::Duration::from_millis(1000)).await;
+    let completed = tokio::time::timeout(std::time::Duration::from_secs(5), async {
+        while !marker_path.exists() {
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+    })
+    .await;
 
     assert!(
-        std::path::Path::new(marker_path).exists(),
+        completed.is_ok() && marker_path.exists(),
         "Async hook should have created marker file"
     );
-    let content = std::fs::read_to_string(marker_path).unwrap_or_default();
+    let received: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string(&marker_path).unwrap()).unwrap();
+    let content = received["hook_event_name"].as_str().unwrap();
     assert_eq!(
         content, "PermissionRequest",
         "hook_event_name should be PermissionRequest, got: {}",
         content
     );
-
-    let _ = std::fs::remove_file(marker_path);
 }
 
 /// Verify PermissionRequest does NOT fire in Bypass (YOLO) mode,
@@ -771,7 +782,7 @@ async fn test_post_tool_batch_block_stops() {
     let hook = make_registered(
         HookEvent::PostToolBatch,
         HookType::Command {
-            command: "echo '{\"action\": \"block\", \"reason\": \"test block\"}' && exit 2"
+            command: "echo '{\"action\": \"block\", \"reason\": \"test block\"}'; exit 2"
                 .to_string(),
             shell: None,
             timeout: Some(1000),
@@ -802,13 +813,14 @@ async fn test_post_tool_batch_block_stops() {
 
 #[tokio::test]
 async fn test_stop_block_continue_sets_block_continue_field() {
-    use peri_agent::agent::state::AgentState;
+    use peri_agent::agent::{agent_context::AgentContext, stages::StageContext};
+    use peri_agent::session::{FrozenContext, Session};
 
     // Hook that returns Block via exit code 2
     let hook = make_registered(
         HookEvent::Stop,
         HookType::Command {
-            command: "echo '{\"action\": \"block\", \"reason\": \"needs more work\"}' && exit 2"
+            command: "echo '{\"action\": \"block\", \"reason\": \"needs more work\"}'; exit 2"
                 .to_string(),
             shell: None,
             timeout: Some(1000),
@@ -822,48 +834,78 @@ async fn test_stop_block_continue_sets_block_continue_field() {
     );
     let mw = make_middleware(vec![hook]);
 
-    let mut state = AgentState::new(std::env::temp_dir().to_str().unwrap());
-    state.add_message(peri_agent::messages::BaseMessage::human("test"));
+    let session = Session::new(
+        std::sync::Arc::from(std::env::temp_dir().to_str().unwrap()),
+        FrozenContext::builder().build(),
+        None,
+    );
+    let context = StageContext::builder(
+        session.start_turn(),
+        session.transcript(),
+        session.queue().clone(),
+    )
+    .build();
+    let execution = context.session.turn.execution_binding();
+    let mut state = AgentContext::from_stage(&context);
 
     let output = peri_agent::agent::react::AgentOutput::new("done", 3);
 
-    let result = mw.after_agent(&mut state, &output).await;
-    match result {
-        Ok(o) => {
-            // If command exits with 2, block_continue should be set
-            // If command exits 0 (Allow), block_continue should be None
-            // Either outcome is valid depending on the hook executor behavior
-            if o.block_continue.is_some() {
-                // Stop hook block → 应通过 v2 queue push 1 条 Defer（StopHookFeedback）
-                let drained = state.v2_queue().drain_all();
-                assert_eq!(
-                    drained.len(),
-                    1,
-                    "stop block 应 push 1 条 StopHookFeedback Defer 消息"
-                );
-                assert_eq!(drained[0].kind, peri_agent::session::MessageKind::Defer);
-                let reminder = match &drained[0].payload {
-                    peri_agent::session::QueuedPayload::SystemReminder(reminder) => {
-                        reminder.as_reminder()
-                    }
-                    other => panic!("expected canonical reminder, got {other:?}"),
-                };
-                assert_eq!(
-                    reminder.category,
-                    peri_acp_types::system_reminder::ReminderCategory::Guidance
-                );
-                assert_eq!(reminder.source.0, "hook");
-                assert_eq!(reminder.kind, "stop_blocked");
-                assert_eq!(
-                    reminder.delivery,
-                    peri_acp_types::system_reminder::ReminderDelivery::Required
-                );
-            }
-        }
-        Err(_) => {
-            // PreventContinuation is also valid
-        }
-    }
+    let result = mw.after_agent(&mut state, &output).await.unwrap();
+    assert!(result.block_continue.is_some());
+    assert!(session.queue().has_required_for_run(&execution));
+    assert!(!session.queue().has_ensure_processing());
+    let drained = session.queue().drain_all();
+    assert_eq!(drained.len(), 1);
+    assert_eq!(drained[0].kind, peri_agent::session::MessageKind::Defer);
+    assert_eq!(
+        drained[0].policy,
+        peri_acp_types::session::MessagePolicy::continue_current_run(execution)
+    );
+    let reminder = match &drained[0].payload {
+        peri_agent::session::QueuedPayload::SystemReminder(reminder) => reminder.as_reminder(),
+        other => panic!("expected canonical reminder, got {other:?}"),
+    };
+    assert_eq!(
+        reminder.category,
+        peri_acp_types::system_reminder::ReminderCategory::Guidance
+    );
+    assert_eq!(reminder.source.0, "hook");
+    assert_eq!(reminder.kind, "stop_blocked");
+    assert_eq!(
+        reminder.delivery,
+        peri_acp_types::system_reminder::ReminderDelivery::Required
+    );
+}
+
+#[tokio::test]
+async fn stop_block_without_execution_identity_is_rejected() {
+    let hook = make_registered(
+        HookEvent::Stop,
+        HookType::Command {
+            command: "echo '{\"action\": \"block\", \"reason\": \"needs more work\"}'; exit 2"
+                .into(),
+            shell: None,
+            timeout: Some(1000),
+            status_message: None,
+            once: false,
+            async_run: false,
+            async_rewake: false,
+            matcher: None,
+            condition: None,
+        },
+    );
+    let mw = make_middleware(vec![hook]);
+    let mut state = peri_agent::agent::state::AgentState::new("/tmp");
+    let result = mw
+        .after_agent(
+            &mut state,
+            &peri_agent::agent::react::AgentOutput::new("done", 1),
+        )
+        .await;
+    assert!(
+        matches!(result, Err(AgentError::MiddlewareError { reason, .. }) if reason.contains("execution binding"))
+    );
+    assert!(state.v2_queue().is_empty());
 }
 
 #[tokio::test]
@@ -909,7 +951,7 @@ async fn test_stop_block_prevent_continuation_returns_error() {
     let hook = make_registered(
         HookEvent::Stop,
         HookType::Command {
-            command: "echo '{\"action\": \"prevent_continuation\", \"stop_reason\": \"bad output\"}' && exit 3"
+            command: "echo '{\"action\": \"prevent_continuation\", \"stop_reason\": \"bad output\"}'; exit 3"
                 .to_string(),
             shell: None,
             timeout: Some(1000),
@@ -945,3 +987,6 @@ async fn test_stop_block_prevent_continuation_returns_error() {
         }
     }
 }
+
+#[path = "pretooluse_ask_test.rs"]
+mod pretooluse_ask_test;

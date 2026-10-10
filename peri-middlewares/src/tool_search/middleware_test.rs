@@ -13,7 +13,10 @@ struct MockTool {
     name_str: String,
     desc_str: String,
     direct: bool,
+    model_visible: bool,
     decl: Option<String>,
+    mcp_source: Option<&'static str>,
+    namespace: Option<&'static str>,
 }
 
 impl MockTool {
@@ -22,7 +25,10 @@ impl MockTool {
             name_str: name.to_string(),
             desc_str: desc.to_string(),
             direct: false,
+            model_visible: true,
             decl: None,
+            mcp_source: None,
+            namespace: None,
         }
     }
 
@@ -32,9 +38,25 @@ impl MockTool {
         self
     }
 
+    /// app-only：宿主可调用（dispatch/HITL 面不变），但不得投影给模型。
+    fn with_model_invisible(mut self) -> Self {
+        self.model_visible = false;
+        self
+    }
+
     /// 声明提示词层模板（design v2 §2.5.1 prompt_declaration）。
     fn with_prompt_declaration(mut self, declaration: &str) -> Self {
         self.decl = Some(declaration.to_string());
+        self
+    }
+
+    fn with_mcp_source(mut self, server: &'static str) -> Self {
+        self.mcp_source = Some(server);
+        self
+    }
+
+    fn with_namespace(mut self, namespace: &'static str) -> Self {
+        self.namespace = Some(namespace);
         self
     }
 }
@@ -52,6 +74,15 @@ impl BaseTool for MockTool {
     }
     fn is_direct(&self) -> bool {
         self.direct
+    }
+    fn visible_to_model(&self) -> bool {
+        self.model_visible
+    }
+    fn mcp_server_name(&self) -> Option<&str> {
+        self.mcp_source
+    }
+    fn namespace(&self) -> Option<&str> {
+        self.namespace
     }
     fn prompt_declaration(&self) -> Option<String> {
         self.decl.clone()
@@ -227,9 +258,49 @@ impl peri_agent::middleware::state::MiddlewareState for LocalToolsState {
     }
 }
 
+#[tokio::test]
+async fn external_mcp_meta_name_winners_survive_catalog_rebinds() {
+    let index = Arc::new(ToolSearchIndex::new());
+    let shared = Arc::new(RwLock::new(BTreeMap::new()));
+    let middleware = ToolSearchMiddleware::new(index, shared);
+    let external = ["SearchExtraTools", "ExecuteExtraTool"]
+        .into_iter()
+        .map(|name| {
+            let tool: Arc<dyn BaseTool> = Arc::new(
+                MockTool::new(name, "external system tool")
+                    .with_direct()
+                    .with_mcp_source("system-server")
+                    .with_namespace("meta"),
+            );
+            (name.to_string(), tool)
+        })
+        .collect::<BTreeMap<_, _>>();
+    let local: peri_agent::agent::stages::SharedToolMap = Arc::new(RwLock::new(external.clone()));
+
+    middleware
+        .before_agent(&mut LocalToolsState::new(Arc::clone(&local)))
+        .await
+        .unwrap();
+    middleware
+        .before_reason_catalog(&mut LocalToolsState::new(Arc::clone(&local)))
+        .await
+        .unwrap();
+
+    let current = local.read();
+    for (name, original) in external {
+        let winner = current.get(&name).unwrap();
+        assert!(
+            Arc::ptr_eq(winner, &original),
+            "{name} must keep the first winner"
+        );
+        assert_eq!(winner.mcp_server_name(), Some("system-server"));
+    }
+}
+
 /// [回归测试] 生产路径：宿主级 shared_tools 恒为空（写入点归零），deferred
 /// 工具经 `MiddlewareState::local_tools`（每 turn 本地视图）注入，before_agent
-/// 必须据此构建索引（issue 2026-08-15-workflow-deferred-tool-missing）。
+/// 必须据此构建索引（issue 2026-08-15-workflow-deferred-tool-missing，已归档至
+/// `spec/history/2026-08.md`）。
 #[tokio::test]
 async fn test_before_agent_builds_index_from_local_tools_when_shared_empty() {
     let index = Arc::new(ToolSearchIndex::new());
@@ -300,16 +371,7 @@ async fn reason_refresh_rebinds_search_and_execute_to_same_dynamic_catalog() {
         },
         ports::SessionMcpCapabilityPort,
     };
-    use peri_agent::{
-        agent::{
-            react::{ReactLLM, Reasoning, StreamingContext},
-            stages::{reason::run_reason, ReasonInput, StageContext},
-        },
-        messages::BaseMessage,
-        middleware::chain::MiddlewareChain,
-        session::{store::FrozenContext, tool_catalog::SessionToolCatalog, Session},
-        tools::ToolContext,
-    };
+    use peri_agent::{session::tool_catalog::SessionToolCatalog, tools::ToolContext};
 
     struct MutableCapability(RwLock<Arc<SessionMcpCapabilitySnapshot>>);
     impl SessionMcpCapabilityPort for MutableCapability {
@@ -318,18 +380,15 @@ async fn reason_refresh_rebinds_search_and_execute_to_same_dynamic_catalog() {
         }
     }
 
+    #[derive(Clone)]
     struct CatalogObservingLlm {
         search_result: Arc<StdRwLock<Option<String>>>,
         execute_result: Arc<StdRwLock<Option<String>>>,
     }
-    #[async_trait]
-    impl ReactLLM for CatalogObservingLlm {
-        async fn generate_reasoning(
-            &self,
-            _messages: &[BaseMessage],
-            tools: &[&dyn BaseTool],
-            _streaming: Option<StreamingContext>,
-        ) -> peri_agent::error::AgentResult<Reasoning> {
+
+    impl CatalogObservingLlm {
+        /// 测试直驱入口：用真实工具实例调用中间件注册的两个元工具。
+        async fn run(&self, tools: &[&dyn BaseTool]) {
             let search = tools
                 .iter()
                 .find(|tool| tool.name() == "SearchExtraTools")
@@ -357,7 +416,29 @@ async fn reason_refresh_rebinds_search_and_execute_to_same_dynamic_catalog() {
                     .await
                     .unwrap(),
             );
-            Ok(Reasoning::with_answer("", "done"))
+        }
+    }
+
+    // 本夹具只在测试内直驱（`run`）；不参与子链模型装配。
+    #[async_trait]
+    impl peri_model::Model for CatalogObservingLlm {
+        fn capabilities(&self) -> peri_model::ModelCapabilities {
+            peri_model::ModelCapabilities::default()
+        }
+
+        fn prepare_stream(
+            &self,
+            _request: peri_model::ModelRequest,
+        ) -> peri_model::ModelResult<peri_model::PreparedModelCall> {
+            unimplemented!("本夹具只在测试内直驱")
+        }
+
+        async fn stream(
+            &self,
+            _request: peri_model::ModelRequest,
+            _cancellation: tokio_util::sync::CancellationToken,
+        ) -> peri_model::ModelResult<peri_model::ModelStream> {
+            unimplemented!("本夹具只在测试内直驱")
         }
     }
 
@@ -414,29 +495,20 @@ async fn reason_refresh_rebinds_search_and_execute_to_same_dynamic_catalog() {
 
     let search_result = Arc::new(StdRwLock::new(None));
     let execute_result = Arc::new(StdRwLock::new(None));
-    let mut chain = MiddlewareChain::new();
-    chain.add(Box::new(middleware));
-    let session = Session::new(Arc::from("/tmp"), FrozenContext::builder().build(), None);
-    let context = StageContext::builder(
-        session.start_turn(),
-        session.transcript(),
-        session.queue().clone(),
-    )
-    .with_tools(working)
-    .with_tool_catalog(catalog)
-    .with_middleware_chain(Arc::new(chain))
-    .with_llm(Arc::new(CatalogObservingLlm {
+    let snapshot = catalog.refresh().unwrap();
+    *working.write() = snapshot.tool_map();
+    middleware
+        .before_reason_catalog(&mut LocalToolsState::new(Arc::clone(&working)))
+        .await
+        .unwrap();
+    let model = CatalogObservingLlm {
         search_result: Arc::clone(&search_result),
         execute_result: Arc::clone(&execute_result),
-    }))
-    .build();
-
-    run_reason(ReasonInput {
-        context,
-        has_tool_calls: false,
-    })
-    .await
-    .unwrap();
+    };
+    let tools: Vec<_> = working.read().values().cloned().collect();
+    model
+        .run(&tools.iter().map(|tool| tool.as_ref()).collect::<Vec<_>>())
+        .await;
 
     let search_result = search_result.read().unwrap().clone().unwrap();
     assert!(search_result.contains("mcp__echo__echo"), "{search_result}");
@@ -599,5 +671,114 @@ async fn test_before_agent_no_declarations_without_prompt_declaration() {
     assert!(
         !contribution.contains("Read a file"),
         "未声明工具不得出现在声明段"
+    );
+}
+
+/// [回归测试] H5：`visible_to_model() == false`（app-only）的工具不得进入
+/// 任何模型面投影——deferred 索引 / deferred 列表 / direct 声明段 / 元工具描述。
+///
+/// 历史背景：direct 面已按 `is_direct() && visible_to_model()` 排除，但
+/// ToolSearch 索引与元工具描述只按 `is_direct()` 分界，server 声明的
+/// 「仅 app 可用」能力仍可被检索并执行（`tool_search/middleware.rs`）。
+/// app-only 工具在宿主注册表中保持可派发（App 合法调用路径不由本修复改变），
+/// 本用例只锁模型面不可见。
+#[tokio::test]
+async fn app_only_tools_are_absent_from_index_lists_and_declarations() {
+    let index = Arc::new(ToolSearchIndex::new());
+    let mut shared = BTreeMap::new();
+    // app-only deferred：索引与 deferred 列表都必须看不到。
+    shared.insert(
+        "AppOnlyDeferred".to_string(),
+        Arc::new(
+            MockTool::new("AppOnlyDeferred", "app only deferred capability").with_model_invisible(),
+        ) as Arc<dyn BaseTool>,
+    );
+    // app-only direct：direct 名单与声明段都必须看不到。
+    shared.insert(
+        "AppOnlyDirect".to_string(),
+        Arc::new(
+            MockTool::new("AppOnlyDirect", "app only direct capability")
+                .with_direct()
+                .with_model_invisible()
+                .with_prompt_declaration("app-only-directive {{name}} AppOnlyDirectMarker"),
+        ) as Arc<dyn BaseTool>,
+    );
+    // 正向对照：模型可见的 deferred / direct 必须照旧出现。
+    shared.insert(
+        "VisibleDeferred".to_string(),
+        Arc::new(MockTool::new("VisibleDeferred", "model visible deferred")) as Arc<dyn BaseTool>,
+    );
+    shared.insert(
+        "VisibleDirect".to_string(),
+        Arc::new(
+            MockTool::new("VisibleDirect", "model visible direct")
+                .with_direct()
+                .with_prompt_declaration("visible-directive {{name}} VisibleDirectMarker"),
+        ) as Arc<dyn BaseTool>,
+    );
+    let shared = Arc::new(RwLock::new(shared));
+    let mw = ToolSearchMiddleware::new(Arc::clone(&index), Arc::clone(&shared));
+    // 生产顺序：宿主先 merge `collect_tools` 的 meta 工具，再在 rebind 时替换。
+    for tool in <ToolSearchMiddleware as Middleware>::collect_tools(&mw, "/tmp") {
+        let name = tool.name().to_string();
+        shared.write().insert(name, Arc::from(tool));
+    }
+
+    let mut state = peri_agent::agent::state::AgentState::new("/tmp");
+    mw.before_agent(&mut state).await.unwrap();
+
+    // 1) 检索投影：精确名（select:）不得命中 app-only 工具；关键词查询即使
+    // 匹配其描述/正文也不得返回（关键词面按分数排序返回候选，不保证空集）。
+    for query in ["select:AppOnlyDeferred", "select:AppOnlyDirect"] {
+        assert!(
+            index.search(query, 10).is_empty(),
+            "app-only 工具不得进入检索投影（query={query}）"
+        );
+    }
+    let keyword_hits: Vec<String> = index
+        .search("app only capability", 10)
+        .into_iter()
+        .map(|result| result.name)
+        .collect();
+    assert!(
+        !keyword_hits
+            .iter()
+            .any(|name| name == "AppOnlyDeferred" || name == "AppOnlyDirect"),
+        "关键词检索不得返回 app-only 工具: {keyword_hits:?}"
+    );
+    assert_eq!(
+        index.search("select:VisibleDeferred", 10).len(),
+        1,
+        "模型可见的 deferred 工具必须保持可检索（正向用例）"
+    );
+
+    // 2) deferred 列表与 direct 声明段：app-only 名字一律不出现。
+    let prompt = contribution(&mw).expect("模型可见工具存在时必须有贡献");
+    assert!(
+        prompt.contains("VisibleDeferred") && prompt.contains("VisibleDirectMarker"),
+        "正向对照工具必须仍在投影内: {prompt}"
+    );
+    for hidden in ["AppOnlyDeferred", "AppOnlyDirectMarker"] {
+        assert!(
+            !prompt.contains(hidden),
+            "app-only 工具 {hidden} 不得出现在模型面投影: {prompt}"
+        );
+    }
+
+    // 3) 元工具描述：direct 工具清单只含模型可见项。
+    let search_description = shared.read()["SearchExtraTools"].description().to_string();
+    assert!(
+        search_description.contains("VisibleDirect"),
+        "模型可见 direct 工具应出现在 SearchExtraTools 描述: {search_description}"
+    );
+    assert!(
+        !search_description.contains("AppOnlyDirect"),
+        "app-only direct 工具不得出现在元工具描述: {search_description}"
+    );
+
+    // 4) app-only 工具仍在宿主注册表内（App 合法调用路径不被本修复删除）。
+    assert!(
+        shared.read().contains_key("AppOnlyDeferred"),
+        "app-only 工具必须保留在共享注册表中，不得从底层注册删除"
     );
 }

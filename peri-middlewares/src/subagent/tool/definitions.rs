@@ -1,28 +1,39 @@
-//! Definition source precedence, local parsing and parent tool policy.
-use crate::{
-    agent_define::{AgentDefineMiddleware, AgentOverrides},
-    claude_agent_parser::{parse_agent_file, ClaudeAgent, ToolsValue},
-    subagent::built_in_agents::get_built_in_agent,
-};
+//! Agent 定义来源解析（W5：唯一来源是 MCP `resources/read`）、本地解析与父工具策略。
+//!
+//! 迁移事实（plan §6.2 / §8.1 W5）：
+//! - 本地三来源（project / plugin / builtin）不再由宿主读盘或读嵌入表——定义
+//!   正文经 builtin `workspace` 实例的 `agent://{scope}/{id}/agent.md`
+//!   `resources/read` 取得，registry 按 E13 优先级（project → builtin → plugin）
+//!   选择条目；
+//! - 远端 `mcp__{server}__{id}` 保持既有激活 + 内容绑定批准路径；
+//! - `skills` 不再整体清空（§6.2）：条目原样留在 frontmatter，由统一 Skill
+//!   activation 逐项解析/校验（见 `subagent::skill_preload`），agent 的批准不
+//!   覆盖 skill；
+//! - builtin 开关（`built_in_subagents_enabled`）语义与迁移前逐位一致：
+//!   新建/后台路径遵守父会话冻结 policy，resume 路径允许恢复既有 builtin 定义。
+use fuzzy_matcher::{skim::SkimMatcherV2, FuzzyMatcher};
+use peri_acp_types::agents::AgentOverrides;
 use peri_agent::tools::BaseTool;
-use std::{collections::BTreeSet, path::Path};
+use peri_mcp_core::agent_definition::{ClaudeAgent, ToolsValue};
+use std::collections::BTreeSet;
 
 impl super::SubAgentTool {
-    pub(crate) fn load_agent_def(&self, agent_id: &str, cwd: &str) -> Result<ClaudeAgent, String> {
-        self.load_agent_def_with_built_ins(agent_id, cwd, self.built_in_subagents_enabled())
+    /// 新建/后台路径：builtin 来源按父会话冻结 policy 过滤。
+    pub(crate) async fn load_agent_def(&self, agent_id: &str) -> Result<ClaudeAgent, String> {
+        self.load_agent_def_with_built_ins(agent_id, self.built_in_subagents_enabled())
+            .await
     }
 
     /// Resume 已有 thread 时允许恢复其原 built-in definition；新建路径遵守
     /// 父 session 冻结的 MetaHarness policy。
-    pub(crate) fn load_agent_def_for_resume(
+    pub(crate) async fn load_agent_def_for_resume(
         &self,
         agent_id: &str,
-        cwd: &str,
     ) -> Result<ClaudeAgent, String> {
-        self.load_agent_def_with_built_ins(agent_id, cwd, true)
+        self.load_agent_def_with_built_ins(agent_id, true).await
     }
 
-    fn built_in_subagents_enabled(&self) -> bool {
+    pub(crate) fn built_in_subagents_enabled(&self) -> bool {
         self.parent_session
             .read()
             .as_ref()
@@ -36,81 +47,45 @@ impl super::SubAgentTool {
             .unwrap_or(true)
     }
 
-    fn load_agent_def_with_built_ins(
+    async fn load_agent_def_with_built_ins(
         &self,
         agent_id: &str,
-        cwd: &str,
         include_built_ins: bool,
     ) -> Result<ClaudeAgent, String> {
-        if agent_id.starts_with("mcp__") {
-            return self
-                .mcp_agent_registry
-                .as_ref()
-                .and_then(|registry| registry.cached(agent_id))
-                .map(|activated| activated.definition)
-                .ok_or_else(|| {
-                    format!(
-                        "Error: MCP agent definition '{}' is not activated in this session",
-                        agent_id
-                    )
-                });
-        }
-
-        let project_candidates = AgentDefineMiddleware::candidate_paths(cwd, agent_id);
-        if project_candidates.is_empty() {
-            return Err(format!("Error: invalid agent definition ID '{}'", agent_id));
-        }
-        let agent_path = project_candidates.into_iter().find(|p| p.is_file());
-
-        if let Some(path) = agent_path {
-            return read_definition(&path);
-        }
-
-        if include_built_ins {
-            if let Some(built_in) = get_built_in_agent(agent_id) {
-                return parse_agent_file(built_in.content).ok_or_else(|| {
-                    format!(
-                        "Error: failed to parse built-in agent definition '{}'",
-                        agent_id
-                    )
-                });
-            }
-        }
-
-        for dir in self.plugin_agent_dirs.iter() {
-            let candidates = [
-                dir.join(format!("{agent_id}.md")),
-                dir.join(agent_id).join("agent.md"),
-            ];
-            if let Some(path) = candidates.into_iter().find(|path| path.is_file()) {
-                return read_definition(&path);
-            }
-        }
-
-        Err(format!(
-            "Error: cannot find agent definition '{}'. Check .claude/agents/ directory{}",
-            agent_id,
-            if include_built_ins {
-                " or configured plugin agents"
-            } else {
-                " or configured plugin agents (built-in agents are disabled)"
-            }
-        ))
+        let Some(registry) = self.mcp_agent_registry.as_ref() else {
+            return Err(format!(
+                "Error: agent definitions are unavailable (MCP workspace face is not assembled); cannot load '{}'",
+                agent_id
+            ));
+        };
+        let activated = registry
+            .activate(agent_id, include_built_ins)
+            .await
+            .map_err(|error| {
+                format!(
+                    "Error: cannot find agent definition '{}': {error}. Check .claude/agents/ directory{}",
+                    agent_id,
+                    if include_built_ins {
+                        " or configured plugin agents"
+                    } else {
+                        " or configured plugin agents (built-in agents are disabled)"
+                    }
+                )
+            })?;
+        Ok(activated.definition)
     }
 
     /// Build retry hints from the same loader and invocation context as the failed call.
     ///
-    /// The error-suggestion registry intentionally does not know about agent sources: its
-    /// snapshot is prompt metadata and may belong to another cwd or policy. Agent hints are
-    /// therefore resolved here, after the real load failed, and every enumerated id is passed
-    /// through `load_agent_def` before it can be shown to the caller.
+    /// Hints are resolved here, at the failure point, after the real load failed: agent
+    /// sources are only known to this tool, and every enumerated id is passed through
+    /// the source resolution before it can be shown to the caller.
     pub(crate) fn agent_error_with_suggestions(
         &self,
         error: &str,
         requested: Option<&str>,
-        cwd: &str,
     ) -> String {
-        let candidates = self.loadable_agent_ids(cwd);
+        let candidates = self.loadable_agent_ids();
         if candidates.is_empty() {
             return error.to_string();
         }
@@ -124,7 +99,7 @@ impl super::SubAgentTool {
             return format!("{error}\nAvailable agent types: {available}");
         };
 
-        let matches = peri_agent::error_suggest::matcher::fuzzy_filter(&candidates, requested)
+        let matches = fuzzy_rank(&candidates, requested)
             .into_iter()
             .take(3)
             .collect::<Vec<_>>();
@@ -134,27 +109,28 @@ impl super::SubAgentTool {
         format!("{error}\nSuggestion: did you mean {}?", matches.join(", "))
     }
 
-    /// Enumerate only the finite, direct agent roots understood by the real loader.
-    /// Candidates are sorted and then reloaded through that loader so malformed files and
-    /// project shadowing never become suggestions.
-    fn loadable_agent_ids(&self, cwd: &str) -> Vec<String> {
-        let mut ids = BTreeSet::new();
-        collect_agent_ids(&Path::new(cwd).join(".claude").join("agents"), &mut ids);
-        collect_agent_ids(&Path::new(cwd).join("agents"), &mut ids);
-        for dir in self.plugin_agent_dirs.iter() {
-            collect_agent_ids(dir, &mut ids);
-        }
-        if self.built_in_subagents_enabled() {
-            ids.extend(
-                crate::subagent::built_in_agent_types()
-                    .iter()
-                    .map(|id| (*id).to_string()),
-            );
-        }
-
-        ids.into_iter()
-            .filter(|id| self.load_agent_def(id, cwd).is_ok())
-            .collect()
+    /// Enumerate only the finite, direct agent roots understood by the real source.
+    ///
+    /// W5：候选来自会话级 MCP Agent registry 的本地条目（E13 优先级去重，遵守
+    /// builtin 开关）——不再枚举磁盘目录：不可解析的定义不会成为建议项，与
+    /// 迁移前「先枚举再经真实 loader 过滤」的净效果一致。
+    fn loadable_agent_ids(&self) -> Vec<String> {
+        let Some(registry) = self.mcp_agent_registry.as_ref() else {
+            return Vec::new();
+        };
+        let mut ids: BTreeSet<String> = registry
+            .local_catalog(self.built_in_subagents_enabled())
+            .into_iter()
+            .map(|entry| entry.id)
+            .collect();
+        ids.extend(
+            registry
+                .entries()
+                .into_iter()
+                .filter(|entry| !entry.source.is_local())
+                .map(|entry| entry.id),
+        );
+        ids.into_iter().collect()
     }
 
     pub(crate) fn overrides_from_agent_def(
@@ -175,31 +151,13 @@ impl super::SubAgentTool {
     }
 }
 
-fn collect_agent_ids(dir: &Path, ids: &mut BTreeSet<String>) {
-    let Ok(entries) = std::fs::read_dir(dir) else {
-        return;
-    };
-    for entry in entries.flatten() {
-        let path = entry.path();
-        if path.is_file() && path.extension().and_then(|ext| ext.to_str()) == Some("md") {
-            if let Some(id) = path.file_stem().and_then(|name| name.to_str()) {
-                ids.insert(id.to_string());
-            }
-        } else if path.is_dir() && path.join("agent.md").is_file() {
-            if let Some(id) = path.file_name().and_then(|name| name.to_str()) {
-                ids.insert(id.to_string());
-            }
-        }
-    }
-}
-
-fn read_definition(path: &std::path::Path) -> Result<ClaudeAgent, String> {
-    let content = std::fs::read_to_string(path)
-        .map_err(|e| format!("Error: failed to read agent definition file: {}", e))?;
-    parse_agent_file(&content).ok_or_else(|| {
-        format!(
-            "Error: failed to parse agent definition file '{}'",
-            path.display()
-        )
-    })
+/// Skim 子序列匹配排序：返回所有可匹配候选项（score 降序）。
+fn fuzzy_rank(candidates: &[String], query: &str) -> Vec<String> {
+    let matcher = SkimMatcherV2::default();
+    let mut scored: Vec<(String, i64)> = candidates
+        .iter()
+        .filter_map(|c| matcher.fuzzy_match(c, query).map(|s| (c.clone(), s)))
+        .collect();
+    scored.sort_by_key(|(_, s)| std::cmp::Reverse(*s));
+    scored.into_iter().map(|(c, _)| c).collect()
 }

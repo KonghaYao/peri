@@ -1,12 +1,9 @@
 use peri_agent::middleware::capabilities as hook_state;
-use std::{
-    path::{Path, PathBuf},
-    sync::Arc,
-};
+use std::sync::Arc;
 
 use async_trait::async_trait;
 use peri_agent::{
-    agent::{events::AgentEventHandler, react::ReactLLM, AgentCancellationToken},
+    agent::{events::AgentEventHandler, AgentCancellationToken},
     error::AgentResult,
     messages::BaseMessage,
     middleware::{
@@ -17,25 +14,31 @@ use peri_agent::{
     tools::BaseTool,
 };
 
-use crate::{
-    agent_define::AgentOverrides, claude_agent_parser::ClaudeAgentFrontmatter,
-    claude_agent_parser::ToolsValue, parse_agent_file, tools::BoxToolWrapper,
-};
+use peri_acp_types::builtin_mcp::original_tool_name_of_effective;
+
+use crate::tools::BoxToolWrapper;
+use peri_acp_types::agents::AgentOverrides;
+use peri_mcp_core::agent_definition::{ClaudeAgentFrontmatter, ToolsValue};
 
 mod agent_result;
-mod built_in_agents;
 mod fork;
 mod skill_preload;
 mod tool;
+
+#[cfg(test)]
+pub(crate) mod test_support;
 pub use agent_result::AgentResultTool;
-pub use built_in_agents::{
-    built_in_agent_types, get_built_in_agent, list_built_in_agents, BuiltInAgent,
-};
 pub use fork::{build_bg_fork_directive, build_fork_directive, build_prediction_directive};
 use parking_lot::RwLock;
 pub use skill_preload::SkillPreloadMiddleware;
 pub use tool::SubAgentTool;
 pub use tool::SubagentChainAssemblerImpl;
+
+/// 子 Agent 默认迭代上限（agent 定义未显式声明 `max_turns`，或声明为 0 时生效）。
+///
+/// 定义型构建、同步 fork、后台 fork、fork resume、workflow agent 与 MCP agent
+/// 审批 key 共用同一默认规则，各通道不得再硬编码。
+pub(crate) const DEFAULT_SUBAGENT_MAX_ITERATIONS: usize = 400;
 
 /// SubAgent 中间件链构造配置
 ///
@@ -54,6 +57,9 @@ pub struct SubAgentMiddlewareConfig {
     pub frozen_claude_local_md: Option<String>,
     /// Frozen skills summary。None 时从磁盘读取。
     pub frozen_skill_summary: Option<String>,
+    /// 会话级 MCP skill registry（W4b：子链技能目录与正文的唯一来源；
+    /// None = 未装配技能面，miss 即缺口报告，不回落磁盘）。
+    pub mcp_skill_registry: Option<Arc<peri_acp_types::mcp_skills::McpSkillRegistry>>,
     /// 装配期关闭的 middleware 名集合（父会话冻结状态投影；
     /// 子链独立装配，必须同样过滤——设计 §2.5）。
     pub meta_harness_disabled: std::collections::HashSet<String>,
@@ -68,6 +74,7 @@ impl SubAgentMiddlewareConfig {
             frozen_claude_md: None,
             frozen_claude_local_md: None,
             frozen_skill_summary: None,
+            mcp_skill_registry: None,
             meta_harness_disabled: std::collections::HashSet::new(),
         }
     }
@@ -81,6 +88,7 @@ impl SubAgentMiddlewareConfig {
             frozen_claude_md: None,
             frozen_claude_local_md: None,
             frozen_skill_summary: None,
+            mcp_skill_registry: None,
             meta_harness_disabled: std::collections::HashSet::new(),
         }
     }
@@ -111,6 +119,15 @@ impl SubAgentMiddlewareConfig {
         self.frozen_skill_summary = skill_summary;
         self
     }
+
+    /// 注入会话级 MCP skill registry（W4b：子链技能的目录与正文来源）。
+    pub fn with_mcp_registry(
+        mut self,
+        registry: Option<Arc<peri_acp_types::mcp_skills::McpSkillRegistry>>,
+    ) -> Self {
+        self.mcp_skill_registry = registry;
+        self
+    }
 }
 
 /// SubAgentMiddleware - injects `Agent` tool into the parent agent
@@ -128,8 +145,9 @@ impl SubAgentMiddlewareConfig {
 /// let parent_tools: Vec<Box<dyn BaseTool>> = vec![
 ///     Box::new(ReadFileTool::new(cwd)),
 /// ];
+/// // H1：工厂只产出模型来源；bridge（身份 + 请求时贡献）由 Agent 层子链装配点构造
 /// let llm_factory = Arc::new(move |_: Option<&str>| {
-///     Box::new(AgentModelBridge::new(model.clone())) as Box<dyn ReactLLM + Send + Sync>
+///     SubagentLlmSource::model(model.clone(), "model-name")
 /// });
 /// // Optional: system prompt builder, making sub-agent's tone/proactiveness visible in Langfuse
 /// let system_builder = Arc::new(|overrides: Option<&AgentOverrides>, cwd: &str| {
@@ -145,10 +163,12 @@ pub struct SubAgentMiddleware {
     parent_tools: Arc<Vec<Arc<dyn BaseTool>>>,
     /// Parent agent event handler (transparent forwarding of child agent events)
     event_handler: Option<Arc<dyn AgentEventHandler>>,
-    /// LLM factory function, creates independent LLM instance for each child agent
-    /// Parameter is optional model alias (e.g., "haiku"/"sonnet"/"opus"), None means use parent model
+    /// 子模型工厂（H1）：只产出 [`SubagentLlmSource`]；参数是可选 model alias
+    /// （"haiku"/"sonnet"/"opus"），None 表示父模型。身份 system 与请求时贡献
+    /// provider 由 Agent 层 session factory 在子链装配点统一装上。
     #[allow(clippy::type_complexity)]
-    llm_factory: Arc<dyn Fn(Option<&str>) -> Box<dyn ReactLLM + Send + Sync> + Send + Sync>,
+    llm_factory:
+        Arc<dyn Fn(Option<&str>) -> peri_agent::session::subagent::SubagentLlmSource + Send + Sync>,
     /// System prompt builder: (agent overrides, cwd) -> system prompt string
     #[allow(clippy::type_complexity)]
     system_builder: Option<Arc<dyn Fn(Option<&AgentOverrides>, &str) -> String + Send + Sync>>,
@@ -158,6 +178,9 @@ pub struct SubAgentMiddleware {
     parent_messages: Option<Arc<RwLock<Vec<BaseMessage>>>>,
     /// Registered hooks for SubagentStart/SubagentStop lifecycle events
     registered_hooks: Arc<Vec<crate::hooks::types::RegisteredHook>>,
+    /// 父链装配期共享；Reason 目录重绑及 middleware clone 不重置 lifecycle once。
+    lifecycle_dispatcher:
+        Arc<std::sync::OnceLock<Option<Arc<crate::hooks::dispatcher::HookDispatcher>>>>,
     /// Per-child agent event handler factory: takes agent_id → returns handler for that child.
     #[allow(clippy::type_complexity)]
     child_handler_factory: Option<Arc<dyn Fn(String) -> Arc<dyn AgentEventHandler> + Send + Sync>>,
@@ -168,15 +191,19 @@ pub struct SubAgentMiddleware {
     /// 运行时通道（[`SubagentHost`]）与 frozen 数据经它读取，Middleware 不再
     /// 逐字段透传（L3 管理权移出）。
     parent_session: Arc<RwLock<Option<Arc<Session>>>>,
-    /// 已启用插件提供的 agent definition 目录。
-    plugin_agent_dirs: Arc<Vec<PathBuf>>,
     /// 会话级 MCP Agents registry（远端定义晚读、晚批准）。
     mcp_agent_registry: Option<Arc<crate::mcp::McpAgentRegistry>>,
+    /// 会话级 MCP skill registry（W4b：子链的技能目录与正文来源；None = 未装配，
+    /// 子链无技能面——不回退磁盘，J5）。
+    mcp_skill_registry: Option<Arc<peri_acp_types::mcp_skills::McpSkillRegistry>>,
     /// MCP Agent 激活使用的用户交互 broker。
     broker: Option<Arc<dyn peri_agent::interaction::UserInteractionBroker>>,
     /// 后台任务管理器是否可用（能力声明，非持有；collect_tools 时决定是否
     /// 注册 AgentResultTool）
     task_manager_available: bool,
+    /// `Agent` 工具 `run_in_background` 的有效缺省（middleware 装配参数；会话内冻结，
+    /// SubAgent 共享——beta flag `full-async-tools` 的投影）。
+    default_run_in_background: bool,
 }
 
 impl SubAgentMiddleware {
@@ -184,7 +211,9 @@ impl SubAgentMiddleware {
     pub fn new(
         parent_tools: Vec<Box<dyn BaseTool>>,
         event_handler: Option<Arc<dyn AgentEventHandler>>,
-        llm_factory: Arc<dyn Fn(Option<&str>) -> Box<dyn ReactLLM + Send + Sync> + Send + Sync>,
+        llm_factory: Arc<
+            dyn Fn(Option<&str>) -> peri_agent::session::subagent::SubagentLlmSource + Send + Sync,
+        >,
     ) -> Self {
         let tools: Vec<Arc<dyn BaseTool>> = parent_tools
             .into_iter()
@@ -198,19 +227,24 @@ impl SubAgentMiddleware {
             cancel: None,
             parent_messages: None,
             registered_hooks: Arc::new(Vec::new()),
+            lifecycle_dispatcher: Arc::new(std::sync::OnceLock::new()),
             child_handler_factory: None,
             parent_agent_id: Arc::new(RwLock::new(None)),
             parent_session: Arc::new(RwLock::new(None)),
-            plugin_agent_dirs: Arc::new(Vec::new()),
             mcp_agent_registry: None,
+            mcp_skill_registry: None,
             broker: None,
             task_manager_available: false,
+            default_run_in_background: false,
         }
     }
 
-    /// 注入已启用插件提供的 agent definition 目录。
-    pub fn with_plugin_agent_dirs(mut self, dirs: Vec<PathBuf>) -> Self {
-        self.plugin_agent_dirs = Arc::new(dirs);
+    /// 注入 `Agent` 工具的 `run_in_background` 有效缺省（装配参数，随会话冻结）。
+    ///
+    /// 未调用 = `false`：与 flag 引入前一致（未显式传参走前台）。显式 `false` 仍走
+    /// 前台；flag 只改缺省。
+    pub fn with_default_run_in_background(mut self, default: bool) -> Self {
+        self.default_run_in_background = default;
         self
     }
 
@@ -221,6 +255,15 @@ impl SubAgentMiddleware {
     ) -> Self {
         self.mcp_agent_registry = registry;
         self.broker = Some(broker);
+        self
+    }
+
+    /// 注入会话级 MCP skill registry（W4b：子链技能目录/正文的唯一来源）。
+    pub fn with_mcp_skills(
+        mut self,
+        registry: Option<Arc<peri_acp_types::mcp_skills::McpSkillRegistry>>,
+    ) -> Self {
+        self.mcp_skill_registry = registry;
         self
     }
 
@@ -316,6 +359,7 @@ impl SubAgentMiddleware {
             Arc::clone(&self.llm_factory),
             cwd.to_string(),
         );
+        tool.lifecycle_dispatcher = Arc::clone(&self.lifecycle_dispatcher);
         if let Some(ref builder) = self.system_builder {
             tool = tool.with_system_builder(Arc::clone(builder));
         }
@@ -331,52 +375,57 @@ impl SubAgentMiddleware {
         if let Some(ref factory) = self.child_handler_factory {
             tool = tool.with_child_handler_factory(Arc::clone(factory));
         }
-        tool = tool.with_plugin_agent_dirs(Arc::clone(&self.plugin_agent_dirs));
         tool = tool.with_mcp_agents(self.mcp_agent_registry.clone(), self.broker.clone());
+        // W4b（F5/J5）：把会话级 MCP skill registry 交给子链装配器——子代理
+        // `skills:` 预载只按名查该 registry（未命中=缺口，不回落磁盘）。
+        tool = tool.with_mcp_skills(self.mcp_skill_registry.clone());
         // 共享父 agent 身份 cell（C2：Start/Stop 事件的 agent_id 字段）
         tool = tool.with_parent_agent_id(Arc::clone(&self.parent_agent_id));
         // L3：父 v2 session（运行时通道 + frozen 数据经 host 读取）
         if let Some(ref session) = *self.parent_session.read() {
             tool = tool.with_parent_session(Arc::clone(session));
         }
+        // beta flag（装配参数，会话内冻结）：`Agent` 工具缺省后台的单一注入点。
+        tool = tool.with_default_run_in_background(self.default_run_in_background);
         tool
     }
 }
 
-/// Scan `{cwd}/.claude/agents/` directory, return `(agent_id, name, description)` list.
-/// Built-in agents are included as fallback — project-level agents with the same ID take precedence.
-///
-/// 波 4 演进（C3，设计 §3.5.1 步骤 2）：catalog 同源收敛——本函数委托
-/// [`scan_agents_detailed`]（共享实现，丢弃能力画像字段），与渲染面
-/// catalog（`SkillsPort::agents` → `scan_agents_detailed`）同一事实源，
-/// 防止提示词 catalog 与子链实际可用 agent 不一致。
-pub fn scan_agents(cwd: &str) -> Vec<(String, String, String)> {
-    scan_agents_detailed(cwd, &[], true)
-        .into_iter()
-        .map(|(id, name, description, _)| (id, name, description))
-        .collect()
-}
-
-/// 扫描 agent 目录，支持额外的插件 agent 搜索路径
-/// 项目级 agent 优先，同名 agent_id 去重时保留先出现的
-///
-/// 波 4 演进（C3）：委托 [`scan_agents_detailed`]（共享实现，见
-/// [`scan_agents`] 注释）。
-pub fn scan_agents_with_extra_dirs(
-    cwd: &str,
-    extra_dirs: &[PathBuf],
-) -> Vec<(String, String, String)> {
-    scan_agents_detailed(cwd, extra_dirs, true)
-        .into_iter()
-        .map(|(id, name, description, _)| (id, name, description))
-        .collect()
-}
-
 /// Agent 运行时能力画像，用于主 Agent 调度决策。
 ///
-/// 主 Agent 在 Prompt 中看到此信息后可以判断：
-// 3.0 批 2 波 1：协议类型归契约层（定义见 `peri_acp_types::agents::AgentCapability`）。
-pub use peri_acp_types::agents::AgentCapability;
+/// 主 Agent 在 Prompt 中看到此信息后可以判断能否并行调度（readonly/writes）与
+/// 期望档位；3.0 批 2 波 1 起协议类型归契约层（定义见
+/// `peri_acp_types::agents::AgentCapability`）。
+pub use peri_acp_types::agents::{
+    AgentCapability, AgentModelSelection, InvalidModelTier, ModelTier,
+};
+
+/// 按名匹配的候选集合（A4 ⑦ 匹配型归一）：原样（小写化）恒在其中，命中归一表
+/// （[`original_tool_name_of_effective`]，IF-D15 唯一入口）时再补一个原始工具名候选。
+///
+/// 未命中（未知 / 外部 `mcp__*`）时只有一个候选 ⇒ 与迁移前的单名比较逐位一致。
+/// `tools` / `disallowedTools` 声明写裸名（agent.md）而模型面工具名是 effective
+/// name（builtin 一等工具），双侧展开才能命中；名字字面量只在声明表声明一份，
+/// 本模块不复制、不反拆（与 `peri_agent::session::tool_catalog` 的同名函数同语义）。
+pub(crate) fn name_candidates(name: &str) -> Vec<String> {
+    let lowered = name.to_lowercase();
+    match original_tool_name_of_effective(name) {
+        Some(original) => vec![lowered, original.to_lowercase()],
+        None => vec![lowered],
+    }
+}
+
+/// 声明列表（`tools` / `disallowedTools`）是否覆盖名字 `name`——双侧归一候选展开。
+///
+/// 迁移前是两侧 `to_lowercase()` 的直接相等比较；未命中归一表的名字候选集合只有
+/// 一个元素 ⇒ 未命中路径与迁移前逐位一致。`*` 通配由调用方单独处理。
+pub(crate) fn declared_names_cover(declared: &[String], name: &str) -> bool {
+    let candidates = name_candidates(name);
+    declared
+        .iter()
+        .flat_map(|declared_name| name_candidates(declared_name))
+        .any(|declared_candidate| candidates.contains(&declared_candidate))
+}
 
 /// 工具名是否为项目写能力（保守集合，D5）。
 ///
@@ -385,9 +434,16 @@ pub use peri_acp_types::agents::AgentCapability;
 ///   （可定时触发任意 prompt，等价委派执行权）；
 /// - 前缀：`mcp__*`（外部能力，无法静态证明只读）。
 ///
+/// **生效名归一（IF-D6 / A4 判定型）**：builtin 一等工具的 effective name 按其
+/// 原始工具名判定（例如 web 实例 `WebFetch` 的 effective name ⇒ `WebFetch`
+/// ⇒ 非 mutation），否则「按名字判定」的结论会因 `mcp__` 前缀而不等于原始名。命中声明表
+/// （[`original_tool_name_of_effective`]，IF-D15 唯一归一入口）才替换；未命中
+/// （未知 / 外部 `mcp__*`）保持既有保守语义分毫不变。
+///
 /// 匹配大小写不敏感（与 `filter_tools` 一致）。
 fn is_mutation_tool(name: &str) -> bool {
-    let lower = name.to_lowercase();
+    let normalized = original_tool_name_of_effective(name).unwrap_or(name);
+    let lower = normalized.to_lowercase();
     matches!(
         lower.as_str(),
         "bash" | "write" | "edit" | "folder_operations" | "cron_register"
@@ -399,6 +455,10 @@ fn is_mutation_tool(name: &str) -> bool {
 /// `mcp__*` 无法用精确 disallowed 排除（`filter_tools` 为精确匹配），
 /// 因此本函数只覆盖可精确排除的核心集合；这是已知局限——readonly 标签
 /// 仅是调度提示，不构成安全边界，最终能力由 filter_tools 真裁剪。
+///
+/// disallowed 侧经 [`declared_names_cover`] 归一候选展开：写裸名
+/// （`disallowedTools: [Bash, Write, …]`）与写 effective name
+/// （`mcp__workspace__Bash` …）都命中 `MUTATION_CORE`。
 fn core_mutation_tools_fully_disallowed(disallowed: &[String]) -> bool {
     const MUTATION_CORE: [&str; 5] = [
         "bash",
@@ -407,25 +467,25 @@ fn core_mutation_tools_fully_disallowed(disallowed: &[String]) -> bool {
         "folder_operations",
         "cron_register",
     ];
-    let dis_lower: Vec<String> = disallowed.iter().map(|s| s.to_lowercase()).collect();
     MUTATION_CORE
         .iter()
-        .all(|t| dis_lower.iter().any(|d| d == t))
+        .all(|tool| declared_names_cover(disallowed, tool))
 }
 
 /// 从 Agent frontmatter 推断运行时能力画像（D5：保守 readonly）。
 ///
-/// 区分三种 tools 语义（`claude_agent_parser::ToolsValue`）：
+/// 区分三种 tools 语义（`peri_mcp_core::agent_definition::ToolsValue`）：
 /// - `Empty`（字段省略）= 继承父工具（含 Bash）→ 默认 writes；
 /// - `NoTools`（显式 `tools: []`）= 零工具 → readonly；
 /// - `List` = 白名单，含 `*` 等价继承全部。
-pub fn infer_agent_capability(fm: &ClaudeAgentFrontmatter) -> AgentCapability {
-    let model_tier = fm
-        .model
-        .as_deref()
-        .filter(|m| !m.is_empty() && *m != "inherit")
-        .unwrap_or("inherit")
-        .to_string();
+///
+/// `model` 经 [`AgentModelSelection::parse`] typed 校验（M2）：未指定/`inherit`
+/// 归一为继承语义，合法档位大小写归一；未知值返回 [`InvalidModelTier`]，
+/// 由调用方隔离该定义并诊断——不静默回退父模型。
+pub fn infer_agent_capability(
+    fm: &ClaudeAgentFrontmatter,
+) -> Result<AgentCapability, InvalidModelTier> {
+    let model_tier = AgentModelSelection::parse(fm.model.as_deref())?;
 
     let disallowed = fm.disallowed_tools.to_vec();
     let can_mutate = match &fm.tools {
@@ -434,116 +494,15 @@ pub fn infer_agent_capability(fm: &ClaudeAgentFrontmatter) -> AgentCapability {
         ToolsValue::List(list) if list.len() == 1 && list[0] == "*" => {
             !core_mutation_tools_fully_disallowed(&disallowed)
         }
-        ToolsValue::List(tools) => {
-            let dis_lower: Vec<String> = disallowed.iter().map(|s| s.to_lowercase()).collect();
-            tools
-                .iter()
-                .any(|t| is_mutation_tool(t) && !dis_lower.iter().any(|d| d == &t.to_lowercase()))
-        }
+        ToolsValue::List(tools) => tools
+            .iter()
+            .any(|tool| is_mutation_tool(tool) && !declared_names_cover(&disallowed, tool)),
     };
 
-    AgentCapability {
+    Ok(AgentCapability {
         model_tier,
         can_mutate,
-    }
-}
-
-/// 扫描 agent 目录并返回完整信息（含能力画像）。
-///
-/// 项目级 agent 优先，同名 agent_id 去重。返回 `(agent_id, name, description, capability)`。
-pub fn scan_agents_detailed(
-    cwd: &str,
-    extra_dirs: &[PathBuf],
-    include_built_ins: bool,
-) -> Vec<(String, String, String, AgentCapability)> {
-    let mut result = Vec::new();
-    let mut seen_ids = std::collections::HashSet::new();
-
-    // 辅助闭包：扫描单个目录
-    let scan_dir =
-        |dir: &Path, result: &mut Vec<_>, seen_ids: &mut std::collections::HashSet<_>| {
-            if !dir.is_dir() {
-                return;
-            }
-            let entries = match std::fs::read_dir(dir) {
-                Ok(e) => e,
-                Err(_) => return,
-            };
-            for entry in entries.flatten() {
-                let path = entry.path();
-                let (agent_id, file_path): (String, PathBuf) = if path.is_file() {
-                    if path.extension().and_then(|e| e.to_str()) != Some("md") {
-                        continue;
-                    }
-                    let id = path
-                        .file_stem()
-                        .unwrap_or_default()
-                        .to_string_lossy()
-                        .to_string();
-                    (id, path)
-                } else if path.is_dir() {
-                    let nested = path.join("agent.md");
-                    if !nested.is_file() {
-                        continue;
-                    }
-                    let id = path
-                        .file_name()
-                        .unwrap_or_default()
-                        .to_string_lossy()
-                        .to_string();
-                    (id, nested)
-                } else {
-                    continue;
-                };
-                if !seen_ids.insert(agent_id.clone()) {
-                    continue;
-                }
-                let content = match std::fs::read_to_string(&file_path) {
-                    Ok(c) => c,
-                    Err(_) => continue,
-                };
-                if let Some(agent) = parse_agent_file(&content) {
-                    let name = if agent.frontmatter.name.is_empty() {
-                        agent_id.clone()
-                    } else {
-                        agent.frontmatter.name.clone()
-                    };
-                    let desc = agent.frontmatter.description.clone();
-                    let cap = infer_agent_capability(&agent.frontmatter);
-                    result.push((agent_id, name, desc, cap));
-                }
-            }
-        };
-
-    // 1. 项目级 agent（最高优先级，先添加则占住 seen_ids）
-    let agents_dir = Path::new(cwd).join(".claude").join("agents");
-    scan_dir(&agents_dir, &mut result, &mut seen_ids);
-
-    // 2. 内置 agent（IFF 启用且同 ID 未被项目级覆盖）
-    if include_built_ins {
-        for built_in in list_built_in_agents() {
-            if seen_ids.insert(built_in.agent_id.to_string()) {
-                if let Some(agent) = parse_agent_file(built_in.content) {
-                    let name = if agent.frontmatter.name.is_empty() {
-                        built_in.agent_id.to_string()
-                    } else {
-                        agent.frontmatter.name.clone()
-                    };
-                    let desc = agent.frontmatter.description.clone();
-                    let cap = infer_agent_capability(&agent.frontmatter);
-                    result.push((built_in.agent_id.to_string(), name, desc, cap));
-                }
-            }
-        }
-    }
-
-    // 3. 插件 agent（最低优先级）
-    for dir in extra_dirs {
-        scan_dir(dir, &mut result, &mut seen_ids);
-    }
-
-    result.sort_by(|a, b| a.0.cmp(&b.0));
-    result
+    })
 }
 
 // L5：SubAgent 中间件端口实现（stage 装配经端口注入主 agent 身份，
@@ -588,8 +547,52 @@ impl Middleware for SubAgentMiddleware {
         }
         Ok(())
     }
+
+    async fn before_reason_catalog(
+        &self,
+        state: &mut dyn hook_state::CatalogState,
+    ) -> AgentResult<()> {
+        let Some(local_tools) = state.local_tools() else {
+            return Ok(());
+        };
+        let Some(parent) = self.parent_session.read().clone() else {
+            return Ok(());
+        };
+        let mut tools = local_tools.write();
+        if !tools.get("Agent").is_some_and(|tool| {
+            tool.mcp_server_name().is_none() && tool.namespace() == Some("interaction")
+        }) {
+            return Ok(());
+        }
+        let mut agent = self.build_tool(&parent.store().cwd);
+        agent.parent_tools = Arc::new(
+            self.parent_tools
+                .iter()
+                .filter(|tool| tool.mcp_server_name().is_none())
+                .cloned()
+                .chain(
+                    tools
+                        .values()
+                        .filter(|tool| tool.mcp_server_name().is_some())
+                        .filter(|tool| {
+                            !matches!(
+                                state.tool_source(tool.name()),
+                                Some(peri_agent::session::tool_catalog::ToolSource::DynamicMcp(_))
+                            )
+                        })
+                        .cloned(),
+                )
+                .collect(),
+        );
+        tools.insert("Agent".to_string(), Arc::new(agent));
+        Ok(())
+    }
 }
 
 #[cfg(test)]
 #[path = "mod_test.rs"]
 mod tests;
+
+#[cfg(test)]
+#[path = "reason_lifecycle_test.rs"]
+mod reason_lifecycle_tests;

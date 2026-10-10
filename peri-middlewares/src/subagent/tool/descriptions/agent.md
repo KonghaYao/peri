@@ -2,7 +2,7 @@ Launch a sub-agent with an independent context to handle a specialized sub-task.
 
 Fork mode (fork: true):
 - Inherits the parent's frozen system prompt, a full history snapshot at launch time, and the parent's core tool set (Filesystem, Bash, Web, MCP)
-- Does NOT inherit the Agent tool (prevents recursion) nor Cron / Workflow / LSP / Plugin extension tools; parent agent_overrides blocks do not enter the forked prompt
+- Does NOT inherit the Agent tool (prevents recursion) nor Cron / Workflow / Plugin extension tools; parent agent_overrides blocks do not enter the forked prompt
 - The prompt is treated as a directive within the existing context, not a standalone briefing
 - Do NOT re-explain background that is already in the conversation history
 - Use for tasks that require context from the ongoing conversation (e.g., continuing a multi-file refactor)
@@ -42,7 +42,7 @@ Background execution (run_in_background: true):
 
 Send or resume (resume_thread_id):
 - Use the existing `resume_thread_id` and `prompt` fields to continue interacting with a sub-agent. The target's current execution state determines the behavior; read the returned `action` to distinguish sending from resuming.
-- **Active background sub-agent in this session:** a non-empty `prompt` is queued as Info and the tool immediately returns `action: send`, `status: queued`, and the target IDs. It does not create or resume execution, interrupt an in-flight model/tool call, or trigger an extra model call. Info enters the transcript at the next Receive; the agent may finish before the model sees it. Queued does not mean read or durably saved. `run_in_background` is ignored for sending.
+- **Active background sub-agent in this session:** a non-empty `prompt` is queued as Defer and the tool immediately returns `action: send`, `status: queued`, and the target IDs. It does not create or resume execution or interrupt an in-flight model/tool call. Defer enters the transcript at the next Receive and drives a subsequent model call, including after a final answer. Queued does not mean read or durably saved; cancellation or execution limits can still prevent consumption. `run_in_background` is ignored for sending.
 - **Non-active thread:** the persisted transcript is replayed and execution resumes, returning `action: resume`. `prompt` is optional; omitting it implicitly continues the task. `run_in_background: true` selects background execution for this resume.
 - Active threads without a live background receiver in this session (including crash leftovers or another session's tasks) return an error. They are not silently resumed or recreated.
 - Both paths take priority over `subagent_type` and `fork`; those fields are ignored. Sending requires no additional tool or parameters.

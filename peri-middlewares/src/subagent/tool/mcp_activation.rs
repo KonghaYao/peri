@@ -1,5 +1,7 @@
 //! Explicit remote activation and content/effective-tool-bound approval.
-use crate::{claude_agent_parser::ClaudeAgent, mcp::McpAgentRegistry};
+use peri_mcp_core::agent_definition::ClaudeAgent;
+
+use crate::mcp::McpAgentRegistry;
 
 impl super::SubAgentTool {
     pub(crate) async fn load_and_approve_mcp_agent(
@@ -14,7 +16,7 @@ impl super::SubAgentTool {
             .mcp_agent_registry
             .as_ref()
             .ok_or("MCP Agents are not available in this session")?;
-        let activated = registry.activate(agent_id).await?;
+        let activated = registry.activate(agent_id, true).await?;
         let effective_tools: Vec<String> = self
             .filter_tools(
                 &activated.definition.frontmatter.tools,
@@ -59,9 +61,19 @@ impl super::SubAgentTool {
                         }
                         _ => "MCP Agent activation was not approved",
                     };
-                    return Err(reason.to_string().into());
+                    return Err(peri_agent::error::AgentError::ToolRejected {
+                        tool: "MCP Agent activation".into(),
+                        reason: reason.to_string(),
+                    }
+                    .into());
                 }
-                _ => return Err("MCP Agent activation was rejected".into()),
+                _ => {
+                    return Err(peri_agent::error::AgentError::ToolRejected {
+                        tool: "MCP Agent activation".into(),
+                        reason: "MCP Agent activation was rejected".into(),
+                    }
+                    .into());
+                }
             }
         }
         Ok(activated.definition)

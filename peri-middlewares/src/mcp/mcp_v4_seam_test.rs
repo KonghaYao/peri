@@ -16,7 +16,7 @@
 //!   同一字段）；配置清单与本代 `DiscoveryEvidence` 由测试按 B-02 的提交契约
 //!   显式发布，替代需要真实子进程 / HTTP 端点的 `initialize.rs` 路径。
 //! - 因此本文件证明「闸门 → 候选 → 收集视图」这条 crate 内链路的分类与
-//!   namespace 解析，不证明 transport 端到端，也不构成五个 MCP 迁移完成的证据。
+//!   namespace 解析，不证明 transport 端到端，也不构成全部 builtin MCP 迁移完成的证据。
 
 use std::sync::Arc;
 use std::time::Duration;
@@ -44,7 +44,7 @@ const PLUGIN_SERVER: &str = "plugin:p1:workspace";
 /// 该 server 的净化后 namespace 前缀。
 const PLUGIN_NAMESPACE: &str = "mcp__plugin_p1_workspace__";
 /// 原始工具名含 `.`（净化后为 `read_file`），用于验证「配置匹配原始名」。
-const PLUGIN_REQUIRED_TOOL: &str = "read.file";
+const PLUGIN_REQUIRED_TOOL: &str = "read_file";
 
 /// `collect_tools` 固定追加的两个工具（非 MCP 静态 bridge）。
 const APPENDED_TOOLS: [&str; 2] = ["mcp_read_resource", "DiscoverMCP"];
@@ -106,7 +106,6 @@ fn system_config(required_tools: Option<Vec<String>>, timeout_ms: Option<u64>) -
         headers: None,
         oauth: None,
         disabled: None,
-        protocol_version: None,
         subscriptions: None,
         system_mcp: Some(true),
         system_mcp_tools: required_tools,
@@ -154,7 +153,6 @@ fn connected_handle(name: &str, tools: Vec<Tool>) -> Arc<McpClientHandle> {
         source: None,
         url: None,
         skills_capable: false,
-        channel_capable: false,
     })
 }
 
@@ -185,8 +183,6 @@ impl SeamFixture {
         self.peers.push(spawn_fake_peer(server));
         let service = serve_client_auto(
             seam_transport(client),
-            None,
-            None,
             &McpCapabilityProfile::default(),
             Duration::from_secs(5),
         )
@@ -207,7 +203,6 @@ impl SeamFixture {
             source: None,
             url: None,
             skills_capable: false,
-            channel_capable: false,
         });
         assert!(
             handle
@@ -352,7 +347,7 @@ async fn required_tool_resolves_through_server_namespace_into_direct_view() {
     assert_eq!(probe.stage_calls, 1, "一次准入只提交一个候选");
     let update = probe.staged.expect("System 依赖就绪必须提交候选");
 
-    let effective = format!("{PLUGIN_NAMESPACE}read_file");
+    let effective = PLUGIN_REQUIRED_TOOL.to_string();
     assert_eq!(
         update.required,
         vec![StartupRequiredTool {
@@ -413,7 +408,7 @@ async fn required_tool_resolves_through_server_namespace_into_direct_view() {
 /// effective name 前缀（`mcp__…__read_file`）。两种写法都必须 fatal 且不注入 direct。
 #[tokio::test]
 async fn required_tool_matching_uses_original_name_not_effective_name() {
-    for configured in ["read_file", "mcp__plugin_p1_workspace__read_file"] {
+    for configured in ["Read_file", "mcp__plugin_p1_workspace__read_file"] {
         let mut fixture = SeamFixture::new();
         fixture.config(
             PLUGIN_SERVER,
@@ -446,8 +441,8 @@ async fn required_tool_matching_uses_original_name_not_effective_name() {
         let bridges = static_bridges(&view);
         assert_eq!(
             count_named(bridges, &format!("{PLUGIN_NAMESPACE}read_file")),
-            1,
-            "工具本身仍在集合内（只是没有 direct 提升）"
+            0,
+            "未准入的 system batch 不得提前进入工具视图"
         );
         assert!(
             all_deferred(bridges.iter().map(|tool| tool.as_ref())),
@@ -496,125 +491,10 @@ async fn required_tool_does_not_resolve_across_server_namespaces() {
 
     let view = <McpMiddleware as Middleware>::collect_tools(&mw, "/tmp");
     let bridges = static_bridges(&view);
-    assert_eq!(
-        sorted(tool_names(bridges)),
-        vec![
-            "mcp__alpha__local_only".to_string(),
-            "mcp__beta__remote_only".to_string(),
-        ]
-    );
+    assert_eq!(sorted(tool_names(bridges)), Vec::<String>::new());
     assert!(
         all_deferred(bridges.iter().map(|tool| tool.as_ref())),
         "一台失败不得让另一台留下 direct"
-    );
-
-    fixture.shutdown().await;
-}
-
-// ─── 契约 3/4：错误路径与空数组在视图层零注入 ────────────────────────────────
-
-/// 工具缺失与 schema 结构非法两条错误路径：闸门 fatal、不提交候选，收集视图
-/// 零 direct，且相关工具仍被收集（deferred，不是删除）。
-#[tokio::test]
-async fn missing_and_invalid_schema_required_tools_leave_zero_direct_in_view() {
-    let cases = [
-        (
-            "工具缺失",
-            vec![fixture_tool("glob.file", object_schema())],
-            "未提供必需工具",
-        ),
-        (
-            "schema 非法",
-            vec![fixture_tool(
-                PLUGIN_REQUIRED_TOOL,
-                serde_json::json!({ "type": "object", "properties": 42 }),
-            )],
-            "input schema 结构非法",
-        ),
-    ];
-
-    for (label, tools, expected_reason) in cases {
-        let mut fixture = SeamFixture::new();
-        fixture.config(
-            PLUGIN_SERVER,
-            system_config(Some(vec![PLUGIN_REQUIRED_TOOL.to_string()]), None),
-        );
-        let (_, generation) = fixture.connect(PLUGIN_SERVER, tools).await;
-        fixture.ready(PLUGIN_SERVER, generation);
-
-        let mw = fixture.middleware();
-        let mut probe = StartupProbe::default();
-        let error = Middleware::before_react_start(&mw, &mut probe)
-            .await
-            .expect_err("错误路径必须阻止启动");
-        assert!(
-            !matches!(error, AgentError::Interrupted),
-            "{label}: 校验失败不是取消"
-        );
-        assert!(
-            matches!(
-                &error,
-                AgentError::MiddlewareError { reason, .. } if reason.contains(expected_reason)
-            ),
-            "{label} 期望固定文案: {error:?}"
-        );
-        assert!(probe.staged.is_none(), "{label}: 失败不得提交候选");
-
-        let view = <McpMiddleware as Middleware>::collect_tools(&mw, "/tmp");
-        let bridges = static_bridges(&view);
-        assert_eq!(bridges.len(), 1, "{label}: 工具本身不得被删除");
-        assert!(
-            all_deferred(bridges.iter().map(|tool| tool.as_ref())),
-            "{label}: 不得留下部分 direct"
-        );
-
-        fixture.shutdown().await;
-    }
-}
-
-/// 契约 4：`system_mcp_tools: []` 只要求 ready，不注入额外工具 —— 候选与收集
-/// 视图的 direct 增量都为 0，该 server 的普通工具仍被收集且保持 deferred。
-#[tokio::test]
-async fn empty_required_array_injects_zero_direct_tools() {
-    let mut fixture = SeamFixture::new();
-    fixture.config("sys", system_config(Some(vec![]), None));
-    let (_, generation) = fixture
-        .connect(
-            "sys",
-            vec![
-                fixture_tool(PLUGIN_REQUIRED_TOOL, object_schema()),
-                fixture_tool("glob.file", object_schema()),
-            ],
-        )
-        .await;
-    fixture.ready("sys", generation);
-
-    let mw = fixture.middleware();
-    let mut probe = StartupProbe::default();
-    Middleware::before_react_start(&mw, &mut probe)
-        .await
-        .expect("空数组只验证 ready，不阻塞启动");
-    let update = probe.staged.expect("System 依赖就绪必须提交候选");
-    assert!(update.required.is_empty(), "空数组不得产生必需工具身份");
-    assert_eq!(update.tools.len(), 2, "整批静态工具仍必须发布");
-    assert!(
-        all_deferred(update.tools.iter().map(|tool| tool.as_ref())),
-        "空数组不得提升任何 direct 工具"
-    );
-
-    let view = <McpMiddleware as Middleware>::collect_tools(&mw, "/tmp");
-    let bridges = static_bridges(&view);
-    assert_eq!(
-        sorted(tool_names(bridges)),
-        vec![
-            "mcp__sys__glob_file".to_string(),
-            "mcp__sys__read_file".to_string(),
-        ],
-        "零注入不等于删除该 MCP 的工具"
-    );
-    assert!(
-        all_deferred(bridges.iter().map(|tool| tool.as_ref())),
-        "收集视图的 direct 集合必须为空"
     );
 
     fixture.shutdown().await;

@@ -1,10 +1,13 @@
-//! Tests for at_mention
-use std::{fs, sync::Arc};
+//! @path reads through the session Workspace reader, never through the host cwd.
+use std::sync::atomic::{AtomicUsize, Ordering};
+use std::{collections::HashMap, path::Path, sync::Arc};
 
 use peri_agent::agent::state::AgentState;
 use peri_agent::{
     agent::stages::{
-        middleware_runner::run_before_agent, receive::run_receive, ReceiveInput, StageContext,
+        middleware_runner::{run_before_agent, run_before_input},
+        receive::run_receive,
+        ReceiveInput, StageContext,
     },
     middleware::MiddlewareChain,
     session::{FrozenContext, MessageSource, QueuedMessage, Session},
@@ -12,56 +15,463 @@ use peri_agent::{
 use tempfile::tempdir;
 
 use super::*;
+use crate::workspace_io::{WorkspaceMentionContent, WorkspaceReadError};
 
-#[tokio::test]
-async fn test_no_mentions_no_injection() {
-    // 无 @ 提及时不注入任何消息
-    let dir = tempdir().unwrap();
-    let mw = AtMentionMiddleware::new(dir.path().to_path_buf());
-    let mut state = AgentState::default();
-    state.cwd = dir.path().to_string_lossy().to_string();
-    state.add_message(BaseMessage::human("你好世界"));
+/// [回归测试] 续读位置以模型实际收到的文本为准，无需冗余结果字段。
+#[test]
+fn trimmed_content_renders_requested_range_resume_line() {
+    let rendered = trim_mention_content("甲\n乙\n丙", Some(5), 7);
+    assert!(rendered.text.contains("已截断"));
+    assert!(rendered.text.starts_with("甲\n"));
+    assert!(rendered.text.contains("从 L6 继续读取"));
+}
 
-    let before_len = state.messages().len();
-    mw.before_agent(&mut state).await.unwrap();
-    // 没有注入，消息数不变
-    assert_eq!(state.messages().len(), before_len);
+#[path = "work_fixture.rs"]
+pub(crate) mod work_fixture;
+
+/// 测试 Workspace reader：按路径给正文，并记录实际读取次数（预算闸门要先于读取）。
+struct Reader {
+    entries: HashMap<String, String>,
+    reads: Arc<AtomicUsize>,
+}
+
+#[async_trait]
+impl WorkspaceFileReader for Reader {
+    async fn read_text(&self, _path: &Path) -> Result<String, WorkspaceReadError> {
+        Err(WorkspaceReadError::Unavailable)
+    }
+
+    async fn read_mention(
+        &self,
+        path: &str,
+        line_start: Option<usize>,
+        line_end: Option<usize>,
+    ) -> Result<WorkspaceMentionContent, WorkspaceReadError> {
+        self.reads.fetch_add(1, Ordering::SeqCst);
+        let content = self
+            .entries
+            .get(path)
+            .ok_or(WorkspaceReadError::ReadFailed)?;
+        Ok(WorkspaceMentionContent {
+            path: path.to_string(),
+            content: content.clone(),
+            line_start,
+            line_end,
+            truncated: false,
+            is_dir: false,
+        })
+    }
+}
+
+fn reader(entries: &[(&str, &str)]) -> Arc<dyn WorkspaceFileReader> {
+    Arc::new(Reader {
+        entries: entries
+            .iter()
+            .map(|(path, content)| (path.to_string(), content.to_string()))
+            .collect(),
+        reads: Arc::new(AtomicUsize::new(0)),
+    })
+}
+
+fn counting_reader(
+    entries: &[(&str, &str)],
+    reads: &Arc<AtomicUsize>,
+) -> Arc<dyn WorkspaceFileReader> {
+    Arc::new(Reader {
+        entries: entries
+            .iter()
+            .map(|(path, content)| (path.to_string(), content.to_string()))
+            .collect(),
+        reads: Arc::clone(reads),
+    })
+}
+
+/// 生产 runner 上下文 + 单一 AtMention 中间件。
+async fn context_with(
+    cwd: &Path,
+    middleware: AtMentionMiddleware,
+) -> (StageContext, tempfile::TempDir) {
+    let session = Session::new(
+        Arc::from(cwd.to_str().unwrap()),
+        FrozenContext::builder().build(),
+        None,
+    );
+    let mut ctx = StageContext::builder(
+        session.start_turn(),
+        session.transcript(),
+        session.queue().clone(),
+    )
+    .build();
+    let fixture = work_fixture::bind(&mut ctx).await;
+    let mut chain = MiddlewareChain::new();
+    chain.add(Box::new(middleware));
+    ctx.runtime.middleware_chain = Arc::new(chain);
+    (ctx, fixture)
+}
+
+/// 走生产 Receive：把入队消息写入 transcript 并返回本批身份。
+async fn receive(ctx: &StageContext) -> Vec<peri_agent::messages::MessageId> {
+    run_receive(ReceiveInput {
+        context: ctx.clone(),
+    })
+    .await
+    .unwrap()
+    .input_message_ids
 }
 
 #[tokio::test]
-async fn test_mention_injects_read_tool() {
-    // @test.rs 注入 Ai[ToolUse] + Tool[ToolResult] 共 2 条消息
+async fn no_mentions_no_injection() {
     let dir = tempdir().unwrap();
-    fs::write(dir.path().join("test.rs"), "fn main() {}\n").unwrap();
-    let mw = AtMentionMiddleware::new(dir.path().to_path_buf());
-    let mut state = AgentState::default();
-    state.cwd = dir.path().to_string_lossy().to_string();
-    state.add_message(BaseMessage::human("看看 @test.rs"));
-
-    mw.before_agent(&mut state).await.unwrap();
-
-    // 1 Human + 1 Ai + 1 Tool = 3
-    assert_eq!(state.messages().len(), 3);
-
-    // 第二条是 Ai，包含 ToolUse
-    let ai_msg = &state.messages()[1];
-    assert!(matches!(ai_msg, BaseMessage::Ai { .. }));
-    assert!(ai_msg.has_tool_calls());
-
-    // 第三条是 Tool 结果
-    let tool_msg = &state.messages()[2];
-    assert!(matches!(tool_msg, BaseMessage::Tool { .. }));
-    let tool_content = tool_msg.content();
-    assert!(tool_content.starts_with("→ test.rs"));
-    assert!(tool_content.contains("fn main() {}"));
+    let mw = AtMentionMiddleware::new(reader(&[]));
+    let (ctx, _fixture) = context_with(dir.path(), mw).await;
+    let input = BaseMessage::human("你好世界");
+    ctx.session.queue.push(QueuedMessage::prompt(
+        MessageSource::UserInput,
+        input.clone(),
+    ));
+    let ids = receive(&ctx).await;
+    run_before_agent(&ctx, &ids).await.unwrap();
+    assert_eq!(ctx.session.transcript.read().len(), 1);
 }
 
-/// [回归测试] 批次前面的 @path 仍应读取，历史引用不应随新批次重复注入。
 #[tokio::test]
-async fn test_mention_batch_reads_first_input_without_replaying_history() {
+async fn mention_uses_workspace_content_even_with_different_host_file() {
     let dir = tempdir().unwrap();
-    fs::write(dir.path().join("old.txt"), "不得重新读取的旧内容").unwrap();
-    fs::write(dir.path().join("fresh.txt"), "本批需要读取的内容").unwrap();
+    std::fs::write(dir.path().join("test.rs"), "host secret").unwrap();
+    let mw = AtMentionMiddleware::new(reader(&[("test.rs", "remote content")]));
+    let (ctx, _fixture) = context_with(dir.path(), mw).await;
+    let input = BaseMessage::human("看看 @test.rs");
+    ctx.session.queue.push(QueuedMessage::prompt(
+        MessageSource::UserInput,
+        input.clone(),
+    ));
+    let ids = receive(&ctx).await;
+    run_before_agent(&ctx, &ids).await.unwrap();
+
+    let transcript = ctx.session.transcript.read();
+    let messages = transcript.visible_messages();
+    assert_eq!(messages.len(), 3);
+    assert!(messages[1].has_tool_calls());
+    let tool_use = serde_json::to_value(messages[1]).unwrap();
+    assert_eq!(tool_use["content"][0]["name"], "workspace/readMention");
+    let output = messages[2].content();
+    assert!(output.contains("remote content"));
+    assert!(!output.contains("host secret"));
+}
+
+#[tokio::test]
+async fn unavailable_workspace_never_reads_host_file() {
+    let dir = tempdir().unwrap();
+    std::fs::write(dir.path().join("test.rs"), "host secret").unwrap();
+    let mw = AtMentionMiddleware::new(reader(&[]));
+    let (ctx, _fixture) = context_with(dir.path(), mw).await;
+    let input = BaseMessage::human("看看 @test.rs");
+    ctx.session.queue.push(QueuedMessage::prompt(
+        MessageSource::UserInput,
+        input.clone(),
+    ));
+    let ids = receive(&ctx).await;
+    run_before_agent(&ctx, &ids).await.unwrap();
+
+    let transcript = ctx.session.transcript.read();
+    assert_eq!(transcript.visible_messages().len(), 1);
+    assert_eq!(transcript.visible_messages()[0].content(), "看看 @test.rs");
+}
+
+/// 无批次身份的 legacy 适配器：不注入、也不扫描历史最后一条 Human。
+#[tokio::test]
+async fn adapter_without_batch_identity_never_scans_history() {
+    let mw = AtMentionMiddleware::new(reader(&[("old.txt", "历史内容不应被注入")]));
+    let mut state = AgentState::default();
+    state.add_message(BaseMessage::human("旧输入 @old.txt"));
+    mw.before_input(&mut state).await.unwrap();
+    assert_eq!(state.messages().len(), 1);
+    assert_eq!(state.messages()[0].content(), "旧输入 @old.txt");
+}
+
+#[tokio::test]
+async fn range_mention_records_actual_workspace_request_and_line_prefix() {
+    let dir = tempdir().unwrap();
+    let mw = AtMentionMiddleware::new(reader(&[("sample.txt", "second\nthird")]));
+    let (ctx, _fixture) = context_with(dir.path(), mw).await;
+    let input = BaseMessage::human("看 @sample.txt#L2-3");
+    ctx.session.queue.push(QueuedMessage::prompt(
+        MessageSource::UserInput,
+        input.clone(),
+    ));
+    let ids = receive(&ctx).await;
+    run_before_agent(&ctx, &ids).await.unwrap();
+
+    let transcript = ctx.session.transcript.read();
+    assert_eq!(
+        transcript.visible_messages()[2].content(),
+        "→ sample.txt (L2-L3)\nsecond\nthird"
+    );
+    let tool_use = serde_json::to_value(transcript.visible_messages()[1]).unwrap();
+    assert_eq!(tool_use["content"][0]["name"], "workspace/readMention");
+    assert_eq!(tool_use["content"][0]["input"]["lineStart"], 2);
+    assert_eq!(tool_use["content"][0]["input"]["lineEnd"], 3);
+}
+
+/// 单项正文超字节预算：截断必须带显式说明，且给出可继续读取的位置。
+#[tokio::test]
+async fn oversized_single_line_is_byte_budgeted_with_explicit_notice() {
+    let dir = tempdir().unwrap();
+    let huge_line = "x".repeat(MAX_MENTION_CONTENT_BYTES * 2);
+    let mw = AtMentionMiddleware::new(reader(&[("huge.txt", &huge_line)]));
+    let (ctx, _fixture) = context_with(dir.path(), mw).await;
+    let input = BaseMessage::human("看 @huge.txt");
+    ctx.session.queue.push(QueuedMessage::prompt(
+        MessageSource::UserInput,
+        input.clone(),
+    ));
+    let ids = receive(&ctx).await;
+    run_before_agent(&ctx, &ids).await.unwrap();
+
+    let transcript = ctx.session.transcript.read();
+    let output = transcript.visible_messages()[2].content();
+    assert!(
+        output.len() < MAX_MENTION_CONTENT_BYTES + 512,
+        "注入正文必须落在字节预算内：{}",
+        output.len()
+    );
+    assert!(
+        output.contains("单行超过") && output.contains("UTF-8 边界截断"),
+        "单行超预算必须显式说明：{output}"
+    );
+    assert!(output.contains("请用更小的行范围重新读取"));
+}
+
+/// 多行正文超字节预算：截断落在行边界并给出续读行号。
+#[tokio::test]
+async fn oversized_multiline_content_reports_resume_line() {
+    let dir = tempdir().unwrap();
+    let line = "y".repeat(1024);
+    let content: String = (0..64).map(|_| format!("{line}\n")).collect();
+    let mw = AtMentionMiddleware::new(reader(&[("multi.txt", &content)]));
+    let (ctx, _fixture) = context_with(dir.path(), mw).await;
+    let input = BaseMessage::human("看 @multi.txt");
+    ctx.session.queue.push(QueuedMessage::prompt(
+        MessageSource::UserInput,
+        input.clone(),
+    ));
+    let ids = receive(&ctx).await;
+    run_before_agent(&ctx, &ids).await.unwrap();
+
+    let transcript = ctx.session.transcript.read();
+    let output = transcript.visible_messages()[2].content();
+    assert!(
+        output.contains("从 L32 继续读取"),
+        "按行截断必须给出可继续读取位置：{output}"
+    );
+    assert!(output.len() < MAX_MENTION_CONTENT_BYTES + 512);
+}
+
+/// [回归测试] 整批累计超预算时，包含工具调用和路径的完整消息有界；
+/// 后续提及不读，并用一条摘要说明省略数量。
+#[tokio::test]
+async fn batch_budget_stops_reads_and_reports_not_loaded() {
+    let dir = tempdir().unwrap();
+    let reads = Arc::new(AtomicUsize::new(0));
+    // 每项 20 KiB：若只计算正文，后续大量路径和回执仍能无限追加。
+    let body = "z".repeat(20 * 1024);
+    let entries: Vec<(String, String)> = (0..20)
+        .map(|index| (format!("f{index}.txt"), body.clone()))
+        .collect();
+    let refs: Vec<(&str, &str)> = entries
+        .iter()
+        .map(|(path, content)| (path.as_str(), content.as_str()))
+        .collect();
+    let mw = AtMentionMiddleware::new(counting_reader(&refs, &reads));
+    let (ctx, _fixture) = context_with(dir.path(), mw).await;
+    let mention = (0..20)
+        .map(|index| format!("@f{index}.txt"))
+        .collect::<Vec<_>>()
+        .join(" ");
+    let input = BaseMessage::human(format!("看 {mention}"));
+    ctx.session.queue.push(QueuedMessage::prompt(
+        MessageSource::UserInput,
+        input.clone(),
+    ));
+    let ids = receive(&ctx).await;
+    run_before_agent(&ctx, &ids).await.unwrap();
+
+    let transcript = ctx.session.transcript.read();
+    let messages = transcript.visible_messages();
+    let tool_use_count: usize = messages
+        .iter()
+        .filter(|message| message.has_tool_calls())
+        .map(|message| message.tool_calls().len())
+        .sum();
+    assert!(tool_use_count < 20, "预算耗尽后不再合成每项调用");
+    let result_count = messages
+        .iter()
+        .filter(|message| matches!(message, BaseMessage::Tool { .. }))
+        .count();
+    assert_eq!(result_count, tool_use_count, "每次调用仍有对应结果");
+    let injected_bytes: usize = messages[1..]
+        .iter()
+        .map(|message| serde_json::to_vec(message).unwrap().len())
+        .sum();
+    assert!(
+        injected_bytes <= MAX_BATCH_MENTION_BYTES,
+        "整批注入必须落在批预算内：{injected_bytes}"
+    );
+    assert!(
+        reads.load(Ordering::SeqCst) < 20,
+        "预算闸门必须先于读取，实际读取量必须受限：{}",
+        reads.load(Ordering::SeqCst)
+    );
+    assert!(
+        messages
+            .iter()
+            .any(|message| message.content().contains("个 @mention 未载入")),
+        "预算耗尽的提及必须给出显式省略摘要"
+    );
+}
+
+/// [回归测试] 多条 Human 共享条目上限，短路径不能生成无界工具消息。
+#[tokio::test]
+async fn batch_item_limit_counts_across_inputs() {
+    let dir = tempdir().unwrap();
+    let reads = Arc::new(AtomicUsize::new(0));
+    let entries: Vec<(String, String)> = (0..50)
+        .map(|index| (format!("f{index}.txt"), "ok".to_string()))
+        .collect();
+    let refs: Vec<(&str, &str)> = entries
+        .iter()
+        .map(|(path, content)| (path.as_str(), content.as_str()))
+        .collect();
+    let mw = AtMentionMiddleware::new(counting_reader(&refs, &reads));
+    let (ctx, _fixture) = context_with(dir.path(), mw).await;
+    for range in [0..25, 25..50] {
+        let mentions = range
+            .map(|index| format!("@f{index}.txt"))
+            .collect::<Vec<_>>()
+            .join(" ");
+        ctx.session.queue.push(QueuedMessage::prompt(
+            MessageSource::UserInput,
+            BaseMessage::human(mentions),
+        ));
+    }
+    let ids = receive(&ctx).await;
+    run_before_agent(&ctx, &ids).await.unwrap();
+
+    let transcript = ctx.session.transcript.read();
+    let messages = transcript.visible_messages();
+    let calls: usize = messages
+        .iter()
+        .map(|message| message.tool_calls().len())
+        .sum();
+    assert_eq!(calls, MAX_BATCH_MENTION_ITEMS);
+    assert_eq!(reads.load(Ordering::SeqCst), MAX_BATCH_MENTION_ITEMS);
+    assert!(messages
+        .iter()
+        .any(|message| message.content().contains("18 个 @mention 未载入")));
+    let injected_bytes: usize = messages[2..]
+        .iter()
+        .map(|message| serde_json::to_vec(message).unwrap().len())
+        .sum();
+    assert!(injected_bytes <= MAX_BATCH_MENTION_BYTES);
+}
+
+/// [回归测试] 极长路径的回执和工具参数也计入预算，不能额外放大模型上下文。
+#[tokio::test]
+async fn long_path_is_omitted_without_workspace_read() {
+    let dir = tempdir().unwrap();
+    let reads = Arc::new(AtomicUsize::new(0));
+    let path = "p".repeat(MAX_BATCH_MENTION_BYTES);
+    let mw = AtMentionMiddleware::new(counting_reader(&[], &reads));
+    let (ctx, _fixture) = context_with(dir.path(), mw).await;
+    ctx.session.queue.push(QueuedMessage::prompt(
+        MessageSource::UserInput,
+        BaseMessage::human(format!("@\"{path}\"")),
+    ));
+    let ids = receive(&ctx).await;
+    run_before_agent(&ctx, &ids).await.unwrap();
+
+    let transcript = ctx.session.transcript.read();
+    let messages = transcript.visible_messages();
+    assert_eq!(reads.load(Ordering::SeqCst), 0);
+    assert_eq!(messages.len(), 2);
+    assert!(messages[1].content().contains("1 个 @mention 未载入"));
+    assert!(serde_json::to_vec(messages[1]).unwrap().len() <= MAX_BATCH_MENTION_BYTES);
+}
+
+/// 同一 loop 的中途批次：只处理本批新输入，不重读历史。
+#[tokio::test]
+async fn mid_loop_batch_prepares_only_new_inputs() {
+    let dir = tempdir().unwrap();
+    let reads = Arc::new(AtomicUsize::new(0));
+    let mw = AtMentionMiddleware::new(counting_reader(
+        &[("first.txt", "first body"), ("steered.txt", "steered body")],
+        &reads,
+    ));
+    let (ctx, _fixture) = context_with(dir.path(), mw).await;
+    let first = BaseMessage::human("看 @first.txt");
+    ctx.session.queue.push(QueuedMessage::prompt(
+        MessageSource::UserInput,
+        first.clone(),
+    ));
+    let first_ids = receive(&ctx).await;
+    run_before_agent(&ctx, &first_ids).await.unwrap();
+    assert_eq!(reads.load(Ordering::SeqCst), 1);
+    // 首批注入恰有一次（此处快照：后续 Receive 会镜像已提交投影，可能重放
+    // 同一批消息，不是本中间件的重复注入）。
+    assert_eq!(
+        ctx.session
+            .transcript
+            .read()
+            .visible_messages()
+            .iter()
+            .filter(|message| message.content().contains("first body"))
+            .count(),
+        1,
+        "首批内容只注入一次"
+    );
+
+    // 中途批次（steering / SDK 追加）：Receive 会把新输入写进 transcript 并把
+    // 本批身份交给 `run_before_input`（此处直接构造该批次，同一生产入口）。
+    let steering = BaseMessage::human("再补一份 @steered.txt");
+    ctx.session.transcript.write().append(steering.clone());
+    run_before_input(&ctx, &[steering.id()]).await.unwrap();
+
+    let before = {
+        let transcript = ctx.session.transcript.read();
+        let messages = transcript.visible_messages();
+        assert_eq!(
+            reads.load(Ordering::SeqCst),
+            2,
+            "首批与中途批次各读一次，历史不重读"
+        );
+        assert!(
+            messages
+                .iter()
+                .any(|message| message.content().contains("first body")),
+            "首批内容仍在会话里"
+        );
+        assert_eq!(
+            messages
+                .iter()
+                .filter(|message| message.content().contains("steered body"))
+                .count(),
+            1,
+            "中途批次内容必须注入"
+        );
+        // 纯工具续跑（空批次）不再注入。
+        messages.len()
+    };
+    run_before_input(&ctx, &[]).await.unwrap();
+    assert_eq!(
+        ctx.session.transcript.read().visible_messages().len(),
+        before
+    );
+}
+
+/// Batch input is read once; historic @path text is not replayed.
+#[tokio::test]
+async fn mention_batch_reads_first_input_without_replaying_history() {
+    let dir = tempdir().unwrap();
     let old = BaseMessage::human("旧输入 @old.txt");
     let first = BaseMessage::human("请查看 @fresh.txt 和 @missing.txt");
     let last = BaseMessage::human("普通文本");
@@ -81,13 +491,18 @@ async fn test_mention_batch_reads_first_input_without_replaying_history() {
             input.clone(),
         ));
     }
-    let mut ctx = StageContext::new(
+    let mut ctx = StageContext::builder(
         session.start_turn(),
         session.transcript(),
         session.queue().clone(),
-    );
+    )
+    .build();
+    let _work_fixture = work_fixture::bind(&mut ctx).await;
     let mut chain = MiddlewareChain::new();
-    chain.add(Box::new(AtMentionMiddleware::new(dir.path().to_path_buf())));
+    chain.add(Box::new(AtMentionMiddleware::new(reader(&[(
+        "fresh.txt",
+        "本批需要读取的内容",
+    )]))));
     ctx.runtime.middleware_chain = Arc::new(chain);
     let received = run_receive(ReceiveInput {
         context: ctx.clone(),
@@ -99,25 +514,20 @@ async fn test_mention_batch_reads_first_input_without_replaying_history() {
         .unwrap();
     let transcript = ctx.session.transcript.read();
     let messages = transcript.visible_messages();
-    assert_eq!(messages.len(), 6, "只为可读的新引用注入一对工具消息");
-    assert!(matches!(messages[4], BaseMessage::Ai { .. }));
+    assert_eq!(messages.len(), 6);
     assert!(messages[4].has_tool_calls());
-    assert!(matches!(messages[5], BaseMessage::Tool { .. }));
     assert!(messages[5].content().contains("本批需要读取的内容"));
-    assert!(!messages[5].content().contains("不得重新读取的旧内容"));
     for original in [&old, &first, &last] {
         assert_eq!(
             serde_json::to_value(transcript.get(original.id()).unwrap().message()).unwrap(),
             serde_json::to_value(original).unwrap(),
-            "每条用户消息保留原内容和身份"
         );
     }
 }
 
 #[tokio::test]
-async fn test_mention_explicit_empty_batch_does_not_read_history() {
+async fn explicit_empty_batch_does_not_read_history() {
     let dir = tempdir().unwrap();
-    fs::write(dir.path().join("old.txt"), "不应注入的旧内容").unwrap();
     let original = BaseMessage::human("旧输入 @old.txt");
     let session = Session::new(
         Arc::from(dir.path().to_str().unwrap()),
@@ -125,17 +535,21 @@ async fn test_mention_explicit_empty_batch_does_not_read_history() {
         None,
     );
     session.transcript().write().append(original.clone());
-    let mut ctx = StageContext::new(
+    let mut ctx = StageContext::builder(
         session.start_turn(),
         session.transcript(),
         session.queue().clone(),
-    );
+    )
+    .build();
+    let _work_fixture = work_fixture::bind(&mut ctx).await;
     let mut chain = MiddlewareChain::new();
-    chain.add(Box::new(AtMentionMiddleware::new(dir.path().to_path_buf())));
+    chain.add(Box::new(AtMentionMiddleware::new(reader(&[(
+        "old.txt", "not read",
+    )]))));
     ctx.runtime.middleware_chain = Arc::new(chain);
     run_before_agent(&ctx, &[]).await.unwrap();
     let transcript = ctx.session.transcript.read();
-    assert_eq!(transcript.len(), 1, "空批次不回退读取旧消息中的引用");
+    assert_eq!(transcript.len(), 1);
     assert_eq!(
         serde_json::to_value(transcript.get(original.id()).unwrap().message()).unwrap(),
         serde_json::to_value(&original).unwrap()

@@ -4,19 +4,17 @@
 //! 业务函数）归实现方本模块。宿主装配点构造本模块实现后 upcast 注入。
 
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 
-use peri_acp_types::agents::AgentCapability;
 use peri_acp_types::event_data::PluginSnapshotEntry;
 use peri_acp_types::hooks::SettingsHooksPort;
 use peri_acp_types::plugin::{InstallScope, InstalledPlugin, PluginManagerPort};
-use peri_acp_types::ports::SkillsPort;
-use peri_acp_types::skills::{SkillMetadata, SkillRoot};
 
 use crate::plugin::{
-    cleanup_orphaned_plugins, install_plugin, load_installed_plugins, load_known_marketplaces,
-    parse_marketplace_input, remove_from_enabled_plugins, save_known_marketplaces,
-    uninstall_plugin, update_enabled_plugins, update_plugin, KnownMarketplace, MarketplaceManager,
-    MarketplaceSource,
+    cleanup_orphaned_plugins, install_plugin, load_enabled_plugins, load_installed_plugins,
+    load_known_marketplaces, parse_marketplace_input, remove_from_enabled_plugins,
+    save_known_marketplaces, uninstall_plugin, update_enabled_plugins, update_plugin,
+    KnownMarketplace, MarketplaceManager, MarketplaceSource,
 };
 
 /// 插件管理端口实现：包装 `install_plugin` / `uninstall_plugin` /
@@ -34,16 +32,53 @@ impl PluginManagerPort for PluginManager {
         scope: InstallScope,
         cache_dir: &Path,
         claude_dir: &Path,
+        project_dir: Option<&Path>,
     ) -> Result<InstalledPlugin, String> {
-        install_plugin(name, marketplace, scope, cache_dir, claude_dir, None)
+        install_plugin(name, marketplace, scope, cache_dir, claude_dir, project_dir)
             .await
             .map_err(|e| e.to_string())
     }
 
-    async fn uninstall(&self, plugin_id: &str, claude_dir: &Path) -> Result<(), String> {
-        uninstall_plugin(plugin_id, claude_dir, None)
+    async fn uninstall(
+        &self,
+        plugin_id: &str,
+        scope: InstallScope,
+        claude_dir: &Path,
+        project_dir: Option<&Path>,
+    ) -> Result<(), String> {
+        uninstall_plugin(plugin_id, scope, claude_dir, project_dir)
             .await
             .map_err(|e| e.to_string())
+    }
+
+    fn installation_scope(
+        &self,
+        claude_dir: &Path,
+        plugin: &peri_acp_types::plugin::LoadedPlugin,
+    ) -> Result<Option<InstallScope>, String> {
+        let installed =
+            load_installed_plugins(Some(&claude_dir.join("plugins/installed_plugins.json")))
+                .map_err(|error| error.to_string())?;
+        let mut records = installed.plugins.iter().filter(|record| {
+            record.id == format!("{}@{}", plugin.name, plugin.marketplace)
+                && record.install_path == plugin.install_path
+        });
+        let Some(record) = records.next() else {
+            return Ok(None);
+        };
+        if (record.scope == InstallScope::User && record.project_path.is_some())
+            || (record.scope != InstallScope::User
+                && !record
+                    .project_path
+                    .as_deref()
+                    .is_some_and(|directory| Path::new(directory).is_absolute()))
+        {
+            return Err("plugin installation record has an invalid scope directory".into());
+        }
+        if records.next().is_some() {
+            return Err("plugin installation scope is ambiguous".into());
+        }
+        Ok(Some(record.scope))
     }
 
     fn set_enabled(
@@ -51,12 +86,36 @@ impl PluginManagerPort for PluginManager {
         plugin_id: &str,
         scope: InstallScope,
         claude_dir: &Path,
+        project_dir: Option<&Path>,
         enable: bool,
     ) -> Result<(), String> {
+        let installed =
+            load_installed_plugins(Some(&claude_dir.join("plugins/installed_plugins.json")))
+                .map_err(|error| error.to_string())?;
+        let writable = installed
+            .plugins
+            .iter()
+            .filter(|record| {
+                record.id == plugin_id
+                    && record.scope == scope
+                    && if scope == InstallScope::User {
+                        record.project_path.is_none()
+                    } else {
+                        record.project_path.as_deref().map(Path::new) == project_dir
+                            && project_dir.is_some()
+                    }
+            })
+            .count();
+        if writable > 1 {
+            return Err("plugin installation scope is ambiguous".into());
+        }
+        if writable == 0 {
+            return Err("plugin has no writable installation record in the requested scope".into());
+        }
         if enable {
-            update_enabled_plugins(plugin_id, scope, claude_dir, None)
+            update_enabled_plugins(plugin_id, scope, claude_dir, project_dir)
         } else {
-            remove_from_enabled_plugins(plugin_id, &scope, claude_dir, None)
+            remove_from_enabled_plugins(plugin_id, &scope, claude_dir, project_dir)
         }
         .map_err(|e| e.to_string())
     }
@@ -68,10 +127,12 @@ impl PluginManagerPort for PluginManager {
     async fn update(
         &self,
         plugin_id: &str,
+        scope: InstallScope,
         cache_dir: &Path,
         claude_dir: &Path,
+        project_dir: Option<&Path>,
     ) -> Result<InstalledPlugin, String> {
-        update_plugin(plugin_id, cache_dir, claude_dir, None)
+        update_plugin(plugin_id, scope, cache_dir, claude_dir, project_dir)
             .await
             .map_err(|e| e.to_string())
     }
@@ -90,13 +151,14 @@ impl PluginManagerPort for PluginManager {
         Ok(manifest.plugins.len())
     }
 
-    fn snapshot(&self, claude_dir: &Path) -> Vec<PluginSnapshotEntry> {
-        let loaded = crate::plugin::load_enabled_plugins_aggregated(claude_dir, None);
+    fn snapshot(&self, claude_dir: &Path, project_dir: Option<&Path>) -> Vec<PluginSnapshotEntry> {
+        let loaded = crate::plugin::load_enabled_plugins_aggregated(claude_dir, project_dir);
 
         let plugins_path = claude_dir.join("plugins").join("installed_plugins.json");
-        let installed = crate::plugin::load_installed_plugins(Some(&plugins_path))
-            .ok()
-            .unwrap_or_default();
+        let installed = crate::plugin::load_installed_plugins(Some(&plugins_path));
+        if let Err(error) = &installed {
+            tracing::error!(%error, "Plugin snapshot installation records failed");
+        }
 
         loaded
             .plugins
@@ -104,7 +166,7 @@ impl PluginManagerPort for PluginManager {
             .map(|p| PluginSnapshotEntry {
                 name: p.manifest.name.clone(),
                 version: p.manifest.version.clone(),
-                enabled: installed.plugins.iter().any(|ip| ip.name == p.name),
+                enabled: true,
                 root: p.install_path.to_string_lossy().to_string(),
                 description: p.manifest.description.clone(),
                 marketplace: p.marketplace.clone(),
@@ -114,12 +176,19 @@ impl PluginManagerPort for PluginManager {
                 agents_count: p.agents_dirs.len(),
                 mcp_count: p.mcp_servers.len(),
                 install_scope: installed
-                    .plugins
-                    .iter()
-                    .find(|ip| ip.name == p.name)
+                    .as_ref()
+                    .ok()
+                    .and_then(|installed| {
+                        installed.plugins.iter().find(|ip| {
+                            ip.id == format!("{}@{}", p.name, p.marketplace)
+                                && ip.install_path == p.install_path
+                                && (ip.scope == InstallScope::User
+                                    || ip.project_path.as_deref().map(Path::new) == project_dir)
+                        })
+                    })
                     .map(|ip| format!("{:?}", ip.scope).to_lowercase())
                     .unwrap_or_default(),
-                load_error: None,
+                load_error: installed.as_ref().err().map(ToString::to_string),
             })
             .collect()
     }
@@ -156,7 +225,7 @@ impl PluginManagerPort for PluginManager {
                 .map_err(|e| e.to_string())?;
         let actual_name = manifest.name;
 
-        let now = chrono::Local::now().format("%Y-%m-%dT%H:%M:%S").to_string();
+        let now = peri_time::now_utc_rfc3339();
         marketplaces.push(KnownMarketplace {
             source: marketplace_source,
             install_location,
@@ -176,6 +245,12 @@ impl PluginManagerPort for PluginManager {
         let removed_location = marketplaces
             .iter()
             .find(|mkt| MarketplaceManager::extract_name(&mkt.source) == name)
+            .filter(|marketplace| {
+                !matches!(
+                    &marketplace.source,
+                    MarketplaceSource::File { .. } | MarketplaceSource::Directory { .. }
+                )
+            })
             .map(|km| km.install_location.clone());
 
         let filtered: Vec<KnownMarketplace> = marketplaces
@@ -190,8 +265,17 @@ impl PluginManagerPort for PluginManager {
         save_known_marketplaces(&filtered, None).map_err(|e| e.to_string())?;
         if let Some(loc) = removed_location {
             let install_path = std::path::Path::new(&loc);
-            if !loc.is_empty() && install_path.exists() {
-                std::fs::remove_dir_all(install_path).map_err(|e| e.to_string())?;
+            let cache_dir = self.cache_dir();
+            if install_path.exists() && cache_dir.exists() {
+                let cache_root = cache_dir
+                    .canonicalize()
+                    .map_err(|error| error.to_string())?;
+                let installed = install_path
+                    .canonicalize()
+                    .map_err(|error| error.to_string())?;
+                if installed.starts_with(&cache_root) && installed != cache_root {
+                    std::fs::remove_dir_all(installed).map_err(|error| error.to_string())?;
+                }
             }
         }
         Ok(())
@@ -212,7 +296,7 @@ impl PluginManagerPort for PluginManager {
                 .map_err(|e| e.to_string())?;
 
         let mut updated = marketplaces;
-        let now = chrono::Local::now().format("%Y-%m-%dT%H:%M:%S").to_string();
+        let now = peri_time::now_utc_rfc3339();
         updated[entry_index].install_location = install_location;
         updated[entry_index].last_updated = now;
 
@@ -399,9 +483,39 @@ impl PluginManagerPort for PluginManager {
             "discover": discover,
         })
     }
+
+    fn claude_home(&self) -> PathBuf {
+        crate::plugin::claude_home()
+    }
+
+    fn enabled_plugin_commands(
+        &self,
+        claude_dir: &Path,
+        cwd: Option<&Path>,
+    ) -> Result<Vec<peri_acp_types::plugin::CommandEntry>, String> {
+        load_enabled_plugins(claude_dir, cwd)
+            .map(|plugins| plugins.into_iter().flat_map(|p| p.commands).collect())
+            .map_err(|error| error.to_string())
+    }
+
+    fn plugin_route_entries(
+        &self,
+        entries: &[peri_acp_types::plugin::CommandEntry],
+    ) -> Vec<peri_acp_types::command::command_route::RouteEntry> {
+        crate::plugin::plugin_route_entries(entries)
+    }
+
+    fn find_marketplace_json(&self, dir: &Path) -> Option<PathBuf> {
+        crate::plugin::marketplace::find_marketplace_json(dir)
+    }
 }
 
 /// Settings hooks 加载端口实现：包装 `hooks::loader::load_*_settings_hooks`。
+///
+/// 项目 / local 两级带 H4 信任准入：只有显式授权（canonical workspace + 来源身份 +
+/// 来源摘要，见 `peri_config::trust`）命中时才返回 hooks；未信任来源被关闭且可诊断
+/// （warn 不含 hook 正文），不阻断普通会话。global 是用户自己的机器级配置，不参与
+/// workspace 信任判定；信任模块按来源 kind 区分身份，global 授权不会外溢。
 #[derive(Debug, Clone, Copy, Default)]
 pub struct SettingsHooksLoader;
 
@@ -411,36 +525,315 @@ impl SettingsHooksPort for SettingsHooksLoader {
     }
 
     fn project(&self, cwd: &str) -> Vec<peri_acp_types::hooks::RegisteredHook> {
-        crate::hooks::loader::load_settings_project_hooks(cwd)
+        admit_settings_hooks(
+            cwd,
+            peri_config::trust::SettingsSourceKind::Project,
+            crate::hooks::loader::load_settings_project_hooks(cwd),
+        )
     }
 
     fn local(&self, cwd: &str) -> Vec<peri_acp_types::hooks::RegisteredHook> {
-        crate::hooks::loader::load_settings_local_hooks(cwd)
-    }
-}
-
-/// Skills 扫描端口实现：包装 `SkillsMiddleware::resolve_roots_static` /
-/// `scan_skill_roots` / `scan_agents_detailed`。
-#[derive(Debug, Clone, Copy, Default)]
-pub struct SkillsProvider;
-
-impl SkillsPort for SkillsProvider {
-    fn available_skills(&self, cwd: &str, plugin_roots: &[SkillRoot]) -> Vec<SkillMetadata> {
-        let disable_bundled = crate::skills::load_disable_bundled_skills();
-        let skill_roots = crate::SkillsMiddleware::resolve_roots_static(
+        admit_settings_hooks(
             cwd,
-            plugin_roots.to_vec(),
-            disable_bundled,
-        );
-        crate::skills::scan_skill_roots(&skill_roots)
-    }
-
-    fn agents(
-        &self,
-        cwd: &str,
-        extra_dirs: &[PathBuf],
-        include_built_ins: bool,
-    ) -> Vec<(String, String, String, AgentCapability)> {
-        crate::scan_agents_detailed(cwd, extra_dirs, include_built_ins)
+            peri_config::trust::SettingsSourceKind::Local,
+            crate::hooks::loader::load_settings_local_hooks(cwd),
+        )
     }
 }
+
+/// 唯一装配准入（本端口是 `assemble_hook_groups` 的 settings 来源视图）：
+/// 未信任来源在此被排除；无法判定信任时按拒绝收口（fail-closed）。
+fn admit_settings_hooks(
+    cwd: &str,
+    kind: peri_config::trust::SettingsSourceKind,
+    hooks: Vec<peri_acp_types::hooks::RegisteredHook>,
+) -> Vec<peri_acp_types::hooks::RegisteredHook> {
+    if hooks.is_empty() {
+        return hooks;
+    }
+    let binding = match peri_config::trust::settings_binding(Path::new(cwd), kind) {
+        Ok(Some(binding)) => binding,
+        Ok(None) => {
+            tracing::warn!(
+                scope = kind.scope(),
+                "settings hooks skipped: workspace path cannot be canonicalized"
+            );
+            return Vec::new();
+        }
+        Err(error) => {
+            tracing::warn!(
+                scope = kind.scope(),
+                error = %error,
+                "settings hooks skipped: trust binding unavailable"
+            );
+            return Vec::new();
+        }
+    };
+    match peri_config::trust::is_trusted(&binding) {
+        Ok(true) => hooks,
+        Ok(false) => {
+            tracing::warn!(
+                scope = kind.scope(),
+                workspace = %binding.workspace,
+                source = %binding.source,
+                "untrusted settings hooks skipped; grant explicitly before they can run"
+            );
+            Vec::new()
+        }
+        Err(error) => {
+            tracing::warn!(
+                scope = kind.scope(),
+                error = %error,
+                "settings hooks skipped: trust store unavailable"
+            );
+            Vec::new()
+        }
+    }
+}
+
+/// 插件来源 hooks 的来源身份与摘要绑定（M6/H4）。
+///
+/// 身份取自 [`peri_acp_types::plugin::PluginScope`]（安装记录事实：id / origin /
+/// scope / projectPath），**不按插件名或安装路径前缀猜**；摘要覆盖来源身份、插件
+/// 根目录与该插件的 hooks 配置正文——授权后插件 hooks 被修改即失效，需要重新
+/// `peri plugin trust grant`。
+///
+/// `Ok(None)` = workspace 不可规范化（调用方按未信任收口）。字段只含路径与配置
+/// 结构，不含 env / headers / OAuth 内容（ARC-SECRET-001）。
+pub fn plugin_hook_binding(
+    cwd: &Path,
+    plugin: &peri_acp_types::plugin::LoadedPlugin,
+) -> std::io::Result<Option<peri_config::trust::HookTrustEntry>> {
+    let Some(workspace) = peri_config::trust::canonical_workspace(cwd)? else {
+        return Ok(None);
+    };
+    let source = format!("plugin-hooks:{}", plugin.scope.source_identity());
+    let hooks_body = plugin
+        .hooks_config
+        .as_ref()
+        .map(serde_json::to_string)
+        .transpose()
+        .map_err(|error| {
+            std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                format!("plugin hooks config cannot be canonicalized: {error}"),
+            )
+        })?
+        .unwrap_or_default();
+    let digest = peri_config::trust::content_digest(&[
+        &workspace,
+        &source,
+        &plugin.install_path.to_string_lossy(),
+        &hooks_body,
+    ]);
+    Ok(Some(peri_config::trust::HookTrustEntry {
+        workspace,
+        source,
+        digest,
+    }))
+}
+
+/// 插件来源 hooks 的**唯一装配准入**（`assemble_hook_groups` 的插件来源视图）。
+///
+/// 与 settings 来源共用同一条信任门与同一信任文件：逐插件按
+/// [`plugin_hook_binding`] 判定，未信任 / 身份或摘要不可得的插件，其 hooks 整组
+/// 不执行并留下可操作诊断（warn 只含来源身份与 workspace，不含 hook 正文）。
+///
+/// **语义边界**：`trust` 只约束**执行来源**（hooks 是否运行），不等于插件整体
+/// 功能授权——插件的 skills / commands / agents / MCP 面不因未信任而被禁用。
+pub fn admit_plugin_hooks(
+    cwd: &str,
+    plugins: &[peri_acp_types::plugin::LoadedPlugin],
+    hooks: Vec<peri_acp_types::hooks::RegisteredHook>,
+) -> Vec<peri_acp_types::hooks::RegisteredHook> {
+    if hooks.is_empty() {
+        return hooks;
+    }
+    let mut decisions = std::collections::HashMap::new();
+    for plugin in plugins {
+        if plugin.hooks_config.is_none() {
+            continue;
+        }
+        let trusted = match plugin_hook_binding(Path::new(cwd), plugin) {
+            Ok(Some(binding)) => match peri_config::trust::is_trusted(&binding) {
+                Ok(trusted) => trusted,
+                Err(error) => {
+                    tracing::warn!(
+                        plugin = %plugin.name,
+                        source = %binding.source,
+                        error = %error,
+                        "plugin hooks skipped: trust store unavailable"
+                    );
+                    false
+                }
+            },
+            Ok(None) => {
+                tracing::warn!(
+                    plugin = %plugin.name,
+                    "plugin hooks skipped: workspace path cannot be canonicalized"
+                );
+                false
+            }
+            Err(error) => {
+                tracing::warn!(
+                    plugin = %plugin.name,
+                    error = %error,
+                    "plugin hooks skipped: trust binding unavailable"
+                );
+                false
+            }
+        };
+        if !trusted {
+            tracing::warn!(
+                plugin = %plugin.name,
+                plugin_id = %plugin.scope.plugin_id,
+                scope = plugin.scope.install_scope.as_str(),
+                source = %plugin.scope.source_identity(),
+                "untrusted plugin hooks skipped; run `peri plugin trust grant --plugin <id>` \
+                 in this workspace to allow them to run"
+            );
+        }
+        decisions.insert((plugin.scope.clone(), plugin.install_path.clone()), trusted);
+    }
+    let mut admitted = Vec::new();
+    let mut unknown = 0usize;
+    for hook in hooks {
+        let decision = hook
+            .plugin_source
+            .as_ref()
+            .and_then(|source| decisions.get(&(source.clone(), hook.plugin_root.clone())));
+        match decision {
+            Some(true) => admitted.push(hook),
+            Some(false) => {}
+            None => {
+                // 来源身份不可得 ⇒ 不执行（fail-closed），且必须可见。
+                unknown += 1;
+                tracing::warn!(
+                    plugin = %hook.plugin_name,
+                    root = %hook.plugin_root.display(),
+                    "plugin hook skipped: no plugin source identity for this hook"
+                );
+            }
+        }
+    }
+    if unknown > 0 {
+        tracing::warn!(
+            skipped = unknown,
+            "plugin hooks skipped without source identity"
+        );
+    }
+    admitted
+}
+
+/// Agent 候选目录端口实现（W5）：对会话级 MCP Agent registry 的只读投影。
+///
+/// 唯一数据源是 builtin `workspace` 实例的 `resources/list`（本地三来源
+/// project / plugin / builtin；E13 优先级去重；builtin 开关由调用方传入）。
+/// 未绑定 registry（面未装配 / 实例被关闭）⇒ 空目录：**不回落磁盘**
+/// （X4/J5）。
+///
+/// 绑定（[`AgentCatalogProvider::bind`]）由本 crate 的装配点（
+/// `assembly/preparation.rs`）在构造 registry 后单次完成——ACP 侧只持有
+/// `Arc<dyn AgentCatalogPort>` 句柄，不感知 registry 类型（§0 依赖方向）。
+#[derive(Default)]
+pub struct AgentCatalogProvider {
+    registry: parking_lot::RwLock<Option<Arc<crate::mcp::McpAgentRegistry>>>,
+}
+
+impl AgentCatalogProvider {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// 绑定会话级 Agent registry（装配点调用；覆盖式，最后一次生效）。
+    pub fn bind(&self, registry: Arc<crate::mcp::McpAgentRegistry>) {
+        *self.registry.write() = Some(registry);
+    }
+}
+
+impl peri_acp_types::ports::AgentCatalogPort for AgentCatalogProvider {
+    fn as_any(&self) -> &dyn std::any::Any {
+        self
+    }
+
+    fn catalog(&self, include_builtin: bool) -> Vec<peri_acp_types::agents::AgentCatalogEntry> {
+        self.registry
+            .read()
+            .as_ref()
+            .map(|registry| {
+                registry
+                    .local_catalog(include_builtin)
+                    .into_iter()
+                    .map(|entry| entry.catalog_entry())
+                    .collect()
+            })
+            .unwrap_or_default()
+    }
+}
+
+/// 会话创建期的**定点绑定**：把池还原成 registry 并绑到目录端口上（W5 / P0）。
+///
+/// 存在理由是渲染与装配的时序差：冻结 system prompt 的 `{{available_agents}}`
+/// 段在会话创建期渲染（`session/frozen.rs` 经端口读候选），而 turn 级装配点
+/// （`assembly/preparation.rs::resolve_ports`）要等首轮装配才 bind——不在这里
+/// 补齐，新建会话的目录恒为空。调用点见
+/// `peri-acp` 的 `host/workspace.rs::assemble_with_frozen`（new / load / resume /
+/// fork 的共同装配点，冻结渲染发生在其返回之后）。
+///
+/// 与 turn 级 bind 共用**同一构造入口**
+/// [`crate::mcp::McpAgentRegistry::for_session`]（会话过滤 + 关闭集派生的本地面
+/// 关闭位，两侧同源），覆盖式（最后一次生效）：先绑不改变可见性，只让渲染面提前
+/// 看到目录。ACP 侧仍只持 `Arc<dyn AgentCatalogPort>`，不感知 registry 类型
+/// （§0 依赖方向）。
+///
+/// 返回 `false` 仅表示本函数不适用：池或端口不是本 crate 的具体实现（两条早退各
+/// 留一条可区分原因的 `debug` 记录）。此处**不回落** `McpClientPool::new_pending()`
+/// 等装配降级实例——那是装配路径的兜底，不是本函数的职责；调用方按「面未装配 ⇒
+/// 空目录」的既有语义静默跳过（X4/J5：不回落磁盘）。
+pub fn bind_agent_catalog_from_pool(
+    agent_catalog: &Arc<dyn peri_acp_types::ports::AgentCatalogPort>,
+    pool: &Arc<dyn peri_acp_types::ports::McpPoolPort>,
+    session_id: &str,
+    disabled_middlewares: &std::collections::HashSet<String>,
+) -> bool {
+    let Ok(pool) = Arc::clone(pool).downcast_arc::<crate::mcp::McpClientPool>() else {
+        tracing::debug!(
+            session_id,
+            "冻结目录定点绑定不适用：pool 不是本 crate 的 McpClientPool 实现"
+        );
+        return false;
+    };
+    let Ok(port) = Arc::clone(agent_catalog).downcast_arc::<AgentCatalogProvider>() else {
+        tracing::debug!(
+            session_id,
+            "冻结目录定点绑定不适用：目录端口不是本 crate 的 AgentCatalogProvider 实现"
+        );
+        return false;
+    };
+    port.bind(Arc::new(crate::mcp::McpAgentRegistry::for_session(
+        pool,
+        session_id,
+        disabled_middlewares,
+    )));
+    true
+}
+
+#[cfg(test)]
+/// 测试用空候选目录端口（无 registry 绑定 ⇒ 空目录，不触碰文件系统）。
+#[derive(Default)]
+pub struct NoopAgentCatalog;
+
+#[cfg(test)]
+impl peri_acp_types::ports::AgentCatalogPort for NoopAgentCatalog {
+    fn as_any(&self) -> &dyn std::any::Any {
+        self
+    }
+
+    fn catalog(&self, _include_builtin: bool) -> Vec<peri_acp_types::agents::AgentCatalogEntry> {
+        Vec::new()
+    }
+}
+
+#[cfg(test)]
+#[path = "host_ports_test.rs"]
+mod host_ports_tests;

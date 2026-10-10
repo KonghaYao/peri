@@ -225,9 +225,14 @@ async fn test_uninstall_plugin() {
     .await
     .unwrap();
 
-    uninstall_plugin("test-plugin@test-mkt", claude_dir.path(), None)
-        .await
-        .unwrap();
+    uninstall_plugin(
+        "test-plugin@test-mkt",
+        InstallScope::User,
+        claude_dir.path(),
+        None,
+    )
+    .await
+    .unwrap();
 
     let installed = load_installed_plugins(Some(
         &claude_dir
@@ -249,7 +254,13 @@ async fn test_uninstall_plugin() {
 #[tokio::test]
 async fn test_uninstall_plugin_not_found() {
     let claude_dir = tempdir().unwrap();
-    let result = uninstall_plugin("nonexistent@test", claude_dir.path(), None).await;
+    let result = uninstall_plugin(
+        "nonexistent@test",
+        InstallScope::User,
+        claude_dir.path(),
+        None,
+    )
+    .await;
     assert!(result.is_err());
 }
 
@@ -272,6 +283,7 @@ async fn test_update_plugin_same_version() {
 
     let result = update_plugin(
         "test-plugin@test-mkt",
+        InstallScope::User,
         cache_dir.path(),
         claude_dir.path(),
         None,
@@ -518,12 +530,12 @@ fn test_match_project_path_exact_match() {
 }
 
 #[test]
-fn test_match_project_path_suffix_match() {
-    assert!(match_project_path(
+fn test_match_project_path_rejects_suffix_match() {
+    assert!(!match_project_path(
         &Some("/home/user/project".into()),
         Some(Path::new("project"))
     ));
-    assert!(match_project_path(
+    assert!(!match_project_path(
         &Some("project".into()),
         Some(Path::new("/home/user/project"))
     ));
@@ -775,48 +787,6 @@ async fn test_cleanup_orphaned_no_marker_not_deleted() {
 }
 
 #[test]
-fn test_generate_synthetic_manifest_lsp() {
-    let dir = tempdir().unwrap();
-    let plugin = crate::plugin::types::MarketplacePlugin {
-        name: "rust-analyzer-lsp".into(),
-        description: "Rust language server".into(),
-        source: serde_json::json!("./plugins/rust-analyzer-lsp"),
-        version: "1.0.0".into(),
-        sha: None,
-        author: None,
-        category: None,
-        homepage: None,
-        tags: None,
-        extra: serde_json::json!({
-            "lspServers": {
-                "rust-analyzer": {
-                    "command": "rust-analyzer",
-                    "extensionToLanguage": { ".rs": "rust" }
-                }
-            }
-        }),
-    };
-
-    generate_synthetic_manifest(dir.path(), &plugin).unwrap();
-
-    let manifest_path = dir.path().join(".claude-plugin").join("plugin.json");
-    assert!(manifest_path.exists());
-
-    let content = std::fs::read_to_string(&manifest_path).unwrap();
-    let manifest: serde_json::Value = serde_json::from_str(&content).unwrap();
-
-    assert_eq!(manifest["name"], "rust-analyzer-lsp");
-    assert_eq!(manifest["version"], "1.0.0");
-    assert_eq!(manifest["description"], "Rust language server");
-
-    let lsp_servers = manifest["lspServers"].as_array().unwrap();
-    assert_eq!(lsp_servers.len(), 1);
-    assert_eq!(lsp_servers[0]["name"], "rust-analyzer");
-    assert_eq!(lsp_servers[0]["command"], "rust-analyzer");
-    assert_eq!(lsp_servers[0]["extensionToLanguage"][".rs"], "rust");
-}
-
-#[test]
 fn test_generate_synthetic_manifest_with_author() {
     let dir = tempdir().unwrap();
     let plugin = crate::plugin::types::MarketplacePlugin {
@@ -841,7 +811,6 @@ fn test_generate_synthetic_manifest_with_author() {
         std::fs::read_to_string(dir.path().join(".claude-plugin").join("plugin.json")).unwrap();
     let manifest: serde_json::Value = serde_json::from_str(&content).unwrap();
     assert_eq!(manifest["author"]["name"], "Test");
-    assert!(manifest.get("lspServers").is_none());
 }
 
 #[test]

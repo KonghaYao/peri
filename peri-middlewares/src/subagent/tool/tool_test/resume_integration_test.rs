@@ -5,26 +5,32 @@ use super::*;
 /// 前 `interrupt_rounds` 次 LLM 调用返回 `AgentError::Interrupted`（模拟中断），
 /// 之后回显最后一条消息（模拟正常完成）。共享计数跨 tool 实例 / 跨恢复生效
 /// ——每次 subagent 执行都会经 llm_factory 创建新实例，计数保持连续。
+#[derive(Clone)]
 struct InterruptThenEchoLLM {
     calls: Arc<std::sync::atomic::AtomicUsize>,
     interrupt_rounds: usize,
 }
 
-#[async_trait::async_trait]
-impl ReactLLM for InterruptThenEchoLLM {
-    async fn generate_reasoning(
+impl InterruptThenEchoLLM {
+    async fn respond(
         &self,
-        messages: &[BaseMessage],
-        _tools: &[&dyn BaseTool],
-        _streaming: Option<StreamingContext>,
-    ) -> peri_agent::error::AgentResult<Reasoning> {
+        request: peri_model::ModelRequest,
+        cancellation: tokio_util::sync::CancellationToken,
+    ) -> Vec<peri_model::ModelResult<peri_model::ModelStreamEvent>> {
+        use crate::subagent::test_support::*;
+        let _ = &cancellation;
+        let messages = base_messages(&request);
+        let defined = defined_tools(&request);
+        let _tools: Vec<&dyn BaseTool> = defined.iter().map(|t| t as &dyn BaseTool).collect();
+
         if self.calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst) < self.interrupt_rounds {
-            return Err(peri_agent::error::AgentError::Interrupted);
+            return vec![Err(peri_model::ModelError::cancelled())];
         }
         let last = messages.last().map(|m| m.content()).unwrap_or_default();
-        Ok(Reasoning::with_answer("", format!("echo: {}", last)))
+        text_events(format!("echo: {}", last))
     }
 }
+crate::subagent::test_support::fixture_model_impl!(InterruptThenEchoLLM);
 
 /// 构造带「前 N 次 Interrupted、之后回显」LLM 的 SubAgentTool（无 bridge/parent）
 fn make_interrupt_tool(
@@ -35,10 +41,13 @@ fn make_interrupt_tool(
         Arc::new(vec![]),
         None,
         Arc::new(move |_: Option<&str>| {
-            Box::new(InterruptThenEchoLLM {
-                calls: Arc::clone(&calls),
-                interrupt_rounds,
-            }) as Box<dyn ReactLLM + Send + Sync>
+            crate::subagent::test_support::fixture_source(
+                std::sync::Arc::new(InterruptThenEchoLLM {
+                    calls: Arc::clone(&calls),
+                    interrupt_rounds,
+                }),
+                "fixture-scripted",
+            )
         }),
         "/tmp".to_string(),
     )
@@ -144,7 +153,7 @@ async fn test_resume_interrupted_then_resumed_across_instances() {
     let store = SessionFixture::open_in(dir.path()).await;
     let cwd = store.workspace_cwd();
     let parent_id = store
-        .create_thread(ThreadMeta::new(cwd.clone()))
+        .create_thread(ThreadMeta::new_at(cwd.clone(), peri_time::now_wall()))
         .await
         .expect("建立父会话失败");
     // 父会话句柄：resume 路径经它校验「owning parent session」
@@ -159,8 +168,8 @@ async fn test_resume_interrupted_then_resumed_across_instances() {
     let t_a = make_interrupt_tool(Arc::clone(&calls), 1)
         .with_session_resources(store.facade())
         .with_parent_thread_id(parent_id.clone())
-        .with_execution_owner(store.execution_owner())
         .with_parent_session(parent.clone());
+    let t_a = with_agent_face(t_a, dir.path()).await;
     let interrupted = t_a
         .invoke(
             serde_json::json!({
@@ -185,8 +194,8 @@ async fn test_resume_interrupted_then_resumed_across_instances() {
     let t_b = make_interrupt_tool(Arc::clone(&calls), 1)
         .with_session_resources(store.facade())
         .with_parent_thread_id(parent_id.clone())
-        .with_execution_owner(store.execution_owner())
         .with_parent_session(parent);
+    let t_b = with_agent_face(t_b, dir.path()).await;
     let result = t_b
         .invoke(
             serde_json::json!({
@@ -228,7 +237,7 @@ async fn test_resume_across_instances_replays_transcript_in_order() {
     let store = SessionFixture::open_in(dir.path()).await;
     let cwd = store.workspace_cwd();
     let parent_id = store
-        .create_thread(ThreadMeta::new(cwd.clone()))
+        .create_thread(ThreadMeta::new_at(cwd.clone(), peri_time::now_wall()))
         .await
         .expect("建立父会话失败");
     // 父会话句柄：resume 路径经它校验「owning parent session」
@@ -244,8 +253,8 @@ async fn test_resume_across_instances_replays_transcript_in_order() {
         let t_a = make_interrupt_tool(Arc::clone(&calls), 1)
             .with_session_resources(store.facade())
             .with_parent_thread_id(parent_id.clone())
-            .with_execution_owner(store.execution_owner())
             .with_parent_session(parent.clone());
+        let t_a = with_agent_face(t_a, dir.path()).await;
         let interrupted = t_a
             .invoke(
                 serde_json::json!({
@@ -271,8 +280,8 @@ async fn test_resume_across_instances_replays_transcript_in_order() {
     let t_b = make_interrupt_tool(Arc::clone(&calls), 1)
         .with_session_resources(store.facade())
         .with_parent_thread_id(parent_id.clone())
-        .with_execution_owner(store.execution_owner())
         .with_parent_session(parent.clone());
+    let t_b = with_agent_face(t_b, dir.path()).await;
     let result = t_b
         .invoke(
             serde_json::json!({
@@ -304,7 +313,7 @@ async fn test_resume_across_instances_replays_transcript_in_order() {
     );
 }
 
-/// 多次恢复：中断 → 恢复 → 再中断 → 再恢复（cancel 前置 → Ok 中断文本，
+/// 多次恢复：中断 → 显式 Reopen → 再中断 → 显式 Reopen（执行中 Interrupted），
 /// 含 `resume with Agent(resume_thread_id:)` 提示）；断言 thread_id 不变、
 /// 最终完成、磁盘 status 收尾 done。
 #[tokio::test]
@@ -314,13 +323,10 @@ async fn test_resume_multiple_times_keeps_thread_id_and_completes() {
     let store = SessionFixture::open_in(dir.path()).await;
     let cwd = store.workspace_cwd();
     let parent_id = store
-        .create_thread(ThreadMeta::new(cwd.clone()))
+        .create_thread(ThreadMeta::new_at(cwd.clone(), peri_time::now_wall()))
         .await
         .expect("建立父会话失败");
-    // 构造「父会话已取 cancel」的实例：Cascade 策略下子 token 由父 token 派生
-    // （`derive_cancel_token`：parent 优先、config 注入仅作 parent 缺席的回退），
-    // 因此父 session 取消才会让 run_react_loop 返回 LoopResult::Interrupted
-    // → Ok 中断文本。同时父会话句柄是 resume 归属校验的前置。
+    let calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
     let mk_parent = |cancelled: bool| {
         let token = Arc::new(AgentCancellationToken::new());
         if cancelled {
@@ -333,16 +339,19 @@ async fn test_resume_multiple_times_keeps_thread_id_and_completes() {
             token,
         )
     };
-    let mk_cancelled = || {
-        make_subagent_tool(vec![])
-            .with_session_resources(store.facade())
-            .with_parent_thread_id(parent_id.clone())
-            .with_execution_owner(store.execution_owner())
-            .with_parent_session(mk_parent(true))
+    let mk_interrupted = || async {
+        with_agent_face(
+            make_interrupt_tool(calls.clone(), 2)
+                .with_session_resources(store.facade())
+                .with_parent_thread_id(parent_id.clone())
+                .with_parent_session(mk_parent(false)),
+            dir.path(),
+        )
+        .await
     };
 
     // 1) spawn → 中断 #1（文本含 child_thread_id + resume 提示）
-    let t1 = mk_cancelled();
+    let t1 = mk_interrupted().await;
     let r1 = t1
         .invoke(
             serde_json::json!({
@@ -362,7 +371,7 @@ async fn test_resume_multiple_times_keeps_thread_id_and_completes() {
     let id1 = extract_child_thread_id(&r1);
 
     // 2) resume → 中断 #2（同一 thread_id）
-    let t2 = mk_cancelled();
+    let t2 = mk_interrupted().await;
     let r2 = t2
         .invoke(
             serde_json::json!({
@@ -385,8 +394,8 @@ async fn test_resume_multiple_times_keeps_thread_id_and_completes() {
     let t3 = make_subagent_tool(vec![])
         .with_session_resources(store.facade())
         .with_parent_thread_id(parent_id.clone())
-        .with_execution_owner(store.execution_owner())
         .with_parent_session(mk_parent(false));
+    let t3 = with_agent_face(t3, dir.path()).await;
     let r3 = t3
         .invoke(
             serde_json::json!({
@@ -421,7 +430,7 @@ async fn test_resume_emits_new_start_stop_pair_per_execution() {
     let store = SessionFixture::open_in(dir.path()).await;
     let cwd = store.workspace_cwd();
     let parent_id = store
-        .create_thread(ThreadMeta::new(cwd.clone()))
+        .create_thread(ThreadMeta::new_at(cwd.clone(), peri_time::now_wall()))
         .await
         .expect("建立父会话失败");
     // 父会话句柄：resume 路径经它校验「owning parent session」
@@ -439,10 +448,13 @@ async fn test_resume_emits_new_start_stop_pair_per_execution() {
         Arc::new(vec![]),
         None,
         Arc::new(move |_: Option<&str>| {
-            Box::new(InterruptThenEchoLLM {
-                calls: Arc::clone(&calls_clone),
-                interrupt_rounds: 1,
-            }) as Box<dyn ReactLLM + Send + Sync>
+            crate::subagent::test_support::fixture_source(
+                std::sync::Arc::new(InterruptThenEchoLLM {
+                    calls: Arc::clone(&calls_clone),
+                    interrupt_rounds: 1,
+                }),
+                "fixture-scripted",
+            )
         }),
         "/tmp".to_string(),
     )
@@ -450,8 +462,9 @@ async fn test_resume_emits_new_start_stop_pair_per_execution() {
     .with_langfuse_bridge(Arc::clone(&bridge) as Arc<dyn peri_agent::agent::LangfuseBridgeLike>)
     .with_session_resources(store.facade())
     .with_parent_thread_id(parent_id.clone())
-    .with_execution_owner(store.execution_owner())
     .with_parent_session(parent.clone());
+    let t = with_agent_face(t, dir.path()).await;
+    let t = with_agent_face(t, dir.path()).await;
 
     // 首次执行 → 中断（第 1 对 Start/Stop；LLM 返回 Interrupted → Ok 可恢复文本）
     let interrupted = t
@@ -550,16 +563,17 @@ async fn test_resume_skill_preload_not_duplicated() {
         "---\nname: skill-user\ndescription: Uses skills\nskills:\n  - test-skill\n---\n\nYou use skills.\n",
     )
     .unwrap();
+    // 磁盘文件是**反例**（W4b：子链预载只查 MCP registry，不读盘）。
     std::fs::write(
         skills_dir.join("SKILL.md"),
-        "---\nname: 'test-skill'\ndescription: 'A test skill'\n---\n\n# Test Skill\n\nThis is the test skill content.\n",
+        "---\nname: 'test-skill'\ndescription: 'A test skill'\n---\n\n# Test Skill\n\nDISK CONTENT MUST NOT BE READ.\n",
     )
     .unwrap();
 
     let store = SessionFixture::open_in(dir.path()).await;
     let cwd = store.workspace_cwd();
     let parent_id = store
-        .create_thread(ThreadMeta::new(cwd.clone()))
+        .create_thread(ThreadMeta::new_at(cwd.clone(), peri_time::now_wall()))
         .await
         .expect("建立父会话失败");
     // 父会话句柄：resume 路径经它校验「owning parent session」
@@ -569,11 +583,15 @@ async fn test_resume_skill_preload_not_duplicated() {
         Some(parent_id.clone()),
     );
     let calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
-    let t = make_interrupt_tool(Arc::clone(&calls), 1)
-        .with_session_resources(store.facade())
-        .with_parent_thread_id(parent_id.clone())
-        .with_execution_owner(store.execution_owner())
-        .with_parent_session(parent.clone());
+    let t = super::with_skill_registry(
+        make_interrupt_tool(Arc::clone(&calls), 1)
+            .with_session_resources(store.facade())
+            .with_parent_thread_id(parent_id.clone())
+            .with_parent_session(parent.clone()),
+        "workspace",
+        &[("test-skill", "This is the test skill content.\n")],
+    );
+    let t = with_agent_face(t, dir.path()).await;
 
     // 首次执行（agent-def 路径）→ SkillPreload 注入一套 → 中断（LLM 返回 Interrupted）
     let interrupted = t
@@ -629,7 +647,7 @@ async fn test_resume_keeps_completed_tool_round_no_duplicate_execution() {
     let store = SessionFixture::open_in(dir.path()).await;
     let cwd = store.workspace_cwd();
     let parent_id = store
-        .create_thread(ThreadMeta::new(cwd.clone()))
+        .create_thread(ThreadMeta::new_at(cwd.clone(), peri_time::now_wall()))
         .await
         .expect("建立父会话失败");
     // 父会话句柄：resume 路径经它校验「owning parent session」
@@ -659,39 +677,48 @@ async fn test_resume_keeps_completed_tool_round_no_duplicate_execution() {
 
     let seen = Arc::new(std::sync::Mutex::new(0usize));
     let seen_clone = Arc::clone(&seen);
+    #[derive(Clone)]
     struct ToolRoundCheckLLM {
         seen: Arc<std::sync::Mutex<usize>>,
     }
-    #[async_trait::async_trait]
-    impl ReactLLM for ToolRoundCheckLLM {
-        async fn generate_reasoning(
+    impl ToolRoundCheckLLM {
+        async fn respond(
             &self,
-            messages: &[BaseMessage],
-            _tools: &[&dyn BaseTool],
-            _streaming: Option<StreamingContext>,
-        ) -> peri_agent::error::AgentResult<Reasoning> {
+            request: peri_model::ModelRequest,
+            cancellation: tokio_util::sync::CancellationToken,
+        ) -> Vec<peri_model::ModelResult<peri_model::ModelStreamEvent>> {
+            use crate::subagent::test_support::*;
+            let _ = &cancellation;
+            let messages = base_messages(&request);
+            let defined = defined_tools(&request);
+            let _tools: Vec<&dyn BaseTool> = defined.iter().map(|t| t as &dyn BaseTool).collect();
+
             let n = messages
                 .iter()
                 .filter(|m| m.content().contains("tool-result-1"))
                 .count();
             *self.seen.lock().unwrap() = n;
-            Ok(Reasoning::with_answer("", "round-preserved"))
+            text_events("round-preserved")
         }
     }
+    crate::subagent::test_support::fixture_model_impl!(ToolRoundCheckLLM);
     let t = SubAgentTool::new(
         Arc::new(vec![]),
         None,
         Arc::new(move |_: Option<&str>| {
-            Box::new(ToolRoundCheckLLM {
-                seen: Arc::clone(&seen_clone),
-            }) as Box<dyn ReactLLM + Send + Sync>
+            crate::subagent::test_support::fixture_source(
+                std::sync::Arc::new(ToolRoundCheckLLM {
+                    seen: Arc::clone(&seen_clone),
+                }),
+                "fixture-scripted",
+            )
         }),
         "/tmp".to_string(),
     )
     .with_session_resources(store.facade())
     .with_parent_thread_id(parent_id.clone())
-    .with_execution_owner(store.execution_owner())
     .with_parent_session(parent.clone());
+    let t = with_agent_face(t, dir.path()).await;
 
     let result = t
         .invoke(
@@ -750,16 +777,17 @@ async fn test_resume_skill_token_in_prompt_reinjects_once() {
         "---\nname: skill-user\ndescription: Uses skills\nskills:\n  - test-skill\n---\n\nYou use skills.\n",
     )
     .unwrap();
+    // 磁盘文件是**反例**（W4b：子链预载只查 MCP registry，不读盘）。
     std::fs::write(
         skills_dir.join("SKILL.md"),
-        "---\nname: 'test-skill'\ndescription: 'A test skill'\n---\n\n# Test Skill\n\nThis is the test skill content.\n",
+        "---\nname: 'test-skill'\ndescription: 'A test skill'\n---\n\n# Test Skill\n\nDISK CONTENT MUST NOT BE READ.\n",
     )
     .unwrap();
 
     let store = SessionFixture::open_in(dir.path()).await;
     let cwd = store.workspace_cwd();
     let parent_id = store
-        .create_thread(ThreadMeta::new(cwd.clone()))
+        .create_thread(ThreadMeta::new_at(cwd.clone(), peri_time::now_wall()))
         .await
         .expect("建立父会话失败");
     // 父会话句柄：resume 路径经它校验「owning parent session」
@@ -769,11 +797,15 @@ async fn test_resume_skill_token_in_prompt_reinjects_once() {
         Some(parent_id.clone()),
     );
     let calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
-    let t = make_interrupt_tool(Arc::clone(&calls), 1)
-        .with_session_resources(store.facade())
-        .with_parent_thread_id(parent_id.clone())
-        .with_execution_owner(store.execution_owner())
-        .with_parent_session(parent.clone());
+    let t = super::with_skill_registry(
+        make_interrupt_tool(Arc::clone(&calls), 1)
+            .with_session_resources(store.facade())
+            .with_parent_thread_id(parent_id.clone())
+            .with_parent_session(parent.clone()),
+        "workspace",
+        &[("test-skill", "This is the test skill content.\n")],
+    );
+    let t = with_agent_face(t, dir.path()).await;
 
     // 首次执行（显式声明 skills）→ 注入一套 → 中断（LLM 返回 Interrupted）
     let interrupted = t

@@ -67,10 +67,6 @@ impl HumanInTheLoopMiddleware {
 
 impl HumanInTheLoopMiddleware {
     /// 创建提问通道 middleware（使用注入的 broker）。
-    ///
-    /// 注意：**使用原始 broker**，不使用 MultiplexBroker——ChannelBroker 对
-    /// Questions 立即返回空答案、Multiplex 竞速时 Channel 先返回，会绕过
-    /// TUI 弹窗（装配期注释的既有约束，`assembly.rs`）。
     pub fn new(broker: Arc<dyn UserInteractionBroker>) -> Self {
         Self { broker }
     }

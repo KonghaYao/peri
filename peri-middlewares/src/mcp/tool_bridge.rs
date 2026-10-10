@@ -5,8 +5,8 @@ use peri_agent::tools::BaseTool;
 use rmcp::model::{ContentBlock, Tool};
 use thiserror::Error;
 
+use super::client::output_store::format_output;
 use super::client::{McpClientHandle, McpClientPool};
-use crate::tools::output_persist::persist_truncated_output;
 
 /// MCP 工具调用错误
 #[derive(Debug, Error)]
@@ -29,6 +29,17 @@ pub enum ToolCallError {
     },
 }
 
+fn completed_application_error(
+    result: &rmcp::model::CallToolResult,
+) -> Option<peri_acp_types::tools::EffectiveToolError> {
+    (result.is_error == Some(true)).then(|| {
+        peri_acp_types::tools::EffectiveToolError::new(
+            peri_acp_types::tools::EffectiveToolErrorCode::ApplicationFailed,
+            format_contents(&result.content),
+        )
+    })
+}
+
 /// 将单个 MCP tool 包装为 BaseTool 实现
 ///
 /// `Clone` 只复制已有的 String/Value/Arc/gate 字段，不建立新连接、不注册新 lease；
@@ -47,10 +58,15 @@ pub struct McpToolBridge {
     client: Arc<McpClientHandle>,
     binding_leases: Option<Arc<super::apps::McpAppBindingLeaseRegistry>>,
     admission: Option<super::dynamic::admission::DynamicMcpAdmissionGate>,
+    output_pool: Option<std::sync::Weak<McpClientPool>>,
+    output_session_id: Option<String>,
 }
 
-const TOOL_CALL_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(120);
-const MAX_MCP_LINES: usize = 2000;
+/// External MCP requests share a 120-second deadline across send and response.
+/// Only the workspace builtin retains its native file/shell deadlines. Identity
+/// comes from ConfigSource; other builtins retain the bounded MCP call contract.
+/// In particular Bash must finish promotion and return its receipt at the 120s boundary.
+pub(crate) const TOOL_CALL_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(120);
 
 /// Sanitize name components to match API tool name pattern: ^[a-zA-Z0-9_-]+$
 pub(crate) fn sanitize_name_component(name: &str) -> String {
@@ -71,11 +87,6 @@ fn app_allowed_tools(
     tools: &[Tool],
     dispatcher: &dyn peri_acp_types::tools::EffectiveToolDispatcher,
 ) -> std::collections::HashMap<String, String> {
-    let dispatcher_tools = dispatcher
-        .tools()
-        .into_iter()
-        .map(|tool| tool.name)
-        .collect::<std::collections::HashSet<_>>();
     tools
         .iter()
         .filter(|tool| {
@@ -84,10 +95,9 @@ fn app_allowed_tools(
         })
         .filter_map(|tool| {
             let name = tool.name.to_string();
-            let effective = effective_mcp_tool_name(server_name, &name);
-            dispatcher_tools
-                .contains(&effective)
-                .then_some((name, effective))
+            dispatcher
+                .admitted_mcp_tool_name(server_name, &name)
+                .map(|effective| (name, effective))
         })
         .collect()
 }
@@ -100,15 +110,33 @@ pub(crate) fn effective_mcp_tool_name(server_name: &str, tool_name: &str) -> Str
     )
 }
 
+/// 单个外部 MCP 工具 description 的字节预算（M7）。
+///
+/// 描述来自外部 server（不受本仓库控制），无预算时一条巨型描述会挤占每次
+/// 请求的 tools 参数。超预算按 UTF-8 边界截断，并在**预算内**追加截断标记
+/// （标记计入预算，模型看到的是有界文本且知道被截断）。
+const MAX_TOOL_DESCRIPTION_BYTES: usize = 8 * 1024;
+
+/// 构造模型可见的工具描述：`[MCP:{server}] {description}`，超预算时截断。
+fn bounded_tool_description(server_name: &str, description: Option<&str>) -> String {
+    let text = format!("[MCP:{}] {}", server_name, description.unwrap_or(""));
+    if text.len() <= MAX_TOOL_DESCRIPTION_BYTES {
+        return text;
+    }
+    let total = text.len();
+    let marker = format!("… [description truncated: {total} bytes total]");
+    let budget = MAX_TOOL_DESCRIPTION_BYTES.saturating_sub(marker.len());
+    let mut truncated = peri_agent::agent::async_tasks::truncate_bytes(&text, budget);
+    truncated.push_str(&marker);
+    truncated
+}
+
 impl McpToolBridge {
     pub fn new(server_name: &str, tool: &Tool, client: Arc<McpClientHandle>) -> Self {
         let tool_name = tool.name.to_string();
         let full_name = effective_mcp_tool_name(server_name, &tool_name);
-        let description = format!(
-            "[MCP:{}] {}",
-            server_name,
-            tool.description.as_ref().map(|d| d.as_ref()).unwrap_or("")
-        );
+        let description =
+            bounded_tool_description(server_name, tool.description.as_ref().map(|d| d.as_ref()));
         let input_schema = serde_json::to_value(&*tool.input_schema)
             .unwrap_or(serde_json::Value::Object(serde_json::Map::new()));
         Self {
@@ -123,6 +151,8 @@ impl McpToolBridge {
             client,
             binding_leases: None,
             admission: None,
+            output_pool: None,
+            output_session_id: None,
         }
     }
 
@@ -138,13 +168,9 @@ impl McpToolBridge {
                 server: server_name.to_string(),
             });
         }
-        let description = format!(
-            "[MCP:{}] {}",
+        let description = bounded_tool_description(
             server_name,
-            tool.description
-                .as_ref()
-                .map(|value| value.as_ref())
-                .unwrap_or("")
+            tool.description.as_ref().map(|value| value.as_ref()),
         );
         Ok(Self {
             server_name: server_name.to_string(),
@@ -159,7 +185,19 @@ impl McpToolBridge {
             client,
             binding_leases: None,
             admission: Some(admission),
+            output_pool: None,
+            output_session_id: None,
         })
+    }
+
+    pub fn with_output_store(
+        mut self,
+        pool: &Arc<McpClientPool>,
+        session_id: Option<&str>,
+    ) -> Self {
+        self.output_pool = Some(Arc::downgrade(pool));
+        self.output_session_id = session_id.map(str::to_string);
+        self
     }
 
     pub fn with_server_generation(mut self, generation: u64) -> Self {
@@ -175,15 +213,17 @@ impl McpToolBridge {
         self
     }
 
-    /// 将本 bridge 提升为 direct（无需模型先搜索即可出现在 tools 参数中）。
-    ///
-    /// 只改 direct 标记：visibility、名称、client、generation、admission 与
-    /// binding leases 均不变，也不产生副本或新注册。
-    ///
-    /// 调用点归 `system_tools::prepare_system_tools`（同 Wave 落地）。
-    pub(crate) fn with_direct(mut self) -> Self {
+    /// 仅启动清单选中的 system 工具使用原始模型名；wire 身份始终保存在 tool_name。
+    pub(crate) fn with_system_direct(mut self) -> Self {
         self.direct = true;
+        self.full_name = self.tool_name.clone();
         self
+    }
+
+    /// The explicitly selected HTTP Workspace publishes its complete model tool
+    /// surface through the live tools/list response.
+    pub(crate) fn with_workspace_direct(self) -> Self {
+        self.with_system_direct()
     }
 
     /// MCP 声明的原始工具名（未净化、未加 server 前缀）。
@@ -223,6 +263,17 @@ impl BaseTool for McpToolBridge {
         Some(&self.server_name)
     }
 
+    fn mcp_tool_name(&self) -> Option<&str> {
+        Some(&self.tool_name)
+    }
+
+    fn builtin_mcp_instance(&self) -> Option<&str> {
+        match &self.client.source {
+            Some(super::config::ConfigSource::Builtin { instance }) => Some(instance),
+            _ => None,
+        }
+    }
+
     fn timeout(&self) -> Option<std::time::Duration> {
         None
     }
@@ -260,45 +311,192 @@ impl BaseTool for McpToolBridge {
         }
 
         let peer = self.client.peer.as_ref().unwrap();
-
-        // 2. 构建 rmcp 请求参数
-        let arguments = input.as_object().cloned().unwrap_or_default();
-        let request = rmcp::model::CallToolRequestParams::new(self.tool_name.clone())
-            .with_arguments(arguments);
-
-        // 3. 带超时调用 peer.call_tool()
-        let result = tokio::time::timeout(TOOL_CALL_TIMEOUT, peer.call_tool(request))
-            .await
-            .map_err(|_| ToolCallError::Timeout {
+        let session_id = ctx.session_id.as_deref().ok_or_else(|| {
+            Box::new(ToolCallError::CallFailed {
                 server: self.server_name.clone(),
                 tool: self.tool_name.clone(),
-                timeout_secs: TOOL_CALL_TIMEOUT.as_secs(),
-            })?
-            .map_err(|e| ToolCallError::CallFailed {
-                server: self.server_name.clone(),
-                tool: self.tool_name.clone(),
-                reason: e.to_string(),
+                reason: "MCP tool call requires a trusted session binding".into(),
+            }) as Box<dyn std::error::Error + Send + Sync>
+        })?;
+        let pool = self
+            .output_pool
+            .as_ref()
+            .and_then(std::sync::Weak::upgrade)
+            .ok_or_else(|| {
+                Box::new(ToolCallError::CallFailed {
+                    server: self.server_name.clone(),
+                    tool: self.tool_name.clone(),
+                    reason: "session MCP task owner unavailable".into(),
+                }) as Box<dyn std::error::Error + Send + Sync>
+            })?;
+        let mut execution_guard = pool
+            .begin_external_task_execution(session_id, &self.server_name)
+            .map_err(|reason| {
+                Box::new(ToolCallError::CallFailed {
+                    server: self.server_name.clone(),
+                    tool: self.tool_name.clone(),
+                    reason,
+                }) as Box<dyn std::error::Error + Send + Sync>
             })?;
 
+        let delivery = ctx.task_terminal_delivery.clone();
+        // 2. 构建 rmcp 请求参数
+        let arguments = input.as_object().cloned().unwrap_or_default();
+        let mut request = rmcp::model::CallToolRequestParams::new(self.tool_name.clone())
+            .with_arguments(arguments);
+        if matches!(self.client.source.as_ref(), Some(super::config::ConfigSource::Builtin { instance }) if instance == "workspace")
+            || matches!(
+                self.client.source.as_ref(),
+                Some(super::config::ConfigSource::WorkspaceRemote)
+            )
+        {
+            request.meta = pool.task_scope_meta_for(&self.server_name, session_id);
+        }
+        request.meta = Some(super::invocation::request_meta(&ctx, request.meta)?);
+
+        // Workspace tools retain their own deadlines (Bash promotes at <=120s).
+        // Source identity, not a spoofable server name, grants this behavior.
+        let timeout = (!matches!(
+            self.client.source.as_ref(),
+            Some(super::config::ConfigSource::Builtin { instance }) if instance == "workspace"
+        ))
+        .then_some(TOOL_CALL_TIMEOUT);
+        let response = match super::tool_request::call_tool(peer, request, timeout).await {
+            Ok(response) => response,
+            Err(error) => {
+                let e = error;
+                return Err(Box::new(
+                    if let rmcp::ServiceError::Timeout { timeout } = e {
+                        ToolCallError::Timeout {
+                            server: self.server_name.clone(),
+                            tool: self.tool_name.clone(),
+                            timeout_secs: timeout.as_secs(),
+                        }
+                    } else {
+                        ToolCallError::CallFailed {
+                            server: self.server_name.clone(),
+                            tool: self.tool_name.clone(),
+                            reason: e.to_string(),
+                        }
+                    },
+                ));
+            }
+        };
+        let result = match response {
+            rmcp::model::CallToolResponse::Complete(result) => {
+                execution_guard.confirm_stopped();
+                result
+            }
+            rmcp::model::CallToolResponse::Task(created) => {
+                let task_created_at = created.task.created_at;
+                let task_id = created.task.task_id;
+                let is_shell = self.tool_name == "Bash"
+                    && (matches!(
+                        self.client.source.as_ref(),
+                        Some(super::config::ConfigSource::Builtin { instance })
+                            if instance == "workspace"
+                    ) || matches!(
+                        self.client.source.as_ref(),
+                        Some(super::config::ConfigSource::WorkspaceRemote)
+                    ));
+                let summary = if is_shell {
+                    input
+                        .get("command")
+                        .and_then(serde_json::Value::as_str)
+                        .unwrap_or("Bash")
+                } else {
+                    self.tool_name.as_str()
+                };
+                let kind = if is_shell {
+                    peri_acp_types::tasks::BgTaskKind::Shell
+                } else {
+                    peri_acp_types::tasks::BgTaskKind::Mcp
+                };
+                let (manager, registration) = pool.external_task_registration(
+                    session_id,
+                    Some(session_id),
+                    delivery.clone(),
+                    &self.server_name,
+                    &task_id,
+                    kind,
+                    summary,
+                    is_shell,
+                    &task_created_at,
+                )?;
+                let public_id = match manager.register_external(registration) {
+                    Ok(task_id) => {
+                        execution_guard.confirm_stopped();
+                        task_id
+                    }
+                    Err(reason) => {
+                        return Err(Box::new(ToolCallError::CallFailed {
+                            server: self.server_name.clone(),
+                            tool: self.tool_name.clone(),
+                            reason: format!("{reason}; remote task {task_id} started but local registration failed; do not repeat the invocation"),
+                        }));
+                    }
+                };
+                if let Err(error) = pool.spawn_managed_task_subscription(
+                    self.server_name.clone(),
+                    session_id.to_owned(),
+                    task_id.clone(),
+                    public_id.clone(),
+                    is_shell,
+                    peer.clone(),
+                ) {
+                    if error != super::task_scope::TaskAdmissionError::DuplicateKey {
+                        return Err(Box::new(ToolCallError::CallFailed {
+                                    server: self.server_name.clone(),
+                                    tool: self.tool_name.clone(),
+                                    reason: format!(
+                                        "background task {public_id} exists, but its monitor was not admitted: {error}; completion delivery is not guaranteed; do not repeat the command"
+                                    ),
+                                }));
+                    }
+                }
+                // 回执只承诺可达的投递：有 canonical 路由 = 持久送达
+                // （resume 后仍可见）；否则只声称活跃期送达。
+                let delivery_note = if delivery.is_some() {
+                    "Its completion reminder is committed to the initiating session's \
+                             transcript and stays visible after resume."
+                } else {
+                    "Its completion reminder is delivered to the initiating session \
+                             while that session is live."
+                };
+                return Ok(format!(
+                    "Background task started: {public_id}. {delivery_note}"
+                ));
+            }
+            _ => {
+                return Err(Box::new(ToolCallError::CallFailed {
+                    server: self.server_name.clone(),
+                    tool: self.tool_name.clone(),
+                    reason: "unsupported MCP tool response".into(),
+                }));
+            }
+        };
+
         // 4. 处理 is_error 标志。失败的实例化调用不得签发 App lease。
-        if result.is_error.unwrap_or(false) {
-            let error_text = format_contents(&result.content);
-            let lines: Vec<&str> = error_text.lines().collect();
-            let reason = if lines.len() > MAX_MCP_LINES {
-                let persist_hint = persist_truncated_output(&error_text);
-                let truncated: String = lines[..MAX_MCP_LINES].join("\n");
-                format!(
-                    "{truncated}\n\n[MCP error output truncated: {} total lines]{persist_hint}",
-                    lines.len()
-                )
-            } else {
-                error_text
-            };
-            return Err(Box::new(ToolCallError::CallFailed {
-                server: self.server_name.clone(),
-                tool: self.tool_name.clone(),
-                reason,
-            }));
+        if let Some(application_error) = completed_application_error(&result) {
+            let pool = self.output_pool.as_ref().and_then(std::sync::Weak::upgrade);
+            let reason = format_output(
+                pool.as_deref(),
+                self.output_session_id
+                    .as_deref()
+                    .or(ctx.session_id.as_deref()),
+                application_error.message,
+                true,
+            )
+            .await;
+            return Err(Box::new(peri_acp_types::tools::EffectiveToolError::new(
+                application_error.code,
+                ToolCallError::CallFailed {
+                    server: self.server_name.clone(),
+                    tool: self.tool_name.clone(),
+                    reason,
+                }
+                .to_string(),
+            )));
         }
 
         if let (
@@ -354,17 +552,16 @@ impl BaseTool for McpToolBridge {
 
         // 5. 格式化返回（截断超大输出）
         let formatted = format_contents(&result.content);
-        let lines: Vec<&str> = formatted.lines().collect();
-        let output = if lines.len() > MAX_MCP_LINES {
-            let persist_hint = persist_truncated_output(&formatted);
-            let truncated: String = lines[..MAX_MCP_LINES].join("\n");
-            format!(
-                "{truncated}\n\n[MCP output truncated: {} total lines]{persist_hint}",
-                lines.len()
-            )
-        } else {
-            formatted
-        };
+        let pool = self.output_pool.as_ref().and_then(std::sync::Weak::upgrade);
+        let output = format_output(
+            pool.as_deref(),
+            self.output_session_id
+                .as_deref()
+                .or(ctx.session_id.as_deref()),
+            formatted,
+            false,
+        )
+        .await;
         Ok(output)
     }
 }
@@ -402,26 +599,69 @@ fn format_contents(contents: &[ContentBlock]) -> String {
 
 /// 会话可见的 typed bridge 集合（唯一 typed 构造入口）。
 ///
-/// `build_tool_bridges` / [`McpToolBridge::with_direct`] 的 typed 版本：调用方
-/// 可以在同一批对象上做分类（如 [`McpToolBridge::with_direct`]）后只装箱一次，
+/// `build_tool_bridges` / [`McpToolBridge::with_system_direct`] 的 typed 版本：调用方
+/// 可以在同一批对象上做分类后只装箱一次，
 /// 避免同一工具被注册两份。两种 constructor、generation 与 binding leases 行为
 /// 与原实现一致。
 ///
 /// `session_id` 为 `None` 表示不过滤（部署面视图）；`Some` 时排除其他会话的
 /// ACP 连接（`McpClientPool::is_visible_to_session`），避免会话间工具泄漏。
+///
+/// **IF-D13 生效点**：注册表中**声明为 direct** 的 builtin 工具在这里直接
+/// `.with_system_direct()`（`direct = 声明的 direct || 启动期 system_mcp_tools 提升`，两者由
+/// 「声明 direct 集合 == `system_mcp_tools` 集合」的断言锁死，不得冲突）。其余一律
+/// 保持 deferred。判定只走 `builtin::is_declared_direct`（未实现 / 未知名恒 false），
+/// 不在本文件硬编码任何 `mcp__*` 字面量或实例名。
 pub(crate) fn build_typed_tool_bridges_visible_to(
-    pool: &McpClientPool,
+    pool: &Arc<McpClientPool>,
+    session_id: Option<&str>,
+) -> Vec<McpToolBridge> {
+    build_bridges(pool, true, session_id)
+}
+
+/// 部署面视图的 typed 版本（无会话归属过滤）。
+pub(crate) fn build_typed_tool_bridges(pool: &Arc<McpClientPool>) -> Vec<McpToolBridge> {
+    build_bridges(pool, true, None)
+}
+
+/// 强制 deferred 的 typed 版本：public [`build_tool_bridges`] 专用。
+///
+/// 与 [`build_typed_tool_bridges_visible_to`] 的唯一差异是不应用声明 direct，因此
+/// public builder 在 builtin 与外部 server 两种输入下的行为都与提取出 typed
+/// builder 之前**逐位一致**。
+pub(crate) fn build_deferred_tool_bridges(pool: &Arc<McpClientPool>) -> Vec<McpToolBridge> {
+    build_bridges(pool, false, None)
+}
+
+fn build_bridges(
+    pool: &Arc<McpClientPool>,
+    apply_declared_direct: bool,
     session_id: Option<&str>,
 ) -> Vec<McpToolBridge> {
     let mut bridges: Vec<McpToolBridge> = Vec::new();
-    for client in pool.get_all_clients_visible_to(session_id) {
+    let mut clients = pool.get_all_clients_visible_to(session_id);
+    clients.sort_by(|left, right| left.name.cmp(&right.name));
+    for client in clients {
         let generation = pool.handle_generation(&client);
         for tool in &client.tools {
-            bridges.push(
-                McpToolBridge::new(&client.name, tool, Arc::clone(&client))
-                    .with_server_generation(generation)
-                    .with_binding_leases(Arc::clone(&pool.app_binding_leases)),
-            );
+            let mut bridge = McpToolBridge::new(&client.name, tool, Arc::clone(&client))
+                .with_server_generation(generation)
+                .with_binding_leases(Arc::clone(&pool.app_binding_leases))
+                .with_output_store(pool, session_id);
+            if apply_declared_direct
+                && matches!(
+                    &client.source,
+                    Some(super::config::ConfigSource::WorkspaceRemote)
+                )
+            {
+                bridge = bridge.with_workspace_direct();
+            } else if apply_declared_direct
+                && matches!(&client.source, Some(super::config::ConfigSource::Builtin { instance }) if instance == &client.name)
+                && super::builtin::is_declared_direct(&client.name, tool.name.as_ref())
+            {
+                bridge = bridge.with_system_direct();
+            }
+            bridges.push(bridge);
         }
     }
     bridges
@@ -429,25 +669,28 @@ pub(crate) fn build_typed_tool_bridges_visible_to(
 
 /// 从 McpClientPool 的所有已连接客户端中批量创建 McpToolBridge
 ///
-/// 全部返回值保持 deferred 默认行为（`is_direct() == false`）。
+/// 全部返回值保持 deferred 默认行为（`is_direct() == false`）——包括 builtin 实例的
+/// 工具：未类型化的 public builder 不参与 direct 提升（IF-D13），保持既有契约不变。
 ///
 /// 不过滤会话归属（部署面视图）：会话内装配必须走
 /// [`build_tool_bridges_visible_to`]，否则会拿到其他会话声明的 ACP 工具。
-pub fn build_tool_bridges(pool: &McpClientPool) -> Vec<Box<dyn BaseTool>> {
-    build_tool_bridges_visible_to(pool, None)
-}
-
-/// 会话可见的 bridge 集合（[`build_tool_bridges`] 的 ACP 归属过滤版）。
-pub fn build_tool_bridges_visible_to(
-    pool: &McpClientPool,
-    session_id: Option<&str>,
-) -> Vec<Box<dyn BaseTool>> {
-    build_typed_tool_bridges_visible_to(pool, session_id)
+pub fn build_tool_bridges(pool: &Arc<McpClientPool>) -> Vec<Box<dyn BaseTool>> {
+    build_deferred_tool_bridges(pool)
         .into_iter()
         .map(|bridge| Box::new(bridge) as Box<dyn BaseTool>)
         .collect()
 }
 
+/// 会话可见的 bridge 集合（[`build_tool_bridges`] 的 ACP 归属过滤版）。
+pub fn build_tool_bridges_visible_to(
+    pool: &Arc<McpClientPool>,
+    session_id: Option<&str>,
+) -> Vec<Box<dyn BaseTool>> {
+    build_bridges(pool, false, session_id)
+        .into_iter()
+        .map(|bridge| Box::new(bridge) as Box<dyn BaseTool>)
+        .collect()
+}
 /// 统一工具池组装：内置工具优先去重
 
 #[cfg(test)]
@@ -486,7 +729,6 @@ mod direct_flag_tests {
             source: None,
             url: None,
             skills_capable: false,
-            channel_capable: false,
         })
     }
 
@@ -502,9 +744,10 @@ mod direct_flag_tests {
         let parameters = bridge.parameters();
         assert!(bridge.visible_to_model());
 
-        let promoted = bridge.with_direct();
+        let promoted = bridge.with_system_direct();
         assert!(promoted.is_direct());
-        assert_eq!(promoted.name(), name);
+        assert_eq!(promoted.name(), "Read");
+        assert_ne!(promoted.name(), name);
         assert_eq!(promoted.original_tool_name(), "Read");
         assert_eq!(promoted.mcp_server_name(), Some("workspace"));
         assert_eq!(promoted.parameters(), parameters);
@@ -514,24 +757,43 @@ mod direct_flag_tests {
         );
     }
 
+    /// typed builder 的输入取注册表中**声明 deferred** 的 builtin 工具。
+    ///
+    /// 只有输入确实声明为 deferred，「不提升」才是有信息的断言：wave 3 起 `workspace`
+    /// 的 7 个工具全部 `direct: true`（注册表第五项），继续拿它当输入会变成「提升」的
+    /// 反面 —— 断言会红，而修法绝不是放宽断言。名字从注册表派生，不新增第二份名单。
     #[test]
     fn test_build_tool_bridges_keeps_deferred_default_and_matches_typed() {
-        let pool = McpClientPool::new_pending();
+        let (instance, tool) = peri_acp_types::builtin_mcp::BUILTIN_MCP_INSTANCES
+            .iter()
+            .find_map(|instance| {
+                instance
+                    .tools
+                    .iter()
+                    .find(|tool| !tool.direct)
+                    .map(|tool| (instance, tool))
+            })
+            .expect("注册表必须至少保留一个 deferred 声明的 builtin 工具");
+        let pool = Arc::new(McpClientPool::new_pending());
         let handle = make_handle(
-            "workspace",
-            vec![make_tool("Read")],
+            instance.name,
+            vec![make_tool(tool.original_name)],
             ClientStatus::Connected,
         );
         pool.clients
             .write()
-            .insert("workspace".to_string(), Arc::clone(&handle));
+            .insert(instance.name.to_string(), Arc::clone(&handle));
 
-        let typed = build_typed_tool_bridges_visible_to(&pool, None);
+        let typed = build_typed_tool_bridges(&pool);
         let boxed = build_tool_bridges(&pool);
         assert_eq!(typed.len(), 1);
         assert_eq!(boxed.len(), typed.len());
         assert_eq!(boxed[0].name(), typed[0].name());
-        assert!(!typed[0].is_direct(), "typed builder 缺省必须为 deferred");
+        assert!(
+            !typed[0].is_direct(),
+            "注册表声明 deferred 的 builtin 工具（{}）在 typed builder 中必须保持 deferred",
+            tool.effective_name
+        );
         assert!(
             !boxed[0].is_direct(),
             "public builder 必须保持 deferred 默认"
@@ -539,5 +801,30 @@ mod direct_flag_tests {
         // 既有 generation / binding leases 传递行为不得因提取 typed builder 而丢失
         assert_eq!(typed[0].server_generation, pool.handle_generation(&handle));
         assert!(typed[0].binding_leases.is_some());
+    }
+
+    #[test]
+    fn remote_workspace_direct_tools_follow_live_list_without_registry_names() {
+        let pool = Arc::new(McpClientPool::new_pending());
+        let mut handle = make_handle(
+            "workspace",
+            vec![make_tool("NewRemoteTool")],
+            ClientStatus::Connected,
+        );
+        Arc::get_mut(&mut handle).unwrap().source =
+            Some(super::super::config::ConfigSource::WorkspaceRemote);
+        pool.clients.write().insert("workspace".into(), handle);
+        let typed = build_typed_tool_bridges(&pool);
+        assert_eq!(typed.len(), 1);
+        assert_eq!(typed[0].name(), "NewRemoteTool");
+        assert!(typed[0].is_direct());
+        assert_eq!(typed[0].builtin_mcp_instance(), None);
+
+        let empty = Arc::new(McpClientPool::new_pending());
+        let mut handle = make_handle("workspace", vec![], ClientStatus::Connected);
+        Arc::get_mut(&mut handle).unwrap().source =
+            Some(super::super::config::ConfigSource::WorkspaceRemote);
+        empty.clients.write().insert("workspace".into(), handle);
+        assert!(build_typed_tool_bridges(&empty).is_empty());
     }
 }

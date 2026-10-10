@@ -20,6 +20,7 @@ use super::*;
 /// - mock LLM 收到的 messages 包含全部 3 条父消息（按顺序透传，验证 BUG-C）
 #[tokio::test]
 async fn test_integration_fork_parent_messages_passthrough() {
+    let host = HostFixture::open("fixture-iv2-passthrough").await;
     // Arrange: 3 条父消息（Human/AI 交替 + 1 条 system context）
     let parent_messages: Arc<RwLock<Vec<BaseMessage>>> = Arc::new(RwLock::new(Vec::new()));
     parent_messages
@@ -32,39 +33,27 @@ async fn test_integration_fork_parent_messages_passthrough() {
         .write()
         .push(BaseMessage::human("parent Q2 followup"));
 
-    // 捕获 mock LLM 收到的完整消息列表
-    let captured: Arc<std::sync::Mutex<Vec<BaseMessage>>> =
-        Arc::new(std::sync::Mutex::new(Vec::new()));
-    let captured_clone = Arc::clone(&captured);
+    // H1 生产装配捕获：模型来源经子链装配点装 bridge，捕获真实 ModelRequest。
+    let model = super::mock_model::RecordingModel::new("fork integration done");
 
-    struct CaptureLLM {
-        captured: Arc<std::sync::Mutex<Vec<BaseMessage>>>,
-    }
-    #[async_trait::async_trait]
-    impl ReactLLM for CaptureLLM {
-        async fn generate_reasoning(
-            &self,
-            messages: &[BaseMessage],
-            _tools: &[&dyn BaseTool],
-            _streaming: Option<StreamingContext>,
-        ) -> peri_agent::error::AgentResult<Reasoning> {
-            *self.captured.lock().unwrap() = messages.to_vec();
-            Ok(Reasoning::with_answer("", "fork integration done"))
-        }
-    }
-
-    let t = SubAgentTool::new(
-        Arc::new(vec![]),
-        None,
-        Arc::new(move |_: Option<&str>| {
-            Box::new(CaptureLLM {
-                captured: Arc::clone(&captured_clone),
-            }) as Box<dyn ReactLLM + Send + Sync>
-        }),
-        "/tmp".to_string(),
-    )
-    .with_parent_messages(Arc::clone(&parent_messages))
-    .with_system_builder(Arc::new(|_ov, _cwd| "FORK-CONTEXT-SP".to_string()));
+    let t = host.bind(
+        SubAgentTool::new(
+            Arc::new(vec![]),
+            None,
+            Arc::new({
+                let model = Arc::clone(&model);
+                move |_: Option<&str>| {
+                    SubagentLlmSource::model(
+                        model.clone() as Arc<dyn peri_model::Model>,
+                        "mock-model",
+                    )
+                }
+            }),
+            "/tmp".to_string(),
+        )
+        .with_parent_messages(Arc::clone(&parent_messages))
+        .with_system_builder(Arc::new(|_ov, _cwd| "FORK-CONTEXT-SP".to_string())),
+    );
 
     // Act: fork 模式触发端到端路径
     let result = t
@@ -73,7 +62,7 @@ async fn test_integration_fork_parent_messages_passthrough() {
                 "fork": true,
                 "prompt": "continue from parent context"
             }),
-            peri_agent::tools::ToolContext::new(&[], "."),
+            host.context(&[]),
         )
         .await
         .unwrap();
@@ -85,48 +74,49 @@ async fn test_integration_fork_parent_messages_passthrough() {
         result
     );
 
-    let msgs = captured.lock().unwrap().clone();
+    let messages = model.last_messages();
+    let texts = super::mock_model::conversation_texts(&messages);
 
-    // Assert 1: 消息数量 >= 4（3 父 + 1 system + 1 fork_directive prompt）
+    // Assert 1: 请求消息 >= 4（3 父 + 1 system + 1 fork_directive prompt）
     assert!(
-        msgs.len() >= 4,
+        messages.len() >= 4,
         "fork should receive parent messages + system + directive (got {})",
-        msgs.len()
+        messages.len()
     );
 
-    // Assert 2: 最后一条是 Human，且包含 <fork_directive>（BUG-A）
-    let last = msgs.last().expect("messages non-empty");
+    // Assert 2: 最后一条是 User，且包含 <fork_directive>（BUG-A）
+    let last = texts.last().expect("messages non-empty");
     assert!(
-        matches!(last, BaseMessage::Human { .. }),
-        "last message should be Human (fork directive)"
-    );
-    let last_content = last.content();
-    assert!(
-        last_content.contains("<fork_directive>"),
+        last.contains("<fork_directive>"),
         "last message should contain <fork_directive> (BUG-A), got: {}",
-        last_content
+        last
     );
     assert!(
-        last_content.contains("continue from parent context"),
+        last.contains("continue from parent context"),
         "fork directive should wrap original prompt"
     );
 
-    // Assert 3: messages 中包含 System 消息，内容含 "FORK-CONTEXT-SP"（BUG-B）
-    let sys_msg = msgs
-        .iter()
-        .find(|m| matches!(m, BaseMessage::System { .. }));
+    // Assert 3: 身份经 bridge base system 注入（恰一次，不再写 transcript）
+    let system = model.last_system();
     assert!(
-        sys_msg.is_some(),
-        "fork path should inject System message (BUG-B)"
+        system.contains("FORK-CONTEXT-SP"),
+        "bridge system should contain system_builder projection, got: {system}"
     );
-    assert!(
-        sys_msg.unwrap().content().contains("FORK-CONTEXT-SP"),
-        "System message should contain system_builder output (BUG-B)"
+    // 身份恰一次：只出现在 bridge base system；非 system 消息不得再出现
+    // （`conversation_texts` 以 "[system]" 前缀标记 system 条目）。
+    assert_eq!(
+        texts
+            .iter()
+            .filter(|t| !t.starts_with("[system]"))
+            .filter(|t| t.contains("FORK-CONTEXT-SP"))
+            .count(),
+        0,
+        "identity must not be duplicated into conversation messages: {texts:?}"
     );
 
     // Assert 4: 父消息按顺序透传（BUG-C）
-    // 验证三条父消息的 content 都在 LLM 收到的 messages 中
-    let contents: Vec<String> = msgs.iter().map(|m| m.content()).collect();
+    // 验证三条父消息的 content 都在请求消息中
+    let contents: Vec<String> = texts.clone();
     assert!(
         contents.iter().any(|c| c.contains("parent Q1")),
         "first parent message should pass through (BUG-C)"
@@ -145,6 +135,7 @@ async fn test_integration_fork_parent_messages_passthrough() {
 
 #[tokio::test]
 async fn test_fork_prefers_tool_context_messages_over_parent_snapshot() {
+    let host = HostFixture::open("fixture-iv2-prefer").await;
     let parent_messages: Arc<RwLock<Vec<BaseMessage>>> = Arc::new(RwLock::new(Vec::new()));
     parent_messages
         .write()
@@ -158,33 +149,44 @@ async fn test_fork_prefers_tool_context_messages_over_parent_snapshot() {
     let captured: Arc<std::sync::Mutex<Vec<String>>> = Arc::new(std::sync::Mutex::new(Vec::new()));
     let captured_clone = Arc::clone(&captured);
 
+    #[derive(Clone)]
     struct CaptureContentLLM {
         captured: Arc<std::sync::Mutex<Vec<String>>>,
     }
-    #[async_trait::async_trait]
-    impl ReactLLM for CaptureContentLLM {
-        async fn generate_reasoning(
+    impl CaptureContentLLM {
+        async fn respond(
             &self,
-            messages: &[BaseMessage],
-            _tools: &[&dyn BaseTool],
-            _streaming: Option<StreamingContext>,
-        ) -> peri_agent::error::AgentResult<Reasoning> {
+            request: peri_model::ModelRequest,
+            cancellation: tokio_util::sync::CancellationToken,
+        ) -> Vec<peri_model::ModelResult<peri_model::ModelStreamEvent>> {
+            use crate::subagent::test_support::*;
+            let _ = &cancellation;
+            let messages = base_messages(&request);
+            let defined = defined_tools(&request);
+            let _tools: Vec<&dyn BaseTool> = defined.iter().map(|t| t as &dyn BaseTool).collect();
+
             *self.captured.lock().unwrap() = messages.iter().map(|m| m.content()).collect();
-            Ok(Reasoning::with_answer("", "ctx-preferred"))
+            text_events("ctx-preferred")
         }
     }
+    crate::subagent::test_support::fixture_model_impl!(CaptureContentLLM);
 
-    let t = SubAgentTool::new(
-        Arc::new(vec![]),
-        None,
-        Arc::new(move |_: Option<&str>| {
-            Box::new(CaptureContentLLM {
-                captured: Arc::clone(&captured_clone),
-            }) as Box<dyn ReactLLM + Send + Sync>
-        }),
-        "/tmp".to_string(),
-    )
-    .with_parent_messages(Arc::clone(&parent_messages));
+    let t = host.bind(
+        SubAgentTool::new(
+            Arc::new(vec![]),
+            None,
+            Arc::new(move |_: Option<&str>| {
+                crate::subagent::test_support::fixture_source(
+                    std::sync::Arc::new(CaptureContentLLM {
+                        captured: Arc::clone(&captured_clone),
+                    }),
+                    "fixture-scripted",
+                )
+            }),
+            "/tmp".to_string(),
+        )
+        .with_parent_messages(Arc::clone(&parent_messages)),
+    );
 
     let result = t
         .invoke(
@@ -192,7 +194,7 @@ async fn test_fork_prefers_tool_context_messages_over_parent_snapshot() {
                 "fork": true,
                 "prompt": "review current turn"
             }),
-            peri_agent::tools::ToolContext::new(&ctx_messages, "."),
+            host.context(&ctx_messages),
         )
         .await
         .unwrap();
@@ -218,6 +220,7 @@ async fn test_fork_prefers_tool_context_messages_over_parent_snapshot() {
 
 #[tokio::test]
 async fn test_fork_falls_back_to_parent_messages_when_tool_context_empty() {
+    let host = HostFixture::open("fixture-iv2-fallback").await;
     let parent_messages: Arc<RwLock<Vec<BaseMessage>>> = Arc::new(RwLock::new(Vec::new()));
     parent_messages
         .write()
@@ -226,33 +229,44 @@ async fn test_fork_falls_back_to_parent_messages_when_tool_context_empty() {
     let captured: Arc<std::sync::Mutex<Vec<String>>> = Arc::new(std::sync::Mutex::new(Vec::new()));
     let captured_clone = Arc::clone(&captured);
 
+    #[derive(Clone)]
     struct FallbackCaptureLLM {
         captured: Arc<std::sync::Mutex<Vec<String>>>,
     }
-    #[async_trait::async_trait]
-    impl ReactLLM for FallbackCaptureLLM {
-        async fn generate_reasoning(
+    impl FallbackCaptureLLM {
+        async fn respond(
             &self,
-            messages: &[BaseMessage],
-            _tools: &[&dyn BaseTool],
-            _streaming: Option<StreamingContext>,
-        ) -> peri_agent::error::AgentResult<Reasoning> {
+            request: peri_model::ModelRequest,
+            cancellation: tokio_util::sync::CancellationToken,
+        ) -> Vec<peri_model::ModelResult<peri_model::ModelStreamEvent>> {
+            use crate::subagent::test_support::*;
+            let _ = &cancellation;
+            let messages = base_messages(&request);
+            let defined = defined_tools(&request);
+            let _tools: Vec<&dyn BaseTool> = defined.iter().map(|t| t as &dyn BaseTool).collect();
+
             *self.captured.lock().unwrap() = messages.iter().map(|m| m.content()).collect();
-            Ok(Reasoning::with_answer("", "fallback-used"))
+            text_events("fallback-used")
         }
     }
+    crate::subagent::test_support::fixture_model_impl!(FallbackCaptureLLM);
 
-    let t = SubAgentTool::new(
-        Arc::new(vec![]),
-        None,
-        Arc::new(move |_: Option<&str>| {
-            Box::new(FallbackCaptureLLM {
-                captured: Arc::clone(&captured_clone),
-            }) as Box<dyn ReactLLM + Send + Sync>
-        }),
-        "/tmp".to_string(),
-    )
-    .with_parent_messages(Arc::clone(&parent_messages));
+    let t = host.bind(
+        SubAgentTool::new(
+            Arc::new(vec![]),
+            None,
+            Arc::new(move |_: Option<&str>| {
+                crate::subagent::test_support::fixture_source(
+                    std::sync::Arc::new(FallbackCaptureLLM {
+                        captured: Arc::clone(&captured_clone),
+                    }),
+                    "fixture-scripted",
+                )
+            }),
+            "/tmp".to_string(),
+        )
+        .with_parent_messages(Arc::clone(&parent_messages)),
+    );
 
     let result = t
         .invoke(
@@ -260,7 +274,7 @@ async fn test_fork_falls_back_to_parent_messages_when_tool_context_empty() {
                 "fork": true,
                 "prompt": "review fallback"
             }),
-            peri_agent::tools::ToolContext::new(&[], "."),
+            host.context(&[]),
         )
         .await
         .unwrap();
@@ -281,6 +295,7 @@ async fn test_fork_falls_back_to_parent_messages_when_tool_context_empty() {
 
 #[tokio::test]
 async fn test_fork_drops_trailing_tool_call_message_from_tool_context() {
+    let host = HostFixture::open("fixture-iv2-drop").await;
     let ctx_messages = vec![
         BaseMessage::human("stable context before tool call"),
         BaseMessage::ai_with_tool_calls(
@@ -296,32 +311,41 @@ async fn test_fork_drops_trailing_tool_call_message_from_tool_context() {
     let captured: Arc<std::sync::Mutex<Vec<String>>> = Arc::new(std::sync::Mutex::new(Vec::new()));
     let captured_clone = Arc::clone(&captured);
 
+    #[derive(Clone)]
     struct DropToolCallCaptureLLM {
         captured: Arc<std::sync::Mutex<Vec<String>>>,
     }
-    #[async_trait::async_trait]
-    impl ReactLLM for DropToolCallCaptureLLM {
-        async fn generate_reasoning(
+    impl DropToolCallCaptureLLM {
+        async fn respond(
             &self,
-            messages: &[BaseMessage],
-            _tools: &[&dyn BaseTool],
-            _streaming: Option<StreamingContext>,
-        ) -> peri_agent::error::AgentResult<Reasoning> {
+            request: peri_model::ModelRequest,
+            cancellation: tokio_util::sync::CancellationToken,
+        ) -> Vec<peri_model::ModelResult<peri_model::ModelStreamEvent>> {
+            use crate::subagent::test_support::*;
+            let _ = &cancellation;
+            let messages = base_messages(&request);
+            let defined = defined_tools(&request);
+            let _tools: Vec<&dyn BaseTool> = defined.iter().map(|t| t as &dyn BaseTool).collect();
+
             *self.captured.lock().unwrap() = messages.iter().map(|m| m.content()).collect();
-            Ok(Reasoning::with_answer("", "tool-call-dropped"))
+            text_events("tool-call-dropped")
         }
     }
+    crate::subagent::test_support::fixture_model_impl!(DropToolCallCaptureLLM);
 
-    let t = SubAgentTool::new(
+    let t = host.bind(SubAgentTool::new(
         Arc::new(vec![]),
         None,
         Arc::new(move |_: Option<&str>| {
-            Box::new(DropToolCallCaptureLLM {
-                captured: Arc::clone(&captured_clone),
-            }) as Box<dyn ReactLLM + Send + Sync>
+            crate::subagent::test_support::fixture_source(
+                std::sync::Arc::new(DropToolCallCaptureLLM {
+                    captured: Arc::clone(&captured_clone),
+                }),
+                "fixture-scripted",
+            )
         }),
         "/tmp".to_string(),
-    );
+    ));
 
     let result = t
         .invoke(
@@ -329,7 +353,7 @@ async fn test_fork_drops_trailing_tool_call_message_from_tool_context() {
                 "fork": true,
                 "prompt": "review without dangling tool call"
             }),
-            peri_agent::tools::ToolContext::new(&ctx_messages, "."),
+            host.context(&ctx_messages),
         )
         .await
         .unwrap();
@@ -374,21 +398,31 @@ async fn test_integration_background_independent_survives_parent_cancel() {
         Arc::new(std::sync::atomic::AtomicUsize::new(0));
     let llm_call_count_clone = Arc::clone(&llm_call_count);
 
+    #[derive(Clone)]
     struct CountingLLM {
         count: Arc<std::sync::atomic::AtomicUsize>,
+        release: Arc<std::sync::Mutex<Option<tokio::sync::oneshot::Receiver<()>>>>,
     }
-    #[async_trait::async_trait]
-    impl ReactLLM for CountingLLM {
-        async fn generate_reasoning(
+    impl CountingLLM {
+        async fn respond(
             &self,
-            _messages: &[BaseMessage],
-            _tools: &[&dyn BaseTool],
-            _streaming: Option<StreamingContext>,
-        ) -> peri_agent::error::AgentResult<Reasoning> {
+            _request: peri_model::ModelRequest,
+            _cancellation: tokio_util::sync::CancellationToken,
+        ) -> Vec<peri_model::ModelResult<peri_model::ModelStreamEvent>> {
+            use crate::subagent::test_support::*;
+            let receiver = self.release.lock().unwrap().take();
+            if let Some(receiver) = receiver {
+                let _ = receiver.await;
+            }
             self.count.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
-            Ok(Reasoning::with_answer("", "bg done independent"))
+            text_events("bg done independent")
         }
     }
+    crate::subagent::test_support::fixture_model_impl!(CountingLLM);
+
+    // 门控：任务必须保持 active 直到测试断言（父 cancel 之后），再放行完成。
+    let (release_tx, release_rx) = tokio::sync::oneshot::channel();
+    let release = Arc::new(std::sync::Mutex::new(Some(release_rx)));
 
     // 父 cancel token（Independent policy 下不应传播到 background task）
     let parent_cancel = AgentCancellationToken::new();
@@ -405,20 +439,32 @@ async fn test_integration_background_independent_survives_parent_cancel() {
         .write()
         .push(BaseMessage::human("parent ctx"));
 
-    let t = SubAgentTool::new(
-        Arc::new(vec![]),
-        None,
-        Arc::new(move |_: Option<&str>| {
-            Box::new(CountingLLM {
-                count: Arc::clone(&llm_call_count_clone),
-            }) as Box<dyn ReactLLM + Send + Sync>
-        }),
-        "/tmp".to_string(),
+    let host = HostFixture::open_with_background(
+        "fixture-iv2-independent",
+        Arc::clone(&registry),
+        bg_tx.clone(),
     )
-    .with_parent_messages(parent_messages)
-    .with_cancel(parent_cancel.clone())
-    .with_task_manager(Arc::clone(&registry))
-    .with_bg_event_sender(bg_tx);
+    .await;
+    let t = host.bind(
+        SubAgentTool::new(
+            Arc::new(vec![]),
+            None,
+            Arc::new(move |_: Option<&str>| {
+                crate::subagent::test_support::fixture_source(
+                    std::sync::Arc::new(CountingLLM {
+                        count: Arc::clone(&llm_call_count_clone),
+                        release: Arc::clone(&release),
+                    }),
+                    "fixture-scripted",
+                )
+            }),
+            "/tmp".to_string(),
+        )
+        .with_parent_messages(parent_messages)
+        .with_cancel(parent_cancel.clone())
+        .with_task_manager(Arc::clone(&registry))
+        .with_bg_event_sender(bg_tx),
+    );
 
     // Act 1: 启动 background fork
     let invoke_result = t
@@ -428,7 +474,7 @@ async fn test_integration_background_independent_survives_parent_cancel() {
                 "run_in_background": true,
                 "prompt": "long running bg task"
             }),
-            peri_agent::tools::ToolContext::new(&[], "."),
+            host.context(&[]),
         )
         .await;
     assert!(
@@ -447,12 +493,15 @@ async fn test_integration_background_independent_survives_parent_cancel() {
     // 注意：Independent policy = background task 使用独立 CancellationToken（spawner.rs:177），
     // 不与 parent_cancel 形成 child_token 关系，所以 cancel 不会传播。
     parent_cancel.cancel();
+    host.cancel_parent();
 
     // Assert 1: background task 仍在运行（active_count >= 1，未被父 cancel 移除）
     assert!(
         registry.active_count() >= 1,
         "independent background task should survive parent cancel"
     );
+    // 放行门控：任务在父 cancel 之后仍继续执行到完成。
+    let _ = release_tx.send(());
 
     // Act 3: 等待 background task 完整执行（消耗所有事件直到 BackgroundTaskCompleted）
     // Independent policy 下 task 应运行到完成，不应被 cancel 中断。
@@ -533,6 +582,7 @@ async fn test_integration_background_independent_survives_parent_cancel() {
 #[tokio::test]
 async fn test_integration_sync_cascade_cancel_returns_interrupted_marker() {
     let dir = tempdir().unwrap();
+    let host = HostFixture::open_in(dir.path(), "fixture-iv2-cascade").await;
     let agents_dir = dir.path().join(".claude").join("agents");
     std::fs::create_dir_all(&agents_dir).unwrap();
     std::fs::write(
@@ -546,44 +596,54 @@ async fn test_integration_sync_cascade_cancel_returns_interrupted_marker() {
         Arc::new(std::sync::atomic::AtomicUsize::new(0));
     let llm_call_count_clone = Arc::clone(&llm_call_count);
 
+    #[derive(Clone)]
     struct LoopingLLM {
         count: Arc<std::sync::atomic::AtomicUsize>,
     }
-    #[async_trait::async_trait]
-    impl ReactLLM for LoopingLLM {
-        async fn generate_reasoning(
+    impl LoopingLLM {
+        async fn respond(
             &self,
-            _messages: &[BaseMessage],
-            _tools: &[&dyn BaseTool],
-            _streaming: Option<StreamingContext>,
-        ) -> peri_agent::error::AgentResult<Reasoning> {
+            request: peri_model::ModelRequest,
+            cancellation: tokio_util::sync::CancellationToken,
+        ) -> Vec<peri_model::ModelResult<peri_model::ModelStreamEvent>> {
+            use crate::subagent::test_support::*;
+            let _ = &cancellation;
+            let _messages = base_messages(&request);
+            let defined = defined_tools(&request);
+            let _tools: Vec<&dyn BaseTool> = defined.iter().map(|t| t as &dyn BaseTool).collect();
+
             self.count.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
-            Ok(Reasoning::with_tools(
-                "call missing",
-                vec![peri_agent::agent::react::ToolCall::new(
-                    "id1",
-                    "nonexistent",
-                    serde_json::json!({}),
-                )],
-            ))
+            tool_events_from_react(vec![peri_agent::agent::react::ToolCall::new(
+                "id1",
+                "nonexistent",
+                serde_json::json!({}),
+            )])
         }
     }
+    crate::subagent::test_support::fixture_model_impl!(LoopingLLM);
 
     let cancel = AgentCancellationToken::new();
     // 关键：在 SubAgent 执行**之前** cancel（模拟父 Agent 收到 Ctrl+C 后才 spawn SubAgent）
     cancel.cancel();
+    host.cancel_parent();
 
-    let t = SubAgentTool::new(
-        Arc::new(vec![]),
-        None,
-        Arc::new(move |_: Option<&str>| {
-            Box::new(LoopingLLM {
-                count: Arc::clone(&llm_call_count_clone),
-            }) as Box<dyn ReactLLM + Send + Sync>
-        }),
-        dir.path().to_str().unwrap().to_string(),
-    )
-    .with_cancel(cancel);
+    let t = host.bind(
+        SubAgentTool::new(
+            Arc::new(vec![]),
+            None,
+            Arc::new(move |_: Option<&str>| {
+                crate::subagent::test_support::fixture_source(
+                    std::sync::Arc::new(LoopingLLM {
+                        count: Arc::clone(&llm_call_count_clone),
+                    }),
+                    "fixture-scripted",
+                )
+            }),
+            dir.path().to_str().unwrap().to_string(),
+        )
+        .with_cancel(cancel),
+    );
+    let t = with_agent_face(t, dir.path()).await;
 
     let result = t
         .invoke(
@@ -592,7 +652,7 @@ async fn test_integration_sync_cascade_cancel_returns_interrupted_marker() {
                 "prompt": "run",
                 "cwd": dir.path().to_str().unwrap()
             }),
-            peri_agent::tools::ToolContext::new(&[], "."),
+            host.context(&[]),
         )
         .await
         .unwrap();
@@ -631,9 +691,10 @@ async fn test_p0_2_background_defined_skill_preload_once_after_parent_cancel() {
         "---\nname: p0-2-bg\ndescription: P0-2 background agent\nskills:\n  - p0-2-skill\n---\n\nRun the task.\n",
     )
     .unwrap();
+    // 磁盘文件是**反例**（W4b：子链预载只查 MCP registry，不读盘）。
     std::fs::write(
         skills_dir.join("SKILL.md"),
-        "---\nname: p0-2-skill\ndescription: P0-2 skill\n---\n\nP0-2 BACKGROUND SKILL MARKER\n",
+        "---\nname: p0-2-skill\ndescription: P0-2 skill\n---\n\nDISK CONTENT MUST NOT BE READ\n",
     )
     .unwrap();
 
@@ -641,18 +702,23 @@ async fn test_p0_2_background_defined_skill_preload_once_after_parent_cancel() {
     let preload_count = Arc::new(std::sync::Mutex::new(0));
     let llm_calls_clone = Arc::clone(&llm_calls);
     let preload_count_clone = Arc::clone(&preload_count);
+    #[derive(Clone)]
     struct BackgroundSkillLLM {
         calls: Arc<AtomicUsize>,
         preload_count: Arc<std::sync::Mutex<usize>>,
     }
-    #[async_trait::async_trait]
-    impl ReactLLM for BackgroundSkillLLM {
-        async fn generate_reasoning(
+    impl BackgroundSkillLLM {
+        async fn respond(
             &self,
-            messages: &[BaseMessage],
-            _tools: &[&dyn BaseTool],
-            _streaming: Option<StreamingContext>,
-        ) -> peri_agent::error::AgentResult<Reasoning> {
+            request: peri_model::ModelRequest,
+            cancellation: tokio_util::sync::CancellationToken,
+        ) -> Vec<peri_model::ModelResult<peri_model::ModelStreamEvent>> {
+            use crate::subagent::test_support::*;
+            let _ = &cancellation;
+            let messages = base_messages(&request);
+            let defined = defined_tools(&request);
+            let _tools: Vec<&dyn BaseTool> = defined.iter().map(|t| t as &dyn BaseTool).collect();
+
             self.calls.fetch_add(1, Ordering::SeqCst);
             assert!(
                 messages
@@ -664,27 +730,46 @@ async fn test_p0_2_background_defined_skill_preload_once_after_parent_cancel() {
                 .iter()
                 .filter(|message| message.content().contains("P0-2 BACKGROUND SKILL MARKER"))
                 .count();
-            Ok(Reasoning::with_answer("", "p0-2 background done"))
+            text_events("p0-2 background done")
         }
     }
+    crate::subagent::test_support::fixture_model_impl!(BackgroundSkillLLM);
 
     let parent_cancel = AgentCancellationToken::new();
     let registry = Arc::new(peri_agent::agent::async_tasks::TaskManager::new());
     let (bg_tx, mut bg_rx) = mpsc::unbounded_channel::<ExecutorEvent>();
-    let tool = SubAgentTool::new(
-        Arc::new(vec![]),
-        None,
-        Arc::new(move |_: Option<&str>| {
-            Box::new(BackgroundSkillLLM {
-                calls: Arc::clone(&llm_calls_clone),
-                preload_count: Arc::clone(&preload_count_clone),
-            }) as Box<dyn ReactLLM + Send + Sync>
-        }),
-        dir.path().to_str().unwrap().to_string(),
+    let host = HostFixture::open_in_with_background(
+        dir.path(),
+        "fixture-iv2-skillpreload",
+        Arc::clone(&registry),
+        bg_tx.clone(),
     )
-    .with_cancel(parent_cancel.clone())
-    .with_task_manager(registry)
-    .with_bg_event_sender(bg_tx);
+    .await;
+    let tool = host.bind(
+        SubAgentTool::new(
+            Arc::new(vec![]),
+            None,
+            Arc::new(move |_: Option<&str>| {
+                crate::subagent::test_support::fixture_source(
+                    std::sync::Arc::new(BackgroundSkillLLM {
+                        calls: Arc::clone(&llm_calls_clone),
+                        preload_count: Arc::clone(&preload_count_clone),
+                    }),
+                    "fixture-scripted",
+                )
+            }),
+            dir.path().to_str().unwrap().to_string(),
+        )
+        .with_cancel(parent_cancel.clone())
+        .with_task_manager(registry)
+        .with_bg_event_sender(bg_tx),
+    );
+    let tool = host.bind(with_agent_face(tool, dir.path()).await);
+    let tool = super::with_skill_registry(
+        tool,
+        "workspace",
+        &[("p0-2-skill", "P0-2 BACKGROUND SKILL MARKER\n")],
+    );
 
     let started = tool
         .invoke(
@@ -694,12 +779,13 @@ async fn test_p0_2_background_defined_skill_preload_once_after_parent_cancel() {
                 "prompt": "p0-2 background prompt",
                 "cwd": dir.path().to_str().unwrap(),
             }),
-            peri_agent::tools::ToolContext::new(&[], "."),
+            host.context(&[]),
         )
         .await
         .expect("background defined subagent should start");
     assert!(started.contains("Background task"));
     parent_cancel.cancel();
+    host.cancel_parent();
 
     let mut lifecycle = Vec::new();
     tokio::time::timeout(std::time::Duration::from_secs(5), async {
@@ -750,17 +836,22 @@ async fn test_integration_fork_plus_background_priority() {
         Arc::new(std::sync::Mutex::new(String::new()));
     let prompt_capture_clone = Arc::clone(&prompt_capture);
 
+    #[derive(Clone)]
     struct PromptCaptureLLM {
         captured: Arc<std::sync::Mutex<String>>,
     }
-    #[async_trait::async_trait]
-    impl ReactLLM for PromptCaptureLLM {
-        async fn generate_reasoning(
+    impl PromptCaptureLLM {
+        async fn respond(
             &self,
-            messages: &[BaseMessage],
-            _tools: &[&dyn BaseTool],
-            _streaming: Option<StreamingContext>,
-        ) -> peri_agent::error::AgentResult<Reasoning> {
+            request: peri_model::ModelRequest,
+            cancellation: tokio_util::sync::CancellationToken,
+        ) -> Vec<peri_model::ModelResult<peri_model::ModelStreamEvent>> {
+            use crate::subagent::test_support::*;
+            let _ = &cancellation;
+            let messages = base_messages(&request);
+            let defined = defined_tools(&request);
+            let _tools: Vec<&dyn BaseTool> = defined.iter().map(|t| t as &dyn BaseTool).collect();
+
             // 找到最后一条 Human 消息（fork directive 在 prompt queue 里）
             if let Some(last_human) = messages
                 .iter()
@@ -769,9 +860,10 @@ async fn test_integration_fork_plus_background_priority() {
             {
                 *self.captured.lock().unwrap() = last_human.content();
             }
-            Ok(Reasoning::with_answer("", "bg-fork done"))
+            text_events("bg-fork done")
         }
     }
+    crate::subagent::test_support::fixture_model_impl!(PromptCaptureLLM);
 
     let (bg_tx, mut bg_rx) = mpsc::unbounded_channel::<ExecutorEvent>();
     let registry = Arc::new(peri_agent::agent::async_tasks::TaskManager::new());
@@ -781,19 +873,30 @@ async fn test_integration_fork_plus_background_priority() {
         .write()
         .push(BaseMessage::human("ctx for bg fork"));
 
-    let t = SubAgentTool::new(
-        Arc::new(vec![]),
-        None,
-        Arc::new(move |_: Option<&str>| {
-            Box::new(PromptCaptureLLM {
-                captured: Arc::clone(&prompt_capture_clone),
-            }) as Box<dyn ReactLLM + Send + Sync>
-        }),
-        "/tmp".to_string(),
+    let host = HostFixture::open_with_background(
+        "fixture-iv2-independent",
+        Arc::clone(&registry),
+        bg_tx.clone(),
     )
-    .with_parent_messages(parent_messages)
-    .with_task_manager(Arc::clone(&registry))
-    .with_bg_event_sender(bg_tx);
+    .await;
+    let t = host.bind(
+        SubAgentTool::new(
+            Arc::new(vec![]),
+            None,
+            Arc::new(move |_: Option<&str>| {
+                crate::subagent::test_support::fixture_source(
+                    std::sync::Arc::new(PromptCaptureLLM {
+                        captured: Arc::clone(&prompt_capture_clone),
+                    }),
+                    "fixture-scripted",
+                )
+            }),
+            "/tmp".to_string(),
+        )
+        .with_parent_messages(parent_messages)
+        .with_task_manager(Arc::clone(&registry))
+        .with_bg_event_sender(bg_tx),
+    );
 
     // Act: 同时 fork=true + run_in_background=true（优先级测试）
     let result = t
@@ -803,7 +906,7 @@ async fn test_integration_fork_plus_background_priority() {
                 "run_in_background": true,
                 "prompt": "do both"
             }),
-            peri_agent::tools::ToolContext::new(&[], "."),
+            host.context(&[]),
         )
         .await
         .unwrap();

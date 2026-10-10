@@ -9,9 +9,12 @@ use peri_agent::{
     session::{FrozenContext, MessageSource, QueuedMessage, Session},
 };
 
+use super::test_support::ImageFixture;
 use super::ImageMiddleware;
 
-/// [回归测试] 同一次运行中追加图片后触发 Micro，模型仍须收到图片载荷。
+use crate::at_mention::tests::work_fixture;
+
+/// [回归测试] 后续 SDK 执行接收追加图片后触发 Micro，模型仍须收到图片载荷。
 /// 历史缺口：图片准备仅挂在一次性的 before_agent，第二批输入只留下 @image 文本。
 #[tokio::test]
 async fn test_image_later_input_reaches_model_after_micro_compact() {
@@ -27,21 +30,19 @@ async fn test_image_later_input_reaches_model_after_micro_compact() {
         tools::BaseTool,
     };
     use std::sync::Mutex;
+    #[derive(Clone)]
     struct CapturingLlm {
         requests: Arc<Mutex<Vec<Vec<BaseMessage>>>>,
         queue: MessageQueue,
         next_input: BaseMessage,
     }
-    #[async_trait::async_trait]
-    impl ReactLLM for CapturingLlm {
-        async fn generate_reasoning(
-            &self,
-            messages: &[BaseMessage],
-            _tools: &[&dyn BaseTool],
-            _streaming: Option<StreamingContext>,
-        ) -> peri_agent::error::AgentResult<Reasoning> {
+    // 本夹具由 `StageContext::with_llm`（ReactLLM 消费面）直接驱动，且断言
+    // 依赖 transcript message id——保留 ReactLLM 形态并实现 durable prepared
+    // 路径（work fixture 要求 prepared 调用）。
+    impl CapturingLlm {
+        fn record(&self, messages: Vec<BaseMessage>) -> peri_agent::error::AgentResult<Reasoning> {
             let mut requests = self.requests.lock().unwrap();
-            requests.push(messages.to_vec());
+            requests.push(messages);
             if requests.len() == 1 {
                 self.queue.push(QueuedMessage::prompt(
                     MessageSource::UserInput,
@@ -53,6 +54,41 @@ async fn test_image_later_input_reaches_model_after_micro_compact() {
             Ok(reasoning)
         }
     }
+
+    #[async_trait::async_trait]
+    impl ReactLLM for CapturingLlm {
+        fn prepare_reasoning(
+            &self,
+            messages: &[BaseMessage],
+            _tools: &[&dyn BaseTool],
+        ) -> peri_agent::error::AgentResult<peri_model::PreparedModelCall> {
+            let checkpoint = serde_json::json!({ "messages": messages });
+            Ok(peri_model::PreparedModelCall::new(checkpoint, |_| {
+                Ok(peri_model::ModelStream::new(futures::stream::empty()))
+            }))
+        }
+
+        async fn generate_prepared_reasoning(
+            &self,
+            prepared: peri_model::PreparedModelCall,
+            _streaming: Option<StreamingContext>,
+        ) -> peri_agent::error::AgentResult<Reasoning> {
+            let messages: Vec<BaseMessage> =
+                serde_json::from_value(prepared.checkpoint()["messages"].clone())
+                    .map_err(|error| peri_agent::error::AgentError::LlmError(error.to_string()))?;
+            self.record(messages)
+        }
+
+        async fn generate_reasoning(
+            &self,
+            messages: &[BaseMessage],
+            _tools: &[&dyn BaseTool],
+            _streaming: Option<StreamingContext>,
+        ) -> peri_agent::error::AgentResult<Reasoning> {
+            self.record(messages.to_vec())
+        }
+    }
+
     let dir = tempfile::tempdir().unwrap();
     let image_path = dir.path().join("input.png");
     image::RgbImage::new(1, 1).save(&image_path).unwrap();
@@ -90,9 +126,10 @@ async fn test_image_later_input_reaches_model_after_micro_compact() {
         first.clone(),
     ));
     let requests = Arc::new(Mutex::new(Vec::new()));
+    let fixture = ImageFixture::new(dir.path()).await;
     let mut chain = MiddlewareChain::new();
-    chain.add(Box::new(ImageMiddleware::new()));
-    let ctx = StageContext::builder(
+    chain.add(Box::new(fixture.middleware()));
+    let mut ctx = StageContext::builder(
         session.start_turn(),
         session.transcript(),
         session.queue().clone(),
@@ -109,45 +146,64 @@ async fn test_image_later_input_reaches_model_after_micro_compact() {
         ..Default::default()
     })
     .build();
+    let _work_fixture = work_fixture::bind(&mut ctx).await;
     let result = run_react_loop(ctx.clone(), 3).await;
     assert!(
         matches!(result, LoopResult::Completed),
         "循环应正常完成：{result:?}"
     );
-    let requests = requests.lock().unwrap();
-    assert_eq!(requests.len(), 2, "追加输入驱动第二次模型请求");
-    use base64::Engine;
-    let expected_image = ContentBlock::image_base64(
-        "image/png",
-        base64::engine::general_purpose::STANDARD.encode(std::fs::read(image_path).unwrap()),
+    let mut next_context = StageContext::builder(
+        session.start_turn(),
+        session.transcript(),
+        session.queue().clone(),
+    )
+    .with_middleware_chain(Arc::clone(&ctx.runtime.middleware_chain))
+    .with_llm(Arc::clone(&ctx.runtime.llm))
+    .build();
+    next_context.compact = ctx.compact.clone();
+    let result = run_react_loop(next_context.clone(), 3).await;
+    assert!(
+        matches!(result, LoopResult::Completed),
+        "后续执行应完成：{result:?}"
     );
-    for (request, input) in [
-        (&requests[0], &first),
-        (&requests[1], &first),
-        (&requests[1], &later),
-    ] {
-        let message = request
-            .iter()
-            .find(|message| message.id() == input.id())
-            .unwrap();
-        assert!(
-            message.content_blocks().contains(&expected_image),
-            "每批输入都必须向模型传递图片字节"
+    let ctx = next_context;
+    {
+        let requests = requests.lock().unwrap();
+        assert_eq!(requests.len(), 2, "追加输入驱动第二次模型请求");
+        use base64::Engine;
+        let expected_image = ContentBlock::image_base64(
+            "image/png",
+            base64::engine::general_purpose::STANDARD.encode(std::fs::read(image_path).unwrap()),
         );
-        assert!(!message.content().contains("@image"), "附件引用应完成转换");
+        for (request, input) in [
+            (&requests[0], &first),
+            (&requests[1], &first),
+            (&requests[1], &later),
+        ] {
+            let message = request
+                .iter()
+                .find(|message| message.id() == input.id())
+                .unwrap();
+            assert!(
+                message.content_blocks().contains(&expected_image),
+                "每批输入都必须向模型传递图片字节"
+            );
+            assert!(!message.content().contains("@image"), "附件引用应完成转换");
+        }
+        let transcript = ctx.session.transcript.read();
+        assert!(
+            transcript
+                .entries()
+                .iter()
+                .any(|entry| transcript.flags(entry.id()).truncated),
+            "必须实际执行 Micro Compact"
+        );
+        assert!(
+            !transcript.flags(later.id()).truncated,
+            "用户图片不参与 Micro 投影"
+        );
     }
-    let transcript = ctx.session.transcript.read();
-    assert!(
-        transcript
-            .entries()
-            .iter()
-            .any(|entry| transcript.flags(entry.id()).truncated),
-        "必须实际执行 Micro Compact"
-    );
-    assert!(
-        !transcript.flags(later.id()).truncated,
-        "用户图片不参与 Micro 投影"
-    );
+    fixture.shutdown().await;
 }
 
 #[tokio::test]
@@ -161,25 +217,31 @@ async fn image_replacement_reaches_transcript_with_the_original_message_id() {
         missing_image.display()
     )));
     session.transcript().write().append(original.clone());
-    let mut ctx = StageContext::new(
+    let mut ctx = StageContext::builder(
         session.start_turn(),
         session.transcript(),
         session.queue().clone(),
-    );
+    )
+    .build();
+    let _work_fixture = work_fixture::bind(&mut ctx).await;
     let mut chain = MiddlewareChain::new();
-    chain.add(Box::new(ImageMiddleware::new()));
+    let fixture = ImageFixture::new(dir.path()).await;
+    chain.add(Box::new(fixture.middleware()));
     ctx.runtime.middleware_chain = Arc::new(chain);
 
     run_before_agent(&ctx, &[original.id()]).await.unwrap();
 
-    let transcript = ctx.session.transcript.read();
-    assert_eq!(transcript.len(), 1);
-    let updated = transcript.get(original.id()).unwrap().message();
-    assert_eq!(updated.id(), original.id());
-    assert!(matches!(updated, BaseMessage::Human { .. }));
-    assert!(updated.content().contains("inspect"));
-    assert!(updated.content().contains("Image not found:"));
-    assert!(!updated.content().contains("@image"));
+    {
+        let transcript = ctx.session.transcript.read();
+        assert_eq!(transcript.len(), 1);
+        let updated = transcript.get(original.id()).unwrap().message();
+        assert_eq!(updated.id(), original.id());
+        assert!(matches!(updated, BaseMessage::Human { .. }));
+        assert!(updated.content().contains("inspect"));
+        assert!(updated.content().contains("Image not found:"));
+        assert!(!updated.content().contains("@image"));
+    }
+    fixture.shutdown().await;
 }
 
 /// [回归测试] 一次 Receive 接收多条用户输入时，附件不能只处理最后一条。
@@ -217,13 +279,16 @@ async fn test_image_batch_prepares_first_input_and_never_reloads_history() {
             input.clone(),
         ));
     }
-    let mut ctx = StageContext::new(
+    let mut ctx = StageContext::builder(
         session.start_turn(),
         session.transcript(),
         session.queue().clone(),
-    );
+    )
+    .build();
+    let _work_fixture = work_fixture::bind(&mut ctx).await;
     let mut chain = MiddlewareChain::new();
-    chain.add(Box::new(ImageMiddleware::new()));
+    let fixture = ImageFixture::new(dir.path()).await;
+    chain.add(Box::new(fixture.middleware()));
     ctx.runtime.middleware_chain = Arc::new(chain);
     let received = run_receive(ReceiveInput {
         context: ctx.clone(),
@@ -233,45 +298,49 @@ async fn test_image_batch_prepares_first_input_and_never_reloads_history() {
     run_before_agent(&ctx, &received.input_message_ids)
         .await
         .unwrap();
-    let transcript = ctx.session.transcript.read();
-    assert_eq!(transcript.len(), 4, "附件转换不增删或重排消息");
-    let updated = transcript.get(first.id()).unwrap().message();
-    assert_eq!(updated.id(), first.id(), "批次首条保留原消息身份");
-    assert!(!updated.content().contains("@image"), "首条附件标记已处理");
-    assert!(
-        updated.content().contains("Image not found:"),
-        "错误落在原输入"
-    );
-    let images = updated
-        .content_blocks()
-        .into_iter()
-        .filter(|block| matches!(block, ContentBlock::Image { .. }))
-        .collect::<Vec<_>>();
-    assert_eq!(images.len(), 2, "文件图片与原有粘贴附件均保留");
-    assert_eq!(
-        images[0],
-        ContentBlock::image_base64("image/png", "already-attached"),
-        "已有附件载荷不改变"
-    );
-    use base64::Engine;
-    assert_eq!(
-        images[1],
-        ContentBlock::image_base64(
-            "image/png",
-            base64::engine::general_purpose::STANDARD.encode(std::fs::read(image_path).unwrap())
-        ),
-        "本批首条图片必须读取真实文件"
-    );
-    assert_eq!(
-        serde_json::to_value(transcript.get(last.id()).unwrap().message()).unwrap(),
-        serde_json::to_value(&last).unwrap(),
-        "末条普通内容与身份不改变"
-    );
-    assert_eq!(
-        serde_json::to_value(transcript.get(old.id()).unwrap().message()).unwrap(),
-        serde_json::to_value(&old).unwrap(),
-        "旧历史的附件引用不能重读或改写"
-    );
+    {
+        let transcript = ctx.session.transcript.read();
+        assert_eq!(transcript.len(), 4, "附件转换不增删或重排消息");
+        let updated = transcript.get(first.id()).unwrap().message();
+        assert_eq!(updated.id(), first.id(), "批次首条保留原消息身份");
+        assert!(!updated.content().contains("@image"), "首条附件标记已处理");
+        assert!(
+            updated.content().contains("Image not found:"),
+            "错误落在原输入"
+        );
+        let images = updated
+            .content_blocks()
+            .into_iter()
+            .filter(|block| matches!(block, ContentBlock::Image { .. }))
+            .collect::<Vec<_>>();
+        assert_eq!(images.len(), 2, "文件图片与原有粘贴附件均保留");
+        assert_eq!(
+            images[0],
+            ContentBlock::image_base64("image/png", "already-attached"),
+            "已有附件载荷不改变"
+        );
+        use base64::Engine;
+        assert_eq!(
+            images[1],
+            ContentBlock::image_base64(
+                "image/png",
+                base64::engine::general_purpose::STANDARD
+                    .encode(std::fs::read(image_path).unwrap())
+            ),
+            "本批首条图片必须读取真实文件"
+        );
+        assert_eq!(
+            serde_json::to_value(transcript.get(last.id()).unwrap().message()).unwrap(),
+            serde_json::to_value(&last).unwrap(),
+            "末条普通内容与身份不改变"
+        );
+        assert_eq!(
+            serde_json::to_value(transcript.get(old.id()).unwrap().message()).unwrap(),
+            serde_json::to_value(&old).unwrap(),
+            "旧历史的附件引用不能重读或改写"
+        );
+    }
+    fixture.shutdown().await;
 }
 
 #[tokio::test]
@@ -287,11 +356,13 @@ async fn test_image_explicit_empty_batch_does_not_fall_back_to_history() {
         None,
     );
     session.transcript().write().append(original.clone());
-    let mut ctx = StageContext::new(
+    let mut ctx = StageContext::builder(
         session.start_turn(),
         session.transcript(),
         session.queue().clone(),
-    );
+    )
+    .build();
+    let _work_fixture = work_fixture::bind(&mut ctx).await;
     let mut chain = MiddlewareChain::new();
     chain.add(Box::new(ImageMiddleware::new()));
     ctx.runtime.middleware_chain = Arc::new(chain);

@@ -23,6 +23,7 @@ fn hook(command: &str, event: HookEvent, asynchronous: bool, timeout: u64) -> Re
         matcher: None,
         plugin_name: "fixture".into(),
         plugin_id: "fixture".into(),
+        plugin_source: None,
         plugin_root: PathBuf::new(),
         plugin_data_dir: PathBuf::new(),
         plugin_options: HashMap::new(),
@@ -61,7 +62,7 @@ async fn await_pid(path: &Path) -> u32 {
     .expect("hook writes its process identity")
 }
 async fn assert_group_stopped(pid: u32) {
-    let status = peri_agent::agent::async_tasks::shell_command(&format!("kill -0 -- -{pid}"), &[])
+    let status = peri_mcp_common::shell::shell_command(&format!("kill -0 -- -{pid}"), &[])
         .stdout(std::process::Stdio::null())
         .stderr(std::process::Stdio::null())
         .status()

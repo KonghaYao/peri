@@ -86,7 +86,6 @@ fn system_config(required_tools: Option<Vec<String>>, timeout_ms: Option<u64>) -
         headers: None,
         oauth: None,
         disabled: None,
-        protocol_version: None,
         subscriptions: None,
         system_mcp: Some(true),
         system_mcp_tools: required_tools,
@@ -146,7 +145,6 @@ impl SystemFixture {
             source: None,
             url: None,
             skills_capable: false,
-            channel_capable: false,
         })
     }
 
@@ -157,8 +155,6 @@ impl SystemFixture {
             .push(spawn_fake_peer(server, FakeInitialize::Legacy));
         let service = serve_client_auto(
             fixture_transport(client),
-            None,
-            None,
             &McpCapabilityProfile::default(),
             Duration::from_secs(5),
         )
@@ -193,8 +189,6 @@ impl SystemFixture {
             .push(spawn_fake_peer(server, FakeInitialize::Error));
         let outcome = serve_client_auto(
             fixture_transport(client),
-            None,
-            None,
             &McpCapabilityProfile::default(),
             Duration::from_secs(5),
         )
@@ -226,7 +220,7 @@ impl SystemFixture {
 async fn assert_pending(
     pool: &Arc<McpClientPool>,
     cancel: &AgentCancellationToken,
-    started_at: tokio::time::Instant,
+    started_at: peri_time::Instant,
 ) {
     let outcome = tokio::time::timeout(
         Duration::from_millis(50),
@@ -240,7 +234,7 @@ async fn assert_pending(
 async fn await_ready(
     pool: &Arc<McpClientPool>,
     cancel: &AgentCancellationToken,
-    started_at: tokio::time::Instant,
+    started_at: peri_time::Instant,
 ) -> Vec<NegotiatedSystemMcp> {
     tokio::time::timeout(
         Duration::from_secs(1),
@@ -255,7 +249,7 @@ async fn await_ready(
 async fn await_error(
     pool: &Arc<McpClientPool>,
     cancel: &AgentCancellationToken,
-    started_at: tokio::time::Instant,
+    started_at: peri_time::Instant,
 ) -> SystemReadinessError {
     tokio::time::timeout(
         Duration::from_secs(1),
@@ -274,7 +268,7 @@ async fn system_ready_waits_for_initialize_and_tools_list() {
     fixture.config("sys", system_config(Some(vec![]), Some(5_000)));
     fixture.publish_loaded();
     let cancel = AgentCancellationToken::new();
-    let started_at = tokio::time::Instant::now();
+    let started_at = peri_time::monotonic_now();
 
     // 阶段 1：transport / initialize 尚未完成（无句柄）→ 不返回 ready。
     assert_pending(fixture.pool(), &cancel, started_at).await;
@@ -307,15 +301,15 @@ async fn system_ready_rejects_initialize_error() {
     fixture.fail_initialize("sys").await;
 
     let cancel = AgentCancellationToken::new();
-    let error = await_error(fixture.pool(), &cancel, tokio::time::Instant::now()).await;
+    let error = await_error(fixture.pool(), &cancel, peri_time::monotonic_now()).await;
     assert_eq!(
         error,
         SystemReadinessError::ConnectionFailed {
-            server: "sys".to_string()
+            server: "sys".to_string(),
+            reason: "fixture: initialize failed".to_string(),
         }
     );
-    // 失败文案不含底层原因原文，也不含任何传输细节。
-    assert!(!error.to_string().contains("fixture"));
+    assert!(error.to_string().contains("fixture"));
 
     fixture.shutdown().await;
 }
@@ -330,11 +324,12 @@ async fn system_ready_rejects_tools_list_error_instead_of_empty() {
     fixture.commit_evidence("sys", DiscoveryEvidence::discovery_failed(generation));
 
     let cancel = AgentCancellationToken::new();
-    let error = await_error(fixture.pool(), &cancel, tokio::time::Instant::now()).await;
+    let error = await_error(fixture.pool(), &cancel, peri_time::monotonic_now()).await;
     assert_eq!(
         error,
         SystemReadinessError::ToolDiscoveryFailed {
-            server: "sys".to_string()
+            server: "sys".to_string(),
+            reason: "tools/list did not complete successfully".to_string(),
         }
     );
 
@@ -348,7 +343,7 @@ async fn system_ready_rejects_stale_generation_evidence() {
     fixture.publish_loaded();
     let (_handle, generation) = fixture.connect("sys").await;
     let cancel = AgentCancellationToken::new();
-    let started_at = tokio::time::Instant::now();
+    let started_at = peri_time::monotonic_now();
 
     // 旧代 / 非本代证据（含 generation 不匹配）不得被接受。
     fixture.commit_evidence("sys", DiscoveryEvidence::discovered(generation + 41));
@@ -381,7 +376,7 @@ async fn system_ready_rejects_connected_without_protocol_evidence() {
     fixture.commit_evidence("sys", DiscoveryEvidence::discovered(generation));
 
     let cancel = AgentCancellationToken::new();
-    let error = await_error(fixture.pool(), &cancel, tokio::time::Instant::now()).await;
+    let error = await_error(fixture.pool(), &cancel, peri_time::monotonic_now()).await;
     assert_eq!(
         error,
         SystemReadinessError::NegotiationIncomplete {
@@ -415,7 +410,7 @@ async fn system_ready_ignores_non_system_pending_and_failed() {
     fixture.commit_evidence("sys", DiscoveryEvidence::discovered(generation));
 
     let cancel = AgentCancellationToken::new();
-    let negotiated = await_ready(fixture.pool(), &cancel, tokio::time::Instant::now()).await;
+    let negotiated = await_ready(fixture.pool(), &cancel, peri_time::monotonic_now()).await;
     assert_eq!(negotiated.len(), 1);
     assert_eq!(negotiated[0].requirement.server, "sys");
 
@@ -429,11 +424,11 @@ async fn system_ready_does_not_treat_unloaded_manifest_as_empty() {
     // Pending + 空 configs：空 map 不是「无 System MCP」的证据，不得放行。
     let pending = SystemFixture::new();
     assert_eq!(pending.pool().system_manifest(), SystemMcpManifest::Pending);
-    assert_pending(pending.pool(), &cancel, tokio::time::Instant::now()).await;
+    assert_pending(pending.pool(), &cancel, peri_time::monotonic_now()).await;
 
     // Loaded(empty) 才通过，且立即通过（不等普通 transport）。
     pending.publish_loaded();
-    let negotiated = await_ready(pending.pool(), &cancel, tokio::time::Instant::now()).await;
+    let negotiated = await_ready(pending.pool(), &cancel, peri_time::monotonic_now()).await;
     assert!(negotiated.is_empty());
     pending.shutdown().await;
 
@@ -442,7 +437,7 @@ async fn system_ready_does_not_treat_unloaded_manifest_as_empty() {
     failed
         .pool()
         .publish_system_manifest(SystemMcpManifest::Failed);
-    let error = await_error(failed.pool(), &cancel, tokio::time::Instant::now()).await;
+    let error = await_error(failed.pool(), &cancel, peri_time::monotonic_now()).await;
     assert_eq!(error, SystemReadinessError::ConfigurationFailed);
     failed.shutdown().await;
 }
@@ -493,7 +488,7 @@ async fn system_ready_reports_generation_change_after_proven_readiness() {
 
     let pool = Arc::clone(fixture.pool());
     let cancel = AgentCancellationToken::new();
-    let started_at = tokio::time::Instant::now();
+    let started_at = peri_time::monotonic_now();
     let waiter = {
         let cancel = cancel.clone();
         tokio::spawn(async move { pool.await_system_connections(&cancel, started_at).await })
@@ -545,7 +540,7 @@ async fn system_ready_rejects_closed_pool_and_cancellation() {
     cancelled.publish_loaded();
     let cancel = AgentCancellationToken::new();
     cancel.cancel();
-    let error = await_error(cancelled.pool(), &cancel, tokio::time::Instant::now()).await;
+    let error = await_error(cancelled.pool(), &cancel, peri_time::monotonic_now()).await;
     assert_eq!(error, SystemReadinessError::Cancelled);
     cancelled.shutdown().await;
 
@@ -555,7 +550,7 @@ async fn system_ready_rejects_closed_pool_and_cancellation() {
     closed.publish_loaded();
     closed.pool().begin_shutdown();
     let cancel = AgentCancellationToken::new();
-    let error = await_error(closed.pool(), &cancel, tokio::time::Instant::now()).await;
+    let error = await_error(closed.pool(), &cancel, peri_time::monotonic_now()).await;
     assert_eq!(error, SystemReadinessError::PoolClosed);
     closed.shutdown().await;
 }
@@ -568,7 +563,7 @@ async fn system_ready_timeout_is_terminal_without_fallback() {
     let (_handle, generation) = fixture.connect("sys").await;
 
     let cancel = AgentCancellationToken::new();
-    let started_at = tokio::time::Instant::now();
+    let started_at = peri_time::monotonic_now();
     let error = await_error(fixture.pool(), &cancel, started_at).await;
     assert_eq!(
         error,
@@ -601,7 +596,7 @@ async fn system_ready_parallel_deadlines_do_not_accumulate() {
     let (_slow, _slow_generation) = fixture.connect("sys-slow").await;
 
     let cancel = AgentCancellationToken::new();
-    let started_at = tokio::time::Instant::now();
+    let started_at = peri_time::monotonic_now();
     let error = await_error(fixture.pool(), &cancel, started_at).await;
     assert_eq!(
         error,
@@ -628,7 +623,7 @@ async fn system_ready_reports_disabled_and_authorization_required() {
     config.disabled = Some(true);
     disabled.config("sys", config);
     disabled.publish_loaded();
-    let error = await_error(disabled.pool(), &cancel, tokio::time::Instant::now()).await;
+    let error = await_error(disabled.pool(), &cancel, peri_time::monotonic_now()).await;
     assert_eq!(
         error,
         SystemReadinessError::Disabled {
@@ -646,11 +641,12 @@ async fn system_ready_reports_disabled_and_authorization_required() {
         "sys",
         "fixture: authorization required".to_string(),
     );
-    let error = await_error(auth.pool(), &cancel, tokio::time::Instant::now()).await;
+    let error = await_error(auth.pool(), &cancel, peri_time::monotonic_now()).await;
     assert_eq!(
         error,
         SystemReadinessError::AuthorizationRequired {
-            server: "sys".to_string()
+            server: "sys".to_string(),
+            reason: "fixture: authorization required".to_string(),
         }
     );
     auth.shutdown().await;
@@ -668,15 +664,15 @@ fn discovery_evidence_is_complete_only_with_nonzero_generation() {
 }
 
 #[test]
-fn system_readiness_error_display_is_secret_safe() {
-    // 危险形态：控制字符 + URL query 凭据（全部为虚构值）。
+fn system_readiness_error_display_preserves_diagnostics_without_control_characters() {
+    // 控制字符仍折叠；原始 server 诊断依 ARC-SECRET-001 保留。
     let error = SystemReadinessError::Disabled {
         server: "sys\u{0}\nhttps://mcp.example.invalid/endpoint?token=fixture-value".to_string(),
     };
     let text = error.to_string();
     assert!(!text.contains('\n'), "文案不得包含换行: {text}");
     assert!(!text.contains('\u{0}'), "文案不得包含控制字符: {text}");
-    assert!(!text.contains("fixture-value"), "文案不得包含凭据: {text}");
+    assert!(text.contains("fixture-value"), "诊断不得被改写: {text}");
     assert!(text.contains("sys"));
     assert!(text.contains("服务器已禁用"));
 
@@ -700,6 +696,7 @@ fn system_readiness_error_maps_cancellation_to_interrupted_only() {
 
     let mapped = SystemReadinessError::ConnectionFailed {
         server: "sys".to_string(),
+        reason: String::new(),
     }
     .into_agent_error("McpMiddleware");
     match mapped {
@@ -723,15 +720,18 @@ fn system_readiness_error_carries_the_frozen_status_set() {
         },
         SystemReadinessError::AuthorizationRequired {
             server: "s".to_string(),
+            reason: String::new(),
         },
         SystemReadinessError::ConnectionFailed {
             server: "s".to_string(),
+            reason: String::new(),
         },
         SystemReadinessError::NegotiationIncomplete {
             server: "s".to_string(),
         },
         SystemReadinessError::ToolDiscoveryFailed {
             server: "s".to_string(),
+            reason: String::new(),
         },
         SystemReadinessError::ConnectionChanged {
             server: "s".to_string(),

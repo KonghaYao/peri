@@ -1,0 +1,430 @@
+diff --git a/src/model.rs b/src/model.rs
+--- a/src/model.rs
++++ b/src/model.rs
+@@ -2090,6 +2090,10 @@
+     #[serde(default, skip_serializing_if = "Option::is_none")]
+     #[cfg_attr(feature = "schemars", schemars(with = "Vec<String>"))]
+     pub resource_subscriptions: Option<Vec<String>>,
++    /// Task IDs to receive `notifications/tasks` for (SEP-2663).
++    #[serde(default, skip_serializing_if = "Option::is_none")]
++    #[cfg_attr(feature = "schemars", schemars(with = "Vec<String>"))]
++    pub task_ids: Option<Vec<String>>,
+ }
+ 
+ impl SubscriptionFilter {
+@@ -2118,6 +2122,19 @@
+                 })
+             })
+             .filter(|uris: &Vec<String>| !uris.is_empty());
++        let task_ids = self
++            .task_ids
++            .as_ref()
++            .and_then(|requested| {
++                other.task_ids.as_ref().map(|accepted| {
++                    requested
++                        .iter()
++                        .filter(|id| accepted.contains(id))
++                        .cloned()
++                        .collect()
++                })
++            })
++            .filter(|ids: &Vec<String>| !ids.is_empty());
+         Self {
+             tools_list_changed: (self.tools_list_changed == Some(true)
+                 && other.tools_list_changed == Some(true))
+@@ -2129,6 +2146,7 @@
+                 && other.resources_list_changed == Some(true))
+             .then_some(true),
+             resource_subscriptions,
++            task_ids,
+         }
+     }
+ 
+@@ -2149,7 +2167,15 @@
+                     .is_some_and(|requested| requested.contains(uri))
+             })
+         });
+-        booleans_are_subset && resources_are_subset
++        let tasks_are_subset = self.task_ids.as_ref().is_none_or(|accepted| {
++            accepted.iter().all(|id| {
++                other
++                    .task_ids
++                    .as_ref()
++                    .is_some_and(|requested| requested.contains(id))
++            })
++        });
++        booleans_are_subset && resources_are_subset && tasks_are_subset
+     }
+ 
+     /// Return the requested notification types advertised by server capabilities.
+@@ -2179,6 +2205,10 @@
+                 .is_some_and(|resources| resources.subscribe == Some(true))
+                 .then(|| self.resource_subscriptions.clone())
+                 .flatten(),
++            task_ids: capabilities
++                .supports_tasks()
++                .then(|| self.task_ids.clone())
++                .flatten(),
+         }
+     }
+ }
+@@ -2224,6 +2254,18 @@
+             .resource_subscriptions
+             .get_or_insert_default()
+             .push(uri.into());
++        self
++    }
++
++    /// Opt in to status notifications for all supplied task IDs.
++    pub fn task_ids(mut self, ids: impl IntoIterator<Item = impl Into<String>>) -> Self {
++        self.filter.task_ids = Some(ids.into_iter().map(Into::into).collect());
++        self
++    }
++
++    /// Add one task ID to the status subscription set.
++    pub fn task_id(mut self, id: impl Into<String>) -> Self {
++        self.filter.task_ids.get_or_insert_default().push(id.into());
+         self
+     }
+ 
+diff --git a/src/handler/server.rs b/src/handler/server.rs
+--- a/src/handler/server.rs
++++ b/src/handler/server.rs
+@@ -149,6 +149,15 @@
+                     Err(McpError::method_not_found::<SubscriptionsListenRequestMethod>())
+                 } else {
+                     let requested = request.params.notifications;
++                    if requested.task_ids.is_some()
++                        && !context
++                            .client_capabilities()
++                            .is_some_and(|caps| caps.supports_tasks())
++                    {
++                        return Err(McpError::missing_required_client_capability(
++                            ClientCapabilities::builder().enable_tasks().build(),
++                        ));
++                    }
+                     let Some(candidate) = self.accepted_subscription_filter(&requested) else {
+                         return Err(
+                             McpError::method_not_found::<SubscriptionsListenRequestMethod>(),
+@@ -158,6 +167,14 @@
+                     let advertised = requested.supported_by(&server_info.capabilities);
+                     let handler_accepted = requested.intersection(&candidate);
+                     let accepted = handler_accepted.intersection(&advertised);
++                    // Reuse tasks/get authorization for every accepted task ID
++                    // before acknowledging the subscription.
++                    if let Some(task_ids) = accepted.task_ids.as_ref() {
++                        for task_id in task_ids {
++                            self.get_task(GetTaskParams::new(task_id), context.clone())
++                                .await?;
++                        }
++                    }
+                     if accepted != handler_accepted {
+                         tracing::debug!(
+                             requested_resource_count = requested
+diff --git a/src/service/server.rs b/src/service/server.rs
+--- a/src/service/server.rs
++++ b/src/service/server.rs
+@@ -22,7 +22,7 @@
+         ResourceUpdatedNotification, ResourceUpdatedNotificationParam, ServerConfig,
+         ServerNotification, ServerRequest, ServerResult, SubscriptionFilter,
+         SubscriptionsAcknowledgedNotification, SubscriptionsAcknowledgedNotificationParams,
+-        ToolListChangedNotification,
++        TaskStatusNotification, TaskStatusNotificationParams, ToolListChangedNotification,
+     },
+     transport::DynamicTransportError,
+ };
+@@ -236,15 +236,17 @@
+                     "notifications/message",
+                 ));
+             }
+-            // SEP-2663 task status notifications are not yet routable through
+-            // `subscriptions/listen`: `SubscriptionFilter` has no `taskIds`
+-            // field yet (the upstream conformance check for this flow is also
+-            // still skipped, pending the subscriptions/listen rewrite).
+-            // Clients currently observe task state by polling `tasks/get`.
+-            ServerNotification::TaskStatusNotification(_) => {
+-                return Err(SubscriptionSendError::UnsupportedNotification(
+-                    "notifications/tasks",
+-                ));
++            ServerNotification::TaskStatusNotification(update) => {
++                let accepted = self
++                    .accepted
++                    .task_ids
++                    .as_ref()
++                    .is_some_and(|ids| ids.contains(&update.params.task.task.task_id));
++                if !accepted {
++                    return Err(SubscriptionSendError::NotificationNotAccepted(
++                        "notifications/tasks",
++                    ));
++                }
+             }
+             ServerNotification::CustomNotification(_) => {
+                 return Err(SubscriptionSendError::UnsupportedNotification(
+@@ -316,6 +318,17 @@
+     ) -> Result<(), SubscriptionSendError> {
+         self.send(ServerNotification::ResourceUpdatedNotification(
+             ResourceUpdatedNotification::new(ResourceUpdatedNotificationParam::new(uri)),
++        ))
++        .await
++    }
++
++    /// Send the complete current task state to a subscriber for its task ID.
++    pub async fn notify_task_status(
++        &self,
++        task: crate::model::DetailedTask,
++    ) -> Result<(), SubscriptionSendError> {
++        self.send(ServerNotification::TaskStatusNotification(
++            TaskStatusNotification::new(TaskStatusNotificationParams::new(task)),
+         ))
+         .await
+     }
+diff --git a/src/service/client.rs b/src/service/client.rs
+--- a/src/service/client.rs
++++ b/src/service/client.rs
+@@ -571,11 +571,15 @@
+                 .resource_subscriptions
+                 .as_ref()
+                 .is_some_and(|uris| uris.contains(&update.params.uri)),
++            ServerNotification::TaskStatusNotification(update) => self
++                .acknowledged
++                .task_ids
++                .as_ref()
++                .is_some_and(|ids| ids.contains(&update.params.task.task.task_id)),
+             ServerNotification::SubscriptionsAcknowledgedNotification(_)
+             | ServerNotification::CancelledNotification(_)
+             | ServerNotification::ProgressNotification(_)
+             | ServerNotification::LoggingMessageNotification(_)
+-            | ServerNotification::TaskStatusNotification(_)
+             | ServerNotification::CustomNotification(_) => false,
+         }
+     }
+diff --git a/tests/test_subscriptions.rs b/tests/test_subscriptions.rs
+--- a/tests/test_subscriptions.rs
++++ b/tests/test_subscriptions.rs
+@@ -17,11 +17,12 @@
+ use rmcp::{
+     ClientHandler, ClientServiceExt, ServerHandler, ServiceExt,
+     model::{
+-        ClientNotification, ClientRequest, DiscoverResult, GetMeta, Implementation,
++        ClientCapabilities, ClientConfig, ClientNotification, ClientRequest, DetailedTask,
++        DiscoverResult, GetMeta, GetTaskParams, GetTaskResult, Implementation,
+         NotificationMetaObject, PromptListChangedNotification, ProtocolVersion, ServerCapabilities,
+         ServerConfig, ServerNotification, ServerResult, SubscriptionFilter,
+         SubscriptionsAcknowledgedNotification, SubscriptionsAcknowledgedNotificationParams,
+-        SubscriptionsListenResult,
++        SubscriptionsListenResult, Task, TaskPayload, TaskStatus,
+     },
+     service::{
+         NotificationContext, RequestContext, RoleClient, RoleServer, SubscriptionContext,
+@@ -118,6 +119,62 @@
+ }
+ 
+ struct ResourceSubscriptionServer;
++
++struct TasksSubscriptionServer;
++
++fn task_state(id: &str) -> DetailedTask {
++    DetailedTask::new(
++        Task::new(
++            id,
++            TaskStatus::Working,
++            "2026-10-02T00:00:00Z",
++            "2026-10-02T00:00:00Z",
++        ),
++        TaskPayload::Working,
++    )
++}
++
++impl ServerHandler for TasksSubscriptionServer {
++    fn get_info(&self) -> ServerConfig {
++        ServerConfig::new(ServerCapabilities::builder().enable_tasks().build())
++    }
++
++    fn accepted_subscription_filter(
++        &self,
++        requested: &SubscriptionFilter,
++    ) -> Option<SubscriptionFilter> {
++        Some(requested.clone())
++    }
++
++    async fn get_task(
++        &self,
++        request: GetTaskParams,
++        _context: RequestContext<RoleServer>,
++    ) -> Result<GetTaskResult, rmcp::ErrorData> {
++        if request.task_id != "task-1" {
++            return Err(rmcp::ErrorData::invalid_params("unknown task", None));
++        }
++        Ok(GetTaskResult::new(task_state(&request.task_id)))
++    }
++
++    async fn listen(&self, context: SubscriptionContext) -> Result<(), rmcp::ErrorData> {
++        assert!(matches!(
++            context
++                .sink()
++                .notify_task_status(task_state("other-task"))
++                .await,
++            Err(SubscriptionSendError::NotificationNotAccepted(
++                "notifications/tasks"
++            ))
++        ));
++        context
++            .sink()
++            .notify_task_status(task_state("task-1"))
++            .await
++            .expect("accepted task notification");
++        Ok(())
++    }
++}
+ 
+ impl ServerHandler for ResourceSubscriptionServer {
+     fn get_info(&self) -> ServerConfig {
+@@ -400,6 +457,87 @@
+     .map_err(Into::into)
+ }
+ 
++async fn modern_tasks_client()
++-> anyhow::Result<rmcp::service::RunningService<rmcp::RoleClient, ClientConfig>> {
++    let (server_transport, client_transport) = tokio::io::duplex(16 * 1024);
++    tokio::spawn(async move {
++        let server = TasksSubscriptionServer.serve(server_transport).await?;
++        server.waiting().await?;
++        anyhow::Ok(())
++    });
++    ClientConfig::new(
++        ClientCapabilities::builder().enable_tasks().build(),
++        Implementation::from_build_env(),
++    )
++    .serve_with_lifecycle(
++        client_transport,
++        rmcp::ClientLifecycleMode::Discover {
++            preferred_versions: vec![ProtocolVersion::V_2026_07_28],
++        },
++    )
++    .await
++    .map_err(Into::into)
++}
++
++#[tokio::test]
++async fn task_subscription_filters_ids_and_delivers_status() -> anyhow::Result<()> {
++    let client = modern_tasks_client().await?;
++    let mut subscription = client
++        .listen(SubscriptionFilter::builder().task_id("task-1").build())
++        .await?;
++    assert_eq!(
++        subscription.acknowledged().task_ids.as_deref(),
++        Some(&["task-1".to_owned()][..])
++    );
++    let notification = subscription.next().await?.expect("task notification");
++    assert_eq!(
++        notification.get_meta().subscription_id(),
++        Some(subscription.id().clone())
++    );
++    let ServerNotification::TaskStatusNotification(status) = notification else {
++        panic!("expected task status notification");
++    };
++    assert_eq!(status.params.task.task.task_id, "task-1");
++    assert!(subscription.next().await?.is_none());
++    client.cancel().await?;
++    Ok(())
++}
++
++#[tokio::test]
++async fn task_subscription_reuses_tasks_get_authorization() -> anyhow::Result<()> {
++    let client = modern_tasks_client().await?;
++    let error = client
++        .listen(SubscriptionFilter::builder().task_id("other-task").build())
++        .await
++        .expect_err("unknown task must not be subscribable");
++    match error {
++        rmcp::ServiceError::McpError(error) => {
++            assert_eq!(error.code, rmcp::model::ErrorCode::INVALID_PARAMS);
++        }
++        other => panic!("expected invalid task error, got {other:?}"),
++    }
++    client.cancel().await?;
++    Ok(())
++}
++
++#[tokio::test]
++async fn task_subscription_requires_client_capability() -> anyhow::Result<()> {
++    let client = modern_client(TasksSubscriptionServer).await?;
++    let error = client
++        .listen(SubscriptionFilter::builder().task_id("task-1").build())
++        .await
++        .expect_err("task subscriptions require the Tasks client capability");
++    match error {
++        rmcp::ServiceError::McpError(error) => assert_eq!(
++            error.code,
++            rmcp::model::ErrorCode::MISSING_REQUIRED_CLIENT_CAPABILITY
++        ),
++        other => panic!("expected missing capability error, got {other:?}"),
++    }
++    client.cancel().await?;
++    Ok(())
++}
++
+ #[tokio::test]
+ async fn listen_exposes_acknowledged_filter_and_graceful_result() -> anyhow::Result<()> {
+     let client = modern_client(ToolsOnlyServer).await?;
+diff --git a/tests/test_subscriptions_model.rs b/tests/test_subscriptions_model.rs
+--- a/tests/test_subscriptions_model.rs
++++ b/tests/test_subscriptions_model.rs
+@@ -51,6 +51,23 @@
+         serde_json::to_value(requested.intersection(&accepted)).expect("serialize intersection"),
+         json!({})
+     );
++}
++
++#[test]
++fn task_filter_round_trips_and_intersects_by_id() {
++    let requested = SubscriptionFilter::builder()
++        .task_ids(["task-1", "task-2"])
++        .build();
++    let accepted = SubscriptionFilter::builder().task_id("task-2").build();
++    assert_eq!(
++        serde_json::to_value(&requested).unwrap(),
++        json!({ "taskIds": ["task-1", "task-2"] })
++    );
++    assert_eq!(requested.intersection(&accepted), accepted);
++    assert!(accepted.is_subset_of(&requested));
++    let decoded: SubscriptionFilter =
++        serde_json::from_value(json!({ "taskIds": ["task-2"] })).unwrap();
++    assert_eq!(decoded, accepted);
+ }
+ 
+ #[test]
+diff --git a/tests/test_message_schema/client_json_rpc_message_schema.json b/tests/test_message_schema/client_json_rpc_message_schema.json
+--- a/tests/test_message_schema/client_json_rpc_message_schema.json
++++ b/tests/test_message_schema/client_json_rpc_message_schema.json
+@@ -2218,6 +2218,13 @@
+         "resourcesListChanged": {
+           "type": "boolean"
+         },
++        "taskIds": {
++          "description": "Task IDs to receive `notifications/tasks` for (SEP-2663).",
++          "type": "array",
++          "items": {
++            "type": "string"
++          }
++        },
+         "toolsListChanged": {
+           "type": "boolean"
+         }
+diff --git a/tests/test_message_schema/server_json_rpc_message_schema.json b/tests/test_message_schema/server_json_rpc_message_schema.json
+--- a/tests/test_message_schema/server_json_rpc_message_schema.json
++++ b/tests/test_message_schema/server_json_rpc_message_schema.json
+@@ -3410,6 +3410,13 @@
+         "resourcesListChanged": {
+           "type": "boolean"
+         },
++        "taskIds": {
++          "description": "Task IDs to receive `notifications/tasks` for (SEP-2663).",
++          "type": "array",
++          "items": {
++            "type": "string"
++          }
++        },
+         "toolsListChanged": {
+           "type": "boolean"
+         }

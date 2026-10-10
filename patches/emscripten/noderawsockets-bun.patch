@@ -1,0 +1,37 @@
+Subject: [PATCH] Allow unbound outbound TCP sockets on Bun
+
+Bun 1.3.1 exposes net.Socket but does not implement process.binding('tcp_wrap').
+An unbound outbound socket can use the public connect API; the connect event
+then fills in its source address. Keep Node's eager bind path.
+
+---
+--- a/src/lib/libsockfs_node.js
++++ b/src/lib/libsockfs_node.js
+@@ -641,11 +641,10 @@
+       sock.dport = port;
+       sock.state = {{{ SOCK_STATE_CONNECTING }}};
+       var net = nodeSockHelpers.getNet();
+-      if (!sock.bound) {
+-        // The kernel assigns the ephemeral source port synchronously at
+-        // connect(), so an unbound client binds an ephemeral port first (the
+-        // same eager bindHandle path an explicit bind() takes) and getsockname()
+-        // is correct immediately, not only once the async connect completes.
++      if (!sock.bound && typeof Bun === 'undefined') {
++        // Bun has no process.binding('tcp_wrap'), which bindHandle uses when
++        // BoundSocket is unavailable. Let its public net.Socket connect() assign
++        // the ephemeral port. Node retains the synchronous bind behavior.
+         nodeSockHelpers.bindHandle(sock, addr.includes(':') ? '::' : '0.0.0.0', 0);
+       }
+       // Connect through the bound handle so the bound source address/port is
+@@ -663,9 +662,8 @@
+       });
+       nodeSockHelpers.wireConnection(sock, conn);
+       conn.connect({ host: addr, port, lookup: nodeSockHelpers.noLookup });
+-      // BoundSocket connects in-tick, so the kernel-assigned source address is
+-      // already known (node >= 26.7).
+-      sock.saddr = conn.address().address;
++      // Bun's unbound socket has no address until the connect callback.
++      sock.saddr = conn.address()?.address;
+       nodeSockHelpers.connectInProgress(sock);
+     },
+     listen(sock, backlog) {

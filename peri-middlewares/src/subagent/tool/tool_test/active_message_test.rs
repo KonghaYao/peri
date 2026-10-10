@@ -4,6 +4,7 @@ use peri_agent::agent::react::ToolCall;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use tokio::sync::{mpsc, Semaphore};
 
+#[derive(Clone)]
 struct GatedMessageLlm {
     calls: Arc<AtomicUsize>,
     release: Arc<Semaphore>,
@@ -11,30 +12,32 @@ struct GatedMessageLlm {
     first_answer: Reasoning,
 }
 
-#[async_trait::async_trait]
-impl ReactLLM for GatedMessageLlm {
-    async fn generate_reasoning(
+impl GatedMessageLlm {
+    async fn respond(
         &self,
-        messages: &[BaseMessage],
-        _tools: &[&dyn BaseTool],
-        _streaming: Option<StreamingContext>,
-    ) -> peri_agent::error::AgentResult<Reasoning> {
+        request: peri_model::ModelRequest,
+        cancellation: tokio_util::sync::CancellationToken,
+    ) -> Vec<peri_model::ModelResult<peri_model::ModelStreamEvent>> {
+        use crate::subagent::test_support::*;
+        let _ = &cancellation;
+        let messages = base_messages(&request);
+        let defined = defined_tools(&request);
+        let _tools: Vec<&dyn BaseTool> = defined.iter().map(|t| t as &dyn BaseTool).collect();
+
         let call = self.calls.fetch_add(1, Ordering::SeqCst);
         self.snapshots.send(messages.to_vec()).unwrap();
         if call == 0 {
             self.release.acquire().await.unwrap().forget();
-            return Ok(self.first_answer.clone());
+            return events_from_reasoning(self.first_answer.clone());
         }
-        Ok(Reasoning::with_answer("", "finished"))
+        text_events("finished")
     }
 }
+crate::subagent::test_support::fixture_model_impl!(GatedMessageLlm);
 
 struct MessageFixture {
     dir: tempfile::TempDir,
-    store: SessionFixture,
-    /// 本夹具父会话 id 与句柄（同库的第二个工具必须用它才不越根）。
-    parent_id: String,
-    parent: Arc<peri_agent::session::Session>,
+    host: HostFixture,
     tool: SubAgentTool,
     manager: Arc<TaskManager>,
     calls: Arc<AtomicUsize>,
@@ -48,18 +51,6 @@ impl MessageFixture {
     async fn new(first_answer: Reasoning) -> Self {
         let dir = tempdir().unwrap();
         write_test_agent(&dir);
-        let store = SessionFixture::open_in(dir.path()).await;
-        // 会话 cwd 与父子链：child 保存要求父会话存在且 cwd 与调用 cwd 一致。
-        let cwd = store.workspace_cwd();
-        let parent_id = store
-            .create_thread(ThreadMeta::new(cwd.clone()))
-            .await
-            .expect("建立父会话失败");
-        let parent = peri_agent::session::Session::new(
-            std::sync::Arc::from(cwd.as_str()),
-            peri_agent::session::FrozenContext::builder().build(),
-            Some(parent_id.clone()),
-        );
         let manager = Arc::new(TaskManager::new());
         let calls = Arc::new(AtomicUsize::new(0));
         let factories = Arc::new(AtomicUsize::new(0));
@@ -69,38 +60,41 @@ impl MessageFixture {
         let factory_calls = factories.clone();
         let llm_calls = calls.clone();
         let llm_release = release.clone();
+        // 生产通道（task manager / bg 事件）与 SDK 端口都装在父 session host 上：
+        // set_subagent_host write-once，必须在装配时一次给定。
+        let manager_for_host = Arc::clone(&manager);
+        let host =
+            HostFixture::open_in_with_host(dir.path(), "fixture-active-message", move |host| {
+                host.task_manager = Some(manager_for_host);
+                host.bg_event_sender = Some(events_tx);
+            })
+            .await;
         let tool = SubAgentTool::new(
             Arc::new(vec![make_tool("Probe")]),
             None,
             Arc::new(move |_| {
                 factory_calls.fetch_add(1, Ordering::SeqCst);
-                Box::new(GatedMessageLlm {
-                    calls: llm_calls.clone(),
-                    release: llm_release.clone(),
-                    snapshots: snapshots_tx.clone(),
-                    first_answer: first_answer.clone(),
-                })
+                crate::subagent::test_support::fixture_source(
+                    std::sync::Arc::new(GatedMessageLlm {
+                        calls: llm_calls.clone(),
+                        release: llm_release.clone(),
+                        snapshots: snapshots_tx.clone(),
+                        first_answer: first_answer.clone(),
+                    }),
+                    "fixture-scripted",
+                )
             }),
-            cwd.clone(),
+            host.cwd.clone(),
         )
-        .with_session_resources(store.facade())
-        .with_parent_thread_id(parent_id.clone())
-        .with_execution_owner(store.execution_owner())
-        .with_parent_session(parent.clone())
-        .with_task_manager(manager.clone())
-        .with_bg_event_sender(events_tx)
-        // 冻结空摘要，避免测试读取用户目录中的指引或 skill 列表。
         .with_frozen_data(
             Some(Arc::new(String::new())),
             None,
             Some(Arc::new(String::new())),
-        )
-        .with_frozen_system_prompt(Arc::new("Frozen test system".into()));
+        );
+        let tool = host.bind(with_agent_face(tool, dir.path()).await);
         Self {
             dir,
-            store,
-            parent_id,
-            parent,
+            host,
             tool,
             manager,
             calls,
@@ -115,12 +109,11 @@ impl MessageFixture {
         &self,
         input: serde_json::Value,
     ) -> Result<String, Box<dyn std::error::Error + Send + Sync>> {
-        self.tool
-            .invoke(
-                input,
-                peri_agent::tools::ToolContext::new(&[], self.dir.path().to_str().unwrap()),
-            )
-            .await
+        let mut ctx = peri_agent::tools::ToolContext::new(&[], self.dir.path().to_str().unwrap());
+        let tool_call = self.host.fresh_tool_call_id("active-message");
+        ctx.invocation_id = Some(tool_call.clone());
+        ctx.tool_call_id = Some(tool_call);
+        self.tool.invoke(input, ctx).await
     }
 
     async fn start(&mut self, mut input: serde_json::Value) -> String {
@@ -135,11 +128,37 @@ impl MessageFixture {
             .next()
             .unwrap()
             .to_owned();
-        let initial =
-            tokio::time::timeout(std::time::Duration::from_secs(5), self.snapshots.recv())
-                .await
-                .unwrap()
-                .unwrap();
+        let initial = match tokio::time::timeout(
+            std::time::Duration::from_secs(5),
+            self.snapshots.recv(),
+        )
+        .await
+        {
+            Ok(value) => value.unwrap(),
+            Err(_) => {
+                let mut drained = Vec::new();
+                while let Ok(event) = self.events.try_recv() {
+                    drained.push(format!("{event:?}"));
+                }
+                let messages = self
+                    .host
+                    .fixture
+                    .load_messages(&id)
+                    .await
+                    .unwrap_or_default();
+                let control = self
+                    .host
+                    .fixture
+                    .resources
+                    .load_session_meta(&id)
+                    .await
+                    .map(|meta| format!("{:?}", meta.agent_status))
+                    .unwrap_or_else(|error| format!("meta-error:{error}"));
+                panic!(
+                    "后台子会话未发出模型请求: invoke={result}; events={drained:?}; control={control}; messages={messages:?}"
+                );
+            }
+        };
         assert!(!initial
             .iter()
             .any(|message| message.content().contains("supplement-one")));
@@ -230,13 +249,20 @@ async fn test_active_message_reaches_next_model_request_without_resume() {
     assert_eq!(fixture.factories.load(Ordering::SeqCst), 1);
     assert_eq!(fixture.calls.load(Ordering::SeqCst), 2);
     assert_eq!(
-        fixture.store.list_session_threads(&id).await.unwrap().len(),
+        fixture
+            .host
+            .fixture
+            .list_session_threads(&id)
+            .await
+            .unwrap()
+            .len(),
         1
     );
 }
 
+/// [回归测试] 父代理在末轮推理期间发送的补充任务不能因 Info 调度被静默跳过。
 #[tokio::test]
-async fn test_active_message_background_fork_info_does_not_extend_final_answer() {
+async fn test_active_message_background_fork_defer_extends_final_answer() {
     let mut fixture = MessageFixture::new(Reasoning::with_answer("", "finished")).await;
     let id = fixture.start(serde_json::json!({"fork": true})).await;
     let receipt = fixture
@@ -245,11 +271,26 @@ async fn test_active_message_background_fork_info_does_not_extend_final_answer()
         .unwrap();
     assert!(receipt.starts_with("action: send\nstatus: queued"));
     fixture.finish().await;
+    let transcript = fixture
+        .host
+        .fixture
+        .load_messages(&id)
+        .await
+        .unwrap_or_default();
+    let texts = transcript
+        .iter()
+        .map(|message| message.content())
+        .collect::<Vec<_>>();
     assert_eq!(
         fixture.calls.load(Ordering::SeqCst),
-        1,
-        "末轮 Info 不能额外触发模型"
+        2,
+        "末轮收到 Defer 必须再次推理消费补充任务; transcript={texts:?}"
     );
+    let next = fixture.snapshots.recv().await.unwrap();
+    assert!(next
+        .iter()
+        .any(|message| message.content().contains("supplement-one")));
+    assert_eq!(fixture.factories.load(Ordering::SeqCst), 1);
     assert!(fixture
         .manager
         .send_subagent_message(&id, Some("late"))
@@ -258,7 +299,7 @@ async fn test_active_message_background_fork_info_does_not_extend_final_answer()
 }
 
 #[tokio::test]
-async fn test_active_message_resumed_background_execution_accepts_info() {
+async fn test_active_message_resumed_background_execution_accepts_defer() {
     let mut fixture = MessageFixture::new(Reasoning::with_tools(
         "",
         vec![ToolCall::new("probe", "Probe", serde_json::json!({}))],
@@ -267,10 +308,10 @@ async fn test_active_message_resumed_background_execution_accepts_info() {
     let id = uuid::Uuid::now_v7().to_string();
     // 被恢复的 thread 必须属于夹具父会话的同一执行根，否则 resume 会被归属校验拒绝。
     preset_resumable_thread(
-        &fixture.store,
+        &fixture.host.fixture,
         &id,
         "fork",
-        Some(fixture.parent_id.as_str()),
+        Some(fixture.host.parent_id.as_str()),
         Vec::new(),
     )
     .await;
@@ -287,7 +328,13 @@ async fn test_active_message_resumed_background_execution_accepts_info() {
         .any(|message| message.content().contains("supplement-one")));
     assert_eq!(fixture.factories.load(Ordering::SeqCst), 1);
     assert_eq!(
-        fixture.store.list_session_threads(&id).await.unwrap().len(),
+        fixture
+            .host
+            .fixture
+            .list_session_threads(&id)
+            .await
+            .unwrap()
+            .len(),
         1
     );
 }
@@ -322,16 +369,17 @@ async fn test_active_message_cross_session_is_rejected_without_spawning() {
     let id = fixture.start(serde_json::json!({"fork": true})).await;
     // 同库、同父会话的第二个工具实例：被拒绝的原因必须是「无活跃接收者」，
     // 而不是缺父身份——否则测不到 cross-session 拒绝本身。
-    let stranger = make_subagent_tool(Vec::new())
-        .with_session_resources(fixture.store.facade())
-        .with_parent_thread_id(fixture.parent_id.clone())
-        .with_execution_owner(fixture.store.execution_owner())
-        .with_parent_session(Arc::clone(&fixture.parent))
-        .with_task_manager(Arc::new(TaskManager::new()));
+    let stranger_host = HostFixture::open_in(fixture.dir.path(), "fixture-active-stranger").await;
+    let _ = &fixture;
+    let stranger = stranger_host.bind(make_subagent_tool(Vec::new()));
+    let mut stranger_ctx = peri_agent::tools::ToolContext::new(&[], ".");
+    let stranger_tool_call = stranger_host.fresh_tool_call_id("stranger");
+    stranger_ctx.invocation_id = Some(stranger_tool_call.clone());
+    stranger_ctx.tool_call_id = Some(stranger_tool_call);
     let error = stranger
         .invoke(
             serde_json::json!({"resume_thread_id": id, "prompt": "other session"}),
-            peri_agent::tools::ToolContext::new(&[], "."),
+            stranger_ctx,
         )
         .await
         .unwrap_err()
@@ -341,7 +389,13 @@ async fn test_active_message_cross_session_is_rejected_without_spawning() {
         "必须拒绝跨 session 投递: {error}"
     );
     assert_eq!(
-        fixture.store.list_session_threads(&id).await.unwrap().len(),
+        fixture
+            .host
+            .fixture
+            .list_session_threads(&id)
+            .await
+            .unwrap()
+            .len(),
         1
     );
     fixture.finish().await;
@@ -350,44 +404,83 @@ async fn test_active_message_cross_session_is_rejected_without_spawning() {
 /// [回归测试] panic 的逆序 Drop 必须先撤销收件箱，再发布注销/停止事件。
 #[tokio::test]
 async fn test_active_message_panic_revokes_before_runtime_deregistration() {
+    #[derive(Clone)]
     struct PanicLlm;
-    #[async_trait::async_trait]
-    impl ReactLLM for PanicLlm {
-        async fn generate_reasoning(
+    impl PanicLlm {
+        async fn respond(
             &self,
-            _messages: &[BaseMessage],
-            _tools: &[&dyn BaseTool],
-            _streaming: Option<StreamingContext>,
-        ) -> peri_agent::error::AgentResult<Reasoning> {
+            request: peri_model::ModelRequest,
+            cancellation: tokio_util::sync::CancellationToken,
+        ) -> Vec<peri_model::ModelResult<peri_model::ModelStreamEvent>> {
+            use crate::subagent::test_support::*;
+            let _ = &cancellation;
+            let _messages = base_messages(&request);
+            let defined = defined_tools(&request);
+            let _tools: Vec<&dyn BaseTool> = defined.iter().map(|t| t as &dyn BaseTool).collect();
+
             panic!("模拟后台执行崩溃");
         }
     }
+    crate::subagent::test_support::fixture_model_impl!(PanicLlm);
     let dir = tempdir().unwrap();
     let manager = Arc::new(TaskManager::new());
     let (tx, mut rx) = mpsc::unbounded_channel();
     let cleanup_manager = manager.clone();
-    let tool = SubAgentTool::new(
-        Arc::new(Vec::new()),
-        None,
-        Arc::new(|_| Box::new(PanicLlm)),
-        dir.path().to_str().unwrap().into(),
-    )
-    .with_task_manager(manager.clone())
-    .with_frozen_data(
-        Some(Arc::new(String::new())),
-        None,
-        Some(Arc::new(String::new())),
-    )
-    .with_deregister_runtime(Arc::new(move |thread_id| {
-        tx.send(matches!(
-            cleanup_manager.send_subagent_message(thread_id, Some("cleanup message")),
-            Err(peri_agent::agent::async_tasks::SubagentMessageError::Closed)
-        ))
-        .unwrap();
-    }));
+    // 注销回调与任务通道必须装在父 host 上（host() 以父 session host 为准，
+    // set_subagent_host write-once → 装配时一次给定）。
+    let host_manager = Arc::clone(&manager);
+    let host_callback_manager = cleanup_manager.clone();
+    let (host_tx, _host_rx) = mpsc::unbounded_channel();
+    let deregister_for_host: Arc<dyn Fn(&str) + Send + Sync> = {
+        let tx = tx.clone();
+        let cleanup_manager = host_callback_manager.clone();
+        Arc::new(move |thread_id| {
+            tx.send(matches!(
+                cleanup_manager.send_subagent_message(thread_id, Some("cleanup message")),
+                Err(peri_agent::agent::async_tasks::SubagentMessageError::Closed)
+            ))
+            .unwrap();
+        })
+    };
+    let host =
+        HostFixture::open_in_with_host(dir.path(), "fixture-active-message-panic", move |host| {
+            host.task_manager = Some(host_manager);
+            host.bg_event_sender = Some(host_tx);
+            host.deregister_runtime = Some(deregister_for_host);
+        })
+        .await;
+    let tool = host.bind(
+        SubAgentTool::new(
+            Arc::new(Vec::new()),
+            None,
+            Arc::new(|_| {
+                crate::subagent::test_support::fixture_source(
+                    std::sync::Arc::new(PanicLlm),
+                    "fixture-scripted",
+                )
+            }),
+            host.cwd.clone(),
+        )
+        .with_frozen_data(
+            Some(Arc::new(String::new())),
+            None,
+            Some(Arc::new(String::new())),
+        )
+        .with_deregister_runtime({
+            let tx = tx.clone();
+            let cleanup_manager = cleanup_manager.clone();
+            Arc::new(move |thread_id| {
+                tx.send(matches!(
+                    cleanup_manager.send_subagent_message(thread_id, Some("cleanup message")),
+                    Err(peri_agent::agent::async_tasks::SubagentMessageError::Closed)
+                ))
+                .unwrap();
+            })
+        }),
+    );
     tool.invoke(
         serde_json::json!({"fork": true, "run_in_background": true, "prompt": "panic task"}),
-        peri_agent::tools::ToolContext::new(&[], dir.path().to_str().unwrap()),
+        host.context(&[]),
     )
     .await
     .unwrap();

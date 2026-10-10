@@ -1,6 +1,16 @@
 use super::*;
 use std::time::Duration;
 
+#[test]
+fn absent_stdio_rejects_shared_static_and_dynamic_process_entry() {
+    let pool = super::super::McpClientPool::new_pending();
+    pool.set_stdio_available(false).unwrap();
+    let command = tokio::process::Command::new("this-command-must-not-run");
+    let error = pool.spawn_process_command(command, None).err().unwrap();
+    assert!(error.to_string().contains("unavailable"));
+    assert!(pool.processes.lock().is_empty());
+}
+
 async fn wait_for_marker(path: &Path) {
     tokio::time::timeout(Duration::from_secs(5), async {
         while !path.exists() {
@@ -58,8 +68,6 @@ async fn cancelled_handshake_keeps_process_owner_until_pool_cleanup() {
     wait_for_marker(&cwd.path().join("marker")).await;
     let result = super::super::transport::serve_client_auto(
         transport,
-        None,
-        None,
         &pool.capability_profile,
         Duration::from_millis(20),
     )

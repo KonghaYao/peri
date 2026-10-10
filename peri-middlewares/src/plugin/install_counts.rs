@@ -66,7 +66,8 @@ pub fn is_install_counts_cache_valid() -> bool {
     // 提取 fetchedAt 字段检查过期
     let fetched_at = extract_fetched_at(&data);
     if let Some(ts) = fetched_at {
-        let elapsed = chrono::Utc::now().signed_duration_since(ts).num_seconds();
+        let now: chrono::DateTime<chrono::Utc> = peri_time::now_wall().into();
+        let elapsed = now.signed_duration_since(ts).num_seconds();
         return elapsed <= CACHE_TTL_SECS;
     }
 

@@ -1,15 +1,20 @@
-use std::{collections::HashSet, process::Stdio, sync::Arc, time::Duration};
+#[cfg(not(target_os = "emscripten"))]
+use std::process::Stdio;
+use std::{collections::HashSet, sync::Arc, time::Duration};
 
 use peri_acp_types::tasks::TaskManager;
-use peri_agent::agent::async_tasks::ShellExecutionGuard;
 use peri_agent::{agent::react::ReactLLM, messages::BaseMessage};
+#[cfg(not(target_os = "emscripten"))]
+use peri_mcp_common::shell::ShellExecutionGuard;
+#[cfg(not(target_os = "emscripten"))]
 use tokio::io::AsyncWriteExt;
 
+#[cfg(not(target_os = "emscripten"))]
+use crate::hooks::variables::resolve_hook_variables;
 use crate::hooks::{
     output_parser::{parse_command_hook_output, parse_http_hook_response},
     ssrf_guard::check_url,
     types::{HookAction, HookInput, HookType, RegisteredHook},
-    variables::resolve_hook_variables,
 };
 
 /// Execute a command hook (shell script).
@@ -27,6 +32,7 @@ pub async fn execute_command_hook(
 }
 
 /// Execute in the session directory and retain process-tree cleanup ownership.
+#[cfg(not(target_os = "emscripten"))]
 pub async fn execute_command_hook_owned(
     hook: &HookType,
     input: &HookInput,
@@ -45,6 +51,22 @@ pub async fn execute_command_hook_owned(
         }
     };
 
+    // H4 参数隔离：`$ARGUMENTS` / `${ARGUMENTS}` 文本替换已移除。旧命令必须在任何
+    // 进程启动前得到可定位的迁移错误（零进程），不能交给 shell 静默展开成空串。
+    if let Some(token) = legacy_arguments_token(&command) {
+        tracing::error!(
+            hook_event = ?input.hook_event_name,
+            token,
+            "Command hook uses removed $ARGUMENTS substitution; migrate to HookInput stdin JSON"
+        );
+        return HookAction::Block {
+            reason: format!(
+                "Command hook uses removed {token} substitution and was not executed. \
+                 Pass hook data via the HookInput JSON on stdin instead."
+            ),
+        };
+    }
+
     let input_json = match serde_json::to_string(input) {
         Ok(json) => json,
         Err(e) => {
@@ -53,12 +75,11 @@ pub async fn execute_command_hook_owned(
         }
     };
 
-    // Resolve ${CLAUDE_PLUGIN_ROOT}, ${CLAUDE_PLUGIN_DATA}, ${ARGUMENTS} in command string
+    // 只替换插件路径变量；HookInput 数据只经 stdin JSON 传递（H4 参数隔离）
     let command = resolve_hook_variables(
         &command,
         &registered.plugin_root,
         &registered.plugin_data_dir,
-        &input_json,
     );
 
     let plugin_root_str = registered.plugin_root.to_string_lossy().to_string();
@@ -66,7 +87,7 @@ pub async fn execute_command_hook_owned(
     let hook_event_str = format!("{:?}", input.hook_event_name);
 
     let ownership = match task_manager
-        .map(TaskManager::begin_external_execution)
+        .map(|manager| TaskManager::begin_external_execution(manager, "hook"))
         .transpose()
     {
         Ok(ownership) => ownership,
@@ -83,8 +104,8 @@ pub async fn execute_command_hook_owned(
             None => std::future::pending::<()>().await,
         }
     };
-    let run = tokio::time::timeout(Duration::from_secs(timeout_secs), async {
-        let mut cmd = peri_agent::agent::async_tasks::shell_command(&command, &[]);
+    let run = peri_time::timeout(Duration::from_secs(timeout_secs), async {
+        let mut cmd = peri_mcp_common::shell::shell_command(&command, &[]);
         cmd.current_dir(&input.cwd)
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
@@ -95,14 +116,18 @@ pub async fn execute_command_hook_owned(
             .env("CLAUDE_HOOK_EVENT_NAME", &hook_event_str)
             .kill_on_drop(true);
 
-        // Inject CLAUDE_PLUGIN_OPTION_* env vars
+        // Inject CLAUDE_PLUGIN_OPTION_* env vars。userConfig 的字符串值按原始字符串注入
+        // （与 MCP `${user_config.X}` 展开语义一致），不把 JSON 引号带进环境变量；
+        // 非字符串值没有原始文本形态，保留 JSON 表示。
         for (key, value) in &registered.plugin_options {
             let env_key = format!("CLAUDE_PLUGIN_OPTION_{}", key.to_uppercase());
-            cmd.env(env_key, value.to_string());
+            let env_value = match value {
+                serde_json::Value::String(s) => s.clone(),
+                other => other.to_string(),
+            };
+            cmd.env(env_key, env_value);
         }
 
-        #[cfg(unix)]
-        cmd.process_group(0);
         execution.prepare(&mut cmd)?;
         let mut child = cmd.spawn()?;
         if let Err(error) = execution.attach(&child) {
@@ -142,12 +167,15 @@ pub async fn execute_command_hook_owned(
             match output.status.code() {
                 Some(0) => {
                     // Parse structured output
-                    parse_command_hook_output(&stdout)
+                    parse_command_hook_output(&input.hook_event_name, &stdout)
                 }
                 Some(1) => {
-                    // Exit code 1 → Allow with warning
+                    // Exit code 1 → Allow with warning（不记录 stderr 正文）
                     if !stderr.is_empty() {
-                        tracing::warn!("Command hook exited with code 1: {}", stderr);
+                        tracing::warn!(
+                            stderr_bytes = stderr.len(),
+                            "Command hook exited with code 1"
+                        );
                     }
                     HookAction::Allow
                 }
@@ -164,9 +192,9 @@ pub async fn execute_command_hook_owned(
                 }
                 Some(code) => {
                     tracing::warn!(
-                        "Command hook exited with unexpected code {}: stderr={}",
                         code,
-                        stderr
+                        stderr_bytes = stderr.len(),
+                        "Command hook exited with unexpected code"
                     );
                     HookAction::Allow
                 }
@@ -181,14 +209,24 @@ pub async fn execute_command_hook_owned(
             HookAction::Allow
         }
         Err(_) => {
-            // Timeout
-            tracing::warn!(
-                "Command hook timed out after {}s: {}",
-                timeout_secs,
-                command
-            );
+            // Timeout：不记录 command 正文
+            tracing::warn!(timeout_secs, "Command hook timed out");
             HookAction::Allow
         }
+    }
+}
+
+#[cfg(target_os = "emscripten")]
+pub async fn execute_command_hook_owned(
+    _hook: &HookType,
+    _input: &HookInput,
+    _registered: &RegisteredHook,
+    _task_manager: Option<&dyn TaskManager>,
+) -> HookAction {
+    let reason = "Command hooks require a process-capable host and are unsupported on WASM";
+    tracing::error!(reason, "Command hook capability rejected");
+    HookAction::Block {
+        reason: reason.to_string(),
     }
 }
 
@@ -223,7 +261,7 @@ pub async fn execute_prompt_hook(
     let prompt = prompt_template.replace("$ARGUMENTS", &input_json);
     let prompt = prompt.replace("${ARGUMENTS}", &input_json);
 
-    let result = tokio::time::timeout(Duration::from_secs(timeout_secs), async {
+    let result = peri_time::timeout(Duration::from_secs(timeout_secs), async {
         let llm = llm_factory();
         // Build a minimal message list with just the prompt as a system message
         let messages = vec![BaseMessage::system(prompt.clone())];
@@ -239,7 +277,7 @@ pub async fn execute_prompt_hook(
                 .unwrap_or(reasoning.thought)
                 .trim()
                 .to_string();
-            parse_command_hook_output(&answer)
+            parse_command_hook_output(&input.hook_event_name, &answer)
         }
         Ok(Err(e)) => {
             tracing::warn!("Prompt hook LLM call failed: {}", e);
@@ -334,19 +372,16 @@ pub async fn execute_http_hook(hook: &HookType, input: &HookInput) -> HookAction
             let body = response.text().await.unwrap_or_default();
 
             if !status.is_success() {
+                // 只记录状态与长度，不记录 body 正文（H4：日志不得携带 hook 原文）
                 tracing::warn!(
-                    "HTTP hook returned non-success status {}: {}",
-                    status,
-                    if body.len() > 200 {
-                        format!("{}...", &body[..body.floor_char_boundary(200)])
-                    } else {
-                        body
-                    }
+                    status = %status,
+                    body_bytes = body.len(),
+                    "HTTP hook returned non-success status"
                 );
                 return HookAction::Allow;
             }
 
-            parse_http_hook_response(&body)
+            parse_http_hook_response(&input.hook_event_name, &body)
         }
         Err(e) => {
             tracing::warn!("HTTP hook request failed: {}", e);
@@ -403,7 +438,7 @@ pub async fn execute_agent_hook(
     );
 
     // 外层 timeout 包装（与 v1 一致）
-    let result = tokio::time::timeout(
+    let result = peri_time::timeout(
         Duration::from_secs(timeout_secs),
         llm.generate_reasoning(&messages, &[], None),
     )
@@ -427,7 +462,7 @@ pub async fn execute_agent_hook(
                 return HookAction::Allow;
             }
             // 复用 command hook 的 output parser 解析 JSON 决策
-            parse_command_hook_output(&text)
+            parse_command_hook_output(&input.hook_event_name, &text)
         }
         Ok(Err(e)) => {
             tracing::warn!("Hook agent: LLM failed: {}, allowing", e);
@@ -437,6 +472,20 @@ pub async fn execute_agent_hook(
             tracing::warn!("Hook agent: timed out ({}s), allowing", timeout_secs);
             HookAction::Allow
         }
+    }
+}
+
+/// 检测已移除的 `$ARGUMENTS` / `${ARGUMENTS}` 命令文本替换写法。
+///
+/// 命中即返回可定位的 token，由 command hook 在执行前转成迁移错误（零进程）。
+#[cfg(not(target_os = "emscripten"))]
+fn legacy_arguments_token(command: &str) -> Option<&'static str> {
+    if command.contains("${ARGUMENTS}") {
+        Some("${ARGUMENTS}")
+    } else if command.contains("$ARGUMENTS") {
+        Some("$ARGUMENTS")
+    } else {
+        None
     }
 }
 

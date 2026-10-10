@@ -26,8 +26,8 @@ use serde_json::{Map, Value};
 
 use super::transport::{create_bridge, AcpBridgeHandle, MCP_CONNECT_METHOD, MCP_DISCONNECT_METHOD};
 use crate::mcp::client::{
-    peer_declares_skills, redact_mcp_error, serve_client_auto, ClientStatus, McpClientHandle,
-    McpClientPool, OAuthStatus, HTTP_CONNECT_TIMEOUT, SHUTDOWN_TIMEOUT,
+    peer_declares_skills, serve_client_auto, ClientStatus, McpClientHandle, McpClientPool,
+    OAuthStatus, HTTP_CONNECT_TIMEOUT, SHUTDOWN_TIMEOUT,
 };
 use crate::mcp::task_scope::McpTaskKey;
 
@@ -295,18 +295,11 @@ async fn connect_server(
         return;
     }
 
-    let served = serve_client_auto(
-        transport,
-        None,
-        None,
-        &pool.capability_profile,
-        HTTP_CONNECT_TIMEOUT,
-    )
-    .await;
+    let served = serve_client_auto(transport, &pool.capability_profile, HTTP_CONNECT_TIMEOUT).await;
     let service = match served {
         Ok(Ok(service)) => service,
         Ok(Err(error)) => {
-            let message = redact_mcp_error(&error.to_string());
+            let message = error.to_string();
             fail_connection(&pool, &state, &gateway, &spec, &connection_id, message).await;
             return;
         }
@@ -326,10 +319,11 @@ async fn connect_server(
 
     let mut service = pool.retain_service(service);
     let peer = service.peer().clone();
+    pool.configure_peer_cache(&peer).await;
     let tools = match peer.list_all_tools().await {
         Ok(tools) => tools,
         Err(error) => {
-            let message = redact_mcp_error(&error.to_string());
+            let message = error.to_string();
             let _ = service.close_with_timeout(SHUTDOWN_TIMEOUT).await;
             fail_connection(&pool, &state, &gateway, &spec, &connection_id, message).await;
             return;
@@ -352,16 +346,6 @@ async fn connect_server(
         // 会话级连接的来源是声明它的 client，不参与持久缓存。
         cache_version: None,
         skills_capable: peer_declares_skills(&peer),
-        channel_capable: peer
-            .peer_info()
-            .and_then(|info| {
-                info.capabilities
-                    .experimental
-                    .as_ref()
-                    .and_then(|experimental| experimental.get("claude/channel"))
-                    .cloned()
-            })
-            .is_some(),
         peer: Some(peer),
         resources: Vec::new(),
         tools,
@@ -370,7 +354,13 @@ async fn connect_server(
         source: Some(ConfigSource::Acp),
         url: None,
     };
-    match pool.commit_acp_connection(&spec.session_id, &spec.name, Arc::new(client), service) {
+    match pool.commit_acp_connection(
+        &spec.session_id,
+        &connection_id,
+        &spec.name,
+        Arc::new(client),
+        service,
+    ) {
         Ok(pool_name) => {
             mark_ready(&state, &spec.session_id, &spec.server_id);
             tracing::info!(
@@ -428,7 +418,7 @@ async fn disconnect(gateway: &Arc<dyn AcpMcpGatewayPort>, connection_id: &str) {
         "connectionId".to_string(),
         Value::String(connection_id.to_string()),
     );
-    let outcome = tokio::time::timeout(
+    let outcome = peri_time::timeout(
         SHUTDOWN_TIMEOUT,
         gateway.request(MCP_DISCONNECT_METHOD, Value::Object(params)),
     )

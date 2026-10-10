@@ -8,11 +8,12 @@
 //! SandboxWrite 注入等 middlewares 能力。
 
 use peri_agent::{
-    agent::react::ReactLLM, session::subagent::SubagentCancelPolicy, tools::BaseTool,
+    session::subagent::{SubagentCancelPolicy, SubagentLlmSource},
+    tools::BaseTool,
 };
 
 use super::super::fork::allows_injected_tools;
-use crate::claude_agent_parser::ClaudeAgent;
+use peri_mcp_core::agent_definition::ClaudeAgent;
 
 /// Agent 工具 `model` 参数可用档位（契约层单一事实源 `peri_acp_types::agents::MODEL_TIERS`；
 /// `inherit` 单独处理，不在档位集合内）
@@ -20,17 +21,18 @@ pub(crate) const MODEL_TIERS: [&str; 4] = peri_acp_types::agents::MODEL_TIERS;
 
 /// v2-ready SubAgent 装配产物（L3 简化：创建/运行/收尾移入 Agent 层统一入口）
 pub(crate) struct AgentBuildResult {
-    /// SubAgent LLM（ReactLLM 实现/装饰器）
-    pub llm: Box<dyn ReactLLM + Send + Sync>,
+    /// SubAgent 模型来源（H1：bridge 由 Agent 层子链装配点构造）
+    pub llm: SubagentLlmSource,
     /// 过滤后的工具集（按 agent_def.tools/disallowed_tools）
     pub tools: Vec<Box<dyn BaseTool>>,
     /// Canonical allow/disallow policy retained for every generation refresh.
-    pub tool_filter: std::sync::Arc<dyn Fn(&str) -> bool + Send + Sync>,
+    pub tool_filter: peri_agent::session::tool_catalog::ToolFilter,
     /// SubAgent system prompt
     pub system_prompt: Option<String>,
     /// agent 定义声明的 skills（SkillPreload 装配输入）
     pub skill_names: Vec<String>,
-    /// ReAct 循环最大迭代次数（来自 agent_def.max_turns，默认 200）
+    /// ReAct 循环最大迭代次数（来自 agent_def.max_turns，缺省/0 时回落
+    /// [`DEFAULT_SUBAGENT_MAX_ITERATIONS`](crate::subagent::DEFAULT_SUBAGENT_MAX_ITERATIONS)）
     pub max_iterations: usize,
 }
 
@@ -61,7 +63,9 @@ impl super::SubAgentTool {
         );
 
         // 显式 `tools: []` 是严格的零工具边界，禁止 WriteSandbox 等后注入工具。
+        #[cfg(not(target_os = "emscripten"))]
         let allowed_write_dirs = &agent_def.frontmatter.allowed_write_dirs;
+        #[cfg(not(target_os = "emscripten"))]
         if allows_injected_tools(&agent_def.frontmatter.tools) && !allowed_write_dirs.is_empty() {
             let disallowed_list = agent_def.frontmatter.disallowed_tools.to_vec();
             let is_disallowed = disallowed_list.iter().any(|n| {
@@ -74,7 +78,7 @@ impl super::SubAgentTool {
                     "SandboxWrite 被 disallowedTools 否决，跳过注入"
                 );
             } else {
-                match crate::tools::filesystem::WriteSandboxTool::new(
+                match peri_mcp_workspace::filesystem::WriteSandboxTool::new(
                     cwd.to_string(),
                     allowed_write_dirs.clone(),
                 ) {
@@ -126,18 +130,33 @@ impl super::SubAgentTool {
                 }
                 Some(tier)
             }
-            None => agent_def
-                .frontmatter
-                .model
-                .clone()
-                .filter(|m| !m.is_empty() && *m != "inherit"),
+            // M2：定义侧档位必须已验证（registry 激活已校验；此处是执行边界的
+            // 防御性复检，杜绝绕过注册表的定义把未知值交给工厂静默回退父模型）。
+            None => {
+                let selection =
+                    peri_acp_types::agents::AgentModelSelection::parse(
+                        agent_def.frontmatter.model.as_deref(),
+                    )
+                    .map_err(|_| {
+                        format!(
+                            "Error: agent definition '{}' declares an unsupported model tier. Available: inherit, {}",
+                            agent_name,
+                            MODEL_TIERS.join(", ")
+                        )
+                    })?;
+                selection.tier_alias().map(str::to_string)
+            }
         };
         let llm = (self.llm_factory)(model_alias.as_deref());
 
         // 3. Max iterations
-        let raw_turns = agent_def.frontmatter.max_turns.unwrap_or(200);
+        let default_turns = crate::subagent::DEFAULT_SUBAGENT_MAX_ITERATIONS;
+        let raw_turns = agent_def
+            .frontmatter
+            .max_turns
+            .unwrap_or(default_turns as u32);
         let max_iterations = if raw_turns == 0 {
-            200
+            default_turns
         } else {
             raw_turns as usize
         };

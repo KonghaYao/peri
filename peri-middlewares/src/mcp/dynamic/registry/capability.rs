@@ -10,7 +10,7 @@ use peri_acp_types::{
         DynamicMcpServerProjection, DynamicMcpToolCapability, SessionMcpCapabilitySnapshot,
     },
     mcp_skills::{HandleToken, McpSkillRegistry},
-    ports::{SessionMcpCapabilityPort, SessionMcpProjectionLease},
+    ports::{McpPoolPort, SessionMcpCapabilityPort, SessionMcpProjectionLease},
     tools::BaseTool,
 };
 use std::{
@@ -32,10 +32,17 @@ impl DynamicMcpRegistry {
         handle: &Arc<crate::mcp::client::McpClientHandle>,
         gate: &super::super::admission::DynamicMcpAdmissionGate,
     ) -> Result<BTreeMap<String, Arc<dyn BaseTool>>, DynamicMcpFailure> {
+        let output_pool = self
+            .state
+            .lock()
+            .projections
+            .get(&instance.logical.session_id)
+            .and_then(Weak::upgrade)
+            .map(|projection| projection.pool());
         let mut tools = BTreeMap::<String, Arc<dyn BaseTool>>::new();
         let mut folded = BTreeSet::new();
         for tool in &handle.tools {
-            let bridge = McpToolBridge::new_dynamic(
+            let mut bridge = McpToolBridge::new_dynamic(
                 &instance.logical.server_name,
                 tool,
                 Arc::clone(handle),
@@ -48,6 +55,9 @@ impl DynamicMcpRegistry {
                     "Dynamic MCP server or tool name is invalid",
                 )
             })?;
+            if let Some(pool) = &output_pool {
+                bridge = bridge.with_output_store(pool, Some(&instance.logical.session_id));
+            }
             let name = bridge.name().to_string();
             if !folded.insert(name.to_ascii_lowercase()) || tools.contains_key(&name) {
                 return Err(Self::failure(
@@ -305,15 +315,23 @@ impl SessionMcpCapabilityPort for RegistrySessionCapability {
 
     fn bind_projection(
         &self,
-        static_handles: Vec<(String, HandleToken)>,
+        static_pool: Arc<dyn McpPoolPort>,
         skill_registry: Arc<McpSkillRegistry>,
         command_registry: Arc<CommandRegistry>,
     ) -> Arc<dyn SessionMcpProjectionLease> {
+        let static_pool = static_pool
+            .downcast_arc::<McpClientPool>()
+            .unwrap_or_else(|_| panic!("checked projection requires its concrete MCP source pool"));
+        let pool = Arc::new(McpClientPool::new_pending());
+        if let Some(context) = static_pool.builtin_instance_context() {
+            pool.set_builtin_instance_context(context)
+                .expect("new checked projection must inherit its source context before discovery");
+        }
         let Some(registry) = self.registry.upgrade() else {
             return Arc::new(CheckedSessionMcpProjection {
                 registry: Weak::new(),
                 session_id: self.session_id.clone(),
-                pool: Arc::new(McpClientPool::new_pending()),
+                pool,
                 static_handles: BTreeMap::new(),
                 skill_registry,
                 command_registry,
@@ -321,19 +339,15 @@ impl SessionMcpCapabilityPort for RegistrySessionCapability {
                 closed: std::sync::atomic::AtomicBool::new(true),
             });
         };
-        let static_handles = static_handles
+        let static_handles = static_pool
+            .get_all_clients_visible_to(Some(&self.session_id))
             .into_iter()
-            .filter_map(|(name, token)| {
-                token
-                    .downcast::<McpClientHandle>()
-                    .ok()
-                    .map(|handle| (name, handle))
-            })
+            .map(|handle| (handle.name.clone(), handle))
             .collect::<BTreeMap<_, _>>();
         let projection = Arc::new(CheckedSessionMcpProjection {
             registry: Arc::downgrade(&registry),
             session_id: self.session_id.clone(),
-            pool: Arc::new(McpClientPool::new_pending()),
+            pool,
             static_handles,
             skill_registry,
             command_registry,

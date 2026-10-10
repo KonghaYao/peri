@@ -12,7 +12,6 @@ use peri_acp_types::command::command_route::{
 };
 use peri_acp_types::command::{CommandContext, CommandHandler, CommandOutcome};
 use peri_acp_types::plugin::McpServerConfigValidationError;
-use peri_resources::lsp::config::{lsp_config_from_plugin, LspServerConfig};
 use serde::Deserialize;
 use thiserror::Error;
 use tracing::{debug, warn};
@@ -246,15 +245,20 @@ fn process_command_file(
     });
 }
 
-/// 插件命令占位 handler（Phase 6 B2；设计「正交维度」：外部系统命令不改变
-/// 执行通路，仅要求路由表支持运行时注册 / 注销）。
+/// 插件命令 handler（Phase 6 B2；设计「正交维度」：外部系统命令不改变执行
+/// 通路，仅要求路由表支持运行时注册 / 注销）。
 ///
-/// 占位实现（执行语义未定）：返回 [`CommandOutcome::Inject`] 空串——拦截
-/// 路径对 Inject 的既有处理为 warn + fall-through（原文进 agent 管线，
-/// 命令不被吞，与 `mcp/skill_discovery.rs` 的 `McpSkillPlaceholder` /
-/// `peri-acp` 的 `PassthroughPlaceholder` 同构）。UI-only 反馈「插件命令
-/// 执行待后续版本」与正式执行体留待 Phase 5+ 补齐（注册 / 注销 / 投影
-/// 链路本 Phase 全量生效）。
+/// 执行体是**真实透传**（与 `peri-acp` 的 `AgentPassthrough`、MCP skill
+/// 占位同语义）：把用户原文整段 [`CommandOutcome::Inject`] 回 agent 管线，
+/// 命令不被吞。历史缺陷：占位实现返回 `Inject(String::new())`，拦截路径据此用
+/// 空串替换用户消息——原文整体丢失且不报错（与 2026-08-16 `AgentPassthrough`
+/// 同款回归；skill 面已修，插件面本次跟进）。
+///
+/// RPC 路径（`dispatch/execute_command.rs`）无 agent 管线：plugin 属第二等级
+/// （`CommandLevel::Level2`，按 provenance 判定），在 handler 执行前即被显式
+/// 拒绝，不伪报执行。
+///
+/// 命令正文的完整执行语义（插件 IPC / prompt 模板展开）留待后续版本。
 #[derive(Clone)]
 pub struct PluginCommandHandler {
     /// 命令来源（插件命令文件路径；占位期仅承载来源信息）。
@@ -263,9 +267,10 @@ pub struct PluginCommandHandler {
 
 #[async_trait]
 impl CommandHandler for PluginCommandHandler {
-    async fn execute(&self, _ctx: CommandContext) -> CommandOutcome {
-        // 占位：Inject 空串 → 拦截路径 fall-through，原文进 agent 管线。
-        CommandOutcome::Inject(String::new())
+    async fn execute(&self, ctx: CommandContext) -> CommandOutcome {
+        // 原文整段交还 agent 管线（含 `/plugin:{plugin}:{cmd}` token 与 args）；
+        // 原文不可重建，故只能随上下文携带（空串会吞掉用户输入）。
+        CommandOutcome::Inject(ctx.raw_text)
     }
 }
 
@@ -319,7 +324,8 @@ pub fn plugin_route_entries(entries: &[CommandEntry]) -> Vec<RouteEntry> {
 /// (matching Claude Code convention: `skills: ["./skills/"]` or `skills: ["skills/tdd"]`).
 /// Each entry becomes a `SkillRoot` (`source=Plugin`, `plugin_name=plugin_name`),
 /// regardless of whether it directly contains `SKILL.md` or is a container——
-/// `scan_skill_roots` handles both cases via leaf semantics.
+/// 两条形态都交给 provider 的扫描语义处理（W4b：宿主侧扫描已删除，
+/// 目录叶子语义见 `mcp-packages/workspace/src/resources/skills.rs`）。
 ///
 /// Falls back to `base_dir/skills/` as a single root when no manifest skills are declared.
 pub(crate) fn extract_skills_paths(
@@ -348,7 +354,7 @@ pub(crate) fn extract_skills_paths(
         }
     }
 
-    // 2. fallback：base_dir/skills/ 作为一个 root（由 scan_skill_roots 递归扫描）
+    // 2. fallback：base_dir/skills/ 作为一个 root（由 provider 递归扫描）
     let skills_dir = base_dir.join("skills");
     if skills_dir.is_dir() {
         result.push(SkillRoot {
@@ -427,6 +433,7 @@ fn describe_json_error(error: &serde_json::Error) -> String {
 fn describe_server_parse_error(error: &serde_json::Error) -> String {
     let text = error.to_string();
     let rule = [
+        McpServerConfigValidationError::DisabledWithSystemMcp,
         McpServerConfigValidationError::SystemMcpToolsRequiresSystemMcp,
         McpServerConfigValidationError::SystemMcpTimeoutRequiresSystemMcp,
         McpServerConfigValidationError::SystemMcpTimeoutOutOfRange,
@@ -645,7 +652,7 @@ fn load_plugins_with_policies(
                 }
                 // 清单文件缺失：只读准备路径以可定位的具体错误失败（不写缓存、不静默
                 // 跳过）；既有路径允许从 marketplace manifest 生成合成清单
-                // （兼容修复前安装的 LSP 插件），生成结果同样按严格语义解析。
+                // （兼容修复前安装的插件），生成结果同样按严格语义解析。
                 if manifest_policy == ManifestPolicy::Readonly {
                     return Err(LoaderError::ManifestLoadFailed(format!(
                         "{}: plugin manifest missing at {}",
@@ -713,6 +720,14 @@ fn load_plugins_with_policies(
             data_path,
             hooks_config,
             marketplace: plugin.marketplace.clone(),
+            // M6：来源身份只取自安装记录（id / origin / scope / projectPath），
+            // 不由插件名、安装路径或当轮 cwd 反推。
+            scope: peri_acp_types::plugin::PluginScope {
+                plugin_id: plugin.id.clone(),
+                origin: plugin.origin,
+                install_scope: plugin.scope,
+                project_path: plugin.project_path.clone(),
+            },
         });
     }
 
@@ -756,13 +771,19 @@ fn select_enabled_plugins(
     let installed = load_installed_plugins(Some(&plugins_path))?;
     let user_settings = load_claude_settings(Some(&settings_path))?;
 
-    // 尝试加载项目级 settings.json（与 P0-1 hooks 加载一致）
     let project_settings = cwd
-        .map(|p| p.join(".claude").join("settings.json"))
-        .filter(|p| p.exists())
-        .and_then(|p| load_claude_settings(Some(&p)).ok());
-
-    let enabled_ids = merge_enabled_plugins(&user_settings, project_settings.as_ref());
+        .map(|directory| load_claude_settings(Some(&directory.join(".claude/settings.json"))))
+        .transpose()?;
+    let local_settings = cwd
+        .map(|directory| load_claude_settings(Some(&directory.join(".claude/settings.local.json"))))
+        .transpose()?;
+    let inherited = ClaudeSettings {
+        enabled_plugins: merge_enabled_plugins(&user_settings, project_settings.as_ref())
+            .into_iter()
+            .collect(),
+        ..ClaudeSettings::default()
+    };
+    let enabled_ids = merge_enabled_plugins(&inherited, local_settings.as_ref());
 
     let filtered: Vec<_> = installed
         .plugins
@@ -858,12 +879,12 @@ pub fn load_enabled_plugins_aggregated(claude_dir: &Path, cwd: Option<&Path>) ->
             );
             return PluginLoadResult {
                 plugins: vec![],
+                scope: vec![],
                 all_skill_roots: vec![],
                 all_mcp_servers: HashMap::new(),
                 all_agent_dirs: vec![],
                 all_commands: vec![],
                 all_hooks: vec![],
-                all_lsp_servers: vec![],
             };
         }
     };
@@ -884,14 +905,13 @@ pub fn load_enabled_plugins_aggregated_readonly(
     )?))
 }
 
-/// 插件聚合（skills / MCP / agent / 命令 / hooks / LSP）单一实现：
+/// 插件聚合（skills / MCP / agent / 命令 / hooks）单一实现：
 /// 宽容聚合与只读聚合共用，避免两条路径各自漂移。
 fn aggregate_plugin_data(plugins: Vec<LoadedPlugin>) -> PluginLoadResult {
     let all_skill_roots: Vec<SkillRoot> = plugins
         .iter()
         .flat_map(|p| p.skills_roots.clone())
         .collect();
-
     let all_mcp_servers = merge_plugin_mcp_servers(&plugins);
 
     let all_agent_dirs: Vec<PathBuf> = plugins.iter().flat_map(|p| p.agents_dirs.clone()).collect();
@@ -915,6 +935,7 @@ fn aggregate_plugin_data(plugins: Vec<LoadedPlugin>) -> PluginLoadResult {
                                 .or_else(|| hook_def.get_matcher().cloned()),
                             plugin_name: plugin.name.clone(),
                             plugin_id: plugin.name.clone(),
+                            plugin_source: Some(plugin.scope.clone()),
                             plugin_root: plugin.install_path.clone(),
                             plugin_data_dir: plugin.data_path.clone(),
                             plugin_options: plugin
@@ -936,43 +957,29 @@ fn aggregate_plugin_data(plugins: Vec<LoadedPlugin>) -> PluginLoadResult {
         .flatten()
         .collect();
 
-    let all_lsp_servers: Vec<LspServerConfig> = plugins
-        .iter()
-        .filter_map(|plugin| {
-            let servers = plugin.manifest.lsp_servers.as_ref()?;
-            if servers.is_empty() {
-                return None;
-            }
-            Some(
-                servers
-                    .iter()
-                    .map(|s| {
-                        lsp_config_from_plugin(
-                            &plugin.name,
-                            &s.name,
-                            &s.command,
-                            &s.args,
-                            &plugin.install_path,
-                            s.extension_to_language.clone(),
-                        )
-                    })
-                    .collect::<Vec<_>>(),
-            )
-        })
-        .flatten()
-        .collect();
+    // M6：来源作用域是 `plugins` 的投影（不是第二份事实），顺序一一对应。
+    let scope: Vec<peri_acp_types::plugin::PluginScope> =
+        plugins.iter().map(|plugin| plugin.scope.clone()).collect();
 
     PluginLoadResult {
         plugins,
+        scope,
         all_skill_roots,
         all_mcp_servers,
         all_agent_dirs,
         all_commands,
         all_hooks,
-        all_lsp_servers,
     }
 }
 
 #[cfg(test)]
 #[path = "loader_test.rs"]
 pub(crate) mod tests;
+
+#[cfg(test)]
+#[path = "loader_scope_test.rs"]
+mod scope_tests;
+
+#[cfg(test)]
+#[path = "loader_admission_test.rs"]
+mod admission_tests;

@@ -10,7 +10,7 @@ use peri_agent::{
 };
 use serde_json::Value;
 
-use crate::ask_user::ask_user_tool_definition;
+use crate::ask_user::{ask_user_tool_definition, ASK_USER_TOOL_DESCRIPTION};
 
 // ─── AskUserTool ──────────────────────────────────────────────────────────────
 
@@ -104,7 +104,7 @@ impl BaseTool for AskUserTool {
     }
 
     fn description(&self) -> &str {
-        ask_user_tool_definition().description.leak()
+        ASK_USER_TOOL_DESCRIPTION
     }
 
     fn parameters(&self) -> Value {

@@ -1,0 +1,576 @@
+use super::*;
+
+// ── 后台任务超时语义（issue 2026-08-02-background-task-15s-timeout-kills-and-misreports）──
+// parse_timeout / bg_shell_task_id 纯函数测试已随实现迁至
+// `peri-agent/src/agent/async_tasks_test.rs`（L1 迁移点），此处不再重复。
+
+/// bg 显式超时：应杀死整个进程组（bash 为组长），sh/sleep 子进程不得孤儿存活创建 marker。
+/// 命令 `sh -c 'sleep 3; touch marker'` + timeout 2000：若只杀 bash 单进程（旧行为），
+/// sh 孤儿会在 3s 时 touch；等 3.5s 断言 marker 不存在可区分新旧行为。
+#[cfg(unix)]
+#[tokio::test]
+async fn test_bg_explicit_timeout_kills_process_group() {
+    let registry = Arc::new(peri_mcp_common::create_local_task_manager());
+    let marker = std::env::temp_dir().join(format!(
+        "peri-bg-timeout-kill-{}.marker",
+        uuid::Uuid::new_v4()
+    ));
+    let marker_path = marker.to_string_lossy().to_string();
+    let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<BackgroundTaskResult>();
+    let _process_env = peri_mcp_common::process_env::lock().expect("process env lock");
+    let tool = BashTool::new(std::env::temp_dir().to_str().unwrap())
+        .with_task_manager(registry)
+        .with_on_bg_complete(Arc::new(move |r, _kind| {
+            tx.send(r.clone()).map_err(|error| error.to_string())
+        }));
+
+    let result = tool
+        .invoke(
+            serde_json::json!({
+                "command": format!("sh -c 'sleep 3; touch {}'", marker_path),
+                "run_in_background": true,
+                "timeout": 2000,
+            }),
+            peri_agent::tools::ToolContext::new(&[], "."),
+        )
+        .await
+        .unwrap();
+    assert!(result.contains("shell-"), "应返回 task_id: {result}");
+
+    // 回调保留失败与真实超时终态，通知不再携带输出正文。
+    let notif = rx
+        .recv()
+        .await
+        .expect("bg 超时后应触发 on_bg_complete 回调");
+    assert!(!notif.success, "超时结果应为失败");
+    assert!(
+        notif.to_notification().contains("超时被终止"),
+        "通知必须区分终止和仍在后台运行"
+    );
+    assert!(notif.timed_out, "超时结果应标记 timed_out");
+
+    // 等 3.5s（> sleep 3）：若进程组未被杀，sh/sleep 孤儿会创建 marker
+    tokio::time::sleep(Duration::from_millis(3500)).await;
+    assert!(!marker.exists(), "子进程不应存活，marker 不应被创建");
+    let _ = std::fs::remove_file(&marker);
+}
+
+/// run_in_background 任务应在**启动时**注册（BgTaskStarted 立即推送），
+/// 运行期间 registry 可见（TUI 展示栏依赖此事件在运行期间显示任务）；
+/// 完成后 registry 归零。
+///
+/// 回归：此前 bg shell 只在完成时 register_with_kind（Started 与 Completed
+/// 同时发出），任务运行期间 TUI 的 status 下方展示栏没有条目。
+#[cfg(unix)]
+#[tokio::test]
+async fn test_bg_shell_registered_while_running() {
+    let registry = Arc::new(peri_mcp_common::create_local_task_manager());
+    let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<BackgroundTaskResult>();
+    let _process_env = peri_mcp_common::process_env::lock().expect("process env lock");
+    let tool = BashTool::new(std::env::temp_dir().to_str().unwrap())
+        .with_task_manager(registry.clone())
+        .with_on_bg_complete(Arc::new(move |r, _kind| {
+            tx.send(r.clone()).map_err(|error| error.to_string())
+        }));
+
+    let result = tool
+        .invoke(
+            serde_json::json!({
+                "command": "sleep 1.2",
+                "run_in_background": true,
+            }),
+            peri_agent::tools::ToolContext::new(&[], "."),
+        )
+        .await
+        .unwrap();
+    assert!(
+        result.lines().any(|l| l.starts_with("pid: ")),
+        "应返回 pid 行: {result}"
+    );
+    assert!(result.contains("kill"), "应说明 kill 方式: {result}");
+    let task_id = result
+        .lines()
+        .find(|l| l.starts_with("task_id: "))
+        .expect("应返回 task_id 行")
+        .trim_start_matches("task_id: ")
+        .to_string();
+
+    // 运行期间（sleep 1.2 尚未结束）：任务必须已注册且可查询
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    assert_eq!(registry.active_count(), 1, "运行期间任务应已注册");
+    let tasks = registry.list_tasks();
+    assert_eq!(tasks.len(), 1, "运行期间应可列出任务");
+    assert_eq!(tasks[0].0, task_id, "注册的任务 id 应与返回的 task_id 一致");
+
+    // 完成后：回调收到成功结果，registry 清空
+    let notif = rx
+        .recv()
+        .await
+        .expect("bg 完成后应触发 on_bg_complete 回调");
+    assert!(notif.success, "sleep 1.2 应成功退出");
+    assert_eq!(notif.task_id, task_id);
+    assert_eq!(registry.active_count(), 0, "完成后任务应已清理");
+}
+
+/// bg shell 的 stdout/stderr 应 tee 到日志文件：返回消息含日志路径，
+/// 运行期间 agent 可经 Read 读取部分输出，完成后文件包含全部输出。
+#[cfg(unix)]
+#[tokio::test]
+async fn test_bg_shell_log_file_tee() {
+    let registry = Arc::new(peri_mcp_common::create_local_task_manager());
+    let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<BackgroundTaskResult>();
+    let _process_env = peri_mcp_common::process_env::lock().expect("process env lock");
+    let tool = BashTool::new(std::env::temp_dir().to_str().unwrap())
+        .with_task_manager(registry.clone())
+        .with_on_bg_complete(Arc::new(move |r, _kind| {
+            tx.send(r.clone()).map_err(|error| error.to_string())
+        }));
+
+    let result = tool
+        .invoke(
+            serde_json::json!({
+                "command": "printf 'first\\n'; sleep 1.5; printf 'second\\n'",
+                "run_in_background": true,
+            }),
+            peri_agent::tools::ToolContext::new(&[], "."),
+        )
+        .await
+        .unwrap();
+    // 运行期的实时日志读取指引必须用**模型面名字**（当前 direct 工具使用原名）：逐字断言注册表的
+    // 冻结字面量，不用查表派生期望值（同源派生会让「查询改坏」自洽通过）。
+    assert!(
+        result.contains("— it appends while the command runs (use `Read` to view)"),
+        "后台启动回执应指引模型面名字读取实时日志: {result}"
+    );
+    let log_line = result
+        .lines()
+        .find(|l| l.contains("stdout.log"))
+        .expect("应返回 stdout 日志路径: {result}");
+    let log_path = log_line
+        .split(' ')
+        .find(|t| t.contains("peri-bg-"))
+        .expect("日志路径应含 peri-bg- 前缀: {log_line}")
+        .to_string();
+    let stderr_path = log_line
+        .split(' ')
+        .find(|t| t.contains("peri-bg-") && t.contains("stderr.log"))
+        .expect("应返回 stderr 日志路径: {log_line}")
+        .to_string();
+
+    // 运行期间（sleep 1.5 未结束）：日志文件应已含 first，不含 second
+    tokio::time::sleep(Duration::from_millis(500)).await;
+    let partial = std::fs::read_to_string(&log_path).expect("运行期间应可读日志文件");
+    assert!(
+        partial.contains("first"),
+        "运行期间应已写入 first: {partial}"
+    );
+    assert!(!partial.contains("second"), "second 尚未输出: {partial}");
+
+    // 完成后：通知到达时日志文件应含全部输出
+    let notif = rx
+        .recv()
+        .await
+        .expect("bg 完成后应触发 on_bg_complete 回调");
+    assert!(notif.success);
+    let files = notif
+        .shell_output
+        .as_ref()
+        .expect("typed output references");
+    assert!(files.complete);
+    assert_eq!(files.stdout_path.as_deref(), Some(log_path.as_str()));
+    assert_eq!(files.exit_code, Some(0));
+    assert!(!notif.to_notification().contains("second"));
+    // 完成通知的读取指引逐字断言完整短语，避免只匹配工具名。
+    assert!(
+        notif
+            .to_notification()
+            .contains("请使用 `Read` 工具按需读取"),
+        "完成通知必须用模型面名字引导读取: {}",
+        notif.to_notification()
+    );
+    let full = std::fs::read_to_string(&log_path).expect("完成后应可读日志文件");
+    assert!(
+        full.contains("first") && full.contains("second"),
+        "完成后应含全部输出: {full}"
+    );
+
+    let _ = std::fs::remove_file(&log_path);
+    let _ = std::fs::remove_file(&stderr_path);
+}
+
+/// 同步超时 + 有注册表：不杀进程，promote 为后台任务续跑；
+/// 完成回调收到 success=true 和完整输出文件引用，active_count 归零。
+#[cfg(unix)]
+#[tokio::test]
+async fn test_sync_timeout_promotes_to_background() {
+    let registry = Arc::new(peri_mcp_common::create_local_task_manager());
+    let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<BackgroundTaskResult>();
+    let _process_env = peri_mcp_common::process_env::lock().expect("process env lock");
+    let tool = BashTool::new(std::env::temp_dir().to_str().unwrap())
+        .with_task_manager(registry.clone())
+        .with_on_bg_complete(Arc::new(move |r, _kind| {
+            tx.send(r.clone()).map_err(|error| error.to_string())
+        }));
+
+    let err = tool
+        .invoke(
+            serde_json::json!({
+                "command": "sh -c 'sleep 2; echo done'",
+                "timeout": 200,
+            }),
+            peri_agent::tools::ToolContext::new(&[], "."),
+        )
+        .await
+        .unwrap_err()
+        .to_string();
+    assert!(err.contains("timed out"), "Err 应含 timed out: {err}");
+    assert!(err.contains("shell-"), "Err 应含 task_id: {err}");
+    assert!(
+        err.contains("background task"),
+        "Err 应说明已转后台续跑: {err}"
+    );
+    assert!(
+        err.lines().any(|l| l.starts_with("pid: ")),
+        "Err 应含 pid 行: {err}"
+    );
+    assert!(err.contains("kill"), "Err 应说明 kill 方式: {err}");
+    assert!(
+        !err.contains("Note:"),
+        "未改写的请求不应附加界上限说明: {err}"
+    );
+    // 超时前已开始落盘的实时日志路径必须回传（promote 后继续追写）
+    let log_line = err
+        .lines()
+        .find(|l| l.contains("peri-foreground-shell-"))
+        .expect("Err 应含实时日志路径行");
+    let stdout_log = log_line
+        .split("Read the log file ")
+        .nth(1)
+        .expect("日志行应含 'Read the log file'")
+        .split(' ')
+        .next()
+        .expect("日志路径后应有空格")
+        .to_string();
+    assert!(
+        std::path::Path::new(&stdout_log).exists(),
+        "Err 回传的日志文件应已创建: {stdout_log}"
+    );
+
+    // Err 中的 task_id 应与回调结果一致
+    let task_id = err
+        .lines()
+        .find(|l| l.starts_with("task_id: "))
+        .expect("Err 应含 task_id 行")
+        .trim_start_matches("task_id: ")
+        .to_string();
+
+    // 约 2s 后续跑任务完成，回调收到成功结果
+    let notif = rx
+        .recv()
+        .await
+        .expect("promote 完成后应触发 on_bg_complete 回调");
+    assert_eq!(notif.task_id, task_id, "回调任务 id 应与 promote 返回一致");
+    assert!(notif.success, "续跑完成应成功");
+    let files = notif
+        .shell_output
+        .as_ref()
+        .expect("promoted output references");
+    assert!(files.complete);
+    assert_eq!(files.exit_code, Some(0));
+    assert!(std::fs::read_to_string(files.stdout_path.as_ref().unwrap())
+        .unwrap()
+        .contains("done"));
+    assert!(
+        std::fs::read_to_string(&stdout_log)
+            .unwrap()
+            .contains("done"),
+        "promote 续跑的输出应写入回传的同一日志文件: {stdout_log}"
+    );
+    assert!(!notif.to_notification().contains("done"));
+    assert!(!notif.timed_out, "正常完成不应标记 timed_out");
+
+    // complete() 清理后 active_count 归零
+    tokio::time::sleep(Duration::from_millis(200)).await;
+    assert_eq!(registry.active_count(), 0, "完成后 active_count 应归零");
+}
+
+/// 同步超时 + 无注册表：杀进程组，部分输出落盘；
+/// Err 含 "timed out" 与部分输出文件路径，文件内容含已产生输出。
+#[cfg(unix)]
+#[tokio::test]
+async fn test_sync_timeout_without_registry_kills_and_persists_partial() {
+    let _process_env = peri_mcp_common::process_env::lock().expect("process env lock");
+    let tool = BashTool::new(std::env::temp_dir().to_str().unwrap()); // 无 registry
+    let err = tool
+        .invoke(
+            serde_json::json!({
+                "command": "sh -c 'echo partial-before-timeout; sleep 30'",
+                "timeout": 500,
+            }),
+            peri_agent::tools::ToolContext::new(&[], "."),
+        )
+        .await
+        .unwrap_err()
+        .to_string();
+    assert!(err.contains("timed out"), "Err 应含 timed out: {err}");
+    assert!(
+        err.contains("Partial output"),
+        "Err 应含 partial output 提示: {err}"
+    );
+    // 指引必须用**模型面名字**引导读取（当前 direct 工具使用原名）：逐字断言注册表的冻结字面量，
+    // 不用查表派生期望值（同源派生会让「查询改坏」自洽通过）。
+    assert!(
+        err.contains("use `Read` to view captured output so far"),
+        "部分输出提示必须用模型面名字引导读取: {err}"
+    );
+
+    // 提取落盘文件路径并验证内容
+    let hint = err
+        .lines()
+        .find(|l| l.contains("peri-tool-output-"))
+        .expect("Err 应包含部分输出文件路径");
+    let path_str = hint
+        .split("saved to ")
+        .nth(1)
+        .expect("提示应含 'saved to'")
+        .split(' ')
+        .next()
+        .expect("路径后应有空格")
+        .trim_end_matches(']');
+    let file_content = std::fs::read_to_string(path_str).expect("部分输出文件应可读");
+    assert!(
+        file_content.contains("partial-before-timeout"),
+        "部分输出文件应含已产生输出: {file_content}"
+    );
+    let _ = std::fs::remove_file(path_str);
+}
+
+/// 无 TaskManager 时显式 `run_in_background` 必须被拒绝：退化分支的原始错误点明
+/// `run_in_background` 与「未配置 manager」。
+///
+/// handler 面的诊断投影由 `workspace_test.rs` 的
+/// `tool_failures_preserve_diagnostic_error_result` 覆盖。
+/// （自 `peri-middlewares` 的 host wire 证据下沉：断言主体即本工具行为。）
+#[tokio::test]
+async fn test_bg_without_task_manager_rejects_run_in_background() {
+    let tool = BashTool::new(std::env::temp_dir().to_str().unwrap());
+    let error = tool
+        .invoke(
+            serde_json::json!({"command": "sleep 1", "run_in_background": true}),
+            peri_agent::tools::ToolContext::new(&[], "."),
+        )
+        .await
+        .expect_err("无 manager 的 BashTool 必须拒绝 run_in_background");
+    let text = error.to_string();
+    assert!(
+        text.contains("run_in_background is not available"),
+        "退化分支必须点明 run_in_background：{text}"
+    );
+    assert!(
+        text.contains("no background task manager configured"),
+        "退化分支必须点明缺 manager：{text}"
+    );
+}
+
+/// 同步超时 + 注册表占满：提升的 `register` 必被拒 ⇒ 回落杀进程组，
+/// 回执点明「无法提升」，typed evidence 为 `TimedOut` 且无 task_id。
+///
+/// （自 `peri-middlewares` 的 host wire 证据下沉：断言主体即本工具行为；
+/// 成功提升与无注册表杀组的对照见 `test_sync_timeout_promotes_to_background`
+/// 与 `test_sync_timeout_without_registry_kills_and_persists_partial`。）
+#[cfg(unix)]
+#[tokio::test]
+async fn test_sync_timeout_with_rejected_promotion_falls_back_to_killing_the_group() {
+    use peri_acp_types::tasks::{BgTaskKind, BgTaskRegistration};
+    use peri_agent::agent::async_tasks::BackgroundTaskRegistry;
+
+    let cwd = std::env::temp_dir();
+    let manager: Arc<dyn peri_acp_types::tasks::TaskManager> =
+        Arc::new(peri_mcp_common::create_local_task_manager());
+    // 占满 Shell 类并发位（纯登记表条目，不产生真进程）⇒ 提升时 `register` 必被拒。
+    for index in 0..BackgroundTaskRegistry::SHELL_LIMIT {
+        manager
+            .register(BgTaskRegistration {
+                task_id: format!("occupied-{index}"),
+                kind: BgTaskKind::Shell,
+                summary: "capacity fixture".into(),
+                pid: None,
+                kill: Some(Box::new(|| {})),
+            })
+            .expect("占位登记必须成功");
+    }
+    assert_eq!(manager.active_count(), BackgroundTaskRegistry::SHELL_LIMIT);
+
+    let out = BashTool::new(cwd.to_str().unwrap())
+        .with_task_manager(Arc::clone(&manager))
+        .invoke_output(
+            serde_json::json!({"command": "sleep 5", "timeout": 300}),
+            peri_agent::tools::ToolContext::new(&[], "."),
+        )
+        .await
+        .expect("工具层超时不是 Err（转 Err 的是 `invoke`）");
+    assert!(
+        out.text
+            .contains("could not be promoted to a background task"),
+        "提升被拒的回执必须点明「无法提升」：{}",
+        out.text
+    );
+    assert!(
+        out.text.contains("The process group has been terminated"),
+        "提升被拒必须回落到杀进程组：{}",
+        out.text
+    );
+    assert!(
+        !out.text.contains("has been promoted to a background task"),
+        "被拒路径不得出现成功提升的措辞：{}",
+        out.text
+    );
+    let evidence = out.execution.expect("BashTool 必须带 typed evidence");
+    assert_eq!(
+        evidence.status,
+        ToolExecutionStatus::TimedOut,
+        "提升被拒 ⇒ 回落 TimedOut（成功提升是 RunningAfterTimeout）"
+    );
+    assert_eq!(evidence.task_id, None, "提升被拒 ⇒ 没有 task_id");
+
+    // 收尾：占位条目按既有夹具的口径撤销（cancel + confirm），再把 manager 关干净。
+    for index in 0..BackgroundTaskRegistry::SHELL_LIMIT {
+        let id = format!("occupied-{index}");
+        manager.cancel(&id).expect("占位条目可取消");
+        manager.confirm_external_execution_stopped(&id);
+    }
+    assert_eq!(manager.active_count(), 0, "占位条目必须全部撤销");
+    let report = manager.shutdown().await;
+    assert_eq!(
+        manager.active_count(),
+        0,
+        "shutdown 之后不得残留活跃任务（报告：{report:?}）"
+    );
+}
+
+// ── beta flag `full-async-tools`：`run_in_background` 有效缺省 ──────────────
+//
+// 装配期注入的缺省只改「调用未给出该字段」时的行为：显式 `false` 仍走前台，
+// 缺省 `false`（flag 未开启）与既有行为逐位一致；schema 的 `default` 与执行路径
+// 判定同源（同一字段），不允许各自维护一份。
+
+/// 有效缺省 = true：schema 声明 `default: true`，且省略字段的调用**真的**走后台。
+#[tokio::test]
+async fn test_default_run_in_background_true_schema_and_execution_agree() {
+    let registry = Arc::new(peri_mcp_common::create_local_task_manager());
+    let _process_env = peri_mcp_common::process_env::lock().expect("process env lock");
+    let tool = BashTool::new(std::env::temp_dir().to_str().unwrap())
+        .with_task_manager(registry.clone())
+        .with_default_run_in_background(true);
+
+    let params = tool.parameters();
+    assert_eq!(
+        params["properties"]["run_in_background"]["default"],
+        serde_json::json!(true),
+        "schema default 必须跟随有效缺省"
+    );
+    assert!(
+        params["properties"]["run_in_background"]["description"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("the default is true"),
+        "描述必须说明该会话缺省为后台：{}",
+        params["properties"]["run_in_background"]["description"]
+    );
+
+    let result = tool
+        .invoke(
+            serde_json::json!({"command": "sleep 30"}),
+            peri_agent::tools::ToolContext::new(&[], "."),
+        )
+        .await
+        .expect("省略 run_in_background 且缺省为 true 时必须走后台");
+    assert!(
+        result.contains("Background shell task started"),
+        "省略字段的调用必须走后台：{result}"
+    );
+    assert_eq!(registry.active_count(), 1, "后台任务必须已登记");
+
+    let report = registry.shutdown().await;
+    assert_eq!(
+        registry.active_count(),
+        0,
+        "shutdown 之后不得残留活跃任务（报告：{report:?}）"
+    );
+}
+
+/// 有效缺省 = true：显式 `false` 仍走前台（flag 只改缺省，不覆盖显式意图）。
+#[tokio::test]
+async fn test_default_run_in_background_true_explicit_false_stays_foreground() {
+    let registry = Arc::new(peri_mcp_common::create_local_task_manager());
+    let _process_env = peri_mcp_common::process_env::lock().expect("process env lock");
+    let tool = BashTool::new(std::env::temp_dir().to_str().unwrap())
+        .with_task_manager(registry.clone())
+        .with_default_run_in_background(true);
+
+    let result = tool
+        .invoke(
+            serde_json::json!({"command": "echo foreground-ok", "run_in_background": false}),
+            peri_agent::tools::ToolContext::new(&[], "."),
+        )
+        .await
+        .expect("显式 false 必须走前台且成功");
+    assert!(
+        result.contains("foreground-ok"),
+        "显式 false 必须拿到前台输出：{result}"
+    );
+    assert!(
+        !result.contains("Background shell task started"),
+        "显式 false 不得走后台：{result}"
+    );
+    assert_eq!(registry.active_count(), 0, "前台调用不得登记后台任务");
+}
+
+/// 缺省未注入（flag 未开启）：schema `default: false`，省略字段仍走前台。
+#[tokio::test]
+async fn test_default_run_in_background_absent_stays_foreground() {
+    let registry = Arc::new(peri_mcp_common::create_local_task_manager());
+    let _process_env = peri_mcp_common::process_env::lock().expect("process env lock");
+    let tool = BashTool::new(std::env::temp_dir().to_str().unwrap()).with_task_manager(registry);
+
+    let params = tool.parameters();
+    assert_eq!(
+        params["properties"]["run_in_background"]["default"],
+        serde_json::json!(false),
+        "缺省注入前的 schema default 必须是 false"
+    );
+
+    let result = tool
+        .invoke(
+            serde_json::json!({"command": "echo default-foreground"}),
+            peri_agent::tools::ToolContext::new(&[], "."),
+        )
+        .await
+        .expect("缺省 false 时省略字段必须走前台");
+    assert!(result.contains("default-foreground"), "{result}");
+    assert!(
+        !result.contains("Background shell task started"),
+        "{result}"
+    );
+}
+
+/// 缺省 = true 但没有任务管理器：维持既有报错语义（flag 不创造未装配的能力）。
+#[tokio::test]
+async fn test_default_run_in_background_without_manager_keeps_existing_error() {
+    let _process_env = peri_mcp_common::process_env::lock().expect("process env lock");
+    let tool =
+        BashTool::new(std::env::temp_dir().to_str().unwrap()).with_default_run_in_background(true);
+
+    let error = tool
+        .invoke(
+            serde_json::json!({"command": "echo never-runs"}),
+            peri_agent::tools::ToolContext::new(&[], "."),
+        )
+        .await
+        .expect_err("无 manager 时后台缺省必须报既有错误")
+        .to_string();
+    assert!(
+        error.contains("run_in_background is not available"),
+        "错误必须点明 run_in_background 与缺 manager：{error}"
+    );
+}
