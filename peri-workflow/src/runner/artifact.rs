@@ -4,6 +4,7 @@ use std::path::{Path, PathBuf};
 use std::process::Stdio;
 use std::time::Duration;
 
+use peri_process::ProcessTree;
 use tokio::process::{Child, Command};
 use tracing::{debug, info, warn};
 
@@ -123,16 +124,26 @@ fn workflow_cmd() -> Result<WorkflowCommand, WorkflowError> {
     )))
 }
 
-async fn stop_install_child(child: &mut Child) {
+async fn stop_install_child(child: &mut Child, tree: &ProcessTree) {
+    tree.terminate();
     let _ = child.kill().await;
     let _ = child.wait().await;
+    tree.wait_for_exit().await;
 }
 
-async fn run_install_with_timeout(child: &mut Child, timeout: Duration) -> std::io::Result<bool> {
-    match tokio::time::timeout(timeout, child.wait()).await {
-        Ok(status) => status.map(|status| status.success()),
+async fn run_install_with_timeout(
+    child: &mut Child,
+    tree: &ProcessTree,
+    timeout: Duration,
+) -> std::io::Result<bool> {
+    match peri_time::timeout(timeout, child.wait()).await {
+        Ok(status) => {
+            let status = status?;
+            tree.wait_for_exit().await;
+            Ok(status.success())
+        }
         Err(_) => {
-            stop_install_child(child).await;
+            stop_install_child(child, tree).await;
             Ok(false)
         }
     }
@@ -223,16 +234,16 @@ async fn ensure_workflow_install() -> Result<(), WorkflowError> {
     tokio::fs::create_dir(&staging).await?;
 
     let package = format!("{WORKFLOW_PACKAGE_NAME}@{WORKFLOW_NPM_VERSION}");
-    let mut child = match Command::new("npm")
+    let mut command = Command::new("npm");
+    command
         .args(["install", "--prefix"])
         .arg(&staging)
         .arg(&package)
         .stdin(Stdio::null())
         .stdout(Stdio::null())
         .stderr(Stdio::null())
-        .kill_on_drop(true)
-        .spawn()
-    {
+        .kill_on_drop(true);
+    let (mut child, tree) = match crate::process::spawn(command) {
         Ok(child) => child,
         Err(error) => {
             let _ = tokio::fs::remove_dir_all(&staging).await;
@@ -240,9 +251,9 @@ async fn ensure_workflow_install() -> Result<(), WorkflowError> {
         }
     };
 
-    let installed = run_install_with_timeout(&mut child, INSTALL_TIMEOUT).await?;
+    let installed = run_install_with_timeout(&mut child, &tree, INSTALL_TIMEOUT).await?;
     if !installed || validate_workflow_artifact(&staging).is_none() {
-        stop_install_child(&mut child).await;
+        stop_install_child(&mut child, &tree).await;
         let _ = tokio::fs::remove_dir_all(&staging).await;
         return Err(WorkflowError::SpawnFailed(
             "workflow artifact installation failed validation".into(),

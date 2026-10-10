@@ -1,0 +1,15 @@
+[package]
+name = "peri-mcp-core"
+version.workspace = true
+edition.workspace = true
+description = "Shared MCP contract logic independent of capability packages"
+
+[dependencies]
+base64 = { version = "0.22", features = ["alloc"] }
+parking_lot.workspace = true
+rmcp.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+serde_yaml.workspace = true
+tracing.workspace = true
+uuid.workspace = true

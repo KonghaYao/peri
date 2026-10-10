@@ -58,8 +58,18 @@ pub enum BackpressurePolicy {
 /// Batcher 批量聚合配置
 #[derive(Debug, Clone)]
 pub struct BatcherConfig {
-    /// 命令队列容量及单批上限，必须为 1..=tokio::sync::Semaphore::MAX_PERMITS。
+    /// 单批事件上限，必须为 1..=tokio::sync::Semaphore::MAX_PERMITS。
     pub max_events: usize,
+    /// 独立命令槽数；Flush 与 Add 共用容量。
+    pub queue_capacity: usize,
+    /// 同时发送的批次数；flush 屏障会等待其前缀批次。
+    pub max_in_flight: usize,
+    /// 准入前计量的事件 JSON 字节上限，不截断事件。
+    pub max_event_bytes: usize,
+    /// 聚合输入及最终编码请求的字节上限。
+    pub max_batch_bytes: usize,
+    /// 已提交队列的事件 JSON 字节总量上限，不含调用方尚未提交的事件。
+    pub max_queue_bytes: usize,
     /// 自动发送间隔，必须非零。
     pub flush_interval: Duration,
     pub backpressure: BackpressurePolicy,
@@ -71,6 +81,11 @@ impl Default for BatcherConfig {
     fn default() -> Self {
         Self {
             max_events: 50,
+            queue_capacity: 1024,
+            max_in_flight: 2,
+            max_event_bytes: 512 * 1024,
+            max_batch_bytes: 4 * 1024 * 1024,
+            max_queue_bytes: 16 * 1024 * 1024,
             flush_interval: Duration::from_secs(10),
             backpressure: BackpressurePolicy::default(),
             max_retries: 3,
@@ -80,9 +95,20 @@ impl Default for BatcherConfig {
 
 impl BatcherConfig {
     pub(crate) fn validate(&self) -> Result<(), crate::LangfuseError> {
-        if self.max_events == 0 || self.max_events > tokio::sync::Semaphore::MAX_PERMITS {
+        if [self.max_events, self.queue_capacity, self.max_in_flight]
+            .into_iter()
+            .any(|capacity| capacity == 0 || capacity > tokio::sync::Semaphore::MAX_PERMITS)
+        {
             return Err(crate::LangfuseError::Config(
-                "batch max_events is outside the supported nonzero capacity range".into(),
+                "batch, queue or in-flight capacity is outside the supported nonzero range".into(),
+            ));
+        }
+        if self.max_event_bytes == 0
+            || self.max_event_bytes > self.max_batch_bytes
+            || self.max_event_bytes > self.max_queue_bytes
+        {
+            return Err(crate::LangfuseError::Config(
+                "event byte budget must be nonzero and fit batch and queue budgets".into(),
             ));
         }
         if self.flush_interval.is_zero() {
@@ -100,6 +126,7 @@ impl BatcherConfig {
             flush_interval: Duration::from_secs(client.batch_flush_interval_secs),
             backpressure: client.batch_backpressure,
             max_retries: 3,
+            ..Default::default()
         }
     }
 }

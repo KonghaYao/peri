@@ -4,8 +4,10 @@ version.workspace = true
 edition.workspace = true
 
 [dependencies]
+peri-time = { path = "../peri-time" }
 peri-acp-types = { path = "../peri-acp-types" }
 peri-js-runtime = { path = "../peri-js-runtime" }
+peri-process = { path = "../peri-process" }
 tokio.workspace = true
 tokio-util.workspace = true
 serde.workspace = true
@@ -24,3 +26,6 @@ dirs-next.workspace = true
 
 [dev-dependencies]
 tokio-test = "0.4"
+
+[target.'cfg(not(target_os = "emscripten"))'.dependencies]
+tokio = { workspace = true, features = ["full"] }

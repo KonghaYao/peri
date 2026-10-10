@@ -14,6 +14,7 @@ use std::{
 };
 
 const READ_ONLY_BUSY_TIMEOUT: Duration = Duration::from_millis(250);
+const SCHEMA_OPEN_LOCK_TIMEOUT: Duration = Duration::from_secs(5);
 pub(super) const REQUIRED_THREAD_COLUMNS: &[&str] = &[
     "id",
     "title",
@@ -26,7 +27,6 @@ pub(super) const REQUIRED_THREAD_COLUMNS: &[&str] = &[
     "hidden",
     "cancel_policy",
     "config",
-    "cached_context",
     "agent_status",
 ];
 pub(super) const REQUIRED_MESSAGE_COLUMNS: &[&str] = &["thread_id", "content"];
@@ -121,7 +121,7 @@ impl SqliteSessionDatabase {
                 .await
                 .with_context(|| format!("创建目录失败: {}", parent.display()))?;
         }
-        let _schema_lock = lock_schema_open(&db_path).await?;
+        let _schema_lock = lock_schema_open(&db_path, SCHEMA_OPEN_LOCK_TIMEOUT).await?;
         // 在 WAL/DDL 写入前识别未知 schema；已知旧库交给事务升级。
         if tokio::fs::metadata(&db_path)
             .await
@@ -168,9 +168,6 @@ impl SqliteSessionDatabase {
 
     /// 只读打开的 store 不能写入：给出可诊断的原因，而不是让 SQL 层在写入时才报
     /// 「attempt to write a readonly database」。
-    ///
-    /// 与 `ExecutionLeaseRequired` 的分工：那个说的是「某条会话的执行所有权不在本
-    /// 节点」（历史仍可按只读会话进入）；这里连会话都还没有，没有可降级的对象。
     pub(super) fn require_writable(&self) -> Result<()> {
         if self.read_only {
             return Err(WorkspaceError::ReadOnlyStore.into());
@@ -242,9 +239,7 @@ impl SqliteSessionDatabase {
     }
 }
 
-/// SQLite's initial journal-mode switch can return BUSY despite busy_timeout when
-/// two fresh connections upgrade together. Serialize writable opens before connecting.
-async fn lock_schema_open(path: &Path) -> Result<std::fs::File> {
+async fn schema_lock_path(path: &Path) -> Result<PathBuf> {
     let canonical = if tokio::fs::try_exists(path).await? {
         tokio::fs::canonicalize(path).await?
     } else {
@@ -258,26 +253,46 @@ async fn lock_schema_open(path: &Path) -> Result<std::fs::File> {
     };
     let mut lock_path = canonical.into_os_string();
     lock_path.push(".schema-lock");
-    tokio::task::spawn_blocking(move || {
-        let file = std::fs::OpenOptions::new()
+    Ok(lock_path.into())
+}
+
+async fn lock_schema_open(path: &Path, budget: Duration) -> Result<std::fs::File> {
+    let lock_path = schema_lock_path(path).await?;
+    let mut file = tokio::task::spawn_blocking(move || {
+        std::fs::OpenOptions::new()
             .create(true)
             .truncate(false)
             .read(true)
             .write(true)
-            .open(lock_path)?;
-        let deadline = std::time::Instant::now() + Duration::from_secs(5);
-        loop {
-            match file.try_lock() {
-                Ok(()) => return Ok(file),
-                Err(std::fs::TryLockError::WouldBlock) if std::time::Instant::now() < deadline => {
-                    std::thread::sleep(Duration::from_millis(10));
-                }
-                Err(std::fs::TryLockError::WouldBlock) => {
-                    anyhow::bail!("session database initialization is busy")
-                }
-                Err(std::fs::TryLockError::Error(error)) => return Err(error.into()),
-            }
-        }
+            .open(lock_path)
     })
-    .await?
+    .await??;
+    let deadline = peri_time::monotonic_now() + budget;
+    loop {
+        let (attempted_file, result) = tokio::task::spawn_blocking(move || {
+            let result = file.try_lock();
+            (file, result)
+        })
+        .await?;
+        file = attempted_file;
+        match result {
+            Ok(()) => return Ok(file),
+            Err(std::fs::TryLockError::WouldBlock) => {
+                let remaining = deadline.saturating_duration_since(peri_time::monotonic_now());
+                if remaining.is_zero() {
+                    return Err(std::io::Error::new(
+                        std::io::ErrorKind::TimedOut,
+                        "session database initialization is busy",
+                    )
+                    .into());
+                }
+                peri_time::sleep(remaining.min(Duration::from_millis(10))).await;
+            }
+            Err(std::fs::TryLockError::Error(error)) => return Err(error.into()),
+        }
+    }
 }
+
+#[cfg(test)]
+#[path = "connection_open_test.rs"]
+mod open_tests;

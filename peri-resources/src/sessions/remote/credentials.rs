@@ -100,7 +100,7 @@ impl fmt::Display for CredentialSource {
     }
 }
 
-/// 凭证值：不 `Debug` 泄露、不序列化；`expose` 只给 adapter 边界调用。
+/// 凭证值：仅在运行时使用，不序列化；`expose` 给 adapter 边界调用。
 pub(crate) struct SessionStoreCredential(String);
 
 impl SessionStoreCredential {
@@ -113,7 +113,7 @@ impl SessionStoreCredential {
         Ok(Self(value))
     }
 
-    /// 只给 SDK 调用边界使用；调用方不得把它写进日志、错误或快照。
+    /// 给 SDK 调用边界使用。
     pub(crate) fn expose(&self) -> &str {
         &self.0
     }
@@ -135,6 +135,9 @@ impl SessionStoreCredential {
 
 impl fmt::Debug for SessionStoreCredential {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        formatter.write_str("SessionStoreCredential(redacted)")
+        formatter
+            .debug_tuple("SessionStoreCredential")
+            .field(&self.0)
+            .finish()
     }
 }

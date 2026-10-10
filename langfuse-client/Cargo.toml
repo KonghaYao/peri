@@ -4,6 +4,7 @@ version.workspace = true
 edition.workspace = true
 
 [dependencies]
+peri-time = { path = "../peri-time" }
 reqwest.workspace = true
 serde.workspace = true
 serde_json.workspace = true
@@ -12,7 +13,11 @@ thiserror.workspace = true
 chrono.workspace = true
 base64 = { version = "0.23.1", features = ["alloc"] }
 tracing.workspace = true
+sha2.workspace = true
 
 [dev-dependencies]
 temp-env = "0.3"
 mockito = "1"
+
+[target.'cfg(not(target_os = "emscripten"))'.dev-dependencies]
+tokio = { workspace = true, features = ["net"] }

@@ -4,7 +4,7 @@
 //! 以及 C §5.1 的 P1–P7 前置条件未实测前不在这里出现——没有半成品 mutation，
 //! 也没有「先连上再假装能写」的中间态。
 //!
-//! 请求有界：SDK 0.1.3 公开面不提供客户端超时配置，因此本层用 `tokio::time::timeout`
+//! 请求有界：SDK 0.1.3 公开面不提供客户端超时配置，因此本层用 `peri_time::timeout`
 //! 兜住上界；超时返回 `Timeout`，不改变远端结果的分类（§7）。
 
 use std::future::Future;
@@ -35,9 +35,12 @@ pub(super) async fn within_budget<T>(
     future: impl Future<Output = turso_serverless::Result<T>>,
     budget: Duration,
 ) -> Budgeted<T> {
-    match tokio::time::timeout(budget, future).await {
+    match peri_time::timeout(budget, future).await {
         Ok(Ok(value)) => Budgeted::Done(value),
-        Ok(Err(error)) => Budgeted::Failed(error),
+        Ok(Err(error)) => {
+            tracing::error!(error = %error, source = ?error, "remote SDK request failed");
+            Budgeted::Failed(error)
+        }
         Err(_) => Budgeted::Exceeded,
     }
 }
@@ -51,7 +54,7 @@ pub(super) async fn connect_sdk(
     let database = bounded(builder.build()).await.map_err(into_error)?;
     database
         .connect()
-        .map_err(|error| failure::classify(&error).into_session_resource_error())
+        .map_err(|error| failure::from_sdk_error(&error))
 }
 
 /// 参数绑定回环事实：每个布尔都是「绑定的哨兵原值读回」。
@@ -99,7 +102,7 @@ impl RemoteConnection {
         let row = bounded(rows.next())
             .await
             .map_err(into_error)?
-            .ok_or_else(|| into_error(RemoteFailureClass::NotFound))?;
+            .ok_or_else(|| RemoteFailureClass::NotFound.into_session_resource_error())?;
         Ok(BindRoundtrip {
             text_ok: matches!(read(&row, 0)?, Value::Text(text) if text == sentinel_text),
             int64_ok: matches!(read(&row, 1)?, Value::Integer(value) if value == sentinel_int),
@@ -113,7 +116,7 @@ impl RemoteConnection {
         let mut rows =
             match bounded(self.connection.query("SELECT sqlite_version() AS v", ())).await {
                 Ok(rows) => rows,
-                Err(RemoteFailureClass::Unsupported) => {
+                Err((RemoteFailureClass::Unsupported, _)) => {
                     return Ok(EngineReadFacts {
                         sqlite_version: None,
                     });
@@ -143,7 +146,7 @@ impl RemoteConnection {
 
 fn read(row: &turso_serverless::Row, index: usize) -> Result<Value, SessionResourceError> {
     row.get_value(index)
-        .map_err(|error| failure::classify(&error).into_session_resource_error())
+        .map_err(|error| failure::from_sdk_error(&error))
 }
 
 /// 一条连接上可用的传输面：**本 crate 唯一真正调用 SDK 语句入口的地方**。
@@ -263,8 +266,8 @@ fn columns_of(row: &turso_serverless::Row) -> turso_serverless::Result<Vec<Value
         .collect()
 }
 
-fn into_error(class: RemoteFailureClass) -> SessionResourceError {
-    class.into_session_resource_error()
+fn into_error((_, error): (RemoteFailureClass, SessionResourceError)) -> SessionResourceError {
+    error
 }
 
 /// 预算内执行 SDK 调用；超时归 `Timeout`，不推断远端是否生效。
@@ -273,10 +276,16 @@ fn into_error(class: RemoteFailureClass) -> SessionResourceError {
 /// （见 `mutation::classify_batch_failure`）。
 async fn bounded<T>(
     future: impl Future<Output = turso_serverless::Result<T>>,
-) -> Result<T, RemoteFailureClass> {
+) -> Result<T, (RemoteFailureClass, SessionResourceError)> {
     match within_budget(future, REQUEST_BUDGET).await {
         Budgeted::Done(value) => Ok(value),
-        Budgeted::Failed(sdk_error) => Err(failure::classify(&sdk_error)),
-        Budgeted::Exceeded => Err(RemoteFailureClass::Timeout),
+        Budgeted::Failed(sdk_error) => Err((
+            failure::classify(&sdk_error),
+            failure::from_sdk_error(&sdk_error),
+        )),
+        Budgeted::Exceeded => Err((
+            RemoteFailureClass::Timeout,
+            RemoteFailureClass::Timeout.into_session_resource_error(),
+        )),
     }
 }

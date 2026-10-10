@@ -17,14 +17,7 @@
 //! 形状已知」时执行，已初始化时读回而不改写任何行。
 
 use super::sql::StatementSpec;
-use crate::sessions::canonical::{CREATE_INDEXES, CREATE_TABLES};
-
-/// canonical 索引清单的远端重导出；用途同上。
-#[cfg(test)]
-pub(super) use crate::sessions::canonical::CANONICAL_INDEXES;
-/// canonical 表清单的远端重导出：形状测试按它核对远端表集合（生产路径按名建表，不需要它）。
-#[cfg(test)]
-pub(super) use crate::sessions::canonical::CANONICAL_TABLES;
+use crate::sessions::canonical::{CREATE_V2_INDEXES, CREATE_V2_TABLES};
 
 /// 初始化本任务 schema 的语句集：建表段 + 索引段，**一条语句一个 spec**。
 ///
@@ -32,9 +25,9 @@ pub(super) use crate::sessions::canonical::CANONICAL_TABLES;
 /// 两段的顺序有意义：`idx_threads_updated` 引用 `threads` 的列，索引必须晚于建表；
 /// 与本机 `sqlite_store::schema` 的「建表 → 补列 → 建索引」顺序同源。
 pub(super) fn initialization_plan() -> Vec<StatementSpec> {
-    CREATE_TABLES
+    CREATE_V2_TABLES
         .iter()
-        .chain(CREATE_INDEXES)
+        .chain(CREATE_V2_INDEXES)
         .map(|sql| StatementSpec::bare(sql))
         .collect()
 }

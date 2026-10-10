@@ -6,7 +6,13 @@ async fn test_inherited_context_freezes_payloads_and_flags_across_store_reopen()
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("inherited.db");
     let store = SqliteThreadStore::new(&path).await.unwrap();
-    let parent_id = store.create_thread(ThreadMeta::new("/tmp")).await.unwrap();
+    let parent_id = store
+        .create_thread(ThreadMeta::new_at(
+            absolute_test_path("tmp"),
+            peri_time::now_wall(),
+        ))
+        .await
+        .unwrap();
     let parent = BaseMessage::human("parent snapshot");
     store
         .append_messages(&parent_id, std::slice::from_ref(&parent))
@@ -16,7 +22,7 @@ async fn test_inherited_context_freezes_payloads_and_flags_across_store_reopen()
         truncated: true,
         ..Default::default()
     };
-    let mut child_meta = ThreadMeta::new("/tmp");
+    let mut child_meta = ThreadMeta::new_at(absolute_test_path("tmp"), peri_time::now_wall());
     child_meta.parent_thread_id = Some(parent_id.clone());
     child_meta.snapshot_at_message_id = Some(parent.id().as_uuid().to_string());
     let child_id = store.create_thread(child_meta).await.unwrap();
@@ -86,7 +92,13 @@ async fn test_inherited_context_rejects_future_corrupt_and_foreign_flags_without
     let store = SqliteThreadStore::new(dir.path().join("invalid.db"))
         .await
         .unwrap();
-    let id = store.create_thread(ThreadMeta::new("/tmp")).await.unwrap();
+    let id = store
+        .create_thread(ThreadMeta::new_at(
+            absolute_test_path("tmp"),
+            peri_time::now_wall(),
+        ))
+        .await
+        .unwrap();
     let future = r#"{"version":2,"payloads":[],"flags":{}}"#;
     for snapshot in ["{", future] {
         sqlx::query("UPDATE threads SET inherited_context = ?1 WHERE id = ?2")
@@ -112,7 +124,13 @@ async fn test_inherited_context_rejects_future_corrupt_and_foreign_flags_without
             .unwrap();
         assert_eq!(raw.0, snapshot);
     }
-    let fresh = store.create_thread(ThreadMeta::new("/tmp")).await.unwrap();
+    let fresh = store
+        .create_thread(ThreadMeta::new_at(
+            absolute_test_path("tmp"),
+            peri_time::now_wall(),
+        ))
+        .await
+        .unwrap();
     let invalid = InheritedContext {
         payloads: vec![],
         flags: HashMap::from([(BaseMessage::human("foreign").id(), MessageFlags::default())]),
@@ -138,8 +156,14 @@ async fn test_inherited_context_legacy_missing_cutoff_and_cycle_fail_closed() {
     let store = SqliteThreadStore::new(dir.path().join("legacy.db"))
         .await
         .unwrap();
-    let parent_id = store.create_thread(ThreadMeta::new("/tmp")).await.unwrap();
-    let mut child_meta = ThreadMeta::new("/tmp");
+    let parent_id = store
+        .create_thread(ThreadMeta::new_at(
+            absolute_test_path("tmp"),
+            peri_time::now_wall(),
+        ))
+        .await
+        .unwrap();
+    let mut child_meta = ThreadMeta::new_at(absolute_test_path("tmp"), peri_time::now_wall());
     child_meta.parent_thread_id = Some(parent_id.clone());
     child_meta.snapshot_at_message_id =
         Some(BaseMessage::human("missing").id().as_uuid().to_string());

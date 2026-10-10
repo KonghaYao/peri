@@ -18,14 +18,15 @@ pub async fn run(args: &[OsString]) -> Result<i32, WorkflowError> {
     let artifact = temp.path().join("peri-workflow.js");
     tokio::fs::write(&artifact, crate::runner::WORKFLOW_ARTIFACT_BYTES).await?;
 
-    let status = tokio::process::Command::new("node")
+    let mut command = tokio::process::Command::new("node");
+    command
         .arg(&artifact)
         .args(args)
         .stdin(Stdio::inherit())
         .stdout(Stdio::inherit())
         .stderr(Stdio::inherit())
-        .kill_on_drop(true)
-        .status()
+        .kill_on_drop(true);
+    let status = crate::process::status(command)
         .await
         .map_err(|error| WorkflowError::SpawnFailed(format!("failed to run node: {error}")))?;
 

@@ -18,7 +18,7 @@
 //! ## 派生规则
 //!
 //! `message_count` 是存储列，按本机同一规则**重数**（不是自增）；`content_size` 不落列，
-//! 读取时由投影现算。远端没有 `cached_context`/`context_cache_epoch`：那是本机读取缓存，
+//! 读取时由投影现算。
 //! 远端没有这个消费者，因此历史变更不产生缓存失效动作。
 
 use std::collections::HashSet;
@@ -29,6 +29,7 @@ use peri_acp_types::store::{
     deserialize_persisted_payload, serialize_persisted_payload, CompactionChange, MessageFlags,
     PersistedPayload,
 };
+use peri_acp_types::system_reminder::TrustedSystemReminder;
 use peri_acp_types::thread::ThreadId;
 use turso_serverless::Value;
 
@@ -36,7 +37,7 @@ use super::session_codec as codec;
 use super::session_data::{invalid_input, not_found, RemoteSessionData};
 use super::sql::{int_at, StatementSpec};
 use crate::sessions::canonical;
-use crate::sessions::sqlite_store::role_of_message;
+use crate::sessions::canonical::role_of as role_of_message;
 
 // ─── 批内守卫 ─────────────────────────────────────────────────────────────────
 
@@ -74,11 +75,9 @@ pub(super) const UPDATE_FLAGS_SQL: &str = "UPDATE messages
     WHERE thread_id = ?4 AND message_id = ?5";
 
 /// 重数派生计数并推进 `updated_at`（与本机 `refresh_history_derivations` 同一规则，
-/// 含两个缓存失效位：同一条语句在两种执行器上执行）。
+/// 同一条语句在两种执行器上执行）。
 const REFRESH_COUNTS_SQL: &str = "UPDATE threads SET updated_at = ?1,
-    message_count = (SELECT COUNT(*) FROM messages WHERE thread_id = ?2),
-    cached_context = NULL,
-    context_cache_epoch = context_cache_epoch + 1
+    message_count = (SELECT COUNT(*) FROM messages WHERE thread_id = ?2)
     WHERE id = ?2";
 
 /// 自动标题：只在标题仍缺失时补一次（本机同一规则：`title IS NULL` 才写）。
@@ -99,6 +98,48 @@ const SELECT_ROWID_SQL: &str =
     "SELECT rowid FROM messages WHERE thread_id = ?1 AND message_id = ?2";
 
 impl RemoteSessionData {
+    /// 全局消息主键承担并发去重；冲突后的精确读区分重放与内容碰撞。
+    pub(super) async fn write_reminder_if_absent(
+        &self,
+        id: &ThreadId,
+        message_id: MessageId,
+        reminder: &TrustedSystemReminder,
+    ) -> SessionResourceResult<bool> {
+        let payload = PersistedPayload::SystemReminder {
+            id: message_id,
+            reminder: reminder.clone(),
+        };
+        let content = payload_content(&payload)?;
+        if let Some(existing) = self.read_reminder_row(message_id).await? {
+            return check_reminder_row(id, &content, existing).map(|()| false);
+        }
+        match self.write_history_append(id, &[payload]).await {
+            Ok(()) => Ok(true),
+            Err(error) => match self.read_reminder_row(message_id).await? {
+                Some(existing) => check_reminder_row(id, &content, existing).map(|()| false),
+                None => Err(error),
+            },
+        }
+    }
+
+    async fn read_reminder_row(
+        &self,
+        message_id: MessageId,
+    ) -> SessionResourceResult<Option<(String, String)>> {
+        let statement = StatementSpec::new(
+            "SELECT thread_id, content FROM messages WHERE message_id = ?1",
+            vec![Value::Text(message_label(message_id))],
+        );
+        let store = self.store().await?;
+        let Some(row) = store.fetch_row(&statement).await? else {
+            return Ok(None);
+        };
+        let [Value::Text(owner), Value::Text(content), ..] = row.as_slice() else {
+            return Err(codec::corrupt("invalid reminder row"));
+        };
+        Ok(Some((owner.clone(), content.clone())))
+    }
+
     /// 追加 canonical payload 批次：顺序稳定、计数重数、自动标题按本机同一规则补齐。
     ///
     /// 冲突语义与本机一致：批次内重复 id 在发请求前拒绝（`InvalidInput`，同一文案）；
@@ -399,6 +440,20 @@ impl RemoteSessionData {
     }
 }
 
+fn check_reminder_row(
+    id: &ThreadId,
+    content: &str,
+    existing: (String, String),
+) -> SessionResourceResult<()> {
+    if existing.0 == id.as_str() && existing.1 == content {
+        Ok(())
+    } else {
+        Err(invalid_input(
+            "reminder id conflicts with another history entry",
+        ))
+    }
+}
+
 // ─── 语句组装 ─────────────────────────────────────────────────────────────────
 
 /// 追加语句：`?1` 消息 id、`?2` 会话 id、`?3` role、`?4` 内容、`?5..?7` 默认 flags。
@@ -468,7 +523,7 @@ fn title_statement(id: &ThreadId, payloads: &[PersistedPayload]) -> Option<State
         .cloned()
         .collect::<Vec<_>>();
     // 领域纯规则：直接调用本机 adapter 用的同一份 `extract_title`，不复制一份到远端。
-    let title = crate::sessions::sqlite_store::row_mapping::extract_title(&messages)?;
+    let title = crate::sessions::canonical::extract_title(&messages)?;
     Some(StatementSpec::new(
         SET_TITLE_IF_ABSENT_SQL,
         vec![Value::Text(title), Value::Text(id.as_str().to_owned())],
@@ -530,7 +585,7 @@ fn entry_inputs(entries: &[(MessageId, String)]) -> Vec<String> {
 }
 
 fn timestamp() -> String {
-    chrono::Utc::now().to_rfc3339()
+    peri_time::now_utc_rfc3339()
 }
 
 #[cfg(test)]

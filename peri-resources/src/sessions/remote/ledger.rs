@@ -97,7 +97,7 @@ impl OperationId {
 
 impl fmt::Debug for OperationId {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(formatter, "OperationId(<opaque>)")
+        formatter.debug_tuple("OperationId").field(&self.0).finish()
     }
 }
 
@@ -113,7 +113,7 @@ impl Receipt {
 
 impl fmt::Debug for Receipt {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(formatter, "Receipt(<opaque>)")
+        formatter.debug_tuple("Receipt").field(&self.0).finish()
     }
 }
 

@@ -1,4 +1,4 @@
-//! The sole ingestion worker owns HTTP, buffering, and FIFO command processing.
+//! The sole worker owns buffering, FIFO barriers, and all bounded HTTP tasks.
 
 use std::{
     collections::VecDeque,
@@ -9,16 +9,19 @@ use std::{
 };
 use tokio::{
     sync::watch,
-    time::{interval, Duration},
+    task::JoinSet,
+    time::{interval, Duration, MissedTickBehavior},
 };
 use tracing::{debug, error, info, warn};
 
 use super::{
     admission::CommandReceiver,
+    budget::event_bytes,
     failure::{FailureLedger, ShutdownSnapshot},
+    stats::Counters,
     BatcherCommand,
 };
-use crate::{config::BatcherConfig, types::IngestionEvent, LangfuseClient};
+use crate::{config::BatcherConfig, types::IngestionEvent, LangfuseClient, LangfuseError};
 
 pub(super) struct BatchWorker {
     client: Arc<LangfuseClient>,
@@ -26,6 +29,20 @@ pub(super) struct BatchWorker {
     max_events: usize,
     dropped: Arc<AtomicUsize>,
     failures: Arc<FailureLedger>,
+    counters: Arc<Counters>,
+    buffered_bytes: usize,
+    max_batch_bytes: usize,
+    max_event_bytes: usize,
+    max_in_flight: usize,
+    in_flight: JoinSet<Result<(), LangfuseError>>,
+}
+
+struct SendCounter(Arc<Counters>);
+
+impl Drop for SendCounter {
+    fn drop(&mut self) {
+        self.0.in_flight_batches.fetch_sub(1, Ordering::Relaxed);
+    }
 }
 
 impl BatchWorker {
@@ -34,6 +51,7 @@ impl BatchWorker {
         config: &BatcherConfig,
         dropped: Arc<AtomicUsize>,
         failures: Arc<FailureLedger>,
+        counters: Arc<Counters>,
     ) -> Self {
         Self {
             client: Arc::new(client),
@@ -43,6 +61,12 @@ impl BatchWorker {
             max_events: config.max_events,
             dropped,
             failures,
+            counters,
+            buffered_bytes: 0,
+            max_batch_bytes: config.max_batch_bytes,
+            max_event_bytes: config.max_event_bytes,
+            max_in_flight: config.max_in_flight,
+            in_flight: JoinSet::new(),
         }
     }
 
@@ -53,6 +77,7 @@ impl BatchWorker {
         flush_interval: Duration,
     ) -> ShutdownSnapshot {
         let mut interval = interval(flush_interval);
+        interval.set_missed_tick_behavior(MissedTickBehavior::Skip);
         interval.tick().await;
         loop {
             if *closing.borrow() {
@@ -60,11 +85,12 @@ impl BatchWorker {
             }
             tokio::select! {
                 _ = closing.changed() => break,
-                command = rx.recv() => match command {
+                _ = self.complete_one(), if !self.in_flight.is_empty() => {},
+                command = rx.recv(), if self.in_flight.len() < self.max_in_flight => match command {
                     Some(command) => self.process(command).await,
                     None => break,
                 },
-                _ = interval.tick() => {
+                _ = interval.tick(), if self.in_flight.len() < self.max_in_flight => {
                     if !self.buffer.is_empty() {
                         debug!("Batcher periodic flush: {} events (interval: {:?})", self.buffer.len(), flush_interval);
                         self.flush_buffer().await;
@@ -86,19 +112,33 @@ impl BatchWorker {
             );
         }
         self.flush_buffer().await;
+        self.drain_sends().await;
+        Self::report_dropped(&self.dropped);
         self.failures.shutdown_snapshot()
     }
 
     async fn process(&mut self, command: BatcherCommand) {
         match command {
             BatcherCommand::Add(event) => {
+                let bytes = event_bytes(&event, self.max_event_bytes)
+                    .expect("admitted event satisfies its byte budget");
+                if !self.buffer.is_empty()
+                    && bytes > self.max_batch_bytes.saturating_sub(self.buffered_bytes)
+                {
+                    self.flush_buffer().await;
+                }
+                self.buffered_bytes += bytes;
                 self.buffer.push_back(event);
-                if self.buffer.len() >= self.max_events {
+                if self.buffer.len() >= self.max_events
+                    || self.buffered_bytes >= self.max_batch_bytes
+                {
                     self.flush_buffer().await;
                 }
             }
             BatcherCommand::Flush(ack) => {
                 self.flush_buffer().await;
+                self.drain_sends().await;
+                Self::report_dropped(&self.dropped);
                 if ack.send(self.failures.snapshot()).is_err() {
                     warn!("Batcher: flush ack receiver dropped");
                 }
@@ -107,46 +147,72 @@ impl BatchWorker {
     }
 
     async fn flush_buffer(&mut self) {
-        Self::flush(&self.client, &mut self.buffer, &self.failures).await;
+        if !self.buffer.is_empty() {
+            while self.in_flight.len() >= self.max_in_flight {
+                self.complete_one().await;
+            }
+            let events: Vec<IngestionEvent> = self.buffer.drain(..).collect();
+            self.buffered_bytes = 0;
+            let client = Arc::clone(&self.client);
+            let limit = self.max_batch_bytes;
+            self.counters
+                .submitted_batches
+                .fetch_add(1, Ordering::Relaxed);
+            self.counters
+                .in_flight_batches
+                .fetch_add(1, Ordering::Relaxed);
+            let counter = SendCounter(Arc::clone(&self.counters));
+            self.in_flight.spawn(async move {
+                let _counter = counter;
+                client.ingest_with_limit(events, limit).await
+            });
+        }
         Self::report_dropped(&self.dropped);
     }
 
-    /// 执行一次 flush：将 buffer 中的事件通过原生 Ingestion 端点发送到 Langfuse API
-    async fn flush(
-        client: &LangfuseClient,
-        buffer: &mut std::collections::VecDeque<IngestionEvent>,
-        failures: &FailureLedger,
-    ) {
-        if buffer.is_empty() {
+    async fn complete_one(&mut self) {
+        let Some(result) = self.in_flight.join_next().await else {
             return;
+        };
+        self.counters
+            .completed_batches
+            .fetch_add(1, Ordering::Relaxed);
+        let Ok(result) = result else {
+            panic!("batch ingestion task did not complete normally");
+        };
+        if let Err(error) = result {
+            self.failures.record_failure();
+            self.counters.failed_batches.fetch_add(1, Ordering::Relaxed);
+            if let LangfuseError::PartialSuccess { rejected_spans } = error {
+                self.counters
+                    .partially_rejected_batches
+                    .fetch_add(1, Ordering::Relaxed);
+                let _ = self.counters.rejected_spans.try_update(
+                    Ordering::Relaxed,
+                    Ordering::Relaxed,
+                    |count| Some(count.saturating_add(rejected_spans)),
+                );
+            }
+            error!(error = %error, "Batcher ingestion submission failed");
         }
+    }
 
-        let events: Vec<IngestionEvent> = buffer.drain(..).collect();
-        debug!("Batcher flushing {} events via OTLP", events.len());
-
-        match client.ingest(events).await {
-            Ok(()) => {
-                debug!("Batcher OTLP flush successful");
-            }
-            Err(_) => {
-                failures.record_failure();
-                error!("Batcher native ingestion flush failed");
-            }
+    async fn drain_sends(&mut self) {
+        while !self.in_flight.is_empty() {
+            self.complete_one().await;
         }
     }
 
     /// 输出丢弃汇总日志并清零计数（每次 flush 完成后调用）。
     ///
-    /// S5.2：`flush`（HTTP + 重试）await 期间 run_loop 无法消费命令通道，
-    /// DropNew/DropOldest 在通道满时会丢弃事件；本函数保证"已丢弃 N 条"
-    /// 至少在每个 flush 周期后可见，避免静默丢失。
+    /// 容量或字节预算耗尽时仅计数，批次提交、屏障及关闭时汇总。
     fn report_dropped(dropped: &AtomicUsize) {
         let n = dropped.swap(0, Ordering::Relaxed);
         if n > 0 {
             warn!(
                 target: "langfuse::batcher",
                 dropped = n,
-                "Batcher 已丢弃 {} 条事件（上一 flush 周期内命令通道满/关闭）",
+                "Batcher 已丢弃 {} 条事件（容量、字节预算或关闭）",
                 n
             );
         }

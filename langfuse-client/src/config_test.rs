@@ -8,9 +8,42 @@ use super::*;
 fn test_batcher_config_default() {
     let config = BatcherConfig::default();
     assert_eq!(config.max_events, 50);
+    assert_eq!(config.queue_capacity, 1024);
+    assert_eq!(config.max_in_flight, 2);
     assert_eq!(config.flush_interval, Duration::from_secs(10));
     assert_eq!(config.backpressure, BackpressurePolicy::DropNew);
     assert_eq!(config.max_retries, 3);
+}
+
+#[test]
+fn test_batcher_rejects_invalid_independent_capacity_and_byte_budgets() {
+    for config in [
+        BatcherConfig {
+            queue_capacity: 0,
+            ..Default::default()
+        },
+        BatcherConfig {
+            max_in_flight: 0,
+            ..Default::default()
+        },
+        BatcherConfig {
+            max_event_bytes: 0,
+            ..Default::default()
+        },
+        BatcherConfig {
+            max_batch_bytes: 1,
+            ..Default::default()
+        },
+        BatcherConfig {
+            max_queue_bytes: 1,
+            ..Default::default()
+        },
+    ] {
+        assert!(matches!(
+            config.validate(),
+            Err(crate::LangfuseError::Config(_))
+        ));
+    }
 }
 
 #[test]
@@ -149,6 +182,9 @@ fn test_batcher_config_validation_keeps_supported_bounds_and_values() {
             flush_interval: Duration::from_nanos(1),
             backpressure: BackpressurePolicy::DropOldest,
             max_retries: 99,
+            queue_capacity: max_events,
+            max_in_flight: 1,
+            ..Default::default()
         };
         config.validate().unwrap();
         assert_eq!(config.max_events, max_events);

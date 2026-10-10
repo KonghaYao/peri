@@ -30,13 +30,12 @@
 //! ## 两种存储模式现在说同一份形状（2026-09-27 统一）
 //!
 //! 远端不再有自己的会话表：`threads` / `messages` / `session_bindings` / `projects` /
-//! `workspaces` 与本机 SQLite 逐列一致，**DDL 与删除语句的唯一来源是 `sessions::canonical`**
+//! `workspaces` 与本机 SQLite 共用 canonical 形状，**DDL 与删除语句的唯一来源是 `sessions::canonical`**
 //! （逐条建表/建索引清单、`THREAD_CHILD_DELETES`、`DELETE_THREAD_ROW_SQL`、`payload_role`），
 //! canonical 历史顺序也统一到 `messages.rowid`。远端只剩执行器自己的机制表（`peri_op_ledger`
 //! 幂等账本、`peri_store_meta` 版本标记），版本值与本机 `CURRENT_SCHEMA_VERSION` 同源。
 //! 旧形状的库（`peri_sessions` 那套，或持 `peri.session.store/v1` 契约）一律**拒绝、不迁移**；
-//! `projects` / `workspaces` 在远端是**空表**（workspace 证据是本机事实，远端没有来源），
-//! 所以写打开会把 `PRAGMA foreign_keys` 归位——引用完整性由显式的父子写入/删除顺序保证。
+//! v2 的 `machines` / `workspaces` 在远端保存 Session 归属，执行目录发现快照随绑定保存在远端。写打开会把 `PRAGMA foreign_keys` 归位；引用完整性由显式写入/删除顺序保证。
 //!
 //! 已实现（C-03 第一批，`session_data` + `session_read`/`session_write`/`session_sql`/
 //! `session_codec`/`session_schema`）：会话表 schema、一致读取（snapshot/meta/binding/
@@ -59,10 +58,9 @@
 //! 现行语义是**配置即用**：门面按**两个**端口组合（`Arc<dyn SessionDataPort>` +
 //! `Arc<dyn LocalExecutionPort>`），远程组合装配在 [`composition::open_remote`]，并由
 //! `Resources::open_deployment` 在远程 locator 上真实接通（见 `context.rs`）。配了哪个 store
-//! 就直接用哪个，不再有本机登记、准入裁决与启动探测；本机只留执行事实（workspace 登记、
-//! 执行代际、sidecar 锁），不在 `threads` 里为远程会话造行。没有本机锚点之后
-//! `recover_persistence` 收敛为「会话数据可读即已收敛」，未结清由门面按活跃租约的
-//! `is_uncertain` 判定。
+//! 就直接用哪个，不再有本机 store 登记、准入裁决与启动探测；Turso 模式不打开本机 SQLite，
+//! 工作区发现由执行端口完成。没有本机锚点之后
+//! `recover_persistence` 收敛为「会话数据可读即已收敛」，未结清由门面的 persistence gate 判定。
 //!
 //! 已实现（C-05 第二批，边界实验）：P5/P6/P7 边界实验（`cloud_limit_test.rs`：取消在途调用、
 //! 超大单批、收据保留与空间成本）。**删除不写墓碑**：v10 撤销本机生命周期锚点后，
@@ -86,9 +84,8 @@
 //! 因此一条已经不可证明的连接不会被交给调用方。
 //!
 //! **关闭（shutdown）的定义**：① 本机传输面的关闭走完（连接被保留在关闭句柄里直到成功，
-//! 失败或取消都可重试、不新建连接）；② 门面侧的未结清检查通过——先按活跃租约等待在途写入
-//! 结束（`wait_for_in_flight`，有界），再拒绝仍为 `is_uncertain` 的租约（见 `resources.rs`
-//! 的 `close`）。
+//! 失败或取消都可重试、不新建连接）；② 门面侧的未结清检查通过——先通过 persistence gate 等待在途写入
+//! 结束，再拒绝仍未结清的会话（见 `resources.rs` 的 `close`）。
 //! 两件都成立才算确认关闭。SDK 的 `Connection::close` 恒返回 `Ok(())` 并显式吞掉远端关闭
 //! 错误，因此 ① **不能**证明服务端连接已释放，也**不能**拿它证明任何未知的远端写没有执行。
 //!
@@ -111,13 +108,26 @@ mod composition;
 mod connection;
 mod credentials;
 mod endpoint;
+mod environment;
+mod execution;
 mod failure;
 mod generation;
 mod ledger;
 mod mutation;
+mod oauth_credentials;
 mod schema;
+mod schema_upgrade;
+mod schema_v12_upgrade;
+mod schema_v14_upgrade;
+mod schema_v19_upgrade;
+
+#[cfg(test)]
+#[path = "schema_upgrade_test.rs"]
+mod schema_upgrade_tests;
+mod session_catalog;
 mod session_codec;
 mod session_data;
+mod session_evidence;
 mod session_history;
 mod session_lifecycle;
 mod session_read;
@@ -127,12 +137,14 @@ mod session_write;
 mod sql;
 
 pub(crate) use composition::open_remote;
+pub(crate) use composition::open_remote_in_environment;
 #[cfg(test)]
 pub(crate) use connection::RemoteConnection;
-#[cfg(test)]
+#[cfg(any(test, target_os = "emscripten"))]
 pub(crate) use credentials::SessionStoreCredential;
 pub(crate) use credentials::{CredentialError, CredentialSource};
 pub(crate) use endpoint::{EndpointError, RemoteEndpoint, RemoteEngine};
+pub use environment::RemoteWorkspaceEnvironment;
 #[cfg(test)]
 pub(crate) use failure::RemoteFailureClass;
 

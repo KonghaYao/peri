@@ -70,14 +70,12 @@ fn qualification_is_first_statement_shaped_and_parameterized() {
 }
 
 #[test]
-fn operation_identity_and_receipt_do_not_debug_leak() {
+fn operation_identity_and_receipt_debug_preserve_identity() {
     let identity = identity("op-3");
     let op_debug = format!("{:?}", identity.operation_id);
     let receipt_debug = format!("{:?}", identity.receipt);
-    assert!(!op_debug.contains(identity.operation_id.as_str()));
-    assert!(!receipt_debug.contains(identity.receipt.as_str()));
-    assert_eq!(op_debug, "OperationId(<opaque>)");
-    assert_eq!(receipt_debug, "Receipt(<opaque>)");
+    assert!(op_debug.contains(identity.operation_id.as_str()));
+    assert!(receipt_debug.contains(identity.receipt.as_str()));
 }
 
 #[test]

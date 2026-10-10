@@ -5,7 +5,7 @@
 //! 各自维护。这里只做同事务内的行写入，不决定准入、不落锚点。
 
 use anyhow::Result;
-use peri_acp_types::workspace::SessionBinding;
+use peri_acp_types::workspace::{SessionBinding, WorkspaceId};
 use sqlx::SqliteConnection;
 
 use crate::sessions::canonical;
@@ -26,19 +26,27 @@ pub(super) struct ThreadRowInsert<'a> {
     pub config: Option<&'a str>,
     pub agent_status: &'a str,
     pub frozen_context: Option<&'a str>,
+    pub owner_workspace_id: Option<&'a WorkspaceId>,
 }
 
-/// 插入一条 `threads` 行；`cached_context` 与 `context_cache_epoch` 从缺省值起步
+/// 插入一条 `threads` 行
 /// （派生缓存由行为在失效时清空，不在这里给值）。
 pub(super) async fn insert_thread_row(
     connection: &mut SqliteConnection,
     row: &ThreadRowInsert<'_>,
 ) -> Result<()> {
+    let workspace_id = super::workspace_identity::identity_for_new_thread(
+        connection,
+        row.parent_thread_id,
+        row.owner_workspace_id,
+        row.cwd,
+    )
+    .await?;
     sqlx::query(
         "INSERT INTO threads (id, title, cwd, created_at, updated_at, message_count,
-            parent_thread_id, snapshot_at_message_id, hidden, cancel_policy, config, cached_context,
-            frozen_context, agent_status, context_cache_epoch)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, NULL, ?12, ?13, 0)",
+            parent_thread_id, snapshot_at_message_id, hidden, cancel_policy, config,
+            frozen_context, agent_status, workspace_id)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14)",
     )
     .bind(row.id)
     .bind(row.title)
@@ -53,6 +61,7 @@ pub(super) async fn insert_thread_row(
     .bind(row.config)
     .bind(row.frozen_context)
     .bind(row.agent_status)
+    .bind(workspace_id.to_string())
     .execute(&mut *connection)
     .await?;
     Ok(())
@@ -61,7 +70,8 @@ pub(super) async fn insert_thread_row(
 /// 插入 canonical binding 行。
 ///
 /// 绑定身份由调用方给出且必须已被本机 workspace 验证过；这里只做形状校验（版本、
-/// 相对路径）与写入。外键指向的本机登记不存在时由调用方按 workspace 语义映射。
+/// 相对路径）与写入。创建证据取归属行当前记录的执行证据：v19 之前它取自执行登记，
+/// 现在归属行的证据列就是同一份事实。
 pub(super) async fn insert_binding_row(
     connection: &mut SqliteConnection,
     thread_id: &str,
@@ -70,8 +80,10 @@ pub(super) async fn insert_binding_row(
     super::workspace::validate_relative(&binding.cwd_relative_to_workspace)?;
     let version = i64::from(binding.schema_version);
     sqlx::query(
-        "INSERT INTO session_bindings (thread_id, schema_version, project_id, workspace_id, relative_cwd)
-         VALUES (?1, ?2, ?3, ?4, ?5)",
+        "INSERT INTO session_bindings (thread_id, schema_version, project_id, workspace_id, relative_cwd,
+            discovery_snapshot, evidence_origin)
+         VALUES (?1, ?2, ?3, ?4, ?5,
+            (SELECT discovery FROM workspaces WHERE id = ?4), 'creation_snapshot')",
     )
     .bind(thread_id)
     .bind(version)
@@ -90,7 +102,7 @@ pub(super) async fn insert_binding_row(
 /// **为什么两端都显式删**：远端执行器提供不了级联——远端 schema 不声明任何
 /// `REFERENCES`，`PRAGMA foreign_keys` 默认读数为 0、且是跨连接共享的可变状态，远端
 /// 也没有 `pragma_foreign_key_check` 等价物（传输面实测结论见母 issue
-/// `spec/issues/2026-09-26-session-store-remote-backend.md` §9.28 的例外 2/3/4）。
+/// `spec/history/2026-09.md` 2026-09-26 session-store 条目；原文 §9.28 的例外 2/3/4 见 Git 历史）。
 /// 一份删除逻辑要跑在两种执行器上，唯一能共用的表达就是显式
 /// 删除，因此本机侧也按同一份语句、同一顺序（先子后父）删。
 ///

@@ -18,7 +18,8 @@
 //! 远端零行 + 远端零 child 行）。
 
 use peri_acp_types::session_resources::{
-    ChildSnapshot, FrozenSnapshotBytes, NewSession, NewSessionMeta, SessionResourceErrorKind,
+    ChildSnapshot, FrozenSnapshotBytes, NewSession, NewSessionDraft, NewSessionMeta,
+    SessionResourceErrorKind,
 };
 use peri_acp_types::store::InheritedContext;
 
@@ -121,7 +122,7 @@ async fn test_remote_child_entry_rejects_a_disagreeing_relation_before_any_io() 
 /// 远程新建只接受 root：带父的输入在**任何远端读取之前**被类型化拒绝。
 ///
 /// 与 `save_child` 的输入一致性判定同一性质——只看纯输入，因此拒绝不带任何副作用。放行会在
-/// 远端写出一条**没有经过 child 通路判定**的父关系（父子/根归属、root owner 门禁、frozen
+/// 远端写出一条**没有经过 child 通路判定**的父关系（父子/根归属、root 关系检查、frozen
 /// 继承全都没走）。这条判定原先挂在已撤销的远程执行面上，v10 撤销时连同文件一起被删掉了。
 #[tokio::test]
 async fn test_remote_root_entry_rejects_a_parent_before_any_io() {
@@ -149,5 +150,29 @@ async fn test_remote_root_entry_rejects_a_parent_before_any_io() {
     assert!(
         matches!(error.kind(), SessionResourceErrorKind::Internal { .. }),
         "a root input must reach the store path, got {error:?}"
+    );
+}
+
+#[tokio::test]
+async fn test_remote_draft_reaches_store_without_execution_admission() {
+    let remote = ClosedRemote::open().await;
+    let root = root_session("draft-without-admission");
+    let draft = NewSessionDraft {
+        thread_id: root.thread_id,
+        created_at: root.created_at,
+        meta: root.meta,
+        binding: root.binding,
+    };
+
+    // Draft persistence does not require execution admission. The closed connection proves that the
+    // request passed admission and reached the store path without a token.
+    let error = remote
+        .adapter
+        .save_new_session_draft(&draft)
+        .await
+        .unwrap_err();
+    assert!(
+        matches!(error.kind(), SessionResourceErrorKind::Internal { .. }),
+        "draft creation should reach the store without execution admission, got {error:?}"
     );
 }

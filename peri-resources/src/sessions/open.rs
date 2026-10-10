@@ -32,6 +32,11 @@ use super::remote::{
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) enum LocatorError {
     Empty,
+    /// The local SQLite backend is not part of the WASM build.
+    #[cfg(target_os = "emscripten")]
+    LocalStoreUnsupported,
+    #[cfg(target_os = "emscripten")]
+    ExecutionUnsupported,
     /// `env:` 后面的变量名不合法。
     InvalidEnvReference,
     EnvValueMissing {
@@ -62,6 +67,10 @@ impl fmt::Display for LocatorError {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::Empty => formatter.write_str("session store locator is empty"),
+            #[cfg(target_os = "emscripten")]
+            Self::LocalStoreUnsupported => formatter.write_str("local session store is unavailable on WASM"),
+            #[cfg(target_os = "emscripten")]
+            Self::ExecutionUnsupported => formatter.write_str("WASM session execution host is unavailable"),
             Self::InvalidEnvReference => {
                 formatter.write_str("session store env reference is not a valid variable name")
             }
@@ -164,7 +173,7 @@ impl fmt::Display for AccessIntent {
 
 /// 打开请求里的 locator：延迟解析，直到真正打开时才读环境变量。
 ///
-/// `Debug` 手写：远程 locator 原文含主机与库名，解析前也不进日志。
+/// `Debug` 不输出远程 locator 原文，避免日志泄露主机、库名或 URL 凭证。
 #[derive(Clone, PartialEq, Eq)]
 pub(crate) enum StorageLocator {
     /// 未指定：使用默认本机库（`~/.peri/threads/threads.db`）。
@@ -201,8 +210,7 @@ impl fmt::Debug for StorageLocator {
             Self::Default => formatter.write_str("Default"),
             Self::LocalPath(path) => formatter.debug_tuple("LocalPath").field(path).finish(),
             Self::Literal(raw) if looks_like_remote_url(raw) => {
-                // 解析后由 `RemoteEndpoint` 的脱敏 `Debug` 给 scheme/引擎/主机家族。
-                formatter.write_str("Literal(<remote locator redacted>)")
+                formatter.write_str("Literal(Remote)")
             }
             Self::Literal(raw) => formatter.debug_tuple("Literal").field(raw).finish(),
             Self::EnvVar(name) => formatter.debug_tuple("EnvVar").field(name).finish(),
@@ -221,8 +229,8 @@ pub(crate) enum ResolvedLocator {
 
 /// 打开请求：locator + 凭证来源 + 访问意图。
 ///
-/// `Debug` 可以安全打印：远程端点的 `Debug` 只给 scheme/引擎/主机家族，凭证来源只给
-/// 变量名，凭证值从不进入本结构（只在打开时按需解析）。
+/// `Debug` 不输出远程 locator 原文；凭证值不进入本结构
+/// （只在打开时按需解析）。
 #[derive(Clone, Debug)]
 pub(crate) struct SessionStoreOpenRequest {
     input: StorageLocator,

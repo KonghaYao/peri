@@ -255,6 +255,29 @@ pub(super) struct RemoteStore {
 }
 
 impl RemoteStore {
+    pub(super) fn access(&self) -> StoreAccess {
+        self.access
+    }
+
+    pub(super) async fn apply_schema_upgrade(
+        &self,
+        statements: Vec<StatementSpec>,
+    ) -> SessionResourceResult<()> {
+        self.access.ensure_writable()?;
+        self.ensure_autocommit()?;
+        let expected = statements.len();
+        match self.run_managed_batch(statements).await {
+            Ok(counts) if counts.len() == expected && counts.last() == Some(&1) => Ok(()),
+            Ok(_) | Err(BatchFailure::Unknown { .. }) => Err(SessionResourceError::new(
+                SessionResourceErrorKind::PersistenceUncertain { thread_id: None },
+            )),
+            Err(BatchFailure::QualificationConflict) => {
+                Err(RemoteFailureClass::Constraint.into_session_resource_error())
+            }
+            Err(BatchFailure::NotApplied { class, .. }) => Err(class.into_session_resource_error()),
+        }
+    }
+
     /// 装配一条连接：传输面、访问意图、代际号与门禁都是既有事实。
     pub(super) fn new(
         transport: Arc<dyn RemoteTransport>,
@@ -440,7 +463,7 @@ impl RemoteStore {
             ));
         }
         let now = now_stamp();
-        let mut statements = Vec::with_capacity(mutation.effects.len() + 1);
+        let mut statements = Vec::with_capacity(mutation.effects.len() + 2);
         statements.push(ledger::qualify_statement(&mutation.identity, &now));
         statements.extend(mutation.effects.iter().cloned());
         Ok(match self.run_managed_batch(statements).await {
@@ -530,7 +553,7 @@ impl RemoteStore {
         self.transport
             .sql_values(&StatementSpec::bare("PRAGMA foreign_keys = OFF"))
             .await
-            .map_err(|error| failure::classify(&error).into_session_resource_error())?;
+            .map_err(|error| failure::from_sdk_error(&error))?;
         Ok(())
     }
 
@@ -550,7 +573,7 @@ impl RemoteStore {
     pub(super) async fn close(&self) -> SessionResourceResult<()> {
         match self.budgeted(self.transport.close()).await {
             Budgeted::Done(()) => Ok(()),
-            Budgeted::Failed(error) => Err(failure::classify(&error).into_session_resource_error()),
+            Budgeted::Failed(error) => Err(failure::from_sdk_error(&error)),
             Budgeted::Exceeded => Err(RemoteFailureClass::Timeout.into_session_resource_error()),
         }
     }
@@ -699,7 +722,7 @@ impl RemoteStore {
     async fn rows(&self, spec: &StatementSpec) -> SessionResourceResult<Vec<Vec<Value>>> {
         match self.guarded(self.transport.sql_values(spec)).await {
             Budgeted::Done(rows) => Ok(rows),
-            Budgeted::Failed(error) => Err(failure::classify(&error).into_session_resource_error()),
+            Budgeted::Failed(error) => Err(failure::from_sdk_error(&error)),
             Budgeted::Exceeded => Err(RemoteFailureClass::Timeout.into_session_resource_error()),
         }
     }
@@ -721,7 +744,7 @@ impl RemoteStore {
 
 /// 时间戳只作诊断（记录空间与封闭时间），不作任何判据。
 fn now_stamp() -> String {
-    chrono::Utc::now().to_rfc3339()
+    peri_time::now_utc_rfc3339()
 }
 
 /// 只读批失败 → 领域失败：直接按分类上报（读没有副作用，不存在「不确定生效」）。

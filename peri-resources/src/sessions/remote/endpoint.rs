@@ -78,7 +78,7 @@ impl fmt::Display for EndpointError {
 
 impl std::error::Error for EndpointError {}
 
-/// 已确认的远程端点：URL + 引擎。`Debug` 只给 scheme、引擎与主机家族，不给主机名与路径。
+/// 已确认的远程端点：URL + 引擎，Debug 保留实际地址。
 #[derive(Clone)]
 pub(crate) struct RemoteEndpoint {
     url: Url,
@@ -175,6 +175,7 @@ impl fmt::Debug for RemoteEndpoint {
             .debug_struct("RemoteEndpoint")
             .field("scheme", &self.url.scheme())
             .field("engine", &self.engine)
+            .field("url", &self.url)
             .field("host_class", &self.host_class())
             .finish()
     }

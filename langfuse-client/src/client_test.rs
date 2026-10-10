@@ -6,6 +6,12 @@ use crate::types::TraceBody;
 
 fn create_test_client(server_url: &str, max_retries: usize) -> LangfuseClient {
     LangfuseClient::new("pk", "sk", server_url, max_retries)
+        .with_export_config(ExportConfig {
+            initial_retry_delay: Duration::from_millis(5),
+            max_retry_delay: Duration::from_millis(20),
+            ..Default::default()
+        })
+        .unwrap()
 }
 
 fn create_test_event(id: &str) -> IngestionEvent {
@@ -91,7 +97,7 @@ async fn test_ingest_5xx_retries_then_success() {
     let mut server = mockito::Server::new_async().await;
     let mock_fail = server
         .mock("POST", "/api/public/otel/v1/traces")
-        .with_status(500)
+        .with_status(503)
         .with_body("internal error")
         .expect(1)
         .create_async()
@@ -116,7 +122,7 @@ async fn test_ingest_5xx_retries_exhausted() {
     let mut server = mockito::Server::new_async().await;
     let mock = server
         .mock("POST", "/api/public/otel/v1/traces")
-        .with_status(500)
+        .with_status(503)
         .with_body("internal error")
         .expect(3) // 1 initial + 2 retries
         .create_async()

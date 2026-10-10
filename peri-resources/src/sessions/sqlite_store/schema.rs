@@ -1,4 +1,4 @@
-//! 单库 schema 升级：保留历史、执行状态与生命周期锚点，事务内调整结构。
+//! 单库 schema 升级：保留历史与会话身份，事务内清理退役状态。
 
 use super::database::SqliteSessionDatabase;
 #[cfg(test)]
@@ -9,9 +9,8 @@ use peri_acp_types::workspace::WorkspaceError;
 use sqlx::{AssertSqlSafe, Connection, SqliteConnection};
 use std::collections::HashSet;
 
-/// 本构建写入并接受的 schema 版本；2..9 经升级路径收敛到此值，0 视为待建库。
-/// 版本接受判定、迁移收尾写入与拒绝时的「本构建上限」都由它派生，避免三处各写一份。
-pub(in crate::sessions) const CURRENT_SCHEMA_VERSION: i64 = 10;
+/// 本机与远端使用同一会话 schema 版本。
+pub(in crate::sessions) use crate::sessions::canonical::CURRENT_SCHEMA_VERSION;
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub(super) enum SchemaState {
@@ -25,6 +24,15 @@ pub(super) enum SchemaState {
     Version7,
     Version8,
     Version9,
+    Version10,
+    Version11,
+    Version12,
+    Version13,
+    Version14,
+    Version15,
+    Version16,
+    Version17,
+    Version18,
     Current,
 }
 
@@ -44,6 +52,15 @@ pub(super) async fn inspect(connection: &mut SqliteConnection) -> Result<SchemaS
         .await?;
     match version {
         v if v == CURRENT_SCHEMA_VERSION => return Ok(SchemaState::Current),
+        18 => return Ok(SchemaState::Version18),
+        17 => return Ok(SchemaState::Version17),
+        16 => return Ok(SchemaState::Version16),
+        15 => return Ok(SchemaState::Version15),
+        14 => return Ok(SchemaState::Version14),
+        13 => return Ok(SchemaState::Version13),
+        12 => return Ok(SchemaState::Version12),
+        11 => return Ok(SchemaState::Version11),
+        10 => return Ok(SchemaState::Version10),
         9 => return Ok(SchemaState::Version9),
         8 => return Ok(SchemaState::Version8),
         7 => return Ok(SchemaState::Version7),
@@ -135,10 +152,38 @@ async fn column_names(connection: &mut SqliteConnection, table: &str) -> Result<
 impl SqliteSessionDatabase {
     /// DDL 与版本号在同一事务中提交；不回填历史 SessionBinding。
     pub(super) async fn init_schema(&self) -> Result<()> {
+        crate::sessions::machine::initialize().await?;
         let mut connection = self.pool.acquire().await?;
         let state = inspect(&mut connection).await?;
         if state == SchemaState::Current {
+            sqlx::query(canonical::CREATE_SESSION_CLOSE_INTENTS_TABLE_SQL)
+                .execute(&mut *connection)
+                .await?;
+            sqlx::query("INSERT OR IGNORE INTO machines(id, name, identity_kind) VALUES (?1, '我的电脑', 'known')")
+                .bind(crate::sessions::machine::current()?)
+                .execute(&mut *connection)
+                .await?;
             return Ok(());
+        }
+        if state == SchemaState::Version18 {
+            return Self::remove_legacy_registrations_schema(&mut connection).await;
+        }
+        if matches!(
+            state,
+            SchemaState::Version12
+                | SchemaState::Version13
+                | SchemaState::Version14
+                | SchemaState::Version15
+                | SchemaState::Version16
+                | SchemaState::Version17
+        ) {
+            Self::remove_execution_owner_schema(&mut connection).await?;
+            return Self::remove_legacy_registrations_schema(&mut connection).await;
+        }
+        if state == SchemaState::Version11 {
+            super::storage_v2_migration::migrate_local_v2(&mut connection).await?;
+            Self::remove_execution_owner_schema(&mut connection).await?;
+            return Self::remove_legacy_registrations_schema(&mut connection).await;
         }
         // 登记表重建要对被引用的父表执行 DROP TABLE：SQLite 对父表做隐式删除时会
         // 立即检查外键，`defer_foreign_keys` 也挡不住。该 PRAGMA 只在事务外生效，
@@ -160,11 +205,47 @@ impl SqliteSessionDatabase {
         } else {
             migrated?;
         }
+        super::storage_v2_migration::migrate_local_v2(&mut connection).await?;
+        Self::remove_execution_owner_schema(&mut connection).await?;
+        Self::remove_legacy_registrations_schema(&mut connection).await
+    }
+
+    /// v18 → v19：把执行登记并入 `workspaces` 并删除登记表。`user_version` 与全部
+    /// DDL 在同一事务内提交；失败回滚后库仍是 18，可由上一版二进制打开。
+    async fn remove_legacy_registrations_schema(connection: &mut SqliteConnection) -> Result<()> {
+        super::storage_v19_migration::migrate_local_v19(connection).await
+    }
+
+    async fn remove_execution_owner_schema(connection: &mut SqliteConnection) -> Result<()> {
+        let mut tx = connection.begin_with("BEGIN IMMEDIATE").await?;
+        let removals = super::schema_cleanup::execution_recovery_removal_plan(&mut tx).await?;
+        let version: i64 = sqlx::query_scalar("PRAGMA user_version")
+            .fetch_one(&mut *tx)
+            .await?;
+        if version != 17 {
+            sqlx::query(canonical::CREATE_SESSION_CLOSE_INTENTS_TABLE_SQL)
+                .execute(&mut *tx)
+                .await?;
+            sqlx::query("DROP TABLE IF EXISTS session_execution_workspace_descriptors")
+                .execute(&mut *tx)
+                .await?;
+            sqlx::query("DROP TABLE IF EXISTS session_execution_owners")
+                .execute(&mut *tx)
+                .await?;
+        }
+        for statement in removals {
+            sqlx::query(*statement).execute(&mut *tx).await?;
+        }
+        sqlx::query("PRAGMA user_version = 18")
+            .execute(&mut *tx)
+            .await?;
+        tx.commit().await?;
         Ok(())
     }
 
     async fn migrate_schema(connection: &mut SqliteConnection, state: SchemaState) -> Result<()> {
         let mut tx = connection.begin_with("BEGIN IMMEDIATE").await?;
+        let removals = super::schema_cleanup::removal_plan(&mut tx).await?;
         if state == SchemaState::Version2 {
             // v2's unused revision column is NOT NULL without a default. Remove
             // it before current writers stop supplying it; all remaining data stays intact.
@@ -192,11 +273,9 @@ impl SqliteSessionDatabase {
                         ("hidden", "BOOLEAN NOT NULL DEFAULT 0"),
                         ("cancel_policy", "TEXT NOT NULL DEFAULT 'cascade'"),
                         ("config", "TEXT"),
-                        ("cached_context", "TEXT"),
                         ("frozen_context", "TEXT"),
                         ("inherited_context", "TEXT"),
                         ("agent_status", "TEXT NOT NULL DEFAULT 'active'"),
-                        ("context_cache_epoch", "INTEGER NOT NULL DEFAULT 0"),
                     ][..],
                 ),
                 (
@@ -246,19 +325,30 @@ impl SqliteSessionDatabase {
                 .into());
             }
         }
-        // 执行代际表：v6 及其以前带 `threads` 外键，v7 起去掉——远程模式下本机不存在
-        // `threads` 行，级联删除会把另一台机器持有的执行代际抹掉。对已升级的库这只是一次
-        // 形状校验，行内容一字不改（`execution_runs` 里的行按 `thread_id` 原文归属，
-        // 不再有 store 维度）。
-        ensure_execution_runs_without_foreign_key(&mut tx).await?;
         // v10 回退：删除 v7..v9 写下的本机远程痕迹（本机登记、未决锚点、远端操作日志、
         // 按 store 分区的执行域）。对没有这些表的库是幂等的。
         drop_remote_local_state(&mut tx).await?;
-        sqlx::query(AssertSqlSafe(format!(
-            "PRAGMA user_version = {CURRENT_SCHEMA_VERSION}"
-        )))
-        .execute(&mut *tx)
-        .await?;
+        for statement in removals {
+            sqlx::query(statement).execute(&mut *tx).await?;
+        }
+        sqlx::query(AssertSqlSafe(canonical::CREATE_OAUTH_CREDENTIALS_TABLE_SQL))
+            .execute(&mut *tx)
+            .await?;
+        // 环境事实与 schema 版本同一事务提交。未来的 Machine/Workspace 归属回填
+        // 必须能使用这些行，不能先留下已推进版本而缺少环境归属的半升级库。
+        sqlx::query(AssertSqlSafe(canonical::CREATE_ENVIRONMENTS_TABLE_SQL))
+            .execute(&mut *tx)
+            .await?;
+        sqlx::query("CREATE INDEX IF NOT EXISTS idx_session_environments_machine ON session_environments(machine_id, thread_id)")
+            .execute(&mut *tx)
+            .await?;
+        sqlx::query(AssertSqlSafe(canonical::BACKFILL_ENVIRONMENTS_SQL))
+            .bind(crate::sessions::machine::current()?)
+            .execute(&mut *tx)
+            .await?;
+        sqlx::query("PRAGMA user_version = 11")
+            .execute(&mut *tx)
+            .await?;
         tx.commit().await?;
         Ok(())
     }
@@ -282,10 +372,7 @@ impl SqliteSessionDatabase {
 /// 此时**不删**并拒绝升级（fail-closed，整个事务回滚），而不是把不认识的数据丢掉。
 /// 表不存在时跳过，因此对没有这些表的库是幂等的。
 ///
-/// 不触碰 `threads` / `messages` / `session_bindings` / `workspaces` / `projects` 与
-/// `execution_runs` 的任何行。`execution_runs` 里可能残留远程会话的执行代际行（本机
-/// `threads` 里没有对应行）——按用户裁决它们是**有效事实**（执行代际仍按 `thread_id`
-/// 单键存放，唯一执行域），既不删除也不改写。
+/// 不触碰 `threads` / `messages` / `session_bindings` / `workspaces` / `projects`。
 async fn drop_remote_local_state(connection: &mut SqliteConnection) -> Result<()> {
     for (table, columns) in DROPPED_LOCAL_TABLES {
         if !table_exists(connection, table).await? {
@@ -359,71 +446,6 @@ const DROPPED_LOCAL_TABLES: &[(&str, &[&str])] = &[
         ],
     ),
 ];
-
-/// `execution_runs` 收敛到 v7 形状：存在但不带 `threads` 外键。
-///
-/// 新库与 legacy 库直接按目标形状创建；已有带外键的表逐行复制后重建。重建只在
-/// `execution_runs` 自己的子表上进行，不需要关闭外键强制。
-async fn ensure_execution_runs_without_foreign_key(
-    connection: &mut SqliteConnection,
-) -> Result<()> {
-    if !table_exists(connection, "execution_runs").await? {
-        create_execution_runs(connection).await?;
-        return Ok(());
-    }
-    require_columns(
-        connection,
-        "execution_runs",
-        &["thread_id", "generation", "clean"],
-    )
-    .await?;
-    let foreign_tables: Vec<(String,)> =
-        sqlx::query_as("SELECT DISTINCT \"table\" FROM pragma_foreign_key_list('execution_runs')")
-            .fetch_all(&mut *connection)
-            .await?;
-    if !foreign_tables.iter().any(|(table,)| table == "threads") {
-        return Ok(());
-    }
-    let before: (i64,) = sqlx::query_as("SELECT COUNT(*) FROM execution_runs")
-        .fetch_one(&mut *connection)
-        .await?;
-    sqlx::raw_sql(
-        "CREATE TABLE execution_runs_local (
-            thread_id  TEXT PRIMARY KEY,
-            generation INTEGER NOT NULL,
-            clean      BOOLEAN NOT NULL
-        );
-        INSERT INTO execution_runs_local (thread_id, generation, clean)
-            SELECT thread_id, generation, clean FROM execution_runs;
-        DROP TABLE execution_runs;
-        ALTER TABLE execution_runs_local RENAME TO execution_runs;",
-    )
-    .execute(&mut *connection)
-    .await?;
-    let after: (i64,) = sqlx::query_as("SELECT COUNT(*) FROM execution_runs")
-        .fetch_one(&mut *connection)
-        .await?;
-    if before != after {
-        return Err(WorkspaceError::DiscoveryError(
-            "execution state rows changed during schema migration".into(),
-        )
-        .into());
-    }
-    Ok(())
-}
-
-async fn create_execution_runs(connection: &mut SqliteConnection) -> Result<()> {
-    sqlx::raw_sql(
-        "CREATE TABLE execution_runs (
-            thread_id  TEXT PRIMARY KEY,
-            generation INTEGER NOT NULL,
-            clean      BOOLEAN NOT NULL
-        );",
-    )
-    .execute(&mut *connection)
-    .await?;
-    Ok(())
-}
 
 async fn table_exists(connection: &mut SqliteConnection, table: &str) -> Result<bool> {
     let row: Option<(String,)> =
@@ -564,3 +586,7 @@ async fn migrate_identity_values(connection: &mut SqliteConnection) -> Result<()
 #[cfg(test)]
 #[path = "schema_test.rs"]
 mod tests;
+
+#[cfg(test)]
+#[path = "schema_v18_test.rs"]
+mod v18_tests;
