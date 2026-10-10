@@ -1,13 +1,15 @@
 import { useState } from 'react';
 import { CircleAlert, ListChecks, MessageCircleQuestion, Timer } from 'lucide-react';
 import type { InteractionAnswer, InteractionFieldView } from '@peri-code/sdk/view';
-import { submitInteractionAnswer } from '../api/client';
 import { buildElicitationContent, initialElicitationValues, type ElicitationValues } from './interactionForm';
 import type { Interaction, SyncState } from './types';
 
 const TERMINAL_TASK = new Set(['completed', 'failed', 'cancelled']);
 /** SDK 契约支持的权限决定；其它 optionId 暂不支持（不误发）。 */
 const SUPPORTED_PERMISSION_OPTIONS = new Set(['allow_once', 'reject_once']);
+
+/** 交互回答经当前会话的 WS 命令通道提交；未同步时不提供回答入口。 */
+export type InteractionAnswerHandler = (interactionId: string, answer: InteractionAnswer) => Promise<void>;
 
 function fieldInput(field: InteractionFieldView, values: ElicitationValues, change: (key: string, value: string | boolean) => void) {
   const id = `interaction-field-${field.key}`;
@@ -37,25 +39,25 @@ function fieldInput(field: InteractionFieldView, values: ElicitationValues, chan
   </label>;
 }
 
-function InteractionCard({ interaction, chatId, token }: { interaction: Interaction; chatId?: string; token?: string }) {
+function InteractionCard({ interaction, onAnswer }: { interaction: Interaction; onAnswer?: InteractionAnswerHandler }) {
   const [values, setValues] = useState<ElicitationValues>(() => initialElicitationValues(interaction.fields ?? []));
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState('');
   const [submitted, setSubmitted] = useState(false);
   const permission = interaction.kind === 'permission';
   const pending = interaction.status === 'pending';
-  const canSubmit = Boolean(pending && chatId && token && !interaction.formUnsupported);
+  const canSubmit = Boolean(pending && onAnswer && !interaction.formUnsupported);
   const choices = interaction.options ?? [];
   const supportedChoices = permission ? choices.filter((option) => SUPPORTED_PERMISSION_OPTIONS.has(option.optionId)) : [];
   // 可回答 = 有支持的权限选项，或有可渲染的表单字段。
   const answerable = canSubmit && !submitted && (permission ? supportedChoices.length > 0 : (interaction.fields?.length ?? 0) > 0);
 
   const submit = async (answer: InteractionAnswer) => {
-    if (!chatId || !token || busy) return;
+    if (!onAnswer || busy) return;
     setBusy(true);
     setError('');
     try {
-      await submitInteractionAnswer(token, chatId, interaction.id, answer);
+      await onAnswer(interaction.id, answer);
       setSubmitted(true);
     } catch (failure) {
       setError(failure instanceof Error ? failure.message : '回答未能提交，请稍后重试。');
@@ -98,7 +100,7 @@ function InteractionCard({ interaction, chatId, token }: { interaction: Interact
       </div>}
 
       {!pending && !interaction.formUnsupported && <p className="muted">回答闭环已在服务端结算，本页只读展示。</p>}
-      {pending && !answerable && <p className="muted" role="status">{chatId && token
+      {pending && !answerable && <p className="muted" role="status">{onAnswer
         ? '这条交互当前不可回答（没有可提交的选项）。' : '连接就绪后可以回答这条交互。'}</p>}
       {error && <p className="has-error" role="alert">{error}</p>}
     </div>
@@ -106,7 +108,7 @@ function InteractionCard({ interaction, chatId, token }: { interaction: Interact
 }
 
 /** 只读消费面 + 交互回答（鉴权命令，不写 Y.Doc）。 */
-export function ChatPanels({ state, chatId, token }: { state: SyncState | null; chatId?: string; token?: string }) {
+export function ChatPanels({ state, onAnswer }: { state: SyncState | null; onAnswer?: InteractionAnswerHandler }) {
   if (!state || state.readiness !== 'ready') return null;
   const pending = state.pendingInteractions;
   const active = state.activeTurn.turnId;
@@ -156,7 +158,7 @@ export function ChatPanels({ state, chatId, token }: { state: SyncState | null; 
         <h3>交互</h3>
         {state.interactions.length === 0 ? <p className="muted">没有交互记录。</p>
           : <ul className="panel-list">{state.interactions.map((interaction) =>
-            <InteractionCard key={interaction.id} interaction={interaction} chatId={chatId} token={token} />)}</ul>}
+            <InteractionCard key={interaction.id} interaction={interaction} onAnswer={onAnswer} />)}</ul>}
       </section>
     </div>
   </details>;

@@ -1,6 +1,6 @@
 import {
   SessionDocs, SessionDocSync, SessionViewStore,
-  type DisplayCheckpoint, type InteractionCallbacks, type JsonRpcNotification,
+  type InteractionCallbacks, type JsonRpcNotification,
 } from "../sdk";
 import type { Chat } from "../types";
 import { syncMetadataSchema, type SyncMetadata, type SyncState } from "../../shared/sync";
@@ -29,18 +29,16 @@ export class ChatProjection {
   get docs(): SessionDocs { return this.chatDocs; }
   get sync(): SessionDocSync { return this.chatSync; }
 
-  /** 从 v2 checkpoint 导入并替换文档对；活动 turn/interactions 由导入收敛。 */
-  restoreCheckpoint(checkpoint: unknown): void {
-    const docs = SessionDocs.fromCheckpoint(checkpoint);
-    this.replaceDocs(docs);
+  /** 丢弃当前展示材料：重放复原重试时使用，避免失败尝试的残留与本次重放叠加。 */
+  reset(): void {
+    this.replaceDocs(new SessionDocs());
   }
 
-  /** 当前展示材料（含外置载荷全文），供记录适配器拆分提交。 */
-  checkpoint(): DisplayCheckpoint { return this.chatDocs.exportCheckpoint(); }
-
-  /** v1 转换时发现此前正在执行：置应用级错误（不持久化，随记录里的 executionBlocked 一同展示）。 */
-  setRestartInterrupted(): void {
-    this.error = "Execution interrupted by host restart; not automatically resumed";
+  /** isolate 内运行期被回收：释放文档与同步通道（内存态，无外部副作用）。 */
+  dispose(): void {
+    this.chatView.destroy();
+    void this.chatSync.close().catch(() => {});
+    this.chatDocs.destroy();
   }
 
   /** 反向 ACP 交互（权限/提问）进入 SDK 投影；未提供回调时保持默认拒绝。 */
@@ -50,6 +48,12 @@ export class ChatProjection {
 
   /** 冷加载响应里的模式/配置项进入会话读面。 */
   seedConfig(response: unknown): void { this.chatDocs.seedConfig(response); }
+
+  /**
+   * 重放没有独立的 turn-done 通知：收到回放内容后按完成收敛，
+   * 否则最后一条历史消息会停留在 streaming、历史 turn 停留在 running（与 SDK Session 同规则）。
+   */
+  closeReplayedTurn(): void { this.chatDocs.completeTurn(); }
 
   /** 任务快照修复入口（session/bg-tasks）；未接线时保持 null，不做无依据的修复。 */
   setTaskSnapshotRequester(requester: (() => Promise<unknown>) | null): void {
@@ -104,7 +108,7 @@ export class ChatProjection {
     return materializeSyncState(this.chatView.getSnapshot(), metadata);
   }
 
-  /** 导入后整体更换文档对：旧的同步通道作废（发布前无订阅者），视图随新文档重建。 */
+  /** 更换文档对：旧的同步通道作废（发布前无订阅者），视图随新文档重建。 */
   private replaceDocs(docs: SessionDocs): void {
     this.chatView.destroy();
     void this.chatSync.close().catch(() => {});

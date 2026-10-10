@@ -1,4 +1,4 @@
-import { lazy, Suspense, useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import { lazy, Suspense, useCallback, useEffect, useRef, useState } from 'react';
 import {
   Activity, ArrowRight, ArrowUp, BookOpen, ChevronDown, Code2, Feather, Menu, MessageSquare,
   PanelLeftClose, Plus, RefreshCw, Settings2, ShieldCheck, Sparkles, Square, X,
@@ -6,7 +6,6 @@ import {
 import { Settings } from './settings/Settings';
 import { readToken, saveToken, subscribeToken, type TokenSaveFailure } from './settings/tokenStorage';
 import { useChat } from './chat/useChat';
-import { httpPayloadReader, unavailablePayloadReader } from './chat/payloadReader';
 import type { Chat } from './chat/types';
 
 const MessageList = lazy(() => import('./chat/MessageList').then((module) => ({ default: module.MessageList })));
@@ -67,11 +66,8 @@ function Workspace({ token, onTokenChange }: { token: string; onTokenChange: (to
   const sidebarTrigger = useRef<HTMLButtonElement>(null);
   const chat = useChat(token);
   const running = ['streaming', 'cancelling', 'blocked'].includes(chat.phase);
-  // 浏览器全文读取：绑定当前会话与令牌；未就绪时由占位 reader 明确报告不可用。
-  const payloadReader = useMemo(
-    () => (chat.selected && token ? httpPayloadReader(chat.selected.id, token) : unavailablePayloadReader),
-    [chat.selected?.id, token],
-  );
+  // 全文读取与交互回答都绑定当前会话的 WS 命令通道；未同步时由 reader/handler 明确报告不可用。
+  const payloadReader = chat.payloadReader;
   const busy = chat.phase !== 'idle' || submitting;
   const navigationDisabled = ['cancelling', 'syncing'].includes(chat.phase) || submitting;
 
@@ -184,7 +180,7 @@ function Workspace({ token, onTokenChange }: { token: string; onTokenChange: (to
           </div>}
           {chat.phase === 'loading' && !submitting ? <div className="loading-state" role="status"><RefreshCw className="spinning" size={22} /><p>正在加载会话…</p></div>
             : (chat.state?.entries.length ?? 0) > 0 ? <Suspense fallback={<div role="status">正在加载消息…</div>}>
-              <ChatPanels state={chat.state} chatId={chat.selected?.id} token={token} />
+              <ChatPanels state={chat.state} onAnswer={chat.historyReady ? chat.answerInteraction : undefined} />
               <MessageList entries={chat.state?.entries ?? []} phase={chat.phase} chatId={chat.selected?.id} reader={payloadReader} />
             </Suspense>
               : <div className="welcome"><div className="welcome-symbol"><Sparkles size={33} strokeWidth={1.35} /></div>

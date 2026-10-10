@@ -1,7 +1,9 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { useQuery } from '@tanstack/react-query';
+import type { InteractionAnswer } from '@peri-code/sdk/view';
 import { ChatApi, errorText } from '../api/client';
 import { createChatQueries } from './queries';
+import { commandPayloadReader } from './payloadReader';
 import { ChatSession, type ChatView } from './session';
 import type { Chat } from './types';
 
@@ -29,6 +31,14 @@ export function useChat(token: string) {
     };
   }, [api, queries, token]);
 
+  // 全文读取与交互回答都经当前会话那条 WS 连接；这里按调用时刻取会话，切换会话不需要重建 reader。
+  const payloadReader = useMemo(() => commandPayloadReader(() => session.current ?? undefined), []);
+  const answerInteraction = useCallback(async (interactionId: string, answer: InteractionAnswer) => {
+    const active = session.current;
+    if (!active) throw new Error('会话尚未就绪，回答未提交，请稍后重试。');
+    await active.answerInteraction(interactionId, answer);
+  }, []);
+
   const refreshList = useCallback(async () => {
     if (token) await list.refetch({ cancelRefetch: true });
   }, [token, list.refetch]);
@@ -45,6 +55,7 @@ export function useChat(token: string) {
   return {
     ...view, chats: list.data ?? [], listLoading: list.isFetching,
     error: view.error || (list.error && dismissedListError !== list.errorUpdatedAt ? errorText(list.error) : ''),
+    payloadReader, answerInteraction,
     refreshList, selectChat, send, stop, dismissError,
   };
 }

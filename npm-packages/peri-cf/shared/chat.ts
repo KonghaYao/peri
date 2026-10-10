@@ -1,6 +1,5 @@
 import { z } from "zod";
 
-export const messageStatuses = ["running", "completed", "cancelled", "error"] as const;
 export const chatIdSchema = z.guid().transform((id) => id.toLowerCase());
 export const chatSchema = z.object({ id: z.string(), title: z.string(), updatedAt: z.string() });
 export const chatListSchema = z.object({ chats: z.array(chatSchema) });
@@ -11,16 +10,7 @@ export const sendMessageBodySchema = z.object({
   content: z.string().max(32_768).refine((content) => content.trim().length > 0),
 });
 
-/**
- * 旧 DO 记录的持久行；只服务应用重启与 P3 checkpoint 迁移输入，不再是公开 DTO。
- * 展示身份/时间/错误以 SDK Entry 为权威。
- */
-export const persistedMessageSchema = z.object({
-  id: z.string(), role: z.enum(["user", "assistant"]), content: z.string(), createdAt: z.string(),
-  status: z.enum(messageStatuses), error: z.string().optional(),
-});
 export type Chat = z.infer<typeof chatSchema>;
-export type PersistedMessage = z.infer<typeof persistedMessageSchema>;
 
 // —— 公开展示 DTO：HTTP 首屏与 WS 实时同源，由 SDK view 物化，不额外持久化。——
 

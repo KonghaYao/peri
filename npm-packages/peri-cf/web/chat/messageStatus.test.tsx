@@ -3,7 +3,7 @@ import { renderToStaticMarkup } from 'react-dom/server';
 import { PayloadReadError } from '@peri-code/sdk/view';
 import { ChatApi } from '../api/client';
 import { MessageList } from './MessageList';
-import { httpPayloadReader, loadPayloadText } from './payloadReader';
+import { commandPayloadReader, loadPayloadText, type PayloadCommandSource } from './payloadReader';
 import type { Entry, EntryBlock } from './types';
 import type { SyncState } from '../../shared/sync';
 
@@ -75,6 +75,12 @@ describe('sync DTO boundary', () => {
   test('rejects an unsupported document pair with an upgrade message', async () => {
     respond(state({ readiness: 'unsupported' }));
     await expect(new ChatApi('test-token').detail(chat.id)).rejects.toThrow('不受支持的数据版本');
+  });
+
+  test('surfaces 426 as an explicit client upgrade prompt', async () => {
+    fetchSpy = spyOn(globalThis, 'fetch').mockResolvedValue(
+      Response.json({ error: 'Client upgrade required', upgrade: true }, { status: 426 }));
+    await expect(new ChatApi('test-token').detail(chat.id)).rejects.toThrow('客户端版本过旧，请刷新页面后重试。');
   });
 });
 
@@ -151,45 +157,48 @@ describe('block rendering covers tools, reasoning and unknown objects', () => {
 
 describe('payload full-text entry point', () => {
   const encoder = new TextEncoder();
+  const json = JSON.stringify({ contentText: '全文' });
+  const bytes = encoder.encode(json).byteLength;
 
-  function jsonResponse(body: unknown, status = 200): Response {
-    return new Response(JSON.stringify(body), { status, headers: { 'content-type': 'application/json' } });
-  }
+  function source(readPayload: PayloadCommandSource['readPayload']): PayloadCommandSource { return { readPayload }; }
 
-  test('http reader calls the versioned endpoint with bearer auth and returns the validated payload', async () => {
-    const json = JSON.stringify({ contentText: '全文' });
-    const calls: Array<{ url: string; init?: RequestInit }> = [];
-    const reader = httpPayloadReader(chat.id, 'secret-token', (async (url: string, init?: RequestInit) => {
-      calls.push({ url, init });
-      return jsonResponse({ id: 'gen:1', bytes: encoder.encode(json).byteLength, json });
-    }) as unknown as typeof fetch);
-    await expect(reader({ id: 'gen:1' })).resolves.toEqual({ id: 'gen:1', bytes: encoder.encode(json).byteLength, json });
-    expect(calls[0]!.url).toBe(`/api/v2/chats/${chat.id}/payloads/gen%3A1`);
-    expect((calls[0]!.init?.headers as Record<string, string>).Authorization).toBe('Bearer secret-token');
-    expect(calls[0]!.init?.cache).toBe('no-store');
+  test('command reader reads the payload through the session command channel', async () => {
+    const refs: string[] = [];
+    const reader = commandPayloadReader(() => source(async (refId) => {
+      refs.push(refId);
+      return { ok: true, payload: { id: refId, bytes, json } };
+    }));
+    await expect(reader({ id: 'gen:1' })).resolves.toEqual({ id: 'gen:1', bytes, json });
+    expect(refs).toEqual(['gen:1']);
   });
 
-  test('http reader maps server failure codes onto the SDK contract', async () => {
-    const cases: Array<[number, string | undefined, string]> = [
-      [401, undefined, 'unauthorized'],
-      [403, undefined, 'unauthorized'],
-      [404, 'unavailable', 'unavailable'],
-      [413, 'too_large', 'too_large'],
-      [500, 'integrity_error', 'integrity_error'],
-      [502, undefined, 'transport_error'],
-    ];
-    for (const [status, code, expected] of cases) {
-      const reader = httpPayloadReader(chat.id, 'token', (async () => jsonResponse({ error: { code, message: 'reason' } }, status)) as unknown as typeof fetch);
-      const failure = await reader({ id: 'gen:1' }).catch((error) => error);
-      expect((failure as { code?: string }).code, `${status}`).toBe(expected);
+  test('command reader maps server failure codes onto the SDK contract', async () => {
+    for (const code of ['unauthorized', 'unavailable', 'too_large', 'integrity_error', 'aborted', 'transport_error'] as const) {
+      const reader = commandPayloadReader(() => source(async () => ({ ok: false, source: 'server', code, message: 'reason' })));
+      const failure = await reader({ id: 'gen:1' }).catch((error: unknown) => error) as { code?: string; message?: string };
+      expect(failure.code, code).toBe(code);
+      expect(failure.message).toBe('reason');
     }
-    const malformed = httpPayloadReader(chat.id, 'token', (async () => jsonResponse({ id: 'gen:1' })) as unknown as typeof fetch);
-    expect(((await malformed({ id: 'gen:1' }).catch((error) => error)) as { code?: string }).code).toBe('integrity_error');
   });
 
-  test('readPayload surfaces network failures as transport_error through the SDK helper', async () => {
-    const reader = httpPayloadReader(chat.id, 'token', (async () => { throw new TypeError('Failed to fetch'); }) as unknown as typeof fetch);
-    const result = await loadPayloadText({ id: 'gen:1', bytes: 4 }, reader);
+  test('unknown server codes and missing payloads are contract mismatches, not transport failures', async () => {
+    const unknown = commandPayloadReader(() => source(async () => ({ ok: false, source: 'server', code: 'busy', message: 'reason' })));
+    const failure = await unknown({ id: 'gen:1' }).catch((error: unknown) => error) as { code?: string };
+    expect(failure.code).toBe('integrity_error');
+    const empty = commandPayloadReader(() => source(async () => ({ ok: true })));
+    expect((await empty({ id: 'gen:1' }).catch((error: unknown) => error) as { code?: string }).code).toBe('integrity_error');
+  });
+
+  test('an unsynced session reports unavailable instead of fabricating content', async () => {
+    const reader = commandPayloadReader(() => undefined);
+    const failure = await reader({ id: 'gen:1' }).catch((error: unknown) => error) as { code?: string; message?: string };
+    expect(failure.code).toBe('unavailable');
+    expect(failure.message).toContain('同步尚未就绪');
+  });
+
+  test('readPayload surfaces client-side command failures through the SDK helper', async () => {
+    const reader = commandPayloadReader(() => source(async () => ({ ok: false, source: 'client', code: 'transport_error', message: '载荷读取失败' })));
+    const result = await loadPayloadText({ id: 'gen:1', bytes }, reader);
     expect(result).toEqual({ ok: false, error: '载荷读取失败' });
   });
 

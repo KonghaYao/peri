@@ -1,31 +1,29 @@
 import { describe, expect, test } from "bun:test";
 import { ChatProjection } from "../worker/chat/projection";
-import { checkpointFromLegacyRecord } from "../worker/chat/record";
-import { SUPPORTED_SCHEMA_VERSIONS, SessionDocReplica } from "../worker/sdk";
+import { SessionDocReplica, type JsonRpcNotification } from "../worker/sdk";
+import { replayChunk } from "./helpers/runtime";
 import { readSyncState } from "../shared/sync-state";
-import type { SessionRecord } from "../worker/types";
 import type { SyncState } from "../shared/sync";
 
-function entryText(entry: { blocks: Array<{ type: string; text?: string }> } | undefined): string {
-  return entry ? entry.blocks.flatMap((block) => (block.type === "text" ? [block.text ?? ""] : [])).join("") : "";
-}
+/**
+ * 投影热路径边界：历史现在只能由 ACP 重放喂入（不再有 checkpoint 导入/导出）。
+ * 这些用例守住「流式期间不重写元数据」「读取时才物化」「身份来自 SDK Entry」三条。
+ */
 
 const createdAt = "2026-10-07T00:00:00.000Z";
 const chatId = "8d68cd01-33d3-4df4-9779-bd3031a09184";
+const chat = { id: chatId, title: "Projection fixture", updatedAt: createdAt };
 
-function record(turns = 0): SessionRecord {
-  return {
-    chat: { id: chatId, title: "Projection fixture", updatedAt: createdAt },
-    messages: Array.from({ length: turns }, (_, index) => [
-      { id: `user-${index}`, role: "user" as const, content: `Question ${index}`, createdAt, status: "completed" as const },
-      { id: `assistant-${index}`, role: "assistant" as const, content: `Answer ${index}`, createdAt, status: "completed" as const },
-    ]).flat(),
-  };
+function entryText(entry: SyncState["entries"][number] | undefined): string {
+  return entry ? entry.blocks.flatMap((block) => (block.type === "text" ? [block.text] : [])).join("") : "";
 }
 
-/** v1 记录 → v2 checkpoint 导入（与 DO 转换同一路径）。 */
-function restore(projection: ChatProjection, session: SessionRecord): void {
-  projection.restoreCheckpoint(checkpointFromLegacyRecord(session, { ...SUPPORTED_SCHEMA_VERSIONS }));
+/** 重放 N 轮历史（每轮用户消息 + 助手回答），与 ACP 的 `session/load` 重放同形。 */
+function replayed(projection: ChatProjection, turns: number): void {
+  for (let index = 0; index < turns; index++) {
+    projection.accept(replayChunk(chatId, `user-${index}`, `Question ${index}`, { role: "user", replay: true }));
+    projection.accept(replayChunk(chatId, `assistant-${index}`, `Answer ${index}`, { role: "assistant", replay: true }));
+  }
 }
 
 function chunk(projection: ChatProjection, text: string, messageId = "streamed-answer"): void {
@@ -38,10 +36,13 @@ function chunk(projection: ChatProjection, text: string, messageId = "streamed-a
 describe("SDK-backed projection materialization boundaries", () => {
   test("500 historical turns and 200 chunks do not materialize history per chunk", async () => {
     const projection = new ChatProjection();
-    await projection.setRunState({ chat: record().chat, running: true, executionBlocked: false });
-    restore(projection, record(500));
+    projection.setRunState({ chat, running: true, executionBlocked: false });
+    replayed(projection, 500);
+    projection.closeReplayedTurn();
+    await projection.flush();
+    const historical = projection.state();
+    expect(historical.entries).toHaveLength(1000);
     await projection.start("New question");
-    const indexBefore = JSON.stringify(projection.checkpoint()).length;
     let metadataPublications = 0;
     projection.docs.session.getMap("peri-cf").observe(() => { metadataPublications++; });
     for (let index = 0; index < 200; index++) {
@@ -53,27 +54,26 @@ describe("SDK-backed projection materialization boundaries", () => {
     const visible = projection.state();
     expect(entryText(visible.entries.at(-1))).toBe("x".repeat(200));
     expect(visible.entries.at(-1)?.status).toBe("streaming");
-    expect(visible.entries.length).toBe(1002);
+    expect(visible.entries).toHaveLength(1002);
     await projection.flush();
     expect(entryText(projection.state().entries.at(-1))).toBe("x".repeat(200));
-    // 索引随流式增长但保持在接纳上限内（P3 预算：1 MiB）。
-    expect(JSON.stringify(projection.checkpoint()).length).toBeGreaterThan(indexBefore);
-    expect(JSON.stringify(projection.checkpoint()).length).toBeLessThan(1_048_576);
-    expect(projection.checkpoint().entries[0]?.id).toBe("user-0");
-    expect(projection.checkpoint().entries.some((entry) => entry.id === "assistant-499")).toBe(true);
-    expect(projection.checkpoint().entries.at(-1)?.id.startsWith("turn:")).toBe(true);
+    // 历史身份来自 SDK Entry：重放的 messageId 决定条目身份，不被流式内容改写。
+    expect(visible.entries[0]?.id).toBe("turn:user-0:user");
+    expect(visible.entries.map((entry) => entry.messageId)).toContain("assistant-499");
+    expect(visible.entries.at(-1)?.id.startsWith("turn:")).toBe(true);
   });
 
   test("read boundaries and terminal errors never return stale text or status", async () => {
     const projection = new ChatProjection();
-    await projection.setRunState({ chat: record().chat, running: true, executionBlocked: false });
-    restore(projection, record(1));
+    projection.setRunState({ chat, running: true, executionBlocked: false });
+    replayed(projection, 1);
+    projection.closeReplayedTurn();
     await projection.start("Question");
     chunk(projection, "first");
     await projection.flush();
     expect(entryText(projection.state().entries.at(-1))).toBe("first");
     chunk(projection, " second");
-    await projection.setRunState({ chat: record().chat, running: false, executionBlocked: true });
+    projection.setRunState({ chat, running: false, executionBlocked: true });
     await projection.complete("error", "Provider failure");
     const visible = projection.state();
     expect(visible.running).toBe(false);
@@ -81,23 +81,20 @@ describe("SDK-backed projection materialization boundaries", () => {
     expect(visible.error).toBe("Provider failure");
     expect(visible.entries.map(entryText)).toEqual(["Question 0", "Answer 0", "Question", "first second"]);
     expect(visible.entries.at(-1)).toMatchObject({ status: "error", error: { code: "execution_failed" } });
-    // 从同一 checkpoint 再导入：文本与状态一致（转换/导入可重复）。
-    const restored = new ChatProjection();
-    restored.restoreCheckpoint(projection.checkpoint());
-    const replayed = restored.state();
-    expect(replayed.entries.map(entryText)).toEqual(visible.entries.map(entryText));
-    expect(replayed.entries.map((entry) => entry.status)).toEqual(visible.entries.map((entry) => entry.status));
   });
 
   test("cancellation, new assistant entries and command-input deduplication retain SDK identity", async () => {
     const projection = new ChatProjection();
-    await projection.setRunState({ chat: record().chat, running: true, executionBlocked: false });
-    restore(projection, record());
+    projection.setRunState({ chat, running: true, executionBlocked: false });
     await projection.start("Question");
     projection.accept({ jsonrpc: "2.0", method: "session/update", params: {
       sessionId: chatId, update: { sessionUpdate: "user_message_chunk", content: { type: "text", text: "Question" } },
     } });
-    const firstAnswerId = projection.checkpoint().entries.at(-1)!.id;
+    // 已投递的用户输入只投影一次：回显被 commandInputDelivered 去重。
+    const echoed = projection.state().entries;
+    expect(echoed.filter((entry) => entry.role === "user").map(entryText)).toEqual(["Question"]);
+    expect(echoed).toHaveLength(2);
+    const firstAnswerId = projection.state().entries.at(-1)!.id;
     chunk(projection, "One", "answer-one");
     await Promise.resolve();
     chunk(projection, "Two", "answer-two");
@@ -113,10 +110,9 @@ describe("SDK-backed projection materialization boundaries", () => {
     expect(visible.entries.slice(1).map((entry) => entry.status)).toEqual(["completed", "cancelled"]);
   });
 
-  test("batched chunks reach an SDK replica before the checkpoint is exported", async () => {
+  test("batched chunks reach an SDK replica with the current text", async () => {
     const projection = new ChatProjection();
-    await projection.setRunState({ chat: record().chat, running: true, executionBlocked: false });
-    restore(projection, record());
+    projection.setRunState({ chat, running: true, executionBlocked: false });
     await projection.start("Question");
     const replica = new SessionDocReplica();
     const subscription = projection.sync.subscribe((update) => replica.applyUpdate(update));
@@ -128,7 +124,7 @@ describe("SDK-backed projection materialization boundaries", () => {
       await Promise.resolve();
       expect(entryText(readSyncState(replica.chat, replica.session).entries.at(-1))).toBe("first second");
       await projection.flush();
-      expect(entryText(projection.checkpoint().entries.at(-1))).toBe("first second");
+      expect(entryText(projection.state().entries.at(-1))).toBe("first second");
     } finally {
       subscription.unsubscribe();
       replica.destroy();
@@ -137,8 +133,10 @@ describe("SDK-backed projection materialization boundaries", () => {
 
   test("same-length compacted histories replace history with SDK-owned identities", async () => {
     const projection = new ChatProjection();
-    await projection.setRunState({ chat: record().chat, running: false, executionBlocked: false });
-    restore(projection, record(1));
+    projection.setRunState({ chat, running: false, executionBlocked: false });
+    replayed(projection, 1);
+    projection.closeReplayedTurn();
+    await projection.flush();
     projection.accept({ jsonrpc: "2.0", method: "peri/agent_event", params: {
       sessionId: chatId, event_json: JSON.stringify({ type: "compact_completed", value: {
         messages_json: JSON.stringify([
@@ -148,8 +146,39 @@ describe("SDK-backed projection materialization boundaries", () => {
       } }),
     } });
     await projection.flush();
-    const entries = projection.checkpoint().entries;
+    const entries = projection.state().entries;
     expect(entries.map((entry) => entry.id)).toEqual(["message:replacement-user", "message:replacement-assistant"]);
-    expect(entries.map((entry) => entryText(entry))).toEqual(["Compacted question", "Compacted answer"]);
+    expect(entries.map(entryText)).toEqual(["Compacted question", "Compacted answer"]);
+  });
+
+  test("reset 丢弃全部展示材料：重放复原重试不得叠加", async () => {
+    const projection = new ChatProjection();
+    projection.setRunState({ chat, running: false, executionBlocked: false });
+    replayed(projection, 2);
+    projection.closeReplayedTurn();
+    await projection.flush();
+    expect(projection.state().entries).toHaveLength(4);
+    projection.reset();
+    expect(projection.state().entries).toEqual([]);
+    replayed(projection, 2);
+    projection.closeReplayedTurn();
+    await projection.flush();
+    expect(projection.state().entries).toHaveLength(4);
+  });
+
+  test("重放内容进入投影前不需要任何持久材料", async () => {
+    const projection = new ChatProjection();
+    projection.setRunState({ chat, running: true, executionBlocked: false });
+    const notifications: JsonRpcNotification[] = [
+      replayChunk(chatId, "user-1", "恢复的问题", { role: "user", replay: true }),
+      replayChunk(chatId, "assistant-1", "恢复的回答", { role: "assistant", replay: true }),
+    ];
+    for (const notification of notifications) projection.accept(notification);
+    projection.closeReplayedTurn();
+    await projection.flush();
+    const visible = projection.state();
+    expect(visible.entries.map(entryText)).toEqual(["恢复的问题", "恢复的回答"]);
+    expect(visible.entries.map((entry) => entry.status)).toEqual(["completed", "completed"]);
+    expect(visible.turns.map((turn) => turn.status)).toEqual(["completed"]);
   });
 });

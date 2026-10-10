@@ -25,12 +25,7 @@ function fixture(options: { replies?: Record<string, unknown>; failMethod?: stri
     setRequestHandler(callback) { handler = callback; },
     async close() { closeCalls++; if (options.closeFailure) throw new Error("close unconfirmed"); },
   };
-  const env: Env = {
-    CHAT_SESSIONS: {
-      idFromName() { throw new Error("Creation must not touch a chat DO"); },
-      get() { throw new Error("Creation must not touch a chat DO"); },
-    },
-  };
+  const env: Env = {};
   const startTransport = async (received: Env) => { expect(received).toBe(env); return transport; };
   const pending: Promise<unknown>[] = [];
   const create = () => createPeriSession(env, "Requested title", startTransport, (work) => { pending.push(work); });

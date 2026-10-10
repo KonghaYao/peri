@@ -26,7 +26,7 @@ export {
   SYNC_WIRE_VERSION,
 } from "@peri-code/sdk/portable";
 export type {
-  AckFrame, AuthFrame, DocSnapshot, DocStateVector, DocUpdate, JsonRpcNotification, PeriConfig,
+  AckFrame, AuthFrame, DeliveryLedger, DocSnapshot, DocStateVector, DocUpdate, JsonRpcNotification, PeriConfig,
   SessionStorage, SessionSummary, SyncFrame, SyncFramePayload, Transport,
   DisplayCheckpoint, CheckpointBlock, CheckpointEntry, CheckpointToolCall, CheckpointTurn, CheckpointInteraction,
   InteractionAnswer, InteractionCallbacks, PermissionRequest, ElicitationRequest, ElicitationDecision, FormField,

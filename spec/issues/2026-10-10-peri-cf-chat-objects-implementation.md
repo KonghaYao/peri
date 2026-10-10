@@ -1,6 +1,8 @@
 # peri-cf 聊天对象实施：P0 冻结与 P1 对象权威
 
-状态：进行中。P0–P4 与 **P5 本地范围**均已交付并通过测试：本地已跑通真实 WASM × workerd × DO × WebSocket × libSQL × 模型 fixture 的闭环（`scripts/smoke.mjs`），workerd 上的载荷端点、权限往返与断宿主验收亦通过。**生产切换（维护窗口、部署端验收、真实浏览器）未执行**，不得称为生产验证。
+> **状态更新（2026-10-10，架构转向后）**：本 issue 的对象契约（P0/P1/P2）与交互闭环（P4）结论仍有效；**P3「DO 记录切换/payload 持久化/容量/版本化存储」与 P5 中把 DO 记录、DO Hibernation socket 当作展示持久化/连接恢复基线的部分已作废（superseded）**，由 [无 DO 转向 issue](2026-10-10-peri-cf-no-durable-object.md) 取代：零表、零持久化、按需 ACP 重放复原、会话命令走 WS 文本控制帧。P3 原交付物 `worker/chat/record.ts` 与相关测试已删除；下文 P3/P5 段落保留为历史记录，不得作为实施依据。
+
+状态：进行中。P0–P4 与 **P5 本地范围**均已交付并通过测试：本地已跑通真实 WASM × workerd × DO × WebSocket × libSQL × 模型 fixture 的闭环（`scripts/smoke.mjs`），workerd 上的载荷端点、权限往返与断宿主验收亦通过（均基于已作废的 DO 基线，见上）。**生产切换（维护窗口、部署端验收、真实浏览器）未执行**，不得称为生产验证。
 依据：[已批准设计](../../docs/design/peri-cf-chat-objects.md)。不重新裁决设计，不进入 P3–P5。
 
 ## 隔离与实施边界
@@ -87,7 +89,9 @@ worktree 内，工作目录 `npm-packages/@peri-sdk`，除另注外。本轮命�
 - `web/chat/messageStatus.test.tsx`：DTO 边界（readiness/entry 字段/不支持 pair）、渲染（仅错误、纯工具、hidden reasoning、孤立工具、未知块、空完成回答）、payload reader 接线（成功/不可用/超限/字节不符）。
 - `tests/server-sync.test.ts` 新增"HTTP 首屏与 WS 实时返回同一 DTO 与同一批对象身份"。
 
-## P3 交付记录（存储与升级，已批准方案）
+## P3 交付记录（存储与升级，已批准方案）〔**整节 superseded**〕
+
+> 本节记录的是已作废的 DO 持久化基线（`recordVersion:2` + 分段 payload + 版本化存储入口）。2026-10-10 转向后：DO 与记录适配器已删除，展示态零持久化、按需 ACP 重放复原，会话命令走 WS 控制帧；`/api/v2/chats` 入口保留。本节仅作历史记录，见 [无 DO 转向 issue](2026-10-10-peri-cf-no-durable-object.md)。
 
 - `worker/chat/record.ts`（新）：`recordVersion:2` 单键索引 + `payload:<id>:<n>` 1 MiB 分段（UTF-8 安全切分）；写入顺序「全部分段 → 索引提交」；v1 转换（幂等、`record:v1-backup` 7 天窗口、索引超 1 MiB 时从最旧 turn 裁剪并标记 `legacyIncomplete`）；加载回填（引用必须可解析，否则 `RecordCorruptionError` 显式失败）；按新旧索引差立即回收被替换段；孤儿段与过期备份清扫；`restoreBackup()` 回滚还原；未知 `recordVersion` 拒绝读取。
 - `worker/chat/session.ts`：记录读写改经适配器；`save()` 提交 checkpoint（含分段）；接纳预检改为索引 1 MiB（`MAX_INDEX_BYTES`）；新增 `GET /api/v2/chats/:id/payloads/:refId`（同源 Bearer、`no-store`、1 MiB 下载上限；404 `unavailable` / 413 `too_large` / 500 `integrity_error`）。
@@ -104,15 +108,15 @@ worktree 内，工作目录 `npm-packages/@peri-sdk`，除另注外。本轮命�
 | `npm-packages/@peri-sdk`: `bun run typecheck`、`bun run test` | exit 0；**257 pass / 0 fail**（36 files） |
 | `npm-packages/peri-cf`: `bun run typecheck`、`bun run test` | exit 0；**378 pass / 0 fail**（30 files） |
 
-### 演练与平台验证边界
+### 演练与平台验证边界 〔superseded〕
 
-- 本地演练（`tests/p3-migration-drill.test.ts`，可重复执行）：旧路径 426 → 首次 v2 访问触发转换（备份写入、旧键删除、`recordVersion:2` + pair 3/2）→ v2 读取与列表可用 → `restoreBackup()` 还原 v1 后可再次转换。命令：`bun test tests/p3-migration-drill.test.ts`，1 pass / 17 断言。
-- **需部署端验证（本地无法证明）**：部署端 2 MB 单值上限的实际强制点与错误形态（本地 workerd 未复现）；真实 DO 存储的写入速率/CPU 计入；生产维护窗口的流量切换与旧构建回滚（须在预发演练一次）；R2 未引入。
+- 〔已作废〕本地演练（`tests/p3-migration-drill.test.ts`）：旧路径 426 → 首次 v2 访问触发迁移 → `restoreBackup()` 还原。**该测试与迁移语义已随 DO 记录适配器一并删除**（转向后无展示持久化可迁移）。
+- 〔已作废〕「部署端 2 MB 单值上限、DO 写入速率/CPU、旧构建回滚」等验收项随记录适配器删除失效；新基线的部署端验收项见 [无 DO 转向 issue](2026-10-10-peri-cf-no-durable-object.md) 的《风险与未验证项》。
 
 ## P4 交付记录（interactions 往返闭环）
 
 - `worker/chat/interactions.ts`（新）：每轮执行的 live 交互登记表——只保存 settle 闭包与会话身份；无回答者保持安全默认（权限拒绝、提问 decline）；`answer()` 校验 kind 并把跨会话/迟到/重复/失效统一按未知处理；`close()` 在轮次结束/宿主关闭时撤销。
-- `worker/chat/session.ts`：`setRequestHandler` 把 `session/request_permission` 与 `elicitation/create` 交给 SDK 投影（`SessionDocs.handleRequest`），其它方法保持默认拒绝；`session/load` 后 `seedConfig` 与 `session/bg-tasks` 快照入口；轮次结束先由投影 `abortAll` 置 `expired` 再兜底关闭队列（宿主关闭导致的挂起不记为“用户拒绝”）；新增鉴权命令 `POST /api/v2/chats/:id/interactions/:interactionId`（202 接受 / 400 非法或 kind 不符 / 409 迟到、重复、跨会话、失效）。
+- `worker/chat/session.ts`：`setRequestHandler` 把 `session/request_permission` 与 `elicitation/create` 交给 SDK 投影（`SessionDocs.handleRequest`），其它方法保持默认拒绝；`session/load` 后 `seedConfig` 与 `session/bg-tasks` 快照入口；轮次结束先由投影 `abortAll` 置 `expired` 再兜底关闭队列（宿主关闭导致的挂起不记为“用户拒绝”）。**〔transport 已迁移（2026-10-10）〕** 交互回答改走 WS 文本控制帧 `op:"interaction"`；原 `POST /api/v2/chats/:id/interactions/:interactionId` 端点返回 426，见 [无 DO 转向 issue](2026-10-10-peri-cf-no-durable-object.md)。
 - `worker/chat/bootstrap.ts`：能力声明新增 `peri.unstableEvent`（任务快照与后台任务事件通道；Rust 门控见 `peri-acp/src/session/event_sink.rs` 的 `caps.unstable_event`）。**交互本身不需要新的 capability 开关**：Rust 侧 `PeriCaps` 无权限/提问相关标志，broker 在 Forward 模式下无条件转发请求。
 - SDK：`InteractionCallbacks`（宿主只提供两个回调）；表单窗口字段描述扩展为 `{type,required,enum}` 并写入交互记录与视图；新增 `validateElicitationContent`（类型/必填/enum/未知字段；投影在接受前复核，前端 `buildElicitationContent` 复用同一套语义）；**不支持的表单不再调用回调**，直接按 decline 结算（不产生无法回答的 pending）。
 - 前端：`web/chat/interactionForm.ts`（纯函数：初值与提交内容）；`web/chat/Panels.tsx` 回答面（权限按钮仅支持 `allow_once`/`reject_once`，其它选项显示“暂不支持”；提问表单按类型渲染 text/number/checkbox/select 并标注必填；提交/拒绝按钮；不可回答时给明确原因）；`web/api/client.ts::submitInteractionAnswer`（Bearer + no-store，409/401 映射为可读提示）。
@@ -130,7 +134,9 @@ worktree 内，工作目录 `npm-packages/@peri-sdk`，除另注外。本轮命�
 - **交互（权限/提问）**：无需新增 capability（协议无对应开关，Rust `PeriCaps` 与 broker 均不门控）；闭环已在本地 fixture 层面验证（真实 ACP 请求 → 投影 → 鉴权命令 → live responder → 原 response）。真实 WASM 宿主 + workerd + 浏览器端到端属 P5，尚未验证。
 - **任务快照/后台事件**：本轮声明 `peri.unstableEvent`，依据 Rust 门控代码（`event_sink.rs`）与本地 fixture 验证（修订缺口触发 `session/bg-tasks` 并回填任务）。部署端平台验收属 P5。
 
-## P5 交付记录（本地闭环验收与收尾）
+## P5 交付记录（本地闭环验收与收尾）〔**DO 相关部分 superseded**〕
+
+> 本节 1/2/3 项与「发布演练」「需部署端/预发验证」1–3、7 项基于已作废的 DO 基线；转向后 `scripts/smoke.mjs`、`tests/real-workerd-ws.test.ts` 已由代码 owner 迁移到无 DO 形态。保留原文只作历史记录，见 [无 DO 转向 issue](2026-10-10-peri-cf-no-durable-object.md)。
 
 ### 端到端闭环（本地）
 
@@ -158,30 +164,32 @@ worktree 内，工作目录 `npm-packages/@peri-sdk`，除另注外。本轮命�
 
 ### 需部署端/预发验证（本地无法证明）
 
-1. 部署端 DO 单值 2 MB 的实际强制点与错误形态（本地 workerd 8 MiB 内未拒绝、16 MiB 报 `SQLITE_TOOBIG`）。
-2. 真实平台计费/CPU/写入速率与 10 GB 每对象上限的实际表现。
-3. 生产维护窗口：流量切换、旧客户端 426 行为、预发完整回滚演练（旧构建 + 备份还原）。
+1. 部署端 DO 单值 2 MB 的实际强制点与错误形态。**〔superseded：记录适配器已删除，不再适用〕**
+2. 真实平台计费/CPU/写入速率与 10 GB 每对象上限的实际表现。**〔superseded〕**
+3. 生产维护窗口：流量切换、旧客户端 426 行为、预发完整回滚演练（旧构建 + 备份还原）。**〔superseded；新基线无备份可还原〕**
 4. 真实浏览器验收（登录、刷新/重连、表单交互、复制/展开）——仓库既有 `scripts/e2e.mjs` 需要真实部署与模型。
 5. resource 块解码（真实 ACP 来源核实后决定）。
 6. elicitation `_meta`（`peri.elicitationUnanswered`）需 Rust 侧扩展 `UnansweredCause` 才能如实声明「表单不支持」。
-7. workerd 组合中 WS 信用/休眠在真实平台（含 hibernating socket 跨版本混跑）的复核。
+7. workerd 组合中 WS 信用/休眠在真实平台（含 hibernating socket 跨版本混跑）的复核。**〔superseded：新基线无 socket attachment/Hibernation〕**
+
+**转为新基线的验收项（见 [无 DO 转向 issue](2026-10-10-peri-cf-no-durable-object.md)）**：免费档 10 ms CPU vs WASM 冷启动；无 DO 的长时执行保活；HTTP 无会话亲和性的多 isolate 分叉；64 MB/isolate 并发上限；远程 Turso 配置。
 
 ## 剩余差距与后续
 
 1. **resource 块**仍未解码：真实 ACP 来源与安全标识未核实；当前以显式 `unknown` 块与不可读原因展示（设计 4.2）。
-2. **生产切换未执行**：schema 3/2 与 v2 入口已就绪，本地闭环（真实 WASM × workerd × DO × WS × sqld × 模型 fixture）已跑通，但维护窗口、部署端验收、真实浏览器与预发回滚演练仍需部署端完成（见「需部署端/预发验证」清单）。
-3. **R2 未引入**（批准为零新增资源）：当单载荷常态 >8 MiB、需要 Range 流式下载或持久量成为常态时另立小项。
-4. **交互闭环**已接通（P4）；真实 WASM 宿主 + workerd + 浏览器的端到端验收属 P5，未验证前不宣称生产可用。
-5. 无时间保留（按引用回收）；更长保留窗口与容量压测待真实数据后再评估。
+2. **生产切换未执行**：schema 3/2 与 v2 入口已就绪；本地闭环已跑通，但部署端验收（免费档 CPU、长时保活、真实浏览器、远程 Turso）仍需完成。**〔2026-10-10 转向后：本地闭环改为无 DO 形态，验收清单见 [无 DO 转向 issue](2026-10-10-peri-cf-no-durable-object.md)〕**
+3. **R2 未引入，且不再计划引入**（零持久化）：原「单载荷 >8 MiB 或持久量成为常态时另立小项」的触发条件作废。**〔superseded〕**
+4. **交互闭环**已接通（P4），transport 已迁移到 WS 控制帧；真实 WASM 宿主 + workerd + 浏览器的端到端验收属部署端，未验证前不宣称生产可用。
+5. 无时间保留、无持久化；容量问题只剩 isolate 内存与 64 MB WASM 预算（见转向 issue）。**〔superseded 原保留期表述〕**
 
-## P3 批准包
+## P3 批准包 〔**存储相关决定已 superseded**〕
 
-P3（DO 记录切换、payload 持久化、容量/保留/GC、平台资源、3/2 升级路径）的调研与方案已产出，**待用户逐项裁决**：见 [P3 批准包](2026-10-10-peri-cf-chat-objects-p3-approval.md)。该文件只做调研与方案，不含实施；平台限制以官方文档链接与本仓库一次性实测为证（探针脚本运行后已删除，源码留档于附录）。
+P3（DO 记录切换、payload 持久化、容量/保留/GC、平台资源、3/2 升级路径）的调研与方案见 [P3 批准包](2026-10-10-peri-cf-chat-objects-p3-approval.md)。该文件的 §1–§4 决定已被 2026-10-10 转向取代（不采用 DO、零表、零持久化）；其官方文档抓取与本地探针证据仍有效，作为对照保留。
 
 ## 下一轮范围与门禁
 
-1. 部署端/预发：维护窗口切换与回滚演练、部署端 2 MB/计费/CPU 验收、真实浏览器验收（见上「需部署端/预发验证」清单）；resource 来源核实后决定解码，否则保持 unsupported；`elicitationUnanswered` 若需要则先扩展 Rust 枚举。
-2. P2 起步：新 SessionView 读面（完整 tools/turns/interactions、`schemaVersions`）、纯选择器、消费端 schema pair 拒绝（`not-ready`/`UnsupportedSchema`）、shared DTO 与块组件；先补 DTO/组件测试。
-3. 上述两条完成后才具备一次性升级 3/2 的条件；升级前仍需版本化入口与维护窗口设计（P3 + 审批）。
+1. 部署端：真实浏览器验收、远程 Turso 配置、免费档 CPU/长时保活/内存预算验收（见 [无 DO 转向 issue](2026-10-10-peri-cf-no-durable-object.md)）；resource 来源核实后决定解码，否则保持 unsupported；`elicitationUnanswered` 若需要则先扩展 Rust 枚举。
+2. **〔superseded：P2 已交付，见上文 P2 交付记录〕**
+3. **〔superseded：3/2 升级与版本化入口已随 P3 落地；存储迁移步骤作废〕**
 4. 不得将本批加法字段与 2/1 版本当作对外发布契约。
-5. 任何 DO 持久化结构、存储容量、保留/GC、bucket/绑定或数据库表变更 → 先停下请求批准。
+5. **新的门禁**：任何重新引入持久化（DO、D1、KV、R2、数据库表）或恢复旧执行的方案 → 先停下请求用户批准；不得以"保活/可靠性"为由自行加回 CF 专有原语。

@@ -60,7 +60,7 @@ draft、proposal、可行性探查、审计报告和未采纳方案不进入本�
 | Command 系统 | [command-system.md](command-system.md) | 对应 command active issue 与代码 |
 | TUI Chat Workbench | [tui-chat-workbench.md](tui-chat-workbench.md) | `spec/history/2026-08.md`（2026-08-10 条目） |
 | SubAgent 活动行 | [tui-subagent-activity.md](tui-subagent-activity.md) | TUI redesign active issue |
-| peri-cf 聊天对象契约 | [peri-cf-chat-objects.md](peri-cf-chat-objects.md) | 前端消费面与对象契约完整性；升级/双身份/checkpoint 三项已批准，实施进度与验收见 [active issue](../../spec/issues/2026-10-10-peri-cf-chat-objects-implementation.md) |
+| peri-cf 聊天对象契约 | [peri-cf-chat-objects.md](peri-cf-chat-objects.md) | 前端消费面与对象契约完整性；升级/双身份已批准，2026-10-10 转向「无 DO、零表、零持久化、按需 ACP 重放复原」；实施进度与验收见 [实施 issue](../../spec/issues/2026-10-10-peri-cf-chat-objects-implementation.md) 与 [无 DO 转向 issue](../../spec/issues/2026-10-10-peri-cf-no-durable-object.md) |
 
 ## 维护要求
 

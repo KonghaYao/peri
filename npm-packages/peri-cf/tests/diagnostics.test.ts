@@ -2,7 +2,7 @@ import { afterEach, describe, expect, spyOn, test } from "bun:test";
 import { createApi } from "../worker/api/router";
 import { diagnosticMessage, errorResponse, logError, publicError } from "../worker/api/http";
 import { HTTPException } from "hono/http-exception";
-import type { ChatRepository, Env } from "../worker/types";
+import type { ChatRepository, Env, StartTransport } from "../worker/types";
 
 let errorLog: ReturnType<typeof spyOn<typeof console, "error">> | undefined;
 
@@ -17,11 +17,14 @@ const env: Env = {
   PERI_STORAGE_TOKEN: "synthetic-store-token",
   PERI_STORAGE_URL: "libsql://synthetic.invalid",
   MODEL_BASE_URL: "https://model.invalid/v1",
-  CHAT_SESSIONS: {
-    idFromName(name) { return name; },
-    get() { throw new Error("Unexpected DO access"); },
-  },
 };
+
+/** 本文件的用例只关心 HTTP 面；会话运行期用不到（444 由同步入口之外的路径拦截）。 */
+const noRuntimes = {
+  runtimeFor() { throw new Error("Unexpected session runtime access"); },
+  peek() { return undefined; },
+};
+const noTransport: StartTransport = async () => { throw new Error("Unexpected ACP host startup"); };
 
 describe("HTTP runtime diagnostics", () => {
   test("preserves synthetic credentials, URLs and complete causes in responses and original logs", async () => {
@@ -33,7 +36,7 @@ describe("HTTP runtime diagnostics", () => {
       async create() { throw new Error("Unexpected create"); },
       async get() { throw new Error("Unexpected get"); },
     };
-    const response = await createApi(() => repository).fetch(new Request("https://app.test/api/v2/chats", {
+    const response = await createApi({ repository: () => repository, startTransport: noTransport }).fetch(new Request("https://app.test/api/v2/chats", {
       headers: { Authorization: "Bearer synthetic-app-token" },
     }), env);
     expect(response.status).toBe(500);
@@ -104,16 +107,19 @@ describe("HTTP runtime diagnostics", () => {
 
   test("logs original sync upgrade failures without dumping request credentials or environment", async () => {
     const failure = new Error("WASM connection failed", { cause: new Error("https://synthetic.invalid?key=synthetic-value") });
-    const upgradeEnv: Env = { ...env, CHAT_SESSIONS: {
-      idFromName(name) { return name; },
-      get() { return { async fetch() { throw failure; } }; },
-    } };
     errorLog = spyOn(console, "error").mockImplementation(() => {});
-    const app = createApi(() => { throw new Error("Unexpected repository access"); });
+    const unused = { async list() { throw new Error("Unexpected repository access"); },
+      async get() { throw new Error("Unexpected repository access"); },
+      async create() { throw new Error("Unexpected repository access"); } };
+    // 升级失败来自会话运行期解析（例如 WASM 启动失败），完整诊断必须进日志与响应。
+    const app = createApi({ repository: () => unused, startTransport: noTransport, runtimes: {
+      runtimeFor() { throw failure; },
+      peek() { return undefined; },
+    } });
     const path = "/api/v2/chats/00000000-0000-4000-8000-000000000001/sync";
     const response = await app.fetch(new Request(`https://app.test${path}`, {
       headers: { Upgrade: "websocket", Authorization: "Bearer synthetic-app-token" },
-    }), upgradeEnv);
+    }), env);
     expect(response.status).toBe(500);
     expect(response.headers.get("Cache-Control")).toBe("no-store");
     expect(await response.json()).toEqual({ error: "WASM connection failed\nCaused by: https://synthetic.invalid?key=synthetic-value" });
@@ -123,7 +129,8 @@ describe("HTTP runtime diagnostics", () => {
 
   test("does not log deliberate credential-bearing authentication inputs", async () => {
     errorLog = spyOn(console, "error").mockImplementation(() => {});
-    const app = createApi(() => { throw new Error("Unexpected repository access"); });
+    const app = createApi({ repository: () => { throw new Error("Unexpected repository access"); },
+      startTransport: noTransport, runtimes: noRuntimes });
     for (const authorization of [undefined, "Bearer synthetic-wrong-token", "Bearer synthetic-app-token extra"]) {
       const response = await app.fetch(new Request("https://app.test/api/v2/chats", {
         headers: authorization ? { Authorization: authorization } : {},

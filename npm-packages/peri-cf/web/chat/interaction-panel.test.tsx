@@ -1,6 +1,6 @@
 import { describe, expect, test } from 'bun:test';
 import { renderToStaticMarkup } from 'react-dom/server';
-import { ChatPanels } from './Panels';
+import { ChatPanels, type InteractionAnswerHandler } from './Panels';
 import { buildElicitationContent, initialElicitationValues } from './interactionForm';
 import type { Interaction, SyncState } from './types';
 
@@ -38,12 +38,14 @@ function elicitation(overrides: Partial<Interaction> = {}): Interaction {
   };
 }
 
-const render = (interactions: Interaction[], chatId?: string, token?: string) =>
-  renderToStaticMarkup(<ChatPanels state={state(interactions)} chatId={chatId} token={token} />);
+/** 回答句柄代表「当前会话已同步」；未同步时面板不提供回答入口。 */
+const answer: InteractionAnswerHandler = async () => {};
+const render = (interactions: Interaction[], onAnswer?: InteractionAnswerHandler) =>
+  renderToStaticMarkup(<ChatPanels state={state(interactions)} onAnswer={onAnswer} />);
 
 describe('interaction answer surface (P4)', () => {
   test('pending permission offers the supported decisions as commands', () => {
-    const output = render([permission()], chat.id, 'token');
+    const output = render([permission()], answer);
     expect(output).toContain('Write file');
     expect(output).toContain('等待回答');
     expect(output).toContain('允许一次');
@@ -52,13 +54,13 @@ describe('interaction answer surface (P4)', () => {
   });
 
   test('unsupported permission options stay visible but are not submittable', () => {
-    const output = render([permission({ options: [{ optionId: 'allow_always', name: '总是允许' }] })], chat.id, 'token');
+    const output = render([permission({ options: [{ optionId: 'allow_always', name: '总是允许' }] })], answer);
     expect(output).toContain('总是允许（暂不支持）');
     expect(output).not.toContain('>总是允许<');
   });
 
   test('elicitation form renders typed inputs, required marks and enum select', () => {
-    const output = render([elicitation()], chat.id, 'token');
+    const output = render([elicitation()], answer);
     expect(output).toContain('名字（必填）');
     expect(output).toContain('type="text"');
     expect(output).toContain('<select');
@@ -68,21 +70,21 @@ describe('interaction answer surface (P4)', () => {
   });
 
   test('unanswerable interactions state the reason and offer no controls', () => {
-    const unsupported = render([elicitation({ formUnsupported: 'unsupported_property_type', fields: [] })], chat.id, 'token');
+    const unsupported = render([elicitation({ formUnsupported: 'unsupported_property_type', fields: [] })], answer);
     expect(unsupported).toContain('该表单类型暂不支持回答');
     expect(unsupported).not.toContain('interaction-form');
-    const offline = render([permission()], chat.id, undefined);
+    const offline = render([permission()]);
     expect(offline).toContain('连接就绪后可以回答这条交互');
-    const noOptions = render([permission({ options: [] })], chat.id, 'token');
+    const noOptions = render([permission({ options: [] })], answer);
     expect(noOptions).toContain('这条交互当前不可回答');
   });
 
   test('settled and expired interactions are read-only', () => {
-    const resolved = render([permission({ status: 'resolved', outcome: 'allow_once' })], chat.id, 'token');
+    const resolved = render([permission({ status: 'resolved', outcome: 'allow_once' })], answer);
     expect(resolved).toContain('已处理：allow_once');
     expect(resolved).toContain('回答闭环已在服务端结算');
     expect(resolved).not.toContain('interaction-actions');
-    const expired = render([elicitation({ status: 'expired', fields: [] })], chat.id, 'token');
+    const expired = render([elicitation({ status: 'expired', fields: [] })], answer);
     expect(expired).toContain('已失效');
   });
 });

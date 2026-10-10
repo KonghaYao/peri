@@ -13,11 +13,10 @@ function fixture() {
       return { id: "00000000-0000-4000-8000-000000000001", title, updatedAt: "2026-10-06T00:00:00.000Z" };
     },
   };
-  const env: Env = { APP_AUTH_TOKEN: "trusted-token", CHAT_SESSIONS: {
-    idFromName() { throw new Error("No DO access is expected"); },
-    get() { throw new Error("No DO access is expected"); },
-  } };
-  const app = createApi(() => repository);
+  const env: Env = { APP_AUTH_TOKEN: "trusted-token" };
+  const app = createApi({ repository: () => repository, startTransport: async () => {
+    throw new Error("No ACP host is expected");
+  } });
   const send = (body: BodyInit | null, headers: Record<string, string> = {}) => app.fetch(new Request("https://app.test/api/v2/chats", {
     method: "POST", body, headers: { Authorization: "Bearer trusted-token", "Content-Type": "application/json", ...headers },
   }), env);

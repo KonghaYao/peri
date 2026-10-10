@@ -10,12 +10,6 @@
     "not_found_handling": "single-page-application",
     "run_worker_first": ["/api/*"]
   },
-  "durable_objects": {
-    "bindings": [
-      { "name": "CHAT_SESSIONS", "class_name": "ChatSession" }
-    ]
-  },
-  "migrations": [{ "tag": "v1", "new_sqlite_classes": ["ChatSession"] }],
   "vars": {
     "MODEL_BASE_URL": "https://api.openai.com/v1",
     "MODEL_ID": "gpt-4.1-mini"

@@ -1,403 +1,305 @@
 import { describe, expect, test } from "bun:test";
-import { ChatSessionCore } from "../worker/chat/session";
-import { fetchApi } from "../worker/api/router";
-import { SessionDocReplica, type JsonRpcNotification, decodeSyncFrame, encodeAckFrame, encodeAuthFrame,
-  encodeSyncFrame, FRAME_AUTH, SYNC_WIRE_VERSION, MAX_AUTH_FRAME_BYTES } from "../worker/sdk";
+import { ChatRuntime } from "../worker/chat/session";
 import { ChatSockets, type SyncSocket } from "../worker/chat/sync";
-import type { AcpTransport, Chat, Env, SessionRecord, SessionState } from "../worker/types";
-import { readSyncState } from "../shared/sync-state";
+import { ChatRegistry } from "../worker/chat/registry";
+import { promptCommand, replayChunk, runtimeFixture, type TransportPlan } from "./helpers/runtime";
+import { FixtureSocket, FixtureSocketHost, until, untilAsync, untilState } from "./helpers/sockets";
+import { encodeAckFrame, encodeAuthFrame, encodeSyncFrame, decodeSyncFrame, FRAME_AUTH, SYNC_WIRE_VERSION,
+  MAX_AUTH_FRAME_BYTES } from "../worker/sdk";
 import type { SyncState } from "../shared/sync";
-import type { StoredRecord } from "../worker/chat/record";
 
-function entryText(entry: { blocks: Array<{ type: string; text?: string }> } | undefined): string {
-  return entry ? entry.blocks.flatMap((block) => (block.type === "text" ? [block.text ?? ""] : [])).join("") : "";
+/**
+ * 无 DO 的同步连接：连接状态只在内存，鉴权、投递信用与恢复语义必须保持不变。
+ * 重放复原由 hydrate-replay.test.ts 覆盖，这里只看连接层。
+ */
+
+const chatId = "00000000-0000-4000-8000-000000000001";
+
+function entryText(entry: SyncState["entries"][number] | undefined): string {
+  return entry ? entry.blocks.flatMap((block) => (block.type === "text" ? [block.text] : [])).join("") : "";
 }
 
-const chat: Chat = { id: "00000000-0000-4000-8000-000000000001", title: "Sync fixture", updatedAt: "2026-10-06T00:00:00.000Z" };
-
-class FixtureSocket implements SyncSocket {
-  readonly frames: Uint8Array[] = [];
-  readonly replica = new SessionDocReplica();
-  readyState = 1;
-  autoAck = true;
-  deferClose = false;
-  closed?: { code: number; reason: string };
-  deserializeAttachment?: () => unknown;
-  private messages: ((event: { data: unknown }) => void)[] = [];
-  private closures: (() => void)[] = [];
-
-  accept(): void {}
-  send(message: Uint8Array): void {
-    const frame = decodeSyncFrame(message);
-    if (frame.type === "snapshot") this.replica.applySnapshot(frame.snapshot);
-    else this.replica.applyUpdate(frame.update);
-    this.frames.push(message);
-    if (this.autoAck) queueMicrotask(() => this.receive(encodeAckFrame(frame.delivery)));
-  }
-  close(code: number, reason: string): void {
-    this.closed = { code, reason };
-    if (this.deferClose) { this.readyState = 2; return; }
-    this.confirmClose();
-  }
-  confirmClose(): void {
-    this.readyState = 3;
-    for (const listener of this.closures) listener();
-  }
-  addEventListener(type: string, listener: ((event: { data: unknown }) => void) | (() => void)): void {
-    if (type === "message") this.messages.push(listener);
-    else this.closures.push(listener as () => void);
-  }
-  receive(data: unknown): void { for (const listener of this.messages) listener({ data }); }
-  state() { return readSyncState(this.replica.chat, this.replica.session); }
-}
-
-class FixtureTransport implements AcpTransport {
-  closed = false;
-  stops = 0;
-  private listeners = new Set<(notification: JsonRpcNotification) => void>();
-  private resolve!: (result: { stopReason: string }) => void;
-  readonly pending = new Promise<{ stopReason: string }>((resolve) => { this.resolve = resolve; });
-  async request<Result>(method: string): Promise<Result> {
-    return (method === "initialize" ? { protocolVersion: 1 } : {}) as Result;
-  }
-  async sendRequest<Result>(): Promise<{ response: Promise<Result> }> { return { response: this.pending as Promise<Result> }; }
-  async notify(method: string): Promise<void> {
-    if (method !== "session/cancel") throw new Error(`Unexpected ACP notification: ${method}`);
-    this.stops++;
-    this.finish("cancelled");
-  }
-  async *events(): AsyncIterable<JsonRpcNotification> {}
-  subscribe(listener: (notification: JsonRpcNotification) => void): () => void {
-    this.listeners.add(listener);
-    return () => this.listeners.delete(listener);
-  }
-  setRequestHandler(): void {}
-  async close(): Promise<void> { this.closed = true; }
-  emit(text: string, extra: Record<string, unknown> = {}): void {
-    for (const listener of this.listeners) listener({ jsonrpc: "2.0", method: "session/update", params: {
-      sessionId: chat.id, update: { sessionUpdate: "agent_message_chunk", content: { type: "text", text } }, ...extra,
-    } });
-  }
-  finish(stopReason = "end_turn"): void { this.resolve({ stopReason }); }
-  done(): void {
-    for (const listener of this.listeners) listener({ jsonrpc: "2.0", method: "peri/agent_event_done",
-      params: { sessionId: chat.id, stopReason: "end_turn" } });
-  }
-  userEcho(): void {
-    for (const listener of this.listeners) listener({ jsonrpc: "2.0", method: "session/update", params: {
-      sessionId: chat.id, update: { sessionUpdate: "user_message_chunk", messageId: "actual-acp-input",
-        content: { type: "text", text: "Hello" } },
-    } });
-  }
-}
-
-function fixture(options: { record?: SessionRecord; closeFailure?: boolean; missing?: boolean } = {}) {
-  let reads = 0;
-  let repositoryReads = 0;
-  let starts = 0;
-  const jobs: Promise<unknown>[] = [];
-  const sockets: FixtureSocket[] = [];
-  const transport = new FixtureTransport();
-  const buckets = new Map<string, unknown>();
-  if (options.record) buckets.set("session", structuredClone(options.record));
-  const state: SessionState = { storage: {
-    async get<Value>(key: string) { reads++; return structuredClone(buckets.get(key)) as Value | undefined; },
-    async put(entries: Record<string, unknown>) {
-      for (const [key, value] of Object.entries(entries)) buckets.set(key, structuredClone(value));
-    },
-    async delete(keys: string[]) { let removed = false; for (const key of keys) removed = buckets.delete(key) || removed; return removed; },
-    async list(options: { prefix?: string } = {}) {
-      const result = new Map<string, unknown>();
-      for (const [key, value] of [...buckets].sort(([left], [right]) => left.localeCompare(right))) {
-        if (options.prefix && !key.startsWith(options.prefix)) continue;
-        result.set(key, structuredClone(value));
-      }
-      return result;
-    },
-  }, waitUntil(job) { jobs.push(job); } };
-  const repository = {
-    async get() { repositoryReads++; return options.missing ? null : chat; },
-    async list() { return [chat]; }, async create() { return chat; },
-  };
-  const env: Env = { APP_AUTH_TOKEN: "sync-secret", CHAT_SESSIONS: {
-    idFromName(name) { return name; }, get() { return { fetch: (request: Request) => core.fetch(request) }; },
-  } };
-  const core = new ChatSessionCore(state, env, async () => { starts++; return transport; }, repository, () => {
-    const socket = new FixtureSocket(); sockets.push(socket);
-    return { socket, response: new Response(null, { status: 200 }) };
-  });
-  if (options.closeFailure) transport.close = async () => { throw new Error("close failed"); };
-  async function connect(resume?: Parameters<typeof encodeAuthFrame>[0]["resume"]) {
-    const response = await fetchApi(new Request(`https://app.invalid/api/v2/chats/${chat.id}/sync`, {
-      headers: { Upgrade: "websocket" },
-    }), env, repository);
-    const socket = sockets.at(-1)!;
-    if (resume) socket.receive(encodeAuthFrame({ type: "auth", token: "sync-secret", resume }));
-    return { socket, response };
-  }
-  const command = (path = "messages") => core.fetch(new Request(`https://app.invalid/api/v2/chats/${chat.id}/${path}`, {
-    method: "POST", headers: { Authorization: "Bearer sync-secret", "Content-Type": "application/json" },
-    ...(path === "messages" ? { body: JSON.stringify({ content: "Hello" }) } : {}),
-  }));
-  return { core, env, transport, connect, command, sockets, jobs,
-    reads: () => reads, repositoryReads: () => repositoryReads, starts: () => starts,
-    record: () => (buckets.get("record") ?? buckets.get("session")) as StoredRecord | undefined,
-    buckets,
-    drain: () => Promise.all(jobs) };
-}
-
-async function until(predicate: () => boolean): Promise<void> {
-  for (let attempt = 0; attempt < 100; attempt++) {
-    if (predicate()) return;
-    await Bun.sleep(2);
-  }
-  throw new Error("Fixture state did not converge");
-}
-
-async function authenticate(app: ReturnType<typeof fixture>) {
-  const { socket } = await app.connect();
-  socket.receive(encodeAuthFrame({ type: "auth", token: "sync-secret" }));
+/** 打开连接并以首个二进制帧鉴权（连接层不认 Authorization 头）。 */
+async function authenticate(app: ReturnType<typeof runtimeFixture>, chatId: string) {
+  const { socket, response } = await app.connect(chatId, { authenticate: false });
+  expect(response.status).toBe(101);
+  socket.receive(encodeAuthFrame({ type: "auth", token: app.env.APP_AUTH_TOKEN! }));
   await until(() => socket.frames.length > 0 || !!socket.closed);
   return socket;
 }
 
-describe("server read-only SDK document synchronization", () => {
-  test("closing peers retain their connection admission until actual transport close is confirmed", async () => {
-    const app = fixture();
-    const peers: FixtureSocket[] = [];
-    for (let connection = 0; connection < 16; connection++) {
-      const socket = await authenticate(app);
-      peers.push(socket);
-      socket.deferClose = true;
-      socket.receive('{"type":"write"}');
-      await until(() => socket.readyState === 2);
-    }
-    expect((await app.connect()).response.status).toBe(429);
-    peers[0]!.confirmClose();
-    expect((await app.connect()).response.status).toBe(200);
-    for (const socket of peers) socket.confirmClose();
-    app.sockets.at(-1)!.close(1000, "Done");
-  });
+describe("session socket admission", () => {
   test("frontdoor forwards browser upgrades without Bearer headers and reads nothing before first-frame auth", async () => {
-    const app = fixture();
-    const { socket, response } = await app.connect();
-    expect(response.status).toBe(200);
-    expect(app.reads()).toBe(0);
-    expect(app.repositoryReads()).toBe(0);
+    const app = runtimeFixture();
+    const chat = await app.create("Admission");
+    const { socket, response } = await app.connect(chat.id);
+    expect(response.status).toBe(101);
     expect(socket.frames).toEqual([]);
+    expect(app.transports).toEqual([]);
     socket.close(1000, "Done");
   });
 
-  test.each(["wrong", "sync-secret-extra", "sync-secret\r\nx", "🙂"]) ("rejects invalid token %s without DB or snapshot access", async (token) => {
-    const app = fixture();
-    const { socket } = await app.connect();
-    socket.receive(encodeAuthFrame({ type: "auth", token }));
-    await app.drain();
-    expect(socket.closed?.code).toBe(4401);
-    expect(app.reads()).toBe(0);
-    expect(app.repositoryReads()).toBe(0);
-    expect(socket.frames).toEqual([]);
-  });
-  test("rejects an empty token frame without DB or snapshot access", async () => {
-    const app = fixture();
-    const { socket } = await app.connect();
-    socket.receive(new Uint8Array([FRAME_AUTH, SYNC_WIRE_VERSION, 0, 0]));
-    await app.drain();
-    expect(socket.closed?.code).toBe(4401);
-    expect(app.reads()).toBe(0);
-    expect(app.repositoryReads()).toBe(0);
-    expect(socket.frames).toEqual([]);
-  });
-
-  test.each(["{", JSON.stringify({ type: "update", chat: [] }), new Uint8Array([FRAME_AUTH]),
-    encodeAckFrame(1)]) ("rejects malformed, text or non-auth first frame", async (raw) => {
-      const app = fixture(); const { socket } = await app.connect();
-      socket.receive(raw); await app.drain();
+  test.each(["wrong", "trusted-app-token-extra", "trusted-app-token\r\nx", "🙂"])(
+    "rejects invalid token %s without starting a host", async (token) => {
+      const app = runtimeFixture();
+      const chat = await app.create("Auth");
+      const { socket } = await app.connect(chat.id, { authenticate: false });
+      socket.receive(encodeAuthFrame({ type: "auth", token }));
+      await until(() => !!socket.closed);
       expect(socket.closed?.code).toBe(4401);
-      expect(app.reads()).toBe(0);
+      expect(socket.frames).toEqual([]);
+      expect(app.transports).toEqual([]);
     });
 
-  test("closes oversized auth with 1009", async () => {
-    const app = fixture(); const { socket } = await app.connect();
-    socket.receive(new Uint8Array(MAX_AUTH_FRAME_BYTES + 1)); await app.drain();
-    expect(socket.closed?.code).toBe(1009); expect(app.reads()).toBe(0);
+  test("rejects an empty token frame and malformed first frames with 4401", async () => {
+    const app = runtimeFixture();
+    const chat = await app.create("Auth frames");
+    for (const raw of [new Uint8Array([FRAME_AUTH, SYNC_WIRE_VERSION, 0, 0]),
+      "{", new Uint8Array([FRAME_AUTH]), encodeAckFrame(1)]) {
+      const { socket } = await app.connect(chat.id, { authenticate: false });
+      socket.receive(raw);
+      await until(() => !!socket.closed);
+      expect(socket.closed?.code).toBe(4401);
+    }
+    expect(app.transports).toEqual([]);
   });
 
-  test("times out unauthenticated sockets after three seconds without DB access", async () => {
-    const app = fixture(); const { socket } = await app.connect();
-    await untilTimeout(socket);
-    expect(socket.closed?.code).toBe(4401); expect(app.reads()).toBe(0);
-  }, 4_500);
+  test("closes oversized auth with 1009", async () => {
+    const app = runtimeFixture();
+    const chat = await app.create("Oversized");
+    const { socket } = await app.connect(chat.id, { authenticate: false });
+    socket.receive(new Uint8Array(MAX_AUTH_FRAME_BYTES + 1));
+    await until(() => !!socket.closed);
+    expect(socket.closed?.code).toBe(1009);
+  });
+
+  test("times out unauthenticated sockets after three seconds without starting a host", async () => {
+    const app = runtimeFixture();
+    const chat = await app.create("Timeout");
+    const { socket } = await app.connect(chat.id, { authenticate: false });
+    await until(() => !!socket.closed, 4_500);
+    expect(socket.closed?.code).toBe(4401);
+    expect(app.transports).toEqual([]);
+  }, 6_000);
 
   test("admits at most sixteen sockets and releases disconnected slots", async () => {
-    const app = fixture();
+    const app = runtimeFixture();
+    const chat = await app.create("Capacity");
+    const sockets: FixtureSocket[] = [];
     try {
-      for (let count = 0; count < 16; count++) await app.connect();
-      expect((await app.connect()).response.status).toBe(429);
-      expect(app.sockets).toHaveLength(16);
-      app.sockets[0]!.close(1000, "Release slot");
-      expect((await app.connect()).response.status).toBe(200);
-      expect(app.reads()).toBe(0);
-    } finally { for (const socket of app.sockets) socket.close(1000, "Done"); }
+      for (let count = 0; count < 16; count++) sockets.push(await authenticate(app, chat.id));
+      expect((await app.connect(chat.id)).response.status).toBe(429);
+      sockets[0]!.close(1000, "Release slot");
+      expect((await app.connect(chat.id)).response.status).toBe(101);
+    } finally { for (const socket of sockets) socket.close(1000, "Done"); }
   });
 
-  test("returns 4404 for missing chats only after authenticating", async () => {
-    const app = fixture({ missing: true }); const socket = await authenticate(app);
-    expect(socket.closed?.code).toBe(4404); expect(socket.frames).toEqual([]);
-    expect(app.repositoryReads()).toBe(1);
+  test("missing chats close with 4404 only after authenticating", async () => {
+    const app = runtimeFixture();
+    const { socket } = await app.connect(chatId, { authenticate: false });
+    socket.receive(encodeAuthFrame({ type: "auth", token: app.env.APP_AUTH_TOKEN! }));
+    await until(() => !!socket.closed);
+    expect(socket.closed?.code).toBe(4404);
+    expect(socket.frames).toEqual([]);
   });
 
   test("rejects URL tokens and non-upgrade requests without opening sockets", async () => {
-    const app = fixture();
-    for (const [suffix, headers, status] of [["?token=sync-secret", { Upgrade: "websocket" }, 400], ["", {}, 426]] as const) {
-      const response = await app.core.fetch(new Request(`https://app.invalid/api/v2/chats/${chat.id}/sync${suffix}`, { headers }));
+    const app = runtimeFixture();
+    const chat = await app.create("Upgrade checks");
+    for (const [suffix, headers, status] of [
+      ["?token=trusted-app-token", { Upgrade: "websocket" }, 400],
+      ["", {}, 426],
+    ] as const) {
+      const response = await app.request(`/api/v2/chats/${chat.id}/sync${suffix}`, { token: null, headers });
       expect(response.status).toBe(status);
+      expect(response.headers.get("Cache-Control")).toBe("no-store");
     }
-    expect(app.sockets).toEqual([]); expect(app.reads()).toBe(0);
+    expect(app.host.sockets).toEqual([]);
+    expect(app.transports).toEqual([]);
   });
 
-  test("authenticated client updates and repeated auth violate the read-only boundary", async () => {
-    const app = fixture();
+  test("authenticated binary writes and repeated auth violate the read-only boundary", async () => {
+    const app = runtimeFixture();
+    const chat = await app.create("Read only");
     const writable = encodeSyncFrame({ type: "update", delivery: 1, update: {
       protocol: 2, generation: "fixture", sequence: 0, chat: new Uint8Array([1]),
     } });
-    for (const raw of [writable, encodeAuthFrame({ type: "auth", token: "sync-secret" })]) {
-      const socket = await authenticate(app);
+    for (const raw of [writable, encodeAuthFrame({ type: "auth", token: app.env.APP_AUTH_TOKEN! })]) {
+      const socket = await authenticate(app, chat.id);
       socket.receive(raw);
+      await until(() => !!socket.closed);
       expect(socket.closed?.code).toBe(4403);
       expect(socket.state().entries).toEqual([]);
     }
   });
 
-  test("syncs live SDK chunks and terminal state without embedding messages into metadata", async () => {
-    const app = fixture(); const socket = await authenticate(app);
-    expect(socket.state()).toMatchObject({ chat, entries: [], running: false, executionBlocked: false });
-    expect((await app.command()).status).toBe(202);
-    await until(() => app.starts() === 1);
-    await Bun.sleep(5);
-    app.transport.userEcho();
-    app.transport.emit("root");
-    app.transport.emit("foreign", { sessionId: "another-session" });
-    app.transport.emit("old child", { _meta: { "peri.sourceAgentId": "child" } });
-    app.transport.emit("child", { _meta: { peri: { sourceAgentId: "child" } } });
+  test("malformed text control frames close the connection without a result frame", async () => {
+    const app = runtimeFixture();
+    const chat = await app.create("Bad control frame");
+    const socket = await authenticate(app, chat.id);
+    socket.receive("{");
+    await until(() => !!socket.closed);
+    expect(socket.closed?.code).toBe(4403);
+    expect(socket.results()).toEqual([]);
+  });
+});
+
+describe("read-only document delivery", () => {
+  test("syncs replayed history, live chunks and terminal state through the same DTO", async () => {
+    const history = [replayChunk(chatId, "user-1", "旧问题", { role: "user", replay: true })];
+    const app = runtimeFixture({ replay: history, chunks: [], blocked: true });
+    const chat = await app.create("Delivery");
+    const socket = await authenticate(app, chat.id);
+    // 连接建立即看到重放复原的历史（冷 isolate 没有持久展示态）。
+    expect(socket.state()).toMatchObject({ running: false, executionBlocked: false });
+    // 重放的用户消息会开启一个 turn：助手条目此时为空，符合 SDK 的历史投影规则。
+    expect(socket.state().entries.map(entryText)).toEqual(["旧问题", ""]);
+    expect(await app.send(socket, promptCommand("Hello"))).toMatchObject({ ok: true });
+    const transport = await app.runTransport();
+    await transport.promptStarted;
+    transport.userEcho("Hello");
+    transport.emit("root");
+    // 外部会话与子代理事件在 prompt 夹具里自动混入，必须被丢弃。
     await until(() => entryText(socket.state().entries.at(-1)) === "root");
+    expect(socket.state().entries.map(entryText)).toEqual(["旧问题", "", "Hello", "root"]);
     const metadata = socket.replica.session.getMap("peri-cf").get("state");
-    app.transport.emit(" tail");
-    await until(() => entryText(socket.state().entries.at(-1)) === "root tail");
-    expect(socket.replica.session.getMap("peri-cf").get("state")).toEqual(metadata);
     expect(metadata).not.toHaveProperty("messages");
     expect(metadata).not.toHaveProperty("entryMetadata");
-    app.transport.finish(); await app.drain();
-    expect(socket.state().entries.map((entry) => ({ content: entryText(entry), status: entry.status }))).toEqual([
-      { content: "Hello", status: "completed" }, { content: "root tail", status: "completed" },
-    ]);
-    expect(socket.state().running).toBe(false);
-    expect(app.record()?.checkpoint.entries.map((entry) => ({ id: entry.id, content: entryText(entry), status: entry.status })) ?? [])
-      .toEqual(socket.state().entries.map((entry) => ({ id: entry.id, content: entryText(entry), status: entry.status })));
+    transport.finish();
+    await app.drain();
+    await untilState(socket, (state) => state.running === false
+      && state.entries.map((entry) => entry.status).join("|") === "completed|completed|completed|completed");
     socket.close(1000, "Done");
   });
 
   test("HTTP 首屏与 WS 实时返回同一 DTO 与同一批对象身份", async () => {
-    const app = fixture(); const socket = await authenticate(app);
-    await app.command(); await Bun.sleep(5);
-    app.transport.emit("hello");
-    app.transport.finish(); await app.drain();
-    const detail = await (await app.core.fetch(new Request(`https://app.invalid/api/v2/chats/${chat.id}`, {
-      headers: { Authorization: "Bearer sync-secret" },
-    }))).json() as SyncState;
-    // 首屏与推送都来自同一 SDK view 物化：条目身份、turn 与状态一致。
-    expect(detail.entries.map((entry) => entry.id)).toEqual(socket.state().entries.map((entry) => entry.id));
-    expect(detail.entries.map((entry) => entry.status)).toEqual(socket.state().entries.map((entry) => entry.status));
-    expect(detail.activeTurn).toEqual(socket.state().activeTurn);
-    expect(detail.readiness).toBe("ready");
+    // blocked：由测试决定这一轮的结束时机，才能观察流式与终态的同一 DTO。
+    const app = runtimeFixture({ chunks: [], blocked: true });
+    const chat = await app.create("Parity");
+    const socket = await authenticate(app, chat.id);
+    await app.send(socket, promptCommand("Hello"));
+    const transport = await app.runTransport();
+    await transport.promptStarted;
+    transport.emit("answer");
+    await until(() => entryText(socket.state().entries.at(-1)) === "answer");
+    transport.finish();
+    await app.drain();
+    const expected = await app.detail(chat.id);
+    // 连接副本按泵节奏收敛：读到与 HTTP 首屏同一份 DTO（对象身份同源）。
+    await untilState(socket, (state) => state.entries.length === expected.entries.length
+      && state.entries.map((entry) => entry.status).join("|") === expected.entries.map((entry) => entry.status).join("|"));
+    expect(socket.state().entries.map((entry) => entry.id)).toEqual(expected.entries.map((entry) => entry.id));
+    expect(socket.state().activeTurn).toEqual(expected.activeTurn);
+    expect(expected.readiness).toBe("ready");
     socket.close(1000, "Done");
   });
 
   test("disconnection leaves execution running and SDK state-vector resume repairs missed chunks", async () => {
-    const app = fixture(); const socket = await authenticate(app);
-    await app.command(); await Bun.sleep(5); app.transport.emit("first");
+    const app = runtimeFixture({ chunks: [], blocked: true });
+    const chat = await app.create("Resume");
+    const socket = await authenticate(app, chat.id);
+    await app.send(socket, promptCommand("Hello"));
+    const transport = await app.runTransport();
+    await transport.promptStarted;
+    transport.emit("first");
     await until(() => entryText(socket.state().entries.at(-1)) === "first");
     const resume = socket.replica.stateVector();
     socket.close(1000, "Offline");
-    app.transport.emit(" missed");
-    expect(app.transport.stops).toBe(0); expect(app.transport.closed).toBe(false);
-    const { socket: next } = await app.connect();
-    for (const raw of socket.frames) {
-      const frame = decodeSyncFrame(raw);
-      if (frame.type === "snapshot") next.replica.applySnapshot(frame.snapshot);
-      else next.replica.applyUpdate(frame.update);
+    transport.emit(" missed");
+    expect(transport.closed).toBe(false);
+    const { socket: next } = await app.connect(chat.id, { authenticate: false });
+    for (const frame of socket.frames) {
+      if (typeof frame === "string") continue;
+      const decoded = decodeSyncFrame(frame);
+      if (decoded.type === "snapshot") next.replica.applySnapshot(decoded.snapshot);
+      else next.replica.applyUpdate(decoded.update);
     }
-    next.receive(encodeAuthFrame({ type: "auth", token: "sync-secret", resume }));
+    // 携带状态向量的首个鉴权帧就是断线续传点。
+    next.receive(encodeAuthFrame({ type: "auth", token: app.env.APP_AUTH_TOKEN!, resume }));
     await until(() => next.frames.length > 0);
-    const frame = decodeSyncFrame(next.frames[0]!);
-    expect(frame.type === "snapshot" && frame.snapshot.mode).toBe("delta");
+    const first = decodeSyncFrame(next.frames[0] as Uint8Array);
+    expect(first.type === "snapshot" && first.snapshot.mode).toBe("delta");
     expect(entryText(next.state().entries.at(-1))).toBe("first missed");
-    expect((await app.command("cancel")).status).toBe(200); await app.drain();
-    expect(next.state().entries.at(-1)?.status).toBe("cancelled");
+    expect(await app.send(next, { type: "command", id: "cancel-1", op: "cancel" })).toMatchObject({ ok: true });
+    await app.drain();
+    await untilState(next, (state) => state.entries.at(-1)?.status === "cancelled");
     next.close(1000, "Done");
   });
 
   test("an unconfirmed host close blocks execution and reports the app error without rewriting the completed result", async () => {
-    const app = fixture({ closeFailure: true });
-    const socket = await authenticate(app); await app.command(); await Bun.sleep(5);
-    app.transport.emit("partial"); app.transport.done(); app.transport.finish(); await app.drain();
+    // 复原阶段的宿主正常关闭；只让执行轮次的宿主持有关闭失败（关闭证据必须真实）。
+    const plan: TransportPlan = { chunks: [], blocked: true };
+    const app = runtimeFixture(plan);
+    const chat = await app.create("Close evidence");
+    const socket = await authenticate(app, chat.id);
+    plan.closeFailure = new Error("close failed");
+    await app.send(socket, promptCommand("Hello"));
+    const transport = await app.runTransport();
+    await transport.promptStarted;
+    transport.emit("partial");
+    transport.done();
+    transport.finish();
+    await app.drain();
+    await untilState(socket, (state) => state.executionBlocked === true && state.running === false
+      && state.error === "close failed" && state.entries.at(-1)?.status === "completed");
     expect(socket.state()).toMatchObject({ running: false, executionBlocked: true, error: "close failed" });
-    // 设计 4.4.7：模型已完成后的清理失败不改写生成结果；失败归应用级 error 与执行阻断。
-    expect(socket.state().entries.at(-1)).toMatchObject({ status: "completed", error: null });
     expect(entryText(socket.state().entries.at(-1))).toBe("partial");
-    expect((await app.command()).status).toBe(503);
-    socket.close(1000, "Done");
-  });
-
-  test("reconstructs persisted cancelled history without starting a host and preserves UI identity", async () => {
-    const messages: SessionRecord["messages"] = [
-      { id: "user-1", role: "user", content: "old input", createdAt: chat.updatedAt, status: "completed" },
-      { id: "assistant-1", role: "assistant", content: "saved partial", createdAt: chat.updatedAt, status: "cancelled" },
-    ];
-    const app = fixture({ record: { chat, messages } }); const socket = await authenticate(app);
-    expect(socket.state().entries.map((entry) => ({ role: entry.role, content: entryText(entry), status: entry.status })))
-      .toEqual(messages.map(({ role, content, status }) => ({ role, content, status })));
-    // 旧记录转换后保留旧 id 与时间（展示身份来自 SDK Entry，值即旧行 id）。
-    expect(app.record()?.checkpoint.entries.map(({ id, createdAt }) => ({ id, createdAt })))
-      .toEqual(messages.map(({ id, createdAt }) => ({ id, createdAt })));
-    expect(app.starts()).toBe(0);
+    expect(await app.send(socket, promptCommand("Again"))).toMatchObject({ ok: false, error: { code: "blocked" } });
     socket.close(1000, "Done");
   });
 
   test("a slow socket is evicted without cancelling the background execution", async () => {
-    const app = fixture(); const socket = await authenticate(app); await app.command(); await Bun.sleep(5);
+    const app = runtimeFixture({ chunks: [], blocked: true });
+    const chat = await app.create("Slow peer");
+    const socket = await authenticate(app, chat.id);
+    await app.send(socket, promptCommand("Hello"));
+    const transport = await app.runTransport();
+    await transport.promptStarted;
     socket.autoAck = false;
     for (let chunk = 0; chunk < 20 && !socket.closed; chunk++) {
-      app.transport.emit("reply"); await Bun.sleep(20);
+      transport.emit("reply");
+      await Bun.sleep(20);
     }
     await until(() => !!socket.closed);
-    expect(socket.closed?.code).toBe(1011); expect(app.transport.stops).toBe(0);
-    app.transport.finish(); await app.drain();
-    expect(entryText(app.record()?.checkpoint.entries.at(-1))).toContain("reply");
-  });
-
-  test("closes sockets restored from the removed Base64 protocol with 1008 instead of downgrading", () => {
-    const previous = new FixtureSocket();
-    previous.deserializeAttachment = () => ({ version: 1, chatId: chat.id, phase: "ready" });
-    const corrupt = new FixtureSocket();
-    corrupt.deserializeAttachment = () => ({ version: 2, chatId: "not-a-uuid" });
-    const current = new FixtureSocket();
-    current.deserializeAttachment = () => ({ version: 2, chatId: chat.id, phase: "ready", credential: "a".repeat(64),
-      nextDelivery: 1, acknowledged: 0, authDeadline: 0, pending: [] });
-    const env: Env = { APP_AUTH_TOKEN: "sync-secret", CHAT_SESSIONS: {
-      idFromName: (name) => name, get: () => ({ fetch: async () => new Response() }),
-    } };
-    new ChatSockets(env, {
-      storage: { async get() { return undefined; }, async put() {}, async delete() { return false; }, async list() { return new Map(); } }, waitUntil() {},
-      acceptWebSocket() {}, getWebSockets: () => [previous, corrupt, current],
-    }, async () => { throw new Error("Restoring sockets must not load documents"); },
-    () => { throw new Error("Restoring sockets must not open transports"); });
-    expect(previous.closed).toEqual({ code: 1008, reason: "Sync protocol upgraded; reload required" });
-    expect(corrupt.closed).toEqual({ code: 1011, reason: "Invalid restored connection" });
-    expect(current.closed).toBeUndefined();
+    expect(socket.closed?.code).toBe(1011);
+    expect(transport.closed).toBe(false);
+    transport.finish();
+    await app.drain();
+    expect(entryText((await app.detail(chat.id)).entries.at(-1))).toContain("reply");
   });
 });
 
-async function untilTimeout(socket: FixtureSocket): Promise<void> {
-  for (let attempt = 0; attempt < 65 && !socket.closed; attempt++) await Bun.sleep(50);
-}
+describe("in-memory socket registry", () => {
+  test("closing peers retain their admission until the transport close is confirmed", async () => {
+    const chat = { id: chatId, title: "Close confirmation", updatedAt: "2026-10-06T00:00:00.000Z" };
+    const sockets = new ChatSockets("chat", { APP_AUTH_TOKEN: "token" }, {
+      async hydrate() {}, sync: () => { throw new Error("Not used"); },
+      async run() { return { type: "command_result", id: "x", ok: true }; }, inFlight: () => undefined,
+    });
+    const host = new FixtureSocketHost();
+    const upgrade = () => new Request("https://app.invalid/api/v2/chats/chat/sync", { headers: { Upgrade: "websocket" } });
+    for (let index = 0; index < 16; index++) expect(sockets.open(upgrade(), host).status).toBe(101);
+    // 关闭未确认前保留名额（否则平台会接受超过上限的连接）。
+    for (const socket of host.sockets) socket.deferClose = true;
+    sockets.closeAll(1000, "Done");
+    expect(sockets.size).toBe(16);
+    for (const socket of host.sockets.slice(1)) socket.confirmClose();
+    expect(sockets.size).toBe(1);
+    host.sockets[0]!.confirmClose();
+    expect(sockets.size).toBe(0);
+    expect(sockets.open(upgrade(), host).status).toBe(101);
+    expect(chat.id).toBe(chatId);
+  });
+
+  test("peek never hydrates or replays", () => {
+    const app = runtimeFixture({ replay: [replayChunk(chatId, "user-1", "不应出现", { role: "user", replay: true })] });
+    expect(app.registry.peek(chatId)).toBeUndefined();
+    expect(app.transports).toEqual([]);
+    const registry = new ChatRegistry();
+    const runtime = registry.runtimeFor(chatId, app.env, { startTransport: async () => { throw new Error("unused"); },
+      repository: app.repository });
+    expect(runtime).toBeInstanceOf(ChatRuntime);
+    expect(registry.peek(chatId)).toBe(runtime);
+    expect(app.transports).toEqual([]);
+  });
+});

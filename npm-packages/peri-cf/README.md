@@ -1,15 +1,16 @@
 # Peri CF
 
-React + Vite 聊天前端，Hono / Cloudflare Workers API，TypeScript 通过 SDK `TursoStorage` 直接读取 Rust Store 的真实会话列表与元数据，每个聊天由独立的 SQLite Durable Object 管理执行与展示状态。后端通过 `@peri-code/sdk/wasm` 接入 Peri Rust ACP Host，复用 SDK `SessionDocs` 的 Yjs 投影，经 `SessionDocSync` / `SessionDocReplica` 和 WebSocket 同步浏览器；模型调用与 Rust 会话存储仍由 Peri 执行。应用不依赖 D1，也没有聊天目录 DO。
+React + Vite 聊天前端，Hono / Cloudflare Workers API，TypeScript 通过 SDK `TursoStorage` 直接读取 Rust Store 的真实会话列表与元数据。**没有 Durable Object、没有数据库表、没有展示持久化**：会话执行驻留在接受连接/请求的 Worker isolate 内，展示态按需由 ACP `session/load` 的历史重放重建；跨 isolate 的持久事实只有 Turso/libSQL 的 Rust Store。后端通过 `@peri-code/sdk/wasm` 接入 Peri Rust ACP Host，复用 SDK `SessionDocs` 的 Yjs 投影，经 `SessionDocSync` / `SessionDocReplica` 和 WebSocket 同步浏览器；模型调用与 Rust 会话存储仍由 Peri 执行。
 
-这是待部署验收的单可信用户示例，不是已完成生产验证的服务。测试中的模拟执行器不证明真实模型、远端 Turso 或 Cloudflare 上线可用。
+这是待部署验收的单可信用户示例，不是已完成生产验证的服务。本地验证是 workerd/WASM/测试范围；平台 CPU、长时执行保活、远程 Turso 与真实浏览器均未验收。测试中的模拟执行器不证明真实模型、远端 Turso 或 Cloudflare 上线可用。
 
 ## 数据与信任边界
 
 - `TursoChatRepository`：通过应用本地 `worker/sdk/index.ts` facade 引用 SDK 现有 `TursoStorage`，查询实际 `threads`。列表读取 `/workspace` 下的会话，ID、标题与更新时间来自 Rust Store，不另建目录索引或双写元数据。
-- `CHAT_SESSIONS`（Durable Objects）：按实际 ACP Session UUID 隔离消息展示与执行状态；`Chat.id` 就是 ACP Session ID，不另设 `periSessionId`。同一聊天不允许并发生成。首次读取/发送从 repository 获取会话元数据，执行只加载该实际 ID，不在聊天 DO 内创建另一个 Rust 会话；GET 每次刷新权威元数据，已有聊天的取消不依赖数据库读取。
-- 执行由 Rust Host 拥有：当前 ACP 没有执行准入协议，也没有精确停止/控制代次，本应用不再实现 ticket/admission、registry/ledger 或 typed Stop。应用负责的是宿主生命周期（启动、关闭确认、isolate 容量与实例观测）、`session/cancel` 取消通知与运行状态持久化；拒绝返回许可请求（`session/request_permission` 一律以 cancelled 应答），不把客户端反向能力当作执行通道。
-- `PERI_STORAGE_URL` / `PERI_STORAGE_TOKEN`：外部 Turso/libSQL，保存 Rust Store 的会话、消息及执行数据。TS 元数据查询与 Rust Host 使用同一 Store；聊天 DO 的展示消息和执行账本不替代 Rust Store。
+- 会话执行驻留在接受连接/请求的 isolate：`Chat.id` 就是 ACP Session ID，不另设 `periSessionId`。同一聊天不允许并发生成；同一会话在不同 isolate 可能各有一份内存态，客户端以自己的连接为准。首次读取/发送从 repository 获取会话元数据，执行只加载该实际 ID，不在本地创建另一个 Rust 会话；`GET /api/v2/chats/:id` 每次刷新权威元数据并触发历史重放复原。
+- 命令通道：prompt、cancel、interaction 回答与 payload 全文读取**全部走 `/api/v2/chats/:id/sync` 的 WS 文本控制帧**（HTTP 没有会话亲和性）；二进制帧仍是 SDK 文档同步帧。命令结果只在服务端明确答否时确定失败；断线、超时、未同步视为未确认，必须阻断重跑、不自动重放。
+- 执行由 Rust Host 拥有：当前 ACP 没有执行准入协议，也没有精确停止/控制代次，本应用不再实现 ticket/admission、registry/ledger 或 typed Stop。应用负责宿主生命周期（启动、关闭确认、isolate 容量与实例观测）与 `session/cancel` 取消通知。反向请求（`session/request_permission` / `elicitation/create`）经 SDK 投影进入 Yjs，回答经 WS 控制帧回灌；未接线的反向方法保持默认拒绝。
+- `PERI_STORAGE_URL` / `PERI_STORAGE_TOKEN`：外部 Turso/libSQL，保存 Rust Store 的会话、消息及执行数据，是唯一跨 isolate 持久权威。TS 元数据查询与 Rust Host 使用同一 Store；isolate 内展示态不替代 Rust Store，也不被持久化。
 - `PERI_MACHINE_ID`：必须显式配置的稳定部署 UUID，用于 Rust Store 的机器身份；缺失或格式无效时拒绝启动，不再使用硬编码 fixture 身份。
 - `MODEL_BASE_URL` / `MODEL_API_KEY` / `MODEL_ID`：服务端模型配置，不能使用 `VITE_*` 暴露密钥。
 - 所有 `/api/*` 请求必须携带 `Authorization: Bearer <APP_AUTH_TOKEN>`。未配置 token 时拒绝访问；静态页面不等于受保护的 API。
@@ -18,7 +19,7 @@ React + Vite 聊天前端，Hono / Cloudflare Workers API，TypeScript 通过 SD
 
 ## Agent 实例资源查询
 
-`GET /api/chats/:id/resources` 使用相同的 Bearer 鉴权，响应禁止缓存。`sessionId` 是实际 ACP 会话身份；`instance` 是此 DO 当前或最近一次启动的 WASM Host，不是聊天列表或整个 Worker 的资源占用。读取已有 DO 会话不刷新 Turso，也不启动新的 Host。未运行过或 DO 重启后，`instance` 为 `null`，不伪造上一实例仍然存活。
+`GET /api/v2/chats/:id/resources` 使用相同的 Bearer 鉴权，响应禁止缓存。`sessionId` 是实际 ACP 会话身份；`instance` 是本 isolate 当前或最近一次启动的 WASM Host，不是聊天列表或整个 Worker 的资源占用。该端点是 peek：不触发复原、不启动新的 Host；本 isolate 从未运行过该会话（或 isolate 已被回收）时，`instance` 为 `null`，不伪造上一实例仍然存活。
 
 - `instance.instanceId` 区分每次 Host 启动；`generationId` 在 transport 就绪后来自实际 SDK 代次。
 - `phase` 区分加载、启动、就绪、关闭中、已关闭、启动失败与关闭未确认；`running` 表示聊天任务状态，`executionBlocked` 表示停止未确认导致的准入阻塞。
@@ -33,9 +34,9 @@ React + Vite 聊天前端，Hono / Cloudflare Workers API，TypeScript 通过 SD
 
 `GET /api/instances` 用同一 Bearer 鉴权按会话汇总上述观测，供前端“实例监控”页面（顶栏 Activity 按钮，路由 `#instances`）轮询展示实例身份、阶段、启动耗时、线性内存与挂载会话。
 
-- 聚合只读取各聊天 DO 的内存采样器：从 Store 取会话列表后按固定并发上限逐会话请求 `GET /api/chats/:id/resources`，不新增存储、不写库、不跨会话合并身份。
+- 聚合只 peek 本 isolate 的内存采样器：从 Store 取会话列表后按固定并发上限逐会话请求 `GET /api/v2/chats/:id/resources`，不新增存储、不写库、不跨会话合并身份、不触发复原或 Host 启动。
 - 单个会话读取失败（宿主不可达或响应不符合 schema）降级为该项 `failure`，不影响其他会话，也不把失败伪装成“没有实例”。“无观测”与“读取失败”在数据上区分。
-- 观测仍然只存在于各聊天 DO 的内存中：DO 被回收后该会话不再有实例观测，页面不伪造存活实例，也没有历史记录。轮询会唤醒被观测的聊天 DO，这是页面刷新的已知代价；页面在后台标签页停止轮询。
+- 观测只存在于 isolate 内存：该 isolate 没有会话内存态（含 isolate 被回收后）就不再显示实例观测，页面不伪造存活实例，也没有历史记录。
 - 页面只做只读展示，不提供启动、停止或清理实例的操作；会话操作仍走聊天本身。
 
 ## 本地启动
@@ -53,8 +54,8 @@ React + Vite 聊天前端，Hono / Cloudflare Workers API，TypeScript 通过 SD
 | 保留位置 | 为什么是宿主适配而不是自建底层实现 | 移除条件 |
 | --- | --- | --- |
 | `worker/wasm/host.ts`、`config.ts`、`budget.ts`、`resources.ts`、`generated/` | CF profile/feature 与静态 `WebAssembly.Module` 注入、isolate 容量预留、导出线性内存采样只对 Cloudflare 有意义；它们通过 SDK 的 `moduleFactory` / `ports` / `onLifecycle` 注入，不自行排序启动或关闭 | SDK 提供 CF 部署 profile 与容量/观测适配时 |
-| `worker/chat/ws-delivery.ts` | 持久化 socket attachment 的形状与唤醒恢复规则属于 DO Hibernation；帧与交付信用已在 SDK | DO Hibernation 由 SDK 直接支持时 |
-| `worker/api/`、`worker/index.ts`、`web/` | Hono/DO 路由、浏览器 Fetch 客户端与 token 存储是本应用产品边界，SDK 不定义应用 HTTP 面 | 不适用 |
+| `worker/chat/sync.ts`、`ws-delivery.ts` | WS 升级、鉴权、控制帧与投递信用预算是连接层职责：连接状态只在 isolate 内存，保活经升级请求的 `waitUntil`（尽力而为）；帧与交付信用已在 SDK | SDK 直接提供 Workers 无状态 socket 生命周期时 |
+| `worker/api/`、`worker/index.ts`、`web/` | Hono HTTP 面、WS 升级与浏览器命令通道是本应用产品边界，SDK 不定义应用 HTTP/WS 面 | 不适用 |
 | `scripts/`、`vite.config.ts` | CF 产物 provenance、Workers glue 注入、Wrangler 与本地 smoke/E2E 属构建与验证工具，不是 Peri 运行时语义 | 不适用 |
 
 尚未由 SDK 提供、需要跨包协作的能力（详见交付报告「所需 SDK 能力清单」）：`/portable`、`/wasm-host` 入口与 `startPeriWasmHost`、同步 wire/交付、`initializeAcpClient` 的生命周期语义；`SESSION_LIST_SQL` / `SESSION_BY_ID_SQL` 等 Store 常量未公开，`tests/storage-turso-workers.test.ts` 仍需引用 SDK 源码；`dist/wasm-host.js` 以 bare `dns` / `net` 说明符输出，而 workerd 只保证 `node:` 前缀，本包在测试 fixture 中把两者标记为 external，正式 Worker 构建需要 SDK 保留前缀或声明 external。
@@ -65,17 +66,17 @@ React + Vite 聊天前端，Hono / Cloudflare Workers API，TypeScript 通过 SD
 
 - `shared/`：Zod schema（含 SDK 同步帧的类型边界）与 Yjs 展示边界转换；不重复实现 SDK 投影、序列号、状态向量、帧编解码或交付信用规则。
 - `worker/api/`：Hono app、HTTP 边界与可注入 repository 的路由入口。
-- `worker/chat/`：会话查询、ACP 创建、聊天 DO 生命周期、启动、取消与聊天路由。
-- `worker/instances/`：实例监控页的只读聚合，按并发上限扇出读取各聊天 DO 的资源观测。
+- `worker/chat/`：会话查询、ACP 创建、isolate 内 runtime 注册表与会话生命周期、启动、取消、重放复原与聊天路由。
+- `worker/instances/`：实例监控页的只读聚合，按并发上限 peek 本 isolate 的资源观测。
 - `worker/wasm/`：SDK 宿主的 Cloudflare 接线（配置、容量、实例观测与已构建产物）；`worker/sdk/` 是唯一 SDK 接线点，`worker/types.ts` 保存应用契约。
-- `web/api/`：带 Bearer 鉴权的 HTTP 命令/查询与只读 WebSocket 同步客户端；`web/chat/` 管理聊天状态与消息展示，`web/settings/` 管理配置界面，`web/instances/` 是只读实例监控页。
+- `web/api/`：带 Bearer 鉴权的 HTTP 只读查询与 WS 同步/命令客户端（`ChatCommandPort`）；`web/chat/` 管理聊天状态与消息展示，`web/settings/` 管理配置界面，`web/instances/` 是只读实例监控页。
 
 ## 库与自有逻辑
 
 - Hono 的 `bearerAuth`、`bodyLimit`、`validator` 与 `HTTPException` 替代手写鉴权、请求体读取和 HTTP 错误类。JSON 上限为实际流入的 64 KiB；边界删除 `Content-Length` 后按流计数，不信任伪造的长度。Zod 校验标题、消息与 UUID，再把类型化输入交给领域层。
 - Zod 是共享 DTO 的唯一 schema 来源；浏览器校验列表、历史和同步帧，不以 TypeScript 静态类型代替外部输入检查。
 - 现有 SDK `SessionDocs` 负责 ACP → Yjs 投影，`SessionDocSync` 负责批处理、generation、sequence、状态向量补齐和慢订阅者预算，`SessionDocReplica` 校验并应用浏览器副本。使用 SDK 已有的只读复制协议，不引入可写回的通用协作文档服务，也不维护另一套文本 delta 聚合器。`lib0/buffer` 将 SDK 二进制更新转换为 Base64，WebSocket 仅承载这些帧；原 SSE 客户端和 `eventsource-parser` 已移除。
-- 展示文本直接读取 SDK view；session 文档的 `peri-cf` map 只保存聊天元数据、执行标志和展示 ID/时间/错误，不在每个增量重复保存完整消息数组。客户端不能写回 Yjs；生成和停止仍由鉴权 HTTP 命令进入服务端控制边界。
+- 展示文本直接读取 SDK view；Yjs 文档只保存 SDK 投影结果，应用运行元数据（chat/running/executionBlocked/error）只在 isolate 内存，不写回 Yjs。客户端不能写回 Yjs；生成、停止与回答全部经 WS 控制帧进入服务端命令边界。
 - TanStack React Query 管理只读列表与历史缓存、加载及查询取消；客户端按认证工作区隔离，token 不进入 query key，切换 token 会卸载旧工作区并取消、清空旧缓存。禁用自动重试和自动重取；新建后显式刷新，历史导航强制查询权威结果。
 - 生成与取消保留显式领域状态机：`running` / `executionBlocked` 由服务端判定，取消必须等到宿主真实关闭；查询重试与缓存不改变执行状态。Markdown 展示通过 React `lazy` / `Suspense` 按需加载，避免增加首屏负担。
 
@@ -102,9 +103,9 @@ bun run prepare:wasm
 bun run dev
 ```
 
-打开 Vite 输出的本地地址，在前端输入 app token。本地 DO 由 Wrangler/workerd 模拟，无需创建 D1 数据库或运行数据库迁移脚本；上面的 Turso 和模型配置仍会访问外部服务并可能产生费用，不会自动启动本地模型或 Turso。不要把 `.dev.vars`、Turso token 或模型密钥提交到仓库。`dev` / `build` 脚本会再次准备 WASM，显式准备一步有助于提前定位缺失产物。
+打开 Vite 输出的本地地址，在前端输入 app token。本地运行不创建任何 D1 数据库、DO 类或表，也没有迁移脚本；上面的 Turso 和模型配置仍会访问外部服务并可能产生费用，不会自动启动本地模型或 Turso。不要把 `.dev.vars`、Turso token 或模型密钥提交到仓库。`dev` / `build` 脚本会再次准备 WASM，显式准备一步有助于提前定位缺失产物。
 
-WASM 的平台适配留在本应用：准备阶段为 Emscripten glue 注入静态 Node TCP 模块、受支持的 DNS record resolver，并跳过 Workers 不支持的本机 socket bind；即时调度使用 timer task，避免微任务循环阻塞外部 I/O。每个 Host 使用独立 WASM 实例，不跨 HTTP/DO 请求共享带 I/O 的运行时。SDK 原始产物不被改写，glue 形状变更会让准备步骤明确失败。
+WASM 的平台适配留在本应用：准备阶段为 Emscripten glue 注入静态 Node TCP 模块、受支持的 DNS record resolver，并跳过 Workers 不支持的本机 socket bind；即时调度使用 timer task，避免微任务循环阻塞外部 I/O。每个 Host 使用独立 WASM 实例，不跨请求或连接共享带 I/O 的运行时，每个 isolate 只保留一份 64 MB WASM 预算（`shared/runtime-limits.ts`）。SDK 原始产物不被改写，glue 形状变更会让准备步骤明确失败。
 
 `bun run dev` 构建应用，再由 Wrangler 在本地 workerd 启动编译后的 Worker，默认地址为 `http://127.0.0.1:8791`；已有构建可直接 `bun run preview`。启动时仅在服务端用本机 DNS 解析配置的存储与模型域名，将临时 `PERI_DNS_OVERRIDES` 写入忽略提交的构建目录 `.dev.vars`。不会改动源 `.dev.vars` 或生产配置，部署时须重新执行干净构建，生产环境使用 Workers DNS resolver；本地映射随开发服务重启刷新。
 
@@ -118,31 +119,31 @@ WASM 的平台适配留在本应用：准备阶段为 Emscripten glue 注入静�
 
 ## API
 
-HTTP 查询和命令均需 Bearer token。WebSocket 在升级后通过第一帧鉴权，鉴权前不发送文档；令牌不放在 URL 中。
+HTTP 面全部需要 Bearer token；HTTP 只承载无状态查询、创建、复原读取、peek 观测与 WS 升级。WebSocket 在升级后通过第一帧鉴权，鉴权前不发送文档；令牌不放在 URL 中。
 
 | 方法 | 路径 | 请求 / 响应 |
 | --- | --- | --- |
-| GET | `/api/chats` | JSON `{ chats: Chat[] }` |
-| POST | `/api/chats` | JSON `{ "title": "可选标题" }`（也可 `{}`），201 返回裸 `Chat` |
-| GET | `/api/chats/:id` | JSON `{ chat, messages }` |
-| POST | `/api/chats/:id/messages` | JSON `{ "content": "你好" }`，202 接受执行；不表示执行完成 |
-| POST | `/api/chats/:id/cancel` | 请求取消当前生成，JSON `{ cancelled: boolean }` |
-| GET | `/api/chats/:id/resources` | JSON `AgentResources`，见 Agent 实例资源查询 |
+| GET | `/api/v2/chats` | JSON `{ chats: Chat[] }`（Turso） |
+| POST | `/api/v2/chats` | JSON `{ "title": "可选标题" }`（也可 `{}`），201 返回裸 `Chat` |
+| GET | `/api/v2/chats/:id` | SyncState JSON；触发按需重放复原后返回与 WS 同一 DTO |
+| GET | `/api/v2/chats/:id/resources` | JSON `AgentResources`，peek 语义，见 Agent 实例资源查询 |
 | GET | `/api/instances` | JSON `{ generatedAt, instances: ChatInstanceObservation[] }`，见实例监控页面 |
-| GET / WS | `/api/chats/:id/sync` | 首帧鉴权后接收 SDK Yjs snapshot / update |
+| GET / WS | `/api/v2/chats/:id/sync` | 首帧鉴权后接收 SDK Yjs snapshot / update；文本帧承载控制帧命令与回执 |
 
-`Chat` 为 `{ id, title, updatedAt }`。消息为 `{ id, role, content, createdAt, status, error? }`，`status` 为 `running`、`completed`、`cancelled` 或 `error`。聊天 ID 使用 UUID；忙碌返回 409，未鉴权返回 401，未配置 app token 返回 503。创建、发送需要 `Content-Type: application/json`；无效内容返回 400。
+会话命令不再有 HTTP 端点：`POST /api/v2/chats/:id/messages`、`POST /api/v2/chats/:id/cancel`、`POST /api/v2/chats/:id/interactions/:interactionId`、`GET /api/v2/chats/:id/payloads/:refId` 与旧 `/api/chats/...` 路径统一返回 **426** `{ error, upgrade: true }`（提示客户端刷新）。命令经 WS 文本帧下发，例如 `{ "type": "command", "id": "<≤64>", "op": "prompt", "content": "你好" }`；服务端以 `{ "type": "command_result", "id", "ok", ... }` 回执（`payload` 命令带 `{id,bytes,json}`）。
 
-列表与创建不访问聊天 DO。创建通过独立的 WASM Host 执行 ACP `initialize` → `session/new` → `session/rename`，关闭 Host 后读取 Turso 中已落盘的摘要，再返回真实 Session ID；此时无需发送第一条消息，列表即可看到新聊天。创建不发 prompt、不启动 execution dispatcher；创建失败、Store 中不可见或关闭未确认不算成功。查询失败也不会当成空列表掩盖。
+`Chat` 为 `{ id, title, updatedAt }`；`GET /api/v2/chats/:id` 返回的 SyncState 带 `entries/toolCalls/turns/tasks/plans/interactions/inputQueue` 等展示对象（由 SDK view 物化）。聊天 ID 使用 UUID；未鉴权返回 401，未配置 app token 返回 503；创建需要 `Content-Type: application/json`，无效内容返回 400。
 
-WS 首帧为 `{ type: "auth", token, resume? }`，`resume` 是 SDK 副本的实际状态向量。服务端回复 `{ type: "snapshot", snapshot }`，后续推送 `{ type: "update", update }`；文档字节在 wire 上为 Base64，协议版本仍为 SDK 的 2。断线后同代 producer 可补 delta；DO 重建的不同 generation 必须替换快照，不能合并旧副本。序号缺口交由 SDK 检测，重新订阅修复，不重发生成命令。
+列表与创建不访问会话运行时。创建通过独立的 WASM Host 执行 ACP `initialize` → `session/new` → `session/rename`，关闭 Host 后读取 Turso 中已落盘的摘要，再返回真实 Session ID；此时无需发送第一条消息，列表即可看到新聊天。创建不发 prompt；创建失败、Store 中不可见或关闭未确认不算成功。查询失败也不会当成空列表掩盖。
 
-WS 是只读展示通道，不等于任务所有权：关闭页面或 socket 不自动取消正在执行的任务；重新连接读取当前状态。只有取消命令和服务端生命周期规则能停止执行。鉴权/只读违规与会话不存在不自动重连；临时断线重连只恢复订阅。生成完成、失败、部分回复取消均通过同步的 SDK view 与执行标志展示，202 或 socket 关闭均不是停止证明。
+WS 首帧为 `{ type: "auth", token, resume? }`，`resume` 是 SDK 副本的实际状态向量。服务端回复 `{ type: "snapshot", snapshot }`，后续推送 `{ type: "update", update }`；文档字节在 wire 上为 Base64，协议版本仍为 SDK 的 2。断线后同代 producer 可补 delta；重放重建的不同 generation 必须替换快照，不能合并旧副本。序号缺口交由 SDK 检测，重新订阅修复，不重放未确认命令。
+
+WS 是展示通道兼命令通道，但不是任务所有权：关闭页面或 socket 不自动取消正在执行的任务；重新连接读取当前状态（必要时触发重放复原）。只有取消命令和服务端生命周期规则能停止执行。鉴权/只读违规与会话不存在不自动重连；临时断线重连只恢复订阅。生成完成、失败、部分回复取消均通过同步的 SDK view 与运行标志展示；`command_result` 明确答否之外，socket 关闭、超时或未同步都不是停止证明。
 
 ## 远端部署
 
-1. 登录 Cloudflare（`bunx wrangler login`），核对部署账号与环境；无需创建 D1 数据库。
-2. 核对 `CHAT_SESSIONS` binding、`ChatSession` class 名和 SQLite DO migration。首次部署应用配置中的 `new_sqlite_classes`；已部署项目后续 DO 类变更须按实际部署历史追加 migration，不可重写已有 tag。这是 DO 类部署迁移，不是单独执行的 SQL 迁移脚本。
+1. 登录 Cloudflare（`bunx wrangler login`），核对部署账号与环境。
+2. **无需也不得配置 Durable Object 绑定或 migrations**：`wrangler.jsonc` 只有 Worker、静态资源与 vars；转向后已删除 `durable_objects` 与 `migrations`，也不创建 D1/表。若在既有账号上曾部署过 DO 版本，按 Cloudflare 实际部署历史处理（本轮不提供迁移路径）。
 3. 通过 Wrangler secrets 设置凭证，勿放入 `vars` 或前端构建：
 
 ```bash
@@ -159,9 +160,9 @@ bunx wrangler secret put MODEL_API_KEY
 bun run deploy
 ```
 
-DO 部署迁移不会迁移 Turso Rust Store；聊天 DO 的执行账本/展示状态与 Rust Store 没有跨存储原子事务，元数据不再单独写入索引。部署也不会自动证明模型凭证、网络、CPU/内存预算或长时间 WebSocket 正常。上线前实际验证鉴权、创建/列表、连续聊天、取消、失败状态、断线重连及 DO 重启后的 Session 加载。运行诊断保留原始错误及 cause，不主动输出环境凭据；部署端须控制诊断接口及日志访问权限。
+本轮没有任何部署端验收：免费档 10 ms/请求 CPU 与 WASM 冷启动（本机实测 10–66.6 ms 量级）很可能导致 1102；长时执行的 isolate 保活没有平台保证；远程 Turso 地址与令牌尚未提供。部署也不会自动证明模型凭证、网络、CPU/内存预算或长时间 WebSocket 正常。上线前必须实际验证鉴权、创建/列表、连续聊天、取消、失败状态、断线重连、重放复原与 isolate 回收后的表现。运行诊断保留原始错误及 cause，不主动输出环境凭据；部署端须控制诊断接口及日志访问权限。
 
-WebSocket 使用 DO Hibernation API、持久 socket attachment 和事件入口恢复鉴权及只读订阅。浏览器在应用 SDK 文档帧后发送 delivery ACK；服务端按未确认字节、帧数和截止时间关闭慢客户端，不依赖 workerd 不提供的 `bufferedAmount`。运行中的 Host、网络及收尾仍会阻止休眠，不承诺生成过程无驻留成本，也不把休眠恢复等同于计算接管。
+WebSocket 不使用 DO Hibernation 或 socket attachment：连接状态只在 isolate 内存，随 isolate 回收消失；保活经升级请求的 `ExecutionContext.waitUntil`，属尽力而为，不承诺生成过程无驻留成本，也不把重放复原等同于计算接管。浏览器在应用 SDK 文档帧后发送 delivery ACK；服务端按未确认字节、帧数和截止时间关闭慢客户端，不依赖 workerd 不提供的 `bufferedAmount`。
 
 ## WASM 限制与验证范围
 
@@ -182,17 +183,17 @@ node scripts/test-cloudflare-fetch.mjs
 
 默认 `cf-wasm-size` 与可选 `cf-wasm-speed` 构建 profile 可分别通过 `bun run build:wasm --profile <name>` 构建，再用 `bun run wasm:profiles` 对比实际产物体积和构建耗时；该报告不声称 runtime CPU 或吞吐收益。流式投影只在结构变化时刷新元数据，在持久化/读取边界生成完整历史；广播帧复用编码，不为每个客户端反复解码重编码。
 
-DO 的持久化不等于在途计算恢复：实例重启或断线不能承诺自动继续模型请求、无损重放或跨实例执行接管。Workers 的 WASM bundle、CPU、内存和连接限制需在实际部署套餐下验收。
+无持久化不等于在途计算恢复：isolate 回收或断线不能承诺自动继续模型请求、无损重放或跨实例执行接管；展示态在重连后由 ACP 重放复原，执行状态不随之恢复。Workers 的 WASM bundle、CPU、内存和连接限制需在实际部署套餐下验收。
 
-本应用不实现执行准入或停止账本：执行归属 Rust Host，客户端只负责宿主生命周期与取消通知。应用不是通用 `ManagedAgents` / `Agent` SDK 宿主，也不提供 child runtime 或子 Agent 接管能力。取消以会话级 `session/cancel` 通知发出；只有 prompt 结算为 cancelled 且 ACP Host 关闭被确认时才算停止成立，未确认的关闭会阻塞该聊天的后续运行。
+本应用不实现执行准入或停止账本：执行归属 Rust Host，客户端只负责宿主生命周期与取消通知。应用不是通用 `ManagedAgents` / `Agent` SDK 宿主，也不提供 child runtime 或子 Agent 接管能力。取消以会话级 `session/cancel` 通知发出；只有 prompt 结算为 cancelled 且 ACP Host 关闭被确认时才算停止成立，未确认的关闭会在本 isolate 内阻断该会话的后续运行（isolate 回收后不保留该阻断状态）。
 
 运行中取消向宿主发送 `session/cancel`（会话级通知，不再携带 `{ turnId, attemptId }` 目标或控制代次）；取消成功以 prompt 以 `cancelled` 结算并且 ACP Host 关闭经确认为准。启动中尚未发送 prompt 时只跳过本轮，不发送任何通知。取消后的下一次显式发送是新的回合，没有 own-stop 恢复握手。
 
-取消接口等待执行收尾、ACP Host 关闭与消息落盘；成功不是仅提交 Stop。若 Host 关闭未确认，聊天会持久化为禁止继续执行，重新加载 DO 也不会绕过该状态；历史仍可读取。不要通过删除状态或重启强行认领未知是否停止的执行。
+取消命令等待执行收尾与 ACP Host 关闭；成功不是仅提交 Stop。若 Host 关闭未确认，该 isolate 内该会话被标记为禁止继续执行，重连也不会绕过该状态；历史仍可读取，isolate 回收后该标记随内存消失。不要通过重启或删除状态强行认领未知是否停止的执行。
 
-本应用自己的 Stop 所产生的 pause marker（lifecycle、control generation、稳定 resume command ID）持久化在聊天 DO 中；仅在用户明确发送下一条消息时，核对该 pause 的匹配身份并提交稳定 Resume 命令，再发送 prompt。读历史或重建 DO 不自动 Resume；外部 pause、已改变的控制代际或恢复失败不得当作本应用的暂停自行解锁。
+本应用没有 pause marker、控制代次或 Resume 命令：取消后的下一次显式发送就是新回合；读历史、重连或 isolate 重建都不恢复旧执行，也不会自动继续被取消的回合。
 
-本示例不提供无限历史：新消息准入时，已有历史加本轮用户消息/助手占位记录的序列化大小不得超过 1 MiB，超限返回 413，应创建新聊天；单轮助手输出按 JSON 编码后文本计算限制为 512 KiB，超限取消执行并保留已接受的部分回复，以 `error` 终结。最终记录可能大于准入时的 1 MiB，不应把该值理解为数据库总容量。
+展示历史没有应用侧容量收纳：不持久化即没有"会话记录上限"，历史长度由 Turso Rust Store 与本 isolate 内存决定。单轮助手输出按 JSON 编码后文本计算限制为 512 KiB（`MAX_REPLY_BYTES`），超限取消执行并保留已接受的部分回复、以 `error` 终结。
 
 ```bash
 bun run test
@@ -202,22 +203,22 @@ bun run build
 
 测试入口只在本包执行，不属于根 Cargo workspace 测试：
 
-- `tests/backend.test.ts`：真实 `fetchApi` / `ChatSessionCore`，注入线程 repository、模拟 ACP transport（`session/cancel` 通知）和复制隔离的内存 DO storage；另有浏览器 `ChatApi` 经 Fetch 的 Request/Response 接入真实路由的闭环，无需监听本地端口。覆盖鉴权、创建/列表不访问 DO、GET 权威元数据刷新、load-only 实际会话身份、查询失败、数据库不可用时取消，以及 202、busy、部分回复、取消后再次显式发送与原始错误因果链保留。
-- `tests/web-api.test.ts`：直接执行前端 HTTP API，验证 Bearer、响应 schema、会话身份与 `202 {accepted:true}`；接受请求不等于生成完成，命令不重试。
+- `tests/backend.test.ts`：真实 `fetchApi` 与会话 runtime，注入线程 repository、模拟 ACP transport（`session/cancel` 通知）和隔离的内存连接 seam；另有浏览器 `ChatApi` 经 Fetch 的 Request/Response 接入真实路由的闭环，无需监听本地端口。覆盖鉴权、创建/列表不访问运行时、GET 权威元数据刷新与复原、load-only 实际会话身份、查询失败、数据库不可用时取消，以及命令回执、busy、部分回复、取消后再次显式发送与原始错误因果链保留。
+- `tests/web-api.test.ts`：直接执行前端 HTTP API 与 WS 命令端口，验证 Bearer、响应 schema、会话身份与命令回执；命令被接受不等于生成完成，未确认命令不重试。
 - `tests/sync-wire.test.ts`：真实 SDK producer/replica/view 经应用 wire 适配复制，覆盖 Unicode、状态向量 delta、序号缺口、新 generation 替换、应用收尾失败与帧大小/格式预算。
-- `tests/server-sync.test.ts`：真实 DO 核心与 SDK 同步，注入 socket seam，覆盖首帧鉴权前无文档/数据库访问、超时、连接上限、只读违规、背压、断线不取消、补齐与重建历史。
+- `tests/server-sync.test.ts`：真实会话 runtime 与 SDK 同步，注入 socket seam，覆盖首帧鉴权前无文档/数据库访问、超时、连接上限、只读违规、背压、断线不取消、补齐与重放重建历史。
 - `tests/client-sync.test.ts`：真实 SDK 副本与可控 WebSocket，验证首帧鉴权、双文档 observer 重绑定、增量修复、身份隔离、限次重连、就绪超时，以及导航/发送/停止生命周期不重放命令。
 - `tests/http-middleware.test.ts`：验证 Hono JSON 校验、UTF-8 字节限制，以及伪造或缺失 Content-Length 不能绕过请求体上限。
 - `tests/chat-queries.test.ts`：验证私有 QueryClient、认证缓存隔离、读请求取消、强制历史刷新和禁用自动重试；不代替实际 UI 生命周期验收。
 - `tests/repository.test.ts`：直接执行 `TursoChatRepository`，注入 SDK storage 的只读 seam 与 ACP 创建函数，验证工作区范围、实际会话 ID、存储顺序、标题与更新时间、重建后刷新、创建后可见性及错误传播；不是源文件文本断言。
-- `tests/session-creation.test.ts`：执行真实创建服务，注入 ACP transport，验证初始化协议、UUID、rename 回执、失败关闭、关闭未确认和反向能力拒绝；创建不发 prompt、不访问聊天 DO。
+- `tests/session-creation.test.ts`：执行真实创建服务，注入 ACP transport，验证初始化协议、UUID、rename 回执、失败关闭、关闭未确认和反向能力拒绝；创建不发 prompt、不访问会话运行时。
 - `tests/wasm-config.test.ts`：执行配置构建函数，验证外部 Turso、模型配置、必需变量和关闭工具能力。
 
 - `tests/storage-turso-workers.test.ts`：从 SDK 迁入，加载 facade bundle，在没有 Bun/process 全局的 Node 子进程里以显式 token 经原生 Fetch 查询本地 HTTP fixture，验证 canonical SQL、元数据、错误传播与连接关闭；同时断言 SDK 只接受显式 `url`/`authToken`（不再有 `deployment()`、`engine`、`tokenEnv` 或环境回退），应用边界在缺少 Store 配置时继续拒绝查询。
 
 已删除的 `tests/execution.test.ts` 与 `tests/execution-admission-core.test.ts` 测的是 `peri/execution/admit|entered|settle` 与 `session/control*` 协议：这些协议已从当前 ACP Host 移除（`.rs` 与 SDK 均无引用），应用侧 adapter 随之删除；SDK 的准入核心仍由 SDK 自身测试覆盖。
 
-多数测试不启动真实 WASM 或 Cloudflare DO，也不调用远端模型或 Turso；原生 Fetch 测试会启动本地 HTTP fixture。`tests/real-workerd-ws.test.ts` 单独运行真实 workerd 和 Hibernation socket，但使用模拟 ACP transport，不证明真实 WASM。内存 DO fixture 不是平台持久性证明。真实运行时可参考 [SDK Workers 示例](../@peri-sdk/examples/workers/worker.js)，但该示例的结果不能代替本应用上线验收。覆盖范围与实际执行结果以 `tests/` 和命令输出为准；尚未验证真实模型上线，也不宣称生产完成。
+多数测试不启动真实 WASM，也不调用远端模型或 Turso；原生 Fetch 测试会启动本地 HTTP fixture。`tests/real-workerd-ws.test.ts` 单独运行真实 workerd 下的 WS 连接与命令帧，但使用模拟 ACP transport，不证明真实 WASM。内存连接与注册表 fixture 不是平台行为证明。真实运行时可参考 [SDK Workers 示例](../@peri-sdk/examples/workers/worker.js)，但该示例的结果不能代替本应用上线验收。覆盖范围与实际执行结果以 `tests/` 和命令输出为准；尚未验证真实模型上线，也不宣称生产完成。
 
 ## 可重复本地 Runtime Smoke
 
@@ -231,12 +232,14 @@ bun run smoke:local
 SQLD_BIN=/absolute/path/to/sqld bun run smoke:local
 ```
 
-脚本使用临时本地数据库与测试凭证，检查新 Store 的空列表、创建后首条 prompt 之前的会话可见性，以及直接 SQL 修改标题后列表和已初始化聊天 DO 的 GET 元数据刷新。通过真实 WebSocket 首帧鉴权，应用 SDK 副本并读取 view；消息命令检查 HTTP 202，生成结果从 Yjs 同步获取，不用轮询代替 WS 验收。执行两轮真实 WASM/ACP 调用，停止和重新启动 Wrangler，检查聊天 DO 历史与 ACP 加载后的模型上下文恢复。随后启动第三轮，收到部分回复后请求 exact-target typed Stop，检查取消成功及部分回复持久化；显式发送第四轮，核对 own-stop Resume 后正常完成，最后清理子进程和临时资源。模型是 fixture，不调用真实模型服务；sqld 是本机 Rust Store，不是托管 Turso。此 smoke 不验证远端部署、真实模型质量或生产网络故障。
+脚本使用临时本地数据库与测试凭证，检查新 Store 的空列表、创建后首条 prompt 之前的会话可见性，以及直接 SQL 修改标题后列表与详情 GET 的元数据刷新。通过真实 WebSocket 首帧鉴权应用 SDK 副本并读取 view；会话命令经 WS 文本控制帧下发与回执，生成结果从 Yjs 同步获取，不用轮询代替 WS 验收。执行多轮真实 WASM/ACP 调用，重启 Wrangler 后检查展示态由 ACP 重放复原。模型是 fixture，不调用真实模型服务；sqld 是本机 Rust Store，不是托管 Turso。此 smoke 不验证远端部署、真实模型质量、平台 CPU/保活或生产网络故障。
 
-**验收状态：直读 Turso 版本的本地 fixture smoke 已通过。** 2026-10-06 主线程确认当前 WASM/Worker 在真实本地 workerd 下通过：`passed: true`、`wasm: true`、`turns: 3`、`primaryModelCalls: 4`、`predictionCalls: 4`、`historyAfterRestart: true`、`acpContextAfterRestart: true`、`cancelledTurn: true`、`partialReplyPersisted: true`、`continuedAfterCancel: true`，以及 `tursoDirectory: true`、`listBeforeFirstPrompt: true`、`externalTitleVisible: true`。其中 `tursoDirectory` 是 smoke 的直读 Store 列表检查标签，不代表另有目录 DO。新会话首条 prompt 前已可列出；直接 SQL 改名后，列表和已初始化聊天 DO 的 GET 均返回新标题。`turns: 3` 指三轮正常完成，取消的一轮另行记录。Wrangler 重启后，展示历史与 ACP 模型上下文保留；第三轮取消保留部分回复，第四轮显式发送经 own-stop Resume 后完成。主模型调用与辅助预测调用分别按 fixture 计数，预测结果不进入用户回答，也不作为重复用户执行统计。
+**历史验收记录（DO 基线，已作废）**：2026-10-06 主线程确认（当时实现为 DO 记录基线，转向后相关记录/端点已删除）当前 WASM/Worker 在真实本地 workerd 下通过：`passed: true`、`wasm: true`、`turns: 3`、`primaryModelCalls: 4`、`predictionCalls: 4`、`historyAfterRestart: true`、`acpContextAfterRestart: true`、`cancelledTurn: true`、`partialReplyPersisted: true`、`continuedAfterCancel: true`，以及 `tursoDirectory: true`、`listBeforeFirstPrompt: true`、`externalTitleVisible: true`。其中 `tursoDirectory` 是 smoke 的直读 Store 列表检查标签；当时重启后的展示历史来自 DO 记录，转向后改由 ACP 重放复原，不再复用该结论。
 
-此结果证明上述本地执行、重启后加载和正常取消路径，不证明在途执行恢复、全部取消失败路径或未知停止后的安全接管。模型仍是本地 fixture，存储仍是本机 sqld，未验证 hosted Cloudflare、真实模型或托管 Turso，不宣称生产完成。后续变更仍应以完整 smoke 命令的退出码、断言结果与运行日志复验，不把构建成功等同于 runtime smoke 成功。
+**当前基线的本地 smoke 结果由代码 owner 在本轮迁移后记录**；未记录前不得把上述历史结果当作无 DO 基线的验收。
 
-2026-10-06 当前版本在独立 worktree 从源码重新构建 SDK/Rust WASM 与应用后，完整复验通过，额外结果为 `webSocketSync: true`、`commandHttp202: true`。本包 281 项测试、类型检查和构建通过；SDK `./test/*.test.ts` 的 90 项测试及类型检查通过。SDK 源码变更仅保留准入核心与 SQLite 装配的两文件隔离，Yjs/WS 接线没有继续修改 SDK，浏览器复用已有公共 `./view` 入口。完整 SDK 集成套件不是本包验收范围：新 worktree 未构建本机 `target/debug/peri`；SDK 另有未改动的后台任务断言，期望 `awaiting_input` 而现状为 `unobserved:awaiting_input`，不能据上述定向通过宣称整个 SDK 全量通过。SDK 测试使用项目 mise 工具时，新 worktree 需信任该受控配置或设置进程级 `MISE_TRUSTED_CONFIG_PATHS`。
+上述历史结果只证明当时（DO 基线）的本地执行、重启后加载和正常取消路径，不证明无 DO 基线的行为，也不证明在途执行恢复、全部取消失败路径或未知停止后的安全接管。模型仍是本地 fixture，存储仍是本机 sqld，未验证 hosted Cloudflare、真实模型或托管 Turso，不宣称生产完成。后续变更仍应以完整 smoke 命令的退出码、断言结果与运行日志复验，不把构建成功等同于 runtime smoke 成功。
 
-当前构建产物另经 headless Chromium、模拟 HTTP API 与真实本地 Yjs/WS fixture 检查：实际 App 切换 token 后不显示旧列表和历史，按需加载 Markdown、正常生成、状态向量重连不重发消息且不自动取消、部分回复停止时等待服务端回执、停止后可继续发送，以及 390px 移动布局均通过，无页面异常。这是 UI/fixture 验证，不是远端服务验收。当前构建有 Zod 上游 PURE 注解告警，未阻断构建，也未修改依赖源码。Cloudflare 类型使用局部 type import，避免 Worker 全局声明覆盖 Node/Bun 工具类型；原生 Fetch fixture 显式移除 Node 的浏览器 Web Storage 全局以模拟 Worker 环境，不屏蔽未知 stderr。
+**历史记录（DO 基线，已作废）**：2026-10-06 在独立 worktree 从源码重新构建 SDK/Rust WASM 与应用后完整复验通过（额外结果 `webSocketSync: true`、`commandHttp202: true`；`commandHttp202` 所指 HTTP 命令端点已删除）。本包 281 项测试、类型检查和构建通过；SDK `./test/*.test.ts` 的 90 项测试及类型检查通过。SDK 源码变更仅保留准入核心与 SQLite 装配的两文件隔离，Yjs/WS 接线没有继续修改 SDK，浏览器复用已有公共 `./view` 入口。完整 SDK 集成套件不是本包验收范围：新 worktree 未构建本机 `target/debug/peri`；SDK 另有未改动的后台任务断言，期望 `awaiting_input` 而现状为 `unobserved:awaiting_input`，不能据上述定向通过宣称整个 SDK 全量通过。SDK 测试使用项目 mise 工具时，新 worktree 需信任该受控配置或设置进程级 `MISE_TRUSTED_CONFIG_PATHS`。
+
+**历史记录（UI/fixture）**：构建产物另经 headless Chromium、模拟 HTTP API 与真实本地 Yjs/WS fixture 检查：实际 App 切换 token 后不显示旧列表和历史，按需加载 Markdown、正常生成、状态向量重连不重发消息且不自动取消、部分回复停止时等待服务端回执、停止后可继续发送，以及 390px 移动布局均通过，无页面异常。这是 UI/fixture 验证，不是远端服务验收。当前构建有 Zod 上游 PURE 注解告警，未阻断构建，也未修改依赖源码。Cloudflare 类型使用局部 type import，避免 Worker 全局声明覆盖 Node/Bun 工具类型；原生 Fetch fixture 显式移除 Node 的浏览器 Web Storage 全局以模拟 Worker 环境，不屏蔽未知 stderr。

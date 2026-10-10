@@ -11,10 +11,6 @@ function environment(): Env {
     MODEL_BASE_URL: "https://model.invalid/v1",
     MODEL_API_KEY: "model-token",
     MODEL_ID: "configured-model",
-    CHAT_SESSIONS: {
-      idFromName() { throw new Error("DO must not configure Rust storage"); },
-      get() { throw new Error("DO must not configure Rust storage"); },
-    },
   };
 }
 
