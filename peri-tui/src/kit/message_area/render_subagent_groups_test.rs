@@ -82,17 +82,38 @@ fn test_subagent_running_shows_recent_tool_lines() {
     );
 }
 
-/// §6.7 running 子 agent 但组内无任何工具调用：不渲染组头，整组留空。
+/// 纯文本子 Agent 没有工具行时仍须保留可聚焦的详情入口。
 #[test]
-fn test_subagent_running_no_tools_renders_empty() {
+fn test_subagent_without_tools_keeps_detail_entry_across_statuses() {
     let grid = GridSpec::grid_for(80);
-    let running = subagent_group(im::Vector::new(), true, false, None);
-    let lines = vm_to_lines(&running, &grid);
-    assert!(
-        lines.is_empty(),
-        "无工具 → 整组留空（不渲染组头），实际 {:?}",
-        all_text(&lines)
-    );
+    for (running, error) in [(true, false), (false, false), (false, true)] {
+        let group = subagent_group(im::Vector::new(), running, error, None);
+        let lines = vm_to_lines(&group, &grid);
+        assert_eq!(
+            lines.len(),
+            1,
+            "无工具也须保留一行入口，实际 {:?}",
+            all_text(&lines)
+        );
+        assert!(header_of(&lines).contains("Agent explorer"));
+        let status_visible = if running {
+            is_running_frame(&header_of(&lines))
+        } else {
+            header_of(&lines).contains(if error { '\u{d7}' } else { '\u{2713}' })
+        };
+        assert!(
+            status_visible,
+            "状态符号须可见，实际 {:?}",
+            header_of(&lines)
+        );
+        assert!(
+            lines[0]
+                .spans
+                .iter()
+                .any(|span| span.content.contains("Agent explorer")
+                    && span.style.add_modifier.contains(Modifier::BOLD))
+        );
+    }
 }
 
 /// Narrow 断点：符号位省略（设计文档 §6 断点表）——`[outer][│][gap=1][2 格缩进]`
@@ -290,14 +311,12 @@ fn test_subagent_failed_reason_line_and_completed() {
         "空 canonical reason 回退 child last_error，实际 {text:?}"
     );
 
-    // genuine parent error 且无工具、无原因 → 整组留空（不渲染组头）
+    // genuine parent error 且无工具、无原因 → 保留带错误状态的入口
     let no_tool_error = subagent_group(im::Vector::new(), false, true, None);
     let lines = vm_to_lines(&no_tool_error, &grid);
-    assert!(
-        lines.is_empty(),
-        "无工具 error 且无原因 → 整组留空，实际 {:?}",
-        all_text(&lines)
-    );
+    assert_eq!(lines.len(), 1);
+    assert!(header_of(&lines).contains("Agent explorer"));
+    assert!(header_of(&lines).contains('\u{d7}'));
 
     // completed parent 无失败 → 只渲染工具行（无组头/结果摘要）
     let completed = subagent_group(

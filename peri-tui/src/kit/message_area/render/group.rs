@@ -21,9 +21,8 @@ pub(super) const SUBAGENT_TOOL_LINES: usize = 3;
 /// 对齐 subagent 摘要：流式最近 3 行持续轮换，固定缩进保证前缀列稳定）。
 pub(super) const SUBAGENT_TOOL_INDENT: usize = 2;
 
-/// §6.7 SubAgent：组只展示子工具调用（任意状态 running/completed/error 同款
-/// 工具行样式：最近 ≤3 个工具行 + 失败原因行）；组内无任何工具调用时不渲染
-/// 组头，整组留空（仅 genuine parent error 保留原因行）。
+/// §6.7 SubAgent：有工具时展示最近 ≤3 个工具行 + 失败原因行；无工具时
+/// 展示一行可聚焦的 Agent 入口，供纯文本子会话打开详情。
 ///
 /// 停止递归内联铺开——嵌套消息不进入主时间轴（Enter 打开详情面板）。
 pub(super) fn render_subagent_group_lines(
@@ -44,18 +43,11 @@ pub(super) fn render_subagent_group_lines(
         })
         .take(SUBAGENT_TOOL_LINES)
         .collect();
-    if recent.is_empty() {
-        // 组内无任何工具调用：不渲染组头——仅 genuine parent error 保留原因行
-        // （错误信息不丢），其余整组留空（子 agent 纯文本/空跑不占消息区空间）。
-        if data.is_error
-            && let Some(reason) = subagent_error_reason(data)
-        {
-            return subagent_error_reason_lines(grid, reason);
-        }
-        return Vec::new();
-    }
-    let mut lines: Vec<Line<'static>> =
-        recent.iter().map(|t| subagent_tool_line(t, grid)).collect();
+    let mut lines: Vec<Line<'static>> = if recent.is_empty() {
+        vec![subagent_entry_line(data, grid)]
+    } else {
+        recent.iter().map(|t| subagent_tool_line(t, grid)).collect()
+    };
     // 失败原因行（§6.7 failed 显示错误原因），优先级：canonical error_reason
     // （SubagentStopped.result）→ 子工具 last_error 兜底。仅 running（实时
     // 反馈）与 genuine parent error（终态）显示；completed 成功组即使有
@@ -64,6 +56,24 @@ pub(super) fn render_subagent_group_lines(
         lines.extend(subagent_error_reason_lines(grid, reason));
     }
     lines
+}
+
+fn subagent_entry_line(data: &TuiSubAgentGroup, grid: &GridSpec) -> Line<'static> {
+    let sem = THEME_ATOM.state().read().semantic;
+    let (symbol, color) = status_symbol_and_color(data.is_running, data.is_error, &sem);
+    let mut spans = first_prefix(grid, &symbol, Style::default().fg(color));
+    let name = if data.agent_name.trim().is_empty() {
+        &data.agent_id
+    } else {
+        &data.agent_name
+    };
+    spans.push(Span::styled(
+        truncate_by_width(name, grid.content_width().max(1)),
+        Style::default()
+            .fg(sem.text.primary)
+            .add_modifier(Modifier::BOLD),
+    ));
+    Line::from(spans)
 }
 
 /// §6.7 单个子工具调用行（设计文档 §3 形态规格）：

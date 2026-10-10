@@ -61,15 +61,21 @@ pub(crate) fn semantic_line_text(
             // 子工具行/原因行是 cont_prefix + 2 格缩进形态（设计文档 §3）——
             // `[outer 空][│][gap][2 空格][符号] {Verb}  {summary}` /
             // `[outer 空][│][gap][2 空格]{错误正文}`；strip_visual_prefix 已剥
-            // `[outer][│][gap]`，剩余部分带缩进。组只渲染工具行/原因行，**没有
-            // 顶层组头**（render_subagent_group_lines 无工具时整组留空），行序：
-            // 最近工具最新在前 → 原因行。
+            // `[outer][│][gap]`，剩余部分带缩进。有工具时行序为最近工具
+            // 最新在前 → 原因行；无工具时首行是可打开详情的 Agent 入口。
             let recent_tool_lines = data
                 .view_models
                 .iter()
                 .filter(|vm| matches!(vm, TuiRenderUnit::TuiToolCard(_)))
                 .count()
                 .min(SUBAGENT_TOOL_LINES);
+            if recent_tool_lines == 0 && local_idx == 0 {
+                return Some(if data.agent_name.trim().is_empty() {
+                    data.agent_id.clone()
+                } else {
+                    data.agent_name.clone()
+                });
+            }
             // 工具行索引 [0, recent_tool_lines)：渲染行序 = view_models 反向工具序，
             // 所以第 local_idx 行对应反向第 local_idx 个工具（nth(local_idx)）。
             if local_idx < recent_tool_lines {

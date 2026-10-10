@@ -1,3 +1,4 @@
+use std::borrow::Cow;
 use std::collections::BTreeSet;
 use std::hash::{Hash, Hasher};
 use std::ops::Range;
@@ -16,7 +17,7 @@ use crate::kit::entry_render_cache::{
 };
 use crate::kit::message_area::grid::GridSpec;
 use crate::kit::message_area::selection::WrappedLineInfo;
-use crate::kit::tui_render_unit::{TuiRenderUnit, TuiSubAgentGroup};
+use crate::kit::tui_render_unit::{FoldKey, FoldState, TuiRenderUnit, TuiSubAgentGroup};
 
 const DETAIL_CACHE_BYTES: usize = 8 * 1024 * 1024;
 
@@ -31,6 +32,10 @@ pub(super) struct DetailRenderCache {
     resident_bytes: usize,
     resident_slots: BTreeSet<usize>,
     header: Vec<Line<'static>>,
+    folds: std::collections::HashMap<FoldKey, FoldState>,
+    focused: Option<FoldKey>,
+    dirty: bool,
+    source_changed: bool,
 }
 
 #[derive(Default)]
@@ -98,13 +103,18 @@ impl DetailRenderCache {
                 context.language != language || !Arc::ptr_eq(&context.theme, &theme)
             });
         self.header = header;
-        if !context_changed && self.source.ptr_eq(&group.view_models) {
+        let source_changed = !self.source.ptr_eq(&group.view_models);
+        self.source_changed = source_changed && !switched && !self.dirty;
+        if !context_changed && !self.dirty && !source_changed {
             return false;
         }
         if switched {
             self.slots = Vec::new();
+            self.folds.clear();
+            self.focused = None;
             self.instance_id.clone_from(&group.instance_id);
         }
+        self.dirty = false;
         let mut hasher = std::collections::hash_map::DefaultHasher::new();
         group.instance_id.hash(&mut hasher);
         self.context = Some(EntryRenderContext {
@@ -122,12 +132,17 @@ impl DetailRenderCache {
         self.resident_bytes = 0;
         self.resident_slots.clear();
         let frame = current_frame();
-        for (index, (slot, vm)) in self.slots.iter_mut().zip(&self.source).enumerate() {
+        for index in 0..self.source.len() {
+            let vm = projected(
+                &self.source[index],
+                fold_key(&self.source[index]).and_then(|key| self.folds.get(&key).copied()),
+            );
+            let slot = &mut self.slots[index];
             if context_changed
                 || slot.hash != Some(vm.content_hash())
-                || slot.variant != Some(std::mem::discriminant(vm))
+                || slot.variant != Some(std::mem::discriminant(&vm))
             {
-                slot.ensure(vm, grid, self.context.as_ref().unwrap().clone(), frame);
+                slot.ensure(&vm, grid, self.context.as_ref().unwrap().clone(), frame);
             }
             self.prefix.push(
                 self.prefix
@@ -162,6 +177,91 @@ impl DetailRenderCache {
             .saturating_add(self.prefix.last().copied().unwrap_or(0))
     }
 
+    pub(super) fn focused(&self) -> Option<usize> {
+        self.source
+            .iter()
+            .position(|vm| fold_key(vm).as_ref() == self.focused.as_ref())
+            .filter(|_| self.focused.is_some())
+    }
+
+    pub(super) fn source_changed(&self) -> bool {
+        self.source_changed
+    }
+
+    pub(super) fn focus_next(&mut self, backwards: bool) -> Option<usize> {
+        let len = self.source.len();
+        if len == 0 {
+            return None;
+        }
+        let start = self
+            .focused()
+            .unwrap_or(if backwards { 0 } else { len - 1 });
+        for step in 1..=len {
+            let index = if backwards {
+                (start + len - step % len) % len
+            } else {
+                (start + step) % len
+            };
+            if let Some(key) = fold_key(&self.source[index]) {
+                self.focused = Some(key);
+                return self
+                    .prefix
+                    .get(index)
+                    .map(|row| self.header.len().saturating_add(*row));
+            }
+        }
+        None
+    }
+
+    pub(super) fn toggle_focused(&mut self, preview: bool) -> bool {
+        let Some(index) = self.focused() else {
+            return false;
+        };
+        let Some(key) = fold_key(&self.source[index]) else {
+            return false;
+        };
+        let Some(current) = self
+            .folds
+            .get(&key)
+            .copied()
+            .or_else(|| fold_of(&self.source[index]))
+        else {
+            return false;
+        };
+        let next = if preview {
+            if current == crate::kit::tui_render_unit::FoldState::Preview {
+                crate::kit::tui_render_unit::FoldState::Collapsed
+            } else {
+                crate::kit::tui_render_unit::FoldState::Preview
+            }
+        } else if current == crate::kit::tui_render_unit::FoldState::Collapsed {
+            crate::kit::tui_render_unit::FoldState::Expanded
+        } else {
+            crate::kit::tui_render_unit::FoldState::Collapsed
+        };
+        self.folds.insert(key, next);
+        self.dirty = true;
+        true
+    }
+
+    pub(super) fn click_fold_header(&mut self, row: usize) -> bool {
+        let Some(content_row) = row.checked_sub(self.header.len()) else {
+            return false;
+        };
+        let index = self
+            .prefix
+            .partition_point(|start| *start <= content_row)
+            .saturating_sub(1);
+        if index >= self.source.len() || self.prefix[index] != content_row {
+            return false;
+        }
+        let Some(key) = fold_key(&self.source[index]) else {
+            return false;
+        };
+        self.focused = Some(key);
+        self.toggle_focused(false)
+    }
+
     fn slots_for(&self, rows: Range<usize>) -> Range<usize> {
         let start = self
             .prefix
@@ -183,7 +283,11 @@ impl DetailRenderCache {
         for index in visible.clone() {
             let slot = &mut self.slots[index];
             let previous_bytes = slot.bytes();
-            slot.ensure(&self.source[index], &self.grid, context.clone(), frame);
+            let vm = projected(
+                &self.source[index],
+                fold_key(&self.source[index]).and_then(|key| self.folds.get(&key).copied()),
+            );
+            slot.ensure(&vm, &self.grid, context.clone(), frame);
             self.resident_bytes = self
                 .resident_bytes
                 .saturating_sub(previous_bytes)
@@ -224,6 +328,7 @@ impl DetailRenderCache {
         }
         let header_height = self.header.len();
         let content_rows = top.saturating_sub(header_height)..bottom.saturating_sub(header_height);
+        let focused_index = self.focused();
         let visible = self.ensure_visible(content_rows.clone());
         for index in visible {
             let slot = &self.slots[index];
@@ -242,12 +347,18 @@ impl DetailRenderCache {
                 let Some(line) = slot.entry.line(mapped.logical_idx) else {
                     continue;
                 };
-                let paragraph = Paragraph::new(line.clone())
-                    .wrap(Wrap { trim: false })
-                    .scroll((
-                        (row_start - mapped.visual_start).min(u16::MAX as usize) as u16,
-                        0,
-                    ));
+                let line = if focused_index == Some(index) && mapped.logical_idx == 0 {
+                    line.clone().style(
+                        ratatui_kit::ratatui::style::Style::default()
+                            .add_modifier(ratatui_kit::ratatui::style::Modifier::REVERSED),
+                    )
+                } else {
+                    line.clone()
+                };
+                let paragraph = Paragraph::new(line).wrap(Wrap { trim: false }).scroll((
+                    (row_start - mapped.visual_start).min(u16::MAX as usize) as u16,
+                    0,
+                ));
                 drawer.render_widget(
                     paragraph,
                     Rect {
@@ -255,6 +366,7 @@ impl DetailRenderCache {
                             .y
                             .saturating_add((header_height + offset + row_start - top) as u16),
                         height: (row_end - row_start) as u16,
+                        width: self.grid.line_width().min(area.width),
                         ..area
                     },
                 );
@@ -284,6 +396,66 @@ impl DetailRenderCache {
         }
         result
     }
+}
+
+fn fold_of(vm: &TuiRenderUnit) -> Option<FoldState> {
+    match vm {
+        TuiRenderUnit::TuiToolCard(card) => Some(card.fold),
+        TuiRenderUnit::TuiAssistantBubble(bubble) => bubble.reasoning.as_ref().map(|r| r.fold),
+        TuiRenderUnit::TuiCollapsedGroup(group) => Some(group.fold),
+        _ => None,
+    }
+}
+
+fn fold_key(vm: &TuiRenderUnit) -> Option<FoldKey> {
+    match vm {
+        TuiRenderUnit::TuiToolCard(card) => Some(FoldKey::Tool(card.tool_id.clone())),
+        TuiRenderUnit::TuiAssistantBubble(bubble) if bubble.reasoning.is_some() => {
+            bubble.message_id.clone().map(FoldKey::Reasoning)
+        }
+        TuiRenderUnit::TuiCollapsedGroup(group) => {
+            let ids: Vec<_> = group
+                .view_models
+                .iter()
+                .filter_map(|vm| match vm {
+                    TuiRenderUnit::TuiToolCard(card) => Some(card.tool_id.clone()),
+                    _ => None,
+                })
+                .collect();
+            if ids.is_empty() {
+                None
+            } else {
+                Some(FoldKey::Group(ids))
+            }
+        }
+        _ => None,
+    }
+}
+
+fn projected(vm: &TuiRenderUnit, fold: Option<FoldState>) -> Cow<'_, TuiRenderUnit> {
+    let Some(fold) = fold else {
+        return Cow::Borrowed(vm);
+    };
+    let mut vm = vm.clone();
+    match &mut vm {
+        TuiRenderUnit::TuiToolCard(card) => {
+            card.fold = fold;
+            card.recompute_hash();
+        }
+        TuiRenderUnit::TuiAssistantBubble(bubble) => {
+            let bubble = Arc::make_mut(bubble);
+            if let Some(reasoning) = &mut bubble.reasoning {
+                reasoning.fold = fold;
+                bubble.recompute_hash();
+            }
+        }
+        TuiRenderUnit::TuiCollapsedGroup(group) => {
+            group.fold = fold;
+            group.recompute_hash();
+        }
+        _ => {}
+    }
+    Cow::Owned(vm)
 }
 
 fn current_frame() -> u64 {

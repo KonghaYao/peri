@@ -1,6 +1,9 @@
 use super::*;
 use crate::kit::acp_bridge::{perf_counters, reset_perf_counters};
-use crate::kit::tui_render_unit::{FoldState, TuiAssistantBubble, TuiRenderUnit};
+use crate::kit::tui_render_unit::{
+    EntryStatus, FoldState, TuiAssistantBubble, TuiReasoningBlock, TuiRenderUnit, TuiToolCard,
+    TuiToolPresentation,
+};
 
 fn group(instance_id: &str, text: &str) -> TuiSubAgentGroup {
     let mut bubble = TuiAssistantBubble {
@@ -25,6 +28,127 @@ fn group(instance_id: &str, text: &str) -> TuiSubAgentGroup {
         user_modified: false,
         content_hash: 0,
     }
+}
+
+fn group_with_tool() -> TuiSubAgentGroup {
+    let mut group = group("tool-run", "intro");
+    let mut tool = TuiToolCard {
+        tool_id: "tool-1".into(),
+        tool_name: "Bash".into(),
+        input_summary: "echo hello".into(),
+        output_summary: "hello".into(),
+        is_error: false,
+        is_running: false,
+        running_duration_ms: None,
+        completed_duration_ms: None,
+        diff: None,
+        presentation: TuiToolPresentation::Generic,
+        fold: FoldState::Collapsed,
+        user_modified: false,
+        content_hash: 0,
+        tool_calls_count: 0,
+    };
+    tool.recompute_hash();
+    group
+        .view_models
+        .push_back(TuiRenderUnit::TuiToolCard(tool));
+    group
+}
+
+#[test]
+#[serial_test::serial]
+fn detail_fold_is_local_and_survives_stream_update() {
+    let mut cache = DetailRenderCache::default();
+    let theme = Arc::new(peri_theme::builtin::dark_theme());
+    let grid = GridSpec::grid_for(60);
+    let mut transcript = group_with_tool();
+    cache.prepare(&transcript, &grid, theme.clone(), 0, Vec::new());
+    let collapsed_height = cache.height();
+    cache.focus_next(false);
+    assert_eq!(cache.focused(), Some(1));
+    assert!(cache.toggle_focused(false));
+    cache.prepare(&transcript, &grid, theme.clone(), 0, Vec::new());
+    assert!(cache.height() > collapsed_height);
+    assert_eq!(
+        fold_of(&transcript.view_models[1]),
+        Some(FoldState::Collapsed)
+    );
+    transcript
+        .view_models
+        .push_back(group("tail", "streamed").view_models[0].clone());
+    transcript
+        .view_models
+        .insert(1, group("inserted", "before tool").view_models[0].clone());
+    cache.prepare(&transcript, &grid, theme, 0, Vec::new());
+    assert_eq!(
+        cache.folds.get(&FoldKey::Tool("tool-1".into())),
+        Some(&FoldState::Expanded)
+    );
+    assert_eq!(cache.focused(), Some(2));
+    assert!(cache.height() > collapsed_height);
+}
+
+#[test]
+#[serial_test::serial]
+fn detail_reasoning_expansion_remeasures_height() {
+    let mut cache = DetailRenderCache::default();
+    let mut transcript = group("reasoning", "");
+    let mut bubble = TuiAssistantBubble {
+        text: String::new(),
+        reasoning: Some(TuiReasoningBlock {
+            text: "first\nsecond\nthird".into(),
+            fold: FoldState::Collapsed,
+            status: EntryStatus::Completed,
+            is_running: false,
+            started_at: None,
+            duration_ms: None,
+        }),
+        message_id: Some("message-1".into()),
+        started_at: None,
+        duration_ms: None,
+        content_hash: 0,
+    };
+    bubble.recompute_hash();
+    transcript.view_models = im::vector![TuiRenderUnit::TuiAssistantBubble(bubble.into())];
+    let grid = GridSpec::grid_for(60);
+    let theme = Arc::new(peri_theme::builtin::dark_theme());
+    cache.prepare(&transcript, &grid, theme.clone(), 0, Vec::new());
+    let collapsed = cache.height();
+    cache.focus_next(false);
+    assert!(cache.toggle_focused(false));
+    cache.prepare(&transcript, &grid, theme, 0, Vec::new());
+    assert!(cache.height() > collapsed);
+    assert_eq!(
+        fold_of(&transcript.view_models[0]),
+        Some(FoldState::Collapsed)
+    );
+}
+
+#[test]
+#[serial_test::serial]
+fn detail_click_toggles_only_foldable_entry_header() {
+    let mut cache = DetailRenderCache::default();
+    let transcript = group_with_tool();
+    let grid = GridSpec::grid_for(30);
+    let theme = Arc::new(peri_theme::builtin::dark_theme());
+    cache.prepare(
+        &transcript,
+        &grid,
+        theme.clone(),
+        0,
+        vec![Line::from("header")],
+    );
+    assert!(!cache.click_fold_header(0));
+    assert!(!cache.click_fold_header(1));
+    let tool_row = cache.header.len() + cache.prefix[1];
+    assert!(cache.click_fold_header(tool_row));
+    cache.prepare(&transcript, &grid, theme, 0, vec![Line::from("header")]);
+    assert_eq!(cache.focused(), Some(1));
+    assert!(!cache.click_fold_header(tool_row + 1));
+    assert_eq!(
+        cache.folds.get(&FoldKey::Tool("tool-1".into())),
+        Some(&FoldState::Expanded)
+    );
 }
 
 fn render(

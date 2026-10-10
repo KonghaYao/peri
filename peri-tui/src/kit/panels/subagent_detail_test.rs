@@ -53,6 +53,47 @@ fn detail_viewport_uses_panel_bounds_once() {
 }
 
 #[test]
+fn detail_width_budget_matches_drawn_viewport() {
+    for width in [2, 3, 6, 7, 30, 40, 60, 100, 120] {
+        let viewport = detail_viewport(Rect::new(0, 0, width, 12));
+        let grid = GridSpec::grid_for(width);
+        assert!(grid.line_width() <= viewport.width, "panel width {width}");
+        if width >= 7 {
+            assert!(
+                grid.first_prefix_width() + grid.content_width() <= viewport.width as usize,
+                "panel width {width}"
+            );
+        }
+    }
+}
+
+#[test]
+fn growing_detail_follows_only_when_already_at_bottom() {
+    assert_eq!(follow_detail_offset(20, 30, 10, 35, 10, true), 25);
+    assert_eq!(follow_detail_offset(12, 30, 10, 35, 10, true), 12);
+    assert_eq!(follow_detail_offset(20, 30, 10, 35, 10, false), 20);
+    assert_eq!(follow_detail_offset(20, 30, 10, 15, 10, true), 5);
+}
+
+#[test]
+fn running_detail_opens_at_live_tail_and_completed_detail_opens_at_header() {
+    assert_eq!(initial_detail_offset(true, 30, 10), 20);
+    assert_eq!(initial_detail_offset(false, 30, 10), 0);
+}
+
+#[test]
+fn detail_scrollbar_drag_reaches_both_ends_without_thumb_jump() {
+    let top = ScrollbarGeometry::new(100, 10, 0);
+    assert!(top.contains_thumb(0));
+    assert_eq!(top.offset_for(0, top.grab_offset(0)), 0);
+    assert_eq!(top.offset_for(7, top.grab_offset(7)), 90);
+    let middle = ScrollbarGeometry::new(100, 10, 45);
+    assert!(middle.contains_thumb(middle.thumb_start));
+    assert!(middle.offset_for(middle.thumb_start, middle.grab_offset(middle.thumb_start)) <= 45);
+    assert_eq!(middle.offset_for(7, 0), 90);
+}
+
+#[test]
 fn test_find_selected_subagent_none_when_no_selection() {
     let snap = ViewModelsSnapshot {
         items: im::Vector::from(vec![TuiRenderUnit::TuiSubAgentGroup(make_subagent(

@@ -218,6 +218,17 @@ fn test_semantic_subagent_tool_line() {
     );
 }
 
+#[test]
+fn test_semantic_subagent_without_tools_copies_entry_and_error_reason() {
+    crate::i18n::init(Some("en"));
+    let grid = GridSpec::grid_for(80);
+    let failed = subagent_group(im::Vector::new(), false, true, Some("child failed"));
+    let lines = vm_to_lines(&failed, &grid);
+    assert_eq!(lines.len(), 2);
+    assert_eq!(sem_at(&failed, 0, &grid).as_deref(), Some("Agent explorer"));
+    assert_eq!(sem_at(&failed, 1, &grid).as_deref(), Some("child failed"));
+}
+
 /// Bash 展开 `$ cmd` 行保留 command（§9）。
 #[test]
 fn test_semantic_bash_command_line() {
