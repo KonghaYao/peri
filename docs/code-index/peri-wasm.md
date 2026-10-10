@@ -16,7 +16,7 @@ WASM 依赖图按平台排除 SQLx、进程执行、stdio 和本地工具 MCP pa
 | 工具链 | `scripts/cargo-rmcp-patched.sh`、`scripts/cargo-wasm.sh` |
 | ACP 端到端验收 | `scripts/smoke-wasm-acp.mjs` |
 | 并发、取消与恢复验收 | `scripts/smoke-wasm-acp-lifecycle.mjs` |
-| Workers Emscripten 源码补丁与本地验收 | `patches/emscripten/workers-module-url.patch`、`scripts/prepare-emscripten.sh`、`npm-packages/@peri-sdk/examples/workers/{worker.js,smoke.mjs,wrangler.toml}`；`bun run smoke:workers` 在本地 `workerd` 上按当前 Host 方法表验证三条路径：队列 turn（`session/input/{snapshot,enqueue}` + 投递/turn 结束通知 + `session/close`）、直连 `session/prompt` turn、以及 `session/list`→`session/load` 冷恢复；三条都以有界 `session/close` 收尾。只在本地运行，不代表 hosted Workers 验收 |
+| Workers Emscripten 源码补丁与本地验收 | `patches/emscripten/workers-module-url.patch`、`scripts/prepare-emscripten.sh`、`npm-packages/@peri-sdk/examples/workers/{worker.js,smoke.mjs,wrangler.toml}`；`bun run smoke:workers` 在本地 `workerd` 上按当前 Host 方法表验证四条路径：SDK 宿主形态（`startPeriWasmHost` 只注入 `moduleFactory`，即 peri-cf 形态，响应回带该运行时的 `import.meta.url`）、队列 turn（`session/input/{snapshot,enqueue}` + 投递/turn 结束通知 + `session/close`）、直连 `session/prompt` turn、以及 `session/list`→`session/load` 冷恢复；三条都以有界 `session/close` 收尾。只在本地运行，不代表 hosted Workers 验收 |
 | Emscripten 日期格式 | `peri-time/src/calendar.rs` |
 | 不依赖 package 的 MCP 共用规则 | `peri-mcp-core/src/{agent_definition,task_scope.rs}` |
 | 配置与 OAuth 浏览器适配 | `peri-config/src/io/wasm.rs`、`mcp-packages/credentials/src/client.rs`；凭证 worker 经当前 Tokio Handle 调度，保持 MCP server 和 rmcp 子任务的运行时上下文，回归入口为 `client_test.rs` |
