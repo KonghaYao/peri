@@ -42,7 +42,7 @@ export function Settings({ token, error, onSave, onClose }: SettingsProps) {
             onClick={() => setVisible(previous => !previous)}>{visible ? <EyeOff size={18} /> : <Eye size={18} />}</button>
         </div>
         {error && <p className="settings-error" role="alert">{error}</p>}
-        <div className="privacy-note"><ShieldCheck size={18} /><p>仅保存在当前标签页的 sessionStorage 中，关闭标签页后清除。令牌会用于同源 API 的身份验证，请勿在共享设备上泄露。</p></div>
+        <div className="privacy-note"><ShieldCheck size={18} /><p>保存在此浏览器的 localStorage 中，关闭标签页或重启浏览器后仍然保留。令牌会用于同源 API 的身份验证，请勿在共享设备上保留，不再需要时可在设置中保存空值清除。</p></div>
         <div className="dialog-footer">
           <button className="text-button" type="button" onClick={onClose}>取消</button>
           <button className="primary-button" type="submit"><Check size={17} />保存设置</button>

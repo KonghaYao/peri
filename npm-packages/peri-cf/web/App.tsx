@@ -1,27 +1,26 @@
-import { lazy, Suspense, useEffect, useRef, useState } from 'react';
+import { lazy, Suspense, useCallback, useEffect, useRef, useState } from 'react';
 import {
   Activity, ArrowRight, ArrowUp, BookOpen, ChevronDown, Code2, Feather, Menu, MessageSquare,
   PanelLeftClose, Plus, RefreshCw, Settings2, ShieldCheck, Sparkles, Square, X,
 } from 'lucide-react';
 import { Settings } from './settings/Settings';
+import { readToken, saveToken, subscribeToken, type TokenSaveFailure } from './settings/tokenStorage';
 import { useChat } from './chat/useChat';
 import type { Chat } from './chat/types';
 
 const MessageList = lazy(() => import('./chat/MessageList').then((module) => ({ default: module.MessageList })));
 const InstancesPanel = lazy(() => import('./instances/InstancesPanel').then((module) => ({ default: module.InstancesPanel })));
 
-const tokenKey = 'peri.access-token';
+const tokenFailureText: Record<TokenSaveFailure, string> = {
+  'invalid-token': '访问令牌不能包含空格、换行或控制字符。',
+  'storage-unavailable': '浏览器禁止本地存储，无法保存令牌。请允许此站点使用 localStorage。',
+};
 const suggestions = [
   { icon: Feather, title: '让文字更有力量', description: '写作、润色，让表达恰到好处', prompt: '帮我写一封简洁、真诚的工作邮件。请先问我收件人和想表达的内容。', color: 'peach' },
   { icon: Code2, title: '一起解决代码难题', description: '读懂代码，找到更好的解法', prompt: '我想请你帮我分析一段代码。请先问我使用的语言和遇到的问题。', color: 'blue' },
   { icon: BookOpen, title: '把复杂的事讲明白', description: '拆解知识，收获新的理解', prompt: '请用通俗的语言解释一个复杂概念。先问我想了解什么，以及我的知识背景。', color: 'lavender' },
   { icon: Sparkles, title: '给想法一点新灵感', description: '打开思路，发现更多可能', prompt: '我想和你一起头脑风暴。请先问我目标和限制条件，再帮我拓展思路。', color: 'green' },
 ];
-
-function readToken(): string {
-  try { return sessionStorage.getItem(tokenKey) || ''; }
-  catch { return ''; }
-}
 
 function groupChats(chats: Chat[]): { label: string; chats: Chat[] }[] {
   const today = new Date();
@@ -42,12 +41,16 @@ function groupChats(chats: Chat[]): { label: string; chats: Chat[] }[] {
 export default function App() {
   const [token, setToken] = useState(readToken);
   const [authRevision, setAuthRevision] = useState(0);
-  return <Workspace key={authRevision} token={token} onTokenChange={(next) => {
-    if (next !== token) {
-      setToken(next);
-      setAuthRevision((revision) => revision + 1);
-    }
-  }} />;
+  const currentToken = useRef(token);
+  // 令牌身份变化必须换掉整个工作区：卸载旧连接与查询缓存，不把旧凭证的读取结果带进新工作区。
+  const commitToken = useCallback((next: string) => {
+    if (next === currentToken.current) return;
+    currentToken.current = next;
+    setToken(next);
+    setAuthRevision((revision) => revision + 1);
+  }, []);
+  useEffect(() => subscribeToken(commitToken), [commitToken]);
+  return <Workspace key={authRevision} token={token} onTokenChange={commitToken} />;
 }
 
 function Workspace({ token, onTokenChange }: { token: string; onTokenChange: (token: string) => void }) {
@@ -112,19 +115,16 @@ function Workspace({ token, onTokenChange }: { token: string; onTokenChange: (to
     } finally { setSubmitting(false); }
   };
 
-  const saveToken = (next: string) => {
-    if (/[\u0000-\u0020\u007f]/.test(next)) {
-      setStorageError('访问令牌不能包含空格、换行或控制字符。');
+  const applyToken = (next: string) => {
+    const failure = saveToken(next);
+    if (failure) {
+      setStorageError(tokenFailureText[failure]);
       return;
     }
-    try {
-      if (next) sessionStorage.setItem(tokenKey, next);
-      else sessionStorage.removeItem(tokenKey);
-      onTokenChange(next);
-      setSettingsOpen(false);
-      setStorageError('');
-      setDraft('');
-    } catch { setStorageError('浏览器禁止会话存储，无法保存令牌。请允许此站点使用 sessionStorage。'); }
+    onTokenChange(next);
+    setSettingsOpen(false);
+    setStorageError('');
+    setDraft('');
   };
 
   return (
@@ -197,7 +197,7 @@ function Workspace({ token, onTokenChange }: { token: string; onTokenChange: (to
           </form><p className="composer-disclaimer">AI 也会有不确定的时候，重要信息请记得核实。<span>保持好奇，也保持判断。</span></p></div>
         </div>
       </main>}
-      {settingsOpen && <Settings token={token} error={storageError} onSave={saveToken} onClose={() => { setSettingsOpen(false); setStorageError(''); }} />}
+      {settingsOpen && <Settings token={token} error={storageError} onSave={applyToken} onClose={() => { setSettingsOpen(false); setStorageError(''); }} />}
     </div>
   );
 }

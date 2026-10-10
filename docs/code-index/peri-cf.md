@@ -45,7 +45,7 @@
 | 聊天展示与生成生命周期 | `npm-packages/peri-cf/web/chat/` |
 | TanStack 私有读侧缓存与取消 | `npm-packages/peri-cf/web/chat/queries.ts` |
 | Token 切换工作区隔离及按需加载展示 | `npm-packages/peri-cf/web/App.tsx` |
-| Token 设置 | `npm-packages/peri-cf/web/settings/Settings.tsx` |
+| Token 设置与浏览器持久化（`localStorage` 键 `peri.access-token`，保存空值即清除） | `npm-packages/peri-cf/web/settings/Settings.tsx`、`tokenStorage.ts` |
 | TS 直连 Turso 元数据查询 | `npm-packages/peri-cf/worker/chat/repository.ts` |
 | 新聊天 ACP 创建与命名 | `npm-packages/peri-cf/worker/chat/creation.ts` |
 | 初始化能力与工作区身份 | `npm-packages/peri-cf/worker/chat/bootstrap.ts` |
