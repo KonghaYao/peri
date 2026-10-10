@@ -97,6 +97,9 @@ pub struct WorkflowAgentContext {
     /// 标准 system prompt（session/new 时冻结的 build_system_prompt() 输出）。
     /// None = 回退到注入的 [`WorkflowSystemPromptFallback`] 运行时构建。
     pub system_prompt: Option<String>,
+    /// Frozen ACP extension, composed only at the model request boundary.
+    pub external_instructions: Option<Arc<str>>,
+    pub legacy_embedded_instructions: bool,
     /// HITL broker + 共享权限模式。两者均 Some 时启用审批；
     /// 任一为 None 时 Bypass（自主后台 agent 默认行为）。
     pub broker: Option<Arc<dyn UserInteractionBroker>>,
@@ -183,6 +186,8 @@ pub fn create_default_executor(
         compact_config: None,
         cancel: None,
         system_prompt: None,
+        external_instructions: None,
+        legacy_embedded_instructions: false,
         broker: None,
         permission_mode: None,
         frozen_date: None,
@@ -385,22 +390,15 @@ impl AgentExecutor for WorkflowAgentExecutor {
 
         // 4. 指定 agent type 时按相同的 subagent overrides 渲染 prompt；否则
         // 继续复用 session 冻结的默认 subagent prompt。
-        let system_prompt = if let Some(definition) = agent_definition.as_ref() {
-            (self.ctx.agent_prompt_builder)(
-                definition.prompt_overrides.as_ref(),
-                &self.ctx.cwd,
-                self.ctx.frozen_date.as_deref(),
-                self.ctx.frozen_language.as_deref(),
-            )
-        } else {
-            self.ctx.system_prompt.clone().unwrap_or_else(|| {
-                (self.ctx.system_prompt_fallback)(
-                    &self.ctx.cwd,
-                    self.ctx.frozen_date.as_deref(),
-                    self.ctx.frozen_language.as_deref(),
-                )
-            })
-        };
+        let system_prompt = select_workflow_system_prompt(
+            agent_definition.as_ref(),
+            self.ctx.system_prompt.as_deref(),
+            &self.ctx.agent_prompt_builder,
+            &self.ctx.system_prompt_fallback,
+            &self.ctx.cwd,
+            self.ctx.frozen_date.as_deref(),
+            self.ctx.frozen_language.as_deref(),
+        );
 
         // 5. 构建中间件链（端口装配；frozen data / HITL 语义自 ctx 读取）
         let mut chain = MiddlewareChain::new();
@@ -449,6 +447,8 @@ impl AgentExecutor for WorkflowAgentExecutor {
         let llm = workflow_model_bridge(
             base_model,
             system_prompt.clone(),
+            self.ctx.external_instructions.clone(),
+            self.ctx.legacy_embedded_instructions,
             Arc::clone(&chain),
             &execution.session_id,
         );
@@ -632,6 +632,8 @@ fn tool_name_in(names: &[String], tool_name: &str) -> bool {
 pub(crate) fn workflow_model_bridge(
     base_model: Arc<dyn peri_model::Model>,
     system_prompt: String,
+    external_instructions: Option<Arc<str>>,
+    legacy_embedded_instructions: bool,
     chain: Arc<MiddlewareChain>,
     session_id: &str,
 ) -> Box<dyn crate::agent::react::ReactLLM + Send + Sync> {
@@ -639,11 +641,33 @@ pub(crate) fn workflow_model_bridge(
     Box::new(
         AgentModelBridge::from_arc(base_model)
             .with_system(system_prompt)
+            .with_external_instructions(external_instructions)
+            .with_legacy_prompt_provenance(legacy_embedded_instructions, true)
             .with_system_contribution_provider(Arc::new(move || {
                 contribution_chain.collect_prompt_contributions()
             }))
             .with_session_id(session_id),
     )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn select_workflow_system_prompt(
+    definition: Option<&super::factory::WorkflowAgentDefinition>,
+    frozen_default: Option<&str>,
+    agent_prompt_builder: &super::factory::WorkflowAgentPromptBuilder,
+    fallback: &super::factory::WorkflowSystemPromptFallback,
+    cwd: &str,
+    date: Option<&str>,
+    language: Option<&str>,
+) -> String {
+    match definition {
+        Some(definition) => {
+            agent_prompt_builder(definition.prompt_overrides.as_ref(), cwd, date, language)
+        }
+        None => frozen_default
+            .map(str::to_owned)
+            .unwrap_or_else(|| fallback(cwd, date, language)),
+    }
 }
 
 #[cfg(test)]

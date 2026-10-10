@@ -155,6 +155,8 @@ impl SessionManager {
         // 构建 v2 FrozenContext
         let v2_frozen = peri_agent::session::FrozenContext {
             system_prompt: Arc::from(system_prompt),
+            external_instructions: None,
+            legacy_embedded_instructions: false,
             claude_md: claude_md.map(Arc::from).unwrap_or_default(),
             skill_summary: skill_summary.map(Arc::from).unwrap_or_default(),
             date: Arc::from(frozen_date),

@@ -49,6 +49,9 @@ pub(super) async fn resume_subagent_impl(
     parent: Option<&Arc<Session>>,
     config: SubagentResumeConfig,
 ) -> Result<SubagentSpawned, Box<dyn std::error::Error + Send + Sync>> {
+    if parent.is_some_and(|session| session.store().frozen.legacy_embedded_instructions) {
+        return Err("V1 frozen prompt contains embedded external instructions; create a new session before resuming a subagent".into());
+    }
     // 解构 config（cwd 不用于恢复——cwd 取 meta.cwd，thread 创建时固化）
     let SubagentResumeConfig {
         thread_id,

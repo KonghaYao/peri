@@ -56,7 +56,7 @@ pub(crate) struct PreparedSessionInputs {
     /// 一次加载的插件聚合（roots/commands/hooks/mcp）。
     pub(crate) plugin_data: Option<PluginLoadResult>,
     pub(crate) skill_roots: Vec<SkillRoot>,
-    /// ACP session/new 扩展指令；只在新建时加入冻结 system prompt。
+    /// ACP session/new 准入后的暂存正文；冻结成功后移交独立 owner 字段。
     pub(crate) agent_instructions: Option<String>,
     /// MCP servers declared by the ACP client for this session.
     pub(crate) session_mcp_servers:
@@ -182,10 +182,7 @@ impl PreparedSessionInputs {
             );
         if let Some(agent_instructions) = self.agent_instructions.as_deref() {
             let mut context = frozen.v2_frozen().clone();
-            context.system_prompt = Arc::from(format!(
-                "{}\n\n<agent_instructions>\n{}\n</agent_instructions>",
-                context.system_prompt, agent_instructions
-            ));
+            context.external_instructions = Some(Arc::from(agent_instructions));
             frozen = FrozenSessionData::from_frozen_parts(
                 context,
                 frozen.claude_local_md().map(Arc::from),
@@ -196,6 +193,7 @@ impl PreparedSessionInputs {
         })?;
         self.frozen = Some(frozen);
         self.frozen_encoded = Some(encoded);
+        self.agent_instructions = None;
         Ok(())
     }
 

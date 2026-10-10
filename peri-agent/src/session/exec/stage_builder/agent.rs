@@ -150,6 +150,11 @@ pub(crate) fn build_agent(
     // 构造 AgentModelBridge（冻结 base 不变；动态 contribution request-time 组合）
     let mut base_llm = AgentModelBridge::new(base_model)
         .with_system(system_prompt)
+        .with_external_instructions(frozen.external_instructions.clone())
+        .with_legacy_prompt_provenance(
+            frozen.legacy_embedded_instructions,
+            agent_overrides.is_some(),
+        )
         .with_system_contribution_provider(Arc::new(move || {
             contribution_chain.collect_prompt_contributions()
         }));

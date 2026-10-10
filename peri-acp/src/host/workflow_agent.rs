@@ -278,6 +278,8 @@ pub(crate) fn create_session_workflow_middleware(
         cancel: None,
         // H2：按 workflow 能力投影重建的冻结 prompt（不再复制主冻结 prompt）。
         system_prompt: Some(workflow_system_prompt),
+        external_instructions: frozen_data.v2_frozen().external_instructions.clone(),
+        legacy_embedded_instructions: frozen_data.v2_frozen().legacy_embedded_instructions,
         broker: workflow_broker,
         permission_mode: workflow_permission_mode,
         frozen_date: Some(frozen_data.date().to_string()),

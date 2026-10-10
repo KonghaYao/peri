@@ -8,9 +8,9 @@
 
 ## 1. 设计边界
 
-System Prompt 由两部分组成：会话级冻结的 base prompt，以及每次模型请求读取的
-middleware contribution。两者都独立于 Transcript，不得伪装成 user/system 消息
-写入对话历史。
+System Prompt 由内部冻结 base、可选的会话级外部系统指令，以及每次模型请求读取的
+middleware contribution 组成。三者有独立来源；外部指令与 contribution 不得作为
+普通消息写入 Transcript。
 
 - base prompt 在 `session/new` 时随日期、运行环境快照（platform / OS 版本 /
   是否 Git 仓库）、项目指引、skill 摘要与 MetaHarness 状态一起冻结和持久化；
@@ -18,9 +18,12 @@ middleware contribution。两者都独立于 Transcript，不得伪装成 user/s
   运行环境值时按 unavailable 显式标记，不重探本地值冒充；
 - middleware contribution 由当前 session 的同一条生产链提供，在 `before_agent`
   完成能力目录准备后，于构造 `ModelRequest` 时同步读取；
+- 外部系统通过 ACP `session/new` 的 `_meta["peri.instructions"]` 添加会话级扩展。
+  它不改变工具、审批或能力关闭事实；正文独立于内部渲染产物冻结并持久化；
 - contribution 只能追加到冻结 base 之后，不能重写缓存前缀，也不能绕过当前
   session-local capability policy；
-- System Prompt 不进入 Transcript，Compact 与 rewind 不修改它。
+- 主会话的组合 System Prompt 不进入 Transcript，Compact 与 rewind 不修改冻结字段；
+  子 Agent 的内部身份可留在其 own history，模型投影会吸收该历史副本。
 
 ## 2. 所有权与段落来源
 
@@ -52,8 +55,11 @@ flowchart LR
     SECTIONS[middleware-owned sections] --> FREEZE
     ENV[cwd + date + language] --> FREEZE
     FREEZE --> BASE[frozen base prompt]
+    EXT[ACP peri.instructions] --> FREEZE
+    FREEZE --> EXTERNAL[frozen external field]
     CHAIN[current middleware chain] --> CONTRIB[request-time contributions]
     BASE --> COMBINE[combine_system_prompt_with_dynamic]
+    EXTERNAL --> COMBINE
     CONTRIB --> COMBINE
     COMBINE --> REQUEST[ModelRequest]
 ```
@@ -61,6 +67,26 @@ flowchart LR
 冻结 snapshot 是 write-once owner state。legacy thread 缺 snapshot 时只能按
 ARC-FROZEN-001 的 CAS 回填路径恢复；未知版本、损坏数据或存储错误必须 fail closed。
 fork 继承 source snapshot 的精确字节，不能以当前磁盘内容重新生成。
+
+外部正文仅在新会话准入：缺席或空字符串为无扩展；非字符串、超过 64 KiB 或包含
+`SYSTEM_PROMPT_DYNAMIC_BOUNDARY` 完整控制字须以 invalid-params 拒绝，不能创建
+可用 thread。接受后按字面值冻结，花括号、标签、空白与换行不作模板、导入或段落
+解析。V2 frozen snapshot 显式保存 `external_instructions` 字段（可为 `null`，缺失
+视为损坏）；冷 load/resume、普通 fork 与子 Agent 从同一份 owner snapshot 继承，
+不从现有 prompt 文本反解析。
+
+模型请求的唯一组合顺序是：**内部静态段 → 唯一缓存分界 → 内部动态段 → 外部
+指令段 → 逐请求 contribution**。外部段的固定标签保护正文边缘空白；正文在
+provider JSON 的 system text 中作为连续子串恰好出现一次，transport 控制字不进
+wire。内部模板为空、没有 contribution 时，也须在外部段之前生成分界。主 Agent
+override、子 Agent 和 workflow 各自按能力投影内部身份，随后由模型桥接层附加
+同一外部字段；子身份持久历史只存内部身份，Compact/继承历史不复制外部正文。
+
+V1 冻结快照没有独立来源字段。普通主 Agent 保留旧 prompt 原字节；若其中有
+`<agent_instructions>` 开始标记，需要重渲染的 override、子 Agent 或 workflow
+明确拒绝并要求新会话。该标记之后若含保留缓存控制字，主 Agent 也须在 provider
+前拒绝，防止 adapter 移除正文。V1 标记不能用来恢复可信外部字段；V1 无标记
+仍按历史主 Agent 语义运行。
 
 request-time contribution provider 返回 owned `String`，不得持锁跨越模型 await。空
 contribution 必须保持 base prompt 字节不变。贡献顺序按 production chain 顺序，任何

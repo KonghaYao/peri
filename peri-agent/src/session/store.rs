@@ -56,6 +56,10 @@ impl std::fmt::Display for SessionId {
 pub struct FrozenContext {
     /// 完整 System Prompt（静态 + 动态占位符填充后）
     pub system_prompt: Arc<str>,
+    /// ACP 客户端提供的会话级 System 扩展，独立于内部提示词保存。
+    pub external_instructions: Option<Arc<str>>,
+    /// V1 快照含不可分离的旧外部指令；派生身份必须拒绝重渲染。
+    pub legacy_embedded_instructions: bool,
     /// CLAUDE.md 内容（项目级 + 用户级合并后）
     pub claude_md: Arc<str>,
     /// Skills 摘要（builtin + 外部加载的汇总）
@@ -97,6 +101,7 @@ impl FrozenContext {
 #[derive(Default)]
 pub struct FrozenContextBuilder {
     system_prompt: Option<String>,
+    external_instructions: Option<String>,
     claude_md: Option<String>,
     skill_summary: Option<String>,
     date: Option<String>,
@@ -109,6 +114,11 @@ pub struct FrozenContextBuilder {
 impl FrozenContextBuilder {
     pub fn system_prompt(mut self, s: impl Into<String>) -> Self {
         self.system_prompt = Some(s.into());
+        self
+    }
+
+    pub fn external_instructions(mut self, s: impl Into<String>) -> Self {
+        self.external_instructions = Some(s.into());
         self
     }
 
@@ -153,6 +163,8 @@ impl FrozenContextBuilder {
     pub fn build(self) -> FrozenContext {
         FrozenContext {
             system_prompt: self.system_prompt.unwrap_or_default().into(),
+            external_instructions: self.external_instructions.map(Into::into),
+            legacy_embedded_instructions: false,
             claude_md: self.claude_md.unwrap_or_default().into(),
             skill_summary: self.skill_summary.unwrap_or_default().into(),
             date: self.date.unwrap_or_default().into(),
