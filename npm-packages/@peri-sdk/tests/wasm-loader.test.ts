@@ -50,6 +50,39 @@ test("注入 factory 不加载文件并保留 preRun 与环境快照", async () 
   expect(hooks).toBe(1);
 });
 
+test("注入 factory 时不解析 moduleUrl，specifier 不可解析也能启动", async () => {
+  // peri-cf 形态：宿主只给 moduleFactory；workerd 的 import.meta.url 是 undefined。
+  // 不可解析的 specifier 证明这条路径根本不解析产物 URL（修复前会抛 TypeError: Invalid URL）。
+  let hooks = 0;
+  const module = await instantiatePeriWasm({
+    moduleUrl: "http://[",
+    env: { INSTANCE: "factory-only" },
+    moduleOptions: { preRun: () => { hooks++; } },
+    moduleFactory: async (options) => {
+      const value: PeriWasmModule = { ENV: {}, PeriWasmAcp: { start: async () => { throw new Error("unused"); } } };
+      for (const hook of options.preRun as Array<(module: PeriWasmModule) => void>) hook(value);
+      return value;
+    },
+  });
+  expect(module.ENV).toEqual({ INSTANCE: "factory-only" });
+  expect(hooks).toBe(1);
+});
+
+test("注入 factory 且不给 moduleUrl 时不依赖 import.meta.url", async () => {
+  const module = await instantiatePeriWasm({ moduleFactory: async () => ({
+    PeriWasmAcp: { start: async () => { throw new Error("unused"); } },
+  }) });
+  expect(module.PeriWasmAcp.start).toBeFunction();
+});
+
+test("缺少 factory 且产物 URL 不可解析时给出可操作的错误", async () => {
+  const failure = await instantiatePeriWasm({ moduleUrl: "http://[" }).catch((error) => error);
+  expect(failure).toBeInstanceOf(Error);
+  expect(failure.message).toContain('Cannot resolve the Peri WASM artifact URL from "http://["');
+  expect(failure.message).toContain("moduleFactory");
+  expect(failure.cause).toBeInstanceOf(TypeError);
+});
+
 test("非法 preRun 不被静默丢弃", async () => {
   await expect(instantiatePeriWasm({ moduleUrl: injectionUrl, moduleOptions: { preRun: [42] } }))
     .rejects.toThrow("Invalid WASM preRun hooks");

@@ -14,11 +14,17 @@ export interface PeriWasmModule {
 export type PeriWasmModuleFactory = (options?: Record<string, unknown>) => Promise<PeriWasmModule>;
 
 export interface PeriWasmInstantiateOptions {
-  /** Artifact location; defaults to the `wasm/peri-wasm.js` shipped beside the SDK entry. */
+  /**
+   * Artifact location, resolved against `import.meta.url`; defaults to the `wasm/peri-wasm.js`
+   * shipped beside the SDK entry. Only read when no `moduleFactory` is injected.
+   */
   moduleUrl?: string | URL;
   /** Environment fixed for this module instance; merged into the artifact's `ENV` before startup. */
   env?: Readonly<Record<string, string>>;
-  /** 静态导入的 Emscripten factory；注入时不读取 moduleUrl。 */
+  /**
+   * 静态导入的 Emscripten factory；注入时宿主已拥有产物位置，`moduleUrl` 既不解析也不要求可解析。
+   * workerd 打包模块的 `import.meta.url` 是 `undefined`，这类宿主只能走本入口。
+   */
   moduleFactory?: (options: Record<string, unknown>) => Promise<PeriWasmModule>;
   /** Host-owned Emscripten options (network, timers, DNS, `instantiateWasm`) for this instance. */
   moduleOptions?: Readonly<Record<string, unknown>>;
@@ -36,14 +42,28 @@ function normalizeEnvironment(env?: Readonly<Record<string, string>>): Record<st
   return environment;
 }
 
+const DEFAULT_ARTIFACT = "./wasm/peri-wasm.js";
+
+/** 解析产物位置；失败时给出宿主可执行的结论，而不是裸 `TypeError: Invalid URL string`。 */
 function artifactUrl(moduleUrl?: string | URL): URL {
-  return moduleUrl ? new URL(String(moduleUrl), import.meta.url) : new URL("./wasm/peri-wasm.js", import.meta.url);
+  const specifier = String(moduleUrl ?? DEFAULT_ARTIFACT);
+  try {
+    return new URL(specifier, import.meta.url);
+  } catch (cause) {
+    throw new Error(
+      `Cannot resolve the Peri WASM artifact URL from ${JSON.stringify(specifier)}: this runtime does not ` +
+      `provide a usable import.meta.url (workerd reports undefined for bundled modules). Pass an absolute ` +
+      `artifact URL, or inject moduleFactory so the host owns the artifact location.`,
+      { cause },
+    );
+  }
 }
 
-async function instantiate(url: URL, environment: Record<string, string>,
+async function instantiate(url: URL | undefined, environment: Record<string, string>,
   moduleOptions: Readonly<Record<string, unknown>>,
   factory?: PeriWasmInstantiateOptions["moduleFactory"]): Promise<PeriWasmModule> {
   if (!factory) {
+    if (!url) throw new Error("Peri WASM artifact URL is unavailable; pass moduleUrl or inject moduleFactory");
     const source = await import(/* @vite-ignore */ url.href) as { default?: PeriWasmModuleFactory };
     factory = source.default;
   }
@@ -64,10 +84,22 @@ async function instantiate(url: URL, environment: Record<string, string>,
   return module;
 }
 
-/** Build a fresh module instance for one host; nothing is shared with other instances or URLs. */
+/**
+ * Build a fresh module instance for one host; nothing is shared with other instances or URLs.
+ *
+ * 环境在调用时同步取快照，失败一律以 reject 结算（`loadPeriWasm` 的校验失败仍是同步抛出）。
+ */
 export function instantiatePeriWasm(options: PeriWasmInstantiateOptions = {}): Promise<PeriWasmModule> {
-  return instantiate(artifactUrl(options.moduleUrl), normalizeEnvironment(options.env),
-    options.moduleOptions ?? {}, options.moduleFactory);
+  let environment: Record<string, string>;
+  let url: URL | undefined;
+  try {
+    environment = normalizeEnvironment(options.env);
+    // 注入 factory 时产物位置归宿主所有：此处不得解析 moduleUrl，否则没有 import.meta.url 的宿主会失败。
+    url = options.moduleFactory ? undefined : artifactUrl(options.moduleUrl);
+  } catch (error) {
+    return Promise.reject(error);
+  }
+  return instantiate(url, environment, options.moduleOptions ?? {}, options.moduleFactory);
 }
 
 /** Load the WASM artifact bundled next to dist/index.js. One module instance is shared per URL. */

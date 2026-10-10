@@ -48,7 +48,10 @@ export interface PeriWasmHostOptions {
   configJson: string;
   moduleUrl?: string | URL;
   env?: Readonly<Record<string, string>>;
-  /** Host-owned module factory; the default loads the packaged artifact at `moduleUrl`. */
+  /**
+   * Host-owned module factory; the default loads the packaged artifact at `moduleUrl`.
+   * 注入时不解析 `moduleUrl`：workerd 打包模块没有 `import.meta.url`，只能走本入口。
+   */
   moduleFactory?: (options: Readonly<Record<string, unknown>>) => Promise<PeriWasmModule>;
   /** Extra Emscripten options merged with the injected ports. */
   moduleOptions?: Readonly<Record<string, unknown>>;
