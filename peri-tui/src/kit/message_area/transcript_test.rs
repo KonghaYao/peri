@@ -571,3 +571,64 @@ fn visible_oversize_exception_and_reset_are_explicit() {
     assert_eq!(transcript.retained_bytes, 0);
     assert!(caches.is_empty());
 }
+
+/// [回归测试] Resize 时 grid 先更新，tracker 下一帧才返回实际宽度；
+/// 后续仅宽度修正也必须更新视觉索引，否则正文提前裁断并留下大片空白。
+#[test]
+#[serial_test::serial]
+fn test_viewport_width_correction_rebuilds_visual_index() {
+    let mut snapshot = snapshot(1);
+    snapshot.items.set(
+        0,
+        TuiRenderUnit::TuiUserBubble(TuiUserBubble::new("中文 viewport words ".repeat(50))),
+    );
+    let grid = GridSpec::grid_for(100);
+    let context = context();
+    let mut transcript = Transcript::default();
+    let mut caches = Vec::new();
+    transcript.prepare(
+        &snapshot,
+        &TranscriptPublication::default(),
+        &mut caches,
+        grid,
+        35,
+        context.clone(),
+        0,
+        0,
+        0,
+        20,
+    );
+    let corrected = transcript.prepare(
+        &snapshot,
+        &TranscriptPublication::default(),
+        &mut caches,
+        grid,
+        grid.line_width(),
+        context.clone(),
+        0,
+        0,
+        0,
+        20,
+    );
+    let fresh = Transcript::default().prepare(
+        &snapshot,
+        &TranscriptPublication::default(),
+        &mut Vec::new(),
+        grid,
+        grid.line_width(),
+        context,
+        0,
+        0,
+        0,
+        20,
+    );
+    assert_eq!(
+        corrected.total_visual(),
+        fresh.total_visual(),
+        "视宽收敛后不能保留旧折行高度"
+    );
+    assert_eq!(
+        corrected.viewport_logical_range(0, 20),
+        fresh.viewport_logical_range(0, 20)
+    );
+}

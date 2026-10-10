@@ -111,6 +111,7 @@ pub(super) struct VmCacheSlot {
     pub(super) entry: crate::kit::entry_render_cache::EntryRenderCache,
     pub(super) lines: Option<Arc<super::selection::SlotLines>>,
     pub(super) wrap_map: Arc<Vec<WrappedLineInfo>>,
+    pub(super) wrap_width: u16,
     pub(super) visual_rows: usize,
     pub(super) copy_button: Option<render::CopyButtonInfo>,
     pub(super) interaction: Option<render::InteractionLayout>,

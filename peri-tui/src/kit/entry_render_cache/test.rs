@@ -219,3 +219,15 @@ fn eviction_releases_derived_ownership_and_rehydrates_original_content() {
     );
     assert_eq!(cache.lines().as_ref(), &expected);
 }
+
+/// [回归测试] 稳定 Markdown 的正文保存在 chunk，主行只有占位；
+/// 请求宽度不同时不能复用旧高度，也不能拿空占位行测量。
+#[test]
+fn test_stable_markdown_wrap_uses_requested_viewport_width() {
+    let lines = vec![Line::from("中文 stable viewport words ".repeat(8))];
+    let mut cache = MarkdownLineCache::default();
+    cache.retain_and_wrap(80, vec![(1, lines.clone())]);
+    cache.stable_start = Some(0);
+    let expected = build_wrap_map(&lines, 25);
+    assert_eq!(cache.build_slot_wrap_map(&[Line::default()], 25), expected);
+}

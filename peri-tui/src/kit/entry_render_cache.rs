@@ -299,14 +299,23 @@ impl MarkdownLineCache {
         let (mut visual_rows, mut result) = build_wrap_map(&lines[..stable_start], width);
         let mut logical_offset = stable_start;
         for chunk in &self.stable {
-            result.extend(chunk.wrap_map.iter().cloned().map(|mut entry| {
+            // 实际绘制宽度可能在 tracker 收敛帧与 grid 宽度不同。
+            // 稳定区的主 lines 只有占位行，必须从 chunk 正文重新测量。
+            let measured;
+            let (chunk_rows, chunk_map) = if self.width == width {
+                (chunk.visual_rows, chunk.wrap_map.as_slice())
+            } else {
+                measured = build_wrap_map(&chunk.lines, width);
+                (measured.0, measured.1.as_slice())
+            };
+            result.extend(chunk_map.iter().cloned().map(|mut entry| {
                 entry.logical_idx += logical_offset;
                 entry.visual_start += visual_rows;
                 entry.visual_end += visual_rows;
                 entry
             }));
             logical_offset += chunk.lines.len();
-            visual_rows += chunk.visual_rows;
+            visual_rows += chunk_rows;
         }
         let (tail_rows, tail_map) = build_wrap_map(&lines[logical_offset..], width);
         result.extend(tail_map.into_iter().map(|mut entry| {

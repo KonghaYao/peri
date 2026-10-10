@@ -188,14 +188,16 @@ impl Transcript {
         let cache = &mut caches[slot];
         drop(cache.lines.take());
         let invalidation = cache.entry.ensure(vm, &grid, context.clone(), frame);
-        if matches!(
+        let layout_changed = matches!(
             invalidation,
             EntryInvalidation::Content | EntryInvalidation::Layout
         ) || cache.wrap_map.is_empty()
-        {
+            || cache.wrap_width != width;
+        if layout_changed {
             let (height, map) = cache.entry.build_wrap_map(width);
             cache.visual_rows = height;
             cache.wrap_map = Arc::new(map);
+            cache.wrap_width = width;
         }
         cache.content_hash = vm.content_hash();
         cache.variant = Some(std::mem::discriminant(vm));
@@ -208,10 +210,7 @@ impl Transcript {
             }
             None => SlotLines::single(Arc::clone(cache.entry.lines())),
         });
-        if matches!(
-            invalidation,
-            EntryInvalidation::Animation | EntryInvalidation::None
-        ) {
+        if !layout_changed {
             Arc::make_mut(&mut self.index).replace_lines(slot, Arc::clone(&lines));
         } else {
             Arc::make_mut(&mut self.index).set_slot(

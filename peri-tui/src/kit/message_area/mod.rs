@@ -507,7 +507,14 @@ pub fn MessageArea(props: &MessageAreaProps, mut hooks: Hooks) -> impl Into<AnyE
         &follow_bottom,
     );
 
-    let vp_height = vis_height as usize;
+    let new_output_active = scroll::new_output_indicator_active(
+        *follow_bottom.read(),
+        scroll_y,
+        vis_height as usize,
+        core_total_visual_rows + footer_visual_rows,
+    );
+    // 指示器独占视口最后一行，正文裁剪预算扣除该行。
+    let vp_height = (vis_height as usize).saturating_sub(usize::from(new_output_active));
 
     // ── keepgoing 按钮屏幕位置（每帧更新）──
     // 必须在 scroll_y 计算之后、handler 使用之前；write_no_update 避免自激重渲染。
@@ -519,7 +526,7 @@ pub fn MessageArea(props: &MessageAreaProps, mut hooks: Hooks) -> impl Into<AnyE
             keepgoing_layout,
             core_total_visual_rows,
             scroll_y,
-            vis_height,
+            vp_height as u16,
         );
     }
 
@@ -528,7 +535,7 @@ pub fn MessageArea(props: &MessageAreaProps, mut hooks: Hooks) -> impl Into<AnyE
         &snapshot,
         &mut vm_caches.write_no_update(),
         scroll_y,
-        vis_height as usize,
+        vp_height,
     );
     trace_phase(
         "viewport-warm",
@@ -549,7 +556,7 @@ pub fn MessageArea(props: &MessageAreaProps, mut hooks: Hooks) -> impl Into<AnyE
         &vm_caches,
         &view_models,
         area_rect,
-        vis_height,
+        vp_height as u16,
         scroll_y,
         &slot_index,
         grid,
@@ -559,7 +566,7 @@ pub fn MessageArea(props: &MessageAreaProps, mut hooks: Hooks) -> impl Into<AnyE
         image_rects,
         &vm_caches,
         area_rect,
-        vis_height,
+        vp_height as u16,
         scroll_y,
         &slot_index,
         grid,
@@ -569,7 +576,7 @@ pub fn MessageArea(props: &MessageAreaProps, mut hooks: Hooks) -> impl Into<AnyE
         interaction_rects,
         &vm_caches,
         area_rect,
-        vis_height,
+        vp_height as u16,
         scroll_y,
         &slot_index,
         &focused_entry_atom,
@@ -719,51 +726,29 @@ pub fn MessageArea(props: &MessageAreaProps, mut hooks: Hooks) -> impl Into<AnyE
         }
     }
 
-    // [Slice 2] §8.1 `↓ New output` 指示器——浏览态（用户滚离底部）且视口未到
-    // 真实内容底时，在视口末尾（有 footer 时插在 footer 之前）插入指示行。
-    // 视口附加行：不进 VmCacheSlot / wrap_map / total_visual_rows（G3 视口级）；
-    // NO_COLOR 剥离 pass（下方）天然覆盖（文本保留、颜色剥离）。
-    // [Why 内容底口径] total_visual_rows 含 SCROLL_PADDING 缓冲（不可见行），
-    // 判定以「真实内容底」= core + footer 视觉行数为准——滚到视觉底部即消失，
-    // 与粘性 follow 恢复（should_follow_after_user_scroll 扣缓冲）口径对齐。
-    let new_output_active = scroll::new_output_indicator_active(
-        *follow_bottom.read(),
-        scroll_y,
-        vp_height,
-        core_total_visual_rows + footer_visual_rows,
-    );
-    {
-        let mut rect = new_output_rect.write_no_update();
-        if new_output_active && let Some(area) = area_rect {
-            let arrow = if caps.read().unicode { "\u{2193}" } else { "v" };
-            let sem = THEME_ATOM.state().read().semantic;
-            let mut spans = vec![Span::raw(" ".repeat(grid.first_prefix_width()))];
-            spans.push(Span::styled(
-                format!("{arrow} {}", crate::i18n::tr("msg-new-output")),
-                Style::default()
-                    .fg(sem.status.running)
-                    .add_modifier(Modifier::BOLD),
-            ));
-            viewport_lines.push(Line::from(spans));
-            // 屏幕行 = area.y + 指示行在 viewport_lines 中的索引 - vp_first_offset
-            // （Paragraph::scroll 仅跳过首行的视觉偏移，viewport_lines 完整传入；
-            // 指示行是 push 后的末元素）。
-            let screen_row =
-                area.y as i64 + viewport_lines.len() as i64 - 1 - vp_first_offset as i64;
-            let vp_end = area.y as i64 + i64::from(vis_height);
-            *rect = if screen_row >= area.y as i64 && screen_row < vp_end {
-                let x_end = area
-                    .x
-                    .saturating_add(area.width)
-                    .max(area.x.saturating_add(1));
-                Some((screen_row as u16, area.x, x_end))
-            } else {
-                None
-            };
+    // 指示器是固定视口 chrome，不参与正文折行/scroll；绘制与点击共用末行。
+    let new_output_line = if new_output_active {
+        let arrow = if caps.read().unicode { "\u{2193}" } else { "v" };
+        let sem = THEME_ATOM.state().read().semantic;
+        let mut spans = vec![Span::raw(" ".repeat(grid.first_prefix_width()))];
+        spans.push(Span::styled(
+            format!("{arrow} {}", crate::i18n::tr("msg-new-output")),
+            Style::default()
+                .fg(sem.status.running)
+                .add_modifier(Modifier::BOLD),
+        ));
+        let line = Line::from(spans);
+        Some(if strip_color {
+            strip_line_colors(&line)
         } else {
-            *rect = None;
-        }
-    }
+            line
+        })
+    } else {
+        None
+    };
+    *new_output_rect.write_no_update() = area_rect
+        .filter(|area| new_output_active && area.height > 0)
+        .map(|area| (area.bottom() - 1, area.x, area.right()));
 
     if viewport_has_footer {
         viewport_lines.extend(footer_lines.iter().cloned());
@@ -807,12 +792,13 @@ pub fn MessageArea(props: &MessageAreaProps, mut hooks: Hooks) -> impl Into<AnyE
             "gen={vm_generation}, excludes-widget-draw-and-terminal-flush"
         )),
     );
-    render_viewport(viewport_lines, scroll_offset_y)
+    render_viewport(viewport_lines, scroll_offset_y, new_output_line)
 }
 
 fn render_viewport(
     viewport_lines: Vec<Line<'static>>,
     scroll_offset_y: u16,
+    new_output_line: Option<Line<'static>>,
 ) -> AnyElement<'static> {
     element!(
         View(
@@ -820,10 +806,17 @@ fn render_viewport(
             width: Constraint::Fill(1),
             height: Constraint::Fill(1),
         ) {
-            Text(text: Paragraph::new(RatText::from(viewport_lines))
-                .wrap(Wrap { trim: false })
-                .block(Block::default().padding(Padding::new(0, 1, 0, 0))),
-                scroll: Position::new(scroll_offset_y, 0))
+            View(height: Constraint::Fill(1)) {
+                Text(text: Paragraph::new(RatText::from(viewport_lines))
+                    .wrap(Wrap { trim: false })
+                    .block(Block::default().padding(Padding::new(0, 1, 0, 0))),
+                    scroll: Position::new(scroll_offset_y, 0))
+            }
+            { new_output_line.map(|line| element!(
+                View(height: Constraint::Length(1)) {
+                    Text(text: line)
+                }
+            )) }
         }
     )
     .into_any()

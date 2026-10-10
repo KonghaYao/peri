@@ -4,7 +4,7 @@
 
 输入反馈仍遵循 [待发送队列设计](../design/user-input-queue.md)：`kit/steer_state.rs::direct_submitting` 驱动 composer “正在提交…”，不是 Delivered 气泡。消息区用 `message_area/vm_cache.rs::read_render_snapshot` 短锁复制一致 VM/publication 后锁外派生；Transcript 跳代只重建实际变化的内容键，冷历史、布局和复制回归见 `transcript_test.rs`。
 
-消息视口几何由 `message_area/props.rs::MsgAreaTracker` 在 draw 边界记录；矩形变化后经 `poll_change` 请求一次校正帧，不依赖下一条消息或输入事件。`message_area/mod.rs::render_viewport` 通过 `Text.scroll` 传递视觉行偏移，不能只设置内层 `Paragraph.scroll`（ratatui-kit 的 `Text` 会覆盖它；当前 `Text.scroll` 的 `Position.x` 对应垂直偏移）。高度增减、宽度/位置变化与稳定后停止重绘的回归见 `props_test.rs`，折行内部和 footer 内部滚动见 `viewport_test.rs`。
+消息视口几何由 `message_area/props.rs::MsgAreaTracker` 在 draw 边界记录；矩形变化后经 `poll_change` 请求一次校正帧，不依赖下一条消息或输入事件。`message_area/mod.rs::render_viewport` 通过 `Text.scroll` 传递视觉行偏移，不能只设置内层 `Paragraph.scroll`（ratatui-kit 的 `Text` 会覆盖它；当前 `Text.scroll` 的 `Position.x` 对应垂直偏移）。高度增减、宽度/位置变化与稳定后停止重绘的回归见 `props_test.rs`，折行内部和 footer 内部滚动见 `viewport_test.rs`。 实际视宽单独参与 `Transcript` 的 wrap map 与视觉索引失效；稳定 Markdown 分片在请求视宽不同时从分片正文重新测量，不能使用占位行。宽度校正回归见 `transcript_test.rs::test_viewport_width_correction_rebuilds_visual_index`。浏览态“新输出”占据视口最后一行，正文裁剪扣除该行，点击区域与绘制同源。
 
 待发送鼠标入口：`kit/steer_queue.rs` 按最近绘制帧命中控件；正文点击只选择发送动作（下划线），按钮命中才触发提交。持续中文流式输出与长中文队列的真实点击回归见 `e2e/tests/smoke/steer-queue-live.test.ts`。
 
