@@ -60,6 +60,29 @@ fn parent_map(events: &[IngestionEvent]) -> HashMap<String, Option<String>> {
     map
 }
 
+/// 断言 agent-run 之下只允许出现主 agent 自身的 stage span。
+///
+/// 主 stage span 的设计 parent 就是 agent-run（`span_events::emit_stage_span_close`），而它按
+/// v2 条件上报（0ms 不上报）——是否现身取决于墙钟，所以不能整体断言「无事件挂 agent-run」，
+/// 只能逐条核对其余事件（child AGENT obs、child stage、工具 batch 等）没有直接挂上去。
+fn assert_only_main_stage_hangs_off_agent_run(
+    tracer: &LangfuseTracer,
+    events: &[IngestionEvent],
+    main_stage_span_id: Option<&str>,
+    context: &str,
+) {
+    let agent_run = tracer.agent_observation_id.as_str();
+    for (id, parent) in parent_map(events) {
+        if parent.as_deref() == Some(agent_run) {
+            assert_eq!(
+                Some(id.as_str()),
+                main_stage_span_id,
+                "仅主 agent 自身 stage span 可挂 agent-run：{context}"
+            );
+        }
+    }
+}
+
 fn agent_obs_creates(events: &[IngestionEvent]) -> Vec<(String, Option<String>, Option<String>)> {
     events
         .iter()
@@ -184,7 +207,7 @@ async fn test_content_before_start_gate() {
     );
 
     // ④ 父 ToolStart 晚到:register_invocation → join → 重放
-    let _main_act = t
+    let main_act = t
         .on_stage_start_gated("main", Stage::Act, "turn_3")
         .unwrap();
     t.on_tool_start("main", "call_agent", "Agent", &serde_json::json!({}));
@@ -211,13 +234,12 @@ async fn test_content_before_start_gate() {
     t.on_llm_end("child_1", 0, "claude-4.7", "anthropic", "out", None, None);
 
     let final_events = session.events_snapshot();
-    let map = parent_map(&final_events);
-    // 无任何 obs 挂 agent-run
-    let agent_run = &t.agent_observation_id;
-    assert!(
-        !map.values()
-            .any(|p| p.as_deref() == Some(agent_run.as_str())),
-        "乱序内容事件不应挂 agent-run"
+    // 无任何 obs 挂 agent-run(主 agent 自身 stage span 除外)
+    assert_only_main_stage_hangs_off_agent_run(
+        &t,
+        &final_events,
+        Some(main_act.span_id.as_str()),
+        "乱序内容事件",
     );
     // child stage span 的 parent 为 child AGENT obs
     let all = child_events(&final_events);
@@ -303,14 +325,9 @@ async fn test_unknown_agent_id_incomplete() {
         "残留缓存应标记 UnknownAgent"
     );
     assert_eq!(t.subagent.incomplete_count(), 1);
-    // 无任何 obs 挂 agent-run
+    // 无任何 obs 挂 agent-run(本用例未起主 stage,故不允许任何事件挂上去)
     let final_events = session.events_snapshot();
-    let map = parent_map(&final_events);
-    assert!(
-        !map.values()
-            .any(|p| p.as_deref() == Some(t.agent_observation_id.as_str())),
-        "ghost 内容不应挂主 agent-run"
-    );
+    assert_only_main_stage_hangs_off_agent_run(&t, &final_events, None, "ghost 内容");
 }
 
 /// ①ToolStart → ②ToolEnded → ③child events(Start 永不出现)→ on_turn_end
@@ -344,13 +361,13 @@ async fn test_missing_start_incomplete() {
     );
 
     let final_events = session.events_snapshot();
-    let map = parent_map(&final_events);
-    assert!(
-        !map.values()
-            .any(|p| p.as_deref() == Some(t.agent_observation_id.as_str())),
-        "child 内容不应挂主 agent-run"
+    // child 内容不得挂主 agent-run(主 agent 自身 stage span 除外)
+    assert_only_main_stage_hangs_off_agent_run(
+        &t,
+        &final_events,
+        Some(main_act.span_id.as_str()),
+        "child 内容",
     );
-    let _ = main_act;
 }
 
 // ── 重复 Start / Stop ───────────────────────────────────────────────────────
@@ -691,12 +708,13 @@ async fn test_bg_subagent_turn_end_cleanup() {
         }),
         "child 工具应随兜底 flush 上报"
     );
-    // 无幽灵序列挂主 agent:任何 child 事件 parent 链不指向 agent-run
-    let map = parent_map(&events);
-    assert!(
-        !map.values()
-            .any(|p| p.as_deref() == Some(t.agent_observation_id.as_str())),
-        "bg child 内容不应挂主 agent-run"
+    // 无幽灵序列挂主 agent:除主 agent 自身 stage span(设计 parent 即 agent-run)外,任何事件
+    // 都不得直接挂上去;child 域内容(AGENT obs / stage / 工具 batch)必然指向 child 自身的序列。
+    assert_only_main_stage_hangs_off_agent_run(
+        &t,
+        &events,
+        Some(main_act.span_id.as_str()),
+        "bg child 内容",
     );
-    let _ = (obs_id, main_act);
+    let _ = obs_id;
 }
