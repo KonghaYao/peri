@@ -56,7 +56,7 @@ v4 分阶段推进存算分离。阶段状态以代码、契约测试及 active 
 
 简称指同名标准文件，architecture 指 `architecture-contracts.md`；跨层、prompt、事件、工具、链序或安全变更读 architecture，Git 操作读 `git.md`，指引维护读 `documentation.md`。
 
-设计：`docs/design/README.md`；需求：`spec/issues/`；历史：`spec/global/problems.md`。主路径 `peri-tui → peri-acp → peri-agent::run_react_loop`；退出语义查 Agent 指引，workspace 查 `Cargo.toml`。
+设计：`docs/design/README.md`；需求：`spec/issues/`；历史：`spec/global/problems.md`；TUI 集成测试用例权威目录：`docs/verification/tui-integration-cases/README.md`。主路径 `peri-tui → peri-acp → peri-agent::run_react_loop`；退出语义查 Agent 指引，workspace 查 `Cargo.toml`。
 
 ## Workspace 命令
 
