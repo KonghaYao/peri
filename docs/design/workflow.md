@@ -215,7 +215,7 @@ Workflow 是 Peri 的多 Agent 编排子系统：用户在 JS 脚本中声明并
 - **execution**：由 run 状态投影（completed / failed / killed）。
 - **acceptance**：语义验收不由运行内核判定；内核当前投影为 `unknown`，验收结论属 ADLC/skill 层（`ADLC-DELIVERY-STATUS-001`，[Ultra-ADLC 设计](ultra-adlc.md)）。
 - **post-processing**：Git postcondition 结果——read_only 通过为 `not_required`，write 通过为 `passed`，失败或缺少可验证基线为 `failed`/`blocked`。
-- **delivery**：仅当 execution 完成、acceptance 非 failed、存在 write intent 且 post-processing 通过时才可能 `deliverable`；acceptance 未知时保持 `unknown`，其余为 `blocked`。
+- **delivery**：内核只投影 `blocked` / `unknown`——execution 完成、acceptance 非 failed、存在 write intent 且 post-processing 通过时为 `unknown`，其余为 `blocked`；`deliverable` 判定属引擎之外的验收层（ADLC/skill），内核不产出。
 
 Git postcondition 只比较 Workflow 前后发生变化的路径，已有且未变化的无关 dirty path 不阻塞；异常只报告并 blocked，不执行 add/commit/stash/reset/restore/clean。`state.json` 写入失败使对外结果降级 failed/blocked——不能继续通知 completed。
 

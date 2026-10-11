@@ -885,8 +885,8 @@ fn run_done_projection_is_committed_before_the_observer_is_notified() {
         "completed",
         None,
         None,
-        peri_acp_types::workflow::PostProcessingStatus::Passed,
-        peri_acp_types::workflow::DeliveryStatus::Deliverable,
+        peri_acp_types::workflow::PostProcessingStatus::Failed,
+        peri_acp_types::workflow::DeliveryStatus::Blocked,
     );
 
     let seen = probe.seen.lock().clone().expect("RunDone 已回调");
@@ -896,11 +896,11 @@ fn run_done_projection_is_committed_before_the_observer_is_notified() {
     );
     assert_eq!(
         seen.delivery_status,
-        peri_acp_types::workflow::DeliveryStatus::Deliverable,
+        peri_acp_types::workflow::DeliveryStatus::Blocked,
         "投影与 RunDone 同一次提交，通知不得早于投影"
     );
     assert_eq!(
         seen.post_processing_status,
-        peri_acp_types::workflow::PostProcessingStatus::Passed
+        peri_acp_types::workflow::PostProcessingStatus::Failed
     );
 }

@@ -238,8 +238,10 @@ async fn workflow_result_receiver_returns_none_when_closed_without_result() {
     assert!(result.is_none());
 }
 
+/// 内核只投影 `blocked` / `unknown`：acceptance 无生产写入方，任何组合都不会
+/// 升级成 `deliverable`（该判定属引擎之外的验收层）。
 #[test]
-fn postcondition_projection_requires_acceptance_evidence_for_delivery() {
+fn postcondition_projection_never_escalates_to_deliverable() {
     use peri_acp_types::workflow::{
         AcceptanceStatus, DeliveryStatus, PostProcessingStatus, WorkflowWriteIntent,
     };
@@ -254,6 +256,8 @@ fn postcondition_projection_requires_acceptance_evidence_for_delivery() {
         ),
         (PostProcessingStatus::NotRequired, DeliveryStatus::Unknown)
     );
+    // acceptance 无生产写入方（内核不判验收）：Passed 也不把 delivery 抬到
+    // deliverable——deliverable 属引擎之外的验收层（2026-10-11 用户裁决）。
     assert_eq!(
         project_postcondition(
             "completed",
@@ -261,10 +265,7 @@ fn postcondition_projection_requires_acceptance_evidence_for_delivery() {
             Some(&read_only),
             Some(&Ok(())),
         ),
-        (
-            PostProcessingStatus::NotRequired,
-            DeliveryStatus::Deliverable,
-        )
+        (PostProcessingStatus::NotRequired, DeliveryStatus::Unknown)
     );
     assert_eq!(
         project_postcondition(

@@ -189,7 +189,7 @@ fn test_state_error_skipped_when_none() {
         execution_status: ExecutionStatus::Completed,
         acceptance_status: AcceptanceStatus::Passed,
         post_processing_status: PostProcessingStatus::NotRequired,
-        delivery_status: DeliveryStatus::Deliverable,
+        delivery_status: DeliveryStatus::Unknown,
         write_intent: None,
         limits: crate::protocol::WorkflowLimits::default(),
         budget_total: None,
@@ -205,6 +205,25 @@ fn test_state_error_skipped_when_none() {
     store.write_state("run-ok", &state).unwrap();
     let raw = std::fs::read_to_string(store.run_dir("run-ok").join("state.json")).unwrap();
     assert!(!raw.contains("error"), "None 时不应序列化 error 字段");
+}
+
+#[test]
+fn test_legacy_deliverable_state_reads_as_unknown() {
+    let state: RunState = serde_json::from_value(serde_json::json!({
+        "run_id": "legacy-delivery",
+        "workflow_name": "legacy",
+        "status": "completed",
+        "delivery_status": "deliverable",
+        "script": "script",
+        "started_at": "2026-06-22T00:00:00Z"
+    }))
+    .unwrap();
+
+    assert_eq!(
+        state.delivery_status,
+        DeliveryStatus::Unknown,
+        "历史 state.json 的 deliverable 必须按 unknown 读入（数据兼容），不得反序列化失败"
+    );
 }
 
 #[test]

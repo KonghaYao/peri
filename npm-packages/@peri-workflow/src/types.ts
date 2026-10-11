@@ -117,7 +117,8 @@ export type WorkflowWriteIntent =
 export type WorkflowExecutionStatus = 'running' | 'completed' | 'failed' | 'killed' | 'unknown'
 export type WorkflowAcceptanceStatus = 'passed' | 'failed' | 'unknown'
 export type WorkflowPostProcessingStatus = 'not_required' | 'passed' | 'failed' | 'blocked' | 'unknown'
-export type WorkflowDeliveryStatus = 'deliverable' | 'blocked' | 'unknown'
+/** 内核只产出 `blocked` / `unknown`；历史 state.json 可能写着 `deliverable`，按 `unknown` 看待。 */
+export type WorkflowDeliveryStatus = 'blocked' | 'unknown'
 
 export type AttemptDisposition = 'produced' | 'recovered' | 'rejected'
 

@@ -304,8 +304,11 @@ pub enum PostProcessingStatus {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
 #[serde(rename_all = "snake_case")]
 pub enum DeliveryStatus {
-    Deliverable,
     Blocked,
+    /// 历史 `state.json` 可能写着 `deliverable`（该投影分支已删，内核不再产出）：
+    /// 继续按 `unknown` 读入，是**数据兼容**而非 API 兼容——枚举收窄不得让
+    /// resume / 审计读旧文件失败。
+    #[serde(alias = "deliverable")]
     #[default]
     Unknown,
 }
@@ -487,7 +490,6 @@ fn post_condition_word(status: PostProcessingStatus) -> &'static str {
 
 fn delivery_status_word(status: DeliveryStatus) -> &'static str {
     match status {
-        DeliveryStatus::Deliverable => "deliverable",
         DeliveryStatus::Blocked => "blocked",
         DeliveryStatus::Unknown => "unknown",
     }

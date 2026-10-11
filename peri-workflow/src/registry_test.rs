@@ -238,7 +238,7 @@ fn test_notification_includes_saved_state_only_when_artifact_exists() {
         execution_status: ExecutionStatus::Completed,
         acceptance_status: AcceptanceStatus::Passed,
         post_processing_status: PostProcessingStatus::NotRequired,
-        delivery_status: DeliveryStatus::Deliverable,
+        delivery_status: DeliveryStatus::Unknown,
         state_artifact_exists: true,
         duration_ms: 1000,
         agent_count: 2,

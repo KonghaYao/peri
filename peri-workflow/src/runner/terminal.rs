@@ -68,6 +68,9 @@ pub(super) fn project_postcondition(
         (Some(WorkflowWriteIntent::Write { .. }), Some(Ok(()))) => PostProcessingStatus::Passed,
         _ => PostProcessingStatus::Blocked,
     };
+    // 内核只投影 `blocked` / `unknown`：验收不由运行内核判定（`acceptance_status`
+    // 在完成路径恒为 `Unknown`，无生产写入方），`deliverable` 属引擎之外的验收层，
+    // 不在本函数取值域（2026-10-11 用户裁决，见 ADLC-DELIVERY-STATUS-001）。
     let delivery = if execution_status != "completed"
         || acceptance_status == AcceptanceStatus::Failed
         || write_intent.is_none()
@@ -76,8 +79,6 @@ pub(super) fn project_postcondition(
             PostProcessingStatus::Failed | PostProcessingStatus::Blocked
         ) {
         DeliveryStatus::Blocked
-    } else if acceptance_status == AcceptanceStatus::Passed {
-        DeliveryStatus::Deliverable
     } else {
         DeliveryStatus::Unknown
     };
