@@ -43,6 +43,8 @@ impl ImageFixture {
             Arc::new(McpClientHandle {
                 name: "workspace".to_owned(),
                 version: None,
+                connected_at: None,
+                protocol_version: None,
                 cache_version: None,
                 peer: Some(service.peer().clone()),
                 tools: Vec::new(),

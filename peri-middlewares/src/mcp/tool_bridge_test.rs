@@ -23,6 +23,8 @@ fn make_disconnected_handle(name: &str) -> Arc<McpClientHandle> {
     Arc::new(McpClientHandle {
         name: name.to_string(),
         version: None,
+        connected_at: None,
+        protocol_version: None,
         cache_version: None,
         peer: None,
         tools: vec![],
@@ -270,6 +272,8 @@ fn test_build_tool_bridges_filters_app_only_tool_from_model_catalog() {
         Arc::new(McpClientHandle {
             name: "apps".to_string(),
             version: None,
+            connected_at: None,
+            protocol_version: None,
             cache_version: None,
             peer: None,
             tools: vec![tool],
@@ -299,6 +303,8 @@ fn connected_handle(name: &str, tools: Vec<Tool>) -> Arc<McpClientHandle> {
     Arc::new(McpClientHandle {
         name: name.to_string(),
         version: None,
+        connected_at: None,
+        protocol_version: None,
         cache_version: None,
         peer: None,
         tools,
@@ -569,6 +575,8 @@ async fn builtin_tool_call_surfaces_timeout_error_after_bridge_deadline() {
         Arc::new(McpClientHandle {
             name: "cron".to_string(),
             version: None,
+            connected_at: None,
+            protocol_version: None,
             cache_version: None,
             peer: Some(peer),
             tools: vec![tool.clone()],

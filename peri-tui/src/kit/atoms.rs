@@ -175,6 +175,12 @@ pub struct PluginSummary {
 pub struct McpServerSummary {
     pub name: String,
     pub version: Option<String>,
+    /// 当前连接建立时刻（RFC3339 UTC；`mcp/list` 的 connectedAt）；
+    /// 从未成功连接为 None。
+    pub connected_at: Option<String>,
+    /// 与 server 协商出的 MCP 协议版本（`mcp/list` 的 protocolVersion，如
+    /// `2026-07-28`）；未协商出为 None。
+    pub protocol_version: Option<String>,
     pub status: String,
     /// 仅用于 MCP 面板的安全、单行失败摘要；完整诊断写入 tracing 日志。
     pub error_summary: Option<String>,

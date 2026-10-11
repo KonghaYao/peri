@@ -22,6 +22,13 @@ pub(super) fn handle_search_event(
     add_marketplace_input: State<TextAreaState>,
     add_marketplace_active: State<bool>,
 ) -> EventResult {
+    // 弹窗（HITL/OAuth/Confirm 等）占用前景时整体让路：本 handler 为
+    // `EventPriority::High` 且注册先于 `PopupOverlay`，层内先注册先消费——
+    // 继续处理会让弹窗收不到任何输入（focus_router 目标优先级 Popup > Panel）。
+    if crate::kit::focus_router::popup_owns_foreground() {
+        return EventResult::Ignored;
+    }
+
     if super::operation::handle_pending_event(&event, operation) {
         return EventResult::Consumed;
     }

@@ -46,6 +46,10 @@ pub struct ServerInfo {
     pub name: String,
     pub version: Option<String>,
     pub cache_version: Option<String>,
+    /// 当前连接建立时刻（RFC3339 UTC）；从未成功连接为 None。
+    pub connected_at: Option<String>,
+    /// 与 server 协商出的 MCP 协议版本（如 `2026-07-28`）；未协商出为 None。
+    pub protocol_version: Option<String>,
     pub transport_type: String,
     pub status: ClientStatus,
     /// 供 UI 显示的稳定状态标签，不暴露 `ClientStatus::Failed` 的完整错误链。
@@ -88,6 +92,11 @@ pub struct McpClientHandle {
     pub name: String,
     pub version: Option<String>,
     pub cache_version: Option<String>,
+    /// 当前连接建立时刻（RFC3339 UTC，server 自报初始化完成时记录）；
+    /// 从未成功连接（Failed / Disabled / Uninitialized）为 None。
+    pub connected_at: Option<String>,
+    /// 与 server 协商出的 MCP 协议版本（如 `2026-07-28`）；未协商出为 None。
+    pub protocol_version: Option<String>,
     pub peer: Option<Peer<RoleClient>>,
     pub tools: Vec<Tool>,
     pub resources: Vec<Resource>,
