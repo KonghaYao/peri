@@ -590,8 +590,8 @@ impl WorkflowTaskResult {
         };
         let projection_line = format!(
             "Execution: {}; acceptance: {}; post-condition: {}; delivery: {}.\n\
-             Acceptance is judged outside the engine: unknown acceptance keeps delivery \
-             `unknown` — not a failure.\n",
+             Acceptance is judged outside the engine, so it reads `unknown` unless the calling \
+             layer (ADLC/skill) supplies a verdict.\n",
             execution_status_word(self.execution_status),
             acceptance_status_word(self.acceptance_status),
             post_condition_word(self.post_processing_status),
