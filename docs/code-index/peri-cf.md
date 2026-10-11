@@ -1,58 +1,61 @@
 # Peri CF 代码索引
 
-状态：新增独立的 Cloudflare 聊天应用。生产部署、真实模型和远端存储仍需环境验收；不属于根 Cargo workspace。使用说明与测试命令由 [包 README](../../npm-packages/peri-cf/README.md) 维护。
+状态：独立的 Cloudflare 聊天应用，**浏览器是唯一计算实例、Worker 零配置无状态**：Peri ACP Host（peri-wasm）在浏览器启动，会话运行时/投影/命令/交互/载荷读取全部驻留标签页；Worker 只提供静态资源与 relay 透传（无 env/secrets、无 Durable Object、零表、无同步状态），上游地址与凭据由浏览器本地配置携带。生产部署、真实浏览器宿主、远端存储与平台资源仍需环境验收；不属于根 Cargo workspace。使用说明与命令由 [包 README](../../npm-packages/peri-cf/README.md) 维护，架构基线见 [浏览器宿主 Agent 设计](../design/peri-cf-browser-agent.md)，迁移范围与验收见 [迁移 issue](../../spec/issues/2026-10-11-peri-cf-browser-agent-migration.md)。
 
 ## 边界与数据流
 
-列表：浏览器 React → 同源 Hono API → SDK `TursoStorage` → Rust Store 的 `threads` 表。执行：Hono API → 按实际 ACP Session ID 定位 SQLite Durable Object → SDK WASM transport → Peri WASM Host → 模型与同一 Turso/libSQL Store。API 与 DO 路由共用鉴权和错误 middleware，聊天执行不负责 HTTP 路由匹配。
+列表与创建：浏览器 React → 标签页应用门面（`web/runtime/application.ts`）→ SDK `TursoStorage`（同源 relay，上游基址与 token 来自浏览器本地配置）→ Rust Store。执行：内存命令 → 标签页 `ChatRegistry` 按实际 ACP Session ID 取得 `ChatRuntime` → SDK `startPeriWasmHost` → Peri WASM Host → 模型经 `/api/relay/model/*`、存储经 `/api/relay/storage/*`（Rust 侧 fetch 执行器；relay 按请求路径首段指定的上游转发）。
 
-展示同步：ACP 通知 → SDK `SessionDocs` → `SessionDocSync` → SDK 帧编解码与交付信用 → 只读 WebSocket → 浏览器 `SessionDocReplica` → SDK view。应用只适配 DO 持久化的 socket attachment、HTTP/WS 鉴权和展示元数据；断线重连恢复订阅，不重发命令或自动取消。
+展示复原：会话运行期先建订阅/投影，再以 ACP `session/load` 触发重放（宿主在响应前以 `session/update` 重放持久历史），重放通知直接进入 SDK 投影；`state()` 与首屏读取返回同一 SyncState DTO。展示不再跨网络同步：Yjs 文档（`SessionDocs`）只存在于标签页内存，`readSessionView` 物化展示面。
 
-- 不设置目录 Durable Object，不保存独立聊天列表，也不在 TS 新建平行会话表。TS 复用 SDK 的元数据查询；新建经 ACP `session/new` 与 `session/rename` 写入 Rust Store，然后从 Turso 读回。聊天 ID 就是实际 ACP Session ID。
-- 每聊天 Durable Object 只保存展示历史和运行协调状态，元数据从 Turso 刷新；Rust Store 是 Peri 会话数据的权威。不依赖 D1，DO 与 Rust Store 不具有跨存储原子事务。展示历史仍是本应用 DO 内的流式投影，不宣称能从任意已有 Rust 会话重建全部展示消息。
-- Workers 只消费已发布 SDK 入口：`/wasm-host`（SDK 拥有宿主启动、端口所有权与关闭证据）、`/portable`（投影、同步 wire/交付语义、Store 读取）与 `/view`；应用内 `worker/sdk/index.ts` 是唯一接线点，不引用 `@peri-sdk/src`、不加载 Bun/stdio 管理入口。Cloudflare 平台适配（CF 产物与静态模块注入、isolate 容量、线性内存观测、DO socket attachment）保留在应用，并通过 SDK 的 `moduleFactory` / `ports` / `onLifecycle` 注入。执行归属 Rust Host：当前 ACP 没有执行准入与精确停止协议（`peri/execution/*`、`session/control*` 在 Rust 与 SDK 中均不存在），应用不实现 admission/ledger，只负责宿主生命周期与 `session/cancel`；本应用不是通用 `ManagedAgents` 或 child runtime 的 Cloudflare 移植，不宣称在途计算恢复或分布式接管。
-- 实例监控页是只读视图：`GET /api/instances` 按并发上限扇出读取各聊天 DO 的采样器快照，不新增实例存储、不保留历史、不提供实例操作；单会话读取失败降级为该项，DO 回收后不显示实例，也不把观测当作存活探测。
-- Bearer token 对应单一共享信任域，不提供多租户所有权隔离。模型与存储密钥只在服务端配置；前端 token 设置不携带提供商密钥。
-- 工具默认关闭，不将 Emscripten 虚拟目录当作真实文件系统。未来接入工具需经 MCP 能力边界单独设计授权与生命周期。
-- 取消已迁移到当前 ACP：应用向宿主发送会话级 `session/cancel` 通知，取消成立以 prompt 结算为 cancelled 且 ACP Host 关闭被确认为准；启动中尚未发送 prompt 时只跳过本轮。旧的 `peri/execution/*` 准入与 `session/control*` 精确停止/控制代次在 Rust 与 SDK 中都不存在，应用侧 dispatcher/ledger adapter 已删除，取消后的下一次显式发送就是新回合。部署须配置持久 `PERI_MACHINE_ID`，不使用跨部署共享的示例身份。
+- Worker 零配置：`apiApp()` 统一 no-store 与错误响应；relay 按路径首段（`/api/relay/<storage|model>/<encodeURIComponent(上游绝对基址)>/…`，基址须 `http(s)`）转发，凭据头原样上行、逐跳头与跳源头剥离，存储 JSON 响应 `base_url` 改写为 relay 前缀。除 relay 外 `/api/*` 一律 404（没有 `GET /api/config`）；非 API 路径走静态资源（SPA 回退）。
+- 配置与凭据在浏览器：`web/settings/config.ts` 以 localStorage 单键 `peri-cf.browser-config.v1` 保存 machineId、模型与存储配置，`web/settings/SettingsView.tsx` 是首次运行门禁与标题栏入口；密钥经 relay 明文过网（DevTools 可见）。
+- 运行期注册表（`web/runtime/registry.ts`）只驻留标签页内存：`runtimeFor` 惰性创建、超限按 LRU 回收空闲运行期（忙碌时允许超限）。Rust Store 是唯一持久权威；刷新/关闭标签页等价于宿主实例结束，在途执行丢失且不复原。
+- 命令通道：内存调用（`web/runtime/session.ts` 的 `ChatCommand` → `ChatCommandError`），不再有 WS 控制帧；失败总是「确定未生效」。浏览器侧不实例化 SessionDocReplica/SessionDocSync。
+- 只消费已发布 SDK 入口：`@peri-code/sdk/wasm`（宿主启动、调度器端口、transport、截止时间与关闭证据）、`/portable`（投影、Store 读取、交互规则）、`/view`（只读视图与载荷读取）；不引用 `@peri-sdk/src`、不加载 Bun/stdio 管理入口。SDK `/portable` 的准入模块引用 `crypto`，浏览器构建以显式失败的替身替换（`web/shims/nodeCrypto.ts` + Vite alias）。
+- 取消：会话级 `session/cancel` 通知，取消成立以 prompt 结算为 cancelled 且宿主关闭被确认为准；未确认关闭在标签页内阻断该会话后续运行。当前 ACP 没有执行准入与精确停止协议，应用侧不实现 admission/ledger。
+- 没有访问控制：HTTP 面与 relay 对知道 URL 的任何人开放，不提供多租户隔离；relay 不限制转发目标，未挂入口控制时等价开放转发面（已知风险，代码不做限制）。部署入口控制由 Cloudflare Access 或等效设施承担。machineId 是客户端身份：首次运行 `crypto.randomUUID()` 生成并长期保存（须为规范 UUID），清除即换身份。
+- 工具默认关闭，不将 Emscripten 虚拟目录当作真实文件系统；接入远程 MCP 需按能力边界单独设计授权与生命周期。
 
 ## 入口
 
 | 职责 | 入口 |
 | --- | --- |
 | 包命令、依赖 | `npm-packages/peri-cf/package.json` |
-| SPA 与同源 Worker 开发构建 | `npm-packages/peri-cf/vite.config.ts` |
-| Workers、DO 与静态资源绑定 | `npm-packages/peri-cf/wrangler.jsonc` |
-| Workers 业务入口 | `npm-packages/peri-cf/worker/index.ts` |
-| 前后端共享 Zod schema 与 DTO | `npm-packages/peri-cf/shared/chat.ts` |
-| 前后端展示 DTO 的 Zod schema | `npm-packages/peri-cf/shared/sync.ts`（帧编解码与交付信用在 SDK） |
-| SDK view 到 UI 的共享展示转换 | `npm-packages/peri-cf/shared/sync-state.ts` |
-| Hono API、共享 middleware 与边界校验 | `npm-packages/peri-cf/worker/api/` |
-| Hono JSON 校验与实际字节上限；取消请求在响应前有界消费 body | `npm-packages/peri-cf/worker/api/json.ts` |
-| 聊天 DO 路由、运行状态与 `session/cancel` 取消 | `npm-packages/peri-cf/worker/chat/routes.ts`、`session.ts` |
-| SDK ACP/Yjs 投影与持久展示恢复 | `npm-packages/peri-cf/worker/chat/projection.ts` |
-| WS 首帧鉴权、Hibernation 订阅恢复与 DO socket attachment | `npm-packages/peri-cf/worker/chat/sync.ts`、`ws-delivery.ts`（帧与交付信用来自 SDK），DO 事件入口 `worker/index.ts` |
-| 工作区 SDK 接线唯一入口（`/portable`、`/wasm-host`、`/view`） | `npm-packages/peri-cf/worker/sdk/index.ts` |
-| SDK 宿主的 Cloudflare 接线（模块注入、容量、实例观测） | `npm-packages/peri-cf/worker/wasm/` |
-| 每 Agent 实例资源查询 DTO 与线性内存采样 | `npm-packages/peri-cf/shared/resources.ts`、`worker/wasm/resources.ts`；`GET /api/chats/:id/resources` |
-| 实例监控页的只读聚合与前端页面 | `npm-packages/peri-cf/worker/instances/collect.ts`、`shared/instances.ts`、`web/instances/`；`GET /api/instances`，入口见 `web/App.tsx` |
-| Workers glue 注入与部署 DNS override 校验 | `npm-packages/peri-cf/scripts/worker-glue.ts`、`worker/wasm/dns.ts` |
-| 仅开发服务的本机 DNS 解析 | `npm-packages/peri-cf/scripts/local-dns.ts` |
-| 编译 Worker 的默认 Wrangler 本地启动 | `npm-packages/peri-cf/scripts/local-preview.ts`、`local-preview-command.ts` |
-| 真实浏览器操作验收（无模型/数据库 mock） | `npm-packages/peri-cf/scripts/e2e.mjs` |
-| 浏览器 HTTP 查询/命令 | `npm-packages/peri-cf/web/api/client.ts` |
-| 浏览器 SDK Yjs 副本与 WS 生命周期 | `npm-packages/peri-cf/web/api/sync.ts` |
-| 聊天展示与生成生命周期 | `npm-packages/peri-cf/web/chat/` |
+| SPA/Worker 开发构建与 `crypto` 替身 alias | `npm-packages/peri-cf/vite.config.ts`、`web/shims/nodeCrypto.ts` |
+| Worker、静态资源与 `ASSETS` 绑定（无 vars、无 DO 绑定、无 migrations） | `npm-packages/peri-cf/wrangler.jsonc` |
+| Worker 入口（ASSETS + `/api/*` 分发） | `npm-packages/peri-cf/worker/index.ts` |
+| 无状态 API 装配（relay 注册） | `npm-packages/peri-cf/worker/api/router.ts` |
+| relay 透传（目标解析、头过滤、流式转发、`base_url` 改写） | `npm-packages/peri-cf/worker/api/relay.ts` |
+| 统一 no-store/错误/404 语义；错误诊断与响应 | `npm-packages/peri-cf/worker/api/app.ts`、`http.ts` |
+| Worker 部署环境契约（仅 `ASSETS` 绑定） | `npm-packages/peri-cf/worker/types.ts` |
+| 标签页应用装配（origin、startHost、registry、repository） | `npm-packages/peri-cf/web/runtime/application.ts` |
+| 浏览器宿主启动（模块工厂 + 调度器端口） | `npm-packages/peri-cf/web/host/index.ts`、`module.ts` |
+| 浏览器宿主运行配置（上游基址编码进 relay 路径、`/workspace`、BareHarnessConfig） | `npm-packages/peri-cf/web/host/config.ts` |
+| 浏览器本地配置读写（localStorage 单键、必填校验、machineId 生成） | `npm-packages/peri-cf/web/settings/config.ts` |
+| 设置页（首次运行门禁、标题栏齿轮入口、保存后刷新生效） | `npm-packages/peri-cf/web/settings/SettingsView.tsx`、`web/App.tsx` |
+| 单会话运行期（`ChatRuntime`：hydrate 重放复原、执行、取消、交互、载荷） | `npm-packages/peri-cf/web/runtime/session.ts` |
+| 标签页运行期注册表（LRU、`runtimeFor`） | `npm-packages/peri-cf/web/runtime/registry.ts` |
+| SDK 投影与展示物化（`state()`；文档对随运行期存活） | `npm-packages/peri-cf/web/runtime/projection.ts` |
+| 会话连接与命令端口（`ChatConnection`/`ChatCommandPort`） | `npm-packages/peri-cf/web/runtime/connection.ts` |
+| 新聊天 ACP 创建与命名（一次性宿主） | `npm-packages/peri-cf/web/runtime/creation.ts` |
+| Turso 元数据查询与创建回读（relay URL + 浏览器配置的上游与 token） | `npm-packages/peri-cf/web/runtime/repository.ts` |
+| ACP 初始化能力与工作区身份 | `npm-packages/peri-cf/web/runtime/bootstrap.ts` |
+| 反向交互 live 登记表（权限/提问） | `npm-packages/peri-cf/web/runtime/interactions.ts` |
+| 浏览器诊断与公开错误（不含凭据） | `npm-packages/peri-cf/web/runtime/logging.ts` |
+| 共享展示 DTO（Entry/Block/Tool/Turn/Interaction/任务/计划/队列） | `npm-packages/peri-cf/shared/chat.ts` |
+| SyncState 与运行元数据 Zod schema | `npm-packages/peri-cf/shared/sync.ts` |
+| SDK view 到 UI 的展示物化（`materializeSyncState`；unsupported pair 由 `web/api/client.ts` 拒绝并提示升级） | `npm-packages/peri-cf/shared/sync-state.ts` |
+| wasm 构建输入常量（内存/栈/清理超时） | `npm-packages/peri-cf/shared/runtime-limits.ts` |
+| 浏览器 HTTP/本地只读查询门面（list/create/detail） | `npm-packages/peri-cf/web/api/client.ts` |
+| 聊天展示、导航与生成生命周期 | `npm-packages/peri-cf/web/chat/`、`web/App.tsx` |
 | TanStack 私有读侧缓存与取消 | `npm-packages/peri-cf/web/chat/queries.ts` |
-| Token 切换工作区隔离及按需加载展示 | `npm-packages/peri-cf/web/App.tsx` |
-| Token 设置与浏览器持久化（`localStorage` 键 `peri.access-token`，保存空值即清除） | `npm-packages/peri-cf/web/settings/Settings.tsx`、`tokenStorage.ts` |
-| TS 直连 Turso 元数据查询 | `npm-packages/peri-cf/worker/chat/repository.ts` |
-| 新聊天 ACP 创建与命名 | `npm-packages/peri-cf/worker/chat/creation.ts` |
-| 初始化能力与工作区身份 | `npm-packages/peri-cf/worker/chat/bootstrap.ts` |
-| 宿主接线与 isolate 容量/实例观测（启动与关闭证据在 SDK） | `npm-packages/peri-cf/worker/wasm/{host,budget,resources}.ts`、`shared/runtime-limits.ts` |
 | CF 专用构建、provenance 与原子准备（哈希范围 = peri-wasm 本地依赖闭包） | `npm-packages/peri-cf/scripts/{build-wasm,wasm-provenance,prepare-wasm}.ts` |
+| 宿主定时器与 socket 胶水注入（`periSetTimeout`/`periClearTimeout`/`periSetImmediate` 经 scheduler 端口） | `npm-packages/peri-cf/scripts/{worker-glue,worker-runtime-glue}.ts` |
 | 构建 profile 产物对比（不测 runtime CPU） | `npm-packages/peri-cf/scripts/profile-wasm.ts` |
-| 原始诊断与独立展示限制 | `npm-packages/peri-cf/worker/api/http.ts` |
-| 行为测试 | `npm-packages/peri-cf/tests/` |
+| 本地 workerd 启动与日志转发 | `npm-packages/peri-cf/scripts/local-preview.ts`、`local-preview-command.ts`、`relay-output.ts` |
+| 行为测试 | `npm-packages/peri-cf/tests/`、`web/**/*.test.tsx`（浏览器宿主与 relay 的行为验收以真实浏览器手工验证为准） |
 
-WASM 产物来源及协议验证入口参见 [Peri WASM 索引](peri-wasm.md)，通用 SDK 执行管理契约参见 [TS SDK 索引](peri-ts-sdk.md)。
+WASM 产物来源及协议验证入口参见 [Peri WASM 索引](peri-wasm.md)，通用 SDK 契约参见 [TS SDK 索引](peri-ts-sdk.md)。
+
+聊天展示对象契约见 [peri-cf 聊天对象契约](../design/peri-cf-chat-objects.md)：产品语义（消息展示、命令、交互回答、载荷读取）继续有效；**执行与同步结构已由 [浏览器宿主 Agent 设计](../design/peri-cf-browser-agent.md) 取代**（2026-10-11）：计算实例在浏览器，Worker 无状态透传，WS 同步与实例观测端点已删除。

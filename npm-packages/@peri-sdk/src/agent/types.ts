@@ -11,7 +11,8 @@ export type AcpMcpServer =
 
 /** Peri's reverse ACP permission request, with the tool input available only to the callback. */
 export type PermissionRequest = {
-    interactionId: number;
+    /** 稳定 Interaction id（同时是 Interaction 记录的 Map key 与 ToolCall.permissionId）。 */
+    interactionId: string;
     sessionId: string;
     toolCallId: string;
     title: string;
@@ -21,7 +22,7 @@ export type PermissionRequest = {
 };
 
 export type ElicitationRequest = {
-    interactionId: number;
+    interactionId: string;
     sessionId: string;
     message: string;
     requestedSchema: Record<string, unknown>;
@@ -31,6 +32,9 @@ export type ElicitationRequest = {
 export type ElicitationDecision =
     | { action: "accept"; content: Record<string, unknown> }
     | { action: "decline" | "cancel" };
+
+/** 反向交互回调：宿主可只提供这两个回调（不需要完整 AgentOptions）。 */
+export type InteractionCallbacks = Pick<AgentOptions, "onPermissionRequest" | "onElicitation">;
 
 export interface AgentOptions {
     id: string;

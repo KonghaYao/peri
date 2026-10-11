@@ -57,9 +57,9 @@ describe("explicit CF size/speed build profiles", () => {
     const original = { PATH: "/toolchain", RUSTFLAGS: "-Copt-level=0", CARGO_ENCODED_RUSTFLAGS: "override",
       CARGO_PROFILE_CF_WASM_SIZE_LTO: "false", CARGO_BUILD_RUSTFLAGS: "override", EMCC_CFLAGS: "-sMAXIMUM_MEMORY=2GB",
       CARGO_TARGET_WASM32_UNKNOWN_EMSCRIPTEN_LINKER: "other", PERI_WASM_MAX_MEMORY: "2147483648",
-      APP_AUTH_TOKEN: "private-server-value" };
+      MODEL_API_KEY: "private-server-value" };
     const result = cleanBuildEnvironment(original);
-    expect(result).toEqual({ PATH: "/toolchain", APP_AUTH_TOKEN: "private-server-value" });
+    expect(result).toEqual({ PATH: "/toolchain", MODEL_API_KEY: "private-server-value" });
     expect(original.RUSTFLAGS).toBe("-Copt-level=0");
   });
 });

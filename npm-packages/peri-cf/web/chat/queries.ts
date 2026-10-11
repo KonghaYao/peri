@@ -1,9 +1,10 @@
 import { QueryClient, queryOptions } from '@tanstack/react-query';
-import type { Chat, ChatDetail } from './types';
+import type { Chat } from './types';
+import type { SyncState } from '../../shared/sync';
 
 export interface ChatReadApi {
   list(signal?: AbortSignal): Promise<Chat[]>;
-  detail(chatId: string, signal?: AbortSignal): Promise<ChatDetail>;
+  detail(chatId: string, signal?: AbortSignal): Promise<SyncState>;
 }
 
 const listKey = ['chats', 'list'] as const;
@@ -40,14 +41,14 @@ export function createChatQueries(api: ChatReadApi) {
     client,
     list,
     history,
-    setHistory(detail: ChatDetail) {
+    setHistory(detail: SyncState) {
       client.setQueryData(historyKey(detail.chat.id), detail);
     },
     mergeChat(chat: Chat) {
       client.setQueryData<Chat[]>(listKey, previous => [...(previous || []).filter(item => item.id !== chat.id), chat]
         .sort((left, right) => Date.parse(right.updatedAt) - Date.parse(left.updatedAt)));
     },
-    async readHistory(chatId: string, signal?: AbortSignal, fresh = true): Promise<ChatDetail> {
+    async readHistory(chatId: string, signal?: AbortSignal, fresh = true): Promise<SyncState> {
       signal?.throwIfAborted();
       const cancel = () => { void client.cancelQueries({ queryKey: historyKey(chatId), exact: true }); };
       signal?.addEventListener('abort', cancel, { once: true });

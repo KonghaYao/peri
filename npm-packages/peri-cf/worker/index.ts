@@ -1,21 +1,12 @@
-import { startTransport } from "./wasm/host";
-import { ChatSessionCore } from "./chat/session";
-import { chatRepository } from "./chat/repository";
-import { createPeriSession } from "./chat/creation";
 import { createApi } from "./api/router";
 import type { Env } from "./types";
 import type { ExecutionContext } from "@cloudflare/workers-types";
-import type { HibernatingSessionState } from "./chat/sync";
 
-export class ChatSession extends ChatSessionCore {
-  constructor(state: HibernatingSessionState, env: Env) {
-    super(state, env, startTransport,
-      chatRepository(env, (title) => createPeriSession(env, title, startTransport, (promise) => state.waitUntil(promise))));
-  }
-}
-
-const api = createApi((env, waitUntil) => chatRepository(env,
-  (title) => createPeriSession(env, title, startTransport, waitUntil)));
+/**
+ * 零配置入口：Worker 只提供静态资源与 relay 透传，不持有配置、凭据、会话运行时、
+ * 同步状态与执行调度。计算实例（Peri ACP Host）驻留在浏览器，上游地址与凭据同在其侧。
+ */
+const api = createApi();
 
 export default {
   async fetch(request: Request, env: Env, context: ExecutionContext): Promise<Response> {

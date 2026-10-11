@@ -5,8 +5,8 @@ dist/
 .dev.vars
 .env*
 !.env.example
-worker/wasm/generated/
-worker/wasm/generated.tmp-*/
+web/wasm/generated/
+web/wasm/generated.tmp-*/
 worker-configuration.d.ts
 
 # 本地 dev 日志（local-preview.ts 落盘）

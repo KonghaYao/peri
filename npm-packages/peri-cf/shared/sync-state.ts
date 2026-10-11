@@ -1,26 +1,21 @@
-import { readSessionView } from "@peri-code/sdk/view";
-import type { Doc } from "yjs";
-import { syncMetadataSchema, syncStateSchema, type SyncState } from "./sync";
+import type { SessionView } from "@peri-code/sdk/view";
+import { syncStateSchema, type SyncMetadata, type SyncState } from "./sync";
 
-export function readSyncState(chat: Doc, session: Doc): SyncState {
-  const metadata = syncMetadataSchema.parse(session.getMap("peri-cf").get("state"));
-  const view = readSessionView(chat, session);
-  return materializeSyncState(view, metadata);
-}
-
-export function materializeSyncState(view: ReturnType<typeof readSessionView>, metadata: SyncStateMetadata): SyncState {
-  const messages = view.entries.map((entry) => {
-    const fields = metadata.entryMetadata[entry.entryId];
-    const status = entry.role === "user" ? "completed" : fields?.error ? "error"
-      : ["completed", "cancelled", "error"].includes(entry.status) ? entry.status : "running";
-    return {
-      id: fields?.id ?? entry.entryId, role: entry.role,
-      content: entry.blocks.flatMap((block) => block.type === "text" ? [block.text] : []).join(""),
-      createdAt: fields?.createdAt ?? metadata.chat.updatedAt, status,
-      ...(fields?.error ? { error: fields.error } : {}),
-    };
+/** 纯展示适配：只复制 SDK view 已确认的公开对象，不补造身份、时间或错误。 */
+export function materializeSyncState(view: SessionView, metadata: SyncMetadata): SyncState {
+  const known = view.readiness === "ready";
+  return syncStateSchema.parse({
+    ...metadata,
+    readiness: view.readiness,
+    entries: known ? view.entries : [],
+    toolCalls: known ? view.toolCalls : [],
+    turns: known ? view.turns : [],
+    activeTurn: known ? view.activeTurn : { turnId: null, status: null },
+    session: known ? view.session : {},
+    tasks: known ? view.tasks : [],
+    plans: { current: known ? view.plan : [], byTurn: known ? view.plansByTurn : {} },
+    interactions: known ? view.interactions : [],
+    pendingInteractions: known ? view.pendingInteractions : [],
+    inputQueue: known ? view.inputQueue : null,
   });
-  return syncStateSchema.parse({ ...metadata, messages });
 }
-
-type SyncStateMetadata = ReturnType<typeof syncMetadataSchema.parse>;

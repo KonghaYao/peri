@@ -3,7 +3,7 @@
   "version": "0.1.0",
   "private": true,
   "type": "module",
-  "description": "Peri WASM chat on Cloudflare Workers and Durable Objects",
+  "description": "Peri WASM chat in the browser with a stateless Cloudflare Workers relay",
   "scripts": {
     "build:wasm": "bun scripts/build-wasm.ts",
     "wasm:profiles": "bun scripts/profile-wasm.ts",
@@ -14,8 +14,6 @@
     "preview": "bun scripts/local-preview.ts",
     "typecheck": "tsc --noEmit",
     "test": "bun test tests web",
-    "test:e2e": "node scripts/e2e.mjs",
-    "smoke:local": "bun run build && bun scripts/smoke.mjs",
     "deploy": "bun run build && wrangler deploy",
     "cf:typegen": "wrangler types"
   },

@@ -1,28 +1,13 @@
 import { Hono } from "hono";
-import { bearerAuth } from "hono/bearer-auth";
 import { HTTPException } from "hono/http-exception";
 import { errorResponse, logError } from "./http";
 import type { Env } from "../types";
 
-const unauthorized = { message: { error: "Unauthorized" }, wwwAuthenticateHeader: "Bearer" };
-
-export function authenticatedApp(): Hono<{ Bindings: Env }> {
+/** 所有 HTTP 面共用的 app：统一 no-store、错误与 404 语义；没有访问控制中间件。 */
+export function apiApp(): Hono<{ Bindings: Env }> {
   const app = new Hono<{ Bindings: Env }>();
   app.use("*", async (context, next) => {
     context.header("Cache-Control", "no-store");
-    if (!context.env.APP_AUTH_TOKEN)
-      return context.json({ error: "Authentication is not configured" }, 503);
-    if ((context.req.header("Authorization")?.length ?? 0) > 4103)
-      return context.json({ error: "Unauthorized" }, 401, { "WWW-Authenticate": "Bearer" });
-    try {
-      await bearerAuth<{ Bindings: Env }>({ token: context.env.APP_AUTH_TOKEN,
-        noAuthenticationHeader: unauthorized, invalidAuthenticationHeader: unauthorized, invalidToken: unauthorized,
-      })(context, async () => {});
-    } catch (error) {
-      if (error instanceof HTTPException && error.status === 400)
-        throw new HTTPException(401, { res: error.getResponse() });
-      throw error;
-    }
     await next();
     if (!context.res.headers.get("Cache-Control")?.includes("no-store"))
       context.header("Cache-Control", "no-store");
