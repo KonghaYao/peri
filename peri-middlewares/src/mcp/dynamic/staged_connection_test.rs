@@ -387,6 +387,35 @@ fn instance() -> DynamicMcpInstanceKey {
     }
 }
 
+/// 动态连接 handle 的排障 URL：HTTP 记录配置 URL，stdio 保持 None
+/// （回归：HTTP 成功路径曾填 None，ACP/TUI 详情 URL 恒显示空占位符）。
+#[test]
+fn configured_transport_url_keeps_http_url_and_skips_stdio() {
+    let http = CanonicalDynamicMcpConfig {
+        transport: CanonicalDynamicMcpTransport::StreamableHttp {
+            url: "https://example/mcp".into(),
+            headers: Default::default(),
+        },
+        timeout_ms: 1_000,
+        subscriptions: None,
+    };
+    assert_eq!(
+        configured_transport_url(&http).as_deref(),
+        Some("https://example/mcp")
+    );
+    let stdio = CanonicalDynamicMcpConfig {
+        transport: CanonicalDynamicMcpTransport::Stdio {
+            command: "node".into(),
+            args: vec![],
+            env: Default::default(),
+            cwd: None,
+        },
+        timeout_ms: 1_000,
+        subscriptions: None,
+    };
+    assert_eq!(configured_transport_url(&stdio), None);
+}
+
 #[tokio::test]
 async fn dynamic_oauth_without_injection_fails_before_flow_admission() {
     for closing in [false, true] {

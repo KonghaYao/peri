@@ -637,10 +637,19 @@ pub async fn prepare_single_server(
         status: ClientStatus::Connected,
         oauth_status: OAuthStatus::None,
         source: None,
-        url: None,
+        url: configured_transport_url(config),
         skills_capable: super::super::client::peer_declares_skills(&peer),
     });
     Ok(staged)
+}
+
+/// 动态连接的排障 URL：HTTP 连接记录配置 URL（状态投影透传给 ACP/TUI 详情），
+/// stdio 无 URL 保持 None。
+fn configured_transport_url(config: &CanonicalDynamicMcpConfig) -> Option<String> {
+    match &config.transport {
+        CanonicalDynamicMcpTransport::StreamableHttp { url, .. } => Some(url.clone()),
+        _ => None,
+    }
 }
 
 fn empty_handle() -> McpClientHandle {
