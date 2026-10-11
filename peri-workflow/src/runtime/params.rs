@@ -290,6 +290,8 @@ fn read_script_file(
     use std::io::Read as _;
 
     let mut file = std::fs::File::open(script_path).map_err(|e| e.to_string())?;
+    // 句柄元数据仅 unix 的 dev/ino 比对使用
+    #[cfg(unix)]
     let opened = file.metadata().map_err(|e| e.to_string())?;
     let recheck = script_path.canonicalize().map_err(|e| e.to_string())?;
     if !recheck.starts_with(cwd_canonical) {
