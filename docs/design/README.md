@@ -41,7 +41,7 @@ draft、proposal、可行性探查、审计报告和未采纳方案不进入本�
 | MCP 适配 v4-part-1 | [mcp-adaptation-v4-part-1.md](mcp-adaptation-v4-part-1.md) | System MCP 启动依赖、工具注入、MCP 隔离与 middleware 归属 |
 | MCP Apps relay | [mcp-multiplexing.md](mcp-multiplexing.md) | stdio Apps profile、binding lease 与多路数据隔离 |
 | Meta 数据访问 | [meta-control.md](meta-control.md) | 只读 session metadata CLI 与持久化边界 |
-| Workflow | [workflow.md](workflow.md) | Node RPC、runner、通知、kill 与 resume |
+| Workflow | [workflow.md](workflow.md) | Node wire、runner、任务与进度、journal/state、resume/kill、TUI 投影与 CLI/artifact 分发；MCP 接入与任务信道归 [workflow-mcp.md](workflow-mcp.md) |
 | Ultra-ADLC | [ultra-adlc.md](ultra-adlc.md) | 超大交付模式的文件协议与编排契约 |
 | TUI 数据流 | [tui-acp-data-flow.md](tui-acp-data-flow.md) | ACP event → Atom → render 链路 |
 | TUI 流式 Markdown 性能 | [tui-streaming-markdown-performance.md](tui-streaming-markdown-performance.md) | publication scheduler、lazy projection、增量 Markdown 与 slot index |
