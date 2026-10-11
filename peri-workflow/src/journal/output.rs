@@ -15,9 +15,13 @@ use tracing::warn;
 fn sanitize_label(json_path: &str) -> String {
     let mut sanitized = String::with_capacity(json_path.len());
     for character in json_path.chars() {
-        if character == '/' || character == '\\' || character.is_control() {
-            sanitized.push('_');
-        } else if character == '.' && sanitized.ends_with('.') {
+        // 两类替换效果相同但理由不同：分隔符/控制字符不能出现在文件名里；
+        // 连续点是路径遍历形态（`..`），折叠成 `._`。
+        let illegal = character == '/'
+            || character == '\\'
+            || character.is_control()
+            || (character == '.' && sanitized.ends_with('.'));
+        if illegal {
             sanitized.push('_');
         } else {
             sanitized.push(character);

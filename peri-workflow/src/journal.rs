@@ -20,6 +20,7 @@ mod git;
 mod output;
 pub use git::GitBaseline;
 pub use output::extract_long_texts;
+#[cfg(test)]
 pub(crate) use output::output_label;
 
 const WORKFLOW_RUNS_DIR: &str = ".claude/workflow-runs";
