@@ -223,12 +223,35 @@ fn test_notification_projects_structured_attempt_identity() {
     assert!(notification.contains("recovered_from=018-source/9/4"));
 }
 
+/// 测试期间的 run 目录守卫：断言 panic 时也要清理。
+///
+/// 本用例在进程 cwd（crate 根）下建 `.claude/workflow-runs/<run_id>/`；失败时
+/// 原来的收尾 `remove_dir_all` 不执行，遗留目录会以未跟踪文件出现在 `git status`
+/// （2026-10-11 复核发现）。
+struct RunDirGuard(std::path::PathBuf);
+
+impl Drop for RunDirGuard {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_dir_all(&self.0);
+        // 父目录只在空时删除成功（并行用例可能仍在用）；`workflow-runs` 删掉了才
+        // 继续收 `.claude`，避免删掉其它内容所在的目录。
+        if let Some(parent) = self.0.parent() {
+            if std::fs::remove_dir(parent).is_ok() {
+                if let Some(grandparent) = parent.parent() {
+                    let _ = std::fs::remove_dir(grandparent);
+                }
+            }
+        }
+    }
+}
+
 #[test]
 fn test_notification_includes_saved_state_only_when_artifact_exists() {
     let run_id = format!("notification-artifact-{}", uuid::Uuid::now_v7());
     let state_dir = std::path::Path::new(".claude/workflow-runs").join(&run_id);
     std::fs::create_dir_all(&state_dir).unwrap();
     std::fs::write(state_dir.join("state.json"), "{}").unwrap();
+    let _cleanup = RunDirGuard(state_dir.clone());
 
     let result = WorkflowTaskResult {
         run_id: run_id.clone(),
@@ -287,7 +310,6 @@ fn test_notification_includes_saved_state_only_when_artifact_exists() {
         "终态四维不得再出现 Debug 小写形态，实际：{notification}"
     );
     assert!(!notification.contains("Error:"));
-    std::fs::remove_dir_all(state_dir).unwrap();
 }
 
 #[tokio::test]
