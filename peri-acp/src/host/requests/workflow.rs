@@ -14,6 +14,7 @@
 //! - `WorkflowKill { runId, agentId? }` → 命中文本以 `killed.` 结尾；
 //! - `Workflow { resumeFromRunId }` → 启动消息含 `run_id: <uuid>` 行
 //!   （`peri-workflow` 的 `WorkflowStartOutcome::message`）。
+//!
 //! 工具面文本口径变更时，这两个函数与 `requests_workflow_cases_test` 同批复核。
 
 use std::sync::Arc;

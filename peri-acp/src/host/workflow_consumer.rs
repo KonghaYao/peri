@@ -317,20 +317,19 @@ async fn scan(
             );
         }
         let task_cancel = cancel.child_token();
-        match runtime
-            .tasks()
-            .mark_executing(&task.run_id, &task.task_id, task_cancel.clone())
+        // 其余 claim 结果（已被 claim / 已终态 / 已不存在）不执行：唯一 claim 的语义——
+        // 调用方不得执行。
+        if let ClaimOutcome::Claimed(record) =
+            runtime
+                .tasks()
+                .mark_executing(&task.run_id, &task.task_id, task_cancel.clone())
         {
-            ClaimOutcome::Claimed(record) => {
-                let pool = Arc::clone(pool);
-                let executor = Arc::clone(executor);
-                let token = token.to_string();
-                inflight.spawn(async move {
-                    execute_and_backfill(pool, executor, token, record, task_cancel).await;
-                });
-            }
-            // 已被 claim / 已终态 / 已不存在：唯一 claim 的语义——调用方不得执行。
-            _ => {}
+            let pool = Arc::clone(pool);
+            let executor = Arc::clone(executor);
+            let token = token.to_string();
+            inflight.spawn(async move {
+                execute_and_backfill(pool, executor, token, record, task_cancel).await;
+            });
         }
     }
     Ok(())
