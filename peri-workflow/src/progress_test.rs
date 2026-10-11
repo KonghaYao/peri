@@ -621,7 +621,10 @@ fn test_resume_cache_hit_excludes_historical_usage_and_preserves_phase() {
         .unwrap();
     assert_eq!(fix.agent_count, 2);
     assert_eq!(fix.token_count, 10);
-    assert_eq!(fix.duration_ms, Some(20));
+    assert_eq!(
+        fix.duration_ms, None,
+        "resume 命中没有相位边界事件，墙钟未知；不得回落成 agent 时长求和"
+    );
     let fallback = summaries
         .iter()
         .find(|summary| summary.name == "repair")
@@ -682,7 +685,10 @@ fn test_completed_cleanup_preserves_phase_usage_until_run_expiration() {
         summaries[0].token_count, 20,
         "仍保留的通知只统计本次真实执行"
     );
-    assert_eq!(summaries[0].duration_ms, Some(40));
+    assert_eq!(
+        summaries[0].duration_ms, None,
+        "该用例不发相位边界事件：墙钟不可得为 None，不是 agent 时长求和"
+    );
     assert_eq!(
         serde_json::to_value(store.get_run(run_id).unwrap()).unwrap(),
         before
@@ -697,6 +703,63 @@ fn test_completed_cleanup_preserves_phase_usage_until_run_expiration() {
     assert!(store.get_run(run_id).is_none());
     assert!(store.get_phase_summaries(run_id).is_empty());
     assert!(!store.runs.read().contains_key(run_id));
+}
+
+/// [回归测试] 相位耗时是墙钟（`PhaseStarted` → `PhaseDone`），不是相位内 agent
+/// 时长求和：并行相位曾把求和读成「重叠 / 超长」（2026-10-11 issue 缺陷 3）。
+#[test]
+fn test_phase_summary_duration_is_wall_clock_not_agent_sum() {
+    let store = make_store();
+    let run_id = "wall-clock";
+    store.apply_event(&ProgressEvent::RunStarted {
+        run_id: run_id.into(),
+        workflow_name: "review".into(),
+        meta: None,
+    });
+    store.apply_event(&ProgressEvent::PhaseStarted {
+        run_id: run_id.into(),
+        phase: "Recon".into(),
+    });
+    // 两个并行 agent 各报 4s：求和是 8s，墙钟只有本用例的 sleep。
+    for agent_id in [1, 2] {
+        store.apply_event(&ProgressEvent::AgentStarted {
+            run_id: run_id.into(),
+            agent_id,
+            label: None,
+            phase: Some("Recon".into()),
+        });
+        store.apply_event(&ProgressEvent::AgentDone {
+            run_id: run_id.into(),
+            agent_id,
+            label: None,
+            phase: Some("Recon".into()),
+            result: AgentRunResult::Ok {
+                output: serde_json::json!("recon"),
+                usage: Usage { output_tokens: 10 },
+                model: None,
+                tool_count: None,
+                token_count: Some(10),
+                phase: Some("Recon".into()),
+                duration_ms: Some(4_000),
+            },
+        });
+    }
+    std::thread::sleep(std::time::Duration::from_millis(5));
+    store.apply_event(&ProgressEvent::PhaseDone {
+        run_id: run_id.into(),
+        phase: "Recon".into(),
+    });
+
+    let summaries = store.get_phase_summaries(run_id);
+    assert_eq!(summaries.len(), 1);
+    assert_eq!(summaries[0].agent_count, 2);
+    let wall_clock = summaries[0]
+        .duration_ms
+        .expect("有相位边界事件时必须给出墙钟");
+    assert!(
+        wall_clock < 4_000,
+        "墙钟不得等于/超过单个 agent 时长（求和会是 8000ms），实际 {wall_clock}ms"
+    );
 }
 
 // ─── run 索引排序与观察者锁 ─────────────────────────────────

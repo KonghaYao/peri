@@ -179,6 +179,11 @@ pub struct PhaseSummary {
     pub name: String,
     pub agent_count: usize,
     pub token_count: u64,
+    /// 相位**墙钟**毫秒（宿主收到 `PhaseStarted` → 收到 `PhaseDone` 的时长差）：
+    /// 并行相位因此重合而非相加。无相位边界事件时为 `None`（resume 命中、引擎
+    /// 未发相位事件、无 `phase()` 的 agent 归组）；生产者不得回落成相位内 agent
+    /// 时长求和——那是另一维度的量，曾把并行相位读成「重叠 / 超长」
+    /// （2026-10-11 issue 缺陷 3）。
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub duration_ms: Option<u64>,
 }

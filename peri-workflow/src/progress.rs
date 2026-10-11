@@ -73,6 +73,16 @@ struct TrackedRun {
     progress: RunProgress,
     /// AgentStarted is emitted only for live execution, not a resume cache hit.
     started_agents: HashSet<u64>,
+    /// 相位墙钟起点：`PhaseStarted` 的**宿主接收时刻**（引擎事件不带时间戳，
+    /// 事件日志的 `at_ms` 同源）。同一相位再次开始会覆盖起点。
+    phase_started_at: HashMap<String, std::time::Instant>,
+    /// 已完成相位的墙钟累计毫秒（同相位多次开始/结束则累加）。
+    ///
+    /// 与 `started_agents` 同属本次执行的记账：resume 命中的相位没有
+    /// `PhaseStarted`，因此拿不到墙钟（`duration_ms = None`）。**不回落成
+    /// 相位内 agent 时长求和**——那是另一维度的量，并行相位会被读成超长
+    /// （2026-10-11 issue 缺陷 3）。
+    phase_wall_ms: HashMap<String, u64>,
 }
 
 pub struct WorkflowProgressStore {
@@ -164,6 +174,8 @@ impl WorkflowProgressStore {
                         TrackedRun {
                             progress: run,
                             started_agents: HashSet::new(),
+                            phase_started_at: HashMap::new(),
+                            phase_wall_ms: HashMap::new(),
                         },
                     );
                 }
@@ -260,12 +272,23 @@ fn apply_state_event(runs: &mut HashMap<String, TrackedRun>, run_id: &str, event
     match event {
         ProgressEvent::PhaseStarted { phase, .. } => {
             if let Some(tracked) = runs.get_mut(run_id) {
+                tracked
+                    .phase_started_at
+                    .insert(phase.clone(), peri_time::monotonic_now());
                 let run = &mut tracked.progress;
                 set_or_update_phase(&mut run.phases, phase, PhaseStatus::Active);
             }
         }
         ProgressEvent::PhaseDone { phase, .. } => {
             if let Some(tracked) = runs.get_mut(run_id) {
+                // 墙钟 = 宿主收到 PhaseStarted 到收到 PhaseDone 的时长（并行相位
+                // 因此重合而非相加）；无起点（resume 命中 / 缺 PhaseStarted）不计。
+                if let Some(started_at) = tracked.phase_started_at.remove(phase) {
+                    let elapsed_ms = peri_time::monotonic_now()
+                        .saturating_duration_since(started_at)
+                        .as_millis() as u64;
+                    *tracked.phase_wall_ms.entry(phase.clone()).or_insert(0) += elapsed_ms;
+                }
                 let run = &mut tracked.progress;
                 set_or_update_phase(&mut run.phases, phase, PhaseStatus::Done);
             }
@@ -479,6 +502,11 @@ impl WorkflowProgressStore {
     }
 
     /// 获取按 phase 分组的统计摘要（供通知格式化）。
+    ///
+    /// `duration_ms` 是该相位的**墙钟**（`PhaseStarted` → `PhaseDone` 的宿主接收
+    /// 时刻差），并行相位因此重合而非相加；无相位边界事件（resume 命中、引擎未
+    /// 发相位事件、无 `phase()` 的 agent 归组）时为 `None`，不回落成 agent 时长
+    /// 求和（2026-10-11 issue 缺陷 3）。
     pub fn get_phase_summaries(&self, run_id: &str) -> Vec<PhaseSummary> {
         let runs = self.runs.read();
         let Some(tracked) = runs.get(run_id) else {
@@ -486,47 +514,31 @@ impl WorkflowProgressStore {
         };
         let run = &tracked.progress;
         let started_agents = &tracked.started_agents;
-        let mut phase_map: std::collections::HashMap<String, (usize, u64, u64)> =
+        let phase_wall_ms = &tracked.phase_wall_ms;
+        let mut phase_map: std::collections::HashMap<String, (usize, u64)> =
             std::collections::HashMap::new();
         for agent in run.agents.values() {
             let phase = agent.phase.as_deref().unwrap_or(run.workflow_name.as_str());
-            let entry = phase_map.entry(phase.to_string()).or_insert((0, 0, 0));
+            let entry = phase_map.entry(phase.to_string()).or_insert((0, 0));
             entry.0 += 1;
             if started_agents.contains(&agent.agent_id) {
                 entry.1 += agent
                     .token_count
                     .or_else(|| agent.result.as_ref().and_then(|r| r.token_count()))
                     .unwrap_or(0);
-                entry.2 += agent
-                    .duration_ms
-                    .or(
-                        if let Some(AgentRunResult::Ok {
-                            duration_ms: Some(d),
-                            ..
-                        }) = &agent.result
-                        {
-                            Some(*d)
-                        } else {
-                            None
-                        },
-                    )
-                    .unwrap_or(0);
             }
         }
         phase_map
             .into_iter()
-            .map(
-                |(name, (agent_count, token_count, duration_sum))| PhaseSummary {
-                    name,
-                    agent_count,
-                    token_count,
-                    duration_ms: if duration_sum > 0 {
-                        Some(duration_sum)
-                    } else {
-                        None
-                    },
-                },
-            )
+            .map(|(name, (agent_count, token_count))| PhaseSummary {
+                duration_ms: phase_wall_ms
+                    .get(&name)
+                    .copied()
+                    .filter(|millis| *millis > 0),
+                name,
+                agent_count,
+                token_count,
+            })
             .collect()
     }
 
