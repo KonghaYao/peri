@@ -41,7 +41,8 @@ Compact 的三项环境变量在宿主装配时覆盖 `config.compact`；Agent �
 | `PERI_WEB_SEARCH_TOKEN` | Web MCP 实例 `env` 中搜索请求的可选 Bearer 凭据；缺省或空串时不发送 `Authorization`。宿主不解释、不记录值。 | 同上 |
 | `PERI_WEB_FETCH_URL` | Web MCP 实例 `env` 中的抓取后端地址；缺省使用内置公共服务。Peri 宿主只透传实例环境。 | `mcp-packages/web/src/web_fetch.rs` |
 | `PERI_WEB_FETCH_TOKEN` | Web MCP 实例 `env` 中抓取请求的可选 Bearer 凭据；缺省或空串时不发送 `Authorization`。宿主不解释、不记录值。 | 同上 |
-| `PERI_WORKFLOW_ALLOW_NPX_FALLBACK` | 固定版本 Workflow artifact 不可用时，值**恰为 `1`**才允许 npx 后备路径；缺省不允许（测试构建例外）。 | `peri-workflow/src/runner/artifact.rs` |
+| `PERI_WORKFLOW_ARTIFACT_DIR` | 显式注入的 Workflow 包目录（npm 包形状：`package.json` + `dist/` 入口）；仍按同一包身份、入口越界与入口 SHA-256 校验，通过后直接使用（不写入本机缓存），校验失败告警并回落本机缓存/随包来源。部署与测试的注入点。 | `peri-workflow/src/runner/artifact.rs` |
+| `PERI_WORKFLOW_ALLOW_NPX_FALLBACK` | 固定版本 Workflow artifact 的显式联网开关（名称沿用历史命名）：值**恰为 `1`** 且显式注入、本机缓存、随包 sidecar 均不可用时，允许一次固定版本 registry 获取；获取内容仍须通过同一包身份与入口 SHA-256 校验后才发布到本机缓存并被使用，不存在直接执行网络内容的路径。缺省不允许，不因测试构建放开。 | `peri-workflow/src/runner/artifact.rs` |
 
 支持 MCP Apps 的客户端应在启动 stdio ACP 子进程时传入 `PERI_MCP_APPS=1`，例如 `PERI_MCP_APPS=1 peri acp`。Artifact 连接信息经 `mcpServers.artifact.env` 传给内建实例，例如 `{"mcpServers":{"artifact":{"env":{"PERI_ARTIFACTS_URL":"${ARTIFACT_ENDPOINT}","PERI_ARTIFACTS_TOKEN":"${ARTIFACT_SECRET}"}}}}`；Web 后端同理经 `mcpServers.web.env` 传给内建 `web` 实例（例如 `PERI_WEB_SEARCH_URL` / `PERI_WEB_FETCH_URL`）。`${…}` 由 MCP 配置加载器展开，因此 shell 变量可经该语法引用。外部 Artifact MCP 子进程使用自己的 MCP `env` 配置，不需要 Peri 宿主解释这些字段。
 

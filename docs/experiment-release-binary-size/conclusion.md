@@ -1,5 +1,7 @@
 # macOS release 体积调查与构建配置决策
 
+> **历史注记（2026-10-11）**：本记录的数据来自当时固定的研究提交 `8c8c346a` 与 main 提交 `d7ee444e` 的构建，两者均包含编译期嵌入的 Workflow JS（`@peri-workflow` dist bundle）。该机制已于 `0cfb72367` 移除，「Rust 侧零 JS 嵌入」现为红线（`ARC-WORKFLOW-DIST-001`，`docs/standards/architecture-contracts.md`）；本记录数据仅为当时形态的实测，不构成现状，不得作为现行分发形态的依据。
+
 日期：2026-10-07。状态：对照、独立验证、对抗审查及最终 macOS 默认配置构建验证完成；用户已授权提交并合入 `pre-release/main`，集成状态以 Git 日志为准。
 
 ## 结论

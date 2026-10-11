@@ -1,5 +1,7 @@
 # 第一轮：当前 HEAD release 体积对照
 
+> **历史注记（2026-10-11）**：本记录的数据来自当时固定的研究提交 `8c8c346a` 与 main 提交 `d7ee444e` 的构建，两者均包含编译期嵌入的 Workflow JS（`@peri-workflow` dist bundle）。该机制已于 `0cfb72367` 移除，「Rust 侧零 JS 嵌入」现为红线（`ARC-WORKFLOW-DIST-001`，`docs/standards/architecture-contracts.md`）；本记录数据仅为当时形态的实测，不构成现状，不得作为现行分发形态的依据。
+
 日期：2026-10-07。状态：三组原正式样本度量完成、两组独立 argv 补证完成；原 argv 的错配/缺失已明确记录，补证度量与实际参数核验通过，独立审查的最终裁定由验证者补齐。未改生产源码、Cargo.lock 或 `00_plan.md`。
 
 ## 结论与边界

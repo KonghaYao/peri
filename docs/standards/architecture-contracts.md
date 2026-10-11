@@ -141,6 +141,12 @@
 - **Rule**：RPC 请求必须先登记 pending 再写入；每帧使用 NDJSON 并 flush；stdout/child 结束及 malformed protocol frame 必须 drain pending，不能静默丢帧。`agent/run` 必须先注册再 spawn，kill/deregister 以所有权 token 防止旧 task 删除新句柄；`workflow/start` 失败或超时必须移除 active channel；kill 后 `killed` 是唯一终态，message loop 或 EOF 不得覆盖为 `failed`。
 - **Verify**：`cargo test -p peri-workflow --lib rpc`；`cargo test -p peri-workflow --lib runner`；检查 `peri-js-runtime/src/rpc.rs` 的 `send_request`、`write_line`、`drain_pending`，`peri-workflow/src/rpc.rs` 的 agent ownership token，以及 `peri-workflow/src/runner/agent_dispatch.rs` 的 register/spawn 与 `peri-workflow/src/runner.rs` 的 kill 顺序。
 
+### ARC-WORKFLOW-DIST-001
+
+- **Scope**：`peri-workflow`、Rust 侧嵌入面、`npm-packages/@peri-workflow` 分发结构（含仓库入库状态与发布结构）。
+- **Rule**：Rust 侧零 JS 嵌入是用户裁决红线（2026-10-11）：`peri-workflow` 及任何 Rust 侧代码不得以 `include_bytes!`、`include_str!`、embed 或等价机制把 JS 产物（如 `@peri-workflow` 的 dist bundle）嵌入二进制；任何分发缺口都不得以把 JS 产物嵌入二进制的方式解决。`@peri-workflow` 分发结构须保持「dist 入库 + 发布结构 + 离线可用 + 完整性校验」；满足方式必须是非嵌入途径（文件系统读取、摘要校验、网络获取等类别），具体机制以代码与 `npm-packages/@peri-workflow/{README,DESIGN}.md` 为准，本契约不绑定实现。现状（2026-10-11 分发实施）：Rust 侧嵌入已移除，四项分发要求均已以非嵌入方式落实——dist 随仓库入库、发行包按发布结构携带资源，消费方默认离线、仅使用通过包身份与入口内容摘要校验的 artifact；网络获取须显式 opt-in 且内容仍须通过同一摘要校验。
+- **Verify**：`rg -n 'include_bytes!' --type rust` 与 `rg -n 'include_str!' peri-workflow/` 人工确认任何命中都不指向 npm 包的 JS 产物；`cargo test -p peri-workflow --lib -- runner::artifact`（解析优先级、包身份/越界/摘要拒绝、入库 dist 与 pin 摘要一致性、opt-in 取值）；`git ls-files --error-unmatch npm-packages/@peri-workflow/dist/peri-workflow.js` 确认 dist 入库；发行归档 sidecar 与部署脚本断言由 release 工作流核对（真实 CI 触发待验收）；`git diff --check`。
+
 ### ARC-KEEPGOING-001
 
 - **Scope**：`peri-tui`、`peri-acp`、`peri-agent`。
