@@ -1,0 +1,21 @@
+{
+  "mcpServers": {
+    "parallel-search": {
+      "command": "npx",
+      "args": [
+        "--prefer-offline",
+        "-y",
+        "mcp-remote@0.14.3",
+        "https://search.parallel.ai/mcp",
+        "--transport",
+        "http-only",
+        "--header",
+        "User-Agent: peri/parallel-search-example",
+        "--enable-proxy"
+      ],
+      "system_mcp": true,
+      "system_mcp_tools": ["web_search", "web_fetch"],
+      "system_mcp_timeout": 60000
+    }
+  }
+}

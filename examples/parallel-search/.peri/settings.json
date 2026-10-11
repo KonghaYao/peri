@@ -1,0 +1,7 @@
+{
+  "config": {
+    "meta_harness": {
+      "WebMiddleware": false
+    }
+  }
+}
