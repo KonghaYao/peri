@@ -28,8 +28,9 @@ use crate::protocol::{AgentResultParams, AgentRunParams, AgentRunResult, Workflo
 use crate::rpc::RpcChannel;
 
 pub(crate) use artifact::prepare_workflow_command;
+pub(crate) use artifact::WorkflowCommand;
 #[cfg(test)]
-pub(crate) use artifact::workflow_local_dist;
+pub(crate) use artifact::{repository_package_dir, repository_workflow_command};
 pub(crate) use limits::RunLimitState;
 
 const START_TIMEOUT: Duration = Duration::from_secs(15);

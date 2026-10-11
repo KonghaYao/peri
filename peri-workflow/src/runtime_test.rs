@@ -263,15 +263,27 @@ fn event_watermark_tracks_the_run_event_log() {
 
 /// F4 回归：保留窗口淘汰不得让已提交水位倒退（`eventWatermark` 不是「保留窗口内
 /// 最新事件」而是「该 run 最后一条已提交事件」）。
+///
+/// 水位口径：sequence 由有界日志在**全局**空间从 1 起单调分配（跨 run 共享），
+/// 水位 = 该 run 最后一条已提交事件的 sequence。因此本用例中 run-1 占 sequence 1，
+/// run-2 的 `CAPACITY + 1` 条事件占 2..=CAPACITY+2，水位期望 `CAPACITY + 2`。
 #[test]
 fn event_watermark_does_not_regress_when_events_are_evicted() {
     let dir = tempfile::tempdir().unwrap();
     let runtime = make_runtime(dir.path().to_str().unwrap());
 
-    runtime.run_events().append(run_event("run-1"));
-    for _ in 0..=super::RUN_EVENT_LOG_CAPACITY {
-        runtime.run_events().append(run_event("run-2"));
-    }
+    assert_eq!(
+        runtime.run_events().append(run_event("run-1")),
+        1,
+        "全局 sequence 从 1 起分配"
+    );
+    let last_sequence = (0..=super::RUN_EVENT_LOG_CAPACITY)
+        .fold(0, |_, _| runtime.run_events().append(run_event("run-2")));
+    assert_eq!(
+        last_sequence,
+        (super::RUN_EVENT_LOG_CAPACITY + 2) as u64,
+        "run-1 已消耗首个 sequence；run-2 的末条事件为 CAPACITY + 2"
+    );
 
     assert_eq!(
         runtime.event_watermark("run-1"),
@@ -280,7 +292,16 @@ fn event_watermark_does_not_regress_when_events_are_evicted() {
     );
     assert_eq!(
         runtime.event_watermark("run-2"),
-        (super::RUN_EVENT_LOG_CAPACITY + 1) as u64
+        (super::RUN_EVENT_LOG_CAPACITY + 2) as u64
+    );
+    // 防假阳性：淘汰必须真的发生（保留窗口容量即 CAPACITY），否则本用例会退化为
+    // 「未触发淘汰路径仍通过」。
+    let page = runtime.run_events().page_where(None, 1, |_| true);
+    assert_eq!(page.head_sequence, last_sequence);
+    assert!(
+        page.truncated_before > 1,
+        "追加 CAPACITY + 2 条后最旧事件必须被淘汰（truncated_before 前进），实际 {}",
+        page.truncated_before
     );
     assert_eq!(
         runtime.event_watermark("run-unknown"),

@@ -1,6 +1,11 @@
-// ─── E2E 集成测试（需要 @peri-code/workflow 已安装）──────────────
+// ─── E2E 集成测试（真实 Node 引擎；产物经 PERI_WORKFLOW_ARTIFACT_DIR 注入）───
+//
+// P6 起 agent 执行权归宿主消费者：需要 agent 结果才能收敛的用例在宿主层
+// （`peri-acp::host::workflow_consumer_tests`）覆盖；本文件只保留不依赖消费者的
+// 引擎生命周期用例（kill / 自然崩溃）。
 
-use super::artifact::workflow_local_dist_in;
+use serial_test::serial;
+
 use super::limits::RunLimitState;
 use super::run_protocol::{
     parse_agent_task_params, parse_run_scoped, reusable_journal_prefix, validate_start_ack,
@@ -172,6 +177,16 @@ fn run_limit_state_tracks_tool_calls_and_keeps_first_breach() {
     assert_eq!(
         state.breach().as_deref(),
         Some("workflow exceeded maxToolCalls (5)"),
+    );
+}
+
+/// 让生产解析路径（`PERI_WORKFLOW_ARTIFACT_DIR` 注入点）指向仓库入库 bundle。
+///
+/// 调用方必须 `#[serial]`：进程级 env 与 `std::env` 读取存在并发窗口。
+fn use_repository_bundle() {
+    std::env::set_var(
+        "PERI_WORKFLOW_ARTIFACT_DIR",
+        crate::runner::repository_package_dir(),
     );
 }
 
@@ -429,147 +444,13 @@ fn test_start_ack_rejects_protocol_mismatch() {
     assert!(error.to_string().contains("protocol mismatch"));
 }
 
-#[test]
-fn test_workflow_local_dist_missing() {
-    let tmp = tempfile::TempDir::new().unwrap();
-    assert!(workflow_local_dist_in(tmp.path()).is_none());
-}
-
-#[test]
-fn test_workflow_local_dist_found() {
-    let tmp = tempfile::TempDir::new().unwrap();
-    let dist = tmp
-        .path()
-        .join("node_modules")
-        .join("@peri-code")
-        .join("workflow")
-        .join("dist")
-        .join("peri-workflow.js");
-    std::fs::create_dir_all(dist.parent().unwrap()).unwrap();
-    std::fs::write(&dist, "// test fixture").unwrap();
-    std::fs::write(
-        dist.parent()
-            .unwrap()
-            .parent()
-            .unwrap()
-            .join("package.json"),
-        serde_json::json!({
-            "name": "@peri-code/workflow",
-            "version": "0.2.0",
-            "main": "dist/peri-workflow.js",
-            "periProtocolVersion": 1,
-            "periBuildId": "@peri-code/workflow@0.2.0"
-        })
-        .to_string(),
-    )
-    .unwrap();
-    let got = workflow_local_dist_in(tmp.path()).unwrap();
-    assert_eq!(std::path::PathBuf::from(got), dist);
-}
-
-#[test]
-fn test_workflow_local_dist_rejects_wrong_version() {
-    let tmp = tempfile::TempDir::new().unwrap();
-    let package = tmp
-        .path()
-        .join("node_modules")
-        .join("@peri-code")
-        .join("workflow");
-    std::fs::create_dir_all(package.join("dist")).unwrap();
-    std::fs::write(package.join("dist/peri-workflow.js"), "entry").unwrap();
-    std::fs::write(
-        package.join("package.json"),
-        r#"{"name":"@peri-code/workflow","version":"0.1.0","main":"dist/peri-workflow.js"}"#,
-    )
-    .unwrap();
-
-    assert!(workflow_local_dist_in(tmp.path()).is_none());
-}
-
-#[test]
-fn test_workflow_local_dist_rejects_escaping_entry() {
-    let tmp = tempfile::TempDir::new().unwrap();
-    let package = tmp
-        .path()
-        .join("node_modules")
-        .join("@peri-code")
-        .join("workflow");
-    std::fs::create_dir_all(&package).unwrap();
-    std::fs::write(tmp.path().join("outside.js"), "entry").unwrap();
-    std::fs::write(
-        package.join("package.json"),
-        r#"{"name":"@peri-code/workflow","version":"0.2.0","main":"../../../../outside.js"}"#,
-    )
-    .unwrap();
-
-    assert!(workflow_local_dist_in(tmp.path()).is_none());
-}
-
+/// [回归测试] kill 后 run 必须收敛为 Killed 且写 completed_at（不能停在幽灵 Running）。
+///
+/// 只依赖真实引擎启动（kill 分支不经过 agent 执行），因此可在本 crate 覆盖。
 #[tokio::test]
-#[ignore = "requires @peri-code/workflow installed"]
-async fn test_e2e_simple_workflow() {
-    let tmp = tempfile::TempDir::new().unwrap();
-    let cwd = tmp.path().to_str().unwrap();
-
-    let executor = Arc::new(MockAgentExecutor {
-        delay: std::time::Duration::ZERO,
-    }) as Arc<dyn AgentExecutor>;
-    let runner = WorkflowRunner::new(executor, cwd, None);
-    let journal = Arc::new(WorkflowJournalStore::new(cwd));
-    let progress = Arc::new(WorkflowProgressStore::new());
-    let (done_tx, mut done_rx) = tokio::sync::watch::channel(None);
-    let (_kill_tx, kill_rx) = tokio::sync::oneshot::channel();
-
-    let script = r#"
-export const meta = { name: 'test-workflow', description: 'simple test' }
-const result = await agent('say hello')
-return { output: result }
-"#;
-
-    let input = WorkflowInput {
-        script: script.to_string(),
-        args: None,
-        max_concurrency: 3,
-        budget_total: None,
-        limits: WorkflowLimits::default(),
-        workflow_name: "test-workflow".to_string(),
-        resume_from: None,
-        write_intent: None,
-        git_baseline: None,
-    };
-
-    let run_id = uuid::Uuid::now_v7().to_string();
-    runner
-        .run(run_id, input, progress, journal, done_tx, kill_rx)
-        .await
-        .unwrap();
-
-    let _ = done_rx.changed().await; // 等待完成信号
-    let result = done_rx.borrow().clone().unwrap();
-    // 打印调试信息
-    eprintln!("=== WORKFLOW RESULT ===");
-    eprintln!("status: {}", result.status);
-    eprintln!("error: {:?}", result.error);
-    eprintln!("stderr_tail: {:?}", result.stderr_tail);
-    eprintln!("========================");
-    assert_eq!(result.status, "completed");
-    // bunx 启动时会输出 "Resolving dependencies" 等正常信息到 stderr，
-    // npx 不会。因此 stderr 非空也可能是正常情况。
-    if let Some(ref stderr) = result.stderr_tail {
-        // 仅当 stderr 不全是 bun 解析信息时才算异常
-        let is_bunx_noise = stderr.lines().all(|l| {
-            l.is_empty()
-                || l.contains("Resolving dependencies")
-                || l.contains("Resolved, downloaded and extracted")
-                || l.contains("Saved lockfile")
-        });
-        assert!(is_bunx_noise, "stderr 含非预期的错误输出:\n{}", stderr);
-    }
-}
-
-#[tokio::test]
-#[ignore = "requires @peri-code/workflow installed"]
+#[serial]
 async fn test_kill_marks_run_killed_in_progress_store() {
+    use_repository_bundle();
     let tmp = tempfile::TempDir::new().unwrap();
     let cwd = tmp.path().to_str().unwrap();
 
@@ -666,14 +547,15 @@ return { output: result }
 /// 为 Failed（issue 2026-08-05 遗留 2：修复前 run 永久 Running，幽灵 running 与
 /// kill 分支同源）。
 ///
-/// 防假阳性：脚本在 agent 执行**之后**顶层 throw → workflow/start 已成功、
-/// RunStarted 已写入（先轮询 Running），随后 Node 进程崩溃退出——崩溃时进程已死，
-/// 没有机会发 run_done progress 事件，只有 msg_loop 收尾（stdout 关闭 → recv None
-/// → final_result 保持 "failed"）能标记终态。修复前该路径不写 progress_store，
-/// 断言必然失败。
+/// 防假阳性：脚本先发布 `agent/task`（**不等待结果**，故本用例不需要宿主消费者：
+/// P6 起 agent 执行权在宿主，等待结果会永久挂起），随后顶层 throw → Node 进程在
+/// workflow/start 成功后自然退出；崩溃时进程已死，没有机会发 run_done progress
+/// 事件，只有 msg_loop 收尾（stdout 关闭 → recv None → final_result 保持 "failed"）
+/// 能标记终态。修复前该路径不写 progress_store，断言必然失败。
 #[tokio::test]
-#[ignore = "requires @peri-code/workflow installed"]
+#[serial]
 async fn test_natural_crash_marks_run_failed_in_progress_store() {
+    use_repository_bundle();
     let tmp = tempfile::TempDir::new().unwrap();
     let cwd = tmp.path().to_str().unwrap();
 
@@ -688,7 +570,7 @@ async fn test_natural_crash_marks_run_failed_in_progress_store() {
 
     let script = r#"
 export const meta = { name: 'crash-test', description: 'crash test' }
-const result = await agent('say hello')
+agent('say hello') // 发布 agent/task（不等待结果：本用例不依赖宿主消费者）
 throw new Error('intentional crash after agent')
 "#;
 

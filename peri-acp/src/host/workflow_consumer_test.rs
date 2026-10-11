@@ -1,12 +1,20 @@
 //! `WorkflowTaskConsumer` 的接线语义测试（P3）：就绪屏障、订阅失败回落、
 //! 基线扫描 → 唯一 claim → 执行 → 回填（带消费者令牌）。
 //!
-//! 轻量验证口径：只覆盖外部可观察行为（就绪位 / 池调用序列 / 任务终态），
+//! P6 生命周期等价覆盖（本文件后段）：P6 起 agent 执行权归本层，`peri-workflow`
+//! 单测不再具备消费者。因此「取消调用者不丢完成所有权（含真实 agent 派发）」与
+//! 「简单 workflow 端到端 completed」两类断言在本层用真实 `WorkflowRuntime` +
+//! 真实消费者 + 真实 Node 引擎覆盖，唯一替换的边界是 MCP 池面
+//! （[`RuntimeWiredPool`]：读基线走生产资源面函数，回填走生产授权判定与同一终态
+//! 提交入口，订阅唤醒来自 runtime 的资源更新流）。
+//!
+//! 轻量验证口径：只覆盖外部可观察行为（就绪位 / 池调用序列 / 任务终态 / run 终态），
 //! 不覆盖重连退避节奏与并发上限细节（由用户验收）。
 
 #![cfg(not(target_os = "emscripten"))]
 
 use std::any::Any;
+use std::future::Future;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
@@ -14,8 +22,11 @@ use std::time::Duration;
 use async_trait::async_trait;
 use peri_acp_types::ports::{McpPoolPort, McpPoolShutdownReport, McpResourceSubscription};
 use peri_acp_types::workflow::{AgentExecutor, AgentRunParams, AgentRunResult, Usage};
-use peri_mcp_workflow::{WorkflowRuntime, WORKFLOW_CONSUMER_META_KEY};
+use peri_mcp_workflow::{WorkflowRuntime, TASKS_URI, WORKFLOW_CONSUMER_META_KEY};
+use peri_workflow::registry::WorkflowRunStatus;
+use peri_workflow::runtime::{WorkflowResourceUpdate, WorkflowTaskState};
 use serde_json::{json, Value};
+use serial_test::serial;
 use tokio_util::sync::CancellationToken;
 
 use super::workflow_consumer::WorkflowTaskConsumer;
@@ -305,4 +316,277 @@ async fn consumer_stop_returns_and_cancels() {
         !runtime.consumer_ready(),
         "停止后必须回落 not-ready（不再接受新启动）"
     );
+}
+
+// ─── P6 生命周期等价覆盖（真实引擎 + 真实消费者）─────────────────────────
+//
+// P6 起 agent 执行权归宿主消费者，`peri-workflow` 单测不再具备消费者，无法覆盖
+// 「调用者在启动窗口被取消 → run 仍须执行真实 agent 并只结算一次」。等价覆盖落在
+// 本层：真实 `WorkflowRuntime` + 真实 `WorkflowTaskConsumer` + 真实 Node 引擎，
+// 唯一被替换的边界是 MCP 池面（读基线走生产资源面函数，回填走生产授权判定与同一
+// 终态提交入口，订阅唤醒来自 runtime 的资源更新流）。
+
+/// 池面接线：把三项池调用路由到生产实现/生产同一入口。
+struct RuntimeWiredPool {
+    runtime: Arc<WorkflowRuntime>,
+}
+
+#[async_trait]
+impl McpPoolPort for RuntimeWiredPool {
+    fn as_any(&self) -> &dyn Any {
+        self
+    }
+
+    async fn shutdown(&self) -> McpPoolShutdownReport {
+        McpPoolShutdownReport::Complete {
+            settled_services: 0,
+            failed_services: 0,
+        }
+    }
+
+    fn snapshot(&self) -> Value {
+        json!({})
+    }
+
+    async fn call_instance_tool(
+        &self,
+        instance: &str,
+        tool: &str,
+        arguments: Value,
+        request_meta: Option<Value>,
+    ) -> Result<String, String> {
+        assert_eq!(instance, "workflow");
+        assert_eq!(
+            tool, "WorkflowAgentResult",
+            "消费者只允许回填 host-only 工具"
+        );
+        let token = request_meta
+            .as_ref()
+            .and_then(|meta| meta.get(WORKFLOW_CONSUMER_META_KEY))
+            .and_then(Value::as_str)
+            .ok_or("回填必须在 _meta 携带消费者令牌")?;
+        if !self.runtime.verify_consumer_token(token) {
+            return Err("unbound consumer token".to_string());
+        }
+        let run_id = arguments["runId"]
+            .as_str()
+            .ok_or("missing runId")?
+            .to_string();
+        let task_id = arguments["taskId"]
+            .as_str()
+            .ok_or("missing taskId")?
+            .to_string();
+        let result: AgentRunResult = serde_json::from_value(arguments["result"].clone())
+            .map_err(|error| format!("invalid result: {error}"))?;
+        // 与实例 handler 相同的终态映射（Ok → Completed；Skipped/Dead → 终态）。
+        let (state, reason) = match &result {
+            AgentRunResult::Ok { .. } => (WorkflowTaskState::Completed, None),
+            AgentRunResult::Skipped => (WorkflowTaskState::Completed, None),
+            AgentRunResult::Dead { reason, .. } => (WorkflowTaskState::Failed, reason.clone()),
+        };
+        self.runtime
+            .settle_agent_task(&run_id, &task_id, state, Some(result), reason);
+        match self.runtime.tasks().get(&run_id, &task_id) {
+            Some(record) if record.state == state => Ok("settled".to_string()),
+            other => Err(format!("settle 未生效: {other:?}")),
+        }
+    }
+
+    async fn read_instance_resource(&self, instance: &str, uri: &str) -> Result<String, String> {
+        assert_eq!(instance, "workflow");
+        peri_mcp_workflow::read_payload(&self.runtime, uri)
+            .map(|payload| payload.to_string())
+            .map_err(|error| format!("{error:?}"))
+    }
+
+    async fn subscribe_instance_resource(
+        &self,
+        instance: &str,
+        uri: &str,
+    ) -> Result<McpResourceSubscription, String> {
+        assert_eq!(instance, "workflow");
+        assert_eq!(uri, TASKS_URI);
+        let (tx, rx) = tokio::sync::mpsc::channel(16);
+        // 生产由实例按资源更新投递订阅通知；测试从同一条更新流转发（唤醒语义同源）。
+        let mut updates = self.runtime.subscribe();
+        tokio::spawn(async move {
+            while let Ok(update) = updates.recv().await {
+                if matches!(update, WorkflowResourceUpdate::Tasks)
+                    && tx.try_send(TASKS_URI.to_string()).is_err()
+                {
+                    break;
+                }
+            }
+        });
+        Ok(McpResourceSubscription::new(rx, CancellationToken::new()))
+    }
+}
+
+/// 真实引擎派发处的门控执行者：证明 agent 是在调用者被取消之后才被派发的。
+struct GatedEngineExecutor {
+    calls: Arc<AtomicUsize>,
+    entered: Arc<tokio::sync::Notify>,
+    release: Arc<tokio::sync::Notify>,
+}
+
+#[async_trait]
+impl AgentExecutor for GatedEngineExecutor {
+    async fn execute(&self, _params: AgentRunParams) -> AgentRunResult {
+        self.calls.fetch_add(1, Ordering::SeqCst);
+        self.entered.notify_one();
+        self.release.notified().await;
+        AgentRunResult::Ok {
+            output: json!("finished"),
+            usage: Usage { output_tokens: 1 },
+            model: None,
+            tool_count: Some(0),
+            token_count: Some(1),
+            phase: None,
+            duration_ms: Some(1),
+        }
+    }
+}
+
+/// 仓库入库的引擎包目录（`PERI_WORKFLOW_ARTIFACT_DIR` 的部署注入点）。
+fn repository_workflow_package() -> std::path::PathBuf {
+    std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../npm-packages/@peri-workflow")
+}
+
+/// [P6 回归] 调用者在启动快速窗口被取消：run 仍由宿主消费者执行真实 agent，
+/// 且只结算一次（`Completed`）。断言集合与 P6 前 `peri-workflow` 的同名生命周期
+/// 用例一致：派发一次、通知恰好一次、活跃数归零、agent 计数为 1。
+#[tokio::test]
+#[serial]
+async fn cancelled_caller_keeps_completion_owner_with_real_engine() {
+    std::env::set_var("PERI_WORKFLOW_ARTIFACT_DIR", repository_workflow_package());
+
+    let dir = tempfile::tempdir().unwrap();
+    let cwd = dir.path().to_str().unwrap();
+    let calls = Arc::new(AtomicUsize::new(0));
+    let entered = Arc::new(tokio::sync::Notify::new());
+    let release = Arc::new(tokio::sync::Notify::new());
+    let executor: Arc<dyn AgentExecutor> = Arc::new(GatedEngineExecutor {
+        calls: Arc::clone(&calls),
+        entered: Arc::clone(&entered),
+        release: Arc::clone(&release),
+    });
+    let (notification_tx, _rx) =
+        tokio::sync::broadcast::channel::<peri_acp_types::workflow::WorkflowTaskResult>(8);
+    let runtime = Arc::new(WorkflowRuntime::new(
+        Arc::clone(&executor),
+        cwd,
+        notification_tx,
+        None,
+    ));
+    let pool = Arc::new(RuntimeWiredPool {
+        runtime: Arc::clone(&runtime),
+    });
+    let consumer = WorkflowTaskConsumer::start(
+        Arc::clone(&pool) as Arc<dyn McpPoolPort>,
+        Arc::clone(&runtime),
+        Arc::clone(&executor),
+        "session-lifecycle".to_string(),
+    );
+    assert!(
+        wait_ready(&runtime, true).await,
+        "消费者在订阅 + 基线成功后必须置就绪"
+    );
+
+    let mut notifications = runtime.registry().notification_tx().subscribe();
+    let script = "export const meta = { name: 'fixture', description: 'lifecycle' }; \
+                  return await agent('finish');";
+    let mut invoke = Box::pin(runtime.start_run(json!({ "script": script })));
+    std::future::poll_fn(|cx| {
+        let result = invoke.as_mut().poll(cx);
+        assert!(
+            result.is_pending(),
+            "必须在 run 已注册、调用者尚未返回的启动窗口内取消"
+        );
+        if runtime.registry().active_count() == 1 {
+            std::task::Poll::Ready(())
+        } else {
+            std::task::Poll::Pending
+        }
+    })
+    .await;
+    drop(invoke);
+
+    tokio::time::timeout(Duration::from_secs(30), entered.notified())
+        .await
+        .unwrap_or_else(|_| {
+            panic!("取消调用者后，宿主消费者仍须派发真实 agent（run 不得被调用者取消带走）")
+        });
+    assert_eq!(calls.load(Ordering::SeqCst), 1, "agent 只执行一次");
+    release.notify_one();
+
+    let result = tokio::time::timeout(Duration::from_secs(10), notifications.recv())
+        .await
+        .expect("取消调用者不能丢失完成通知")
+        .expect("完成通知通道必须存活");
+    assert_eq!(result.status, WorkflowRunStatus::Completed);
+    assert_eq!(result.agent_count, 1);
+    assert_eq!(runtime.registry().active_count(), 0);
+    assert!(
+        notifications.try_recv().is_err(),
+        "同一 run 只结算一次（不得双投递）"
+    );
+
+    consumer.stop().await;
+    std::env::remove_var("PERI_WORKFLOW_ARTIFACT_DIR");
+}
+
+/// [等价覆盖] 简单 workflow 端到端：真实引擎发布 `agent/task`，宿主消费者派发一次并
+/// 回填，run 收敛为 `Completed`。
+///
+/// 承接原 `peri-workflow::runner_test::test_e2e_simple_workflow` 的「completed + agent
+/// 正常往返」断言：P6 起 agent 结果只能由宿主消费者提供，该断言只能在本层成立。
+#[tokio::test]
+#[serial]
+async fn simple_workflow_completes_through_host_consumer() {
+    std::env::set_var("PERI_WORKFLOW_ARTIFACT_DIR", repository_workflow_package());
+
+    let dir = tempfile::tempdir().unwrap();
+    let cwd = dir.path().to_str().unwrap();
+    let calls = Arc::new(AtomicUsize::new(0));
+    let executor: Arc<dyn AgentExecutor> = Arc::new(StubExecutor {
+        calls: Arc::clone(&calls),
+    });
+    let (notification_tx, _rx) =
+        tokio::sync::broadcast::channel::<peri_acp_types::workflow::WorkflowTaskResult>(8);
+    let runtime = Arc::new(WorkflowRuntime::new(
+        Arc::clone(&executor),
+        cwd,
+        notification_tx,
+        None,
+    ));
+    let pool = Arc::new(RuntimeWiredPool {
+        runtime: Arc::clone(&runtime),
+    });
+    let consumer = WorkflowTaskConsumer::start(
+        Arc::clone(&pool) as Arc<dyn McpPoolPort>,
+        Arc::clone(&runtime),
+        Arc::clone(&executor),
+        "session-simple".to_string(),
+    );
+    assert!(wait_ready(&runtime, true).await, "消费者必须先就绪");
+
+    let mut notifications = runtime.registry().notification_tx().subscribe();
+    let script = "export const meta = { name: 'e2e-simple', description: 'simple e2e' }; \
+                  const r = await agent('say hello'); \
+                  return { answer: r };";
+    runtime
+        .start_run(json!({ "script": script }))
+        .await
+        .expect("简单 workflow 必须启动并在快速路径内可收敛");
+
+    let result = tokio::time::timeout(Duration::from_secs(20), notifications.recv())
+        .await
+        .expect("简单 workflow 必须在超时内收敛")
+        .expect("完成通知通道必须存活");
+    assert_eq!(result.status, WorkflowRunStatus::Completed);
+    assert_eq!(calls.load(Ordering::SeqCst), 1, "agent 恰好执行一次");
+    assert_eq!(result.agent_count, 1);
+
+    consumer.stop().await;
+    std::env::remove_var("PERI_WORKFLOW_ARTIFACT_DIR");
 }

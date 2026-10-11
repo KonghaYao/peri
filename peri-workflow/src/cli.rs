@@ -7,14 +7,26 @@ use crate::error::WorkflowError;
 
 /// Run an allowlisted workflow CLI command against the validated local engine artifact.
 ///
-/// Acquisition goes through `prepare_workflow_command`: the pinned package installed under
-/// `~/.peri/workflow/<version>/` is reused offline, with an explicit opt-in npx fallback.
-/// The engine source is never copied into or embedded in the Rust binary.
+/// Acquisition goes through `prepare_workflow_command`: the bundled sidecar next to the
+/// executable or the validated cache under `~/.peri/workflow/<version>/` is reused offline.
+/// Network acquisition is explicit opt-in and must pass the same digest validation before
+/// anything is executed. The engine source is never copied into or embedded in the Rust binary.
 pub async fn run(args: &[OsString]) -> Result<i32, WorkflowError> {
     validate_args(args)?;
 
     let prepared = crate::runner::prepare_workflow_command().await?;
+    run_prepared(&prepared, args).await
+}
 
+/// Spawn the prepared engine command with the allowlisted arguments.
+///
+/// Callers own command preparation (`prepare_workflow_command`) and argument validation;
+/// tests inject a prepared command so real engine execution never depends on a
+/// machine-global install or on network access.
+pub(crate) async fn run_prepared(
+    prepared: &crate::runner::WorkflowCommand,
+    args: &[OsString],
+) -> Result<i32, WorkflowError> {
     let mut command = tokio::process::Command::new(&prepared.program);
     command
         .args(&prepared.args)

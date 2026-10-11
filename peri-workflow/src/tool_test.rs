@@ -4,6 +4,8 @@ use std::sync::Arc;
 
 use peri_acp_types::tools::{BaseTool, ToolContext};
 
+use serial_test::serial;
+
 use super::*;
 use crate::preflight::preflight_validate_script;
 use crate::protocol::{AgentRunParams, AgentRunResult, Usage};
@@ -30,6 +32,16 @@ impl AgentExecutor for CountingExecutor {
             duration_ms: None,
         }
     }
+}
+
+/// 让生产解析路径（`PERI_WORKFLOW_ARTIFACT_DIR` 注入点）指向仓库入库 bundle。
+///
+/// 调用方必须 `#[serial]`：进程级 env 与 `std::env` 读取存在并发窗口。
+fn use_repository_bundle() {
+    std::env::set_var(
+        "PERI_WORKFLOW_ARTIFACT_DIR",
+        crate::runner::repository_package_dir(),
+    );
 }
 
 fn make_tool(cwd: &str, calls: Arc<AtomicUsize>) -> (WorkflowTool, Arc<WorkflowTaskRegistry>) {
@@ -60,11 +72,9 @@ fn script_example_from_parameters(tool: &WorkflowTool) -> String {
 
 /// [回归测试] 生产 tool description 中的示例必须通过随包 Node parser。
 #[tokio::test]
+#[serial]
 async fn test_production_description_example_passes_real_node_preflight() {
-    if crate::runner::workflow_local_dist().is_none() {
-        eprintln!("skipping: @peri-code/workflow engine is not installed");
-        return;
-    }
+    use_repository_bundle();
     let tmp = tempfile::TempDir::new().unwrap();
     let (tool, _) = make_tool(tmp.path().to_str().unwrap(), Arc::new(AtomicUsize::new(0)));
     let script = script_example_from_parameters(&tool);
@@ -76,11 +86,9 @@ async fn test_production_description_example_passes_real_node_preflight() {
 
 /// [回归测试] 生产示例的 grammar 变异必须在副作用前命中 parser 拒绝边界。
 #[tokio::test]
+#[serial]
 async fn test_production_description_mutations_hit_parser_rejection_boundaries() {
-    if crate::runner::workflow_local_dist().is_none() {
-        eprintln!("skipping: @peri-code/workflow engine is not installed");
-        return;
-    }
+    use_repository_bundle();
     let tmp = tempfile::TempDir::new().unwrap();
     let (tool, _) = make_tool(tmp.path().to_str().unwrap(), Arc::new(AtomicUsize::new(0)));
     let script = script_example_from_parameters(&tool);
@@ -243,7 +251,9 @@ fn workflow_schema_exposes_budget_total_integer_bounds() {
 }
 
 #[tokio::test]
+#[serial]
 async fn invalid_script_fails_before_workflow_side_effects() {
+    use_repository_bundle();
     let tmp = tempfile::TempDir::new().unwrap();
     let cwd = tmp.path().to_str().unwrap();
     let calls = Arc::new(AtomicUsize::new(0));
@@ -409,38 +419,11 @@ fn make_completion_tool(
     (tool, registry, entered, release)
 }
 
-/// [回归测试] 调用future在快速检测窗口被取消，后台run仍须完成登记并广播一次。
-#[test]
-fn test_invoke_cancel_during_fast_window_keeps_completion_owner() {
-    if isolated_completion_child(
-        "tool::tests::test_invoke_cancel_during_fast_window_keeps_completion_owner",
-    ) {
-        return;
-    }
-    tokio::runtime::Builder::new_multi_thread().worker_threads(2).enable_all().build().unwrap().block_on(async {
-        let dir = tempfile::tempdir().unwrap();
-        let (tool, registry, entered, release) = make_completion_tool(dir.path().to_str().unwrap());
-        let mut notifications = registry.notification_tx().subscribe();
-        let mut invoke = Box::pin(tool.invoke(serde_json::json!({"script": "export const meta = { name: 'fixture', description: 'lifecycle' }; return await agent('finish');"}), ToolContext::new(&[], dir.path().to_str().unwrap())));
-        std::future::poll_fn(|cx| {
-            let result = invoke.as_mut().poll(cx);
-            assert!(result.is_pending(), "必须在invoke尚未返回的启动窗口取消");
-            if registry.active_count() == 1 { std::task::Poll::Ready(()) } else { std::task::Poll::Pending }
-        }).await;
-        drop(invoke);
-        tokio::time::timeout(std::time::Duration::from_secs(10), entered.notified()).await.expect("真实Node须派发agent");
-        release.notify_one();
-        let result = tokio::time::timeout(std::time::Duration::from_secs(3), notifications.recv()).await.expect("取消调用者不能丢失完成通知").unwrap();
-        assert_eq!(result.status, WorkflowRunStatus::Completed);
-        assert_eq!(registry.active_count(), 0);
-        assert_eq!(result.agent_count, 1);
-        assert!(notifications.try_recv().is_err(), "同一run只结算一次");
-    });
-}
-
 /// [回归测试] 快速窗口中的kill也必须保留Killed，不能被另一路完成映射改成Failed。
 #[test]
+#[serial]
 fn test_invoke_fast_kill_preserves_terminal_projection() {
+    use_repository_bundle();
     if isolated_completion_child("tool::tests::test_invoke_fast_kill_preserves_terminal_projection")
     {
         return;
@@ -467,11 +450,9 @@ fn test_invoke_fast_kill_preserves_terminal_projection() {
 /// [回归测试] preflight 被取消时不能留下验证进程或脚本目录。
 #[cfg(unix)]
 #[test]
+#[serial]
 fn test_preflight_cancellation_releases_process_and_script() {
-    if crate::runner::workflow_local_dist().is_none() {
-        eprintln!("skipping: @peri-code/workflow engine is not installed");
-        return;
-    }
+    use_repository_bundle();
     if isolated_completion_child(
         "tool::tests::test_preflight_cancellation_releases_process_and_script",
     ) {
