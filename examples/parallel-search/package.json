@@ -1,8 +1,0 @@
-{
-  "name": "peri-parallel-search-example",
-  "private": true,
-  "version": "1.0.0",
-  "description": "Opt-in Parallel Search MCP configuration for Peri",
-  "engines": { "node": ">=22" },
-  "dependencies": { "mcp-remote": "0.14.3" }
-}

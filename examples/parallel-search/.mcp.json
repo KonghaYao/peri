@@ -1,9 +1,10 @@
 {
   "mcpServers": {
     "parallel-search": {
-      "command": "node",
+      "command": "npx",
       "args": [
-        "./node_modules/mcp-remote/dist/proxy.js",
+        "-y",
+        "mcp-remote@0.14.3",
         "https://search.parallel.ai/mcp",
         "--transport",
         "http-only",
