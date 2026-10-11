@@ -286,9 +286,9 @@ snake_case 命名（`serde` 未做 rename，Rust `RunState` 直出）：
 
 ### outputs/*.txt 与 `${label}` 占位符
 
-`return_value` 中超过阈值（200 字符）的字符串由宿主 `extract_long_texts`（`journal.rs`）递归提取：
+`return_value` 中超过阈值（200 字节，宿主常量 `LONGTEXT_EXTRACT_THRESHOLD_BYTES`）的字符串由宿主 `extract_long_texts`（`journal.rs`）递归提取：
 
-- **label 规则**：字符串在 JSON 中的字段路径即文件名——对象字段按点路径拼接（`a.b` → `outputs/a.b.txt`），数组元素按下标 `[i]`（`items[0]` → `outputs/items[0].txt`）；label 含路径遍历字符时回退为 `unnamed`
+- **label 规则**：字符串在 JSON 中的字段路径即文件名——对象字段按点路径拼接（`a.b` → `outputs/a.b.txt`），数组元素按下标 `[i]`（`items[0]` → `outputs/items[0].txt`）；路径分隔符与控制字符替换为 `_`，连续点折叠为 `._`，空 label 回落 `unnamed`，同一 run 内归一到同名时追加 `-2`、`-3`…（宿主 `output_label` 是唯一权威）。占位符与文件名取同一 label，因此读取侧按 label 解析必然命中。
 - 原位置替换为 `${label}` 占位符（如 `"${a.b}"`）；reader 用 `/^\$\{([^}]+)\}$/` **精确匹配整个字符串**，命中且存在对应文件则替换回原文，未命中（无对应文件 / 非整串占位符）时原样保留
 
 ---

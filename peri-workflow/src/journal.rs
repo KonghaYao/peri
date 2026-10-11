@@ -20,6 +20,7 @@ mod git;
 mod output;
 pub use git::GitBaseline;
 pub use output::extract_long_texts;
+pub(crate) use output::output_label;
 
 const WORKFLOW_RUNS_DIR: &str = ".claude/workflow-runs";
 const KEEP_MAX_RUNS: usize = 50;
@@ -260,17 +261,27 @@ impl WorkflowJournalStore {
             .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))
     }
 
-    /// 将 agent 输出写入独立文件 outputs/{label}.txt。
+    /// 将长文本写入独立文件 `outputs/{label}.txt`。
+    ///
+    /// label 已由 [`output::output_label`] 归一（非法字符替换、重名去重），本方法
+    /// 只做最后一道防御：仍含路径分隔符、控制字符或 `..` 形态即报错返回。
+    /// **不得在这里静默改名**——静默改名会让 state.json 的 `${label}` 指向不存在
+    /// 的文件（引用断裂），多个非法 label 还会互相覆盖（2026-10-11 issue）。
     pub fn write_output(&self, run_id: &str, label: &str, content: &str) -> std::io::Result<()> {
-        // 防御性检查：label 不含路径遍历字符
-        let safe_label = if label.contains("..") || label.contains('/') || label.contains('\\') {
-            "unnamed"
-        } else {
-            label
-        };
+        if label.is_empty()
+            || label.contains("..")
+            || label.contains('/')
+            || label.contains('\\')
+            || label.chars().any(char::is_control)
+        {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                format!("unsafe workflow output label: {label:?}"),
+            ));
+        }
         let dir = self.run_dir(run_id).join("outputs");
         fs::create_dir_all(&dir)?;
-        fs::write(dir.join(format!("{}.txt", safe_label)), content)
+        fs::write(dir.join(format!("{label}.txt")), content)
     }
 }
 
