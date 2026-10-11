@@ -76,15 +76,22 @@ pub struct WorkflowStartOutcome {
 
 impl WorkflowStartOutcome {
     /// 启动成功文案（稳定格式；MCP `Workflow` 工具与旧 `WorkflowTool` 共用）。
+    ///
+    /// 与完成提醒同口径说明长文本外置（`${label}` 是引用、内容在 `outputs/`）：
+    /// 启动期先说清，完成提醒才不会被读成「脚本未求值」。
     pub fn message(&self) -> String {
         format!(
-            "Workflow '{}' started.\n\
-             run_id: {}\n\
+            "Workflow '{workflow_name}' started.\n\
+             run_id: {run_id}\n\
              \n\
              The workflow is running in the background.\n\
              You will be notified when it completes with a result summary.\n\
-             Results will be saved to .claude/workflow-runs/{}/state.json",
-            self.workflow_name, self.run_id, self.run_id
+             Results will be saved to .claude/workflow-runs/{run_id}/state.json\n\
+             Strings longer than {threshold} bytes are externalized to `outputs/<label>.txt` \
+             in that directory; a `${{label}}` token in state.json is that reference.",
+            workflow_name = self.workflow_name,
+            run_id = self.run_id,
+            threshold = peri_acp_types::workflow::LONGTEXT_EXTRACT_THRESHOLD_BYTES,
         )
     }
 }

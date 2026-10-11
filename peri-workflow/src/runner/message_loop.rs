@@ -275,7 +275,7 @@ impl MessageLoop {
                                         &mut v,
                                         &done.run_id,
                                         &journal_for_extract,
-                                        200,
+                                        peri_acp_types::workflow::LONGTEXT_EXTRACT_THRESHOLD_BYTES,
                                     );
                                 }
                                 v

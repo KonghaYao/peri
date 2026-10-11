@@ -136,7 +136,7 @@ Do not create a file solely to validate an inline script passed directly to the 
 
 ### 8. Inspect saved workflow results with the CLI
 
-After a run, the runner persists `state.json`, agent journal entries, and extracted long outputs under `.claude/workflow-runs/<run_id>/`. The Read tool remains suitable for a known result file; use the built-in CLI when you need a complete report or need to discover runs:
+After a run, the runner persists `state.json`, agent journal entries, and extracted long outputs under `.claude/workflow-runs/<run_id>/`. Strings longer than 200 bytes are **not** stored inline: `state.json` (and any raw dump of it, e.g. `list --json`) keeps a `${label}` reference to `outputs/<label>.txt` in the same run directory — a `${...}` token is an externalized value, never a missing or unevaluated one. The Read tool remains suitable for a known result file or a referenced `outputs/*.txt`; use the built-in CLI when you need a complete report (it restores the extracted text inline) or need to discover runs:
 
 ```bash
 npx -y @peri-code/workflow@0.3.0 list
@@ -145,11 +145,13 @@ npx -y @peri-code/workflow@0.3.0 read <run_id>
 npx -y @peri-code/workflow@0.3.0 read <run_id> --short --json
 ```
 
-`read` and `list` search upward from the current directory for `.claude/workflow-runs/`. `read` restores extracted long outputs in its report.
+`read` and `list` search upward from the current directory for `.claude/workflow-runs/`. `read` restores extracted long outputs in its report; `list` reports the stored state, so its output still shows the `${label}` references.
 
 ### 9. The workflow runs asynchronously
 
 The Workflow tool returns immediately with a run_id. You'll receive a notification when it completes. The results are saved to `.claude/workflow-runs/<run_id>/state.json`.
+
+Long strings are externalized as described above: the start message, the completion notification and `state.json` all mark them with a `${label}` reference whose content lives in `outputs/<label>.txt`. Read the referenced file instead of reporting the token as the result.
 
 Use the Read tool or the `read` CLI command to examine the results after completion.
 

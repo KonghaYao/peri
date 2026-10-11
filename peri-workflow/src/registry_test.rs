@@ -258,6 +258,20 @@ fn test_notification_includes_saved_state_only_when_artifact_exists() {
         notification.contains("Use `Read` to view full results"),
         "存在 artifact 时应以模型面名字引导读取，实际：{notification}"
     );
+    // 长文本外置必须对消费方可见：不说明 `${label}` 是引用，读 state.json 的
+    // 消费方会把 token 当结果、静默丢长文本（2026-10-11 issue 缺陷 1）。
+    // 阈值断言取常量展开值而非硬编码数字，避免文案与提取阈值漂移。
+    assert!(
+        notification.contains(&format!(
+            "Strings longer than {} bytes are externalized",
+            peri_acp_types::workflow::LONGTEXT_EXTRACT_THRESHOLD_BYTES
+        )),
+        "存在 artifact 时应说明长文本外置阈值，实际：{notification}"
+    );
+    assert!(
+        notification.contains("`${label}` token in state.json references `outputs/<label>.txt`"),
+        "存在 artifact 时应说明 `${{label}}` 指向 outputs/<label>.txt，实际：{notification}"
+    );
     assert!(!notification.contains("Error:"));
     std::fs::remove_dir_all(state_dir).unwrap();
 }

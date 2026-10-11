@@ -447,6 +447,16 @@ fn escape_reminder_text(input: &str) -> String {
         .replace('>', "&gt;")
 }
 
+/// `return_value` 长文本外置阈值（**字节**，非字符数）：超过它的字符串在写
+/// `state.json` 前被抽出到 `outputs/<label>.txt`，原位替换为 `${label}` 引用。
+///
+/// 单一权威：宿主提取的调用点（`peri-workflow` 的 `extract_long_texts` 调用）
+/// 与提醒/启动文案（`WorkflowTaskResult::to_notification`、
+/// `peri-workflow` 的启动文案）共用本常量。CJK 一字 3 字节，所以「200 字节」
+/// 对中文内容远早于 200 字触发；改这里即同时改变提取行为与对外说明。
+/// 口径见 `docs/design/workflow.md` §3.6。
+pub const LONGTEXT_EXTRACT_THRESHOLD_BYTES: usize = 200;
+
 impl WorkflowTaskResult {
     /// 主 Agent 是否应把 workflow 视为「成功交付」（非仅 engine 跑完）。
     pub fn agent_facing_success(&self) -> bool {
@@ -518,9 +528,17 @@ impl WorkflowTaskResult {
         let artifact_lines = if self.state_artifact_exists {
             // 指引指代 builtin 文件工具时必须用**模型面名字**（裸名已无提供面）；
             // 查表未命中的兜底不含工具名，不得回落到裸名。
+            // `${label}` 是写入期契约（阈值见 LONGTEXT_EXTRACT_THRESHOLD_BYTES）：
+            // 不说明它是引用，读 state.json 的消费方会把 token 当结果、静默丢长文本。
             let read_lead = crate::builtin_mcp::effective_name_of("workspace", "Read")
                 .map_or("Read it".to_string(), |name| format!("Use `{name}`"));
-            format!("Results saved to {state_path}\n{read_lead} to view full results.\n")
+            let threshold = LONGTEXT_EXTRACT_THRESHOLD_BYTES;
+            format!(
+                "Results saved to {state_path}\n\
+                 Strings longer than {threshold} bytes are externalized: a `${{label}}` token in \
+                 state.json references `outputs/<label>.txt` in the same run directory.\n\
+                 {read_lead} to view full results.\n"
+            )
         } else {
             "Result state file was not generated.\n".to_string()
         };
