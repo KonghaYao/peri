@@ -45,8 +45,7 @@ fn test_plugin_detail_footer_describes_execute_not_open() {
     }
 }
 
-/// 列表态四个 tab 共用底部提示：Enter 进详情 / 激活添加市场输入，Esc 关闭面板。
-/// Errors 页 Enter 会切回 Installed（`panel_handler.rs` 列表 Enter 分支末段），本行未描述。
+/// Installed / Discover 列表态底部提示：Enter 进详情，Esc 关闭面板。
 #[test]
 fn test_plugin_list_footer_describes_details_not_close() {
     let src = include_str!("../plugin.rs");
@@ -84,6 +83,67 @@ fn test_plugin_list_footer_describes_details_not_close() {
         assert!(
             hint.contains("Enter: details") || hint.contains("Enter: 查看详情"),
             "{lang} 提示须标明 Enter 查看详情：{hint}"
+        );
+    }
+}
+
+/// 列表态 footer 按 tab 选提示：Marketplaces 的 Enter 是「详情/添加」，Errors 的 Enter 切回已安装，
+/// 二者都不适用 `panel-plugin-list-hint` 的「Enter: 查看详情」。
+#[test]
+fn test_plugin_list_footer_hint_selected_by_tab() {
+    let src = include_str!("../plugin.rs");
+    let footer = src
+        .split("// 列表态 Enter 语义按 tab 不同")
+        .nth(1)
+        .and_then(|rest| {
+            rest.split("lines.push(Line::from(vec![Span::styled(footer_text")
+                .next()
+        })
+        .expect("Plugin 列表态 footer 分支存在");
+
+    for (tab, key) in [
+        (
+            "PluginViewTab::Marketplaces",
+            "panel-plugin-marketplace-hint-keys",
+        ),
+        ("PluginViewTab::Errors", "panel-plugin-errors-hint-keys"),
+        ("PluginViewTab::Installed", "panel-plugin-list-hint"),
+        ("PluginViewTab::Discover", "panel-plugin-list-hint"),
+    ] {
+        assert!(footer.contains(tab), "footer 须按 {tab} 选择提示 key");
+        assert!(
+            footer.contains(&format!(r#"i18n::tr("{key}")"#)),
+            "footer 的 {tab} 分支须引用 {key}：{footer}"
+        );
+    }
+
+    // 动作侧：Errors tab 行不可展开，Enter 切回 Installed
+    let handler = include_str!("panel_handler.rs");
+    let list_enter_arm = handler
+        .split("(false, false, KeyCode::Enter)")
+        .nth(1)
+        .and_then(|rest| rest.split("(false, false, KeyCode::").next())
+        .expect("列表模式 Enter 分支存在");
+    assert!(
+        list_enter_arm.contains("PluginViewTab::Errors"),
+        "Errors tab Enter 的真实动作是切回已安装视图；动作语义变化须同步提示与该用例"
+    );
+
+    for lang in ["en", "zh-CN"] {
+        let reg = LcRegistry::new(Some(lang));
+        let marketplaces = reg.tr("panel-plugin-marketplace-hint-keys");
+        assert!(
+            marketplaces.contains("Enter: detail/add") || marketplaces.contains("Enter: 详情/添加"),
+            "{lang} Marketplaces 提示须标明 Enter 进详情或激活添加：{marketplaces}"
+        );
+        let errors = reg.tr("panel-plugin-errors-hint-keys");
+        assert!(
+            errors.contains("Enter: back to installed") || errors.contains("Enter: 切回已安装"),
+            "{lang} Errors 提示须标明 Enter 切回已安装：{errors}"
+        );
+        assert!(
+            !errors.contains("Enter: details") && !errors.contains("Enter: 查看详情"),
+            "{lang} Errors 行不可展开，提示不得声称查看详情：{errors}"
         );
     }
 }

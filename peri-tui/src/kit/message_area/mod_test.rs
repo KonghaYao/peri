@@ -298,7 +298,10 @@ fn hover_state(path: &str, row: u16) -> ImageHoverState {
     }
 }
 
-#[tokio::test]
+// [Why 暂停时钟] 预览任务在 tokio 定时器上延迟写回，固定 sleep 只留 20ms 余量，
+// Windows CI 上定时器唤醒稍晚即误报。暂停时钟让 sleep 在运行时空闲时自动推进，
+// 断言不再依赖墙钟，且「移出取消」分支真正等到旧任务触发后才判定。
+#[tokio::test(start_paused = true)]
 #[serial]
 async fn image_preview_hover_requires_stable_dwell_and_cancels_on_exit() {
     *IMAGE_HOVER.state().write() = None;

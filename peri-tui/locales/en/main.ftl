@@ -1021,6 +1021,7 @@ panel-plugin-marketplaces-empty = No marketplaces configured
 # ---- Plugin Panel Errors ----
 panel-plugin-errors-title = Load Errors
 panel-plugin-errors-empty = No errors
+panel-plugin-errors-hint-keys = ←/→/Tab: switch view  |  Enter: back to installed  |  Esc: close
 
 # ---- Plugin Panel Status ----
 panel-plugin-status-enabled = enabled
@@ -1084,6 +1085,7 @@ panel-tasks-empty =   No active tasks
 panel-tasks-empty-hint-1 =   Cron jobs are scheduled via /loop command;
 panel-tasks-empty-hint-2 =   SubAgents are spawned by Task / SubAgent tools.
 panel-tasks-nav-hint =   ↑/↓::navigate  Enter::cancel  Esc::close
+panel-tasks-nav-hint-close =   ↑/↓::navigate  Enter::close  Esc::close
 
 # ---- Theme Panel ----
 panel-theme-active-mark =  *

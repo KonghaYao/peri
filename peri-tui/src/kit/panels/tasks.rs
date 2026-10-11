@@ -350,7 +350,13 @@ pub fn TasksPanel(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
     }
 
     lines.push(Line::from(""));
-    lines.push(Line::from(i18n::tr("panel-tasks-nav-hint")).fg(theme_def.read().semantic.text.dim));
+    // Enter 仅在选中后台任务行时取消该任务；Cron / SubAgent 行 Enter 只关闭面板。
+    let nav_hint = if sel < bg_count {
+        i18n::tr("panel-tasks-nav-hint")
+    } else {
+        i18n::tr("panel-tasks-nav-hint-close")
+    };
+    lines.push(Line::from(nav_hint).fg(theme_def.read().semantic.text.dim));
 
     let content = Paragraph::new(ratatui::text::Text::from(lines));
 
@@ -423,28 +429,66 @@ mod tests {
         );
     }
 
-    /// P0-74：底部导航提示必须描述真实动作（Enter 取消所选后台任务），不得声称打开。
+    /// P0-74：底部导航提示必须描述真实动作——后台任务行 Enter 取消，Cron / SubAgent 行 Enter 只关闭。
     #[test]
     fn test_tasks_nav_hint_describes_cancel_not_open() {
         let src = include_str!("tasks.rs");
         let main_src = src.split("#[cfg(test)]").next().expect("tasks module body");
         assert!(
-            main_src.contains(r#"i18n::tr("panel-tasks-nav-hint")"#),
-            "Tasks 面板底部提示须使用 Tasks 专属 key"
-        );
-        assert!(
             !main_src.contains("common-nav-enter-close"),
             "Tasks 面板不得复用 Enter::open 语义的通用提示"
         );
+
+        // 动作侧：Enter 只在选中后台任务行时取消（sel < bg_count），其余行走 close_panel
+        let enter_arm = main_src
+            .split("KeyCode::Enter =>")
+            .nth(1)
+            .and_then(|rest| rest.split("KeyCode::Up =>").next())
+            .expect("Tasks Enter 分支存在");
+        assert!(
+            enter_arm.contains("sel < bg_count") && enter_arm.contains("cancel_bg_task"),
+            "Tasks Enter 的真实动作是仅对后台任务行取消；动作语义变化须同步提示与该用例"
+        );
+
+        // 提示侧：按选中行落在哪个分组选择 key
+        let hint_branch = main_src
+            .split("let nav_hint = if sel < bg_count")
+            .nth(1)
+            .and_then(|rest| rest.split("lines.push(Line::from(nav_hint))").next())
+            .expect("Tasks 提示选择分支存在");
+        assert!(
+            hint_branch.contains(r#"i18n::tr("panel-tasks-nav-hint")"#),
+            "后台任务行提示须使用 Tasks 取消专属 key"
+        );
+        assert!(
+            hint_branch.contains(r#"i18n::tr("panel-tasks-nav-hint-close")"#),
+            "Cron / SubAgent 行提示须使用关闭专属 key"
+        );
+
         for lang in ["en", "zh-CN"] {
-            let hint = crate::i18n::LcRegistry::new(Some(lang)).tr("panel-tasks-nav-hint");
+            let reg = crate::i18n::LcRegistry::new(Some(lang));
+            let cancel = reg.tr("panel-tasks-nav-hint");
             assert!(
-                !hint.contains("Enter::open"),
-                "{lang} 提示不得把取消伪装成打开：{hint}"
+                !cancel.contains("Enter::open"),
+                "{lang} 提示不得把取消伪装成打开：{cancel}"
             );
             assert!(
-                hint.contains("Enter::cancel") || hint.contains("Enter::取消"),
-                "{lang} 提示须标明 Enter 取消：{hint}"
+                cancel.contains("Enter::cancel") || cancel.contains("Enter::取消"),
+                "{lang} 提示须标明 Enter 取消：{cancel}"
+            );
+
+            let close = reg.tr("panel-tasks-nav-hint-close");
+            assert!(
+                !close.contains("Enter::open"),
+                "{lang} 提示不得把关闭伪装成打开：{close}"
+            );
+            assert!(
+                close.contains("Enter::close") || close.contains("Enter::关闭"),
+                "{lang} 非后台任务行提示须标明 Enter 关闭：{close}"
+            );
+            assert!(
+                !close.contains("Enter::cancel") && !close.contains("Enter::取消"),
+                "{lang} 非后台任务行 Enter 不取消，提示不得声称取消：{close}"
             );
         }
     }

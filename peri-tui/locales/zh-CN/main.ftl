@@ -1021,6 +1021,7 @@ panel-plugin-marketplaces-empty = 未配置市场
 # ---- Plugin Panel Errors ----
 panel-plugin-errors-title = 加载错误
 panel-plugin-errors-empty = 无错误
+panel-plugin-errors-hint-keys = ←/→/Tab: 切换视图  |  Enter: 切回已安装  |  Esc: 关闭
 
 # ---- Plugin Panel Status ----
 panel-plugin-status-enabled = 已启用
@@ -1084,6 +1085,7 @@ panel-tasks-empty =   当前无活跃任务
 panel-tasks-empty-hint-1 =   通过 /loop 命令调度定时任务；
 panel-tasks-empty-hint-2 =   子代理由 Task / SubAgent 工具创建。
 panel-tasks-nav-hint =   ↑/↓::导航  Enter::取消  Esc::关闭
+panel-tasks-nav-hint-close =   ↑/↓::导航  Enter::关闭  Esc::关闭
 
 # ---- Theme Panel ----
 panel-theme-active-mark =  *
