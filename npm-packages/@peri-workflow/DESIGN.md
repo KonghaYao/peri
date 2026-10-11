@@ -307,16 +307,20 @@ bun build src/index.ts \
   --banner:js='#!/usr/bin/env node'
 ```
 
-产出：`dist/peri-workflow.js`（单文件，零外部依赖，~35KB）
+产出：`dist/peri-workflow.js`（单文件，engine 一并打包，零运行时依赖）。
 
-### 安装
+该文件**入库并作为发行内容的事实源**：Rust 侧只保存它的 sha256 摘要
+（`peri-workflow/src/runner/artifact.rs::WORKFLOW_ENTRY_SHA256`），不把 JS 嵌入二进制。
+重建 dist 后必须同步该摘要（`repository_bundle_matches_pinned_digest` 测试守卫）。
+
+### 安装（npm 渠道）
 
 ```bash
 npm install -g @peri-code/workflow
 # bin: peri-workflow → dist/peri-workflow.js
 ```
 
-或通过 npx / bunx 自动下载（无需全局安装）：
+或通过 npx / bunx 使用（无需全局安装；手工/调试口径）：
 
 ```bash
 # 必须带显式版本：npx 在全局已有同名 bin 时会静默复用旧版（旧版无 CLI 子命令，
@@ -325,31 +329,32 @@ npx -y @peri-code/workflow@0.2.0   # Node.js 环境
 bunx @peri-code/workflow@0.2.0     # Bun 环境
 ```
 
-### 宿主发现
+### 宿主消费（Peri 的非嵌入契约）
 
-宿主自动检测 bun 环境，优先用 bunx：
+Peri 不把 JS 产物嵌入二进制；发行归档在可执行文件旁携带 sidecar：
 
-```rust
-fn workflow_cmd() -> (&'static str, &'static [&'static str]) {
-    if has_bun() {
-        ("bunx", &["@peri-code/workflow"])
-    } else {
-        ("npx", &["-y", "@peri-code/workflow"])
-    }
-}
-Command::new(cmd_bin)
-    .args(cmd_args)
-    .stdin(Stdio::piped())
-    .stdout(Stdio::piped())
-    .spawn()
+```text
+peri
+peri-resources/workflow/<内容身份>/     # 内容身份 = dist/peri-workflow.js 的 sha256 前 12 位
+    package.json
+    dist/peri-workflow.js
 ```
 
-`-y` 标志自动确认首次下载，无需用户交互。
+`peri-workflow/src/runner/artifact.rs` 的解析顺序：
+
+1. `PERI_WORKFLOW_ARTIFACT_DIR` 显式注入的包目录（部署或测试）；
+2. 本机缓存 `~/.peri/workflow/<version>/<内容身份>/`；
+3. 可执行文件目录旁的随包 sidecar（命中后 best-effort 发布到缓存以便复用）。
+
+每步都校验包身份（name / version / main / `periProtocolVersion` / `periBuildId`）、入口路径
+不越界，以及入口字节的 sha256 等于编译期 pin。默认不联网：缺失或摘要不符即 fail closed；
+显式 `PERI_WORKFLOW_ALLOW_NPX_FALLBACK=1` 只允许一次网络获取，内容仍须通过同一摘要校验后
+才会被使用——不存在直接执行网络内容的路径。启动方式为 `node <已校验入口>`；
+`peri workflow` CLI、preflight 与 workflow 工具共用同一解析路径。
 
 **安全要点**：
-- 必须 `env_clear()` 清除父进程环境变量
+- 子进程默认 `env_clear()`，仅注入显式声明的环境变量（`peri-js-runtime` 的 `JsExecutionHost`）
 - 禁止注入 `*_API_KEY`、`*_SECRET`、`LANGFUSE_*` 等密钥
-- 仅注入 `HOME`、`PATH`、`USER` 等基本变量及 `PERI_*` 相关业务变量
 
 ---
 
@@ -363,7 +368,7 @@ Command::new(cmd_bin)
 2. 全局对象受限（禁止 `Date.now()`、`Math.random` 等非确定性 API）
 3. 所有对外交互（agent、日志、文件）都通过声明的 hooks（`WorkflowHooks`），不存在直接的系统调用
 
-**安全关键**：`@claude-code-best/workflow-engine` 是私有 npm 包，定义沙箱边界。JS 打包为单文件 bundle 后，沙箱代码内嵌为仓库自有代码，完全可审计。
+**安全关键**：`@claude-code-best/workflow-engine` 是私有 npm 包，定义沙箱边界。JS 打包为单文件 bundle 后，沙箱代码随 bundle 一同分发且入库受摘要 pin 保护，完全可审计（Rust 侧不嵌入该产物）。
 
 ### 传输安全
 

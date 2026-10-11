@@ -1,1 +1,2 @@
-# dist/ 为构建产物（`bun run build` 生成）：不入库；npm 发布经 prepublishOnly 从 src 重建。
+# dist/ 为发布、随包分发（sidecar）与发行包内容校验所需的 hermetic 单文件 artifact：构建产物入库。
+# Rust 侧不嵌入该产物，仅按固定 SHA-256 摘要校验消费（peri-workflow/src/runner/artifact.rs）。

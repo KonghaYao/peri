@@ -19,6 +19,17 @@ import type { AgentTaskParams } from './types'
 /** taskId 序号：作用域 = 单次 run（runId 前缀保证跨 run 不复用）。 */
 let taskSeq = 0
 
+/**
+ * 宿主取消编码（P6 wire）：`dead { reason: 'killed' }`。
+ *
+ * 该编码由本仓 wire 约定定义；引擎 0.1.0 的 `AgentRunResult.reason` 联合尚未包含
+ * 它，因此按 `unknown` 比较，避免与引擎类型声明产生假冲突。
+ */
+function isCancelledResult(result: AgentRunResult | undefined): boolean {
+  if (!result || result.kind !== 'dead') return false
+  return (result.reason as unknown) === 'killed'
+}
+
 export const rpcAdapter: AgentAdapter = {
   id: 'perihelion-rpc',
   capabilities: { structuredOutput: true, tools: true },
@@ -42,7 +53,7 @@ export const rpcAdapter: AgentAdapter = {
     } satisfies AgentTaskParams)
 
     const result = (await pending) as AgentRunResult | undefined
-    if (result && result.kind === 'dead' && result.reason === 'killed') {
+    if (isCancelledResult(result)) {
       throw new engine.WorkflowAbortedError()
     }
     if (!result) {
