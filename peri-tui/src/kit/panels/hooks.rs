@@ -215,3 +215,7 @@ fn close_panel() {
     // I19-A: 弹栈而非清空整个栈，避免同时打开多个不同组面板时关闭一个会全部关闭
     crate::kit::panel_registry::close_active_panel();
 }
+
+#[cfg(test)]
+#[path = "hooks_test.rs"]
+mod tests;

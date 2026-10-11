@@ -120,3 +120,29 @@ fn test_collect_subagents_recurses_into_nested_subagent() {
     assert_eq!(result[0].agent_id, "outer");
     assert_eq!(result[1].agent_id, "inner");
 }
+
+/// 只读 Info 面板（333c51d4）：Enter 与 Esc 一样关闭面板，提示必须描述真实动作。
+#[test]
+fn test_agent_nav_hint_describes_close_not_open() {
+    let src = include_str!("agent.rs");
+    let main_src = src.split("#[cfg(test)]").next().expect("agent module body");
+    assert!(
+        main_src.contains(r#"i18n::tr("panel-agent-nav-hint")"#),
+        "Agent 面板底部提示须使用 Agent 专属 key"
+    );
+    assert!(
+        main_src.contains("KeyCode::Enter => close_panel()"),
+        "本用例锁定 Enter 关闭面板的动作侧；动作语义变化须同步提示与该用例"
+    );
+    for lang in ["en", "zh-CN"] {
+        let hint = crate::i18n::LcRegistry::new(Some(lang)).tr("panel-agent-nav-hint");
+        assert!(
+            !hint.contains("Enter::open"),
+            "{lang} 提示不得把关闭伪装成打开：{hint}"
+        );
+        assert!(
+            hint.contains("Enter::close") || hint.contains("Enter::关闭"),
+            "{lang} 提示须标明 Enter 关闭：{hint}"
+        );
+    }
+}
