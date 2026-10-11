@@ -97,6 +97,7 @@ fn structured_reminder_notification_pins_the_peri_wire_contract() {
             vec![ReminderAudience::Tui],
         ),
         replay: true,
+        source_agent_id: Some("child-thread-99".into()),
     };
 
     assert_eq!(notification.method(), "peri/systemReminder");
@@ -124,5 +125,26 @@ fn structured_reminder_notification_pins_the_peri_wire_contract() {
     assert!(
         params["reminder"]["audiences"].is_array(),
         "受众声明必须随 DTO 下发，客户端据此决定是否展示"
+    );
+    assert_eq!(
+        params["sourceAgentId"], "child-thread-99",
+        "子 Agent 转发展示归属随结构化通知下发"
+    );
+
+    // 本会话自身提醒：sourceAgentId 键省略（skip_serializing_if）。
+    let local = Notification {
+        session_id: agent_client_protocol::schema::v1::SessionId::new("s-wire-local"),
+        reminder: reminder(
+            "wire_pinned",
+            ReminderDelivery::Required,
+            vec![ReminderAudience::Tui],
+        ),
+        replay: false,
+        source_agent_id: None,
+    };
+    let local_params = local.to_untyped_message().unwrap().params().clone();
+    assert!(
+        local_params.get("sourceAgentId").is_none(),
+        "本会话提醒不得携带转发来源键"
     );
 }

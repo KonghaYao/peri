@@ -809,6 +809,7 @@ reminder-legacy-marker = Legacy reminder
 reminder-required-marker = Required reminder
 reminder-structured-marker = System reminder
 reminder-legacy-source = legacy history
+reminder-relayed-from = Forwarded from subagent { $name } · handled by that subagent
 channel-wechat = WeChat
 channel-feishu = Feishu
 channel-dingtalk = DingTalk

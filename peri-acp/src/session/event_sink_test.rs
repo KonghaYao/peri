@@ -763,8 +763,15 @@ async fn model_only_and_diagnostic_only_reminders_never_reach_the_client_wire() 
                 vec![ReminderAudience::Model, ReminderAudience::Tui],
             ),
         ] {
-            sink.push_event("s1", &ExecutorEvent::SystemReminder(reminder), 0)
-                .await;
+            sink.push_event(
+                "s1",
+                &ExecutorEvent::SystemReminder {
+                    reminder,
+                    source_agent_id: None,
+                },
+                0,
+            )
+            .await;
         }
         assert!(
             transport.notifications.lock().unwrap().is_empty(),
@@ -791,11 +798,14 @@ async fn client_audience_reminders_follow_caps_with_and_without_structured_wire(
         let sink = TransportEventSink::new(transport.clone(), caps);
         sink.push_event(
             "s1",
-            &ExecutorEvent::SystemReminder(reminder_for_test(
-                "client_notice",
-                ReminderDelivery::Required,
-                vec![ReminderAudience::Tui],
-            )),
+            &ExecutorEvent::SystemReminder {
+                reminder: reminder_for_test(
+                    "client_notice",
+                    ReminderDelivery::Required,
+                    vec![ReminderAudience::Tui],
+                ),
+                source_agent_id: None,
+            },
             0,
         )
         .await;
@@ -816,4 +826,98 @@ async fn client_audience_reminders_follow_caps_with_and_without_structured_wire(
             assert_eq!(notifications[0].1["data"]["text"], "client_notice summary");
         }
     }
+}
+
+/// 子 Agent 转发展示归属：结构化分支携带 source_agent_id；本会话提醒省略该键，
+/// fallback 分支不带归属（legacy 客户端无展开渲染面）。
+#[tokio::test]
+async fn system_reminder_source_agent_id_is_carried_only_when_relayed_structurally() {
+    use peri_acp_types::system_reminder::{ReminderAudience, ReminderDelivery};
+
+    let transport = Arc::new(MockTransport::default());
+    let caps: Arc<DashMap<String, PeriCaps>> = Arc::new(DashMap::new());
+    caps.insert(
+        "s1".to_string(),
+        PeriCaps {
+            system_reminder: true,
+            ..PeriCaps::default()
+        },
+    );
+    let sink = TransportEventSink::new(transport.clone(), caps);
+
+    // 1. 子 Agent 转发：结构化事件携带 source_agent_id。
+    sink.push_event(
+        "s1",
+        &ExecutorEvent::SystemReminder {
+            reminder: reminder_for_test(
+                "relayed_notice",
+                ReminderDelivery::Required,
+                vec![ReminderAudience::Tui],
+            ),
+            source_agent_id: Some("child-thread-42".into()),
+        },
+        0,
+    )
+    .await;
+    {
+        let notifications = transport.notifications.lock().unwrap();
+        assert_eq!(notifications.len(), 1);
+        assert_eq!(notifications[0].1["event"], "system-reminder");
+        assert_eq!(
+            notifications[0].1["data"]["source_agent_id"], "child-thread-42",
+            "转发来源必须随结构化 DTO 下发"
+        );
+    }
+
+    // 2. 本会话自身提醒：省略 source_agent_id 键。
+    sink.push_event(
+        "s1",
+        &ExecutorEvent::SystemReminder {
+            reminder: reminder_for_test(
+                "local_notice",
+                ReminderDelivery::Required,
+                vec![ReminderAudience::Tui],
+            ),
+            source_agent_id: None,
+        },
+        0,
+    )
+    .await;
+    {
+        let notifications = transport.notifications.lock().unwrap();
+        assert_eq!(notifications.len(), 2);
+        assert!(
+            notifications[1].1["data"].get("source_agent_id").is_none(),
+            "本会话提醒不得携带转发来源键"
+        );
+    }
+
+    // 3. fallback 分支（caps 未声明结构化）：不带归属。
+    sink.caps_registry.insert(
+        "s1".into(),
+        PeriCaps {
+            system_reminder: false,
+            ..PeriCaps::default()
+        },
+    );
+    sink.push_event(
+        "s1",
+        &ExecutorEvent::SystemReminder {
+            reminder: reminder_for_test(
+                "relayed_fallback",
+                ReminderDelivery::Required,
+                vec![ReminderAudience::Tui],
+            ),
+            source_agent_id: Some("child-thread-42".into()),
+        },
+        0,
+    )
+    .await;
+    let notifications = transport.notifications.lock().unwrap();
+    assert_eq!(notifications.len(), 3);
+    assert_eq!(notifications[2].1["event"], "system-reminder-fallback");
+    assert!(
+        notifications[2].1["data"].get("source_agent_id").is_none(),
+        "fallback 文本形态无展开渲染面，不带归属键"
+    );
 }

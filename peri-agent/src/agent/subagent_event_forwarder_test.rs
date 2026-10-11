@@ -679,6 +679,70 @@ async fn test_forwarder_filters_v2_subagent_start_stop() {
         events
     );
 }
+/// 子 Agent 提醒经父会话转发展示：转发器必须打上 source_agent_id = child_thread_id，
+/// 供父视图标注转发归属；提醒 DTO 内容不得被修改。
+#[tokio::test]
+async fn test_forwarder_injects_source_agent_id_for_system_reminder() {
+    use peri_acp_types::system_reminder::{
+        ReminderAudience, ReminderAudiences, ReminderCategory, ReminderDelivery, ReminderSeverity,
+        ReminderSource, SystemReminder, SYSTEM_REMINDER_VERSION,
+    };
+
+    let (bus, handles) = EventBus::new(EventBusConfig::default());
+    let captured: Arc<Mutex<Vec<ExecutorEvent>>> = Arc::new(Mutex::new(Vec::new()));
+    let handler = Arc::new(CapturingHandler {
+        events: Arc::clone(&captured),
+    });
+
+    let _forwarder = spawn_subagent_event_forwarder(
+        handles,
+        Some(handler),
+        None,
+        "child_reminder_1".to_string(),
+    );
+
+    let (turn_id, agent_id) = ids();
+    let reminder = SystemReminder {
+        version: SYSTEM_REMINDER_VERSION,
+        category: ReminderCategory::Guidance,
+        source: ReminderSource("model_runtime".into()),
+        kind: "stream_interrupted".into(),
+        severity: ReminderSeverity::Warning,
+        delivery: ReminderDelivery::Required,
+        audiences: ReminderAudiences(vec![ReminderAudience::Model, ReminderAudience::Tui]),
+        body: "stream interrupted".into(),
+        summary: Some("流中断".into()),
+        metadata: serde_json::json!({}),
+    };
+    bus.emit_state(StateEvent::ProtocolEvent {
+        turn_id,
+        agent_id,
+        event: Box::new(ExecutorEvent::SystemReminder {
+            reminder: reminder.clone(),
+            source_agent_id: None,
+        }),
+    });
+
+    wait_for_event_count(&captured, 1).await;
+
+    let first_event = captured.lock()[0].clone();
+    match first_event {
+        ExecutorEvent::SystemReminder {
+            reminder: forwarded,
+            source_agent_id,
+        } => {
+            assert_eq!(
+                source_agent_id.as_deref(),
+                Some("child_reminder_1"),
+                "转发器必须注入 child_thread_id 作为转发展示归属"
+            );
+            assert_eq!(forwarded.kind, "stream_interrupted");
+            assert_eq!(forwarded.body, reminder.body);
+        }
+        other => panic!("应为 SystemReminder，实际 {:?}", other),
+    }
+}
+
 /// [回归测试] observe 已关闭不表示 render/state 的已入队事件都已排空。
 #[tokio::test]
 async fn test_forwarder_drains_buffered_render_and_state_after_producer_drop() {

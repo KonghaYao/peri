@@ -19,7 +19,7 @@ use crate::kit::bg_task_live::{
     seed_live_from_terminal_snapshot, seed_unobserved_snapshot,
 };
 use crate::kit::tui_render_unit::{
-    DisplayTrusted, InteractionKind, TuiAskUserBlock, TuiNoteLevel, TuiRenderUnit,
+    DisplayTrusted, InteractionKind, ReminderRelay, TuiAskUserBlock, TuiNoteLevel, TuiRenderUnit,
     TuiSystemReminder,
 };
 use fluent_bundle::FluentValue;
@@ -99,13 +99,30 @@ pub(super) fn handle_goal_snapshot(
         });
 }
 
+/// 解析转发来源展示归属：子 Agent 名优先，TUI 未登记时只保留 child_thread_id。
+fn resolve_reminder_relay(
+    state: &BridgeState,
+    source_agent_id: Option<&str>,
+) -> Option<ReminderRelay> {
+    let agent_id = source_agent_id?;
+    Some(ReminderRelay {
+        agent_id: agent_id.to_string(),
+        agent_name: state
+            .current_turn
+            .subagent_name(agent_id)
+            .map(str::to_string),
+    })
+}
+
 pub(super) fn handle_trusted_system_reminder(
     state: &mut BridgeState,
     reminder: peri_acp_types::system_reminder::SystemReminder,
+    source_agent_id: Option<&str>,
 ) {
-    if let Some(vm) = TuiSystemReminder::from_trusted_structured(
+    if let Some(mut vm) = TuiSystemReminder::from_trusted_structured(
         DisplayTrusted::after_current_session_gate(reminder),
     ) {
+        vm.attach_relay(resolve_reminder_relay(state, source_agent_id));
         state.flush_current_turn();
         state
             .committed
@@ -116,8 +133,10 @@ pub(super) fn handle_trusted_system_reminder(
 pub(super) fn handle_system_reminder(
     state: &mut BridgeState,
     reminder: &peri_acp_types::system_reminder::SystemReminder,
+    source_agent_id: Option<&str>,
 ) {
-    if let Some(vm) = TuiSystemReminder::from_wire(reminder.clone()) {
+    if let Some(mut vm) = TuiSystemReminder::from_wire(reminder.clone()) {
+        vm.attach_relay(resolve_reminder_relay(state, source_agent_id));
         state.flush_current_turn();
         state
             .committed

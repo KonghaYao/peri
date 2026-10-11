@@ -21,6 +21,13 @@ struct PeriSystemReminderNotification {
     session_id: SdkSessionId,
     reminder: peri_acp_types::system_reminder::SystemReminder,
     replay: bool,
+    /// 转发展示归属：子 Agent 提醒经父会话转发时非空。
+    #[serde(
+        rename = "sourceAgentId",
+        default,
+        skip_serializing_if = "Option::is_none"
+    )]
+    source_agent_id: Option<String>,
 }
 
 /// Build ACP-standard metadata for routing output to its originating SubAgent.
@@ -125,6 +132,7 @@ impl EventSink for StdioEventSink {
         _session_id: &str,
         reminder: &peri_acp_types::system_reminder::SystemReminder,
         replay: bool,
+        source_agent_id: Option<&str>,
     ) {
         match reminder_carriage(&self.caps, reminder) {
             StdioReminderCarriage::FilteredOut => {
@@ -153,6 +161,7 @@ impl EventSink for StdioEventSink {
             session_id: self.session_id.clone(),
             reminder: reminder.clone(),
             replay,
+            source_agent_id: source_agent_id.map(str::to_string),
         };
         if let Err(e) = self.cx.send_notification(notification) {
             error!(error = %e, "StdioEventSink: failed to send system reminder");
@@ -160,8 +169,12 @@ impl EventSink for StdioEventSink {
     }
 
     async fn push_event(&self, _session_id: &str, event: &ExecutorEvent, context_window: u32) {
-        if let ExecutorEvent::SystemReminder(reminder) = event {
-            self.push_system_reminder(_session_id, reminder, false)
+        if let ExecutorEvent::SystemReminder {
+            reminder,
+            source_agent_id,
+        } = event
+        {
+            self.push_system_reminder(_session_id, reminder, false, source_agent_id.as_deref())
                 .await;
             return;
         }

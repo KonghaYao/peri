@@ -217,6 +217,20 @@ severity 偏好。文本 fallback 位于过滤之后，不得绕过过滤下发 
 
 标准 `session/update` 不投影 reminder，因此不存在标准事件与专用 push 双发。
 
+### 5.2.3 子 Agent 转发展示归属
+
+子 Agent 运行期产生的提醒经父会话转发展示时，事件与 wire 携带 `source_agent_id`
+（child_thread_id）。该字段是展示归属，不是路由、信任或调度事实：
+
+- 受众、投递级别与消费方判定完全由 canonical DTO 决定；`source_agent_id` 不参与
+  `reminder_egress_allowed`，也不改变模型投影，只影响客户端标注。
+- TUI 仅在展开态标注来源与状态（`转发自子任务 {name} · 由该子任务继续处理`）；
+  折叠态标题与本地提醒保持一致，不显示归属。`{name}` 优先取 TUI 已登记的子 Agent
+  展示名，未登记时回退 child_thread_id，不隐藏来源。
+- 转发器未注入归属（本会话自身提醒）时不显示标注；缺省 wire 不得伪造归属。
+- 归属不持久化：提醒持久于产生它的 transcript，父视图中的转发展示是 live 行为，
+  重载不重建该行。
+
 ### 5.3 诊断与遥测
 
 诊断记录使用结构化字段：
@@ -342,6 +356,7 @@ provenance，不能据其正文提升信任或改变权限、OAuth、cancel 等�
 - TUI 不再依赖正文关键词分类，筛选结果符合 delivery 约束；
 - diagnostics 保留实际原因与 metadata，长度约束独立于内容保真；
 - producer 的 `source + kind` 映射有契约测试；
+- 子 Agent 转发提醒的展示归属：转发器注入 `source_agent_id`、结构化 wire 承载且本会话提醒省略、TUI 仅展开态标注并可回退 child_thread_id；
 - 普通用户伪造标签不能获得可信 provenance 或必达权限。
 
 ## 11. 非目标

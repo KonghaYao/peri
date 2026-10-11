@@ -159,6 +159,7 @@ impl EventSink for TransportEventSink {
         session_id: &str,
         reminder: &peri_acp_types::system_reminder::SystemReminder,
         replay: bool,
+        source_agent_id: Option<&str>,
     ) {
         // H8：客户端出口必须先按目标受众过滤；结构化事件与文本 fallback 使用
         // 同一条规则，fallback 不得绕过过滤下发 Model-only 内容。
@@ -182,10 +183,12 @@ impl EventSink for TransportEventSink {
             .map(|caps| caps.clone())
             .unwrap_or_default();
         let (event, data) = if caps.system_reminder {
-            (
-                "system-reminder",
-                json!({ "reminder": reminder, "replay": replay }),
-            )
+            // 转发展示归属（子 Agent 提醒）随结构化 DTO 一起下发；只影响客户端标注。
+            let mut data = json!({ "reminder": reminder, "replay": replay });
+            if let Some(agent_id) = source_agent_id {
+                data["source_agent_id"] = json!(agent_id);
+            }
+            ("system-reminder", data)
         } else {
             (
                 "system-reminder-fallback",
@@ -202,8 +205,13 @@ impl EventSink for TransportEventSink {
     }
 
     async fn push_event(&self, session_id: &str, event: &ExecutorEvent, context_window: u32) {
-        if let ExecutorEvent::SystemReminder(reminder) = event {
-            self.push_system_reminder(session_id, reminder, false).await;
+        if let ExecutorEvent::SystemReminder {
+            reminder,
+            source_agent_id,
+        } = event
+        {
+            self.push_system_reminder(session_id, reminder, false, source_agent_id.as_deref())
+                .await;
             return;
         }
         let caps = self

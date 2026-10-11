@@ -288,7 +288,7 @@ pub fn map_agent_activity(event: &ExecutorEvent) -> Option<AgentActivityWire> {
         | ExecutorEvent::TextChunk { .. }
         | ExecutorEvent::ToolStart { .. }
         | ExecutorEvent::ToolEnd { .. }
-        | ExecutorEvent::SystemReminder(_)
+        | ExecutorEvent::SystemReminder { .. }
         | ExecutorEvent::StateSnapshot(_)
         | ExecutorEvent::TurnCommitted { .. }
         | ExecutorEvent::StateSnapshotMeta { .. }

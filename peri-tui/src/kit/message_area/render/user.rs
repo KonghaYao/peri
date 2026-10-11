@@ -57,6 +57,18 @@ pub(super) fn render_system_reminder_lines(
     ));
     let mut lines = vec![Line::from(spans)];
     if data.fold == FoldState::Expanded {
+        if let Some(relay) = &data.relay {
+            // 子 Agent 转发展示归属：仅展开时显示，便于区分“本会话提醒”与“子任务提醒”。
+            let text = i18n::tr_args(
+                "reminder-relayed-from",
+                &[("name".into(), FluentValue::from(relay.label()))],
+            );
+            lines.push(prefixed_cont_line(
+                grid,
+                sem.accents.reasoning,
+                Line::from(Span::styled(text, Style::default().fg(sem.text.dim))),
+            ));
+        }
         for text in data
             .body
             .lines()

@@ -181,7 +181,7 @@ impl UnifiedLangfuseEvent {
             | ExecutorEvent::WorkflowProgress(_)
             | ExecutorEvent::AgentExecutionFailed { .. }
             | ExecutorEvent::TurnSuspended { .. }
-            | ExecutorEvent::SystemReminder(_)
+            | ExecutorEvent::SystemReminder { .. }
             | ExecutorEvent::SystemNotification { .. }
             | ExecutorEvent::OauthNeeded { .. }
             | ExecutorEvent::OauthCompleted { .. }

@@ -388,6 +388,8 @@ pub enum AcpEventData {
     SystemReminder {
         reminder: peri_acp_types::system_reminder::SystemReminder,
         replay: bool,
+        /// 转发展示归属：子 Agent 提醒经父会话转发时非空；只影响展示标注。
+        source_agent_id: Option<String>,
     },
 
     /// Explicit text-only compatibility display; never promoted to canonical trust.
@@ -440,10 +442,13 @@ impl AcpEventData {
                     reminder: peri_acp_types::system_reminder::SystemReminder,
                     #[serde(default)]
                     replay: bool,
+                    #[serde(default)]
+                    source_agent_id: Option<String>,
                 }
                 decode_or_unknown(event, data, |wire: Wire| AcpEventData::SystemReminder {
                     reminder: wire.reminder,
                     replay: wire.replay,
+                    source_agent_id: wire.source_agent_id,
                 })
             }
             "system-reminder-fallback" => {

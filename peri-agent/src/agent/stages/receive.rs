@@ -175,9 +175,10 @@ pub(super) async fn run_receive_with_budget(
                     .emit_state(StateEvent::ProtocolEvent {
                         turn_id: input.context.turn_id(),
                         agent_id: input.context.session.agent_id,
-                        event: Box::new(ExecutorEvent::SystemReminder(
-                            reminder.as_reminder().clone(),
-                        )),
+                        event: Box::new(ExecutorEvent::SystemReminder {
+                            reminder: reminder.as_reminder().clone(),
+                            source_agent_id: None,
+                        }),
                     });
             } else if let Some(text) = synthetic_defer_text(msg) {
                 input

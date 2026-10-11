@@ -25,10 +25,28 @@ pub struct TuiSystemReminder {
     pub severity: ReminderSeverity,
     pub required: bool,
     pub legacy: bool,
+    /// 转发展示归属：子 Agent 提醒经父会话转发展示时非空（只影响展示，不进入 wire）。
+    pub relay: Option<ReminderRelay>,
     /// 仅用于当前 TUI session 的折叠身份，不进入 wire 或内容哈希。
     pub reminder_id: u64,
     pub fold: FoldState,
     pub content_hash: u64,
+}
+
+/// 转发来源展示归属：子 Agent 提醒经父会话转发展示时的来源标注。
+#[derive(Debug, Clone, PartialEq)]
+pub struct ReminderRelay {
+    /// 子 Agent 的 child_thread_id（转发器注入）。
+    pub agent_id: String,
+    /// 子 Agent 展示名；TUI 未登记该 id 时为 None。
+    pub agent_name: Option<String>,
+}
+
+impl ReminderRelay {
+    /// 展示用标签：子 Agent 名优先，未知时回退 child_thread_id。
+    pub fn label(&self) -> &str {
+        self.agent_name.as_deref().unwrap_or(&self.agent_id)
+    }
 }
 
 /// Local, non-serializable proof that a structured reminder passed the live ACP
@@ -90,6 +108,7 @@ impl TuiSystemReminder {
             body: reminder.body.clone(),
             summary,
             legacy: false,
+            relay: None,
             reminder_id: next_reminder_id(),
             fold: FoldState::Collapsed,
             content_hash: 0,
@@ -108,6 +127,7 @@ impl TuiSystemReminder {
             severity: ReminderSeverity::Info,
             required: false,
             legacy: true,
+            relay: None,
             reminder_id: next_reminder_id(),
             fold: FoldState::Collapsed,
             content_hash: 0,
@@ -115,6 +135,14 @@ impl TuiSystemReminder {
         };
         vm.recompute_hash();
         vm
+    }
+
+    /// 附加转发展示归属并重算内容哈希；进入展示队列前调用。
+    pub(crate) fn attach_relay(&mut self, relay: Option<ReminderRelay>) {
+        if self.relay != relay {
+            self.relay = relay;
+            self.recompute_hash();
+        }
     }
 
     pub fn recompute_hash(&mut self) {
@@ -125,12 +153,18 @@ impl TuiSystemReminder {
         h = tui_hash_combine(h, self.severity as u64);
         h = tui_hash_combine(h, u64::from(self.required));
         h = tui_hash_combine(h, u64::from(self.legacy));
+        if let Some(relay) = &self.relay {
+            h = tui_hash_combine(h, tui_hash_str(&relay.agent_id));
+            if let Some(name) = &relay.agent_name {
+                h = tui_hash_combine(h, tui_hash_str(name));
+            }
+        }
         h = tui_hash_combine(h, fold_state_code(self.fold));
         self.content_hash = h;
     }
 }
 
-tui_impl_partial_eq!(TuiSystemReminder: wire, summary, body, category, source, severity, required, legacy, reminder_id, fold);
+tui_impl_partial_eq!(TuiSystemReminder: wire, summary, body, category, source, severity, required, legacy, relay, reminder_id, fold);
 
 /// System-reminder 分类——10 种从 `<system-reminder>` 标签检测到的类型。
 #[derive(Debug, Clone, PartialEq)]

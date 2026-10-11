@@ -38,7 +38,7 @@ pub use group::{
 pub use hash::{tui_hash_combine, tui_hash_roll, tui_hash_roll_update, tui_hash_str};
 pub use interaction::{InteractionKind, TuiAskUserBlock, TuiAskUserItem, interaction_kind_code};
 pub(crate) use reminder::DisplayTrusted;
-pub use reminder::{ReminderInfo, ReminderType, TuiSystemReminder, detect_reminder};
+pub use reminder::{ReminderInfo, ReminderRelay, ReminderType, TuiSystemReminder, detect_reminder};
 pub use tool_card::{
     TuiSkillPresentation, TuiTodoChange, TuiTodoChangeKind, TuiTodoItem, TuiTodoPresentation,
     TuiTodoStatus, TuiToolCard, TuiToolPresentation,

@@ -809,6 +809,7 @@ reminder-legacy-marker = 旧版提醒
 reminder-required-marker = 必达提醒
 reminder-structured-marker = 系统提醒
 reminder-legacy-source = 旧版历史
+reminder-relayed-from = 转发自子任务 { $name } · 由该子任务继续处理
 channel-wechat = 微信
 channel-feishu = 飞书
 channel-dingtalk = 钉钉

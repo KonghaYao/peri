@@ -27,7 +27,7 @@ fn system_reminder_structured_decode_preserves_dto_and_unknown_version_fails_clo
         json!({"reminder": reminder(), "replay": false}),
     );
     assert!(
-        matches!(decoded, AcpEventData::SystemReminder { reminder, replay: false } if reminder.kind == "mode_changed")
+        matches!(decoded, AcpEventData::SystemReminder { reminder, replay: false, .. } if reminder.kind == "mode_changed")
     );
 
     let mut future = reminder();
@@ -92,6 +92,7 @@ fn system_reminder_fallback_is_legacy_only_and_each_path_renders_once() {
         &AcpEventData::SystemReminder {
             reminder: reminder(),
             replay: false,
+            source_agent_id: None,
         },
     );
     assert_eq!(state.committed.len(), 1);
@@ -128,6 +129,7 @@ fn system_reminder_fold_override_survives_snapshot_rebuild() {
         &AcpEventData::SystemReminder {
             reminder: reminder(),
             replay: false,
+            source_agent_id: None,
         },
     );
     let TuiRenderUnit::TuiSystemReminder(vm) = &state.committed[0] else {
@@ -155,6 +157,7 @@ fn trusted_structured_dispatch_preserves_required_and_renders_marker() {
         AcpEventData::SystemReminder {
             reminder: reminder(),
             replay: false,
+            source_agent_id: None,
         },
     );
 
@@ -190,4 +193,120 @@ fn system_reminder_cjk_extreme_narrow_render_is_bounded_and_hides_metadata() {
         .collect::<String>();
     assert!(!text.contains("must-not-render"));
     assert!(!rendered.is_empty());
+}
+
+#[test]
+fn system_reminder_decode_reads_optional_source_agent_id() {
+    let decoded = AcpEventData::decode(
+        "system-reminder",
+        json!({"reminder": reminder(), "replay": false, "source_agent_id": "child-1"}),
+    );
+    let AcpEventData::SystemReminder {
+        source_agent_id, ..
+    } = decoded
+    else {
+        panic!("relayed reminder should decode")
+    };
+    assert_eq!(source_agent_id.as_deref(), Some("child-1"));
+
+    let decoded = AcpEventData::decode(
+        "system-reminder",
+        json!({"reminder": reminder(), "replay": false}),
+    );
+    let AcpEventData::SystemReminder {
+        source_agent_id, ..
+    } = decoded
+    else {
+        panic!("local reminder should decode")
+    };
+    assert!(
+        source_agent_id.is_none(),
+        "缺省 wire 不得伪造转发来源（本会话提醒）"
+    );
+}
+
+fn rendered_text(unit: &TuiRenderUnit) -> String {
+    let grid = crate::kit::message_area::grid::GridSpec::with_content(80);
+    crate::kit::message_area::render::vm_to_lines(unit, &grid)
+        .iter()
+        .flat_map(|line| line.spans.iter())
+        .map(|span| span.content.as_ref())
+        .collect()
+}
+
+fn relay_label_text(name: &str) -> String {
+    crate::i18n::tr_args(
+        "reminder-relayed-from",
+        &[("name".into(), fluent_bundle::FluentValue::from(name))],
+    )
+}
+
+/// 转发展示归属：子 Agent 提醒在父视图展开时标注来源与状态，折叠时不展示。
+#[test]
+#[serial]
+fn trusted_relayed_reminder_marks_source_only_when_expanded() {
+    let mut state = make_fold_test_state();
+    state
+        .current_turn
+        .start_subagent("child-thread-7".into(), "coder".into(), None);
+    let _ = dispatch_trusted_structured_for_bridge(
+        &mut state,
+        AcpEventData::SystemReminder {
+            reminder: reminder(),
+            replay: false,
+            source_agent_id: Some("child-thread-7".into()),
+        },
+    );
+
+    let TuiRenderUnit::TuiSystemReminder(vm) = &state.committed[0] else {
+        panic!("structured reminder should render")
+    };
+    assert_eq!(
+        vm.relay
+            .as_ref()
+            .map(crate::kit::tui_render_unit::ReminderRelay::label),
+        Some("coder"),
+        "TUI 已登记该子 Agent 时应使用展示名"
+    );
+
+    let collapsed = rendered_text(&state.committed[0]);
+    assert!(
+        !collapsed.contains(&relay_label_text("coder")),
+        "折叠时不展示转发归属标注：{collapsed}"
+    );
+
+    let mut expanded_vm = vm.clone();
+    expanded_vm.fold = FoldState::Expanded;
+    expanded_vm.recompute_hash();
+    let expanded = rendered_text(&TuiRenderUnit::TuiSystemReminder(expanded_vm));
+    assert!(
+        expanded.contains(&relay_label_text("coder")),
+        "展开时必须标注转发来源与状态：{expanded}"
+    );
+}
+
+/// 非 trusted 入口同样附加归属；未登记子 Agent 名时回退 child_thread_id。
+#[test]
+#[serial]
+fn wire_relayed_reminder_falls_back_to_agent_id_label() {
+    let mut state = make_fold_test_state();
+    dispatch_for_bridge(
+        &mut state,
+        &AcpEventData::SystemReminder {
+            reminder: reminder(),
+            replay: false,
+            source_agent_id: Some("child-unknown-9".into()),
+        },
+    );
+
+    let TuiRenderUnit::TuiSystemReminder(vm) = &state.committed[0] else {
+        panic!("structured reminder should render")
+    };
+    assert_eq!(
+        vm.relay
+            .as_ref()
+            .map(crate::kit::tui_render_unit::ReminderRelay::label),
+        Some("child-unknown-9"),
+        "未登记展示名时不得隐藏来源"
+    );
 }
