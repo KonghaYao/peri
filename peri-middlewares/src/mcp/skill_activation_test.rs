@@ -214,6 +214,8 @@ async fn fixture(
     let handle = Arc::new(McpClientHandle {
         name: SERVER.to_string(),
         version: None,
+        connected_at: None,
+        protocol_version: None,
         cache_version: None,
         peer: Some(client.peer().clone()),
         tools: vec![],
@@ -454,6 +456,8 @@ async fn legacy_templates_only_server_probes_without_error() {
     let legacy = Arc::new(McpClientHandle {
         name: SERVER.to_string(),
         version: None,
+        connected_at: None,
+        protocol_version: None,
         cache_version: None,
         peer: Some(fx._client.peer().clone()),
         tools: vec![],
@@ -591,6 +595,8 @@ mod real_workspace_provider {
             let handle = Arc::new(McpClientHandle {
                 name: "workspace".to_string(),
                 version: None,
+                connected_at: None,
+                protocol_version: None,
                 cache_version: None,
                 peer: Some(service.peer().clone()),
                 tools: vec![],

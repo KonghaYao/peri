@@ -626,6 +626,10 @@ pub async fn prepare_single_server(
         version: peer
             .peer_info()
             .and_then(|info| info.server_info.as_ref().map(|value| value.version.clone())),
+        connected_at: Some(peri_time::now_utc_rfc3339()),
+        protocol_version: peer
+            .peer_info()
+            .map(|info| info.protocol_version.as_str().to_string()),
         cache_version: None,
         peer: Some(peer.clone()),
         tools,
@@ -633,16 +637,27 @@ pub async fn prepare_single_server(
         status: ClientStatus::Connected,
         oauth_status: OAuthStatus::None,
         source: None,
-        url: None,
+        url: configured_transport_url(config),
         skills_capable: super::super::client::peer_declares_skills(&peer),
     });
     Ok(staged)
+}
+
+/// 动态连接的排障 URL：HTTP 连接记录配置 URL（状态投影透传给 ACP/TUI 详情），
+/// stdio 无 URL 保持 None。
+fn configured_transport_url(config: &CanonicalDynamicMcpConfig) -> Option<String> {
+    match &config.transport {
+        CanonicalDynamicMcpTransport::StreamableHttp { url, .. } => Some(url.clone()),
+        _ => None,
+    }
 }
 
 fn empty_handle() -> McpClientHandle {
     McpClientHandle {
         name: String::new(),
         version: None,
+        connected_at: None,
+        protocol_version: None,
         cache_version: None,
         peer: None,
         tools: Vec::<Tool>::new(),

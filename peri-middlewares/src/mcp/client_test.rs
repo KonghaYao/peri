@@ -28,6 +28,8 @@ fn connected_test_handle(name: &str) -> Arc<McpClientHandle> {
     Arc::new(McpClientHandle {
         name: name.to_string(),
         version: None,
+        connected_at: None,
+        protocol_version: None,
         cache_version: None,
         peer: None,
         tools: vec![],
@@ -165,6 +167,41 @@ fn test_new_pending_creates_empty_pool() {
 fn test_server_infos_empty_pool() {
     assert!(McpClientPool::new_pending().server_infos().is_empty());
 }
+
+#[tokio::test]
+async fn test_server_infos_projects_version_and_connected_at() {
+    let pool = McpClientPool::new_pending();
+    pool.clients.write().insert(
+        "s".into(),
+        Arc::new(McpClientHandle {
+            name: "s".into(),
+            version: Some("1.2.3".into()),
+            connected_at: Some("2026-10-11T06:32:05Z".into()),
+            protocol_version: Some("2026-07-28".into()),
+            cache_version: None,
+            peer: None,
+            tools: vec![],
+            resources: vec![],
+            status: ClientStatus::Connected,
+            oauth_status: OAuthStatus::default(),
+            source: None,
+            url: None,
+            skills_capable: false,
+        }),
+    );
+    let info = &pool.server_infos()[0];
+    assert_eq!(info.version.as_deref(), Some("1.2.3"));
+    assert_eq!(info.connected_at.as_deref(), Some("2026-10-11T06:32:05Z"));
+    assert_eq!(info.protocol_version.as_deref(), Some("2026-07-28"));
+    // ACP 端口投影同样透传（`mcp/list` 数据源）。
+    let projected = peri_acp_types::ports::McpPoolPort::server_infos(&pool).unwrap();
+    assert_eq!(projected[0].version.as_deref(), Some("1.2.3"));
+    assert_eq!(
+        projected[0].connected_at.as_deref(),
+        Some("2026-10-11T06:32:05Z")
+    );
+    assert_eq!(projected[0].protocol_version.as_deref(), Some("2026-07-28"));
+}
 #[tokio::test]
 async fn test_insert_failed() {
     let pool = Arc::new(McpClientPool::new_pending());
@@ -173,6 +210,10 @@ async fn test_insert_failed() {
         pool.server_infos()[0].status,
         ClientStatus::Failed("err".into())
     );
+    // ACP 端口投影（`mcp/list` 数据源）透传有界失败摘要；无配置 url 为 None。
+    let projected = peri_acp_types::ports::McpPoolPort::server_infos(pool.as_ref()).unwrap();
+    assert_eq!(projected[0].error_summary.as_deref(), Some("err"));
+    assert_eq!(projected[0].url, None);
 }
 #[tokio::test]
 async fn test_remove_server() {
@@ -182,6 +223,8 @@ async fn test_remove_server() {
         Arc::new(McpClientHandle {
             name: "a".into(),
             version: None,
+            connected_at: None,
+            protocol_version: None,
             cache_version: None,
             peer: None,
             tools: vec![],
@@ -204,6 +247,8 @@ async fn test_get_tools_resources() {
         Arc::new(McpClientHandle {
             name: "s".into(),
             version: None,
+            connected_at: None,
+            protocol_version: None,
             cache_version: None,
             peer: None,
             tools: vec![],

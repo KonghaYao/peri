@@ -20,6 +20,8 @@ fn connected_handle(server: &str, tools: &[&str]) -> Arc<McpClientHandle> {
     Arc::new(McpClientHandle {
         name: server.to_string(),
         version: None,
+        connected_at: None,
+        protocol_version: None,
         cache_version: None,
         peer: None,
         tools: tools.iter().map(|tool| make_tool(tool)).collect(),

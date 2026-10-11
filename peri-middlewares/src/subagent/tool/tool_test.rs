@@ -278,6 +278,8 @@ pub(crate) fn with_agent_catalog(
         Arc::new(crate::mcp::McpClientHandle {
             name: "workspace".to_string(),
             version: None,
+            connected_at: None,
+            protocol_version: None,
             cache_version: None,
             peer: None,
             tools: Vec::new(),
@@ -540,6 +542,8 @@ async fn mcp_agent_suggestions_require_activation_and_connection() {
         Arc::new(McpClientHandle {
             name: "offline".to_string(),
             version: None,
+            connected_at: None,
+            protocol_version: None,
             cache_version: None,
             peer: None,
             tools: Vec::new(),

@@ -386,7 +386,38 @@ async fn test_mcp_list_requires_negotiated_oauth_capability() {
     .await
     .unwrap_err();
     assert_eq!(error.code, -32601);
-    assert_eq!(error.message, "peri.oauth capability not negotiated");
+    assert_eq!(error.message, "OAuth capability not negotiated");
+}
+
+/// legacy 客户端（peri.agentEvent，无 peri.oauth）同样消费 mcp/list：
+/// TUI 面板数据源经此投影刷新，caps 门须放行 legacy OAuth 通道。
+#[tokio::test]
+async fn test_legacy_agent_event_mcp_list_returns_snapshot() {
+    let tmp = tempfile::TempDir::new().unwrap();
+    let peri_config = make_peri_config_with_provider(make_provider_config(
+        "a",
+        "openai",
+        "sk-test-placeholder",
+        "gpt-test",
+    ));
+    let provider = LlmProvider::from_config(&peri_config).unwrap();
+    let mut cfg = make_server_config(peri_config, provider, &tmp).await;
+    cfg.session_manager.set_pending_caps(PeriCaps {
+        agent_event: true,
+        ..PeriCaps::default()
+    });
+    cfg.mcp_pool = Some(Arc::new(peri_middlewares::mcp::McpClientPool::new_pending()));
+    let transport: Arc<dyn crate::transport::AcpTransport> = Arc::new(MockTransport::default());
+    let response = handle_request(
+        "mcp/list",
+        &json!({}),
+        &cfg,
+        &mut HashMap::new(),
+        &transport,
+    )
+    .await
+    .unwrap();
+    assert_eq!(response, json!({ "servers": [] }));
 }
 
 #[tokio::test]
@@ -420,6 +451,119 @@ async fn test_mcp_list_returns_bounded_safe_empty_snapshot_when_negotiated() {
     assert!(response.to_string().find("error").is_none());
 }
 
+/// 固定服务器目录的假 pool：验证 `mcp/list` 逐项投影（不经过具体实现）。
+struct CatalogPool {
+    servers: Vec<peri_acp_types::ports::McpServerInfo>,
+}
+
+#[async_trait]
+impl peri_acp_types::ports::McpPoolPort for CatalogPool {
+    fn as_any(&self) -> &dyn std::any::Any {
+        self
+    }
+
+    async fn shutdown(&self) -> peri_acp_types::ports::McpPoolShutdownReport {
+        peri_acp_types::ports::McpPoolShutdownReport::Complete {
+            settled_services: 0,
+            failed_services: 0,
+        }
+    }
+
+    fn snapshot(&self) -> Value {
+        json!({})
+    }
+
+    fn server_infos(&self) -> Result<Vec<peri_acp_types::ports::McpServerInfo>, String> {
+        Ok(self.servers.clone())
+    }
+}
+
+#[tokio::test]
+async fn test_mcp_list_projects_connection_meta() {
+    use peri_acp_types::ports::{McpServerConnectionStatus, McpServerInfo, McpServerOAuthStatus};
+    let tmp = tempfile::TempDir::new().unwrap();
+    let peri_config = make_peri_config_with_provider(make_provider_config(
+        "a",
+        "openai",
+        "sk-test-placeholder",
+        "gpt-test",
+    ));
+    let provider = LlmProvider::from_config(&peri_config).unwrap();
+    let mut cfg = make_server_config(peri_config, provider, &tmp).await;
+    cfg.session_manager.set_pending_caps(PeriCaps {
+        oauth: true,
+        ..PeriCaps::default()
+    });
+    cfg.mcp_pool = Some(Arc::new(CatalogPool {
+        servers: vec![
+            McpServerInfo {
+                name: "fixture".to_string(),
+                transport: "stdio".to_string(),
+                status: McpServerConnectionStatus::Connected,
+                oauth_status: McpServerOAuthStatus::None,
+                tool_count: 3,
+                resource_count: 1,
+                version: Some("9.9.9".to_string()),
+                connected_at: Some("2026-10-11T06:32:05Z".to_string()),
+                protocol_version: Some("2026-07-28".to_string()),
+                error_summary: None,
+                url: None,
+            },
+            McpServerInfo {
+                name: "never-connected".to_string(),
+                transport: "http".to_string(),
+                status: McpServerConnectionStatus::Failed,
+                oauth_status: McpServerOAuthStatus::None,
+                tool_count: 0,
+                resource_count: 0,
+                version: None,
+                connected_at: None,
+                protocol_version: None,
+                error_summary: Some("connect error: Connection refused (os error 61)".to_string()),
+                url: Some("http://127.0.0.1:9/mcp".to_string()),
+            },
+        ],
+    }));
+    let transport: Arc<dyn crate::transport::AcpTransport> = Arc::new(MockTransport::default());
+    let response = handle_request(
+        "mcp/list",
+        &json!({}),
+        &cfg,
+        &mut HashMap::new(),
+        &transport,
+    )
+    .await
+    .unwrap();
+    assert_eq!(
+        response["servers"][0]["connectionStatus"],
+        json!("connected")
+    );
+    assert_eq!(response["servers"][0]["version"], json!("9.9.9"));
+    assert_eq!(
+        response["servers"][0]["connectedAt"],
+        json!("2026-10-11T06:32:05Z")
+    );
+    assert_eq!(
+        response["servers"][0]["protocolVersion"],
+        json!("2026-07-28")
+    );
+    // 从未成功连接的条目显式为 null，而不是缺字段。
+    assert_eq!(response["servers"][1]["version"], Value::Null);
+    assert_eq!(response["servers"][1]["connectedAt"], Value::Null);
+    assert_eq!(response["servers"][1]["protocolVersion"], Value::Null);
+    // 排障字段：failed 的有界摘要与 URL 随投影透传；非 failed 显式 null。
+    assert_eq!(
+        response["servers"][1]["errorSummary"],
+        json!("connect error: Connection refused (os error 61)")
+    );
+    assert_eq!(
+        response["servers"][1]["url"],
+        json!("http://127.0.0.1:9/mcp")
+    );
+    assert_eq!(response["servers"][0]["errorSummary"], Value::Null);
+    assert_eq!(response["servers"][0]["url"], Value::Null);
+}
+
 #[tokio::test]
 async fn test_oauth_start_rejects_missing_flow_id_before_spawning() {
     let tmp = tempfile::TempDir::new().unwrap();
@@ -448,6 +592,48 @@ async fn test_oauth_start_rejects_missing_flow_id_before_spawning() {
     .unwrap_err();
     assert_eq!(error.code, -32602);
     assert_eq!(error.message, "missing 'flow_id'");
+}
+
+#[tokio::test]
+async fn test_legacy_agent_event_oauth_start_without_flow_id_generates_one() {
+    // caps: agent_event=true 且 oauth=false（legacy TUI 契约）——无 flow_id 时
+    // 必须由 host 自动生成并受理；TUI 的 [ 授权 ] 按钮依赖这条兜底路径。
+    let tmp = tempfile::TempDir::new().unwrap();
+    let peri_config = make_peri_config_with_provider(make_provider_config(
+        "a",
+        "openai",
+        "sk-test-placeholder",
+        "gpt-test",
+    ));
+    let provider = LlmProvider::from_config(&peri_config).unwrap();
+    let mut cfg = make_server_config(peri_config, provider, &tmp).await;
+    cfg.session_manager.set_pending_caps(PeriCaps {
+        agent_event: true,
+        ..PeriCaps::default()
+    });
+    // `new_pending()` 的 spawner 处于 closed 状态，`spawn_oauth_flow_with_id`
+    // 会以 task-owner-closing 返回 Conflict；本用例需要真实受理，用 held owner
+    // 的 spawner（owner 存活到测试结束）。
+    let (_owner, spawner) = peri_middlewares::mcp::McpTaskOwner::new();
+    let pool = Arc::new(peri_middlewares::mcp::McpClientPool::new_pending_with_spawner(spawner));
+    cfg.mcp_pool = Some(pool);
+    let transport: Arc<dyn crate::transport::AcpTransport> = Arc::new(MockTransport::default());
+    let response = handle_request(
+        "mcp/oauth_start",
+        &json!({ "server_name": "docs" }),
+        &cfg,
+        &mut HashMap::new(),
+        &transport,
+    )
+    .await
+    .unwrap();
+    assert_eq!(response["success"], json!(true));
+    assert_eq!(response["status"], json!("started"));
+    assert!(
+        response["flowId"].as_str().is_some_and(|id| !id.is_empty()),
+        "legacy 路径必须自动生成 flow_id: {response}"
+    );
+    assert_eq!(response["flowId"], response["activeFlowId"]);
 }
 
 #[tokio::test]

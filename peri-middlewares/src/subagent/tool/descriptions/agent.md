@@ -6,6 +6,7 @@ Fork mode (fork: true):
 - The prompt is treated as a directive within the existing context, not a standalone briefing
 - Do NOT re-explain background that is already in the conversation history
 - Use for tasks that require context from the ongoing conversation (e.g., continuing a multi-file refactor)
+- Unavailable once the parent context exceeds 75% usage — a fork inherits the full parent context, so fall back to a non-fork sub-agent (`subagent_type` + self-contained prompt) instead
 - The forked agent follows a structured output format: Scope, Result, Key files, Files changed
 
 Usage:

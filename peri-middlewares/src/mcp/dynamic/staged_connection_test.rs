@@ -387,6 +387,35 @@ fn instance() -> DynamicMcpInstanceKey {
     }
 }
 
+/// 动态连接 handle 的排障 URL：HTTP 记录配置 URL，stdio 保持 None
+/// （回归：HTTP 成功路径曾填 None，ACP/TUI 详情 URL 恒显示空占位符）。
+#[test]
+fn configured_transport_url_keeps_http_url_and_skips_stdio() {
+    let http = CanonicalDynamicMcpConfig {
+        transport: CanonicalDynamicMcpTransport::StreamableHttp {
+            url: "https://example/mcp".into(),
+            headers: Default::default(),
+        },
+        timeout_ms: 1_000,
+        subscriptions: None,
+    };
+    assert_eq!(
+        configured_transport_url(&http).as_deref(),
+        Some("https://example/mcp")
+    );
+    let stdio = CanonicalDynamicMcpConfig {
+        transport: CanonicalDynamicMcpTransport::Stdio {
+            command: "node".into(),
+            args: vec![],
+            env: Default::default(),
+            cwd: None,
+        },
+        timeout_ms: 1_000,
+        subscriptions: None,
+    };
+    assert_eq!(configured_transport_url(&stdio), None);
+}
+
 #[tokio::test]
 async fn dynamic_oauth_without_injection_fails_before_flow_admission() {
     for closing in [false, true] {
@@ -651,6 +680,7 @@ async fn dynamic_process_uses_session_cwd_and_close_drains_its_descendant() {
         .await
         .unwrap();
         let active = staged.commit();
+        assert!(active.handle.url.is_none());
         tokio::time::timeout(Duration::from_secs(5), async {
             while !cwd.join("heartbeat").exists() {
                 tokio::time::sleep(Duration::from_millis(5)).await;
@@ -672,4 +702,192 @@ async fn dynamic_process_uses_session_cwd_and_close_drains_its_descendant() {
         assert!(pool.shutdown().await.is_complete());
         tasks.shutdown().await;
     }
+}
+
+/// 最小动态 HTTP MCP fixture：POST /mcp 应答 initialize / tools/list /
+/// resources/list，拒绝 server/discover 让 Auto 回退 legacy initialize；
+/// 其余请求（OAuth 端点探测与 well-known 发现）一律 404，使 rmcp 的
+/// 元数据发现回退到 legacy endpoint 推导，不发起真实授权。
+async fn serve_dynamic_http_fixture(listener: tokio::net::TcpListener) {
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    loop {
+        let Ok((mut socket, _)) = listener.accept().await else {
+            return;
+        };
+        let mut request = Vec::new();
+        let mut header_end = 0;
+        loop {
+            let mut chunk = [0_u8; 4096];
+            let Ok(size) = socket.read(&mut chunk).await else {
+                break;
+            };
+            if size == 0 {
+                break;
+            }
+            request.extend_from_slice(&chunk[..size]);
+            if let Some(end) = request.windows(4).position(|bytes| bytes == b"\r\n\r\n") {
+                header_end = end + 4;
+                break;
+            }
+        }
+        if header_end == 0 {
+            continue;
+        }
+        let headers = String::from_utf8_lossy(&request[..header_end]).to_string();
+        if !headers.starts_with("POST /mcp ") {
+            let _ = socket
+                .write_all(
+                    b"HTTP/1.1 404 Not Found\r\nContent-Length: 0\r\nConnection: close\r\n\r\n",
+                )
+                .await;
+            continue;
+        }
+        let content_length: usize = headers
+            .lines()
+            .find_map(|line| {
+                line.to_ascii_lowercase()
+                    .strip_prefix("content-length:")
+                    .and_then(|value| value.trim().parse().ok())
+            })
+            .unwrap_or(0);
+        while request.len() < header_end + content_length {
+            let mut chunk = [0_u8; 4096];
+            let Ok(size) = socket.read(&mut chunk).await else {
+                break;
+            };
+            if size == 0 {
+                break;
+            }
+            request.extend_from_slice(&chunk[..size]);
+        }
+        if request.len() < header_end + content_length {
+            continue;
+        }
+        let Ok(message) = serde_json::from_slice::<serde_json::Value>(
+            &request[header_end..header_end + content_length],
+        ) else {
+            continue;
+        };
+        let method = message
+            .get("method")
+            .and_then(|method| method.as_str())
+            .unwrap_or_default();
+        let body = if message.get("id").is_none() {
+            None
+        } else {
+            let payload = match method {
+                "initialize" => serde_json::json!({
+                    "jsonrpc": "2.0", "id": message["id"],
+                    "result": {
+                        "protocolVersion": "2025-03-26",
+                        "capabilities": {"tools": {}, "resources": {}},
+                        "serverInfo": {"name": "dynamic-http-fixture", "version": "1.0.0"},
+                    },
+                }),
+                "tools/list" => serde_json::json!({
+                    "jsonrpc": "2.0", "id": message["id"],
+                    "result": {"tools": [{
+                        "name": "fixture-tool",
+                        "description": "Dynamic HTTP fixture tool",
+                        "inputSchema": {"type": "object", "properties": {}},
+                    }]},
+                }),
+                "resources/list" => serde_json::json!({
+                    "jsonrpc": "2.0", "id": message["id"],
+                    "result": {"resources": []},
+                }),
+                "ping" => serde_json::json!({"jsonrpc": "2.0", "id": message["id"], "result": {}}),
+                other => serde_json::json!({
+                    "jsonrpc": "2.0", "id": message["id"],
+                    "error": {"code": -32601, "message": format!("Method not found: {other}")},
+                }),
+            };
+            Some(payload.to_string())
+        };
+        let response = match &body {
+            None => {
+                "HTTP/1.1 202 Accepted\r\nContent-Length: 0\r\nConnection: close\r\n\r\n".to_string()
+            }
+            Some(body) => format!(
+                "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                body.len()
+            ),
+        };
+        let _ = socket.write_all(response.as_bytes()).await;
+    }
+}
+
+/// 动态 HTTP 成功路径的 URL 投影：初始化完成后 committed handle 记录配置 URL
+/// （回归：HTTP 成功路径曾填 None，ACP/TUI 详情 URL 恒显示空占位符）。
+#[tokio::test]
+async fn dynamic_http_success_projects_configured_url_into_committed_handle() {
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let url = format!("http://{}/mcp", listener.local_addr().unwrap());
+    let fixture = tokio::spawn(serve_dynamic_http_fixture(listener));
+
+    let (mut tasks, spawner) = crate::mcp::McpTaskOwner::new();
+    let key = instance();
+    let client = memory_client();
+    let credentials_key = format!(
+        "dynamic:{}:{}:{}",
+        key.logical.session_id,
+        key.incarnation_id.as_str(),
+        key.logical.server_name
+    );
+    // 预置凭证走 initialize_from_store 快速路径，跳过交互授权直达连接阶段。
+    let token: rmcp::transport::auth::OAuthTokenResponse =
+        serde_json::from_value(serde_json::json!({
+            "access_token": "fixture-access-token",
+            "token_type": "bearer",
+        }))
+        .unwrap();
+    client
+        .save_server(
+            &credentials_key,
+            rmcp::transport::auth::StoredCredentials::new(
+                "fixture-client".into(),
+                Some(token),
+                vec![],
+                None,
+            ),
+        )
+        .await
+        .unwrap();
+    let pool = Arc::new(McpClientPool::new_pending_with_spawner(spawner.clone()));
+    pool.inject_oauth_credentials(client).unwrap();
+    let config = CanonicalDynamicMcpConfig {
+        transport: CanonicalDynamicMcpTransport::StreamableHttp {
+            url: url.clone(),
+            headers: Default::default(),
+        },
+        timeout_ms: 5_000,
+        subscriptions: None,
+    };
+    let staged = tokio::time::timeout(
+        Duration::from_secs(10),
+        prepare_single_server(
+            key,
+            Default::default(),
+            &config,
+            &RejectingSecretResolver,
+            spawner,
+            pool.clone(),
+            Arc::new(|_| {}),
+        ),
+    )
+    .await
+    .unwrap()
+    .unwrap();
+    let active = staged.commit();
+    assert!(matches!(active.handle.status, ClientStatus::Connected));
+    assert_eq!(active.handle.url.as_deref(), Some(url.as_str()));
+    tokio::time::timeout(Duration::from_secs(5), active.close())
+        .await
+        .unwrap()
+        .unwrap();
+    fixture.abort();
+    tokio::time::timeout(Duration::from_secs(5), pool.shutdown())
+        .await
+        .unwrap();
+    tasks.shutdown().await;
 }

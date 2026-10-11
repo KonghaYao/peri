@@ -33,6 +33,8 @@ fn make_handle(name: &str, tools: Vec<Tool>, resources: Vec<Resource>) -> Arc<Mc
     Arc::new(McpClientHandle {
         name: name.to_string(),
         version: None,
+        connected_at: None,
+        protocol_version: None,
         cache_version: None,
         peer: None,
         tools,

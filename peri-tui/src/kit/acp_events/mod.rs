@@ -376,7 +376,11 @@ pub(crate) fn dispatch_for_bridge(
         Progress(_) => tool::handle_progress(state),
         BudgetWarning(bw) => system::handle_budget_warning(state, bw),
         SystemNotification(sn) => system::handle_system_notification(state, sn),
-        SystemReminder { reminder, .. } => system::handle_system_reminder(state, reminder),
+        SystemReminder {
+            reminder,
+            source_agent_id,
+            ..
+        } => system::handle_system_reminder(state, reminder, source_agent_id.as_deref()),
         SystemReminderFallback { text, .. } => system::handle_system_reminder_fallback(state, text),
         CommandFeedback(fb) => system::handle_command_feedback(state, fb),
 
@@ -586,8 +590,12 @@ pub(crate) fn dispatch_trusted_structured_for_bridge(
     event: AcpEventData,
 ) -> PublicationIntent {
     match event {
-        AcpEventData::SystemReminder { reminder, .. } => {
-            system::handle_trusted_system_reminder(state, reminder);
+        AcpEventData::SystemReminder {
+            reminder,
+            source_agent_id,
+            ..
+        } => {
+            system::handle_trusted_system_reminder(state, reminder, source_agent_id.as_deref());
             std::mem::take(&mut state.publication_intent)
         }
         other => dispatch_for_bridge(state, &other),

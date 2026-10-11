@@ -20,11 +20,15 @@ pub trait EventSink: Send + Sync {
 
     /// Push a canonical System Reminder. Implementations capability-gate the rich DTO and
     /// must never serialize trusted provenance.
+    ///
+    /// `source_agent_id` 为转发展示归属（子 Agent child_thread_id）；None 表示提醒
+    /// 由当前会话自身产生。它只影响客户端展示标注，不改变受众、投递与消费方。
     async fn push_system_reminder(
         &self,
         _session_id: &str,
         _reminder: &crate::system_reminder::SystemReminder,
         _replay: bool,
+        _source_agent_id: Option<&str>,
     ) {
     }
 
@@ -477,7 +481,14 @@ pub enum ExecutorEvent {
         content: crate::messages::MessageContent,
     },
     /// Canonical System Reminder display payload; trusted provenance is never serialized.
-    SystemReminder(crate::system_reminder::SystemReminder),
+    ///
+    /// `source_agent_id` 为转发展示归属：Some 表示该提醒来自子 Agent 运行、经父会话
+    /// 转发展示；只影响客户端展示标注，不代表消费方变化。
+    SystemReminder {
+        reminder: crate::system_reminder::SystemReminder,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        source_agent_id: Option<String>,
+    },
     /// 系统级通知文本（MCP 上下线、连接状态变化等），经 peri/agent_event
     /// 通道送达 TUI 显示为 system-notification 通知。
     ///

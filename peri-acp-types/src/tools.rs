@@ -455,6 +455,26 @@ pub trait EffectiveToolDispatcher: Send + Sync {
     }
 }
 
+/// 当前会话上下文用量快照（工具只读运行时事实）。
+///
+/// 由 Agent 阶段在 dispatch 时投影：token 数为会话估算值，
+/// 与状态栏 / 自动 Compact 使用同一口径（见 `TokenTracker::estimated_context_tokens`）。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ContextUsage {
+    /// 估算的当前上下文 token 数。
+    pub used_tokens: u64,
+    /// 模型上下文窗口大小（token）。
+    pub context_window: u32,
+}
+
+impl ContextUsage {
+    /// 上下文使用率百分比（0-100）；窗口为 0 时无定义，返回 `None`。
+    pub fn percent(&self) -> Option<f64> {
+        (self.context_window > 0)
+            .then(|| self.used_tokens as f64 / self.context_window as f64 * 100.0)
+    }
+}
+
 /// 工具只读上下文（借用 state，零 clone）
 ///
 /// 通过 `BaseTool::invoke` 的第二个参数传入。工具可读取 messages 和 cwd，
@@ -479,6 +499,8 @@ pub struct ToolContext<'a> {
     /// 当前 turn generation；用于撤销跨 turn 的宿主调用租约。
     pub turn_generation: Option<String>,
     pub session_resources: Option<std::sync::Arc<dyn crate::session_resources::SessionResources>>,
+    /// 当前会话上下文用量快照；`None` = 无预算或无估算，工具无法评估。
+    pub context_usage: Option<ContextUsage>,
 }
 
 impl<'a> ToolContext<'a> {
@@ -494,7 +516,14 @@ impl<'a> ToolContext<'a> {
             task_terminal_delivery: None,
             turn_generation: None,
             session_resources: None,
+            context_usage: None,
         }
+    }
+
+    /// 绑定 dispatch 时刻的会话上下文用量快照。
+    pub fn with_context_usage(mut self, usage: Option<ContextUsage>) -> Self {
+        self.context_usage = usage;
+        self
     }
 
     pub fn with_effective_tool_dispatcher(

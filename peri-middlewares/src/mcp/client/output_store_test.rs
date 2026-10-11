@@ -204,6 +204,8 @@ impl Wire {
         let handle = Arc::new(McpClientHandle {
             name: name.into(),
             version: None,
+            connected_at: None,
+            protocol_version: None,
             cache_version: None,
             peer: Some(self.client.peer().clone()),
             tools: vec![test_tool()],

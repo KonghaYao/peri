@@ -114,6 +114,17 @@ pub fn active_layer() -> FocusLayer {
     }
 }
 
+/// 前景是否已由弹窗接管（背景 handler 的让路判定）。
+///
+/// 弹窗 handler 与面板 handler 同为 `EventPriority::High`，且同属 root 输入层
+/// （弹窗用 `Positioned` 定位，不开独占输入层）。层内投递顺序只按注册序——
+/// `SessionColumn`/`PanelOverlay` 内的面板 handler 先于 `PopupOverlay` 内的弹窗
+/// handler 注册，于是先注册的面板把键消费掉，弹窗收不到任何输入。
+/// 背景 handler（面板、搜索框等）必须先经此判定让路。
+pub fn popup_owns_foreground() -> bool {
+    matches!(active_layer(), FocusLayer::Popup(_))
+}
+
 pub fn classify_global_shortcut(key: &KeyEvent) -> Option<GlobalShortcut> {
     // BackTab (Shift+Tab) → 权限模式循环
     // crossterm 发送 BackTab 时 modifiers 可能为 SHIFT 或 NONE，两者都处理

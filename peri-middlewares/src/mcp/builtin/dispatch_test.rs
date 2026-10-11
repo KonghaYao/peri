@@ -392,6 +392,8 @@ async fn bridge_pool(instance: &str, peer: &Peer<RoleClient>) -> Arc<McpClientPo
         Arc::new(McpClientHandle {
             name: instance.to_string(),
             version: None,
+            connected_at: None,
+            protocol_version: None,
             cache_version: None,
             peer: Some(peer.clone()),
             tools,

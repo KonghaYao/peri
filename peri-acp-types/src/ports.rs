@@ -99,6 +99,17 @@ pub struct McpServerInfo {
     pub oauth_status: McpServerOAuthStatus,
     pub tool_count: usize,
     pub resource_count: usize,
+    /// server 自报版本（initialize 响应的 `serverInfo.version`）；未知为 None。
+    pub version: Option<String>,
+    /// 当前连接建立时刻（RFC3339 UTC）；从未成功连接为 None。
+    pub connected_at: Option<String>,
+    /// 与 server 协商出的 MCP 协议版本（如 `2026-07-28`）；未协商出为 None。
+    pub protocol_version: Option<String>,
+    /// 供 UI 显示的一行安全失败摘要（trim + 160 字符上限，由 middlewares
+    /// 侧投影承载；完整错误链仅写入 tracing 日志）；非 Failed 状态为 None。
+    pub error_summary: Option<String>,
+    /// 服务器 URL（HTTP 传输）；stdio/builtin 传输为 None。
+    pub url: Option<String>,
 }
 
 /// `mcp/oauth_start` 的启动结果（与 middlewares 内部

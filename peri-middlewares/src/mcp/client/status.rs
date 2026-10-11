@@ -80,6 +80,8 @@ impl McpClientPool {
             let handle = Arc::new(McpClientHandle {
                 name: name.to_string(),
                 version: None,
+                connected_at: None,
+                protocol_version: None,
                 cache_version: None,
                 peer: None,
                 tools: vec![],
@@ -127,6 +129,8 @@ impl McpClientPool {
             let handle = Arc::new(McpClientHandle {
                 name: name.to_string(),
                 version: None,
+                connected_at: None,
+                protocol_version: None,
                 cache_version: None,
                 peer: None,
                 tools: vec![],
@@ -158,6 +162,8 @@ impl McpClientPool {
             .map(|h| ServerInfo {
                 name: h.name.clone(),
                 version: h.version.clone(),
+                connected_at: h.connected_at.clone(),
+                protocol_version: h.protocol_version.clone(),
                 cache_version: h.cache_version.clone(),
                 transport_type: transport_type_of(h.source.as_ref(), h.url.as_deref()).to_string(),
                 status: h.status.clone(),
@@ -189,6 +195,8 @@ impl McpClientPool {
             result.push(ServerInfo {
                 name: h.name.clone(),
                 version: h.version.clone(),
+                connected_at: h.connected_at.clone(),
+                protocol_version: h.protocol_version.clone(),
                 cache_version: h.cache_version.clone(),
                 transport_type: transport_type_of(h.source.as_ref(), h.url.as_deref()).to_string(),
                 status: h.status.clone(),
@@ -209,6 +217,8 @@ impl McpClientPool {
             if !clients.contains_key(name) {
                 result.push(ServerInfo {
                     version: None,
+                    connected_at: None,
+                    protocol_version: None,
                     cache_version: None,
                     name: name.clone(),
                     transport_type: transport_type_of(sc.source.as_ref(), sc.url.as_deref())

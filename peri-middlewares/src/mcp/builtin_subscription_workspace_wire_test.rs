@@ -347,6 +347,8 @@ async fn t6_session_delivery_is_info_and_closure_skips_subscription() {
     let handle = Arc::new(McpClientHandle {
         name: "workspace".to_string(),
         version: None,
+        connected_at: None,
+        protocol_version: None,
         cache_version: None,
         peer: Some(peer.clone()),
         tools: peer.list_all_tools().await.expect("tools/list 必须成功"),
@@ -531,6 +533,8 @@ async fn t7b_read_failure_falls_back_to_generic_reminder() {
         Arc::new(McpClientHandle {
             name: "workspace".to_string(),
             version: None,
+            connected_at: None,
+            protocol_version: None,
             cache_version: None,
             peer: Some(peer.clone()),
             tools: vec![],

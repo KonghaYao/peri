@@ -59,12 +59,11 @@ fn validate_dynamic_instance(
 }
 
 pub(super) fn handle_list(_params: &Value, cfg: &AcpServerConfig) -> Result<Value, AcpError> {
+    // 目录投影供两类 OAuth 客户端共享：safe（peri.oauth，flow 管理面）与
+    // legacy（peri.agentEvent，TUI 面板数据源）；两者都未协商时 fail closed。
     let caps = cfg.session_manager.effective_host_caps();
-    if !caps.oauth {
-        return Err(AcpError::new(
-            -32601,
-            "peri.oauth capability not negotiated",
-        ));
+    if !caps.oauth && !caps.agent_event {
+        return Err(AcpError::new(-32601, "OAuth capability not negotiated"));
     }
     let pool = cfg
         .mcp_pool
@@ -99,6 +98,13 @@ pub(super) fn handle_list(_params: &Value, cfg: &AcpServerConfig) -> Result<Valu
                 "activeFlowId": pool.active_oauth_flow(&server.name),
                 "toolsCount": server.tool_count,
                 "resourcesCount": server.resource_count,
+                "version": server.version,
+                "connectedAt": server.connected_at,
+                "protocolVersion": server.protocol_version,
+                // 排障字段：有界安全摘要（160 字符上限，投影侧截断）与
+                // HTTP 传输 URL；无失败/stdio 时为 null。
+                "errorSummary": server.error_summary,
+                "url": server.url,
             })
         })
         .collect::<Vec<_>>();

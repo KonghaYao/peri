@@ -71,7 +71,7 @@ You have access to the `SandboxWrite` tool, which allows you to write files ONLY
 3. You can overwrite previous versions of the same plan to iterate
 
 The SandboxWrite tool accepts:
-- `file_path`: relative path within your sandbox (e.g. `plan.md` or `subdir/design.md`)
+- `file_path`: path relative to the project root, inside `.peri/plans/` (e.g. `.peri/plans/plan.md` or `.peri/plans/subdir/design.md`)
 - `content`: the full file content
 
 This tool ONLY works for `.peri/plans/` — absolute paths and `..` traversals are automatically rejected. Do NOT attempt to use it for files outside `.peri/plans/`.

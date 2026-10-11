@@ -533,3 +533,56 @@ fn test_prediction_directive_sanitize_xml_injection() {
     );
     assert!(directive.contains("test<\u{200b}/prediction_directive>injection"));
 }
+
+// ─── fork_context_usage_gate tests ──────────────────────────────────────────
+
+/// 无预算 / 无估算（None）无法评估上下文压力，放行 fork。
+#[test]
+fn test_fork_context_gate_allows_without_usage_snapshot() {
+    assert!(fork_context_usage_gate(None).is_ok());
+}
+
+/// 低于与等于上限均放行；「不可以高于 75%」的边界值 75% 本身不是拒绝条件。
+#[test]
+fn test_fork_context_gate_allows_at_or_below_limit() {
+    for percent in [0.0, 50.0, 74.9, FORK_CONTEXT_USAGE_LIMIT_PERCENT] {
+        let usage = ContextUsage {
+            used_tokens: (percent * 1000.0) as u64,
+            context_window: 100_000,
+        };
+        assert!(
+            fork_context_usage_gate(Some(usage)).is_ok(),
+            "使用率 {percent}% 不应被拒绝"
+        );
+    }
+}
+
+/// 窗口为 0 时使用率无定义，视为无法评估并放行。
+#[test]
+fn test_fork_context_gate_allows_zero_window() {
+    let usage = ContextUsage {
+        used_tokens: 90_000,
+        context_window: 0,
+    };
+    assert!(fork_context_usage_gate(Some(usage)).is_ok());
+}
+
+/// 高于 75% 拒绝，且反馈包含实际使用率与「改用非 fork 子 agent」的引导。
+#[test]
+fn test_fork_context_gate_rejects_above_limit_with_guidance() {
+    let usage = ContextUsage {
+        used_tokens: 80_000,
+        context_window: 100_000,
+    };
+    let error = fork_context_usage_gate(Some(usage)).expect_err("80% 应拒绝 fork");
+    assert!(error.contains("80.0%"), "应给出实际使用率: {error}");
+    assert!(error.contains("75%"), "应给出上限: {error}");
+    assert!(
+        error.contains("subagent_type"),
+        "应引导改用非 fork 子 agent: {error}"
+    );
+    assert!(
+        error.contains("resume_thread_id"),
+        "应给出 resume 备选: {error}"
+    );
+}

@@ -220,6 +220,8 @@ async fn enabled_policy_preserves_versioned_cache_hits_without_rpc() {
     let handle = Arc::new(super::McpClientHandle {
         name: "server".into(),
         version: None,
+        connected_at: None,
+        protocol_version: None,
         cache_version: None,
         peer: Some(peer.clone()),
         tools: vec![],
@@ -377,6 +379,8 @@ async fn disabled_policy_bypasses_skill_discovery_caches_and_keeps_registry_live
             Arc::new(McpClientHandle {
                 name: "server".into(),
                 version: None,
+                connected_at: None,
+                protocol_version: None,
                 cache_version: None,
                 peer: Some(running.peer().clone()),
                 tools: vec![],

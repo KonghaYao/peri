@@ -21,9 +21,10 @@ async fn successful_projection_then_partial_failure_preserves_last_good_and_repo
                     (0, "plugin/list") => Ok(
                         json!({"hooks":[{"event":"PreToolUse","plugin_name":"first","command":"echo","matcher":null}],"plugins":[]}),
                     ),
-                    (0, "mcp/list") => Ok(
-                        json!({"servers":[{"name":"first","transport":"stdio","connectionStatus":"connected","oauthStatus":"none","toolsCount":1}]}),
-                    ),
+                    (0, "mcp/list") => Ok(json!({"servers":[
+                        {"name":"first","transport":"stdio","connectionStatus":"connected","oauthStatus":"none","toolsCount":1,"version":"1.2.3","connectedAt":"2026-10-11T06:32:05Z","protocolVersion":"2026-07-28","url":"http://127.0.0.1:8080/mcp"},
+                        {"name":"second","transport":"http","connectionStatus":"failed","oauthStatus":"none","toolsCount":0,"errorSummary":"connect error: Connection refused (os error 61)","url":"http://127.0.0.1:9/mcp"}
+                    ]})),
                     (0, "cron/list") => Ok(
                         json!({"jobs":[{"id":"job-a","expression":"*/5 * * * *","prompt":"scheduled","enabled":true,"next_fire":null}]}),
                     ),
@@ -40,6 +41,30 @@ async fn successful_projection_then_partial_failure_preserves_last_good_and_repo
     assert!(query(&client, "session-a", &mut services).await.is_none());
     assert_eq!(services.hooks[0].event, "pretooluse");
     assert_eq!(services.mcp.connected, 1);
+    assert_eq!(services.mcp_servers[0].version.as_deref(), Some("1.2.3"));
+    assert_eq!(
+        services.mcp_servers[0].connected_at.as_deref(),
+        Some("2026-10-11T06:32:05Z")
+    );
+    assert_eq!(
+        services.mcp_servers[0].protocol_version.as_deref(),
+        Some("2026-07-28")
+    );
+    // 排障字段映射：URL 透传；非 Failed 无摘要。
+    assert_eq!(
+        services.mcp_servers[0].url.as_deref(),
+        Some("http://127.0.0.1:8080/mcp")
+    );
+    assert_eq!(services.mcp_servers[0].error_summary, None);
+    // failed 服务器：有界失败摘要与 URL 进入详情视图数据。
+    assert_eq!(
+        services.mcp_servers[1].error_summary.as_deref(),
+        Some("connect error: Connection refused (os error 61)")
+    );
+    assert_eq!(
+        services.mcp_servers[1].url.as_deref(),
+        Some("http://127.0.0.1:9/mcp")
+    );
     assert_eq!(services.cron_jobs[0].id, "job-a");
     let error = query(&client, "session-a", &mut services).await.unwrap();
     assert!(!error.is_empty());

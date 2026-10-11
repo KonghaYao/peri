@@ -56,6 +56,18 @@ struct McpServer {
     connection_status: String,
     oauth_status: String,
     tools_count: usize,
+    #[serde(default)]
+    version: Option<String>,
+    #[serde(default)]
+    connected_at: Option<String>,
+    #[serde(default)]
+    protocol_version: Option<String>,
+    /// failed 状态的一行安全失败摘要（`mcp/list` 有界投影）；详情视图展示。
+    #[serde(default)]
+    error_summary: Option<String>,
+    /// 服务器 URL（HTTP 传输）；详情视图展示。
+    #[serde(default)]
+    url: Option<String>,
 }
 
 pub(super) async fn query(
@@ -106,10 +118,15 @@ pub(super) async fn query(
                 .into_iter()
                 .map(|server| McpServerSummary {
                     name: server.name,
+                    version: server.version,
+                    connected_at: server.connected_at,
+                    protocol_version: server.protocol_version,
                     transport: server.transport,
                     status: server.connection_status,
                     needs_auth: server.oauth_status == "needs_authorization",
                     tools_count: server.tools_count,
+                    error_summary: server.error_summary,
+                    url: server.url,
                     ..McpServerSummary::default()
                 })
                 .collect();

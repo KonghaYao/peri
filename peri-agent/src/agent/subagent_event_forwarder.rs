@@ -200,7 +200,9 @@ async fn forward_subagent_events(
                     crate::agent::events_v2::StateEvent::StateSnapshot { .. }
                 );
                 if should_forward {
-                    if let Some(exec_ev) = state_event_to_executor(ev) {
+                    if let Some(mut exec_ev) = state_event_to_executor(ev) {
+                        // 子 Agent 的提醒经父会话转发展示：打上来源，供父视图标注归属。
+                        set_source_agent_id(&mut exec_ev, &child_thread_id);
                         if let Some(h) = &event_handler {
                             h.on_event(exec_ev);
                         }
@@ -213,8 +215,8 @@ async fn forward_subagent_events(
     pending_stop
 }
 
-/// 对 ToolStart / ToolEnd / TextChunk / AiReasoning 设置 source_agent_id。
-/// 其他变体为 no-op。
+/// 对 ToolStart / ToolEnd / TextChunk / AiReasoning / LlmCallEnd / SystemReminder
+/// 设置 source_agent_id。其他变体为 no-op。
 pub(crate) fn set_source_agent_id(event: &mut ExecutorEvent, agent_id: &str) {
     match event {
         ExecutorEvent::ToolStart {
@@ -230,6 +232,9 @@ pub(crate) fn set_source_agent_id(event: &mut ExecutorEvent, agent_id: &str) {
             source_agent_id, ..
         }
         | ExecutorEvent::LlmCallEnd {
+            source_agent_id, ..
+        }
+        | ExecutorEvent::SystemReminder {
             source_agent_id, ..
         } => {
             *source_agent_id = Some(agent_id.to_string());

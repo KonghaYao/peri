@@ -528,6 +528,20 @@ async fn empty_tools_list_is_success_not_failure() {
         client.status
     );
     assert!(client.tools.is_empty(), "空数组必须原样保留为空清单");
+    assert_eq!(
+        client.version.as_deref(),
+        Some("1"),
+        "server 自报版本必须进入句柄"
+    );
+    assert!(
+        client.connected_at.is_some(),
+        "成功连接必须记录建立时刻（RFC3339）"
+    );
+    assert_eq!(
+        client.protocol_version.as_deref(),
+        Some("2025-11-25"),
+        "协商出的 MCP 协议版本必须进入句柄"
+    );
     assert!(
         matches!(&*pool.init_status.read(), McpInitStatus::Ready { .. }),
         "空数组成功必须发布 ready，实际: {:?}",

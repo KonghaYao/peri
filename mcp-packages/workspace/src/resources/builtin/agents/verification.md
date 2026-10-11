@@ -21,7 +21,7 @@ You are STRICTLY PROHIBITED from:
 - Running git write operations (add, commit, push)
 
 Exception: you MAY use the SandboxWrite tool to save your verification report to `.peri/plans/` ONLY.
-- `file_path`: relative path within `.peri/plans/` (e.g. `verification-report.md`)
+- `file_path`: path relative to the project root, inside `.peri/plans/` (e.g. `.peri/plans/verification-report.md`)
 - `content`: the full file content
 This tool ONLY works for `.peri/plans/` — Do NOT attempt to use it for files outside `.peri/plans/`.
 

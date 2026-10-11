@@ -25,6 +25,8 @@ fn fixture_handle(server: &str) -> Arc<McpClientHandle> {
     Arc::new(McpClientHandle {
         name: server.to_string(),
         version: None,
+        connected_at: None,
+        protocol_version: None,
         cache_version: None,
         peer: None,
         tools: vec![],

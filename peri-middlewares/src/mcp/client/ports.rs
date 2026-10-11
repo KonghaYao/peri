@@ -226,8 +226,10 @@ impl peri_acp_types::ports::McpPoolPort for McpClientPool {
     }
 }
 
-/// `mcp/list` 契约投影：只暴露面板需要的状态分类，屏蔽 `Failed` 的错误正文
-/// 与其余内部字段（与 `peri-acp` 原 downcast 后逐字段映射一致）。
+/// `mcp/list` 契约投影：暴露面板需要的状态分类与排障字段（有界的
+/// `error_summary`、`url`；摘要已由 `ServerInfo` 侧 trim + 160 字符截断，
+/// 完整错误链不出投影），其余内部字段（source/plugin_source/cache_version
+/// 等）不透传。
 fn mcp_server_info_projection(info: ServerInfo) -> McpServerInfo {
     McpServerInfo {
         name: info.name,
@@ -246,6 +248,11 @@ fn mcp_server_info_projection(info: ServerInfo) -> McpServerInfo {
         },
         tool_count: info.tool_count,
         resource_count: info.resource_count,
+        version: info.version,
+        connected_at: info.connected_at,
+        protocol_version: info.protocol_version,
+        error_summary: info.error_summary,
+        url: info.url,
     }
 }
 

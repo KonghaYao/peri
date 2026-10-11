@@ -370,6 +370,8 @@ async fn builtin_source_propagates() {
             Arc::new(McpClientHandle {
                 name: (*instance).to_string(),
                 version: None,
+                connected_at: None,
+                protocol_version: None,
                 cache_version: None,
                 peer: Some(pair.peer()),
                 tools,

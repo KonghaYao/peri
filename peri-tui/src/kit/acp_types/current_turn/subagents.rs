@@ -157,6 +157,18 @@ impl CurrentTurn {
             .map(|s| s.instance_id.as_str())
     }
 
+    /// 该 agent 最新 occurrence 的展示名；TUI 未登记该 id 时为 None。
+    ///
+    /// 供子 Agent 提醒的转发展示归属标注使用；resume 复用 agent_id 时取最新
+    /// occurrence 的名称。
+    pub fn subagent_name(&self, agent_id: &str) -> Option<&str> {
+        self.subagents
+            .iter()
+            .rev()
+            .find(|s| s.agent_id == agent_id)
+            .map(|s| s.agent_name.as_str())
+    }
+
     /// Mark a sub-agent group as done from `"subagent-stopped"`.
     ///
     /// `is_error` 是 parent 终态的唯一事实源（agent 层语义：Completed→false、

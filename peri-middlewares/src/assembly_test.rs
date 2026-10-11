@@ -474,6 +474,8 @@ fn make_connected_handle(server: &str, tools: Vec<rmcp::model::Tool>) -> Arc<Mcp
     Arc::new(McpClientHandle {
         name: server.to_string(),
         version: None,
+        connected_at: None,
+        protocol_version: None,
         cache_version: None,
         peer: None,
         tools,
