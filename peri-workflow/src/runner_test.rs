@@ -180,14 +180,17 @@ fn run_limit_state_tracks_tool_calls_and_keeps_first_breach() {
     );
 }
 
-/// 让生产解析路径（`PERI_WORKFLOW_ARTIFACT_DIR` 注入点）指向仓库入库 bundle。
-///
-/// 调用方必须 `#[serial]`：进程级 env 与 `std::env` 读取存在并发窗口。
-fn use_repository_bundle() {
-    std::env::set_var(
-        "PERI_WORKFLOW_ARTIFACT_DIR",
-        crate::runner::repository_package_dir(),
+/// 真实引擎集成用例的显式前置：由开发者提供已校验引擎包目录
+/// （`PERI_WORKFLOW_ARTIFACT_DIR`）。仓库不读工作树 dist、也不假设本机装有引擎：
+/// 未提供时打印说明并返回（显式、可见，不用 `#[ignore]`）。
+fn require_explicit_engine() -> bool {
+    if std::env::var_os("PERI_WORKFLOW_ARTIFACT_DIR").is_some_and(|value| !value.is_empty()) {
+        return true;
+    }
+    eprintln!(
+        "note: 跳过真实引擎用例（仓库不读工作树 dist）；         需要时设置 PERI_WORKFLOW_ARTIFACT_DIR=<@peri-code/workflow 包目录> 后重跑"
     );
+    false
 }
 
 fn completed_workflow_result() -> WorkflowResult {
@@ -450,7 +453,9 @@ fn test_start_ack_rejects_protocol_mismatch() {
 #[tokio::test]
 #[serial]
 async fn test_kill_marks_run_killed_in_progress_store() {
-    use_repository_bundle();
+    if !require_explicit_engine() {
+        return;
+    }
     let tmp = tempfile::TempDir::new().unwrap();
     let cwd = tmp.path().to_str().unwrap();
 
@@ -555,7 +560,9 @@ return { output: result }
 #[tokio::test]
 #[serial]
 async fn test_natural_crash_marks_run_failed_in_progress_store() {
-    use_repository_bundle();
+    if !require_explicit_engine() {
+        return;
+    }
     let tmp = tempfile::TempDir::new().unwrap();
     let cwd = tmp.path().to_str().unwrap();
 

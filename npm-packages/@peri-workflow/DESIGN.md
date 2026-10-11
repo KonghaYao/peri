@@ -309,7 +309,7 @@ bun build src/index.ts \
 
 产出：`dist/peri-workflow.js`（单文件，engine 一并打包，零运行时依赖）。
 
-该文件**入库并作为发行内容的事实源**：Rust 侧只保存它的 sha256 摘要
+`dist/` 为**构建产物**（`bun run build` 可复现字节）、**不入库**：发布链在打包前构建并随发布包携带；Rust 侧只保存它的 sha256 摘要
 （`peri-workflow/src/runner/artifact.rs::WORKFLOW_ENTRY_SHA256`），不把 JS 嵌入二进制。
 重建 dist 后必须同步该摘要（`repository_bundle_matches_pinned_digest` 测试守卫）。
 
@@ -368,7 +368,7 @@ peri-resources/workflow/<内容身份>/     # 内容身份 = dist/peri-workflow.
 2. 全局对象受限（禁止 `Date.now()`、`Math.random` 等非确定性 API）
 3. 所有对外交互（agent、日志、文件）都通过声明的 hooks（`WorkflowHooks`），不存在直接的系统调用
 
-**安全关键**：`@claude-code-best/workflow-engine` 是私有 npm 包，定义沙箱边界。JS 打包为单文件 bundle 后，沙箱代码随 bundle 一同分发且入库受摘要 pin 保护，完全可审计（Rust 侧不嵌入该产物）。
+**安全关键**：`@claude-code-best/workflow-engine` 是私有 npm 包，定义沙箱边界。JS 打包为单文件 bundle 后，沙箱代码随 bundle 一同分发且受摘要 pin 保护，完全可审计（Rust 侧不嵌入该产物；bundle 由发布链构建、不入库）。
 
 ### 传输安全
 

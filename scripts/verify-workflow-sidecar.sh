@@ -33,6 +33,7 @@ fail() {
 
 [[ -f "$archive" ]] || fail "archive not found"
 [[ -f "$artifact_rs" ]] || fail "missing $artifact_rs"
+# 仓库 manifest 仅用于核对身份字段口径（不参与字节比对；仓库不读工作树 dist）。
 [[ -f "$package_json" ]] || fail "missing $package_json"
 
 # sha256 工具（CI 为 GNU coreutils；macOS 本地为 perl shasum）
@@ -93,13 +94,11 @@ printf '%s\n' "$listing" | grep -qx "$meta_member" \
 printf '%s\n' "$listing" | grep -qx "$entry_member" \
     || fail "missing sidecar entry at '$entry_member'"
 
-# ─── 内容：入口摘要 == pin == 仓库 dist；元数据 == Rust 常量 == 仓库 manifest ──
+# ─── 内容：归档内入口摘要 == Rust 侧 pin；元数据 == Rust 常量 == 仓库 manifest ──
+# 只校验被校验的 artifact 本身与 pin 常量：不读取工作树 dist（dist 不入库，也不作为字节源）。
 entry_digest="$(read_member "$entry_member" | sha256_stdin)"
 [[ "$entry_digest" == "$pin" ]] \
     || fail "archive entry sha256 ${entry_digest:0:12}… != pinned ${pin:0:12}… (tampered or stale bundle)"
-repo_digest="$(sha256_file "${root}/npm-packages/@peri-workflow/${entry_rel}")"
-[[ "$repo_digest" == "$pin" ]] \
-    || fail "repository bundle sha256 ${repo_digest:0:12}… != pinned ${pin:0:12}… (rebuild requires updating the pin)"
 
 meta_check() {
     python3 -c '

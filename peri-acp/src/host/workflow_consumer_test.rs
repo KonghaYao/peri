@@ -447,9 +447,18 @@ impl AgentExecutor for GatedEngineExecutor {
     }
 }
 
-/// 仓库入库的引擎包目录（`PERI_WORKFLOW_ARTIFACT_DIR` 的部署注入点）。
-fn repository_workflow_package() -> std::path::PathBuf {
-    std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../npm-packages/@peri-workflow")
+/// 真实引擎集成用例的显式前置：由开发者提供已校验引擎包目录
+/// （`PERI_WORKFLOW_ARTIFACT_DIR`，例如发布包或本机缓存）。仓库不读工作树 dist，
+/// 未提供时打印说明并返回（显式、可见，不用 `#[ignore]`）。
+fn require_explicit_engine() -> bool {
+    if std::env::var_os("PERI_WORKFLOW_ARTIFACT_DIR").is_some_and(|value| !value.is_empty()) {
+        return true;
+    }
+    eprintln!(
+        "note: 跳过真实引擎用例（仓库不读工作树 dist）；\
+         需要时设置 PERI_WORKFLOW_ARTIFACT_DIR=<@peri-code/workflow 包目录> 后重跑"
+    );
+    false
 }
 
 /// [P6 回归] 调用者在启动快速窗口被取消：run 仍由宿主消费者执行真实 agent，
@@ -458,7 +467,9 @@ fn repository_workflow_package() -> std::path::PathBuf {
 #[tokio::test]
 #[serial]
 async fn cancelled_caller_keeps_completion_owner_with_real_engine() {
-    std::env::set_var("PERI_WORKFLOW_ARTIFACT_DIR", repository_workflow_package());
+    if !require_explicit_engine() {
+        return;
+    }
 
     let dir = tempfile::tempdir().unwrap();
     let cwd = dir.path().to_str().unwrap();
@@ -532,7 +543,6 @@ async fn cancelled_caller_keeps_completion_owner_with_real_engine() {
     );
 
     consumer.stop().await;
-    std::env::remove_var("PERI_WORKFLOW_ARTIFACT_DIR");
 }
 
 /// [等价覆盖] 简单 workflow 端到端：真实引擎发布 `agent/task`，宿主消费者派发一次并
@@ -543,7 +553,9 @@ async fn cancelled_caller_keeps_completion_owner_with_real_engine() {
 #[tokio::test]
 #[serial]
 async fn simple_workflow_completes_through_host_consumer() {
-    std::env::set_var("PERI_WORKFLOW_ARTIFACT_DIR", repository_workflow_package());
+    if !require_explicit_engine() {
+        return;
+    }
 
     let dir = tempfile::tempdir().unwrap();
     let cwd = dir.path().to_str().unwrap();
@@ -588,5 +600,4 @@ async fn simple_workflow_completes_through_host_consumer() {
     assert_eq!(result.agent_count, 1);
 
     consumer.stop().await;
-    std::env::remove_var("PERI_WORKFLOW_ARTIFACT_DIR");
 }

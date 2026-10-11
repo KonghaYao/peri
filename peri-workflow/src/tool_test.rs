@@ -7,7 +7,7 @@ use peri_acp_types::tools::{BaseTool, ToolContext};
 use serial_test::serial;
 
 use super::*;
-use crate::preflight::preflight_validate_script;
+use crate::preflight::{preflight_validate_script, validate_script_with};
 use crate::protocol::{AgentRunParams, AgentRunResult, Usage};
 use crate::registry::{WorkflowRunStatus, WorkflowTaskRegistry};
 use crate::runner::AgentExecutor;
@@ -34,14 +34,20 @@ impl AgentExecutor for CountingExecutor {
     }
 }
 
-/// 让生产解析路径（`PERI_WORKFLOW_ARTIFACT_DIR` 注入点）指向仓库入库 bundle。
+/// 真实引擎集成用例的显式前置：由开发者提供已校验的引擎包目录
+/// （`PERI_WORKFLOW_ARTIFACT_DIR`，例如发布包或本机缓存的 @peri-code/workflow 目录）。
 ///
-/// 调用方必须 `#[serial]`：进程级 env 与 `std::env` 读取存在并发窗口。
-fn use_repository_bundle() {
-    std::env::set_var(
-        "PERI_WORKFLOW_ARTIFACT_DIR",
-        crate::runner::repository_package_dir(),
+/// 仓库不读工作树 dist、也不假设本机装有引擎：未提供时打印说明并返回（显式、可见，
+/// 不使用 `#[ignore]`）。引擎语义（脚本 parser 的接受/拒绝边界）的等价覆盖在包内
+/// `bun test`（自含构建，见 `npm-packages/@peri-workflow/test`）。
+fn require_explicit_engine() -> bool {
+    if std::env::var_os("PERI_WORKFLOW_ARTIFACT_DIR").is_some_and(|value| !value.is_empty()) {
+        return true;
+    }
+    eprintln!(
+        "note: 跳过真实引擎用例（仓库不读工作树 dist）；         需要时设置 PERI_WORKFLOW_ARTIFACT_DIR=<@peri-code/workflow 包目录> 后重跑"
     );
+    false
 }
 
 fn make_tool(cwd: &str, calls: Arc<AtomicUsize>) -> (WorkflowTool, Arc<WorkflowTaskRegistry>) {
@@ -74,7 +80,9 @@ fn script_example_from_parameters(tool: &WorkflowTool) -> String {
 #[tokio::test]
 #[serial]
 async fn test_production_description_example_passes_real_node_preflight() {
-    use_repository_bundle();
+    if !require_explicit_engine() {
+        return;
+    }
     let tmp = tempfile::TempDir::new().unwrap();
     let (tool, _) = make_tool(tmp.path().to_str().unwrap(), Arc::new(AtomicUsize::new(0)));
     let script = script_example_from_parameters(&tool);
@@ -88,7 +96,9 @@ async fn test_production_description_example_passes_real_node_preflight() {
 #[tokio::test]
 #[serial]
 async fn test_production_description_mutations_hit_parser_rejection_boundaries() {
-    use_repository_bundle();
+    if !require_explicit_engine() {
+        return;
+    }
     let tmp = tempfile::TempDir::new().unwrap();
     let (tool, _) = make_tool(tmp.path().to_str().unwrap(), Arc::new(AtomicUsize::new(0)));
     let script = script_example_from_parameters(&tool);
@@ -250,29 +260,51 @@ fn workflow_schema_exposes_budget_total_integer_bounds() {
         .contains("total token budget"));
 }
 
+/// [回归测试] 启动失败（没有任何可校验 artifact）必须在 workflow 副作用之前收敛：
+/// 不派发 agent、不登记 run、不写 run 目录。
+///
+/// 隔离 `HOME`（缓存前缀）并把注入点指向非法包，确保与机器上既有安装/缓存无关；
+/// 脚本 parser 的接受/拒绝覆盖在包内 `bun test`（自含构建）。
 #[tokio::test]
 #[serial]
-async fn invalid_script_fails_before_workflow_side_effects() {
-    use_repository_bundle();
+async fn failed_start_leaves_no_workflow_side_effects() {
     let tmp = tempfile::TempDir::new().unwrap();
     let cwd = tmp.path().to_str().unwrap();
+    let previous_home = std::env::var_os("HOME");
+    std::env::set_var("HOME", tmp.path());
+    std::env::set_var(
+        "PERI_WORKFLOW_ARTIFACT_DIR",
+        tmp.path().join("not-a-package"),
+    );
+
     let calls = Arc::new(AtomicUsize::new(0));
     let (tool, registry) = make_tool(cwd, Arc::clone(&calls));
-
-    let error = tool
+    let result = tool
         .invoke(
             serde_json::json!({
-                "script": "export const meta = { name: 'broken', description: 'test' }; const = nope"
+                "script": "export const meta = { name: 'broken', description: 'test' }; return 1"
             }),
             ToolContext::new(&[], cwd),
         )
-        .await
-        .unwrap_err();
+        .await;
 
-    assert!(error.to_string().contains("Workflow preflight failed"));
-    assert_eq!(calls.load(Ordering::SeqCst), 0);
-    assert_eq!(registry.active_count(), 0);
-    assert!(!tmp.path().join(".claude/workflow-runs").exists());
+    match previous_home {
+        Some(value) => std::env::set_var("HOME", value),
+        None => std::env::remove_var("HOME"),
+    }
+    std::env::remove_var("PERI_WORKFLOW_ARTIFACT_DIR");
+
+    let error = result.expect_err("无任何已校验 artifact 时启动必须失败");
+    assert!(
+        error.to_string().contains("unavailable"),
+        "错误须指出 artifact 不可用: {error}"
+    );
+    assert_eq!(calls.load(Ordering::SeqCst), 0, "不得派发 agent");
+    assert_eq!(registry.active_count(), 0, "不得留下登记的 run");
+    assert!(
+        !tmp.path().join(".claude/workflow-runs").exists(),
+        "不得写 run 目录"
+    );
 }
 
 #[tokio::test]
@@ -423,7 +455,9 @@ fn make_completion_tool(
 #[test]
 #[serial]
 fn test_invoke_fast_kill_preserves_terminal_projection() {
-    use_repository_bundle();
+    if !require_explicit_engine() {
+        return;
+    }
     if isolated_completion_child("tool::tests::test_invoke_fast_kill_preserves_terminal_projection")
     {
         return;
@@ -452,7 +486,6 @@ fn test_invoke_fast_kill_preserves_terminal_projection() {
 #[test]
 #[serial]
 fn test_preflight_cancellation_releases_process_and_script() {
-    use_repository_bundle();
     if isolated_completion_child(
         "tool::tests::test_preflight_cancellation_releases_process_and_script",
     ) {
@@ -468,7 +501,12 @@ fn test_preflight_cancellation_releases_process_and_script() {
     std::env::set_var("PATH", fixture.path());
     std::env::set_var("PERI_WORKFLOW_PREFLIGHT_PROBE", &probe);
     tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap().block_on(async {
-        let mut validation = Box::pin(preflight_validate_script("return 'ok'"));
+        // 合成引擎命令 + PATH 上的假 node：不依赖任何真实引擎产物。
+        let command = crate::runner::WorkflowCommand {
+            program: "node".into(),
+            args: vec!["dist/peri-workflow.js".into()],
+        };
+        let mut validation = Box::pin(validate_script_with(&command, "return 'ok'"));
         let observed = tokio::time::timeout(std::time::Duration::from_secs(5), async {
             loop {
                 tokio::select! {

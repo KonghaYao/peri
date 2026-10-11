@@ -32,14 +32,14 @@
 ## 安装
 
 Peri（Rust 宿主）**随二进制分发本包构建出的单文件 bundle 作为 sidecar**，不把 JS 嵌入二进制：发行归档在可执行文件旁携带
-`peri-resources/workflow/<内容身份>/`（`<内容身份>` = 入库 `dist/peri-workflow.js` 的 sha256 前 12 位），
+`peri-resources/workflow/<内容身份>/`（`<内容身份>` = `dist/peri-workflow.js` 构建产物的 sha256 前 12 位），
 首次使用时校验身份与摘要并发布到本机缓存 `~/.peri/workflow/<version>/<内容身份>/`，之后离线复用。
 `peri workflow --help` 与 workflow 工具走同一份已校验产物。
 
 - 默认**不联网**：sidecar 或缓存缺失/摘要不符时直接 fail closed（错误信息给出 sidecar 路径与可选入口）。
 - 显式 opt-in 的网络获取（`PERI_WORKFLOW_ALLOW_NPX_FALLBACK=1`）只负责把包取到 staging，仍须通过同一摘要校验；**不存在直接执行网络内容的路径**。
 - 部署方可显式指定包目录：`PERI_WORKFLOW_ARTIFACT_DIR`（仍按同一身份与摘要校验）。
-- 仓库开发时先 `bun run build`，再用 `node dist/peri-workflow.js --help`；`dist/` 入库并作为发行内容的事实源。
+- `dist/` 为构建产物（`bun run build` 可复现字节）、**不入库**：由发布链在打包前构建并随发布包携带，消费方按固定 SHA-256 pin 校验。仓库开发时先 `bun run build`，再用 `node dist/peri-workflow.js --help`。
 
 npm 渠道（给非 Peri 宿主或手工调试）仍然可用：
 
@@ -297,7 +297,7 @@ npm publish --access public
 - `WORKFLOW_NPM_VERSION` / `WORKFLOW_BUILD_ID` / `WORKFLOW_PROTOCOL_VERSION` 决定期望的包身份、
   缓存路径 `~/.peri/workflow/<version>/<内容身份>/` 与启动握手校验值；
 - `WORKFLOW_ENTRY_SHA256` 必须改为新 `dist` 的完整 sha256（`repository_bundle_matches_pinned_digest`
-  测试会比对入库 dist 与 pin，不一致即失败）；
+  测试会比对构建产物与 pin，不一致即失败——先在 `npm-packages/@peri-workflow` 运行 `bun run build`）；
 - 内容身份目录名（sha256 前 12 位）由发行归档的打包步骤与发布门自动推导，无需手工同步；
 - 发布门 `scripts/verify-workflow-sidecar.sh` 会核对归档内元数据、JS 完整 sha256、目录身份与
   上述 Rust 常量四者一致。

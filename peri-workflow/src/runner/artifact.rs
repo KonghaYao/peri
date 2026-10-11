@@ -28,8 +28,8 @@ pub(super) const WORKFLOW_BUILD_ID: &str = "@peri-code/workflow@0.3.0";
 
 /// pin 的入口内容摘要（sha256 十六进制小写），不是 JS 内容本身。
 ///
-/// 与入库的 `npm-packages/@peri-workflow/dist/peri-workflow.js` 一致；dist 重建后
-/// 必须同步更新，`repository_bundle_matches_pinned_digest` 测试守卫两者一致。
+/// 与发布产物（`bun run build` 的构建产出，不入库）一致：bundle 变化时必须重新发布并
+/// 同步本常量；仓库内不保存该产物，任何代码/测试都不读取工作树 dist。
 const WORKFLOW_ENTRY_SHA256: &str =
     "bd746ad747e9056bd5cb4a7c24964278a421bd46929edd9a9bc86775519514ba";
 
@@ -91,6 +91,19 @@ pub(crate) struct ResolvedArtifact {
     pub(crate) origin: ArtifactOrigin,
 }
 
+/// 期望的入口内容摘要（可注入）。
+///
+/// 生产恒为编译期 [`WORKFLOW_ENTRY_SHA256`]；测试用**合成夹具**时注入夹具自身的
+/// 摘要，从而在不读取任何仓库文件的前提下覆盖「接受合法包」路径（仓库不承载 dist）。
+#[derive(Debug, Clone)]
+pub(crate) struct EntryPin(pub(crate) String);
+
+impl Default for EntryPin {
+    fn default() -> Self {
+        Self(WORKFLOW_ENTRY_SHA256.to_string())
+    }
+}
+
 /// 解析输入：从进程环境派生，或由测试/部署显式构造。
 #[derive(Debug, Default, Clone)]
 pub(crate) struct ArtifactSources {
@@ -100,6 +113,8 @@ pub(crate) struct ArtifactSources {
     pub(crate) sidecar_dirs: Vec<PathBuf>,
     /// 本机缓存前缀（`~/.peri/workflow/<version>`）。
     pub(crate) cache_prefix: Option<PathBuf>,
+    /// 期望的入口摘要（默认 = 生产 pin；测试可注入合成夹具的摘要）。
+    pub(crate) entry_pin: EntryPin,
 }
 
 impl ArtifactSources {
@@ -114,6 +129,7 @@ impl ArtifactSources {
                 .map(|dir| dir.join(SIDECAR_RELATIVE_DIR).join(artifact_id()))
                 .collect(),
             cache_prefix: workflow_prefix(),
+            entry_pin: EntryPin::default(),
         }
     }
 }
@@ -122,8 +138,9 @@ impl ArtifactSources {
 ///
 /// 显式注入无效时继续尝试其余来源（三者校验口径一致，接受的必为同一内容）。
 pub(crate) fn resolve_artifact(sources: &ArtifactSources) -> Option<ResolvedArtifact> {
+    let expected = sources.entry_pin.0.as_str();
     if let Some(dir) = sources.override_dir.as_deref() {
-        if let Some(entry) = validate_workflow_package(dir) {
+        if let Some(entry) = validate_workflow_package(dir, expected) {
             return Some(ResolvedArtifact {
                 package_dir: dir.to_path_buf(),
                 entry,
@@ -138,7 +155,7 @@ pub(crate) fn resolve_artifact(sources: &ArtifactSources) -> Option<ResolvedArti
     }
     if let Some(prefix) = sources.cache_prefix.as_deref() {
         let dir = prefix.join(artifact_id());
-        if let Some(entry) = validate_workflow_package(&dir) {
+        if let Some(entry) = validate_workflow_package(&dir, expected) {
             return Some(ResolvedArtifact {
                 package_dir: dir,
                 entry,
@@ -147,7 +164,7 @@ pub(crate) fn resolve_artifact(sources: &ArtifactSources) -> Option<ResolvedArti
         }
     }
     for dir in &sources.sidecar_dirs {
-        if let Some(entry) = validate_workflow_package(dir) {
+        if let Some(entry) = validate_workflow_package(dir, expected) {
             return Some(ResolvedArtifact {
                 package_dir: dir.clone(),
                 entry,
@@ -161,7 +178,7 @@ pub(crate) fn resolve_artifact(sources: &ArtifactSources) -> Option<ResolvedArti
 /// 校验 npm 包目录的身份、入口契约与入口内容摘要。
 ///
 /// 返回入口路径；身份、越界路径或摘要任一不符返回 `None`（fail closed）。
-fn validate_workflow_package(package_dir: &Path) -> Option<PathBuf> {
+fn validate_workflow_package(package_dir: &Path, expected_sha256: &str) -> Option<PathBuf> {
     let metadata: WorkflowPackageMetadata =
         serde_json::from_slice(&std::fs::read(package_dir.join("package.json")).ok()?).ok()?;
     if metadata.name != WORKFLOW_PACKAGE_NAME
@@ -180,10 +197,7 @@ fn validate_workflow_package(package_dir: &Path) -> Option<PathBuf> {
     {
         return None;
     }
-    if !digest_matches(
-        &std::fs::read(&canonical_entry).ok()?,
-        WORKFLOW_ENTRY_SHA256,
-    ) {
+    if !digest_matches(&std::fs::read(&canonical_entry).ok()?, expected_sha256) {
         return None;
     }
     Some(entry)
@@ -263,7 +277,13 @@ pub(crate) async fn prepare_workflow_command_with(
         let entry = if resolved.origin == ArtifactOrigin::Sidecar {
             match sources.cache_prefix.as_deref() {
                 Some(prefix) => {
-                    match publish_to_cache_in(prefix, &resolved.package_dir, &resolved.entry).await
+                    match publish_to_cache_in(
+                        prefix,
+                        &resolved.package_dir,
+                        &resolved.entry,
+                        sources.entry_pin.0.as_str(),
+                    )
+                    .await
                     {
                         Ok(entry) => entry,
                         Err(error) => {
@@ -298,14 +318,15 @@ pub(crate) async fn publish_to_cache_in(
     prefix: &Path,
     package_dir: &Path,
     entry: &Path,
+    expected_sha256: &str,
 ) -> Result<PathBuf, WorkflowError> {
     let target = prefix.join(artifact_id());
-    if let Some(entry) = validate_workflow_package(&target) {
+    if let Some(entry) = validate_workflow_package(&target, expected_sha256) {
         return Ok(entry);
     }
 
     let _guard = INSTALL_LOCK.lock().await;
-    if let Some(entry) = validate_workflow_package(&target) {
+    if let Some(entry) = validate_workflow_package(&target, expected_sha256) {
         return Ok(entry);
     }
 
@@ -316,7 +337,7 @@ pub(crate) async fn publish_to_cache_in(
         let _ = tokio::fs::remove_dir_all(&staging).await;
         return Err(error);
     }
-    if validate_workflow_package(&staging).is_none() {
+    if validate_workflow_package(&staging, expected_sha256).is_none() {
         let _ = tokio::fs::remove_dir_all(&staging).await;
         return Err(WorkflowError::SpawnFailed(
             "staged workflow artifact failed validation".into(),
@@ -325,7 +346,7 @@ pub(crate) async fn publish_to_cache_in(
 
     match tokio::fs::rename(&staging, &target).await {
         Ok(()) => {}
-        Err(error) if validate_workflow_package(&target).is_some() => {
+        Err(error) if validate_workflow_package(&target, expected_sha256).is_some() => {
             let _ = tokio::fs::remove_dir_all(&staging).await;
             debug!(target: "workflow", error_kind = ?error.kind(), "another publisher created the workflow artifact cache entry");
         }
@@ -334,7 +355,7 @@ pub(crate) async fn publish_to_cache_in(
             return Err(WorkflowError::Io(error));
         }
     }
-    validate_workflow_package(&target).ok_or_else(|| {
+    validate_workflow_package(&target, expected_sha256).ok_or_else(|| {
         WorkflowError::SpawnFailed("published workflow artifact failed validation".into())
     })
 }
@@ -430,7 +451,7 @@ async fn fetch_and_publish_from_registry() -> Result<PathBuf, WorkflowError> {
         .join("@peri-code")
         .join("workflow");
     let entry = if installed {
-        validate_workflow_package(&package_dir)
+        validate_workflow_package(&package_dir, WORKFLOW_ENTRY_SHA256)
     } else {
         None
     };
@@ -442,7 +463,7 @@ async fn fetch_and_publish_from_registry() -> Result<PathBuf, WorkflowError> {
         )));
     };
 
-    let published = publish_to_cache_in(&prefix, &package_dir, &entry).await;
+    let published = publish_to_cache_in(&prefix, &package_dir, &entry, WORKFLOW_ENTRY_SHA256).await;
     let _ = tokio::fs::remove_dir_all(&staging).await;
     let published = published?;
     info!(
@@ -451,33 +472,6 @@ async fn fetch_and_publish_from_registry() -> Result<PathBuf, WorkflowError> {
         "fetched and validated workflow artifact from the registry"
     );
     Ok(published)
-}
-
-/// [测试专用] 入库 npm 包目录（`PERI_WORKFLOW_ARTIFACT_DIR` 的注入目标）。
-#[cfg(test)]
-pub(crate) fn repository_package_dir() -> PathBuf {
-    Path::new(env!("CARGO_MANIFEST_DIR"))
-        .join("..")
-        .join("npm-packages")
-        .join("@peri-workflow")
-}
-
-/// [测试专用] 入库 bundle 的路径（`npm-packages/@peri-workflow/dist`）。
-#[cfg(test)]
-pub(crate) fn repository_bundle_path() -> PathBuf {
-    repository_package_dir().join(WORKFLOW_ENTRY)
-}
-
-/// [测试专用] 以入库 bundle 直接构造命令：测试真实执行随包产物，缺失即失败。
-#[cfg(test)]
-pub(crate) fn repository_workflow_command() -> WorkflowCommand {
-    let entry = repository_bundle_path();
-    assert!(
-        entry.is_file(),
-        "仓库必须包含已入库的 workflow bundle: {}",
-        entry.display()
-    );
-    node_command(entry)
 }
 
 #[cfg(test)]
