@@ -495,14 +495,19 @@ fn delivery_status_word(status: DeliveryStatus) -> &'static str {
     }
 }
 
-/// `return_value` 长文本外置阈值（**字节**，非字符数）：超过它的字符串在写
-/// `state.json` 前被抽出到 `outputs/<label>.txt`，原位替换为 `${label}` 引用。
+/// `return_value` **对象字段**的长文本外置阈值（**字节**，非字符数）：超过它的
+/// 字符串在写 `state.json` 前被抽出到 `outputs/<label>.txt`，原位替换为 `${label}`
+/// 引用。
 ///
 /// 单一权威：宿主提取的调用点（`peri-workflow` 的 `extract_long_texts` 调用）
 /// 与提醒/启动文案（`WorkflowTaskResult::to_notification`、
 /// `peri-workflow` 的启动文案）共用本常量。CJK 一字 3 字节，所以「200 字节」
 /// 对中文内容远早于 200 字触发；改这里即同时改变提取行为与对外说明。
 /// 口径见 `docs/design/workflow.md` §3.6。
+///
+/// 作用面：宿主提取点位于 `workflow/done` 处理，且只对**对象形态**的 `return`
+/// 生效（`extract_long_texts` 本身支持数组/嵌套，但调用点的 gate 排除了顶层数组
+/// 与顶层字符串）。文案必须与 gate 一致，不得声称「所有超长字符串都会外置」。
 pub const LONGTEXT_EXTRACT_THRESHOLD_BYTES: usize = 200;
 
 impl WorkflowTaskResult {
@@ -583,8 +588,9 @@ impl WorkflowTaskResult {
             let threshold = LONGTEXT_EXTRACT_THRESHOLD_BYTES;
             format!(
                 "Results saved to {state_path}\n\
-                 Strings longer than {threshold} bytes are externalized: a `${{label}}` token in \
-                 state.json references `outputs/<label>.txt` in the same run directory.\n\
+                 Long string fields in the result object (>{threshold} bytes) are externalized: a \
+                 `${{label}}` token in state.json references `outputs/<label>.txt` in the same run \
+                 directory.\n\
                  {read_lead} to view full results.\n"
             )
         } else {

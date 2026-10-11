@@ -136,7 +136,7 @@ Do not create a file solely to validate an inline script passed directly to the 
 
 ### 8. Inspect saved workflow results with the CLI
 
-After a run, the runner persists `state.json`, agent journal entries, and extracted long outputs under `.claude/workflow-runs/<run_id>/`. Strings longer than 200 bytes are **not** stored inline: `state.json` (and any raw dump of it, e.g. `list --json`) keeps a `${label}` reference to `outputs/<label>.txt` in the same run directory — a `${...}` token is an externalized value, never a missing or unevaluated one. The Read tool remains suitable for a known result file or a referenced `outputs/*.txt`; use the built-in CLI when you need a complete report (it restores the extracted text inline) or need to discover runs:
+After a run, the runner persists `state.json`, agent journal entries, and extracted long outputs under `.claude/workflow-runs/<run_id>/`. Long string fields of the result object (over 200 bytes) are **not** stored inline: `state.json` (and any raw dump of it, e.g. `list --json`) keeps a `${label}` reference to `outputs/<label>.txt` in the same run directory — a `${...}` token is an externalized value, never a missing or unevaluated one. The same threshold applies only to object fields: a top-level array or bare string return is stored inline as-is. The Read tool remains suitable for a known result file or a referenced `outputs/*.txt`; use the built-in CLI when you need a complete report (it restores the extracted text inline) or need to discover runs:
 
 ```bash
 npx -y @peri-code/workflow@0.3.0 list

@@ -87,8 +87,9 @@ impl WorkflowStartOutcome {
              The workflow is running in the background.\n\
              You will be notified when it completes with a result summary.\n\
              Results will be saved to .claude/workflow-runs/{run_id}/state.json\n\
-             Strings longer than {threshold} bytes are externalized to `outputs/<label>.txt` \
-             in that directory; a `${{label}}` token in state.json is that reference.",
+             Long string fields in the result object (>{threshold} bytes) are externalized to \
+             `outputs/<label>.txt` in that directory; a `${{label}}` token in state.json is that \
+             reference.",
             workflow_name = self.workflow_name,
             run_id = self.run_id,
             threshold = peri_acp_types::workflow::LONGTEXT_EXTRACT_THRESHOLD_BYTES,
