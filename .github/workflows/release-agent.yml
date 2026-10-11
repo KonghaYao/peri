@@ -87,7 +87,17 @@ jobs:
             - name: Build agent-tui (Linux)
               if: runner.os == 'Linux'
               shell: bash
-              run: ./scripts/cargo-rmcp-patched.sh --cross build --locked -p peri-tui --release --target ${{ matrix.target }}
+              run: |
+                  # cross 在构建前会先运行一次不带 --config 的 `cargo metadata`；
+                  # 若该调用看不到 patch 配置，会按 crates.io 版本改写 Cargo.lock，
+                  # 随后 `--locked` 构建直接失败。把同一份 patch 配置放进 cargo
+                  # 用户级配置链（容器内随 $CARGO_HOME 挂载继承），让 cross 内部
+                  # 调用与容器内 cargo 都读到同一 patch。
+                  ./scripts/cargo-rmcp-patched.sh --version > /dev/null
+                  cargo_home="${CARGO_HOME:-$HOME/.cargo}"
+                  mkdir -p "$cargo_home"
+                  cp "$(ls -t target/peri-rmcp-patches/*/cargo-config.toml | head -1)" "$cargo_home/config.toml"
+                  ./scripts/cargo-rmcp-patched.sh --cross build --locked -p peri-tui --release --target ${{ matrix.target }}
 
             - name: Build agent-tui (non-Linux)
               if: runner.os != 'Linux'

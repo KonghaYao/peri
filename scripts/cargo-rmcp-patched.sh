@@ -155,7 +155,21 @@ PY
 # Keep the caller's directory: dev.sh uses it as the TUI workspace.
 if [[ "$1" == "--cross" ]]; then
     shift
-    exec cross --config "$cargo_config_file" "$@"
+    # cross 0.2.5 parses its own argv and takes the first non-flag token as the
+    # subcommand. `--config <path>` is not a cross flag, so the path itself
+    # became that token: the subcommand degraded to `Other`, cross silently
+    # skipped the container, and the host fallback could not link non-host
+    # targets. Pass the config as a single trailing `--config=<path>` token so
+    # the subcommand stays the first positional argument, and mirror the patch
+    # cache into the container at the same absolute paths so the paths inside
+    # the config resolve there as well.
+    # `--config=` only reaches the in-container cargo: cross also runs one
+    # host-side `cargo metadata` before building, without it. Callers that
+    # build `--locked` must therefore expose the same patch through cargo's
+    # user-level config chain ($CARGO_HOME/config.toml); see the Linux release
+    # job.
+    export CROSS_CONTAINER_OPTS="-v \"${repo_root}/target:${repo_root}/target\" ${CROSS_CONTAINER_OPTS:-}"
+    exec cross "$@" "--config=$cargo_config_file"
 fi
 if [[ "$1" == "clippy" ]]; then
     shift
