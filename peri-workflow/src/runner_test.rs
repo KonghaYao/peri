@@ -426,8 +426,8 @@ fn test_run_scoped_journal_rejects_missing_run_identity() {
 fn test_start_ack_accepts_matching_protocol_and_build() {
     validate_start_ack(serde_json::json!({
         "ok": true,
-        "protocolVersion": 1,
-        "buildId": "@peri-code/workflow@0.2.0"
+        "protocolVersion": super::artifact::WORKFLOW_PROTOCOL_VERSION,
+        "buildId": super::artifact::WORKFLOW_BUILD_ID
     }))
     .unwrap();
 }
@@ -436,8 +436,8 @@ fn test_start_ack_accepts_matching_protocol_and_build() {
 fn test_start_ack_rejects_protocol_mismatch() {
     let error = validate_start_ack(serde_json::json!({
         "ok": true,
-        "protocolVersion": 2,
-        "buildId": "@peri-code/workflow@0.2.0"
+        "protocolVersion": super::artifact::WORKFLOW_PROTOCOL_VERSION + 1,
+        "buildId": super::artifact::WORKFLOW_BUILD_ID
     }))
     .unwrap_err();
 

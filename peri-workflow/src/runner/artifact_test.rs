@@ -7,7 +7,9 @@ use std::path::{Path, PathBuf};
 
 use super::{
     artifact_id, digest_matches, network_fetch_allowed_from, prepare_workflow_command_with,
-    publish_to_cache_in, resolve_artifact, ArtifactOrigin, ArtifactSources, WORKFLOW_ENTRY_SHA256,
+    publish_to_cache_in, resolve_artifact, ArtifactOrigin, ArtifactSources, WORKFLOW_BUILD_ID,
+    WORKFLOW_ENTRY, WORKFLOW_ENTRY_SHA256, WORKFLOW_NPM_VERSION, WORKFLOW_PACKAGE_NAME,
+    WORKFLOW_PROTOCOL_VERSION,
 };
 
 /// 入库 bundle 字节：夹具与真实消费共用同一内容。
@@ -27,8 +29,8 @@ fn valid_package(parent: &Path, name: &str) -> PathBuf {
     write_package(
         &package,
         &repository_bundle_bytes(),
-        "0.2.0",
-        "dist/peri-workflow.js",
+        WORKFLOW_NPM_VERSION,
+        WORKFLOW_ENTRY,
     );
     package
 }
@@ -40,11 +42,11 @@ fn write_package(package: &Path, entry_bytes: &[u8], version: &str, main: &str) 
     std::fs::write(
         package.join("package.json"),
         serde_json::json!({
-            "name": "@peri-code/workflow",
+            "name": WORKFLOW_PACKAGE_NAME,
             "version": version,
             "main": main,
-            "periProtocolVersion": 1,
-            "periBuildId": "@peri-code/workflow@0.2.0",
+            "periProtocolVersion": WORKFLOW_PROTOCOL_VERSION,
+            "periBuildId": WORKFLOW_BUILD_ID,
         })
         .to_string(),
     )
@@ -75,8 +77,8 @@ fn resolve_prefers_override_then_cache_then_sidecar() {
     write_package(
         &cached,
         &repository_bundle_bytes(),
-        "0.2.0",
-        "dist/peri-workflow.js",
+        WORKFLOW_NPM_VERSION,
+        WORKFLOW_ENTRY,
     );
     let sidecar = valid_package(tmp.path(), "sidecar");
 
@@ -113,11 +115,12 @@ fn resolve_prefers_override_then_cache_then_sidecar() {
 fn resolve_rejects_wrong_version() {
     let tmp = tempfile::TempDir::new().unwrap();
     let package = tmp.path().join("package");
+    // 负例：版本取一个与常量不同的历史值（`main` 用真实入口，隔离版本断言）。
     write_package(
         &package,
         &repository_bundle_bytes(),
         "0.1.0",
-        "dist/peri-workflow.js",
+        WORKFLOW_ENTRY,
     );
 
     let sources = ArtifactSources {
@@ -134,7 +137,7 @@ fn resolve_rejects_tampered_entry_with_correct_metadata() {
     // 元数据、路径、版本全部合法，只有入口内容被替换。
     let mut tampered = repository_bundle_bytes();
     tampered.extend_from_slice(b"\n// tampered payload\n");
-    write_package(&package, &tampered, "0.2.0", "dist/peri-workflow.js");
+    write_package(&package, &tampered, WORKFLOW_NPM_VERSION, WORKFLOW_ENTRY);
 
     let sources = ArtifactSources {
         override_dir: Some(package),
@@ -151,7 +154,9 @@ async fn offline_first_use_publishes_sidecar_into_cache() {
     let tmp = tempfile::TempDir::new().unwrap();
     let sidecar = valid_package(tmp.path(), "sidecar");
     // 缓存前缀等价于 `~/.peri/workflow/<version>`，全程不触网。
-    let cache_prefix = tmp.path().join("home/.peri/workflow/0.2.0");
+    let cache_prefix = tmp
+        .path()
+        .join(format!("home/.peri/workflow/{WORKFLOW_NPM_VERSION}"));
 
     let resolved = resolve_artifact(&ArtifactSources {
         sidecar_dirs: vec![sidecar.clone()],
@@ -225,7 +230,9 @@ async fn first_use_with_empty_cache_runs_published_sidecar() {
     let tmp = tempfile::TempDir::new().unwrap();
     // 随包 sidecar 的目录形状即 npm 包目录；以仓库包目录充当发行内容。
     let sidecar = super::repository_package_dir();
-    let cache_prefix = tmp.path().join(".peri/workflow/0.2.0");
+    let cache_prefix = tmp
+        .path()
+        .join(format!(".peri/workflow/{WORKFLOW_NPM_VERSION}"));
     let sources = ArtifactSources {
         override_dir: None,
         sidecar_dirs: vec![sidecar],
@@ -260,11 +267,11 @@ fn resolve_rejects_escaping_entry() {
     std::fs::write(
         package.join("package.json"),
         serde_json::json!({
-            "name": "@peri-code/workflow",
-            "version": "0.2.0",
+            "name": WORKFLOW_PACKAGE_NAME,
+            "version": WORKFLOW_NPM_VERSION,
             "main": "../../outside.js",
-            "periProtocolVersion": 1,
-            "periBuildId": "@peri-code/workflow@0.2.0",
+            "periProtocolVersion": WORKFLOW_PROTOCOL_VERSION,
+            "periBuildId": WORKFLOW_BUILD_ID,
         })
         .to_string(),
     )

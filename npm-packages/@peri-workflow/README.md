@@ -47,9 +47,11 @@ npm 渠道（给非 Peri 宿主或手工调试）仍然可用：
 npm install -g @peri-code/workflow
 ```
 
-或通过 npx / bunx 自动下载（无需全局安装）：`npx -y @peri-code/workflow@0.2.0` / `bunx @peri-code/workflow@0.2.0`
+或通过 npx / bunx 使用（无需全局安装）：`npx -y @peri-code/workflow@0.3.0` / `bunx @peri-code/workflow@0.3.0`
 
-> **⚠️ npx 必须带显式版本号**：机器上若全局装过旧版（如 0.1.1），`npx -y @peri-code/workflow` 会**静默复用全局旧版**而不下载最新版——旧版没有 CLI 子命令，`list` / `read` / `validate` / `--help` 全部无输出且 exit 0（看似成功实则什么都没跑）。显式 `@0.2.0` 才能强制使用 registry 上的目标版本。清理全局旧版：`npm uninstall -g @peri-code/workflow`。
+> **⚠️ npx 必须带显式版本号**：机器上若全局装过旧版（如 0.1.1），`npx -y @peri-code/workflow` 会**静默复用全局旧版**而不下载最新版——旧版没有 CLI 子命令，`list` / `read` / `validate` / `--help` 全部无输出且 exit 0（看似成功实则什么都没跑）。显式 `@0.3.0` 才能强制使用 registry 上的目标版本。清理全局旧版：`npm uninstall -g @peri-code/workflow`。
+>
+> **版本兼容**：0.3.0 的 Node wire 为 `agent/task` + `agent/result`（`periProtocolVersion = 2`），与 0.2.0（`agent/run` 请求/响应）**不兼容**，宿主与引擎必须成对升级（见 [DESIGN.md](./DESIGN.md)「协议版本」）。
 >
 > 该路径属于手工/调试用法：Peri 自身按上文的 sidecar + 摘要校验消费，不使用 npx 直接执行。
 
@@ -200,9 +202,9 @@ peri-workflow --help               # 用法帮助
 无参数运行时保持 JSON-RPC 模式（宿主集成）；带子命令即 CLI 模式，互不干扰。通过 `npx` / `bunx` 也可直接用（npm 渠道，手工/调试）：
 
 ```bash
-npx -y @peri-code/workflow@0.2.0 list
-npx -y @peri-code/workflow@0.2.0 read 019fc025-c4d9-7d52-a30a-7409229e3148 --short
-npx -y @peri-code/workflow@0.2.0 validate my-workflow.mjs
+npx -y @peri-code/workflow@0.3.0 list
+npx -y @peri-code/workflow@0.3.0 read 019fc025-c4d9-7d52-a30a-7409229e3148 --short
+npx -y @peri-code/workflow@0.3.0 validate my-workflow.mjs
 ```
 
 Peri 用户可把上述前缀替换为 `peri workflow`，始终使用随二进制分发并校验过的同版本 bundle
@@ -281,22 +283,24 @@ node dist/peri-workflow.js < /dev/null && echo "OK"
 ### 发布流程（checklist）
 
 ```bash
-# 1. bump 版本（自动更新 package.json 并打 git tag）
-npm version patch        # 或 minor / major
-# 2. 构建 + 测试 + 覆盖率自检（prepublishOnly 会自动重跑）
-npm run build && npm run test:coverage && node dist/peri-workflow.js < /dev/null && echo OK
+# 1. bump 版本：直接改 package.json 的 version / periBuildId / periProtocolVersion
+#    （`npm version` 会顺手打 git tag，需要 tag 时才用；仓库流程里版本由 release workflow 管理）
+# 2. 本地自检（prepublishOnly 在 publish 时会自动重跑 build + coverage）
+npm run typecheck && npm run test:coverage && node dist/peri-workflow.js < /dev/null && echo OK
 # 3. 发布
-npm publish
+npm publish --access public
 ```
 
 **4. 同步 Peri 宿主（关键联动）**：`dist/peri-workflow.js` 是发行内容与摘要校验的事实源，
-发布后必须让 Rust 侧与它一致：
+发布后必须让 Rust 侧与它一致（`peri-workflow/src/runner/artifact.rs`）：
 
-- `peri-workflow/src/runner/artifact.rs` 的 `WORKFLOW_NPM_VERSION` / `WORKFLOW_BUILD_ID` 决定
-  期望的包身份与缓存路径 `~/.peri/workflow/<version>/<内容身份>/`；
-- 同一文件的 `WORKFLOW_ENTRY_SHA256` 必须改为新 `dist` 的 sha256（`repository_bundle_matches_pinned_digest`
+- `WORKFLOW_NPM_VERSION` / `WORKFLOW_BUILD_ID` / `WORKFLOW_PROTOCOL_VERSION` 决定期望的包身份、
+  缓存路径 `~/.peri/workflow/<version>/<内容身份>/` 与启动握手校验值；
+- `WORKFLOW_ENTRY_SHA256` 必须改为新 `dist` 的完整 sha256（`repository_bundle_matches_pinned_digest`
   测试会比对入库 dist 与 pin，不一致即失败）；
-- 内容身份目录名（sha256 前 12 位）由发行归档的打包步骤自动推导，无需手工同步。
+- 内容身份目录名（sha256 前 12 位）由发行归档的打包步骤与发布门自动推导，无需手工同步；
+- 发布门 `scripts/verify-workflow-sidecar.sh` 会核对归档内元数据、JS 完整 sha256、目录身份与
+  上述 Rust 常量四者一致。
 
 **5. 验证**：重编 peri 后触发一次 workflow。首次调用从随包 sidecar 校验并发布到
 `~/.peri/workflow/<ver>/<内容身份>/`（离线，无需 npm/网络）；摘要不符或缺失时 fail closed，

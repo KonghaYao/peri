@@ -18,20 +18,20 @@ use tracing::{debug, info, warn};
 use crate::error::WorkflowError;
 
 /// 本地固定 Workflow engine 版本（与 npm 发布版本保持一致）。
-const WORKFLOW_NPM_VERSION: &str = "0.2.0";
+const WORKFLOW_NPM_VERSION: &str = "0.3.0";
 const WORKFLOW_PACKAGE_NAME: &str = "@peri-code/workflow";
 const WORKFLOW_ENTRY: &str = "dist/peri-workflow.js";
 /// 网络获取的超时（仅显式 opt-in 路径使用）。
 const INSTALL_TIMEOUT: Duration = Duration::from_secs(90);
-pub(super) const WORKFLOW_PROTOCOL_VERSION: u32 = 1;
-pub(super) const WORKFLOW_BUILD_ID: &str = "@peri-code/workflow@0.2.0";
+pub(super) const WORKFLOW_PROTOCOL_VERSION: u32 = 2;
+pub(super) const WORKFLOW_BUILD_ID: &str = "@peri-code/workflow@0.3.0";
 
 /// pin 的入口内容摘要（sha256 十六进制小写），不是 JS 内容本身。
 ///
 /// 与入库的 `npm-packages/@peri-workflow/dist/peri-workflow.js` 一致；dist 重建后
 /// 必须同步更新，`repository_bundle_matches_pinned_digest` 测试守卫两者一致。
 const WORKFLOW_ENTRY_SHA256: &str =
-    "89b9b605954847267fa30107935e2454c029ecb75b64d27844367cc75b866c92";
+    "bd746ad747e9056bd5cb4a7c24964278a421bd46929edd9a9bc86775519514ba";
 
 /// 随包 sidecar 目录（相对可执行文件所在目录）。
 const SIDECAR_RELATIVE_DIR: &str = "peri-resources/workflow";

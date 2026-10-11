@@ -2253,8 +2253,8 @@ var rpcAdapter = {
 };
 
 // src/types.ts
-var WORKFLOW_PROTOCOL_VERSION = 1;
-var WORKFLOW_BUILD_ID = "@peri-code/workflow@0.2.0";
+var WORKFLOW_PROTOCOL_VERSION = 2;
+var WORKFLOW_BUILD_ID = "@peri-code/workflow@0.3.0";
 
 // src/server.ts
 var currentRunId;

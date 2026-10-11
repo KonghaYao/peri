@@ -14,6 +14,8 @@ import { tmpdir } from 'node:os'
 import { dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 
+import { WORKFLOW_BUILD_ID, WORKFLOW_PROTOCOL_VERSION } from '../src/types'
+
 const pkgRoot = join(dirname(fileURLToPath(import.meta.url)), '..')
 const distPath = join(pkgRoot, 'dist', 'peri-workflow.js')
 
@@ -160,8 +162,8 @@ return { answer: r }`
     const startResp = await s.waitFor((m) => m.id === 1 && 'result' in m)
     expect(startResp.result).toEqual({
       ok: true,
-      protocolVersion: 1,
-      buildId: '@peri-code/workflow@0.2.0',
+      protocolVersion: WORKFLOW_PROTOCOL_VERSION,
+      buildId: WORKFLOW_BUILD_ID,
     })
 
     // 事件链前置

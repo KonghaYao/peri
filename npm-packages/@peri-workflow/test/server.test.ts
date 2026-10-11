@@ -8,6 +8,7 @@
 import { afterAll, describe, expect, test } from 'bun:test'
 import { createHash } from 'node:crypto'
 import { handleRequest } from '../src/server'
+import { WORKFLOW_BUILD_ID, WORKFLOW_PROTOCOL_VERSION } from '../src/types'
 import { handleTaskResult, setOutWriter } from '../src/rpc'
 
 // ─── 进程级 patch ──────────────────────────────────────────
@@ -59,8 +60,8 @@ return { answer: r }`
     const startResp = written.find((m) => m.id === 1)
     expect(startResp?.result).toEqual({
       ok: true,
-      protocolVersion: 1,
-      buildId: '@peri-code/workflow@0.2.0',
+      protocolVersion: WORKFLOW_PROTOCOL_VERSION,
+      buildId: WORKFLOW_BUILD_ID,
     })
 
     // 真实 engine 发 agent/task 通知 → 模拟宿主回投 agent/result

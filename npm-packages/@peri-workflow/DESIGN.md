@@ -325,8 +325,8 @@ npm install -g @peri-code/workflow
 ```bash
 # 必须带显式版本：npx 在全局已有同名 bin 时会静默复用旧版（旧版无 CLI 子命令，
 # 命令无输出且 exit 0），`@<version>` 才能强制使用 registry 上的目标版本。
-npx -y @peri-code/workflow@0.2.0   # Node.js 环境
-bunx @peri-code/workflow@0.2.0     # Bun 环境
+npx -y @peri-code/workflow@0.3.0   # Node.js 环境
+bunx @peri-code/workflow@0.3.0     # Bun 环境
 ```
 
 ### 宿主消费（Peri 的非嵌入契约）
@@ -387,13 +387,13 @@ peri-resources/workflow/<内容身份>/     # 内容身份 = dist/peri-workflow.
 |------|------|
 | 0.1.0 | 初始版本，完整的 JSON-RPC 2.0 协议 |
 | 0.2.0 | 新增 CLI 子命令 read/list/validate 与运行结果落盘格式（见上节）；CLI 子命令不参与 JSON-RPC 协议面，**不影响 RPC 兼容性** |
+| 0.3.0 | Node wire 改为 `agent/task`（发布通知）+ `agent/result`（回投通知），删除 `agent/run` 请求/响应；`periProtocolVersion` 升为 2 并纳入启动握手校验。**破坏性变更：0.3.0 与 0.2.0 的宿主/引擎不得混用** |
 
-**向前兼容承诺**：
-- 新增 RPC 方法不会破坏现有宿主
-- 现有方法的参数新增可选字段不会破坏现有宿主
-- 通知的新类型不会破坏现有宿主
-- 破坏性变更（删除方法、改变参数语义）会触发主版本号升级
-- CLI 子命令（read/list/validate）为独立 argv 入口，不改变任何 RPC 方法、参数或错误码
+**0.x 阶段的兼容策略**：
+- 0.x 的破坏性 wire 变更随 **minor** 发布（0.2 → 0.3 即为此例）：0.3.0 不兼容 0.2.0 的 wire，也不宣称兼容；新增 RPC 方法、参数新增可选字段与新增通知类型仍视为兼容变更。
+- `periProtocolVersion` 是 wire 兼容的**唯一权威判定**：宿主的启动握手（`validate_start_ack`）比对协议版本与 `periBuildId`，不匹配即拒绝启动；宿主与引擎必须成对升级。
+- 宿主本地 artifact 另有内容 SHA-256 pin（见「宿主消费」节），旧 bundle 因摘要不符不会被采用。
+- CLI 子命令（read/list/validate）为独立 argv 入口，仍不改变任何 RPC 方法、参数或错误码。
 
 ---
 
