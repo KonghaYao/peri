@@ -1,11 +1,34 @@
 use super::super::tool_card::{SubAgentAccumulator, ToolCardAccumulator};
-use super::{CurrentTurn, TurnSegment};
+use super::{CurrentTurn, PendingSubagentGroup, TurnSegment};
+
+/// 工具名是否为子 Agent 启动调用（Agent 工具卡片与 Subagent 分组配对的唯一判据）。
+///
+/// 配对判定分三层：身份优先（`parent_tool_call_id` == 卡片 `tool_id`，两个方向
+/// 共用）、无身份时前向扫描（`start_subagent` 认领最早未 claim 卡片）、以及
+/// 分组先到时的待配对表（`start_tool` 认领，仅身份匹配或无身份分组）。
+pub(super) fn is_agent_launcher_tool(tool_name: &str) -> bool {
+    tool_name == "Agent"
+}
 
 impl CurrentTurn {
     /// Begin a new sub-agent group from `"subagent-started"`.
     ///
     /// Flushes any pending text before the sub-agent boundary.
-    pub fn start_subagent(&mut self, agent_id: String, agent_name: String) {
+    ///
+    /// 配对优先级：
+    /// 1. `parent_tool_call_id` 有值 → 按身份找该 Agent 工具卡片（并发批次下事件
+    ///    到达顺序不可判定，身份是唯一可靠依据）；卡片尚未到达时记入待配对表，
+    ///    由 `start_tool` 在卡片出现时按同一身份认领。
+    /// 2. 无父身份（旧生产端 / `/bg` 等无工具调用上下文）→ 前向扫描第一个未
+    ///    claim 的 Agent 卡片（到达顺序兜底，语义同修复前）。
+    ///
+    /// 两条路都找不到落点时，段先记在尾部并进入待配对表，等卡片到达再迁移。
+    pub fn start_subagent(
+        &mut self,
+        agent_id: String,
+        agent_name: String,
+        parent_tool_call_id: Option<String>,
+    ) {
         // Duplicate Start for the same live occurrence is idempotent. A resume,
         // however, reuses child_thread_id after the previous occurrence stopped;
         // it must create a fresh group and claim the new Agent ToolCard.
@@ -19,20 +42,12 @@ impl CurrentTurn {
         self.flush_text_segment();
         let idx = self.subagents.len();
 
-        // 前向扫描找第一个未 claim 的 Agent ToolCard，在其后插入 SubAgent 段。
-        // 防止多 Agent 同 turn 时 SubAgent 段全部 append 到末尾导致
-        // "agent agent tools tools" 而非 "agent tools agent tools"。
-        let mut insert_at: Option<(usize, usize)> = None; // (seg_pos, tool_idx)
-        for (i, seg) in self.segments.iter().enumerate() {
-            if let TurnSegment::Tool { tool_idx } = seg
-                && let Some(tc) = self.tool_cards.get(*tool_idx)
-                && tc.tool_name == "Agent"
-                && !tc.claimed_by_subagent
-            {
-                insert_at = Some((i + 1, *tool_idx));
-                break;
-            }
-        }
+        // (seg_pos, tool_idx)：找到配对卡片时在其后插入 SubAgent 段，防止多 Agent
+        // 同 turn 时 SubAgent 段全部 append 到末尾导致 "agent agent tools tools"。
+        let insert_at = match parent_tool_call_id.as_deref() {
+            Some(parent_id) => self.agent_card_segment_for(parent_id),
+            None => self.first_unclaimed_agent_card_segment(),
+        };
 
         if let Some((seg_pos, tool_idx)) = insert_at {
             self.tool_cards[tool_idx].claimed_by_subagent = true;
@@ -42,6 +57,15 @@ impl CurrentTurn {
             // 该操作低频（每 subagent 一次），O(total) 成本可接受。
             self.cached_view_models = im::Vector::new();
         } else {
+            // 卡片尚未到达（并行多 Agent 批次里非首个工具调用的 ToolStarted 只
+            // 在 dispatch 阶段发出，与子 Agent 直发的 SubagentStarted 竞争）：
+            // 不能就此 append 到末尾——那样分组会挂在别的（仍 loading 的）Agent
+            // 调用之下。先记账，等卡片到达时由 `start_tool` 认领
+            // （见 adopt_pending_subagent_group）。
+            self.pending_subagent_groups.push(PendingSubagentGroup {
+                subagent_idx: idx,
+                parent_tool_call_id,
+            });
             self.segments
                 .push(TurnSegment::SubAgent { subagent_idx: idx });
         }
@@ -50,6 +74,70 @@ impl CurrentTurn {
             .push(SubAgentAccumulator::new(agent_id, agent_name));
         self.active = true;
         self.invalidate_cache();
+    }
+
+    /// 父工具调用 id 对应的 Agent 卡片段位置 `(seg_pos, tool_idx)`。
+    fn agent_card_segment_for(&self, parent_tool_call_id: &str) -> Option<(usize, usize)> {
+        self.segments.iter().enumerate().find_map(|(i, seg)| {
+            let TurnSegment::Tool { tool_idx } = seg else {
+                return None;
+            };
+            let card = self.tool_cards.get(*tool_idx)?;
+            (card.tool_id == parent_tool_call_id).then_some((i + 1, *tool_idx))
+        })
+    }
+
+    /// 第一个未 claim 的 Agent 卡片段位置（无父身份时的到达顺序兜底）。
+    fn first_unclaimed_agent_card_segment(&self) -> Option<(usize, usize)> {
+        self.segments.iter().enumerate().find_map(|(i, seg)| {
+            let TurnSegment::Tool { tool_idx } = seg else {
+                return None;
+            };
+            let card = self.tool_cards.get(*tool_idx)?;
+            (is_agent_launcher_tool(&card.tool_name) && !card.claimed_by_subagent)
+                .then_some((i + 1, *tool_idx))
+        })
+    }
+
+    /// Agent ToolCard 晚于子分组到达时的接管：把待配对分组段移动到该卡片之后，
+    /// 恢复 "Agent 调用紧接自己的子工具行" 的时序。
+    ///
+    /// 优先按身份配对（分组记录的 `parent_tool_call_id` == 卡片 `tool_id`）；
+    /// 仅当卡片没有身份匹配、且存在无父身份的待配对分组（旧生产端 / 无工具上下文
+    /// 路径）时，才按到达顺序 FIFO 兜底——有身份的分组绝不按顺序猜。
+    pub(super) fn adopt_pending_subagent_group(&mut self, tool_idx: usize, tool_seg_pos: usize) {
+        let tool_id = self.tool_cards[tool_idx].tool_id.clone();
+        let matched = self
+            .pending_subagent_groups
+            .iter()
+            .position(|pending| pending.parent_tool_call_id.as_deref() == Some(tool_id.as_str()))
+            .or_else(|| {
+                self.pending_subagent_groups
+                    .iter()
+                    .position(|pending| pending.parent_tool_call_id.is_none())
+            });
+        let Some(pos) = matched else {
+            return;
+        };
+        let subagent_idx = self.pending_subagent_groups.remove(pos).subagent_idx;
+        let Some(seg_pos) = self.segments.iter().position(
+            |seg| matches!(seg, TurnSegment::SubAgent { subagent_idx: si } if *si == subagent_idx),
+        ) else {
+            // 段已不存在（turn 重置/提交）：丢弃记账，保持不变量。
+            return;
+        };
+        self.segments.remove(seg_pos);
+        // 被移动的段在卡片之前时，移除后卡片位置左移一格，目标槽位随之左移。
+        let insert_at = if seg_pos < tool_seg_pos {
+            tool_seg_pos
+        } else {
+            tool_seg_pos + 1
+        };
+        self.segments
+            .insert(insert_at, TurnSegment::SubAgent { subagent_idx });
+        self.tool_cards[tool_idx].claimed_by_subagent = true;
+        // 段列表重排会破坏 segment↔cache 的索引对齐——清空缓存整体重建。
+        self.cached_view_models = im::Vector::new();
     }
 
     /// [诊断] 返回当前所有 SubAgentAccumulator 的 agent_id 列表。

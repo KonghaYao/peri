@@ -218,7 +218,13 @@ fn test_turn_done_clears_last_submitted_text() {
         &mut state,
         &AcpEventData::PromptSubmitted { request_id: None },
     );
-    assert_eq!(state.last_submitted_text.as_deref(), Some("hello"));
+    assert_eq!(
+        state
+            .last_submitted_text
+            .as_ref()
+            .map(|input| input.text.as_str()),
+        Some("hello")
+    );
 
     dispatch_and_notify(&mut state, &AcpEventData::TurnDone);
 

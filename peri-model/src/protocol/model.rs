@@ -54,8 +54,11 @@ fn complete_tool_calls(tool_calls: BTreeMap<usize, PendingToolCall>) -> ModelRes
             let name = tool_call
                 .name
                 .ok_or_else(|| ModelError::protocol(ProtocolErrorKind::ToolCallMissingName))?;
-            let value = serde_json::from_str(&tool_call.arguments)
-                .map_err(|_| ModelError::protocol(ProtocolErrorKind::ToolCallInvalidArguments))?;
+            let value = serde_json::from_str(&tool_call.arguments).map_err(|error| {
+                ModelError::protocol(ProtocolErrorKind::ToolCallInvalidArguments)
+                    .with_error(&error)
+                    .with_body(&tool_call.arguments)
+            })?;
             let arguments = JsonObject::from_value(value)?;
             Ok(ToolCall::new(id, name, arguments))
         })
@@ -163,6 +166,27 @@ impl Drop for ModelStream {
 #[async_trait]
 pub trait Model: Send + Sync {
     fn capabilities(&self) -> ModelCapabilities;
+
+    /// 单次请求的有效输出上限（provider 已解析的配置值，只读）。
+    ///
+    /// 调用方（如 Compact 摘要器）据此推导派生请求的输出预算与长度目标，**不**
+    /// 覆写 provider 已解析的上限、thinking 配置或从 `ModelRequest` 反推。`None`
+    /// 表示 provider 不声明可解析上限：请求按 provider 默认执行，调用方不得代填
+    /// 任意常量。
+    fn output_token_limit(&self) -> Option<u32> {
+        None
+    }
+
+    /// Freezes the complete request for a durable checkpoint before execution.
+    ///
+    /// Implementations must satisfy [`crate::PreparedModelCall::new`]'s full
+    /// wire, same-request and cancellation contracts. This is not the safe
+    /// observation projection returned by [`Model::prepare_request`]. The
+    /// default rejects unsupported providers rather than rebuilding or sending
+    /// a request outside the durable execution boundary.
+    fn prepare_stream(&self, _request: ModelRequest) -> ModelResult<crate::PreparedModelCall> {
+        Err(ModelError::protocol(ProtocolErrorKind::Provider))
+    }
 
     /// 构造可安全用于观测的 provider 请求投影。
     ///

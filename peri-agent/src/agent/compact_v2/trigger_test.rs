@@ -225,7 +225,7 @@ async fn test_micro_effective_full_overlay() {
 async fn test_micro_then_full_success_does_not_double_count_affected_messages() {
     let store = MockSessionResources::new();
     let thread_id = store
-        .create_thread(ThreadMeta::new("/tmp"))
+        .create_thread(ThreadMeta::new_at("/tmp", peri_time::now_wall()))
         .await
         .expect("创建 thread 失败");
     let mut t = MessageTranscript::new().with_persistence(store, thread_id);
@@ -260,7 +260,10 @@ async fn test_force_full_failure_preserves_persistent_excluded_flags_after_prior
     let dir = tempfile::tempdir().expect("创建临时目录失败");
     let store = MockSessionResources::new();
     let thread_id = store
-        .create_thread(ThreadMeta::new(dir.path().to_string_lossy().to_string()))
+        .create_thread(ThreadMeta::new_at(
+            dir.path().to_string_lossy().to_string(),
+            peri_time::now_wall(),
+        ))
         .await
         .expect("创建 thread 失败");
 
@@ -598,7 +601,10 @@ async fn test_smart_then_full_success_aggregates_metrics() {
     // 使用临时 SQLite store 满足此约束。
     let store = MockSessionResources::new();
     let thread_id = store
-        .create_thread(ThreadMeta::new("/tmp".to_string()))
+        .create_thread(ThreadMeta::new_at(
+            "/tmp".to_string(),
+            peri_time::now_wall(),
+        ))
         .await
         .expect("创建 thread 失败");
 

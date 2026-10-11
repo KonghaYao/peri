@@ -2,63 +2,60 @@ mod generation;
 mod metadata;
 mod observation;
 mod trace;
+mod validation;
 
 use super::{otlp::*, ObservationLevel};
+use crate::error::LangfuseError;
+use validation::{build_span, conversion_error};
 
 // ─── IngestionEvent → OTLP Spans ───────────────────────
 
-/// Strip dashes from a Langfuse observation/trace ID to derive an
-/// OTel-compatible span/trace ID.
-///
-/// OTel span/trace IDs must be lowercase hex without dashes; Langfuse IDs
-/// are UUID-like strings with dashes. Caller controls Optionality:
-/// `id.as_deref().unwrap_or("")` for required IDs, `.map(build_span_id)`
-/// for optional parent IDs.
-fn build_span_id(id: &str) -> String {
-    id.replace('-', "")
-}
-
 /// Convert a batch of IngestionEvents into an OTLP trace export request.
 ///
-/// Mapping strategy:
-/// - TraceCreate → root span with `langfuse.observation.type` = omitted (root is trace)
-/// - SpanCreate → span with `langfuse.observation.type` = "span"
-/// - GenerationCreate → span with `langfuse.observation.type` = "generation" + model/usage attrs
-/// - ObservationCreate → span with `langfuse.observation.type` from body.type
-/// - EventCreate → span with `langfuse.observation.type` = "event"
-/// - ScoreCreate → span with `langfuse.observation.type` = omitted (attached to trace)
-/// - Others → span with basic attributes
-pub(crate) fn ingestion_events_to_otel(events: &[super::IngestionEvent]) -> OtelTraceExportRequest {
+/// Create events export complete spans with validated identities and timing.
+/// Updates and scores fail the batch rather than masquerading as new spans.
+/// Session records and SDK logs are not spans and are filtered out.
+pub(crate) fn ingestion_events_to_otel(
+    events: &[super::IngestionEvent],
+) -> Result<OtelTraceExportRequest, LangfuseError> {
     let mut spans: Vec<OtelSpan> = Vec::with_capacity(events.len());
 
     for event in events {
         spans.push(match event {
             super::IngestionEvent::TraceCreate {
                 body, timestamp, ..
-            } => trace::trace_create(body, timestamp),
-            super::IngestionEvent::SpanCreate { body, .. } => observation::span_create(body),
-            super::IngestionEvent::SpanUpdate { body, .. } => observation::span_update(body),
-            super::IngestionEvent::GenerationCreate { body, .. } => {
-                generation::generation_create(body)
+            } => trace::trace_create(body, timestamp)?,
+            super::IngestionEvent::SpanCreate {
+                body, timestamp, ..
+            } => observation::span_create(body, timestamp)?,
+            super::IngestionEvent::GenerationCreate {
+                body, timestamp, ..
+            } => generation::generation_create(body, timestamp)?,
+            super::IngestionEvent::EventCreate {
+                body, timestamp, ..
+            } => observation::event_create(body, timestamp)?,
+            super::IngestionEvent::ObservationCreate {
+                body, timestamp, ..
+            } => observation::observation_create(body, timestamp)?,
+            super::IngestionEvent::SpanUpdate { .. }
+            | super::IngestionEvent::GenerationUpdate { .. }
+            | super::IngestionEvent::ObservationUpdate { .. } => {
+                return Err(conversion_error(
+                    "update events require a complete create event",
+                ));
             }
-            super::IngestionEvent::GenerationUpdate { body, .. } => {
-                generation::generation_update(body)
+            super::IngestionEvent::ScoreCreate { .. } => {
+                return Err(conversion_error(
+                    "score events require the dedicated score API",
+                ));
             }
-            super::IngestionEvent::EventCreate { body, .. } => observation::event_create(body),
-            super::IngestionEvent::ObservationCreate { body, .. } => {
-                observation::observation_create(body)
-            }
-            super::IngestionEvent::ObservationUpdate { body, .. } => {
-                observation::observation_update(body)
-            }
-            super::IngestionEvent::ScoreCreate { body, .. } => metadata::score_create(body),
-            super::IngestionEvent::SdkLog { body, .. } => metadata::sdk_log(body),
-            super::IngestionEvent::SessionCreate { body, .. } => metadata::session_create(body),
-            super::IngestionEvent::SessionUpdate { body, .. } => metadata::session_update(body),
+            super::IngestionEvent::SdkLog { .. }
+            | super::IngestionEvent::SessionCreate { .. }
+            | super::IngestionEvent::SessionUpdate { .. } => continue,
         });
     }
 
-    OtelTraceExportRequest {
+    Ok(OtelTraceExportRequest {
         resource_spans: vec![OtelResourceSpan {
             resource: Some(OtelResource {
                 attributes: Some(vec![
@@ -75,7 +72,7 @@ pub(crate) fn ingestion_events_to_otel(events: &[super::IngestionEvent]) -> Otel
                 spans: Some(spans),
             }]),
         }],
-    }
+    })
 }
 
 /// Helper: append common observation-level attributes
@@ -99,10 +96,8 @@ fn append_common_obs_attrs(
             output.to_string(),
         ));
     }
-    if let Some(ref metadata) = metadata {
-        if let Ok(json) = serde_json::to_string(metadata) {
-            attrs.push(OtelAttribute::string("langfuse.observation.metadata", json));
-        }
+    if let Some(metadata) = metadata {
+        metadata::append_metadata_attrs(attrs, "langfuse.observation.metadata", metadata);
     }
     if let Some(v) = version {
         attrs.push(OtelAttribute::string("langfuse.version", v.as_str()));
@@ -124,13 +119,6 @@ fn build_status(
         }),
         _ => Some(OtelStatus::default()),
     }
-}
-
-/// Convert RFC 3339 timestamp to Unix nanoseconds string
-fn rfc3339_to_nano(rfc3339: &str) -> Option<String> {
-    // Parse common RFC 3339 formats
-    let ts = chrono::DateTime::parse_from_rfc3339(rfc3339).ok()?;
-    Some(ts.timestamp_nanos_opt()?.to_string())
 }
 
 #[cfg(test)]

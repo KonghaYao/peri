@@ -12,7 +12,7 @@
 Git 不是创建普通目录会话的前置条件：找不到 Git 可执行文件时，以当前目录建立
 目录工作区；Git 可用时自动探测仓库/worktree。仓库权限、信任或损坏错误不会被
 忽略。已有 Git 绑定缺少 Git 时拒绝执行；目录绑定后来被识别为仓库时也不会
-自动改绑。身份规则见 [工作区身份设计](../design/session-workspace-identity.md)。
+自动改绑。身份规则见 [会话身份与工作区设计](../design/session-id-environment.md)。
 
 ## 构建
 

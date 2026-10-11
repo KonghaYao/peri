@@ -22,15 +22,14 @@ impl super::SubAgentTool {
         prompt: &str,
         cwd: &str,
         parent_messages: Vec<BaseMessage>,
+        parent_tool_call_id: Option<String>,
     ) -> Result<String, Box<dyn std::error::Error + Send + Sync>> {
         let host = self.host();
 
-        // system prompt（frozen 优先 + system_builder 回退）
-        let system_prompt = host
-            .frozen_system_prompt
-            .clone()
-            .map(|sp| sp.as_ref().to_string())
-            .or_else(|| self.system_builder.as_ref().map(|b| b(None, cwd)));
+        // 子身份 system（H2 子能力投影）：fork 无 agent 定义 overrides，
+        // 由注入的 system_builder 重建；不复制父冻结字节（父能力声明不得
+        // 进入子请求面——父字节经 system_builder 的冻结输入投影后才是子身份）。
+        let system_prompt = self.system_builder.as_ref().map(|b| b(None, cwd));
 
         // LLM（fork 用默认 provider，无 model alias）。v1 `inject_event_handler`
         // 已随流式事件中间态退役（v1-retire）：LLM 重试/流式事件统一经 v2
@@ -45,15 +44,16 @@ impl super::SubAgentTool {
             prompt.to_string(),
             parent_messages,
             SubagentCancelPolicy::Cascade,
-            200,
+            crate::subagent::DEFAULT_SUBAGENT_MAX_ITERATIONS,
             Some(ForkDirectiveKind::Fork),
             SubagentRunMode::Sync,
             llm,
             tools,
-            Arc::new(|name| name != "Agent"),
+            crate::subagent::fork::child_inheritance_filter(),
             system_prompt,
             Vec::new(),
             cwd.to_string(),
+            parent_tool_call_id,
         );
 
         let spawned = self.spawn(config).await?;

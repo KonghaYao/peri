@@ -8,7 +8,8 @@
 
 ## 0. 依赖规则
 
-禁止跨层调用，依赖只能沿声明边单向。箭头 = 提供方向：
+业务执行遵守跨模块契约，不绕过协议与领域边界。下图箭头表示能力提供方向，
+不是 Rust crate 的完整依赖清单，也不表示消费者必须依赖提供方的具体实现：
 
 ```mermaid
 flowchart BT
@@ -23,18 +24,35 @@ flowchart BT
     Resources --> Controller
     Process[Peri Process] --> Agent
     Process --> Middleware
-    Process --> LSP[LSP transport]
     Process --> JS[JavaScript runtime]
+    Config[Peri Config] --> ACP
+    Config --> Middleware
+    Config --> Controller
+    Config --> TUI
+    Types[共享契约 peri-acp-types] --> Config
+    ConfigInput[输入 I/O peri-mcp-config] --> Config
 ```
 
 - 边含义：Model 提供协议能力；Agent 提供 session 运行单元；Runtime 提供多 session 编排；Controller 提供业务操作；ACP 提供协议服务；Middleware 提供 Hook 实现；Resources 提供外部数据抓手
-- 未声明边一律禁止
-- crate 依赖方向进 CI 验证
+- Rust 依赖按消费者 → 提供方理解：`peri-middlewares` 消费 `peri-agent` 的 hook、
+  工具与装配接口，Agent 不反向依赖 Middleware 实现；Runtime 消费共享契约中的
+  `SessionHandle`，不依赖具体 Agent crate。
+- ACP 宿主可在部署装配面消费 Agent、Middleware、Model 与 Resources，业务执行
+  仍经注入端口推进；不能把这些合法装配边解释为协议层自行运行 Agent 业务。
+- 依赖方向及装配豁免由 `scripts/check-layer-imports.sh` 与
+  `scripts/import-exemptions.conf` 验证；跨层行为边界以架构标准为准，能力图不能
+  替代门禁或成为新的依赖白名单。
+
+`peri-config` 是内部配置权威面，向 ACP、Middleware、Controller、TUI 提供
+typed 结果；消费者依赖 core。core 只消费共享契约与来源 I/O，不反向依赖业务层。
+输入 adapter → 纯 resolver → scoped immutable snapshot/revision/explain/updateCAS
+的边界见 [配置权威面](configuration-authority.md)。来源 MCP 独立 bootstrap，
+不通过待配置工具池启动，不增加 daemon 或模型工具；环境来自选中的 source provider。
 
 `peri-process` 是不依赖业务层的 OS 子进程能力：在 spawn 前配置独立进程组或
 Windows 挂起进程，attach 后提供终止请求与实际退出证据。它不拥有 session、
-数据库 lease、协议或 UI；Bash、MCP、LSP 和 JavaScript 的各自 owner 持有它并
-负责等待清理。进程树实现不得因复用而让 LSP 反向依赖 Agent。
+数据库 lease、协议或 UI；Bash、MCP 和 JavaScript 的各自 owner 持有它并
+负责等待清理。进程树实现不得因复用而引入反向依赖。
 
 归层判据（三问定层）：
 
@@ -64,39 +82,44 @@ Windows 挂起进程，attach 后提供终止请求与实际退出证据。它�
   - 建 thread：经 Resources 存储，parent_thread_id 挂父子链
   - 建 session：transcript 绑定存储（with_persistence）
   - 运行 + 结束：更新 agent_status
-- async tasks manager：异步 shell 实际执行、bg agent、cron、channel 触发
-  - BackgroundTaskRegistry 归此层统一管理：per-session 实例化，随 session 创建/销毁（生命周期/取消/事件跟随 session）
-  - Middleware 只做定义与启动发起，不持有管理权
-  - 任务启动执行（进程 spawn/进程组/超时/输出收集）在此层
+- Task 目录、调用关联和交付属于当前进程运行态；跨实例执行恢复目标已撤销。
+  当前任务与关闭边界见 [Session 异步任务架构](session-async-tasks.md)，剥离状态见 active spec。
 - 消息统一：MessageType（Human/Ai/Tool/SystemReminder，v2 BaseMessage 更名；协议转换在 Reason 阶段）
 - MQ 消息管理：MessageQueue（Prompt/Defer/Info + MessageSource）
 - RCRA 循环：Receive -> Compact -> Reason -> Act，Receive 为唯一退出口
 - Hook/Middleware 统一抽象：MiddlewareHook trait
-- Middleware 链装配：session 初始化时构建（数据自 Resources；事实源自 peri-acp builder 迁入，ARC-MIDDLEWARE-001 同步迁）
+- Middleware 链序蓝本在 Agent session 工厂，具体实例装配在
+  `peri-middlewares/src/assembly.rs`，由宿主经装配端口注入，遵循 ARC-MIDDLEWARE-001。
 - cancel 最终执行权：Cascade/Independent 判定与终止执行归此层，上层仅传递，Model 执行中止
 
 ## 3. Peri Runtime 层
 
-- 多 session 编排器：创建/销毁 session（经 Agent 层工厂）、事件聚合路由、调度
+- 多 session 句柄编排器：注册/销毁 session（经注入句柄）、事件聚合补打与请求转发；
+  不作为消息激活或 SDK 执行准入的第二权威。
 - 无状态：唯一持有 `session_id -> SessionHandle` 映射
   - 不持有 session 状态、无持久态、无业务配置
   - 其余全部注入，状态在 Agent 层各 session 内
 
 ## 4. Peri Middleware 分片
 
-- 实现 MiddlewareHook，聚合业务模块：FS/Goal/SubAgent/HITL/...
-- MCP：薄封装 Resources 层 MCP 管理为 middleware（工具注册/执行桥接），连接状态从 Resources context 获取
-- bg：任务定义 + 启动发起（调 Agent 层 TaskManager 接口），不持有管理权
-- 外部依赖一律经 Resources context，不直接触碰外部系统
+- 实现 MiddlewareHook，承载 Goal/SubAgent/Permission/AskUser 等业务切面；
+  文件系统与终端工具由 builtin Workspace MCP 实例提供，不再是独立链槽位。
+- MCP 客户端连接池、连接生命周期与工具桥接在 Middleware 层；宿主装配并注入 pool，
+  不把连接状态误归 Resources。输入 I/O 与工具提供方经各自 MCP 能力边界消费。
+- 任务发起、登记和工具桥接的现行入口见代码索引；当前任务目录不提供 owner 冷恢复，
+  目标职责见 [Session 异步任务架构](session-async-tasks.md)。
 - 切面 = hook 挂载 + 工具声明 + prompt 贡献 + 条件守卫
 
 ## 5. Peri Resources 层
 
 - 外部系统门面：抽象外部数据，对上提供抓手
-  - peri-config：直操配置文件（settings.json 等）
-  - peri-sessions：直操 sqlite（session 持久化、transcript；SqliteThreadStore 实现迁入）
-  - MCP 状态维持、HITL broker、secret
-- 不解释业务语义：只保存与适配状态（存储/配置/连接）；重实现仅限协议适配且显式声明
+  - 配置来源 I/O：由独立 `peri-mcp-config` bootstrap 能力提供文件正文、具名环境与字节 CAS；有效配置规则归 `peri-config`，不归 Resources 或输入 provider
+  - 会话持久化：SessionResources 契约与本地 SQLite、远端 Turso adapter，保存身份、
+    transcript、配置、frozen/inherited、环境绑定；不保存 Agent 执行恢复账本。
+  - Workspace 级 OAuth 凭据的持久存储；MCP 连接由 Middleware 持有，交互 broker
+    由 ACP 宿主提供，不归 Resources。
+- adapter 保存和适配状态，共用领域 reducer，不维护第二份业务规则；访问模式与
+  存储完整性不构成执行所有权；跨实例唯一性由外部部署协调，不依赖 SDK admission。
 - 以 context 形式提供给 Agent / Middleware / Controller
 
 ## 6. Peri Controller 层
@@ -116,6 +139,7 @@ Windows 挂起进程，attach 后提供终止请求与实际退出证据。它�
 ## 7. Peri ACP 层
 
 - 纯协议实现：ACP 协议适配，不承载业务
+- settings 类型与 `ConfigSource` 由 `peri-config` 提供；正常 source 持有 `ConfigurationSystem`，宿主把同一 scoped snapshot 注入新建 MCP pool，并适配 provider / Langfuse 投影。ACP 不复制 typed 配置解析和来源规则；workspace 资源 consumer 使用 snapshot 的资源开关投影，不重读全局值。新来源须显式 reload 并重取 snapshot，旧 pool 固定旧 Arc，无 hot watcher。
 - 事件协议化映射、caps 门控
 - 全部客户端（TUI/CLI/stdio/IDE/print）一律经 ACP
 - 部署单元：TUI/print = `peri-tui` 客户端装配；stdio/IDE = `run_acp_stdio(StdioInput)`（`peri-acp/src/host/stdio/mod.rs`）→ `assemble_stdio_config` → `run_acp_server`——与 TUI 共用同一 `run_acp_server`（`handle_request` + `dispatch_prompt_turn`），仅 transport 多态（mpsc vs `transport/stdio.rs` `StdioTransport`，JSON-RPC 2.0 newline-delimited）
@@ -126,7 +150,7 @@ Windows 挂起进程，attach 后提供终止请求与实际退出证据。它�
 - cli = 启动接口：装配 View 与 ACP 客户端，不承载业务
 - print = 同层轻量渲染客户端（无界面，输出文本）
 - 只经 ACP 拿数据，不触碰业务层
-- 部署装配输入：cli 全局参数 `--config-file` / `--db-path`（别名 camelCase）进程级重定向全局配置文件与 SQLite 会话数据库路径，TUI / print / `peri acp` 三路径生效；thread store 实例化在装配面（`Resources::open_with` / agent 侧 `open_thread_store_with`），ACP 协议面不感知。已知边界：`peri sync` 与 middlewares 侧 skillsDir/MCP 全局配置仍读写默认 `~/.peri/settings.json`（不跟随重定向）
+- 部署装配输入：cli 全局参数 `--config-file` / `--db-path`（别名 camelCase）选择全局 settings 与 SQLite 会话数据库路径，TUI / print / `peri acp` 三路径消费；MCP 基础配置使用选中来源的 snapshot，UI 类型归 `peri-config::ui`。存储实例化仍在装配面，locator / credentials 不属于本次核心配置迁移。自定义全局 skill 根的 `skillsDir` 已删除。
 
 ## 9. 横切面
 
@@ -176,17 +200,23 @@ session 销毁顺序：
 
 持久真相：
 
-- Thread/transcript = 持久真相；Task = 易失投影
-- 重启不复活 Task；遗留 Running/Creating 记录标记为中断
+- Thread/transcript、配置与 frozen/inherited 是历史事实源；持久 Work、任务恢复绑定、
+  处理义务与 control 回执目标已撤销，不建立替代执行账本。
+- TaskManager、运行句柄、MQ 和 callback 是当前进程能力，不因加载历史复活旧 execution。
+  外部副作用未知时如实报告，不伪造完成、取消或跨进程恢复保证。
 
-续跑链路（cancel 的镜像）：
+异步完成与激活（已批准目标边界，实施状态见 RCRA 消息权威）：
 
 ```mermaid
 flowchart LR
-    Bg[bg 完成] --> R[Runtime/AsyncRouter]
-    R --> I[Agent/SessionInbox]
-    I --> A[Agent 续跑被取消的 turn]
+    Bg[当前任务完成] --> I[明确收件会话的内存 MQ]
+    I --> P[当前运行资格与取消检查]
+    P --> A[RCRA 处理并写入 canonical history]
 ```
+
+结果到达不是复活已取消 turn 的授权；当前运行、暂停和关闭状态须参与判断。
+历史 load 本身不是执行请求，具体运行与历史边界见
+[RCRA 消息权威](rcra-message-activation.md)。
 
 错误模型：边界类型化，层内 anyhow
 
@@ -201,6 +231,7 @@ HITL/secret：broker 经 Resources 注入 Middleware（OnPermissionRequest 在 M
 
 Task vs Thread：
 
-- Task：内存运行态（registry），bg shell/后台 SubAgent，不持久化，生命周期跟随 session
+- Task 运行投影：内存 registry 与执行句柄；持久任务绑定、owner 路由及交付责任
+  独立存在，完整 Task 目录与跨实例恢复仍按目标设计推进。
 - Thread：持久化实体（sqlite），ThreadMeta + 消息，subagent 必有
 - 父子链 parent_thread_id = 父子标记的持久化载体（thread_id = agent_id）

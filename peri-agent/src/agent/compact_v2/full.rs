@@ -1,4 +1,4 @@
-//! Full Compact + Re-inject 实现
+//! Full Compact 实现
 //!
 //! 完整流程：
 //! 1. 从包含 canonical reminder 的可见模型上下文派生摘要请求
@@ -6,11 +6,10 @@
 //! 3. 后处理摘要
 //! 4. 快照内自有的普通历史和 reminder 标 excluded（保留 System / ancestor）
 //! 5. 追加 Human 摘要消息（带 CONTINUATION_HINT，wrap 在 system-reminder 标签中）
-//! 6. Re-inject 关键文件 + Skills（如果 cwd 提供）
+//!
+//! 历史工具调用及结果留存在 transcript 中；不会从计算实例本机重新读取 Workspace 文件。
 
-use std::path::Path;
-
-use peri_model::{ModelMessage, ModelRequest, StopReason};
+use peri_model::{ModelMessage, ModelRequest};
 use tokio_util::sync::CancellationToken;
 use tracing::{debug, warn};
 
@@ -19,7 +18,7 @@ use crate::agent::{
     events::CompactStrategy,
     model_bridge::{map_model_error, AgentModelBridge},
 };
-use crate::error::AgentResult;
+use crate::error::{AgentError, AgentResult};
 use crate::messages::BaseMessage;
 use crate::session::transcript::MessageTranscript;
 use crate::session::MessageFlags;
@@ -33,12 +32,16 @@ const SUMMARY_SYSTEM_PROMPT: &str = include_str!("descriptions/summary_system_pr
 /// Full Compact user prompt 模板
 const SUMMARY_USER_PROMPT: &str = include_str!("descriptions/summary_user_prompt.md");
 
-// 与普通输出恢复一样有界续写；不抬高 provider 的单次输出上限。
-const MAX_SUMMARY_CONTINUATIONS: usize = 2;
+#[path = "summary.rs"]
+mod summary;
+
+use summary::{assemble_summary, SummaryAssembly};
+
 const SUMMARY_CONTINUATION_PROMPT: &str = "Your summary was cut off by the output token limit. \
 Continue exactly from the end of your previous text, including any unfinished word or tag. \
 Output only the missing remainder; do not restart, repeat earlier sections, or add analysis. \
-Finish the remaining essential facts concisely and close </summary>. Do not call tools.";
+This is your final response: finish the remaining essential facts concisely within the output budget \
+and close </summary>. There will be no further continuation. Do not call tools.";
 
 // ─── Full Compact ───────────────────────────────────────────────────────────────
 
@@ -50,12 +53,11 @@ Finish the remaining essential facts concisely and close </summary>. Do not call
 /// 3. 后处理摘要
 /// 4. 快照内自有的普通历史和 reminder 标 excluded（保留 System / ancestor）
 /// 5. 追加 Human 摘要消息（带 CONTINUATION_HINT，wrap 在 system-reminder 标签中）
-/// 6. Re-inject 关键文件（如果 cwd 提供）
 pub(super) async fn full_compact_inner(
     transcript: &mut MessageTranscript,
     llm: Option<&dyn peri_model::Model>,
     config: &CompactConfig,
-    cwd: &str,
+    _cwd: &str,
 ) -> AgentResult<super::CompactResult> {
     let llm = llm.ok_or(crate::error::AgentError::CompactNoLlm)?;
     // Full 和 Reason 读取同一已提交视图。按摘要 provider 的协议保护 reasoning；恢复器只接受
@@ -90,39 +92,26 @@ pub(super) async fn full_compact_inner(
             .iter()
             .any(|message| !matches!(message, BaseMessage::System { .. }));
     let summary = if has_history {
+        let budget = SummaryBudget::resolve(llm, config)?;
         // 保留历史的角色、工具配对和完整正文；摘要指令只追加到派生请求，
         // 不回写原 transcript，也不提供可执行工具。
         let mut messages = AgentModelBridge::convert_messages(&visible)?;
         messages.insert(0, ModelMessage::system_text(SUMMARY_SYSTEM_PROMPT));
         messages.push(ModelMessage::user_text(SUMMARY_USER_PROMPT.replace(
             "{summary_target_tokens}",
-            &(config.summary_max_tokens / 2).max(1).to_string(),
+            &(budget.target_tokens / 2).max(1).to_string(),
         )));
-        let request = ModelRequest::new(messages).with_max_tokens(config.summary_max_tokens);
+        let request = budget.apply(ModelRequest::new(messages));
         complete_summary(llm, request).await?
     } else {
         // 全 System / 空历史仍保持命令输出 Human-first 的既有契约。
         "No conversation history to compact.".to_owned()
     };
 
-    // 6. 先收集 re-inject 消息，随后和摘要一次性提交。
-    let re_inject_result = if has_history {
-        collect_reinject_v2(transcript, config, cwd).await
-    } else {
-        ReInjectResult::default()
-    };
-    debug!(
-        files_injected = re_inject_result.files_injected,
-        skills_injected = re_inject_result.skills_injected,
-        "Full Compact: re-inject 完成"
-    );
-
-    let mut appended_messages = vec![build_summary_message(&summary)];
-    appended_messages.extend(re_inject_result.messages);
     transcript
         .commit_compaction_lifecycle(CompactionChange {
             flag_updates,
-            appended_messages,
+            appended_messages: vec![build_summary_message(&summary)],
         })
         .await?;
     transcript.mark_full_compaction_committed();
@@ -135,7 +124,7 @@ pub(super) async fn full_compact_inner(
 
     debug!(
         before_visible_len,
-        after_visible, "Full Compact: excluded 旧消息 + 追加摘要 + re-inject"
+        after_visible, "Full Compact: excluded 旧消息 + 追加摘要"
     );
 
     Ok(super::CompactResult {
@@ -154,74 +143,100 @@ pub(super) async fn full_compact_inner(
     })
 }
 
-// 续写状态只属于本次摘要计算；完整成功前不向 canonical transcript 写半截摘要。
+/// Full Compact 派生请求的输出预算（H6）。
+///
+/// 单一来源是**当前模型已解析的单次输出上限**（`Model::output_token_limit`），
+/// 不是 `summary_max_tokens`：后者是长度目标上限，只影响提示词里的目标字数，
+/// 并受有效输出预算约束。这样：
+/// - 低输出预算的模型不会收到超过自身上限的 `max_tokens`（旧行为会在摘要请求上
+///   覆写成 16000 而失败）；
+/// - thinking 配置与上限由 provider 解析，摘要路径不改写；
+/// - 续写复用同一 `ModelRequest`，因此预算与首轮一致。
+struct SummaryBudget {
+    /// 模型已解析的单次输出上限；`None` = provider 未声明，请求沿用 provider 默认。
+    output_limit: Option<u32>,
+    /// 提示词中声明的长度目标（受有效输出预算约束）。
+    target_tokens: u32,
+}
+
+impl SummaryBudget {
+    fn resolve(llm: &dyn peri_model::Model, config: &CompactConfig) -> AgentResult<Self> {
+        if config.summary_max_tokens == 0 {
+            // 零值不是「不限」：既不能成为长度目标，也不允许被代填成任意常量。
+            return Err(AgentError::CompactSummaryBudgetInvalid {
+                reason: "summary_max_tokens must be greater than zero",
+            });
+        }
+        let output_limit = match llm.output_token_limit() {
+            Some(0) => {
+                return Err(AgentError::CompactSummaryBudgetInvalid {
+                    reason: "resolved model output limit is zero",
+                })
+            }
+            limit => limit,
+        };
+        Ok(Self {
+            output_limit,
+            target_tokens: output_limit.map_or(config.summary_max_tokens, |limit| {
+                config.summary_max_tokens.min(limit)
+            }),
+        })
+    }
+
+    /// 把有效预算应用到请求上：只沿用已解析上限，不写入 `summary_max_tokens`。
+    fn apply(&self, request: ModelRequest) -> ModelRequest {
+        match self.output_limit {
+            Some(limit) => request.with_max_tokens(limit),
+            None => request,
+        }
+    }
+}
+
 async fn complete_summary(
     llm: &dyn peri_model::Model,
     mut request: ModelRequest,
 ) -> AgentResult<String> {
-    let mut text = String::new();
-    for continuation in 0..=MAX_SUMMARY_CONTINUATIONS {
-        let response = llm
-            .complete(request.clone(), CancellationToken::new())
-            .await
-            .map_err(map_model_error)?;
-        let part = response.assistant_text().unwrap_or_default();
-        let has_tools = matches!(response.message(), ModelMessage::Assistant { content, tool_calls }
-            if !tool_calls.is_empty() || content.iter().any(|block| matches!(block, peri_model::ContentBlock::ToolUse { .. })));
-        if has_tools {
-            return Err(crate::error::AgentError::CompactIncompleteResponse {
-                stop_reason: StopReason::ToolUse,
-            });
-        }
-        text.push_str(&part);
-        match response.stop_reason() {
-            StopReason::EndTurn => {
-                // 空白尾响应不能证明已有半截正文完整，也不能触发外层空摘要重试。
-                // 续写必须闭合 summary；跨响应拆开的标签在拼接之后才校验。
-                if continuation > 0 && (part.trim().is_empty() || !text.contains("</summary>")) {
-                    return Err(crate::error::AgentError::CompactIncompleteResponse {
-                        stop_reason: StopReason::MaxTokens,
-                    });
-                }
-                return postprocess_summary(&text).ok_or_else(|| {
-                    warn!(
-                        response_chars = text.chars().count(),
-                        output_tokens = response.usage().map(|usage| usage.output_tokens),
-                        "Full Compact response has no usable summary"
-                    );
-                    if continuation > 0 {
-                        crate::error::AgentError::CompactIncompleteResponse {
-                            stop_reason: StopReason::MaxTokens,
-                        }
-                    } else {
-                        crate::error::AgentError::CompactEmptyResponse
-                    }
-                });
-            }
-            StopReason::MaxTokens
-                if continuation < MAX_SUMMARY_CONTINUATIONS && !part.trim().is_empty() =>
-            {
+    let first = llm
+        .complete(request.clone(), CancellationToken::new())
+        .await
+        .map_err(map_model_error)?;
+    match assemble_summary(&first, None).inspect_err(|error| {
+        warn!(%error, "Full Compact first response has no usable summary");
+    })? {
+        SummaryAssembly::Complete { text, .. } => return Ok(text),
+        SummaryAssembly::Continue => {}
+    }
+    warn!(
+        output_tokens = first.usage().map(|usage| usage.output_tokens),
+        "Full Compact output truncated; continuing the existing summary once"
+    );
+    request.messages.push(ModelMessage::assistant_text(
+        first.assistant_text().unwrap_or_default(),
+    ));
+    request
+        .messages
+        .push(ModelMessage::user_text(SUMMARY_CONTINUATION_PROMPT));
+    tokio::task::yield_now().await;
+    let second = llm
+        .complete(request, CancellationToken::new())
+        .await
+        .map_err(map_model_error)?;
+    match assemble_summary(&first, Some(&second)).inspect_err(|error| {
+        warn!(%error, "Full Compact continuation has no usable summary");
+    })? {
+        SummaryAssembly::Complete { text, truncated } => {
+            if truncated {
                 warn!(
-                    continuation = continuation + 1,
-                    output_tokens = response.usage().map(|usage| usage.output_tokens),
-                    "Full Compact output truncated; continuing the existing summary"
+                    output_tokens = second.usage().map(|usage| usage.output_tokens),
+                    "Full Compact reached output limit twice; preserving both chunks and omitting the remaining tail"
                 );
-                // 只续接可见正文；不重放未签名 reasoning 或任何工具调用。
-                request.messages.push(ModelMessage::assistant_text(part));
-                request
-                    .messages
-                    .push(ModelMessage::user_text(SUMMARY_CONTINUATION_PROMPT));
-                // 给外层取消 select 明确的调度点，不在同步完成的模型替身上连跑请求。
-                tokio::task::yield_now().await;
             }
-            stop_reason => {
-                return Err(crate::error::AgentError::CompactIncompleteResponse {
-                    stop_reason: stop_reason.clone(),
-                });
-            }
+            Ok(text)
+        }
+        SummaryAssembly::Continue => {
+            unreachable!("a second summary response cannot request continuation")
         }
     }
-    unreachable!("the final truncated response returns an error")
 }
 
 /// 构造 Full Compact 的 Human 摘要消息。
@@ -233,348 +248,7 @@ fn build_summary_message(summary: &str) -> BaseMessage {
     ))
 }
 
-/// 后处理 LLM 摘要输出：移除 analysis 块，提取 summary 块，添加前缀
-///
-/// # Safety
-///
-/// 本函数内部使用 `str::find` 返回的字节索引进行切片（`&text[..start]` 等）。
-/// `<analysis>`、`</analysis>`、`<summary>`、`</summary>` 均为纯 ASCII 标签，
-/// `find()` 返回的字节索引即字符边界，不会导致 panic。
-fn postprocess_summary(raw: &str) -> Option<String> {
-    let mut text = extract_summary_text(raw)?;
-
-    let prefix = "This session continues from a previous conversation. Below is a summary of the prior dialogue.";
-
-    text = text.trim().to_string();
-    while text.contains("\n\n\n") {
-        text = text.replace("\n\n\n", "\n\n");
-    }
-
-    if text.is_empty() {
-        None
-    } else {
-        Some(format!("{}\n\n{}", prefix, text))
-    }
-}
-
-// 只提取思考块之外的闭合 summary，正文中的标签可能是任务讨论的字面量。
-// 没有闭合 summary 时保留原有回退：剥除配对思考块及未闭合思考尾部。
-fn extract_summary_text(raw: &str) -> Option<String> {
-    const TAGS: [(&str, &str, bool); 7] = [
-        ("<summary>", "summary", true),
-        ("<analysis>", "analysis", true),
-        ("</analysis>", "analysis", false),
-        ("<thinking>", "thinking", true),
-        ("</thinking>", "thinking", false),
-        ("<think>", "think", true),
-        ("</think>", "think", false),
-    ];
-    let mut remaining = raw;
-    let mut result = String::new();
-    let mut stack = Vec::new();
-    while let Some((position, tag, name, opening)) = TAGS
-        .iter()
-        .filter_map(|(tag, name, opening)| {
-            remaining
-                .find(tag)
-                .map(|position| (position, *tag, *name, *opening))
-        })
-        .min_by_key(|(position, ..)| *position)
-    {
-        if stack.is_empty() {
-            result.push_str(&remaining[..position]);
-        }
-        if name == "summary" {
-            let body_start = position + tag.len();
-            if stack.is_empty() {
-                if let Some(body_len) = remaining[body_start..].find("</summary>") {
-                    return Some(remaining[body_start..body_start + body_len].to_owned());
-                }
-                // 未闭合 summary 仍走后续思考块过滤，再沿用正文回退。
-                result.push_str(tag);
-            }
-            remaining = &remaining[body_start..];
-            continue;
-        }
-        if opening {
-            stack.push(name);
-        } else if stack.pop() != Some(name) {
-            return None;
-        }
-        remaining = &remaining[position + tag.len()..];
-    }
-    if stack.is_empty() {
-        result.push_str(remaining);
-    }
-    // 到此不存在可提取的闭合 summary；保留既有未闭合 summary 回退。
-    if let Some(start) = result.find("<summary>") {
-        result = result[start + "<summary>".len()..].to_owned();
-    }
-    Some(result)
-}
-
-// ─── Re-inject ──────────────────────────────────────────────────────────────────
-
-/// Full Compact 后重新注入的关键信息结果
-#[derive(Debug, Clone, Default)]
-pub struct ReInjectResult {
-    /// 注入的消息列表（文件 + Skills，已按顺序排列）
-    pub messages: Vec<BaseMessage>,
-    /// 成功注入的文件数量
-    pub files_injected: usize,
-    /// 成功注入的 Skills 数量
-    pub skills_injected: usize,
-}
-
-/// 判断路径是否为 Skills 目录下的 SKILL.md 文件
-fn is_skills_path(path: &str) -> bool {
-    let normalized = path.replace('\\', "/");
-    normalized.contains("/.claude/skills/")
-        || (normalized.contains("/skills/") && normalized.ends_with("SKILL.md"))
-}
-
-/// 从消息历史中提取最近通过 Read 工具读取的文件路径（去重，保留最新）
-fn extract_recent_files(messages: &[BaseMessage], max_files: usize) -> Vec<String> {
-    let mut seen = std::collections::HashSet::<String>::new();
-    let mut paths = Vec::new();
-
-    for msg in messages.iter().rev() {
-        for tc in msg.tool_calls() {
-            if tc.name == "Read" {
-                let path = tc
-                    .arguments
-                    .get("file_path")
-                    .and_then(|v| v.as_str())
-                    .or_else(|| tc.arguments.get("path").and_then(|v| v.as_str()));
-                if let Some(path) = path {
-                    if is_skills_path(path) {
-                        continue;
-                    }
-                    if seen.insert(path.to_string()) {
-                        paths.push(path.to_string());
-                        if paths.len() >= max_files {
-                            return paths;
-                        }
-                    }
-                }
-            }
-        }
-    }
-
-    paths
-}
-
-/// 从消息历史中提取 SkillPreloadMiddleware 注入的 Skills 路径（去重，保留出现顺序）
-fn extract_skills_paths(messages: &[BaseMessage]) -> Vec<String> {
-    let mut seen = std::collections::HashSet::<String>::new();
-    let mut paths = Vec::new();
-
-    for msg in messages.iter() {
-        for tc in msg.tool_calls() {
-            if tc.name == "Read" {
-                let path = tc
-                    .arguments
-                    .get("file_path")
-                    .and_then(|v| v.as_str())
-                    .or_else(|| tc.arguments.get("path").and_then(|v| v.as_str()));
-                if let Some(path) = path {
-                    if is_skills_path(path) && seen.insert(path.to_string()) {
-                        paths.push(path.to_string());
-                    }
-                }
-            }
-        }
-
-        let text = match msg {
-            BaseMessage::System { content, .. } | BaseMessage::Human { content, .. } => {
-                content.text_content()
-            }
-            _ => continue,
-        };
-        for line in text.lines() {
-            if let Some(rest) = line.strip_prefix("[Skill: ") {
-                if let Some(path) = rest.strip_suffix(']') {
-                    let trimmed = path.trim();
-                    if is_skills_path(trimmed) && seen.insert(trimmed.to_string()) {
-                        paths.push(trimmed.to_string());
-                    }
-                }
-            }
-        }
-    }
-
-    paths
-}
-
-/// 异步读取文件并截断到指定 token 预算（字符数 / 4 估算）
-async fn read_file_with_budget(path: &str, max_tokens: u32) -> Option<String> {
-    let path_owned = path.to_string();
-    let content = tokio::task::spawn_blocking(move || std::fs::read_to_string(&path_owned))
-        .await
-        .ok()?
-        .ok()?;
-
-    let max_chars = max_tokens as usize * 4;
-    if content.chars().count() > max_chars {
-        let truncated: String = content.chars().take(max_chars).collect();
-        debug!(path, max_tokens, "文件内容截断到 {} 字符", max_chars);
-        Some(format!("{}...(已截断)", truncated))
-    } else {
-        Some(content)
-    }
-}
-
-/// 按总 token 预算截断内容列表，返回保留的条目数
-fn truncate_to_budget(contents: &mut Vec<(String, String)>, budget: u32) -> usize {
-    let budget_chars = budget as usize * 4;
-    let mut used_chars = 0;
-    let mut keep_count = 0;
-
-    for (_, content) in contents.iter() {
-        let chars = content.chars().count();
-        if used_chars + chars > budget_chars {
-            break;
-        }
-        used_chars += chars;
-        keep_count += 1;
-    }
-
-    contents.truncate(keep_count);
-    keep_count
-}
-
-/// 解析相对路径为绝对路径（基于 cwd）
-fn resolve_path(path: &str, cwd: &str) -> String {
-    if Path::new(path).is_absolute() {
-        path.to_string()
-    } else {
-        let abs = Path::new(cwd).join(path);
-        abs.to_string_lossy().to_string()
-    }
-}
-
-/// Full Compact 后重新注入关键信息（文件 + Skills）。
-///
-/// 保留既有公共行为：收集消息后普通追加到 transcript 末尾。
-pub async fn re_inject_v2(
-    transcript: &mut MessageTranscript,
-    config: &CompactConfig,
-    cwd: &str,
-) -> ReInjectResult {
-    let result = collect_reinject_v2(transcript, config, cwd).await;
-    for message in &result.messages {
-        transcript.append(message.clone());
-    }
-    result
-}
-
-/// 收集 Full Compact 后需要重新注入的关键信息（文件 + Skills）。
-///
-/// 文件候选仅来自当前可见消息；Skills 保持从全部历史 entries 收集。
-async fn collect_reinject_v2(
-    transcript: &MessageTranscript,
-    config: &CompactConfig,
-    cwd: &str,
-) -> ReInjectResult {
-    let visible_messages: Vec<BaseMessage> = transcript
-        .entries()
-        .iter()
-        .filter(|entry| !transcript.flags(entry.id()).excluded)
-        .filter_map(|entry| entry.as_message().cloned())
-        .collect();
-    let all_messages: Vec<BaseMessage> = transcript
-        .entries()
-        .iter()
-        .filter_map(|entry| entry.as_message().cloned())
-        .collect();
-
-    let mut result_messages: Vec<BaseMessage> = Vec::new();
-
-    // 1. 提取并注入最近读取的文件
-    let file_paths = extract_recent_files(&visible_messages, config.re_inject_max_files);
-    let mut files_injected = 0;
-
-    if !file_paths.is_empty() {
-        let resolved_paths: Vec<String> = file_paths.iter().map(|p| resolve_path(p, cwd)).collect();
-
-        let mut file_futures = Vec::new();
-        for path in &resolved_paths {
-            file_futures.push(read_file_with_budget(
-                path,
-                config.re_inject_max_tokens_per_file,
-            ));
-        }
-        let file_contents: Vec<Option<String>> = futures::future::join_all(file_futures).await;
-
-        let mut valid_files: Vec<(String, String)> = Vec::new();
-        for (path, content) in file_paths.iter().zip(file_contents) {
-            if let Some(content) = content {
-                valid_files.push((path.clone(), content));
-            } else {
-                debug!(path, "文件读取失败或不存在，跳过重新注入");
-            }
-        }
-
-        truncate_to_budget(&mut valid_files, config.re_inject_file_budget);
-
-        for (path, content) in &valid_files {
-            // 用 Human 消息（而非 System）避免 LLM invoke hoist 污染 frozen prompt
-            let human_content = format!("[最近读取的文件: {}]\n{}", path, content);
-            result_messages.push(BaseMessage::human(human_content));
-        }
-        files_injected = valid_files.len();
-    }
-
-    // 2. 提取并注入激活的 Skills
-    let skills_paths = extract_skills_paths(&all_messages);
-    let mut skills_injected = 0;
-
-    if !skills_paths.is_empty() {
-        let resolved_skill_paths: Vec<String> =
-            skills_paths.iter().map(|p| resolve_path(p, cwd)).collect();
-
-        let mut skill_futures = Vec::new();
-        for path in &resolved_skill_paths {
-            skill_futures.push(read_file_with_budget(
-                path,
-                config.re_inject_max_tokens_per_file,
-            ));
-        }
-        let skill_contents: Vec<Option<String>> = futures::future::join_all(skill_futures).await;
-
-        let mut valid_skills: Vec<(String, String)> = Vec::new();
-        for (path, content) in skills_paths.iter().zip(skill_contents) {
-            if let Some(content) = content {
-                valid_skills.push((path.clone(), content));
-            } else {
-                warn!(path, "Skill 文件读取失败，跳过重新注入");
-            }
-        }
-
-        truncate_to_budget(&mut valid_skills, config.re_inject_skills_budget);
-
-        for (path, content) in &valid_skills {
-            let human_content = format!("[激活的 Skill 指令: {}]\n{}", path, content);
-            result_messages.push(BaseMessage::human(human_content));
-        }
-        skills_injected = valid_skills.len();
-    }
-
-    debug!(
-        files_injected,
-        skills_injected,
-        total_messages = result_messages.len(),
-        "v2 重新注入完成"
-    );
-
-    ReInjectResult {
-        messages: result_messages,
-        files_injected,
-        skills_injected,
-    }
-}
-
-/// 从 re_inject 消息提取文件/Skill 信息（事实源 peri-acp-types::compact）
+/// 提取旧格式压缩文件/Skill 元信息（事实源 peri-acp-types::compact）
 pub use peri_acp_types::compact::{extract_file_info, extract_skill_names};
 
 #[cfg(test)]

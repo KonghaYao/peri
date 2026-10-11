@@ -72,7 +72,7 @@ pub struct ExecOutcome {
     pub stop_reason: PromptStopReason,
     /// 致命执行失败（None = 正常终止 / 用户取消 / 最大轮数；Some = 真正
     /// fatal 的 `LoopResult::Error`，见
-    /// spec/issues/2026-08-18-acp-error-handler.md Commit 1）。
+    /// spec/history/2026-08.md 2026-08-18 条目 Commit 1）。
     pub failure: Option<ExecutionFailure>,
     /// A Full Compact committed during this turn and replaced prior visible history.
     pub history_replaced_by_compaction: bool,
@@ -81,6 +81,18 @@ pub struct ExecOutcome {
     /// Durable state could not be rolled back or verified; host must invalidate the session.
     pub persistence_inconsistent: bool,
     pub agent_state: AgentState,
+}
+
+/// turn 退出时仍未结算的后台任务数（§7.3 有界等待摘要）。
+///
+/// 与 `idle_should_wait` 的 busy 判据同源（`active_count`）：任务终态结算后
+/// 即不再计入；`0` 表示无未结算任务，ACP 响应不附加 pending 标记。
+pub(crate) fn pending_task_count(
+    manager: Option<&std::sync::Arc<dyn peri_acp_types::tasks::TaskManager>>,
+) -> u32 {
+    manager
+        .map(|manager| manager.active_count() as u32)
+        .unwrap_or(0)
 }
 
 #[cfg(test)]

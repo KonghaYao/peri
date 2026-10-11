@@ -22,7 +22,24 @@ pub(crate) fn translate_observation(
         attempt: observation.attempt() as usize,
         max_attempts: observation.max_attempts() as usize,
         delay_ms: observation.delay().as_millis() as u64,
-        error: observation.error_kind().to_string(),
+        error: observation
+            .diagnostic()
+            .map(|diagnostic| {
+                let diagnostic =
+                    peri_acp_types::error::SafeModelErrorDiagnostic::from_model(diagnostic.clone());
+                let mut message = observation.error_kind().to_string();
+                if let Some(reason) = diagnostic.message() {
+                    message.push_str(&format!(": {reason}"));
+                }
+                if let Some(body) = diagnostic.body() {
+                    message.push_str(&format!("\nbody: {body}"));
+                }
+                for cause in diagnostic.causes() {
+                    message.push_str(&format!("\ncause: {cause}"));
+                }
+                peri_acp_types::session::bounded_error_message(&message, 2_000)
+            })
+            .unwrap_or_else(|| observation.error_kind().to_string()),
         diagnostic: observation
             .diagnostic()
             .cloned()
@@ -33,9 +50,34 @@ pub(crate) fn translate_observation(
 /// 将 `AgentEventHandler` 包装为 `RetryObserver`：重试观测直接翻译为
 /// `ExecutorEvent::LlmRetrying` 交给 handler。
 pub fn retry_observer_for(handler: Arc<dyn AgentEventHandler>) -> Arc<dyn RetryObserver> {
-    Arc::new(move |observation: RetryObservation| {
-        translate_observation(&observation, &handler);
-    })
+    let forwarder = RetryEventForwarder::new();
+    forwarder.set(Some(handler));
+    forwarder.as_retry_observer()
+}
+
+pub(crate) fn log_interruption(
+    diagnostic: &peri_model::ModelErrorDiagnostic,
+    attempts: u32,
+    max_attempts: u32,
+    session_id: Option<&str>,
+    turn_id: Option<peri_acp_types::session::TurnId>,
+) {
+    tracing::warn!(
+        session_id,
+        turn_id = ?turn_id,
+        provider = diagnostic.provider().unwrap_or("unknown"),
+        request_id = diagnostic.request_id(),
+        attempts,
+        max_attempts,
+        error_kind = diagnostic.category_name(),
+        transport = diagnostic.transport().map(|kind| kind.to_string()),
+        http_status = diagnostic.status(),
+        protocol = diagnostic.protocol().map(|kind| kind.to_string()),
+        message = diagnostic.message(),
+        body = diagnostic.body(),
+        causes = ?diagnostic.causes(),
+        "模型流中断 (stream_interrupted)"
+    );
 }
 
 /// Session 级可更新 retry 事件转发器。
@@ -45,6 +87,12 @@ pub fn retry_observer_for(handler: Arc<dyn AgentEventHandler>) -> Arc<dyn RetryO
 #[derive(Clone, Default)]
 pub struct RetryEventForwarder {
     handler: Arc<parking_lot::RwLock<Option<Arc<dyn AgentEventHandler>>>>,
+    context: Arc<parking_lot::RwLock<Option<RetryExecutionContext>>>,
+}
+
+struct RetryExecutionContext {
+    session_id: String,
+    turn: std::sync::Weak<crate::session::TurnContext>,
 }
 
 impl RetryEventForwarder {
@@ -56,12 +104,64 @@ impl RetryEventForwarder {
         *self.handler.write() = handler;
     }
 
+    pub fn set_context(&self, session_id: &str, turn: &Arc<crate::session::TurnContext>) {
+        *self.context.write() = Some(RetryExecutionContext {
+            session_id: session_id.to_owned(),
+            turn: Arc::downgrade(turn),
+        });
+    }
+
+    fn log_context(&self) -> (Option<String>, Option<peri_acp_types::session::TurnId>) {
+        let context = self.context.read();
+        match context.as_ref() {
+            Some(context) => (
+                Some(context.session_id.clone()),
+                context.turn.upgrade().map(|turn| turn.turn_id()),
+            ),
+            None => (None, None),
+        }
+    }
+
     pub fn as_retry_observer(&self) -> Arc<dyn RetryObserver> {
-        let cell = self.clone();
-        Arc::new(move |observation: RetryObservation| {
-            if let Some(handler) = cell.handler.read().clone() {
-                translate_observation(&observation, &handler);
-            }
-        })
+        Arc::new(self.clone())
     }
 }
+
+impl RetryObserver for RetryEventForwarder {
+    fn on_retry(&self, observation: RetryObservation) {
+        let (session_id, turn_id) = self.log_context();
+        tracing::warn!(
+            session_id = session_id.as_deref(),
+            turn_id = ?turn_id,
+            attempt = observation.attempt(),
+            max_attempts = observation.max_attempts(),
+            delay_ms = observation.delay().as_millis() as u64,
+            error_kind = %observation.error_kind(),
+            diagnostic = ?observation.diagnostic(),
+            "model request retrying"
+        );
+        if let Some(handler) = self.handler.read().clone() {
+            translate_observation(&observation, &handler);
+        }
+    }
+
+    fn on_interrupted(&self, observation: RetryObservation) -> bool {
+        let Some(diagnostic) = observation.diagnostic() else {
+            return false;
+        };
+        let (session_id, turn_id) = self.log_context();
+        // 日志不依赖 turn handler，池化模型暂未绑定 handler 时也不能静默。
+        log_interruption(
+            diagnostic,
+            observation.attempt(),
+            observation.max_attempts(),
+            session_id.as_deref(),
+            turn_id,
+        );
+        true
+    }
+}
+
+#[cfg(test)]
+#[path = "retry_events_test.rs"]
+mod tests;

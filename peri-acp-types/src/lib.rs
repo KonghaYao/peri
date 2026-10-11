@@ -14,7 +14,7 @@
 //! - `identity` — §9 身份标识契约（AgentId/EventEnvelope/CancelRequest/...）
 //! - `event` / `event_v2` — 事件契约（ExecutorEvent + v2 三层事件 + EventBus + v1 兼容映射）
 //! - `session` — session 契约（TurnId/MQ/inbox/cron/AgentRuntime）
-//! - `interaction` — HITL/通道交互契约（UserInteractionBroker/ChannelState/...）
+//! - `interaction` — HITL/问答交互契约（UserInteractionBroker/...）
 //! - `goal` — goal steering 契约（ThreadGoal/GoalStatus/GoalStore/...）
 //! - `frozen` — 会话冻结数据契约（FrozenData/ThreadPersistence/...）
 //! - `tasks` — 后台任务契约（BgTaskKind/BgRegistryEvent）
@@ -25,22 +25,26 @@
 //! - `agents` — agent 定义契约（AgentOverrides/AgentCapability）
 //! - `command` — slash 命令契约（PromptStopReason/CommandHandler/CommandContext）
 //! - `skills` — skill 契约（SkillSource/SkillRoot/SkillMetadata）
-//! - `lsp` — LSP 服务器配置契约（LspServerConfig/LspConfigSource）
 //! - `meta_harness` — MetaHarness 契约（MetaHarnessState + SECTION_IDS/MIDDLEWARE_NAMES）
+//! - `beta_flags` — Beta flag 注册表与投影/冻结值契约（BETA_FLAGS + BetaFlags）
 //! - `cron` — cron 契约（CronTrigger + CronSchedulerPort）
 //! - `workflow` — workflow 协议契约（AgentRunParams/ProgressEvent/AgentExecutor/...）
 //! - `hooks` — hook 契约（HookEvent/HookType/RegisteredHook/...）
 //! - `plugin` — 插件契约（PluginManifest/LoadedPlugin/PluginLoadResult/PluginManagerPort）
-//! - `ports` — 装配注入端口（McpPoolPort/ToolSearchPort/WorkflowMiddlewarePort/SkillsPort）
+//! - `builtin_mcp` — builtin MCP 注册表纯数据（实例 / 原始工具名 / effective name / direct / 声明模板）
+//! - `ports` — 装配注入端口（McpPoolPort/ToolSearchPort/WorkflowMiddlewarePort/AgentCatalogPort）
 
 pub mod acp_mcp;
 pub mod agents;
+pub mod beta_flags;
+pub mod builtin_mcp;
 pub mod command;
 // 注册表顶层 re-export（Phase 2 消费方路径 `peri_acp_types::command_registry::*`，
 // 挂载本体在 command.rs 契约子模块区，避免双份模块实例）。
 pub use command::command_registry;
 pub mod compact;
 pub mod compact_reminder;
+pub mod configuration;
 pub mod cron;
 pub mod dynamic_mcp;
 pub mod error;
@@ -52,17 +56,18 @@ pub mod goal;
 pub mod hooks;
 pub mod identity;
 pub mod interaction;
-pub mod lsp;
 pub mod mcp;
 pub mod mcp_apps;
 pub mod mcp_skills;
 pub mod messages;
 pub mod meta_harness;
 pub mod model;
+pub mod oauth_credentials;
 pub mod peri_caps;
 pub use peri_caps::PeriCaps;
 pub mod permission;
 pub mod plugin;
+pub mod plugin_scope;
 pub mod ports;
 pub mod projection;
 pub mod runtime;
@@ -80,3 +85,5 @@ pub mod tools;
 pub mod workflow;
 
 pub mod workspace;
+pub mod workspace_output;
+pub mod workspace_resources;

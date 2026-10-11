@@ -154,7 +154,7 @@ fn test_notification_includes_error_when_failed() {
 }
 
 #[test]
-fn test_notification_redacts_and_limits_untrusted_error() {
+fn test_notification_preserves_and_limits_error() {
     let secret = "workflow-secret-value";
     let result = WorkflowTaskResult {
         run_id: "run-secret".into(),
@@ -178,11 +178,11 @@ fn test_notification_redacts_and_limits_untrusted_error() {
     };
 
     let notification = result.to_notification();
-    assert!(!notification.contains(secret));
-    assert!(!notification.contains("https://example.invalid/run?api_key="));
+    assert!(notification.contains(secret));
+    assert!(notification.contains("https://example.invalid/run?api_key="));
     assert!(!notification.contains("</system-reminder>"));
     assert!(!notification.contains("<system-reminder"));
-    assert!(notification.contains("[redacted]"));
+    assert!(!notification.contains("[redacted]"));
     assert!(notification.contains("&lt;/system-reminder&gt;"));
     assert!(notification.contains('…'));
 }
@@ -251,6 +251,12 @@ fn test_notification_includes_saved_state_only_when_artifact_exists() {
     assert!(
         notification.contains(&format!(".claude/workflow-runs/{run_id}/state.json")),
         "存在 artifact 时应提供真实 state.json 路径，实际：{notification}"
+    );
+    // 读取指引必须用当前 system direct 原名：逐字断言注册表的冻结字面量，
+    // 不用查表派生期望值（同源派生会让「查询改坏」自洽通过）。
+    assert!(
+        notification.contains("Use `Read` to view full results"),
+        "存在 artifact 时应以模型面名字引导读取，实际：{notification}"
     );
     assert!(!notification.contains("Error:"));
     std::fs::remove_dir_all(state_dir).unwrap();

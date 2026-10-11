@@ -12,7 +12,7 @@
 //! | `update_meta`（title/status/cancel_policy/config 定向更新） | 已实现 |
 //! | `append_history` / `apply_message_projections` / `apply_compaction` | 已实现（[`super::session_history`]：批内守卫，整批生效或整批不生效） |
 //! | `rewind_history`（显式两边界）/ `remove_history_entries` | 已实现（同上；未知截止点保持无变更语义） |
-//! | `delete_tree` / `revoke_unpublished_session` / `adopt_legacy_session` | 已实现（[`super::session_lifecycle`]；远端无墓碑/执行行，删除是刻意删除数据事实） |
+//! | `delete_tree` / `revoke_unpublished_session` | 已实现（[`super::session_lifecycle`]；远端无墓碑/执行行，删除是刻意删除数据事实） |
 //! | `load_child_resume_record` / `store_child_resume_record` | 已实现（`agent_status` + 由状态派生的认领标记） |
 //! | `drain` | 已实现为「无队列可排空，但未结清不算已排空」（见方法文档） |
 //! | `close` | 已实现（真正关闭连接，之后写入明确失败） |
@@ -22,11 +22,11 @@
 //! 与业务效果在同一个托管批里同生共死）。操作 id 不由内容派生，因此同内容的第二次、第三次
 //! 领域调用都是新操作（状态 A→B→A、标题 x→y→x 不再被当成重放丢弃）；输入摘要只用于一致性
 //! 校验。v10 撤销本机操作日志后，不再有「发送前本机落盘、确定终态才结清」这一步，未结清只
-//! 在活跃租约上表达（见 `recover_persistence` 的方法文档）。等价的公开行为仍只有门面暴露的
+//! 在当前实例的 persistence gate 上表达（见 `recover_persistence` 的方法文档）。等价的公开行为仍只有门面暴露的
 //! 那 33 条——adapter 不另立一套平行行为。
 //!
-//! 本机执行事实不在本模块：workspace 证据、执行代际与 OS 锁由本机 `LocalExecution` 持有
-//! （见 `sessions::local_port`）。adapter 只回答 canonical 数据事实。
+//! Workspace 归属与执行快照保存在远端；文件系统发现和进程内运行句柄由
+//! `RemoteExecution` 持有（见 `sessions::local_port`）。
 //!
 //! 打开的两种访问模式：
 //!
@@ -36,16 +36,19 @@
 //!
 //! ## 边界（远程不做本机的事）
 //!
-//! - 不持有本机执行事实：workspace 证据与执行代际只在本机库，远端没有这些事实；
+//! - 不持有本机执行事实：运行句柄及未结清标记只在当前实例内，远端不持久化这些事实；
 //! - 不解析本机目录、不发执行资格、不判定 legacy：`LegacyConfirmed` 与执行准入由门面与
 //!   执行面按本机证据判定（这也是 `load_binding` 只回答绑定事实的原因）；
-//! - 不保存派生缓存：`threads.cached_context` / `context_cache_epoch` 与本机同列（同一份 DDL，
-//!   形状不能各自漂移），但远端没有「读缓存」这个消费者——远端不读它，只在历史变更时按同一份
-//!   语句把它归位（`session_history::REFRESH_COUNTS_SQL`）。
 
-use std::collections::HashMap;
-use std::sync::Arc;
-
+use super::credentials::SessionStoreCredential;
+use super::endpoint::RemoteEndpoint;
+use super::generation::{ConnectionFactory, ConnectionGate, RemoteConnectionFactory};
+use super::mutation::{RemoteStore, StoreAccess};
+use super::schema::{StoreId, StoreIdentityRead};
+use super::schema_upgrade;
+use super::session_schema;
+use super::sql::StatementSpec;
+use crate::sessions::data::{ChildResumeRecord, SessionDataPort};
 use async_trait::async_trait;
 use peri_acp_types::messages::MessageId;
 use peri_acp_types::session_resources::{
@@ -54,22 +57,20 @@ use peri_acp_types::session_resources::{
     SessionResourceErrorKind, SessionResourceResult, SessionSnapshot,
 };
 use peri_acp_types::store::{CompactionChange, MessageFlags, PersistedPayload};
+use peri_acp_types::system_reminder::TrustedSystemReminder;
 use peri_acp_types::thread::{ThreadId, ThreadMeta};
 use peri_acp_types::workspace::{
     ResolvedWorkspace, ScopedThreadPage, ScopedThreadQuery, SessionBinding,
 };
+use std::collections::HashMap;
+use std::sync::Arc;
 use tokio::sync::{RwLock, RwLockReadGuard};
-
-use crate::sessions::data::{ChildResumeRecord, SessionDataPort};
-
-use super::credentials::SessionStoreCredential;
-use super::endpoint::RemoteEndpoint;
-use super::generation::{ConnectionFactory, ConnectionGate, RemoteConnectionFactory};
-use super::mutation::{incomplete_reply, RemoteStore, StoreAccess};
-use super::schema::{self, StoreId, StoreIdentityOutcome, StoreIdentityRead};
-use super::session_schema;
-use super::sql::{int_at, StatementSpec};
 use turso_serverless::Value;
+#[cfg(test)]
+#[path = "session_data_fixture.rs"]
+mod fixtures;
+#[path = "session_close.rs"]
+mod session_close;
 
 /// 本次打开对远端 store 身份做了什么：首次登记资格的唯一证据。
 ///
@@ -83,83 +84,10 @@ pub(super) enum StoreInitialization {
     CreatedByThisOpen,
 }
 
-/// 只读身份读取之后的下一步（纯函数结论）。
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub(super) enum OpenStep {
-    /// 已有本构建认识的身份：本次打开没有建立任何东西。
-    Existing(StoreId),
-    /// 明确为空：写打开在这里才继续初始化；只读打开到这一步就拒绝。
-    NeedsInitialization,
-}
-
-/// 身份读取 + 访问意图 → 打开的下一步（纯函数，真引擎 seam 与生产共用）。
-///
-/// 三条拒绝路径都不猜：版本/契约不认识、元数据形状不可解释、只读打开遇上尚未初始化的
-/// store（没有 schema 就没有会话事实可读，也不越权建表）。
-pub(super) fn open_step(
-    read: StoreIdentityRead,
-    access: StoreAccess,
-) -> SessionResourceResult<OpenStep> {
-    match read {
-        StoreIdentityRead::Present(snapshot) if snapshot.matches_build() => {
-            Ok(OpenStep::Existing(snapshot.store_id))
-        }
-        StoreIdentityRead::Present(_) => {
-            Err(unsupported_behavior("unrecognized remote store schema"))
-        }
-        StoreIdentityRead::Malformed => Err(super::session_codec::corrupt(
-            "remote session store metadata is not interpretable",
-        )),
-        StoreIdentityRead::Uninitialized => match access {
-            StoreAccess::ReadOnly => Err(unsupported_behavior(
-                "read-only open of an uninitialized remote store",
-            )),
-            StoreAccess::ReadWrite => Ok(OpenStep::NeedsInitialization),
-        },
-    }
-}
-
-/// 身份竞争的结论 → 权威身份 + 本次打开的初始化事实（首次登记资格的唯一映射）。
-///
-/// `CreatedByThisOpen` 只能由 `Created` 产生：竞败方读回的胜者身份也是 `Existing`，
-/// 所以败方没有首次登记资格，但它用的仍是同一个权威身份。
-pub(super) fn open_verdict(outcome: StoreIdentityOutcome) -> (StoreId, StoreInitialization) {
-    match outcome {
-        StoreIdentityOutcome::Created(store_id) => {
-            (store_id, StoreInitialization::CreatedByThisOpen)
-        }
-        StoreIdentityOutcome::Existing(store_id) => (store_id, StoreInitialization::Existing),
-    }
-}
-
-/// 旧形状探测（只读、单条 SELECT）：写打开遇上未初始化的库时，先问一次「这里有没有
-/// 统一之前的远端会话表」。
-///
-/// 命中即拒绝（`Unsupported`）：这不是空库，而是一个本构建不认识的旧形状库。
-/// **不自动迁移**——迁移要重命名表并搬运每一行，而本段的运行前提是新库没有历史数据；
-/// **也不覆盖**——覆盖等于替使用者丢掉他看不见的数据。只发一条只读语句，不建表、不写行。
-async fn refuse_legacy_shape(store: &RemoteStore) -> SessionResourceResult<()> {
-    let row = store
-        .fetch_row(&StatementSpec::new(
-            schema::COUNT_LEGACY_TABLES_SQL,
-            schema::LEGACY_SHAPE_TABLES
-                .iter()
-                .map(|table| Value::Text((*table).to_owned()))
-                .collect(),
-        ))
-        .await?;
-    // 读不到计数不是「没有旧表」：形状不完整的读取按未决上报，不放行初始化。
-    let count = row
-        .as_ref()
-        .and_then(|values| int_at(values, 0))
-        .ok_or_else(|| incomplete_reply("legacy shape probe returned no count"))?;
-    if count > 0 {
-        return Err(unsupported_behavior(
-            "remote store has the pre-unification session tables; it is not migrated automatically",
-        ));
-    }
-    Ok(())
-}
+#[path = "session_open.rs"]
+mod session_open;
+pub(super) use session_open::{open_step, open_verdict, probe_shape, OpenStep};
+use session_open::{refuse_legacy_shape, resolve_open_machine_id};
 
 /// 远端会话数据 adapter：一个已初始化（或已读回身份）的远程 store 上的会话行为。
 ///
@@ -170,9 +98,10 @@ async fn refuse_legacy_shape(store: &RemoteStore) -> SessionResourceResult<()> {
 /// 与否）再没有重连：槽里没有可服务的连接时如实返回关闭错误，绝不用一次重连把关闭事实盖掉。
 ///
 /// 本机**不再**持有远端操作的日志（v10 删除了 `session_remote_operations`）：远端账本
-/// （`peri_op_ledger`）仍按「资格先于效果」写，但它是**远端**事实，本机不复制。跨进程重启
-/// 后没有「按原 id 求证终态」这条路径，未结清只在本进程的租约上表达。
+/// （`peri_op_ledger`）仍按「资格先于效果」写，但它是**远端**事实，本机不复制。
+/// 普通 mutation 的写入确认保留；它不提供 Agent 执行恢复，不能把内存 gate 当成持久日志。
 pub(super) struct RemoteSessionData {
+    pub(super) machine_id: String,
     /// 连接的生命周期槽位：服务中，或关闭中（含已确认关闭）。
     slot: RwLock<ConnectionSlot>,
     /// 建立连接的地方（本 crate 唯一持有凭证处）；重建不改变打开事实。
@@ -180,6 +109,9 @@ pub(super) struct RemoteSessionData {
     /// 连接代际门禁：哪一代已经不可信。
     gate: Arc<ConnectionGate>,
     store_id: StoreId,
+    /// 压缩前的形状（`v2` 契约，10|11）：只读打开下它没有当前形状的归属列与机器目录，
+    /// 读路径按老形状服务。写打开会先升级，升级后的实例不再带这一位。
+    pub(super) legacy_shape: bool,
     /// thread → root 解析缓存：父关系创建后不变（本 adapter 不提供改父行为），因此
     /// 同一条会话只需一次远端上溯；解析失败不缓存，避免把网络失败固化成事实。
     roots: RwLock<HashMap<ThreadId, ThreadId>>,
@@ -193,12 +125,22 @@ impl RemoteSessionData {
     /// 插入元数据行并提交（`Created`）才是 `CreatedByThisOpen`。初始化结果未知（丢响应、
     /// 超时）会让本次打开直接失败：既不发身份，也不发创建事实。
     ///
-    /// 三条拒绝路径都不猜：版本/契约不认识、元数据形状不可解释、只读打开遇上尚未初始化的
-    /// store（没有 schema 就没有会话事实可读，也不越权建表）。
+    /// 四条拒绝路径都不猜：版本/契约不认识、元数据形状不可解释、会话表形状与契约声明的
+    /// 代数不符（[`probe_shape`]，只读）、只读打开遇上尚未初始化的 store（没有 schema 就
+    /// 没有会话事实可读，也不越权建表）。
     pub(super) async fn open(
         endpoint: &RemoteEndpoint,
         credential: &SessionStoreCredential,
         access: StoreAccess,
+    ) -> SessionResourceResult<(Self, StoreInitialization)> {
+        Self::open_with_machine(endpoint, credential, access, None).await
+    }
+
+    pub(super) async fn open_with_machine(
+        endpoint: &RemoteEndpoint,
+        credential: &SessionStoreCredential,
+        access: StoreAccess,
+        supplied_machine_id: Option<String>,
     ) -> SessionResourceResult<(Self, StoreInitialization)> {
         let gate = Arc::new(ConnectionGate::default());
         let factory: Arc<dyn ConnectionFactory> = Arc::new(RemoteConnectionFactory::new(
@@ -208,8 +150,16 @@ impl RemoteSessionData {
             Arc::clone(&gate),
         ));
         let store = factory.connect().await?;
-        let (store_id, initialization) = match open_step(store.read_identity().await?, access)? {
+        // 打开路径的两份只读事实：身份（版本 + 契约 + store id）与**会话表形状**。后者按契约
+        // 声明的代数探测（只发 SELECT），读得动的库必须相符——形状不符即拒绝，不下发任何读写。
+        let read = store.read_identity().await?;
+        let shape = probe_shape(&store, &read).await?;
+        let (store_id, initialization) = match open_step(read, shape, access)? {
             OpenStep::Existing(store_id) => (store_id, StoreInitialization::Existing),
+            OpenStep::Upgrade(snapshot) => {
+                schema_upgrade::upgrade(&store, &snapshot).await?;
+                (snapshot.store_id, StoreInitialization::Existing)
+            }
             // 空库：写打开在这里才参与身份竞争，结论由本事务的结果给出（见 [`open_verdict`]），
             // 不由「刚才读到空库」推定创建。
             OpenStep::NeedsInitialization => {
@@ -218,6 +168,7 @@ impl RemoteSessionData {
                 open_verdict(store.initialize_store().await?)
             }
         };
+        let machine_id = resolve_open_machine_id(supplied_machine_id, access).await?;
         // 可写打开时补齐本构建的会话表形状：DDL 全部 `IF NOT EXISTS`，既有对象不改写、
         // 不覆盖，已初始化的 store 上是一次幂等的空操作。这一步不能只在「身份刚建立」时
         // 跑——身份早于会话表建立的 store（例如只做过机制实测的库）同样需要补齐。
@@ -227,13 +178,30 @@ impl RemoteSessionData {
             store
                 .apply_schema(session_schema::initialization_plan())
                 .await?;
+            store
+                .apply_schema(vec![StatementSpec::new(
+                    "INSERT OR IGNORE INTO machines(id, name, identity_kind) VALUES (?1, '我的电脑', 'known')",
+                    vec![Value::Text(machine_id.clone())],
+                )])
+                .await?;
         }
+        let legacy_shape = match store.read_identity().await? {
+            // 只读打开不升级：压缩前的形状（v2 契约）此后按各自的读法服务。
+            StoreIdentityRead::Present(snapshot) => !snapshot.matches_build(),
+            _ => {
+                return Err(unsupported_behavior(
+                    "remote store identity missing after initialization",
+                ));
+            }
+        };
         Ok((
             Self {
+                machine_id,
                 slot: RwLock::new(ConnectionSlot::serving(store)),
                 factory,
                 gate,
                 store_id,
+                legacy_shape,
                 roots: RwLock::new(HashMap::new()),
             },
             initialization,
@@ -332,9 +300,14 @@ impl RemoteSessionData {
     /// 只读打开因此与可写打开走同一条重建路径，且不产生任何写入。
     async fn verify_reconnect(&self, store: &RemoteStore) -> SessionResourceResult<()> {
         match store.read_identity().await? {
-            StoreIdentityRead::Present(snapshot) if !snapshot.matches_build() => Err(
-                unsupported_behavior("unrecognized remote store schema after reconnect"),
-            ),
+            StoreIdentityRead::Present(snapshot)
+                if !(snapshot.matches_build()
+                    || (store.access() == StoreAccess::ReadOnly && snapshot.readable())) =>
+            {
+                Err(unsupported_behavior(
+                    "unrecognized remote store schema after reconnect",
+                ))
+            }
             StoreIdentityRead::Present(snapshot)
                 if snapshot.store_id.as_str() != self.store_id.as_str() =>
             {
@@ -349,53 +322,6 @@ impl RemoteSessionData {
             StoreIdentityRead::Uninitialized => Err(unsupported_behavior(
                 "reconnected remote store has no session schema",
             )),
-        }
-    }
-
-    /// 装载故障计划（仅测试构建）：把「响应丢失」「发出前丢弃」变成可控观察点，
-    /// 走的是同一套真实批、真实账本与真实恢复路径。
-    #[cfg(test)]
-    pub(super) async fn inject_faults(&self, plan: super::mutation::FaultPlan) {
-        if let Some(store) = self.slot.read().await.serving_store() {
-            store.inject_faults(plan);
-        }
-    }
-
-    /// 测试装配：连接已关闭的 adapter（不连网，与 `close` 之后的状态同一个形状）。
-    ///
-    /// 这种装配下任何一次 store 访问都只会失败，所以「输入不自洽时仍然拿到 `InvalidInput`」
-    /// 就证明判定发生在取连接之前、也没有写下任何本机记录。
-    ///
-    /// 注意这与「关闭过一次但没成功」**不同**：那种情况下连接仍被保留在关闭句柄里，
-    /// 关闭可以重试（见 [`RemoteSessionData::close`]）；这里从来没有过连接可关。
-    #[cfg(test)]
-    pub(super) fn closed_for_test(store_id: StoreId) -> Self {
-        Self {
-            slot: RwLock::new(ConnectionSlot::default()),
-            factory: Arc::new(NoConnectionFactory),
-            gate: Arc::new(ConnectionGate::default()),
-            store_id,
-            roots: RwLock::new(HashMap::new()),
-        }
-    }
-
-    /// 测试装配：连接由调用方给定的工厂与首条连接构成（故障可控，不连网）。
-    ///
-    /// 首条连接与工厂共用同一份代际门禁：失效、重建与「迟到任务不碰新连接」的判定与生产
-    /// 完全一致，测试只是把传输面换成能确定复现故障的实现。
-    #[cfg(test)]
-    pub(super) fn with_connection_for_test(
-        store_id: StoreId,
-        connection: RemoteStore,
-        factory: Arc<dyn ConnectionFactory>,
-        gate: Arc<ConnectionGate>,
-    ) -> Self {
-        Self {
-            slot: RwLock::new(ConnectionSlot::serving(connection)),
-            factory,
-            gate,
-            store_id,
-            roots: RwLock::new(HashMap::new()),
         }
     }
 }
@@ -541,7 +467,6 @@ fn retired_connection() -> SessionResourceError {
 pub(super) fn not_found() -> SessionResourceError {
     SessionResourceError::new(SessionResourceErrorKind::NotFound)
 }
-
 pub(super) fn invalid_input(detail: &str) -> SessionResourceError {
     SessionResourceError::new(SessionResourceErrorKind::InvalidInput {
         detail: detail.to_owned(),
@@ -549,29 +474,146 @@ pub(super) fn invalid_input(detail: &str) -> SessionResourceError {
 }
 
 /// 本阶段尚未落地的行为：明确失败，并留下行为名便于诊断（不含任何会话内容）。
-fn unsupported_behavior(behavior: &'static str) -> SessionResourceError {
+pub(super) fn unsupported_behavior(behavior: &'static str) -> SessionResourceError {
     tracing::debug!(behavior, "remote session data behavior is not implemented");
     SessionResourceError::new(SessionResourceErrorKind::Unsupported)
 }
 
 #[async_trait]
 impl SessionDataPort for RemoteSessionData {
+    async fn finish_close(&self, id: &ThreadId) -> SessionResourceResult<()> {
+        self.finish_session_close(id).await
+    }
+
+    async fn close_settlement(
+        &self,
+        id: &ThreadId,
+    ) -> SessionResourceResult<peri_acp_types::session_resources::CloseSettlement> {
+        self.store().await?.close_settlement(id).await
+    }
+
+    fn oauth_credentials_for_workspace(
+        self: Arc<Self>,
+        workspace_id: peri_acp_types::workspace::WorkspaceId,
+    ) -> Option<Arc<dyn peri_acp_types::oauth_credentials::OAuthCredentialPort>> {
+        // 压缩前的形状里凭证只有 machine 作用域，给不出 workspace 归属。
+        if self.legacy_shape {
+            return None;
+        }
+        Some(Arc::new(super::oauth_credentials::RemoteOAuthCredentials(
+            self,
+            workspace_id,
+        )))
+    }
+
+    async fn machine_id_of(&self, id: &ThreadId) -> SessionResourceResult<Option<String>> {
+        let store = self.store().await?;
+        if self.legacy_shape {
+            let row = store
+                .fetch_row(&StatementSpec::new(
+                    "SELECT machine_id FROM session_environments WHERE thread_id = ?1",
+                    vec![Value::Text(id.clone())],
+                ))
+                .await?;
+            return Ok(row.and_then(|values| super::sql::text_at(&values, 0).map(str::to_owned)));
+        }
+        let row = store
+            .fetch_row(&StatementSpec::new(
+                "SELECT w.machine_id FROM threads t JOIN workspaces w ON w.id = t.workspace_id WHERE t.id = ?1",
+                vec![Value::Text(id.clone())],
+            ))
+            .await?;
+        Ok(row.and_then(|values| super::sql::text_at(&values, 0).map(str::to_owned)))
+    }
+    async fn workspace_id_of(
+        &self,
+        id: &ThreadId,
+    ) -> SessionResourceResult<Option<peri_acp_types::workspace::WorkspaceId>> {
+        if self.legacy_shape {
+            return Ok(None);
+        }
+        let store = self.store().await?;
+        let row = store
+            .fetch_row(&StatementSpec::new(
+                "SELECT workspace_id FROM threads WHERE id = ?1",
+                vec![Value::Text(id.clone())],
+            ))
+            .await?;
+        row.map(|row| {
+            super::sql::text_at(&row, 0)
+                .ok_or_else(|| super::session_codec::corrupt("invalid remote workspace id"))?
+                .parse()
+                .map_err(|_| super::session_codec::corrupt("invalid remote workspace id"))
+        })
+        .transpose()
+    }
+    async fn list_machines(
+        &self,
+    ) -> SessionResourceResult<Vec<peri_acp_types::workspace::MachineInfo>> {
+        self.catalog_machines().await
+    }
+    async fn list_workspaces(
+        &self,
+        machine_id: &str,
+    ) -> SessionResourceResult<Vec<peri_acp_types::workspace::WorkspaceInfo>> {
+        self.catalog_workspaces(machine_id).await
+    }
+    async fn rename_machine(&self, machine_id: &str, name: &str) -> SessionResourceResult<()> {
+        self.catalog_rename_machine(machine_id, name).await
+    }
     async fn save_new_session(&self, input: &NewSession) -> SessionResourceResult<()> {
         self.write_new_session(input).await
+    }
+    async fn save_new_session_in_workspace(
+        &self,
+        input: &NewSession,
+        workspace: &ResolvedWorkspace,
+    ) -> SessionResourceResult<()> {
+        self.write_new_session_in_workspace(input, workspace).await
+    }
+
+    async fn save_new_session_draft(
+        &self,
+        draft: &peri_acp_types::session_resources::NewSessionDraft,
+    ) -> SessionResourceResult<()> {
+        self.write_new_session_draft(draft).await
+    }
+    async fn save_new_session_draft_in_workspace(
+        &self,
+        draft: &peri_acp_types::session_resources::NewSessionDraft,
+        workspace: &ResolvedWorkspace,
+    ) -> SessionResourceResult<()> {
+        self.write_new_session_draft_in_workspace(draft, workspace)
+            .await
+    }
+
+    async fn commit_frozen(
+        &self,
+        id: &ThreadId,
+        frozen: &FrozenSnapshotBytes,
+    ) -> SessionResourceResult<()> {
+        self.write_commit_frozen(id, frozen).await
     }
 
     async fn revoke_unpublished_session(&self, id: &ThreadId) -> SessionResourceResult<()> {
         self.revoke_unpublished(id).await
     }
 
+    async fn revoke_unpublished_draft(&self, id: &ThreadId) -> SessionResourceResult<()> {
+        self.revoke_unpublished_draft(id).await
+    }
+
     async fn adopt_legacy_session(
         &self,
-        id: &ThreadId,
-        saved_cwd: &str,
-        workspace: &ResolvedWorkspace,
-        frozen: &FrozenSnapshotBytes,
+        _id: &ThreadId,
+        _saved_cwd: &str,
+        _workspace: &ResolvedWorkspace,
+        _frozen: &FrozenSnapshotBytes,
     ) -> SessionResourceResult<()> {
-        self.adopt_legacy(id, saved_cwd, workspace, frozen).await
+        // Old remote sessions without immutable evidence remain history-only.
+        Err(SessionResourceError::new(
+            SessionResourceErrorKind::Unsupported,
+        ))
     }
 
     async fn load_snapshot(&self, id: &ThreadId) -> SessionResourceResult<SessionSnapshot> {
@@ -601,6 +643,13 @@ impl SessionDataPort for RemoteSessionData {
         self.binding_of(id).await
     }
 
+    async fn binding_discovery_snapshot(
+        &self,
+        id: &ThreadId,
+    ) -> SessionResourceResult<Option<String>> {
+        self.read_binding_discovery_snapshot(id).await
+    }
+
     async fn session_root(&self, id: &ThreadId) -> SessionResourceResult<ThreadId> {
         // 远端父链的根；上溯失败按「解析不出」退回自身（范围变窄，但不会把未知当成已知）。
         Ok(self.root_for(id).await)
@@ -611,6 +660,44 @@ impl SessionDataPort for RemoteSessionData {
         query: &ScopedThreadQuery,
     ) -> SessionResourceResult<ScopedThreadPage> {
         self.read_page(query).await
+    }
+    async fn list_archived_sessions(
+        &self,
+        query: &ScopedThreadQuery,
+    ) -> SessionResourceResult<ScopedThreadPage> {
+        self.read_page_by_archive(query, true).await
+    }
+    async fn set_session_archived(
+        &self,
+        id: &ThreadId,
+        archived: bool,
+    ) -> SessionResourceResult<()> {
+        let store = self.store().await?;
+        let row = store
+            .fetch_row(&StatementSpec::new(
+                "SELECT parent_thread_id, frozen_context FROM threads WHERE id = ?1",
+                vec![Value::Text(id.clone())],
+            ))
+            .await?
+            .ok_or_else(not_found)?;
+        if !matches!(row.first(), Some(Value::Null)) {
+            return Err(invalid_input("child sessions cannot be archived"));
+        }
+        if !matches!(row.get(1), Some(Value::Text(_))) {
+            return Err(invalid_input("draft sessions cannot be archived"));
+        }
+        let counts = self.commit_effects("set_session_archived", &[id.clone(), archived.to_string()],
+            vec![StatementSpec::new(
+                "UPDATE threads SET archived = ?1 WHERE id = ?2 AND parent_thread_id IS NULL AND frozen_context IS NOT NULL",
+                vec![Value::Integer(i64::from(archived)), Value::Text(id.clone())],
+            )], id).await?;
+        match counts.first() {
+            None | Some(1) => Ok(()),
+            Some(0) => Err(invalid_input("session is not an archivable root")),
+            _ => Err(super::session_codec::corrupt(
+                "archive updated multiple sessions",
+            )),
+        }
     }
 
     async fn list_children(&self, parent: &ThreadId) -> SessionResourceResult<Vec<ThreadMeta>> {
@@ -629,8 +716,33 @@ impl SessionDataPort for RemoteSessionData {
         self.write_history_append(id, payloads).await
     }
 
+    async fn append_reminder_if_absent(
+        &self,
+        id: &ThreadId,
+        message_id: MessageId,
+        reminder: &TrustedSystemReminder,
+    ) -> SessionResourceResult<bool> {
+        self.write_reminder_if_absent(id, message_id, reminder)
+            .await
+    }
+
+    async fn mark_session_closing(&self, id: &ThreadId) -> SessionResourceResult<()> {
+        self.write_close_intent(id).await
+    }
+
+    async fn is_session_closing(&self, id: &ThreadId) -> SessionResourceResult<bool> {
+        self.read_close_intent(id).await
+    }
+
     async fn save_fork(&self, fork: &ForkSnapshot) -> SessionResourceResult<()> {
         self.write_fork(fork).await
+    }
+    async fn save_fork_in_workspace(
+        &self,
+        fork: &ForkSnapshot,
+        workspace: &ResolvedWorkspace,
+    ) -> SessionResourceResult<()> {
+        self.write_fork_in_workspace(fork, workspace).await
     }
 
     async fn save_child(&self, child: &ChildSnapshot) -> SessionResourceResult<()> {
@@ -715,8 +827,8 @@ impl SessionDataPort for RemoteSessionData {
     ///
     /// 本方法只回答本机能回答的那部分：本机已没有可证明未结态的 durable 记录，会话数据
     /// 仍可读即可重载。**影响面**：进程崩溃前发出的远端请求若结果未知，本机无法再判定它
-    /// 是否生效——这是被撤销的能力，不是遗漏；未结清因此只在活跃租约上表达，崩溃后的未
-    /// 结清代际由 `execution_runs.clean = 0` 走既有的显式恢复流程。
+    /// 是否生效——这是被撤销的能力，不是遗漏；未结清只在当前实例的 persistence gate 上表达，进程退出后
+    /// 不由新的运行句柄宣称前次未知请求已结清。
     ///
     /// 若将来重新引入跨进程未决判定，移除条件是：本机重新持有「发送前登记、确定终态才
     /// 结清」的记录，并且远端账本的终态封闭仍按同一唯一键空间竞争。
@@ -731,8 +843,7 @@ impl SessionDataPort for RemoteSessionData {
 
     /// 远端没有异步写入队列，本机也没有未结清记录可供等待，因此没有可排空的东西。
     ///
-    /// 在途请求的等待由门面按活跃租约完成（`drain_persistence` 先等 `wait_for_in_flight`
-    /// 并检查 `is_uncertain`），adapter 自己不做时序假设。
+    /// 在途请求的等待由门面通过当前实例的 persistence gate 完成，adapter 自己不做时序假设。
     async fn drain(&self, _id: &ThreadId) -> SessionResourceResult<()> {
         Ok(())
     }
@@ -746,7 +857,7 @@ impl SessionDataPort for RemoteSessionData {
     /// 「确认」的范围是**本机传输面关闭成功**（见 [`RemoteStore::close`] 与 `remote` 模块
     /// 文档的 shutdown 定义）：它不证明服务端连接已释放，也不证明任何未知的远端写没有生效——
     /// v10 撤销本机操作日志后，本机已没有可以向远端账本求证的 durable 锚点，这条判定只剩下
-    /// 「活跃租约上的未结清标记」与「崩溃后 `execution_runs.clean = 0` 的显式恢复」两条路。
+    /// 当前实例 persistence gate 的未结清标记；重开不构成对前次未知写入效果的证明。
     async fn close(&self) -> SessionResourceResult<()> {
         // 唯一的翻转点：取走服务中的连接（已经在关闭中时复用同一个句柄）。
         let closing = { self.slot.write().await.begin_close() };

@@ -26,7 +26,7 @@ use ratatui_kit::{
         widgets::{Paragraph, Wrap},
     },
 };
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 /// 状态栏第 1 行：权限模式 · cwd · provider/model · bg tasks
 ///（CPU%/MEM/ctx 已迁移 composer footer 资源线，见 input_area.rs）
@@ -39,12 +39,11 @@ fn StatusBarRow1(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
     let mode_hl = hooks.use_atom(&atoms::MODE_HIGHLIGHT_UNTIL);
     let bg_tasks = hooks.use_atom(&atoms::BG_TASKS);
     let preparing = hooks.use_atom(&atoms::SESSION_PREPARING);
-    let read_only = hooks.use_atom(&atoms::SESSION_READ_ONLY);
     let goal_store = hooks.use_atom(&atoms::GOAL_SNAPSHOT);
 
     let snap = snap.read().clone();
     let goal = goal_store.read().clone();
-    let now = Instant::now();
+    let now = peri_time::monotonic_now();
     // provider 不单独显示；provider 或 model 任一变化都让模型段闪烁提醒
     let model_highlighted = model_hl.read().as_ref().is_some_and(|t| *t > now)
         || provider_hl.read().as_ref().is_some_and(|t| *t > now);
@@ -153,17 +152,6 @@ fn StatusBarRow1(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
         ));
     }
 
-    // 7. 只读准入
-    //    这条会话历史可读但没有执行所有权：提交会被 host 的同一道闸门拒绝，这里说明
-    //    原因（准入本身不再报错，只在进程日志留 warning）。
-    if let Some(reason) = read_only.read().as_ref() {
-        spans.push(separator());
-        spans.push(Span::styled(
-            read_only_label(reason),
-            Style::default().fg(THEME_ATOM.state().read().semantic.status.warning),
-        ));
-    }
-
     // 根据可用宽度动态决定是否需要折行（单行 → 双行）
     let total_width = Line::from(spans.clone()).width() as u16;
     let prev_size = hooks.use_previous_size();
@@ -263,7 +251,7 @@ fn StatusBarRow2(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
     let is_popup = popup_kind.read().is_some();
     let is_at = *at_active.read();
     let is_slash = *slash_active.read();
-    let now = Instant::now();
+    let now = peri_time::monotonic_now();
 
     // 复制提示优先于其他 hints。
     // [TRAP] 只读 atom 判断过期——禁止在 render body 中写 atom（render→write→render 自激）。
@@ -340,7 +328,7 @@ fn NotifRow(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
     let show_notif = notif_store
         .read()
         .as_ref()
-        .is_some_and(|n| Instant::now() < n.until);
+        .is_some_and(|n| peri_time::monotonic_now() < n.until);
     let notif_text = if show_notif {
         notif_store
             .read()
@@ -588,21 +576,6 @@ fn permission_mode_display(mode: &str) -> String {
 /// 只做「事实 → 文案」映射；位置与样式由 `StatusBarRow1` 决定。
 fn preparing_label(preparing: bool) -> Option<String> {
     preparing.then(|| i18n::tr("statusbar-preparing"))
-}
-
-/// 只读准入的原因标签：说明这条会话为什么执行不了，而不是只说「只读」。
-fn read_only_label(reason: &peri_acp_types::workspace::ReadOnlyAdmission) -> String {
-    match reason {
-        peri_acp_types::workspace::ReadOnlyAdmission::ExecutionBusy => {
-            i18n::tr("statusbar-read-only-busy")
-        }
-        peri_acp_types::workspace::ReadOnlyAdmission::RecoveryRequired(_) => {
-            i18n::tr("statusbar-read-only-recovery")
-        }
-        peri_acp_types::workspace::ReadOnlyAdmission::ExecutionLeaseRequired => {
-            i18n::tr("statusbar-read-only-store")
-        }
-    }
 }
 
 fn permission_mode_color(mode: &str) -> ratatui::style::Color {

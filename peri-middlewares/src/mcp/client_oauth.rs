@@ -1,7 +1,7 @@
 use std::sync::Arc;
 
 use super::{
-    auth_store::FileCredentialStore,
+    auth_store::static_credential_key,
     client::{
         build_authed_transport, ClientStatus, McpClientHandle, McpClientPool, McpPoolError,
         McpServiceWrapper, OAuthStartDisposition, OAuthStatus, HTTP_CONNECT_TIMEOUT,
@@ -9,7 +9,7 @@ use super::{
     },
     initialize::{
         commit_discovery_failure, commit_discovery_success, downgrade_resource_listing,
-        fail_tool_discovery, list_discovered_tools,
+        fail_tool_discovery, fail_workspace_resource_discovery, list_discovered_tools,
     },
     oauth_flow::{OAuthFailureKind, OAuthFlowEvent, OAuthFlowManager},
 };
@@ -23,9 +23,9 @@ impl McpClientPool {
     /// `AuthorizationManager` 重建认证传输层并连接。
     ///
     /// 无 `oauth_event_callback`（TUI 面板池，UI 无法弹 popup）时降级为
-    /// 快速路径：仅尝试恢复磁盘凭证连接，不启动完整授权（不弹窗、不阻塞）；
+    /// 快速路径：仅尝试恢复存储凭证连接，不启动完整授权（不弹窗、不阻塞）；
     /// 凭据缺失/失效时保持 `NeedsAuthorization`，由 host pool 授权完成后
-    /// 各 pool 经共享 `FileCredentialStore` 恢复。
+    /// 各 pool 经宿主注入的 MCP 凭据客户端恢复。
     pub fn spawn_oauth_flow(self: &Arc<Self>, server_name: &str) {
         let flow_id = uuid::Uuid::now_v7().to_string();
         let _ = self.spawn_oauth_flow_with_id(server_name, &flow_id);
@@ -76,7 +76,7 @@ impl McpClientPool {
 
     /// 执行 OAuth 授权流程（异步，两轮尝试）。
     ///
-    /// `quick_only=true`（面板池路径）：只跑第一轮「恢复磁盘凭证 → 连接」，
+    /// `quick_only=true`（面板池路径）：只跑第一轮「恢复存储凭证 → 连接」，
     /// 凭据失效时不清除、不启动完整授权，直接返回错误（保持 NeedsAuthorization）。
     /// `quick_only=false`（host pool 路径）：第一轮恢复失败/凭据失效时清除
     /// 失效凭证，第二轮走完整授权（DCR + PKCE + AuthorizationNeeded 弹 popup）。
@@ -118,12 +118,20 @@ impl McpClientPool {
                 super::config::OAuthConfig::default()
             }
         };
-        let ts = Arc::new(FileCredentialStore::new());
+        let ts = self.oauth_credentials().map_err(|error| {
+            let error = McpPoolError::ConnectionFailed {
+                server: server_name.to_string(),
+                reason: error.to_string(),
+            };
+            self.emit_oauth_failure(flow_id, server_name, OAuthFailureKind::Internal, &error);
+            error
+        })?;
+        let credential_key = static_credential_key(server_name, &url, &oauth_cfg);
         let event_cb = self
             .oauth_event_callback()
             .unwrap_or_else(|| Arc::new(|_| {}) as Arc<dyn Fn(OAuthFlowEvent) + Send + Sync>);
 
-        // 两轮尝试：第一轮优先恢复磁盘凭证（可能已过期/被 revoke）；恢复后
+        // 两轮尝试：第一轮优先恢复存储凭证（可能已过期/被 revoke）；恢复后
         // 连接仍要求授权（401）时清除失效凭证，第二轮走完整授权流程（弹
         // popup 让用户重新授权）。第二轮再失败直接返回错误。
         // quick_only（面板池路径）只跑第一轮：401 时不清除凭据、不完整授权。
@@ -171,7 +179,7 @@ impl McpClientPool {
 
             // 使用认证传输层重新连接
             let headers = cfg.headers.clone().unwrap_or_default();
-            let result = tokio::time::timeout(
+            let result = peri_time::timeout(
                 HTTP_CONNECT_TIMEOUT,
                 rmcp::service::serve_client(
                     super::client::mcpp_client_info_for_profile(&self.capability_profile),
@@ -185,6 +193,7 @@ impl McpClientPool {
                     let service = self.retain_service(McpServiceWrapper::Default(rs));
                     let rs = &service;
                     let peer = rs.peer().clone();
+                    self.configure_peer_cache(&peer).await;
                     let cache_version = self.install_peer_cache_version(server_name, &peer);
                     // 严格发现：`tools/list` 的 `Err` 不是「没有工具」。System MCP 走
                     // 本次 live round-trip（不用历史缓存代替健康证据），失败即
@@ -212,6 +221,29 @@ impl McpClientPool {
                     let resources = match self.list_all_resources_cached(server_name, &peer).await {
                         Ok(resources) => resources,
                         Err(error) => {
+                            if matches!(
+                                cfg.source,
+                                Some(super::config::ConfigSource::WorkspaceRemote)
+                            ) {
+                                let mut service = service;
+                                let _ = service.close_with_timeout(SHUTDOWN_TIMEOUT).await;
+                                fail_workspace_resource_discovery(
+                                    self,
+                                    server_name,
+                                    &error.to_string(),
+                                );
+                                let error = McpPoolError::ResourceDiscoveryFailed {
+                                    server: server_name.to_string(),
+                                    reason: error.to_string(),
+                                };
+                                self.emit_oauth_failure(
+                                    flow_id,
+                                    server_name,
+                                    OAuthFailureKind::ConnectionFailed,
+                                    &error,
+                                );
+                                return Err(error);
+                            }
                             downgrade_resource_listing(server_name, &error.to_string());
                             Vec::new()
                         }
@@ -230,7 +262,6 @@ impl McpClientPool {
                         oauth_status: OAuthStatus::Authorized,
                         source: cfg.source.clone(),
                         url: cfg.url.clone(),
-                        channel_capable: false,
                         skills_capable,
                     });
                     let committed = Arc::clone(&handle);
@@ -254,10 +285,22 @@ impl McpClientPool {
                     let err_str = e.to_string();
                     if Self::is_auth_required_error(&err_str, true) {
                         if attempt == 0 && !quick_only {
-                            // 磁盘凭证已失效（过期/被服务端 revoke）：清除后
+                            // 存储凭证已失效（过期/被服务端 revoke）：清除后
                             // 第二轮走完整授权（弹 popup），保证用户可重新授权。
                             tracing::info!(server = %server_name, "恢复的 OAuth 凭证已失效，清除并重新授权");
-                            let _ = ts.clear_server(server_name).await;
+                            ts.clear_server(&credential_key).await.map_err(|error| {
+                                let error = McpPoolError::ConnectionFailed {
+                                    server: server_name.to_string(),
+                                    reason: error.to_string(),
+                                };
+                                self.emit_oauth_failure(
+                                    flow_id,
+                                    server_name,
+                                    OAuthFailureKind::Internal,
+                                    &error,
+                                );
+                                error
+                            })?;
                             continue;
                         }
                         Self::insert_needs_auth(self, server_name, err_str.clone());
@@ -317,9 +360,33 @@ impl McpClientPool {
 
     /// 清除指定服务器的 OAuth 凭证并断开连接
     pub async fn clear_oauth(self: &Arc<Self>, server_name: &str) -> Result<(), McpPoolError> {
-        // 1. 清除 token 文件中的凭证
-        let store = FileCredentialStore::new();
-        let _ = store.clear_server(server_name).await;
+        let cfg = self
+            .configs
+            .read()
+            .get(server_name)
+            .cloned()
+            .ok_or_else(|| McpPoolError::NotConnected {
+                server: server_name.to_string(),
+                status: ClientStatus::Disconnected,
+            })?;
+        let oauth = cfg
+            .oauth
+            .filter(|oauth| oauth.is_enabled())
+            .unwrap_or_default();
+        let credential_key =
+            static_credential_key(server_name, cfg.url.as_deref().unwrap_or(""), &oauth);
+        let store = self
+            .oauth_credentials()
+            .map_err(|error| McpPoolError::ConnectionFailed {
+                server: server_name.to_string(),
+                reason: error.to_string(),
+            })?;
+        store.clear_server(&credential_key).await.map_err(|error| {
+            McpPoolError::ConnectionFailed {
+                server: server_name.to_string(),
+                reason: error.to_string(),
+            }
+        })?;
 
         // 2. 关闭连接
         let service = { self.services.lock().remove(server_name) };
@@ -353,7 +420,6 @@ impl McpClientPool {
                 source,
                 url,
                 skills_capable: false,
-                channel_capable: false,
             }),
         );
         self.record_status_change(server_name, old_status.as_ref());

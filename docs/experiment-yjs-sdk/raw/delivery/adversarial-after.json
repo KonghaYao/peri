@@ -1,0 +1,17 @@
+[
+  {
+    "attack": "subscribe during close in admission flush",
+    "admitted": false,
+    "error": "Error: Yjs sync is closed",
+    "chatListeners": 0
+  },
+  {
+    "attack": "unsubscribe inside rejecting async sender",
+    "unhandledRejections": []
+  },
+  {
+    "attack": "reentrant subscribe while pending both docs",
+    "replicaText": "AB",
+    "sessionVersion": 2
+  }
+]

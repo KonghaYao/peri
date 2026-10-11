@@ -15,12 +15,12 @@
 
 use peri_acp_types::messages::MessageId;
 use peri_acp_types::session_resources::{
-    ChildSnapshot, ForkSnapshot, NewSession, SessionMetaPatch, SessionResourceError,
-    SessionResourceErrorKind, SessionResourceResult,
+    ChildSnapshot, ForkSnapshot, FrozenSnapshotBytes, NewSession, NewSessionDraft,
+    SessionMetaPatch, SessionResourceError, SessionResourceErrorKind, SessionResourceResult,
 };
 use peri_acp_types::store::MessageFlags;
 use peri_acp_types::thread::ThreadId;
-use peri_acp_types::workspace::{SessionBinding, WorkspaceError};
+use peri_acp_types::workspace::{ResolvedWorkspace, SessionBinding, WorkspaceError};
 
 use crate::sessions::data::ensure_child_relation;
 
@@ -32,10 +32,95 @@ use super::session_sql::{self, SessionInsert};
 use super::sql::StatementSpec;
 
 impl RemoteSessionData {
+    fn workspace_registration_statements(
+        &self,
+        workspace: &ResolvedWorkspace,
+    ) -> SessionResourceResult<Vec<StatementSpec>> {
+        let machine_id = self.machine_id.as_str();
+        let path = workspace
+            .root
+            .to_str()
+            .ok_or_else(|| invalid_input("workspace path is not UTF-8"))?;
+        let evidence = workspace
+            .discovery_snapshot
+            .as_deref()
+            .ok_or_else(|| invalid_input("workspace creation evidence is unavailable"))?;
+        let snapshot: serde_json::Value = serde_json::from_str(evidence)
+            .map_err(|_| invalid_input("workspace creation evidence is invalid"))?;
+        if snapshot.get("root").and_then(serde_json::Value::as_str) != Some(path) {
+            return Err(invalid_input(
+                "workspace creation evidence does not match root",
+            ));
+        }
+        let discovered = ["common_dir", "private_dir"]
+            .iter()
+            .any(|field| snapshot.get(*field).is_some_and(|value| !value.is_null()));
+        Ok(vec![
+            StatementSpec::new("INSERT OR IGNORE INTO machines(id, name, identity_kind) VALUES (?1, '我的电脑', 'known')",
+                vec![turso_serverless::Value::Text(machine_id.to_owned())]),
+            StatementSpec::new("INSERT OR IGNORE INTO workspaces(id, machine_id, path, path_source) VALUES (?1, ?2, ?3, ?4)",
+                vec![turso_serverless::Value::Text(workspace.workspace_id.to_string()),
+                    turso_serverless::Value::Text(machine_id.to_owned()),
+                    turso_serverless::Value::Text(path.to_owned()),
+                    turso_serverless::Value::Text(if discovered { "discovered" } else { "unverified" }.to_owned())]),
+            StatementSpec::new("INSERT INTO peri_store_meta(singleton) SELECT 0 WHERE NOT EXISTS (SELECT 1 FROM workspaces WHERE id = ?1 AND machine_id = ?2 AND path = ?3)",
+                vec![turso_serverless::Value::Text(workspace.workspace_id.to_string()),
+                    turso_serverless::Value::Text(machine_id.to_owned()),
+                    turso_serverless::Value::Text(path.to_owned())]),
+        ])
+    }
+
+    pub(super) async fn write_new_session_in_workspace(
+        &self,
+        input: &NewSession,
+        workspace: &ResolvedWorkspace,
+    ) -> SessionResourceResult<()> {
+        if input.meta.parent_thread_id.is_some() {
+            return Err(invalid_input(
+                "child sessions must be saved through the child path",
+            ));
+        }
+        let mut row = session_sql::session_insert(input, 0, None);
+        row.owner_workspace_id = Some(workspace.workspace_id);
+        row.discovery_snapshot = workspace.discovery_snapshot.as_deref();
+        let mut statements = self.workspace_registration_statements(workspace)?;
+        statements.extend(session_sql::insert_session_statements(&row)?);
+        let inputs = session_inputs(input);
+        self.commit_effects("create_session", &inputs, statements, &input.thread_id)
+            .await
+            .map(|_| ())
+    }
+
+    pub(super) async fn write_new_session_draft_in_workspace(
+        &self,
+        draft: &NewSessionDraft,
+        workspace: &ResolvedWorkspace,
+    ) -> SessionResourceResult<()> {
+        if draft.meta.parent_thread_id.is_some() {
+            return Err(invalid_input(
+                "child sessions must be saved through the child path",
+            ));
+        }
+        let mut statements = self.workspace_registration_statements(workspace)?;
+        statements.extend(session_sql::insert_session_draft_statements(
+            draft,
+            Some(workspace.workspace_id),
+            workspace.discovery_snapshot.as_deref(),
+        )?);
+        let inputs = draft_inputs(draft);
+        self.commit_effects(
+            "begin_initialization",
+            &inputs,
+            statements,
+            &draft.thread_id,
+        )
+        .await
+        .map(|_| ())
+    }
     /// 保存新会话：meta + 不可变绑定 + frozen 完整落库（执行准入由本机执行面另行完成）。
     pub(super) async fn write_new_session(&self, input: &NewSession) -> SessionResourceResult<()> {
         // 远程新建只接受 **root**：带父的会话必须走 `save_child`，那里才有父子/根归属判定
-        // （`data::ensure_child_relation`）、root owner 门禁与 frozen 继承。
+        // （`data::ensure_child_relation`）、root 关系检查与 frozen 继承。
         //
         // 这条判定原先挂在已撤销的远程执行面（`remote/local_execution.rs`）上，v10 撤销把
         // 那个文件连同它一起删掉了（真云回归因此转红：`cloud_limit_test.rs` 的
@@ -58,8 +143,79 @@ impl RemoteSessionData {
             .map(|_| ())
     }
 
+    /// 保存未发布创建（J2 第一阶段）：身份/绑定落库，frozen 暂空。
+    ///
+    /// 与新会话同一条规则（远程只接受 root）；frozen 由
+    /// [`Self::write_commit_frozen`] 以 write-once CAS 一次性提交。
+    pub(super) async fn write_new_session_draft(
+        &self,
+        draft: &NewSessionDraft,
+    ) -> SessionResourceResult<()> {
+        if draft.meta.parent_thread_id.is_some() {
+            return Err(invalid_input(
+                "child sessions must be saved through the child path",
+            ));
+        }
+        let statements = session_sql::insert_session_draft_statements(draft, None, None)?;
+        let inputs = draft_inputs(draft);
+        self.commit_effects(
+            "begin_initialization",
+            &inputs,
+            statements,
+            &draft.thread_id,
+        )
+        .await
+        .map(|_| ())
+    }
+
+    /// 一次性提交 frozen（write-once CAS）：受影响行数必须恰为 1。
+    pub(super) async fn write_commit_frozen(
+        &self,
+        id: &ThreadId,
+        frozen: &FrozenSnapshotBytes,
+    ) -> SessionResourceResult<()> {
+        let statements = vec![session_sql::commit_frozen_statement(
+            id.as_str(),
+            frozen.as_str(),
+        )];
+        let inputs = vec![
+            format!("id:{}", id.as_str()),
+            format!("frozen:{}", frozen.as_str()),
+        ];
+        let counts = self
+            .commit_effects("commit_frozen", &inputs, statements, id)
+            .await?;
+        match counts.first() {
+            // 重放：原操作已生效，效果落在第一次提交里。
+            None => Ok(()),
+            Some(1) => Ok(()),
+            Some(0) => Err(SessionResourceError::conflict(
+                "session frozen snapshot was already committed",
+            )),
+            Some(_) => Err(corrupt(
+                "frozen snapshot commit did not apply to exactly one row",
+            )),
+        }
+    }
+
     /// 保存 fork：source 不变，目标带映射后的 payload 与 flags。
     pub(super) async fn write_fork(&self, fork: &ForkSnapshot) -> SessionResourceResult<()> {
+        self.write_fork_with_workspace(fork, None).await
+    }
+
+    pub(super) async fn write_fork_in_workspace(
+        &self,
+        fork: &ForkSnapshot,
+        workspace: &ResolvedWorkspace,
+    ) -> SessionResourceResult<()> {
+        self.write_fork_with_workspace(fork, Some(workspace)).await
+    }
+
+    async fn write_fork_with_workspace(
+        &self,
+        fork: &ForkSnapshot,
+        workspace: Option<&ResolvedWorkspace>,
+    ) -> SessionResourceResult<()> {
         if fork.target.thread_id == fork.source_id {
             return Err(invalid_input("fork target must differ from its source"));
         }
@@ -80,8 +236,17 @@ impl RemoteSessionData {
         if !self.exists(&fork.source_id).await? {
             return Err(not_found());
         }
-        let insert = session_sql::session_insert(&fork.target, fork.payloads.len() as i64, None);
-        let mut statements = session_sql::insert_session_statements(&insert)?;
+        let mut insert =
+            session_sql::session_insert(&fork.target, fork.payloads.len() as i64, None);
+        if let Some(workspace) = workspace {
+            insert.owner_workspace_id = Some(workspace.workspace_id);
+            insert.discovery_snapshot = workspace.discovery_snapshot.as_deref();
+        }
+        let mut statements = workspace
+            .map(|workspace| self.workspace_registration_statements(workspace))
+            .transpose()?
+            .unwrap_or_default();
+        statements.extend(session_sql::insert_session_statements(&insert)?);
         for payload in &fork.payloads {
             statements.push(session_sql::insert_message_statement(
                 &fork.target.thread_id,
@@ -167,7 +332,7 @@ impl RemoteSessionData {
         {
             return Ok(());
         }
-        let now = chrono::Utc::now().to_rfc3339();
+        let now = peri_time::now_utc_rfc3339();
         let title_input = patch_input(&patch.title);
         let status_input = patch
             .status
@@ -212,7 +377,7 @@ impl RemoteSessionData {
     ///
     /// 本机**不再**为这些操作留日志（v10 删除了 `session_remote_operations`，用户裁决不做
     /// 跨安装能力）：跨进程重启后没有「按原 id 向远端求证」这条路径，未结清只在本进程的
-    /// 租约上表达，进程崩溃的未结清代际由 `execution_runs.clean = 0` 表达。
+    /// persistence gate 上表达；进程重开不会自动证明前次未知写入的终态。
     pub(super) async fn commit_effects(
         &self,
         behavior: &str,
@@ -259,6 +424,32 @@ fn patch_input(slot: &Option<Option<String>>) -> String {
 /// 身份不由内容派生（id 每次唯一），摘要只用于事后一致性校验；但校验要成立，摘要就必须
 /// 覆盖领域输入的全部字段：漏掉 binding/metadata 时，两次「内容摘要相同、实际写入不同」
 /// 的操作会被判成同一次，那正是身份模型出错的表现，不能靠事后补字段掩盖。
+/// 未发布创建的摘要输入：与 [`session_inputs`] 同一组领域事实，只是**没有** frozen
+/// （frozen 尚未成立，不能进摘要；提交是另一次操作）。
+fn draft_inputs(draft: &NewSessionDraft) -> Vec<String> {
+    let meta = &draft.meta;
+    vec![
+        format!("thread:{}", draft.thread_id.as_str()),
+        format!("created_at:{}", draft.created_at),
+        format!("title:{}", meta.title.as_deref().unwrap_or("<none>")),
+        format!("cwd:{}", meta.cwd),
+        format!(
+            "parent:{}",
+            meta.parent_thread_id.as_deref().unwrap_or("<none>")
+        ),
+        format!("hidden:{}", u8::from(meta.hidden)),
+        format!("cancel_policy:{}", meta.cancel_policy.as_str()),
+        format!(
+            "snapshot_at:{}",
+            meta.snapshot_at_message_id
+                .as_ref()
+                .map(|id| id.as_uuid().to_string())
+                .unwrap_or_else(|| "<none>".to_owned())
+        ),
+        binding_input(&draft.binding),
+    ]
+}
+
 fn session_inputs(input: &NewSession) -> Vec<String> {
     let meta = &input.meta;
     vec![

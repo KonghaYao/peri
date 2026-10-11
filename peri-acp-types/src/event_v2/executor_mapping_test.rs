@@ -507,15 +507,19 @@ fn test_observe_subagent_lifecycle_maps() {
         child_agent_id: child,
         agent_name: "researcher".to_string(),
         is_background: false,
+        parent_tool_call_id: Some("tool-call-7".to_string()),
     };
     match observe_event_to_executor(start).unwrap() {
         ExecutorEvent::SubagentStarted {
             agent_name,
             is_background,
+            parent_tool_call_id,
             ..
         } => {
             assert_eq!(agent_name, "researcher");
             assert!(!is_background);
+            // 父工具调用身份必须透传（TUI 配对依据），不能被映射层丢弃。
+            assert_eq!(parent_tool_call_id.as_deref(), Some("tool-call-7"));
         }
         _ => panic!("应为 SubagentStarted"),
     }

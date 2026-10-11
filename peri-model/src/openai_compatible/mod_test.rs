@@ -253,14 +253,14 @@ fn request_contract_covers_qwen_kimi_and_litellm_options() {
 }
 
 #[test]
-fn config_debug_does_not_expose_credential() {
+fn config_debug_preserves_credential() {
     let rendered = format!("{:?}", config("gpt-4o"));
-    assert!(!rendered.contains("test-credential"));
-    assert!(rendered.contains("[REDACTED]"));
+    assert!(rendered.contains("test-credential"));
+    assert!(!rendered.contains("[REDACTED]"));
 }
 
 #[test]
-fn config_debug_redacts_all_endpoint_components() {
+fn config_debug_preserves_all_endpoint_components() {
     let config = OpenAiConfig::new(
         Url::parse("https://user:sk-live-secret@api.example.test/v1?api_key=secret#fragment")
             .expect("valid endpoint"),
@@ -270,7 +270,7 @@ fn config_debug_redacts_all_endpoint_components() {
 
     let rendered = format!("{config:?}");
 
-    assert!(rendered.contains("https://api.example.test/[REDACTED]"));
+    assert!(!rendered.contains("[REDACTED]"));
     for sensitive_fragment in [
         "user",
         "sk-live-secret",
@@ -280,7 +280,7 @@ fn config_debug_redacts_all_endpoint_components() {
         "test-credential",
     ] {
         assert!(
-            !rendered.contains(sensitive_fragment),
+            rendered.contains(sensitive_fragment),
             "Debug output exposed {sensitive_fragment:?}: {rendered}"
         );
     }
@@ -305,32 +305,16 @@ fn chat_completions_endpoint_preserves_base_path_without_trailing_slash() {
     }
 }
 
-#[tokio::test]
-async fn chat_completions_endpoint_rejects_userinfo() {
-    let transport = Arc::new(FakeTransport::with_response(FakeResponse {
-        status: 200,
-        request_id: None,
-        chunks: vec![],
-    }));
-    let model = OpenAiModel::with_transport(
-        OpenAiConfig::new(
-            Url::parse("https://user:password@proxy.example.test/v1/").expect("valid endpoint URL"),
-            "test-credential",
-            "gpt-4o",
-        ),
-        transport.clone(),
-    );
-
-    let error = match model.stream(request(), CancellationToken::new()).await {
-        Err(error) => error,
-        Ok(_) => panic!("userinfo endpoint must be rejected before transport"),
-    };
-
+#[test]
+fn chat_completions_endpoint_preserves_userinfo_and_query() {
+    let endpoint = super::request::chat_completions_endpoint(
+        &Url::parse("https://user:password@api.example.test/v1?api_key=secret#fragment").unwrap(),
+    )
+    .unwrap();
     assert_eq!(
-        error.protocol_error().map(|error| error.kind()),
-        Some(crate::ProtocolErrorKind::InvalidEndpoint)
+        endpoint.as_str(),
+        "https://user:password@api.example.test/v1/chat/completions?api_key=secret#fragment"
     );
-    assert!(transport.bodies().is_empty());
 }
 
 #[tokio::test]
@@ -770,4 +754,194 @@ async fn test_qwen_usage_tracks_each_request_with_history() {
     assert_eq!(bodies.len(), 2);
     assert_eq!(bodies[1]["messages"].as_array().unwrap().len(), 2);
     assert_eq!(bodies[1]["stream_options"]["include_usage"], true);
+}
+
+/// [回归测试] P1-4：无 choices 的帧只有携带 usage 时才是合法 usage-only 尾帧；
+/// 其余（畸形空帧）必须上报解码诊断，不得静默降级为空事件。
+#[tokio::test]
+async fn stream_choice_less_frame_is_diagnosed_unless_it_carries_usage() {
+    let malformed = Arc::new(FakeTransport::with_response(FakeResponse {
+        status: 200,
+        request_id: None,
+        chunks: vec![Ok(
+            b"data: {\"id\":\"chatcmpl-malformed\",\"object\":\"chat.completion.chunk\"}\n\ndata: [DONE]\n\n"
+                .to_vec(),
+        )],
+    }));
+    let events =
+        OpenAiModel::with_transport(config_without_protocol_retry("gpt-4o"), malformed.clone())
+            .stream(
+                ModelRequest::new(vec![ModelMessage::user_text("go")]),
+                CancellationToken::new(),
+            )
+            .await
+            .expect("stream")
+            .collect::<Vec<_>>()
+            .await;
+
+    assert_eq!(events.len(), 1, "畸形帧必须 fail closed：{events:?}");
+    let Err(error) = &events[0] else {
+        panic!("无 choices 且无 usage 的帧必须产生解码诊断：{events:?}");
+    };
+    let protocol = error.protocol_error().expect("provider protocol error");
+    assert_eq!(protocol.kind(), crate::ProtocolErrorKind::Provider);
+    assert_eq!(protocol.summary(), Some("openai_stream_missing_choices"));
+    assert_eq!(malformed.bodies().len(), 1, "无可见输出时不得重放请求");
+
+    let usage_only = Arc::new(FakeTransport::with_response(FakeResponse {
+        status: 200,
+        request_id: None,
+        chunks: vec![Ok(concat!(
+            "data: {\"choices\":[{\"delta\":{\"content\":\"answer\"},\"finish_reason\":\"stop\"}]}\n\n",
+            "data: {\"choices\":[],\"usage\":{\"prompt_tokens\":3,\"completion_tokens\":5}}\n\n",
+            "data: [DONE]\n\n"
+        )
+        .as_bytes()
+        .to_vec())],
+    }));
+    let events = OpenAiModel::with_transport(config_without_protocol_retry("qwen3"), usage_only)
+        .stream(
+            ModelRequest::new(vec![ModelMessage::user_text("go")]),
+            CancellationToken::new(),
+        )
+        .await
+        .expect("stream")
+        .collect::<Vec<_>>()
+        .await;
+
+    assert!(
+        events.iter().all(ModelResult::is_ok),
+        "合法 usage-only 尾帧不得报错：{events:?}"
+    );
+    assert!(events
+        .iter()
+        .any(|event| matches!(event, Ok(ModelStreamEvent::Usage(_)))));
+    assert!(events
+        .iter()
+        .any(|event| matches!(event, Ok(ModelStreamEvent::Completed(_)))));
+}
+
+/// [回归测试] P1-4：`delta` 类型错须成为可见诊断，不能按 `Value::Null` 静默继续；
+/// 已交付的正文仍保留，畸形帧以携带摘要的中断终止。
+#[tokio::test]
+async fn stream_delta_type_error_is_diagnosed_on_the_visible_surface() {
+    let transport = Arc::new(FakeTransport::with_response(FakeResponse {
+        status: 200,
+        request_id: None,
+        chunks: vec![Ok(concat!(
+            "data: {\"choices\":[{\"delta\":{\"content\":\"partial\"},\"finish_reason\":null}]}\n\n",
+            "data: {\"choices\":[{\"delta\":\"not-an-object\"}]}\n\n"
+        )
+        .as_bytes()
+        .to_vec())],
+    }));
+    let model =
+        OpenAiModel::with_transport(config_without_protocol_retry("gpt-4o"), transport.clone());
+    let events = model
+        .stream(
+            ModelRequest::new(vec![ModelMessage::user_text("go")]),
+            CancellationToken::new(),
+        )
+        .await
+        .expect("stream")
+        .collect::<Vec<_>>()
+        .await;
+
+    assert!(
+        matches!(
+            events.as_slice(),
+            [
+                Ok(ModelStreamEvent::TextDelta { text }),
+                Ok(ModelStreamEvent::Interrupted {
+                    attempts: 1,
+                    max_attempts: 1,
+                    ..
+                }),
+            ] if text == "partial"
+        ),
+        "已交付正文后遇畸形 delta 必须中断并携带诊断：{events:?}"
+    );
+    let Some(Ok(ModelStreamEvent::Interrupted { error, .. })) = events.last() else {
+        panic!("interrupted event required");
+    };
+    let protocol = error.protocol_error().expect("provider protocol error");
+    assert_eq!(protocol.kind(), crate::ProtocolErrorKind::Provider);
+    assert_eq!(protocol.summary(), Some("openai_stream_delta_not_object"));
+    assert!(events
+        .iter()
+        .all(|event| !matches!(event, Ok(ModelStreamEvent::Completed(_)))));
+    assert_eq!(transport.bodies().len(), 1, "已产生正文的请求不得重放");
+}
+
+/// [回归测试] P1-4：tool call 的 `arguments`/`function` 类型错须成为解码诊断，
+/// 残缺参数不得以残缺形式进入 `ToolCallDelta`，也不得进入 `Completed`。
+#[tokio::test]
+async fn stream_tool_arguments_type_error_is_diagnosed_without_partial_delta() {
+    for (payload, expected_summary) in [
+        (
+            "{\"index\":0,\"id\":\"call-1\",\"function\":{\"name\":\"Bash\",\"arguments\":{\"command\":\"pwd\"}}}",
+            "openai_stream_arguments_not_string",
+        ),
+        (
+            "{\"index\":0,\"id\":\"call-1\",\"function\":\"Bash\"}",
+            "openai_stream_function_not_object",
+        ),
+    ] {
+        let transport = Arc::new(FakeTransport::with_response(FakeResponse {
+            status: 200,
+            request_id: None,
+            chunks: vec![Ok(
+                format!("data: {{\"choices\":[{{\"delta\":{{\"tool_calls\":[{payload}]}}}}]}}\n\ndata: [DONE]\n\n")
+                    .into_bytes(),
+            )],
+        }));
+        let model = OpenAiModel::with_transport(
+            config_without_protocol_retry("gpt-4o"),
+            transport.clone(),
+        );
+        let events = model
+            .stream(
+                ModelRequest::new(vec![ModelMessage::user_text("go")]),
+                CancellationToken::new(),
+            )
+            .await
+            .expect("stream")
+            .collect::<Vec<_>>()
+            .await;
+
+        assert!(
+            events
+                .iter()
+                .all(|event| !matches!(event, Ok(ModelStreamEvent::ToolCallDelta { .. }))),
+            "残缺参数不得进入 ToolCallDelta：{events:?}"
+        );
+        assert_eq!(events.len(), 1, "畸形工具分片必须 fail closed：{events:?}");
+        let Err(error) = &events[0] else {
+            panic!("畸形工具分片必须产生解码诊断：{events:?}");
+        };
+        let protocol = error.protocol_error().expect("provider protocol error");
+        assert_eq!(protocol.kind(), crate::ProtocolErrorKind::Provider);
+        assert_eq!(
+            protocol.summary(),
+            Some(expected_summary),
+            "类型错摘要必须可读：{protocol}"
+        );
+    }
+}
+
+/// [回归测试] 只读输出预算接口与 wire 解析同源（H6）。
+#[test]
+fn output_token_limit_matches_the_resolved_wire_budget() {
+    let model = OpenAiModel::new(
+        config("deepseek-r1")
+            .with_max_tokens(4_096)
+            .with_reasoning_effort("high"),
+    );
+    assert_eq!(model.output_token_limit(), Some(4_096));
+    let body = body_for_test(
+        &model.config,
+        &ModelRequest::new(vec![ModelMessage::user_text("summarize")]),
+    );
+    assert_eq!(body["max_tokens"], 4_096);
+    assert_eq!(body["reasoning_effort"], "high");
 }

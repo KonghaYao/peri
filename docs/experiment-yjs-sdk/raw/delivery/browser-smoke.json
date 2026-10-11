@@ -1,0 +1,34 @@
+{
+  "status": "passed",
+  "fixtureTools": 12000,
+  "initial": {
+    "children": 201,
+    "tools": 182,
+    "error": "",
+    "status": "已连接 · running"
+  },
+  "before": {
+    "payloadReads": 0
+  },
+  "expanded": {
+    "bodyBytes": 8241,
+    "open": true
+  },
+  "updated": {
+    "preserved": true,
+    "open": true,
+    "tail": true,
+    "children": 201
+  },
+  "after": {
+    "children": 401,
+    "stats": {
+      "payloadReads": 1
+    }
+  },
+  "longText": {
+    "visibleCharacters": 65561,
+    "fullBytes": 131072
+  },
+  "errors": []
+}

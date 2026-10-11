@@ -13,7 +13,7 @@
 //! - **AgentEvent DTO 已接入**：`peri/agent_event` 携带的 AcpEvent 变体
 //!   （SubagentStarted/SubagentStopped/TurnSuspended/RewindCompleted/...）
 //!   通过 `convert_agent_event` 转换为 AcpEventData 推入双 bridge channel。
-//!   未映射变体（StateSnapshot/BgToolStep/LspDiagnostics/ContextWarning/...）
+//!   未映射变体（StateSnapshot/BgToolStep/ContextWarning/...）
 //!   保持静默丢弃，S5+ 迭代扩展。
 //!
 //! 私有模块解码 DTO；本任务顺序发布 commands/plan/spinner 状态后推入 bridge，
@@ -97,7 +97,7 @@ fn spawn_kit_notifier_inner(
                             INPUT_BUFFER.state().write().clear();
                             *NOTIFICATION.state().write() = Some(crate::kit::atoms::Notification {
                                 message: i18n::tr("app-agent-disconnected"),
-                                until: std::time::Instant::now() + std::time::Duration::from_secs(5),
+                                until: peri_time::monotonic_now() + std::time::Duration::from_secs(5),
                             });
                             RENDER_HEARTBEAT.set(RENDER_HEARTBEAT.get().wrapping_add(1));
                             break;
@@ -112,7 +112,7 @@ fn spawn_kit_notifier_inner(
 /// 把单条 `AcpNotification` 转换并推入 bridge channel。
 ///
 /// 设计决策：session/update 是流式主通道（agent_message_chunk / tool_call 等），
-/// AgentDone 通过 TurnDone 转换，AgentEvent 通过 `convert_agent_event` 转换。
+/// AgentDone 保留已有 requestId，AgentEvent 通过 `convert_agent_event` 转换。
 fn forward_notification(
     bridge_tx: &mpsc::UnboundedSender<AcpEventWithEpoch>,
     n: AcpNotification,
@@ -163,6 +163,8 @@ fn forward_notification(
                     // 丢弃早于当前 turn 的 stale 取消事件（Issue 2026-08-05）。
                     request_id,
                 }
+            } else if request_id.is_some() {
+                AcpEventData::AgentDone { request_id }
             } else {
                 AcpEventData::TurnDone
             };
@@ -293,3 +295,40 @@ fn handle_session_update(
 #[cfg(test)]
 #[path = "acp_notifier_test.rs"]
 mod tests;
+
+#[cfg(test)]
+#[path = "acp_notifier_agent_test.rs"]
+mod agent_tests;
+
+#[cfg(test)]
+#[path = "acp_notifier_lifecycle_test.rs"]
+mod lifecycle_tests;
+
+#[cfg(test)]
+#[path = "acp_notifier_projection_test.rs"]
+mod projection_tests;
+
+#[cfg(test)]
+#[path = "acp_notifier_interaction_test.rs"]
+mod interaction_tests;
+
+#[cfg(test)]
+mod execution_done_test {
+    use super::*;
+
+    #[test]
+    fn test_agent_done_preserves_request_id_for_bridge() {
+        let (tx, mut rx) = mpsc::unbounded_channel();
+        forward_notification(
+            &tx,
+            AcpNotification::AgentDone {
+                session_id: "s1".into(),
+                stop_reason: "end_turn".into(),
+                request_id: Some("execution".into()),
+            },
+        );
+        assert!(matches!(rx.try_recv().unwrap(), AcpEventWithEpoch {
+            event: AcpEventData::AgentDone { request_id: Some(id) }, active_session_id,
+        } if id == "execution" && active_session_id == "s1"));
+    }
+}

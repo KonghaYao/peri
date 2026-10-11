@@ -1,0 +1,23 @@
+[package]
+name = "peri-config"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+peri-acp-types = { path = "../peri-acp-types" }
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+tracing.workspace = true
+sha2.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true
+serial_test.workspace = true
+
+[target.'cfg(not(target_os = "emscripten"))'.dependencies]
+peri-mcp-config.workspace = true
+
+[target.'cfg(target_os = "emscripten")'.dependencies]
+uuid.workspace = true
+dirs-next.workspace = true

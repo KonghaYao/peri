@@ -85,13 +85,11 @@ const ALL_DIMENSIONS = [
 4. **敏感数据**：API key/secret 泄漏、日志中的敏感信息
 5. **SSRF**：网络请求是否有 SSRF 防护
 6. **权限提升**：权限检查是否可绕过
-7. **加密安全**：sync 模块的加密实现是否安全
 
 重点关注：
 - peri-agent/src/llm/sse.rs（SSE 解析 - 外部数据）
 - peri-middlewares/src/hooks/（hooks 执行 - 命令注入）
 - peri-middlewares/src/mcp/（MCP 通信 - 外部数据）
-- peri-tui/src/sync/（同步模块 - 加密/网络）
 - peri-middlewares/src/hooks/ssrf_guard.rs（SSRF 防护）${extraFocusBlock}
 
 对每个发现，报告文件路径、行号、严重级别、具体描述、建议修复。用中文输出。`,

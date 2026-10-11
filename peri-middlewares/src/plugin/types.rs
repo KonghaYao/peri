@@ -7,8 +7,7 @@ use serde::{Deserialize, Serialize};
 // `InstalledPlugin` 等自本文件迁出；本模块保留 re-export 保兼容。
 pub use peri_acp_types::plugin::{
     InstallScope, InstalledPlugin, McpServerConfig, McpServerEntry, PluginAgent, PluginAuthor,
-    PluginChannel, PluginCommand, PluginCommandEntry, PluginLspServer, PluginManifest,
-    PluginOption, PluginOrigin,
+    PluginCommand, PluginCommandEntry, PluginManifest, PluginOption, PluginOrigin,
 };
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -28,7 +27,7 @@ pub struct MarketplacePlugin {
     pub homepage: Option<String>,
     #[serde(default)]
     pub tags: Option<Vec<String>>,
-    /// 保留 marketplace.json 中未声明的字段（lspServers、mcpServers、strict 等）
+    /// 保留 marketplace.json 中未声明的字段（mcpServers、strict 等）
     #[serde(flatten)]
     pub extra: serde_json::Value,
 }

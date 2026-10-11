@@ -64,8 +64,7 @@ pub fn TasksPanel(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
             match key.code {
                 KeyCode::Esc => close_panel(),
                 KeyCode::Enter => {
-                    // 选中 bg task：真实取消。Workflow 走 workflow/kill_run（kill 通道与
-                    // cancel-bg-task 已打通，见 issue 2026-08-05），Agent/Shell 走 cancel-bg-task。
+                    // All session task handles use the same ACP cancellation route.
                     let sel = *selected.read();
                     let bg_count = BG_TASKS.state().read().len();
                     if sel < bg_count
@@ -77,11 +76,7 @@ pub fn TasksPanel(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
                             let client = client.clone();
                             let sid = client.current_session_id().unwrap_or_default();
                             tokio::spawn(async move {
-                                let result = if kind == "workflow" {
-                                    client.kill_workflow_run(&sid, &task_id).await
-                                } else {
-                                    client.cancel_bg_task(&sid, &task_id).await
-                                };
+                                let result = client.cancel_bg_task(&sid, &task_id).await;
                                 match result {
                                     Ok(v) => tracing::info!(
                                         task_id = %task_id,

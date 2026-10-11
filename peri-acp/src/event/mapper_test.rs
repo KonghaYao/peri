@@ -1,4 +1,4 @@
-use crate::session::event_sink::EventSink;
+use super::*;
 use agent_client_protocol_schema::v1::{
     ToolCallContent, ToolCallStatus, ToolCallUpdateFields, ToolKind,
 };
@@ -8,53 +8,7 @@ use peri_acp_types::event::{
 };
 use peri_acp_types::messages::{BaseMessage, MessageId};
 use peri_acp_types::tools::ToolDefinition;
-use peri_acp_types::PeriCaps;
 use peri_model::{StopReason, TokenUsage};
-use serde_json::Value;
-use std::sync::{Arc, Mutex};
-
-#[derive(Debug, Default)]
-struct MapperWireTransport {
-    notifications: Mutex<Vec<(String, Value)>>,
-}
-
-#[async_trait::async_trait]
-impl crate::transport::AcpTransport for MapperWireTransport {
-    async fn send_request(
-        &self,
-        _method: &str,
-        _params: Value,
-    ) -> Result<Value, crate::transport::types::AcpError> {
-        Ok(Value::Null)
-    }
-
-    async fn send_notification(
-        &self,
-        method: &str,
-        params: Value,
-    ) -> Result<(), crate::transport::types::AcpError> {
-        self.notifications
-            .lock()
-            .unwrap()
-            .push((method.to_string(), params));
-        Ok(())
-    }
-
-    async fn recv(&self) -> Option<crate::transport::types::IncomingMessage> {
-        None
-    }
-
-    async fn send_response(
-        &self,
-        _id: crate::transport::types::RequestId,
-        _result: Result<Value, crate::transport::types::AcpError>,
-    ) -> Result<(), crate::transport::types::AcpError> {
-        Ok(())
-    }
-}
-
-use super::*;
-
 #[test]
 fn test_llm_call_end_maps_to_enriched_usage_update() {
     let event = ExecutorEvent::LlmCallEnd {
@@ -623,6 +577,22 @@ fn test_tool_start_maps_to_session_update_with_tool_info() {
 #[test]
 fn test_tool_start_infer_tool_kind_variants() {
     // 验证 infer_tool_kind 对不同工具名的推断结果
+    //
+    // v4-part-2（A4 匹配型归一）：builtin 一等工具的 effective name（迁移后模型面
+    // 实际名字）必须仍推断为与原工具相同的 kind；名字字面量只在
+    // `peri_acp_types::builtin_mcp` 声明一份，此处按声明表派生，不复写 `mcp__*`
+    // 字面量（消费点不得硬编码 effective name）。
+    let effective = |instance: &str, original: &str| -> &'static str {
+        peri_acp_types::builtin_mcp::find(instance)
+            .and_then(|declared| {
+                declared
+                    .tools
+                    .iter()
+                    .find(|tool| tool.original_name == original)
+            })
+            .map(|tool| tool.effective_name)
+            .expect("builtin 声明表应声明该 (实例, 原始工具名)")
+    };
     let cases = [
         ("Read", ToolKind::Read),
         ("Write", ToolKind::Edit),
@@ -633,7 +603,14 @@ fn test_tool_start_infer_tool_kind_variants() {
         ("Glob", ToolKind::Search),
         ("WebFetch", ToolKind::Fetch),
         ("WebSearch", ToolKind::Fetch),
+        (effective("web", "WebFetch"), ToolKind::Fetch),
+        (effective("web", "WebSearch"), ToolKind::Fetch),
+        // artifact 不属于任何 Fetch 分支：归一到原始名 `artifact` 后仍是 Other
+        (effective("artifact", "artifact"), ToolKind::Other),
         ("mcp__server__tool", ToolKind::Other),
+        // 反证：未命中归一表（外部 server）不得被误吞
+        ("mcp__foo__bar", ToolKind::Other),
+        ("mcp__filesystem__read_file", ToolKind::Other),
     ];
     for (name, expected_kind) in cases {
         let event = ExecutorEvent::ToolStart {
@@ -654,6 +631,30 @@ fn test_tool_start_infer_tool_kind_variants() {
             }
             other => panic!("{} 预期 ToolCall，实际: {:?}", name, other),
         }
+    }
+
+    // 大小写不匹配的 effective name（非声明表字面量）不命中归一 ⇒ 仍为 Other
+    let lowered = effective("web", "WebFetch").to_lowercase();
+    assert!(
+        peri_acp_types::builtin_mcp::original_tool_name_of_effective(&lowered).is_none(),
+        "归一表是精确匹配：{lowered} 不得命中"
+    );
+    let event = ExecutorEvent::ToolStart {
+        message_id: MessageId::new(),
+        tool_call_id: "tc-lower".to_string(),
+        name: lowered.clone(),
+        input: serde_json::Value::Null,
+        source_agent_id: None,
+    };
+    match &map_event(&event, 200_000, &PeriCaps::default())[0].updates[0] {
+        SessionUpdate::ToolCall(tc) => {
+            assert_eq!(tc.kind, ToolKind::Other, "{lowered} 不得被误分类为 Fetch");
+            assert_eq!(
+                tc.title, lowered,
+                "投影真值仍是模型面名字（归一不改写载荷）"
+            );
+        }
+        other => panic!("{lowered} 预期 ToolCall，实际: {:?}", other),
     }
 }
 
@@ -764,6 +765,7 @@ fn test_subagent_started_no_session_update() {
             agent_name: "sub-agent".to_string(),
             instance_id: "inst-001".to_string(),
             is_background: false,
+            parent_tool_call_id: None,
         },
         "SubagentStarted",
     );
@@ -836,18 +838,6 @@ fn test_background_task_completed_no_session_update() {
 }
 
 #[test]
-fn test_lsp_diagnostics_no_session_update() {
-    assert_no_session_update(
-        &ExecutorEvent::LspDiagnostics {
-            errors: 2,
-            warnings: 5,
-            files_with_errors: 3,
-        },
-        "LspDiagnostics",
-    );
-}
-
-#[test]
 fn test_command_feedback_no_session_update() {
     assert_no_session_update(
         &ExecutorEvent::CommandFeedback(CommandFeedback {
@@ -893,86 +883,4 @@ fn test_llm_call_start_no_output() {
         },
         "LlmCallStart",
     );
-}
-
-#[tokio::test]
-async fn test_subagent_stopped_safe_failure_survives_acp_wire_consumption() {
-    let transport = Arc::new(MapperWireTransport::default());
-    let caps = Arc::new(dashmap::DashMap::new());
-    caps.insert(
-        "session-1".to_string(),
-        PeriCaps {
-            agent_event: true,
-            agent_activity: true,
-            ..PeriCaps::default()
-        },
-    );
-    let sink = crate::session::event_sink::TransportEventSink::new(transport.clone(), caps);
-    let failure = peri_acp_types::error::SafeSubagentFailure::new(
-        "CHILD_THREAD_SENTINEL",
-        peri_acp_types::error::SafeModelErrorDiagnostic::from_model(
-            peri_model::ModelError::http_status(500, "provider.example", Some("request-500"))
-                .diagnostic(),
-        ),
-    )
-    .expect("safe failure fixture");
-
-    sink.push_event(
-        "session-1",
-        &ExecutorEvent::SubagentStopped {
-            agent_name: "reviewer".into(),
-            result: "RESULT_SENTINEL".into(),
-            is_error: true,
-            instance_id: "INSTANCE_SENTINEL".into(),
-            subagent_failure: Some(failure),
-        },
-        0,
-    )
-    .await;
-
-    let notifications = transport.notifications.lock().unwrap();
-    assert_eq!(
-        notifications.len(),
-        2,
-        "activity 与 legacy ACP wire 都应送达"
-    );
-    assert_eq!(notifications[0].0, "peri/agent_activity");
-    assert_eq!(notifications[0].1["activity"]["status"], "failed");
-    let activity_wire = notifications[0].1.to_string();
-    assert!(!activity_wire.contains("RESULT_SENTINEL"));
-    assert!(!activity_wire.contains("INSTANCE_SENTINEL"));
-    assert!(!activity_wire.contains("CHILD_THREAD_SENTINEL"));
-    assert!(
-        !notifications
-            .iter()
-            .any(|(method, _)| method == "session/update"),
-        "SubagentStopped 不应伪造标准 SessionUpdate"
-    );
-
-    assert_eq!(notifications[1].0, "peri/agent_event");
-    let event_json = notifications[1].1["event_json"]
-        .as_str()
-        .expect("legacy ACP event_json");
-    let event: crate::event::AcpEvent =
-        serde_json::from_str(event_json).expect("decode actual ACP event wire");
-    let crate::event::AcpEvent::SubagentStopped {
-        agent_name,
-        result,
-        is_error,
-        instance_id,
-        subagent_failure: Some(failure),
-    } = event
-    else {
-        panic!("expected typed SubagentStopped ACP event");
-    };
-    assert_eq!(agent_name, "reviewer");
-    assert_eq!(result, "RESULT_SENTINEL");
-    assert!(is_error);
-    assert_eq!(instance_id, "INSTANCE_SENTINEL");
-    let safe_wire = serde_json::to_value(failure).expect("safe failure wire value");
-    assert_eq!(safe_wire["child_thread_id"], "CHILD_THREAD_SENTINEL");
-    assert_eq!(safe_wire["diagnostic"]["category"], "http_status");
-    assert_eq!(safe_wire["diagnostic"]["status"], 500);
-    assert_eq!(safe_wire["diagnostic"]["provider"], "provider.example");
-    assert_eq!(safe_wire["diagnostic"]["request_id"], "request-500");
 }

@@ -168,7 +168,7 @@ fn output_section(live: Option<&BgLiveDetail>, display: Option<&BgDisplayEntry>)
 
     let running = live
         .map(|d| d.status == BgLiveStatus::Running)
-        .unwrap_or_else(|| display.map(|d| d.is_active).unwrap_or(true));
+        .unwrap_or_else(|| display.map(|d| d.is_active).unwrap_or(false));
 
     if running {
         OutputSection::RunningNoStream
@@ -180,6 +180,7 @@ fn output_section(live: Option<&BgLiveDetail>, display: Option<&BgDisplayEntry>)
 fn status_label(display: Option<&BgDisplayEntry>, live: Option<&BgLiveDetail>) -> String {
     if let Some(d) = live {
         let base = match d.status {
+            BgLiveStatus::Unobserved => i18n::tr("shell-detail-status-unobserved"),
             BgLiveStatus::Running => i18n::tr("shell-detail-status-running"),
             BgLiveStatus::Succeeded => i18n::tr("shell-detail-status-succeeded"),
             BgLiveStatus::Failed => i18n::tr("shell-detail-status-failed"),
@@ -199,7 +200,7 @@ fn status_label(display: Option<&BgDisplayEntry>, live: Option<&BgLiveDetail>) -
         }
         return i18n::tr("shell-detail-status-succeeded");
     }
-    i18n::tr("shell-detail-status-running")
+    i18n::tr("shell-detail-status-unobserved")
 }
 
 /// 抽屉展示用的 shell 上下文（运行中来自 `BG_TASKS`；完成后仍可从 display / live 投影读取）。

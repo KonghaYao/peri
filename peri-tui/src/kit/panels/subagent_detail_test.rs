@@ -37,6 +37,63 @@ fn test_subagent_detail_content_height_is_non_zero_and_saturating() {
 }
 
 #[test]
+fn virtual_detail_offset_preserves_full_height_and_clamps_after_resize() {
+    assert_eq!(clamp_detail_offset(90_000, 100_000, 20), 90_000);
+    assert_eq!(clamp_detail_offset(100_000, 100_000, 20), 99_980);
+    assert_eq!(clamp_detail_offset(99_980, 100_000, 100), 99_900);
+    assert_eq!(clamp_detail_offset(50, 10, 20), 0);
+}
+
+#[test]
+fn detail_viewport_uses_panel_bounds_once() {
+    assert_eq!(
+        detail_viewport(Rect::new(4, 3, 60, 12)),
+        Rect::new(4, 4, 59, 10)
+    );
+}
+
+#[test]
+fn detail_width_budget_matches_drawn_viewport() {
+    for width in [2, 3, 6, 7, 30, 40, 60, 100, 120] {
+        let viewport = detail_viewport(Rect::new(0, 0, width, 12));
+        let grid = GridSpec::grid_for(width);
+        assert!(grid.line_width() <= viewport.width, "panel width {width}");
+        if width >= 7 {
+            assert!(
+                grid.first_prefix_width() + grid.content_width() <= viewport.width as usize,
+                "panel width {width}"
+            );
+        }
+    }
+}
+
+#[test]
+fn growing_detail_follows_only_when_already_at_bottom() {
+    assert_eq!(follow_detail_offset(20, 30, 10, 35, 10, true), 25);
+    assert_eq!(follow_detail_offset(12, 30, 10, 35, 10, true), 12);
+    assert_eq!(follow_detail_offset(20, 30, 10, 35, 10, false), 20);
+    assert_eq!(follow_detail_offset(20, 30, 10, 15, 10, true), 5);
+}
+
+#[test]
+fn running_detail_opens_at_live_tail_and_completed_detail_opens_at_header() {
+    assert_eq!(initial_detail_offset(true, 30, 10), 20);
+    assert_eq!(initial_detail_offset(false, 30, 10), 0);
+}
+
+#[test]
+fn detail_scrollbar_drag_reaches_both_ends_without_thumb_jump() {
+    let top = ScrollbarGeometry::new(100, 10, 0);
+    assert!(top.contains_thumb(0));
+    assert_eq!(top.offset_for(0, top.grab_offset(0)), 0);
+    assert_eq!(top.offset_for(7, top.grab_offset(7)), 90);
+    let middle = ScrollbarGeometry::new(100, 10, 45);
+    assert!(middle.contains_thumb(middle.thumb_start));
+    assert!(middle.offset_for(middle.thumb_start, middle.grab_offset(middle.thumb_start)) <= 45);
+    assert_eq!(middle.offset_for(7, 0), 90);
+}
+
+#[test]
 fn test_find_selected_subagent_none_when_no_selection() {
     let snap = ViewModelsSnapshot {
         items: im::Vector::from(vec![TuiRenderUnit::TuiSubAgentGroup(make_subagent(
@@ -219,7 +276,7 @@ fn text_unit(text: &str) -> TuiRenderUnit {
         content_hash: 0,
     };
     bubble.recompute_hash();
-    TuiRenderUnit::TuiAssistantBubble(bubble)
+    TuiRenderUnit::TuiAssistantBubble(bubble.into())
 }
 
 /// 某次 bg 运行产生的 live 明细——记录它属于哪一次运行（`SubAgentAccumulator`
@@ -342,6 +399,14 @@ fn test_resolve_selected_subagent_matches_selected_occurrence() {
         .expect("newer occurrence");
     assert_eq!(newer.instance_id, "task-new");
     assert_eq!(nested_texts(&newer), vec!["new run".to_string()]);
+
+    // 底栏点击使用 task_id；同一 agent 的旧行和新行各自打开自己的记录。
+    let older_row = resolve_selected_subagent(&snap, &live, &display, Some("task-old"))
+        .expect("older task row");
+    let newer_row = resolve_selected_subagent(&snap, &live, &display, Some("task-new"))
+        .expect("newer task row");
+    assert_eq!(nested_texts(&older_row), vec!["old run".to_string()]);
+    assert_eq!(nested_texts(&newer_row), vec!["new run".to_string()]);
 }
 
 /// 同步 subagent 不在 `BG_LIVE_DETAIL` 中——仍走 VIEW_MODELS 扫描（不得回归）。

@@ -28,6 +28,35 @@ fn make_context_from_stage(ctx: &StageContext) -> AgentContext<'_> {
     AgentContext::from_stage(ctx)
 }
 
+async fn run_interruptible_hook<T>(
+    ctx: &StageContext,
+    hook: &'static str,
+    future: impl std::future::Future<Output = crate::error::AgentResult<T>>,
+) -> crate::error::AgentResult<T> {
+    tokio::select! {
+        biased;
+        _ = ctx.session.turn.cancel_token.cancelled() => {
+            tracing::debug!(turn_id = %ctx.turn_id(), hook, "middleware hook interrupted");
+            Err(crate::error::AgentError::Interrupted)
+        }
+        result = future => result,
+    }
+}
+
+pub(crate) async fn run_first_turn_reminders(
+    ctx: &StageContext,
+) -> crate::error::AgentResult<Vec<String>> {
+    let mut cx = make_context_from_stage(ctx);
+    run_interruptible_hook(
+        ctx,
+        "first_turn_reminder",
+        ctx.runtime
+            .middleware_chain
+            .run_first_turn_reminders(&mut cx),
+    )
+    .await
+}
+
 /// 启动闸门状态：暂存本次准入的候选工具更新。
 ///
 /// 候选只存在于本次 `run_before_react_start` 的局部 state；middleware 失败、
@@ -83,10 +112,14 @@ impl hook_state::StartupState for StartupGateState {
 /// 丢弃，目录不变——调用方据此阻止进入 Compact。
 pub async fn run_before_react_start(ctx: &StageContext) -> crate::error::AgentResult<()> {
     let mut gate = StartupGateState::default();
-    ctx.runtime
-        .middleware_chain
-        .run_before_react_start(&mut gate)
-        .await?;
+    run_interruptible_hook(
+        ctx,
+        "before_react_start",
+        ctx.runtime
+            .middleware_chain
+            .run_before_react_start(&mut gate),
+    )
+    .await?;
     let Some(update) = hook_state::StartupState::take_startup_tools(&mut gate) else {
         return Ok(());
     };
@@ -111,11 +144,12 @@ pub async fn run_before_react_start(ctx: &StageContext) -> crate::error::AgentRe
 /// 调用 middleware chain 的 `before_compact` 钩子（只读，无 drain）
 pub async fn run_before_compact(ctx: &StageContext) -> crate::error::AgentResult<()> {
     let mut cx = make_context_from_stage(ctx);
-    let result = ctx
-        .runtime
-        .middleware_chain
-        .run_before_compact(&mut cx)
-        .await;
+    let result = run_interruptible_hook(
+        ctx,
+        "before_compact",
+        ctx.runtime.middleware_chain.run_before_compact(&mut cx),
+    )
+    .await;
     let rec = cx.drain_recall();
     if !rec.is_empty() {
         ctx.recall_buffer.write().extend(rec);
@@ -126,11 +160,12 @@ pub async fn run_before_compact(ctx: &StageContext) -> crate::error::AgentResult
 /// 调用 middleware chain 的 `after_compact` 钩子（只读，无 drain）
 pub async fn run_after_compact(ctx: &StageContext) -> crate::error::AgentResult<()> {
     let mut cx = make_context_from_stage(ctx);
-    let result = ctx
-        .runtime
-        .middleware_chain
-        .run_after_compact(&mut cx)
-        .await;
+    let result = run_interruptible_hook(
+        ctx,
+        "after_compact",
+        ctx.runtime.middleware_chain.run_after_compact(&mut cx),
+    )
+    .await;
     let rec = cx.drain_recall();
     if !rec.is_empty() {
         ctx.recall_buffer.write().extend(rec);
@@ -144,7 +179,12 @@ pub async fn run_before_agent(
     input_message_ids: &[crate::messages::MessageId],
 ) -> crate::error::AgentResult<()> {
     let mut cx = make_context_from_stage(ctx).with_input_message_ids(input_message_ids);
-    let result = ctx.runtime.middleware_chain.run_before_agent(&mut cx).await;
+    let result = run_interruptible_hook(
+        ctx,
+        "before_agent",
+        ctx.runtime.middleware_chain.run_before_agent(&mut cx),
+    )
+    .await;
     let rec = cx.drain_recall();
     if !rec.is_empty() {
         ctx.recall_buffer.write().extend(rec);
@@ -170,7 +210,12 @@ pub async fn run_before_input(
         return Ok(());
     }
     let mut cx = make_context_from_stage(ctx).with_input_message_ids(input_message_ids);
-    let result = ctx.runtime.middleware_chain.run_before_input(&mut cx).await;
+    let result = run_interruptible_hook(
+        ctx,
+        "before_input",
+        ctx.runtime.middleware_chain.run_before_input(&mut cx),
+    )
+    .await;
     if cx.messages_modified() {
         cx.reconcile_to_transcript(&mut ctx.session.transcript.write());
     }
@@ -180,11 +225,14 @@ pub async fn run_before_input(
 /// 调用 middleware chain 的 Reason 工具目录刷新钩子。
 pub async fn run_before_reason_catalog(ctx: &StageContext) -> crate::error::AgentResult<()> {
     let mut cx = make_context_from_stage(ctx);
-    let result = ctx
-        .runtime
-        .middleware_chain
-        .run_before_reason_catalog(&mut cx)
-        .await;
+    let result = run_interruptible_hook(
+        ctx,
+        "before_reason_catalog",
+        ctx.runtime
+            .middleware_chain
+            .run_before_reason_catalog(&mut cx),
+    )
+    .await;
     let rec = cx.drain_recall();
     if !rec.is_empty() {
         ctx.recall_buffer.write().extend(rec);
@@ -195,7 +243,12 @@ pub async fn run_before_reason_catalog(ctx: &StageContext) -> crate::error::Agen
 /// 调用 middleware chain 的 `before_model` 钩子
 pub async fn run_before_model(ctx: &StageContext) -> crate::error::AgentResult<()> {
     let mut cx = make_context_from_stage(ctx);
-    let result = ctx.runtime.middleware_chain.run_before_model(&mut cx).await;
+    let result = run_interruptible_hook(
+        ctx,
+        "before_model",
+        ctx.runtime.middleware_chain.run_before_model(&mut cx),
+    )
+    .await;
     let rec = cx.drain_recall();
     if !rec.is_empty() {
         ctx.recall_buffer.write().extend(rec);
@@ -209,11 +262,14 @@ pub async fn run_after_model(
     reasoning: &crate::agent::react::Reasoning,
 ) -> crate::error::AgentResult<()> {
     let mut cx = make_context_from_stage(ctx);
-    let result = ctx
-        .runtime
-        .middleware_chain
-        .run_after_model(&mut cx, reasoning)
-        .await;
+    let result = run_interruptible_hook(
+        ctx,
+        "after_model",
+        ctx.runtime
+            .middleware_chain
+            .run_after_model(&mut cx, reasoning),
+    )
+    .await;
     let rec = cx.drain_recall();
     if !rec.is_empty() {
         ctx.recall_buffer.write().extend(rec);
@@ -226,17 +282,90 @@ pub async fn run_before_tools_batch(
     ctx: &StageContext,
     calls: &[crate::agent::react::ToolCall],
 ) -> Vec<crate::error::AgentResult<crate::agent::react::ToolCall>> {
-    let mut cx = make_context_from_stage(ctx);
-    let result = ctx
-        .runtime
-        .middleware_chain
-        .run_before_tools_batch(&mut cx, calls.to_vec())
-        .await;
-    let rec = cx.drain_recall();
-    if !rec.is_empty() {
-        ctx.recall_buffer.write().extend(rec);
+    run_before_bound_tools_batch(ctx, calls, &std::collections::HashMap::new()).await
+}
+
+/// Production approval receives the exact targets already bound by dispatch.
+pub async fn run_before_bound_tools_batch(
+    ctx: &StageContext,
+    calls: &[crate::agent::react::ToolCall],
+    targets: &std::collections::HashMap<String, std::sync::Arc<dyn crate::tools::BaseTool>>,
+) -> Vec<crate::error::AgentResult<crate::agent::react::ToolCall>> {
+    let cx = make_context_from_stage(ctx);
+    let mut state = BoundApprovalState {
+        context: &cx,
+        targets,
+    };
+    match run_interruptible_hook(ctx, "before_tools_batch", async {
+        Ok(ctx
+            .runtime
+            .middleware_chain
+            .run_before_tools_batch(&mut state, calls.to_vec())
+            .await)
+    })
+    .await
+    {
+        Ok(results) => results,
+        Err(_) => calls
+            .iter()
+            .map(|_| Err(crate::error::AgentError::Interrupted))
+            .collect(),
     }
-    result
+}
+
+struct BoundApprovalState<'a, 'b> {
+    context: &'a AgentContext<'b>,
+    targets: &'a std::collections::HashMap<String, std::sync::Arc<dyn crate::tools::BaseTool>>,
+}
+
+impl hook_state::StateView for BoundApprovalState<'_, '_> {
+    fn execution_binding(&self) -> Option<peri_acp_types::session::ExecutionBinding> {
+        MiddlewareState::execution_binding(self.context)
+    }
+    fn cwd(&self) -> &str {
+        MiddlewareState::cwd(self.context)
+    }
+    fn messages(&self) -> &[crate::messages::BaseMessage] {
+        MiddlewareState::messages(self.context)
+    }
+    fn current_step(&self) -> usize {
+        MiddlewareState::current_step(self.context)
+    }
+}
+
+impl hook_state::HookOutputState for BoundApprovalState<'_, '_> {
+    fn enqueue_hook_model_reminder(
+        &self,
+        reminder: peri_acp_types::system_reminder::TrustedSystemReminder,
+    ) {
+        hook_state::HookOutputState::enqueue_hook_model_reminder(self.context, reminder)
+    }
+
+    fn enqueue_hook_client_notice(
+        &self,
+        reminder: peri_acp_types::system_reminder::TrustedSystemReminder,
+    ) {
+        hook_state::HookOutputState::enqueue_hook_client_notice(self.context, reminder)
+    }
+
+    fn enqueue_session_start_message(
+        &self,
+        reminder: peri_acp_types::system_reminder::TrustedSystemReminder,
+    ) {
+        hook_state::HookOutputState::enqueue_session_start_message(self.context, reminder)
+    }
+}
+
+impl hook_state::BeforeToolState for BoundApprovalState<'_, '_> {
+    fn tool_origin(&self, call_id: &str) -> Option<hook_state::BoundToolOrigin> {
+        self.targets
+            .get(call_id)
+            .map(|tool| hook_state::BoundToolOrigin {
+                mcp_server_name: tool.mcp_server_name().map(str::to_owned),
+                mcp_tool_name: tool.mcp_tool_name().map(str::to_owned),
+                builtin_mcp_instance: tool.builtin_mcp_instance().map(str::to_owned),
+            })
+    }
 }
 
 /// 调用 middleware chain 的 `after_tool` 钩子
@@ -246,11 +375,14 @@ pub async fn run_after_tool(
     result: &crate::agent::react::ToolResult,
 ) -> crate::error::AgentResult<()> {
     let mut cx = make_context_from_stage(ctx);
-    let res = ctx
-        .runtime
-        .middleware_chain
-        .run_after_tool(&mut cx, call, result)
-        .await;
+    let res = run_interruptible_hook(
+        ctx,
+        "after_tool",
+        ctx.runtime
+            .middleware_chain
+            .run_after_tool(&mut cx, call, result),
+    )
+    .await;
     let rec = cx.drain_recall();
     if !rec.is_empty() {
         ctx.recall_buffer.write().extend(rec);
@@ -267,11 +399,14 @@ pub async fn run_after_tools_batch(
     )],
 ) -> crate::error::AgentResult<()> {
     let mut cx = make_context_from_stage(ctx);
-    let result = ctx
-        .runtime
-        .middleware_chain
-        .run_after_tools_batch(&mut cx, results)
-        .await;
+    let result = run_interruptible_hook(
+        ctx,
+        "after_tools_batch",
+        ctx.runtime
+            .middleware_chain
+            .run_after_tools_batch(&mut cx, results),
+    )
+    .await;
     let rec = cx.drain_recall();
     if !rec.is_empty() {
         ctx.recall_buffer.write().extend(rec);
@@ -285,11 +420,14 @@ pub async fn run_after_agent(
     output: crate::agent::react::AgentOutput,
 ) -> crate::error::AgentResult<crate::agent::react::AgentOutput> {
     let mut cx = make_context_from_stage(ctx);
-    let result = ctx
-        .runtime
-        .middleware_chain
-        .run_after_agent(&mut cx, output)
-        .await;
+    let result = run_interruptible_hook(
+        ctx,
+        "after_agent",
+        ctx.runtime
+            .middleware_chain
+            .run_after_agent(&mut cx, output),
+    )
+    .await;
     let rec = cx.drain_recall();
     if !rec.is_empty() {
         ctx.recall_buffer.write().extend(rec);
@@ -303,11 +441,12 @@ pub async fn run_on_error(
     error: &crate::error::AgentError,
 ) -> crate::error::AgentResult<()> {
     let mut cx = make_context_from_stage(ctx);
-    let result = ctx
-        .runtime
-        .middleware_chain
-        .run_on_error(&mut cx, error)
-        .await;
+    let result = run_interruptible_hook(
+        ctx,
+        "on_error",
+        ctx.runtime.middleware_chain.run_on_error(&mut cx, error),
+    )
+    .await;
     let rec = cx.drain_recall();
     if !rec.is_empty() {
         ctx.recall_buffer.write().extend(rec);
@@ -320,3 +459,7 @@ pub async fn run_on_error(
 #[cfg(test)]
 #[path = "middleware_runner_test.rs"]
 mod tests;
+
+#[cfg(test)]
+#[path = "middleware_cancel_test.rs"]
+mod cancel_tests;

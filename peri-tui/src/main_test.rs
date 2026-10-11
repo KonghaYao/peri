@@ -14,6 +14,41 @@ fn test_propagate_tui_result_preserves_startup_failure() {
     assert_eq!(error.to_string(), "database open failed");
 }
 
+#[test]
+fn acp_settings_stdin_is_explicit_opt_in() {
+    let cli = Cli::try_parse_from(["peri", "acp", "--settings-stdin"]).unwrap();
+    assert!(matches!(
+        cli.command,
+        Some(Commands::Acp {
+            settings_stdin: true,
+            ..
+        })
+    ));
+    let cli = Cli::try_parse_from(["peri", "acp"]).unwrap();
+    assert!(matches!(
+        cli.command,
+        Some(Commands::Acp {
+            settings_stdin: false,
+            ..
+        })
+    ));
+    let args = [
+        OsString::from("peri"),
+        OsString::from("acp"),
+        OsString::from("--settings-stdin"),
+    ];
+    assert!(argv_requests_settings_stdin(&args));
+    let cli = Cli::try_parse_from([
+        "peri",
+        "--config-file",
+        "/tmp/settings.json",
+        "acp",
+        "--settings-stdin",
+    ])
+    .unwrap();
+    assert!(validate_cli(&cli).is_err());
+}
+
 fn make_temp_file(content: &str) -> tempfile::TempPath {
     use std::io::Write;
     let mut file = tempfile::NamedTempFile::new().unwrap();
@@ -333,9 +368,9 @@ fn test_session_store_deployment_normalizes_locator_options() {
     assert_eq!(deployment.access(), AccessMode::ReadOnly);
 }
 
-/// `Debug` 不回显 locator 原文（远程 locator 含主机与库名）。
+/// `Debug` 保留 locator 原文，供运行时诊断。
 #[test]
-fn test_session_store_deployment_debug_keeps_locator_out() {
+fn test_session_store_deployment_debug_preserves_locator() {
     let cli = Cli::try_parse_from([
         "peri",
         "--session-store",
@@ -344,8 +379,7 @@ fn test_session_store_deployment_debug_keeps_locator_out() {
     .unwrap();
     let deployment = session_store_deployment(&cli, AccessMode::ReadWrite).unwrap();
     let rendered = format!("{deployment:?}");
-    assert!(!rendered.contains("sentinel-db-sentinel"));
-    assert!(rendered.contains("<configured>"));
+    assert!(rendered.contains("sentinel-db-sentinel"));
 }
 
 /// meta 的受限 grammar 同步：只接受定位参数与 session 自身的 `--json`。
@@ -384,4 +418,36 @@ fn test_meta_grammar_allows_session_store_options() {
         let cli = Cli::try_parse_from(args).unwrap();
         assert!(validate_cli(&cli).is_err());
     }
+}
+
+#[test]
+fn machine_catalog_and_explicit_adoption_parse_as_distinct_actions() {
+    let catalog = Cli::try_parse_from(["peri", "meta", "machines", "--json"]).unwrap();
+    assert!(matches!(
+        catalog.command,
+        Some(Commands::Meta {
+            action: MetaAction::Machines { json: true }
+        })
+    ));
+    let adopt = Cli::try_parse_from([
+        "peri",
+        "machine",
+        "adopt",
+        "550e8400-e29b-41d4-a716-446655440000",
+        "--current",
+        "550e8400-e29b-41d4-a716-446655440001",
+        "--apply",
+        "--confirm-no-active-executions",
+    ])
+    .unwrap();
+    assert!(matches!(
+        adopt.command,
+        Some(Commands::Machine {
+            action: MachineAction::Adopt {
+                apply: true,
+                confirm_no_active_executions: true,
+                ..
+            }
+        })
+    ));
 }

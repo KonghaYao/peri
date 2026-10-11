@@ -259,7 +259,7 @@ async fn test_user_input_stop_preserves_managed_run_identity_on_wire() {
     assert!(
         client
             .lifecycle
-            .open_user_input_run("s", "g", "run")
+            .open_execution("s", "g", "run", true)
             .is_some(),
         "应打开实际执行标记"
     );
@@ -275,7 +275,7 @@ async fn test_user_input_stop_preserves_managed_run_identity_on_wire() {
         "Stop 必须在退役本地 marker 之前保存目标身份，避免取消后续 run"
     );
     assert!(
-        client.lifecycle.active_user_input_run().is_none(),
+        client.lifecycle.active_execution(false).is_none(),
         "Stop 后本地 owner 应退役"
     );
     client.close();

@@ -14,15 +14,14 @@ pub(super) async fn preflight_validate_script(script: &str) -> Result<(), String
 
     // Normal completion waits/reaps. Cancellation kills the child and lets Tokio
     // reap it best-effort; TempDir removes both inputs on every exit path.
-    let output = tokio::process::Command::new("node")
+    let mut command = tokio::process::Command::new("node");
+    command
         .kill_on_drop(true)
         .arg(&artifact)
         .arg("validate")
         .arg(&source)
-        .arg("--json")
-        .output()
-        .await
-        .map_err(unavailable)?;
+        .arg("--json");
+    let output = crate::process::output(command).await.map_err(unavailable)?;
     if output.status.success() {
         return Ok(());
     }

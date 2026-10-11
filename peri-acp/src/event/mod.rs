@@ -41,6 +41,10 @@ use serde::{Deserialize, Serialize};
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "type", content = "value", rename_all = "snake_case")]
 pub enum AcpEvent {
+    ExecutionStarted {
+        generation: String,
+        request_id: String,
+    },
     UserInputRunStarted {
         generation: String,
         request_id: String,
@@ -103,7 +107,7 @@ pub enum AcpEvent {
     },
     /// Turn 已挂起等待异步事件（bg agent/cron/workflow）。
     ///
-    /// v2 `StateEvent::TurnSuspended` → ExecutorEvent::TurnSuspended → 本 DTO。
+    /// v2 `RenderEvent::TurnSuspended` → ExecutorEvent::TurnSuspended → 本 DTO。
     /// TUI 收到后归档 current_turn、停止 loading spinner。
     ///
     /// `turn_id` / `agent_id` 为 v2 事件透传的身份（v1 兼容层最小身份载体）。
@@ -113,6 +117,12 @@ pub enum AcpEvent {
         agent_name: String,
         instance_id: String,
         is_background: bool,
+        /// 发起本次子 agent 的父 Agent 工具调用 id（tool_call_id）。
+        ///
+        /// 由父侧 `InvocationIntent.tool_call_id` 透传；TUI 按它把子分组配到父
+        /// Agent 工具卡片，不依赖事件到达顺序。None = 无工具调用上下文的路径。
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        parent_tool_call_id: Option<String>,
     },
     /// SubAgent execution completed
     SubagentStopped {
@@ -162,12 +172,6 @@ pub enum AcpEvent {
     },
     /// Background agent tool call progress
     BgToolStep { child_thread_id: String },
-    /// LSP diagnostics update
-    LspDiagnostics {
-        errors: usize,
-        warnings: usize,
-        files_with_errors: usize,
-    },
     /// Agent execution failed
     AgentExecutionFailed { message: String },
     /// Context window usage warning

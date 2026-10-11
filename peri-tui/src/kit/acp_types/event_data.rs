@@ -78,6 +78,9 @@ pub enum AcpEventData {
     PromptSubmitted {
         request_id: Option<String>,
     },
+    ExecutionStarted {
+        request_id: String,
+    },
 
     /// Root-agent usage observation for one model request. Auxiliary agent updates
     /// are filtered by the notifier. `Some` includes an explicit zero cache read;
@@ -92,6 +95,11 @@ pub enum AcpEventData {
 
     /// `"turn-done"` -- agent finished this turn (Streaming -> Idle).
     TurnDone,
+
+    /// `peri/agent_event_done` retains the execution identity for bridge settlement.
+    AgentDone {
+        request_id: Option<String>,
+    },
 
     /// `"turn-interrupted"` -- agent was interrupted (user cancel / timeout).
     /// `request_id` 为被中断 turn 的 prompt requestId（服务器经
@@ -112,14 +120,19 @@ pub enum AcpEventData {
         text: String,
     },
 
-    /// TUI 内部事件：本地 loading 复位请求（cancel / /clear / prompt 失败
-    /// 兜底时由 submit_consumer 发出）。仅 TUI 内部使用，不走 ACP 协议。
+    /// TUI 内部事件：`/clear` 失败后的 loading 复位请求。
+    /// 仅 TUI 内部使用，不走 ACP 协议。
     /// bridge 收到后若 phase == PromptRunning 则复位为 Idle 并重推 ACP_STATE
     /// ——与直接写 ACP_STATE.is_loading 的兜底互补：兜底覆盖 bridge 已退出的
-    /// shutdown 路径，本事件覆盖 bridge 存活时 phase 派生覆盖（cancel 后迟到
+    /// shutdown 路径，本事件覆盖 bridge 存活时 phase 派生覆盖（复位后迟到
     /// 事件触发 push_acp_state 会用 phase 重算 is_loading=true，造成闪回）。
     /// 幂等：phase 非 PromptRunning 时 no-op（Issue 2026-08-05 S4.2）。
     LocalLoadingReset,
+
+    /// A failed local prompt RPC may only reset its own execution.
+    PromptFailed {
+        request_id: String,
+    },
 
     /// bg agent 完成回调 user bubble——要求先 flush current_turn 到 committed，
     /// 再 push 自身。与 LocalUserBubble 的纯追加不同，此变体主动切分视觉 turn：
@@ -244,6 +257,12 @@ pub enum AcpEventData {
         agent_id: String,
         agent_name: String,
         is_background: bool,
+        /// 发起本次子 agent 的父 Agent 工具调用 id（tool_call_id）。
+        ///
+        /// 有值时消息区按身份把子分组配到该 Agent 工具卡片（并发批次下顺序
+        /// 不可判定，不能按到达顺序猜）；None = 旧生产端/无工具上下文，退化为
+        /// 到达顺序兜底。
+        parent_tool_call_id: Option<String>,
     },
 
     /// `"subagent-stopped"` -- sub-agent exited, TUI closes the group.
@@ -275,16 +294,28 @@ pub enum AcpEventData {
         success: bool,
         duration_ms: u64,
         output_preview: Option<String>,
+        revision: Option<u64>,
     },
 
     /// `"bg-task-cancelled"` -- a background task was cancelled.
     BgTaskCancelled {
         task_id: String,
         reason: String,
+        revision: Option<u64>,
+    },
+
+    /// `"bg-task-updated"` -- an external task is being reconciled.
+    BgTaskUpdated {
+        task_id: String,
+        status: String,
+        revision: Option<u64>,
     },
 
     /// `"bg-task-snapshot"` -- full list of active background tasks.
-    BgTaskSnapshot(Vec<BgTaskEntry>),
+    BgTaskSnapshot {
+        tasks: Vec<BgTaskEntry>,
+        revision: Option<u64>,
+    },
 
     // -- §4.8 Agent Event Extensions (P1-5) ----------------------------------
     /// `"turn-committed"` — ReAct 迭代提交信号。
@@ -451,10 +482,16 @@ impl AcpEventData {
                 let agent_id = data["agent_id"].as_str().unwrap_or("").to_string();
                 let agent_name = data["agent_name"].as_str().unwrap_or("").to_string();
                 let is_background = data["is_background"].as_bool().unwrap_or(false);
+                // legacy 通道无父身份字段 → None（到达顺序兜底）
+                let parent_tool_call_id = data["parent_tool_call_id"]
+                    .as_str()
+                    .filter(|id| !id.is_empty())
+                    .map(ToOwned::to_owned);
                 AcpEventData::SubagentStarted {
                     agent_id,
                     agent_name,
                     is_background,
+                    parent_tool_call_id,
                 }
             }
             "subagent-stopped" => {
@@ -479,15 +516,31 @@ impl AcpEventData {
                     success: d.success,
                     duration_ms: d.duration_ms,
                     output_preview: d.output_preview.filter(|s| !s.is_empty()),
+                    revision: d.revision,
                 }
             }),
             "bg-task-cancelled" => decode_or_unknown(event, data, |d: BgTaskCancelledData| {
                 AcpEventData::BgTaskCancelled {
                     task_id: d.task_id,
                     reason: d.reason,
+                    revision: d.revision,
                 }
             }),
-            "bg-task-snapshot" => decode_or_unknown(event, data, AcpEventData::BgTaskSnapshot),
+            "bg-task-updated" => decode_or_unknown(event, data, |d: BgTaskUpdatedData| {
+                AcpEventData::BgTaskUpdated {
+                    task_id: d.task_id,
+                    status: d.status,
+                    revision: d.revision,
+                }
+            }),
+            "bg-task-snapshot" => {
+                let revision = data.get("revision").and_then(serde_json::Value::as_u64);
+                let tasks = data.get("tasks").cloned().unwrap_or(data);
+                decode_or_unknown(event, tasks, |tasks| AcpEventData::BgTaskSnapshot {
+                    tasks,
+                    revision,
+                })
+            }
 
             "bg-callback-user-message" => {
                 let text = data["text"].as_str().unwrap_or("").to_string();
@@ -557,6 +610,10 @@ pub struct BgTaskEntry {
     pub summary: String,
     pub started_at: String,
     pub pid: Option<u32>,
+    #[serde(default)]
+    pub revision: Option<u64>,
+    #[serde(default)]
+    pub status: Option<String>,
 }
 
 /// Deserialization helper for `bg-task-completed` payload.
@@ -569,6 +626,8 @@ struct BgTaskCompletedData {
     duration_ms: u64,
     #[serde(default)]
     output_preview: Option<String>,
+    #[serde(default)]
+    revision: Option<u64>,
 }
 
 /// Deserialization helper for `bg-task-cancelled` payload.
@@ -576,6 +635,16 @@ struct BgTaskCompletedData {
 struct BgTaskCancelledData {
     task_id: String,
     reason: String,
+    #[serde(default)]
+    revision: Option<u64>,
+}
+
+#[derive(Debug, serde::Deserialize)]
+struct BgTaskUpdatedData {
+    task_id: String,
+    status: String,
+    #[serde(default)]
+    revision: Option<u64>,
 }
 
 /// Decode `data` into `T` and apply the variant constructor, or fall back to

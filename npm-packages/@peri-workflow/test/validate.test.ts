@@ -14,7 +14,7 @@ return { answer: r }
 describe('validateScript', () => {
   test('内置 Ultra-ADLC 的完整 W1 示例通过真实引擎预检', async () => {
     const skill = await Bun.file(new URL(
-      '../../../peri-middlewares/src/skills/builtin/skills/ultra-adlc/SKILL.md',
+      '../../../mcp-packages/workspace/src/resources/builtin/skills/ultra-adlc/SKILL.md',
       import.meta.url,
     )).text()
     const source = skill

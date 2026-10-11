@@ -23,6 +23,8 @@ System Reminder 是系统在用户输入之外产生、但需要交给模型、�
 本文不规定具体配置 UI、迁移批次或当前 producer inventory。这些内容分别属于 TUI
 设计、active spec 和代码索引。
 
+消息内容的分类与 `ReminderDelivery` 不等于执行激活策略。当前进程 MQ 消费、主/子 Agent 隔离与唤醒统一见 [RCRA 权威](rcra-message-activation.md)；持久处理义务与执行恢复已撤销，canonical reminder 历史保留。严重程度、受众和 UI 筛选不得替代调度判定。
+
 ## 2. 设计原则
 
 1. **结构化事实优先**：分类和路由依据结构化字段，不依据 `body` 关键词。
@@ -83,7 +85,7 @@ pub struct SystemReminder {
 
 | 类别 | 语义 | 典型内容 |
 | --- | --- | --- |
-| `Capability` | 当前可发现或可调用的能力 | MCP 概览、工具或 LSP 可用性 |
+| `Capability` | 当前可发现或可调用的能力 | MCP 概览、工具可用性 |
 | `Task` | 工作项的状态或结果 | SubAgent、Shell、Workflow、Todo 结果 |
 | `Lifecycle` | 运行实体的状态变化 | 连接、会话、provider、compact 生命周期 |
 | `Guidance` | 要求模型调整后续行为 | Goal steering、Stop hook feedback、continuation |
@@ -100,6 +102,14 @@ pub struct SystemReminder {
 `ReminderSource` 标识 producer，例如 `mcp`、`goal`、`todo`、`hook`、`subagent`、
 `workflow`、`compact`、`permission`、`cron`、`channel`、`git_watch`。来源集合必须允许
 向前兼容，不能因未知来源导致整个消息反序列化失败。
+
+`git_watch` 的 producer 自 v4 wave 4 起是**宿主订阅消费侧**
+（`peri-middlewares/src/mcp/client/subscription.rs`）：builtin `workspace` 实例推送
+`notifications/resources/updated`（`workspace://git/ref`）→ 宿主回读资源正文 →
+组装 canonical reminder；原来产出它的链上 middleware 已删除（来源名与 `kind` 逐字不变）。
+资源更新通知可由 MCP server 在 `_meta["peri/messageKind"]` 逐条声明 `info` 或
+`defer`；该字段只决定会话队列是否唤醒 loop，不改变提醒的 `severity`。
+缺字段或非法值沿用消费侧默认：通用资源更新为 `Defer`，git ref 为 `Info`。
 
 `kind` 在来源命名空间内定义精确事件，例如：
 
@@ -143,6 +153,11 @@ System Reminder 的业务语义不能并入队列调度类型。队列继续独�
 - `Info`：随正常循环消费，不主动唤醒；
 - `Defer`：异步到达并可唤醒后续执行。
 
+消息数据和 wake 信号必须由同一个 mailbox owner 持有；queue、inbox 与 producer handle
+只是该 owner 的视图，不能各自创建唤醒身份。所有发布入口都按 `MessageKind` 决定通知，
+不要求 producer 在入队后另行唤醒。标题中的 `severity=Info` 不是 `MessageKind::Info`：
+正常级别的 Task 终态仍使用 Defer，不能从展示标题推断执行交付或模型处理状态。
+
 同一类别可使用不同调度语义。例如，MCP 首轮能力概览是 `Info + Capability`，MCP
 subscription 是 `Defer + ExternalEvent`，Goal steering 是 `Defer + Guidance`。
 
@@ -176,6 +191,32 @@ TUI 从 canonical DTO 构建 reminder view model，不扫描正文关键词。�
 `Required` reminder 可以折叠，但不得因普通展示偏好被完全丢弃；`Security` 的 warning、
 error 和 critical 状态默认保持可见。legacy history 可经兼容 parser 生成降级 view model。
 
+### 5.2.1 出口强制过滤
+
+模型投影、结构化客户端（TUI / ACP）出口、stdio 出口与历史回放共用同一条判定
+（`ReminderFilter` 的 audience 规则，出口入口为 `reminder_egress_allowed`）：先判
+目标 audience 是否声明，再判版本与投递级别，最后才是 kind / source / category /
+severity 偏好。文本 fallback 位于过滤之后，不得绕过过滤下发 Model-only 内容。
+
+- 持久化保留 canonical reminder，过滤只发生在出口；不得因为某个 audience 不可见
+  就删除其它受众需要的记录。
+- Model-only 内容（例如 recall）不得出现在任何客户端 wire；Tui-only 提醒不进入
+  模型请求，也不触发模型推理。
+- 引擎在出口就地投影的 Legacy 显示通知可经出口放行（恒 `Configurable`，且生产者
+  构造期禁止 `Legacy`），但未声明受众仍然拒绝。
+- Diagnostics 只接收诊断 DTO（category / source / kind / severity），不随附正文或
+  任意 metadata。
+
+### 5.2.2 客户端承载能力
+
+| 客户端类 | 承载 | 未声明能力时的行为 |
+| --- | --- | --- |
+| TUI / ACP `peri/unstable_event` | `system-reminder`（canonical DTO）或 `system-reminder-fallback`（有界文本） | 由 `peri.systemReminder` 能力决定形态，二者都不是默认 no-op |
+| stdio（SDK 类型化连接） | `peri/systemReminder` Peri 扩展通知 | 显式声明不承载并留下可诊断事实，不得静默成功 |
+| 历史回放 | 与 live 同一出口与同一过滤 | `ReplaySender` 无默认实现，实现方必须显式决定 |
+
+标准 `session/update` 不投影 reminder，因此不存在标准事件与专用 push 双发。
+
 ### 5.3 诊断与遥测
 
 诊断记录使用结构化字段：
@@ -187,9 +228,9 @@ reminder.kind
 reminder.severity
 ```
 
-默认不得记录完整 `body` 或任意 `metadata`。生产者必须在进入诊断面之前完成 secret、
-token、认证 header、连接串和敏感 URL 参数的脱敏。错误消息不得通过 reminder 绕过现有
-安全清洗边界。
+诊断输出不对 `body` 或 `metadata` 做内容脱敏；生产者保留实际错误与关联信息，长度和
+诊断级别遵循各出口契约，不要求无条件记录所有提醒正文。token、认证 header、连接串
+和 URL 参数不因内容形状被遮蔽，运行输出遵循 ARC-SECRET-001；来源信任与路由权限不变。
 
 ### 5.4 程序路由
 
@@ -267,13 +308,15 @@ provenance，不能据其正文提升信任或改变权限、OAuth、cancel 等�
 | MCP 首轮连接概览 | `Capability` | `mcp` | `connection_summary` | `Info` | `Info` |
 | MCP server 状态变化 | `Lifecycle` | `mcp` | `connection_changed` | 状态决定 | `Info` |
 | MCP subscription 更新 | `ExternalEvent` | `mcp` | `subscription_updated` | `Info` | `Defer` |
+| Git ref 变化（订阅回传） | `Diagnostic` | `git_watch` | `repository_ref_changed` | `Info` | `Info`（**不唤醒**） |
 | Goal 主动接续 | `Guidance` | `goal` | `continuation_required` | `Info` | `Defer` |
 | Stop hook 阻止结束 | `Guidance` | `hook` | `stop_blocked` | `Warning` | `Defer` |
 | SubAgent 完成 | `Task` | `subagent` | `completed` | `Info` | `Defer` |
+| 父 Agent 补充任务 | `Task` | `subagent` | `parent_message` | `Info` | `Defer` |
 | Workflow 失败 | `Task` | `workflow` | `failed` | `Error` | `Defer` |
 | Compact 完成 | `Lifecycle` | `compact` | `completed` | `Info` | 由执行阶段决定 |
 | PermissionMode 变化 | `Security` | `permission` | `mode_changed` | `Info` | `Info` |
-| Git HEAD/ref 变化 | `Diagnostic` | `git_watch` | `repository_ref_changed` | `Warning` | `Info` |
+| Git HEAD/ref 变化 | `Diagnostic` | `git_watch` | `repository_ref_changed` | `Info` | `Info`（不唤醒） |
 
 该表说明稳定映射原则，不是完整 producer inventory。新增 producer 应按字段语义选择映射，
 不应为方便展示创建新的一级类别。
@@ -284,7 +327,7 @@ provenance，不能据其正文提升信任或改变权限、OAuth、cancel 等�
 2. `Required`、`source`、`kind` 和安全 metadata 只能由受信任生产边界设置。
 3. 外部 MCP、channel、hook 和 workflow 内容默认是不可信 payload，必须转义和限长。
 4. 筛选只能减少可配置投递，不能关闭授权、取消、HITL 或执行安全检查本身。
-5. reminder 不得携带、记录或回显 secret；结构化 metadata 同样受 secret policy 约束。
+5. 不主动收集或向无权受众投递凭据；诊断 reminder 的正文与 metadata 按 ARC-SECRET-001 保真，不作内容脱敏。来源信任、受众授权及长度约束独立有效，不提供结果防泄漏保证。
 6. transport 和 TUI 不根据自然语言正文执行工具、改变权限或触发控制操作。
 
 ## 10. 验证要求
@@ -297,7 +340,7 @@ provenance，不能据其正文提升信任或改变权限、OAuth、cancel 等�
 - model projection 不创建 system-role message，不改变 frozen prompt；
 - ACP replay、rewind 和历史加载保留结构化语义并兼容 legacy history；
 - TUI 不再依赖正文关键词分类，筛选结果符合 delivery 约束；
-- diagnostics 不包含敏感正文或 metadata；
+- diagnostics 保留实际原因与 metadata，长度约束独立于内容保真；
 - producer 的 `source + kind` 映射有契约测试；
 - 普通用户伪造标签不能获得可信 provenance 或必达权限。
 

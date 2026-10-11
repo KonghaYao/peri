@@ -1,0 +1,11 @@
+{
+  "measuredSource": "raw/final/frozen-source.tar.gz",
+  "deliveredSourceDifferences": [
+    "sync/peer.ts",
+    "sync/session-doc-sync.ts"
+  ],
+  "sourceChanges": "Recheck closed after admission flush; observe a sender Promise even when it synchronously unsubscribes. Both independently reproduced and regression-tested.",
+  "otherChanges": "Share external Yjs between SDK/view builds; add public-entrypoint test; add deterministic browser fixture and CDP smoke; docs and test additions.",
+  "performanceRerunAfterReview": false,
+  "reason": "Changes guard lifecycle/error paths, with exact independent and regression checks; performance numbers explicitly refer to frozen round 3."
+}

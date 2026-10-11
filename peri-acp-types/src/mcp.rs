@@ -1,9 +1,9 @@
 //! MCP subscriptions 端口契约（2026-07-28 `subscriptions/listen`）。
 //!
 //! 由 `peri-middlewares` 的 `McpClientPool` 实现：连接协商 2026-07-28 协议后
-//! 建立订阅长流，收到通知（`notifications/resources/updated` / `list_changed`）
-//! 时向已注册的会话 inbox 推送 Defer 消息并唤醒 idle executor（agent 因此
-//! 可以主动回复外部聊天消息，无需用户在 TUI 里发 prompt）。
+//! 建立订阅长流，收到 `notifications/resources/updated` 时按通知 `_meta`
+//! 声明向会话 inbox 投递 Defer 或 Info；缺省资源更新仍为
+//! Defer，可唤醒 idle executor 回复外部消息。
 //!
 //! 装配方向（与 cron 端口同构）：
 //! `SessionManager`（peri-acp）在 session 创建时调用 `register_inbox`，
@@ -12,6 +12,41 @@
 use std::{any::Any, sync::Arc};
 
 use crate::session::InboxHandle;
+
+/// Peri extension on an MCP notification's `_meta`: queue scheduling intent.
+pub const MCP_MESSAGE_KIND_META_KEY: &str = "peri/messageKind";
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum McpNotificationMessageKind {
+    Defer,
+    Info,
+}
+
+impl McpNotificationMessageKind {
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Defer => "defer",
+            Self::Info => "info",
+        }
+    }
+
+    pub fn parse(value: &str) -> Option<Self> {
+        match value {
+            "defer" => Some(Self::Defer),
+            "info" => Some(Self::Info),
+            _ => None,
+        }
+    }
+}
+
+impl From<McpNotificationMessageKind> for crate::session::MessageKind {
+    fn from(value: McpNotificationMessageKind) -> Self {
+        match value {
+            McpNotificationMessageKind::Defer => Self::Defer,
+            McpNotificationMessageKind::Info => Self::Info,
+        }
+    }
+}
 
 /// MCP subscriptions 通知 → 会话 inbox 的桥接端口
 pub trait McpSubscriptionPort: Send + Sync {

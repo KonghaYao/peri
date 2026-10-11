@@ -50,7 +50,7 @@ impl CompactSpan {
         trigger: CompactTrigger,
     ) -> CompactSpanStart {
         let span_id = format!("span_{}", uuid::Uuid::now_v7());
-        let start_time = chrono::Utc::now().to_rfc3339();
+        let start_time = peri_time::now_utc_rfc3339();
         let start = CompactSpanStart {
             span_id: span_id.clone(),
             start_time: start_time.clone(),

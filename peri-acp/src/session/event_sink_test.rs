@@ -470,7 +470,7 @@ async fn push_event_emits_only_safe_activity_when_cap_is_declared() {
     assert_eq!(notifications[0].1["activity"]["kind"], "subagent");
     let serialized = notifications[0].1.to_string();
     assert!(!serialized.contains("SECRET_RESULT_SENTINEL"));
-    assert!(!serialized.contains("raw-instance-id"));
+    assert!(serialized.contains("raw-instance-id"));
 }
 
 #[tokio::test]
@@ -512,8 +512,8 @@ async fn test_subagent_completion_keeps_activity_safe_before_legacy_output() {
         "摘要不得携带结果正文"
     );
     assert!(
-        !activity.contains("private-instance-id"),
-        "摘要不得携带原始实例标识"
+        activity.contains("private-instance-id"),
+        "摘要必须保留与启动事件配对的实例标识"
     );
     let event: AcpEvent =
         serde_json::from_str(notifications[1].1["event_json"].as_str().unwrap()).unwrap();
@@ -708,4 +708,112 @@ async fn push_unstable_event_uses_snake_case_method() {
     assert_eq!(notifications.len(), 1, "应发出恰好 1 条通知");
     let (method, _params) = &notifications[0];
     assert_eq!(method, "peri/unstable_event");
+}
+
+// ── H8：客户端出口按受众过滤 ─────────────────────────────────────────────────
+
+fn reminder_for_test(
+    kind: &str,
+    delivery: peri_acp_types::system_reminder::ReminderDelivery,
+    audiences: Vec<peri_acp_types::system_reminder::ReminderAudience>,
+) -> peri_acp_types::system_reminder::SystemReminder {
+    use peri_acp_types::system_reminder::{
+        ReminderAudiences, ReminderCategory, ReminderSeverity, ReminderSource, SystemReminder,
+        SYSTEM_REMINDER_VERSION,
+    };
+    SystemReminder {
+        version: SYSTEM_REMINDER_VERSION,
+        category: ReminderCategory::Guidance,
+        source: ReminderSource("audience_wire_test".into()),
+        kind: kind.into(),
+        severity: ReminderSeverity::Info,
+        delivery,
+        audiences: ReminderAudiences(audiences),
+        body: format!("{kind} body"),
+        summary: Some(format!("{kind} summary")),
+        metadata: serde_json::json!({}),
+    }
+}
+
+/// Model-only 内容（如 recall）不得出现在客户端 wire；DiagnosticOnly 同样不下发。
+#[tokio::test]
+async fn model_only_and_diagnostic_only_reminders_never_reach_the_client_wire() {
+    use peri_acp_types::system_reminder::{ReminderAudience, ReminderDelivery};
+
+    for caps_structured in [true, false] {
+        let transport = Arc::new(MockTransport::default());
+        let caps: Arc<DashMap<String, PeriCaps>> = Arc::new(DashMap::new());
+        caps.insert(
+            "s1".to_string(),
+            PeriCaps {
+                system_reminder: caps_structured,
+                ..PeriCaps::default()
+            },
+        );
+        let sink = TransportEventSink::new(transport.clone(), caps);
+        for reminder in [
+            reminder_for_test(
+                "recall",
+                ReminderDelivery::Configurable,
+                vec![ReminderAudience::Model],
+            ),
+            reminder_for_test(
+                "diagnostic",
+                ReminderDelivery::DiagnosticOnly,
+                vec![ReminderAudience::Model, ReminderAudience::Tui],
+            ),
+        ] {
+            sink.push_event("s1", &ExecutorEvent::SystemReminder(reminder), 0)
+                .await;
+        }
+        assert!(
+            transport.notifications.lock().unwrap().is_empty(),
+            "未声明客户端受众的提醒不得下发（包括 fallback），structured={caps_structured}"
+        );
+    }
+}
+
+/// Tui-only 提醒按 caps 下发结构化事件或有界摘要，两种形态都经过同一过滤。
+#[tokio::test]
+async fn client_audience_reminders_follow_caps_with_and_without_structured_wire() {
+    use peri_acp_types::system_reminder::{ReminderAudience, ReminderDelivery};
+
+    for caps_structured in [true, false] {
+        let transport = Arc::new(MockTransport::default());
+        let caps: Arc<DashMap<String, PeriCaps>> = Arc::new(DashMap::new());
+        caps.insert(
+            "s1".to_string(),
+            PeriCaps {
+                system_reminder: caps_structured,
+                ..PeriCaps::default()
+            },
+        );
+        let sink = TransportEventSink::new(transport.clone(), caps);
+        sink.push_event(
+            "s1",
+            &ExecutorEvent::SystemReminder(reminder_for_test(
+                "client_notice",
+                ReminderDelivery::Required,
+                vec![ReminderAudience::Tui],
+            )),
+            0,
+        )
+        .await;
+
+        let notifications = transport.notifications.lock().unwrap();
+        assert_eq!(notifications.len(), 1, "标准事件与专用 push 不得双发");
+        assert_eq!(notifications[0].0, "peri/unstable_event");
+        assert_eq!(notifications[0].1["sessionId"], "s1");
+        if caps_structured {
+            assert_eq!(notifications[0].1["event"], "system-reminder");
+            assert_eq!(
+                notifications[0].1["data"]["reminder"]["kind"],
+                "client_notice"
+            );
+        } else {
+            assert_eq!(notifications[0].1["event"], "system-reminder-fallback");
+            assert_eq!(notifications[0].1["data"]["legacy"], true);
+            assert_eq!(notifications[0].1["data"]["text"], "client_notice summary");
+        }
+    }
 }

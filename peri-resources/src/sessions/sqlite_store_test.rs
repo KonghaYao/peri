@@ -1,11 +1,6 @@
 //! Tests for sqlite_store
 
-use std::collections::BTreeMap;
-use std::error::Error as _;
 use std::sync::Arc;
-use std::time::{Duration, Instant};
-
-use sqlx::Connection;
 
 use tempfile::tempdir;
 
@@ -22,7 +17,13 @@ async fn make_store() -> (SqliteThreadStore, tempfile::TempDir) {
 #[tokio::test]
 async fn test_sqlite_store_flush_persistence_makes_messages_and_flags_readable() {
     let (store, _dir) = make_store().await;
-    let thread_id = store.create_thread(ThreadMeta::new("/tmp")).await.unwrap();
+    let thread_id = store
+        .create_thread(ThreadMeta::new_at(
+            absolute_test_path("tmp"),
+            peri_time::now_wall(),
+        ))
+        .await
+        .unwrap();
     let store: Arc<dyn ThreadStore> = Arc::new(store);
 
     // 原测试经 MessageTranscript（Agent 层）追加/标记后 flush 落库。
@@ -56,7 +57,13 @@ async fn test_sqlite_store_flush_persistence_makes_messages_and_flags_readable()
 #[tokio::test]
 async fn test_delete_messages_removes_exact_turn_ids_and_preserves_ancestor() {
     let (store, _dir) = make_store().await;
-    let id = store.create_thread(ThreadMeta::new("/tmp")).await.unwrap();
+    let id = store
+        .create_thread(ThreadMeta::new_at(
+            absolute_test_path("tmp"),
+            peri_time::now_wall(),
+        ))
+        .await
+        .unwrap();
     let messages = vec![
         BaseMessage::human("ancestor"),
         BaseMessage::ai("first durable batch"),
@@ -78,7 +85,7 @@ async fn test_delete_messages_removes_exact_turn_ids_and_preserves_ancestor() {
 #[tokio::test]
 async fn test_create_append_load() {
     let (store, _dir) = make_store().await;
-    let meta = ThreadMeta::new("/tmp");
+    let meta = ThreadMeta::new_at(absolute_test_path("tmp"), peri_time::now_wall());
     let id = store.create_thread(meta).await.unwrap();
 
     let msgs = vec![BaseMessage::human("Hello"), BaseMessage::ai("Hi there")];
@@ -90,58 +97,18 @@ async fn test_create_append_load() {
     assert_eq!(loaded[1].content(), "Hi there");
 }
 
-#[tokio::test]
-async fn test_frozen_snapshot_roundtrip_and_legacy_null() {
-    let (store, _dir) = make_store().await;
-    let id = store.create_thread(ThreadMeta::new("/tmp")).await.unwrap();
-    let snapshot = r#"{"version":1,"marker":"sqlite-frozen-prefix"}"#;
-
-    assert!(store.load_frozen_snapshot(&id).await.unwrap().is_none());
-    assert!(store
-        .store_frozen_snapshot_if_absent(&id, snapshot)
-        .await
-        .unwrap());
-    assert!(
-        !store
-            .store_frozen_snapshot_if_absent(&id, r#"{"version":2}"#)
-            .await
-            .unwrap(),
-        "frozen snapshot is write-once"
-    );
-
-    assert_eq!(
-        store.load_frozen_snapshot(&id).await.unwrap().as_deref(),
-        Some(snapshot)
-    );
-}
-
-#[tokio::test]
-async fn test_frozen_snapshot_concurrent_backfill_has_one_winner() {
-    let (store, _dir) = make_store().await;
-    let id = store.create_thread(ThreadMeta::new("/tmp")).await.unwrap();
-    let first = r#"{"version":1,"candidate":"first"}"#;
-    let second = r#"{"version":1,"candidate":"second"}"#;
-
-    let (first_won, second_won) = tokio::join!(
-        store.store_frozen_snapshot_if_absent(&id, first),
-        store.store_frozen_snapshot_if_absent(&id, second),
-    );
-    let first_won = first_won.unwrap();
-    let second_won = second_won.unwrap();
-    assert_ne!(first_won, second_won, "exactly one backfill must win");
-    let stored = store.load_frozen_snapshot(&id).await.unwrap().unwrap();
-    assert_eq!(stored, if first_won { first } else { second });
-}
+#[path = "sqlite_store/frozen_snapshot_test.rs"]
+mod frozen_snapshot_tests;
 
 #[tokio::test]
 async fn test_list_threads_order() {
     let (store, _dir) = make_store().await;
 
-    let m1 = ThreadMeta::new("/a");
+    let m1 = ThreadMeta::new_at(absolute_test_path("a"), peri_time::now_wall());
     let id1 = store.create_thread(m1).await.unwrap();
     tokio::time::sleep(std::time::Duration::from_millis(5)).await;
 
-    let m2 = ThreadMeta::new("/b");
+    let m2 = ThreadMeta::new_at(absolute_test_path("b"), peri_time::now_wall());
     let id2 = store.create_thread(m2).await.unwrap();
 
     // 给 id2 追加消息，更新 updated_at
@@ -162,7 +129,10 @@ async fn test_list_thread_entries_filters_by_cwd_and_omits_hidden_and_empty_thre
     let (store, _dir) = make_store().await;
 
     let visible_id = store
-        .create_thread(ThreadMeta::new("/workspace"))
+        .create_thread(ThreadMeta::new_at(
+            absolute_test_path("workspace"),
+            peri_time::now_wall(),
+        ))
         .await
         .unwrap();
     store
@@ -171,11 +141,14 @@ async fn test_list_thread_entries_filters_by_cwd_and_omits_hidden_and_empty_thre
         .unwrap();
 
     let empty_id = store
-        .create_thread(ThreadMeta::new("/workspace"))
+        .create_thread(ThreadMeta::new_at(
+            absolute_test_path("workspace"),
+            peri_time::now_wall(),
+        ))
         .await
         .unwrap();
 
-    let mut hidden = ThreadMeta::new("/workspace");
+    let mut hidden = ThreadMeta::new_at(absolute_test_path("workspace"), peri_time::now_wall());
     hidden.hidden = true;
     let hidden_id = store.create_thread(hidden).await.unwrap();
     store
@@ -184,7 +157,10 @@ async fn test_list_thread_entries_filters_by_cwd_and_omits_hidden_and_empty_thre
         .unwrap();
 
     let other_id = store
-        .create_thread(ThreadMeta::new("/other"))
+        .create_thread(ThreadMeta::new_at(
+            absolute_test_path("other"),
+            peri_time::now_wall(),
+        ))
         .await
         .unwrap();
     store
@@ -192,11 +168,14 @@ async fn test_list_thread_entries_filters_by_cwd_and_omits_hidden_and_empty_thre
         .await
         .unwrap();
 
-    let summaries = store.list_thread_entries("/workspace").await.unwrap();
+    let summaries = store
+        .list_thread_entries(&absolute_test_path("workspace"))
+        .await
+        .unwrap();
 
     assert_eq!(summaries.len(), 1);
     assert_eq!(summaries[0].id, visible_id);
-    assert_eq!(summaries[0].cwd, "/workspace");
+    assert_eq!(summaries[0].cwd, absolute_test_path("workspace"));
     assert_eq!(summaries[0].message_count, 1);
     assert_ne!(summaries[0].id, empty_id);
     assert_ne!(summaries[0].id, hidden_id);
@@ -208,7 +187,10 @@ async fn test_list_thread_entries_orders_by_updated_at_descending() {
     let (store, _dir) = make_store().await;
 
     let first_id = store
-        .create_thread(ThreadMeta::new("/workspace"))
+        .create_thread(ThreadMeta::new_at(
+            absolute_test_path("workspace"),
+            peri_time::now_wall(),
+        ))
         .await
         .unwrap();
     store
@@ -218,7 +200,10 @@ async fn test_list_thread_entries_orders_by_updated_at_descending() {
     tokio::time::sleep(std::time::Duration::from_millis(5)).await;
 
     let second_id = store
-        .create_thread(ThreadMeta::new("/workspace"))
+        .create_thread(ThreadMeta::new_at(
+            absolute_test_path("workspace"),
+            peri_time::now_wall(),
+        ))
         .await
         .unwrap();
     store
@@ -226,7 +211,10 @@ async fn test_list_thread_entries_orders_by_updated_at_descending() {
         .await
         .unwrap();
 
-    let summaries = store.list_thread_entries("/workspace").await.unwrap();
+    let summaries = store
+        .list_thread_entries(&absolute_test_path("workspace"))
+        .await
+        .unwrap();
 
     assert_eq!(summaries.len(), 2);
     assert_eq!(summaries[0].id, second_id);
@@ -236,7 +224,7 @@ async fn test_list_thread_entries_orders_by_updated_at_descending() {
 #[tokio::test]
 async fn test_delete_thread_cascade() {
     let (store, _dir) = make_store().await;
-    let meta = ThreadMeta::new("/tmp");
+    let meta = ThreadMeta::new_at(absolute_test_path("tmp"), peri_time::now_wall());
     let id = store.create_thread(meta).await.unwrap();
     store
         .append_messages(&id, &[BaseMessage::human("msg")])
@@ -261,12 +249,18 @@ async fn test_delete_thread_cascades_child_thread_tree() {
     let (store, _dir) = make_store().await;
 
     // 父 → 子 → 孙 三层线程树（子 agent 链，hidden=true）
-    let parent_id = store.create_thread(ThreadMeta::new("/tmp")).await.unwrap();
-    let mut child_meta = ThreadMeta::new("/tmp");
+    let parent_id = store
+        .create_thread(ThreadMeta::new_at(
+            absolute_test_path("tmp"),
+            peri_time::now_wall(),
+        ))
+        .await
+        .unwrap();
+    let mut child_meta = ThreadMeta::new_at(absolute_test_path("tmp"), peri_time::now_wall());
     child_meta.parent_thread_id = Some(parent_id.clone());
     child_meta.hidden = true;
     let child_id = store.create_thread(child_meta).await.unwrap();
-    let mut grand_meta = ThreadMeta::new("/tmp");
+    let mut grand_meta = ThreadMeta::new_at(absolute_test_path("tmp"), peri_time::now_wall());
     grand_meta.parent_thread_id = Some(child_id.clone());
     grand_meta.hidden = true;
     let grand_id = store.create_thread(grand_meta).await.unwrap();
@@ -307,7 +301,7 @@ async fn test_delete_thread_cascades_child_thread_tree() {
 #[tokio::test]
 async fn test_message_order_after_multiple_appends() {
     let (store, _dir) = make_store().await;
-    let meta = ThreadMeta::new("/tmp");
+    let meta = ThreadMeta::new_at(absolute_test_path("tmp"), peri_time::now_wall());
     let id = store.create_thread(meta).await.unwrap();
 
     store
@@ -333,7 +327,7 @@ async fn test_message_order_after_multiple_appends() {
 #[tokio::test]
 async fn test_title_auto_set() {
     let (store, _dir) = make_store().await;
-    let meta = ThreadMeta::new("/tmp");
+    let meta = ThreadMeta::new_at(absolute_test_path("tmp"), peri_time::now_wall());
     let id = store.create_thread(meta).await.unwrap();
 
     store
@@ -349,7 +343,7 @@ async fn test_title_auto_set() {
 #[tokio::test]
 async fn test_update_title() {
     let (store, _dir) = make_store().await;
-    let meta = ThreadMeta::new("/tmp");
+    let meta = ThreadMeta::new_at(absolute_test_path("tmp"), peri_time::now_wall());
     let id = store.create_thread(meta).await.unwrap();
 
     store.update_title(&id, "new title").await.unwrap();
@@ -360,7 +354,7 @@ async fn test_update_title() {
 #[tokio::test]
 async fn test_update_title_updates_timestamp() {
     let (store, _dir) = make_store().await;
-    let meta = ThreadMeta::new("/tmp");
+    let meta = ThreadMeta::new_at(absolute_test_path("tmp"), peri_time::now_wall());
     let id = store.create_thread(meta).await.unwrap();
 
     let before = store.load_meta(&id).await.unwrap().updated_at;
@@ -379,11 +373,11 @@ async fn test_update_title_updates_timestamp() {
 async fn test_child_thread_create_and_list() {
     let (store, _dir) = make_store().await;
     // 创建父线程
-    let parent_meta = ThreadMeta::new("/project");
+    let parent_meta = ThreadMeta::new_at(absolute_test_path("project"), peri_time::now_wall());
     let parent_id = store.create_thread(parent_meta).await.unwrap();
 
     // 创建子线程
-    let mut child_meta = ThreadMeta::new("/project");
+    let mut child_meta = ThreadMeta::new_at(absolute_test_path("project"), peri_time::now_wall());
     child_meta.parent_thread_id = Some(parent_id.clone());
     child_meta.hidden = true;
     let child_id = store.create_thread(child_meta).await.unwrap();
@@ -410,14 +404,20 @@ async fn test_child_thread_create_and_list() {
 async fn test_session_threads_recursive() {
     let (store, _dir) = make_store().await;
     // L1 根线程
-    let l1_id = store.create_thread(ThreadMeta::new("/root")).await.unwrap();
+    let l1_id = store
+        .create_thread(ThreadMeta::new_at(
+            absolute_test_path("root"),
+            peri_time::now_wall(),
+        ))
+        .await
+        .unwrap();
     // L2 子线程
-    let mut l2_meta = ThreadMeta::new("/root");
+    let mut l2_meta = ThreadMeta::new_at(absolute_test_path("root"), peri_time::now_wall());
     l2_meta.parent_thread_id = Some(l1_id.clone());
     l2_meta.hidden = true;
     let l2_id = store.create_thread(l2_meta).await.unwrap();
     // L3 孙线程
-    let mut l3_meta = ThreadMeta::new("/root");
+    let mut l3_meta = ThreadMeta::new_at(absolute_test_path("root"), peri_time::now_wall());
     l3_meta.parent_thread_id = Some(l2_id.clone());
     l3_meta.hidden = true;
     let l3_id = store.create_thread(l3_meta).await.unwrap();
@@ -435,7 +435,13 @@ async fn test_session_threads_recursive() {
 async fn test_update_thread_status() {
     use peri_acp_types::thread::AgentStatus;
     let (store, _dir) = make_store().await;
-    let id = store.create_thread(ThreadMeta::new("/tmp")).await.unwrap();
+    let id = store
+        .create_thread(ThreadMeta::new_at(
+            absolute_test_path("tmp"),
+            peri_time::now_wall(),
+        ))
+        .await
+        .unwrap();
 
     // 默认 active
     let meta = store.load_meta(&id).await.unwrap();
@@ -456,7 +462,13 @@ async fn test_update_thread_status() {
 async fn test_update_thread_status_rejects_illegal_string() {
     // 关键约束：非法状态字符串不应静默 fallback，必须返回错误
     let (store, _dir) = make_store().await;
-    let id = store.create_thread(ThreadMeta::new("/tmp")).await.unwrap();
+    let id = store
+        .create_thread(ThreadMeta::new_at(
+            absolute_test_path("tmp"),
+            peri_time::now_wall(),
+        ))
+        .await
+        .unwrap();
     let result = store.update_thread_status(&id, "running").await;
     assert!(result.is_err(), "非法 agent_status 字符串应被拒绝");
     // 状态保持不变（active）
@@ -470,7 +482,13 @@ async fn test_update_thread_status_rejects_illegal_string() {
 #[tokio::test]
 async fn test_load_context_without_parent() {
     let (store, _dir) = make_store().await;
-    let id = store.create_thread(ThreadMeta::new("/tmp")).await.unwrap();
+    let id = store
+        .create_thread(ThreadMeta::new_at(
+            absolute_test_path("tmp"),
+            peri_time::now_wall(),
+        ))
+        .await
+        .unwrap();
 
     let msgs = vec![
         BaseMessage::human("hello"),
@@ -486,7 +504,6 @@ async fn test_load_context_without_parent() {
     assert_eq!(ctx[1].content(), "world");
     assert_eq!(ctx[2].content(), "how are you");
 
-    // 第二次调用应命中缓存（cached_context 已写入）
     let ctx2 = store.load_context(&id).await.unwrap();
     assert_eq!(ctx2.len(), 3);
 }
@@ -495,7 +512,13 @@ async fn test_load_context_without_parent() {
 async fn test_load_context_with_snapshot() {
     let (store, _dir) = make_store().await;
     // 父线程 + 3 条消息
-    let parent_id = store.create_thread(ThreadMeta::new("/tmp")).await.unwrap();
+    let parent_id = store
+        .create_thread(ThreadMeta::new_at(
+            absolute_test_path("tmp"),
+            peri_time::now_wall(),
+        ))
+        .await
+        .unwrap();
     let parent_msgs = vec![
         BaseMessage::human("p1"),
         BaseMessage::ai("p2"),
@@ -511,7 +534,7 @@ async fn test_load_context_with_snapshot() {
     let snapshot_msg_id = parent_loaded[1].id().as_uuid().to_string();
 
     // 创建子线程
-    let mut child_meta = ThreadMeta::new("/tmp");
+    let mut child_meta = ThreadMeta::new_at(absolute_test_path("tmp"), peri_time::now_wall());
     child_meta.parent_thread_id = Some(parent_id.clone());
     child_meta.snapshot_at_message_id = Some(snapshot_msg_id);
     child_meta.hidden = true;
@@ -530,45 +553,20 @@ async fn test_load_context_with_snapshot() {
 }
 
 #[tokio::test]
-async fn test_cached_context_invalidation() {
-    let (store, _dir) = make_store().await;
-    let id = store.create_thread(ThreadMeta::new("/tmp")).await.unwrap();
-    store
-        .append_messages(&id, &[BaseMessage::human("hello")])
-        .await
-        .unwrap();
-
-    // 首次加载产生缓存
-    let ctx = store.load_context(&id).await.unwrap();
-    assert_eq!(ctx.len(), 1);
-
-    // 验证缓存已写入
-    let meta = store.load_meta(&id).await.unwrap();
-    assert!(meta.cached_context.is_some());
-
-    // 清除缓存
-    store.invalidate_context_cache(&id).await.unwrap();
-    let meta = store.load_meta(&id).await.unwrap();
-    assert!(
-        meta.cached_context.is_none(),
-        "清除缓存后 cached_context 应为 None"
-    );
-
-    // 再次加载仍然正常工作（从零重建）
-    let ctx2 = store.load_context(&id).await.unwrap();
-    assert_eq!(ctx2.len(), 1);
-    assert_eq!(ctx2[0].content(), "hello");
-}
-
-#[tokio::test]
 async fn test_list_threads_excludes_hidden() {
     let (store, _dir) = make_store().await;
 
     // 创建普通线程
-    let visible_id = store.create_thread(ThreadMeta::new("/tmp")).await.unwrap();
+    let visible_id = store
+        .create_thread(ThreadMeta::new_at(
+            absolute_test_path("tmp"),
+            peri_time::now_wall(),
+        ))
+        .await
+        .unwrap();
 
     // 创建 hidden 的子 agent 线程
-    let mut hidden_meta = ThreadMeta::new("/tmp");
+    let mut hidden_meta = ThreadMeta::new_at(absolute_test_path("tmp"), peri_time::now_wall());
     hidden_meta.parent_thread_id = Some(visible_id.clone());
     hidden_meta.hidden = true;
     let _hidden_id = store.create_thread(hidden_meta).await.unwrap();
@@ -585,7 +583,10 @@ async fn test_load_context_three_level_nesting() {
 
     // L1 根线程：3 条消息，快照到第 2 条
     let l1_id = store
-        .create_thread(ThreadMeta::new("/project"))
+        .create_thread(ThreadMeta::new_at(
+            absolute_test_path("project"),
+            peri_time::now_wall(),
+        ))
         .await
         .unwrap();
     let l1_msgs = vec![
@@ -598,7 +599,7 @@ async fn test_load_context_three_level_nesting() {
     let l1_snap = l1_loaded[1].id().as_uuid().to_string();
 
     // L2 子线程：2 条消息，快照到第 1 条
-    let mut l2_meta = ThreadMeta::new("/project");
+    let mut l2_meta = ThreadMeta::new_at(absolute_test_path("project"), peri_time::now_wall());
     l2_meta.parent_thread_id = Some(l1_id.clone());
     l2_meta.snapshot_at_message_id = Some(l1_snap);
     l2_meta.hidden = true;
@@ -609,7 +610,7 @@ async fn test_load_context_three_level_nesting() {
     let l2_snap = l2_loaded[0].id().as_uuid().to_string();
 
     // L3 孙线程：1 条消息，无快照
-    let mut l3_meta = ThreadMeta::new("/project");
+    let mut l3_meta = ThreadMeta::new_at(absolute_test_path("project"), peri_time::now_wall());
     l3_meta.parent_thread_id = Some(l2_id.clone());
     l3_meta.snapshot_at_message_id = Some(l2_snap);
     l3_meta.hidden = true;
@@ -633,7 +634,7 @@ async fn test_load_context_three_level_nesting() {
 #[tokio::test]
 async fn test_update_and_load_message_flags() {
     let (store, _dir) = make_store().await;
-    let meta = ThreadMeta::new("/tmp");
+    let meta = ThreadMeta::new_at(absolute_test_path("tmp"), peri_time::now_wall());
     let id = store.create_thread(meta).await.unwrap();
 
     let msgs = vec![
@@ -684,7 +685,7 @@ async fn test_update_and_load_message_flags() {
 #[tokio::test]
 async fn test_load_message_flags_empty_when_no_flags() {
     let (store, _dir) = make_store().await;
-    let meta = ThreadMeta::new("/tmp");
+    let meta = ThreadMeta::new_at(absolute_test_path("tmp"), peri_time::now_wall());
     let id = store.create_thread(meta).await.unwrap();
 
     let msgs = vec![BaseMessage::human("hello"), BaseMessage::ai("world")];
@@ -705,7 +706,7 @@ async fn test_update_message_flags_persists() {
     // 第一步：创建 store，写消息，设 flags
     let msg_id = {
         let store = SqliteThreadStore::new(db_path.clone()).await.unwrap();
-        let meta = ThreadMeta::new("/tmp");
+        let meta = ThreadMeta::new_at(absolute_test_path("tmp"), peri_time::now_wall());
         let tid = store.create_thread(meta).await.unwrap();
 
         let msgs = vec![
@@ -785,7 +786,7 @@ async fn test_update_message_flags_persists_projection() {
     // 第一步：写入 projection flag
     let (msg_id, tid) = {
         let store = SqliteThreadStore::new(db_path.clone()).await.unwrap();
-        let meta = ThreadMeta::new("/tmp");
+        let meta = ThreadMeta::new_at(absolute_test_path("tmp"), peri_time::now_wall());
         let tid = store.create_thread(meta).await.unwrap();
 
         let msgs = vec![BaseMessage::human("projected message")];
@@ -826,7 +827,13 @@ async fn test_update_message_flags_persists_projection() {
 #[tokio::test]
 async fn test_commit_compaction_lifecycle_persists_flags_and_appended_messages_in_order() {
     let (store, _dir) = make_store().await;
-    let thread_id = store.create_thread(ThreadMeta::new("/tmp")).await.unwrap();
+    let thread_id = store
+        .create_thread(ThreadMeta::new_at(
+            absolute_test_path("tmp"),
+            peri_time::now_wall(),
+        ))
+        .await
+        .unwrap();
     let original_messages = vec![
         BaseMessage::human("原始用户消息"),
         BaseMessage::ai("原始助手回复"),
@@ -901,7 +908,13 @@ async fn test_commit_compaction_lifecycle_persists_flags_and_appended_messages_i
 #[tokio::test]
 async fn test_commit_compaction_lifecycle_rolls_back_flags_and_appends_when_message_is_missing() {
     let (store, _dir) = make_store().await;
-    let thread_id = store.create_thread(ThreadMeta::new("/tmp")).await.unwrap();
+    let thread_id = store
+        .create_thread(ThreadMeta::new_at(
+            absolute_test_path("tmp"),
+            peri_time::now_wall(),
+        ))
+        .await
+        .unwrap();
     let original_messages = vec![
         BaseMessage::human("回滚前的用户消息"),
         BaseMessage::ai("回滚前的助手回复"),
@@ -952,539 +965,4 @@ async fn test_commit_compaction_lifecycle_rolls_back_flags_and_appends_when_mess
         messages.iter().all(|message| message.id() != summary.id()),
         "事务回滚后摘要不得出现"
     );
-}
-
-#[derive(Debug, PartialEq, Eq)]
-struct DatabaseSnapshot {
-    schema_version: i64,
-    schema: Vec<(String, String, String)>,
-    thread_rows: Vec<String>,
-    message_rows: Vec<String>,
-}
-
-async fn database_snapshot(path: &std::path::Path) -> DatabaseSnapshot {
-    let options = SqliteConnectOptions::new()
-        .filename(path)
-        .read_only(true)
-        .create_if_missing(false);
-    let mut connection = sqlx::SqliteConnection::connect_with(&options)
-        .await
-        .unwrap();
-    let schema_version = sqlx::query_scalar("PRAGMA schema_version")
-        .fetch_one(&mut connection)
-        .await
-        .unwrap();
-    let schema = sqlx::query_as(
-        "SELECT type, name, COALESCE(sql, '') FROM sqlite_master ORDER BY type, name",
-    )
-    .fetch_all(&mut connection)
-    .await
-    .unwrap();
-    let thread_rows = sqlx::query_scalar(
-        "SELECT printf('%Q|%Q|%Q|%Q|%Q|%Q|%Q|%Q|%Q|%Q|%Q|%Q|%Q|%Q|%Q|%Q',
-            id, title, cwd, created_at, updated_at, message_count, parent_thread_id,
-            snapshot_at_message_id, hidden, cancel_policy, config, cached_context,
-            frozen_context, agent_status, context_cache_epoch, typeof(message_count))
-         FROM threads ORDER BY id",
-    )
-    .fetch_all(&mut connection)
-    .await
-    .unwrap_or_default();
-    let message_rows = sqlx::query_scalar(
-        "SELECT printf('%Q|%Q|%Q|%Q|%Q|%Q|%Q', message_id, thread_id, role, content,
-            truncated, excluded, projection) FROM messages ORDER BY message_id",
-    )
-    .fetch_all(&mut connection)
-    .await
-    .unwrap_or_default();
-    connection.close().await.unwrap();
-    DatabaseSnapshot {
-        schema_version,
-        schema,
-        thread_rows,
-        message_rows,
-    }
-}
-
-fn directory_snapshot(path: &std::path::Path) -> BTreeMap<std::ffi::OsString, Vec<u8>> {
-    std::fs::read_dir(path)
-        .unwrap()
-        .map(|entry| {
-            let entry = entry.unwrap();
-            let file_type = entry.file_type().unwrap();
-            assert!(file_type.is_file(), "fixture directory only contains files");
-            let name = entry.file_name();
-            let bytes = if name.to_string_lossy().ends_with("-wal")
-                || name.to_string_lossy().ends_with("-shm")
-            {
-                Vec::new()
-            } else {
-                std::fs::read(entry.path()).unwrap()
-            };
-            (name, bytes)
-        })
-        .collect()
-}
-
-async fn create_schema_without(path: &std::path::Path, omitted_table: &str, omitted_column: &str) {
-    let thread_definitions = [
-        ("id", "id TEXT PRIMARY KEY"),
-        ("title", "title TEXT"),
-        ("cwd", "cwd TEXT NOT NULL DEFAULT ''"),
-        ("created_at", "created_at TEXT NOT NULL"),
-        ("updated_at", "updated_at TEXT NOT NULL"),
-        ("message_count", "message_count INTEGER NOT NULL DEFAULT 0"),
-        ("parent_thread_id", "parent_thread_id TEXT"),
-        ("snapshot_at_message_id", "snapshot_at_message_id TEXT"),
-        ("hidden", "hidden BOOLEAN NOT NULL DEFAULT 0"),
-        (
-            "cancel_policy",
-            "cancel_policy TEXT NOT NULL DEFAULT 'cascade'",
-        ),
-        ("config", "config TEXT"),
-        ("cached_context", "cached_context TEXT"),
-        (
-            "agent_status",
-            "agent_status TEXT NOT NULL DEFAULT 'active'",
-        ),
-    ];
-    let message_definitions = [
-        ("thread_id", "thread_id TEXT NOT NULL"),
-        ("content", "content TEXT NOT NULL"),
-    ];
-    let columns = |table: &str, definitions: &[(&str, &str)]| {
-        definitions
-            .iter()
-            .filter(|(name, _)| !(table == omitted_table && *name == omitted_column))
-            .map(|(_, definition)| *definition)
-            .collect::<Vec<_>>()
-            .join(", ")
-    };
-    let schema = format!(
-        "CREATE TABLE threads ({}); CREATE TABLE messages ({})",
-        columns("threads", &thread_definitions),
-        columns("messages", &message_definitions)
-    );
-    let mut connection = sqlx::SqliteConnection::connect_with(
-        &SqliteConnectOptions::new()
-            .filename(path)
-            .create_if_missing(true),
-    )
-    .await
-    .unwrap();
-    sqlx::query(AssertSqlSafe(schema))
-        .execute(&mut connection)
-        .await
-        .unwrap();
-    connection.close().await.unwrap();
-}
-
-async fn readonly_error_kind(path: &std::path::Path) -> ReadOnlyStoreErrorKind {
-    match SqliteThreadStore::open_existing_read_only(path).await {
-        Ok(_) => panic!("只读打开应失败"),
-        Err(error) => error.kind(),
-    }
-}
-
-fn readonly_load_error_kind(error: &anyhow::Error) -> ReadOnlyStoreErrorKind {
-    error
-        .downcast_ref::<ReadOnlyThreadStoreError>()
-        .expect("只读错误应保持可 downcast")
-        .kind()
-}
-
-#[tokio::test]
-async fn test_readonly_open_missing_database_creates_nothing() {
-    let dir = tempdir().unwrap();
-    let parent = dir.path().join("missing-parent");
-    let db_path = parent.join("threads.db");
-    let kind = readonly_error_kind(&db_path).await;
-    assert_eq!(kind, ReadOnlyStoreErrorKind::DatabaseNotFound);
-    assert!(!parent.exists(), "只读打开不得创建父目录");
-}
-
-#[tokio::test]
-async fn test_readonly_open_directory_and_non_sqlite_are_typed() {
-    let dir = tempdir().unwrap();
-    let directory_kind = readonly_error_kind(dir.path()).await;
-    assert_eq!(directory_kind, ReadOnlyStoreErrorKind::DatabaseUnreadable);
-    let file = dir.path().join("not-sqlite.db");
-    std::fs::write(&file, "not a sqlite database").unwrap();
-    let file_kind = readonly_error_kind(&file).await;
-    assert_eq!(file_kind, ReadOnlyStoreErrorKind::SchemaIncompatible);
-}
-
-#[tokio::test]
-async fn test_readonly_open_rejects_missing_table_and_required_column_without_migration() {
-    let dir = tempdir().unwrap();
-    let missing_table = dir.path().join("missing-table.db");
-    let mut connection = sqlx::SqliteConnection::connect_with(
-        &SqliteConnectOptions::new()
-            .filename(&missing_table)
-            .create_if_missing(true),
-    )
-    .await
-    .unwrap();
-    sqlx::query("CREATE TABLE unrelated (id TEXT)")
-        .execute(&mut connection)
-        .await
-        .unwrap();
-    connection.close().await.unwrap();
-    let database_before = database_snapshot(&missing_table).await;
-    let before = directory_snapshot(dir.path());
-    assert_eq!(
-        readonly_error_kind(&missing_table).await,
-        ReadOnlyStoreErrorKind::SchemaIncompatible
-    );
-    assert_eq!(database_snapshot(&missing_table).await, database_before);
-    assert_eq!(directory_snapshot(dir.path()), before);
-    let missing_column = dir.path().join("missing-column.db");
-    let mut connection = sqlx::SqliteConnection::connect_with(
-        &SqliteConnectOptions::new()
-            .filename(&missing_column)
-            .create_if_missing(true),
-    )
-    .await
-    .unwrap();
-    sqlx::query(
-        "CREATE TABLE threads (id TEXT); CREATE TABLE messages (thread_id TEXT, content TEXT)",
-    )
-    .execute(&mut connection)
-    .await
-    .unwrap();
-    connection.close().await.unwrap();
-    let database_before = database_snapshot(&missing_column).await;
-    let before = directory_snapshot(dir.path());
-    assert_eq!(
-        readonly_error_kind(&missing_column).await,
-        ReadOnlyStoreErrorKind::SchemaIncompatible
-    );
-    assert_eq!(database_snapshot(&missing_column).await, database_before);
-    assert_eq!(directory_snapshot(dir.path()), before);
-}
-
-#[tokio::test]
-async fn test_readonly_open_rejects_every_required_column_without_mutation() {
-    for (table, columns) in [
-        ("threads", REQUIRED_THREAD_COLUMNS),
-        ("messages", REQUIRED_MESSAGE_COLUMNS),
-    ] {
-        for column in columns {
-            let dir = tempdir().unwrap();
-            let db_path = dir.path().join(format!("missing-{table}-{column}.db"));
-            create_schema_without(&db_path, table, column).await;
-            let before = directory_snapshot(dir.path());
-            assert_eq!(
-                readonly_error_kind(&db_path).await,
-                ReadOnlyStoreErrorKind::SchemaIncompatible,
-                "missing {table}.{column} must fail at shape probe"
-            );
-            assert_eq!(directory_snapshot(dir.path()), before);
-        }
-    }
-}
-
-#[tokio::test]
-async fn test_readonly_store_loads_exact_meta_and_distinguishes_missing_session() {
-    let dir = tempdir().unwrap();
-    let db_path = dir.path().join("threads.db");
-    let writer = SqliteThreadStore::new(&db_path).await.unwrap();
-    let mut expected = ThreadMeta::new("/workspace");
-    expected.title = Some("title".into());
-    expected.agent_status = AgentStatus::Done;
-    let id = writer.create_thread(expected.clone()).await.unwrap();
-    writer.database.pool.close().await;
-    let database_before = database_snapshot(&db_path).await;
-    let directory_before = directory_snapshot(dir.path());
-    let reader = SqliteThreadStore::open_existing_read_only(&db_path)
-        .await
-        .unwrap();
-    let loaded = reader.load_meta(&id).await.unwrap();
-    assert_eq!(loaded.id, expected.id);
-    assert_eq!(loaded.title, expected.title);
-    assert_eq!(loaded.cwd, expected.cwd);
-    assert_eq!(loaded.agent_status, expected.agent_status);
-    let error = reader
-        .load_meta(&"00000000-0000-0000-0000-000000000000".into())
-        .await
-        .unwrap_err();
-    assert_eq!(
-        readonly_load_error_kind(&error),
-        ReadOnlyStoreErrorKind::SessionNotFound
-    );
-    drop(reader);
-    assert_eq!(database_snapshot(&db_path).await, database_before);
-    assert_eq!(directory_snapshot(dir.path()), directory_before);
-}
-
-#[test]
-fn test_meta_decoder_rejects_negative_derived_content_size() {
-    let error = meta_from_row(
-        "550e8400-e29b-41d4-a716-446655440000".into(),
-        None,
-        "/tmp".into(),
-        "2026-09-04T00:00:00Z".into(),
-        "2026-09-04T00:00:00Z".into(),
-        0,
-        -1,
-        None,
-        None,
-        false,
-        "cascade".into(),
-        None,
-        None,
-        "active".into(),
-    )
-    .unwrap_err();
-    assert!(error.to_string().contains("content_size is negative"));
-}
-
-#[tokio::test]
-async fn test_readonly_store_rejects_corrupt_enum_time_type_and_negative_counts_without_values() {
-    for (column, value) in [
-        ("agent_status", "'secret-invalid-status'"),
-        ("cancel_policy", "'secret-invalid-policy'"),
-        ("created_at", "'secret-invalid-time'"),
-        ("updated_at", "'secret-invalid-updated-time'"),
-        ("cwd", "X'80'"),
-        ("title", "X'80'"),
-        ("parent_thread_id", "X'80'"),
-        ("snapshot_at_message_id", "X'80'"),
-        ("hidden", "'secret-invalid-hidden-type'"),
-        ("config", "X'80'"),
-        ("cached_context", "X'80'"),
-        ("message_count", "-1"),
-        ("message_count", "'secret-invalid-type'"),
-    ] {
-        let dir = tempdir().unwrap();
-        let db_path = dir.path().join("threads.db");
-        let writer = SqliteThreadStore::new(&db_path).await.unwrap();
-        let id = writer.create_thread(ThreadMeta::new("/tmp")).await.unwrap();
-        sqlx::query(AssertSqlSafe(format!(
-            "UPDATE threads SET {column} = {value} WHERE id = ?1"
-        )))
-        .bind(&id)
-        .execute(&writer.database.pool)
-        .await
-        .unwrap();
-        writer.database.pool.close().await;
-        let database_before = database_snapshot(&db_path).await;
-        let reader = SqliteThreadStore::open_existing_read_only(&db_path)
-            .await
-            .unwrap();
-        let before = directory_snapshot(dir.path());
-        let error = reader.load_meta(&id).await.unwrap_err();
-        assert_eq!(
-            readonly_load_error_kind(&error),
-            ReadOnlyStoreErrorKind::CorruptSessionData
-        );
-        assert!(
-            !error.to_string().contains("secret-invalid"),
-            "稳定错误不得泄露存储原值"
-        );
-        assert!(!format!("{error:#}").contains("secret-invalid"));
-        assert!(!format!("{error:?}").contains("secret-invalid"));
-        let typed = error.downcast_ref::<ReadOnlyThreadStoreError>().unwrap();
-        assert!(typed.source().is_none(), "公开错误 source chain 必须脱敏");
-        drop(reader);
-        assert_eq!(database_snapshot(&db_path).await, database_before);
-        assert_eq!(directory_snapshot(dir.path()), before);
-    }
-}
-
-#[tokio::test]
-async fn test_readonly_backed_trait_rejects_mutation_and_preserves_row() {
-    let dir = tempdir().unwrap();
-    let db_path = dir.path().join("threads.db");
-    let writer = SqliteThreadStore::new(&db_path).await.unwrap();
-    let expected = ThreadMeta::new("/before");
-    let id = writer.create_thread(expected.clone()).await.unwrap();
-    writer.database.pool.close().await;
-    let database_before = database_snapshot(&db_path).await;
-    let reader: Arc<dyn ThreadStore> = Arc::new(
-        SqliteThreadStore::open_existing_read_only(&db_path)
-            .await
-            .unwrap(),
-    );
-    let before = directory_snapshot(dir.path());
-    let mut changed = expected.clone();
-    changed.cwd = "/after".into();
-    assert!(
-        reader.update_meta(&id, changed).await.is_err(),
-        "SQLite read-only capability 必须拒绝写入"
-    );
-    let loaded = reader.load_meta(&id).await.unwrap();
-    assert_eq!(loaded.id, expected.id);
-    assert_eq!(loaded.cwd, expected.cwd);
-    assert_eq!(loaded.created_at, expected.created_at);
-    assert_eq!(loaded.updated_at, expected.updated_at);
-    assert_eq!(loaded.message_count, expected.message_count);
-    assert_eq!(loaded.agent_status, expected.agent_status);
-    drop(reader);
-    assert_eq!(database_snapshot(&db_path).await, database_before);
-    assert_eq!(directory_snapshot(dir.path()), before);
-}
-
-#[tokio::test]
-async fn test_readonly_store_observes_wal_commit_but_not_uncommitted_update() {
-    let dir = tempdir().unwrap();
-    let db_path = dir.path().join("threads.db");
-    let writer = SqliteThreadStore::new(&db_path).await.unwrap();
-    let id = writer
-        .create_thread(ThreadMeta::new("/baseline"))
-        .await
-        .unwrap();
-    let mut transaction = writer.database.pool.begin().await.unwrap();
-    sqlx::query("UPDATE threads SET cwd = '/pending' WHERE id = ?1")
-        .bind(&id)
-        .execute(&mut *transaction)
-        .await
-        .unwrap();
-    let sidecars_before_open = directory_snapshot(dir.path());
-    let reader = SqliteThreadStore::open_existing_read_only(&db_path)
-        .await
-        .unwrap();
-    let sidecars_after_open = directory_snapshot(dir.path());
-    assert_eq!(sidecars_after_open, sidecars_before_open);
-    assert_eq!(reader.load_meta(&id).await.unwrap().cwd, "/baseline");
-    let sidecars_after_load = directory_snapshot(dir.path());
-    assert_eq!(sidecars_after_load, sidecars_before_open);
-    drop(reader);
-    assert_eq!(directory_snapshot(dir.path()), sidecars_before_open);
-    transaction.commit().await.unwrap();
-    let sidecars_before_committed_open = directory_snapshot(dir.path());
-    let reader = SqliteThreadStore::open_existing_read_only(&db_path)
-        .await
-        .unwrap();
-    assert_eq!(
-        directory_snapshot(dir.path()),
-        sidecars_before_committed_open
-    );
-    assert_eq!(reader.load_meta(&id).await.unwrap().cwd, "/pending");
-    assert_eq!(
-        directory_snapshot(dir.path()),
-        sidecars_before_committed_open
-    );
-    drop(reader);
-    assert_eq!(
-        directory_snapshot(dir.path()),
-        sidecars_before_committed_open
-    );
-}
-
-/// 确定性 test double：只用于覆盖 probe 失败的分类分支，不经过真实 SQLite。
-#[derive(Debug)]
-struct ShapeProbeError {
-    code: Option<&'static str>,
-    message: &'static str,
-}
-
-impl std::fmt::Display for ShapeProbeError {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.write_str(self.message)
-    }
-}
-
-impl std::error::Error for ShapeProbeError {}
-
-impl sqlx::error::DatabaseError for ShapeProbeError {
-    fn message(&self) -> &str {
-        self.message
-    }
-
-    fn code(&self) -> Option<std::borrow::Cow<'_, str>> {
-        self.code.map(std::borrow::Cow::Borrowed)
-    }
-
-    fn as_error(&self) -> &(dyn std::error::Error + Send + Sync + 'static) {
-        self
-    }
-
-    fn as_error_mut(&mut self) -> &mut (dyn std::error::Error + Send + Sync + 'static) {
-        self
-    }
-
-    fn into_error(self: Box<Self>) -> Box<dyn std::error::Error + Send + Sync + 'static> {
-        self
-    }
-
-    fn kind(&self) -> sqlx::error::ErrorKind {
-        sqlx::error::ErrorKind::Other
-    }
-}
-
-#[test]
-fn test_shape_probe_failure_classification_never_fakes_schema_verdict() {
-    // 只有确定性损坏/非数据库镜像才可判定 schema 不兼容。
-    for code in ["11", "26"] {
-        let error = sqlx::Error::Database(Box::new(ShapeProbeError {
-            code: Some(code),
-            message: "shape probe failed",
-        }));
-        assert_eq!(
-            classify_shape_probe_failure(&error).kind(),
-            ReadOnlyStoreErrorKind::SchemaIncompatible,
-            "SQLite primary result code {code} 是确定性 schema/镜像判定"
-        );
-    }
-
-    // 瞬时或环境故障（锁竞争、IO、连接池超时等）必须保持可诊断。
-    let transient_codes = [
-        Some("5"),   // SQLITE_BUSY：并发 checkpoint / lock 未释放
-        Some("6"),   // SQLITE_LOCKED：共享缓存表锁
-        Some("10"),  // SQLITE_IOERR
-        Some("14"),  // SQLITE_CANTOPEN：-wal/-shm 不可用
-        Some("266"), // SQLITE_IOERR_READ 扩展码
-        None,
-    ];
-    for code in transient_codes {
-        let error = sqlx::Error::Database(Box::new(ShapeProbeError {
-            code,
-            message: "shape probe failed",
-        }));
-        assert_eq!(
-            classify_shape_probe_failure(&error).kind(),
-            ReadOnlyStoreErrorKind::DatabaseUnreadable,
-            "code {code:?} 不得伪装成 schema 判定"
-        );
-    }
-    for error in [sqlx::Error::PoolTimedOut, sqlx::Error::RowNotFound] {
-        assert_eq!(
-            classify_shape_probe_failure(&error).kind(),
-            ReadOnlyStoreErrorKind::DatabaseUnreadable
-        );
-    }
-}
-
-#[tokio::test]
-async fn test_readonly_open_lock_contention_is_bounded() {
-    let dir = tempdir().unwrap();
-    let db_path = dir.path().join("threads.db");
-    let writer = SqliteThreadStore::new(&db_path).await.unwrap();
-    drop(writer);
-    let mut lock =
-        sqlx::SqliteConnection::connect_with(&SqliteConnectOptions::new().filename(&db_path))
-            .await
-            .unwrap();
-    sqlx::query("PRAGMA locking_mode=EXCLUSIVE")
-        .execute(&mut lock)
-        .await
-        .unwrap();
-    sqlx::query("BEGIN EXCLUSIVE")
-        .execute(&mut lock)
-        .await
-        .unwrap();
-    let started = Instant::now();
-    let kind = readonly_error_kind(&db_path).await;
-    let elapsed = started.elapsed();
-    assert_eq!(
-        kind,
-        ReadOnlyStoreErrorKind::DatabaseUnreadable,
-        "锁竞争必须报成不可读，不得伪装成 schema 判定: {kind:?}"
-    );
-    assert!(
-        elapsed < Duration::from_secs(2),
-        "锁等待必须有界: {elapsed:?}"
-    );
-    sqlx::query("ROLLBACK").execute(&mut lock).await.unwrap();
 }

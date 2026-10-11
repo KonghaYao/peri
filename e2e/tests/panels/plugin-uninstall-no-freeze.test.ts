@@ -43,11 +43,22 @@ describe("panels: plugin uninstall no-freeze", () => {
       fs.mkdirSync(path.join(testHome, ".peri"), { recursive: true });
       fs.writeFileSync(
         path.join(testHome, ".peri", "settings.json"),
-        JSON.stringify({ config: { language: "zh-CN" } }),
+        JSON.stringify({ config: {
+          language: "zh-CN", active_alias: "sonnet",
+          providers: [{ id: "offline-panel", type: "anthropic", apiKey: "fixture-only-key",
+            baseUrl: "http://127.0.0.1:9", models: { sonnet: "fixture-model" } }],
+        } }),
       );
       const pluginsDir = path.join(testHome, ".claude", "plugins");
       const cacheDir = path.join(pluginsDir, "cache", "fixture-marketplace", "fixture-plugin", "1.0.0");
       fs.mkdirSync(cacheDir, { recursive: true });
+      // 插件清单：会话准备路径的插件发现是**严格只读**的（清单缺失/非法即
+      // 会话创建失败，不再生成合成清单），夹具必须给出真实安装形态。
+      fs.mkdirSync(path.join(cacheDir, ".claude-plugin"), { recursive: true });
+      fs.writeFileSync(
+        path.join(cacheDir, ".claude-plugin", "plugin.json"),
+        JSON.stringify({ name: "fixture-plugin", version: "1.0.0", description: "Fixture plugin" }),
+      );
       fs.writeFileSync(
         path.join(pluginsDir, "installed_plugins.json"),
         JSON.stringify({
@@ -57,9 +68,12 @@ describe("panels: plugin uninstall no-freeze", () => {
             name: "fixture-plugin",
             marketplace: "fixture-marketplace",
             version: "1.0.0",
-            scope: "user",
+            // scope / origin 取值必须是契约枚举的 serde 名（InstallScope /
+            // PluginOrigin，PascalCase）——写 `"user"` / `"peri"` 会让
+            // installed_plugins.json 解析失败。
+            scope: "User",
             install_path: cacheDir,
-            origin: "peri",
+            origin: "PeriInstalled",
           }],
         }),
       );
@@ -77,11 +91,7 @@ describe("panels: plugin uninstall no-freeze", () => {
       await tester.sendKey("Enter");
       await tester.sleep(800);
       const detailText = (await tester.captureScreen()).text;
-      // 若无插件可进详情，跳过后续断言（环境无关性）
-      if (!detailText.includes("操作")) {
-        console.log("SKIP: 无已安装插件，无法进入详情");
-        return;
-      }
+      expect(detailText, "安装夹具必须进入插件详情，不能跳过卸载确认断言").toContain("操作");
 
       // ── down 选中 Uninstall action ──
       await tester.sendKey("down");

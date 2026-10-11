@@ -1,3 +1,5 @@
+use std::sync::{Arc, Mutex, MutexGuard};
+
 use super::*;
 
 #[test]
@@ -43,13 +45,6 @@ fn test_truncate_non_string_unchanged() {
     assert_eq!(result["count"], 42);
     assert_eq!(result["flag"], true);
     assert!(result["null"].is_null());
-}
-
-#[test]
-fn test_today_format() {
-    let date = today();
-    assert_eq!(date.len(), 10);
-    assert!(date.contains('-'));
 }
 
 #[test]
@@ -108,4 +103,104 @@ fn test_current_rss_mb_is_realtime_not_monotonic_max() {
         after,
         peak
     );
+}
+
+/// 出口槽是进程级共享状态：触碰它的用例必须串行，并在结束时清空出口。
+static SINK_LOCK: Mutex<()> = Mutex::new(());
+
+#[derive(Default)]
+struct CapturingSink {
+    events: Mutex<Vec<MetricEvent>>,
+}
+
+impl MetricsSink for CapturingSink {
+    fn record(&self, event: MetricEvent) {
+        self.events.lock().unwrap().push(event);
+    }
+}
+
+/// 串行化 + 捕获出口；`Drop` 清空出口并释放锁。
+struct SinkHarness {
+    _lock: MutexGuard<'static, ()>,
+    sink: Arc<CapturingSink>,
+}
+
+impl SinkHarness {
+    fn new() -> Self {
+        Self {
+            _lock: SINK_LOCK.lock().unwrap_or_else(|e| e.into_inner()),
+            sink: Arc::new(CapturingSink::default()),
+        }
+    }
+
+    fn install(&self) {
+        set_sink(Some(Arc::clone(&self.sink) as Arc<dyn MetricsSink>));
+    }
+
+    fn captured(&self, name: &str) -> Vec<MetricEvent> {
+        self.sink
+            .events
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|e| e.event == name)
+            .cloned()
+            .collect()
+    }
+}
+
+impl Drop for SinkHarness {
+    fn drop(&mut self) {
+        set_sink(None);
+    }
+}
+
+#[test]
+fn emit_without_sink_drops_event_without_persistence() {
+    let harness = SinkHarness::new();
+    // 未安装出口 = 未配置 Langfuse：事件丢弃，本地不落盘（模块无文件系统写入）
+    emit(
+        "test.metrics.no-sink",
+        serde_json::json!({"error": "boom"}),
+        Some("sid-1"),
+        Some("rid-1"),
+    );
+    assert!(harness.captured("test.metrics.no-sink").is_empty());
+}
+
+#[test]
+fn emit_delivers_event_with_identity_and_truncation_to_sink() {
+    let harness = SinkHarness::new();
+    harness.install();
+    emit(
+        "test.metrics.deliver",
+        serde_json::json!({"error": "x".repeat(600), "step": 3}),
+        Some("sid-1"),
+        Some("rid-1"),
+    );
+
+    let events = harness.captured("test.metrics.deliver");
+    assert_eq!(
+        events.len(),
+        1,
+        "installed sink must receive the event once"
+    );
+    let event = &events[0];
+    assert_eq!(event.sid.as_deref(), Some("sid-1"));
+    assert_eq!(event.rid.as_deref(), Some("rid-1"));
+    assert_eq!(event.data["error"].as_str().unwrap().chars().count(), 500);
+    assert_eq!(event.data["step"], 3);
+    assert!(!event.ts.is_empty());
+}
+
+#[test]
+fn emit_keeps_absent_identity_as_none() {
+    let harness = SinkHarness::new();
+    harness.install();
+    emit("test.metrics.anonymous", serde_json::json!({}), None, None);
+
+    let events = harness.captured("test.metrics.anonymous");
+    assert_eq!(events.len(), 1);
+    assert!(events[0].sid.is_none());
+    assert!(events[0].rid.is_none());
 }

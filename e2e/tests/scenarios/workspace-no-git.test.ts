@@ -1,8 +1,9 @@
+import { buildPeriForE2e } from "../../helpers/build.js";
 /**
  * 无 Git 环境的普通目录会话：PATH 中不存在 `git` 时，仍能新建会话并发送输入。
  *
  * 只使用本地 SSE 模型端点，无真实凭据、无外部 API。验收
- * `spec/issues/2026-09-17-p0-workspace-validation-blocks-input.md` 第 2 项：
+ * `spec/history/2026-09.md`（2026-09-17 条目） 第 2 项：
  * 「无 Git 的普通目录能新建会话并成功发送一次输入；无重复入队，草稿状态正确」。
  *
  * 依据：`discovery.rs::git` 只在 spawn 返回 `NotFound` 时降级为目录模式，因此本
@@ -54,16 +55,17 @@ describe("无 Git 环境的工作区", () => {
     }
     const node = path.join(shim, "node");
     await symlink(process.execPath, node).catch(() => {});
+    const { stdout } = await execFileAsync("/bin/sh", ["-c", "command -v bun"]);
+    const bun = await realpath(stdout.trim());
+    expect(path.isAbsolute(bun)).toBe(true);
+    await rm(path.join(shim, "bun"), { force: true });
+    await symlink(bun, path.join(shim, "bun"));
     return shim;
   }
 
   beforeAll(async () => {
     // 控制面脚本不构建 binary；本用例必须跑当前源码。
-    await execFileAsync("cargo", ["build", "-p", "peri-tui", "--bin", "peri"], {
-      cwd: PROJECT_ROOT,
-      timeout: 600_000,
-      maxBuffer: 8 * 1024 * 1024,
-    });
+    await buildPeriForE2e();
   }, 610_000);
 
   beforeEach(async () => {
@@ -212,6 +214,8 @@ describe("无 Git 环境的工作区", () => {
     };
     expect(discovery.common_dir, "无 Git 时不得推断出仓库布局").toBeNull();
     expect(discovery.private_dir).toBeNull();
+    expect(discovery.root).toBe(await realpath(work));
+    expect(await query("SELECT path FROM workspaces")).toEqual([{ path: await realpath(work) }]);
     expect(await query("SELECT id FROM projects")).toHaveLength(1);
     expect(await query("SELECT thread_id FROM session_bindings")).toHaveLength(1);
 
@@ -219,15 +223,19 @@ describe("无 Git 环境的工作区", () => {
     await tester!.sendKey("enter");
     await new Promise((resolve) => setTimeout(resolve, 1_500));
     expect(replies, "空回车不得产生第二次模型请求").toBe(1);
+    // 首轮注入的 MCP 能力概览 reminder（system_reminder）按 canonical 契约持久化，仅首轮一条
     expect(await messageCounts()).toEqual([
       { role: "assistant", n: 1 },
+      { role: "system_reminder", n: 1 },
       { role: "user", n: 1 },
     ]);
 
     // 同一会话继续可用：第二次输入正常送达，历史里仍只有各自一条。
     await prompt("NO_GIT_SECOND_INPUT", 2);
+    // 首轮注入的 MCP 能力概览 reminder（system_reminder）按 canonical 契约持久化，仅首轮一条
     expect(await messageCounts()).toEqual([
       { role: "assistant", n: 2 },
+      { role: "system_reminder", n: 1 },
       { role: "user", n: 2 },
     ]);
     expect(await query("SELECT thread_id FROM session_bindings")).toHaveLength(1);
@@ -248,6 +256,7 @@ describe("无 Git 环境的工作区", () => {
     expect(projects).toHaveLength(1);
     expect(workspaces).toHaveLength(1);
     expect(workspaces[0].project_id).toBe(projects[0].id);
+    expect(await query("SELECT path FROM workspaces")).toEqual([{ path: await realpath(work) }]);
     expect(await query("SELECT thread_id FROM session_bindings")).toHaveLength(2);
   }, 180_000);
 
@@ -271,6 +280,7 @@ describe("无 Git 环境的工作区", () => {
       root: string; common_dir: string | null; private_dir: string | null;
     };
     const expectedRoot = await realpath(nested);
+    expect(await query("SELECT path FROM workspaces")).toEqual([{ path: expectedRoot }]);
     expect(
       discovery.root === expectedRoot
         ? "cwd"

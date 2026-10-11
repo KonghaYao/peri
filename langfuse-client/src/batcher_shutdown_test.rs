@@ -12,6 +12,7 @@ fn event(id: &str) -> IngestionEvent {
         timestamp: "2026-01-01T00:00:00Z".into(),
         body: TraceBody {
             id: Some(id.into()),
+            name: Some(id.into()),
             ..Default::default()
         },
         metadata: None,
@@ -26,6 +27,9 @@ fn batcher(url: &str) -> Batcher {
             flush_interval: Duration::from_secs(60),
             backpressure: BackpressurePolicy::DropNew,
             max_retries: 0,
+            queue_capacity: 1,
+            max_in_flight: 1,
+            ..Default::default()
         },
     )
 }
@@ -151,7 +155,7 @@ async fn test_shutdown_owner_closes_admission_with_a_full_command_queue() {
                 .as_array()
                 .unwrap()
                 .iter()
-                .map(|span| span["spanId"].as_str().unwrap())
+                .map(|span| span["name"].as_str().unwrap())
         })
         .collect::<Vec<_>>();
     assert_eq!(
@@ -249,6 +253,9 @@ async fn test_shutdown_owner_does_not_wait_for_an_unpolled_blocked_producer() {
             flush_interval: Duration::from_secs(60),
             backpressure: BackpressurePolicy::Block,
             max_retries: 0,
+            queue_capacity: 1,
+            max_in_flight: 1,
+            ..Default::default()
         },
     );
     batcher.add(event("first")).await.unwrap();
@@ -375,6 +382,9 @@ async fn assert_drop_oldest_admission_keeps_newest(use_try_add: bool) {
             flush_interval: Duration::from_secs(60),
             backpressure: BackpressurePolicy::DropOldest,
             max_retries: 0,
+            queue_capacity: 2,
+            max_in_flight: 1,
+            ..Default::default()
         },
     );
     batcher.add(event("inflight0")).await.unwrap();
@@ -406,7 +416,7 @@ async fn assert_drop_oldest_admission_keeps_newest(use_try_add: bool) {
                 .as_array()
                 .unwrap()
                 .iter()
-                .map(|span| span["spanId"].as_str().unwrap())
+                .map(|span| span["name"].as_str().unwrap())
         })
         .collect::<Vec<_>>();
     assert_eq!(
@@ -437,7 +447,7 @@ fn http_span_ids(bodies: &[serde_json::Value]) -> Vec<&str> {
                 .as_array()
                 .unwrap()
                 .iter()
-                .map(|span| span["spanId"].as_str().unwrap())
+                .map(|span| span["name"].as_str().unwrap())
         })
         .collect()
 }
@@ -453,6 +463,9 @@ async fn test_backpressure_flush_prefix_is_protected_even_after_waiter_cancellat
                 flush_interval: Duration::from_secs(60),
                 backpressure: BackpressurePolicy::DropOldest,
                 max_retries: 0,
+                queue_capacity: 2,
+                max_in_flight: 1,
+                ..Default::default()
             },
         )
         .unwrap();
@@ -499,6 +512,9 @@ async fn test_backpressure_replacement_stays_after_flush_barrier() {
             flush_interval: Duration::from_secs(60),
             backpressure: BackpressurePolicy::DropOldest,
             max_retries: 0,
+            queue_capacity: 3,
+            max_in_flight: 1,
+            ..Default::default()
         },
     );
     for id in ["inflight0", "inflight1", "inflight2"] {
@@ -544,6 +560,9 @@ async fn test_flush_barrier_does_not_wait_for_later_http_batch() {
             flush_interval: Duration::from_secs(60),
             backpressure: BackpressurePolicy::Block,
             max_retries: 0,
+            queue_capacity: 2,
+            max_in_flight: 1,
+            ..Default::default()
         },
     );
     batcher.try_add(event("before")).unwrap();
@@ -571,7 +590,7 @@ async fn test_flush_barrier_does_not_wait_for_later_http_batch() {
 
 #[tokio::test]
 async fn test_batcher_legacy_retry_field_never_overrides_client_http_policy() {
-    for (client_retries, legacy_retries, statuses) in [(1, 0, vec![500, 200]), (0, 9, vec![500])] {
+    for (client_retries, legacy_retries, statuses) in [(1, 0, vec![503, 200]), (0, 9, vec![503])] {
         let expected_requests = statuses.len();
         let server = gated_ingestion(statuses).await;
         let batcher = Batcher::try_new(
@@ -581,6 +600,9 @@ async fn test_batcher_legacy_retry_field_never_overrides_client_http_policy() {
                 flush_interval: Duration::from_secs(60),
                 backpressure: BackpressurePolicy::DropNew,
                 max_retries: legacy_retries,
+                queue_capacity: 1,
+                max_in_flight: 1,
+                ..Default::default()
             },
         )
         .unwrap();

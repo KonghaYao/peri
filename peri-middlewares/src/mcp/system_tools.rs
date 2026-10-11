@@ -6,8 +6,8 @@
 //! 或「ready」证据——ready 的判定与发布归 B。
 //!
 //! 匹配口径：必需工具按**所属 server 的原始工具名**精确匹配（不折叠大小写、
-//! 不剥离 effective name 前缀、不跨 server 搜索）；对模型暴露的名字仍由 bridge
-//! 现有的 `mcp__{server}__{tool}` 命名规则给出。
+//! 不剥离 effective name 前缀、不跨 server 搜索）；选中的 direct 工具对模型
+//! 暴露原始名字，普通 deferred 工具沿用 `mcp__{server}__{tool}`。
 
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -24,14 +24,6 @@ use super::tool_bridge::McpToolBridge;
 pub(crate) enum SystemToolError {
     #[error("system MCP server \"{server}\" 未提供必需工具 \"{tool}\"")]
     MissingTool { server: String, tool: String },
-    #[error("system MCP server \"{server}\" 的必需工具 \"{tool}\" 存在多个同名注册")]
-    AmbiguousTool {
-        server: String,
-        tool: String,
-        /// 命中的全部注册的 effective name，顺序与输入一致。原始名相同时
-        /// 各项文本相同，**长度**即冲突的注册数，不能据此任意取第一项。
-        matches: Vec<String>,
-    },
     #[error("system MCP server \"{server}\" 的工具 \"{tool}\" input schema 结构非法: {reason}")]
     InvalidSchema {
         server: String,
@@ -41,14 +33,14 @@ pub(crate) enum SystemToolError {
     },
     #[error("system MCP server \"{server}\" 的必需工具 \"{tool}\" 对模型不可见")]
     NotModelVisible { server: String, tool: String },
-    #[error("system 必需工具的 effective name \"{effective_name}\" 与其他工具冲突")]
-    EffectiveNameCollision { effective_name: String },
+    #[error("system MCP server \"{server}\" 的必需工具 \"{tool}\" 名称不符合模型工具命名规则")]
+    InvalidToolName { server: String, tool: String },
 }
 
 /// 把同一次 typed 构建得到的静态 bridge 集合中，所有必需工具提升为 direct。
 ///
 /// 语义：
-/// - **all-or-nothing**：先验证全部必需项，再统一调用 `with_direct`；任何错误
+/// - **all-or-nothing**：先验证全部必需项，再统一调用 `with_system_direct`；任何错误
 ///   只返回 `Err`，不存在部分成功的集合，也不产生共享副作用。
 /// - 输入与输出的**长度、顺序、身份一致**，只有命中项 `is_direct()` 变为 true。
 /// - `required` 的 value 允许为空数组：该 server 不做必需工具检查，也不提升任何
@@ -74,6 +66,16 @@ pub(crate) fn prepare_system_tools(
                     tool: tool.to_string(),
                 });
             }
+            if !tool
+                .bytes()
+                .all(|byte| byte.is_ascii_alphanumeric() || byte == b'_' || byte == b'-')
+                || tool.is_empty()
+            {
+                return Err(SystemToolError::InvalidToolName {
+                    server: server.clone(),
+                    tool: tool.to_string(),
+                });
+            }
             validate_input_schema(&bridge.parameters()).map_err(|reason| {
                 SystemToolError::InvalidSchema {
                     server: server.clone(),
@@ -81,20 +83,24 @@ pub(crate) fn prepare_system_tools(
                     reason,
                 }
             })?;
-            selected.insert(index);
+            // Every duplicate has the same model spelling, so catalog admission
+            // drops later declarations rather than exposing an old prefixed alias.
+            selected.extend(bridges.iter().enumerate().filter_map(|(index, candidate)| {
+                (candidate.mcp_server_name() == Some(server.as_str())
+                    && candidate.original_tool_name() == tool)
+                    .then_some(index)
+            }));
         }
     }
 
-    // 阶段 2：必需工具的 effective name 必须在整批静态 bridge 内唯一。
-    validate_effective_names(&bridges, &selected)?;
-
-    // 阶段 3：统一提升。整体替换原集合，不 append 第二份注册。
+    // 阶段 2：统一提升。名称准入在 session catalog 执行 first-wins，
+    // 此处必须保留全部发现证据，不能把同名项误报为启动失败。
     Ok(bridges
         .into_iter()
         .enumerate()
         .map(|(index, bridge)| {
             if selected.contains(&index) {
-                bridge.with_direct()
+                bridge.with_system_direct()
             } else {
                 bridge
             }
@@ -113,60 +119,23 @@ fn unique_tools(tools: &[String]) -> Vec<&str> {
     unique
 }
 
-/// 在所属 server 的原始工具名上精确匹配：0 个命中 → `MissingTool`，
-/// 多于 1 个 → `AmbiguousTool`。
+/// 在所属 server 的原始工具名上精确匹配；重复注册保留 tools/list 首项。
 fn resolve_required_bridge(
     bridges: &[McpToolBridge],
     server: &str,
     tool: &str,
 ) -> Result<usize, SystemToolError> {
-    let matches: Vec<usize> = bridges
+    bridges
         .iter()
         .enumerate()
-        .filter(|(_, bridge)| {
+        .find(|(_, bridge)| {
             bridge.mcp_server_name() == Some(server) && bridge.original_tool_name() == tool
         })
         .map(|(index, _)| index)
-        .collect();
-    match matches.as_slice() {
-        [] => Err(SystemToolError::MissingTool {
+        .ok_or_else(|| SystemToolError::MissingTool {
             server: server.to_string(),
             tool: tool.to_string(),
-        }),
-        [index] => Ok(*index),
-        indices => Err(SystemToolError::AmbiguousTool {
-            server: server.to_string(),
-            tool: tool.to_string(),
-            matches: indices
-                .iter()
-                .map(|index| bridges[*index].name().to_string())
-                .collect(),
-        }),
-    }
-}
-
-/// 必需工具的 effective name 必须在整批静态 bridge 内唯一，且 ASCII 大小写折叠后
-/// 也不得与其他工具同名（净化碰撞与执行期大小写歧义都 fail closed）。
-///
-/// 只检查必需项：与必需项无关的普通 deferred 工具沿用既有冲突策略。
-fn validate_effective_names(
-    bridges: &[McpToolBridge],
-    selected: &BTreeSet<usize>,
-) -> Result<(), SystemToolError> {
-    for index in selected {
-        let name = bridges[*index].name();
-        let folded = name.to_ascii_lowercase();
-        let collides = bridges
-            .iter()
-            .enumerate()
-            .any(|(other, bridge)| other != *index && bridge.name().to_ascii_lowercase() == folded);
-        if collides {
-            return Err(SystemToolError::EffectiveNameCollision {
-                effective_name: name.to_string(),
-            });
-        }
-    }
-    Ok(())
+        })
 }
 
 // ─── input schema 结构解析 ──────────────────────────────────────────────────

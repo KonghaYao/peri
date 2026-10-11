@@ -61,7 +61,9 @@ fn test_receive_input_output_contract() {
     let output = ReceiveOutput {
         consumed_count: 0,
         wake_up_count: 0,
+        budget_deferred_count: 0,
         input_message_ids: Vec::new(),
+        stop_requested: false,
     };
     assert_eq!(output.consumed_count, 0);
     assert_eq!(output.wake_up_count, 0);

@@ -146,7 +146,7 @@ impl WorkflowRunner {
         done_tx: watch::Sender<Option<WorkflowResult>>,
         mut kill_rx: oneshot::Receiver<()>,
     ) -> Result<(), WorkflowError> {
-        let started_at_iso = chrono::Utc::now().to_rfc3339();
+        let started_at_iso = peri_time::now_utc_rfc3339();
 
         // 1. Persist script
         match journal_store.init_run(&run_id, &input.script) {
@@ -261,7 +261,7 @@ impl WorkflowRunner {
                 return Err(err);
             }
         };
-        let start_request = tokio::time::timeout(
+        let start_request = peri_time::timeout(
             START_TIMEOUT,
             channel.send_request("workflow/start", start_params),
         );
@@ -335,7 +335,7 @@ impl WorkflowRunner {
         }
 
         // 8. Message loop (spawned task)
-        let run_started = std::time::Instant::now();
+        let run_started = peri_time::monotonic_now();
 
         let kill_input = input.clone();
         let kill_started_at = started_at_iso.clone();
@@ -379,7 +379,7 @@ impl WorkflowRunner {
             _ = kill_rx => {
                 run_scope.cancel();
                 // 超时保护：Node crash 时不会阻塞 (M-ARCH6)
-                let _ = tokio::time::timeout(
+                let _ = peri_time::timeout(
                     std::time::Duration::from_secs(5),
                     channel.send_request("workflow/kill", serde_json::json!({"runId": run_id})),
                 )

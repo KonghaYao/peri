@@ -9,6 +9,9 @@ mod cron_owner;
 mod execution;
 mod inbox;
 mod queue;
+mod queue_policy;
+#[cfg(test)]
+mod queue_policy_test;
 mod runtime;
 mod user_input;
 
@@ -18,11 +21,14 @@ use std::{sync::atomic::AtomicBool, sync::Arc};
 
 pub use cron_owner::CronOwner;
 pub use execution::{
-    sanitize_public_error, ExecutionFailure, ExecutionFailureKind, PromptResult,
+    bounded_error_message, ExecutionFailure, ExecutionFailureKind, PromptResult,
     TurnTelemetryOutcome, EXECUTION_FAILURE_FALLBACK_MESSAGE,
 };
 pub use inbox::{InboxHandle, SessionInbox};
 pub use queue::{MessageKind, MessageQueue, MessageSource, QueuedMessage, QueuedPayload};
+pub use queue_policy::{
+    ExecutionBinding, MessageActivation, MessageDisposition, MessagePolicy, MessageRequirement,
+};
 pub use runtime::{
     cancel_all_agents, cancel_all_in, cancel_cascade_agents, cancel_cascade_in, AgentRuntime,
 };
@@ -72,6 +78,12 @@ impl std::fmt::Display for TurnId {
 /// ACP 侧 `SessionManager` 实现本端口；print mode / 测试等无 session 场景
 /// 为 `None`（调用方保持原 None 语义，仅读路径可用时生效）。
 pub trait SessionAccessPort: Send + Sync {
+    fn task_terminal_delivery(
+        &self,
+        _session_id: &str,
+    ) -> Option<Arc<dyn crate::tasks::TaskTerminalDelivery>> {
+        None
+    }
     /// 会话级共享 v2 MessageQueue（`AcpSession.v2_message_queue`）。
     /// 返回 clone（内部 Arc 共享，语义同 `SessionManager::v2_queue_for`）。
     fn v2_message_queue(&self, session_id: &str) -> Option<MessageQueue>;

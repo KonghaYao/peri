@@ -26,9 +26,9 @@ impl ProjectedResult {
                 }
             }
             AgentRunResult::Dead { .. } => TurnTelemetryOutcome::Failed {
-                failure: self.failure.clone().unwrap_or_else(|| {
+                failure: Box::new(self.failure.clone().unwrap_or_else(|| {
                     ExecutionFailure::internal("Workflow agent execution failed")
-                }),
+                })),
             },
             _ => TurnTelemetryOutcome::Completed,
         }

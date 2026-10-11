@@ -233,12 +233,6 @@ impl ToolOutput {
     }
 }
 
-/// Programmatic Tool Calling 的 public canonical 工具名。
-///
-/// 置于工具契约 crate，供 Agent dispatch guard 与 middleware 实现共享，避免
-/// `peri-agent` 反向依赖 `peri-middlewares`。
-pub const RUN_PTC_CODE_TOOL_NAME: &str = "RunPtcCode";
-
 /// Todo 条目状态（L5：自 `peri-middlewares/src/tools/todo.rs` 迁入，
 /// middlewares 保留 re-export；与 `crate::event::TodoStatus`（事件 DTO）同构
 /// 但独立定义，避免改动事件序列化语义）。
@@ -382,6 +376,7 @@ pub enum EffectiveToolErrorCode {
     UserRejected,
     Cancelled,
     Timeout,
+    ApplicationFailed,
     ToolFailed,
 }
 
@@ -394,6 +389,7 @@ impl EffectiveToolErrorCode {
             Self::UserRejected => "USER_REJECTED",
             Self::Cancelled => "CANCELLED",
             Self::Timeout => "TIMEOUT",
+            Self::ApplicationFailed => "APPLICATION_FAILED",
             Self::ToolFailed => "TOOL_FAILED",
         }
     }
@@ -406,7 +402,7 @@ pub struct EffectiveToolError {
     pub message: String,
     /// Typed child failure facts, when this effective call crossed a subagent
     /// boundary.  The textual message remains the user-facing projection.
-    pub subagent_failure: Option<crate::error::SafeSubagentFailure>,
+    pub subagent_failure: Option<Box<crate::error::SafeSubagentFailure>>,
 }
 
 impl EffectiveToolError {
@@ -419,12 +415,12 @@ impl EffectiveToolError {
     }
 
     pub fn with_subagent_failure(mut self, failure: crate::error::SafeSubagentFailure) -> Self {
-        self.subagent_failure = Some(failure);
+        self.subagent_failure = Some(Box::new(failure));
         self
     }
 
     pub fn subagent_failure(&self) -> Option<&crate::error::SafeSubagentFailure> {
-        self.subagent_failure.as_ref()
+        self.subagent_failure.as_deref()
     }
 }
 
@@ -451,6 +447,12 @@ pub trait EffectiveToolDispatcher: Send + Sync {
     }
 
     fn tools(&self) -> Vec<EffectiveToolDefinition>;
+
+    /// Resolve an admitted MCP target by its source and original wire name.
+    /// A colliding tool from another source must never authorize an App call.
+    fn admitted_mcp_tool_name(&self, _server: &str, _wire_name: &str) -> Option<String> {
+        None
+    }
 }
 
 /// 工具只读上下文（借用 state，零 clone）
@@ -464,14 +466,19 @@ pub struct ToolContext<'a> {
     pub cwd: &'a str,
     /// 当前 canonical dispatch 能力；仅 dispatch 中调用工具时存在。
     pub effective_tool_dispatcher: Option<std::sync::Arc<dyn EffectiveToolDispatcher>>,
-    /// 当前外层 tool call ID，供宿主工具关联内部 invocation。
+    /// 当前执行 invocation ID。
     pub invocation_id: Option<String>,
+    pub tool_call_id: Option<String>,
     /// 当前外层调用的取消令牌。
     pub cancellation: tokio_util::sync::CancellationToken,
     /// 当前 Agent session identity；仅 canonical dispatch 中存在。
     pub session_id: Option<String>,
+    /// Trusted terminal-reminder route into this (initiating) session's
+    /// canonical transcript. `None` = no current delivery route available.
+    pub task_terminal_delivery: Option<std::sync::Arc<dyn crate::tasks::TaskTerminalDelivery>>,
     /// 当前 turn generation；用于撤销跨 turn 的宿主调用租约。
     pub turn_generation: Option<String>,
+    pub session_resources: Option<std::sync::Arc<dyn crate::session_resources::SessionResources>>,
 }
 
 impl<'a> ToolContext<'a> {
@@ -481,9 +488,12 @@ impl<'a> ToolContext<'a> {
             cwd,
             effective_tool_dispatcher: None,
             invocation_id: None,
+            tool_call_id: None,
             cancellation: tokio_util::sync::CancellationToken::new(),
             session_id: None,
+            task_terminal_delivery: None,
             turn_generation: None,
+            session_resources: None,
         }
     }
 
@@ -499,6 +509,11 @@ impl<'a> ToolContext<'a> {
         self
     }
 
+    pub fn with_tool_call_id(mut self, tool_call_id: impl Into<String>) -> Self {
+        self.tool_call_id = Some(tool_call_id.into());
+        self
+    }
+
     pub fn with_session_identity(
         mut self,
         session_id: impl Into<String>,
@@ -506,6 +521,15 @@ impl<'a> ToolContext<'a> {
     ) -> Self {
         self.session_id = Some(session_id.into());
         self.turn_generation = Some(turn_generation.into());
+        self
+    }
+
+    /// Attach the trusted terminal-reminder route of the executing session.
+    pub fn with_task_terminal_delivery(
+        mut self,
+        delivery: std::sync::Arc<dyn crate::tasks::TaskTerminalDelivery>,
+    ) -> Self {
+        self.task_terminal_delivery = Some(delivery);
         self
     }
 }
@@ -572,6 +596,16 @@ pub trait BaseTool: Send + Sync {
     /// Static MCP source identity used by session catalog shadowing and collision
     /// checks. Non-MCP tools return `None`; wrappers must forward this value.
     fn mcp_server_name(&self) -> Option<&str> {
+        None
+    }
+
+    /// Original MCP wire name, independent of model-facing naming.
+    fn mcp_tool_name(&self) -> Option<&str> {
+        None
+    }
+
+    /// Trusted builtin transport identity. Never inferred from a tool/server name.
+    fn builtin_mcp_instance(&self) -> Option<&str> {
         None
     }
 

@@ -64,11 +64,55 @@ fn assert_human_error(output: &Output, exit_code: i32, kind: &str, message: &str
     assert_eq!(text(&output.stderr), format!("{kind}: {message}\n"));
 }
 
+fn assert_json_diagnostic(output: &Output, exit_code: i32, kind: &str, fragments: &[&str]) {
+    assert_eq!(output.status.code(), Some(exit_code));
+    assert!(output.stdout.is_empty(), "stdout: {}", text(&output.stdout));
+    let stderr = text(&output.stderr);
+    assert!(stderr.ends_with('\n'));
+    assert_eq!(stderr.lines().count(), 1);
+    let value: serde_json::Value = serde_json::from_slice(&output.stderr).unwrap();
+    assert_eq!(value.as_object().unwrap().len(), 2);
+    assert_eq!(value["schemaVersion"], 1);
+    assert_eq!(value["error"].as_object().unwrap().len(), 2);
+    assert_eq!(value["error"]["kind"], kind);
+    let message = value["error"]["message"].as_str().unwrap();
+    for fragment in fragments {
+        assert!(
+            message.contains(fragment),
+            "missing {fragment:?} in {message:?}"
+        );
+    }
+}
+
+fn assert_human_diagnostic(output: &Output, exit_code: i32, kind: &str, fragments: &[&str]) {
+    assert_eq!(output.status.code(), Some(exit_code));
+    assert!(output.stdout.is_empty(), "stdout: {}", text(&output.stdout));
+    let stderr = text(&output.stderr);
+    assert!(stderr.ends_with('\n'));
+    assert_eq!(stderr.lines().count(), 1);
+    let message = stderr
+        .strip_prefix(&format!("{kind}: "))
+        .unwrap_or_else(|| panic!("unexpected diagnostic: {stderr:?}"));
+    for fragment in fragments {
+        assert!(
+            message.contains(fragment),
+            "missing {fragment:?} in {message:?}"
+        );
+    }
+}
+
+fn fixture_cwd(relative: &str) -> String {
+    std::env::temp_dir()
+        .join(relative.trim_start_matches('/'))
+        .to_string_lossy()
+        .into_owned()
+}
+
 fn fixture_meta(id: &str, title: &str, cwd: &str) -> ThreadMeta {
     ThreadMeta {
         id: id.to_owned(),
         title: Some(title.to_owned()),
-        cwd: cwd.to_owned(),
+        cwd: fixture_cwd(cwd),
         created_at: Utc.with_ymd_and_hms(2026, 9, 4, 1, 2, 3).unwrap(),
         updated_at: Utc.with_ymd_and_hms(2026, 9, 4, 4, 5, 6).unwrap(),
         message_count: 7,
@@ -78,7 +122,6 @@ fn fixture_meta(id: &str, title: &str, cwd: &str) -> ThreadMeta {
         hidden: true,
         cancel_policy: Default::default(),
         config: Some(FORBIDDEN_CONFIG.to_owned()),
-        cached_context: Some(FORBIDDEN_CONTEXT.to_owned()),
         agent_status: AgentStatus::Done,
     }
 }
@@ -150,9 +193,13 @@ fn human_success_is_stdout_only_and_escapes_persisted_controls() {
     );
 
     assert_success(&output);
+    let cwd = fixture_cwd("/tmp/project\rnext");
+    let escaped_cwd = cwd.escape_debug();
     assert_eq!(
         text(&output.stdout),
-        "Schema version: 1\nID: 550e8400-e29b-41d4-a716-446655440000\nTitle: safe\\n\\t\\u{1b}[31m\nCWD: /tmp/project\\rnext\nCreated at: 2026-09-04T01:02:03+00:00\nUpdated at: 2026-09-04T04:05:06+00:00\nMessage count: 7\nParent thread ID: null\nPersisted agent status: done\n"
+        format!(
+            "Schema version: 1\nID: 550e8400-e29b-41d4-a716-446655440000\nTitle: safe\\n\\t\\u{{1b}}[31m\nCWD: {escaped_cwd}\nCreated at: 2026-09-04T01:02:03+00:00\nUpdated at: 2026-09-04T04:05:06+00:00\nMessage count: 7\nParent thread ID: null\nPersisted agent status: done\n"
+        )
     );
     assert_forbidden_output(&output);
 }
@@ -188,7 +235,7 @@ fn json_success_is_one_exact_allowlisted_object() {
             "schemaVersion": 1,
             "id": SESSION_ID,
             "title": "database-a",
-            "cwd": "/project/a",
+            "cwd": fixture_cwd("/project/a"),
             "createdAt": "2026-09-04T01:02:03+00:00",
             "updatedAt": "2026-09-04T04:05:06+00:00",
             "messageCount": 7,
@@ -276,7 +323,12 @@ fn explicit_database_selection_never_falls_back_to_another_database() {
             "--json",
         ],
     );
-    assert_json_error(&missing, 3, "session_not_found", "session was not found");
+    assert_json_diagnostic(
+        &missing,
+        3,
+        "session_not_found",
+        &["session not found", "NotApplied"],
+    );
 
     let selected = run_peri(
         sandbox.path(),
@@ -293,7 +345,7 @@ fn explicit_database_selection_never_falls_back_to_another_database() {
     assert_success(&selected);
     let value: serde_json::Value = serde_json::from_slice(&selected.stdout).unwrap();
     assert_eq!(value["title"], "only-b");
-    assert_eq!(value["cwd"], "/b");
+    assert_eq!(value["cwd"], fixture_cwd("/b"));
 }
 
 // 默认库位置由 `dirs_next::home_dir()` 派生，而 Windows 上它读 Profile known-folder、
@@ -316,7 +368,7 @@ fn default_database_reads_existing_single_store_without_modifying_history() {
     assert_success(&output);
     let value: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
     assert_eq!(value["title"], "old-history");
-    assert_eq!(value["cwd"], "/old");
+    assert_eq!(value["cwd"], fixture_cwd("/old"));
     assert_eq!(std::fs::read(&db).unwrap(), before);
     assert!(!home.join(".peri/threads/threads-v2.db").exists());
     assert_forbidden_output(&output);
@@ -362,11 +414,11 @@ fn missing_default_database_does_not_create_home_paths() {
 
     let output = run_peri(&home, &cwd, &["meta", "session", SESSION_ID, "--json"]);
 
-    assert_json_error(
+    assert_json_diagnostic(
         &output,
         3,
         "database_not_found",
-        "thread database was not found",
+        &["~/.peri/threads/threads.db", "session database not found"],
     );
     assert!(!home.exists());
 }
@@ -387,11 +439,11 @@ fn missing_database_and_incompatible_schema_have_stable_process_contracts() {
             "--json",
         ],
     );
-    assert_json_error(
+    assert_json_diagnostic(
         &missing_output,
         3,
         "database_not_found",
-        "thread database was not found",
+        &[missing.to_str().unwrap(), "session database not found"],
     );
     assert!(!missing.exists());
 
@@ -409,11 +461,11 @@ fn missing_database_and_incompatible_schema_have_stable_process_contracts() {
             "--json",
         ],
     );
-    assert_json_error(
+    assert_json_diagnostic(
         &incompatible_output,
         4,
         "schema_incompatible",
-        "thread database schema is incompatible",
+        &[incompatible.to_str().unwrap(), "schema"],
     );
     assert_forbidden_output(&incompatible_output);
 }
@@ -647,11 +699,11 @@ fn every_error_kind_has_human_real_binary_stream_and_exit_evidence() {
             SESSION_ID,
         ],
     );
-    assert_human_error(
+    assert_human_diagnostic(
         &missing_database,
         3,
         "database_not_found",
-        "thread database was not found",
+        &[missing_path.to_str().unwrap(), "session database not found"],
     );
 
     let unreadable = run_peri(
@@ -665,11 +717,14 @@ fn every_error_kind_has_human_real_binary_stream_and_exit_evidence() {
             SESSION_ID,
         ],
     );
-    assert_human_error(
+    assert_human_diagnostic(
         &unreadable,
         4,
         "database_unreadable",
-        "thread database could not be opened for reading",
+        &[
+            sandbox.path().to_str().unwrap(),
+            "session database is unreadable",
+        ],
     );
 
     let incompatible_path = sandbox.path().join("incompatible.db");
@@ -685,11 +740,11 @@ fn every_error_kind_has_human_real_binary_stream_and_exit_evidence() {
             SESSION_ID,
         ],
     );
-    assert_human_error(
+    assert_human_diagnostic(
         &incompatible,
         4,
         "schema_incompatible",
-        "thread database schema is incompatible",
+        &[incompatible_path.to_str().unwrap(), "schema"],
     );
 
     let compatible_path = sandbox.path().join("compatible.db");
@@ -708,11 +763,11 @@ fn every_error_kind_has_human_real_binary_stream_and_exit_evidence() {
             SESSION_ID,
         ],
     );
-    assert_human_error(
+    assert_human_diagnostic(
         &session_missing,
         3,
         "session_not_found",
-        "session was not found",
+        &["session not found", "NotApplied"],
     );
 
     let corrupt_path = sandbox.path().join("corrupt-human.db");
@@ -730,11 +785,14 @@ fn every_error_kind_has_human_real_binary_stream_and_exit_evidence() {
             SESSION_ID,
         ],
     );
-    assert_human_error(
+    assert_human_diagnostic(
         &corrupt_output,
         4,
         "corrupt_session_data",
-        "stored session metadata is corrupt",
+        &[
+            "session data is corrupt",
+            "stored session data is not readable",
+        ],
     );
 }
 
@@ -767,9 +825,11 @@ fn human_argument_and_storage_failures_are_stderr_only() {
     );
     assert_eq!(database.status.code(), Some(3));
     assert!(database.stdout.is_empty());
-    assert_eq!(
-        text(&database.stderr),
-        "database_not_found: thread database was not found\n"
+    assert_human_diagnostic(
+        &database,
+        3,
+        "database_not_found",
+        &[missing.to_str().unwrap(), "session database not found"],
     );
 }
 
@@ -806,11 +866,11 @@ fn unreadable_regular_file_has_real_binary_stream_and_exit_contract() {
         ],
     );
     std::fs::set_permissions(&db, original_permissions).unwrap();
-    assert_json_error(
+    assert_json_diagnostic(
         &output,
         4,
         "database_unreadable",
-        "thread database could not be opened for reading",
+        &[db.to_str().unwrap(), "session database is unreadable"],
     );
 }
 
@@ -835,11 +895,14 @@ fn corrupt_session_data_is_stderr_only_and_does_not_echo_stored_value() {
         ],
     );
 
-    assert_json_error(
+    assert_json_diagnostic(
         &output,
         4,
         "corrupt_session_data",
-        "stored session metadata is corrupt",
+        &[
+            "session data is corrupt",
+            "stored session data is not readable",
+        ],
     );
     assert!(!text(&output.stderr).contains("orrupt-title"));
     assert!(!text(&output.stderr).contains("corrupt-title"));

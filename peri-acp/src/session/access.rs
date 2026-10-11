@@ -68,7 +68,7 @@ impl SessionManager {
             .map(|s| s.command_registry.clone())
     }
 
-    /// 获取指定 session 的共享 v2 MessageQueue（用于 TUI 侧 cron/channel 异步触发注入）。
+    /// 获取指定 session 的共享 v2 MessageQueue（用于异步触发注入）。
     /// 内部 Arc 共享，clone 廉价。session 不存在时返回 None。
     pub fn v2_queue_for(&self, session_id: &str) -> Option<peri_acp_types::session::MessageQueue> {
         self.inner
@@ -117,6 +117,19 @@ impl SessionManager {
     }
 }
 impl SessionAccessPort for SessionManager {
+    fn task_terminal_delivery(
+        &self,
+        session_id: &str,
+    ) -> Option<Arc<dyn peri_acp_types::tasks::TaskTerminalDelivery>> {
+        let session = self.inner.sessions.get(session_id)?;
+        if session.cancel_token.is_cancelled() {
+            return None;
+        }
+        Some(peri_agent::session::bg_complete::queue_terminal_delivery(
+            session.v2_message_queue.clone(),
+        ))
+    }
+
     fn v2_message_queue(&self, session_id: &str) -> Option<peri_acp_types::session::MessageQueue> {
         self.v2_queue_for(session_id)
     }

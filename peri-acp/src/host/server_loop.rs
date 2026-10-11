@@ -4,8 +4,8 @@ use std::sync::Arc;
 
 use serde_json::Value;
 use tokio_util::sync::CancellationToken;
-use tracing::debug;
 
+use super::diagnostics::ResponseDiagnostics;
 use super::{
     connection::ConnectionContext, dispatch_prompt_turn, extract_session_id, handle_notification,
     handle_request, mcp_apps, requests, send_session_info_update, task_scope, AcpServerConfig,
@@ -31,6 +31,9 @@ impl ServerLoop<'_> {
                 IncomingMessage::Request { id, method, params } => match method.as_str() {
                     "session/prompt" => self.spawn_prompt(id, params).await,
                     "mcp/message" => self.spawn_acp_mcp_request(id, params).await,
+                    "session/input/snapshot" => {
+                        self.spawn_session_io(id, method, params).await;
+                    }
                     "peri/mcp/open" | "peri/mcp/app" | "peri/mcp/resource" | "peri/mcp/invoke" => {
                         self.spawn_mcp_apps_request(id, method, params).await;
                     }
@@ -46,7 +49,49 @@ impl ServerLoop<'_> {
         }
     }
 
+    async fn spawn_session_io(&self, id: RequestId, method: String, params: Value) {
+        let diagnostics = ResponseDiagnostics::new(id, &method, &params);
+        let rejected_diagnostics = diagnostics.clone();
+        let cfg = Arc::clone(self.cfg);
+        let transport = Arc::clone(self.transport);
+        let rejected_transport = Arc::clone(&transport);
+        let sessions = Arc::clone(self.sessions);
+        let cancellation = self.connection_cancellation.clone();
+        let spawned = self.cfg.host_task_spawner.spawn(
+            task_scope::HostTaskOwnerKind::Session,
+            task_scope::HostTaskKind::SessionRequest,
+            async move {
+                let request = async {
+                    let prepared = {
+                        let sessions = sessions.lock().await;
+                        requests::session_io::prepare(&method, &params, &sessions)?
+                    };
+                    let local = prepared.as_ref().map(|environment| &environment.cfg).unwrap_or(&cfg);
+                    requests::session_io::handle(&method, &params, local, &transport).await
+                };
+                let result = tokio::select! {
+                    biased;
+                    _ = cancellation.cancelled() => Err(crate::transport::types::AcpError::new(-32800, "request cancelled")),
+                    result = request => result,
+                };
+                let _ = diagnostics.send(transport.as_ref(), result).await;
+            },
+        );
+        if spawned.is_err() {
+            let _ = rejected_diagnostics
+                .send(
+                    rejected_transport.as_ref(),
+                    Err(crate::transport::types::AcpError::new(
+                        -32800,
+                        "session request host is closing",
+                    )),
+                )
+                .await;
+        }
+    }
+
     async fn spawn_prompt(&self, id: RequestId, params: Value) {
+        let diagnostics = ResponseDiagnostics::new(id, "session/prompt", &params);
         let sessions = self.sessions;
         let transport = self.transport;
         let prompt_locks = self.prompt_locks;
@@ -74,14 +119,14 @@ impl ServerLoop<'_> {
         let cont_tx = cont_tx.clone();
         let prompt_spawner = cfg.host_task_spawner.clone();
         let rejected_transport = Arc::clone(&transport);
-        let rejected_id = id.clone();
+        let rejected_diagnostics = diagnostics.clone();
         let spawn_result = prompt_spawner.spawn(
             task_scope::HostTaskOwnerKind::Session,
             task_scope::HostTaskKind::Prompt,
             async move {
                 let result = dispatch_prompt_turn(
                     params,
-                    false,
+                    super::PromptOrigin::User,
                     None,
                     &sessions,
                     &prompt_locks,
@@ -98,8 +143,7 @@ impl ServerLoop<'_> {
                     &transport,
                     &cont_tx,
                 );
-                if let Err(error) = transport.send_response(id, result).await {
-                    tracing::warn!(%error, "prompt terminal response send failed");
+                if diagnostics.send(transport.as_ref(), result).await.is_err() {
                     return;
                 }
                 if !prompt_session_id.is_empty() {
@@ -108,22 +152,20 @@ impl ServerLoop<'_> {
             },
         );
         if spawn_result.is_err() {
-            if let Err(error) = rejected_transport
-                .send_response(
-                    rejected_id,
+            let _ = rejected_diagnostics
+                .send(
+                    rejected_transport.as_ref(),
                     Err(crate::transport::types::AcpError::new(
                         -32800,
                         "request cancelled",
                     )),
                 )
-                .await
-            {
-                tracing::warn!(%error, "rejected prompt response send failed");
-            }
+                .await;
         }
     }
 
     async fn spawn_mcp_apps_request(&self, id: RequestId, method: String, params: Value) {
+        let diagnostics = ResponseDiagnostics::new(id, &method, &params);
         let transport = self.transport;
         let cfg = self.cfg;
         let connection = self.connection;
@@ -160,7 +202,7 @@ impl ServerLoop<'_> {
         let app_spawner = cfg.host_task_spawner.clone();
         let connection_cancellation = connection_cancellation.clone();
         let rejected_transport = Arc::clone(&transport);
-        let rejected_id = id.clone();
+        let rejected_diagnostics = diagnostics.clone();
         let spawn_result = app_spawner.spawn(
             task_scope::HostTaskOwnerKind::Connection,
             task_scope::HostTaskKind::McpAppsRelay,
@@ -191,13 +233,12 @@ impl ServerLoop<'_> {
                                     match sessions.get(owner_session_id) {
                                         Some(state) => mcp_apps::InvokeSessionGate {
                                             known: true,
-                                            owned: state.execution_owner.is_some()
-                                                && !state.closing,
+                                            open: !state.closing,
                                             prompt_in_flight: state.cancel_token.is_some(),
                                         },
                                         None => mcp_apps::InvokeSessionGate {
                                             known: false,
-                                            owned: false,
+                                            open: false,
                                             prompt_in_flight: false,
                                         },
                                     }
@@ -261,15 +302,13 @@ impl ServerLoop<'_> {
                         }
                     } => result,
                 };
-                if let Err(error) = transport.send_response(id, result).await {
-                    tracing::warn!(%error, "MCP Apps terminal response send failed");
-                }
+                let _ = diagnostics.send(transport.as_ref(), result).await;
             },
         );
         if spawn_result.is_err() {
-            let _ = rejected_transport
-                .send_response(
-                    rejected_id,
+            let _ = rejected_diagnostics
+                .send(
+                    rejected_transport.as_ref(),
                     Err(crate::transport::types::AcpError::new(
                         -32800,
                         "request cancelled",
@@ -285,6 +324,7 @@ impl ServerLoop<'_> {
     /// 决定，不在请求循环里等。定位承载会话只需一次短锁（连接事实分散在各会话
     /// 的会话级 MCP 池，`mcp/message` 只带 `connectionId`）。
     async fn spawn_acp_mcp_request(&self, id: RequestId, params: Value) {
+        let diagnostics = ResponseDiagnostics::new(id, "mcp/message", &params);
         let transport = Arc::clone(self.transport);
         let connection_cancellation = self.connection_cancellation.clone();
         let routed = {
@@ -293,7 +333,7 @@ impl ServerLoop<'_> {
         };
         let spawner = self.cfg.host_task_spawner.clone();
         let rejected_transport = Arc::clone(&transport);
-        let rejected_id = id.clone();
+        let rejected_diagnostics = diagnostics.clone();
         let spawn_result = spawner.spawn(
             task_scope::HostTaskOwnerKind::Session,
             task_scope::HostTaskKind::McpOverAcp,
@@ -308,15 +348,13 @@ impl ServerLoop<'_> {
                     },
                     Err(error) => Err(error),
                 };
-                if let Err(error) = transport.send_response(id, result).await {
-                    tracing::warn!(%error, "MCP over ACP response send failed");
-                }
+                let _ = diagnostics.send(transport.as_ref(), result).await;
             },
         );
         if spawn_result.is_err() {
-            let _ = rejected_transport
-                .send_response(
-                    rejected_id,
+            let _ = rejected_diagnostics
+                .send(
+                    rejected_transport.as_ref(),
                     Err(crate::transport::types::AcpError::new(
                         -32800,
                         "request cancelled",
@@ -327,6 +365,7 @@ impl ServerLoop<'_> {
     }
 
     async fn dispatch_request(&self, id: RequestId, method: String, params: Value) {
+        let diagnostics = ResponseDiagnostics::new(id, &method, &params);
         let transport = self.transport;
         let cfg = self.cfg;
         let sessions = self.sessions;
@@ -347,7 +386,7 @@ impl ServerLoop<'_> {
             if matches!(method.as_str(), "session/close" | "session/delete") {
                 if let Some(state) = sessions.lock().await.get_mut(&lifecycle_session_id) {
                     state.closing = true;
-                    state.continuation_armed = false;
+
                     if let Some(token) = &state.cancel_token {
                         token.cancel();
                     }
@@ -362,14 +401,13 @@ impl ServerLoop<'_> {
                 .or_insert_with(|| Arc::new(tokio::sync::Mutex::new(())))
                 .clone();
             if matches!(method.as_str(), "session/close" | "session/delete") {
-                match tokio::time::timeout(std::time::Duration::from_secs(5), lock.lock_owned())
-                    .await
+                match peri_time::timeout(std::time::Duration::from_secs(5), lock.lock_owned()).await
                 {
                     Ok(guard) => Some(guard),
                     Err(_) => {
-                        let _ = transport
-                            .send_response(
-                                id,
+                        let _ = diagnostics
+                            .send(
+                                transport.as_ref(),
                                 Err(crate::transport::types::AcpError::new(
                                     -32010,
                                     "Session close incomplete: active execution has not stopped",
@@ -383,9 +421,9 @@ impl ServerLoop<'_> {
                 match lock.try_lock_owned() {
                     Ok(guard) => Some(guard),
                     Err(_) => {
-                        let _ = transport
-                            .send_response(
-                                id,
+                        let _ = diagnostics
+                            .send(
+                                transport.as_ref(),
                                 Err(crate::transport::types::AcpError::new(
                                     -32010,
                                     "Session is executing; retry after the current turn",
@@ -399,7 +437,22 @@ impl ServerLoop<'_> {
         } else {
             None
         };
-        let result = {
+        let result = if requests::session_io::handles(&method) {
+            let prepared = {
+                let sessions = sessions.lock().await;
+                requests::session_io::prepare(&method, &params, &sessions)
+            };
+            match prepared {
+                Ok(prepared) => {
+                    let local = prepared
+                        .as_ref()
+                        .map(|environment| &environment.cfg)
+                        .unwrap_or(cfg);
+                    requests::session_io::handle(&method, &params, local, transport).await
+                }
+                Err(error) => Err(error),
+            }
+        } else {
             let mut sessions = sessions.lock().await;
             handle_request(&method, &params, cfg, &mut sessions, transport).await
         };
@@ -427,7 +480,7 @@ impl ServerLoop<'_> {
             }
         }
         let setup_session_id = session_setup(&method, &params, result.as_ref().ok());
-        let response_sent = transport.send_response(id, result).await.is_ok();
+        let response_sent = diagnostics.send(transport.as_ref(), result).await.is_ok();
         if response_sent {
             if let Some(session_id) = setup_session_id {
                 let environment = sessions
@@ -462,7 +515,8 @@ impl ServerLoop<'_> {
             match routed {
                 Ok((port, inbound)) => {
                     if let Err(error) = port.notify(inbound).await {
-                        debug!(
+                        tracing::warn!(
+                            method,
                             code = error.code,
                             error = %error.message,
                             "MCP over ACP 通知未能投递"
@@ -470,7 +524,8 @@ impl ServerLoop<'_> {
                     }
                 }
                 Err(error) => {
-                    debug!(
+                    tracing::warn!(
+                        method,
                         code = error.code,
                         error = %error.message,
                         "MCP over ACP 通知未能路由"
@@ -503,7 +558,13 @@ impl ServerLoop<'_> {
             handle_notification(&method, &params, &mut sessions, cfg)
         };
         if let Some(req) = cont_req {
-            let _ = cont_tx.send(req);
+            if cont_tx.send(req).is_err() {
+                tracing::warn!(
+                    method,
+                    session_id = extract_session_id(&params, ""),
+                    "ACP continuation scheduling failed: channel closed"
+                );
+            }
         }
     }
 }

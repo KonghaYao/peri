@@ -15,6 +15,8 @@ pub struct CollectRequest<'a> {
     pub pump_handle: PumpHandle,
     pub session_id: &'a str,
     pub exec_outcome: ExecOutcome,
+    /// turn 退出时仍未结算的后台任务数（§7.3 摘要，由调用方在 loop 结束后读取）。
+    pub pending_tasks: u32,
 }
 
 /// 最终结果收集：close channel → 等待 pump drain → 提取 recall items。
@@ -26,6 +28,7 @@ pub async fn collect_result(req: CollectRequest<'_>) -> PromptResult {
         pump_handle,
         session_id,
         mut exec_outcome,
+        pending_tasks,
     } = req;
 
     close_channel(event_tx);
@@ -41,6 +44,7 @@ pub async fn collect_result(req: CollectRequest<'_>) -> PromptResult {
         persistence_inconsistent: exec_outcome.persistence_inconsistent,
         history_replaced_by_compaction: exec_outcome.history_replaced_by_compaction,
         recall_items,
+        pending_tasks,
     }
 }
 
@@ -52,7 +56,7 @@ pub fn close_channel(
 }
 
 pub async fn wait_for_pump(pump_done_rx: oneshot::Receiver<()>, session_id: &str) {
-    match tokio::time::timeout(std::time::Duration::from_secs(10), pump_done_rx).await {
+    match peri_time::timeout(std::time::Duration::from_secs(10), pump_done_rx).await {
         Ok(Ok(())) => debug!(session_id, "Event pump done"),
         Ok(Err(_)) => error!(session_id, "Event pump done channel closed unexpectedly"),
         Err(_) => error!(

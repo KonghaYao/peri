@@ -85,6 +85,36 @@ async function json(response: Response): Promise<any> {
 }
 
 describe("viewer API contract", () => {
+  test("reads schema 11 configuration and history without retired cache columns", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "peri-viewer-"));
+    tempDirs.push(dir);
+    const path = join(dir, "schema11.db");
+    const db = new Database(path);
+    db.exec(`PRAGMA user_version=11;
+      CREATE TABLE threads(id TEXT PRIMARY KEY,title TEXT,cwd TEXT,created_at TEXT,updated_at TEXT,message_count INTEGER,parent_thread_id TEXT,snapshot_at_message_id TEXT,hidden INTEGER,cancel_policy TEXT,config TEXT,frozen_context TEXT,inherited_context TEXT,agent_status TEXT);
+      CREATE TABLE messages(message_id TEXT PRIMARY KEY,thread_id TEXT,role TEXT,content TEXT,truncated INTEGER,excluded INTEGER,projection TEXT);
+      INSERT INTO threads VALUES ('t1','fixture','/tmp','2026-01-01','2026-01-01',1,NULL,NULL,0,'default','{"model":"retained"}',NULL,NULL,'done');
+      INSERT INTO messages VALUES ('m1','t1','user','{"role":"user","content":"hello"}',0,0,NULL);`);
+    db.close();
+    const source = await ViewerDataAdapter.open(path);
+    try {
+      expect(source.getThreadById("t1")).toMatchObject({ id: "t1", title: "fixture", agent_status: "done" });
+      expect(source.getThreadById("t1")).not.toHaveProperty("cached_context");
+      expect(source.getThreadById("t1")).not.toHaveProperty("context_cache_epoch");
+      expect(source.loadMessages("t1")[0]).toMatchObject({ messageId: "m1", role: "user", text: "hello", sequence: 1 });
+      expect(source.getStats().totalMessages).toBe(1);
+    } finally {
+      source.close();
+    }
+    const reader = new Database(path, { readonly: true });
+    try {
+      expect(reader.query("SELECT config FROM threads WHERE id='t1'").get()).toEqual({ config: '{"model":"retained"}' });
+      expect(reader.query("PRAGMA user_version").get()).toEqual({ user_version: 11 });
+    } finally {
+      reader.close();
+    }
+  });
+
   test("fails clearly for a missing or incompatible database", async () => {
     await expect(ViewerDataAdapter.open("/tmp/peri-viewer-does-not-exist.db")).rejects.toThrow();
     const dir = mkdtempSync(join(tmpdir(), "peri-viewer-"));

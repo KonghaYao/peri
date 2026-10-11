@@ -1,7 +1,7 @@
 //! mcp.rs 契约测试：McpSubscriptionPort::downcast_arc 还原 + subscriptions 配置 serde。
 //!
 //! downcast 回归背景（同构 issue 2026-08-07-cron-tool-task-never-triggers，
-//! 见 peri-middlewares/src/cron/mod_test.rs）：直接对 trait object 调 `type_id()`
+//! 见 mcp-packages/cron/src/mod_test.rs）：直接对 trait object 调 `type_id()`
 //! 会解析到 trait object 自身（恒不等于具体类型）→ downcast 恒失败；必须经
 //! `as_any()` 取具体类型 TypeId。
 

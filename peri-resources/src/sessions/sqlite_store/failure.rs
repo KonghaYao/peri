@@ -12,42 +12,12 @@
 //! 唯一例外是写事务的提交阶段（[`commit_failure`]）：一旦进入 `commit()`，错误形状不再
 //! 能回答问题，「没生效」也不能由原因推出，因此固定上报未决持久化。
 
+pub(in crate::sessions) use crate::sessions::failure::{
+    corrupt, invalid_input, not_found, unavailable,
+};
 use peri_acp_types::session_resources::{SessionResourceError, SessionResourceErrorKind};
 use peri_acp_types::thread::ThreadId;
 use peri_acp_types::workspace::WorkspaceError;
-
-pub(in crate::sessions) fn invalid_input(detail: &str) -> SessionResourceError {
-    SessionResourceError::new(SessionResourceErrorKind::InvalidInput {
-        detail: detail.to_owned(),
-    })
-}
-
-pub(in crate::sessions) fn corrupt(detail: &str) -> SessionResourceError {
-    SessionResourceError::new(SessionResourceErrorKind::Corrupt {
-        detail: detail.to_owned(),
-    })
-}
-
-pub(in crate::sessions) fn unavailable(detail: &str) -> SessionResourceError {
-    SessionResourceError::new(SessionResourceErrorKind::Unavailable {
-        detail: detail.to_owned(),
-    })
-}
-
-pub(in crate::sessions) fn not_found() -> SessionResourceError {
-    SessionResourceError::new(SessionResourceErrorKind::NotFound)
-}
-
-pub(in crate::sessions) fn read_only_store() -> SessionResourceError {
-    SessionResourceError::new(SessionResourceErrorKind::ReadOnlyStore)
-}
-
-/// 「需要一条活的本机执行所有者」这一领域的统一失败。
-pub(in crate::sessions) fn lease_required() -> SessionResourceError {
-    SessionResourceError::new(SessionResourceErrorKind::Workspace(
-        WorkspaceError::ExecutionLeaseRequired,
-    ))
-}
 
 /// SQLx 失败 → 领域失败：只给稳定分类，不把 SQL 文本或驱动消息带出实现。
 pub(in crate::sessions) fn map_sqlx(error: &sqlx::Error) -> SessionResourceError {
@@ -81,7 +51,7 @@ pub(in crate::sessions) fn map_sqlx(error: &sqlx::Error) -> SessionResourceError
 /// 长得像 [`SessionResourceErrorKind::Unavailable`]（IO、驱动未分类失败）时尤其不能冒充
 /// 「没写进去」。因此提交阶段不做原因分类，效果固定为
 /// [`MutationOutcome::Unknown`](peri_acp_types::session_resources::MutationOutcome)：
-/// 写入准入据此不结清范围，由 `Drop` 在租约上留下未决证据，阻断续写与 clean。
+/// 写入准入据此不结清范围，由门禁保留未决证据，阻断续写与关闭确认。
 ///
 /// 只用于**写事务**的 `commit()`：提交之前的失败（输入非法、约束冲突、可证明的回滚）
 /// 仍走 [`write_failure`] / [`map_sqlx`]，不得被判成 `Unknown`；只读事务没有写入效果，
@@ -107,14 +77,6 @@ pub(in crate::sessions) fn preserve_domain_failure(
     error.downcast::<SessionResourceError>()
 }
 
-/// `anyhow` 链上是否已存在「未决持久化」的领域失败：桥侧结清写入准入前询问，
-/// 避免把提交未决当成已确定效果。
-pub(in crate::sessions) fn is_persistence_uncertain(error: &anyhow::Error) -> bool {
-    error
-        .downcast_ref::<SessionResourceError>()
-        .is_some_and(SessionResourceError::is_persistence_uncertain)
-}
-
 /// 写入路径失败映射：领域失败（已带效果）原样保留，绑定形状/关系失败保持 workspace 语义。
 pub(in crate::sessions) fn write_failure(error: anyhow::Error) -> SessionResourceError {
     match preserve_domain_failure(error) {
@@ -131,8 +93,7 @@ pub(in crate::sessions) fn write_failure(error: anyhow::Error) -> SessionResourc
     }
 }
 
-/// 本机执行面失败映射：领域失败（已带效果）原样保留，workspace 语义同样保留，SQL 失败按
-/// 原因分类，其余（IO、发现探测等）都是「后端暂不可用」，不冒充「没有这条会话」。
+/// Native execution failures retain the SQLx-specific classification at the adapter boundary.
 pub(in crate::sessions) fn execution_failure(error: anyhow::Error) -> SessionResourceError {
     match preserve_domain_failure(error) {
         Ok(domain) => domain,
@@ -191,9 +152,5 @@ mod tests {
             execution_failure(unknown()).effect(),
             MutationOutcome::Unknown
         );
-        assert!(is_persistence_uncertain(&unknown()));
-        assert!(!is_persistence_uncertain(&anyhow::Error::new(
-            sqlx::Error::RowNotFound
-        )));
     }
 }

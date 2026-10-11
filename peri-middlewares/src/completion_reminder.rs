@@ -3,7 +3,7 @@ use peri_agent::{
     agent::react::AgentOutput,
     error::{AgentError, AgentResult},
     middleware::capabilities::AfterAgentState,
-    session::{MessageKind, MessageSource, QueuedMessage},
+    session::{MessageKind, MessagePolicy, MessageSource, QueuedMessage},
 };
 
 // 准入必须先于业务计数或模板构造；持有同一状态能力，统一 canonical 入队与续跑。
@@ -26,6 +26,7 @@ impl<'a> CompletionReminder<'a> {
         middleware: &str,
         reminder: SystemReminder,
         source: MessageSource,
+        policy: MessagePolicy,
         block_reason: &str,
     ) -> AgentResult<AgentOutput> {
         let reminder = TrustedSystemReminderFactory::for_producer()
@@ -34,12 +35,10 @@ impl<'a> CompletionReminder<'a> {
                 middleware: middleware.to_string(),
                 reason: error.to_string(),
             })?;
-        self.state
-            .enqueue_v2_message(QueuedMessage::system_reminder(
-                MessageKind::Defer,
-                source,
-                reminder,
-            ));
+        self.state.enqueue_v2_message(
+            QueuedMessage::system_reminder(MessageKind::Defer, source, reminder)
+                .with_policy(policy),
+        );
         let mut output = self.output.clone();
         output.block_continue = Some(block_reason.to_string());
         Ok(output)

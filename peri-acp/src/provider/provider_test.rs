@@ -41,10 +41,8 @@ fn into_model_openai_produces_openai_compatible_protocol() {
         peri_model::ProviderProtocol::OpenAiCompatible
     ));
     assert_eq!(prepared.model_id(), "gpt-4o");
-    // PreparedModelRequest 是有意的安全观测投影：endpoint path 被脱敏为 /[REDACTED]，
-    // host 保留。协议补全路径（/v1/chat/completions）只发生在私有请求构造期。
     assert_eq!(prepared.endpoint().host_str(), Some("api.example.com"));
-    assert_eq!(prepared.endpoint().path(), "/[REDACTED]");
+    assert_eq!(prepared.endpoint().path(), "/v1/chat/completions");
 }
 
 #[test]
@@ -58,9 +56,8 @@ fn into_model_anthropic_produces_anthropic_protocol() {
         peri_model::ProviderProtocol::Anthropic
     ));
     assert_eq!(prepared.model_id(), "claude-sonnet-4-6");
-    // 同 OpenAI：host 保留，path 在观测投影中脱敏。
     assert_eq!(prepared.endpoint().host_str(), Some("api.anthropic.com"));
-    assert_eq!(prepared.endpoint().path(), "/[REDACTED]");
+    assert_eq!(prepared.endpoint().path(), "/v1/messages");
 }
 
 #[test]
@@ -213,9 +210,8 @@ fn into_model_invalid_base_url_falls_back_without_panic() {
     let prepared = model
         .prepare_request(&peri_model::ModelRequest::default())
         .expect("prepare_request 必须成功");
-    // 非法 base_url 回落到默认 endpoint（api.openai.com），host 保留，path 脱敏。
     assert_eq!(prepared.endpoint().host_str(), Some("api.openai.com"));
-    assert_eq!(prepared.endpoint().path(), "/[REDACTED]");
+    assert_eq!(prepared.endpoint().path(), "/v1/chat/completions");
 }
 
 #[test]
@@ -303,4 +299,81 @@ fn from_config_for_alias_fable_falls_back_to_opus_model() {
     // fable 档位 model 空 → 回退 opus
     assert_eq!(p.model_name(), "claude-opus-4-6");
     let _ = p;
+}
+
+#[test]
+fn from_resolved_preserves_runtime_fields_for_both_protocols() {
+    let resolved = [
+        ResolvedProvider::Anthropic {
+            api_key: "key".into(),
+            model: "model".into(),
+            base_url: Some("https://configured.example".into()),
+            effort: Some("high".into()),
+            max_tokens: 64000,
+            context_1m: true,
+        },
+        ResolvedProvider::OpenAi {
+            api_key: "key".into(),
+            model: "model".into(),
+            base_url: "https://configured.example".into(),
+            effort: Some("high".into()),
+            max_tokens: 64000,
+            context_1m: true,
+        },
+    ];
+    for provider in resolved {
+        let runtime = LlmProvider::from_resolved(provider);
+        assert_eq!(runtime.model_name(), "model");
+        assert!(runtime.context_1m());
+        assert_eq!(runtime.effort_key(), ":effort=high");
+        match runtime {
+            LlmProvider::Anthropic {
+                api_key,
+                base_url,
+                max_tokens,
+                retry_observer,
+                ..
+            } => {
+                assert_eq!(api_key, "key");
+                assert_eq!(base_url.as_deref(), Some("https://configured.example"));
+                assert_eq!(max_tokens, 64000);
+                assert!(retry_observer.is_none());
+            }
+            LlmProvider::OpenAi {
+                api_key,
+                base_url,
+                max_tokens,
+                retry_observer,
+                ..
+            } => {
+                assert_eq!(api_key, "key");
+                assert_eq!(base_url, "https://configured.example");
+                assert_eq!(max_tokens, 64000);
+                assert!(retry_observer.is_none());
+            }
+        }
+    }
+}
+
+#[test]
+fn from_source_uses_resolved_snapshot_after_disk_changes() {
+    let temporary = tempfile::tempdir().unwrap();
+    let path = temporary.path().join("settings.json");
+    std::fs::write(
+        &path,
+        r#"{"config":{"active_alias":"opus","providers":[{"id":"configured","type":"openai","apiKey":"key","models":{"opus":"frozen-model"}}]}}"#,
+    )
+    .unwrap();
+    let source = ConfigSource::load_at(temporary.path(), path.clone()).unwrap();
+    std::fs::write(&path, "{broken-later}").unwrap();
+
+    let provider = LlmProvider::from_source(&source).unwrap();
+    assert_eq!(provider.model_name(), "frozen-model");
+    assert!(matches!(
+        provider,
+        LlmProvider::OpenAi {
+            retry_observer: None,
+            ..
+        }
+    ));
 }

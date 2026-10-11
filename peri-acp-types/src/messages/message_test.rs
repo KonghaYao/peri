@@ -157,7 +157,13 @@ fn test_tool_message_roundtrips_safe_retry_failure_facts() {
         panic!("safe child failure should survive canonical message serde");
     };
     assert_eq!(restored_failure, failure);
-    assert_eq!(restored_failure.diagnostic().retry_attempts(), Some(3));
+    assert_eq!(
+        restored_failure
+            .diagnostic()
+            .expect("model diagnostic")
+            .retry_attempts(),
+        Some(3)
+    );
 }
 
 #[test]

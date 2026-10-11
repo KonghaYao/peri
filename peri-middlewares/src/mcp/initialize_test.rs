@@ -1,4 +1,5 @@
 use super::*;
+use crate::mcp::builtin::context::BuiltinInstanceContext;
 
 const SCRIPT: &str = r#"
 const fs = require('node:fs');
@@ -23,6 +24,71 @@ readline.on('line', line => {
   process.stdout.write(JSON.stringify({ jsonrpc: '2.0', id: request.id, result }) + '\n');
 });
 "#;
+
+const RESOURCE_ERROR_SCRIPT: &str = r#"
+const readline = require('node:readline').createInterface({ input: process.stdin });
+readline.on('line', line => {
+  const request = JSON.parse(line);
+  if (request.id === undefined) return;
+  let result = {};
+  if (request.method === 'initialize') result = {
+    protocolVersion: '2025-11-25', capabilities: { resources: {} },
+    serverInfo: { name: 'resource-error', version: '1' },
+  };
+  else if (request.method === 'tools/list') result = { tools: [] };
+  else if (request.method === 'resources/list') {
+    process.stdout.write(JSON.stringify({ jsonrpc: '2.0', id: request.id,
+      error: { code: -32603, message: 'resource unavailable' } }) + '\n');
+    return;
+  } else if (request.method !== 'ping') {
+    process.stdout.write(JSON.stringify({ jsonrpc: '2.0', id: request.id,
+      error: { code: -32601, message: 'Method not found' } }) + '\n');
+    return;
+  }
+  process.stdout.write(JSON.stringify({ jsonrpc: '2.0', id: request.id, result }) + '\n');
+});
+"#;
+
+#[tokio::test]
+async fn remote_workspace_resource_discovery_failure_blocks_initial_connection() {
+    let fixture = tempfile::tempdir().unwrap();
+    std::fs::write(fixture.path().join("server.js"), RESOURCE_ERROR_SCRIPT).unwrap();
+    let mut config: super::super::config::McpConfigFile =
+        serde_json::from_value(serde_json::json!({
+            "mcpServers": { "workspace": { "command": "node", "args": ["server.js"] } }
+        }))
+        .unwrap();
+    config.mcp_servers.get_mut("workspace").unwrap().source = Some(ConfigSource::WorkspaceRemote);
+    let (mut tasks, spawner) = super::super::task_scope::McpTaskOwner::new();
+    let pool = Arc::new(McpClientPool::new_pending_with_spawner(spawner));
+    let (status, _) = tokio::sync::watch::channel(McpInitStatus::Pending);
+    McpClientPool::initialize_config(
+        pool.clone(),
+        fixture.path(),
+        config,
+        Default::default(),
+        status,
+        None,
+    )
+    .await;
+    assert!(matches!(
+        pool.get_client("workspace")
+            .map(|handle| handle.status.clone()),
+        Some(ClientStatus::Failed(_))
+    ));
+    assert!(!pool
+        .discovery_evidence("workspace")
+        .is_some_and(|e| e.is_complete()));
+    let reconnect = pool.reconnect("workspace", None).await;
+    assert!(matches!(
+        reconnect,
+        Err(super::super::client::McpPoolError::ResourceDiscoveryFailed { .. })
+    ));
+    pool.begin_shutdown();
+    tasks.begin_shutdown();
+    let _ = tasks.shutdown().await;
+    assert!(pool.shutdown().await.is_complete());
+}
 
 /// 极简 tracing Subscriber：捕获 WARN 事件的字段（沿用 `skill_discovery_test`
 /// 的无 dev-dependency 做法）。本回归断言的是「启动失败必须在日志里可查」。
@@ -90,7 +156,6 @@ fn stdio_spawn_failure_is_recorded_and_logged() {
                     Default::default(),
                     status,
                     None,
-                    None,
                 )
                 .await;
                 assert!(matches!(
@@ -135,7 +200,6 @@ async fn worktree_static_server_uses_target_directory_on_initialize_and_reconnec
             config,
             Default::default(),
             status,
-            None,
             None,
         )
         .await;
@@ -188,7 +252,7 @@ async fn test_system_mcp_config_error_never_publishes_ready() {
 
     let pool = Arc::new(McpClientPool::new_pending());
     let (status_tx, status_rx) = tokio::sync::watch::channel(McpInitStatus::Pending);
-    McpClientPool::run_initialize(pool.clone(), &cwd, &claude_home, status_tx, None, None).await;
+    McpClientPool::run_initialize(pool.clone(), &cwd, &claude_home, status_tx, None).await;
 
     let expected_rule = "system_mcp_tools requires system_mcp = true";
     match &*pool.init_status.read() {
@@ -308,7 +372,6 @@ async fn tools_list_error_never_becomes_connected_with_empty_tools() {
         Default::default(),
         status_tx,
         None,
-        None,
     )
     .await;
 
@@ -404,11 +467,10 @@ async fn system_gate_concludes_tools_list_failure_without_waiting_for_timeout() 
         Default::default(),
         status_tx,
         None,
-        None,
     )
     .await;
 
-    let started_at = tokio::time::Instant::now();
+    let started_at = peri_time::monotonic_now();
     let outcome = pool
         .await_system_connections(
             &peri_agent::agent::AgentCancellationToken::new(),
@@ -417,7 +479,7 @@ async fn system_gate_concludes_tools_list_failure_without_waiting_for_timeout() 
         .await
         .expect_err("发现失败不得放行启动");
     match outcome {
-        crate::mcp::client::SystemReadinessError::ToolDiscoveryFailed { server } => {
+        crate::mcp::client::SystemReadinessError::ToolDiscoveryFailed { server, .. } => {
             assert_eq!(server, "gate-broken")
         }
         other => panic!("必须归类为工具发现失败，实际: {other:?}"),
@@ -453,7 +515,6 @@ async fn empty_tools_list_is_success_not_failure() {
         config,
         Default::default(),
         status_tx,
-        None,
         None,
     )
     .await;
@@ -524,6 +585,8 @@ async fn system_discovery_is_live_while_ordinary_server_uses_cache() {
     let (mut tasks, spawner) = super::super::task_scope::McpTaskOwner::new();
     let mut pool = McpClientPool::new_pending_with_spawner(spawner);
     pool.resource_cache = crate::mcp::resource_cache::McpResourceCache::isolated_for_test();
+    pool.bind_workspace_scope(peri_acp_types::workspace::WorkspaceId::new())
+        .unwrap();
     let pool = Arc::new(pool);
 
     for round in 1..=2 {
@@ -534,7 +597,6 @@ async fn system_discovery_is_live_while_ordinary_server_uses_cache() {
             config.clone(),
             Default::default(),
             status_tx,
-            None,
             None,
         )
         .await;
@@ -646,7 +708,6 @@ async fn reconnect_replaces_discovery_evidence_with_current_generation() {
         config,
         Default::default(),
         status_tx,
-        None,
         None,
     )
     .await;
@@ -764,7 +825,6 @@ async fn system_requirement_is_discovered_before_gated_ordinary_server() {
             Default::default(),
             status_tx,
             None,
-            None,
         )
         .await;
     });
@@ -801,3 +861,6 @@ async fn system_requirement_is_discovered_before_gated_ordinary_server() {
     let _ = tasks.shutdown().await;
     assert!(pool.shutdown().await.is_complete());
 }
+
+#[path = "initialize_builtin_test.rs"]
+mod builtin_initialization_tests;

@@ -31,7 +31,10 @@ async fn test_empty_agent_text_skipped() {
     let result = handle_submit(
         &client,
         &cwd,
-        SubmitRequest::AgentText("   \n\t ".to_string()),
+        SubmitRequest::AgentText {
+            text: "   \n\t ".to_string(),
+            attachments: Vec::new(),
+        },
     )
     .await;
     assert!(result.is_ok());
@@ -47,7 +50,14 @@ async fn test_creates_session_when_missing() {
     // 启动一个简短超时，确保 handle_submit 进入 new_session 分支
     let result = tokio::time::timeout(
         std::time::Duration::from_millis(100),
-        handle_submit(&client, &cwd, SubmitRequest::AgentText("hello".to_string())),
+        handle_submit(
+            &client,
+            &cwd,
+            SubmitRequest::AgentText {
+                text: "hello".to_string(),
+                attachments: Vec::new(),
+            },
+        ),
     )
     .await;
 
@@ -83,14 +93,9 @@ async fn test_dropped_tx_exits_loop() {
     let _ = tokio::time::timeout(std::time::Duration::from_millis(500), handle).await;
 }
 
-/// Issue 2026-08-05 S4.2: cancel 收到信号时先发 cancel RPC（带超时）再本地
-/// 兜底复位 is_loading——transport 死亡 / prompt task panic 时 TurnInterrupted
-/// 永不到达，loading 无事件驱动复位路径；本地复位后 Ctrl+C 双击退出路径恢复
-/// 可用（与服务端 TurnInterrupted 幂等：事件到达后再次复位无害）。本测试的
-/// client 无 active session → cancel() 立即失败 → 走兜底复位分支。
 #[tokio::test]
 #[serial]
-async fn test_cancel_consumer_resets_loading_locally() {
+async fn test_cancel_consumer_failure_does_not_claim_execution_stopped() {
     crate::kit::atoms::init_atoms();
     // 模拟卡死状态：is_loading=true（事件流已中断，无法靠事件复位）
     {
@@ -104,12 +109,10 @@ async fn test_cancel_consumer_resets_loading_locally() {
     let _handle = spawn_cancel_consumer(client, rx, shutdown.clone());
 
     tx.send(()).unwrap();
-    // 复位发生在 cancel RPC 完成/失败之后——即使 cancel RPC 无响应（transport
-    // 已死）超时，复位也必定执行。
     tokio::time::sleep(std::time::Duration::from_millis(100)).await;
     assert!(
-        !ACP_STATE.state().read().is_loading,
-        "cancel 信号后 is_loading 应本地复位为 false"
+        ACP_STATE.state().read().is_loading,
+        "控制失败不得伪造执行已停止"
     );
     shutdown.cancel();
 }
@@ -206,7 +209,8 @@ async fn test_clear_request_bypasses_prompt() {
                 reasoning: None,
                 message_id: None,
                 content_hash: tui_hash_str("existing|"),
-            },
+            }
+            .into(),
         )]),
         generation: 0,
     };

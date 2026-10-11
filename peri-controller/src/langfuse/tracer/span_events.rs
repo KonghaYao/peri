@@ -168,7 +168,9 @@ impl LangfuseTracer {
             None
         };
 
-        self.stages.on_stage_end(agent_id, handle, status);
+        if !self.stages.on_stage_end(agent_id, handle, status) {
+            return;
+        }
 
         self.emit_stage_span_close(handle, status, receive_input);
 
@@ -194,15 +196,19 @@ impl LangfuseTracer {
     /// 发送 stage 的合并 SpanCreate（含 end_time）。
     ///
     /// 条件上报（v2 语义）：0ms stage 不上报；Compact 阶段无实际工作时不上报。
-    /// 供 `on_stage_end` 与「旧 stage 被覆盖时立即补发」两条路径共用——
-    /// 覆盖补发的 span 若与后续乱序到达的 StageEnded 重复发送，Langfuse 对
-    /// 相同 observation id 的写入是 upsert，最终以较晚的 end_time/status 为准。
+    /// 供 stage 正常结束、覆盖与兜底共用，同一身份最多关闭一次。
     pub(crate) fn emit_stage_span_close(
-        &self,
+        &mut self,
         handle: &crate::langfuse::tracer::stages::StageHandle,
         status: StageStatus,
         receive_input: Option<serde_json::Value>,
     ) {
+        if !self.stages.close_stage_once(&handle.span_id) {
+            return;
+        }
+        for record in self.stages.take_workflows_for_stage(&handle.span_id) {
+            self.emit_workflow_span(record, None);
+        }
         // Compact stage：仅在实际执行了 micro/full compact 时才上报 span，
         // 否则跳过空 compact 阶段（无意义的 ~20ms span）
         if handle.stage == Stage::Compact && !self.compact_work_done {
@@ -263,33 +269,7 @@ impl LangfuseTracer {
         if !self.sampling.should_emit(&self.trace_id, &self.session_id) {
             return;
         }
-        let record = self.stages.on_workflow_start(workflow_id, plan);
-        if record.span_id.is_empty() {
-            return;
-        }
-        let span_body = SpanBody {
-            id: Some(record.span_id),
-            trace_id: Some(self.trace_id.clone()),
-            name: Some(format!("workflow-{}", workflow_id)),
-            start_time: Some(now_rfc3339()),
-            end_time: None,
-            input: Some(serde_json::json!({"plan": plan})),
-            output: None,
-            metadata: None,
-            level: None,
-            status_message: None,
-            version: Some(VERSION.to_string()),
-            environment: None,
-            parent_observation_id: Some(self.agent_observation_id.clone()),
-            session_id: Some(self.session_id.clone()),
-        };
-        let event = IngestionEvent::SpanCreate {
-            id: new_uuid(),
-            timestamp: now_rfc3339(),
-            body: span_body,
-            metadata: None,
-        };
-        try_add_or_warn_via_session(&*self.session, event, &self.trace_id, "Workflow SpanCreate");
+        self.stages.on_workflow_start(workflow_id, plan);
     }
 
     /// Workflow 结束（Act 阶段）
@@ -304,33 +284,54 @@ impl LangfuseTracer {
             Some(r) => r,
             None => return,
         };
+        self.emit_workflow_span(
+            record.start,
+            Some((record.agents_spawned, record.tool_calls)),
+        );
+    }
+
+    fn emit_workflow_span(
+        &self,
+        record: super::stages::WorkflowStartRecord,
+        stats: Option<(usize, usize)>,
+    ) {
         let end_time = now_rfc3339();
+        let incomplete = stats.is_none();
+        let output = match stats {
+            Some((agents_spawned, tool_calls)) => serde_json::json!({
+                "agents_spawned": agents_spawned,
+                "tool_calls": tool_calls,
+            }),
+            None => serde_json::json!({"error_class": "lifecycle_incomplete"}),
+        };
         let span_body = SpanBody {
             id: Some(record.span_id),
-            trace_id: Some(self.trace_id.clone()),
-            name: Some(format!("workflow-{}", workflow_id)),
-            start_time: None, // start_time from WorkflowStartRecord not retained
+            trace_id: Some(record.trace_id),
+            name: Some(format!("workflow-{}", record.workflow_id)),
+            start_time: Some(record.start_time),
             end_time: Some(end_time.clone()),
-            input: None,
-            output: Some(serde_json::json!({
-                "agents_spawned": record.agents_spawned,
-                "tool_calls": record.tool_calls,
-            })),
-            metadata: None,
-            level: None,
-            status_message: None,
+            input: Some(serde_json::json!({"plan": record.plan})),
+            output: Some(output),
+            metadata: incomplete.then(|| {
+                serde_json::json!({
+                    "incomplete": true,
+                    "terminal_source": "stage_close_fallback",
+                })
+            }),
+            level: incomplete.then_some(ObservationLevel::Warning),
+            status_message: incomplete.then(|| "lifecycle_incomplete".to_string()),
             version: Some(VERSION.to_string()),
             environment: None,
-            parent_observation_id: Some(self.agent_observation_id.clone()),
+            parent_observation_id: Some(record.parent_observation_id),
             session_id: Some(self.session_id.clone()),
         };
-        let event = IngestionEvent::SpanUpdate {
+        let event = IngestionEvent::SpanCreate {
             id: new_uuid(),
             timestamp: end_time,
             body: span_body,
             metadata: None,
         };
-        try_add_or_warn_via_session(&*self.session, event, &self.trace_id, "Workflow SpanUpdate");
+        try_add_or_warn_via_session(&*self.session, event, &self.trace_id, "Workflow SpanCreate");
     }
 
     // ── 中间件链事件 ────────────────────────────────────────────────────────

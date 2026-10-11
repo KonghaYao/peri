@@ -1,5 +1,103 @@
 use super::*;
 
+/// P0 regression: a newly submitted prompt must follow every visible entry
+/// from the previous turn, even when its terminal event has not arrived yet.
+#[test]
+#[serial]
+fn p0_new_prompt_follows_unarchived_previous_answer() {
+    let mut state = make_fold_test_state();
+    dispatch_and_notify(
+        &mut state,
+        &AcpEventData::LocalUserBubble { text: "q1".into() },
+    );
+    dispatch_and_notify(
+        &mut state,
+        &AcpEventData::TextChunk(TuiTextChunk {
+            text: "a1".into(),
+            message_id: None,
+            agent_id: None,
+        }),
+    );
+    dispatch_and_notify(
+        &mut state,
+        &AcpEventData::LocalUserBubble { text: "q2".into() },
+    );
+
+    let sequence: Vec<_> = VIEW_MODELS
+        .state()
+        .read()
+        .items
+        .iter()
+        .filter_map(|vm| match vm {
+            TuiRenderUnit::TuiUserBubble(b) => Some(format!("user:{}", b.text)),
+            TuiRenderUnit::TuiAssistantBubble(b) => Some(format!("assistant:{}", b.text)),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(sequence, ["user:q1", "assistant:a1", "user:q2"]);
+
+    dispatch_and_notify(&mut state, &AcpEventData::TurnDone);
+    let archived: Vec<_> = VIEW_MODELS
+        .state()
+        .read()
+        .items
+        .iter()
+        .filter_map(|vm| match vm {
+            TuiRenderUnit::TuiUserBubble(b) => Some(format!("user:{}", b.text)),
+            TuiRenderUnit::TuiAssistantBubble(b) => Some(format!("assistant:{}", b.text)),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(
+        archived, sequence,
+        "turn terminal must not reorder visible prompts"
+    );
+}
+
+/// P0 regression: a prompt arriving while a tool runs must preserve the tool
+/// accumulator so its eventual result can still update the visible card.
+#[test]
+#[serial]
+fn p0_new_prompt_preserves_running_tool_result() {
+    let mut state = make_fold_test_state();
+    dispatch_and_notify(
+        &mut state,
+        &AcpEventData::LocalUserBubble { text: "q1".into() },
+    );
+    dispatch_and_notify(
+        &mut state,
+        &AcpEventData::ToolStarted(TuiToolStarted {
+            tool_id: "tool-1".into(),
+            tool_name: "Read".into(),
+            input_summary: "file.rs".into(),
+            raw_input: serde_json::json!({"path": "file.rs"}),
+            agent_id: None,
+        }),
+    );
+    dispatch_and_notify(
+        &mut state,
+        &AcpEventData::LocalUserBubble { text: "q2".into() },
+    );
+    dispatch_and_notify(
+        &mut state,
+        &AcpEventData::ToolEnded(TuiToolEnded {
+            tool_id: "tool-1".into(),
+            output_summary: "file contents".into(),
+            is_error: false,
+            agent_id: None,
+        }),
+    );
+
+    let snapshot = VIEW_MODELS.state().read().clone();
+    let items = &snapshot.items;
+    let tool = items.iter().position(|vm| matches!(vm, TuiRenderUnit::TuiToolCard(card) if card.tool_id == "tool-1" && card.output_summary == "file contents"));
+    let prompt = items
+        .iter()
+        .position(|vm| matches!(vm, TuiRenderUnit::TuiUserBubble(b) if b.text == "q2"));
+    assert!(tool.is_some(), "completed tool result must remain visible");
+    assert!(tool < prompt, "new prompt must follow the previous tool");
+}
+
 // ── Slice 3：快照后处理流水线（turn divider / todo 摘要 / 工具分组）─────────
 
 /// §6.6 turn 边界 divider：上一 turn 结束后，新 turn 的 prompt 位于 committed
@@ -159,6 +257,7 @@ fn test_snapshot_cache_tracks_subagent_before_todo_summary() {
             agent_id: "cache-agent".into(),
             agent_name: "researcher".into(),
             is_background: false,
+            parent_tool_call_id: None,
         },
     );
     dispatch_and_notify(

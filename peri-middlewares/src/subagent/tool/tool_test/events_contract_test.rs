@@ -7,20 +7,28 @@ use super::*;
 // 捕获通道：child EventBus → forwarder observe 分支 → mock LangfuseBridgeLike
 // （v1 mapper 转发已被过滤，见 peri-agent subagent_event_forwarder 测试）。
 
-/// 构造注入父身份的 SubAgentTool + 记录 bridge（parent_agent_id 已 set → emit 生效）
-fn make_tool_with_bridge() -> (SubAgentTool, Arc<RecordingBridge>) {
-    let bridge = Arc::new(RecordingBridge {
+/// 记录 bridge（观测 v2 Start/Stop；必须同时装到父 host 与工具上）。
+fn make_bridge() -> Arc<RecordingBridge> {
+    Arc::new(RecordingBridge {
         observes: Arc::new(std::sync::Mutex::new(Vec::new())),
-    });
-    let t = SubAgentTool::new(
+    })
+}
+
+/// 构造注入父身份的 SubAgentTool（parent_agent_id 已 set → emit 生效）。
+fn make_tool_with_bridge(bridge: &Arc<RecordingBridge>) -> SubAgentTool {
+    SubAgentTool::new(
         Arc::new(vec![]),
         None,
-        Arc::new(|_: Option<&str>| Box::new(EchoLLM) as Box<dyn ReactLLM + Send + Sync>),
+        Arc::new(|_: Option<&str>| {
+            crate::subagent::test_support::fixture_source(
+                std::sync::Arc::new(EchoLLM),
+                "fixture-scripted",
+            )
+        }),
         "/tmp".to_string(),
     )
     .with_parent_agent_id(Arc::new(RwLock::new(Some(AgentId::new()))))
-    .with_langfuse_bridge(Arc::clone(&bridge) as Arc<dyn peri_agent::agent::LangfuseBridgeLike>);
-    (t, bridge)
+    .with_langfuse_bridge(Arc::clone(bridge) as Arc<dyn peri_agent::agent::LangfuseBridgeLike>)
 }
 
 /// 轮询等待 bridge 收到 Start 与 Stop 各至少一次（forwarder 异步消费，
@@ -61,18 +69,17 @@ fn start_child_agent_id(evs: &[ObserveEvent]) -> peri_acp_types::identity::Agent
         .expect("事件流中应有 SubagentStart")
 }
 
-/// 安装父会话：真实门面 + 已建立会话（父 id 即会话 id）+ root owner + canonical cwd。
-///
-/// child 保存要求父会话存在、调用 cwd 与父会话 cwd 一致、owner 存活；三者一次建好。
-/// 夹具本体随返回值存活（drop 即释放 owner），调用方必须持有到 invoke 结束。
-async fn install_parent_session(dir: &std::path::Path) -> (SessionFixture, String, String) {
-    let fixture = SessionFixture::open_in(dir).await;
-    let cwd = fixture.workspace_cwd();
-    let parent_id = fixture
-        .create_thread(ThreadMeta::new(cwd.clone()))
-        .await
-        .expect("建立父会话失败");
-    (fixture, parent_id, cwd)
+/// 父 host 携带记录 bridge 的 durable 宿主（host() 以父 session host 为准）。
+async fn durable_host_with_bridge(
+    dir: &std::path::Path,
+    invocation_id: &str,
+    bridge: &Arc<RecordingBridge>,
+) -> HostFixture {
+    let bridge = Arc::clone(bridge) as Arc<dyn peri_agent::agent::LangfuseBridgeLike>;
+    HostFixture::open_in_with_host(dir, invocation_id, move |host| {
+        host.langfuse_bridge = Some(bridge);
+    })
+    .await
 }
 
 /// S1/T1：fork 同步路径（execute_fork.rs）—— Start/Stop 恰好一次，
@@ -80,21 +87,18 @@ async fn install_parent_session(dir: &std::path::Path) -> (SessionFixture, Strin
 #[tokio::test]
 async fn test_fork_path_emits_v2_start_stop_exactly_once() {
     let dir = tempdir().unwrap();
-    let (fixture, parent_id, cwd) = install_parent_session(dir.path()).await;
+    let bridge = make_bridge();
+    let host = durable_host_with_bridge(dir.path(), "fixture-events-fork", &bridge).await;
     // 会话资源门面存在时 invoke 返回携带 child_thread_id，用于身份对齐断言
-    let (t, bridge) = make_tool_with_bridge();
-    let t = t
-        .with_session_resources(fixture.facade())
-        .with_parent_thread_id(parent_id)
-        .with_execution_owner(fixture.execution_owner());
+    let t = host.bind(with_agent_face(make_tool_with_bridge(&bridge), dir.path()).await);
     let result = t
         .invoke(
             serde_json::json!({
                 "fork": true,
-                "cwd": cwd,
+                "cwd": host.cwd.clone(),
                 "prompt": "fork task"
             }),
-            peri_agent::tools::ToolContext::new(&[], "."),
+            host.context(&[]),
         )
         .await;
     assert!(result.is_ok(), "fork 应成功: {:?}", result.err());
@@ -121,20 +125,17 @@ async fn test_fork_path_emits_v2_start_stop_exactly_once() {
 async fn test_define_path_emits_v2_start_stop_exactly_once() {
     let dir = tempdir().unwrap();
     write_test_agent(&dir);
-    let (fixture, parent_id, cwd) = install_parent_session(dir.path()).await;
-    let (t, bridge) = make_tool_with_bridge();
-    let t = t
-        .with_session_resources(fixture.facade())
-        .with_parent_thread_id(parent_id)
-        .with_execution_owner(fixture.execution_owner());
+    let bridge = make_bridge();
+    let host = durable_host_with_bridge(dir.path(), "fixture-events-define", &bridge).await;
+    let t = host.bind(with_agent_face(make_tool_with_bridge(&bridge), dir.path()).await);
     let result = t
         .invoke(
             serde_json::json!({
                 "subagent_type": "test-agent",
-                "cwd": cwd,
+                "cwd": host.cwd.clone(),
                 "prompt": "do it"
             }),
-            peri_agent::tools::ToolContext::new(&[], "."),
+            host.context(&[]),
         )
         .await;
     assert!(result.is_ok(), "define 应成功: {:?}", result.err());
@@ -163,19 +164,32 @@ async fn test_background_path_emits_v2_start_stop_exactly_once() {
     write_test_agent(&dir);
     let (bg_tx, mut bg_rx) = tokio::sync::mpsc::unbounded_channel::<ExecutorEvent>();
     let registry = Arc::new(peri_agent::agent::async_tasks::TaskManager::new());
-    let (t, bridge) = make_tool_with_bridge();
-    let t = t
-        .with_task_manager(Arc::clone(&registry))
-        .with_bg_event_sender(bg_tx);
+    let bridge = make_bridge();
+    let bridge_for_host = Arc::clone(&bridge);
+    let host = HostFixture::open_in_with_background(
+        dir.path(),
+        "fixture-events-bg",
+        Arc::clone(&registry),
+        bg_tx,
+    )
+    .await;
+    // 后台路径的 bridge 同样必须装在父 host 上；后台通道用 host 装配版本。
+    let host = {
+        let mut sub_host = host.parent_session_host().unwrap_or_default();
+        sub_host.langfuse_bridge =
+            Some(Arc::clone(&bridge_for_host) as Arc<dyn peri_agent::agent::LangfuseBridgeLike>);
+        host.with_rebuilt_host(sub_host)
+    };
+    let t = host.bind(with_agent_face(make_tool_with_bridge(&bridge), dir.path()).await);
     let result = t
         .invoke(
             serde_json::json!({
                 "subagent_type": "test-agent",
                 "run_in_background": true,
-                "cwd": dir.path().to_str().unwrap(),
+                "cwd": host.cwd.clone(),
                 "prompt": "bg task"
             }),
-            peri_agent::tools::ToolContext::new(&[], "."),
+            host.context(&[]),
         )
         .await;
     assert!(result.is_ok(), "bg 应启动成功: {:?}", result.err());
@@ -207,11 +221,18 @@ async fn test_bg_fork_path_emits_v2_start_stop_exactly_once() {
     let registry = Arc::new(peri_agent::agent::async_tasks::TaskManager::new());
     let parent_messages: Arc<RwLock<Vec<BaseMessage>>> =
         Arc::new(RwLock::new(vec![BaseMessage::human("ctx for bg fork")]));
-    let (t, bridge) = make_tool_with_bridge();
-    let t = t
-        .with_parent_messages(parent_messages)
-        .with_task_manager(Arc::clone(&registry))
-        .with_bg_event_sender(bg_tx);
+    let bridge = make_bridge();
+    let bridge_for_host = Arc::clone(&bridge);
+    let host =
+        HostFixture::open_with_background("fixture-events-bg-fork", Arc::clone(&registry), bg_tx)
+            .await;
+    let host = {
+        let mut sub_host = host.parent_session_host().unwrap_or_default();
+        sub_host.langfuse_bridge =
+            Some(Arc::clone(&bridge_for_host) as Arc<dyn peri_agent::agent::LangfuseBridgeLike>);
+        host.with_rebuilt_host(sub_host)
+    };
+    let t = host.bind(make_tool_with_bridge(&bridge).with_parent_messages(parent_messages));
     let result = t
         .invoke(
             serde_json::json!({
@@ -219,7 +240,7 @@ async fn test_bg_fork_path_emits_v2_start_stop_exactly_once() {
                 "run_in_background": true,
                 "prompt": "bg fork task"
             }),
-            peri_agent::tools::ToolContext::new(&[], "."),
+            host.context(&[]),
         )
         .await;
     assert!(result.is_ok(), "bg fork 应启动成功: {:?}", result.err());

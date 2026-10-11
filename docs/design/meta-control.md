@@ -208,7 +208,6 @@ peri --db-path /path/to/threads.db meta session <SESSION_ID> --json
 v1 不返回：
 
 - `config`；
-- `cached_context`；
 - frozen snapshot；
 - `snapshot_at_message_id`；
 - `content_size`、`hidden`、`cancel_policy` 等非基础诊断字段；
@@ -237,7 +236,7 @@ CLI JSON。存储类型新增字段不得自动扩大 CLI interface。
 - `schema_incompatible`：schema 缺失、损坏或版本不受支持；
 - `session_not_found`：数据库中不存在该 ID；
 - `corrupt_session_data`：记录字段无法按强类型契约解析；
-- `internal_error`：脱敏后的其他失败。
+- `internal_error`：其他失败，保留实际原因，不做内容脱敏。
 
 命令成功退出码为 `0`。参数错误、未找到、数据库错误和内部错误使用不同非零类别；精确
 数值由实现 contract tests 冻结。`--json` 下错误也应提供稳定 JSON error DTO，且只写

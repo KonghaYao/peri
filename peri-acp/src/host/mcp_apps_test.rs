@@ -132,7 +132,7 @@ async fn invoke_disabled_capability_fails_closed() {
         Some(&relay),
         InvokeSessionGate {
             known: true,
-            owned: true,
+            open: true,
             prompt_in_flight: false,
         },
     )
@@ -151,7 +151,7 @@ async fn invoke_unknown_session_fails_closed() {
         Some(&relay),
         InvokeSessionGate {
             known: false,
-            owned: false,
+            open: false,
             prompt_in_flight: false,
         },
     )
@@ -170,7 +170,7 @@ async fn invoke_during_prompt_is_policy_denied() {
         Some(&relay),
         InvokeSessionGate {
             known: true,
-            owned: true,
+            open: true,
             prompt_in_flight: true,
         },
     )
@@ -179,10 +179,9 @@ async fn invoke_during_prompt_is_policy_denied() {
     assert_eq!(error.data.unwrap()["kind"], "policy_denied");
 }
 
-/// 只读准入的会话没有执行所有权，不是可执行对象：invoke 与 prompt 同属执行面，闸门必须
-/// 在没有 owner 时拒绝，而不是因为 `known` 为真就执行工具并向该会话下发 session/update。
+/// 正在关闭的会话不能执行工具或发送新的工具更新。
 #[tokio::test]
-async fn invoke_without_execution_ownership_is_policy_denied() {
+async fn invoke_while_session_is_closing_is_policy_denied() {
     let connection = enabled_connection();
     let relay: Arc<dyn McpAppsRelayPort> = Arc::new(StubRelay::invoke_ok());
     let error = handle_invoke(
@@ -191,7 +190,28 @@ async fn invoke_without_execution_ownership_is_policy_denied() {
         Some(&relay),
         InvokeSessionGate {
             known: true,
-            owned: false,
+            open: false,
+            prompt_in_flight: false,
+        },
+    )
+    .await
+    .unwrap_err();
+    assert_eq!(error.data.unwrap()["kind"], "policy_denied");
+}
+
+#[tokio::test]
+async fn invoke_relay_policy_denial_does_not_project_success() {
+    let connection = enabled_connection();
+    let relay: Arc<dyn McpAppsRelayPort> = Arc::new(StubRelay {
+        invoke: std::sync::Mutex::new(Some(Err(McpAppsErrorKind::PolicyDenied))),
+    });
+    let error = handle_invoke(
+        &invoke_params(),
+        &connection,
+        Some(&relay),
+        InvokeSessionGate {
+            known: true,
+            open: true,
             prompt_in_flight: false,
         },
     )
@@ -210,7 +230,7 @@ async fn invoke_success_projects_completed_tool_call_and_returns_tool_call_id() 
         Some(&relay),
         InvokeSessionGate {
             known: true,
-            owned: true,
+            open: true,
             prompt_in_flight: false,
         },
     )

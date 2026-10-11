@@ -1,15 +1,10 @@
-//! Privacy-safe Peri Agent activity projection.
-//!
-//! This module is the wire privacy boundary for `peri.agentActivity`. It maps
-//! canonical protocol-carrier events to a compact DTO without ever cloning raw
-//! messages, prompts, reasoning, tool I/O, summaries, paths, errors or URLs.
+//! Compact Peri Agent activity projection with complete failure diagnostics.
 
 use std::collections::BTreeMap;
 
 use peri_acp_types::event::ExecutorEvent;
 use peri_acp_types::tasks::BgRegistryEvent;
 use serde::{Deserialize, Serialize};
-use sha2::{Digest, Sha256};
 
 pub const AGENT_ACTIVITY_SCHEMA_VERSION: u32 = 1;
 const LABEL_MAX_BYTES: usize = 128;
@@ -24,7 +19,6 @@ pub enum AgentActivityKind {
     LlmRetry,
     Workflow,
     Rewind,
-    Diagnostics,
     Turn,
     Agent,
     System,
@@ -43,8 +37,7 @@ pub enum AgentActivityStatus {
     Info,
 }
 
-/// Stable compact wire DTO. Every free-form source field must be discarded or
-/// normalized before construction; maps contain mapper-owned keys only.
+/// Stable compact wire DTO with bounded text and optional failure diagnostics.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct AgentActivityWire {
@@ -61,6 +54,8 @@ pub struct AgentActivityWire {
     pub metrics: BTreeMap<String, u64>,
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub attributes: BTreeMap<String, String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub details: Option<serde_json::Value>,
 }
 
 impl AgentActivityWire {
@@ -74,11 +69,12 @@ impl AgentActivityWire {
             is_background: None,
             metrics: BTreeMap::new(),
             attributes: BTreeMap::new(),
+            details: None,
         }
     }
 
     fn correlated(mut self, namespace: &str, value: &str) -> Self {
-        self.correlation_id = Some(hash_correlation(namespace, value));
+        self.correlation_id = Some(format!("{namespace}:{value}"));
         self
     }
 
@@ -94,11 +90,12 @@ pub fn map_agent_activity(event: &ExecutorEvent) -> Option<AgentActivityWire> {
     use AgentActivityKind as K;
     use AgentActivityStatus as S;
 
-    let activity = match event {
+    let mut activity = match event {
         ExecutorEvent::SubagentStarted {
             agent_name,
             instance_id,
             is_background,
+            parent_tool_call_id: _,
         } => {
             let mut item = AgentActivityWire::new(K::Subagent, S::Running)
                 .correlated("subagent", instance_id)
@@ -227,27 +224,6 @@ pub fn map_agent_activity(event: &ExecutorEvent) -> Option<AgentActivityWire> {
             item
         }
         ExecutorEvent::RewindCompleted { .. } => AgentActivityWire::new(K::Rewind, S::Completed),
-        ExecutorEvent::LspDiagnostics {
-            errors,
-            warnings,
-            files_with_errors,
-        } => {
-            let status = if *errors > 0 {
-                S::Failed
-            } else if *warnings > 0 {
-                S::Warning
-            } else {
-                S::Completed
-            };
-            let mut item =
-                AgentActivityWire::new(K::Diagnostics, status).correlated("diagnostics", "current");
-            item.metrics.insert("error_count".into(), *errors as u64);
-            item.metrics
-                .insert("warning_count".into(), *warnings as u64);
-            item.metrics
-                .insert("files_with_errors".into(), *files_with_errors as u64);
-            item
-        }
         ExecutorEvent::TurnSuspended { turn_id, .. } => {
             AgentActivityWire::new(K::Turn, S::Suspended).correlated("turn", turn_id)
         }
@@ -332,6 +308,42 @@ pub fn map_agent_activity(event: &ExecutorEvent) -> Option<AgentActivityWire> {
         // （该通道禁止消息/错误文本，CommandFeedback.message 是用户可见文本）
         | ExecutorEvent::CommandFeedback(_) => return None,
     };
+    activity.details = match event {
+        ExecutorEvent::LlmRetrying {
+            error, diagnostic, ..
+        } => Some(serde_json::json!({
+            "message": peri_acp_types::session::bounded_error_message(error, 2_000),
+            "diagnostic": diagnostic,
+        })),
+        ExecutorEvent::AgentExecutionFailed { message } => Some(serde_json::json!({
+            "message": peri_acp_types::session::bounded_error_message(message, 2_000),
+        })),
+        ExecutorEvent::SubagentStopped {
+            result,
+            subagent_failure,
+            is_error: true,
+            ..
+        } => Some(serde_json::json!({
+            "message": peri_acp_types::session::bounded_error_message(result, 2_000),
+            "subagent_failure": subagent_failure,
+        })),
+        ExecutorEvent::BackgroundTaskCompleted(result) if !result.success => {
+            Some(serde_json::json!({
+                "message": peri_acp_types::session::bounded_error_message(&result.output, 2_000),
+                "subagent_failure": result.subagent_failure,
+                "child_thread_id": result.child_thread_id,
+                "shell_output": result.shell_output,
+            }))
+        }
+        ExecutorEvent::SystemNotification { level, text }
+            if matches!(level.as_str(), "error" | "warn" | "warning") =>
+        {
+            Some(serde_json::json!({
+                "message": peri_acp_types::session::bounded_error_message(text, 2_000),
+            }))
+        }
+        _ => None,
+    };
     Some(activity)
 }
 
@@ -369,6 +381,19 @@ fn map_bg_registry_activity(event: &BgRegistryEvent) -> AgentActivityWire {
             item.is_background = Some(true);
             item
         }
+        BgRegistryEvent::Updated { task_id, status } => {
+            let mut item = AgentActivityWire::new(
+                BackgroundTask,
+                if status == "running" {
+                    Running
+                } else {
+                    AgentActivityStatus::Warning
+                },
+            )
+            .correlated("background_task", task_id);
+            item.is_background = Some(true);
+            item
+        }
     }
 }
 
@@ -391,18 +416,6 @@ fn truncate_utf8(value: &str, max_bytes: usize) -> String {
     value[..end].to_string()
 }
 
-fn hash_correlation(namespace: &str, value: &str) -> String {
-    let mut hasher = Sha256::new();
-    hasher.update(namespace.as_bytes());
-    hasher.update([0]);
-    hasher.update(value.as_bytes());
-    let digest = hasher.finalize();
-    digest[..12]
-        .iter()
-        .map(|byte| format!("{byte:02x}"))
-        .collect()
-}
-
 fn wire_name<T: Serialize>(value: &T) -> String {
     serde_json::to_string(value)
         .unwrap_or_else(|_| "unknown".into())
@@ -420,11 +433,12 @@ mod tests {
     use peri_acp_types::event::{BackgroundTaskResult, CompactStrategy, CompactTrigger};
 
     #[test]
-    fn subagent_lifecycle_correlates_without_raw_identity_or_result() {
+    fn subagent_lifecycle_preserves_identity_and_failure_result() {
         let started = map_agent_activity(&ExecutorEvent::SubagentStarted {
             agent_name: " Research\nAgent ".into(),
             instance_id: "private-instance-id".into(),
             is_background: true,
+            parent_tool_call_id: None,
         })
         .unwrap();
         let stopped = map_agent_activity(&ExecutorEvent::SubagentStopped {
@@ -438,7 +452,7 @@ mod tests {
         assert_eq!(started.correlation_id, stopped.correlation_id);
         assert_eq!(started.label.as_deref(), Some("Research Agent"));
         let wire = serde_json::to_string(&stopped).unwrap();
-        assert!(!wire.contains("private-instance-id"));
+        assert!(wire.contains("private-instance-id"));
         assert!(!wire.contains("SECRET_RESULT_SENTINEL"));
     }
 
@@ -475,7 +489,7 @@ mod tests {
     }
 
     #[test]
-    fn background_projection_omits_prompt_output_and_thread_identity() {
+    fn background_failure_projection_preserves_output_and_identity() {
         let event = ExecutorEvent::BackgroundTaskCompleted(BackgroundTaskResult {
             task_id: "raw-task-id".into(),
             agent_name: "explorer".into(),
@@ -498,16 +512,16 @@ mod tests {
         let wire = serde_json::to_string(&map_agent_activity(&event).unwrap()).unwrap();
         assert!(wire.contains("\"tool_count\":7"));
         assert!(wire.contains("timed_out"));
-        for prohibited in [
+        assert!(!wire.contains("SECRET_PROMPT"));
+        for detail in [
             "raw-task-id",
-            "SECRET_PROMPT",
             "SECRET_OUTPUT",
             "raw-thread-id",
             "SECRET_STDOUT",
             "SECRET_STDERR",
             "SECRET_FILE_ERROR",
         ] {
-            assert!(!wire.contains(prohibited));
+            assert!(wire.contains(detail));
         }
     }
 }

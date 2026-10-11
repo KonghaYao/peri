@@ -17,9 +17,7 @@ fn make_manifest_with_hooks(hooks: Option<HooksConfig>) -> PluginManifest {
         skills: None,
         hooks,
         mcp_servers: None,
-        lsp_servers: None,
         output_styles: None,
-        channels: None,
         options: None,
         settings: None,
         extra: serde_json::json!({}),
@@ -137,6 +135,17 @@ fn test_both_missing_returns_none() {
 }
 
 #[test]
+fn test_unreadable_hooks_file_falls_back_to_manifest() {
+    let dir = tempdir().unwrap();
+    std::fs::create_dir_all(dir.path().join("hooks/hooks.json")).unwrap();
+    let manifest = make_manifest_with_hooks(Some(HashMap::from([(HookEvent::Stop, vec![])])));
+
+    let result = extract_hooks(&manifest, dir.path()).unwrap();
+    assert_eq!(result.len(), 1);
+    assert!(result.contains_key(&HookEvent::Stop));
+}
+
+#[test]
 fn test_invalid_json_falls_back_to_manifest() {
     let dir = tempdir().unwrap();
     let hooks_dir = dir.path().join("hooks");
@@ -203,6 +212,9 @@ fn test_load_settings_local_hooks_basic() {
     // Verify plugin source
     for h in &hooks {
         assert_eq!(h.plugin_name, "settings.local.json");
+        assert_eq!(h.plugin_id, "settings.local");
+        assert_eq!(h.plugin_root, dir.path());
+        assert_eq!(h.plugin_data_dir, claude_dir);
     }
 
     // Check both events are present (order not guaranteed)
@@ -263,23 +275,19 @@ fn test_load_settings_local_hooks_with_matcher() {
 }
 
 #[test]
-fn test_load_from_real_project_dir() {
-    // Test loading from the actual peri project directory
-    let cwd = std::env::current_dir()
-        .unwrap_or_default()
-        .to_string_lossy()
-        .to_string();
-    let settings_path = std::path::Path::new(&cwd)
-        .join(".claude")
-        .join("settings.local.json");
-    if !settings_path.exists() {
-        eprintln!(
-            "Skipping: no settings.local.json at {}",
-            settings_path.display()
-        );
-        return;
-    }
-    let hooks = load_settings_local_hooks(&cwd);
+fn test_load_local_hooks_known_events() {
+    let dir = tempdir().unwrap();
+    let claude_dir = dir.path().join(".claude");
+    std::fs::create_dir_all(&claude_dir).unwrap();
+    std::fs::write(
+        claude_dir.join("settings.local.json"),
+        r#"{"hooks":{
+            "PreToolUse":[{"hooks":[{"type":"command","command":"echo pre"}]}],
+            "PermissionRequest":[{"hooks":[{"type":"command","command":"echo perm"}]}]
+        }}"#,
+    )
+    .unwrap();
+    let hooks = load_settings_local_hooks(dir.path().to_str().unwrap());
     assert!(
         !hooks.is_empty(),
         "Should load hooks from project settings.local.json"
@@ -295,70 +303,13 @@ fn test_load_from_real_project_dir() {
     assert!(has_perm, "Should have PermissionRequest hook");
 }
 
-#[test]
-#[ignore = "需要 ~/.claude/settings.json 真实文件，CI 环境不存在"]
-fn test_load_global_settings_hooks_real_file() {
-    // 读取真实 ~/.claude/settings.json 并验证 hooks 解析
-    let settings_path = dirs_next::home_dir()
-        .expect("Cannot determine home directory")
-        .join(".claude")
-        .join("settings.json");
-    assert!(
-        settings_path.exists(),
-        "settings.json not found at {}",
-        settings_path.display()
-    );
-
-    let hooks = load_global_settings_hooks();
-
-    // 预期 6 个事件，每个事件 1 个 command hook
-    assert_eq!(
-        hooks.len(),
-        6,
-        "Expected 6 hooks (6 events x 1 command), got {}",
-        hooks.len()
-    );
-
-    // 验证所有期望的事件都存在
-    let expected_events = [
-        HookEvent::PermissionRequest,
-        HookEvent::PreToolUse,
-        HookEvent::SessionEnd,
-        HookEvent::SessionStart,
-        HookEvent::Stop,
-        HookEvent::UserPromptSubmit,
-    ];
-    for expected_event in &expected_events {
-        let found = hooks.iter().any(|h| &h.event == expected_event);
-        assert!(found, "Missing hook for event {:?}", expected_event);
-    }
-
-    // 验证每个 hook 的字段
-    for hook in &hooks {
-        assert_eq!(
-            hook.plugin_name, "settings.json",
-            "plugin_name should be 'settings.json' for event {:?}",
-            hook.event
-        );
-        assert_eq!(
-            hook.plugin_id, "settings.global",
-            "plugin_id should be 'settings.global'"
-        );
-        // 验证是 Command 类型，且命令包含 herdr-agent-state.sh
-        match &hook.hook {
-            HookType::Command { command, .. } => {
-                assert!(
-                    command.contains("herdr-agent-state.sh"),
-                    "Command should contain herdr-agent-state.sh, got: {}",
-                    command
-                );
-            }
-            other => panic!("Expected Command hook, got {:?}", other),
-        }
-    }
-}
-
 // ===== load_settings_project_hooks 测试 =====
+
+fn load_project_hooks(cwd: &str) -> Vec<RegisteredHook> {
+    let home = tempdir().unwrap();
+    write_hooks_settings(home.path());
+    load_settings_project_hooks_under(cwd, Some(home.path()))
+}
 
 #[test]
 fn test_load_settings_project_hooks_basic() {
@@ -390,12 +341,15 @@ fn test_load_settings_project_hooks_basic() {
     )
     .unwrap();
 
-    let hooks = load_settings_project_hooks(dir.path().to_str().unwrap());
+    let hooks = load_project_hooks(dir.path().to_str().unwrap());
     assert_eq!(hooks.len(), 2);
 
     // 验证插件来源标识
     for h in &hooks {
         assert_eq!(h.plugin_name, "project-settings.json");
+        assert_eq!(h.plugin_id, "settings.project");
+        assert_eq!(h.plugin_root, dir.path());
+        assert_eq!(h.plugin_data_dir, claude_dir);
     }
 
     // 验证两个事件都存在（顺序不保证）
@@ -411,7 +365,7 @@ fn test_load_settings_project_hooks_basic() {
 
 #[test]
 fn test_load_settings_project_hooks_no_file() {
-    let hooks = load_settings_project_hooks("/nonexistent/path");
+    let hooks = load_project_hooks("/nonexistent/path");
     assert!(hooks.is_empty());
 }
 
@@ -422,8 +376,19 @@ fn test_load_settings_project_hooks_no_hooks_field() {
     std::fs::create_dir_all(&claude_dir).unwrap();
     std::fs::write(claude_dir.join("settings.json"), "{}").unwrap();
 
-    let hooks = load_settings_project_hooks(dir.path().to_str().unwrap());
+    let hooks = load_project_hooks(dir.path().to_str().unwrap());
     assert!(hooks.is_empty());
+}
+
+#[test]
+fn test_settings_hooks_read_failure_returns_empty() {
+    let dir = tempdir().unwrap();
+    let claude_dir = dir.path().join(".claude");
+    std::fs::create_dir_all(claude_dir.join("settings.json")).unwrap();
+    std::fs::create_dir_all(claude_dir.join("settings.local.json")).unwrap();
+
+    assert!(load_project_hooks(dir.path().to_str().unwrap()).is_empty());
+    assert!(load_settings_local_hooks(dir.path().to_str().unwrap()).is_empty());
 }
 
 #[test]
@@ -450,7 +415,7 @@ fn test_load_settings_project_hooks_with_matcher() {
     )
     .unwrap();
 
-    let hooks = load_settings_project_hooks(dir.path().to_str().unwrap());
+    let hooks = load_project_hooks(dir.path().to_str().unwrap());
     assert_eq!(hooks.len(), 1);
     assert_eq!(hooks[0].matcher.as_deref(), Some(".env|.env.local"));
 }
@@ -459,17 +424,17 @@ fn test_load_settings_project_hooks_with_matcher() {
 
 /// 改写 `HOME` 的 guard：持有进程环境锁，drop 时还原。
 ///
-/// 与 `ptc_test::HomeGuard` 同一模式——`std::env::set_var` 是进程级全局，
+/// `std::env::set_var` 是进程级全局，
 /// 不串行会与并行测试竞态。
 struct HomeGuard {
-    _lock: crate::process_env::EnvLockFile,
+    _lock: peri_mcp_common::process_env::EnvLockFile,
     previous_home: Option<std::ffi::OsString>,
     previous_userprofile: Option<std::ffi::OsString>,
 }
 
 impl HomeGuard {
     fn set(home: &Path) -> Self {
-        let lock = crate::process_env::lock().expect("process env lock");
+        let lock = peri_mcp_common::process_env::lock().expect("process env lock");
         let previous_home = std::env::var_os("HOME");
         let previous_userprofile = std::env::var_os("USERPROFILE");
         std::env::set_var("HOME", home);
@@ -517,7 +482,7 @@ fn write_hooks_settings(dir: &Path) {
 /// `~/.claude/settings.json` 是同一个文件，项目级加载必须跳过——否则同一份
 /// hooks 会注册成 global 与 project 两组而执行两次。子目录仍按项目级加载。
 ///
-/// 主目录经 `plugin::user_home`（HOME 优先）解析，`HomeGuard` 注入的临时 `~`
+/// 主目录经配置数据面（HOME 优先）解析，`HomeGuard` 注入的临时 `~`
 /// 在两个平台都生效（旧实现走 `dirs_next::home_dir()`，Windows 上读 Profile
 /// known-folder 而不读环境变量，该平台只能跳过）。
 #[test]
@@ -530,16 +495,19 @@ fn test_project_hooks_skipped_when_cwd_is_home() {
 
     let _guard = HomeGuard::set(&home);
 
+    assert_eq!(peri_config::io::home_dir().as_deref(), Some(home.as_path()));
     // 同一文件：项目级为空，用户级仍加载（hooks 只保留一份）
     assert!(
         load_settings_project_hooks(home.to_str().unwrap()).is_empty(),
         "用户主目录下不得把用户级 hooks 再注册为项目级"
     );
-    assert_eq!(
-        load_global_settings_hooks().len(),
-        1,
-        "用户级 hooks 应照常加载"
-    );
+    assert_eq!(load_project_hooks(home.to_str().unwrap()).len(), 1);
+    let global_hooks = load_global_settings_hooks();
+    assert_eq!(global_hooks.len(), 1, "用户级 hooks 应照常加载");
+    assert_eq!(global_hooks[0].plugin_name, "settings.json");
+    assert_eq!(global_hooks[0].plugin_id, "settings.global");
+    assert_eq!(global_hooks[0].plugin_root, home.join(".claude"));
+    assert_eq!(global_hooks[0].plugin_data_dir, home.join(".claude"));
 
     // 子目录是真正的项目级，不受影响
     assert_eq!(
@@ -559,10 +527,8 @@ fn test_project_hooks_skipped_when_home_reached_via_symlink() {
     let link = tmp.path().join("home-link");
     std::os::unix::fs::symlink(&home, &link).unwrap();
 
-    let _guard = HomeGuard::set(&home);
-
     assert!(
-        load_settings_project_hooks(link.to_str().unwrap()).is_empty(),
+        load_settings_project_hooks_under(link.to_str().unwrap(), Some(&home)).is_empty(),
         "符号链接指向用户级文件时不得重复注册"
     );
 }
@@ -606,6 +572,69 @@ fn test_is_user_settings_path_under_symlinked_home() {
     );
 }
 
+#[cfg(unix)]
+#[test]
+fn test_project_settings_file_alias_is_user_source() {
+    let tmp = tempdir().unwrap();
+    let home = tmp.path().join("home");
+    write_hooks_settings(&home);
+    let project = tmp.path().join("project");
+    std::fs::create_dir_all(project.join(".claude")).unwrap();
+    std::os::unix::fs::symlink(
+        home.join(".claude/settings.json"),
+        project.join(".claude/settings.json"),
+    )
+    .unwrap();
+    assert!(load_settings_project_hooks_under(project.to_str().unwrap(), Some(&home)).is_empty());
+}
+
+#[cfg(unix)]
+#[test]
+fn test_symlink_with_same_lexical_prefix_is_distinct_source() {
+    let tmp = tempdir().unwrap();
+    let home = tmp.path().join("home");
+    let other = tmp.path().join("other");
+    write_hooks_settings(&home);
+    write_hooks_settings(&other);
+    std::os::unix::fs::symlink(&other, home.join("alias")).unwrap();
+    assert!(!is_user_settings_path_under(
+        &home.join("alias/.claude/settings.json"),
+        &home,
+    ));
+}
+
+/// [回归测试] 用户配置的循环符号链接使来源身份不可证明，项目 hooks 必须失败关闭。
+#[cfg(unix)]
+#[test]
+fn test_project_hooks_skipped_when_user_source_identity_fails() {
+    let tmp = tempdir().unwrap();
+    let home = tmp.path().join("home");
+    let claude_dir = home.join(".claude");
+    std::fs::create_dir_all(&claude_dir).unwrap();
+    let user_path = claude_dir.join("settings.json");
+    std::os::unix::fs::symlink(&user_path, &user_path).unwrap();
+    let project_dir = tmp.path().join("project");
+    write_hooks_settings(&project_dir);
+    assert!(is_user_settings_path_under(
+        &project_dir.join(".claude/settings.json"),
+        &home,
+    ));
+    assert!(
+        load_settings_project_hooks_under(project_dir.to_str().unwrap(), Some(&home)).is_empty()
+    );
+}
+
+#[test]
+fn test_project_hooks_without_home_load_project_source() {
+    let project = tempdir().unwrap();
+    write_hooks_settings(project.path());
+
+    assert_eq!(
+        load_settings_project_hooks_under(project.path().to_str().unwrap(), None).len(),
+        1
+    );
+}
+
 // ===== 宽松解析测试 (P0-2) =====
 
 #[test]
@@ -640,7 +669,7 @@ fn test_tolerant_mixed_valid_and_invalid_events() {
     )
     .unwrap();
 
-    let hooks = load_settings_project_hooks(dir.path().to_str().unwrap());
+    let hooks = load_project_hooks(dir.path().to_str().unwrap());
     // 只有 PreToolUse 有效
     assert_eq!(hooks.len(), 1);
     assert!(matches!(&hooks[0].event, HookEvent::PreToolUse));
@@ -677,7 +706,7 @@ fn test_tolerant_unknown_event_skipped() {
     )
     .unwrap();
 
-    let hooks = load_settings_project_hooks(dir.path().to_str().unwrap());
+    let hooks = load_project_hooks(dir.path().to_str().unwrap());
     assert!(hooks.is_empty(), "unknown events should be skipped");
 }
 
@@ -706,7 +735,7 @@ fn test_tolerant_non_array_rules_skipped() {
     )
     .unwrap();
 
-    let hooks = load_settings_project_hooks(dir.path().to_str().unwrap());
+    let hooks = load_project_hooks(dir.path().to_str().unwrap());
     // 只有 Notification 有效
     assert_eq!(hooks.len(), 1);
     assert!(matches!(&hooks[0].event, HookEvent::Notification));
@@ -732,7 +761,7 @@ fn test_tolerant_all_invalid_returns_empty() {
     )
     .unwrap();
 
-    let hooks = load_settings_project_hooks(dir.path().to_str().unwrap());
+    let hooks = load_project_hooks(dir.path().to_str().unwrap());
     assert!(hooks.is_empty());
 }
 
@@ -752,6 +781,6 @@ fn test_tolerant_hooks_not_object_returns_empty() {
     )
     .unwrap();
 
-    let hooks = load_settings_project_hooks(dir.path().to_str().unwrap());
+    let hooks = load_project_hooks(dir.path().to_str().unwrap());
     assert!(hooks.is_empty());
 }

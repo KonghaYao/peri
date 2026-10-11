@@ -47,6 +47,7 @@ impl SessionManager {
             if session.cron_bridge.is_none() {
                 session.cron_bridge = Some(SessionCronBridge::start(
                     session_id.to_string(),
+                    session.v2_message_queue.clone(),
                     &scheduler,
                     continuation_tx,
                 ));

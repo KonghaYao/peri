@@ -1,0 +1,23 @@
+[package]
+name = "peri-wasm"
+version.workspace = true
+edition.workspace = true
+description = "Emscripten ACP Host deployment"
+
+[features]
+cloudflare = ["peri-model/cloudflare"]
+
+[[bin]]
+name = "peri-wasm"
+path = "src/main.rs"
+
+[target.'cfg(target_os = "emscripten")'.dependencies]
+peri-model = { path = "../peri-model" }
+peri-acp = { path = "../peri-acp" }
+peri-resources = { path = "../peri-resources" }
+peri-acp-types = { path = "../peri-acp-types" }
+serde_json.workspace = true
+wasm-bindgen = "=0.2.129"
+wasm-bindgen-futures = "=0.4.79"
+tokio = { workspace = true, features = ["sync"] }
+parking_lot.workspace = true

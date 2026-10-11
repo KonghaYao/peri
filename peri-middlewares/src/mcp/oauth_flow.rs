@@ -6,7 +6,7 @@ use tokio::sync::oneshot;
 use tracing::{info, warn};
 
 use super::{
-    auth_store::{FileCredentialStore, PerServerCredentialStore},
+    auth_store::{static_credential_key, OAuthCredentialClient, PerServerCredentialStore},
     callback_server::{CallbackError, OAuthCallbackServer},
     config::OAuthConfig,
 };
@@ -67,7 +67,7 @@ pub enum OAuthFlowEvent {
         flow_id: String,
         server_name: String,
     },
-    /// 从凭证存储恢复成功（快速路径：磁盘已有有效凭证，跳过浏览器授权）。
+    /// 从凭证存储恢复成功（快速路径：存储已有有效凭证，跳过浏览器授权）。
     ///
     /// 恢复 ≠ 用户本次完成授权——连接阶段仍会验证 token 有效性，失效时由
     /// 调用方清除凭证并重新走完整授权。TUI 收到此事件用于反馈「已使用已
@@ -93,10 +93,10 @@ pub enum OAuthFailureKind {
 /// 为每个需要 OAuth 的 MCP 服务器管理独立的 OAuthState 状态机。
 /// 通过回调函数将事件转发给调用方（client.rs），由调用方决定如何通知 TUI。
 pub struct OAuthFlowManager {
-    /// 共享的 Token 文件存储
-    token_store: Arc<FileCredentialStore>,
+    /// 共享的 MCP 凭据客户端
+    token_store: OAuthCredentialClient,
     /// 按 server_name 管理的 OAuth 状态机
-    states: HashMap<String, OAuthState>,
+    states: HashMap<String, (String, OAuthState)>,
     /// 事件回调（由 client.rs 在创建时注入；Arc 存储便于跨任务共享）
     event_callback: Arc<dyn Fn(OAuthFlowEvent) + Send + Sync>,
 }
@@ -104,9 +104,9 @@ pub struct OAuthFlowManager {
 impl OAuthFlowManager {
     /// 创建 OAuth 流程管理器
     ///
-    /// `token_store`: 共享的 Token 文件存储实例
+    /// `token_store`: 宿主注入的 MCP 凭据客户端
     /// `event_callback`: 事件回调函数，用于将 OAuth 事件转发给 TUI
-    pub fn new<F>(token_store: Arc<FileCredentialStore>, event_callback: F) -> Self
+    pub fn new<F>(token_store: OAuthCredentialClient, event_callback: F) -> Self
     where
         F: Fn(OAuthFlowEvent) + Send + Sync + 'static,
     {
@@ -119,7 +119,7 @@ impl OAuthFlowManager {
 
     /// 创建 OAuth 流程管理器（Arc 回调版本：跨任务共享的 `Arc<dyn Fn>` 回调）。
     pub fn new_with_arc(
-        token_store: Arc<FileCredentialStore>,
+        token_store: OAuthCredentialClient,
         event_callback: Arc<dyn Fn(OAuthFlowEvent) + Send + Sync>,
     ) -> Self {
         Self {
@@ -149,8 +149,33 @@ impl OAuthFlowManager {
         server_url: &str,
         oauth_config: &OAuthConfig,
     ) -> Result<(), OAuthFlowError> {
+        let credential_key = static_credential_key(server_name, server_url, oauth_config);
+        self.run_oauth_flow_with_key(
+            flow_id,
+            server_name,
+            &credential_key,
+            server_url,
+            oauth_config,
+        )
+        .await
+    }
+
+    pub(crate) async fn run_oauth_flow_with_key(
+        &mut self,
+        flow_id: &str,
+        server_name: &str,
+        credential_key: &str,
+        server_url: &str,
+        oauth_config: &OAuthConfig,
+    ) -> Result<(), OAuthFlowError> {
         let result = self
-            .run_oauth_flow_inner(flow_id, server_name, server_url, oauth_config)
+            .run_oauth_flow_inner(
+                flow_id,
+                server_name,
+                credential_key,
+                server_url,
+                oauth_config,
+            )
             .await;
         if let Err(error) = &result {
             match error {
@@ -175,17 +200,19 @@ impl OAuthFlowManager {
         &mut self,
         flow_id: &str,
         server_name: &str,
+        credential_key: &str,
         server_url: &str,
         oauth_config: &OAuthConfig,
     ) -> Result<(), OAuthFlowError> {
         info!(server = %server_name, "开始 OAuth 授权流程");
 
         // 1. 创建或复用 OAuthState
-        let state = if let Some(existing) = self.states.remove(server_name) {
-            existing
+        let existing = self.states.remove(server_name);
+        let state = if let Some((_, state)) = existing.filter(|(key, _)| key == credential_key) {
+            state
         } else {
             let credential_store =
-                PerServerCredentialStore::new(self.token_store.clone(), server_name.to_string());
+                PerServerCredentialStore::new(self.token_store.clone(), credential_key.to_string());
             let mut mgr_state = OAuthState::new(server_url, None).await?;
             if let OAuthState::Unauthorized(ref mut manager) = mgr_state {
                 manager.set_credential_store(credential_store);
@@ -200,7 +227,8 @@ impl OAuthFlowManager {
             let has_creds = manager.initialize_from_store().await?;
             if has_creds {
                 info!(server = %server_name, "从存储恢复已有凭证，跳过浏览器授权");
-                self.states.insert(server_name.to_string(), state);
+                self.states
+                    .insert(server_name.to_string(), (credential_key.to_string(), state));
                 // 注意：不 emit AuthorizationCompleted——恢复凭证 ≠ 用户完成
                 // 授权；token 可能已过期/被 revoke，有效性由连接阶段验证，
                 // 失效时调用方清除凭证并重新走完整授权（弹 popup）。
@@ -215,7 +243,8 @@ impl OAuthFlowManager {
         }
         if let OAuthState::Authorized(_) = &state {
             info!(server = %server_name, "已处于授权状态，跳过浏览器授权");
-            self.states.insert(server_name.to_string(), state);
+            self.states
+                .insert(server_name.to_string(), (credential_key.to_string(), state));
             return Ok(());
         }
 
@@ -280,7 +309,8 @@ impl OAuthFlowManager {
             .await?;
 
         // 9. 保存状态到 states map
-        self.states.insert(server_name.to_string(), state);
+        self.states
+            .insert(server_name.to_string(), (credential_key.to_string(), state));
 
         // 10. 通知 TUI 授权完成
         self.emit_event(OAuthFlowEvent::AuthorizationCompleted {
@@ -300,7 +330,7 @@ impl OAuthFlowManager {
         &mut self,
         server_name: &str,
     ) -> Option<rmcp::transport::auth::AuthorizationManager> {
-        let state = self.states.remove(server_name)?;
+        let (_, state) = self.states.remove(server_name)?;
         match state {
             OAuthState::Authorized(manager) | OAuthState::Unauthorized(manager) => Some(manager),
             _ => {
@@ -317,12 +347,12 @@ impl OAuthFlowManager {
     pub fn is_authorized(&self, server_name: &str) -> bool {
         matches!(
             self.states.get(server_name),
-            Some(OAuthState::Authorized(_)) | Some(OAuthState::AuthorizedHttpClient(_))
+            Some((_, OAuthState::Authorized(_))) | Some((_, OAuthState::AuthorizedHttpClient(_)))
         )
     }
 
     /// 获取共享的 Token 存储引用
-    pub fn token_store(&self) -> &Arc<FileCredentialStore> {
+    pub fn token_store(&self) -> &OAuthCredentialClient {
         &self.token_store
     }
 

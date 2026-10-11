@@ -2,9 +2,39 @@
 
 use anyhow::Result;
 use chrono::Local;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use crate::cli_args::PluginScope;
+
+struct PluginScopeContext {
+    scope: peri_acp_types::plugin::InstallScope,
+    project_dir: Option<PathBuf>,
+}
+
+fn plugin_scope_context(
+    scope_str: Option<&str>,
+    current_dir: impl FnOnce() -> std::io::Result<PathBuf>,
+) -> Result<PluginScopeContext> {
+    let scope: PluginScope = scope_str
+        .unwrap_or("user")
+        .parse()
+        .map_err(|error: String| anyhow::anyhow!("无效的 scope: {error}"))?;
+    let project_dir = match scope {
+        PluginScope::User => None,
+        PluginScope::Project | PluginScope::Local => {
+            let directory = current_dir()?;
+            anyhow::ensure!(
+                directory.is_absolute() && directory.is_dir(),
+                "plugin execution directory must be an existing absolute directory"
+            );
+            Some(directory)
+        }
+    };
+    Ok(PluginScopeContext {
+        scope: scope.into(),
+        project_dir,
+    })
+}
 
 struct PluginListEntry {
     id: String,
@@ -77,7 +107,7 @@ pub fn run_plugin_list(json: bool) -> Result<()> {
 }
 
 pub async fn run_plugin_install(plugin_name: &str, scope_str: &str) -> Result<()> {
-    let scope: PluginScope = scope_str.parse().map_err(|e: String| anyhow::anyhow!(e))?;
+    let context = plugin_scope_context(Some(scope_str), std::env::current_dir)?;
     let claude_dir = dirs_next::home_dir()
         .unwrap_or_else(|| std::path::PathBuf::from("."))
         .join(".claude");
@@ -95,10 +125,10 @@ pub async fn run_plugin_install(plugin_name: &str, scope_str: &str) -> Result<()
     let result = peri_middlewares::plugin::install_plugin(
         name,
         &marketplace,
-        scope.into(),
+        context.scope,
         &cache_dir,
         &claude_dir,
-        None,
+        context.project_dir.as_deref(),
     )
     .await
     .map_err(|e| anyhow::anyhow!("安装失败: {e}"))?;
@@ -110,14 +140,20 @@ pub async fn run_plugin_install(plugin_name: &str, scope_str: &str) -> Result<()
     Ok(())
 }
 
-pub async fn run_plugin_uninstall(plugin_id: &str, _scope_str: Option<&str>) -> Result<()> {
+pub async fn run_plugin_uninstall(plugin_id: &str, scope_str: Option<&str>) -> Result<()> {
+    let context = plugin_scope_context(scope_str, std::env::current_dir)?;
     let claude_dir = dirs_next::home_dir()
         .unwrap_or_else(|| std::path::PathBuf::from("."))
         .join(".claude");
 
-    peri_middlewares::plugin::uninstall_plugin(plugin_id, &claude_dir, None)
-        .await
-        .map_err(|e| anyhow::anyhow!("卸载失败: {e}"))?;
+    peri_middlewares::plugin::uninstall_plugin(
+        plugin_id,
+        context.scope,
+        &claude_dir,
+        context.project_dir.as_deref(),
+    )
+    .await
+    .map_err(|e| anyhow::anyhow!("卸载失败: {e}"))?;
 
     println!("已卸载: {}", plugin_id);
     Ok(())
@@ -154,7 +190,8 @@ pub async fn run_marketplace_add(source: &str) -> Result<()> {
     // 用 manifest 里的 name 覆盖从 source 提取的名称
     let actual_name = manifest.name;
 
-    let now = Local::now().format("%Y-%m-%dT%H:%M:%S").to_string();
+    let now: chrono::DateTime<Local> = peri_time::now_wall().into();
+    let now = now.format("%Y-%m-%dT%H:%M:%S").to_string();
     marketplaces.push(peri_middlewares::plugin::KnownMarketplace {
         source: marketplace_source,
         install_location,
@@ -261,7 +298,8 @@ pub async fn run_marketplace_update(name: &str) -> Result<()> {
             .map_err(|e| anyhow::anyhow!("无法刷新 marketplace: {e}"))?;
 
     let mut updated = marketplaces;
-    let now = Local::now().format("%Y-%m-%dT%H:%M:%S").to_string();
+    let now: chrono::DateTime<Local> = peri_time::now_wall().into();
+    let now = now.format("%Y-%m-%dT%H:%M:%S").to_string();
     updated[entry_index].install_location = install_location;
     updated[entry_index].last_updated = now;
 
@@ -276,16 +314,18 @@ pub async fn run_marketplace_update(name: &str) -> Result<()> {
 // ── plugin enable ───────────────────────────────────────────────────────
 
 pub fn run_plugin_enable(plugin_id: &str, scope_str: &str) -> Result<()> {
-    let scope: PluginScope = scope_str
-        .parse()
-        .map_err(|e: String| anyhow::anyhow!("无效的 scope: {e}"))?;
-    let install_scope: peri_acp_types::plugin::InstallScope = scope.into();
+    let context = plugin_scope_context(Some(scope_str), std::env::current_dir)?;
     let claude_dir = dirs_next::home_dir()
         .unwrap_or_else(|| std::path::PathBuf::from("."))
         .join(".claude");
 
-    peri_middlewares::plugin::update_enabled_plugins(plugin_id, install_scope, &claude_dir, None)
-        .map_err(|e| anyhow::anyhow!("启用插件失败: {e}"))?;
+    peri_middlewares::plugin::update_enabled_plugins(
+        plugin_id,
+        context.scope,
+        &claude_dir,
+        context.project_dir.as_deref(),
+    )
+    .map_err(|e| anyhow::anyhow!("启用插件失败: {e}"))?;
 
     println!("已启用插件: {} (scope: {})", plugin_id, scope_str);
     Ok(())
@@ -294,19 +334,16 @@ pub fn run_plugin_enable(plugin_id: &str, scope_str: &str) -> Result<()> {
 // ── plugin disable ──────────────────────────────────────────────────────
 
 pub fn run_plugin_disable(plugin_id: &str, scope_str: &str) -> Result<()> {
-    let scope: PluginScope = scope_str
-        .parse()
-        .map_err(|e: String| anyhow::anyhow!("无效的 scope: {e}"))?;
-    let install_scope: peri_acp_types::plugin::InstallScope = scope.into();
+    let context = plugin_scope_context(Some(scope_str), std::env::current_dir)?;
     let claude_dir = dirs_next::home_dir()
         .unwrap_or_else(|| std::path::PathBuf::from("."))
         .join(".claude");
 
     peri_middlewares::plugin::remove_from_enabled_plugins(
         plugin_id,
-        &install_scope,
+        &context.scope,
         &claude_dir,
-        None,
+        context.project_dir.as_deref(),
     )
     .map_err(|e| anyhow::anyhow!("禁用插件失败: {e}"))?;
 
@@ -317,16 +354,21 @@ pub fn run_plugin_disable(plugin_id: &str, scope_str: &str) -> Result<()> {
 // ── plugin update ───────────────────────────────────────────────────────
 
 pub async fn run_plugin_update(plugin_id: &str, scope_str: &str) -> Result<()> {
-    let scope: PluginScope = scope_str
-        .parse()
-        .map_err(|e: String| anyhow::anyhow!("无效的 scope: {e}"))?;
-    let _install_scope: peri_acp_types::plugin::InstallScope = scope.into();
+    let context = plugin_scope_context(Some(scope_str), std::env::current_dir)?;
     let claude_dir = dirs_next::home_dir()
         .unwrap_or_else(|| std::path::PathBuf::from("."))
         .join(".claude");
     let cache_dir = peri_middlewares::plugin::config::marketplaces_cache_dir();
 
-    match peri_middlewares::plugin::update_plugin(plugin_id, &cache_dir, &claude_dir, None).await {
+    match peri_middlewares::plugin::update_plugin(
+        plugin_id,
+        context.scope,
+        &cache_dir,
+        &claude_dir,
+        context.project_dir.as_deref(),
+    )
+    .await
+    {
         Ok(installed) => {
             println!("已更新插件: {} v{}", installed.id, installed.version);
         }
@@ -429,6 +471,10 @@ pub async fn run_plugin_cleanup(claude_dir: &Path) -> Result<()> {
     Ok(())
 }
 
+#[cfg(test)]
+#[path = "cli_plugin_test.rs"]
+mod tests;
+
 // ── plugin search ────────────────────────────────────────────────────────
 
 pub fn run_plugin_search(query: &str) -> Result<()> {
@@ -478,6 +524,182 @@ pub fn run_plugin_search(query: &str) -> Result<()> {
         println!("{}", "-".repeat(100));
         for (name, version, mp, desc) in &found {
             println!("{:<40} {:<12} {:<20} {}", name, version, mp, desc,);
+        }
+    }
+    Ok(())
+}
+
+// ─── hook 执行来源信任（H4）────────────────────────────────────────────────
+//
+// 项目 / local settings hooks 默认不执行；显式 grant 后绑定
+// `canonical workspace + 来源身份 + 来源摘要`。授权/撤销只走配置数据面
+// （`peri_config::trust`），本层不直接读写信任文件。
+//
+// M6：**插件来源** hooks 走同一条信任门（来源身份取自
+// `PluginLoadResult.scope`/`LoadedPlugin::scope` 的安装记录事实，不按插件名或
+// 路径猜）。信任只约束执行来源，不等于插件整体功能授权。
+
+use peri_config::trust::{self, SettingsSourceKind};
+
+/// 信任切片只覆盖项目 / local settings hooks；global 是用户机器级配置，不参与。
+fn settings_trust_scope(scope: &str) -> Result<SettingsSourceKind> {
+    match scope {
+        "project" => Ok(SettingsSourceKind::Project),
+        "local" => Ok(SettingsSourceKind::Local),
+        other => Err(anyhow::anyhow!(
+            "无效的信任 scope '{other}'：仅支持 project / local（global 为用户机器级配置，不参与信任判定）"
+        )),
+    }
+}
+
+fn trust_workspace() -> Result<PathBuf> {
+    let cwd = std::env::current_dir()?;
+    anyhow::ensure!(
+        cwd.is_absolute() && cwd.is_dir(),
+        "信任绑定要求已存在的绝对 workspace 路径"
+    );
+    Ok(cwd)
+}
+
+fn trust_binding(scope: &str) -> Result<trust::HookTrustEntry> {
+    let kind = settings_trust_scope(scope)?;
+    let cwd = trust_workspace()?;
+    trust::settings_binding(&cwd, kind)?
+        .ok_or_else(|| anyhow::anyhow!("workspace 路径无法规范化：{}", cwd.display()))
+}
+
+/// 当前 workspace 已启用插件（严格只读发现；失败即报错，不降级为空清单）。
+fn enabled_plugins_for_trust(cwd: &Path) -> Result<Vec<peri_middlewares::plugin::LoadedPlugin>> {
+    let claude_dir = peri_middlewares::plugin::claude_home();
+    peri_middlewares::plugin::load_enabled_plugins(&claude_dir, Some(cwd))
+        .map_err(|error| anyhow::anyhow!("插件清单读取失败：{error}"))
+}
+
+/// 按安装记录 id 或插件名定位唯一插件（歧义必须报错，不猜）。
+fn resolve_plugin_for_trust(
+    cwd: &Path,
+    selector: &str,
+) -> Result<peri_middlewares::plugin::LoadedPlugin> {
+    let plugins = enabled_plugins_for_trust(cwd)?;
+    let matched: Vec<peri_middlewares::plugin::LoadedPlugin> = plugins
+        .into_iter()
+        .filter(|plugin| plugin.scope.plugin_id == selector || plugin.name == selector)
+        .collect();
+    match matched.as_slice() {
+        [plugin] => Ok(plugin.clone()),
+        [] => Err(anyhow::anyhow!(
+            "当前 workspace 没有匹配 '{selector}' 的已启用插件（可用 `peri plugin list` 查看 id）"
+        )),
+        many => Err(anyhow::anyhow!(
+            "'{selector}' 匹配到 {} 个来源，请用安装记录 id 指定：{}",
+            many.len(),
+            many.iter()
+                .map(|plugin| plugin.scope.source_identity())
+                .collect::<Vec<_>>()
+                .join(", ")
+        )),
+    }
+}
+
+fn plugin_trust_binding(cwd: &Path, selector: &str) -> Result<trust::HookTrustEntry> {
+    let plugin = resolve_plugin_for_trust(cwd, selector)?;
+    peri_middlewares::host_ports::plugin_hook_binding(cwd, &plugin)?
+        .ok_or_else(|| anyhow::anyhow!("workspace 路径无法规范化：{}", cwd.display()))
+}
+
+pub fn run_plugin_trust_grant(scope: &str, plugin: Option<&str>) -> Result<()> {
+    if let Some(selector) = plugin {
+        let cwd = trust_workspace()?;
+        let binding = plugin_trust_binding(&cwd, selector)?;
+        trust::grant(&binding)?;
+        println!("已授权插件 hooks 来源在当前 workspace 执行：");
+        println!("  workspace: {}", binding.workspace);
+        println!("  source:    {}", binding.source);
+        println!("  digest:    {}", binding.digest);
+        println!("提示：来源身份或插件 hooks 内容变化后授权自动失效，需重新 grant。");
+        return Ok(());
+    }
+    let binding = trust_binding(scope)?;
+    trust::grant(&binding)?;
+    println!(
+        "已授权 {} settings hooks 在当前 workspace 执行：",
+        settings_trust_scope(scope)?.scope()
+    );
+    println!("  workspace: {}", binding.workspace);
+    println!("  source:    {}", binding.source);
+    println!("  digest:    {}", binding.digest);
+    println!("提示：来源或摘要变化后授权自动失效，需重新 grant。");
+    Ok(())
+}
+
+pub fn run_plugin_trust_revoke(scope: &str, plugin: Option<&str>) -> Result<()> {
+    if let Some(selector) = plugin {
+        let cwd = trust_workspace()?;
+        let binding = plugin_trust_binding(&cwd, selector)?;
+        if trust::revoke(&binding.workspace, &binding.source)? {
+            println!("已撤销插件 hooks 来源 {} 的授权。", binding.source);
+        } else {
+            println!("当前 workspace 上没有该插件来源的授权记录（无需撤销）。");
+        }
+        return Ok(());
+    }
+    let binding = trust_binding(scope)?;
+    if trust::revoke(&binding.workspace, &binding.source)? {
+        println!(
+            "已撤销 {} settings hooks 的授权。",
+            settings_trust_scope(scope)?.scope()
+        );
+    } else {
+        println!("当前 workspace 上没有该来源的授权记录（无需撤销）。");
+    }
+    Ok(())
+}
+
+pub fn run_plugin_trust_status() -> Result<()> {
+    let cwd = trust_workspace()?;
+    let workspace = trust::canonical_workspace(&cwd)?
+        .ok_or_else(|| anyhow::anyhow!("workspace 路径无法规范化：{}", cwd.display()))?;
+    println!("workspace: {workspace}");
+    for kind in [SettingsSourceKind::Project, SettingsSourceKind::Local] {
+        let state = match trust::settings_binding(&cwd, kind)? {
+            Some(binding) if trust::is_trusted(&binding)? => "已授权",
+            Some(_) => "未授权（默认拒绝执行）",
+            None => "workspace 不可规范化",
+        };
+        println!("{} settings hooks: {state}", kind.scope());
+    }
+    // 插件来源：列出当前已启用插件中有 hooks 声明的来源及其授权状态。
+    let plugins = enabled_plugins_for_trust(&cwd)?;
+    let with_hooks: Vec<peri_middlewares::plugin::LoadedPlugin> = plugins
+        .into_iter()
+        .filter(|plugin| plugin.hooks_config.is_some())
+        .collect();
+    if with_hooks.is_empty() {
+        println!("已启用插件中没有 hooks 声明。");
+    } else {
+        println!("插件 hooks 来源（{} 个）：", with_hooks.len());
+        for plugin in with_hooks {
+            let state = match peri_middlewares::host_ports::plugin_hook_binding(&cwd, &plugin)? {
+                Some(binding) if trust::is_trusted(&binding)? => "已授权",
+                Some(_) => "未授权（默认拒绝执行）",
+                None => "workspace 不可规范化",
+            };
+            println!(
+                "  {} [{} / {}]: {state}",
+                plugin.scope.plugin_id,
+                plugin.scope.origin.as_str(),
+                plugin.scope.install_scope.as_str()
+            );
+            println!("    source: {}", plugin.scope.source_identity());
+        }
+    }
+    let entries = trust::list(&workspace)?;
+    if entries.is_empty() {
+        println!("无授权记录：来源 hooks 不会执行。");
+    } else {
+        println!("授权记录（{} 条）：", entries.len());
+        for entry in entries {
+            println!("  {}  digest={}", entry.source, entry.digest);
         }
     }
     Ok(())

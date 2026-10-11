@@ -1,7 +1,7 @@
 //! Planner — Compact 计划和策略类型
 //!
 //! planner 只能读取 MessageTranscript 和 CompactConfig，绝对不能调用
-//! set_truncated、set_excluded、send_persist、invalidate_context_cache 或 provider。
+//! set_truncated、set_excluded、send_persist 或 provider。
 
 use std::collections::{HashMap, HashSet};
 
@@ -32,7 +32,7 @@ impl ContextPressure {
         let reserve = self.output_reserve as u64
             + self.predicted_tool_growth as u64
             + self.safety_buffer as u64;
-        self.context_window.saturating_sub(reserve as u32) as u64
+        (self.context_window as u64).saturating_sub(reserve)
     }
 
     /// 需要回收的 token 数量（饱和减法，不溢出）。

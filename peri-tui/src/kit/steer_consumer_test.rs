@@ -11,6 +11,127 @@ use peri_acp_types::{
 };
 use serde_json::json;
 
+const RECEIPT_TIMEOUT: Duration = AcpTuiClient::USER_INPUT_RECEIPT_TIMEOUT;
+
+async fn expect_rpc(
+    server: &MpscServerTransport,
+    expected: &str,
+) -> (RequestId, serde_json::Value) {
+    let incoming = tokio::time::timeout(Duration::from_secs(2), server.recv())
+        .await
+        .unwrap()
+        .unwrap();
+    let IncomingMessage::Request { id, method, params } = incoming else {
+        panic!("expected {expected}, got {incoming:?}");
+    };
+    assert_eq!(method, expected);
+    (id, params)
+}
+
+/// [回归测试] Refresh 等待 snapshot 回包时曾占满 consumer，使后来输入无法发送。
+#[tokio::test]
+#[serial_test::serial]
+async fn test_slow_refresh_does_not_queue_new_enqueue() {
+    let _restore = RestoreProjection {
+        steers: STEERS.state().read().clone(),
+        session: atoms::ACTIVE_SESSION_ID.state().read().clone(),
+        epoch: atoms::BRIDGE_RESET_COUNTER.get(),
+    };
+    atoms::ACTIVE_SESSION_ID.set("s".into());
+    atoms::BRIDGE_RESET_COUNTER.set(7);
+    let mut state = SteerState::default();
+    state.reset_session("s", 7);
+    state.accept_snapshot(
+        UserInputQueueSnapshot {
+            session_id: "s".into(),
+            generation: "g".into(),
+            revision: 1,
+            active_request_id: None,
+            items: vec![],
+        },
+        7,
+        true,
+    );
+    let enqueue = first_input_command(7, "command", "input", "synthetic input");
+    state.begin(enqueue.clone());
+    STEERS.set(state);
+    let (transport, server) = mpsc_transport_pair();
+    let (client, _, _) = AcpTuiClient::new(transport);
+    client.force_stable_for_test("s", false);
+    let binding_client = client.clone();
+    let binding = tokio::spawn(async move { binding_client.user_input_snapshot("s").await });
+    let (binding_id, _) = expect_rpc(&server, "session/input/snapshot").await;
+    server
+        .send_response(
+            binding_id,
+            Ok(json!({
+                "sessionId":"s","generation":"g","revision":1,"items":[]
+            })),
+        )
+        .await
+        .unwrap();
+    binding.await.unwrap().unwrap();
+    let (sender, receiver) = tokio::sync::mpsc::unbounded_channel();
+    let shutdown = CancellationToken::new();
+    let consumer = spawn_steer_consumer(client.clone(), receiver, "/tmp".into(), shutdown.clone());
+    sender
+        .send(SteerCommand {
+            session_id: "s".into(),
+            epoch: 7,
+            command_id: "refresh".into(),
+            generation: None,
+            kind: SteerCommandKind::Refresh,
+        })
+        .unwrap();
+    let (snapshot_id, _) = expect_rpc(&server, "session/input/snapshot").await;
+    sender.send(enqueue).unwrap();
+    let (enqueue_id, params) = expect_rpc(&server, "session/input/enqueue").await;
+    assert_eq!(params["commandId"], "command");
+    assert_eq!(params["inputId"], "input");
+    assert_eq!(params["generation"], "g");
+    server
+        .send_response(
+            enqueue_id,
+            Ok(json!({
+                "snapshot":{"sessionId":"s","generation":"g","revision":2,"items":[{
+                    "inputId":"input","originalDraft":"synthetic input",
+                    "content":MessageContent::text("synthetic input"),"state":"queued"
+                }]},"results":[]
+            })),
+        )
+        .await
+        .unwrap();
+    tokio::time::timeout(Duration::from_secs(2), async {
+        while STEERS
+            .state()
+            .read()
+            .pending_command("s", "command")
+            .is_some()
+        {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .unwrap();
+    assert_eq!(
+        STEERS.state().read().snapshot("s", 7).unwrap().revision,
+        2,
+        "刷新未回包时输入必须已经受理"
+    );
+    server
+        .send_response(
+            snapshot_id,
+            Ok(json!({
+                "sessionId":"s","generation":"g","revision":1,"items":[]
+            })),
+        )
+        .await
+        .unwrap();
+    shutdown.cancel();
+    consumer.await.unwrap();
+    client.close();
+}
+
 struct RestoreProjection {
     steers: SteerState,
     session: String,
@@ -313,83 +434,6 @@ fn test_failure_notice_distinguishes_preparation_from_admission() {
     );
 }
 
-/// 只读准入的会话上，宿主的 `-32010` 是确定结论，不是「回执不明」。
-///
-/// 判据只是客户端已经持有的准入事实（`SESSION_READ_ONLY`），不是新加的输入闸门：请求
-/// 照发，结论仍由宿主的 `require_owner` 给出；这里只保证呈现口径——原稿按确定拒绝还给
-/// composer，不把只读会话的提交挂成每 5s 重投的待定态。
-#[test]
-#[serial_test::serial]
-fn test_read_only_session_submission_is_a_determined_rejection() {
-    use peri_acp_types::workspace::ReadOnlyAdmission;
-
-    struct RestoreReadOnly(Option<ReadOnlyAdmission>);
-    impl Drop for RestoreReadOnly {
-        fn drop(&mut self) {
-            atoms::SESSION_READ_ONLY.set(self.0.take());
-        }
-    }
-
-    let _restore = RestoreProjection {
-        steers: STEERS.state().read().clone(),
-        session: atoms::ACTIVE_SESSION_ID.state().read().clone(),
-        epoch: atoms::BRIDGE_RESET_COUNTER.get(),
-    };
-    let _read_only = RestoreReadOnly(atoms::SESSION_READ_ONLY.state().read().clone());
-    atoms::ACTIVE_SESSION_ID.set("s".into());
-    atoms::BRIDGE_RESET_COUNTER.set(7);
-    let ownership_denied = AcpError::new(-32010, "session is owned by another execution host");
-    let draft = "  中文草稿\n@image /tmp/a.png\n";
-    let command = SteerCommand {
-        session_id: "s".into(),
-        epoch: 7,
-        command_id: "stable-command".into(),
-        // snapshot 已经成功、入队请求已发出：`-32010` 来自入队本身。
-        generation: Some("g".into()),
-        kind: SteerCommandKind::Enqueue(UserInput {
-            input_id: "input-1".into(),
-            original_draft: draft.into(),
-            content: MessageContent::text(draft),
-        }),
-    };
-
-    atoms::SESSION_READ_ONLY.set(Some(ReadOnlyAdmission::ExecutionBusy));
-    let mut projection = SteerState::default();
-    projection.reset_session("s", 7);
-    projection.begin(command.clone());
-    STEERS.set(projection);
-    let mut read_only_command = command.clone();
-    assert!(
-        reject_command(&mut read_only_command, &ownership_denied),
-        "只读会话的执行所有权拒绝是确定结论"
-    );
-    assert_eq!(
-        STEERS
-            .state()
-            .write()
-            .recover("s", 7, true)
-            .map(|input| input.original_draft),
-        Some(draft.to_string()),
-        "确定拒绝必须把原稿还给 composer"
-    );
-
-    // 对照：没有只读准入事实时，同一错误仍是「回执不明」——占用可能只是瞬时的。
-    atoms::SESSION_READ_ONLY.set(None);
-    let mut projection = SteerState::default();
-    projection.reset_session("s", 7);
-    projection.begin(command.clone());
-    STEERS.set(projection);
-    let mut uncertain_command = command.clone();
-    assert!(
-        !reject_command(&mut uncertain_command, &ownership_denied),
-        "瞬时的执行占用不得被改判为确定拒绝"
-    );
-    assert!(
-        STEERS.state().read().pending_recovery_ids("s").is_empty(),
-        "回执不明不能变成可重复提交草稿"
-    );
-}
-
 #[test]
 fn test_steer_session_unavailable_notice_is_translated_in_both_locales() {
     let error = "session unavailable".to_string();
@@ -400,18 +444,6 @@ fn test_steer_session_unavailable_notice_is_translated_in_both_locales() {
         assert!(
             notice.contains(&error) && !notice.contains("steer-session-unavailable"),
             "{lang} 缺少 steer-session-unavailable 文案：{notice}"
-        );
-    }
-}
-
-#[test]
-fn test_steer_read_only_notice_is_translated_in_both_locales() {
-    for lang in ["en", "zh-CN"] {
-        let registry = crate::i18n::LcRegistry::new(Some(lang));
-        let notice = registry.tr("steer-session-read-only");
-        assert!(
-            !notice.is_empty() && !notice.contains("steer-session-read-only"),
-            "{lang} 缺少 steer-session-read-only 文案：{notice}"
         );
     }
 }

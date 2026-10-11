@@ -29,6 +29,7 @@ fn make_tracer(
         batch_max_events: 50,
         batch_flush_interval_secs: 10,
         user_id: None,
+        ..Default::default()
     };
     let t = LangfuseTracer::new(session.clone(), "sess_smoke".to_string(), config);
     (t, session)
@@ -124,7 +125,9 @@ async fn test_error_span_emitted_for_error_turn() {
     let (mut t, session) = make_tracer(0.0);
     t.on_turn_start("turn_1");
     t.on_turn_end(peri_acp_types::session::TurnTelemetryOutcome::Failed {
-        failure: peri_acp_types::session::ExecutionFailure::internal("Turn failed"),
+        failure: Box::new(peri_acp_types::session::ExecutionFailure::internal(
+            "Turn failed",
+        )),
     })
     .await
     .expect("flush task should finish");
@@ -160,9 +163,11 @@ async fn test_turn_end_failed_closes_active_generation_with_canonical_failure() 
             message: "retry exhausted token=secret".to_string(),
         });
 
-    t.on_turn_end(TurnTelemetryOutcome::Failed { failure })
-        .await
-        .expect("flush task should finish");
+    t.on_turn_end(TurnTelemetryOutcome::Failed {
+        failure: Box::new(failure),
+    })
+    .await
+    .expect("flush task should finish");
 
     let events = session.events_snapshot();
     let stage_index = events
@@ -201,13 +206,13 @@ async fn test_turn_end_failed_closes_active_generation_with_canonical_failure() 
         Some(&serde_json::json!(429))
     );
     assert!(
-        !generation
+        generation
             .output
             .as_ref()
-            .expect("safe failure output")
+            .expect("failure output")
             .to_string()
-            .contains("secret"),
-        "generation must not contain provider error text"
+            .contains("retry exhausted token=secret"),
+        "generation must retain the provider diagnostic"
     );
 }
 
@@ -240,8 +245,12 @@ async fn test_unresolved_llm_parent_is_preserved_until_turn_end_fallback() {
     let (mut t, session) = make_tracer(1.0);
     t.set_main_agent_id("main".to_string());
     t.on_turn_start("turn_1");
-    t.generation
-        .on_llm_start("unregistered-child", 0, vec![], vec![]);
+    t.generation.on_llm_start(
+        "unregistered-child",
+        0,
+        Default::default(),
+        Default::default(),
+    );
 
     t.on_llm_end(
         "unregistered-child",
@@ -258,7 +267,7 @@ async fn test_unresolved_llm_parent_is_preserved_until_turn_end_fallback() {
     );
 
     t.on_turn_end(TurnTelemetryOutcome::Failed {
-        failure: ExecutionFailure::internal("safe internal failure"),
+        failure: Box::new(ExecutionFailure::internal("safe internal failure")),
     })
     .await
     .expect("flush task should finish");
@@ -345,13 +354,13 @@ async fn test_llm_end_without_start_emits_synthetic_generation() {
 }
 
 #[tokio::test]
-async fn test_unsampled_failure_emits_parent_before_error_and_redacts_message() {
+async fn test_unsampled_failure_emits_parent_before_error_and_preserves_message() {
     let (mut t, session) = make_tracer(0.0);
     let parent_id = t.agent_observation_id.clone();
     let secrets = "sk-live-raw eyJhbGciOiJIUzI1NiJ9.payload.signature -----BEGIN PRIVATE KEY----- postgres://user:password@host/db";
 
     t.on_turn_end(TurnTelemetryOutcome::Failed {
-        failure: ExecutionFailure::internal(secrets),
+        failure: Box::new(ExecutionFailure::internal(secrets)),
     })
     .await
     .expect("flush task should finish");
@@ -388,8 +397,8 @@ async fn test_unsampled_failure_emits_parent_before_error_and_redacts_message() 
         "postgres://",
     ] {
         assert!(
-            !serialized.contains(secret),
-            "Langfuse payload leaked secret marker: {secret}"
+            serialized.contains(secret),
+            "Langfuse payload lost diagnostic marker: {secret}"
         );
     }
 }
@@ -435,7 +444,7 @@ async fn test_llm_generation_emits_events() {
 }
 
 #[tokio::test]
-async fn test_llm_error_uses_safe_status_message() {
+async fn test_llm_error_preserves_status_message() {
     let (mut t, session) = make_tracer(1.0);
     t.on_turn_start("turn_1");
     t.on_llm_start("main", 0, &[], &[]);
@@ -467,10 +476,10 @@ async fn test_llm_error_uses_safe_status_message() {
     );
     assert_eq!(
         gen.status_message.as_deref(),
-        Some("provider_or_stream_failure"),
-        "generation statusMessage 应为稳定分类"
+        Some("ERROR: sentinel-secret"),
+        "generation statusMessage 应保留实际错误"
     );
-    assert!(!format!("{gen:?}").contains("sentinel-secret"));
+    assert!(format!("{gen:?}").contains("sentinel-secret"));
 }
 
 #[tokio::test]
@@ -479,12 +488,14 @@ async fn test_turn_error_reason_is_safe_in_error_span() {
     t.on_turn_start("turn_1");
     t.on_turn_error(peri_agent::agent::events_v2::TurnErrorReason::LlmFailure);
     let _handle = t.on_turn_end(peri_acp_types::session::TurnTelemetryOutcome::Failed {
-        failure: peri_acp_types::session::ExecutionFailure {
+        failure: Box::new(peri_acp_types::session::ExecutionFailure {
             kind: peri_acp_types::session::ExecutionFailureKind::Llm,
             public_message: "LLM failure".to_string(),
+            error_category: None,
+            causes: Vec::new(),
             http_status: None,
             diagnostic: None,
-        },
+        }),
     });
     tokio::task::yield_now().await;
     let events = session.events_snapshot();
@@ -511,7 +522,7 @@ async fn test_turn_error_reason_is_safe_in_error_span() {
             .metadata
             .as_ref()
             .and_then(|metadata| metadata.get("error_schema_version")),
-        Some(&serde_json::json!(2))
+        Some(&serde_json::json!(3))
     );
     assert!(!format!("{error_span:?}").contains("sentinel-secret"));
 }
@@ -958,5 +969,26 @@ async fn test_tool_observation_error_marks_error_class() {
             "error_schema_version": 2,
         })),
         "错误工具 output 应保留 error_class 与 error_message 标记"
+    );
+}
+
+// ── 活跃 turn trace 登记（指标出口归属） ──────────────────────────────────────
+
+#[tokio::test]
+async fn turn_lifecycle_registers_and_clears_active_trace_for_metrics() {
+    let (mut t, session) = make_tracer(1.0);
+    let trace_id = t.trace_id.clone();
+
+    t.on_turn_start("turn_metrics");
+    assert_eq!(
+        session.turn_traces().resolve("sess_smoke").as_deref(),
+        Some(trace_id.as_str()),
+        "turn 开始后指标出口应能取到本 turn 的 trace"
+    );
+
+    let _flush = t.on_turn_end(TurnTelemetryOutcome::Completed);
+    assert!(
+        session.turn_traces().resolve("sess_smoke").is_none(),
+        "turn 结束后应清理活跃登记，后续指标回退独立 root trace"
     );
 }

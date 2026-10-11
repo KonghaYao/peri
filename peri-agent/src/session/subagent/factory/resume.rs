@@ -49,6 +49,9 @@ pub(super) async fn resume_subagent_impl(
     parent: Option<&Arc<Session>>,
     config: SubagentResumeConfig,
 ) -> Result<SubagentSpawned, Box<dyn std::error::Error + Send + Sync>> {
+    if parent.is_some_and(|session| session.store().frozen.legacy_embedded_instructions) {
+        return Err("V1 frozen prompt contains embedded external instructions; create a new session before resuming a subagent".into());
+    }
     // 解构 config（cwd 不用于恢复——cwd 取 meta.cwd，thread 创建时固化）
     let SubagentResumeConfig {
         thread_id,
@@ -61,8 +64,6 @@ pub(super) async fn resume_subagent_impl(
         tools,
         tool_filter,
         tool_invocation_resolver,
-        error_suggest_registry,
-        tool_registry_snapshot,
         compact_config,
         context_budget,
         compact_llm,
@@ -77,6 +78,7 @@ pub(super) async fn resume_subagent_impl(
         register_runtime,
         deregister_runtime,
         parent_agent_id,
+        parent_tool_call_id,
         cancel_token: cancel_token_cfg,
         cwd: _,
         frozen_claude_md: frozen_claude_md_cfg,
@@ -127,11 +129,14 @@ pub(super) async fn resume_subagent_impl(
     let ownership = task_manager
         .as_ref()
         .map(|manager| {
-            peri_acp_types::tasks::TaskManager::begin_external_execution(manager.as_ref())
+            peri_acp_types::tasks::TaskManager::begin_external_execution(
+                manager.as_ref(),
+                "subagent-resume",
+            )
         })
         .transpose()?;
     let cluster_root = super::execution_root(session_resources.as_ref(), &thread_id).await?;
-    let (meta, claim) = ResumeClaim::acquire(
+    let (meta, mut claim) = ResumeClaim::acquire(
         Arc::clone(&session_resources),
         thread_id.clone(),
         cluster_root,
@@ -206,8 +211,20 @@ pub(super) async fn resume_subagent_impl(
     let frozen_date = parent
         .map(|p| p.store().frozen.date.to_string())
         .or(frozen_date_cfg);
+    // Spawn puts the child's identity first in its own persisted history. Only
+    // hidden child threads use that convention; legacy/non-child history has no
+    // typed identity marker and its first System must remain ordinary history.
+    // For older hidden children, the first own System is the compatible identity
+    // slot. A future typed payload can remove this historical convention.
+    let identity = (meta.hidden && meta.parent_thread_id.is_some())
+        .then(|| loaded.first().and_then(PersistedPayload::as_message))
+        .flatten()
+        .and_then(|message| {
+            matches!(message, BaseMessage::System { .. }).then(|| message.content().to_owned())
+        });
     let frozen = inherited_frozen_context(
         parent,
+        identity.as_deref(),
         &frozen_claude_md,
         &frozen_skill_summary,
         &frozen_date,
@@ -232,6 +249,7 @@ pub(super) async fn resume_subagent_impl(
         frozen,
         cancel_token.clone(),
         thread_id.clone(),
+        parent.and_then(|session| session.subagent_host()),
         Some(Arc::clone(&session_resources)),
         inherited,
         loaded,
@@ -247,13 +265,13 @@ pub(super) async fn resume_subagent_impl(
         frozen_claude_local_md_cfg,
         frozen_skill_summary,
         tool_invocation_resolver,
-        error_suggest_registry,
-        tool_registry_snapshot,
         compact_config,
         context_budget,
         compact_llm,
         Some(agent_id_from_child_thread(&thread_id)),
-    );
+        identity.is_some(),
+    )
+    .await?;
 
     // Assembly is synchronous but can observe cancellation from another task
     // (or a callback). Sync callers still receive the established interrupted
@@ -297,6 +315,7 @@ pub(super) async fn resume_subagent_impl(
                 deregister_runtime,
                 langfuse_bridge,
                 parent_agent_id,
+                parent_tool_call_id.clone(),
                 v2_ctx,
                 session.clone(),
                 Some(claim),
@@ -324,7 +343,7 @@ pub(super) async fn resume_subagent_impl(
                 max_iterations,
                 bg_event_sender,
                 task_manager,
-                on_bg_complete,
+                super::completion_delivery(parent, on_bg_complete),
                 langfuse_bridge,
                 Some(Arc::clone(&session_resources)),
                 deregister_runtime,
@@ -332,12 +351,14 @@ pub(super) async fn resume_subagent_impl(
                 on_subagent_stop,
                 register_runtime,
                 parent_agent_id,
+                parent_tool_call_id,
                 cancel_token.clone(),
                 v2_ctx,
+                Some(&mut claim),
             )
             .await
             {
-                Ok(()) => claim.release().await,
+                Ok(()) => {}
                 Err(e) => {
                     // review MEDIUM-1 回滚：注册失败（task_manager 缺失 /
                     // register_with_kind 撞 per-kind 上限）时任务未执行——status

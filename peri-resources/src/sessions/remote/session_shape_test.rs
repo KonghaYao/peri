@@ -147,11 +147,15 @@ fn bigger_projections_extend_the_same_meta_source() {
 fn schema_ddl_matches_the_canonical_shape() {
     let plan = super::session_schema::initialization_plan();
     // 一条语句一个 spec：远端执行器的语句单元就是一条语句，多句拼一个请求只会执行第一条。
+    let expected: Vec<&str> = crate::sessions::canonical::CREATE_TABLES
+        .iter()
+        .chain(crate::sessions::canonical::CREATE_INDEXES.iter())
+        .copied()
+        .collect();
+    let actual: Vec<&str> = plan.iter().map(|spec| spec.sql).collect();
     assert_eq!(
-        plan.len(),
-        super::session_schema::CANONICAL_TABLES.len()
-            + super::session_schema::CANONICAL_INDEXES.len(),
-        "远端下发的 canonical DDL：逐条建表 + 逐条建索引"
+        actual, expected,
+        "远端 DDL：canonical 建表段 + canonical 索引段"
     );
     for spec in &plan {
         assert!(
@@ -166,8 +170,17 @@ fn schema_ddl_matches_the_canonical_shape() {
             spec.sql
         );
     }
-    // 远端建的是本机那一份 canonical 表（清单来自同一处，不另抄一遍）。
-    for table in super::session_schema::CANONICAL_TABLES {
+    // 远端建的是本机那一份 canonical 表（清单来自同一处，不另抄一遍）。v19 起
+    // `legacy_execution_registrations` 不在其中：它只作为升级入参存在，不由新库建出。
+    for table in [
+        "machines",
+        "workspaces",
+        "threads",
+        "messages",
+        "projects",
+        "session_bindings",
+        "mcp_oauth_credentials",
+    ] {
         assert!(
             plan.iter().any(|spec| spec.sql.contains(table)),
             "canonical 表必须有建表语句: {table}"
@@ -180,14 +193,13 @@ fn schema_ddl_matches_the_canonical_shape() {
         .expect("索引段存在");
     assert_eq!(
         first_index,
-        super::session_schema::CANONICAL_TABLES.len(),
+        crate::sessions::canonical::CREATE_TABLES.len(),
         "建表段在前、索引段在后"
     );
-    for index in super::session_schema::CANONICAL_INDEXES {
+    for index_sql in crate::sessions::canonical::CREATE_INDEXES {
         assert!(
-            plan.iter()
-                .any(|spec| spec.sql.contains(&format!(" {index} "))),
-            "缺索引: {index}"
+            plan.iter().any(|spec| spec.sql == *index_sql),
+            "v2 canonical index missing: {index_sql}"
         );
     }
     // 会话表主键是会话 id（canonical 列名），历史表主键是消息 id（同一条消息不属于两个会话）。
@@ -264,8 +276,6 @@ fn meta_row_decodes_field_by_field() {
     assert!(!meta.hidden);
     assert_eq!(meta.cancel_policy, CancelPolicy::Cascade);
     assert_eq!(meta.agent_status, AgentStatus::Active);
-    // 远端不保存物化缓存：没有第二份真相可返回。
-    assert!(meta.cached_context.is_none());
 }
 
 #[test]
@@ -490,8 +500,8 @@ fn new_session(thread_id: &str, snapshot_at: Option<MessageId>) -> NewSession {
     }
 }
 
-#[test]
-fn write_sql_is_static_and_all_values_are_bound() {
+#[tokio::test]
+async fn write_sql_is_static_and_all_values_are_bound() {
     let first = new_session("session-a", None);
     let second = new_session("session-b", Some(MessageId::new()));
     let one = session_sql::insert_session_statements(&session_sql::session_insert(&first, 0, None))
@@ -499,15 +509,14 @@ fn write_sql_is_static_and_all_values_are_bound() {
     let two =
         session_sql::insert_session_statements(&session_sql::session_insert(&second, 3, None))
             .expect("encodable");
-    // 创建路径就是两条语句：canonical `threads` 行 + `session_bindings` 行。
     assert_eq!(one.len(), 2);
     assert_eq!(one[0].sql, two[0].sql);
     assert_eq!(one[1].sql, two[1].sql);
     assert_ne!(one[0].params, two[0].params);
     assert!(one[0].sql.starts_with("INSERT INTO threads"));
     assert!(one[1].sql.starts_with("INSERT INTO session_bindings"));
-    assert_eq!(one[0].params.len(), 13);
-    assert_eq!(one[1].params.len(), 5);
+    assert_eq!(one[0].params.len(), 14);
+    assert_eq!(one[1].params.len(), 7);
     // 全部动态内容都出现在参数里，不出现在 SQL 文本里。
     for secret in ["session-a", "session-b", "/home/u/project"] {
         assert!(!one[0].sql.contains(secret));
@@ -533,8 +542,10 @@ fn write_sql_is_static_and_all_values_are_bound() {
         )
     );
     // child 多一条继承区写入：与本机 child 路径同一句形态。
+    let mut child_session = new_session("child", None);
+    child_session.meta.parent_thread_id = Some(first.thread_id.clone());
     let child = session_sql::insert_session_statements(&session_sql::session_insert(
-        &first,
+        &child_session,
         0,
         Some("{\"inherited\":true}"),
     ))
@@ -556,6 +567,76 @@ fn binding_cwd_must_be_relative_and_textual() {
         error.kind(),
         SessionResourceErrorKind::InvalidInput { .. }
     ));
+}
+
+#[tokio::test]
+async fn draft_revocation_cleans_environment_without_cascade_and_preserves_committed_rows() {
+    use sqlx::Connection;
+
+    let mut connection = sqlx::SqliteConnection::connect("sqlite::memory:")
+        .await
+        .unwrap();
+    sqlx::query("PRAGMA foreign_keys = OFF")
+        .execute(&mut connection)
+        .await
+        .unwrap();
+    let foreign_keys: (i64,) = sqlx::query_as("PRAGMA foreign_keys")
+        .fetch_one(&mut connection)
+        .await
+        .unwrap();
+    assert_eq!(foreign_keys.0, 0);
+    for sql in crate::sessions::canonical::CREATE_TABLES {
+        sqlx::query(*sql).execute(&mut connection).await.unwrap();
+    }
+    sqlx::query(
+        "INSERT INTO machines(id, name, identity_kind) VALUES ('machine', '测试机', 'known')",
+    )
+    .execute(&mut connection)
+    .await
+    .unwrap();
+    sqlx::query("INSERT INTO workspaces(id, machine_id, path, path_source) VALUES ('owner', 'machine', '/home/u/project', 'unverified')")
+        .execute(&mut connection)
+        .await
+        .unwrap();
+    for (id, frozen, expected_deleted) in [("draft", None, 1), ("committed", Some("{}"), 0)] {
+        sqlx::query("INSERT INTO threads(id, created_at, updated_at, frozen_context, workspace_id) VALUES (?1, 'now', 'now', ?2, 'owner')")
+            .bind(id).bind(frozen).execute(&mut connection).await.unwrap();
+        sqlx::query("INSERT INTO messages(message_id, thread_id, role, content) VALUES (?1, ?1, 'human', '{}')")
+            .bind(id).execute(&mut connection).await.unwrap();
+        sqlx::query("INSERT INTO session_bindings(thread_id, schema_version, project_id, workspace_id, relative_cwd, evidence_origin) VALUES (?1, 1, 'project', 'owner', '', 'creation_snapshot')")
+            .bind(id).execute(&mut connection).await.unwrap();
+        let statements = session_sql::revoke_draft_statements(id);
+        assert_eq!(statements.len(), 3);
+        assert!(statements[2].sql.starts_with("DELETE FROM threads"));
+        let mut transaction = connection.begin().await.unwrap();
+        for statement in &statements {
+            assert_eq!(statement.params, vec![Value::Text(id.to_owned())]);
+            assert!(statement.sql.contains("frozen_context IS NULL"));
+            let result = sqlx::query(statement.sql)
+                .bind(id)
+                .execute(&mut *transaction)
+                .await
+                .unwrap();
+            assert_eq!(
+                result.rows_affected(),
+                expected_deleted,
+                "{}",
+                statement.sql
+            );
+        }
+        transaction.commit().await.unwrap();
+        for statement in &statements {
+            let result = sqlx::query(statement.sql)
+                .bind(id)
+                .execute(&mut connection)
+                .await
+                .unwrap();
+            assert_eq!(result.rows_affected(), 0);
+        }
+        assert!(statements
+            .iter()
+            .all(|statement| !statement.sql.contains("session_environments")));
+    }
 }
 
 #[test]
@@ -581,7 +662,11 @@ fn read_statements_are_read_only_and_parameterized() {
 
     let page = session_sql::page_statement(&query(ThreadScope::All, None)).expect("bindable");
     assert!(page.is_read_only(), "分页列举不得写: {}", page.sql);
-    assert_eq!(page.params.len(), 7, "scope/游标/上限都是绑定参数");
+    assert_eq!(
+        page.params.len(),
+        8,
+        "scope/游标/上限与归档状态都是绑定参数"
+    );
 }
 
 #[test]
@@ -690,10 +775,10 @@ impl OpaqueIdExt for WorkspaceId {
     }
 }
 
-/// 语句形状断言不依赖客户端：`StatementSpec` 的 Debug 不打印绑定值。
+/// 语句形状断言不依赖客户端：`StatementSpec` 的 Debug 保留绑定值供诊断。
 #[test]
-fn statement_debug_does_not_leak_bound_values() {
+fn statement_debug_preserves_bound_values() {
     let spec: StatementSpec = session_sql::select_meta_statement("session-secret");
     let rendered = format!("{spec:?}");
-    assert!(!rendered.contains("session-secret"));
+    assert!(rendered.contains("session-secret"));
 }

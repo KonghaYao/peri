@@ -15,6 +15,12 @@ async fn nested_dispatch_keeps_pinned_target_and_does_not_commit_outer_batch() {
         fn description(&self) -> &str {
             self.0
         }
+        fn mcp_server_name(&self) -> Option<&str> {
+            Some(self.0)
+        }
+        fn mcp_tool_name(&self) -> Option<&str> {
+            Some("wire_target")
+        }
         fn parameters(&self) -> serde_json::Value {
             json!({})
         }
@@ -33,6 +39,19 @@ async fn nested_dispatch_keeps_pinned_target_and_does_not_commit_outer_batch() {
         fn name(&self) -> &str {
             "NestedHooks"
         }
+        async fn before_tool(
+            &self,
+            state: &mut dyn hook_state::BeforeToolState,
+            call: &ToolCall,
+        ) -> crate::error::AgentResult<ToolCall> {
+            let origin = state
+                .tool_origin(&call.id)
+                .expect("bound identity reaches approval");
+            assert_eq!(origin.mcp_server_name.as_deref(), Some("pinned"));
+            assert_eq!(origin.mcp_tool_name.as_deref(), Some("wire_target"));
+            assert_eq!(origin.builtin_mcp_instance, None);
+            Ok(call.clone())
+        }
         async fn after_tool(
             &self,
             state: &mut dyn hook_state::AfterToolState,
@@ -44,7 +63,7 @@ async fn nested_dispatch_keeps_pinned_target_and_does_not_commit_outer_batch() {
         }
         async fn after_tools_batch(
             &self,
-            state: &mut dyn hook_state::StateView,
+            state: &mut dyn hook_state::AfterToolsBatchState,
             _results: &[(ToolCall, crate::agent::react::ToolResult)],
         ) -> crate::error::AgentResult<()> {
             self.0.lock().push(("after_batch", state.messages().len()));
@@ -74,6 +93,15 @@ async fn nested_dispatch_keeps_pinned_target_and_does_not_commit_outer_batch() {
         .pin_working_tools(&ctx.runtime.tools.read())
         .unwrap();
     let dispatcher = StageEffectiveToolDispatcher::new(ctx.clone(), catalog);
+    assert_eq!(
+        dispatcher.admitted_mcp_tool_name("pinned", "wire_target"),
+        Some("Target".into())
+    );
+    assert_eq!(
+        dispatcher.admitted_mcp_tool_name("replacement", "wire_target"),
+        None
+    );
+    assert_eq!(dispatcher.admitted_mcp_tool_name("pinned", "Target"), None);
     // A later working-map change must not replace the target of this invocation.
     ctx.runtime
         .tools
@@ -88,7 +116,7 @@ async fn nested_dispatch_keeps_pinned_target_and_does_not_commit_outer_batch() {
                 invocation_id: "inner".into(),
                 tool_name: "Target".into(),
                 input: json!({}),
-                parent_invocation_id: Some("outer-ptc".into()),
+                parent_invocation_id: Some("outer".into()),
             },
             CancellationToken::new(),
         )
@@ -120,5 +148,5 @@ async fn nested_dispatch_keeps_pinned_target_and_does_not_commit_outer_batch() {
             ids.push(tool_call_id);
         }
     }
-    assert_eq!(ids, vec!["outer-ptc/inner", "outer-ptc/inner"]);
+    assert_eq!(ids, vec!["outer/inner", "outer/inner"]);
 }

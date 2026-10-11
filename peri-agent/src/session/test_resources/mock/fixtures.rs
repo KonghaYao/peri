@@ -10,6 +10,22 @@ use super::*;
 /// 语义对未登记 id 回答 `NotFound`；这里的方法只服务夹具——读取未登记 id 时按「空区」
 /// 回答，写入时按「写入即登记」补齐记录。需要「不存在」语义的用例请用 trait 方法。
 impl MockSessionResources {
+    pub(crate) async fn create_resumable_thread(
+        &self,
+        meta: ThreadMeta,
+    ) -> Result<ThreadId, anyhow::Error> {
+        let id = self.create_legacy_thread(meta).await?;
+        Ok(id)
+    }
+
+    pub(crate) async fn create_legacy_thread(
+        &self,
+        meta: ThreadMeta,
+    ) -> Result<ThreadId, anyhow::Error> {
+        let id = self.create_thread(meta).await?;
+        Ok(id)
+    }
+
     pub(crate) async fn create_thread(&self, meta: ThreadMeta) -> Result<ThreadId, anyhow::Error> {
         let id = meta.id.clone();
         if let Some(parent) = meta.parent_thread_id.clone() {
@@ -27,7 +43,7 @@ impl MockSessionResources {
         if self.regions.lock().unwrap().contains_key(&parent) {
             return;
         }
-        let mut meta = ThreadMeta::new(cwd);
+        let mut meta = ThreadMeta::new_at(cwd, peri_time::now_wall());
         meta.id = parent.clone();
         self.with_region(&parent, |region| region.meta = Some(meta));
     }

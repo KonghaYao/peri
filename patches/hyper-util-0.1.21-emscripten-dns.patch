@@ -1,0 +1,118 @@
+diff --git a/src/client/legacy/connect/dns.rs b/src/client/legacy/connect/dns.rs
+--- a/src/client/legacy/connect/dns.rs
++++ b/src/client/legacy/connect/dns.rs
+@@ -21,12 +21,17 @@
+ //! });
+ //! ```
+ use std::error::Error;
+-use std::net::{Ipv4Addr, Ipv6Addr, SocketAddr, SocketAddrV4, SocketAddrV6, ToSocketAddrs};
++#[cfg(target_os = "emscripten")]
++use std::future::Future;
++#[cfg(not(target_os = "emscripten"))]
++use std::net::ToSocketAddrs;
++use std::net::{Ipv4Addr, Ipv6Addr, SocketAddr, SocketAddrV4, SocketAddrV6};
+ use std::pin::Pin;
+ use std::str::FromStr;
+ use std::task::{self, Poll};
+ use std::{fmt, io, vec};
+ 
++#[cfg(not(target_os = "emscripten"))]
+ use tokio::task::JoinHandle;
+ use tower_service::Service;
+ 
+@@ -51,7 +56,10 @@
+ 
+ /// A future to resolve a name returned by `GaiResolver`.
+ pub struct GaiFuture {
++    #[cfg(not(target_os = "emscripten"))]
+     inner: JoinHandle<Result<SocketAddrs, io::Error>>,
++    #[cfg(target_os = "emscripten")]
++    inner: Pin<Box<dyn Future<Output = Result<SocketAddrs, io::Error>> + Send>>,
+ }
+ 
+ impl Name {
+@@ -115,13 +123,31 @@
+     }
+ 
+     fn call(&mut self, name: Name) -> Self::Future {
+-        let blocking = tokio::task::spawn_blocking(move || {
+-            (&*name.host, 0)
+-                .to_socket_addrs()
+-                .map(|i| SocketAddrs { iter: i })
+-        });
++        #[cfg(target_os = "emscripten")]
++        {
++            // This target cannot spawn a blocking resolver thread. Tokio's
++            // lookup_host uses Emscripten's async DNS fd and reactor instead.
++            let lookup = async move {
++                tokio::net::lookup_host((&*name.host, 0))
++                    .await
++                    .map(|addrs| SocketAddrs {
++                        iter: addrs.collect::<Vec<_>>().into_iter(),
++                    })
++            };
++            GaiFuture {
++                inner: Box::pin(lookup),
++            }
++        }
++        #[cfg(not(target_os = "emscripten"))]
++        {
++            let blocking = tokio::task::spawn_blocking(move || {
++                (&*name.host, 0)
++                    .to_socket_addrs()
++                    .map(|i| SocketAddrs { iter: i })
++            });
+ 
+-        GaiFuture { inner: blocking }
++            GaiFuture { inner: blocking }
++        }
+     }
+ }
+ 
+@@ -135,17 +161,28 @@
+     type Output = Result<GaiAddrs, io::Error>;
+ 
+     fn poll(mut self: Pin<&mut Self>, cx: &mut task::Context<'_>) -> Poll<Self::Output> {
+-        Pin::new(&mut self.inner).poll(cx).map(|res| match res {
+-            Ok(Ok(addrs)) => Ok(GaiAddrs { inner: addrs }),
+-            Ok(Err(err)) => Err(err),
+-            Err(join_err) => {
+-                if join_err.is_cancelled() {
+-                    Err(io::Error::new(io::ErrorKind::Interrupted, join_err))
+-                } else {
+-                    panic!("gai background task failed: {join_err:?}")
++        #[cfg(target_os = "emscripten")]
++        {
++            return self
++                .inner
++                .as_mut()
++                .poll(cx)
++                .map(|result| result.map(|inner| GaiAddrs { inner }));
++        }
++        #[cfg(not(target_os = "emscripten"))]
++        {
++            Pin::new(&mut self.inner).poll(cx).map(|res| match res {
++                Ok(Ok(addrs)) => Ok(GaiAddrs { inner: addrs }),
++                Ok(Err(err)) => Err(err),
++                Err(join_err) => {
++                    if join_err.is_cancelled() {
++                        Err(io::Error::new(io::ErrorKind::Interrupted, join_err))
++                    } else {
++                        panic!("gai background task failed: {join_err:?}")
++                    }
+                 }
+-            }
+-        })
++            })
++        }
+     }
+ }
+ 
+@@ -157,6 +194,7 @@
+ 
+ impl Drop for GaiFuture {
+     fn drop(&mut self) {
++        #[cfg(not(target_os = "emscripten"))]
+         self.inner.abort();
+     }
+ }

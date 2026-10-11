@@ -91,7 +91,7 @@ impl BackgroundAgentInbox {
             }),
         })?;
         queue.push(QueuedMessage::system_reminder(
-            MessageKind::Info,
+            MessageKind::Defer,
             MessageSource::SystemInjected,
             reminder,
         ));

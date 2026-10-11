@@ -208,8 +208,8 @@ fn test_has_pending_defer_matches_source_and_kind() {
         make_msg("p1"),
     ));
     assert!(
-        !q.has_pending_defer(&MessageSource::SubAgentComplete),
-        "Prompt 不命中（仅 Defer kind）"
+        q.has_pending_defer(&MessageSource::SubAgentComplete),
+        "Required processing is independent of presentation kind"
     );
 
     // drain 后清空

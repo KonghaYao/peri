@@ -77,7 +77,7 @@ impl ConnectionGate {
 
 /// 一次在途调用的代际守卫（RAII）。
 ///
-/// 在途 future 被丢弃的机会只有一次，而且发生在 **drop 点**：`tokio::time::timeout` 到点、
+/// 在途 future 被丢弃的机会只有一次，而且发生在 **drop 点**：`peri_time::timeout` 到点、
 /// 外层任务取消、调用方放弃，都在那里同步落定。因此失效事实由 `Drop` 落下——
 /// 「调用方已经不管这条连接了」与「这条连接被记为失效」之间没有时间窗。
 #[derive(Debug)]

@@ -1,15 +1,21 @@
-//! OS subprocess ownership shared by shell, MCP, LSP and JavaScript transports.
+//! OS subprocess ownership shared by shell, MCP and JavaScript transports.
 //! A termination request is not completion; owners must wait for actual group/job exit.
+//! Unix commands start in a new session without an inherited controlling terminal.
+//! Stdio descriptors remain the caller's responsibility; session isolation is not FD isolation.
 //! Unix descendants that deliberately leave the group are outside this ownership boundary.
 
 use std::io;
 use std::sync::atomic::{AtomicBool, Ordering};
 use tokio::process::{Child, Command};
 
+#[cfg(unix)]
+mod broker;
+#[cfg(unix)]
+mod unix;
 #[cfg(windows)]
 mod windows;
 
-/// One dedicated Unix process group or Windows Job, prepared before child execution.
+/// One dedicated Unix session/process group or Windows Job, prepared before child execution.
 /// Keep this owner until `wait_for_exit` completes; Drop only requests termination.
 /// This is a lifecycle primitive, not a sandbox preventing Unix setsid/setpgid.
 pub struct ProcessTree {
@@ -17,6 +23,8 @@ pub struct ProcessTree {
     pid: Option<u32>,
     settled: AtomicBool,
     terminate_on_drop: bool,
+    #[cfg(unix)]
+    broker: Option<broker::Registration>,
     #[cfg(windows)]
     job: windows::WindowsJob,
 }
@@ -28,17 +36,54 @@ impl ProcessTree {
             pid: None,
             settled: AtomicBool::new(false),
             terminate_on_drop: true,
+            #[cfg(unix)]
+            broker: broker::Registration::from_environment()?,
             #[cfg(windows)]
             job: windows::WindowsJob::new()?,
         })
     }
 
+    /// Prepare non-interactive execution without changing the caller's stdio configuration.
+    /// Unix session isolation precedes broker registration and preserves a dedicated PGID.
+    /// Call once per command: repeated preparation is not idempotent and fails at spawn on Unix.
+    /// Use a new owner for each attached process tree.
     pub fn prepare(&self, command: &mut Command) {
         command.kill_on_drop(true);
         #[cfg(unix)]
-        command.process_group(0);
+        self.prepare_std(command.as_std_mut());
         #[cfg(windows)]
         command.creation_flags(windows_sys::Win32::System::Threading::CREATE_SUSPENDED);
+    }
+
+    /// Prepare a synchronous Unix subprocess through the same broker protocol.
+    /// Session isolation, stdio ownership and single-preparation rules match [`Self::prepare`].
+    #[cfg(unix)]
+    pub fn prepare_std(&self, command: &mut std::process::Command) {
+        unix::prepare(command);
+        if let Some(broker) = &self.broker {
+            broker.prepare_std(command);
+        }
+    }
+
+    #[cfg(unix)]
+    pub fn attach_pid(&mut self, pid: u32) -> io::Result<()> {
+        if self.attempted {
+            return Err(io::Error::other("process tree already attached"));
+        }
+        self.attempted = true;
+        self.pid = Some(pid);
+        if pid > 0 && i32::try_from(pid).is_ok() {
+            Ok(())
+        } else {
+            Err(io::Error::other("child process group unavailable"))
+        }
+    }
+
+    #[cfg(unix)]
+    pub fn wait_for_exit_blocking(&self) {
+        while !self.is_stopped() {
+            std::thread::sleep(std::time::Duration::from_millis(20));
+        }
     }
 
     /// Call immediately after spawning the prepared command, before publishing its handle.
@@ -97,7 +142,7 @@ impl ProcessTree {
 
     pub async fn wait_for_exit(&self) {
         while !self.is_stopped() {
-            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+            peri_time::sleep(std::time::Duration::from_millis(20)).await;
         }
     }
 
@@ -117,6 +162,44 @@ impl Drop for ProcessTree {
             self.terminate();
         }
     }
+}
+
+/// Run a short-lived command under the same process-group ownership as tools.
+pub async fn run_output(mut command: Command) -> io::Result<std::process::Output> {
+    command
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped());
+    let mut tree = ProcessTree::new()?;
+    tree.prepare(&mut command);
+    let mut child = command.spawn()?;
+    if let Err(error) = tree.attach(&child) {
+        tree.terminate();
+        let _ = child.start_kill();
+        return Err(error);
+    }
+    let output = child.wait_with_output().await;
+    if output.is_err() {
+        tree.terminate();
+    }
+    tree.wait_for_exit().await;
+    output
+}
+
+/// Blocking variant for Git checks already running in a blocking worker.
+#[cfg(unix)]
+pub fn run_output_blocking(mut command: std::process::Command) -> io::Result<std::process::Output> {
+    use std::process::Stdio;
+    let mut tree = ProcessTree::new()?;
+    tree.prepare_std(&mut command);
+    command.stdout(Stdio::piped()).stderr(Stdio::piped());
+    let child = command.spawn()?;
+    tree.attach_pid(child.id())?;
+    let output = child.wait_with_output();
+    if output.is_err() {
+        tree.terminate();
+    }
+    tree.wait_for_exit_blocking();
+    output
 }
 
 #[cfg(all(test, unix))]
@@ -142,12 +225,12 @@ mod tests {
         assert!(cwd.path().join("descendant").is_file());
         assert!(!tree.is_stopped());
         assert!(
-            tokio::time::timeout(Duration::from_millis(20), tree.wait_for_exit())
+            peri_time::timeout(Duration::from_millis(20), tree.wait_for_exit())
                 .await
                 .is_err()
         );
         tree.terminate();
-        tokio::time::timeout(Duration::from_secs(5), tree.wait_for_exit())
+        peri_time::timeout(Duration::from_secs(5), tree.wait_for_exit())
             .await
             .unwrap();
         assert!(tree.is_stopped());
@@ -164,14 +247,14 @@ mod tests {
         let mut child = command.spawn().unwrap();
         tree.attach(&child).unwrap();
         assert!(
-            tokio::time::timeout(Duration::from_millis(20), tree.wait_for_exit())
+            peri_time::timeout(Duration::from_millis(20), tree.wait_for_exit())
                 .await
                 .is_err()
         );
         assert!(!tree.is_stopped());
         tree.terminate();
         child.wait().await.unwrap();
-        tokio::time::timeout(Duration::from_secs(5), tree.wait_for_exit())
+        peri_time::timeout(Duration::from_secs(5), tree.wait_for_exit())
             .await
             .unwrap();
     }

@@ -2,7 +2,7 @@
 
 ## Scope
 
-`peri-tui` 是基于 ratatui-kit 的终端客户端。用户交互主路径经 ACP transport；crate 当前仍直接依赖 `peri-agent`、`peri-middlewares` 等 crate 的类型、配置和桥接代码。TUI 不得直接驱动 agent loop，Agent 执行入口保持在 ACP 会话执行路径。
+`peri-tui` 是基于 ratatui-kit 的终端客户端。用户交互主路径经 ACP transport；crate 仍直接依赖 `peri-middlewares` 和 `peri-resources` 做宿主装配与部分面板数据访问，并依赖 ACP、主题等 crate 的协议和展示类型。TUI 不直接依赖 `peri-agent`，也不得直接驱动 agent loop；Agent 执行入口保持在 ACP 会话执行路径。
 
 ## 数据流/架构
 
@@ -22,6 +22,7 @@ ACP notification → acp_notifier → acp_bridge / BridgeState
 | 全局状态与 ViewModel | `src/kit/atoms.rs`、`src/kit/acp_types.rs` |
 | 输入、提交、历史、@mention、slash | `src/kit/input_area.rs`、`src/kit/input_history.rs`、`src/kit/submit_consumer.rs` |
 | 消息渲染、滚动、选择 | `src/kit/message_area/`、`src/kit/markdown/`、`src/kit/text_selection.rs` |
+| 增量布局与派生缓存预算 | `src/kit/message_area/transcript.rs`、`transcript_index.rs`、`src/kit/entry_render_cache.rs` |
 | 键盘、鼠标、焦点与事件优先级 | `src/kit/event_handlers.rs`、`src/kit/focus_router.rs` |
 | 面板、弹窗与确认交互 | `src/kit/panels/`、`src/kit/popups/`、`src/kit/panel_overlay.rs` |
 | 国际化与主题 | `src/i18n/`、`locales/`、`peri-theme` atoms |
@@ -33,11 +34,16 @@ ACP notification → acp_notifier → acp_bridge / BridgeState
 
 - ACP 是交互与 Agent 执行的边界；新增请求、通知或终止事件须覆盖 ACP 映射、bridge 和组件消费，终止事件必须离开 loading 状态。
 - `BridgeState` 是 ACP 事件到 `VIEW_MODELS` 与 atoms 的状态边界。切换会话或重置时，必须过滤陈旧 session 事件并清理旧会话状态。
-- 会话列表经 ACP 的 `peri.sessionWorkspaceV1` scope 查询：默认 Project、可切 Workspace / All；分页未结束时数量标明“已加载/还有更多”，向下键、PageDown 或 End 接近已加载末尾时追加下一页，重复按键合并同页请求。未绑定旧历史继续列出，`v` 通过只读 history RPC 预览且不切换执行会话；`-c` 精确选择启动工作区内当前相对目录，`-r` / 普通恢复先查询保存 binding 或旧会话保存的 cwd，再由 load 接纳旧根。查询或恢复失败不得通过 `ensure_session` 无声新建或把排队输入发给旧会话。执行所有权不可得不是失败：`session/load` 按只读准入进入（`_meta.peri.sessionWorkspaceV1.read_only` → `SESSION_READ_ONLY`，状态栏说明原因），dirty 只读准入同样走确认——接受取回所有权，取消只是保持只读，取回失败也保留首次只读准入（会话不因重试失败被丢弃）。`SESSION_READ_ONLY` 是交互投影：只有交互客户端写入，每次会话边界清空；宿主会在响应 `session/load` 前回放历史，因此每个可能被回放的 load（含 reset 后的重载与重取）之前都要有一次 `project_session_boundary`，否则两次回放叠加在同一个 `committed` 上、消息区整段重复。写入与执行仍由 host 的 `require_owner` 把关，客户端不复制该规则、不另设输入闸门。
+- 会话列表经 ACP 的 `peri.sessionWorkspaceV1` scope 查询：默认 Project、可切 Workspace / All；分页未结束时数量标明“已加载/还有更多”，向下键、PageDown 或 End 接近已加载末尾时追加下一页，重复按键合并同页请求。未绑定旧历史继续列出，`v` 通过只读 history RPC 预览且不切换执行会话；`-c` 精确选择启动工作区内当前相对目录，`-r` / 普通恢复先查询保存 binding 或旧会话保存的 cwd，再由 load 接纳旧根。查询或恢复失败不得通过 `ensure_session` 无声新建或把排队输入发给旧会话。会话执行唯一性与接管由 `peri-sdk` 负责；TUI 不投影 ownership 只读准入、不请求取回执行权或接管 proof、不维护 `SESSION_READ_ONLY`。执行环境不可用时 load 明确失败，history 预览仍可读。宿主在响应 `session/load` 前回放历史，每次可能回放的 load 前均须 `project_session_boundary`，防止消息区重复；客户端 prompt request lease、load reservation 与 operation gate 只协调请求和交互生命周期，不代表会话执行所有权。
 - `ACTIVE_EXECUTION_CWD` 仅在 session 初始化提交后发布，驱动路径展示、文件补全和本地导出；启动 cwd 独立保留给新会话。Hooks / Plugin / MCP 面板按 active session ID 查询实际环境，不能持续回写启动快照。
 - History 面板使用单行会话列表与固定详情/操作栏；按容器高度计算视口，列表和只读预览各持有独立滚动状态。刷新按 thread ID 保留选择，执行操作使用已选身份，删除确认固定待删 ID，不能用旧索引查新列表决定目标。
-- Config / Model / Login / Betas / Theme 的持久配置仍编辑宿主启动时选中的 `ConfigSource`，面板明确标识“宿主配置”和实际保存路径；权限切换（配置行、Shift+Tab、slash）及会话模型选择等运行请求继续按 session ID 路由。整份配置上送不带 session ID；切换会话不重定位宿主配置写入。同配置源会话刷新 provider 连接并失效模型缓存，保留各自的模型/profile 选择和 frozen 数据。
+- Config / Model / Login / Theme 的持久配置仍编辑宿主启动时选中的 `ConfigSource`，面板明确标识“宿主配置”和实际保存路径；权限切换（配置行、Shift+Tab、slash）及会话模型选择等运行请求继续按 session ID 路由。整份配置上送不带 session ID；切换会话不重定位宿主配置写入。同配置源会话刷新 provider 连接并失效模型缓存，保留各自的模型/profile 选择和 frozen 数据。
 - render body 不写 atom；render 内派生缓存使用既有无通知写入模式，副作用放在事件或 effect 边界。
+- cancel 关闭 reverse interaction owner，不等于执行终态已确认；匹配当前 execution 的 done 仍须透传一次以结束 loading，重复 done 与旧 execution 终态不得影响新 turn。
+- 消息区按 generation 验证 publication，复用不可变布局；冷缓存保持选择、复制与高度。主消息/详情共用 entry 缓存；预算不含 canonical 历史、轻量索引或整体 RSS。
+- Cron/MCP 经 ACP 消费；快照/last-good 按 session generation 隔离，失败可见；无会话明确标注启动插件/Hooks。scheduler/pool 及关闭权属宿主。
+- Assistant VM 的完整气泡以 `Arc<TuiAssistantBubble>` 发布，快照与 im 节点 COW 共享不可变 payload；修改 fold/终态前先判定是否真的变化，再复制或 `Arc::make_mut`，不能改动旧快照。后台流式累积仍持有独占正文，不能把共享发布气泡直接当逐 chunk 写入缓冲。
+- Markdown 稳定分片仅冻结安全空行边界，fence 内部空行不能切断代码块；引用、列表、表格与未闭合 fence 保留可变尾部，terminal full parse 校正。正文前景与代码背景须同时进入内外层缓存 key，主题变化只复用 parsed blocks，不复用旧样式。
 - `#[component]` 的 hooks 必须在所有条件分支、`match` 与提前返回前按稳定顺序调用。
 - 消息区、输入区、状态栏与后台任务栏的绘制区域由 `kit/layout.rs` 的 `CenterBandHook` 收进居中带（§3.1）。带内的换行宽度、命中列与光标列都以带内相对坐标为准，位置 tracker 必须注册在 band hook 之后，否则记录的是未收窄的整幅宽度。滚动条是窗口级 chrome（锚在终端最右列）：`ScrollbarHook` 必须在 band hook **之前**注册并在 `pre_component_draw` 捕获收窄前的矩形，渲染与命中测试共用该矩形。
 - 交互事件按 focus owner、语义命中区域、z-order 与 pointer capture 分发；弹窗/面板前景事件和遮罩必须先于背景处理，避免 click-through。
@@ -61,6 +67,7 @@ cargo test -p peri-tui --lib -- app::mcp_lifecycle_tests
 ## 按需引用 / Verify
 
 - 稳定 UI 规则：`../docs/standards/tui.md`。
+- TUI 专属环境变量：`../docs/standards/tui-environment-variables.md`；其他运行变量见 `../docs/standards/environment-variables.md`。
 - 跨模块边界、事件与冻结数据：`../docs/standards/architecture-contracts.md`，重点遵守 `ARC-BOUNDARY-001` 与 `ARC-EVENT-001`。
 - 修改 ACP 数据流时，核对 `src/kit/acp_notifier.rs`、`src/kit/acp_bridge.rs` 和对应组件；修改用户界面文本时核对两份 FTL。
 - 完成后运行相关 `cargo test -p peri-tui --lib`，并运行 `git diff --check`。不得把密钥、token、密码或连接串写入界面、日志、错误或测试 fixture。

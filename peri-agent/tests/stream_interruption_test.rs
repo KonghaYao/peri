@@ -86,17 +86,28 @@ struct Evidence {
 }
 
 async fn run_script(responses: Vec<Vec<u8>>) -> Evidence {
+    run_script_with_observer(responses, None, false).await
+}
+
+async fn run_script_with_observer(
+    responses: Vec<Vec<u8>>,
+    observer: Option<Arc<dyn peri_model::RetryObserver>>,
+    truncated_transport: bool,
+) -> Evidence {
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let endpoint = format!("http://{}/v1/", listener.local_addr().unwrap());
+    let mut runtime = peri_model::ModelRuntimeConfig::default().with_retry(
+        peri_model::RetryConfig::default()
+            .with_max_attempts(2)
+            .with_base_delay(Duration::ZERO)
+            .with_jitter(false),
+    );
+    if let Some(observer) = observer {
+        runtime = runtime.with_retry_observer(observer);
+    }
     let model = OpenAiModel::new(
-        OpenAiConfig::new(endpoint.parse().unwrap(), "fixture-key", "fixture-model").with_runtime(
-            peri_model::ModelRuntimeConfig::default().with_retry(
-                peri_model::RetryConfig::default()
-                    .with_max_attempts(2)
-                    .with_base_delay(Duration::ZERO)
-                    .with_jitter(false),
-            ),
-        ),
+        OpenAiConfig::new(endpoint.parse().unwrap(), "fixture-key", "fixture-model")
+            .with_runtime(runtime),
     );
     let directory = tempfile::tempdir().unwrap();
     let session = Session::new(
@@ -128,7 +139,7 @@ async fn run_script(responses: Vec<Vec<u8>>) -> Evidence {
             requests.push(read_request(&mut socket).await);
             let header = format!(
                 "HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
-                body.len()
+                body.len() + usize::from(truncated_transport && body == PARTIAL.as_bytes())
             );
             socket
                 .write_all(&[header.as_bytes(), &body].concat())

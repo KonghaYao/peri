@@ -3,7 +3,10 @@ use crate::kit::acp_types::PendingInteraction;
 use peri_acp_types::event_data::{AskUser, HitlPending};
 use serial_test::serial;
 
-fn scheduler_state() -> BridgeState {
+#[path = "acp_bridge_cancel_test.rs"]
+mod cancel_tests;
+
+pub(super) fn scheduler_state() -> BridgeState {
     crate::kit::atoms::init_atoms();
     BridgeState {
         variant: 0,
@@ -85,6 +88,16 @@ async fn test_replay_persisted_history_publishes_final_assistant_in_order() {
                 .unwrap();
             Ok(())
         }
+
+        async fn send_system_reminder(
+            &self,
+            _session_id: &str,
+            _reminder: &peri_acp_types::system_reminder::SystemReminder,
+            _caps: &PeriCaps,
+        ) -> Result<(), ReplayError> {
+            // 本 fixture 只走标准 SessionUpdate 通道（历史里没有 canonical reminder）。
+            Ok(())
+        }
     }
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("history.db");
@@ -136,7 +149,10 @@ async fn test_replay_persisted_history_publishes_final_assistant_in_order() {
             .collect();
         let store = SqliteThreadStore::new(&path).await.unwrap();
         let id = store
-            .create_thread(ThreadMeta::new(dir.path().to_str().unwrap()))
+            .create_thread(ThreadMeta::new_at(
+                dir.path().to_str().unwrap(),
+                peri_time::now_wall(),
+            ))
             .await
             .unwrap();
         store.append_messages(&id, &messages).await.unwrap();
@@ -165,7 +181,7 @@ async fn test_replay_persisted_history_publishes_final_assistant_in_order() {
         state.active_session_id = id;
         *VIEW_MODELS.state().write() = Default::default();
         let mut scheduler = PublicationScheduler::default();
-        let now = tokio::time::Instant::now();
+        let now = peri_time::Instant::now();
         for _ in &expected {
             let event = tokio::time::timeout(std::time::Duration::from_secs(5), bridge_rx.recv())
                 .await
@@ -235,7 +251,7 @@ fn test_replay_tool_completion_publishes_same_length_update() {
     use crate::kit::tui_render_unit::TuiRenderUnit;
     let mut state = scheduler_state();
     let mut scheduler = PublicationScheduler::default();
-    let now = tokio::time::Instant::now();
+    let now = peri_time::Instant::now();
     let intent = acp_events::dispatch_for_bridge(
         &mut state,
         &AcpEventData::ReplayToolStarted {
@@ -280,7 +296,7 @@ fn test_production_scheduler_uses_fixed_deadline_and_terminal_invalidates_it() {
     scheduler.accept(PublicationIntent::Immediate, &mut state);
     assert_eq!(state.generation, 1);
 
-    let now = tokio::time::Instant::now();
+    let now = peri_time::Instant::now();
     state.current_turn.append_text(" second", Some("m1"));
     scheduler.accept_at(PublicationIntent::Deferred, &mut state, now);
     let fixed_deadline = scheduler.pending_deadline.expect("deadline scheduled");
@@ -316,7 +332,7 @@ fn test_production_scheduler_lifecycle_invalidation_matrix_is_stale_noop() {
         let mut state = scheduler_state();
         state.current_turn.append_text("pending", Some("m1"));
         let mut scheduler = PublicationScheduler::default();
-        let now = tokio::time::Instant::now();
+        let now = peri_time::Instant::now();
         scheduler.accept_at(PublicationIntent::Deferred, &mut state, now);
         let stale_deadline = scheduler.pending_deadline.unwrap();
 
@@ -349,7 +365,7 @@ fn test_receiver_close_reset_wins_over_dirty_final_publication() {
     scheduler.accept_at(
         PublicationIntent::Deferred,
         &mut state,
-        tokio::time::Instant::now(),
+        peri_time::Instant::now(),
     );
     flush_on_receiver_close(&mut state, &mut scheduler, &mut last_reset);
 
@@ -648,6 +664,45 @@ async fn test_goal_snapshot_bridge_accepts_current_session_and_drops_stale_sessi
     *ACTIVE_SESSION_ID.state().write() = old_active;
     BRIDGE_RESET_COUNTER.set(old_reset);
     *GOAL_SNAPSHOT.state().write() = old_goal;
+}
+
+/// [回归测试] 会话切换后 A 的 prompt 错误不能清除 B 的 loading。
+#[tokio::test]
+#[serial]
+async fn test_late_prompt_failure_from_previous_session_does_not_reset_loading() {
+    use crate::kit::atoms::{ACP_STATE, ACTIVE_SESSION_ID, BRIDGE_RESET_COUNTER};
+    let _restore = ReplayAtomsGuard::new();
+    let old_active = ACTIVE_SESSION_ID.state().read().clone();
+    let old_reset = BRIDGE_RESET_COUNTER.get();
+    *ACTIVE_SESSION_ID.state().write() = "s2".into();
+    BRIDGE_RESET_COUNTER.set(old_reset.wrapping_add(1));
+    let (tx, rx) = mpsc::unbounded_channel();
+    let (observed_tx, mut observed_rx) = mpsc::unbounded_channel();
+    let shutdown = CancellationToken::new();
+    let handle = spawn_acp_bridge_observed(rx, shutdown.clone(), observed_tx);
+    tx.send(AcpEventWithEpoch {
+        event: AcpEventData::PromptSubmitted {
+            request_id: Some("B".into()),
+        },
+        active_session_id: "s2".into(),
+    })
+    .unwrap();
+    assert_eq!(observed_rx.recv().await, Some(true));
+    assert!(ACP_STATE.state().read().is_loading);
+    tx.send(AcpEventWithEpoch {
+        event: AcpEventData::PromptFailed {
+            request_id: "A".into(),
+        },
+        active_session_id: "s1".into(),
+    })
+    .unwrap();
+    assert_eq!(observed_rx.recv().await, Some(false));
+    assert!(ACP_STATE.state().read().is_loading);
+    shutdown.cancel();
+    drop(tx);
+    handle.await.unwrap();
+    *ACTIVE_SESSION_ID.state().write() = old_active;
+    BRIDGE_RESET_COUNTER.set(old_reset);
 }
 
 /// [回归测试] production bridge 在 session gate 前不发布 HITL UI state。

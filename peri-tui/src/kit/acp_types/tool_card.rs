@@ -3,11 +3,16 @@ use crate::kit::tool_semantics::{TodoSnapshot, presentation_for};
 use crate::kit::tui_render_unit::{
     EntryStatus, FoldTarget, TuiRenderUnit, TuiToolCard, TuiToolPresentation, fold_for_status,
 };
+use peri_acp_types::builtin_mcp::original_tool_name_of_effective;
 use serde_json::Value;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Instant;
 
 static NEXT_SUBAGENT_INSTANCE_ID: AtomicU64 = AtomicU64::new(1);
+
+#[cfg(test)]
+#[path = "tool_card_test.rs"]
+mod tests;
 
 /// 从 `ToolCardAccumulator` 派生 `TuiToolCard`。
 ///
@@ -18,7 +23,8 @@ static NEXT_SUBAGENT_INSTANCE_ID: AtomicU64 = AtomicU64::new(1);
 /// 按秒取整避免每毫秒 hash 抖动）。
 pub(crate) fn build_tool_card(t: &ToolCardAccumulator, turn_active: bool) -> TuiToolCard {
     let is_running = turn_active && t.output_summary.is_none();
-    let running_duration_ms = is_running.then(|| t.started_at.elapsed().as_millis() as u64);
+    let running_duration_ms =
+        is_running.then(|| peri_time::elapsed_since(t.started_at).as_millis() as u64);
     let status = if is_running {
         EntryStatus::Running
     } else if t.is_error {
@@ -61,8 +67,11 @@ pub(crate) fn build_tool_card(t: &ToolCardAccumulator, turn_active: bool) -> Tui
 }
 
 /// [G-Diff] 从工具原始输入提取 path hint（Edit/Write 的 `file_path`）。
+///
+/// 按名门控先经 IF-D15 归一 helper（effective name → 原始名），未命中回落原样。
 fn tool_path_hint(tool_name: &str, raw_input: &serde_json::Value) -> Option<String> {
-    if !matches!(tool_name, "Edit" | "Write") {
+    let name = original_tool_name_of_effective(tool_name).unwrap_or(tool_name);
+    if !matches!(name, "Edit" | "Write") {
         return None;
     }
     raw_input
@@ -74,13 +83,17 @@ fn tool_path_hint(tool_name: &str, raw_input: &serde_json::Value) -> Option<Stri
 
 /// [G-Diff] 生产路径的 diff 解析入口：仅 Edit/Write 完成态（非 running、
 /// 非 error）尝试解析；其余场景恒 `None`（数据不可达省略，G-Tokens 同口径）。
+///
+/// 按名门控先经 IF-D15 归一 helper（effective name → 原始名），未命中回落原样：
+/// 未命中（未知 / 外部 `mcp__*`）仍恒 `None`，与迁移前逐位一致。
 pub(crate) fn parse_tool_diff(
     tool_name: &str,
     output: &str,
     skip: bool,
     path_hint: Option<String>,
 ) -> Option<crate::kit::tui_render_unit::TuiDiffBlock> {
-    if skip || !matches!(tool_name, "Edit" | "Write") {
+    let name = original_tool_name_of_effective(tool_name).unwrap_or(tool_name);
+    if skip || !matches!(name, "Edit" | "Write") {
         return None;
     }
     // [Slice 5] 两段式：优先 unified diff（协议未来携带 diff 文本时自动接管），
@@ -119,6 +132,28 @@ pub struct ToolCardAccumulator {
 }
 
 impl ToolCardAccumulator {
+    pub(crate) fn finish(&mut self, output: String, is_error: bool) -> bool {
+        if self.output_summary.is_some() {
+            return false;
+        }
+        self.output_summary = Some(output);
+        self.is_error = is_error;
+        self.completed_duration_ms =
+            Some(peri_time::elapsed_since(self.started_at).as_millis() as u64);
+        true
+    }
+
+    pub(crate) fn upgrade_input(&mut self, tool: Self) -> bool {
+        if tool.raw_input.is_null() || !self.raw_input.is_null() {
+            return false;
+        }
+        self.tool_name = tool.tool_name;
+        self.raw_input = tool.raw_input;
+        self.input_summary = tool.input_summary;
+        self.presentation = tool.presentation;
+        true
+    }
+
     /// Create a generic in-progress tool card from a replay or legacy event.
     pub fn new(tool_id: String, tool_name: String, input_summary: String) -> Self {
         Self::with_input(tool_id, tool_name, input_summary, Value::Null, None)
@@ -141,7 +176,7 @@ impl ToolCardAccumulator {
             presentation,
             output_summary: None,
             is_error: false,
-            started_at: Instant::now(),
+            started_at: peri_time::monotonic_now(),
             completed_duration_ms: None,
             claimed_by_subagent: false,
         }
@@ -197,6 +232,9 @@ impl SubAgentAccumulator {
 
     pub(super) fn start_tool(&mut self, tool: ToolCardAccumulator) {
         self.child_turn.start_tool(tool);
+        if !self.is_running {
+            self.child_turn.deactivate();
+        }
         self.cached_view_model.replace(None);
     }
 

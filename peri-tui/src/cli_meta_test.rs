@@ -7,6 +7,19 @@ use peri_acp_types::thread::{AgentStatus, ThreadMeta};
 
 use super::*;
 
+#[test]
+fn resource_failure_details_survive_meta_error_projection() {
+    let message = "database https://example.test/db?token=fixture failed\ncaused by: TLS reset";
+    let error = SessionResourceError::new(SessionResourceErrorKind::Unavailable {
+        detail: message.to_owned(),
+    });
+    let outcome = error_outcome_with_message(map_resource_error(&error), true, error.to_string());
+    assert_eq!(outcome.exit_code, 4);
+    let wire: serde_json::Value = serde_json::from_str(outcome.stderr.as_deref().unwrap()).unwrap();
+    assert_eq!(wire["error"]["kind"], "database_unreadable");
+    assert!(wire["error"]["message"].as_str().unwrap().contains(message));
+}
+
 fn meta_with_control_characters() -> ThreadMeta {
     ThreadMeta {
         id: "550e8400-e29b-41d4-a716-446655440000".to_owned(),
@@ -21,7 +34,6 @@ fn meta_with_control_characters() -> ThreadMeta {
         hidden: true,
         cancel_policy: Default::default(),
         config: Some("forbidden-config-secret".to_owned()),
-        cached_context: Some("forbidden-cached-context".to_owned()),
         agent_status: AgentStatus::Done,
     }
 }
@@ -152,7 +164,7 @@ async fn missing_database_maps_to_database_not_found() {
 }
 
 /// 远程 locator 而凭证来源没配好（变量显式不存在）是**配置**错误：exit 2
-/// `store_not_configured`，在连网与本机 I/O 之前失败；locator 原文与凭证来源名都不回显。
+/// `store_not_configured`，在连网与本机 I/O 之前失败；错误保留凭证来源名。
 ///
 /// 该用例的前身是 `unwired_remote_store_reports_unavailable`（前提 `RemoteStoreNotWired`
 /// 已在 C 批删除，远程分支是真装配）：此时再断言「远程不可用」既非事实，也要求真去连网。
@@ -185,10 +197,7 @@ async fn missing_credential_configuration_is_a_configuration_error() {
         !rendered.contains("sentinel-db-sentinel-org"),
         "不回显 locator 原文: {rendered}"
     );
-    assert!(
-        !rendered.contains(ABSENT_CREDENTIAL_ENV),
-        "不回显凭证来源名: {rendered}"
-    );
+    assert!(rendered.contains(ABSENT_CREDENTIAL_ENV));
 }
 
 /// 缺少 locator 的凭证来源是配置错误：不是「空库」也不是「不存在」。

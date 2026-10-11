@@ -1,0 +1,100 @@
+{
+  "scenario": "tools",
+  "sample": 1,
+  "root": "/tmp/peri-yjs-sdk-final-round3",
+  "api": "candidate",
+  "workload": {
+    "version": 1,
+    "tools": 12000,
+    "toolsPerAssistant": 10,
+    "inputDataBytes": 960,
+    "resultTextBytes": 4096,
+    "resultDataBytes": 4096,
+    "asyncUpdates": 128,
+    "streamChunks": 16384,
+    "chunkBytes": 1024,
+    "largeResultBytes": 1048576
+  },
+  "startedAt": "2026-10-04T16:51:20.548Z",
+  "status": "passed",
+  "budget": {
+    "timeoutMs": 120000,
+    "maxRssBytes": 2147483648
+  },
+  "environment": {
+    "bun": "1.4.2",
+    "yjs": "13.6.33",
+    "platform": "darwin",
+    "release": "25.5.0",
+    "arch": "arm64",
+    "cpu": "Apple M5 Pro",
+    "totalMemoryBytes": 51539607552
+  },
+  "sourceSha256": "96800d1a6c1be32cb460a8b85be68788a8410f5bc5215dd4eb3d8c5e16ebbb67",
+  "dependencyLockSha256": "acf7c28963e8fbb65317a543683d400cec43ece64de3603777f6ef1510e0e367",
+  "generatorSha256": "5fe3c36d10ea9b148deb605559b4bb5724d78bfd9fb672ef134291cd01856a66",
+  "harnessVersion": 2,
+  "progress": {
+    "stage": "complete",
+    "elapsedMs": 581.106792
+  },
+  "memory": {
+    "rssBytes": 1354842112,
+    "peakRssBytes": 1354842112,
+    "heapUsedBytes": 465054685,
+    "finalRssBytes": 1354842112,
+    "processPeakRssBytes": 1354842112
+  },
+  "projection": {
+    "completedTools": 12000,
+    "rawPayloadBytes": 111050670,
+    "projectionMs": 160.47279900000038,
+    "batch1000Ms": [
+      19.25220299999992,
+      13.31666499999995,
+      12.18235499999993,
+      11.37273400000008,
+      9.899296999999763,
+      13.149957999999899,
+      11.881333000000069,
+      12.62450100000018,
+      11.466468999999563,
+      16.883828000000562,
+      16.813329999999866,
+      11.630126000000587
+    ]
+  },
+  "completeMs": 10.915166999999997,
+  "snapshot": {
+    "encoding": "v2",
+    "chatBytes": 23059025,
+    "sessionBytes": 296,
+    "totalBytes": 23059321,
+    "encodeMs": 69.00645800000001,
+    "applyMs": 79.83466700000002
+  },
+  "validation": {
+    "exact": true,
+    "verifiedTools": 12000,
+    "verifiedAssistantMessages": 1200,
+    "onDemandReads": 12000,
+    "onDemandReadBytes": 98964890,
+    "referencedPayloadBytes": 98964890,
+    "activeTurnStatus": "completed"
+  },
+  "alternativeCodec": {
+    "encoding": "v1",
+    "chatBytes": 24718921,
+    "sessionBytes": 330,
+    "totalBytes": 24719251,
+    "encodeMs": 58.36991699999999,
+    "purpose": "same candidate documents encoded as V1 to separate hot payload isolation from codec"
+  },
+  "elapsedMs": 581.108458,
+  "process": {
+    "exitCode": 0,
+    "reason": null,
+    "externalPeakRssBytes": 1213087744,
+    "stderr": ""
+  }
+}

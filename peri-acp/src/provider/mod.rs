@@ -8,6 +8,8 @@ pub mod store;
 
 use std::sync::Arc;
 
+use peri_config::provider::ResolvedProvider;
+
 pub use config::{AppConfig, PeriConfig, ProfileConfig, Profiles, ProviderConfig, ProviderModels};
 use peri_model::{AnthropicConfig, AnthropicModel, OpenAiConfig, OpenAiModel};
 pub use store::{
@@ -44,125 +46,65 @@ pub enum LlmProvider {
 }
 
 impl LlmProvider {
-    pub fn from_env() -> Option<Self> {
-        let provider_hint = std::env::var("MODEL_PROVIDER").unwrap_or_default();
+    pub fn from_source(source: &peri_config::settings::ConfigSource) -> Option<Self> {
+        if let Some(snapshot) = source.snapshot() {
+            return snapshot.provider().cloned().map(Self::from_resolved);
+        }
+        let environment =
+            peri_config::source::read_environment(peri_config::provider::ENVIRONMENT_KEYS).ok()?;
+        peri_config::provider::resolve(&source.loaded_merged(), &environment)
+            .map(Self::from_resolved)
+    }
 
-        match provider_hint.to_lowercase().as_str() {
-            "anthropic" => {
-                let api_key = std::env::var("ANTHROPIC_API_KEY").ok()?;
-                let model = std::env::var("ANTHROPIC_MODEL")
-                    .unwrap_or_else(|_| "claude-sonnet-4-6".to_string());
-                let base_url = std::env::var("ANTHROPIC_BASE_URL").ok();
-                Some(Self::Anthropic {
-                    api_key,
-                    model,
-                    base_url,
-                    effort: None,
-                    max_tokens: 32000,
-                    context_1m: false,
-                    retry_observer: None,
-                })
-            }
-            "openai" | "" => {
-                if provider_hint.is_empty() {
-                    if let Ok(api_key) = std::env::var("ANTHROPIC_API_KEY") {
-                        let model = std::env::var("ANTHROPIC_MODEL")
-                            .unwrap_or_else(|_| "claude-sonnet-4-6".to_string());
-                        let base_url = std::env::var("ANTHROPIC_BASE_URL").ok();
-                        return Some(Self::Anthropic {
-                            api_key,
-                            model,
-                            base_url,
-                            effort: None,
-                            max_tokens: 32000,
-                            context_1m: false,
-                            retry_observer: None,
-                        });
-                    }
-                }
-                let api_key = std::env::var("OPENAI_API_KEY").ok()?;
-                let base_url = std::env::var("OPENAI_API_BASE")
-                    .or_else(|_| std::env::var("OPENAI_BASE_URL"))
-                    .unwrap_or_else(|_| "https://api.openai.com/v1".to_string());
-                let model = std::env::var("OPENAI_MODEL").unwrap_or_else(|_| "gpt-4o".to_string());
-                Some(Self::OpenAi {
-                    api_key,
-                    base_url,
-                    model,
-                    effort: None,
-                    max_tokens: 32000,
-                    context_1m: false,
-                    retry_observer: None,
-                })
-            }
-            _ => {
-                let api_key = std::env::var("OPENAI_API_KEY").ok()?;
-                let base_url = std::env::var("OPENAI_API_BASE")
-                    .or_else(|_| std::env::var("OPENAI_BASE_URL"))
-                    .unwrap_or_else(|_| "https://api.openai.com/v1".to_string());
-                let model = std::env::var("OPENAI_MODEL").unwrap_or_else(|_| "gpt-4o".to_string());
-                Some(Self::OpenAi {
-                    api_key,
-                    base_url,
-                    model,
-                    effort: None,
-                    max_tokens: 32000,
-                    context_1m: false,
-                    retry_observer: None,
-                })
-            }
+    pub fn from_resolved(provider: ResolvedProvider) -> Self {
+        match provider {
+            ResolvedProvider::Anthropic {
+                api_key,
+                model,
+                base_url,
+                effort,
+                max_tokens,
+                context_1m,
+            } => Self::Anthropic {
+                api_key,
+                model,
+                base_url,
+                effort,
+                max_tokens,
+                context_1m,
+                retry_observer: None,
+            },
+            ResolvedProvider::OpenAi {
+                api_key,
+                base_url,
+                model,
+                effort,
+                max_tokens,
+                context_1m,
+            } => Self::OpenAi {
+                api_key,
+                base_url,
+                model,
+                effort,
+                max_tokens,
+                context_1m,
+                retry_observer: None,
+            },
         }
     }
 
-    /// 从 PeriConfig 按 active_alias 对应的 Profile 构造 LlmProvider
+    /// 从当前配置和本地配置环境构造 Provider；初始 scoped 配置优先用 `from_source`。
     pub fn from_config(cfg: &config::PeriConfig) -> Option<Self> {
-        Self::from_config_for_alias(cfg, &cfg.config.active_alias)
+        let environment =
+            peri_config::source::read_environment(peri_config::provider::ENVIRONMENT_KEYS).ok()?;
+        peri_config::provider::resolve(cfg, &environment).map(Self::from_resolved)
     }
 
     /// 从 PeriConfig 按指定档位（"fable"/"opus"/"sonnet"/"haiku"）构造 LlmProvider。
     /// Profile 是唯一事实源：provider/model/effort/max_tokens/context_1m 全部取自
     /// `profiles[alias]`，model 空时回退 provider.models 同档位映射（fable 空回退 opus）。
     pub fn from_config_for_alias(cfg: &config::PeriConfig, alias: &str) -> Option<Self> {
-        let app = &cfg.config;
-        let (provider, profile) = resolve_profile(app, alias)?;
-
-        if provider.api_key.is_empty() {
-            return None;
-        }
-
-        let model = resolve_model_name(provider, alias, profile);
-        let effort = Some(profile.effort.clone());
-        let max_tokens = profile.max_tokens;
-        let context_1m = profile.context_1m;
-
-        match provider.provider_type.as_str() {
-            "anthropic" => Some(Self::Anthropic {
-                api_key: provider.api_key.clone(),
-                model,
-                base_url: if provider.base_url.is_empty() {
-                    None
-                } else {
-                    Some(provider.base_url.clone())
-                },
-                effort,
-                max_tokens,
-                context_1m,
-                retry_observer: None,
-            }),
-            _ => Some(Self::OpenAi {
-                api_key: provider.api_key.clone(),
-                base_url: if provider.base_url.is_empty() {
-                    "https://api.openai.com/v1".to_string()
-                } else {
-                    provider.base_url.clone()
-                },
-                model,
-                effort,
-                max_tokens,
-                context_1m,
-                retry_observer: None,
-            }),
-        }
+        peri_config::provider::resolve_for_alias(cfg, alias).map(Self::from_resolved)
     }
 
     pub fn display_name(&self) -> &str {
@@ -306,41 +248,6 @@ impl LlmProvider {
             }
         }
     }
-}
-
-/// 解析 active profile → (provider, profile)。
-/// profile.provider 为空时回退第一个可用 provider；provider 找不到返回 None。
-fn resolve_profile<'a>(
-    app: &'a config::AppConfig,
-    alias: &str,
-) -> Option<(&'a ProviderConfig, &'a config::ProfileConfig)> {
-    let profile = app.profiles.get(alias)?;
-    let provider = if profile.provider.is_empty() {
-        app.providers.first()
-    } else {
-        app.providers.iter().find(|p| p.id == profile.provider)
-    }?;
-    Some((provider, profile))
-}
-
-/// 解析最终 model 名：Profile.model > ProviderModels 同档位（fable 空回退 opus）> 厂商默认
-fn resolve_model_name(
-    provider: &ProviderConfig,
-    alias: &str,
-    profile: &config::ProfileConfig,
-) -> String {
-    if let Some(m) = profile.model.as_ref().filter(|m| !m.is_empty()) {
-        return m.clone();
-    }
-    provider
-        .models
-        .get_model(alias)
-        .filter(|m| !m.is_empty())
-        .map(str::to_string)
-        .unwrap_or_else(|| match provider.provider_type.as_str() {
-            "anthropic" => "claude-sonnet-4-6".to_string(),
-            _ => "gpt-4o".to_string(),
-        })
 }
 
 /// 解析 provider endpoint；非法 URL 时记录告警并回落到默认值，

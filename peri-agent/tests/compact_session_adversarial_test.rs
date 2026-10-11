@@ -12,7 +12,7 @@ use peri_acp_types::{
     session_resources::{FrozenSnapshotBytes, NewSession, NewSessionMeta, SessionResources},
     store::PersistedPayload,
     thread::CancelPolicy,
-    workspace::{SessionBinding, SessionExecutionLease},
+    workspace::SessionBinding,
 };
 use peri_agent::{
     agent::{
@@ -40,7 +40,6 @@ struct BoundSession {
     thread_id: String,
     cwd: String,
     db_path: std::path::PathBuf,
-    _lease: Arc<dyn SessionExecutionLease>,
     _directory: tempfile::TempDir,
 }
 
@@ -56,7 +55,7 @@ impl BoundSession {
         let workspace = resources.resolve_workspace(directory.path()).await.unwrap();
         let thread_id = uuid::Uuid::now_v7().to_string();
         let cwd = workspace.cwd.to_string_lossy().into_owned();
-        let lease = resources
+        resources
             .create_session(&NewSession {
                 thread_id: thread_id.clone(),
                 created_at: "2026-09-28T00:00:00Z".into(),
@@ -78,7 +77,6 @@ impl BoundSession {
             thread_id,
             cwd,
             db_path,
-            _lease: lease,
             _directory: directory,
         }
     }
@@ -460,9 +458,9 @@ impl Model for RejectedSummary {
     }
 }
 
-/// [回归测试] 手动 compact 必须保留安全的 HTTP 诊断，并保全原历史。
+/// [回归测试] 手动 compact 必须保留逐字分类诊断（含 provider 标识）并保全原历史。
 #[tokio::test]
-async fn test_compact_session_manual_http_failure_reports_safe_cause() {
+async fn test_compact_session_manual_http_failure_reports_classified_cause() {
     let (bound, result, _, history) = manual_with_model(
         Arc::new(RejectedSummary {
             protocol: false,
@@ -475,7 +473,7 @@ async fn test_compact_session_manual_http_failure_reports_safe_cause() {
     assert!(matches!(feedback.level, FeedbackLevel::Error));
     assert_eq!(
         feedback.message,
-        "An LLM API error occurred (HTTP 401, request id: req-compact-401). Please try again."
+        "An LLM API error occurred (HTTP 401, request id: req-compact-401, provider: fixture). Please try again."
     );
     assert_eq!(
         serde_json::to_value(result.messages).unwrap(),
@@ -489,9 +487,9 @@ async fn test_compact_session_manual_http_failure_reports_safe_cause() {
     assert!(snapshot.flags.values().all(|flag| !flag.excluded));
 }
 
-/// [回归测试] 协议诊断只显示 allowlist 分类，不透出 provider 原文。
+/// [回归测试] 协议诊断必须保留分类事实与有界实际文本，不遮蔽底层原因。
 #[tokio::test]
-async fn test_compact_session_manual_protocol_failure_redacts_provider_body() {
+async fn test_compact_session_manual_protocol_failure_preserves_classified_cause() {
     let (_, result, _, _) = manual_with_model(
         Arc::new(RejectedSummary {
             protocol: true,
@@ -504,7 +502,7 @@ async fn test_compact_session_manual_protocol_failure_redacts_provider_body() {
     assert!(matches!(feedback.level, FeedbackLevel::Error));
     assert_eq!(
         feedback.message,
-        "An LLM API error occurred (protocol failure: invalid JSON object). Please try again."
+        "An LLM API error occurred (protocol failure: invalid JSON object, message: fixture-private-body: sk-not-a-real-key https://private.example/path). Please try again."
     );
 }
 

@@ -1,5 +1,26 @@
 use super::*;
 
+#[tokio::test]
+async fn ordinary_history_flush_failure_is_an_execution_error() {
+    let resources = crate::session::test_resources::mock::MockSessionResources::new();
+    let session_id = uuid::Uuid::now_v7().to_string();
+    let session = crate::session::Session::new(
+        Arc::from("/tmp"),
+        crate::session::FrozenContext::builder().build(),
+        Some(session_id.clone()),
+    );
+    *session.transcript().write() =
+        crate::session::MessageTranscript::new().with_persistence(resources.clone(), session_id);
+    resources.restrict_to_history_read_only();
+    session
+        .transcript()
+        .write()
+        .append(crate::messages::BaseMessage::human("not committed"));
+    assert!(flush_session_history(&session).await.is_err());
+    assert!(session.transcript().read().has_persistence_failure());
+}
+use crate::session::turn::TurnId;
+
 /// [回归测试] 取消正在 drain 的 owner 时不能 detach forwarder，随后发布成功 Stop。
 #[tokio::test(flavor = "current_thread")]
 async fn test_drain_subagent_events_abort_cancels_forwarder() {

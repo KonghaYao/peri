@@ -78,8 +78,13 @@ pub(crate) enum GateEvent {
     LlmCallStart {
         agent_id: String,
         step: usize,
-        messages: Vec<BaseMessage>,
-        tools: Vec<ToolDefinition>,
+        messages: std::sync::Arc<Vec<BaseMessage>>,
+        tools: std::sync::Arc<Vec<ToolDefinition>>,
+    },
+    LlmRequestPayload {
+        agent_id: String,
+        step: usize,
+        body: std::sync::Arc<serde_json::Value>,
     },
     ToolStart {
         agent_id: String,
@@ -100,6 +105,7 @@ impl GateEvent {
         match self {
             GateEvent::StageStarted { agent_id, .. }
             | GateEvent::LlmCallStart { agent_id, .. }
+            | GateEvent::LlmRequestPayload { agent_id, .. }
             | GateEvent::ToolStart { agent_id, .. }
             | GateEvent::ToolEnd { agent_id, .. } => agent_id,
         }
@@ -125,7 +131,7 @@ pub(crate) struct AgentObsStart {
     pub input: Option<serde_json::Value>,
 }
 
-/// AGENT obs 关闭所需全部信息,tracer 据此发 ObservationUpdate + flush child tool_batch
+/// AGENT obs 关闭所需全部信息，tracer 据此一次导出 ObservationCreate。
 pub(crate) struct ClosedSubagent {
     /// 事件侧 child_agent_id(关闭时兜底清理该 agent 的活跃 stage 用)
     pub agent_id: String,
@@ -148,7 +154,7 @@ pub(crate) struct ClosedSubagent {
 /// on_subagent_start 的结果
 #[allow(clippy::large_enum_variant)] // replayed/ClosedSubagent 体积大,一次性结果非热点
 pub(crate) enum SubagentStartOutcome {
-    /// join 成功:AGENT obs 已创建(open),gate 事件已取出待重放
+    /// join 成功：完整开始快照已缓存，gate 事件已取出待重放。
     Joined {
         obs: AgentObsStart,
         replayed: Vec<GateEvent>,

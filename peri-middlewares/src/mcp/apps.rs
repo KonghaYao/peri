@@ -62,12 +62,12 @@ impl McpAppBindingLease {
             allowed_tools,
             dispatcher,
             cancellation,
-            expires_at: Instant::now() + BINDING_LEASE_TTL,
+            expires_at: peri_time::monotonic_now() + BINDING_LEASE_TTL,
         }
     }
 
     pub fn is_valid(&self) -> bool {
-        Instant::now() < self.expires_at && !self.cancellation.is_cancelled()
+        peri_time::monotonic_now() < self.expires_at && !self.cancellation.is_cancelled()
     }
 }
 
@@ -98,7 +98,7 @@ impl McpAppBindingLeaseRegistry {
         }
         drop(leases);
 
-        let now = Instant::now();
+        let now = peri_time::monotonic_now();
         let mut raw_results = self.raw_results.lock();
         raw_results.retain(|_, (expires_at, _)| now < *expires_at);
         while raw_results.len() > MAX_RAW_RESULTS {
@@ -131,7 +131,7 @@ impl McpAppBindingLeaseRegistry {
 
     pub fn issue(&self, mut lease: McpAppBindingLease) {
         self.cleanup();
-        lease.expires_at = Instant::now() + BINDING_LEASE_TTL;
+        lease.expires_at = peri_time::monotonic_now() + BINDING_LEASE_TTL;
         self.current_turns.lock().insert(
             lease.owner_session_id.clone(),
             lease.turn_generation.clone(),
@@ -158,7 +158,7 @@ impl McpAppBindingLeaseRegistry {
         self.cleanup();
         self.raw_results.lock().insert(
             invocation_id.to_string(),
-            (Instant::now() + RAW_RESULT_TTL, result),
+            (peri_time::monotonic_now() + RAW_RESULT_TTL, result),
         );
         self.cleanup();
     }

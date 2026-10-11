@@ -39,7 +39,7 @@ tui_impl_partial_eq!(TuiUserBubble: text, reminder, source);
 ///
 /// Tool invocations are **siblings** (separate `TuiToolCard` entries), not
 /// embedded inside the bubble.
-#[derive(Debug, Clone)]
+#[derive(Debug)]
 pub struct TuiAssistantBubble {
     /// Markdown source text.
     pub text: String,
@@ -57,6 +57,33 @@ pub struct TuiAssistantBubble {
     pub duration_ms: Option<u64>,
     /// 内容哈希——rebuild 时用于检测是否需重新渲染
     pub content_hash: u64,
+}
+
+impl Clone for TuiAssistantBubble {
+    fn clone(&self) -> Self {
+        #[cfg(test)]
+        {
+            use crate::kit::acp_bridge::{PerfCounter, observe_perf};
+            observe_perf(PerfCounter::AssistantCloneCalls, 1);
+            observe_perf(
+                PerfCounter::AssistantCloneBytes,
+                (self.text.len()
+                    + self
+                        .reasoning
+                        .as_ref()
+                        .map(|block| block.text.len())
+                        .unwrap_or(0)) as u64,
+            );
+        }
+        Self {
+            text: self.text.clone(),
+            reasoning: self.reasoning.clone(),
+            message_id: self.message_id.clone(),
+            started_at: self.started_at,
+            duration_ms: self.duration_ms,
+            content_hash: self.content_hash,
+        }
+    }
 }
 
 impl TuiAssistantBubble {
@@ -81,9 +108,27 @@ impl TuiAssistantBubble {
         duration_secs: u64,
         frozen: bool,
     ) -> u64 {
-        let mut h = tui_hash_roll(text);
+        Self::compute_hash_from_rolls(
+            tui_hash_roll(text),
+            reasoning
+                .map(|block| tui_hash_roll(&block.text))
+                .unwrap_or(0),
+            reasoning,
+            duration_secs,
+            frozen,
+        )
+    }
+
+    pub(crate) fn compute_hash_from_rolls(
+        text_hash: u64,
+        reasoning_hash: u64,
+        reasoning: Option<&TuiReasoningBlock>,
+        duration_secs: u64,
+        frozen: bool,
+    ) -> u64 {
+        let mut h = text_hash;
         if let Some(r) = reasoning {
-            h = tui_hash_combine(h, tui_hash_roll(&r.text));
+            h = tui_hash_combine(h, reasoning_hash);
             h = tui_hash_combine(h, fold_state_code(r.fold));
             h = tui_hash_combine(h, entry_status_code(r.status));
             h = tui_hash_combine(h, u64::from(r.is_running));
@@ -98,7 +143,7 @@ impl TuiAssistantBubble {
     /// 同语义。
     pub fn duration_secs(&self) -> u64 {
         if let Some(started) = self.started_at {
-            started.elapsed().as_secs()
+            peri_time::elapsed_since(started).as_secs()
         } else {
             self.duration_ms.unwrap_or(0) / 1000
         }
@@ -137,6 +182,8 @@ impl TuiAssistantBubble {
 
 tui_impl_partial_eq!(TuiAssistantBubble: text, reasoning, message_id, started_at, duration_ms);
 
+impl Eq for TuiAssistantBubble {}
+
 // ---------------------------------------------------------------------------
 // Shared helper types
 // ---------------------------------------------------------------------------
@@ -151,7 +198,7 @@ tui_impl_partial_eq!(TuiAssistantBubble: text, reasoning, message_id, started_at
 ///   hash 含按秒取整的 elapsed——流式期间时长文本随 token 重建刷新。
 /// - Completed 块：`duration_ms = Some(冻结值)`（segment flush 或折叠 pass
 ///   在 phase 离开 PromptRunning 时冻结），hash 稳定。
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct TuiReasoningBlock {
     pub text: String,
     /// 折叠状态——由折叠 pass（spec §7 表）与用户覆盖（FOLD_OVERRIDES）驱动。
@@ -182,7 +229,7 @@ impl TuiReasoningBlock {
         if self.is_running {
             let ms = self
                 .started_at
-                .map(|t| t.elapsed().as_millis() as u64)
+                .map(|t| peri_time::elapsed_since(t).as_millis() as u64)
                 .unwrap_or(0);
             ms / 1000
         } else {
@@ -193,7 +240,9 @@ impl TuiReasoningBlock {
     /// 展示用时长（秒数）：Running 取当前已耗时，Completed 取冻结值。
     pub fn duration_secs(&self) -> u64 {
         if self.is_running {
-            self.started_at.map(|t| t.elapsed().as_secs()).unwrap_or(0)
+            self.started_at
+                .map(|t| peri_time::elapsed_since(t).as_secs())
+                .unwrap_or(0)
         } else {
             self.duration_ms.unwrap_or(0) / 1000
         }

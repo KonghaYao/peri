@@ -4,6 +4,60 @@ use crate::session::queue::MessageQueue;
 use crate::session::transcript::MessageTranscript;
 use crate::session::turn::TurnContext;
 
+#[test]
+fn completed_application_failure_retains_typed_error_without_unknown_classification() {
+    let received = EffectiveToolError::new(
+        EffectiveToolErrorCode::ApplicationFailed,
+        "FileNotFound: missing-file.txt",
+    );
+    let effective = effective_tool_error_from_boxed(Box::new(received));
+    assert_eq!(effective.code, EffectiveToolErrorCode::ApplicationFailed);
+    assert_eq!(effective.message, "FileNotFound: missing-file.txt");
+    assert!(execution_for_effective_error(effective.code).is_none());
+}
+
+#[test]
+fn unclassified_tool_errors_retain_failure_classification() {
+    for message in ["FileNotFound", "-32603", "transport disconnected"] {
+        let effective = effective_tool_error_from_boxed(std::io::Error::other(message).into());
+        assert_eq!(effective.code, EffectiveToolErrorCode::ToolFailed);
+    }
+}
+
+#[test]
+fn boxed_known_agent_rejections_preserve_failure_classification() {
+    for (error, expected) in [
+        (
+            AgentError::ToolNotFound("resume".into()),
+            EffectiveToolErrorCode::UnknownTool,
+        ),
+        (
+            AgentError::ToolRejected {
+                tool: "resume".into(),
+                reason: "denied".into(),
+            },
+            EffectiveToolErrorCode::UserRejected,
+        ),
+    ] {
+        let effective = effective_tool_error_from_boxed(Box::new(error));
+        assert_eq!(effective.code, expected);
+    }
+}
+
+#[test]
+fn boxed_interruption_retains_cancelled_classification() {
+    let effective = effective_tool_error_from_boxed(Box::new(AgentError::Interrupted));
+    assert_eq!(effective.code, EffectiveToolErrorCode::Cancelled);
+}
+
+#[test]
+fn boxed_unclassified_agent_error_retains_tool_failed_classification() {
+    let effective = effective_tool_error_from_boxed(Box::new(AgentError::Other(anyhow::anyhow!(
+        "resume preparation rejected"
+    ))));
+    assert_eq!(effective.code, EffectiveToolErrorCode::ToolFailed);
+}
+
 struct OutputTool {
     name: String,
     output: String,
@@ -70,6 +124,80 @@ fn make_test_ctx() -> StageContext {
 }
 
 #[tokio::test]
+async fn same_name_calls_have_distinct_invocations_and_original_model_ids() {
+    type Identities = Arc<parking_lot::Mutex<Vec<(String, String, String)>>>;
+    struct IdentityProbe(Identities);
+    #[async_trait::async_trait]
+    impl BaseTool for IdentityProbe {
+        fn name(&self) -> &str {
+            "Probe"
+        }
+        fn description(&self) -> &str {
+            "identity probe"
+        }
+        fn parameters(&self) -> serde_json::Value {
+            serde_json::json!({})
+        }
+        async fn invoke(
+            &self,
+            _: serde_json::Value,
+            context: crate::tools::ToolContext<'_>,
+        ) -> Result<String, Box<dyn std::error::Error + Send + Sync>> {
+            self.0.lock().push((
+                context.session_id.unwrap(),
+                context.invocation_id.unwrap(),
+                context.tool_call_id.unwrap(),
+            ));
+            Ok("ok".into())
+        }
+    }
+    let context = make_test_ctx();
+    context
+        .session
+        .session_context
+        .write()
+        .insert("session_id".into(), "current-session".into());
+    let captured: Identities = Arc::default();
+    let tool: Arc<dyn BaseTool> = Arc::new(IdentityProbe(captured.clone()));
+    let calls = vec![
+        ToolCall::new("model-call-1", "Probe", serde_json::json!({})),
+        ToolCall::new("model-call-2", "Probe", serde_json::json!({})),
+    ];
+    let targets = HashMap::from([
+        ("model-call-1".into(), tool.clone()),
+        ("model-call-2".into(), tool),
+    ]);
+    let output = dispatch_concurrent(
+        &context,
+        &calls,
+        &HashMap::new(),
+        &targets,
+        &context.runtime.tool_catalog.snapshot(),
+        &CancellationToken::new(),
+        &BaseMessage::ai("call"),
+        None,
+    )
+    .await;
+    assert!(output.iter().all(Result::is_ok));
+    let identities = captured.lock();
+    assert_eq!(identities.len(), 2);
+    assert_ne!(identities[0].1, identities[1].1);
+    for (session, invocation, model_call) in identities.iter() {
+        assert_eq!(session, "current-session");
+        assert_ne!(invocation, model_call);
+        assert!(uuid::Uuid::parse_str(invocation).is_ok());
+    }
+    let model_ids: std::collections::HashSet<_> = identities
+        .iter()
+        .map(|identity| identity.2.as_str())
+        .collect();
+    assert_eq!(
+        model_ids,
+        std::collections::HashSet::from(["model-call-1", "model-call-2"])
+    );
+}
+
+#[tokio::test]
 async fn test_dispatch_concurrent_single_tool_succeeds() {
     let ctx = make_test_ctx();
     let tool = std::sync::Arc::new(OutputTool {
@@ -100,6 +228,7 @@ async fn test_dispatch_concurrent_single_tool_succeeds() {
         &catalog,
         &cancel,
         &ai_msg,
+        None,
     )
     .await;
     assert_eq!(results.len(), 1);
@@ -139,6 +268,7 @@ async fn test_dispatch_concurrent_cancelled() {
         &catalog,
         &cancel,
         &ai_msg,
+        None,
     )
     .await;
     assert_eq!(results.len(), 1);
@@ -173,6 +303,7 @@ async fn test_dispatch_concurrent_preserves_typed_subagent_failure() {
         &catalog,
         &cancel,
         &ai_msg,
+        None,
     )
     .await;
     let error = results[0].as_ref().expect_err("child failure");
@@ -180,8 +311,14 @@ async fn test_dispatch_concurrent_preserves_typed_subagent_failure() {
         .subagent_failure()
         .expect("typed child failure must survive dispatch");
     assert_eq!(failure.child_thread_id(), "child-123");
-    assert_eq!(failure.diagnostic().status(), Some(500));
-    assert_eq!(failure.diagnostic().request_id(), Some("req-123"));
+    assert_eq!(
+        failure.diagnostic().expect("model diagnostic").status(),
+        Some(500)
+    );
+    assert_eq!(
+        failure.diagnostic().expect("model diagnostic").request_id(),
+        Some("req-123")
+    );
     assert!(!error.to_string().contains("provider body"));
 }
 
@@ -216,23 +353,52 @@ async fn test_settle_results_mixed_ready_settled() {
 }
 
 #[test]
-fn test_post_process_result_no_registry() {
-    let ctx = make_test_ctx();
+fn test_post_process_result_truncates_by_tool_output_limit() {
+    struct LimitedTool;
+    #[async_trait::async_trait]
+    impl BaseTool for LimitedTool {
+        fn name(&self) -> &str {
+            "Limited"
+        }
+        fn description(&self) -> &str {
+            "test output limit"
+        }
+        fn parameters(&self) -> serde_json::Value {
+            serde_json::json!({})
+        }
+        async fn invoke(
+            &self,
+            _input: serde_json::Value,
+            _ctx: crate::tools::ToolContext<'_>,
+        ) -> Result<String, Box<dyn std::error::Error + Send + Sync>> {
+            Ok(String::new())
+        }
+        fn output_char_limit(&self) -> Option<usize> {
+            Some(60)
+        }
+    }
     let call = ToolCall {
         id: "call_1".to_string(),
-        name: "Read".to_string(),
-        input: serde_json::json!({"file_path": "/tmp/x"}),
+        name: "Limited".to_string(),
+        input: serde_json::json!({}),
     };
-    let mut result = ToolResult::error("call_1", "Read", "ENOENT: file not found");
-    let all_tools: HashMap<String, std::sync::Arc<dyn BaseTool>> = HashMap::new();
-    let output_before = result.output.clone();
-    // error_suggest_registry 为 None（默认），不应修改 output
-    post_process_result(&ctx, &call, &mut result, &all_tools);
-    assert_eq!(
-        result.output, output_before,
-        "无 registry 时 output 不应变化，实际: {}",
+    let mut result = ToolResult::error("call_1", "Limited", "x".repeat(200));
+    let mut all_tools: HashMap<String, std::sync::Arc<dyn BaseTool>> = HashMap::new();
+    all_tools.insert("call_1".to_string(), std::sync::Arc::new(LimitedTool));
+    post_process_result(&call, &mut result, &all_tools);
+    assert_eq!(result.output.chars().count(), 60, "{}", result.output);
+    assert!(
+        result.output.ends_with("[Output truncated at 60 chars]"),
+        "{}",
         result.output
     );
+    assert!(result.output.starts_with('x'));
+
+    // 未登记 output 上限的工具：输出保持不变
+    let mut untouched = ToolResult::error("call_2", "Other", "kept as-is");
+    let empty_tools: HashMap<String, std::sync::Arc<dyn BaseTool>> = HashMap::new();
+    post_process_result(&call, &mut untouched, &empty_tools);
+    assert_eq!(untouched.output, "kept as-is");
 }
 
 #[test]

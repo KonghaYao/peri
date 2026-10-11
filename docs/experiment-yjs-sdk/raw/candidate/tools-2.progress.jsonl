@@ -1,0 +1,15 @@
+{"progress":{"stage":"project_tools","completed":1000,"elapsedMs":37.996},"memory":{"rssBytes":107626496,"peakRssBytes":107626496,"heapUsedBytes":16341689}}
+{"progress":{"stage":"project_tools","completed":2000,"elapsedMs":56.968416999999995},"memory":{"rssBytes":142508032,"peakRssBytes":142508032,"heapUsedBytes":34240200}}
+{"progress":{"stage":"project_tools","completed":3000,"elapsedMs":72.90683299999999},"memory":{"rssBytes":169869312,"peakRssBytes":169869312,"heapUsedBytes":51616259}}
+{"progress":{"stage":"project_tools","completed":4000,"elapsedMs":89.720458},"memory":{"rssBytes":219250688,"peakRssBytes":219250688,"heapUsedBytes":65782866}}
+{"progress":{"stage":"project_tools","completed":5000,"elapsedMs":102.82633299999999},"memory":{"rssBytes":307576832,"peakRssBytes":307576832,"heapUsedBytes":65782866}}
+{"progress":{"stage":"project_tools","completed":6000,"elapsedMs":119.936833},"memory":{"rssBytes":332677120,"peakRssBytes":332677120,"heapUsedBytes":102063118}}
+{"progress":{"stage":"project_tools","completed":7000,"elapsedMs":132.300917},"memory":{"rssBytes":361873408,"peakRssBytes":361873408,"heapUsedBytes":102063118}}
+{"progress":{"stage":"project_tools","completed":8000,"elapsedMs":149.000583},"memory":{"rssBytes":380682240,"peakRssBytes":380682240,"heapUsedBytes":137478842}}
+{"progress":{"stage":"project_tools","completed":9000,"elapsedMs":161.73925},"memory":{"rssBytes":415301632,"peakRssBytes":415301632,"heapUsedBytes":137478842}}
+{"progress":{"stage":"project_tools","completed":10000,"elapsedMs":178.5},"memory":{"rssBytes":432013312,"peakRssBytes":432013312,"heapUsedBytes":172294186}}
+{"progress":{"stage":"project_tools","completed":11000,"elapsedMs":194.10404200000002},"memory":{"rssBytes":470384640,"peakRssBytes":470384640,"heapUsedBytes":207306288}}
+{"progress":{"stage":"project_tools","completed":12000,"elapsedMs":208.846417},"memory":{"rssBytes":488718336,"peakRssBytes":488718336,"heapUsedBytes":207306288}}
+{"progress":{"stage":"snapshot_encode","elapsedMs":219.61212500000002},"memory":{"rssBytes":488947712,"peakRssBytes":488947712,"heapUsedBytes":207306288}}
+{"progress":{"stage":"snapshot_apply","elapsedMs":294.581292},"memory":{"rssBytes":604667904,"peakRssBytes":604667904,"heapUsedBytes":302207588}}
+{"resultFile":"/Users/konghayao/code/ai/peri-v4p3/docs/experiment-yjs-sdk/raw/candidate/tools-2.json","status":"passed","elapsedMs":551.5804169999999}

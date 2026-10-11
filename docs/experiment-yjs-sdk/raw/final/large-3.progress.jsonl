@@ -1,0 +1,4 @@
+{"progress":{"stage":"project_tools","completed":1,"elapsedMs":13.986625000000002},"memory":{"rssBytes":49397760,"peakRssBytes":49430528,"heapUsedBytes":2900992}}
+{"progress":{"stage":"snapshot_encode","elapsedMs":15.376208},"memory":{"rssBytes":50020352,"peakRssBytes":50020352,"heapUsedBytes":3053568}}
+{"progress":{"stage":"snapshot_apply","elapsedMs":16.090708},"memory":{"rssBytes":50823168,"peakRssBytes":50823168,"heapUsedBytes":3193856}}
+{"resultFile":"/Users/konghayao/code/ai/peri-v4p3/docs/experiment-yjs-sdk/raw/final/large-3.json","status":"passed","elapsedMs":18.852791000000003}

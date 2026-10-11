@@ -69,28 +69,35 @@ impl HttpTransport for ReqwestTransport {
         request: HttpRequest,
         cancellation: CancellationToken,
     ) -> ModelResult<HttpResponse> {
-        let response = tokio::select! {
-            biased;
-            _ = cancellation.cancelled() => return Err(ModelError::cancelled()),
-            response = self.client.execute(request.request) => response.map_err(map_reqwest_error)?,
-        };
-        let status = response.status().as_u16();
-        let request_id = response
-            .headers()
-            .get("x-request-id")
-            .or_else(|| response.headers().get("request-id"))
-            .and_then(|value| value.to_str().ok())
-            .map(str::to_owned);
-        let body = response
-            .bytes_stream()
-            .map(|chunk| chunk.map(|chunk| chunk.to_vec()).map_err(map_reqwest_error));
+        #[cfg(all(target_os = "emscripten", feature = "cloudflare"))]
+        {
+            super::cloudflare::send(request, cancellation).await
+        }
+        #[cfg(not(all(target_os = "emscripten", feature = "cloudflare")))]
+        {
+            let response = tokio::select! {
+                biased;
+                _ = cancellation.cancelled() => return Err(ModelError::cancelled()),
+                response = self.client.execute(request.request) => response.map_err(map_reqwest_error)?,
+            };
+            let status = response.status().as_u16();
+            let request_id = response
+                .headers()
+                .get("x-request-id")
+                .or_else(|| response.headers().get("request-id"))
+                .and_then(|value| value.to_str().ok())
+                .map(str::to_owned);
+            let body = response
+                .bytes_stream()
+                .map(|chunk| chunk.map(|chunk| chunk.to_vec()).map_err(map_reqwest_error));
 
-        Ok(HttpResponse::new(
-            status,
-            request_id,
-            Box::pin(body),
-            cancellation,
-        ))
+            Ok(HttpResponse::new(
+                status,
+                request_id,
+                Box::pin(body),
+                cancellation,
+            ))
+        }
     }
 }
 
@@ -110,7 +117,7 @@ fn cancellable_body(body: HttpBody, cancellation: CancellationToken) -> HttpBody
     ))
 }
 
-fn map_reqwest_error(error: reqwest::Error) -> ModelError {
+pub(super) fn map_reqwest_error(error: reqwest::Error) -> ModelError {
     let kind = if error.is_timeout() {
         TransportErrorKind::Timeout
     } else if error.is_connect() {
@@ -118,5 +125,5 @@ fn map_reqwest_error(error: reqwest::Error) -> ModelError {
     } else {
         TransportErrorKind::Other
     };
-    ModelError::transport(kind, None::<&str>)
+    ModelError::transport(kind, None::<&str>).with_error(&error)
 }

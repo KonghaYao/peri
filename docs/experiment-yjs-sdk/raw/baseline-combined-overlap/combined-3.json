@@ -1,0 +1,105 @@
+{
+  "scenario": "combined",
+  "sample": 3,
+  "root": "/tmp/peri-yjs-sdk-baseline-567640f1837771442628970a56ce68c5a8f8e256",
+  "api": "legacy",
+  "workload": {
+    "version": 1,
+    "tools": 12000,
+    "toolsPerAssistant": 10,
+    "inputDataBytes": 960,
+    "resultTextBytes": 4096,
+    "resultDataBytes": 4096,
+    "asyncUpdates": 128,
+    "streamChunks": 16384,
+    "chunkBytes": 1024,
+    "largeResultBytes": 1048576
+  },
+  "startedAt": "2026-10-04T16:56:14.950Z",
+  "status": "truncated",
+  "budget": {
+    "timeoutMs": 120000,
+    "maxRssBytes": 2147483648
+  },
+  "environment": {
+    "bun": "1.4.2",
+    "yjs": "13.6.33",
+    "platform": "darwin",
+    "release": "25.5.0",
+    "arch": "arm64",
+    "cpu": "Apple M5 Pro",
+    "totalMemoryBytes": 51539607552
+  },
+  "sourceSha256": "ce4e0419196957af166a48c333e53cbaff2db5d50b733258b07436ed3a6cfbd1",
+  "dependencyLockSha256": "acf7c28963e8fbb65317a543683d400cec43ece64de3603777f6ef1510e0e367",
+  "generatorSha256": "5fe3c36d10ea9b148deb605559b4bb5724d78bfd9fb672ef134291cd01856a66",
+  "harnessVersion": 3,
+  "progress": {
+    "stage": "combined_stream",
+    "completed": 2752,
+    "elapsedMs": 2739.713
+  },
+  "memory": {
+    "rssBytes": 2157002752,
+    "peakRssBytes": 2157002752,
+    "heapUsedBytes": 793085751,
+    "finalRssBytes": 2157051904,
+    "processPeakRssBytes": 2157051904
+  },
+  "projection": {
+    "completedTools": 12000,
+    "rawPayloadBytes": 111050670,
+    "projectionMs": 1774.8405300000006,
+    "batch1000Ms": [
+      25.507973000000025,
+      36.060175999999935,
+      52.75068099999989,
+      74.25656200000006,
+      98.14765000000128,
+      128.31070200000022,
+      155.39025000000197,
+      184.32791799999825,
+      227.26106999999956,
+      230.22664000000282,
+      251.1630559999967,
+      311.4378519999998
+    ]
+  },
+  "initialSnapshot": {
+    "encoding": "v1",
+    "jsonBytes": 154624565,
+    "updateBytes": 115968355,
+    "applyMs": 122.16987500000005,
+    "totalMs": 322.7114580000002
+  },
+  "initialHistory": {
+    "exact": true,
+    "verifiedTools": 12000,
+    "verifiedAssistantMessages": 1200,
+    "onDemandReads": 0,
+    "onDemandReadBytes": 0,
+    "referencedPayloadBytes": 0
+  },
+  "stream": {
+    "frames": 2753,
+    "jsonBytes": 4217542,
+    "updateBytes": 2968078,
+    "applyMs": 18.166821999986496,
+    "completedChunks": 2752,
+    "projectionMs": 44.99637299999131,
+    "publications": 43,
+    "unchangedToolIdentity": 0,
+    "endToEndMs": 484.4140830000001
+  },
+  "error": {
+    "message": "RSS_BUDGET_EXCEEDED",
+    "stack": "Error: RSS_BUDGET_EXCEEDED\n    at check (/Users/konghayao/code/ai/peri-v4p3/npm-packages/@peri-sdk/benchmarks/harness.ts:42:56)\n    at combinedScenario (/Users/konghayao/code/ai/peri-v4p3/npm-packages/@peri-sdk/benchmarks/combined.ts:99:25)\n    at async worker (/Users/konghayao/code/ai/peri-v4p3/npm-packages/@peri-sdk/benchmarks/run.ts:55:51)"
+  },
+  "elapsedMs": 2739.8660840000002,
+  "process": {
+    "exitCode": 1,
+    "reason": null,
+    "externalPeakRssBytes": 2010710016,
+    "stderr": ""
+  }
+}

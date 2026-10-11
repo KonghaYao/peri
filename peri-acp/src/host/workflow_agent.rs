@@ -2,7 +2,7 @@
 //!
 //! 执行体已随 p1-wa 物理迁入 `peri_agent::agent::workflow`（`agent.rs` /
 //! `factory.rs`——session 运行单元归 Agent 层，§2）；中间件链 / 工具 /
-//! error_suggest / tool resolver / session 级 WorkflowMiddleware 装配经
+//! tool resolver / session 级 WorkflowMiddleware 装配经
 //! [`WorkflowMiddlewareFactory`] 端口注入（peri-middlewares 实现，ACP 宿主
 //! 装配点注入）。
 //!
@@ -20,8 +20,8 @@ use std::sync::Arc;
 use parking_lot::RwLock;
 use peri_acp_types::{
     agents::AgentOverrides,
-    compact::CompactConfig,
-    ports::{SkillsPort, WorkflowMiddlewarePort},
+    mcp_skills::McpSkillRegistry,
+    ports::{AgentCatalogPort, WorkflowMiddlewarePort},
     workflow::{AgentExecutor, ProgressEvent, WorkflowTaskResult},
 };
 use peri_agent::agent::workflow::{
@@ -102,41 +102,40 @@ pub(crate) fn build_workflow_forwarder_launcher() -> ForwarderLauncherFn {
 }
 
 /// system prompt fallback 渲染闭包构造（`PromptTemplate` 渲染面；skills 经
-/// 注入的 [`SkillsPort`] 访问——与宿主装配点注入的端口实现同一类型）。
+/// 注入的 [`AgentCatalogPort`] 访问——与宿主装配点注入的端口实现同一类型）。
 ///
 /// 16_workflow 已删除（C2），workflow agent 渲染与主链共用同一段落来源；
 /// `meta_harness` 为冻结期 MetaHarnessState（随调用点从 `FrozenSessionData`
 /// 注入，段落覆盖与主会话同源——禁止重读配置，设计 §2.4）。
+///
+/// H2：段落集合来自 **workflow 链能力事实**（`capabilities`）——workflow 链
+/// 没有子代理持有者，审批仅在 broker + permission_mode 齐备（有效模式）时
+/// 声明；不再按执行类型硬编码过滤 10_hitl。H3：运行环境只消费冻结快照。
 pub(crate) fn build_workflow_system_prompt_fallback(
-    skills: Arc<dyn SkillsPort>,
+    agent_catalog: Arc<dyn AgentCatalogPort>,
     meta_harness: peri_acp_types::meta_harness::MetaHarnessState,
+    capabilities: peri_agent::middleware::SectionCapabilities,
+    frozen_runtime_env: Option<peri_acp_types::frozen::FrozenRuntimeEnv>,
 ) -> WorkflowSystemPromptFallback {
     Arc::new(
         move |cwd: &str, frozen_date: Option<&str>, frozen_language: Option<&str>| {
-            // C3：detect 无参（gate 判定随段落实体迁移至持有者装配判定；
-            // workflow 渲染与主链共用同一段落来源——C2 决定）
-            let features = crate::prompt::PromptFeatures::detect();
-            // C2：收集结果 = 渲染面静态声明（冻结 disabled 集合 + 冻结语言
-            // 驱动；fallback 无 overrides）。
-            // advisor 裁决 B（2026-08-14）：workflow agent 链不装配审批
-            // middleware（broker: None → PermissionMiddleware::disabled()），
-            // 10_hitl 描述的是主会话审批机制——对 workflow 模型是误导性
-            // 指令；presence-is-the-gate 契约要求在无审批的渲染路径排除
-            // 该段（C3 D5 决策修订；2026-08-15 职责拆分：10_hitl 持有者由
-            // HumanInTheLoopMiddleware 改为 PermissionMiddleware，过滤目标
-            // 段落不变）。
-            let collected =
-                crate::session::build_collected_sections(&meta_harness, None, frozen_language)
-                    .into_iter()
-                    .filter(|s| s.id != "10_hitl")
-                    .collect::<Vec<_>>();
+            // C2：收集结果 = 能力事实驱动（冻结 disabled 集合 + 冻结语言）。
+            let collected = crate::session::build_collected_sections_with_capabilities(
+                &meta_harness,
+                None,
+                frozen_language,
+                &capabilities,
+            );
             let template = crate::prompt::PromptTemplate::new(&meta_harness, &collected);
-            let env = if let Some(date) = frozen_date {
-                crate::prompt::PromptEnv::with_frozen_date(cwd, date)
-            } else {
-                crate::prompt::PromptEnv::detect(cwd)
-            };
-            template.render(&env, &features, skills.as_ref(), &[])
+            let date = frozen_date.map(str::to_string).unwrap_or_else(|| {
+                peri_time::calendar_date(
+                    peri_time::now_wall(),
+                    peri_time::CalendarConvention::deployment_default(),
+                )
+                .to_string()
+            });
+            let env = crate::prompt::PromptEnv::frozen(cwd, &date, frozen_runtime_env.as_ref());
+            template.render(&env, agent_catalog.as_ref())
         },
     )
 }
@@ -147,32 +146,72 @@ pub(crate) fn build_workflow_system_prompt_fallback(
 /// 16_workflow 已删除（C2），无子面向 feature 差异。
 ///
 /// `meta_harness` 为冻结期 MetaHarnessState（同源注入，见
-/// `build_workflow_system_prompt_fallback`）。
+/// `build_workflow_system_prompt_fallback`）；`capabilities` 为 workflow 链
+/// 能力事实（H2，含权限有效模式），`frozen_runtime_env` 为冻结运行环境（H3）。
 pub(crate) fn build_workflow_agent_prompt_builder(
-    skills: Arc<dyn SkillsPort>,
+    agent_catalog: Arc<dyn AgentCatalogPort>,
     meta_harness: peri_acp_types::meta_harness::MetaHarnessState,
+    capabilities: peri_agent::middleware::SectionCapabilities,
+    frozen_runtime_env: Option<peri_acp_types::frozen::FrozenRuntimeEnv>,
 ) -> WorkflowAgentPromptBuilder {
     Arc::new(
         move |overrides: Option<&AgentOverrides>, cwd, frozen_date, frozen_language| {
-            // C3：detect 无参（同 build_workflow_system_prompt_fallback）
-            let features = crate::prompt::PromptFeatures::detect();
-            // C2：收集结果 = 渲染面静态声明（冻结 disabled 集合 + overrides +
+            // C2：收集结果 = 能力事实驱动（冻结 disabled 集合 + overrides +
             // 冻结语言驱动；persona 段内容依赖 overrides，调用期计算）。
-            // advisor 裁决 B：workflow 链无审批 middleware（PermissionMiddleware
-            // disabled 实例），排除 10_hitl（同 build_workflow_system_prompt_fallback）。
-            let collected =
-                crate::session::build_collected_sections(&meta_harness, overrides, frozen_language)
-                    .into_iter()
-                    .filter(|s| s.id != "10_hitl")
-                    .collect::<Vec<_>>();
-            let template = crate::prompt::PromptTemplate::new(&meta_harness, &collected);
-            let env = frozen_date.map_or_else(
-                || crate::prompt::PromptEnv::detect(cwd),
-                |date| crate::prompt::PromptEnv::with_frozen_date(cwd, date),
+            // H2：不再按执行类型硬编码排除 10_hitl——审批有效性由能力事实
+            // （PermissionMiddleware 有效模式）决定。
+            let collected = crate::session::build_collected_sections_with_capabilities(
+                &meta_harness,
+                overrides,
+                frozen_language,
+                &capabilities,
             );
-            template.render(&env, &features, skills.as_ref(), &[])
+            let template = crate::prompt::PromptTemplate::new(&meta_harness, &collected);
+            let date = frozen_date.map(str::to_string).unwrap_or_else(|| {
+                peri_time::calendar_date(
+                    peri_time::now_wall(),
+                    peri_time::CalendarConvention::deployment_default(),
+                )
+                .to_string()
+            });
+            let env = crate::prompt::PromptEnv::frozen(cwd, &date, frozen_runtime_env.as_ref());
+            template.render(&env, agent_catalog.as_ref())
         },
     )
+}
+
+/// workflow agent 链能力事实（H2）：与调用点实际注入的 broker / permission_mode
+/// 及冻结 disabled 集合同源（`build_workflow_middlewares` 的条件镜像，parity
+/// 测试锁定）。生产调用点的 broker/permission_mode 恒 None ⇒ 审批通道无效
+/// （`PermissionMiddleware::disabled()`），workflow prompt 因此不声明 10_hitl。
+pub(crate) fn workflow_capabilities(
+    disabled: &std::collections::HashSet<String>,
+    broker_present: bool,
+    permission_mode_present: bool,
+) -> peri_agent::middleware::SectionCapabilities {
+    crate::session::workflow_chain_capabilities(disabled, broker_present, permission_mode_present)
+}
+
+/// 按 workflow 能力事实投影冻结输入后的 system prompt（H2 生产路径共用）。
+///
+/// 生产不直接复制主会话冻结 prompt（其中包含 workflow 链不具备的审批 / 提问 /
+/// 子代理声明），而是用同一份冻结输入（日期 / 语言 / 运行环境 / MetaHarness /
+/// 基础段）按 workflow 能力投影重建；运行环境消费冻结快照（H3）。
+pub(crate) fn project_workflow_system_prompt(
+    frozen_data: &FrozenSessionData,
+    capabilities: &peri_agent::middleware::SectionCapabilities,
+    agent_catalog: &dyn AgentCatalogPort,
+    cwd: &str,
+) -> String {
+    let collected = crate::session::build_collected_sections_with_capabilities(
+        frozen_data.meta_harness(),
+        None,
+        frozen_data.language(),
+        capabilities,
+    );
+    let template = crate::prompt::PromptTemplate::new(frozen_data.meta_harness(), &collected);
+    let env = crate::prompt::PromptEnv::frozen(cwd, frozen_data.date(), frozen_data.runtime_env());
+    template.render(&env, agent_catalog)
 }
 
 /// 创建 session 级 WorkflowMiddleware（session/new / load / resume 共用，GAP-05）。
@@ -197,37 +236,69 @@ pub(crate) fn create_session_workflow_middleware(
     frozen_data: &FrozenSessionData,
     middleware_factory: Arc<dyn WorkflowMiddlewareFactory>,
     publish_hook: Option<WorkflowPublishHook>,
-    skills: Arc<dyn SkillsPort>,
+    agent_catalog: Arc<dyn AgentCatalogPort>,
+    mcp_skill_registry: Option<Arc<McpSkillRegistry>>,
+    session_resources: Arc<dyn peri_acp_types::session_resources::SessionResources>,
 ) -> Option<Arc<dyn WorkflowMiddlewarePort>> {
-    let mut compact_config = CompactConfig::default();
-    compact_config.apply_env_overrides();
+    let compact_config = super::compact_config::load_compact_config(&peri_config.read());
     let (progress_tx, progress_rx) = tokio::sync::mpsc::unbounded_channel::<ProgressEvent>();
+    // H2：workflow agent 链的能力事实——与下面传入的 broker / permission_mode
+    // 及冻结 disabled 集合同源（`build_workflow_middlewares` 的条件镜像，
+    // parity 测试锁定）。本构造点的 broker/permission_mode 恒 None ⇒ 审批
+    // 通道无效（`PermissionMiddleware::disabled()`），因此 workflow prompt 不
+    // 声明 10_hitl；不再依赖「按执行类型过滤某段」的第二份名单。
+    let workflow_broker: Option<Arc<dyn peri_acp_types::interaction::UserInteractionBroker>> = None;
+    let workflow_permission_mode: Option<Arc<peri_acp_types::permission::SharedPermissionMode>> =
+        None;
+    let workflow_capabilities = workflow_capabilities(
+        &frozen_data.meta_harness().disabled_middlewares,
+        workflow_broker.is_some(),
+        workflow_permission_mode.is_some(),
+    );
+    // H2：生产传入的 system prompt 必须是**按 workflow 能力投影**后的冻结输入
+    // 重建（不是主会话冻结字节的复制——那会把 workflow 链不具备的审批/提问/
+    // 子代理声明带给 workflow 模型）。
+    let workflow_system_prompt = project_workflow_system_prompt(
+        frozen_data,
+        &workflow_capabilities,
+        agent_catalog.as_ref(),
+        cwd,
+    );
     let wf_executor = create_executor(WorkflowAgentContext {
         cwd: cwd.to_string(),
         frozen_claude_md: frozen_data.claude_md().map(|s| s.to_string()),
         frozen_claude_local_md: frozen_data.claude_local_md().map(|s| s.to_string()),
         frozen_skill_summary: frozen_data.skill_summary().map(|s| s.to_string()),
+        // W4b（F4/J5）：workflow agent 的技能来源 = 会话级 MCP registry（与主链
+        // 同一份）；None = 未装配技能面（如 print/无会话 registry）。
+        mcp_skill_registry,
         session_id: Some(session_id.to_string()),
+        session_resources: Some(session_resources),
         compact_config: Some(compact_config),
         cancel: None,
-        // 16_workflow 已删除（C2）：子面向 prompt 与主 prompt 字节相同，
-        // 直接复用主冻结 prompt（subagent_system_prompt 字段已随 C5 移除）。
-        system_prompt: Some(frozen_data.system_prompt().to_string()),
-        broker: None,
-        permission_mode: None,
+        // H2：按 workflow 能力投影重建的冻结 prompt（不再复制主冻结 prompt）。
+        system_prompt: Some(workflow_system_prompt),
+        external_instructions: frozen_data.v2_frozen().external_instructions.clone(),
+        legacy_embedded_instructions: frozen_data.v2_frozen().legacy_embedded_instructions,
+        broker: workflow_broker,
+        permission_mode: workflow_permission_mode,
         frozen_date: Some(frozen_data.date().to_string()),
         frozen_language: frozen_data.language().map(|s| s.to_string()),
         progress_tx: Some(progress_tx),
         subagent_ctx_builder: None,
         agent_prompt_builder: build_workflow_agent_prompt_builder(
-            Arc::clone(&skills),
+            Arc::clone(&agent_catalog),
             frozen_data.meta_harness().clone(),
+            workflow_capabilities,
+            frozen_data.runtime_env().cloned(),
         ),
         model_factory: build_model_factory(&provider, peri_config),
         middleware_factory: Arc::clone(&middleware_factory),
         system_prompt_fallback: build_workflow_system_prompt_fallback(
-            skills,
+            agent_catalog,
             frozen_data.meta_harness().clone(),
+            workflow_capabilities,
+            frozen_data.runtime_env().cloned(),
         ),
         forwarder_launcher: build_workflow_forwarder_launcher(),
         publish_hook,

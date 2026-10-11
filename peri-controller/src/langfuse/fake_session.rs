@@ -7,10 +7,12 @@ use std::sync::Arc;
 
 use super::drop_telemetry::LangfuseDropRegistry;
 use super::session_like::LangfuseSessionLike;
+use super::turn_traces::TurnTraceRegistry;
 
 pub struct FakeLangfuseSession {
     events: Mutex<Vec<IngestionEvent>>,
     drop_registry: LangfuseDropRegistry,
+    turn_traces: TurnTraceRegistry,
     session_id: String,
     flush_count: AtomicUsize,
 }
@@ -20,6 +22,7 @@ impl FakeLangfuseSession {
         Arc::new(Self {
             events: Mutex::new(Vec::new()),
             drop_registry: LangfuseDropRegistry::default(),
+            turn_traces: TurnTraceRegistry::default(),
             session_id: session_id.into(),
             flush_count: AtomicUsize::new(0),
         })
@@ -55,5 +58,9 @@ impl LangfuseSessionLike for FakeLangfuseSession {
 
     fn drop_registry(&self) -> &LangfuseDropRegistry {
         &self.drop_registry
+    }
+
+    fn turn_traces(&self) -> &TurnTraceRegistry {
+        &self.turn_traces
     }
 }

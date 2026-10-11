@@ -9,7 +9,7 @@ use std::{collections::BTreeMap, fmt, sync::Arc};
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
-use crate::{plugin::McpProtocolVersion, tools::BaseTool};
+use crate::tools::BaseTool;
 
 macro_rules! opaque_id {
     ($name:ident, $prefix:literal) => {
@@ -95,8 +95,8 @@ impl SecretRef {
     }
 }
 
-/// Resolved secret material. Deliberately not `Clone`, `Debug`, `Serialize` or
-/// `Deserialize`; it may only be exposed at the transport construction seam.
+/// Resolved material owned by the transport construction seam.
+#[derive(Debug)]
 pub struct ResolvedSecret(String);
 
 impl ResolvedSecret {
@@ -134,8 +134,6 @@ pub struct DynamicMcpConfig {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub timeout_ms: Option<u64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub protocol_version: Option<McpProtocolVersion>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub subscriptions: Option<crate::plugin::McpSubscriptionsConfig>,
 }
 
@@ -161,8 +159,6 @@ pub struct CanonicalDynamicMcpConfig {
     pub transport: CanonicalDynamicMcpTransport,
     pub timeout_ms: u64,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub protocol_version: Option<McpProtocolVersion>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub subscriptions: Option<crate::plugin::McpSubscriptionsConfig>,
 }
 
@@ -182,14 +178,12 @@ pub enum DynamicMcpConfigSummary {
         env: BTreeMap<String, String>,
         cwd: Option<String>,
         timeout_ms: u64,
-        protocol_version: Option<McpProtocolVersion>,
         subscriptions: Option<crate::plugin::McpSubscriptionsConfig>,
     },
     StreamableHttp {
         url: String,
         headers: BTreeMap<String, DynamicMcpHeaderSummary>,
         timeout_ms: u64,
-        protocol_version: Option<McpProtocolVersion>,
         subscriptions: Option<crate::plugin::McpSubscriptionsConfig>,
     },
 }
@@ -197,6 +191,7 @@ pub enum DynamicMcpConfigSummary {
 impl CanonicalDynamicMcpConfig {
     pub const DEFAULT_TIMEOUT_MS: u64 = 30_000;
 
+    /// Returns the configured display/policy summary.
     pub fn safe_summary(&self) -> DynamicMcpConfigSummary {
         match &self.transport {
             CanonicalDynamicMcpTransport::Stdio {
@@ -213,15 +208,11 @@ impl CanonicalDynamicMcpConfig {
                     .collect(),
                 cwd: cwd.clone(),
                 timeout_ms: self.timeout_ms,
-                protocol_version: self.protocol_version,
                 subscriptions: self.subscriptions.clone(),
             },
             CanonicalDynamicMcpTransport::StreamableHttp { url, headers } => {
-                let mut parsed = url::Url::parse(url).expect("canonical Dynamic MCP URL is valid");
-                parsed.set_query(None);
-                parsed.set_fragment(None);
                 DynamicMcpConfigSummary::StreamableHttp {
-                    url: parsed.to_string(),
+                    url: url.clone(),
                     headers: headers
                         .iter()
                         .map(|(name, value)| {
@@ -237,7 +228,6 @@ impl CanonicalDynamicMcpConfig {
                         })
                         .collect(),
                     timeout_ms: self.timeout_ms,
-                    protocol_version: self.protocol_version,
                     subscriptions: self.subscriptions.clone(),
                 }
             }
@@ -333,17 +323,6 @@ impl DynamicMcpConfig {
                         "url must be an absolute HTTP(S) URL".to_string(),
                     ));
                 }
-                for (name, value) in &self.headers {
-                    let sensitive = matches!(
-                        name.to_ascii_lowercase().as_str(),
-                        "authorization" | "proxy-authorization" | "cookie" | "x-api-key"
-                    );
-                    if sensitive && matches!(value, DynamicMcpHeaderValue::Literal(_)) {
-                        return Err(DynamicMcpConfigError::Invalid(format!(
-                            "sensitive header {name} requires secretRef"
-                        )));
-                    }
-                }
                 CanonicalDynamicMcpTransport::StreamableHttp {
                     url,
                     headers: self.headers,
@@ -358,7 +337,6 @@ impl DynamicMcpConfig {
         Ok(CanonicalDynamicMcpConfig {
             transport,
             timeout_ms,
-            protocol_version: self.protocol_version,
             subscriptions: self.subscriptions.filter(|value| !value.is_empty()),
         })
     }

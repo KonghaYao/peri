@@ -113,7 +113,7 @@ impl super::McpClientPool {
         cwd: &Path,
     ) -> io::Result<McpStdioTransport> {
         let arg_strs: Vec<_> = args.iter().map(String::as_str).collect();
-        let mut cmd = peri_agent::agent::async_tasks::shell_command(command, &arg_strs);
+        let mut cmd = peri_mcp_common::shell::shell_command(command, &arg_strs);
         cmd.envs(env).current_dir(cwd);
         self.spawn_process_command(cmd, Some(command))
     }
@@ -126,6 +126,9 @@ impl super::McpClientPool {
         let _admission = self.lifecycle_registration.lock();
         if !self.is_open() {
             return Err(io::Error::other("MCP pool is closing"));
+        }
+        if !self.stdio_available.load(Ordering::Acquire) {
+            return Err(io::Error::other(crate::platform::STDIO_UNAVAILABLE));
         }
         cmd.stdin(Stdio::piped())
             .stdout(Stdio::piped())
@@ -180,7 +183,7 @@ impl super::McpClientPool {
         let mut unfinished = 0;
         for process in processes {
             if !matches!(
-                tokio::time::timeout(super::SHUTDOWN_TIMEOUT, process.close()).await,
+                peri_time::timeout(super::SHUTDOWN_TIMEOUT, process.close()).await,
                 Ok(Ok(()))
             ) {
                 unfinished += 1;

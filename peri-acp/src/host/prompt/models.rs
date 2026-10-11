@@ -127,9 +127,14 @@ pub(super) fn build_model_factories(
                             .into_model(),
                     },
                 );
-            let mut llm = peri_agent::agent::model_bridge::AgentModelBridge::from_arc(model);
-            llm = llm.with_session_id(sid.clone());
-            Box::new(llm)
+            // H1：只产出模型来源（模型 + 名称 + session id）——bridge 的身份与
+            // 请求时 contribution provider 由 Agent 层子链装配点统一装上。
+            let model_name = p
+                .as_ref()
+                .map(|resolved| resolved.model_name())
+                .unwrap_or_else(|| provider.model_name());
+            peri_agent::session::subagent::SubagentLlmSource::model(model, model_name)
+                .with_session_id(sid.clone())
         }))
     };
 

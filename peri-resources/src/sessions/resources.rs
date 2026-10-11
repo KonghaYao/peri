@@ -1,54 +1,42 @@
-//! 会话资源门面实现：把本机执行面与数据面组合成消费侧唯一入口。
-//!
-//! 职责分工（B §2）：门面持有**两类事实**——数据面（`SessionDataPort` 的 SQLite 实现）
-//! 与本机执行面（[`LocalExecution`]：发现、登记、owner、dirty、准入）；业务侧只看到本
-//! 门面。数据端口是 `crate::sessions` 内的可见类型，其他 crate 与资源层其他模块都拿
-//! 不到裸写句柄，本门面也不导出任何无 guard 的写入路径。
-//!
-//! 四条贯穿全部 mutation 的规则：
-//!
-//! 1. **统一准入**：能力/权限 → 未决持久化 → 本 root 有效 owner，检查在门面内部完成
-//!    （[`MutationGate`]），不靠调用方先查。
-//! 2. **效果结清**：只有 `Applied | NotApplied` 才释放写入准入；`Unknown`（取消、
-//!    提交未确认）把范围交给 `Drop`，在租约上留下未决证据。
-//! 3. **只读不退化**：已有会话上的写入在只读打开时返回 `ReadOnlyStore`（历史可读、
-//!    执行权不可得，与既有只读降级路径一致）；需要登记新身份/新绑定的写入返回
-//!    `Workspace(ReadOnlyStore)`（连会话都还没有，没有可降级的对象）。
-//! 4. **诚实失败**：数据已完整保存但准入未成立时返回 `saved_but_not_admitted`，
-//!    不谎称「确定未创建」，也不让调用方据此删数据。
-//!
-//! SQLite 的本地塌缩（新建时数据与执行代际同一事务）见 [`LocalExecution::create_with_lease`]；
-//! 远程是「durable 数据 + 本机准入」两步，不是分布式事务。
+//! 会话数据资源门面：工作区校验、读写权限与持久化结清。
+//! 执行所有权由 peri-sdk 维护，本模块不登记或认领执行者。
 
 mod claim;
+mod evidence;
 mod gate;
 mod lifecycle;
+mod oauth_credentials;
 
-use std::path::{Path, PathBuf};
+use std::path::Path;
+#[cfg(not(target_os = "emscripten"))]
+use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
 
 use async_trait::async_trait;
 use peri_acp_types::messages::MessageId;
 use peri_acp_types::session_resources::{
-    AccessMode, BindingRecheck, BindingState, ChildResumeClaim, ChildSnapshot, DataCapabilities,
-    ExecutionAvailability, ForkSnapshot, FrozenSnapshotBytes, NewSession, PersistenceRecovery,
-    RewindBoundary, SessionAvailability, SessionMetaPatch, SessionResourceError,
-    SessionResourceErrorKind, SessionResourceResult, SessionResources, SessionSnapshot,
+    AccessMode, BindingRecheck, BindingState, ChildResumeClaim, ChildSnapshot, CloseSettlement,
+    DataCapabilities, ExecutionAvailability, ForkSnapshot, FrozenSnapshotBytes, FrozenState,
+    NewSession, NewSessionDraft, PersistenceRecovery, RewindBoundary, SessionAvailability,
+    SessionInitialization, SessionMetaPatch, SessionResourceError, SessionResourceErrorKind,
+    SessionResourceResult, SessionResources, SessionSnapshot,
 };
 use peri_acp_types::store::{CompactionChange, MessageFlags, PersistedPayload};
 use peri_acp_types::thread::{AgentStatus, ThreadId, ThreadMeta};
 use peri_acp_types::workspace::{
-    RecoveryRequiredDetails, ResolvedWorkspace, ScopedThreadPage, ScopedThreadQuery,
-    SessionBinding, SessionExecutionLease, WorkspaceError,
+    ResolvedWorkspace, ScopedThreadPage, ScopedThreadQuery, SessionBinding, WorkspaceError,
 };
 
 use super::data::{ensure_child_relation, ChildResumeRecord, SessionDataPort};
+#[cfg(target_os = "emscripten")]
+use super::failure::execution_failure;
+use super::failure::{invalid_input, not_found};
 use super::local_port::LocalExecutionPort;
-use super::sqlite_store::{
-    execution_failure, invalid_input, lease_required, not_found, same_lease, LocalExecution,
-    ReadOnlyThreadStoreError,
-};
+#[cfg(not(target_os = "emscripten"))]
+use super::sqlite_store::execution_failure;
+#[cfg(not(target_os = "emscripten"))]
+use super::sqlite_store::{LocalExecution, ReadOnlyThreadStoreError};
 
 use claim::ChildResumeClaimHandle;
 use gate::MutationGate;
@@ -60,18 +48,40 @@ use lifecycle::{Lifecycle, LifecycleState};
 /// 此时报告未结清，而不是无限期等待一个外部 future。
 const SETTLE_WAIT: Duration = Duration::from_secs(10);
 
-/// 会话数据的存放位置 — 由组合层在装配时确定，门面不做后端推断。
-///
-/// 它只决定 `create_session` 的提交次数，不改变任何公开行为：
-///
-/// - 数据与执行代际在**同一个本机库**时是一次提交（本地塌缩，数据与代际同生共死）；
-/// - 数据在**远端**时是两步（先由数据端口保存 canonical 数据，再取本机执行准入）。
-///   两步之间没有分布式事务，因此保存成功而准入失败时只能如实报告
-///   `saved_but_not_admitted`（历史可读，执行资格不可得）。
+/// 会话数据存放位置，用于选择工作区证据校验规则。
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(in crate::sessions) enum SessionDataHome {
     LocalLibrary,
     RemoteStore,
+}
+
+struct DraftInitialization {
+    id: ThreadId,
+    gate: MutationGate,
+}
+
+#[async_trait]
+impl SessionInitialization for DraftInitialization {
+    fn thread_id(&self) -> &ThreadId {
+        &self.id
+    }
+
+    async fn commit_frozen(&self, frozen: &FrozenSnapshotBytes) -> SessionResourceResult<()> {
+        self.gate
+            .with_exclusive(&self.id, || {
+                self.gate.data().commit_frozen(&self.id, frozen)
+            })
+            .await
+    }
+
+    async fn abandon(self: Arc<Self>) -> SessionResourceResult<()> {
+        self.gate.ensure_session_write()?;
+        self.gate
+            .with_registration(&self.id, || {
+                self.gate.data().revoke_unpublished_draft(&self.id)
+            })
+            .await
+    }
 }
 
 /// 会话资源门面（生产实现）。
@@ -86,17 +96,20 @@ pub struct SessionResourcesImpl {
     /// 串行化关闭确认：并发关闭必须依次看到真实结论，不能两个都「从头开始」而重复关闭
     /// 同一个连接，也不能把另一个调用的未确认状态当成成功。
     close_confirm: tokio::sync::Mutex<()>,
+    credential_operations: Arc<tokio::sync::RwLock<()>>,
     /// 会话数据的存放位置：决定 `create_session` 是几次提交（见 [`SessionDataHome`]）。
     home: SessionDataHome,
 }
 
 impl SessionResourcesImpl {
     /// 打开或创建会话库，原地升级已知旧 schema 并保留历史数据。
+    #[cfg(not(target_os = "emscripten"))]
     pub async fn open(db_path: impl Into<PathBuf>) -> anyhow::Result<Self> {
         Ok(Self::from_local(LocalExecution::open(db_path).await?))
     }
 
     /// 以只读方式打开已存在的会话库；不创建目录、库、schema 或锁文件。
+    #[cfg(not(target_os = "emscripten"))]
     pub async fn open_existing_read_only(
         db_path: impl AsRef<Path>,
     ) -> Result<Self, ReadOnlyThreadStoreError> {
@@ -106,6 +119,7 @@ impl SessionResourcesImpl {
     }
 
     /// 默认数据库位置 `~/.peri/threads/threads.db`；不创建目录、数据库或连接。
+    #[cfg(not(target_os = "emscripten"))]
     pub fn default_database_path() -> anyhow::Result<PathBuf> {
         LocalExecution::default_database_path()
     }
@@ -114,6 +128,7 @@ impl SessionResourcesImpl {
     ///
     /// 本机组合：数据面与执行面由同一个库句柄回答（同一条连接真相），两个端口因此只是
     /// 同一实现的两张面孔。
+    #[cfg(not(target_os = "emscripten"))]
     pub(in crate::sessions) fn from_local(local: LocalExecution) -> Self {
         let data = Arc::new(local.data_port());
         Self::from_ports(data, Arc::new(local), SessionDataHome::LocalLibrary)
@@ -129,19 +144,16 @@ impl SessionResourcesImpl {
         home: SessionDataHome,
     ) -> Self {
         let lifecycle = Lifecycle::new();
-        let gate = MutationGate::new(data, local, lifecycle.clone());
+        let gate = MutationGate::new(data, local, lifecycle.clone(), home);
         Self {
             gate,
             lifecycle,
             close_confirm: tokio::sync::Mutex::new(()),
+            credential_operations: Arc::new(tokio::sync::RwLock::new(())),
             home,
         }
     }
 
-    /// 会话级执行资格：只读事实、未决持久化与代际事实分开表达。
-    ///
-    /// 本方法不取得所有权、不创建锁文件：跨进程的持有者只能由
-    /// [`SessionResources::acquire_execution`] 的稳定锁判定。
     async fn execution_availability(
         &self,
         id: &ThreadId,
@@ -153,132 +165,74 @@ impl SessionResourcesImpl {
         if !self.gate.data().session_exists(id).await? {
             return Err(not_found());
         }
-        // 数据面事实一次取齐：活 owner 判定要树根，绑定复核要绑定字节。两者都不是本机事实，
-        // 远端组合里本机没有这条会话的行。
-        let facts = self.gate.session_facts(id).await?;
-        // 活 owner 优先于代际事实：正在运行的会话必然是 `clean = 0`，那是「有主」而不是
-        // 「需要恢复」。`OwnedElsewhere` 因此表达「执行权已在某处且活跃，本次不能再次取得」。
-        if local
-            .live_owner(id, &facts)
-            .await
-            .map_err(execution_failure)?
-            .is_some_and(|lease| lease.is_active())
-        {
-            return Ok(ExecutionAvailability::OwnedElsewhere);
-        }
-        if let Some((generation, false)) =
-            local.execution_state(id).await.map_err(execution_failure)?
-        {
-            return Ok(ExecutionAvailability::Dirty(RecoveryRequiredDetails {
-                thread_id: id.clone(),
-                generation,
-            }));
-        }
-        match self.recheck_binding(facts.binding.as_ref(), false).await {
-            Ok(_) => Ok(ExecutionAvailability::Available),
-            Err(error)
-                if matches!(
-                    error.workspace_error(),
-                    Some(WorkspaceError::BindingMissing)
-                ) =>
+        if let Some(machine_id) = self.gate.data().machine_id_of(id).await? {
+            if machine_id
+                != local.machine_id().map_err(|_| {
+                    crate::sessions::failure::unavailable("machine identity is not initialized")
+                })?
             {
-                Ok(ExecutionAvailability::BindingMissing)
+                return Ok(ExecutionAvailability::WorkspaceUnavailable);
             }
-            Err(_) => Ok(ExecutionAvailability::WorkspaceUnavailable),
         }
-    }
-
-    /// 用 canonical 绑定字节做本机复核（`full` 为真时叠一次完整发现快照比对）。
-    ///
-    /// 绑定字节来自数据面：本机组合是本机 `session_bindings`，远程组合是远端会话行。
-    /// 没有绑定行时按 `BindingMissing` 如实失败——执行资格需要一个可复核的绑定。
-    async fn recheck_binding(
-        &self,
-        binding: Option<&SessionBinding>,
-        full: bool,
-    ) -> SessionResourceResult<ResolvedWorkspace> {
-        let binding = binding.ok_or_else(|| {
-            SessionResourceError::new(SessionResourceErrorKind::Workspace(
-                WorkspaceError::BindingMissing,
-            ))
-        })?;
-        self.gate
-            .local()
-            .validate_binding_value(binding, full)
-            .await
-            .map_err(execution_failure)
-    }
-
-    /// 按 id 取数据面绑定字节后复核（只回答「绑定向哪里」的调用方用这个）。
-    async fn recheck_binding_of(
-        &self,
-        id: &ThreadId,
-        full: bool,
-    ) -> SessionResourceResult<ResolvedWorkspace> {
-        let binding = self.gate.data().binding_of(id).await?;
-        self.recheck_binding(binding.as_ref(), full).await
-    }
-
-    /// `Missing` 与 `LegacyConfirmed` 的差别是本机来源证据：无绑定、无父会话、无执行
-    /// 代际，且保存的绝对 cwd 落在本机已登记工作区内，才表达为 legacy 历史；其余的无
-    /// 绑定状态（外来会话、登记缺失）不冒充 legacy。
-    ///
-    /// 这份证据**只属于本机组合**：`legacy_confirmed` 读的是本机 `threads` / `session_bindings`
-    /// / `workspaces`，远端组合里会话行与它的 cwd 都在远端，本机根本没有可读的来源证据。
-    /// 因此远端组合由门面**固定为 false**（端口文档同此），而不是去本机表里碰运气：
-    /// 本机恰有一条同 id 的行就会把远端会话判成 legacy。
-    async fn classify_binding(
-        &self,
-        id: &ThreadId,
-        state: BindingState,
-    ) -> SessionResourceResult<BindingState> {
-        if !matches!(state, BindingState::Missing) {
-            return Ok(state);
-        }
-        if self.home == SessionDataHome::RemoteStore {
-            return Ok(state);
-        }
-        if self
-            .gate
-            .local()
-            .legacy_confirmed(id)
-            .await
-            .map_err(execution_failure)?
+        let meta = self.gate.data().load_meta(id).await?;
+        if matches!(self.home, SessionDataHome::RemoteStore)
+            && self
+                .gate
+                .data()
+                .binding_discovery_snapshot(id)
+                .await?
+                .is_none()
         {
-            return Ok(BindingState::LegacyConfirmed);
+            return Ok(ExecutionAvailability::WorkspaceUnavailable);
         }
-        Ok(state)
+        if !local.directory_available(Path::new(&meta.cwd)).await {
+            return Ok(ExecutionAvailability::WorkspaceUnavailable);
+        }
+        if matches!(self.home, SessionDataHome::RemoteStore) {
+            match self.recheck_binding_of(id, true).await {
+                Ok(_) => {}
+                Err(error) if matches!(error.kind(), SessionResourceErrorKind::Workspace(_)) => {
+                    return Ok(ExecutionAvailability::WorkspaceUnavailable);
+                }
+                Err(error) => return Err(error),
+            }
+        }
+        Ok(ExecutionAvailability::Available)
     }
 
-    /// 「数据已完整保存、执行代际未写」的收敛。
+    /// 完整创建的重试：不可变事实一致时只重新建立执行准入。
     ///
     /// 前提（又是同一次创建、工作区证据仍然一致）成立时补上准入；否则保留 identity 并
     /// 如实报告「已保存、未准入」——既不重造 binding/frozen，也不谎称「确定未创建」。
-    async fn admit_saved_creation(
-        &self,
-        id: &ThreadId,
-        binding: &SessionBinding,
-    ) -> SessionResourceResult<Arc<dyn SessionExecutionLease>> {
-        let local = self.gate.local();
-        if local
-            .execution_state(id)
-            .await
-            .map_err(execution_failure)?
-            .is_some()
+    async fn admit_saved_creation(&self, input: &NewSession) -> SessionResourceResult<()> {
+        let id = &input.thread_id;
+        let saved = self.gate.data().load_snapshot(id).await?;
+        let created_at = chrono::DateTime::parse_from_rfc3339(&input.created_at)
+            .map_err(|_| invalid_input("invalid session creation timestamp"))?;
+        let snapshot_at = input
+            .meta
+            .snapshot_at_message_id
+            .map(|message| message.as_uuid().to_string());
+        if saved.meta.id != *id
+            || saved.meta.created_at != created_at
+            || saved.meta.cwd != input.meta.cwd
+            || saved.meta.parent_thread_id != input.meta.parent_thread_id
+            || saved.meta.snapshot_at_message_id != snapshot_at
+            || saved.binding != BindingState::Bound(input.binding.clone())
+            || saved.frozen != FrozenState::Present(input.frozen.clone())
         {
-            return Err(invalid_input("session identity already exists"));
+            return Err(SessionResourceError::conflict(
+                "session identity has different immutable creation facts",
+            ));
         }
-        let saved = self.gate.data().binding_of(id).await?;
-        let premise_holds = saved.as_ref() == Some(binding)
-            && self.recheck_binding(saved.as_ref(), false).await.is_ok();
-        if !premise_holds {
+        if !matches!(
+            self.execution_availability(id).await?,
+            ExecutionAvailability::Available
+        ) {
             return Err(SessionResourceError::saved_but_not_admitted(id.clone()));
         }
-        match local.admit_existing(id, binding).await {
-            Ok(lease) => Ok(lease),
-            Err(error) if error.is_persistence_uncertain() => Err(error),
-            Err(_) => Err(SessionResourceError::saved_but_not_admitted(id.clone())),
-        }
+        self.recheck_binding(Some(&input.binding), false).await?;
+        Ok(())
     }
 
     fn workspace_mismatch() -> SessionResourceError {
@@ -288,7 +242,7 @@ impl SessionResourcesImpl {
     }
 
     /// 测试用：本机组合背后的 SQLite 连接池（逐条构造事实的夹具使用）。
-    #[cfg(test)]
+    #[cfg(all(test, not(target_os = "emscripten")))]
     pub(super) fn local_pool(&self) -> &sqlx::SqlitePool {
         self.gate
             .local()
@@ -301,6 +255,23 @@ impl SessionResourcesImpl {
 
 #[async_trait]
 impl SessionResources for SessionResourcesImpl {
+    fn oauth_credentials_for_workspace(
+        &self,
+        workspace_id: peri_acp_types::workspace::WorkspaceId,
+    ) -> Option<Arc<dyn peri_acp_types::oauth_credentials::OAuthCredentialPort>> {
+        self.gate
+            .data()
+            .clone()
+            .oauth_credentials_for_workspace(workspace_id)
+            .map(|inner| {
+                Arc::new(oauth_credentials::LifecycleCredentials::new(
+                    inner,
+                    self.lifecycle.clone(),
+                    self.credential_operations.clone(),
+                ))
+                    as Arc<dyn peri_acp_types::oauth_credentials::OAuthCredentialPort>
+            })
+    }
     // ── 能力与准入 ──
 
     async fn inspect_availability(
@@ -351,86 +322,73 @@ impl SessionResources for SessionResourcesImpl {
         Ok(())
     }
 
-    async fn acquire_execution(
-        &self,
-        id: &ThreadId,
-        workspace: &ResolvedWorkspace,
-    ) -> SessionResourceResult<Arc<dyn SessionExecutionLease>> {
-        self.gate.ensure_session_write()?;
-        // 先复核再取锁：binding 不可变，先复核不与取得所有权竞争，且失败时不会留下
-        // 一个新的 dirty 代际。
-        let facts = self.gate.session_facts(id).await?;
-        let resolved = self.recheck_binding(facts.binding.as_ref(), true).await?;
-        if &resolved != workspace {
-            return Err(Self::workspace_mismatch());
-        }
-        self.gate
-            .local()
-            .acquire_lease(id, &facts)
-            .await
-            .map_err(execution_failure)
+    async fn finish_close(&self, id: &ThreadId) -> SessionResourceResult<()> {
+        self.gate.ensure_recovery_write()?;
+        self.gate.finish_close(id).await
     }
 
-    async fn reset_dirty_execution(
-        &self,
-        request: &peri_acp_types::workspace::ResetDirtyRequest,
-    ) -> SessionResourceResult<()> {
-        self.gate.ensure_session_write()?;
-        // 显式风险接受是这条行为的领域前提，不能只由协议层把关。
-        if !request.accept_risk {
-            return Err(invalid_input("explicit risk acceptance required"));
-        }
-        self.gate
-            .local()
-            .reset_dirty(&request.target)
-            .await
-            .map_err(execution_failure)
+    async fn close_settlement(&self, id: &ThreadId) -> SessionResourceResult<CloseSettlement> {
+        self.gate.ensure_recovery_permitted()?;
+        self.gate.data().close_settlement(id).await
     }
 
     // ── 创建与接纳 ──
 
-    async fn create_session(
-        &self,
-        input: &NewSession,
-    ) -> SessionResourceResult<Arc<dyn SessionExecutionLease>> {
+    async fn create_session(&self, input: &NewSession) -> SessionResourceResult<()> {
         self.gate.ensure_registration_write()?;
-        let local = self.gate.local();
         if self.gate.data().session_exists(&input.thread_id).await? {
-            return self
-                .admit_saved_creation(&input.thread_id, &input.binding)
-                .await;
+            return self.admit_saved_creation(input).await;
         }
-        // 提交次数由数据位置决定（见 [`SessionDataHome`]）：同一个本机库时数据与执行代际
-        // 一次提交；数据在别处时先由数据端口保存，再取本机执行准入。门面不做后端推断。
-        match self.home {
-            SessionDataHome::LocalLibrary => local.create_session(input).await,
-            SessionDataHome::RemoteStore => {
-                self.gate.data().save_new_session(input).await?;
-                match local.admit_existing(&input.thread_id, &input.binding).await {
-                    Ok(lease) => Ok(lease),
-                    Err(error) if error.is_persistence_uncertain() => Err(error),
-                    Err(_) => Err(SessionResourceError::saved_but_not_admitted(
-                        input.thread_id.clone(),
-                    )),
-                }
-            }
-        }
+        let workspace = self.recheck_binding(Some(&input.binding), false).await?;
+        self.gate
+            .with_registration(&input.thread_id, || {
+                self.gate
+                    .data()
+                    .save_new_session_in_workspace(input, &workspace)
+            })
+            .await?;
+        self.admit_saved_creation(input).await
     }
 
-    async fn abandon_initialization(
-        &self,
-        id: &ThreadId,
-        lease: &Arc<dyn SessionExecutionLease>,
-    ) -> SessionResourceResult<()> {
+    async fn abandon_initialization(&self, id: &ThreadId) -> SessionResourceResult<()> {
         self.gate.ensure_session_write()?;
-        let data = self.gate.data().clone();
         self.gate
-            .local()
-            .abandon_initialization(
-                id,
-                lease,
-                Box::pin(async move { data.revoke_unpublished_session(id).await }),
-            )
+            .with_registration(id, || self.gate.data().revoke_unpublished_session(id))
+            .await
+    }
+
+    async fn begin_initialization(
+        &self,
+        draft: &NewSessionDraft,
+    ) -> SessionResourceResult<Arc<dyn SessionInitialization>> {
+        self.gate.ensure_registration_write()?;
+        let workspace = self.recheck_binding(Some(&draft.binding), false).await?;
+        self.gate
+            .with_registration(&draft.thread_id, || {
+                self.gate
+                    .data()
+                    .save_new_session_draft_in_workspace(draft, &workspace)
+            })
+            .await?;
+        Ok(Arc::new(DraftInitialization {
+            id: draft.thread_id.clone(),
+            gate: self.gate.clone(),
+        }))
+    }
+
+    async fn discard_incomplete_initialization(&self, id: &ThreadId) -> SessionResourceResult<()> {
+        self.gate
+            .with_exclusive(id, || async {
+                if !matches!(
+                    self.gate.data().load_binding(id).await?,
+                    BindingState::Bound(_)
+                ) {
+                    return Err(SessionResourceError::conflict(
+                        "session is not a bound draft",
+                    ));
+                }
+                self.gate.data().revoke_unpublished_draft(id).await
+            })
             .await
     }
 
@@ -442,8 +400,11 @@ impl SessionResources for SessionResourcesImpl {
         frozen: &FrozenSnapshotBytes,
     ) -> SessionResourceResult<()> {
         self.gate.ensure_session_write()?;
-        // 接纳在数据面的一次写事务内完成：保存路径一致、登记关系一致、既有绑定只校验
-        // 不覆盖、有执行行时拒绝（不借接纳绕过 dirty）。
+        if matches!(self.home, SessionDataHome::RemoteStore) {
+            return Err(SessionResourceError::new(
+                SessionResourceErrorKind::Unsupported,
+            ));
+        }
         self.gate
             .data()
             .adopt_legacy_session(id, saved_cwd, workspace, frozen)
@@ -468,10 +429,7 @@ impl SessionResources for SessionResourcesImpl {
         id: &ThreadId,
         check: BindingRecheck,
     ) -> SessionResourceResult<ResolvedWorkspace> {
-        // 复核不改绑、不取执行权：与 `execution_availability` 走同一对本机原语，
-        // 因此「能不能执行」与「绑定向哪里」不会出现两套结论。
-        self.recheck_binding_of(id, matches!(check, BindingRecheck::Full))
-            .await
+        self.load_workspace_for_session(id, check).await
     }
 
     async fn load_session_history(
@@ -485,11 +443,55 @@ impl SessionResources for SessionResourcesImpl {
         self.gate.data().load_meta(id).await
     }
 
+    async fn session_environment_id(&self, id: &ThreadId) -> SessionResourceResult<Option<String>> {
+        self.gate.data().machine_id_of(id).await
+    }
+    async fn session_workspace_id(
+        &self,
+        id: &ThreadId,
+    ) -> SessionResourceResult<Option<peri_acp_types::workspace::WorkspaceId>> {
+        self.gate.data().workspace_id_of(id).await
+    }
+
+    async fn list_machines(
+        &self,
+    ) -> SessionResourceResult<Vec<peri_acp_types::workspace::MachineInfo>> {
+        self.gate.data().list_machines().await
+    }
+
+    async fn list_workspaces(
+        &self,
+        machine_id: &str,
+    ) -> SessionResourceResult<Vec<peri_acp_types::workspace::WorkspaceInfo>> {
+        self.gate.data().list_workspaces(machine_id).await
+    }
+
+    async fn rename_machine(&self, machine_id: &str, name: &str) -> SessionResourceResult<()> {
+        self.gate.data().rename_machine(machine_id, name).await
+    }
+
     async fn list_sessions(
         &self,
         query: &ScopedThreadQuery,
     ) -> SessionResourceResult<ScopedThreadPage> {
         self.gate.data().list_sessions(query).await
+    }
+
+    async fn list_archived_sessions(
+        &self,
+        query: &ScopedThreadQuery,
+    ) -> SessionResourceResult<ScopedThreadPage> {
+        self.gate.data().list_archived_sessions(query).await
+    }
+
+    async fn set_session_archived(
+        &self,
+        id: &ThreadId,
+        archived: bool,
+    ) -> SessionResourceResult<()> {
+        self.gate
+            .with_mutation(id, || self.gate.data().set_session_archived(id, archived))
+            .await
     }
 
     async fn list_children(&self, parent: &ThreadId) -> SessionResourceResult<Vec<ThreadMeta>> {
@@ -512,69 +514,56 @@ impl SessionResources for SessionResourcesImpl {
             .await
     }
 
-    async fn save_fork(
+    async fn append_reminder_if_absent(
         &self,
-        fork: &ForkSnapshot,
-    ) -> SessionResourceResult<Arc<dyn SessionExecutionLease>> {
+        id: &ThreadId,
+        message_id: MessageId,
+        reminder: &peri_acp_types::system_reminder::TrustedSystemReminder,
+    ) -> SessionResourceResult<bool> {
+        self.gate
+            .with_mutation(id, || {
+                self.gate
+                    .data()
+                    .append_reminder_if_absent(id, message_id, reminder)
+            })
+            .await
+    }
+
+    async fn mark_session_closing(&self, id: &ThreadId) -> SessionResourceResult<()> {
+        self.gate
+            .with_mutation(id, || self.gate.data().mark_session_closing(id))
+            .await
+    }
+
+    async fn is_session_closing(&self, id: &ThreadId) -> SessionResourceResult<bool> {
+        self.gate.data().is_session_closing(id).await
+    }
+
+    async fn save_fork(&self, fork: &ForkSnapshot) -> SessionResourceResult<()> {
         self.gate.ensure_registration_write()?;
-        let local = self.gate.local();
         let data = self.gate.data();
         if !data.session_exists(&fork.source_id).await? {
             return Err(not_found());
         }
-        // 目标已存在：与 create 同一条判定——已有执行代际是 identity 冲突，数据已保存
-        // 而未准入则收敛（同一次尝试的幂等重试不会重复写历史）。
         if data.session_exists(&fork.target.thread_id).await? {
-            return self
-                .admit_saved_creation(&fork.target.thread_id, &fork.target.binding)
-                .await;
+            return self.admit_saved_creation(&fork.target).await;
         }
-        // 目标快照先完整落库（数据面一次事务），再建立执行准入；准入失败时数据已保存，
-        // 如实报告「已保存、未准入」，不重造目标快照。
-        //
-        // 这里不取租约门禁：目标是**新 identity**，此刻既没有 root 也没有 owner 可挂；
-        // 落库结果自描述（`threads` 行在、`execution_runs` 无），重试按「已保存、未准入」
-        // 收敛，因此不需要在别处留下未决证据。与 child 的差别在于 child 的写入归属
-        // root 执行域，没有自己的 identity 可解释残留。
-        self.gate.data().save_fork(fork).await?;
-        match local
-            .admit_existing(&fork.target.thread_id, &fork.target.binding)
-            .await
-        {
-            Ok(lease) => Ok(lease),
-            Err(error) if error.is_persistence_uncertain() => Err(error),
-            Err(_) => Err(SessionResourceError::saved_but_not_admitted(
-                fork.target.thread_id.clone(),
-            )),
-        }
+        let workspace = self
+            .recheck_binding(Some(&fork.target.binding), false)
+            .await?;
+        self.gate
+            .with_registration(&fork.target.thread_id, || {
+                self.gate.data().save_fork_in_workspace(fork, &workspace)
+            })
+            .await?;
+        self.admit_saved_creation(&fork.target).await
     }
 
-    async fn save_child(
-        &self,
-        child: &ChildSnapshot,
-        lease: &Arc<dyn SessionExecutionLease>,
-    ) -> SessionResourceResult<()> {
-        // 输入自洽先于一切副作用：快照里的父子关系出现两次（`parent_id` 与 target meta），
-        // 落库用的是后者。不一致的快照必须先被拒绝——此时还什么都没写、也没有在 root 的
-        // 租约上留下未决证据；只靠调用点自觉会让直接调用门面的一方写出「独立 root」。
+    async fn save_child(&self, child: &ChildSnapshot) -> SessionResourceResult<()> {
         ensure_child_relation(child)?;
         self.gate.ensure_registration_write()?;
-        let local = self.gate.local();
-        // root 的事实由数据面回答（子会话在本机可能一行都没有）；root 自己也可能是别处的
-        // 子会话，因此按「root 的 root + root 有没有绑定」问一次。
-        let facts = self.gate.session_facts(&child.root_id).await?;
-        let owned = local
-            .owner_lease(&child.root_id, &facts)
-            .await
-            .map_err(execution_failure)?
-            .ok_or_else(lease_required)?;
-        // child 沿用 root owner：传入的必须是这条 root 的活 owner，不能借别人的所有权写。
-        if !owned.is_active() || !same_lease(&owned, lease) {
-            return Err(lease_required());
-        }
-        // child 沿用 root owner，写入门禁也必须挂在 root 上：新 child 自己既没有 identity 也没有
-        // 执行代际，用 target id 解析只会得到「链上无 owner」而不设门禁，取消/超时就无法在
-        // root 的租约上留下未决证据（B §4.1.3「guard 覆盖真正的 adapter 工作完成」）。
+        self.recheck_binding(Some(&child.target.binding), false)
+            .await?;
         self.gate
             .with_mutation(&child.root_id, || self.gate.data().save_child(child))
             .await
@@ -672,146 +661,25 @@ impl SessionResources for SessionResourcesImpl {
     }
 
     async fn delete_session_tree(&self, id: &ThreadId) -> SessionResourceResult<()> {
-        // 删除是显式生命周期行为：门面确认有效 owner 后才动数据；删除即删除——v10 之后
-        // 本机不再留删除锚点（用户裁决不做跨安装的终态判定），远端删除也不再需要先把
-        // 「正在删除」写回本机。
         self.gate
             .with_mutation(id, || self.gate.data().delete_tree(id))
-            .await?;
-        // 数据消失之后，本机执行事实也随之结束：这条 identity 的代际行与本进程持有的
-        // owner 在同一步收尾（见 `LocalExecutionPort::dispose_execution`）。放在删除**之后**
-        // 是必须的——所有权要在数据被删的整个过程中保持；删除失败时提前返回，所有权原样
-        // 保留，调用方仍可重试或显式放弃。
-        self.gate.local().dispose_execution(id).await
+            .await
     }
 
-    /// 未决持久化的收敛：不需要调用方提供任何令牌或操作 id。
-    ///
-    /// 收谁的口供由数据面决定（本机写入同事务完成，因此本机组合只需确认锚点已清；远程组合
-    /// 按本机日志里的**原操作 id** 逐条向远端账本求证终态）。门面在这里只做两件事：
-    ///
-    /// 1. **不与自己在途的请求抢判定权**：本进程还持有这条 root 的活 owner 时，先等已准入
-    ///    的写入结束（有界），再让数据面判定。取消/超时之后的真实写仍会留在日志里，因此
-    ///    等待只是把先后顺序摆正，不是判定依据；
-    /// 2. 把结论原样转达（`Recovered` 才代表本机已无可证明未结态的写入），失败不降级。
-    ///
-    /// 只读打开时本方法只读不写：回答的是「能否重载」，不是「已经收敛」。
-    ///
-    /// 关闭流程（`Closing`）下仍可调用：第一次关闭因未结清失败之后，收敛必须还有入口。
     async fn recover_session_persistence(
         &self,
         id: &ThreadId,
     ) -> SessionResourceResult<PersistenceRecovery> {
-        self.gate.ensure_recovery_permitted()?;
-        // 这是先后顺序而不是判定依据：等待失败（例如本机父链损坏导致诊断读取失败）不构成
-        // 「不能判定」，收敛结论仍只由数据面给出，不在这里用兜底把未知当已知。
-        let facts = self.gate.session_facts(id).await?;
-        let owner = self
-            .gate
-            .local()
-            .live_owner(id, &facts)
-            .await
-            .ok()
-            .flatten();
-        if let Some(lease) = owner {
-            if lease.is_active() {
-                tokio::time::timeout(SETTLE_WAIT, lease.wait_for_in_flight())
-                    .await
-                    .map_err(|_| SessionResourceError::new(SessionResourceErrorKind::Timeout))?;
-            }
-        }
-        self.gate.data().recover_persistence(id).await
+        self.gate.recover(id).await
     }
 
     async fn drain_persistence(&self, id: &ThreadId) -> SessionResourceResult<()> {
-        // 与恢复同样在 `Closing` 下放行：关闭前的排空必须能重做。
-        self.gate.ensure_recovery_permitted()?;
-        let local = self.gate.local();
-        let facts = self.gate.session_facts(id).await?;
-        // 排空等待的是**本进程**已准入的写入：他处持有的所有权不归本次等待，
-        // 因此这里用诊断查询，不把「本进程没有 owner」当成错误。
-        if let Some(lease) = local
-            .live_owner(id, &facts)
-            .await
-            .map_err(execution_failure)?
-        {
-            if lease.is_active() {
-                // 有界等待已准入写入结清；超时说明有写入卡住，报告未结清而不是无限等。
-                tokio::time::timeout(SETTLE_WAIT, lease.wait_for_in_flight())
-                    .await
-                    .map_err(|_| SessionResourceError::new(SessionResourceErrorKind::Timeout))?;
-            }
-            if lease.is_uncertain() {
-                return Err(SessionResourceError::persistence_uncertain(Some(
-                    id.clone(),
-                )));
-            }
-        }
-        self.gate.data().drain(id).await
+        self.gate.drain(id).await
     }
 }
 
-// ─── 部署关闭 ─────────────────────────────────────────────────────────────────
-
-impl SessionResourcesImpl {
-    /// 关闭整个存储（部署生命周期行为，不属于业务行为面）。
-    ///
-    /// 完成条件有两条，缺一不算确认：**本机传输面的关闭走完**（数据面 `close` 成功返回），
-    /// 以及**这个 store 的持久化未决已结清**——未结清判定按整 store 作用域提问（见下），
-    /// 不缩到活跃租约或活跃 root：租约已经 drop、durable 锚点仍在的写入同样挡住关闭。
-    /// 未结清时保持 `Closing`（恢复入口仍可用），重复关闭重新做一遍真实检查。
-    ///
-    /// 权限不由本方法决定而由**谁能拿到实例**决定：业务侧只持有
-    /// `Arc<dyn SessionResources>`（[`SessionResources`] 已不含关闭），本方法只对
-    /// 具体实例可见，取用点只有部署 owner [`SessionStoreShutdownOwner`]。
-    ///
-    /// [`SessionStoreShutdownOwner`]: crate::context::SessionStoreShutdownOwner
-    pub(crate) async fn close(&self) -> SessionResourceResult<()> {
-        // 关闭确认串行化：后来者要么看到确认关闭（幂等成功），要么重新做一遍真实检查，
-        // 不会因为「上一次调用过」或「正好并发」而绕过未结清事实。
-        let _confirm = self.close_confirm.lock().await;
-        if self.lifecycle.state() == LifecycleState::Closed {
-            return Ok(());
-        }
-        // 停止新写入不可逆；`Closing` 不是 `Closed`：未结清事实仍可收敛（恢复/排空在
-        // `Closing` 下继续可用，见 `gate::ensure_recovery_permitted`）。
-        self.lifecycle.begin_closing();
-
-        // 每次调用都重新做真实检查，不复用上一次的失败结论。
-        //
-        // 等待与判定分开：等待建立先后顺序（在途写入在关闭前结束），判定只认 `is_uncertain`
-        // 与未决锚点；超时说明写入卡住，报告未结清而不是无限期等待外部 future。
-        for lease in self.gate.local().live_leases() {
-            if !lease.is_active() {
-                continue;
-            }
-            if tokio::time::timeout(SETTLE_WAIT, lease.wait_for_in_flight())
-                .await
-                .is_err()
-            {
-                return Err(SessionResourceError::new(SessionResourceErrorKind::Timeout));
-            }
-            if lease.is_uncertain() {
-                return Err(SessionResourceError::persistence_uncertain(Some(
-                    lease.thread_id().clone(),
-                )));
-            }
-        }
-        // 未结清事实只在活租约上（本机没有再留 durable 锚点）：租约 drop 之后那次写入的
-        // 终态由 `execution_runs.clean = 0` 表达，不挡关闭——那是「需要恢复」而不是
-        // 「本次关闭不能确认」。
-        //
-        // 恢复所需的证据已确认结清之后才关闭数据面：提前取走连接（远程 adapter 的唯一
-        // 连接句柄）会让「未确认」的未决事实失去收敛路径，而重复关闭恰恰要能重做检查。
-        self.gate.data().close().await?;
-        // 只有到这里才是确认关闭（并发调用由串行化保证只有一个走到这里；即便迁移已由
-        // 别处完成，结论也相同）。本机数据面的 `close` 只停止它自己的写入入口（连接池由
-        // 共享库句柄所有）；clean 由各 owner 自己写（`SessionExecutionLease::mark_clean`），
-        // 门面不代写、也不替它们宣告会话已结清。
-        self.lifecycle.confirm_closed();
-        Ok(())
-    }
-}
+#[path = "resources/deployment.rs"]
+mod deployment;
 
 #[cfg(test)]
 #[path = "resources_test.rs"]

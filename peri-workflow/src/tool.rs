@@ -78,7 +78,7 @@ impl WorkflowTool {
         let run_id = uuid::Uuid::now_v7().to_string();
         let workflow_name = wf_input.workflow_name.clone();
         let (kill_tx, kill_rx) = oneshot::channel::<()>();
-        let started_at = std::time::Instant::now();
+        let started_at = peri_time::monotonic_now();
 
         // 先原子占用 registry 并发槽，再 spawn，避免并发失败产生孤儿 run。
         let script_preview: String = wf_input.script.chars().take(100).collect();
@@ -147,7 +147,7 @@ impl WorkflowTool {
 
         // The one-second fast path observes the same already-published terminal projection.
         // Dropping this caller cannot cancel the registered execution/completion task.
-        if let Ok(Some(completed)) = tokio::time::timeout(
+        if let Ok(Some(completed)) = peri_time::timeout(
             std::time::Duration::from_secs(1),
             completion::receive_completion(&mut fast_rx),
         )

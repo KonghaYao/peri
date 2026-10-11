@@ -17,7 +17,7 @@
 
 use peri_acp_types::session_resources::{FrozenSnapshotBytes, NewSession, NewSessionMeta};
 use peri_acp_types::store::PersistedPayload;
-use peri_acp_types::workspace::{ResolvedWorkspace, SessionBinding, SESSION_BINDING_VERSION};
+use peri_acp_types::workspace::{ResolvedWorkspace, SessionBinding};
 use sqlx::sqlite::{SqliteConnectOptions, SqlitePoolOptions};
 use sqlx::SqlitePool;
 use tempfile::TempDir;
@@ -94,16 +94,15 @@ async fn seed(fixture: &NoCascade, id: &str, parent: Option<&str>) {
             cancel_policy: Default::default(),
             snapshot_at_message_id: None,
         },
-        binding: SessionBinding {
-            schema_version: SESSION_BINDING_VERSION,
-            revision: 1,
-            project_id: workspace.project_id,
-            workspace_id: workspace.workspace_id,
-            cwd_relative_to_workspace: workspace.relative_cwd.clone(),
-        },
+        binding: SessionBinding::from_workspace(&workspace),
         frozen: FrozenSnapshotBytes::new(format!(r#"{{"v":1,"id":"{id}"}}"#)),
     };
     fixture.data.save_new_session(&input).await.unwrap();
+    fixture
+        .data
+        .mark_session_closing(&id.to_owned())
+        .await
+        .unwrap();
     fixture
         .data
         .append_history(
@@ -247,11 +246,20 @@ async fn test_data_delete_tree_leaves_no_orphans_without_cascade() {
 }
 
 /// 数据面 `revoke_unpublished_session`（单条未发布会话）。
+///
+/// 撤销的对象是**未提交 frozen** 的草稿：已提交快照的会话不是「未发布创建」，撤销必须
+/// 拒绝（见 `test_revoke_refuses_a_committed_session`），所以这里先删掉种子写入的 frozen
+/// 值，让判据回到草稿态。
 #[tokio::test]
 async fn test_revoke_unpublished_session_leaves_no_orphans_without_cascade() {
     let fixture = without_cascade().await;
     let id = "s-revoked";
     seed(&fixture, id, None).await;
+    sqlx::query("UPDATE threads SET frozen_context = NULL WHERE id = ?1")
+        .bind(id)
+        .execute(&fixture.store.database.pool)
+        .await
+        .unwrap();
     let pool = fixture.store.database.pool.clone();
     let tables = schema_child_tables(&pool).await;
     assert_child_rows_present(&pool, &tables, &[id]).await;
@@ -275,20 +283,6 @@ async fn test_bridge_delete_thread_leaves_no_orphans_without_cascade() {
     let pool = fixture.store.database.pool.clone();
     let tables = schema_child_tables(&pool).await;
     assert_child_rows_present(&pool, &tables, &[id]).await;
-
-    // 桥的删除走执行准入：有绑定行的会话是「有主」的，按生产语义先取得所有权。
-    let facts = fixture
-        .store
-        .database
-        .local_session_facts(&id.to_owned())
-        .await
-        .unwrap();
-    let _lease = fixture
-        .store
-        .database
-        .acquire_execution_lease_impl(&id.to_owned(), &facts)
-        .await
-        .unwrap();
 
     fixture.store.delete_thread(&id.to_owned()).await.unwrap();
 

@@ -21,7 +21,7 @@ async fn run_manual_compact(ctx: SessionContext, sessions: SharedSessions) -> se
             ..Default::default()
         },
     );
-    let mut turn = make_recovery_turn(&ctx, &sessions, false).await;
+    let mut turn = make_compact_turn(&ctx, &sessions, false).await;
     turn.content = MessageContent::text("/compact");
     turn.event_sink = Arc::new(TransportEventSink::new(Arc::new(server), caps));
     let result = run_session_loop(ctx.clone(), turn).await;
@@ -62,8 +62,7 @@ async fn run_manual_compact(ctx: SessionContext, sessions: SharedSessions) -> se
 async fn test_manual_compact_twice_through_host_preserves_canonical_history() {
     let dir = tempfile::tempdir().unwrap();
     let _home = HomeGuard::set(dir.path());
-    let (mut ctx, store, sessions) =
-        make_recovery_context(&dir, Arc::new(SummaryModel), false).await;
+    let (mut ctx, store, sessions) = make_compact_context(&dir, Arc::new(SummaryModel)).await;
     enable_compact_command(&mut ctx, Arc::new(SummaryModel));
     let original = store
         .load_payloads(ctx.thread_id.as_ref().unwrap())
@@ -102,10 +101,9 @@ async fn test_manual_compact_twice_through_host_preserves_canonical_history() {
 async fn test_auto_full_then_manual_compact_through_host() {
     let dir = tempfile::tempdir().unwrap();
     let _home = HomeGuard::set(dir.path());
-    let (mut ctx, store, sessions) =
-        make_recovery_context(&dir, Arc::new(SummaryModel), false).await;
+    let (mut ctx, store, sessions) = make_compact_context(&dir, Arc::new(SummaryModel)).await;
     enable_compact_command(&mut ctx, Arc::new(SummaryModel));
-    let turn = make_recovery_turn(&ctx, &sessions, true).await;
+    let turn = make_compact_turn(&ctx, &sessions, true).await;
     let result = run_session_loop(ctx.clone(), turn).await;
     assert!(result.history_replaced_by_compaction);
     finish_prompt_turn(&sessions, &ctx.session_id, false, result)
@@ -122,13 +120,12 @@ async fn test_auto_full_then_manual_compact_through_host() {
 async fn test_cold_snapshot_then_manual_compact_through_host() {
     let dir = tempfile::tempdir().unwrap();
     let _home = HomeGuard::set(dir.path());
-    let (mut ctx, store, sessions) =
-        make_recovery_context(&dir, Arc::new(SummaryModel), false).await;
+    let (mut ctx, store, sessions) = make_compact_context(&dir, Arc::new(SummaryModel)).await;
     enable_compact_command(&mut ctx, Arc::new(SummaryModel));
     run_manual_compact(ctx.clone(), sessions.clone()).await;
     drop(sessions);
     let reader = peri_resources::sessions::SessionResourcesImpl::open_existing_read_only(
-        dir.path().join("recovery.db"),
+        dir.path().join("compact-history.db"),
     )
     .await
     .unwrap();
@@ -149,8 +146,7 @@ async fn test_cold_snapshot_then_manual_compact_through_host() {
 async fn test_manual_compact_model_cancel_has_consistent_wire_and_preserves_history() {
     let dir = tempfile::tempdir().unwrap();
     let _home = HomeGuard::set(dir.path());
-    let (mut ctx, store, sessions) =
-        make_recovery_context(&dir, Arc::new(SummaryModel), false).await;
+    let (mut ctx, store, sessions) = make_compact_context(&dir, Arc::new(SummaryModel)).await;
     let (entered, ready) = tokio::sync::oneshot::channel();
     enable_compact_command(
         &mut ctx,

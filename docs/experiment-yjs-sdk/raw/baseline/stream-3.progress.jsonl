@@ -1,0 +1,10 @@
+{"progress":{"stage":"stream","completed":2048,"elapsedMs":43.113375},"memory":{"rssBytes":81739776,"peakRssBytes":81739776,"heapUsedBytes":13809948}}
+{"progress":{"stage":"stream","completed":4096,"elapsedMs":69.60412500000001},"memory":{"rssBytes":106921984,"peakRssBytes":106921984,"heapUsedBytes":19430244}}
+{"progress":{"stage":"stream","completed":6144,"elapsedMs":90.738208},"memory":{"rssBytes":113836032,"peakRssBytes":113836032,"heapUsedBytes":27903798}}
+{"progress":{"stage":"stream","completed":8192,"elapsedMs":112.185208},"memory":{"rssBytes":119783424,"peakRssBytes":119783424,"heapUsedBytes":39233531}}
+{"progress":{"stage":"stream","completed":10240,"elapsedMs":135.195666},"memory":{"rssBytes":165904384,"peakRssBytes":165904384,"heapUsedBytes":36960602}}
+{"progress":{"stage":"stream","completed":12288,"elapsedMs":153.744291},"memory":{"rssBytes":174571520,"peakRssBytes":174571520,"heapUsedBytes":44499660}}
+{"progress":{"stage":"stream","completed":14336,"elapsedMs":172.34283299999998},"memory":{"rssBytes":181239808,"peakRssBytes":181239808,"heapUsedBytes":52007974}}
+{"progress":{"stage":"stream","completed":16384,"elapsedMs":192.628291},"memory":{"rssBytes":187400192,"peakRssBytes":187400192,"heapUsedBytes":67085078}}
+{"progress":{"stage":"stream_verified","completed":16384,"elapsedMs":217.72270799999998},"memory":{"rssBytes":277463040,"peakRssBytes":277463040,"heapUsedBytes":105070379}}
+{"resultFile":"/Users/konghayao/code/ai/docs/experiment-yjs-sdk/raw/baseline/stream-3.json","status":"passed","elapsedMs":217.77754099999999}

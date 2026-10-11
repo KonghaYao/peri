@@ -1,9 +1,70 @@
+use super::MachineAction;
+use anyhow::{Context, Result, bail, ensure};
 use peri_acp_types::session_resources::{SessionResourceError, SessionResourceErrorKind};
 use peri_acp_types::session_store::SessionStoreDeployment;
 use peri_acp_types::thread::{ThreadId, ThreadMeta};
+use peri_acp_types::workspace::MachineIdentityKind;
+use peri_acp_types::workspace::{MachineInfo, WorkspaceInfo};
 use peri_resources::{StoreOpenFailure, classify_open_failure};
 use serde::Serialize;
 use uuid::Uuid;
+
+pub(crate) async fn run_machine_adopt(
+    action: MachineAction,
+    deployment: SessionStoreDeployment,
+) -> Result<()> {
+    let MachineAction::Adopt {
+        target,
+        current,
+        apply,
+        confirm_no_active_executions,
+    } = action;
+    let target = Uuid::parse_str(&target)
+        .context("target Machine ID must be a UUID")?
+        .to_string();
+    let resources = peri_resources::Resources::open_deployment(&deployment).await?;
+    let sessions = resources.session_resources();
+    let current_id = peri_resources::sessions::current_machine_id()?.to_owned();
+    let machines = sessions.list_machines().await?;
+    let selected = machines
+        .iter()
+        .find(|machine| machine.id == target)
+        .context("target Machine ID is not registered in this store")?;
+    ensure!(
+        selected.identity_kind == MachineIdentityKind::Known,
+        "legacy unknown identity cannot be adopted"
+    );
+    let workspaces = sessions.list_workspaces(&target).await?;
+    println!("Current Machine ID: {current_id}");
+    println!("Adopt: {} ({target})", selected.name.escape_debug());
+    for workspace in workspaces {
+        println!(
+            "  {}  {}",
+            workspace.id,
+            workspace.path.to_string_lossy().escape_debug()
+        );
+    }
+    if !apply {
+        println!(
+            "Review this identity, then rerun with --current {current_id} --apply --confirm-no-active-executions."
+        );
+        return Ok(());
+    }
+    ensure!(
+        confirm_no_active_executions,
+        "--apply requires --confirm-no-active-executions"
+    );
+    let Some(expected) = current else {
+        bail!("--apply requires --current with the displayed Machine ID");
+    };
+    ensure!(
+        Uuid::parse_str(&expected)?.to_string() == current_id,
+        "current Machine ID changed; review the catalog again"
+    );
+    peri_resources::sessions::adopt_file_identity(&current_id, &target)?;
+    println!("Machine identity saved. Restart Peri to use {target}.");
+    Ok(())
+}
 
 const SCHEMA_VERSION: u8 = 1;
 
@@ -25,6 +86,109 @@ struct SessionMetaDtoV1 {
     message_count: usize,
     parent_thread_id: Option<String>,
     persisted_agent_status: String,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct MachineCatalogEntry {
+    #[serde(flatten)]
+    machine: MachineInfo,
+    workspaces: Vec<WorkspaceInfo>,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct MachineCatalogDto {
+    current_machine_id: String,
+    machines: Vec<MachineCatalogEntry>,
+}
+
+pub(crate) async fn run_meta_machines(
+    deployment: SessionStoreDeployment,
+    json: bool,
+) -> MetaCommandOutcome {
+    let resources = match peri_resources::Resources::open_deployment(&deployment).await {
+        Ok(resources) => resources,
+        Err(error) => {
+            return error_outcome_with_message(map_open_error(&error), json, format!("{error:#}"));
+        }
+    };
+    let sessions = resources.session_resources();
+    let current_machine_id = match peri_resources::sessions::current_machine_id() {
+        Ok(id) => id.to_owned(),
+        Err(error) => {
+            return error_outcome_with_message(
+                MetaErrorKind::InternalError,
+                json,
+                error.to_string(),
+            );
+        }
+    };
+    let machines = match sessions.list_machines().await {
+        Ok(machines) => machines,
+        Err(error) => {
+            return error_outcome_with_message(map_resource_error(&error), json, error.to_string());
+        }
+    };
+    let mut entries = Vec::with_capacity(machines.len());
+    for machine in machines {
+        let workspaces = match sessions.list_workspaces(&machine.id).await {
+            Ok(workspaces) => workspaces,
+            Err(error) => {
+                return error_outcome_with_message(
+                    map_resource_error(&error),
+                    json,
+                    error.to_string(),
+                );
+            }
+        };
+        entries.push(MachineCatalogEntry {
+            machine,
+            workspaces,
+        });
+    }
+    let output = if json {
+        match serde_json::to_string(&MachineCatalogDto {
+            current_machine_id: current_machine_id.clone(),
+            machines: entries,
+        }) {
+            Ok(output) => output,
+            Err(error) => {
+                return error_outcome_with_message(
+                    MetaErrorKind::InternalError,
+                    true,
+                    error.to_string(),
+                );
+            }
+        }
+    } else {
+        let mut output = format!("Current Machine ID: {current_machine_id}\n");
+        for entry in entries {
+            use std::fmt::Write;
+            let current = if entry.machine.is_current { " *" } else { "" };
+            let _ = writeln!(
+                output,
+                "{} ({}){}",
+                escape_human(&entry.machine.name),
+                entry.machine.id,
+                current
+            );
+            for workspace in entry.workspaces {
+                let _ = writeln!(
+                    output,
+                    "  {}  {}",
+                    workspace.id,
+                    escape_human(&workspace.path.to_string_lossy())
+                );
+            }
+        }
+        output.trim_end_matches('\n').to_owned()
+    };
+    MetaCommandOutcome {
+        stdout: Some(format!("{output}\n")),
+        stderr: None,
+        exit_code: 0,
+    }
 }
 
 impl From<ThreadMeta> for SessionMetaDtoV1 {
@@ -113,7 +277,7 @@ struct MetaErrorDtoV1 {
 #[derive(Serialize)]
 struct MetaErrorBodyV1 {
     kind: &'static str,
-    message: &'static str,
+    message: String,
 }
 
 pub(crate) fn invalid_argument_outcome(json: bool) -> MetaCommandOutcome {
@@ -139,7 +303,9 @@ pub(crate) async fn run_meta_session(
     // 访问意图在入口处固定为只读（不写任何本机文件、不登记 owner、不建目录）。
     let resources = match peri_resources::Resources::open_deployment(&deployment).await {
         Ok(resources) => resources,
-        Err(error) => return error_outcome(map_open_error(&error), json),
+        Err(error) => {
+            return error_outcome_with_message(map_open_error(&error), json, format!("{error:#}"));
+        }
     };
     let meta = match resources
         .session_resources()
@@ -147,7 +313,9 @@ pub(crate) async fn run_meta_session(
         .await
     {
         Ok(meta) => meta,
-        Err(error) => return error_outcome(map_resource_error(&error), json),
+        Err(error) => {
+            return error_outcome_with_message(map_resource_error(&error), json, error.to_string());
+        }
     };
 
     success_outcome(SessionMetaDtoV1::from(meta), json)
@@ -180,7 +348,13 @@ fn success_outcome(dto: SessionMetaDtoV1, json: bool) -> MetaCommandOutcome {
     let output = if json {
         match serde_json::to_string(&dto) {
             Ok(value) => value,
-            Err(_) => return error_outcome(MetaErrorKind::InternalError, true),
+            Err(error) => {
+                return error_outcome_with_message(
+                    MetaErrorKind::InternalError,
+                    true,
+                    error.to_string(),
+                );
+            }
         }
     } else {
         render_human(&dto)
@@ -193,19 +367,27 @@ fn success_outcome(dto: SessionMetaDtoV1, json: bool) -> MetaCommandOutcome {
 }
 
 fn error_outcome(kind: MetaErrorKind, json: bool) -> MetaCommandOutcome {
+    error_outcome_with_message(kind, json, kind.message().to_owned())
+}
+
+fn error_outcome_with_message(
+    kind: MetaErrorKind,
+    json: bool,
+    message: String,
+) -> MetaCommandOutcome {
+    let message = peri_acp_types::session::bounded_error_message(&message, 2_000);
+    tracing::error!(kind = kind.name(), error = %message, "Meta command failed");
     let output = if json {
         let dto = MetaErrorDtoV1 {
             schema_version: SCHEMA_VERSION,
             error: MetaErrorBodyV1 {
                 kind: kind.name(),
-                message: kind.message(),
+                message: message.clone(),
             },
         };
-        serde_json::to_string(&dto).unwrap_or_else(|_| {
-            "{\"schemaVersion\":1,\"error\":{\"kind\":\"internal_error\",\"message\":\"an internal error occurred\"}}".to_owned()
-        })
+        serde_json::to_string(&dto).expect("Meta error DTO contains only strings and an integer")
     } else {
-        format!("{}: {}", kind.name(), kind.message())
+        format!("{}: {}", kind.name(), message)
     };
     MetaCommandOutcome {
         stdout: None,

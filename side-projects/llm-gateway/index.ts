@@ -86,16 +86,8 @@ function logC(color: number, ...args: unknown[]) {
     console.log(`\x1b[${color}m`, ...args, "\x1b[0m");
 }
 
-export function sanitizeHeaders(headers: Headers): Record<string, string> {
-    const safe: Record<string, string> = {};
-    for (const [k, v] of headers.entries()) {
-        if (/authorization|api[_-]?key|cookie/i.test(k)) {
-            safe[k] = v.slice(0, 12) + "…";
-        } else {
-            safe[k] = v;
-        }
-    }
-    return safe;
+export function headersForLog(headers: Headers): Record<string, string> {
+    return Object.fromEntries(headers.entries());
 }
 
 function logRequest(
@@ -115,7 +107,7 @@ function logRequest(
         logC(
             90,
             "  HEADERS:",
-            JSON.stringify(sanitizeHeaders(headers), null, 2),
+            JSON.stringify(headersForLog(headers), null, 2),
         );
         logC(90, "  BODY:", JSON.stringify(body, null, 2));
     }
@@ -194,7 +186,7 @@ export async function proxyRequest(
         id,
         "request.json",
         JSON.stringify(
-            { headers: sanitizeHeaders(proxyHeaders), body: reqJson },
+            { headers: headersForLog(proxyHeaders), body: reqJson },
             null,
             2,
         ),

@@ -1,0 +1,361 @@
+use super::*;
+use peri_acp_types::system_reminder::{
+    ReminderAudience, ReminderCategory, ReminderDelivery, ReminderSeverity,
+};
+use peri_agent::agent::react::AgentOutput;
+use peri_agent::agent::state::AgentState;
+use peri_agent::goal::{GoalController, GoalStatus, GoalViewSnapshot};
+use peri_agent::middleware::r#trait::Middleware;
+
+struct MockController {
+    snapshot: parking_lot::Mutex<GoalViewSnapshot>,
+    continuation_count: std::sync::atomic::AtomicU64,
+}
+
+#[async_trait]
+impl GoalController for MockController {
+    async fn create_goal(&self, _objective: String) -> Result<(), String> {
+        Ok(())
+    }
+    async fn complete_goal(&self) -> Result<(), String> {
+        Ok(())
+    }
+    async fn block_goal(&self, _reason: String) -> Result<(), String> {
+        Ok(())
+    }
+    async fn clear_goal(&self) -> Result<(), String> {
+        Ok(())
+    }
+    async fn increment_continuation(&self) -> Result<(), String> {
+        self.continuation_count
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        Ok(())
+    }
+    fn snapshot(&self) -> GoalViewSnapshot {
+        self.snapshot.lock().clone()
+    }
+}
+
+fn make_active_snapshot() -> GoalViewSnapshot {
+    GoalViewSnapshot {
+        objective: Some("测试目标".to_string()),
+        status: Some(GoalStatus::Active),
+        token_budget: None,
+        tokens_used: 0,
+        ..Default::default()
+    }
+}
+
+fn make_complete_snapshot() -> GoalViewSnapshot {
+    GoalViewSnapshot {
+        status: Some(GoalStatus::Complete),
+        ..make_active_snapshot()
+    }
+}
+
+/// [回归测试] 后台任务尚未终态时，旧 after_agent 会注入提醒并增长接续次数与紧迫感。
+#[tokio::test]
+async fn test_after_agent_background_tasks_suppress_and_resume_goal() {
+    use peri_acp_types::tasks::{BgTaskKind, BgTaskRegistration, TaskManager as _};
+    use peri_agent::agent::{
+        agent_context::AgentContext, async_tasks::TaskManager, events::BackgroundTaskResult,
+        stages::StageContext,
+    };
+    use peri_agent::session::{FrozenContext, Session};
+    for kind in [BgTaskKind::Agent, BgTaskKind::Workflow, BgTaskKind::Shell] {
+        for success in [true, false] {
+            let manager = Arc::new(TaskManager::new());
+            let session = Session::new(
+                Arc::from("/tmp/goal-reminder"),
+                FrozenContext::builder().build(),
+                None,
+            );
+            let ctx = StageContext::builder(
+                session.start_turn(),
+                session.transcript(),
+                session.queue().clone(),
+            )
+            .with_idle_should_wait({
+                let manager = manager.clone();
+                Arc::new(move || manager.active_count() > 0)
+            })
+            .build();
+            let mut state = AgentContext::from_stage(&ctx);
+            let controller = Arc::new(MockController {
+                snapshot: parking_lot::Mutex::new(make_active_snapshot()),
+                continuation_count: std::sync::atomic::AtomicU64::new(0),
+            });
+            let mw = GoalMiddleware::new(controller.clone(), None);
+            let output = AgentOutput::new("等待后台完成", 1);
+            Middleware::after_agent(&mw, &mut state, &output)
+                .await
+                .unwrap();
+            session.queue().drain_all();
+            manager
+                .register(BgTaskRegistration {
+                    task_id: "background".into(),
+                    kind,
+                    summary: "后台边界替身".into(),
+                    pid: None,
+                    kill: Some(Box::new(|| {})),
+                })
+                .unwrap();
+            for _ in 0..2 {
+                let result = Middleware::after_agent(&mw, &mut state, &output)
+                    .await
+                    .unwrap();
+                assert!(result.block_continue.is_none(), "{kind:?} 活跃时不应续跑");
+                assert!(session.queue().drain_all().is_empty(), "后台期间不应注入");
+                assert_eq!(controller.continuation_count.load(Ordering::Relaxed), 1);
+                assert_eq!(
+                    mw.pending_rounds.load(Ordering::Relaxed),
+                    1,
+                    "紧迫感不应增长"
+                );
+            }
+            assert!(manager.complete(
+                "background",
+                BackgroundTaskResult {
+                    task_id: "background".into(),
+                    agent_name: "边界替身".into(),
+                    prompt_summary: String::new(),
+                    success,
+                    output: "终态".into(),
+                    tool_calls_count: 0,
+                    duration_ms: 0,
+                    child_thread_id: None,
+                    timed_out: false,
+                    subagent_failure: None,
+                    shell_output: None,
+                }
+            ));
+            let result = Middleware::after_agent(&mw, &mut state, &output)
+                .await
+                .unwrap();
+            assert_eq!(result.block_continue.as_deref(), Some("goal_active"));
+            assert_eq!(controller.continuation_count.load(Ordering::Relaxed), 2);
+            assert_eq!(mw.pending_rounds.load(Ordering::Relaxed), 2);
+            let messages = session.queue().drain_all();
+            assert_eq!(messages.len(), 1);
+            assert_eq!(messages[0].kind, peri_agent::session::MessageKind::Defer);
+            assert_eq!(
+                messages[0].source,
+                peri_agent::session::MessageSource::GoalSteering
+            );
+            let peri_agent::session::QueuedPayload::SystemReminder(reminder) = &messages[0].payload
+            else {
+                panic!("必须使用 canonical reminder");
+            };
+            assert_eq!(reminder.as_reminder().metadata["round"], 2);
+            assert!(reminder.as_reminder().body.contains("must call"));
+        }
+    }
+}
+
+#[test]
+fn test_render_steering_escalates() {
+    let r1 = GoalMiddleware::render_steering("目标", 1);
+    assert!(r1.contains("Decide"));
+
+    let r2 = GoalMiddleware::render_steering("目标", 2);
+    assert!(r2.contains("must call"));
+
+    let r3 = GoalMiddleware::render_steering("目标", 3);
+    assert!(r3.contains("Attention"));
+}
+
+#[test]
+fn test_render_steering_contains_objective() {
+    let r = GoalMiddleware::render_steering("完成重构", 1);
+    assert!(r.contains("完成重构"));
+}
+
+/// **防漂移不变量**：Goal 面与 MCP 能力面**按构造解耦**，故它**不是** builtin 关闭集
+/// （IF-D10）的一个面。
+///
+/// 事实：`GoalMiddleware::collect_tools` 恒返回 `vec![GoalTool]`
+/// （`peri-middlewares/src/goal/middleware.rs:77-84`），既不消费 `shared_tools`、也不消费
+/// bridge 列表或装配期的关闭集（`assembly.rs:366-371` 的 `ChainSlot::Goal` 只看
+/// `"GoalMiddleware"` 这个策略键）。
+///
+/// 因此**不能**断言「关闭 web/artifact 后 Goal 工具表收缩」——那是必然同义反复：Goal 面的
+/// 工具集合与关闭集按构造无关，**没有**独立的可证伪面，本用例不假装有。
+///
+/// 下面第三条断言（工具集合不含 `mcp__` 前缀名）**与前面两条不独立**：在
+/// `len == 1` 且 `name() == "goal"` 成立的前提下它恒真。它**不是**「关闭集收缩」的
+/// 可证伪替代，保留它的价值只有一个：一旦将来有人放宽前两条（例如允许 Goal 合并外部
+/// 工具进列表），本条仍把「Goal 面不得承载 MCP 能力」钉住。
+#[test]
+fn test_collect_tools_returns_goal_tool() {
+    let controller = Arc::new(MockController {
+        snapshot: parking_lot::Mutex::new(make_active_snapshot()),
+        continuation_count: std::sync::atomic::AtomicU64::new(0),
+    }) as Arc<dyn GoalController>;
+    let mw = GoalMiddleware::new(controller, None);
+
+    let tools = Middleware::collect_tools(&mw, "/tmp");
+    assert_eq!(tools.len(), 1);
+    assert_eq!(tools[0].name(), "goal");
+    assert!(
+        !tools.iter().any(|tool| tool.name().starts_with("mcp__")),
+        "Goal 面不得承载任何 MCP 工具（`mcp__` 前缀）：它与 builtin 关闭集按构造无关: {:?}",
+        tools.iter().map(|tool| tool.name()).collect::<Vec<_>>()
+    );
+}
+
+#[tokio::test]
+async fn test_after_agent_goal_active_注入_steering_并设_block_continue() {
+    let controller = Arc::new(MockController {
+        snapshot: parking_lot::Mutex::new(make_active_snapshot()),
+        continuation_count: std::sync::atomic::AtomicU64::new(0),
+    });
+    let mw = GoalMiddleware::new(controller.clone(), None);
+    let mut state = AgentState::new("/tmp");
+    let output = AgentOutput::new("我完成了", 1);
+
+    let result = Middleware::after_agent(&mw, &mut state, &output)
+        .await
+        .unwrap();
+
+    // 设 block_continue 触发 executor 续跑
+    assert_eq!(result.block_continue.as_deref(), Some("goal_active"));
+    assert_eq!(
+        controller
+            .continuation_count
+            .load(std::sync::atomic::Ordering::Relaxed),
+        1
+    );
+
+    // 注入路径：v2 MessageQueue 应收到 1 条 Defer（GoalSteering）
+    let drained = state.v2_queue().drain_all();
+    assert_eq!(drained.len(), 1, "应 push 1 条 goal steering Defer 消息");
+    assert_eq!(drained[0].kind, peri_agent::session::MessageKind::Defer);
+    assert_eq!(
+        drained[0].source,
+        peri_agent::session::MessageSource::GoalSteering
+    );
+    let reminder = match &drained[0].payload {
+        peri_agent::session::QueuedPayload::SystemReminder(reminder) => reminder.as_reminder(),
+        other => panic!("expected canonical reminder, got {other:?}"),
+    };
+    assert_eq!(reminder.category, ReminderCategory::Guidance);
+    assert_eq!(reminder.source.0, "goal");
+    assert_eq!(reminder.kind, "steering");
+    assert_eq!(reminder.severity, ReminderSeverity::Warning);
+    assert_eq!(reminder.delivery, ReminderDelivery::Required);
+    assert!(reminder.audiences.contains(ReminderAudience::Model));
+    assert!(reminder.audiences.contains(ReminderAudience::Automation));
+}
+
+#[tokio::test]
+async fn test_after_agent_no_goal_放行_不注入() {
+    let controller = Arc::new(MockController {
+        snapshot: parking_lot::Mutex::new(GoalViewSnapshot::default()),
+        continuation_count: std::sync::atomic::AtomicU64::new(0),
+    }) as Arc<dyn GoalController>;
+    let mw = GoalMiddleware::new(controller, None);
+    let mut state = AgentState::new("/tmp");
+    let output = AgentOutput::new("普通回答", 1);
+
+    let result = Middleware::after_agent(&mw, &mut state, &output)
+        .await
+        .unwrap();
+
+    assert!(
+        result.block_continue.is_none(),
+        "无 goal 时不应设 block_continue"
+    );
+    // 无 goal 时 queue 应为空
+    let drained = state.v2_queue().drain_all();
+    assert!(drained.is_empty(), "无 goal 时不应 push 任何消息");
+}
+
+#[tokio::test]
+async fn test_after_agent_existing_block_continue_不干预() {
+    // HookMiddleware 等前置中间件已设 block_continue 时，
+    // GoalMiddleware 必须尊重优先级，不覆盖也不重复注入 steering
+    let controller = Arc::new(MockController {
+        snapshot: parking_lot::Mutex::new(make_active_snapshot()),
+        continuation_count: std::sync::atomic::AtomicU64::new(0),
+    });
+    let mw = GoalMiddleware::new(controller.clone(), None);
+    let mut state = AgentState::new("/tmp");
+    let mut output = AgentOutput::new("hook 拦截", 1);
+    output.block_continue = Some("hook_stop".to_string());
+
+    let result = Middleware::after_agent(&mw, &mut state, &output)
+        .await
+        .unwrap();
+
+    assert_eq!(
+        result.block_continue.as_deref(),
+        Some("hook_stop"),
+        "已有 block_continue 应保留原值，不被 goal_active 覆盖"
+    );
+    assert_eq!(controller.continuation_count.load(Ordering::Relaxed), 0);
+    assert_eq!(mw.pending_rounds.load(Ordering::Relaxed), 0);
+    // 不干预时 queue 应为空
+    let drained = state.v2_queue().drain_all();
+    assert!(
+        drained.is_empty(),
+        "已有 block_continue 时不应 push steering"
+    );
+}
+
+#[tokio::test]
+async fn test_after_agent_terminal_重置_pending_rounds() {
+    let mock = Arc::new(MockController {
+        snapshot: parking_lot::Mutex::new(make_active_snapshot()),
+        continuation_count: std::sync::atomic::AtomicU64::new(0),
+    });
+    let controller: Arc<dyn GoalController> = mock.clone();
+    let mw = GoalMiddleware::new(controller, None);
+    let mut state = AgentState::new("/tmp");
+
+    // 第一次：goal active，递增到 round 1
+    let r1 = Middleware::after_agent(&mw, &mut state, &AgentOutput::new("回答1", 1))
+        .await
+        .unwrap();
+    assert_eq!(r1.block_continue.as_deref(), Some("goal_active"));
+    // v1 MessageQueue 已删除；round1 紧迫感直接由 render_steering(1) 校验
+    let round1_urgency: String = GoalMiddleware::render_steering("测试目标", 1)
+        .lines()
+        .filter(|l| l.contains("Decide") || l.contains("must call") || l.contains("Attention"))
+        .collect();
+
+    // 转入终态（Complete）
+    {
+        *mock.snapshot.lock() = make_complete_snapshot();
+    }
+    let r2 = Middleware::after_agent(&mw, &mut state, &AgentOutput::new("完成", 2))
+        .await
+        .unwrap();
+    assert!(r2.block_continue.is_none(), "终态时不应 block_continue");
+
+    // 重新 active：pending_rounds 应已重置，从 round 1 重新开始
+    {
+        *mock.snapshot.lock() = make_active_snapshot();
+    }
+    let r3 = Middleware::after_agent(&mw, &mut state, &AgentOutput::new("新目标", 3))
+        .await
+        .unwrap();
+    assert_eq!(r3.block_continue.as_deref(), Some("goal_active"));
+    // v1 MessageQueue 已删除；round3 紧迫感直接由 render_steering(1) 校验
+    let round3_urgency: String = GoalMiddleware::render_steering("测试目标", 1)
+        .lines()
+        .filter(|l| l.contains("Decide") || l.contains("must call") || l.contains("Attention"))
+        .collect();
+
+    assert_eq!(
+        round1_urgency, round3_urgency,
+        "终态后重新 active 应从 round 1 开始（递增紧迫感计数器已重置）"
+    );
+
+    // 验证 queue 累积：两次 active（r1 / r3）各 push 1 条 Defer，r2 终态不 push
+    let drained_msg = state.v2_queue().drain_all();
+    assert_eq!(
+        drained_msg.len(),
+        2,
+        "应累积 2 条 goal steering Defer（两次 active），终态 r2 不 push"
+    );
+}

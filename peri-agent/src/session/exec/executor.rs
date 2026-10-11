@@ -56,11 +56,10 @@ use peri_acp_types::{
     event::ExecutorEvent,
     interaction::UserInteractionBroker,
     messages::{ContentBlock, MessageContent},
-    session::QueuedMessage,
 };
 use tokio_util::sync::CancellationToken as AgentCancellationToken;
 
-use peri_acp_types::tasks::{BgRegistryEvent, BgTaskKind};
+use peri_acp_types::tasks::BgTaskKind;
 
 use crate::agent::react::AgentInput;
 use crate::session::async_router::AsyncRouter;
@@ -153,56 +152,6 @@ struct TurnConfig<'a> {
     effective_context_window: u32,
 }
 
-/// BgRegistryEvent → unstable 事件（bg-task-started/completed/cancelled）映射。
-///
-/// TUI bg 面板协议面（`AcpEventData::BgTask*` 解码）依赖的事件名与 payload
-/// 字段保持不变——事件三层化仅改发射/消费路径（发射经 Controller 补打身份、
-/// 消费经 Controller 订阅），不改协议面。
-fn registry_unstable_event(event: &BgRegistryEvent) -> (String, serde_json::Value) {
-    match event {
-        BgRegistryEvent::Started {
-            task_id,
-            kind,
-            summary,
-            started_at,
-        } => (
-            "bg-task-started".to_string(),
-            serde_json::json!({
-                "task_id": task_id,
-                "kind": kind,
-                "summary": summary,
-                "started_at": started_at,
-            }),
-        ),
-        BgRegistryEvent::Completed {
-            task_id,
-            kind,
-            success,
-            output_preview,
-            duration_ms,
-            // route_bg_result 现在在 spawner 中同步执行（在 task_manager.complete()
-            // 之前），不再需要 registry 事件泵异步注入。
-            result: _result,
-        } => (
-            "bg-task-completed".to_string(),
-            serde_json::json!({
-                "task_id": task_id,
-                "kind": kind,
-                "success": success,
-                "output_preview": output_preview,
-                "duration_ms": duration_ms,
-            }),
-        ),
-        BgRegistryEvent::Cancelled { task_id, reason } => (
-            "bg-task-cancelled".to_string(),
-            serde_json::json!({
-                "task_id": task_id,
-                "reason": reason,
-            }),
-        ),
-    }
-}
-
 /// Shared agent execution pipeline with auto-compact support.
 ///
 /// # 调用方职责（L5 依赖反转）
@@ -285,15 +234,13 @@ pub async fn run_session_loop(ctx: SessionContext, turn: TurnInput) -> PromptRes
             history_replaced_by_compaction: false,
             persistence_inconsistent: false,
             recall_items: Vec::new(),
+            pending_tasks: 0,
             failure: None,
         };
     }
 
-    // Compact config — computed early for command interception and agent building.
-    // （L5：env overrides 在宿主构造点应用，语义与 load_compact_config 一致）
-    let disable_compact = std::env::var("DISABLE_COMPACT").is_ok()
-        || std::env::var("DISABLE_AUTO_COMPACT").is_ok()
-        || !ctx.compact_config.auto_compact_enabled;
+    // The host has already applied environment overrides to this turn's config.
+    let disable_compact = !ctx.compact_config.auto_compact_enabled;
 
     // 解析会话级共享的 v2 MessageQueue（经 SessionAccessPort）。
     // 缺失时（无 session_access / session 不存在）退化为独立 MessageQueue，
@@ -311,52 +258,14 @@ pub async fn run_session_loop(ctx: SessionContext, turn: TurnInput) -> PromptRes
         incoming_recalls.clear();
     }
 
-    // 解析 session-level SessionInbox（await-wake wrapper）。
-    // 用于：(1) executor idle 期间 await_wake 阻塞等待异步事件，
-    // (2) AsyncRouter 推送 bg_results/workflow 事件时触发 wake。
-    // None 表示不支持 async wake（如 print mode），保持向后兼容。
-    let session_inbox = ctx
-        .session_access
-        .as_ref()
-        .and_then(|sa| sa.session_inbox(&ctx.session_id));
-
-    // 构建 AsyncRouter（统一异步事件路由到 inbox）。
-    // 通过 InboxHandle 推送 Defer 消息并触发 wake Notify，
-    // 替代 executor 的直接 v2_message_queue.push（raw，无 wake）。
-    let async_router = session_inbox
-        .as_ref()
-        .map(|inbox| AsyncRouter::new(inbox.handle()));
-
-    // bg_results 通过 AsyncRouter（或回退到 v2 MessageQueue）push（Defer kind）。
-    //
-    // Defer 是异步延迟结果的正确语义：本轮 Receive 跳过保留，End 阶段 drain
-    // 唤醒新 turn，并由 `mod.rs::run_react_loop` 写入 transcript（包裹
-    // `<system-reminder>`）。与 WorkflowComplete / cron 等其他异步唤醒路径
-    // 走同一套机制——见 `append_messages_to_transcript`。
+    let async_router = AsyncRouter::for_queue(&v2_message_queue);
     if !bg_results.is_empty() {
         tracing::info!(
             count = bg_results.len(),
             "[bg-diag] ctx.bg_results is non-empty, will inject each via AsyncRouter"
         );
-        if let Some(ref router) = async_router {
-            // v2 路径：通过 AsyncRouter → InboxHandle → push_defer（触发 wake）
-            for result in &bg_results {
-                router.route_bg_result(result, BgTaskKind::Agent);
-            }
-        } else {
-            // 回退路径：直接 push（无 wake，兼容 print mode / 无 SessionAccess）
-            use peri_acp_types::session::{MessageKind as V2Kind, MessageSource as V2Src};
-            for result in &bg_results {
-                let reminder = crate::session::async_router::background_result_reminder(
-                    result,
-                    BgTaskKind::Agent,
-                );
-                v2_message_queue.push(QueuedMessage::system_reminder(
-                    V2Kind::Defer,
-                    V2Src::SubAgentComplete,
-                    reminder,
-                ));
-            }
+        for result in &bg_results {
+            async_router.route_bg_result(result, BgTaskKind::Agent);
         }
     }
 
@@ -381,91 +290,16 @@ pub async fn run_session_loop(ctx: SessionContext, turn: TurnInput) -> PromptRes
     let effective_context_window = ctx.effective_context_window;
 
     // session 级 TaskManager（跨 prompt 存活，由 executor 从 session 获取）
-    let task_manager_for_cmd = ctx
+    // 有界等待摘要需要 loop 结束后的未结算计数；TaskManager 随后被 move 进
+    // 执行路径，这里先保留一个 Arc 句柄。
+    let pending_task_probe = ctx
         .session_access
         .as_ref()
-        .and_then(|sa| sa.task_manager(&ctx.session_id))
+        .and_then(|sa| sa.task_manager(&ctx.session_id));
+    let task_manager_for_cmd = pending_task_probe
+        .clone()
         .unwrap_or_else(|| Arc::new(peri_acp_types::tasks::NoopTaskManager));
-
-    // Registry → 事件链泵（事件三层化收尾）：发射经 EventPublisher
-    // （BgRegistryEvent 包装为 ExecutorEvent::BgRegistryEvent 载体；身份降级为
-    // 空串——registry 事件无 turn 归属），消费端从 subscribe() 工厂订阅
-    // 本 session 事件并映射回 bg-task-* unstable 事件（TUI bg 面板协议面不变）。
-    {
-        let (registry_event_tx, mut registry_event_rx) =
-            tokio::sync::mpsc::unbounded_channel::<BgRegistryEvent>();
-        task_manager_for_cmd.set_event_sender(registry_event_tx, ctx.session_id.clone());
-        let mut subscription = (ctx.subscribe)();
-        let registry_sink = Arc::clone(&event_sink);
-        let registry_sid = ctx.session_id.clone();
-        let publisher = Arc::clone(&ctx.event_publisher);
-        tokio::spawn(async move {
-            loop {
-                tokio::select! {
-                    msg = subscription.recv() => {
-                        match msg {
-                            Ok(m) if m.envelope.session_id == registry_sid => {
-                                if let Some(ExecutorEvent::BgRegistryEvent(event)) = m.event {
-                                    let (event_name, payload) = registry_unstable_event(&event);
-                                    registry_sink
-                                        .push_unstable_event(&registry_sid, event_name, payload)
-                                        .await;
-                                }
-                            }
-                            Ok(_) => {}
-                            Err(peri_acp_types::event::SubscriptionError::Lagged(n)) => {
-                                tracing::warn!(n, "registry event subscription lagged, events dropped");
-                            }
-                            Err(peri_acp_types::event::SubscriptionError::Closed) => break,
-                        }
-                    }
-                    ev = registry_event_rx.recv() => {
-                        match ev {
-                            Some(event) => {
-                                // 发射端：registry 事件无 turn/agent 身份（身份降级为
-                                // 空串；envelope 仅 ACP 内部使用）。
-                                let source = peri_acp_types::runtime::UnstampedEvent::new(
-                                    String::new(),
-                                    String::new(),
-                                    None,
-                                    peri_acp_types::identity::EventDeliveryClass::Critical,
-                                );
-                                publisher.publish_event(
-                                    &registry_sid,
-                                    &source,
-                                    ExecutorEvent::BgRegistryEvent(event),
-                                );
-                            }
-                            None => {
-                                // 发射点集合结束（registry_event_tx 全 drop）：drain 广播
-                                // 在途事件后退出（与主 pump 同语义）。
-                                loop {
-                                    match subscription.try_recv() {
-                                        Ok(Some(m)) if m.envelope.session_id == registry_sid => {
-                                            if let Some(ExecutorEvent::BgRegistryEvent(event)) = m.event {
-                                                let (event_name, payload) = registry_unstable_event(&event);
-                                                registry_sink
-                                                    .push_unstable_event(&registry_sid, event_name, payload)
-                                                    .await;
-                                            }
-                                        }
-                                        Ok(Some(_)) => {}
-                                        Ok(None) => break,
-                                        Err(peri_acp_types::event::SubscriptionError::Lagged(n)) => {
-                                            tracing::warn!(n, "registry event subscription lagged, events dropped");
-                                            break;
-                                        }
-                                        Err(peri_acp_types::event::SubscriptionError::Closed) => break,
-                                    }
-                                }
-                                break;
-                            }
-                        }
-                    }
-                }
-            }
-        });
-    }
+    task_manager_for_cmd.retry_pending_deliveries();
 
     // ── L5 命令拦截注入面（注册表 / compact 配置）──
     let command_lookup = Arc::clone(&ctx.command_lookup);
@@ -502,12 +336,13 @@ pub async fn run_session_loop(ctx: SessionContext, turn: TurnInput) -> PromptRes
         event_sink: &event_sink,
         auxiliary_model: &auxiliary_model,
         task_manager: &task_manager_for_cmd,
+        mcp_pool: ctx.mcp_pool.clone(),
         command_lookup,
         compact_config_loader,
     })
     .await
     {
-        InterceptOutcome::Handled(result) => return result,
+        InterceptOutcome::Handled(result) => return *result,
         InterceptOutcome::Inject(text) => MessageContent::text(text),
         InterceptOutcome::PassThrough => content,
     };
@@ -592,7 +427,6 @@ pub async fn run_session_loop(ctx: SessionContext, turn: TurnInput) -> PromptRes
         history_payloads,
         &ctx.session_id,
         cached_llm.as_ref(),
-        &v2_message_queue,
         async_router.clone(),
         task_manager_for_cmd,
         continuation,
@@ -608,11 +442,14 @@ pub async fn run_session_loop(ctx: SessionContext, turn: TurnInput) -> PromptRes
     );
     let _ = stop_reason_tx.send((exec_outcome.stop_reason, telemetry_outcome));
 
+    let pending_tasks =
+        crate::session::exec::executor_helpers::pending_task_count(pending_task_probe.as_ref());
     let result = collect_result(CollectRequest {
         event_tx: &event_tx,
         pump_handle,
         session_id: &ctx.session_id,
         exec_outcome,
+        pending_tasks,
     })
     .await;
 

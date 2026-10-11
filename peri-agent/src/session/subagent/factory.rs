@@ -5,11 +5,32 @@ mod context;
 mod resume;
 mod spawn;
 
+#[cfg(test)]
+#[path = "factory/completion_delivery_test.rs"]
+mod completion_delivery_tests;
+
 use super::types::{SubagentResumeConfig, SubagentSpawnConfig, SubagentSpawned};
 use crate::session::Session;
 pub(super) use claim::ResumeClaim;
 use resume::resume_subagent_impl;
 use spawn::spawn_subagent_impl;
+
+fn completion_delivery(
+    parent: Option<&Arc<Session>>,
+    configured: Option<peri_acp_types::tasks::OnBgCompleteFn>,
+) -> Option<peri_acp_types::tasks::OnBgCompleteFn> {
+    configured.or_else(|| {
+        parent.map(|parent| {
+            let router = crate::session::async_router::AsyncRouter::for_queue(parent.queue());
+            Arc::new(
+                move |result: &peri_acp_types::event::BackgroundTaskResult, kind| {
+                    router.route_bg_result(result, kind);
+                    Ok(())
+                },
+            ) as peri_acp_types::tasks::OnBgCompleteFn
+        })
+    })
+}
 
 /// resume 的 thread id 格式校验：非 UUID 必须在**存在性判定之前**报错。
 ///

@@ -12,13 +12,12 @@ use peri_acp_types::event_data::PluginSnapshotEntry;
 use peri_acp_types::plugin::{InstallScope, InstalledPlugin, PluginManagerPort, PluginOrigin};
 use peri_acp_types::ports::WorkflowMiddlewarePort;
 use peri_acp_types::session_resources::{
-    BindingRecheck, BindingState, FrozenSnapshotBytes, FrozenState, NewSession, NewSessionMeta,
-    SessionResources,
+    BindingState, FrozenSnapshotBytes, FrozenState, NewSession, NewSessionMeta, SessionResources,
 };
 use peri_acp_types::store::{PersistedPayload, ThreadStore};
 use peri_acp_types::tasks::BgTaskKind;
 use peri_acp_types::thread::ThreadMeta;
-use peri_acp_types::workspace::{SessionBinding, SessionExecutionLease};
+use peri_acp_types::workspace::SessionBinding;
 use peri_middlewares::permission::shared_mode::{PermissionMode, SharedPermissionMode};
 use peri_middlewares::workflow::WorkflowMiddleware;
 use peri_resources::sessions::SqliteThreadStore;
@@ -31,8 +30,8 @@ use serial_test::serial;
 use super::*;
 use crate::provider::LlmProvider;
 
-#[path = "requests_recovery_test.rs"]
-mod recovery_tests;
+#[path = "requests_history_lifecycle_test.rs"]
+mod history_lifecycle_tests;
 
 #[path = "requests_legacy_test.rs"]
 mod legacy_tests;
@@ -42,6 +41,9 @@ mod update_config_tests;
 
 #[path = "requests/acp_mcp_loop_test.rs"]
 mod acp_mcp_loop_tests;
+
+#[path = "activation_test.rs"]
+mod activation_tests;
 
 // ── Mock AcpTransport ─────────────────────────────────────────────────────────
 
@@ -127,7 +129,7 @@ async fn make_server_config(
 
 /// 门面 + 裸桥配对打开：夹具需要按 legacy/损坏事实逐条构造时用。
 ///
-/// 二者出自**同一次打开**（同一库句柄、同一份 owner 登记）；裸句柄只用于建事实与
+/// 二者出自**同一次打开**（同一库句柄）；裸句柄只用于建事实与
 /// 直读断言，生产路径一律走注入的门面。
 async fn make_server_config_with_bridge(
     peri_config: PeriConfig,
@@ -162,9 +164,8 @@ async fn build_server_config(
             Arc::new(peri_agent::agent::async_tasks::TaskManager::new())
                 as Arc<dyn peri_acp_types::tasks::TaskManager>
         })),
-        Arc::new(peri_middlewares::host_ports::SkillsProvider),
+        Arc::new(peri_middlewares::host_ports::AgentCatalogProvider::new()),
         Vec::new(), // plugin 命令条目（Phase 6 B2；测试无）
-        Vec::new(), // plugin skill roots（C1；测试无）
     );
     let (host_task_owner, host_task_spawner) = crate::host::task_scope::HostTaskOwner::new();
     let (mcp_task_owner, _mcp_task_spawner) = peri_middlewares::mcp::McpTaskOwner::new();
@@ -183,17 +184,15 @@ async fn build_server_config(
         dynamic_mcp: None,
         oauth_event_tx: None,
         oauth_event_rx: None,
-        channel_state: None,
         plugin_skill_roots: Vec::new(),
         plugin_command_entries: Vec::new(),
-        plugin_agent_dirs: Vec::new(),
+        plugin_face_closed: false,
         plugin_hooks: Vec::new(),
         plugin_hooks_only: Vec::new(),
         plugin_loaded: Vec::new(),
         hook_groups: Vec::new(),
-        plugin_lsp_servers: Vec::new(),
         tool_search_index: Arc::new(peri_middlewares::tool_search::ToolSearchIndex::new()),
-        skills: Arc::new(peri_middlewares::host_ports::SkillsProvider),
+        agent_catalog: Arc::new(peri_middlewares::host_ports::AgentCatalogProvider::new()),
         plugin_manager: Arc::new(peri_middlewares::host_ports::PluginManager),
         settings_hooks: Arc::new(peri_middlewares::host_ports::SettingsHooksLoader),
         shared_tools: Arc::new(parking_lot::RwLock::new(BTreeMap::new())),
@@ -219,10 +218,7 @@ async fn build_server_config(
     }
 }
 
-/// 夹具建一条**已绑定**会话：门面一次保存 binding/frozen 并给出执行准入。
-///
-/// 建完即按正常收尾标 clean 并释放所有权；需要写入或执行的用例随后自行取得
-/// （[`acquire_bound_owner`]）。
+/// 夹具建一条**已绑定**会话：门面一次保存 binding/frozen。
 async fn create_bound_fixture(cfg: &AcpServerConfig, cwd: &str, id: Option<&str>) -> String {
     let workspace = cfg
         .session_resources
@@ -230,18 +226,14 @@ async fn create_bound_fixture(cfg: &AcpServerConfig, cwd: &str, id: Option<&str>
         .await
         .unwrap();
     let thread_id = id.map(str::to_owned).unwrap_or_else(new_session_id);
-    let frozen = cfg.session_manager.build_frozen_data(
-        workspace.cwd.to_str().unwrap(),
-        &cfg.plugin_skill_roots,
-        &cfg.plugin_agent_dirs,
-    );
+    let frozen = cfg
+        .session_manager
+        .build_frozen_data(workspace.cwd.to_str().unwrap());
     let encoded = crate::session::frozen_snapshot::encode_frozen_snapshot(&frozen).unwrap();
-    let lease = cfg
-        .session_resources
+    cfg.session_resources
         .create_session(&bound_input(&thread_id, &workspace, encoded))
         .await
         .unwrap();
-    lease.mark_clean().await.unwrap();
     thread_id
 }
 
@@ -272,21 +264,6 @@ fn bound_input(
     }
 }
 
-/// 门面取执行所有权：先按 identity 复核绑定，再准入（等价旧的
-/// `acquire_execution_lease`，但不再绕过绑定事实）。
-async fn acquire_bound_owner(cfg: &AcpServerConfig, id: &str) -> Arc<dyn SessionExecutionLease> {
-    let workspace = cfg
-        .session_resources
-        .validate_bound_workspace(&id.to_owned(), BindingRecheck::Recorded)
-        .await
-        .unwrap();
-    cfg.session_resources
-        .acquire_execution(&id.to_owned(), &workspace)
-        .await
-        .unwrap()
-}
-
-/// 门面追加一条 human 消息（夹具用语；写入仍受活 owner 门禁约束）。
 async fn append_human_message(cfg: &AcpServerConfig, id: &str, text: &str) {
     cfg.session_resources
         .append_history(
@@ -310,9 +287,6 @@ async fn frozen_snapshot_bytes(cfg: &AcpServerConfig, id: &str) -> Option<String
     {
         FrozenState::Present(bytes) => Some(bytes.into_string()),
         FrozenState::LegacyAbsent => None,
-        FrozenState::Unsupported => {
-            panic!("fixture frozen snapshot must be readable by this build")
-        }
     }
 }
 
@@ -326,189 +300,6 @@ async fn own_payloads(cfg: &AcpServerConfig, id: &str) -> Vec<PersistedPayload> 
 }
 
 // ── 测试 ──────────────────────────────────────────────────────────────────────
-
-/// 验证 session/update_config 切换 active profile 的 provider 后 cfg.provider 正确更新
-#[tokio::test]
-async fn test_update_config_切换provider后cfg_provider更新() {
-    // Arrange: 构造两个 provider（a=openai, b=anthropic），初始 sonnet profile 绑定 "a"
-    let tmp = tempfile::TempDir::new().unwrap();
-    let provider_a = make_provider_config("a", "openai", "sk-openai-test", "gpt-4o");
-    let provider_b = make_provider_config("b", "anthropic", "sk-ant-test", "claude-sonnet-4-6");
-
-    let mut peri_config = PeriConfig::default();
-    peri_config
-        .config
-        .profiles
-        .get_mut("sonnet")
-        .unwrap()
-        .provider = "a".to_string();
-    peri_config.config.active_alias = "sonnet".to_string();
-    peri_config.config.providers = vec![provider_a.clone(), provider_b.clone()];
-
-    let initial_provider = LlmProvider::from_config(&peri_config).unwrap();
-    assert!(
-        matches!(initial_provider, LlmProvider::OpenAi { .. }),
-        "初始 provider 应为 OpenAI"
-    );
-
-    let cfg = make_server_config(peri_config.clone(), initial_provider, &tmp).await;
-    let mut sessions = HashMap::new();
-    let transport: Arc<dyn crate::transport::AcpTransport> = Arc::new(MockTransport::default());
-
-    // 构造 update_config 参数：sonnet profile 的 provider 改为 "b"
-    let mut updated_config = peri_config.clone();
-    updated_config
-        .config
-        .profiles
-        .get_mut("sonnet")
-        .unwrap()
-        .provider = "b".to_string();
-
-    let params = json!({
-        "sessionId": "test-session",
-        "config": updated_config,
-    });
-
-    // Act: 调用 handle_request
-    let result = handle_request(
-        "session/update_config",
-        &params,
-        &cfg,
-        &mut sessions,
-        &transport,
-    )
-    .await
-    .unwrap();
-
-    // Assert: cfg.provider 应切换到 anthropic
-    let provider = cfg.provider.read();
-    assert!(
-        matches!(&*provider, LlmProvider::Anthropic { model, .. } if model == "claude-sonnet-4-6"),
-        "切换后 provider 应为 Anthropic claude-sonnet-4-6，实际: display={} model={}",
-        provider.display_name(),
-        provider.model_name(),
-    );
-    assert_eq!(
-        provider.display_name(),
-        "Anthropic",
-        "display_name 应为 Anthropic"
-    );
-
-    // 验证返回值包含 configOptions
-    assert!(
-        result.get("configOptions").is_some(),
-        "响应应包含 configOptions"
-    );
-}
-
-/// 验证 session/update_config 空 providers 时返回错误
-#[tokio::test]
-async fn test_update_config_空providers返回错误() {
-    let tmp = tempfile::TempDir::new().unwrap();
-    let provider_a = make_provider_config("a", "openai", "sk-openai-test", "gpt-4o");
-
-    let mut peri_config = PeriConfig::default();
-    peri_config.config.active_alias = "sonnet".to_string();
-    peri_config
-        .config
-        .profiles
-        .get_mut("sonnet")
-        .unwrap()
-        .provider = "a".to_string();
-    peri_config.config.providers = vec![provider_a];
-
-    let initial_provider = LlmProvider::from_config(&peri_config).unwrap();
-    let cfg = make_server_config(peri_config.clone(), initial_provider, &tmp).await;
-    let mut sessions = HashMap::new();
-    let transport: Arc<dyn crate::transport::AcpTransport> = Arc::new(MockTransport::default());
-
-    // 空 providers
-    let mut bad_config = PeriConfig::default();
-    bad_config.config.providers = vec![];
-
-    let params = json!({
-        "sessionId": "test-session",
-        "config": bad_config,
-    });
-
-    let result = handle_request(
-        "session/update_config",
-        &params,
-        &cfg,
-        &mut sessions,
-        &transport,
-    )
-    .await;
-
-    assert!(result.is_err(), "空 providers 应返回错误");
-    let err = result.unwrap_err();
-    assert!(
-        err.message.contains("providers cannot be empty"),
-        "错误消息应提及 providers 为空，实际: {}",
-        err.message,
-    );
-}
-
-/// 验证 session/update_config 不存在的 active_provider_id 返回错误
-#[tokio::test]
-async fn test_update_config_不存在的provider_id返回错误() {
-    let tmp = tempfile::TempDir::new().unwrap();
-    let provider_a = make_provider_config("a", "openai", "sk-openai-test", "gpt-4o");
-
-    let mut peri_config = PeriConfig::default();
-    peri_config.config.active_alias = "sonnet".to_string();
-    peri_config
-        .config
-        .profiles
-        .get_mut("sonnet")
-        .unwrap()
-        .provider = "a".to_string();
-    peri_config.config.providers = vec![provider_a];
-
-    let initial_provider = LlmProvider::from_config(&peri_config).unwrap();
-    let cfg = make_server_config(peri_config.clone(), initial_provider, &tmp).await;
-    let mut sessions = HashMap::new();
-    let transport: Arc<dyn crate::transport::AcpTransport> = Arc::new(MockTransport::default());
-
-    // sonnet profile 的 provider 指向不存在的 provider
-    let mut bad_config = peri_config.clone();
-    bad_config
-        .config
-        .profiles
-        .get_mut("sonnet")
-        .unwrap()
-        .provider = "nonexistent".to_string();
-    bad_config.config.providers = vec![make_provider_config(
-        "a",
-        "openai",
-        "sk-openai-test",
-        "gpt-4o",
-    )];
-
-    let params = json!({
-        "sessionId": "test-session",
-        "config": bad_config,
-    });
-
-    let result = handle_request(
-        "session/update_config",
-        &params,
-        &cfg,
-        &mut sessions,
-        &transport,
-    )
-    .await;
-
-    assert!(result.is_err(), "不存在的 provider_id 应返回错误");
-    let err = result.unwrap_err();
-    assert!(
-        err.message.contains("not found"),
-        "错误消息应提及 not found，实际: {}",
-        err.message,
-    );
-}
-
-// ── Rewind RPC 路由测试 ─────────────────────────────────────────────────────
 
 /// 注册一个含 user/ai 消息的 SessionState（字段以 mod.rs 定义为准）。
 async fn register_session_with_history(
@@ -532,19 +323,14 @@ async fn register_session_with_history(
         .resolve_workspace(Path::new(cwd))
         .await
         .unwrap();
-    let frozen = cfg.session_manager.build_frozen_data(
-        workspace.cwd.to_str().unwrap(),
-        &cfg.plugin_skill_roots,
-        &cfg.plugin_agent_dirs,
-    );
+    let frozen = cfg
+        .session_manager
+        .build_frozen_data(workspace.cwd.to_str().unwrap());
     let encoded = crate::session::frozen_snapshot::encode_frozen_snapshot(&frozen).unwrap();
-    let lease = cfg
-        .session_resources
+    cfg.session_resources
         .create_session(&bound_input(&sid, &workspace, encoded))
         .await
         .unwrap();
-    lease.mark_clean().await.unwrap();
-    let owner = acquire_bound_owner(cfg, &sid).await;
     cfg.session_resources
         .append_history(&sid, &history_payloads)
         .await
@@ -555,1842 +341,24 @@ async fn register_session_with_history(
             session_id: sid.clone(),
             thread_id: sid.clone(),
             cwd: workspace.cwd.to_str().unwrap().to_owned(),
-            execution_owner: Some(owner),
             environment: None,
             closing: false,
             history,
             history_payloads,
             cancel_token: None,
+            continuation_armed: false,
+            continuation_epoch: 0,
+            continuation_in_flight: false,
+            continuation_mq_steering_pending: false,
             frozen: None,
             recall_items: Vec::new(),
             agent_pool: crate::session::agent_pool::AgentPool::new(),
             workflow_middleware: None,
-            lsp_pool: None,
             title: None,
             tags: Vec::new(),
-            continuation_armed: false,
-            continuation_epoch: 0,
-            continuation_in_flight: false,
-            continuation_mq_steering_pending: false,
-            lease: crate::host::lease::WriterLease::acquired("default"),
         },
     );
     sid
-}
-
-#[tokio::test]
-async fn test_rewind_methods_require_explicit_capability() {
-    let tmp = tempfile::TempDir::new().unwrap();
-    let peri_config = make_peri_config_with_provider(make_provider_config(
-        "a",
-        "openai",
-        "sk-openai-test",
-        "gpt-4o",
-    ));
-    let provider = LlmProvider::from_config(&peri_config).unwrap();
-    let cfg = make_server_config(peri_config, provider, &tmp).await;
-    let mut sessions = HashMap::new();
-    let transport: Arc<dyn crate::transport::AcpTransport> = Arc::new(MockTransport::default());
-    let sid =
-        register_session_with_history(&mut sessions, tmp.path().to_str().unwrap(), &cfg).await;
-    cfg.session_manager
-        .caps_registry()
-        .insert(sid.clone(), PeriCaps::default());
-    let target = sessions.get(&sid).unwrap().history[0]
-        .id()
-        .as_uuid()
-        .to_string();
-    let original: Vec<_> = sessions
-        .get(&sid)
-        .unwrap()
-        .history
-        .iter()
-        .map(|message| (message.id().as_uuid().to_string(), message.content()))
-        .collect();
-
-    for (method, params) in [
-        ("session/rewind-candidates", json!({"sessionId": sid})),
-        (
-            "session/rewind-preview",
-            json!({"sessionId": sid, "target_message_id": target}),
-        ),
-        (
-            "session/rewind",
-            json!({"sessionId": sid, "target_message_id": target}),
-        ),
-    ] {
-        let error = handle_request(method, &params, &cfg, &mut sessions, &transport)
-            .await
-            .unwrap_err();
-        assert_eq!(error.code, -32601);
-        assert_eq!(error.message, "peri.rewind capability not negotiated");
-    }
-    let current: Vec<_> = sessions
-        .get(&sid)
-        .unwrap()
-        .history
-        .iter()
-        .map(|message| (message.id().as_uuid().to_string(), message.content()))
-        .collect();
-    assert_eq!(current, original);
-}
-
-/// session/rewind-candidates 路由到 dispatch：返回 user-only 候选。
-#[tokio::test]
-async fn test_rewind_candidates_routes_to_dispatch() {
-    let tmp = tempfile::TempDir::new().unwrap();
-    let peri_config = make_peri_config_with_provider(make_provider_config(
-        "a",
-        "openai",
-        "sk-openai-test",
-        "gpt-4o",
-    ));
-    let provider = LlmProvider::from_config(&peri_config).unwrap();
-    let cfg = make_server_config(peri_config, provider, &tmp).await;
-    let mut sessions = HashMap::new();
-    let transport: Arc<dyn crate::transport::AcpTransport> = Arc::new(MockTransport::default());
-    let sid =
-        register_session_with_history(&mut sessions, tmp.path().to_str().unwrap(), &cfg).await;
-    cfg.session_manager.caps_registry().insert(
-        sid.clone(),
-        PeriCaps {
-            rewind: true,
-            ..PeriCaps::default()
-        },
-    );
-
-    let result = handle_request(
-        "session/rewind-candidates",
-        &json!({ "sessionId": sid }),
-        &cfg,
-        &mut sessions,
-        &transport,
-    )
-    .await;
-
-    let value = result.unwrap();
-    let messages = value["messages"].as_array().unwrap();
-    assert_eq!(messages.len(), 2, "只返回 user 消息");
-}
-
-/// session/rewind-preview 路由到 dispatch：返回 file_changes 数组（无工具调用 → 空）。
-/// 目标取 history[2]（Human 消息）——与生产口径一致：rewind-candidates 只返回
-/// user 消息，AI 消息永远不可能成为回滚目标。
-#[tokio::test]
-async fn test_rewind_preview_routes_to_dispatch() {
-    let tmp = tempfile::TempDir::new().unwrap();
-    let peri_config = make_peri_config_with_provider(make_provider_config(
-        "a",
-        "openai",
-        "sk-openai-test",
-        "gpt-4o",
-    ));
-    let provider = LlmProvider::from_config(&peri_config).unwrap();
-    let cfg = make_server_config(peri_config, provider, &tmp).await;
-    let mut sessions = HashMap::new();
-    let transport: Arc<dyn crate::transport::AcpTransport> = Arc::new(MockTransport::default());
-    let sid =
-        register_session_with_history(&mut sessions, tmp.path().to_str().unwrap(), &cfg).await;
-    cfg.session_manager.caps_registry().insert(
-        sid.clone(),
-        PeriCaps {
-            rewind: true,
-            ..PeriCaps::default()
-        },
-    );
-    let target_id = sessions.get(&sid).unwrap().history[2]
-        .id()
-        .as_uuid()
-        .to_string();
-
-    let result = handle_request(
-        "session/rewind-preview",
-        &json!({ "sessionId": sid, "target_message_id": target_id }),
-        &cfg,
-        &mut sessions,
-        &transport,
-    )
-    .await;
-
-    let value = result.unwrap();
-    let changes = value["file_changes"].as_array().unwrap();
-    assert_eq!(changes.len(), 0, "历史无工具调用 → 空预算");
-}
-
-/// session/rewind-preview：目标消息不存在时返回 not found 错误（生产 rewind_preview
-/// 按 id 定位，history 之外的 id 一律拒绝）。「仅 AI 消息」场景由候选层保证不可达
-/// （rewind-candidates 只返回 user 消息），UI 不可能选中 AI 消息作为目标。
-#[tokio::test]
-async fn test_rewind_preview_missing_target_returns_not_found() {
-    let tmp = tempfile::TempDir::new().unwrap();
-    let peri_config = make_peri_config_with_provider(make_provider_config(
-        "a",
-        "openai",
-        "sk-openai-test",
-        "gpt-4o",
-    ));
-    let provider = LlmProvider::from_config(&peri_config).unwrap();
-    let cfg = make_server_config(peri_config, provider, &tmp).await;
-    let mut sessions = HashMap::new();
-    let transport: Arc<dyn crate::transport::AcpTransport> = Arc::new(MockTransport::default());
-    let sid =
-        register_session_with_history(&mut sessions, tmp.path().to_str().unwrap(), &cfg).await;
-    cfg.session_manager.caps_registry().insert(
-        sid.clone(),
-        PeriCaps {
-            rewind: true,
-            ..PeriCaps::default()
-        },
-    );
-
-    let result = handle_request(
-        "session/rewind-preview",
-        &json!({ "sessionId": sid, "target_message_id": "00000000-0000-0000-0000-000000000000" }),
-        &cfg,
-        &mut sessions,
-        &transport,
-    )
-    .await;
-
-    assert!(result.is_err(), "目标不存在应返回错误");
-    let err = result.unwrap_err();
-    assert!(
-        err.message.contains("未找到目标消息"),
-        "错误消息应提及未找到目标，实际: {}",
-        err.message,
-    );
-}
-
-/// session/rewind 路由到 dispatch：执行回退（无 Write/Edit 时仅截断）。
-#[tokio::test]
-async fn test_rewind_routes_to_dispatch() {
-    let tmp = tempfile::TempDir::new().unwrap();
-    let peri_config = make_peri_config_with_provider(make_provider_config(
-        "a",
-        "openai",
-        "sk-openai-test",
-        "gpt-4o",
-    ));
-    let provider = LlmProvider::from_config(&peri_config).unwrap();
-    let cfg = make_server_config(peri_config, provider, &tmp).await;
-    let mut sessions = HashMap::new();
-    let transport: Arc<dyn crate::transport::AcpTransport> = Arc::new(MockTransport::default());
-    let sid =
-        register_session_with_history(&mut sessions, tmp.path().to_str().unwrap(), &cfg).await;
-    cfg.session_manager.caps_registry().insert(
-        sid.clone(),
-        PeriCaps {
-            rewind: true,
-            ..PeriCaps::default()
-        },
-    );
-    let target_id = sessions.get(&sid).unwrap().history[0]
-        .id()
-        .as_uuid()
-        .to_string();
-    let preview = handle_request(
-        "session/rewind-preview",
-        &json!({ "sessionId": sid, "target_message_id": target_id }),
-        &cfg,
-        &mut sessions,
-        &transport,
-    )
-    .await
-    .unwrap();
-    let preview_fingerprint = preview["preview_fingerprint"].as_str().unwrap();
-
-    let result = handle_request(
-        "session/rewind",
-        &json!({
-            "sessionId": sid,
-            "target_message_id": target_id,
-            "preview_fingerprint": preview_fingerprint,
-        }),
-        &cfg,
-        &mut sessions,
-        &transport,
-    )
-    .await;
-
-    assert_eq!(result.unwrap()["status"], "executed");
-
-    // P1：rewind 后 SessionState.history 必须截断——它是后续候选/预算查询的
-    // 数据源，不写回会导致第二次回退 not found。
-    let s = sessions.get(&sid).unwrap();
-    assert_eq!(s.history.len(), 0, "回退到第一条后 history 应为空");
-    assert_eq!(
-        s.history_payloads.len(),
-        0,
-        "rewind 必须同步裁剪 canonical history_payloads"
-    );
-}
-
-#[tokio::test]
-async fn test_rewind_rejects_stale_preview_without_mutating_history() {
-    let tmp = tempfile::TempDir::new().unwrap();
-    let peri_config = make_peri_config_with_provider(make_provider_config(
-        "a",
-        "openai",
-        "sk-openai-test",
-        "gpt-4o",
-    ));
-    let provider = LlmProvider::from_config(&peri_config).unwrap();
-    let cfg = make_server_config(peri_config, provider, &tmp).await;
-    let mut sessions = HashMap::new();
-    let transport: Arc<dyn crate::transport::AcpTransport> = Arc::new(MockTransport::default());
-    let sid =
-        register_session_with_history(&mut sessions, tmp.path().to_str().unwrap(), &cfg).await;
-    cfg.session_manager.caps_registry().insert(
-        sid.clone(),
-        PeriCaps {
-            rewind: true,
-            ..PeriCaps::default()
-        },
-    );
-    let target_id = sessions.get(&sid).unwrap().history[0]
-        .id()
-        .as_uuid()
-        .to_string();
-    let preview = handle_request(
-        "session/rewind-preview",
-        &json!({ "sessionId": sid, "target_message_id": target_id }),
-        &cfg,
-        &mut sessions,
-        &transport,
-    )
-    .await
-    .unwrap();
-    let preview_fingerprint = preview["preview_fingerprint"].as_str().unwrap().to_string();
-
-    sessions
-        .get_mut(&sid)
-        .unwrap()
-        .history
-        .push(peri_acp_types::messages::BaseMessage::ai("late answer"));
-    let before = sessions.get(&sid).unwrap().history.len();
-    let error = handle_request(
-        "session/rewind",
-        &json!({
-            "sessionId": sid,
-            "target_message_id": target_id,
-            "preview_fingerprint": preview_fingerprint,
-        }),
-        &cfg,
-        &mut sessions,
-        &transport,
-    )
-    .await
-    .unwrap_err();
-
-    assert!(error.message.contains("preview is stale"));
-    assert_eq!(sessions.get(&sid).unwrap().history.len(), before);
-}
-
-// ── session/cancel-bg-task 路由测试（issue 2026-08-05）───────────────────
-
-/// [回归测试] cancel-bg-task 对 Workflow 类型任务必须真正 kill（issue 2026-08-05）。
-/// 历史 bug：Workflow 注册时固定 `Kill(None)`，cancel() 只 warn 并返回 success——
-/// 条目移除但 runner 继续运行。修复后 kill 闭包（生产路径转发
-/// WorkflowTaskRegistry::kill）随注册存入条目，cancel() 触发闭包。
-/// 本测试用探针闭包在 RPC 层锁定该行为。
-#[tokio::test]
-async fn test_cancel_bg_task_workflow_invokes_kill_closure() {
-    let tmp = tempfile::TempDir::new().unwrap();
-    let peri_config = make_peri_config_with_provider(make_provider_config(
-        "a",
-        "openai",
-        "sk-openai-test",
-        "gpt-4o",
-    ));
-    let provider = LlmProvider::from_config(&peri_config).unwrap();
-    let cfg = make_server_config(peri_config, provider, &tmp).await;
-    let mut sessions = HashMap::new();
-    let transport: Arc<dyn crate::transport::AcpTransport> = Arc::new(MockTransport::default());
-    let created = handle_request(
-        "session/new",
-        &json!({"cwd":tmp.path()}),
-        &cfg,
-        &mut sessions,
-        &transport,
-    )
-    .await
-    .unwrap();
-    let sid = created["sessionId"].as_str().unwrap().to_owned();
-
-    let killed = Arc::new(AtomicBool::new(false));
-    let killed_clone = killed.clone();
-    let registry = &cfg.session_manager.get_session(&sid).unwrap().task_manager;
-    registry
-        .register(peri_acp_types::tasks::BgTaskRegistration {
-            task_id: "wf-run-1".to_string(),
-            kind: BgTaskKind::Workflow,
-            summary: "wf cancel test".to_string(),
-            pid: None,
-            kill: Some(Box::new(move || {
-                killed_clone.store(true, Ordering::SeqCst);
-            })),
-        })
-        .unwrap();
-    assert_eq!(registry.active_count(), 1);
-
-    let result = handle_request(
-        "session/cancel-bg-task",
-        &json!({ "sessionId": sid, "taskId": "wf-run-1" }),
-        &cfg,
-        &mut sessions,
-        &transport,
-    )
-    .await;
-
-    assert!(
-        result.is_ok(),
-        "取消 Workflow 任务应返回 success，实际: {:?}",
-        result.err()
-    );
-    assert!(
-        killed.load(Ordering::SeqCst),
-        "cancel-bg-task 必须触发 kill 闭包（runner 真正被终止），而非仅移除条目"
-    );
-    assert_eq!(registry.active_count(), 0, "取消后条目应从 registry 移除");
-}
-
-/// [回归测试] cancel-bg-task 会话不存在时必须如实报错（issue 2026-08-05）。
-/// 历史 bug：静默返回 success，掩盖"取消未生效"。
-#[tokio::test]
-async fn test_cancel_bg_task_session_not_found_returns_error() {
-    let tmp = tempfile::TempDir::new().unwrap();
-    let peri_config = make_peri_config_with_provider(make_provider_config(
-        "a",
-        "openai",
-        "sk-openai-test",
-        "gpt-4o",
-    ));
-    let provider = LlmProvider::from_config(&peri_config).unwrap();
-    let cfg = make_server_config(peri_config, provider, &tmp).await;
-    let mut sessions = HashMap::new();
-    let transport: Arc<dyn crate::transport::AcpTransport> = Arc::new(MockTransport::default());
-
-    let result = handle_request(
-        "session/cancel-bg-task",
-        &json!({ "sessionId": "no-such-session", "taskId": "wf-run-1" }),
-        &cfg,
-        &mut sessions,
-        &transport,
-    )
-    .await;
-
-    assert!(result.is_err(), "会话不存在应返回错误");
-    let err = result.unwrap_err();
-    assert!(
-        err.message.contains("session not found"),
-        "错误消息应提及 session not found，实际: {}",
-        err.message
-    );
-}
-
-/// [回归测试] cancel-bg-task 任务不存在时必须如实报错（issue 2026-08-05）。
-/// 与 session_not_found 区分（错误消息不同），客户端可据此判断重试策略。
-#[tokio::test]
-async fn test_cancel_bg_task_task_not_found_returns_error() {
-    let tmp = tempfile::TempDir::new().unwrap();
-    let peri_config = make_peri_config_with_provider(make_provider_config(
-        "a",
-        "openai",
-        "sk-openai-test",
-        "gpt-4o",
-    ));
-    let provider = LlmProvider::from_config(&peri_config).unwrap();
-    let cfg = make_server_config(peri_config, provider, &tmp).await;
-    let mut sessions = HashMap::new();
-    let transport: Arc<dyn crate::transport::AcpTransport> = Arc::new(MockTransport::default());
-    let sid = "cancel-bg-session".to_string();
-    cfg.session_manager
-        .new_session_with_id(&sid, tmp.path().to_str().unwrap())
-        .await
-        .unwrap();
-
-    let result = handle_request(
-        "session/cancel-bg-task",
-        &json!({ "sessionId": sid, "taskId": "no-such-task" }),
-        &cfg,
-        &mut sessions,
-        &transport,
-    )
-    .await;
-
-    assert!(result.is_err(), "任务不存在应返回错误");
-    let err = result.unwrap_err();
-    assert!(
-        err.message.contains("not found"),
-        "错误消息应提及 not found，实际: {}",
-        err.message
-    );
-}
-
-// ── workflow/kill_run & workflow/kill_agent sessionId 分发测试（issue 2026-08-05）──
-
-/// Mock workflow executor（仅用于构造 WorkflowMiddleware，不真正执行 agent）
-struct MockWorkflowExecutor;
-
-#[async_trait]
-impl AgentExecutor for MockWorkflowExecutor {
-    async fn execute(&self, _params: AgentRunParams) -> AgentRunResult {
-        AgentRunResult::Ok {
-            output: serde_json::json!("mock"),
-            usage: Usage { output_tokens: 0 },
-            model: None,
-            tool_count: None,
-            token_count: None,
-            phase: None,
-            duration_ms: None,
-        }
-    }
-}
-
-/// 构造带 workflow_middleware 的 SessionState，返回 middleware 引用（供注册 run 用）。
-async fn register_session_with_workflow(
-    sessions: &mut HashMap<String, SessionState>,
-    sid: &str,
-    cwd: &str,
-    cfg: &AcpServerConfig,
-) -> Arc<WorkflowMiddleware> {
-    // 会话尚未创建（NotFound）或没有本机绑定：本夹具负责建一条已绑定会话。
-    let bound = matches!(
-        cfg.session_resources
-            .load_session_binding(&sid.to_owned())
-            .await,
-        Ok(BindingState::Bound(_))
-    );
-    if !bound {
-        create_bound_fixture(cfg, cwd, Some(sid)).await;
-    }
-    let owner = acquire_bound_owner(cfg, sid).await;
-    let executor: Arc<dyn AgentExecutor> = Arc::new(MockWorkflowExecutor);
-    let (notification_tx, _) = tokio::sync::broadcast::channel::<WorkflowTaskResult>(32);
-    let mw = Arc::new(WorkflowMiddleware::new(
-        executor,
-        cwd,
-        notification_tx,
-        None,
-    ));
-    sessions.insert(
-        sid.to_string(),
-        SessionState {
-            session_id: sid.to_string(),
-            thread_id: sid.to_owned(),
-            cwd: std::fs::canonicalize(cwd)
-                .unwrap()
-                .to_str()
-                .unwrap()
-                .to_owned(),
-            execution_owner: Some(owner),
-            environment: None,
-            closing: false,
-            history: Vec::new(),
-            history_payloads: Vec::new(),
-            cancel_token: None,
-            frozen: None,
-            recall_items: Vec::new(),
-            agent_pool: crate::session::agent_pool::AgentPool::new(),
-            workflow_middleware: Some(Arc::clone(&mw) as Arc<dyn WorkflowMiddlewarePort>),
-            lsp_pool: None,
-            title: None,
-            tags: Vec::new(),
-            continuation_armed: false,
-            continuation_epoch: 0,
-            continuation_in_flight: false,
-            continuation_mq_steering_pending: false,
-            lease: crate::host::lease::WriterLease::acquired("default"),
-        },
-    );
-    mw
-}
-
-/// 在 middleware 的 registry 注册一个 Running 的 run（kill_tx 保持 open）。
-fn register_run(mw: &Arc<WorkflowMiddleware>, run_id: &str) {
-    let (kill_tx, _kill_rx) = tokio::sync::oneshot::channel::<()>();
-    let child = tokio::spawn(async {});
-    mw.registry()
-        .register(WorkflowRun {
-            run_id: run_id.to_string(),
-            workflow_name: "wf-test".to_string(),
-            script_preview: "test".to_string(),
-            status: WorkflowRunStatus::Running,
-            started_at: std::time::Instant::now(),
-            child_handle: Some(child),
-            kill_tx: Some(kill_tx),
-        })
-        .unwrap();
-}
-
-/// [回归测试] workflow/kill_run 必须按请求 sessionId 定位 session（issue 2026-08-05）。
-/// 历史 bug：`sessions.values().find_map()` 取第一个带 middleware 的 session，
-/// 多 session 时可能 kill 错 session（run 在另一 session 却报 killed:true）。
-#[tokio::test]
-async fn test_kill_run_targets_requested_session() {
-    let tmp = tempfile::TempDir::new().unwrap();
-    let peri_config = make_peri_config_with_provider(make_provider_config(
-        "a",
-        "openai",
-        "sk-openai-test",
-        "gpt-4o",
-    ));
-    let provider = LlmProvider::from_config(&peri_config).unwrap();
-    let cfg = make_server_config(peri_config, provider, &tmp).await;
-    let mut sessions = HashMap::new();
-    let transport: Arc<dyn crate::transport::AcpTransport> = Arc::new(MockTransport::default());
-    let cwd = tmp.path().to_str().unwrap();
-
-    let mw_a = register_session_with_workflow(&mut sessions, "sess-a", cwd, &cfg).await;
-    let mw_b = register_session_with_workflow(&mut sessions, "sess-b", cwd, &cfg).await;
-    register_run(&mw_a, "run-a");
-    register_run(&mw_b, "run-b");
-
-    // run-a 只在 sess-a：请求 sess-b 杀 run-a 必须 killed:false（修复前可能误报 true）
-    let resp = handle_request(
-        "workflow/kill_run",
-        &json!({ "sessionId": "sess-b", "runId": "run-a" }),
-        &cfg,
-        &mut sessions,
-        &transport,
-    )
-    .await
-    .unwrap();
-    assert_eq!(resp["killed"], false, "sess-b 无 run-a，不得误报 killed");
-
-    // 请求 sess-b 杀 run-b → killed:true，且只影响 sess-b 的 registry
-    let resp = handle_request(
-        "workflow/kill_run",
-        &json!({ "sessionId": "sess-b", "runId": "run-b" }),
-        &cfg,
-        &mut sessions,
-        &transport,
-    )
-    .await
-    .unwrap();
-    assert_eq!(resp["killed"], true, "sess-b 的 run-b 应被 kill");
-    assert!(
-        mw_b.registry().list_runs().is_empty(),
-        "sess-b 的 registry 应已移除 run-b"
-    );
-    assert!(
-        !mw_a.registry().list_runs().is_empty(),
-        "sess-a 的 registry 不得受影响"
-    );
-
-    // 缺失 sessionId → -32602
-    let err = handle_request(
-        "workflow/kill_run",
-        &json!({ "runId": "run-a" }),
-        &cfg,
-        &mut sessions,
-        &transport,
-    )
-    .await
-    .unwrap_err();
-    assert!(
-        err.message.contains("missing sessionId"),
-        "缺失 sessionId 应报错，实际: {}",
-        err.message
-    );
-
-    // session 不存在 → 明确错误（修复前静默返回 killed:false）
-    let err = handle_request(
-        "workflow/kill_run",
-        &json!({ "sessionId": "no-such-session", "runId": "run-a" }),
-        &cfg,
-        &mut sessions,
-        &transport,
-    )
-    .await
-    .unwrap_err();
-    assert!(
-        err.message.contains("session not found"),
-        "会话不存在应报 session not found，实际: {}",
-        err.message
-    );
-
-    // session 存在但无 workflow middleware → 明确错误
-    let sid = register_session_with_history(&mut sessions, cwd, &cfg).await;
-    let err = handle_request(
-        "workflow/kill_run",
-        &json!({ "sessionId": sid, "runId": "run-a" }),
-        &cfg,
-        &mut sessions,
-        &transport,
-    )
-    .await
-    .unwrap_err();
-    assert!(
-        err.message.contains("session not found"),
-        "无 middleware 的会话应报错，实际: {}",
-        err.message
-    );
-}
-
-/// [回归测试] workflow/kill_agent 必须按请求 sessionId 定位 session（issue 2026-08-05）。
-/// 深层 kill 依赖 runner 内部 active_channels（外部不可注入），此处锁定协议层：
-/// 缺失/不存在的 session 如实报错，存在的 session 正常返回 killed 结果。
-#[tokio::test]
-async fn test_kill_agent_targets_requested_session() {
-    let tmp = tempfile::TempDir::new().unwrap();
-    let peri_config = make_peri_config_with_provider(make_provider_config(
-        "a",
-        "openai",
-        "sk-openai-test",
-        "gpt-4o",
-    ));
-    let provider = LlmProvider::from_config(&peri_config).unwrap();
-    let cfg = make_server_config(peri_config, provider, &tmp).await;
-    let mut sessions = HashMap::new();
-    let transport: Arc<dyn crate::transport::AcpTransport> = Arc::new(MockTransport::default());
-    let cwd = tmp.path().to_str().unwrap();
-
-    register_session_with_workflow(&mut sessions, "sess-a", cwd, &cfg).await;
-    register_session_with_workflow(&mut sessions, "sess-b", cwd, &cfg).await;
-
-    // 存在 session：正常返回 killed（sess-b 无该 run 的 active channel → false，不报错）
-    let resp = handle_request(
-        "workflow/kill_agent",
-        &json!({ "sessionId": "sess-b", "runId": "run-x", "agentId": 1 }),
-        &cfg,
-        &mut sessions,
-        &transport,
-    )
-    .await
-    .unwrap();
-    assert_eq!(resp["killed"], false);
-
-    // 缺失 sessionId → -32602
-    let err = handle_request(
-        "workflow/kill_agent",
-        &json!({ "runId": "run-x", "agentId": 1 }),
-        &cfg,
-        &mut sessions,
-        &transport,
-    )
-    .await
-    .unwrap_err();
-    assert!(
-        err.message.contains("missing sessionId"),
-        "缺失 sessionId 应报错，实际: {}",
-        err.message
-    );
-
-    // session 不存在 → 明确错误（修复前静默返回 killed:false）
-    let err = handle_request(
-        "workflow/kill_agent",
-        &json!({ "sessionId": "no-such-session", "runId": "run-x", "agentId": 1 }),
-        &cfg,
-        &mut sessions,
-        &transport,
-    )
-    .await
-    .unwrap_err();
-    assert!(
-        err.message.contains("session not found"),
-        "会话不存在应报 session not found，实际: {}",
-        err.message
-    );
-}
-
-/// [回归测试] workflow/resume 必须按请求 sessionId 定位 session（issue 2026-08-05）。
-/// 历史 bug：`sessions.values().find_map()` 取第一个带 middleware 的 session，
-/// 多 session 时可能 resume 错 session（与 kill_run 同源）。
-#[tokio::test]
-async fn test_resume_targets_requested_session() {
-    let tmp = tempfile::TempDir::new().unwrap();
-    let peri_config = make_peri_config_with_provider(make_provider_config(
-        "a",
-        "openai",
-        "sk-openai-test",
-        "gpt-4o",
-    ));
-    let provider = LlmProvider::from_config(&peri_config).unwrap();
-    let cfg = make_server_config(peri_config, provider, &tmp).await;
-    let mut sessions = HashMap::new();
-    let transport: Arc<dyn crate::transport::AcpTransport> = Arc::new(MockTransport::default());
-    let cwd = tmp.path().to_str().unwrap();
-
-    register_session_with_workflow(&mut sessions, "sess-a", cwd, &cfg).await;
-    register_session_with_workflow(&mut sessions, "sess-b", cwd, &cfg).await;
-
-    // 请求 sess-b + 不存在的 run → 错误来自 sess-b 的 middleware（read_state 失败），
-    // 而非 "session not found"——证明分发到了 sess-b 而非第一个 session
-    let err = handle_request(
-        "workflow/resume",
-        &json!({ "sessionId": "sess-b", "runId": "no-such-run" }),
-        &cfg,
-        &mut sessions,
-        &transport,
-    )
-    .await
-    .unwrap_err();
-    assert!(
-        err.message.contains("Failed to read workflow state"),
-        "应分发到 sess-b 的 middleware 并报 read_state 失败，实际: {}",
-        err.message
-    );
-
-    // 缺失 sessionId → -32602
-    let err = handle_request(
-        "workflow/resume",
-        &json!({ "runId": "no-such-run" }),
-        &cfg,
-        &mut sessions,
-        &transport,
-    )
-    .await
-    .unwrap_err();
-    assert!(
-        err.message.contains("missing sessionId"),
-        "缺失 sessionId 应报错，实际: {}",
-        err.message
-    );
-
-    // session 不存在 → 明确错误（修复前可能误用第一个 session 的 middleware）
-    let err = handle_request(
-        "workflow/resume",
-        &json!({ "sessionId": "no-such-session", "runId": "no-such-run" }),
-        &cfg,
-        &mut sessions,
-        &transport,
-    )
-    .await
-    .unwrap_err();
-    assert!(
-        err.message.contains("session not found"),
-        "会话不存在应报 session not found，实际: {}",
-        err.message
-    );
-}
-
-// ── session/delete（标准 ACP，agentclientprotocol.com/protocol/v1/session-delete）──
-
-/// 删除后：响应为空对象、线程从 store 移除（load_meta 报错）、活跃会话从
-/// sessions 表清理。
-#[tokio::test]
-async fn test_delete_removes_thread_and_active_session() {
-    let tmp = tempfile::TempDir::new().unwrap();
-    let peri_config = make_peri_config_with_provider(make_provider_config(
-        "a",
-        "openai",
-        "sk-openai-test",
-        "gpt-4o",
-    ));
-    let provider = LlmProvider::from_config(&peri_config).unwrap();
-    let cfg = make_server_config(peri_config, provider, &tmp).await;
-    let mut sessions = HashMap::new();
-    let transport: Arc<dyn crate::transport::AcpTransport> = Arc::new(MockTransport::default());
-    let cwd = tmp.path().to_str().unwrap();
-
-    // 真实创建线程（id 即 session id）
-    let thread_id = create_bound_fixture(&cfg, cwd, None).await;
-    let sid = thread_id.clone();
-
-    // 活跃会话登记（与 session/new 后的内存态一致）
-    register_session_with_workflow(&mut sessions, &sid, cwd, &cfg).await;
-
-    let resp = handle_request(
-        "session/delete",
-        &json!({ "sessionId": sid }),
-        &cfg,
-        &mut sessions,
-        &transport,
-    )
-    .await
-    .expect("session/delete 应成功");
-
-    // 标准响应为空对象
-    assert_eq!(
-        resp,
-        serde_json::json!({}),
-        "标准 session/delete 响应为 {{}}"
-    );
-
-    // 活跃会话已清理
-    assert!(
-        !sessions.contains_key(&sid),
-        "删除后活跃会话应从 sessions 表移除"
-    );
-
-    // 线程已从 store 持久化删除（元数据不存在 + 列表不再包含）
-    assert!(
-        cfg.session_resources.load_session_meta(&sid).await.is_err(),
-        "删除后线程元数据不应存在"
-    );
-    let remaining = cfg
-        .session_resources
-        .list_sessions(&peri_acp_types::workspace::ScopedThreadQuery {
-            scope: peri_acp_types::workspace::ThreadScope::All,
-            cursor: None,
-            limit: 100,
-        })
-        .await
-        .unwrap();
-    assert!(
-        !remaining.entries.iter().any(|entry| entry.thread.id == sid),
-        "删除后 session/list 不应再包含该线程"
-    );
-}
-
-/// 删除不存在的线程：幂等成功（存储层不报错，历史不存在视为已删除）。
-#[tokio::test]
-async fn test_delete_unknown_session_is_idempotent() {
-    let tmp = tempfile::TempDir::new().unwrap();
-    let peri_config = make_peri_config_with_provider(make_provider_config(
-        "a",
-        "openai",
-        "sk-openai-test",
-        "gpt-4o",
-    ));
-    let provider = LlmProvider::from_config(&peri_config).unwrap();
-    let cfg = make_server_config(peri_config, provider, &tmp).await;
-    let mut sessions = HashMap::new();
-    let transport: Arc<dyn crate::transport::AcpTransport> = Arc::new(MockTransport::default());
-
-    let resp = handle_request(
-        "session/delete",
-        &json!({ "sessionId": "never-existed" }),
-        &cfg,
-        &mut sessions,
-        &transport,
-    )
-    .await
-    .expect("删除不存在的会话应幂等成功");
-    assert_eq!(resp, serde_json::json!({}));
-}
-
-/// 缺失 sessionId → -32602 Invalid params。
-#[tokio::test]
-async fn test_delete_missing_session_id_returns_error() {
-    let tmp = tempfile::TempDir::new().unwrap();
-    let peri_config = make_peri_config_with_provider(make_provider_config(
-        "a",
-        "openai",
-        "sk-openai-test",
-        "gpt-4o",
-    ));
-    let provider = LlmProvider::from_config(&peri_config).unwrap();
-    let cfg = make_server_config(peri_config, provider, &tmp).await;
-    let mut sessions = HashMap::new();
-    let transport: Arc<dyn crate::transport::AcpTransport> = Arc::new(MockTransport::default());
-
-    let err = handle_request(
-        "session/delete",
-        &json!({}),
-        &cfg,
-        &mut sessions,
-        &transport,
-    )
-    .await
-    .unwrap_err();
-    assert!(
-        err.message.contains("missing sessionId"),
-        "缺失 sessionId 应报 -32602，实际: {}",
-        err.message
-    );
-}
-
-// ── session/rename（标准 ACP；stdio 与 TUI 共用统一 host 注册于 requests.rs）──
-
-/// 重命名成功：thread store 持久化标题 + `session/update` 通知携带
-/// `SessionInfoUpdate.title` + 响应往返 `{sessionId, title}`。
-#[tokio::test]
-async fn test_rename_persists_title_and_pushes_session_info_update() {
-    let tmp = tempfile::TempDir::new().unwrap();
-    let peri_config = make_peri_config_with_provider(make_provider_config(
-        "a",
-        "openai",
-        "sk-openai-test",
-        "gpt-4o",
-    ));
-    let provider = LlmProvider::from_config(&peri_config).unwrap();
-    let cfg = make_server_config(peri_config, provider, &tmp).await;
-    let mut sessions = HashMap::new();
-    let mock = std::sync::Arc::new(MockTransport::default());
-    let transport: Arc<dyn crate::transport::AcpTransport> = mock.clone();
-    let cwd = tmp.path().to_str().unwrap();
-
-    // 真实创建线程（id 即 session id），与 session/new 后的持久层状态一致
-    let sid = create_bound_fixture(&cfg, cwd, None).await;
-    let new_title = "重构 ACP 协议".to_string();
-
-    let resp = handle_request(
-        "session/rename",
-        &json!({ "sessionId": sid, "title": new_title }),
-        &cfg,
-        &mut sessions,
-        &transport,
-    )
-    .await
-    .expect("session/rename 应成功");
-
-    // 标准响应往返
-    assert_eq!(resp["sessionId"], sid, "响应 sessionId: {resp}");
-    assert_eq!(resp["title"], new_title, "响应 title: {resp}");
-
-    // 持久化：load_meta 标题已更新
-    let meta = cfg.session_resources.load_session_meta(&sid).await.unwrap();
-    assert_eq!(meta.title.as_deref(), Some(new_title.as_str()));
-
-    // 通知：session/update 携带 SessionInfoUpdate.title，供标题栏与外部客户端刷新
-    let (method, payload) = mock
-        .notifications()
-        .iter()
-        .find(|(m, _)| m == "session/update")
-        .cloned()
-        .expect("rename 应推送 session/update 通知");
-    assert_eq!(method, "session/update");
-    assert_eq!(payload["sessionId"], sid);
-    assert_eq!(payload["update"]["sessionUpdate"], "session_info_update");
-    assert_eq!(payload["update"]["title"], new_title);
-}
-
-/// 缺失 sessionId → -32602 Invalid params。
-#[tokio::test]
-async fn test_rename_missing_session_id_returns_error() {
-    let tmp = tempfile::TempDir::new().unwrap();
-    let peri_config = make_peri_config_with_provider(make_provider_config(
-        "a",
-        "openai",
-        "sk-openai-test",
-        "gpt-4o",
-    ));
-    let provider = LlmProvider::from_config(&peri_config).unwrap();
-    let cfg = make_server_config(peri_config, provider, &tmp).await;
-    let mut sessions = HashMap::new();
-    let transport: Arc<dyn crate::transport::AcpTransport> = Arc::new(MockTransport::default());
-
-    let err = handle_request(
-        "session/rename",
-        &json!({ "title": "无 sessionId" }),
-        &cfg,
-        &mut sessions,
-        &transport,
-    )
-    .await
-    .unwrap_err();
-    assert_eq!(err.code, -32602);
-    assert!(
-        err.message.contains("missing sessionId"),
-        "缺失 sessionId 应报 -32602，实际: {}",
-        err.message
-    );
-}
-
-/// 缺失 title → -32602 Invalid params。
-#[tokio::test]
-async fn test_rename_missing_title_returns_error() {
-    let tmp = tempfile::TempDir::new().unwrap();
-    let peri_config = make_peri_config_with_provider(make_provider_config(
-        "a",
-        "openai",
-        "sk-openai-test",
-        "gpt-4o",
-    ));
-    let provider = LlmProvider::from_config(&peri_config).unwrap();
-    let cfg = make_server_config(peri_config, provider, &tmp).await;
-    let mut sessions = HashMap::new();
-    let transport: Arc<dyn crate::transport::AcpTransport> = Arc::new(MockTransport::default());
-
-    let err = handle_request(
-        "session/rename",
-        &json!({ "sessionId": "some-session" }),
-        &cfg,
-        &mut sessions,
-        &transport,
-    )
-    .await
-    .unwrap_err();
-    assert_eq!(err.code, -32602);
-    assert!(
-        err.message.contains("missing title"),
-        "缺失 title 应报 -32602，实际: {}",
-        err.message
-    );
-}
-
-// ── M2 回归：进程内 session/delete 必须 shutdown LSP pool ────────────────────
-
-/// 记录 shutdown 调用的 mock LSP pool。
-struct MockLspPool {
-    shutdown_calls: Arc<std::sync::atomic::AtomicU32>,
-}
-
-#[async_trait::async_trait]
-impl peri_acp_types::ports::LspPoolPort for MockLspPool {
-    fn as_any(&self) -> &dyn std::any::Any {
-        self
-    }
-    async fn shutdown(&self) {
-        self.shutdown_calls
-            .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
-    }
-}
-
-/// 删除活跃会话（带 lsp_pool）时必须在锁外 shutdown pool，与 stdio 路径一致，
-/// 避免 LSP 服务器子进程/read task 残留（M2；此前进程内路径直接丢弃 pool）。
-#[tokio::test]
-async fn test_delete_active_session_shuts_down_lsp_pool() {
-    let tmp = tempfile::TempDir::new().unwrap();
-    let peri_config = make_peri_config_with_provider(make_provider_config(
-        "a",
-        "openai",
-        "sk-openai-test",
-        "gpt-4o",
-    ));
-    let provider = LlmProvider::from_config(&peri_config).unwrap();
-    let cfg = make_server_config(peri_config, provider, &tmp).await;
-    let mut sessions = HashMap::new();
-    let transport: Arc<dyn crate::transport::AcpTransport> = Arc::new(MockTransport::default());
-    let cwd = tmp.path().to_str().unwrap();
-
-    // 真实创建会话（id 即 session id），与 delete 分支的会话树删除对应
-    let sid = create_bound_fixture(&cfg, cwd, None).await;
-
-    let shutdown_calls = Arc::new(std::sync::atomic::AtomicU32::new(0));
-    let pool: Arc<dyn peri_acp_types::ports::LspPoolPort> = Arc::new(MockLspPool {
-        shutdown_calls: Arc::clone(&shutdown_calls),
-    });
-
-    // 构造带 lsp_pool 的活跃会话（其余字段与 register_session_with_workflow 一致）
-    let executor: Arc<dyn AgentExecutor> = Arc::new(MockWorkflowExecutor);
-    let (notification_tx, _) = tokio::sync::broadcast::channel::<WorkflowTaskResult>(32);
-    let mw = Arc::new(WorkflowMiddleware::new(
-        executor,
-        cwd,
-        notification_tx,
-        None,
-    ));
-    sessions.insert(
-        sid.clone(),
-        SessionState {
-            session_id: sid.clone(),
-            thread_id: sid.clone(),
-            cwd: cwd.to_string(),
-            execution_owner: Some(acquire_bound_owner(&cfg, &sid).await),
-            environment: None,
-            closing: false,
-            history: Vec::new(),
-            history_payloads: Vec::new(),
-            cancel_token: None,
-            frozen: None,
-            recall_items: Vec::new(),
-            agent_pool: crate::session::agent_pool::AgentPool::new(),
-            workflow_middleware: Some(Arc::clone(&mw) as Arc<dyn WorkflowMiddlewarePort>),
-            lsp_pool: Some(pool),
-            title: None,
-            tags: Vec::new(),
-            continuation_armed: false,
-            continuation_epoch: 0,
-            continuation_in_flight: false,
-            continuation_mq_steering_pending: false,
-            lease: crate::host::lease::WriterLease::acquired("default"),
-        },
-    );
-
-    let resp = handle_request(
-        "session/delete",
-        &json!({ "sessionId": sid }),
-        &cfg,
-        &mut sessions,
-        &transport,
-    )
-    .await
-    .expect("session/delete 应成功");
-    assert_eq!(resp, serde_json::json!({}));
-    assert!(
-        !sessions.contains_key(&sid),
-        "删除后活跃会话应从 sessions 表移除"
-    );
-    assert_eq!(
-        shutdown_calls.load(std::sync::atomic::Ordering::SeqCst),
-        1,
-        "删除活跃会话必须 shutdown LSP pool（M2）"
-    );
-}
-
-// ── AvailableCommandsUpdate + 注册表回调重发（Slice 6 / DD-5 / Phase 6 A4）──
-
-/// session/new 首发无 mcp 条目；MCP 发现完成后经「发现管线直接写入命令
-/// 注册表（A3 `mark_source_completed`）→ **注册表 on_change（投影重建唯一
-/// 触发源）**」重发，第二次通知含 mcp 条目（条目级 `_meta.periKind`；
-/// update 级 `mcpSkillNames` 镜像键已退役，Phase 6 D1）；注册表
-/// 内容变化（unregister）亦触发重发且投影收缩（Phase 6 A4：McpSkillRegistry
-/// 挂点已删，命令面变更统一经注册表）。
-#[tokio::test]
-async fn test_available_commands_update_mcp_callback_resend() {
-    let tmp = tempfile::TempDir::new().unwrap();
-    let peri_config = make_peri_config_with_provider(make_provider_config(
-        "a",
-        "openai",
-        "sk-openai-test",
-        "gpt-4o",
-    ));
-    let provider = LlmProvider::from_config(&peri_config).unwrap();
-    let cfg = make_server_config(peri_config, provider, &tmp).await;
-    let mut sessions = HashMap::new();
-    let transport: Arc<MockTransport> = Arc::new(MockTransport::default());
-    let transport_dyn: Arc<dyn crate::transport::AcpTransport> = transport.clone();
-
-    let result = handle_request(
-        "session/new",
-        &json!({ "cwd": tmp.path().to_str().unwrap() }),
-        &cfg,
-        &mut sessions,
-        &transport_dyn,
-    )
-    .await
-    .unwrap();
-    let sid = result["sessionId"].as_str().unwrap().to_string();
-    super::session_lifecycle::after_new_response(&cfg, &transport_dyn, &sid).await;
-
-    // 首发：registry 尚未发现 → availableCommands 无 mcp 条目
-    let notifications = transport.notifications();
-    assert_eq!(notifications.len(), 1, "首发仅一条 session/update 通知");
-    assert_eq!(notifications[0].0, "session/update");
-    let update0 = &notifications[0].1["update"];
-    assert_eq!(update0["sessionUpdate"], "available_commands_update");
-    let commands0 = update0["availableCommands"].as_array().unwrap();
-    assert!(
-        commands0
-            .iter()
-            .all(|c| c["name"] != "mcp__demo__hello" && c["name"] != "demo:hello"),
-        "首发不得含 mcp 条目"
-    );
-
-    // 变更命令注册表（A4 后 MCP 条目由发现管线直接写入，不再经
-    // McpSkillRegistry on_change 对账——挂点已删）→ 注册表 on_change
-    // 触发投影重发（A3 `mark_source_completed` 同语义）。
-    let command_registry = cfg
-        .session_manager
-        .command_registry_for(&sid)
-        .expect("session 应持有命令注册表");
-    let token: peri_acp_types::mcp_skills::HandleToken = Arc::new(42u32);
-    command_registry.mark_source_started("demo", token.clone());
-    command_registry.mark_source_completed(
-        "demo",
-        token,
-        vec![peri_acp_types::command::command_route::RouteEntry {
-            fullname: "demo:hello".into(),
-            aliases: Vec::new(),
-            description: "MCP skill hello".into(),
-            kind: peri_acp_types::command::command_route::CommandEntryKind::McpSkill,
-            category: None,
-            args_schema: None,
-            handler: Arc::new(crate::session::command::AgentPassthrough),
-            provenance: peri_acp_types::command::command_route::CommandProvenance {
-                source: peri_acp_types::command::command_route::CommandSource::Mcp {
-                    server: "demo".into(),
-                },
-                // 对齐生产语义（skill_discovery.rs `mcp_route_entries` 产出
-                // Discovered；handler 为跨 crate 占位等价——peri-acp 无法
-                // 引用 peri-middlewares 的 McpSkillReleaser，用
-                // AgentPassthrough 占位，本用例只断言触发源 = 注册表
-                // on_change，与 handler/lifecycle 无关）。
-                lifecycle: peri_acp_types::command::command_route::CommandLifecycle::Discovered,
-            },
-        }],
-    );
-
-    // 回调经 tokio::spawn 异步发送 → 轮询短等待
-    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
-    while transport.notifications().len() < 2 {
-        assert!(std::time::Instant::now() < deadline, "等待重发通知超时");
-        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
-    }
-    // 稳定窗口：异步重发落袋后再等一拍，断言重发**恰一次**（注册表
-    // on_change 只触发一次，不得重复重发——A5「重发恰一次断言不变」）
-    tokio::time::sleep(std::time::Duration::from_millis(50)).await;
-    assert_eq!(
-        transport.notifications().len(),
-        2,
-        "mark_source_completed 应触发重发恰一次（首发 + 重发）"
-    );
-
-    // 静默断言（验收 13 ACP 半边）：除 available_commands_update 外无其它
-    // 通知类型
-    let notifications = transport.notifications();
-    assert!(
-        notifications.iter().all(|(m, p)| {
-            m == "session/update" && p["update"]["sessionUpdate"] == "available_commands_update"
-        }),
-        "不得出现其它通知类型，实际: {:?}",
-        notifications
-            .iter()
-            .map(|(m, p)| (m.as_str(), p["update"]["sessionUpdate"].clone()))
-            .collect::<Vec<_>>()
-    );
-
-    let update1 = &notifications[1].1["update"];
-    let commands1 = update1["availableCommands"].as_array().unwrap();
-    let hello = commands1
-        .iter()
-        .find(|c| c["name"] == "demo:hello")
-        .expect("第二次通知应含 mcp 条目（demo:hello 全名）");
-    assert_eq!(
-        hello["_meta"]["periKind"], "mcp_skill",
-        "mcp 条目 kind 入条目级 _meta（mcpSkillNames 镜像键已退役）"
-    );
-
-    // 触发源 = 注册表：unregister 内置条目 → 重发且投影收缩（不再依赖
-    // McpSkillRegistry 直接重发）
-    let before = transport.notifications().len();
-    assert!(
-        command_registry.unregister("core:loop"),
-        "unregister 应命中"
-    );
-    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
-    loop {
-        let shrunk = transport.notifications().iter().any(|(_, p)| {
-            p["update"]["availableCommands"]
-                .as_array()
-                .map(|a| a.iter().all(|c| c["name"] != "loop"))
-                .unwrap_or(false)
-        });
-        if shrunk {
-            break;
-        }
-        assert!(
-            std::time::Instant::now() < deadline,
-            "等待注册表 on_change 重发超时（before={before}）"
-        );
-        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
-    }
-}
-
-/// session/load 与 session/new 同构（决策 B 扩展）：同样预热 MCP skill
-/// 发现。pool 存在但无已连接 server（pending）时 prewarm 空跑不 panic、
-/// 广播正常发出；已连接 server 的发现行为由 middleware 层单测覆盖
-/// （`prewarm_discovery_triggers_idempotent_discovery`）。
-#[tokio::test]
-async fn test_session_load_prewarms_mcp_discovery_smoke() {
-    let tmp = tempfile::TempDir::new().unwrap();
-    let peri_config = make_peri_config_with_provider(make_provider_config(
-        "a",
-        "openai",
-        "sk-openai-test",
-        "gpt-4o",
-    ));
-    let provider = LlmProvider::from_config(&peri_config).unwrap();
-    let mut cfg = make_server_config(peri_config, provider, &tmp).await;
-    cfg.session_manager.set_pending_caps(PeriCaps::default());
-    cfg.mcp_pool = Some(Arc::new(peri_middlewares::mcp::McpClientPool::new_pending()));
-    create_bound_fixture(&cfg, tmp.path().to_str().unwrap(), Some("s1")).await;
-    let mut sessions = HashMap::new();
-    let transport: Arc<MockTransport> = Arc::new(MockTransport::default());
-    let transport_dyn: Arc<dyn crate::transport::AcpTransport> = transport.clone();
-
-    let result = handle_request(
-        "session/load",
-        &json!({ "sessionId": "s1", "cwd": tmp.path().to_str().unwrap() }),
-        &cfg,
-        &mut sessions,
-        &transport_dyn,
-    )
-    .await
-    .unwrap();
-    assert!(
-        result.get("modes").is_some(),
-        "session/load 应返回 modes/configOptions"
-    );
-    // prewarm 空跑路径（pending pool 无已连接 server）不 panic，广播正常发出
-    assert!(
-        transport.notifications().iter().any(|(m, p)| {
-            m == "session/update" && p["update"]["sessionUpdate"] == "available_commands_update"
-        }),
-        "session/load 应广播 available_commands_update"
-    );
-}
-
-/// [回归测试] 冷启动加载同一 session 必须恢复创建时的 frozen prompt。
-///
-/// 历史问题：`session/load` 只恢复消息，却重新扫描当前 CLAUDE.md/skills/date；
-/// OpenAI/Cursor 因而在恢复后的首请求看到“新 system + 旧 history”，首轮重建
-/// cache prefix、后续轮才恢复命中。
-#[tokio::test]
-async fn test_session_load_cold_host_restores_original_frozen_prompt() {
-    // Arrange
-    let tmp = tempfile::TempDir::new().unwrap();
-    std::fs::write(tmp.path().join("CLAUDE.md"), "FROZEN_PROMPT_V1").unwrap();
-    let peri_config = make_peri_config_with_provider(make_provider_config(
-        "a",
-        "openai",
-        "sk-openai-test",
-        "gpt-4o",
-    ));
-    let provider = LlmProvider::from_config(&peri_config).unwrap();
-    let cfg = make_server_config(peri_config.clone(), provider.clone(), &tmp).await;
-    let mut sessions = HashMap::new();
-    let transport: Arc<dyn crate::transport::AcpTransport> = Arc::new(MockTransport::default());
-    let created = handle_request(
-        "session/new",
-        &json!({ "cwd": tmp.path().to_str().unwrap() }),
-        &cfg,
-        &mut sessions,
-        &transport,
-    )
-    .await
-    .unwrap();
-    let session_id = created["sessionId"].as_str().unwrap().to_string();
-    let original_prompt = sessions[&session_id]
-        .frozen
-        .as_ref()
-        .unwrap()
-        .system_prompt()
-        .to_string();
-    let original_claude_md = sessions[&session_id]
-        .frozen
-        .as_ref()
-        .unwrap()
-        .claude_md()
-        .unwrap()
-        .to_string();
-    assert!(original_claude_md.contains("FROZEN_PROMPT_V1"));
-    append_human_message(&cfg, &session_id, "existing history").await;
-    handle_request(
-        "session/close",
-        &json!({"sessionId": session_id}),
-        &cfg,
-        &mut sessions,
-        &transport,
-    )
-    .await
-    .unwrap();
-    drop(cfg);
-    drop(sessions);
-    std::fs::write(tmp.path().join("CLAUDE.md"), "FROZEN_PROMPT_V2").unwrap();
-    let restarted = make_server_config(peri_config, provider, &tmp).await;
-    let mut restored_sessions = HashMap::new();
-    // Act
-    handle_request(
-        "session/load",
-        &json!({
-            "sessionId": session_id,
-            "cwd": tmp.path().to_str().unwrap(),
-        }),
-        &restarted,
-        &mut restored_sessions,
-        &transport,
-    )
-    .await
-    .unwrap();
-    // Assert
-    let restored_prompt = restored_sessions[&session_id]
-        .frozen
-        .as_ref()
-        .unwrap()
-        .system_prompt();
-    let restored_claude_md = restored_sessions[&session_id]
-        .frozen
-        .as_ref()
-        .unwrap()
-        .claude_md()
-        .unwrap();
-    assert_eq!(restored_prompt, original_prompt);
-    assert_eq!(restored_claude_md, original_claude_md);
-    assert!(restored_claude_md.contains("FROZEN_PROMPT_V1"));
-    assert!(!restored_claude_md.contains("FROZEN_PROMPT_V2"));
-}
-
-/// 驻留空会话恢复后，fork 必须读到同一份 canonical 历史，而非只补展示缓存。
-#[tokio::test]
-async fn test_session_resume_existing_empty_history_is_available_to_fork() {
-    use peri_acp_types::messages::BaseMessage;
-
-    let tmp = tempfile::TempDir::new().unwrap();
-    let peri_config = make_peri_config_with_provider(make_provider_config(
-        "a",
-        "openai",
-        "sk-openai-test",
-        "gpt-4o",
-    ));
-    let provider = LlmProvider::from_config(&peri_config).unwrap();
-    let cfg = make_server_config(peri_config, provider, &tmp).await;
-    let mut sessions = HashMap::new();
-    let transport: Arc<dyn crate::transport::AcpTransport> = Arc::new(MockTransport::default());
-    let cwd = tmp.path().to_str().unwrap();
-    let created = handle_request(
-        "session/new",
-        &json!({ "cwd": cwd }),
-        &cfg,
-        &mut sessions,
-        &transport,
-    )
-    .await
-    .unwrap();
-    let session_id = created["sessionId"].as_str().unwrap().to_string();
-    let original = BaseMessage::human("persisted while the resident session is empty");
-    cfg.session_resources
-        .append_history(&session_id, &[PersistedPayload::Message(original.clone())])
-        .await
-        .unwrap();
-
-    handle_request(
-        "session/resume",
-        &json!({ "sessionId": session_id, "cwd": cwd }),
-        &cfg,
-        &mut sessions,
-        &transport,
-    )
-    .await
-    .unwrap();
-    let forked = handle_request(
-        "session/fork",
-        &json!({ "sessionId": session_id, "cwd": cwd }),
-        &cfg,
-        &mut sessions,
-        &transport,
-    )
-    .await
-    .unwrap();
-    let fork_id = forked["sessionId"].as_str().unwrap().to_string();
-    let persisted_fork = own_payloads(&cfg, &fork_id).await;
-    assert_eq!(
-        persisted_fork.len(),
-        1,
-        "resume 后的真实 fork 不得丢失已持久化历史"
-    );
-    let copied = persisted_fork[0].as_message().unwrap();
-    assert_eq!(copied.content(), original.content());
-    assert_ne!(copied.id(), original.id(), "fork 保持独立 payload identity");
-    assert_eq!(
-        sessions[&session_id].history_payloads[0].id(),
-        original.id()
-    );
-    assert_eq!(own_payloads(&cfg, &session_id).await[0].id(), original.id());
-    assert_eq!(
-        sessions[&fork_id].frozen.as_ref().unwrap().system_prompt(),
-        sessions[&session_id]
-            .frozen
-            .as_ref()
-            .unwrap()
-            .system_prompt(),
-        "恢复与 fork 不得重建 frozen 前缀"
-    );
-}
-
-#[tokio::test]
-async fn test_session_load_future_frozen_snapshot_fails_without_overwrite() {
-    let tmp = tempfile::TempDir::new().unwrap();
-    let peri_config = make_peri_config_with_provider(make_provider_config(
-        "a",
-        "openai",
-        "sk-openai-test",
-        "gpt-4o",
-    ));
-    let provider = LlmProvider::from_config(&peri_config).unwrap();
-    // 未来版本快照是「本构建读不懂的既有事实」：夹具用裸句柄按原样落库，
-    // 门面不给这种字节提供写入口（生产创建路径不接受写不懂的快照）。
-    let (cfg, bridge) =
-        make_server_config_with_bridge(peri_config.clone(), provider.clone(), &tmp).await;
-    let transport: Arc<dyn crate::transport::AcpTransport> = Arc::new(MockTransport::default());
-    let workspace = bridge.resolve_workspace(tmp.path()).await.unwrap();
-    let session_id = bridge
-        .create_bound_thread(ThreadMeta::new(tmp.path().to_str().unwrap()), &workspace)
-        .await
-        .unwrap();
-    let owner = bridge.acquire_execution_lease(&session_id).await.unwrap();
-    let future_snapshot = r#"{"version":999,"data":{"must":"remain"}}"#;
-    bridge
-        .store_frozen_snapshot_if_absent(&session_id, future_snapshot)
-        .await
-        .unwrap();
-    owner.mark_clean().await.unwrap();
-    drop(owner);
-    drop(cfg);
-    drop(bridge);
-
-    let (restarted, restarted_bridge) =
-        make_server_config_with_bridge(peri_config, provider, &tmp).await;
-    let mut restored_sessions = HashMap::new();
-    let error = handle_request(
-        "session/load",
-        &json!({
-            "sessionId": session_id,
-            "cwd": tmp.path().to_str().unwrap(),
-        }),
-        &restarted,
-        &mut restored_sessions,
-        &transport,
-    )
-    .await
-    .unwrap_err();
-
-    assert!(error
-        .message
-        .contains("unsupported frozen snapshot version"));
-    assert!(restored_sessions.is_empty());
-    assert!(restarted.session_manager.get_session(&session_id).is_none());
-    assert_eq!(
-        restarted_bridge
-            .load_frozen_snapshot(&session_id)
-            .await
-            .unwrap()
-            .unwrap(),
-        future_snapshot,
-        "future snapshot must be preserved for a newer binary"
-    );
-}
-
-/// 核对点 8 覆盖缺口（P2-3）：`set_pending_caps` 带 `ui_commands` 明细 →
-/// session/new → 断言 ui 面板条目随 caps 明细出现（name = Level1 裸名、
-/// `periKind=panel`、`periCategory=ui`、alias 注入），未协商的默认明细不出现。
-#[tokio::test]
-async fn test_available_commands_update_ui_entries_from_caps_details() {
-    let tmp = tempfile::TempDir::new().unwrap();
-    let peri_config = make_peri_config_with_provider(make_provider_config(
-        "a",
-        "openai",
-        "sk-openai-test",
-        "gpt-4o",
-    ));
-    let provider = LlmProvider::from_config(&peri_config).unwrap();
-    let cfg = make_server_config(peri_config, provider, &tmp).await;
-    // 协商 caps：仅上送两条自定义 ui 明细（大写 name 验证小写归一 + alias 透传）
-    cfg.session_manager.set_pending_caps(PeriCaps {
-        ui_commands: vec![
-            peri_acp_types::command::command_route::UiCommandSpec {
-                name: "gallery".into(),
-                description: "Open the gallery panel".into(),
-                aliases: vec!["gal".into()],
-                args: None,
-            },
-            peri_acp_types::command::command_route::UiCommandSpec {
-                name: "Zoom".into(),
-                description: "Zoom panel".into(),
-                ..Default::default()
-            },
-        ],
-        ..Default::default()
-    });
-    let mut sessions = HashMap::new();
-    let transport: Arc<MockTransport> = Arc::new(MockTransport::default());
-    let transport_dyn: Arc<dyn crate::transport::AcpTransport> = transport.clone();
-
-    let result = handle_request(
-        "session/new",
-        &json!({ "cwd": tmp.path().to_str().unwrap() }),
-        &cfg,
-        &mut sessions,
-        &transport_dyn,
-    )
-    .await
-    .unwrap();
-    let sid = result["sessionId"].as_str().unwrap();
-    super::session_lifecycle::after_new_response(&cfg, &transport_dyn, sid).await;
-
-    let notifications = transport.notifications();
-    assert_eq!(notifications.len(), 1, "首发仅一条 session/update 通知");
-    let update = &notifications[0].1["update"];
-    assert_eq!(update["sessionUpdate"], "available_commands_update");
-    let commands = update["availableCommands"].as_array().unwrap();
-    let by_name = |n: &str| {
-        commands
-            .iter()
-            .find(|c| c["name"] == n)
-            .unwrap_or_else(|| panic!("条目 {n} 应存在: {:?}", commands))
-    };
-    // ui 条目随 caps 明细出现：name = 裸名 / periKind=panel / periLevel=1 /
-    // periCategory=ui（Level1 域归属只经条目级 kind 下发，name 不带域前缀）
-    let gallery = by_name("gallery");
-    assert_eq!(
-        gallery["_meta"]["periKind"], "panel",
-        "ui 条目 kind = panel"
-    );
-    assert_eq!(gallery["_meta"]["periLevel"], 1, "core/ui 域 level = 1");
-    assert_eq!(gallery["_meta"]["periCategory"], "ui");
-    assert_eq!(
-        gallery["_meta"]["periAliases"],
-        json!(["gal"]),
-        "caps 明细 alias 应透传注入"
-    );
-    assert_eq!(
-        by_name("zoom")["_meta"]["periKind"],
-        "panel",
-        "name 应小写归一（Zoom → zoom）"
-    );
-    // 未协商的默认明细不得出现（门控反转：只广播客户端声明的明细）——
-    // panel 条目恰为协商的 gallery/zoom 两条（help 未协商不注册；core:clear
-    // 的内置裸名条目 kind=command，不构成 panel）
-    let panels: Vec<&str> = commands
-        .iter()
-        .filter(|c| c["_meta"]["periKind"] == "panel")
-        .map(|c| c["name"].as_str().unwrap())
-        .collect();
-    assert_eq!(
-        panels,
-        ["gallery", "zoom"],
-        "仅协商的 ui 明细注册为 panel 条目: {panels:?}"
-    );
-    // 基座内置仍在（注册表投影，Level1 裸名）
-    assert!(
-        commands.iter().any(|c| c["name"] == "compact"),
-        "基座内置条目应保留"
-    );
-}
-
-/// 防引用环断言：注册回调后清零外部强引用（持 Weak 观察）→ upgrade 必须
-/// 变 None——注册表 on_change 回调不得捕获注册表 Arc 强引用（重发闭包只
-/// 持 Weak；Phase 6 A4 后 McpSkillRegistry 不再经本函数挂回调）。
-#[tokio::test]
-async fn test_available_commands_update_callbacks_do_not_hold_strong_refs() {
-    let tmp = tempfile::TempDir::new().unwrap();
-    let peri_config = make_peri_config_with_provider(make_provider_config(
-        "a",
-        "openai",
-        "sk-openai-test",
-        "gpt-4o",
-    ));
-    let provider = LlmProvider::from_config(&peri_config).unwrap();
-    let _cfg = make_server_config(peri_config, provider, &tmp).await;
-    let transport: Arc<MockTransport> = Arc::new(MockTransport::default());
-    let transport_dyn: Arc<dyn crate::transport::AcpTransport> = transport.clone();
-
-    let command_registry = Arc::new(peri_acp_types::command_registry::CommandRegistry::new());
-    let weak_cmd = Arc::downgrade(&command_registry);
-
-    crate::host::notify::send_available_commands_update(
-        &transport_dyn,
-        "anti-cycle-session",
-        &PeriCaps::all_enabled(),
-        Some(command_registry), // 唯一强引用移入函数，返回后即释放
-        false,
-    )
-    .await;
-
-    // 外部强引用清零后：注册表 on_change 回调只持 Weak(注册表)（重发闭包），
-    // 注册表必须能被回收（无引用环）。
-    assert!(
-        weak_cmd.upgrade().is_none(),
-        "注册表应可回收（on_change 回调不得捕获强引用）；upgrade 应为 None"
-    );
-    assert_eq!(weak_cmd.strong_count(), 0, "注册表 strong_count 应归零");
-}
-
-#[tokio::test]
-async fn test_mcp_list_requires_negotiated_oauth_capability() {
-    let tmp = tempfile::TempDir::new().unwrap();
-    let peri_config = make_peri_config_with_provider(make_provider_config(
-        "a",
-        "openai",
-        "sk-test-placeholder",
-        "gpt-test",
-    ));
-    let provider = LlmProvider::from_config(&peri_config).unwrap();
-    let mut cfg = make_server_config(peri_config, provider, &tmp).await;
-    cfg.session_manager.set_pending_caps(PeriCaps::default());
-    cfg.mcp_pool = Some(Arc::new(peri_middlewares::mcp::McpClientPool::new_pending()));
-    let transport: Arc<dyn crate::transport::AcpTransport> = Arc::new(MockTransport::default());
-    let error = handle_request(
-        "mcp/list",
-        &json!({}),
-        &cfg,
-        &mut HashMap::new(),
-        &transport,
-    )
-    .await
-    .unwrap_err();
-    assert_eq!(error.code, -32601);
-    assert_eq!(error.message, "peri.oauth capability not negotiated");
-}
-
-#[tokio::test]
-async fn test_mcp_list_returns_bounded_safe_empty_snapshot_when_negotiated() {
-    let tmp = tempfile::TempDir::new().unwrap();
-    let peri_config = make_peri_config_with_provider(make_provider_config(
-        "a",
-        "openai",
-        "sk-test-placeholder",
-        "gpt-test",
-    ));
-    let provider = LlmProvider::from_config(&peri_config).unwrap();
-    let mut cfg = make_server_config(peri_config, provider, &tmp).await;
-    cfg.session_manager.set_pending_caps(PeriCaps {
-        oauth: true,
-        ..PeriCaps::default()
-    });
-    cfg.mcp_pool = Some(Arc::new(peri_middlewares::mcp::McpClientPool::new_pending()));
-    let transport: Arc<dyn crate::transport::AcpTransport> = Arc::new(MockTransport::default());
-    let response = handle_request(
-        "mcp/list",
-        &json!({}),
-        &cfg,
-        &mut HashMap::new(),
-        &transport,
-    )
-    .await
-    .unwrap();
-    assert_eq!(response, json!({ "servers": [] }));
-    assert!(response.to_string().find("url").is_none());
-    assert!(response.to_string().find("error").is_none());
-}
-
-#[tokio::test]
-async fn test_oauth_start_rejects_missing_flow_id_before_spawning() {
-    let tmp = tempfile::TempDir::new().unwrap();
-    let peri_config = make_peri_config_with_provider(make_provider_config(
-        "a",
-        "openai",
-        "sk-test-placeholder",
-        "gpt-test",
-    ));
-    let provider = LlmProvider::from_config(&peri_config).unwrap();
-    let mut cfg = make_server_config(peri_config, provider, &tmp).await;
-    cfg.session_manager.set_pending_caps(PeriCaps {
-        oauth: true,
-        ..PeriCaps::default()
-    });
-    cfg.mcp_pool = Some(Arc::new(peri_middlewares::mcp::McpClientPool::new_pending()));
-    let transport: Arc<dyn crate::transport::AcpTransport> = Arc::new(MockTransport::default());
-    let error = handle_request(
-        "mcp/oauth_start",
-        &json!({ "server_name": "docs" }),
-        &cfg,
-        &mut HashMap::new(),
-        &transport,
-    )
-    .await
-    .unwrap_err();
-    assert_eq!(error.code, -32602);
-    assert_eq!(error.message, "missing 'flow_id'");
-}
-
-#[tokio::test]
-async fn test_safe_oauth_capability_rejects_callback_secrets_over_acp() {
-    let tmp = tempfile::TempDir::new().unwrap();
-    let peri_config = make_peri_config_with_provider(make_provider_config(
-        "a",
-        "openai",
-        "sk-test-placeholder",
-        "gpt-test",
-    ));
-    let provider = LlmProvider::from_config(&peri_config).unwrap();
-    let mut cfg = make_server_config(peri_config, provider, &tmp).await;
-    cfg.session_manager.set_pending_caps(PeriCaps {
-        oauth: true,
-        ..PeriCaps::default()
-    });
-    cfg.mcp_pool = Some(Arc::new(peri_middlewares::mcp::McpClientPool::new_pending()));
-    let transport: Arc<dyn crate::transport::AcpTransport> = Arc::new(MockTransport::default());
-    let error = handle_request(
-        "mcp/oauth_callback",
-        &json!({
-            "server_name": "docs",
-            "flow_id": "flow-1",
-            "code": "secret-code",
-            "state": "secret-state"
-        }),
-        &cfg,
-        &mut HashMap::new(),
-        &transport,
-    )
-    .await
-    .unwrap_err();
-    assert_eq!(error.code, -32601);
-    assert!(!error.message.contains("secret-code"));
-    assert!(!error.message.contains("secret-state"));
 }
 
 // ── Phase 6 B3：plugin install/uninstall RPC 级投影断言（P2-2）──────────────
@@ -2446,6 +414,7 @@ impl Drop for HomeDirGuard {
 /// cache_dir；`unstable_event` caps 默认关闭，push_plugin_* 不发通知）。
 struct MockPluginManager {
     cache_dir: PathBuf,
+    snapshot_entries: Vec<PluginSnapshotEntry>,
     install_result: std::sync::Mutex<Result<InstalledPlugin, String>>,
     uninstall_result: std::sync::Mutex<Result<(), String>>,
 }
@@ -2454,6 +423,7 @@ impl MockPluginManager {
     fn install_ok(id: &str) -> Self {
         Self {
             cache_dir: PathBuf::from("/tmp/mock-cache"),
+            snapshot_entries: Vec::new(),
             install_result: std::sync::Mutex::new(Ok(InstalledPlugin {
                 id: id.to_string(),
                 name: id.to_string(),
@@ -2478,12 +448,27 @@ impl PluginManagerPort for MockPluginManager {
         _scope: InstallScope,
         _cache_dir: &Path,
         _claude_dir: &Path,
+        _project_dir: Option<&Path>,
     ) -> Result<InstalledPlugin, String> {
         self.install_result.lock().unwrap().clone()
     }
 
-    async fn uninstall(&self, _plugin_id: &str, _claude_dir: &Path) -> Result<(), String> {
+    async fn uninstall(
+        &self,
+        _plugin_id: &str,
+        _scope: InstallScope,
+        _claude_dir: &Path,
+        _project_dir: Option<&Path>,
+    ) -> Result<(), String> {
         self.uninstall_result.lock().unwrap().clone()
+    }
+
+    fn installation_scope(
+        &self,
+        claude_dir: &Path,
+        plugin: &peri_acp_types::plugin::LoadedPlugin,
+    ) -> Result<Option<InstallScope>, String> {
+        peri_middlewares::host_ports::PluginManager.installation_scope(claude_dir, plugin)
     }
 
     fn set_enabled(
@@ -2491,6 +476,7 @@ impl PluginManagerPort for MockPluginManager {
         _plugin_id: &str,
         _scope: InstallScope,
         _claude_dir: &Path,
+        _project_dir: Option<&Path>,
         _enable: bool,
     ) -> Result<(), String> {
         Ok(())
@@ -2503,8 +489,10 @@ impl PluginManagerPort for MockPluginManager {
     async fn update(
         &self,
         _plugin_id: &str,
+        _scope: InstallScope,
         _cache_dir: &Path,
         _claude_dir: &Path,
+        _project_dir: Option<&Path>,
     ) -> Result<InstalledPlugin, String> {
         Err("mock: unused".into())
     }
@@ -2533,14 +521,99 @@ impl PluginManagerPort for MockPluginManager {
         json!({})
     }
 
-    fn snapshot(&self, _claude_dir: &Path) -> Vec<PluginSnapshotEntry> {
-        vec![]
+    fn snapshot(
+        &self,
+        _claude_dir: &Path,
+        _project_dir: Option<&Path>,
+    ) -> Vec<PluginSnapshotEntry> {
+        self.snapshot_entries.clone()
+    }
+
+    // W3 端口补全：命令重载 / 路由投影 / 目录定位按真实加载器委托——与替换前
+    // ACP 直调 middlewares 静态函数的行为逐字节一致（磁盘夹具依赖这一路径）。
+    fn claude_home(&self) -> PathBuf {
+        peri_middlewares::plugin::claude_home()
+    }
+
+    fn enabled_plugin_commands(
+        &self,
+        claude_dir: &Path,
+        cwd: Option<&Path>,
+    ) -> Result<Vec<peri_acp_types::plugin::CommandEntry>, String> {
+        peri_middlewares::plugin::load_enabled_plugins(claude_dir, cwd)
+            .map(|plugins| plugins.into_iter().flat_map(|p| p.commands).collect())
+            .map_err(|error| error.to_string())
+    }
+
+    fn plugin_route_entries(
+        &self,
+        entries: &[peri_acp_types::plugin::CommandEntry],
+    ) -> Vec<peri_acp_types::command::command_route::RouteEntry> {
+        peri_middlewares::plugin::plugin_route_entries(entries)
+    }
+
+    fn find_marketplace_json(&self, dir: &Path) -> Option<PathBuf> {
+        peri_middlewares::plugin::marketplace::find_marketplace_json(dir)
     }
 }
 
 /// 在 `{home}/.claude` 布置一个启用中的插件 `ecc`（含命令
 /// `commands/deploy.md`），供 `refresh_plugin_command_entries` 重载出
 /// `plugin:ecc:deploy`（与 peri-middlewares loader_test 的磁盘形态同构）。
+#[path = "user_input_test.rs"]
+mod user_input_tests;
+
+#[path = "requests/plugin_search_test.rs"]
+mod plugin_search_tests;
+
+#[path = "requests/plugin_scope_test.rs"]
+mod plugin_scope_tests;
+
+#[path = "requests/plugin_identity_test.rs"]
+mod plugin_identity_tests;
+
+#[path = "requests/marketplace_mutation_test.rs"]
+mod marketplace_mutation_tests;
+
+#[path = "requests_config_cases_test.rs"]
+mod config_cases;
+
+#[path = "requests_rewind_cases_test.rs"]
+mod rewind_cases;
+
+#[path = "requests_workflow_cases_test.rs"]
+mod workflow_cases;
+
+#[path = "requests_lifecycle_cases_test.rs"]
+mod lifecycle_cases;
+
+#[path = "requests_mcp_cases_test.rs"]
+mod mcp_cases;
+
+#[path = "requests_frozen_cases_test.rs"]
+mod frozen_cases;
+
+#[path = "requests_plugins_cases_test.rs"]
+mod plugins_cases;
+
+#[path = "requests_workspace_cases_test.rs"]
+mod workspace_cases;
+
+#[path = "requests_meta_resources_test.rs"]
+mod meta_resources;
+
+#[path = "requests_beta_flags_test.rs"]
+mod beta_flags;
+
+#[path = "requests_agent_catalog_test.rs"]
+mod agent_catalog;
+
+#[path = "requests_skill_resources_test.rs"]
+mod skill_resources;
+
+#[path = "requests_cron_test.rs"]
+mod cron_tests;
+
 fn seed_plugin_ecc(home: &Path) {
     let claude_dir = home.join(".claude");
     let plugin_dir = claude_dir.join("plugins").join("ecc");
@@ -2585,1006 +658,74 @@ fn seed_plugin_ecc(home: &Path) {
     .unwrap();
 }
 
-/// 等待 `session/update` 通知达到目标条数（on_change 经 tokio::spawn
-/// 异步发送 → 轮询短等待，对齐 A5 重发测试先例）。仅计数 session/update：
-/// 未协商 caps 回退 all_enabled（`unstable_event: true`），install/uninstall
-/// 还会发 `peri/unstable_event`（plugin-action-result / plugin-snapshot）。
-fn session_update_count(transport: &MockTransport) -> usize {
-    transport
-        .notifications()
-        .iter()
-        .filter(|(m, _)| m == "session/update")
-        .count()
-}
-
-async fn wait_for_session_updates(transport: &MockTransport, target: usize) {
-    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
-    while session_update_count(transport) < target {
-        assert!(
-            std::time::Instant::now() < deadline,
-            "等待通知超时（target={target}）"
-        );
-        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
-    }
-    // 稳定窗口：异步重发落袋后再等一拍（防迟到的重复重发漏判）
-    tokio::time::sleep(std::time::Duration::from_millis(50)).await;
-}
-
-fn plugin_entries(registry: &peri_acp_types::command::CommandRegistry) -> Vec<String> {
-    registry
-        .snapshot()
-        .iter()
-        .filter(|e| e.fullname.to_lowercase().starts_with("plugin:"))
-        .map(|e| e.fullname.clone())
-        .collect()
-}
-
-/// B3 成功分支（install 调用路径 :907）：mock install 成功 + 磁盘重载出
-/// `plugin:ecc:deploy` → 注册表投影含新插件命令（provenance 剥离前缀，
-/// P0-1 回归）+ 注册表 on_change 触发投影推送**恰一次**。
-#[tokio::test]
-#[serial]
-async fn test_plugin_install_refreshes_plugin_domain_and_pushes_once() {
-    let tmp = tempfile::TempDir::new().unwrap();
-    let home = tmp.path().join("home");
-    std::fs::create_dir_all(&home).unwrap();
-    let _home_guard = HomeDirGuard::set(&home);
-    seed_plugin_ecc(&home);
-
-    let peri_config = make_peri_config_with_provider(make_provider_config(
-        "a",
-        "openai",
-        "sk-openai-test",
-        "gpt-4o",
-    ));
-    let provider = LlmProvider::from_config(&peri_config).unwrap();
-    let mut cfg = make_server_config(peri_config, provider, &tmp).await;
-    cfg.plugin_manager = Arc::new(MockPluginManager::install_ok("ecc"));
-    let mut sessions = HashMap::new();
-    let transport: Arc<MockTransport> = Arc::new(MockTransport::default());
-    let transport_dyn: Arc<dyn crate::transport::AcpTransport> = transport.clone();
-
-    let result = handle_request(
-        "session/new",
-        &json!({ "cwd": tmp.path().to_str().unwrap() }),
-        &cfg,
-        &mut sessions,
-        &transport_dyn,
-    )
-    .await
-    .unwrap();
-    let sid = result["sessionId"].as_str().unwrap().to_string();
-    super::session_lifecycle::after_new_response(&cfg, &transport_dyn, &sid).await;
-    assert_eq!(
-        transport.notifications().len(),
-        1,
-        "session/new response 后首发仅 available_commands_update 一条"
-    );
-    let registry = cfg
-        .session_manager
-        .command_registry_for(&sid)
-        .expect("session 应持有命令注册表");
-    assert!(
-        plugin_entries(&registry).is_empty(),
-        "初始 plugin 域应为空（无插件命令）"
-    );
-
-    // Act：plugin/install（mock 成功）
-    let resp = handle_request(
-        "plugin/install",
-        &json!({
-            "sessionId": sid,
-            "name": "ecc",
-            "marketplace": "test-mkt",
-        }),
-        &cfg,
-        &mut sessions,
-        &transport_dyn,
-    )
-    .await
-    .unwrap();
-    assert_eq!(resp["success"], true, "install RPC 应成功");
-    assert_eq!(resp["plugin"], "ecc");
-
-    // Assert ①：注册表投影含新插件命令，provenance 剥离 plugin: 前缀
-    let entries = plugin_entries(&registry);
-    assert_eq!(entries, vec!["plugin:ecc:deploy"]);
-    let entry = registry
-        .snapshot()
-        .into_iter()
-        .find(|e| e.fullname == "plugin:ecc:deploy")
-        .expect("插件命令应已注册");
-    use peri_acp_types::command::command_route::{
-        CommandEntryKind, CommandLifecycle, CommandSource as RouteCommandSource,
-    };
-    assert_eq!(entry.kind, CommandEntryKind::Command);
-    assert_eq!(entry.provenance.lifecycle, CommandLifecycle::Connected);
-    match &entry.provenance.source {
-        RouteCommandSource::Plugin { name } => {
-            assert_eq!(name, "ecc", "plugin: 前缀必须剥离，实际: {name}");
-        }
-        other => panic!("source 应为 Plugin，实际: {other:?}"),
-    }
-
-    // Assert ②：注册表 on_change → 投影推送恰一次（首发 + 重发）
-    wait_for_session_updates(&transport, 2).await;
-    let notifications = transport.notifications();
-    let updates: Vec<_> = notifications
-        .iter()
-        .filter(|(m, _)| m == "session/update")
-        .collect();
-    assert_eq!(
-        updates.len(),
-        2,
-        "install 后注册表 on_change 应触发投影重发恰一次"
-    );
-    let commands = updates[1].1["update"]["availableCommands"]
-        .as_array()
-        .expect("重发载荷应含 availableCommands");
-    assert!(
-        commands.iter().any(|c| c["name"] == "plugin:ecc:deploy"),
-        "投影推送应含插件命令条目"
-    );
-}
-
-/// B3 失败分支（install 调用路径 :907）：磁盘重载失败（installed_plugins.json
-/// 非法 JSON → `load_enabled_plugins` Err）→ 保留空 plugin 域 + 告警，
-/// **不阻塞 RPC 回包**（`{success: true}` 仍回），plugin 域无变化不触发推送。
-#[tokio::test]
-#[serial]
-async fn test_plugin_install_reload_failure_keeps_domain_empty_and_does_not_block_rpc() {
-    let tmp = tempfile::TempDir::new().unwrap();
-    let home = tmp.path().join("home");
-    let claude_dir = home.join(".claude");
-    std::fs::create_dir_all(claude_dir.join("plugins")).unwrap();
-    let _home_guard = HomeDirGuard::set(&home);
-    // 重载失败形态：installed_plugins.json 内容非法
-    std::fs::write(
-        claude_dir.join("plugins").join("installed_plugins.json"),
-        "{invalid json",
-    )
-    .unwrap();
-
-    let peri_config = make_peri_config_with_provider(make_provider_config(
-        "a",
-        "openai",
-        "sk-openai-test",
-        "gpt-4o",
-    ));
-    let provider = LlmProvider::from_config(&peri_config).unwrap();
-    let mut cfg = make_server_config(peri_config, provider, &tmp).await;
-    cfg.plugin_manager = Arc::new(MockPluginManager::install_ok("ecc"));
-    let mut sessions = HashMap::new();
-    let transport: Arc<MockTransport> = Arc::new(MockTransport::default());
-    let transport_dyn: Arc<dyn crate::transport::AcpTransport> = transport.clone();
-
-    let result = handle_request(
-        "session/new",
-        &json!({ "cwd": tmp.path().to_str().unwrap() }),
-        &cfg,
-        &mut sessions,
-        &transport_dyn,
-    )
-    .await
-    .unwrap();
-    let sid = result["sessionId"].as_str().unwrap().to_string();
-    super::session_lifecycle::after_new_response(&cfg, &transport_dyn, &sid).await;
-    let registry = cfg
-        .session_manager
-        .command_registry_for(&sid)
-        .expect("session 应持有命令注册表");
-
-    // Act：plugin/install —— 重载失败不得阻塞回包
-    let resp = handle_request(
-        "plugin/install",
-        &json!({
-            "sessionId": sid,
-            "name": "ecc",
-            "marketplace": "test-mkt",
-        }),
-        &cfg,
-        &mut sessions,
-        &transport_dyn,
-    )
-    .await
-    .unwrap();
-    assert_eq!(resp["success"], true, "重载失败不得阻塞 RPC 回包");
-
-    // Assert：plugin 域保持空 + 无内容变化 → 无投影推送（unstable_event
-    // 通知 `peri/unstable_event` 与投影推送 `session/update` 相互独立）
-    assert!(
-        plugin_entries(&registry).is_empty(),
-        "重载失败 → 保留空 plugin 域（过时条目不得残留）"
-    );
-    // 稳定窗口：若存在异步重发也已落袋（重载失败路径 reconcile 无内容
-    // 变化，不应触发任何 on_change）
-    tokio::time::sleep(std::time::Duration::from_millis(100)).await;
-    assert_eq!(
-        session_update_count(&transport),
-        1,
-        "plugin 域无内容变化，不得触发投影推送（仅首发一条）"
-    );
-}
-
-/// B3 注销分支（uninstall 调用路径 :969）：install 预置 plugin 域条目 →
-/// 磁盘 enabledPlugins 清空 → uninstall 成功 → stale 条目按名注销，
-/// plugin 域为空，RPC 仍 success。
-#[tokio::test]
-#[serial]
-async fn test_plugin_uninstall_removes_stale_plugin_entries() {
-    let tmp = tempfile::TempDir::new().unwrap();
-    let home = tmp.path().join("home");
-    std::fs::create_dir_all(&home).unwrap();
-    let _home_guard = HomeDirGuard::set(&home);
-    seed_plugin_ecc(&home);
-
-    let peri_config = make_peri_config_with_provider(make_provider_config(
-        "a",
-        "openai",
-        "sk-openai-test",
-        "gpt-4o",
-    ));
-    let provider = LlmProvider::from_config(&peri_config).unwrap();
-    let mut cfg = make_server_config(peri_config, provider, &tmp).await;
-    cfg.plugin_manager = Arc::new(MockPluginManager::install_ok("ecc"));
-    let mut sessions = HashMap::new();
-    let transport: Arc<MockTransport> = Arc::new(MockTransport::default());
-    let transport_dyn: Arc<dyn crate::transport::AcpTransport> = transport.clone();
-
-    let result = handle_request(
-        "session/new",
-        &json!({ "cwd": tmp.path().to_str().unwrap() }),
-        &cfg,
-        &mut sessions,
-        &transport_dyn,
-    )
-    .await
-    .unwrap();
-    let sid = result["sessionId"].as_str().unwrap().to_string();
-    super::session_lifecycle::after_new_response(&cfg, &transport_dyn, &sid).await;
-    let registry = cfg
-        .session_manager
-        .command_registry_for(&sid)
-        .expect("session 应持有命令注册表");
-
-    // 预置：install 成功 → plugin 域含 plugin:ecc:deploy
-    handle_request(
-        "plugin/install",
-        &json!({
-            "sessionId": sid,
-            "name": "ecc",
-            "marketplace": "test-mkt",
-        }),
-        &cfg,
-        &mut sessions,
-        &transport_dyn,
-    )
-    .await
-    .unwrap();
-    assert_eq!(
-        plugin_entries(&registry),
-        vec!["plugin:ecc:deploy"],
-        "install 预置失败"
-    );
-
-    // 卸载后磁盘重载面清空（enabledPlugins 空 → 无插件）
-    std::fs::write(
-        home.join(".claude").join("settings.json"),
-        r#"{"enabledPlugins":[]}"#,
-    )
-    .unwrap();
-
-    // Act：plugin/uninstall（mock 成功）
-    let resp = handle_request(
-        "plugin/uninstall",
-        &json!({
-            "sessionId": sid,
-            "pluginId": "ecc@test-mkt",
-        }),
-        &cfg,
-        &mut sessions,
-        &transport_dyn,
-    )
-    .await
-    .unwrap();
-    assert_eq!(resp["success"], true, "uninstall RPC 应成功");
-
-    // Assert：stale 条目按名注销 → plugin 域空
-    assert!(
-        plugin_entries(&registry).is_empty(),
-        "uninstall 后 stale 插件命令应全部注销"
-    );
-    // 通知：首发 + install on_change + uninstall 注销 on_change，各恰一次
-    wait_for_session_updates(&transport, 3).await;
-    assert_eq!(
-        session_update_count(&transport),
-        3,
-        "install/uninstall 各触发一次投影推送（首发 + 2 次重发）"
-    );
-}
-
-#[path = "user_input_test.rs"]
-mod user_input_tests;
-
-#[path = "requests/plugin_search_test.rs"]
-mod plugin_search_tests;
-
-#[tokio::test]
-async fn worktree_binding_hot_cold_resume_and_owner_are_consistent() {
-    let tmp = tempfile::TempDir::new().unwrap();
-    let repo = tmp.path().join("main");
-    let linked = tmp.path().join("linked");
-    std::fs::create_dir(&repo).unwrap();
-    let run_git = |args: &[&std::ffi::OsStr]| {
-        let output = std::process::Command::new("git")
-            .current_dir(&repo)
-            .args(args)
-            .output()
-            .unwrap();
-        assert!(
-            output.status.success(),
-            "{}",
-            String::from_utf8_lossy(&output.stderr)
-        );
-    };
-    run_git(&["init".as_ref(), "--quiet".as_ref()]);
-    run_git(&[
-        "-c".as_ref(),
-        "user.name=Test".as_ref(),
-        "-c".as_ref(),
-        "user.email=test@example.invalid".as_ref(),
-        "commit".as_ref(),
-        "--allow-empty".as_ref(),
-        "-m".as_ref(),
-        "initial".as_ref(),
-        "--quiet".as_ref(),
-    ]);
-    run_git(&[
-        "worktree".as_ref(),
-        "add".as_ref(),
-        "--detach".as_ref(),
-        linked.as_os_str(),
-    ]);
-    let sub = repo.join("src");
-    std::fs::create_dir(&sub).unwrap();
-    std::fs::write(sub.join("CLAUDE.md"), "SOURCE_WORKTREE_FROZEN_SENTINEL").unwrap();
-    let provider_config = make_provider_config("test", "openai", "key", "model");
-    let peri_config = make_peri_config_with_provider(provider_config);
-    let provider = LlmProvider::from_config(&peri_config).unwrap();
-    let cfg = make_server_config(peri_config.clone(), provider.clone(), &tmp).await;
-    let second = make_server_config(peri_config, provider, &tmp).await;
-    let transport: Arc<dyn crate::transport::AcpTransport> = Arc::new(MockTransport::default());
-    let mut sessions = HashMap::new();
-    let created = handle_request(
-        "session/new",
-        &json!({"cwd": sub}),
-        &cfg,
-        &mut sessions,
-        &transport,
-    )
-    .await
-    .unwrap();
-    let id = created["sessionId"].as_str().unwrap().to_owned();
-    let original_cwd = std::fs::canonicalize(&sub).unwrap();
-    assert_eq!(sessions[&id].cwd, original_cwd.to_str().unwrap());
-    assert_eq!(
-        created["_meta"]["peri.sessionWorkspaceV1"]["workspace"]["cwd"],
-        original_cwd.to_str().unwrap()
-    );
-    let frozen = frozen_snapshot_bytes(&cfg, &id).await;
-    append_human_message(&cfg, &id, "visible project session").await;
-    for method in ["session/load", "session/resume", "session/fork"] {
-        assert!(handle_request(
-            method,
-            &json!({"sessionId": id, "cwd": linked}),
-            &cfg,
-            &mut sessions,
-            &transport
-        )
-        .await
-        .is_err());
-        assert_eq!(sessions[&id].cwd, original_cwd.to_str().unwrap());
-    }
-    let project = handle_request(
-        "peri/session_context",
-        &json!({"cwd": linked}),
-        &cfg,
-        &mut sessions,
-        &transport,
-    )
-    .await
-    .unwrap();
-    let list = handle_request("session/list", &json!({"_meta":{"peri.sessionWorkspaceV1":{"scope":{"kind":"project","value":project["workspace"]["project_id"]}}}}), &cfg, &mut sessions, &transport).await.unwrap();
-    assert_eq!(list["sessions"].as_array().unwrap().len(), 1);
-    let exact = handle_request(
-        "session/list",
-        &json!({"cwd": linked}),
-        &cfg,
-        &mut sessions,
-        &transport,
-    )
-    .await
-    .unwrap();
-    assert!(exact["sessions"].as_array().unwrap().is_empty());
-    let forked = handle_request(
-        "session/fork",
-        &json!({"sessionId": id}),
-        &cfg,
-        &mut sessions,
-        &transport,
-    )
-    .await
-    .unwrap();
-    let fork_id = forked["sessionId"].as_str().unwrap().to_owned();
-    assert_eq!(
-        cfg.session_resources
-            .load_session_binding(&fork_id)
-            .await
-            .unwrap(),
-        cfg.session_resources
-            .load_session_binding(&id)
-            .await
-            .unwrap()
-    );
-    assert_eq!(frozen_snapshot_bytes(&cfg, &fork_id).await, frozen);
-    assert_eq!(own_payloads(&cfg, &fork_id).await.len(), 1);
-    handle_request(
-        "session/close",
-        &json!({"sessionId": fork_id}),
-        &cfg,
-        &mut sessions,
-        &transport,
-    )
-    .await
-    .unwrap();
-    let mut cold = HashMap::new();
-    // 热会话仍持有执行所有权：冷会话按只读准入进入，历史可读但不取得所有权。
-    let read_only_load = handle_request(
-        "session/load",
-        &json!({"sessionId": id, "cwd": sub}),
-        &second,
-        &mut cold,
-        &transport,
-    )
-    .await
-    .unwrap();
-    assert_eq!(
-        read_only_load["_meta"]["peri.sessionWorkspaceV1"]["read_only"]["kind"],
-        "peri.executionBusyV1"
-    );
-    assert!(cold[&id].execution_owner.is_none());
-    handle_request(
-        "session/close",
-        &json!({"sessionId": id}),
-        &cfg,
-        &mut sessions,
-        &transport,
-    )
-    .await
-    .unwrap();
-    std::fs::write(sub.join("CLAUDE.md"), "MUTATED_AFTER_CLOSE").unwrap();
-    handle_request(
-        "session/resume",
-        &json!({"sessionId": id}),
-        &second,
-        &mut cold,
-        &transport,
-    )
-    .await
-    .unwrap();
-    assert_eq!(cold[&id].cwd, original_cwd.to_str().unwrap());
-    assert_eq!(frozen_snapshot_bytes(&second, &id).await, frozen);
-    assert!(cold[&id]
-        .frozen
-        .as_ref()
-        .unwrap()
-        .system_prompt()
-        .contains(original_cwd.to_str().unwrap()));
-    handle_request(
-        "session/close",
-        &json!({"sessionId": id}),
-        &second,
-        &mut cold,
-        &transport,
-    )
-    .await
-    .unwrap();
-}
-
-#[tokio::test]
-async fn worktree_missing_directory_history_is_read_only_and_load_is_rejected() {
-    let tmp = tempfile::TempDir::new().unwrap();
-    let cwd = tmp.path().join("project");
-    std::fs::create_dir(&cwd).unwrap();
-    let config =
-        make_peri_config_with_provider(make_provider_config("test", "openai", "key", "model"));
-    let provider = LlmProvider::from_config(&config).unwrap();
-    let cfg = make_server_config(config, provider, &tmp).await;
-    let transport: Arc<dyn crate::transport::AcpTransport> = Arc::new(MockTransport::default());
-    let mut sessions = HashMap::new();
-    let created = handle_request(
-        "session/new",
-        &json!({"cwd": cwd}),
-        &cfg,
-        &mut sessions,
-        &transport,
-    )
-    .await
-    .unwrap();
-    let id = created["sessionId"].as_str().unwrap();
-    append_human_message(&cfg, id, "saved history").await;
-    handle_request(
-        "session/close",
-        &json!({"sessionId": id}),
-        &cfg,
-        &mut sessions,
-        &transport,
-    )
-    .await
-    .unwrap();
-    std::fs::remove_dir(&cwd).unwrap();
-    let history = handle_request(
-        "peri/session_history",
-        &json!({"sessionId": id}),
-        &cfg,
-        &mut sessions,
-        &transport,
-    )
-    .await
-    .unwrap();
-    assert_eq!(history["payloads"].as_array().unwrap().len(), 1);
-    assert!(sessions.is_empty());
-    assert!(handle_request(
-        "session/load",
-        &json!({"sessionId": id}),
-        &cfg,
-        &mut sessions,
-        &transport
-    )
-    .await
-    .is_err());
-    assert!(sessions.is_empty());
-}
-
-#[tokio::test]
-async fn worktree_new_resources_use_the_target_directory() {
-    let tmp = tempfile::TempDir::new().unwrap();
-    let startup = tmp.path().join("startup");
-    let target = tmp.path().join("target");
-    std::fs::create_dir(&startup).unwrap();
-    std::fs::create_dir(&target).unwrap();
-    std::fs::write(target.join("CLAUDE.md"), "TARGET_FROZEN_CONFIGURATION").unwrap();
-    let config =
-        make_peri_config_with_provider(make_provider_config("test", "openai", "key", "model"));
-    let provider = LlmProvider::from_config(&config).unwrap();
-    let mut cfg = make_server_config(config.clone(), provider, &tmp).await;
-    crate::provider::save_to(&config, cfg.config_source.global_path()).unwrap();
-    cfg.workspace_assembly = Some(crate::host::assemble::WorkspaceAssembly {
-        startup_cwd: startup.to_str().unwrap().to_owned(),
-        bare: true,
-        mcp_profile: peri_middlewares::mcp::apps::McpCapabilityProfile::disabled(),
-    });
-    let transport: Arc<dyn crate::transport::AcpTransport> = Arc::new(MockTransport::default());
-    let mut sessions = HashMap::new();
-    let created = handle_request(
-        "session/new",
-        &json!({"cwd": target}),
-        &cfg,
-        &mut sessions,
-        &transport,
-    )
-    .await
-    .unwrap();
-    let id = created["sessionId"].as_str().unwrap();
-    let state = &sessions[id];
-    let environment = state.environment.as_ref().unwrap();
-    assert!(state
-        .frozen
-        .as_ref()
-        .unwrap()
-        .v2_frozen()
-        .claude_md
-        .contains("TARGET_FROZEN_CONFIGURATION"));
-    assert_eq!(
-        environment.cfg.session_manager.get_session(id).unwrap().cwd,
-        state.cwd
-    );
-    assert!(environment.cfg.mcp_pool.is_none());
-    assert!(environment.cfg.hook_groups.is_empty());
-    assert_eq!(cfg.session_manager.get_session(id).unwrap().cwd, state.cwd);
-    handle_request(
-        "session/close",
-        &json!({"sessionId": id}),
-        &cfg,
-        &mut sessions,
-        &transport,
-    )
-    .await
-    .unwrap();
-}
-
-/// A resource that keeps closing until its external cleanup is acknowledged.
-struct RetryShutdownPool {
-    settled: AtomicBool,
-    called: AtomicBool,
-}
+struct MockWorkflowExecutor;
 
 #[async_trait]
-impl peri_acp_types::ports::McpPoolPort for RetryShutdownPool {
-    fn as_any(&self) -> &dyn std::any::Any {
-        self
-    }
-
-    async fn shutdown(&self) -> peri_acp_types::ports::McpPoolShutdownReport {
-        self.called.store(true, Ordering::Release);
-        if self.settled.load(Ordering::Acquire) {
-            peri_acp_types::ports::McpPoolShutdownReport::Complete {
-                settled_services: 1,
-                failed_services: 0,
-            }
-        } else {
-            peri_acp_types::ports::McpPoolShutdownReport::Incomplete {
-                settled_services: 0,
-                unfinished_services: 1,
-                failed_services: 0,
-            }
+impl AgentExecutor for MockWorkflowExecutor {
+    async fn execute(&self, _params: AgentRunParams) -> AgentRunResult {
+        AgentRunResult::Ok {
+            output: serde_json::json!("mock"),
+            usage: Usage { output_tokens: 0 },
+            model: None,
+            tool_count: None,
+            token_count: None,
+            phase: None,
+            duration_ms: None,
         }
-    }
-
-    fn snapshot(&self) -> Value {
-        json!({})
     }
 }
 
-/// 测试夹具：把一次未完成排空的装配保留在会话表里，供关闭重试。
-///
-/// 原为生产侧 fork 补偿链的保留入口；该补偿链已随 fork 门面迁移删除，这里按
-/// 同一形态在测试内构造，继续锁定「Closing + 唯一 owner + 资源保留」不变量。
-fn retain_failed_assembly(
+/// 构造带 workflow_middleware 的 SessionState，返回 middleware 引用（供注册 run 用）。
+async fn register_session_with_workflow(
     sessions: &mut HashMap<String, SessionState>,
-    id: &str,
+    sid: &str,
     cwd: &str,
-    owner: Arc<dyn peri_acp_types::workspace::SessionExecutionLease>,
-    environment: Arc<crate::host::workspace::SessionEnvironment>,
-) {
+    cfg: &AcpServerConfig,
+) -> Arc<WorkflowMiddleware> {
+    // 会话尚未创建（NotFound）或没有本机绑定：本夹具负责建一条已绑定会话。
+    let bound = matches!(
+        cfg.session_resources
+            .load_session_binding(&sid.to_owned())
+            .await,
+        Ok(BindingState::Bound(_))
+    );
+    if !bound {
+        create_bound_fixture(cfg, cwd, Some(sid)).await;
+    }
+    let executor: Arc<dyn AgentExecutor> = Arc::new(MockWorkflowExecutor);
+    let (notification_tx, _) = tokio::sync::broadcast::channel::<WorkflowTaskResult>(32);
+    let mw = Arc::new(WorkflowMiddleware::new(
+        executor,
+        cwd,
+        notification_tx,
+        None,
+    ));
     sessions.insert(
-        id.to_owned(),
+        sid.to_string(),
         SessionState {
-            session_id: id.to_owned(),
-            thread_id: id.to_owned(),
-            cwd: cwd.to_owned(),
-            execution_owner: Some(owner),
-            environment: Some(environment),
-            closing: true,
+            session_id: sid.to_string(),
+            thread_id: sid.to_owned(),
+            cwd: std::fs::canonicalize(cwd)
+                .unwrap()
+                .to_str()
+                .unwrap()
+                .to_owned(),
+            environment: None,
+            closing: false,
             history: Vec::new(),
             history_payloads: Vec::new(),
             cancel_token: None,
-            frozen: None,
-            recall_items: Vec::new(),
-            agent_pool: crate::session::agent_pool::AgentPool::new(),
-            workflow_middleware: None,
-            lsp_pool: None,
-            title: None,
-            tags: Vec::new(),
             continuation_armed: false,
             continuation_epoch: 0,
             continuation_in_flight: false,
             continuation_mq_steering_pending: false,
-            lease: crate::host::lease::WriterLease::acquired("default"),
+            frozen: None,
+            recall_items: Vec::new(),
+            agent_pool: crate::session::agent_pool::AgentPool::new(),
+            workflow_middleware: Some(Arc::clone(&mw) as Arc<dyn WorkflowMiddlewarePort>),
+            title: None,
+            tags: Vec::new(),
         },
     );
-}
-
-#[tokio::test]
-async fn worktree_failed_assembly_retains_resources_and_lease_until_cleanup_retry() {
-    let tmp = tempfile::TempDir::new().unwrap();
-    let config =
-        make_peri_config_with_provider(make_provider_config("test", "openai", "key", "model"));
-    let provider = LlmProvider::from_config(&config).unwrap();
-    let mut cfg = make_server_config(config, provider, &tmp).await;
-    let cwd = tmp.path().canonicalize().unwrap();
-    cfg.workspace_assembly = Some(crate::host::assemble::WorkspaceAssembly {
-        startup_cwd: cwd.to_str().unwrap().to_owned(),
-        bare: true,
-        mcp_profile: peri_middlewares::mcp::apps::McpCapabilityProfile::disabled(),
-    });
-    let id = create_bound_fixture(&cfg, cwd.to_str().unwrap(), None).await;
-    let owner = acquire_bound_owner(&cfg, &id).await;
-    let mut environment =
-        crate::host::workspace::SessionEnvironment::assemble(&cfg, cwd.to_str().unwrap(), &id)
-            .await
-            .unwrap()
-            .unwrap();
-    let pool = Arc::new(RetryShutdownPool {
-        settled: AtomicBool::new(false),
-        called: AtomicBool::new(false),
-    });
-    Arc::get_mut(&mut environment).unwrap().cfg.mcp_pool = Some(pool.clone());
-    assert!(!environment.shutdown().await);
-    let mut sessions = HashMap::new();
-    retain_failed_assembly(
-        &mut sessions,
-        &id,
-        cwd.to_str().unwrap(),
-        owner,
-        environment,
-    );
-    let transport: Arc<dyn crate::transport::AcpTransport> = Arc::new(MockTransport::default());
-    let competing = SqliteThreadStore::new(tmp.path().join("threads.db"))
-        .await
-        .unwrap();
-    assert!(sessions[&id].closing);
-    assert!(competing.acquire_execution_lease(&id).await.is_err());
-    let close = json!({"sessionId": id});
-    assert!(
-        handle_request("session/close", &close, &cfg, &mut sessions, &transport)
-            .await
-            .is_err()
-    );
-    assert!(sessions.contains_key(&id));
-    assert!(competing.acquire_execution_lease(&id).await.is_err());
-    // A closing owner cannot mutate session configuration or restart execution.
-    assert!(handle_request(
-        "session/set_mode",
-        &json!({"sessionId": id, "modeId": "ask"}),
-        &cfg,
-        &mut sessions,
-        &transport,
-    )
-    .await
-    .is_err());
-    pool.settled.store(true, Ordering::Release);
-    handle_request("session/close", &close, &cfg, &mut sessions, &transport)
-        .await
-        .unwrap();
-    assert!(!sessions.contains_key(&id));
-    competing
-        .acquire_execution_lease(&id)
-        .await
-        .unwrap()
-        .mark_clean()
-        .await
-        .unwrap();
-}
-
-#[tokio::test]
-async fn worktree_scheduled_approval_uses_session_permission_and_rejects_closed_owner() {
-    let tmp = tempfile::TempDir::new().unwrap();
-    let config =
-        make_peri_config_with_provider(make_provider_config("test", "openai", "key", "model"));
-    let provider = LlmProvider::from_config(&config).unwrap();
-    let mut cfg = make_server_config(config, provider, &tmp).await;
-    let cwd = tmp.path().canonicalize().unwrap();
-    cfg.workspace_assembly = Some(crate::host::assemble::WorkspaceAssembly {
-        startup_cwd: cwd.to_str().unwrap().to_owned(),
-        bare: true,
-        mcp_profile: peri_middlewares::mcp::apps::McpCapabilityProfile::disabled(),
-    });
-    let transport: Arc<dyn crate::transport::AcpTransport> = Arc::new(MockTransport::default());
-    let mut sessions = HashMap::new();
-    let created = handle_request(
-        "session/new",
-        &json!({"cwd": cwd}),
-        &cfg,
-        &mut sessions,
-        &transport,
-    )
-    .await
-    .unwrap();
-    let id = created["sessionId"].as_str().unwrap();
-    sessions[id]
-        .environment
-        .as_ref()
-        .unwrap()
-        .cfg
-        .permission_mode
-        .store(PermissionMode::Default);
-    assert_eq!(cfg.permission_mode.load(), PermissionMode::Bypass);
-    let sessions = Arc::new(tokio::sync::Mutex::new(sessions));
-    let permission = crate::host::continuation::scheduled_permission_mode(&cfg, &sessions, id)
-        .await
-        .unwrap();
-    assert_eq!(permission.load(), PermissionMode::Default);
-    assert!(
-        !crate::host::prompt::approve_scheduled_trigger(permission.as_ref(), None, "task", "run")
-            .await
-    );
-    sessions.lock().await.get_mut(id).unwrap().closing = true;
-    assert!(
-        crate::host::continuation::scheduled_permission_mode(&cfg, &sessions, id)
-            .await
-            .is_err()
-    );
-    assert!(
-        crate::host::continuation::scheduled_permission_mode(&cfg, &sessions, "missing")
-            .await
-            .is_err()
-    );
-    handle_request(
-        "session/close",
-        &json!({"sessionId": id}),
-        &cfg,
-        &mut *sessions.lock().await,
-        &transport,
-    )
-    .await
-    .unwrap();
-}
-
-#[cfg(unix)]
-#[tokio::test]
-async fn worktree_session_end_retains_owner_and_joins_same_hook_on_retry() {
-    use peri_acp_types::hooks::{HookEvent, RegisteredHook};
-    use peri_acp_types::store::ThreadStore;
-
-    let tmp = tempfile::TempDir::new().unwrap();
-    let target = tmp.path().join("target");
-    std::fs::create_dir(&target).unwrap();
-    let target = target.canonicalize().unwrap();
-    let config =
-        make_peri_config_with_provider(make_provider_config("test", "openai", "key", "model"));
-    let provider = LlmProvider::from_config(&config).unwrap();
-    let mut cfg = make_server_config(config, provider, &tmp).await;
-    cfg.workspace_assembly = Some(crate::host::assemble::WorkspaceAssembly {
-        startup_cwd: target.to_str().unwrap().to_owned(),
-        bare: true,
-        mcp_profile: peri_middlewares::mcp::apps::McpCapabilityProfile::disabled(),
-    });
-    let transport: Arc<dyn crate::transport::AcpTransport> = Arc::new(MockTransport::default());
-    let mut sessions = HashMap::new();
-    let created = handle_request(
-        "session/new",
-        &json!({"cwd": target}),
-        &cfg,
-        &mut sessions,
-        &transport,
-    )
-    .await
-    .unwrap();
-    let id = created["sessionId"].as_str().unwrap();
-    let environment = sessions.get_mut(id).unwrap().environment.as_mut().unwrap();
-    Arc::get_mut(environment).unwrap().cfg.hook_groups = vec![vec![RegisteredHook {
-        hook: serde_json::from_value(json!({
-            "type": "command",
-            "command": "cat > ended.json; pwd > ended.cwd; echo end >> ended.count; while [ ! -f release ]; do sleep 0.02; done",
-            "async": true,
-            "timeout": 30,
-        })).unwrap(),
-        event: HookEvent::SessionEnd,
-        matcher: None,
-        plugin_name: "test".into(),
-        plugin_id: "test".into(),
-        plugin_root: target.clone(),
-        plugin_data_dir: target.clone(),
-        plugin_options: HashMap::new(),
-    }]];
-    let close = json!({"sessionId": id});
-    let error = handle_request("session/close", &close, &cfg, &mut sessions, &transport)
-        .await
-        .unwrap_err();
-    assert!(error.message.contains("incomplete"));
-    let input: Value =
-        serde_json::from_str(&std::fs::read_to_string(target.join("ended.json")).unwrap()).unwrap();
-    assert_eq!(input["session_id"], id);
-    assert_eq!(input["cwd"], target.to_str().unwrap());
-    assert_eq!(
-        std::fs::read_to_string(target.join("ended.cwd"))
-            .unwrap()
-            .trim(),
-        target.to_str().unwrap()
-    );
-    let competing = SqliteThreadStore::new(tmp.path().join("threads.db"))
-        .await
-        .unwrap();
-    assert!(competing
-        .acquire_execution_lease(&id.to_owned())
-        .await
-        .is_err());
-    std::fs::write(target.join("release"), "ready").unwrap();
-    handle_request("session/close", &close, &cfg, &mut sessions, &transport)
-        .await
-        .unwrap();
-    assert!(!sessions.contains_key(id));
-    assert_eq!(
-        std::fs::read_to_string(target.join("ended.count")).unwrap(),
-        "end\n"
-    );
-    competing
-        .acquire_execution_lease(&id.to_owned())
-        .await
-        .unwrap()
-        .mark_clean()
-        .await
-        .unwrap();
-}
-
-#[tokio::test]
-async fn worktree_invalid_session_end_binding_skips_hook_but_drains_existing_resources() {
-    use peri_acp_types::hooks::{HookEvent, RegisteredHook};
-    use peri_acp_types::store::ThreadStore;
-
-    let tmp = tempfile::TempDir::new().unwrap();
-    let target = tmp.path().join("target");
-    std::fs::create_dir(&target).unwrap();
-    let target = target.canonicalize().unwrap();
-    let config =
-        make_peri_config_with_provider(make_provider_config("test", "openai", "key", "model"));
-    let provider = LlmProvider::from_config(&config).unwrap();
-    let mut cfg = make_server_config(config, provider, &tmp).await;
-    cfg.workspace_assembly = Some(crate::host::assemble::WorkspaceAssembly {
-        startup_cwd: target.to_str().unwrap().to_owned(),
-        bare: true,
-        mcp_profile: peri_middlewares::mcp::apps::McpCapabilityProfile::disabled(),
-    });
-    let transport: Arc<dyn crate::transport::AcpTransport> = Arc::new(MockTransport::default());
-    let mut sessions = HashMap::new();
-    let created = handle_request(
-        "session/new",
-        &json!({"cwd": target}),
-        &cfg,
-        &mut sessions,
-        &transport,
-    )
-    .await
-    .unwrap();
-    let id = created["sessionId"].as_str().unwrap();
-    let environment =
-        Arc::get_mut(sessions.get_mut(id).unwrap().environment.as_mut().unwrap()).unwrap();
-    environment.cfg.hook_groups = vec![vec![RegisteredHook {
-        hook: serde_json::from_value(
-            json!({"type":"command", "command":"echo unexpected > ended"}),
-        )
-        .unwrap(),
-        event: HookEvent::SessionEnd,
-        matcher: None,
-        plugin_name: "test".into(),
-        plugin_id: "test".into(),
-        plugin_root: target.clone(),
-        plugin_data_dir: target.clone(),
-        plugin_options: HashMap::new(),
-    }]];
-    let pool = Arc::new(RetryShutdownPool {
-        settled: AtomicBool::new(false),
-        called: AtomicBool::new(false),
-    });
-    environment.cfg.mcp_pool = Some(pool.clone());
-    let moved = tmp.path().join("moved");
-    std::fs::rename(&target, &moved).unwrap();
-    std::fs::create_dir(&target).unwrap();
-    let close = json!({"sessionId": id});
-    assert!(
-        handle_request("session/close", &close, &cfg, &mut sessions, &transport)
-            .await
-            .is_err()
-    );
-    assert!(
-        pool.called.load(Ordering::Acquire),
-        "invalid hook binding must not prevent MCP shutdown"
-    );
-    assert!(!target.join("ended").exists());
-    assert!(
-        sessions.contains_key(id),
-        "actual incomplete resource drain must retain the owner"
-    );
-    pool.settled.store(true, Ordering::Release);
-    handle_request("session/close", &close, &cfg, &mut sessions, &transport)
-        .await
-        .unwrap();
-    assert!(!sessions.contains_key(id));
-    assert!(
-        !target.join("ended").exists(),
-        "terminal hook must never run in a replacement directory"
-    );
-    std::fs::remove_dir(&target).unwrap();
-    std::fs::rename(&moved, &target).unwrap();
-    let competing = SqliteThreadStore::new(tmp.path().join("threads.db"))
-        .await
-        .unwrap();
-    competing
-        .acquire_execution_lease(&id.to_owned())
-        .await
-        .unwrap()
-        .mark_clean()
-        .await
-        .unwrap();
+    mw
 }

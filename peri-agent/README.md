@@ -167,67 +167,8 @@ let _guard = peri_agent::telemetry::init_tracing("my-agent");
 // _guard 必须存活到程序退出，drop 时自动 flush
 ```
 
-### 开关控制
+### 日志控制
 
-**不配置环境变量则不开启 OTLP**，仅输出到 stdout：
-
-| 环境变量                      | 说明                                            |
-| ----------------------------- | ----------------------------------------------- |
-| `OTEL_EXPORTER_OTLP_ENDPOINT` | 设置后自动启用 OTLP 导出，未设置则只输出 stdout |
-| `RUST_LOG`                    | 日志级别，默认 `info`                           |
-| `RUST_LOG_FORMAT=json`        | 使用 JSON 格式输出（默认 pretty）               |
-
-```bash
-# 仅 stdout 输出（默认行为）
-cargo run
-
-# 开启 OTLP 导出到本地 Jaeger
-OTEL_EXPORTER_OTLP_ENDPOINT=http://localhost:4318 cargo run --features otel
-
-# 调整日志级别
-RUST_LOG=debug cargo run
-RUST_LOG=peri_agent=trace cargo run
-```
-
-### 本地可视化（Jaeger）
-
-项目根目录提供了 `docker-compose.otel.yml`，一键启动 Jaeger（内置 OTLP 接收器 + UI）：
-
-```bash
-# 启动
-docker compose -f docker-compose.otel.yml up -d
-
-# 停止
-docker compose -f docker-compose.otel.yml down
-```
-
-启动后：
-
-- **可视化 UI**：<http://localhost:16686>
-- **OTLP HTTP**：`http://localhost:4318`（`OTEL_EXPORTER_OTLP_ENDPOINT` 填这个）
-- **OTLP gRPC**：`localhost:4317`
-
-### otel Feature
-
-OTLP 导出功能通过 Cargo feature 控制，默认不编译进二进制：
-
-```toml
-# Cargo.toml
-[dependencies]
-peri-agent = { version = "*", features = ["otel"] }
-```
-
-| 场景                     | 配置                                              | 结果                        |
-| ------------------------ | ------------------------------------------------- | --------------------------- |
-| 开发/测试                | 无                                                | 只输出到 stdout             |
-| 生产（有 Collector）     | `OTEL_EXPORTER_OTLP_ENDPOINT` + `--features otel` | 同时导出 trace              |
-| 配置了变量但未开 feature | `OTEL_EXPORTER_OTLP_ENDPOINT`（无 feature）       | 打印 warn，降级为 stdout    |
-| OTLP 初始化失败          | 网络不通等                                        | 打印 warn，自动降级，不崩溃 |
-
-`run_react_loop` 内的 LLM 调用、每次工具调用均已自动埋点，无需额外代码。
-
-## Cargo Features
-
-| Feature | 默认 | 说明                                                                                           |
-| ------- | ---- | ---------------------------------------------------------------------------------------------- |
-| `otel`  | 否   | 启用 OpenTelemetry OTLP 导出（`opentelemetry`、`opentelemetry-otlp`、`tracing-opentelemetry`） |
+`init_tracing` 当前使用按天轮转的本地日志文件。`RUST_LOG` 控制过滤级别，
+`RUST_LOG_FORMAT=json` 选择 JSON 格式，`RUST_LOG_FILE` 指定文件路径/名前缀。
+有效值、缺省行为及其他 Peri 开关见[环境变量控制表](../docs/standards/environment-variables.md)。

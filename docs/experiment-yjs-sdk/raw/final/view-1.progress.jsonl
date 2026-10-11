@@ -1,0 +1,13 @@
+{"progress":{"stage":"project_tools","completed":1000,"elapsedMs":37.171959},"memory":{"rssBytes":108953600,"peakRssBytes":108953600,"heapUsedBytes":16321903}}
+{"progress":{"stage":"project_tools","completed":2000,"elapsedMs":54.311583999999996},"memory":{"rssBytes":142622720,"peakRssBytes":142622720,"heapUsedBytes":34155033}}
+{"progress":{"stage":"project_tools","completed":3000,"elapsedMs":70.334042},"memory":{"rssBytes":171425792,"peakRssBytes":171425792,"heapUsedBytes":51546502}}
+{"progress":{"stage":"project_tools","completed":4000,"elapsedMs":86.161292},"memory":{"rssBytes":221118464,"peakRssBytes":221118464,"heapUsedBytes":65826713}}
+{"progress":{"stage":"project_tools","completed":5000,"elapsedMs":99.547709},"memory":{"rssBytes":308674560,"peakRssBytes":308674560,"heapUsedBytes":65826713}}
+{"progress":{"stage":"project_tools","completed":6000,"elapsedMs":115.391375},"memory":{"rssBytes":335233024,"peakRssBytes":335233024,"heapUsedBytes":102607376}}
+{"progress":{"stage":"project_tools","completed":7000,"elapsedMs":128.223167},"memory":{"rssBytes":363757568,"peakRssBytes":363757568,"heapUsedBytes":102607376}}
+{"progress":{"stage":"project_tools","completed":8000,"elapsedMs":144.04625},"memory":{"rssBytes":381796352,"peakRssBytes":381796352,"heapUsedBytes":137857141}}
+{"progress":{"stage":"project_tools","completed":9000,"elapsedMs":156.5275},"memory":{"rssBytes":416186368,"peakRssBytes":416186368,"heapUsedBytes":137857141}}
+{"progress":{"stage":"project_tools","completed":10000,"elapsedMs":173.34437499999999},"memory":{"rssBytes":432783360,"peakRssBytes":432783360,"heapUsedBytes":172299348}}
+{"progress":{"stage":"project_tools","completed":11000,"elapsedMs":187.687959},"memory":{"rssBytes":472727552,"peakRssBytes":472727552,"heapUsedBytes":172299348}}
+{"progress":{"stage":"project_tools","completed":12000,"elapsedMs":203.535792},"memory":{"rssBytes":490536960,"peakRssBytes":490536960,"heapUsedBytes":207344305}}
+{"resultFile":"/Users/konghayao/code/ai/peri-v4p3/docs/experiment-yjs-sdk/raw/final/view-1.json","status":"passed","elapsedMs":458.707417}

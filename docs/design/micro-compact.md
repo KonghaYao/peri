@@ -105,25 +105,27 @@ TurnGroup #2:
 
 ### 4.1 投影粒度
 
-压缩不是"一条消息截不截"这么粗。同一条 AI 消息里可能有一个 Bash 调用（参数很长，可以压缩）和一个 AskUserQuestion（工具调用，必须保留）。新版用三级粒度区分：
+压缩按工具结果消息与媒体 block 分别投影，不连带改变同消息的其他内容。
+历史 `ToolCallRequest.arguments` 与 `ContentBlock::ToolUse.input` 是 canonical
+执行数据，Micro 在模型可见视图中也不得修改；长 Bash 参数不是可压缩对象。
 
 | 粒度 | 什么时候用 | 例子 |
 |------|-----------|------|
 | 整条消息 | 工具输出（ToolResult）——整条消息做 head/tail 截断 | Bash 的 stdout 输出 |
 | 消息内的一个 block | Image/Document 类型的 ContentBlock——把 Base64 替换成文本占位符 | 用户发的截图 |
-| 消息内的一个工具调用 | AI 消息中的某个 tool_call——只压缩这个调用的参数 | Bash 的 command 参数 |
+| 消息内的一个工具调用 | 仅保留 legacy directive 的可解码形状；当前 planner 不生成、renderer 不应用输入投影 | ToolCall/ToolUse 输入保持原值 |
 
-三级粒度由 `ProjectionTarget` 枚举表示。
+目标形状由 `ProjectionTarget` 枚举表示；可解码的历史形状不等于当前允许的投影行为。
 
 ### 4.2 投影动作
 
-`ProjectionAction` 枚举定义了六种投影方式：
+`ProjectionAction` 保留以下形状，历史输入 action 不参与当前执行：
 
 | 动作 | 对什么用 | 效果 |
 |------|---------|------|
 | **Keep** | Human 消息、System 消息、错误输出、受保护的工具 | 原样保留 |
 | **CompactToolResult** | 普通工具的输出 | 保留前 N 个字符和后 N 个字符，中间省略 |
-| **CompactToolInput** | 工具的输入参数 | 替换为 `{"_compact_note": "已压缩"}`，保持 JSON object 格式 |
+| **CompactToolInput** | legacy 输入投影 directive | 可解码但忽略；输入保持 canonical transcript 原值 |
 | **CompactText** | 普通文本 | 截断到 max_chars 字符，追加 `[内容已压缩]` |
 | **ReplaceMedia** | Image / Document block | 移除 Base64 payload，换成 `[图片已压缩: ...]` 文本 |
 | **Exclude** | 整块内容 | 替换为 `[已排除]` |
@@ -171,8 +173,7 @@ sequenceDiagram
         else ContentBlock 级 action
             R->>R: Image→ReplaceMedia<br/>Document→ReplaceMedia
         else ToolCall 级 action
-            R->>R: 压缩 tool input · 保持 JSON object 根
-            R->>R: 同步 ToolUse block 内容
+            R->>R: 忽略 legacy input action<br/>保留 ToolCall/ToolUse canonical 输入
         end
     end
 
@@ -256,7 +257,7 @@ flowchart TD
 
 Full 与 Reason 共用 `render_persisted_llm_view` 恢复已提交的模型视图，包括 canonical reminder；派生摘要请求保留消息角色、工具配对与完整可见正文，不再使用每条 2000 字符、工具结果前三行或关键参数预览。已有 Micro 投影仍生效，避免 Full 重新展开已经隐藏的工具输出。摘要请求不开放可执行工具；冻结 prompt 与父会话的继承快照不被改写。
 
-子 Agent 报告与后台任务结果参与摘要，摘要指令要求保留结论、约束与未完成工作并按通知来源归因。摘要只输出交接正文，长度目标为 `summary_max_tokens` 的一半，给模型输出留余量；不要求分析块、所有消息清单或完整代码副本。MaxTokens 且有正文时保留片段，在同次 Full 内最多续写两次，沿用原上下文和单次输出上限，按原顺序拼接后再提取摘要；仅回灌正文，不重放隐藏思考或工具。只有正常完成且后处理后非空的摘要可以提交，续写还须闭合 summary；没有可续接正文、预算耗尽、续写失败或仅含 analysis 时保留原历史；嵌套的分析标签与残留结束标签不能充当有效摘要；思考块之外已闭合的 `<summary>` 正文按普通文本保留，其中讨论的标签字面量不得再次被剥除。提交时将快照内 own region 的普通历史与 reminder 一起标 excluded，摘要与标记使用同一持久化事务；System 和 ancestor 不在排除集合。原文留在 canonical 存储供回查，后续模型请求及冷恢复不再发送已排除报告全文。
+子 Agent 报告与后台任务结果参与摘要，摘要指令要求保留结论、约束与未完成工作并按通知来源归因。摘要只输出交接正文，长度目标是 `min(summary_max_tokens, 当前模型已解析的单次输出上限)` 的一半，给模型输出留余量；请求预算与目标同源——沿用同一已解析上限，不用 `summary_max_tokens` 覆写 provider 输出上限（零值或解析出零上限是显式配置错误，不是「不限」，也不代填常量）；不要求分析块、所有消息清单或完整代码副本。MaxTokens 且有正文时保留片段，在同次 Full 内最多续写一次（共两次请求），沿用首轮请求的原上下文与预算，按原顺序拼接后再提取摘要；仅回灌正文，不重放隐藏思考或工具。只有正常完成且后处理后非空的摘要可以提交，续写还须闭合 summary；没有可续接正文、预算耗尽、续写失败或仅含 analysis 时保留原历史；嵌套的分析标签与残留结束标签不能充当有效摘要；思考块之外已闭合的 `<summary>` 正文按普通文本保留，其中讨论的标签字面量不得再次被剥除。提交时将快照内 own region 的普通历史与 reminder 一起标 excluded，摘要与标记使用同一持久化事务；System 和 ancestor 不在排除集合。原文留在 canonical 存储供回查，后续模型请求及冷恢复不再发送已排除报告全文。
 
 手动 `/compact` 从一次一致快照恢复完整 payload、flags 和 ancestor/own 边界；普通消息 ID 校验仅用于调用方一致性检查，不再决定摘要输入范围。仅有 reminder 的会话也可压缩。摘要期间新到达的 inbox 结果在后续 Receive 处理，不属于旧快照的排除集合。
 
@@ -296,9 +297,9 @@ MessageFlags {
 
 ### 7.2 批量写入
 
-旧版每条 `truncated` 标记都发一条 `PersistOp::UpdateFlags` 给 writer task，writer 每条都单独 `invalidate_context_cache`——N 条消息 N 次 cache invalidation。
+旧版逐条持久化 `truncated` 标记产生多次写入；当前采用同事务批量投影更新。当前形状已移除会话派生缓存及其失效接口，不再为历史变更维护缓存正文或 epoch。
 
-新版新增 `PersistOp::ApplyCompactionBatch`：writer task 循环内逐条更新数据库，循环外只做**一次** cache invalidation。
+`PersistOp::ApplyCompactionBatch` 将本轮投影合为一个持久化行为；SQLite 数据面在同一事务内提交投影和更新时间，不再调用缓存失效接口。
 
 ### 7.3 Session 恢复
 
@@ -340,7 +341,7 @@ SQLite 的 `projection TEXT` 列通过幂等迁移添加。恢复时 `load_messa
 
 | 模块 | 文件 | 测试数 | 重点 |
 |------|------|--------|------|
-| projection | `projection_test.rs` | 8 | Image/Document 移除、ToolInput 根类型、head/tail 截断、CJK 安全、signed reasoning |
+| projection | `projection_test.rs` | 8 | Image/Document 移除、legacy directive 下 ToolInput 保真、head/tail 截断、CJK 安全、signed reasoning |
 | planner | `planner_test.rs` | 8 | token 估算、TurnGroup 分组、retention map、并行 tool exchange |
 | micro | `micro_test.rs` | 9 | 基本截断、错误保护、retention 排除 |
 | trigger | `trigger_test.rs` | 9 | estimated_tokens_saved 反映、多轮次增长、完整 pipeline |
@@ -358,13 +359,13 @@ SQLite 的 `projection TEXT` 列通过幂等迁移添加。恢复时 `load_messa
 |------|------|---------|
 | P0-1 | Blocks/Raw 打了标记但不投影 | `project_content()` 处理所有 ContentBlock 类型，`render_llm_view()` 替换 `truncated_content(100)` |
 | P0-2 | `affected_count` 不是真实收益 | `estimate_tokens()` + `estimated_tokens_saved` 决策 |
-| P0-3 | 同一条 AI 消息的工具调用被连带 | `ProjectionTarget::ToolCall { tool_call_id }` 粒度 |
-| P0-4 | Tool input 的 JSON 结构被破坏 | `project_tool_input()` 保持 `Value::Object` 根类型 |
+| P0-3 | 同一条 AI 消息的工具调用被连带 | 结果投影按 tool exchange 判断，所有历史输入均保留 |
+| P0-4 | Tool input 的 JSON 结构被破坏 | planner 不生成输入投影，renderer 忽略 legacy 输入 action；遵循 ARC-MICRO-TOOL-INPUT-001 |
 | P1-1 | 100 字符截断丢失恢复信息 | `apply_head_tail()` head+tail+省略提示 |
 | P1-2 | round 分组太简化 | `TurnGroup::collect()` + `ToolExchange` 配对 |
 | P1-3 | Micro 后跑 Full 白写标记 | dry-run → 不足时跳过 Micro apply |
 | P1-4 | 百分比触发没有回收目标 | `ContextPressure::target_reclaim_tokens()` |
-| P2-1 | N 次 cache invalidation | `ApplyCompactionBatch` 单次 invalidate |
+| P2-1 | 逐条写入与派生缓存维护 | `ApplyCompactionBatch` 同事务批量投影；当前形状不维护派生缓存 |
 
 ---
 

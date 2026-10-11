@@ -165,9 +165,12 @@ pub async fn attach_acp(
     let acp_client = {
         let provider = {
             let cfg_guard = app.services.peri_config.read();
-            LlmProvider::from_config(&cfg_guard)
-        }
-        .or_else(LlmProvider::from_env);
+            if *cfg_guard == app.config_source.loaded_merged() {
+                LlmProvider::from_source(&app.config_source)
+            } else {
+                LlmProvider::from_config(&cfg_guard)
+            }
+        };
 
         if let Some(provider) = provider {
             let host_config = peri_acp::host::assemble::assemble_server_config(
@@ -181,6 +184,7 @@ pub async fn attach_acp(
                     // SettingsHooksLoader / 插件聚合数据）由 ACP Host 装配面内部构造
                     // （peri_acp::host::assemble）；TUI 只提供协议面输入（§0 依赖方向）。
                     session_resources: app.services.session_resources.clone(),
+                    workspace_id: None,
                     // 部署关闭权随宿主移交：任务排空之后由宿主关闭会话存储。
                     session_store_shutdown: app.session_store_shutdown.take(),
                     cwd: app.services.cwd.clone(),
@@ -188,8 +192,22 @@ pub async fn attach_acp(
                     // TUI=true：复刻迁移前 TUI 每秒 tick 行为（cron 面板直持
                     // cron_state，tick 由 host 侧 scheduler 驱动执行）。
                     drive_cron_tick: true,
+                    // 顶层装配不构造 builtin 上下文：session 级 workspace 输入由每
+                    // session 的会话环境装配产生（AW3-11）。
+                    workspace_input: None,
+                    // 顶层三路径（无会话上下文）不消费 flag：Bash 缺省恒为前台。
+                    workspace_bash_default_run_in_background: false,
+                    // 资源面输入与 session 级输入同源（见上）：顶层装配无会话消费者，
+                    // 保持未接线（`resources/list` 只有 git ref）。
+                    workspace_resources: None,
+                    // 顶层装配无会话上下文：A24 关闭集恒为空集（会话装配才从 frozen 派生）。
+                    builtin_closed: Default::default(),
+                    // 宿主技能面关闭位与关闭集同源（会话级派生）：顶层装配恒为假。
+                    skills_face_closed: false,
+                    plugin_face_closed: false,
                     // TUI 装配点无准备路径提供的插件聚合：按既有语义由装配面自行加载。
                     prepared_plugins: None,
+                    session_mcp_servers: None,
                 },
             )
             .await;
@@ -198,10 +216,11 @@ pub async fn attach_acp(
             // 该句柄此前仅由 ServiceRegistry 持有但无任何消费者读取。
 
             let (client_transport, server_transport) = mpsc_transport_pair();
-            let host = peri_acp::host::spawn_acp_server(Arc::new(server_transport), host_config);
-
             let (acp_client, notification_tx, notification_rx) =
                 AcpTuiClient::new_interactive(client_transport);
+            let server_transport = Arc::new(server_transport);
+            let host = peri_acp::host::spawn_acp_server(server_transport, host_config);
+
             acp_client.spawn_pump(notification_tx);
 
             app.acp_deployment = Some(crate::acp_client::AcpDeployment::new(

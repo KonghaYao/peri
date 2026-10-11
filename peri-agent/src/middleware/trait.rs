@@ -123,8 +123,9 @@ pub trait Middleware: Send + Sync {
     /// 当中间件可对多个工具调用进行合并处理时（如 HITL 批量审批），
     /// 应覆盖此方法。默认实现回退到逐个调用 `before_tool`。
     ///
-    /// 返回值：`Vec<AgentResult<ToolCall>>`，与输入 `calls` 按顺序一一对应。
-    /// 返回的错误可以是 `ToolRejected`（不中断流程）或其它错误（中断流程）。
+    /// 返回值必须与输入 `calls` 等长，并按顺序一一对应。`MiddlewareChain`
+    /// 检测到长度不符时会 fail closed，拒绝本次仍未拒绝的调用并停止后续中间件。
+    /// 错误按调用保留：`ToolRejected` 会结算为工具拒绝，其它错误由工具执行边界传播。
     async fn before_tools_batch(
         &self,
         state: &mut dyn hook_state::BeforeToolState,
@@ -150,9 +151,13 @@ pub trait Middleware: Send + Sync {
 
     /// 一批并行工具调用全部写入 state 后触发（每个 batch 一次）。
     /// 可用于聚合检查、批量日志等。
+    ///
+    /// 工具结果已提交：本钩子只能经窄反馈能力回注有界反馈或停止意图
+    /// （[`hook_state::AfterToolsBatchState`]），不能追加/替换 transcript，
+    /// 也不能把已执行的工具伪装成拒绝。
     async fn after_tools_batch(
         &self,
-        _state: &mut dyn hook_state::StateView,
+        _state: &mut dyn hook_state::AfterToolsBatchState,
         _results: &[(ToolCall, ToolResult)],
     ) -> AgentResult<()> {
         Ok(())

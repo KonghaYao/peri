@@ -57,7 +57,7 @@ fn test_continuation_recall_not_consumed_or_overwritten() {
     assert_eq!(user_state_recall, vec!["本轮新 recall".to_string()]);
 }
 
-// ── ACP 结果投影 seam（spec/issues/2026-08-18-acp-error-handler.md D2）────────
+// ── ACP 结果投影 seam（spec/history/2026-08.md 2026-08-18 条目 D2）────────
 //
 // 测外部协议行为（`run_prompt` 尾部的 wire 形态决定），不断言内部局部变量：
 // fatal → `Err(AcpError)`（code/message/data 契约）；cancel / max-iterations /
@@ -74,6 +74,63 @@ mod wire_projection {
         ACP_TURN_EXECUTION_FAILED_CODE,
     };
 
+    #[test]
+    fn complete_error_details_survive_acp_projection() {
+        let causes = vec!["DNS lookup token=fixture failed".to_string()];
+        let diagnostic =
+            peri_model::ModelErrorDiagnostic::from_parts(peri_model::ModelErrorDiagnosticParts {
+                category: peri_model::ModelErrorCategory::HttpStatus,
+                status: Some(500),
+                provider: Some("https://provider.example?token=fixture"),
+                request_id: Some("request-fixture"),
+                transport: None,
+                protocol: None,
+                retry_attempts: None,
+                retry_kind: None,
+                message: Some("upstream token=fixture failed"),
+                body: Some("{\"api_key\":\"fixture\"}"),
+                causes: &causes,
+            })
+            .expect("valid diagnostic");
+        let failure = ExecutionFailure {
+            kind: ExecutionFailureKind::LlmHttp,
+            public_message: "upstream failed".into(),
+            http_status: Some(500),
+            diagnostic: Some(Box::new(diagnostic)),
+            error_category: Some("http_status".into()),
+            causes: causes.clone(),
+        };
+        let wire = execution_failure_to_acp_error(&failure);
+        let data = wire.data.expect("error data");
+        assert_eq!(data["error_category"], "http_status");
+        assert_eq!(data["causes"], serde_json::json!(causes));
+        assert_eq!(
+            data["diagnostic"]["message"],
+            "upstream token=fixture failed"
+        );
+        assert_eq!(data["diagnostic"]["body"], "{\"api_key\":\"fixture\"}");
+        assert_eq!(data["diagnostic"]["causes"], data["causes"]);
+    }
+
+    #[test]
+    fn non_model_causes_survive_acp_projection() {
+        let failure = ExecutionFailure {
+            kind: ExecutionFailureKind::Internal,
+            public_message: "storage failed".into(),
+            http_status: None,
+            diagnostic: None,
+            error_category: Some("storage".into()),
+            causes: vec!["SQL token=fixture failed\nconnection reset".into()],
+        };
+        let data = execution_failure_to_acp_error(&failure).data.unwrap();
+        assert_eq!(data["error_category"], "storage");
+        assert_eq!(
+            data["causes"][0],
+            "SQL token=fixture failed\nconnection reset"
+        );
+        assert!(data.get("diagnostic").is_none());
+    }
+
     /// [回归测试] 恢复耗尽沿用标准 ACP fatal 投影，诊断不能在边界丢失。
     #[test]
     fn test_stream_recovery_exhausted_acp_diagnostic() {
@@ -88,13 +145,14 @@ mod wire_projection {
         let wire = execution_failure_to_acp_error(&failure);
         assert_eq!(wire.code, ACP_TURN_EXECUTION_FAILED_CODE);
         assert_eq!(wire.message, error.user_facing_message());
+        let data = wire.data.unwrap();
+        assert_eq!(data["kind"], "llm");
+        assert_eq!(data["diagnostic"], serde_json::json!(failure.diagnostic));
         assert_eq!(
-            wire.data.unwrap(),
-            serde_json::json!({
-                "kind": "llm",
-                "diagnostic": {"category": "stream_interrupted", "provider": "anthropic", "request_id": "req-partial"}
-            })
+            data["error_category"],
+            serde_json::json!(failure.error_category)
         );
+        assert_eq!(data["causes"], serde_json::json!(failure.causes));
     }
 
     /// fatal failure → 唯一 `Internal` 类别穷尽映射到命名 code `-32000`。
@@ -131,7 +189,7 @@ mod wire_projection {
     }
 
     #[test]
-    fn llm_http_failure_maps_status_and_redacted_original_to_wire() {
+    fn llm_http_failure_maps_status_and_original_to_wire() {
         let failure = ExecutionFailure::from_agent_error(&AgentError::LlmHttpError {
             status: 421,
             message: "Misdirected Request token=top-secret".to_string(),
@@ -141,15 +199,19 @@ mod wire_projection {
         assert_eq!(err.code, ACP_TURN_EXECUTION_FAILED_CODE);
         assert!(err.message.contains("LLM HTTP 421"));
         assert!(err.message.contains("Misdirected Request"));
-        assert!(!err.message.contains("top-secret"));
+        assert!(err.message.contains("top-secret"));
+        let data = err.data.unwrap();
+        assert_eq!(data["kind"], "llm_http");
+        assert_eq!(data["status"], 421);
         assert_eq!(
-            err.data,
-            Some(serde_json::json!({"kind": "llm_http", "status": 421}))
+            data["error_category"],
+            serde_json::json!(failure.error_category)
         );
+        assert_eq!(data["causes"], serde_json::json!(failure.causes));
     }
 
     #[test]
-    fn llm_http_serialized_error_redacts_structured_secrets() {
+    fn llm_http_serialized_error_preserves_structured_details() {
         let failure = ExecutionFailure::from_agent_error(&AgentError::LlmHttpError {
             status: 401,
             message: r#"Unauthorized Authorization:'Bearer auth-secret' api_key="key-secret" endpoint="https://api.example.test/v1?token=query-secret""#.to_string(),
@@ -157,43 +219,42 @@ mod wire_projection {
         let err = execution_failure_to_acp_error(&failure);
         let wire = serde_json::to_value(&err).expect("AcpError 序列化不应失败");
 
+        assert_eq!(wire["data"]["kind"], "llm_http");
+        assert_eq!(wire["data"]["status"], 401);
         assert_eq!(
-            wire["data"],
-            serde_json::json!({"kind": "llm_http", "status": 401})
+            wire["data"]["error_category"],
+            serde_json::json!(failure.error_category)
         );
+        assert_eq!(wire["data"]["causes"], serde_json::json!(failure.causes));
         assert!(wire["message"].as_str().unwrap().contains("Unauthorized"));
         for secret in ["auth-secret", "key-secret", "query-secret"] {
-            assert!(!wire["message"].as_str().unwrap().contains(secret));
+            assert!(wire["message"].as_str().unwrap().contains(secret));
         }
     }
 
     #[test]
-    fn typed_model_failure_projects_only_allowlisted_diagnostic() {
+    fn typed_model_failure_projects_complete_diagnostic() {
         let failure = ExecutionFailure::from_agent_error(&AgentError::ModelError(
             peri_model::ModelError::http_status(429, "anthropic", Some("req_429")),
         ));
         let err = execution_failure_to_acp_error(&failure);
 
+        let data = err.data.as_ref().unwrap();
+        assert_eq!(data["kind"], "llm_http");
+        assert_eq!(data["status"], 429);
+        assert_eq!(data["diagnostic"], serde_json::json!(failure.diagnostic));
         assert_eq!(
-            err.data,
-            Some(serde_json::json!({
-                "kind": "llm_http",
-                "status": 429,
-                "diagnostic": {
-                    "category": "http_status",
-                    "status": 429,
-                    "provider": "anthropic",
-                    "request_id": "req_429"
-                }
-            }))
+            data["error_category"],
+            serde_json::json!(failure.error_category)
         );
+        assert_eq!(data["causes"], serde_json::json!(failure.causes));
         let wire = serde_json::to_string(&err).expect("safe ACP error should serialize");
-        assert!(!wire.contains("body"));
+        assert!(data["diagnostic"]["body"].is_null());
         assert!(!wire.contains("prompt"));
     }
 
     #[test]
-    fn typed_model_failure_does_not_project_sk_credential_identity() {
+    fn typed_model_failure_preserves_credential_shaped_identity() {
         let credential = "sk-ant-api03-very-secret";
         let failure = ExecutionFailure::from_agent_error(&AgentError::ModelError(
             peri_model::ModelError::http_status(401, credential, Some(credential)),
@@ -201,9 +262,9 @@ mod wire_projection {
         let err = execution_failure_to_acp_error(&failure);
         let wire = serde_json::to_string(&err).expect("safe ACP error should serialize");
 
-        assert!(!wire.contains(credential));
-        assert!(!wire.contains("provider"));
-        assert!(!wire.contains("request_id"));
+        assert!(wire.contains(credential));
+        assert!(wire.contains("provider"));
+        assert!(wire.contains("request_id"));
     }
 
     #[test]
@@ -211,6 +272,8 @@ mod wire_projection {
         let failure = ExecutionFailure {
             kind: ExecutionFailureKind::Llm,
             public_message: "LLM failure".to_string(),
+            error_category: None,
+            causes: Vec::new(),
             http_status: Some(500),
             diagnostic: None,
         };
@@ -237,6 +300,7 @@ mod wire_projection {
         let err = prompt_wire_response(
             Some(&failure),
             crate::session::executor::PromptStopReason::EndTurn,
+            0,
         )
         .expect_err("fatal failure 必须映射为 Err，不得返回成功 PromptResponse");
         assert_eq!(err.code, ACP_TURN_EXECUTION_FAILED_CODE);
@@ -252,9 +316,12 @@ mod wire_projection {
     /// 用户 cancel → 成功 `PromptResponse(Cancelled)`，不升级为请求错误。
     #[test]
     fn prompt_wire_response_cancel_is_success_prompt_response() {
-        let value =
-            prompt_wire_response(None, crate::session::executor::PromptStopReason::Cancelled)
-                .expect("cancel 必须返回成功 PromptResponse");
+        let value = prompt_wire_response(
+            None,
+            crate::session::executor::PromptStopReason::Cancelled,
+            0,
+        )
+        .expect("cancel 必须返回成功 PromptResponse");
         assert_eq!(value["stopReason"], "cancelled", "{value}");
         assert!(value.get("error").is_none(), "成功响应不应携带 error 字段");
     }
@@ -265,6 +332,7 @@ mod wire_projection {
         let value = prompt_wire_response(
             None,
             crate::session::executor::PromptStopReason::MaxTurnRequests,
+            0,
         )
         .expect("max-iterations 必须返回成功 PromptResponse");
         assert_eq!(value["stopReason"], "max_turn_requests", "{value}");
@@ -273,9 +341,12 @@ mod wire_projection {
 
     #[test]
     fn prompt_wire_response_max_tokens_preserves_incomplete_stop_reason() {
-        let value =
-            prompt_wire_response(None, crate::session::executor::PromptStopReason::MaxTokens)
-                .expect("输出截断是标准停止状态，不是 JSON-RPC 错误");
+        let value = prompt_wire_response(
+            None,
+            crate::session::executor::PromptStopReason::MaxTokens,
+            0,
+        )
+        .expect("输出截断是标准停止状态，不是 JSON-RPC 错误");
         assert_eq!(value["stopReason"], "max_tokens");
         assert!(value.get("error").is_none());
     }
@@ -283,16 +354,17 @@ mod wire_projection {
     /// 正常完成 → 成功 `PromptResponse(EndTurn)`。
     #[test]
     fn prompt_wire_response_end_turn_is_success_prompt_response() {
-        let value = prompt_wire_response(None, crate::session::executor::PromptStopReason::EndTurn)
-            .expect("正常完成必须返回成功 PromptResponse");
+        let value =
+            prompt_wire_response(None, crate::session::executor::PromptStopReason::EndTurn, 0)
+                .expect("正常完成必须返回成功 PromptResponse");
         assert_eq!(value["stopReason"], "end_turn", "{value}");
         assert!(value.get("error").is_none());
     }
 
     /// System MCP 启动准入失败（`McpMiddleware`）在 ACP 边界的投影契约：
-    /// 类别固定 `Internal` → `-32000`、`data` 只有 `kind=internal`、不携带
-    /// status / diagnostic，message 保留 `Middleware error: {middleware} - {reason}`
-    /// 形态——安全文案由 MCP 边界构造，ACP 不替它脱敏也不额外补内部 cause。
+    /// 类别固定 `Internal` → `-32000`、`data` 不携带 status / diagnostic，
+    /// 但保留 error_category / causes；message 保留
+    /// `Middleware error: {middleware} - {reason}` 形态。
     ///
     /// 真实失败文本由 `host::mcp_v4_startup_tests` 的端到端用例断言（真实
     /// gate 产生的 `ExecutionFailure` 走同一投影函数）。
@@ -309,6 +381,7 @@ mod wire_projection {
         let err = prompt_wire_response(
             Some(&failure),
             crate::session::executor::PromptStopReason::EndTurn,
+            0,
         )
         .expect_err("启动准入失败必须映射为协议错误，不得返回成功 PromptResponse");
         assert_eq!(err.code, ACP_TURN_EXECUTION_FAILED_CODE);
@@ -316,10 +389,40 @@ mod wire_projection {
             err.message,
             "Middleware error: McpMiddleware - System MCP startup rejected"
         );
-        assert_eq!(err.data, Some(serde_json::json!({"kind": "internal"})));
+        assert_eq!(
+            err.data,
+            Some(serde_json::json!({
+                "kind": "internal",
+                "error_category": failure.error_category,
+                "causes": failure.causes,
+            }))
+        );
 
         let wire = serde_json::to_value(&err).expect("AcpError 序列化不应失败");
         assert_eq!(wire["code"], ACP_TURN_EXECUTION_FAILED_CODE);
-        assert_eq!(wire["data"], serde_json::json!({"kind": "internal"}));
+        assert_eq!(
+            wire["data"],
+            serde_json::json!({
+                "kind": "internal",
+                "error_category": failure.error_category,
+                "causes": failure.causes,
+            })
+        );
     }
+}
+
+// [回归测试] §7.3 有界等待摘要：无未结算任务时响应保持原形；有则携带 pending:n。
+#[test]
+fn test_prompt_wire_response_carries_pending_tasks_only_when_unsettled() {
+    let settled =
+        prompt_wire_response(None, crate::session::executor::PromptStopReason::EndTurn, 0).unwrap();
+    assert!(
+        settled.get("_meta").is_none_or(serde_json::Value::is_null),
+        "无未结算任务不得附加 pending 标记: {settled}"
+    );
+
+    let pending =
+        prompt_wire_response(None, crate::session::executor::PromptStopReason::EndTurn, 3).unwrap();
+    assert_eq!(pending["_meta"]["peri"]["pendingTasks"], 3, "{pending}");
+    assert_eq!(pending["stopReason"], "end_turn", "{pending}");
 }

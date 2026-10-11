@@ -55,6 +55,11 @@ impl ToolSearchMiddleware {
     async fn rebind_catalog(&self, state: &mut dyn hook_state::CatalogState) -> AgentResult<()> {
         // 优先读取 v2 每 turn 本地工具视图（stage_builder 构建，含当前链全部
         // 工具）；无本地视图时回退宿主级 shared_tools（v1 / 测试路径）。
+        //
+        // H5 可见性否决：`visible_to_model()` 是所有模型面投影的统一前置条件，
+        // `is_direct()` 只区分 direct/deferred。app-only（`model:false`）工具
+        // 保留在底层注册表（App 合法调用路径不变），但不得进入索引、deferred
+        // 列表、direct 声明段与元工具描述。
         let deferred_arcs: Vec<Arc<dyn BaseTool>>;
         let direct_arcs: Vec<Arc<dyn BaseTool>>;
         let request_index = Arc::new(ToolSearchIndex::new());
@@ -66,16 +71,21 @@ impl ToolSearchMiddleware {
             };
             let direct_names: Vec<String> = guard
                 .iter()
-                .filter(|(_, tool)| tool.is_direct())
+                .filter(|(_, tool)| tool.is_direct() && tool.visible_to_model())
                 .map(|(name, _)| name.clone())
                 .collect();
             deferred_arcs = guard
                 .iter()
-                .filter(|(_, tool)| !tool.is_direct())
+                .filter(|(_, tool)| !tool.is_direct() && tool.visible_to_model())
                 .map(|(_, tool)| Arc::clone(tool))
                 .collect();
             request_index.build(deferred_arcs.clone());
-            if guard.contains_key(super::core_tools::SEARCH_EXTRA_TOOLS_NAME) {
+            if guard
+                .get(super::core_tools::SEARCH_EXTRA_TOOLS_NAME)
+                .is_some_and(|tool| {
+                    tool.mcp_server_name().is_none() && tool.namespace() == Some("meta")
+                })
+            {
                 guard.insert(
                     super::core_tools::SEARCH_EXTRA_TOOLS_NAME.to_string(),
                     Arc::new(SearchExtraTools::with_direct_tools(
@@ -85,7 +95,12 @@ impl ToolSearchMiddleware {
                 );
             }
             let request_resolver = Arc::new(RwLock::new(guard.clone()));
-            if guard.contains_key(super::core_tools::EXECUTE_EXTRA_TOOL_NAME) {
+            if guard
+                .get(super::core_tools::EXECUTE_EXTRA_TOOL_NAME)
+                .is_some_and(|tool| {
+                    tool.mcp_server_name().is_none() && tool.namespace() == Some("meta")
+                })
+            {
                 guard.insert(
                     super::core_tools::EXECUTE_EXTRA_TOOL_NAME.to_string(),
                     Arc::new(ExecuteExtraTool::with_direct_tools(
@@ -96,7 +111,7 @@ impl ToolSearchMiddleware {
             }
             direct_arcs = guard
                 .iter()
-                .filter(|(_, tool)| tool.is_direct())
+                .filter(|(_, tool)| tool.is_direct() && tool.visible_to_model())
                 .map(|(_, tool)| Arc::clone(tool))
                 .collect();
         }

@@ -1,6 +1,6 @@
 # 对抗验证：TUI streaming publication 方案
 
-本报告针对 2026-09-27 的 [issue 方案稿](../../spec/issues/2026-09-27-p0-tui-streaming-view-rebuild-cpu.md) S1–S4，以及审查开始时的生产源码。对照设计为 [现行性能设计](../design/tui-streaming-markdown-performance.md)。审查期间用户另外授权主 agent 实施修复；以下源码观察均描述修复前状态，不是修复后验收，也不推断并行修改已经解决这些问题。
+本报告针对 2026-09-27 的 [issue 方案稿](../../spec/history/2026-09.md)（2026-09-27 条目）S1–S4，以及审查开始时的生产源码。对照设计为 [现行性能设计](../design/tui-streaming-markdown-performance.md)。审查期间用户另外授权主 agent 实施修复；以下源码观察均描述修复前状态，不是修复后验收，也不推断并行修改已经解决这些问题。
 
 **最新 disposition**：末节收尾审查为 **CONCLUSION_STANDS（限定为已收窄的机制与修复方向）**，未发现新的必须修复逻辑缺陷。先前攻击及首版问题的处理见末节；正式测试、lint 和现场性能证据由主 agent 的最终执行结果提供，本报告不替代它们。
 

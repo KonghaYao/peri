@@ -198,7 +198,9 @@ pub(super) fn render_detail(
             p.author.clone().unwrap_or_else(|| "—".to_string())
         }),
         ("panel-plugin-detail-path", &|| p.root.clone()),
-        ("panel-plugin-detail-scope", &|| p.install_scope.clone()),
+        ("panel-plugin-detail-scope", &|| {
+            p.install_scope.clone().unwrap_or_else(|| "—".into())
+        }),
     ];
     for (label_key, get_value) in &fields {
         lines.push(Line::from(vec![

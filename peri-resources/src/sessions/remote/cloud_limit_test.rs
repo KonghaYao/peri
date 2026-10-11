@@ -14,14 +14,14 @@
 //!   读回只作为附加一致性检查。这样「整批生效或零部分结果」不会被读路径的预算问题掩盖。
 //! - **取消实验分两段**：先在同一次打开的实例上收敛并继续读（被丢弃的在途请求使那一代
 //!   连接失效，adapter 按同一份打开事实重建，见 `generation` 与 `RemoteSessionData::store`），
-//!   再按同一份本机执行面库**重开**新实例收敛。两段都必须给出同一个确定终态。
+//!   再按同一份远端库**重开**新实例收敛。两段都必须给出同一个确定终态。
 //!
 //! P5 的静态部分（SDK 是否自动重试 mutating 请求）不是行为断言，结论写在母需求本轮小节里：
 //! `turso_serverless` 0.1.3 的源码里没有 retry/backoff/sleep 逻辑，我方也没有重试层，只有 20s
 //! 请求预算——预算超时归「结果未知」，不会推断为已生效。因此「同一次发送的重试」只可能是调用
 //! 方重新发起，而每次**新的领域调用**都会铸造新的操作 id（R1 的身份修正）。
 //!
-//! 安全与清理：只操作本轮 run 命名空间；本机执行面库在系统临时目录；只输出计数、字节数与
+//! 安全与清理：只操作本轮 run 命名空间；合成工作区在系统临时目录；只输出计数、字节数与
 //! 类别名；不打印 locator、token、会话内容或凭证；结束按正常删除路径清理并复核计数为 0。
 //!
 //! ```text
@@ -40,9 +40,7 @@ use peri_acp_types::session_resources::{
 };
 use peri_acp_types::store::PersistedPayload;
 use peri_acp_types::thread::{CancelPolicy, ThreadId};
-use peri_acp_types::workspace::{
-    ResetDirtyRequest, SessionBinding, SessionExecutionLease, SESSION_BINDING_VERSION,
-};
+use peri_acp_types::workspace::{SessionBinding, SESSION_BINDING_VERSION};
 use turso_serverless::Value;
 
 use super::cloud_deployment_tests::synthetic_workspace;
@@ -79,24 +77,18 @@ async fn step<T>(
         .map_err(|error| format!("{name}: {}", remote_error_class(&error)))
 }
 
-// ─── 夹具：本机执行面库 + 合成 workspace（可重开）；会话实例（门面 + owner）──
+// ─── 夹具：合成 workspace（可重开）；会话实例（持久化门面）──
 
-/// 本机与工作区环境：重开时**必须沿用**（本机执行面库、run 标签、合成仓库都不变）。
+/// 工作区环境：重开时沿用 run 标签与合成仓库。
 struct Env {
     run: String,
-    registry: PathBuf,
-    _registry_dir: tempfile::TempDir,
     workspace: tempfile::TempDir,
     root: ThreadId,
 }
 
 async fn fixture_env(run: &str) -> Result<Env, String> {
-    let registry_dir = tempfile::tempdir().map_err(|error| error.to_string())?;
-    let registry = registry_dir.path().join("threads.db");
     Ok(Env {
         run: run.to_owned(),
-        registry,
-        _registry_dir: registry_dir,
         workspace: synthetic_workspace(),
         root: ThreadId::from(format!("{run}-root")),
     })
@@ -112,21 +104,15 @@ impl Env {
             target.endpoint(),
             target.credential(),
             AccessMode::ReadWrite,
-            self.registry.clone(),
         )
         .await
         .map_err(|error| format!("open failed: {error:#}"))
     }
 }
 
-/// 一次打开：门面 + 这条 root 的执行所有权。
-///
-/// 租约与真实消费方一样活着——本机库只持弱引用，强引用一落，后续写入就会按
-/// 「有绑定而无 owner」被拒绝。
+/// 一次打开的远程会话门面。
 struct Session {
     facade: Arc<SessionResourcesImpl>,
-    /// 执行所有权本身没有别的方法要调：它存在即「本进程持有这条 root 的 owner」。
-    _lease: Arc<dyn SessionExecutionLease>,
 }
 
 async fn create_session_at(target: &CloudTarget, env: &Env) -> Result<Session, String> {
@@ -159,16 +145,13 @@ async fn create_session_at(target: &CloudTarget, env: &Env) -> Result<Session, S
             env.run
         )),
     };
-    let lease = step("create", facade.create_session(&input)).await?;
-    Ok(Session {
-        facade,
-        _lease: lease,
-    })
+    step("create", facade.create_session(&input)).await?;
+    Ok(Session { facade })
 }
 
-/// 同一份本机执行面库上的**新打开**（新连接、新 owner）：上一段实例必须已经落下。
+/// 同一份远端库上的**新打开**（新连接、新实例）：上一段实例必须已经落下。
 ///
-/// 顺序与恢复链路一致：先把未决收敛掉，再按普通 dirty 显式风险接受，最后取 owner。
+/// 顺序与恢复链路一致：先检查持久化恢复状态，再复核持久 workspace 绑定。
 async fn reopen(target: &CloudTarget, env: &Env) -> Result<Session, String> {
     let facade = env.open(target).await?;
     let recovery = step(
@@ -178,37 +161,26 @@ async fn reopen(target: &CloudTarget, env: &Env) -> Result<Session, String> {
     .await?;
     check(
         recovery == PersistenceRecovery::Recovered,
-        "a reopened store must converge before handing out a new owner",
+        "a reopened store must report recovery before continuing writes",
     )?;
     let availability = step(
         "reopen availability",
         facade.inspect_availability(Some(&env.root)),
     )
     .await?;
-    if let Some(ExecutionAvailability::Dirty(details)) = availability.execution {
-        step(
-            "reopen dirty reset",
-            facade.reset_dirty_execution(&ResetDirtyRequest {
-                target: details,
-                accept_risk: true,
-            }),
-        )
-        .await?;
-    }
-    let resolved = step(
-        "reopen resolve workspace",
-        facade.resolve_workspace(env.workspace.path()),
+    check(
+        availability.execution == Some(ExecutionAvailability::Available),
+        "a reopened instance must not reconstruct runtime uncertainty from durable history",
+    )?;
+    step(
+        "reopen validate workspace",
+        facade.validate_bound_workspace(
+            &env.root,
+            peri_acp_types::session_resources::BindingRecheck::Full,
+        ),
     )
     .await?;
-    let lease = step(
-        "reopen acquire",
-        facade.acquire_execution(&env.root, &resolved),
-    )
-    .await?;
-    Ok(Session {
-        facade,
-        _lease: lease,
-    })
+    Ok(Session { facade })
 }
 
 async fn rows_via(session: &Session, root: &ThreadId) -> Result<usize, String> {
@@ -335,7 +307,7 @@ async fn oversized_flow(target: &CloudTarget, run: &str) -> Result<Vec<String>, 
             counts.messages
         ));
     }
-    // 换一次打开（新连接、新 owner）：行数仍与写入意图一致，且会话没有被大写入卡住。
+    // 换一次打开（新连接、新实例）：行数仍与写入意图一致，且会话没有被大写入卡住。
     drop(session);
     let reopened = reopen(target, &env).await?;
     step(
@@ -522,7 +494,7 @@ async fn cancelled_flow(target: &CloudTarget, run: &str) -> Result<Vec<String>, 
         "same_instance_recover={same_instance:?} same_instance_rows={same_instance_rows}"
     ));
 
-    // ② 换一次打开（新连接、新 owner）：重开后必须收敛到确定终态。
+    // ② 换一次打开（新连接、新实例）：重开后必须收敛到确定终态。
     drop(session);
     let reopened = reopen(target, &env).await?;
     let rows = rows_via(&reopened, &env.root).await?;

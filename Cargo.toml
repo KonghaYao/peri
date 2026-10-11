@@ -1,20 +1,29 @@
 [workspace]
 members = [
+    "peri-config",
     "peri-acp",
     "peri-acp-types",
     "peri-agent",
     "peri-controller",
     "peri-middlewares",
+    "mcp-packages/common",
+    "peri-mcp-core",
+    "mcp-packages/config",
+    "mcp-packages/credentials",
+    "mcp-packages/web",
+    "mcp-packages/artifact",
+    "mcp-packages/cron",
+    "mcp-packages/workspace",
     "peri-model",
     "peri-process",
     "peri-resources",
+    "peri-time",
     "peri-runtime",
     "peri-tui",
     "langfuse-client",
-    "peri-lsp",
     "peri-js-runtime",
-    "peri-web-pty",
     "peri-workflow",
+    "peri-wasm",
 ]
 resolver = "2"
 
@@ -27,8 +36,27 @@ edition = "2021"
 #       "true" on macOS only strips debug info, leaving 8MB of symbol table.
 strip = "symbols"
 opt-level = "z"
-lto = true
+lto = "fat"
 codegen-units = 1
+
+[profile.cf-wasm-size]
+inherits = "release"
+opt-level = "z"
+lto = "thin"
+codegen-units = 16
+
+[profile.cf-wasm-speed]
+inherits = "release"
+opt-level = 3
+lto = "thin"
+codegen-units = 16
+
+[profile.dev]
+debug = 1
+
+# Dependencies carry no debug info in dev; workspace members keep debug=1.
+[profile.dev.package."*"]
+debug = false
 
 # ============================================================================
 # Workspace-wide dependency declarations
@@ -36,8 +64,11 @@ codegen-units = 1
 # ============================================================================
 
 [workspace.dependencies]
+peri-config = { path = "peri-config" }
+peri-time = { path = "peri-time" }
 # --- Async runtime ---
-tokio = { version = "1", features = ["full"] }
+# Shared runtime baseline; native crates opt into full features at their target boundary.
+tokio = { version = "=1.53.1", default-features = false, features = ["rt", "macros", "sync", "time", "io-util"] }
 tokio-util = { version = "0.7", features = ["rt"] }
 futures = "0.3"
 async-trait = "0.1"
@@ -48,7 +79,7 @@ serde_json = "1.0"
 serde_yaml = "0.9"
 
 # --- HTTP ---
-reqwest = { version = "0.13", default-features = false, features = [
+reqwest = { version = "=0.13.4", default-features = false, features = [
     "json",
     "rustls",
 ] }
@@ -80,8 +111,19 @@ dirs-next = "2"
 url = "2"
 sqlx = { version = "0.9.0", features = ["runtime-tokio", "sqlite"] }
 sysinfo = "0.39"
-lsp-types = "0.97"
 lru = "0.18"
+
+# --- MCP capability packages ---
+peri-mcp-common = { path = "mcp-packages/common" }
+peri-mcp-core = { path = "peri-mcp-core" }
+peri-mcp-config = { path = "mcp-packages/config" }
+peri-mcp-credentials = { path = "mcp-packages/credentials" }
+peri-mcp-web = { path = "mcp-packages/web" }
+peri-mcp-artifact = { path = "mcp-packages/artifact" }
+peri-mcp-cron = { path = "mcp-packages/cron" }
+peri-mcp-workspace = { path = "mcp-packages/workspace" }
+# Apply patches/rmcp-3.5.0-task-subscriptions.patch via scripts/cargo-rmcp-patched.sh.
+rmcp = "=3.5.0"
 
 # --- Build ---
 tempfile = "3"
@@ -95,14 +137,5 @@ clap = { version = "4", features = ["derive", "env"] }
 semver = "1"
 sha2 = "0.10"
 
-# --- PTY server ---
 axum = { version = "0.8.9", features = ["ws"] }
-# 0.9.0：历史 pin（0.8.1）因 Windows ConPTY reader 短命令场景 bug 而设；
-# 2026-08-12 Batch 2b 解除 pin 升级后 Windows CI 上 3 个 pty_session 读取测试
-# 失败。排查确认 0.8.1/0.9.0 的 Windows 实现（conpty.rs）完全一致，失败与
-# 版本无关，实为 PowerShell 5.1 在 ConPTY 下的输出编码/交互行为问题——
-# 测试已改用 cmd.exe（纯字节流）规避，重新升级回 0.9.0 验证。
-# 详见 docs/review/2026-06-16-peri-web-pty-windows-conpty-bug.md
-portable-pty = "0.9"
-tokio-tungstenite = "0.30"
 serial_test = { version = "4.0.1", features = ["async"] }

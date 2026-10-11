@@ -6,6 +6,7 @@ mod subagents;
 
 use super::tool_card::{SubAgentAccumulator, ToolCardAccumulator};
 use crate::kit::tui_render_unit::{TuiNoteLevel, TuiRenderUnit};
+use peri_acp_types::builtin_mcp::original_tool_name_of_effective;
 use std::time::Instant;
 
 // ---------------------------------------------------------------------------
@@ -41,12 +42,21 @@ pub struct CurrentTurn {
 
     /// Whether the turn is actively streaming (any text / tool event arrived).
     pub active: bool,
+    deactivated: bool,
 
     /// Streaming sub-agent occurrences routed by agent_id / instance_id.
     ///
     /// A resumed child reuses its agent_id, so multiple stopped/running
     /// occurrences with the same ID may coexist in one parent turn.
     pub subagents: Vec<SubAgentAccumulator>,
+
+    /// 早于父 Agent ToolCard 到达、尚未配对的子分组（按创建顺序）。
+    ///
+    /// 事件乱序时 `start_subagent` 找不到可认领的 Agent 卡片，只能先把段记在
+    /// 尾部；迟到的卡片由 `start_tool` 认领（见 `adopt_pending_subagent_group`）：
+    /// 先按 `parent_tool_call_id` 身份匹配，无身份的分组才按到达顺序兜底。
+    /// 空表示所有分组都已配对。
+    pending_subagent_groups: Vec<PendingSubagentGroup>,
 
     /// Chronological order of text flushes, tool starts, and sub-agent starts
     /// within this turn. Drive `sync_cache` to produce interleaved output.
@@ -122,7 +132,9 @@ impl Default for CurrentTurn {
             tool_cards: Vec::new(),
             committed: false,
             active: false,
+            deactivated: false,
             subagents: Vec::new(),
+            pending_subagent_groups: Vec::new(),
             segments: Vec::new(),
             last_text_flush: 0,
             last_reasoning_flush: 0,
@@ -137,6 +149,16 @@ impl Default for CurrentTurn {
             cache_dirty: false,
         }
     }
+}
+
+/// 尚未与父 Agent 工具卡片配对的子分组。
+#[derive(Debug, Clone)]
+pub(super) struct PendingSubagentGroup {
+    /// 指向 `CurrentTurn.subagents` 的分组下标。
+    pub subagent_idx: usize,
+    /// 父 Agent 工具调用 id（`SubagentStarted.parent_tool_call_id`）。
+    /// None = 生产端未提供身份，只能按到达顺序兜底配对。
+    pub parent_tool_call_id: Option<String>,
 }
 
 /// A single entry in the chronological ordering of a turn's streaming events.
@@ -171,6 +193,8 @@ enum TurnSegment {
         level: TuiNoteLevel,
         content_hash: u64,
     },
+    /// A user input delivered while a running subagent keeps this turn open.
+    UserBubble { text: String },
 }
 
 impl CurrentTurn {
@@ -219,6 +243,7 @@ impl CurrentTurn {
     pub fn deactivate(&mut self) {
         self.freeze_trailing();
         self.active = false;
+        self.deactivated = true;
         self.invalidate_cache();
     }
 
@@ -228,6 +253,7 @@ impl CurrentTurn {
         self.reasoning.clear();
         self.tool_cards.clear();
         self.subagents.clear();
+        self.pending_subagent_groups.clear();
         self.segments.clear();
         self.last_text_flush = 0;
         self.last_reasoning_flush = 0;
@@ -241,6 +267,7 @@ impl CurrentTurn {
         self.cache_dirty = false;
         self.active = false;
         self.committed = true;
+        self.deactivated = true;
     }
 
     /// [§6.7] 冻结 trailing 流式段（镜像顶层折叠 pass 的翻转点语义）。
@@ -260,10 +287,11 @@ impl CurrentTurn {
             && (self.text_started_at.is_some() || self.reasoning_started_at.is_some())
         {
             self.trailing_frozen = Some((
-                self.text_started_at.map(|t| t.elapsed().as_millis() as u64),
+                self.text_started_at
+                    .map(|t| peri_time::elapsed_since(t).as_millis() as u64),
                 self.trailing_reasoning_frozen_ms.or_else(|| {
                     self.reasoning_started_at
-                        .map(|t| t.elapsed().as_millis() as u64)
+                        .map(|t| peri_time::elapsed_since(t).as_millis() as u64)
                 }),
             ));
         }
@@ -287,12 +315,13 @@ impl CurrentTurn {
     }
 
     pub fn has_running_bash_tool(&self) -> bool {
-        self.tool_cards
+        // 按名判定先经 IF-D15 归一 helper（effective name → 原始名），未命中回落原样。
+        self.tool_cards.iter().any(|t| {
+            original_tool_name_of_effective(&t.tool_name).unwrap_or(t.tool_name.as_str()) == "Bash"
+                && t.output_summary.is_none()
+        }) || self
+            .subagents
             .iter()
-            .any(|t| t.tool_name == "Bash" && t.output_summary.is_none())
-            || self
-                .subagents
-                .iter()
-                .any(|s| s.child_turn.has_running_bash_tool())
+            .any(|s| s.child_turn.has_running_bash_tool())
     }
 }

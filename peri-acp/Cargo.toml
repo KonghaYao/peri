@@ -9,7 +9,9 @@ name = "peri_acp"
 path = "src/lib.rs"
 
 [dependencies]
+peri-time = { path = "../peri-time" }
 peri-acp-types = { path = "../peri-acp-types" }
+peri-config = { path = "../peri-config" }
 # 依赖方向注释（p1-deps-acp 收敛后状态）：
 # - peri-agent：薄壳调用面——`session/executor.rs` 协议化入口 re-export
 #   （run_session_loop / SessionContext / TurnInput 等）+ host 装配面闭包签名
@@ -30,7 +32,7 @@ peri-acp-types = { path = "../peri-acp-types" }
 #   dispatch/* + session/agent_pool.rs 执行上下文签名、event/mapper.rs
 #   StopReason 协议映射（随 v1 退役收敛）。
 # - check-layer-imports.sh 为验收门：非测试、非豁免路径代码禁止引用
-#   peri-middlewares / peri-lsp / peri-workflow（豁免见 scripts/import-exemptions.conf）。
+#   peri-middlewares / peri-workflow（豁免见 scripts/import-exemptions.conf）。
 peri-agent = { path = "../peri-agent" }
 peri-controller = { path = "../peri-controller" }
 peri-model = { path = "../peri-model" }
@@ -67,3 +69,14 @@ langfuse-client = { path = "../langfuse-client" }
 # AgentExecutor 等 registry/runner 类型仅测试构造使用，不构成协议/业务面依赖）
 peri-workflow = { path = "../peri-workflow" }
 tracing-subscriber.workspace = true
+sqlx.workspace = true
+# 测试面虚拟时钟（`tokio::time::pause`）：R29/F02 的桥层 120s 期限不真等 120 秒。
+# 与 peri-agent / peri-tui 的既有写法同形（dev-dependencies，resolver = "2" 下不进入生产构建）。
+tokio = { workspace = true, features = ["test-util"] }
+
+[target.'cfg(not(target_os = "emscripten"))'.dependencies]
+peri-mcp-common.workspace = true
+peri-process = { path = "../peri-process" }
+tokio = { workspace = true, features = ["full"] }
+peri-mcp-cron.workspace = true
+peri-mcp-workspace.workspace = true

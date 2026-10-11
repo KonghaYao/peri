@@ -1,99 +1,21 @@
-use crate::components::textarea::TextAreaState;
+//! 图片字节编码：RGBA → PNG（内存）。
+//!
+//! 仅供上传式附件使用——编码结果直接进 `PENDING_ATTACHMENTS`（base64），
+//! 不落盘。写入走 [`LimitedWriter`]，超限立即失败，避免为会被拒收的图片
+//! 分配整块编码缓冲。
 
-// 在启动线程前获取许可；释放覆盖正常返回、错误和 panic，避免重复按键叠加整图分配。
-#[derive(Default, Clone)]
-pub(super) struct PasteGate(std::sync::Arc<std::sync::atomic::AtomicBool>);
-
-pub(super) struct PastePermit(std::sync::Arc<std::sync::atomic::AtomicBool>);
-
-impl PasteGate {
-    pub(super) fn try_acquire(&self) -> Option<PastePermit> {
-        self.0
-            .compare_exchange(
-                false,
-                true,
-                std::sync::atomic::Ordering::AcqRel,
-                std::sync::atomic::Ordering::Acquire,
-            )
-            .ok()
-            .map(|_| PastePermit(self.0.clone()))
-    }
-}
-
-impl Drop for PastePermit {
-    fn drop(&mut self) {
-        self.0.store(false, std::sync::atomic::Ordering::Release);
-    }
-}
-
-#[cfg(target_os = "macos")]
-pub(super) fn save_native_clipboard_png() -> anyhow::Result<Option<std::path::PathBuf>> {
-    objc2::rc::autoreleasepool(|_| {
-        let pasteboard = objc2_app_kit::NSPasteboard::generalPasteboard();
-        save_pasteboard_png(
-            &pasteboard,
-            &crate::kit::image_safety::managed_images_root(),
-        )
-    })
-}
-
-#[cfg(target_os = "macos")]
-fn save_pasteboard_png(
-    pasteboard: &objc2_app_kit::NSPasteboard,
-    directory: &std::path::Path,
-) -> anyhow::Result<Option<std::path::PathBuf>> {
-    // PNG 缺席才允许回退 TIFF；超限或读取/落盘失败不能触发更昂贵的解码。
-    let Some(data) = (unsafe { pasteboard.dataForType(objc2_app_kit::NSPasteboardTypePNG) }) else {
-        return Ok(None);
-    };
-    anyhow::ensure!(
-        data.len() as u64 <= crate::kit::image_safety::MAX_IMAGE_BYTES,
-        "clipboard PNG exceeds byte limit"
-    );
-    // SAFETY: 保持 NSData 存活且不修改内容，借用仅在同步校验和写盘期间有效。
-    let bytes = unsafe { data.as_bytes_unchecked() };
-    // 只读 IHDR，不分配像素缓冲；完整解码仍由使用图片的受限入口负责。
-    let mut decoder = png::Decoder::new(std::io::Cursor::new(bytes));
-    decoder.read_header_info()?;
-    std::fs::create_dir_all(directory)?;
-    let path = directory.join(format!("{}.png", uuid::Uuid::now_v7()));
-    std::fs::write(&path, bytes)?;
-    Ok(Some(path))
-}
-
-/// 在当前光标处插入独占一行的 `@image <path>` 引用。
+/// 将 RGBA 字节数组编码为 PNG 字节，超过 `limit` 立即失败。
 ///
-/// 图片路径按行尾结束；前后补换行可避免用户粘贴图片后继续输入的文本被解析为路径。
-pub(crate) fn insert_image_reference(state: &mut TextAreaState, output_path: &std::path::Path) {
-    state.delete_selection();
-    let previous = state
-        .cursor
-        .checked_sub(1)
-        .and_then(|index| state.text.chars().nth(index));
-    let next = state.text.chars().nth(state.cursor);
-    let mut reference = format!("@image {}", output_path.display());
-
-    if previous.is_some_and(|ch| ch != '\n') {
-        reference.insert(0, '\n');
-    }
-    if next != Some('\n') {
-        reference.push('\n');
-    }
-
-    state.insert_str(&reference);
-    if next == Some('\n') {
-        state.cursor_right();
-    }
-}
-
-/// 将 RGBA 字节数组编码为 PNG 文件
-pub(crate) fn png_encode(
+/// 错误形态：
+/// - 尺寸/缓冲不一致、维度溢出 → `io::ErrorKind::InvalidInput`；
+/// - 编码结果超过 `limit` → `io::ErrorKind::InvalidData`。
+pub(crate) fn png_encode_bytes(
     rgba_bytes: &[u8],
     width: usize,
     height: usize,
-    output_path: &std::path::Path,
-) -> Result<(), Box<dyn std::error::Error>> {
-    use std::io::{Error as IoError, ErrorKind, Write};
+    limit: usize,
+) -> anyhow::Result<Vec<u8>> {
+    use std::io::{Error as IoError, ErrorKind};
 
     let expected_len = width
         .checked_mul(height)
@@ -115,9 +37,28 @@ pub(crate) fn png_encode(
     let height = u32::try_from(height)
         .map_err(|_| IoError::new(ErrorKind::InvalidInput, "image height exceeds PNG limit"))?;
 
-    let file = std::fs::File::create(output_path)?;
-    let mut w = std::io::BufWriter::new(file);
-    let mut encoder = png::Encoder::new(&mut w, width, height);
+    let mut writer = LimitedWriter::new(limit);
+    if let Err(error) = encode_png(&mut writer, rgba_bytes, width, height) {
+        // 超限错误由 LimitedWriter 产生，但会经 png 编码器包装成 EncodingError——
+        // 这里还原为原始 io::Error，保证调用方看到的上限语义稳定。
+        return Err(match writer.limit_error() {
+            Some(error) => error.into(),
+            None => IoError::other(error).into(),
+        });
+    }
+    Ok(writer.into_inner())
+}
+
+/// 流式写入 PNG 字节（不整体缓冲压缩结果）。
+fn encode_png(
+    writer: &mut LimitedWriter,
+    rgba_bytes: &[u8],
+    width: u32,
+    height: u32,
+) -> Result<(), png::EncodingError> {
+    use std::io::Write;
+
+    let mut encoder = png::Encoder::new(writer, width, height);
     encoder.set_color(png::ColorType::Rgba);
     encoder.set_depth(png::BitDepth::Eight);
     // Stream the compressed IDAT chunks. `write_image_data` first builds the
@@ -133,8 +74,56 @@ pub(crate) fn png_encode(
     // this explicit ensures errors are propagated instead of being swallowed
     // by Drop.
     png_writer.finish()?;
-    w.flush()?;
     Ok(())
+}
+
+/// 只写内存的上限写入器：一旦累计字节超过 `limit` 立即报错。
+struct LimitedWriter {
+    buffer: Vec<u8>,
+    limit: usize,
+    exceeded: bool,
+}
+
+impl LimitedWriter {
+    fn new(limit: usize) -> Self {
+        Self {
+            buffer: Vec::new(),
+            limit,
+            exceeded: false,
+        }
+    }
+
+    /// 超限错误（未超限返回 `None`）。
+    fn limit_error(&self) -> Option<std::io::Error> {
+        self.exceeded.then(|| {
+            std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                format!("encoded image exceeds {} byte limit", self.limit),
+            )
+        })
+    }
+
+    fn into_inner(self) -> Vec<u8> {
+        self.buffer
+    }
+}
+
+impl std::io::Write for LimitedWriter {
+    fn write(&mut self, data: &[u8]) -> std::io::Result<usize> {
+        if self.buffer.len() + data.len() > self.limit {
+            self.exceeded = true;
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                format!("encoded image exceeds {} byte limit", self.limit),
+            ));
+        }
+        self.buffer.extend_from_slice(data);
+        Ok(data.len())
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        Ok(())
+    }
 }
 
 #[cfg(test)]

@@ -1,0 +1,92 @@
+{
+  "scenario": "tools",
+  "sample": 2,
+  "root": "/tmp/peri-yjs-sdk-baseline-567640f1837771442628970a56ce68c5a8f8e256",
+  "api": "legacy",
+  "workload": {
+    "version": 1,
+    "tools": 12000,
+    "toolsPerAssistant": 10,
+    "inputDataBytes": 960,
+    "resultTextBytes": 4096,
+    "resultDataBytes": 4096,
+    "asyncUpdates": 128,
+    "streamChunks": 16384,
+    "chunkBytes": 1024,
+    "largeResultBytes": 1048576
+  },
+  "startedAt": "2026-10-04T16:40:52.499Z",
+  "status": "passed",
+  "budget": {
+    "timeoutMs": 120000,
+    "maxRssBytes": 2147483648
+  },
+  "environment": {
+    "bun": "1.4.2",
+    "yjs": "13.6.33",
+    "platform": "darwin",
+    "release": "25.5.0",
+    "arch": "arm64",
+    "cpu": "Apple M5 Pro",
+    "totalMemoryBytes": 51539607552
+  },
+  "sourceSha256": "ce4e0419196957af166a48c333e53cbaff2db5d50b733258b07436ed3a6cfbd1",
+  "dependencyLockSha256": "acf7c28963e8fbb65317a543683d400cec43ece64de3603777f6ef1510e0e367",
+  "generatorSha256": "5fe3c36d10ea9b148deb605559b4bb5724d78bfd9fb672ef134291cd01856a66",
+  "harnessVersion": 2,
+  "progress": {
+    "stage": "complete",
+    "elapsedMs": 2164.828083
+  },
+  "memory": {
+    "rssBytes": 1527283712,
+    "peakRssBytes": 1527283712,
+    "heapUsedBytes": 527932339,
+    "finalRssBytes": 1527283712,
+    "processPeakRssBytes": 1527283712
+  },
+  "projection": {
+    "completedTools": 12000,
+    "rawPayloadBytes": 111050670,
+    "projectionMs": 1696.7032469999917,
+    "batch1000Ms": [
+      25.947337000000054,
+      38.26710200000004,
+      54.39906500000018,
+      75.48587699999962,
+      97.87050599999978,
+      123.75946100000061,
+      148.93267099999952,
+      166.39818100000127,
+      194.85601799999972,
+      228.83745199999805,
+      251.86525699999856,
+      290.08431999999425
+    ]
+  },
+  "completeMs": 8.027999999999793,
+  "snapshot": {
+    "encoding": "v1",
+    "chatBytes": 115984647,
+    "sessionBytes": 330,
+    "totalBytes": 115984977,
+    "encodeMs": 175.21170899999993,
+    "applyMs": 116.42220900000007
+  },
+  "validation": {
+    "exact": true,
+    "verifiedTools": 12000,
+    "verifiedAssistantMessages": 1200,
+    "onDemandReads": 0,
+    "onDemandReadBytes": 0,
+    "referencedPayloadBytes": 0,
+    "activeTurnStatus": "completed"
+  },
+  "elapsedMs": 2164.831917,
+  "process": {
+    "exitCode": 0,
+    "reason": null,
+    "externalPeakRssBytes": 954515456,
+    "stderr": ""
+  }
+}

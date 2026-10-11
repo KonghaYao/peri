@@ -127,7 +127,7 @@ pub fn apply_bg_task_click_route(route: BgTaskClickRoute) {
         BgTaskClickRoute::UnknownKind => {
             *NOTIFICATION.state().write() = Some(Notification {
                 message: i18n::tr("bg-task-unknown-kind"),
-                until: Instant::now() + Duration::from_secs(UNKNOWN_KIND_NOTIFY_SECS),
+                until: peri_time::monotonic_now() + Duration::from_secs(UNKNOWN_KIND_NOTIFY_SECS),
             });
         }
     }

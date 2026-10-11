@@ -8,6 +8,7 @@ use langfuse_client::{GenerationBody, IngestionEvent};
 use peri_agent::messages::BaseMessage;
 use peri_agent::tools::ToolDefinition;
 use peri_model::TokenUsage;
+use std::sync::Arc;
 
 impl LangfuseTracer {
     // ── LLM Generation 事件 ──────────────────────────────────────────────────
@@ -35,17 +36,45 @@ impl LangfuseTracer {
         messages: &[BaseMessage],
         tools: &[ToolDefinition],
     ) -> bool {
+        self.on_llm_start_snapshot_inner(
+            agent_id,
+            step,
+            Arc::new(messages.to_vec()),
+            Arc::new(tools.to_vec()),
+        )
+    }
+
+    pub(crate) fn on_llm_start_snapshot(
+        &mut self,
+        agent_id: &str,
+        step: usize,
+        messages: Arc<Vec<BaseMessage>>,
+        tools: &[ToolDefinition],
+    ) {
+        if !self.sampling.should_emit(&self.trace_id, &self.session_id) {
+            return;
+        }
+        self.on_llm_start_snapshot_inner(agent_id, step, messages, Arc::new(tools.to_vec()));
+    }
+
+    pub(super) fn on_llm_start_snapshot_inner(
+        &mut self,
+        agent_id: &str,
+        step: usize,
+        messages: Arc<Vec<BaseMessage>>,
+        tools: Arc<Vec<ToolDefinition>>,
+    ) -> bool {
         match self.subagent.ownership(agent_id) {
             Ownership::Main => {
                 self.generation
-                    .on_llm_start(agent_id, step, messages.to_vec(), tools.to_vec());
+                    .on_llm_start(agent_id, step, messages, tools);
                 true
             }
             Ownership::Subagent => {
                 self.generation
-                    .on_llm_start(agent_id, step, messages.to_vec(), tools.to_vec());
+                    .on_llm_start(agent_id, step, messages, tools);
                 self.subagent
-                    .touch_content_time(agent_id, &chrono::Utc::now().to_rfc3339());
+                    .touch_content_time(agent_id, &peri_time::now_utc_rfc3339());
                 true
             }
             Ownership::Unknown => {
@@ -53,8 +82,8 @@ impl LangfuseTracer {
                 if self.subagent.try_gate(GateEvent::LlmCallStart {
                     agent_id: agent_id.to_string(),
                     step,
-                    messages: messages.to_vec(),
-                    tools: tools.to_vec(),
+                    messages,
+                    tools,
                 }) {
                     tracing::debug!(
                         target: "langfuse::subagent",
@@ -78,7 +107,15 @@ impl LangfuseTracer {
         if !self.sampling.should_emit(&self.trace_id, &self.session_id) {
             return;
         }
-        self.generation.on_llm_request_payload(agent_id, step, body);
+        if self.generation.contains(agent_id, step) {
+            self.generation.on_llm_request_payload(agent_id, step, body);
+        } else if self.subagent.ownership(agent_id) == Ownership::Unknown {
+            self.subagent.try_gate(GateEvent::LlmRequestPayload {
+                agent_id: agent_id.to_string(),
+                step,
+                body,
+            });
+        }
     }
 
     /// LLM 调用结束：同步创建 Generation 事件
@@ -106,7 +143,7 @@ impl LangfuseTracer {
                 "on_llm_end: 缺少 LlmCallStart，创建 synthetic generation"
             );
             self.generation
-                .on_llm_start(agent_id, step, Vec::new(), Vec::new());
+                .on_llm_start(agent_id, step, Arc::default(), Arc::default());
         }
 
         // 必须先解析 parent 再消费 tracker state。未知 ownership 可能由可丢的
@@ -216,12 +253,13 @@ impl LangfuseTracer {
             }
         }
 
-        // LLM 失败路径只保留固定分类，避免将 provider 原始错误写入 statusMessage 或 output。
         let (level, status_message, generation_output) = if output.starts_with("ERROR: ") {
             (
                 Some(ObservationLevel::Error),
-                Some("provider_or_stream_failure".to_string()),
-                Some(serde_json::json!({"error_class": "provider_or_stream_failure"})),
+                Some(output.to_string()),
+                Some(
+                    serde_json::json!({"error_class": "provider_or_stream_failure", "text": output}),
+                ),
             )
         } else {
             (None, None, Some(parse_output(output)))

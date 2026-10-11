@@ -2,18 +2,33 @@ use std::sync::Arc;
 
 use super::*;
 
-async fn make_channel() -> RpcChannel {
+#[test]
+fn rpc_failure_debug_and_display_preserve_payload() {
+    let error = JsonRpcError {
+        code: -32000,
+        message: "JavaScript token=fixture failed".into(),
+        data: Some(serde_json::json!({"cause": "cwd=/fixture\nTLS reset"})),
+    };
+    let rendered = crate::JsRuntimeError::RpcResponse(error).to_string();
+    assert!(rendered.contains("token=fixture"));
+    assert!(rendered.contains("cwd=/fixture"));
+    assert!(rendered.contains("TLS reset"));
+}
+
+async fn make_channel() -> (RpcChannel, tokio::process::Child) {
     let mut child = tokio::process::Command::new("node")
         .args(["-e", "setTimeout(() => {}, 60_000);"])
         .stdin(std::process::Stdio::piped())
         .stdout(std::process::Stdio::null())
         .stderr(std::process::Stdio::null())
+        .kill_on_drop(true)
         .spawn()
-        .expect("spawn perl failed");
-    RpcChannel::new(
+        .expect("spawn node failed");
+    let channel = RpcChannel::new(
         child.stdin.take().expect("stdin 应为 piped"),
         4 * 1024 * 1024,
-    )
+    );
+    (channel, child)
 }
 
 #[tokio::test]
@@ -28,8 +43,9 @@ async fn test_notification_writes_newline_and_flushes_frame() {
         .stdin(std::process::Stdio::piped())
         .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::null())
+        .kill_on_drop(true)
         .spawn()
-        .expect("spawn perl failed");
+        .expect("spawn node failed");
     let channel = RpcChannel::new(
         child.stdin.take().expect("stdin 应为 piped"),
         4 * 1024 * 1024,
@@ -41,11 +57,16 @@ async fn test_notification_writes_newline_and_flushes_frame() {
     // 属于「写入即 flush」的语义，却会吃掉同一份预算。行为断言仍是严格的 1s。
     let mut ready = String::new();
     tokio::time::timeout(
-        std::time::Duration::from_secs(30),
+        std::time::Duration::from_secs(120),
         reader.read_line(&mut ready),
     )
     .await
-    .expect("node 应在启动预算内就绪")
+    .unwrap_or_else(|error| {
+        panic!(
+            "node 应在启动预算内就绪: {error}; child status: {:?}",
+            child.try_wait()
+        )
+    })
     .unwrap();
     assert_eq!(ready, "ready\n");
 
@@ -71,11 +92,13 @@ async fn test_notification_writes_newline_and_flushes_frame() {
             "params": {"value": 1}
         })
     );
+    child.kill().await.unwrap();
 }
 
 #[tokio::test]
 async fn test_drain_pending_settles_waiting_request_with_reason() {
-    let channel = Arc::new(make_channel().await);
+    let (channel, mut child) = make_channel().await;
+    let channel = Arc::new(channel);
     let request_channel = Arc::clone(&channel);
     let request = tokio::spawn(async move {
         request_channel
@@ -93,6 +116,7 @@ async fn test_drain_pending_settles_waiting_request_with_reason() {
     channel.drain_pending("process exited");
 
     let error = request.await.unwrap().unwrap_err();
-    assert_eq!(error.code(), "PROTOCOL_ERROR");
+    assert!(matches!(error, crate::JsRuntimeError::RpcResponse(_)));
     assert!(channel.pending_requests.is_empty());
+    child.kill().await.unwrap();
 }

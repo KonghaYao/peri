@@ -48,9 +48,9 @@ use serial_test::serial;
 use tokio_util::sync::CancellationToken as AgentCancellationToken;
 
 use super::executor_flow_tests::{
-    make_session_context, make_stage_build, make_turn_input, MockEventSink,
+    make_session_context, make_stage_build, make_turn_input, run_session_loop, MockEventSink,
 };
-use crate::session::executor::{run_session_loop, PromptStopReason, SessionContext};
+use crate::session::executor::{PromptStopReason, SessionContext};
 
 /// 受控 stdio MCP 对端。只实现启动准入涉及的方法：
 /// `initialize` / `tools/list` / `resources/list` / `ping`；其余请求（含
@@ -111,12 +111,23 @@ readline.on('line', line => {
 
 /// HOME 重定向守卫：`load_merged_config_full` 读取 `~/.peri/settings.json`，
 /// 测试必须走临时 HOME，避免启动用户自己的 MCP server。
+///
+/// **A11 / R28（主 plan §5 R28 登记为允许的夹具改动）**：本守卫同时把
+/// `PERI_MCP_BUILTIN=off` 写入进程环境 —— 本文件断言的是**夹具自己声明的** server
+/// 集合与工具面，builtin 默认层注入（`web` / `artifact` 两个 in-process 实例）会在这
+/// 些精确断言之外多出服务器；off 是显式运维开关（A2），使本文件的既有断言在其原
+/// 语义下继续成立。**既有断言一字未改**；off 语义本体的断言在 `host::mcp_v4_builtin`
+/// 与该模块的新增用例中。
 struct HomeRedirect {
     _lock: MutexGuard<'static, ()>,
     previous: Option<OsString>,
+    previous_builtin_injection: Option<OsString>,
 }
 
 impl HomeRedirect {
+    /// builtin 注入开关的 env 名（`peri-middlewares` 的 `BUILTIN_INJECTION_ENV` 同值）。
+    const BUILTIN_INJECTION_ENV: &'static str = "PERI_MCP_BUILTIN";
+
     fn set(home: &Path) -> Self {
         static HOME_LOCK: OnceLock<Mutex<()>> = OnceLock::new();
         // 一个用例 panic 不得毒化 HOME 重定向，使后续用例连带失败（HOME 由 Drop
@@ -127,9 +138,12 @@ impl HomeRedirect {
             .unwrap_or_else(|poison| poison.into_inner());
         let previous = std::env::var_os("HOME");
         std::env::set_var("HOME", home);
+        let previous_builtin_injection = std::env::var_os(Self::BUILTIN_INJECTION_ENV);
+        std::env::set_var(Self::BUILTIN_INJECTION_ENV, "off");
         Self {
             _lock: lock,
             previous,
+            previous_builtin_injection,
         }
     }
 }
@@ -139,6 +153,10 @@ impl Drop for HomeRedirect {
         match self.previous.take() {
             Some(home) => std::env::set_var("HOME", home),
             None => std::env::remove_var("HOME"),
+        }
+        match self.previous_builtin_injection.take() {
+            Some(value) => std::env::set_var(Self::BUILTIN_INJECTION_ENV, value),
+            None => std::env::remove_var(Self::BUILTIN_INJECTION_ENV),
         }
     }
 }
@@ -173,17 +191,6 @@ impl CountingModel {
             .unwrap()
             .first()
             .map(|request| request.tools.iter().map(|tool| tool.name.clone()).collect())
-            .unwrap_or_default()
-    }
-
-    /// 首个 LLM 请求的系统消息文本（deferred 摘要的断言面）。
-    fn first_request_system_text(&self) -> String {
-        self.requests
-            .lock()
-            .unwrap()
-            .first()
-            .and_then(|request| request.messages.first())
-            .map(|message| message.text_content().unwrap_or_default())
             .unwrap_or_default()
     }
 }
@@ -250,15 +257,8 @@ impl McpStartupHarness {
         let (status_tx, _status_rx) = tokio::sync::watch::channel(McpInitStatus::Pending);
         let init_pool = Arc::clone(&pool);
         let init_task = tokio::spawn(async move {
-            McpClientPool::run_initialize(
-                init_pool,
-                &workspace,
-                &claude_home,
-                status_tx,
-                None,
-                None,
-            )
-            .await;
+            McpClientPool::run_initialize(init_pool, &workspace, &claude_home, status_tx, None)
+                .await;
         });
 
         Self {
@@ -402,8 +402,12 @@ fn assert_fatal_without_reason(
     );
     assert_eq!(
         wire.data,
-        Some(serde_json::json!({ "kind": "internal" })),
-        "MCP 准入失败只能投影为 internal 类别"
+        Some(serde_json::json!({
+            "kind": "internal",
+            "error_category": "middleware",
+            "causes": [failure.public_message],
+        })),
+        "MCP 准入失败必须保留 internal 类别与中间件原因"
     );
     assert!(wire.message.contains("McpMiddleware"));
     assert!(wire.message.contains(expected_fragment));
@@ -649,7 +653,7 @@ async fn system_mcp_ready_exposes_required_tools_on_first_model_request() {
 
     let tools = model.first_request_tool_names();
     assert!(
-        tools.iter().any(|name| name == "mcp__sys__echo"),
+        tools.iter().any(|name| name == "echo"),
         "必需工具必须直接出现在首个 LLM 请求: {tools:?}"
     );
     assert!(
@@ -657,14 +661,17 @@ async fn system_mcp_ready_exposes_required_tools_on_first_model_request() {
         "非必需的同 server 工具不得被提升为 direct: {tools:?}"
     );
     assert!(
+        !tools.iter().any(|name| name == "mcp__sys__echo"),
+        "system MCP 选中项使用原名，不额外注册前缀别名: {tools:?}"
+    );
+    assert!(
         !tools.iter().any(|name| name == "mcp__ord__ping"),
         "普通 MCP 工具必须保持 deferred: {tools:?}"
     );
 
-    let system = model.first_request_system_text();
     assert!(
-        system.contains("## Deferred Tools") && system.contains("mcp__ord__ping"),
-        "所有 deferred 工具（含普通 MCP）仍必须经 ToolSearch 摘要可见"
+        tools.iter().any(|name| name == "SearchExtraTools"),
+        "普通 MCP 工具通过 ToolSearch 发现"
     );
 }
 
@@ -696,13 +703,14 @@ async fn system_mcp_empty_required_tools_ready_without_injection() {
     assert_eq!(model.call_count(), 1, "ready 后正常进入 Reason");
     let tools = model.first_request_tool_names();
     assert!(
-        !tools.iter().any(|name| name == "mcp__sys__echo"),
+        !tools
+            .iter()
+            .any(|name| name == "echo" || name == "mcp__sys__echo"),
         "空数组不得注入任何 direct 工具: {tools:?}"
     );
-    let system = model.first_request_system_text();
     assert!(
-        system.contains("mcp__sys__echo"),
-        "未提升的工具仍应在 deferred 摘要中可见"
+        tools.iter().any(|name| name == "SearchExtraTools"),
+        "未提升的工具通过 ToolSearch 发现"
     );
 }
 
@@ -738,7 +746,7 @@ async fn ordinary_mcp_pending_does_not_block_startup() {
         model
             .first_request_tool_names()
             .iter()
-            .any(|name| name == "mcp__sys__echo"),
+            .any(|name| name == "echo"),
         "system 依赖满足后必需工具仍须直接可见"
     );
     assert!(
@@ -826,5 +834,73 @@ async fn system_mcp_gate_runs_after_receive_and_before_reason() {
             .count(),
         1,
         "失败事件恰好一次"
+    );
+}
+
+// ── A11 / R28：夹具守卫的 `PERI_MCP_BUILTIN=off` 必须真的生效 ──────────────────
+
+/// 守卫内的 `PERI_MCP_BUILTIN=off` 的可观察后果（本文件唯一的新增断言，A11/R28）：
+/// 注入面恰为夹具自己声明的 server —— 既没有两个 builtin 实例，也没有它们的能力面
+/// （effective name 与裸名都不出现）。
+///
+/// 这正是 A2 的运维语义：off **不是**回退到 middleware 旧实现（提供面已删除），
+/// 而是「该能力在模型面不存在」。off 语义本体与用户 MCP 共存的证据在
+/// `host::mcp_v4_builtin`。
+#[cfg(not(windows))]
+#[tokio::test]
+#[serial]
+async fn builtin_injection_off_leaves_only_fixture_servers() {
+    let harness = McpStartupHarness::initialized(serde_json::json!({
+        "sys": system_server("tools", "echo", serde_json::json!(["echo"]), 5_000),
+    }))
+    .await;
+    harness.await_connected("sys").await;
+
+    let mut servers: Vec<String> = harness
+        .pool
+        .get_all_clients()
+        .into_iter()
+        .map(|handle| handle.name.clone())
+        .collect();
+    servers.sort();
+    assert_eq!(
+        servers,
+        vec!["sys".to_string()],
+        "off 时 pool 恰为夹具声明的 server（两个 builtin 实例不得被注册）"
+    );
+    for instance in ["web", "artifact"] {
+        assert!(
+            harness.pool.get_client(instance).is_none(),
+            "off 时不得注册 builtin 实例 `{instance}`"
+        );
+    }
+
+    let sink = Arc::new(MockEventSink::new());
+    let model = CountingModel::new();
+    let result = run_prompt(
+        harness.session_context("mcp-v4-builtin-off-guard").await,
+        &sink,
+        &model,
+    )
+    .await;
+
+    assert!(result.ok, "off 不得使准入失败: {:?}", result.failure);
+    let tools = model.first_request_tool_names();
+    for name in [
+        "mcp__web__WebSearch",
+        "mcp__web__WebFetch",
+        "mcp__artifact__artifact",
+        "WebSearch",
+        "WebFetch",
+        "artifact",
+    ] {
+        assert!(
+            !tools.iter().any(|tool| tool == name),
+            "off 时不得出现 `{name}`（effective 与裸名都不存在该能力）: {tools:?}"
+        );
+    }
+    assert!(
+        tools.iter().any(|name| name == "echo"),
+        "off 只关闭 builtin 注入：夹具自身的必需工具仍必须 direct: {tools:?}"
     );
 }

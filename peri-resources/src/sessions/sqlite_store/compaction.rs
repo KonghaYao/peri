@@ -3,7 +3,6 @@
 use super::failure::commit_failure;
 use super::{database::SqliteSessionDatabase, row_mapping::role_of};
 use anyhow::Result;
-use chrono::Utc;
 use peri_acp_types::{
     store::{CompactionChange, MessageFlags},
     thread::ThreadId,
@@ -28,7 +27,7 @@ pub(super) async fn delete_messages(
             .execute(&mut *tx)
             .await?;
     }
-    let now = Utc::now().to_rfc3339();
+    let now = peri_time::now_utc_rfc3339();
     sqlx::query(
         "UPDATE threads SET updated_at = ?1,
                 message_count = (SELECT COUNT(*) FROM messages WHERE thread_id = ?2)
@@ -41,7 +40,6 @@ pub(super) async fn delete_messages(
     tx.commit()
         .await
         .map_err(|_| commit_failure(Some(thread_id.clone())))?;
-    database.invalidate_context_cache(thread_id).await?;
     Ok(())
 }
 
@@ -66,16 +64,6 @@ pub(super) async fn update_message_flags(
     .execute(&database.pool)
     .await?;
 
-    // 消息可见性变更（truncation/excluded/projection）影响上下文视图，失效 cached_context
-    let thread_id: Option<(String,)> =
-        sqlx::query_as("SELECT thread_id FROM messages WHERE message_id = ?1")
-            .bind(&id_str)
-            .fetch_optional(&database.pool)
-            .await?;
-    if let Some((tid,)) = thread_id {
-        database.invalidate_context_cache(&tid).await?;
-    }
-
     Ok(())
 }
 
@@ -85,7 +73,18 @@ pub(super) async fn commit_compaction_lifecycle(
     lifecycle: &CompactionChange,
 ) -> Result<()> {
     let mut tx = database.pool.begin().await?;
+    commit_compaction_lifecycle_on(&mut tx, thread_id, lifecycle).await?;
+    tx.commit()
+        .await
+        .map_err(|_| commit_failure(Some(thread_id.clone())))?;
+    Ok(())
+}
 
+pub(super) async fn commit_compaction_lifecycle_on(
+    tx: &mut SqliteConnection,
+    thread_id: &ThreadId,
+    lifecycle: &CompactionChange,
+) -> Result<()> {
     for (message_id, flags) in &lifecycle.flag_updates {
         let projection_json = flags
             .projection
@@ -127,13 +126,11 @@ pub(super) async fn commit_compaction_lifecycle(
         .await?;
     }
 
-    let now = Utc::now().to_rfc3339();
+    let now = peri_time::now_utc_rfc3339();
     sqlx::query(
         "UPDATE threads
              SET updated_at = ?1,
-                 message_count = (SELECT COUNT(*) FROM messages WHERE thread_id = ?2),
-                 cached_context = NULL,
-                 context_cache_epoch = context_cache_epoch + 1
+                 message_count = (SELECT COUNT(*) FROM messages WHERE thread_id = ?2)
              WHERE id = ?2",
     )
     .bind(&now)
@@ -141,9 +138,6 @@ pub(super) async fn commit_compaction_lifecycle(
     .execute(&mut *tx)
     .await?;
 
-    tx.commit()
-        .await
-        .map_err(|_| commit_failure(Some(thread_id.clone())))?;
     Ok(())
 }
 
@@ -211,7 +205,7 @@ pub(super) async fn delete_messages_since(
             .bind(rowid)
             .execute(&mut *tx)
             .await?;
-        let now = Utc::now().to_rfc3339();
+        let now = peri_time::now_utc_rfc3339();
         sqlx::query(
             "UPDATE threads SET updated_at = ?1,
                     message_count = (SELECT COUNT(*) FROM messages WHERE thread_id = ?2)
@@ -224,7 +218,6 @@ pub(super) async fn delete_messages_since(
         tx.commit()
             .await
             .map_err(|_| commit_failure(Some(thread_id.clone())))?;
-        database.invalidate_context_cache(thread_id).await?;
     }
     Ok(())
 }

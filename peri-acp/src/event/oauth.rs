@@ -1,8 +1,6 @@
 //! Capability-gated MCP OAuth wire boundary.
 //!
-//! The authorization URL is deliberately held by a non-`Debug`, non-`Serialize`
-//! value and is converted to JSON only at the transport call site. This keeps it
-//! out of generic event persistence and diagnostic surfaces.
+//! Authorization URL validation and event classification remain separate from diagnostics.
 
 use serde_json::{json, Value};
 use url::{Host, Url};
@@ -53,6 +51,7 @@ impl OAuthFailureClass {
     }
 }
 
+#[derive(Debug)]
 pub struct ValidatedAuthorizationUrl(String);
 
 impl ValidatedAuthorizationUrl {
@@ -88,6 +87,7 @@ impl ValidatedAuthorizationUrl {
     }
 }
 
+#[derive(Debug)]
 pub struct OAuthWireNotification {
     flow_id: String,
     server_name: String,
@@ -96,11 +96,11 @@ pub struct OAuthWireNotification {
     session_id: Option<String>,
     authorization_url: Option<ValidatedAuthorizationUrl>,
     failure_class: Option<OAuthFailureClass>,
+    error: Option<String>,
 }
 
-/// Host assembly → transport consumer event. This internal carrier may contain
-/// a URL or raw local error, so it intentionally implements neither `Debug` nor
-/// serde traits.
+/// Host assembly → transport consumer event carrying actual runtime details.
+#[derive(Debug)]
 pub enum HostOAuthEvent {
     Session {
         session_id: String,
@@ -153,6 +153,7 @@ impl OAuthWireNotification {
             session_id: None,
             authorization_url: None,
             failure_class: None,
+            error: None,
         })
     }
 
@@ -199,9 +200,13 @@ impl OAuthWireNotification {
         flow_id: String,
         server_name: String,
         failure_class: OAuthFailureClass,
+        error: String,
     ) -> Result<Self, OAuthWireError> {
         let mut notification = Self::new(flow_id, server_name, OAuthWireStatus::Failed)?;
         notification.failure_class = Some(failure_class);
+        notification.error = Some(peri_acp_types::session::bounded_error_message(
+            &error, 2_000,
+        ));
         Ok(notification)
     }
 
@@ -223,6 +228,9 @@ impl OAuthWireNotification {
         }
         if let Some(class) = self.failure_class {
             params["failureClass"] = Value::String(class.as_str().to_string());
+        }
+        if let Some(error) = self.error {
+            params["error"] = Value::String(error);
         }
         params
     }
@@ -265,6 +273,23 @@ pub fn validate_server_name(value: &str) -> Result<(), OAuthWireError> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn oauth_failure_preserves_actual_error() {
+        let params = OAuthWireNotification::failed(
+            "flow-fixture".into(),
+            "fixture".into(),
+            OAuthFailureClass::ConnectionFailed,
+            "connection token=fixture failed\ncaused by: TLS reset".into(),
+        )
+        .unwrap()
+        .into_params();
+        assert_eq!(params["failureClass"], "connection_failed");
+        assert_eq!(
+            params["error"],
+            "connection token=fixture failed\ncaused by: TLS reset"
+        );
+    }
 
     #[test]
     fn test_authorization_url_policy_accepts_https_and_loopback_http() {

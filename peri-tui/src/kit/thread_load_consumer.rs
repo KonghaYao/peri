@@ -188,6 +188,6 @@ mod tests;
 pub(crate) fn notify_restore_error(error: &str) {
     atoms::NOTIFICATION.set(Some(atoms::Notification {
         message: i18n::tr_args("session-restore-failed", &[("error".into(), error.into())]),
-        until: std::time::Instant::now() + std::time::Duration::from_secs(15),
+        until: peri_time::monotonic_now() + std::time::Duration::from_secs(15),
     }));
 }

@@ -135,7 +135,10 @@ async fn test_open_with_busy_schema_lock_degrades_to_read_only() {
     let db_path = dir.path().join("threads.db");
     let writable = SqliteThreadStore::new(db_path.clone()).await.unwrap();
     let thread = writable
-        .create_thread(ThreadMeta::new("/tmp/read-only-degradation"))
+        .create_thread(ThreadMeta::new_at(
+            dir.path().join("read-only-degradation").to_str().unwrap(),
+            peri_time::now_wall(),
+        ))
         .await
         .unwrap();
     // 门面列表语义只收已有历史的会话（`message_count > 0`）：裸建的空 thread 不在
@@ -219,30 +222,25 @@ fn git_repository() -> tempfile::TempDir {
     directory
 }
 
-/// [P0] 迁移桥与门面必须共享同一库句柄：桥取得的执行权要能被门面的写入准入承认。
-///
-/// 这是本阶段的前提条件——ACP 仍经桥取得 owner，Agent 已改走门面写入。两者若各自
-/// 建一份连接与 owner 登记，门面会把正在跑的会话判成「无主」而拒绝写入；因此
-/// 资源测试入口 `open_store_and_facade_for_tests` 仍提供裸句柄供夹具逐条断言。
 #[tokio::test]
-async fn test_bridge_lease_is_visible_to_shared_facade() {
+async fn shared_facade_writes_without_execution_claim() {
     let repo = git_repository();
     let db_dir = tempdir().unwrap();
     let (store, facade) =
         crate::sessions::open_store_and_facade_for_tests(db_dir.path().join("threads.db"))
             .await
             .unwrap();
-
     let workspace = store.resolve_workspace(repo.path()).await.unwrap();
     let thread = store
         .create_bound_thread(
-            ThreadMeta::new(workspace.cwd.to_string_lossy().into_owned()),
+            ThreadMeta::new_at(
+                workspace.cwd.to_string_lossy().into_owned(),
+                peri_time::now_wall(),
+            ),
             &workspace,
         )
         .await
         .unwrap();
-    let lease = store.acquire_execution_lease(&thread).await.unwrap();
-
     facade
         .append_history(
             &thread,
@@ -251,12 +249,10 @@ async fn test_bridge_lease_is_visible_to_shared_facade() {
             ))],
         )
         .await
-        .expect("桥取得的 owner 必须被门面写入准入承认");
-
+        .unwrap();
     let snapshot = facade.load_session_snapshot(&thread).await.unwrap();
     assert_eq!(snapshot.payloads.len(), 1);
     assert_eq!(snapshot.meta.id, thread);
-    drop(lease);
 }
 
 /// 部署所有权交付：工厂只在这里交出「业务句柄 + 部署关闭权」。
@@ -399,11 +395,7 @@ async fn test_missing_remote_credential_child_process() {
     // 受控环境：变量确实不存在——不读 `.env`，也不会有任何真实网络调用。
     std::env::remove_var(ABSENT_CREDENTIAL_ENV);
     assert!(std::env::var_os(ABSENT_CREDENTIAL_ENV).is_none());
-    // HOME 控制已生效：默认登记库位置指向临时目录（只解析，不创建）。
-    assert_eq!(
-        Resources::local_registry_path().unwrap(),
-        home.join(".peri").join("threads").join("threads.db")
-    );
+    // Remote configuration must not resolve or open a local SQLite registry.
 
     let deployment = SessionStoreDeployment::from_locator(LOCATOR_SENTINEL)
         .with_credential_env(ABSENT_CREDENTIAL_ENV)

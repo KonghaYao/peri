@@ -1,8 +1,9 @@
+import { buildPeriForE2e } from "../../helpers/build.js";
 /**
  * 普通目录登记 → 目录内出现 `.git` → 真实 TUI 仍能新建会话并发送输入，重启亦然。
  *
  * 只使用本地 SSE 模型端点，无真实凭据、无外部 API。回归
- * `spec/issues/2026-09-17-p0-workspace-validation-blocks-input.md`：
+ * `spec/history/2026-09.md`（2026-09-17 条目）：
  * 修复前 `session/new` 在 `resolve_workspace` 处返回 `NeedsRelink`（-32010），
  * TUI 停在 `Input was not accepted. Your draft has been kept.`，该目录永久不可用。
  */
@@ -32,11 +33,7 @@ describe("目录登记后出现 .git 的工作区", () => {
 
   beforeAll(async () => {
     // 控制面脚本不构建 binary；本用例必须跑当前源码。
-    await execFileAsync("cargo", ["build", "-p", "peri-tui", "--bin", "peri"], {
-      cwd: PROJECT_ROOT,
-      timeout: 600_000,
-      maxBuffer: 8 * 1024 * 1024,
-    });
+    await buildPeriForE2e();
   }, 610_000);
 
   beforeEach(async () => {
@@ -160,6 +157,7 @@ describe("目录登记后出现 .git 的工作区", () => {
   }
 
   async function workspaceSnapshot(): Promise<{ root: string; common_dir: string | null }> {
+    // v19 起观测证据就记在归属行上（没有独立的执行登记表）。
     const rows = await query<{ discovery: string }>("SELECT discovery FROM workspaces");
     expect(rows, "登记后应恰好有一个工作区").toHaveLength(1);
     return JSON.parse(rows[0].discovery);
@@ -170,6 +168,8 @@ describe("目录登记后出现 .git 的工作区", () => {
     await launch();
     await prompt("GIT_INIT_FIRST_INPUT", 1);
     expect((await workspaceSnapshot()).common_dir, "首次登记是普通目录模式").toBeNull();
+    const originalBindings = await query<{ thread_id: string }>("SELECT * FROM session_bindings");
+    expect(originalBindings).toHaveLength(1);
 
     // ② 目录内出现 `.git`：目录对象没有变，注册必须继续可用。
     await execFileAsync("git", ["init", "-q"], { cwd: work });
@@ -203,6 +203,15 @@ describe("目录登记后出现 .git 的工作区", () => {
       expect(binding.project_id).toBe(projects[0].id);
       expect(binding.workspace_id).toBe(workspaces[0].id);
     }
+    const retainedBindings = await query<{ thread_id: string }>("SELECT * FROM session_bindings");
+    expect(retainedBindings.find((binding) => binding.thread_id === originalBindings[0].thread_id))
+      .toEqual(originalBindings[0]);
+    const currentWorkspaces = await query<{ id: string; path: string }>("SELECT id, path FROM workspaces");
+    expect(currentWorkspaces).toHaveLength(1);
+    expect(currentWorkspaces[0].path).toBe(await realpath(work));
+    const sessionWorkspaces = await query<{ workspace_id: string }>("SELECT workspace_id FROM threads");
+    expect(sessionWorkspaces).toHaveLength(3);
+    expect(sessionWorkspaces.every((session) => session.workspace_id === currentWorkspaces[0].id)).toBe(true);
     const snapshot = await workspaceSnapshot();
     expect(snapshot.root).toBe(await realpath(work));
     expect(snapshot.common_dir, "Git 布局已刷新为仓库模式").toBe(await realpath(path.join(work, ".git")));

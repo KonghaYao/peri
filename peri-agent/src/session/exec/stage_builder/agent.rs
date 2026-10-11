@@ -65,8 +65,9 @@ pub(crate) fn build_agent(
     retry_events.set(Some(Arc::clone(&event_handler)));
 
     // Capture system_prompt before it may be overridden below (for SubAgent fork reuse).
-    // 16_workflow 已删除（C2）：子面向 prompt 与主 prompt 字节相同（无二次
-    // 渲染版本），直接复用主 prompt。
+    // 16_workflow 已删除（C2）：不再有独立子面向版本；ACP 注入的
+    // `system_builder` 会按子链能力投影重建 prompt（H2），本字段是
+    // overrides 未命中时的基础来源。
     let system_prompt_for_sub = system_prompt.clone();
 
     // 应用 agent overrides 到系统提示词
@@ -116,12 +117,7 @@ pub(crate) fn build_agent(
     // - 装配实现：`peri-middlewares::assembly::ProductionChainAssembler`
     //   （含 SubAgentMiddleware 构造点；经 `MiddlewareChainAssembler` trait
     //   注入，本模块不引用装配实现）
-    let ChainAssembly {
-        chain,
-        subagent_mw,
-        error_suggest_registry: registry,
-        tool_registry_snapshot: snapshot,
-    } = assembler.assemble(
+    let ChainAssembly { chain, subagent_mw } = assembler.assemble(
         &crate::session::factory::production_blueprint(),
         &project_assembly(
             input,
@@ -154,6 +150,11 @@ pub(crate) fn build_agent(
     // 构造 AgentModelBridge（冻结 base 不变；动态 contribution request-time 组合）
     let mut base_llm = AgentModelBridge::new(base_model)
         .with_system(system_prompt)
+        .with_external_instructions(frozen.external_instructions.clone())
+        .with_legacy_prompt_provenance(
+            frozen.legacy_embedded_instructions,
+            agent_overrides.is_some(),
+        )
         .with_system_contribution_provider(Arc::new(move || {
             contribution_chain.collect_prompt_contributions()
         }));
@@ -177,8 +178,6 @@ pub(crate) fn build_agent(
         llm: model,
         chain,
         shared_tools: Some(Arc::clone(&shared_tools)),
-        error_suggest_registry: registry,
-        tool_registry_snapshot: snapshot,
         context_budget: Some(context_budget),
         compact_config: Some(compact_config),
         subagent_mw,
@@ -236,7 +235,6 @@ fn project_assembly(input: &StageBuildInput, turn: TurnAssembly) -> AssemblyCont
     } = turn;
     let ThreadPersistence {
         session_resources,
-        execution_owner: _,
         parent_thread_id,
         register_runtime,
         deregister_runtime,
@@ -250,9 +248,9 @@ fn project_assembly(input: &StageBuildInput, turn: TurnAssembly) -> AssemblyCont
         provider_name: input.provider_name.clone(),
         auxiliary_model: mw_auxiliary_model,
         auto_classifier_model,
-        claude_md_excludes: input.claude_md_excludes.clone(),
         preload_skills,
         plugin_skill_roots: input.plugin_skill_roots.clone(),
+        agent_catalog: Arc::clone(&input.agent_catalog),
         plugin_loaded: input.plugin_loaded.clone(),
         hook_groups: input.hook_groups.clone(),
         session_start_source: input.session_start_source.clone(),
@@ -263,19 +261,18 @@ fn project_assembly(input: &StageBuildInput, turn: TurnAssembly) -> AssemblyCont
         dynamic_mcp: input.dynamic_mcp.clone(),
         dynamic_mcp_projection: Arc::clone(&input.dynamic_mcp_projection),
         session_id: input.session_id.clone(),
-        channel_state: input.channel_state.clone(),
         tool_search_index: input.tool_search_index.clone(),
         shared_tools: input.shared_tools.clone(),
         // MetaHarness：装配期关闭集合（源自会话冻结状态投影，
         // 顶层链过滤——设计 §2.5；禁止从每 turn 当前配置重建）。
         meta_harness_disabled: input.meta_harness_disabled.clone(),
+        // beta flag 投影（会话冻结）：`Agent` 工具缺省后台的语义值，随链装配下传。
+        agent_default_run_in_background: input.agent_default_run_in_background,
         // 波 4 演进 2：基础段持有者（DefaultSystemPromptMiddleware 的
         // persona 内容源 = 与 render_system_prompt 同一份 agent_overrides；
         // LangMiddleware 的语言内容源 = 冻结语言，保证链收集与渲染一致）。
         agent_overrides,
         language: input.language.clone(),
-        lsp_servers: input.lsp_servers.clone(),
-        lsp_pool: input.lsp_pool.clone(),
         workflow_executor: input.workflow_executor.clone(),
         workflow_middleware: input.workflow_middleware.clone(),
         event_handler,

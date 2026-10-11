@@ -108,6 +108,19 @@ fn load_input() -> serde_json::Value {
     })
 }
 
+#[tokio::test]
+async fn dynamic_load_does_not_require_store_execution_ownership() {
+    let deployment = Arc::new(FakeDeployment::default());
+    let tool = DynamicMcpTool::new("session-a", deployment.clone());
+    let invocation = tool.bind_invocation(load_input()).unwrap().unwrap();
+    invocation
+        .target
+        .invoke(json!({}), ToolContext::new(&[], "/tmp"))
+        .await
+        .unwrap();
+    assert_eq!(deployment.actions.lock().unwrap().len(), 1);
+}
+
 #[test]
 fn parameters_describe_method_specific_contracts() {
     let tool = DynamicMcpTool::new("session-a", Arc::new(FakeDeployment::default()));

@@ -22,6 +22,7 @@ use self::geometry::{compute_thumb_geometry, position_to_scroll_y, thumb_start_t
 pub(super) use self::gesture::{DragAction, drag_step, freeze_down_index, settle_up};
 #[cfg(test)]
 use self::gesture::{entry_click_target, freeze_down, is_click};
+use self::gesture::{selection_bounds_on_release, selection_captures_pointer, selection_position};
 use self::throttle::apply_scroll;
 pub(super) use self::throttle::{DragThrottle, SCROLL_PADDING, flush_scroll_if_due};
 pub(crate) use self::throttle::{SCROLL_LINES, ScrollThrottle, scroll_frame_ms};

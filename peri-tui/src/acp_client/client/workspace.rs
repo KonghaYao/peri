@@ -2,8 +2,8 @@
 
 use peri_acp::transport::types::AcpError;
 use peri_acp_types::workspace::{
-    ResolvedWorkspace, ScopedThreadEntry, ScopedThreadPage, ScopedThreadQuery, SessionBinding,
-    ThreadListCursor, ThreadScope,
+    MachineInfo, ResolvedWorkspace, ScopedThreadEntry, ScopedThreadPage, ScopedThreadQuery,
+    SessionBinding, ThreadListCursor, ThreadScope, WorkspaceInfo,
 };
 use serde::Deserialize;
 use serde_json::json;
@@ -24,7 +24,85 @@ struct ThreadPageProjection {
     next_cursor: Option<ThreadListCursor>,
 }
 
+#[derive(Deserialize)]
+struct MachinePage {
+    machines: Vec<MachineInfo>,
+}
+
+#[derive(Deserialize)]
+struct WorkspacePage {
+    workspaces: Vec<WorkspaceInfo>,
+}
+
 impl AcpTuiClient {
+    pub(crate) async fn list_machines(&self) -> Result<Vec<MachineInfo>, AcpError> {
+        let response = self
+            .send_raw_request("peri/machines/list", json!({}))
+            .await?;
+        serde_json::from_value::<MachinePage>(response)
+            .map(|page| page.machines)
+            .map_err(|error| AcpError::new(-32603, format!("invalid Machine list: {error}")))
+    }
+
+    pub(crate) async fn list_workspaces(
+        &self,
+        machine_id: &str,
+    ) -> Result<Vec<WorkspaceInfo>, AcpError> {
+        let response = self
+            .send_raw_request("peri/workspaces/list", json!({"machineId": machine_id}))
+            .await?;
+        serde_json::from_value::<WorkspacePage>(response)
+            .map(|page| page.workspaces)
+            .map_err(|error| AcpError::new(-32603, format!("invalid Workspace list: {error}")))
+    }
+
+    pub(crate) async fn set_session_archived(
+        &self,
+        session_id: &str,
+        archived: bool,
+    ) -> Result<(), AcpError> {
+        self.send_raw_request(
+            "peri/session/archive",
+            json!({"sessionId": session_id, "archived": archived}),
+        )
+        .await?;
+        Ok(())
+    }
+
+    pub(crate) async fn list_archived_threads(
+        &self,
+        query: &ScopedThreadQuery,
+    ) -> Result<ScopedThreadPage, AcpError> {
+        if !self.supports_session_workspace() {
+            return Err(AcpError::new(
+                -32601,
+                "host does not support session workspace identity",
+            ));
+        }
+        let response = self
+            .send_raw_request(
+                "session/list",
+                json!({
+                    "_meta": {"peri.sessionWorkspaceV1": {
+                        "scope": query.scope, "cursor": query.cursor, "limit": query.limit,
+                        "archived": true
+                    }}
+                }),
+            )
+            .await?;
+        let projection = response
+            .pointer("/_meta/peri.sessionWorkspaceV1")
+            .cloned()
+            .ok_or_else(|| AcpError::new(-32603, "missing archived session list"))?;
+        let projection: ThreadPageProjection =
+            serde_json::from_value(projection).map_err(|error| {
+                AcpError::new(-32603, format!("invalid archived session list: {error}"))
+            })?;
+        Ok(ScopedThreadPage {
+            entries: projection.threads,
+            next_cursor: projection.next_cursor,
+        })
+    }
     pub(crate) fn supports_session_workspace(&self) -> bool {
         self.session_workspace
             .load(std::sync::atomic::Ordering::Acquire)

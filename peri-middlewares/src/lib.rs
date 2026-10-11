@@ -2,91 +2,92 @@
 //!
 //! Rust middleware implementations aligned with `@langgraph-js/agent-middlewares` (TypeScript).
 //!
-//! ## 文件系统与终端（原 peri-middlewares）
+//! ## 文件系统与终端
+//!
+//! 不再有 middleware 提供面（v4-part-4 W3-C1）：7 个文件/终端工具
+//! （`Read` / `Write` / `Edit` / `Glob` / `Grep` / `folder_operations` / `Bash`）
+//! 由 builtin `workspace` MCP 实例提供，模型面使用原始工具名。
+//! 工具实现位于 `peri-mcp-workspace` 包的 `filesystem` 与 `terminal` 模块。
 
 #![allow(
     clippy::type_complexity,
     clippy::empty_line_after_doc_comments,
     clippy::useless_conversion
 )]
-//! - [`middleware::FilesystemMiddleware`]：文件系统操作
-//! - [`middleware::TerminalMiddleware`]：终端命令执行
-//!
 //! ## 认知增强与安全（原 rust-standard-middlewares）
 //! - [`AgentsMdMiddleware`]：注入 AGENTS.md / CLAUDE.md 项目指引
 //! - [`SkillsMiddleware`]：渐进式 Skills 摘要注入
 //! - [`PermissionMiddleware`]：敏感工具调用前需用户确认
 //! - [`HumanInTheLoopMiddleware`]：向用户提问的通道（AskUserQuestion 工具）
 
-pub mod agent_define;
 pub mod agents_md;
-pub mod artifact;
 pub mod assembly;
-pub mod claude_agent_parser;
 mod completion_reminder;
-pub mod git_watch;
 pub mod goal;
-pub mod goal_middleware;
-/// 装配注入端口实现（3.0 批 2 波 2：`PluginManager` / `SkillsProvider`）。
+/// 装配注入端口实现（3.0 批 2 波 2：`PluginManager` / `AgentCatalogProvider`）。
 pub mod host_ports;
 pub mod subagent;
-pub use claude_agent_parser::{
-    format_agent_id, parse_agent_file, ClaudeAgent, ClaudeAgentFrontmatter, ToolsValue,
-};
+
 pub mod ask_user;
 pub mod attribution;
-pub mod cron;
 pub mod default_system_prompt;
-pub mod error_suggest;
 pub mod hitl;
 pub mod hooks;
-pub mod lsp;
 pub mod mcp;
-pub mod meta_harness;
 pub mod middleware;
 pub mod permission;
+/// 部署能力平面（唯一事实源）：MCP 装配与本地进程能力查询入口。
+pub(crate) mod platform;
 pub mod plugin;
-#[doc(hidden)]
-pub mod process_env;
-pub mod ptc;
+/// 段落能力策略（H2 单一权威）：由实际装配事实派生系统提示词段落集合。
+pub mod prompt_policy;
+pub mod workspace_io;
 pub use plugin::{
     AvailablePlugin, ClaudeSettings, CommandEntry, CommandProvider, CommandSource, InstallScope,
     InstalledPlugin, InstalledPlugins, KnownMarketplace, LoadedPlugin, LoaderError,
     MarketplaceEntry, MarketplaceError, MarketplaceManager, MarketplaceManifest, MarketplacePlugin,
-    MarketplaceRefreshEvent, MarketplaceSource, PluginAgent, PluginAuthor, PluginChannel,
-    PluginCommand, PluginCommandEntry, PluginCommandProvider, PluginConfigError, PluginLspServer,
-    PluginManifest, PluginMiddleware, PluginOption,
+    MarketplaceRefreshEvent, MarketplaceSource, PluginAgent, PluginAuthor, PluginCommand,
+    PluginCommandEntry, PluginCommandProvider, PluginConfigError, PluginManifest, PluginMiddleware,
+    PluginOption, PluginSourceAdmission,
 };
 pub mod at_mention;
 pub mod skills;
 pub mod tool_search;
 pub mod tools;
+#[cfg(not(target_os = "emscripten"))]
+pub mod workflow;
+#[cfg(target_os = "emscripten")]
+#[path = "workflow/wasm.rs"]
 pub mod workflow;
 
-pub use agent_define::{AgentDefineMiddleware, AgentOverrides};
+/// v4 引名约定锁定：prompt 文本引用的 builtin 工具名必须与注册表一致（跨 crate 的
+/// prompt 文本扫描，见 [`prompt_tool_name_lock_tests`] 的边界说明）。
+#[cfg(test)]
+#[path = "prompt_tool_name_lock_test.rs"]
+mod prompt_tool_name_lock_tests;
+
 pub use agents_md::AgentsMdMiddleware;
 pub use ask_user::{
     ask_user_tool_definition, parse_ask_user, InteractionContext, QuestionItem, QuestionOption,
 };
 pub use at_mention::AtMentionMiddleware;
 pub use attribution::GitAttributionMiddleware;
-pub use cron::{CronMiddleware, CronScheduler, CronTask, CronTrigger};
 pub use default_system_prompt::{DefaultSystemPromptMiddleware, LangMiddleware};
-pub use git_watch::GitWatchMiddleware;
-pub use goal_middleware::GoalMiddleware;
+pub use goal::GoalMiddleware;
 pub use hitl::HumanInTheLoopMiddleware;
-pub use lsp::{LspMiddleware, LspTool};
 pub use middleware::image::ImageMiddleware;
+pub use peri_acp_types::agents::AgentOverrides;
 pub use permission::{
     default_requires_approval, effective_tool_name, AutoClassifier, BatchItem, Classification,
     HitlDecision, LlmAutoClassifier, PermissionMiddleware, PermissionMode, SharedPermissionMode,
 };
-pub use skills::{
-    list_skills, load_global_skills_dir, load_skill_metadata, SkillMetadata, SkillsMiddleware,
-};
+pub mod settings;
+
+pub use settings::load_disable_bundled_skills;
+pub use skills::{resolve_skill_roots, SkillMetadata, SkillRoot, SkillsMiddleware};
 pub use subagent::{
-    infer_agent_capability, scan_agents, scan_agents_detailed, scan_agents_with_extra_dirs,
-    AgentCapability, SkillPreloadMiddleware, SubAgentMiddleware, SubAgentTool,
+    infer_agent_capability, AgentCapability, SkillPreloadMiddleware, SubAgentMiddleware,
+    SubAgentTool,
 };
 pub use tool_search::{
     resolve_effective_tool_name, ExecuteExtraToolResolver, ToolSearchMiddleware,
@@ -101,17 +102,15 @@ pub mod prelude {
     pub use peri_agent::prelude::*;
 
     pub use crate::{
-        agent_define::AgentDefineMiddleware,
         agents_md::AgentsMdMiddleware,
         ask_user::{
             ask_user_tool_definition, parse_ask_user, InteractionContext, QuestionItem,
             QuestionOption,
         },
         attribution::GitAttributionMiddleware,
-        cron::{CronMiddleware, CronScheduler, CronTask, CronTrigger},
         hitl::HumanInTheLoopMiddleware,
         hooks::{HookMiddleware, RegisteredHook},
-        middleware::{FilesystemMiddleware, TerminalMiddleware, TodoMiddleware, WebMiddleware},
+        middleware::TodoMiddleware,
         permission::{
             default_requires_approval, AutoClassifier, BatchItem, Classification, HitlDecision,
             LlmAutoClassifier, PermissionMiddleware, PermissionMode, SharedPermissionMode,
@@ -121,15 +120,11 @@ pub mod prelude {
             InstallScope, InstalledPlugin, InstalledPlugins, KnownMarketplace, LoadedPlugin,
             LoaderError, MarketplaceEntry, MarketplaceError, MarketplaceManager,
             MarketplaceManifest, MarketplacePlugin, MarketplaceRefreshEvent, MarketplaceSource,
-            PluginAgent, PluginAuthor, PluginChannel, PluginCommand, PluginCommandProvider,
-            PluginConfigError, PluginLspServer, PluginManifest, PluginMiddleware, PluginOption,
+            PluginAgent, PluginAuthor, PluginCommand, PluginCommandProvider, PluginConfigError,
+            PluginManifest, PluginMiddleware, PluginOption,
         },
         skills::{SkillMetadata, SkillsMiddleware},
         subagent::{SkillPreloadMiddleware, SubAgentMiddleware, SubAgentTool},
-        tools::{
-            ArcToolWrapper, AskUserTool, BoxToolWrapper, EditFileTool, FolderOperationsTool,
-            GlobFilesTool, GrepTool, ReadFileTool, TodoItem, TodoStatus, TodoWriteTool,
-            WriteFileTool,
-        },
+        tools::{ArcToolWrapper, AskUserTool, BoxToolWrapper, TodoItem, TodoStatus, TodoWriteTool},
     };
 }

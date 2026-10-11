@@ -29,7 +29,7 @@ use peri_acp_types::{
     },
     store::{MessageFlags, PersistedPayload},
     thread::{CancelPolicy, ThreadId},
-    workspace::{SessionBinding, SessionExecutionLease},
+    workspace::SessionBinding,
 };
 
 use super::*;
@@ -95,7 +95,7 @@ fn make_ctx(
 
 /// 构造带 auxiliary_model 的 CommandContext（contract test 使用真实模型路径）
 ///
-/// 返回夹具本体：门面写入要求「本 root 有活 owner」，lease 必须活到测试结束，
+/// 返回夹具本体：临时数据库必须活到测试结束，
 /// 因此由调用方持有（`let (ctx, _session) = make_ctx_with_model(..)`）。
 async fn make_ctx_with_model(
     sink: Arc<dyn crate::session::event_sink::EventSink>,
@@ -140,18 +140,16 @@ fn make_ctx_with_model_and_thread(
 
 // ── 门面夹具 ──────────────────────────────────────────────────────────
 //
-// 完整 compact lifecycle 必须绑定会话资源门面；门面的写入门禁要求「本 root 有活
-// owner」，所以夹具真的建立一条已绑定会话并持有它的执行所有权（与生产路径同一前置
-// 条件），不用替身假装可写。断言走同一次一致快照（payload 与 flags 同一次读取）。
+// 完整 compact lifecycle 使用真实已绑定会话资源门面。
+// 断言走同一次一致快照（payload 与 flags 同一次读取）。
 
-/// 临时库上的已绑定会话 + 活跃执行所有权。
+/// 临时库上的已绑定会话。
 struct BoundSession {
     resources: Arc<dyn SessionResources>,
     thread_id: ThreadId,
     cwd: String,
     db_path: std::path::PathBuf,
-    /// 持有到测试结束：owner 一旦丢弃，门面的写入按 `LeaseRequired` 真实失败。
-    _lease: Arc<dyn SessionExecutionLease>,
+    /// 持有临时目录到测试结束。
     _db: tempfile::TempDir,
 }
 
@@ -170,7 +168,7 @@ impl BoundSession {
             .await
             .expect("解析工作区失败");
         let thread_id: ThreadId = uuid::Uuid::now_v7().to_string();
-        let lease = resources
+        resources
             .create_session(&NewSession {
                 thread_id: thread_id.clone(),
                 created_at: chrono::Utc::now().to_rfc3339(),
@@ -193,7 +191,6 @@ impl BoundSession {
             thread_id,
             cwd,
             db_path,
-            _lease: lease,
             _db: db,
         }
     }

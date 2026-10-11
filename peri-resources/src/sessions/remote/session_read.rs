@@ -115,11 +115,29 @@ impl RemoteSessionData {
         &self,
         query: &ScopedThreadQuery,
     ) -> SessionResourceResult<ScopedThreadPage> {
+        self.read_page_by_archive(query, false).await
+    }
+
+    pub(super) async fn read_page_by_archive(
+        &self,
+        query: &ScopedThreadQuery,
+        archived: bool,
+    ) -> SessionResourceResult<ScopedThreadPage> {
+        // 压缩前的形状没有 `archived` 列：归档面在它上面恒为空，分页也走老形状的语句。
+        if self.legacy_shape && archived {
+            return Ok(ScopedThreadPage {
+                entries: Vec::new(),
+                next_cursor: None,
+            });
+        }
         let limit = query.limit.clamp(1, 200) as usize;
         let store = self.store().await?;
-        let rows = store
-            .fetch_rows(&session_sql::page_statement(query)?)
-            .await?;
+        let statement = if self.legacy_shape {
+            session_sql::page_statement_v11(query)?
+        } else {
+            session_sql::page_statement_for_archive(query, archived)?
+        };
+        let rows = store.fetch_rows(&statement).await?;
         let mut entries = Vec::with_capacity(rows.len());
         for row in &rows {
             let meta = codec::decode_meta(row)?;
@@ -243,8 +261,8 @@ fn decode_history(
 
 /// 绑定列 + 父关系 → 绑定分类。
 ///
-/// 「绑定的本机登记已不存在」在远端无从判断（登记只在本机）：远端只回答绑定事实是否
-/// 完整存在，登记一致性与 legacy 判定留给门面按本机证据联合判定。
+/// 远端只回答绑定事实是否完整存在。执行资格由门面读取远端不可变
+/// 发现快照，再用当前文件系统与 Git 复核；缺快照不改变绑定分类。
 fn classify_binding(binding: Option<SessionBinding>, facts: &[Value]) -> BindingState {
     match binding {
         Some(binding) => BindingState::Bound(binding),

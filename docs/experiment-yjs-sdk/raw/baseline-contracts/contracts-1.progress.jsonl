@@ -1,0 +1,5 @@
+{"progress":{"stage":"project_tools","completed":1,"elapsedMs":17.487666},"memory":{"rssBytes":50528256,"peakRssBytes":50544640,"heapUsedBytes":2833408}}
+{"progress":{"stage":"snapshot_encode","elapsedMs":18.956708},"memory":{"rssBytes":51363840,"peakRssBytes":51363840,"heapUsedBytes":2984960}}
+{"progress":{"stage":"snapshot_apply","elapsedMs":20.579333},"memory":{"rssBytes":56508416,"peakRssBytes":56508416,"heapUsedBytes":5225640}}
+{"progress":{"stage":"project_tools","completed":20,"elapsedMs":24.262833},"memory":{"rssBytes":64782336,"peakRssBytes":64782336,"heapUsedBytes":12323179}}
+{"resultFile":"/Users/konghayao/code/ai/peri-v4p3/docs/experiment-yjs-sdk/raw/baseline-contracts/contracts-1.json","status":"passed","elapsedMs":25.609833000000002}

@@ -7,6 +7,8 @@
 //! - `input_builder`：`HookInput` 字面量构造集中收口
 //! - `action_resolver`：`HookAction` → `AgentResult` / `ToolCall` 归约（消除 5 处重复 match）
 //! - `permission_gate`：PermissionRequest 双条件门控
+//! - `hook_output_delivery`：M10 hook 输出字段 → 受众投递（`additionalContext`
+//!   / `systemMessage` 的 reminder 构造、承载预算与未接线降级诊断）
 //! - `stop_block_guard`：Stop Block 连续次数状态机（上限 8）
 //! - `once_tracker`：一次性 hook 状态跟踪
 //!
@@ -35,7 +37,14 @@ use peri_agent::{
 };
 use serde_json::json;
 
+use crate::hooks::hook_output_delivery::{
+    diagnose_undelivered_output, hook_output_reminder, route_hook_output,
+};
+
 use crate::permission::SharedPermissionMode;
+use peri_agent::interaction::{
+    ApprovalDecision, ApprovalItem, InteractionContext, InteractionResponse, UserInteractionBroker,
+};
 // HookType 仅 `middleware_test.rs` 通过 `use super::*` 使用。保留以维持测试不变。
 #[allow(unused_imports)]
 use crate::hooks::{
@@ -44,8 +53,11 @@ use crate::hooks::{
     input_builder,
     once_tracker::OnceTracker,
     permission_gate,
-    stop_block_guard::{format_stop_block_feedback_no_wrapper, GuardDecision, StopBlockGuard},
-    types::{HookAction, HookEvent, HookInput, HookType, RegisteredHook},
+    stop_block_guard::{
+        format_post_tool_batch_feedback_no_wrapper, format_post_tool_batch_stop_intent,
+        format_stop_block_feedback_no_wrapper, GuardDecision, StopBlockGuard,
+    },
+    types::{HookAction, HookEvent, HookInput, HookType, PermissionDecision, RegisteredHook},
 };
 
 /// Plugin hook middleware — fires registered hooks at lifecycle events.
@@ -69,6 +81,19 @@ pub struct HookMiddleware {
     requires_approval: fn(&str) -> bool,
     /// Stop hook block 连续次数计数器（最多 8 次，超过后忽略）
     stop_block_guard: Arc<StopBlockGuard>,
+    /// PreToolUse `ask` 的审批端口（与 PermissionMiddleware 同源 broker）。
+    /// None = 无审批通道：宿主也不会弹窗时，ask 必须拒绝而不是放行。
+    broker: Option<Arc<dyn UserInteractionBroker>>,
+    /// 宿主审批路径（PermissionMiddleware）是否真的在链上。
+    ///
+    /// `should_fire_permission_request_*` 只描述"权限面存在时会不会弹窗"；
+    /// MetaHarness 关闭 Permission 面后 Default 模式同样不会有人弹审批。
+    /// 缺失（默认）时 ask 不允许交宿主，必须走 `broker`；无 broker 明确拒绝。
+    host_approval_path: bool,
+    /// broker.request 超时（与 PermissionMiddleware 同源常量）
+    broker_timeout: std::time::Duration,
+    /// SessionStart `initialUserMessage` 的会话级准入闸门：每个会话至多投递一次。
+    session_start_message_admitted: std::sync::atomic::AtomicBool,
 }
 
 impl HookMiddleware {
@@ -136,7 +161,98 @@ impl HookMiddleware {
             session_start_source,
             requires_approval: crate::permission::default_requires_approval,
             stop_block_guard,
+            broker: None,
+            // fail-closed 默认：未显式声明宿主审批面在链上时，ask 不得交宿主。
+            host_approval_path: false,
+            broker_timeout: crate::permission::BROKER_TIMEOUT,
+            session_start_message_admitted: std::sync::atomic::AtomicBool::new(false),
         }
+    }
+
+    /// 声明宿主审批路径（PermissionMiddleware）是否在链上。
+    ///
+    /// 由装配点按 MetaHarness 关闭集注入（关闭 Permission 面 → false）；
+    /// 缺失即 false：ask 走 broker，无 broker 明确拒绝。
+    pub fn with_host_approval_path(mut self, present: bool) -> Self {
+        self.host_approval_path = present;
+        self
+    }
+
+    /// 注入审批端口（PreToolUse `ask` 落实用）。
+    ///
+    /// 与 `PermissionMiddleware` 使用同一 broker 源；未注入时，宿主权限路径不会
+    /// 弹窗的场景下 ask 必须拒绝（见 [`Self::resolve_ask_approval`]）。
+    pub fn with_broker(mut self, broker: Arc<dyn UserInteractionBroker>) -> Self {
+        self.broker = Some(broker);
+        self
+    }
+
+    /// 设置 ask 审批超时（测试用）
+    pub fn with_broker_timeout(mut self, timeout: std::time::Duration) -> Self {
+        self.broker_timeout = timeout;
+        self
+    }
+
+    /// 落实 PreToolUse `ask`。
+    ///
+    /// - 宿主权限路径确实在链上，且本来就会弹窗（`should_fire_permission_request_*`）
+    ///   → 返回 `None` 交给宿主审批，避免同一次调用出现双重审批；
+    /// - 宿主路径缺失（MetaHarness 关闭 Permission 面）或本就不会弹窗（Bypass、
+    ///   豁免工具等）→ 必须经既有 `UserInteractionBroker` 有界审批；无 broker、
+    ///   超时、拒绝都返回固定反馈的 `ToolRejected`，绝不放行。
+    async fn resolve_ask_approval(
+        &self,
+        state: &mut dyn hook_state::BeforeToolState,
+        tool_call: &ToolCall,
+    ) -> AgentResult<Option<ToolCall>> {
+        let origin = state.tool_origin(&tool_call.id);
+        let host_will_ask = self.host_approval_path
+            && permission_gate::should_fire_permission_request_for_origin(
+                self.permission_mode.load(),
+                &tool_call.name,
+                self.requires_approval,
+                origin.as_ref(),
+            );
+        if host_will_ask {
+            return Ok(None);
+        }
+
+        let Some(broker) = &self.broker else {
+            return Err(AgentError::ToolRejected {
+                tool: tool_call.name.clone(),
+                reason: HOOK_ASK_UNAVAILABLE_REASON.to_string(),
+            });
+        };
+
+        let ctx = InteractionContext::Approval {
+            items: vec![ApprovalItem {
+                tool_call_id: tool_call.id.clone(),
+                tool_name: tool_call.name.clone(),
+                tool_input: tool_call.input.clone(),
+            }],
+        };
+        let response = match peri_time::timeout(self.broker_timeout, broker.request(ctx)).await {
+            Ok(response) => response,
+            Err(_) => {
+                return Err(AgentError::ToolRejected {
+                    tool: tool_call.name.clone(),
+                    reason: HOOK_ASK_TIMEOUT_REASON.to_string(),
+                });
+            }
+        };
+        let decision = match response {
+            InteractionResponse::Decisions(mut decisions) => {
+                decisions.pop().unwrap_or_else(|| ApprovalDecision::Reject {
+                    reason: "用户拒绝".to_string(),
+                    source: None,
+                })
+            }
+            _ => ApprovalDecision::Reject {
+                reason: "用户拒绝".to_string(),
+                source: None,
+            },
+        };
+        crate::permission::apply_decision(tool_call, decision).map(Some)
     }
 
     /// Keep asynchronous hooks and command processes in the session execution scope.
@@ -146,6 +262,37 @@ impl HookMiddleware {
     ) -> Self {
         self.dispatcher = self.dispatcher.with_task_manager(task_manager);
         self
+    }
+
+    /// SessionStart `initialUserMessage`：受控准入一次，保留 hook 来源。
+    ///
+    /// 走 canonical reminder（source=hook）而不是伪造用户消息，因此不会被当成
+    /// "用户亲自输入"；重复的 SessionStart 输出在会话内被抑制并可诊断。
+    fn admit_session_start_message(&self, state: &dyn hook_state::HookOutputState, message: &str) {
+        if self
+            .session_start_message_admitted
+            .swap(true, std::sync::atomic::Ordering::SeqCst)
+        {
+            tracing::debug!(
+                field = "initialUserMessage",
+                bytes = message.len(),
+                "SessionStart initialUserMessage already admitted for this session"
+            );
+            return;
+        }
+        match hook_output_reminder(
+            "session_start",
+            "initial_user_message",
+            message,
+            &[ReminderAudience::Model],
+        ) {
+            Ok(reminder) => state.enqueue_session_start_message(reminder),
+            Err(error) => tracing::warn!(
+                field = "initialUserMessage",
+                %error,
+                "SessionStart initialUserMessage could not be delivered"
+            ),
+        }
     }
 
     // -----------------------------------------------------------------------
@@ -165,16 +312,44 @@ impl HookMiddleware {
         tool_name: Option<&str>,
         tool_input: Option<&serde_json::Value>,
     ) -> HookAction {
-        self.dispatcher
-            .fire_event(event, input, tool_name, tool_input)
+        self.fire_event_with_delivery(None, event, input, tool_name, tool_input)
             .await
+    }
+
+    /// 带投递面的 `fire_event`：M10 字段路由在唯一出口完成。
+    ///
+    /// 有投递面时按受众投递 `additionalContext` / `systemMessage`；没有投递面
+    /// （例如直接调用 `fire_event` 的测试或只读阶段）时用可诊断状态记录，
+    /// 不得静默丢弃，也不得"解析成功即假装生效"。
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) async fn fire_event_with_delivery(
+        &self,
+        delivery: Option<&dyn hook_state::HookOutputState>,
+        event: HookEvent,
+        input: &HookInput,
+        tool_name: Option<&str>,
+        tool_input: Option<&serde_json::Value>,
+    ) -> HookAction {
+        let action = self
+            .dispatcher
+            .fire_event(event.clone(), input, tool_name, tool_input)
+            .await;
+        match delivery {
+            Some(state) => route_hook_output(state, &event, &action),
+            None => diagnose_undelivered_output(&event, &action),
+        }
+        action
     }
 
     /// 在一批并行工具调用全部完成后触发 PostToolBatch hook。
     /// 由 dispatch_tools 在所有 tool_result 写入后调用。
+    ///
+    /// 工具结果已提交，因此这里不存在「拒绝」语义：
+    /// - Block ⇒ 回注有界反馈（复用 stop_block_guard 防循环计数，模型下一请求可见）；
+    /// - `continue:false` ⇒ 投递显式停止意图，经 Receive 唯一退出口停止，不发起额外请求。
     pub async fn fire_post_tool_batch(
         &self,
-        state: &mut dyn hook_state::StateView,
+        state: &mut dyn hook_state::AfterToolsBatchState,
     ) -> AgentResult<()> {
         let prompt_text = state
             .messages()
@@ -194,11 +369,75 @@ impl HookMiddleware {
             state.messages().len(),
         );
 
+        // PostToolBatch 的 additionalContext / systemMessage 同样必须按受众投递，
+        // 不能因为该事件另有 Block 语义就被"解析成功即假装生效"。
         let action = self
-            .fire_event(HookEvent::PostToolBatch, &input, None, None)
+            .fire_event_with_delivery(Some(&*state), HookEvent::PostToolBatch, &input, None, None)
             .await;
 
-        action_resolver::resolve_post_tool_batch_action(&action)
+        match action_resolver::resolve_post_tool_batch_action(&action) {
+            action_resolver::PostToolBatchDecision::Continue => {
+                self.stop_block_guard.on_non_block();
+                Ok(())
+            }
+            action_resolver::PostToolBatchDecision::Feedback { reason } => {
+                match self.stop_block_guard.on_block(&reason) {
+                    // 防循环上限：忽略 block，正常继续（不再回注）
+                    GuardDecision::ForceFinish | GuardDecision::Pass => Ok(()),
+                    GuardDecision::Block { count, reason } => {
+                        let feedback = format_post_tool_batch_feedback_no_wrapper(&reason, count);
+                        let reminder = TrustedSystemReminderFactory::for_producer()
+                            .construct(SystemReminder {
+                                version: SYSTEM_REMINDER_VERSION,
+                                category: ReminderCategory::Guidance,
+                                source: ReminderSource("hook".into()),
+                                kind: "post_tool_batch_blocked".into(),
+                                severity: ReminderSeverity::Warning,
+                                delivery: ReminderDelivery::Required,
+                                audiences: ReminderAudiences(vec![
+                                    ReminderAudience::Model,
+                                    ReminderAudience::Automation,
+                                ]),
+                                body: feedback,
+                                summary: Some(format!("PostToolBatch hook 阻止继续（{count}/8）")),
+                                metadata: json!({ "block_count": count }),
+                            })
+                            .map_err(|error| AgentError::MiddlewareError {
+                                middleware: self.name().to_string(),
+                                reason: error.to_string(),
+                            })?;
+                        state.enqueue_batch_feedback(reminder);
+                        Ok(())
+                    }
+                }
+            }
+            action_resolver::PostToolBatchDecision::Stop { stop_reason } => {
+                self.stop_block_guard.on_non_block();
+                let body = format_post_tool_batch_stop_intent(stop_reason.as_deref());
+                let reminder = TrustedSystemReminderFactory::for_producer()
+                    .construct(SystemReminder {
+                        version: SYSTEM_REMINDER_VERSION,
+                        category: ReminderCategory::Lifecycle,
+                        source: ReminderSource("hook".into()),
+                        kind: "post_tool_batch_stop".into(),
+                        severity: ReminderSeverity::Info,
+                        delivery: ReminderDelivery::Configurable,
+                        audiences: ReminderAudiences(vec![
+                            ReminderAudience::Tui,
+                            ReminderAudience::Automation,
+                        ]),
+                        body,
+                        summary: Some("PostToolBatch hook 请求停止本轮".into()),
+                        metadata: json!({}),
+                    })
+                    .map_err(|error| AgentError::MiddlewareError {
+                        middleware: self.name().to_string(),
+                        reason: error.to_string(),
+                    })?;
+                state.enqueue_stop_intent(reminder);
+                Ok(())
+            }
+        }
     }
 }
 
@@ -228,24 +467,15 @@ impl Middleware for HookMiddleware {
                 &self.current_model,
             );
             let action = self
-                .fire_event(HookEvent::SessionStart, &input, None, None)
+                .fire_event_with_delivery(Some(state), HookEvent::SessionStart, &input, None, None)
                 .await;
             action_resolver::resolve_action_to_result(
                 &action,
                 "SessionStart",
                 "SessionStart hook prevented continuation",
             )?;
-            match &action {
-                HookAction::SystemMessage { message } => {
-                    tracing::info!("SessionStart hook system message: {}", message);
-                }
-                HookAction::AdditionalContext { context } => {
-                    tracing::info!("SessionStart hook additional context: {}", context);
-                }
-                HookAction::InitialUserMessage { message } => {
-                    tracing::info!("SessionStart hook initial user message: {}", message);
-                }
-                _ => {}
+            if let HookAction::InitialUserMessage { message } = &action {
+                self.admit_session_start_message(state, message);
             }
         }
 
@@ -257,7 +487,7 @@ impl Middleware for HookMiddleware {
             &prompt,
         );
         let action = self
-            .fire_event(HookEvent::UserPromptSubmit, &input, None, None)
+            .fire_event_with_delivery(Some(state), HookEvent::UserPromptSubmit, &input, None, None)
             .await;
 
         action_resolver::resolve_action_to_result(
@@ -287,7 +517,8 @@ impl Middleware for HookMiddleware {
             message_count: None,
             additional_data: None,
         };
-        self.fire_event(
+        self.fire_event_with_delivery(
+            Some(state),
             HookEvent::InstructionsLoaded,
             &instructions_input,
             None,
@@ -300,11 +531,11 @@ impl Middleware for HookMiddleware {
 
     async fn before_tool(
         &self,
-        _state: &mut dyn hook_state::BeforeToolState,
+        state: &mut dyn hook_state::BeforeToolState,
         tool_call: &ToolCall,
     ) -> AgentResult<ToolCall> {
         let permission_mode_str = format!("{:?}", self.permission_mode.load());
-        let input = HookInput::tool_call(
+        let mut input = HookInput::tool_call(
             &self.session_id,
             &self.transcript_path,
             &self.cwd,
@@ -316,7 +547,8 @@ impl Middleware for HookMiddleware {
 
         // Fire PreToolUse
         let action = self
-            .fire_event(
+            .fire_event_with_delivery(
+                Some(state),
                 HookEvent::PreToolUse,
                 &input,
                 Some(&tool_call.name),
@@ -327,6 +559,8 @@ impl Middleware for HookMiddleware {
         // 原实现的 `_ => {}`：只有 Block / PreventContinuation / ModifyInput 会
         // 提前 return，其余（Allow / Notification / SystemMessage / ...）继续走
         // PermissionRequest 门控。
+        // PreToolUse 归并结果：deny 零执行 > updatedInput > allow/passthrough 交宿主。
+        let mut effective_call = tool_call.clone();
         match &action {
             HookAction::Block { .. }
             | HookAction::PreventContinuation { .. }
@@ -338,6 +572,33 @@ impl Middleware for HookMiddleware {
                     "Hook prevented continuation",
                 );
             }
+            HookAction::PermissionOverride {
+                decision,
+                updated_input,
+                ..
+            } => {
+                if let Some(new_input) = updated_input {
+                    effective_call.input = new_input.clone();
+                }
+                // M10 字段路由：additionalContext / systemMessage 已由 fire_event
+                // 出口统一诊断（不重复记录正文）。
+
+                // deny（含无法识别的判定）优先于 updatedInput：零工具执行 + 固定安全反馈
+                if decision.is_deny_like() {
+                    return Err(AgentError::ToolRejected {
+                        tool: effective_call.name.clone(),
+                        reason: HOOK_DENY_REASON.to_string(),
+                    });
+                }
+
+                if matches!(decision, PermissionDecision::Ask) {
+                    if let Some(approved) =
+                        self.resolve_ask_approval(state, &effective_call).await?
+                    {
+                        effective_call = approved;
+                    }
+                }
+            }
             _ => {}
         }
 
@@ -348,57 +609,84 @@ impl Middleware for HookMiddleware {
         //
         // 使用 hitl::default_requires_approval 判断工具是否需要审批（Bash/Write/Edit/Agent/
         // mcp__*/WebFetch/WebSearch 等）。非敏感工具（Read/Glob/Grep 等）不触发。
-        let should_fire = permission_gate::should_fire_permission_request(
+        if effective_call.input != tool_call.input {
+            input.tool_input = Some(effective_call.input.clone());
+        }
+        let origin = state.tool_origin(&effective_call.id);
+        let should_fire = permission_gate::should_fire_permission_request_for_origin(
             self.permission_mode.load(),
-            &tool_call.name,
+            &effective_call.name,
             self.requires_approval,
+            origin.as_ref(),
         );
 
         if should_fire {
+            // M10 字段路由：`PermissionRequest` 的输出同样可能携带 `systemMessage`
+            // 等受众字段。本阶段的 `BeforeToolState` 带 `HookOutputState`，有投递面，
+            // 因此必须走 `fire_event_with_delivery`——不得解析成功却只落 DEBUG 诊断。
             let action = self
-                .fire_event(
+                .fire_event_with_delivery(
+                    Some(state),
                     HookEvent::PermissionRequest,
                     &input,
-                    Some(&tool_call.name),
-                    Some(&tool_call.input),
+                    Some(&effective_call.name),
+                    Some(&effective_call.input),
                 )
                 .await;
 
-            // P1-5: PermissionDenied —— 当 hook 拒绝权限时触发
+            // P1-5: PermissionDenied —— 当 hook 拒绝权限时触发。
+            // deny 也可能以 PermissionOverride（permissionDecision: deny/无法识别）
+            // 归并而来，判定必须同时看两个形状。
+            let override_denies = matches!(
+                &action,
+                HookAction::PermissionOverride { decision, .. } if decision.is_deny_like()
+            );
             let is_denied = matches!(&action, HookAction::Block { .. })
-                || matches!(&action, HookAction::PreventContinuation { .. });
+                || matches!(&action, HookAction::PreventContinuation { .. })
+                || override_denies;
             if is_denied {
-                self.fire_event(
+                self.fire_event_with_delivery(
+                    Some(state),
                     HookEvent::PermissionDenied,
                     &input,
-                    Some(&tool_call.name),
-                    Some(&tool_call.input),
+                    Some(&effective_call.name),
+                    Some(&effective_call.input),
                 )
                 .await;
             }
 
             // Fire Notification (agent is waiting for user permission)
-            self.fire_event(
+            self.fire_event_with_delivery(
+                Some(state),
                 HookEvent::Notification,
                 &input,
-                Some(&tool_call.name),
-                Some(&tool_call.input),
+                Some(&effective_call.name),
+                Some(&effective_call.input),
             )
             .await;
 
+            // PermissionOverride 的 deny/非法判定不经过 resolve_action_to_toolcall
+            // （该归约只认 Block/PreventContinuation）：必须显式零执行，绝不放行。
+            if override_denies {
+                return Err(AgentError::ToolRejected {
+                    tool: effective_call.name.clone(),
+                    reason: HOOK_PERMISSION_DENY_REASON.to_string(),
+                });
+            }
+
             return action_resolver::resolve_action_to_toolcall(
                 &action,
-                tool_call,
+                &effective_call,
                 "Hook prevented continuation",
             );
         }
 
-        Ok(tool_call.clone())
+        Ok(effective_call)
     }
 
     async fn after_tool(
         &self,
-        _state: &mut dyn hook_state::AfterToolState,
+        state: &mut dyn hook_state::AfterToolState,
         tool_call: &ToolCall,
         result: &ToolResult,
     ) -> AgentResult<()> {
@@ -421,7 +709,13 @@ impl Middleware for HookMiddleware {
         );
 
         let _action = self
-            .fire_event(event, &input, Some(&tool_call.name), Some(&tool_call.input))
+            .fire_event_with_delivery(
+                Some(state),
+                event,
+                &input,
+                Some(&tool_call.name),
+                Some(&tool_call.input),
+            )
             .await;
 
         Ok(())
@@ -429,7 +723,7 @@ impl Middleware for HookMiddleware {
 
     async fn after_tools_batch(
         &self,
-        state: &mut dyn hook_state::StateView,
+        state: &mut dyn hook_state::AfterToolsBatchState,
         _results: &[(ToolCall, ToolResult)],
     ) -> AgentResult<()> {
         self.fire_post_tool_batch(state).await
@@ -449,7 +743,9 @@ impl Middleware for HookMiddleware {
             output,
         );
 
-        let action = self.fire_event(HookEvent::Stop, &input, None, None).await;
+        let action = self
+            .fire_event_with_delivery(Some(state), HookEvent::Stop, &input, None, None)
+            .await;
 
         match &action {
             HookAction::Block { reason } => match self.stop_block_guard.on_block(reason) {
@@ -457,6 +753,14 @@ impl Middleware for HookMiddleware {
                     return Ok(output.clone());
                 }
                 GuardDecision::Block { count, reason } => {
+                    let execution =
+                        state
+                            .execution_binding()
+                            .ok_or_else(|| AgentError::MiddlewareError {
+                                middleware: self.name().to_string(),
+                                reason: "Stop hook steering requires a current execution binding"
+                                    .into(),
+                            })?;
                     let feedback = format_stop_block_feedback_no_wrapper(&reason, count);
                     let reminder = TrustedSystemReminderFactory::for_producer()
                         .construct(SystemReminder {
@@ -478,11 +782,16 @@ impl Middleware for HookMiddleware {
                             middleware: self.name().to_string(),
                             reason: error.to_string(),
                         })?;
-                    state.enqueue_v2_message(QueuedMessage::system_reminder(
-                        MessageKind::Defer,
-                        MessageSource::StopHookFeedback,
-                        reminder,
-                    ));
+                    state.enqueue_v2_message(
+                        QueuedMessage::system_reminder(
+                            MessageKind::Defer,
+                            MessageSource::StopHookFeedback,
+                            reminder,
+                        )
+                        .with_policy(
+                            peri_acp_types::session::MessagePolicy::continue_current_run(execution),
+                        ),
+                    );
                     let mut output = output.clone();
                     output.block_continue = Some(reason);
                     return Ok(output);
@@ -504,7 +813,7 @@ impl Middleware for HookMiddleware {
         }
 
         // Fire Notification (agent done, waiting for user input)
-        self.fire_event(HookEvent::Notification, &input, None, None)
+        self.fire_event_with_delivery(Some(state), HookEvent::Notification, &input, None, None)
             .await;
 
         Ok(output.clone())
@@ -550,6 +859,43 @@ impl Middleware for HookMiddleware {
     }
 }
 
+/// PreToolUse `deny` 的固定安全反馈：不透传 hook 自述文本。
+const HOOK_DENY_REASON: &str = "PreToolUse hook denied this tool call";
+
+/// PermissionRequest `permissionDecision: deny` 的固定安全反馈：不透传 hook 自述文本。
+const HOOK_PERMISSION_DENY_REASON: &str = "PermissionRequest hook denied this tool call";
+
+/// PreToolUse `ask` 无审批端口时的固定反馈。
+const HOOK_ASK_UNAVAILABLE_REASON: &str =
+    "PreToolUse hook requested approval, but no approval channel is available";
+
+/// PreToolUse `ask` 审批超时的固定反馈。
+const HOOK_ASK_TIMEOUT_REASON: &str = "PreToolUse hook approval request timed out";
+
 #[cfg(test)]
 #[path = "middleware_test.rs"]
 mod tests;
+
+#[cfg(test)]
+#[path = "post_tool_batch_test.rs"]
+mod post_tool_batch_tests;
+
+#[cfg(test)]
+#[path = "async_diagnostic_test.rs"]
+mod async_diagnostic_tests;
+
+#[cfg(test)]
+#[path = "ask_host_path_test.rs"]
+mod ask_host_path_tests;
+
+#[cfg(test)]
+#[path = "undelivered_output_test.rs"]
+mod undelivered_output_tests;
+
+#[cfg(test)]
+#[path = "hook_output_delivery_test.rs"]
+mod hook_output_delivery_tests;
+
+#[cfg(test)]
+#[path = "permission_request_deny_test.rs"]
+mod permission_request_deny_tests;

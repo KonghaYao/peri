@@ -1,0 +1,3 @@
+[tools]
+turso = "1.0.33"
+"http:sqld" = { version = "0.24.32", url = "https://github.com/tursodatabase/libsql/releases/download/libsql-server-v0.24.32/libsql-server-aarch64-apple-darwin.tar.xz", checksum = "sha256:ced2a9d65a5d4b6bd72c67e98ad6c63139e2a139d91769f07fdd15be935381dd", strip_components = 1 }

@@ -21,6 +21,9 @@ pub const TOOL_GLOB: &str = "Glob";
 pub const TOOL_GREP: &str = "Grep";
 pub const TOOL_FOLDER_OPS: &str = "folder_operations";
 pub const TOOL_AGENT: &str = "Agent";
+/// WorkflowTool 的模型面名称（实现 `peri_resources::workflow::tool::WorkflowTool`
+/// 的 `name()`）。子链不装配 workflow 持有者，继承策略按名 fail-closed 排除。
+pub const TOOL_WORKFLOW: &str = "Workflow";
 pub const TOOL_WEBFETCH: &str = "WebFetch";
 pub const TOOL_WEBSEARCH: &str = "WebSearch";
 pub const TOOL_ASK_USER: &str = "AskUserQuestion";

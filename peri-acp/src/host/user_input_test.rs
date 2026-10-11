@@ -2,6 +2,9 @@
 
 use super::*;
 
+#[path = "session_io_test.rs"]
+mod session_io_tests;
+
 async fn make_user_input_session(
     tmp: &tempfile::TempDir,
 ) -> (AcpServerConfig, HashMap<String, SessionState>, String) {
@@ -180,51 +183,6 @@ async fn test_user_input_generation_invalidation_rejects_old_command() {
     assert!(
         data["snapshot"]["items"].as_array().unwrap().is_empty(),
         "旧内容不能进入新实例"
-    );
-}
-
-#[tokio::test]
-async fn test_user_input_observer_can_read_but_cannot_mutate() {
-    let tmp = tempfile::TempDir::new().unwrap();
-    let (cfg, mut sessions, sid) = make_user_input_session(&tmp).await;
-    sessions[&sid].lease.release("default");
-    let transport: Arc<dyn crate::transport::AcpTransport> = Arc::new(MockTransport::default());
-    let snapshot = handle_request(
-        "session/input/snapshot",
-        &json!({"sessionId":sid}),
-        &cfg,
-        &mut sessions,
-        &transport,
-    )
-    .await
-    .unwrap();
-    let error = handle_request(
-        "session/input/enqueue",
-        &make_user_input_request(
-            &sid,
-            snapshot["generation"].as_str().unwrap(),
-            "00000000-0000-0000-0000-000000000001",
-            "不应提交",
-        ),
-        &cfg,
-        &mut sessions,
-        &transport,
-    )
-    .await
-    .unwrap_err();
-    assert_eq!(error.code, -32602, "观察者只允许读取快照");
-    assert!(
-        error.message.contains("read-only observer"),
-        "错误必须明确指出写权限"
-    );
-    assert!(
-        cfg.session_manager
-            .user_input_mailbox_for(&sid)
-            .unwrap()
-            .snapshot()
-            .items
-            .is_empty(),
-        "拒绝不能修改队列"
     );
 }
 

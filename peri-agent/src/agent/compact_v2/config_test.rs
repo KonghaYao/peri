@@ -22,12 +22,7 @@ fn test_default_values() {
         "黑名单默认 4 个工具（Agent/AskUserQuestion/goal/TodoWrite）"
     );
     assert_eq!(config.summary_max_tokens, 16000);
-    assert_eq!(config.re_inject_max_files, 5);
-    assert_eq!(config.re_inject_max_tokens_per_file, 5000);
-    assert_eq!(config.re_inject_file_budget, 25000);
-    assert_eq!(config.re_inject_skills_budget, 25000);
     assert_eq!(config.max_consecutive_failures, 3);
-    assert_eq!(config.ptl_max_retries, 3);
 }
 
 #[test]

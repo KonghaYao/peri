@@ -8,7 +8,7 @@ use std::sync::Arc;
 use tokio_util::sync::CancellationToken;
 use tracing::Instrument;
 
-use super::super::middleware_runner::{run_after_tool, run_before_tools_batch, run_on_error};
+use super::super::middleware_runner::{run_after_tool, run_before_bound_tools_batch, run_on_error};
 use super::effective_dispatcher::StageEffectiveToolDispatcher;
 use super::StageContext;
 use crate::agent::events_v2::RenderEvent;
@@ -36,9 +36,20 @@ pub(super) fn effective_tool_error(error: AgentError) -> EffectiveToolError {
 fn effective_tool_error_from_boxed(
     error: Box<dyn std::error::Error + Send + Sync>,
 ) -> EffectiveToolError {
+    let error = match error.downcast::<EffectiveToolError>() {
+        Ok(error) => return *error,
+        Err(error) => error,
+    };
+    let error = match error.downcast::<AgentError>() {
+        Ok(error) => return effective_tool_error(*error),
+        Err(error) => error,
+    };
     let mut effective =
         EffectiveToolError::new(EffectiveToolErrorCode::ToolFailed, error.to_string());
     if let Some(failure) = error.downcast_ref::<SubagentFailure>() {
+        if failure.execution_finished() {
+            effective.code = EffectiveToolErrorCode::ApplicationFailed;
+        }
         if let Some(safe_failure) = failure.safe_failure() {
             effective = effective.with_subagent_failure(safe_failure);
         }
@@ -90,11 +101,13 @@ pub(super) async fn collect_tool_results(
     // ai_msg_id 保留为 API 契约（未来 ToolEnd 事件可携带 message_id）
     ai_msg_id: MessageId,
     ai_msg: &BaseMessage,
+    model_tool_call_id: Option<&str>,
 ) -> AgentResult<CollectOutcome> {
     let _ = ai_msg_id;
 
     // 阶段一：批量 before_tool 审批
-    let approval = run_before_tool_approvals(ctx, original_calls, event_calls, cancel).await?;
+    let approval =
+        run_before_tool_approvals(ctx, original_calls, event_calls, all_tools, cancel).await?;
 
     // yield 使 EventBus forwarder task 排空 render_tx 中由阶段一 emit 的
     // ToolStarted 事件（转发到 event_tx），保证在 SubAgent 工具 invoke 内部
@@ -113,6 +126,7 @@ pub(super) async fn collect_tool_results(
         catalog,
         cancel,
         ai_msg,
+        model_tool_call_id,
     )
     .await;
 
@@ -139,6 +153,7 @@ async fn run_before_tool_approvals(
     ctx: &StageContext,
     original_calls: Vec<ToolCall>,
     event_calls: &HashMap<String, ToolCall>,
+    targets: &HashMap<String, Arc<dyn BaseTool>>,
     cancel: &CancellationToken,
 ) -> AgentResult<ApprovalOutcome> {
     let turn_id = ctx.turn_id();
@@ -147,7 +162,7 @@ async fn run_before_tool_approvals(
     let mut ready_calls: Vec<ToolCall> = Vec::with_capacity(original_calls.len());
     let mut settled_results: Vec<(ToolCall, ToolResult)> = Vec::new();
 
-    let before_results = run_before_tools_batch(ctx, &original_calls).await;
+    let before_results = run_before_bound_tools_batch(ctx, &original_calls, targets).await;
 
     for (tool_call, before_result) in original_calls.iter().zip(before_results) {
         if cancel.is_cancelled() {
@@ -236,6 +251,7 @@ async fn run_before_tool_approvals(
 ///
 /// 每个调用走 `biased` select：cancel.cancelled() 优先于 invoke_fut，
 /// 命中时返回 `ToolExecutionFailed { reason: "interrupted by user" }`。
+#[allow(clippy::too_many_arguments)] // 与 collect_tool_results 同一决策：阶段边界显式传递调用上下文，不分组
 async fn dispatch_concurrent(
     ctx: &StageContext,
     ready_calls: &[ToolCall],
@@ -244,6 +260,7 @@ async fn dispatch_concurrent(
     catalog: &Arc<SessionToolCatalogSnapshot>,
     cancel: &CancellationToken,
     ai_msg: &BaseMessage,
+    model_tool_call_id: Option<&str>,
 ) -> Vec<Result<ToolOutput, EffectiveToolError>> {
     if ready_calls.is_empty() {
         return Vec::new();
@@ -270,6 +287,7 @@ async fn dispatch_concurrent(
                 .get(&call.id)
                 .cloned()
                 .unwrap_or_else(|| call.clone());
+            let model_tool_call_id = model_tool_call_id.unwrap_or(&raw_call.id).to_owned();
             let tool = all_tools.get(&call.id).cloned();
             let input = match &tool {
                 Some(t) => normalize_params(call.input.clone(), Some(t.as_ref())),
@@ -295,13 +313,16 @@ async fn dispatch_concurrent(
             async move {
                 let timeout_opt = tool.as_ref().and_then(|t| t.timeout());
                 let invoke_fut = async {
-                    let ctx_param = crate::tools::ToolContext::new(&messages, &cwd)
+                    let mut ctx_param = crate::tools::ToolContext::new(&messages, &cwd)
                         .with_effective_tool_dispatcher(
-                            Arc::new(StageEffectiveToolDispatcher::new(
-                                dispatch_context.clone(),
-                                dispatch_catalog,
-                            )),
-                            raw_call.id.clone(),
+                            Arc::new(
+                                StageEffectiveToolDispatcher::new(
+                                    dispatch_context.clone(),
+                                    dispatch_catalog,
+                                )
+                                .with_tool_call_id(model_tool_call_id.clone()),
+                            ),
+                            uuid::Uuid::now_v7().to_string(),
                             cancel.clone(),
                         )
                         .with_session_identity(
@@ -312,8 +333,23 @@ async fn dispatch_concurrent(
                                 .get("session_id")
                                 .cloned()
                                 .unwrap_or_else(|| dispatch_context.session.agent_id.to_string()),
-                            dispatch_context.session.turn.turn_id.to_string(),
-                        );
+                            dispatch_context.session.turn.turn_id().to_string(),
+                        )
+                        .with_tool_call_id(model_tool_call_id);
+                    ctx_param.cancellation = cancel.clone();
+                    ctx_param.session_resources = dispatch_context
+                        .session
+                        .transcript
+                        .read()
+                        .idempotent_reminder_port()
+                        .map(|(resources, _, _)| resources);
+                    // 投递归属 = 直接发起会话（本 session）；路由取自该会话的
+                    // canonical 持久化句柄，不接受模型参数。
+                    ctx_param = ctx_param.with_task_terminal_delivery(
+                        crate::agent::async_tasks::delivery::SessionTerminalDelivery::for_queue(
+                            dispatch_context.session.queue.clone(),
+                        ),
+                    );
                     match tool {
                         Some(t) => t
                             .invoke_output(input, ctx_param)
@@ -334,7 +370,7 @@ async fn dispatch_concurrent(
                     }
                     result = async {
                         if let Some(d) = timeout_opt {
-                            tokio::time::timeout(d, invoke_fut).await
+                            peri_time::timeout(d, invoke_fut).await
                         } else {
                             Ok(invoke_fut.await)
                         }
@@ -404,7 +440,7 @@ async fn dispatch_concurrent(
 }
 
 /// 阶段三：串行处理结果（ToolEnd 已在 dispatch_concurrent 中 emit）
-/// + after_tool + error_suggest + 截断 + 聚合。
+/// + after_tool + 截断 + 聚合。
 ///
 /// 不变量：deferred_error 取首个 after_tool 错误，后续错误不覆盖。
 async fn settle_results(
@@ -432,7 +468,7 @@ async fn settle_results(
                     ToolResult::error(&modified_call.id, &modified_call.name, e.to_string());
                 result.effective_error_code = Some(e.code);
                 result.execution = execution_for_effective_error(e.code);
-                result.subagent_failure = e.subagent_failure.clone();
+                result.subagent_failure = e.subagent_failure.as_deref().cloned();
                 if let Some(failure) = &result.subagent_failure {
                     result.output.push('\n');
                     result.output.push_str(&failure.render_model_summary());
@@ -477,15 +513,15 @@ async fn settle_results(
         }
 
         // ToolEnd 已在 dispatch_concurrent 中 emit（工具完成即刻发射）
-        // 此处仅处理 after_tool + error_suggest 等后处理逻辑
+        // 此处仅处理 after_tool + 截断等后处理逻辑
 
         if let Err(e) = run_after_tool(ctx, &modified_call, &result).await {
             let _ = run_on_error(ctx, &e).await;
             deferred_error = deferred_error.or(Some(e.to_string()));
         }
 
-        // error_suggest 注入 + output_char_limit 截断
-        post_process_result(ctx, &modified_call, &mut result, all_tools_ref);
+        // output_char_limit 截断
+        post_process_result(&modified_call, &mut result, all_tools_ref);
 
         exec_results.push((modified_call, result));
     }
@@ -499,32 +535,12 @@ async fn settle_results(
     }
 }
 
-/// 单条结果的后处理：error_suggest 注入（仅 error 分支）+ output_char_limit 截断。
-///
-/// 顺序：先注入建议文本，再按工具声明的 `output_char_limit` 截断。
+/// 单条结果的后处理：按工具声明的 `output_char_limit` 截断。
 fn post_process_result(
-    ctx: &StageContext,
     modified_call: &ToolCall,
     result: &mut ToolResult,
     all_tools: &HashMap<String, Arc<dyn BaseTool>>,
 ) {
-    // error_suggest 注入：仅修改 output 文本
-    if result.is_error {
-        if let Some(registry) = &ctx.runtime.error_suggest_registry {
-            let ec = crate::error_suggest::ErrorContext::new(
-                &modified_call.name,
-                &modified_call.input,
-                &result.output,
-                std::path::Path::new(ctx.cwd()),
-                &ctx.runtime.tool_registry_snapshot,
-            );
-            if let Some(sug) = registry.suggest(&ec) {
-                result.output =
-                    crate::error_suggest::format::format_suggestion(&result.output, &sug);
-            }
-        }
-    }
-
     // output_char_limit 截断：已经解析完成的 target 工具声明输出上限时按字符截断
     if let Some(tool) = all_tools.get(&modified_call.id) {
         let limit = tool.output_char_limit();

@@ -353,7 +353,9 @@ fn config_source_str(source: &ConfigSource) -> &'static str {
         ConfigSource::Project(_) => "project",
         ConfigSource::Global(_) => "global",
         ConfigSource::Plugin => "plugin",
+        ConfigSource::WorkspaceRemote => "workspace_remote",
         ConfigSource::Acp => "acp",
+        ConfigSource::Builtin { .. } => "builtin",
     }
 }
 

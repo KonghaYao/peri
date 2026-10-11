@@ -33,4 +33,4 @@ mkdir -p "$(dirname "$RUST_LOG_FILE")"
 
 # 在指定工作区启动 TUI；Cargo manifest 始终指向仓库根目录。
 cd "$cwd"
-cargo run --manifest-path "$repo_root/Cargo.toml" -p peri-tui -- "${args[@]}"
+"$repo_root/scripts/cargo-rmcp-patched.sh" run --locked --manifest-path "$repo_root/Cargo.toml" -p peri-tui -- "${args[@]}"

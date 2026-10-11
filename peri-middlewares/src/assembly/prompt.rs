@@ -5,27 +5,29 @@ use peri_agent::middleware::chain::MiddlewareChain;
 
 pub(super) fn add_agents_md(ctx: &AssemblyContext, chain: &mut MiddlewareChain) {
     let AssemblyContext {
-        claude_md_excludes,
         frozen_claude_md,
         frozen_claude_local_md,
         ..
     } = ctx;
-    let mut mw = AgentsMdMiddleware::new().with_excludes(claude_md_excludes.clone());
-    if let Some(main) = frozen_claude_md {
-        mw = mw.with_frozen_content(main.clone(), frozen_claude_local_md.clone());
-    }
+    // W5（plan §6.3）：纯贡献 adapter——正文只来自会话冻结快照（P4 内容准入期
+    // 经 builtin `workspace` 实例的 `peri-instruction://` 读取）；excludes 与
+    // 候选选择归 provider 输入，本中间件无读盘/搜索路径。
+    // M4：main / local 是独立输入，任一非空都贡献（local-only 也要贡献）；
+    // None（不可得）与 Some("")（显式空快照）都不贡献，但不是「重新扫描」的授权。
+    let mw = AgentsMdMiddleware::new()
+        .with_frozen_parts(frozen_claude_md.clone(), frozen_claude_local_md.clone());
     chain.add(Box::new(mw));
 }
 
 pub(super) fn add_skills(ctx: &AssemblyContext, chain: &mut MiddlewareChain) {
     let AssemblyContext {
-        plugin_skill_roots,
         frozen_skill_summary,
         ..
     } = ctx;
-    let mut skills_mw = SkillsMiddleware::new()
-        .with_plugin_roots(plugin_skill_roots.clone())
-        .with_mcp_registry(ctx.mcp_skill_registry.clone());
+    // W4b（F2/J5）：技能目录只由 MCP registry 投影——`plugin_skill_roots` /
+    // `disable_bundled` 等本地扫描参数已从本中间件删除（它们现在只作为
+    // workspace 实例的资源根/关闭位输入，见 `peri-acp/src/host/workspace.rs`）。
+    let mut skills_mw = SkillsMiddleware::new().with_mcp_registry(ctx.mcp_skill_registry.clone());
     if let Some(summary) = frozen_skill_summary {
         skills_mw = skills_mw.with_frozen_summary(summary.clone());
     }
@@ -33,15 +35,9 @@ pub(super) fn add_skills(ctx: &AssemblyContext, chain: &mut MiddlewareChain) {
 }
 
 pub(super) fn add_skill_preload(ctx: &AssemblyContext, chain: &mut MiddlewareChain) {
-    let AssemblyContext {
-        preload_skills,
-        cwd,
-        plugin_skill_roots,
-        ..
-    } = ctx;
+    let AssemblyContext { preload_skills, .. } = ctx;
     chain.add(Box::new(
-        SkillPreloadMiddleware::new(preload_skills.clone(), cwd)
-            .with_plugin_roots(plugin_skill_roots.clone())
+        SkillPreloadMiddleware::new(preload_skills.clone())
             .with_mcp_registry(ctx.mcp_skill_registry.clone()),
     ));
 }

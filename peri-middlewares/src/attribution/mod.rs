@@ -17,9 +17,7 @@ mod state;
 use peri_agent::middleware::capabilities as hook_state;
 use std::{
     collections::HashMap,
-    process::Stdio,
     sync::{Arc, Mutex},
-    time::Duration,
 };
 
 use async_trait::async_trait;
@@ -33,14 +31,15 @@ pub use state::AttributionState;
 
 use crate::tool_search::core_tools::{TOOL_EDIT, TOOL_WRITE};
 
-const GIT_BRANCH_TIMEOUT: Duration = Duration::from_secs(1);
-
 /// Git 留名中间件
 ///
-/// 注册在 `FilesystemMiddleware` 之后，hook 其 Write/Edit 工具调用。
+/// 注册在 `ChainSlot::GitAttribution`（第二组；v4-part-4 W3-C1 后本组已不含文件/终端
+/// 工具提供器，二者由 builtin `workspace` 实例提供；v4 wave 4 后 GitWatch 已从链上删除，
+/// 本中间件是组内唯一成员），hook 其 Write/Edit 工具调用。
 /// `before_tool` 暂存旧文件内容，`after_tool` 计算贡献字符数。
 /// Co-Authored-By 指令由 `build_bare_agent` 在 system prompt 中注入。
 pub struct GitAttributionMiddleware {
+    reader: Arc<dyn crate::workspace_io::WorkspaceFileReader>,
     state: Arc<Mutex<AttributionState>>,
     pending_old_content: Arc<Mutex<HashMap<String, String>>>,
     branch_baseline: Arc<Mutex<Option<String>>>,
@@ -49,9 +48,13 @@ pub struct GitAttributionMiddleware {
 }
 
 impl GitAttributionMiddleware {
-    pub fn new(model_name: &str) -> Self {
+    pub fn new(
+        model_name: &str,
+        reader: Arc<dyn crate::workspace_io::WorkspaceFileReader>,
+    ) -> Self {
         let attribution_text = Self::attribution_text(model_name);
         Self {
+            reader,
             state: Arc::new(Mutex::new(AttributionState::new(model_name.to_string()))),
             pending_old_content: Arc::new(Mutex::new(HashMap::new())),
             branch_baseline: Arc::new(Mutex::new(None)),
@@ -81,48 +84,6 @@ impl GitAttributionMiddleware {
             _ => None,
         }
     }
-
-    fn spawn_branch_command(mut command: tokio::process::Command) -> Option<tokio::process::Child> {
-        command
-            .stdin(Stdio::null())
-            .stdout(Stdio::piped())
-            .stderr(Stdio::piped())
-            .kill_on_drop(true)
-            .spawn()
-            .ok()
-    }
-
-    async fn current_branch_from_child(
-        child: tokio::process::Child,
-        timeout: Duration,
-    ) -> Option<String> {
-        let output = tokio::time::timeout(timeout, child.wait_with_output())
-            .await
-            .ok()?
-            .ok()?;
-        if !output.status.success() {
-            return None;
-        }
-        let branch = String::from_utf8(output.stdout).ok()?;
-        let branch = branch.trim();
-        (!branch.is_empty()).then(|| branch.to_string())
-    }
-
-    async fn current_branch_with_command(
-        command: tokio::process::Command,
-        timeout: Duration,
-    ) -> Option<String> {
-        let child = Self::spawn_branch_command(command)?;
-        Self::current_branch_from_child(child, timeout).await
-    }
-
-    async fn current_branch(cwd: &str) -> Option<String> {
-        let mut command = tokio::process::Command::new("git");
-        command
-            .args(["rev-parse", "--abbrev-ref", "HEAD"])
-            .current_dir(cwd);
-        Self::current_branch_with_command(command, GIT_BRANCH_TIMEOUT).await
-    }
 }
 
 #[async_trait]
@@ -132,8 +93,10 @@ impl Middleware for GitAttributionMiddleware {
     }
 
     fn prompt_contribution(&self) -> Option<String> {
+        // M1：分隔符由 `MiddlewareChain::collect_prompt_contributions` 统一
+        // 负责（非空贡献以空行连接）——贡献正文不再自带前导 `\n\n`。
         let text = format!(
-            "\n\n## Git Attribution\n\nWhen the user asks you to commit, append the following line to the commit message:\n\n```\n{}\n```\n\nThis tracks AI contributions for code you authored. Only include it when you are already creating a commit at the user's request.",
+            "## Git Attribution\n\nWhen the user asks you to commit, append the following line to the commit message:\n\n```\n{}\n```\n\nThis tracks AI contributions for code you authored. Only include it when you are already creating a commit at the user's request.",
             self.attribution_text
         );
         Some(text)
@@ -141,7 +104,7 @@ impl Middleware for GitAttributionMiddleware {
 
     async fn before_tool(
         &self,
-        _state: &mut dyn hook_state::BeforeToolState,
+        state: &mut dyn hook_state::BeforeToolState,
         tool_call: &ToolCall,
     ) -> AgentResult<ToolCall> {
         // 仅处理 Write 和 Edit
@@ -150,11 +113,16 @@ impl Middleware for GitAttributionMiddleware {
         }
         // 读取当前文件内容，暂存到 pending
         if let Some(file_path) = tool_call.input.get("file_path").and_then(|v| v.as_str()) {
-            if let Ok(old_content) = tokio::fs::read_to_string(file_path).await {
+            let path = std::path::Path::new(state.cwd()).join(file_path);
+            self.pending_old_content
+                .lock()
+                .unwrap()
+                .remove(&tool_call.id);
+            if let Ok(old_content) = self.reader.read_text(&path).await {
                 self.pending_old_content
                     .lock()
                     .unwrap()
-                    .insert(file_path.to_string(), old_content);
+                    .insert(tool_call.id.clone(), old_content);
             }
         }
         Ok(tool_call.clone())
@@ -162,7 +130,7 @@ impl Middleware for GitAttributionMiddleware {
 
     async fn after_tool(
         &self,
-        _state: &mut dyn hook_state::AfterToolState,
+        state: &mut dyn hook_state::AfterToolState,
         tool_call: &ToolCall,
         _result: &ToolResult,
     ) -> AgentResult<()> {
@@ -178,9 +146,10 @@ impl Middleware for GitAttributionMiddleware {
             .pending_old_content
             .lock()
             .unwrap()
-            .remove(file_path)
+            .remove(&tool_call.id)
             .unwrap_or_default();
-        let new_content = match tokio::fs::read_to_string(file_path).await {
+        let path = std::path::Path::new(state.cwd()).join(file_path);
+        let new_content = match self.reader.read_text(&path).await {
             Ok(c) => c,
             Err(_) => return Ok(()),
         };
@@ -191,8 +160,8 @@ impl Middleware for GitAttributionMiddleware {
         Ok(())
     }
 
-    async fn before_agent(&self, state: &mut dyn hook_state::BeforeAgentState) -> AgentResult<()> {
-        if let Some(branch) = Self::current_branch(state.cwd()).await {
+    async fn before_agent(&self, _state: &mut dyn hook_state::BeforeAgentState) -> AgentResult<()> {
+        if let Ok(Some(branch)) = self.reader.current_branch().await {
             if let Some((previous_branch, current_branch)) = self.observe_branch(branch) {
                 tracing::info!(
                     target: "git",
@@ -210,3 +179,7 @@ impl Middleware for GitAttributionMiddleware {
 #[cfg(test)]
 #[path = "mod_test.rs"]
 mod tests;
+
+#[cfg(test)]
+#[path = "io_test.rs"]
+mod io_tests;

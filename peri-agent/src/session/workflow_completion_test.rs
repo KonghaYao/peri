@@ -55,7 +55,7 @@ fn consumer_applies_defer_before_clearing_active_count() {
     let router = AsyncRouter::new(handle);
     let task_result = failed_task_result(run_id);
 
-    apply_workflow_task_result(&task_result, Some(&router), None, bg.as_ref());
+    apply_workflow_task_result(&task_result, &router, bg.as_ref()).unwrap();
 
     assert!(
         inbox.queue().has_wake_up(),

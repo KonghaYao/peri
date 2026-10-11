@@ -375,12 +375,10 @@ const SCHEMA_SQL = [
   `ALTER TABLE threads ADD COLUMN hidden BOOLEAN NOT NULL DEFAULT 0`,
   `ALTER TABLE threads ADD COLUMN cancel_policy TEXT NOT NULL DEFAULT 'cascade'`,
   `ALTER TABLE threads ADD COLUMN config TEXT`,
-  `ALTER TABLE threads ADD COLUMN cached_context TEXT`,
   `ALTER TABLE threads ADD COLUMN agent_status TEXT NOT NULL DEFAULT 'active'`,
   `ALTER TABLE messages ADD COLUMN truncated BOOLEAN NOT NULL DEFAULT 0`,
   `ALTER TABLE messages ADD COLUMN excluded BOOLEAN NOT NULL DEFAULT 0`,
   `ALTER TABLE messages ADD COLUMN projection TEXT`,
-  `ALTER TABLE threads ADD COLUMN context_cache_epoch INTEGER NOT NULL DEFAULT 0`,
 ];
 
 // ─── 主流程 ────────────────────────────────────────────────────────────────────
@@ -568,8 +566,8 @@ function main() {
     const insThread = outDb.prepare(
       `INSERT INTO threads (id, title, cwd, created_at, updated_at, message_count,
          parent_thread_id, snapshot_at_message_id, hidden, cancel_policy, config,
-         cached_context, agent_status, context_cache_epoch)
-       VALUES (?, ?, ?, ?, ?, ?, ?, NULL, ?, ?, ?, NULL, ?, 0)`,
+         agent_status)
+       VALUES (?, ?, ?, ?, ?, ?, ?, NULL, ?, ?, ?, ?)`,
     );
     for (const t of threadRows) {
       insThread.run(

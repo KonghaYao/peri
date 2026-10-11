@@ -320,3 +320,91 @@ fn test_cached_prompt_becomes_stale_after_rebuild() {
         "cached_prompt_version 仍停留在上一次 set_cached_prompt 的版本（middleware 负责检测并重建）"
     );
 }
+
+// ── M7：deferred 列表总量预算（结构性省略，不裁字符串/schema）──────────────
+
+fn oversized_param_tool(name: &str, param_bytes: usize) -> std::sync::Arc<dyn BaseTool> {
+    std::sync::Arc::new(MockTool {
+        name_str: name.to_string(),
+        desc_str: "tool with an oversized parameter description".to_string(),
+        params: json!({
+            "type": "object",
+            "properties": {
+                "payload": {
+                    "type": "string",
+                    "description": "p".repeat(param_bytes),
+                }
+            }
+        }),
+    })
+}
+
+/// 单条自身超预算：只保留工具名与省略原因（结构化省略），不按字符串裁切 schema。
+#[test]
+fn oversized_deferred_entry_is_omitted_structurally_not_truncated() {
+    let index = ToolSearchIndex::new();
+    index.build(vec![oversized_param_tool("Huge", MAX_DEFERRED_LIST_BYTES)]);
+
+    let list = index.format_deferred_list();
+    assert!(list.len() <= MAX_DEFERRED_LIST_BYTES, "len={}", list.len());
+    assert!(
+        list.contains("Huge: [entry omitted: exceeds the"),
+        "超预算条目必须留下名字与原因: {list}"
+    );
+    assert!(
+        !list.contains("p".repeat(64).as_str()),
+        "参数描述不得出现在列表里"
+    );
+    assert!(
+        list.contains("1 oversized"),
+        "省略计数必须对模型可见: {list}"
+    );
+}
+
+/// 多条累积超预算：后续条目整条省略并给出可操作原因，总量恒在预算内。
+#[test]
+fn deferred_list_stays_within_budget_and_reports_omissions() {
+    let index = ToolSearchIndex::new();
+    let tools: Vec<std::sync::Arc<dyn BaseTool>> = (0..40)
+        .map(|i| {
+            oversized_param_tool(&format!("Tool{i:02}"), 4_000) as std::sync::Arc<dyn BaseTool>
+        })
+        .collect();
+    index.build(tools);
+
+    let list = index.format_deferred_list();
+    assert!(list.len() <= MAX_DEFERRED_LIST_BYTES, "len={}", list.len());
+    assert!(
+        list.contains("more deferred tool(s) omitted"),
+        "省略必须显式可见: {}",
+        &list[list.len().saturating_sub(220)..]
+    );
+    assert!(
+        list.contains("SearchExtraTools"),
+        "被省略的工具必须给出替代发现路径"
+    );
+    // 每条进入列表的条目都是完整的（参数段结尾完整），不存在半截条目。
+    for entry in list.split("\n- ").skip(1) {
+        if entry.starts_with("…") {
+            continue;
+        }
+        assert!(
+            entry.contains("Parameters:") || entry.starts_with("Tool"),
+            "条目必须完整: {}",
+            &entry[..entry.len().min(80)]
+        );
+    }
+}
+
+/// 预算内的正常列表逐字保持既有格式（回归保护）。
+#[test]
+fn deferred_list_within_budget_is_unchanged() {
+    let index = ToolSearchIndex::new();
+    index.build(vec![std::sync::Arc::new(MockTool::new(
+        "Small",
+        "a small deferred tool",
+    ))]);
+    let list = index.format_deferred_list();
+    assert!(list.contains("- Small: a small deferred tool"));
+    assert!(!list.contains("omitted"));
+}

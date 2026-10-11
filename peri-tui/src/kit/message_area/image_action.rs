@@ -94,7 +94,7 @@ pub(crate) fn try_open_image(path: &str) -> bool {
 fn show_open_failed_notification() {
     *crate::kit::atoms::NOTIFICATION.state().write() = Some(crate::kit::atoms::Notification {
         message: crate::i18n::tr("user-image-open-failed"),
-        until: std::time::Instant::now() + std::time::Duration::from_secs(3),
+        until: peri_time::monotonic_now() + std::time::Duration::from_secs(3),
     });
     crate::kit::atoms::RENDER_HEARTBEAT
         .set(crate::kit::atoms::RENDER_HEARTBEAT.get().wrapping_add(1));

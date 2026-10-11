@@ -132,15 +132,6 @@ impl OtelAttributeValue {
             bool_value: None,
         }
     }
-
-    pub fn bool(v: bool) -> Self {
-        Self {
-            string_value: None,
-            int_value: None,
-            double_value: None,
-            bool_value: Some(v),
-        }
-    }
 }
 
 /// Helper to build an attribute

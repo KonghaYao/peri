@@ -11,13 +11,13 @@
 ### RUST-ERROR-001
 
 - **Scope**：Rust 错误边界。
-- **Rule**：库 crate 用 `thiserror` 的结构化错误和 crate Result 别名；应用 crate（`peri-tui`、`peri-acp`）用 `anyhow::Result` 组织调用链。错误文本不得泄露 secret。
+- **Rule**：库 crate 用 `thiserror` 的结构化错误和 crate Result 别名；应用 crate（`peri-tui`、`peri-acp`）用 `anyhow::Result` 组织调用链。错误保留实际诊断与原因链，不做内容脱敏；运行时输出契约见 `ARC-SECRET-001`。
 - **Verify**：`cargo check -p <crate>`；人工检查新增 public error 与调用边界。
 
 ### RUST-TRACE-001
 
 - **Scope**：运行时诊断。
-- **Rule**：库和运行时诊断使用 `tracing`，禁止新增 `println!`、`eprintln!`、`dbg!`；应用启动边界已有的用户可见 stderr 输出按邻近模式处理。字段应结构化且不包含敏感信息。
+- **Rule**：库和运行时诊断使用 `tracing`，禁止新增 `println!`、`eprintln!`、`dbg!`；应用启动边界已有的用户可见 stderr 输出按邻近模式处理。字段应结构化，失败记录保留实际原因与关联身份，不以公开通用文案替代内部诊断。
 - **Verify**：`rg 'println!|eprintln!|dbg!' <changed-rust-path>`；人工检查新增 `tracing` 字段。
 
 ### RUST-ASYNC-001

@@ -34,7 +34,6 @@ fn fixture_handle(server: &str) -> Arc<McpClientHandle> {
         source: None,
         url: None,
         skills_capable: false,
-        channel_capable: false,
     })
 }
 
@@ -127,10 +126,7 @@ fn expect_error(
 
 #[test]
 fn test_system_required_tools_resolve_in_own_namespace() {
-    let before = vec![
-        "mcp__workspace__Read".to_string(),
-        "mcp__archive__Read".to_string(),
-    ];
+    let before = vec!["Read".to_string(), "mcp__archive__Read".to_string()];
     let before_params: Vec<serde_json::Value> = vec![read_schema(), read_schema()];
 
     let prepared = expect_ok(
@@ -138,7 +134,7 @@ fn test_system_required_tools_resolve_in_own_namespace() {
         &required(&[("workspace", &["Read"])]),
     );
 
-    // 长度、顺序与有效名集合不变；只有所属 namespace 命中项被提升。
+    // 长度、顺序与参数不变；仅选中项以原始名进入模型工具集。
     assert_eq!(names(&prepared), before);
     assert_eq!(
         prepared
@@ -147,10 +143,7 @@ fn test_system_required_tools_resolve_in_own_namespace() {
             .collect::<Vec<_>>(),
         before_params
     );
-    assert_eq!(
-        direct_names(&prepared),
-        vec!["mcp__workspace__Read".to_string()]
-    );
+    assert_eq!(direct_names(&prepared), vec!["Read".to_string()]);
 }
 
 #[test]
@@ -205,6 +198,21 @@ fn test_system_missing_tool_returns_explicit_error() {
 }
 
 #[test]
+fn test_system_invalid_raw_name_fails_before_injection() {
+    let error = expect_error(
+        vec![bridge("workspace", "read.file")],
+        &required(&[("workspace", &["read.file"])]),
+    );
+    assert_eq!(
+        error,
+        SystemToolError::InvalidToolName {
+            server: "workspace".to_string(),
+            tool: "read.file".to_string(),
+        }
+    );
+}
+
+#[test]
 fn test_system_error_selection_is_deterministic() {
     let bridges = vec![bridge("workspace", "Read")];
     let required = required(&[("zulu", &["Read"]), ("alpha", &["Read"])]);
@@ -223,50 +231,30 @@ fn test_system_error_selection_is_deterministic() {
 }
 
 #[test]
-fn test_system_ambiguous_raw_tool_is_rejected() {
-    let error = expect_error(
+fn test_system_duplicate_raw_tool_keeps_first_discovery() {
+    let prepared = expect_ok(
         vec![bridge("workspace", "Read"), bridge("workspace", "Read")],
         &required(&[("workspace", &["Read"])]),
     );
-
-    assert_eq!(
-        error,
-        SystemToolError::AmbiguousTool {
-            server: "workspace".to_string(),
-            tool: "Read".to_string(),
-            matches: vec![
-                "mcp__workspace__Read".to_string(),
-                "mcp__workspace__Read".to_string(),
-            ],
-        }
-    );
+    assert_eq!(direct_names(&prepared), vec!["Read", "Read"]);
+    assert_eq!(prepared[1].name(), "Read");
 }
 
 #[test]
-fn test_system_effective_name_collision_is_rejected() {
-    // 净化碰撞：不同原始 server 名落到同一 effective name。
-    let error = expect_error(
+fn test_system_name_collision_preserves_discovery_for_catalog_admission() {
+    // 净化碰撞的 deferred 项仍保留，供目录统一决议。
+    let prepared = expect_ok(
         vec![bridge("a.b", "Read"), bridge("a_b", "Read")],
         &required(&[("a.b", &["Read"])]),
     );
-    assert_eq!(
-        error,
-        SystemToolError::EffectiveNameCollision {
-            effective_name: "mcp__a_b__Read".to_string(),
-        }
-    );
+    assert_eq!(names(&prepared), vec!["Read", "mcp__a_b__Read"]);
 
-    // ASCII 大小写折叠冲突：执行期无法区分这两个名字。
-    let error = expect_error(
+    // 大小写冲突也不影响 readiness 的发现事实。
+    let prepared = expect_ok(
         vec![bridge("workspace", "Read"), bridge("workspace", "read")],
         &required(&[("workspace", &["Read"])]),
     );
-    assert_eq!(
-        error,
-        SystemToolError::EffectiveNameCollision {
-            effective_name: "mcp__workspace__Read".to_string(),
-        }
-    );
+    assert_eq!(names(&prepared), vec!["Read", "mcp__workspace__read"]);
 
     // 与必需项无关的普通 deferred 冲突沿用既有策略，本函数不改写。
     let prepared = expect_ok(
@@ -277,10 +265,7 @@ fn test_system_effective_name_collision_is_rejected() {
         ],
         &required(&[("workspace", &["Read"])]),
     );
-    assert_eq!(
-        direct_names(&prepared),
-        vec!["mcp__workspace__Read".to_string()]
-    );
+    assert_eq!(direct_names(&prepared), vec!["Read".to_string()]);
 }
 
 #[test]
@@ -534,10 +519,7 @@ fn test_system_valid_schema_preserves_extensions_and_data() {
 
     // MCP 原始 schema 被完整保留，未被改写或补齐。
     assert_eq!(prepared[0].parameters(), schema);
-    assert_eq!(
-        direct_names(&prepared),
-        vec!["mcp__workspace__Read".to_string()]
-    );
+    assert_eq!(direct_names(&prepared), vec!["Read".to_string()]);
 }
 
 // ─── 空数组、幂等与 all-or-nothing ──────────────────────────────────────────
@@ -579,15 +561,12 @@ fn test_system_duplicate_requirements_do_not_duplicate_registration() {
     assert_eq!(
         names(&prepared)
             .iter()
-            .filter(|name| name.as_str() == "mcp__workspace__Read")
+            .filter(|name| name.as_str() == "Read")
             .count(),
         1,
         "Vec 层不得出现第二份同名注册"
     );
-    assert_eq!(
-        direct_names(&prepared),
-        vec!["mcp__workspace__Read".to_string()]
-    );
+    assert_eq!(direct_names(&prepared), vec!["Read".to_string()]);
 }
 
 #[test]
@@ -600,10 +579,7 @@ fn test_system_repeated_admission_is_idempotent() {
     let second = expect_ok(first, &required);
 
     assert_eq!(second.len(), 2);
-    assert_eq!(
-        direct_names(&second),
-        vec!["mcp__workspace__Read".to_string()]
-    );
+    assert_eq!(direct_names(&second), vec!["Read".to_string()]);
 }
 
 #[test]
@@ -631,10 +607,7 @@ fn test_system_validation_is_all_or_nothing() {
     // 非法项留在集合中但不被要求时，合法必需项可独立通过。
     let prepared = expect_ok(rebuilt, &required(&[("workspace", &["Read"])]));
     assert_eq!(prepared.len(), 2);
-    assert_eq!(
-        direct_names(&prepared),
-        vec!["mcp__workspace__Read".to_string()]
-    );
+    assert_eq!(direct_names(&prepared), vec!["Read".to_string()]);
 }
 
 #[test]
@@ -658,10 +631,7 @@ fn test_system_dynamic_control_remains_deferred() {
         &required(&[("workspace", &["Read"])]),
     );
 
-    assert_eq!(
-        direct_names(&prepared),
-        vec!["mcp__workspace__Read".to_string()]
-    );
+    assert_eq!(direct_names(&prepared), vec!["Read".to_string()]);
     let dynamic = prepared
         .iter()
         .find(|bridge| bridge.name() == "mcp__dynamic__ShadowTool")

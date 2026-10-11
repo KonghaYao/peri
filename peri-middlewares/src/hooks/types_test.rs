@@ -231,6 +231,16 @@ fn test_permission_decision_deser() {
 }
 
 #[test]
+fn test_permission_decision_unknown_value_is_preserved_not_error() {
+    // 未知取值不得让整份 hook 输出解析失败后 fail-open 成 Allow：
+    // 保留原值，交由消费方 fail-closed 处理。
+    let d: PermissionDecision = serde_json::from_str("\"explode\"").unwrap();
+    assert_eq!(d, PermissionDecision::Invalid("explode".to_string()));
+    let back = serde_json::to_string(&d).unwrap();
+    assert_eq!(back, "\"explode\"");
+}
+
+#[test]
 fn test_post_tool_batch_serialization() {
     let json = "\"PostToolBatch\"";
     let event: HookEvent = serde_json::from_str(json).unwrap();

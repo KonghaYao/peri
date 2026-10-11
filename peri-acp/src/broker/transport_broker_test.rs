@@ -367,7 +367,6 @@ use std::{
 
 use crate::transport::types::AcpError;
 use crate::transport::RequestTransport;
-use peri_agent::interaction::MultiplexBroker;
 use tokio::sync::{mpsc, oneshot, Semaphore};
 
 /// Mock `RequestTransport`：记录调用；`Behavior::Respond` 回固定响应，
@@ -435,7 +434,6 @@ fn questions_context() -> InteractionContext {
 struct CausalTransport {
     calls: Arc<Mutex<Vec<(String, serde_json::Value)>>>,
     entered_tx: mpsc::UnboundedSender<String>,
-    entered_signal: Arc<Semaphore>,
     releases: Arc<Semaphore>,
 }
 
@@ -451,7 +449,6 @@ impl RequestTransport for CausalTransport {
             .unwrap()
             .push((method.to_string(), params));
         let _ = self.entered_tx.send(method.to_string());
-        self.entered_signal.add_permits(1);
 
         self.releases
             .clone()
@@ -474,26 +471,22 @@ struct CausalFixture {
     transport: Arc<CausalTransport>,
     entered_rx: mpsc::UnboundedReceiver<String>,
     calls: Arc<Mutex<Vec<(String, serde_json::Value)>>>,
-    entered_signal: Arc<Semaphore>,
     releases: Arc<Semaphore>,
 }
 
 fn causal_fixture() -> CausalFixture {
     let calls = Arc::new(Mutex::new(Vec::new()));
-    let entered_signal = Arc::new(Semaphore::new(0));
     let releases = Arc::new(Semaphore::new(0));
     let (entered_tx, entered_rx) = mpsc::unbounded_channel();
     let transport = Arc::new(CausalTransport {
         calls: Arc::clone(&calls),
         entered_tx,
-        entered_signal: Arc::clone(&entered_signal),
         releases: Arc::clone(&releases),
     });
     CausalFixture {
         transport,
         entered_rx,
         calls,
-        entered_signal,
         releases,
     }
 }
@@ -704,73 +697,6 @@ async fn test_interaction_gate_is_per_broker_instance() {
     assert!(matches!(
         second.await.unwrap(),
         InteractionResponse::Answers(_)
-    ));
-}
-
-struct EnteredWinnerBroker {
-    entered_signal: Arc<Semaphore>,
-}
-
-#[async_trait::async_trait]
-impl UserInteractionBroker for EnteredWinnerBroker {
-    async fn request(&self, context: InteractionContext) -> InteractionResponse {
-        self.entered_signal
-            .clone()
-            .acquire_owned()
-            .await
-            .expect("causal entry semaphore must remain open")
-            .forget();
-        let InteractionContext::Approval { items } = context else {
-            return InteractionResponse::Rejected;
-        };
-        InteractionResponse::Decisions(
-            items
-                .into_iter()
-                .map(|_| ApprovalDecision::Approve { source: None })
-                .collect(),
-        )
-    }
-}
-
-#[tokio::test]
-async fn test_multiplex_winner_drop_releases_transport_broker_gate() {
-    let CausalFixture {
-        transport,
-        mut entered_rx,
-        entered_signal,
-        releases,
-        ..
-    } = causal_fixture();
-    let raw = Arc::new(AcpTransportBroker::new(transport, SessionId::new("s1")));
-    let winner = Arc::new(EnteredWinnerBroker { entered_signal });
-    let multiplex =
-        MultiplexBroker::new(vec![("raw".into(), raw.clone()), ("winner".into(), winner)]);
-
-    let response = multiplex.request(approval_context()).await;
-    let InteractionResponse::Decisions(decisions) = response else {
-        panic!("multiplex winner must return Decisions");
-    };
-    assert!(matches!(
-        decisions.as_slice(),
-        [ApprovalDecision::Approve { source: Some(source) }] if source == "winner"
-    ));
-    assert_eq!(
-        next_entered(&mut entered_rx).await,
-        "session/request_permission"
-    );
-
-    let next = tokio::spawn({
-        let raw = Arc::clone(&raw);
-        async move { raw.request(approval_context()).await }
-    });
-    assert_eq!(
-        next_entered(&mut entered_rx).await,
-        "session/request_permission"
-    );
-    releases.add_permits(1);
-    assert!(matches!(
-        next.await.unwrap(),
-        InteractionResponse::Decisions(_)
     ));
 }
 

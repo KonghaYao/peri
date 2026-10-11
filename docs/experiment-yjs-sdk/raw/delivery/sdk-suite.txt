@@ -1,0 +1,193 @@
+bun test v1.4.2 (744846f84)
+
+test/domain.test.ts:
+(pass) MemoryKV claims once and releases only for its owner [0.09ms]
+(pass) Agent lists Sessions from Sandbox storage without starting ACP [1.34ms]
+(pass) ManagedAgents lifecycle > declaration is synchronous and does not claim or create transport [0.16ms]
+(pass) ManagedAgents lifecycle > plain unstorage Storage is rejected because it has no atomic claim [0.03ms]
+(pass) ManagedAgents lifecycle > same manager rejects a duplicate declaration before start [0.14ms]
+(pass) ManagedAgents lifecycle > two managers racing for the same Agent: exactly one starts [1.03ms]
+(pass) ManagedAgents lifecycle > the same Agent id in different Workspaces uses separate claims [0.22ms]
+(pass) ManagedAgents lifecycle > different Agents cannot claim the same existing Session [0.23ms]
+(pass) ManagedAgents lifecycle > failed start closes transport and releases only its own claims [0.14ms]
+(pass) ManagedAgents lifecycle > close releases claims after process closes; another instance can start [0.26ms]
+(pass) ManagedAgents lifecycle > send awaits delivery, allows more input, and forceSend dispatches [1.37ms]
+(pass) ManagedAgents lifecycle > delivery event arriving before enqueue receipt still resolves send [0.18ms]
+(pass) ManagedAgents lifecycle > a failed unclaimed run is dispatched once more and can deliver [1.58ms]
+(pass) ManagedAgents lifecycle > a second failed unclaimed run withdraws input and rejects delivery [1.50ms]
+(pass) ManagedAgents lifecycle > close rejects input waiting for delivery [0.10ms]
+(pass) ManagedAgents lifecycle > a delivery event from an older mailbox generation cannot complete send [0.13ms]
+(pass) ManagedAgents lifecycle > enqueue failure rejects the send receipt and keeps it unsent [0.14ms]
+(pass) ManagedAgents lifecycle > stream receives same-session events emitted before consumption [0.26ms]
+(pass) ManagedAgents lifecycle > raw stream overflow leaves projection current and allows a new live diagnostic stream [8.74ms]
+(pass) ManagedAgents lifecycle > ACP setup serializes HTTP headers and stdio env as named entries [0.22ms]
+(pass) ManagedAgents lifecycle > loading a Session preserves its frozen instructions [0.08ms]
+(pass) ManagedAgents lifecycle > loading uses the stored path without an Agent path [0.08ms]
+(pass) ManagedAgents lifecycle > creating a Session requires an Agent path before starting ACP [0.08ms]
+(pass) ManagedAgents lifecycle > unknown Session ID fails before starting ACP [0.08ms]
+
+tests/session-docs-wire.test.ts:
+(pass) Peri ACP wire aggregation > background snapshot restores tasks and a later snapshot repairs a revision gap [0.84ms]
+(pass) Peri ACP wire aggregation > background start uses the wire summary, and completion keeps its identity [0.13ms]
+(pass) Peri ACP wire aggregation > queue snapshots and delivery follow the current generation [0.12ms]
+(pass) Peri ACP wire aggregation > agent execution failure marks the active turn before done arrives [0.15ms]
+(pass) Peri ACP wire aggregation > plan preserves ACP activeForm and usage preserves token metadata [0.17ms]
+(pass) Peri ACP wire aggregation > configuration state follows load response and live config option updates [0.08ms]
+(pass) Peri ACP wire aggregation > plans retain the turn that produced them [0.09ms]
+(pass) Peri ACP wire aggregation > available command input hint follows the ACP object shape [0.04ms]
+
+tests/wasm-acp-integration.test.ts:
+error: store is unavailable: remote session store server_error
+store is unavailable: remote session store server_error
+(fail) Agent start, send, list and load work through WASM ACP [376.17ms]
+
+tests/event-queue-budget.test.ts:
+(pass) an unconsumed diagnostic stream fails explicitly at its retention budget [0.63ms]
+(pass) large queued events hit the byte budget and a waiting live consumer still receives large frames [0.23ms]
+(pass) draining and finishing a bounded queue preserves order and wakes consumers [0.54ms]
+
+tests/tool-payloads.test.ts:
+(pass) large JSON stays exact on demand and is absent from hot snapshots [3.61ms]
+(pass) payload versions deduplicate repeats and retire when replaced, inlined, or rewound [0.70ms]
+(pass) caller mutation cannot alter inline or external payloads after projection [0.12ms]
+(pass) canonical history uses the same bounded payload structure and preserves full content [0.18ms]
+(pass) canonical tool call arrays preserve order while deduplicating content-block identities [0.10ms]
+
+tests/session-sync.test.ts:
+(pass) bounded binary batches preserve Unicode streaming, tool payload refs, and the terminal tail [11.21ms]
+(pass) resume includes offline deletions even when the Yjs state vector did not advance [0.36ms]
+(pass) a missing batch is detected and repaired from state vectors; duplicate frames are harmless [0.32ms]
+(pass) Yjs V2 updates converge when a binary transport reorders and duplicates batches [0.37ms]
+(pass) replacing a producer generation requires a fresh pair and detaches an existing view store [0.53ms]
+(pass) slow subscribers exceed a bounded queue while fast subscribers remain current and resume works [0.48ms]
+(pass) close waits for an asynchronous transport to send queued tail updates [0.17ms]
+(pass) malformed snapshots and invalid budgets fail without replacing a usable replica [0.13ms]
+(pass) a reentrant subscriber cannot send a later batch ahead of the current broadcast [0.14ms]
+(pass) closing from a send callback still delivers the current batch to every admitted peer [0.11ms]
+(pass) each subscriber can transfer its binary buffers to a Worker without corrupting another peer [0.25ms]
+(pass) subscription admission fails if flushing an existing peer closes the producer [0.07ms]
+(pass) a sender that unsubscribes before returning a rejected promise is still observed [0.09ms]
+
+tests/sandbox.test.ts:
+(pass) external Workspace keeps its remote path identity despite a local symlink [0.80ms]
+(pass) external Workspace accepts a session path absent from the SDK host [0.69ms]
+
+tests/session-view-incremental.test.ts:
+(pass) streaming reuses unchanged history and tools while previous snapshots stay immutable [1.70ms]
+(pass) tool reference edges invalidate only affected blocks across repeated remote updates [0.56ms]
+(pass) tool replacement, deletion, and canonical rewind remove stale cached references [0.30ms]
+(pass) task order changes and session updates invalidate the correct read-model collections [0.19ms]
+(pass) destroy rejects every later projection entry point without resurrecting a turn [0.09ms]
+(pass) replacing the tools collection cannot leave cached blocks pointing at its previous values [0.10ms]
+
+tests/process-supervisor.test.ts:
+(pass) supervisor proves only its registered stopped generation [5009.50ms]
+(pass) concurrent registration cannot replace a live generation [25007.30ms]
+(pass) spawn registration proves a crash before session response [5005.83ms]
+
+tests/process-broker.test.ts:
+(pass) broker kills and reaps a registered process group after Agent exit [30.21ms]
+(pass) normal anchored E/ACK release removes the group before its PID is reusable [39.88ms]
+
+tests/task-projection-recovery.test.ts:
+(pass) a missed client revision requests the Peri snapshot and converges [0.37ms]
+(pass) subagent lifecycle preserves background identity and rejects terminal rollback [0.13ms]
+(pass) Session asks Peri for a task snapshot after a missed notification [0.74ms]
+
+tests/interaction-projection.test.ts:
+(pass) reverse ACP interaction projection > permission is pending in Yjs until callback resolves; only selected approval grants [0.46ms]
+(pass) reverse ACP interaction projection > overlapping requests settle independently; absent callbacks reject and decline [0.33ms]
+(pass) reverse ACP interaction projection > failed callbacks and mismatched session cannot approve [0.12ms]
+(pass) reverse ACP interaction projection > turn cancellation settles pending requests before late callbacks can approve [0.11ms]
+
+tests/wasm-transport.test.ts:
+(pass) WASM frame port preserves ACP requests, notifications and reverse requests [1.75ms]
+(pass) WASM port close rejects a pending request and ends event stream [0.10ms]
+(pass) existing Agent and Session APIs run over an injected WASM frame port [0.38ms]
+(pass) WASM receive failure settles pending requests and closes native port once [0.10ms]
+
+tests/public-view.test.ts:
+(pass) the SDK and browser view package entrypoints share Yjs type identity [1.59ms]
+
+tests/transport.test.ts:
+(pass) ACP stdio transport > writes raw settings before the first ACP line [7.85ms]
+(pass) ACP stdio transport > correlates concurrent requests when responses arrive out of order [7.40ms]
+(pass) ACP stdio transport > assembles split UTF-8 response bytes [7.35ms]
+(pass) ACP stdio transport > handles reverse ACP requests and returns the handler result [8.04ms]
+(pass) ACP stdio transport > delivers notifications to subscription and stream [6.67ms]
+(pass) ACP stdio transport > rejects pending and later requests after EOF [6.46ms]
+(pass) ACP stdio transport > close rejects a pending request and ends event iterators [5003.36ms]
+(pass) ACP stdio transport > rejects oversized settings before spawning [0.58ms]
+
+tests/interaction-responder.test.ts:
+(pass) interaction command parser accepts only supported decisions [0.08ms]
+(pass) interaction replies require the matching session and kind [0.19ms]
+(pass) turn abort and responder close settle pending human requests [0.17ms]
+
+tests/real-peri.test.ts:
+(pass) trusted settings prelude reaches ACP despite invalid disk settings [34.92ms]
+(pass) omitting settings lets Peri load its global model configuration [32.38ms]
+(pass) a session can be listed and loaded by a fresh Peri process [642.11ms]
+(pass) ManagedAgents starts one real Peri session and rejects a second owner [217.99ms]
+(pass) one Session delivers multiple inputs through real Peri without a turn wait [371.20ms]
+(pass) ManagedAgents directly creates Agents and loads a historical Session [560.90ms]
+(pass) Sandbox Workspace MCP is discovered before the real ACP Session and outlives Agent closure [355.88ms]
+(pass) a fresh ACP settles a Workspace shell task after the old ACP is killed during close [580.59ms]
+
+tests/session-docs.test.ts:
+(pass) ACP to Yjs session documents > streams user, thought, and answer chunks into ordered Yjs entries [0.43ms]
+(pass) ACP to Yjs session documents > tool calls keep their identity and a terminal status cannot regress [0.15ms]
+(pass) ACP to Yjs session documents > a canonical snapshot does not claim an unpaired tool call succeeded [0.13ms]
+(pass) ACP to Yjs session documents > a new user turn cancels the unfinished assistant and its tool [0.15ms]
+(pass) ACP to Yjs session documents > a late chunk from a terminal turn does not create a phantom turn [0.10ms]
+(pass) ACP to Yjs session documents > an assistant chunk after rewind clears the active turn cannot create a ghost turn [0.13ms]
+(pass) ACP to Yjs session documents > replayed notifications with an explicit event id do not append text twice [0.12ms]
+(pass) ACP to Yjs session documents > ACP replay chunks carrying the same messageId replace prior live text [0.15ms]
+(pass) ACP to Yjs session documents > multiple replay chunks of one user message preserve every text block [0.10ms]
+(pass) ACP to Yjs session documents > a later replayed user turn completes the prior historical assistant [0.13ms]
+(pass) ACP to Yjs session documents > different assistant messageIds in one turn remain separate entries [0.09ms]
+(pass) ACP to Yjs session documents > adjacent identical text blocks in one replayed assistant message both survive [0.10ms]
+(pass) ACP to Yjs session documents > ACP turn completion finalizes the assistant entry without adding a message [0.08ms]
+(pass) ACP to Yjs session documents > max_tokens turn done keeps an incomplete terminal state [0.08ms]
+(pass) ACP to Yjs session documents > late done from an older input request cannot finish the next turn [0.13ms]
+(pass) ACP to Yjs session documents > a late identified done cannot finish a later turn without a run-started event [0.10ms]
+(pass) ACP to Yjs session documents > cancel requested stops new deltas and done closes the same turn [0.11ms]
+(pass) ACP to Yjs session documents > separate Agent session document pairs do not share state [0.08ms]
+(pass) ACP to Yjs session documents > subagent lifecycle is mirrored as safe task state [0.11ms]
+(pass) ACP to Yjs session documents > background task snapshot recovers a missed start and update [0.09ms]
+(pass) ACP to Yjs session documents > rewind replaces streamed chat with exactly the retained canonical messages [0.69ms]
+(pass) ACP to Yjs session documents > rewind keeps root collection handles for Yjs observers [0.08ms]
+(pass) ACP to Yjs session documents > compact replaces old chat content with the committed snapshot [0.16ms]
+(pass) ACP to Yjs session documents > unknown and malformed notifications leave both documents unchanged [0.10ms]
+(pass) Session projects load replay and later live ACP events without a stream consumer [0.86ms]
+(pass) failed session/load discards replay from the rejected attempt [0.19ms]
+(pass) real mailbox delivery creates the user entry before assistant output [0.17ms]
+
+tests/session-view.test.ts:
+(pass) transport independent session view > reads the same chat, tools, plan and task state from mirrored Y.Doc updates [0.83ms]
+(pass) transport independent session view > store batches two document notifications, replaces docs, and detaches old docs [0.36ms]
+(pass) transport independent session view > an empty browser replica publishes one view after both remote updates [0.20ms]
+(pass) transport independent session view > projects queue and pending interaction metadata without exposing private answers [0.29ms]
+(pass) transport independent session view > empty peer docs have an empty safe view [0.03ms]
+
+tests/tool-projection.test.ts:
+(pass) live ACP tool cards keep public kind, arguments, and standard result content [0.20ms]
+(pass) terminal tool cards retain result and cannot regress on late updates [0.10ms]
+(pass) permission-pending tool resumes and ACP replay uses the same public card fields [0.10ms]
+(pass) canonical history reconstructs tool arguments and result content [0.12ms]
+(pass) completion remains attached to the assistant message that started the tool [0.11ms]
+
+examples/demo/session-doc-stream.test.ts:
+(pass) SSE adapter batches V2 updates and resumes an existing document pair [0.75ms]
+(pass) real HTTP SSE reconnect sends only missing Yjs content and diagnostics are opt in [4.79ms]
+
+examples/demo/session-event-log.test.ts:
+(pass) event log replays missed events, follows live events, and resumes after disconnect [0.06ms]
+
+1 tests failed:
+(fail) Agent start, send, list and load work through WASM ACP [376.17ms]
+
+ 137 pass
+ 1 fail
+ 1545 expect() calls
+Ran 138 tests across 22 files. [43.43s]

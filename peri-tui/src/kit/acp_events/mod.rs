@@ -18,6 +18,7 @@ mod turn;
 pub use self::render::handle_plan_update;
 pub(crate) use self::render::push_view_models;
 pub use self::render::push_view_models_for_reset;
+pub(crate) use self::system::request_bg_task_snapshot;
 // 测试文件通过 super::* 获取这些类型——原在 acp_events.rs 中直接可用
 #[cfg(test)]
 pub(crate) use self::render::drain_input_buffer;
@@ -62,7 +63,7 @@ pub(crate) fn current_streaming_mode() -> StreamingMode {
     }
 }
 
-/// 检测 full_text 中 since_chars 之后是否出现了 Markdown 块边界。
+/// 检测未发布文本中的新增 Markdown 块边界，偏移均为字节数。
 ///
 /// 块边界定义：
 /// - 两个连续换行（段落分隔）
@@ -70,76 +71,36 @@ pub(crate) fn current_streaming_mode() -> StreamingMode {
 /// - 以 ``` 开头的行（代码块开始/结束）
 /// - 以 `---`、`***`、`___` 开头的行（水平线）
 ///
-/// since_chars 为 0 时始终返回 true（首次推送）。
-fn has_md_block_boundary_since(full_text: &str, since_chars: usize) -> bool {
-    // 首次推送
-    if since_chars == 0 {
+/// 首次推送直接返回；其余只扫描新 chunk，回看最多两个字节识别跨 chunk 标记。
+/// 新 chunk 含换行时才检查未发布前缀；两个换行即发布，因此前缀扫描摊销线性。
+fn has_md_block_boundary_since(full_text: &str, published: usize, chunk_start: usize) -> bool {
+    if published == 0 {
         return true;
     }
-
-    // 将 since_chars（字符偏移）转换为字节偏移
-    let start_byte = full_text
-        .char_indices()
-        .nth(since_chars)
-        .map(|(i, _)| i)
-        .unwrap_or(full_text.len());
-
-    // 无增量文本
-    if start_byte >= full_text.len() {
+    let bytes = full_text.as_bytes();
+    let new_start = chunk_start.max(published).min(bytes.len());
+    if new_start == bytes.len() {
         return false;
     }
-
-    let new = &full_text[start_byte..];
-
-    // 从 since_chars 开始逐字符扫描，检测块边界。
-    // 同时追踪行数——fallback：累计 ≥ 3 行时也返回 true，
-    // 防止无格式长段落导致 block 模式下 UI 永久冻结。
-    let mut is_line_start = start_byte == 0 || full_text.as_bytes()[start_byte - 1] == b'\n';
-
-    let mut chars = new.char_indices().peekable();
-    let mut line_count = 0usize;
-
-    while let Some((_byte_i, ch)) = chars.next() {
-        if is_line_start {
-            // 标题：以 # 开头（且后跟空格或行尾）
-            if ch == '#' && chars.peek().is_none_or(|(_, c)| *c == ' ') {
-                return true;
-            }
-
-            // 代码块边界：以 ``` 开头
-            if ch == '`' {
-                let mut peek = chars.clone();
-                if let (Some((_, '`')), Some((_, '`'))) = (peek.next(), peek.next()) {
-                    return true;
-                }
-            }
-
-            // 水平线：以 ---、***、___ 开头（三个相同字符）
-            if (ch == '-' || ch == '*' || ch == '_')
-                && {
-                    let mut peek = chars.clone();
-                    matches!((peek.next(), peek.next()), (Some((_, c2)), Some((_, c3))) if c2 == ch && c3 == ch)
-                }
+    let scan_start = new_start.saturating_sub(2).max(published);
+    for offset in scan_start..bytes.len() {
+        if offset == 0 || bytes[offset - 1] == b'\n' {
+            let byte = bytes[offset];
+            if (byte == b'#' && bytes.get(offset + 1).is_none_or(|next| *next == b' '))
+                || (matches!(byte, b'`' | b'-' | b'*' | b'_')
+                    && bytes.get(offset + 1) == Some(&byte)
+                    && bytes.get(offset + 2) == Some(&byte))
             {
                 return true;
             }
         }
-
-        // 追踪换行 + 段落边界 \n\n
-        if ch == '\n' {
-            line_count += 1;
-            let mut peek = chars.clone();
-            if let Some((_, '\n')) = peek.next() {
-                return true;
-            }
-        }
-
-        is_line_start = ch == '\n';
     }
-
-    // Fallback：增量文本累计 ≥ 3 行时也刷新，防止单段长文本永不推送
-    // 2 个换行 = 至少 3 行（与 str::lines().count() >= 3 语义一致）
-    line_count >= 2
+    let new_lines = bytes[new_start..]
+        .iter()
+        .filter(|byte| **byte == b'\n')
+        .take(2)
+        .count();
+    new_lines >= 2 || (new_lines == 1 && bytes[published..new_start].contains(&b'\n'))
 }
 
 // ---------------------------------------------------------------------------
@@ -151,6 +112,12 @@ pub enum SessionPhase {
     Idle,
     PromptRunning,
     ReplayingHistory,
+}
+
+/// Composer rollback text is owned by its submitted request, not the active execution.
+pub struct SubmittedInputRollback {
+    pub text: String,
+    pub request_id: Option<String>,
 }
 
 /// 桥接任务维护的内部状态，每个 ACP 事件到达时同步更新。
@@ -179,13 +146,13 @@ pub struct BridgeState {
     /// 命令 compact 后无流事件，标志保持；agent 内部 auto-compact 后标志被
     /// 后续流事件清掉（无需知道 compact 触发来源）。
     pub compact_just_completed: bool,
-    /// 本轮用户提交的文本——TurnInterrupted 零产出回滚时用于恢复输入框。
+    /// 本地用户提交的文本及身份——仅所属请求的零产出取消可恢复输入框。
     /// LocalUserBubble 到达时写入，TurnInterrupted 零产出时消费并清空。
-    pub last_submitted_text: Option<String>,
-    /// streaming_mode=block 时追踪上次推送后主 agent 文本的字符数。
+    pub last_submitted_text: Option<SubmittedInputRollback>,
+    /// streaming_mode=block 时追踪上次推送后主 agent 文本的字节数。
     /// 用于 `has_md_block_boundary_since` 的比较基点。
     pub last_pushed_text_len: usize,
-    /// streaming_mode=block 时追踪上次推送后主 agent 推理的字符数。
+    /// streaming_mode=block 时追踪上次推送后主 agent 推理的字节数。
     pub last_pushed_reasoning_len: usize,
     /// 当前会话最近一次成功 TodoWrite 的完整快照；仅用于下一张 Todo 卡片的变更集。
     pub(crate) last_successful_todos: Option<crate::kit::tool_semantics::TodoSnapshot>,
@@ -234,7 +201,7 @@ impl BridgeState {
     ///
     /// 安全守卫：如果 current_turn 中存在正在运行的 SubAgentAccumulator，
     /// 跳过 flush 以避免清除容器——否则后续工具事件无法路由到已清除的容器，
-    /// 造成 SubAgentGroup 内部卡片空白（具体现象：外壳可见但内部工具条目缺失）。
+    /// 造成 SubAgentGroup 内部卡片空白。
     ///
     /// 注意：SystemNote（BudgetWarning/SystemNotification/CommandFeedback/
     /// AgentExecutionFailed）不再通过 flush-then-push 模式，
@@ -262,6 +229,29 @@ impl BridgeState {
             }
         }
         self.current_turn.reset();
+    }
+
+    /// Put a user prompt after all output already received from the preceding
+    /// turn. A live subagent keeps its container in current_turn, so in that
+    /// case the prompt joins the same chronological segment stream.
+    fn push_user_bubble(&mut self, text: String) {
+        // A tool result can still arrive after the next prompt is displayed.
+        // Preserve its accumulator until ToolEnded; TurnDone retains its normal
+        // flush behavior for tools that never emit an end event.
+        let has_running_tool = self
+            .current_turn
+            .tool_cards
+            .iter()
+            .any(|tool| tool.output_summary.is_none());
+        if !has_running_tool {
+            self.flush_current_turn();
+        }
+        if self.current_turn.is_empty() {
+            self.committed
+                .push_back(TuiRenderUnit::TuiUserBubble(TuiUserBubble::new(text)));
+        } else {
+            self.current_turn.push_user_bubble(text);
+        }
     }
 
     /// SystemNote 统一注入入口。封装 push_system_note → push_view_models → push_acp_state
@@ -368,10 +358,14 @@ pub(crate) fn dispatch_for_bridge(
         // ── §4.2 Boundary events ──
         PromptStarted => turn::handle_prompt_started(state),
         PromptSubmitted { request_id } => turn::handle_prompt_submitted(state, request_id),
+        ExecutionStarted { request_id } => {
+            turn::handle_execution_started(state, &Some(request_id.clone()))
+        }
         CacheUsageUpdated(sample) => turn::handle_cache_usage_updated(state, sample),
         SessionReplayStarted => turn::handle_session_replay_started(state),
         SessionReplayDone => turn::handle_session_replay_done(state),
         TurnDone => turn::handle_turn_done(state),
+        AgentDone { request_id } => turn::handle_agent_done(state, request_id),
         TurnInterrupted { reason, request_id } => {
             turn::handle_turn_interrupted(state, reason, request_id)
         }
@@ -431,7 +425,14 @@ pub(crate) fn dispatch_for_bridge(
             agent_id,
             agent_name,
             is_background,
-        } => subagent::handle_subagent_started(state, agent_id, agent_name, *is_background),
+            parent_tool_call_id,
+        } => subagent::handle_subagent_started(
+            state,
+            agent_id,
+            agent_name,
+            *is_background,
+            parent_tool_call_id.clone(),
+        ),
         SubagentStopped {
             agent_id,
             result,
@@ -517,6 +518,7 @@ pub(crate) fn dispatch_for_bridge(
             turn::handle_local_user_bubble(state, text);
         }
         LocalLoadingReset => turn::handle_loading_reset(state),
+        PromptFailed { request_id } => turn::handle_prompt_failed(state, request_id),
         BgCallbackBubble { .. } => turn::handle_bg_callback_bubble(state),
         CommittedAssistantText { text, reasoning } => {
             turn::handle_committed_assistant_text(state, text, reasoning)
@@ -534,7 +536,9 @@ pub(crate) fn dispatch_for_bridge(
         } => tool::handle_replay_tool_ended(state, tool_id, output_summary, *is_error),
 
         // ── §4.7 Background Tasks ──
-        BgTaskSnapshot(tasks) => system::handle_bg_task_snapshot(state, tasks),
+        BgTaskSnapshot { tasks, revision } => {
+            system::handle_bg_task_snapshot(state, tasks, *revision)
+        }
         BgTaskStarted(entry) => system::handle_bg_task_started(state, entry),
         // kind payload 保留（bg task UI 展示 / 未来扩展）；内部续跑由 ACP
         // server 的 continuation scheduler 承担，TUI bridge 不触发 KeepGoing。
@@ -544,13 +548,24 @@ pub(crate) fn dispatch_for_bridge(
             success,
             duration_ms,
             output_preview,
+            revision,
         } => system::handle_bg_task_completed(
             task_id,
             *success,
             *duration_ms,
             output_preview.clone(),
+            *revision,
         ),
-        BgTaskCancelled { task_id, reason } => system::handle_bg_task_cancelled(task_id, reason),
+        BgTaskCancelled {
+            task_id,
+            reason,
+            revision,
+        } => system::handle_bg_task_cancelled(task_id, reason, *revision),
+        BgTaskUpdated {
+            task_id,
+            status,
+            revision,
+        } => system::handle_bg_task_updated(task_id, status, *revision),
     }
 
     let requested = std::mem::take(&mut state.publication_intent);
@@ -586,6 +601,7 @@ pub(crate) fn dispatch_and_notify(state: &mut BridgeState, event: &AcpEventData)
     if dispatch_for_bridge(state, event) != PublicationIntent::Published {
         render::push_view_models(state);
     }
+    crate::kit::bg_task_live::publish_pending_streams();
 }
 
 // ---------------------------------------------------------------------------

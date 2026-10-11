@@ -13,6 +13,7 @@ fn event(id: &str) -> IngestionEvent {
         timestamp: "2026-01-01T00:00:00Z".into(),
         body: TraceBody {
             id: Some(id.into()),
+            name: Some(id.into()),
             ..Default::default()
         },
         metadata: None,
@@ -48,7 +49,7 @@ async fn test_owned_host_shutdown_includes_final_producer_event_and_joins() {
     let mut http = mockito::Server::new_async().await;
     let request = http
         .mock("POST", "/api/public/otel/v1/traces")
-        .match_body(mockito::Matcher::Regex("hosttail".into()))
+        .match_body(mockito::Matcher::Regex(r#""name":"hosttail""#.into()))
         .with_status(200)
         .with_body("{}")
         .expect(1)
@@ -62,7 +63,7 @@ async fn test_owned_host_shutdown_includes_final_producer_event_and_joins() {
     cfg.host_task_spawner
         .spawn(
             crate::host::task_scope::HostTaskOwnerKind::Host,
-            crate::host::task_scope::HostTaskKind::LegacyCancelHook,
+            crate::host::task_scope::HostTaskKind::UserInputEvents,
             async move {
                 started_tx.send(()).unwrap();
                 cancellation.cancelled().await;
@@ -136,7 +137,9 @@ async fn test_owned_host_incomplete_keeps_telemetry_open_and_retries_same_resour
     let mut http = mockito::Server::new_async().await;
     let request = http
         .mock("POST", "/api/public/otel/v1/traces")
-        .match_body(mockito::Matcher::Regex("afterincomplete".into()))
+        .match_body(mockito::Matcher::Regex(
+            r#""name":"afterincomplete""#.into(),
+        ))
         .with_status(200)
         .with_body("{}")
         .expect(1)

@@ -256,8 +256,7 @@ fn model_commit_switch_persists_workspace_before_request() {
                 std::fs::read(&fixture.global).unwrap(),
                 fixture.original_global
             );
-            // Selecting the active alias still saves and pushes the same snapshot.
-            std::fs::remove_file(&fixture.target).unwrap();
+            // Re-selecting the active alias still pushes the same saved snapshot.
             switch_active_alias(3);
             fixture.expect_request(true, false).await;
             fixture.finish().await;

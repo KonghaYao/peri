@@ -47,6 +47,236 @@ fn make_context() -> StageContext {
 }
 
 #[tokio::test]
+async fn exhausted_receive_preserves_only_fresh_ensure_processing_inputs() {
+    use peri_acp_types::session::MessagePolicy;
+    let context = make_context();
+    let execution = context.session.turn.execution_binding();
+    let initial = BaseMessage::human("initial input");
+    let initial_id = initial.id();
+    context
+        .session
+        .queue
+        .push(QueuedMessage::prompt(MessageSource::UserInput, initial));
+    let watermark = context.session.queue.admission_watermark();
+    let passive = BaseMessage::human("passive input");
+    let passive_id = passive.id();
+    context
+        .session
+        .queue
+        .push(QueuedMessage::info(MessageSource::SystemInjected, passive));
+    let continuation = BaseMessage::human("current run only");
+    let continuation_id = continuation.id();
+    context.session.queue.push(
+        QueuedMessage::defer(MessageSource::SystemInjected, continuation)
+            .with_policy(MessagePolicy::continue_current_run(execution)),
+    );
+    let stale_execution = make_context().session.turn.execution_binding();
+    context.session.queue.push(
+        QueuedMessage::defer(
+            MessageSource::SystemInjected,
+            BaseMessage::human("stale run input"),
+        )
+        .with_policy(MessagePolicy::continue_current_run(stale_execution)),
+    );
+    for body in ["first fresh result", "second fresh result"] {
+        context.session.queue.push(QueuedMessage::defer(
+            MessageSource::SubAgentComplete,
+            BaseMessage::human(body),
+        ));
+    }
+    let output = run_receive_with_budget(
+        ReceiveInput {
+            context: context.clone(),
+        },
+        Some(watermark),
+    )
+    .await
+    .unwrap();
+    assert_eq!(output.budget_deferred_count, 2);
+    assert_eq!(output.consumed_count, 4);
+    assert_eq!(output.wake_up_count, 2);
+    let transcript = context.session.transcript.read();
+    assert!(transcript.get(initial_id).is_some());
+    assert!(transcript.get(passive_id).is_some());
+    assert!(transcript.get(continuation_id).is_some());
+    assert_eq!(transcript.len(), 3);
+    assert_eq!(context.session.queue.suppressed_messages().len(), 1);
+    let pending = context.session.queue.drain_all();
+    assert_eq!(
+        pending
+            .iter()
+            .map(|message| message.admission_sequence.unwrap())
+            .collect::<Vec<_>>(),
+        vec![5, 6]
+    );
+    assert_eq!(
+        pending
+            .iter()
+            .map(|message| message.message().unwrap().content().to_string())
+            .collect::<Vec<_>>(),
+        ["first fresh result", "second fresh result"]
+    );
+    assert_eq!(context.session.queue.admission_watermark(), 6);
+}
+
+#[tokio::test]
+async fn stable_terminal_delivery_id_is_recorded_once_across_receive_runs() {
+    use peri_acp_types::system_reminder::{
+        ReminderAudience, ReminderAudiences, ReminderCategory, ReminderDelivery, ReminderSeverity,
+        ReminderSource, SystemReminder, TrustedSystemReminderFactory, SYSTEM_REMINDER_VERSION,
+    };
+    let reminder = TrustedSystemReminderFactory::for_producer()
+        .construct(SystemReminder {
+            version: SYSTEM_REMINDER_VERSION,
+            category: ReminderCategory::Task,
+            source: ReminderSource("mcp".into()),
+            kind: "completed".into(),
+            severity: ReminderSeverity::Info,
+            delivery: ReminderDelivery::Configurable,
+            audiences: ReminderAudiences(vec![ReminderAudience::Model]),
+            body: "completed".into(),
+            summary: None,
+            metadata: serde_json::json!({}),
+        })
+        .unwrap();
+    let context = make_context();
+    let delivery_id = crate::messages::MessageId::new();
+    for _ in 0..2 {
+        context
+            .session
+            .queue
+            .push(QueuedMessage::system_reminder_with_delivery_id(
+                MessageKind::Defer,
+                MessageSource::DynamicMcpNotification,
+                reminder.clone(),
+                delivery_id,
+            ));
+        run_receive(ReceiveInput {
+            context: context.clone(),
+        })
+        .await
+        .unwrap();
+    }
+    {
+        let transcript = context.session.transcript.read();
+        assert_eq!(transcript.persisted_payloads().len(), 1);
+        assert!(transcript.get(delivery_id).is_some());
+    }
+    let mut conflicting = reminder.into_inner();
+    conflicting.body = "different terminal".into();
+    let conflicting = TrustedSystemReminderFactory::for_producer()
+        .construct(conflicting)
+        .unwrap();
+    context
+        .session
+        .queue
+        .push(QueuedMessage::system_reminder_with_delivery_id(
+            MessageKind::Defer,
+            MessageSource::DynamicMcpNotification,
+            conflicting,
+            delivery_id,
+        ));
+    assert!(run_receive(ReceiveInput {
+        context: context.clone()
+    })
+    .await
+    .is_err());
+    assert_eq!(
+        context.session.transcript.read().persisted_payloads().len(),
+        1
+    );
+}
+
+#[tokio::test]
+async fn durable_terminal_delivery_preserves_order_and_dedups_after_exclusion() {
+    use crate::session::test_resources::TestSession;
+    use crate::session::transcript::MessageTranscript;
+    use peri_acp_types::system_reminder::{
+        ReminderAudience, ReminderAudiences, ReminderCategory, ReminderDelivery, ReminderSeverity,
+        ReminderSource, SystemReminder, TrustedSystemReminderFactory, SYSTEM_REMINDER_VERSION,
+    };
+    let bound = TestSession::open().await;
+    let context = make_context();
+    *context.session.transcript.write() =
+        MessageTranscript::new().with_persistence(bound.resources(), bound.thread_id());
+    let reminder = TrustedSystemReminderFactory::for_producer()
+        .construct(SystemReminder {
+            version: SYSTEM_REMINDER_VERSION,
+            category: ReminderCategory::Task,
+            source: ReminderSource("mcp".into()),
+            kind: "completed".into(),
+            severity: ReminderSeverity::Info,
+            delivery: ReminderDelivery::Configurable,
+            audiences: ReminderAudiences(vec![ReminderAudience::Model]),
+            body: "owner result".into(),
+            summary: None,
+            metadata: serde_json::json!({}),
+        })
+        .unwrap();
+    let first = BaseMessage::human("prior input");
+    let first_id = first.id();
+    let delivery_id = crate::messages::MessageId::new();
+    context
+        .session
+        .queue
+        .push(QueuedMessage::prompt(MessageSource::UserInput, first));
+    context
+        .session
+        .queue
+        .push(QueuedMessage::system_reminder_with_delivery_id(
+            MessageKind::Defer,
+            MessageSource::DynamicMcpNotification,
+            reminder.clone(),
+            delivery_id,
+        ));
+    run_receive(ReceiveInput {
+        context: context.clone(),
+    })
+    .await
+    .unwrap();
+    let history = bound
+        .resources()
+        .load_session_history(&bound.thread_id())
+        .await
+        .unwrap();
+    assert_eq!(
+        history.iter().map(|item| item.id()).collect::<Vec<_>>(),
+        vec![first_id, delivery_id]
+    );
+
+    context
+        .session
+        .transcript
+        .write()
+        .set_excluded(delivery_id, true);
+    context
+        .session
+        .queue
+        .push(QueuedMessage::system_reminder_with_delivery_id(
+            MessageKind::Defer,
+            MessageSource::DynamicMcpNotification,
+            reminder,
+            delivery_id,
+        ));
+    let output = run_receive(ReceiveInput {
+        context: context.clone(),
+    })
+    .await
+    .unwrap();
+    assert_eq!(output.wake_up_count, 1);
+    assert_eq!(
+        context.session.transcript.read().persisted_payloads().len(),
+        2
+    );
+    let history = bound
+        .resources()
+        .load_session_history(&bound.thread_id())
+        .await
+        .unwrap();
+    assert_eq!(history.len(), 2);
+}
+
+#[tokio::test]
 async fn test_receive_user_input_delivery_keeps_identity_order_and_render_fifo() {
     use crate::agent::events_v2::{EventBus, RenderEvent};
     use crate::session::user_input_mailbox::{UserInputAttemptOutcome, UserInputMailbox};
@@ -252,4 +482,48 @@ async fn test_receive_exit_on_empty_queue() {
     };
     let output = run_receive(input).await.unwrap();
     assert_eq!(output.consumed_count, 0);
+}
+
+/// M10：hook 的显式停止意图（`continue:false`）经 Receive 唯一出口停止：
+/// 消费必须置位 `stop_requested`，且不得按可唤醒消息驱动额外模型请求。
+#[tokio::test]
+async fn hook_stop_intent_requests_stop_without_waking_the_run() {
+    use peri_acp_types::system_reminder::{
+        ReminderAudience, ReminderAudiences, ReminderCategory, ReminderDelivery, ReminderSeverity,
+        ReminderSource, SystemReminder, TrustedSystemReminderFactory, SYSTEM_REMINDER_VERSION,
+    };
+    let reminder = TrustedSystemReminderFactory::for_producer()
+        .construct(SystemReminder {
+            version: SYSTEM_REMINDER_VERSION,
+            category: ReminderCategory::Lifecycle,
+            source: ReminderSource("hook".into()),
+            kind: "post_tool_batch_stop".into(),
+            severity: ReminderSeverity::Info,
+            delivery: ReminderDelivery::Configurable,
+            audiences: ReminderAudiences(vec![ReminderAudience::Tui]),
+            body: "hook requested stop".into(),
+            summary: None,
+            metadata: serde_json::json!({}),
+        })
+        .unwrap();
+    let context = make_context();
+    context.session.queue.push(
+        QueuedMessage::system_reminder(MessageKind::Info, MessageSource::HookStopIntent, reminder)
+            .with_policy(crate::session::MessagePolicy::passive()),
+    );
+
+    let output = run_receive(ReceiveInput {
+        context: context.clone(),
+    })
+    .await
+    .expect("receive must consume the stop intent");
+
+    assert!(
+        output.stop_requested,
+        "消费到 HookStopIntent 必须置位停止请求（Receive 是唯一退出口）"
+    );
+    assert_eq!(
+        output.wake_up_count, 0,
+        "停止意图不得作为可唤醒消息驱动额外模型请求"
+    );
 }

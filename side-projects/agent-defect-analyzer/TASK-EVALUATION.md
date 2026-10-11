@@ -42,7 +42,6 @@ execution facts 纳入任务包 schema 2 的必需 contract。schema 1 packet �
 
 当前归一化 `text` 拼接内容块的文本，未保留可核验的用户可见 channel。它可提供持久化内容证据，但不能仅据此判定 UI 泄露思考过程、用户看到了某段内部叙述或回答的显示形式。交付标签限定在现有记录支持的范围；界面可见性另需生产协议/渲染证据。
 
-PTC 嵌套调用在当前持久化格式中没有独立 canonical transcript；分析器只能报告实际持久化的外层消息与其中的 typed execution facts，不能声称恢复从未持久化的嵌套调用、参数或结果。
 
 评审 sidecar 独立于事实包，至少包含：
 

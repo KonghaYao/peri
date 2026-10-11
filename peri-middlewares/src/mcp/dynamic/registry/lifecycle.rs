@@ -74,10 +74,9 @@ impl DynamicMcpRegistry {
         let mut unfinished = 0;
         let mut retained = BTreeSet::new();
         for (instance, connection) in &active {
-            let drain_incomplete =
-                tokio::time::timeout(self.drain_timeout, connection.gate.drain())
-                    .await
-                    .is_err();
+            let drain_incomplete = peri_time::timeout(self.drain_timeout, connection.gate.drain())
+                .await
+                .is_err();
             let close_incomplete = connection.close().await.is_err();
             if drain_incomplete || close_incomplete {
                 unfinished += 1;

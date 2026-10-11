@@ -1,6 +1,19 @@
 use super::*;
 
 #[test]
+fn current_run_identity_is_stable_and_distinct() {
+    let cancellation = Arc::new(CancellationToken::new());
+    let context = TurnContext::new(Arc::from("/tmp"), Arc::clone(&cancellation));
+    let other = TurnContext::new(Arc::from("/tmp"), Arc::new(CancellationToken::new()));
+    let binding = context.execution_binding();
+    context.advance_step();
+    cancellation.cancel();
+    assert_eq!(context.execution_binding(), binding);
+    assert_eq!(context.turn_id(), binding.turn_id);
+    assert_ne!(binding, other.execution_binding());
+}
+
+#[test]
 fn test_turn_id_unique_and_ordered() {
     let id1 = TurnId::new();
     let id2 = TurnId::new();

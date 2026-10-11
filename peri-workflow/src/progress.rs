@@ -219,7 +219,7 @@ impl WorkflowProgressStore {
                     } else {
                         peri_acp_types::workflow::DeliveryStatus::Blocked
                     };
-                    run.completed_at = Some(std::time::Instant::now());
+                    run.completed_at = Some(peri_time::monotonic_now());
                 }
             }
             // Log 事件已在函数入口处提前返回（不持写锁），此处 unreachable
@@ -278,7 +278,7 @@ impl WorkflowProgressStore {
     const COMPLETED_RETENTION: std::time::Duration = std::time::Duration::from_secs(300);
 
     pub fn cleanup_completed(&self) {
-        self.cleanup_completed_at(std::time::Instant::now());
+        self.cleanup_completed_at(peri_time::monotonic_now());
     }
 
     fn cleanup_completed_at(&self, now: std::time::Instant) {

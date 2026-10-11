@@ -15,14 +15,14 @@ use peri_agent::{
     },
 };
 
-use peri_agent::tools::RUN_PTC_CODE_TOOL_NAME;
+use peri_acp_types::builtin_mcp::original_tool_name_of_effective;
 
 use crate::tool_search::core_tools::{
     TOOL_AGENT, TOOL_BASH, TOOL_EDIT, TOOL_FOLDER_OPS, TOOL_WEBFETCH, TOOL_WEBSEARCH, TOOL_WRITE,
 };
 
 /// broker.request 超时（秒）：防止挂起 broker 导致 before_tool 永久阻塞
-const BROKER_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(300);
+pub(crate) const BROKER_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(300);
 
 pub mod auto_classifier;
 pub mod shared_mode;
@@ -33,7 +33,19 @@ pub use shared_mode::{PermissionMode, SharedPermissionMode};
 
 // ─── 默认规则 ──────────────────────────────────────────────────────────────────
 
+/// `cron_register` 的**原始**工具名（不是 effective name）。
+///
+/// 判定分支（[`default_requires_approval`] 的 `cron_register` 行）与模型可见清单
+/// 条目（[`sensitive_tool_entries`] 的查表键）共用同一字面量：同一工具的原始名在本
+/// 模块只允许出现一次，避免两处字面量漂移（effective name 仍只从声明表解析）。
+const CRON_REGISTER_TOOL_NAME: &str = "cron_register";
+
 /// 默认敏感工具判断规则
+///
+/// builtin direct 工具使用原名，deferred 工具仍可能使用前缀名。命中声明表
+/// （[`original_tool_name_of_effective`]，IF-D15 唯一归一入口）则改用原始名走下面的
+/// 分支；未命中前缀名沿用保守语义。raw 外部 MCP 来源由绑定目标强制审批。
+/// 名字字面量只在 `peri_acp_types::builtin_mcp` 声明一份，本模块不得复制。
 ///
 /// - `bash`：所有 bash 命令
 /// - `Write`：文件写入
@@ -42,10 +54,17 @@ pub use shared_mode::{PermissionMode, SharedPermissionMode};
 /// - `Agent`：子 Agent 委派（子 Agent 不含 HITL，可传递绕过审批）
 /// - `cron_register`：定时任务注册（可定时触发任意 prompt，等价于代理执行权）
 pub fn default_requires_approval(tool_name: &str) -> bool {
+    match original_tool_name_of_effective(tool_name) {
+        Some(original_name) => default_requires_approval_without_builtin(original_name),
+        None => default_requires_approval_without_builtin(tool_name),
+    }
+}
+
+/// [`default_requires_approval`] 的分支本体（自迁移前实现逐字位移，含 `mcp__` 前缀行）。
+fn default_requires_approval_without_builtin(tool_name: &str) -> bool {
     tool_name == TOOL_BASH
         || tool_name == TOOL_FOLDER_OPS
         || tool_name == TOOL_AGENT
-        || tool_name == RUN_PTC_CODE_TOOL_NAME
         || tool_name == TOOL_WRITE
         || tool_name == TOOL_EDIT
         || tool_name.starts_with("delete_")
@@ -55,15 +74,42 @@ pub fn default_requires_approval(tool_name: &str) -> bool {
         || tool_name.starts_with("mcp__")
         || tool_name == "DynamicMCP.load"
         || tool_name == "DynamicMCP.unload"
-        || tool_name == "cron_register"
+        || tool_name == CRON_REGISTER_TOOL_NAME
 }
 
 /// 判断工具是否为文件编辑类工具（AcceptEdits 模式使用）
 ///
 /// `Write`、`Edit`、`folder_operations` 归类为编辑工具，在 AcceptEdits 模式下自动放行。
 /// `Bash`、`Agent`、`delete_*`、`rm_*` 不属于编辑工具，仍需审批。
+/// builtin 一等工具按原始名判定；raw 外部 MCP 不作为编辑工具自动放行。
 pub fn is_edit_tool(tool_name: &str) -> bool {
+    match original_tool_name_of_effective(tool_name) {
+        Some(original_name) => is_edit_tool_without_builtin(original_name),
+        None => is_edit_tool_without_builtin(tool_name),
+    }
+}
+
+/// [`is_edit_tool`] 的分支本体（自迁移前实现逐字位移）。
+fn is_edit_tool_without_builtin(tool_name: &str) -> bool {
     tool_name == TOOL_WRITE || tool_name == TOOL_EDIT || tool_name == TOOL_FOLDER_OPS
+}
+
+pub(crate) fn is_external_mcp(origin: Option<&hook_state::BoundToolOrigin>) -> bool {
+    matches!(origin, Some(origin) if origin.mcp_server_name.is_some() && origin.builtin_mcp_instance.is_none())
+}
+
+/// Auto 分类与缓存必须区分外部 MCP 的真实目标，执行调用名仍保持原样。
+fn classifier_tool_name(call: &ToolCall, origin: Option<&hook_state::BoundToolOrigin>) -> String {
+    if !is_external_mcp(origin) {
+        return call.name.clone();
+    }
+    let origin = origin.expect("external MCP 必须有绑定来源");
+    serde_json::json!({
+        "kind": "external_mcp",
+        "server": origin.mcp_server_name.as_deref().unwrap_or_default(),
+        "wire_tool": origin.mcp_tool_name.as_deref().unwrap_or(&call.name),
+    })
+    .to_string()
 }
 
 // ─── 10_hitl 段落持有（波 4 演进 C3，设计 §3.1.1 归属全景 / §3.1.2）──────────
@@ -84,19 +130,43 @@ pub struct SensitiveToolEntry {
     pub prefix_match: bool,
 }
 
+/// builtin 工具的模型面名字查表。
+///
+/// 名字字面量只在 `peri_acp_types::builtin_mcp` 声明一份（A4/IF-D6：禁止在消费点
+/// 硬编码 effective name 字面量或自建第二张反查表）。声明表由 `mcp::builtin::tests`
+/// 与 `builtin_mcp_test.rs` 锁定，因此这里的查表失败只可能是改坏了声明表。
+fn builtin_tool_effective_name(instance: &str, original_name: &str) -> &'static str {
+    peri_acp_types::builtin_mcp::find(instance)
+        .and_then(|declared| {
+            declared
+                .tools
+                .iter()
+                .find(|tool| tool.original_name == original_name)
+        })
+        .map(|tool| tool.effective_name)
+        .expect("builtin 声明表必须声明该 (实例, 原始工具名)：见 peri-acp-types/src/builtin_mcp.rs")
+}
+
 /// 敏感工具规则清单（10_hitl 段落内容来源）。
 ///
 /// 与 [`default_requires_approval`] 的判定分支一一对应——段落不再硬编码
 /// 列表（设计 §3.1.2 重复段处理：修改代码无需同步段落，防失同步）。
-pub fn sensitive_tool_entries() -> [SensitiveToolEntry; 14] {
+/// 数量与顺序固定为 14 项 / 3 条前缀；已迁移为 builtin 一等工具的条目
+/// （web×2 + cron×1 + workspace×4）名为**模型面名字**，经
+/// [`builtin_tool_effective_name`] 从 `peri_acp_types::builtin_mcp` 声明表解析
+/// （A19/IF-G3：模型看到的名字就是 effective name，条目名若留裸名会点名一个
+/// 已不存在的工具）。只列需审批的 workspace 条目：`Read` / `Glob` / `Grep`
+/// 归一后走免审批分支（[`default_requires_approval`] 为假），进清单即与
+/// 「每条目必须判定为敏感」的一致性断言冲突。
+pub fn sensitive_tool_entries() -> [SensitiveToolEntry; 13] {
     [
         SensitiveToolEntry {
-            name: TOOL_BASH,
+            name: builtin_tool_effective_name("workspace", TOOL_BASH),
             description: "shell command execution",
             prefix_match: false,
         },
         SensitiveToolEntry {
-            name: TOOL_FOLDER_OPS,
+            name: builtin_tool_effective_name("workspace", TOOL_FOLDER_OPS),
             description: "folder create/list/exists",
             prefix_match: false,
         },
@@ -106,17 +176,12 @@ pub fn sensitive_tool_entries() -> [SensitiveToolEntry; 14] {
             prefix_match: false,
         },
         SensitiveToolEntry {
-            name: RUN_PTC_CODE_TOOL_NAME,
-            description: "programmatic arbitrary JavaScript execution with direct Node.js API access",
-            prefix_match: false,
-        },
-        SensitiveToolEntry {
-            name: TOOL_WRITE,
+            name: builtin_tool_effective_name("workspace", TOOL_WRITE),
             description: "file write",
             prefix_match: false,
         },
         SensitiveToolEntry {
-            name: TOOL_EDIT,
+            name: builtin_tool_effective_name("workspace", TOOL_EDIT),
             description: "file edit",
             prefix_match: false,
         },
@@ -131,18 +196,18 @@ pub fn sensitive_tool_entries() -> [SensitiveToolEntry; 14] {
             prefix_match: true,
         },
         SensitiveToolEntry {
-            name: TOOL_WEBFETCH,
+            name: builtin_tool_effective_name("web", TOOL_WEBFETCH),
             description: "fetch a URL",
             prefix_match: false,
         },
         SensitiveToolEntry {
-            name: TOOL_WEBSEARCH,
+            name: builtin_tool_effective_name("web", TOOL_WEBSEARCH),
             description: "web search",
             prefix_match: false,
         },
         SensitiveToolEntry {
             name: "mcp__",
-            description: "any MCP server tool (prefix match)",
+            description: "prefixed MCP server tool; raw external MCP tools also require approval by bound source; builtin first-class capabilities follow their original tool's rule",
             prefix_match: true,
         },
         SensitiveToolEntry {
@@ -156,7 +221,7 @@ pub fn sensitive_tool_entries() -> [SensitiveToolEntry; 14] {
             prefix_match: false,
         },
         SensitiveToolEntry {
-            name: "cron_register",
+            name: builtin_tool_effective_name("cron", CRON_REGISTER_TOOL_NAME),
             description: "scheduled task registration (can trigger arbitrary prompts later, equivalent to delegated execution rights)",
             prefix_match: false,
         },
@@ -165,8 +230,24 @@ pub fn sensitive_tool_entries() -> [SensitiveToolEntry; 14] {
 
 /// 渲染敏感工具 markdown 列表（10_hitl 段落动态部分）。
 pub fn format_sensitive_tools() -> String {
+    format_sensitive_tools_for_disabled(&std::collections::HashSet::new())
+}
+
+/// Deployment closure only changes the prompt inventory; approval remains conservative.
+pub fn format_sensitive_tools_for_disabled(disabled: &std::collections::HashSet<String>) -> String {
     sensitive_tool_entries()
         .iter()
+        .filter(|entry| {
+            !peri_acp_types::builtin_mcp::BUILTIN_MCP_INSTANCES
+                .iter()
+                .any(|instance| {
+                    disabled.contains(instance.policy_key)
+                        && instance
+                            .tools
+                            .iter()
+                            .any(|tool| tool.effective_name == entry.name)
+                })
+        })
         .map(|e| {
             if e.prefix_match {
                 format!("- `{}*` — {}", e.name, e.description)
@@ -204,9 +285,21 @@ pub struct PermissionMiddleware {
     auto_classifier: Option<Arc<dyn AutoClassifier>>,
     /// broker.request 超时，默认 300s；测试可设为短值
     broker_timeout: std::time::Duration,
+    prompt_disabled_builtin: std::collections::HashSet<String>,
 }
 
 impl PermissionMiddleware {
+    fn requires_approval_for(
+        &self,
+        call: &ToolCall,
+        origin: Option<&hook_state::BoundToolOrigin>,
+    ) -> bool {
+        // A raw external MCP name can equal a trusted builtin name such as Read.
+        // The pinned dispatch target, rather than the spelling, decides its policy.
+        is_external_mcp(origin)
+            || (self.requires_approval)(&effective_tool_name(&call.name, &call.input))
+    }
+
     /// 段落声明（渲染面收集与链收集的单一事实源；C3 迁移，设计 §3.1.1）。
     ///
     /// 10_hitl 段 = 机制说明（`sections/10_hitl.md`，include_str 零拷贝，
@@ -219,13 +312,19 @@ impl PermissionMiddleware {
     /// （收集即装配）——Bypass 模式下本 middleware 仍在链（装配只按
     /// disabled 集合过滤），10_hitl 照常渲染（决策记录 C3 D5）。
     pub fn sections() -> Vec<PromptSection> {
+        Self::sections_for_disabled(&std::collections::HashSet::new())
+    }
+
+    pub fn sections_for_disabled(
+        disabled: &std::collections::HashSet<String>,
+    ) -> Vec<PromptSection> {
         let mut content = String::with_capacity(2048);
         content.push_str(include_str!(concat!(
             env!("CARGO_MANIFEST_DIR"),
             "/../peri-acp/prompts/sections/10_hitl.md"
         )));
         content.push_str("\n\n");
-        content.push_str(&format_sensitive_tools());
+        content.push_str(&format_sensitive_tools_for_disabled(disabled));
         content.push_str(
             "\n\nWhether a sensitive tool actually requires approval is decided by the current `PermissionMode`, not by this list alone.",
         );
@@ -248,6 +347,7 @@ impl PermissionMiddleware {
             mode: None,
             auto_classifier: None,
             broker_timeout: BROKER_TIMEOUT,
+            prompt_disabled_builtin: Default::default(),
         }
     }
 
@@ -259,7 +359,50 @@ impl PermissionMiddleware {
             mode: None,
             auto_classifier: None,
             broker_timeout: BROKER_TIMEOUT,
+            prompt_disabled_builtin: Default::default(),
         }
+    }
+
+    /// 审批通道是否有效（H2 有效模式判定；实例级）。
+    ///
+    /// `disabled()`（无 broker、无 mode）为 false：工具调用直接放行，声明
+    /// 10_hitl 会让模型等待永不到来的审批，因此不声明该段——「存在不等于需要
+    /// 审批说明」，装配事实之外还要看持有者的有效模式。
+    ///
+    /// 规则唯一事实源是 [`Self::approval_active_from`]：装配面（`for_workflow` /
+    /// 主链 `with_shared_mode`）与段落投影（`prompt_policy`）都消费同一函数，
+    /// 不允许出现两份漂移的判定。
+    pub fn approval_active(&self) -> bool {
+        Self::approval_active_from(self.broker.is_some(), self.mode.is_some())
+    }
+
+    /// 有效审批判定（构造输入级）：broker 或共享 mode **任一存在** ⇒ 审批通道
+    /// 有效；两者皆无 ⇒ 放行（disabled）。
+    pub fn approval_active_from(broker_present: bool, mode_present: bool) -> bool {
+        broker_present || mode_present
+    }
+
+    /// workflow 链的审批装配与判定（**同一规则的两个出口**）：
+    ///
+    /// `broker` 与共享 `permission_mode` **齐备**才构造启用共享模式的实例
+    /// （自主后台 agent 的既有语义：缺任一即 Bypass）；否则 `disabled()`
+    /// （无审批通道，段落投影随之为 10_hitl 缺席）。
+    pub fn for_workflow(
+        broker: Option<Arc<dyn UserInteractionBroker>>,
+        mode: Option<Arc<SharedPermissionMode>>,
+    ) -> Self {
+        match (broker, mode) {
+            (Some(broker), Some(mode)) => {
+                Self::with_shared_mode(broker, default_requires_approval, mode, None)
+            }
+            _ => Self::disabled(),
+        }
+    }
+
+    /// workflow 链的有效审批事实（与 [`Self::for_workflow`] 同一规则；
+    /// 段落投影在无链构造点消费它）。
+    pub fn workflow_approval_active(broker_present: bool, mode_present: bool) -> bool {
+        matches!((broker_present, mode_present), (true, true))
     }
 
     /// 创建带共享权限模式的 HITL 中间件
@@ -275,7 +418,16 @@ impl PermissionMiddleware {
             mode: Some(mode),
             auto_classifier,
             broker_timeout: BROKER_TIMEOUT,
+            prompt_disabled_builtin: Default::default(),
         }
+    }
+
+    pub fn with_prompt_disabled_builtin(
+        mut self,
+        disabled: std::collections::HashSet<String>,
+    ) -> Self {
+        self.prompt_disabled_builtin = disabled;
+        self
     }
 
     /// 设置 broker 审批超时（测试用）
@@ -286,7 +438,7 @@ impl PermissionMiddleware {
 }
 
 /// 将 `ApprovalDecision` 映射为 `AgentResult<ToolCall>`
-fn apply_decision(call: &ToolCall, decision: ApprovalDecision) -> AgentResult<ToolCall> {
+pub(crate) fn apply_decision(call: &ToolCall, decision: ApprovalDecision) -> AgentResult<ToolCall> {
     match decision {
         ApprovalDecision::Approve { .. } => Ok(call.clone()),
         ApprovalDecision::Edit { new_input } => {
@@ -308,6 +460,15 @@ fn apply_decision(call: &ToolCall, decision: ApprovalDecision) -> AgentResult<To
 impl PermissionMiddleware {
     /// 批量处理一批工具调用：收集所有需要审批的项，一次性弹窗，返回每个 call 的处理结果
     pub async fn process_batch(&self, calls: &[ToolCall]) -> Vec<AgentResult<ToolCall>> {
+        self.process_batch_with_origins(calls, &vec![None; calls.len()])
+            .await
+    }
+
+    async fn process_batch_with_origins(
+        &self,
+        calls: &[ToolCall],
+        origins: &[Option<hook_state::BoundToolOrigin>],
+    ) -> Vec<AgentResult<ToolCall>> {
         let mut results: Vec<AgentResult<ToolCall>> = Vec::with_capacity(calls.len());
 
         // 快照当前 mode，确保整个批处理内评估一致（避免迭代过程中 mode 被外部修改）
@@ -317,15 +478,14 @@ impl PermissionMiddleware {
             // Canonical dispatch has already projected method-based tools. Keep
             // the wrapper fallback for legacy/static call paths that still pass
             // ExecuteExtraTool directly.
-            let effective_name = effective_tool_name(&call.name, &call.input);
-            if !(self.requires_approval)(&effective_name) {
+            if !self.requires_approval_for(call, origins[i].as_ref()) {
                 results.push(Ok(call.clone()));
                 continue;
             }
 
             // 有 mode → 使用快照模式决策
             if let Some(mode) = &mode_snapshot {
-                results.push(self.decide_by_mode(mode, call).await);
+                results.push(self.decide_by_mode(mode, call, origins[i].as_ref()).await);
                 continue;
             }
 
@@ -337,7 +497,7 @@ impl PermissionMiddleware {
 
             // 无 mode 但有 broker → 收集后批量弹窗
             return self
-                .batch_broker_approve(broker, calls, i, &mut results)
+                .batch_broker_approve(broker, calls, origins, i, &mut results)
                 .await;
         }
 
@@ -357,7 +517,7 @@ impl PermissionMiddleware {
                 tool_input: tool_call.input.clone(),
             }],
         };
-        let response = match tokio::time::timeout(self.broker_timeout, broker.request(ctx)).await {
+        let response = match peri_time::timeout(self.broker_timeout, broker.request(ctx)).await {
             Ok(resp) => resp,
             Err(_elapsed) => {
                 return Err(AgentError::ToolRejected {
@@ -384,11 +544,12 @@ impl PermissionMiddleware {
         &self,
         mode: &Arc<SharedPermissionMode>,
         tool_call: &ToolCall,
+        origin: Option<&hook_state::BoundToolOrigin>,
     ) -> AgentResult<ToolCall> {
         match mode.load() {
             PermissionMode::Bypass => Ok(tool_call.clone()),
             PermissionMode::AcceptEdit => {
-                if is_edit_tool(&tool_call.name) {
+                if !is_external_mcp(origin) && is_edit_tool(&tool_call.name) {
                     Ok(tool_call.clone())
                 } else {
                     match &self.broker {
@@ -399,7 +560,10 @@ impl PermissionMiddleware {
             }
             PermissionMode::AutoMode => match &self.auto_classifier {
                 Some(classifier) => {
-                    let result = classifier.classify(&tool_call.name, &tool_call.input).await;
+                    let classification_name = classifier_tool_name(tool_call, origin);
+                    let result = classifier
+                        .classify(&classification_name, &tool_call.input)
+                        .await;
                     match result {
                         Classification::Allow => Ok(tool_call.clone()),
                         Classification::Deny => Err(AgentError::ToolRejected {
@@ -438,6 +602,7 @@ impl PermissionMiddleware {
         &self,
         broker: &Arc<dyn UserInteractionBroker>,
         calls: &[ToolCall],
+        origins: &[Option<hook_state::BoundToolOrigin>],
         start_idx: usize,
         initial_results: &mut Vec<AgentResult<ToolCall>>,
     ) -> Vec<AgentResult<ToolCall>> {
@@ -447,7 +612,7 @@ impl PermissionMiddleware {
             .iter()
             .enumerate()
             .skip(start_idx)
-            .filter(|(_, c)| (self.requires_approval)(&effective_tool_name(&c.name, &c.input)))
+            .filter(|(i, c)| self.requires_approval_for(c, origins[*i].as_ref()))
             .collect();
 
         if needs_approval.is_empty() {
@@ -465,17 +630,16 @@ impl PermissionMiddleware {
             .collect();
 
         let ctx = InteractionContext::Approval { items };
-        let response = match tokio::time::timeout(self.broker_timeout, broker.request(ctx)).await {
+        let response = match peri_time::timeout(self.broker_timeout, broker.request(ctx)).await {
             Ok(resp) => resp,
             Err(_elapsed) => {
-                results.push(Err(AgentError::ToolRejected {
-                    tool: "batch_approval".to_string(),
-                    reason: format!("审批超时 ({} 秒)", BROKER_TIMEOUT.as_secs()),
-                }));
+                // 批量结果必须与输入等长：`MiddlewareChain::run_before_tools_batch`
+                // 会对长度不符 fail closed，因此超时按每条调用各返一条拒绝，
+                // 不额外插入汇总条目。
                 results.extend(calls.iter().skip(start_idx).map(|c| {
                     Err(AgentError::ToolRejected {
                         tool: c.name.clone(),
-                        reason: "审批超时".to_string(),
+                        reason: format!("审批超时 ({} 秒)", BROKER_TIMEOUT.as_secs()),
                     })
                 }));
                 return results;
@@ -495,8 +659,8 @@ impl PermissionMiddleware {
 
         let mut decision_iter = decisions.into_iter();
 
-        for call in calls.iter().skip(start_idx) {
-            if (self.requires_approval)(&effective_tool_name(&call.name, &call.input)) {
+        for (i, call) in calls.iter().enumerate().skip(start_idx) {
+            if self.requires_approval_for(call, origins[i].as_ref()) {
                 let decision = decision_iter.next().unwrap_or(ApprovalDecision::Reject {
                     reason: "用户拒绝".to_string(),
                     source: None,
@@ -518,34 +682,45 @@ impl Middleware for PermissionMiddleware {
     }
 
     /// 声明持有的系统提示词段落（10_hitl，内容载体；装配期收集，契约 2）。
+    ///
+    /// 有效模式判定（H2）：审批通道无效（`disabled()`——无 broker、无 mode）
+    /// 时不声明 10_hitl，与 `prompt_policy::collect_prompt_sections` 的能力
+    /// 投影同源；workflow 链的 disabled 实例因此不会向模型声明审批机制。
     fn prompt_sections(&self) -> Vec<PromptSection> {
-        Self::sections()
+        if !self.approval_active() {
+            return Vec::new();
+        }
+        Self::sections_for_disabled(&self.prompt_disabled_builtin)
     }
 
     /// 批量工具调用前处理：对一批工具调用一次性收集所有需审批的项，
     /// 通过 broker 弹出一个 [多工具审批] 弹窗，避免逐个弹窗打断用户。
     async fn before_tools_batch(
         &self,
-        _state: &mut dyn hook_state::BeforeToolState,
+        state: &mut dyn hook_state::BeforeToolState,
         calls: &[ToolCall],
     ) -> Vec<AgentResult<ToolCall>> {
-        self.process_batch(calls).await
+        let origins: Vec<_> = calls
+            .iter()
+            .map(|call| state.tool_origin(&call.id))
+            .collect();
+        self.process_batch_with_origins(calls, &origins).await
     }
 
     async fn before_tool(
         &self,
-        _state: &mut dyn hook_state::BeforeToolState,
+        state: &mut dyn hook_state::BeforeToolState,
         tool_call: &ToolCall,
     ) -> AgentResult<ToolCall> {
         // 1. 非敏感工具 → 所有模式都放行
-        let effective_name = effective_tool_name(&tool_call.name, &tool_call.input);
-        if !(self.requires_approval)(&effective_name) {
+        let origin = state.tool_origin(&tool_call.id);
+        if !self.requires_approval_for(tool_call, origin.as_ref()) {
             return Ok(tool_call.clone());
         }
 
         // 2. 有 mode → 按权限模式决策
         if let Some(mode) = &self.mode {
-            return self.decide_by_mode(mode, tool_call).await;
+            return self.decide_by_mode(mode, tool_call, origin.as_ref()).await;
         }
 
         // 3. 无 mode 且无 broker → 放行（disabled() 路径）
@@ -561,3 +736,7 @@ impl Middleware for PermissionMiddleware {
 #[cfg(test)]
 #[path = "mod_test.rs"]
 mod tests;
+
+#[cfg(test)]
+#[path = "source_identity_test.rs"]
+mod source_identity_tests;

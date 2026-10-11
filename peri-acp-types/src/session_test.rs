@@ -1,14 +1,56 @@
 //! session.rs 契约类型测试。
 //!
 //! 覆盖 ExecutionFailure DTO 与 `PromptResult` 的失败语义
-//! （spec/issues/2026-08-18-acp-error-handler.md Commit 1）：
+//! （spec/history/2026-08.md 2026-08-18 条目 Commit 1）：
 //! - `PromptResult::default()` 必须产生安全的 fatal failure，不能作为成功
 //!   `EndTurn` 继续交给 ACP（结果缺失语义）；
-//! - `ExecutionFailure` 的 public message 非空并脱敏（D5 fallback 契约）。
+//! - `ExecutionFailure` 的 public message 非空且限长（D5 fallback 契约）。
 
 use crate::command::PromptStopReason;
 use crate::error::AgentError;
-use crate::session::{sanitize_public_error, ExecutionFailure, ExecutionFailureKind, PromptResult};
+use crate::session::{bounded_error_message, ExecutionFailure, ExecutionFailureKind, PromptResult};
+
+#[test]
+fn work_budget_failure_preserves_typed_error_through_anyhow_and_public_projection() {
+    let error = AgentError::WorkBudgetExhausted {
+        budget: crate::error::WorkBudgetKind::ReasonRequests,
+        used: 64,
+        limit: 64,
+    };
+    let error = AgentError::from(anyhow::Error::new(error).context("private checkpoint context"));
+    assert!(matches!(
+        error,
+        AgentError::WorkBudgetExhausted {
+            used: 64,
+            limit: 64,
+            ..
+        }
+    ));
+    let failure = ExecutionFailure::from_agent_error(&error);
+    assert_eq!(failure.kind, ExecutionFailureKind::Internal);
+    assert_eq!(failure.kind.wire_name(), "internal");
+    assert!(failure.public_message.contains("reason requests (64/64)"));
+    assert!(failure
+        .public_message
+        .contains("explicit budget reset authorization"));
+    assert!(!failure
+        .public_message
+        .contains("private checkpoint context"));
+    assert!(failure.http_status.is_none());
+    assert!(failure.diagnostic.is_none());
+}
+
+#[test]
+fn non_budget_typed_error_wrapped_in_anyhow_preserves_original_message() {
+    let error = AgentError::from(anyhow::Error::new(AgentError::LlmError(
+        "secret-provider-body".into(),
+    )));
+    assert!(matches!(error, AgentError::Other(_)));
+    assert_eq!(
+        error.user_facing_message(),
+        "LLM error: secret-provider-body"
+    );
+}
 
 /// 默认结果缺失语义：必须带 fatal failure，而不是成功 EndTurn。
 #[test]
@@ -71,7 +113,7 @@ fn missing_result_is_internal_non_empty() {
 }
 
 #[test]
-fn llm_http_failure_preserves_status_and_redacted_original_meaning() {
+fn llm_http_failure_preserves_status_and_original_meaning() {
     let failure = ExecutionFailure::from_agent_error(&AgentError::LlmHttpError {
         status: 421,
         message: "Misdirected Request Authorization: Bearer top-secret token=hidden endpoint=https://api.example.test/v1?api_key=hidden".to_string(),
@@ -81,29 +123,18 @@ fn llm_http_failure_preserves_status_and_redacted_original_meaning() {
     assert_eq!(failure.http_status, Some(421));
     assert!(failure.public_message.contains("LLM HTTP 421"));
     assert!(failure.public_message.contains("Misdirected Request"));
-    assert!(!failure.public_message.contains("top-secret"));
-    assert!(!failure.public_message.contains("token=hidden"));
-    assert!(!failure.public_message.contains("api_key=hidden"));
-    assert!(failure.public_message.contains("[redacted]"));
+    assert!(failure.public_message.contains("top-secret"));
+    assert!(failure.public_message.contains("token=hidden"));
+    assert!(failure.public_message.contains("api_key=hidden"));
+    assert!(!failure.public_message.contains("[redacted]"));
 }
 
 #[test]
-fn llm_error_redacts_structured_prefixed_and_labeled_url_secrets() {
-    let failure = ExecutionFailure::from_agent_error(&AgentError::LlmError(
-        r#"provider rejected Authorization:"Bearer auth-secret" "api_key": "key-secret" endpoint_url="https://api.example.test/v1?token=query-secret&mode=debug""#.to_string(),
-    ));
-
+fn llm_error_preserves_structured_and_url_content() {
+    let text = r#"provider rejected Authorization:"Bearer auth-secret" "api_key": "key-secret" endpoint_url="https://api.example.test/v1?token=query-secret&mode=debug""#;
+    let failure = ExecutionFailure::from_agent_error(&AgentError::LlmError(text.to_owned()));
     assert_eq!(failure.kind, ExecutionFailureKind::Llm);
-    assert!(failure.public_message.contains("provider rejected"));
-    assert!(failure.public_message.contains("Authorization:"));
-    assert!(failure.public_message.contains("[redacted]"));
-    assert!(failure.public_message.contains("\"api_key\": \"[redacted]"));
-    assert!(failure
-        .public_message
-        .contains("endpoint_url=\"https://api.example.test/v1?[redacted]"));
-    for secret in ["auth-secret", "key-secret", "query-secret"] {
-        assert!(!failure.public_message.contains(secret));
-    }
+    assert_eq!(failure.public_message, format!("LLM error: {text}"));
 }
 
 #[test]
@@ -135,7 +166,7 @@ fn typed_model_failure_preserves_safe_diagnostic_without_provider_body() {
 }
 
 #[test]
-fn typed_model_failure_drops_invalid_identity() {
+fn typed_model_failure_preserves_identity_content() {
     let error = AgentError::ModelError(peri_model::ModelError::http_status(
         401,
         "provider with spaces",
@@ -144,8 +175,8 @@ fn typed_model_failure_drops_invalid_identity() {
     let failure = ExecutionFailure::from_agent_error(&error);
     let diagnostic = failure.diagnostic.expect("typed model facts");
 
-    assert_eq!(diagnostic.provider(), None);
-    assert_eq!(diagnostic.request_id(), None);
+    assert_eq!(diagnostic.provider(), Some("provider with spaces"));
+    assert_eq!(diagnostic.request_id(), Some("request id with spaces"));
     assert!(!failure.public_message.contains("[invalid]"));
 }
 
@@ -169,30 +200,19 @@ fn typed_retry_failure_preserves_safe_exhaustion_facts_at_execution_boundary() {
 }
 
 #[test]
-fn public_error_sanitizer_redacts_bearer_credentials_and_url_components() {
-    let secret = "sentinel-secret";
-    let sanitized = sanitize_public_error(
-        &format!(
-            "Bearer {secret}; client_secret={secret} private_key='{secret}' endpoint=https://user:{secret}@api.example.test/v1?token={secret}&mode=debug"
-        ),
-        2_000,
-    );
-
-    assert!(!sanitized.contains(secret));
-    assert!(sanitized.contains("Bearer [redacted]"));
-    assert!(sanitized.contains("client_secret=[redacted]"));
-    assert!(sanitized.contains("private_key='[redacted]'"));
-    assert!(sanitized.contains("https://[redacted]@api.example.test/v1?[redacted]"));
+fn bounded_error_preserves_bearer_credentials_and_url_components() {
+    let text = "Bearer sentinel-secret; client_secret=sentinel-secret private_key='sentinel-secret' endpoint=https://user:sentinel-secret@api.example.test/v1?token=sentinel-secret&mode=debug";
+    assert_eq!(bounded_error_message(text, 2_000), text);
 }
 
 #[test]
-fn public_error_sanitizer_truncates_unicode_and_falls_back_for_empty_input() {
-    let sanitized = sanitize_public_error(&"错".repeat(20), 8);
+fn bounded_error_truncates_unicode_and_falls_back_for_empty_input() {
+    let sanitized = bounded_error_message(&"错".repeat(20), 8);
     assert_eq!(sanitized.chars().count(), 9);
     assert!(sanitized.ends_with('…'));
 
     assert_eq!(
-        sanitize_public_error("   ", 2_000),
+        bounded_error_message("   ", 2_000),
         crate::session::EXECUTION_FAILURE_FALLBACK_MESSAGE
     );
 }

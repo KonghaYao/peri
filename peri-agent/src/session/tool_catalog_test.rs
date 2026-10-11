@@ -190,7 +190,7 @@ fn filtered_catalog_reapplies_policy_across_load_and_unload() {
     let catalog = SessionToolCatalog::with_filter(
         BTreeMap::new(),
         Some(capability.clone()),
-        Arc::new(|name| name != "mcp__example__lookup"),
+        Arc::new(|tool| tool.name() != "mcp__example__lookup"),
     );
 
     capability.publish(SessionMcpCapabilitySnapshot {
@@ -526,7 +526,7 @@ fn startup_commit_rejects_required_tool_filtered_by_policy() {
     let catalog = SessionToolCatalog::with_filter(
         core_and_static_base(),
         None,
-        Arc::new(|name| name != "mcp__system__lookup"),
+        Arc::new(|tool| tool.name() != "mcp__system__lookup"),
     );
     let before = catalog.snapshot();
     let prepared: Arc<dyn BaseTool> =
@@ -606,15 +606,12 @@ fn startup_commit_rejects_tool_without_static_mcp_identity() {
 
     let declared_but_core_named: Arc<dyn BaseTool> =
         Arc::new(BridgeTool::bridge("Read", "system").direct());
-    let error = catalog
-        .replace_static_mcp_tools(startup_update(vec![declared_but_core_named], &[]))
-        .unwrap_err();
-    assert_eq!(
-        error,
-        CatalogRefreshError::InvalidStartupSource {
-            tool: "Read".to_string()
-        }
-    );
+    catalog
+        .replace_static_mcp_tools(startup_update(
+            vec![declared_but_core_named],
+            &[("system", "Read", "Read")],
+        ))
+        .unwrap();
     assert!(
         !catalog.snapshot().tools["Read"].tool.is_direct(),
         "启动提交不得把 core 工具身份换成 MCP bridge"
@@ -622,20 +619,14 @@ fn startup_commit_rejects_tool_without_static_mcp_identity() {
 }
 
 #[test]
-fn startup_commit_rejects_cross_server_takeover() {
+fn startup_commit_skips_cross_server_takeover() {
     let catalog = startup_catalog(core_and_static_base(), None);
     let foreign: Arc<dyn BaseTool> =
         Arc::new(BridgeTool::bridge("mcp__system__lookup", "other").direct());
-    let error = catalog
+    catalog
         .replace_static_mcp_tools(startup_update(vec![foreign], &[]))
-        .unwrap_err();
+        .unwrap();
 
-    assert_eq!(
-        error,
-        CatalogRefreshError::StartupRegistrationRejected {
-            tool: "mcp__system__lookup".to_string()
-        }
-    );
     assert_eq!(
         catalog.snapshot().tools["mcp__system__lookup"].source,
         ToolSource::StaticMcp("system".to_string()),
@@ -644,7 +635,7 @@ fn startup_commit_rejects_cross_server_takeover() {
 }
 
 #[test]
-fn startup_commit_rejects_alias_conflict_without_partial_publish() {
+fn startup_commit_skips_alias_conflict() {
     let base = BTreeMap::from([
         (
             "mcp__other__keep".to_string(),
@@ -659,11 +650,10 @@ fn startup_commit_rejects_alias_conflict_without_partial_publish() {
     let catalog = startup_catalog(base, None);
     let conflicting: Arc<dyn BaseTool> =
         Arc::new(BridgeTool::bridge("mcp__system__tool", "system").with_alias("shared"));
-    let error = catalog
+    catalog
         .replace_static_mcp_tools(startup_update(vec![conflicting], &[]))
-        .unwrap_err();
+        .unwrap();
 
-    assert_eq!(error, CatalogRefreshError::AliasConflict);
     assert!(!catalog.snapshot().tools.contains_key("mcp__system__tool"));
     assert_eq!(
         base_names(&catalog),
@@ -716,4 +706,77 @@ fn startup_commit_registers_collision_directory_before_publishing() {
         ),
         "碰撞目录拒绝后本地状态不得改变"
     );
+}
+
+#[test]
+fn raw_system_names_keep_first_source_across_refresh_and_case_collisions() {
+    let catalog = startup_catalog(BTreeMap::new(), None);
+    let first: Arc<dyn BaseTool> = Arc::new(BridgeTool::bridge("lookup", "a").direct());
+    let second: Arc<dyn BaseTool> = Arc::new(BridgeTool::bridge("LOOKUP", "b").direct());
+    let snapshot = catalog
+        .replace_static_mcp_tools(startup_update(
+            vec![first.clone(), second.clone()],
+            &[("a", "lookup", "lookup"), ("b", "LOOKUP", "LOOKUP")],
+        ))
+        .unwrap();
+    assert_eq!(snapshot.tools.len(), 1);
+    assert!(Arc::ptr_eq(&snapshot.tools["lookup"].tool, &first));
+    let resolved = crate::tools::DirectToolInvocationResolver
+        .resolve_target("LOOKUP", &snapshot.tool_map())
+        .unwrap();
+    assert!(Arc::ptr_eq(&resolved, &first));
+
+    // A later refresh of the losing source cannot take over the existing name.
+    let snapshot = catalog
+        .replace_static_mcp_tools(startup_update(vec![second], &[("b", "LOOKUP", "LOOKUP")]))
+        .unwrap();
+    assert!(Arc::ptr_eq(&snapshot.tools["lookup"].tool, &first));
+    let refreshed: Arc<dyn BaseTool> = Arc::new(BridgeTool::bridge("lookup", "a").direct());
+    let snapshot = catalog
+        .replace_static_mcp_tools(startup_update(
+            vec![refreshed.clone()],
+            &[("a", "lookup", "lookup")],
+        ))
+        .unwrap();
+    assert!(Arc::ptr_eq(&snapshot.tools["lookup"].tool, &refreshed));
+}
+
+#[test]
+fn raw_system_required_alias_collision_does_not_fail_startup() {
+    let first: Arc<dyn BaseTool> = Arc::new(
+        BridgeTool::bridge("execute", "first")
+            .with_alias("Shell")
+            .direct(),
+    );
+    let catalog = startup_catalog(BTreeMap::from([("execute".into(), first.clone())]), None);
+    let second: Arc<dyn BaseTool> = Arc::new(BridgeTool::bridge("shell", "second").direct());
+    let snapshot = catalog
+        .replace_static_mcp_tools(startup_update(
+            vec![second],
+            &[("second", "shell", "shell")],
+        ))
+        .unwrap();
+    assert_eq!(snapshot.tools.len(), 1);
+    let resolved = crate::tools::DirectToolInvocationResolver
+        .resolve_target("shell", &snapshot.tool_map())
+        .unwrap();
+    assert!(Arc::ptr_eq(&resolved, &first));
+}
+
+#[test]
+fn duplicate_required_declaration_cannot_hide_a_filtered_winner() {
+    let catalog = SessionToolCatalog::with_filter(BTreeMap::new(), None, Arc::new(|_| false));
+    let first: Arc<dyn BaseTool> = Arc::new(BridgeTool::bridge("Read", "system").direct());
+    let duplicate: Arc<dyn BaseTool> = Arc::new(BridgeTool::bridge("Read", "system").direct());
+    let error = catalog
+        .replace_static_mcp_tools(startup_update(
+            vec![first, duplicate],
+            &[("system", "Read", "Read")],
+        ))
+        .unwrap_err();
+    assert!(matches!(
+        error,
+        CatalogRefreshError::RequiredToolUnavailable { .. }
+    ));
+    assert!(catalog.snapshot().tools.is_empty());
 }

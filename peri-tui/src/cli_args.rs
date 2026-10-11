@@ -1,4 +1,22 @@
+use std::ffi::OsString;
 use std::str::FromStr;
+
+pub(crate) fn argv_requests_settings_stdin(args: &[OsString]) -> bool {
+    args.iter()
+        .skip(1)
+        .take_while(|arg| arg.to_str() != Some("--"))
+        .any(|arg| arg.to_str() == Some("--settings-stdin"))
+}
+
+/// 统一创建 tokio runtime（4 workers，4MB stack），避免 7 处重复构造。
+pub(crate) fn build_runtime() -> anyhow::Result<tokio::runtime::Runtime> {
+    tokio::runtime::Builder::new_multi_thread()
+        .worker_threads(4)
+        .thread_stack_size(4 * 1024 * 1024)
+        .enable_all()
+        .build()
+        .map_err(Into::into)
+}
 
 // ─── OutputFormat ─────────────────────────────────────────────────────────
 

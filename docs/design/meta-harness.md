@@ -14,7 +14,7 @@ MetaHarness 一个 kv 字段承载三项能力，key 类型决定动作：
 | key 类型 | value | 动作 |
 | --- | --- | --- |
 | 段落 ID | `true` | **覆盖系统提示词**（第一能力） |
-| middleware 名 | `false` | **关闭 middleware**（第二能力） |
+| middleware 名 / builtin 实例策略键 | `false` | **关闭能力**（第二能力）：链槽位名 ⇒ 该 middleware 不进链；builtin 实例策略键（`WebMiddleware` / `ArtifactMiddleware` / `CronMiddleware` / `WorkspaceMiddleware`）⇒ 该实例的工具面关闭 |
 | `BuiltInSubagents` | `true` / `false` | 启用 / 屏蔽 compile-time built-in subagent definitions（默认启用） |
 
 `BuiltInSubagents` 只控制 built-in definition provider，不关闭 `SubAgentMiddleware`；
@@ -36,7 +36,7 @@ settings.json:
 期望：`session/new` 渲染系统提示词时，这两个段落内容被 md 全文替换；段落
 渲染顺序（按位置属性 + 段内序号）不变；其余段落保持内置。
 
-### 场景 2：关闭 middleware（卸载工具）
+### 场景 2：关闭能力（卸载工具）
 
 用户要关闭 Web 工具：
 
@@ -45,8 +45,13 @@ settings.json:
 { "meta_harness": { "WebMiddleware": false } }
 ```
 
-期望：装配期 WebMiddleware 不进链，WebFetch / WebSearch 不进入工具列表，
-其钩子全部失效（无需 md 文件）。
+期望：`WebMiddleware` 是 **builtin `web` 实例**的关闭键（v4-part-2 起 Web /
+Artifact 已不是链槽位；键集合 = `MIDDLEWARE_NAMES` ∪
+`BUILTIN_INSTANCE_POLICY_KEYS`，两键仍被识别为已知键），
+`WebSearch` / `WebFetch` 从 direct tools、deferred 目录与
+检索、subagent `parent_tools`、workflow agent 工具列表四个面一并消失。关闭
+**链槽位名**（如 `TodoMiddleware`）则是装配期该 middleware 不进链，其工具与
+钩子全部失效（无需 md 文件）。
 
 ### 场景 3：回退与生效时机
 
@@ -88,51 +93,43 @@ pub meta_harness: Option<HashMap<String, bool>>,
 文档存在性校验在冻结期，见 2.3，避免解析期二次读盘；**非 bool 值保持
 serde 类型错误 fail**——"warn 不 fail"仅适用于成功解析后的未知 key）：
 
-```rust
-for (key, v) in meta_harness {
-    match (key, v) {
-        (k, _) if !SECTION_IDS.contains(k) && !MIDDLEWARE_NAMES.contains(k)
-            => warn!("meta_harness: unknown key {k}"), // 忽略
-        (k, false) if SECTION_IDS.contains(k) => { /* 段落显式不覆盖：合法，静默 */ }
-        (k, true)  if MIDDLEWARE_NAMES.contains(k) => { /* 显式恢复装配：合法，静默 */ }
-        _ => {}
-    }
-}
-```
+合法键集合由 `peri-acp-types/src/meta_harness.rs` 的 `SECTION_IDS`、
+`MIDDLEWARE_NAMES`、`BUILTIN_INSTANCE_POLICY_KEYS` 与 `BUILT_IN_SUBAGENTS_KEY`
+共同定义；校验实现为 `AppConfig::validate_meta_harness`，设计不复制校验代码。
+段落的 `false` 与链槽位/实例策略的 `true` 都是合法的显式恢复值。
 
-`SECTION_IDS` / `MIDDLEWARE_NAMES` 为编译期常量：段落文件名清单 +
-装配面 middleware name 清单。
+### 2.2 段落覆盖来源：workspace `peri-meta://`（原宿主加载器已删除）
 
-### 2.2 加载器：`.peri/meta/`
+原 `peri-middlewares/src/meta_harness/` 加载器（`scan_harness_docs`）**已删除（W3b/J6）**：
+段落覆盖文档改由 builtin `workspace` 实例的 `peri-meta://workspace/{section_id}` 资源提供
+（provider 侧扫描，见 `mcp-packages/workspace/src/resources/meta.rs`；URI 形状与解析契约在
+`peri-acp-types/src/workspace_resources.rs`；宿主消费在
+`peri-middlewares/src/mcp/client.rs::read_builtin_workspace_meta`）：
 
-新模块 `peri-middlewares/src/meta_harness/`（与 `skills/`、`agents_md/`
-同构：加载逻辑在 middlewares，类型归契约层）：
-
-```rust
-/// 扫描 {cwd}/.peri/meta/*.md，返回 文件名(去 .md) → 全文
-pub fn scan_harness_docs(cwd: &str) -> HashMap<String, String>
-// 规则：
-//  - 仅扫描一级目录 *.md（不递归）；非 .md 文件忽略
-//  - 文件名即 key（"01_intro.md" → "01_intro"）
-//  - 读取失败（IO/权限）→ warn + 跳过该文件，不 fail 扫描
-```
+- **来源白名单（X7）**：只消费 host 绑定为真实 builtin `workspace` 实例的句柄
+  （`ConfigSource::Builtin { instance: "workspace" }` 且 `Connected`）；外部 origin 的同 scheme
+  资源一律拒绝并记录，判定依据是实例身份而非资源文本自称。
+- **关闭与失败（X8）**：覆盖不可得（实例关闭 / 文档缺失 / 读取失败）⇒ warn 并保持内置段落、
+  不阻塞会话创建、**不回落磁盘**；必选输入的读取失败仍按其契约走发布前失败补偿，legacy 首次接纳
+  无执行环境 ⇒ 覆盖不可得（保持内置）。
+- **既有扫描语义**（今在 provider 侧）：仅一级目录 `{cwd}/.peri/meta/*.md`（不递归）；非 `.md`
+  文件忽略；文件 stem 即 section_id（`"01_intro.md"` → `"01_intro"`）；读取失败跳过该文件、
+  不 fail 扫描。
+- **排查指引（scanner 删除后）**：配置了 `"<section>": true` 而覆盖未生效时，依次检查
+  ① `.peri/meta/<section>.md` 是否在 workspace 根下且可读；② `workspace` 实例是否被关闭
+  （`"WorkspaceMiddleware": false` / 实例 `disabled` / 进程级开关）——关闭即无覆盖来源；
+  ③ 进程日志中 provider 的缺失/读取失败 warn 与宿主身份过滤记录。
 
 ### 2.3 冻结状态：MetaHarnessState
 
-```rust
-/// 冻结期构建，随冻结载体传播；会话内不可变
-pub struct MetaHarnessState {
-    /// 段落 ID → md 全文；仅含"开关 true 且文档存在"的条目
-    pub section_overrides: HashMap<String, Arc<str>>,
-    /// 装配期关闭的 middleware 名集合（v=false 条目）
-    pub disabled_middlewares: HashSet<String>,
-}
-```
+契约类型唯一声明在 `peri-acp-types/src/meta_harness.rs::MetaHarnessState`：
+冻结覆盖正文、关闭的链槽位/builtin 策略键，以及内置 SubAgent 定义开关。
+本文不复制结构字段，避免合法键与冻结状态漂移。
 
 - **构建时点**：`build_frozen_data` 冻结期、渲染 system prompt 之前——一次
-  读取 settings + `scan_harness_docs`。
-- **文档存在性校验在此处**：开关 `true` 但扫描无对应文件 → warn + 忽略该
-  条目（保持内置段落），不二次读盘。
+  读取 settings +（J6 后）workspace `peri-meta://` 资源读取（宿主 scanner 已删除）。
+- **文档存在性校验在此处**：开关 `true` 但资源面无对应文档 → warn + 忽略该
+  条目（保持内置段落），不二次读取、也不回落磁盘。
 - **挂载要求**：`FrozenContext` 单份存储 `meta_harness`
   字段，`FrozenSessionData` 经委托字段提供 accessor，`from_frozen_parts`
   不加重复参数，避免双事实源。
@@ -143,39 +140,15 @@ pub struct MetaHarnessState {
 
 ### 2.4 段落覆盖
 
-**数组升级**：系统提示词三个段落数组均携带 ID：
-`IMMUTABLE_SECTIONS` / `ALWAYS_UNCACHED_SECTIONS` 为 "ID + 内容" 二元组；
-`GATED_SECTIONS` 为 "ID + 内容 + Gate" 三元组。
-ID 即 `prompts/sections/` 文件名去 `.md`（`01_intro`、`05_using_tools`…），
-维护成本为零。
+段落声明的唯一来源是已装配 middleware 的 `PromptSection`；ID 对应模板名或
+渲染生成段，位置与缓存语义由声明的 zone/order 决定，不另建 Layer。
+channel 退役后不保留无持有者的内置段落数组或 feature gate。
 
-位置与缓存语义只由数组归属和段内序号决定，不另建内容分类 Layer。
-
-**覆盖注入方式：PromptTemplate 构造期合并**（物化容器而非覆盖 map，内容源零拷贝双态）：
-`PromptTemplate` 构造期按 ID 将段落内容替换为 md 全文后**物化为三个段落
-容器**（`immutable_sections` / `always_uncached_sections` /
-`gated_sections`，元素含 id/content），**不保留覆盖 map**（避免与
-物化结果重复存储）；**render 签名与全部调用点不变**，改动收敛到 `new`
-一处，render 零查表直接拼接：
-
-```rust
-// 内容来源双态：内置静态文本零拷贝借 &'static str，
-// 覆盖全文持 Arc<str>——避免 Arc::from(builtin) 全量堆拷贝
-enum SectionContent {
-    Builtin(&'static str),   // include_str! 静态文本，零拷贝
-    Override(Arc<str>),      // MetaHarness 覆盖全文（冻结期扫描）
-}
-struct ResolvedSection { id: &'static str, content: SectionContent }
-// PromptTemplate::new(state: &MetaHarnessState) 内：
-let immutable = IMMUTABLE_SECTIONS.map(|(id, content)| ResolvedSection {
-    id,
-    content: match state.section_overrides.get(id) {
-        Some(overridden) => SectionContent::Override(Arc::clone(overridden)),
-        None => SectionContent::Builtin(content),
-    },
-});
-```
-（`section_overrides` 字段仅存在于 `MetaHarnessState`，模板侧不重复持有。）
+**覆盖注入方式：PromptTemplate 构造期合并**：`new(state, collected)` 按 ID
+替换已收集段落的内容，过滤空正文并排序，物化为 cached/uncached 两个容器。
+不保留第二份覆盖 map；`render(env, agent_catalog)` 只拼接内容及替换环境占位符，
+不读盘、不重新加载配置。内容源为 builtin 静态文本、冻结的覆盖正文或 middleware
+动态正文；覆盖不能创建未装配持有者的段落。
 
 **同源一致性要求**：所有 PromptTemplate 构造点统一从冻结载体取
 MetaHarnessState 传入——冻结渲染与后续重渲染必须同一覆盖源，禁止出现
@@ -183,8 +156,8 @@ MetaHarnessState 传入——冻结渲染与后续重渲染必须同一覆盖源
 
 **边界**：
 
-- **gated 段落**：覆盖只改内容来源，`FeatureGate` 判定不变——未启用功能的
-  段落即使被覆盖也不渲染（现状 gate 判定事实见 3.4）。
+- **功能段落**：覆盖只改内容来源，是否装配持有 middleware 的判定不变；未装配功能的
+  段落即使被覆盖也不渲染。
 - **缓存区 transport seam**：现状 `__SYSTEM_PROMPT_DYNAMIC_BOUNDARY__` 由
   `PromptTemplate::render` 生成，不在段落文件内；段落位置属性（契约 2）负责
   装配，保留控制字负责把 seam 跨越 `String` handoff 传给 provider。provider
@@ -199,18 +172,23 @@ MetaHarnessState 传入——冻结渲染与后续重渲染必须同一覆盖源
 
 **关闭面 = 全部装配入口**（禁止只过滤顶层链——否则产生系统性链下泄漏：
 parent_tools / Workflow agent 链 / 子链独立装配、无条件注入工具，关闭
-Filesystem/Web/Terminal/Mcp 后子 agent 仍携带这些工具）：
+Todo / SubAgent / Mcp 后子 agent 仍携带这些工具）：
 
 ```rust
 // 每个装配入口内：
-let disabled: HashSet<&str> = meta_harness.iter()
+let disabled: HashSet<String> = meta_harness.iter()
     .filter(|(_, v)| !**v)
-    .map(|(k, _)| k.as_str())
+    .map(|(k, _)| k.clone())
     .collect();
 
-if !disabled.contains("WebMiddleware") {
-    chain.add(Box::new(WebMiddleware::new(...)));   // 关闭 → 不构造、不进链
+if !disabled.contains("TodoMiddleware") {
+    chain.add(Box::new(TodoMiddleware::new(...)));   // 关闭 → 不构造、不进链
 }
+
+// builtin MCP 实例（`WebMiddleware` / `ArtifactMiddleware` / `CronMiddleware` /
+// `WorkspaceMiddleware`）不走链构造：它们由关闭集映射为实例关闭集，
+// 再交给工具面过滤（`assembly.rs`）。
+let closed_instances = crate::mcp::builtin::closed_instances(&disabled);
 ```
 
 **联动清理**：关闭 SubAgentMiddleware 时，其关联构造（parent_tools 注入、
@@ -218,8 +196,9 @@ subagent_mw 槽位）联动置空，禁止半开状态。
 
 **语义**：
 
-- **关闭面 = middleware 实例**（key = `name()` 返回值）；同一 middleware 的
-  全部工具随之一并关闭（连坐语义）。
+- **关闭面 = 能力提供者**：链槽位 middleware 以 key = `name()` 返回值关闭；builtin
+  MCP 实例以策略键（`BUILTIN_INSTANCE_POLICY_KEYS`，映射唯一来源是声明表的
+  `policy_key`）关闭。同一提供者的全部工具随之一并关闭（连坐语义）。
 - 关闭后该 middleware 的钩子（before_agent / before_tool /
   prompt_contribution / first_turn_reminder）全部不执行——工具与提示词贡献
   同时消失。
@@ -235,8 +214,21 @@ subagent_mw 槽位）联动置空，禁止半开状态。
   prompt contribution 同时从 session-local 视图消失（见 ARC-CAPABILITY-CLOSURE-001）。
 - 插件无独立 meta_harness 条目：关闭 `PluginMiddleware` 即关闭插件整体注入；
   插件卸载/管理走既有机制。
-- Artifact 上传由独立 `ArtifactMiddleware` 承载；关闭它仅移除 `artifact`，不影响
-  `ToolSearch` 的 `SearchExtraTools` / `ExecuteExtraTool`。
+- Artifact 上传由 builtin `artifact` MCP 实例承载（`mcp-packages/artifact/src/{server,tool}.rs`；宿主实例注册与 dispatch 仍在 `peri-middlewares/src/mcp/builtin/`）；
+  策略键 `ArtifactMiddleware: false` 关闭该实例的工具面，仅移除 `artifact`（模型面
+  `artifact`），不影响 `ToolSearch` 的 `SearchExtraTools` / `ExecuteExtraTool`。
+- `CronMiddleware` 是 `cron` 实例的策略键，语义与
+  `ArtifactMiddleware` 同构，但该实例的工具是 deferred：关闭只收缩 deferred 目录与
+  检索结果（`parent_tools` 与 workflow 工具列表本来就不含 deferred 工具），实例、handler
+  与 readiness 仍保留。
+- `WorkspaceMiddleware` 是 `workspace` 实例的策略键（v4-part-4 wave 3）：7 个文件/终端
+  工具（`Read` / `Write` / `Edit` / `Glob` / `Grep` / `folder_operations` /
+  `Bash`）在声明表中**全部**标为 direct，因此关闭必须在同一 turn 同时收缩三个真实面——
+  首个模型请求的 tools、subagent `parent_tools` 与 workflow agent 工具列表（deferred 目录
+  与检索面本来就不含 direct 工具，属平凡成立）。关闭后 peri 不再提供任何文件系统与
+  shell 工具（`FilesystemMiddleware` / `TerminalMiddleware` 与 `ChainSlot::Filesystem` /
+  `ChainSlot::Terminal` 已随本波删除，没有回退的 middleware 提供面），实例、handler 与
+  pool 级连接状态仍保留。
 
 ### 2.6 生命周期
 
@@ -251,7 +243,7 @@ subagent_mw 槽位）联动置空，禁止半开状态。
 | 组件 | 落点 | 说明 |
 | --- | --- | --- |
 | `MetaHarnessState` 类型 | `peri-acp-types/src/meta_harness.rs` | 跨层冻结载体，简单类型 |
-| `scan_harness_docs` 加载器 | `peri-middlewares/src/meta_harness/` | 与 skills/agents_md 同构 |
+| ~~`scan_harness_docs` 加载器~~ | ~~`peri-middlewares/src/meta_harness/`~~ | **已删除（W3b/J6）**：读取改由 workspace 实例的 `peri-meta://` resources 承担（`read_builtin_workspace_meta`） |
 | settings 字段解析/合并 | `peri-acp/src/provider/config.rs` | `AppConfig.meta_harness` + merge 特例 + 校验 |
 | 冻结组装 | `peri-acp/src/session/mod.rs` | build_frozen_data + 冻结载体三结构加字段 |
 | 段落覆盖合并 | `peri-acp/src/prompt/mod.rs` | 数组加 ID（二元组/三元组，Layer 已去除）+ `PromptTemplate::new` 构造期合并（`SectionContent` 零拷贝双态） |

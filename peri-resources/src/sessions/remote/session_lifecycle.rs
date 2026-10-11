@@ -1,9 +1,9 @@
-//! 远程会话生命周期写入：legacy 接纳、未发布撤销、删除会话树、child resume 认领事实。
+//! 远程会话生命周期写入：未发布撤销、删除会话树、child resume 认领事实。
 //!
 //! ## 远端没有本机生命周期锚点
 //!
-//! 本机侧这些行为会同时写执行行（`execution_runs`）并在删除路径上显式结束所有权：那些是
-//! **本机事实**（同步、回收、执行代际的判据），远端没有也**不得**新增——远端没有第二个副本，
+//! 门面在删除路径上显式结束当前实例的运行所有权，不额外持久化执行行或墓碑；
+//! 远端同样不新增执行状态副本——远端没有第二个副本，
 //! 删除就是删除，不存在「删除被复制回来」的路径。所以这里的删除是**刻意删除数据事实本身**，
 //! 不是把本机的墓碑语义搬过来。v10 撤销本机登记与未决锚点后，本机也不再持有
 //! `session_lifecycle_commitments` 这类跨进程生命周期表——刻意删除由本机执行面显式结束
@@ -18,19 +18,17 @@
 
 use std::str::FromStr;
 
-use peri_acp_types::session_resources::{
-    FrozenSnapshotBytes, SessionResourceError, SessionResourceErrorKind, SessionResourceResult,
-};
+#[cfg(test)]
+use peri_acp_types::session_resources::SessionResourceErrorKind;
+use peri_acp_types::session_resources::{SessionResourceError, SessionResourceResult};
 use peri_acp_types::thread::{AgentStatus, ThreadId};
-use peri_acp_types::workspace::{ResolvedWorkspace, SessionBinding, WorkspaceError};
 use turso_serverless::Value;
 
 use super::mutation::incomplete_reply;
 use super::session_codec as codec;
 use super::session_data::{invalid_input, not_found, RemoteSessionData};
-use super::session_sql::binding_relative_text;
+use super::session_sql::{self, DELETE_SESSION_SQL};
 use super::sql::{int_at, text_at, StatementSpec};
-use crate::sessions::canonical;
 use crate::sessions::data::ChildResumeRecord;
 
 // ─── 批内守卫 ─────────────────────────────────────────────────────────────────
@@ -50,29 +48,6 @@ const SELECT_TREE_IDS_SQL: &str = "WITH RECURSIVE tree(id) AS (
 /// 直接子会话计数（撤销必须拒绝「已有子会话」的 identity，否则子会话会指向不存在的父）。
 const COUNT_CHILDREN_SQL: &str = "SELECT COUNT(*) FROM threads WHERE parent_thread_id = ?1";
 
-/// 接纳依据：保存的绝对 cwd 与父关系。
-const SELECT_ADOPT_FACTS_SQL: &str = "SELECT cwd, parent_thread_id FROM threads WHERE id = ?1";
-
-/// 删除整段会话历史的全部条目（与 `canonical::THREAD_CHILD_DELETES` 同一份语句）。
-const DELETE_SESSION_MESSAGES_SQL: &str = canonical::DELETE_MESSAGES_BY_THREAD_SQL;
-
-/// 删除会话的不可变绑定行（统一后绑定住在 `session_bindings`，不再是会话行上的扁平列）。
-const DELETE_SESSION_BINDINGS_SQL: &str = canonical::DELETE_BINDINGS_BY_THREAD_SQL;
-
-/// 删除会话行（与 `canonical::DELETE_THREAD_ROW_SQL` 同一份语句）。
-const DELETE_SESSION_SQL: &str = canonical::DELETE_THREAD_ROW_SQL;
-
-/// 补 frozen：已有值不变（`IS NULL` 谓词即本机「已有值不变」的同一语义）。
-const ADOPT_FROZEN_SQL: &str = "UPDATE threads SET frozen_context = ?2
-    WHERE id = ?1 AND frozen_context IS NULL";
-
-/// 补不可变绑定：只在 `session_bindings` 里还没有这一行时写入，之后任何行为都不改写它
-/// （本机同一判定：先读已有绑定，没有才 INSERT）。
-const ADOPT_BINDING_SQL: &str = "INSERT INTO session_bindings
-    (thread_id, schema_version, project_id, workspace_id, relative_cwd)
-    SELECT ?1, ?2, ?3, ?4, ?5
-    WHERE NOT EXISTS (SELECT 1 FROM session_bindings WHERE thread_id = ?1)";
-
 /// child resume 认领事实：状态 + 更新时间（`claimed` 由状态派生，不是独立列）。
 const UPDATE_AGENT_STATUS_SQL: &str =
     "UPDATE threads SET agent_status = ?1, updated_at = ?2 WHERE id = ?3";
@@ -80,87 +55,101 @@ const UPDATE_AGENT_STATUS_SQL: &str =
 const SELECT_AGENT_STATUS_SQL: &str = "SELECT agent_status FROM threads WHERE id = ?1";
 
 impl RemoteSessionData {
-    /// 接纳 legacy 会话：binding 与缺失的 frozen 一次成立，已有值不变。
-    ///
-    /// 本机在这一步还要核对本机 workspace 登记（`workspaces` 表）——那是**本机证据**，
-    /// 远端没有也不得伪造：绑定由调用方在本机解析后给出，远端只负责把事实写下去。
-    pub(super) async fn adopt_legacy(
-        &self,
-        id: &ThreadId,
-        saved_cwd: &str,
-        workspace: &ResolvedWorkspace,
-        frozen: &FrozenSnapshotBytes,
-    ) -> SessionResourceResult<()> {
-        if !std::path::Path::new(saved_cwd).is_absolute() {
-            return Err(SessionResourceError::new(
-                SessionResourceErrorKind::Workspace(WorkspaceError::Unavailable),
-            ));
+    pub(super) async fn write_close_intent(&self, id: &ThreadId) -> SessionResourceResult<()> {
+        if !self.exists(id).await? {
+            return Err(not_found());
         }
+        self.commit_effects(
+            "mark_session_closing",
+            &[id.as_str().to_owned()],
+            vec![StatementSpec::new(
+                "INSERT OR IGNORE INTO session_close_intents(thread_id, requested_at) VALUES (?1, ?2)",
+                vec![Value::Text(id.as_str().to_owned()), Value::Text(peri_time::now_utc_rfc3339())],
+            )],
+            id,
+        ).await.map(|_| ())
+    }
+
+    pub(super) async fn read_close_intent(&self, id: &ThreadId) -> SessionResourceResult<bool> {
         let store = self.store().await?;
-        let facts = store
+        let table = store.fetch_row(&StatementSpec::bare(
+            "SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'session_close_intents'",
+        )).await?;
+        if table.is_none() {
+            return Ok(false);
+        }
+        Ok(store
             .fetch_row(&StatementSpec::new(
-                SELECT_ADOPT_FACTS_SQL,
+                "SELECT 1 FROM session_close_intents WHERE thread_id = ?1",
                 vec![Value::Text(id.as_str().to_owned())],
             ))
             .await?
-            .ok_or_else(not_found)?;
-        let cwd = text_at(&facts, 0).ok_or_else(|| codec::corrupt("session cwd is unreadable"))?;
-        // 保存的绝对 cwd 是接纳依据；调用方不能借接纳顺手改绑，也不能接纳 child。
-        if cwd != saved_cwd || text_at(&facts, 1).is_some() {
-            return Err(SessionResourceError::new(
-                SessionResourceErrorKind::Workspace(WorkspaceError::ExecutionBindingMismatch),
-            ));
-        }
-        // 下面两次读取自己取连接：借用不能跨过去（重连要拿写锁，同任务里握着读锁会自锁）。
-        drop(store);
-        let binding_present = self.binding_of(id).await?.is_some();
-        let frozen_present = self.frozen_of(id).await?.is_some();
-        if binding_present && frozen_present {
-            // 已经接纳过：不写、也不假装写入什么。
-            return Ok(());
-        }
-        let mut effects = vec![guard_session_statement(id)];
-        if !frozen_present {
-            effects.push(StatementSpec::new(
-                ADOPT_FROZEN_SQL,
-                vec![
-                    Value::Text(id.as_str().to_owned()),
-                    Value::Text(frozen.as_str().to_owned()),
-                ],
-            ));
-        }
-        let binding = SessionBinding::from_workspace(workspace);
-        if !binding_present {
-            let relative = binding_relative_text(&binding)?;
-            effects.push(StatementSpec::new(
-                ADOPT_BINDING_SQL,
-                vec![
-                    Value::Text(id.as_str().to_owned()),
-                    codec::int_value(i64::from(binding.schema_version)),
-                    Value::Text(binding.project_id.to_string()),
-                    Value::Text(binding.workspace_id.to_string()),
-                    Value::Text(relative),
-                ],
-            ));
-        }
-        let inputs = vec![
-            format!("id:{}", id.as_str()),
-            format!("cwd:{saved_cwd}"),
-            format!("frozen:{}", frozen.as_str()),
-            format!("workspace:{}", workspace.workspace_id),
-        ];
-        self.commit_effects("adopt_legacy_session", &inputs, effects, id)
-            .await
-            .map(|_| ())
+            .is_some())
     }
 
-    /// 撤销本次未发布的创建：有子会话就拒绝，否则删除该会话的历史与会话行。
+    /// 撤销未发布的创建（write-once 完整创建的失败补偿：fork 等）。
+    ///
+    /// 语义由**入口**决定：这里的目标创建即带 frozen（可由 source 重生成），撤销就是把它
+    /// 整条删掉——不叠加「未提交 frozen」判据。两阶段草稿的撤销走
+    /// [`Self::revoke_unpublished_draft`]。
     ///
     /// 与本机同一判据（`parent_thread_id` 计数 > 0 → `InvalidInput`）；会话行本来就不在时
     /// 是幂等删除（本机同一语义：补偿路径把「已经不在了」当成目标已达成）。
     /// 远端不留 `creation_intent` 锚点：那本机事实用于判定「同一 identity 不被复活」，
     /// 远端没有第二个副本，也就没有需要锚定的复活路径。
     pub(super) async fn revoke_unpublished(&self, id: &ThreadId) -> SessionResourceResult<()> {
+        let effects = session_sql::revoke_session_statements(id.as_str());
+        self.commit_revocation("revoke_unpublished_session", id, effects)
+            .await
+    }
+
+    /// 撤销**两阶段草稿**（`SessionInitialization::abandon` 驱动的补偿）。
+    ///
+    /// 与 [`Self::revoke_unpublished`] 的唯一差别是判据：三条删除共用
+    /// `frozen_context IS NULL`，已提交 frozen 的草稿一条都不删并返回 typed 冲突
+    /// （那是「已定稿、未发布」的合法中间态，走 dirty 恢复）。
+    pub(super) async fn revoke_unpublished_draft(
+        &self,
+        id: &ThreadId,
+    ) -> SessionResourceResult<()> {
+        let effects = session_sql::revoke_draft_statements(id.as_str());
+        let counts = self
+            .commit_revocation_counts("revoke_unpublished_draft", id, effects)
+            .await?;
+        match counts.last() {
+            // 重放：原操作已生效（行已经不在）。
+            None => Ok(()),
+            Some(0) => {
+                // 判据不成立：要么已提交 frozen，要么行本来就不在（幂等删除）。
+                match self.frozen_of(id).await? {
+                    Some(_) => Err(SessionResourceError::conflict(
+                        "session has a committed frozen snapshot and cannot be revoked",
+                    )),
+                    None => Ok(()),
+                }
+            }
+            Some(_) => Ok(()),
+        }
+    }
+
+    /// 撤销的公共编排：子会话守卫（计数必须可证明为 0）+ 一次托管删除批。
+    async fn commit_revocation(
+        &self,
+        behavior: &str,
+        id: &ThreadId,
+        effects: Vec<StatementSpec>,
+    ) -> SessionResourceResult<()> {
+        self.commit_revocation_counts(behavior, id, effects)
+            .await
+            .map(|_| ())
+    }
+
+    async fn commit_revocation_counts(
+        &self,
+        behavior: &str,
+        id: &ThreadId,
+        effects: Vec<StatementSpec>,
+    ) -> SessionResourceResult<Vec<u64>> {
         let store = self.store().await?;
         let children = store
             .fetch_row(&StatementSpec::new(
@@ -171,28 +160,8 @@ impl RemoteSessionData {
         // 子会话数与后面的写入各取一次连接：借用不跨过去（见上）。
         drop(store);
         revocation_gate(children.as_ref().and_then(|values| int_at(values, 0)))?;
-        let effects = vec![
-            StatementSpec::new(
-                DELETE_SESSION_MESSAGES_SQL,
-                vec![Value::Text(id.as_str().to_owned())],
-            ),
-            StatementSpec::new(
-                DELETE_SESSION_BINDINGS_SQL,
-                vec![Value::Text(id.as_str().to_owned())],
-            ),
-            StatementSpec::new(
-                DELETE_SESSION_SQL,
-                vec![Value::Text(id.as_str().to_owned())],
-            ),
-        ];
-        self.commit_effects(
-            "revoke_unpublished_session",
-            &[format!("id:{}", id.as_str())],
-            effects,
-            id,
-        )
-        .await
-        .map(|_| ())
+        self.commit_effects(behavior, &[format!("id:{}", id.as_str())], effects, id)
+            .await
     }
 
     /// 删除会话树：子树（含根）的历史与会话行在同一批里消失。
@@ -218,8 +187,8 @@ impl RemoteSessionData {
         // 删除不新增墓碑：树上的每个会话先清子行（messages → session_bindings，
         // 与 `canonical::THREAD_CHILD_DELETES` 同一份语句与顺序）再清会话行，
         // 全部在同一个批里。
-        let mut effects = Vec::with_capacity(tree.len() * 3);
-        for statement in [DELETE_SESSION_MESSAGES_SQL, DELETE_SESSION_BINDINGS_SQL] {
+        let mut effects = Vec::with_capacity(tree.len() * 4);
+        for (_, statement) in crate::sessions::canonical::THREAD_CHILD_DELETES {
             for thread in &tree {
                 effects.push(StatementSpec::new(
                     statement,
@@ -306,7 +275,7 @@ fn guard_session_statement(id: &ThreadId) -> StatementSpec {
 }
 
 fn timestamp() -> String {
-    chrono::Utc::now().to_rfc3339()
+    peri_time::now_utc_rfc3339()
 }
 
 /// 子树读取 → 会话 id 列表。
@@ -344,6 +313,7 @@ fn revocation_gate(children: Option<i64>) -> SessionResourceResult<()> {
 
 #[cfg(test)]
 mod tests {
+    use super::super::session_sql::{DELETE_SESSION_BINDINGS_SQL, DELETE_SESSION_MESSAGES_SQL};
     use super::*;
 
     fn placeholders(sql: &str) -> usize {
@@ -352,11 +322,10 @@ mod tests {
 
     #[test]
     fn every_statement_is_static_and_fully_bound() {
-        let cases: [(&str, usize); 8] = [
+        let cases: [(&str, usize); 7] = [
             (GUARD_SESSION_ABSENT_SQL, 1),
             (SELECT_TREE_IDS_SQL, 1),
             (COUNT_CHILDREN_SQL, 1),
-            (SELECT_ADOPT_FACTS_SQL, 1),
             (DELETE_SESSION_MESSAGES_SQL, 1),
             (DELETE_SESSION_BINDINGS_SQL, 1),
             (DELETE_SESSION_SQL, 1),
@@ -366,15 +335,6 @@ mod tests {
             assert_eq!(placeholders(sql), expected, "绑定量与占位符不一致: {sql}");
             assert!(!sql.contains('\''), "语句里出现了字面量: {sql}");
         }
-    }
-
-    /// 接纳只补缺失的事实：`IS NULL` 谓词就是本机「已有值不变」的同一语义。
-    #[test]
-    fn adopt_only_fills_missing_facts() {
-        assert!(ADOPT_FROZEN_SQL.contains("AND frozen_context IS NULL"));
-        assert!(ADOPT_BINDING_SQL.contains("WHERE NOT EXISTS (SELECT 1 FROM session_bindings"));
-        // 不可变绑定没有「改绑」路径：接纳只在缺行时插入一次，任何路径都不 UPDATE 它。
-        assert!(!ADOPT_BINDING_SQL.contains("UPDATE"));
     }
 
     /// 删除范围是整棵子树（含根），且删除语句不含任何计算——范围完全由绑定参数给出。

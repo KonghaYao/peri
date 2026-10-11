@@ -231,7 +231,7 @@ fn format_size(bytes: u64) -> String {
 /// 相对时间（"3m ago" / "2h ago" / "5d ago" / "2026-06-01"）。
 fn format_relative_time(ts: chrono::DateTime<chrono::Utc>) -> String {
     use chrono::Utc;
-    let now = Utc::now();
+    let now: chrono::DateTime<Utc> = peri_time::now_wall().into();
     let delta = now.signed_duration_since(ts);
     let secs = delta.num_seconds();
     if secs < 60 {

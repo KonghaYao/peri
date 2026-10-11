@@ -1,31 +1,62 @@
 //! peri-sessions — 会话持久化子模块（自 peri-agent/src/thread 迁入）。
 //!
-//! 直操 sqlite：`SqliteThreadStore` 为生产实现；`FilesystemThreadStore` 为纯测试用途。
+//! Native 可使用 SQLite 数据/执行面或 Turso 远端数据；WASM 使用 Turso 远端数据
+//! 与虚拟工作区执行面。具体后端由部署装配入口选择。
 //! 契约类型（`ThreadStore` trait / `ThreadMeta` / `BaseMessage` / `MessageFlags`）位于
 //! peri-acp-types（接口契约归 peri-acp-types），本模块仅实现，不解释业务语义。
 
 mod canonical;
 mod data;
+#[cfg(not(target_os = "emscripten"))]
+mod discovery;
+mod failure;
+#[cfg(not(target_os = "emscripten"))]
 mod filesystem;
 mod local_port;
+mod machine;
+#[cfg(not(target_os = "emscripten"))]
+pub use machine::adopt_file_identity;
+pub use machine::current as current_machine_id;
+#[cfg(target_os = "emscripten")]
+pub(crate) use machine::set_explicit as set_explicit_machine_id;
 mod open;
 mod remote;
+mod schema_cleanup;
+mod schema_shape;
+mod storage_v2_plan;
 // `CredentialError` 只做 crate 内最小 re-export：分类（`classify_open_failure`）要按类型认出
 // 「凭证来源不可用」，但凭证类型不进公共 API，也不向消费侧暴露 SDK 类型或凭证值。
+pub(crate) use remote::open_remote_in_environment;
+pub use remote::RemoteWorkspaceEnvironment;
 pub(crate) use remote::{open_remote, CredentialError, RemoteEndpoint};
 mod resources;
+#[cfg(not(target_os = "emscripten"))]
 mod sqlite_store;
 
+#[cfg(not(target_os = "emscripten"))]
 pub use filesystem::FilesystemThreadStore;
 pub use resources::SessionResourcesImpl;
+#[cfg(not(target_os = "emscripten"))]
 pub use sqlite_store::{ReadOnlyStoreErrorKind, ReadOnlyThreadStoreError, SqliteThreadStore};
 
 pub(crate) use open::{AccessIntent, LocatorError, ResolvedLocator, SessionStoreOpenRequest};
 
-use std::path::PathBuf;
-use std::sync::Arc;
+#[cfg(target_os = "emscripten")]
+pub(crate) fn remote_engine_turso() -> remote::RemoteEngine {
+    remote::RemoteEngine::Turso
+}
+#[cfg(target_os = "emscripten")]
+pub(crate) fn credential_from_value(
+    value: String,
+) -> Result<remote::SessionStoreCredential, remote::CredentialError> {
+    remote::SessionStoreCredential::new(value)
+}
+
+#[cfg(not(target_os = "emscripten"))]
+use std::{path::PathBuf, sync::Arc};
 
 /// 只解析默认数据库位置；不创建目录、数据库或连接。
+#[cfg(not(target_os = "emscripten"))]
 fn default_database_path() -> Option<PathBuf> {
     dirs_next::home_dir().map(|home| home.join(".peri").join("threads").join("threads.db"))
 }
@@ -36,6 +67,7 @@ fn default_database_path() -> Option<PathBuf> {
 /// [`ReadOnlyThreadStoreError`] 如实报告（库不存在 / 不可读 / schema 不兼容 / 损坏）。
 /// 返回具体实例只服务 crate 内装配（[`crate::context::Resources`] 的只读降级），本函数
 /// 不交关闭权：实例上没有关闭路径，部署关闭权只由 `Resources` 装配入口交出。
+#[cfg(not(target_os = "emscripten"))]
 pub(crate) async fn open_session_resources_read_only(
     db_path: Option<PathBuf>,
 ) -> Result<Arc<SessionResourcesImpl>, ReadOnlyThreadStoreError> {
@@ -48,6 +80,7 @@ pub(crate) async fn open_session_resources_read_only(
 }
 
 /// 生产装配：打开会话资源门面（写打开，必要时原地升级已知旧 schema）。
+#[cfg(not(target_os = "emscripten"))]
 pub(crate) async fn open_facade(
     db_path: impl Into<PathBuf>,
 ) -> anyhow::Result<SessionResourcesImpl> {
@@ -55,6 +88,7 @@ pub(crate) async fn open_facade(
 }
 
 /// [`open_facade`] 的只读版本。
+#[cfg(not(target_os = "emscripten"))]
 pub(crate) async fn open_facade_read_only(
     db_path: &std::path::Path,
 ) -> Result<SessionResourcesImpl, ReadOnlyThreadStoreError> {
@@ -65,7 +99,8 @@ pub(crate) async fn open_facade_read_only(
 ///
 /// 夹具需要「逐条构造事实（create_thread / append …）+ 用门面消费」时配对打开；
 /// 生产装配一律走 `open_facade`，不通过本函数取裸句柄——两个入口各自打开同一库
-/// 文件会得到两份 owner 登记，本函数的存在正是为了不出现那种「第二个真相」。
+/// 文件会得到不同的连接池，本函数保持测试装配与生产组合一致。
+#[cfg(not(target_os = "emscripten"))]
 pub async fn open_store_and_facade_for_tests(
     db_path: impl Into<PathBuf>,
 ) -> anyhow::Result<(SqliteThreadStore, SessionResourcesImpl)> {

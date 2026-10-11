@@ -2,6 +2,9 @@
 //! mcp/list / oauth_start / oauth_callback / oauth_cancel（自 requests.rs
 //! 拆出，请求分发见 `host/requests.rs`）。
 
+use peri_acp_types::ports::{
+    McpOAuthStartDisposition, McpServerConnectionStatus, McpServerOAuthStatus,
+};
 use serde_json::Value;
 
 use super::super::AcpServerConfig;
@@ -66,10 +69,10 @@ pub(super) fn handle_list(_params: &Value, cfg: &AcpServerConfig) -> Result<Valu
     let pool = cfg
         .mcp_pool
         .clone()
-        .ok_or_else(|| AcpError::new(-32603, "mcp pool not available"))?
-        .downcast_arc::<peri_middlewares::mcp::McpClientPool>()
-        .map_err(|_| AcpError::new(-32603, "mcp pool type mismatch"))?;
-    let mut servers = pool.all_server_infos();
+        .ok_or_else(|| AcpError::new(-32603, "mcp pool not available"))?;
+    let mut servers = pool
+        .server_infos()
+        .map_err(|error| AcpError::new(-32603, error))?;
     servers.sort_by(|left, right| left.name.cmp(&right.name));
     let servers = servers
         .into_iter()
@@ -77,20 +80,20 @@ pub(super) fn handle_list(_params: &Value, cfg: &AcpServerConfig) -> Result<Valu
         .take(256)
         .map(|server| {
             let connection_status = match server.status {
-                peri_middlewares::mcp::ClientStatus::Connected => "connected",
-                peri_middlewares::mcp::ClientStatus::Failed(_) => "failed",
-                peri_middlewares::mcp::ClientStatus::Disconnected => "disconnected",
-                peri_middlewares::mcp::ClientStatus::Disabled => "disabled",
-                peri_middlewares::mcp::ClientStatus::Uninitialized => "uninitialized",
+                McpServerConnectionStatus::Connected => "connected",
+                McpServerConnectionStatus::Failed => "failed",
+                McpServerConnectionStatus::Disconnected => "disconnected",
+                McpServerConnectionStatus::Disabled => "disabled",
+                McpServerConnectionStatus::Uninitialized => "uninitialized",
             };
             let oauth_status = match server.oauth_status {
-                peri_middlewares::mcp::OAuthStatus::None => "none",
-                peri_middlewares::mcp::OAuthStatus::Authorized => "authorized",
-                peri_middlewares::mcp::OAuthStatus::NeedsAuthorization => "needs_authorization",
+                McpServerOAuthStatus::None => "none",
+                McpServerOAuthStatus::Authorized => "authorized",
+                McpServerOAuthStatus::NeedsAuthorization => "needs_authorization",
             };
             serde_json::json!({
                 "name": server.name,
-                "transport": server.transport_type,
+                "transport": server.transport,
                 "connectionStatus": connection_status,
                 "oauthStatus": oauth_status,
                 "activeFlowId": pool.active_oauth_flow(&server.name),
@@ -130,29 +133,20 @@ pub(super) fn handle_oauth_start(params: &Value, cfg: &AcpServerConfig) -> Resul
         .mcp_pool
         .clone()
         .ok_or_else(|| AcpError::new(-32603, "mcp pool not available"))?;
-    match pool.downcast_arc::<peri_middlewares::mcp::McpClientPool>() {
-        Ok(p) => {
-            let disposition = p.spawn_oauth_flow_with_id(&server_name, &flow_id);
-            let (status, active_flow_id) = match disposition {
-                peri_middlewares::mcp::OAuthStartDisposition::Started => {
-                    ("started", flow_id.clone())
-                }
-                peri_middlewares::mcp::OAuthStartDisposition::AlreadyActive => {
-                    ("already_active", flow_id.clone())
-                }
-                peri_middlewares::mcp::OAuthStartDisposition::Conflict { active_flow_id } => {
-                    ("conflict", active_flow_id)
-                }
-            };
-            Ok(serde_json::json!({
-                "success": status != "conflict",
-                "status": status,
-                "flowId": flow_id,
-                "activeFlowId": active_flow_id,
-            }))
-        }
-        Err(_) => Err(AcpError::new(-32603, "mcp pool type mismatch")),
-    }
+    let disposition = pool
+        .spawn_oauth_flow_with_id(&server_name, &flow_id)
+        .map_err(|error| AcpError::new(-32603, error))?;
+    let (status, active_flow_id) = match disposition {
+        McpOAuthStartDisposition::Started => ("started", flow_id.clone()),
+        McpOAuthStartDisposition::AlreadyActive => ("already_active", flow_id.clone()),
+        McpOAuthStartDisposition::Conflict { active_flow_id } => ("conflict", active_flow_id),
+    };
+    Ok(serde_json::json!({
+        "success": status != "conflict",
+        "status": status,
+        "flowId": flow_id,
+        "activeFlowId": active_flow_id,
+    }))
 }
 
 pub(super) fn handle_oauth_callback(
@@ -192,9 +186,6 @@ pub(super) fn handle_oauth_callback(
         .mcp_pool
         .clone()
         .ok_or_else(|| AcpError::new(-32603, "mcp pool not available"))?;
-    let pool = pool
-        .downcast_arc::<peri_middlewares::mcp::McpClientPool>()
-        .map_err(|_| AcpError::new(-32603, "mcp pool type mismatch"))?;
     let result = match dynamic_identity {
         Some((instance, flow_id)) => {
             validate_dynamic_instance(cfg, &instance)?;
@@ -219,13 +210,11 @@ pub(super) fn handle_oauth_cancel(
         .mcp_pool
         .clone()
         .ok_or_else(|| AcpError::new(-32603, "mcp pool not available"))?;
-    let pool = pool
-        .downcast_arc::<peri_middlewares::mcp::McpClientPool>()
-        .map_err(|_| AcpError::new(-32603, "mcp pool type mismatch"))?;
     let cancelled = match dynamic_oauth_identity(params)? {
         Some((instance, flow_id)) => {
             validate_dynamic_instance(cfg, &instance)?;
             pool.cancel_dynamic_oauth_flow(instance, &flow_id)
+                .map_err(|error| AcpError::new(-32603, error))?
         }
         None if caps.agent_event && !caps.oauth => {
             let server_name = params
@@ -235,6 +224,7 @@ pub(super) fn handle_oauth_cancel(
             crate::event::oauth::validate_server_name(server_name)
                 .map_err(|error| AcpError::new(-32602, error.to_string()))?;
             pool.cancel_oauth_callback(server_name)
+                .map_err(|error| AcpError::new(-32603, error))?
         }
         None => return Err(AcpError::new(-32602, "missing Dynamic MCP identity")),
     };

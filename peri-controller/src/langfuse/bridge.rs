@@ -332,6 +332,20 @@ impl peri_agent::agent::LangfuseBridgeLike for LangfuseBridge {
     }
 
     fn process_observe_event(&self, ev: &ObserveEvent) {
+        if let ObserveEvent::LlmCallStart {
+            agent_id,
+            step,
+            messages,
+            tools,
+            ..
+        } = ev
+        {
+            let agent_id = agent_id.to_string();
+            let mut tracer = self.tracer.lock();
+            self.llm_start_steps.lock().insert(agent_id.clone(), *step);
+            tracer.on_llm_start_snapshot(&agent_id, *step, Arc::clone(messages), tools);
+            return;
+        }
         if let Some(u) = UnifiedLangfuseEvent::from_observe_event(ev.clone()) {
             let mut guard = self.active_stage.lock();
             self.process_event(&u, &mut guard);
@@ -348,3 +362,15 @@ mod tests;
 #[cfg(test)]
 #[path = "bridge_test.rs"]
 mod bridge_test;
+
+#[cfg(test)]
+#[path = "bridge/snapshot_test.rs"]
+mod snapshot_test;
+
+#[cfg(test)]
+#[path = "bridge/ordering_test.rs"]
+mod ordering_test;
+
+#[cfg(test)]
+#[path = "bridge/registration_test.rs"]
+mod registration_test;

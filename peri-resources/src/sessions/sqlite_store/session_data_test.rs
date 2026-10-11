@@ -1,7 +1,6 @@
 //! `SessionDataPort`（SQLite 数据面）行为测试。
 //!
-//! 断言以可观察结果为准：一次保存后的完整事实、碰撞是否失败、墓碑与执行行是否
-//! 与数据删除同事务收敛；不复制实现细节。
+//! 断言以可观察结果为准：一次保存后的完整事实、冲突是否失败以及级联删除的后置条件。
 
 use super::*;
 use crate::sessions::data::SessionDataPort;
@@ -10,8 +9,10 @@ use peri_acp_types::session_resources::{
     BindingState, ChildSnapshot, ForkSnapshot, FrozenSnapshotBytes, FrozenState, NewSession,
     NewSessionMeta, PersistenceRecovery, RewindBoundary, SessionMetaPatch,
 };
-use peri_acp_types::store::{CompactionChange, PersistedPayload, ThreadStore};
-use peri_acp_types::workspace::{RecoveryRequiredDetails, ResolvedWorkspace};
+use peri_acp_types::store::{
+    serialize_persisted_payload, CompactionChange, PersistedPayload, ThreadStore,
+};
+use peri_acp_types::workspace::ResolvedWorkspace;
 use sqlx::Connection;
 use std::collections::HashMap;
 use tempfile::TempDir;
@@ -30,13 +31,7 @@ fn frozen(marker: &str) -> FrozenSnapshotBytes {
 }
 
 fn binding_of(workspace: &ResolvedWorkspace) -> peri_acp_types::workspace::SessionBinding {
-    peri_acp_types::workspace::SessionBinding {
-        schema_version: peri_acp_types::workspace::SESSION_BINDING_VERSION,
-        revision: 1,
-        project_id: workspace.project_id,
-        workspace_id: workspace.workspace_id,
-        cwd_relative_to_workspace: workspace.relative_cwd.clone(),
-    }
+    peri_acp_types::workspace::SessionBinding::from_workspace(workspace)
 }
 
 async fn workspace(store: &SqliteThreadStore, cwd: &std::path::Path) -> ResolvedWorkspace {
@@ -69,6 +64,97 @@ fn payloads(count: usize) -> Vec<PersistedPayload> {
     (0..count)
         .map(|index| PersistedPayload::Message(BaseMessage::human(format!("message {index}"))))
         .collect()
+}
+
+fn payload_bytes(payloads: &[PersistedPayload]) -> Vec<String> {
+    payloads
+        .iter()
+        .map(|payload| serialize_persisted_payload(payload).unwrap())
+        .collect()
+}
+
+#[tokio::test]
+async fn archive_hides_only_root_from_regular_list_and_preserves_history_time() {
+    use peri_acp_types::workspace::{ScopedThreadQuery, ThreadScope};
+
+    let (store, data, directory) = database().await;
+    let owner = workspace(&store, directory.path()).await;
+    let id = "archive-root".to_owned();
+    data.save_new_session(&session(
+        &id,
+        owner.cwd.to_str().unwrap(),
+        &owner,
+        frozen("archive"),
+    ))
+    .await
+    .unwrap();
+    data.append_history(&id, &payloads(1)).await.unwrap();
+    let before: (String,) = sqlx::query_as("SELECT updated_at FROM threads WHERE id = ?1")
+        .bind(&id)
+        .fetch_one(&store.database.pool)
+        .await
+        .unwrap();
+    let query = ScopedThreadQuery {
+        scope: ThreadScope::Workspace(owner.workspace_id),
+        cursor: None,
+        limit: 10,
+    };
+    assert_eq!(data.list_sessions(&query).await.unwrap().entries.len(), 1);
+    data.set_session_archived(&id, true).await.unwrap();
+    assert!(data.list_sessions(&query).await.unwrap().entries.is_empty());
+    assert_eq!(
+        data.list_archived_sessions(&query)
+            .await
+            .unwrap()
+            .entries
+            .len(),
+        1
+    );
+    assert_eq!(data.load_snapshot(&id).await.unwrap().payloads.len(), 1);
+    let after: (i64, String) =
+        sqlx::query_as("SELECT archived, updated_at FROM threads WHERE id = ?1")
+            .bind(&id)
+            .fetch_one(&store.database.pool)
+            .await
+            .unwrap();
+    assert_eq!(after, (1, before.0));
+    data.set_session_archived(&id, false).await.unwrap();
+    assert_eq!(data.list_sessions(&query).await.unwrap().entries.len(), 1);
+    assert!(data
+        .list_archived_sessions(&query)
+        .await
+        .unwrap()
+        .entries
+        .is_empty());
+}
+
+#[tokio::test]
+async fn current_machine_name_changes_without_changing_workspace_identity() {
+    let (store, data, directory) = database().await;
+    let owner = workspace(&store, directory.path()).await;
+    let current = data
+        .list_machines()
+        .await
+        .unwrap()
+        .into_iter()
+        .find(|machine| machine.is_current)
+        .unwrap();
+    let original_id = current.id.clone();
+    data.rename_machine(&original_id, "开发机").await.unwrap();
+    let renamed = data
+        .list_machines()
+        .await
+        .unwrap()
+        .into_iter()
+        .find(|machine| machine.is_current)
+        .unwrap();
+    assert_eq!(renamed.id, original_id);
+    assert_eq!(renamed.name, "开发机");
+    let workspaces = data.list_workspaces(&original_id).await.unwrap();
+    assert!(workspaces
+        .iter()
+        .any(|workspace| workspace.id == owner.workspace_id));
+    assert!(data.rename_machine(&original_id, "  ").await.is_err());
 }
 // ─── 新建：完整快照一次保存 ────────────────────────────────────────────────────
 
@@ -133,7 +219,7 @@ async fn test_save_new_session_requires_a_registered_workspace() {
 // ─── 读取：一致快照与轻量投影 ──────────────────────────────────────────────────
 
 #[tokio::test]
-async fn test_snapshot_read_is_consistent_and_meta_projection_skips_cache_blob() {
+async fn test_snapshot_read_returns_canonical_history_and_metadata() {
     let (store, data, directory) = database().await;
     let workspace = workspace(&store, directory.path()).await;
     let cwd = workspace.cwd.to_string_lossy().into_owned();
@@ -158,13 +244,6 @@ async fn test_snapshot_read_is_consistent_and_meta_projection_skips_cache_blob()
     )
     .await
     .unwrap();
-    // 直接写入派生缓存正文：轻量投影不得把它带出来。
-    sqlx::query("UPDATE threads SET cached_context = ?1 WHERE id = 's-read'")
-        .bind("x".repeat(4096))
-        .execute(&store.database.pool)
-        .await
-        .unwrap();
-
     let snapshot = data.load_snapshot(&"s-read".to_owned()).await.unwrap();
     assert_eq!(snapshot.payloads.len(), 3);
     assert_eq!(
@@ -184,10 +263,7 @@ async fn test_snapshot_read_is_consistent_and_meta_projection_skips_cache_blob()
     assert_eq!(snapshot.meta.title.as_deref(), Some("message 0"));
 
     let meta = data.load_meta(&"s-read".to_owned()).await.unwrap();
-    assert!(
-        meta.cached_context.is_none(),
-        "轻量 metadata 投影不加载派生缓存正文"
-    );
+    assert_eq!(meta.message_count, 3);
     let page = data
         .list_sessions(&peri_acp_types::workspace::ScopedThreadQuery {
             scope: peri_acp_types::workspace::ThreadScope::All,
@@ -201,9 +277,14 @@ async fn test_snapshot_read_is_consistent_and_meta_projection_skips_cache_blob()
 }
 
 #[tokio::test]
-async fn test_load_snapshot_reports_missing_rows_and_unregistered_bindings() {
+async fn test_load_snapshot_reports_missing_rows_and_preserves_unregistered_binding_facts() {
     let (store, data, directory) = database().await;
     let error = data.load_snapshot(&"absent".to_owned()).await.unwrap_err();
+    assert!(matches!(
+        error.kind(),
+        peri_acp_types::session_resources::SessionResourceErrorKind::NotFound
+    ));
+    let error = data.load_binding(&"absent".to_owned()).await.unwrap_err();
     assert!(matches!(
         error.kind(),
         peri_acp_types::session_resources::SessionResourceErrorKind::NotFound
@@ -211,11 +292,21 @@ async fn test_load_snapshot_reports_missing_rows_and_unregistered_bindings() {
 
     let workspace = workspace(&store, directory.path()).await;
     let cwd = workspace.cwd.to_string_lossy().into_owned();
-    data.save_new_session(&session("s-orphan", &cwd, &workspace, frozen("orphan")))
-        .await
-        .unwrap();
-    // 登记行被移除（曾有写入方在未强制外键时删掉登记）后，绑定不再能于本机验证：
-    // 报告为「本机登记缺失」而不是损坏，也不是 legacy。
+    let id = "s-orphan".to_owned();
+    let input = session(&id, &cwd, &workspace, frozen("orphan"));
+    data.save_new_session(&input).await.unwrap();
+    data.update_meta(
+        &id,
+        &SessionMetaPatch {
+            config: Some(Some(r#"{"model":"orphan"}"#.to_owned())),
+            ..Default::default()
+        },
+    )
+    .await
+    .unwrap();
+    let history = payloads(2);
+    data.append_history(&id, &history).await.unwrap();
+    let before = data.load_snapshot(&id).await.unwrap();
     let mut connection = sqlx::SqliteConnection::connect_with(
         &sqlx::sqlite::SqliteConnectOptions::new().filename(directory.path().join("threads.db")),
     )
@@ -225,14 +316,82 @@ async fn test_load_snapshot_reports_missing_rows_and_unregistered_bindings() {
         .execute(&mut connection)
         .await
         .unwrap();
-    sqlx::query("DELETE FROM workspaces WHERE id = ?1")
+    let deleted = sqlx::query("DELETE FROM workspaces WHERE id = ?1")
         .bind(workspace.workspace_id.to_string())
         .execute(&mut connection)
         .await
         .unwrap();
+    assert_eq!(deleted.rows_affected(), 1);
     connection.close().await.unwrap();
-    let snapshot = data.load_snapshot(&"s-orphan".to_owned()).await.unwrap();
-    assert_eq!(snapshot.binding, BindingState::ExternalOrUnregistered);
+    let snapshot = data.load_snapshot(&id).await.unwrap();
+    assert_eq!(snapshot.binding, BindingState::Bound(input.binding.clone()));
+    assert_eq!(data.load_binding(&id).await.unwrap(), snapshot.binding);
+    assert_eq!(snapshot.frozen, FrozenState::Present(input.frozen));
+    assert_eq!(
+        snapshot.meta.config.as_deref(),
+        Some(r#"{"model":"orphan"}"#)
+    );
+    assert_eq!(
+        serde_json::to_value(&snapshot.meta).unwrap(),
+        serde_json::to_value(&before.meta).unwrap()
+    );
+    assert_eq!(payload_bytes(&snapshot.payloads), payload_bytes(&history));
+    assert_eq!(snapshot.flags, before.flags);
+    assert!(snapshot.inherited.payloads.is_empty());
+    assert!(snapshot.inherited.flags.is_empty());
+    assert_eq!(data.machine_id_of(&id).await.unwrap(), None);
+}
+
+#[tokio::test]
+async fn test_load_snapshot_rejects_unsupported_and_corrupt_binding_records() {
+    let (store, data, directory) = database().await;
+    let workspace = workspace(&store, directory.path()).await;
+    let cwd = workspace.cwd.to_string_lossy().into_owned();
+    let id = "s-invalid-binding".to_owned();
+    let input = session(&id, &cwd, &workspace, frozen("invalid-binding"));
+    data.save_new_session(&input).await.unwrap();
+    sqlx::query("UPDATE session_bindings SET schema_version = ?1 WHERE thread_id = ?2")
+        .bind(i64::from(input.binding.schema_version) + 1)
+        .bind(&id)
+        .execute(&store.database.pool)
+        .await
+        .unwrap();
+    let snapshot_error = data.load_snapshot(&id).await.unwrap_err();
+    let binding_error = data.load_binding(&id).await.unwrap_err();
+    for error in [snapshot_error, binding_error] {
+        assert!(matches!(
+            error.kind(),
+            peri_acp_types::session_resources::SessionResourceErrorKind::Unsupported
+        ));
+    }
+
+    let mut connection = store.database.pool.acquire().await.unwrap();
+    sqlx::query("PRAGMA foreign_keys = OFF")
+        .execute(&mut *connection)
+        .await
+        .unwrap();
+    sqlx::query(
+        "UPDATE session_bindings SET schema_version = ?1, workspace_id = 'invalid-uuid' WHERE thread_id = ?2",
+    )
+    .bind(i64::from(input.binding.schema_version))
+    .bind(&id)
+    .execute(&mut *connection)
+    .await
+    .unwrap();
+    sqlx::query("PRAGMA foreign_keys = ON")
+        .execute(&mut *connection)
+        .await
+        .unwrap();
+    drop(connection);
+    let snapshot_error = data.load_snapshot(&id).await.unwrap_err();
+    let binding_error = data.load_binding(&id).await.unwrap_err();
+    for error in [snapshot_error, binding_error] {
+        assert!(matches!(
+            error.kind(),
+            peri_acp_types::session_resources::SessionResourceErrorKind::Corrupt { detail }
+                if detail == "session binding is not decodable"
+        ));
+    }
 }
 
 // ─── append：碰撞失败、派生事实一并维护 ────────────────────────────────────────
@@ -522,7 +681,7 @@ async fn test_adopt_legacy_session_publishes_binding_and_frozen_once() {
     let cwd = workspace.cwd.to_string_lossy().into_owned();
     // legacy 会话：有历史但无绑定、无 frozen（由旧版本写入）。
     let id = store
-        .create_thread(ThreadMeta::new(cwd.as_str()))
+        .create_thread(ThreadMeta::new_at(cwd.as_str(), peri_time::now_wall()))
         .await
         .unwrap();
 
@@ -558,515 +717,224 @@ async fn test_adopt_legacy_session_publishes_binding_and_frozen_once() {
     assert_eq!(after.meta.cwd, cwd);
 }
 
+/// legacy 竞争（write-once）：先提交的候选是 winner；后提交者不带覆盖，读回仍是最先那份字节。
+///
+/// ACP 侧据此把「adopt 后重读的 winner」传给装配（§6.3），因此这里的读回值就是装配事实源。
 #[tokio::test]
-async fn test_adopt_legacy_session_refuses_to_bypass_dirty_execution() {
+async fn test_adopt_legacy_session_keeps_the_first_winner_bytes() {
     let (store, data, directory) = database().await;
     let workspace = workspace(&store, directory.path()).await;
     let cwd = workspace.cwd.to_string_lossy().into_owned();
     let id = store
-        .create_thread(ThreadMeta::new(cwd.as_str()))
+        .create_thread(ThreadMeta::new_at(cwd.as_str(), peri_time::now_wall()))
         .await
         .unwrap();
-    sqlx::query("INSERT INTO execution_runs (thread_id, generation, clean) VALUES (?1, 1, 0)")
-        .bind(&id)
-        .execute(&store.database.pool)
+    // 第二个句柄：同一份库事实上的另一次接纳（两宿主共享同一个 store 的等价形态）。
+    let second = SqliteSessionData::new(Arc::clone(&store.database));
+
+    data.adopt_legacy_session(&id, &cwd, &workspace, &frozen("winner"))
         .await
         .unwrap();
+    second
+        .adopt_legacy_session(&id, &cwd, &workspace, &frozen("candidate"))
+        .await
+        .expect("绑定一致时接纳幂等：候选不写入，也不报冲突");
+
+    let snapshot = second.load_snapshot(&id).await.unwrap();
+    match snapshot.frozen {
+        FrozenState::Present(bytes) => assert_eq!(bytes.as_str(), frozen("winner").as_str()),
+        other => panic!("winner bytes must stay persisted: {other:?}"),
+    }
+}
+
+#[tokio::test]
+async fn test_adopt_legacy_session_preserves_canonical_metadata_and_history() {
+    let (store, data, directory) = database().await;
+    let workspace = workspace(&store, directory.path()).await;
+    let cwd = workspace.cwd.to_string_lossy().into_owned();
+    let mut meta = ThreadMeta::new_at(cwd.as_str(), peri_time::now_wall());
+    meta.config = Some(r#"{"model":"legacy"}"#.to_owned());
+    let id = store.create_thread(meta).await.unwrap();
+    let history = payloads(2);
+    data.append_history(&id, &history).await.unwrap();
+    let before = data.load_snapshot(&id).await.unwrap();
+    assert_eq!(before.binding, BindingState::Missing);
+    assert_eq!(before.frozen, FrozenState::LegacyAbsent);
+    assert_eq!(before.meta.message_count, 2);
+    assert_eq!(before.meta.config.as_deref(), Some(r#"{"model":"legacy"}"#));
+    let machine = data.machine_id_of(&id).await.unwrap().unwrap();
 
     let error = data
-        .adopt_legacy_session(&id, &cwd, &workspace, &frozen("legacy"))
+        .adopt_legacy_session(&id, "/elsewhere", &workspace, &frozen("legacy"))
         .await
         .unwrap_err();
     assert!(
         matches!(
             error.kind(),
             peri_acp_types::session_resources::SessionResourceErrorKind::Workspace(
-                peri_acp_types::workspace::WorkspaceError::InvalidBinding
+                peri_acp_types::workspace::WorkspaceError::ExecutionBindingMismatch
             )
         ),
         "{error}"
     );
+    let rejected = data.load_snapshot(&id).await.unwrap();
+    assert_eq!(rejected.binding, BindingState::Missing);
+    assert_eq!(rejected.frozen, FrozenState::LegacyAbsent);
+    assert_eq!(
+        serde_json::to_value(&rejected.meta).unwrap(),
+        serde_json::to_value(&before.meta).unwrap()
+    );
+    assert_eq!(payload_bytes(&rejected.payloads), payload_bytes(&history));
+
+    data.adopt_legacy_session(&id, &cwd, &workspace, &frozen("legacy"))
+        .await
+        .unwrap();
+    data.adopt_legacy_session(&id, &cwd, &workspace, &frozen("candidate"))
+        .await
+        .unwrap();
     let snapshot = data.load_snapshot(&id).await.unwrap();
-    assert_eq!(snapshot.binding, BindingState::Missing);
-    assert_eq!(snapshot.frozen, FrozenState::LegacyAbsent);
+    assert_eq!(
+        snapshot.binding,
+        BindingState::Bound(binding_of(&workspace))
+    );
+    assert_eq!(data.load_binding(&id).await.unwrap(), snapshot.binding);
+    assert_eq!(snapshot.frozen, FrozenState::Present(frozen("legacy")));
+    assert_eq!(
+        serde_json::to_value(&snapshot.meta).unwrap(),
+        serde_json::to_value(&before.meta).unwrap()
+    );
+    assert_eq!(payload_bytes(&snapshot.payloads), payload_bytes(&history));
+    assert_eq!(snapshot.flags, before.flags);
+    assert!(snapshot.inherited.payloads.is_empty());
+    assert!(snapshot.inherited.flags.is_empty());
+    assert_eq!(data.machine_id_of(&id).await.unwrap(), Some(machine));
+}
+
+#[tokio::test]
+async fn test_adopt_legacy_session_rejects_unbound_frozen_canonical_data() {
+    let (store, data, directory) = database().await;
+    let workspace = workspace(&store, directory.path()).await;
+    let cwd = workspace.cwd.to_string_lossy().into_owned();
+    let id = "s-unbound-frozen".to_owned();
+    data.save_new_session(&session(&id, &cwd, &workspace, frozen("canonical")))
+        .await
+        .unwrap();
+    data.append_history(&id, &payloads(2)).await.unwrap();
+    sqlx::query("DELETE FROM session_bindings WHERE thread_id = ?1")
+        .bind(&id)
+        .execute(&store.database.pool)
+        .await
+        .unwrap();
+    let before = data.load_snapshot(&id).await.unwrap();
+    assert_eq!(before.binding, BindingState::Missing);
+    let error = data
+        .adopt_legacy_session(&id, &cwd, &workspace, &frozen("replacement"))
+        .await
+        .unwrap_err();
+    assert!(matches!(
+        error.kind(),
+        peri_acp_types::session_resources::SessionResourceErrorKind::Workspace(
+            peri_acp_types::workspace::WorkspaceError::InvalidBinding
+        )
+    ));
+    let after = data.load_snapshot(&id).await.unwrap();
+    assert_eq!(after.binding, before.binding);
+    assert_eq!(after.frozen, before.frozen);
+    assert_eq!(
+        serde_json::to_value(&after.meta).unwrap(),
+        serde_json::to_value(&before.meta).unwrap()
+    );
+    assert_eq!(
+        payload_bytes(&after.payloads),
+        payload_bytes(&before.payloads)
+    );
 }
 
 // ─── 投影、compaction、rewind ─────────────────────────────────────────────────
 
-#[tokio::test]
-async fn test_projection_and_compaction_maintain_derived_views_in_the_same_write() {
-    let (store, data, directory) = database().await;
-    let workspace = workspace(&store, directory.path()).await;
-    let cwd = workspace.cwd.to_string_lossy().into_owned();
-    data.save_new_session(&session("s-compact", &cwd, &workspace, frozen("compact")))
-        .await
-        .unwrap();
-    let history = payloads(3);
-    data.append_history(&"s-compact".to_owned(), &history)
-        .await
-        .unwrap();
-    let epoch_before: (i64,) =
-        sqlx::query_as("SELECT context_cache_epoch FROM threads WHERE id = ?")
-            .bind("s-compact")
-            .fetch_one(&store.database.pool)
-            .await
-            .unwrap();
-
-    // 一次性投影变更集：flags 与派生视图同事务生效。
-    data.apply_message_projections(
-        &"s-compact".to_owned(),
-        &[(
-            history[0].id(),
-            peri_acp_types::store::MessageFlags {
-                truncated: true,
-                excluded: false,
-                projection: None,
-            },
-        )],
-    )
-    .await
-    .unwrap();
-    let flags = data
-        .load_snapshot(&"s-compact".to_owned())
-        .await
-        .unwrap()
-        .flags;
-    assert!(flags[&history[0].id()].truncated);
-    let epoch_after: (i64,) =
-        sqlx::query_as("SELECT context_cache_epoch FROM threads WHERE id = ?")
-            .bind("s-compact")
-            .fetch_one(&store.database.pool)
-            .await
-            .unwrap();
-    assert_eq!(epoch_after.0, epoch_before.0 + 1);
-
-    // 指向别会话/不存在的条目：整体失败，不留部分写入。
-    let error = data
-        .apply_message_projections(
-            &"s-compact".to_owned(),
-            &[
-                (
-                    history[1].id(),
-                    peri_acp_types::store::MessageFlags {
-                        truncated: true,
-                        excluded: true,
-                        projection: None,
-                    },
-                ),
-                (
-                    peri_acp_types::messages::MessageId::new(),
-                    peri_acp_types::store::MessageFlags::default(),
-                ),
-            ],
-        )
-        .await
-        .unwrap_err();
-    assert!(matches!(
-        error.kind(),
-        peri_acp_types::session_resources::SessionResourceErrorKind::InvalidInput { .. }
-    ));
-    let flags = data
-        .load_snapshot(&"s-compact".to_owned())
-        .await
-        .unwrap()
-        .flags;
-    assert!(
-        !flags
-            .get(&history[1].id())
-            .is_some_and(|flags| flags.truncated),
-        "失败批次不得留下部分 flags"
-    );
-
-    // compaction：追加摘要消息与 flags 一次生效。
-    let summary = BaseMessage::ai("summary");
-    let summary_id = summary.id();
-    data.apply_compaction(
-        &"s-compact".to_owned(),
-        &CompactionChange {
-            flag_updates: vec![(
-                history[2].id(),
-                peri_acp_types::store::MessageFlags {
-                    truncated: false,
-                    excluded: true,
-                    projection: None,
-                },
-            )],
-            appended_messages: vec![summary],
-        },
-    )
-    .await
-    .unwrap();
-    let snapshot = data.load_snapshot(&"s-compact".to_owned()).await.unwrap();
-    assert_eq!(snapshot.payloads.len(), 4);
-    assert_eq!(snapshot.payloads[3].id(), summary_id);
-    assert!(snapshot.flags[&history[2].id()].excluded);
-    assert_eq!(snapshot.meta.message_count, 4);
-
-    // 归属校验：别会话的条目不能在本次 compaction 里被改掉。
-    let error = data
-        .apply_compaction(
-            &"s-compact".to_owned(),
-            &CompactionChange {
-                flag_updates: vec![(
-                    peri_acp_types::messages::MessageId::new(),
-                    peri_acp_types::store::MessageFlags::default(),
-                )],
-                appended_messages: vec![],
-            },
-        )
-        .await
-        .unwrap_err();
-    assert!(!matches!(
-        error.kind(),
-        peri_acp_types::session_resources::SessionResourceErrorKind::NotFound
-    ));
-}
+#[path = "session_history_test.rs"]
+mod history_tests;
 
 #[tokio::test]
-async fn test_rewind_boundaries_are_distinct_and_unknown_cutoffs_change_nothing() {
+async fn close_intent_survives_reopen_and_finishes_without_execution_owner() {
+    use peri_acp_types::session_resources::CloseSettlement;
+
     let (store, data, directory) = database().await;
     let workspace = workspace(&store, directory.path()).await;
-    let cwd = workspace.cwd.to_string_lossy().into_owned();
-    data.save_new_session(&session("s-rewind", &cwd, &workspace, frozen("rewind")))
-        .await
-        .unwrap();
-    let history = payloads(4);
-    data.append_history(&"s-rewind".to_owned(), &history)
-        .await
-        .unwrap();
-
-    // 未知截止点：无变更（保留现有 rewind 语义）。
-    data.rewind_history(
-        &"s-rewind".to_owned(),
-        RewindBoundary::RemoveFrom(peri_acp_types::messages::MessageId::new()),
-    )
+    let id = "close-reopen".to_owned();
+    data.save_new_session(&session(
+        &id,
+        workspace.cwd.to_str().unwrap(),
+        &workspace,
+        frozen("close"),
+    ))
     .await
     .unwrap();
+    data.mark_session_closing(&id).await.unwrap();
+    data.mark_session_closing(&id).await.unwrap();
     assert_eq!(
-        data.load_snapshot(&"s-rewind".to_owned())
-            .await
-            .unwrap()
-            .payloads
-            .len(),
-        4
+        data.close_settlement(&id).await.unwrap(),
+        CloseSettlement::Pending
     );
-
-    // 保留到目标：目标本身保留。
-    data.rewind_history(
-        &"s-rewind".to_owned(),
-        RewindBoundary::KeepThrough(history[1].id()),
-    )
-    .await
-    .unwrap();
-    let snapshot = data.load_snapshot(&"s-rewind".to_owned()).await.unwrap();
-    assert_eq!(
-        snapshot
-            .payloads
-            .iter()
-            .map(PersistedPayload::id)
-            .collect::<Vec<_>>(),
-        vec![history[0].id(), history[1].id()]
-    );
-    assert_eq!(snapshot.meta.message_count, 2);
-
-    // 从目标开始移除：目标及之后的条目都不再存在。
-    data.rewind_history(
-        &"s-rewind".to_owned(),
-        RewindBoundary::RemoveFrom(history[1].id()),
-    )
-    .await
-    .unwrap();
-    let snapshot = data.load_snapshot(&"s-rewind".to_owned()).await.unwrap();
-    assert_eq!(
-        snapshot
-            .payloads
-            .iter()
-            .map(PersistedPayload::id)
-            .collect::<Vec<_>>(),
-        vec![history[0].id()]
-    );
-    assert_eq!(snapshot.meta.message_count, 1);
-}
-
-#[tokio::test]
-async fn test_remove_history_entries_is_exact_and_idempotent() {
-    let (store, data, directory) = database().await;
-    let workspace = workspace(&store, directory.path()).await;
-    let cwd = workspace.cwd.to_string_lossy().into_owned();
-    data.save_new_session(&session("s-remove", &cwd, &workspace, frozen("remove")))
-        .await
-        .unwrap();
-    data.save_new_session(&session("s-other", &cwd, &workspace, frozen("other")))
-        .await
-        .unwrap();
-    let history = payloads(2);
-    let other = payloads(1);
-    data.append_history(&"s-remove".to_owned(), &history)
-        .await
-        .unwrap();
-    data.append_history(&"s-other".to_owned(), &other)
-        .await
-        .unwrap();
-
-    // 别会话的条目不得被本次移除命中。
-    let error = data
-        .remove_history_entries(&"s-remove".to_owned(), &[other[0].id()])
-        .await
-        .unwrap_err();
-    assert!(matches!(
-        error.kind(),
-        peri_acp_types::session_resources::SessionResourceErrorKind::InvalidInput { .. }
-    ));
-    assert_eq!(
-        data.load_snapshot(&"s-other".to_owned())
-            .await
-            .unwrap()
-            .payloads
-            .len(),
-        1
-    );
-
-    data.remove_history_entries(&"s-remove".to_owned(), &[history[0].id()])
-        .await
-        .unwrap();
-    assert_eq!(
-        data.load_snapshot(&"s-remove".to_owned())
-            .await
-            .unwrap()
-            .payloads
-            .len(),
-        1
-    );
-    // 已经不存在的条目：幂等，不报错。
-    data.remove_history_entries(&"s-remove".to_owned(), &[history[0].id()])
-        .await
-        .unwrap();
-}
-
-// ─── metadata、resume、登记 ───────────────────────────────────────────────────
-
-#[tokio::test]
-async fn test_update_meta_applies_only_requested_fields() {
-    let (store, data, directory) = database().await;
-    let workspace = workspace(&store, directory.path()).await;
-    let cwd = workspace.cwd.to_string_lossy().into_owned();
-    data.save_new_session(&session("s-meta", &cwd, &workspace, frozen("meta")))
-        .await
-        .unwrap();
-    let before = data.load_meta(&"s-meta".to_owned()).await.unwrap();
-
-    // 空 patch：不改任何字段，也不刷新时间戳。
-    data.update_meta(&"s-meta".to_owned(), &SessionMetaPatch::default())
-        .await
-        .unwrap();
-    let after = data.load_meta(&"s-meta".to_owned()).await.unwrap();
-    assert_eq!(after.updated_at, before.updated_at);
-
-    data.update_meta(
-        &"s-meta".to_owned(),
-        &SessionMetaPatch {
-            title: Some(Some("renamed".to_owned())),
-            status: Some(AgentStatus::Done),
-            cancel_policy: Some(peri_acp_types::thread::CancelPolicy::Independent),
-            config: Some(Some("{\"k\":1}".to_owned())),
-        },
-    )
-    .await
-    .unwrap();
-    let updated = data.load_meta(&"s-meta".to_owned()).await.unwrap();
-    assert_eq!(updated.title.as_deref(), Some("renamed"));
-    assert_eq!(updated.agent_status, AgentStatus::Done);
-    assert_eq!(
-        updated.cancel_policy,
-        peri_acp_types::thread::CancelPolicy::Independent
-    );
-    assert_eq!(updated.config.as_deref(), Some("{\"k\":1}"));
-    // cwd/parent/计数不是定向更新能改的字段。
-    assert_eq!(updated.cwd, before.cwd);
-    assert_eq!(updated.parent_thread_id, before.parent_thread_id);
-    assert_eq!(updated.created_at, before.created_at);
-
-    data.update_meta(
-        &"s-meta".to_owned(),
-        &SessionMetaPatch {
-            title: Some(None),
-            ..Default::default()
-        },
-    )
-    .await
-    .unwrap();
-    assert!(data
-        .load_meta(&"s-meta".to_owned())
-        .await
-        .unwrap()
-        .title
-        .is_none());
-
-    let error = data
-        .update_meta(
-            &"absent".to_owned(),
-            &SessionMetaPatch {
-                status: Some(AgentStatus::Done),
-                ..Default::default()
-            },
-        )
-        .await
-        .unwrap_err();
-    assert!(matches!(
-        error.kind(),
-        peri_acp_types::session_resources::SessionResourceErrorKind::NotFound
-    ));
-}
-
-#[tokio::test]
-async fn test_child_resume_record_round_trip() {
-    let (store, data, directory) = database().await;
-    let workspace = workspace(&store, directory.path()).await;
-    let cwd = workspace.cwd.to_string_lossy().into_owned();
-    data.save_new_session(&session("s-resume", &cwd, &workspace, frozen("resume")))
-        .await
-        .unwrap();
-    let mut child = session("s-resume-child", &cwd, &workspace, frozen("resume"));
-    child.meta.parent_thread_id = Some("s-resume".to_owned());
-    data.save_child(&ChildSnapshot {
-        target: child,
-        parent_id: "s-resume".to_owned(),
-        root_id: "s-resume".to_owned(),
-        inherited: Default::default(),
-    })
-    .await
-    .unwrap();
-
-    let record = data
-        .load_child_resume_record(&"s-resume-child".to_owned())
-        .await
-        .unwrap();
-    assert_eq!(record.status, AgentStatus::Active);
-    assert!(record.claimed, "active 的 child 视为已被认领");
-
-    data.store_child_resume_record(
-        &"s-resume-child".to_owned(),
-        &crate::sessions::data::ChildResumeRecord {
-            status: AgentStatus::Done,
-            claimed: false,
-        },
-    )
-    .await
-    .unwrap();
-    let record = data
-        .load_child_resume_record(&"s-resume-child".to_owned())
-        .await
-        .unwrap();
-    assert_eq!(record.status, AgentStatus::Done);
-    assert!(!record.claimed);
-}
-
-// ─── 只读与关闭 ───────────────────────────────────────────────────────────────
-
-#[tokio::test]
-async fn test_read_only_store_serves_reads_and_refuses_every_mutation() {
-    let (store, data, directory) = database().await;
-    let workspace = workspace(&store, directory.path()).await;
-    let cwd = workspace.cwd.to_string_lossy().into_owned();
-    data.save_new_session(&session("s-ro", &cwd, &workspace, frozen("ro")))
-        .await
-        .unwrap();
-    let path = directory.path().join("threads.db");
     store.close().await;
-    let reader = SqliteThreadStore::open_existing_read_only(&path)
-        .await
-        .unwrap();
-    let read_only = SqliteSessionData::new(Arc::clone(&reader.database));
 
-    assert!(read_only.load_snapshot(&"s-ro".to_owned()).await.is_ok());
-    let error = read_only
-        .save_new_session(&session("s-ro-2", &cwd, &workspace, frozen("ro")))
-        .await
-        .unwrap_err();
-    assert!(matches!(
-        error.kind(),
-        peri_acp_types::session_resources::SessionResourceErrorKind::ReadOnlyStore
-    ));
-    let error = read_only
-        .append_history(&"s-ro".to_owned(), &payloads(1))
-        .await
-        .unwrap_err();
-    assert!(matches!(
-        error.kind(),
-        peri_acp_types::session_resources::SessionResourceErrorKind::ReadOnlyStore
-    ));
-    let error = read_only.delete_tree(&"s-ro".to_owned()).await.unwrap_err();
-    assert!(matches!(
-        error.kind(),
-        peri_acp_types::session_resources::SessionResourceErrorKind::ReadOnlyStore
-    ));
-    // 收敛检查在只读下不写库：没有未决锚点时报告可重载。
-    assert_eq!(
-        read_only
-            .recover_persistence(&"s-ro".to_owned())
-            .await
-            .unwrap(),
-        PersistenceRecovery::Recovered
-    );
-}
-
-#[tokio::test]
-async fn test_close_stops_writes_and_keeps_history_readable() {
-    let (store, data, directory) = database().await;
-    let workspace = workspace(&store, directory.path()).await;
-    let cwd = workspace.cwd.to_string_lossy().into_owned();
-    data.save_new_session(&session("s-close", &cwd, &workspace, frozen("close")))
-        .await
-        .unwrap();
-
-    data.close().await.unwrap();
-    let error = data
-        .append_history(&"s-close".to_owned(), &payloads(1))
-        .await
-        .unwrap_err();
-    assert!(
-        matches!(
-            error.kind(),
-            peri_acp_types::session_resources::SessionResourceErrorKind::Unavailable { .. }
-        ),
-        "{error}"
-    );
-    assert!(data.load_snapshot(&"s-close".to_owned()).await.is_ok());
-}
-
-#[tokio::test]
-async fn test_dirty_execution_generation_survives_a_port_restart() {
-    let (_store, data, directory) = database().await;
-    let store = SqliteThreadStore::new(directory.path().join("threads.db"))
-        .await
-        .unwrap();
-    let workspace = workspace(&store, directory.path()).await;
-    let cwd = workspace.cwd.to_string_lossy().into_owned();
-    data.save_new_session(&session("s-dirty", &cwd, &workspace, frozen("dirty")))
-        .await
-        .unwrap();
-    store
-        .acquire_execution_lease(&"s-dirty".to_owned())
-        .await
-        .unwrap();
-    drop(store);
-    assert!(data.load_snapshot(&"s-dirty".to_owned()).await.is_ok());
-
-    // 未 clean 的代际跨实例保留：精确代际解除仍然可用（执行面语义，数据侧只提供事实）。
     let reopened = SqliteThreadStore::new(directory.path().join("threads.db"))
         .await
         .unwrap();
-    let generation: (i64, bool) =
-        sqlx::query_as("SELECT generation, clean FROM execution_runs WHERE thread_id = 's-dirty'")
-            .fetch_one(&reopened.database.pool)
+    let successor = SqliteSessionData::new(Arc::clone(&reopened.database));
+    assert_eq!(
+        successor.close_settlement(&id).await.unwrap(),
+        CloseSettlement::Pending
+    );
+    successor.finish_close(&id).await.unwrap();
+    assert_eq!(
+        successor.close_settlement(&id).await.unwrap(),
+        CloseSettlement::Finished
+    );
+    assert!(!successor.is_session_closing(&id).await.unwrap());
+    assert!(successor.finish_close(&id).await.is_err());
+    assert_eq!(
+        successor
+            .close_settlement(&"missing".to_owned())
             .await
-            .unwrap();
-    assert!(!generation.1, "Drop 不代表 clean");
-    reopened
-        .reset_dirty_execution(&RecoveryRequiredDetails {
-            thread_id: "s-dirty".to_owned(),
-            generation: generation.0,
-        })
+            .unwrap(),
+        CloseSettlement::Unknown
+    );
+    assert!(successor.finish_close(&"missing".to_owned()).await.is_err());
+    assert!(successor.load_snapshot(&id).await.is_ok());
+}
+
+#[tokio::test]
+async fn frozen_commit_is_write_once_and_bound_draft_revocation_is_guarded() {
+    use peri_acp_types::session_resources::NewSessionDraft;
+
+    let (store, data, directory) = database().await;
+    let workspace = workspace(&store, directory.path()).await;
+    let target = session(
+        "bound-draft",
+        workspace.cwd.to_str().unwrap(),
+        &workspace,
+        frozen("ignored"),
+    );
+    let id = target.thread_id.clone();
+    data.save_new_session_draft(&NewSessionDraft {
+        thread_id: target.thread_id,
+        created_at: target.created_at,
+        meta: target.meta,
+        binding: target.binding,
+    })
+    .await
+    .unwrap();
+    data.commit_frozen(&id, &frozen("winner")).await.unwrap();
+    assert!(data
+        .commit_frozen(&id, &frozen("replacement"))
         .await
-        .unwrap();
+        .is_err());
+    assert!(data.revoke_unpublished_draft(&id).await.is_err());
+    assert_eq!(
+        data.load_snapshot(&id).await.unwrap().frozen,
+        FrozenState::Present(frozen("winner"))
+    );
+    data.revoke_unpublished_session(&id).await.unwrap();
+    assert!(!data.session_exists(&id).await.unwrap());
 }

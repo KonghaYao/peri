@@ -52,6 +52,8 @@ InputArea
 
 ### Agent 输出
 
+真实执行与交互许可由宿主开始/结束身份驱动，不由首 token 或 loading 反推。外部实际 attempt（包括内部 continuation）经 `ExecutionStarted` 提供 session mailbox generation 与非空 request ID；managed 用户输入保留已有开始事件，共用客户端执行身份规则。定时执行前审批先建立独立身份并在审批结束后关闭，实际执行使用另一身份。陈旧终态或提交失败只能结算自己的身份，不能直接写全局 loading。输入回滚记录独立绑定提交请求，external execution 开始不能借用待提交文本的回滚许可，其结束或取消也不能丢弃另一个请求的回滚记录。挂起信号与恢复后的渲染输出共享 FIFO，不能从另一条状态通道越过新输出。实施验证见 `spec/issues/2026-10-08-async-execution-chain-fixes.md`。
+
 ```text
 Agent canonical event
   → ACP mapper / session notification
@@ -187,8 +189,9 @@ SubAgent、后台 task、Cron、Workflow 和 plugin 数据不应混入 `CurrentT
 5. **终态完整**：完成、失败、取消、挂起和 transport terminal 均清理 loading 与 transient owner。
 6. **live/replay 等价**：同一语义经相同 reducer 收敛；重放不恢复失效的可执行 interaction。
 7. **前端隔离**：Agent/ACP 不依赖 `TuiRenderUnit`、atom、layout 或渲染缓存。
-8. **安全显示**：协议 payload 按不可信输入处理；不显示 secret，不把任意结构化数据直接 dump
-   到 transcript。
+8. **安全显示**：协议 payload 按不可信输入处理，不把任意成功业务数据直接 dump 到
+   transcript；运行时诊断按 ARC-SECRET-001 保留实际内容，不承诺界面无凭据数据。
+   认证、受众授权、限长和终端控制字符处理独立有效。
 9. **增量渲染**：流式更新只失效变化 slot；viewport 外内容不做无界重复 wrap/clone。
 10. **可验证变更**：跨层事件修改同步更新协议、mapper、TUI decoder/reducer、caps 和测试。
 

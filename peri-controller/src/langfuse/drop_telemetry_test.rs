@@ -48,6 +48,10 @@ fn test_registry_evicts_oldest_trace_at_capacity() {
 #[test]
 fn test_error_reason_mapping_is_stable() {
     assert_eq!(
+        LangfuseDropReason::from_error(&LangfuseError::PayloadTooLarge { limit_bytes: 1 }),
+        Some(LangfuseDropReason::OversizedEvent)
+    );
+    assert_eq!(
         LangfuseDropReason::from_error(&LangfuseError::QueueFull),
         Some(LangfuseDropReason::DropNewQueueFull)
     );

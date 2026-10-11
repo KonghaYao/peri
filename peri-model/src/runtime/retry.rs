@@ -154,7 +154,7 @@ impl RetryConfig {
     }
 }
 
-/// 可安全发送给上层的 retry 观测；不包含 request、response、Agent 或 telemetry 类型。
+/// 可发送给上层的 retry 观测；不包含 request、response、Agent 或 telemetry 类型。
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct RetryObservation {
     attempt: u32,
@@ -196,13 +196,13 @@ impl RetryObservation {
         self.error_kind
     }
 
-    /// Safe facts from the failed attempt.  No retryability decision is
+    /// Bounded facts from the failed attempt.  No retryability decision is
     /// exposed; the policy remains owned by `RetryConfig`.
     pub fn diagnostic(&self) -> Option<&crate::ModelErrorDiagnostic> {
         self.diagnostic.as_ref()
     }
 
-    /// Derive the retry class and safe facts from one model error. This keeps
+    /// Derive the retry class and bounded facts from one model error. This keeps
     /// the observer from receiving two independently supplied classifications.
     pub fn from_model_error(
         attempt: u32,
@@ -228,12 +228,18 @@ impl RetryObservation {
     }
 }
 
-/// 上层可注册的、安全 retry 观测回调。
+/// 上层可注册的、retry 观测回调。
 ///
 /// 回调只接收 attempt、最大尝试数、实际退避与失败分类，不会收到请求、响应、headers 或 telemetry
 /// 对象。
 pub trait RetryObserver: Send + Sync {
     fn on_retry(&self, observation: RetryObservation);
+
+    /// 可见输出后的中断观测（delay 为零，不表示将重试）。
+    /// 返回 true 表示已记录诊断；默认不处理，由 Agent 边界兜底。
+    fn on_interrupted(&self, _observation: RetryObservation) -> bool {
+        false
+    }
 }
 
 impl<F> RetryObserver for F
@@ -347,11 +353,12 @@ async fn run_retrying_stream(
                 }
                 Some(Err(error)) if error.is_cancelled() => return,
                 Some(Err(error)) if visible => {
-                    let error = if error.transport_kind().is_some() {
-                        interrupted_from(&error)
-                    } else {
-                        error
-                    };
+                    let error = observe_interruption(
+                        observer.as_ref(),
+                        attempt_number,
+                        config.max_attempts(),
+                        error,
+                    );
                     let _ = send_event(
                         &sender,
                         &cancellation,
@@ -380,13 +387,17 @@ async fn run_retrying_stream(
                     break;
                 }
                 None if usage_after_visible => {
+                    let error = observe_interruption(
+                        observer.as_ref(),
+                        attempt_number,
+                        config.max_attempts(),
+                        ModelError::protocol(crate::ProtocolErrorKind::StreamEndedWithoutCompleted),
+                    );
                     let _ = send_event(
                         &sender,
                         &cancellation,
                         Ok(ModelStreamEvent::Interrupted {
-                            error: ModelError::protocol(
-                                crate::ProtocolErrorKind::StreamEndedWithoutCompleted,
-                            ),
+                            error,
                             attempts: attempt_number,
                             max_attempts: config.max_attempts(),
                         }),
@@ -395,11 +406,21 @@ async fn run_retrying_stream(
                     return;
                 }
                 None if visible => {
+                    let source = observe_interruption(
+                        observer.as_ref(),
+                        attempt_number,
+                        config.max_attempts(),
+                        ModelError::protocol(crate::ProtocolErrorKind::StreamEndedWithoutCompleted),
+                    );
+                    let error = interrupted_from(&source).with_interruption_diagnostic(
+                        source.diagnostic(),
+                        source.interruption_logged(),
+                    );
                     let _ = send_event(
                         &sender,
                         &cancellation,
                         Ok(ModelStreamEvent::Interrupted {
-                            error: ModelError::stream_interrupted(None::<&str>, None::<&str>),
+                            error,
                             attempts: attempt_number,
                             max_attempts: config.max_attempts(),
                         }),
@@ -463,7 +484,7 @@ async fn retry_or_finish(
     tokio::select! {
         biased;
         _ = cancellation.cancelled() => false,
-        _ = tokio::time::sleep(delay) => true,
+        _ = peri_time::sleep(delay) => true,
     }
 }
 
@@ -479,8 +500,48 @@ async fn send_event(
     }
 }
 
+fn observe_interruption(
+    observer: Option<&Arc<dyn RetryObserver>>,
+    attempts: u32,
+    max_attempts: u32,
+    error: ModelError,
+) -> ModelError {
+    let diagnostic = error.diagnostic();
+    let observation = RetryObservation {
+        attempt: attempts,
+        max_attempts,
+        delay: Duration::ZERO,
+        error_kind: error.retry_error_kind().unwrap_or_else(|| {
+            if error.transport_kind().is_some() {
+                RetryErrorKind::Transport
+            } else if error.http_status_code().is_some() {
+                RetryErrorKind::HttpStatus
+            } else {
+                RetryErrorKind::Protocol
+            }
+        }),
+        diagnostic: Some(diagnostic.clone()),
+    };
+    let logged = observer.is_some_and(|observer| observer.on_interrupted(observation));
+    let error = if error.transport_kind().is_some() {
+        interrupted_from(&error)
+    } else {
+        error
+    };
+    error.with_interruption_diagnostic(diagnostic, logged)
+}
+
 fn interrupted_from(error: &ModelError) -> ModelError {
-    ModelError::stream_interrupted(error.provider(), error.request_id())
+    let diagnostic = error.diagnostic();
+    let mut interrupted = ModelError::stream_interrupted(error.provider(), error.request_id())
+        .with_causes(diagnostic.causes().iter().cloned());
+    if let Some(message) = diagnostic.message() {
+        interrupted = interrupted.with_message(message);
+    }
+    if let Some(body) = diagnostic.body() {
+        interrupted = interrupted.with_body(body);
+    }
+    interrupted
 }
 
 #[cfg(test)]

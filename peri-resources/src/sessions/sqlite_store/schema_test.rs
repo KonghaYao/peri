@@ -6,14 +6,145 @@ use peri_acp_types::{
     messages::BaseMessage,
     store::{serialize_persisted_payload, PersistedPayload, ThreadStore},
     thread::ThreadMeta,
-    workspace::{ScopedThreadQuery, ThreadScope},
+    workspace::{ScopedThreadQuery, ThreadScope, WorkspaceError},
 };
 use sqlx::{sqlite::SqliteConnectOptions, AssertSqlSafe, Connection};
 use std::path::Path;
 
-/// [回归测试] 实际旧库包含 thread_goals，不能因额外业务表而拒绝启动。
+/// 已退役的运行时状态表：任何一个都不该出现在当前形状的库里。
+const RECOVERY_TABLES: &[&str] = &[
+    "session_work_commands",
+    "session_work_state",
+    "session_work_events",
+    "session_work_receipts",
+    "session_control_state",
+    "session_control_receipts",
+];
+
+async fn assert_no_recovery_tables(pool: &sqlx::SqlitePool) {
+    for table in RECOVERY_TABLES {
+        let count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM sqlite_schema WHERE name = ?1")
+            .bind(table)
+            .fetch_one(pool)
+            .await
+            .unwrap();
+        assert_eq!(count, 0, "{table}");
+    }
+}
+
 #[tokio::test]
-async fn test_legacy_with_goals_upgrades_and_preserves_auxiliary_data() {
+async fn current_store_has_eight_business_tables_and_normal_history() {
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("threads.db");
+    let store = SqliteThreadStore::new(&path).await.unwrap();
+    assert_no_recovery_tables(&store.database.pool).await;
+    let count: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*) FROM sqlite_schema WHERE type = 'table' AND name NOT LIKE 'sqlite_%'",
+    )
+    .fetch_one(&store.database.pool)
+    .await
+    .unwrap();
+    // 执行登记并入 `workspaces`：新建库只有八张业务表，没有登记表，也没有运行时状态表。
+    assert_eq!(count, 8);
+    let registrations: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*) FROM sqlite_schema WHERE type = 'table' AND name = 'legacy_execution_registrations'",
+    )
+    .fetch_one(&store.database.pool)
+    .await
+    .unwrap();
+    assert_eq!(registrations, 0);
+    let id = store
+        .create_thread(ThreadMeta::new_at(
+            directory.path().to_string_lossy().into_owned(),
+            peri_time::now_wall(),
+        ))
+        .await
+        .unwrap();
+    store
+        .append_message(&id, BaseMessage::human("first"))
+        .await
+        .unwrap();
+    store.close().await;
+    let reopened = SqliteThreadStore::new(&path).await.unwrap();
+    assert_eq!(
+        reopened.load_context(&id).await.unwrap()[0].content(),
+        "first"
+    );
+    reopened
+        .append_message(&id, BaseMessage::human("next"))
+        .await
+        .unwrap();
+    let history = reopened.load_context(&id).await.unwrap();
+    assert_eq!(history.len(), 2);
+    assert_eq!(history[1].content(), "next");
+    reopened.close().await;
+}
+
+/// 压缩掉的开发期代数（12..19）一律拒绝：不迁移、不改写，库留在原位由上一版二进制打开。
+#[tokio::test]
+async fn compressed_dev_generations_are_refused_without_touching_the_database() {
+    for version in 12..=19_i64 {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("threads.db");
+        let store = SqliteThreadStore::new(&path).await.unwrap();
+        let id = store
+            .create_thread(ThreadMeta::new_at(
+                directory.path().to_string_lossy().into_owned(),
+                peri_time::now_wall(),
+            ))
+            .await
+            .unwrap();
+        store
+            .append_message(&id, BaseMessage::human("preserved"))
+            .await
+            .unwrap();
+        sqlx::query(AssertSqlSafe(format!("PRAGMA user_version = {version}")))
+            .execute(&store.database.pool)
+            .await
+            .unwrap();
+        let before: Vec<(String, String, Option<String>)> =
+            sqlx::query_as("SELECT type, name, sql FROM sqlite_schema ORDER BY type, name")
+                .fetch_all(&store.database.pool)
+                .await
+                .unwrap();
+        store.close().await;
+
+        let error = match SqliteThreadStore::new(&path).await {
+            Ok(_) => panic!("unexpected upgrade of schema {version}"),
+            Err(error) => error,
+        };
+        assert!(matches!(
+            error.downcast_ref::<WorkspaceError>(),
+            Some(WorkspaceError::UnsupportedSchemaVersion { found, supported })
+                if *found == version && *supported == CURRENT_SCHEMA_VERSION
+        ));
+
+        let mut connection = SqliteConnection::connect_with(
+            &SqliteConnectOptions::new().filename(&path).read_only(true),
+        )
+        .await
+        .unwrap();
+        let after: Vec<(String, String, Option<String>)> =
+            sqlx::query_as("SELECT type, name, sql FROM sqlite_schema ORDER BY type, name")
+                .fetch_all(&mut connection)
+                .await
+                .unwrap();
+        assert_eq!(after, before, "{version}");
+        let (stored,): (i64,) = sqlx::query_as("PRAGMA user_version")
+            .fetch_one(&mut connection)
+            .await
+            .unwrap();
+        assert_eq!(stored, version);
+    }
+}
+
+/// [回归测试] 实际旧库包含 thread_goals，不能因额外业务表而拒绝启动。
+///
+/// 夹具里带一条 v9 代的退役索引 `idx_threads_parent_thread_id`：`threads` 在升级里被重建，
+/// 重建表上的索引以 canonical 声明为准（见 `schema_shape` 的边界说明），因此它随重建消失，
+/// 由这条测试显式记录，而不是靠实现的副作用。
+#[tokio::test]
+async fn test_legacy_with_goals_upgrades_preserving_goals_and_extensions() {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("threads.db");
     let mut connection = SqliteConnection::connect_with(
@@ -37,16 +168,11 @@ async fn test_legacy_with_goals_upgrades_and_preserves_auxiliary_data() {
         INSERT INTO extension_state VALUES ('state', 'preserved extension bytes');",
     ).execute(&mut connection).await.unwrap();
     let before = history_bytes(&mut connection).await;
-    let auxiliary_query =
-        "SELECT json_array(thread_id, goal_id, objective, status, token_budget, tokens_used,
-        time_used_seconds, created_at_ms, updated_at_ms) FROM thread_goals";
-    let goals: (String,) = sqlx::query_as(AssertSqlSafe(auxiliary_query))
-        .fetch_one(&mut connection)
-        .await
-        .unwrap();
-    let extra_schema: Vec<(String, Option<String>)> = sqlx::query_as(
-        "SELECT name, sql FROM sqlite_schema WHERE name IN ('thread_goals', 'extension_state', 'idx_threads_parent_thread_id') ORDER BY name",
-    ).fetch_all(&mut connection).await.unwrap();
+    let before_extension: Vec<(String, Option<String>)> =
+        sqlx::query_as("SELECT name, sql FROM sqlite_schema WHERE name = 'extension_state'")
+            .fetch_all(&mut connection)
+            .await
+            .unwrap();
     connection.close().await.unwrap();
     // 调用应用启动所用的 Resources 门面，复现相同的写打开入口。
     let (store, _facade) = crate::sessions::open_store_and_facade_for_tests(path.clone())
@@ -71,15 +197,27 @@ async fn test_legacy_with_goals_upgrades_and_preserves_auxiliary_data() {
     )
     .await
     .unwrap();
-    let after_goals: (String,) = sqlx::query_as(AssertSqlSafe(auxiliary_query))
-        .fetch_one(&mut connection)
-        .await
-        .unwrap();
-    assert_eq!(after_goals, goals);
-    let after_schema: Vec<(String, Option<String>)> = sqlx::query_as(
-        "SELECT name, sql FROM sqlite_schema WHERE name IN ('thread_goals', 'extension_state', 'idx_threads_parent_thread_id') ORDER BY name",
-    ).fetch_all(&mut connection).await.unwrap();
-    assert_eq!(after_schema, extra_schema);
+    let (goals,): (i64,) =
+        sqlx::query_as("SELECT COUNT(*) FROM sqlite_schema WHERE name = 'thread_goals'")
+            .fetch_one(&mut connection)
+            .await
+            .unwrap();
+    assert_eq!(goals, 1);
+    let after_extension: Vec<(String, Option<String>)> =
+        sqlx::query_as("SELECT name, sql FROM sqlite_schema WHERE name = 'extension_state'")
+            .fetch_all(&mut connection)
+            .await
+            .unwrap();
+    assert_eq!(after_extension, before_extension);
+    // `threads` 被重建到 canonical 形状：旧代留下的退役索引随重建消失，索引集合以
+    // canonical 的声明为准（迁移末尾整表重放一次）。索引是派生对象，不承载数据。
+    let (retired,): (i64,) = sqlx::query_as(
+        "SELECT COUNT(*) FROM sqlite_schema WHERE name = 'idx_threads_parent_thread_id'",
+    )
+    .fetch_one(&mut connection)
+    .await
+    .unwrap();
+    assert_eq!(retired, 0);
     let (value,): (String,) =
         sqlx::query_as("SELECT value FROM extension_state WHERE key = 'state'")
             .fetch_one(&mut connection)
@@ -95,15 +233,16 @@ async fn test_legacy_with_goals_upgrades_and_preserves_auxiliary_data() {
     connection.close().await.unwrap();
     let workspace = store.resolve_workspace(dir.path()).await.unwrap();
     let id = store
-        .create_bound_thread(ThreadMeta::new(dir.path().to_str().unwrap()), &workspace)
+        .create_bound_thread(
+            ThreadMeta::new_at(dir.path().to_str().unwrap(), peri_time::now_wall()),
+            &workspace,
+        )
         .await
         .unwrap();
-    let lease = store.acquire_execution_lease(&id).await.unwrap();
     store
         .append_messages(&id, &[BaseMessage::human("新会话")])
         .await
         .unwrap();
-    lease.mark_clean().await.unwrap();
 }
 
 #[tokio::test]
@@ -168,43 +307,52 @@ async fn legacy_database(path: &Path) -> SqliteConnection {
     connection
 }
 
-/// [回归测试] 默认读写必须沿用原数据库，结构升级不能丢失历史或自动推断旧归属。
+/// [回归测试] 默认读写沿用原数据库，升级保留历史、不补造旧绑定，执行代际独立记录。
 #[tokio::test]
 async fn test_single_database_upgrade_preserves_history_and_binds_only_new_sessions() {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("threads.db");
-    legacy_database(&path).await.close().await.unwrap();
+    let mut connection = legacy_database(&path).await;
+    sqlx::raw_sql(
+        "ALTER TABLE threads ADD COLUMN config TEXT;
+        UPDATE threads SET config = '{\"model\":\"legacy\"}' WHERE id = 'old-session';",
+    )
+    .execute(&mut connection)
+    .await
+    .unwrap();
+    let history: Vec<(String, String)> = sqlx::query_as(
+        "SELECT message_id, content FROM messages WHERE thread_id = 'old-session' ORDER BY rowid",
+    )
+    .fetch_all(&mut connection)
+    .await
+    .unwrap();
+    connection.close().await.unwrap();
     let store = SqliteThreadStore::new(&path).await.unwrap();
     let old_id = "old-session".to_owned();
     let old = store.load_meta(&old_id).await.unwrap();
     assert_eq!(old.title.as_deref(), Some("旧会话"));
     assert_eq!(old.cwd, "/old/worktree");
     assert_eq!(old.message_count, 1);
+    assert_eq!(old.config.as_deref(), Some(r#"{"model":"legacy"}"#));
     assert_eq!(
         store.load_messages(&old_id).await.unwrap()[0].content(),
         "保留的历史消息"
     );
     assert_eq!(store.load_session_binding(&old_id).await.unwrap(), None);
-    assert!(matches!(
-        store
-            .acquire_execution_lease(&old_id)
-            .await
-            .err()
-            .unwrap()
-            .downcast_ref::<WorkspaceError>(),
-        Some(WorkspaceError::BindingMissing)
-    ));
+    assert_eq!(store.load_session_binding(&old_id).await.unwrap(), None);
+    assert_eq!(store.load_frozen_snapshot(&old_id).await.unwrap(), None);
     let workspace = store.resolve_workspace(dir.path()).await.unwrap();
     let id = store
-        .create_bound_thread(ThreadMeta::new(dir.path().to_str().unwrap()), &workspace)
+        .create_bound_thread(
+            ThreadMeta::new_at(dir.path().to_str().unwrap(), peri_time::now_wall()),
+            &workspace,
+        )
         .await
         .unwrap();
-    let lease = store.acquire_execution_lease(&id).await.unwrap();
     store
         .append_messages(&id, &[BaseMessage::human("新会话")])
         .await
         .unwrap();
-    lease.mark_clean().await.unwrap();
     store.close().await;
     let reopened = SqliteThreadStore::new(&path).await.unwrap();
     let page = reopened
@@ -228,7 +376,20 @@ async fn test_single_database_upgrade_preserves_history_and_binds_only_new_sessi
         reopened.validate_session_binding(&id).await.unwrap(),
         workspace
     );
-    assert_eq!(reopened.load_meta(&old_id).await.unwrap().cwd, old.cwd);
+    assert_eq!(
+        serde_json::to_value(reopened.load_meta(&old_id).await.unwrap()).unwrap(),
+        serde_json::to_value(&old).unwrap()
+    );
+    let persisted_history: Vec<(String, String)> = sqlx::query_as(
+        "SELECT message_id, content FROM messages WHERE thread_id = ?1 ORDER BY rowid",
+    )
+    .bind(&old_id)
+    .fetch_all(&reopened.database.pool)
+    .await
+    .unwrap();
+    assert_eq!(persisted_history, history);
+    assert_eq!(reopened.load_session_binding(&old_id).await.unwrap(), None);
+    assert_eq!(reopened.load_frozen_snapshot(&old_id).await.unwrap(), None);
     let (version,): (i64,) = sqlx::query_as("PRAGMA user_version")
         .fetch_one(&reopened.database.pool)
         .await
@@ -262,7 +423,7 @@ async fn test_single_database_upgrade_preserves_all_existing_columns_and_context
         ALTER TABLE messages ADD COLUMN truncated BOOLEAN NOT NULL DEFAULT 0;
         ALTER TABLE messages ADD COLUMN excluded BOOLEAN NOT NULL DEFAULT 0;
         ALTER TABLE messages ADD COLUMN projection TEXT;
-        UPDATE threads SET parent_thread_id = 'old-parent', snapshot_at_message_id = 'snapshot',
+        UPDATE threads SET parent_thread_id = NULL, snapshot_at_message_id = 'snapshot',
             hidden = 1, cancel_policy = 'detach', config = 'config bytes', cached_context = 'cache bytes',
             frozen_context = 'frozen bytes', inherited_context = 'inherited bytes', agent_status = 'done',
             context_cache_epoch = 7;
@@ -289,8 +450,8 @@ async fn test_single_database_upgrade_preserves_all_existing_columns_and_context
 async fn history_bytes(connection: &mut SqliteConnection) -> (String, String) {
     let (thread,): (String,) = sqlx::query_as(
         "SELECT json_array(id, title, cwd, created_at, updated_at, message_count, parent_thread_id,
-            snapshot_at_message_id, hidden, cancel_policy, config, cached_context, frozen_context,
-            inherited_context, agent_status, context_cache_epoch) FROM threads WHERE id = 'old-session'",
+            snapshot_at_message_id, hidden, cancel_policy, config, frozen_context,
+            inherited_context, agent_status) FROM threads WHERE id = 'old-session'",
     )
     .fetch_one(&mut *connection)
     .await
@@ -607,13 +768,12 @@ async fn test_schema3_identity_migration_reuses_binding_and_survives_reopen() {
         workspace.workspace_id.to_string(),
         "22222222-2222-4222-8222-222222222222"
     );
-    let execution: (i64, bool) = sqlx::query_as(
-        "SELECT generation, clean FROM execution_runs WHERE thread_id = 'old-session'",
-    )
-    .fetch_one(&store.database.pool)
-    .await
-    .unwrap();
-    assert_eq!(execution, (7, false));
+    let execution: (i64,) =
+        sqlx::query_as("SELECT COUNT(*) FROM sqlite_schema WHERE name = 'execution_runs'")
+            .fetch_one(&store.database.pool)
+            .await
+            .unwrap();
+    assert_eq!(execution, (0,));
     assert_eq!(
         store
             .load_messages(&"old-session".to_owned())
@@ -664,14 +824,36 @@ async fn test_schema3_identity_migration_reuses_binding_and_survives_reopen() {
     reopened.close().await;
 }
 
-/// 记录 v2 升级不能改动的身份与执行数据。
-async fn identity_and_execution_bytes(connection: &mut SqliteConnection) -> Vec<String> {
+/// 记录 v2 升级不能改动的身份数据：项目、登记空间与绑定三段的原样值。
+///
+/// 登记空间的**载体与列名**随版本变化：v12 之前是 `workspaces(root, root_identity)`，
+/// v12..v18 是改名为 `legacy_execution_registrations` 的原表，v19 起并回
+/// `workspaces(path, identity)`。同一 id 下的五元组 (id, project_id, 根, 根身份, 发现)
+/// 在搬运中逐字不变，所以投影按当前形状选择，跨版本的比较仍然落在同一份事实上。
+async fn identity_bytes(connection: &mut SqliteConnection) -> Vec<String> {
+    let registrations = column_names(connection, "legacy_execution_registrations")
+        .await
+        .unwrap();
+    let workspaces = column_names(connection, "workspaces").await.unwrap();
+    let registration_query = match (registrations.is_empty(), workspaces.contains("root")) {
+        (false, _) => {
+            "SELECT json_array(id, project_id, root, root_identity, discovery)
+             FROM legacy_execution_registrations ORDER BY id"
+        }
+        (true, true) => {
+            "SELECT json_array(id, project_id, root, root_identity, discovery)
+             FROM workspaces ORDER BY id"
+        }
+        (true, false) => {
+            "SELECT json_array(id, project_id, path, identity, discovery)
+             FROM workspaces ORDER BY id"
+        }
+    };
     let mut values = Vec::new();
     for query in [
         "SELECT json_array(id, locator, object_identity) FROM projects ORDER BY id",
-        "SELECT json_array(id, project_id, root, root_identity, discovery) FROM workspaces ORDER BY id",
+        registration_query,
         "SELECT json_array(thread_id, schema_version, project_id, workspace_id, relative_cwd) FROM session_bindings ORDER BY thread_id",
-        "SELECT json_array(thread_id, generation, clean) FROM execution_runs ORDER BY thread_id",
     ] {
         let rows: Vec<(String,)> = sqlx::query_as(AssertSqlSafe(query))
             .fetch_all(&mut *connection)
@@ -683,7 +865,7 @@ async fn identity_and_execution_bytes(connection: &mut SqliteConnection) -> Vec<
 }
 
 #[tokio::test]
-async fn test_version2_upgrade_removes_required_revision_and_preserves_execution_state() {
+async fn test_version2_upgrade_removes_required_revision_and_preserves_identity() {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("threads.db");
     let mut connection = version2_database(&path).await;
@@ -697,7 +879,7 @@ async fn test_version2_upgrade_removes_required_revision_and_preserves_execution
     let store = SqliteThreadStore::new(&path).await.unwrap();
     let mut connection = store.database.pool.acquire().await.unwrap();
     assert_eq!(history_bytes(&mut connection).await, before_history);
-    let migrated_identity = identity_and_execution_bytes(&mut connection).await;
+    let migrated_identity = identity_bytes(&mut connection).await;
     assert!(migrated_identity
         .iter()
         .all(|value| !value.contains("birth_")));
@@ -729,10 +911,12 @@ async fn test_version2_upgrade_removes_required_revision_and_preserves_execution
     assert!(old.cwd_relative_to_workspace.as_os_str().is_empty());
     let workspace = store.resolve_workspace(dir.path()).await.unwrap();
     let id = store
-        .create_bound_thread(ThreadMeta::new(dir.path().to_str().unwrap()), &workspace)
+        .create_bound_thread(
+            ThreadMeta::new_at(dir.path().to_str().unwrap(), peri_time::now_wall()),
+            &workspace,
+        )
         .await
         .unwrap();
-    let owner = store.acquire_execution_lease(&id).await.unwrap();
     assert_eq!(
         store.validate_session_binding(&id).await.unwrap(),
         workspace
@@ -746,7 +930,6 @@ async fn test_version2_upgrade_removes_required_revision_and_preserves_execution
             .revision,
         1
     );
-    owner.mark_clean().await.unwrap();
     store.close().await;
 }
 
@@ -765,7 +948,7 @@ async fn test_version2_failed_column_drop_preserves_schema_version_and_data() {
             .fetch_all(&mut connection)
             .await
             .unwrap();
-    let before_data = identity_and_execution_bytes(&mut connection).await;
+    let before_data = identity_bytes(&mut connection).await;
     connection.close().await.unwrap();
     let error = SqliteThreadStore::new(&path).await.err().unwrap();
     let message = error.to_string();
@@ -784,10 +967,7 @@ async fn test_version2_failed_column_drop_preserves_schema_version_and_data() {
             .await
             .unwrap();
     assert_eq!(after_schema, before_schema);
-    assert_eq!(
-        identity_and_execution_bytes(&mut connection).await,
-        before_data
-    );
+    assert_eq!(identity_bytes(&mut connection).await, before_data);
     let (version,): (i64,) = sqlx::query_as("PRAGMA user_version")
         .fetch_one(&mut connection)
         .await
@@ -854,404 +1034,5 @@ async fn test_identity_migration_corrupt_discovery_rolls_back_schema() {
     assert_eq!(version, 2, "损坏 discovery 必须回滚版本号");
 }
 
-/// 现行 schema 4：身份载荷已规范化，登记表仍保留单列唯一约束。
-async fn version4_database(path: &Path, root: &Path) -> SqliteConnection {
-    let mut connection = version3_database(path, root).await;
-    let (identity,): (String,) = sqlx::query_as("SELECT object_identity FROM projects")
-        .fetch_one(&mut connection)
-        .await
-        .unwrap();
-    let identity =
-        super::super::discovery::normalize_identity_json(&serde_json::from_str(&identity).unwrap())
-            .unwrap();
-    sqlx::query("UPDATE projects SET object_identity = ?")
-        .bind(identity)
-        .execute(&mut connection)
-        .await
-        .unwrap();
-    let (root_identity, discovery): (String, String) =
-        sqlx::query_as("SELECT root_identity, discovery FROM workspaces")
-            .fetch_one(&mut connection)
-            .await
-            .unwrap();
-    let root_identity = super::super::discovery::normalize_identity_json(
-        &serde_json::from_str(&root_identity).unwrap(),
-    )
-    .unwrap();
-    let discovery = super::super::discovery::normalize_discovery_json(
-        &serde_json::from_str(&discovery).unwrap(),
-    )
-    .unwrap();
-    sqlx::query("UPDATE workspaces SET root_identity = ?, discovery = ?")
-        .bind(root_identity)
-        .bind(discovery)
-        .execute(&mut connection)
-        .await
-        .unwrap();
-    sqlx::query("PRAGMA user_version = 4")
-        .execute(&mut connection)
-        .await
-        .unwrap();
-    connection
-}
-
-/// [回归测试] schema 4 的单列唯一约束把「同一路径上的另一个文件对象」挡在登记之外，
-/// 目录被替换或换位后该路径无法建立新会话。升级只把登记键放宽为组合键：行、绑定、
-/// 外键、线程行与消息（含 frozen snapshot）都保持原样，同一定位 + 同一证据仍然唯一。
-#[tokio::test]
-async fn test_version4_upgrade_relaxes_registration_keys_and_preserves_rows() {
-    let dir = tempfile::tempdir().unwrap();
-    let path = dir.path().join("threads.db");
-    let status = std::process::Command::new("git")
-        .args(["init", "-q", dir.path().to_str().unwrap()])
-        .status()
-        .unwrap();
-    assert!(status.success(), "Git fixture initialization failed");
-    let mut connection = version4_database(&path, dir.path()).await;
-    // 升级前：同一 root 上的第二个文件对象无法登记。
-    let blocked = sqlx::query(
-        "INSERT INTO workspaces (id, project_id, root, root_identity, discovery)
-         SELECT '33333333-3333-4333-8333-333333333333', project_id, root, '{\"device\":9,\"inode\":9}', discovery
-         FROM workspaces",
-    )
-    .execute(&mut connection)
-    .await;
-    assert!(blocked.is_err(), "schema 4 的单列唯一约束必须仍然存在");
-    let before = identity_and_execution_bytes(&mut connection).await;
-    let before_history = history_bytes(&mut connection).await;
-    connection.close().await.unwrap();
-
-    let store = SqliteThreadStore::new(&path).await.unwrap();
-    let (version,): (i64,) = sqlx::query_as("PRAGMA user_version")
-        .fetch_one(&store.database.pool)
-        .await
-        .unwrap();
-    assert_eq!(version, CURRENT_SCHEMA_VERSION);
-
-    // 原有登记、绑定与历史原样可用。
-    let workspace = store.resolve_workspace(dir.path()).await.unwrap();
-    assert_eq!(
-        workspace.project_id.to_string(),
-        "11111111-1111-4111-8111-111111111111"
-    );
-    assert_eq!(
-        workspace.workspace_id.to_string(),
-        "22222222-2222-4222-8222-222222222222"
-    );
-    assert_eq!(
-        store
-            .validate_session_binding(&"old-session".to_owned())
-            .await
-            .unwrap(),
-        workspace
-    );
-    assert_eq!(
-        store
-            .load_messages(&"old-session".to_owned())
-            .await
-            .unwrap()
-            .len(),
-        1
-    );
-    assert_eq!(
-        store
-            .load_frozen_snapshot(&"old-session".to_owned())
-            .await
-            .unwrap()
-            .as_deref(),
-        Some("frozen-owner-state"),
-        "迁移不得丢失 frozen snapshot"
-    );
-
-    // 同一路径上的另一个文件对象可以登记，同一 (locator, 证据) 组合仍然唯一。
-    let mut probe = SqliteConnection::connect_with(
-        &SqliteConnectOptions::new().filename(&path).read_only(true),
-    )
-    .await
-    .unwrap();
-    let after = identity_and_execution_bytes(&mut probe).await;
-    let after_history = history_bytes(&mut probe).await;
-    probe.close().await.unwrap();
-    assert_eq!(before, after, "迁移不得改写登记、绑定或执行状态");
-    assert_eq!(
-        before_history, after_history,
-        "迁移不得改写线程行与消息：frozen snapshot 与历史都在其中"
-    );
-
-    sqlx::query(
-        "INSERT INTO workspaces (id, project_id, root, root_identity, discovery)
-         SELECT '33333333-3333-4333-8333-333333333333', project_id, root, '{\"device\":9,\"inode\":9}', discovery
-         FROM workspaces WHERE id = '22222222-2222-4222-8222-222222222222'",
-    )
-    .execute(&store.database.pool)
-    .await
-    .unwrap();
-    let duplicate_workspace = sqlx::query(
-        "INSERT INTO workspaces (id, project_id, root, root_identity, discovery)
-         SELECT '44444444-4444-4444-8444-444444444444', project_id, root, root_identity, discovery
-         FROM workspaces WHERE id = '22222222-2222-4222-8222-222222222222'",
-    )
-    .execute(&store.database.pool)
-    .await;
-    assert!(
-        duplicate_workspace.is_err(),
-        "同一 (root, root_identity) 不得重复登记"
-    );
-    // 同一 locator 上的另一个文件对象可以登记（同一路径重新克隆）。
-    sqlx::query(
-        "INSERT INTO projects (id, locator, object_identity)
-         SELECT '55555555-5555-4555-8555-555555555555', locator, '{\"device\":10,\"inode\":10}' FROM projects",
-    )
-    .execute(&store.database.pool)
-    .await
-    .unwrap();
-    let duplicate_project = sqlx::query(
-        "INSERT INTO projects (id, locator, object_identity)
-         SELECT '66666666-6666-4666-8666-666666666666', locator, object_identity FROM projects
-         WHERE id = '11111111-1111-4111-8111-111111111111'",
-    )
-    .execute(&store.database.pool)
-    .await;
-    assert!(
-        duplicate_project.is_err(),
-        "同一 (locator, object_identity) 不得重复登记"
-    );
-    // 重建登记表不能丢外键：引用不存在项目的工作区仍被拒绝。
-    let orphan = sqlx::query(
-        "INSERT INTO workspaces (id, project_id, root, root_identity, discovery)
-         SELECT '77777777-7777-4777-8777-777777777777', 'missing-project', root || '-orphan', root_identity, discovery
-         FROM workspaces WHERE id = '22222222-2222-4222-8222-222222222222'",
-    )
-    .execute(&store.database.pool)
-    .await;
-    assert!(orphan.is_err(), "工作区必须仍受 projects 外键约束");
-    store.close().await;
-}
-
-/// 不可访问的旧会话也必须能升级；迁移不得为了补登记约束发现旧目录。
-async fn assert_registration_upgrade_allows_directory_changes(version: i64) {
-    let dir = tempfile::tempdir().unwrap();
-    let path = dir.path().join("threads.db");
-    let mut connection = version2_database(&path).await;
-    if version >= 3 {
-        sqlx::query("ALTER TABLE session_bindings DROP COLUMN revision")
-            .execute(&mut connection)
-            .await
-            .unwrap();
-        sqlx::query("PRAGMA user_version = 3")
-            .execute(&mut connection)
-            .await
-            .unwrap();
-    }
-    if version >= 4 {
-        // 独立重现旧版 3→4 的输出；5 的缺陷形态正是只更新版本号、未迁移约束。
-        sqlx::raw_sql(
-            "UPDATE projects SET object_identity = json_remove(object_identity, '$.birth_seconds', '$.birth_nanos');
-             UPDATE workspaces SET root_identity = json_remove(root_identity, '$.birth_seconds', '$.birth_nanos'),
-                discovery = json_remove(discovery, '$.root_identity.birth_seconds', '$.root_identity.birth_nanos');"
-        ).execute(&mut connection).await.unwrap();
-        sqlx::query(if version == 4 {
-            "PRAGMA user_version = 4"
-        } else {
-            "PRAGMA user_version = 5"
-        })
-        .execute(&mut connection)
-        .await
-        .unwrap();
-    }
-    let old_history = history_bytes(&mut connection).await;
-    let old_identity = identity_and_execution_bytes(&mut connection).await;
-    connection.close().await.unwrap();
-    let store = SqliteThreadStore::new(&path).await.unwrap();
-    let original = dir.path().join("original");
-    std::fs::create_dir(&original).unwrap();
-    let workspace = store.resolve_workspace(&original).await.unwrap();
-    let thread = store
-        .create_bound_thread(ThreadMeta::new(original.to_str().unwrap()), &workspace)
-        .await
-        .unwrap();
-    let binding = store.load_session_binding(&thread).await.unwrap();
-    store.close().await;
-    // 跨越关闭/重开；移动保留旧文件对象，再在原位置创建新对象，不依赖 inode 复用时序。
-    let moved = dir.path().join("moved");
-    std::fs::rename(&original, &moved).unwrap();
-    std::fs::create_dir(&original).unwrap();
-    let store = SqliteThreadStore::new(&path).await.unwrap();
-    for cwd in [&moved, &original] {
-        let resolved = store.resolve_workspace(cwd).await.unwrap_or_else(|error| {
-            panic!("schema {version} 升级后目录 {cwd:?} 必须可登记：{error}")
-        });
-        assert_ne!(resolved.workspace_id, workspace.workspace_id);
-        assert_ne!(resolved.project_id, workspace.project_id);
-        let new_thread = store
-            .create_bound_thread(ThreadMeta::new(cwd.to_str().unwrap()), &resolved)
-            .await
-            .unwrap();
-        let owner = store.acquire_execution_lease(&new_thread).await.unwrap();
-        assert_eq!(
-            store.validate_session_binding(&new_thread).await.unwrap(),
-            resolved
-        );
-        owner.mark_clean().await.unwrap();
-    }
-    assert_eq!(store.load_session_binding(&thread).await.unwrap(), binding);
-    let error = store.validate_session_binding(&thread).await.unwrap_err();
-    assert!(
-        matches!(
-            error.downcast_ref::<WorkspaceError>(),
-            Some(WorkspaceError::NeedsRelink)
-        ),
-        "原路径被替换后旧会话必须拒绝执行：{error}"
-    );
-    let mut connection = store.database.pool.acquire().await.unwrap();
-    // 精确读取旧会话，不以新增线程的插入顺序推断目标。
-    assert_eq!(history_bytes(&mut connection).await, old_history);
-    let after = identity_and_execution_bytes(&mut connection).await;
-    assert!(
-        old_identity[2..].iter().all(|row| after.contains(row)),
-        "原 binding 和 dirty generation 不得被迁移清除或改写"
-    );
-    if version >= 4 {
-        assert!(
-            old_identity.iter().all(|row| after.contains(row)),
-            "已规范化的登记证据必须原样保留"
-        );
-    }
-    let (current,): (i64,) = sqlx::query_as("PRAGMA user_version")
-        .fetch_one(&mut *connection)
-        .await
-        .unwrap();
-    assert_eq!(current, CURRENT_SCHEMA_VERSION);
-    drop(connection);
-    store.close().await;
-}
-
-#[tokio::test]
-async fn test_registration_upgrade_from_v2_allows_moved_and_replaced_directories() {
-    assert_registration_upgrade_allows_directory_changes(2).await;
-}
-
-#[tokio::test]
-async fn test_registration_upgrade_from_v3_allows_moved_and_replaced_directories() {
-    assert_registration_upgrade_allows_directory_changes(3).await;
-}
-
-#[tokio::test]
-async fn test_registration_upgrade_from_v4_allows_moved_and_replaced_directories() {
-    assert_registration_upgrade_allows_directory_changes(4).await;
-}
-
-/// [回归测试] 已被旧 writer 标记为 5 的漏迁移库，重启后也必须自动补齐约束。
-#[tokio::test]
-async fn test_registration_upgrade_repairs_incomplete_v5() {
-    assert_registration_upgrade_allows_directory_changes(5).await;
-}
-
-/// 独立构造健康 schema 5 的登记表；不能由本轮迁移生成 fixture，否则会掩盖回归。
-async fn healthy_version5_database(path: &Path) -> SqliteConnection {
-    let mut connection = version2_database(path).await;
-    sqlx::raw_sql(
-        "PRAGMA foreign_keys = OFF;
-         ALTER TABLE session_bindings DROP COLUMN revision;
-         CREATE TABLE projects_v5 (
-             id TEXT PRIMARY KEY, locator TEXT NOT NULL, object_identity TEXT NOT NULL,
-             UNIQUE(locator, object_identity));
-         INSERT INTO projects_v5 SELECT id, locator, json_remove(object_identity, '$.birth_seconds', '$.birth_nanos') FROM projects;
-         DROP TABLE projects;
-         ALTER TABLE projects_v5 RENAME TO projects;
-         CREATE TABLE workspaces_v5 (
-             id TEXT PRIMARY KEY, project_id TEXT NOT NULL REFERENCES projects(id),
-             root TEXT NOT NULL, root_identity TEXT NOT NULL, discovery TEXT NOT NULL,
-             UNIQUE(root, root_identity), UNIQUE(id, project_id));
-         INSERT INTO workspaces_v5 SELECT id, project_id, root,
-             json_remove(root_identity, '$.birth_seconds', '$.birth_nanos'),
-             json_remove(discovery, '$.root_identity.birth_seconds', '$.root_identity.birth_nanos') FROM workspaces;
-         DROP TABLE workspaces;
-         ALTER TABLE workspaces_v5 RENAME TO workspaces;
-         PRAGMA user_version = 5;
-         PRAGMA foreign_keys = ON;"
-    ).execute(&mut connection).await.unwrap();
-    connection
-}
-
-/// [回归测试] 健康 5 已允许同路径多对象、同对象多路径，补迁移不能重新收紧或归并它们。
-#[tokio::test]
-async fn test_registration_upgrade_preserves_healthy_v5_composite_registrations() {
-    let dir = tempfile::tempdir().unwrap();
-    let path = dir.path().join("threads.db");
-    let mut connection = healthy_version5_database(&path).await;
-    sqlx::raw_sql(
-        "INSERT INTO projects SELECT '33333333-3333-4333-8333-333333333333', locator || '-moved', object_identity FROM projects;
-         INSERT INTO projects SELECT '44444444-4444-4444-8444-444444444444', locator, '{\"device\":9,\"inode\":9}'
-             FROM projects WHERE id = '11111111-1111-4111-8111-111111111111';
-         INSERT INTO workspaces SELECT '55555555-5555-4555-8555-555555555555', project_id, root || '-moved', root_identity, discovery FROM workspaces;
-         INSERT INTO workspaces SELECT '66666666-6666-4666-8666-666666666666', project_id, root, '{\"device\":9,\"inode\":9}', discovery
-             FROM workspaces WHERE id = '22222222-2222-4222-8222-222222222222';"
-    ).execute(&mut connection).await.unwrap();
-    let before = identity_and_execution_bytes(&mut connection).await;
-    let history = history_bytes(&mut connection).await;
-    connection.close().await.unwrap();
-    // 首次开库升级，第二次开库保持同一结果；不访问 fixture 中不存在的旧目录。
-    for _ in 0..2 {
-        let store = SqliteThreadStore::new(&path).await.unwrap();
-        let mut connection = store.database.pool.acquire().await.unwrap();
-        assert_eq!(identity_and_execution_bytes(&mut connection).await, before);
-        assert_eq!(history_bytes(&mut connection).await, history);
-        let (version,): (i64,) = sqlx::query_as("PRAGMA user_version")
-            .fetch_one(&mut *connection)
-            .await
-            .unwrap();
-        assert_eq!(version, CURRENT_SCHEMA_VERSION);
-        drop(connection);
-        store.close().await;
-    }
-}
-
-/// [回归测试] 补迁移遇到损坏引用必须回滚，不能留下半张表、升级版本或清 dirty。
-#[tokio::test]
-async fn test_registration_upgrade_corrupt_v5_rolls_back_all_state() {
-    let dir = tempfile::tempdir().unwrap();
-    let path = dir.path().join("threads.db");
-    let mut connection = healthy_version5_database(&path).await;
-    sqlx::raw_sql(
-        "PRAGMA foreign_keys = OFF;
-         UPDATE session_bindings SET workspace_id = 'missing-workspace';
-         PRAGMA foreign_keys = ON;",
-    )
-    .execute(&mut connection)
-    .await
-    .unwrap();
-    let rows = identity_and_execution_bytes(&mut connection).await;
-    let history = history_bytes(&mut connection).await;
-    let schema: Vec<(String, Option<String>)> =
-        sqlx::query_as("SELECT name, sql FROM sqlite_schema ORDER BY name")
-            .fetch_all(&mut connection)
-            .await
-            .unwrap();
-    connection.close().await.unwrap();
-    let error = SqliteThreadStore::new(&path).await.err().unwrap();
-    assert!(
-        matches!(error.downcast_ref::<WorkspaceError>(),
-        Some(WorkspaceError::DiscoveryError(message)) if message == "registration rebuild broke references"),
-        "悬空引用必须拒绝提交：{error}"
-    );
-    let mut connection = SqliteConnection::connect_with(
-        &SqliteConnectOptions::new().filename(&path).read_only(true),
-    )
-    .await
-    .unwrap();
-    let after_schema: Vec<(String, Option<String>)> =
-        sqlx::query_as("SELECT name, sql FROM sqlite_schema ORDER BY name")
-            .fetch_all(&mut connection)
-            .await
-            .unwrap();
-    assert_eq!(after_schema, schema);
-    assert_eq!(identity_and_execution_bytes(&mut connection).await, rows);
-    assert_eq!(history_bytes(&mut connection).await, history);
-    let (version,): (i64,) = sqlx::query_as("PRAGMA user_version")
-        .fetch_one(&mut connection)
-        .await
-        .unwrap();
-    assert_eq!(version, 5, "失败不得提交新版本号");
-    connection.close().await.unwrap();
-}
+#[path = "schema_registration_test.rs"]
+mod registration_tests;

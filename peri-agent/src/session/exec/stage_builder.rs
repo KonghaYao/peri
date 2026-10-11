@@ -29,13 +29,10 @@ use peri_acp_types::{
     goal::GoalController,
     hooks::RegisteredHook,
     identity::AgentId,
-    interaction::{ChannelState, UserInteractionBroker},
-    lsp::LspServerConfig,
+    interaction::UserInteractionBroker,
     mcp_skills::McpSkillRegistry,
     plugin::LoadedPlugin,
-    ports::{
-        LspPoolPort, McpPoolPort, SessionMcpCapabilityPort, ToolSearchPort, WorkflowMiddlewarePort,
-    },
+    ports::{McpPoolPort, SessionMcpCapabilityPort, ToolSearchPort, WorkflowMiddlewarePort},
     session::{MessageQueue, SessionInbox},
     session_resources::SessionResources,
     skills::SkillRoot,
@@ -50,9 +47,9 @@ use crate::agent::{
     token::ContextBudget,
     LangfuseBridgeLike,
 };
-use crate::error_suggest::{ErrorSuggestRegistry, ToolRegistrySnapshot};
 use crate::middleware::chain::MiddlewareChain;
 use crate::session::exec::executor::FrozenSessionData;
+use crate::session::exec::executor::SubagentLlmFactory;
 use crate::session::factory::{
     AssemblyContext, ChainAssembly, MiddlewareChainAssembler, OnBgCompleteFn,
     SubAgentMiddlewarePort, SystemPromptBuilder,
@@ -93,6 +90,10 @@ pub struct StageBuildInput {
     pub permission_mode: Arc<peri_acp_types::permission::SharedPermissionMode>,
     /// 插件技能根目录
     pub plugin_skill_roots: Vec<SkillRoot>,
+    /// Agent 候选目录端口（W5）：链装配点用它绑定会话级 MCP Agent registry
+    /// （`resolve_ports`），prompt 渲染经它取 `{{available_agents}}` 候选；
+    /// 唯一来源，不回落磁盘。
+    pub agent_catalog: Arc<dyn peri_acp_types::ports::AgentCatalogPort>,
     /// 已加载插件
     pub plugin_loaded: Vec<LoadedPlugin>,
     /// Hook 组（每组一个 HookMiddleware 实例）
@@ -110,16 +111,10 @@ pub struct StageBuildInput {
     /// Session-owned checked projection lease holder, shared across stage builds.
     pub dynamic_mcp_projection:
         Arc<parking_lot::Mutex<Option<Arc<dyn peri_acp_types::ports::SessionMcpProjectionLease>>>>,
-    /// Channel 状态
-    pub channel_state: Option<Arc<ChannelState>>,
     /// 工具搜索索引端口
     pub tool_search_index: Arc<dyn ToolSearchPort>,
     /// 共享工具注册表（deferred tools）
     pub shared_tools: Arc<RwLock<BTreeMap<String, Arc<dyn BaseTool>>>>,
-    /// LSP 服务器配置
-    pub lsp_servers: Vec<LspServerConfig>,
-    /// 会话级 LSP 服务器池端口（复用，None = 构造临时实例）
-    pub lsp_pool: Option<Arc<dyn LspPoolPort>>,
     /// Workflow executor（Some 时注册 Workflow 中间件）
     pub workflow_executor: Option<Arc<dyn AgentExecutor>>,
     /// 会话级 WorkflowMiddleware 端口
@@ -135,8 +130,6 @@ pub struct StageBuildInput {
     pub provider_name: String,
     /// 上下文窗口（已含 context_1m 调整；token 监控）
     pub context_window: u32,
-    /// CLAUDE.md 排除项
-    pub claude_md_excludes: Vec<String>,
     /// 会话语言（frozen，sub prompt 渲染用）
     pub language: Option<String>,
     /// Compact 配置（ACP 装配点按 `load_compact_config` 语义预填，含 env overrides）
@@ -149,8 +142,8 @@ pub struct StageBuildInput {
     /// auto-classifier 模型构造工厂（cached 缺失时调用）
     pub auto_classifier_factory:
         Arc<dyn Fn() -> Arc<tokio::sync::Mutex<Box<dyn peri_model::Model>>> + Send + Sync>,
-    /// 子 agent LLM 工厂（支持 SubAgent LLM 缓存复用）
-    pub llm_factory: Arc<dyn Fn(Option<&str>) -> Box<dyn ReactLLM + Send + Sync> + Send + Sync>,
+    /// 子 agent 模型工厂（支持 SubAgent LLM 缓存复用；H1：只产出模型来源）
+    pub llm_factory: SubagentLlmFactory,
     /// provider fingerprint（CachedLlmInstances 缓存键）
     pub provider_fp: String,
     /// agent overrides 渲染（主 prompt 覆盖；含 workflow feature 判定）
@@ -188,6 +181,9 @@ pub struct StageBuildInput {
     /// `v2_frozen.meta_harness.disabled_middlewares` 投影；
     /// 顶层链过滤——设计 §2.5）。
     pub meta_harness_disabled: HashSet<String>,
+    /// `Agent` 工具 `run_in_background` 的有效缺省（源自会话冻结的 beta flag 投影，
+    /// 由 ACP 装配面投影为语义值；`false` = 既有行为）。
+    pub agent_default_run_in_background: bool,
 }
 
 /// 后台任务完成事件的独立发送端（跨 turn 存活；L3：注入 SubagentHost）
@@ -240,10 +236,6 @@ pub struct AgentComponents {
     /// 共享工具注册表（deferred tools，供 ExecuteExtraTool 代理）
     #[allow(clippy::type_complexity)]
     pub shared_tools: Option<Arc<RwLock<BTreeMap<String, Arc<dyn BaseTool>>>>>,
-    /// 错误感知建议注册表
-    pub error_suggest_registry: Option<Arc<ErrorSuggestRegistry>>,
-    /// 工具注册表快照（工具名 + subagent 类型）
-    pub tool_registry_snapshot: Arc<ToolRegistrySnapshot>,
     /// 上下文预算（token 监控）
     pub context_budget: Option<ContextBudget>,
     /// Compact 配置
@@ -349,9 +341,46 @@ pub fn build_stage_context(
 
     // 无 session manager 时只在此创建一次回退实例，工具、host 与后台 probe 必须同源。
     let task_manager = task_manager.unwrap_or_else(|| Arc::new(TaskManager::new()));
+    // 有界等待：从本会话首次出现未结算任务起算，超过 HANDOFF_MAX_WAIT 后
+    // 不再无限等待，改由 loop 退出路径写可观测交接（§7.3）。
+    let bounded_wait = crate::agent::async_tasks::handoff::BoundedWait::new(
+        crate::agent::async_tasks::handoff::HANDOFF_MAX_WAIT,
+    );
     let idle_should_wait: Option<Arc<dyn Fn() -> bool + Send + Sync>> = {
         let manager = task_manager.clone();
-        Some(Arc::new(move || manager.active_count() > 0))
+        let mcp_pool = input.mcp_pool.clone();
+        let session_id = session_id.clone();
+        let bounded_wait = Arc::clone(&bounded_wait);
+        Some(Arc::new(move || {
+            let busy = manager.active_count() > 0
+                || mcp_pool
+                    .as_ref()
+                    .is_some_and(|pool| pool.has_active_tasks(&session_id));
+            bounded_wait.should_wait(busy)
+        }))
+    };
+    let handoff_deadline: Option<Arc<dyn Fn() -> Option<tokio::time::Instant> + Send + Sync>> = {
+        let bounded_wait = Arc::clone(&bounded_wait);
+        Some(Arc::new(move || bounded_wait.deadline()))
+    };
+    let pending_handoff: Option<
+        Arc<dyn Fn() -> Option<crate::agent::async_tasks::handoff::PendingHandoff> + Send + Sync>,
+    > = {
+        let manager = task_manager.clone();
+        let bounded_wait = Arc::clone(&bounded_wait);
+        Some(Arc::new(move || {
+            if !bounded_wait.take_due() {
+                return None;
+            }
+            let tasks = manager.pending_handoff_tasks();
+            if tasks.is_empty() {
+                return None;
+            }
+            Some(crate::agent::async_tasks::handoff::PendingHandoff {
+                tasks,
+                waited: bounded_wait.waited(),
+            })
+        }))
     };
     // Subscribe before the Receive loop can probe active_count. The watch
     // version is only a retained wake signal; registry remains the state owner.
@@ -381,8 +410,6 @@ pub fn build_stage_context(
         llm,
         chain,
         shared_tools: shared_tools_opt,
-        error_suggest_registry,
-        tool_registry_snapshot,
         context_budget,
         compact_config,
         subagent_mw,
@@ -467,16 +494,13 @@ pub fn build_stage_context(
         .with_tool_invocation_resolver(Arc::clone(&input.tool_invocation_resolver))
         .with_middleware_chain(Arc::clone(&chain))
         .with_event_bus(Arc::new(event_bus))
-        .with_session_context(session_context)
-        .with_tool_registry_snapshot((*tool_registry_snapshot).clone());
+        .with_session_context(session_context);
 
     let builder = dependencies::configure_stage(
         builder,
         input,
-        &session,
         dependencies::StageDependencies {
             goal_controller,
-            error_suggest_registry,
             context_budget,
             compact_config,
             compact_llm_for_v2,
@@ -486,8 +510,21 @@ pub fn build_stage_context(
     );
 
     let builder = builder.with_idle_registry(idle_registry);
+    let builder = if let Some(probe) = pending_handoff {
+        builder.with_pending_handoff(probe)
+    } else {
+        builder
+    };
+    let builder = if let Some(probe) = handoff_deadline {
+        builder.with_handoff_deadline(probe)
+    } else {
+        builder
+    };
 
     let context = builder.build();
+    input
+        .retry_events
+        .set_context(&session_id, &context.session.turn);
 
     Ok((
         V2AgentOutput {

@@ -56,6 +56,10 @@ impl std::fmt::Display for SessionId {
 pub struct FrozenContext {
     /// 完整 System Prompt（静态 + 动态占位符填充后）
     pub system_prompt: Arc<str>,
+    /// ACP 客户端提供的会话级 System 扩展，独立于内部提示词保存。
+    pub external_instructions: Option<Arc<str>>,
+    /// V1 快照含不可分离的旧外部指令；派生身份必须拒绝重渲染。
+    pub legacy_embedded_instructions: bool,
     /// CLAUDE.md 内容（项目级 + 用户级合并后）
     pub claude_md: Arc<str>,
     /// Skills 摘要（builtin + 外部加载的汇总）
@@ -67,6 +71,17 @@ pub struct FrozenContext {
     /// MetaHarness 冻结状态（段落覆盖 + middleware 关闭集合；会话内不可变，
     /// SubAgent/fork 复用——见 `docs/design/meta-harness-design.md` §2.3）。
     pub meta_harness: peri_acp_types::meta_harness::MetaHarnessState,
+    /// Beta flag 冻结值（覆盖 id → 有效值 + 来源层；会话创建时从配置快照投影一次，
+    /// 会话内不可变，SubAgent/fork 复用——见 `docs/design/beta-flags.md` §消费契约）。
+    ///
+    /// 装配面（工具池 / middleware）只消费它，不回读配置源；空投影 = 全部按 false。
+    pub beta_flags: peri_acp_types::beta_flags::BetaFlags,
+    /// 冻结运行环境（平台 / OS 版本 / 是否 Git 仓库；H3）。
+    ///
+    /// 内容准入期由选定执行环境探测一次后随冻结持久化；主/子/workflow 的
+    /// 重渲染只消费它。`None` = 旧快照缺少结构化环境值（unavailable）：
+    /// 不重探本地值冒充，派生新 prompt 时显式标记限制。
+    pub runtime_env: Option<peri_acp_types::frozen::FrozenRuntimeEnv>,
 }
 
 impl FrozenContext {
@@ -86,16 +101,24 @@ impl FrozenContext {
 #[derive(Default)]
 pub struct FrozenContextBuilder {
     system_prompt: Option<String>,
+    external_instructions: Option<String>,
     claude_md: Option<String>,
     skill_summary: Option<String>,
     date: Option<String>,
     language: Option<Option<String>>,
     meta_harness: Option<peri_acp_types::meta_harness::MetaHarnessState>,
+    beta_flags: Option<peri_acp_types::beta_flags::BetaFlags>,
+    runtime_env: Option<peri_acp_types::frozen::FrozenRuntimeEnv>,
 }
 
 impl FrozenContextBuilder {
     pub fn system_prompt(mut self, s: impl Into<String>) -> Self {
         self.system_prompt = Some(s.into());
+        self
+    }
+
+    pub fn external_instructions(mut self, s: impl Into<String>) -> Self {
+        self.external_instructions = Some(s.into());
         self
     }
 
@@ -125,14 +148,30 @@ impl FrozenContextBuilder {
         self
     }
 
+    /// 设置 beta flag 冻结值；未设置时空投影（一切按 false）。
+    pub fn beta_flags(mut self, flags: peri_acp_types::beta_flags::BetaFlags) -> Self {
+        self.beta_flags = Some(flags);
+        self
+    }
+
+    /// 设置冻结运行环境快照（H3）；未设置时保持 `None`（unavailable）。
+    pub fn runtime_env(mut self, env: Option<peri_acp_types::frozen::FrozenRuntimeEnv>) -> Self {
+        self.runtime_env = env;
+        self
+    }
+
     pub fn build(self) -> FrozenContext {
         FrozenContext {
             system_prompt: self.system_prompt.unwrap_or_default().into(),
+            external_instructions: self.external_instructions.map(Into::into),
+            legacy_embedded_instructions: false,
             claude_md: self.claude_md.unwrap_or_default().into(),
             skill_summary: self.skill_summary.unwrap_or_default().into(),
             date: self.date.unwrap_or_default().into(),
             language: self.language.flatten().map(Into::into),
             meta_harness: self.meta_harness.unwrap_or_default(),
+            beta_flags: self.beta_flags.unwrap_or_default(),
+            runtime_env: self.runtime_env,
         }
     }
 }

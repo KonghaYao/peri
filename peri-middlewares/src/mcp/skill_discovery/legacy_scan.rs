@@ -10,7 +10,7 @@ use rmcp::{
 use tokio_util::sync::CancellationToken as AgentCancellationToken;
 
 use super::super::client::cache_scope_allows_persistence;
-use super::super::resource_cache::McpResourceCache;
+use super::super::client::ConnectionResourceCache;
 use super::verify::disambiguate_names;
 use super::{parse_mcp_skill_md, READ_CONCURRENCY, RESOURCE_READ_TIMEOUT};
 
@@ -80,7 +80,7 @@ pub(crate) async fn collect_skill_entries(
     server: &str,
     resources: Vec<Resource>,
     cancel: AgentCancellationToken,
-    cache: Option<(McpResourceCache, String)>,
+    cache: Option<(ConnectionResourceCache, String)>,
 ) -> (bool, Vec<SkillMetadata>) {
     let resources = filter_nested_skills(resources);
     if resources.is_empty() {
@@ -98,7 +98,9 @@ pub(crate) async fn collect_skill_entries(
         let task_cancel = cancel.clone();
         let task_cache = cache.clone();
         join_set.spawn(async move {
-            if task_cancel.is_cancelled() {
+            if task_cancel.is_cancelled()
+                || task_cache.as_ref().is_some_and(|(cache, _)| !cache.is_current())
+            {
                 return None;
             }
             let _permit = permit_sem.acquire_owned().await;
@@ -122,7 +124,7 @@ pub(crate) async fn collect_skill_entries(
                     None => None,
                 };
                 let request = ReadResourceRequestParams::new(uri.clone());
-                let result = match tokio::time::timeout(
+                let result = match peri_time::timeout(
                     RESOURCE_READ_TIMEOUT,
                     task_peer.read_resource(request),
                 )
@@ -138,6 +140,9 @@ pub(crate) async fn collect_skill_entries(
                         return None;
                     }
                 };
+                if task_cache.as_ref().is_some_and(|(cache, _)| !cache.is_current()) {
+                    return None;
+                }
                 if cache_scope_allows_persistence(result.cache_scope)
                     || (result.cache_scope.is_none() && result.ttl_ms.is_some())
                 {
@@ -155,6 +160,9 @@ pub(crate) async fn collect_skill_entries(
                 }
                 result
             };
+            if task_cache.as_ref().is_some_and(|(cache, _)| !cache.is_current()) {
+                return None;
+            }
             let text = result.contents.iter().find_map(|content| match content {
                 ResourceContents::TextResourceContents { text, .. } => Some(text.clone()),
                 _ => None,

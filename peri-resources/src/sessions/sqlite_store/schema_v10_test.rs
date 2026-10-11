@@ -1,11 +1,11 @@
 //! schema v10 回退迁移：删除 v7..v9 写下的本机远程痕迹。
 //!
 //! 用户裁决撤销「远程存储在本机留有痕迹」的整套能力，本机表结构回到 remote 工作之前：
-//! 不加表、不加列、没有 store 维度。覆盖：
+//! 不保留远程痕迹表或 store 维度；当前初始化补建环境表与 OAuth 凭据表。覆盖：
 //!
-//! - v7 / v8 / v9 三种来源库都收敛到同一形状（本机表集合与 v6 时代一致）；
+//! - v7 / v8 / v9 三种来源库都收敛到同一形状（既有业务表与两张初始化表）；
 //! - 表数据连同表一起消失，**业务表逐行不动**；
-//! - `execution_runs` 的行全部保留，包括远程会话遗留的孤儿行（按裁决它们是有效事实）；
+//! - schema 11 删除 `execution_runs`，不把其状态移入新的表或列；
 //! - 同名但形状不符的表 → fail-closed 拒绝并整体回滚，不删不认识的数据；
 //! - 没有那 5 张表的库是幂等的。
 //!
@@ -13,6 +13,7 @@
 
 use super::schema::CURRENT_SCHEMA_VERSION;
 use super::*;
+use crate::sessions::canonical::{OAUTH_CREDENTIALS_TABLE, SESSION_ENVIRONMENTS_TABLE};
 use peri_acp_types::workspace::WorkspaceError;
 use sqlx::{sqlite::SqliteConnectOptions, Connection, SqliteConnection};
 use std::path::Path;
@@ -62,7 +63,13 @@ CREATE INDEX idx_bindings_project ON session_bindings(project_id, thread_id);
 CREATE TABLE execution_runs (
     thread_id TEXT PRIMARY KEY, generation INTEGER NOT NULL, clean BOOLEAN NOT NULL
 );
-CREATE TABLE thread_goals (thread_id TEXT PRIMARY KEY, objective TEXT NOT NULL);
+CREATE TABLE thread_goals (
+    thread_id TEXT PRIMARY KEY, goal_id TEXT NOT NULL, objective TEXT NOT NULL,
+    status TEXT NOT NULL CHECK(status IN ('active','paused','blocked','usage_limited','budget_limited','complete')),
+    token_budget INTEGER NULL, tokens_used INTEGER NOT NULL DEFAULT 0,
+    time_used_seconds INTEGER NOT NULL DEFAULT 0, created_at_ms INTEGER NOT NULL, updated_at_ms INTEGER NOT NULL,
+    FOREIGN KEY(thread_id) REFERENCES threads(id) ON DELETE CASCADE
+);
 CREATE TABLE session_lifecycle_commitments (
     thread_id TEXT PRIMARY KEY, root_id TEXT NOT NULL, kind TEXT NOT NULL, state TEXT NOT NULL,
     generation INTEGER, operation_id TEXT, detail TEXT,
@@ -125,10 +132,9 @@ async fn populate_business(connection: &mut SqliteConnection) {
          VALUES ('m1', 'local-root', 'user', 'hello');
          INSERT INTO projects (id, locator, object_identity) VALUES ('p1', '/work', 'dev:1');
          INSERT INTO workspaces (id, project_id, root, root_identity, discovery)
-         VALUES ('w1', 'p1', '/work', 'dev:1', 'git');
+         VALUES ('11111111-1111-4111-8111-111111111111', 'p1', '/work', 'dev:1', '{\"root\":\"/work\",\"root_identity\":{\"device\":1,\"inode\":1},\"common_dir\":null,\"common_identity\":null,\"private_dir\":null,\"private_identity\":null}');
          INSERT INTO session_bindings (thread_id, schema_version, project_id, workspace_id, relative_cwd)
-         VALUES ('local-root', 1, 'p1', 'w1', '.');
-         INSERT INTO thread_goals (thread_id, objective) VALUES ('local-root', '保留目标');
+         VALUES ('local-root', 1, 'p1', '11111111-1111-4111-8111-111111111111', '');
          INSERT INTO execution_runs (thread_id, generation, clean) VALUES ('local-root', 4, 0);
          INSERT INTO execution_runs (thread_id, generation, clean) VALUES ('remote-root', 7, 0);",
     )
@@ -174,13 +180,39 @@ async fn table_names(connection: &mut SqliteConnection) -> Vec<String> {
     rows.into_iter().map(|(name,)| name).collect()
 }
 
+async fn preserved_table_definitions(connection: &mut SqliteConnection) -> Vec<(String, String)> {
+    let mut rows: Vec<(String, String)> = sqlx::query_as(
+        "SELECT name, sql FROM sqlite_schema WHERE type = 'table' AND name NOT LIKE 'sqlite_%'
+         ORDER BY name",
+    )
+    .fetch_all(&mut *connection)
+    .await
+    .unwrap();
+    rows.retain(|(name, _)| {
+        !DROPPED_TABLES.contains(&name.as_str())
+            && name != "threads"
+            && name != "execution_runs"
+            && name != "thread_goals"
+            && name != OAUTH_CREDENTIALS_TABLE
+            && name != SESSION_ENVIRONMENTS_TABLE
+            && name != "workspaces"
+            && name != "session_bindings"
+            && name != "legacy_execution_registrations"
+            && name != "machines"
+            && name != "session_close_intents"
+            && name != "session_execution_owners"
+            && name != "session_execution_workspace_descriptors"
+    });
+    rows
+}
+
 async fn read_only(path: &Path) -> SqliteConnection {
     SqliteConnection::connect_with(&SqliteConnectOptions::new().filename(path).read_only(true))
         .await
         .unwrap()
 }
 
-/// v7 / v8 / v9 三种来源库都收敛到同一形状：本机表集合回到 v6 时代，业务数据一行不动。
+/// v7 / v8 / v9 收敛并补齐初始化表，既有业务表结构与数据保持不变。
 #[tokio::test]
 async fn test_v7_v8_v9_all_converge_and_drop_only_the_remote_tables() {
     for source_version in [7, 8, 9] {
@@ -189,6 +221,7 @@ async fn test_v7_v8_v9_all_converge_and_drop_only_the_remote_tables() {
         let mut connection = v9_database(&path, source_version).await;
         populate(&mut connection).await;
         let tables_before = table_names(&mut connection).await;
+        let definitions_before = preserved_table_definitions(&mut connection).await;
         connection.close().await.unwrap();
 
         let store = SqliteThreadStore::new(&path).await.unwrap();
@@ -199,7 +232,6 @@ async fn test_v7_v8_v9_all_converge_and_drop_only_the_remote_tables() {
             .unwrap();
         assert_eq!(version, CURRENT_SCHEMA_VERSION, "来源版本 {source_version}");
 
-        // 五张本机远程表消失，且没有留下其它新增结构。
         let tables_after = table_names(&mut connection).await;
         for table in DROPPED_TABLES {
             assert!(
@@ -208,12 +240,24 @@ async fn test_v7_v8_v9_all_converge_and_drop_only_the_remote_tables() {
             );
             assert!(tables_before.iter().any(|name| name == table));
         }
-        let expected: Vec<String> = tables_before
+        let mut expected: Vec<String> = tables_before
             .iter()
-            .filter(|name| !DROPPED_TABLES.contains(&name.as_str()))
+            .filter(|name| {
+                !DROPPED_TABLES.contains(&name.as_str()) && name.as_str() != "execution_runs"
+            })
             .cloned()
             .collect();
+        expected.extend([
+            OAUTH_CREDENTIALS_TABLE.to_owned(),
+            "machines".to_owned(),
+            "session_close_intents".to_owned(),
+        ]);
+        expected.sort();
         assert_eq!(tables_after, expected, "来源版本 {source_version}");
+        assert_eq!(
+            preserved_table_definitions(&mut connection).await,
+            definitions_before
+        );
 
         // 业务表逐行保留。
         let (title,): (String,) =
@@ -222,40 +266,20 @@ async fn test_v7_v8_v9_all_converge_and_drop_only_the_remote_tables() {
                 .await
                 .unwrap();
         assert_eq!(title, "本机会话");
-        let (objective,): (String,) =
-            sqlx::query_as("SELECT objective FROM thread_goals WHERE thread_id = 'local-root'")
-                .fetch_one(&mut connection)
-                .await
-                .unwrap();
-        assert_eq!(objective, "保留目标");
         let (cwd,): (String,) = sqlx::query_as(
             "SELECT relative_cwd FROM session_bindings WHERE thread_id = 'local-root'",
         )
         .fetch_one(&mut connection)
         .await
         .unwrap();
-        assert_eq!(cwd, ".");
+        assert_eq!(cwd, "");
         let (locator,): (String,) = sqlx::query_as("SELECT locator FROM projects WHERE id = 'p1'")
             .fetch_one(&mut connection)
             .await
             .unwrap();
         assert_eq!(locator, "/work");
 
-        // 执行代际全部保留，包括本机没有 `threads` 行的远程遗留行。
-        let runs: Vec<(String, i64, bool)> = sqlx::query_as(
-            "SELECT thread_id, generation, clean FROM execution_runs ORDER BY thread_id",
-        )
-        .fetch_all(&mut connection)
-        .await
-        .unwrap();
-        assert_eq!(
-            runs,
-            vec![
-                ("local-root".to_owned(), 4, false),
-                ("remote-root".to_owned(), 7, false),
-            ],
-            "v10 不重建 execution_runs，也不删除远程遗留的代际行"
-        );
+        assert!(!tables_after.iter().any(|name| name == "execution_runs"));
         connection.close().await.unwrap();
 
         // 迁移后的库可以正常写打开（门面与桥共用同一条连接真相）。
@@ -265,7 +289,7 @@ async fn test_v7_v8_v9_all_converge_and_drop_only_the_remote_tables() {
     }
 }
 
-/// 没有那 5 张表的库是幂等的：不报错、不加表、不改业务数据。
+/// 没有远程痕迹表时仅补齐初始化表，既有业务表结构与数据保持不变。
 #[tokio::test]
 async fn test_database_without_remote_tables_is_idempotent() {
     let directory = tempfile::tempdir().unwrap();
@@ -295,6 +319,7 @@ async fn test_database_without_remote_tables_is_idempotent() {
     // 这些库从来只有业务表，所以只填业务数据（远程痕迹表不存在，无从填写）。
     populate_business(&mut connection).await;
     let tables_before = table_names(&mut connection).await;
+    let definitions_before = preserved_table_definitions(&mut connection).await;
     connection.close().await.unwrap();
 
     let store = SqliteThreadStore::new(&path).await.unwrap();
@@ -304,20 +329,27 @@ async fn test_database_without_remote_tables_is_idempotent() {
         .await
         .unwrap();
     assert_eq!(version, CURRENT_SCHEMA_VERSION);
-    assert_eq!(table_names(&mut connection).await, tables_before);
-    // 业务数据一行不动：本机会话与两条（含远程遗留的）代际行都还在。
-    let runs: Vec<(String, i64, bool)> = sqlx::query_as(
-        "SELECT thread_id, generation, clean FROM execution_runs ORDER BY thread_id",
-    )
-    .fetch_all(&mut connection)
-    .await
-    .unwrap();
+    let mut expected = tables_before;
+    expected.retain(|name| name != "execution_runs");
+    expected.extend([
+        OAUTH_CREDENTIALS_TABLE.to_owned(),
+        "machines".to_owned(),
+        "session_close_intents".to_owned(),
+    ]);
+    expected.sort();
+    assert_eq!(table_names(&mut connection).await, expected);
     assert_eq!(
-        runs,
-        vec![
-            ("local-root".to_owned(), 4, false),
-            ("remote-root".to_owned(), 7, false),
-        ]
+        preserved_table_definitions(&mut connection).await,
+        definitions_before
+    );
+    let sessions: Vec<(String, String)> =
+        sqlx::query_as("SELECT id, title FROM threads ORDER BY id")
+            .fetch_all(&mut connection)
+            .await
+            .unwrap();
+    assert_eq!(
+        sessions,
+        vec![("local-root".to_owned(), "本机会话".to_owned())]
     );
     connection.close().await.unwrap();
     store.close().await;

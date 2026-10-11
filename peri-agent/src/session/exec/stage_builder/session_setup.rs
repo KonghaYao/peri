@@ -92,7 +92,7 @@ pub(super) fn build_session(
             tracing::info!("CronOwner started (ACP bridge path)");
 
             // 分支内 scheduler 恒为 Some（else-if 绑定），直接注入
-            session.set_async_owners(session_inbox, Some(owner), None);
+            session.set_async_owners(session_inbox, Some(owner));
         }
     }
 

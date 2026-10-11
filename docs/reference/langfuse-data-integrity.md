@@ -42,7 +42,10 @@ peri-fuse（本地服务 localhost:23332）   ③ 接收端：Langfuse OTel attr
 
 ## 二、观测类型字段契约
 
-id 前缀即类型签名：`gen_*`=GENERATION、`span_*`=SPAN、`obs_*`=TOOL、`batch_*`=tool-batch SPAN、trace id（UUID）=TRACE。
+下表描述生产侧领域 ID；领域内仍可有 `gen_*`、`span_*`、`obs_*`、`batch_*` 前缀。
+OTLP wire 和新接收记录使用标准 trace ID（32 hex）及 span/parent ID（16 hex），
+不能再用数据库 ID 前缀判定类型。标准身份正常化保留，其他领域身份通过确定性
+SHA-256 映射；父子关系共用 span ID 映射。类型以观测字段及 name 判断。
 
 | 类型 | 名称示例 | 必填字段 | 可选字段 | 设计要点 |
 |------|----------|----------|----------|----------|
@@ -55,7 +58,7 @@ id 前缀即类型签名：`gen_*`=GENERATION、`span_*`=SPAN、`obs_*`=TOOL、`
 | SPAN(compact) | `compact` / `micro-compact` | id(`span_*`)、input、output | metadata | **name 即类型**：Micro 策略记录 `micro-compact`，Full/Smart/Skip 记录 `compact`（2026-08-15 起）；input=执行前状态（strategy/trigger/estimated_tokens_before/cache_hit_rate_before），output=执行结果（summary/files_count/skills_count/micro_cleared/duration_ms/estimated_tokens_saved/estimated_tokens_after/full_escalation_reason/outcome）；失败时 output=`{"error_class":"compact_failure","message":...}` |
 | TOOL | 工具名（Bash/Read/Edit…） | id(`obs_*`)、input（工具入参）、output | level | 失败时 output 为 `{"error_class": "tool_failure"}` |
 | AGENT | `agent-run` / `subagent-*` | id、output、input | — | input = on_turn_start 的对话输入（2026-08-15 已恢复上报） |
-| EVENT | `cache-hit-rate-low` | id、input（告警指标）、level | output | 告警类 |
+| EVENT | `cache-hit-rate-low` | id、input（告警指标）、level | output | 告警类；指标事件（`tool.error` / `mcp.error` 等）同属 EVENT，来源见 `peri-controller/src/langfuse/metric_sink.rs`。归属：按指标自带 `sid` 挂到该会话活跃 turn 的 trace（`turn_traces.rs` 注册表，turn 开始登记/结束清理）；无活跃 trace 或无 `sid` 时回退独立 root trace，事件不丢 |
 
 ### 字段来源规则（OTLP attribute 映射）
 
@@ -63,7 +66,7 @@ id 前缀即类型签名：`gen_*`=GENERATION、`span_*`=SPAN、`obs_*`=TOOL、`
 - `model`：`langfuse.observation.model.name`；参数：`...model.parameters`
 - `usage`：`langfuse.observation.usage_details`（含 cache_read/cache_creation_input_tokens）
 - `metadata`：`langfuse.observation.metadata`
-- 上传侧按事件职责构造：`peri-controller/src/langfuse/tracer/llm_events.rs` 构造 `GenerationBody`，`span_events.rs` 构造阶段/Compact/Workflow 的 `SpanBody`，`tool_events.rs::emit_tools_flush` 构造工具批次 `SpanBody` 与工具 `ObservationBody`，`turn.rs` 构造 Trace/Session/agent-run。共同入队入口是 `event_builder.rs::try_add_or_warn_via_session`；`tracer/mod.rs` 保留门面与共享状态。
+- 上传侧按事件职责构造：`llm_events.rs` 构造 Generation，`span_events.rs` 构造阶段/Compact/Workflow，`tool_events.rs::emit_tools_flush` 构造工具批次及工具；`turn.rs` 构造 Trace/agent-run，session 关联通过观测属性传递，不发送无身份 Session span。`metric_sink.rs` 构造指标 Event，归属查 `turn_traces.rs`。共同入队入口仍是 `event_builder.rs::try_add_or_warn_via_session`；Workflow/子 agent 在内存收齐终态后一次导出，不依赖重复 ID 去重。
 
 ---
 
@@ -90,17 +93,16 @@ sqlite3 ~/.peri-fuse/telemetry.db \
 sqlite3 ~/.peri-fuse/telemetry.db \
   "SELECT id, type, name, trace_id, parent_observation_id,
           (input IS NULL) as no_input, length(output) as out_len
-   FROM observations WHERE id='gen_...';"
+   FROM observations WHERE id='<实际接收的 observation id>';"
 
 # 父链完整性：parent 指向不存在的观测。
-# 注意：parent 可以是 trace id（设计上大量观测直接挂 trace），需排除；
-# 真正的断裂特征是 parent 带 obs_/span_/gen_/batch_ 前缀但查无此 id。
+# 新 OTLP parent 应引用同 trace 的 observation/span；旧记录可能直接引用 trace ID。
+# 混合历史库保留 trace ID 排除，但不得再按前缀忽略缺失的 parent。
 sqlite3 ~/.peri-fuse/telemetry.db \
   "SELECT COUNT(*) FROM observations o
    WHERE o.parent_observation_id IS NOT NULL
      AND o.parent_observation_id NOT IN (SELECT id FROM observations)
-     AND o.parent_observation_id NOT IN (SELECT id FROM traces)
-     AND o.parent_observation_id NOT LIKE '01%';"
+     AND o.parent_observation_id NOT IN (SELECT id FROM traces);"
 
 # usage 缺失 / 缓存 token 未记录
 sqlite3 ~/.peri-fuse/telemetry.db \
@@ -145,7 +147,7 @@ bunx langfuse-cli api traces list --limit 10 --json                        # CLI
 | 3 | **TOOL 无 input** | §3.1 类型统计 | TOOL 完整率低 | 已修复（2026-08-10）；若出现新缺口按天断点定位 |
 | 4 | SPAN 数量爆炸（>> turn × 5） | `SELECT COUNT(*) FROM observations WHERE type='SPAN'` | 单 turn 理论 stage 数 5 + batch | stage span 未成对关闭会堆积；按 `spec/global/problems.md` 的 Langfuse 路由查 Git 历史 |
 | 5 | 缓存命中率异常（0% 或缺失 cache_read） | `trace-tokens.ts` / usage 直查 | 同模型同 prompt 应命中缓存 | `2026-07-22-langfuse-cache-tokens-not-recorded.md` |
-| 6 | 父链断裂（parent 不存在） | §3.1 父链 SQL | 带 `obs_`/`span_`/`gen_`/`batch_` 前缀的 parent 查无此 id 即断裂 | 2026-08-15 实测存在 5151 条：stage span 挂在缺失的 TOOL obs 下（TOOL 未落库但子 span 已上传，疑似采样/丢弃不一致，待查） |
+| 6 | 父链断裂（parent 不存在） | §3.1 父链 SQL | 按实际接收 ID 查父记录；新 hex ID 不以类型前缀分类 | 历史排查入口见 `spec/global/problems.md`；新传输身份与旧记录不等同 |
 | 7 | 并行 subagent 下 step 顺序乱/span 挂错 | `analyze.ts --tools` + trace 详情 | 并行 agent 的 generation 应各归其 AGENT obs | `2026-08-03-langfuse-trace-step-order-shuffled-with-parallel-subagents.md`（已按 agent 隔离修复） |
 | 8 | token 计费异常（input cost 为负等） | `daily-report.ts --days 7` | cost/token 比例异常 | `2026-08-02-langfuse-lib-ts-negative-input-cost.md`（脚本侧已修） |
 | 9 | 上报偶发丢失（batcher 慢 flush 丢弃） | 对拍 trace 数量：UI 数 vs telemetry.db 数 | 差异突增 | `2026-08-05-langfuse-batcher-drops-during-slow-flush.md` |

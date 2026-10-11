@@ -1,6 +1,45 @@
 use crate::kit::message_area::selection::SlotIndex;
 
 use super::GesturePending;
+use crate::kit::text_selection::TextSelection;
+use ratatui_kit::crossterm::event::{MouseButton, MouseEventKind};
+use ratatui_kit::ratatui::layout::Rect;
+
+pub(in crate::kit::message_area) fn selection_captures_pointer(
+    pending: Option<GesturePending>,
+    dragging: bool,
+    kind: MouseEventKind,
+) -> bool {
+    (pending.is_some() || dragging)
+        && matches!(
+            kind,
+            MouseEventKind::Drag(MouseButton::Left) | MouseEventKind::Up(MouseButton::Left)
+        )
+}
+
+pub(in crate::kit::message_area) fn selection_position(
+    area: Rect,
+    screen: (u16, u16),
+    scroll_y: usize,
+) -> (usize, u16) {
+    let row = screen
+        .1
+        .saturating_sub(area.y)
+        .min(area.height.saturating_sub(1));
+    let col = screen.0.saturating_sub(area.x).min(area.width);
+    (scroll_y.saturating_add(usize::from(row)), col)
+}
+
+pub(in crate::kit::message_area) fn selection_bounds_on_release(
+    selection: &mut TextSelection,
+    visual: (usize, u16),
+) -> Option<((usize, u16), (usize, u16))> {
+    if !selection.dragging {
+        return None;
+    }
+    selection.update_drag(visual.0, visual.1);
+    selection.normalized_bounds()
+}
 
 /// 单击判定：Down 与 Drag/Up 屏幕坐标差 ≤1 行、≤2 列（手抖容差）。
 ///
@@ -120,3 +159,7 @@ pub(in crate::kit::message_area) fn drag_step(
 pub(in crate::kit::message_area) fn settle_up(dragging: bool, gesture_pending: bool) -> bool {
     !dragging && gesture_pending
 }
+
+#[cfg(test)]
+#[path = "gesture_test.rs"]
+mod tests;

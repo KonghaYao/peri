@@ -22,7 +22,7 @@ impl<'a> GenerationFallbackStatus<'a> {
             TurnTelemetryOutcome::Failed { failure } => GenerationFallbackStatus {
                 error_class: failure_error_class(failure),
                 level: ObservationLevel::Error,
-                failure: Some(failure),
+                failure: Some(failure.as_ref()),
             },
             TurnTelemetryOutcome::Stopped {
                 reason: PromptStopReason::Cancelled,
@@ -80,8 +80,6 @@ impl LangfuseTracer {
         error_class: &str,
     ) {
         let failure = fallback_status.failure;
-        // 兜底闭合缺少 LlmCallEnd 的 Generation。仅写稳定分类和 allowlist status，
-        // 不写 provider/body 错误正文。
         for abandoned in self.generation.take_all_active() {
             let (parent_id, ownership_unresolved) = match self.llm_parent(&abandoned.agent_id) {
                 Some(parent_id) => (parent_id, false),
@@ -133,24 +131,29 @@ impl LangfuseTracer {
                     object.insert("http_status".to_string(), serde_json::json!(status));
                 }
             }
-            let (output, level, status_message, model, usage_details) =
-                if let Some(terminal) = terminal {
-                    (
-                        Some(safe_generation_output(&terminal.output)),
-                        None,
-                        Some("ownership_unresolved".to_string()),
-                        Some(terminal.model.clone()),
-                        terminal.usage.as_ref().map(usage::build_usage_details),
-                    )
-                } else {
-                    (
-                        Some(serde_json::json!({"error_class": error_class})),
-                        Some(fallback_status.level.clone()),
-                        Some(error_class.to_string()),
-                        None,
-                        None,
-                    )
-                };
+            let (output, level, status_message, model, usage_details) = if let Some(terminal) =
+                terminal
+            {
+                (
+                    Some(safe_generation_output(&terminal.output)),
+                    None,
+                    Some("ownership_unresolved".to_string()),
+                    Some(terminal.model.clone()),
+                    terminal.usage.as_ref().map(usage::build_usage_details),
+                )
+            } else {
+                (
+                    Some(
+                        failure
+                            .map(|failure| super::turn_error::failure_output(failure, error_class))
+                            .unwrap_or_else(|| serde_json::json!({"error_class": error_class})),
+                    ),
+                    Some(fallback_status.level.clone()),
+                    Some(error_class.to_string()),
+                    None,
+                    None,
+                )
+            };
             let end_time = now_rfc3339();
             let body = GenerationBody {
                 id: Some(abandoned.gen_id),
@@ -187,7 +190,7 @@ impl LangfuseTracer {
 
 fn safe_generation_output(output: &str) -> serde_json::Value {
     if output.starts_with("ERROR: ") {
-        serde_json::json!({"error_class": "provider_or_stream_failure"})
+        serde_json::json!({"error_class": "provider_or_stream_failure", "text": output})
     } else if let Ok(value) = serde_json::from_str::<serde_json::Value>(output) {
         if value.is_object() {
             value

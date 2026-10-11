@@ -13,12 +13,13 @@
 
 | 任务 | 读取 |
 | --- | --- |
-| 跨模块边界、事件、Prompt、工具、中间件、安全 | [architecture-contracts.md](architecture-contracts.md) |
+| 跨模块边界、事件、Prompt、工具、中间件、能力关闭、安全 | [architecture-contracts.md](architecture-contracts.md) |
 | Rust 实现 | [rust.md](rust.md) |
 | `peri-tui` 界面与交互 | [tui.md](tui.md) 与 `peri-tui/CLAUDE.md` |
 | `CLAUDE.md` 维护 | [documentation.md](documentation.md) |
 | Git 分支创建、upstream、历史整理与 push 安全 | [git.md](git.md) |
 | 测试（根 workspace、submodule、独立/side project 的范围与命令） | [testing.md](testing.md) |
+| 环境变量控制项、默认值与维护 | [environment-variables.md](environment-variables.md)；TUI 专属项见 [tui-environment-variables.md](tui-environment-variables.md) |
 | 权威设计与参考资料的生命周期 | [documentation.md](documentation.md) |
 
 ## 规则

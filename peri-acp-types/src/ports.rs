@@ -11,18 +11,21 @@
 //! 还原具体类型调用业务方法（与 `TaskManager` downcast 先例一致）。
 
 use std::any::{Any, TypeId};
-use std::path::PathBuf;
+use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
 use crate::acp_mcp::{AcpMcpError, AcpMcpInbound, AcpMcpServerSpec};
-use crate::agents::AgentCapability;
+use crate::agents::AgentCatalogEntry;
+use crate::command_registry::CommandRegistry;
 use crate::dynamic_mcp::{
     CanonicalDynamicMcpAction, DynamicMcpCatalogTool, DynamicMcpFailure, DynamicMcpInstanceKey,
     DynamicMcpNotification, DynamicMcpResponse, DynamicMcpShutdownReport, ResolvedSecret,
     SecretRef, SessionMcpCapabilitySnapshot,
 };
-use crate::mcp_skills::HandleToken;
-use crate::skills::{SkillMetadata, SkillRoot};
+use crate::mcp_skills::McpSkillRegistry;
+use crate::skills::SkillMetadata;
+use crate::tasks::TaskManager;
+use tokio_util::sync::CancellationToken;
 
 /// Terminal evidence for one MCP pool service-close transaction.
 ///
@@ -68,6 +71,59 @@ pub trait McpTaskOwnerPort: Send + Sync {
     async fn shutdown(&mut self) -> McpTaskShutdownReport;
 }
 
+/// MCP 服务器连接状态（[`McpPoolPort::server_infos`] 投影；与
+/// `peri-middlewares` 的 `ClientStatus` 同构，屏蔽其错误正文）。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum McpServerConnectionStatus {
+    Connected,
+    Failed,
+    Disconnected,
+    Disabled,
+    Uninitialized,
+}
+
+/// MCP 服务器 OAuth 授权状态（[`McpPoolPort::server_infos`] 投影）。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum McpServerOAuthStatus {
+    None,
+    Authorized,
+    NeedsAuthorization,
+}
+
+/// 单个 MCP 服务器的状态投影（`mcp/list` 命令面数据源）。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct McpServerInfo {
+    pub name: String,
+    pub transport: String,
+    pub status: McpServerConnectionStatus,
+    pub oauth_status: McpServerOAuthStatus,
+    pub tool_count: usize,
+    pub resource_count: usize,
+}
+
+/// `mcp/oauth_start` 的启动结果（与 middlewares 内部
+/// `OAuthStartDisposition` 同构）。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum McpOAuthStartDisposition {
+    Started,
+    AlreadyActive,
+    Conflict { active_flow_id: String },
+}
+
+/// builtin `workspace` 实例在当前池中的连接态（冻结期技能/指令/meta 读取的
+/// 等待与短路判定；与替换前 `get_client("workspace")` + `ClientStatus` 同构）。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum McpBuiltinWorkspaceState {
+    /// 实现方不提供 builtin Workspace 实例（替换前类型还原失败 ⇒ 立即短路）。
+    Unavailable,
+    /// 实例尚未装配进池（按 initPhase 决定是否继续有界等待）。
+    Absent,
+    /// 句柄已连接。
+    Connected,
+    /// 句柄存在但非 Connected（Failed / Disconnected / Disabled）⇒ 立即短路。
+    NotConnected,
+}
+
 /// MCP 客户端池端口（`peri-middlewares::mcp::McpClientPool` 实现）。
 ///
 /// 宿主装配点构造 `McpClientPool` 后 upcast 注入；ACP 协议面只传递
@@ -75,10 +131,53 @@ pub trait McpTaskOwnerPort: Send + Sync {
 /// `host/stage_builder.rs`）。`shutdown` / `snapshot` 为 M-TUI 收口新增
 /// 数据端口（`host/shutdown` 与 `mcp/list` 命令面经此访问，TUI 不再
 /// 直持具体句柄）。
+///
+/// W3 端口补全（C3 前置）：ACP 侧的服务器目录 / OAuth / 会话执行 owner /
+/// Workspace task scope / 发现预热改经本端口，不再 `downcast_arc` 还原
+/// 具体类型。默认实现即「实现方不提供该能力」，与替换前类型还原失败时的
+/// 分支同构：目录与 OAuth 类返回错误、清理与跳过类空操作；生产装配只注入
+/// `McpClientPool`，路径不变。
 #[async_trait::async_trait]
 pub trait McpPoolPort: Send + Sync {
     /// 还原具体实现（downcast 还原点，供 middlewares 装配面与装配面宿主使用）。
     fn as_any(&self) -> &dyn Any;
+
+    fn bind_agent_session(
+        &self,
+        _session_id: &str,
+        _inbox: crate::session::InboxHandle,
+        _manager: Arc<dyn crate::tasks::TaskManager>,
+    ) {
+    }
+
+    fn agent_session_binding(
+        &self,
+        _session_id: &str,
+    ) -> Option<(
+        crate::session::InboxHandle,
+        Arc<dyn crate::tasks::TaskManager>,
+    )> {
+        None
+    }
+
+    fn verify_shared_environment_close(&self, _root_session_id: &str) -> Result<(), String> {
+        Err("Incomplete: shared environment child ownership unknown".into())
+    }
+
+    /// Revert recorded file changes in the session's trusted Workspace owner.
+    /// Implementations must reject unavailable owners and report every failed change.
+    async fn rewind_files(
+        &self,
+        _session_id: &str,
+        _changes: serde_json::Value,
+    ) -> Result<(), String> {
+        Err("trusted Workspace rewind capability unavailable".into())
+    }
+
+    /// Whether this session has MCP Tasks whose terminal notification is pending.
+    fn has_active_tasks(&self, _session_id: &str) -> bool {
+        false
+    }
 
     /// Synchronously close task/callback/commit admission before external task
     /// owners are joined. Idempotent.
@@ -93,6 +192,175 @@ pub trait McpPoolPort: Send + Sync {
     /// [...]}`，字段语义与 TUI 面板投影一致（序列化格式由实现方保证，
     /// 契约层不透传具体类型）。
     fn snapshot(&self) -> serde_json::Value;
+
+    // ── 服务器目录 / OAuth（`mcp/list` 与 `mcp/oauth_*` 命令面） ──────────
+
+    /// 全量服务器目录（`mcp/list` 数据源；语义与 `McpClientPool::all_server_infos`
+    /// 一致：clients 表优先，configs 表补 `Uninitialized`）。
+    ///
+    /// 默认实现返回错误（实现方无服务器目录能力；替换前类型还原失败即报错）。
+    fn server_infos(&self) -> Result<Vec<McpServerInfo>, String> {
+        Err("MCP server catalog unavailable".into())
+    }
+
+    /// 指定 server 的进行中 OAuth flow id（`mcp/list` 逐项投影）。
+    ///
+    /// 默认 `None`（实现方无该能力；调用方仅在 [`Self::server_infos`] 成功后读取）。
+    fn active_oauth_flow(&self, _server_name: &str) -> Option<String> {
+        None
+    }
+
+    /// 以稳定 flow identity 启动 OAuth 授权（`mcp/oauth_start`；reservation
+    /// 在 spawn 前完成，并发/重试不得启动第二个 provider flow）。
+    ///
+    /// 默认实现返回错误（替换前类型还原失败即报错）。
+    fn spawn_oauth_flow_with_id(
+        self: Arc<Self>,
+        _server_name: &str,
+        _flow_id: &str,
+    ) -> Result<McpOAuthStartDisposition, String> {
+        Err("MCP OAuth flow unavailable".into())
+    }
+
+    /// 投递授权码回传（`mcp/oauth_callback`，静态 server 面）。
+    ///
+    /// 默认实现返回错误（替换前类型还原失败即报错）。
+    fn deliver_oauth_callback(
+        &self,
+        _server_name: &str,
+        _code: String,
+        _state: String,
+    ) -> Result<(), String> {
+        Err("MCP OAuth flow unavailable".into())
+    }
+
+    /// 以完整 dynamic identity 投递授权码；实现不得退化为裸 server name。
+    ///
+    /// 默认实现返回错误（替换前类型还原失败即报错）。
+    fn deliver_dynamic_oauth_callback(
+        &self,
+        _instance: DynamicMcpInstanceKey,
+        _flow_id: &str,
+        _code: String,
+        _state: String,
+    ) -> Result<(), String> {
+        Err("MCP OAuth flow unavailable".into())
+    }
+
+    /// 取消静态 server 的进行中授权（`mcp/oauth_cancel`），返回是否确有取消。
+    ///
+    /// 默认实现返回错误（替换前类型还原失败即报错）。
+    fn cancel_oauth_callback(&self, _server_name: &str) -> Result<bool, String> {
+        Err("MCP OAuth flow unavailable".into())
+    }
+
+    /// 取消指定 dynamic instance 的进行中授权，返回是否确有取消。
+    ///
+    /// 默认实现返回错误（替换前类型还原失败即报错）。
+    fn cancel_dynamic_oauth_flow(
+        &self,
+        _instance: DynamicMcpInstanceKey,
+        _flow_id: &str,
+    ) -> Result<bool, String> {
+        Err("MCP OAuth flow unavailable".into())
+    }
+
+    // ── Workspace task scope ─────────────────────────────────────────────
+
+    async fn close_agent_session_scope(self: Arc<Self>, _session_id: &str) -> Result<(), String> {
+        Err("Incomplete: agent session scope close capability unavailable".into())
+    }
+    //
+    // 默认实现同「替换前类型还原失败 ⇒ 跳过」：不参与 scope 生命周期。
+
+    /// 在 Store 清除持久 close intent 后重新开启已关闭的 scope。默认跳过。
+    async fn open_workspace_task_scope(&self, _session_id: &str) -> Result<(), String> {
+        Ok(())
+    }
+
+    /// 会话关闭：栅栏新工作、发现既有任务、经 TaskManager 路由取消。默认跳过。
+    async fn close_workspace_task_scope(self: Arc<Self>, _session_id: &str) -> Result<(), String> {
+        Ok(())
+    }
+
+    /// 会话已不在内存（重入 close）时对账既有 scope 并收口。默认跳过。
+    async fn reconcile_closing_workspace_scope(&self, _session_id: &str) -> Result<(), String> {
+        Ok(())
+    }
+
+    /// 绑定会话 TaskManager（外部任务取消/结算的投影）。默认跳过。
+    fn bind_session_task_manager(&self, _session_id: &str, _manager: &Arc<dyn TaskManager>) {}
+
+    /// 在初始快照后保持 scope 游标（长驻任务；`cancel` 触发即退出）。默认立即返回。
+    async fn watch_workspace_tasks(self: Arc<Self>, _session_id: &str, _cancel: CancellationToken) {
+    }
+
+    // ── 会话 MCP 发现接线（session/new 预热路径） ─────────────────────────
+
+    /// 挂接连接完成事件 → 幂等发现。端口面不含 ExecutorEvent 通知通道
+    /// （ACP 路径为 `None`；含通知的完整版仍由 middlewares 装配面内部调用）。
+    /// 默认跳过。
+    fn attach_connection_notifier(
+        self: Arc<Self>,
+        _registry: Option<&Arc<McpSkillRegistry>>,
+        _command_registry: Option<&Arc<CommandRegistry>>,
+        _cancel: &CancellationToken,
+    ) {
+    }
+
+    /// 会话新建即触发幂等发现（不装配 chain）。默认跳过。
+    fn prewarm_discovery(
+        self: Arc<Self>,
+        _registry: &Arc<McpSkillRegistry>,
+        _command_registry: &Arc<CommandRegistry>,
+        _session_id: &str,
+        _cancel: &CancellationToken,
+    ) {
+    }
+
+    // ── builtin Workspace 冻结读取（技能 / 指令 / meta） ─────────────────
+    //
+    // 默认实现同「替换前 `downcast_ref` 失败 ⇒ 立即返回空」：状态为
+    // `Unavailable`，读取方法返回错误（调用点先看状态，不会走到读取）。
+
+    /// 有效 `workspace` 声明的来源身份（H3/D1：执行环境的唯一事实源）。
+    ///
+    /// 实现方语义（`McpClientPool`）：覆盖会话声明（含恢复/reopen 由持久 owner
+    /// 装载的结果）与合并配置（部署/全局/项目/插件层 + builtin overlay）；
+    /// `None` = 无 `workspace` 条目。默认 `None`（实现方不暴露来源面）。
+    fn workspace_source(&self) -> Option<crate::plugin::ConfigSource> {
+        None
+    }
+
+    /// builtin `workspace` 实例的连接态。默认 `Unavailable`（实现方不提供）。
+    fn builtin_workspace_state(&self) -> McpBuiltinWorkspaceState {
+        McpBuiltinWorkspaceState::Unavailable
+    }
+
+    /// 冻结期技能清单快照（元数据快照，不读正文）。默认错误。
+    ///
+    /// 实现方语义（`McpClientPool`）：实例未装配 / 未连接 / 未声明 skills
+    /// 能力 ⇒ `Ok(空)`（不是失败）；能力已声明且实例健康但读取失败 ⇒ `Err`
+    /// （调用方 fail-closed，不谎称「无技能」）。
+    async fn read_builtin_workspace_skills(&self) -> Result<Vec<SkillMetadata>, String> {
+        Err("builtin workspace skills face unavailable".into())
+    }
+
+    /// 冻结期项目指令读取：`(main, local)`，main 为 import 展开后的正文，
+    /// local 为原文；两者都可为 `None`（未列出 ≠ 失败）。默认错误。
+    async fn read_builtin_workspace_instructions(
+        &self,
+    ) -> Result<(Option<String>, Option<String>), String> {
+        Err("builtin workspace instruction face unavailable".into())
+    }
+
+    /// 冻结期 MetaHarness 覆盖文档读取（仅启用 section；不回落磁盘）。默认错误。
+    async fn read_builtin_workspace_meta(
+        &self,
+        _enabled_sections: &HashSet<String>,
+    ) -> Result<HashMap<String, String>, String> {
+        Err("builtin workspace meta face unavailable".into())
+    }
 }
 
 impl dyn McpPoolPort {
@@ -252,12 +520,13 @@ pub trait SessionMcpCapabilityPort: Send + Sync {
     fn snapshot(&self) -> Arc<SessionMcpCapabilitySnapshot>;
 
     /// Bind the existing session MCP read/discovery registries to this checked
-    /// capability source. The returned lease owns no parallel capability
-    /// registry: it only projects the effective handles into the existing MCP
+    /// capability source, preserving the source pool's builtin policy. The
+    /// returned lease owns no parallel capability registry: it only projects
+    /// the effective handles into the existing MCP
     /// pool, skill registry and command registry.
     fn bind_projection(
         &self,
-        _static_handles: Vec<(String, HandleToken)>,
+        _static_pool: Arc<dyn McpPoolPort>,
         _skill_registry: Arc<crate::mcp_skills::McpSkillRegistry>,
         _command_registry: Arc<crate::command_registry::CommandRegistry>,
     ) -> Arc<dyn SessionMcpProjectionLease> {
@@ -377,35 +646,32 @@ impl dyn WorkflowMiddlewarePort {
     }
 }
 
-/// LSP 服务器池端口（`peri-lsp::pool::LspServerPool` 实现）。
+/// Agent 候选目录端口：主提示词 `{{available_agents}}` 渲染经此取候选
+/// （W5：唯一来源是会话级 MCP Agent registry 对 builtin `workspace` 实例
+/// `resources/list` 的投影）。
 ///
-/// per-session 实例；构造点（装配面宿主 `host/requests.rs` /
-/// `host/stdio/session/create.rs` 经 `peri_middlewares::assembly::create_session_lsp_pool`
-/// 创建）持有具体实现，协议面只持端口句柄。装配面（`assembly.rs`
-/// `ChainSlot::Lsp`）经 `downcast_arc` 还原具体类型复用同一 pool——
-/// 服务器进程、initialized 状态与诊断注册表跨 turn 存活（H1：
-/// 每 turn 重建 pool 导致冷启动与状态丢失）。宿主退出（`run_acp_server` /
-/// `run_acp_stdio` 返回）经 `shutdown` 优雅关闭全部服务器子进程。
-#[async_trait::async_trait]
-pub trait LspPoolPort: Send + Sync {
-    /// 还原具体实现（downcast 还原点，供 middlewares 装配面使用）。
-    fn as_any(&self) -> &dyn Any;
+/// 历史沿革：W4b 删除 `available_skills`（技能命令面改由 MCP 发现异步投影）；
+/// W5 把本端口从「本地扫盘（`scan_agents_detailed`）」改为「registry 投影」，
+/// 端口实现留在 `peri-middlewares`（`host_ports::AgentCatalogProvider`），
+/// ACP 侧不直调业务 crate（§0 依赖方向）。
+pub trait AgentCatalogPort: Send + Sync {
+    /// 还原具体实现（downcast 还原点，供 middlewares 装配面绑定会话级 registry）。
+    fn as_any(&self) -> &dyn std::any::Any;
 
-    /// 优雅关闭全部服务器（发送 shutdown/exit 并终止子进程；幂等）。
-    async fn shutdown(&self);
+    /// 本地来源候选（E13 优先级去重）。
+    ///
+    /// `include_builtin=false`（父会话冻结的 built-in policy 关闭）时返回的列表
+    /// 不含 builtin 来源项；面未装配 / 实例被关闭 ⇒ 空列表（X4：不回落磁盘）。
+    fn catalog(&self, include_builtin: bool) -> Vec<AgentCatalogEntry>;
 }
 
-impl dyn LspPoolPort {
-    /// 将 `Arc<dyn LspPoolPort>` 还原为具体实现 `Arc<T>`（类型不符返回原 `Arc`）。
-    pub fn downcast_arc<T: LspPoolPort + 'static>(self: Arc<Self>) -> Result<Arc<T>, Arc<Self>> {
+impl dyn AgentCatalogPort {
+    /// 将 `Arc<dyn AgentCatalogPort>` 还原为具体实现 `Arc<T>`（类型不符返回原 `Arc`）。
+    pub fn downcast_arc<T: AgentCatalogPort + 'static>(
+        self: Arc<Self>,
+    ) -> Result<Arc<T>, Arc<Self>> {
         let ptr = Arc::into_raw(self);
         unsafe {
-            // 经 `as_any()` 取具体类型的 TypeId：直接对 trait object 调
-            // `type_id()` 会命中 `Any` 的 blanket impl，返回
-            // `TypeId::of::<dyn LspPoolPort>()`（trait object 自身），
-            // 恒不等于 `TypeId::of::<T>()` → downcast 恒失败 → 装配面回退
-            // 临时实例，会话级 pool 与装配产物分离（同构
-            // 2026-08-06-e2e-workflow-not-completing 遗留项）。
             if (*ptr).as_any().type_id() == TypeId::of::<T>() {
                 Ok(Arc::from_raw(ptr as *const T))
             } else {
@@ -413,23 +679,6 @@ impl dyn LspPoolPort {
             }
         }
     }
-}
-
-/// Skills 扫描端口：协议命令面（available-commands / skill 列表 / agent 列表）
-/// 经此访问 skills/agents 扫描业务，具体扫描逻辑留在 `peri-middlewares`
-/// （`SkillsMiddleware::resolve_roots_static` / `scan_skill_roots` /
-/// `scan_agents_detailed`）。
-pub trait SkillsPort: Send + Sync {
-    /// 解析 skill 根目录并扫描全部 skill 元数据（含 bundled 禁用判定）。
-    fn available_skills(&self, cwd: &str, plugin_roots: &[SkillRoot]) -> Vec<SkillMetadata>;
-
-    /// 扫描可调度 agent 目录，返回 `(agent_id, name, description, capability)`。
-    fn agents(
-        &self,
-        cwd: &str,
-        extra_dirs: &[PathBuf],
-        include_built_ins: bool,
-    ) -> Vec<(String, String, String, AgentCapability)>;
 }
 
 #[cfg(test)]

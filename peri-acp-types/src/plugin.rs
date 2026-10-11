@@ -13,8 +13,8 @@ use std::{
 use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
 
+use crate::command::command_route::RouteEntry;
 use crate::hooks::{HooksConfig, RegisteredHook};
-use crate::lsp::LspServerConfig;
 use crate::skills::SkillRoot;
 
 // ─── MCP 服务器配置（mcp/config.rs 迁入）────────────────────
@@ -28,17 +28,19 @@ pub enum ConfigSource {
     Global(PathBuf),
     /// 插件配置
     Plugin,
+    /// 会话明确指定的远端 Workspace MCP。仅由宿主 overlay 设置，
+    /// 不从用户配置反序列化，供资源面识别被选中的来源。
+    WorkspaceRemote,
     /// 会话级声明：client 在 ACP 会话 setup 中以 `McpServer::Acp` 声明的
     /// MCP over ACP 服务器（无配置文件条目，归属绑定声明它的会话）。
     Acp,
-}
-
-/// 显式 MCP 协议版本。
-#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Hash)]
-pub enum McpProtocolVersion {
-    /// 使用 `server/discover` lifecycle 的 MCP 2026-07-28。
-    #[serde(rename = "2026-07-28")]
-    V2026_07_28,
+    /// builtin 实例（同进程 `ServerHandler`）：由构建期注册表决定的运行时来源，
+    /// **不可能**来自用户配置 —— `McpServerConfig::source` 是 `#[serde(skip)]`，
+    /// 只有代码能构造该变体（`TransportConfig::Builtin` 的判定唯一来源）。
+    Builtin {
+        /// 实例身份（`peri_acp_types::builtin_mcp` 注册表中的 `instance`）。
+        instance: String,
+    },
 }
 
 /// 单个 MCP 服务器配置
@@ -66,14 +68,6 @@ pub struct McpServerConfig {
     /// 是否禁用（默认 false，不序列化默认值以保持配置简洁）
     #[serde(default, skip_serializing_if = "is_false")]
     pub disabled: Option<bool>,
-    /// 显式 MCP 协议版本。仅 `2026-07-28` 使用 `server/discover` lifecycle；
-    /// 未配置使用官方 Auto 自动协商，未知版本会使配置解析失败。
-    #[serde(
-        default,
-        rename = "protocolVersion",
-        skip_serializing_if = "Option::is_none"
-    )]
-    pub protocol_version: Option<McpProtocolVersion>,
     /// subscriptions/listen 订阅配置（2026-07-28 协议；仅负责连接后建立订阅）
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub subscriptions: Option<McpSubscriptionsConfig>,
@@ -135,8 +129,6 @@ struct McpServerConfigWire {
     oauth: Option<OAuthConfig>,
     #[serde(default)]
     disabled: Option<bool>,
-    #[serde(default, rename = "protocolVersion")]
-    protocol_version: Option<McpProtocolVersion>,
     #[serde(default)]
     subscriptions: Option<McpSubscriptionsConfig>,
     #[serde(
@@ -194,7 +186,6 @@ impl<'de> Deserialize<'de> for McpServerConfig {
             headers: wire.headers,
             oauth: wire.oauth,
             disabled: wire.disabled,
-            protocol_version: wire.protocol_version,
             subscriptions: wire.subscriptions,
             system_mcp: wire.system_mcp,
             system_mcp_tools: wire.system_mcp_tools,
@@ -202,7 +193,7 @@ impl<'de> Deserialize<'de> for McpServerConfig {
             source: None,
         };
         // 非法组合在解析期拒绝，错误正文为固定契约文本。
-        config.validate().map_err(serde::de::Error::custom)?;
+        config.validate_wire().map_err(serde::de::Error::custom)?;
         Ok(config)
     }
 }
@@ -215,12 +206,31 @@ impl McpServerConfig {
     /// `system_mcp_timeout` 合法区间上界（毫秒，10 分钟）。
     pub const MAX_SYSTEM_MCP_TIMEOUT_MS: u64 = 600_000;
 
-    /// 纯数据不变量校验：System key 与 `system_mcp = true` 的组合、timeout 区间。
+    /// 纯数据不变量校验：System key 与 `system_mcp = true` 的组合、timeout 区间，
+    /// 以及 `disabled = true` 与 `system_mcp = true` 的组合（M7）。
     ///
     /// 无副作用、无 namespace / transport / I/O 依赖；`disabled = true` 也照常校验。
-    /// 确定性优先级：先组合错误（`system_mcp_tools` 先于 `system_mcp_timeout`），
-    /// 再 timeout 区间。
+    /// 确定性优先级：先组合错误（`disabled && system_mcp` → `system_mcp_tools` →
+    /// `system_mcp_timeout`），再 timeout 区间。
+    ///
+    /// `disabled && system_mcp` 覆盖**全部来源**（builtin / 普通 / global / project /
+    /// plugin 与配置更新）：两种开关语义互斥（既要关闭又要作为系统前置），
+    /// **合并/加载准入**一次失败并定位到 server 名，不再每轮 Reason 才在 readiness
+    /// 报 fatal，也不静默选择其中一个开关。
     pub fn validate(&self) -> Result<(), McpServerConfigValidationError> {
+        if self.disabled == Some(true) && self.system_mcp == Some(true) {
+            return Err(McpServerConfigValidationError::DisabledWithSystemMcp);
+        }
+        self.validate_wire()
+    }
+
+    /// wire 解析期可判定的规则（`system_mcp` 三个字段的自洽与 timeout 区间）。
+    ///
+    /// 与 [`Self::validate`] 的唯一差别是**不含** `disabled && system_mcp`：该组合的
+    /// 可操作诊断需要来源名字（配置键 / 插件 server 键），因此由配置文件级与合并级
+    /// 准入（`peri_config::mcp::validate_servers`、插件严格路径、写回前置校验）报出，
+    /// 解析期先按来源无关的规则拒绝，避免退化成「整份文件解析失败」的无名错误。
+    fn validate_wire(&self) -> Result<(), McpServerConfigValidationError> {
         if self.system_mcp != Some(true) {
             if self.system_mcp_tools.is_some() {
                 return Err(McpServerConfigValidationError::SystemMcpToolsRequiresSystemMcp);
@@ -243,6 +253,9 @@ impl McpServerConfig {
 /// MCP 服务器配置的纯校验错误（固定规则文本，不携带配置内容）。
 #[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
 pub enum McpServerConfigValidationError {
+    /// 同时声明了 `disabled = true` 与 `system_mcp = true`（任一来源都不合法）。
+    #[error("disabled = true cannot be combined with system_mcp = true")]
+    DisabledWithSystemMcp,
     /// 声明了 `system_mcp_tools` 却没有 `system_mcp = true`（含显式 `[]`）。
     #[error("system_mcp_tools requires system_mcp = true")]
     SystemMcpToolsRequiresSystemMcp,
@@ -257,8 +270,8 @@ pub enum McpServerConfigValidationError {
 /// `subscriptions/listen` 订阅配置（2026-07-28 协议）
 ///
 /// 任一字段非空即启用订阅：连接后建立对应过滤器的
-/// `subscriptions/listen` 长流；收到通知时
-/// 唤醒 agent 会话（注入 `<system-reminder>` Defer 消息）。
+/// `subscriptions/listen` 长流；资源更新按通知 `_meta` 的 Peri 消息类型声明
+/// 投递，未声明时沿用消费侧默认调度语义。
 #[derive(Debug, Clone, Serialize, Deserialize, Default, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
 pub struct McpSubscriptionsConfig {
@@ -407,24 +420,6 @@ pub struct PluginAgent {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct PluginLspServer {
-    pub name: String,
-    pub command: String,
-    #[serde(default)]
-    pub args: Vec<String>,
-    /// 文件扩展名到语言 ID 的映射（如 {".rs": "rust"}）
-    #[serde(default, rename = "extensionToLanguage")]
-    pub extension_to_language: HashMap<String, String>,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct PluginChannel {
-    pub name: String,
-    #[serde(rename = "mcpServer")]
-    pub mcp_server: String,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PluginOption {
     pub name: String,
     pub description: String,
@@ -475,11 +470,8 @@ pub struct PluginManifest {
     pub hooks: Option<HooksConfig>,
     #[serde(rename = "mcpServers")]
     pub mcp_servers: Option<HashMap<String, McpServerEntry>>,
-    #[serde(rename = "lspServers")]
-    pub lsp_servers: Option<Vec<PluginLspServer>>,
     #[serde(rename = "outputStyles")]
     pub output_styles: Option<Vec<String>>,
-    pub channels: Option<Vec<PluginChannel>>,
     pub options: Option<Vec<PluginOption>>,
     pub settings: Option<serde_json::Value>,
     /// 保留 plugin.json 中未声明的字段，确保前向兼容（read→write roundtrip 不丢字段）。
@@ -514,15 +506,8 @@ pub enum PluginOrigin {
     ProjectClaude,
 }
 
-impl PluginOrigin {
-    /// 是否由外部工具（Claude Code）安装，非 Peri 管理
-    pub fn is_external(&self) -> bool {
-        matches!(
-            self,
-            Self::ClaudeCodeInstalled | Self::UserClaude | Self::ProjectClaude
-        )
-    }
-}
+/// 来源作用域身份（M6，实现见 `plugin_scope.rs`）。
+pub use crate::plugin_scope::PluginScope;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct InstalledPlugin {
@@ -576,19 +561,25 @@ pub struct LoadedPlugin {
     pub hooks_config: Option<HooksConfig>,
     /// 插件来源 marketplace（如 "claude-plugins-official"），用于追踪插件来源
     pub marketplace: String,
+    /// 来源作用域身份（M6）：显式元数据，供「用户全局 vs 项目声明」区分与
+    /// hook 信任门控使用；不靠名称或路径猜。
+    pub scope: PluginScope,
 }
 
 /// 插件聚合加载结果（`load_enabled_plugins_aggregated` 返回值）。
 #[derive(Debug, Clone)]
 pub struct PluginLoadResult {
     pub plugins: Vec<LoadedPlugin>,
+    /// 本聚合覆盖的来源作用域（M6），顺序与 `plugins` 一一对应。
+    ///
+    /// 与 `LoadedPlugin::scope` 同源：由 [`Self::plugins`] 投影生成，不是第二份
+    /// 事实（消费方按 `plugin_id` 关联；`plugins` 顺序即事实源顺序）。
+    pub scope: Vec<PluginScope>,
     pub all_skill_roots: Vec<SkillRoot>,
     pub all_mcp_servers: HashMap<String, McpServerConfig>,
     pub all_agent_dirs: Vec<PathBuf>,
     pub all_commands: Vec<CommandEntry>,
     pub all_hooks: Vec<RegisteredHook>,
-    /// 聚合所有插件的 LSP 服务器配置
-    pub all_lsp_servers: Vec<LspServerConfig>,
 }
 
 // ─── 插件管理端口（波 2 装配注入）────────────────────────────
@@ -607,10 +598,23 @@ pub trait PluginManagerPort: Send + Sync {
         scope: InstallScope,
         cache_dir: &Path,
         claude_dir: &Path,
+        project_dir: Option<&Path>,
     ) -> Result<InstalledPlugin, String>;
 
     /// 卸载插件。
-    async fn uninstall(&self, plugin_id: &str, claude_dir: &Path) -> Result<(), String>;
+    async fn uninstall(
+        &self,
+        plugin_id: &str,
+        scope: InstallScope,
+        claude_dir: &Path,
+        project_dir: Option<&Path>,
+    ) -> Result<(), String>;
+
+    fn installation_scope(
+        &self,
+        claude_dir: &Path,
+        plugin: &LoadedPlugin,
+    ) -> Result<Option<InstallScope>, String>;
 
     /// 启用/禁用插件（写 enabledPlugins 配置）。
     fn set_enabled(
@@ -618,6 +622,7 @@ pub trait PluginManagerPort: Send + Sync {
         plugin_id: &str,
         scope: InstallScope,
         claude_dir: &Path,
+        project_dir: Option<&Path>,
         enable: bool,
     ) -> Result<(), String>;
 
@@ -628,8 +633,10 @@ pub trait PluginManagerPort: Send + Sync {
     async fn update(
         &self,
         plugin_id: &str,
+        scope: InstallScope,
         cache_dir: &Path,
         claude_dir: &Path,
+        project_dir: Option<&Path>,
     ) -> Result<InstalledPlugin, String>;
 
     /// 刷新 marketplace（按名称定位 known_marketplaces 条目），返回插件数量。
@@ -657,7 +664,33 @@ pub trait PluginManagerPort: Send + Sync {
     fn marketplace_snapshot(&self) -> serde_json::Value;
 
     /// 聚合快照：已启用插件 × 已安装记录 → 协议快照条目（plugin-snapshot 事件）。
-    fn snapshot(&self, claude_dir: &Path) -> Vec<crate::event_data::PluginSnapshotEntry>;
+    fn snapshot(
+        &self,
+        claude_dir: &Path,
+        project_dir: Option<&Path>,
+    ) -> Vec<crate::event_data::PluginSnapshotEntry>;
+
+    /// `~/.claude` 根目录（插件布局的用户级根，由实现方给出部署默认）。
+    ///
+    /// 替代 ACP 侧对 middlewares `plugin::claude_home` 的静态直调
+    /// （W3 端口补全）。
+    fn claude_home(&self) -> PathBuf;
+
+    /// 已启用插件的命令清单（`claude_dir` 下 enabledPlugins；`cwd` 提供项目级
+    /// 覆盖，`None` 仅用户级）。失败以 `String` 呈现（调用方按需降级）。
+    fn enabled_plugin_commands(
+        &self,
+        claude_dir: &Path,
+        cwd: Option<&Path>,
+    ) -> Result<Vec<CommandEntry>, String>;
+
+    /// `CommandEntry` → plugin 域 `RouteEntry` 投影（词法校验与异常跳过规则
+    /// 由实现方保证，语义同 middlewares `plugin_route_entries`）。
+    fn plugin_route_entries(&self, entries: &[CommandEntry]) -> Vec<RouteEntry>;
+
+    /// marketplace 缓存目录内的 manifest 定位（`marketplace.json` 或
+    /// `.claude-plugin/marketplace.json` 两形态），未找到返回 `None`。
+    fn find_marketplace_json(&self, dir: &Path) -> Option<PathBuf>;
 }
 
 #[cfg(test)]
@@ -674,7 +707,6 @@ mod tests {
             headers: None,
             oauth: None,
             disabled: None,
-            protocol_version: None,
             subscriptions: None,
             system_mcp: None,
             system_mcp_tools: None,
@@ -690,20 +722,17 @@ mod tests {
     /// 旧 JSON 兼容：新增 key 全部缺省为 None，输出不出现新 key，既有语义不变。
     #[test]
     fn test_system_mcp_legacy_defaults() {
-        let cfg = parse(r#"{"command":"npx","protocolVersion":"2026-07-28"}"#)
-            .expect("旧 JSON 必须仍可解析");
+        let cfg = parse(r#"{"command":"npx"}"#).expect("既有 JSON 必须仍可解析");
         assert!(cfg.system_mcp.is_none(), "旧 JSON 不得推断出启动依赖");
         assert!(cfg.system_mcp_tools.is_none());
         assert!(cfg.system_mcp_timeout.is_none());
         assert!(cfg.validate().is_ok(), "缺省 System 字段必须合法");
-        assert_eq!(cfg.protocol_version, Some(McpProtocolVersion::V2026_07_28));
         assert!(cfg.source.is_none(), "source 是运行时标记，不从 wire 读取");
 
         let json = serde_json::to_value(&cfg).unwrap();
         for key in ["system_mcp", "system_mcp_tools", "system_mcp_timeout"] {
             assert!(json.get(key).is_none(), "缺省不得序列化 {key}: {json}");
         }
-        assert_eq!(json["protocolVersion"], serde_json::json!("2026-07-28"));
         assert!(json.get("source").is_none(), "source 不进入 wire: {json}");
 
         let legacy = parse(r#"{"command":"npx","disabled":true,"args":["-y"]}"#).unwrap();

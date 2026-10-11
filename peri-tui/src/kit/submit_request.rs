@@ -1,9 +1,15 @@
 use crate::app::panel_types::PanelKind;
+use crate::kit::atoms::PendingAttachment;
 use crate::kit::ui_command::{UiCommandAction, resolve_ui_command};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum SubmitRequest {
-    AgentText(String),
+    /// agent 文本提交。附件随请求一起下发——提交链上任何一环都不得丢弃它
+    /// （丢弃即静默丢失用户已提交的图片）。
+    AgentText {
+        text: String,
+        attachments: Vec<PendingAttachment>,
+    },
     /// keepgoing：发送空白 user prompt，服务端不插入 user 消息但继续运行 agent loop。
     /// 由消息区 footer 的 keepgoing 按钮触发，不产生本地 user bubble。
     KeepGoing,
@@ -87,7 +93,10 @@ pub fn parse_submit_request(input: &str) -> Option<SubmitRequest> {
         });
     }
 
-    Some(SubmitRequest::AgentText(trimmed.to_string()))
+    Some(SubmitRequest::AgentText {
+        text: trimmed.to_string(),
+        attachments: Vec::new(),
+    })
 }
 
 fn is_clear_command(command: &str) -> bool {

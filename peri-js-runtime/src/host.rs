@@ -1,5 +1,4 @@
 use std::process::Stdio;
-use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 
 use tokio::io::{AsyncReadExt, BufReader};
@@ -41,11 +40,16 @@ impl JsProcessSpec {
         self
     }
 
+    /// 与下面的 `with_environment` 同为进程环境控制的测试门：生产侧只使用
+    /// `new`/`with_cwd`，唯一的调用方是 `#[cfg(all(test, unix))]` 生命周期
+    /// fixture（需要干净环境构造 hermetic Node 子进程）。
+    #[cfg(all(test, unix))]
     pub(crate) fn without_inherited_environment(mut self) -> Self {
         self.inherit_environment = false;
         self
     }
 
+    #[cfg(all(test, unix))]
     pub(crate) fn with_environment(
         mut self,
         environment: impl IntoIterator<Item = (String, String)>,
@@ -60,9 +64,10 @@ impl std::fmt::Debug for JsProcessSpec {
         formatter
             .debug_struct("JsProcessSpec")
             .field("program", &self.program)
-            .field("args", &"[REDACTED]")
-            .field("cwd", &self.cwd.as_ref().map(|_| "[REDACTED]"))
+            .field("args", &self.args)
+            .field("cwd", &self.cwd)
             .field("inherit_environment", &self.inherit_environment)
+            .field("environment", &self.environment)
             .finish()
     }
 }
@@ -74,7 +79,6 @@ pub struct JsExecutionHost {
     process_tree: ProcessTree,
     stdout_task: tokio::sync::Mutex<Option<JoinHandle<()>>>,
     stderr_task: tokio::sync::Mutex<Option<JoinHandle<()>>>,
-    stderr_bytes: Arc<AtomicUsize>,
     stderr_tail: Arc<Mutex<Vec<u8>>>,
 }
 
@@ -126,10 +130,8 @@ impl JsExecutionHost {
         let channel = Arc::new(RpcChannel::new(stdin, max_frame_bytes));
         let (sender, incoming) = mpsc::channel(256);
         let stdout_task = spawn_stdout_reader(stdout, Arc::clone(&channel), sender);
-        let stderr_bytes = Arc::new(AtomicUsize::new(0));
         let stderr_tail = Arc::new(Mutex::new(Vec::new()));
         let stderr_task = tokio::spawn({
-            let stderr_bytes = Arc::clone(&stderr_bytes);
             let stderr_tail = Arc::clone(&stderr_tail);
             async move {
                 let mut stderr = BufReader::new(stderr);
@@ -138,7 +140,6 @@ impl JsExecutionHost {
                     if bytes == 0 {
                         break;
                     }
-                    stderr_bytes.fetch_add(bytes, Ordering::Relaxed);
                     if let Ok(mut tail) = stderr_tail.lock() {
                         tail.extend_from_slice(&buffer[..bytes]);
                         if tail.len() > STDERR_TAIL_BYTES {
@@ -158,7 +159,6 @@ impl JsExecutionHost {
             process_tree,
             stdout_task: tokio::sync::Mutex::new(Some(stdout_task)),
             stderr_task: tokio::sync::Mutex::new(Some(stderr_task)),
-            stderr_bytes,
             stderr_tail,
         })
     }
@@ -171,12 +171,11 @@ impl JsExecutionHost {
         self.incoming.lock().await.take()
     }
 
+    /// 只等待 leader（不排空 channel、不等重定向后代），供
+    /// `#[cfg(all(test, unix))]` fixture 在整树清理前断言 leader 已自然退出。
+    #[cfg(all(test, unix))]
     pub(crate) async fn wait_for_exit(&self) -> Result<std::process::ExitStatus> {
         self.child.lock().await.wait().await.map_err(Into::into)
-    }
-
-    pub(crate) fn stderr_bytes(&self) -> usize {
-        self.stderr_bytes.load(Ordering::Relaxed)
     }
 
     pub async fn kill(&self) -> Result<()> {

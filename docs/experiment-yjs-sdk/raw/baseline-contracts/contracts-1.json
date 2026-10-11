@@ -1,0 +1,147 @@
+{
+  "scenario": "contracts",
+  "sample": 1,
+  "root": "/tmp/peri-yjs-sdk-baseline-567640f1837771442628970a56ce68c5a8f8e256",
+  "api": "legacy",
+  "workload": {
+    "version": 1,
+    "tools": 12000,
+    "toolsPerAssistant": 10,
+    "inputDataBytes": 960,
+    "resultTextBytes": 4096,
+    "resultDataBytes": 4096,
+    "asyncUpdates": 128,
+    "streamChunks": 16384,
+    "chunkBytes": 1024,
+    "largeResultBytes": 1048576
+  },
+  "startedAt": "2026-10-04T16:26:35.499Z",
+  "status": "passed",
+  "budget": {
+    "timeoutMs": 120000,
+    "maxRssBytes": 2147483648
+  },
+  "environment": {
+    "bun": "1.4.2",
+    "yjs": "13.6.33",
+    "platform": "darwin",
+    "release": "25.5.0",
+    "arch": "arm64",
+    "cpu": "Apple M5 Pro",
+    "totalMemoryBytes": 51539607552
+  },
+  "sourceSha256": "ce4e0419196957af166a48c333e53cbaff2db5d50b733258b07436ed3a6cfbd1",
+  "dependencyLockSha256": "acf7c28963e8fbb65317a543683d400cec43ece64de3603777f6ef1510e0e367",
+  "generatorSha256": "5fe3c36d10ea9b148deb605559b4bb5724d78bfd9fb672ef134291cd01856a66",
+  "harnessVersion": 2,
+  "contracts": {
+    "large": {
+      "projection": {
+        "completedTools": 1,
+        "rawPayloadBytes": 1049635,
+        "projectionMs": 0.607291,
+        "batch1000Ms": [
+          0.607291
+        ]
+      },
+      "completeMs": 0.10437499999999744,
+      "snapshot": {
+        "encoding": "v1",
+        "chatBytes": 1050799,
+        "sessionBytes": 296,
+        "totalBytes": 1051095,
+        "encodeMs": 1.6024160000000052,
+        "applyMs": 0.8131249999999994
+      },
+      "validation": {
+        "exact": true,
+        "verifiedTools": 1,
+        "verifiedAssistantMessages": 1,
+        "onDemandReads": 0,
+        "onDemandReadBytes": 0,
+        "referencedPayloadBytes": 0,
+        "activeTurnStatus": "completed"
+      }
+    },
+    "view": {
+      "projection": {
+        "completedTools": 20,
+        "rawPayloadBytes": 184930,
+        "projectionMs": 0.9630869999999874,
+        "batch1000Ms": [
+          0.9630869999999874
+        ]
+      },
+      "initialViewMs": 0.16587499999999977,
+      "initialHistory": {
+        "exact": true,
+        "verifiedTools": 20,
+        "verifiedAssistantMessages": 2,
+        "onDemandReads": 0,
+        "onDemandReadBytes": 0,
+        "referencedPayloadBytes": 0
+      },
+      "view": {
+        "snapshots": 3,
+        "unchangedToolIdentity": 0,
+        "latencyMs": {
+          "count": 3,
+          "total": 0.5916660000000036,
+          "min": 0.09754200000000424,
+          "median": 0.21479099999999818,
+          "p95": 0.27933300000000116,
+          "max": 0.27933300000000116
+        },
+        "rawLatencyMs": [
+          0.27933300000000116,
+          0.21479099999999818,
+          0.09754200000000424
+        ]
+      },
+      "validation": {
+        "bytes": 3072,
+        "sha256": "c600a28a7c38cada7f7bd46c6fe8169f697134ccc37a4f8d5bc2bdd10fa79003",
+        "expectedSha256": "c600a28a7c38cada7f7bd46c6fe8169f697134ccc37a4f8d5bc2bdd10fa79003",
+        "exact": true,
+        "history": {
+          "exact": true,
+          "verifiedTools": 20,
+          "verifiedAssistantMessages": 2,
+          "onDemandReads": 0,
+          "onDemandReadBytes": 0,
+          "referencedPayloadBytes": 0
+        }
+      },
+      "cacheContract": {
+        "changedToolInvalidated": true,
+        "priorSnapshotUnchanged": true,
+        "timing": "checked after the measured async update loop using one additional metadata update"
+      }
+    }
+  },
+  "progress": {
+    "stage": "complete",
+    "elapsedMs": 25.6085
+  },
+  "memory": {
+    "rssBytes": 66945024,
+    "peakRssBytes": 66945024,
+    "heapUsedBytes": 12323179,
+    "finalRssBytes": 66977792,
+    "processPeakRssBytes": 66977792
+  },
+  "validation": {
+    "exact": true,
+    "purpose": "supplementary public assertions, not a pressure comparison",
+    "tools": 20,
+    "asyncUpdates": 3,
+    "largeResultBytes": 1048576
+  },
+  "elapsedMs": 25.609833000000002,
+  "process": {
+    "exitCode": 0,
+    "reason": null,
+    "externalPeakRssBytes": 0,
+    "stderr": ""
+  }
+}

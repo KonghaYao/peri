@@ -6,9 +6,9 @@ use crate::middleware::{
     Middleware,
 };
 use crate::session::store::FrozenContext;
-use crate::session::test_resources::mock::MockSessionResources;
+use crate::session::test_resources::TestSession;
 use crate::session::{MessageKind, MessageQueue, MessageSource, Session};
-use crate::thread::{ThreadId, ThreadMeta};
+use crate::thread::ThreadId;
 use peri_acp_types::store::PersistedPayload;
 use peri_acp_types::system_reminder::{
     ReminderAudience, ReminderAudiences, ReminderCategory, ReminderDelivery, ReminderSeverity,
@@ -141,8 +141,9 @@ impl peri_model::Model for CountingSummaryModel {
 
 struct BudgetScenario {
     _dir: tempfile::TempDir,
+    _bound: TestSession,
     context: StageContext,
-    store: Arc<MockSessionResources>,
+    store: Arc<dyn peri_acp_types::session_resources::SessionResources>,
     thread_id: ThreadId,
     reason_calls: Arc<AtomicUsize>,
     compact_calls: Arc<AtomicUsize>,
@@ -152,11 +153,9 @@ struct BudgetScenario {
 
 async fn make_scenario(cancel_on_third: bool) -> BudgetScenario {
     let dir = tempfile::tempdir().unwrap();
-    let store = MockSessionResources::new();
-    let thread_id = store
-        .create_thread(ThreadMeta::new(dir.path().to_string_lossy()))
-        .await
-        .unwrap();
+    let bound = TestSession::open().await;
+    let store = bound.resources();
+    let thread_id = bound.thread_id();
     let session = Session::new(
         Arc::from(dir.path().to_string_lossy().as_ref()),
         FrozenContext::builder().build(),
@@ -199,6 +198,7 @@ async fn make_scenario(cancel_on_third: bool) -> BudgetScenario {
     ));
     BudgetScenario {
         _dir: dir,
+        _bound: bound,
         context,
         store,
         thread_id,
@@ -270,12 +270,13 @@ async fn test_budget_recovery_loop_stops_after_two_committed_fulls() {
         .persist_tx_handle()
         .unwrap();
     MessageTranscript::flush_via_tx(&tx).await.unwrap();
-    let payloads = scenario.store.payloads();
-    let flags = scenario
+    let snapshot = scenario
         .store
-        .load_message_flags(&scenario.thread_id)
+        .load_session_snapshot(&scenario.thread_id)
         .await
         .unwrap();
+    let payloads = snapshot.payloads;
+    let flags = snapshot.flags;
     let reminder_ids: Vec<_> = payloads
         .iter()
         .filter_map(|payload| match payload {

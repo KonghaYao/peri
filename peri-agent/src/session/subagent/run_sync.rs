@@ -13,7 +13,7 @@ use super::{
     SubagentStopV2Input,
 };
 use crate::agent::events::AgentEventHandler;
-use crate::agent::stages::{run_react_loop, LoopResult};
+use crate::agent::stages::LoopResult;
 use crate::agent::subagent_event_forwarder::spawn_subagent_event_forwarder_for_completion;
 use crate::agent::LangfuseBridgeLike;
 use crate::session::factory::{DeregisterRuntimeFn, RegisterRuntimeFn};
@@ -37,6 +37,7 @@ pub(super) async fn run_sync_subagent(
     deregister_runtime: Option<DeregisterRuntimeFn>,
     langfuse_bridge: Option<Arc<dyn LangfuseBridgeLike>>,
     parent_agent_id: Option<AgentId>,
+    parent_tool_call_id: Option<String>,
     v2_ctx: V2SubagentContext,
     session: Arc<Session>,
     mut resume_claim: Option<ResumeClaim>,
@@ -52,7 +53,7 @@ pub(super) async fn run_sync_subagent(
             "cascade".into(),
         );
     }
-    let _deregister_guard = DeregisterGuard {
+    let mut deregister_guard = DeregisterGuard {
         thread_id: child_thread_id.to_string(),
         deregister: deregister_runtime,
     };
@@ -60,7 +61,7 @@ pub(super) async fn run_sync_subagent(
     // The resumed claim crosses the first execution await with us. Its Drop
     // records cancellation without duplicating lifecycle Stop/hook delivery.
     if let Some(claim) = &mut resume_claim {
-        claim.mark_running();
+        claim.mark_running(session.clone());
     }
     let stop_resources = if resume_claim.is_some() {
         None // 认领持有终态写入（finish 内定向写状态），此处不重复写。
@@ -68,12 +69,10 @@ pub(super) async fn run_sync_subagent(
         session_resources
     };
 
-    // lifecycle hook（SubagentStart）
-    if let Some(ref on_start) = on_subagent_start {
-        on_start(&agent_name, &cwd);
+    // 真实子会话身份：hook 载荷 agent_id 的来源（不是 agent 名）。
+    if let Some(on_start) = &on_subagent_start {
+        on_start(child_thread_id, &agent_name, &cwd);
     }
-
-    // v2 SubagentStart（C2）：parent_agent_id 未注入时静默跳过（helper 内 warn）
     emit_subagent_start_v2(
         &v2_ctx.event_bus,
         v2_ctx.context.turn_id(),
@@ -81,12 +80,8 @@ pub(super) async fn run_sync_subagent(
         v2_ctx.agent_id,
         &agent_name,
         false,
+        parent_tool_call_id.clone(),
     );
-    // v1 协议化载体直发（SubagentStarted）：发射语义单一事实源为 v2 事件构造
-    // （ObserveEvent 身份透传：child_agent_id → instance_id），经
-    // `observe_event_to_executor` 同步映射后直发父 handler——同步保证 Started
-    // 恒先于本 turn 后续事件到达父协议化链路（v1 ExecutorEvent 中间态已退役，
-    // 仅保留 ACP 协议序列化面映射，`2026-07-18-executor-event-retirement.md`）。
     forward_subagent_start_v1(
         event_handler.as_ref(),
         build_subagent_start_v2(
@@ -95,6 +90,7 @@ pub(super) async fn run_sync_subagent(
             v2_ctx.agent_id,
             &agent_name,
             false,
+            parent_tool_call_id,
         ),
     );
 
@@ -109,8 +105,41 @@ pub(super) async fn run_sync_subagent(
     let event_bus = v2_ctx.event_bus;
 
     // 运行 v2 ReAct 循环
-    let subagent_turn_id = v2_ctx.context.turn_id();
-    let mut loop_result = run_react_loop(v2_ctx.context, max_iterations).await;
+    let execution_turn = v2_ctx.context.session.turn.clone();
+    let mut loop_result =
+        super::child_runner::run_child_until_terminal(v2_ctx.context, max_iterations, &session)
+            .await;
+    if let Err(error) = super::lifecycle::flush_session_history(&session).await {
+        loop_result = LoopResult::Error(error);
+    }
+    if let LoopResult::Error(error) = &loop_result {
+        if !execution_turn.cancel_token.is_cancelled()
+            && !matches!(error, crate::error::AgentError::Interrupted)
+        {
+            tracing::error!(
+                session_id = %child_thread_id,
+                turn_id = %execution_turn.turn_id(),
+                agent_name,
+                category = error.category_name(),
+                error = %error.user_facing_message(),
+                causes = ?error.cause_chain(),
+                "sync child execution failed"
+            );
+        }
+    }
+    let subagent_turn_id = Some(execution_turn.turn_id());
+    if let Err(error) = super::close::settle_explicit_close(
+        &session,
+        matches!(&loop_result, LoopResult::Interrupted),
+    )
+    .await
+    {
+        deregister_guard.deregister = None;
+        if let Some(mut claim) = resume_claim.take() {
+            claim.release().await?.accept()?;
+        }
+        return Err(error.into());
+    }
 
     // v2 SubagentStop（C3）：一个 emit 点覆盖 Completed / Interrupted / Error 三路
     let mut stop_failure = match &loop_result {
@@ -143,46 +172,55 @@ pub(super) async fn run_sync_subagent(
     // v2 SubagentStop（C3）：一个 emit 点覆盖 Completed / Interrupted / Error 三路。
     // 恢复路径复用本 Stop 发射点（R-L4）：stop_result 不含 child_thread_id——
     // issue 验收仅要求工具返回文本与 bg 通知文本携带 thread_id，事件侧不加。
-    emit_subagent_stop_v2_with_failure(
-        &event_bus,
-        SubagentStopV2Input {
-            turn_id: subagent_turn_id,
-            parent_agent_id,
-            child_agent_id,
-            agent_name: &agent_name,
-            result: &stop_result,
-            is_error: stop_is_error,
-            subagent_failure: stop_failure.clone(),
-        },
-    );
+    if let Some(subagent_turn_id) = subagent_turn_id {
+        emit_subagent_stop_v2_with_failure(
+            &event_bus,
+            SubagentStopV2Input {
+                turn_id: subagent_turn_id,
+                parent_agent_id,
+                child_agent_id,
+                agent_name: &agent_name,
+                result: &stop_result,
+                is_error: stop_is_error,
+                subagent_failure: stop_failure.clone(),
+            },
+        );
+    }
     // Close the child producer after the terminal v2 event. Awaiting the
     // forwarder drains queued render/observe events (including visible deltas)
     // before the synchronous v1 stop reaches the parent handler.
     if let Err(error) = drain_subagent_events(event_bus, forwarder_handle, langfuse_bridge).await {
-        // Retain cancellation and typed model diagnostics when execution had
-        // already failed; a successful loop cannot hide forwarding failure.
+        tracing::error!(thread_id = %child_thread_id, error = %error.user_facing_message(), causes = ?error.cause_chain(), "sync child event forwarding barrier incomplete");
         if matches!(loop_result, LoopResult::Completed) {
-            stop_result = error.user_facing_message();
+            stop_result = format!(
+                "{agent_name} execution failed: {}",
+                error.user_facing_message()
+            )
+            .chars()
+            .take(500)
+            .collect();
             stop_is_error = true;
-            stop_failure = None;
+            stop_failure = SubagentFailure::safe_failure_from_error(child_thread_id, &error);
             loop_result = LoopResult::Error(error);
         }
     }
     // v1 协议化载体直发（SubagentStopped）：与 Started 同源（v2 事件构造 +
     // observe_event_to_executor 同步映射），保证 Stopped 在 turn 收尾前到达
     // 父协议化链路（TUI 容器销毁 / depth 配对）。
-    forward_subagent_stop_v1(
-        event_handler.as_ref(),
-        build_subagent_stop_v2_with_failure(
-            subagent_turn_id,
-            parent_agent_id,
-            child_agent_id,
-            &agent_name,
-            &stop_result,
-            stop_is_error,
-            stop_failure,
-        ),
-    );
+    if let Some(subagent_turn_id) = subagent_turn_id {
+        forward_subagent_stop_v1(
+            event_handler.as_ref(),
+            build_subagent_stop_v2_with_failure(
+                subagent_turn_id,
+                parent_agent_id,
+                child_agent_id,
+                &agent_name,
+                &stop_result,
+                stop_is_error,
+                stop_failure,
+            ),
+        );
+    }
 
     let (final_text, interrupted) = match loop_result {
         LoopResult::Completed => {
@@ -194,7 +232,7 @@ pub(super) async fn run_sync_subagent(
             // child_thread_id 前缀：错误路径（LLM 网络错误等）必须可恢复——主 agent
             // 凭返回值中的 thread_id 找回执行现场（与 define.rs 成功路径
             // `child_thread_id: {id}\n{result}` 格式一致，多行展示）
-            let failure = SubagentFailure::new(child_thread_id, &agent_name, e);
+            let failure = SubagentFailure::completed(child_thread_id, &agent_name, e);
             let error_summary = failure.to_string();
             let error_result: String = error_summary.chars().take(500).collect();
             // 统一后处理（hook + thread_store；v1 协议化直发已在 emit_subagent_stop_v2
@@ -212,7 +250,7 @@ pub(super) async fn run_sync_subagent(
             if let Some(claim) = resume_claim.take() {
                 claim
                     .finish(peri_acp_types::thread::AgentStatus::Error)
-                    .await;
+                    .await?;
             }
             return Err(Box::new(failure));
         }
@@ -240,7 +278,7 @@ pub(super) async fn run_sync_subagent(
             } else {
                 peri_acp_types::thread::AgentStatus::Done
             })
-            .await;
+            .await?;
     }
 
     Ok(interrupted)

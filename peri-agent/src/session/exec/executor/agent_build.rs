@@ -1,12 +1,9 @@
 use std::sync::Arc;
 
-use chrono::Local;
-
 use peri_acp_types::{
     event::{AgentEventHandler, BackgroundTaskResult, ExecutorEvent},
     frozen::ThreadPersistence,
     messages::BaseMessage,
-    session::MessageQueue,
     tasks::{BgTaskKind, TaskManager},
 };
 
@@ -17,7 +14,7 @@ use crate::session::exec::executor_helpers::{
 };
 use crate::session::exec::stage_builder::CachedLlmInstances;
 
-use super::{ContinuationRequest, FrozenSessionData, SessionContext, TurnConfig};
+use super::{FrozenSessionData, SessionContext, TurnConfig};
 
 /// Agent 执行后的最终输出（state + 停止原因）。
 ///
@@ -39,8 +36,7 @@ pub(super) async fn build_and_execute_agent(
     history_payloads: Vec<peri_acp_types::store::PersistedPayload>,
     session_id: &str,
     cached_llm: Option<&CachedLlmInstances>,
-    v2_message_queue: &MessageQueue,
-    async_router: Option<AsyncRouter>,
+    async_router: AsyncRouter,
     task_manager: Arc<dyn TaskManager>,
     continuation: bool,
     stage_build: StageBuildFn,
@@ -60,12 +56,25 @@ pub(super) async fn build_and_execute_agent(
                 FrozenSessionData::from_frozen_parts(
                     crate::session::FrozenContext {
                         system_prompt: Arc::from(""),
+                        external_instructions: None,
+                        legacy_embedded_instructions: false,
                         claude_md: Arc::from(""),
                         skill_summary: Arc::from(""),
-                        date: Arc::from(Local::now().format("%Y-%m-%d").to_string()),
+                        date: Arc::from(
+                            peri_time::calendar_date(
+                                peri_time::now_wall(),
+                                peri_time::CalendarConvention::deployment_default(),
+                            )
+                            .to_string(),
+                        ),
                         language: turn.language.clone().map(Arc::from),
                         // 防御性回退：无冻结数据时 MetaHarness 状态为空（无覆盖、无关闭）
                         meta_harness: peri_acp_types::meta_harness::MetaHarnessState::default(),
+                        // 防御性回退：无冻结数据时 beta flag 投影为空（一切按 false，
+                        // 不意外开启能力）
+                        beta_flags: peri_acp_types::beta_flags::BetaFlags::default(),
+                        // 无冻结执行环境：unavailable（不探测本地值冒充，H3）
+                        runtime_env: None,
                     },
                     None,
                 )
@@ -119,26 +128,22 @@ pub(super) async fn build_and_execute_agent(
         // 因此每个 session 的消费者只 spawn 一次，无跨 session 污染。
         if wf_mw.init_notification_buffer() {
             let mut rx = wf_mw.subscribe_notifications();
-            // AsyncRouter（v2 路径：push_defer + wake Notify）
-            // 或回退 v2 queue clone（无 inbox 时直接 push，无 wake）
             let wf_router = async_router.clone();
-            let fallback_queue = v2_message_queue.clone();
             // task_manager 用于在 Defer 入队后递减 active_count，消除竞态窗口
             let notify_bg = task_manager.clone();
             tokio::spawn(async move {
                 loop {
                     match rx.recv().await {
                         Ok(task_result) => {
-                            crate::session::workflow_completion::apply_workflow_task_result(
-                                &task_result,
-                                wf_router.as_ref(),
-                                if wf_router.is_none() {
-                                    Some(&fallback_queue)
-                                } else {
-                                    None
-                                },
-                                notify_bg.as_ref(),
-                            );
+                            if let Err(error) =
+                                crate::session::workflow_completion::apply_workflow_task_result(
+                                    &task_result,
+                                    &wf_router,
+                                    notify_bg.as_ref(),
+                                )
+                            {
+                                tracing::error!(run_id = %task_result.run_id, %error, "workflow terminal delivery is pending");
+                            }
                         }
                         Err(tokio::sync::broadcast::error::RecvError::Lagged(n)) => {
                             tracing::warn!("WF notification consumer lagged by {} messages", n);
@@ -161,7 +166,6 @@ pub(super) async fn build_and_execute_agent(
 
     let thread_persistence = ThreadPersistence {
         session_resources: ctx.session_resources.clone(),
-        execution_owner: ctx.execution_owner.clone(),
         parent_thread_id: ctx.thread_id.clone(),
         register_runtime,
         deregister_runtime,
@@ -172,25 +176,20 @@ pub(super) async fn build_and_execute_agent(
         .as_ref()
         .and_then(|sa| sa.task_manager(session_id));
 
-    // on_bg_complete：bg 完成时**先**把结果同步 route 到 SessionInbox
-    // （Defer + wake），**再**通知 ACP server 的 per-session continuation
-    // scheduler。回调可能在主 prompt 结束后才发生（bg 独立运行），此时
-    // callback queue 已先写入；scheduler 原子 take session/cancel 标记后
-    // 通过同一 session execution path 发起内部 AsyncContinuation。
-    let on_bg_complete = async_router.as_ref().map(|router| {
-        let router = router.clone();
-        let notify = ctx.continuation_notify.clone();
-        let sid = ctx.session_id.clone();
-        Arc::new(move |result: &BackgroundTaskResult, kind: BgTaskKind| {
-            router.route_bg_result(result, kind);
-            if let Some(ref tx) = notify {
-                let _ = tx.send(ContinuationRequest {
-                    session_id: sid.clone(),
-                    kind,
-                    mq_steering: false,
-                });
-            }
-        }) as Arc<dyn Fn(&BackgroundTaskResult, BgTaskKind) + Send + Sync>
+    let on_bg_complete = Some({
+        match (
+            &ctx.session_resources,
+            ctx.session_access
+                .as_ref()
+                .and_then(|access| access.v2_message_queue(session_id)),
+        ) {
+            (Some(_), Some(queue)) => crate::session::bg_complete::task_bg_complete_callback(
+                crate::agent::async_tasks::delivery::SessionTerminalDelivery::for_queue(queue),
+            ),
+            _ => Arc::new(|_: &BackgroundTaskResult, _: BgTaskKind| {
+                Err("required terminal publication route unavailable".into())
+            }) as peri_acp_types::tasks::OnBgCompleteFn,
+        }
     });
 
     // ── L5 执行体注入面（stage 构建 / 事件发射 / LLM 缓存 / cancel cascade / forwarder）──

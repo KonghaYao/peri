@@ -155,11 +155,7 @@ pub async fn run_reason(input: ReasonInput) -> AgentResult<ReasonOutput> {
         _ = ctx.session.turn.cancel_token.cancelled() => {
             return Err(AgentError::Interrupted);
         }
-        result = ctx.runtime.llm.generate_reasoning_with_observed_body(
-            &messages_snapshot,
-            &tool_refs,
-            streaming,
-        ) => {
+        result = ctx.runtime.llm.generate_reasoning_with_observed_body(&messages_snapshot, &tool_refs, streaming) => {
             match result {
                 Ok((r, body)) => (r, body),
                 Err(e) => {

@@ -11,11 +11,9 @@
 //! Pushers from Agent/ACP layers use [`InboxHandle`] (cloneable). The TUI should NOT have
 //! access to this handle — TUI loses its `drain_for_end` responsibility in v2.
 
-pub mod channel_owner;
 pub mod cron_owner;
 pub mod inbox;
 
-pub use channel_owner::ChannelOwner;
 pub use cron_owner::CronOwner;
 pub use inbox::InboxHandle;
 pub use inbox::SessionInbox;

@@ -35,7 +35,7 @@
 //!    （`ProductionChainAssembler` 槽位）**：需要 `peri-acp` host 装配层。
 //!    本层只断言 `StageContext` 的 render 事件属于同一 turn，不代替 host seam。
 //!    归 **B-07**（`peri-acp/src/host/mcp_v4_startup_test.rs`）。
-//! 4. **Hook / SubAgent / Workflow / Goal / PTC 的具体实现**未在本层重测；本层只证明
+//! 4. **Hook / SubAgent / Workflow / Goal 的具体实现**未在本层重测；本层只证明
 //!    工具调用仍然完整经过 middleware chain（`before_tools_batch` 对 MCP bridge 可见），
 //!    即 direct 注入没有短路链上既有 hook 位。
 //!
@@ -62,21 +62,24 @@ use peri_agent::{
     },
     middleware::{capabilities as hook_state, r#trait::Middleware, MiddlewareChain},
     session::{tool_catalog::SessionToolCatalog, FrozenContext, Session},
-    tools::{BaseTool, ToolContext},
+    tools::{BaseTool, ToolContext, ToolInvocationResolver},
 };
 use peri_middlewares::{
-    mcp::{ClientStatus, McpClientHandle, McpToolBridge, OAuthStatus},
+    mcp::{ClientStatus, McpClientHandle, McpClientPool, McpToolBridge, OAuthStatus},
     permission::{
         default_requires_approval, PermissionMiddleware, PermissionMode, SharedPermissionMode,
     },
     tool_search::{
-        SearchExtraTools, ToolSearchIndex, ToolSearchMiddleware, EXECUTE_EXTRA_TOOL_NAME,
-        SEARCH_EXTRA_TOOLS_NAME,
+        ExecuteExtraTool, SearchExtraTools, ToolSearchIndex, ToolSearchMiddleware,
+        EXECUTE_EXTRA_TOOL_NAME, SEARCH_EXTRA_TOOLS_NAME,
     },
     ExecuteExtraToolResolver,
 };
 use rmcp::{
-    model::{ClientCapabilities, Implementation, InitializeRequestParams},
+    model::{
+        CallToolRequestParams, ClientCapabilities, Implementation, InitializeRequestParams,
+        JsonObject,
+    },
     service::{serve_client_with_lifecycle, ClientLifecycleMode, RoleClient, RunningService},
     transport::async_rw::AsyncRwTransport,
 };
@@ -87,8 +90,11 @@ use tokio_util::sync::CancellationToken;
 // ─── 真实 MCP wire fixture（duplex + rmcp 官方 client service）─────────────────
 
 const FIXTURE_SERVER: &str = "host-fixture";
+const FIXTURE_SESSION: &str = "host-policy-session";
 const REQUIRED_TOOL: &str = "write_note";
 const DEFERRED_TOOL: &str = "read_note";
+/// `_meta.ui.visibility = ["app"]`：server 声明的「仅 App 可用」工具（H5）。
+const APP_ONLY_TOOL: &str = "app_only_note";
 
 fn effective_name(tool: &str) -> String {
     format!("mcp__{FIXTURE_SERVER}__{tool}")
@@ -130,7 +136,9 @@ impl WireLog {
 struct Fixture {
     handle: Arc<McpClientHandle>,
     log: Arc<WireLog>,
-    _service: RunningService<RoleClient, InitializeRequestParams>,
+    pool: Arc<McpClientPool>,
+    _task_manager: Arc<dyn peri_acp_types::tasks::TaskManager>,
+    service: RunningService<RoleClient, InitializeRequestParams>,
 }
 
 impl Fixture {
@@ -142,12 +150,17 @@ impl Fixture {
             .find(|candidate| candidate.name.as_ref() == tool)
             .expect("fixture must expose the requested tool on the wire");
         McpToolBridge::new(FIXTURE_SERVER, declaration, Arc::clone(&self.handle))
+            .with_output_store(&self.pool, Some(FIXTURE_SESSION))
     }
 }
 
 /// 启动一个最小 MCP server（initialize / tools/list / tools/call），
 /// 让真实 rmcp client service 完成握手并返回由 wire 声明的工具。
 async fn spawn_fixture(blocking_call: bool) -> Fixture {
+    let pool = Arc::new(McpClientPool::new_pending());
+    let task_manager: Arc<dyn peri_acp_types::tasks::TaskManager> =
+        Arc::new(peri_agent::agent::async_tasks::TaskManager::new());
+    pool.bind_session_task_manager(FIXTURE_SESSION, &task_manager);
     let declarations = vec![
         tool_declaration(
             REQUIRED_TOOL,
@@ -166,6 +179,15 @@ async fn spawn_fixture(blocking_call: bool) -> Fixture {
                 "properties": {"id": {"type": "string"}}
             }),
         ),
+        json!({
+            "name": APP_ONLY_TOOL,
+            "description": "App 专用笔记面板（server 声明仅 app 可见）",
+            "inputSchema": {
+                "type": "object",
+                "properties": {"id": {"type": "string"}}
+            },
+            "_meta": {"ui": {"visibility": ["app"]}}
+        }),
     ];
     let release = blocking_call.then(|| Arc::new(tokio::sync::Notify::new()));
     let log = Arc::new(WireLog {
@@ -208,13 +230,14 @@ async fn spawn_fixture(blocking_call: bool) -> Fixture {
         oauth_status: OAuthStatus::default(),
         source: None,
         url: None,
-        channel_capable: false,
         skills_capable: false,
     });
     Fixture {
         handle,
         log,
-        _service: service,
+        pool,
+        _task_manager: task_manager,
+        service,
     }
 }
 
@@ -389,6 +412,11 @@ fn make_context(
         .with_middleware_chain(Arc::new(chain))
         .with_event_bus(Arc::new(event_bus))
         .build();
+    context
+        .session
+        .session_context
+        .write()
+        .insert("session_id".into(), FIXTURE_SESSION.into());
     (context, handles, catalog)
 }
 
@@ -525,7 +553,7 @@ async fn hitl_approval_gates_mcp_bridge_by_effective_name_and_calls_server_once(
         "HITL 必须看到 effective tool name，而不是裸 MCP 工具名"
     );
 
-    // 链未被绕过：before_tools_batch 观察到同一次调用（Hook/Workflow/PTC 等
+    // 链未被绕过：before_tools_batch 观察到同一次调用（Hook/Workflow 等
     // 链上能力的接入点）。具体实现不在本层重测。
     assert_policy_saw(&chain_seen, &effective);
 
@@ -673,7 +701,12 @@ async fn in_flight_cancellation_ends_the_call_without_a_second_wire_request() {
 
     // 等到 server 真的收到 tools/call（显式信号，不用睡眠）后再取消：
     // 取消必须打在**已批准且已在飞**的调用上，不是启动前拦截。
-    wire_log.call_reached.notified().await;
+    tokio::time::timeout(
+        std::time::Duration::from_secs(5),
+        wire_log.call_reached.notified(),
+    )
+    .await
+    .expect("approved MCP call must reach the fixture before cancellation");
     cancel.cancel();
 
     let outcome = dispatch.await.expect("dispatch task must not panic");
@@ -850,6 +883,9 @@ async fn deferred_mcp_bridge_is_reachable_only_through_tool_search() {
         "deferred 调用必须落到所属 namespace 的裸 MCP 工具名上，且只有一次"
     );
 }
+
+#[path = "mcp_host_policy_contract/app_visibility.rs"]
+mod app_visibility;
 
 /// 能力：契约 6 的「未绕过」补充说明——`SEARCH_EXTRA_TOOLS_NAME` 常量必须与
 /// `ToolSearchMiddleware` 注册的 meta 工具名一致，否则上面的断言会退化成

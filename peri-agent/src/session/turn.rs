@@ -32,7 +32,8 @@ pub use peri_acp_types::session::TurnId;
 #[derive(Debug)]
 pub struct TurnContext {
     /// Turn 唯一 ID（事件流纽带）
-    pub turn_id: TurnId,
+    turn_id: TurnId,
+    attempt_id: peri_acp_types::identity::AttemptId,
     /// 当前 ReAct step（turn 内的循环迭代次数，AtomicUsize 支持 &self 自增）
     step: AtomicUsize,
     /// 工作目录（只读）
@@ -48,16 +49,28 @@ impl TurnContext {
     pub fn new(cwd: Arc<str>, cancel_token: Arc<CancellationToken>) -> Self {
         Self {
             turn_id: TurnId::new(),
+            attempt_id: peri_acp_types::identity::AttemptId::new(),
             step: AtomicUsize::new(0),
             cwd,
             cancel_token,
-            started_at: Instant::now(),
+            started_at: peri_time::monotonic_now(),
         }
     }
 
     /// 当前 step（从 0 开始）
     pub fn current_step(&self) -> usize {
         self.step.load(Ordering::Relaxed)
+    }
+
+    pub fn execution_binding(&self) -> peri_acp_types::session::ExecutionBinding {
+        peri_acp_types::session::ExecutionBinding {
+            turn_id: self.turn_id,
+            attempt_id: self.attempt_id.clone(),
+        }
+    }
+
+    pub fn turn_id(&self) -> TurnId {
+        self.execution_binding().turn_id
     }
 
     /// 推进 step，返回推进后的值

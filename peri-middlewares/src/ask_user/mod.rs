@@ -61,15 +61,16 @@ pub fn parse_ask_user(tool_call: &ToolCall) -> Result<Vec<QuestionItem>, AgentEr
 
 // ─── `ask_user_question` 工具定义 ─────────────────────────────────────────────
 
+pub(crate) const ASK_USER_TOOL_DESCRIPTION: &str = "Batch ask users questions with options to get their selection or custom input.\
+                      Use when a task requires users to provide details, preferences, or make choices.\
+                      One call supports 1-4 questions, all displayed together to the user.\
+                      Each question provides a clear list of options, and users can always input custom content.";
+
 /// `ask_user_question` tool definition (aligned with Claude AskUserQuestion)
 pub fn ask_user_tool_definition() -> peri_agent::tools::ToolDefinition {
     peri_agent::tools::ToolDefinition {
         name: TOOL_ASK_USER.to_string(),
-        description: "Batch ask users questions with options to get their selection or custom input.\
-                      Use when a task requires users to provide details, preferences, or make choices.\
-                      One call supports 1-4 questions, all displayed together to the user.\
-                      Each question provides a clear list of options, and users can always input custom content."
-            .to_string(),
+        description: ASK_USER_TOOL_DESCRIPTION.to_string(),
         parameters: serde_json::json!({
             "type": "object",
             "properties": {

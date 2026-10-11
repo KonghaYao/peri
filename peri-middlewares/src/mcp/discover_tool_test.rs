@@ -42,7 +42,6 @@ fn make_handle(name: &str, tools: Vec<Tool>, resources: Vec<Resource>) -> Arc<Mc
         source: Some(ConfigSource::Project(PathBuf::from("/tmp/.mcp.json"))),
         url: Some(format!("https://{name}.example.com/mcp")),
         skills_capable: false,
-        channel_capable: false,
     })
 }
 
@@ -545,6 +544,26 @@ async fn detail_missing_server_param_returns_32602() {
     let tool = make_tool_box(None);
     let result = invoke(&tool, "detail", json!({})).await;
     assert_eq!(result["error"]["code"], -32602);
+}
+
+/// builtin 实例的来源标签（IF-D2 传播面：`config_source_str` 的新臂）。
+#[tokio::test]
+async fn detail_reports_builtin_source_label() {
+    let pool = Arc::new(McpClientPool::new_empty());
+    let mut handle = make_handle("web", vec![make_tool("WebSearch", "d")], vec![]);
+    Arc::get_mut(&mut handle).unwrap().source = Some(ConfigSource::Builtin {
+        instance: "web".to_string(),
+    });
+    insert_handle(&pool, handle);
+    let tool = DiscoverMCPTool::new(pool, None);
+
+    let result = invoke(&tool, "detail", json!({ "server": "web" })).await;
+    assert_eq!(
+        result["source"], "builtin",
+        "builtin 来源不得退化成其它标签"
+    );
+    assert_eq!(result["server"], "web");
+    assert_eq!(result["tool_count"], 1);
 }
 
 // ─── 未知 method / 错误对象结构 ────────────────────────────────────────────

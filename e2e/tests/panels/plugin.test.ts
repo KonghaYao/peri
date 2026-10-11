@@ -23,7 +23,14 @@ describe("panels: plugin", () => {
     fs.mkdirSync(path.join(home, ".peri"), { recursive: true });
     fs.writeFileSync(
       path.join(home, ".peri", "settings.json"),
-      JSON.stringify({ config: { language: "zh-CN" } }),
+      JSON.stringify({ config: {
+        language: "zh-CN",
+        active_alias: "sonnet",
+        providers: [{
+          id: "offline-panel", type: "anthropic", apiKey: "fixture-only-key",
+          baseUrl: "http://127.0.0.1:9", models: { sonnet: "fixture-model" },
+        }],
+      } }),
     );
     const pluginsDir = path.join(home, ".claude", "plugins");
     const marketplaceDir = path.join(pluginsDir, "marketplaces", "claude-plugins-official");

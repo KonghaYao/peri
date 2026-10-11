@@ -9,6 +9,7 @@
 pub mod action_resolver;
 pub mod dispatcher;
 pub mod executor;
+pub mod hook_output_delivery;
 pub mod input_builder;
 pub mod loader;
 pub mod matcher;

@@ -56,6 +56,7 @@ jobs:
                   tar -czf target/dist/peri-linux-i386.tar.gz \
                     -C target/i686-unknown-linux-musl/release peri
                   cd target/dist
+                  sha256sum peri-linux-i386.tar.gz > peri-linux-i386.tar.gz.sha256
                   sha256sum peri-linux-i386.tar.gz > checksums.txt
                   {
                     echo "Commit: $GITHUB_SHA"
@@ -71,6 +72,7 @@ jobs:
                   name: peri-linux-i386-${{ github.sha }}
                   path: |
                       target/dist/peri-linux-i386.tar.gz
+                      target/dist/peri-linux-i386.tar.gz.sha256
                       target/dist/checksums.txt
                       target/dist/build-info.txt
                   if-no-files-found: error

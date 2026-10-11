@@ -4,6 +4,7 @@
 
 use super::*;
 use crate::mcp::client::{McpClientHandle, OAuthStatus};
+use crate::mcp::skill_discovery::skills_list::collect_entries;
 use crate::mcp::ClientStatus;
 use peri_acp_types::mcp_skills::ServerDiscoveryState;
 use std::sync::Arc;
@@ -204,6 +205,7 @@ fn disambiguate_names_on_collision_uses_path_segments() {
         content: None,
         // 消歧只依赖 name/origin，resources 不参与
         resources: Vec::new(),
+        frontmatter: None,
     };
     let entries = vec![
         mk("mcp__srv__refunds", "skill://acme/billing/refunds/SKILL.md"),
@@ -323,13 +325,38 @@ fn entry_from_dto_resources_omitted_vs_empty_distinguished() {
 }
 
 #[test]
-fn entry_from_dto_missing_name_returns_none() {
+fn entry_from_dto_missing_name_reports_field_and_category() {
     let dto: SkillListEntryDto = serde_json::from_value(serde_json::json!({
         "uri": "skill://a/SKILL.md",
         "frontmatter": { "description": "no name" },
     }))
     .unwrap();
-    assert!(entry_from_dto(dto).is_none());
+    let defect = entry_from_dto(dto).unwrap_err();
+    assert_eq!(defect.field, "name");
+    assert_eq!(defect.category, "missing");
+}
+
+/// M8：非字符串 name/description 同样在 discovery 边界隔离（类别 wrong-type），
+/// 诊断只带字段与类别，不回显字段正文。
+#[test]
+fn entry_from_dto_non_string_field_is_isolated() {
+    let dto: SkillListEntryDto = serde_json::from_value(serde_json::json!({
+        "uri": "skill://a/SKILL.md",
+        "frontmatter": { "name": 7, "description": { "nested": "value" } },
+    }))
+    .unwrap();
+    let defect = entry_from_dto(dto).unwrap_err();
+    assert_eq!(defect.field, "name");
+    assert_eq!(defect.category, "wrong-type");
+
+    let dto: SkillListEntryDto = serde_json::from_value(serde_json::json!({
+        "uri": "skill://a/SKILL.md",
+        "frontmatter": { "name": "a", "description": 7 },
+    }))
+    .unwrap();
+    let defect = entry_from_dto(dto).unwrap_err();
+    assert_eq!(defect.field, "description");
+    assert_eq!(defect.category, "wrong-type");
 }
 
 #[test]
@@ -355,7 +382,7 @@ fn skill_list_response_parses_pagination_and_defaults() {
     assert_eq!(e1.resources.as_ref().unwrap().len(), 1);
 }
 
-// ─── verify_and_build（digest / frontmatter / uri 段校验）──────────────────
+// ─── entry_to_metadata（W2：发现期只做结构校验，不读正文）─────────────────
 
 const SPEC_MD: &str = "---\nname: a\ndescription: A skill\n---\n\n# A\n";
 
@@ -378,11 +405,8 @@ fn spec_entry(digest: Option<&str>) -> SkillListEntry {
 }
 
 #[test]
-fn verify_and_build_ok() {
-    let outcome = verify_and_build("srv", &spec_entry(None), SPEC_MD);
-    let VerifyOutcome::Built(meta) = outcome else {
-        panic!("digest+frontmatter 一致应构建，实际: {outcome:?}");
-    };
+fn entry_to_metadata_builds_metadata_without_content() {
+    let meta = entry_to_metadata("srv", &spec_entry(None)).expect("结构合法应构建");
     assert_eq!(meta.name, "mcp__srv__a");
     assert_eq!(meta.description, "A skill");
     assert_eq!(
@@ -392,178 +416,91 @@ fn verify_and_build_ok() {
             uri: "skill://a/SKILL.md".to_string(),
         })
     );
-}
-
-#[test]
-fn verify_and_build_digest_mismatch_rejected() {
-    let entry = spec_entry(Some(&format!("sha256:{}", "0".repeat(64))));
+    // W2：发现只发布 metadata——正文与 frontmatter 快照留给 activation。
+    assert!(meta.content.is_none(), "发现期不得携带正文");
     assert!(
-        matches!(
-            verify_and_build("srv", &entry, SPEC_MD),
-            VerifyOutcome::DigestMismatch
-        ),
-        "digest 不匹配（内容被替换/陈旧）→ DigestMismatch（stale 信号）"
+        meta.frontmatter.is_some(),
+        "必须携带 frontmatter 快照供激活比对"
     );
+    assert_eq!(meta.resources.len(), 1, "resources 清单保留供内容绑定");
 }
 
 #[test]
-fn verify_and_build_frontmatter_mismatch_rejected() {
+fn entry_to_metadata_rejects_uri_name_mismatch() {
     let mut entry = spec_entry(None);
-    entry
-        .frontmatter
-        .insert("description".to_string(), "Stale description".into());
-    assert!(
-        matches!(
-            verify_and_build("srv", &entry, SPEC_MD),
-            VerifyOutcome::Rejected
-        ),
-        "读到的 frontmatter 与条目不一致 → 拒绝"
-    );
-}
-
-#[test]
-fn verify_and_build_uri_name_mismatch_rejected() {
-    let mut entry = spec_entry(None);
-    entry.uri = "skill://b/SKILL.md".to_string();
-    assert!(
-        matches!(
-            verify_and_build("srv", &entry, SPEC_MD),
-            VerifyOutcome::Rejected
-        ),
-        "uri 最终段 != frontmatter name → 拒绝"
-    );
-}
-
-#[test]
-fn verify_and_build_without_resources_accepted() {
-    let mut entry = spec_entry(None);
-    entry.resources = None;
-    assert!(
-        matches!(
-            verify_and_build("srv", &entry, SPEC_MD),
-            VerifyOutcome::Built(_)
-        ),
-        "省略 resources（None，动态生成技能）：接受但不可内容绑定（规范 MAY 省略）"
-    );
-}
-
-/// resources present 但为显式空数组 → 完整性违规（present 时必须完整，
-/// 含 SKILL.md 自身条目）→ 拒绝。
-#[test]
-fn verify_and_build_empty_resources_rejected() {
-    let mut entry = spec_entry(None);
-    entry.resources = Some(vec![]);
-    assert!(
-        matches!(
-            verify_and_build("srv", &entry, SPEC_MD),
-            VerifyOutcome::Rejected
-        ),
-        "显式空 resources → 完整性违规拒绝"
-    );
-}
-
-/// resources present 但未含 SKILL.md 自身条目（只列了附属资源）→ 拒绝。
-#[test]
-fn verify_and_build_resources_missing_self_rejected() {
-    let mut entry = spec_entry(None);
+    entry.uri = "skill://other/SKILL.md".to_string();
     entry.resources = Some(vec![SkillResource {
-        uri: "skill://a/notes.md".to_string(),
+        uri: "skill://other/SKILL.md".to_string(),
         digest: format!("sha256:{}", "0".repeat(64)),
     }]);
     assert!(
-        matches!(
-            verify_and_build("srv", &entry, SPEC_MD),
-            VerifyOutcome::Rejected
-        ),
-        "resources 未含 SKILL.md 自身条目 → 完整性违规拒绝"
+        entry_to_metadata("srv", &entry).is_none(),
+        "URI 最终段与 frontmatter name 不一致（身份失败）→ 拒绝"
     );
 }
 
-// ─── frontmatter 逐字段全量比对（任务：附加字段/值类型归一）────────────────
-
-/// entry frontmatter 含附加字段 license；内容侧 license 被改 → 拒绝
-/// （附加字段差异也是验证失败，规范 MUST NOT load）。
 #[test]
-fn verify_and_build_extra_field_mismatch_rejected() {
-    let content = "---\nname: a\ndescription: A skill\nlicense: Apache-2.0\n---\n\n# A\n";
-    // content 与 entry frontmatter 的 name/description 一致、digest 也匹配，
-    // 但 license 不同 → 全量比对失败
-    let mut entry = spec_entry(Some(&spec_entry_digest_for(content)));
-    entry
-        .frontmatter
-        .insert("license".to_string(), "MIT".into());
-    assert!(
-        matches!(
-            verify_and_build("srv", &entry, content),
-            VerifyOutcome::Rejected
-        ),
-        "附加字段 license 不一致 → 拒绝"
-    );
+fn entry_to_metadata_without_resources_is_accepted_but_unbound() {
+    let mut entry = spec_entry(None);
+    entry.resources = None;
+    let meta = entry_to_metadata("srv", &entry).expect("省略 resources（动态技能）条目仍可发现");
+    assert!(meta.resources.is_empty(), "无内容绑定：激活按保守策略拒绝");
 }
 
-/// 附加字段全等（含嵌套 metadata 对象）→ 接受。
 #[test]
-fn verify_and_build_extra_fields_equal_accepted() {
-    let content = "---\nname: a\ndescription: A skill\nlicense: MIT\nmetadata:\n  author: x\n  tags: [t1, t2]\n---\n\n# A\n";
-    let mut entry = spec_entry(Some(&spec_entry_digest_for(content)));
-    entry.frontmatter = serde_json::json!({
-        "name": "a",
-        "description": "A skill",
-        "license": "MIT",
-        "metadata": { "author": "x", "tags": ["t1", "t2"] },
-    })
-    .as_object()
-    .unwrap()
-    .clone();
+fn entry_to_metadata_empty_resources_rejected() {
+    let mut entry = spec_entry(None);
+    entry.resources = Some(Vec::new());
     assert!(
-        matches!(
-            verify_and_build("srv", &entry, content),
-            VerifyOutcome::Built(_)
-        ),
-        "附加字段全等（含嵌套对象/数组）→ 接受"
+        entry_to_metadata("srv", &entry).is_none(),
+        "显式空数组（present 但不完整）→ 完整性违规，拒绝"
     );
 }
 
-/// YAML 值类型严格比较（2026-08-15 定案）：数字 ↔ 字符串**跨类型不相等**
-/// （42 ≠ "42"，规范 "identical in content" 字面；两侧类型不一致即内容
-/// 差异）→ 拒绝。
 #[test]
-fn verify_and_build_yaml_value_type_cross_type_rejected() {
-    let content = "---\nname: a\ndescription: A skill\nversion: 42\n---\n\n# A\n";
-    let mut entry = spec_entry(Some(&spec_entry_digest_for(content)));
-    entry.frontmatter.insert("version".to_string(), "42".into());
+fn entry_to_metadata_resources_missing_self_rejected() {
+    let mut entry = spec_entry(None);
+    entry.resources = Some(vec![SkillResource {
+        uri: "skill://a/other.md".to_string(),
+        digest: format!("sha256:{}", "0".repeat(64)),
+    }]);
     assert!(
-        matches!(
-            verify_and_build("srv", &entry, content),
-            VerifyOutcome::Rejected
-        ),
-        "YAML 数字 42 与字符串 \"42\" 跨类型 → 拒绝"
+        entry_to_metadata("srv", &entry).is_none(),
+        "resources 未含 SKILL.md 自身条目 → 完整性违规，拒绝"
     );
 }
 
-/// YAML 尾随空白归一：String vs String 比较前两侧 trim_end（block scalar
-/// 渲染差异容忍）→ 接受。
 #[test]
-fn verify_and_build_yaml_trailing_whitespace_normalized() {
-    let content = "---\nname: a\ndescription: A skill\nversion: |\n  1.0\n---\n\n# A\n";
-    let mut entry = spec_entry(Some(&spec_entry_digest_for(content)));
-    // 条目侧 version 为 "1.0\n"（渲染差异），内容侧为 "1.0\n"（block scalar
-    // 自带换行）——trim_end 后相等。
-    entry
-        .frontmatter
-        .insert("version".to_string(), "1.0".into());
-    assert!(
-        matches!(
-            verify_and_build("srv", &entry, content),
-            VerifyOutcome::Built(_)
-        ),
-        "字符串尾随空白归一（trim_end）→ 接受"
+fn entries_to_metadata_sorts_and_reports_all_rejected() {
+    let entries = vec![
+        SkillListEntry {
+            uri: "skill://z/SKILL.md".to_string(),
+            frontmatter: serde_json::json!({ "name": "z", "description": "Z" })
+                .as_object()
+                .unwrap()
+                .clone(),
+            resources: Some(vec![SkillResource {
+                uri: "skill://z/SKILL.md".to_string(),
+                digest: format!("sha256:{}", "1".repeat(64)),
+            }]),
+        },
+        spec_entry(None),
+    ];
+    let (all_rejected, metas) = entries_to_metadata("srv", entries);
+    assert!(!all_rejected);
+    assert_eq!(
+        metas.iter().map(|m| m.name.as_str()).collect::<Vec<_>>(),
+        vec!["mcp__srv__a", "mcp__srv__z"],
+        "输出按注册名排序（完成序无关）"
     );
-}
 
-/// 计算 content 的 sha256 digest（spec_entry 用）。
-fn spec_entry_digest_for(content: &str) -> String {
-    format!("sha256:{}", sha256_hex(content))
+    let mut broken = spec_entry(None);
+    broken.uri = "skill://mismatch/SKILL.md".to_string();
+    let (all_rejected, metas) = entries_to_metadata("srv", vec![broken]);
+    assert!(
+        all_rejected && metas.is_empty(),
+        "候选非空但全部结构非法 → 上报汇总 warn 信号"
+    );
 }
 
 /// frontmatter_maps_equal 纯函数单测：键集合/值类型归一/嵌套递归。
@@ -776,138 +713,6 @@ async fn private_zero_ttl_skill_server(
     }
 }
 
-#[tokio::test]
-async fn legacy_private_zero_ttl_cache_survives_cache_recreation() {
-    let (client_io, server_io) = tokio::io::duplex(8192);
-    let request_count = Arc::new(std::sync::atomic::AtomicUsize::new(0));
-    tokio::spawn(private_zero_ttl_skill_server(
-        server_io,
-        Arc::clone(&request_count),
-    ));
-    let running = rmcp::service::serve_directly::<RoleClient, _, _, _, _>(
-        (),
-        client_io,
-        None::<rmcp::model::ServerPeerInfo>,
-    );
-    let cache_dir = tempfile::tempdir().unwrap();
-    let origin = "legacy-private-origin";
-    let version = "sha256:test-cache-version";
-    let first_cache =
-        crate::mcp::resource_cache::McpResourceCache::at(cache_dir.path().to_path_buf());
-    first_cache.set_cache_version(origin, Some(version));
-    let resources = vec![resource("skill://srv/cached/SKILL.md")];
-    let (_, first_entries) = collect_skill_entries(
-        running.peer().clone(),
-        "srv",
-        resources.clone(),
-        AgentCancellationToken::new(),
-        Some((first_cache.clone(), origin.to_string())),
-    )
-    .await;
-    assert_eq!(first_entries.len(), 1);
-    assert_eq!(
-        request_count.load(std::sync::atomic::Ordering::Relaxed),
-        1,
-        "首次 legacy read 必须访问远程 server"
-    );
-
-    drop(first_cache);
-
-    // 丢弃第一个 cache 实例后，用同一磁盘根目录重建，模拟重启/新 pool。
-    let second_cache =
-        crate::mcp::resource_cache::McpResourceCache::at(cache_dir.path().to_path_buf());
-    second_cache.set_cache_version(origin, Some(version));
-    let (_, second_entries) = collect_skill_entries(
-        running.peer().clone(),
-        "srv",
-        resources,
-        AgentCancellationToken::new(),
-        Some((second_cache.clone(), origin.to_string())),
-    )
-    .await;
-    assert_eq!(second_entries.len(), 1);
-    assert_eq!(
-        request_count.load(std::sync::atomic::Ordering::Relaxed),
-        1,
-        "匹配 cacheVersion 的 private + ttlMs:0 条目应直接从新 cache 实例读取"
-    );
-    assert_eq!(
-        second_cache.recent_status(origin),
-        Some(crate::mcp::resource_cache::CacheLoadStatus::VersionHit),
-        "第二次读取必须记录 VersionHit，而不是 LiveFetch"
-    );
-
-    // 版本变化必须拒绝旧的零 TTL 内容，恢复远程读取。
-    let third_cache =
-        crate::mcp::resource_cache::McpResourceCache::at(cache_dir.path().to_path_buf());
-    third_cache.set_cache_version(origin, Some("sha256:changed-cache-version"));
-    let (_, third_entries) = collect_skill_entries(
-        running.peer().clone(),
-        "srv",
-        vec![resource("skill://srv/cached/SKILL.md")],
-        AgentCancellationToken::new(),
-        Some((third_cache, origin.to_string())),
-    )
-    .await;
-    assert_eq!(third_entries.len(), 1);
-    assert_eq!(
-        request_count.load(std::sync::atomic::Ordering::Relaxed),
-        2,
-        "cacheVersion 改变后必须重新访问远程 server，不能复用旧零 TTL 内容"
-    );
-}
-
-#[tokio::test]
-async fn collect_skill_entries_sorts_by_name_despite_completion_order() {
-    let (client_io, server_io) = tokio::io::duplex(8192);
-    // 服务端每请求独立 spawn：zebra 立即返回、alpha 延迟 200ms → 完成序
-    // 确定性为 [zebra, alpha]（与 name 排序相反）；若 collect 不排序，
-    // entries 将保持完成序。
-    let completion_log: Arc<std::sync::Mutex<Vec<String>>> = Default::default();
-    tokio::spawn(raw_skill_server(
-        server_io,
-        vec![RespondRule {
-            segment: "alpha",
-            delay: std::time::Duration::from_millis(200),
-            error: false,
-        }],
-        None,
-        Some(Arc::clone(&completion_log)),
-    ));
-
-    let running = rmcp::service::serve_directly::<RoleClient, _, _, _, _>(
-        (),
-        client_io,
-        None::<rmcp::model::ServerPeerInfo>,
-    );
-    let peer = running.peer().clone();
-
-    let resources = vec![
-        resource("skill://srv/zebra/SKILL.md"),
-        resource("skill://srv/alpha/SKILL.md"),
-    ];
-    let cancel = AgentCancellationToken::new();
-    let (_, entries) = collect_skill_entries(peer, "srv", resources, cancel, None).await;
-
-    let names: Vec<&str> = entries.iter().map(|e| e.name.as_str()).collect();
-    // frontmatter name = uri 最终段（zebra/alpha）→ 注册名
-    assert_eq!(
-        names,
-        vec!["mcp__srv__alpha", "mcp__srv__zebra"],
-        "JoinSet 完成序非确定，输出应按 name 排序"
-    );
-    // 完成序确定性：zebra（无延迟）先于 alpha（200ms 延迟）写出——与排序序
-    // 相反，证明排序断言确实覆盖了乱序输入。
-    assert_eq!(
-        *completion_log.lock().unwrap(),
-        vec![
-            "skill://srv/zebra/SKILL.md".to_string(),
-            "skill://srv/alpha/SKILL.md".to_string()
-        ],
-        "服务端完成序应为 [zebra, alpha]，与排序序相反"
-    );
-}
-
 // ─── run_discovery 级测试（legacy 路径）───────────────────────────────────
 
 /// 极简 tracing Subscriber：只捕获 WARN 事件的 message 字段（不引入
@@ -960,196 +765,7 @@ fn make_discovery_handle(
         source: None,
         url: None,
         skills_capable: false,
-        channel_capable: false,
     })
-}
-
-/// candidates 非空 + 全部 read 失败 → 汇总 warn（回写空条目 Discovered）。
-#[test]
-fn run_discovery_all_reads_fail_emits_warn() {
-    let warns = Arc::new(std::sync::Mutex::new(Vec::new()));
-    tracing::subscriber::with_default(
-        WarnCaptureSubscriber {
-            warns: Arc::clone(&warns),
-        },
-        || {
-            let rt = tokio::runtime::Builder::new_current_thread()
-                .enable_all()
-                .build()
-                .unwrap();
-            rt.block_on(async {
-                let reg = Arc::new(McpSkillRegistry::new());
-                let token: HandleToken = Arc::new(3u32);
-                let (client_io, server_io) = tokio::io::duplex(8192);
-                // 空段规则匹配所有 uri → 全部返回 JSON-RPC error（read 失败）
-                tokio::spawn(raw_skill_server(
-                    server_io,
-                    vec![RespondRule {
-                        segment: "",
-                        delay: std::time::Duration::ZERO,
-                        error: true,
-                    }],
-                    None,
-                    None,
-                ));
-                let running = rmcp::service::serve_directly::<RoleClient, _, _, _, _>(
-                    (),
-                    client_io,
-                    None::<rmcp::model::ServerPeerInfo>,
-                );
-                let handle = make_discovery_handle(
-                    &running,
-                    vec![
-                        resource("skill://srv/a/SKILL.md"),
-                        resource("skill://srv/b/SKILL.md"),
-                    ],
-                );
-                reg.mark_discovery_started("srv", token.clone());
-                let cancel = AgentCancellationToken::new();
-                run_discovery(reg.clone(), None, handle, token.clone(), cancel).await;
-                assert!(
-                    matches!(
-                        reg.discovery_state("srv"),
-                        Some(ServerDiscoveryState::Discovered { entries, .. })
-                            if entries.is_empty()
-                    ),
-                    "全部 read 失败应回写空条目 Discovered"
-                );
-            });
-        },
-    );
-    let warns = warns.lock().unwrap();
-    assert!(
-        warns.iter().any(|m| m.contains("无可用条目")),
-        "candidates 非空且全部 read 失败应发汇总 warn，实际: {warns:?}"
-    );
-}
-
-/// cancel 提前退出 → clear_discovery_started 回退：首条响应后触发 cancel，
-/// run_discovery 结束断言 discovery_state 为 None（Started 已清除）。
-#[tokio::test]
-async fn run_discovery_cancel_after_first_response_clears_started() {
-    let reg = Arc::new(McpSkillRegistry::new());
-    let token: HandleToken = Arc::new(4u32);
-    let (client_io, server_io) = tokio::io::duplex(8192);
-    let first_done = Arc::new(tokio::sync::Notify::new());
-    tokio::spawn(raw_skill_server(
-        server_io,
-        vec![RespondRule {
-            segment: "alpha",
-            delay: std::time::Duration::from_secs(2),
-            error: false,
-        }],
-        Some(Arc::clone(&first_done)),
-        None,
-    ));
-    let running = rmcp::service::serve_directly::<RoleClient, _, _, _, _>(
-        (),
-        client_io,
-        None::<rmcp::model::ServerPeerInfo>,
-    );
-    let handle = make_discovery_handle(
-        &running,
-        vec![
-            resource("skill://srv/zebra/SKILL.md"),
-            resource("skill://srv/alpha/SKILL.md"),
-        ],
-    );
-    reg.mark_discovery_started("srv", token.clone());
-    let cancel = AgentCancellationToken::new();
-    let discovery = tokio::spawn(run_discovery(
-        reg.clone(),
-        None,
-        handle,
-        token.clone(),
-        cancel.clone(),
-    ));
-
-    // zebra 立即响应、alpha 延迟 2s → 首条响应后触发 cancel
-    first_done.notified().await;
-    cancel.cancel();
-    discovery.await.unwrap();
-
-    assert!(
-        reg.discovery_state("srv").is_none(),
-        "cancel 后应 clear_discovery_started 回退（discovery_state None）"
-    );
-}
-
-/// cancel 提前退出不得误报汇总 warn：首条响应为 read 失败（entries 保持空），
-/// 随后 cancel → 走 clear 路径，不经过 entries.is_empty() 的 warn 分支。
-#[test]
-fn run_discovery_cancel_before_warn_does_not_emit_warn() {
-    let warns = Arc::new(std::sync::Mutex::new(Vec::new()));
-    tracing::subscriber::with_default(
-        WarnCaptureSubscriber {
-            warns: Arc::clone(&warns),
-        },
-        || {
-            let rt = tokio::runtime::Builder::new_current_thread()
-                .enable_all()
-                .build()
-                .unwrap();
-            rt.block_on(async {
-                let reg = Arc::new(McpSkillRegistry::new());
-                let token: HandleToken = Arc::new(5u32);
-                let (client_io, server_io) = tokio::io::duplex(8192);
-                let first_done = Arc::new(tokio::sync::Notify::new());
-                tokio::spawn(raw_skill_server(
-                    server_io,
-                    vec![
-                        // zebra：立即返回 error（entries 保持空）
-                        RespondRule {
-                            segment: "zebra",
-                            delay: std::time::Duration::ZERO,
-                            error: true,
-                        },
-                        // alpha：延迟 2s（cancel 在其完成前触发）
-                        RespondRule {
-                            segment: "alpha",
-                            delay: std::time::Duration::from_secs(2),
-                            error: false,
-                        },
-                    ],
-                    Some(Arc::clone(&first_done)),
-                    None,
-                ));
-                let running = rmcp::service::serve_directly::<RoleClient, _, _, _, _>(
-                    (),
-                    client_io,
-                    None::<rmcp::model::ServerPeerInfo>,
-                );
-                let handle = make_discovery_handle(
-                    &running,
-                    vec![
-                        resource("skill://srv/zebra/SKILL.md"),
-                        resource("skill://srv/alpha/SKILL.md"),
-                    ],
-                );
-                reg.mark_discovery_started("srv", token.clone());
-                let cancel = AgentCancellationToken::new();
-                let discovery = tokio::spawn(run_discovery(
-                    reg.clone(),
-                    None,
-                    handle,
-                    token.clone(),
-                    cancel.clone(),
-                ));
-                first_done.notified().await;
-                cancel.cancel();
-                discovery.await.unwrap();
-                assert!(
-                    reg.discovery_state("srv").is_none(),
-                    "cancel 后应 clear_discovery_started 回退"
-                );
-            });
-        },
-    );
-    let warns = warns.lock().unwrap();
-    assert!(
-        !warns.iter().any(|m| m.contains("无可用条目")),
-        "cancel 提前退出不得误报汇总 warn，实际: {warns:?}"
-    );
 }
 
 // ─── run_discovery 级测试（SEP-2640 规范路径）─────────────────────────────
@@ -1350,828 +966,26 @@ fn make_spec_handle(
         source: None,
         url: None,
         skills_capable: true,
-        channel_capable: false,
     })
 }
 
-/// 规范模式端到端：skills/list 发现 → digest 校验通过的条目注册，
-/// digest 不匹配的条目经 skills/get 恢复仍失败 → 被拒绝。
-#[tokio::test]
-async fn run_discovery_spec_mode_via_skills_list() {
-    let ok_text = "---\nname: alpha\ndescription: Alpha skill\n---\n\n# Alpha\n";
-    let bad_text = "---\nname: beta\ndescription: Beta skill\n---\n\n# Beta\n";
-    let (client_io, server_io) = tokio::io::duplex(8192);
-    tokio::spawn(spec_skill_server(
-        server_io,
-        vec![
-            SpecSkill {
-                uri: "skill://alpha/SKILL.md",
-                name: "alpha",
-                description: "Alpha skill",
-                text: ok_text,
-                digest_override: None,
-                get_text: None,
-                get_error: false,
-                get_wrong_uri: false,
-            },
-            // beta：digest 故意给错 → 内容校验失败 → skills/get 返回同一
-            // stale 快照 → 恢复失败 → 拒绝
-            SpecSkill {
-                uri: "skill://beta/SKILL.md",
-                name: "beta",
-                description: "Beta skill",
-                text: bad_text,
-                digest_override: Some(format!("sha256:{}", "0".repeat(64))),
-                get_text: None,
-                get_error: false,
-                get_wrong_uri: false,
-            },
-        ],
-        None,
-        None,
-        false,
-    ));
-    let running = rmcp::service::serve_directly::<RoleClient, _, _, _, _>(
-        (),
-        client_io,
-        None::<rmcp::model::ServerPeerInfo>,
-    );
-    let handle = make_spec_handle(&running);
-    let reg = Arc::new(McpSkillRegistry::new());
-    let token: HandleToken = Arc::new(6u32);
-    reg.mark_discovery_started("srv", token.clone());
-    let cancel = AgentCancellationToken::new();
-    run_discovery(reg.clone(), None, handle, token.clone(), cancel).await;
+#[path = "skill_discovery_legacy_test.rs"]
+mod legacy_discovery_tests;
 
-    let skills = reg.all_skills();
-    let names: Vec<&str> = skills.iter().map(|s| s.name.as_str()).collect();
-    assert_eq!(
-        names,
-        vec!["mcp__srv__alpha"],
-        "digest 校验失败的条目被拒绝，仅注册通过校验的条目"
-    );
-    assert_eq!(
-        skills[0].content.as_deref(),
-        Some(ok_text),
-        "content 存经校验的 SKILL.md 全文"
-    );
-    assert_eq!(
-        skills[0].origin,
-        Some(SkillOrigin::Mcp {
-            server: "srv".to_string(),
-            uri: "skill://alpha/SKILL.md".to_string(),
-        })
-    );
-}
+#[path = "skill_discovery/cache_fixture_test.rs"]
+mod cache_fixture;
 
-/// 规范模式端到端（skills/get 恢复）：digest 校验失败（stale）→
-/// `skills/get` 拉取当前条目快照 → 按新内容重新校验注册；`skills/get`
-/// 失败（-32602）→ 条目拒绝；frontmatter 比对失败不是 stale 信号 →
-/// 不触发 skills/get。
-#[tokio::test]
-async fn run_discovery_spec_mode_recovers_via_skills_get() {
-    let old_text = "---\nname: gamma\ndescription: Gamma skill\n---\n\n# Gamma v1\n";
-    let new_text = "---\nname: gamma\ndescription: Gamma skill\n---\n\n# Gamma v2\n";
-    let bad_text = "---\nname: delta\ndescription: Delta skill\n---\n\n# Delta\n";
-    let fm_mismatch_text = "---\nname: epsilon\ndescription: Eps content\n---\n\n# Eps\n";
-    let request_log: Arc<std::sync::Mutex<Vec<String>>> = Default::default();
-    let (client_io, server_io) = tokio::io::duplex(8192);
-    tokio::spawn(spec_skill_server(
-        server_io,
-        vec![
-            // gamma：list 给新 digest + 旧内容（stale）→ get 给新快照
-            // （新内容 + 同 digest）→ 恢复成功，按新内容注册
-            SpecSkill {
-                uri: "skill://gamma/SKILL.md",
-                name: "gamma",
-                description: "Gamma skill",
-                text: old_text,
-                digest_override: Some(format!("sha256:{}", sha256_hex(new_text))),
-                get_text: Some(new_text),
-                get_error: false,
-                get_wrong_uri: false,
-            },
-            // delta：get 返回 -32602 → 恢复失败 → 拒绝
-            SpecSkill {
-                uri: "skill://delta/SKILL.md",
-                name: "delta",
-                description: "Delta skill",
-                text: bad_text,
-                digest_override: Some(format!("sha256:{}", "0".repeat(64))),
-                get_text: None,
-                get_error: true,
-                get_wrong_uri: false,
-            },
-            // epsilon：digest 匹配但 frontmatter 比对失败（非 stale 信号）→
-            // 不触发 skills/get，直接拒绝
-            SpecSkill {
-                uri: "skill://epsilon/SKILL.md",
-                name: "epsilon",
-                description: "Eps entry",
-                text: fm_mismatch_text,
-                digest_override: None,
-                get_text: None,
-                get_error: false,
-                get_wrong_uri: false,
-            },
-        ],
-        None,
-        Some(Arc::clone(&request_log)),
-        false,
-    ));
-    let running = rmcp::service::serve_directly::<RoleClient, _, _, _, _>(
-        (),
-        client_io,
-        None::<rmcp::model::ServerPeerInfo>,
-    );
-    let handle = make_spec_handle(&running);
-    let reg = Arc::new(McpSkillRegistry::new());
-    let token: HandleToken = Arc::new(7u32);
-    reg.mark_discovery_started("srv", token.clone());
-    let cancel = AgentCancellationToken::new();
-    run_discovery(reg.clone(), None, handle, token.clone(), cancel).await;
+#[path = "skill_discovery_spec_test.rs"]
+mod spec_discovery_tests;
 
-    let skills = reg.all_skills();
-    let names: Vec<&str> = skills.iter().map(|s| s.name.as_str()).collect();
-    assert_eq!(
-        names,
-        vec!["mcp__srv__gamma"],
-        "仅经 skills/get 恢复成功的条目注册（delta get 失败拒绝、epsilon frontmatter 失败拒绝）"
-    );
-    assert_eq!(
-        skills[0].content.as_deref(),
-        Some(new_text),
-        "content 为恢复后的新全文（按新条目重新读取校验）"
-    );
+#[path = "skill_discovery_commands_test.rs"]
+mod command_projection_tests;
 
-    let log = request_log.lock().unwrap();
-    assert!(
-        log.iter().any(|e| e == "skills/get skill://gamma/SKILL.md"),
-        "gamma digest 失败应触发 skills/get，实际: {log:?}"
-    );
-    assert!(
-        log.iter().any(|e| e == "skills/get skill://delta/SKILL.md"),
-        "delta digest 失败应触发 skills/get，实际: {log:?}"
-    );
-    assert!(
-        !log.iter()
-            .any(|e| e.starts_with("skills/get") && e.contains("epsilon")),
-        "frontmatter 比对失败不是 stale 信号，不应触发 skills/get，实际: {log:?}"
-    );
-}
+#[path = "skill_discovery_releaser_test.rs"]
+mod releaser_tests;
 
-/// skills/get 响应 uri 核对（2026-08-15 review）：get 返回的条目 uri 与
-/// 请求不一致（server 违规）→ 拒绝恢复（不按新 uri 重读），条目拒绝。
-#[tokio::test]
-async fn run_discovery_spec_mode_get_wrong_uri_rejects_recovery() {
-    let zeta_text = "---\nname: zeta\ndescription: Zeta skill\n---\n\n# Zeta\n";
-    let (client_io, server_io) = tokio::io::duplex(8192);
-    tokio::spawn(spec_skill_server(
-        server_io,
-        vec![SpecSkill {
-            uri: "skill://zeta/SKILL.md",
-            name: "zeta",
-            description: "Zeta skill",
-            text: zeta_text,
-            // list 给错误 digest → 触发恢复
-            digest_override: Some(format!("sha256:{}", "0".repeat(64))),
-            get_text: None,
-            get_error: false,
-            // get 返回错误 uri（与请求不一致）→ 恢复被拒
-            get_wrong_uri: true,
-        }],
-        None,
-        None,
-        false,
-    ));
-    let running = rmcp::service::serve_directly::<RoleClient, _, _, _, _>(
-        (),
-        client_io,
-        None::<rmcp::model::ServerPeerInfo>,
-    );
-    let handle = make_spec_handle(&running);
-    let reg = Arc::new(McpSkillRegistry::new());
-    let token: HandleToken = Arc::new(8u32);
-    reg.mark_discovery_started("srv", token.clone());
-    let cancel = AgentCancellationToken::new();
-    run_discovery(reg.clone(), None, handle, token.clone(), cancel).await;
+#[path = "skill_discovery/entry_validation_test.rs"]
+mod entry_validation_tests;
 
-    assert!(
-        reg.all_skills().is_empty(),
-        "get 返回错误 uri → 拒绝恢复，条目不注册"
-    );
-}
-
-// ─── mcp_route_entries（决策 1 命令面转换）─────────────────────────────────
-
-/// 纯函数转换：SkillMetadata → mcp 域 RouteEntry（fullname `{server}:{skill}`
-/// 小写、首段取 server 名末段、kind=McpSkill、provenance=Mcp+Discovered、
-/// handler=McpSkillReleaser 放行跳板）。
-#[test]
-fn mcp_route_entries_converts_skills() {
-    let registry = Arc::new(McpSkillRegistry::new());
-    let skills = vec![
-        SkillMetadata {
-            name: "mcp__demo__AlphaSkill".to_string(),
-            aliases: Vec::new(),
-            description: "Alpha skill".to_string(),
-            path: PathBuf::new(),
-            source: SkillSource::Mcp,
-            plugin_name: None,
-            origin: Some(SkillOrigin::Mcp {
-                server: "demo".to_string(),
-                uri: "skill://demo/alpha/SKILL.md".to_string(),
-            }),
-            content: None,
-            resources: vec![],
-        },
-        // 同名消歧后形态：路径段作为 skill 名
-        SkillMetadata {
-            name: "mcp__demo__alpha/sub".to_string(),
-            aliases: Vec::new(),
-            description: "Sub skill".to_string(),
-            path: PathBuf::new(),
-            source: SkillSource::Mcp,
-            plugin_name: None,
-            origin: None,
-            content: None,
-            resources: vec![],
-        },
-    ];
-    let entries = mcp_route_entries(&registry, "demo", &skills);
-    assert_eq!(entries.len(), 2, "全部转换");
-    let e = &entries[0];
-    assert_eq!(e.fullname, "demo:alphaskill", "fullname 小写归一");
-    assert!(e.aliases.is_empty());
-    assert_eq!(e.description, "Alpha skill");
-    assert_eq!(e.kind, CommandEntryKind::McpSkill);
-    assert_eq!(e.category, None);
-    assert!(e.args_schema.is_none());
-    assert_eq!(
-        e.provenance.source,
-        CommandSource::Mcp {
-            server: "demo".to_string()
-        }
-    );
-    assert_eq!(e.provenance.lifecycle, CommandLifecycle::Discovered);
-    assert_eq!(
-        entries[1].fullname, "demo:alpha/sub",
-        "路径段形态保留（词法允许 /）"
-    );
-}
-
-/// plugin 提供的 server key 形如 `plugin:{plugin}:{server}`（loader.rs:541），
-/// 含冒号会突破词法 2 段上限 → 词法首段取末段；纯 server 名不变。
-#[test]
-fn mcp_route_entries_plugin_server_takes_last_segment() {
-    let registry = Arc::new(McpSkillRegistry::new());
-    let skills = vec![SkillMetadata {
-        name: "mcp__plugin:p1:demosrv__beta".to_string(),
-        aliases: Vec::new(),
-        description: "Beta skill".to_string(),
-        path: PathBuf::new(),
-        source: SkillSource::Mcp,
-        plugin_name: None,
-        origin: None,
-        content: None,
-        resources: vec![],
-    }];
-    let entries = mcp_route_entries(&registry, "plugin:p1:demosrv", &skills);
-    assert_eq!(entries.len(), 1);
-    assert_eq!(entries[0].fullname, "demosrv:beta");
-    assert_eq!(
-        entries[0].provenance.source,
-        CommandSource::Mcp {
-            server: "demosrv".to_string()
-        }
-    );
-}
-
-/// P1-1：`mcp_source_key` 与 `mcp_route_entries` 的 fullname 首段派生
-/// 同构（单一派生点 `mcp_namespace`）——断连注销前缀 `{末段}:` 才能
-/// 命中条目 fullname（决策 1：键 = server 名末段，无 `mcp:` 域前缀）。
-#[test]
-fn mcp_source_key_matches_route_entry_namespace() {
-    // 纯 server 名：键 = demo（不变）
-    assert_eq!(mcp_source_key("demo"), "demo");
-    // plugin server key：键 = demosrv（末段，非原名）
-    assert_eq!(mcp_source_key("plugin:p1:demosrv"), "demosrv");
-    // 键与条目 fullname 前缀一致（注销前缀 `{键}:` 命中 fullname）
-    let registry = Arc::new(McpSkillRegistry::new());
-    let entries = mcp_route_entries(
-        &registry,
-        "plugin:p1:demosrv",
-        &[SkillMetadata {
-            name: "mcp__plugin:p1:demosrv__beta".to_string(),
-            aliases: Vec::new(),
-            description: "Beta skill".to_string(),
-            ..SkillMetadata::default()
-        }],
-    );
-    let key = mcp_source_key("plugin:p1:demosrv");
-    for e in &entries {
-        assert!(
-            e.fullname.starts_with(&format!("{key}:")),
-            "条目 fullname {} 必须以注销前缀 {key}: 开头",
-            e.fullname
-        );
-    }
-    // 大小写归一同源：大写 server 名同样派生小写键（与词法键一致）
-    assert_eq!(mcp_source_key("Plugin:P1:DemoSrv"), "demosrv");
-}
-
-/// 审查 B1 防线 1：保留词法域 server 不进命令面——来源键派生标记 +
-/// `finish_command_source` 跳过注册（元数据面不受影响，工具面仍可用）。
-#[test]
-fn mcp_source_key_reserved_domain_skipped() {
-    for reserved in ["core", "ui", "plugin", "user", "mcp"] {
-        assert!(
-            mcp_namespace_reserved(reserved),
-            "{reserved} 应判定为保留域"
-        );
-        // 纯 server 名末段命中保留域也判定（plugin:pa:core → core）。
-        assert!(mcp_namespace_reserved(&format!("plugin:pa:{reserved}")));
-    }
-    assert!(!mcp_namespace_reserved("demo"));
-    assert!(!mcp_namespace_reserved("plugin:pa:demosrv"));
-
-    // finish_command_source：保留域 server 不产生任何命令面条目。
-    let command_registry = Arc::new(CommandRegistry::new());
-    let meta_registry = Arc::new(McpSkillRegistry::new());
-    let skills = vec![SkillMetadata {
-        name: "mcp__core__hello".to_string(),
-        aliases: Vec::new(),
-        description: "Core-named skill".to_string(),
-        ..SkillMetadata::default()
-    }];
-    let token_core: HandleToken = Arc::new(101u32);
-    command_registry.mark_source_started("core", token_core.clone());
-    finish_command_source(
-        &Some(command_registry.clone()),
-        &meta_registry,
-        "core",
-        token_core,
-        &skills,
-    );
-    assert!(
-        command_registry.resolve("core:hello").is_none(),
-        "保留域 server 的 skill 不得注册为命令"
-    );
-    // 对照：非保留域正常注册。
-    let skills2 = vec![SkillMetadata {
-        name: "mcp__demo__hello".to_string(),
-        aliases: Vec::new(),
-        description: "Demo skill".to_string(),
-        ..SkillMetadata::default()
-    }];
-    let token_demo: HandleToken = Arc::new(102u32);
-    command_registry.mark_source_started("demo", token_demo.clone());
-    finish_command_source(
-        &Some(command_registry.clone()),
-        &meta_registry,
-        "demo",
-        token_demo,
-        &skills2,
-    );
-    assert!(
-        command_registry.resolve("demo:hello").is_some(),
-        "非保留域 server 正常注册"
-    );
-}
-
-/// 缺 `mcp__{server}__` 前缀的 skill 名 → 跳过（warn），不产出条目。
-#[test]
-fn mcp_route_entries_skips_unprefixed_name() {
-    let registry = Arc::new(McpSkillRegistry::new());
-    let skills = vec![SkillMetadata {
-        name: "other__name".to_string(),
-        aliases: Vec::new(),
-        description: "No prefix".to_string(),
-        path: PathBuf::new(),
-        source: SkillSource::Mcp,
-        plugin_name: None,
-        origin: None,
-        content: None,
-        resources: vec![],
-    }];
-    let entries = mcp_route_entries(&registry, "demo", &skills);
-    assert!(entries.is_empty(), "缺前缀条目跳过");
-}
-
-/// run_discovery 命令面双写（决策 1）：规范模式发现完成后，命令面
-/// 注册表收到 `srv:alpha` 条目（kind=McpSkill、provenance=Mcp+Discovered）。
-#[tokio::test]
-async fn run_discovery_writes_command_registry() {
-    let ok_text = "---\nname: alpha\ndescription: Alpha skill\n---\n\n# Alpha\n";
-    let (client_io, server_io) = tokio::io::duplex(8192);
-    tokio::spawn(spec_skill_server(
-        server_io,
-        vec![SpecSkill {
-            uri: "skill://alpha/SKILL.md",
-            name: "alpha",
-            description: "Alpha skill",
-            text: ok_text,
-            digest_override: None,
-            get_text: None,
-            get_error: false,
-            get_wrong_uri: false,
-        }],
-        None,
-        None,
-        false,
-    ));
-    let running = rmcp::service::serve_directly::<RoleClient, _, _, _, _>(
-        (),
-        client_io,
-        None::<rmcp::model::ServerPeerInfo>,
-    );
-    let handle = make_spec_handle(&running);
-    let reg = Arc::new(McpSkillRegistry::new());
-    let cmd_reg = Arc::new(CommandRegistry::new());
-    let token: HandleToken = Arc::new(9u32);
-    reg.mark_discovery_started("srv", token.clone());
-    cmd_reg.mark_source_started("srv", token.clone());
-    let cancel = AgentCancellationToken::new();
-    run_discovery(
-        reg.clone(),
-        Some(cmd_reg.clone()),
-        handle,
-        token.clone(),
-        cancel,
-    )
-    .await;
-
-    let entries = cmd_reg.snapshot();
-    assert_eq!(entries.len(), 1, "命令面注册 1 条");
-    let e = &entries[0];
-    assert_eq!(e.fullname, "srv:alpha");
-    assert_eq!(e.kind, CommandEntryKind::McpSkill);
-    assert_eq!(
-        e.provenance.source,
-        CommandSource::Mcp {
-            server: "srv".to_string()
-        }
-    );
-    assert_eq!(e.provenance.lifecycle, CommandLifecycle::Discovered);
-    assert_eq!(e.description, "Alpha skill");
-}
-
-/// cancel 提前退出 → 命令面 Started 回退（与元数据面对齐，下轮可重试）。
-#[tokio::test]
-async fn run_discovery_cancel_clears_command_source_started() {
-    let reg = Arc::new(McpSkillRegistry::new());
-    let cmd_reg = Arc::new(CommandRegistry::new());
-    let token: HandleToken = Arc::new(10u32);
-    let (client_io, server_io) = tokio::io::duplex(8192);
-    let first_done = Arc::new(tokio::sync::Notify::new());
-    tokio::spawn(raw_skill_server(
-        server_io,
-        vec![RespondRule {
-            segment: "alpha",
-            delay: std::time::Duration::from_secs(2),
-            error: false,
-        }],
-        Some(Arc::clone(&first_done)),
-        None,
-    ));
-    let running = rmcp::service::serve_directly::<RoleClient, _, _, _, _>(
-        (),
-        client_io,
-        None::<rmcp::model::ServerPeerInfo>,
-    );
-    let handle = make_discovery_handle(
-        &running,
-        vec![
-            resource("skill://srv/zebra/SKILL.md"),
-            resource("skill://srv/alpha/SKILL.md"),
-        ],
-    );
-    reg.mark_discovery_started("srv", token.clone());
-    cmd_reg.mark_source_started("srv", token.clone());
-    let cancel = AgentCancellationToken::new();
-    let discovery = tokio::spawn(run_discovery(
-        reg.clone(),
-        Some(cmd_reg.clone()),
-        handle,
-        token.clone(),
-        cancel.clone(),
-    ));
-
-    // zebra 立即响应、alpha 延迟 2s → 首条响应后触发 cancel
-    first_done.notified().await;
-    cancel.cancel();
-    discovery.await.unwrap();
-    assert!(
-        reg.discovery_state("srv").is_none(),
-        "cancel 后元数据面 Started 已回退"
-    );
-    // 命令面 Started 回退后，来源无状态 → 下轮 before_agent 重新 to_discover；
-    // 注册表无公开 sources 查询，用无条目 + 无 on_change 侧证（cancel 不触发）。
-    assert!(cmd_reg.snapshot().is_empty(), "cancel 路径不注册条目");
-}
-
-// ─── McpSkillReleaser（决策 A2/D 放行跳板）─────────────────────────────────
-
-/// 最小事件 sink（releaser execute 需要 CommandContext，对齐
-/// plugin/loader_test.rs 先例）。
-struct NoopEventSink;
-
-#[async_trait::async_trait]
-impl peri_acp_types::event::EventSink for NoopEventSink {
-    async fn push_event(
-        &self,
-        _session_id: &str,
-        _event: &peri_acp_types::event::ExecutorEvent,
-        _context_window: u32,
-    ) {
-    }
-
-    async fn push_done(&self, _session_id: &str, _stop_reason: &str, _request_id: Option<&str>) {}
-}
-
-/// 构造最小 CommandContext（supports_inject / raw_text 按场景置位）。
-fn make_releaser_ctx(raw_text: &str, supports_inject: bool) -> CommandContext {
-    let mut ctx = CommandContext::new(
-        "s1".to_string(),
-        vec![],
-        "/tmp".to_string(),
-        Arc::new(NoopEventSink),
-        tokio_util::sync::CancellationToken::new(),
-        peri_acp_types::command::DependencyBag::new(),
-    );
-    ctx.raw_text = raw_text.to_string();
-    ctx.supports_inject = supports_inject;
-    ctx
-}
-
-/// 造 Discovered 条目（content 带全文；对齐 mcp_skills_test 的 complete）。
-fn seed_discovered(reg: &Arc<McpSkillRegistry>, server: &str, skill: &str, content: &str) {
-    let token: HandleToken = Arc::new(1u32);
-    let meta = SkillMetadata {
-        name: format!("mcp__{server}__{skill}"),
-        aliases: Vec::new(),
-        description: format!("MCP skill {skill}"),
-        path: PathBuf::new(),
-        source: SkillSource::Mcp,
-        plugin_name: None,
-        origin: Some(SkillOrigin::Mcp {
-            server: server.to_string(),
-            uri: format!("skill://{server}/{skill}/SKILL.md"),
-        }),
-        content: Some(content.to_string()),
-        resources: vec![],
-    };
-    reg.mark_discovery_started(server, token.clone());
-    reg.mark_discovery_completed(server, token, vec![meta]);
-}
-
-/// 交互式（supports_inject）：Inject(原文)——命令含 `/` 前缀与 args 整段
-/// 放行进 agent 管线，由 SkillPreload 完成注入（决策 A2 核心语义）。
-#[tokio::test]
-async fn releaser_interactive_injects_raw_text() {
-    let reg = Arc::new(McpSkillRegistry::new());
-    let releaser = McpSkillReleaser {
-        registry: Arc::clone(&reg),
-    };
-    let outcome = releaser
-        .execute(make_releaser_ctx("/demo:hello some args", true))
-        .await;
-    match outcome {
-        CommandOutcome::Inject(text) => {
-            assert_eq!(
-                text, "/demo:hello some args",
-                "原文整段放行（含 / 前缀与 args）"
-            )
-        }
-        _other => panic!("交互式应 Inject 原文"),
-    }
-}
-
-/// 交互式但原文缺失（理论不可达：拦截层恒透传）→ 回退 Done + Info，不吞
-/// 命令不静默。
-#[tokio::test]
-async fn releaser_interactive_empty_raw_text_falls_back_done() {
-    let reg = Arc::new(McpSkillRegistry::new());
-    let releaser = McpSkillReleaser {
-        registry: Arc::clone(&reg),
-    };
-    let outcome = releaser.execute(make_releaser_ctx("", true)).await;
-    match outcome {
-        CommandOutcome::Done(result) => {
-            assert!(result.messages.is_empty());
-            let fb = result.feedback.expect("回退应有 Info 反馈");
-            assert_eq!(fb.level, FeedbackLevel::Info);
-            assert!(
-                fb.message.contains("原文缺失"),
-                "反馈应说明原文缺失，实际: {}",
-                fb.message
-            );
-        }
-        _other => panic!("原文缺失应回退 Done"),
-    }
-}
-
-/// RPC（supports_inject=false，决策 D）：直返 skill 全文 + 标注（与预载注入
-/// 同源 annotate_mcp_content），feedback 说明语义差异。
-#[tokio::test]
-async fn releaser_rpc_returns_skill_content_with_annotation() {
-    let reg = Arc::new(McpSkillRegistry::new());
-    seed_discovered(&reg, "demo", "hello", "Body of hello.");
-    let releaser = McpSkillReleaser {
-        registry: Arc::clone(&reg),
-    };
-    let outcome = releaser
-        .execute(make_releaser_ctx("/demo:hello", false))
-        .await;
-    match outcome {
-        CommandOutcome::Done(result) => {
-            let last = result.messages.last().expect("RPC 命中应追加内容消息");
-            let content = last.content();
-            assert!(content.contains("Body of hello."), "应含 skill 全文");
-            assert!(
-                content.contains("This skill is served by MCP server \"demo\""),
-                "应含来源标注，实际: {content}"
-            );
-            assert!(
-                content.contains("SearchExtraTools"),
-                "应含工具通路提醒，实际: {content}"
-            );
-            let fb = result.feedback.expect("RPC 命中应有反馈");
-            assert_eq!(fb.level, FeedbackLevel::Info);
-            assert!(
-                fb.message.contains("内容已返回"),
-                "反馈应说明直返语义，实际: {}",
-                fb.message
-            );
-        }
-        _other => panic!("RPC 命中应直返 Done"),
-    }
-}
-
-/// RPC 且 registry miss（server 未连接/无该 skill）→ Done + Info 提示，不
-/// 吞命令不静默；messages 原样（不追加内容）。
-#[tokio::test]
-async fn releaser_rpc_miss_falls_back_done_info() {
-    let reg = Arc::new(McpSkillRegistry::new());
-    seed_discovered(&reg, "demo", "hello", "Body of hello.");
-    let releaser = McpSkillReleaser {
-        registry: Arc::clone(&reg),
-    };
-    let outcome = releaser
-        .execute(make_releaser_ctx("other:bye", false))
-        .await;
-    match outcome {
-        CommandOutcome::Done(result) => {
-            assert!(result.messages.is_empty(), "miss 不追加内容");
-            let fb = result.feedback.expect("miss 应有反馈");
-            assert_eq!(fb.level, FeedbackLevel::Info);
-            assert!(
-                fb.message.contains("未发现"),
-                "反馈应说明未发现，实际: {}",
-                fb.message
-            );
-        }
-        _other => panic!("RPC miss 应回退 Done"),
-    }
-}
-
-#[tokio::test]
-async fn cached_skill_discovery_avoids_list_and_skill_reads() {
-    let text = "---\nname: cached\ndescription: Cached skill\n---\n\n# Cached\n";
-    let request_log = Arc::new(std::sync::Mutex::new(Vec::new()));
-    let (client_io, server_io) = tokio::io::duplex(8192);
-    tokio::spawn(spec_skill_server(
-        server_io,
-        vec![SpecSkill {
-            uri: "skill://cached/SKILL.md",
-            name: "cached",
-            description: "Cached skill",
-            text,
-            digest_override: None,
-            get_text: None,
-            get_error: false,
-            get_wrong_uri: false,
-        }],
-        None,
-        Some(Arc::clone(&request_log)),
-        true,
-    ));
-    let running = rmcp::service::serve_directly::<RoleClient, _, _, _, _>(
-        (),
-        client_io,
-        None::<rmcp::model::ServerPeerInfo>,
-    );
-    let cache_dir = tempfile::tempdir().unwrap();
-    let cache = crate::mcp::resource_cache::McpResourceCache::at(cache_dir.path().to_path_buf());
-    let origin = "test-skill-origin".to_string();
-
-    let first = Arc::new(McpSkillRegistry::new());
-    let first_token: HandleToken = Arc::new(41u32);
-    first.mark_discovery_started("srv", first_token.clone());
-    run_discovery_with_cache(
-        first.clone(),
-        None,
-        make_spec_handle(&running),
-        first_token,
-        AgentCancellationToken::new(),
-        Some((cache.clone(), origin.clone())),
-    )
-    .await;
-    assert_eq!(first.all_skills().len(), 1);
-    let first_requests = request_log.lock().unwrap().len();
-    assert!(
-        first_requests >= 2,
-        "首次发现应请求 skills/list 与 resources/read"
-    );
-
-    let second = Arc::new(McpSkillRegistry::new());
-    let second_token: HandleToken = Arc::new(42u32);
-    second.mark_discovery_started("srv", second_token.clone());
-    run_discovery_with_cache(
-        second.clone(),
-        None,
-        make_spec_handle(&running),
-        second_token,
-        AgentCancellationToken::new(),
-        Some((cache, origin)),
-    )
-    .await;
-
-    assert_eq!(second.all_skills().len(), 1);
-    assert_eq!(
-        request_log.lock().unwrap().len(),
-        first_requests,
-        "skills/list 与通过校验的 SKILL.md 应均从持久化缓存读取"
-    );
-}
-
-/// skills/read 缓存内容与当前 skills/list digest 不一致时，应失效缓存并重读，
-/// 而非静默丢弃技能。
-#[tokio::test]
-async fn cached_skill_read_digest_mismatch_refetches_once() {
-    let stale_text = "---\nname: refreshed\ndescription: Refreshed skill\n---\n\n# Stale\n";
-    let fresh_text = "---\nname: refreshed\ndescription: Refreshed skill\n---\n\n# Fresh\n";
-    let request_log = Arc::new(std::sync::Mutex::new(Vec::new()));
-    let (client_io, server_io) = tokio::io::duplex(8192);
-    tokio::spawn(spec_skill_server(
-        server_io,
-        vec![SpecSkill {
-            uri: "skill://refreshed/SKILL.md",
-            name: "refreshed",
-            description: "Refreshed skill",
-            text: fresh_text,
-            digest_override: None,
-            get_text: None,
-            get_error: false,
-            get_wrong_uri: false,
-        }],
-        None,
-        Some(Arc::clone(&request_log)),
-        false,
-    ));
-    let running = rmcp::service::serve_directly::<RoleClient, _, _, _, _>(
-        (),
-        client_io,
-        None::<rmcp::model::ServerPeerInfo>,
-    );
-    let cache_dir = tempfile::tempdir().unwrap();
-    let cache = crate::mcp::resource_cache::McpResourceCache::at(cache_dir.path().to_path_buf());
-    let origin = "test-skill-origin".to_string();
-    let uri = "skill://refreshed/SKILL.md";
-    let ticket = cache.ticket(&origin, "skills/read", uri).await.unwrap();
-    cache
-        .put_ticket(&ticket, std::time::Duration::from_secs(60), &stale_text)
-        .await;
-
-    let registry = Arc::new(McpSkillRegistry::new());
-    let token: HandleToken = Arc::new(43u32);
-    registry.mark_discovery_started("srv", token.clone());
-    run_discovery_with_cache(
-        registry.clone(),
-        None,
-        make_spec_handle(&running),
-        token,
-        AgentCancellationToken::new(),
-        Some((cache, origin)),
-    )
-    .await;
-
-    let skills = registry.all_skills();
-    assert_eq!(skills.len(), 1, "陈旧缓存应重读后仍发现技能");
-    assert_eq!(skills[0].content.as_deref(), Some(fresh_text));
-    let requests = request_log.lock().unwrap();
-    assert_eq!(
-        requests
-            .iter()
-            .filter(|request| request.starts_with("resources/read"))
-            .count(),
-        1,
-        "陈旧 skills/read 缓存应只失效并实时重读一次"
-    );
-    assert!(
-        !requests
-            .iter()
-            .any(|request| request.starts_with("skills/get")),
-        "实时重读已满足当前 digest，不应额外请求 skills/get"
-    );
-}
+#[path = "skill_discovery/catalog_state_test.rs"]
+mod catalog_state_tests;

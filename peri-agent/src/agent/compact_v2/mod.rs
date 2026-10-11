@@ -29,7 +29,7 @@ pub mod smart;
 // ─── 公共重导出：保持外部调用路径不变 ─────────────────────────────────────────────
 
 pub use config::{CompactConfig, CONTINUATION_HINT};
-pub use full::{extract_file_info, extract_skill_names, re_inject_v2, ReInjectResult};
+pub use full::{extract_file_info, extract_skill_names};
 pub use micro::micro_compact;
 pub use planner::{plan_micro, ApplyReport, CompactPolicy, ContextPressure, FullEscalationReason};
 pub use projection::{
@@ -589,6 +589,22 @@ async fn run_full_or_degrade(
 #[cfg(test)]
 #[path = "projection_test.rs"]
 mod projection_tests;
+
+#[cfg(test)]
+#[path = "projection_render_test.rs"]
+mod projection_render_tests;
+
+#[cfg(test)]
+#[path = "projection_restore_test.rs"]
+mod projection_restore_tests;
+
+#[cfg(test)]
+#[path = "projection_estimate_test.rs"]
+mod projection_estimate_tests;
+
+#[cfg(test)]
+#[path = "projection_tool_use_test.rs"]
+mod projection_tool_use_tests;
 
 #[cfg(test)]
 mod _test;

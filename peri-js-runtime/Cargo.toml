@@ -6,16 +6,11 @@ edition.workspace = true
 [dependencies]
 tokio.workspace = true
 tokio-util.workspace = true
-async-trait.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 thiserror.workspace = true
 tracing.workspace = true
 dashmap = "6"
-parking_lot.workspace = true
-tempfile.workspace = true
-fs2 = "0.4"
-dirs-next.workspace = true
 peri-process = { path = "../peri-process" }
 
 [target.'cfg(unix)'.dev-dependencies]
@@ -23,3 +18,6 @@ libc = "0.2"
 
 [dev-dependencies]
 tempfile.workspace = true
+
+[target.'cfg(not(target_os = "emscripten"))'.dependencies]
+tokio = { workspace = true, features = ["full"] }

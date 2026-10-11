@@ -1,10 +1,10 @@
 use std::sync::Arc;
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 use crate::kit::focus_router;
 use crate::kit::message_area::props::{ScrollbarFields, mouse_in_area};
 use crate::kit::message_area::selection::{
-    SlotIndex, copy_to_clipboard, extract_visual_range_index, mark_copy_message,
+    SlotIndex, copy_to_clipboard, extract_visual_range_index,
 };
 use crate::kit::mouse_router;
 use crate::kit::text_selection::TextSelection;
@@ -15,7 +15,8 @@ use ratatui_kit::ratatui::layout::Rect;
 use super::{
     DragAction, DragThrottle, GesturePending, SCROLL_LINES, ScrollPos, ScrollThrottle,
     ScrollbarDragState, apply_scroll, compute_thumb_geometry, drag_step, freeze_down_index,
-    is_scrollbar_column, position_to_scroll_y, scroll_frame_ms, settle_up, thumb_start_to_position,
+    is_scrollbar_column, position_to_scroll_y, scroll_frame_ms, selection_bounds_on_release,
+    selection_captures_pointer, selection_position, settle_up, thumb_start_to_position,
     update_follow_on_scroll,
 };
 
@@ -89,6 +90,8 @@ pub(in crate::kit::message_area) fn handle_event(
             let in_area = mouse_in_area(mouse.row, mouse.column, area);
             // 滚动条几何/命中用收窄前的整幅矩形（缺省回退带内区域，保持旧行为）。
             let sb_area = scrollbar_rect.unwrap_or(area);
+            let selection_captured =
+                selection_captures_pointer(*gesture.read(), text_sel.read().dragging, mouse.kind);
 
             // ── 滚动条点击/拖拽（优先于文本选区）──
             // [Why] 滚动条列（窗口最右 1 列）以前 fallthrough 到文本选区，
@@ -99,7 +102,7 @@ pub(in crate::kit::message_area) fn handle_event(
             let on_scrollbar_col = mouse_in_area(mouse.row, mouse.column, sb_area)
                 && is_scrollbar_column(mouse.column, sb_area);
             let drag_active = scrollbar_drag.read().active;
-            if drag_active || on_scrollbar_col {
+            if drag_active || (on_scrollbar_col && !selection_captured) {
                 let fields = *scrollbar_fields.read();
                 let max_scroll = fields.content_length.saturating_sub(fields.viewport_length);
                 if let Some(geo) = compute_thumb_geometry(&fields, sb_area) {
@@ -151,7 +154,7 @@ pub(in crate::kit::message_area) fn handle_event(
                                 let mut s = scrollbar_drag.write_no_update();
                                 s.active = true;
                                 s.thumb_offset = thumb_offset;
-                                s.last_flush = Instant::now();
+                                s.last_flush = peri_time::monotonic_now();
                             }
                             // 清除手势按下记录，防止 fallthrough 冲突
                             *gesture.write_no_update() = None;
@@ -159,7 +162,7 @@ pub(in crate::kit::message_area) fn handle_event(
                         }
                         MouseEventKind::Drag(MouseButton::Left) if drag_active => {
                             // 16ms 节流——和滚轮 / 文本 Drag 保持一致
-                            let now = Instant::now();
+                            let now = peri_time::monotonic_now();
                             {
                                 let d = scrollbar_drag.read();
                                 if now.duration_since(d.last_flush)
@@ -223,7 +226,7 @@ pub(in crate::kit::message_area) fn handle_event(
                 .unwrap_or(false);
 
             // ── 文本选中处理（消息区内 Down/Drag/Up）──
-            if in_area && !drag_select_disabled {
+            if (in_area || selection_captured) && !drag_select_disabled {
                 match mouse.kind {
                     MouseEventKind::Down(MouseButton::Left) => {
                         // 记录手势意图（Pending）：冻结屏幕坐标 + 一次性换算的
@@ -255,7 +258,7 @@ pub(in crate::kit::message_area) fn handle_event(
                         // [TRAP] 先 copy 出 gesture 值 drop guard 再 write——
                         // parking_lot 同 thread read+write 冲突会 panic。
                         let pending = *gesture.read();
-                        let now = Instant::now();
+                        let now = peri_time::monotonic_now();
                         let within_throttle_window = {
                             let dt = drag_throttle.read();
                             now.duration_since(dt.last_flush)
@@ -268,9 +271,8 @@ pub(in crate::kit::message_area) fn handle_event(
                                 let scroll_y = scroll_state.read().offset();
                                 // [usize 视觉行] 同 Down 分支：不做 u16 clamp，
                                 // 超长内容选区不错位。
-                                let visual_row =
-                                    mouse.row.saturating_sub(area.y) as usize + scroll_y;
-                                let visual_col = mouse.column.saturating_sub(area.x);
+                                let (visual_row, visual_col) =
+                                    selection_position(area, (mouse.column, mouse.row), scroll_y);
                                 // 单次 write guard，drop 时只 wake 一次（不是两次）
                                 // start_drag + update_drag 合并到同一 guard 内
                                 {
@@ -295,9 +297,8 @@ pub(in crate::kit::message_area) fn handle_event(
                                 // 现状行为：update_drag 空转（dragging=false 时
                                 // no-op；已升级后的拖拽延续则跟随鼠标）。
                                 let scroll_y = scroll_state.read().offset();
-                                let visual_row =
-                                    mouse.row.saturating_sub(area.y) as usize + scroll_y;
-                                let visual_col = mouse.column.saturating_sub(area.x);
+                                let (visual_row, visual_col) =
+                                    selection_position(area, (mouse.column, mouse.row), scroll_y);
                                 text_sel.write().update_drag(visual_row, visual_col);
                                 return EventResult::Consumed;
                             }
@@ -326,7 +327,12 @@ pub(in crate::kit::message_area) fn handle_event(
                             return EventResult::Consumed;
                         }
                         // 先 copy 出 normalized_bounds（owned Option），drop read guard
-                        let bounds = text_sel.read().normalized_bounds();
+                        let visual = selection_position(
+                            area,
+                            (mouse.column, mouse.row),
+                            scroll_state.read().offset(),
+                        );
+                        let bounds = selection_bounds_on_release(&mut text_sel.write(), visual);
                         let extracted: Option<String> = if let Some(((sr, sc), (er, ec))) = bounds {
                             extract_visual_range_index(
                                 slot_index,
@@ -348,9 +354,7 @@ pub(in crate::kit::message_area) fn handle_event(
 
                         // 复制（独立线程，不阻塞）
                         if let Some(text) = extracted {
-                            let char_count = text.chars().count();
                             copy_to_clipboard(text);
-                            mark_copy_message(char_count);
                         }
 
                         return EventResult::Consumed;

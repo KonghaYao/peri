@@ -206,7 +206,7 @@ fn test_bridge_pressure_estimate_is_pure_and_includes_frozen_system() {
     .with_system("base".repeat(90_000))
     .with_system_contribution_provider(Arc::new(move || {
         calls.fetch_add(1, Ordering::SeqCst);
-        "dynamic".into()
+        Ok("dynamic".into())
     }));
     let messages = [BaseMessage::human("more".repeat(6_000))];
     assert_eq!(bridge.estimate_request_tokens(&messages, &[]), 96_000);
@@ -267,7 +267,7 @@ async fn test_bridge_dynamic_system_contribution_reads_current_value_once_per_re
         let provider_calls = Arc::clone(&provider_calls);
         Arc::new(move || {
             provider_calls.fetch_add(1, Ordering::SeqCst);
-            dynamic.lock().unwrap().clone()
+            Ok(dynamic.lock().unwrap().clone())
         })
     };
     let bridge = AgentModelBridge::from_arc(Arc::new(CaptureSystemModel {
@@ -340,7 +340,7 @@ async fn test_bridge_dynamic_contribution_preserves_explicit_seam_for_empty_and_
         if let Some(base) = base {
             bridge = bridge.with_system(base);
         }
-        bridge = bridge.with_system_contribution_provider(Arc::new(|| "DYNAMIC".into()));
+        bridge = bridge.with_system_contribution_provider(Arc::new(|| Ok("DYNAMIC".to_string())));
 
         bridge
             .generate_reasoning(&[BaseMessage::human("hello")], &[], None)
@@ -390,7 +390,7 @@ async fn test_bridge_empty_dynamic_contribution_preserves_base_system() {
         let provider_calls = Arc::clone(&provider_calls);
         Arc::new(move || {
             provider_calls.fetch_add(1, Ordering::SeqCst);
-            String::new()
+            Ok(String::new())
         })
     };
     let bridge = AgentModelBridge::from_arc(Arc::new(CaptureSystemModel {
@@ -414,6 +414,9 @@ async fn test_bridge_empty_dynamic_contribution_preserves_base_system() {
     );
     assert_eq!(provider_calls.load(Ordering::SeqCst), 1);
 }
+
+#[path = "model_bridge_external_test.rs"]
+mod external_tests;
 
 #[async_trait]
 impl Model for FakeModel {
@@ -800,7 +803,9 @@ impl Model for CancellingModel {
 }
 
 /// 取消前先 emit 一个 TextDelta，随后永久 pending。
-struct HalfStreamingModel;
+struct HalfStreamingModel {
+    reasoning: bool,
+}
 
 #[async_trait]
 impl Model for HalfStreamingModel {
@@ -813,11 +818,17 @@ impl Model for HalfStreamingModel {
         _request: ModelRequest,
         cancellation: CancellationToken,
     ) -> ModelResult<ModelStream> {
-        Ok(ModelStream::with_parent_cancellation(
-            stream::iter(vec![Ok(ModelStreamEvent::TextDelta {
+        let delta = if self.reasoning {
+            ModelStreamEvent::ReasoningDelta {
                 text: "partial".into(),
-            })])
-            .chain(stream::pending::<ModelResult<ModelStreamEvent>>()),
+            }
+        } else {
+            ModelStreamEvent::TextDelta {
+                text: "partial".into(),
+            }
+        };
+        Ok(ModelStream::with_parent_cancellation(
+            stream::iter(vec![Ok(delta)]).chain(stream::pending::<ModelResult<ModelStreamEvent>>()),
             cancellation,
         ))
     }
@@ -851,9 +862,8 @@ async fn bridge_maps_precancelled_token_to_interrupted_without_events() {
     );
 }
 
-#[tokio::test]
-async fn bridge_stops_emitting_events_after_mid_stream_cancellation() {
-    let bridge = AgentModelBridge::from_arc(Arc::new(HalfStreamingModel));
+async fn assert_bridge_stops_emitting_after_cancellation(reasoning: bool) {
+    let bridge = AgentModelBridge::from_arc(Arc::new(HalfStreamingModel { reasoning }));
     let cancel = CancellationToken::new();
     let cancel_on_first_render = cancel.clone();
     let (bus, handles) = EventBus::new(EventBusConfig::default());
@@ -894,4 +904,14 @@ async fn bridge_stops_emitting_events_after_mid_stream_cancellation() {
         "取消后不得再 emit 事件（残留 {} 个）",
         extra_events
     );
+}
+
+#[tokio::test]
+async fn bridge_stops_emitting_events_after_mid_stream_cancellation() {
+    assert_bridge_stops_emitting_after_cancellation(false).await;
+}
+
+#[tokio::test]
+async fn bridge_stops_emitting_events_after_mid_thinking_cancellation() {
+    assert_bridge_stops_emitting_after_cancellation(true).await;
 }

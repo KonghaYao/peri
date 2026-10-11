@@ -10,9 +10,9 @@
 use crate::app::panel_types::PanelKind;
 use crate::i18n;
 use crate::kit::atoms::{
-    ACP_CLIENT_HANDLE, LANG_VERSION, THREAD_BROWSER_SCOPE, THREAD_LIST, THREAD_LIST_ERROR,
-    THREAD_LIST_HAS_MORE, THREAD_LIST_PAGE_COUNT, THREAD_LIST_PAGE_SIZE, THREAD_LOAD_TX,
-    ThreadBrowserScope, ThreadSummary,
+    ACP_CLIENT_HANDLE, LANG_VERSION, THREAD_BROWSER_ARCHIVED, THREAD_BROWSER_SCOPE, THREAD_LIST,
+    THREAD_LIST_ERROR, THREAD_LIST_HAS_MORE, THREAD_LIST_PAGE_COUNT, THREAD_LIST_PAGE_SIZE,
+    THREAD_LOAD_TX, ThreadBrowserScope, ThreadSummary,
 };
 use crate::kit::list_nav::{next_selection, previous_selection};
 use crate::kit::panel_mouse::{AreaTracker, ListLayout, hit_item, is_scrollbar_column};
@@ -61,12 +61,35 @@ pub fn ThreadBrowserPanel(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
         },
         (preview_id.read().clone(), language_version),
     );
+    let machines = hooks.use_async_state(
+        || async {
+            let client = ACP_CLIENT_HANDLE
+                .get()
+                .ok_or_else(|| "ACP client is unavailable".to_owned())?;
+            let current = client
+                .list_machines()
+                .await
+                .map_err(|error| error.to_string())?
+                .into_iter()
+                .find(|machine| machine.is_current);
+            let Some(current) = current else {
+                return Ok::<_, String>(None);
+            };
+            let workspaces = client
+                .list_workspaces(&current.id)
+                .await
+                .map_err(|error| error.to_string())?;
+            Ok(Some((current, workspaces.len())))
+        },
+        (),
+    );
 
     // S6c: 订阅 THREAD_LIST atom——后台 service_snapshot 2s 派生一次
     let scope_store = hooks.use_atom(&THREAD_BROWSER_SCOPE);
     let list_error = hooks.use_atom(&THREAD_LIST_ERROR).read().clone();
     let has_more = hooks.use_atom(&THREAD_LIST_HAS_MORE).get();
     let scope = scope_store.get();
+    let archived_view = hooks.use_atom(&THREAD_BROWSER_ARCHIVED).get();
     let threads_store = hooks.use_atom(&THREAD_LIST);
     let threads: Vec<ThreadSummary> = threads_store.read().clone();
     let _ = threads_store;
@@ -243,6 +266,36 @@ pub fn ThreadBrowserPanel(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
                         *selected_id.write() = None;
                         *sv.write() = ScrollViewState::default();
                     }
+                    KeyCode::Char('r') => {
+                        THREAD_BROWSER_ARCHIVED.set(!archived_view);
+                        THREAD_LIST_PAGE_COUNT.set(1);
+                        THREAD_LIST_HAS_MORE.set(false);
+                        THREAD_LIST.state().write().clear();
+                        *cursor.write() = 0;
+                        *selected_id.write() = None;
+                        *sv.write() = ScrollViewState::default();
+                    }
+                    KeyCode::Char('a') => {
+                        if let Some(sid) = selected_id.read().clone()
+                            && let Some(client) = ACP_CLIENT_HANDLE.get() {
+                            let client = client.clone();
+                            tokio::spawn(async move {
+                                match client.set_session_archived(&sid, !archived_view).await {
+                                    Ok(()) => {
+                                        THREAD_LIST.state().write().retain(|thread| thread.id != sid);
+                                        THREAD_LIST_ERROR.set(None);
+                                    }
+                                    Err(error) => {
+                                        THREAD_LIST_ERROR.set(Some(format!(
+                                            "{}: {error}",
+                                            i18n::tr("thread-browser-archive-error")
+                                        )));
+                                        tracing::warn!(session_id = %sid, %error, "thread browser: archive action failed");
+                                    }
+                                }
+                            });
+                        }
+                    }
                     KeyCode::Char('n') if has_more => {
                         request_more_threads();
                     }
@@ -332,6 +385,29 @@ pub fn ThreadBrowserPanel(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
     let mut lines: Vec<Line<'_>> = Vec::new();
 
     // header
+    let scope_label = i18n::tr(match scope {
+        ThreadBrowserScope::Project => "thread-browser-project",
+        ThreadBrowserScope::Workspace => "thread-browser-workspace",
+        ThreadBrowserScope::All => "thread-browser-all",
+    });
+    let mut scope_label = if archived_view {
+        format!("{} · {scope_label}", i18n::tr("thread-browser-archived"))
+    } else {
+        scope_label
+    };
+    if let Some(Some((machine, workspaces))) = machines.data.read().as_ref() {
+        scope_label = format!(
+            "{scope_label} · {}",
+            i18n::tr_args(
+                "thread-browser-machine",
+                &[
+                    ("name".into(), machine.name.clone().into()),
+                    ("id".into(), machine.id.clone().into()),
+                    ("count".into(), (*workspaces as i64).into()),
+                ],
+            )
+        );
+    }
     lines.push(Line::from(vec![Span::styled(
         i18n::tr_args(
             if has_more {
@@ -340,15 +416,7 @@ pub fn ThreadBrowserPanel(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
                 "thread-browser-scope-count"
             },
             &[
-                (
-                    "scope".into(),
-                    i18n::tr(match scope {
-                        ThreadBrowserScope::Project => "thread-browser-project",
-                        ThreadBrowserScope::Workspace => "thread-browser-workspace",
-                        ThreadBrowserScope::All => "thread-browser-all",
-                    })
-                    .into(),
-                ),
+                ("scope".into(), scope_label.into()),
                 ("count".into(), (item_count as i64).into()),
             ],
         ),
@@ -426,14 +494,14 @@ pub fn ThreadBrowserPanel(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
             Style::new().fg(theme_def.read().semantic.status.warning),
         )]));
     } else {
-        lines.push(Line::from(vec![Span::styled(
-            i18n::tr(if panel_area.width < 80 {
-                "thread-browser-actions-compact"
-            } else {
-                "thread-browser-actions"
-            }),
-            muted_style,
-        )]));
+        use unicode_width::UnicodeWidthStr;
+        let actions = i18n::tr("thread-browser-actions");
+        let actions = if actions.width() > panel_area.width.saturating_sub(2) as usize {
+            i18n::tr("thread-browser-actions-compact")
+        } else {
+            actions
+        };
+        lines.push(Line::from(vec![Span::styled(actions, muted_style)]));
     }
 
     if let Some(id) = preview_id.read().as_ref() {

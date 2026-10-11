@@ -189,7 +189,7 @@ npx -y @peri-code/workflow@0.2.0 validate my-workflow.mjs
 Peri 用户可把上述前缀替换为 `peri workflow`，始终使用当前二进制内嵌版本。
 `boundary` 和 `adlc` 使用请求文件，返回 JSON；非零退出或 `ok: false` 不能当作检查通过。
 请求类型和固定上限见 `src/boundary.ts`、`src/adlc.ts`；编排策略与完整步骤由
-[ultra-adlc skill](../../peri-middlewares/src/skills/builtin/skills/ultra-adlc/SKILL.md) 维护。
+[ultra-adlc skill](../../mcp-packages/workspace/src/resources/builtin/skills/ultra-adlc/SKILL.md) 维护。
 文件 gate 不评价产品语义，通用 Workflow 仍允许零次 Agent 调用；任何检查都不构成写权限沙箱。
 
 ### validate：agent 写脚本前的语法校验

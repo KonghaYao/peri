@@ -2,6 +2,48 @@
 
 use super::*;
 
+use peri_acp_types::oauth_credentials::{OAuthCredentialPort, OAuthCredentialResult};
+
+#[derive(Default)]
+struct MemoryOAuthCredentialPort {
+    records: parking_lot::Mutex<std::collections::HashMap<String, String>>,
+}
+
+#[async_trait::async_trait]
+impl OAuthCredentialPort for MemoryOAuthCredentialPort {
+    async fn load(&self, key: &str) -> OAuthCredentialResult<Option<String>> {
+        Ok(self.records.lock().get(key).cloned())
+    }
+
+    async fn save(&self, key: &str, credentials: &str) -> OAuthCredentialResult<()> {
+        self.records
+            .lock()
+            .insert(key.to_string(), credentials.to_string());
+        Ok(())
+    }
+
+    async fn clear(&self, key: &str) -> OAuthCredentialResult<()> {
+        self.records.lock().remove(key);
+        Ok(())
+    }
+
+    async fn clear_all(&self) -> OAuthCredentialResult<()> {
+        self.records.lock().clear();
+        Ok(())
+    }
+
+    async fn list(&self) -> OAuthCredentialResult<Vec<String>> {
+        Ok(self.records.lock().keys().cloned().collect())
+    }
+}
+
+fn memory_client() -> crate::mcp::auth_store::OAuthCredentialClient {
+    crate::mcp::auth_store::OAuthCredentialClient::new(std::sync::Arc::new(
+        MemoryOAuthCredentialPort::default(),
+    ))
+    .unwrap()
+}
+
 #[test]
 fn test_oauth_flow_error_display() {
     let err = OAuthFlowError::Cancelled;
@@ -51,20 +93,14 @@ fn test_oauth_callback_result_fields() {
 
 #[tokio::test]
 async fn test_oauth_flow_manager_new() {
-    let tmp = tempfile::NamedTempFile::new().unwrap();
-    let path = tmp.path().to_path_buf();
-    drop(tmp);
-    let store = Arc::new(FileCredentialStore::with_path(path));
+    let store = memory_client();
     let manager = OAuthFlowManager::new(store, |_| {});
     assert!(!manager.is_authorized("nonexistent"));
 }
 
 #[tokio::test]
 async fn test_oauth_flow_manager_is_authorized_empty() {
-    let tmp = tempfile::NamedTempFile::new().unwrap();
-    let path = tmp.path().to_path_buf();
-    drop(tmp);
-    let store = Arc::new(FileCredentialStore::with_path(path));
+    let store = memory_client();
     let manager = OAuthFlowManager::new(store, |_| {});
     assert!(!manager.is_authorized("any-server"));
 }
@@ -75,10 +111,7 @@ async fn test_oauth_flow_manager_emit_event() {
     let counter = Arc::new(AtomicUsize::new(0));
     let counter_clone = counter.clone();
 
-    let tmp = tempfile::NamedTempFile::new().unwrap();
-    let path = tmp.path().to_path_buf();
-    drop(tmp);
-    let store = Arc::new(FileCredentialStore::with_path(path));
+    let store = memory_client();
     let manager = OAuthFlowManager::new(store, move |_| {
         counter_clone.fetch_add(1, Ordering::SeqCst);
     });

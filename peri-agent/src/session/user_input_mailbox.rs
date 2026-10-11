@@ -1,7 +1,7 @@
 //! 用户待发区与执行准入的会话级 owner，普通待办在 idle 时逐条交接给 MQ。
 
 use std::{
-    collections::HashMap,
+    collections::{HashMap, HashSet},
     hash::{Hash, Hasher},
     sync::Arc,
 };
@@ -34,7 +34,7 @@ pub enum UserInputAttemptOutcome {
     Failed,
 }
 
-#[derive(Debug, thiserror::Error, PartialEq, Eq)]
+#[derive(Debug, Clone, thiserror::Error, PartialEq, Eq)]
 pub enum UserInputQueueError {
     #[error("User input queue belongs to a different session generation")]
     StaleSession,
@@ -87,6 +87,7 @@ struct MailboxState {
     paused: bool,
     suspended: bool,
     valid: bool,
+    delivered_notifications: HashSet<String>,
 }
 
 /// 由宿主持有跨 turn 实例，Agent 独占队列状态、取消原因和执行准入判定。
@@ -119,6 +120,7 @@ impl UserInputMailbox {
                 paused: false,
                 suspended: false,
                 valid: true,
+                delivered_notifications: HashSet::new(),
             }),
             emit,
             control_turn: TurnId::new(),
@@ -581,10 +583,27 @@ impl UserInputMailbox {
 
     /// 返回本次首次接纳的注册输入 ID，调用方在本轮 render FIFO 发聊天事件。
     pub(crate) fn mark_delivered(&self, ids: &[MessageId]) -> Vec<String> {
+        self.mark_delivery_notifications(ids)
+    }
+
+    fn mark_delivery_notifications(&self, ids: &[MessageId]) -> Vec<String> {
         let mut state = self.state.lock();
+        if !state.valid {
+            return Vec::new();
+        }
         let mut delivered = Vec::new();
-        for record in &mut state.records {
-            if record.state == UserInputState::Claimed && matches_id(record, ids) {
+        let MailboxState {
+            records,
+            delivered_notifications,
+            ..
+        } = &mut *state;
+        for record in records {
+            if matches!(
+                record.state,
+                UserInputState::Claimed | UserInputState::Delivered
+            ) && matches_id(record, ids)
+                && delivered_notifications.insert(record.input.input_id.clone())
+            {
                 record.state = UserInputState::Delivered;
                 delivered.push(record.input.input_id.clone());
                 discard_payload(record);

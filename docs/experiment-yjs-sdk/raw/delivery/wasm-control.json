@@ -1,0 +1,8 @@
+{
+  "baselineSdkCommit": "567640f1837771442628970a56ce68c5a8f8e256",
+  "wasmSha256": "4380edda7cc1663fc25ba720e8a49055148b441064558641c3d07b561097bc86",
+  "baselineBuildScript": "import {mkdir,symlink} from 'node:fs/promises';\nconst output='/tmp/peri-yjs-baseline-runtime/dist';await mkdir(output,{recursive:true});\nconst result=await Bun.build({entrypoints:['/tmp/peri-yjs-sdk-baseline-567640f1837771442628970a56ce68c5a8f8e256/src/sdk/index.ts'],outdir:output,target:'bun',format:'esm'});if(!result.success)throw result.logs;\nawait symlink('/Users/konghayao/code/ai/peri-v4p3/npm-packages/@peri-sdk/dist/wasm',`${output}/wasm`);\nlet test=await Bun.file('/Users/konghayao/code/ai/peri-v4p3/npm-packages/@peri-sdk/tests/wasm-acp-integration.test.ts').text();\ntest=test.replaceAll('\"../dist/index.js\"','\"/tmp/peri-yjs-baseline-runtime/dist/index.js\"').replaceAll('resolve(import.meta.dir, \"..\")','\"/Users/konghayao/code/ai/peri-v4p3/npm-packages/@peri-sdk\"');\nawait Bun.write('/tmp/peri-yjs-baseline-runtime/wasm-acp-integration.test.ts',test);\n",
+  "control": "Frozen baseline TypeScript bundled with Bun; original integration test; same current WASM release artifact as optimized SDK. This isolates SDK changes, not unrelated Rust working-tree changes.",
+  "baselineResult": "remote session store server_error before projection; exit 1",
+  "candidateResult": "remote session store server_error before projection; exit 1"
+}

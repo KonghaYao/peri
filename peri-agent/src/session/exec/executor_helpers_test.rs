@@ -130,6 +130,7 @@ fn make_intercept_request<'a>(
     let compact_config_loader: Arc<dyn Fn() -> CompactConfig + Send + Sync> =
         Arc::new(CompactConfig::default);
     InterceptRequest {
+        mcp_pool: None,
         content,
         history,
         history_payloads: history
@@ -916,468 +917,54 @@ async fn test_intercept_cancel_outcome_returns_handled_cancelled() {
 
 /// args 解析失败：schema 声明 required positional，args 缺失 → 不进入 handler，
 /// 立即返回 Handled + feedback(Error, 解析失败) + history 原样 + push_done。
-#[tokio::test]
-async fn test_intercept_args_parse_failure_returns_error_feedback() {
-    // Arrange：rewind 形态 schema（required positional + flag）；handler 为
-    // 哨兵——若被调用即 panic（解析失败必须不进入 handler）。
-    struct SentryHandler;
-    #[async_trait]
-    impl CommandHandler for SentryHandler {
-        async fn execute(&self, _ctx: CommandContext) -> CommandOutcome {
-            panic!("解析失败路径不得进入 handler");
-        }
-    }
-    let schema = peri_acp_types::command::ArgsSchema {
-        positionals: vec![peri_acp_types::command::ArgSpec {
-            name: "target_message_id".into(),
-            kind: peri_acp_types::command::ArgKind::String,
-            required: true,
-            description: None,
-        }],
-        named: vec![],
-        flags: vec![peri_acp_types::command::FlagSpec {
-            name: "no-revert-files".into(),
-            short: None,
-            description: None,
-        }],
-    };
-    let lookup: super::CommandLookupFn = Arc::new(move |text: &str| {
-        if text == "rewind" {
-            Some(ResolvedCommand {
-                entry: Arc::new(RouteEntry {
-                    fullname: "core:rewind".to_string(),
-                    aliases: vec![],
-                    description: "rewind for args-parse test".to_string(),
-                    kind: peri_acp_types::command::command_route::CommandEntryKind::Command,
-                    category: None,
-                    args_schema: Some(schema.clone()),
-                    handler: Arc::new(SentryHandler),
-                    provenance: peri_acp_types::command::command_route::CommandProvenance {
-                        source: peri_acp_types::command::command_route::CommandSource::Core,
-                        lifecycle:
-                            peri_acp_types::command::command_route::CommandLifecycle::Connected,
-                    },
-                }),
-                args: String::new(),
-            })
-        } else {
-            None
-        }
-    });
+#[path = "executor_helpers/command_feedback_test.rs"]
+mod command_feedback_tests;
 
-    let content = MessageContent::text("/rewind");
-    let history: Vec<BaseMessage> = vec![BaseMessage::human("hello")];
-    let cancel = AgentCancellationToken::new();
-    let mock_sink = Arc::new(MockEventSink::new());
-    let sink: Arc<dyn EventSink> = Arc::clone(&mock_sink) as Arc<dyn EventSink>;
-    let (bg_tx, bg_reg) = make_bg_infra();
-    let req = make_intercept_request(
-        &content,
-        &history,
-        "test-session",
-        &cancel,
-        &sink,
-        &bg_tx,
-        &bg_reg,
-        lookup,
-    );
-
-    // Act
-    let result = intercept_immediate_command(req).await;
-
-    // Assert：Handled + feedback(Error, 参数解析失败) + history 原样 + push_done
-    let InterceptOutcome::Handled(prompt_result) = result else {
-        panic!("解析失败应返回 Handled");
-    };
-    assert!(prompt_result.ok);
-    assert_eq!(prompt_result.stop_reason, PromptStopReason::EndTurn);
-    assert_eq!(
-        prompt_result.messages.len(),
-        1,
-        "解析失败应返回原样 history"
-    );
-    // feedback 经 emit_command_feedback 发射为 CommandFeedback 事件
-    let events = mock_sink.pushed_events.lock().unwrap();
-    let fb_event = events.iter().find(|json| json.contains("command_feedback"));
-    assert!(fb_event.is_some(), "解析失败应发射 CommandFeedback 事件");
-    assert!(
-        fb_event.unwrap().contains("rewind 参数解析失败"),
-        "错误消息应含 'rewind 参数解析失败'，实际: {events:?}"
-    );
-    drop(events);
-    assert_eq!(
-        mock_sink.push_done_count(),
-        1,
-        "解析失败路径必须调用 push_done（TRAP 守护）"
-    );
-}
-
-/// args 解析通过：schema 声明 required positional，args 提供 → 正常进入
-/// handler（SentryHandler 替换为正常 handler）。
-#[tokio::test]
-async fn test_intercept_args_parse_ok_passes_into_handler() {
-    // Arrange：rewind 形态 schema + 正常 handler（Done + history 原样）
-    struct OkHandler;
-    #[async_trait]
-    impl CommandHandler for OkHandler {
-        async fn execute(&self, ctx: CommandContext) -> CommandOutcome {
-            assert_eq!(
-                ctx.args, "abc123 --no-revert-files",
-                "ctx.args 应为 resolve 切分原文"
-            );
-            // P1-1：统一解析结果经 ctx.parsed_args 传入——handler 不再自研解析
-            let parsed = ctx
-                .parsed_args
-                .as_ref()
-                .expect("解析通过路径应携带 parsed_args");
-            assert_eq!(
-                parsed.positionals,
-                vec!["abc123".to_string()],
-                "positionals[0] 应为 target_message_id"
-            );
-            assert_eq!(
-                parsed.flags,
-                vec!["no-revert-files".to_string()],
-                "flags 应命中 no-revert-files"
-            );
-            CommandOutcome::Done(CommandResult {
-                messages: ctx.history,
-                stop_reason: PromptStopReason::EndTurn,
-                feedback: None,
-            })
-        }
-    }
-    let schema = peri_acp_types::command::ArgsSchema {
-        positionals: vec![peri_acp_types::command::ArgSpec {
-            name: "target_message_id".into(),
-            kind: peri_acp_types::command::ArgKind::String,
-            required: true,
-            description: None,
-        }],
-        named: vec![],
-        flags: vec![peri_acp_types::command::FlagSpec {
-            name: "no-revert-files".into(),
-            short: None,
-            description: None,
-        }],
-    };
-    let lookup: super::CommandLookupFn = Arc::new(move |text: &str| {
-        if text.starts_with("rewind") {
-            Some(ResolvedCommand {
-                entry: Arc::new(RouteEntry {
-                    fullname: "core:rewind".to_string(),
-                    aliases: vec![],
-                    description: "rewind for args-parse test".to_string(),
-                    kind: peri_acp_types::command::command_route::CommandEntryKind::Command,
-                    category: None,
-                    args_schema: Some(schema.clone()),
-                    handler: Arc::new(OkHandler),
-                    provenance: peri_acp_types::command::command_route::CommandProvenance {
-                        source: peri_acp_types::command::command_route::CommandSource::Core,
-                        lifecycle:
-                            peri_acp_types::command::command_route::CommandLifecycle::Connected,
-                    },
-                }),
-                // resolve 词法切分（不变式 3）：命令名后的参数原样
-                args: "abc123 --no-revert-files".to_string(),
-            })
-        } else {
-            None
-        }
-    });
-
-    let content = MessageContent::text("/rewind abc123 --no-revert-files");
-    let history: Vec<BaseMessage> = vec![];
-    let cancel = AgentCancellationToken::new();
-    let mock_sink = Arc::new(MockEventSink::new());
-    let sink: Arc<dyn EventSink> = Arc::clone(&mock_sink) as Arc<dyn EventSink>;
-    let (bg_tx, bg_reg) = make_bg_infra();
-    let req = make_intercept_request(
-        &content,
-        &history,
-        "test-session",
-        &cancel,
-        &sink,
-        &bg_tx,
-        &bg_reg,
-        lookup,
-    );
-
-    // Act
-    let result = intercept_immediate_command(req).await;
-
-    // Assert：Handled + handler 已执行（OkHandler 内断言 ctx.args）
-    let InterceptOutcome::Handled(prompt_result) = result else {
-        panic!("解析通过应返回 Handled");
-    };
-    assert!(prompt_result.ok);
-    assert_eq!(mock_sink.push_done_count(), 1, "解析通过路径必须 push_done");
-}
-
-// ── emit_command_feedback: 反馈双通道验证 ───────────────────────────────────
-
-/// 构造带 feedback 的 CommandResult（messages 预置一条 human 消息）。
-fn result_with_feedback(channel: FeedbackChannel) -> CommandResult {
-    CommandResult {
-        messages: vec![BaseMessage::human("你好")],
-        stop_reason: PromptStopReason::EndTurn,
-        feedback: Some(CommandFeedback {
-            level: FeedbackLevel::Info,
-            message: "命令已完成".to_string(),
-            channel,
-        }),
-    }
-}
-
-/// channel=Session：message 以系统消息追加进 messages 尾部，事件发射一次
-/// （Step 1：编排层统一反馈出口；Session 仅命令显式 opt-in，设计 §79）。
-#[tokio::test]
-async fn test_emit_command_feedback_session_appends_system_message() {
-    // Arrange
-    let mock_sink = Arc::new(MockEventSink::new());
-    let sink: Arc<dyn EventSink> = Arc::clone(&mock_sink) as Arc<dyn EventSink>;
-    let mut result = result_with_feedback(FeedbackChannel::Session);
-
-    // Act
-    emit_command_feedback(&sink, "test-session", &mut result).await;
-
-    // Assert：尾部为系统消息（内容同 feedback.message）
-    let messages = &result.messages;
-    assert_eq!(messages.len(), 2, "Session 通道应追加一条系统消息");
-    let last = messages.last().unwrap();
-    assert!(
-        matches!(last, BaseMessage::System { .. }),
-        "尾元素应为系统消息"
-    );
-    assert_eq!(last.content(), "命令已完成");
-    // feedback 已被 take（发射唯一归属本 helper），事件发射一次
-    assert!(result.feedback.is_none(), "feedback 应被 take 出");
-    assert_eq!(
-        mock_sink.pushed_events.lock().unwrap().len(),
-        1,
-        "Session 通道也应发射 CommandFeedback 事件"
-    );
-}
-
-/// channel=UiOnly：messages 不变（不追加系统消息），事件仍发射
-#[tokio::test]
-async fn test_emit_command_feedback_ui_only_keeps_messages() {
-    // Arrange
-    let mock_sink = Arc::new(MockEventSink::new());
-    let sink: Arc<dyn EventSink> = Arc::clone(&mock_sink) as Arc<dyn EventSink>;
-    let mut result = result_with_feedback(FeedbackChannel::UiOnly);
-
-    // Act
-    emit_command_feedback(&sink, "test-session", &mut result).await;
-
-    // Assert：messages 不变（UiOnly 不进会话，设计 §79）
-    assert_eq!(result.messages.len(), 1, "UiOnly 不应追加消息");
-    assert!(result.feedback.is_none(), "feedback 应被 take 出");
-    assert_eq!(
-        mock_sink.pushed_events.lock().unwrap().len(),
-        1,
-        "UiOnly 仍应发射 CommandFeedback 事件"
-    );
-}
-
-// ── LoopResult → ExecOutcome 分类映射（v2 Phase 9）─────────────────────────
-//
-// spec/issues/2026-08-18-acp-error-handler.md Commit 1：fatal / cancel /
-// max-iterations 三类不会混淆，且 fatal 的 public message 非空并脱敏。
-mod loop_result_mapping {
-    use peri_acp_types::{
-        command::PromptStopReason,
-        error::AgentError,
-        event::{TurnErrorKind, TurnStatus},
-        session::{ExecutionFailureKind, EXECUTION_FAILURE_FALLBACK_MESSAGE},
-    };
-
-    use crate::agent::stages::LoopResult;
-
-    use super::super::v2_execute::classify_loop_terminal;
-
-    /// 真正 fatal（LLM 错误）：ok=false + failure=Some(Llm, 非空脱敏原文)。
-    /// 消息保留原始诊断含义，但不得泄露凭据。
-    #[test]
-    fn fatal_llm_error_maps_to_safe_llm_failure() {
-        let terminal = classify_loop_terminal(
-            &LoopResult::Error(AgentError::LlmError(
-                "provider 500: Authorization: Bearer top-secret-key".to_string(),
-            )),
-            false,
-        );
-        assert!(!terminal.ok);
-        assert_eq!(terminal.stop_reason, PromptStopReason::EndTurn);
-        assert_eq!(terminal.turn_status, TurnStatus::Error);
-        assert_eq!(terminal.turn_error_kind, Some(TurnErrorKind::LlmFailure));
-        let failure = terminal.failure.expect("fatal error 必须携带 failure");
-        assert_eq!(failure.kind, ExecutionFailureKind::Llm);
-        assert!(failure.http_status.is_none());
-        assert!(
-            !failure.public_message.is_empty(),
-            "public message 必须非空"
-        );
-        assert!(!failure.public_message.contains("top-secret-key"));
-        assert!(failure.public_message.contains("provider 500"));
-        assert!(failure.public_message.contains("Bearer [redacted]"));
-    }
-
-    /// 用户主动中断：failure=None，stop_reason=Cancelled。
-    #[test]
-    fn interrupted_maps_to_no_failure() {
-        let terminal = classify_loop_terminal(&LoopResult::Interrupted, false);
-        assert!(!terminal.ok);
-        assert_eq!(terminal.stop_reason, PromptStopReason::Cancelled);
-        assert_eq!(terminal.turn_status, TurnStatus::Interrupted);
-        assert_eq!(terminal.turn_error_kind, Some(TurnErrorKind::Interrupted));
-        assert!(
-            terminal.failure.is_none(),
-            "Interrupted 不得升级为 fatal failure"
-        );
-    }
-
-    #[test]
-    fn legacy_error_interrupted_maps_to_interrupted_terminal() {
-        let terminal = classify_loop_terminal(&LoopResult::Error(AgentError::Interrupted), false);
-        assert!(!terminal.ok);
-        assert_eq!(terminal.stop_reason, PromptStopReason::Cancelled);
-        assert_eq!(terminal.turn_status, TurnStatus::Interrupted);
-        assert_eq!(terminal.turn_error_kind, Some(TurnErrorKind::Interrupted));
-        assert!(terminal.failure.is_none());
-    }
-
-    /// cancel token 已取消（即便 Error 非 Interrupted）：failure=None，
-    /// 视为用户取消而非请求失败。
-    #[test]
-    fn cancelled_error_maps_to_no_failure() {
-        let terminal = classify_loop_terminal(
-            &LoopResult::Error(AgentError::LlmError("cancelled while failing".to_string())),
-            true,
-        );
-        assert!(!terminal.ok);
-        assert_eq!(terminal.stop_reason, PromptStopReason::Cancelled);
-        assert_eq!(terminal.turn_status, TurnStatus::Interrupted);
-        assert_eq!(terminal.turn_error_kind, Some(TurnErrorKind::Interrupted));
-        assert!(
-            terminal.failure.is_none(),
-            "用户 cancel 不得升级为 fatal failure"
-        );
-    }
-
-    /// 最大轮数：failure=None，stop_reason=MaxTurnRequests。
-    #[test]
-    fn max_iterations_maps_to_no_failure() {
-        let terminal = classify_loop_terminal(
-            &LoopResult::Error(AgentError::MaxIterationsExceeded(500)),
-            false,
-        );
-        assert!(!terminal.ok);
-        assert_eq!(terminal.stop_reason, PromptStopReason::MaxTurnRequests);
-        assert_eq!(terminal.turn_status, TurnStatus::Error);
-        assert_eq!(terminal.turn_error_kind, Some(TurnErrorKind::MaxIterations));
-        assert!(
-            terminal.failure.is_none(),
-            "MaxIterationsExceeded 不得升级为 fatal failure"
-        );
-    }
-
-    #[test]
-    fn output_truncated_maps_to_max_tokens_without_fatal_failure() {
-        let terminal = classify_loop_terminal(
-            &LoopResult::Error(AgentError::OutputTruncated { attempts: 3 }),
-            false,
-        );
-        assert!(!terminal.ok);
-        assert_eq!(terminal.stop_reason, PromptStopReason::MaxTokens);
-        assert_eq!(terminal.turn_status, TurnStatus::Error);
-        assert_eq!(terminal.turn_error_kind, Some(TurnErrorKind::LlmFailure));
-        assert!(terminal.failure.is_none());
-        assert_eq!(
-            peri_acp_types::session::TurnTelemetryOutcome::from_result(
-                terminal.stop_reason,
-                terminal.failure,
-            ),
-            peri_acp_types::session::TurnTelemetryOutcome::Stopped {
-                reason: PromptStopReason::MaxTokens,
-            },
-        );
-    }
-
-    #[test]
-    fn cancelled_output_truncation_maps_to_cancelled() {
-        let terminal = classify_loop_terminal(
-            &LoopResult::Error(AgentError::OutputTruncated { attempts: 3 }),
-            true,
-        );
-        assert_eq!(terminal.stop_reason, PromptStopReason::Cancelled);
-        assert_eq!(terminal.turn_status, TurnStatus::Interrupted);
-        assert!(terminal.failure.is_none());
-    }
-
-    #[test]
-    fn cancelled_max_iterations_maps_to_interrupted_terminal() {
-        let terminal = classify_loop_terminal(
-            &LoopResult::Error(AgentError::MaxIterationsExceeded(500)),
-            true,
-        );
-        assert!(!terminal.ok);
-        assert_eq!(terminal.stop_reason, PromptStopReason::Cancelled);
-        assert_eq!(terminal.turn_status, TurnStatus::Interrupted);
-        assert_eq!(terminal.turn_error_kind, Some(TurnErrorKind::Interrupted));
-        assert!(terminal.failure.is_none());
-    }
-
-    /// 正常完成：ok=true + failure=None。
-    #[test]
-    fn completed_maps_to_success_no_failure() {
-        let terminal = classify_loop_terminal(&LoopResult::Completed, false);
-        assert!(terminal.ok);
-        assert_eq!(terminal.stop_reason, PromptStopReason::EndTurn);
-        assert_eq!(terminal.turn_status, TurnStatus::Done);
-        assert_eq!(terminal.turn_error_kind, None);
-        assert!(terminal.failure.is_none());
-    }
-
-    #[test]
-    fn completed_after_late_cancel_remains_committed_success() {
-        let terminal = classify_loop_terminal(&LoopResult::Completed, true);
-        assert!(terminal.ok);
-        assert_eq!(terminal.stop_reason, PromptStopReason::EndTurn);
-        assert_eq!(terminal.turn_status, TurnStatus::Done);
-        assert_eq!(terminal.turn_error_kind, None);
-        assert!(terminal.failure.is_none());
-    }
-
-    /// LLM HTTP fatal 保留 status 与经过脱敏的 provider 原文。
-    #[test]
-    fn llm_http_error_maps_to_sanitized_message() {
-        let terminal = classify_loop_terminal(
-            &LoopResult::Error(AgentError::LlmHttpError {
-                status: 421,
-                message: "Misdirected Request token=secret-provider-body".to_string(),
-            }),
-            false,
-        );
-        assert!(!terminal.ok);
-        assert_eq!(terminal.turn_status, TurnStatus::Error);
-        assert_eq!(terminal.turn_error_kind, Some(TurnErrorKind::LlmFailure));
-        let failure = terminal.failure.expect("fatal error 必须携带 failure");
-        assert_eq!(failure.kind, ExecutionFailureKind::LlmHttp);
-        assert_eq!(failure.http_status, Some(421));
-        assert!(failure.public_message.contains("LLM HTTP 421"));
-        assert!(failure.public_message.contains("Misdirected Request"));
-        assert!(!failure.public_message.contains("secret-provider-body"));
-        assert!(failure.public_message.contains("[redacted]"));
-    }
-
-    /// 脱敏契约：任何 fatal failure 的 public message 都不得为空，
-    /// fallback 文案本身不含内部细节。
-    #[test]
-    fn fallback_message_is_non_empty_and_safe() {
-        assert!(!EXECUTION_FAILURE_FALLBACK_MESSAGE.is_empty());
-        assert!(!EXECUTION_FAILURE_FALLBACK_MESSAGE.contains("secret"));
-    }
-}
+#[path = "executor_helpers/terminal_mapping_test.rs"]
+mod terminal_mapping_tests;
 
 #[path = "executor_helpers/compact_cancel_test.rs"]
 mod compact_cancel_tests;
+
+// [回归测试] §7.3 摘要计数与 loop 的 busy 判据同源：无任务/无 manager 记 0，
+// 未结算任务按 active_count 计入（终态结算后不再计入）。
+#[test]
+fn test_pending_task_count_reflects_unsettled_tasks() {
+    use crate::session::exec::executor_helpers::pending_task_count;
+    use peri_acp_types::tasks::{BgTaskKind, BgTaskRegistration, TaskManager as TaskManagerPort};
+    let none: Option<Arc<dyn TaskManagerPort>> = None;
+    assert_eq!(pending_task_count(none.as_ref()), 0);
+    let manager: Arc<dyn TaskManagerPort> = Arc::new(crate::agent::async_tasks::TaskManager::new());
+    assert_eq!(pending_task_count(Some(&manager)), 0);
+    manager
+        .register(BgTaskRegistration {
+            task_id: "bg-pending".into(),
+            kind: BgTaskKind::Shell,
+            summary: "sleep 300".into(),
+            pid: None,
+            kill: Some(Box::new(|| {})),
+        })
+        .unwrap();
+    assert_eq!(pending_task_count(Some(&manager)), 1);
+    manager.complete(
+        "bg-pending",
+        peri_acp_types::event::BackgroundTaskResult {
+            task_id: "bg-pending".into(),
+            agent_name: "bg-shell".into(),
+            prompt_summary: "sleep 300".into(),
+            success: true,
+            output: "done".into(),
+            tool_calls_count: 0,
+            duration_ms: 1,
+            timed_out: false,
+            child_thread_id: None,
+            subagent_failure: None,
+            shell_output: None,
+        },
+    );
+    assert_eq!(
+        pending_task_count(Some(&manager)),
+        0,
+        "结算后不得再计入 pending"
+    );
+}

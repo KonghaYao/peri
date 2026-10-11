@@ -34,7 +34,7 @@ pub fn build_initialize_response(peri_caps: &PeriCaps) -> InitializeResponse {
                 .fork(SessionForkCapabilities::new())
                 .delete(SessionDeleteCapabilities::new()),
         )
-        .mcp_capabilities(McpCapabilities::new().acp(true));
+        .mcp_capabilities(McpCapabilities::new().acp(true).http(true));
     let caps = caps.meta(peri_caps.to_agent_meta());
     InitializeResponse::new(ProtocolVersion::V1).agent_capabilities(caps)
 }

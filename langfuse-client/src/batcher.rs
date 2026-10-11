@@ -1,11 +1,15 @@
 mod admission;
+mod budget;
 mod failure;
 mod shutdown;
+mod stats;
 mod worker;
 
 use admission::{Admission, AdmissionOutcome};
 use failure::{FailureLedger, FlushSnapshot};
 use shutdown::WorkerOwner;
+pub use stats::BatcherStats;
+use stats::Counters;
 use worker::BatchWorker;
 
 use std::sync::{
@@ -13,7 +17,6 @@ use std::sync::{
     Arc,
 };
 use tokio::sync::{oneshot, Mutex};
-use tracing::warn;
 
 use crate::{
     config::{BackpressurePolicy, BatcherConfig},
@@ -41,6 +44,7 @@ pub struct Batcher {
     /// 准入丢弃计数；worker 每次 flush 后汇总输出并清零。
     dropped: Arc<AtomicUsize>,
     failures: Arc<FailureLedger>,
+    counters: Arc<Counters>,
 }
 
 impl Batcher {
@@ -57,10 +61,21 @@ impl Batcher {
     /// 必须在 Tokio runtime 内调用。HTTP 重试仍仅由传入的 client 决定。
     pub fn try_new(client: LangfuseClient, config: BatcherConfig) -> Result<Self, LangfuseError> {
         config.validate()?;
-        let (admission, rx, closing) = Admission::new(config.max_events);
+        let (admission, rx, closing) = Admission::with_limits(
+            config.queue_capacity,
+            config.max_event_bytes,
+            config.max_queue_bytes,
+        );
         let dropped = Arc::new(AtomicUsize::new(0));
         let failures = Arc::new(FailureLedger::default());
-        let worker = BatchWorker::new(client, &config, Arc::clone(&dropped), Arc::clone(&failures));
+        let counters = Arc::new(Counters::default());
+        let worker = BatchWorker::new(
+            client,
+            &config,
+            Arc::clone(&dropped),
+            Arc::clone(&failures),
+            Arc::clone(&counters),
+        );
         let handle = tokio::spawn(worker.run(rx, closing, config.flush_interval));
         Ok(Self {
             admission,
@@ -68,6 +83,7 @@ impl Batcher {
             backpressure: config.backpressure,
             dropped,
             failures,
+            counters,
         })
     }
 
@@ -87,10 +103,20 @@ impl Batcher {
     /// 新事件始终追加在队尾；队列已满时，其他策略或无可驱逐事件会返回 QueueFull。
     pub fn try_add(&self, event: IngestionEvent) -> Result<(), LangfuseError> {
         match self.admission.try_add(event, self.backpressure) {
-            Ok(AdmissionOutcome::Accepted) => Ok(()),
-            Ok(AdmissionOutcome::ReplacedOldest) => {
-                self.dropped.fetch_add(1, Ordering::Relaxed);
-                warn!("Batcher replaced oldest unprotected queued event");
+            Ok(AdmissionOutcome::Accepted) => {
+                self.counters
+                    .accepted_events
+                    .fetch_add(1, Ordering::Relaxed);
+                Ok(())
+            }
+            Ok(AdmissionOutcome::ReplacedOldest(count)) => {
+                self.dropped.fetch_add(count, Ordering::Relaxed);
+                self.counters
+                    .evicted_events
+                    .fetch_add(count, Ordering::Relaxed);
+                self.counters
+                    .accepted_events
+                    .fetch_add(1, Ordering::Relaxed);
                 Ok(())
             }
             Err(error) => self.report_rejection(Err(error)),
@@ -98,9 +124,15 @@ impl Batcher {
     }
 
     fn report_rejection(&self, result: Result<(), LangfuseError>) -> Result<(), LangfuseError> {
-        if let Err(error) = &result {
+        if result.is_err() {
             self.dropped.fetch_add(1, Ordering::Relaxed);
-            warn!("Batcher event rejected: {error}");
+            self.counters
+                .rejected_events
+                .fetch_add(1, Ordering::Relaxed);
+        } else {
+            self.counters
+                .accepted_events
+                .fetch_add(1, Ordering::Relaxed);
         }
         result
     }
@@ -150,6 +182,11 @@ impl Batcher {
         self.dropped.load(Ordering::Relaxed)
     }
 
+    /// 累计计数不随周期汇总清零；字段分别读取，不是并发事务快照。
+    pub fn stats(&self) -> BatcherStats {
+        self.counters.snapshot()
+    }
+
     #[cfg(test)]
     async fn worker_is_joined(&self) -> bool {
         matches!(*self.worker.lock().await, WorkerOwner::Joined(_))
@@ -171,3 +208,7 @@ mod tests;
 #[cfg(test)]
 #[path = "batcher_shutdown_test.rs"]
 mod shutdown_tests;
+
+#[cfg(test)]
+#[path = "batcher_concurrency_test.rs"]
+mod concurrency_tests;

@@ -1,3 +1,4 @@
+#[cfg(test)]
 use std::hash::{Hash, Hasher};
 use std::sync::Arc;
 use std::time::Instant;
@@ -5,14 +6,35 @@ use std::time::Instant;
 use super::render;
 use super::render::ImageLineInfo;
 use super::scroll;
-use super::selection::{WrappedLineInfo, build_wrap_map};
-use ratatui_kit::ratatui::text::Line;
+use super::selection::WrappedLineInfo;
+pub(super) fn read_render_snapshot() -> (
+    crate::kit::atoms::ViewModelsSnapshot,
+    crate::kit::atoms::TranscriptPublication,
+) {
+    let wait_start = peri_time::monotonic_now();
+    let view_models = crate::kit::atoms::VIEW_MODELS.state();
+    let guard = view_models.read();
+    let acquired = peri_time::monotonic_now();
+    let snapshot = guard.clone();
+    let publication = crate::kit::atoms::TRANSCRIPT_PUBLICATION.get();
+    drop(guard);
+    let released = peri_time::monotonic_now();
+    trace_elapsed("vm-read-wait", acquired.duration_since(wait_start), None);
+    trace_elapsed(
+        "vm-snapshot",
+        released.duration_since(acquired),
+        Some("persistent-clone-and-publication"),
+    );
+    (snapshot, publication)
+}
 
 /// 计算 palette 中影响 markdown 渲染的关键字段哈希。
 /// 当主题切换时，hash 变化 → 触发 vm_caches 重建 → markdown 色值更新。
+#[cfg(test)]
 pub(super) fn palette_markdown_key(
     p: &ratatui_kit::prelude::Palette,
     surface_sunken: ratatui_kit::ratatui::style::Color,
+    markdown_text: ratatui_kit::ratatui::style::Color,
 ) -> u64 {
     let mut h = std::collections::hash_map::DefaultHasher::new();
     p.fg.hash(&mut h);
@@ -21,6 +43,7 @@ pub(super) fn palette_markdown_key(
     p.accent.hash(&mut h);
     p.surface.hash(&mut h);
     surface_sunken.hash(&mut h);
+    markdown_text.hash(&mut h);
     p.border.hash(&mut h);
     p.success.hash(&mut h);
     p.warning.hash(&mut h);
@@ -57,10 +80,14 @@ pub(super) fn render_timing_enabled() -> bool {
 /// 如果启用诊断，打印阶段耗时。
 #[track_caller]
 pub(super) fn trace_phase(phase: &str, start: Instant, detail: Option<&str>) {
+    trace_elapsed(phase, peri_time::elapsed_since(start), detail);
+}
+
+pub(super) fn trace_elapsed(phase: &str, elapsed: std::time::Duration, detail: Option<&str>) {
     if render_timing_enabled() {
-        let elapsed_us = start.elapsed().as_micros();
-        let extra = detail.map(|d| format!(" | {d}")).unwrap_or_default();
-        tracing::info!(target: "perf.render", "[{phase}] {elapsed_us}μs{extra}");
+        tracing::info!(target: "perf.render", phase, elapsed_us = elapsed.as_micros() as u64,
+            process_id = std::process::id(), thread = ?std::thread::current().id(),
+            detail = detail.unwrap_or_default(), "message-render-phase");
     }
 }
 
@@ -75,138 +102,54 @@ pub(super) fn trace_phase(phase: &str, start: Instant, detail: Option<&str>) {
 //
 // content_hash 由 build_view_models / TuiAssistantBubble::recompute_hash 维护，
 // 已覆盖 text / reasoning.text / reasoning.collapsed / tool duration(secs) 等可变字段。
-#[derive(Clone)]
-pub(super) struct MarkdownLineChunk {
-    pub(super) identity: usize,
-    pub(super) lines: Arc<Vec<Line<'static>>>,
-    pub(super) wrap_map: Arc<Vec<WrappedLineInfo>>,
-    pub(super) visual_rows: usize,
-}
+pub(crate) use crate::kit::entry_render_cache::MarkdownLineCache;
 
-#[derive(Clone, Default)]
-pub(super) struct MarkdownLineCache {
-    pub(super) width: u16,
-    pub(super) stable_start: Option<usize>,
-    pub(super) stable: Vec<MarkdownLineChunk>,
-}
-
-impl MarkdownLineCache {
-    pub(super) fn retain_and_wrap(&mut self, width: u16, chunks: &[(usize, Vec<Line<'static>>)]) {
-        if self.width != width {
-            self.stable.clear();
-            self.width = width;
-        }
-        for (index, (identity, lines)) in chunks.iter().enumerate() {
-            if self
-                .stable
-                .get(index)
-                .is_some_and(|cached| cached.identity == *identity)
-            {
-                continue;
-            }
-            self.stable.truncate(index);
-            // [Fix] 走到这里即该 index 无可用缓存（命中缓存的 chunk 已在上方 continue）。
-            // 空 lines 表示调用方判定该 chunk 无可见内容，按空内容重建即可；旧实现
-            // 试图复用 `self.stable[index]`，但 `truncate(index)` 已保证 len <= index
-            // ——渲染热路径上任何空 lines 都会越界 panic（宽度变化清理 stable 后必现）。
-            let lines = Arc::new(lines.clone());
-            let (_, wrap_map) = build_wrap_map(&lines, width);
-            let visual_rows = wrap_map.last().map(|entry| entry.visual_end).unwrap_or(0);
-            self.stable.push(MarkdownLineChunk {
-                identity: *identity,
-                lines,
-                wrap_map: Arc::new(wrap_map),
-                visual_rows,
-            });
-        }
-        self.stable.truncate(chunks.len());
-    }
-
-    pub(super) fn stable_overlay(&self) -> Option<(usize, Vec<Arc<Vec<Line<'static>>>>)> {
-        Some((
-            self.stable_start?,
-            self.stable
-                .iter()
-                .map(|chunk| Arc::clone(&chunk.lines))
-                .collect(),
-        ))
-    }
-
-    pub(super) fn build_slot_wrap_map(
-        &self,
-        lines: &[Line<'static>],
-        width: u16,
-    ) -> (usize, Vec<WrappedLineInfo>) {
-        let Some(stable_start) = self.stable_start.filter(|_| !self.stable.is_empty()) else {
-            return build_wrap_map(lines, width);
-        };
-        let stable_len = self
-            .stable
-            .iter()
-            .map(|chunk| chunk.lines.len())
-            .sum::<usize>();
-        if stable_start.saturating_add(stable_len) > lines.len() {
-            return build_wrap_map(lines, width);
-        }
-
-        let (mut visual_rows, mut result) = build_wrap_map(&lines[..stable_start], width);
-        let mut logical_offset = stable_start;
-        for chunk in &self.stable {
-            result.extend(chunk.wrap_map.iter().cloned().map(|mut entry| {
-                entry.logical_idx += logical_offset;
-                entry.visual_start += visual_rows;
-                entry.visual_end += visual_rows;
-                entry
-            }));
-            logical_offset += chunk.lines.len();
-            visual_rows += chunk.visual_rows;
-        }
-        let (tail_rows, tail_map) = build_wrap_map(&lines[logical_offset..], width);
-        result.extend(tail_map.into_iter().map(|mut entry| {
-            entry.logical_idx += logical_offset;
-            entry.visual_start += visual_rows;
-            entry.visual_end += visual_rows;
-            entry
-        }));
-        (visual_rows + tail_rows, result)
-    }
-}
-
-#[derive(Clone, Default)]
+#[derive(Default)]
 pub(super) struct VmCacheSlot {
-    /// 上次渲染时 VM 的 content_hash。变化时（流式追加 text、折叠/展开 reasoning、
-    /// tool duration 跨秒）触发 markdown 重新解析 + wrap_map 重建。
     pub(super) content_hash: u64,
-    /// 上次渲染时的视宽。width 变化（窗口 resize）时 wrap 规则改变，必须重建。
-    pub(super) width: u16,
-    /// 上次渲染时的 palette 关键字段哈希。主题切换时 hash 变化 → 强制重建所有 VM 的 markdown 渲染。
-    pub(super) palette_key: u64,
-    /// 上次渲染时的 LANG_VERSION。语言切换时递增 → 强制重建（md 复制按钮文本依赖 i18n）。
-    pub(super) lang_key: u64,
-    /// 该 VM 解析后的所有 Line（markdown + reasoning + tool card 渲染结果）。
-    pub(super) lines: Arc<Vec<Line<'static>>>,
-    /// 该 VM 内部 wrap_map（visual_row 从 0 起）。拼接时累加 visual_offset 和 logical_idx 偏移。
+    pub(super) variant: Option<std::mem::Discriminant<crate::kit::tui_render_unit::TuiRenderUnit>>,
+    pub(super) entry: crate::kit::entry_render_cache::EntryRenderCache,
+    pub(super) lines: Option<Arc<super::selection::SlotLines>>,
     pub(super) wrap_map: Arc<Vec<WrappedLineInfo>>,
-    /// 该 VM 占据的视觉行数（= wrap_map 末项 visual_end）。
+    pub(super) wrap_width: u16,
     pub(super) visual_rows: usize,
-    /// [Phase 2] markdown 增量渲染缓存——按文本前缀复用 stable_state，仅处理新增 block。
-    /// 仅 AssistantBubble / UserBubble 实际使用；其他 VM 类型保留默认值不消耗资源。
-    pub(super) markdown_cache: crate::kit::markdown::MarkdownRenderCache,
-    /// Phase D：stable rendered chunk 对应的 Line/wrap identity cache。
-    pub(super) markdown_lines: MarkdownLineCache,
-    /// md 复制按钮布局（slot 内逻辑索引 + 列范围）。None = 该 VM 无按钮
-    /// （非 AssistantBubble / 空文本 / 宽度不足）。rebuild 时随 lines 重建。
     pub(super) copy_button: Option<render::CopyButtonInfo>,
-    /// [Slice 4 §6.8] pending interaction block 的选项行布局（slot 内逻辑行
-    /// 与列区间）。None = 非 pending interaction。rebuild 时随 lines 重建，
-    /// 供视口 post-pass 应用「当前项」高亮与点击热区。
     pub(super) interaction: Option<render::InteractionLayout>,
-    /// [T4 §4] @image 行渲染期信息（slot 内逻辑索引 + 展示路径 + 受管理标志）。
-    /// rebuild 时随 lines 重建，供点击/hover 屏幕命中映射。
     pub(super) image_lines: Vec<ImageLineInfo>,
-    /// 上次渲染时的动画帧（§8.2 壁钟 tick，100ms 粒度）。running 类 VM
-    /// （tool/subagent/reasoning）帧变化时强制重建——braille 动画随帧推进。
-    pub(super) anim_frame: u64,
+}
+
+impl VmCacheSlot {
+    pub(super) fn matches_content(&self, vm: &crate::kit::tui_render_unit::TuiRenderUnit) -> bool {
+        self.variant == Some(std::mem::discriminant(vm)) && self.content_hash == vm.content_hash()
+    }
+
+    pub(super) fn retained_bytes(&self) -> usize {
+        self.entry.retained_bytes()
+            + self
+                .lines
+                .as_ref()
+                .map_or(0, |lines| lines.retained_metadata_bytes())
+            + self.wrap_map.capacity() * std::mem::size_of::<WrappedLineInfo>()
+            + self.interaction.as_ref().map_or(0, |layout| {
+                layout.option_rows.capacity() * std::mem::size_of::<usize>()
+                    + layout.option_cols.capacity() * std::mem::size_of::<Option<(u16, u16)>>()
+            })
+            + self.image_lines.capacity() * std::mem::size_of::<ImageLineInfo>()
+            + self
+                .image_lines
+                .iter()
+                .map(|image| image.path.capacity() + image.size_text.capacity())
+                .sum::<usize>()
+    }
+
+    pub(super) fn evict(&mut self) {
+        self.entry.evict();
+        self.lines = None;
+        self.wrap_map = Arc::default();
+        self.copy_button = None;
+        self.interaction = None;
+        self.image_lines = Vec::new();
+    }
 }
 
 #[test]
@@ -218,7 +161,7 @@ fn test_markdown_line_cache_reuses_stable_wrap_and_rebuilds_tail_only() {
     let stable = vec![Line::from("stable 中文 line")];
     let identity = 7usize;
     let mut cache = MarkdownLineCache::default();
-    cache.retain_and_wrap(20, &[(identity, stable.clone())]);
+    cache.retain_and_wrap(20, vec![(identity, stable.clone())]);
     let stable_lines = Arc::clone(&cache.stable[0].lines);
     cache.stable_start = Some(1);
 
@@ -239,9 +182,9 @@ fn test_markdown_line_cache_width_invalidates_stable_wrap() {
     use ratatui_kit::ratatui::text::Line;
 
     let mut cache = MarkdownLineCache::default();
-    cache.retain_and_wrap(20, &[(1, vec![Line::from("long stable line")])]);
+    cache.retain_and_wrap(20, vec![(1, vec![Line::from("long stable line")])]);
     let first = Arc::clone(&cache.stable[0].wrap_map);
-    cache.retain_and_wrap(8, &[(1, vec![Line::from("long stable line")])]);
+    cache.retain_and_wrap(8, vec![(1, vec![Line::from("long stable line")])]);
     assert!(!Arc::ptr_eq(&first, &cache.stable[0].wrap_map));
 }
 
@@ -255,9 +198,9 @@ fn test_markdown_line_cache_empty_chunk_after_width_change_does_not_panic() {
     use ratatui_kit::ratatui::text::Line;
 
     let mut cache = MarkdownLineCache::default();
-    cache.retain_and_wrap(20, &[(1, vec![Line::from("stable line")])]);
+    cache.retain_and_wrap(20, vec![(1, vec![Line::from("stable line")])]);
 
-    cache.retain_and_wrap(8, &[(1, Vec::new())]);
+    cache.retain_and_wrap(8, vec![(1, Vec::new())]);
 
     assert_eq!(cache.stable.len(), 1);
     assert!(cache.stable[0].lines.is_empty());
@@ -269,10 +212,30 @@ fn test_markdown_line_cache_hit_with_empty_placeholder_keeps_cached_lines() {
     use ratatui_kit::ratatui::text::Line;
 
     let mut cache = MarkdownLineCache::default();
-    cache.retain_and_wrap(20, &[(7, vec![Line::from("stable line")])]);
+    cache.retain_and_wrap(20, vec![(7, vec![Line::from("stable line")])]);
 
-    cache.retain_and_wrap(20, &[(7, Vec::new())]);
+    cache.retain_and_wrap(20, vec![(7, Vec::new())]);
 
     assert_eq!(cache.stable.len(), 1);
     assert_eq!(cache.stable[0].lines.len(), 1);
+}
+
+#[test]
+fn test_markdown_key_tracks_text_color_and_code_background() {
+    use ratatui_kit::ratatui::style::Color;
+
+    let palette = ratatui_kit::prelude::Palette::default();
+    let original = palette_markdown_key(&palette, Color::Black, Color::White);
+    assert_ne!(
+        original,
+        palette_markdown_key(&palette, Color::Black, Color::Green)
+    );
+    assert_ne!(
+        original,
+        palette_markdown_key(&palette, Color::Blue, Color::White)
+    );
+    assert_eq!(
+        original,
+        palette_markdown_key(&palette, Color::Black, Color::White)
+    );
 }

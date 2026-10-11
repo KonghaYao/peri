@@ -3,7 +3,7 @@
 use peri_acp_types::session_resources::{
     FrozenSnapshotBytes, NewSession, NewSessionMeta, SessionResources,
 };
-use peri_acp_types::workspace::{SessionBinding, SessionExecutionLease, SESSION_BINDING_VERSION};
+use peri_acp_types::workspace::{SessionBinding, SESSION_BINDING_VERSION};
 use peri_agent::agent::compact_v2::CompactConfig;
 use peri_agent::agent::events_v2::{EventBus, EventHandles, ObserveEvent};
 use peri_agent::agent::react::{ReactLLM, Reasoning, StreamingContext};
@@ -27,7 +27,6 @@ use tokio_util::sync::CancellationToken;
 struct BoundSession {
     resources: Arc<dyn SessionResources>,
     thread_id: String,
-    _lease: Arc<dyn SessionExecutionLease>,
     db: tempfile::TempDir,
     repo: tempfile::TempDir,
 }
@@ -70,7 +69,7 @@ impl BoundSession {
         );
         let workspace = resources.resolve_workspace(repo.path()).await.unwrap();
         let thread_id = uuid::Uuid::now_v7().to_string();
-        let lease = resources
+        resources
             .create_session(&NewSession {
                 thread_id: thread_id.clone(),
                 created_at: "2026-09-28T00:00:00Z".into(),
@@ -96,7 +95,6 @@ impl BoundSession {
         Self {
             resources,
             thread_id,
-            _lease: lease,
             db,
             repo,
         }
@@ -216,6 +214,36 @@ impl peri_model::Model for SummaryText {
 
 #[async_trait::async_trait]
 impl ReactLLM for ReasonModel {
+    fn prepare_reasoning(
+        &self,
+        messages: &[BaseMessage],
+        _: &[&dyn BaseTool],
+    ) -> AgentResult<peri_model::PreparedModelCall> {
+        let checkpoint = serde_json::json!({"messages": messages});
+        Ok(peri_model::PreparedModelCall::new(checkpoint, |_| {
+            Ok(ModelStream::new(futures::stream::empty()))
+        }))
+    }
+
+    async fn generate_prepared_reasoning(
+        &self,
+        prepared: peri_model::PreparedModelCall,
+        streaming: Option<StreamingContext>,
+    ) -> AgentResult<Reasoning> {
+        let messages =
+            serde_json::from_value::<Vec<BaseMessage>>(prepared.checkpoint()["messages"].clone())
+                .map_err(|error| AgentError::LlmError(error.to_string()))?;
+        prepared
+            .start(
+                streaming
+                    .as_ref()
+                    .map(|context| context.cancel.clone())
+                    .unwrap_or_default(),
+            )
+            .map_err(AgentError::ModelError)?;
+        self.generate_reasoning(&messages, &[], streaming).await
+    }
+
     async fn generate_reasoning(
         &self,
         messages: &[BaseMessage],
@@ -348,12 +376,6 @@ async fn assert_unusable_summary_blocks_reason(failure: Failure) {
             assert!(matches!(error, AgentError::ModelError(_)));
             assert_eq!(public.diagnostic.unwrap().retry_attempts(), Some(3));
         }
-        Failure::MaxTokens => assert!(matches!(
-            error,
-            AgentError::CompactIncompleteResponse {
-                stop_reason: StopReason::MaxTokens
-            }
-        )),
         Failure::ToolUse => assert!(matches!(
             error,
             AgentError::CompactIncompleteResponse {
@@ -364,16 +386,16 @@ async fn assert_unusable_summary_blocks_reason(failure: Failure) {
             error,
             AgentError::CompactRetriesExhausted { attempts: 3, .. }
         )),
-        Failure::Success => unreachable!(),
+        Failure::MaxTokens | Failure::Success => unreachable!(),
     }
     assert_eq!(
         summary.calls.load(Ordering::SeqCst),
-        if matches!(failure, Failure::AnalysisOnly | Failure::MaxTokens) {
+        if matches!(failure, Failure::AnalysisOnly) {
             3
         } else {
             1
         },
-        "空摘要重试和 MaxTokens 续写有界；Provider 失败不能在 Compact 层重启"
+        "空摘要重试有界；Provider 失败不能在 Compact 层重启"
     );
 }
 
@@ -395,24 +417,35 @@ async fn test_provider_retry_exhaustion_blocks_reason() {
     assert_unusable_summary_blocks_reason(Failure::ProviderRetryExhausted).await;
 }
 
-/// [回归测试] MaxTokens 输出不是完整摘要，失败后不得拿原高压历史继续请求。
 #[tokio::test]
-async fn test_max_tokens_summary_blocks_reason() {
-    assert_unusable_summary_blocks_reason(Failure::MaxTokens).await;
+async fn test_max_tokens_summary_uses_two_chunks_without_third_call() {
+    let (_bound, ctx, reason, summary, _) =
+        make_case(Failure::MaxTokens, usize::MAX, false, None).await;
+    let result = run_react_loop(ctx, 4).await;
+    assert!(matches!(result, LoopResult::Completed), "{result:?}");
+    assert_eq!(summary.calls.load(Ordering::SeqCst), 2);
+    let requests = reason.requests.lock();
+    assert_eq!(requests.len(), 1);
+    assert!(requests[0]
+        .iter()
+        .any(|message| message.content().contains("incomplete task still pending")));
+    assert!(requests[0]
+        .iter()
+        .any(|message| message.content().contains("remaining tail was omitted")));
 }
 
 /// [回归测试] 最后一次续写成功后，下一次 Reason 必须看到所有摘要片段而不是原历史。
 #[tokio::test]
 async fn test_max_tokens_summary_continuation_resumes_reason_with_complete_summary() {
-    let (_bound, ctx, reason, summary, _) = make_case(Failure::MaxTokens, 2, false, None).await;
+    let (_bound, ctx, reason, summary, _) = make_case(Failure::MaxTokens, 1, false, None).await;
     let result = run_react_loop(ctx, 4).await;
     assert!(matches!(result, LoopResult::Completed), "{result:?}");
-    assert_eq!(summary.calls.load(Ordering::SeqCst), 3);
+    assert_eq!(summary.calls.load(Ordering::SeqCst), 2);
     let requests = reason.requests.lock();
     assert_eq!(requests.len(), 1);
-    assert!(requests[0].iter().any(|message| message
-        .content()
-        .contains("incomplete task still pending RECOVERED task")));
+    assert!(requests[0]
+        .iter()
+        .any(|message| message.content().contains("incomplete task RECOVERED task")));
     assert!(!requests[0]
         .iter()
         .any(|message| message.content() == "original task"));
@@ -485,7 +518,7 @@ async fn test_analysis_only_recovers_at_last_attempt_and_preserves_canonical() {
 
 #[tokio::test]
 async fn test_cancel_on_last_empty_attempt_wins_over_exhaustion() {
-    let (_, ctx, reason, summary, _) =
+    let (_bound, ctx, reason, summary, _) =
         make_case(Failure::AnalysisOnly, usize::MAX, false, Some(3)).await;
     let result = run_react_loop(ctx, 4).await;
     assert!(
@@ -580,7 +613,7 @@ async fn test_cancel_after_micro_preserves_projection_without_reason() {
 
 #[tokio::test]
 async fn test_missing_summary_model_blocks_high_pressure_reason() {
-    let (_, mut ctx, reason, summary, _) = make_case(Failure::Success, 0, false, None).await;
+    let (_bound, mut ctx, reason, summary, _) = make_case(Failure::Success, 0, false, None).await;
     ctx.compact.compact_llm = None;
     let result = run_react_loop(ctx, 4).await;
     assert!(

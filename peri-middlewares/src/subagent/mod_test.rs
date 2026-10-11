@@ -1,36 +1,43 @@
+use peri_acp_types::builtin_mcp::{original_tool_name_of_effective, BUILTIN_MCP_INSTANCES};
 use peri_agent::{
-    agent::{
-        react::{ReactLLM, Reasoning, StreamingContext},
-        state::AgentState,
-    },
-    messages::BaseMessage,
-    middleware::r#trait::Middleware,
-    session,
+    agent::state::AgentState, messages::BaseMessage, middleware::r#trait::Middleware, session,
 };
 
 use super::*;
+use peri_mcp_core::agent_definition::parse_agent_file;
 
+#[derive(Clone)]
 struct EchoLLM;
 
-#[async_trait::async_trait]
-impl ReactLLM for EchoLLM {
-    async fn generate_reasoning(
+impl EchoLLM {
+    async fn respond(
         &self,
-        messages: &[BaseMessage],
-        _tools: &[&dyn BaseTool],
-        _streaming: Option<StreamingContext>,
-    ) -> peri_agent::error::AgentResult<Reasoning> {
+        request: peri_model::ModelRequest,
+        cancellation: tokio_util::sync::CancellationToken,
+    ) -> Vec<peri_model::ModelResult<peri_model::ModelStreamEvent>> {
+        use crate::subagent::test_support::*;
+        let _ = &cancellation;
+        let messages = base_messages(&request);
+        let defined = defined_tools(&request);
+        let _tools: Vec<&dyn BaseTool> = defined.iter().map(|t| t as &dyn BaseTool).collect();
+
         let last = messages.last().map(|m| m.content()).unwrap_or_default();
-        Ok(Reasoning::with_answer("", format!("echo: {}", last)))
+        text_events(format!("echo: {}", last))
     }
 }
+crate::subagent::test_support::fixture_model_impl!(EchoLLM);
 
 #[test]
 fn test_middleware_name() {
     let m = SubAgentMiddleware::new(
         vec![],
         None,
-        Arc::new(|_: Option<&str>| Box::new(EchoLLM) as Box<dyn ReactLLM + Send + Sync>),
+        Arc::new(|_: Option<&str>| {
+            crate::subagent::test_support::fixture_source(
+                std::sync::Arc::new(EchoLLM),
+                "fixture-scripted",
+            )
+        }),
     );
     // Call via Middleware, explicit trait path
     assert_eq!(
@@ -44,7 +51,12 @@ fn test_middleware_collect_tools() {
     let m = SubAgentMiddleware::new(
         vec![],
         None,
-        Arc::new(|_: Option<&str>| Box::new(EchoLLM) as Box<dyn ReactLLM + Send + Sync>),
+        Arc::new(|_: Option<&str>| {
+            crate::subagent::test_support::fixture_source(
+                std::sync::Arc::new(EchoLLM),
+                "fixture-scripted",
+            )
+        }),
     );
     let tools = <SubAgentMiddleware as Middleware>::collect_tools(&m, "/tmp");
     assert_eq!(tools.len(), 1);
@@ -56,72 +68,15 @@ fn test_build_tool_returns_subagent_tool() {
     let m = SubAgentMiddleware::new(
         vec![],
         None,
-        Arc::new(|_: Option<&str>| Box::new(EchoLLM) as Box<dyn ReactLLM + Send + Sync>),
+        Arc::new(|_: Option<&str>| {
+            crate::subagent::test_support::fixture_source(
+                std::sync::Arc::new(EchoLLM),
+                "fixture-scripted",
+            )
+        }),
     );
     let tool = m.build_tool("/tmp");
     assert_eq!(tool.name(), "Agent");
-}
-
-#[test]
-fn test_scan_agents_no_dir() {
-    let result = scan_agents("/nonexistent/path");
-    // No project-level agents, but built-in agents should still appear
-    assert!(
-        !result.is_empty(),
-        "Built-in agents should always be present"
-    );
-    assert!(
-        result.iter().any(|(id, _, _)| id == "explorer"),
-        "Built-in explorer agent should be present"
-    );
-}
-
-#[test]
-fn test_scan_agents_flat_md() {
-    use tempfile::tempdir;
-    let dir = tempdir().unwrap();
-    let agents_dir = dir.path().join(".claude").join("agents");
-    std::fs::create_dir_all(&agents_dir).unwrap();
-    std::fs::write(
-        agents_dir.join("code-reviewer.md"),
-        "---\nname: code-reviewer\ndescription: Reviews code quality\n---\n\nYou are a reviewer.\n",
-    )
-    .unwrap();
-
-    let result = scan_agents(dir.path().to_str().unwrap());
-    // Should contain the project agent + built-in agents
-    assert!(
-        result.len() > 1,
-        "Should contain project agent + built-in agents"
-    );
-    let reviewer = result.iter().find(|(id, _, _)| id == "code-reviewer");
-    assert!(reviewer.is_some(), "Project agent should be present");
-    assert_eq!(reviewer.unwrap().1, "code-reviewer");
-    assert_eq!(reviewer.unwrap().2, "Reviews code quality");
-}
-
-#[test]
-fn test_scan_agents_nested_dir() {
-    use tempfile::tempdir;
-    let dir = tempdir().unwrap();
-    let agent_dir = dir.path().join(".claude").join("agents").join("analyst");
-    std::fs::create_dir_all(&agent_dir).unwrap();
-    std::fs::write(
-        agent_dir.join("agent.md"),
-        "---\nname: data-analyst\ndescription: Analyzes data\n---\n\nYou are an analyst.\n",
-    )
-    .unwrap();
-
-    let result = scan_agents(dir.path().to_str().unwrap());
-    // Should contain the project agent + built-in agents
-    assert!(
-        result.len() > 1,
-        "Should contain project agent + built-in agents"
-    );
-    let analyst = result.iter().find(|(id, _, _)| id == "analyst");
-    assert!(analyst.is_some(), "Project agent should be present");
-    assert_eq!(analyst.unwrap().1, "data-analyst");
-    assert_eq!(analyst.unwrap().2, "Analyzes data");
 }
 
 #[tokio::test]
@@ -139,7 +94,12 @@ async fn test_before_agent_no_longer_injects_summary() {
     let m = SubAgentMiddleware::new(
         vec![],
         None,
-        Arc::new(|_: Option<&str>| Box::new(EchoLLM) as Box<dyn ReactLLM + Send + Sync>),
+        Arc::new(|_: Option<&str>| {
+            crate::subagent::test_support::fixture_source(
+                std::sync::Arc::new(EchoLLM),
+                "fixture-scripted",
+            )
+        }),
     );
     let mut state = AgentState::new(dir.path().to_str().unwrap());
     <SubAgentMiddleware as Middleware>::before_agent(&m, &mut state)
@@ -159,7 +119,12 @@ async fn test_before_agent_no_agents_no_op() {
     let m = SubAgentMiddleware::new(
         vec![],
         None,
-        Arc::new(|_: Option<&str>| Box::new(EchoLLM) as Box<dyn ReactLLM + Send + Sync>),
+        Arc::new(|_: Option<&str>| {
+            crate::subagent::test_support::fixture_source(
+                std::sync::Arc::new(EchoLLM),
+                "fixture-scripted",
+            )
+        }),
     );
     let mut state = AgentState::new("/nonexistent");
     <SubAgentMiddleware as Middleware>::before_agent(&m, &mut state)
@@ -176,7 +141,12 @@ async fn test_before_agent_snapshots_messages() {
     let m = SubAgentMiddleware::new(
         vec![],
         None,
-        Arc::new(|_: Option<&str>| Box::new(EchoLLM) as Box<dyn ReactLLM + Send + Sync>),
+        Arc::new(|_: Option<&str>| {
+            crate::subagent::test_support::fixture_source(
+                std::sync::Arc::new(EchoLLM),
+                "fixture-scripted",
+            )
+        }),
     )
     .with_parent_messages(Arc::clone(&parent_messages));
 
@@ -206,7 +176,12 @@ fn test_build_tool_receives_parent_messages() {
     let m = SubAgentMiddleware::new(
         vec![],
         None,
-        Arc::new(|_: Option<&str>| Box::new(EchoLLM) as Box<dyn ReactLLM + Send + Sync>),
+        Arc::new(|_: Option<&str>| {
+            crate::subagent::test_support::fixture_source(
+                std::sync::Arc::new(EchoLLM),
+                "fixture-scripted",
+            )
+        }),
     )
     .with_parent_messages(Arc::clone(&parent_messages));
 
@@ -246,7 +221,12 @@ fn test_build_tool_after_set_parent_session_reads_runtime_host() {
     let m = SubAgentMiddleware::new(
         vec![],
         None,
-        Arc::new(|_: Option<&str>| Box::new(EchoLLM) as Box<dyn ReactLLM + Send + Sync>),
+        Arc::new(|_: Option<&str>| {
+            crate::subagent::test_support::fixture_source(
+                std::sync::Arc::new(EchoLLM),
+                "fixture-scripted",
+            )
+        }),
     );
     // 先注入 parent_session（模拟 set_parent_session 先于 collect_tools）
     m.set_parent_session(Arc::clone(&session));
@@ -257,81 +237,6 @@ fn test_build_tool_after_set_parent_session_reads_runtime_host() {
         host.task_manager.is_some(),
         "tool.host().task_manager 应为 Some（parent_session 注入后构建工具）"
     );
-}
-
-#[test]
-fn test_scan_agents_can_exclude_built_ins_without_removing_project_override() {
-    use tempfile::tempdir;
-    let dir = tempdir().unwrap();
-    let agents_dir = dir.path().join(".claude").join("agents");
-    std::fs::create_dir_all(&agents_dir).unwrap();
-    std::fs::write(
-        agents_dir.join("coder.md"),
-        "---\nname: project-coder\ndescription: Project override\n---\n\nProject agent.\n",
-    )
-    .unwrap();
-
-    let result = scan_agents_detailed(dir.path().to_str().unwrap(), &[], false);
-    assert_eq!(result.len(), 1);
-    assert_eq!(result[0].0, "coder");
-    assert_eq!(result[0].1, "project-coder");
-}
-
-#[test]
-fn test_scan_agents_with_extra_dirs() {
-    use tempfile::tempdir;
-    let dir = tempdir().unwrap();
-    let extra_dir = dir.path().join("extra_agents");
-    std::fs::create_dir_all(&extra_dir).unwrap();
-    std::fs::write(
-        extra_dir.join("plugin-agent.md"),
-        "---\nname: plugin-agent\ndescription: From plugin\n---\n\nPlugin agent.\n",
-    )
-    .unwrap();
-
-    let result = scan_agents_with_extra_dirs(
-        dir.path().to_str().unwrap(),
-        std::slice::from_ref(&extra_dir),
-    );
-    // Should contain plugin-agent + built-in agents
-    let plugin = result.iter().find(|(id, _, _)| id == "plugin-agent");
-    assert!(plugin.is_some(), "Plugin agent should be present");
-    assert_eq!(plugin.unwrap().2, "From plugin");
-}
-
-#[test]
-fn test_scan_agents_with_extra_dirs_dedup() {
-    use tempfile::tempdir;
-    let dir = tempdir().unwrap();
-    let cwd_agents = dir.path().join(".claude").join("agents");
-    std::fs::create_dir_all(&cwd_agents).unwrap();
-    std::fs::write(
-        cwd_agents.join("reviewer.md"),
-        "---\nname: reviewer\ndescription: CWD reviewer\n---\n\nReview.\n",
-    )
-    .unwrap();
-
-    let extra_dir = dir.path().join("extra");
-    std::fs::create_dir_all(&extra_dir).unwrap();
-    std::fs::write(
-        extra_dir.join("reviewer.md"),
-        "---\nname: reviewer\ndescription: Plugin reviewer\n---\n\nReview.\n",
-    )
-    .unwrap();
-
-    let result = scan_agents_with_extra_dirs(dir.path().to_str().unwrap(), &[extra_dir]);
-    // Duplicate "reviewer" should be deduped (CWD takes precedence)
-    let reviewer_count = result.iter().filter(|(id, _, _)| id == "reviewer").count();
-    assert_eq!(reviewer_count, 1, "duplicate agent_id should be deduped");
-    // Total: CWD reviewer (1) + built-in agents (6, none named "reviewer") + extra reviewer (deduped) = 7
-    assert_eq!(result.len(), 7);
-}
-
-#[test]
-fn test_scan_agents_with_extra_dirs_empty() {
-    let result = scan_agents_with_extra_dirs("/nonexistent", &[]);
-    let expected = scan_agents("/nonexistent");
-    assert_eq!(result.len(), expected.len());
 }
 
 // ── count_tool_calls_from_session 单元测试 ──────────────
@@ -414,7 +319,7 @@ fn make_session() -> std::sync::Arc<session::Session> {
 fn capability_from_yaml(yaml: &str) -> AgentCapability {
     let content = format!("---\n{}\n---\n\nbody", yaml);
     let agent = parse_agent_file(&content).expect("agent frontmatter 应能解析");
-    infer_agent_capability(&agent.frontmatter)
+    infer_agent_capability(&agent.frontmatter).expect("夹具档位必须合法")
 }
 
 /// [回归测试] D5：omitted tools（继承父工具）+ 仅 disallow Write/Edit，
@@ -499,58 +404,196 @@ fn test_capability_whitelist_mcp_prefix_is_writes() {
     assert!(cap.can_mutate, "mcp__* 无法证明只读，应保守标 writes");
 }
 
-// ─── catalog 同源一致性（波 4 演进 C3，设计 §3.5.1 步骤 2）─────────────────
+// ─── A4 生效名归一（IF-D6 判定型 ③ / IF-D15）─────────────────────────────
 
-/// 同源收敛：`scan_agents` / `scan_agents_with_extra_dirs` 与渲染面 catalog
-/// （`SkillsPort::agents` → `scan_agents_detailed`）同一实现——投影（丢弃
-/// capability）必须逐项一致，防止提示词 catalog 与子链实际可用 agent 不一致。
+/// 从注册表解析 effective name（测试不得硬编码 `mcp__*` 字面量）。
+fn effective_name_of(instance: &str, original: &str) -> &'static str {
+    peri_acp_types::builtin_mcp::find(instance)
+        .unwrap_or_else(|| panic!("声明表应含实例 `{instance}`"))
+        .tools
+        .iter()
+        .find(|tool| tool.original_name == original)
+        .unwrap_or_else(|| panic!("声明表应含 `{instance}` 的原始工具名 `{original}`"))
+        .effective_name
+}
+
+/// IF-D6 ③：builtin 一等工具的 effective name 按原始名判定（判定相等）。
 #[test]
-fn scan_agents_matches_scan_agents_detailed_projection() {
-    use tempfile::tempdir;
-    let dir = tempdir().unwrap();
-    let agents_dir = dir.path().join(".claude").join("agents");
-    std::fs::create_dir_all(&agents_dir).unwrap();
-    std::fs::write(
-        agents_dir.join("code-reviewer.md"),
-        "---\nname: code-reviewer\ndescription: Reviews code quality\n---\n\nYou are a reviewer.\n",
-    )
-    .unwrap();
-    let nested = agents_dir.join("analyst").join("agent.md");
-    std::fs::create_dir_all(nested.parent().unwrap()).unwrap();
-    std::fs::write(
-        nested,
-        "---\nname: data-analyst\ndescription: Analyzes data\n---\n\nYou are an analyst.\n",
-    )
-    .unwrap();
+fn mutation_tool_matches_original_name_policy_for_builtin_names() {
+    let mut declared = 0;
+    for instance in BUILTIN_MCP_INSTANCES {
+        for tool in instance.tools {
+            declared += 1;
+            assert_eq!(
+                is_mutation_tool(tool.effective_name),
+                is_mutation_tool(tool.original_name),
+                "`{}` 的 mutation 判定必须等于原始名 `{}`（IF-D6 ③）",
+                tool.effective_name,
+                tool.original_name
+            );
+        }
+    }
+    // 行数从注册表派生（不再硬编码：wave 3 的 `== 7` 是漏记 workspace 7 行之后
+    // 的中间态红灯，AW3-08）。遍历必须覆盖注册表全部行；注册表自身的逐实例内容
+    // 由 `peri-acp-types/src/builtin_mcp_test.rs` 的字面量测试锁定。
+    let expected: usize = BUILTIN_MCP_INSTANCES.iter().map(|i| i.tools.len()).sum();
+    assert_eq!(declared, expected, "遍历必须覆盖注册表全部行");
+    for instance in BUILTIN_MCP_INSTANCES {
+        assert!(
+            !instance.tools.is_empty(),
+            "实例 `{}` 不得声明零工具（实例被清空会使派生期望值同步退化）",
+            instance.name
+        );
+    }
 
-    let cwd = dir.path().to_str().unwrap();
-    let plain = scan_agents(cwd);
-    let detailed: Vec<(String, String, String)> = scan_agents_detailed(cwd, &[], true)
-        .into_iter()
-        .map(|(id, name, desc, _)| (id, name, desc))
-        .collect();
-    assert_eq!(
-        plain, detailed,
-        "scan_agents 应为 scan_agents_detailed 的投影（同源共享实现）"
+    // wave 1 冻结结果（IF-G2 第 2 条）：两个 Web 工具不再因 `mcp__` 前缀被算 mutation；
+    // artifact 迁移前就是裸名且不在 mutation 集合内，判定不变。
+    assert!(!is_mutation_tool("mcp__web__WebSearch"));
+    assert!(!is_mutation_tool("mcp__web__WebFetch"));
+    assert!(!is_mutation_tool("mcp__artifact__artifact"));
+
+    // wave 2 冻结结果（IF-P3-11）：`cron_register` 两种名字形态都必须判 mutation
+    // （可定时触发任意 prompt，等价委派执行权）；`cron_list` / `cron_remove`
+    // 两种形态都必须判非 mutation（不再因 `mcp__` 前缀算写能力）。
+    // 期望值逐项写死，等价断言不能替代：归一与集合同时改错时等价仍成立。
+    let frozen: [(&str, &str, bool); 3] = [
+        ("cron", "cron_register", true),
+        ("cron", "cron_list", false),
+        ("cron", "cron_remove", false),
+    ];
+    for (instance, original, mutation) in frozen {
+        let declared = peri_acp_types::builtin_mcp::find(instance).expect("实例应有声明");
+        let tool = declared
+            .tools
+            .iter()
+            .find(|tool| tool.original_name == original)
+            .unwrap_or_else(|| panic!("声明表应含 `{instance}` 的原始工具名 `{original}`"));
+        for name in [original, tool.effective_name] {
+            assert_eq!(
+                is_mutation_tool(name),
+                mutation,
+                "`{name}` 的 mutation 判定应为 {mutation}（wave 2 冻结）"
+            );
+        }
+    }
+
+    // wave 3 冻结结果：workspace 七工具（Write/Edit/folder_operations/Bash 是写能力，
+    // Read/Glob/Grep 不是），两种名字形态逐项绝对判定——等价断言之外再锁方向。
+    let workspace_frozen: [(&str, bool); 7] = [
+        ("Read", false),
+        ("Write", true),
+        ("Edit", true),
+        ("Glob", false),
+        ("Grep", false),
+        ("folder_operations", true),
+        ("Bash", true),
+    ];
+    let workspace = peri_acp_types::builtin_mcp::find("workspace").expect("workspace 实例应有声明");
+    for (original, mutation) in workspace_frozen {
+        let tool = workspace
+            .tools
+            .iter()
+            .find(|tool| tool.original_name == original)
+            .unwrap_or_else(|| panic!("声明表应含 workspace 的原始工具名 `{original}`"));
+        for name in [original, tool.effective_name] {
+            assert_eq!(
+                is_mutation_tool(name),
+                mutation,
+                "`{name}` 的 mutation 判定应为 {mutation}（wave 3 冻结）"
+            );
+        }
+    }
+}
+
+/// 反证（IF-D6 冻结约束 3）：未知 / 外部 `mcp__*` 仍保守算 mutation。
+#[test]
+fn unknown_mcp_prefix_still_mutates() {
+    assert!(is_mutation_tool("mcp__filesystem__write_file"));
+    assert!(is_mutation_tool("mcp__anything"));
+    // 与 effective name 仅差大小写 ⇒ 未命中归一表 ⇒ 走既有的 `mcp__` 前缀保守路径
+    assert_eq!(original_tool_name_of_effective("mcp__web__fetch"), None);
+    assert!(is_mutation_tool("mcp__web__fetch"));
+    // 非 builtin 名字的判定逐位不变
+    assert!(is_mutation_tool("Bash"));
+    assert!(!is_mutation_tool("Read"));
+}
+
+/// 归一的可见后果（IF-G2 第 2 条）：白名单只含 builtin Web 工具的 agent 由
+/// `writes` 改为 `readonly`（迁移前 `mcp__*` 前缀一律算写能力）。
+#[test]
+fn builtin_web_tool_whitelist_is_readonly() {
+    let cap = capability_from_yaml(
+        "name: a\ndescription: d\ntools: [mcp__web__WebFetch, mcp__web__WebSearch]\n",
     );
-    // 额外目录路径同样一致
-    let extra = tempdir().unwrap();
-    std::fs::write(
-        extra.path().join("plugin-agent.md"),
-        "---\nname: plugin-a\ndescription: Plugin agent\n---\n\nPlugin.\n",
-    )
-    .unwrap();
-    let plain_extra = scan_agents_with_extra_dirs(cwd, &[extra.path().to_path_buf()]);
-    let detailed_extra: Vec<(String, String, String)> =
-        scan_agents_detailed(cwd, &[extra.path().to_path_buf()], true)
-            .into_iter()
-            .map(|(id, name, desc, _)| (id, name, desc))
-            .collect();
-    assert_eq!(
-        plain_extra, detailed_extra,
-        "scan_agents_with_extra_dirs 应为 scan_agents_detailed 的投影"
+    assert!(
+        !cap.can_mutate,
+        "只含 builtin Web 工具（均非写能力）的 agent 应标 readonly"
     );
 }
+
+/// [安全回归] 用户用**模型面 effective name** 写 `disallowedTools`
+/// （`mcp__workspace__Bash` …）时，必须与写裸名一样命中 `MUTATION_CORE` 判定；
+/// 否则「核心写能力已被完全 disallow」的 readonly 结论失效，模块被误判为仍可写。
+/// 名字从注册表派生（测试不硬编码 `mcp__*` 字面量）。
+#[test]
+fn fully_disallowed_with_workspace_effective_names_is_readonly() {
+    let disallow = |names: &[(&str, &str)]| {
+        names
+            .iter()
+            .map(|(instance, original)| format!("  - {}", effective_name_of(instance, original)))
+            .collect::<Vec<_>>()
+            .join("\n")
+    };
+
+    let cap = capability_from_yaml(&format!(
+        "name: a\ndescription: d\ndisallowedTools:\n{}\n",
+        disallow(&[
+            ("workspace", "Bash"),
+            ("workspace", "Write"),
+            ("workspace", "Edit"),
+            ("workspace", "folder_operations"),
+            ("cron", "cron_register"),
+        ])
+    ));
+    assert!(
+        !cap.can_mutate,
+        "effective name 写全五个核心写能力工具后应标 readonly（omitted tools 路径）"
+    );
+
+    // 对照：少覆盖一个（Write）⇒ 必须仍标 writes（证明上面的 readonly 来自归一
+    // 命中，而不是「任何名字都被算作覆盖」）。
+    let partial = capability_from_yaml(&format!(
+        "name: a\ndescription: d\ndisallowedTools:\n{}\n",
+        disallow(&[
+            ("workspace", "Bash"),
+            ("workspace", "Edit"),
+            ("workspace", "folder_operations"),
+            ("cron", "cron_register"),
+        ])
+    ));
+    assert!(
+        partial.can_mutate,
+        "未覆盖 Write 时必须保守标 writes（对照组）"
+    );
+}
+
+/// [安全回归] 白名单写 effective name、disallowed 写裸名（N2 的
+/// `ToolsValue::List` 分支）也必须互相命中——否则「白名单里的写工具被 disallowed
+/// 覆盖」这一判定失效，agent 被误标 writes（保守方向安全，但白名单 + 覆盖的
+/// readonly 结论反转）。
+#[test]
+fn capability_whitelist_effective_name_disallowed_by_bare_name_is_readonly() {
+    let cap = capability_from_yaml(&format!(
+        "name: a\ndescription: d\ntools: [{}, Read]\ndisallowedTools: [Write]\n",
+        effective_name_of("workspace", "Write")
+    ));
+    assert!(
+        !cap.can_mutate,
+        "白名单里的 `mcp__workspace__Write` 被裸名 `Write` 覆盖后应标 readonly"
+    );
+}
+
+// ─── catalog 同源一致性（波 4 演进 C3，设计 §3.5.1 步骤 2）─────────────────
 
 /// 11_subagent 段落声明：位置属性（Uncached order=4）+ 含占位符的 Builtin
 /// 内容（catalog 替换留在渲染层，设计 §3.5.1 步骤 2）。
@@ -595,4 +638,34 @@ fn subagent_section_declaration_shape() {
             && content.contains("verify the loaded definition before choosing parallelism"),
         "缺少 metadata 时必须验证定义或保守执行"
     );
+}
+
+/// [M2] frontmatter `model` 未知档位必须 typed 拒绝（不静默回退父模型）。
+#[test]
+fn test_capability_rejects_unknown_model_tier() {
+    let content = "---\nname: a\ndescription: d\nmodel: turbo\n---\n\nbody";
+    let agent = parse_agent_file(content).expect("agent frontmatter 应能解析");
+    assert_eq!(
+        infer_agent_capability(&agent.frontmatter).unwrap_err(),
+        InvalidModelTier,
+        "未知档位必须 typed 拒绝"
+    );
+}
+
+/// [M2] 档位大小写归一：`SoNnEt` → `sonnet`；`InHerit`/空串 → inherit。
+#[test]
+fn test_capability_normalizes_known_tiers_case_insensitively() {
+    for (raw, expected) in [
+        ("SoNnEt", "sonnet"),
+        ("HAIKU", "haiku"),
+        ("InHerit", "inherit"),
+        ("", "inherit"),
+    ] {
+        let capability = capability_from_yaml(&format!("name: a\ndescription: d\nmodel: {raw}\n"));
+        assert_eq!(
+            capability.model_tier.catalog_label(),
+            expected,
+            "档位 {raw:?} 应归一为 {expected}"
+        );
+    }
 }
