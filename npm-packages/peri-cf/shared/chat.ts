@@ -12,7 +12,7 @@ export const sendMessageBodySchema = z.object({
 
 export type Chat = z.infer<typeof chatSchema>;
 
-// —— 公开展示 DTO：HTTP 首屏与 WS 实时同源，由 SDK view 物化，不额外持久化。——
+// —— 公开展示 DTO：首屏读取与运行期投影同源，由 SDK view 物化，不额外持久化。——
 
 export const publicErrorSchema = z.object({ code: z.string().min(1), message: z.string() });
 export const toolPayloadRefSchema = z.object({

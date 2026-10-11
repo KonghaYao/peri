@@ -16,7 +16,7 @@
  */
 import Module from './peri-wasm.js';
 import wasmModule from './peri_wasm.wasm';
-import { createNodeSchedulerPort, startPeriWasmHost } from './wasm-host.js';
+import { createSchedulerPort, startPeriWasmHost } from './wasm-host.js';
 
 const CWD = '/workspace';
 const TURN_BUDGET_MS = 60_000;
@@ -135,7 +135,7 @@ async function probeSdkHost(env) {
       },
       ...options,
     }),
-    ports: { scheduler: createNodeSchedulerPort() },
+    ports: { scheduler: createSchedulerPort() },
   });
   try {
     // transport.request<T> 的默认返回类型是 unknown，这里显式标注用到的响应字段。

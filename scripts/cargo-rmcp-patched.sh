@@ -124,29 +124,89 @@ if [[ "$patch_present" != yes ]]; then
     exit 1
 fi
 
+# turso_serverless hardcodes reqwest as the network primitive of its
+# SQL-over-HTTP driver. The patch adds a `fetch` executor behind the
+# `wasm-fetch` feature so the store can also run in hosts without POSIX
+# sockets (the browser); the wire protocol, error shape and Send contract are
+# unchanged.
+turso_patch_file="$repo_root/patches/turso-serverless-0.1.3-wasm-fetch.patch"
+turso_patch_sha256="$(sha256_file "$turso_patch_file")"
+turso_cache_dir="$repo_root/target/peri-turso-patches/$turso_patch_sha256"
+turso_crate_dir="$turso_cache_dir/turso_serverless-0.1.3"
+if [[ ! -f "$turso_crate_dir/.peri-patch-sha256" ]]; then
+    mkdir -p "$turso_cache_dir"
+    staging_dir="$(mktemp -d "$turso_cache_dir/staging.XXXXXXXX")"
+    trap 'rm -rf "$staging_dir"' EXIT
+    curl --fail --location --silent --show-error \
+        "https://static.crates.io/crates/turso_serverless/turso_serverless-0.1.3.crate" \
+        -o "$staging_dir/turso_serverless.crate"
+    actual_sha256="$(sha256_file "$staging_dir/turso_serverless.crate")"
+    if [[ "$actual_sha256" != "4548bc9f685877497b6a74c4da874a72e03cc8306e77ac812fd6bd53d0ff803e" ]]; then
+        echo "turso_serverless 0.1.3 archive checksum mismatch" >&2
+        exit 1
+    fi
+    tar -xzf "$staging_dir/turso_serverless.crate" -C "$staging_dir"
+    if command -v patch >/dev/null 2>&1; then
+        patch --dry-run --batch -p1 -d "$staging_dir/turso_serverless-0.1.3" < "$turso_patch_file" >/dev/null
+        patch --batch -p1 -d "$staging_dir/turso_serverless-0.1.3" < "$turso_patch_file"
+    else
+        # Git Bash may not ship `patch`; a nested temporary repository makes
+        # git apply target the extracted crate instead of the Peri repository.
+        git init -q "$staging_dir/turso_serverless-0.1.3"
+        git -C "$staging_dir/turso_serverless-0.1.3" apply --check "$turso_patch_file"
+        git -C "$staging_dir/turso_serverless-0.1.3" apply "$turso_patch_file"
+    fi
+    printf '%s\n' "$turso_patch_sha256" > "$staging_dir/turso_serverless-0.1.3/.peri-patch-sha256"
+    if [[ -f "$turso_crate_dir/.peri-patch-sha256" ]]; then
+        : # Another invocation finished first; reuse its cache.
+    else
+        # Replace interrupted or partial caches instead of leaving them in place.
+        rm -rf "$turso_crate_dir"
+        mv "$staging_dir/turso_serverless-0.1.3" "$turso_crate_dir"
+    fi
+    rm -rf "$staging_dir"
+    trap - EXIT
+fi
+if [[ "$(cat "$turso_crate_dir/.peri-patch-sha256")" != "$turso_patch_sha256" ]]; then
+    echo "patched turso_serverless cache is incomplete; move $turso_cache_dir aside and retry" >&2
+    exit 1
+fi
+if command -v patch >/dev/null 2>&1; then
+    patch_present=$(patch --dry-run --batch -R -p1 -d "$turso_crate_dir" < "$turso_patch_file" >/dev/null 2>&1 && echo yes || echo no)
+else
+    patch_present=$(git -C "$turso_crate_dir" apply --reverse --check "$turso_patch_file" >/dev/null 2>&1 && echo yes || echo no)
+fi
+if [[ "$patch_present" != yes ]]; then
+    echo "patched turso_serverless cache does not contain the expected patch; move $turso_cache_dir aside and retry" >&2
+    exit 1
+fi
+
 python_bin="python"
 if ! command -v "$python_bin" >/dev/null 2>&1; then
     python_bin="python3"
 fi
 cargo_crate_dir="$crate_dir"
 hyper_cargo_crate_dir="$hyper_crate_dir"
+turso_cargo_crate_dir="$turso_crate_dir"
 cargo_config_file="$config_file"
 if command -v cygpath >/dev/null 2>&1; then
     cargo_crate_dir="$(cygpath -w "$crate_dir")"
     hyper_cargo_crate_dir="$(cygpath -w "$hyper_crate_dir")"
+    turso_cargo_crate_dir="$(cygpath -w "$turso_crate_dir")"
     # Git Bash launches a native cargo.exe, which needs the config path in the
     # same Windows form as the patched crate paths inside that config.
     cargo_config_file="$(cygpath -w "$config_file")"
 fi
-"$python_bin" - "$cargo_crate_dir" "$hyper_cargo_crate_dir" "$config_file" <<'PY'
+"$python_bin" - "$cargo_crate_dir" "$hyper_cargo_crate_dir" "$turso_cargo_crate_dir" "$config_file" <<'PY'
 import json
 import pathlib
 import sys
 
-pathlib.Path(sys.argv[3]).write_text(
+pathlib.Path(sys.argv[4]).write_text(
     '[patch.crates-io]\n'
     + 'rmcp = { path = ' + json.dumps(sys.argv[1]) + ' }\n'
     + 'hyper-util = { path = ' + json.dumps(sys.argv[2]) + ' }\n'
+    + 'turso_serverless = { path = ' + json.dumps(sys.argv[3]) + ' }\n'
     + 'mio = { git = "https://github.com/guybedford/mio", tag = "1.2.3-cf.emscripten" }\n'
     + 'tokio = { git = "https://github.com/guybedford/tokio", tag = "1.53.1-cf.emscripten" }\n'
 )

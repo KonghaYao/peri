@@ -8,7 +8,7 @@ const TERMINAL_TASK = new Set(['completed', 'failed', 'cancelled']);
 /** SDK 契约支持的权限决定；其它 optionId 暂不支持（不误发）。 */
 const SUPPORTED_PERMISSION_OPTIONS = new Set(['allow_once', 'reject_once']);
 
-/** 交互回答经当前会话的 WS 命令通道提交；未同步时不提供回答入口。 */
+/** 交互回答经当前会话的命令通道提交；未就绪时不提供回答入口。 */
 export type InteractionAnswerHandler = (interactionId: string, answer: InteractionAnswer) => Promise<void>;
 
 function fieldInput(field: InteractionFieldView, values: ElicitationValues, change: (key: string, value: string | boolean) => void) {
@@ -107,7 +107,7 @@ function InteractionCard({ interaction, onAnswer }: { interaction: Interaction; 
   </li>;
 }
 
-/** 只读消费面 + 交互回答（鉴权命令，不写 Y.Doc）。 */
+/** 只读消费面 + 交互回答（本地命令，不写 Y.Doc）。 */
 export function ChatPanels({ state, onAnswer }: { state: SyncState | null; onAnswer?: InteractionAnswerHandler }) {
   if (!state || state.readiness !== 'ready') return null;
   const pending = state.pendingInteractions;

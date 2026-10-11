@@ -2,7 +2,7 @@
 
 唤醒合并回归：`src/execution/coordinator.ts::ensureProcessing` 为同会话 active operation 保留 dirty wake，旧查询返回 idle 时继续检查新工作；单执行、Unknown、退役与 drain 上界保持。`test/execution-wake.test.ts` 用屏障覆盖重叠 notification、控制观察、预算与封闭边界。该 coordinator 是嵌入方可用的可移植准入核心，SDK 自身不再驱动它：废弃的本地 SQLite registry/busy 装配与对应测试已删除。
 
-Cloudflare 网页聊天消费端：[`peri-cf`](peri-cf.md)。SDK 公开 `/portable`（准入规则、注册表、存储读取与投影）、`/wasm-host`（实例启动、注入端口与关闭证据）、`/wasm`（浏览器 transport/loader）、`/view`（复制与视图）。`execution/admission-core.ts` 是可移植的唯一执行准入规则及 async ledger 契约，ledger/registry 后端由嵌入方注入。`/portable` 的准入摘要仍依赖 `node:crypto`，`/wasm-host` 的默认端口依赖 Node 网络/DNS，不能宣称这两个入口纯浏览器可用。`peri-cf` 的接入与平台验收归消费端 owner。
+Cloudflare 网页聊天消费端：[`peri-cf`](peri-cf.md)。SDK 公开 `/portable`（准入规则、注册表、存储读取与投影）、`/wasm`（平台无关的宿主启动、transport/loader、scheduler 端口与关闭证据）、`/wasm-host`（在 `/wasm` 之外提供 Node 网络/DNS 端口）、`/view`（复制与视图）。`execution/admission-core.ts` 是可移植的唯一执行准入规则及 async ledger 契约，ledger/registry 后端由嵌入方注入。`/portable` 的准入摘要仍依赖 `node:crypto`，`/wasm-host` 的默认端口依赖 Node 网络/DNS，不能宣称这两个入口纯浏览器可用。`peri-cf` 的接入与平台验收归消费端 owner。
 
 进程控制不在 SDK 契约内：stdio transport、`Sandbox.stdio`/`workspaceProcess`、进程 broker/supervisor、本机停止证明、JSONL dispatcher 与本地 SQLite 存储（含 turso CLI 部署参数、`Bun.env` token 回退、`realpathSync` 路径规范化）均已删除且不留 shim；ACP 连接只能由宿主经 `Sandbox.transportFactory` 注入。消费端迁移状态见 [`peri-cf` 索引](peri-cf.md)（已改用宿主生命周期 + `session/cancel`）。数据库表结构未变更。
 

@@ -1,19 +1,11 @@
-import { afterEach, describe, expect, spyOn, test } from 'bun:test';
+import { describe, expect, test } from 'bun:test';
 import { renderToStaticMarkup } from 'react-dom/server';
 import { PayloadReadError } from '@peri-code/sdk/view';
-import { ChatApi } from '../api/client';
 import { MessageList } from './MessageList';
 import { commandPayloadReader, loadPayloadText, type PayloadCommandSource } from './payloadReader';
 import type { Entry, EntryBlock } from './types';
-import type { SyncState } from '../../shared/sync';
 
 const chat = { id: 'chat-status', title: '状态回归', updatedAt: '2026-10-06T00:00:00Z' };
-let fetchSpy: ReturnType<typeof spyOn<typeof globalThis, 'fetch'>> | undefined;
-
-afterEach(() => {
-  fetchSpy?.mockRestore();
-  fetchSpy = undefined;
-});
 
 function textBlock(text: string): EntryBlock {
   return { blockId: 'text:0', type: 'text', text };
@@ -28,61 +20,9 @@ function entry(overrides: Partial<Entry> = {}): Entry {
   };
 }
 
-function state(overrides: Partial<SyncState> = {}): SyncState {
-  return {
-    chat, running: false, executionBlocked: false, readiness: 'ready',
-    entries: [entry()], toolCalls: [], turns: [], activeTurn: { turnId: null, status: null },
-    session: {}, tasks: [], plans: { current: [], byTurn: {} }, interactions: [], pendingInteractions: [],
-    inputQueue: null,
-    ...overrides,
-  };
-}
-
-function respond(payload: unknown) {
-  fetchSpy = spyOn(globalThis, 'fetch').mockResolvedValue(Response.json(payload));
-}
-
 function render(entries: Entry[], phase: 'idle' | 'streaming' = 'idle') {
   return renderToStaticMarkup(<MessageList entries={entries} phase={phase} chatId={chat.id} />);
 }
-
-describe('sync DTO boundary', () => {
-  test('accepts entries with nullable times and full read面', async () => {
-    const payload = state({
-      entries: [entry({ createdAt: null, createdAtSource: 'unknown', completedAt: null, error: null })],
-      toolCalls: [{ toolCallId: 't1', turnId: 'turn:1', name: 'Read', status: 'completed',
-        createdAt: null, completedAt: null, error: null, resultRef: { id: 'p1', bytes: 4, preview: 'body' } }],
-      turns: [{ turnId: 'turn:1', status: 'completed', startedAt: null, completedAt: null, error: null, interactionStatus: 'none' }],
-      interactions: [{ id: 'interaction:1', kind: 'permission', sessionId: chat.id, status: 'resolved',
-        createdAt: null, resolvedAt: null, outcome: 'allow_once' }],
-      pendingInteractions: [],
-    });
-    respond(payload);
-    expect(await new ChatApi('test-token').detail(chat.id)).toEqual(payload);
-  });
-
-  test.each(['unknown', '', 42, {}, []].map(value => ({ value })))('rejects invalid readiness %j', async ({ value: readiness }) => {
-    respond(state({ readiness: readiness as SyncState['readiness'] }));
-    await expect(new ChatApi('test-token').detail(chat.id)).rejects.toThrow('会话历史格式不正确');
-  });
-
-  test.each([['status', 42], ['blocks', 'text'], ['error', 'boom'], ['kind', 'note']].map(([field, value]) => ({ field, value })))
-    ('rejects invalid entry field %s', async ({ field, value }) => {
-      respond(state({ entries: [{ ...entry(), [field!]: value }] }));
-      await expect(new ChatApi('test-token').detail(chat.id)).rejects.toThrow('会话历史格式不正确');
-    });
-
-  test('rejects an unsupported document pair with an upgrade message', async () => {
-    respond(state({ readiness: 'unsupported' }));
-    await expect(new ChatApi('test-token').detail(chat.id)).rejects.toThrow('不受支持的数据版本');
-  });
-
-  test('surfaces 426 as an explicit client upgrade prompt', async () => {
-    fetchSpy = spyOn(globalThis, 'fetch').mockResolvedValue(
-      Response.json({ error: 'Client upgrade required', upgrade: true }, { status: 426 }));
-    await expect(new ChatApi('test-token').detail(chat.id)).rejects.toThrow('客户端版本过旧，请刷新页面后重试。');
-  });
-});
 
 describe('entry rendering follows block order and terminal status', () => {
   test('shows failure instead of a generic empty answer', () => {

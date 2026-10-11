@@ -36,7 +36,7 @@ python3 scripts/test-cargo-patches.py
 
 脚本下载 crates.io 的固定发布包，核验 SHA-256，用 `patch`（缺少时以独立临时 Git 仓库执行 `git apply`）应用补丁并反向校验缓存，再以 Cargo `[patch.crates-io]` 配置运行所给命令。生成的源码位于 gitignored 的 `target/peri-*-patches/`，按补丁哈希隔离；第二次运行复用缓存。`Cargo.lock` 记录本地 patched crate，因此直接运行 `cargo --locked` 不会偷偷回退到未打补丁的 registry 版本。CI、pre-release、release、Lefthook 和 `./dev.sh` 的编译命令也使用该脚本；Windows CI 用 Git Bash 运行脚本，脚本将 crate 和 Cargo 配置路径统一转换给原生 `cargo.exe`。脚本保留调用者的工作目录，让 `./dev.sh --cwd=...` 仍以指定目录启动 TUI。Linux 的 cross 构建使用 `./scripts/cargo-rmcp-patched.sh --cross build …`。更新补丁后，使用脚本执行 `update -p <crate>` 并提交更新后的 lockfile。
 
-Emscripten 目标固定 Cloudflare 的 Mio 与 Tokio 分支。`reqwest 0.13.4` 与 `turso_serverless 0.1.3` 使用官方发布版，经 native/Hyper HTTP 后端保持远程 MCP、模型和存储的 `Send` 契约。WASM 构建用 `scripts/cargo-wasm.sh` 加上 linker 和 Tokio 事件循环参数；用法与已验证范围见 [`peri-wasm/README.md`](../peri-wasm/README.md)。
+Emscripten 目标固定 Cloudflare 的 Mio 与 Tokio 分支。`reqwest 0.13.4` 使用官方发布版，经 native/Hyper HTTP 后端保持远程 MCP、模型和存储的 `Send` 契约。[`turso_serverless 0.1.3`](turso-serverless-0.1.3-wasm-fetch.patch) 的补丁把驱动的网络原语抽成 `HttpExecutor`：默认仍是 reqwest，Emscripten 目标可经 `wasm-fetch` feature 改用宿主 `fetch`（浏览器没有 POSIX socket）。驱动线路协议、错误形态与 `Send` 契约不变；原生目标行为不变。WASM 构建用 `scripts/cargo-wasm.sh` 加上 linker 和 Tokio 事件循环参数；用法与已验证范围见 [`peri-wasm/README.md`](../peri-wasm/README.md)。
 
 [`hyper-util 0.1.21`](hyper-util-0.1.21-emscripten-dns.patch) 的默认 GAI resolver 原本调用 `spawn_blocking`，Emscripten 无法启动 worker thread。目标专用补丁把域名查找交给 Cloudflare Tokio 的异步 DNS，原生目标仍用原解析器。脚本按固定发布包 SHA-256 获取并校验该补丁；`Cargo.lock` 锁定 patched crate。
 

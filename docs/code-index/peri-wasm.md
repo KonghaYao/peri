@@ -20,7 +20,7 @@ WASM 依赖图按平台排除 SQLx、进程执行、stdio 和本地工具 MCP pa
 | Emscripten 日期格式 | `peri-time/src/calendar.rs` |
 | 不依赖 package 的 MCP 共用规则 | `peri-mcp-core/src/{agent_definition,task_scope.rs}` |
 | 配置与 OAuth 浏览器适配 | `peri-config/src/io/wasm.rs`、`mcp-packages/credentials/src/client.rs`；凭证 worker 经当前 Tokio Handle 调度，保持 MCP server 和 rmcp 子任务的运行时上下文，回归入口为 `client_test.rs` |
-| Cloudflare 网页聊天消费端 | [Peri CF 索引](peri-cf.md)，TS 经 SDK 直连 Turso 查询列表，每聊天 DO 协调执行，无目录 DO 或 D1 |
+| Cloudflare 网页聊天消费端 | [Peri CF 索引](peri-cf.md)：浏览器宿主（Vite 资源 + `instantiateWasm` 显式实例化，只注入调度器端口），Worker 无状态透传；无 DO、无表 |
 | 部署环境注入与 Langfuse | `npm-packages/@peri-sdk/src/wasm/loader.ts`、`src/transport/wasm-transport.ts`（同包）；`scripts/cargo-wasm.sh` 导出 `ENV` |
 
 `@peri-code/sdk` 的 `scripts/build.ts` 构建本产物并复制到 npm 包的 `dist/wasm/`，`WasmAcpTransport` 使现有 Agent/Session 接口复用 ACP。示例服务器是 `npm-packages/@peri-sdk/examples/demo/demo-wasm.ts`，复用 `demo.html`。

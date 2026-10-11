@@ -1,10 +1,13 @@
 import { WasmAcpTransport } from "../transport/wasm-transport";
 import { DeadlineError, withDeadline } from "../util/deadline";
 import { instantiatePeriWasm, type PeriWasmModule } from "./loader";
-import type { WasmDnsPort, WasmNetworkPort, WasmSchedulerPort } from "./ports";
+import type { WasmDnsPort, WasmNetworkPort } from "./ports";
+import type { WasmSchedulerPort } from "./scheduler";
 
 /**
- * Owned Emscripten ACP Host startup for Node-compatible runtimes.
+ * Owned Emscripten ACP Host startup for platform-neutral runtimes (browsers, Workers with
+ * `nodejs_compat`, Node): only `fetch`, timers and WebAssembly are required; sockets and DNS are
+ * optional injected ports.
  *
  * The SDK owns startup ordering, callback/socket ownership and close evidence; the embedder owns
  * the platform module factory, ports and the capacity policy around them. A host is only reported

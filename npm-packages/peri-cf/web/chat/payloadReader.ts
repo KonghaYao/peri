@@ -2,28 +2,28 @@ import {
   readPayload, PayloadReadError,
   type PayloadReadErrorCode, type ToolPayloadReadRef, type ToolPayloadReader,
 } from '@peri-code/sdk/view';
-import type { CommandFailure, CommandOutcome } from '../api/sync';
+import type { CommandFailure, CommandOutcome } from '../runtime/connection';
 
-/** 端点不可用时的占位 reader（未选择会话或未配置令牌）。 */
+/** 端点不可用时的占位 reader（未选择会话或宿主尚未就绪）。 */
 export const unavailablePayloadReader: ToolPayloadReader = async () => {
   throw new PayloadReadError('unavailable', '当前没有可用的全文读取端点。');
 };
 
 const KNOWN_CODES: PayloadReadErrorCode[] = ["unauthorized", "unavailable", "too_large", "integrity_error", "aborted", "transport_error"];
 
-/** 全文读取只依赖「会话命令通道」这一窄接口，由当前 ChatSession 实现；不直接触碰 socket。 */
+/** 全文读取只依赖「会话命令通道」这一窄接口，由当前 ChatSession 实现；不直接触碰宿主。 */
 export interface PayloadCommandSource {
   readPayload(refId: string, signal?: AbortSignal): Promise<CommandOutcome>;
 }
 
 /**
- * 浏览器全文读取：经当前会话那条已鉴权的 WS 连接下发 `{op:"payload", refId}`。
- * 载荷驻留在会话执行上下文里，HTTP 没有会话亲和性；未就绪时明确报告 unavailable，不伪造内容。
+ * 浏览器全文读取：经当前会话的命令通道下发 `{op:"payload", refId}`。
+ * 载荷驻留在会话运行期里；未就绪时明确报告 unavailable，不伪造内容。
  */
 export function commandPayloadReader(source: () => PayloadCommandSource | undefined): ToolPayloadReader {
   return async ({ id, signal }) => {
     const channel = source();
-    if (!channel) throw new PayloadReadError('unavailable', '会话同步尚未就绪，无法读取全文。');
+    if (!channel) throw new PayloadReadError('unavailable', '会话尚未就绪，无法读取全文。');
     const result = await channel.readPayload(id, signal);
     if (!result.ok) throw payloadFailure(result);
     if (!result.payload) throw new PayloadReadError('integrity_error', '载荷响应缺少正文。');

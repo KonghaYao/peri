@@ -10,7 +10,7 @@ declare module "*peri-wasm.js" {
 
 declare module "*wasm-host.js" {
   export const startPeriWasmHost: typeof import("../src/wasm-host").startPeriWasmHost;
-  export const createNodeSchedulerPort: typeof import("../src/wasm-host").createNodeSchedulerPort;
+  export const createSchedulerPort: typeof import("../src/wasm-host").createSchedulerPort;
 }
 
 declare module "*.wasm" {

@@ -5,8 +5,10 @@
 
 export { instantiatePeriWasm, loadPeriWasm } from "./wasm/loader";
 export type { NativeWasmAcp, PeriWasmInstantiateOptions, PeriWasmModule, PeriWasmModuleFactory } from "./wasm/loader";
-export { createNodeDnsPort, createNodeNetworkPort, createNodeSchedulerPort } from "./wasm/ports";
-export type { WasmDnsAddress, WasmDnsLookupOptions, WasmDnsPort, WasmDnsPortOptions, WasmNetworkPort, WasmSchedulerPort } from "./wasm/ports";
+export { createNodeDnsPort, createNodeNetworkPort } from "./wasm/ports";
+export type { WasmDnsAddress, WasmDnsLookupOptions, WasmDnsPort, WasmDnsPortOptions, WasmNetworkPort } from "./wasm/ports";
+export { createSchedulerPort } from "./wasm/scheduler";
+export type { WasmSchedulerPort } from "./wasm/scheduler";
 export { DEFAULT_WASM_HOST_CLEANUP_TIMEOUT_MS, PeriWasmHostStartupError, startPeriWasmHost } from "./wasm/host";
 export type {
   PeriWasmHostCleanupOutcome, PeriWasmHostDiagnosticKind, PeriWasmHostLifecycleEvent, PeriWasmHostOptions,

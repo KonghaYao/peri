@@ -1,6 +1,9 @@
 # peri-cf 聊天对象契约与前端消费面目标设计
 
-> 状态：**已批准目标设计；对象契约、view/消费面与「零持久化 + 按需 ACP 重放复原」架构基线已落地（本地验证），生产切换与部署端验收未完成。**
+> 状态：**已批准目标设计；本文的执行与同步结构已由 [浏览器宿主 Agent 设计](peri-cf-browser-agent.md)（2026-10-11 批准）取代。**
+> 取代范围：Worker 承载 ACP 宿主、浏览器为只读副本、WS 文档同步与文本控制帧命令、`/api/v2/*` 会话面与实例观测端点、isolate 容量/实例观测。**产品语义继续有效**：对象契约（Entry / ContentBlock / ToolCall / Turn / Task / Plan / Interaction）、消息展示、命令语义（prompt/cancel/interaction/payload）、交互回答、载荷读取与「唯一持久权威是 Turso/libSQL 的 Rust Store」；冲突处以浏览器宿主设计为准。实施与验收见 [迁移 issue](../../spec/issues/2026-10-11-peri-cf-browser-agent-migration.md)。
+>
+> 原文状态（历史）：**已批准目标设计；对象契约、view/消费面与「零持久化 + 按需 ACP 重放复原」架构基线已落地（本地验证），生产切换与部署端验收未完成。**
 > 用户已批准三项裁决：(1) 升级策略：chat schema 2→3 / session schema 1→2，消费端拒绝旧 schema、版本化应用入口 + 短维护窗口、不长期双写；(2) **展示权威与持久化（2026-10-10 转向）**：无 Durable Object、零表、零持久化，Yjs 展示态不持久化，历史由 ACP `session/load` 重放按需复原，Turso/libSQL 的 Rust Store 是唯一跨 isolate 持久权威，会话命令走 WS 文本控制帧；(3) Entry 双身份：`entryId` 为对象 key、新增稳定展示 `id`，新数据两者默认同值。
 > **已作废（superseded）**：本文原「DO 展示 checkpoint（`recordVersion:2` 单键索引 + `payload:<id>:<n>` 1 MiB 分段 + `record:v1-backup` 7 天回滚窗口）」「5.3.4 平台结构裁决」「四张表草案」及其容量数值，全部由裁决 (2) 取代，不再具有设计效力。它们只作为决策历史保留在 [P3 批准包](../../spec/issues/2026-10-10-peri-cf-chat-objects-p3-approval.md)，取代关系与证据见 [无 DO 转向 issue](../../spec/issues/2026-10-10-peri-cf-no-durable-object.md)；不得按旧基线创建 DO、表、bucket 或绑定。
 > 实施进度、验收边界与遗留项只写 `spec/issues/`；本文件不记录实施叙事。原文「本次交付仅文档」等历史表述已随实施落地作废。
@@ -10,7 +13,7 @@
 > 参考（结构对照，不引为本仓库事实源）：`/Users/konghayao/code/pazhou/remote-control-server/packages/chat-channel/src/`（该仓库不在本仓库内，路径保留绝对前缀）。
 > 相邻设计：TUI 侧同类展示目标见 [TUI Chat 与 Tool Activity Workbench](tui-chat-workbench.md)；Session 与执行归属见 [Session 异步任务统一入口](session-async-tasks.md)、[RCRA 消息、任务归属与激活](rcra-message-activation.md)；代码定位以 [TS SDK 索引](../code-index/peri-ts-sdk.md) 与 [Peri CF 索引](../code-index/peri-cf.md) 为准。
 
-本文只定义稳定对象契约与消费面边界，不记录实施批次、勾选清单或运行结果。当前实现、入口与动态 inventory 以代码索引和源码为准：`npm-packages/@peri-sdk/src/state/`、`src/view/`、`src/sync/`、`npm-packages/peri-cf/worker/chat/`、`shared/`、`web/chat/`。
+本文只定义稳定对象契约与消费面边界，不记录实施批次、勾选清单或运行结果。当前实现、入口与动态 inventory 以代码索引和源码为准：`npm-packages/@peri-sdk/src/state/`、`src/view/`、`src/sync/`、`npm-packages/peri-cf/web/runtime/`、`shared/`、`web/chat/`。
 
 ## 1. 前提与已定基线
 
@@ -44,7 +47,7 @@
 | F14 | SDK 同时写当前 info.plan 和按 turn 的 plansByTurn；tasks 已有轻量投影、数量限制和快照修复；usage 已写 Entry。 | `npm-packages/@peri-sdk/src/state/session-projection.ts:58-76,114-125`；`.../task-projection.ts:5-7,19-35,43-65`；`.../session-docs.ts:70-84` |
 | F15 | rcs Entry/Block/Tool 有 kind、时间、error、visibility、resource、permissionId；聚合器在 Yjs transaction 内分派事件；退出统一收敛 Entry/权限/工具。 | `/Users/konghayao/code/pazhou/remote-control-server/packages/chat-channel/src/schema.ts:32-81`；`.../src/state/aggregator.ts:750-788`；`.../src/state/turn-machine.ts:40-80` |
 | F16 | rcs 前端按工具块切段保序，错误挂本 Entry 末段；此为展示参考，不是必须复制的对象结构。 | `/Users/konghayao/code/pazhou/remote-control-server/packages/web-runtime/web/chat/chat-doc-to-structured.ts:158-243` |
-| F17 | peri-cf 是共享 Bearer token 信任域，不是多租户；HTTP 复用鉴权；现有 publicError 只是拼接诊断并截断，不能视为脱敏。 | `npm-packages/peri-cf/CLAUDE.md:9-21`；`.../worker/api/app.ts:9-33`；`.../worker/api/http.ts:5-37` |
+| F17 | peri-cf 无访问控制（原共享 Bearer token 已移除）：HTTP 面与 WS 对知道 URL 的任何人开放，不是多租户；现有 publicError 只是拼接诊断并截断，不能视为脱敏。 | `npm-packages/peri-cf/CLAUDE.md:9-21`；`.../worker/api/app.ts:1-24`；`.../worker/api/http.ts:5-37` |
 
 **差距判断：**不是 SDK 缺少聚合，而是字段/恢复不完整（F4/F7/F9/F10）、应用有损物化（F9）、载荷不可达（F7）、交互未接线（F13）。F4/F5 已有的保序机制保留；F9/F10 必须一起治理，否则只修当前页面、重启后仍丢对象。
 
@@ -227,7 +230,7 @@ TurnProjection = {
 
 1. **无 DO、零表、零持久化**：不注册 Durable Object、不配置 `durable_objects`/`migrations`，不使用 DO 存储、socket attachment 或 Hibernation 事件入口；不新增 R2/KV/D1 等替代持久层。展示态（Yjs 文档、运行元数据、连接状态、载荷全文）只存在于 isolate 内存。
 2. **持久权威唯一**：Turso/libSQL 的 Rust Store 保存会话、消息与执行数据；ACP `session/load` 在响应**之前**以 `session/update` 重放持久历史（`peri-acp/src/host/requests/session_restore.rs`），应用必须先建立订阅/runtime 再触发重放，重放不得被丢弃。
-3. **按需复原**：`GET /api/v2/chats/:id` 与 WS 连接鉴权成功后触发复原（重放重建投影后返回同一 SyncState DTO）；`GET /api/v2/chats/:id/resources` 与 `GET /api/instances` 是 peek，不触发复原、不启动 Host。
+3. **按需复原**：`GET /api/v2/chats/:id` 与 WS 连接握手成功后触发复原（重放重建投影后返回同一 SyncState DTO）；`GET /api/v2/chats/:id/resources` 与 `GET /api/instances` 是 peek，不触发复原、不启动 Host。
 4. **执行归属与丢失语义**：执行驻留在接受连接/请求的 isolate；isolate 回收即在途执行丢失且**不复原**，不得由展示历史重造 Rust 工作义务。长时保活只依赖平台尽力而为的机制（WS 消息 await 与升级请求的 `waitUntil`），没有平台保证，部署端才能验证。
 5. **载荷全文**：工具参数/结果全文只在 isolate 内存，经 WS 文本控制帧（`op:"payload"`）按需读取，不通过 Yjs、不经 HTTP 端点、不持久化；重放后由历史重建。若上游历史不含完整载荷，则读取不可用必须显式失败，不得伪装成功（重建覆盖范围待验证）。
 6. **命令通道**：prompt/cancel/interaction 回答/payload 读取一律走 WS 文本控制帧（HTTP 无会话亲和性）；旧 HTTP 命令/载荷端点返回 426。命令结果只在服务端明确答否时为确定失败；断线、超时、未同步视为未确认，调用方必须阻断重跑。
@@ -255,7 +258,7 @@ readPayload(ref, reader, { signal, maxBytes })
 
 1. `reader` 为注入的 transport-neutral `ToolPayloadReader`；服务端 adapter 可使用 SessionDocs.readPayload，浏览器 adapter 经 peri-cf 的 **WS 控制帧**（`op:"payload"`，结果帧带 `{id,bytes,json}`）。**不 re-export SessionDocs，不假设浏览器能读服务端 Map。**
 2. 请求绑定 `chatId + toolCallId + field + ref.id`；服务器验证归属，随机 ref id 不是授权。SDK helper 校验返回 id、UTF-8 bytes 与合法 JSON；应用拒绝跨会话或已过期 ref 的迟到响应（旧响应不覆盖新选择）。
-3. 控制帧经已鉴权的同步连接（首帧 Bearer），token 不入 URL；全文与 preview 不记录日志、不入持久浏览器缓存；JSON 转义显示，不当 HTML 执行；resource URI 默认不自动访问。
+3. 控制帧经同步连接的握手后通道（首帧 `hello`，无凭据），不进入 URL；全文与 preview 不记录日志、不入持久浏览器缓存；JSON 转义显示，不当 HTML 执行；resource URI 默认不自动访问。
 4. 默认按需展开读取，不全量预取。WS 控制帧是浏览器唯一读取路径；服务端只读 isolate 内存当前版本（重放重建），不含持久 repository；不得以任意 URL、文件路径或 provider endpoint 兜底。
 5. 明确失败码：unauthorized、unavailable/stale、too_large、integrity_error、aborted、transport_error；未知/越界 ref 不泄露其他会话存在性；stale 不替换成最新版本内容。
 6. 保留 4096-byte inline 分界与投影接纳时的 inline+外置总量、reasoning、资源与累计版本预算；预算只约束 isolate 内存与单次传输，不是持久容量（F2/F7）。

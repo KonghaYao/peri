@@ -1,6 +1,4 @@
 import { HTTPException } from "hono/http-exception";
-import { chatIdSchema } from "../../shared/chat";
-import type { Env } from "../types";
 
 export function diagnosticMessage(error: unknown): string {
   const ancestors = new Set<object>();
@@ -33,10 +31,6 @@ export function logError(label: string, error: unknown, context: Record<string, 
   console.error(label, context, error);
 }
 
-export function publicError(error: unknown, _env: Env): string {
-  return diagnosticMessage(error).replace(/[\u0000-\u0008\u000b-\u001f\u007f-\u009f]/g, "").slice(0, 512);
-}
-
 export function errorResponse(error: unknown): Response {
   if (error instanceof HTTPException && error.res) {
     const headers = new Headers(error.res.headers);
@@ -47,10 +41,4 @@ export function errorResponse(error: unknown): Response {
     status: error instanceof HTTPException ? error.status : 500,
     headers: { "Cache-Control": "no-store" },
   });
-}
-
-export function normalizeChatId(id: string | undefined): string {
-  const parsed = chatIdSchema.safeParse(id);
-  if (!parsed.success) throw new HTTPException(404, { message: "Not found" });
-  return parsed.data;
 }

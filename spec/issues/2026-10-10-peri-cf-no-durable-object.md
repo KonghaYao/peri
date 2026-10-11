@@ -110,7 +110,7 @@ DO 行只作对照：本设计不使用该原语，数值不再构成容量约�
 ### 3.3 其他
 
 - **执行归属**：执行驻留在接受连接的 isolate；isolate 回收 = 在途执行丢失，**不复原**（与既有"不恢复旧 Agent 执行"一致）。
-- **唯一持久事实**：Turso Rust Store；`PERI_MACHINE_ID` 仍是部署持久 UUID（`worker/wasm/config.ts` 校验）。
+- **唯一持久事实**：Turso Rust Store；`PERI_MACHINE_ID` 仍是部署持久 UUID（`worker/wasm/config.ts` 校验）。（注记：该约束已被 2026-10-11 的 BYOK 迁移取代——machineId 改为浏览器客户端生成，Worker 不再校验、不再有 `worker/wasm/`；见 [迁移 issue](2026-10-11-peri-cf-browser-agent-migration.md)。）
 - **前端**：命令全部经 `ChatCommandPort`；HTTP 客户端只读。`web/chat/payloadReader.ts` 改为 WS 载荷读取。
 
 ## 4. 风险与未验证项

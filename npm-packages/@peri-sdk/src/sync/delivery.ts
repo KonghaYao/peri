@@ -40,9 +40,3 @@ export function acknowledgeDelivery(ledger: DeliveryLedger, delivery: number): v
     ledger.pending.shift();
     ledger.acknowledged = delivery;
 }
-
-/** Stable fingerprint that binds a persisted connection attachment to a credential without storing it. */
-export async function credentialFingerprint(token: string): Promise<string> {
-    const digest = await crypto.subtle.digest("SHA-256", new TextEncoder().encode(token));
-    return Array.from(new Uint8Array(digest), (byte) => byte.toString(16).padStart(2, "0")).join("");
-}

@@ -364,7 +364,7 @@ function sessionInfo(value: Y.Map<unknown> | null): SessionInfoView {
     return result;
 }
 
-/** One read-only, transport-neutral view over an authorized pair of Y.Doc replicas. */
+/** One read-only, transport-neutral view over a pair of Y.Doc replicas. */
 export function readSessionView(chat: Y.Doc, session: Y.Doc): SessionView {
     return readView(chat, session, new ReadCache());
 }
