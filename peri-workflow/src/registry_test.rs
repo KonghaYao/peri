@@ -284,16 +284,26 @@ fn test_notification_includes_saved_state_only_when_artifact_exists() {
     // 长文本外置必须对消费方可见，且措辞与提取 gate 一致（对象字段）：不说明
     // `${label}` 是引用，读 state.json 的消费方会把 token 当结果、静默丢长文本
     // （2026-10-11 issue 缺陷 1）。阈值断言取常量展开值而非硬编码数字。
+    //
+    // 文案不得含尖括号：提醒正文在信封边界统一 HTML 转义，`>200` 会变成 `&gt;200`。
     assert!(
         notification.contains(&format!(
-            "Long string fields in the result object (>{} bytes) are externalized",
+            "Long string fields in the result object (over {} bytes) are externalized",
             peri_acp_types::workflow::LONGTEXT_EXTRACT_THRESHOLD_BYTES
         )),
         "存在 artifact 时应说明长文本外置阈值与作用面，实际：{notification}"
     );
     assert!(
-        notification.contains("`${label}` token in state.json references `outputs/<label>.txt`"),
-        "存在 artifact 时应说明 `${{label}}` 指向 outputs/<label>.txt，实际：{notification}"
+        notification.contains("`${label}` token in state.json is that field's path"),
+        "存在 artifact 时应说明 `${{label}}` 是结果对象字段路径，实际：{notification}"
+    );
+    assert!(
+        notification.contains("lives in `outputs/` under the same label with a `.txt` suffix"),
+        "存在 artifact 时应说明外置文件位置（同一 label 加 .txt 后缀），实际：{notification}"
+    );
+    assert!(
+        !notification.contains('>') && !notification.contains('<'),
+        "提醒正文不得含尖括号（信封边界会转义成实体），实际：{notification}"
     );
     // 终态四维必须词汇化：`Debug` 小写把 `NotRequired` 渲染成 `notrequired`，
     // 与 `unknown` 并列时被读作「未验证」（2026-10-11 issue 缺陷 2）。

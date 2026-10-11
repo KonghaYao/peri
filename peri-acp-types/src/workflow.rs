@@ -588,9 +588,9 @@ impl WorkflowTaskResult {
             let threshold = LONGTEXT_EXTRACT_THRESHOLD_BYTES;
             format!(
                 "Results saved to {state_path}\n\
-                 Long string fields in the result object (>{threshold} bytes) are externalized: a \
-                 `${{label}}` token in state.json references `outputs/<label>.txt` in the same run \
-                 directory.\n\
+                 Long string fields in the result object (over {threshold} bytes) are externalized: \
+                 a `${{label}}` token in state.json is that field's path, and its text lives in \
+                 `outputs/` under the same label with a `.txt` suffix.\n\
                  {read_lead} to view full results.\n"
             )
         } else {
