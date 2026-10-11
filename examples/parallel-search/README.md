@@ -12,9 +12,9 @@
    peri -p "使用 parallel-search MCP 搜索 Rust 官方 async 文档，给出来源链接；再用该 MCP 读取 https://doc.rust-lang.org/book/ch17-01-futures-and-syntax.html 并总结 Future。"
    ```
 
-模型仍需使用你已配置的推理服务。MCP 工具通过 Peri 的工具发现与执行路径使用：`SearchExtraTools` 发现 `parallel-search` 工具，`ExecuteExtraTool` 调用发现结果中的工具名。`web_search` 返回搜索结果与摘录，`web_fetch` 提取指定 URL 的内容。
+模型仍需使用你已配置的推理服务。`web_search` 与 `web_fetch` 已在 `system_mcp_tools` 中声明为必需工具，以原始工具名直接进入模型工具面，不经工具搜索发现：`web_search` 返回搜索结果与摘录，`web_fetch` 提取指定 URL 的内容。
 
-`system_mcp: true` 让首轮推理等待 MCP 连接与工具发现（本例启动依赖等待上限为 60 秒）；空的 `system_mcp_tools` 保持工具通过发现路径使用。服务不可用时，此示例会阻止会话启动；移除该条目可恢复不依赖它的会话。
+`system_mcp: true` 让首轮推理等待 MCP 连接与工具列表就绪（本例启动依赖等待上限为 60 秒）；`system_mcp_tools` 中的工具随连接就绪直接进入模型工具面。服务不可用时，此示例会阻止会话启动；移除该条目可恢复不依赖它的会话。
 
 配置通过 `npx -y mcp-remote@0.14.3` 启动固定版本的桥接依赖：首次运行会下载到 npx 缓存（首轮启动等待包含该下载耗时），之后复用缓存。`--transport http-only` 限定远端使用 Streamable HTTP；`--enable-proxy` 允许使用已有的 HTTP(S) 代理环境配置。当前 Peri 的直接 HTTP discovery 使用 `2026-07-28`，而 Parallel 接受的版本截至 `2025-11-25`，因此本例使用 stdio 桥接。
 

@@ -13,7 +13,7 @@
         "--enable-proxy"
       ],
       "system_mcp": true,
-      "system_mcp_tools": [],
+      "system_mcp_tools": ["web_search", "web_fetch"],
       "system_mcp_timeout": 60000
     }
   }
