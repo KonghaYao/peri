@@ -2,7 +2,7 @@ use super::*;
 
 // ── 契约用例 ─────────────────────────────────────────────────────────────────
 
-/// 蓝本槽位顺序 = 行为契约（7 组 21 槽，禁止重排；波 4 演进 C2 新增
+/// 蓝本槽位顺序 = 行为契约（7 组 17 槽，禁止重排；波 4 演进 C2 新增
 /// DefaultSystemPrompt / Lang 于第一组首位——渲染排序不依赖链序，契约 2）。
 ///
 /// v4-part-2 W3（A7/A14）：`Web` / `Artifact` 两槽位随 `WebMiddleware` /
@@ -17,7 +17,11 @@ use super::*;
 ///
 /// v4 wave 4（Git Watch 下沉）：`GitWatch` 槽位删除（git ref 变化改由 builtin
 /// `workspace` 实例的 `workspace://git/ref` 资源 + 2026-07-28 订阅回传），
-/// 其余槽位相对顺序不变；槽位总数随之 22 → 21。
+/// 其余槽位相对顺序不变。
+///
+/// v4 P5（wave 5，workflow 下沉 builtin `workflow` 实例）：`Workflow` 槽位删除
+/// （编排能力是 `mcp__workflow__*` 工具面），其余槽位相对顺序不变；
+/// 槽位总数随之 18 → 17。
 #[test]
 fn blueprint_sequence_is_canonical() {
     let slots = production_blueprint();
@@ -53,7 +57,7 @@ fn blueprint_sequence_is_canonical() {
             "Goal",
         ]
     );
-    assert_eq!(slots.len(), 18, "蓝本槽位恰 18 个");
+    assert_eq!(slots.len(), 17, "蓝本槽位恰 17 个");
 }
 
 fn slot_name(slot: &ChainSlot) -> &'static str {
