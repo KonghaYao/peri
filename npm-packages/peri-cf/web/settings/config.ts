@@ -81,13 +81,29 @@ export function saveBrowserConfig(config: BrowserConfig): void {
   globalThis.localStorage.setItem(CONFIG_STORAGE_KEY, JSON.stringify(config));
 }
 
-/** 必填校验；返回缺失项的中文名（空数组 = 可以启动宿主）。 */
+/** relay 只按 http(s) 选择并转发上游：`libsql://`、`turso://` 会被 Worker 直接拒绝。 */
+function isHttpAddress(value: string): boolean {
+  try {
+    const url = new URL(value);
+    return url.protocol === "http:" || url.protocol === "https:";
+  } catch {
+    return false;
+  }
+}
+
+/** 上游地址：空值按必填报出，非空但非 http(s) 报格式，二者都在设置页可见。 */
+function addressProblems(label: string, value: string): string[] {
+  if (!value.trim()) return [label];
+  return isHttpAddress(value) ? [] : [`${label}（须为 http(s) 地址）`];
+}
+
+/** 必填与格式校验；返回待处理项的中文名（空数组 = 可以启动宿主）。 */
 export function configProblems(config: BrowserConfig): string[] {
   const problems: string[] = [];
   if (!config.model.id.trim()) problems.push("模型 ID");
-  if (!config.model.baseUrl.trim()) problems.push("模型 Base URL");
+  problems.push(...addressProblems("模型 Base URL", config.model.baseUrl));
   if (!config.model.apiKey.trim()) problems.push("模型 API Key");
-  if (!config.storage.url.trim()) problems.push("存储 URL");
+  problems.push(...addressProblems("存储 URL", config.storage.url));
   if (!config.storage.token.trim()) problems.push("存储 Token");
   return problems;
 }

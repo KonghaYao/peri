@@ -15,6 +15,7 @@ const fixtureGlue = [
   'if(!sock.bound&&typeof Bun==="undefined")',
   'setImmediateWrapped.mapping[id]=setImmediate(',
   'clearImmediate(handle);setImmediateWrapped.mapping[id]=undefined',
+  'if(!ENVIRONMENT_IS_NODE){throw new Error("NODERAWSOCKETS is currently only supported on Node.js environment.")}',
   'safeSetTimeout.mapping[id]=setTimeout(',
   'clearTimeout(handle);safeSetTimeout.mapping[id]=undefined',
   'globalThis.setTimeout(arg0,arg1>>>0)',

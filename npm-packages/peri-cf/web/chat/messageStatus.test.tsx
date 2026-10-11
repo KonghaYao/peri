@@ -133,7 +133,7 @@ describe('payload full-text entry point', () => {
     const reader = commandPayloadReader(() => undefined);
     const failure = await reader({ id: 'gen:1' }).catch((error: unknown) => error) as { code?: string; message?: string };
     expect(failure.code).toBe('unavailable');
-    expect(failure.message).toContain('同步尚未就绪');
+    expect(failure.message).toContain('会话尚未就绪');
   });
 
   test('readPayload surfaces client-side command failures through the SDK helper', async () => {

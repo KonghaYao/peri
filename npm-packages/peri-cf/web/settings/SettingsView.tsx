@@ -66,7 +66,7 @@ export function SettingsView({ config, onSave, onClose }: SettingsViewProps) {
           <h2>存储服务</h2>
           <label className="settings-field">
             <span>存储 URL（必填）</span>
-            <input value={draft.storage.url} placeholder="libsql://your-db.turso.io" autoComplete="off" spellCheck={false}
+            <input value={draft.storage.url} placeholder="https://your-db.example" autoComplete="off" spellCheck={false}
               onChange={(event) => setStorage({ url: event.target.value })} />
           </label>
           <label className="settings-field">

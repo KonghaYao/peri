@@ -36,6 +36,7 @@
 4. 无状态后端：已删除 `worker/chat/*`、`worker/wasm/*`、`worker/instances/*`、`worker/sdk/*`、
    `worker/api/json.ts` 与 `/api/v2/*`、`/api/instances`、426 旧面；`worker/index.ts` +
    `worker/api/{router,app,http,relay}.ts` 只剩静态资源、`GET /api/config` 与 relay。
+   （注：该句已被下文「配置与凭据迁移」追加节取代——`GET /api/config` 已删除。）
 5. 前端迁移：新增 `web/host/`、`web/runtime/`（application/registry/session/projection/connection/
    creation/interactions/repository/logging）；删除 `web/api/sync.ts`、`web/instances/`、
    `shared/{resources,instances}.ts` 与控制帧 schema；UI 消费本地 `ChatApi`/`ChatConnection`。

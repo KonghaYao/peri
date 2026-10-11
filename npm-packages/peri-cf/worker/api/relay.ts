@@ -60,37 +60,77 @@ function relayTarget(kind: RelayKind, request: Request): RelayTarget {
   return { url: target, encodedBase };
 }
 
-/** 把结构体内的绝对 `base_url` 改写为 relay 相对前缀；未命中时保持原字节。 */
+/**
+ * 原位把 `"base_url"` 的字符串值改写为 relay 相对前缀：只替换该 JSON 字符串字面量本身，
+ * 文档内其它字节（数字字面量、空白与换行等）保持原样；单行 NDJSON 与美化多行 JSON 都生效。
+ * 字符串内容里的同名字面量、`null` 与非字符串值、非绝对 http(s) URL 一律跳过。
+ */
 function rewriteStorageBaseUrls(text: string, encodedBase: string): string {
   if (!text.includes('"base_url"')) return text;
-  return text.split("\n").map((line) => {
-    if (!line.includes('"base_url"')) return line;
-    try {
-      const value = JSON.parse(line) as unknown;
-      if (!rewriteBaseUrlField(value, encodedBase)) return line;
-      return JSON.stringify(value);
-    } catch {
-      return line;
-    }
-  }).join("\n");
-}
-
-function rewriteBaseUrlField(value: unknown, encodedBase: string): boolean {
-  if (Array.isArray(value)) return value.map((entry) => rewriteBaseUrlField(entry, encodedBase)).some(Boolean);
-  if (value === null || typeof value !== "object") return false;
-  let rewritten = false;
-  for (const [key, entry] of Object.entries(value)) {
-    if (key === "base_url" && typeof entry === "string") {
-      const replacement = relayRelative(entry, encodedBase);
-      if (replacement !== undefined) {
-        (value as Record<string, unknown>)[key] = replacement;
-        rewritten = true;
-      }
+  let output = "";
+  let cursor = 0;
+  let index = 0;
+  while (index < text.length) {
+    if (text[index] !== '"') {
+      index++;
       continue;
     }
-    if (rewriteBaseUrlField(entry, encodedBase)) rewritten = true;
+    const keyEnd = stringLiteralEnd(text, index);
+    if (keyEnd === -1) break;
+    const colon = skipJsonWhitespace(text, keyEnd);
+    if (text[colon] !== ":" || decodeStringLiteral(text.slice(index, keyEnd)) !== "base_url") {
+      index = keyEnd;
+      continue;
+    }
+    const valueStart = skipJsonWhitespace(text, colon + 1);
+    if (text[valueStart] !== '"') {
+      index = keyEnd;
+      continue;
+    }
+    const valueEnd = stringLiteralEnd(text, valueStart);
+    if (valueEnd === -1) break;
+    const candidate = decodeStringLiteral(text.slice(valueStart, valueEnd));
+    const replacement = candidate === undefined ? undefined : relayRelative(candidate, encodedBase);
+    if (replacement !== undefined) {
+      output += text.slice(cursor, valueStart) + JSON.stringify(replacement);
+      cursor = valueEnd;
+    }
+    index = valueEnd;
   }
-  return rewritten;
+  return output + text.slice(cursor);
+}
+
+/** 返回字符串字面量结束后的下标；未闭合或非法转义未中止的返回 -1。 */
+function stringLiteralEnd(text: string, start: number): number {
+  for (let index = start + 1; index < text.length; index++) {
+    const char = text[index];
+    if (char === "\\") {
+      index++;
+      continue;
+    }
+    if (char === '"') return index + 1;
+  }
+  return -1;
+}
+
+function skipJsonWhitespace(text: string, start: number): number {
+  let index = start;
+  while (index < text.length) {
+    const char = text[index];
+    if (char !== " " && char !== "\t" && char !== "\n" && char !== "\r") break;
+    index++;
+  }
+  return index;
+}
+
+/** 解析完整字符串字面量（含引号）；非法字面量返回 undefined，按不命中处理。 */
+function decodeStringLiteral(literal: string): string | undefined {
+  try {
+    const value = JSON.parse(literal) as unknown;
+    return typeof value === "string" ? value : undefined;
+  } catch {
+    return undefined;
+  }
 }
 
 function relayRelative(candidate: string, encodedBase: string): string | undefined {
