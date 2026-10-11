@@ -1,7 +1,7 @@
 /**
  * e2e 模拟测试 — spawn 构建产物 dist/peri-workflow.js，模拟宿主完整交互。
  *
- * 1. **JSON-RPC 模式**：模拟宿主进程 — 发 workflow/start、响应 agent/run、
+ * 1. **JSON-RPC 模式**：模拟宿主进程 — 发 workflow/start、回投 agent/result、
  *    断言 progress/journal/workflow/done 全事件链（真实 engine 执行）。
  * 2. **CLI 子命令模式**：构造临时 workflow-runs 目录，验证 read/list 输出与错误路径。
  *
@@ -112,6 +112,19 @@ function startRpc(): RpcSession {
   }
 }
 
+/** 模拟宿主回投 agent/result（取 agent/task 通知里的 taskId；P6 wire）。 */
+function settleTask(
+  s: RpcSession,
+  agentTask: Record<string, unknown>,
+  result: unknown
+): void {
+  s.send({
+    jsonrpc: '2.0',
+    method: 'agent/result',
+    params: { taskId: (agentTask.params as { taskId: string }).taskId, result },
+  })
+}
+
 const sessions: RpcSession[] = []
 
 afterAll(() => {
@@ -127,7 +140,7 @@ beforeAll(() => {
 // ═══════════════════════════════════════════════════════════
 
 describe('JSON-RPC 模式（宿主模拟）', () => {
-  test('workflow/start → agent/run → 响应 → workflow/done 全链路', async () => {
+  test('workflow/start → agent/task → agent/result → workflow/done 全链路', async () => {
     const s = startRpc()
     sessions.push(s)
 
@@ -154,14 +167,10 @@ return { answer: r }`
     // 事件链前置
     await s.waitFor((m) => (m.method as string) === 'progress/event' && (m.params as { type: string }).type === 'run_started')
 
-    // 收到 agent/run 请求 → 模拟宿主响应 ok
-    const agentReq = await s.waitFor((m) => m.method === 'agent/run')
-    expect((agentReq.params as { runId: string }).runId).toBe('e2e-run-1')
-    s.send({
-      jsonrpc: '2.0',
-      id: agentReq.id,
-      result: { kind: 'ok', output: '宿主模拟结果', usage: { outputTokens: 42 } },
-    })
+    // 收到 agent/task 通知 → 模拟宿主回投 agent/result（ok）
+    const agentTask = await s.waitFor((m) => m.method === 'agent/task')
+    expect((agentTask.params as { runId: string }).runId).toBe('e2e-run-1')
+    settleTask(s, agentTask, { kind: 'ok', output: '宿主模拟结果', usage: { outputTokens: 42 } })
 
     // 终态
     const done = await s.waitFor(
@@ -198,13 +207,9 @@ return await agent('fresh-null')`
       params: { runId: 'e2e-fresh-null-resume', cwd: '/tmp', script, resume: null },
     })
     await s.waitFor((m) => m.id === 11 && 'result' in m)
-    const agentReq = await s.waitFor((m) => m.method === 'agent/run')
-    expect((agentReq.params as { runId: string }).runId).toBe('e2e-fresh-null-resume')
-    s.send({
-      jsonrpc: '2.0',
-      id: agentReq.id,
-      result: { kind: 'ok', output: 'fresh-result', usage: { outputTokens: 1 } },
-    })
+    const agentTask = await s.waitFor((m) => m.method === 'agent/task')
+    expect((agentTask.params as { runId: string }).runId).toBe('e2e-fresh-null-resume')
+    settleTask(s, agentTask, { kind: 'ok', output: 'fresh-result', usage: { outputTokens: 1 } })
     const done = await s.waitFor((m) => m.method === 'workflow/done', 15000)
     expect((done.params as { status: string; returnValue: string }).status).toBe('completed')
     expect((done.params as { returnValue: string }).returnValue).toBe('fresh-result')
@@ -233,7 +238,7 @@ return await agent('fresh-null')`
     })
     await new Promise((resolve) => setTimeout(resolve, 100))
     expect(s.all().some((m) => m.method === 'progress/event')).toBe(false)
-    expect(s.all().some((m) => m.method === 'agent/run')).toBe(false)
+    expect(s.all().some((m) => m.method === 'agent/task')).toBe(false)
     expect(s.all().some((m) => m.method === 'workflow/done')).toBe(false)
   })
 
@@ -254,18 +259,14 @@ return { first, second }`
     })
     await s.waitFor((m) => m.id === 1 && 'result' in m)
 
-    const first = await s.waitFor((m) => m.method === 'agent/run')
-    s.send({
-      jsonrpc: '2.0',
-      id: first.id,
-      result: { kind: 'ok', output: 'first-result', usage: { outputTokens: 1 } },
-    })
+    const first = await s.waitFor((m) => m.method === 'agent/task')
+    settleTask(s, first, { kind: 'ok', output: 'first-result', usage: { outputTokens: 1 } })
 
     const done = await s.waitFor((m) => m.method === 'workflow/done', 10000)
     const params = done.params as { status: string; error?: string }
     expect(params.status).toBe('failed')
     expect(
-      s.all().filter((m) => m.method === 'agent/run')
+      s.all().filter((m) => m.method === 'agent/task')
     ).toHaveLength(1)
 
     const runDone = s
@@ -309,7 +310,7 @@ return { result }`
     const params = done.params as { status: string; returnValue: { result: string } }
     expect(params.status).toBe('completed')
     expect(params.returnValue).toEqual({ result: 'cached-result' })
-    expect(s.all().filter((m) => m.method === 'agent/run')).toHaveLength(0)
+    expect(s.all().filter((m) => m.method === 'agent/task')).toHaveLength(0)
     const recovered = s.all().filter((m) => m.method === 'journal/append')
     expect(recovered).toHaveLength(1)
     expect((recovered[0].params as { entry: { attempt: { disposition: string } } }).entry.attempt.disposition).toBe('recovered')
@@ -343,13 +344,9 @@ return { r1, r2 }`
       })
       await s.waitFor((m) => m.id === 1 && 'result' in m)
 
-      // 响应首个 agent 后立即 kill
-      const first = await s.waitFor((m) => m.method === 'agent/run')
-      s.send({
-        jsonrpc: '2.0',
-        id: first.id,
-        result: { kind: 'ok', output: 'r1', usage: { outputTokens: 1 } },
-      })
+      // 回投首个 agent 后立即 kill
+      const first = await s.waitFor((m) => m.method === 'agent/task')
+      settleTask(s, first, { kind: 'ok', output: 'r1', usage: { outputTokens: 1 } })
       s.send({ jsonrpc: '2.0', id: 2, method: 'workflow/kill' })
       const killResp = await s.waitFor((m) => m.id === 2)
       expect(killResp.result).toEqual({ ok: true })

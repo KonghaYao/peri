@@ -1,1 +1,1 @@
-# dist/ 为发布与 Rust 嵌入所需的 hermetic 单文件 artifact。
+# dist/ 为构建产物（`bun run build` 生成）：不入库；npm 发布经 prepublishOnly 从 src 重建。

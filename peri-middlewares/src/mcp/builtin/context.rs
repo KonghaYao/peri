@@ -26,6 +26,8 @@ use thiserror::Error;
 #[cfg(not(target_os = "emscripten"))]
 use peri_mcp_cron::CronScheduler;
 #[cfg(not(target_os = "emscripten"))]
+use peri_mcp_workflow::WorkflowInstanceInput;
+#[cfg(not(target_os = "emscripten"))]
 use peri_mcp_workspace::{WorkspaceInstanceInput, WorkspaceResourcesInput};
 
 /// 实例上下文注入的 typed 语义错误（A33）。
@@ -66,6 +68,15 @@ pub struct BuiltinInstanceContext {
     pub cwd: String,
     /// `cron` 实例输入；`None` = 未提供（`cron` 实例不可装配，见 [`Self::instance_input_ready`]）。
     pub cron: Option<CronInstanceInput>,
+    /// `workflow` 实例输入（会话装配注入的运行时槽位，见
+    /// [`peri_mcp_workflow::WorkflowInstanceInput`]）。
+    ///
+    /// `None` = **不装配该实例**（`instance_input_ready` 返回 false，spawn 点给出 typed
+    /// `InstanceInputMissing`）：只有会话级装配提供它（顶层三路径不产生会话，也就没有
+    /// 编排状态与消费者）。`Some` 而槽位未绑定时实例照常装配——工具/资源调用以明确
+    /// 错误收敛「运行时尚未绑定」，不伪装成实例缺失。
+    #[cfg(not(target_os = "emscripten"))]
+    pub workflow: Option<WorkflowInstanceInput>,
     /// 遗留测试输入槽。生产 dispatcher 不读取它；Workspace 自己持有 Bash 任务。
     #[cfg(not(target_os = "emscripten"))]
     pub workspace: Option<WorkspaceInstanceInput>,
@@ -113,6 +124,8 @@ impl BuiltinInstanceContext {
             cwd: cwd.into(),
             cron: None,
             #[cfg(not(target_os = "emscripten"))]
+            workflow: None,
+            #[cfg(not(target_os = "emscripten"))]
             workspace: None,
             #[cfg(not(target_os = "emscripten"))]
             workspace_resources: None,
@@ -128,6 +141,13 @@ impl BuiltinInstanceContext {
     #[cfg(not(target_os = "emscripten"))]
     pub fn with_cron(mut self, input: CronInstanceInput) -> Self {
         self.cron = Some(input);
+        self
+    }
+
+    /// 提供 `workflow` 实例输入（会话装配注入的运行时槽位；见 [`Self::workflow`]）。
+    #[cfg(not(target_os = "emscripten"))]
+    pub fn with_workflow(mut self, input: WorkflowInstanceInput) -> Self {
+        self.workflow = Some(input);
         self
     }
 
@@ -174,7 +194,8 @@ impl BuiltinInstanceContext {
     /// 实例装配共同使用，避免各自硬编码实例名。
     ///
     /// 判定按注册表名（`peri_acp_types::builtin_mcp::find(instance)?.name`），不另立第二张
-    /// 实例名字表：`cron` 需要 [`Self::cron`]；`web` / `artifact`
+    /// 实例名字表：`cron` 需要 [`Self::cron`]；`workflow` 需要 [`Self::workflow`]
+    /// （会话级编排状态与消费者都随会话存在，顶层装配没有）；`web` / `artifact`
     /// 不需要额外输入（`artifact` 的解析根是 [`Self::cwd`]）。
     ///
     /// `workspace` **不在本判定内**（AW3-11 明文）：它落 `Some(_) => true` 分支——
@@ -194,6 +215,7 @@ impl BuiltinInstanceContext {
         }
         match find(instance).map(|registered| registered.name) {
             Some("cron") => self.cron.is_some(),
+            Some("workflow") => self.workflow.is_some(),
             Some(_) => true,
             None => false,
         }

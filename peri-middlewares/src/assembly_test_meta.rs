@@ -35,17 +35,6 @@ fn meta_harness_disables_conditional_middleware_despite_conditions() {
     let names = assemble_names(&ctx);
     assert!(!names.iter().any(|n| n == "McpMiddleware"), "{names:?}");
 
-    // Workflow：executor 存在 + disabled → 不注册 adaptor
-    let mut ctx = base_context();
-    ctx.workflow_executor = Some(Arc::new(FakeAgentExecutor));
-    ctx.meta_harness_disabled
-        .insert("WorkflowMiddleware".to_string());
-    let names = assemble_names(&ctx);
-    assert!(
-        !names.iter().any(|n| n == "WorkflowMiddleware"),
-        "{names:?}"
-    );
-
     // Goal：controller 存在 + disabled → 不注册
     let mut ctx = base_context();
     ctx.goal_controller = Some(Arc::new(FakeGoalController));
@@ -532,7 +521,11 @@ fn meta_harness_disabled_parent_tools_filtered() {
 ///
 /// 1. 链槽位名 == `MIDDLEWARE_NAMES` 去掉 builtin 实例策略键后的集合；
 /// 2. builtin 策略键集合 == 声明表 `policy_key` 集合（常量或声明表漂移即红）；
-/// 3. 槽位名 ∩ 策略键 == ∅（两表语义不重叠）。
+/// 3. 槽位名 ∩ 策略键 == ∅（P5 原子切换后严格成立）。
+///
+/// P5 原子切换后：旧链槽位已删除，本断言恢复**严格零交集**——`WorkflowMiddleware`
+/// 是 builtin `workflow` 实例的 `policy_key`（键名沿用，用户配置兼容），链槽位名
+/// 集合里不再有它。
 ///
 /// 与 §3 IF-D7 A 节的等价表述一致：`槽位名 ∪ 策略键 == MIDDLEWARE_NAMES ∪
 /// BUILTIN_INSTANCE_POLICY_KEYS`。`BUILTIN_INSTANCE_POLICY_KEYS` 常量由 S-02
@@ -559,6 +552,7 @@ fn middleware_names_match_production_blueprint() {
         peri_acp_types::builtin_mcp::BUILTIN_MCP_INSTANCES.len(),
         "policy_key 必须在声明表内唯一"
     );
+    // P5 后：链槽位名与 builtin 策略键严格零交集。
     assert!(
         slot_names.is_disjoint(&policy_keys),
         "链槽位名与 builtin 策略键必须语义不重叠: {slot_names:?} / {policy_keys:?}"
@@ -612,7 +606,8 @@ fn middleware_tool_names_match_static_tool_sets() {
             "Agent",
             "AgentResult",
             // WorkflowMiddleware（peri-workflow::tool::WorkflowTool）
-            "Workflow",
+            // 双轨期（P3–P5）：`Workflow` 已迁为 builtin `workflow` 实例的声明
+            // （`WORKFLOW_TOOLS`），按迁移惯例不再计入本静态并集；链槽删除见 P5。
             // TodoMiddleware
             "TodoWrite",
             // ToolSearch

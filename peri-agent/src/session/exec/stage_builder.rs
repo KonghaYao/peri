@@ -32,12 +32,11 @@ use peri_acp_types::{
     interaction::UserInteractionBroker,
     mcp_skills::McpSkillRegistry,
     plugin::LoadedPlugin,
-    ports::{McpPoolPort, SessionMcpCapabilityPort, ToolSearchPort, WorkflowMiddlewarePort},
+    ports::{McpPoolPort, SessionMcpCapabilityPort, ToolSearchPort},
     session::{MessageQueue, SessionInbox},
     session_resources::SessionResources,
     skills::SkillRoot,
     tools::TodoItem,
-    workflow::AgentExecutor,
 };
 
 use crate::agent::{
@@ -115,10 +114,8 @@ pub struct StageBuildInput {
     pub tool_search_index: Arc<dyn ToolSearchPort>,
     /// 共享工具注册表（deferred tools）
     pub shared_tools: Arc<RwLock<BTreeMap<String, Arc<dyn BaseTool>>>>,
-    /// Workflow executor（Some 时注册 Workflow 中间件）
-    pub workflow_executor: Option<Arc<dyn AgentExecutor>>,
-    /// 会话级 WorkflowMiddleware 端口
-    pub workflow_middleware: Option<Arc<dyn WorkflowMiddlewarePort>>,
+    /// 会话级 workflow 完成通知源（P5；见 `session::factory::AssemblyContext` 同名字段）
+    pub workflow_notifications: Option<Arc<peri_acp_types::workflow::WorkflowNotifications>>,
     /// 会话资源门面（transcript persistence 激活与 child 保存的唯一入口）
     pub session_resources: Option<Arc<dyn SessionResources>>,
     /// 当前会话 thread ID

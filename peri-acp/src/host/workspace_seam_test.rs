@@ -60,6 +60,8 @@ async fn seam_fixture() -> SeamFixture {
         workspace_bash_default_run_in_background: false,
         // 本夹具直接构造顶层装配：资源面输入同样保持未接线（会话路径才装载）。
         workspace_resources: None,
+        // 同理：workflow 运行时槽位是会话级装配输入，本夹具无会话上下文。
+        workflow_input: None,
         // 无会话上下文（测试夹具）：A24 关闭集为空集。
         builtin_closed: Default::default(),
         // 宿主技能面关闭位与关闭集同源：本夹具无会话上下文，恒为假。

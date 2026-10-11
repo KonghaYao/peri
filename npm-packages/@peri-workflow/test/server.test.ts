@@ -1,14 +1,14 @@
 /**
  * server 测试 — handleRequest 的 workflow/start（真实 engine 闭环）、kill、未知方法。
  *
- * 不 mock engine：start 后真实 engine 发出 agent/run，测试以 handleResponse
- * 模拟宿主响应，断言 workflow/done 终态。process.exit 置为 noop
+ * 不 mock engine：start 后真实 engine 发出 agent/task 通知，测试以 handleTaskResult
+ * 模拟宿主回投 agent/result，断言 workflow/done 终态。process.exit 置为 noop
  * （engine 完成后会调用，测试进程不能真退出）。
  */
 import { afterAll, describe, expect, test } from 'bun:test'
 import { createHash } from 'node:crypto'
 import { handleRequest } from '../src/server'
-import { handleResponse, setOutWriter } from '../src/rpc'
+import { handleTaskResult, setOutWriter } from '../src/rpc'
 
 // ─── 进程级 patch ──────────────────────────────────────────
 
@@ -63,13 +63,14 @@ return { answer: r }`
       buildId: '@peri-code/workflow@0.2.0',
     })
 
-    // 真实 engine 发 agent/run → 模拟宿主响应
-    const agentReq = await waitFor((m) => m.method === 'agent/run')
-    handleResponse({
-      jsonrpc: '2.0',
-      id: agentReq.id as number,
-      result: { kind: 'ok', output: 'srv-out', usage: { outputTokens: 5 } },
-    } as never)
+    // 真实 engine 发 agent/task 通知 → 模拟宿主回投 agent/result
+    const agentTask = await waitFor((m) => m.method === 'agent/task')
+    handleTaskResult({
+      params: {
+        taskId: (agentTask.params as { taskId: string }).taskId,
+        result: { kind: 'ok', output: 'srv-out', usage: { outputTokens: 5 } },
+      },
+    })
 
     // 终态
     const done = await waitFor((m) => m.method === 'workflow/done')
@@ -106,7 +107,7 @@ return { phaseUpdated: true }`
     const params = done.params as { status: string; returnValue: { phaseUpdated: boolean } }
     expect(params.status).toBe('completed')
     expect(params.returnValue).toEqual({ phaseUpdated: true })
-    expect(written.some((m) => m.method === 'agent/run')).toBe(false)
+    expect(written.some((m) => m.method === 'agent/task')).toBe(false)
 
     const phaseTypes = written
       .filter((m) => m.method === 'progress/event')
@@ -168,16 +169,17 @@ return await agent('retry-me')`
       },
     })
 
-    const agentReq = await waitFor((m) => m.method === 'agent/run')
-    expect(agentReq.params).toMatchObject({ runId: '019-retry-run', agentId: 0, prompt: 'retry-me' })
-    handleResponse({
-      jsonrpc: '2.0',
-      id: agentReq.id as number,
-      result: { kind: 'ok', output: 'recovered-live', usage: { outputTokens: 1 } },
-    } as never)
+    const agentTask = await waitFor((m) => m.method === 'agent/task')
+    expect(agentTask.params).toMatchObject({ runId: '019-retry-run', agentId: 0, prompt: 'retry-me' })
+    handleTaskResult({
+      params: {
+        taskId: (agentTask.params as { taskId: string }).taskId,
+        result: { kind: 'ok', output: 'recovered-live', usage: { outputTokens: 1 } },
+      },
+    })
     const done = await waitFor((m) => m.method === 'workflow/done')
     expect((done.params as { returnValue: string }).returnValue).toBe('recovered-live')
-    expect(written.filter((m) => m.method === 'agent/run')).toHaveLength(1)
+    expect(written.filter((m) => m.method === 'agent/task')).toHaveLength(1)
     const produced = written
       .filter((m) => m.method === 'journal/append')
       .map((m) => (m.params as { entry: { attempt?: Record<string, unknown> } }).entry)
@@ -211,7 +213,7 @@ return await agent('retry-me')`
         error: { code: -32602, message: 'resume must be an array when resumeFromRunId is present' },
       }])
     }
-    expect(written.some((message) => message.method === 'agent/run')).toBe(false)
+    expect(written.some((message) => message.method === 'agent/task')).toBe(false)
   })
 
   test('workflow/start：invalid-present budgetTotal 在启动前同步拒绝', async () => {

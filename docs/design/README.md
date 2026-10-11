@@ -60,6 +60,7 @@ draft、proposal、可行性探查、审计报告和未采纳方案不进入本�
 | Command 系统 | [command-system.md](command-system.md) | 对应 command active issue 与代码 |
 | TUI Chat Workbench | [tui-chat-workbench.md](tui-chat-workbench.md) | `spec/history/2026-08.md`（2026-08-10 条目） |
 | SubAgent 活动行 | [tui-subagent-activity.md](tui-subagent-activity.md) | TUI redesign active issue |
+| Workflow as MCP | [workflow-mcp.md](workflow-mcp.md) | [Workflow as MCP 实施](../../spec/issues/2026-10-11-workflow-as-mcp.md)；builtin 实例迁移、任务资源 + 回填信道与旧链删除进行中 |
 
 ## 维护要求
 

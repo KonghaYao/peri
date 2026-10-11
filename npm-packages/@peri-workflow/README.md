@@ -31,7 +31,7 @@
 
 ## 安装
 
-Peri 内部使用随二进制分发的固定 artifact。运行 `peri workflow --help` 可调用同一份 CLI，配置和会话初始化之前分发，不下载 npm 包。仓库开发时先 `bun run build`，再用 `node dist/peri-workflow.js --help`；新增能力是否已发布到 registry 需单独核实。
+Peri 内部按版本自动安装（`ensure_workflow_install` 自动 `npm install --prefix ~/.peri/workflow/<ver> @peri-code/workflow@<ver>`），运行 `peri workflow --help` 调用同一份 CLI。仓库开发时先 `bun run build`，再用 `node dist/peri-workflow.js --help`；新增能力是否已发布到 registry 需单独核实。
 
 ```bash
 npm install -g @peri-code/workflow
@@ -186,7 +186,7 @@ npx -y @peri-code/workflow@0.2.0 read 019fc025-c4d9-7d52-a30a-7409229e3148 --sho
 npx -y @peri-code/workflow@0.2.0 validate my-workflow.mjs
 ```
 
-Peri 用户可把上述前缀替换为 `peri workflow`，始终使用当前二进制内嵌版本。
+Peri 用户可把上述前缀替换为 `peri workflow`，始终使用 Peri 自动安装的同版本包（`~/.peri/workflow/<ver>`）。
 `boundary` 和 `adlc` 使用请求文件，返回 JSON；非零退出或 `ok: false` 不能当作检查通过。
 请求类型和固定上限见 `src/boundary.ts`、`src/adlc.ts`；编排策略与完整步骤由
 [ultra-adlc skill](../../mcp-packages/workspace/src/resources/builtin/skills/ultra-adlc/SKILL.md) 维护。

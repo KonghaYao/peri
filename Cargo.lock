@@ -3383,6 +3383,7 @@ dependencies = [
  "peri-controller",
  "peri-mcp-common",
  "peri-mcp-cron",
+ "peri-mcp-workflow",
  "peri-mcp-workspace",
  "peri-middlewares",
  "peri-model",
@@ -3643,6 +3644,23 @@ dependencies = [
 ]
 
 [[package]]
+name = "peri-mcp-workflow"
+version = "0.2.0"
+dependencies = [
+ "async-trait",
+ "parking_lot",
+ "peri-acp-types",
+ "peri-mcp-common",
+ "peri-workflow",
+ "rmcp",
+ "serde",
+ "serde_json",
+ "tokio",
+ "tracing",
+ "uuid",
+]
+
+[[package]]
 name = "peri-mcp-workspace"
 version = "0.2.0"
 dependencies = [
@@ -3713,6 +3731,7 @@ dependencies = [
  "peri-mcp-credentials",
  "peri-mcp-cron",
  "peri-mcp-web",
+ "peri-mcp-workflow",
  "peri-mcp-workspace",
  "peri-model",
  "peri-process",

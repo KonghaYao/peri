@@ -1,9 +1,9 @@
 // ─── E2E 集成测试（需要 @peri-code/workflow 已安装）──────────────
 
-use super::artifact::{workflow_local_dist_in, WORKFLOW_ARTIFACT_BYTES};
-use super::limits::try_reserve_live_attempt;
+use super::artifact::workflow_local_dist_in;
+use super::limits::RunLimitState;
 use super::run_protocol::{
-    parse_agent_run_params, parse_run_scoped, reusable_journal_prefix, validate_start_ack,
+    parse_agent_task_params, parse_run_scoped, reusable_journal_prefix, validate_start_ack,
     workflow_start_params, JournalTruncateParams,
 };
 use super::terminal::project_postcondition;
@@ -154,16 +154,25 @@ impl AgentExecutor for MockAgentExecutor {
 }
 
 #[test]
-fn live_attempt_permit_releases_capacity_on_drop() {
-    let counter = Arc::new(AtomicU64::new(0));
-    let first = try_reserve_live_attempt(&counter, Some(1)).expect("首个 live attempt 应获准");
-    assert_eq!(counter.load(Ordering::SeqCst), 1);
-    assert!(try_reserve_live_attempt(&counter, Some(1)).is_none());
-    assert_eq!(counter.load(Ordering::SeqCst), 1, "拒绝不得消耗配额");
-
-    drop(first);
-    assert_eq!(counter.load(Ordering::SeqCst), 0);
-    assert!(try_reserve_live_attempt(&counter, Some(1)).is_some());
+fn run_limit_state_tracks_tool_calls_and_keeps_first_breach() {
+    let state = RunLimitState::new(Some(5));
+    assert!(state.observe_tool_calls(3).is_none());
+    assert_eq!(state.breach(), None, "未超限不得置 breach");
+    assert_eq!(
+        state.observe_tool_calls(3).as_deref(),
+        Some("workflow exceeded maxToolCalls (5)"),
+        "累计超限时返回首次 breach 详情",
+    );
+    assert_eq!(
+        state.breach().as_deref(),
+        Some("workflow exceeded maxToolCalls (5)"),
+    );
+    // breach 只写首次：后到的超限文本不得覆写（沿用旧 limit_breach 语义）。
+    state.set_breach("workflow exceeded maxAgents (0)".into());
+    assert_eq!(
+        state.breach().as_deref(),
+        Some("workflow exceeded maxToolCalls (5)"),
+    );
 }
 
 fn completed_workflow_result() -> WorkflowResult {
@@ -304,10 +313,11 @@ fn test_workflow_start_params_preserve_budget_total() {
 }
 
 #[test]
-fn test_agent_run_params_preserve_requested_model() {
-    let params = parse_agent_run_params(
+fn test_agent_task_params_preserve_requested_model() {
+    let (task_id, params) = parse_agent_task_params(
         Some(serde_json::json!({
             "runId": "run-1",
+            "taskId": "t-1",
             "agentId": 7,
             "prompt": "inspect",
             "model": "sonnet"
@@ -316,14 +326,16 @@ fn test_agent_run_params_preserve_requested_model() {
     )
     .unwrap();
 
+    assert_eq!(task_id, "t-1");
     assert_eq!(params.model.as_deref(), Some("sonnet"));
 }
 
 #[test]
-fn test_agent_run_params_reject_invalid_model_type() {
-    let result = parse_agent_run_params(
+fn test_agent_task_params_reject_invalid_model_type() {
+    let result = parse_agent_task_params(
         Some(serde_json::json!({
             "runId": "run-1",
+            "taskId": "t-1",
             "agentId": 7,
             "prompt": "inspect",
             "model": 42
@@ -335,15 +347,31 @@ fn test_agent_run_params_reject_invalid_model_type() {
 }
 
 #[test]
-fn test_agent_run_params_reject_missing_params() {
-    assert!(parse_agent_run_params(None, "run-1").is_err());
+fn test_agent_task_params_reject_missing_params() {
+    assert!(parse_agent_task_params(None, "run-1").is_err());
 }
 
 #[test]
-fn test_agent_run_params_reject_cross_run_identity() {
-    let result = parse_agent_run_params(
+fn test_agent_task_params_reject_empty_task_id() {
+    let result = parse_agent_task_params(
+        Some(serde_json::json!({
+            "runId": "run-1",
+            "taskId": "  ",
+            "agentId": 7,
+            "prompt": "inspect"
+        })),
+        "run-1",
+    );
+
+    assert_eq!(result.unwrap_err(), "taskId must be a non-empty string");
+}
+
+#[test]
+fn test_agent_task_params_reject_cross_run_identity() {
+    let result = parse_agent_task_params(
         Some(serde_json::json!({
             "runId": "other-run",
+            "taskId": "t-1",
             "agentId": 7,
             "prompt": "inspect"
         })),
@@ -418,7 +446,7 @@ fn test_workflow_local_dist_found() {
         .join("dist")
         .join("peri-workflow.js");
     std::fs::create_dir_all(dist.parent().unwrap()).unwrap();
-    std::fs::write(&dist, WORKFLOW_ARTIFACT_BYTES).unwrap();
+    std::fs::write(&dist, "// test fixture").unwrap();
     std::fs::write(
         dist.parent()
             .unwrap()

@@ -32,6 +32,10 @@ pub struct BuiltinMcpTool {
     /// 直连性声明：是否在类型化 bridge 构造点直接进入模型 tools 参数。
     /// 与实例的 `system_mcp_tools` 集合必须一致（同一来源）。
     pub direct: bool,
+    /// 模型可见性（发现的唯一过滤位）：`false` 表示 host-only——工具保留在
+    /// 实例 `tools/list` 中供宿主调用，但不进入桥接、ToolSearch 索引与 LLM
+    /// tools 参数。可见性不是授权边界，服务端仍须校验调用上下文。
+    pub model_visible: bool,
     /// 提示词层声明模板（逐字搬运既有 `BaseTool::prompt_declaration()` 文本）；
     /// `{{name}}` / `{{title}}` 的渲染仍由 `tool_search/declaration.rs` 负责。
     pub prompt_declaration: Option<&'static str>,
@@ -58,6 +62,7 @@ const WEB_TOOLS: &[BuiltinMcpTool] = &[
         original_name: "WebSearch",
         effective_name: "WebSearch",
         direct: true,
+        model_visible: true,
         prompt_declaration: Some(
             "Look up current information beyond your knowledge → `{{name}}` ({{title}}). Query the web for recent or external facts.",
         ),
@@ -66,6 +71,7 @@ const WEB_TOOLS: &[BuiltinMcpTool] = &[
         original_name: "WebFetch",
         effective_name: "WebFetch",
         direct: true,
+        model_visible: true,
         prompt_declaration: Some(
             "Fetch a URL you have reason to trust → `{{name}}` ({{title}}). Retrieve URLs with `{{name}}`, never `curl` via Bash.",
         ),
@@ -77,6 +83,7 @@ const ARTIFACT_TOOLS: &[BuiltinMcpTool] = &[BuiltinMcpTool {
     original_name: "artifact",
     effective_name: "artifact",
     direct: true,
+    model_visible: true,
     prompt_declaration: Some(
         "Share generated HTML/Markdown as a public link → `{{name}}` ({{title}}). \
          The link expires in 7 or 30 days; use for dashboards, reports, and prototypes you want to share.",
@@ -93,18 +100,21 @@ const CRON_TOOLS: &[BuiltinMcpTool] = &[
         original_name: "cron_register",
         effective_name: "mcp__cron__cron_register",
         direct: false,
+        model_visible: true,
         prompt_declaration: None,
     },
     BuiltinMcpTool {
         original_name: "cron_list",
         effective_name: "mcp__cron__cron_list",
         direct: false,
+        model_visible: true,
         prompt_declaration: None,
     },
     BuiltinMcpTool {
         original_name: "cron_remove",
         effective_name: "mcp__cron__cron_remove",
         direct: false,
+        model_visible: true,
         prompt_declaration: None,
     },
 ];
@@ -123,6 +133,7 @@ const WORKSPACE_TOOLS: &[BuiltinMcpTool] = &[
         original_name: "Read",
         effective_name: "Read",
         direct: true,
+        model_visible: true,
         prompt_declaration: Some(
             "Read a file → `{{name}}` ({{title}}). Use `{{name}}` for file content, not `cat`/`head`/`tail`.",
         ),
@@ -131,6 +142,7 @@ const WORKSPACE_TOOLS: &[BuiltinMcpTool] = &[
         original_name: "Write",
         effective_name: "Write",
         direct: true,
+        model_visible: true,
         prompt_declaration: Some(
             "Write a file → `{{name}}` (full contents). Use `{{name}}` for writing files, not `echo >`/`sed`/`awk`.",
         ),
@@ -139,6 +151,7 @@ const WORKSPACE_TOOLS: &[BuiltinMcpTool] = &[
         original_name: "Edit",
         effective_name: "Edit",
         direct: true,
+        model_visible: true,
         prompt_declaration: Some(
             "Edit a file → `{{name}}` (targeted diff). Use `{{name}}` for targeted edits, not `echo >`/`sed`/`awk`.",
         ),
@@ -147,6 +160,7 @@ const WORKSPACE_TOOLS: &[BuiltinMcpTool] = &[
         original_name: "Glob",
         effective_name: "Glob",
         direct: true,
+        model_visible: true,
         prompt_declaration: Some(
             "Find files by name → `{{name}}` (e.g. `**/*.rs`, `*.config.json`). Use `{{name}}` for name search, not `Bash` with `find`; never `{{name}}(\"*\")`/`{{name}}(\"**/*\")` — that dumps the whole tree — list directories via `folder_operations` or `Bash ls`.",
         ),
@@ -155,6 +169,7 @@ const WORKSPACE_TOOLS: &[BuiltinMcpTool] = &[
         original_name: "Grep",
         effective_name: "Grep",
         direct: true,
+        model_visible: true,
         prompt_declaration: Some(
             "Search file contents → `{{name}}` (regex, fast, scoped). Use `{{name}}` for content search, not `grep`/`rg`.",
         ),
@@ -163,6 +178,7 @@ const WORKSPACE_TOOLS: &[BuiltinMcpTool] = &[
         original_name: "folder_operations",
         effective_name: "folder_operations",
         direct: true,
+        model_visible: true,
         prompt_declaration: Some(
             "List a directory / check structure → `{{name}}` (atomic, cross-platform, structured). Prefer `{{name}}` when entries are needed as data, `Bash ls -la` for quick one-shot human-readable output; avoid `mkdir`/`test -d` via `Bash`.",
         ),
@@ -171,14 +187,57 @@ const WORKSPACE_TOOLS: &[BuiltinMcpTool] = &[
         original_name: "Bash",
         effective_name: "Bash",
         direct: true,
+        model_visible: true,
         prompt_declaration: Some(
             "Run a shell command → `{{name}}` ({{title}}). Prefer the purpose-built tools above when applicable: they give structured output and enforce permission rules.",
         ),
     },
 ];
 
+/// `workflow` 实例的工具声明（4 项；顺序即声明段顺序）。
+///
+/// wave 5：编排能力从 middleware 槽位（链槽 `Workflow` + `WorkflowMiddlewarePort`）
+/// 迁移为 builtin 实例。三项模型面工具一律 deferred（`direct: false`，模型面名字
+/// `mcp__workflow__*`）；`WorkflowAgentResult` 是**回填通道**（宿主消费者专用，
+/// `model_visible: false`）：保留在实例 `tools/list` 中供宿主经池调用，但不进入
+/// 桥接、ToolSearch 索引与 LLM tools 参数。可见性不是授权边界——服务端仍在
+/// handler 内校验调用方令牌（`peri/workflowConsumer` `_meta`）。
+///
+/// `prompt_declaration` 全为 `None`：本实例的工具无 `BaseTool::prompt_declaration()`
+/// 文本（与 `cron` 三项同形），声明段不因迁移变化。
+const WORKFLOW_TOOLS: &[BuiltinMcpTool] = &[
+    BuiltinMcpTool {
+        original_name: "Workflow",
+        effective_name: "mcp__workflow__Workflow",
+        direct: false,
+        model_visible: true,
+        prompt_declaration: None,
+    },
+    BuiltinMcpTool {
+        original_name: "WorkflowStatus",
+        effective_name: "mcp__workflow__WorkflowStatus",
+        direct: false,
+        model_visible: true,
+        prompt_declaration: None,
+    },
+    BuiltinMcpTool {
+        original_name: "WorkflowKill",
+        effective_name: "mcp__workflow__WorkflowKill",
+        direct: false,
+        model_visible: true,
+        prompt_declaration: None,
+    },
+    BuiltinMcpTool {
+        original_name: "WorkflowAgentResult",
+        effective_name: "mcp__workflow__WorkflowAgentResult",
+        direct: false,
+        model_visible: false,
+        prompt_declaration: None,
+    },
+];
+
 /// 已实现的 builtin 实例（wave 1 = `web` / `artifact`；wave 2 增 `cron`；
-/// wave 3 增 `workspace`）。
+/// wave 3 增 `workspace`；wave 5 增 `workflow`）。
 ///
 /// 这是「实例 / 原始工具名 / effective name / 逐工具 `direct` / `prompt_declaration` /
 /// 关闭键」的**唯一事实源**：关闭集判定、默认层注入、`system_mcp_tools`、归一表与
@@ -208,13 +267,21 @@ pub const BUILTIN_MCP_INSTANCES: &[BuiltinMcpInstance] = &[
         policy_key: "WorkspaceMiddleware",
         tools: WORKSPACE_TOOLS,
     },
+    BuiltinMcpInstance {
+        name: "workflow",
+        instance: "workflow",
+        // 沿用旧链槽位名：用户配置兼容（关闭语义从「链槽关闭」变为「实例关闭」）。
+        policy_key: "WorkflowMiddleware",
+        tools: WORKFLOW_TOOLS,
+    },
 ];
 
 /// 保留实例名：已实现实例 + 后续波次预留。
 ///
-/// 当前四个保留名全部已实现（无「预留但未实现」的名字）；用户配置为任一
+/// 当前五个保留名全部已实现（无「预留但未实现」的名字）；用户配置为任一
 /// 保留名声明 `command` 或 `url` 一律是加载期 typed error。
-pub const BUILTIN_RESERVED_INSTANCE_NAMES: &[&str] = &["web", "artifact", "cron", "workspace"];
+pub const BUILTIN_RESERVED_INSTANCE_NAMES: &[&str] =
+    &["web", "artifact", "cron", "workspace", "workflow"];
 
 /// 按实例身份解析**已实现**实例；未登记的名字（含后续波次的预留名）返回 `None`。
 pub fn find(instance: &str) -> Option<&'static BuiltinMcpInstance> {

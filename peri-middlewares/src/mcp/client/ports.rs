@@ -194,6 +194,30 @@ impl peri_acp_types::ports::McpPoolPort for McpClientPool {
         );
     }
 
+    // ── 按实例消费（宿主面） ────────────────────────────────────────────
+
+    async fn call_instance_tool(
+        &self,
+        instance: &str,
+        tool: &str,
+        arguments: serde_json::Value,
+        request_meta: Option<serde_json::Value>,
+    ) -> Result<String, String> {
+        McpClientPool::call_instance_tool(self, instance, tool, arguments, request_meta).await
+    }
+
+    async fn read_instance_resource(&self, instance: &str, uri: &str) -> Result<String, String> {
+        McpClientPool::read_instance_resource(self, instance, uri).await
+    }
+
+    async fn subscribe_instance_resource(
+        &self,
+        instance: &str,
+        uri: &str,
+    ) -> Result<peri_acp_types::ports::McpResourceSubscription, String> {
+        McpClientPool::subscribe_instance_resource(self, instance, uri).await
+    }
+
     fn workspace_source(&self) -> Option<peri_acp_types::plugin::ConfigSource> {
         McpClientPool::workspace_source(self)
     }

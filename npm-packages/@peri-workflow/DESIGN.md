@@ -18,7 +18,7 @@
  └──────────────────┘              └─────────────────────────┘
 ```
 
-**核心原则**：宿主拥有 agent 执行权，本进程拥有 workflow 编排权。边界在 `agent/run` RPC 调用——宿主决定如何执行 LLM agent（选择模型、管理 API 密钥、运行工具），本进程决定 agent 之间如何编排（并行、流水线、重试）。
+**核心原则**：宿主拥有 agent 执行权，本进程拥有 workflow 编排权。边界在 **`agent/task`（发布）+ `agent/result`（回填）通知对**（P6；旧链为 `agent/run` 请求/响应）——宿主决定如何执行 LLM agent（选择模型、管理 API 密钥、运行工具），本进程决定 agent 之间如何编排（并行、流水线、重试）。
 
 ---
 
@@ -60,7 +60,7 @@
 { jsonrpc: "2.0", id: 1, result: { ok: true } }
 ```
 
-**时序**：响应立即返回（验证 stage），workflow 自体异步执行。宿主必须在收到响应后随时准备好处理后续的 `agent/run` 请求和 `progress/event` 通知。
+**时序**：响应立即返回（验证 stage），workflow 自体异步执行。宿主必须在收到响应后随时准备好处理后续的 `agent/task` 通知与 `progress/event` 通知。
 
 #### `workflow/kill`
 
@@ -73,17 +73,18 @@
 { jsonrpc: "2.0", id: 2, result: { ok: true } }
 ```
 
-**效果**：设置 `AbortController.abort()`。正在运行的 agent 会收到 signal 并返回 `{ kind: "dead" }`。workflow 停止推进并发送 `workflow/done` 通知（status: "killed"）。
+**效果**：设置 `AbortController.abort()`。未完成任务的等待项以取消编码 `dead { reason: "killed" }` 结算（adapter 抛 `WorkflowAbortedError`）。workflow 停止推进并发送 `workflow/done` 通知（status: "killed"）。
 
-### Runner → 宿主（出站请求）
+### Runner → 宿主（出站通知）
 
-#### `agent/run`
+#### `agent/task`
 
-执行一个 agent 调用。这是 **唯一的双向请求**——runner 请求宿主执行 LLM agent，宿主必须响应。
+发布一个 agent 任务（**通知**，无 `id`、无响应）。宿主登记 `taskId` → 认领执行 → 以 `agent/result` 通知回投结果（按 `taskId` 幂等）。P6 任务信道；旧链 `agent/run` 请求/响应已删除。
 
 ```typescript
-// 请求
-{ jsonrpc: "2.0", id: 100, method: "agent/run", params: {
+// 发布（通知；无 id）
+{ jsonrpc: "2.0", method: "agent/task", params: {
+  taskId:   string,        // 单次 run 内唯一（`<runId>:<seq>`）；回填按它去重
   runId:    string,
   agentId:  number,        // 引擎层序列号（不是核心 AgentId）
   prompt:   string,
@@ -96,26 +97,27 @@
   label?:    string,       // 展示名称
   phase?:    string,       // 所属阶段
 } }
-// 成功响应
-{ jsonrpc: "2.0", id: 100, result: {
-  kind: "ok",
-  output:     string|object,
-  usage:      { outputTokens: number },
-  model?:     string,
-  toolCount?: number,
-  tokenCount?: number,
-} }
-// 跳过响应
-{ jsonrpc: "2.0", id: 100, result: { kind: "skipped" } }
-// 失败响应
-{ jsonrpc: "2.0", id: 100, result: {
-  kind: "dead",
-  reason?: "no-structured-output"|"runagent-threw"|"worktree-failed"|"unknown",
-  detail?: string,
-} }
-// 中止（特殊错误码）
-{ jsonrpc: "2.0", id: 100, error: { code: -32000, message: "aborted" } }
 ```
+
+#### `agent/result`
+
+宿主回投任务结果（**通知**，无 `id`）。
+
+```typescript
+// 回填（宿主 → runner，通知；无 id）
+{ jsonrpc: "2.0", method: "agent/result", params: {
+  runId:  string,
+  taskId: string,   // 与发布一致；未知/重复 taskId 忽略（幂等结算等待表）
+  result: AgentRunResult,
+} }
+```
+
+`AgentRunResult` 判别联合：
+- `{ kind: "ok", output: string|object, usage: { outputTokens: number }, model?, toolCount?, tokenCount? }`
+- `{ kind: "skipped" }`
+- `{ kind: "dead", reason?: "no-structured-output"|"runagent-threw"|"worktree-failed"|"killed"|"unknown", detail?: string }` —— `killed` 为取消编码，adapter 据此抛 `WorkflowAbortedError`。
+
+**等待表与幂等**：adapter 发布前登记 `taskId → pending`（`registerTask`）；`agent/result` 按 `taskId` 结算（`handleTaskResult`），未知或重复投递直接忽略；run 结束/kill 收口时以 `dead { reason: "killed" }` 结算全部未完成项（`rejectPendingTasks`），不残留悬挂 promise。
 
 **宿主职责**：
 1. 加载正确的 LLM 模型（使用 `model` 参数）
@@ -123,10 +125,12 @@
 3. 管理 API 密钥（只待在宿主内存中，绝不影响 runner 环境变量）
 4. 应用 `allowedTools` 过滤
 5. 返回结果时包含 `usage.outputTokens`
+6. 执行完成后以 `agent/result` 通知回投（`taskId` 幂等；取消/中止编码为 `dead { reason: "killed" }`）
 
-**错误码约定**：
-- `-32000`：aborted（workflow 被 kill，agent 中止）— runner 会转为 `WorkflowAbortedError`
-- `-32603`：内部错误 — runner 记录为 `{ kind: "dead", reason: "runagent-threw" }`
+**任务结算编码（P6）**：任务结果不再经请求/错误响应，统一在 `agent/result` 中编码：
+- 取消/中止：`dead { reason: "killed" }` → adapter 抛 `WorkflowAbortedError`（旧链等价 `-32000` 错误响应）；
+- 宿主内部失败：`dead { reason: "runagent-threw", detail }`（adapter 对空投递兜底同一 reason）；
+- `-32603` 等 generic error 仅适用于仍有响应的宿主 → runner 请求（`workflow/start`、`workflow/kill`）。
 
 ### Runner → 宿主（出站通知）
 
@@ -199,8 +203,8 @@ workflow 执行完毕（不管成功/失败/中止）。
 [4] runner → 宿主: progress/event(run_started)
 [5] 循环 {
 [6]   runner → 宿主: progress/event(agent_started)
-[7]   runner → 宿主: agent/run（宿主执行 LLM agent）
-[8]   宿主 → runner: AgentRunResult
+[7]   runner → 宿主: agent/task（通知；宿主登记任务并执行 LLM agent）
+[8]   宿主 → runner: agent/result（通知；按 taskId 结算等待表）
 [9]   runner → 宿主: progress/event(agent_done)
 [10]  runner → 宿主: journal/append
 [11] }
@@ -215,8 +219,8 @@ workflow 执行完毕（不管成功/失败/中止）。
 ```
 [1] 宿主 → runner: workflow/kill
 [2] runner → 宿主: { ok: true }
-[3] runner 内部 abort
-[4] 正在执行的 agent → 宿主: agent/run RPC 的响应应为 { error: { code: -32000 } }
+[3] runner 内部 abort；未完成任务的等待项以 `dead { reason: "killed" }` 结算（`rejectPendingTasks`）
+[4] 宿主亦可主动以 `agent/result` 回投取消编码；adapter 统一抛 `WorkflowAbortedError`（旧链等价 `-32000` 响应）
 [5] runner → 宿主: workflow/done { status: "killed" }
 [6] runner 进程退出
 ```

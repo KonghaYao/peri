@@ -5,6 +5,7 @@ mod cache;
 #[cfg(test)]
 #[path = "client/cache_policy_test.rs"]
 mod cache_policy_tests;
+mod instance_face;
 mod lifecycle;
 mod oauth;
 pub(crate) mod output_store;
@@ -121,6 +122,9 @@ pub struct McpClientPool {
     handle_generations:
         parking_lot::Mutex<HashMap<String, Vec<(std::sync::Weak<McpClientHandle>, u64)>>>,
     next_handle_generation: std::sync::atomic::AtomicU64,
+    /// 宿主面按实例资源订阅的池内序号（`instance_face`；唯一化同一实例/URI 的多次
+    /// 订阅，不承载业务语义）。
+    pub(super) next_instance_subscription: std::sync::atomic::AtomicU64,
     pub(crate) services: parking_lot::Mutex<HashMap<String, McpServiceWrapper>>,
     /// builtin 实例的**代监督者**表（键 = server name，与 `services` 同期登记 / 移除）。
     ///
@@ -285,6 +289,7 @@ impl McpClientPool {
             clients: parking_lot::RwLock::new(HashMap::new()),
             handle_generations: parking_lot::Mutex::new(HashMap::new()),
             next_handle_generation: std::sync::atomic::AtomicU64::new(1),
+            next_instance_subscription: std::sync::atomic::AtomicU64::new(1),
             services: parking_lot::Mutex::new(HashMap::new()),
             builtin_server_tasks: parking_lot::Mutex::new(HashMap::new()),
             builtin_context: parking_lot::Mutex::new(BuiltinContextSlot {
@@ -952,3 +957,7 @@ mod session_bindings;
 #[cfg(test)]
 #[path = "client_test.rs"]
 mod tests;
+
+#[cfg(test)]
+#[path = "client_instance_face_test.rs"]
+mod instance_face_tests;

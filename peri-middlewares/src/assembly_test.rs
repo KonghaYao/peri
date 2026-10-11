@@ -320,15 +320,6 @@ impl GoalController for FakeGoalController {
     }
 }
 
-struct FakeAgentExecutor;
-
-#[async_trait]
-impl AgentExecutor for FakeAgentExecutor {
-    async fn execute(&self, _params: AgentRunParams) -> AgentRunResult {
-        unimplemented!("契约测试不执行 workflow")
-    }
-}
-
 // ── 装配上下文构造 ────────────────────────────────────────────────────────────
 
 /// 最小装配上下文（全部条件关闭，权限模式 Default）。
@@ -374,8 +365,7 @@ fn base_context() -> AssemblyContext {
         session_id: "session-contract-test".to_string(),
         tool_search_index: Arc::new(ToolSearchIndex::new()),
         shared_tools,
-        workflow_executor: None,
-        workflow_middleware: None,
+        workflow_notifications: None,
         event_handler: Arc::new(FakeEventHandler),
         task_manager: Arc::new(TaskManager::new()),
         bg_event_tx,
@@ -623,7 +613,6 @@ fn slot_middleware_name(slot: &ChainSlot) -> &'static str {
         ChainSlot::AskUser => "HumanInTheLoopMiddleware",
         ChainSlot::SubAgent => "SubAgentMiddleware",
         ChainSlot::Mcp => "McpMiddleware",
-        ChainSlot::Workflow => "WorkflowMiddleware",
         ChainSlot::ToolSearch => "ToolSearch",
         ChainSlot::Goal => "GoalMiddleware",
     }

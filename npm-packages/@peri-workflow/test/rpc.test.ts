@@ -1,10 +1,20 @@
 /**
- * rpc 传输层测试 — send / rpcRequest / rpcNotify / handleResponse / waitDrain。
+ * rpc 传输层测试 — send / rpcRequest / rpcNotify / handleResponse / 任务等待表 / waitDrain。
  *
  * 通过 setOutWriter 注入收集器捕获输出（模块级隔离，不影响其他测试文件）。
  */
 import { describe, expect, test, afterEach } from 'bun:test'
-import { handleResponse, rpcNotify, rpcRequest, send, setOutWriter, waitDrain } from '../src/rpc'
+import {
+  handleResponse,
+  handleTaskResult,
+  registerTask,
+  rejectPendingTasks,
+  rpcNotify,
+  rpcRequest,
+  send,
+  setOutWriter,
+  waitDrain,
+} from '../src/rpc'
 
 // ─── 输出收集 helper ───────────────────────────────────────
 
@@ -52,9 +62,9 @@ describe('send / rpcNotify', () => {
 describe('rpcRequest / handleResponse', () => {
   test('请求带自增 id，响应结果 resolve', async () => {
     captureStdout()
-    const p = rpcRequest('agent/run', { prompt: 'hi' })
+    const p = rpcRequest('some/request', { prompt: 'hi' })
     const sent = JSON.parse(written[0])
-    expect(sent.method).toBe('agent/run')
+    expect(sent.method).toBe('some/request')
     expect(typeof sent.id).toBe('number')
     expect(sent.params).toEqual({ prompt: 'hi' })
 
@@ -64,7 +74,7 @@ describe('rpcRequest / handleResponse', () => {
 
   test('响应 error 时 reject', async () => {
     captureStdout()
-    const p = rpcRequest('agent/run', {})
+    const p = rpcRequest('some/request', {})
     const sent = JSON.parse(written[0])
     handleResponse({ jsonrpc: '2.0', id: sent.id, error: { code: -32601, message: 'nope' } })
     await expect(p).rejects.toEqual({ code: -32601, message: 'nope' })
@@ -73,6 +83,41 @@ describe('rpcRequest / handleResponse', () => {
   test('未知 id 的响应被忽略（不 panic）', () => {
     captureStdout()
     expect(() => handleResponse({ jsonrpc: '2.0', id: 9999, result: 1 })).not.toThrow()
+  })
+})
+
+// ─── agent/result 任务等待表（P6 任务信道）──────────────────
+
+describe('registerTask / handleTaskResult / rejectPendingTasks', () => {
+  test('按 taskId 结算等待项', async () => {
+    const p = registerTask('run-1:t-1')
+    handleTaskResult({ params: { taskId: 'run-1:t-1', result: { kind: 'ok', output: 'x' } } })
+    await expect(p).resolves.toEqual({ kind: 'ok', output: 'x' })
+  })
+
+  test('未知/重复 taskId 的投递被忽略（幂等）', async () => {
+    const p = registerTask('run-1:t-2')
+    handleTaskResult({ params: { taskId: 'run-1:other', result: { kind: 'ok' } } })
+    expect(() => handleTaskResult({ params: { taskId: 'run-1:t-2', result: { kind: 'ok' } } })).not.toThrow()
+    await expect(p).resolves.toEqual({ kind: 'ok' })
+    // 已结算后再投递：不得抛错
+    expect(() => handleTaskResult({ params: { taskId: 'run-1:t-2', result: { kind: 'dead' } } })).not.toThrow()
+  })
+
+  test('rejectPendingTasks 以取消编码结算全部等待项', async () => {
+    const p1 = registerTask('run-1:t-3')
+    const p2 = registerTask('run-1:t-4')
+    rejectPendingTasks('workflow killed by host')
+    await expect(p1).resolves.toEqual({
+      kind: 'dead',
+      reason: 'killed',
+      detail: 'workflow killed by host',
+    })
+    await expect(p2).resolves.toEqual({
+      kind: 'dead',
+      reason: 'killed',
+      detail: 'workflow killed by host',
+    })
   })
 })
 

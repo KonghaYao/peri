@@ -6,7 +6,8 @@ use super::*;
 // 证据边界（不得读成本节 = 全部链路已端到端验证）：
 //
 // **A. 真宿主装配形态**（[`Wave3Fixture`]）：真 loader（含 step 6.5 默认层）→ 真
-// transport（`spawn_builtin_transport`）→ 真 handler（web / artifact / cron / workspace）→
+// transport（`spawn_builtin_transport`）→ 真 handler（web / artifact / cron / workspace /
+// workflow）→
 // 真实握手。与既有 [`StartupFixture`] 的差别**只有两处**：tick 可开（本波需要「1 driver」
 // 与「物理关闭后 tick 静默」两个观测面）、可写项目级 `.mcp.json` 与 `PERI_MCP_BUILTIN`
 // （关闭来源分列需要）。既有夹具与其全部断言逐位不变。
@@ -64,12 +65,16 @@ impl Wave3Fixture {
         let (cron_trigger_tx, triggers) = tokio::sync::mpsc::unbounded_channel();
         let scheduler = Arc::new(parking_lot::Mutex::new(CronScheduler::new(cron_trigger_tx)));
         // A33：实例上下文由宿主装配在 `run_initialize` **之前**注入（本夹具扮演宿主）。
-        pool.set_builtin_instance_context(Arc::new(BuiltinInstanceContext::new(cwd).with_cron(
-            CronInstanceInput {
-                scheduler: Arc::clone(&scheduler),
-                tick_enabled: spec.tick_enabled,
-            },
-        )))
+        // 与 `StartupFixture` 同形：cron 输入 + `workflow` 空槽（P3–P5 双轨期与会话装配
+        // 同构——运行时由会话旧链在 `session/new` 之后绑定，槽位未绑定不影响实例连接）。
+        pool.set_builtin_instance_context(Arc::new(
+            BuiltinInstanceContext::new(cwd)
+                .with_cron(CronInstanceInput {
+                    scheduler: Arc::clone(&scheduler),
+                    tick_enabled: spec.tick_enabled,
+                })
+                .with_workflow(WorkflowInstanceInput::slot()),
+        ))
         .expect("夹具首次注入上下文必须成功");
         let (status_tx, _status_rx) = tokio::sync::watch::channel(McpInitStatus::Pending);
         McpClientPool::run_initialize(pool.clone(), &project, &home, status_tx, None).await;

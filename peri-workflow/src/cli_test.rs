@@ -18,13 +18,21 @@ fn workflow_cli_rejects_empty_and_unknown_subcommands() {
 }
 
 #[tokio::test]
-async fn workflow_cli_spawns_embedded_artifact_for_help() {
+async fn workflow_cli_spawns_installed_artifact_for_help() {
+    if crate::runner::workflow_local_dist().is_none() {
+        eprintln!("skipping: @peri-code/workflow engine is not installed");
+        return;
+    }
     let exit_code = super::run(&[OsString::from("--help")]).await.unwrap();
     assert_eq!(exit_code, 0);
 }
 
 #[tokio::test]
 async fn workflow_cli_propagates_validate_failure() {
+    if crate::runner::workflow_local_dist().is_none() {
+        eprintln!("skipping: @peri-code/workflow engine is not installed");
+        return;
+    }
     let temp = tempfile::tempdir().unwrap();
     let missing = temp.path().join("missing-script.mjs");
     let exit_code = super::run(&[OsString::from("validate"), missing.into_os_string()])

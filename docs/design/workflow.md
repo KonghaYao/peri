@@ -1,6 +1,8 @@
 # Workflow 系统设计
 
-**状态**：现行设计
+**状态**：现行设计（部分已迁移，见下注）
+
+> 迁移提示（2026-10-11）：Workflow 已迁移为 builtin MCP 实例，接入、信道与关闭语义以 [`workflow-mcp.md`](workflow-mcp.md) 为权威。本文中 middleware 槽位 / `WorkflowMiddlewarePort` / `agent/run` 请求-响应 / 链槽位等描述为迁移前旧链；Node 引擎、journal/state 落盘格式、ADLC 检查、沙箱与 Git postcondition 等章节仍是现行事实源。完成状态见 `spec/issues/2026-10-11-workflow-as-mcp.md`。
 
 ## 1. 概述
 

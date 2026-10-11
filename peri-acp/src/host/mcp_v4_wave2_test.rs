@@ -64,7 +64,9 @@ use peri_acp_types::{
     ports::McpPoolPort,
 };
 use peri_middlewares::{
-    assembly::{BuiltinContextError, BuiltinInstanceContext, CronInstanceInput},
+    assembly::{
+        BuiltinContextError, BuiltinInstanceContext, CronInstanceInput, WorkflowInstanceInput,
+    },
     mcp::{ClientStatus, McpClientPool, McpInitStatus, McpTaskOwner},
     tool_search::{core_tools, SEARCH_EXTRA_TOOLS_NAME},
 };
@@ -170,10 +172,17 @@ impl BuiltinHostFixture {
         let scheduler = Arc::new(parking_lot::Mutex::new(peri_mcp_cron::CronScheduler::new(
             cron_trigger_tx,
         )));
-        let context = BuiltinInstanceContext::new(cwd.clone()).with_cron(CronInstanceInput {
-            scheduler,
-            tick_enabled,
-        });
+        let context = BuiltinInstanceContext::new(cwd.clone())
+            .with_cron(CronInstanceInput {
+                scheduler,
+                tick_enabled,
+            })
+            // P3 起 `workflow` 是会话级 builtin 实例（`WorkflowInstanceInput` 槽位由会话
+            // 环境装配提供，运行时在 session/new 之后就绪）：本夹具扮演会话级装配，
+            // 给**空槽**——与会话发布前的生产形态同形，实例连接 / 发现 / 工具面不依赖绑定。
+            // 无输入会让 `instance_input_ready` 判否 ⇒ spawn typed `InstanceInputMissing`
+            // ⇒ system 闸门 fatal（夹具断言面空洞）。
+            .with_workflow(WorkflowInstanceInput::slot());
         Self::start_with_context(dirs, context).await
     }
 
@@ -336,6 +345,11 @@ async fn assemble_host_with_workspace_input(
             workspace_input,
             // 资源面输入同为会话级（见上）：本文件断言面不含它，恒为 `None`。
             workspace_resources: None,
+            // workflow 运行时槽位同为会话级：本夹具扮演**会话级装配**（`session_scoped =
+            // true`，与 `host/workspace.rs` 同源）⇒ 必须与会话生产路径一样给出空槽
+            // （运行时由会话旧链在 session/new 之后绑定）。此前的 `None` 会让实例走
+            // typed `InstanceInputMissing`，system 闸门把首个 prompt 打成 fatal。
+            workflow_input: Some(WorkflowInstanceInput::slot()),
             // Bash 的 beta flag 缺省同为会话级投影：本夹具无 flag 覆盖。
             workspace_bash_default_run_in_background: false,
             // 无会话上下文（测试夹具）：A24 关闭集为空集。

@@ -8,7 +8,6 @@ use super::{WorkflowInput, WorkflowResult};
 use crate::error::WorkflowError;
 use crate::journal::WorkflowJournalStore;
 use crate::progress::WorkflowProgressStore;
-use crate::protocol::ProgressEvent;
 
 fn public_workflow_error(error: &str) -> String {
     peri_acp_types::session::bounded_error_message(error, 2_000)
@@ -192,20 +191,13 @@ pub(super) fn finalize_workflow(
     // 与 kill 分支同源，issue 2026-08-05）。status 取 final_result.status：
     // completed 路径与 Node 已发的 RunDone 幂等，failed 路径修复永久 Running。
     // 与 kill 分支时序无冲突：kill 会 abort 本 msg_loop，收尾不执行。
-    progress_store.apply_event(&ProgressEvent::RunDone {
-        run_id: final_result.run_id.clone(),
-        status: final_result.status.clone(),
-        return_value: None,
-        error: final_result.error.clone(),
-    });
-    progress_store.set_terminal_projection(
+    // 终态投影与 RunDone 同一次提交落定：订阅方按通知补读即得完整终态
+    // （execution 由 reducer 从 status 推出，acceptance 固定 Unknown）。
+    progress_store.apply_run_done(
         &final_result.run_id,
-        match final_result.status.as_str() {
-            "completed" => peri_acp_types::workflow::ExecutionStatus::Completed,
-            "killed" => peri_acp_types::workflow::ExecutionStatus::Killed,
-            _ => peri_acp_types::workflow::ExecutionStatus::Failed,
-        },
-        peri_acp_types::workflow::AcceptanceStatus::Unknown,
+        &final_result.status,
+        None,
+        final_result.error.clone(),
         final_result.post_processing_status,
         final_result.delivery_status,
     );
@@ -247,12 +239,15 @@ pub(super) fn send_killed(
         error: error.clone(),
     };
     let _ = journal.write_state(run_id, &state);
-    progress.apply_event(&crate::protocol::ProgressEvent::RunDone {
-        run_id: run_id.into(),
-        status: "killed".into(),
-        return_value: None,
-        error: error.clone(),
-    });
+    // 与 `done.send` 报告的投影一致：订阅方读到的终态投影 == 命令面结果。
+    progress.apply_run_done(
+        run_id,
+        "killed",
+        None,
+        error.clone(),
+        peri_acp_types::workflow::PostProcessingStatus::Blocked,
+        peri_acp_types::workflow::DeliveryStatus::Blocked,
+    );
     let _ = done.send(Some(super::WorkflowResult {
         run_id: run_id.into(),
         status: "killed".into(),

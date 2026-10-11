@@ -85,6 +85,6 @@
 
 - Session ID/environment 现行契约见 [ARC-WORKSPACE-001](../standards/architecture-contracts.md) 与[现行设计](../design/session-id-environment.md)：机器身份发布与权限限制、迁移来源假设、恢复/执行边界和并发保证以此为准；跨实例执行协调归部署方，Peri 不提供旧执行接管；工作区身份、目录与 binding 校验不构成 Peri 内部执行所有权协议。
 
-- 消费方：`peri-tui/src/app/mod.rs:88` 与 `peri-tui/src/cli_print.rs:136`（`Resources::open_with`，默认或显式路径失败均直接传播）；`peri-controller/src/controller.rs:222`（`Resources::open()` 后调用）；`peri-middlewares/src/`（plugin/loader.rs:14、workflow/mod.rs、assembly.rs）
+- 消费方：`peri-tui/src/app/mod.rs:88` 与 `peri-tui/src/cli_print.rs:136`（`Resources::open_with`，默认或显式路径失败均直接传播）；`peri-controller/src/controller.rs:222`（`Resources::open()` 后调用）；`peri-middlewares/src/`（plugin/loader.rs:14、assembly.rs）
 - 契约类型：`ThreadStore` trait / `ThreadMeta` / `BaseMessage` / `MessageFlags` 事实源在 `peri-acp-types/src/store/mod.rs`（sessions/mod.rs 明确「接口契约归 peri-acp-types」）
 - 门面依赖：Cargo.toml 仅保留 `peri-workflow` 等实际 Resources 实现

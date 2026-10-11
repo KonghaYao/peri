@@ -4,10 +4,13 @@ use std::sync::Arc;
 
 use peri_acp_types::tools::{BaseTool, ToolContext};
 
-use super::preflight::preflight_validate_script;
 use super::*;
+use crate::preflight::preflight_validate_script;
 use crate::protocol::{AgentRunParams, AgentRunResult, Usage};
+use crate::registry::{WorkflowRunStatus, WorkflowTaskRegistry};
 use crate::runner::AgentExecutor;
+use crate::runtime::params::MAX_SAFE_BUDGET_TOTAL;
+use crate::runtime::WorkflowRuntime;
 
 struct CountingExecutor {
     calls: Arc<AtomicUsize>,
@@ -31,15 +34,10 @@ impl AgentExecutor for CountingExecutor {
 
 fn make_tool(cwd: &str, calls: Arc<AtomicUsize>) -> (WorkflowTool, Arc<WorkflowTaskRegistry>) {
     let executor = Arc::new(CountingExecutor { calls }) as Arc<dyn AgentExecutor>;
-    let runner = Arc::new(WorkflowRunner::new(executor, cwd, None));
     let (notification_tx, _) = tokio::sync::broadcast::channel(4);
-    let registry = Arc::new(WorkflowTaskRegistry::new(notification_tx));
-    let tool = WorkflowTool::new(
-        runner,
-        Arc::clone(&registry),
-        Arc::new(WorkflowProgressStore::new()),
-        Arc::new(WorkflowJournalStore::new(cwd)),
-    );
+    let runtime = Arc::new(WorkflowRuntime::new(executor, cwd, notification_tx, None));
+    let registry = Arc::clone(runtime.registry());
+    let tool = WorkflowTool::new(runtime);
     (tool, registry)
 }
 
@@ -63,6 +61,10 @@ fn script_example_from_parameters(tool: &WorkflowTool) -> String {
 /// [回归测试] 生产 tool description 中的示例必须通过随包 Node parser。
 #[tokio::test]
 async fn test_production_description_example_passes_real_node_preflight() {
+    if crate::runner::workflow_local_dist().is_none() {
+        eprintln!("skipping: @peri-code/workflow engine is not installed");
+        return;
+    }
     let tmp = tempfile::TempDir::new().unwrap();
     let (tool, _) = make_tool(tmp.path().to_str().unwrap(), Arc::new(AtomicUsize::new(0)));
     let script = script_example_from_parameters(&tool);
@@ -75,6 +77,10 @@ async fn test_production_description_example_passes_real_node_preflight() {
 /// [回归测试] 生产示例的 grammar 变异必须在副作用前命中 parser 拒绝边界。
 #[tokio::test]
 async fn test_production_description_mutations_hit_parser_rejection_boundaries() {
+    if crate::runner::workflow_local_dist().is_none() {
+        eprintln!("skipping: @peri-code/workflow engine is not installed");
+        return;
+    }
     let tmp = tempfile::TempDir::new().unwrap();
     let (tool, _) = make_tool(tmp.path().to_str().unwrap(), Arc::new(AtomicUsize::new(0)));
     let script = script_example_from_parameters(&tool);
@@ -236,59 +242,6 @@ fn workflow_schema_exposes_budget_total_integer_bounds() {
         .contains("total token budget"));
 }
 
-#[test]
-fn parse_budget_total_accepts_omitted_and_safe_integer_bounds() {
-    assert_eq!(parse_budget_total(&serde_json::json!({})).unwrap(), None);
-    assert_eq!(
-        parse_budget_total(&serde_json::json!({"budgetTotal": 1})).unwrap(),
-        Some(1)
-    );
-    assert_eq!(
-        parse_budget_total(&serde_json::json!({
-            "budgetTotal": MAX_SAFE_BUDGET_TOTAL
-        }))
-        .unwrap(),
-        Some(MAX_SAFE_BUDGET_TOTAL)
-    );
-}
-
-#[test]
-fn parse_budget_total_rejects_invalid_values_with_stable_range_error() {
-    let invalid = [
-        serde_json::json!(null),
-        serde_json::json!(0),
-        serde_json::json!(-1),
-        serde_json::json!(1.5),
-        serde_json::json!("1000"),
-        serde_json::json!(true),
-        serde_json::json!(MAX_SAFE_BUDGET_TOTAL + 1),
-    ];
-
-    for value in invalid {
-        let error = parse_budget_total(&serde_json::json!({"budgetTotal": value})).unwrap_err();
-        assert_eq!(
-            error,
-            format!("'budgetTotal' must be an integer between 1 and {MAX_SAFE_BUDGET_TOTAL}")
-        );
-    }
-}
-
-#[test]
-fn parse_host_limits_rejects_invalid_values() {
-    for field in ["maxAgents", "maxToolCalls", "maxElapsedMs"] {
-        let input = serde_json::json!({(field): 0});
-        let error = parse_bounded_integer(&input, field, None, MAX_SAFE_INTEGER).unwrap_err();
-        assert!(error.contains(field));
-    }
-    assert!(parse_bounded_integer(
-        &serde_json::json!({"maxConcurrency": 17}),
-        "maxConcurrency",
-        Some(3),
-        MAX_CONCURRENCY_CAP,
-    )
-    .is_err());
-}
-
 #[tokio::test]
 async fn invalid_script_fails_before_workflow_side_effects() {
     let tmp = tempfile::TempDir::new().unwrap();
@@ -445,22 +398,14 @@ fn make_completion_tool(
 ) {
     let entered = Arc::new(tokio::sync::Notify::new());
     let release = Arc::new(tokio::sync::Notify::new());
-    let runner = Arc::new(WorkflowRunner::new(
-        Arc::new(GatedCompletionExecutor {
-            entered: entered.clone(),
-            release: release.clone(),
-        }),
-        cwd,
-        None,
-    ));
+    let executor: Arc<dyn AgentExecutor> = Arc::new(GatedCompletionExecutor {
+        entered: entered.clone(),
+        release: release.clone(),
+    });
     let (tx, _) = tokio::sync::broadcast::channel(4);
-    let registry = Arc::new(WorkflowTaskRegistry::new(tx));
-    let tool = WorkflowTool::new(
-        runner,
-        registry.clone(),
-        Arc::new(WorkflowProgressStore::new()),
-        Arc::new(WorkflowJournalStore::new(cwd)),
-    );
+    let runtime = Arc::new(WorkflowRuntime::new(executor, cwd, tx, None));
+    let registry = Arc::clone(runtime.registry());
+    let tool = WorkflowTool::new(runtime);
     (tool, registry, entered, release)
 }
 
@@ -523,6 +468,10 @@ fn test_invoke_fast_kill_preserves_terminal_projection() {
 #[cfg(unix)]
 #[test]
 fn test_preflight_cancellation_releases_process_and_script() {
+    if crate::runner::workflow_local_dist().is_none() {
+        eprintln!("skipping: @peri-code/workflow engine is not installed");
+        return;
+    }
     if isolated_completion_child(
         "tool::tests::test_preflight_cancellation_releases_process_and_script",
     ) {
@@ -532,7 +481,7 @@ fn test_preflight_cancellation_releases_process_and_script() {
     let fixture = tempfile::tempdir().unwrap();
     let probe = fixture.path().join("probe");
     let node = fixture.path().join("node");
-    std::fs::write(&node, "#!/bin/sh\nprintf '%s\\n' \"$$\" \"$1\" > \"$PERI_WORKFLOW_PREFLIGHT_PROBE\"\nexec /bin/sleep 30\n").unwrap();
+    std::fs::write(&node, "#!/bin/sh\nprintf '%s\\n' \"$$\" \"$3\" > \"$PERI_WORKFLOW_PREFLIGHT_PROBE\"\nexec /bin/sleep 30\n").unwrap();
     std::fs::set_permissions(&node, std::fs::Permissions::from_mode(0o755)).unwrap();
     // 当前测试只在独立子进程中设置环境，且 runtime 尚未启动。
     std::env::set_var("PATH", fixture.path());

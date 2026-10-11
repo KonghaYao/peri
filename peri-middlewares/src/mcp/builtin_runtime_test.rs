@@ -6,6 +6,7 @@ use peri_agent::middleware::r#trait::Middleware;
 use crate::mcp::builtin::closed_instances;
 use crate::mcp::builtin::context::BuiltinInstanceContext;
 use crate::mcp::{ClientStatus, McpClientHandle, McpClientPool, McpMiddleware};
+use peri_mcp_workflow::WorkflowInstanceInput;
 
 use invocation_fixture::FIXTURE_SESSION_ID;
 
@@ -586,8 +587,8 @@ impl hook_state::StartupState for StartupProbe {
 
 /// 生产启动路径夹具：`run_initialize`（生产 loader 含 step 6.5 默认层）+ 真实连接。
 ///
-/// `HOME` 被重定向到空临时目录，`PERI_MCP_BUILTIN` 置空 ⇒ 唯一注入的 server 是**四个**
-/// builtin 实例（web / artifact / cron / workspace）；断言不依赖运行者本机配置。
+/// `HOME` 被重定向到空临时目录，`PERI_MCP_BUILTIN` 置空 ⇒ 唯一注入的 server 是**五个**
+/// builtin 实例（web / artifact / cron / workspace / workflow）；断言不依赖运行者本机配置。
 struct StartupFixture {
     _fixture: tempfile::TempDir,
     _env: LoaderEnvGuard,
@@ -611,17 +612,22 @@ impl StartupFixture {
         let pool = Arc::new(McpClientPool::new_pending());
         bind_fixture_session(&pool);
         // A33：实例上下文必须由宿主装配在 `run_initialize` **之前**注入（本夹具扮演宿主）。
-        // 四个已实现实例的输入一次给齐：`web` / `artifact` 不需要额外输入（后者的解析根是
+        // 五个已实现实例的输入一次给齐：`web` / `artifact` 不需要额外输入（后者的解析根是
         // `cwd`），`cron` 要 scheduler（`tick_enabled = false`：本夹具不起 tick，tick 归属
         // 由 `mcp::builtin::runtime` / `cron` 的驱动用例与
-        // `pool_spawn_point_drives_cron_tick_and_stops_on_generation_close` 覆盖）。
+        // `pool_spawn_point_drives_cron_tick_and_stops_on_generation_close` 覆盖），
+        // `workspace` 的输入只影响工具退化（AW3-11），`workflow` 给**空槽**——与会话装配
+        // 同形（P3–P5 双轨：运行时由会话旧链在 `session/new` 之后绑定，池装配期槽位未绑定
+        // 不影响实例连接与发现）。
         let (cron_trigger_tx, cron_triggers) = tokio::sync::mpsc::unbounded_channel();
         let scheduler = Arc::new(parking_lot::Mutex::new(CronScheduler::new(cron_trigger_tx)));
         pool.set_builtin_instance_context(Arc::new(
-            BuiltinInstanceContext::new(cwd.clone()).with_cron(CronInstanceInput {
-                scheduler,
-                tick_enabled: false,
-            }),
+            BuiltinInstanceContext::new(cwd.clone())
+                .with_cron(CronInstanceInput {
+                    scheduler,
+                    tick_enabled: false,
+                })
+                .with_workflow(WorkflowInstanceInput::slot()),
         ))
         .expect("夹具首次注入上下文必须成功");
         let (status_tx, _status_rx) = tokio::sync::watch::channel(McpInitStatus::Pending);

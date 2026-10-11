@@ -131,6 +131,19 @@ fn bounded_tool_description(server_name: &str, description: Option<&str>) -> Str
     truncated
 }
 
+/// builtin 声明表中声明为 host-only（`model_visible: false`）的工具。
+///
+/// 判定要求来源确为 builtin（`ConfigSource::Builtin` 且实例身份与 server name
+/// 一致）：保留名接管在加载期已拒绝，此处仍按来源判定，不依赖配置校验的间接
+/// 结论，外部 / 动态 server 因此永不受声明表影响。声明表之外恒 `false`
+/// （可见性默认开放，保守默认不改变既有实例行为）。
+pub(crate) fn declared_model_hidden(client: &McpClientHandle, tool_name: &str) -> bool {
+    matches!(
+        &client.source,
+        Some(super::config::ConfigSource::Builtin { instance }) if instance == &client.name
+    ) && super::builtin::is_declared_model_hidden(&client.name, tool_name)
+}
+
 impl McpToolBridge {
     pub fn new(server_name: &str, tool: &Tool, client: Arc<McpClientHandle>) -> Self {
         let tool_name = tool.name.to_string();
@@ -139,13 +152,15 @@ impl McpToolBridge {
             bounded_tool_description(server_name, tool.description.as_ref().map(|d| d.as_ref()));
         let input_schema = serde_json::to_value(&*tool.input_schema)
             .unwrap_or(serde_json::Value::Object(serde_json::Map::new()));
+        let model_visible =
+            super::apps::tool_visibility(tool).model && !declared_model_hidden(&client, &tool_name);
         Self {
             server_name: server_name.to_string(),
             tool_name,
             full_name,
             description,
             input_schema,
-            model_visible: super::apps::tool_visibility(tool).model,
+            model_visible,
             direct: false,
             server_generation: 0,
             client,
@@ -172,6 +187,8 @@ impl McpToolBridge {
             server_name,
             tool.description.as_ref().map(|value| value.as_ref()),
         );
+        let model_visible =
+            super::apps::tool_visibility(tool).model && !declared_model_hidden(&client, &tool_name);
         Ok(Self {
             server_name: server_name.to_string(),
             full_name: effective_mcp_tool_name(server_name, &tool_name),
@@ -179,7 +196,7 @@ impl McpToolBridge {
             description,
             input_schema: serde_json::to_value(&*tool.input_schema)
                 .unwrap_or(serde_json::Value::Object(serde_json::Map::new())),
-            model_visible: super::apps::tool_visibility(tool).model,
+            model_visible,
             direct: false,
             server_generation: 0,
             client,
@@ -344,12 +361,18 @@ impl BaseTool for McpToolBridge {
         let arguments = input.as_object().cloned().unwrap_or_default();
         let mut request = rmcp::model::CallToolRequestParams::new(self.tool_name.clone())
             .with_arguments(arguments);
-        if matches!(self.client.source.as_ref(), Some(super::config::ConfigSource::Builtin { instance }) if instance == "workspace")
-            || matches!(
-                self.client.source.as_ref(),
-                Some(super::config::ConfigSource::WorkspaceRemote)
-            )
-        {
+        // per-call 会话身份（`peri/taskScope` 能力令牌）随源接线：workspace 工具面
+        // 与 builtin `workflow` 实例面共用同一签发面（design `workflow-mcp` §3
+        // 「per-call 身份沿用 `_meta["peri/taskScope"]`」，为 workflow 源接线）。
+        let task_scope_source = matches!(
+            self.client.source.as_ref(),
+            Some(super::config::ConfigSource::Builtin { instance })
+                if instance == "workspace" || instance == "workflow"
+        ) || matches!(
+            self.client.source.as_ref(),
+            Some(super::config::ConfigSource::WorkspaceRemote)
+        );
+        if task_scope_source {
             request.meta = pool.task_scope_meta_for(&self.server_name, session_id);
         }
         request.meta = Some(super::invocation::request_meta(&ctx, request.meta)?);
@@ -566,8 +589,8 @@ impl BaseTool for McpToolBridge {
     }
 }
 
-/// 将 content 列表格式化为纯文本字符串
-fn format_contents(contents: &[ContentBlock]) -> String {
+/// 将 content 列表格式化为纯文本字符串（模型面与宿主面 `call_instance_tool` 共用）。
+pub(crate) fn format_contents(contents: &[ContentBlock]) -> String {
     let mut parts = Vec::new();
     for content in contents {
         match content {
@@ -732,6 +755,61 @@ mod direct_flag_tests {
             url: None,
             skills_capable: false,
         })
+    }
+
+    fn make_builtin_handle(instance: &str) -> Arc<McpClientHandle> {
+        Arc::new(McpClientHandle {
+            name: instance.to_string(),
+            version: None,
+            connected_at: None,
+            protocol_version: None,
+            cache_version: None,
+            peer: None,
+            tools: vec![],
+            resources: vec![],
+            status: ClientStatus::Connected,
+            oauth_status: Default::default(),
+            source: Some(crate::mcp::config::ConfigSource::Builtin {
+                instance: instance.to_string(),
+            }),
+            url: None,
+            skills_capable: false,
+        })
+    }
+
+    /// host-only 发现过滤：bridge 的 `visible_to_model()` 等于注册表逐工具
+    /// `model_visible`（builtin 来源）；非 builtin 来源不受声明表影响。
+    ///
+    /// 派生式断言：首个 host-only 条目（workflow 的 `WorkflowAgentResult`）随实例
+    /// 注册落地后自动被覆盖，不需要改本用例。
+    #[test]
+    fn builtin_declared_model_visibility_is_applied_to_bridges() {
+        for instance in peri_acp_types::builtin_mcp::BUILTIN_MCP_INSTANCES {
+            for tool in instance.tools {
+                let bridge = McpToolBridge::new(
+                    instance.name,
+                    &make_tool(tool.original_name),
+                    make_builtin_handle(instance.name),
+                );
+                assert_eq!(
+                    bridge.visible_to_model(),
+                    tool.model_visible,
+                    "{}/{} 的桥接可见性必须等于注册表 model_visible",
+                    instance.name,
+                    tool.original_name
+                );
+            }
+        }
+        // 非 builtin 来源（source: None）：同名工具名不受 builtin 声明表影响。
+        let external = McpToolBridge::new(
+            "workflow",
+            &make_tool("WorkflowAgentResult"),
+            make_handle("workflow", vec![], ClientStatus::Connected),
+        );
+        assert!(
+            external.visible_to_model(),
+            "非 builtin 来源不得消费 builtin 声明表"
+        );
     }
 
     #[test]

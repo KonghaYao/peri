@@ -12,8 +12,6 @@
 use std::sync::Arc;
 
 use peri_acp_types::agents::AgentOverrides;
-use peri_acp_types::ports::WorkflowMiddlewarePort;
-use peri_acp_types::workflow::{AgentExecutor, ProgressEvent, WorkflowTaskResult};
 
 use crate::middleware::r#trait::Middleware;
 use crate::tools::{BaseTool, ToolInvocationResolver};
@@ -53,7 +51,7 @@ pub struct WorkflowAgentDefinition {
 /// `resources/read`（builtin `workspace` 实例的 `agent://…/agent.md`），正文
 /// 读取是异步 I/O，不允许 `block_on`（ARC-MIDDLEWARE-CAPABILITY-001）。
 #[async_trait::async_trait]
-pub trait WorkflowMiddlewareFactory: Send + Sync {
+pub trait WorkflowAgentFactory: Send + Sync {
     fn mcp_pool(&self) -> Option<Arc<dyn peri_acp_types::ports::McpPoolPort>> {
         None
     }
@@ -105,16 +103,6 @@ pub trait WorkflowMiddlewareFactory: Send + Sync {
     /// 构造 tool invocation resolver（迁移前语义 =
     /// `ExecuteExtraToolResolver::default()`）。
     fn build_tool_resolver(&self) -> Arc<dyn ToolInvocationResolver>;
-
-    /// 构造 session 级 workflow 中间件实例（`WorkflowMiddleware` upcast 为端口；
-    /// 创建点仍在宿主装配面，本方法只做实例化）。
-    fn build_workflow_middleware(
-        &self,
-        executor: Arc<dyn AgentExecutor>,
-        cwd: &str,
-        notification_tx: tokio::sync::broadcast::Sender<WorkflowTaskResult>,
-        progress_rx: Option<tokio::sync::mpsc::UnboundedReceiver<ProgressEvent>>,
-    ) -> Arc<dyn WorkflowMiddlewarePort>;
 }
 
 /// Workflow agent 模型构造产物：模型实例 + 有效模型名（GitAttribution 装配用，

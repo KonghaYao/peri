@@ -9,14 +9,10 @@
 use crate::{
     hitl::HumanInTheLoopMiddleware, mcp::McpClientPool, middleware::TodoMiddleware,
     permission::PermissionMiddleware, skills::SkillsMiddleware, subagent::SkillPreloadMiddleware,
-    workflow::WorkflowMiddleware, AgentsMdMiddleware, GitAttributionMiddleware,
-};
-use peri_acp_types::{
-    ports::WorkflowMiddlewarePort,
-    workflow::{AgentExecutor, ProgressEvent, WorkflowTaskResult},
+    AgentsMdMiddleware, GitAttributionMiddleware,
 };
 use peri_agent::{
-    agent::workflow::{WorkflowAgentContext, WorkflowAgentDefinition, WorkflowMiddlewareFactory},
+    agent::workflow::{WorkflowAgentContext, WorkflowAgentDefinition, WorkflowAgentFactory},
     middleware::r#trait::Middleware,
     tools::{BaseTool, ToolInvocationResolver},
 };
@@ -31,7 +27,7 @@ pub struct WorkflowAgentMiddlewareFactory;
 
 /// 持有 builtin pool 的装配器（A6 面③）。
 ///
-/// 覆写 [`WorkflowMiddlewareFactory::build_tools`]：在既有工具集之后追加 builtin
+/// 覆写 [`WorkflowAgentFactory::build_tools`]：在既有工具集之后追加 builtin
 /// 实例声明的 direct bridge（WebSearch / WebFetch / artifact），并按同一份
 /// frozen policy 过滤关闭实例；独立中间件链复用同一池的 Workspace 内容读取端口。
 /// 其余方法与无池工厂逐位一致（delegate）。
@@ -144,11 +140,11 @@ fn build_workflow_middlewares(
     middlewares
 }
 
-/// 构造 workflow agent 装配端口并 upcast（部署装配点调用；返回类型已锚定
+/// 构造 workflow agent 装配端口（P5：原 `WorkflowMiddlewareFactory` 更名——旧链 middleware 已删除，本端口只装配 agent 链）并 upcast（部署装配点调用；返回类型已锚定
 /// 端口 trait，调用方无需引用 peri-agent 类型路径——TUI 等消费方只写
 /// `peri_middlewares::assembly::default_workflow_middleware_factory()`）。
 pub fn default_workflow_middleware_factory(
-) -> Arc<dyn peri_agent::agent::workflow::WorkflowMiddlewareFactory> {
+) -> Arc<dyn peri_agent::agent::workflow::WorkflowAgentFactory> {
     Arc::new(WorkflowAgentMiddlewareFactory)
 }
 
@@ -159,7 +155,7 @@ pub fn default_workflow_middleware_factory(
 /// [`default_workflow_middleware_factory`] 一致。
 pub fn default_workflow_middleware_factory_with_pool(
     pool: Option<Arc<McpClientPool>>,
-) -> Arc<dyn peri_agent::agent::workflow::WorkflowMiddlewareFactory> {
+) -> Arc<dyn peri_agent::agent::workflow::WorkflowAgentFactory> {
     let agent_registry = pool
         .as_ref()
         .map(|pool| Arc::new(crate::mcp::McpAgentRegistry::new(Arc::clone(pool))));
@@ -190,7 +186,7 @@ impl BuiltinWorkflowAgentFactory {
 }
 
 #[async_trait::async_trait]
-impl WorkflowMiddlewareFactory for BuiltinWorkflowAgentFactory {
+impl WorkflowAgentFactory for BuiltinWorkflowAgentFactory {
     fn mcp_pool(&self) -> Option<Arc<dyn peri_acp_types::ports::McpPoolPort>> {
         self.builtin
             .as_ref()
@@ -243,21 +239,6 @@ impl WorkflowMiddlewareFactory for BuiltinWorkflowAgentFactory {
     fn build_tool_resolver(&self) -> Arc<dyn ToolInvocationResolver> {
         WorkflowAgentMiddlewareFactory.build_tool_resolver()
     }
-
-    fn build_workflow_middleware(
-        &self,
-        executor: Arc<dyn AgentExecutor>,
-        cwd: &str,
-        notification_tx: tokio::sync::broadcast::Sender<WorkflowTaskResult>,
-        progress_rx: Option<tokio::sync::mpsc::UnboundedReceiver<ProgressEvent>>,
-    ) -> Arc<dyn WorkflowMiddlewarePort> {
-        WorkflowAgentMiddlewareFactory.build_workflow_middleware(
-            executor,
-            cwd,
-            notification_tx,
-            progress_rx,
-        )
-    }
 }
 
 impl WorkflowAgentMiddlewareFactory {
@@ -273,7 +254,7 @@ impl WorkflowAgentMiddlewareFactory {
     /// `open_builtin_bridges`）以原名提供，关闭键为该实例的
     /// `policy_key`（`WorkspaceMiddleware`）。因此 `execution_manager` 在本函数内
     /// 已无消费点（原 `TerminalMiddleware::build_tools_with_registry` 是唯一消费者）；
-    /// 形参保留以维持端口签名（`WorkflowMiddlewareFactory::build_tools`）不变。
+    /// 形参保留以维持端口签名（`WorkflowAgentFactory::build_tools`）不变。
     /// workflow agent 的基础工具集（无 builtin 提供面）。
     ///
     /// 迁移后**不含**裸名 Web 工具：Web / Artifact 能力由 builtin 实例以
@@ -286,7 +267,7 @@ impl WorkflowAgentMiddlewareFactory {
     /// `open_builtin_bridges`）以原名提供，关闭键为该实例的
     /// `policy_key`（`WorkspaceMiddleware`）。因此 `execution_manager` 在本函数内
     /// 已无消费点（原 `TerminalMiddleware::build_tools_with_registry` 是唯一消费者）；
-    /// 形参保留以维持端口签名（`WorkflowMiddlewareFactory::build_tools`）不变。
+    /// 形参保留以维持端口签名（`WorkflowAgentFactory::build_tools`）不变。
     ///
     /// W4b（F4/J5）：**本地扫描已删除**——两个技能工具在调用时直接读会话级
     /// MCP skill registry 的当前投影（`registry` 形参；workflow agent 与主链
@@ -376,7 +357,7 @@ async fn resolve_agent_definition_via_registry(
 }
 
 #[async_trait::async_trait]
-impl WorkflowMiddlewareFactory for WorkflowAgentMiddlewareFactory {
+impl WorkflowAgentFactory for WorkflowAgentMiddlewareFactory {
     async fn resolve_agent_definition(
         &self,
         agent_type: &str,
@@ -425,20 +406,5 @@ impl WorkflowMiddlewareFactory for WorkflowAgentMiddlewareFactory {
 
     fn build_tool_resolver(&self) -> Arc<dyn ToolInvocationResolver> {
         Arc::new(crate::tool_search::ExecuteExtraToolResolver::default())
-    }
-
-    fn build_workflow_middleware(
-        &self,
-        executor: Arc<dyn AgentExecutor>,
-        cwd: &str,
-        notification_tx: tokio::sync::broadcast::Sender<WorkflowTaskResult>,
-        progress_rx: Option<tokio::sync::mpsc::UnboundedReceiver<ProgressEvent>>,
-    ) -> Arc<dyn WorkflowMiddlewarePort> {
-        Arc::new(WorkflowMiddleware::new(
-            executor,
-            cwd,
-            notification_tx,
-            progress_rx,
-        ))
     }
 }

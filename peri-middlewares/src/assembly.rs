@@ -8,17 +8,15 @@
 //! 依赖方向说明（L5）：装配上下文（[`AssemblyContext`] / [`ChainAssembly`] /
 //! [`OnBgCompleteFn`] / [`SystemPromptBuilder`]）随 L5 stage 装配迁入 Agent 层
 //! session 工厂（事实源），middlewares 具体类型经 `peri-acp-types` 端口
-//! （`McpPoolPort` / `ToolSearchPort` / `WorkflowMiddlewarePort` /
-//! `CronSchedulerPort`）接入，本模块装配时 downcast 还原具体实例。
+//! （`McpPoolPort` / `ToolSearchPort` / `CronSchedulerPort`）接入，本模块装配时
+//! downcast 还原具体实例。
 
 mod hooks;
 mod mcp;
 mod preparation;
 mod prompt;
+// Emscripten：workflow 装配随依赖段（Cargo.toml 同目标 cfg 段）一并移出，不设 wasm 变体。
 #[cfg(not(target_os = "emscripten"))]
-mod workflow;
-#[cfg(target_os = "emscripten")]
-#[path = "assembly/workflow_wasm.rs"]
 mod workflow;
 
 // builtin 实例上下文（IF-P3-04 / A33）：宿主装配（`peri-acp`）经这里拿到宿主构造的上下文
@@ -27,6 +25,9 @@ mod workflow;
 pub use crate::mcp::builtin::context::{
     BuiltinContextError, BuiltinInstanceContext, CronInstanceInput,
 };
+#[cfg(not(target_os = "emscripten"))]
+pub use peri_mcp_workflow::WorkflowInstanceInput;
+#[cfg(not(target_os = "emscripten"))]
 pub use workflow::{
     default_workflow_middleware_factory, default_workflow_middleware_factory_with_pool,
     WorkflowAgentMiddlewareFactory,
@@ -40,7 +41,6 @@ use crate::{
     plugin::PluginMiddleware,
     subagent::SubAgentMiddleware,
     tool_search::ToolSearchMiddleware,
-    workflow::{WorkflowMiddleware, WorkflowMiddlewareAdaptor},
     AtMentionMiddleware, GitAttributionMiddleware, GoalMiddleware, ImageMiddleware,
 };
 use parking_lot::RwLock;
@@ -117,14 +117,13 @@ impl MiddlewareChainAssembler for ProductionChainAssembler {
     /// `peri-acp/src/agent/builder.rs` 完全一致。
     fn assemble(&self, blueprint: &[ChainSlot], ctx: &Self::Context) -> Self::Output {
         let AssemblyContext {
-            cwd,
+            cwd: _,
             cancel,
             broker,
             permission_mode,
             model_name,
             auxiliary_model,
             plugin_loaded,
-            workflow_executor,
             event_handler,
             child_handler_factory,
             llm_factory,
@@ -149,7 +148,6 @@ impl MiddlewareChainAssembler for ProductionChainAssembler {
             mcp_pool_concrete,
             mcp_agent_registry,
             tool_search_index_concrete,
-            workflow_middleware_concrete,
             auto_classifier,
         } = preparation::resolve_ports(ctx);
 
@@ -157,33 +155,6 @@ impl MiddlewareChainAssembler for ProductionChainAssembler {
         // 的 collect_tools 提供；宿主级 shared_tools 不再注册任何工具。
 
         let parent_tools = preparation::build_parent_tools(ctx, &mcp_pool_concrete);
-
-        // Workflow 中间件（条件注册）
-        // 优先复用 session 级 WorkflowMiddleware（progress_store/registry/runner 跨 turn 存活）。
-        // 仅在无 session 级实例时创建临时实例（print 模式等）。
-        // MetaHarness：WorkflowMiddleware 关闭 → 不构造临时/复用 adaptor
-        // （设计 §2.5，构造副作用与链注册同时消失）。
-        let mut wf_adaptor: Option<WorkflowMiddlewareAdaptor> = None;
-        if !disabled.contains("WorkflowMiddleware") {
-            if let Some(ref executor) = workflow_executor {
-                let wf_mw = if let Some(ref session_mw) = workflow_middleware_concrete {
-                    Arc::clone(session_mw)
-                } else {
-                    let (notification_tx, _) = tokio::sync::broadcast::channel(32);
-                    Arc::new(WorkflowMiddleware::new(
-                        Arc::clone(executor),
-                        cwd,
-                        notification_tx,
-                        None, // per-prompt: 不需要 progress_rx
-                    ))
-                };
-
-                // 通过 WorkflowMiddlewareAdaptor 注册到中间件链。
-                // 上层会调 chain.collect_tools() 把 WorkflowTool
-                //（以及其它 middleware 提供的工具）一次性 merge 到 shared_tools。
-                wf_adaptor = Some(WorkflowMiddlewareAdaptor::new(Arc::clone(&wf_mw)));
-            }
-        }
 
         // SubAgent middleware（L3 瘦身：只声明工具与发起意图）。
         // [TRAP] SubAgent 复用 main agent 在 session/new 时捕获的 frozen CLAUDE.md/Skills
@@ -378,14 +349,6 @@ impl MiddlewareChainAssembler for ProductionChainAssembler {
                 ChainSlot::Mcp if disabled.contains("McpMiddleware") => {}
                 ChainSlot::Mcp => {
                     mcp::add_mcp(ctx, &mut chain, &mcp_pool_concrete);
-                }
-                // Workflow 中间件（通过 collect_tools 注册 WorkflowTool 为 deferred tool）
-                // MetaHarness：WorkflowMiddleware 关闭 → wf_adaptor 已为 None，不注册。
-                ChainSlot::Workflow if disabled.contains("WorkflowMiddleware") => {}
-                ChainSlot::Workflow => {
-                    if let Some(adaptor) = wf_adaptor.take() {
-                        chain.add(Box::new(adaptor));
-                    }
                 }
                 // ToolSearch 中间件
                 ChainSlot::ToolSearch if disabled.contains("ToolSearch") => {}

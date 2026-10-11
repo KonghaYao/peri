@@ -7,17 +7,19 @@ pub(super) async fn preflight_validate_script(script: &str) -> Result<(), String
         .prefix("peri-workflow-preflight-")
         .tempdir()
         .map_err(unavailable)?;
-    let artifact = temp.path().join("peri-workflow.js");
     let source = temp.path().join("script.js");
-    std::fs::write(&artifact, crate::runner::WORKFLOW_ARTIFACT_BYTES).map_err(unavailable)?;
     std::fs::write(&source, script).map_err(unavailable)?;
 
+    let prepared = crate::runner::prepare_workflow_command()
+        .await
+        .map_err(|error| format!("Workflow preflight unavailable: {error}"))?;
+
     // Normal completion waits/reaps. Cancellation kills the child and lets Tokio
-    // reap it best-effort; TempDir removes both inputs on every exit path.
-    let mut command = tokio::process::Command::new("node");
+    // reap it best-effort; TempDir removes the input on every exit path.
+    let mut command = tokio::process::Command::new(&prepared.program);
     command
         .kill_on_drop(true)
-        .arg(&artifact)
+        .args(&prepared.args)
         .arg("validate")
         .arg(&source)
         .arg("--json");

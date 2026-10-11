@@ -6,4 +6,4 @@
 //! `peri_agent::agent::workflow`（session 运行单元归 Agent 层，§2），
 //! ACP 侧保留装配面薄壳 `host/workflow_agent.rs`（注入面构造 +
 //! session 级 WorkflowMiddleware 装配编排，装配经
-//! `WorkflowMiddlewareFactory` 端口——peri-middlewares 实现）。
+//! `WorkflowAgentFactory` 端口——peri-middlewares 实现）。

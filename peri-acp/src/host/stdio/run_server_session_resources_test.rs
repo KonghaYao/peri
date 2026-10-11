@@ -55,7 +55,7 @@ async fn test_fork_registers_session_and_copies_history() {
             frozen: Some(source_frozen),
             recall_items: Vec::new(),
             agent_pool: crate::session::agent_pool::AgentPool::new(),
-            workflow_middleware: None,
+            workflow_notifications: None,
             title: None,
             tags: Vec::new(),
         },

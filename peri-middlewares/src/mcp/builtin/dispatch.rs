@@ -31,6 +31,8 @@ use super::context::BuiltinInstanceContext;
 use peri_mcp_artifact::ArtifactMcpServer;
 use peri_mcp_cron::CronMcpServer;
 use peri_mcp_web::WebMcpServer;
+#[cfg(not(target_os = "emscripten"))]
+use peri_mcp_workflow::WorkflowMcpServer;
 use peri_mcp_workspace::WorkspaceMcpServer;
 
 /// 实例的 handler 类型擦除：`runtime` 需要在运行时按实例名选择 handler，
@@ -45,6 +47,8 @@ pub(crate) enum BuiltinServerHandler {
     Artifact(ArtifactMcpServer),
     Cron(CronMcpServer),
     Workspace(WorkspaceMcpServer),
+    #[cfg(not(target_os = "emscripten"))]
+    Workflow(WorkflowMcpServer),
 }
 
 impl ServerHandler for BuiltinServerHandler {
@@ -56,6 +60,8 @@ impl ServerHandler for BuiltinServerHandler {
             Self::Artifact(server) => server.get_info(),
             Self::Cron(server) => server.get_info(),
             Self::Workspace(server) => server.get_info(),
+            #[cfg(not(target_os = "emscripten"))]
+            Self::Workflow(server) => server.get_info(),
         }
     }
 
@@ -69,6 +75,8 @@ impl ServerHandler for BuiltinServerHandler {
             Self::Artifact(server) => server.list_tools(request, context).await,
             Self::Cron(server) => server.list_tools(request, context).await,
             Self::Workspace(server) => server.list_tools(request, context).await,
+            #[cfg(not(target_os = "emscripten"))]
+            Self::Workflow(server) => server.list_tools(request, context).await,
         }
     }
 
@@ -82,6 +90,8 @@ impl ServerHandler for BuiltinServerHandler {
             Self::Artifact(server) => server.call_tool(request, context).await,
             Self::Cron(server) => server.call_tool(request, context).await,
             Self::Workspace(server) => server.call_tool(request, context).await,
+            #[cfg(not(target_os = "emscripten"))]
+            Self::Workflow(server) => server.call_tool(request, context).await,
         }
     }
 
@@ -101,6 +111,8 @@ impl ServerHandler for BuiltinServerHandler {
     ) -> Result<ListResourcesResult, McpError> {
         match self {
             Self::Workspace(server) => server.list_resources(request, context).await,
+            #[cfg(not(target_os = "emscripten"))]
+            Self::Workflow(server) => server.list_resources(request, context).await,
             _ => Ok(ListResourcesResult::default()),
         }
     }
@@ -112,6 +124,8 @@ impl ServerHandler for BuiltinServerHandler {
     ) -> Result<ListResourceTemplatesResult, McpError> {
         match self {
             Self::Workspace(server) => server.list_resource_templates(request, context).await,
+            #[cfg(not(target_os = "emscripten"))]
+            Self::Workflow(server) => server.list_resource_templates(request, context).await,
             _ => Ok(ListResourceTemplatesResult::default()),
         }
     }
@@ -123,6 +137,8 @@ impl ServerHandler for BuiltinServerHandler {
     ) -> Result<ReadResourceResponse, McpError> {
         match self {
             Self::Workspace(server) => server.read_resource(request, context).await,
+            #[cfg(not(target_os = "emscripten"))]
+            Self::Workflow(server) => server.read_resource(request, context).await,
             _ => Err(McpError::method_not_found::<
                 rmcp::model::ReadResourceRequestMethod,
             >()),
@@ -153,6 +169,8 @@ impl ServerHandler for BuiltinServerHandler {
     ) -> Option<SubscriptionFilter> {
         match self {
             Self::Workspace(server) => server.accepted_subscription_filter(requested),
+            #[cfg(not(target_os = "emscripten"))]
+            Self::Workflow(server) => server.accepted_subscription_filter(requested),
             _ => None,
         }
     }
@@ -160,6 +178,8 @@ impl ServerHandler for BuiltinServerHandler {
     async fn listen(&self, context: SubscriptionContext) -> Result<(), McpError> {
         match self {
             Self::Workspace(server) => server.listen(context).await,
+            #[cfg(not(target_os = "emscripten"))]
+            Self::Workflow(server) => server.listen(context).await,
             _ => {
                 context.cancelled().await;
                 Ok(())
@@ -228,6 +248,10 @@ impl ServerHandler for BuiltinServerHandler {
 ///   `WorkspaceMcpServer::with_resources`（`None` = 资源面未接线）。两个槽位各自独立：
 ///   资源面不因 session 级输入缺失而消失，反之亦然。
 ///
+/// - `workflow`：`ctx.workflow` 的会话槽位（[`peri_mcp_workflow::WorkflowInstanceInput`]）
+///   以 `Clone` 克隆进 handler（`Arc` 克隆，槽位句柄共享：运行时由会话装配在
+///   session/new 之后绑定，handler 每次调用按槽位解析，未绑定即明确报错）。
+///
 /// **与 `cron` 的差别（AW3-11）**：`workspace` 的 arm 是**无条件**构造的——
 /// `ctx.workspace` 为 `None` 时同样返回 `Some`（「可见但退化」：实例照常装配，只有 `Bash`
 /// 失去后台任务那一路），因此 `None` 在这一支上**不是** `HandlerNotWired`。
@@ -278,6 +302,11 @@ pub(crate) fn builtin_server_handler_with_env(
             };
             Some(BuiltinServerHandler::Workspace(server))
         }
+        #[cfg(not(target_os = "emscripten"))]
+        "workflow" => ctx
+            .workflow
+            .as_ref()
+            .map(|input| BuiltinServerHandler::Workflow(WorkflowMcpServer::new(input.clone()))),
         _ => None,
     }
 }

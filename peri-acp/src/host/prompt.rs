@@ -251,7 +251,6 @@ async fn run_prompt_attempt(
     let controller = &deployment.controller;
     let langfuse_session = deployment.langfuse_session.clone();
     let session_manager = deployment.session_manager.clone();
-    let workflow_middleware_factory = &deployment.workflow_middleware_factory;
     let stdio_command_filter = deployment.stdio_command_filter;
     let (session_id, content, _attachments) =
         crate::dispatch::prompt::extract_and_validate_run_prompt_params(&params)?;
@@ -321,7 +320,15 @@ async fn run_prompt_attempt(
             .await?;
     }
     // Read session data under lock, then release immediately.
-    let (cwd, history_payloads, is_empty, thread_id, frozen, incoming_recalls, workflow_middleware) = {
+    let (
+        cwd,
+        history_payloads,
+        is_empty,
+        thread_id,
+        frozen,
+        incoming_recalls,
+        workflow_notifications,
+    ) = {
         let mut sessions = sessions.lock().await;
         let state = sessions
             .get_mut(&session_id)
@@ -335,7 +342,7 @@ async fn run_prompt_attempt(
             state.frozen.clone(),
             // 后台 continuation 保留 recall；队列承载的新用户输入仍消费 recall。
             take_recall_for_turn(&mut state.recall_items, continuation && !managed_input),
-            state.workflow_middleware.clone(),
+            state.workflow_notifications.clone(),
         )
     };
     let history = history_payloads
@@ -369,87 +376,6 @@ async fn run_prompt_attempt(
             "Session has no frozen snapshot; refusing to rebuild it from the current state",
         ));
     };
-
-    // MetaHarness：从会话冻结数据投影（ARC-FROZEN-001——禁止从每 turn 的
-    // 当前配置重建）。设计 §2.5-2.6：装配与 workflow 渲染统一消费冻结状态。
-    let meta_harness = frozen.meta_harness().clone();
-    // H2：workflow agent 链能力事实 + 按能力投影的 system prompt（本 turn 级
-    // 构造点的 broker/permission_mode 恒 None ⇒ 审批通道无效）。基础段 / 语言
-    // 与冻结决策同源，运行环境消费冻结快照（H3）。
-    let workflow_capabilities = crate::host::workflow_agent::workflow_capabilities(
-        &meta_harness.disabled_middlewares,
-        false,
-        false,
-    );
-    let workflow_system_prompt = crate::host::workflow_agent::project_workflow_system_prompt(
-        &frozen,
-        &workflow_capabilities,
-        agent_catalog.as_ref(),
-        &cwd,
-    );
-
-    // Create workflow executor (enables Workflow tool for multi-agent orchestration)
-    // GAP-05: inject frozen data so workflow agents reuse SubAgent infra
-    // p1-wa：执行体在 peri-agent（`agent::workflow`），ACP 侧构造注入面
-    // （模型工厂 / 装配端口 / forwarder / publish hook / prompt fallback）。
-    let workflow_executor = peri_agent::agent::workflow::create_executor(
-        peri_agent::agent::workflow::WorkflowAgentContext {
-            cwd: cwd.clone(),
-            frozen_claude_md: frozen.claude_md().map(|s| s.to_string()),
-            frozen_claude_local_md: frozen.claude_local_md().map(|s| s.to_string()),
-            frozen_skill_summary: frozen.skill_summary().map(|s| s.to_string()),
-            // W4b（F4/J5）：workflow agent 的技能来源 = 会话级 MCP registry
-            // （与主链同一份）；会话未登记时为 None（技能面为空，不回落磁盘）。
-            mcp_skill_registry: session_manager.mcp_skill_registry_for(&session_id),
-            session_id: Some(session_id.clone()),
-            session_resources: Some(deployment.session_resources.clone()),
-            compact_config: {
-                let mut cc = peri_config_snapshot
-                    .config
-                    .compact
-                    .clone()
-                    .unwrap_or_default();
-                cc.apply_env_overrides();
-                Some(cc)
-            },
-            cancel: Some(cancel.clone()),
-            // 无 16_workflow 版本（P2-2026-08-02）：workflow agent 链不
-            // 注册 WorkflowTool，不得复用带 workflow 声明的主 prompt。
-            // （16_workflow 已删除（C2）；H2：按 workflow 能力投影重建。）
-            system_prompt: Some(workflow_system_prompt.clone()),
-            external_instructions: frozen.v2_frozen().external_instructions.clone(),
-            legacy_embedded_instructions: frozen.v2_frozen().legacy_embedded_instructions,
-            broker: None,
-            permission_mode: None,
-            frozen_date: Some(frozen.date().to_string()),
-            frozen_language: frozen.language().map(|s| s.to_string()),
-            progress_tx: None,
-            subagent_ctx_builder: None,
-            agent_prompt_builder: crate::host::workflow_agent::build_workflow_agent_prompt_builder(
-                Arc::clone(&agent_catalog),
-                meta_harness.clone(),
-                workflow_capabilities,
-                frozen.runtime_env().cloned(),
-            ),
-            model_factory: crate::host::workflow_agent::build_model_factory(provider, peri_config),
-            middleware_factory: Arc::clone(workflow_middleware_factory),
-            system_prompt_fallback:
-                crate::host::workflow_agent::build_workflow_system_prompt_fallback(
-                    Arc::clone(&agent_catalog),
-                    meta_harness.clone(),
-                    workflow_capabilities,
-                    frozen.runtime_env().cloned(),
-                ),
-            forwarder_launcher: crate::host::workflow_agent::build_workflow_forwarder_launcher(),
-            publish_hook: Some(crate::host::workflow_agent::build_publish_hook(controller)),
-            // Langfuse 观测：与迁移前一致（workflow agent 路径未启用遥测）。
-            langfuse_hooks: None,
-            langfuse_event_handler: None,
-            // MetaHarness：装配期关闭集合（与段落覆盖同源，见上方 meta_harness
-            // 投影——设计 §2.5）。
-            meta_harness_disabled: meta_harness.disabled_middlewares.clone(),
-        },
-    );
 
     // ── L5：SessionContext 投影（provider / peri_config / pool / SessionManager /
     //    Controller 端口化——执行体迁入 peri-agent 后由本宿主构造注入面）──
@@ -572,8 +498,7 @@ async fn run_prompt_attempt(
         tool_search_index,
         agent_catalog,
         shared_tools,
-        workflow_executor: Some(workflow_executor),
-        workflow_middleware,
+        workflow_notifications,
         event_publisher,
         subscribe,
         command_lookup,

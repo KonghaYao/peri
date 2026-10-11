@@ -172,6 +172,8 @@ pub async fn run_print(
         workspace_bash_default_run_in_background: false,
         // 资源面输入同为会话级（见上）：顶层装配无会话消费者，保持未接线。
         workspace_resources: None,
+        // 同理：workflow 运行时槽位是会话级装配输入（编排状态随会话存在），顶层恒为 `None`。
+        workflow_input: None,
         // 顶层装配无会话上下文：A24 关闭集恒为空集（会话装配才从 frozen 派生）。
         builtin_closed: Default::default(),
         // 宿主技能面关闭位与关闭集同源（会话级派生）：顶层装配恒为假。

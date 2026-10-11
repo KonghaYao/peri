@@ -119,15 +119,14 @@ pub(super) async fn build_and_execute_agent(
     // TUI 侧通知由 registry 通道提供（registry.complete → BgRegistryEvent::Completed →
     // bg-task-completed unstable event），不再经 EventSink 直推 BackgroundTaskCompleted——
     // 该映射在 event_sink 是死路径（S5.1，issue 2026-08-05-background-task-completed-event-dead-path）。
-    if let Some(wf_mw) = ctx.workflow_middleware.as_ref() {
-        // 将 session 级 TaskManager 注入 WorkflowMiddleware（延迟注入，支持内部可变性）
-        wf_mw.set_bg_registry(task_manager.clone());
-
-        // init_notification_buffer() 是 set-once gate：首次返回 true，后续返回 false。
-        // WorkflowMiddleware 是 session 级实例（session/new 创建），
-        // 因此每个 session 的消费者只 spawn 一次，无跨 session 污染。
-        if wf_mw.init_notification_buffer() {
-            let mut rx = wf_mw.subscribe_notifications();
+    //
+    // P5：通知源改为契约层句柄 [`peri_acp_types::workflow::WorkflowNotifications`]
+    //（旧链 `WorkflowMiddlewarePort` 已删除；bg registry 注入移到宿主会话装配点，
+    // 与运行时创建同一处）。`claim_consumer()` 是会话级 set-once 门：每 session
+    // 只 spawn 一个消费者，避免 broadcast 扇出造成重复 Defer。
+    if let Some(notifications) = ctx.workflow_notifications.as_ref() {
+        if notifications.claim_consumer() {
+            let mut rx = notifications.subscribe();
             let wf_router = async_router.clone();
             // task_manager 用于在 Defer 入队后递减 active_count，消除竞态窗口
             let notify_bg = task_manager.clone();

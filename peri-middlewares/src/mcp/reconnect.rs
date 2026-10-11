@@ -55,6 +55,11 @@ impl McpClientPool {
             server_name.to_string(),
         ))
         .await;
+        // 宿主面资源订阅也必须先于旧 service 关闭：它们同样持有 Subscription 并
+        // 保活连接；换代后旧订阅流不再有意义，由宿主按需要重建。
+        self.task_spawner
+            .stop_instance_resource_subscriptions(server_name)
+            .await;
         let previous_service = { self.services.lock().remove(server_name) };
         if let Some(mut svc) = previous_service {
             let _ = svc.close_with_timeout(SHUTDOWN_TIMEOUT).await;

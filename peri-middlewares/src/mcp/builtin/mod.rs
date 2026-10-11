@@ -190,6 +190,22 @@ pub(crate) fn is_declared_direct(server_name: &str, original_tool: &str) -> bool
     })
 }
 
+/// `(server_name, original_tool)` 是否为已实现实例声明的 **host-only** 工具
+/// （`model_visible: false`）。
+///
+/// 未实现 / 未知名与未声明工具恒返回 `false`：可见性默认对模型开放，只有声明表
+/// 显式收窄才隐藏（保守默认，不改变既有实例行为）。发现过滤在
+/// `tool_bridge::McpToolBridge` 构造点消费；本函数不是授权边界——服务端仍须
+/// 自行校验调用上下文。
+pub(crate) fn is_declared_model_hidden(server_name: &str, original_tool: &str) -> bool {
+    find(server_name).is_some_and(|instance| {
+        instance
+            .tools
+            .iter()
+            .any(|tool| !tool.model_visible && tool.original_name == original_tool)
+    })
+}
+
 /// builtin 工具的提示词层声明模板（A9）。
 ///
 /// 只暴露模板本身；渲染（`{{name}}` → effective name）仍由

@@ -58,6 +58,32 @@ pub use peri_acp_types::workflow::{
     WorkflowAttempt,
 };
 
+// ─── Agent 任务信道（P6：`agent/run` 请求/响应 → `agent/task` + `agent/result` 通知）──
+
+/// Node → 宿主：agent 任务发布（通知；design §5.2 第 1 条）。
+///
+/// `taskId` 作用域 = 单次 run（所属 run 由 [`AgentRunParams::run_id`] 标识）；
+/// 字段与 npm 侧 `types.ts::AgentTaskParams` 逐字段对齐（camelCase wire 命名）。
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AgentTaskParams {
+    pub task_id: String,
+    #[serde(flatten)]
+    pub params: AgentRunParams,
+}
+
+/// 宿主 → Node：agent 任务结果投递（通知；design §5.2 第 4 条）。
+///
+/// 投递契约（design §5.1）：任务结果先提交任务表，再投递本通知；Node 侧按 `taskId`
+/// 去重、已结算的重复投递忽略——通知只是结算信号，不承担可靠投递。
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AgentResultParams {
+    pub run_id: String,
+    pub task_id: String,
+    pub result: AgentRunResult,
+}
+
 // ─── Journal ───────────────────────────────────────────────
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

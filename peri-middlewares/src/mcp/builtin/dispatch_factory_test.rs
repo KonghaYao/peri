@@ -64,9 +64,9 @@ fn dispatch_factory_covers_implemented_instances_only() {
         "保留名表必须与已实现实例表一致（未接线集合为空），实际仍缺 handler 的保留名：{unwired:?}"
     );
     // 同一事实的正面表述（遍历注册表派生）：最小上下文里**只有**「需要实例输入」的实例
-    // 可以没有 handler——cron 的缺输入由 seam 在工厂之前收口 `InstanceInputMissing`，
-    // 其余每一个已实现实例（含无输入的 workspace）都必须拿到 handler。`workspace` 若被写成
-    // 条件构造，本断言即红。
+    // 可以没有 handler——cron / workflow 的缺输入由 seam 在工厂之前收口
+    // `InstanceInputMissing`，其余每一个已实现实例（含无输入的 workspace）都必须拿到
+    // handler。`workspace` 若被写成条件构造，本断言即红。
     let none_with_minimal_ctx: Vec<&str> = BUILTIN_MCP_INSTANCES
         .iter()
         .map(|instance| instance.name)
@@ -74,9 +74,9 @@ fn dispatch_factory_covers_implemented_instances_only() {
         .collect();
     assert_eq!(
         none_with_minimal_ctx,
-        vec!["cron"],
-        "最小上下文里没有 handler 的已实现实例必须恰为「需要实例输入」的 cron（缺输入归 seam 前置判定，\
-         不是未接线）；workspace 属可见但退化，必须仍有 handler"
+        vec!["cron", "workflow"],
+        "最小上下文里没有 handler 的已实现实例必须恰为「需要实例输入」的 cron 与 workflow\
+         （缺输入归 seam 前置判定，不是未接线）；workspace 属可见但退化，必须仍有 handler"
     );
 
     // 表外的名字（外部 MCP / 拼错的实例名）：非保留性先落成前置断言，再验同样的 None。
@@ -206,6 +206,8 @@ fn all_registered_instances_have_handler() {
             BuiltinServerHandler::Artifact(_) => "artifact",
             BuiltinServerHandler::Cron(_) => "cron",
             BuiltinServerHandler::Workspace(_) => "workspace",
+            #[cfg(not(target_os = "emscripten"))]
+            BuiltinServerHandler::Workflow(_) => "workflow",
         };
         assert_eq!(
             variant, instance.name,

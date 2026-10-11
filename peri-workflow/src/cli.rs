@@ -1,26 +1,23 @@
-//! Stable wrapper for the embedded workflow engine CLI.
+//! Stable wrapper for the workflow engine CLI.
 
 use std::ffi::OsString;
 use std::process::Stdio;
 
 use crate::error::WorkflowError;
 
-/// Run an allowlisted workflow CLI command in an isolated temporary artifact directory.
+/// Run an allowlisted workflow CLI command against the validated local engine artifact.
 ///
-/// The wrapper deliberately starts node directly. It never resolves or downloads a
-/// package, and the temporary directory is retained until the child exits.
+/// Acquisition goes through `prepare_workflow_command`: the pinned package installed under
+/// `~/.peri/workflow/<version>/` is reused offline, with an explicit opt-in npx fallback.
+/// The engine source is never copied into or embedded in the Rust binary.
 pub async fn run(args: &[OsString]) -> Result<i32, WorkflowError> {
     validate_args(args)?;
 
-    let temp = tempfile::Builder::new()
-        .prefix("peri-workflow-cli-")
-        .tempdir()?;
-    let artifact = temp.path().join("peri-workflow.js");
-    tokio::fs::write(&artifact, crate::runner::WORKFLOW_ARTIFACT_BYTES).await?;
+    let prepared = crate::runner::prepare_workflow_command().await?;
 
-    let mut command = tokio::process::Command::new("node");
+    let mut command = tokio::process::Command::new(&prepared.program);
     command
-        .arg(&artifact)
+        .args(&prepared.args)
         .args(args)
         .stdin(Stdio::inherit())
         .stdout(Stdio::inherit())

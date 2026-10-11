@@ -100,11 +100,13 @@ fn tools_are_non_empty_and_unique_per_instance() {
                     );
                 }
             }
-            "cron" => {
+            // wave 2：cron 冻结 `None`（A4：声明段零变化）。
+            // wave 5：workflow 四项同形（无 `BaseTool::prompt_declaration()` 文本）。
+            "cron" | "workflow" => {
                 for tool in instance.tools {
                     assert!(
                         tool.prompt_declaration.is_none(),
-                        "实例 {} 的工具 {} 必须无声明模板（A4：声明段零变化）",
+                        "实例 {} 的工具 {} 必须无声明模板（cron / workflow）",
                         instance.name,
                         tool.original_name
                     );
@@ -186,8 +188,8 @@ fn reserved_names_superset_of_implemented_instances() {
             instance.name
         );
     }
-    // 保留名表本身冻结：四个名字逐一覆盖（全部为已实现实例）。
-    for reserved in ["web", "artifact", "cron", "workspace"] {
+    // 保留名表本身冻结：五个名字逐一覆盖（全部为已实现实例）。
+    for reserved in ["web", "artifact", "cron", "workspace", "workflow"] {
         assert!(
             BUILTIN_RESERVED_INSTANCE_NAMES.contains(&reserved),
             "保留名表缺失: {reserved}"
@@ -208,11 +210,15 @@ fn policy_keys_are_unique_and_frozen() {
         BUILTIN_MCP_INSTANCES.len(),
         "关闭键必须逐实例唯一"
     );
+    // 冻结期望与 `BUILTIN_INSTANCE_POLICY_KEYS` 同步（该常量自行断言与声明表相等）：
+    // `"WorkflowMiddleware"` 是 workflow builtin 实例（P1）的关闭键，双轨期与旧链
+    // 槽位同名；旧链删除属 P5 原子切换（`spec/issues/2026-10-11-workflow-as-mcp.md`）。
     let expected: HashSet<&str> = [
         "WebMiddleware",
         "ArtifactMiddleware",
         "CronMiddleware",
         "WorkspaceMiddleware",
+        "WorkflowMiddleware",
     ]
     .into_iter()
     .collect();
@@ -391,6 +397,12 @@ fn wave1_tools_are_all_declared_direct() {
                 "cron" => assert!(
                     !tool.direct,
                     "实例 {} 的工具 {} 必须声明 direct: false（A4：deferred 工具）",
+                    instance.name, tool.original_name
+                ),
+                // wave 5：workflow 四项一律 deferred（模型面 `mcp__workflow__*`）。
+                "workflow" => assert!(
+                    !tool.direct,
+                    "实例 {} 的工具 {} 必须声明 direct: false（模型面 deferred）",
                     instance.name, tool.original_name
                 ),
                 "workspace" => assert!(

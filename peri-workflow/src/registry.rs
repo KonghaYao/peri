@@ -106,12 +106,16 @@ impl WorkflowTaskRegistry {
     }
 
     /// 终止指定 workflow，移除记录并发送 kill 信号。
-    pub fn kill(&self, run_id: &str) -> Result<(), RegistryError> {
+    ///
+    /// 返回「被终止的是一条**运行中**的 run」：已终态（仅留档）的记录同样移除，
+    /// 但返回 `false`——调用方据此区分「确实终止了运行中的 run」与「仅清理留档」。
+    pub fn kill(&self, run_id: &str) -> Result<bool, RegistryError> {
         let run = self
             .runs
             .lock()
             .remove(run_id)
             .ok_or_else(|| RegistryError::NotFound(run_id.into()))?;
+        let was_running = run.status == WorkflowRunStatus::Running;
         if let Some(kill_tx) = run.kill_tx {
             let _ = kill_tx.send(());
         }
@@ -119,7 +123,7 @@ impl WorkflowTaskRegistry {
         // workflow/kill RPC → child.kill().await → state.json → done_tx.send()
         // → active_channels.remove() → progress_store.cleanup_completed()
         // 不在此处 abort child_handle，避免中断 runner 清理路径。
-        Ok(())
+        Ok(was_running)
     }
 
     /// 列出所有 workflow run 的摘要信息。

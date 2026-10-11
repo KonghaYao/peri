@@ -7,7 +7,8 @@ use super::artifact::{WORKFLOW_BUILD_ID, WORKFLOW_PROTOCOL_VERSION};
 use super::WorkflowInput;
 use crate::error::WorkflowError;
 use crate::protocol::{
-    AgentRunParams, AgentRunResult, JournalEntry, WorkflowDoneParams, WorkflowStartParams,
+    AgentRunParams, AgentRunResult, AgentTaskParams, JournalEntry, WorkflowDoneParams,
+    WorkflowStartParams,
 };
 
 #[derive(serde::Deserialize)]
@@ -55,17 +56,32 @@ impl RunScoped for AgentRunParams {
     }
 }
 
+impl RunScoped for AgentTaskParams {
+    fn run_id(&self) -> &str {
+        &self.params.run_id
+    }
+}
+
 impl RunScoped for WorkflowDoneParams {
     fn run_id(&self) -> &str {
         &self.run_id
     }
 }
 
-pub(super) fn parse_agent_run_params(
+/// 解析 `agent/task` 通知参数（design §5.2 第 1 条）。
+///
+/// 与 `agent/run` 同一条 run 作用域校验（`runId` 必须等于当前 run）；`taskId`
+/// 非空——它是任务表主键的一半，空值会让任务不可寻址。
+pub(super) fn parse_agent_task_params(
     params: Option<Value>,
     expected_run_id: &str,
-) -> Result<AgentRunParams, String> {
-    parse_run_scoped(params, expected_run_id).map_err(str::to_string)
+) -> Result<(String, AgentRunParams), String> {
+    let parsed: AgentTaskParams =
+        parse_run_scoped(params, expected_run_id).map_err(str::to_string)?;
+    if parsed.task_id.trim().is_empty() {
+        return Err("taskId must be a non-empty string".to_string());
+    }
+    Ok((parsed.task_id, parsed.params))
 }
 
 pub(super) fn workflow_start_params(

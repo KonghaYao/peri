@@ -122,6 +122,11 @@ impl McpClientPool {
             server_name.to_string(),
         ))
         .await;
+        // 宿主面资源订阅（`subscribe_instance_resource`）同样持有 Subscription 并
+        // 保活连接：必须先于 service 关闭收口。
+        self.task_spawner
+            .stop_instance_resource_subscriptions(server_name)
+            .await;
         self.clients.write().remove(server_name);
         let service = { self.services.lock().remove(server_name) };
         if let Some(mut svc) = service {
@@ -256,6 +261,10 @@ impl McpClientPool {
             server_name.to_string(),
         ))
         .await;
+        // 宿主面资源订阅先于连接收口（同 `remove_server` 的理由）。
+        self.task_spawner
+            .stop_instance_resource_subscriptions(server_name)
+            .await;
         // 关闭实际连接
         let service = { self.services.lock().remove(server_name) };
         if let Some(mut svc) = service {

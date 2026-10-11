@@ -28,7 +28,7 @@ fn retain_failed_assembly(
             frozen: None,
             recall_items: Vec::new(),
             agent_pool: crate::session::agent_pool::AgentPool::new(),
-            workflow_middleware: None,
+            workflow_notifications: None,
             title: None,
             tags: Vec::new(),
         },

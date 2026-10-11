@@ -21,17 +21,15 @@ const INSTALL_TIMEOUT: Duration = Duration::from_secs(90);
 pub(super) const WORKFLOW_PROTOCOL_VERSION: u32 = 1;
 pub(super) const WORKFLOW_BUILD_ID: &str = "@peri-code/workflow@0.2.0";
 const NPX_FALLBACK_ENV: &str = "PERI_WORKFLOW_ALLOW_NPX_FALLBACK";
-pub(crate) const WORKFLOW_ARTIFACT_BYTES: &[u8] =
-    include_bytes!("../../../npm-packages/@peri-workflow/dist/peri-workflow.js");
 
 /// 串行化本地安装（避免并发 workflow 同时触发安装）。
 static INSTALL_LOCK: std::sync::LazyLock<tokio::sync::Mutex<()>> =
     std::sync::LazyLock::new(|| tokio::sync::Mutex::new(()));
 
 #[derive(Debug)]
-pub(super) struct WorkflowCommand {
-    pub(super) program: String,
-    pub(super) args: Vec<String>,
+pub(crate) struct WorkflowCommand {
+    pub(crate) program: String,
+    pub(crate) args: Vec<String>,
 }
 
 #[derive(serde::Deserialize)]
@@ -83,10 +81,6 @@ fn validate_workflow_artifact(base: &Path) -> Option<PathBuf> {
     {
         return None;
     }
-    let entry_bytes = std::fs::read(&canonical_entry).ok()?;
-    if entry_bytes.as_slice() != WORKFLOW_ARTIFACT_BYTES {
-        return None;
-    }
     Some(entry)
 }
 
@@ -94,7 +88,7 @@ pub(super) fn workflow_local_dist_in(base: &Path) -> Option<String> {
     validate_workflow_artifact(base).map(|path| path.to_string_lossy().into_owned())
 }
 
-fn workflow_local_dist() -> Option<String> {
+pub(crate) fn workflow_local_dist() -> Option<String> {
     workflow_prefix().and_then(|prefix| workflow_local_dist_in(&prefix))
 }
 
@@ -147,67 +141,6 @@ async fn run_install_with_timeout(
             Ok(false)
         }
     }
-}
-
-async fn publish_embedded_workflow_artifact() -> Result<(), WorkflowError> {
-    if workflow_local_dist().is_some() {
-        return Ok(());
-    }
-    let prefix = workflow_prefix().ok_or_else(|| {
-        WorkflowError::SpawnFailed("HOME is unavailable for workflow artifact lookup".into())
-    })?;
-    let _guard = INSTALL_LOCK.lock().await;
-    if workflow_local_dist().is_some() {
-        return Ok(());
-    }
-
-    let parent = prefix.parent().ok_or_else(|| {
-        WorkflowError::SpawnFailed("workflow artifact prefix has no parent".into())
-    })?;
-    tokio::fs::create_dir_all(parent).await?;
-    if prefix.exists() {
-        tokio::fs::remove_dir_all(&prefix).await?;
-    }
-    let staging = parent.join(format!(
-        ".{WORKFLOW_NPM_VERSION}.staging-{}",
-        uuid::Uuid::now_v7()
-    ));
-    let package = staging
-        .join("node_modules")
-        .join("@peri-code")
-        .join("workflow");
-    tokio::fs::create_dir_all(package.join("dist")).await?;
-    tokio::fs::write(
-        package.join("package.json"),
-        serde_json::to_vec(&serde_json::json!({
-            "name": WORKFLOW_PACKAGE_NAME,
-            "version": WORKFLOW_NPM_VERSION,
-            "main": WORKFLOW_ENTRY,
-            "periProtocolVersion": WORKFLOW_PROTOCOL_VERSION,
-            "periBuildId": WORKFLOW_BUILD_ID,
-        }))?,
-    )
-    .await?;
-    tokio::fs::write(package.join(WORKFLOW_ENTRY), WORKFLOW_ARTIFACT_BYTES).await?;
-
-    if validate_workflow_artifact(&staging).is_none() {
-        let _ = tokio::fs::remove_dir_all(&staging).await;
-        return Err(WorkflowError::SpawnFailed(
-            "embedded workflow artifact failed validation".into(),
-        ));
-    }
-    match tokio::fs::rename(&staging, &prefix).await {
-        Ok(()) => {}
-        Err(error) if validate_workflow_artifact(&prefix).is_some() => {
-            let _ = tokio::fs::remove_dir_all(&staging).await;
-            debug!(target: "workflow", error_kind = ?error.kind(), "another process published the workflow artifact");
-        }
-        Err(error) => {
-            let _ = tokio::fs::remove_dir_all(&staging).await;
-            return Err(WorkflowError::Io(error));
-        }
-    }
-    Ok(())
 }
 
 /// 安装到同文件系统 staging，完整校验后通过 rename 发布。
@@ -280,16 +213,13 @@ async fn ensure_workflow_install() -> Result<(), WorkflowError> {
     Ok(())
 }
 
-pub(super) async fn prepare_workflow_command() -> Result<WorkflowCommand, WorkflowError> {
-    // 3. Publish the bundled artifact first so development, tests, and releases use
-    // the same hermetic runtime. Network resolution remains an explicit fallback.
+pub(crate) async fn prepare_workflow_command() -> Result<WorkflowCommand, WorkflowError> {
+    // 首次经 registry 安装固定版本到 `~/.peri/workflow/<version>`，之后复用已验证的
+    // 本地 artifact（不再有编译期内嵌 JS）。网络解析（npx）仅在显式 opt-in 或测试下启用。
     if workflow_local_dist().is_none() {
-        if let Err(error) = publish_embedded_workflow_artifact().await {
+        if let Err(error) = ensure_workflow_install().await {
             if npx_fallback_allowed() {
-                warn!(target: "workflow", error_kind = %error, "embedded workflow artifact unavailable; trying explicit network fallback");
-                if let Err(install_error) = ensure_workflow_install().await {
-                    warn!(target: "workflow", error_kind = %install_error, "workflow artifact install unavailable; using explicit npx fallback");
-                }
+                warn!(target: "workflow", error_kind = %error, "workflow artifact install unavailable; using explicit npx fallback");
             } else {
                 return Err(error);
             }

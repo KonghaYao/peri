@@ -106,10 +106,12 @@ pub(crate) async fn handle_request(
         | "session/input/snapshot" => {
             user_input::handle_user_input(method, params, cfg, sessions, transport).await
         }
-        "workflow/list_runs" => workflow::handle_list_runs(params, sessions),
-        "workflow/kill_agent" => workflow::handle_kill_agent(params, sessions).await,
-        "workflow/kill_run" => workflow::handle_kill_run(params, sessions),
-        "workflow/resume" => workflow::handle_resume(params, sessions).await,
+        // workflow/* 消费会话作用域池中的 builtin `workflow` 实例（设计 §6.3）；
+        // `cfg` 已按 sessionId 解析到该会话的环境配置。
+        "workflow/list_runs" => workflow::handle_list_runs(params, cfg).await,
+        "workflow/kill_agent" => workflow::handle_kill_agent(params, cfg).await,
+        "workflow/kill_run" => workflow::handle_kill_run(params, cfg).await,
+        "workflow/resume" => workflow::handle_resume(params, cfg).await,
         "session/cancel-bg-task" => session_lifecycle::handle_cancel_bg_task(params, cfg).await,
         "session/bg-tasks" => session_lifecycle::handle_bg_tasks(params, cfg),
         "session/close" => session_lifecycle::handle_close(params, cfg, sessions).await,

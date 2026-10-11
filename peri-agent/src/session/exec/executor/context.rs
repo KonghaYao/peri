@@ -230,8 +230,8 @@ pub struct SessionContext {
     >,
 
     // ── workflow: workflow agents ──────────────────────────────────────────
-    pub workflow_executor: Option<Arc<dyn peri_acp_types::workflow::AgentExecutor>>,
-    pub workflow_middleware: Option<Arc<dyn peri_acp_types::ports::WorkflowMiddlewarePort>>,
+    /// 会话级 workflow 完成通知源（None = 本会话无 workflow 面）。
+    pub workflow_notifications: Option<Arc<peri_acp_types::workflow::WorkflowNotifications>>,
 
     // ── 事件端口（原 controller；ACP 宿主适配 Controller）──────────────────
     /// 事件发射端口（`Controller::publish_event` 适配；补打 session_id/session_seq）。
