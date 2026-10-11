@@ -119,9 +119,10 @@ fn declared_direct_tools_is_derived_from_registry() {
                 "workspace 的 7 个本地工具必须全部 declared direct（AW3-03）"
             ),
             // wave 2：cron 零 direct —— `system_mcp_tools` 恒为空集（A5）。
-            "cron" => assert!(
+            // wave 5：workflow 四项同形（模型面 `mcp__workflow__*` 一律 deferred）。
+            "cron" | "workflow" => assert!(
                 declared.is_empty(),
-                "实例 {} 的声明 direct 必须为空（A4：deferred）",
+                "实例 {} 的声明 direct 必须为空（cron / workflow：deferred）",
                 instance.name
             ),
             other => panic!("新增实例 {other} 必须在本测试内显式登记 direct 语义"),
@@ -171,6 +172,32 @@ fn is_declared_direct_true_for_implemented_false_for_unknown() {
     assert!(!is_declared_direct("not-a-builtin", "Read"));
 }
 
+/// host-only 判定与注册表逐工具 `model_visible` 派生一致（桥接发现过滤的事实源）。
+///
+/// 派生式断言（而非「表内全部可见」的现状断言）：新增 host-only 工具时本测试
+/// 自动覆盖，不需要改；桥接消费点的行为测试在 `mcp::tool_bridge` 侧。
+#[test]
+fn is_declared_model_hidden_is_derived_from_registry() {
+    for instance in BUILTIN_MCP_INSTANCES {
+        for tool in instance.tools {
+            assert_eq!(
+                is_declared_model_hidden(instance.name, tool.original_name),
+                !tool.model_visible,
+                "{}/{} 的 host-only 判定必须由注册表逐工具 model_visible 派生",
+                instance.name,
+                tool.original_name
+            );
+        }
+    }
+    // 未知名 / 表外 server / 未声明工具：恒 false（可见性默认开放，保守默认）。
+    assert!(!is_declared_model_hidden("workspace", "Nope"));
+    assert!(!is_declared_model_hidden(
+        "some-user-server",
+        "WorkflowAgentResult"
+    ));
+    assert!(!is_declared_model_hidden("not-a-builtin", "Read"));
+}
+
 #[test]
 fn builtin_prompt_declaration_matches_registry() {
     for instance in BUILTIN_MCP_INSTANCES {
@@ -186,10 +213,11 @@ fn builtin_prompt_declaration_matches_registry() {
                     );
                 }
                 // wave 2：cron 冻结 `None`（A4：声明段零变化）。
-                "cron" => {
+                // wave 5：workflow 四项同形（无 `BaseTool::prompt_declaration()` 文本）。
+                "cron" | "workflow" => {
                     assert_eq!(
                         template, None,
-                        "实例 {} 的工具 {} 必须无声明模板（A4）",
+                        "实例 {} 的工具 {} 必须无声明模板（cron / workflow）",
                         instance.name, tool.original_name
                     );
                     assert_eq!(
@@ -294,7 +322,7 @@ fn injection_policy_all_and_none_shapes() {
     let all = BuiltinInjectionPolicy::all();
     assert_eq!(
         all.enabled_instances().to_vec(),
-        vec!["web", "artifact", "cron", "workspace"],
+        vec!["web", "artifact", "cron", "workspace", "workflow"],
         "默认注入全部已实现实例（注册表顺序）"
     );
     assert!(all.enables("web") && all.enables("artifact"));
@@ -302,6 +330,10 @@ fn injection_policy_all_and_none_shapes() {
     assert!(
         all.enables("workspace"),
         "workspace 已实现（W3-A 注册表 T1）⇒ 默认策略必须注入它"
+    );
+    assert!(
+        all.enables("workflow"),
+        "workflow 已实现（wave 5 注册表）⇒ 默认策略必须注入它"
     );
     assert!(!all.enables("not-a-builtin"), "表外名字永不注入");
 
@@ -312,6 +344,7 @@ fn injection_policy_all_and_none_shapes() {
             && !none.enables("artifact")
             && !none.enables("cron")
             && !none.enables("workspace")
+            && !none.enables("workflow")
     );
 }
 

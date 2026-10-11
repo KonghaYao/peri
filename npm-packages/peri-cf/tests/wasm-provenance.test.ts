@@ -185,14 +185,14 @@ describe("CF WASM build provenance", () => {
     await expect(sourceChecksums(setup.root)).rejects.toThrow("has no peri-wasm member");
   });
 
-  test("hashes the prebuilt bundle a closure crate embeds outside the Cargo graph", async () => {
+  test("hashes optional non-Cargo inputs outside the Cargo graph", async () => {
     const setup = await fixture();
-    const embedded = "npm-packages/@peri-workflow/dist/peri-workflow.js";
-    await setup.file(embedded, "// embedded workflow bundle");
+    const pinned = "rust-toolchain";
+    await setup.file(pinned, "[toolchain]\nchannel = \"1.99.0\"\n");
     const files = await sourceChecksums(setup.root);
-    expect(files[embedded]).toHaveLength(64);
-    await setup.file(embedded, "// changed embedded workflow bundle");
-    expect((await sourceChecksums(setup.root))[embedded]).not.toBe(files[embedded]);
+    expect(files[pinned]).toHaveLength(64);
+    await setup.file(pinned, "[toolchain]\nchannel = \"stable\"\n");
+    expect((await sourceChecksums(setup.root))[pinned]).not.toBe(files[pinned]);
   });
 
   test("rejects source symlinks and mutations during build", async () => {

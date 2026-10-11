@@ -1,9 +1,14 @@
-// ─── E2E 集成测试（需要 @peri-code/workflow 已安装）──────────────
+// ─── E2E 集成测试（真实 Node 引擎；产物经 PERI_WORKFLOW_ARTIFACT_DIR 注入）───
+//
+// P6 起 agent 执行权归宿主消费者：需要 agent 结果才能收敛的用例在宿主层
+// （`peri-acp::host::workflow_consumer_tests`）覆盖；本文件只保留不依赖消费者的
+// 引擎生命周期用例（kill / 自然崩溃）。
 
-use super::artifact::{workflow_local_dist_in, WORKFLOW_ARTIFACT_BYTES};
-use super::limits::try_reserve_live_attempt;
+use serial_test::serial;
+
+use super::limits::RunLimitState;
 use super::run_protocol::{
-    parse_agent_run_params, parse_run_scoped, reusable_journal_prefix, validate_start_ack,
+    parse_agent_task_params, parse_run_scoped, reusable_journal_prefix, validate_start_ack,
     workflow_start_params, JournalTruncateParams,
 };
 use super::terminal::project_postcondition;
@@ -154,16 +159,38 @@ impl AgentExecutor for MockAgentExecutor {
 }
 
 #[test]
-fn live_attempt_permit_releases_capacity_on_drop() {
-    let counter = Arc::new(AtomicU64::new(0));
-    let first = try_reserve_live_attempt(&counter, Some(1)).expect("首个 live attempt 应获准");
-    assert_eq!(counter.load(Ordering::SeqCst), 1);
-    assert!(try_reserve_live_attempt(&counter, Some(1)).is_none());
-    assert_eq!(counter.load(Ordering::SeqCst), 1, "拒绝不得消耗配额");
+fn run_limit_state_tracks_tool_calls_and_keeps_first_breach() {
+    let state = RunLimitState::new(Some(5));
+    assert!(state.observe_tool_calls(3).is_none());
+    assert_eq!(state.breach(), None, "未超限不得置 breach");
+    assert_eq!(
+        state.observe_tool_calls(3).as_deref(),
+        Some("workflow exceeded maxToolCalls (5)"),
+        "累计超限时返回首次 breach 详情",
+    );
+    assert_eq!(
+        state.breach().as_deref(),
+        Some("workflow exceeded maxToolCalls (5)"),
+    );
+    // breach 只写首次：后到的超限文本不得覆写（沿用旧 limit_breach 语义）。
+    state.set_breach("workflow exceeded maxAgents (0)".into());
+    assert_eq!(
+        state.breach().as_deref(),
+        Some("workflow exceeded maxToolCalls (5)"),
+    );
+}
 
-    drop(first);
-    assert_eq!(counter.load(Ordering::SeqCst), 0);
-    assert!(try_reserve_live_attempt(&counter, Some(1)).is_some());
+/// 真实引擎集成用例的显式前置：由开发者提供已校验引擎包目录
+/// （`PERI_WORKFLOW_ARTIFACT_DIR`）。仓库不读工作树 dist、也不假设本机装有引擎：
+/// 未提供时打印说明并返回（显式、可见，不用 `#[ignore]`）。
+fn require_explicit_engine() -> bool {
+    if std::env::var_os("PERI_WORKFLOW_ARTIFACT_DIR").is_some_and(|value| !value.is_empty()) {
+        return true;
+    }
+    eprintln!(
+        "note: 跳过真实引擎用例（仓库不读工作树 dist）；         需要时设置 PERI_WORKFLOW_ARTIFACT_DIR=<@peri-code/workflow 包目录> 后重跑"
+    );
+    false
 }
 
 fn completed_workflow_result() -> WorkflowResult {
@@ -211,8 +238,10 @@ async fn workflow_result_receiver_returns_none_when_closed_without_result() {
     assert!(result.is_none());
 }
 
+/// 内核只投影 `blocked` / `unknown`：acceptance 无生产写入方，任何组合都不会
+/// 升级成 `deliverable`（该判定属引擎之外的验收层）。
 #[test]
-fn postcondition_projection_requires_acceptance_evidence_for_delivery() {
+fn postcondition_projection_never_escalates_to_deliverable() {
     use peri_acp_types::workflow::{
         AcceptanceStatus, DeliveryStatus, PostProcessingStatus, WorkflowWriteIntent,
     };
@@ -227,6 +256,8 @@ fn postcondition_projection_requires_acceptance_evidence_for_delivery() {
         ),
         (PostProcessingStatus::NotRequired, DeliveryStatus::Unknown)
     );
+    // acceptance 无生产写入方（内核不判验收）：Passed 也不把 delivery 抬到
+    // deliverable——deliverable 属引擎之外的验收层（2026-10-11 用户裁决）。
     assert_eq!(
         project_postcondition(
             "completed",
@@ -234,10 +265,7 @@ fn postcondition_projection_requires_acceptance_evidence_for_delivery() {
             Some(&read_only),
             Some(&Ok(())),
         ),
-        (
-            PostProcessingStatus::NotRequired,
-            DeliveryStatus::Deliverable,
-        )
+        (PostProcessingStatus::NotRequired, DeliveryStatus::Unknown)
     );
     assert_eq!(
         project_postcondition(
@@ -304,10 +332,11 @@ fn test_workflow_start_params_preserve_budget_total() {
 }
 
 #[test]
-fn test_agent_run_params_preserve_requested_model() {
-    let params = parse_agent_run_params(
+fn test_agent_task_params_preserve_requested_model() {
+    let (task_id, params) = parse_agent_task_params(
         Some(serde_json::json!({
             "runId": "run-1",
+            "taskId": "t-1",
             "agentId": 7,
             "prompt": "inspect",
             "model": "sonnet"
@@ -316,14 +345,16 @@ fn test_agent_run_params_preserve_requested_model() {
     )
     .unwrap();
 
+    assert_eq!(task_id, "t-1");
     assert_eq!(params.model.as_deref(), Some("sonnet"));
 }
 
 #[test]
-fn test_agent_run_params_reject_invalid_model_type() {
-    let result = parse_agent_run_params(
+fn test_agent_task_params_reject_invalid_model_type() {
+    let result = parse_agent_task_params(
         Some(serde_json::json!({
             "runId": "run-1",
+            "taskId": "t-1",
             "agentId": 7,
             "prompt": "inspect",
             "model": 42
@@ -335,15 +366,31 @@ fn test_agent_run_params_reject_invalid_model_type() {
 }
 
 #[test]
-fn test_agent_run_params_reject_missing_params() {
-    assert!(parse_agent_run_params(None, "run-1").is_err());
+fn test_agent_task_params_reject_missing_params() {
+    assert!(parse_agent_task_params(None, "run-1").is_err());
 }
 
 #[test]
-fn test_agent_run_params_reject_cross_run_identity() {
-    let result = parse_agent_run_params(
+fn test_agent_task_params_reject_empty_task_id() {
+    let result = parse_agent_task_params(
+        Some(serde_json::json!({
+            "runId": "run-1",
+            "taskId": "  ",
+            "agentId": 7,
+            "prompt": "inspect"
+        })),
+        "run-1",
+    );
+
+    assert_eq!(result.unwrap_err(), "taskId must be a non-empty string");
+}
+
+#[test]
+fn test_agent_task_params_reject_cross_run_identity() {
+    let result = parse_agent_task_params(
         Some(serde_json::json!({
             "runId": "other-run",
+            "taskId": "t-1",
             "agentId": 7,
             "prompt": "inspect"
         })),
@@ -383,8 +430,8 @@ fn test_run_scoped_journal_rejects_missing_run_identity() {
 fn test_start_ack_accepts_matching_protocol_and_build() {
     validate_start_ack(serde_json::json!({
         "ok": true,
-        "protocolVersion": 1,
-        "buildId": "@peri-code/workflow@0.2.0"
+        "protocolVersion": super::artifact::WORKFLOW_PROTOCOL_VERSION,
+        "buildId": super::artifact::WORKFLOW_BUILD_ID
     }))
     .unwrap();
 }
@@ -393,155 +440,23 @@ fn test_start_ack_accepts_matching_protocol_and_build() {
 fn test_start_ack_rejects_protocol_mismatch() {
     let error = validate_start_ack(serde_json::json!({
         "ok": true,
-        "protocolVersion": 2,
-        "buildId": "@peri-code/workflow@0.2.0"
+        "protocolVersion": super::artifact::WORKFLOW_PROTOCOL_VERSION + 1,
+        "buildId": super::artifact::WORKFLOW_BUILD_ID
     }))
     .unwrap_err();
 
     assert!(error.to_string().contains("protocol mismatch"));
 }
 
-#[test]
-fn test_workflow_local_dist_missing() {
-    let tmp = tempfile::TempDir::new().unwrap();
-    assert!(workflow_local_dist_in(tmp.path()).is_none());
-}
-
-#[test]
-fn test_workflow_local_dist_found() {
-    let tmp = tempfile::TempDir::new().unwrap();
-    let dist = tmp
-        .path()
-        .join("node_modules")
-        .join("@peri-code")
-        .join("workflow")
-        .join("dist")
-        .join("peri-workflow.js");
-    std::fs::create_dir_all(dist.parent().unwrap()).unwrap();
-    std::fs::write(&dist, WORKFLOW_ARTIFACT_BYTES).unwrap();
-    std::fs::write(
-        dist.parent()
-            .unwrap()
-            .parent()
-            .unwrap()
-            .join("package.json"),
-        serde_json::json!({
-            "name": "@peri-code/workflow",
-            "version": "0.2.0",
-            "main": "dist/peri-workflow.js",
-            "periProtocolVersion": 1,
-            "periBuildId": "@peri-code/workflow@0.2.0"
-        })
-        .to_string(),
-    )
-    .unwrap();
-    let got = workflow_local_dist_in(tmp.path()).unwrap();
-    assert_eq!(std::path::PathBuf::from(got), dist);
-}
-
-#[test]
-fn test_workflow_local_dist_rejects_wrong_version() {
-    let tmp = tempfile::TempDir::new().unwrap();
-    let package = tmp
-        .path()
-        .join("node_modules")
-        .join("@peri-code")
-        .join("workflow");
-    std::fs::create_dir_all(package.join("dist")).unwrap();
-    std::fs::write(package.join("dist/peri-workflow.js"), "entry").unwrap();
-    std::fs::write(
-        package.join("package.json"),
-        r#"{"name":"@peri-code/workflow","version":"0.1.0","main":"dist/peri-workflow.js"}"#,
-    )
-    .unwrap();
-
-    assert!(workflow_local_dist_in(tmp.path()).is_none());
-}
-
-#[test]
-fn test_workflow_local_dist_rejects_escaping_entry() {
-    let tmp = tempfile::TempDir::new().unwrap();
-    let package = tmp
-        .path()
-        .join("node_modules")
-        .join("@peri-code")
-        .join("workflow");
-    std::fs::create_dir_all(&package).unwrap();
-    std::fs::write(tmp.path().join("outside.js"), "entry").unwrap();
-    std::fs::write(
-        package.join("package.json"),
-        r#"{"name":"@peri-code/workflow","version":"0.2.0","main":"../../../../outside.js"}"#,
-    )
-    .unwrap();
-
-    assert!(workflow_local_dist_in(tmp.path()).is_none());
-}
-
+/// [回归测试] kill 后 run 必须收敛为 Killed 且写 completed_at（不能停在幽灵 Running）。
+///
+/// 只依赖真实引擎启动（kill 分支不经过 agent 执行），因此可在本 crate 覆盖。
 #[tokio::test]
-#[ignore = "requires @peri-code/workflow installed"]
-async fn test_e2e_simple_workflow() {
-    let tmp = tempfile::TempDir::new().unwrap();
-    let cwd = tmp.path().to_str().unwrap();
-
-    let executor = Arc::new(MockAgentExecutor {
-        delay: std::time::Duration::ZERO,
-    }) as Arc<dyn AgentExecutor>;
-    let runner = WorkflowRunner::new(executor, cwd, None);
-    let journal = Arc::new(WorkflowJournalStore::new(cwd));
-    let progress = Arc::new(WorkflowProgressStore::new());
-    let (done_tx, mut done_rx) = tokio::sync::watch::channel(None);
-    let (_kill_tx, kill_rx) = tokio::sync::oneshot::channel();
-
-    let script = r#"
-export const meta = { name: 'test-workflow', description: 'simple test' }
-const result = await agent('say hello')
-return { output: result }
-"#;
-
-    let input = WorkflowInput {
-        script: script.to_string(),
-        args: None,
-        max_concurrency: 3,
-        budget_total: None,
-        limits: WorkflowLimits::default(),
-        workflow_name: "test-workflow".to_string(),
-        resume_from: None,
-        write_intent: None,
-        git_baseline: None,
-    };
-
-    let run_id = uuid::Uuid::now_v7().to_string();
-    runner
-        .run(run_id, input, progress, journal, done_tx, kill_rx)
-        .await
-        .unwrap();
-
-    let _ = done_rx.changed().await; // 等待完成信号
-    let result = done_rx.borrow().clone().unwrap();
-    // 打印调试信息
-    eprintln!("=== WORKFLOW RESULT ===");
-    eprintln!("status: {}", result.status);
-    eprintln!("error: {:?}", result.error);
-    eprintln!("stderr_tail: {:?}", result.stderr_tail);
-    eprintln!("========================");
-    assert_eq!(result.status, "completed");
-    // bunx 启动时会输出 "Resolving dependencies" 等正常信息到 stderr，
-    // npx 不会。因此 stderr 非空也可能是正常情况。
-    if let Some(ref stderr) = result.stderr_tail {
-        // 仅当 stderr 不全是 bun 解析信息时才算异常
-        let is_bunx_noise = stderr.lines().all(|l| {
-            l.is_empty()
-                || l.contains("Resolving dependencies")
-                || l.contains("Resolved, downloaded and extracted")
-                || l.contains("Saved lockfile")
-        });
-        assert!(is_bunx_noise, "stderr 含非预期的错误输出:\n{}", stderr);
-    }
-}
-
-#[tokio::test]
-#[ignore = "requires @peri-code/workflow installed"]
+#[serial]
 async fn test_kill_marks_run_killed_in_progress_store() {
+    if !require_explicit_engine() {
+        return;
+    }
     let tmp = tempfile::TempDir::new().unwrap();
     let cwd = tmp.path().to_str().unwrap();
 
@@ -638,14 +553,17 @@ return { output: result }
 /// 为 Failed（issue 2026-08-05 遗留 2：修复前 run 永久 Running，幽灵 running 与
 /// kill 分支同源）。
 ///
-/// 防假阳性：脚本在 agent 执行**之后**顶层 throw → workflow/start 已成功、
-/// RunStarted 已写入（先轮询 Running），随后 Node 进程崩溃退出——崩溃时进程已死，
-/// 没有机会发 run_done progress 事件，只有 msg_loop 收尾（stdout 关闭 → recv None
-/// → final_result 保持 "failed"）能标记终态。修复前该路径不写 progress_store，
-/// 断言必然失败。
+/// 防假阳性：脚本先发布 `agent/task`（**不等待结果**，故本用例不需要宿主消费者：
+/// P6 起 agent 执行权在宿主，等待结果会永久挂起），随后顶层 throw → Node 进程在
+/// workflow/start 成功后自然退出；崩溃时进程已死，没有机会发 run_done progress
+/// 事件，只有 msg_loop 收尾（stdout 关闭 → recv None → final_result 保持 "failed"）
+/// 能标记终态。修复前该路径不写 progress_store，断言必然失败。
 #[tokio::test]
-#[ignore = "requires @peri-code/workflow installed"]
+#[serial]
 async fn test_natural_crash_marks_run_failed_in_progress_store() {
+    if !require_explicit_engine() {
+        return;
+    }
     let tmp = tempfile::TempDir::new().unwrap();
     let cwd = tmp.path().to_str().unwrap();
 
@@ -660,7 +578,7 @@ async fn test_natural_crash_marks_run_failed_in_progress_store() {
 
     let script = r#"
 export const meta = { name: 'crash-test', description: 'crash test' }
-const result = await agent('say hello')
+agent('say hello') // 发布 agent/task（不等待结果：本用例不依赖宿主消费者）
 throw new Error('intentional crash after agent')
 "#;
 

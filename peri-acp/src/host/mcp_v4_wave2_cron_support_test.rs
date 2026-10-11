@@ -190,9 +190,11 @@ impl AssembledHostFixture {
             .expect("初始化任务必须在有界等待内结束")
             .expect("初始化任务不得 panic");
         let status = status_rx.borrow().clone();
+        // 期望值从**注册表**派生（实例数随波次增长：wave 1 两个 → wave 5 五个）。
+        let expected_ready = peri_acp_types::builtin_mcp::BUILTIN_MCP_INSTANCES.len();
         assert!(
-            matches!(status, McpInitStatus::Ready { total: 4 }),
-            "装配池必须 4/4 ready（否则 tick / 工具面 / 生命周期断言面全是空的）: {status:?}"
+            matches!(status, McpInitStatus::Ready { total } if total == expected_ready),
+            "装配池必须 {expected_ready}/{expected_ready} ready（否则 tick / 工具面 / 生命周期断言面全是空的）: {status:?}"
         );
         Self {
             dirs,

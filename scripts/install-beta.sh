@@ -79,7 +79,12 @@ main() {
         actual_digest=$(shasum -a 256 "$temporary_dir/$archive")
     fi
     [[ "${actual_digest%% *}" == "$expected_digest" ]] || fail "Checksum mismatch; retry after the beta publication finishes."
-    [[ "$(tar -tzf "$temporary_dir/$archive")" == peri-beta ]] || fail "Archive must contain only peri-beta."
+    # 归档布局：根目录 peri-beta + 随包 workflow sidecar（peri-resources/...）。
+    listing="$(tar -tzf "$temporary_dir/$archive")" || fail "Cannot list the archive."
+    printf '%s\n' "$listing" | grep -qx 'peri-beta' || fail "Archive must contain peri-beta."
+    if printf '%s\n' "$listing" | grep -v -e '^peri-beta$' -e '^peri-resources/' | grep -q .; then
+        fail "Archive must contain only peri-beta and peri-resources."
+    fi
     tar -xzf "$temporary_dir/$archive" -C "$temporary_dir"
     [[ -f "$temporary_dir/peri-beta" && ! -L "$temporary_dir/peri-beta" ]] || fail "Invalid peri-beta binary."
     chmod 755 "$temporary_dir/peri-beta"
@@ -90,6 +95,11 @@ main() {
     install -m 755 "$temporary_dir/peri-beta" "$staged_binary"
     mv -f "$staged_binary" "$install_dir/peri-beta"
     staged_binary=""
+    # 随包 sidecar 与二进制同目录（内容身份子目录，按增量覆盖写入，不删除既有内容）。
+    if [[ -d "$temporary_dir/peri-resources" ]]; then
+        mkdir -p "$install_dir/peri-resources"
+        cp -R "$temporary_dir/peri-resources/." "$install_dir/peri-resources/"
+    fi
     printf '[INFO] Installed: %s/peri-beta\n' "$install_dir"
     printf '[INFO] Update beta by running this installer again; do not use peri-beta update.\n'
     case ":${PATH:-}:" in

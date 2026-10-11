@@ -148,10 +148,9 @@ export async function sourceChecksums(repoRoot: string): Promise<Record<string, 
   await walk(resolve(repoRoot, "npm-packages/peri-cf/scripts"), async (path) => {
     if (/\/(?:build-wasm|wasm-provenance|wasm-profile|wasm-tools|worker-glue|worker-runtime-glue)\.ts$/.test(path)) await add(path);
   });
-  // Non-Cargo inputs: toolchain pins plus the prebuilt bundle a closure crate embeds with `include_bytes!`
-  // (`peri-workflow/src/runner/artifact.rs`). Missing files are skipped here because the Rust build itself
-  // then fails on the missing include.
-  for (const optional of ["rust-toolchain", "rust-toolchain.toml", "npm-packages/@peri-workflow/dist/peri-workflow.js"]) {
+  // Non-Cargo inputs: toolchain pins (`rust-toolchain`, `rust-toolchain.toml`) hashed when present.
+  // Missing pins are skipped: the build falls back to the environment default toolchain.
+  for (const optional of ["rust-toolchain", "rust-toolchain.toml"]) {
     try { await lstat(resolve(repoRoot, optional)); } catch (error) {
       if ((error as NodeJS.ErrnoException).code === "ENOENT") continue;
       throw error;

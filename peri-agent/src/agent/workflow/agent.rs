@@ -15,7 +15,7 @@
 //! - 模型构造（provider alias 解析 / AgentPool 缓存 / retry observer 烘焙）
 //!   → [`WorkflowModelFactory`]（ACP 宿主构造）
 //! - 中间件链 / 工具 / tool resolver 装配
-//!   → [`WorkflowMiddlewareFactory`]（peri-middlewares 实现，ACP 宿主注入）
+//!   → [`WorkflowAgentFactory`]（peri-middlewares 实现，ACP 宿主注入）
 //! - system prompt fallback 渲染 → [`WorkflowSystemPromptFallback`]（ACP 宿主）
 //! - EventBus forwarder 启动（v2 → v1 映射 + biased select 不变量单点）
 //!   → `ForwarderLauncherFn`（ACP 宿主构造）
@@ -40,8 +40,8 @@ use tokio_util::sync::CancellationToken;
 use tracing::{debug, warn};
 
 use super::factory::{
-    WorkflowAgentPromptBuilder, WorkflowMiddlewareFactory, WorkflowModelFactory,
-    WorkflowPublishHook, WorkflowSystemPromptFallback,
+    WorkflowAgentFactory, WorkflowAgentPromptBuilder, WorkflowModelFactory, WorkflowPublishHook,
+    WorkflowSystemPromptFallback,
 };
 use crate::agent::{model_bridge::AgentModelBridge, stages::run_react_loop, token::ContextBudget};
 use crate::middleware::chain::MiddlewareChain;
@@ -122,7 +122,7 @@ pub struct WorkflowAgentContext {
     /// 模型工厂（ACP 宿主构造：alias 解析 + retry observer 烘焙）。
     pub model_factory: WorkflowModelFactory,
     /// 中间件/工具装配端口（peri-middlewares 实现，ACP 宿主装配注入）。
-    pub middleware_factory: Arc<dyn WorkflowMiddlewareFactory>,
+    pub middleware_factory: Arc<dyn WorkflowAgentFactory>,
     /// system prompt fallback 渲染（`system_prompt = None` 时调用）。
     pub system_prompt_fallback: WorkflowSystemPromptFallback,
     /// EventBus forwarder 启动器（ACP 宿主构造）。
@@ -170,7 +170,7 @@ pub fn create_executor(ctx: WorkflowAgentContext) -> Arc<dyn AgentExecutor> {
 /// 本函数为 API 兼容保留（dead code 候选，删除留待 API 冻结窗口）。
 pub fn create_default_executor(
     model_factory: WorkflowModelFactory,
-    middleware_factory: Arc<dyn WorkflowMiddlewareFactory>,
+    middleware_factory: Arc<dyn WorkflowAgentFactory>,
     system_prompt_fallback: WorkflowSystemPromptFallback,
     forwarder_launcher: ForwarderLauncherFn,
     cwd: &str,

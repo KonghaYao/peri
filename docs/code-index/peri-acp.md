@@ -185,7 +185,7 @@ Session ID 恢复与生命周期回归：`src/host/requests_workspace_cases_test
 | Host 任务所有权 | host/task_scope.rs | `HostTaskOwner` / `HostTaskSpawner`；生产 timeout driver + 测试 controlled phase driver |
 | 装配 | `host/assemble.rs` | `assemble_server_config`；`build_legacy_frozen_data` 按保存目录准备配置与插件输入；新建 MCP pool 在初始化前绑定 `ConfigSource` snapshot，host Langfuse 消费同快照的 observability；观测成功时安装指标出口，未配置时不安装、指标不落盘 |
 | stage 构建 | host/stage_builder.rs | `build_stage_context`：消费单一 `FrozenSessionData`，派生 frozen language/MetaHarness/date 与 Agent 装配输入，禁止从当轮 config 建第二事实源；frozen 中的项目指令正文来自 P4 内容准入期经 builtin `workspace` 实例读取的 `peri-instruction://workspace/{main\|local}` 资源（W5：`AgentsMdMiddleware` 为纯 adapter、不读盘） |
-| workflow 薄壳 | host/workflow_agent.rs | `create_session_workflow_middleware`（:192，装配经 `WorkflowMiddlewareFactory` 端口）；生产工厂由 `host/assemble.rs` 经 `default_workflow_middleware_factory_with_pool(mcp_pool_concrete.clone())`（:514）注入**带 MCP 池**的实例，使 workflow agent 工具面与主链一样可见 selected builtin tools using raw names |
+| workflow 宿主面 | host/workflow_agent.rs + host/workflow_consumer.rs + host/requests/workflow.rs | 本地运行时路径（`create_session_workflow_chain` :235 经 `WorkflowAgentFactory` 端口装配 executor/runtime 链、`WorkflowTaskConsumer` 就绪屏障 + 订阅 `workflow://tasks`、`workflow_face_closed` 关闭集特例、`AcpServerConfig::workflow_middleware_factory`）按 `not(emscripten)` 门控：wasm 产物不打包本地 workflow 运行时，该目标不建链、不绑定；ACP 四 handler（`host/requests/workflow.rs`）经**会话池协议面**调用实例 `Workflow`/`WorkflowStatus`/`WorkflowKill`，不随目标门控（远端通路保留） |
 | stdio 部署 | host/stdio/ | `run_acp_stdio`（mod.rs:39，`StdioInput` → `assemble_stdio_config` → `run_acp_server_with_sessions`，业务处理走统一宿主）；集成测试 `run_server_integration_test.rs`（initialize → session/new → 通知 wire 链路） |
 
 ### src/agent/（装配面薄壳）

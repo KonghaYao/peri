@@ -63,6 +63,8 @@ use crate::mcp::tool_bridge::{build_deferred_tool_bridges, McpToolBridge};
 use crate::mcp::transport::{require_known_builtin_instance, TransportConfig, TransportKind};
 use crate::mcp::ToolCallError;
 use peri_mcp_cron::{CronScheduler, CronTrigger};
+#[cfg(not(target_os = "emscripten"))]
+use peri_mcp_workflow::WorkflowInstanceInput;
 use peri_mcp_workspace::{
     ResourceRoot, ResourceScope, WorkspaceInstanceInput, WorkspaceMcpServer,
     WorkspaceResourcesInput,
@@ -116,10 +118,12 @@ const HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(2);
 /// client 侧关闭上界（收尾共用）。
 const CLOSE_TIMEOUT: Duration = Duration::from_millis(500);
 
-/// 交叉面夹具：一份齐备的实例上下文（cron 真实 scheduler）+ 观察端。
+/// 交叉面夹具：一份齐备的实例上下文（cron 真实 scheduler + 未绑定的 workflow 槽位）+
+/// 观察端。
 ///
-/// `web` / `artifact` 不需要额外输入（artifact 的解析根是 `ctx.cwd`），因此同一份上下文可
-/// 喂给四个已实现实例的工厂。
+/// `web` / `artifact` 不需要额外输入（artifact 的解析根是 `ctx.cwd`）；`workflow` 的输入
+/// 是会话装配期的空槽（此处不绑定运行时——本夹具只覆盖分派身份，不驱动编排），因此同一份
+/// 上下文可喂给五个已实现实例的工厂。
 struct CrossFixture {
     ctx: BuiltinInstanceContext,
     scheduler: Arc<Mutex<CronScheduler>>,
@@ -139,6 +143,10 @@ impl CrossFixture {
             scheduler: Arc::clone(&scheduler),
             tick_enabled: false,
         });
+        // workflow 的 session 级槽位：分派身份需要它存在（运行时由会话旧链在
+        // session/new 绑定；本夹具不驱动编排，槽位保持未绑定）。
+        #[cfg(not(target_os = "emscripten"))]
+        let ctx = ctx.with_workflow(WorkflowInstanceInput::slot());
         Self {
             ctx,
             scheduler,

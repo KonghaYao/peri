@@ -54,11 +54,6 @@ pub mod at_mention;
 pub mod skills;
 pub mod tool_search;
 pub mod tools;
-#[cfg(not(target_os = "emscripten"))]
-pub mod workflow;
-#[cfg(target_os = "emscripten")]
-#[path = "workflow/wasm.rs"]
-pub mod workflow;
 
 /// v4 引名约定锁定：prompt 文本引用的 builtin 工具名必须与注册表一致（跨 crate 的
 /// prompt 文本扫描，见 [`prompt_tool_name_lock_tests`] 的边界说明）。

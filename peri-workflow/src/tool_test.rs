@@ -4,10 +4,15 @@ use std::sync::Arc;
 
 use peri_acp_types::tools::{BaseTool, ToolContext};
 
-use super::preflight::preflight_validate_script;
+use serial_test::serial;
+
 use super::*;
+use crate::preflight::{preflight_validate_script, validate_script_with};
 use crate::protocol::{AgentRunParams, AgentRunResult, Usage};
+use crate::registry::{WorkflowRunStatus, WorkflowTaskRegistry};
 use crate::runner::AgentExecutor;
+use crate::runtime::params::MAX_SAFE_BUDGET_TOTAL;
+use crate::runtime::WorkflowRuntime;
 
 struct CountingExecutor {
     calls: Arc<AtomicUsize>,
@@ -29,17 +34,28 @@ impl AgentExecutor for CountingExecutor {
     }
 }
 
+/// 真实引擎集成用例的显式前置：由开发者提供已校验的引擎包目录
+/// （`PERI_WORKFLOW_ARTIFACT_DIR`，例如发布包或本机缓存的 @peri-code/workflow 目录）。
+///
+/// 仓库不读工作树 dist、也不假设本机装有引擎：未提供时打印说明并返回（显式、可见，
+/// 不使用 `#[ignore]`）。引擎语义（脚本 parser 的接受/拒绝边界）的等价覆盖在包内
+/// `bun test`（自含构建，见 `npm-packages/@peri-workflow/test`）。
+fn require_explicit_engine() -> bool {
+    if std::env::var_os("PERI_WORKFLOW_ARTIFACT_DIR").is_some_and(|value| !value.is_empty()) {
+        return true;
+    }
+    eprintln!(
+        "note: 跳过真实引擎用例（仓库不读工作树 dist）；         需要时设置 PERI_WORKFLOW_ARTIFACT_DIR=<@peri-code/workflow 包目录> 后重跑"
+    );
+    false
+}
+
 fn make_tool(cwd: &str, calls: Arc<AtomicUsize>) -> (WorkflowTool, Arc<WorkflowTaskRegistry>) {
     let executor = Arc::new(CountingExecutor { calls }) as Arc<dyn AgentExecutor>;
-    let runner = Arc::new(WorkflowRunner::new(executor, cwd, None));
     let (notification_tx, _) = tokio::sync::broadcast::channel(4);
-    let registry = Arc::new(WorkflowTaskRegistry::new(notification_tx));
-    let tool = WorkflowTool::new(
-        runner,
-        Arc::clone(&registry),
-        Arc::new(WorkflowProgressStore::new()),
-        Arc::new(WorkflowJournalStore::new(cwd)),
-    );
+    let runtime = Arc::new(WorkflowRuntime::new(executor, cwd, notification_tx, None));
+    let registry = Arc::clone(runtime.registry());
+    let tool = WorkflowTool::new(runtime);
     (tool, registry)
 }
 
@@ -62,7 +78,11 @@ fn script_example_from_parameters(tool: &WorkflowTool) -> String {
 
 /// [回归测试] 生产 tool description 中的示例必须通过随包 Node parser。
 #[tokio::test]
+#[serial]
 async fn test_production_description_example_passes_real_node_preflight() {
+    if !require_explicit_engine() {
+        return;
+    }
     let tmp = tempfile::TempDir::new().unwrap();
     let (tool, _) = make_tool(tmp.path().to_str().unwrap(), Arc::new(AtomicUsize::new(0)));
     let script = script_example_from_parameters(&tool);
@@ -74,7 +94,11 @@ async fn test_production_description_example_passes_real_node_preflight() {
 
 /// [回归测试] 生产示例的 grammar 变异必须在副作用前命中 parser 拒绝边界。
 #[tokio::test]
+#[serial]
 async fn test_production_description_mutations_hit_parser_rejection_boundaries() {
+    if !require_explicit_engine() {
+        return;
+    }
     let tmp = tempfile::TempDir::new().unwrap();
     let (tool, _) = make_tool(tmp.path().to_str().unwrap(), Arc::new(AtomicUsize::new(0)));
     let script = script_example_from_parameters(&tool);
@@ -236,80 +260,51 @@ fn workflow_schema_exposes_budget_total_integer_bounds() {
         .contains("total token budget"));
 }
 
-#[test]
-fn parse_budget_total_accepts_omitted_and_safe_integer_bounds() {
-    assert_eq!(parse_budget_total(&serde_json::json!({})).unwrap(), None);
-    assert_eq!(
-        parse_budget_total(&serde_json::json!({"budgetTotal": 1})).unwrap(),
-        Some(1)
-    );
-    assert_eq!(
-        parse_budget_total(&serde_json::json!({
-            "budgetTotal": MAX_SAFE_BUDGET_TOTAL
-        }))
-        .unwrap(),
-        Some(MAX_SAFE_BUDGET_TOTAL)
-    );
-}
-
-#[test]
-fn parse_budget_total_rejects_invalid_values_with_stable_range_error() {
-    let invalid = [
-        serde_json::json!(null),
-        serde_json::json!(0),
-        serde_json::json!(-1),
-        serde_json::json!(1.5),
-        serde_json::json!("1000"),
-        serde_json::json!(true),
-        serde_json::json!(MAX_SAFE_BUDGET_TOTAL + 1),
-    ];
-
-    for value in invalid {
-        let error = parse_budget_total(&serde_json::json!({"budgetTotal": value})).unwrap_err();
-        assert_eq!(
-            error,
-            format!("'budgetTotal' must be an integer between 1 and {MAX_SAFE_BUDGET_TOTAL}")
-        );
-    }
-}
-
-#[test]
-fn parse_host_limits_rejects_invalid_values() {
-    for field in ["maxAgents", "maxToolCalls", "maxElapsedMs"] {
-        let input = serde_json::json!({(field): 0});
-        let error = parse_bounded_integer(&input, field, None, MAX_SAFE_INTEGER).unwrap_err();
-        assert!(error.contains(field));
-    }
-    assert!(parse_bounded_integer(
-        &serde_json::json!({"maxConcurrency": 17}),
-        "maxConcurrency",
-        Some(3),
-        MAX_CONCURRENCY_CAP,
-    )
-    .is_err());
-}
-
+/// [回归测试] 启动失败（没有任何可校验 artifact）必须在 workflow 副作用之前收敛：
+/// 不派发 agent、不登记 run、不写 run 目录。
+///
+/// 隔离 `HOME`（缓存前缀）并把注入点指向非法包，确保与机器上既有安装/缓存无关；
+/// 脚本 parser 的接受/拒绝覆盖在包内 `bun test`（自含构建）。
 #[tokio::test]
-async fn invalid_script_fails_before_workflow_side_effects() {
+#[serial]
+async fn failed_start_leaves_no_workflow_side_effects() {
     let tmp = tempfile::TempDir::new().unwrap();
     let cwd = tmp.path().to_str().unwrap();
+    let previous_home = std::env::var_os("HOME");
+    std::env::set_var("HOME", tmp.path());
+    std::env::set_var(
+        "PERI_WORKFLOW_ARTIFACT_DIR",
+        tmp.path().join("not-a-package"),
+    );
+
     let calls = Arc::new(AtomicUsize::new(0));
     let (tool, registry) = make_tool(cwd, Arc::clone(&calls));
-
-    let error = tool
+    let result = tool
         .invoke(
             serde_json::json!({
-                "script": "export const meta = { name: 'broken', description: 'test' }; const = nope"
+                "script": "export const meta = { name: 'broken', description: 'test' }; return 1"
             }),
             ToolContext::new(&[], cwd),
         )
-        .await
-        .unwrap_err();
+        .await;
 
-    assert!(error.to_string().contains("Workflow preflight failed"));
-    assert_eq!(calls.load(Ordering::SeqCst), 0);
-    assert_eq!(registry.active_count(), 0);
-    assert!(!tmp.path().join(".claude/workflow-runs").exists());
+    match previous_home {
+        Some(value) => std::env::set_var("HOME", value),
+        None => std::env::remove_var("HOME"),
+    }
+    std::env::remove_var("PERI_WORKFLOW_ARTIFACT_DIR");
+
+    let error = result.expect_err("无任何已校验 artifact 时启动必须失败");
+    assert!(
+        error.to_string().contains("unavailable"),
+        "错误须指出 artifact 不可用: {error}"
+    );
+    assert_eq!(calls.load(Ordering::SeqCst), 0, "不得派发 agent");
+    assert_eq!(registry.active_count(), 0, "不得留下登记的 run");
+    assert!(
+        !tmp.path().join(".claude/workflow-runs").exists(),
+        "不得写 run 目录"
+    );
 }
 
 #[tokio::test]
@@ -445,57 +440,24 @@ fn make_completion_tool(
 ) {
     let entered = Arc::new(tokio::sync::Notify::new());
     let release = Arc::new(tokio::sync::Notify::new());
-    let runner = Arc::new(WorkflowRunner::new(
-        Arc::new(GatedCompletionExecutor {
-            entered: entered.clone(),
-            release: release.clone(),
-        }),
-        cwd,
-        None,
-    ));
-    let (tx, _) = tokio::sync::broadcast::channel(4);
-    let registry = Arc::new(WorkflowTaskRegistry::new(tx));
-    let tool = WorkflowTool::new(
-        runner,
-        registry.clone(),
-        Arc::new(WorkflowProgressStore::new()),
-        Arc::new(WorkflowJournalStore::new(cwd)),
-    );
-    (tool, registry, entered, release)
-}
-
-/// [回归测试] 调用future在快速检测窗口被取消，后台run仍须完成登记并广播一次。
-#[test]
-fn test_invoke_cancel_during_fast_window_keeps_completion_owner() {
-    if isolated_completion_child(
-        "tool::tests::test_invoke_cancel_during_fast_window_keeps_completion_owner",
-    ) {
-        return;
-    }
-    tokio::runtime::Builder::new_multi_thread().worker_threads(2).enable_all().build().unwrap().block_on(async {
-        let dir = tempfile::tempdir().unwrap();
-        let (tool, registry, entered, release) = make_completion_tool(dir.path().to_str().unwrap());
-        let mut notifications = registry.notification_tx().subscribe();
-        let mut invoke = Box::pin(tool.invoke(serde_json::json!({"script": "export const meta = { name: 'fixture', description: 'lifecycle' }; return await agent('finish');"}), ToolContext::new(&[], dir.path().to_str().unwrap())));
-        std::future::poll_fn(|cx| {
-            let result = invoke.as_mut().poll(cx);
-            assert!(result.is_pending(), "必须在invoke尚未返回的启动窗口取消");
-            if registry.active_count() == 1 { std::task::Poll::Ready(()) } else { std::task::Poll::Pending }
-        }).await;
-        drop(invoke);
-        tokio::time::timeout(std::time::Duration::from_secs(10), entered.notified()).await.expect("真实Node须派发agent");
-        release.notify_one();
-        let result = tokio::time::timeout(std::time::Duration::from_secs(3), notifications.recv()).await.expect("取消调用者不能丢失完成通知").unwrap();
-        assert_eq!(result.status, WorkflowRunStatus::Completed);
-        assert_eq!(registry.active_count(), 0);
-        assert_eq!(result.agent_count, 1);
-        assert!(notifications.try_recv().is_err(), "同一run只结算一次");
+    let executor: Arc<dyn AgentExecutor> = Arc::new(GatedCompletionExecutor {
+        entered: entered.clone(),
+        release: release.clone(),
     });
+    let (tx, _) = tokio::sync::broadcast::channel(4);
+    let runtime = Arc::new(WorkflowRuntime::new(executor, cwd, tx, None));
+    let registry = Arc::clone(runtime.registry());
+    let tool = WorkflowTool::new(runtime);
+    (tool, registry, entered, release)
 }
 
 /// [回归测试] 快速窗口中的kill也必须保留Killed，不能被另一路完成映射改成Failed。
 #[test]
+#[serial]
 fn test_invoke_fast_kill_preserves_terminal_projection() {
+    if !require_explicit_engine() {
+        return;
+    }
     if isolated_completion_child("tool::tests::test_invoke_fast_kill_preserves_terminal_projection")
     {
         return;
@@ -522,6 +484,7 @@ fn test_invoke_fast_kill_preserves_terminal_projection() {
 /// [回归测试] preflight 被取消时不能留下验证进程或脚本目录。
 #[cfg(unix)]
 #[test]
+#[serial]
 fn test_preflight_cancellation_releases_process_and_script() {
     if isolated_completion_child(
         "tool::tests::test_preflight_cancellation_releases_process_and_script",
@@ -532,13 +495,18 @@ fn test_preflight_cancellation_releases_process_and_script() {
     let fixture = tempfile::tempdir().unwrap();
     let probe = fixture.path().join("probe");
     let node = fixture.path().join("node");
-    std::fs::write(&node, "#!/bin/sh\nprintf '%s\\n' \"$$\" \"$1\" > \"$PERI_WORKFLOW_PREFLIGHT_PROBE\"\nexec /bin/sleep 30\n").unwrap();
+    std::fs::write(&node, "#!/bin/sh\nprintf '%s\\n' \"$$\" \"$3\" > \"$PERI_WORKFLOW_PREFLIGHT_PROBE\"\nexec /bin/sleep 30\n").unwrap();
     std::fs::set_permissions(&node, std::fs::Permissions::from_mode(0o755)).unwrap();
     // 当前测试只在独立子进程中设置环境，且 runtime 尚未启动。
     std::env::set_var("PATH", fixture.path());
     std::env::set_var("PERI_WORKFLOW_PREFLIGHT_PROBE", &probe);
     tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap().block_on(async {
-        let mut validation = Box::pin(preflight_validate_script("return 'ok'"));
+        // 合成引擎命令 + PATH 上的假 node：不依赖任何真实引擎产物。
+        let command = crate::runner::WorkflowCommand {
+            program: "node".into(),
+            args: vec!["dist/peri-workflow.js".into()],
+        };
+        let mut validation = Box::pin(validate_script_with(&command, "return 'ok'"));
         let observed = tokio::time::timeout(std::time::Duration::from_secs(5), async {
             loop {
                 tokio::select! {

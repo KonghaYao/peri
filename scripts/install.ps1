@@ -278,6 +278,16 @@ function Main {
     $LinkPath = Join-Path $InstallDir $ExeName
     Copy-Item -Force $TargetExe $LinkPath
 
+    # 随包 workflow sidecar 必须与用户实际调用的可执行文件同目录：上面的便捷副本位于
+    # $InstallDir，sidecar 源就在 $VersionDir（解压产物）。只复制到两者不同的位置：
+    # 目标与源同一路径时不复制（幂等、杜绝自复制）。
+    $SidecarSource = Join-Path $VersionDir "peri-resources"
+    $SidecarTarget = Join-Path $InstallDir "peri-resources"
+    if ((Test-Path $SidecarSource) -and ($SidecarTarget -ne $SidecarSource)) {
+        New-Item -ItemType Directory -Force -Path $SidecarTarget | Out-Null
+        Copy-Item -Recurse -Force (Join-Path $SidecarSource "*") $SidecarTarget
+    }
+
     # Write current version
     $VersionFile = Join-Path $InstallDir "current-version.txt"
     $VersionTag | Out-File -FilePath $VersionFile -Encoding ascii -NoNewline

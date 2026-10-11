@@ -33,6 +33,16 @@ pub enum McpTaskKey {
     OAuth(String),
     Reconnect(String),
     Subscription(String),
+    /// 宿主面按实例资源订阅（`McpPoolPort::subscribe_instance_resource` 的转发任务）。
+    ///
+    /// 与 [`Self::Subscription`]（配置驱动的 server 级订阅循环）分开：本键按**每次
+    /// 订阅**登记（`sequence` 唯一化同一实例/URI 的多次订阅，取消是异步收口），
+    /// 实例名用于实例移除 / 重连时按实例停止全部宿主订阅。
+    InstanceStateSubscription {
+        instance: String,
+        uri: String,
+        sequence: u64,
+    },
     TaskStatus {
         server: String,
         task_id: String,
@@ -360,6 +370,35 @@ impl McpTaskSpawner {
         }
         let mut state = inner.state.lock().expect("MCP task state poisoned");
         compact_finished(&mut state, key);
+    }
+
+    /// 停止某实例的全部宿主面资源订阅（实例移除 / 重连路径调用）。
+    ///
+    /// 宿主订阅句柄持有 `Subscription`（保活 client 传输），因此这些路径必须先于
+    /// 「关闭连接 / 换代」收口它们——与配置驱动订阅循环（[`McpTaskKey::Subscription`]）
+    /// 的停止点同序。订阅任务自身在连接关闭时也会自然结束；本方法消除的正是
+    /// 「关闭先于订阅收口」的窗口。
+    pub(crate) async fn stop_instance_resource_subscriptions(&self, instance: &str) {
+        let Some(inner) = self.inner.upgrade() else {
+            return;
+        };
+        let keys: Vec<McpTaskKey> = inner
+            .state
+            .lock()
+            .expect("MCP task state poisoned")
+            .records
+            .keys()
+            .filter(|key| {
+                matches!(
+                    key,
+                    McpTaskKey::InstanceStateSubscription { instance: name, .. } if name == instance
+                )
+            })
+            .cloned()
+            .collect();
+        for key in keys {
+            self.stop_key(&key).await;
+        }
     }
 
     pub async fn stop_instance_kinds(

@@ -122,6 +122,11 @@ impl McpClientPool {
             server_name.to_string(),
         ))
         .await;
+        // 宿主面资源订阅（`subscribe_instance_resource`）同样持有 Subscription 并
+        // 保活连接：必须先于 service 关闭收口。
+        self.task_spawner
+            .stop_instance_resource_subscriptions(server_name)
+            .await;
         self.clients.write().remove(server_name);
         let service = { self.services.lock().remove(server_name) };
         if let Some(mut svc) = service {
@@ -256,6 +261,10 @@ impl McpClientPool {
             server_name.to_string(),
         ))
         .await;
+        // 宿主面资源订阅先于连接收口（同 `remove_server` 的理由）。
+        self.task_spawner
+            .stop_instance_resource_subscriptions(server_name)
+            .await;
         // 关闭实际连接
         let service = { self.services.lock().remove(server_name) };
         if let Some(mut svc) = service {
@@ -358,6 +367,20 @@ impl McpClientPool {
         if matches!(*transaction, ServiceShutdownState::Idle) {
             self.begin_shutdown();
             let names: Vec<String> = self.clients.read().keys().cloned().collect();
+            // 宿主面资源订阅（`subscribe_instance_resource`）与配置驱动订阅循环都持有
+            // `Subscription` 并**保活 client 传输**：必须先于「关闭连接」收口。否则
+            // server 半边看不到 EOF，builtin 实例只能在 `BUILTIN_CONVERGE_TIMEOUT`
+            // 后被 abort（2026-10-11 复核：workflow 实例在 run 刚结束时关闭会话稳定
+            // 触发该 WARN）。与 `remove_server` / `set_disabled` / reconnect 同序。
+            for name in &names {
+                self.stop_background(&crate::mcp::task_scope::McpTaskKey::Subscription(
+                    name.clone(),
+                ))
+                .await;
+                self.task_spawner
+                    .stop_instance_resource_subscriptions(name)
+                    .await;
+            }
             for name in &names {
                 if let Some(c) = self.clients.write().get_mut(name) {
                     if matches!(c.status, ClientStatus::Connected) {

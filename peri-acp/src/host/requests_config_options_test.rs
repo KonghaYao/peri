@@ -46,7 +46,7 @@ fn seeded_sessions(provider: &LlmProvider) -> HashMap<String, SessionState> {
             frozen: None,
             recall_items: Vec::new(),
             agent_pool,
-            workflow_middleware: None,
+            workflow_notifications: None,
             title: None,
             tags: Vec::new(),
         },

@@ -13,4 +13,5 @@ pub use peri_workflow::protocol;
 pub use peri_workflow::registry;
 pub use peri_workflow::rpc;
 pub use peri_workflow::runner;
+pub use peri_workflow::runtime;
 pub use peri_workflow::tool;

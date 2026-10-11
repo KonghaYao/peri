@@ -1,7 +1,7 @@
 //! 装配注入端口（3.0 批 2 波 2）。
 //!
 //! 资源类（`McpClientPool` / `CronScheduler` / `ToolSearchIndex` /
-//! `WorkflowMiddleware`）与业务操作面（skills 扫描 / plugin 管理）在
+//! `McpClientPool`）与业务操作面（skills 扫描 / plugin 管理）在
 //! peri-acp 协议面不再直接引用具体实现；宿主装配点构造具体实例后
 //! upcast 为端口注入，ACP 侧只持端口接口（`docs/top-level.md` §0 依赖方向）。
 //!
@@ -133,6 +133,45 @@ pub enum McpBuiltinWorkspaceState {
     Connected,
     /// 句柄存在但非 Connected（Failed / Disconnected / Disabled）⇒ 立即短路。
     NotConnected,
+}
+
+/// 宿主面「按实例消费」的资源订阅句柄
+/// （[`McpPoolPort::subscribe_instance_resource`] 的返回）。
+///
+/// 每次 [`Self::next`] 产出一条 `notifications/resources/updated` 携带的资源 URI；
+/// `None` = 订阅已终止（连接关闭 / 实例移除 / 池关闭），此后不得再读取。
+///
+/// 通知只是**唤醒信号**（设计 `docs/design/workflow-mcp.md` §4.3）：不携带正文、
+/// 不保证可靠投递（缓冲满即丢弃），消费方收到后经
+/// [`McpPoolPort::read_instance_resource`] 按快照/游标补读。句柄是订阅的所有权：
+/// `drop` 或 [`Self::cancel`] 即注销（幂等，尽力而为——取消经传输通知送达）。
+#[derive(Debug)]
+pub struct McpResourceSubscription {
+    updates: tokio::sync::mpsc::Receiver<String>,
+    cancel: CancellationToken,
+}
+
+impl McpResourceSubscription {
+    /// 由实现方构造：`updates` 为通知转发通道，`cancel` 触发注销。
+    pub fn new(updates: tokio::sync::mpsc::Receiver<String>, cancel: CancellationToken) -> Self {
+        Self { updates, cancel }
+    }
+
+    /// 等待下一次资源更新通知；`None` = 订阅终止。
+    pub async fn next(&mut self) -> Option<String> {
+        self.updates.recv().await
+    }
+
+    /// 主动注销订阅（幂等）；`drop` 句柄等价。
+    pub fn cancel(&self) {
+        self.cancel.cancel();
+    }
+}
+
+impl Drop for McpResourceSubscription {
+    fn drop(&mut self) {
+        self.cancel.cancel();
+    }
 }
 
 /// MCP 客户端池端口（`peri-middlewares::mcp::McpClientPool` 实现）。
@@ -327,6 +366,65 @@ pub trait McpPoolPort: Send + Sync {
         _session_id: &str,
         _cancel: &CancellationToken,
     ) {
+    }
+
+    // ── 按实例消费（宿主面对池内某一具体实例的工具 / 资源面） ─────────────
+    //
+    // 用途：宿主（ACP workflow handlers / WorkflowTaskConsumer）对池内**已连接的
+    // builtin 实例**做 `tools/call`（可带 request `_meta`）、`resources/read` 与
+    // `notifications/resources/updated` 订阅，不还原具体池类型。默认实现即
+    // 「实现方不提供该能力」，与替换前 `downcast_ref` 失败时的分支同构：一律返回
+    // 错误（调用点按错误处理，不伪造空结果）。
+
+    /// 对池内某实例执行 `tools/call`，返回既有工具结果映射口径的文本。
+    ///
+    /// `request_meta`：请求 `_meta` 对象（如 workflow 消费者令牌
+    /// `peri/workflowConsumer`）；`None` = 不附加元数据。
+    ///
+    /// 实现方语义（`McpClientPool`）：
+    /// - 未知实例 / 实例未连接 ⇒ `Err`（既有 `ServerNotFound` / `NotConnected` 文本）；
+    /// - 成功 ⇒ `Ok(结果文本)`（与模型面 `format_contents` 同一映射）；
+    /// - 工具级失败（`isError: true`）⇒ `Err(服务端错误文本)`；
+    /// - 协议 / 传输错误 / 超时 / task 形状响应 ⇒ `Err`（既有 `ToolCallError` 文本）。
+    ///
+    /// 默认实现返回错误（实现方不提供按实例调用能力）。
+    async fn call_instance_tool(
+        &self,
+        _instance: &str,
+        _tool: &str,
+        _arguments: serde_json::Value,
+        _request_meta: Option<serde_json::Value>,
+    ) -> Result<String, String> {
+        Err("per-instance MCP tool call face unavailable".into())
+    }
+
+    /// 读取池内某实例的资源 URI，返回资源正文文本。
+    ///
+    /// 实现方语义（`McpClientPool`）：未知实例 / 未连接 / 服务端拒绝
+    /// （URI 不支持或资源不存在）/ 无文本内容 / 含二进制内容 ⇒ `Err`；
+    /// 文本内容按序拼接 ⇒ `Ok`。读取直连实例连接，不进入跨进程资源缓存
+    /// （宿主面按需读取，缓存提交属资源工具面的内容验证路径）。
+    ///
+    /// 默认实现返回错误（实现方不提供按实例读取能力）。
+    async fn read_instance_resource(&self, _instance: &str, _uri: &str) -> Result<String, String> {
+        Err("per-instance MCP resource read face unavailable".into())
+    }
+
+    /// 就池内某实例的指定资源 URI 订阅 `notifications/resources/updated`。
+    ///
+    /// 返回宿主消费句柄 [`McpResourceSubscription`]：`next()` 逐条产出更新 URI，
+    /// `None` = 订阅终止；`drop` 句柄或 `cancel()` = 注销订阅（幂等）。
+    ///
+    /// 实现方语义（`McpClientPool`）：未知实例 / 未连接 / 订阅建立失败 ⇒ `Err`；
+    /// 订阅流随实例连接（per-session 池）存续，实例移除 / 重连 / 池关闭即终止。
+    ///
+    /// 默认实现返回错误（实现方不提供按实例订阅能力）。
+    async fn subscribe_instance_resource(
+        &self,
+        _instance: &str,
+        _uri: &str,
+    ) -> Result<McpResourceSubscription, String> {
+        Err("per-instance MCP resource subscription face unavailable".into())
     }
 
     // ── builtin Workspace 冻结读取（技能 / 指令 / meta） ─────────────────
@@ -595,66 +693,6 @@ pub trait DynamicMcpNotificationSinkPort: Send + Sync {
     }
 
     fn accepts(&self, instance: &DynamicMcpInstanceKey) -> bool;
-}
-
-/// Workflow 中间件端口（`peri-middlewares::workflow::WorkflowMiddleware` 实现）。
-///
-/// per-session 实例；构造点（装配面宿主 `host/workflow_agent.rs` 的
-/// `create_session_workflow_middleware`）持有具体实现，协议面只持端口句柄。
-/// 命令面（workflow/list_runs / kill_agent / kill_run / resume）与执行装配
-/// （bg registry 注入 / 完成通知订阅）均经本端口；装配面宿主可经
-/// `downcast_arc` 还原具体类型。
-#[async_trait::async_trait]
-pub trait WorkflowMiddlewarePort: Send + Sync {
-    /// 还原具体实现（downcast 还原点，供 middlewares 装配面与装配面宿主使用）。
-    fn as_any(&self) -> &dyn Any;
-
-    /// 全部 run 快照（JSON 透传：`RunProgress` 保留在 peri-workflow，
-    /// 契约层不引入 indexmap 依赖）。
-    fn runs_snapshot(&self) -> serde_json::Value;
-
-    /// 终止单个 workflow agent（返回是否命中）。
-    async fn kill_agent(&self, run_id: &str, agent_id: u64) -> bool;
-
-    /// 终止整个 run（返回是否命中）。
-    fn kill_run(&self, run_id: &str) -> bool;
-
-    /// 从 journal 恢复 run。
-    async fn resume(&self, run_id: &str) -> Result<String, String>;
-
-    /// 订阅 run 完成通知（每 run 一条 `WorkflowTaskResult`）。
-    fn subscribe_notifications(
-        &self,
-    ) -> tokio::sync::broadcast::Receiver<crate::workflow::WorkflowTaskResult>;
-
-    /// 注入统一后台任务注册表（session 级 TaskManager）。
-    fn set_bg_registry(&self, bg_registry: std::sync::Arc<dyn crate::tasks::TaskManager>);
-
-    /// 通知消费者单次 spawn 门（首次调用返回 true）。
-    fn init_notification_buffer(&self) -> bool;
-}
-
-impl dyn WorkflowMiddlewarePort {
-    /// 将 `Arc<dyn WorkflowMiddlewarePort>` 还原为具体实现 `Arc<T>`（类型不符返回原 `Arc`）。
-    pub fn downcast_arc<T: WorkflowMiddlewarePort + 'static>(
-        self: Arc<Self>,
-    ) -> Result<Arc<T>, Arc<Self>> {
-        let ptr = Arc::into_raw(self);
-        unsafe {
-            // 经 `as_any()` 取具体类型的 TypeId：直接对 trait object 调
-            // `type_id()` 会命中 `Any` 的 blanket impl，返回
-            // `TypeId::of::<dyn WorkflowMiddlewarePort>()`（trait object 自身），
-            // 恒不等于 `TypeId::of::<T>()` → downcast 恒失败 → 装配面回退
-            // 临时实例，WorkflowTool 注册的 registry 与 executor 完成通知
-            // 消费者订阅的 registry 分离，workflow 完成通知丢失
-            // （e2e workflow 超时，2026-08-06）。
-            if (*ptr).as_any().type_id() == TypeId::of::<T>() {
-                Ok(Arc::from_raw(ptr as *const T))
-            } else {
-                Err(Arc::from_raw(ptr))
-            }
-        }
-    }
 }
 
 /// Agent 候选目录端口：主提示词 `{{available_agents}}` 渲染经此取候选

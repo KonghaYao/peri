@@ -1,14 +1,14 @@
 {
   "name": "@peri-code/workflow",
-  "version": "0.2.0",
+  "version": "0.3.0",
   "description": "Workflow runner for the Perihelion agent — JSON-RPC 2.0 stdio bridge. Host-language-agnostic: any language that can spawn a Node child process and speak JSON-RPC over stdin/stdout can integrate. Built-in CLI subcommands (read/list) for inspecting run results.",
   "bin": {
     "peri-workflow": "dist/peri-workflow.js"
   },
   "type": "module",
   "main": "dist/peri-workflow.js",
-  "periProtocolVersion": 1,
-  "periBuildId": "@peri-code/workflow@0.2.0",
+  "periProtocolVersion": 2,
+  "periBuildId": "@peri-code/workflow@0.3.0",
   "types": "src/index.ts",
   "files": [
     "dist",

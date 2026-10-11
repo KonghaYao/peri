@@ -227,6 +227,9 @@ async fn assemble_stdio_config(
             // 资源面输入与 session 级输入同源（见上）：顶层装配无会话消费者，恒为
             // `None`（资源面未接线），不改变任何既有行为。
             workspace_resources: None,
+            // 同理：workflow 的运行时槽位是**会话级**装配输入（编排状态与消费者都随
+            // 会话存在），顶层无会话对象，恒为 `None`（该实例在本层不装配）。
+            workflow_input: None,
             // 同理：A24 关闭集是**会话级** frozen policy 的投影，顶层装配无会话上下文，
             // 恒为空集（订阅建立门在本层无对象——顶层不建 MCP 池）。
             builtin_closed: Default::default(),

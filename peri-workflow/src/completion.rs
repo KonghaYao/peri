@@ -76,7 +76,7 @@ impl RunCompletion {
             owner.started = true;
             // Unwinding must still settle the registered run. Panic content is never published.
             let execution = std::panic::AssertUnwindSafe(async {
-                super::preflight::preflight_validate_script(&input.script)
+                crate::preflight::preflight_validate_script(&input.script)
                     .await
                     .map_err(crate::error::WorkflowError::ScriptParse)?;
                 runner
@@ -187,13 +187,16 @@ impl RunCompletion {
                 );
             }
         }
-        self.progress
-            .apply_event(&crate::protocol::ProgressEvent::RunDone {
-                run_id: self.run_id.clone(),
-                status: "failed".into(),
-                return_value: None,
-                error: Some(error.to_string()),
-            });
+        // 投影与返回值同口径（Failed / Blocked），且与 RunDone 同一次提交：
+        // 订阅方按通知补读即得完整终态。
+        self.progress.apply_run_done(
+            &self.run_id,
+            "failed",
+            None,
+            Some(error.to_string()),
+            PostProcessingStatus::Failed,
+            DeliveryStatus::Blocked,
+        );
         WorkflowResult {
             run_id: self.run_id.clone(),
             status: "failed".into(),

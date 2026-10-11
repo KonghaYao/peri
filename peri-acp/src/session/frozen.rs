@@ -218,6 +218,10 @@ pub(crate) fn subagent_chain_capabilities(
 }
 
 /// workflow 链能力事实（H2）：含审批有效模式（broker + permission_mode 齐备）。
+///
+/// `not(emscripten)`：唯一消费方是本地 workflow 装配面
+/// （`host/workflow_agent.rs`，随目标门控）。
+#[cfg(not(target_os = "emscripten"))]
 pub(crate) fn workflow_chain_capabilities(
     disabled: &std::collections::HashSet<String>,
     broker_present: bool,

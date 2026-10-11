@@ -106,13 +106,21 @@ jobs:
 
             # 归档根目录内的可执行文件必须叫 peri / peri.exe：mise 等安装器按归档内
             # 文件名暴露命令名，不剥离平台后缀。逐资产校验和按 <asset>.sha256 命名发布。
+            # 归档同时携带随包 workflow sidecar（`peri-resources/workflow/<内容身份>/`）：
+            # Rust 侧不嵌入 JS 产物，按该布局消费（peri-workflow/src/runner/artifact.rs）。
             - name: Package binaries (Unix)
               if: matrix.ext == ''
               run: |
                   mkdir -p dist/package
                   cp "target/${{ matrix.target }}/release/peri" dist/package/peri
                   chmod +x dist/package/peri
-                  tar -czf "dist/peri-${{ matrix.platform }}.tar.gz" -C dist/package peri
+                  sidecar_id="$(sha256sum npm-packages/@peri-workflow/dist/peri-workflow.js | cut -d' ' -f1)"
+                  sidecar_id="${sidecar_id:0:12}"
+                  sidecar_dir="dist/package/peri-resources/workflow/${sidecar_id}"
+                  mkdir -p "${sidecar_dir}/dist"
+                  cp npm-packages/@peri-workflow/dist/peri-workflow.js "${sidecar_dir}/dist/peri-workflow.js"
+                  cp npm-packages/@peri-workflow/package.json "${sidecar_dir}/package.json"
+                  tar -czf "dist/peri-${{ matrix.platform }}.tar.gz" -C dist/package peri peri-resources
                   rm -rf dist/package
                   cd dist
                   if command -v sha256sum >/dev/null 2>&1; then
@@ -127,7 +135,12 @@ jobs:
               run: |
                   New-Item -ItemType Directory -Force -Path dist/package | Out-Null
                   Copy-Item "target/${{ matrix.target }}/release/peri.exe" "dist/package/peri.exe"
-                  Compress-Archive -Path "dist/package/peri.exe" -DestinationPath "dist/peri-${{ matrix.platform }}.zip"
+                  $sidecarId = (Get-FileHash -Algorithm SHA256 "npm-packages/@peri-workflow/dist/peri-workflow.js").Hash.ToLower().Substring(0, 12)
+                  $sidecarDir = "dist/package/peri-resources/workflow/$sidecarId"
+                  New-Item -ItemType Directory -Force -Path "$sidecarDir/dist" | Out-Null
+                  Copy-Item "npm-packages/@peri-workflow/dist/peri-workflow.js" "$sidecarDir/dist/peri-workflow.js"
+                  Copy-Item "npm-packages/@peri-workflow/package.json" "$sidecarDir/package.json"
+                  Compress-Archive -Path "dist/package/*" -DestinationPath "dist/peri-${{ matrix.platform }}.zip"
                   Remove-Item -Recurse -Force dist/package
                   Set-Location dist
                   $asset = "peri-${{ matrix.platform }}.zip"
@@ -162,15 +175,19 @@ jobs:
             - name: List artifacts
               run: ls -lR artifacts/
 
-            # 发布前核对归档布局与逐资产校验和；布局回归在此处失败，不进入 Release。
+            # 发布前核对归档布局、逐资产校验和与 sidecar 内容身份；任一项回归都在此失败，
+            # 不进入 Release。四者一致（归档元数据 / 归档内 JS 完整 sha256 / 目录身份 /
+            # Rust 侧 pin）由 scripts/verify-workflow-sidecar.sh 单点校验。
             - name: Verify packages
               run: |
                   cd artifacts
                   sha256sum --check peri-*.sha256
                   for archive in peri-*.tar.gz; do
-                      test "$(tar -tzf "$archive")" = peri
+                      bash ../scripts/verify-workflow-sidecar.sh "$archive" peri
                   done
-                  test "$(unzip -Z1 peri-*.zip)" = peri.exe
+                  for archive in peri-*.zip; do
+                      bash ../scripts/verify-workflow-sidecar.sh "$archive" peri.exe
+                  done
 
             - name: Generate checksums
               run: |

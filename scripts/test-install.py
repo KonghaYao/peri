@@ -16,6 +16,8 @@ import unittest
 
 INSTALLER = Path(__file__).resolve().with_name("install.sh")
 VERSION_TAG = "agent-v9.9.9"
+# 随包 workflow sidecar 的内容身份目录（安装器不解析其值，仅透传布局）。
+SIDECAR_ID = "0123456789ab"
 
 
 class StableInstallerTests(unittest.TestCase):
@@ -109,7 +111,8 @@ esac
         )
         self.published.write_text("".join(f"{name}\n" for name in published))
 
-    def make_archive(self, platform="linux-x86_64", member="peri", exit_code=0):
+    def make_archive(self, platform="linux-x86_64", member="peri", exit_code=0,
+                     sidecar=True):
         archive = self.assets / f"peri-{platform}.tar.gz"
         payload = f"#!/bin/sh\nprintf 'peri fixture\\n'\nexit {exit_code}\n".encode()
         with tarfile.open(archive, "w:gz") as package:
@@ -117,6 +120,13 @@ esac
             info.mode = 0o755
             info.size = len(payload)
             package.addfile(info, io.BytesIO(payload))
+            if sidecar:
+                for entry in (f"peri-resources/workflow/{SIDECAR_ID}/package.json",
+                              f"peri-resources/workflow/{SIDECAR_ID}/dist/peri-workflow.js"):
+                    payload_entry = b"{}" if entry.endswith(".json") else b"// fixture\n"
+                    info = tarfile.TarInfo(entry)
+                    info.size = len(payload_entry)
+                    package.addfile(info, io.BytesIO(payload_entry))
         digest = hashlib.sha256(archive.read_bytes()).hexdigest()
         (self.assets / f"{archive.name}.sha256").write_text(
             f"{digest}  {archive.name}\n"
@@ -157,6 +167,15 @@ esac
         self.assert_install_succeeded(result, payload)
         self.assertIn(archive.name, self.download_log.read_text())
         self.assertIn(f"{archive.name}.sha256", self.download_log.read_text())
+
+    def test_release_sidecar_resources_are_extracted(self):
+        archive, payload = self.make_archive()
+        self.write_release([(archive.name, True), (f"{archive.name}.sha256", True)])
+        result = self.run_installer()
+        self.assert_install_succeeded(result, payload)
+        base = self.install_dir / VERSION_TAG / "peri-resources" / "workflow" / SIDECAR_ID
+        self.assertEqual((base / "package.json").read_text(), "{}")
+        self.assertTrue((base / "dist" / "peri-workflow.js").is_file())
 
     def test_platform_matrix(self):
         for system, architecture, platform in [

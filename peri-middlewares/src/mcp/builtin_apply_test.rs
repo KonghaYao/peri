@@ -777,6 +777,13 @@ fn system_mcp_tools_equals_declared_direct_set_for_every_instance() {
                 "{} 的 direct 集合必须为空（A4：cron 工具一律 deferred）",
                 instance.name
             ),
+            // workflow（wave 5 注册表）：与 cron 同形——四项一律 deferred（模型面
+            // `mcp__workflow__*`），`system_mcp_tools` 为空集。
+            "workflow" => assert!(
+                tools.is_empty(),
+                "{} 的 direct 集合必须为空（workflow 工具一律 deferred）",
+                instance.name
+            ),
             // workspace（wave 3 落地，AW3-03：7 项一律 direct，且 7 项都来自 `BaseTool`
             // 实现，无 deferred 项）。期望值**从注册表派生**，不在此处第二份硬编码名单：
             // 上方已把 `tools` 与注册表派生的 direct 集合逐项比对，这里锁住的是「全部声明

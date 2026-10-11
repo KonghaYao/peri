@@ -54,6 +54,47 @@ export function rpcNotify(method: string, params: unknown): void {
   send({ jsonrpc: '2.0', method, params })
 }
 
+// ─── agent/result 等待表（P6：任务结果经通知投递，不再有请求/响应）────
+
+/** 已发布任务等待表（taskId → pending resolver）。 */
+const pendingTasks = new Map<string, { resolve: (value: unknown) => void }>()
+
+/** 登记一个已发布任务的等待项（`agent/task` 通知发出前调用）。 */
+export function registerTask(taskId: string): Promise<unknown> {
+  return new Promise((resolve) => {
+    pendingTasks.set(taskId, { resolve })
+  })
+}
+
+/**
+ * 处理宿主 `agent/result` 通知：按 taskId 结算等待项。
+ *
+ * 幂等：未知 taskId（迟到/重复投递、或已由 run 结束清空）直接忽略。
+ */
+export function handleTaskResult(msg: {
+  params?: { taskId?: unknown; result?: unknown }
+}): void {
+  const taskId = msg.params?.taskId
+  if (typeof taskId !== 'string') return
+  const entry = pendingTasks.get(taskId)
+  if (!entry) return
+  pendingTasks.delete(taskId)
+  entry.resolve(msg.params?.result)
+}
+
+/**
+ * 结算全部未完成任务（run 结束/kill 收口；不残留悬挂 promise）。
+ *
+ * 以取消编码结算（`dead { reason: 'killed' }`），与宿主取消路径同构 ——
+ * adapter 据此抛 `WorkflowAbortedError`，与旧链 `-32000` 错误响应等价。
+ */
+export function rejectPendingTasks(message: string): void {
+  for (const [, entry] of pendingTasks) {
+    entry.resolve({ kind: 'dead', reason: 'killed', detail: message })
+  }
+  pendingTasks.clear()
+}
+
 export function handleResponse(msg: JsonRpcResponse): void {
   const entry = pending.get(msg.id)
   if (!entry) return

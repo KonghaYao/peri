@@ -1,1 +1,3 @@
-# dist/ 为发布与 Rust 嵌入所需的 hermetic 单文件 artifact。
+# dist/ 为发布、随包分发（sidecar）与摘要校验所需的 hermetic 单文件构建产物：
+# 不入库，由 `bun run build` 生成；发布物、sidecar 归档与 Rust pin 守卫都以该构建
+# 产物为字节源（仓库只保存其 sha256 摘要）。

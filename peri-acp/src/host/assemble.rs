@@ -192,6 +192,14 @@ pub struct HostAssemblyInput {
     /// 已有事实源构造（本层不第二次读配置）。
     #[cfg(not(target_os = "emscripten"))]
     pub workspace_resources: Option<peri_mcp_workspace::WorkspaceResourcesInput>,
+    /// builtin `workflow` 实例的运行时槽位（会话装配期创建、session/new 之后绑定）。
+    ///
+    /// `None` = 不装配该实例（顶层三路径不产生会话，没有编排状态与消费者）；会话环境
+    /// 装配（`host/workspace.rs`）传 `Some`，并在会话就绪后用**同一份**会话旧链的
+    /// `WorkflowRuntime` 绑定进去（双轨期两条面共享同一状态，见
+    /// `peri_middlewares::assembly::bind_workflow_runtime`）。
+    #[cfg(not(target_os = "emscripten"))]
+    pub workflow_input: Option<peri_mcp_workflow::WorkflowInstanceInput>,
     /// 准备路径一次加载的插件聚合：`Some` 时装配面不再重读插件目录
     /// （`None` = 既有语义，由装配面自行加载；仅 host 级/非准备调用点如此）。
     pub prepared_plugins: Option<PreparedPlugins>,
@@ -421,6 +429,8 @@ pub(crate) async fn assemble_server_config_with_mcp_profile(
         workspace_bash_default_run_in_background,
         #[cfg(not(target_os = "emscripten"))]
         workspace_resources,
+        #[cfg(not(target_os = "emscripten"))]
+        workflow_input,
         prepared_plugins,
         session_mcp_servers,
         builtin_closed,
@@ -565,6 +575,12 @@ pub(crate) async fn assemble_server_config_with_mcp_profile(
         #[cfg(not(target_os = "emscripten"))]
         if let Some(workspace_resources) = workspace_resources {
             builtin_context = builtin_context.with_workspace_resources(workspace_resources);
+        }
+        // `workflow` 实例的运行时槽位：会话环境装配创建，session/new 之后由会话旧链
+        // 绑定（同一份运行时）；`None` = 该实例不可装配（顶层三路径）。
+        #[cfg(not(target_os = "emscripten"))]
+        if let Some(workflow_input) = workflow_input {
+            builtin_context = builtin_context.with_workflow(workflow_input);
         }
         // beta flag 投影（会话冻结）：Bash 的 `run_in_background` 有效缺省随本上下文
         // 一次注入；装配面只传值，dispatch 不读配置、不解析 flag 语义。
@@ -781,6 +797,9 @@ pub(crate) async fn assemble_server_config_with_mcp_profile(
     // A6 面③：workflow agent 的工具面必须同样保留 Web / Artifact 能力（迁移后为
     // builtin 实例的 direct bridge `mcp__web__*` 等），因此装配点把 deployment pool
     // 交给工厂；bare 池同样保留 workspace，无 pool 时为 None。
+    // Emscripten：本地 workflow 运行时不在构建面内，不构造该工厂
+    // （`AcpServerConfig` 同名字段随目标移出）。
+    #[cfg(not(target_os = "emscripten"))]
     let workflow_middleware_factory =
         peri_middlewares::assembly::default_workflow_middleware_factory_with_pool(
             mcp_pool_concrete.clone(),
@@ -944,6 +963,7 @@ pub(crate) async fn assemble_server_config_with_mcp_profile(
         plugin_manager,
         settings_hooks,
         shared_tools,
+        #[cfg(not(target_os = "emscripten"))]
         workflow_middleware_factory,
         session_resources: session_resources.clone(),
         session_store_shutdown,
@@ -959,34 +979,5 @@ pub(crate) async fn assemble_server_config_with_mcp_profile(
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[tokio::test]
-    async fn worktree_mcp_pool_is_bound_before_deferred_initialization() {
-        let target = tempfile::TempDir::new().unwrap();
-        let sibling = tempfile::TempDir::new().unwrap();
-        let (resources, shutdown) =
-            peri_resources::Resources::open_with(Some(target.path().join("configured.db")))
-                .await
-                .unwrap()
-                .into_parts();
-        let (_owner, spawner) = peri_middlewares::mcp::McpTaskOwner::new();
-        let pool = pending_mcp_pool(
-            spawner,
-            peri_middlewares::mcp::apps::McpCapabilityProfile::disabled(),
-            Some(target.path()),
-            None,
-            &resources,
-        );
-        assert_eq!(pool.snapshot()["initPhase"], "pending");
-        assert!(pool.bind_execution_cwd(sibling.path()).is_err());
-        assert_eq!(
-            pool.bind_execution_cwd(target.path()).unwrap(),
-            target.path()
-        );
-        peri_acp_types::session_resources::SessionStoreShutdownPort::shutdown(&shutdown)
-            .await
-            .unwrap();
-    }
-}
+#[path = "assemble_test.rs"]
+mod tests;

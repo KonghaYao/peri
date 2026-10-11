@@ -9,7 +9,6 @@ use agent_client_protocol::schema::v1::{
     CloseSessionResponse, DeleteSessionResponse, ForkSessionResponse, ListSessionsResponse,
     NewSessionResponse, SessionId,
 };
-use peri_acp_types::ports::WorkflowMiddlewarePort;
 use peri_acp_types::session_resources::{
     FrozenSnapshotBytes, FrozenState, NewSessionDraft, NewSessionMeta, SessionInitialization,
     SessionMetaPatch,
@@ -41,19 +40,22 @@ fn fork_source_error(error: anyhow::Error) -> AcpError {
     }
 }
 
-/// 创建 session 级 WorkflowMiddleware（session/new / load / resume 共用，GAP-05）。
+/// 创建 session 级 workflow 装配链（session/new / load / resume 共用，GAP-05）。
 ///
-/// 构造收拢在 host 装配面（`host/workflow_agent.rs` 薄壳：executor 注入面 +
-/// 端口装配），命令面只持 `Arc<dyn WorkflowMiddlewarePort>`（3.0 批 2
-/// 波 2 装配边界收口；p1-wa：执行体在 peri-agent，装配经
-/// `workflow_middleware_factory` 端口）。
-pub(super) fn create_session_workflow_middleware(
+/// 构造收拢在 host 装配面（`host/workflow_agent.rs`：executor 注入面 +
+/// `WorkflowRuntime` 创建）；P5 起运行时是 MCP 实例与消费者的共享权威，
+/// 旧链 middleware 端口已删除。返回链路（运行时 + 执行依赖 + 通知句柄）。
+///
+/// `not(emscripten)`：本地 workflow 运行时随 `peri-mcp-workflow` 目标依赖移出
+/// 构建面（wasm 产物不打包 workflow），该目标无链可建。
+#[cfg(not(target_os = "emscripten"))]
+pub(super) fn create_session_workflow_chain(
     cfg: &AcpServerConfig,
     cwd: &str,
     session_id: &str,
     frozen_data: &crate::session::executor::FrozenSessionData,
-) -> Option<Arc<dyn WorkflowMiddlewarePort>> {
-    let middleware = crate::host::workflow_agent::create_session_workflow_middleware(
+) -> crate::host::workflow_agent::SessionWorkflowChain {
+    crate::host::workflow_agent::create_session_workflow_chain(
         Arc::clone(&cfg.provider),
         &cfg.peri_config,
         cwd,
@@ -68,13 +70,55 @@ pub(super) fn create_session_workflow_middleware(
         // （会话已登记时取到；未登记/print 模式为 None → 技能工具为空面）。
         cfg.session_manager.mcp_skill_registry_for(session_id),
         cfg.session_resources.clone(),
-    );
-    if let (Some(middleware), Some(session)) =
-        (&middleware, cfg.session_manager.get_session(session_id))
-    {
-        middleware.set_bg_registry(session.task_manager.clone());
+    )
+}
+
+/// P5 用户裁决（2026-10-11）：`"WorkflowMiddleware"` 命中会话关闭集 ⇒ workflow
+/// 实例与消费者都不装配（唯一物理关闭特例；ARC-CAPABILITY-CLOSURE-001 的既有语义
+/// 是非物理投影关闭，本特例经裁决，注记见 `spec/issues/2026-10-11-workflow-as-mcp.md`）。
+///
+/// 门控同 [`create_session_workflow_chain`]：该特例只对本地 workflow 运行时生效。
+#[cfg(not(target_os = "emscripten"))]
+pub(super) fn workflow_face_closed(
+    frozen_data: &crate::session::executor::FrozenSessionData,
+) -> bool {
+    peri_middlewares::assembly::builtin_closed_instances(
+        &frozen_data.meta_harness().disabled_middlewares,
+    )
+    .contains("workflow")
+}
+
+/// 把会话级 `WorkflowRuntime` 绑定进 builtin `workflow` 实例槽位并启动消费者
+/// （design §5.5 / §6.2：装配任一步失败按会话初始化失败处理并回收已建资源）。
+///
+/// 语义：
+/// - 环境缺失（本部署无会话环境）不是失败；
+/// - 环境未注入实例槽位（无 builtin 池的部署形态）无需绑定；
+/// - 首次绑定与同一实例重复绑定（幂等）成立；
+/// - 槽位已绑定不同实例是装配异常：返回错误，由调用方排空环境并撤销未发布的
+///   创建 —— 不得降级为警告后带病发布（否则实例面永久未绑定或两份状态）。
+///
+/// `not(emscripten)`：本地 workflow 运行时不在构建面内，该目标没有链可绑定
+/// （调用点随之不产生链，不会调用本函数）。
+#[cfg(not(target_os = "emscripten"))]
+pub(super) fn attach_session_workflow(
+    environment: Option<&Arc<super::super::workspace::SessionEnvironment>>,
+    chain: &crate::host::workflow_agent::SessionWorkflowChain,
+) -> Result<(), AcpError> {
+    if let Some(environment) = environment {
+        if let Some(binding) = environment.bind_workflow_runtime(&chain.runtime) {
+            if matches!(binding, peri_mcp_workflow::BindOutcome::Conflict) {
+                return Err(AcpError::new(
+                    -32603,
+                    "builtin workflow instance slot is already bound to a different runtime",
+                ));
+            }
+        }
+        // 消费者在发布之前接线（订阅在后台建立）；就绪屏障保证订阅就绪前
+        // `Workflow` 工具拒绝新启动。
+        environment.start_workflow_consumer(Arc::clone(&chain.executor));
     }
-    middleware
+    Ok(())
 }
 
 pub(crate) fn handle_initialize(params: &Value, cfg: &AcpServerConfig) -> Result<Value, AcpError> {
@@ -359,9 +403,30 @@ pub(crate) async fn new_session_from_prepared(
         environment.as_ref().map(|env| env.task_manager()),
     );
 
-    // Create session-scoped WorkflowMiddleware at session/new (GAP-05: inject frozen data)
-    let workflow_middleware =
-        create_session_workflow_middleware(cfg, &cwd, &session_id, &frozen_data);
+    // Create session-scoped workflow runtime at session/new (GAP-05: inject frozen data)。
+    // P5：关闭集命中 workflow 时不创建运行时、不绑定、不启动消费者（实例也不会 spawn）。
+    // Emscripten：本地 workflow 运行时不在构建面内，无链可建（通知句柄随之缺省）。
+    #[cfg(not(target_os = "emscripten"))]
+    let workflow_chain = if workflow_face_closed(&frozen_data) {
+        None
+    } else {
+        Some(create_session_workflow_chain(
+            cfg,
+            &cwd,
+            &session_id,
+            &frozen_data,
+        ))
+    };
+    // P5：builtin `workflow` 实例与本运行时共享同一份状态（会话发布之前绑定，
+    // 实例面对外可见时槽位必然已就绪）。绑定失败按会话初始化失败处理
+    // （design §6.2）：先排空已起环境、再撤销未发布的创建，不发布半可用会话。
+    #[cfg(not(target_os = "emscripten"))]
+    if let Some(chain) = workflow_chain.as_ref() {
+        if let Err(error) = attach_session_workflow(environment.as_ref(), chain) {
+            drain_and_abandon(environment.as_ref(), &initialization).await?;
+            return Err(error);
+        }
+    }
 
     // ── P6：发布（`sessions.insert` 是唯一对外可见点）──
     // 发布之后才可能有 prompt/执行；activate 已在 P3
@@ -384,7 +449,13 @@ pub(crate) async fn new_session_from_prepared(
             frozen: Some(frozen_data),
             recall_items: Vec::new(),
             agent_pool: crate::session::agent_pool::AgentPool::new(),
-            workflow_middleware,
+            // Emscripten：无本地 workflow 运行时 ⇒ 无完成通知源。
+            #[cfg(not(target_os = "emscripten"))]
+            workflow_notifications: workflow_chain
+                .as_ref()
+                .map(|chain| Arc::clone(&chain.notifications)),
+            #[cfg(target_os = "emscripten")]
+            workflow_notifications: None,
             title: None,
             tags: Vec::new(),
         },
@@ -726,8 +797,41 @@ pub(crate) async fn handle_fork(
         environment.as_ref().map(|env| env.task_manager()),
     );
     let caps = cfg.session_manager.ensure_session_caps(&new_session_id);
-    let workflow_middleware =
-        create_session_workflow_middleware(cfg, cwd, &new_session_id, &frozen_data);
+    // P5：关闭集命中 workflow 时不创建运行时、不绑定、不启动消费者（实例也不会 spawn）。
+    // Emscripten：本地 workflow 运行时不在构建面内，无链可建（通知句柄随之缺省）。
+    #[cfg(not(target_os = "emscripten"))]
+    let workflow_chain = if workflow_face_closed(&frozen_data) {
+        None
+    } else {
+        Some(create_session_workflow_chain(
+            cfg,
+            cwd,
+            &new_session_id,
+            &frozen_data,
+        ))
+    };
+    // fork 会话同样绑定 builtin `workflow` 实例槽位（同一份运行时）。
+    // 绑定失败按会话初始化失败处理（design §6.2）：先排空已建环境，**排空确认之后**
+    // 才撤销未发布的创建（顺序不变量），不发布半可用会话。
+    #[cfg(not(target_os = "emscripten"))]
+    if let Some(chain) = workflow_chain.as_ref() {
+        if let Err(error) = attach_session_workflow(environment.as_ref(), chain) {
+            if let Some(environment) = &environment {
+                if !environment.shutdown().await {
+                    return Err(AcpError::new(
+                        -32603,
+                        "workflow runtime binding failed and the unpublished fork environment \
+                         did not confirm shutdown",
+                    ));
+                }
+            }
+            cfg.session_resources
+                .abandon_initialization(&new_thread_id)
+                .await
+                .map_err(super::super::workspace::resource_error)?;
+            return Err(error);
+        }
+    }
 
     sessions.insert(
         new_session_id.clone(),
@@ -750,7 +854,13 @@ pub(crate) async fn handle_fork(
             frozen: Some(frozen_data),
             recall_items: Vec::new(),
             agent_pool: crate::session::agent_pool::AgentPool::new(),
-            workflow_middleware,
+            // Emscripten：无本地 workflow 运行时 ⇒ 无完成通知源。
+            #[cfg(not(target_os = "emscripten"))]
+            workflow_notifications: workflow_chain
+                .as_ref()
+                .map(|chain| Arc::clone(&chain.notifications)),
+            #[cfg(target_os = "emscripten")]
+            workflow_notifications: None,
             title: None,
             tags: Vec::new(),
         },

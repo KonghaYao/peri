@@ -317,7 +317,7 @@ impl McpClientPool {
     async fn initialize_config(
         pool: Arc<Self>,
         cwd: &Path,
-        config: super::config::McpConfigFile,
+        mut config: super::config::McpConfigFile,
         plugin_sources: std::collections::HashMap<String, String>,
         status_tx: tokio::sync::watch::Sender<McpInitStatus>,
         oauth_event_callback: Option<Box<dyn Fn(OAuthFlowEvent) + Send + Sync>>,
@@ -326,6 +326,20 @@ impl McpClientPool {
         // `run_initialize`），配置校验与目录绑定都已越过「注入窗口」的边界；两处封口都是
         // 幂等的，任一路径进入都会让此后的首次注入被 typed 拒绝。
         pool.seal_builtin_context();
+        // P5（用户裁决 2026-10-11）：命中关闭集的 builtin 实例**不 spawn**。
+        //
+        // ARC-CAPABILITY-CLOSURE-001 的既有语义是「非物理投影关闭」（实例照常
+        // 连接，只关本 turn 的工具投影）；workflow 是**经裁决的唯一特例**——
+        // 关闭集命中时实例（含宿主消费者）不得装配。实现点选在这里：把该条目
+        // 从本会话的 server 集合中移除，使它既不连接、也不进入 System 依赖
+        // 清单（readiness 的 `await_system_connections` 按 pool 级配置判定，
+        // 留下条目但跳过连接会造成启动 fatal）。特例仅按实例名精确匹配，
+        // 不改变共享关闭机制本身（见 docs/design/workflow-mcp.md §4.4）。
+        if let Some(context) = pool.builtin_instance_context() {
+            if context.closed.contains("workflow") {
+                config.mcp_servers.remove("workflow");
+            }
+        }
         // typed 配置（含手工构造）在任何 empty / disabled / ready 分支之前校验：
         // 非法组合必须暴露为 Failed，不能因为「空配置」或「全部 disabled」被跳过。
         if let Err(error) = super::config::validate_config(&config) {

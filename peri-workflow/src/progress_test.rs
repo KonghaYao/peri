@@ -621,7 +621,10 @@ fn test_resume_cache_hit_excludes_historical_usage_and_preserves_phase() {
         .unwrap();
     assert_eq!(fix.agent_count, 2);
     assert_eq!(fix.token_count, 10);
-    assert_eq!(fix.duration_ms, Some(20));
+    assert_eq!(
+        fix.duration_ms, None,
+        "resume 命中没有相位边界事件，墙钟未知；不得回落成 agent 时长求和"
+    );
     let fallback = summaries
         .iter()
         .find(|summary| summary.name == "repair")
@@ -682,7 +685,10 @@ fn test_completed_cleanup_preserves_phase_usage_until_run_expiration() {
         summaries[0].token_count, 20,
         "仍保留的通知只统计本次真实执行"
     );
-    assert_eq!(summaries[0].duration_ms, Some(40));
+    assert_eq!(
+        summaries[0].duration_ms, None,
+        "该用例不发相位边界事件：墙钟不可得为 None，不是 agent 时长求和"
+    );
     assert_eq!(
         serde_json::to_value(store.get_run(run_id).unwrap()).unwrap(),
         before
@@ -697,4 +703,248 @@ fn test_completed_cleanup_preserves_phase_usage_until_run_expiration() {
     assert!(store.get_run(run_id).is_none());
     assert!(store.get_phase_summaries(run_id).is_empty());
     assert!(!store.runs.read().contains_key(run_id));
+}
+
+/// [回归测试] 相位耗时是墙钟（`PhaseStarted` → `PhaseDone`），不是相位内 agent
+/// 时长求和：并行相位曾把求和读成「重叠 / 超长」（2026-10-11 issue 缺陷 3）。
+#[test]
+fn test_phase_summary_duration_is_wall_clock_not_agent_sum() {
+    let store = make_store();
+    let run_id = "wall-clock";
+    store.apply_event(&ProgressEvent::RunStarted {
+        run_id: run_id.into(),
+        workflow_name: "review".into(),
+        meta: None,
+    });
+    store.apply_event(&ProgressEvent::PhaseStarted {
+        run_id: run_id.into(),
+        phase: "Recon".into(),
+    });
+    // 两个并行 agent 各报 4s：求和是 8s，墙钟只有本用例的 sleep。
+    for agent_id in [1, 2] {
+        store.apply_event(&ProgressEvent::AgentStarted {
+            run_id: run_id.into(),
+            agent_id,
+            label: None,
+            phase: Some("Recon".into()),
+        });
+        store.apply_event(&ProgressEvent::AgentDone {
+            run_id: run_id.into(),
+            agent_id,
+            label: None,
+            phase: Some("Recon".into()),
+            result: AgentRunResult::Ok {
+                output: serde_json::json!("recon"),
+                usage: Usage { output_tokens: 10 },
+                model: None,
+                tool_count: None,
+                token_count: Some(10),
+                phase: Some("Recon".into()),
+                duration_ms: Some(4_000),
+            },
+        });
+    }
+    std::thread::sleep(std::time::Duration::from_millis(5));
+    store.apply_event(&ProgressEvent::PhaseDone {
+        run_id: run_id.into(),
+        phase: "Recon".into(),
+    });
+
+    let summaries = store.get_phase_summaries(run_id);
+    assert_eq!(summaries.len(), 1);
+    assert_eq!(summaries[0].agent_count, 2);
+    let wall_clock = summaries[0]
+        .duration_ms
+        .expect("有相位边界事件时必须给出墙钟");
+    assert!(
+        wall_clock < 4_000,
+        "墙钟不得等于/超过单个 agent 时长（求和会是 8000ms），实际 {wall_clock}ms"
+    );
+}
+
+/// [回归测试] 相位摘要顺序 = 引擎相位顺序（`PhaseStarted` 到达序），无相位事件的
+/// 归组垫后；不得随 `HashMap` 迭代序抖动（2026-10-11 真实 run 里 Digest 排在
+/// Recon 之前）。
+#[test]
+fn test_phase_summaries_follow_engine_phase_order() {
+    let store = make_store();
+    let run_id = "phase-order";
+    store.apply_event(&ProgressEvent::RunStarted {
+        run_id: run_id.into(),
+        workflow_name: "wf".into(),
+        meta: None,
+    });
+    let mut agent_id = 1;
+    for phase in ["Recon", "Digest", "Fix"] {
+        store.apply_event(&ProgressEvent::PhaseStarted {
+            run_id: run_id.into(),
+            phase: phase.into(),
+        });
+        for _ in 0..3 {
+            store.apply_event(&ProgressEvent::AgentStarted {
+                run_id: run_id.into(),
+                agent_id,
+                label: None,
+                phase: Some(phase.into()),
+            });
+            agent_id += 1;
+        }
+    }
+    // 无 `phase()` 的 agent 落在 workflow_name 桶：排在引擎相位之后。
+    store.apply_event(&ProgressEvent::AgentStarted {
+        run_id: run_id.into(),
+        agent_id,
+        label: None,
+        phase: None,
+    });
+
+    let names: Vec<String> = store
+        .get_phase_summaries(run_id)
+        .into_iter()
+        .map(|summary| summary.name)
+        .collect();
+    assert_eq!(names, vec!["Recon", "Digest", "Fix", "wf"]);
+}
+
+// ─── run 索引排序与观察者锁 ─────────────────────────────────
+
+#[test]
+fn run_index_is_ordered_by_start_time_not_hashmap_iteration() {
+    let store = make_store();
+    for (run_id, started_at_ms) in [("r_late", 200i64), ("r_early_b", 100), ("r_early_a", 100)] {
+        store.apply_event(&ProgressEvent::RunStarted {
+            run_id: run_id.into(),
+            workflow_name: "w".into(),
+            meta: None,
+        });
+        store
+            .runs
+            .write()
+            .get_mut(run_id)
+            .expect("run 已登记")
+            .progress
+            .started_at_ms = started_at_ms;
+    }
+
+    let runs = store.list_runs();
+    let order: Vec<&str> = runs.iter().map(|run| run.run_id.as_str()).collect();
+    assert_eq!(
+        order,
+        vec!["r_early_a", "r_early_b", "r_late"],
+        "升序（旧→新），同毫秒按 run_id 定序，不得依赖 HashMap 迭代顺序"
+    );
+    assert_eq!(
+        store.list_runs().last().map(|run| run.run_id.as_str()),
+        Some("r_late"),
+        "「最近 N 个 run」= 尾部 N（WorkflowStatus 依赖该约定）"
+    );
+    let snapshot: Vec<String> = store
+        .get_all_runs_snapshot()
+        .into_iter()
+        .map(|run| run.run_id)
+        .collect();
+    assert_eq!(snapshot, vec!["r_early_a", "r_early_b", "r_late"]);
+}
+
+#[test]
+fn run_started_records_wall_clock_start_time() {
+    let store = make_store();
+    let before = chrono::Utc::now().timestamp_millis();
+    store.apply_event(&ProgressEvent::RunStarted {
+        run_id: "r1".into(),
+        workflow_name: "w".into(),
+        meta: None,
+    });
+    let after = chrono::Utc::now().timestamp_millis();
+    let started = store.get_run("r1").unwrap().started_at_ms;
+    assert!(
+        (before..=after).contains(&started),
+        "started_at_ms 应落在本次调用窗口内，实际 {started}"
+    );
+}
+
+/// 观察者回调期间不得持有 observer 读锁（否则回调内改注入会自锁）。
+struct LockProbe {
+    store: std::sync::Weak<WorkflowProgressStore>,
+    calls: std::sync::atomic::AtomicUsize,
+}
+
+impl ProgressObserver for LockProbe {
+    fn on_progress_event(&self, _event: &ProgressEvent) {
+        let store = self.store.upgrade().expect("store 存活");
+        assert!(
+            store.observer.try_write().is_some(),
+            "observer 回调不得持有读锁"
+        );
+        drop(store);
+        self.calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+    }
+}
+
+#[test]
+fn progress_observer_is_called_without_holding_the_observer_lock() {
+    let store = Arc::new(WorkflowProgressStore::new());
+    let probe = Arc::new(LockProbe {
+        store: Arc::downgrade(&store),
+        calls: std::sync::atomic::AtomicUsize::new(0),
+    });
+    store.set_observer(probe.clone());
+    store.apply_event(&ProgressEvent::Log {
+        run_id: "r1".into(),
+        message: "hello".into(),
+    });
+    assert_eq!(probe.calls.load(std::sync::atomic::Ordering::SeqCst), 1);
+}
+
+/// 记录 `RunDone` 回调时刻 store 中该 run 的快照（用于断言投影已可见）。
+struct ProjectionProbe {
+    store: std::sync::Weak<WorkflowProgressStore>,
+    seen: parking_lot::Mutex<Option<RunProgress>>,
+}
+
+impl ProgressObserver for ProjectionProbe {
+    fn on_progress_event(&self, event: &ProgressEvent) {
+        if matches!(event, ProgressEvent::RunDone { .. }) {
+            let store = self.store.upgrade().expect("store 存活");
+            *self.seen.lock() = store.get_run(event.run_id());
+        }
+    }
+}
+
+#[test]
+fn run_done_projection_is_committed_before_the_observer_is_notified() {
+    let store = Arc::new(WorkflowProgressStore::new());
+    let probe = Arc::new(ProjectionProbe {
+        store: Arc::downgrade(&store),
+        seen: parking_lot::Mutex::new(None),
+    });
+    store.set_observer(probe.clone());
+    store.apply_event(&ProgressEvent::RunStarted {
+        run_id: "r1".into(),
+        workflow_name: "w".into(),
+        meta: None,
+    });
+    store.apply_run_done(
+        "r1",
+        "completed",
+        None,
+        None,
+        peri_acp_types::workflow::PostProcessingStatus::Failed,
+        peri_acp_types::workflow::DeliveryStatus::Blocked,
+    );
+
+    let seen = probe.seen.lock().clone().expect("RunDone 已回调");
+    assert!(
+        matches!(seen.status, RunStatus::Completed),
+        "回调时刻终态已提交"
+    );
+    assert_eq!(
+        seen.delivery_status,
+        peri_acp_types::workflow::DeliveryStatus::Blocked,
+        "投影与 RunDone 同一次提交，通知不得早于投影"
+    );
+    assert_eq!(
+        seen.post_processing_status,
+        peri_acp_types::workflow::PostProcessingStatus::Failed
+    );
 }

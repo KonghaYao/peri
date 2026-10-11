@@ -233,8 +233,7 @@ pub(crate) fn build_stage_context(
         dynamic_mcp_projection: Arc::clone(&ctx.dynamic_mcp_projection),
         tool_search_index: Arc::clone(&ctx.tool_search_index),
         shared_tools: Arc::clone(&ctx.shared_tools),
-        workflow_executor: ctx.workflow_executor.clone(),
-        workflow_middleware: ctx.workflow_middleware.clone(),
+        workflow_notifications: ctx.workflow_notifications.clone(),
         session_resources: ctx.session_resources.clone(),
         thread_id: ctx.thread_id.clone(),
         // 注入面

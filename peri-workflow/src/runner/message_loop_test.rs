@@ -2,26 +2,33 @@ use super::*;
 use crate::journal::RunState;
 use crate::progress::{RunProgress, RunStatus};
 use serde_json::json;
-use std::sync::atomic::Ordering;
+use std::sync::atomic::{AtomicU64, Ordering};
 
-struct CountingExecutor(Arc<AtomicU64>);
+/// 记录发布调用的测试 sink：返回固定结果（不触达任务表）。
+///
+/// 真实准入（maxAgents / 关闭）在 `WorkflowRuntime` 的 sink 实现内；本测试验证
+/// 消息循环对发布结果的处置（拒绝参数 / 准入拒绝 / 放行）。
+struct RecordingSink {
+    calls: Arc<AtomicU64>,
+    outcome: AgentTaskPublish,
+}
 
-#[async_trait::async_trait]
-impl AgentExecutor for CountingExecutor {
-    async fn execute(&self, _params: AgentRunParams) -> AgentRunResult {
-        self.0.fetch_add(1, Ordering::SeqCst);
-        AgentRunResult::Dead {
-            reason: Some("unexpected-dispatch".into()),
-            detail: None,
-        }
+impl AgentTaskSink for RecordingSink {
+    fn publish_agent_task(&self, _task_id: String, _params: AgentRunParams) -> AgentTaskPublish {
+        self.calls.fetch_add(1, Ordering::SeqCst);
+        self.outcome.clone()
     }
 }
 
-// 与 RPC 单测相同的本地管道 fixture；不查询 HOME、artifact cache 或网络。
+/// 与 RPC 单测相同的本地管道 fixture；不查询 HOME、artifact cache 或网络。
+///
+/// 返回 (终态, state.json, progress)。
 async fn run_messages(
-    agent_run_id: &str,
+    sink: Arc<dyn AgentTaskSink>,
+    method: &str,
+    params: serde_json::Value,
     limits: WorkflowLimits,
-) -> (WorkflowResult, RunState, RunProgress, u64) {
+) -> (WorkflowResult, RunState, RunProgress) {
     let tmp = tempfile::tempdir().unwrap();
     let journal = Arc::new(WorkflowJournalStore::new(tmp.path().to_str().unwrap()));
     journal.init_run("run-1", "return null").unwrap();
@@ -38,13 +45,12 @@ async fn run_messages(
         ))
         .expect("应创建本地 RPC 管道"),
     );
-    let calls = Arc::new(AtomicU64::new(0));
     let (msg_tx, msg_rx) = tokio::sync::mpsc::channel(2);
     msg_tx
         .send(IncomingMessage::Request {
             id: None,
-            method: "agent/run".into(),
-            params: Some(json!({"runId": agent_run_id, "agentId": 7, "prompt": "inspect"})),
+            method: method.into(),
+            params: Some(params),
         })
         .await
         .unwrap();
@@ -60,7 +66,8 @@ async fn run_messages(
     let (done_tx, mut done_rx) = watch::channel(None);
     let message_loop = MessageLoop {
         run_scope: Arc::new(super::super::scope::RunScope::new()),
-        agent_executor: Arc::new(CountingExecutor(Arc::clone(&calls))),
+        agent_task_sink: Some(sink),
+        limit_state: Arc::new(RunLimitState::new(limits.max_tool_calls)),
         channel: Arc::new(RpcChannel::new(host.channel())),
         journal_store: Arc::clone(&journal),
         progress_store: Arc::clone(&progress),
@@ -91,15 +98,25 @@ async fn run_messages(
         result,
         journal.read_state("run-1").unwrap(),
         progress.get_run("run-1").unwrap(),
-        calls.load(Ordering::SeqCst),
     )
 }
 
 #[tokio::test]
-async fn test_invalid_agent_run_continues_to_workflow_done() {
-    let (result, state, progress, calls) =
-        run_messages("other-run", WorkflowLimits::default()).await;
-    assert_eq!(calls, 0, "跨 run 请求不得执行 agent");
+async fn test_invalid_agent_task_continues_to_workflow_done() {
+    let calls = Arc::new(AtomicU64::new(0));
+    let sink = RecordingSink {
+        calls: Arc::clone(&calls),
+        outcome: AgentTaskPublish::Accepted,
+    };
+    let (result, state, progress) = run_messages(
+        Arc::new(sink),
+        "agent/task",
+        // 跨 run 的发布：runId 与当前 run 不匹配，必须在准入前被拒绝。
+        json!({"runId": "other-run", "taskId": "t-1", "agentId": 7, "prompt": "inspect"}),
+        WorkflowLimits::default(),
+    )
+    .await;
+    assert_eq!(calls.load(Ordering::SeqCst), 0, "跨 run 发布不得进入准入");
     assert_eq!(result.status, "completed", "拒绝参数不应提前结束消息循环");
     assert_eq!(state.status, "completed");
     assert!(matches!(progress.status, RunStatus::Completed));
@@ -107,12 +124,23 @@ async fn test_invalid_agent_run_continues_to_workflow_done() {
 
 #[tokio::test]
 async fn test_agent_limit_stops_before_queued_workflow_done() {
+    let calls = Arc::new(AtomicU64::new(0));
+    let sink = RecordingSink {
+        calls: Arc::clone(&calls),
+        outcome: AgentTaskPublish::LimitBreach("workflow exceeded maxAgents (0)".into()),
+    };
     let limits = WorkflowLimits {
         max_agents: Some(0),
         ..WorkflowLimits::default()
     };
-    let (result, state, progress, calls) = run_messages("run-1", limits).await;
-    assert_eq!(calls, 0, "超额请求不得创建 agent task");
+    let (result, state, progress) = run_messages(
+        Arc::new(sink),
+        "agent/task",
+        json!({"runId": "run-1", "taskId": "t-1", "agentId": 7, "prompt": "inspect"}),
+        limits,
+    )
+    .await;
+    assert_eq!(calls.load(Ordering::SeqCst), 1, "准入被调用一次并拒绝");
     assert_eq!(result.status, "failed", "限额失败不得被后续 done 覆写");
     assert_eq!(
         result.error.as_deref(),

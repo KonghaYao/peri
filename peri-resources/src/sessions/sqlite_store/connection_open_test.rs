@@ -496,7 +496,9 @@ async fn exited_process_releases_initialization_lock_for_retry() {
     );
     child.kill().await.unwrap();
     child.wait().await.unwrap();
-    let store = tokio::time::timeout(Duration::from_secs(1), SqliteThreadStore::new(&path))
+    // 外层超时必须宽于生产锁预算 SCHEMA_OPEN_LOCK_TIMEOUT，让真实缺陷以 TimedOut 暴露。
+    // 曾用 1s，CI 负载下外层先到期误报（run 38145652592）。
+    let store = tokio::time::timeout(Duration::from_secs(10), SqliteThreadStore::new(&path))
         .await
         .unwrap()
         .unwrap();

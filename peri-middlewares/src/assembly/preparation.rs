@@ -4,7 +4,6 @@ use crate::{
     mcp::{McpClientPool, McpResourceTool},
     permission::{AutoClassifier, LlmAutoClassifier},
     tool_search::ToolSearchIndex,
-    workflow::WorkflowMiddleware,
 };
 use peri_acp_types::mcp_skills::McpSkillRegistry;
 use peri_agent::tools::BaseTool;
@@ -14,7 +13,6 @@ pub(super) struct ResolvedPorts {
     pub(super) mcp_pool_concrete: Option<Arc<McpClientPool>>,
     pub(super) mcp_agent_registry: Option<Arc<crate::mcp::McpAgentRegistry>>,
     pub(super) tool_search_index_concrete: Arc<ToolSearchIndex>,
-    pub(super) workflow_middleware_concrete: Option<Arc<WorkflowMiddleware>>,
     pub(super) auto_classifier: Option<Arc<dyn AutoClassifier>>,
 }
 
@@ -22,7 +20,6 @@ pub(super) fn resolve_ports(ctx: &AssemblyContext) -> ResolvedPorts {
     let AssemblyContext {
         mcp_pool,
         tool_search_index,
-        workflow_middleware,
         auto_classifier_model,
         ..
     } = ctx;
@@ -65,11 +62,6 @@ pub(super) fn resolve_ports(ctx: &AssemblyContext) -> ResolvedPorts {
         .downcast_arc::<ToolSearchIndex>()
         .unwrap_or_else(|_| Arc::new(ToolSearchIndex::default()));
 
-    // WorkflowMiddleware 端口（会话级复用，None 时构造临时实例）。
-    let workflow_middleware_concrete: Option<Arc<WorkflowMiddleware>> = workflow_middleware
-        .as_ref()
-        .and_then(|p| Arc::clone(p).downcast_arc::<WorkflowMiddleware>().ok());
-
     // HITL middleware — reuse auto_classifier model from cache when available
     let auto_classifier: Option<Arc<dyn AutoClassifier>> = Some(Arc::new(LlmAutoClassifier::new(
         auto_classifier_model.clone(),
@@ -79,7 +71,6 @@ pub(super) fn resolve_ports(ctx: &AssemblyContext) -> ResolvedPorts {
         mcp_pool_concrete,
         mcp_agent_registry,
         tool_search_index_concrete,
-        workflow_middleware_concrete,
         auto_classifier,
     }
 }

@@ -58,7 +58,9 @@ use std::{
 use async_trait::async_trait;
 use futures::{stream, StreamExt};
 use peri_acp_types::{messages::MessageContent, ports::McpPoolPort};
-use peri_middlewares::assembly::{BuiltinInstanceContext, CronInstanceInput};
+use peri_middlewares::assembly::{
+    BuiltinInstanceContext, CronInstanceInput, WorkflowInstanceInput,
+};
 use peri_middlewares::mcp::{ClientStatus, McpClientPool, McpInitStatus, McpTaskOwner};
 use peri_model::{
     JsonObject, Model, ModelCapabilities, ModelMessage, ModelRequest, ModelResponse, ModelResult,
@@ -331,12 +333,16 @@ impl WireFixtureHarness {
         let cwd = workspace.to_string_lossy().to_string();
         let (cron_trigger_tx, _cron_triggers) = tokio::sync::mpsc::unbounded_channel();
         pool.set_builtin_instance_context(Arc::new(
-            BuiltinInstanceContext::new(cwd.clone()).with_cron(CronInstanceInput {
-                scheduler: Arc::new(parking_lot::Mutex::new(peri_mcp_cron::CronScheduler::new(
-                    cron_trigger_tx,
-                ))),
-                tick_enabled: false,
-            }),
+            BuiltinInstanceContext::new(cwd.clone())
+                .with_cron(CronInstanceInput {
+                    scheduler: Arc::new(parking_lot::Mutex::new(
+                        peri_mcp_cron::CronScheduler::new(cron_trigger_tx),
+                    )),
+                    tick_enabled: false,
+                })
+                // P3 起 `workflow` 是会话级 builtin 实例：会话生产装配给空槽（运行时由会话
+                // 旧链在 session/new 之后绑定），本夹具同形——实例连接与工具面不依赖绑定。
+                .with_workflow(WorkflowInstanceInput::slot()),
         ))
         .expect("夹具池首次注入必须成功（不存在二次注入）");
     }

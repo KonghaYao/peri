@@ -8,7 +8,7 @@ use std::sync::Arc;
 
 use peri_agent::tools::{BaseTool, ContextUsage};
 
-use crate::tool_search::core_tools::{TOOL_AGENT, TOOL_ASK_USER, TOOL_WORKFLOW};
+use crate::tool_search::core_tools::{TOOL_AGENT, TOOL_ASK_USER};
 use crate::tools::ArcToolWrapper;
 use peri_acp_types::agents::AgentOverrides;
 use peri_mcp_core::agent_definition::ToolsValue;
@@ -42,15 +42,18 @@ pub fn fork_context_usage_gate(usage: Option<ContextUsage>) -> Result<(), String
 }
 
 /// 子链不持有的 builtin 实例（按 `BaseTool::builtin_mcp_instance()` 的**可信
-/// 实例身份**判定，不按工具名猜）：v4 起 cron 是 builtin 实例，子链没有其持有者，
-/// 因此不进入子执行。
-const CHILD_ABSENT_BUILTIN_INSTANCES: [&str; 1] = ["cron"];
+/// 实例身份**判定，不按工具名猜）：
+/// - `cron`：v4 起是 builtin 实例，子链没有其持有者，因此不进入子执行；
+/// - `workflow`：编排能力（`mcp__workflow__Workflow` / `WorkflowStatus` /
+///   `WorkflowKill`）整体不进入子执行（workflow as MCP P5：按实例整体排除，
+///   不再按裸名 `Workflow` 逐名猜）。
+const CHILD_ABSENT_BUILTIN_INSTANCES: [&str; 2] = ["cron", "workflow"];
 
 /// 子 Agent 继承策略（**单一权威**，与 `subagent/tool/descriptions/agent.md`
 /// 的继承声明同一契约）：父工具集中这些扩展面不进入子执行——
 /// `Agent`（防递归）、`AskUserQuestion`（子链无提问持有者，与子能力投影
-/// `subagent_chain_capabilities` 的 ask_user=false 一致）、`Workflow`、
-/// builtin `cron` 实例工具。
+/// `subagent_chain_capabilities` 的 ask_user=false 一致）、builtin `cron` 与
+/// `workflow` 实例的全部工具（P5：workflow 的排除按实例身份整体处理）。
 ///
 /// 定义型（[`canonical_tool_filter`] 组合本函数）与前台/后台 fork 共用本函数；
 /// deferred 搜索与执行消费同一 `tool_filter`（`SessionToolCatalog::with_filter`
@@ -64,7 +67,6 @@ pub fn child_inheritance_filter() -> peri_agent::session::tool_catalog::ToolFilt
     std::sync::Arc::new(|tool: &dyn BaseTool| {
         let excluded = tool.name() == TOOL_AGENT
             || tool.name() == TOOL_ASK_USER
-            || tool.name() == TOOL_WORKFLOW
             || tool
                 .builtin_mcp_instance()
                 .is_some_and(|instance| CHILD_ABSENT_BUILTIN_INSTANCES.contains(&instance));
@@ -90,7 +92,7 @@ pub fn canonical_tool_filter(
         allowed,
         disallowed.to_vec(),
     );
-    // 定义型与 fork 共用同一继承策略（含 Agent/AskUser/Workflow/cron），
+    // 定义型与 fork 共用同一继承策略（含 Agent/AskUser/cron/workflow 实例），
     // 再叠加定义自身的 allow/disallow 策略。
     let inheritance = child_inheritance_filter();
     Arc::new(move |tool| inheritance(tool) && policy(tool))

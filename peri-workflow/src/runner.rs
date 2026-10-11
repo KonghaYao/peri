@@ -1,6 +1,8 @@
 //! WorkflowRunner —— 公开运行入口、子进程所有权与取消收敛。
+//!
+//! P6 wire：Node → 宿主 `agent/task`（通知）经 [`AgentTaskSink`] 发布为任务表记录；
+//! 宿主的终态提交（[`Self::deliver_agent_result`]）向 Node 投递 `agent/result`（通知）。
 
-mod agent_dispatch;
 mod artifact;
 mod limits;
 mod message_loop;
@@ -15,7 +17,6 @@ use peri_js_runtime::{JsExecutionHost, JsProcessSpec};
 use serde_json::Value;
 use tokio::sync::{oneshot, watch};
 
-use artifact::prepare_workflow_command;
 use message_loop::MessageLoop;
 use run_protocol::{reusable_journal_prefix, validate_start_ack, workflow_start_params};
 use terminal::{send_failure, send_killed};
@@ -23,16 +24,40 @@ use terminal::{send_failure, send_killed};
 use crate::error::WorkflowError;
 use crate::journal::WorkflowJournalStore;
 use crate::progress::WorkflowProgressStore;
-use crate::protocol::WorkflowLimits;
+use crate::protocol::{AgentResultParams, AgentRunParams, AgentRunResult, WorkflowLimits};
 use crate::rpc::RpcChannel;
 
-pub(crate) use artifact::WORKFLOW_ARTIFACT_BYTES;
+pub(crate) use artifact::prepare_workflow_command;
+pub(crate) use artifact::WorkflowCommand;
+pub(crate) use limits::RunLimitState;
 
 const START_TIMEOUT: Duration = Duration::from_secs(15);
 
 // ─── Agent 回调 trait（3.0 批 2 波 1 迁入 peri-acp-types）────────────
 
 pub use peri_acp_types::workflow::AgentExecutor;
+
+// ─── agent/task 发布面（P6：Node → 宿主任务发布）──────────────────
+
+/// `agent/task` 的发布结果（wire 侧视角；design §5.2 第 1 条）。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum AgentTaskPublish {
+    /// 已登记（重复发布幂等返回既有记录）；消费与投递由任务表驱动。
+    Accepted,
+    /// 实例已关闭（任务表 `PublishOutcome::Closed`）：拒绝登记，发布方须就地结算
+    /// Node 等待方，不留悬挂 promise（design §4.4 关闭顺序第 ① 步）。
+    Closed,
+    /// 超出 run limits（如 maxAgents）：与旧链同语义——run 以限额错误终止。
+    LimitBreach(String),
+}
+
+/// Node 任务发布面：`agent/task` → 任务表（由 `WorkflowRuntime` 装配期注入）。
+///
+/// 边界：wire 侧只依赖本 trait，不直连任务表；limits 准入（maxAgents）与关闭判定
+/// 都在实现侧，与 run `maxConcurrency`/limits 使用同一执行权威（design §5.2 第 5 条）。
+pub trait AgentTaskSink: Send + Sync {
+    fn publish_agent_task(&self, task_id: String, params: AgentRunParams) -> AgentTaskPublish;
+}
 
 // ─── 公开类型 ──────────────────────────────────────────────────
 
@@ -85,6 +110,10 @@ pub struct WorkflowRunner {
     cwd: String,
     /// 活跃 workflow run 的 RPC 通道（run_id → channel），供 kill_agent 查找（GAP-07）。
     active_channels: dashmap::DashMap<String, Arc<RpcChannel>>,
+    /// `agent/task` 发布面（装配期由 `WorkflowRuntime` 绑定；未绑定 = 未接线，一律拒绝）。
+    agent_task_sink: parking_lot::RwLock<Option<Arc<dyn AgentTaskSink>>>,
+    /// 活跃 run 的 limit 状态（tool 计数 / breach；run 结束时移除）。
+    run_limit_states: dashmap::DashMap<String, Arc<RunLimitState>>,
     /// 进度事件接收通道（从 workflow agent 内部发送，合并到 msg_loop）
     progress_rx: Option<
         Arc<
@@ -105,8 +134,97 @@ impl WorkflowRunner {
             agent_executor,
             cwd: cwd.to_string(),
             active_channels: dashmap::DashMap::new(),
+            agent_task_sink: parking_lot::RwLock::new(None),
+            run_limit_states: dashmap::DashMap::new(),
             progress_rx: progress_rx.map(|rx| Arc::new(tokio::sync::Mutex::new(rx))),
         }
+    }
+
+    /// 绑定 `agent/task` 发布面（`WorkflowRuntime` 构造期一次绑定）。
+    pub fn bind_agent_task_sink(&self, sink: Arc<dyn AgentTaskSink>) {
+        *self.agent_task_sink.write() = Some(sink);
+    }
+
+    pub(crate) fn agent_task_sink(&self) -> Option<Arc<dyn AgentTaskSink>> {
+        self.agent_task_sink.read().clone()
+    }
+
+    /// 投递 `agent/result` 通知（design §5.2 第 4 条：先提交任务表，再投递）。
+    ///
+    /// 通知只是结算信号、不承担可靠投递：Node 侧按 `taskId` 去重，迟到/重复投递被
+    /// 忽略。投递在消息循环之外发生（宿主提交路径），因此以 spawn 移交、不阻塞提交
+    /// （任务表 CAS 临界区内调用，必须非阻塞）；失败只记录。
+    /// 返回是否找到该 run 的活跃通道。
+    pub fn deliver_agent_result(
+        &self,
+        run_id: &str,
+        task_id: &str,
+        result: &AgentRunResult,
+    ) -> bool {
+        let Some(channel) = self
+            .active_channels
+            .get(run_id)
+            .map(|entry| Arc::clone(entry.value()))
+        else {
+            // run 已结束（通道已回收）属预期路径：终态仍提交任务表，只是不再有等待方。
+            tracing::debug!(
+                target: "workflow.rpc",
+                run_id,
+                task_id,
+                "agent/result delivery skipped: run channel is not active",
+            );
+            return false;
+        };
+        let params = match serde_json::to_value(AgentResultParams {
+            run_id: run_id.to_string(),
+            task_id: task_id.to_string(),
+            result: result.clone(),
+        }) {
+            Ok(value) => value,
+            Err(error) => {
+                tracing::warn!(
+                    target: "workflow.rpc",
+                    run_id,
+                    task_id,
+                    error = %error,
+                    "agent/result serialization failed; result not delivered",
+                );
+                return false;
+            }
+        };
+        if tokio::runtime::Handle::try_current().is_err() {
+            tracing::warn!(
+                target: "workflow.rpc",
+                run_id,
+                task_id,
+                "agent/result delivery skipped: no async runtime",
+            );
+            return false;
+        }
+        let delivery_run_id = run_id.to_string();
+        let delivery_task_id = task_id.to_string();
+        tokio::spawn(async move {
+            if let Err(error) = channel.send_notification("agent/result", params).await {
+                tracing::warn!(
+                    target: "workflow.rpc",
+                    run_id = %delivery_run_id,
+                    task_id = %delivery_task_id,
+                    error = %error,
+                    "agent/result delivery failed",
+                );
+            }
+        });
+        true
+    }
+
+    /// 记录一次任务结果的 tool 调用数（design §5.2 第 5 条：与 run limits 同一权威）。
+    ///
+    /// 返回首次超限的 breach 详情（若有）；breach 由消息循环在 `workflow/done`
+    /// 读取并投影为 run 终态（`status = failed` + 限额错误）。
+    pub(crate) fn note_task_tool_calls(&self, run_id: &str, count: u64) -> Option<String> {
+        self.run_limit_states
+            .get(run_id)
+            .and_then(|state| state.observe_tool_calls(count))
     }
 
     /// Bind workflow agent tools to the owning session's execution scope.
@@ -336,6 +454,9 @@ impl WorkflowRunner {
 
         // 8. Message loop (spawned task)
         let run_started = peri_time::monotonic_now();
+        let limit_state = Arc::new(RunLimitState::new(input.limits.max_tool_calls));
+        self.run_limit_states
+            .insert(run_id.clone(), Arc::clone(&limit_state));
 
         let kill_input = input.clone();
         let kill_started_at = started_at_iso.clone();
@@ -358,7 +479,8 @@ impl WorkflowRunner {
 
         let message_loop = MessageLoop {
             run_scope: Arc::clone(&run_scope),
-            agent_executor: Arc::clone(&self.agent_executor),
+            agent_task_sink: self.agent_task_sink(),
+            limit_state: Arc::clone(&limit_state),
             channel: Arc::clone(&channel),
             journal_store: Arc::clone(&journal_store),
             progress_store: Arc::clone(&progress_store),
@@ -406,6 +528,9 @@ impl WorkflowRunner {
 
         // Cleanup: remove channel from active tracking (GAP-07)
         self.active_channels.remove(&run_id);
+
+        // Cleanup: drop per-run limit state (计数随 run 结束)
+        self.run_limit_states.remove(&run_id);
 
         // Cleanup old runs from journal
         let _ = journal_store.cleanup_old_runs();

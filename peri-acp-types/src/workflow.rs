@@ -33,7 +33,7 @@ pub struct AgentRunParams {
 }
 
 /// AgentRunResult（对齐引擎 AgentRunResult）
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "kind")]
 pub enum AgentRunResult {
     #[serde(rename = "ok")]
@@ -84,7 +84,7 @@ impl AgentRunResult {
     }
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Usage {
     #[serde(rename = "outputTokens")]
     pub output_tokens: u64,
@@ -179,6 +179,11 @@ pub struct PhaseSummary {
     pub name: String,
     pub agent_count: usize,
     pub token_count: u64,
+    /// 相位**墙钟**毫秒（宿主收到 `PhaseStarted` → 收到 `PhaseDone` 的时长差）：
+    /// 并行相位因此重合而非相加。无相位边界事件时为 `None`（resume 命中、引擎
+    /// 未发相位事件、无 `phase()` 的 agent 归组）；生产者不得回落成相位内 agent
+    /// 时长求和——那是另一维度的量，曾把并行相位读成「重叠 / 超长」
+    /// （2026-10-11 issue 缺陷 3）。
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub duration_ms: Option<u64>,
 }
@@ -299,8 +304,11 @@ pub enum PostProcessingStatus {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
 #[serde(rename_all = "snake_case")]
 pub enum DeliveryStatus {
-    Deliverable,
     Blocked,
+    /// 历史 `state.json` 可能写着 `deliverable`（该投影分支已删，内核不再产出）：
+    /// 继续按 `unknown` 读入，是**数据兼容**而非 API 兼容——枚举收窄不得让
+    /// resume / 审计读旧文件失败。
+    #[serde(alias = "deliverable")]
     #[default]
     Unknown,
 }
@@ -400,12 +408,107 @@ pub struct WorkflowTaskResult {
     pub attempts: Vec<WorkflowAttempt>,
 }
 
+/// 会话级 workflow 完成通知源（P5：替代旧链 `WorkflowMiddlewarePort` 的通知面）。
+///
+/// 事实源是 `WorkflowRuntime` 持有的 broadcast 发送端（构造期由宿主注入同一
+/// 通道）；会话装配点创建本句柄并随会话状态传递：
+///
+/// - `subscribe`：执行装配（`agent_build`）订阅完成通知，把终态 run 翻译成
+///   唤醒主循环的 Defer（`apply_workflow_task_result`）；
+/// - `claim_consumer`：通知消费者**单次 spawn 门**（会话级；每会话只有一个
+///   订阅消费者，避免 broadcast 扇出造成重复投递）。
+///
+/// 本类型是数据面句柄（不承担控制面语义）：kill / resume / 状态查询一律经
+/// builtin `workflow` 实例的 MCP 面（`mcp__workflow__*` 与 `McpPoolPort`），
+/// 不再有 middleware 端口。
+pub struct WorkflowNotifications {
+    sender: tokio::sync::broadcast::Sender<WorkflowTaskResult>,
+    consumer_spawned: std::sync::atomic::AtomicBool,
+}
+
+impl WorkflowNotifications {
+    /// 以完成通知发送端构造（发送端由 `WorkflowRuntime` 与宿主共享）。
+    pub fn new(sender: tokio::sync::broadcast::Sender<WorkflowTaskResult>) -> Self {
+        Self {
+            sender,
+            consumer_spawned: std::sync::atomic::AtomicBool::new(false),
+        }
+    }
+
+    /// 订阅完成通知（每 run 一条 `WorkflowTaskResult`）。
+    pub fn subscribe(&self) -> tokio::sync::broadcast::Receiver<WorkflowTaskResult> {
+        self.sender.subscribe()
+    }
+
+    /// 通知消费者单次 spawn 门：首次调用返回 true（此后恒 false）。
+    pub fn claim_consumer(&self) -> bool {
+        !self
+            .consumer_spawned
+            .swap(true, std::sync::atomic::Ordering::SeqCst)
+    }
+}
+
 fn escape_reminder_text(input: &str) -> String {
     input
         .replace('&', "&amp;")
         .replace('<', "&lt;")
         .replace('>', "&gt;")
 }
+
+/// 终态四维词表：给消费方（模型/客户端）可读表达，不用 `Debug` 派生的小写——
+/// `Debug` 把 `NotRequired` 渲染成 `notrequired`，与 `unknown` 并列时被读成
+/// 「未验证」（2026-10-11 issue 缺陷 2）。
+fn execution_status_word(status: ExecutionStatus) -> &'static str {
+    match status {
+        ExecutionStatus::Running => "running",
+        ExecutionStatus::Completed => "completed",
+        ExecutionStatus::Failed => "failed",
+        ExecutionStatus::Killed => "killed",
+        ExecutionStatus::Unknown => "unknown",
+    }
+}
+
+fn acceptance_status_word(status: AcceptanceStatus) -> &'static str {
+    match status {
+        AcceptanceStatus::Passed => "passed",
+        AcceptanceStatus::Failed => "failed",
+        // 内核不判验收（ADLC-DELIVERY-STATUS-001）：`unknown` 是常态，不是缺失。
+        AcceptanceStatus::Unknown => "unknown (not judged by the engine)",
+    }
+}
+
+fn post_condition_word(status: PostProcessingStatus) -> &'static str {
+    match status {
+        // read_only 通过 = 仓库前后未被改动，读作「已验证」而不是「未处理」。
+        PostProcessingStatus::NotRequired => "passed (read-only verified)",
+        PostProcessingStatus::Passed => "passed (write intent verified)",
+        PostProcessingStatus::Failed => "failed",
+        PostProcessingStatus::Blocked => "blocked (no baseline or intent omitted)",
+        PostProcessingStatus::Unknown => "unknown",
+    }
+}
+
+fn delivery_status_word(status: DeliveryStatus) -> &'static str {
+    match status {
+        DeliveryStatus::Blocked => "blocked",
+        DeliveryStatus::Unknown => "unknown",
+    }
+}
+
+/// `return_value` **对象字段**的长文本外置阈值（**字节**，非字符数）：超过它的
+/// 字符串在写 `state.json` 前被抽出到 `outputs/<label>.txt`，原位替换为 `${label}`
+/// 引用。
+///
+/// 单一权威：宿主提取的调用点（`peri-workflow` 的 `extract_long_texts` 调用）
+/// 与提醒/启动文案（`WorkflowTaskResult::to_notification`、
+/// `peri-workflow` 的启动文案）共用本常量。CJK 一字 3 字节，所以「200 字节」
+/// 对中文内容远早于 200 字触发；改这里即同时改变提取行为与对外说明。
+/// 口径见 `docs/design/workflow.md` §3.6。
+///
+/// 作用面：宿主提取点位于 `workflow/done` 处理，且只对**对象形态**的 `return`
+/// 生效（`extract_long_texts` 本身支持数组/嵌套，但调用点的 gate 排除了顶层数组
+/// 与顶层字符串）。文案必须与 gate 一致，不得声称「所有超长字符串都会外置」。
+pub const LONGTEXT_EXTRACT_THRESHOLD_BYTES: usize = 200;
 
 impl WorkflowTaskResult {
     /// 主 Agent 是否应把 workflow 视为「成功交付」（非仅 engine 跑完）。
@@ -478,20 +581,30 @@ impl WorkflowTaskResult {
         let artifact_lines = if self.state_artifact_exists {
             // 指引指代 builtin 文件工具时必须用**模型面名字**（裸名已无提供面）；
             // 查表未命中的兜底不含工具名，不得回落到裸名。
+            // `${label}` 是写入期契约（阈值见 LONGTEXT_EXTRACT_THRESHOLD_BYTES）：
+            // 不说明它是引用，读 state.json 的消费方会把 token 当结果、静默丢长文本。
             let read_lead = crate::builtin_mcp::effective_name_of("workspace", "Read")
                 .map_or("Read it".to_string(), |name| format!("Use `{name}`"));
-            format!("Results saved to {state_path}\n{read_lead} to view full results.\n")
+            let threshold = LONGTEXT_EXTRACT_THRESHOLD_BYTES;
+            format!(
+                "Results saved to {state_path}\n\
+                 Long string fields in the result object (over {threshold} bytes) are externalized: \
+                 a `${{label}}` token in state.json is that field's path, and its text lives in \
+                 `outputs/` under the same label with a `.txt` suffix.\n\
+                 {read_lead} to view full results.\n"
+            )
         } else {
             "Result state file was not generated.\n".to_string()
         };
         let projection_line = format!(
-            "Execution: {:?}; acceptance: {:?}; post-processing: {:?}; delivery: {:?}.\n",
-            self.execution_status,
-            self.acceptance_status,
-            self.post_processing_status,
-            self.delivery_status,
-        )
-        .to_ascii_lowercase();
+            "Execution: {}; acceptance: {}; post-condition: {}; delivery: {}.\n\
+             Acceptance is judged outside the engine, so it reads `unknown` unless the calling \
+             layer (ADLC/skill) supplies a verdict.\n",
+            execution_status_word(self.execution_status),
+            acceptance_status_word(self.acceptance_status),
+            post_condition_word(self.post_processing_status),
+            delivery_status_word(self.delivery_status),
+        );
 
         let attempt_lines = self
             .attempts

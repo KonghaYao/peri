@@ -84,6 +84,22 @@ pub async fn run_print(
         anyhow::bail!("无输入 prompt。用法: peri -p \"你的问题\" 或 echo \"问题\" | peri -p");
     }
 
+    // 这些开关当前在 print 路径没有消费方（`--max-turns` 在 TUI 路径同样未实现；
+    // `--allowed-tools` / `--disallowed-tools` / `--effort` 只被解析与透传，从未生效）。
+    // 静默忽略会让调用方以为限制已经生效，因此显式拒绝而不是继续忽略。
+    let unimplemented = unimplemented_print_flags(
+        max_turns,
+        effort_override.as_deref(),
+        &allowed_tools,
+        &disallowed_tools,
+    );
+    if !unimplemented.is_empty() {
+        anyhow::bail!(
+            "print 模式（-p）尚未实现这些开关：{}。它们当前没有消费方，静默忽略会让调用方以为限制已生效，故显式拒绝；请去掉参数后重试。",
+            unimplemented.join(", ")
+        );
+    }
+
     let _telemetry = peri_acp::telemetry::init_tracing("peri-print");
 
     // 加载配置（经 ConfigSource 承载读写路径决策，与 TUI 同源；print 模式
@@ -107,8 +123,6 @@ pub async fn run_print(
     } else {
         provider
     };
-
-    let _ = (effort_override, max_turns, allowed_tools, disallowed_tools);
 
     let cwd = cwd
         .as_deref()
@@ -172,6 +186,8 @@ pub async fn run_print(
         workspace_bash_default_run_in_background: false,
         // 资源面输入同为会话级（见上）：顶层装配无会话消费者，保持未接线。
         workspace_resources: None,
+        // 同理：workflow 运行时槽位是会话级装配输入（编排状态随会话存在），顶层恒为 `None`。
+        workflow_input: None,
         // 顶层装配无会话上下文：A24 关闭集恒为空集（会话装配才从 frozen 派生）。
         builtin_closed: Default::default(),
         // 宿主技能面关闭位与关闭集同源（会话级派生）：顶层装配恒为假。
@@ -240,6 +256,27 @@ pub async fn run_print(
         cleanup_result?;
         anyhow::bail!("session/prompt ended without a terminal response")
     }
+}
+
+/// print 路径未实现的开关（有值即需要显式拒绝）。
+///
+/// 现状：`--max-turns` 在 TUI 路径同样未实现；`--allowed-tools` /
+/// `--disallowed-tools` / `--effort` 只被解析与透传，没有任何消费方。
+fn unimplemented_print_flags(
+    max_turns: Option<u32>,
+    effort: Option<&str>,
+    allowed_tools: &[String],
+    disallowed_tools: &[String],
+) -> Vec<&'static str> {
+    [
+        (max_turns.is_some(), "--max-turns"),
+        (effort.is_some(), "--effort"),
+        (!allowed_tools.is_empty(), "--allowed-tools"),
+        (!disallowed_tools.is_empty(), "--disallowed-tools"),
+    ]
+    .into_iter()
+    .filter_map(|(provided, flag)| provided.then_some(flag))
+    .collect()
 }
 
 fn require_completed(stop_reason: StopReason) -> Result<()> {
@@ -537,6 +574,25 @@ mod tests {
     use agent_client_protocol_schema::v1::{CreateElicitationResponse, ElicitationAction};
 
     use super::*;
+
+    /// [回归测试] print 路径不得静默忽略未实现的开关：有值即列名，缺省为空。
+    #[test]
+    fn test_unimplemented_print_flags_lists_only_provided_ones() {
+        assert!(unimplemented_print_flags(None, None, &[], &[]).is_empty());
+        assert_eq!(
+            unimplemented_print_flags(Some(3), None, &[], &[]),
+            vec!["--max-turns"]
+        );
+        assert_eq!(
+            unimplemented_print_flags(
+                None,
+                Some("high"),
+                &["Bash".to_string()],
+                &["Edit".to_string()],
+            ),
+            vec!["--effort", "--allowed-tools", "--disallowed-tools"]
+        );
+    }
 
     /// [回归测试] 临时空队列之后才到达的尾帧仍须进入最终输出。
     #[tokio::test]

@@ -3,14 +3,15 @@
 //! 执行体已随 p1-wa 物理迁入 `peri_agent::agent::workflow`（`agent.rs` /
 //! `factory.rs`——session 运行单元归 Agent 层，§2）；中间件链 / 工具 /
 //! tool resolver / session 级 WorkflowMiddleware 装配经
-//! [`WorkflowMiddlewareFactory`] 端口注入（peri-middlewares 实现，ACP 宿主
+//! [`WorkflowAgentFactory`] 端口注入（peri-middlewares 实现，ACP 宿主
 //! 装配点注入）。
 //!
 //! 本模块保留 ACP 装配面职责（§0 边 2：ACP 不再持有 middlewares/workflow
 //! 引用——`scripts/import-exemptions.conf` 的 L5 豁免随本任务移除）：
 //!
-//! 1. `create_session_workflow_middleware`：session 级 WorkflowMiddleware
-//!    装配编排（executor 构造 + progress channel + 端口装配）；
+//! 1. `create_session_workflow_chain`：session 级 workflow 装配编排
+//!    （executor 构造 + progress channel + `WorkflowRuntime` 创建；旧链
+//!    middleware 端口已随 P5 删除，运行时是 MCP 实例与消费者的共享状态）；
 //! 2. 注入面构造 helpers（provider/peri_config 投影模型工厂、publish hook、
 //!    forwarder launcher、system prompt fallback）——构造点收敛在本模块，
 //!    防注入面漂移（`host/requests.rs` / `host/stdio` 装配面共用）。
@@ -21,11 +22,11 @@ use parking_lot::RwLock;
 use peri_acp_types::{
     agents::AgentOverrides,
     mcp_skills::McpSkillRegistry,
-    ports::{AgentCatalogPort, WorkflowMiddlewarePort},
-    workflow::{AgentExecutor, ProgressEvent, WorkflowTaskResult},
+    ports::AgentCatalogPort,
+    workflow::{AgentExecutor, ProgressEvent},
 };
 use peri_agent::agent::workflow::{
-    create_executor, WorkflowAgentContext, WorkflowAgentPromptBuilder, WorkflowMiddlewareFactory,
+    create_executor, WorkflowAgentContext, WorkflowAgentFactory, WorkflowAgentPromptBuilder,
     WorkflowModel, WorkflowModelFactory, WorkflowPublishHook, WorkflowSystemPromptFallback,
 };
 use peri_agent::session::exec::executor_helpers::ForwarderLauncherFn;
@@ -81,15 +82,6 @@ pub(crate) fn build_model_factory(
             }
         },
     )
-}
-
-/// 事件发射钩子构造（`Controller::publish_event` 适配；事件三层化统一出口，
-/// workflow agent 的 v2 事件经此进入协议化路径，与主 executor 同一出口）。
-pub(crate) fn build_publish_hook(
-    controller: &Arc<peri_controller::Controller>,
-) -> WorkflowPublishHook {
-    let controller = Arc::clone(controller);
-    Arc::new(move |sid: &str, source, ev| controller.publish_event(sid, source, ev.clone()))
 }
 
 /// EventBus forwarder 启动器构造（workflow 专用：bridge = None——workflow 的
@@ -214,12 +206,24 @@ pub(crate) fn project_workflow_system_prompt(
     template.render(&env, agent_catalog)
 }
 
-/// 创建 session 级 WorkflowMiddleware（session/new / load / resume 共用，GAP-05）。
+/// 会话 workflow 装配结果：运行时 + 执行依赖 + 完成通知句柄。
+///
+/// 执行依赖（executor）是该会话 workflow agent 的唯一执行入口
+/// （消费者 `WorkflowTaskConsumer` 经运行时消费任务并调用它，design §5.5）；
+/// `runtime` 绑定进 builtin `workflow` 实例槽位，MCP 工具/资源面与消费者共享同一份
+/// 状态；`notifications` 随会话状态进入执行装配（完成通知 → Defer 唤醒主循环）。
+pub(crate) struct SessionWorkflowChain {
+    pub(crate) runtime: Arc<peri_mcp_workflow::WorkflowRuntime>,
+    pub(crate) executor: Arc<dyn AgentExecutor>,
+    pub(crate) notifications: Arc<peri_acp_types::workflow::WorkflowNotifications>,
+}
+
+/// 创建 session 级 workflow 装配链（session/new / load / resume 共用，GAP-05）。
 ///
 /// 编排：构造 executor（`WorkflowAgentContext` 注入面）+ progress 通道 +
-/// 经 [`WorkflowMiddlewareFactory`] 端口装配 `WorkflowMiddleware` 实例；
-/// 返回端口句柄，host/stdio 命令面与 host/requests 命令面只持
-/// `Arc<dyn WorkflowMiddlewarePort>`（3.0 批 2 波 2 装配边界收口）。
+/// `WorkflowRuntime`（领域控制面，P5 起是唯一权威；旧链 middleware 已删除）。
+/// 返回链路（运行时 + 执行依赖 + 完成通知句柄）；调用方随后经
+/// `attach_session_workflow` 绑定实例槽位并启动消费者。
 ///
 /// 事件发布：session 级路径与迁移前一致（`controller: None`），不启用事件
 /// 发布——publish_hook 传 None，workflow 事件仅由内部 handler 消费
@@ -228,18 +232,18 @@ pub(crate) fn project_workflow_system_prompt(
 /// `host/stdio/session/prompt_exec.rs`）仍传 Some（与迁移前一致）。统一发射
 /// 接线留待单独裁定。
 #[allow(clippy::too_many_arguments)]
-pub(crate) fn create_session_workflow_middleware(
+pub(crate) fn create_session_workflow_chain(
     provider: Arc<RwLock<LlmProvider>>,
     peri_config: &RwLock<PeriConfig>,
     cwd: &str,
     session_id: &str,
     frozen_data: &FrozenSessionData,
-    middleware_factory: Arc<dyn WorkflowMiddlewareFactory>,
+    middleware_factory: Arc<dyn WorkflowAgentFactory>,
     publish_hook: Option<WorkflowPublishHook>,
     agent_catalog: Arc<dyn AgentCatalogPort>,
     mcp_skill_registry: Option<Arc<McpSkillRegistry>>,
     session_resources: Arc<dyn peri_acp_types::session_resources::SessionResources>,
-) -> Option<Arc<dyn WorkflowMiddlewarePort>> {
+) -> SessionWorkflowChain {
     let compact_config = super::compact_config::load_compact_config(&peri_config.read());
     let (progress_tx, progress_rx) = tokio::sync::mpsc::unbounded_channel::<ProgressEvent>();
     // H2：workflow agent 链的能力事实——与下面传入的 broker / permission_mode
@@ -311,23 +315,22 @@ pub(crate) fn create_session_workflow_middleware(
         meta_harness_disabled: frozen_data.meta_harness().disabled_middlewares.clone(),
     });
     let (notification_tx, _) = tokio::sync::broadcast::channel(32);
-    Some(middleware_factory.build_workflow_middleware(
-        wf_executor,
+    // P5：运行时是会话的权威控制面（MCP 实例绑定它、消费者消费它）。
+    // 通知发送端与运行时共享同一通道：`WorkflowNotifications` 句柄随会话状态
+    // 传递，执行装配据此订阅完成通知（bg registry 注入在 attach 处完成）。
+    let runtime = Arc::new(peri_mcp_workflow::WorkflowRuntime::new(
+        Arc::clone(&wf_executor),
         cwd,
-        notification_tx,
+        notification_tx.clone(),
         Some(progress_rx),
-    ))
-}
-
-// 类型锚点：确认端口装配方法的入参类型与编排处一致（防签名漂移）。
-#[allow(dead_code)]
-fn _type_anchor(
-    f: Arc<dyn WorkflowMiddlewareFactory>,
-    e: Arc<dyn AgentExecutor>,
-    n: tokio::sync::broadcast::Sender<WorkflowTaskResult>,
-    p: Option<tokio::sync::mpsc::UnboundedReceiver<ProgressEvent>>,
-) -> Arc<dyn WorkflowMiddlewarePort> {
-    f.build_workflow_middleware(e, "cwd", n, p)
+    ));
+    SessionWorkflowChain {
+        runtime,
+        executor: wf_executor,
+        notifications: Arc::new(peri_acp_types::workflow::WorkflowNotifications::new(
+            notification_tx,
+        )),
+    }
 }
 
 #[cfg(test)]

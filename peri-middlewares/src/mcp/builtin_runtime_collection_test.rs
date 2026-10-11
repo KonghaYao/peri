@@ -81,6 +81,16 @@ fn pool_with_builtin_instances() -> Arc<McpClientPool> {
         "workspace".to_string(),
         connected_handle("workspace", &workspace_tools),
     );
+    let workflow_tools: Vec<&str> = peri_acp_types::builtin_mcp::find("workflow")
+        .expect("workflow 已实现（wave 5）")
+        .tools
+        .iter()
+        .map(|tool| tool.original_name)
+        .collect();
+    pool.clients.write().insert(
+        "workflow".to_string(),
+        connected_handle("workflow", &workflow_tools),
+    );
     pool.clients.write().insert(
         "external".to_string(),
         connected_handle("external", &["Read"]),

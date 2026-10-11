@@ -23,9 +23,7 @@ use peri_acp_types::hooks::SettingsHooksPort;
 use peri_acp_types::messages::BaseMessage;
 use peri_acp_types::permission::SharedPermissionMode;
 use peri_acp_types::plugin::PluginManagerPort;
-use peri_acp_types::ports::{
-    AgentCatalogPort, McpPoolPort, McpTaskOwnerPort, ToolSearchPort, WorkflowMiddlewarePort,
-};
+use peri_acp_types::ports::{AgentCatalogPort, McpPoolPort, McpTaskOwnerPort, ToolSearchPort};
 use tokio_util::sync::CancellationToken;
 
 use crate::provider::{LlmProvider, PeriConfig};
@@ -98,7 +96,18 @@ mod task_scope;
 #[path = "unify_wire_baseline_test.rs"]
 mod unify_wire_baseline_tests;
 mod user_input;
+/// Workflow agent 装配面薄壳（session 级运行时创建，见模块文档）。
+/// `not(emscripten)`：本地 workflow 运行时随 `peri-mcp-workflow` 目标依赖移出
+/// 构建面（wasm 产物不打包 workflow），该目标不提供 workflow 装配面。
+#[cfg(not(target_os = "emscripten"))]
 pub mod workflow_agent;
+/// 宿主侧 workflow 任务消费者（P3 就绪与订阅接线，design `workflow-mcp` §5.5）。
+/// `not(emscripten)`：依赖 builtin `workflow` 实例面（同目标段依赖 `peri-mcp-workflow`）。
+#[cfg(not(target_os = "emscripten"))]
+pub(crate) mod workflow_consumer;
+#[cfg(all(test, not(target_os = "emscripten")))]
+#[path = "workflow_consumer_test.rs"]
+mod workflow_consumer_tests;
 // wave 3（AW3-11 session 级 seam）**发送端**用例：会话环境装配产出的 per-session
 // `TaskManager` + session 级 `on_bg_complete` 送进 builtin `workspace` 实例上下文，
 // 并在会话登记处保持同一 `Arc`；回调经 inbox 把 Shell 完成投为 `Defer` 并唤醒。
@@ -140,8 +149,9 @@ pub(crate) struct SessionState {
     pub(crate) recall_items: Vec<String>,
     /// Session-scoped agent component pool for reusing heavy objects across prompts.
     pub(crate) agent_pool: crate::session::agent_pool::AgentPool,
-    /// Session 级 WorkflowMiddleware（session/new 时创建，跨 turn 复用）。
-    pub(crate) workflow_middleware: Option<Arc<dyn WorkflowMiddlewarePort>>,
+    /// Session 级 workflow 完成通知源（P5：替代旧链 middleware 端口；
+    /// 运行时归 builtin `workflow` 实例，本句柄只承载完成通知订阅）。
+    pub(crate) workflow_notifications: Option<Arc<peri_acp_types::workflow::WorkflowNotifications>>,
     // ── Prediction 写入的会话元数据（MVP：仅存储，不展示）──
     /// 预测生成的会话标题（未来 /rename 与标题栏显示使用）。
     pub(crate) title: Option<String>,
@@ -209,8 +219,11 @@ pub struct AcpServerConfig {
     /// Workflow agent 装配端口（peri-middlewares 实现，TUI 部署装配点构造后
     /// 经 [`assemble::HostAssemblyInput`] 注入；p1-wa 收口——ACP 不直接
     /// 引用 middlewares，见 `host/workflow_agent.rs`）。
-    pub workflow_middleware_factory:
-        Arc<dyn peri_agent::agent::workflow::WorkflowMiddlewareFactory>,
+    ///
+    /// `not(emscripten)`：工厂实现依赖本地 workflow 运行时（`peri-mcp-workflow`
+    /// 随目标移出构建面），该目标不装配本地 workflow 运行时路径。
+    #[cfg(not(target_os = "emscripten"))]
+    pub workflow_middleware_factory: Arc<dyn peri_agent::agent::workflow::WorkflowAgentFactory>,
     /// 会话资源门面：协议面、Agent transcript/subagent 与 middleware 的唯一会话行为
     /// 入口（同一个库句柄、同一份 owner 登记）；协议面与 Controller 都不再持有裸存储。
     pub session_resources: Arc<dyn peri_acp_types::session_resources::SessionResources>,

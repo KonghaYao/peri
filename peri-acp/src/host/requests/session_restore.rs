@@ -17,7 +17,10 @@ use crate::host::{build_mode_state, AcpServerConfig, SessionState};
 use crate::session::frozen_snapshot::decode_frozen_snapshot;
 use crate::{dispatch, transport::types::AcpError};
 
-use super::{create_session_workflow_middleware, prewarm_session_mcp_discovery};
+use super::prewarm_session_mcp_discovery;
+// 本地 workflow 运行时不在 emscripten 构建面内（wasm 产物不打包 workflow）。
+#[cfg(not(target_os = "emscripten"))]
+use super::{attach_session_workflow, create_session_workflow_chain, workflow_face_closed};
 
 #[path = "legacy_session.rs"]
 mod legacy_session;
@@ -158,8 +161,8 @@ pub(crate) async fn prepare_existing(
             .frozen
             .clone()
             .ok_or_else(|| AcpError::new(-32603, "Restored frozen snapshot is missing"))?;
-        // 环境定稿是最后一步可失败操作（take 已有候选或现场装配）；此后只做
-        // 不可失败的登记与投影，成功路径才 move 环境进 SessionState。
+        // 环境定稿（take 已有候选或现场装配）之后只剩登记、绑定与投影：登记与投影
+        // 不可失败；成功路径才 move 环境进 SessionState（绑定失败见下方排空处理）。
         let environment = match environment_slot.take() {
             // 阶段一已装配（bootstrap）且与接纳字节同源：复用，不第二次装配。
             Some(environment) => Some(environment),
@@ -182,10 +185,25 @@ pub(crate) async fn prepare_existing(
         // workflow agent 与主链共用会话级 MCP skill registry，而该 registry 在
         // 会话构造（`ensure_session_with_task_manager` → `build_session`）时才
         // 产生；先构造会让 workflow 链永久拿不到技能面（J5：不回退磁盘）。
-        let workflow_middleware = match frozen.as_ref() {
-            Some(frozen) => create_session_workflow_middleware(local, &cwd, id, frozen),
-            None => None,
+        // P5：关闭集命中 workflow 时不创建运行时、不绑定、不启动消费者（实例也不会 spawn）。
+        // Emscripten：本地 workflow 运行时不在构建面内，无链可建（通知句柄随之缺省）。
+        #[cfg(not(target_os = "emscripten"))]
+        let workflow_chain = match frozen.as_ref() {
+            Some(frozen) if !workflow_face_closed(frozen) => {
+                Some(create_session_workflow_chain(local, &cwd, id, frozen))
+            }
+            _ => None,
         };
+        // 恢复路径同样绑定 builtin `workflow` 实例槽位（同一份运行时）。
+        // 绑定失败按会话初始化失败处理（design §6.2）：环境已定稿且由本作用域唯一持有，
+        // 失败必须排空它（`shutdown_bootstrapped_environment` 保留原错误原因），不发布
+        // 半可用会话。
+        #[cfg(not(target_os = "emscripten"))]
+        if let Some(chain) = workflow_chain.as_ref() {
+            if let Err(error) = attach_session_workflow(environment.as_ref(), chain) {
+                return Err(shutdown_bootstrapped_environment(environment, error).await);
+            }
+        }
         Ok(RestoreOutcome::Publish {
             state: Box::new(SessionState {
                 session_id: id.to_owned(),
@@ -207,7 +225,13 @@ pub(crate) async fn prepare_existing(
                 frozen,
                 recall_items: Vec::new(),
                 agent_pool: crate::session::agent_pool::AgentPool::new(),
-                workflow_middleware,
+                // Emscripten：无本地 workflow 运行时 ⇒ 无完成通知源。
+                #[cfg(not(target_os = "emscripten"))]
+                workflow_notifications: workflow_chain
+                    .as_ref()
+                    .map(|chain| Arc::clone(&chain.notifications)),
+                #[cfg(target_os = "emscripten")]
+                workflow_notifications: None,
                 title: None,
                 tags: Vec::new(),
             }),

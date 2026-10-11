@@ -13,6 +13,8 @@ import unittest
 
 
 INSTALLER = Path(__file__).resolve().with_name("install-beta.sh")
+# 随包 workflow sidecar 的内容身份目录（安装器不解析其值，仅透传布局）。
+SIDECAR_ID = "0123456789ab"
 
 
 class BetaInstallerTests(unittest.TestCase):
@@ -77,7 +79,7 @@ esac
         path.chmod(0o755)
 
     def make_archive(self, platform="linux-x86_64", name="peri-beta", exit_code=0,
-                     symlink=False):
+                     symlink=False, sidecar=True, extra_members=()):
         archive = self.assets / f"peri-beta-{platform}.tar.gz"
         payload = f"#!/bin/sh\nprintf 'beta fixture\\n'\nexit {exit_code}\n".encode()
         with tarfile.open(archive, "w:gz") as package:
@@ -90,6 +92,17 @@ esac
             else:
                 member.size = len(payload)
                 package.addfile(member, io.BytesIO(payload))
+            if sidecar:
+                for entry in (f"peri-resources/workflow/{SIDECAR_ID}/package.json",
+                              f"peri-resources/workflow/{SIDECAR_ID}/dist/peri-workflow.js"):
+                    payload_entry = b"{}" if entry.endswith(".json") else b"// fixture\n"
+                    info = tarfile.TarInfo(entry)
+                    info.size = len(payload_entry)
+                    package.addfile(info, io.BytesIO(payload_entry))
+            for entry in extra_members:
+                info = tarfile.TarInfo(entry)
+                info.size = 0
+                package.addfile(info, io.BytesIO(b""))
         digest = hashlib.sha256(archive.read_bytes()).hexdigest()
         archive.with_suffix(".gz.sha256").write_text(f"{digest}  {archive.name}\n")
         return archive, payload
@@ -186,12 +199,33 @@ esac
         self.assertEqual(self.beta.read_bytes(), payload)
         self.assertEqual(self.stable.read_text(), "stable binary must not change\n")
 
+    def test_sidecar_resources_are_installed_next_to_binary(self):
+        self.make_archive()
+        result = self.run_installer()
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        base = self.install_dir / "peri-resources" / "workflow" / SIDECAR_ID
+        self.assertEqual((base / "package.json").read_text(), "{}")
+        self.assertTrue((base / "dist" / "peri-workflow.js").is_file())
+
+    def test_archive_without_sidecar_still_installs(self):
+        # 旧 beta 归档（无 sidecar）继续可安装：滚动渠道不强制新布局。
+        _, payload = self.make_archive(sidecar=False)
+        result = self.run_installer()
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertEqual(self.beta.read_bytes(), payload)
+        self.assertFalse((self.install_dir / "peri-resources").exists())
+
+    def test_unexpected_archive_entries_are_rejected(self):
+        self.make_archive(extra_members=("bin/evil",))
+        self.assert_unchanged(self.run_installer())
+
     def test_checksum_backends(self):
         for backend in ("sha256sum", "shasum"):
             with self.subTest(backend=backend):
                 isolated = self.root / backend
                 isolated.mkdir()
-                for command in ("tar", "mktemp", "install", "chmod", "mkdir", "mv", "rm"):
+                for command in ("tar", "mktemp", "install", "chmod", "mkdir", "mv", "rm",
+                                "cp", "grep"):
                     (isolated / command).symlink_to(shutil.which(command))
                 for command in ("curl", "uname"):
                     (isolated / command).symlink_to(self.commands / command)

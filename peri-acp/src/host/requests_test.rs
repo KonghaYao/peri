@@ -10,7 +10,6 @@ use crate::transport::types::{AcpError, IncomingMessage, RequestId};
 use async_trait::async_trait;
 use peri_acp_types::event_data::PluginSnapshotEntry;
 use peri_acp_types::plugin::{InstallScope, InstalledPlugin, PluginManagerPort, PluginOrigin};
-use peri_acp_types::ports::WorkflowMiddlewarePort;
 use peri_acp_types::session_resources::{
     BindingState, FrozenSnapshotBytes, FrozenState, NewSession, NewSessionMeta, SessionResources,
 };
@@ -19,11 +18,7 @@ use peri_acp_types::tasks::BgTaskKind;
 use peri_acp_types::thread::ThreadMeta;
 use peri_acp_types::workspace::SessionBinding;
 use peri_middlewares::permission::shared_mode::{PermissionMode, SharedPermissionMode};
-use peri_middlewares::workflow::WorkflowMiddleware;
 use peri_resources::sessions::SqliteThreadStore;
-use peri_workflow::protocol::{AgentRunParams, AgentRunResult, Usage};
-use peri_workflow::registry::{WorkflowRun, WorkflowRunStatus, WorkflowTaskResult};
-use peri_workflow::runner::AgentExecutor;
 use serde_json::{json, Value};
 use serial_test::serial;
 
@@ -353,7 +348,7 @@ async fn register_session_with_history(
             frozen: None,
             recall_items: Vec::new(),
             agent_pool: crate::session::agent_pool::AgentPool::new(),
-            workflow_middleware: None,
+            workflow_notifications: None,
             title: None,
             tags: Vec::new(),
         },
@@ -658,30 +653,13 @@ fn seed_plugin_ecc(home: &Path) {
     .unwrap();
 }
 
-struct MockWorkflowExecutor;
-
-#[async_trait]
-impl AgentExecutor for MockWorkflowExecutor {
-    async fn execute(&self, _params: AgentRunParams) -> AgentRunResult {
-        AgentRunResult::Ok {
-            output: serde_json::json!("mock"),
-            usage: Usage { output_tokens: 0 },
-            model: None,
-            tool_count: None,
-            token_count: None,
-            phase: None,
-            duration_ms: None,
-        }
-    }
-}
-
-/// 构造带 workflow_middleware 的 SessionState，返回 middleware 引用（供注册 run 用）。
+/// 构造带会话态的最小 `SessionState`（session/delete 等内存态用例的登记夹具）。
 async fn register_session_with_workflow(
     sessions: &mut HashMap<String, SessionState>,
     sid: &str,
     cwd: &str,
     cfg: &AcpServerConfig,
-) -> Arc<WorkflowMiddleware> {
+) {
     // 会话尚未创建（NotFound）或没有本机绑定：本夹具负责建一条已绑定会话。
     let bound = matches!(
         cfg.session_resources
@@ -692,14 +670,6 @@ async fn register_session_with_workflow(
     if !bound {
         create_bound_fixture(cfg, cwd, Some(sid)).await;
     }
-    let executor: Arc<dyn AgentExecutor> = Arc::new(MockWorkflowExecutor);
-    let (notification_tx, _) = tokio::sync::broadcast::channel::<WorkflowTaskResult>(32);
-    let mw = Arc::new(WorkflowMiddleware::new(
-        executor,
-        cwd,
-        notification_tx,
-        None,
-    ));
     sessions.insert(
         sid.to_string(),
         SessionState {
@@ -722,10 +692,9 @@ async fn register_session_with_workflow(
             frozen: None,
             recall_items: Vec::new(),
             agent_pool: crate::session::agent_pool::AgentPool::new(),
-            workflow_middleware: Some(Arc::clone(&mw) as Arc<dyn WorkflowMiddlewarePort>),
+            workflow_notifications: None,
             title: None,
             tags: Vec::new(),
         },
     );
-    mw
 }

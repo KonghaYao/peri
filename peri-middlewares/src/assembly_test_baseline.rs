@@ -2,7 +2,7 @@ use super::*;
 
 // ── 契约用例 ─────────────────────────────────────────────────────────────────
 
-/// 蓝本槽位顺序 = 行为契约（7 组 21 槽，禁止重排；波 4 演进 C2 新增
+/// 蓝本槽位顺序 = 行为契约（7 组 17 槽，禁止重排；波 4 演进 C2 新增
 /// DefaultSystemPrompt / Lang 于第一组首位——渲染排序不依赖链序，契约 2）。
 ///
 /// v4-part-2 W3（A7/A14）：`Web` / `Artifact` 两槽位随 `WebMiddleware` /
@@ -17,7 +17,11 @@ use super::*;
 ///
 /// v4 wave 4（Git Watch 下沉）：`GitWatch` 槽位删除（git ref 变化改由 builtin
 /// `workspace` 实例的 `workspace://git/ref` 资源 + 2026-07-28 订阅回传），
-/// 其余槽位相对顺序不变；槽位总数随之 22 → 21。
+/// 其余槽位相对顺序不变。
+///
+/// v4 P5（wave 5，workflow 下沉 builtin `workflow` 实例）：`Workflow` 槽位删除
+/// （编排能力是 `mcp__workflow__*` 工具面），其余槽位相对顺序不变；
+/// 槽位总数随之 18 → 17。
 #[test]
 fn blueprint_sequence_is_canonical() {
     let slots = production_blueprint();
@@ -45,15 +49,15 @@ fn blueprint_sequence_is_canonical() {
             "Permission",
             "AskUser",
             "SubAgent",
-            // 第六组：MCP / Workflow / ToolSearch
+            // 第六组：MCP / ToolSearch（Workflow 槽位已随 P5 删除——
+            // 编排能力是 builtin `workflow` 实例的 MCP 工具面）
             "Mcp",
-            "Workflow",
             "ToolSearch",
             // 第七组：Goal（Goal 在链最后）
             "Goal",
         ]
     );
-    assert_eq!(slots.len(), 18, "蓝本槽位恰 18 个");
+    assert_eq!(slots.len(), 17, "蓝本槽位恰 17 个");
 }
 
 fn slot_name(slot: &ChainSlot) -> &'static str {
@@ -73,7 +77,6 @@ fn slot_name(slot: &ChainSlot) -> &'static str {
         ChainSlot::AskUser => "AskUser",
         ChainSlot::SubAgent => "SubAgent",
         ChainSlot::Mcp => "Mcp",
-        ChainSlot::Workflow => "Workflow",
         ChainSlot::ToolSearch => "ToolSearch",
         ChainSlot::Goal => "Goal",
     }
@@ -166,13 +169,8 @@ fn permission_mode_keeps_chain_shape() {
             Some(10),
             "mode {mode:?}: Permission 位置漂移"
         );
-        // 条件中间件（Hook/MCP/Workflow/Goal）不应出现
-        for cond in [
-            "HookMiddleware",
-            "McpMiddleware",
-            "WorkflowMiddleware",
-            "GoalMiddleware",
-        ] {
+        // 条件中间件（Hook/MCP/Goal）不应出现
+        for cond in ["HookMiddleware", "McpMiddleware", "GoalMiddleware"] {
             assert!(
                 !names.contains(&cond.to_string()),
                 "mode {mode:?}: 不应注册 {cond}"
@@ -257,23 +255,6 @@ fn conditional_registration_matrix() {
         "MCP 位置错误: {names_mcp:?}"
     );
 
-    let mut with_wf = base_context();
-    with_wf.workflow_executor = Some(Arc::new(FakeAgentExecutor));
-    let names_wf = assemble_names(&with_wf);
-    let pos_wf = names_wf
-        .iter()
-        .position(|n| n == "WorkflowMiddleware")
-        .unwrap();
-    let pos_sub_wf = names_wf
-        .iter()
-        .position(|n| n == "SubAgentMiddleware")
-        .unwrap();
-    let pos_ts_wf = names_wf.iter().position(|n| n == "ToolSearch").unwrap();
-    assert!(
-        pos_sub_wf < pos_wf && pos_wf < pos_ts_wf,
-        "Workflow 位置错误: {names_wf:?}"
-    );
-
     let mut with_goal = base_context();
     with_goal.goal_controller = Some(Arc::new(FakeGoalController));
     let names_goal = assemble_names(&with_goal);
@@ -283,13 +264,12 @@ fn conditional_registration_matrix() {
     );
 }
 
-/// 全开组合：完整序列精确断言（Hook 2 组 + MCP + Workflow + Goal）。
+/// 全开组合：完整序列精确断言（Hook 2 组 + MCP + Goal；Workflow 槽位已随 P5 删除）。
 #[test]
 fn full_config_chain_order() {
     let mut ctx = base_context();
     ctx.hook_groups = vec![vec![make_hook()], vec![make_hook()]];
     ctx.mcp_pool = Some(Arc::new(McpClientPool::new_empty()));
-    ctx.workflow_executor = Some(Arc::new(FakeAgentExecutor));
     ctx.goal_controller = Some(Arc::new(FakeGoalController));
 
     let names = assemble_names(&ctx);
@@ -312,7 +292,6 @@ fn full_config_chain_order() {
             "HumanInTheLoopMiddleware",
             "SubAgentMiddleware",
             "McpMiddleware",
-            "WorkflowMiddleware",
             "ToolSearch",
             "GoalMiddleware",
         ]

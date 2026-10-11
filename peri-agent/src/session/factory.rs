@@ -64,11 +64,12 @@ pub enum ChainSlot {
     AskUser,
     /// SubAgent（子 Agent 工具）
     SubAgent,
-    // ── 第六组：MCP / Workflow / ToolSearch（工具提供器，条件注册） ──
+    // ── 第六组：MCP / ToolSearch（工具提供器，条件注册） ──
+    // P5：原 `Workflow` 槽位已删除——编排能力是 builtin `workflow` 实例的
+    // MCP 工具面（`mcp__workflow__*`），不再有链上 middleware（见
+    // `docs/design/workflow-mcp.md` §7 删除清单）。
     /// Mcp（MCP 工具，pool 可用时注册）
     Mcp,
-    /// Workflow（workflow 工具，executor 可用时注册）
-    Workflow,
     /// ToolSearch（deferred 工具搜索/执行代理）
     ToolSearch,
     // ── 第七组：Goal（steering，条件注册；在链最后） ──
@@ -102,9 +103,8 @@ pub fn production_blueprint() -> Vec<ChainSlot> {
         ChainSlot::Permission,
         ChainSlot::AskUser,
         ChainSlot::SubAgent,
-        // 第六组：MCP / Workflow / ToolSearch
+        // 第六组：MCP / ToolSearch（Workflow 槽位已随 P5 删除）
         ChainSlot::Mcp,
-        ChainSlot::Workflow,
         ChainSlot::ToolSearch,
         // 第七组：Goal
         ChainSlot::Goal,
@@ -143,7 +143,7 @@ pub fn build_middleware_chain<A: MiddlewareChainAssembler>(
 // 装配实现方（`peri-middlewares::assembly::ProductionChainAssembler`）依赖
 // 本层类型，避免 Agent 层反向依赖 middlewares 成环。middlewares 具体类型
 // 全部经 `peri-acp-types` 端口（McpPoolPort / ToolSearchPort /
-// WorkflowMiddlewarePort / CronSchedulerPort）或注入面接入。
+// CronSchedulerPort）或注入面接入。
 
 use std::any::Any;
 use std::collections::{BTreeMap, HashSet};
@@ -160,11 +160,10 @@ use peri_acp_types::hooks::RegisteredHook;
 use peri_acp_types::interaction::UserInteractionBroker;
 use peri_acp_types::mcp_skills::McpSkillRegistry;
 use peri_acp_types::plugin::LoadedPlugin;
-use peri_acp_types::ports::{McpPoolPort, ToolSearchPort, WorkflowMiddlewarePort};
+use peri_acp_types::ports::{McpPoolPort, ToolSearchPort};
 use peri_acp_types::session_resources::SessionResources;
 use peri_acp_types::skills::SkillRoot;
 use peri_acp_types::tools::TodoItem;
-use peri_acp_types::workflow::AgentExecutor;
 use peri_acp_types::{identity::AgentId, permission::SharedPermissionMode};
 
 use crate::agent::async_tasks::TaskManager;
@@ -279,10 +278,10 @@ pub struct AssemblyContext {
     pub tool_search_index: Arc<dyn ToolSearchPort>,
     /// 共享工具注册表（deferred tools；AskUserTool 插入、snapshot 构造）
     pub shared_tools: Arc<RwLock<BTreeMap<String, Arc<dyn BaseTool>>>>,
-    /// Workflow executor（Some 时注册 Workflow 中间件）
-    pub workflow_executor: Option<Arc<dyn AgentExecutor>>,
-    /// 会话级 WorkflowMiddleware 端口（复用，None = 构造临时实例）
-    pub workflow_middleware: Option<Arc<dyn WorkflowMiddlewarePort>>,
+    /// 会话级 workflow 完成通知源（P5：替代旧链 `WorkflowMiddlewarePort`；
+    /// 运行时状态与执行依赖归 builtin `workflow` 实例，本句柄只承载完成
+    /// 通知的订阅与单次消费门）。
+    pub workflow_notifications: Option<Arc<peri_acp_types::workflow::WorkflowNotifications>>,
     // ── 事件 / 后台 ──
     /// 事件 handler（子 agent 事件转发）
     pub event_handler: Arc<dyn AgentEventHandler>,

@@ -189,7 +189,7 @@ fn test_state_error_skipped_when_none() {
         execution_status: ExecutionStatus::Completed,
         acceptance_status: AcceptanceStatus::Passed,
         post_processing_status: PostProcessingStatus::NotRequired,
-        delivery_status: DeliveryStatus::Deliverable,
+        delivery_status: DeliveryStatus::Unknown,
         write_intent: None,
         limits: crate::protocol::WorkflowLimits::default(),
         budget_total: None,
@@ -205,6 +205,25 @@ fn test_state_error_skipped_when_none() {
     store.write_state("run-ok", &state).unwrap();
     let raw = std::fs::read_to_string(store.run_dir("run-ok").join("state.json")).unwrap();
     assert!(!raw.contains("error"), "None 时不应序列化 error 字段");
+}
+
+#[test]
+fn test_legacy_deliverable_state_reads_as_unknown() {
+    let state: RunState = serde_json::from_value(serde_json::json!({
+        "run_id": "legacy-delivery",
+        "workflow_name": "legacy",
+        "status": "completed",
+        "delivery_status": "deliverable",
+        "script": "script",
+        "started_at": "2026-06-22T00:00:00Z"
+    }))
+    .unwrap();
+
+    assert_eq!(
+        state.delivery_status,
+        DeliveryStatus::Unknown,
+        "历史 state.json 的 deliverable 必须按 unknown 读入（数据兼容），不得反序列化失败"
+    );
 }
 
 #[test]
@@ -463,6 +482,58 @@ fn test_write_intent_rejects_parent_traversal() {
 }
 
 // ─── extract_long_texts / write_output 测试 ────────────────────
+
+/// [回归测试] label 归一：分隔符/控制字符替换、连续点折叠、空 label 回落、
+/// 重名去重（同一 label 不得覆盖）。
+#[test]
+fn test_output_label_sanitizes_and_dedups() {
+    let mut used = std::collections::HashSet::new();
+    assert_eq!(output_label("a.b[0]", &mut used), "a.b[0]");
+    assert_eq!(output_label("raw/crates", &mut used), "raw_crates");
+    assert_eq!(output_label("raw\\crates", &mut used), "raw_crates-2");
+    assert_eq!(output_label("..", &mut used), "._");
+    assert_eq!(output_label("", &mut used), "unnamed");
+}
+
+/// [回归测试] 占位符与文件名同源：label 含 `/`（非法路径字符）时，state.json 写入的
+/// `${label}` 必须指向真实存在的 `outputs/<label>.txt`；两个会归一到同一名字的
+/// label 不得互相覆盖（2026-10-11 issue：引用断裂 / 内容被覆盖）。
+#[test]
+fn test_extract_long_texts_label_matches_output_file() {
+    let (_tmp, store) = make_store();
+    store.init_run("r1", "script").unwrap();
+    let first = "a".repeat(250);
+    let second = "b".repeat(260);
+    let mut value = serde_json::json!({"raw/crates": first.clone(), "raw_crates": second.clone()});
+    let extracted = extract_long_texts(&mut value, "r1", &store, 200);
+    let mut labels = extracted.clone();
+    labels.sort();
+    assert_eq!(labels, vec!["raw_crates", "raw_crates-2"]);
+
+    // 每个占位符都必须解析到真实文件，两份内容都不丢。
+    let outputs = store.run_dir("r1").join("outputs");
+    let mut resolved: Vec<(String, String)> = ["raw/crates", "raw_crates"]
+        .into_iter()
+        .map(|key| {
+            let placeholder = value[key].as_str().expect("长文本应替换为占位符");
+            let name = placeholder
+                .strip_prefix("${")
+                .and_then(|rest| rest.strip_suffix('}'))
+                .expect("占位符形态必须为 ${label}");
+            let content = std::fs::read_to_string(outputs.join(format!("{name}.txt")))
+                .unwrap_or_else(|error| panic!("占位符 {placeholder} 未指向真实文件: {error}"));
+            (name.to_string(), content)
+        })
+        .collect();
+    resolved.sort();
+    assert_eq!(
+        resolved,
+        vec![
+            ("raw_crates".to_string(), first),
+            ("raw_crates-2".to_string(), second),
+        ]
+    );
+}
 
 #[test]
 fn test_extract_long_texts_empty() {

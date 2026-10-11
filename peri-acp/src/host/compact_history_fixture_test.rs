@@ -297,7 +297,7 @@ fn make_host_sessions(ctx: &SessionContext, payloads: Vec<PersistedPayload>) -> 
         frozen: Some(make_sentinel_frozen()),
         recall_items: vec![],
         agent_pool: AgentPool::new(),
-        workflow_middleware: None,
+        workflow_notifications: None,
         title: None,
         tags: vec![],
     };

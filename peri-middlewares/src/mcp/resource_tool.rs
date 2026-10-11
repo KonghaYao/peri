@@ -37,7 +37,8 @@ pub enum ResourceError {
 }
 
 const TOOL_NAME: &str = "mcp_read_resource";
-const RESOURCE_READ_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(120);
+/// 资源读取上界（资源工具面与宿主面 `read_instance_resource` 共用）。
+pub(crate) const RESOURCE_READ_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(120);
 
 /// MCP 资源读取工具——统一资源读取入口
 pub struct McpResourceTool {

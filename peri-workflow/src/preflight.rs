@@ -2,22 +2,35 @@
 
 use serde_json::Value;
 
+/// 用生产解析路径取得引擎后校验脚本。
+///
+/// 引擎来源与执行路径同 `peri workflow`：随包 sidecar / 本机缓存 / 显式注入（仓库不读
+/// 工作树 dist）；缺失或摘要不符时返回 `Workflow preflight unavailable: …`。
 pub(super) async fn preflight_validate_script(script: &str) -> Result<(), String> {
+    let prepared = crate::runner::prepare_workflow_command()
+        .await
+        .map_err(|error| format!("Workflow preflight unavailable: {error}"))?;
+    validate_script_with(&prepared, script).await
+}
+
+/// 以已准备的引擎命令校验脚本（测试注入用；spawn/退出码/错误解码与生产同路径）。
+pub(super) async fn validate_script_with(
+    prepared: &crate::runner::WorkflowCommand,
+    script: &str,
+) -> Result<(), String> {
     let temp = tempfile::Builder::new()
         .prefix("peri-workflow-preflight-")
         .tempdir()
         .map_err(unavailable)?;
-    let artifact = temp.path().join("peri-workflow.js");
     let source = temp.path().join("script.js");
-    std::fs::write(&artifact, crate::runner::WORKFLOW_ARTIFACT_BYTES).map_err(unavailable)?;
     std::fs::write(&source, script).map_err(unavailable)?;
 
     // Normal completion waits/reaps. Cancellation kills the child and lets Tokio
-    // reap it best-effort; TempDir removes both inputs on every exit path.
-    let mut command = tokio::process::Command::new("node");
+    // reap it best-effort; TempDir removes the input on every exit path.
+    let mut command = tokio::process::Command::new(&prepared.program);
     command
         .kill_on_drop(true)
-        .arg(&artifact)
+        .args(&prepared.args)
         .arg("validate")
         .arg(&source)
         .arg("--json");

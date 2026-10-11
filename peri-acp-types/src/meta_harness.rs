@@ -121,7 +121,6 @@ pub const MIDDLEWARE_NAMES: &[&str] = &[
     "HumanInTheLoopMiddleware",
     "SubAgentMiddleware",
     "McpMiddleware",
-    "WorkflowMiddleware",
     "ToolSearch",
     "GoalMiddleware",
 ];
@@ -146,11 +145,19 @@ pub const MIDDLEWARE_NAMES: &[&str] = &[
 /// v4-part-4（W3-C1）：`WorkspaceMiddleware` 随 `workspace` 实例加入——7 个文件/终端
 /// 工具（Read / Write / Edit / Glob / Grep / folder_operations / Bash）的唯一提供面，
 /// 关闭语义与 Web / Artifact 逐位同构。
+///
+/// workflow as MCP（P5 原子切换后）：`"WorkflowMiddleware"` 是 builtin `workflow`
+/// 实例的关闭键，**唯一**归属本表——旧链槽位（[`MIDDLEWARE_NAMES`] 同名键）与
+/// `MIDDLEWARE_TOOL_NAMES` 的 `"Workflow"` 已随 P5 删除，两表零交集。
+/// 口径：命中该键 ⇒ workflow 实例不 spawn（含消费者），见 `docs/design/workflow-mcp.md`
+/// §4.4 与 `spec/issues/2026-10-11-workflow-as-mcp.md` 批次 P5。
 pub const BUILTIN_INSTANCE_POLICY_KEYS: &[&str] = &[
     "WebMiddleware",
     "ArtifactMiddleware",
     "CronMiddleware",
     "WorkspaceMiddleware",
+    // workflow builtin 实例的关闭键（用户配置兼容：沿用旧链槽位名，P5 后为唯一持有者）。
+    "WorkflowMiddleware",
 ];
 
 /// 段落 → 持有 middleware 名映射表（设计 §3.1.1 拆分持有契约 3）。
@@ -222,8 +229,6 @@ pub const MIDDLEWARE_TOOL_NAMES: &[&str] = &[
     // SubAgentMiddleware
     "Agent",
     "AgentResult",
-    // WorkflowMiddleware
-    "Workflow",
     // TodoMiddleware
     "TodoWrite",
     // ToolSearch
@@ -281,14 +286,19 @@ mod tests {
     /// A7 两表语义不重叠：槽位名表与 builtin 策略键表交集为空（并集即「已知键全集」）。
     ///
     /// 交集非空意味着同一个键有两条语义（既关槽位又关实例），关闭面无法判定。
+    /// workflow as MCP P5 原子切换后旧链槽位已删除，本断言恢复**严格零交集**
+    /// （不再有逐键豁免表）。
     #[test]
     fn middleware_names_and_builtin_policy_keys_are_disjoint() {
-        for key in BUILTIN_INSTANCE_POLICY_KEYS {
-            assert!(
-                !MIDDLEWARE_NAMES.contains(key),
-                "builtin 策略键 {key} 不得再出现在链槽位名表（A7 的两表分离）"
-            );
-        }
+        let overlap: std::collections::HashSet<&str> = MIDDLEWARE_NAMES
+            .iter()
+            .copied()
+            .filter(|key| BUILTIN_INSTANCE_POLICY_KEYS.contains(key))
+            .collect();
+        assert!(
+            overlap.is_empty(),
+            "两表交集必须为空（同一键不得既关槽位又关实例）：{overlap:?}"
+        );
     }
 
     /// A7 关闭语义不降级：两表并集必须覆盖 builtin 实例的关闭键，

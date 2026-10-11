@@ -20,9 +20,9 @@
 │  peri-workflow    │◄────────────────►│  宿主进程 (Rust)     │
 │  (此包, Node.js)  │   stdin/stdout   │                     │
 │                   │                  │  执行 agent()       │
-│  编排 agent()     │──agent/run──────►│  管理 LLM 密钥       │
+│  编排 agent()     │──agent/task─────►│  管理 LLM 密钥       │
 │  parallel()       │                  │  运行工具            │
-│  pipeline()       │◄──AgentRunResult─│                     │
+│  pipeline()       │◄──agent/result───│                     │
 │  phase()          │                  │                     │
 └───────────────────┘                  └─────────────────────┘
 ```
@@ -31,17 +31,31 @@
 
 ## 安装
 
-Peri 内部使用随二进制分发的固定 artifact。运行 `peri workflow --help` 可调用同一份 CLI，配置和会话初始化之前分发，不下载 npm 包。仓库开发时先 `bun run build`，再用 `node dist/peri-workflow.js --help`；新增能力是否已发布到 registry 需单独核实。
+Peri（Rust 宿主）**随二进制分发本包构建出的单文件 bundle 作为 sidecar**，不把 JS 嵌入二进制：发行归档在可执行文件旁携带
+`peri-resources/workflow/<内容身份>/`（`<内容身份>` = `dist/peri-workflow.js` 构建产物的 sha256 前 12 位），
+首次使用时校验身份与摘要并发布到本机缓存 `~/.peri/workflow/<version>/<内容身份>/`，之后离线复用。
+`peri workflow --help` 与 workflow 工具走同一份已校验产物。
+
+- 默认**不联网**：sidecar 或缓存缺失/摘要不符时直接 fail closed（错误信息给出 sidecar 路径与可选入口）。
+- 显式 opt-in 的网络获取（`PERI_WORKFLOW_ALLOW_NPX_FALLBACK=1`）只负责把包取到 staging，仍须通过同一摘要校验；**不存在直接执行网络内容的路径**。
+- 部署方可显式指定包目录：`PERI_WORKFLOW_ARTIFACT_DIR`（仍按同一身份与摘要校验）。
+- `dist/` 为构建产物（`bun run build` 可复现字节）、**不入库**：由发布链在打包前构建并随发布包携带，消费方按固定 SHA-256 pin 校验。仓库开发时先 `bun run build`，再用 `node dist/peri-workflow.js --help`。
+
+npm 渠道（给非 Peri 宿主或手工调试）仍然可用：
 
 ```bash
 npm install -g @peri-code/workflow
 ```
 
-或通过 npx / bunx 自动下载（无需全局安装）：`npx -y @peri-code/workflow@0.2.0` / `bunx @peri-code/workflow@0.2.0`
+或通过 npx / bunx 使用（无需全局安装）：`npx -y @peri-code/workflow@0.3.0` / `bunx @peri-code/workflow@0.3.0`
 
-> **⚠️ npx 必须带显式版本号**：机器上若全局装过旧版（如 0.1.1），`npx -y @peri-code/workflow` 会**静默复用全局旧版**而不下载最新版——旧版没有 CLI 子命令，`list` / `read` / `validate` / `--help` 全部无输出且 exit 0（看似成功实则什么都没跑）。显式 `@0.2.0` 才能强制使用 registry 上的目标版本。清理全局旧版：`npm uninstall -g @peri-code/workflow`。
+> **⚠️ npx 必须带显式版本号**：机器上若全局装过旧版（如 0.1.1），`npx -y @peri-code/workflow` 会**静默复用全局旧版**而不下载最新版——旧版没有 CLI 子命令，`list` / `read` / `validate` / `--help` 全部无输出且 exit 0（看似成功实则什么都没跑）。显式 `@0.3.0` 才能强制使用 registry 上的目标版本。清理全局旧版：`npm uninstall -g @peri-code/workflow`。
+>
+> **版本兼容**：0.3.0 的 Node wire 为 `agent/task` + `agent/result`（`periProtocolVersion = 2`），与 0.2.0（`agent/run` 请求/响应）**不兼容**，宿主与引擎必须成对升级（见 [DESIGN.md](./DESIGN.md)「协议版本」）。
+>
+> 该路径属于手工/调试用法：Peri 自身按上文的 sidecar + 摘要校验消费，不使用 npx 直接执行。
 
-**消费端无需构建**：发布的包自带 `dist/peri-workflow.js`（自包含单文件，内嵌 engine、零运行时依赖），Node.js ≥ 18 直接运行。
+**消费端无需构建**：发布的包自带 `dist/peri-workflow.js`（自包含单文件，engine 一并打包、零运行时依赖），Node.js ≥ 18 直接运行。
 
 ## 快速开始
 
@@ -71,13 +85,16 @@ return { research, summary }
 
 宿主需要实现两个能力：
 
-**A) spawn Node 子进程**：
+**A) 解析并启动已校验的引擎产物**（宿主自选校验口径；Peri 的做法见下）：
 
 ```rust
-// 伪代码 (Rust) — bun 环境优先 bunx，否则 npx
-let cmd = if has_bun() { ("bunx", &["@peri-code/workflow"]) } else { ("npx", &["-y", "@peri-code/workflow"]) };
-let child = Command::new(cmd.0)
-    .args(cmd.1)
+// 伪代码 (Rust) — 宿主先从随包 sidecar 或本机缓存解析入口，校验后直接运行 node。
+// Peri 的实际实现：sidecar `peri-resources/workflow/<内容身份>/` → 缓存
+// `~/.peri/workflow/<version>/<内容身份>/`，身份 + sha256 摘要均校验（见
+// peri-workflow/src/runner/artifact.rs）；不执行未经校验的网络内容。
+let entry = resolve_and_validate_local_artifact()?; // 例如 node 直跑已验证的 dist/peri-workflow.js
+let child = Command::new("node")
+    .arg(&entry)
     .stdin(Stdio::piped())
     .stdout(Stdio::piped())
     .spawn()?;
@@ -95,16 +112,19 @@ send_json(&mut child.stdin, json!({
 }));
 ```
 
-**B) 响应 agent/run 请求**：
+**B) 响应 agent/task 通知并以 agent/result 回投**：
 
 ```rust
-// 读取 stdout，解析 agent/run
-if method == "agent/run" {
+// 读取 stdout，解析 agent/task 通知（无 id、无响应）
+if method == "agent/task" {
+    let task_id = params["taskId"].as_str().unwrap();
     let prompt = params["prompt"].as_str().unwrap();
     let result = execute_llm_agent(prompt, &api_key).await?;
+    // 回投：通知形式，按 taskId 幂等结算 Node 侧等待表
     send_json(&mut child.stdin, json!({
-        "jsonrpc": "2.0", "id": request.id,
-        "result": { "kind": "ok", "output": result, "usage": {"outputTokens": 500} }
+        "jsonrpc": "2.0", "method": "agent/result",
+        "params": { "runId": params["runId"], "taskId": task_id,
+                    "result": { "kind": "ok", "output": result, "usage": {"outputTokens": 500} } }
     }));
 }
 ```
@@ -132,12 +152,13 @@ if method == "agent/run" {
 |------|------|------|
 | `workflow/start` | Request | 启动一个 workflow run（含脚本源码，立即返回，异步执行） |
 | `workflow/kill` | Request | 中止当前 workflow（发送 `workflow/done`，status: "killed"） |
+| `agent/result` | Notification | 回投任务结果（`AgentRunResult`；取消编码 `dead { reason: "killed" }`，adapter 转为 `WorkflowAbortedError`） |
 
 ### Runner → 宿主
 
 | 方法 | 类型 | 描述 |
 |------|------|------|
-| `agent/run` | Request | 执行一个 agent 调用（宿主必须响应；`-32000` 表示 aborted） |
+| `agent/task` | Notification | 发布一个 agent 任务（宿主登记 `taskId` → 执行 → 以 `agent/result` 通知回投；按 `taskId` 幂等） |
 | `progress/event` | Notification | 进度更新（run_started / phase_started / phase_done ...） |
 | `journal/append` | Notification | 持久化 journal |
 | `workflow/done` | Notification | workflow 完成 |
@@ -146,10 +167,10 @@ if method == "agent/run" {
 
 想对接 `@peri-code/workflow`，你的宿主需要实现：
 
-- [ ] spawn 子进程（`npx -y @peri-code/workflow@<version>` 或 `bunx @peri-code/workflow@<version>`，**必须带显式版本**，避免 npx 静默复用全局旧版）
+- [ ] 解析并校验本地引擎产物（随包 sidecar 或校验过的本机缓存；显式路径优先）后 `node <entry>` 启动；不要直接执行未经校验的网络内容
 - [ ] 在 `stdin` 上写 newline-delimited JSON，在 `stdout` 上读 newline-delimited JSON
 - [ ] 发送 `workflow/start` 请求（含脚本源码）
-- [ ] 处理 `agent/run` 请求：执行 LLM agent 并返回 `AgentRunResult`
+- [ ] 处理 `agent/task` 通知：登记 `taskId` 并执行 LLM agent，完成后以 `agent/result` 通知回投（`taskId` 幂等；取消/中止编码为 `dead { reason: "killed" }`）
 - [ ] 处理 `progress/event` 通知（更新 UI progress panel）
 - [ ] 处理 `journal/append` 通知（持久化到磁盘）
 - [ ] 处理 `workflow/done` 通知（清理资源、通知用户）
@@ -178,15 +199,16 @@ peri-workflow adlc plan <request.json>         # 按依赖和缺口生成恢复�
 peri-workflow --help               # 用法帮助
 ```
 
-无参数运行时保持 JSON-RPC 模式（宿主集成）；带子命令即 CLI 模式，互不干扰。通过 `npx` / `bunx` 也可直接用：
+无参数运行时保持 JSON-RPC 模式（宿主集成）；带子命令即 CLI 模式，互不干扰。通过 `npx` / `bunx` 也可直接用（npm 渠道，手工/调试）：
 
 ```bash
-npx -y @peri-code/workflow@0.2.0 list
-npx -y @peri-code/workflow@0.2.0 read 019fc025-c4d9-7d52-a30a-7409229e3148 --short
-npx -y @peri-code/workflow@0.2.0 validate my-workflow.mjs
+npx -y @peri-code/workflow@0.3.0 list
+npx -y @peri-code/workflow@0.3.0 read 019fc025-c4d9-7d52-a30a-7409229e3148 --short
+npx -y @peri-code/workflow@0.3.0 validate my-workflow.mjs
 ```
 
-Peri 用户可把上述前缀替换为 `peri workflow`，始终使用当前二进制内嵌版本。
+Peri 用户可把上述前缀替换为 `peri workflow`，始终使用随二进制分发并校验过的同版本 bundle
+（随包 sidecar 或已校验缓存 `~/.peri/workflow/<ver>/<内容身份>/`）。
 `boundary` 和 `adlc` 使用请求文件，返回 JSON；非零退出或 `ok: false` 不能当作检查通过。
 请求类型和固定上限见 `src/boundary.ts`、`src/adlc.ts`；编排策略与完整步骤由
 [ultra-adlc skill](../../mcp-packages/workspace/src/resources/builtin/skills/ultra-adlc/SKILL.md) 维护。
@@ -249,7 +271,7 @@ npm run build   # 等价于：
 node dist/peri-workflow.js < /dev/null && echo "OK"
 ```
 
-输出是一个完整的自包含 Node.js 脚本（~35KB），无需 `node_modules`。
+输出是一个完整的自包含 Node.js 脚本（engine 一并打包进该单文件），无需 `node_modules`。
 
 ## 发布（Publishing）
 
@@ -261,21 +283,28 @@ node dist/peri-workflow.js < /dev/null && echo "OK"
 ### 发布流程（checklist）
 
 ```bash
-# 1. bump 版本（自动更新 package.json 并打 git tag）
-npm version patch        # 或 minor / major
-# 2. 构建 + 测试 + 覆盖率自检（prepublishOnly 会自动重跑）
-npm run build && npm run test:coverage && node dist/peri-workflow.js < /dev/null && echo OK
+# 1. bump 版本：直接改 package.json 的 version / periBuildId / periProtocolVersion
+#    （`npm version` 会顺手打 git tag，需要 tag 时才用；仓库流程里版本由 release workflow 管理）
+# 2. 本地自检（prepublishOnly 在 publish 时会自动重跑 build + coverage）
+npm run typecheck && npm run test:coverage && node dist/peri-workflow.js < /dev/null && echo OK
 # 3. 发布
-npm publish
+npm publish --access public
 ```
 
-**4. 同步 Peri 宿主（关键联动）**：`peri-workflow/src/runner.rs:19` 的 `WORKFLOW_NPM_VERSION` 常量
-必须改为新版本——它决定本地固定安装路径 `~/.peri/workflow/<version>/` 与
-`npm install @peri-code/workflow@<version>` 的版本约束。未同步会导致：
-本地固定安装停留在旧版、`npx` 回退路径拿到新版，出现版本漂移。
+**4. 同步 Peri 宿主（关键联动）**：`dist/peri-workflow.js` 是发行内容与摘要校验的事实源，
+发布后必须让 Rust 侧与它一致（`peri-workflow/src/runner/artifact.rs`）：
 
-**5. 验证**：重编 peri 后触发一次 workflow（首次调用自动 `npm install --prefix ~/.peri/workflow/<ver>`，
-旧版本目录按版本号共存、不清理，无需迁移）。
+- `WORKFLOW_NPM_VERSION` / `WORKFLOW_BUILD_ID` / `WORKFLOW_PROTOCOL_VERSION` 决定期望的包身份、
+  缓存路径 `~/.peri/workflow/<version>/<内容身份>/` 与启动握手校验值；
+- `WORKFLOW_ENTRY_SHA256` 必须改为新 `dist` 的完整 sha256（`repository_bundle_matches_pinned_digest`
+  测试会比对构建产物与 pin，不一致即失败——先在 `npm-packages/@peri-workflow` 运行 `bun run build`）；
+- 内容身份目录名（sha256 前 12 位）由发行归档的打包步骤与发布门自动推导，无需手工同步；
+- 发布门 `scripts/verify-workflow-sidecar.sh` 会核对归档内元数据、JS 完整 sha256、目录身份与
+  上述 Rust 常量四者一致。
+
+**5. 验证**：重编 peri 后触发一次 workflow。首次调用从随包 sidecar 校验并发布到
+`~/.peri/workflow/<ver>/<内容身份>/`（离线，无需 npm/网络）；摘要不符或缺失时 fail closed，
+显式 `PERI_WORKFLOW_ALLOW_NPX_FALLBACK=1` 才尝试网络获取，且获取内容仍须通过同一摘要校验。
 
 > 若协议有变更，同步更新 [DESIGN.md](./DESIGN.md) 的「协议版本」表。
 
@@ -293,13 +322,13 @@ npm publish
 
 | 使用方 | 接入方式 | 需要构建？ |
 |--------|----------|-----------|
-| Peri 宿主（Rust） | `ensure_workflow_install` 自动 `npm install --prefix ~/.peri/workflow/<ver> @peri-code/workflow@<ver>`，`node` 直跑 `dist/peri-workflow.js` | 不需要（仅 Peri 自身重编时同步版本常量） |
+| Peri 宿主（Rust） | 从随包 sidecar 或已校验缓存解析入口（身份 + sha256 校验），`node` 直跑 `dist/peri-workflow.js`；缺产物时 fail closed | 不需要（重编时同步 `WORKFLOW_NPM_VERSION` 与 `WORKFLOW_ENTRY_SHA256`） |
 | 临时手动 / 调试 | `npx -y @peri-code/workflow@<version>` 或 `bunx @peri-code/workflow@<version>`（显式版本；不带版本会在全局已有同名 bin 时静默复用旧版） | 不需要 |
 | 其他宿主集成 | 按上方「宿主实现检查清单」spawn 子进程 + JSON-RPC 协议 | 不需要 |
 | 参与开发 / 发布 | 仓库内 `bun build src/index.ts`（npm run build） | 需要（bun） |
 
-**结论：消费端永远不需要构建**——`dist/peri-workflow.js` 是自包含单文件（内嵌
-`@claude-code-best/workflow-engine`、零运行时依赖），Node.js ≥ 18 直接跑。
+**结论：消费端永远不需要构建**——`dist/peri-workflow.js` 是自包含单文件（`@claude-code-best/workflow-engine`
+已打包进该 JS bundle，零运行时依赖），Node.js ≥ 18 直接跑。
 
 ## 技术栈
 
@@ -307,7 +336,7 @@ npm publish
 - **测试**：`bun test`（`test/` 目录，模块单测 + e2e 黑盒模拟；行覆盖率 ≥ 80% 门禁）
 - **类型检查**：`tsc --noEmit`（严格模式）
 - **运行时**：Node.js ≥ 18
-- **内部引擎**：`@claude-code-best/workflow-engine`（构建时内嵌）
+- **内部引擎**：`@claude-code-best/workflow-engine`（构建时打包进 JS 单文件 bundle；Rust 侧不嵌入 JS 产物）
 - **无生产依赖**：打包后为单文件，零运行时依赖
 
 ## 架构
@@ -316,7 +345,7 @@ npm publish
 
 - **宿主拥有 agent 执行权**（模型选择、API 密钥、工具、安全）
 - **此包拥有 workflow 编排权**（DAG 调度、并行、重试、journal 回放）
-- **边界在 `agent/run`**：宿主决定"怎么执行 agent"，此包决定"agent 之间怎么编排"
+- **边界在 `agent/task` 发布 + `agent/result` 回投**：宿主决定"怎么执行 agent"，此包决定"agent 之间怎么编排"
 
 ## 许可
 

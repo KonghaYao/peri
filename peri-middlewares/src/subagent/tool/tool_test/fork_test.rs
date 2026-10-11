@@ -106,13 +106,18 @@ async fn test_fork_tool_surface_excludes_child_absent_capabilities() {
     }
     crate::subagent::test_support::fixture_model_impl!(ToolsCheckLLM);
 
-    // 父工具面包含子链不具备的扩展面（Agent/AskUser/Workflow/builtin cron）与工作区工具。
-    // cron 依可信 builtin 实例身份排除（不按名字猜）：夹具声明 `builtin_mcp_instance`。
+    // 父工具面包含子链不具备的扩展面（Agent/AskUser/builtin workflow 与 cron 实例）
+    // 与工作区工具。builtin 面依**可信实例身份**排除（不按名字猜）：夹具声明
+    // `builtin_mcp_instance`（P5 起 workflow 是 builtin 实例，模型面名字
+    // `mcp__workflow__Workflow`）。
     let parent_tools: Vec<Arc<dyn BaseTool>> = vec![
         make_tool("Read"),
         make_tool("Agent"),
         make_tool("AskUserQuestion"),
-        make_tool("Workflow"),
+        Arc::new(CapabilityTool {
+            name: "mcp__workflow__Workflow",
+            builtin_instance: Some("workflow"),
+        }),
         Arc::new(CapabilityTool {
             name: "cron_list",
             builtin_instance: Some("cron"),
@@ -150,7 +155,12 @@ async fn test_fork_tool_surface_excludes_child_absent_capabilities() {
     let captured = tools_capture.lock().unwrap();
     // 子链能力收缩（H1/fork 继承策略）：扩展面不得进入子请求工具面，
     // 而 deferred 元工具与工作区工具保持可用（同一 tool_filter 派生）。
-    for excluded in ["Agent", "AskUserQuestion", "Workflow", "cron_list"] {
+    for excluded in [
+        "Agent",
+        "AskUserQuestion",
+        "mcp__workflow__Workflow",
+        "cron_list",
+    ] {
         assert!(
             !captured.iter().any(|name| name == excluded),
             "{excluded} 不得进入 fork 工具面, got: {:?}",
@@ -402,6 +412,11 @@ impl BaseTool for CapabilityTool {
     fn parameters(&self) -> serde_json::Value {
         serde_json::json!({})
     }
+    /// 夹具工具一律 direct：继承策略的决策在请求工具面上可观察，
+    /// 否则「被排除」与「本就不在工具面（deferred）」无法区分。
+    fn is_direct(&self) -> bool {
+        true
+    }
     fn builtin_mcp_instance(&self) -> Option<&str> {
         self.builtin_instance
     }
@@ -424,16 +439,24 @@ fn capability_tools() -> Vec<Arc<dyn BaseTool>> {
             name: "AskUserQuestion",
             builtin_instance: None,
         }),
+        // P5：workflow 编排面整体是 builtin `workflow` 实例的 deferred 工具
+        // （模型面 `mcp__workflow__*`），排除按**实例身份**整体命中——
+        // `Workflow` / `WorkflowStatus` / `WorkflowKill` 同一条规则，
+        // 不再按裸名 `Workflow` 逐名猜。
         Arc::new(CapabilityTool {
-            name: "Workflow",
-            builtin_instance: None,
+            name: "mcp__workflow__Workflow",
+            builtin_instance: Some("workflow"),
+        }),
+        Arc::new(CapabilityTool {
+            name: "mcp__workflow__WorkflowStatus",
+            builtin_instance: Some("workflow"),
         }),
         Arc::new(CapabilityTool {
             name: "cron_list",
             builtin_instance: Some("cron"),
         }),
-        // 用户 MCP 工具恰好叫 Workflow / cron 名字：同样是 fail-closed 排除，
-        // 但**不是**按名字归因 builtin——非 builtin 的 cron 同样排除（名字面）。
+        // 非 builtin 的用户 MCP 工具（名字与 builtin 面相近）：不按名字猜，
+        // 实例身份为 None 即不命中排除名单，照常继承。
         Arc::new(CapabilityTool {
             name: "mcp__user__cron",
             builtin_instance: None,
@@ -449,7 +472,7 @@ fn capability_tools() -> Vec<Arc<dyn BaseTool>> {
     ]
 }
 
-/// 继承策略：Agent / AskUser / Workflow / builtin cron 全部闭合；工作区工具保持。
+/// 继承策略：Agent / AskUser / builtin workflow 与 cron 实例全部闭合；工作区工具保持。
 #[test]
 fn child_inheritance_filter_closes_extension_faces_and_keeps_workspace() {
     use crate::subagent::fork::child_inheritance_filter;
@@ -532,7 +555,11 @@ async fn fork_spawn_config_filter_closes_extension_tools() {
     for tool in parent_tools.iter() {
         let kept = (config.tool_filter)(tool.as_ref());
         match tool.name() {
-            "Agent" | "AskUserQuestion" | "Workflow" | "cron_list" => {
+            "Agent"
+            | "AskUserQuestion"
+            | "mcp__workflow__Workflow"
+            | "mcp__workflow__WorkflowStatus"
+            | "cron_list" => {
                 assert!(!kept, "{} 不得进入 fork 工具面", tool.name())
             }
             _ => assert!(kept, "{} 应保持可继承", tool.name()),
@@ -556,7 +583,12 @@ fn child_inheritance_filter_closes_deferred_catalog_view() {
         crate::subagent::fork::child_inheritance_filter(),
     );
     let names: Vec<String> = catalog.snapshot().tools.keys().cloned().collect();
-    for excluded in ["Agent", "AskUserQuestion", "Workflow", "cron_list"] {
+    for excluded in [
+        "Agent",
+        "AskUserQuestion",
+        "mcp__workflow__Workflow",
+        "cron_list",
+    ] {
         assert!(
             !names.iter().any(|name| name == excluded),
             "{excluded} 不得进入 deferred 目录视图: {names:?}"

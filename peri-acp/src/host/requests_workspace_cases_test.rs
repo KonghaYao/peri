@@ -899,7 +899,7 @@ async fn prompt_without_frozen_snapshot_fails_closed() {
             frozen: None,
             recall_items: Vec::new(),
             agent_pool: crate::session::agent_pool::AgentPool::new(),
-            workflow_middleware: None,
+            workflow_notifications: None,
             title: None,
             tags: Vec::new(),
         },

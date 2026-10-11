@@ -80,3 +80,4 @@ peri-process = { path = "../peri-process" }
 tokio = { workspace = true, features = ["full"] }
 peri-mcp-cron.workspace = true
 peri-mcp-workspace.workspace = true
+peri-mcp-workflow.workspace = true

@@ -88,7 +88,10 @@ async fn wave2_ready_gate_matrix() {
         let dirs = FixtureDirs::new();
         let cwd = dirs.workspace_str();
         // 只给**健康实例**的输入：被观察实例的输入缺失 ⇒ 装配期 typed 失败。
-        let context = BuiltinInstanceContext::new(cwd.clone());
+        // `workflow` 同为会话级实例（P3）：会话装配给空槽，本夹具同形——若不给，
+        // workflow 会与 `fault` 一起失败，下面的「失败文案必须指名 cron」断言面失效。
+        let context =
+            BuiltinInstanceContext::new(cwd.clone()).with_workflow(WorkflowInstanceInput::slot());
         let fixture = BuiltinHostFixture::start_with_context(dirs, context).await;
 
         // ① 故障实例：ready 面五行全否。
@@ -165,10 +168,11 @@ async fn wave2_ready_gate_matrix() {
 /// 封口后再注入。判据不是「按构造顺序自证」，而是三条互相独立的可观察事实：
 /// ① 封口前的重复注入返回 `AlreadyInjected`，且**首个上下文继续生效** —— 第二份上下文
 ///    故意无 cron 输入，若它被静默接受，下一段 `run_initialize` 里
-///    cron 会以 `InstanceInputMissing` 失败（不是 4/4 ready）；
-/// ② `run_initialize` 收口为 `Ready { total: 4 }` 且四个实例 ready、工具面与注册表逐字
-///    相等 —— 这同时是「注入早于 initialize」的证据（注入晚于封口只会被 typed 拒绝，
-///    实例只能以 `ContextMissing` 收口，见 B 段实测）；
+///    cron 会以 `InstanceInputMissing` 失败（不是注册表全实例 ready）；
+/// ② `run_initialize` 收口为 `Ready { total }`（`total` == 注册表实例数，随波次增长）、
+///    [WAVE2_INSTANCES] 四个实例 ready、工具面与注册表逐字相等 —— 这同时是「注入早于
+///    initialize」的证据（注入晚于封口只会被 typed 拒绝，实例只能以 `ContextMissing`
+///    收口，见 B 段实测）；
 /// ③ 封口**之后**的再注入换分支返回 `InitializationStarted`（`initialize_started` 先判，
 ///    封口优先，见 `McpClientPool::set_builtin_instance_context` 的判定顺序），且被拒的
 ///    注入**不改变**任何事实（四个实例仍 ready）。
@@ -192,11 +196,13 @@ async fn context_injected_before_initialize_and_rejects_duplicate() {
     let scheduler = Arc::new(parking_lot::Mutex::new(peri_mcp_cron::CronScheduler::new(
         cron_tx,
     )));
-    // 宿主组合根的**唯一**一份上下文：cron 输入齐备。
-    let first = BuiltinInstanceContext::new(cwd.clone()).with_cron(CronInstanceInput {
-        scheduler,
-        tick_enabled: false,
-    });
+    // 宿主组合根的**唯一**一份上下文：cron 输入齐备（workflow 空槽同会话装配形态）。
+    let first = BuiltinInstanceContext::new(cwd.clone())
+        .with_cron(CronInstanceInput {
+            scheduler,
+            tick_enabled: false,
+        })
+        .with_workflow(WorkflowInstanceInput::slot());
     let (_owner, spawner) = McpTaskOwner::new();
     let pool = Arc::new(McpClientPool::new_pending_with_spawner(spawner));
     pool.bind_execution_cwd(&dirs.workspace)
@@ -218,7 +224,7 @@ async fn context_injected_before_initialize_and_rejects_duplicate() {
         "封口前的重复注入必须是 typed 拒绝（含同一 `Arc` 再注入），不得静默覆盖"
     );
 
-    // ③ initialize：只有「首个上下文生效」才可能 4/4 ready。
+    // ③ initialize：只有「首个上下文生效」才可能注册表全实例 ready。
     let (status_tx, status_rx) = tokio::sync::watch::channel(McpInitStatus::Pending);
     tokio::time::timeout(
         std::time::Duration::from_secs(30),
@@ -233,9 +239,11 @@ async fn context_injected_before_initialize_and_rejects_duplicate() {
     .await
     .expect("真实初始化必须有界收敛（不得挂起）");
     let status = status_rx.borrow().clone();
+    // 期望值从**注册表**派生（实例数随波次增长：wave 1 两个 → wave 5 五个）。
+    let expected_ready = peri_acp_types::builtin_mcp::BUILTIN_MCP_INSTANCES.len();
     assert!(
-        matches!(status, McpInitStatus::Ready { total: 4 }),
-        "首个上下文生效 ⇒ 四个实例必须全部 ready（第二份上下文若被静默接受，cron 会以 InstanceInputMissing 失败）: {status:?}"
+        matches!(status, McpInitStatus::Ready { total } if total == expected_ready),
+        "首个上下文生效 ⇒ {expected_ready} 个实例必须全部 ready（第二份上下文若被静默接受，cron 会以 InstanceInputMissing 失败）: {status:?}"
     );
     for (instance, expected) in WAVE2_INSTANCES {
         assert_instance_ready(&pool, instance, expected);
@@ -256,7 +264,7 @@ async fn context_injected_before_initialize_and_rejects_duplicate() {
         assert_instance_ready(&pool, instance, expected);
     }
     println!(
-        "[W2 context] inject_seq=1（封口前）→ duplicate_err={duplicate_err:?} → initialize_seq=2（Ready 4/4）→ 封口后再注入={late_err:?}；ready 面不受被拒注入影响"
+        "[W2 context] inject_seq=1（封口前）→ duplicate_err={duplicate_err:?} → initialize_seq=2（Ready {expected_ready}/{expected_ready}）→ 封口后再注入={late_err:?}；ready 面不受被拒注入影响"
     );
 
     // ── B：未注入 + 先 initialize ⇒ 全实例 ContextMissing，且首次晚注入被拒 ────

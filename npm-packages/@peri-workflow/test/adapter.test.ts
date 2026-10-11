@@ -1,14 +1,14 @@
 /**
- * adapter 测试 — rpcAdapter.run 的三条路径（ok / aborted / 其他错误）。
+ * adapter 测试 — rpcAdapter.run 的三条路径（ok / cancelled / 迟到投递）。
  *
- * 不 mock 模块：走真实 rpc 传输闭环——setOutWriter 捕获 agent/run 请求，
- * handleResponse 模拟宿主响应（与 e2e 黑盒同构，但单元级驱动）。
+ * 不 mock 模块：走真实 rpc 传输闭环——setOutWriter 捕获 agent/task 通知，
+ * handleTaskResult 模拟宿主 agent/result 回投（与 e2e 黑盒同构，但单元级驱动）。
  */
 import { describe, expect, test, afterEach } from 'bun:test'
 import * as engine from '@claude-code-best/workflow-engine'
 import type { AgentAdapterContext } from '@claude-code-best/workflow-engine'
 import { rpcAdapter } from '../src/adapter'
-import { handleResponse, setOutWriter } from '../src/rpc'
+import { handleTaskResult, setOutWriter } from '../src/rpc'
 
 let written: Record<string, unknown>[] = []
 
@@ -23,18 +23,19 @@ afterEach(() => {
   setOutWriter((line) => process.stdout.write(line))
 })
 
-/** 等待下一个 agent/run 请求并模拟宿主响应 */
-function respond(agentReq: Record<string, unknown>, result: unknown): void {
-  handleResponse({
-    jsonrpc: '2.0',
-    id: agentReq.id as number,
-    result,
-  } as never)
+/** 等待下一个 agent/task 通知并模拟宿主回投 agent/result */
+function respond(agentTask: Record<string, unknown>, result: unknown): void {
+  handleTaskResult({
+    params: {
+      taskId: (agentTask.params as { taskId: string }).taskId,
+      result,
+    },
+  })
 }
 
-function waitAgentReq(): Record<string, unknown> {
-  const req = written.find((m) => m.method === 'agent/run')
-  if (!req) throw new Error(`no agent/run sent; seen=${JSON.stringify(written)}`)
+function waitAgentTask(): Record<string, unknown> {
+  const req = written.find((m) => m.method === 'agent/task')
+  if (!req) throw new Error(`no agent/task sent; seen=${JSON.stringify(written)}`)
   return req
 }
 
@@ -46,7 +47,7 @@ const ctx: AgentAdapterContext = {
 }
 
 describe('rpcAdapter.run', () => {
-  test('ok 路径：透传宿主结果并带上 runId/agentId', async () => {
+  test('ok 路径：透传宿主结果并带上 runId/agentId/taskId', async () => {
     capture()
     const p = rpcAdapter.run(
       {
@@ -59,8 +60,8 @@ describe('rpcAdapter.run', () => {
       },
       ctx
     )
-    const req = waitAgentReq()
-    expect(req.params).toMatchObject({
+    const task = waitAgentTask()
+    expect(task.params).toMatchObject({
       runId: 'run-1',
       agentId: 3,
       prompt: 'hello',
@@ -70,7 +71,8 @@ describe('rpcAdapter.run', () => {
       allowedTools: ['WebSearch'],
       phase: 'fix',
     })
-    respond(req, { kind: 'ok', output: 'mock result', usage: { outputTokens: 7 } })
+    expect(typeof (task.params as { taskId: string }).taskId).toBe('string')
+    respond(task, { kind: 'ok', output: 'mock result', usage: { outputTokens: 7 } })
     await expect(p).resolves.toEqual({
       kind: 'ok',
       output: 'mock result',
@@ -78,31 +80,38 @@ describe('rpcAdapter.run', () => {
     })
   })
 
-  test('-32000 错误 → 抛 WorkflowAbortedError', async () => {
+  test('取消编码（dead/killed）→ 抛 WorkflowAbortedError', async () => {
     capture()
     const p = rpcAdapter.run({ prompt: 'x' }, ctx)
-    const req = waitAgentReq()
-    handleResponse({
-      jsonrpc: '2.0',
-      id: req.id as number,
-      error: { code: -32000, message: 'aborted' },
-    } as never)
+    const task = waitAgentTask()
+    respond(task, { kind: 'dead', reason: 'killed', detail: 'workflow run killed' })
     await expect(p).rejects.toBeInstanceOf(engine.WorkflowAbortedError)
   })
 
-  test('其他错误 → dead(runagent-threw)', async () => {
+  test('普通 dead 结果 → 透传（不抛 aborted）', async () => {
     capture()
     const p = rpcAdapter.run({ prompt: 'x' }, ctx)
-    const req = waitAgentReq()
-    handleResponse({
-      jsonrpc: '2.0',
-      id: req.id as number,
-      error: { code: -1, message: 'boom' },
-    } as never)
+    const task = waitAgentTask()
+    respond(task, { kind: 'dead', reason: 'runagent-threw', detail: 'boom' })
     await expect(p).resolves.toEqual({
       kind: 'dead',
       reason: 'runagent-threw',
-      detail: '[object Object]', // String(err) 对非 Error 对象的序列化
+      detail: 'boom',
     })
+  })
+
+  test('迟到/未知 taskId 投递被忽略（幂等）', async () => {
+    capture()
+    const p = rpcAdapter.run({ prompt: 'x' }, ctx)
+    const task = waitAgentTask()
+    // 首次投递结算
+    respond(task, { kind: 'ok', output: 'first', usage: { outputTokens: 1 } })
+    await expect(p).resolves.toEqual({
+      kind: 'ok',
+      output: 'first',
+      usage: { outputTokens: 1 },
+    })
+    // 重复投递：等待表已清空，不得抛错也不得改变已结算结果
+    expect(() => respond(task, { kind: 'dead', reason: 'killed' })).not.toThrow()
   })
 })

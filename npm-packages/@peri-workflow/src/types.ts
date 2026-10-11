@@ -42,8 +42,8 @@ export type JsonRpcMessage = JsonRpcRequest | JsonRpcResponse | JsonRpcNotificat
 // ─── RPC method signatures ─────────────────────────────────
 
 /** Rust host 与 Node artifact 必须共同实现的启动协议。 */
-export const WORKFLOW_PROTOCOL_VERSION = 1
-export const WORKFLOW_BUILD_ID = '@peri-code/workflow@0.2.0'
+export const WORKFLOW_PROTOCOL_VERSION = 2
+export const WORKFLOW_BUILD_ID = '@peri-code/workflow@0.3.0'
 
 export type WorkflowLimits = {
   maxAgents?: number
@@ -65,13 +65,16 @@ export type WorkflowStartParams = {
 }
 
 /**
- * runner → host: 执行一次 agent 调用的请求参数（wire 字段）。
+ * runner → host: agent 任务发布（通知；P6 wire）。
  *
  * 显式声明而非透传引擎 `AgentRunParams`：字段与 Rust 侧
- * `protocol.rs::AgentRunParams` 逐字段对齐（camelCase wire 命名），
+ * `protocol.rs::AgentTaskParams` 逐字段对齐（camelCase wire 命名），
  * 避免引擎类型升级导致两侧静默分叉。
+ *
+ * `taskId` 作用域 = 单次 run；宿主回填经 `agent/result` 通知（按 taskId 去重）。
  */
-export type AgentRunRequestParams = {
+export type AgentTaskParams = {
+  taskId: string
   runId: string
   agentId: number
   prompt: string
@@ -83,6 +86,19 @@ export type AgentRunRequestParams = {
   allowedTools?: string[]
   label?: string
   phase?: string
+}
+
+/**
+ * host → runner: agent 任务结果投递（通知；P6 wire）。
+ *
+ * 字段与 Rust 侧 `protocol.rs::AgentResultParams` 对齐；`result` 为引擎
+ * `AgentRunResult`（`ok` / `skipped` / `dead`）。取消编码为
+ * `dead { reason: 'killed' }`，adapter 按引擎约定抛 `WorkflowAbortedError`。
+ */
+export type AgentResultParams = {
+  runId: string
+  taskId: string
+  result: unknown
 }
 
 // ─── CLI 读取器类型 ────────────────────────────────────────
@@ -101,7 +117,8 @@ export type WorkflowWriteIntent =
 export type WorkflowExecutionStatus = 'running' | 'completed' | 'failed' | 'killed' | 'unknown'
 export type WorkflowAcceptanceStatus = 'passed' | 'failed' | 'unknown'
 export type WorkflowPostProcessingStatus = 'not_required' | 'passed' | 'failed' | 'blocked' | 'unknown'
-export type WorkflowDeliveryStatus = 'deliverable' | 'blocked' | 'unknown'
+/** 内核只产出 `blocked` / `unknown`；历史 state.json 可能写着 `deliverable`，按 `unknown` 看待。 */
+export type WorkflowDeliveryStatus = 'blocked' | 'unknown'
 
 export type AttemptDisposition = 'produced' | 'recovered' | 'rejected'
 

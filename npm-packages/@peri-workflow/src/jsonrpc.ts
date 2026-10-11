@@ -2,7 +2,7 @@
  * JSON-RPC 模式启动 — 监听 stdin 的 newline-delimited JSON 并分发。
  */
 import * as readline from 'readline'
-import { handleResponse } from './rpc'
+import { handleResponse, handleTaskResult } from './rpc'
 import type { JsonRpcMessage, JsonRpcRequest, JsonRpcResponse } from './types'
 import { handleRequest } from './server'
 
@@ -24,6 +24,12 @@ export function startJsonRpc(): void {
       ('result' in msg || 'error' in msg)
     ) {
       handleResponse(msg as JsonRpcResponse)
+      return
+    }
+
+    // 宿主通知：agent/result 结算任务等待表（P6 任务信道）。
+    if ('method' in msg && msg.method === 'agent/result') {
+      handleTaskResult(msg as { params?: { taskId?: unknown; result?: unknown } })
       return
     }
 

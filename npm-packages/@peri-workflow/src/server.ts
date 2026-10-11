@@ -14,7 +14,7 @@ import type {
   WorkflowRunResult,
 } from '@claude-code-best/workflow-engine'
 import { rpcAdapter } from './adapter'
-import { rpcNotify, send, waitDrain } from './rpc'
+import { rejectPendingTasks, rpcNotify, send, waitDrain } from './rpc'
 import type { JsonRpcRequest, WorkflowJournalEntry, WorkflowStartParams } from './types'
 import { WORKFLOW_BUILD_ID, WORKFLOW_PROTOCOL_VERSION } from './types'
 
@@ -226,6 +226,9 @@ export async function handleRequest(msg: JsonRpcRequest): Promise<void> {
 
     case 'workflow/kill': {
       currentAbortController?.abort()
+      // 未完成任务的等待项以取消编码就地结算：不残留悬挂 promise（design §5.3）。
+      // 宿主侧 kill 也会取消任务并投递取消结果；此处兜底覆盖投递丢失的窗口。
+      rejectPendingTasks('workflow killed by host')
       send({
         jsonrpc: '2.0',
         id: id!,
