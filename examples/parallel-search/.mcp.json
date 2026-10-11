@@ -3,6 +3,7 @@
     "parallel-search": {
       "command": "npx",
       "args": [
+        "--prefer-offline",
         "-y",
         "mcp-remote@0.14.3",
         "https://search.parallel.ai/mcp",

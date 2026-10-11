@@ -16,8 +16,8 @@
 
 `system_mcp: true` 让首轮推理等待 MCP 连接与工具列表就绪（本例启动依赖等待上限为 60 秒）；`system_mcp_tools` 中的工具随连接就绪直接进入模型工具面。服务不可用时，此示例会阻止会话启动；移除该条目可恢复不依赖它的会话。
 
-配置通过 `npx -y mcp-remote@0.14.3` 启动固定版本的桥接依赖：首次运行会下载到 npx 缓存（首轮启动等待包含该下载耗时），之后复用缓存。`--transport http-only` 限定远端使用 Streamable HTTP；`--enable-proxy` 允许使用已有的 HTTP(S) 代理环境配置。当前 Peri 的直接 HTTP discovery 使用 `2026-07-28`，而 Parallel 接受的版本截至 `2025-11-25`，因此本例使用 stdio 桥接。
+配置通过 `npx --prefer-offline -y mcp-remote@0.14.3` 启动固定版本的桥接依赖：缓存命中时跳过每次启动的 registry 校验；首次运行仍会自动下载到 npx 缓存（首轮启动等待包含该下载耗时）。`--transport http-only` 限定远端使用 Streamable HTTP；`--enable-proxy` 允许使用已有的 HTTP(S) 代理环境配置。当前 Peri 的直接 HTTP discovery 使用 `2026-07-28`，而 Parallel 接受的版本截至 `2025-11-25`，因此本例使用 stdio 桥接。
 
-这是可选的 stdio 配置，不替换内置 `WebSearch` / `WebFetch`，也不更改模型或其他 MCP 设置。配置中的 `User-Agent` 标识此 Peri 示例。不要为匿名使用添加 `Authorization` 或 OAuth 配置。
+这是可选的 stdio 配置。本示例目录的 [`.peri/settings.json`](.peri/settings.json)（`config.meta_harness.WebMiddleware: false`）关闭内置 `web` 实例，使搜索与页面提取完全由 parallel-search 提供；复制到自己的项目时可移除该文件以保留内置 `WebSearch` / `WebFetch`。配置中的 `User-Agent` 标识此 Peri 示例。不要为匿名使用添加 `Authorization` 或 OAuth 配置。
 
 若已有同名服务，请先合并或改名；工具名会随服务名变化。修改配置后重新启动会话。遇到速率限制时，按服务响应等待后重试。
