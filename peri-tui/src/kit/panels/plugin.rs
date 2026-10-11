@@ -33,6 +33,10 @@ mod search_handler;
 mod search_request;
 
 #[cfg(test)]
+#[path = "plugin/hint_test.rs"]
+mod hint_tests;
+
+#[cfg(test)]
 #[path = "plugin/search_request_test.rs"]
 mod search_request_tests;
 
@@ -495,13 +499,23 @@ pub fn PluginPanel(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
     } else if confirm_action.read().is_some() {
         i18n::tr("panel-plugin-confirm-hint")
     } else if discover_read.detail.is_some() {
-        i18n::tr("common-nav-enter-close")
+        i18n::tr("panel-plugin-detail-hint")
     } else if detail_idx.is_some() {
-        i18n::tr("common-nav-enter-close")
+        i18n::tr("panel-plugin-detail-hint")
     } else if marketplace_detail.read().is_some() {
         i18n::tr("panel-plugin-marketplace-detail-hint")
     } else {
-        i18n::tr("common-nav-tab-close")
+        // 列表态 Enter 语义按 tab 不同，提示随之选择。
+        match current_tab {
+            // 首行 Enter 激活「添加市场」输入，其余行 Enter 进市场详情。
+            PluginViewTab::Marketplaces => i18n::tr("panel-plugin-marketplace-hint-keys"),
+            // 错误行不可展开，Enter 切回已安装视图。
+            PluginViewTab::Errors => i18n::tr("panel-plugin-errors-hint-keys"),
+            // Installed / Discover：Enter 进详情。
+            PluginViewTab::Installed | PluginViewTab::Discover => {
+                i18n::tr("panel-plugin-list-hint")
+            }
+        }
     };
     lines.push(Line::from(vec![Span::styled(footer_text, muted_style)]));
 

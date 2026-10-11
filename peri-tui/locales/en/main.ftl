@@ -497,7 +497,7 @@ agent-panel-title-none =  Select Agent (None)
 agent-panel-title =  Select Agent 
 agent-panel-none-label = No Agent (default)
 agent-panel-empty-hint = Add Agent definition files in .claude/agents/
-panel-agent-nav-hint =   ↑/↓::navigate  Enter::open  Esc::close
+panel-agent-nav-hint =   ↑/↓::navigate  Enter::close  Esc::close
 
 # ---- Agent Session Info Panel ----
 
@@ -522,7 +522,7 @@ hooks-configured-count = { $count } hooks configured
 hooks-readonly-hint = This panel is read-only. To add or modify hooks, edit plugin hooks.json.
 hooks-no-hooks =   No hooks configured.
 hooks-no-hooks-hint =   Hooks can be added via plugin hooks/hooks.json.
-panel-hooks-nav-hint =   ↑/↓::navigate  Enter::open  Esc::close
+panel-hooks-nav-hint =   ↑/↓::navigate  Enter::close  Esc::close
 hook-event-before-tool = Before tool execution
 hook-event-after-tool = After tool execution
 hook-event-after-tool-fail = After tool execution fails
@@ -764,7 +764,6 @@ statusbar-rewind-switch-file = Switch restore file
 # ---- Common (P0) ----
 common-loading = Loading
 common-esc-close =   Esc: close
-common-nav-enter-close =   ↑/↓::navigate  Enter::open  Esc::close
 common-empty =   (empty)
 
 # ---- Setup Wizard (P0) ----
@@ -993,6 +992,7 @@ panel-plugin-detail-author = author
 panel-plugin-detail-path = path
 panel-plugin-detail-scope = scope
 panel-plugin-detail-error = load error
+panel-plugin-detail-hint = ↑/↓: select  |  Enter: execute  |  Esc: back
 
 # ---- Plugin Panel Actions ----
 panel-plugin-action-disable = Disable plugin
@@ -1021,6 +1021,7 @@ panel-plugin-marketplaces-empty = No marketplaces configured
 # ---- Plugin Panel Errors ----
 panel-plugin-errors-title = Load Errors
 panel-plugin-errors-empty = No errors
+panel-plugin-errors-hint-keys = ←/→/Tab: switch view  |  Enter: back to installed  |  Esc: close
 
 # ---- Plugin Panel Status ----
 panel-plugin-status-enabled = enabled
@@ -1064,7 +1065,7 @@ panel-plugin-list-count = { $count } plugins found
 panel-plugin-discover-hint-keys = Enter: details  |  type: filter  |  ←/→/Tab: switch view
 
 # ---- Plugin Panel Navigation ----
-common-nav-tab-close = ←/→/Tab switch view · ↑/↓ navigate · Enter close · Esc close
+panel-plugin-list-hint = ←/→/Tab: switch view  |  ↑/↓: navigate  |  Enter: details  |  Esc: close
 
 # ---- Tasks Panel ----
 panel-tasks-total-label =   Total: 
@@ -1083,7 +1084,8 @@ panel-tasks-msgs =   { $count } msgs
 panel-tasks-empty =   No active tasks
 panel-tasks-empty-hint-1 =   Cron jobs are scheduled via /loop command;
 panel-tasks-empty-hint-2 =   SubAgents are spawned by Task / SubAgent tools.
-panel-tasks-nav-hint =   ↑/↓::navigate  Enter::open  Esc::close
+panel-tasks-nav-hint =   ↑/↓::navigate  Enter::cancel  Esc::close
+panel-tasks-nav-hint-close =   ↑/↓::navigate  Enter::close  Esc::close
 
 # ---- Theme Panel ----
 panel-theme-active-mark =  *

@@ -498,7 +498,7 @@ agent-panel-title-none =  Agent 选择 (无)
 agent-panel-title =  Agent 选择 
 agent-panel-none-label = 无 Agent（默认）
 agent-panel-empty-hint = 在 .claude/agents/ 目录中添加 Agent 定义文件
-panel-agent-nav-hint =   ↑/↓::导航  Enter::打开  Esc::关闭
+panel-agent-nav-hint =   ↑/↓::导航  Enter::关闭  Esc::关闭
 
 # ---- Agent 会话信息面板 ----
 
@@ -523,7 +523,7 @@ hooks-configured-count = 已配置 { $count } 个 hook
 hooks-readonly-hint = 此面板为只读。要添加或修改 hook，请编辑插件的 hooks.json。
 hooks-no-hooks =   未配置 hook。
 hooks-no-hooks-hint =   Hook 可通过插件 hooks/hooks.json 添加。
-panel-hooks-nav-hint =   ↑/↓::导航  Enter::打开  Esc::关闭
+panel-hooks-nav-hint =   ↑/↓::导航  Enter::关闭  Esc::关闭
 hook-event-before-tool = 工具执行前
 hook-event-after-tool = 工具执行后
 hook-event-after-tool-fail = 工具执行失败后
@@ -764,7 +764,6 @@ statusbar-rewind-switch-file = 切换回退文件
 # ---- Common (P0) ----
 common-loading = 正在加载
 common-esc-close =   Esc: close
-common-nav-enter-close =   ↑/↓::navigate  Enter::open  Esc::close
 common-empty =   (empty)
 
 # ---- Setup Wizard (P0) ----
@@ -993,6 +992,7 @@ panel-plugin-detail-author = 作者
 panel-plugin-detail-path = 路径
 panel-plugin-detail-scope = 作用域
 panel-plugin-detail-error = 加载错误
+panel-plugin-detail-hint = ↑/↓: 选择  |  Enter: 执行  |  Esc: 返回
 
 # ---- Plugin Panel Actions ----
 panel-plugin-action-disable = 禁用插件
@@ -1021,6 +1021,7 @@ panel-plugin-marketplaces-empty = 未配置市场
 # ---- Plugin Panel Errors ----
 panel-plugin-errors-title = 加载错误
 panel-plugin-errors-empty = 无错误
+panel-plugin-errors-hint-keys = ←/→/Tab: 切换视图  |  Enter: 切回已安装  |  Esc: 关闭
 
 # ---- Plugin Panel Status ----
 panel-plugin-status-enabled = 已启用
@@ -1064,7 +1065,7 @@ panel-plugin-list-count = 发现 { $count } 个插件
 panel-plugin-discover-hint-keys = Enter: 查看详情  |  输入: 过滤  |  ←/→/Tab: 切换视图
 
 # ---- Plugin Panel Navigation ----
-common-nav-tab-close = ←/→/Tab 切换视图 · ↑/↓ 导航 · Enter 查看 · Esc 关闭
+panel-plugin-list-hint = ←/→/Tab: 切换视图  |  ↑/↓: 导航  |  Enter: 查看详情  |  Esc: 关闭
 
 # ---- Tasks Panel ----
 panel-tasks-total-label =   总计: 
@@ -1083,7 +1084,8 @@ panel-tasks-msgs =   { $count } 条消息
 panel-tasks-empty =   当前无活跃任务
 panel-tasks-empty-hint-1 =   通过 /loop 命令调度定时任务；
 panel-tasks-empty-hint-2 =   子代理由 Task / SubAgent 工具创建。
-panel-tasks-nav-hint =   ↑/↓::navigate  Enter::open  Esc::close
+panel-tasks-nav-hint =   ↑/↓::导航  Enter::取消  Esc::关闭
+panel-tasks-nav-hint-close =   ↑/↓::导航  Enter::关闭  Esc::关闭
 
 # ---- Theme Panel ----
 panel-theme-active-mark =  *

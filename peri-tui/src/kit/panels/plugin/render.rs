@@ -591,16 +591,11 @@ pub(super) fn render_marketplaces(
         lines.push(Line::from(""));
     }
 
-    // Footer hints
+    // Footer hints：列表态提示由 PluginPanel 主组件按 tab 统一给出，此处只保留刷新中状态
     if refreshing {
         lines.push(Line::from(vec![Span::styled(
             i18n::tr("panel-plugin-marketplace-refreshing"),
             Style::new().fg(warning_color),
-        )]));
-    } else {
-        lines.push(Line::from(vec![Span::styled(
-            i18n::tr("panel-plugin-marketplace-hint-keys"),
-            muted_style,
         )]));
     }
 }

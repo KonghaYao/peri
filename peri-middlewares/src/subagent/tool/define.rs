@@ -125,7 +125,7 @@ impl BaseTool for SubAgentTool {
                 },
                 "resume_thread_id": {
                     "type": "string",
-                    "description": "目标 subagent 的 child_thread_id（UUID）；不填即新建。active 后台执行：将非空 prompt 作为 Defer 入队并立即返回 action: send / status: queued，不中断、不恢复，在后续 Receive 驱动推理，run_in_background 被忽略。非 active：从磁盘恢复，prompt 可省略以隐式继续，run_in_background 决定恢复模式。两种行为均优先于 subagent_type / fork。active 但当前会话没有可投递运行实例时明确报错"
+                    "description": "目标 subagent 的 child_thread_id（UUID）；不填即新建。非 UUID 的非空值（例如后台 task_id `bg-...`）会被明确拒绝，而不是忽略后新建。active 后台执行：将非空 prompt 作为 Defer 入队并立即返回 action: send / status: queued，不中断、不恢复，在后续 Receive 驱动推理，run_in_background 被忽略。非 active：从磁盘恢复，prompt 可省略以隐式继续，run_in_background 决定恢复模式。两种行为均优先于 subagent_type / fork。active 但当前会话没有可投递运行实例时明确报错"
                 },
                 "description": {
                     "type": "string",
@@ -189,7 +189,7 @@ impl BaseTool for SubAgentTool {
             run_in_background,
             cwd,
             is_fork,
-        } = InvocationArgs::parse(&input, &self.parent_cwd);
+        } = InvocationArgs::parse(&input, &self.parent_cwd)?;
 
         // host 提前获取（resume 校验需要会话资源门面；R-M2 分支优先级）
         let host = self.host();
@@ -197,8 +197,9 @@ impl BaseTool for SubAgentTool {
         // ── resume 分支（优先于 bg / fork / agent-def，R-M2）──
         // 容错语义：resume_thread_id 为有效 UUID 时直接进入恢复分支，subagent_type /
         // fork 字段被忽略（LLM 常按 schema 惯性同时携带，报错会让恢复被拦两次而放弃；
-        // 宽容处理使恢复总是可成功，多余字段无副作用）。非 UUID 占位符已在解析时
-        // 过滤（见上），不会劫持新建路径。
+        // 宽容处理使恢复总是可成功，多余字段无副作用）。
+        // 非 UUID 非空值已在解析时报明确错误（invocation.rs），不会劫持新建路径，
+        // 也不会被静默丢弃后转入新建。
         // invoke_resume 先尝试当前会话的 live Defer 投递；只有恢复路径才需要磁盘。
         //
         // resume 只消费**显式**意图：beta flag 的缺省后台不改变恢复模式
