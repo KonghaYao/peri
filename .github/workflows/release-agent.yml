@@ -45,6 +45,11 @@ jobs:
             - name: Checkout repository
               uses: actions/checkout@v7
 
+            - name: Install Rust toolchain
+              uses: dtolnay/rust-toolchain@stable
+              with:
+                  targets: ${{ matrix.target }}
+
             - name: Set version from tag
               shell: bash
               run: |
@@ -52,11 +57,9 @@ jobs:
                   echo "Setting version to ${VERSION}"
                   sed -i.bak -e "s/^version = \".*\"/version = \"${VERSION}\"/" Cargo.toml
                   rm -f Cargo.toml.bak
-
-            - name: Install Rust toolchain
-              uses: dtolnay/rust-toolchain@stable
-              with:
-                  targets: ${{ matrix.target }}
+                  # sed 只改 Cargo.toml；--locked 构建要求 Cargo.lock 中的 workspace 成员
+                  # 版本与之一致，故按同一 patch 配置同步一次 lock。
+                  ./scripts/cargo-rmcp-patched.sh update --workspace
 
             - name: Cache cargo registry
               uses: actions/cache@v4
