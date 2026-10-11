@@ -2,44 +2,147 @@ use super::*;
 
 // ─── Slice 6:Agent 工具 resume_thread_id 参数（tool 层） ──────────────────────
 
-/// 回归（占位符劫持）：LLM 表达「省略/意图」时会把 resume_thread_id 填成
-/// "" / "new" / "__omit__" 等非 UUID 占位符——必须忽略并走新建路径，
-/// 而不是进入 resume 分支报 invalid thread id（曾导致 subagent 高失败率死循环）。
+/// 解析层三分语义：缺省 / null / 空串 → 未提供（新建）；合法 UUID → 恢复；
+/// 非 UUID 非空值 → 明确错误（保留原始值），不得静默忽略该字段。
+#[test]
+fn test_resume_thread_id_parse_is_three_way() {
+    let parse =
+        |input: serde_json::Value| super::super::invocation::InvocationArgs::parse(&input, "/tmp");
+
+    // 缺省 / null / 空串（含纯空白）：等同未填，走新建路径。
+    for omitted in [
+        serde_json::json!({}),
+        serde_json::json!({ "resume_thread_id": null }),
+        serde_json::json!({ "resume_thread_id": "   " }),
+    ] {
+        let parsed = parse(omitted.clone()).expect("缺省值不得报错");
+        assert!(
+            parsed.resume_thread_id.is_none(),
+            "{omitted} 应视为未提供（新建）"
+        );
+    }
+
+    // 合法 UUID：恢复意图；trim 后原样保留。
+    let id = uuid::Uuid::now_v7().to_string();
+    let parsed = parse(serde_json::json!({ "resume_thread_id": format!(" {id} ") }))
+        .expect("合法 UUID 不得报错");
+    assert_eq!(parsed.resume_thread_id.as_deref(), Some(id.as_str()));
+
+    // 非 UUID 非空值：明确报错（含原始值）。
+    let error = parse(serde_json::json!({ "resume_thread_id": "bg-1234" }))
+        .err()
+        .expect("非 UUID 非空值必须报错");
+    let rejection = error
+        .downcast_ref::<peri_agent::tools::EffectiveToolError>()
+        .expect("解析拒绝应为 typed preflight rejection");
+    assert_eq!(
+        rejection.code,
+        peri_agent::tools::EffectiveToolErrorCode::InvalidInput
+    );
+    assert!(
+        rejection.message.contains("bg-1234"),
+        "错误须保留收到的原始值: {}",
+        rejection.message
+    );
+}
+
+/// 空串 resume_thread_id（LLM 表达「省略」的常见形式）→ 等同未填，走新建路径。
 #[tokio::test]
-async fn test_resume_thread_id_placeholder_ignored_and_spawns_new() {
-    for placeholder in ["", "new", "__omit__"] {
-        let dir = tempdir().unwrap();
-        write_test_agent(&dir);
-        let _fixture = SessionFixture::open_in(dir.path()).await;
-        let host = HostFixture::open_in(dir.path(), "fixture-resume-placeholder").await;
-        let t = host.bind(with_agent_face(make_subagent_tool(vec![]), dir.path()).await);
-        let result = t
+async fn test_resume_thread_id_empty_string_spawns_new() {
+    let dir = tempdir().unwrap();
+    write_test_agent(&dir);
+    let _fixture = SessionFixture::open_in(dir.path()).await;
+    let host = HostFixture::open_in(dir.path(), "fixture-resume-empty").await;
+    let t = host.bind(with_agent_face(make_subagent_tool(vec![]), dir.path()).await);
+    let result = t
+        .invoke(
+            serde_json::json!({
+                "resume_thread_id": "",
+                "subagent_type": "test-agent",
+                "cwd": host.cwd.clone(),
+                "prompt": "do it",
+            }),
+            host.context(&[]),
+        )
+        .await;
+    assert!(
+        result.is_ok(),
+        "空串 resume_thread_id 应等同未填并走新建路径: {:?}",
+        result.err()
+    );
+    let result = result.unwrap();
+    assert!(
+        result.contains("child_thread_id:"),
+        "新建路径返回值应带 child_thread_id: {}",
+        result
+    );
+    assert!(
+        !result.contains("invalid thread id"),
+        "不应触发 invalid thread id: {}",
+        result
+    );
+}
+
+/// 回归：非 UUID 非空值（`bg-` 前缀的后台 task_id / 占位符）→ 明确报错且不新建。
+///
+/// 历史背景：曾把非 UUID 值一律过滤为「未填」——协调者误把后台 task_id
+/// （`bg-{uuid}`）当成 child_thread_id 传入时被静默吞掉，同一次调用还带
+/// subagent_type / prompt 就转入新建路径，重复执行同一任务并造成工作区竞争。
+#[tokio::test]
+async fn test_resume_thread_id_non_uuid_is_rejected_without_spawning() {
+    let dir = tempdir().unwrap();
+    write_test_agent(&dir);
+    let _fixture = SessionFixture::open_in(dir.path()).await;
+    let host = HostFixture::open_in(dir.path(), "fixture-resume-non-uuid").await;
+    let t = host.bind(with_agent_face(make_subagent_tool(vec![]), dir.path()).await);
+
+    let task_id = format!("bg-{}", uuid::Uuid::now_v7());
+    for bad in ["new", task_id.as_str()] {
+        let error = t
             .invoke(
                 serde_json::json!({
-                    "resume_thread_id": placeholder,
+                    "resume_thread_id": bad,
                     "subagent_type": "test-agent",
                     "cwd": host.cwd.clone(),
                     "prompt": "do it",
                 }),
                 host.context(&[]),
             )
-            .await;
-        assert!(
-            result.is_ok(),
-            "占位符 resume_thread_id {:?} 应被忽略并走新建路径: {:?}",
-            placeholder,
-            result.err()
-        );
-        let result = result.unwrap();
-        assert!(
-            result.contains("child_thread_id:"),
-            "新建路径返回值应带 child_thread_id: {}",
-            result
+            .await
+            .err()
+            .unwrap_or_else(|| panic!("非法 resume_thread_id {bad:?} 必须报错"));
+        let rejection = error
+            .downcast_ref::<peri_agent::tools::EffectiveToolError>()
+            .expect("非法 resume_thread_id 应为 typed preflight rejection");
+        assert_eq!(
+            rejection.code,
+            peri_agent::tools::EffectiveToolErrorCode::InvalidInput,
+            "非法 resume_thread_id 应归为 InvalidInput"
         );
         assert!(
-            !result.contains("invalid thread id"),
-            "不应触发 invalid thread id: {}",
-            result
+            rejection.message.contains(bad),
+            "错误须保留收到的原始值 {bad:?}: {}",
+            rejection.message
+        );
+        assert!(
+            rejection.message.contains("child_thread_id"),
+            "错误须指引 child_thread_id: {}",
+            rejection.message
+        );
+        assert!(
+            rejection.message.contains("task id"),
+            "错误须说明 task_id 不能用于 resume: {}",
+            rejection.message
+        );
+        // 未经新建路径：父会话没有新增 child thread。
+        assert!(
+            host.fixture
+                .facade()
+                .list_children(&host.parent_id)
+                .await
+                .unwrap()
+                .is_empty(),
+            "非法 resume_thread_id 不得转入新建路径（{bad:?}）"
         );
     }
 }
