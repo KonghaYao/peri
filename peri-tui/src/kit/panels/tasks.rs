@@ -350,9 +350,7 @@ pub fn TasksPanel(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
     }
 
     lines.push(Line::from(""));
-    lines.push(
-        Line::from(i18n::tr("common-nav-enter-close")).fg(theme_def.read().semantic.text.dim),
-    );
+    lines.push(Line::from(i18n::tr("panel-tasks-nav-hint")).fg(theme_def.read().semantic.text.dim));
 
     let content = Paragraph::new(ratatui::text::Text::from(lines));
 
@@ -423,5 +421,31 @@ mod tests {
             !main_src.contains("open_panel"),
             "Tasks 面板 Enter 不得打开 SubAgent/Shell 详情抽屉"
         );
+    }
+
+    /// P0-74：底部导航提示必须描述真实动作（Enter 取消所选后台任务），不得声称打开。
+    #[test]
+    fn test_tasks_nav_hint_describes_cancel_not_open() {
+        let src = include_str!("tasks.rs");
+        let main_src = src.split("#[cfg(test)]").next().expect("tasks module body");
+        assert!(
+            main_src.contains(r#"i18n::tr("panel-tasks-nav-hint")"#),
+            "Tasks 面板底部提示须使用 Tasks 专属 key"
+        );
+        assert!(
+            !main_src.contains("common-nav-enter-close"),
+            "Tasks 面板不得复用 Enter::open 语义的通用提示"
+        );
+        for lang in ["en", "zh-CN"] {
+            let hint = crate::i18n::LcRegistry::new(Some(lang)).tr("panel-tasks-nav-hint");
+            assert!(
+                !hint.contains("Enter::open"),
+                "{lang} 提示不得把取消伪装成打开：{hint}"
+            );
+            assert!(
+                hint.contains("Enter::cancel") || hint.contains("Enter::取消"),
+                "{lang} 提示须标明 Enter 取消：{hint}"
+            );
+        }
     }
 }

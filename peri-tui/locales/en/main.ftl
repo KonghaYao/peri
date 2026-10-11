@@ -1083,7 +1083,7 @@ panel-tasks-msgs =   { $count } msgs
 panel-tasks-empty =   No active tasks
 panel-tasks-empty-hint-1 =   Cron jobs are scheduled via /loop command;
 panel-tasks-empty-hint-2 =   SubAgents are spawned by Task / SubAgent tools.
-panel-tasks-nav-hint =   ↑/↓::navigate  Enter::open  Esc::close
+panel-tasks-nav-hint =   ↑/↓::navigate  Enter::cancel  Esc::close
 
 # ---- Theme Panel ----
 panel-theme-active-mark =  *

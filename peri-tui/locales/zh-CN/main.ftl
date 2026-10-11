@@ -1083,7 +1083,7 @@ panel-tasks-msgs =   { $count } 条消息
 panel-tasks-empty =   当前无活跃任务
 panel-tasks-empty-hint-1 =   通过 /loop 命令调度定时任务；
 panel-tasks-empty-hint-2 =   子代理由 Task / SubAgent 工具创建。
-panel-tasks-nav-hint =   ↑/↓::navigate  Enter::open  Esc::close
+panel-tasks-nav-hint =   ↑/↓::导航  Enter::取消  Esc::关闭
 
 # ---- Theme Panel ----
 panel-theme-active-mark =  *
