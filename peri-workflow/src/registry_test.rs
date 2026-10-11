@@ -272,6 +272,20 @@ fn test_notification_includes_saved_state_only_when_artifact_exists() {
         notification.contains("`${label}` token in state.json references `outputs/<label>.txt`"),
         "存在 artifact 时应说明 `${{label}}` 指向 outputs/<label>.txt，实际：{notification}"
     );
+    // 终态四维必须词汇化：`Debug` 小写把 `NotRequired` 渲染成 `notrequired`，
+    // 与 `unknown` 并列时被读作「未验证」（2026-10-11 issue 缺陷 2）。
+    assert!(
+        notification.contains("post-condition: passed (read-only verified)"),
+        "read_only 通过应读作已验证，实际：{notification}"
+    );
+    assert!(
+        notification.contains("Acceptance is judged outside the engine"),
+        "应说明验收不由内核判定，实际：{notification}"
+    );
+    assert!(
+        !notification.contains("notrequired"),
+        "终态四维不得再出现 Debug 小写形态，实际：{notification}"
+    );
     assert!(!notification.contains("Error:"));
     std::fs::remove_dir_all(state_dir).unwrap();
 }

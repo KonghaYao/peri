@@ -452,6 +452,47 @@ fn escape_reminder_text(input: &str) -> String {
         .replace('>', "&gt;")
 }
 
+/// 终态四维词表：给消费方（模型/客户端）可读表达，不用 `Debug` 派生的小写——
+/// `Debug` 把 `NotRequired` 渲染成 `notrequired`，与 `unknown` 并列时被读成
+/// 「未验证」（2026-10-11 issue 缺陷 2）。
+fn execution_status_word(status: ExecutionStatus) -> &'static str {
+    match status {
+        ExecutionStatus::Running => "running",
+        ExecutionStatus::Completed => "completed",
+        ExecutionStatus::Failed => "failed",
+        ExecutionStatus::Killed => "killed",
+        ExecutionStatus::Unknown => "unknown",
+    }
+}
+
+fn acceptance_status_word(status: AcceptanceStatus) -> &'static str {
+    match status {
+        AcceptanceStatus::Passed => "passed",
+        AcceptanceStatus::Failed => "failed",
+        // 内核不判验收（ADLC-DELIVERY-STATUS-001）：`unknown` 是常态，不是缺失。
+        AcceptanceStatus::Unknown => "unknown (not judged by the engine)",
+    }
+}
+
+fn post_condition_word(status: PostProcessingStatus) -> &'static str {
+    match status {
+        // read_only 通过 = 仓库前后未被改动，读作「已验证」而不是「未处理」。
+        PostProcessingStatus::NotRequired => "passed (read-only verified)",
+        PostProcessingStatus::Passed => "passed (write intent verified)",
+        PostProcessingStatus::Failed => "failed",
+        PostProcessingStatus::Blocked => "blocked (no baseline or intent omitted)",
+        PostProcessingStatus::Unknown => "unknown",
+    }
+}
+
+fn delivery_status_word(status: DeliveryStatus) -> &'static str {
+    match status {
+        DeliveryStatus::Deliverable => "deliverable",
+        DeliveryStatus::Blocked => "blocked",
+        DeliveryStatus::Unknown => "unknown",
+    }
+}
+
 /// `return_value` 长文本外置阈值（**字节**，非字符数）：超过它的字符串在写
 /// `state.json` 前被抽出到 `outputs/<label>.txt`，原位替换为 `${label}` 引用。
 ///
@@ -548,13 +589,14 @@ impl WorkflowTaskResult {
             "Result state file was not generated.\n".to_string()
         };
         let projection_line = format!(
-            "Execution: {:?}; acceptance: {:?}; post-processing: {:?}; delivery: {:?}.\n",
-            self.execution_status,
-            self.acceptance_status,
-            self.post_processing_status,
-            self.delivery_status,
-        )
-        .to_ascii_lowercase();
+            "Execution: {}; acceptance: {}; post-condition: {}; delivery: {}.\n\
+             Acceptance is judged outside the engine: unknown acceptance keeps delivery \
+             `unknown` — not a failure.\n",
+            execution_status_word(self.execution_status),
+            acceptance_status_word(self.acceptance_status),
+            post_condition_word(self.post_processing_status),
+            delivery_status_word(self.delivery_status),
+        );
 
         let attempt_lines = self
             .attempts
