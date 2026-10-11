@@ -564,3 +564,111 @@ fn child_inheritance_filter_closes_deferred_catalog_view() {
     }
     assert!(names.iter().any(|name| name == "Read"), "{names:?}");
 }
+
+// ─── Fork 上下文门（启动前） ────────────────────────────────────────────────
+
+/// 不得被执行到的假模型：被上下文门拒绝的 fork 不会装配子执行。
+#[derive(Clone)]
+struct UnreachableForkModel;
+
+impl UnreachableForkModel {
+    async fn respond(
+        &self,
+        _request: peri_model::ModelRequest,
+        _cancellation: tokio_util::sync::CancellationToken,
+    ) -> Vec<peri_model::ModelResult<peri_model::ModelStreamEvent>> {
+        panic!("fork 应在上下文门被拒绝，不得进入子执行")
+    }
+}
+crate::subagent::test_support::fixture_model_impl!(UnreachableForkModel);
+
+/// 父上下文使用率 > 75% 时同步与后台 fork 均拒绝：不进入子执行装配
+/// （LLM 工厂零调用），反馈包含实际使用率与改用非 fork 子 agent 的引导。
+#[tokio::test]
+async fn test_fork_rejected_when_parent_context_above_limit() {
+    let host = HostFixture::open("fixture-fork-context-gate").await;
+    let llm_factory_calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let calls = Arc::clone(&llm_factory_calls);
+
+    let tool = host.bind(SubAgentTool::new(
+        Arc::new(vec![]),
+        None,
+        Arc::new(move |_: Option<&str>| {
+            calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            crate::subagent::test_support::fixture_source(
+                Arc::new(UnreachableForkModel),
+                "fixture-scripted",
+            )
+        }),
+        host.cwd.clone(),
+    ));
+
+    for (label, extra) in [
+        ("sync", serde_json::json!({})),
+        (
+            "background",
+            serde_json::json!({ "run_in_background": true }),
+        ),
+    ] {
+        let mut ctx = host.context(&[]);
+        ctx.context_usage = Some(peri_agent::tools::ContextUsage {
+            used_tokens: 80_000,
+            context_window: 100_000,
+        });
+        let mut input = serde_json::json!({ "fork": true, "prompt": "do the thing" });
+        for (key, value) in extra.as_object().expect("fixture object") {
+            input[key] = value.clone();
+        }
+
+        let error = tool
+            .invoke(input, ctx)
+            .await
+            .expect_err(&format!("{label} fork 在使用率 80% 时应被拒绝"));
+        let message = error.to_string();
+        assert!(message.contains("fork mode is unavailable"), "{message}");
+        assert!(message.contains("80.0%"), "应给出实际使用率: {message}");
+        assert!(
+            message.contains("subagent_type"),
+            "应引导改用非 fork 子 agent: {message}"
+        );
+    }
+
+    assert_eq!(
+        llm_factory_calls.load(std::sync::atomic::Ordering::SeqCst),
+        0,
+        "被拒绝的 fork 不得进入子执行装配"
+    );
+}
+
+/// 上下文门只在 fork 启动前生效：非 fork 子 agent 调用不受父上下文压力影响。
+#[tokio::test]
+async fn test_non_fork_invocation_ignores_fork_context_gate() {
+    let host = HostFixture::open("fixture-fork-context-gate-non-fork").await;
+    let tool = host.bind(SubAgentTool::new(
+        Arc::new(vec![]),
+        None,
+        Arc::new(|_: Option<&str>| {
+            crate::subagent::test_support::fixture_source(
+                Arc::new(UnreachableForkModel),
+                "fixture-scripted",
+            )
+        }),
+        host.cwd.clone(),
+    ));
+
+    let mut ctx = host.context(&[]);
+    ctx.context_usage = Some(peri_agent::tools::ContextUsage {
+        used_tokens: 80_000,
+        context_window: 100_000,
+    });
+
+    // 缺少 subagent_type 时走到定义解析前的参数错误——证明没有触发 fork 门，
+    // 也证明门不误伤非 fork 路径（错误来自缺失参数而非上下文使用率）。
+    let error = tool
+        .invoke(serde_json::json!({ "prompt": "do the thing" }), ctx)
+        .await
+        .expect_err("缺少 subagent_type 应报参数错误");
+    let message = error.to_string();
+    assert!(!message.contains("fork mode is unavailable"), "{message}");
+    assert!(message.contains("subagent_type"), "{message}");
+}

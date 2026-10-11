@@ -67,6 +67,24 @@ fn test_active_layer_defaults_to_input() {
     assert_eq!(active_layer(), FocusLayer::Input);
 }
 
+/// OAuth 弹窗从 MCP 面板详情打开：面板仍激活，但前景归弹窗——背景 handler
+/// 必须让路，否则同优先级下先注册的面板把键消费掉（弹窗收不到输入）。
+#[test]
+#[serial]
+fn test_popup_owns_foreground_over_panel() {
+    reset_focus_atoms();
+    open_panel(PanelKind::Mcp);
+    assert!(!popup_owns_foreground());
+
+    *POPUP_KIND.state().write() = Some(PopupKind::OAuth);
+    assert_eq!(active_layer(), FocusLayer::Popup(PopupKind::OAuth));
+    assert!(popup_owns_foreground());
+
+    *POPUP_KIND.state().write() = None;
+    assert!(!popup_owns_foreground());
+    close_all_panels();
+}
+
 #[test]
 fn test_classify_global_shortcut_ctrl_only() {
     assert_eq!(

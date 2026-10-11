@@ -345,6 +345,10 @@ async fn connect_server(
         }),
         // 会话级连接的来源是声明它的 client，不参与持久缓存。
         cache_version: None,
+        connected_at: Some(peri_time::now_utc_rfc3339()),
+        protocol_version: peer
+            .peer_info()
+            .map(|info| info.protocol_version.as_str().to_string()),
         skills_capable: peer_declares_skills(&peer),
         peer: Some(peer),
         resources: Vec::new(),

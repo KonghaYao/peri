@@ -397,6 +397,8 @@ async fn bridge_accepts_workspace_owned_task_handle() {
     let handle = Arc::new(crate::mcp::client::McpClientHandle {
         name: "workspace".into(),
         version: None,
+        connected_at: None,
+        protocol_version: None,
         cache_version: None,
         peer: Some(peer.clone()),
         tools: tools.clone(),
@@ -521,6 +523,8 @@ async fn closing_workspace_scope_reconciles_without_live_agent_manager() {
         Arc::new(crate::mcp::client::McpClientHandle {
             name: "workspace".into(),
             version: None,
+            connected_at: None,
+            protocol_version: None,
             cache_version: None,
             peer: Some(peer.clone()),
             tools: vec![],

@@ -717,6 +717,8 @@ async fn mcp_slot_derives_discover_agent_face_from_sub_agent_closed_key() {
         Arc::new(McpClientHandle {
             name: "workspace".to_string(),
             version: None,
+            connected_at: None,
+            protocol_version: None,
             cache_version: None,
             peer: None,
             tools: Vec::new(),

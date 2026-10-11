@@ -1,16 +1,45 @@
-//! Fork semantics: tool filtering, fork directive construction, agent override extraction.
+//! Fork semantics: tool filtering, pre-launch context gate, fork directive
+//! construction, agent override extraction.
 //!
 //! Pure computation functions for sub-agent inheritance from parent agent.
 //! No async, no external state mutation — safe for unit testing without mocks.
 
 use std::sync::Arc;
 
-use peri_agent::tools::BaseTool;
+use peri_agent::tools::{BaseTool, ContextUsage};
 
 use crate::tool_search::core_tools::{TOOL_AGENT, TOOL_ASK_USER, TOOL_WORKFLOW};
 use crate::tools::ArcToolWrapper;
 use peri_acp_types::agents::AgentOverrides;
 use peri_mcp_core::agent_definition::ToolsValue;
+
+/// Fork 启动时父会话上下文使用率上限（百分比）。
+///
+/// fork 继承父会话完整上下文，接近上下文上限时启动等于把压力整体转嫁给子执行；
+/// 高于本上限时拒绝 fork 并引导调用方改用非 fork 子 agent。
+pub const FORK_CONTEXT_USAGE_LIMIT_PERCENT: f64 = 75.0;
+
+/// Fork 上下文门（启动前评估，纯函数）。
+///
+/// - `None`（无 context budget 或无估算）→ 无法评估，放行；
+/// - `≤ 75%` → 放行；
+/// - `> 75%` → 拒绝，返回引导改用非 fork 子 agent 的错误文本。
+pub fn fork_context_usage_gate(usage: Option<ContextUsage>) -> Result<(), String> {
+    let Some(percent) = usage.and_then(|u| u.percent()) else {
+        return Ok(());
+    };
+    if percent <= FORK_CONTEXT_USAGE_LIMIT_PERCENT {
+        return Ok(());
+    }
+    Err(format!(
+        "Error: fork mode is unavailable: the parent context is at {percent:.1}% usage, \
+         above the {limit:.0}% fork limit. A fork inherits the full parent context, so it \
+         cannot start at this context pressure. Use a non-fork sub-agent instead: call Agent \
+         with a subagent_type and a self-contained prompt (optionally run_in_background: true), \
+         or resume an existing child thread with resume_thread_id.",
+        limit = FORK_CONTEXT_USAGE_LIMIT_PERCENT
+    ))
+}
 
 /// 子链不持有的 builtin 实例（按 `BaseTool::builtin_mcp_instance()` 的**可信
 /// 实例身份**判定，不按工具名猜）：v4 起 cron 是 builtin 实例，子链没有其持有者，

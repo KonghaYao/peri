@@ -151,6 +151,8 @@ impl DynamicMcpConnector for FakeConnector {
         let handle = Arc::new(McpClientHandle {
             name: instance.logical.server_name.clone(),
             version: None,
+            connected_at: None,
+            protocol_version: None,
             cache_version: None,
             peer: None,
             tools: vec![tool],
@@ -178,6 +180,8 @@ fn handle(name: &str, tool_name: &str) -> Arc<McpClientHandle> {
     Arc::new(McpClientHandle {
         name: name.to_string(),
         version: None,
+        connected_at: None,
+        protocol_version: None,
         cache_version: None,
         peer: None,
         tools: vec![tool],

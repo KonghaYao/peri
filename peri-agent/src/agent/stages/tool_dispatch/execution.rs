@@ -18,8 +18,8 @@ use crate::messages::{BaseMessage, MessageId};
 use crate::session::subagent::SubagentFailure;
 use crate::session::tool_catalog::SessionToolCatalogSnapshot;
 use crate::tools::{
-    normalize_params, BaseTool, EffectiveToolError, EffectiveToolErrorCode, ToolExecutionEvidence,
-    ToolExecutionStatus, ToolOutput,
+    normalize_params, BaseTool, ContextUsage, EffectiveToolError, EffectiveToolErrorCode,
+    ToolExecutionEvidence, ToolExecutionStatus, ToolOutput,
 };
 
 pub(super) fn effective_tool_error(error: AgentError) -> EffectiveToolError {
@@ -272,6 +272,18 @@ async fn dispatch_concurrent(
         Arc::new(msgs)
     };
     let cwd_snapshot = ctx.cwd().to_owned();
+    // 会话上下文用量快照（dispatch 时刻的只读事实，与 StateSnapshot / 自动 Compact
+    // 同口径）：工具在启动子执行前据此评估父会话上下文压力；无预算或无估算时为 None。
+    let context_usage = ctx.compact.context_budget.as_ref().and_then(|budget| {
+        ctx.compact
+            .token_tracker
+            .read()
+            .estimated_context_tokens()
+            .map(|used_tokens| ContextUsage {
+                used_tokens,
+                context_window: budget.context_window,
+            })
+    });
     let turn_id = ctx.turn_id();
     let agent_id = ctx.session.agent_id;
     let event_bus = Arc::clone(&ctx.runtime.event_bus);
@@ -335,7 +347,8 @@ async fn dispatch_concurrent(
                                 .unwrap_or_else(|| dispatch_context.session.agent_id.to_string()),
                             dispatch_context.session.turn.turn_id().to_string(),
                         )
-                        .with_tool_call_id(model_tool_call_id);
+                        .with_tool_call_id(model_tool_call_id)
+                        .with_context_usage(context_usage);
                     ctx_param.cancellation = cancel.clone();
                     ctx_param.session_resources = dispatch_context
                         .session

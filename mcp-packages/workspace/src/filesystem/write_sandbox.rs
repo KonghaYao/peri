@@ -3,10 +3,14 @@
 //! 用于 readonly subagent（如 plan），给它们一个能力最小化的写入通道：
 //! 只能写沙箱目录内的文件，不能碰项目代码。路径安全通过词法校验 +
 //! canonicalize 前缀匹配实现 symlink 逃逸防护。
+//!
+//! 路径解释：带沙箱前缀（如 `.peri/plans/x.md`）按项目根解析；无前缀相对路径
+//! （如 `x.md`、`sub/x.md`）按沙箱内相对路径解析（多沙箱按声明顺序依次尝试）。
+//! 两种形式最终都经同一完整校验链，不会逃出沙箱。
 
 use peri_agent::tools::BaseTool;
 use serde_json::Value;
-use std::path::{Path, PathBuf};
+use std::path::{Component, Path, PathBuf};
 use std::sync::{Arc, Mutex};
 
 use super::draft::{draft_hint_zh, DraftStore};
@@ -15,6 +19,7 @@ const WRITE_SANDBOX_DESC_PREFIX: &str = "Write a file ONLY into your sandbox dir
 
 const WRITE_SANDBOX_DESC_SUFFIX: &str = r#"
  Paths are relative to the project root. Overwriting is allowed.
+ A relative path without a sandbox prefix (e.g. 'report.md' or 'sub/report.md') is resolved inside the first sandbox directory.
  Absolute paths and '..' are rejected.
  Do NOT use this tool for files outside the sandbox directories listed above."#;
 
@@ -107,7 +112,7 @@ impl WriteSandboxTool {
         let Some(store) = self.drafts.as_ref() else {
             // 禁用 == 不存在,统一优雅降级
             return Err(format!(
-                "WriteSandbox: 草稿 '{draft_id}' 不存在或已失效,请改用 'content' 参数重试"
+                "WriteSandbox: 草稿 '{draft_id}' 不存在或已失效（路径/参数错误不会保存草稿）,请重新提供完整 'content' 重试"
             ));
         };
         let verdict = {
@@ -120,7 +125,7 @@ impl WriteSandboxTool {
         };
         match verdict {
             None => Err(format!(
-                "WriteSandbox: 草稿 '{draft_id}' 不存在或已失效,请改用 'content' 参数重试"
+                "WriteSandbox: 草稿 '{draft_id}' 不存在或已失效（路径/参数错误不会保存草稿）,请重新提供完整 'content' 重试"
             )),
             Some(false) => Err(format!(
                 "WriteSandbox: 草稿 '{draft_id}' 属于其他路径,请使用原 file_path,或改用 'content' 参数重试"
@@ -129,7 +134,7 @@ impl WriteSandboxTool {
                 // peek 与 take 之间存在竞态窗口(同 draft_id 被并发恢复),优雅降级为 unknown
                 let Some(entry) = store.lock().unwrap().take(draft_id) else {
                     return Err(format!(
-                        "WriteSandbox: 草稿 '{draft_id}' 不存在或已失效,请改用 'content' 参数重试"
+                        "WriteSandbox: 草稿 '{draft_id}' 不存在或已失效（路径/参数错误不会保存草稿）,请重新提供完整 'content' 重试"
                     ));
                 };
                 Ok((entry.content, entry.append))
@@ -153,12 +158,17 @@ impl WriteSandboxTool {
 
     /// 全路径安全校验链。
     ///
+    /// 路径解释规则（两种形式都约束在沙箱内）：
+    /// - 带沙箱目录前缀（如 `.peri/plans/x.md`）→ 按项目根解析；
+    /// - 其余相对路径（如 `x.md`、`sub/x.md`）→ 按沙箱内相对路径解析
+    ///   （多沙箱时按声明顺序依次尝试）。
+    ///
     /// 返回 canonicalized 目标路径，或错误描述。
     fn validate_path(&self, path: &str) -> Result<PathBuf, String> {
         // ① 词法拒绝绝对路径
         if Path::new(path).is_absolute() {
             return Err(format!(
-                "WriteSandbox: 拒绝绝对路径 '{}'。请使用基于项目根的相对路径。{}",
+                "WriteSandbox: 拒绝绝对路径 '{}'。请使用沙箱目录内的相对路径。{}",
                 path,
                 self.allowed_dirs_display()
             ));
@@ -175,6 +185,56 @@ impl WriteSandboxTool {
             }
         }
 
+        // ③ 路径解释分派：带沙箱前缀 → 项目根解析（历史行为）；否则 → 沙箱内相对解析
+        if self.has_sandbox_prefix(path) {
+            return self.resolve_relative(path);
+        }
+        self.resolve_sandbox_relative(path)
+    }
+
+    /// `path` 是否以某个沙箱目录的相对前缀开头（组件级比较，容忍 Windows 反斜杠分隔）。
+    ///
+    /// 先折叠 `.` 组件：`./x` 与 `x` 等价，但 `Path::starts_with` 逐组件比较时
+    /// 首组件 `CurDir` 会让 `./.peri/plans/x` 匹配不上前缀 `.peri/plans`，
+    /// 继而被误判为裸相对路径、嵌套落盘为 `<沙箱>/.peri/plans/x`。
+    fn has_sandbox_prefix(&self, path: &str) -> bool {
+        let normalized_owned = path.replace('\\', "/");
+        let normalized: PathBuf = Path::new(&normalized_owned)
+            .components()
+            .filter(|component| !matches!(component, Component::CurDir))
+            .collect();
+        self.allowed_dirs.iter().any(|dir| {
+            let dir = dir.trim_end_matches(['/', '\\']);
+            !dir.is_empty() && normalized.starts_with(Path::new(dir))
+        })
+    }
+
+    /// 按“沙箱内相对路径”解释：`report.md` → `<沙箱根>/report.md`。
+    /// 多沙箱按声明顺序依次尝试，全部失败返回最后一个错误。
+    fn resolve_sandbox_relative(&self, path: &str) -> Result<PathBuf, String> {
+        let mut last_err = None;
+        for dir in &self.allowed_dirs {
+            let base = dir.trim_end_matches(['/', '\\']);
+            let rel = if base.is_empty() {
+                path.to_string()
+            } else {
+                format!("{base}/{path}")
+            };
+            match self.resolve_relative(&rel) {
+                Ok(target) => return Ok(target),
+                Err(err) => last_err = Some(err),
+            }
+        }
+        Err(last_err.unwrap_or_else(|| {
+            format!(
+                "WriteSandbox: 路径 '{}' 无法解析到沙箱目录（沙箱列表为空）",
+                path
+            )
+        }))
+    }
+
+    /// 相对项目根解析 + 完整安全校验链（原 validate_path 主体）。
+    fn resolve_relative(&self, path: &str) -> Result<PathBuf, String> {
         let raw = Path::new(&self.cwd).join(path);
 
         // ③ 寻找最长存在祖先并 canonicalize + 沙箱校验，防止 create_dir_all
@@ -295,16 +355,17 @@ impl BaseTool for WriteSandboxTool {
             "properties": {
                 "file_path": {
                     "type": "string",
-                    "description": "The file path relative to the project root (within your sandbox).\
+                    "description": "The file path relative to the project root (e.g. '.peri/plans/report.md').\
+                     A bare relative path without the sandbox prefix (e.g. 'report.md') is also accepted and resolved inside the sandbox.\
                      Do NOT use absolute paths or '..'. Overwriting is allowed."
                 },
                 "content": {
                     "type": "string",
-                    "description": "The full content to write to the file. Either 'content' or 'from_draft' must be provided."
+                    "description": "The full content to write to the file. Required unless recovering a draft saved by a previous filesystem-stage write failure (see 'from_draft')."
                 },
                 "from_draft": {
                     "type": "string",
-                    "description": "A draft id returned in a previous SandboxWrite error message. Recover the failed write without resending content. Mutually exclusive with 'content'; reuse the original file_path."
+                    "description": "A 'draft_...' id from a previous SandboxWrite error that failed while writing to disk. Only filesystem-stage failures save drafts; path/parameter validation errors never do (provide 'content' again in that case). Mutually exclusive with 'content'; reuse the original file_path."
                 }
             },
             "required": ["file_path"]

@@ -626,6 +626,10 @@ pub async fn prepare_single_server(
         version: peer
             .peer_info()
             .and_then(|info| info.server_info.as_ref().map(|value| value.version.clone())),
+        connected_at: Some(peri_time::now_utc_rfc3339()),
+        protocol_version: peer
+            .peer_info()
+            .map(|info| info.protocol_version.as_str().to_string()),
         cache_version: None,
         peer: Some(peer.clone()),
         tools,
@@ -643,6 +647,8 @@ fn empty_handle() -> McpClientHandle {
     McpClientHandle {
         name: String::new(),
         version: None,
+        connected_at: None,
+        protocol_version: None,
         cache_version: None,
         peer: None,
         tools: Vec::<Tool>::new(),

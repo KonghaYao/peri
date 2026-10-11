@@ -12,6 +12,10 @@ use super::AcpTuiClient;
 mod cancel_tests;
 
 #[cfg(test)]
+#[path = "requests_caps_test.rs"]
+mod caps_tests;
+
+#[cfg(test)]
 #[path = "session_request_test.rs"]
 mod session_request_tests;
 
@@ -53,8 +57,9 @@ impl AcpTuiClient {
     ///
     /// TUI 内部 Mpsc 路径无协议 initialize 握手，host 默认以
     /// [`PeriCaps::all_enabled`] 兜底（含 11 条旧兜底 ui 明细）。本方法显式协商
-    /// caps：以 all_enabled 为基座、替换 `ui_commands` 为 TUI 实时明细，经
-    /// initialize 请求送达 host（`handle_request` "initialize" 分支 → `set_pending_caps`
+    /// caps：以 all_enabled 为基座、关闭 TUI 不消费的 `peri.oauth` 专用通道、
+    /// 替换 `ui_commands` 为 TUI 实时明细，经 initialize 请求送达 host
+    /// （`handle_request` "initialize" 分支 → `set_pending_caps`
     /// → 首个 session/new 的 `ensure_session_caps` 取协商值 → `send_available_commands_update`
     /// 把明细注册进注册表，投影回推刷新补全缓存）。
     ///
@@ -63,6 +68,12 @@ impl AcpTuiClient {
     /// 首 session 仍可用（R2 双写窗口防御）。
     pub async fn register_ui_commands(&self, specs: &[UiCommandSpec]) -> Result<(), AcpError> {
         let mut caps = PeriCaps::all_enabled();
+        // TUI 的 MCP OAuth 交互走 legacy `peri/agent_event` 通道
+        // （OauthNeeded/OauthCompleted…）+ `mcp/oauth_callback` 授权码回传，
+        // 不消费专用 `peri/oauth` 通道。声明 oauth=true 会让 host 请求面切到
+        // safe 契约：`mcp/oauth_start` 强制要求 flow_id、`mcp/oauth_callback`
+        // 直接拒绝授权码——TUI 的 [ 授权 ] 按钮会因缺 flow_id 被拒且无反馈。
+        caps.oauth = false;
         caps.ui_commands = specs.to_vec();
         let params = json!({
             "protocolVersion": 1,

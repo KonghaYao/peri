@@ -413,6 +413,8 @@ impl McpClientPool {
                     Arc::new(McpClientHandle {
                         name: name.clone(),
                         version: None,
+                        connected_at: None,
+                        protocol_version: None,
                         cache_version: None,
                         peer: None,
                         tools: vec![],
@@ -659,6 +661,10 @@ impl McpClientPool {
                             info.server_info.as_ref().map(|si| si.version.clone())
                         }),
                         cache_version: cache_version.clone(),
+                        connected_at: Some(peri_time::now_utc_rfc3339()),
+                        protocol_version: peer
+                            .peer_info()
+                            .map(|info| info.protocol_version.as_str().to_string()),
                         peer: Some(peer),
                         tools,
                         resources,

@@ -220,6 +220,13 @@ impl BaseTool for SubAgentTool {
             return Err("Error: missing required parameter prompt".into());
         };
 
+        // ── Fork 上下文门（启动前，同步与后台 fork 共用同一决策点）──
+        // 父会话上下文使用率高于上限时 fork 不可用：拒绝并引导改用非 fork
+        // 子 agent（subagent_type）或 resume。resume 分支已先返回，不经过本门。
+        if is_fork {
+            crate::subagent::fork::fork_context_usage_gate(ctx.context_usage)?;
+        }
+
         let current_messages = self.current_messages(ctx.messages);
 
         let is_mcp_agent = subagent_type

@@ -346,11 +346,11 @@ pub(crate) fn visit_mounted_panel(panel: MountedPanel) {
 }
 
 impl MountedPanel {
-    fn event(&self, event: Event) -> ratatui_kit::EventResult {
-        use super::super::{panel_handler, search_handler};
-        use ratatui_kit::EventResult;
-        let result = search_handler::handle_search_event(
-            event.clone(),
+    /// 只走 High handler（Discover 搜索框 / marketplace add）——弹窗让路守卫所在层。
+    fn search_event(&self, event: Event) -> ratatui_kit::EventResult {
+        use super::super::search_handler;
+        search_handler::handle_search_event(
+            event,
             None,
             self.active_tab,
             self.discover,
@@ -362,7 +362,13 @@ impl MountedPanel {
             self.operation,
             self.add_marketplace_input,
             self.add_marketplace_active,
-        );
+        )
+    }
+
+    fn event(&self, event: Event) -> ratatui_kit::EventResult {
+        use super::super::panel_handler;
+        use ratatui_kit::EventResult;
+        let result = self.search_event(event.clone());
         if matches!(result, EventResult::Consumed) {
             return result;
         }
@@ -569,6 +575,10 @@ fn mounted_late_timeout_response_cannot_clear_new_pending_ticket() {
 fn mounted_escape_cancels_only_client_wait_then_allows_panel_exit() {
     let _guard = SessionGuard::new();
     use crate::kit::atoms::{ACTIVE_PANEL, PluginViewTab};
+    // 前置条件：无弹窗占用前景——弹窗打开时 Esc 归弹窗（focus_router 目标优先级
+    // Popup > Panel），本用例断言的是无弹窗语义。原子在测试间共享，前序用例可能
+    // 留下 POPUP_KIND=Some（谁设谁清尚未收敛），故这里显式声明。
+    *crate::kit::atoms::POPUP_KIND.state().write() = None;
     for tab in [
         PluginViewTab::Installed,
         PluginViewTab::Discover,
@@ -778,4 +788,45 @@ fn mounted_unmanaged_or_ambiguous_mutations_report_reason_without_pending() {
             });
         }
     }
+}
+
+/// 回归（同类缺陷）：弹窗占用前景时，Discover 搜索框的 High handler 必须整体让路。
+/// 它与弹窗同为 `EventPriority::High` 且注册先于 `PopupOverlay`，抢键会让
+/// HITL/OAuth 等弹窗收不到输入。
+#[test]
+#[serial]
+fn popup_owns_keyboard_over_discover_search() {
+    use crate::kit::atoms::{ACTIVE_PANEL, POPUP_KIND, PluginViewTab, PopupKind};
+
+    struct PopupGuard(Option<PopupKind>);
+    impl Drop for PopupGuard {
+        fn drop(&mut self) {
+            *POPUP_KIND.state().write() = self.0;
+        }
+    }
+    let _popup_guard = PopupGuard(*POPUP_KIND.state().read());
+    *POPUP_KIND.state().write() = Some(PopupKind::Hitl);
+
+    mount_panel(|panel| {
+        *panel.active_tab.write() = PluginViewTab::Discover;
+        let panel_before = ACTIVE_PANEL.get();
+        for code in [
+            KeyCode::Char('a'),
+            KeyCode::Backspace,
+            KeyCode::Enter,
+            KeyCode::Esc,
+            KeyCode::Down,
+        ] {
+            assert_eq!(
+                panel.search_event(Event::Key(KeyEvent::new(code, KeyModifiers::NONE))),
+                ratatui_kit::EventResult::Ignored,
+                "{code:?} 必须留给弹窗"
+            );
+        }
+        assert!(
+            panel.discover.read().editor.text.is_empty(),
+            "字符不得进入搜索框"
+        );
+        assert_eq!(ACTIVE_PANEL.get(), panel_before, "Esc 不得关面板");
+    });
 }
