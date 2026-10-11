@@ -79,7 +79,20 @@ jobs:
                   mkdir -p dist/package
                   cp "target/${TARGET}/release/peri" dist/package/peri-beta
                   chmod +x dist/package/peri-beta
-                  tar -czf "dist/peri-beta-${PLATFORM}.tar.gz" -C dist/package peri-beta
+                  # 随包 workflow sidecar：内容身份 = 入库 dist 的 sha256 前 12 位，
+                  # 与非嵌入消费布局 `peri-resources/workflow/<内容身份>/` 对齐
+                  # （peri-workflow/src/runner/artifact.rs）。
+                  if command -v sha256sum >/dev/null 2>&1; then
+                      sidecar_id="$(sha256sum npm-packages/@peri-workflow/dist/peri-workflow.js | cut -d' ' -f1)"
+                  else
+                      sidecar_id="$(shasum -a 256 npm-packages/@peri-workflow/dist/peri-workflow.js | cut -d' ' -f1)"
+                  fi
+                  sidecar_id="${sidecar_id:0:12}"
+                  sidecar_dir="dist/package/peri-resources/workflow/${sidecar_id}"
+                  mkdir -p "${sidecar_dir}/dist"
+                  cp npm-packages/@peri-workflow/dist/peri-workflow.js "${sidecar_dir}/dist/peri-workflow.js"
+                  cp npm-packages/@peri-workflow/package.json "${sidecar_dir}/package.json"
+                  tar -czf "dist/peri-beta-${PLATFORM}.tar.gz" -C dist/package peri-beta peri-resources
                   (
                       cd dist
                       shasum -a 256 "peri-beta-${PLATFORM}.tar.gz" > "peri-beta-${PLATFORM}.tar.gz.sha256"
@@ -154,6 +167,11 @@ jobs:
             run:
                 shell: bash
         steps:
+            - name: Checkout repository
+              uses: actions/checkout@v7
+              with:
+                  persist-credentials: false
+
             - name: Download beta artifacts
               uses: actions/download-artifact@v4
               with:
@@ -165,7 +183,7 @@ jobs:
               run: |
                   for platform in linux-x86_64 macos-aarch64; do
                       (cd dist && sha256sum --check "peri-beta-${platform}.tar.gz.sha256")
-                      test "$(tar -tzf "dist/peri-beta-${platform}.tar.gz")" = peri-beta
+                      bash scripts/verify-workflow-sidecar.sh "dist/peri-beta-${platform}.tar.gz" peri-beta
                   done
                   (cd dist && sha256sum --check peri-beta-wasm32-unknown-emscripten.tar.gz.sha256)
                   test "$(tar -tzf dist/peri-beta-wasm32-unknown-emscripten.tar.gz)" = "$(printf 'peri-wasm.js\nperi_wasm.wasm')"
