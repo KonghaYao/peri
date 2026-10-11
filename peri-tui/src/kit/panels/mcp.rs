@@ -939,16 +939,44 @@ fn start_oauth(server_name: String) {
         };
         tokio::spawn(async move {
             let params = serde_json::json!({ "server_name": server_name, "sessionId":session_id });
-            if let Err(e) = client.send_raw_request("mcp/oauth_start", params).await {
-                tracing::warn!(error = %e, "mcp/oauth_start RPC failed");
-                notify(i18n::tr_args(
-                    "panel-mcp-oauth-start-failed",
-                    &[("error".into(), e.message.into())],
-                ));
+            match client.send_raw_request("mcp/oauth_start", params).await {
+                Err(e) => {
+                    tracing::warn!(error = %e, "mcp/oauth_start RPC failed");
+                    notify(i18n::tr_args(
+                        "panel-mcp-oauth-start-failed",
+                        &[("error".into(), e.message.into())],
+                    ));
+                }
+                Ok(response) => {
+                    if let Some(status) = oauth_start_failure_message(&response) {
+                        tracing::warn!(status = %status, "mcp/oauth_start not started");
+                        notify(i18n::tr_args(
+                            "panel-mcp-oauth-start-failed",
+                            &[("error".into(), status.into())],
+                        ));
+                    }
+                }
             }
         });
     } else {
         tracing::warn!(target: "mcp-panel", "ACP_CLIENT_HANDLE not set, oauth_start skipped");
+    }
+}
+
+/// `Ok` 响应的失败判定：host 在已有活跃授权流程时返回 `success=false`
+/// （status=conflict）而非 RPC 错误——只检查 `Err` 分支会让 [ 授权 ] 按钮
+/// 再次静默无反馈。返回需展示的 status（缺失时保底 `conflict`）。
+fn oauth_start_failure_message(response: &serde_json::Value) -> Option<String> {
+    if response.get("success").and_then(serde_json::Value::as_bool) == Some(false) {
+        Some(
+            response
+                .get("status")
+                .and_then(serde_json::Value::as_str)
+                .unwrap_or("conflict")
+                .to_string(),
+        )
+    } else {
+        None
     }
 }
 
@@ -1022,6 +1050,37 @@ mod tests {
     #[test]
     fn detail_button_row_counts_empty_url_value_line() {
         assert_eq!(detail_btn_row(&McpServerSummary::default()), 9);
+    }
+
+    /// `mcp/oauth_start` 的 Ok 响应失败判定：仅 `success=false`（conflict）触发
+    /// 提示；成功、缺失或非布尔 success 不提示；status 缺失时保底 "conflict"。
+    #[test]
+    fn oauth_start_failure_message_detects_conflict() {
+        assert_eq!(
+            super::oauth_start_failure_message(
+                &serde_json::json!({"success": false, "status": "conflict"})
+            )
+            .as_deref(),
+            Some("conflict")
+        );
+        assert_eq!(
+            super::oauth_start_failure_message(&serde_json::json!({"success": false})).as_deref(),
+            Some("conflict")
+        );
+        assert_eq!(
+            super::oauth_start_failure_message(
+                &serde_json::json!({"success": true, "status": "started"})
+            ),
+            None
+        );
+        assert_eq!(
+            super::oauth_start_failure_message(&serde_json::json!({})),
+            None
+        );
+        assert_eq!(
+            super::oauth_start_failure_message(&serde_json::json!({"success": "yes"})),
+            None
+        );
     }
 
     /// 鼠标命中的按钮行号必须与真实渲染出的按钮行一致：常量与渲染漂移时

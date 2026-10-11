@@ -10,7 +10,7 @@
 
 use peri_agent::tools::BaseTool;
 use serde_json::Value;
-use std::path::{Path, PathBuf};
+use std::path::{Component, Path, PathBuf};
 use std::sync::{Arc, Mutex};
 
 use super::draft::{draft_hint_zh, DraftStore};
@@ -193,9 +193,16 @@ impl WriteSandboxTool {
     }
 
     /// `path` 是否以某个沙箱目录的相对前缀开头（组件级比较，容忍 Windows 反斜杠分隔）。
+    ///
+    /// 先折叠 `.` 组件：`./x` 与 `x` 等价，但 `Path::starts_with` 逐组件比较时
+    /// 首组件 `CurDir` 会让 `./.peri/plans/x` 匹配不上前缀 `.peri/plans`，
+    /// 继而被误判为裸相对路径、嵌套落盘为 `<沙箱>/.peri/plans/x`。
     fn has_sandbox_prefix(&self, path: &str) -> bool {
         let normalized_owned = path.replace('\\', "/");
-        let normalized = Path::new(&normalized_owned);
+        let normalized: PathBuf = Path::new(&normalized_owned)
+            .components()
+            .filter(|component| !matches!(component, Component::CurDir))
+            .collect();
         self.allowed_dirs.iter().any(|dir| {
             let dir = dir.trim_end_matches(['/', '\\']);
             !dir.is_empty() && normalized.starts_with(Path::new(dir))

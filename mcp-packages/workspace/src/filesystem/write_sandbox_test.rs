@@ -139,6 +139,48 @@ async fn test_write_sandbox_bare_name_resolves_inside_sandbox() {
     assert_eq!(content, "# Report");
 }
 
+/// `./` 前缀的沙箱前缀路径与无前缀等价：`./.peri/plans/x.md` 应按项目根解析到
+/// `.peri/plans/x.md`。回归：CurDir 首组件曾使其匹配不上沙箱前缀，被误判为裸
+/// 相对路径后嵌套落盘为 `<沙箱>/.peri/plans/x.md` 且报告成功。
+#[tokio::test]
+async fn test_write_sandbox_dot_slash_prefix_resolves_project_root() {
+    let dir = tempfile::tempdir().unwrap();
+    let tool = make_tool(&dir, vec![".peri/plans"]);
+    let result = tool
+        .invoke(
+            serde_json::json!({"file_path": "./.peri/plans/report.md", "content": "# Plan"}),
+            peri_agent::tools::ToolContext::new(&[], "."),
+        )
+        .await
+        .unwrap();
+    assert!(result.contains("Wrote 1 line"), "应写入成功: {result}");
+    assert!(
+        dir.path().join(".peri/plans/report.md").exists(),
+        "应落到项目根 .peri/plans/report.md"
+    );
+    assert!(
+        !dir.path().join(".peri/plans/.peri").exists(),
+        "不应嵌套写入沙箱内"
+    );
+}
+
+/// 裸名带 `./` 前缀仍按沙箱内相对路径解释：`./report.md` → `<沙箱>/report.md`。
+#[tokio::test]
+async fn test_write_sandbox_bare_name_with_dot_slash_resolves_inside_sandbox() {
+    let dir = tempfile::tempdir().unwrap();
+    let tool = make_tool(&dir, vec!["sandbox"]);
+    let result = tool
+        .invoke(
+            serde_json::json!({"file_path": "./report.md", "content": "# Report"}),
+            peri_agent::tools::ToolContext::new(&[], "."),
+        )
+        .await
+        .unwrap();
+    assert!(result.contains("Wrote 1 line"), "应写入成功: {result}");
+    let content = std::fs::read_to_string(dir.path().join("sandbox/report.md")).unwrap();
+    assert_eq!(content, "# Report");
+}
+
 /// 子目录相对路径同样按沙箱内相对解释（agent prompt 历史示例 'subdir/report.md'）
 #[tokio::test]
 async fn test_write_sandbox_bare_subdir_resolves_inside_sandbox() {
