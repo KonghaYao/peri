@@ -9,7 +9,7 @@ use super::transaction::{target_key, with_target_lock, CommitError, SENTINEL_REJ
 const WRITE_FILE_DESCRIPTION: &str = include_str!("descriptions/write.md");
 const WRITE_IO_ERROR: &str = "Write failed while committing the file.";
 const DRAFT_UNKNOWN: &str =
-    "Draft is unknown or no longer available. Retry by providing content directly.";
+    "Draft is unknown or no longer available (path/parameter errors never save drafts). Retry by providing content directly.";
 const DRAFT_TARGET_MISMATCH: &str =
     "Draft belongs to a different file_path. Retry with the original file_path or content.";
 
@@ -182,11 +182,11 @@ impl BaseTool for WriteFileTool {
                 },
                 "content": {
                     "type": "string",
-                    "description": "The full content to write to the file. Either 'content' or 'from_draft' must be provided."
+                    "description": "The full content to write to the file. Required unless recovering a draft saved by a previous filesystem-stage write failure (see 'from_draft')."
                 },
                 "from_draft": {
                     "type": "string",
-                    "description": "A draft id returned in a previous Write error message. Recover the failed write without resending content. Mutually exclusive with 'content'; reuse the original file_path."
+                    "description": "A 'draft_...' id from a previous Write error that failed while writing to disk. Only filesystem-stage failures save drafts; path/parameter validation errors never do (provide 'content' again in that case). Mutually exclusive with 'content'; reuse the original file_path."
                 },
                 "append": {
                     "type": "boolean",

@@ -100,8 +100,10 @@ async fn test_write_sandbox_absolute_rejected() {
     assert!(err.contains("绝对"), "错误消息应说明拒绝原因: {}", err);
 }
 
+/// 无沙箱前缀的相对路径按“沙箱内相对路径”解释（历史失败样本：LLM 写 'other/outside.txt'
+/// 曾被直接拒绝；现在解析为 <沙箱根>/other/outside.txt，仍约束在沙箱内）。
 #[tokio::test]
-async fn test_write_sandbox_outside_dir_rejected() {
+async fn test_write_sandbox_bare_relative_path_resolves_inside_sandbox() {
     let dir = tempfile::tempdir().unwrap();
     let tool = make_tool(&dir, vec!["sandbox"]);
     let result = tool
@@ -109,14 +111,86 @@ async fn test_write_sandbox_outside_dir_rejected() {
             serde_json::json!({"file_path": "other/outside.txt", "content": "nope"}),
             peri_agent::tools::ToolContext::new(&[], "."),
         )
-        .await;
-    assert!(result.is_err(), "沙箱外路径应被拒绝");
-    let err = result.unwrap_err().to_string();
+        .await
+        .unwrap();
+    assert!(result.contains("Wrote 1 line"), "应写入成功: {result}");
+    let content = std::fs::read_to_string(dir.path().join("sandbox/other/outside.txt")).unwrap();
+    assert_eq!(content, "nope");
+}
+
+/// 裸文件名（无沙箱前缀）按沙箱内相对路径解释——历史高失败率场景的回归
+/// （explorer/verification subagent 按 agent prompt 写 'report.md' 曾被拒）。
+#[tokio::test]
+async fn test_write_sandbox_bare_name_resolves_inside_sandbox() {
+    let dir = tempfile::tempdir().unwrap();
+    let tool = make_tool(&dir, vec!["sandbox"]);
+    let result = tool
+        .invoke(
+            serde_json::json!({"file_path": "report.md", "content": "# Report"}),
+            peri_agent::tools::ToolContext::new(&[], "."),
+        )
+        .await
+        .unwrap();
     assert!(
-        err.contains("sandbox") || err.contains("沙箱"),
-        "错误消息应提示沙箱限制: {}",
-        err
+        result.contains("Wrote 1 line"),
+        "裸文件名应写入成功: {result}"
     );
+    let content = std::fs::read_to_string(dir.path().join("sandbox/report.md")).unwrap();
+    assert_eq!(content, "# Report");
+}
+
+/// 子目录相对路径同样按沙箱内相对解释（agent prompt 历史示例 'subdir/report.md'）
+#[tokio::test]
+async fn test_write_sandbox_bare_subdir_resolves_inside_sandbox() {
+    let dir = tempfile::tempdir().unwrap();
+    let tool = make_tool(&dir, vec!["sandbox"]);
+    tool.invoke(
+        serde_json::json!({"file_path": "sub/design.md", "content": "# Design"}),
+        peri_agent::tools::ToolContext::new(&[], "."),
+    )
+    .await
+    .unwrap();
+    let content = std::fs::read_to_string(dir.path().join("sandbox/sub/design.md")).unwrap();
+    assert_eq!(content, "# Design");
+}
+
+/// 多沙箱：裸路径按声明顺序落到第一个沙箱
+#[tokio::test]
+async fn test_write_sandbox_bare_name_uses_first_sandbox() {
+    let dir = tempfile::tempdir().unwrap();
+    let tool = make_tool(&dir, vec!["plans", "output"]);
+    tool.invoke(
+        serde_json::json!({"file_path": "x.md", "content": "v"}),
+        peri_agent::tools::ToolContext::new(&[], "."),
+    )
+    .await
+    .unwrap();
+    assert!(dir.path().join("plans/x.md").exists(), "应落到第一个沙箱");
+    assert!(
+        !dir.path().join("output/x.md").exists(),
+        "不应落到第二个沙箱"
+    );
+}
+
+/// fallback 解释同样受 symlink 逃逸防护约束
+#[cfg(unix)]
+#[tokio::test]
+async fn test_write_sandbox_bare_path_symlink_escape_rejected() {
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::create_dir_all(dir.path().join("outside_dir")).unwrap();
+    let tool = make_tool(&dir, vec!["sandbox"]);
+    std::os::unix::fs::symlink(
+        dir.path().join("outside_dir"),
+        dir.path().join("sandbox/sub"),
+    )
+    .unwrap();
+    let result = tool
+        .invoke(
+            serde_json::json!({"file_path": "sub/evil.txt", "content": "bypass"}),
+            peri_agent::tools::ToolContext::new(&[], "."),
+        )
+        .await;
+    assert!(result.is_err(), "fallback 解释下 symlink 逃逸仍应被拒绝");
 }
 
 #[tokio::test]
@@ -236,10 +310,10 @@ fn test_write_sandbox_auto_create_dir() {
 async fn test_write_sandbox_error_displays_relative_dirs() {
     let dir = tempfile::tempdir().unwrap();
     let tool = make_tool(&dir, vec!["plans"]);
-    // 裸文件名——已有祖先（cwd）不在沙箱目录内
+    // '..' 穿越被拒——错误消息中的允许目录应为原始相对路径
     let result = tool
         .invoke(
-            serde_json::json!({"file_path": "bare.md", "content": "test"}),
+            serde_json::json!({"file_path": "plans/../bare.md", "content": "test"}),
             peri_agent::tools::ToolContext::new(&[], "."),
         )
         .await;
