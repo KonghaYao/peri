@@ -68,7 +68,7 @@ typed schema、默认值、领域合并、scope/revision/explain/update 归
 | 工具 trait | `BaseTool::invoke_output`（默认 legacy `execution=None`）；`ToolOutput::projected_text` / `bounded_text`（live/transcript 共用有界投影）；`ToolOutput` / `ToolExecutionEvidence` / `ToolExecutionStatus`；`is_direct`（默认 false）；`context_retention`（默认 Preserve）；`timeout`（默认 120s）；`aliases`；`output_char_limit`；`prefers_persist`；`title`/`namespace`；`tool_description` 组装 |
 | 描述契约 | `ToolDefinition`（线上 LLM 投影）；`ToolDescription`（title/namespace 仅进程内与提示词层）；`derive_title_from_name`（CamelCase/snake_case 拆词） |
 | 压缩保留策略 | `ContextRetention`：Preserve/StateBearing/SideEffectReceipt/Recomputable |
-| 只读上下文 | `ToolContext`（messages + cwd 只读借用）；`EffectiveToolDispatcher::dispatch_output`（typed wrapper seam）；Todo 契约 `TodoStatus`/`TodoItem`（与 event.rs 同构但独立定义） |
+| 只读上下文 | `ToolContext`（messages + cwd 只读借用；`context_usage` = dispatch 时刻会话上下文用量快照 `ContextUsage{used_tokens, context_window}`，窗口为 0 时 `percent()` 无定义）；`EffectiveToolDispatcher::dispatch_output`（typed wrapper seam）；Todo 契约 `TodoStatus`/`TodoItem`（与 event.rs 同构但独立定义） |
 
 ### session（src/session.rs + 私有 session/ 子模块）
 

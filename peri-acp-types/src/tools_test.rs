@@ -14,6 +14,28 @@ fn tool_context_keeps_model_call_identity_independent_from_invocation() {
     assert!(!context.cancellation.is_cancelled());
 }
 
+#[test]
+fn context_usage_percent_uses_tokens_over_window() {
+    let context = ToolContext::new(&[], "/tmp");
+    assert!(context.context_usage.is_none());
+    let usage = ContextUsage {
+        used_tokens: 75_000,
+        context_window: 100_000,
+    };
+    assert_eq!(usage.percent(), Some(75.0));
+    let context = context.with_context_usage(Some(usage));
+    assert_eq!(context.context_usage, Some(usage));
+    // 窗口为 0 时使用率无定义
+    assert_eq!(
+        ContextUsage {
+            used_tokens: 1,
+            context_window: 0
+        }
+        .percent(),
+        None
+    );
+}
+
 // -- ToolDescription serde roundtrip（P0 数据结构序列化） ----------------------
 
 #[test]
