@@ -762,6 +762,50 @@ fn test_phase_summary_duration_is_wall_clock_not_agent_sum() {
     );
 }
 
+/// [回归测试] 相位摘要顺序 = 引擎相位顺序（`PhaseStarted` 到达序），无相位事件的
+/// 归组垫后；不得随 `HashMap` 迭代序抖动（2026-10-11 真实 run 里 Digest 排在
+/// Recon 之前）。
+#[test]
+fn test_phase_summaries_follow_engine_phase_order() {
+    let store = make_store();
+    let run_id = "phase-order";
+    store.apply_event(&ProgressEvent::RunStarted {
+        run_id: run_id.into(),
+        workflow_name: "wf".into(),
+        meta: None,
+    });
+    let mut agent_id = 1;
+    for phase in ["Recon", "Digest", "Fix"] {
+        store.apply_event(&ProgressEvent::PhaseStarted {
+            run_id: run_id.into(),
+            phase: phase.into(),
+        });
+        for _ in 0..3 {
+            store.apply_event(&ProgressEvent::AgentStarted {
+                run_id: run_id.into(),
+                agent_id,
+                label: None,
+                phase: Some(phase.into()),
+            });
+            agent_id += 1;
+        }
+    }
+    // 无 `phase()` 的 agent 落在 workflow_name 桶：排在引擎相位之后。
+    store.apply_event(&ProgressEvent::AgentStarted {
+        run_id: run_id.into(),
+        agent_id,
+        label: None,
+        phase: None,
+    });
+
+    let names: Vec<String> = store
+        .get_phase_summaries(run_id)
+        .into_iter()
+        .map(|summary| summary.name)
+        .collect();
+    assert_eq!(names, vec!["Recon", "Digest", "Fix", "wf"]);
+}
+
 // ─── run 索引排序与观察者锁 ─────────────────────────────────
 
 #[test]

@@ -507,6 +507,11 @@ impl WorkflowProgressStore {
     /// 时刻差），并行相位因此重合而非相加；无相位边界事件（resume 命中、引擎未
     /// 发相位事件、无 `phase()` 的 agent 归组）时为 `None`，不回落成 agent 时长
     /// 求和（2026-10-11 issue 缺陷 3）。
+    ///
+    /// **顺序** = 引擎相位顺序（`run.phases` 的 `PhaseStarted` 到达序）；不在该
+    /// 列表里的归组（无 `phase()` 的 agent 落在 workflow_name 桶）按名排序垫后。
+    /// 不得依赖 `HashMap` 迭代序：那是随机的，用户可见的相位行会乱序
+    /// （2026-10-11 真实 run 里 Digest 排在 Recon 之前）。
     pub fn get_phase_summaries(&self, run_id: &str) -> Vec<PhaseSummary> {
         let runs = self.runs.read();
         let Some(tracked) = runs.get(run_id) else {
@@ -515,6 +520,12 @@ impl WorkflowProgressStore {
         let run = &tracked.progress;
         let started_agents = &tracked.started_agents;
         let phase_wall_ms = &tracked.phase_wall_ms;
+        let engine_order: HashMap<&str, usize> = run
+            .phases
+            .iter()
+            .enumerate()
+            .map(|(index, phase)| (phase.title.as_str(), index))
+            .collect();
         let mut phase_map: std::collections::HashMap<String, (usize, u64)> =
             std::collections::HashMap::new();
         for agent in run.agents.values() {
@@ -528,7 +539,7 @@ impl WorkflowProgressStore {
                     .unwrap_or(0);
             }
         }
-        phase_map
+        let mut summaries: Vec<PhaseSummary> = phase_map
             .into_iter()
             .map(|(name, (agent_count, token_count))| PhaseSummary {
                 duration_ms: phase_wall_ms
@@ -539,7 +550,22 @@ impl WorkflowProgressStore {
                 agent_count,
                 token_count,
             })
-            .collect()
+            .collect();
+        summaries.sort_by(|left, right| {
+            let left_rank = engine_order
+                .get(left.name.as_str())
+                .copied()
+                .unwrap_or(usize::MAX);
+            let right_rank = engine_order
+                .get(right.name.as_str())
+                .copied()
+                .unwrap_or(usize::MAX);
+            // 同秩（含都无相位事件）时按名排序，保证任意输入下顺序都确定。
+            left_rank
+                .cmp(&right_rank)
+                .then_with(|| left.name.cmp(&right.name))
+        });
+        summaries
     }
 
     /// 获取指定 agent 的 phase（供 journal 注入）。
