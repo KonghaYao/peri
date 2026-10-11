@@ -301,7 +301,7 @@ Git postcondition 只比较 Workflow 前后发生变化的路径，已有且未�
 - **artifact 解析**（`runner/artifact.rs`）：显式注入目录（`PERI_WORKFLOW_ARTIFACT_DIR`）→ 本机缓存 `~/.peri/workflow/<version>/<内容身份>/` → 随包 sidecar（可执行文件旁 `peri-resources/workflow/<内容身份>/`）。校验包身份（name/version/main/协议/buildId）、入口不越界与入口 SHA-256；本地来源均不可用时默认离线 fail closed。
 - **网络获取**：仅显式 `PERI_WORKFLOW_ALLOW_NPX_FALLBACK=1` 允许一次固定版本 registry 获取，获取内容仍须通过同一身份与摘要校验；不存在直接执行网络内容的路径。
 - **红线**：Rust 侧零 JS 嵌入（`ARC-WORKFLOW-DIST-001`，[architecture-contracts.md](../standards/architecture-contracts.md)）；分发缺口不得以嵌入 JS 产物解决，表述以 [workflow-mcp.md](workflow-mcp.md) §2.3 为准。
-- **引擎包**：自述协议与 CLI 子命令（`read`/`list`/`validate`/`boundary`/`adlc`）以 `npm-packages/@peri-workflow/{README,DESIGN}.md` 为准；`dist/` 入库并作为发行内容事实源。
+- **引擎包**：自述协议与 CLI 子命令（`read`/`list`/`validate`/`boundary`/`adlc`）以 `npm-packages/@peri-workflow/{README,DESIGN}.md` 为准；`dist/` 为构建产物（`bun run build` 可复现字节）、不入库，由发布链在打包前构建并随发布包携带，消费方仍按固定 SHA-256 pin 校验。
 
 ---
 
