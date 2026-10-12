@@ -19,3 +19,36 @@ nextest-version = "0.9.85"
 # 排除其他包里同名的测试。这些用例需要真实 SDK / 外部环境，在 CI 中不执行
 # （范围与迁移前 `cargo test -- --skip ...` 一致）。
 default-filter = "not (package(=peri-acp) & test(host::execution_admission_jsonl) | package(=peri-acp) & test(host::scheduled_admission) | package(=peri-tui) & test(sdk_execution::tests::real_sdk) | package(=peri-middlewares) & test(subagent::tool) | package(=peri-middlewares) & test(mcp::workspace_recovery_tests) | package(=peri-middlewares) & test(mcp::workspace_builtin_tests::bridge_accepts_workspace_owned_task_handle) | package(=peri-middlewares) & test(mcp::tool_bridge::tests::builtin_tool_call_surfaces_timeout_error_after_bridge_deadline))"
+
+# 互斥组：把串行额度收窄到「迁移前靠 --test-threads=1 隐式串行」的那些测试，
+# 而不是整个测试运行。其余测试按正常的 num-cpus 额度并行。
+#
+# 迁移前的串行范围与原因：peri-middlewares 的 lib 单元测试，以及 5 个 MCP 能力包的
+# 全部 target。libtest 会把同一二进制内的测试放在线程里并发执行，这些用例改写进程级
+# 全局状态（std::env 的 HOME / PERI_* 、全局 config path 单例、TUI 全局 atom、
+# OnceLock / 静态 Mutex），只能靠 --test-threads=1 兜住。
+#
+# nextest 是一个测试一个进程，上述进程内状态不再跨测试共享，这类冲突在结构上消失；
+# 仓库中所有 `#[serial]` / `serial_test::serial` 标注保护的都是这一类状态，因此
+# 不需要为它们建组。跨进程共享的资源不受进程隔离保护，但目前的实现是文件排他锁
+# （peri_mcp_common::process_env::lock()，基于 fs2），在 nextest 下依然有效。
+#
+# 因此这里不下「已经证明无冲突」的结论，而是先复刻迁移前的范围：与迁移前等价、
+# 零回归；同时记录迁移新增的并行面 —— nextest 允许不同测试二进制的用例同时运行
+# （迁移前 cargo test 逐个二进制串行执行、只在二进制内部按线程并发）。待实测候选：
+#   - mcp-packages/common 的 shell 类测试、mcp-packages/workspace 的非 terminal 测试
+#   - mcp-packages/config 的全局 CLIENT 单例、mcp-packages/cron 的时间敏感用例
+#   - peri-process/tests/pty_isolation.rs、peri-workflow 的真实 node 用例
+#   - 同一包内 lib 二进制与多个集成测试二进制之间的重叠
+# 收窄条件：某包连续三次三平台通过、且没有新增重试配置，即可移出组；出现一次竞态
+# 证据（而不是推测）则把对应测试并入组，并把证据记在此处。
+[test-groups]
+serial-process-state = { max-threads = 1 }
+
+[[profile.default.overrides]]
+filter = 'package(=peri-middlewares) & kind(lib)'
+test-group = 'serial-process-state'
+
+[[profile.default.overrides]]
+filter = 'package(=peri-mcp-common) | package(=peri-mcp-web) | package(=peri-mcp-artifact) | package(=peri-mcp-cron) | package(=peri-mcp-workspace)'
+test-group = 'serial-process-state'

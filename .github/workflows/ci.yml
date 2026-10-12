@@ -155,17 +155,20 @@ jobs:
                   ./scripts/cargo-rmcp-patched.sh nextest run --locked --workspace --no-tests=fail
                   -E 'package(=peri-tui) & (kind(lib) | kind(bin) | binary(=meta_session_cli))'
 
-            # 涉及进程级全局状态的测试保持迁移前的串行语义（原 --test-threads=1）。
+            # 需要串行的测试不再依靠「整步 --test-threads=1」，而是 .config/nextest.toml 的
+            # serial-process-state 互斥组（max-threads = 1）：串行只施加在这些测试上，
+            # 组之外的用例维持正常并行额度，串行范围也不再随步骤划分漂移。
             - name: Run middleware unit tests (serial, excluding E2E)
               shell: bash
               run: >-
-                  ./scripts/cargo-rmcp-patched.sh nextest run --locked --workspace --no-tests=fail --test-threads=1
+                  ./scripts/cargo-rmcp-patched.sh nextest run --locked --workspace --no-tests=fail
                   -E 'package(=peri-middlewares) & kind(lib)'
 
+            # 5 个 MCP 能力包的全部 target 同属 serial-process-state 互斥组。
             - name: Run MCP capability tests (serial)
               shell: bash
               run: >-
-                  ./scripts/cargo-rmcp-patched.sh nextest run --locked --workspace --no-tests=fail --test-threads=1
+                  ./scripts/cargo-rmcp-patched.sh nextest run --locked --workspace --no-tests=fail
                   -E 'package(=peri-mcp-common) | package(=peri-mcp-web) | package(=peri-mcp-artifact)
                   | package(=peri-mcp-cron) | package(=peri-mcp-workspace)'
 
