@@ -734,10 +734,15 @@ async fn summary_request_single_attempt_budget_never_recovers() {
     assert!(!transcript.flags(original).excluded);
 }
 
-/// [回归测试] 追加草稿后装不下的请求不再发送，也不裁剪原上下文。
+/// [回归测试] 估算装不下不是拒绝压缩的理由：请求照发，由恢复循环续写并合并成一份文本。
+///
+/// 旧实现会在启动前拒绝发送（`CompactSummaryInputExceeded`），而 Full 只在高压
+/// 触发，导致压缩在最需要它的时刻必然失败并终止本轮。
 #[tokio::test]
-async fn summary_request_stops_before_the_request_that_does_not_fit() {
-    let mut transcript = MessageTranscript::new();
+async fn summary_request_over_window_budget_is_still_sent_and_merged() {
+    let bound = TestSession::open().await;
+    let mut transcript =
+        MessageTranscript::new().with_persistence(bound.resources(), bound.thread_id.clone());
     let original = transcript.append(BaseMessage::human("ORIGINAL_TASK"));
     // 200_000 字符 ≈ 50_000 token，远超 20_000 的窗口预算。
     let draft = "x".repeat(200_000);
@@ -749,35 +754,26 @@ async fn summary_request_stops_before_the_request_that_does_not_fit() {
         Some(4_096),
         Some(20_000),
     );
-    let error = full_compact_inner(
+    let result = full_compact_inner(
         &mut transcript,
         Some(&model),
         &CompactConfig::default(),
         "/tmp",
     )
     .await
-    .unwrap_err();
+    .unwrap();
+    let summary = result.summary.expect("续写合并后必须产出摘要");
     assert!(
-        matches!(
-            error,
-            AgentError::CompactSummaryInputExceeded {
-                request_index: 2,
-                output_reserve: 4_096,
-                safety_margin: 5_000,
-                context_window: 20_000,
-                ..
-            }
-        ),
-        "{error:?}"
+        summary.ends_with(" and last"),
+        "{}",
+        &summary[..80.min(summary.len())]
     );
     assert_eq!(
         model.requests.lock().unwrap().len(),
-        1,
-        "装不下的请求不得发送"
+        2,
+        "装不下的请求必须照发并续写，不能在启动前拒绝"
     );
-    assert_eq!(model.responses.lock().unwrap().len(), 1);
-    assert!(!transcript.flags(original).excluded);
-    assert_eq!(transcript.visible_model_messages().unwrap().len(), 1);
+    assert!(transcript.flags(original).excluded);
 }
 
 /// [回归测试] 摘要元数据无法解析时显式跳过检查，不冒用主模型窗口、不伪造限额。
@@ -787,7 +783,7 @@ async fn summary_request_with_unknown_metadata_keeps_provider_defaults() {
     let mut transcript =
         MessageTranscript::new().with_persistence(bound.resources(), bound.thread_id.clone());
     let original = transcript.append(BaseMessage::human("ORIGINAL_TASK"));
-    // 有窗口但没有输出上限 → 无法解析输出预留，预算检查记为 unknown。
+    // 无输出上限（provider 未声明）→ 请求沿用 provider 默认，不被改写。
     let model = SummaryModel::with_budget(
         [
             response("<summary>first", StopReason::MaxTokens),

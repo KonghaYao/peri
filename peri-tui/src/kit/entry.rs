@@ -546,6 +546,10 @@ pub async fn run_kit_fullscreen(
         DisableBracketedPaste
     );
 
+    // 5b. 退出提示——fullscreen 返回时 ratatui-kit 已 restore 终端（RestoreGuard），
+    //     此处 stdout 只归本线程写；无会话（setup 取消、离线模式）不打印。
+    crate::kit::exit_hint::print_resume_hint();
+
     // 6. 退出前触发 shutdown，让后台任务干净退出
     shutdown.cancel();
 

@@ -57,12 +57,6 @@ const SUMMARY_REGENERATION_PROMPT: &str = "Your previous response contained no u
 complete summary: output only <summary>...</summary>, with no analysis or preamble. Finish every priority section from \
 the instructions above and close the summary within the reduced target. Do not call tools.";
 
-/// 摘要恢复请求的固定安全余量。
-///
-/// 这里的 token 数是 `crate::agent::token` 的字符启发式估算，不是 provider
-/// usage；协议开销与语言密度仍是近似边界，因此检查必须留出余量，不能当作精确值。
-const SUMMARY_INPUT_SAFETY_MARGIN_TOKENS: u32 = 5_000;
-
 // ─── Full Compact ───────────────────────────────────────────────────────────────
 
 /// Full Compact 内部实现
@@ -277,6 +271,9 @@ impl RecoveryConversation {
 /// 有界恢复循环：每次 Full 只允许 `summary_max_requests` 次逻辑生成。
 ///
 /// 取消、配置错误、provider 重试耗尽与持久化失败都不在这里重开预算。
+/// 这里不做「请求装不下就拒绝发送」的前置拦截：摘要请求的输入是历史本身，
+/// 装不下时正确的做法是发出请求并由 provider / 截断驱动恢复循环续写，而不是
+/// 在 compaction 最需要的时刻拒绝压缩（拒绝会让高压 turn 直接终止）。
 async fn complete_summary(
     llm: &dyn peri_model::Model,
     prefix: Vec<ModelMessage>,
@@ -284,8 +281,6 @@ async fn complete_summary(
     budget: SummaryBudget,
     mut conversation: RecoveryConversation,
 ) -> AgentResult<String> {
-    // 摘要模型自己的已解析窗口；无法解析时预算检查显式记为 unknown。
-    let context_window = llm.context_window();
     // 历史长度沿用 Reason 侧的同一 chars/4 估算；恢复片段与提示逐次计入。
     let history_tokens = crate::agent::token::estimate_request_tokens(visible, &[]);
     let mut request_index = 0u32;
@@ -324,7 +319,6 @@ async fn complete_summary(
         let next_index = request_index + 1;
         let estimated_input_tokens =
             history_tokens.saturating_add(estimate_dialog_tokens(&conversation.messages));
-        check_input_budget(next_index, estimated_input_tokens, &budget, context_window)?;
         let request = budget.apply(conversation.request(&prefix));
         tokio::task::yield_now().await;
         request_index = next_index;
@@ -388,49 +382,6 @@ async fn complete_summary(
             }
         }
     }
-}
-
-/// 每次派生请求前的同源预算检查。
-///
-/// 上限齐全时拒绝装不下的请求（不裁剪原始上下文、工具配对或用户约束）；任一
-/// 元数据无法解析时显式记为 `budget_check=unknown`，保留 provider 默认行为。
-fn check_input_budget(
-    request_index: u32,
-    estimated_input_tokens: u64,
-    budget: &SummaryBudget,
-    context_window: Option<u32>,
-) -> AgentResult<()> {
-    let (Some(context_window), Some(output_reserve)) = (context_window, budget.output_limit) else {
-        debug!(
-            request_index,
-            budget_check = "unknown",
-            input_tokens_estimate = estimated_input_tokens,
-            output_token_limit = ?budget.output_limit,
-            context_window = ?context_window,
-            "Full Compact summary request budget check skipped: resolved metadata is incomplete"
-        );
-        return Ok(());
-    };
-    let required = estimated_input_tokens
-        .saturating_add(u64::from(output_reserve))
-        .saturating_add(u64::from(SUMMARY_INPUT_SAFETY_MARGIN_TOKENS));
-    if required > u64::from(context_window) {
-        warn!(
-            request_index,
-            input_tokens_estimate = estimated_input_tokens,
-            output_reserve = output_reserve,
-            context_window,
-            "Full Compact summary request does not fit the compact model window; not sending it"
-        );
-        return Err(AgentError::CompactSummaryInputExceeded {
-            request_index,
-            request_tokens: estimated_input_tokens,
-            output_reserve,
-            safety_margin: SUMMARY_INPUT_SAFETY_MARGIN_TOKENS,
-            context_window,
-        });
-    }
-    Ok(())
 }
 
 /// 摘要指令：模板 + 本次声明的长度目标。

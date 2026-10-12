@@ -117,18 +117,6 @@ pub enum AgentError {
         last_reason: SummaryRecoveryReason,
     },
 
-    /// 摘要派生请求本身超出摘要模型的已知上下文窗口：不发送请求、不裁剪历史。
-    ///
-    /// 这是可区分的预算不足，不是 provider 或模型输出失败。
-    #[error("Full Compact summary request {request_index} needs {request_tokens} input tokens plus {output_reserve} output reserve ({safety_margin} margin) but the compact model window is {context_window}. The original history is unchanged.")]
-    CompactSummaryInputExceeded {
-        request_index: u32,
-        request_tokens: u64,
-        output_reserve: u32,
-        safety_margin: u32,
-        context_window: u32,
-    },
-
     #[error("Full Compact failed after {attempts} attempts while context usage is {context_tokens}/{context_window} tokens. The turn was stopped before another model request; retry or change the compact model.")]
     CompactRetriesExhausted {
         attempts: u32,
@@ -515,7 +503,6 @@ impl AgentError {
             Self::CompactSummaryBudgetInvalid { .. } => "compact_summary_budget_invalid",
             Self::CompactIncompleteResponse { .. } => "compact_incomplete_response",
             Self::CompactRecoveryExhausted { .. } => "compact_recovery_exhausted",
-            Self::CompactSummaryInputExceeded { .. } => "compact_summary_input_exceeded",
             Self::CompactRetriesExhausted { .. } => "compact_retries_exhausted",
             Self::CompactBudgetUnrecovered { .. } => "compact_budget_unrecovered",
             Self::Other(_) => "other",
@@ -550,14 +537,6 @@ impl AgentError {
                 last_reason,
             } => format!(
                 "Full Compact left the original history unchanged after {attempts} summary attempts ({last_reason}). This turn stopped before another model request; no background retry is running. Retry, or change the compact model."
-            ),
-            Self::CompactSummaryInputExceeded {
-                request_index,
-                request_tokens,
-                context_window,
-                ..
-            } => format!(
-                "Full Compact summary request {request_index} ({request_tokens} input tokens) exceeds the compact model context window ({context_window}). The original history is unchanged; reduce retained context or use a larger compact model context window."
             ),
             Self::Other(error) => format!("{error:#}"),
             Self::StreamRecoveryExhausted { attempts, source } => {
