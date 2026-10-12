@@ -628,6 +628,6 @@ async fn test_nested_analysis_only_response_cannot_replace_history() {
     );
     assert!(matches!(
         result,
-        Err(AgentError::CompactRetriesExhausted { attempts: 3, .. })
+        Err(AgentError::CompactRecoveryExhausted { attempts: 2, .. })
     ));
 }

@@ -203,7 +203,7 @@ impl TokenTracker {
 
 // 编码后的字节数不是媒体 token 成本；缺少尺寸/页数和 provider tokenizer 时，
 // 每个二进制块只放一个固定预算占位。此值不是成本上限，实际 usage 仍为权威。
-const BINARY_MEDIA_ESTIMATED_TOKENS: u64 = 1_024;
+pub(crate) const BINARY_MEDIA_ESTIMATED_TOKENS: u64 = 1_024;
 
 /// 无 tokenizer 时按文字和有界媒体占位估算请求内容。它用于提前压缩，
 /// 不替代 provider usage；媒体尺寸/页数、协议开销和语言密度仍是近似边界。
