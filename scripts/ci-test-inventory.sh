@@ -108,7 +108,13 @@ required_suites=(
     'peri-middlewares:lib:*'
 )
 
-metadata="$(cargo metadata --no-deps --format-version 1)"
+# metadata 经临时文件传给 Python，不作为命令行参数：本仓库的 workspace 已让
+# `cargo metadata --no-deps` 输出约 148KB，超过 Linux 的单字符串上限
+# （MAX_ARG_STRLEN = 128KB），直接传参会 E2BIG（Argument list too long）；
+# 环境变量受同一上限约束，故两者都不用。
+metadata_file="$(mktemp)"
+trap 'rm -f "$metadata_file"' EXIT
+cargo metadata --no-deps --format-version 1 > "$metadata_file"
 
 WORKFLOW="$workflow" \
 EXCLUDED_SET="$(printf '%s\n' "${workspace_excluded[@]}")" \
@@ -116,13 +122,14 @@ INCLUDES="$(printf '%s\n' "${step_includes[@]}")" \
 DOCTEST_EXCLUDED="$(printf '%s\n' "${doctest_excluded[@]}")" \
 REQUIRED="$(printf '%s\n' "${required_suites[@]}")" \
 AS_JSON="$as_json" \
-python3 - "$metadata" <<'PY'
+python3 - "$metadata_file" <<'PY'
 import json
 import os
 import re
 import sys
 
-meta = json.loads(sys.argv[1])
+with open(sys.argv[1], encoding="utf-8") as handle:
+    meta = json.load(handle)
 workflow_path = os.environ["WORKFLOW"]
 workspace_excluded = set(os.environ["EXCLUDED_SET"].split())
 include_entries = [e for e in os.environ["INCLUDES"].split()]
