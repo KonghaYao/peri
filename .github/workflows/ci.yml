@@ -18,8 +18,38 @@ env:
     CARGO_PROFILE_TEST_DEBUG: "0"
 
 jobs:
+    # 变更分类：只有全部受影响路径都落在「已确认不影响构建与测试」的文档白名单内，
+    # 才跳过 Rust 三平台任务。判定规则与白名单见 scripts/ci-classify-changes.sh。
+    changes:
+        name: Classify changes
+        runs-on: ubuntu-latest
+        timeout-minutes: 5
+        outputs:
+            docs_only: ${{ steps.classify.outputs.docs_only }}
+            reason: ${{ steps.classify.outputs.reason }}
+        steps:
+            - name: Checkout repository
+              uses: actions/checkout@v7
+              with:
+                  # 分类要比较 base..head 的实际 diff。默认浅克隆拿不到 base 提交，
+                  # 那种情况下分类会回退成完整验证（安全，只是不省）。
+                  fetch-depth: 0
+                  persist-credentials: false
+
+            - name: Classify changed paths
+              id: classify
+              env:
+                  EVENT_NAME: ${{ github.event_name }}
+                  PR_BASE_SHA: ${{ github.event.pull_request.base.sha }}
+                  PUSH_BEFORE_SHA: ${{ github.event.before }}
+                  CI_HEAD_SHA: ${{ github.sha }}
+              run: bash scripts/ci-classify-changes.sh
+
     build:
         name: Build (${{ matrix.os }})
+        needs: changes
+        # 纯文档变更不启动 Rust 三平台任务；其余一律完整验证。
+        if: needs.changes.outputs.docs_only != 'true'
         runs-on: ${{ matrix.os }}
         strategy:
             fail-fast: false
@@ -113,3 +143,49 @@ jobs:
                   else
                       ./scripts/cargo-rmcp-patched.sh clippy --locked --workspace --all-targets -- -D warnings
                   fi
+
+    # 汇总检查：只要本 job 运行就给出确定的结论 —— 区分「文档按策略跳过」与
+    # 「代码测试失败 / 取消 / 意外跳过」，避免后者被读成通过。
+    #
+    # 关于 required check：GitHub 的「Troubleshooting required status checks」明确
+    # 「A job is skipped by a conditional → The job reports "Success"」，而**工作流**
+    # 级跳过（path/branch 过滤）才会停在 Pending。因此 build 用 job 级 `if:` 跳过
+    # 不会阻塞合并；本 job 存在是为了给「跳过」一个显式、可读的结论，并可选地作为
+    # 单一 required check（job 名称是稳定标识，改名需同步分支保护配置）。
+    ci-result:
+        name: CI result
+        if: always()
+        needs: [changes, build]
+        runs-on: ubuntu-latest
+        timeout-minutes: 5
+        steps:
+            - name: Summarize
+              env:
+                  CHANGES_RESULT: ${{ needs.changes.result }}
+                  BUILD_RESULT: ${{ needs.build.result }}
+                  DOCS_ONLY: ${{ needs.changes.outputs.docs_only }}
+                  DOCS_REASON: ${{ needs.changes.outputs.reason }}
+              run: |
+                  set -euo pipefail
+                  printf 'changes=%s build=%s docs_only=%s\n' \
+                      "$CHANGES_RESULT" "$BUILD_RESULT" "$DOCS_ONLY"
+                  printf 'reason: %s\n' "$DOCS_REASON"
+
+                  if [[ "$CHANGES_RESULT" != "success" ]]; then
+                      printf '::error::变更分类未成功（%s），无法确认能否跳过重型任务\n' "$CHANGES_RESULT" >&2
+                      exit 1
+                  fi
+
+                  if [[ "$DOCS_ONLY" == "true" ]]; then
+                      printf 'docs-only：按策略跳过 Rust 三平台任务，汇总检查通过\n'
+                      exit 0
+                  fi
+
+                  # 非 docs-only 时三平台任务必须真跑且成功；skipped 说明触发条件
+                  # 出了问题，不能当成通过。
+                  if [[ "$BUILD_RESULT" != "success" ]]; then
+                      printf '::error::Rust 三平台任务结果 = %s（期望 success）\n' "$BUILD_RESULT" >&2
+                      exit 1
+                  fi
+
+                  printf '完整验证通过\n'
