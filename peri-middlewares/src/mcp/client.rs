@@ -5,6 +5,9 @@ mod cache;
 #[cfg(test)]
 #[path = "client/cache_policy_test.rs"]
 mod cache_policy_tests;
+// 浏览器（emscripten）部署的 MCP HTTP 通道：宿主 fetch 实现；纯判定逻辑在原生目标
+// 照常编译由单测覆盖，`FetchHttpClient` 与 JS 桥只在 emscripten 目标存在。
+mod fetch_http;
 mod lifecycle;
 mod oauth;
 pub(crate) mod output_store;
@@ -84,7 +87,9 @@ use status::{mcp_error_summary, mcp_status_label};
 #[cfg(test)]
 pub(crate) use subscription::build_subscription_filter;
 pub(crate) use subscription::setup_subscription;
-pub(crate) use transport::{build_authed_transport, build_http_transport, serve_client_auto};
+pub(crate) use transport::{
+    build_authed_transport, build_http_transport, serve_client_auto, serve_client_http,
+};
 pub(crate) use types::{AcpConnectionIdentity, McpConnectionKey};
 pub use types::{
     ClientStatus, McpClientHandle, McpInitStatus, McpPoolError, OAuthStatus, ServerInfo,

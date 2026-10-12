@@ -160,6 +160,14 @@ button { transition: background .16s, border-color .16s, opacity .16s; }
 .settings-foot { display: flex; flex-wrap: wrap; align-items: center; gap: 12px; margin-top: 16px; }
 .settings-foot .muted { font-size: 10px; }
 .settings-problems { margin: 12px 0 0; color: #9c6238; font-size: 11px; line-height: 1.8; }
+.settings-group-head { display: flex; align-items: center; justify-content: space-between; margin-bottom: 11px; }
+.settings-group-head h2 { margin: 0; }
+.settings-group-head > .icon-button { padding: 4px; }
+.settings-empty { margin: 0; color: #95988d; font-size: 11px; }
+.secondary-button { display: inline-flex; align-items: center; gap: 6px; padding: 9px 13px; border: 1px solid #dbe2d0; border-radius: 9px; background: #f7f9f3; color: #5c6b52; font-size: 12px; }
+.secondary-button:hover { background: #eef2e6; }
+.settings-field textarea { width: 100%; padding: 9px 11px; border: 1px solid #e0e4d8; border-radius: 9px; background: #fdfefb; color: #3e4638; font-size: 12px; font-family: inherit; resize: vertical; }
+.settings-field textarea:focus { border-color: #a5b998; }
 .spinning { animation: spin 1.2s linear infinite; }
 @keyframes spin { to { transform: rotate(360deg); } }
 @keyframes pulse { 50% { opacity: .35; transform: translateY(-2px); } }

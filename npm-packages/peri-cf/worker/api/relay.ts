@@ -3,20 +3,22 @@ import { HTTPException } from "hono/http-exception";
 import type { Env } from "../types";
 
 /**
- * 无状态、零配置的 BYOK 透传：浏览器宿主经同源端点访问存储与模型上游。
+ * 无状态、零配置的 BYOK 透传：浏览器宿主经同源端点访问存储、模型与 MCP 上游。
  *
  * - 上游由请求路径第一段携带（`/api/relay/<kind>/<encodeURIComponent(上游绝对基址)>/<上游路径>`），
  *   Worker 不持有任何地址或凭据；客户端凭据（authorization / x-api-key / api-key）原样带上游，
  *   逐跳头与跳源头仍被剥离。
  * - 存储响应里的 `base_url`（libSQL baton 亲和）改写回同一 relay 前缀并复用本请求的基址段，
  *   浏览器不直连上游。
- * - 模型响应可以是 SSE 流，必须流式透传，不得缓冲。
+ * - 模型响应可以是 SSE 流，必须流式透传，不得缓冲；MCP（streamable HTTP）的
+ *   JSON / SSE 响应与 `mcp-session-id` 头同样原样透传。
  * - 部署语义不变：拿 URL 即访问，入口控制由 Cloudflare Access 或等效设施承担。relay 现为
  *   按请求指定目标转发，未挂入口控制时会被当作开放转发面使用（已知风险，不做额外限制）。
  */
 
 export const STORAGE_RELAY_PREFIX = "/api/relay/storage";
 export const MODEL_RELAY_PREFIX = "/api/relay/model";
+export const MCP_RELAY_PREFIX = "/api/relay/mcp";
 
 /** 逐跳头与跳源头：不向上游透传。客户端凭据（authorization 等）不在此列。 */
 const REQUEST_HEADER_DENYLIST =
@@ -25,7 +27,13 @@ const REQUEST_HEADER_DENYLIST =
 const RESPONSE_HEADER_DENYLIST =
   /^(content-encoding|content-length|transfer-encoding|connection|set-cookie|cf-)/i;
 
-export type RelayKind = "storage" | "model";
+export type RelayKind = "storage" | "model" | "mcp";
+
+const RELAY_PREFIXES: Record<RelayKind, string> = {
+  storage: STORAGE_RELAY_PREFIX,
+  model: MODEL_RELAY_PREFIX,
+  mcp: MCP_RELAY_PREFIX,
+};
 
 interface RelayTarget {
   /** 转发目标：基址 origin + 基址 pathname（去尾斜杠）+ 请求余部路径；query 原样保留。 */
@@ -41,7 +49,7 @@ function invalidTarget(): HTTPException {
 }
 
 function relayTarget(kind: RelayKind, request: Request): RelayTarget {
-  const prefix = kind === "storage" ? STORAGE_RELAY_PREFIX : MODEL_RELAY_PREFIX;
+  const prefix = RELAY_PREFIXES[kind];
   const incoming = new URL(request.url);
   const rest = incoming.pathname.slice(prefix.length);
   const separator = rest.indexOf("/", 1);
@@ -172,6 +180,7 @@ export function registerRelayRoutes(app: Hono<{ Bindings: Env }>): void {
   for (const [path, kind] of [
     ["/api/relay/storage", "storage"], ["/api/relay/storage/*", "storage"],
     ["/api/relay/model", "model"], ["/api/relay/model/*", "model"],
+    ["/api/relay/mcp", "mcp"], ["/api/relay/mcp/*", "mcp"],
   ] as const) {
     app.all(path, (context) => relayRequest(context.req.raw, kind));
   }

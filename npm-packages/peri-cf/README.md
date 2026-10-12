@@ -6,12 +6,13 @@ React + Vite 聊天前端 + 零配置无状态 Cloudflare Worker。**浏览器�
 
 ## 配置与信任边界
 
-- **浏览器 BYOK，配置不进服务端**：模型 Provider/ID/Base URL/API Key、存储 URL/token 与 machineId 在设置页（`web/settings/SettingsView.tsx`）填写，以单条 JSON 保存在本机 localStorage（键 `peri-cf.browser-config.v1`）。请求按真实值经同源 relay 上行；Worker 不保存、不注入、也不读取任何配置项。
-- **密钥在浏览器侧可见**（2026-10-11 用户裁决，取代旧约束「模型 key / 存储 token 不进浏览器、只在 Worker 注入」）：凭据存于 localStorage，并经 relay 明文过网，浏览器 DevTools 网络面板可见；授权由部署入口控制承担，不由应用承担。
-- **relay 按请求目标转发**：`/api/relay/<kind>/<encodeURIComponent(上游绝对基址)>/<上游路径>?query`，kind 为 `storage` 或 `model`，基址必须是 `http(s)`（否则 400）。Worker 不持有上游地址与凭据，也不限制目标 host——未挂入口控制时等价于开放转发面（已知风险，代码不做限制，见下）。
-- **头处理**：客户端凭据头（`authorization`、`x-api-key`、`api-key`）原样上行；逐跳头与跳源头（`cookie`、`host`、`content-length`、`content-encoding`、`accept-encoding`、`connection`、`origin`、`referer`、`cf-*`、`x-forwarded-*`）剥离；上游响应剥离 `content-encoding`、`content-length`、`transfer-encoding`、`connection`、`set-cookie`、`cf-*`。响应流式透传（模型 SSE 不缓冲），存储 JSON 响应的 `base_url` 改写回同一 relay 前缀（baton 亲和不由浏览器直连上游）。
+- **浏览器 BYOK，配置不进服务端**：模型 Provider/ID/Base URL/API Key、存储 URL/token 与 machineId 在设置页（`web/settings/SettingsView.tsx`）填写，MCP 服务器列表在插件页（`web/plugins/PluginsView.tsx`：名称、真实绝对地址、自定义请求头）维护，二者以同一条 JSON 装进浏览器 VFS 的单个文件（`/config.json`），由 IndexedDB 持久化。请求按真实值经同源 relay 上行；Worker 不保存、不注入、也不读取任何配置项。
+- **VFS 只服务浏览器侧**：`web/vfs/index.ts` 是挂在 IndexedDB 上的文件树（lightning-fs，MIT），只是配置的持久层；wasm 的 Emscripten 文件系统保持原样、不做持久化，Rust 侧不读写这个文件。
+- **密钥在浏览器侧可见**（2026-10-11 用户裁决，取代旧约束「模型 key / 存储 token 不进浏览器、只在 Worker 注入」）：凭据存于浏览器（IndexedDB 上的配置文件），并经 relay 明文过网，浏览器 DevTools 网络面板可见；授权由部署入口控制承担，不由应用承担。
+- **relay 按请求目标转发**：`/api/relay/<kind>/<encodeURIComponent(上游绝对基址)>/<上游路径>?query`，kind 为 `storage`、`model` 或 `mcp`，基址必须是 `http(s)`（否则 400）。Worker 不持有上游地址与凭据，也不限制目标 host——未挂入口控制时等价于开放转发面（已知风险，代码不做限制，见下）。
+- **头处理**：客户端凭据头（`authorization`、`x-api-key`、`api-key`）与自定义请求头原样上行；逐跳头与跳源头（`cookie`、`host`、`content-length`、`content-encoding`、`accept-encoding`、`connection`、`origin`、`referer`、`cf-*`、`x-forwarded-*`）剥离；上游响应剥离 `content-encoding`、`content-length`、`transfer-encoding`、`connection`、`set-cookie`、`cf-*`（`mcp-session-id` 等 MCP 头不受影响）。响应流式透传（模型与 MCP 的 SSE 不缓冲），存储 JSON 响应的 `base_url` 改写回同一 relay 前缀（baton 亲和不由浏览器直连上游）。
 - **没有任何访问控制**：`/api/*` 与页面本身对拿到地址的任何人开放。部署入口控制（Cloudflare Access 或等效设施）是必要条件，不是可选项。生产环境不要直接暴露未受保护的域名。
-- **machineId 是客户端身份**：首次运行由浏览器 `crypto.randomUUID()` 生成并长期保存，作为写入 Rust Store 的机器身份（必须是规范 UUID）；清除 localStorage 或换浏览器即换新身份，旧会话仍归属旧 machineId。它不是认证凭证。
+- **machineId 是客户端身份**：首次运行由浏览器 `crypto.randomUUID()` 生成并长期保存，作为写入 Rust Store 的机器身份（必须是规范 UUID）；清除浏览器数据（IndexedDB）或换浏览器即换新身份，旧会话仍归属旧 machineId。它不是认证凭证。
 - 会话清单与创建由浏览器 TS 经 SDK `TursoStorage` 查询 Rust Store（`/workspace` 下会话）；`Chat.id` 就是 ACP Session ID，不另设身份，也不维护平行会话表；查询失败不当作空列表。
 
 ## 浏览器宿主的生命周期
@@ -34,10 +35,11 @@ React + Vite 聊天前端 + 零配置无状态 Cloudflare Worker。**浏览器�
 | --- | --- | --- |
 | ALL | `/api/relay/storage/<编码基址>/<上游路径>` | 转发到路径首段解码出的上游（libSQL HTTP 接口）；凭据按客户端真实值上行；JSON 响应的 `base_url` 改写为 relay 前缀 |
 | ALL | `/api/relay/model/<编码基址>/<上游路径>` | 转发到路径首段解码出的上游（模型端点，响应流式透传）；凭据按客户端真实值上行 |
+| ALL | `/api/relay/mcp/<编码基址>/<上游路径>` | 转发到路径首段解码出的上游（MCP streamable HTTP：JSON / SSE 响应与 `mcp-session-id` 原样透传，不做 `base_url` 改写）；自定义请求头按客户端真实值上行 |
 
 没有 `GET /api/config`（已删除）：Worker 不返回任何配置，配置只存在于浏览器。relay 路径首段缺失、URL 解码失败或不是 `http(s)` 时返回 400；其余 `/api/*` 返回 404 JSON 且 `Cache-Control: no-store`；非 API 路径交给静态资源（SPA 回退）。会话列表、创建、读取与命令没有 HTTP 端点——全部发生在浏览器内。
 
-浏览器宿主的运行配置（`web/host/config.ts`）从浏览器本地配置取上游基址与凭据，把 `storage.url` 与 provider `baseUrl` 编码进同源 relay 路径（`web/settings/config.ts` 负责 localStorage 读写），`cwd` 固定 `/workspace`，`meta_harness` 直接使用 SDK `BareHarnessConfig`（默认关闭工具段落）。
+浏览器宿主的运行配置（`web/host/config.ts`）消费**页面启动时注入**的配置（`web/settings/config.ts` 从 VFS 的 `/config.json` 读出，再经 `App` → `web/runtime/application.ts` 显式下传），把 `storage.url`、provider `baseUrl` 与每个 MCP 服务器地址编码进同源 relay 路径，`cwd` 固定 `/workspace`，`meta_harness` 在 SDK `BareHarnessConfig` 之上只开 `McpMiddleware`，MCP 服务器表随 `settings.config.mcpServers` 注入。
 
 ## 本地启动与构建
 
@@ -47,7 +49,7 @@ React + Vite 聊天前端 + 零配置无状态 Cloudflare Worker。**浏览器�
 sqld --no-welcome --http-listen-addr 127.0.0.1:8090 --db-path /tmp/peri-cf-dev-store
 ```
 
-存储与模型配置**不在仓库文件里**：首次打开页面时未配置则只渲染设置页（宿主不启动），在该页填写存储 URL（须 `http(s)`，本地 sqld 如 `http://127.0.0.1:8090`）、存储 Token、模型 Provider/ID/Base URL/API Key；保存后刷新页面即对宿主生效。配置只写入该浏览器的 localStorage；本机 `.dev.vars` 里保留的既有取值可供手工抄录参考，但应用已不读取它（`.dev.vars.example` 已删除，Worker 侧无 env 变量）。空库首轮打开会建立 store 身份与 schema。
+存储与模型配置**不在仓库文件里**：首次打开页面时未配置则只渲染设置页（宿主不启动），在该页填写存储 URL（须 `http(s)`，本地 sqld 如 `http://127.0.0.1:8090`）、存储 Token、模型 Provider/ID/Base URL/API Key；保存后刷新页面即对宿主生效。配置只写入该浏览器的 VFS（IndexedDB 上的 `/config.json`），换浏览器或清除浏览器数据即从零开始；本机 `.dev.vars` 里保留的既有取值可供手工抄录参考，但应用已不读取它（`.dev.vars.example` 已删除，Worker 侧无 env 变量）。空库首轮打开会建立 store 身份与 schema。
 
 ```bash
 bun run build:wasm      # 构建 CF feature/profile 的 WASM 并写入 provenance（约 2–3 分钟）
@@ -79,7 +81,7 @@ WASM 产物必须与当前源码一致：`prepare:wasm` 验证源码、锁文件
 | --- | --- | --- |
 | `web/host/` | 浏览器模块加载（Vite 资源 URL + 显式 `instantiateWasm`）与同源 relay 路径装配 | SDK 提供浏览器资源加载适配时 |
 | `web/runtime/` | 标签页内的会话运行期、投影、命令与关闭观察；生命周期建立在 SDK 宿主与清理证据之上 | SDK 提供浏览器端会话运行期时 |
-| `web/settings/` | 浏览器本地配置（localStorage 单键）与设置页门禁属本应用产品边界 | 不适用 |
+| `web/settings/`、`web/vfs/` | 浏览器本地配置（VFS 单文件）与设置页门禁属本应用产品边界；VFS 是 IndexedDB 持久化层（lightning-fs）的薄门面 | 不适用 |
 | `worker/api/`、`worker/index.ts` | relay 透传与静态资源是本应用产品边界 | 不适用 |
 | `scripts/`、`vite.config.ts` | WASM provenance、宿主定时器 glue 注入（`periSetTimeout`/`periClearTimeout` 经 scheduler 端口）与 Wrangler 属构建与验证工具 | 不适用 |
 
@@ -89,8 +91,10 @@ WASM 产物必须与当前源码一致：`prepare:wasm` 验证源码、锁文件
 
 - `shared/`：展示 DTO 的 Zod schema（`chat.ts` 对象契约、`sync.ts` SyncState 与运行元数据）与 wasm 构建输入常量。
 - `worker/api/`：Hono app、relay 透传与 HTTP 边界；`worker/index.ts` 是唯一入口，`worker/types.ts` 的 Env 只有 `ASSETS` 绑定。
-- `web/host/`：Emscripten 模块工厂与浏览器宿主启动（`startBrowserHost`）。
-- `web/settings/`：浏览器本地配置读写（`config.ts`，localStorage 单键 `peri-cf.browser-config.v1`）与设置页（`SettingsView.tsx`：首次运行门禁 + 标题栏齿轮入口）。
+- `web/host/`：Emscripten 模块工厂与浏览器宿主启动（`startBrowserHost`，配置由调用方注入）。
+- `web/vfs/`：浏览器虚拟文件系统（`index.ts`：IndexedDB 上的文件树，读写门面 `readText`/`writeText`/`deleteFile`/`list`，写后显式 `flush` 保证落盘）。
+- `web/settings/`：浏览器本地配置读写（`config.ts`，VFS 单文件 `/config.json`）与设置页（`SettingsView.tsx`：首次运行门禁 + 标题栏齿轮入口）。
+- `web/plugins/`：插件页（`PluginsView.tsx`：标题栏入口 + 常驻浮层），维护 MCP 服务器列表（名称、真实地址、自定义请求头），只接 2026-07-28 协议版本。
 - `web/runtime/`：标签页应用装配（application/registry/repository）、会话运行期（session）、投影（projection）、命令连接（connection）、交互与创建。
 - `web/chat/`：TanStack Query 读侧、会话视图状态机、消息展示与面板。
 - `web/shims/`：浏览器构建的打包替身（见 SDK 消费边界）。
@@ -103,10 +107,11 @@ WASM 产物必须与当前源码一致：`prepare:wasm` 验证源码、锁文件
 - ACP → Yjs 投影复用 SDK `SessionDocs`，展示经 SDK view 读取；不复制文本累加、序号或状态向量规则。展示态与运行元数据只在该标签页内存，不写回持久层。
 - TanStack Query 只管理读侧查询；切换会话卸载旧工作区、取消查询并清空缓存，不把发送或停止接入自动重放。
 - 模型与 Rust Store 的 HTTP 由 Rust 侧 transport（Emscripten `fetch` 执行器）发起，经同源 relay；浏览器不直连上游。
+- 浏览器 VFS 由 lightning-fs（MIT）承载：目录树（`!root`）与文件都存在 IndexedDB 的 `<库名>_files` 商店。它的写入靠去抖/空闲提交，所以门面在每次变更后显式 `flush()`；同一库名的第二个实例要等前一个空闲 500ms 释放跨标签页锁，因此实例在 `web/main.tsx` 建一次并显式下传。
 
 ## WASM 限制与验证范围
 
-WASM 运行的是 ACP Host，不是本地终端工具环境：没有宿主项目文件系统、任意 shell/子进程或本地 builtin MCP 服务。默认关闭工具能力；若接入远程 MCP，需独立设计授权、环境生命周期与网络可达性。
+WASM 运行的是 ACP Host，不是本地终端工具环境：没有宿主项目文件系统、任意 shell/子进程或本地 builtin MCP 服务。默认关闭工具能力；远程能力经插件页接入 MCP（只开 `McpMiddleware`），MCP 流量经同源 relay，**只接协议版本 2026-07-28**（走 discover 握手、不回落旧版本；TUI/本机部署不受此限）。鉴权只在请求头里（`Authorization: Bearer …` 等）：**不提供 MCP OAuth 授权流**（回调服务器是本地 TCP 端口，属原生路径）。浏览器部署不启用 `PermissionMiddleware`：MCP 工具调用不弹审批、不拦截（用户裁决，本部署不做权限面）。
 
 每个 CF WASM 线性内存最大 64 MiB、栈 8 MiB、增长步长 1 MiB（`shared/runtime-limits.ts` 是构建输入）。CF feature 的模型 HTTP/SSE 走 Emscripten `fetch` 执行器；`turso_serverless` 的 HTTP 原语经仓库补丁（`patches/turso-serverless-0.1.3-wasm-fetch.patch`，`wasm-fetch` feature）在同一执行器上运行——补丁与 `scripts/cargo-rmcp-patched.sh` 的校验值绑定，升级 crate 时必须按 `patches/README.md` 重新生成。命令型 hook 在 Emscripten 下明确报错，不静默放行。
 
@@ -136,6 +141,9 @@ node scripts/test-cloudflare-fetch.mjs
 - `tests/chat-queries.test.ts`：私有 QueryClient、缓存隔离、读请求取消、强制历史刷新与禁用自动重试。
 - `tests/wasm-provenance.test.ts`、`tests/wasm-profile.test.ts`：WASM 构建输入的哈希范围、原子发布与 profile 契约。
 - `tests/worker-glue.test.ts`、`tests/worker-runtime-glue.test.ts`、`tests/relay-output.test.ts`、`tests/local-preview-command.test.ts`：构建/开发脚本的 glue 与输出转发契约。
+- `tests/relay-mcp.test.ts`：MCP relay 通道（路径/查询/方法/正文/头的转发形态、SSE 不缓冲、`base_url` 不改写、非法基址 400 与路由表）。
+- `web/vfs/vfs.test.ts`：VFS 行为（写入落 IndexedDB、换实例仍读回、父目录按需创建、缺失文件收敛为 null、列目录与删除）。测试用 `fake-indexeddb` 提供 IndexedDB。
+- `web/settings/config.test.ts`、`web/host/config.test.ts`：MCP 条目的读取收敛与校验、配置经 VFS 的落盘往返、宿主注入（relay 地址改写、请求头解析、`McpMiddleware`）。
 - `web/chat/messageStatus.test.tsx`、`web/chat/interaction-panel.test.tsx`：消息与交互面板的渲染行为。
 
 Worker 侧执行面测试随 `worker/chat/*`、`worker/wasm/*` 一并删除；浏览器宿主、relay 与 wasm 运行时的行为验收目前以真实浏览器手工验证为准（见 `spec/issues/2026-10-11-peri-cf-browser-agent-migration.md`）。测试不启动真实 WASM、不调用远端模型或 Turso。

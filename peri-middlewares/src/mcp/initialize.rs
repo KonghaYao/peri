@@ -9,9 +9,10 @@ use super::{
     auth_store::static_credential_key,
     builtin::runtime::BUILTIN_CONVERGE_TIMEOUT,
     client::{
-        build_http_transport, serve_client_auto, setup_subscription, ClientStatus,
-        DiscoveryEvidence, McpClientHandle, McpClientPool, McpInitStatus, OAuthStatus,
-        SystemMcpManifest, HTTP_CONNECT_TIMEOUT, SHUTDOWN_TIMEOUT, STDIO_CONNECT_TIMEOUT,
+        build_http_transport, serve_client_auto, serve_client_http, setup_subscription,
+        ClientStatus, DiscoveryEvidence, McpClientHandle, McpClientPool, McpInitStatus,
+        OAuthStatus, SystemMcpManifest, HTTP_CONNECT_TIMEOUT, SHUTDOWN_TIMEOUT,
+        STDIO_CONNECT_TIMEOUT,
     },
     config::{ConfigSource, McpServerConfig, OAuthConfig},
     oauth_flow::OAuthFlowEvent,
@@ -579,7 +580,7 @@ impl McpClientPool {
                         pool.spawn_oauth_flow(name);
                         continue;
                     } else {
-                        serve_client_auto(
+                        serve_client_http(
                             build_http_transport(url, headers),
                             &pool.capability_profile,
                             timeout,

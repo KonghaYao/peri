@@ -50,6 +50,49 @@ async fn auto_falls_back_to_legacy() {
     server.await.unwrap();
 }
 
+/// Discover-only lifecycle（浏览器部署选用的模式）不接受 legacy 对端：同一个
+/// fixture 在 `Auto` 下回退成功（见 `auto_falls_back_to_legacy`），这里必须失败，
+/// 且保留对端的 JSON-RPC 错误而不是只报传输层文案。
+#[tokio::test]
+async fn discover_only_rejects_legacy_server() {
+    let (client, server) = tokio::io::duplex(8192);
+    let server = tokio::spawn(async move {
+        let (read, mut write) = tokio::io::split(server);
+        let mut lines = BufReader::new(read).lines();
+        let discover: serde_json::Value =
+            serde_json::from_str(&lines.next_line().await.unwrap().unwrap()).unwrap();
+        assert_eq!(discover["method"], "server/discover");
+        let error = serde_json::json!({
+            "jsonrpc": "2.0", "id": discover["id"],
+            "error": {"code": -32601, "message": "Method not found"}
+        });
+        write
+            .write_all(format!("{error}\n").as_bytes())
+            .await
+            .unwrap();
+    });
+    let outcome = serve_client_with_mode(
+        client,
+        &crate::mcp::apps::McpCapabilityProfile::disabled(),
+        std::time::Duration::from_secs(2),
+        rmcp::service::ClientLifecycleMode::Discover {
+            preferred_versions: vec![rmcp::model::ProtocolVersion::V_2026_07_28],
+        },
+    )
+    .await
+    .expect("握手不应超时");
+    let Err(error) = outcome else {
+        panic!("Discover-only 不应与 legacy 对端握手成功");
+    };
+    match error {
+        rmcp::service::ClientInitializeError::JsonRpcError(data) => {
+            assert_eq!(data.code, rmcp::model::ErrorCode(-32601));
+        }
+        other => panic!("应保留对端的 JSON-RPC 错误：{other:?}"),
+    }
+    server.await.unwrap();
+}
+
 async fn observe_first_request(
     capability_profile: &crate::mcp::apps::McpCapabilityProfile,
 ) -> serde_json::Value {

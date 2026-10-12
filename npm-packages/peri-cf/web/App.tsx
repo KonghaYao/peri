@@ -1,12 +1,15 @@
 import { lazy, Suspense, useEffect, useRef, useState } from 'react';
 import {
-  ArrowRight, ArrowUp, BookOpen, ChevronDown, Code2, Feather, Menu, MessageSquare,
+  ArrowRight, ArrowUp, Blocks, BookOpen, ChevronDown, Code2, Feather, Menu, MessageSquare,
   PanelLeftClose, Plus, RefreshCw, Settings, Sparkles, Square, X,
 } from 'lucide-react';
 import { useChat } from './chat/useChat';
 import type { Chat } from './chat/types';
+import { errorText } from './api/client';
 import { SettingsView } from './settings/SettingsView';
+import { PluginsView } from './plugins/PluginsView';
 import { isConfigured, loadBrowserConfig, saveBrowserConfig, type BrowserConfig } from './settings/config';
+import type { Vfs } from './vfs';
 
 const MessageList = lazy(() => import('./chat/MessageList').then((module) => ({ default: module.MessageList })));
 const ChatPanels = lazy(() => import('./chat/Panels').then((module) => ({ default: module.ChatPanels })));
@@ -35,37 +38,70 @@ function groupChats(chats: Chat[]): { label: string; chats: Chat[] }[] {
 }
 
 /**
- * 首次运行门禁：必填项未完成时只渲染设置界面，宿主不启动；
- * 已有配置时设置以浮层打开，保存后刷新页面以让新配置在宿主启动时生效。
+ * 配置读写在浏览器 VFS（IndexedDB）上，只能异步完成，因此先停在启动提示态：读完之前不渲染
+ * 聊天面，读失败明确报告而不是按「未配置」放行。首次运行门禁不变——必填项未完成时只渲染
+ * 设置界面、宿主不启动；已有配置时设置以浮层打开，保存后刷新页面让新配置在宿主启动时生效。
  */
-export default function App() {
-  const [config, setConfig] = useState(loadBrowserConfig);
+export default function App({ vfs }: { vfs: Vfs }) {
+  const [config, setConfig] = useState<BrowserConfig | null>(null);
+  const [bootError, setBootError] = useState('');
+  const [saveError, setSaveError] = useState('');
   const [settingsOpen, setSettingsOpen] = useState(false);
-  const configured = isConfigured(config);
+  const [pluginsOpen, setPluginsOpen] = useState(false);
+
+  useEffect(() => {
+    let active = true;
+    loadBrowserConfig(vfs).then(
+      (loaded) => { if (active) setConfig(loaded); },
+      (error) => { if (active) setBootError(errorText(error)); },
+    );
+    return () => { active = false; };
+  }, [vfs]);
+
+  const configured = config !== null && isConfigured(config);
 
   const save = (next: BrowserConfig) => {
-    saveBrowserConfig(next);
-    setConfig(next);
-    setSettingsOpen(false);
-    // 宿主只在启动时读取配置：已有运行期时刷新，避免旧凭据继续生效。
-    if (configured) globalThis.location.reload();
+    setSaveError('');
+    saveBrowserConfig(vfs, next).then(() => {
+      setConfig(next);
+      setSettingsOpen(false);
+      setPluginsOpen(false);
+      // 宿主只在启动时读取配置：已有运行期时刷新，避免旧凭据继续生效。
+      if (configured) globalThis.location.reload();
+    }, (error) => setSaveError(errorText(error)));
   };
+  const openSettings = () => { setSaveError(''); setSettingsOpen(true); };
+  const openPlugins = () => { setSaveError(''); setPluginsOpen(true); };
 
-  if (!configured) return <SettingsView config={config} onSave={save} />;
+  if (bootError) return (
+    <div className="settings-shell"><div className="settings-card">
+      <p className="settings-problems" role="alert">本地配置读取失败：{bootError}</p>
+      <p className="muted">配置存在浏览器 IndexedDB 上；不可用时无法读写配置，请检查浏览器隐私设置。</p>
+    </div></div>
+  );
+  if (config === null) return (
+    <div className="settings-shell"><div className="settings-card">
+      <p className="muted" role="status">正在读取本地配置…</p>
+    </div></div>
+  );
+  if (!configured) return <SettingsView config={config} error={saveError} onSave={save} />;
   return <>
-    {settingsOpen && <SettingsView config={config} onSave={save} onClose={() => setSettingsOpen(false)} />}
-    <ChatApp onOpenSettings={() => setSettingsOpen(true)} />
+    {settingsOpen && <SettingsView config={config} error={saveError} onSave={save} onClose={() => setSettingsOpen(false)} />}
+    {pluginsOpen && <PluginsView config={config} error={saveError} onSave={save} onClose={() => setPluginsOpen(false)} />}
+    <ChatApp config={config} onOpenSettings={openSettings} onOpenPlugins={openPlugins} />
   </>;
 }
 
-function ChatApp({ onOpenSettings }: { onOpenSettings: () => void }) {
+function ChatApp({ config, onOpenSettings, onOpenPlugins }: {
+  config: BrowserConfig; onOpenSettings: () => void; onOpenPlugins: () => void;
+}) {
   const [sidebarOpen, setSidebarOpen] = useState(false);
   const [draft, setDraft] = useState('');
   const [submitting, setSubmitting] = useState(false);
   const textarea = useRef<HTMLTextAreaElement>(null);
   const sidebar = useRef<HTMLElement>(null);
   const sidebarTrigger = useRef<HTMLButtonElement>(null);
-  const chat = useChat();
+  const chat = useChat(config);
   const running = ['streaming', 'cancelling', 'blocked'].includes(chat.phase);
   // 全文读取与交互回答都绑定当前会话的本地命令通道；未同步时由 reader/handler 明确报告不可用。
   const payloadReader = chat.payloadReader;
@@ -139,6 +175,7 @@ function ChatApp({ onOpenSettings }: { onOpenSettings: () => void }) {
           <span className="topbar-name">Peri <ChevronDown size={14} /></span><span className="topbar-divider" /><span className="topbar-subtitle">{chat.selected?.title || '让想法，自由生长'}</span></div>
           <div className="topbar-actions">
             <span className="topbar-badge"><span />专注于你的下一步</span>
+            <button type="button" className="icon-button" onClick={onOpenPlugins} aria-label="打开插件页" title="MCP 服务器（插件）"><Blocks size={17} /></button>
             <button type="button" className="icon-button" onClick={onOpenSettings} aria-label="打开浏览器设置" title="模型与存储配置"><Settings size={17} /></button>
           </div>
         </header>

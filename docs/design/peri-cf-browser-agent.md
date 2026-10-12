@@ -19,7 +19,8 @@
 | --- | --- |
 | 模型 | 浏览器 Rust fetch transport → 同源 `/api/relay/model/<encodeURIComponent(上游基址)>/<上游路径>` → 该基址的模型端点（响应流式透传） |
 | 存储 | 浏览器 Rust 驱动的 fetch executor → 同源 `/api/relay/storage/<encodeURIComponent(上游基址)>/<上游路径>` → 该基址的 libSQL HTTP 接口 |
-| 配置 | 浏览器本地配置（设置页写入 localStorage 单键）；没有服务端配置面 |
+| MCP | 浏览器 Rust fetch 通道（`StreamableHttpClient` 的宿主 fetch 实现）→ 同源 `/api/relay/mcp/<encodeURIComponent(上游基址)>/<上游路径>` → 该基址的 MCP server（JSON / SSE 与 `mcp-session-id` 原样透传） |
+| 配置 | 浏览器本地配置（设置页与插件页写入浏览器 VFS 的单个文件 `/config.json`，IndexedDB 持久化）；没有服务端配置面 |
 
 约定：
 
@@ -31,22 +32,27 @@
 
 1. **决策**：放弃「模型 key / 存储 token 不进浏览器、只在 Worker 注入」的旧约束，改为
    浏览器 BYOK 零配置后端。安全姿态由「密钥不出浏览器」改为「入口控制承担访问授权」。
-2. **配置面**：`web/settings/config.ts` 用 localStorage 单键 `peri-cf.browser-config.v1` 保存
-   `{ machineId, model: { provider, id, baseUrl, apiKey }, storage: { url, token } }`。
+2. **配置面**：`web/settings/config.ts` 以单个文件 `/config.json` 保存
+   `{ machineId, model: { provider, id, baseUrl, apiKey }, storage: { url, token }, mcpServers: [{ name, url, headers }] }`
+   （`mcpServers` 由插件页 `web/plugins/PluginsView.tsx` 维护）。文件在浏览器 VFS 上
+   （`web/vfs/index.ts`，lightning-fs + IndexedDB），因此读写是异步的；VFS 只服务浏览器侧，
+   Rust 不读该文件，wasm 的 Emscripten 文件系统保持原样、不做持久化。
    `SettingsView` 兼作首次运行门禁（必填项不齐只渲染设置页，宿主不启动）与标题栏齿轮入口；
-   配置在宿主启动时读取，保存后刷新页面生效，运行期不热切换凭据。machineId 由客户端
+   配置在页面启动时读一次，经 `App` → `createApplication({ config })` 显式下传给宿主与
+   `TursoStorage`，保存后刷新页面生效，运行期不热切换凭据。machineId 由客户端
    `crypto.randomUUID()` 首次生成并长期保存，是 Rust Store 的机器身份（须为规范 UUID）；
-   清除 localStorage 或换浏览器即换身份，旧会话归旧身份。
+   清除浏览器数据（IndexedDB）或换浏览器即换身份，旧会话归旧身份。
 3. **relay 合同**：`/api/relay/<kind>/<encodeURIComponent(上游绝对基址)>/<上游路径>?query`，
-   kind ∈ {storage, model}；基址必须为 `http(s)`，路径首段缺失、解码失败或协议不符返回 400。
-   凭据头（`authorization` / `x-api-key` / `api-key`）原样上行，不再剥离或注入；逐跳头与跳源头
+   kind ∈ {storage, model, mcp}；基址必须为 `http(s)`，路径首段缺失、解码失败或协议不符返回 400。
+   凭据头（`authorization` / `x-api-key` / `api-key`）与 MCP 自定义请求头原样上行，不再剥离或注入；
+   逐跳头与跳源头
    （cookie、host、content-length、content-encoding、accept-encoding、connection、origin、
    referer、cf-*、x-forwarded-*）与上游响应中的编码/长度/连接/Set-Cookie/cf-* 字段被剥离。
-   存储 JSON 响应的 `base_url` 改写为 relay 前缀；模型响应流式透传、不缓冲。不再提供
-   `GET /api/config`。
+   存储 JSON 响应的 `base_url` 改写为 relay 前缀（MCP 通道不改写）；模型与 MCP 的 SSE 响应流式
+   透传、不缓冲。不再提供 `GET /api/config`。
 4. **风险（已知，代码不做限制）**：relay 按请求目标转发且无 host 白名单，未挂入口控制时
-   等价开放转发面；凭据存 localStorage 并经 relay 明文过网（DevTools 网络可见）；machineId
-   由客户端自行生成，不是认证凭证。
+   等价开放转发面；凭据存在浏览器（IndexedDB 上的配置文件）并经 relay 明文过网（DevTools 网络可见）；
+   machineId 由客户端自行生成，不是认证凭证。
 5. **影响**：Worker env 与 secrets 全部移除（`worker/types.ts` 仅剩 `ASSETS`，`wrangler.jsonc`
    无 vars，`.dev.vars.example` 删除）；部署步骤只剩构建、部署与入口保护；旧会话与新身份
    机器归属不一致。
@@ -67,7 +73,12 @@
    在途执行丢失且不复原，展示态由下一次 `session/load` 重放重建。
 5. **多标签页**：每标签页一个宿主实例；跨标签页一致性由远端 Store 承担，不做跨标签页
    协调、不迁移执行、不互相观察。
-6. **工具**：沿用默认关闭；接入工具仍须按 MCP 能力边界单独设计授权与生命周期。
+6. **工具（MCP，2026-10-11 用户裁决）**：浏览器部署只在裸 harness 之上开 `McpMiddleware`——
+   插件页维护多条 MCP 服务器，地址改写为同源 relay 前缀后随 `settings.config.mcpServers` 注入；
+   不改 `PermissionMiddleware`（工具调用不弹审批、不拦截），本地文件工具与 builtin MCP 仍然不接；
+   鉴权只走请求头，不提供 MCP OAuth 授权流（回调服务器是本地 TCP 端口，属原生路径）。
+   **只接 MCP 协议版本 2026-07-28**：浏览器目标的 MCP HTTP 通道走 discover 握手且不回落旧版
+   （TUI/本机部署仍走 Auto、可回落），版本不符即该服务器初始化失败，不影响其它服务器与 Agent 执行。
 7. **删除清单**（不做兼容层）：`worker/chat/*`、`worker/wasm/*`、`shared/sync.ts` 的握手与
    控制帧、浏览器 SessionDocReplica/SessionDocSync 的传输用途、`/api/v2/*` 会话面与实例
    观测端点。

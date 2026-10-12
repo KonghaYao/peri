@@ -4,18 +4,18 @@
 
 ## 边界与数据流
 
-列表与创建：浏览器 React → 标签页应用门面（`web/runtime/application.ts`）→ SDK `TursoStorage`（同源 relay，上游基址与 token 来自浏览器本地配置）→ Rust Store。执行：内存命令 → 标签页 `ChatRegistry` 按实际 ACP Session ID 取得 `ChatRuntime` → SDK `startPeriWasmHost` → Peri WASM Host → 模型经 `/api/relay/model/*`、存储经 `/api/relay/storage/*`（Rust 侧 fetch 执行器；relay 按请求路径首段指定的上游转发）。
+列表与创建：浏览器 React → 标签页应用门面（`web/runtime/application.ts`）→ SDK `TursoStorage`（同源 relay，上游基址与 token 来自浏览器本地配置）→ Rust Store。执行：内存命令 → 标签页 `ChatRegistry` 按实际 ACP Session ID 取得 `ChatRuntime` → SDK `startPeriWasmHost` → Peri WASM Host → 模型经 `/api/relay/model/*`、存储经 `/api/relay/storage/*`、MCP（工具）经 `/api/relay/mcp/*`（Rust 侧 fetch 执行器；relay 按请求路径首段指定的上游转发）。
 
 展示复原：会话运行期先建订阅/投影，再以 ACP `session/load` 触发重放（宿主在响应前以 `session/update` 重放持久历史），重放通知直接进入 SDK 投影；`state()` 与首屏读取返回同一 SyncState DTO。展示不再跨网络同步：Yjs 文档（`SessionDocs`）只存在于标签页内存，`readSessionView` 物化展示面。
 
-- Worker 零配置：`apiApp()` 统一 no-store 与错误响应；relay 按路径首段（`/api/relay/<storage|model>/<encodeURIComponent(上游绝对基址)>/…`，基址须 `http(s)`）转发，凭据头原样上行、逐跳头与跳源头剥离，存储 JSON 响应 `base_url` 改写为 relay 前缀。除 relay 外 `/api/*` 一律 404（没有 `GET /api/config`）；非 API 路径走静态资源（SPA 回退）。
-- 配置与凭据在浏览器：`web/settings/config.ts` 以 localStorage 单键 `peri-cf.browser-config.v1` 保存 machineId、模型与存储配置，`web/settings/SettingsView.tsx` 是首次运行门禁与标题栏入口；密钥经 relay 明文过网（DevTools 可见）。
+- Worker 零配置：`apiApp()` 统一 no-store 与错误响应；relay 按路径首段（`/api/relay/<storage|model|mcp>/<encodeURIComponent(上游绝对基址)>/…`，基址须 `http(s)`）转发，凭据头与自定义头原样上行、逐跳头与跳源头剥离，存储 JSON 响应 `base_url` 改写为 relay 前缀（MCP 通道不改写，JSON/SSE 与 `mcp-session-id` 原样透传）。除 relay 外 `/api/*` 一律 404（没有 `GET /api/config`）；非 API 路径走静态资源（SPA 回退）。
+- 配置与凭据在浏览器：`web/settings/config.ts` 把 machineId、模型、存储与 MCP 服务器列表装进浏览器 VFS 的单个文件（`/config.json`，IndexedDB 持久化，读写为异步），`web/settings/SettingsView.tsx` 是首次运行门禁与标题栏入口，`web/plugins/PluginsView.tsx`（标题栏入口）维护 MCP 条目；密钥与自定义请求头经 relay 明文过网（DevTools 可见）。该文件只由浏览器侧读写（宿主启动时注入 settings），Rust 侧不读它，也不占用 wasm 的 Emscripten 文件系统。
 - 运行期注册表（`web/runtime/registry.ts`）只驻留标签页内存：`runtimeFor` 惰性创建、超限按 LRU 回收空闲运行期（忙碌时允许超限）。Rust Store 是唯一持久权威；刷新/关闭标签页等价于宿主实例结束，在途执行丢失且不复原。
 - 命令通道：内存调用（`web/runtime/session.ts` 的 `ChatCommand` → `ChatCommandError`），不再有 WS 控制帧；失败总是「确定未生效」。浏览器侧不实例化 SessionDocReplica/SessionDocSync。
 - 只消费已发布 SDK 入口：`@peri-code/sdk/wasm`（宿主启动、调度器端口、transport、截止时间与关闭证据）、`/portable`（投影、Store 读取、交互规则）、`/view`（只读视图与载荷读取）；不引用 `@peri-sdk/src`、不加载 Bun/stdio 管理入口。SDK `/portable` 的准入模块引用 `crypto`，浏览器构建以显式失败的替身替换（`web/shims/nodeCrypto.ts` + Vite alias）。
 - 取消：会话级 `session/cancel` 通知，取消成立以 prompt 结算为 cancelled 且宿主关闭被确认为准；未确认关闭在标签页内阻断该会话后续运行。当前 ACP 没有执行准入与精确停止协议，应用侧不实现 admission/ledger。
 - 没有访问控制：HTTP 面与 relay 对知道 URL 的任何人开放，不提供多租户隔离；relay 不限制转发目标，未挂入口控制时等价开放转发面（已知风险，代码不做限制）。部署入口控制由 Cloudflare Access 或等效设施承担。machineId 是客户端身份：首次运行 `crypto.randomUUID()` 生成并长期保存（须为规范 UUID），清除即换身份。
-- 工具默认关闭，不将 Emscripten 虚拟目录当作真实文件系统；接入远程 MCP 需按能力边界单独设计授权与生命周期。
+- 工具只有 MCP 一条通路：默认不接本地文件工具，不将 Emscripten 虚拟目录当作真实文件系统；MCP 服务器由插件页维护、经同源 relay 接入，宿主只开 `McpMiddleware`（`PermissionMiddleware` 保持关闭，MCP 工具调用不弹审批，用户裁决）。**浏览器部署只接 MCP 协议版本 2026-07-28**：走 discover 握手且不回落旧版本（TUI/本机部署不受此限）；版本不符的服务器初始化失败，不影响其它服务器。
 
 ## 入口
 
@@ -26,14 +26,16 @@
 | Worker、静态资源与 `ASSETS` 绑定（无 vars、无 DO 绑定、无 migrations） | `npm-packages/peri-cf/wrangler.jsonc` |
 | Worker 入口（ASSETS + `/api/*` 分发） | `npm-packages/peri-cf/worker/index.ts` |
 | 无状态 API 装配（relay 注册） | `npm-packages/peri-cf/worker/api/router.ts` |
-| relay 透传（目标解析、头过滤、流式转发、`base_url` 改写） | `npm-packages/peri-cf/worker/api/relay.ts` |
+| relay 透传（目标解析、头过滤、流式转发、`base_url` 改写；kind = storage/model/mcp） | `npm-packages/peri-cf/worker/api/relay.ts` |
 | 统一 no-store/错误/404 语义；错误诊断与响应 | `npm-packages/peri-cf/worker/api/app.ts`、`http.ts` |
 | Worker 部署环境契约（仅 `ASSETS` 绑定） | `npm-packages/peri-cf/worker/types.ts` |
-| 标签页应用装配（origin、startHost、registry、repository） | `npm-packages/peri-cf/web/runtime/application.ts` |
-| 浏览器宿主启动（模块工厂 + 调度器端口） | `npm-packages/peri-cf/web/host/index.ts`、`module.ts` |
-| 浏览器宿主运行配置（上游基址编码进 relay 路径、`/workspace`、BareHarnessConfig） | `npm-packages/peri-cf/web/host/config.ts` |
-| 浏览器本地配置读写（localStorage 单键、必填校验、machineId 生成） | `npm-packages/peri-cf/web/settings/config.ts` |
+| 标签页应用装配（origin、config、startHost、registry、repository） | `npm-packages/peri-cf/web/runtime/application.ts` |
+| 浏览器宿主启动（模块工厂 + 调度器端口；配置由调用方注入） | `npm-packages/peri-cf/web/host/index.ts`、`module.ts` |
+| 浏览器宿主运行配置（上游基址与 MCP 地址编码进 relay 路径、`/workspace`、BareHarnessConfig + `McpMiddleware`） | `npm-packages/peri-cf/web/host/config.ts` |
+| 浏览器 VFS（IndexedDB 持久化的文件树；读写门面 readText/writeText/deleteFile/list，写后显式 flush） | `npm-packages/peri-cf/web/vfs/index.ts` |
+| 浏览器本地配置读写（VFS 单文件 `/config.json`、必填校验、machineId 生成、MCP 条目校验与请求头文本解析） | `npm-packages/peri-cf/web/settings/config.ts` |
 | 设置页（首次运行门禁、标题栏齿轮入口、保存后刷新生效） | `npm-packages/peri-cf/web/settings/SettingsView.tsx`、`web/App.tsx` |
+| 插件页（MCP 服务器增删改：名称/地址/请求头，标注只接 2026-07-28） | `npm-packages/peri-cf/web/plugins/PluginsView.tsx`、`web/App.tsx` |
 | 单会话运行期（`ChatRuntime`：hydrate 重放复原、执行、取消、交互、载荷） | `npm-packages/peri-cf/web/runtime/session.ts` |
 | 标签页运行期注册表（LRU、`runtimeFor`） | `npm-packages/peri-cf/web/runtime/registry.ts` |
 | SDK 投影与展示物化（`state()`；文档对随运行期存活） | `npm-packages/peri-cf/web/runtime/projection.ts` |
@@ -54,7 +56,7 @@
 | 宿主定时器与 socket 胶水注入（`periSetTimeout`/`periClearTimeout`/`periSetImmediate` 经 scheduler 端口） | `npm-packages/peri-cf/scripts/{worker-glue,worker-runtime-glue}.ts` |
 | 构建 profile 产物对比（不测 runtime CPU） | `npm-packages/peri-cf/scripts/profile-wasm.ts` |
 | 本地 workerd 启动与日志转发 | `npm-packages/peri-cf/scripts/local-preview.ts`、`local-preview-command.ts`、`relay-output.ts` |
-| 行为测试 | `npm-packages/peri-cf/tests/`、`web/**/*.test.tsx`（浏览器宿主与 relay 的行为验收以真实浏览器手工验证为准） |
+| 行为测试 | `npm-packages/peri-cf/tests/`（含 `relay-mcp.test.ts`）、`web/**/*.test.ts(x)`（浏览器宿主与 relay 的行为验收以真实浏览器手工验证为准） |
 
 WASM 产物来源及协议验证入口参见 [Peri WASM 索引](peri-wasm.md)，通用 SDK 契约参见 [TS SDK 索引](peri-ts-sdk.md)。
 

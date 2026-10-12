@@ -6,17 +6,20 @@ import {
 } from './config';
 
 /**
- * 浏览器 BYOK 设置：模型 key、存储 URL/token 只保存在本机 localStorage，
- * 请求经同源 relay 按真实值上行；保存后由刷新后的宿主生效。
+ * 浏览器 BYOK 设置：模型 key、存储 URL/token 只保存在本机浏览器
+ * （浏览器 VFS 的配置文件，落在 IndexedDB），请求经同源 relay 按真实值上行；
+ * 保存后由刷新后的宿主生效。
  */
 export interface SettingsViewProps {
   config: BrowserConfig;
   onSave: (config: BrowserConfig) => void;
+  /** 上一次保存失败的原因（写入 VFS 失败时由 App 传入）。 */
+  error?: string;
   /** 已有可用配置时的关闭入口；首次运行必须完成填写。 */
   onClose?: () => void;
 }
 
-export function SettingsView({ config, onSave, onClose }: SettingsViewProps) {
+export function SettingsView({ config, onSave, error, onClose }: SettingsViewProps) {
   const [draft, setDraft] = useState(config);
   const problems = configProblems(draft);
   const setModel = (patch: Partial<ModelConfig>) => setDraft((current) => ({ ...current, model: { ...current.model, ...patch } }));
@@ -30,7 +33,7 @@ export function SettingsView({ config, onSave, onClose }: SettingsViewProps) {
           <h1>浏览器配置</h1>
           {onClose && <button type="button" className="icon-button" onClick={onClose} aria-label="关闭设置"><X size={17} /></button>}
         </div>
-        <p className="settings-intro">密钥与令牌只保存在本机浏览器（localStorage），由浏览器经同源 relay 按真实值转发；模型与存储服务直连上游，服务端不保存配置。</p>
+        <p className="settings-intro">密钥与令牌只保存在本机浏览器（IndexedDB 上的配置文件），由浏览器经同源 relay 按真实值转发；模型与存储服务直连上游，服务端不保存配置。</p>
         <div className="settings-group">
           <h2>设备标识</h2>
           <label className="settings-field">
@@ -80,6 +83,7 @@ export function SettingsView({ config, onSave, onClose }: SettingsViewProps) {
           <span className="muted">{onClose ? '配置在宿主启动时读取，保存后刷新页面生效。' : '保存后进入聊天，宿主按新配置启动。'}</span>
         </div>
         {problems.length > 0 && <p className="settings-problems" role="status">还需填写：{problems.join('、')}</p>}
+        {error && <p className="settings-problems" role="alert">保存失败：{error}</p>}
       </form>
     </div>
   );

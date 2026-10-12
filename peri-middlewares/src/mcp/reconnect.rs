@@ -5,9 +5,9 @@ use super::{
     auth_store::static_credential_key,
     builtin::runtime::BUILTIN_CONVERGE_TIMEOUT,
     client::{
-        build_authed_transport, build_http_transport, serve_client_auto, setup_subscription,
-        ClientStatus, McpClientHandle, McpClientPool, McpPoolError, OAuthStartDisposition,
-        OAuthStatus, SHUTDOWN_TIMEOUT,
+        build_authed_transport, build_http_transport, serve_client_auto, serve_client_http,
+        setup_subscription, ClientStatus, McpClientHandle, McpClientPool, McpPoolError,
+        OAuthStartDisposition, OAuthStatus, SHUTDOWN_TIMEOUT,
     },
     initialize::{
         commit_discovery_failure, commit_discovery_success, connect_timeout,
@@ -242,7 +242,7 @@ impl McpClientPool {
                                 .await
                             } else {
                                 if oauth.is_none() {
-                                    serve_client_auto(
+                                    serve_client_http(
                                         build_http_transport(url, headers),
                                         &self.capability_profile,
                                         timeout,
@@ -264,7 +264,7 @@ impl McpClientPool {
                         Err(e) => {
                             if oauth.is_none() {
                                 tracing::warn!(server = %server_name, error = %e, "OAuth 恢复失败，尝试裸连接");
-                                serve_client_auto(
+                                serve_client_http(
                                     build_http_transport(url, headers),
                                     &self.capability_profile,
                                     timeout,
@@ -282,7 +282,7 @@ impl McpClientPool {
                         }
                     }
                 } else {
-                    serve_client_auto(
+                    serve_client_http(
                         build_http_transport(url, headers),
                         &self.capability_profile,
                         timeout,

@@ -44,6 +44,10 @@ tar = "0.4"
 
 shellexpand = "3"
 sha2.workspace = true
+# 浏览器 fetch 通道的 SSE 解析与分块载体（rmcp 的 SSE 类型来自同一 crate，
+# 且不对外再导出；版本与其依赖声明一致，解析到同一份源码）。
+sse-stream = "0.2.5"
+bytes = "1"
 image = { version = "0.25", default-features = false, features = ["png", "jpeg", "webp"] }
 base64 = { version = "0.23.1", features = ["alloc"] }
 ipnet = "2.10"
@@ -71,3 +75,10 @@ peri-mcp-artifact.workspace = true
 peri-mcp-cron.workspace = true
 peri-mcp-workspace.workspace = true
 rmcp = { workspace = true, features = ["transport-child-process"] }
+
+# 浏览器 fetch 通道的宿主桥（版本与 peri-wasm / peri-model 的 emscripten 依赖
+# 保持逐位一致，避免 emscripten 链接期出现两份 wasm-bindgen 运行期）。
+[target.'cfg(target_os = "emscripten")'.dependencies]
+wasm-bindgen = "=0.2.129"
+wasm-bindgen-futures = "=0.4.79"
+js-sys = "0.3"

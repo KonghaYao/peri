@@ -3,6 +3,7 @@ import { useQuery } from '@tanstack/react-query';
 import type { InteractionAnswer } from '@peri-code/sdk/view';
 import { ChatApi, errorText } from '../api/client';
 import { createApplication } from '../runtime/application';
+import type { BrowserConfig } from '../settings/config';
 import { createChatQueries } from './queries';
 import { commandPayloadReader } from './payloadReader';
 import { ChatSession, type ChatView } from './session';
@@ -10,10 +11,11 @@ import type { Chat } from './types';
 
 const initialView: ChatView = { selected: null, state: null, phase: 'idle', historyReady: true, error: '' };
 
-export function useChat() {
+/** 应用与配置同生共死：配置变化即重建仓储与宿主接线（运行期不热切换凭据）。 */
+export function useChat(config: BrowserConfig) {
   const [view, setView] = useState(initialView);
   const [dismissedListError, setDismissedListError] = useState(0);
-  const application = useMemo(() => createApplication(), []);
+  const application = useMemo(() => createApplication({ config }), [config]);
   const api = useMemo(() => new ChatApi(application), [application]);
   const queries = useMemo(() => createChatQueries(api), [api]);
   const session = useRef<ChatSession | null>(null);

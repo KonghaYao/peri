@@ -1,6 +1,6 @@
 import { TursoStorage, type SessionStorage, type SessionSummary } from "@peri-code/sdk/portable";
 import { storageRelayUrl } from "../host/config";
-import { loadBrowserConfig, type BrowserConfig } from "../settings/config";
+import type { BrowserConfig } from "../settings/config";
 import { WORKSPACE_CWD } from "./bootstrap";
 import type { Chat } from "../../shared/chat";
 import type { ChatRepository } from "./types";
@@ -30,13 +30,14 @@ export class TursoChatRepository implements ChatRepository {
   }
 }
 
-/** 会话清单经同源 relay 读取；存储上游基址与 token 来自浏览器配置，按真实值上行（Worker 不持凭据）。 */
-export function relayStorage(origin: string, config: BrowserConfig = loadBrowserConfig()): TursoStorage {
+/** 会话清单经同源 relay 读取；存储上游基址与 token 由调用方从页面启动时的配置注入（Worker 不持凭据）。 */
+export function relayStorage(origin: string, config: BrowserConfig): TursoStorage {
   return new TursoStorage({ url: storageRelayUrl(origin, config.storage.url), authToken: config.storage.token });
 }
 
-export function chatRepository(origin: string, createSession: (title: string) => Promise<string>): ChatRepository {
-  const storage = relayStorage(origin);
+export function chatRepository(origin: string, config: BrowserConfig,
+  createSession: (title: string) => Promise<string>): ChatRepository {
+  const storage = relayStorage(origin, config);
   return new TursoChatRepository({
     getSessions: (cwd) => storage.getSessions(cwd),
     getSession: (id) => storage.getSession(id),
