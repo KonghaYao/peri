@@ -84,10 +84,30 @@ jobs:
               if: runner.os == 'Linux'
               run: bash scripts/ci-test-inventory.sh --check
 
+            # 缓存身份由 rust-cache 内建覆盖：rustc 版本/宿主/hash、全仓
+            # Cargo.toml+Cargo.lock 哈希、根 rust-toolchain*、根 .cargo/config.toml，
+            # 以及 RUST*/CARGO* 前缀环境变量（本文件顶部的 debug=0 也在内）。
+            # patch 内容不额外进 key：wrapper 把补丁摘要写进依赖源路径
+            # （target/peri-rmcp-patches/<patch-sha256>/…，见 scripts/cargo-rmcp-patched.sh），
+            # 补丁一变，Cargo 只失效受影响单元并复用其余产物；把摘要塞进 key 会把
+            # 「部分重建」放大成「三平台整盘冷启动」，收益为负。
+            # cache-workspace-crates 与 cache-all-crates 均保持默认 false（已评估，不启用）：
+            # 前者恢复来的产物会被源码指纹立刻作废（本工作区的 crate 几乎每次提交都在变），
+            # 却把清理、压缩、上传的成本按整个 target 计（现 Windows 单平台已约 1.1GB）；
+            # 后者只对本仓在 CI 内额外编译的 crate 有意义，而本 job 没有这类编译
+            # （跨平台工具链由预编译产物安装），故无收益。
+            #
+            # 只在默认分支的 push 写入：PR 与 pre-release/main 仍能读 main 的基线缓存
+            # （GitHub 允许恢复当前分支与默认分支的缓存），但不再每次 push 都写
+            # ~1GB×3。Windows 单次保存约 96 秒（CI #707 实测）因此从「每次运行一次」
+            # 降为「每次 main 合并一次」；main 合并会重建并刷新基线，一次合并后热缓存
+            # 即恢复。代价：改动依赖的 PR 不再持久化自己的增量产物，每次 push 需重编
+            # 新增依赖；若该代价高于收益，回退方式＝删除 save-if 这一行。
             - name: Cache cargo registry and build
               uses: Swatinem/rust-cache@v2
               with:
                   key: ${{ matrix.target }}
+                  save-if: ${{ github.ref == 'refs/heads/main' }}
 
             # 固定 nextest 版本：--no-tests 的默认值与过滤器语义随版本变化，
             # 三条平台都由 GitHub Releases 的预编译产物安装（不源码编译）。

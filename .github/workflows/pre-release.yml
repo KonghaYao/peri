@@ -60,6 +60,10 @@ jobs:
               with:
                   targets: ${{ matrix.target }}
 
+            # 注册表缓存 key 取根 Cargo.lock（依赖集的真实输入）；`**/Cargo.lock` 会连带
+            # 匹配与本构建无关的 side-projects 锁文件。
+            # 作用域：本分支的缓存只有本分支（及默认分支的回落）能读；release tag 既读不到
+            # 本分支缓存，也不会用本 job 的 key 格式写缓存（见 release-agent.yml）。
             - name: Cache cargo registry
               uses: actions/cache@v4
               with:
@@ -67,18 +71,36 @@ jobs:
                       ~/.cargo/registry/index
                       ~/.cargo/registry/cache
                       ~/.cargo/git/db
-                  key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}
+                  key: ${{ runner.os }}-cargo-${{ hashFiles('Cargo.lock') }}
                   restore-keys: ${{ runner.os }}-cargo-
+
+            # 产物缓存的 key 必须含工具链身份：只按 lock 哈希取 key 时，Rust 工具链升级后
+            # 旧 key 仍会精确命中，于是每次运行都是「恢复过期产物 + 全量重编」，而
+            # actions/cache 在精确命中时不回写，这条陈旧缓存永远不会被刷新；把 rustc 解析
+            # 出的版本纳入 key 后，工具链一变就是一次干净的未命中。
+            # profile 维度：本 key（`-build-`）只承载 release profile 产物，与 ci.yml 的
+            # rust-cache（v0-rust-* 前缀、dev/test profile）在 key 与 ref 作用域上都不重叠。
+            - name: Resolve toolchain identity
+              id: toolchain
+              shell: bash
+              run: echo "hash=$(rustc -vV | shasum -a 256 | cut -c1-16)" >> "$GITHUB_OUTPUT"
 
             - name: Cache build artifacts
               uses: actions/cache@v4
               with:
                   path: target
-                  key: ${{ runner.os }}-${{ matrix.target }}-build-${{ hashFiles('**/Cargo.lock') }}
+                  key: ${{ runner.os }}-${{ matrix.target }}-build-${{ hashFiles('Cargo.lock') }}-${{ steps.toolchain.outputs.hash }}
                   restore-keys: |
+                      ${{ runner.os }}-${{ matrix.target }}-build-${{ hashFiles('Cargo.lock') }}-
                       ${{ runner.os }}-${{ matrix.target }}-build-
-                      ${{ runner.os }}-${{ matrix.target }}-
 
+            # 预发布专用编译参数：本轮不改，也不复用 cf-wasm-*。结论与依据：
+            # - 现有 [profile.cf-wasm-size]/[profile.cf-wasm-speed] 是为 peri-wasm 的
+            #   Cloudflare 目标设计的（lto="thin"、codegen-units=16），换到这里的 native
+            #   预发布二进制会同时改变产物大小与运行性能，属于未测先改；
+            # - 正式发布的 lto="fat"/codegen-units=1 本轮不动；
+            # - 若要做对照实验：先记录改动前后 pre-release 运行的编译时间与
+            #   dist/peri-beta-*.tar.gz 体积，实验单独提交，只有落在体积与性能约束内才合入。
             - name: Build agent-tui (Linux)
               if: runner.os == 'Linux'
               run: ./scripts/cargo-rmcp-patched.sh build --locked -p peri-tui --bin peri --release --target ${{ matrix.target }}
@@ -141,10 +163,46 @@ jobs:
               with:
                   persist-credentials: false
 
+            # 补丁身份必须在 mise 之前取：--print-patch-identity 只读
+            # patches/emscripten/*.patch，不要求本机已有 emcc（此时 emsdk 还没装）。
+            - name: Resolve Emscripten patch identity
+              id: emscripten
+              run: echo "identity=$(bash scripts/prepare-emscripten.sh --print-patch-identity)" >> "$GITHUB_OUTPUT"
+
+            # 开启 mise 工具缓存（原先 cache: false 等于每次重装）：命中时省掉 emsdk/python
+            # 的下载安装与 wasm-bindgen-cli 的源码编译（Build Next Major #61 实测工具安装
+            # 1分46秒，其中源码安装 wasm-bindgen-cli 单项约 1分38秒）。
+            # 工具来源与完整性：不引入第三方预构建产物，仍由 mise 按 mise.wasm.toml 钉死的
+            # 版本安装（emsdk 6.0.10 另有 scripts/prepare-emscripten.sh 的版本断言），
+            # mise 二进制自身由 action 用发布签名校验和验证后才执行。
+            # 身份三要素：
+            #   1. runner 镜像与架构（本 job 固定在 ubuntu-24.04）；
+            #   2. mise 配置哈希 —— mise.wasm.toml 里 emsdk 6.0.10、python 3.12、
+            #      wasm-bindgen-cli 0.2.129 都是钉死版本，改版本即换 key；`rust = stable`
+            #      不进身份，因为 rustup 的工具链状态在 mise 数据目录之外，不会被缓存固定，
+            #      stable 更新仍会被解析到（rust-cache 的 rustc 哈希随之变化）；
+            #   3. Emscripten 补丁集摘要。
+            # 保存时机：本 workflow 钉在 jdx/mise-action@v4，缓存的是 mise 数据目录
+            # （默认 ~/.local/share/mise），该版本没有 post 步骤，`mise install` 之后立即
+            # 保存，而打补丁发生在其后的步骤 —— 缓存里存的是**未打补丁**的工具链，每个新
+            # runner 上仍由 scripts/prepare-emscripten.sh 重新打补丁并逐项校验。补丁摘要进
+            # key 是防御：若以后升级到会延后保存的版本（缓存将包含已打补丁的工具链），
+            # 旧补丁集处理过的工具链也不会被恢复，不会出现 stamp 与期望值不符导致脚本失败。
+            # 写入成本：精确命中不回写，所以只在工具版本或补丁集变化时重写一次，占用仓库
+            # 10GB 缓存额度的固定一部分；mise 自身的二进制也在该数据目录里，因此同样随缓存
+            # 固定到 key 变化为止（mise-action 的既定行为）。
+            # 回退方式：cache: false 即恢复原行为。
             - name: Install WASM build tools
               uses: jdx/mise-action@v4
               with:
-                  cache: false
+                  cache: true
+                  cache_key: mise-wasm-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('mise.toml', 'mise.wasm.toml') }}-${{ steps.emscripten.outputs.identity }}
+
+            # 缓存命中时 mise 直接复用数据目录里的安装记录，这里就地验证工具仍可执行：
+            # 「记录在、二进制不在」这类缓存问题立刻失败，而不是等到构建/链接阶段。
+            # （emsdk 由下一步的 scripts/prepare-emscripten.sh 做版本与补丁校验。）
+            - name: Verify cached WASM tools
+              run: mise exec -- wasm-bindgen --version
 
             - name: Cache Rust build
               uses: Swatinem/rust-cache@v2
