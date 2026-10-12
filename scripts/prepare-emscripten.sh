@@ -3,6 +3,23 @@
 set -euo pipefail
 
 repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+
+# 补丁身份：四个补丁文件按固定顺序拼接后的 sha256。它同时是 stamp 文件的内容
+# 与「补丁已应用」的期望值，是补丁集的唯一事实源。
+# 该计算只依赖仓库内的补丁文件，故放在工具链解析之前 —— 预发布工作流需要
+# 在 mise 安装 emsdk 之前（此时还没有 emcc）把它作为 mise 工具缓存 key 的一部分，
+# 见 --print-patch-identity；补丁集一变，缓存 key 就变，不会复用一个按旧补丁集
+# 打过补丁的工具链。
+base_expected="$(cat "$repo_root/patches/emscripten/epoll-listeners.patch" "$repo_root/patches/emscripten/noderawsockets-dns.patch" | shasum -a 256 | cut -d ' ' -f 1)"
+legacy_base_expected="$(shasum -a 256 "$repo_root/patches/emscripten/epoll-listeners.patch" "$repo_root/patches/emscripten/noderawsockets-dns.patch" | shasum -a 256 | cut -d ' ' -f 1)"
+previous_expected="$(cat "$repo_root/patches/emscripten/epoll-listeners.patch" "$repo_root/patches/emscripten/noderawsockets-dns.patch" "$repo_root/patches/emscripten/noderawsockets-bun.patch" | shasum -a 256 | cut -d ' ' -f 1)"
+expected="$(cat "$repo_root/patches/emscripten/epoll-listeners.patch" "$repo_root/patches/emscripten/noderawsockets-dns.patch" "$repo_root/patches/emscripten/noderawsockets-bun.patch" "$repo_root/patches/emscripten/workers-module-url.patch" | shasum -a 256 | cut -d ' ' -f 1)"
+
+if [[ "${1:-}" == "--print-patch-identity" ]]; then
+    printf '%s\n' "$expected"
+    exit 0
+fi
+
 if [[ -n "${EMSCRIPTEN:-}" ]]; then
     frontend="$EMSCRIPTEN"
 elif [[ -n "${EMSDK:-}" ]]; then
@@ -68,10 +85,6 @@ verify_workers_module_url() {
     grep -Fq "createRequire(import.meta.url ?? Module['mainScriptUrlOrBlob'])" "$frontend/src/shell.js" &&
     grep -Fq "var _scriptName = import.meta.url ?? Module['mainScriptUrlOrBlob'];" "$frontend/src/shell.js"
 }
-base_expected="$(cat "$repo_root/patches/emscripten/epoll-listeners.patch" "$repo_root/patches/emscripten/noderawsockets-dns.patch" | shasum -a 256 | cut -d ' ' -f 1)"
-legacy_base_expected="$(shasum -a 256 "$repo_root/patches/emscripten/epoll-listeners.patch" "$repo_root/patches/emscripten/noderawsockets-dns.patch" | shasum -a 256 | cut -d ' ' -f 1)"
-previous_expected="$(cat "$repo_root/patches/emscripten/epoll-listeners.patch" "$repo_root/patches/emscripten/noderawsockets-dns.patch" "$repo_root/patches/emscripten/noderawsockets-bun.patch" | shasum -a 256 | cut -d ' ' -f 1)"
-expected="$(cat "$repo_root/patches/emscripten/epoll-listeners.patch" "$repo_root/patches/emscripten/noderawsockets-dns.patch" "$repo_root/patches/emscripten/noderawsockets-bun.patch" "$repo_root/patches/emscripten/workers-module-url.patch" | shasum -a 256 | cut -d ' ' -f 1)"
 if [[ -f "$stamp" ]]; then
     installed="$(cat "$stamp")"
     if [[ "$installed" != "$expected" && "$installed" != "$previous_expected" && "$installed" != "$base_expected" && "$installed" != "$legacy_base_expected" ]]; then
