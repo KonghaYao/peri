@@ -150,8 +150,8 @@
 ### ARC-KEEPGOING-001
 
 - **Scope**：`peri-tui`、`peri-acp`、`peri-agent`。
-- **Rule**：空白 user prompt（按 content block 判空，必须用 `MessageContent::is_empty()`，禁止用 `text_content().trim()` 替代）是「继续跑 loop」指令（keepgoing），唯一生产者是 TUI keepgoing 按钮；keepgoing turn 不注入 recall；空历史 + 空白 prompt 时 ACP executor 短路返回，且必须发送终止通知（`push_done`）使客户端退出 loading；畸形请求（`message.content` 反序列化失败）静默落入 keepgoing 路径是防御性设计，各 transport 行为一致。
-- **Verify**：`cargo test -p peri-agent --lib session::exec::executor_test`（`is_keepgoing` 判空三例 + keepgoing 短路 push_done + request_id 透传）；`cargo test -p peri-agent --lib stages`（`test_append_messages_empty_prompt_skipped` / `test_append_messages_whitespace_prompt_kept`）；人工检查 `peri-agent/src/session/exec/executor.rs` 短路分支与 `peri-tui/src/kit/submit_consumer.rs` 的 keepgoing 提交路径。
+- **Rule**：空白 user prompt（按 content block 判空，必须用 `MessageContent::is_empty()`，禁止用 `text_content().trim()` 替代）是「继续跑 loop」指令（keepgoing），唯一生产者是 TUI keepgoing 按钮；非空历史时 keepgoing 必须把空 Prompt 入 v2 queue 作为唤醒信号（Receive 消费计数 >0 才推进循环），不得静默结束 turn；空 Prompt 不写入 transcript、不产生空用户气泡；keepgoing turn 不注入 recall；空历史 + 空白 prompt 时 ACP executor 短路返回，且必须发送终止通知（`push_done`）使客户端退出 loading；畸形请求（`message.content` 反序列化失败）静默落入 keepgoing 路径是防御性设计，各 transport 行为一致。
+- **Verify**：`cargo test -p peri-agent --lib session::exec::executor_test`（`is_keepgoing` 判空三例 + keepgoing 短路 push_done + request_id 透传）；`cargo test -p peri-acp --lib -- test_keepgoing_empty_prompt_reaches_reason`（keepgoing 驱动一次模型调用且不写空 human 历史）；`cargo test -p peri-agent --lib stages`（`test_append_messages_empty_prompt_skipped` / `test_append_messages_whitespace_prompt_kept`）；人工检查 `peri-agent/src/session/exec/executor.rs` 短路分支、`v2_execute.rs` Phase 6 入队与 `peri-tui/src/kit/submit_consumer.rs` 的 keepgoing 提交路径。
 
 ### ARC-SERIAL-001
 

@@ -217,7 +217,14 @@ pub async fn build_and_execute_agent_v2(req: V2ExecuteRequest) -> ExecOutcome {
         (req.store_llm)(cache);
     }
 
-    if !req.continuation && !req.agent_input.content.is_empty() {
+    // Phase 6: push 用户输入到 v2 queue（Receive 阶段消费）。
+    // [ARC-KEEPGOING-001] 空 content 的**非 continuation** prompt 即 keepgoing
+    // （空 Prompt 入队是唯一唤醒信号：Receive 消费计数 >0 才推进 Compact/Reason；
+    // 缺省时 run_react_loop 在 Receive 退出判断处直接 Completed，表现为
+    // 「继续」按钮一点就停且无模型调用）。空 human 不写入 transcript
+    // （append_messages_to_transcript 跳过空 Prompt），也不产生空 user 气泡。
+    // continuation（含队列交接路径）不 push——其输入经 mailbox handoff 入队。
+    if !req.continuation {
         v2_out.context.session.queue.push(QueuedMessage::prompt(
             V2MessageSource::UserInput,
             BaseMessage::human(req.agent_input.content.clone()),
