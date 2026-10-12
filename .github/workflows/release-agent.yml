@@ -9,8 +9,15 @@ env:
     CARGO_TERM_COLOR: always
 
 jobs:
+    # sidecar 生成前置（与 pre-release 共用同一份实现）。失败即矩阵整体不启动：
+    # 基线 v4.0.2 的失败点是六平台 Rust 编译全部完成之后才在打包阶段发现
+    # npm-packages/@peri-workflow/dist/peri-workflow.js 不存在。
+    sidecar:
+        uses: ./.github/workflows/workflow-sidecar.yml
+
     build:
         name: Build (${{ matrix.target }})
+        needs: sidecar
         runs-on: ${{ matrix.os }}
         strategy:
             fail-fast: false
@@ -84,6 +91,14 @@ jobs:
               if: runner.os == 'Linux'
               run: cargo install cross
 
+            # sidecar 已在前置任务里构建并通过身份校验；这里只做下载与布局，
+            # 不再在本矩阵内重复构建 JS（六平台各构建一次既慢又会各自漂移）。
+            - name: Download workflow sidecar
+              uses: actions/download-artifact@v4
+              with:
+                  name: workflow-sidecar
+                  path: sidecar
+
             - name: Build agent-tui (Linux)
               if: runner.os == 'Linux'
               shell: bash
@@ -110,16 +125,18 @@ jobs:
             # Rust 侧不嵌入 JS 产物，按该布局消费（peri-workflow/src/runner/artifact.rs）。
             - name: Package binaries (Unix)
               if: matrix.ext == ''
+              env:
+                  SIDECAR_ROOT: sidecar
+                  SIDECAR_IDENTITY: ${{ needs.sidecar.outputs.identity }}
               run: |
                   mkdir -p dist/package
                   cp "target/${{ matrix.target }}/release/peri" dist/package/peri
                   chmod +x dist/package/peri
-                  sidecar_id="$(sha256sum npm-packages/@peri-workflow/dist/peri-workflow.js | cut -d' ' -f1)"
-                  sidecar_id="${sidecar_id:0:12}"
-                  sidecar_dir="dist/package/peri-resources/workflow/${sidecar_id}"
-                  mkdir -p "${sidecar_dir}/dist"
-                  cp npm-packages/@peri-workflow/dist/peri-workflow.js "${sidecar_dir}/dist/peri-workflow.js"
-                  cp npm-packages/@peri-workflow/package.json "${sidecar_dir}/package.json"
+                  # 目录身份来自前置任务，不在本矩阵内由工作树重新计算 —— 重算会让
+                  # 「打包成功但身份与 Rust 侧 pin 不一致」的包有活路。
+                  sidecar_entry="${SIDECAR_ROOT}/peri-resources/workflow/${SIDECAR_IDENTITY}/dist/peri-workflow.js"
+                  test -f "$sidecar_entry" || { echo "missing sidecar entry: $sidecar_entry" >&2; exit 1; }
+                  cp -R "${SIDECAR_ROOT}/peri-resources" dist/package/peri-resources
                   tar -czf "dist/peri-${{ matrix.platform }}.tar.gz" -C dist/package peri peri-resources
                   rm -rf dist/package
                   cd dist
@@ -132,14 +149,15 @@ jobs:
             - name: Package binaries (Windows)
               if: matrix.ext == '.exe'
               shell: pwsh
+              env:
+                  SIDECAR_ROOT: sidecar
+                  SIDECAR_IDENTITY: ${{ needs.sidecar.outputs.identity }}
               run: |
                   New-Item -ItemType Directory -Force -Path dist/package | Out-Null
                   Copy-Item "target/${{ matrix.target }}/release/peri.exe" "dist/package/peri.exe"
-                  $sidecarId = (Get-FileHash -Algorithm SHA256 "npm-packages/@peri-workflow/dist/peri-workflow.js").Hash.ToLower().Substring(0, 12)
-                  $sidecarDir = "dist/package/peri-resources/workflow/$sidecarId"
-                  New-Item -ItemType Directory -Force -Path "$sidecarDir/dist" | Out-Null
-                  Copy-Item "npm-packages/@peri-workflow/dist/peri-workflow.js" "$sidecarDir/dist/peri-workflow.js"
-                  Copy-Item "npm-packages/@peri-workflow/package.json" "$sidecarDir/package.json"
+                  $sidecarEntry = "$env:SIDECAR_ROOT/peri-resources/workflow/$env:SIDECAR_IDENTITY/dist/peri-workflow.js"
+                  if (-not (Test-Path $sidecarEntry)) { throw "missing sidecar entry: $sidecarEntry" }
+                  Copy-Item -Recurse "$env:SIDECAR_ROOT/peri-resources" "dist/package/peri-resources"
                   Compress-Archive -Path "dist/package/*" -DestinationPath "dist/peri-${{ matrix.platform }}.zip"
                   Remove-Item -Recurse -Force dist/package
                   Set-Location dist

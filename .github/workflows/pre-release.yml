@@ -4,6 +4,14 @@ on:
     push:
         branches: [pre-release/main]
     workflow_dispatch:
+        inputs:
+            # 仅用于验证「sidecar 前置失败 → build 矩阵 skipped」：build/wasm 仍受
+            # pre-release/main 的 ref 守卫约束，dispatch 到其它分支不会触发发布。
+            fault:
+                description: sidecar 故障注入（仅验证短路行为）
+                type: choice
+                options: [none, build-failure, missing-entry, identity-mismatch]
+                default: none
 
 permissions:
     contents: read
@@ -16,9 +24,17 @@ env:
     CARGO_TERM_COLOR: always
 
 jobs:
+    # sidecar 生成前置（与 release-agent 共用同一份实现）。失败即 build 矩阵整体
+    # 不启动，预发布的 beta 资产不会带着缺失/漂移的 JS 进入打包阶段。
+    sidecar:
+        uses: ./.github/workflows/workflow-sidecar.yml
+        with:
+            fault: ${{ inputs.fault || 'none' }}
+
     build:
         name: Build (${{ matrix.target }})
         if: github.ref == 'refs/heads/pre-release/main'
+        needs: sidecar
         runs-on: ${{ matrix.os }}
         timeout-minutes: 90
         defaults:
@@ -71,27 +87,28 @@ jobs:
               if: runner.os != 'Linux'
               run: ./scripts/cargo-rmcp-patched.sh build --locked -p peri-tui --release --target ${{ matrix.target }}
 
+            - name: Download workflow sidecar
+              uses: actions/download-artifact@v4
+              with:
+                  name: workflow-sidecar
+                  path: sidecar
+
             - name: Package binary
               env:
                   PLATFORM: ${{ matrix.platform }}
                   TARGET: ${{ matrix.target }}
+                  SIDECAR_ROOT: sidecar
+                  SIDECAR_IDENTITY: ${{ needs.sidecar.outputs.identity }}
               run: |
                   mkdir -p dist/package
                   cp "target/${TARGET}/release/peri" dist/package/peri-beta
                   chmod +x dist/package/peri-beta
-                  # 随包 workflow sidecar：内容身份 = 入库 dist 的 sha256 前 12 位，
-                  # 与非嵌入消费布局 `peri-resources/workflow/<内容身份>/` 对齐
+                  # 随包 workflow sidecar：目录身份由前置任务给出（不在本矩阵内由工作树
+                  # 重算），布局 `peri-resources/workflow/<内容身份>/` 与消费端对齐
                   # （peri-workflow/src/runner/artifact.rs）。
-                  if command -v sha256sum >/dev/null 2>&1; then
-                      sidecar_id="$(sha256sum npm-packages/@peri-workflow/dist/peri-workflow.js | cut -d' ' -f1)"
-                  else
-                      sidecar_id="$(shasum -a 256 npm-packages/@peri-workflow/dist/peri-workflow.js | cut -d' ' -f1)"
-                  fi
-                  sidecar_id="${sidecar_id:0:12}"
-                  sidecar_dir="dist/package/peri-resources/workflow/${sidecar_id}"
-                  mkdir -p "${sidecar_dir}/dist"
-                  cp npm-packages/@peri-workflow/dist/peri-workflow.js "${sidecar_dir}/dist/peri-workflow.js"
-                  cp npm-packages/@peri-workflow/package.json "${sidecar_dir}/package.json"
+                  sidecar_entry="${SIDECAR_ROOT}/peri-resources/workflow/${SIDECAR_IDENTITY}/dist/peri-workflow.js"
+                  test -f "$sidecar_entry" || { echo "missing sidecar entry: $sidecar_entry" >&2; exit 1; }
+                  cp -R "${SIDECAR_ROOT}/peri-resources" dist/package/peri-resources
                   tar -czf "dist/peri-beta-${PLATFORM}.tar.gz" -C dist/package peri-beta peri-resources
                   (
                       cd dist
