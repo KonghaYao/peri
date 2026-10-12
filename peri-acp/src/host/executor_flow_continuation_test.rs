@@ -424,14 +424,90 @@ async fn test_continuation_skips_empty_prompt_push() {
         history,
         stage_build2,
     );
-    let _ = run_session_loop(ctx2, turn2).await;
+    let result2 = run_session_loop(ctx2, turn2).await;
 
-    // Assert 2：keepgoing 也不得虚构空 human publication。
+    // Assert 2：keepgoing 必须 push 一条空 Prompt——这是唯一的唤醒信号
+    // （Receive 消费计数 >0 才推进 Compact/Reason，ARC-KEEPGOING-001）。
+    // 空 human 由 stages 跳过转录（append_messages_to_transcript 跳过空
+    // Prompt），不产生空用户气泡、不写入空 human 历史。
     let drained = sm
         .get_session(session_id)
         .expect("session 应存在")
         .v2_message_queue
         .clone()
         .drain_all();
-    assert!(drained.is_empty(), "keepgoing 不得虚构空 human publication");
+    assert_eq!(drained.len(), 1, "keepgoing 应 push 一条空 Prompt 唤醒信号");
+    assert_eq!(
+        drained[0].kind,
+        peri_acp_types::session::MessageKind::Prompt,
+        "keepgoing 唤醒信号应为 Prompt kind"
+    );
+    assert_eq!(
+        drained[0].source,
+        peri_acp_types::session::MessageSource::UserInput,
+        "keepgoing 唤醒信号应归属 UserInput"
+    );
+    assert!(
+        drained[0]
+            .message()
+            .expect("keepgoing 唤醒信号应为 BaseMessage payload")
+            .content()
+            .is_empty(),
+        "keepgoing 唤醒信号内容为空（用户未输入新文本）"
+    );
+    assert!(
+        !result2.messages.iter().any(|message| matches!(
+            message,
+            BaseMessage::Human { content, .. } if content.is_empty()
+        )),
+        "keepgoing 不得把空 human 写入历史"
+    );
+}
+
+/// [回归测试] keepgoing（空 content 的非 continuation prompt + 非空历史）必须
+/// 驱动 ReAct loop 继续：空 Prompt 入 v2 queue 是唯一的唤醒信号（Receive 消费
+/// 计数 >0 才推进到 Reason，ARC-KEEPGOING-001）。缺失该信号时循环在 Receive
+/// 退出判断处直接 Completed——用户点「继续」表现为「一点就停」，无任何模型调用。
+#[cfg(not(windows))]
+#[tokio::test]
+async fn test_keepgoing_empty_prompt_reaches_reason() {
+    let session_id = "test-keepgoing-drives-loop";
+    let requests = Arc::new(Mutex::new(Vec::new()));
+    let model: Arc<dyn Model> = Arc::new(CapturePromptModel {
+        requests: Arc::clone(&requests),
+    });
+    let mut ctx = make_session_context(session_id).await;
+    ctx.primary_llm_factory = Some(Arc::new(move || Arc::clone(&model)));
+    let stage_build = make_stage_build(&ctx);
+    let sink = Arc::new(MockEventSink::new());
+    // 非空历史：不落入「空历史 + 空 prompt」短路，必须真实驱动一轮。
+    let history = vec![BaseMessage::human("prior turn")];
+    let turn = make_turn_input(
+        Arc::clone(&sink) as Arc<dyn EventSink>,
+        MessageContent::text(""),
+        false,
+        history,
+        stage_build,
+    );
+
+    let result = run_session_loop(ctx, turn).await;
+
+    assert!(
+        result.ok,
+        "keepgoing turn 应正常结束（EndTurn）；实际 stop_reason={:?} failure={:?}",
+        result.stop_reason, result.failure
+    );
+    assert_eq!(
+        requests.lock().unwrap().len(),
+        1,
+        "keepgoing 必须驱动一次模型调用（空 Prompt 入队 → Receive 消费 → Reason）"
+    );
+    // 空 Prompt 不进入 transcript，也不得产生空 human 历史。
+    assert!(
+        !result.messages.iter().any(|message| matches!(
+            message,
+            BaseMessage::Human { content, .. } if content.is_empty()
+        )),
+        "keepgoing 不得把空 human 写入历史"
+    );
 }
