@@ -111,8 +111,7 @@ impl ExecutionFailure {
                 None,
             ),
             crate::error::AgentError::CompactIncompleteResponse { .. }
-            | crate::error::AgentError::CompactRecoveryExhausted { .. }
-            | crate::error::AgentError::CompactSummaryInputExceeded { .. } => Self::new(
+            | crate::error::AgentError::CompactRecoveryExhausted { .. } => Self::new(
                 ExecutionFailureKind::Llm,
                 error.user_facing_message(),
                 None,
