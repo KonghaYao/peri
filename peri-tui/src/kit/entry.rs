@@ -48,7 +48,7 @@ use ratatui_kit::{
 /// spawn kit 四链路（notifier / bridge / submit_consumer / service_snapshot），
 /// 进入 ratatui-kit 全屏。
 ///
-/// 返回前调用一次 `teardown_app`，尝试关闭 hooks、MCP、ACP host 与 Langfuse。
+/// 返回前调用一次 `teardown_app`：显式关闭 ACP transport 并等待 host 收口（任务/会话排空后关闭部署资源与 Langfuse）。
 /// 关闭报告不完整时仍会退出并 Drop App，不安排重试，也不保证未完成资源已 join。
 pub async fn run_kit_fullscreen(
     opts: TuiLaunchOptions,
