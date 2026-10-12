@@ -530,7 +530,12 @@ pub async fn run_compact(
     }
 }
 
-/// 运行 Full Compact；在同一边界管理摘要重试预算并保留失败原因。
+/// 运行 Full Compact；保留跨 Full 的失败预算与失败原因。
+///
+/// 摘要生成本身的恢复（空响应重新生成、截断续写、未闭合补全）已在同一次
+/// `full_compact_inner` 内共用一个有界计数器；这里不再重试空摘要，避免内外
+/// 层次数相乘。`max_consecutive_failures` 只作为跨 Full 调用的失败预算与兼容
+/// 字段保留。
 async fn run_full_or_degrade(
     transcript: &mut MessageTranscript,
     llm: Option<&dyn peri_model::Model>,
@@ -541,14 +546,13 @@ async fn run_full_or_degrade(
     escalation_reason: FullEscalationReason,
 ) -> CompactResult {
     let before_visible_len = transcript.visible_messages().len();
-    let error = loop {
-        if *consecutive_failures >= config.max_consecutive_failures {
-            break crate::error::AgentError::CompactRetriesExhausted {
-                attempts: *consecutive_failures,
-                context_tokens: pressure.estimated_tokens,
-                context_window: pressure.context_window,
-            };
+    let error = if *consecutive_failures >= config.max_consecutive_failures {
+        crate::error::AgentError::CompactRetriesExhausted {
+            attempts: *consecutive_failures,
+            context_tokens: pressure.estimated_tokens,
+            context_window: pressure.context_window,
         }
+    } else {
         match full::full_compact_inner(transcript, llm, config, cwd).await {
             Ok(mut result) => {
                 *consecutive_failures = 0;
@@ -557,16 +561,9 @@ async fn run_full_or_degrade(
             }
             Err(error) => {
                 *consecutive_failures = consecutive_failures.saturating_add(1);
-                warn!(%error, attempts = *consecutive_failures, "Full Compact 失败");
-                // 空摘要没有提交历史替换，在当前 Compact 内恢复并共享同一预算。
                 // Provider 自己负责传输重试；持久化错误与提交不确定不得在这里重试。
-                if matches!(error, crate::error::AgentError::CompactEmptyResponse)
-                    && !transcript.compaction_commit_state().is_uncertain()
-                {
-                    tokio::task::yield_now().await;
-                    continue;
-                }
-                break error;
+                warn!(%error, attempts = *consecutive_failures, "Full Compact 失败");
+                error
             }
         }
     };

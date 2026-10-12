@@ -144,6 +144,10 @@ fn default_excluded_tools() -> Vec<String> {
 fn default_summary_max_tokens() -> u32 {
     16000
 }
+/// 单次 Full Compact 内允许的逻辑摘要生成次数（首轮 + 恢复）。
+fn default_summary_max_requests() -> u32 {
+    3
+}
 fn default_max_consecutive_failures() -> u32 {
     3
 }
@@ -221,6 +225,13 @@ pub struct CompactConfig {
     /// 而是明确的配置错误（`CompactSummaryBudgetInvalid`）。
     #[serde(default = "default_summary_max_tokens")]
     pub summary_max_tokens: u32,
+    /// 单次 Full Compact 内允许的逻辑摘要生成次数（首轮 1 次 + 恢复至多 N-1 次）。
+    ///
+    /// 空响应重新生成、截断续写与格式补全共用这一个预算：每次调用摘要模型前
+    /// 递增计数，绝不发起第 N+1 次逻辑生成。值为 1 时只运行首次生成（不恢复）；
+    /// 0 不是「不限」，而是明确的配置错误（`CompactSummaryBudgetInvalid`）。
+    #[serde(default = "default_summary_max_requests")]
+    pub summary_max_requests: u32,
     #[serde(default = "default_max_consecutive_failures")]
     pub max_consecutive_failures: u32,
 
@@ -276,6 +287,7 @@ impl Default for CompactConfig {
             micro_compact_stale_steps: default_stale_steps(),
             micro_excluded_tools: default_excluded_tools(),
             summary_max_tokens: default_summary_max_tokens(),
+            summary_max_requests: default_summary_max_requests(),
             max_consecutive_failures: default_max_consecutive_failures(),
             smart_compact_enabled: default_false(),
             smart_keep_recent_msgs: default_smart_keep_recent_msgs(),
