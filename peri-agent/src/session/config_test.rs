@@ -45,7 +45,7 @@ fn test_session_config_cancel() {
 #[test]
 fn test_session_config_max_iterations() {
     let cfg = SessionConfig::new();
-    assert_eq!(cfg.max_iterations(), 500);
+    assert_eq!(cfg.max_iterations(), usize::MAX);
 
     cfg.set_max_iterations(100);
     assert_eq!(cfg.max_iterations(), 100);

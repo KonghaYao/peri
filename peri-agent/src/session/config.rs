@@ -8,7 +8,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use parking_lot::RwLock;
-pub(crate) const DEFAULT_AGENT_MAX_ITERATIONS: usize = 500;
+pub(crate) const DEFAULT_AGENT_MAX_ITERATIONS: usize = usize::MAX;
 use serde::{Deserialize, Serialize};
 use tokio_util::sync::CancellationToken;
 

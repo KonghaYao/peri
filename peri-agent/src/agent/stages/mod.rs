@@ -899,6 +899,10 @@ mod truncation_tests;
 mod budget_recovery_integration_tests;
 
 #[cfg(test)]
+#[path = "default_iteration_budget_test.rs"]
+mod default_iteration_budget_tests;
+
+#[cfg(test)]
 #[path = "terminal_wake_test.rs"]
 mod terminal_wake_tests;
 

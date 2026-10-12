@@ -61,7 +61,7 @@ fn test_session_config_access() {
     let frozen = FrozenContext::builder().build();
     let session = Session::new(cwd, frozen, None);
 
-    assert_eq!(session.config().max_iterations(), 500);
+    assert_eq!(session.config().max_iterations(), usize::MAX);
     session.config().set_max_iterations(100);
     assert_eq!(session.config().max_iterations(), 100);
 }
