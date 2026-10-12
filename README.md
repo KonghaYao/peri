@@ -106,7 +106,7 @@ irm https://raw.githubusercontent.com/konghayao/peri/main/scripts/install.ps1 | 
 ```
 
 Also installable with [mise](https://mise.jdx.dev/) through the `github:KonghaYao/peri` tool;
-see [release notes](.github/README.md#mise-安装) for the `version_prefix` entry.
+set `version_prefix = "agent-v"` to strip the release tag prefix.
 
 Follow the installer's PATH instructions, then run `peri` in your project. Complete model setup and restart Peri.
 
