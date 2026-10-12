@@ -384,3 +384,28 @@ async fn test_concurrent_terminal_shutdown_settles_pending_task_subscription_and
     assert_eq!(close_count.load(Ordering::SeqCst), 1);
     assert!(pool.active_oauth_flow("docs").is_none());
 }
+
+/// 关机竞态准入（ARC-HOST-SHUTDOWN-001）：`spawn_reconnect` 在关闭竞态中
+/// 必须**或注册或拒绝**——关闭前发起（winning）任务入账并由 owner 收敛；
+/// `begin_shutdown` 后发起（losing）以 `McpTaskScopeClosed` 显式拒绝，
+/// 不允许静默丢弃（静默丢弃会留下无归属连接生命周期）。
+#[tokio::test]
+async fn test_spawn_reconnect_racing_begin_shutdown_is_registered_or_rejected() {
+    use crate::mcp::McpTaskOwner;
+
+    let (mut winning_owner, winning_spawner) = McpTaskOwner::new();
+    let winning_pool = Arc::new(McpClientPool::new_pending_with_spawner(winning_spawner));
+    assert!(winning_pool.spawn_reconnect("server".into()).is_ok());
+    winning_pool.begin_shutdown();
+    winning_owner.begin_shutdown();
+    winning_owner.shutdown().await;
+    winning_pool.shutdown().await;
+
+    let (mut losing_owner, losing_spawner) = McpTaskOwner::new();
+    let losing_pool = Arc::new(McpClientPool::new_pending_with_spawner(losing_spawner));
+    losing_pool.begin_shutdown();
+    assert!(losing_pool.spawn_reconnect("server".into()).is_err());
+    losing_owner.begin_shutdown();
+    losing_owner.shutdown().await;
+    losing_pool.shutdown().await;
+}
