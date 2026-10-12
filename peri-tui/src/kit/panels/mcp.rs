@@ -1,7 +1,7 @@
 //! ratatui-kit McpPanel component.
 //!
 //! H1d（Iteration 14）：从 MCP_SERVERS atom 读取真实 MCP server 列表（由
-//! service_snapshot 从 mcp_pool.all_server_infos 派生）。结合 SERVICE_SNAPSHOT.mcp
+//! service_snapshot 经 ACP `mcp/list` 查询派生）。结合 SERVICE_SNAPSHOT.mcp
 //! 显示初始化阶段摘要。只读面板——MCP 配置通过 ~/.claude/settings.json 管理。
 //!
 //! OAuth 授权入口（详情视图）：列表选中「需要认证」server 按 Enter 进入

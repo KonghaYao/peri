@@ -621,7 +621,7 @@ fn close_oauth_popup(state: &mut BridgeState) {
 }
 
 pub(super) fn handle_oauth_completed(state: &mut BridgeState, server_name: &str) {
-    // 授权完成：关闭 popup 并提示（MCP 面板状态由 pool 侧更新）
+    // 授权完成：关闭 popup 并提示（MCP 面板状态由 service_snapshot 轮询 mcp/list 刷新）
     close_oauth_popup(state);
     let text = i18n::tr_args(
         "mcp-oauth-completed",
@@ -647,7 +647,7 @@ pub(super) fn handle_oauth_failed(state: &mut BridgeState, server_name: &str, er
 
 pub(super) fn handle_oauth_restored(state: &mut BridgeState, server_name: &str) {
     // 凭证恢复成功（快速路径）：用户主动发起授权但磁盘已有有效凭证，
-    // 不弹 popup；提示「已使用已保存凭证连接」并同步面板池状态。
+    // 不弹 popup；提示「已使用已保存凭证连接」（面板状态经轮询刷新）。
     let text = i18n::tr_args(
         "mcp-oauth-restored",
         &[("server".into(), FluentValue::from(server_name))],

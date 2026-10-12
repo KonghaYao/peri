@@ -293,7 +293,7 @@ async fn test_full_report_request_preserves_structured_tool_history() {
     assert!(request.tools.is_empty(), "摘要请求不得开放工具执行");
 }
 
-/// [回归测试] 摘要空白或截断时不排除报告、不提交占位摘要。
+/// [回归测试] 摘要只有隐藏思考时不排除报告、不提交占位摘要。
 #[tokio::test]
 async fn test_full_report_invalid_summary_preserves_original_history() {
     for (summary, stop) in [
@@ -318,15 +318,18 @@ async fn test_full_report_invalid_summary_preserves_original_history() {
         )
         .await
         .unwrap_err();
-        match model.stop {
-            StopReason::EndTurn => assert!(matches!(error, AgentError::CompactEmptyResponse)),
-            _ => assert!(matches!(
+        // 首轮无正文 → 重新生成一次 → 仍无正文 → 恢复耗尽；两种 stop 都不算成功。
+        assert!(
+            matches!(
                 error,
-                AgentError::CompactIncompleteResponse {
-                    stop_reason: StopReason::MaxTokens
+                AgentError::CompactRecoveryExhausted {
+                    attempts: 2,
+                    last_reason: peri_acp_types::error::SummaryRecoveryReason::EmptyResponse,
                 }
-            )),
-        }
+            ),
+            "{error:?}"
+        );
+        assert_eq!(model.requests.lock().unwrap().len(), 2);
         assert!(!transcript.flags(id).excluded);
         assert_eq!(transcript.visible_model_messages().unwrap().len(), 1);
         let stored = bound

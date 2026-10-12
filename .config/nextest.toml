@@ -42,6 +42,16 @@ default-filter = "not (package(=peri-acp) & test(host::execution_admission_jsonl
 #   - 同一包内 lib 二进制与多个集成测试二进制之间的重叠
 # 收窄条件：某包连续三次三平台通过、且没有新增重试配置，即可移出组；出现一次竞态
 # 证据（而不是推测）则把对应测试并入组，并把证据记在此处。
+#
+# 已记录证据（配置未变，原因随附）：
+#   - 2026-10-12 PR #186 第二轮 macOS：
+#     peri-mcp-workspace 的 terminal::tests::lifecycle_tests::
+#     test_cancelled_foreground_shell_retains_owner_until_process_exit 断言
+#     TaskManager::shutdown 报 Complete，实得 Incomplete；耗时 3.04s，未到
+#     scope.wait() 的 5s 超时，即卡在 unsettled_external / pending_deliveries 未清空的
+#     结算竞态。该包的每个 target 都已在组内串行，重跑即通过，故这条证据不指向并行竞态，
+#     收窄条件仍未满足（三平台连续三次尚未达成）；若再次出现，优先按「整段互斥」回退，
+#     不要放宽断言。
 [test-groups]
 serial-process-state = { max-threads = 1 }
 

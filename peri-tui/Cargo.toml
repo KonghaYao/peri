@@ -22,12 +22,10 @@ tracing-subscriber.workspace = true
 peri-time.workspace = true
 serde.workspace = true
 # 3.0 批 3（tui-deps）依赖收紧豁免清单（见 scripts/import-exemptions.conf）：
-# - peri-middlewares：宿主装配点（launch.rs / main.rs / cli_print.rs 构造
-#   CronScheduler / McpClientPool / ToolSearchIndex / host_ports 注入 ACP 端口）
-#   与面板数据源直读（cron/mcp/plugin 具体句柄，service_snapshot / panels /
-#   atoms / cli_plugin）——「ACP Host 部署装配点职责」，M-TUI 收紧后移除
-#   （「面板数据全部经 ACP」需新增 cron/list、mcp/list 命令面，见批 3
-#   tui-deps 未做项）
+# - peri-middlewares：插件子系统直读（cli_plugin.rs 命令面与 host_ports hook
+#   绑定、kit/panels/plugin 数据源、launch.rs 插件聚合加载）——middlewares
+#   具体实现构造已迁 ACP Host 装配面；cron/mcp 面板数据经 ACP（cron/list、
+#   mcp/list），插件数据源随 M-TUI 收紧后移除
 # - peri-resources：Resources::open() 门面（app/mod.rs / main.rs / cli_print.rs
 #   初始化 thread store）+ thread/mod.rs 的 SqliteThreadStore re-export；
 #   M-TUI / L5 收紧后移除

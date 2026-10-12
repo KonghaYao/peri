@@ -72,6 +72,7 @@ step_includes=(
     'peri-agent:test:compact_failure_adversarial_test'
     'peri-agent:test:compact_pressure_adversarial_test'
     'peri-agent:test:compact_session_adversarial_test'
+    'peri-agent:test:compact_session_manual_adversarial_test'
     'peri-agent:test:compact_authority_projection_test'
     'peri-tui:lib:*'
     'peri-tui:bin:*'
@@ -93,11 +94,12 @@ doctest_excluded=(
     peri-middlewares
 )
 
-# 必跑套件（--check 的判据）。ARC-COMPACT-001 要求 Compact 三套对抗测试真实执行
+# 必跑套件（--check 的判据）。ARC-COMPACT-001 要求 Compact 对抗套件真实执行
 # 且各自命中非零用例，因此它们单列而不是依赖通配。
 required_suites=(
     'peri-agent:test:compact_pressure_adversarial_test'
     'peri-agent:test:compact_session_adversarial_test'
+    'peri-agent:test:compact_session_manual_adversarial_test'
     'peri-agent:test:compact_authority_projection_test'
     'peri-agent:test:middleware_tests'
     'peri-agent:test:compact_followup_behavior_test'

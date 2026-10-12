@@ -185,7 +185,19 @@ impl LlmProvider {
         200_000
     }
 
+    /// 装配处已解析的有效上下文窗口：`context_1m` 生效后的值。
+    ///
+    /// 这是唯一权威，装配出的模型与宿主预算都用它，避免两处各算一遍。
+    pub fn effective_context_window(&self) -> u32 {
+        if self.context_1m() {
+            1_000_000
+        } else {
+            self.context_window()
+        }
+    }
+
     pub fn into_model(self) -> Box<dyn peri_model::Model> {
+        let context_window = self.effective_context_window();
         match self {
             Self::OpenAi {
                 api_key,
@@ -204,6 +216,7 @@ impl LlmProvider {
                     config = config.with_thinking_enabled(true);
                 }
                 config = config.with_max_tokens(max_tokens);
+                config = config.with_context_window(Some(context_window));
                 // 全量观测：langfuse input 与实际发送请求体一致（敏感键/data URI 仍强制脱敏）
                 config = config.with_runtime(match retry_observer {
                     Some(observer) => peri_model::ModelRuntimeConfig::with_full_observation()
@@ -238,6 +251,7 @@ impl LlmProvider {
                     config = config.with_extended_thinking(thinking_budget, e);
                 }
                 config = config.with_max_tokens(output_max_tokens);
+                config = config.with_context_window(Some(context_window));
                 // 全量观测：langfuse input 与实际发送请求体一致（敏感键/data URI 仍强制脱敏）
                 config = config.with_runtime(match retry_observer {
                     Some(observer) => peri_model::ModelRuntimeConfig::with_full_observation()

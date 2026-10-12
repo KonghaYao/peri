@@ -1,6 +1,6 @@
 //! TUI 启动共享层——App + ACP server/client 构建与拆解。
 //!
-//! 把 App 初始化、ACP server/client 配对、插件/Hook 装配等步骤提取为
+//! 把 App 初始化、ACP server/client 配对、插件数据加载等步骤提取为
 //! `build_app_and_acp` / `teardown_app` 公共函数，供 `kit::entry::run_kit_fullscreen` 调用。
 
 use std::sync::Arc;
@@ -101,9 +101,6 @@ pub async fn build_app_and_acp(
             );
         }
     }
-
-    // 后台初始化 MCP 连接池（不阻塞 UI）
-    app.spawn_mcp_init();
 
     // 加载已启用插件数据
     {
@@ -241,7 +238,7 @@ pub async fn attach_acp(
     Ok(acp_client)
 }
 
-/// App 关闭：fire SessionEnd hooks + MCP pool shutdown。
+/// App 关闭：显式关闭 ACP deployment。
 ///
 /// 对称 `build_app_and_acp`——所有路径在退出前都应该调用。
 ///
@@ -249,16 +246,6 @@ pub async fn attach_acp(
 /// Incomplete 时部署 owner 仅在 App 仍被调用方持有时可重试，本函数不安排重试。
 /// 全屏退出路径随后会 Drop App；未完成的关闭不能因此视为已 join。
 pub async fn teardown_app(app: &mut App) {
-    // 关闭 MCP 连接池
-    if let Some(pool) = app.services.mcp_pool.take() {
-        tracing::info!("正在关闭 MCP 连接池...");
-        let report = shutdown_mcp_pool(pool, app.services.mcp_task_owner.take()).await;
-        if report.is_complete() {
-            tracing::info!("MCP 连接池已关闭");
-        } else {
-            tracing::warn!(?report, "MCP 连接池关闭未完全收敛");
-        }
-    }
     if let Some(deployment) = app.acp_deployment.as_mut() {
         let report = deployment.shutdown().await;
         if report.is_complete() {
@@ -271,18 +258,6 @@ pub async fn teardown_app(app: &mut App) {
         }
     }
     app.acp_client.take();
-}
-
-pub(crate) async fn shutdown_mcp_pool(
-    pool: Arc<peri_middlewares::mcp::McpClientPool>,
-    mut owner: Option<peri_middlewares::mcp::McpTaskOwner>,
-) -> peri_acp_types::ports::McpPoolShutdownReport {
-    pool.begin_shutdown();
-    if let Some(owner) = owner.as_mut() {
-        owner.begin_shutdown();
-        let _ = owner.shutdown().await;
-    }
-    pool.shutdown().await
 }
 
 #[cfg(test)]

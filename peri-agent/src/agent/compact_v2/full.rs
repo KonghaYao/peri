@@ -2,17 +2,22 @@
 //!
 //! 完整流程：
 //! 1. 从包含 canonical reminder 的可见模型上下文派生摘要请求
-//! 2. LLM 生成结构化摘要
+//! 2. LLM 生成结构化摘要；未完成时在同一次 Full 内用**有界恢复循环**补齐
 //! 3. 后处理摘要
 //! 4. 快照内自有的普通历史和 reminder 标 excluded（保留 System / ancestor）
 //! 5. 追加 Human 摘要消息（带 CONTINUATION_HINT，wrap 在 system-reminder 标签中）
 //!
 //! 历史工具调用及结果留存在 transcript 中；不会从计算实例本机重新读取 Workspace 文件。
+//!
+//! 恢复循环只把已生成的正文片段回填进临时请求；未完成摘要、错误字符串与
+//! 隐藏思考都不进入正式 transcript，也不执行摘要响应里的工具调用。只有正常
+//! 通过校验的非空摘要才经现有原子提交替换历史。
 
 use peri_model::{ModelMessage, ModelRequest};
 use tokio_util::sync::CancellationToken;
-use tracing::{debug, warn};
+use tracing::{debug, info, warn};
 
+use self::summary::{classify_summary_step, SummaryRecoveryReason, SummaryStep};
 use crate::agent::{
     compact_v2::{config::CompactConfig, CompactOutcome},
     events::CompactStrategy,
@@ -35,13 +40,28 @@ const SUMMARY_USER_PROMPT: &str = include_str!("descriptions/summary_user_prompt
 #[path = "summary.rs"]
 mod summary;
 
-use summary::{assemble_summary, SummaryAssembly};
+/// 摘要恢复提示：从已有正文末尾续写，只输出缺失部分。
+const SUMMARY_RECOVERY_PROMPT: &str = "Your summary was cut off. Continue exactly from the end of your previous text, \
+including any unfinished word or tag. Output only the missing remainder; do not restart, repeat earlier sections, or add \
+analysis. Prioritize the essential facts that are still missing — the active request and its constraints, work status, \
+and the next step — instead of only closing tags. Do not call tools.";
 
-const SUMMARY_CONTINUATION_PROMPT: &str = "Your summary was cut off by the output token limit. \
-Continue exactly from the end of your previous text, including any unfinished word or tag. \
-Output only the missing remainder; do not restart, repeat earlier sections, or add analysis. \
-This is your final response: finish the remaining essential facts concisely within the output budget \
-and close </summary>. There will be no further continuation. Do not call tools.";
+/// 最后一次生成的提示：补齐必要内容并在预算内简短收尾。
+const SUMMARY_FINAL_PROMPT: &str = "Your summary is still incomplete. Continue exactly from the end of your previous text \
+and output only the missing remainder; do not restart or repeat earlier sections. This is your final response: finish \
+the remaining essential facts — the active request and constraints, work status, and the next step — concisely within \
+the output budget and close </summary>. There will be no further continuation. Do not call tools.";
+
+/// 从未取得正文时的重新生成提示（替换原摘要指令，目标已减半）。
+const SUMMARY_REGENERATION_PROMPT: &str = "Your previous response contained no usable summary text. Respond now with a \
+complete summary: output only <summary>...</summary>, with no analysis or preamble. Finish every priority section from \
+the instructions above and close the summary within the reduced target. Do not call tools.";
+
+/// 摘要恢复请求的固定安全余量。
+///
+/// 这里的 token 数是 `crate::agent::token` 的字符启发式估算，不是 provider
+/// usage；协议开销与语言密度仍是近似边界，因此检查必须留出余量，不能当作精确值。
+const SUMMARY_INPUT_SAFETY_MARGIN_TOKENS: u32 = 5_000;
 
 // ─── Full Compact ───────────────────────────────────────────────────────────────
 
@@ -49,7 +69,7 @@ and close </summary>. There will be no further continuation. Do not call tools."
 ///
 /// 步骤：
 /// 1. 从包含 canonical reminder 的可见模型上下文派生摘要请求
-/// 2. LLM 生成结构化摘要
+/// 2. LLM 生成结构化摘要（未完成时同一次 Full 内有界恢复）
 /// 3. 后处理摘要
 /// 4. 快照内自有的普通历史和 reminder 标 excluded（保留 System / ancestor）
 /// 5. 追加 Human 摘要消息（带 CONTINUATION_HINT，wrap 在 system-reminder 标签中）
@@ -95,14 +115,10 @@ pub(super) async fn full_compact_inner(
         let budget = SummaryBudget::resolve(llm, config)?;
         // 保留历史的角色、工具配对和完整正文；摘要指令只追加到派生请求，
         // 不回写原 transcript，也不提供可执行工具。
-        let mut messages = AgentModelBridge::convert_messages(&visible)?;
-        messages.insert(0, ModelMessage::system_text(SUMMARY_SYSTEM_PROMPT));
-        messages.push(ModelMessage::user_text(SUMMARY_USER_PROMPT.replace(
-            "{summary_target_tokens}",
-            &(budget.target_tokens / 2).max(1).to_string(),
-        )));
-        let request = budget.apply(ModelRequest::new(messages));
-        complete_summary(llm, request).await?
+        let mut messages = vec![ModelMessage::system_text(SUMMARY_SYSTEM_PROMPT)];
+        messages.extend(AgentModelBridge::convert_messages(&visible)?);
+        let conversation = RecoveryConversation::default();
+        complete_summary(llm, messages, &visible, budget, conversation).await?
     } else {
         // 全 System / 空历史仍保持命令输出 Human-first 的既有契约。
         "No conversation history to compact.".to_owned()
@@ -143,20 +159,19 @@ pub(super) async fn full_compact_inner(
     })
 }
 
-/// Full Compact 派生请求的输出预算（H6）。
+/// Full Compact 派生请求的输出预算与恢复次数预算（H6）。
 ///
-/// 单一来源是**当前模型已解析的单次输出上限**（`Model::output_token_limit`），
+/// 输出预算的单一来源是**当前模型已解析的单次输出上限**（`Model::output_token_limit`），
 /// 不是 `summary_max_tokens`：后者是长度目标上限，只影响提示词里的目标字数，
-/// 并受有效输出预算约束。这样：
-/// - 低输出预算的模型不会收到超过自身上限的 `max_tokens`（旧行为会在摘要请求上
-///   覆写成 16000 而失败）；
-/// - thinking 配置与上限由 provider 解析，摘要路径不改写；
-/// - 续写复用同一 `ModelRequest`，因此预算与首轮一致。
+/// 并受有效输出预算约束。恢复次数由 `summary_max_requests` 限定，首轮与所有
+/// 恢复共用同一个计数器。
 struct SummaryBudget {
     /// 模型已解析的单次输出上限；`None` = provider 未声明，请求沿用 provider 默认。
     output_limit: Option<u32>,
     /// 提示词中声明的长度目标（受有效输出预算约束）。
     target_tokens: u32,
+    /// 单次 Full 内允许的逻辑摘要生成次数（首轮 + 恢复），恒 ≥ 1。
+    max_requests: u32,
 }
 
 impl SummaryBudget {
@@ -165,6 +180,12 @@ impl SummaryBudget {
             // 零值不是「不限」：既不能成为长度目标，也不允许被代填成任意常量。
             return Err(AgentError::CompactSummaryBudgetInvalid {
                 reason: "summary_max_tokens must be greater than zero",
+            });
+        }
+        if config.summary_max_requests == 0 {
+            // 零值不是「不限」：没有逻辑生成次数的请求预算，就不是可执行的配置。
+            return Err(AgentError::CompactSummaryBudgetInvalid {
+                reason: "summary_max_requests must be at least 1",
             });
         }
         let output_limit = match llm.output_token_limit() {
@@ -180,7 +201,18 @@ impl SummaryBudget {
             target_tokens: output_limit.map_or(config.summary_max_tokens, |limit| {
                 config.summary_max_tokens.min(limit)
             }),
+            max_requests: config.summary_max_requests,
         })
+    }
+
+    /// 首轮提示词声明的长度目标：给模型输出留余量。
+    fn initial_target_tokens(&self) -> u32 {
+        (self.target_tokens / 2).max(1)
+    }
+
+    /// 无正文重新生成时声明的长度目标：在首轮目标上再减半，且不触碰 provider 上限。
+    fn regeneration_target_tokens(&self) -> u32 {
+        (self.initial_target_tokens() / 2).max(1)
     }
 
     /// 把有效预算应用到请求上：只沿用已解析上限，不写入 `summary_max_tokens`。
@@ -192,50 +224,274 @@ impl SummaryBudget {
     }
 }
 
+/// 一次 Full 的临时摘要恢复对话（原始请求 + 已生成片段 + 恢复提示）。
+///
+/// 恢复对话始终以 user 提示结尾；回填的片段只出现一次，避免同时加入
+/// 「合并全文」和同一批历史片段而重复计算。连续的同角色消息合并到尾部
+/// user 提示里，保持 provider 要求的 user/assistant 交替。
+#[derive(Default)]
+struct RecoveryConversation {
+    /// 除原始请求外的恢复对话消息。
+    messages: Vec<ModelMessage>,
+    /// 按顺序累计的可回填片段；拼接时不插入分隔符。
+    chunks: String,
+}
+
+impl RecoveryConversation {
+    /// 追加本轮提示；尾部已是 user 时并入同一条消息。
+    fn push_prompt(&mut self, prompt: &str) {
+        if let Some(ModelMessage::User { content }) = self.messages.last_mut() {
+            content.push(peri_model::ContentBlock::text(prompt));
+            return;
+        }
+        self.messages.push(ModelMessage::user_text(prompt));
+    }
+
+    /// 用新提示替换尾部提示（无正文重新生成时改写目标，不注入空 assistant）。
+    fn replace_prompt(&mut self, prompt: &str) {
+        if matches!(self.messages.last(), Some(ModelMessage::User { .. })) {
+            self.messages.pop();
+        }
+        self.messages.push(ModelMessage::user_text(prompt));
+    }
+
+    /// 回填已生成的 assistant 正文片段。
+    fn push_chunk(&mut self, chunk: &str) {
+        self.chunks.push_str(chunk);
+        self.messages.push(ModelMessage::assistant_text(chunk));
+    }
+
+    /// 构造本次派生请求：原始请求 + 恢复对话。
+    fn request(&self, prefix: &[ModelMessage]) -> ModelRequest {
+        let mut messages = prefix.to_vec();
+        messages.extend(self.messages.iter().cloned());
+        ModelRequest::new(messages)
+    }
+
+    /// 已有草稿的字节长度；没有 tokenizer 估算时只作为诊断量，不冒充 tokens。
+    fn draft_bytes(&self) -> usize {
+        self.chunks.len()
+    }
+}
+
+/// 有界恢复循环：每次 Full 只允许 `summary_max_requests` 次逻辑生成。
+///
+/// 取消、配置错误、provider 重试耗尽与持久化失败都不在这里重开预算。
 async fn complete_summary(
     llm: &dyn peri_model::Model,
-    mut request: ModelRequest,
+    prefix: Vec<ModelMessage>,
+    visible: &[BaseMessage],
+    budget: SummaryBudget,
+    mut conversation: RecoveryConversation,
 ) -> AgentResult<String> {
-    let first = llm
-        .complete(request.clone(), CancellationToken::new())
-        .await
-        .map_err(map_model_error)?;
-    match assemble_summary(&first, None).inspect_err(|error| {
-        warn!(%error, "Full Compact first response has no usable summary");
-    })? {
-        SummaryAssembly::Complete { text, .. } => return Ok(text),
-        SummaryAssembly::Continue => {}
-    }
-    warn!(
-        output_tokens = first.usage().map(|usage| usage.output_tokens),
-        "Full Compact output truncated; continuing the existing summary once"
-    );
-    request.messages.push(ModelMessage::assistant_text(
-        first.assistant_text().unwrap_or_default(),
-    ));
-    request
-        .messages
-        .push(ModelMessage::user_text(SUMMARY_CONTINUATION_PROMPT));
-    tokio::task::yield_now().await;
-    let second = llm
-        .complete(request, CancellationToken::new())
-        .await
-        .map_err(map_model_error)?;
-    match assemble_summary(&first, Some(&second)).inspect_err(|error| {
-        warn!(%error, "Full Compact continuation has no usable summary");
-    })? {
-        SummaryAssembly::Complete { text, truncated } => {
-            if truncated {
-                warn!(
-                    output_tokens = second.usage().map(|usage| usage.output_tokens),
-                    "Full Compact reached output limit twice; preserving both chunks and omitting the remaining tail"
+    // 摘要模型自己的已解析窗口；无法解析时预算检查显式记为 unknown。
+    let context_window = llm.context_window();
+    // 历史长度沿用 Reason 侧的同一 chars/4 估算；恢复片段与提示逐次计入。
+    let history_tokens = crate::agent::token::estimate_request_tokens(visible, &[]);
+    let mut request_index = 0u32;
+    let mut empty_regeneration_used = false;
+    let mut last_reason: Option<SummaryRecoveryReason> = None;
+
+    loop {
+        if request_index >= budget.max_requests {
+            // 绝不发起第 N+1 次逻辑生成。
+            let error = AgentError::CompactRecoveryExhausted {
+                attempts: request_index,
+                last_reason: last_reason.unwrap_or(SummaryRecoveryReason::EmptyResponse),
+            };
+            warn!(
+                attempts = request_index,
+                max_requests = budget.max_requests,
+                recovery_reason = ?last_reason,
+                draft_bytes = conversation.draft_bytes(),
+                "Full Compact summary recovery exhausted; the original history is unchanged"
+            );
+            return Err(error);
+        }
+        let is_final_request = request_index + 1 == budget.max_requests;
+        if request_index == 0 {
+            conversation.push_prompt(&summary_instruction(budget.initial_target_tokens()));
+        } else if conversation.chunks.is_empty() {
+            // 从未取得可用正文：只允许一次重新生成，目标减半，不注入空 assistant。
+            conversation.replace_prompt(&regeneration_instruction(
+                budget.regeneration_target_tokens(),
+            ));
+        } else if is_final_request {
+            conversation.push_prompt(SUMMARY_FINAL_PROMPT);
+        } else {
+            conversation.push_prompt(SUMMARY_RECOVERY_PROMPT);
+        }
+        let next_index = request_index + 1;
+        let estimated_input_tokens =
+            history_tokens.saturating_add(estimate_dialog_tokens(&conversation.messages));
+        check_input_budget(next_index, estimated_input_tokens, &budget, context_window)?;
+        let request = budget.apply(conversation.request(&prefix));
+        tokio::task::yield_now().await;
+        request_index = next_index;
+        let response = llm
+            .complete(request, CancellationToken::new())
+            .await
+            .map_err(map_model_error)?;
+        debug!(
+            request_index,
+            max_requests = budget.max_requests,
+            stop_reason = ?response.stop_reason(),
+            input_tokens_estimate = estimated_input_tokens,
+            output_tokens = response.usage().map(|usage| usage.output_tokens),
+            draft_bytes = conversation.draft_bytes(),
+            "Full Compact summary request completed"
+        );
+        match classify_summary_step(&response, &conversation.chunks)? {
+            SummaryStep::Complete(text) => {
+                info!(
+                    request_index,
+                    max_requests = budget.max_requests,
+                    recovered = request_index > 1,
+                    "Full Compact summary completed"
                 );
+                return Ok(text);
             }
-            Ok(text)
+            SummaryStep::Draft { chunk, reason } => {
+                // 截断/未闭合是恢复分支，不是 session fatal error。
+                warn!(
+                    request_index,
+                    max_requests = budget.max_requests,
+                    recovery_reason = %reason,
+                    stop_reason = ?response.stop_reason(),
+                    output_tokens = response.usage().map(|usage| usage.output_tokens),
+                    draft_bytes = conversation.draft_bytes(),
+                    "Full Compact summary is incomplete; continuing within the same Full"
+                );
+                last_reason = Some(reason);
+                conversation.push_chunk(&chunk);
+            }
+            SummaryStep::Empty { reason } => {
+                warn!(
+                    request_index,
+                    max_requests = budget.max_requests,
+                    recovery_reason = %reason,
+                    stop_reason = ?response.stop_reason(),
+                    previous_draft_bytes = conversation.draft_bytes(),
+                    "Full Compact summary response has no usable text"
+                );
+                if conversation.chunks.trim().is_empty() {
+                    if empty_regeneration_used {
+                        // 重新生成后仍无正文：提前结束，避免用光预算空转。
+                        return Err(AgentError::CompactRecoveryExhausted {
+                            attempts: request_index,
+                            last_reason: reason,
+                        });
+                    }
+                    empty_regeneration_used = true;
+                }
+                last_reason = Some(reason);
+            }
         }
-        SummaryAssembly::Continue => {
-            unreachable!("a second summary response cannot request continuation")
+    }
+}
+
+/// 每次派生请求前的同源预算检查。
+///
+/// 上限齐全时拒绝装不下的请求（不裁剪原始上下文、工具配对或用户约束）；任一
+/// 元数据无法解析时显式记为 `budget_check=unknown`，保留 provider 默认行为。
+fn check_input_budget(
+    request_index: u32,
+    estimated_input_tokens: u64,
+    budget: &SummaryBudget,
+    context_window: Option<u32>,
+) -> AgentResult<()> {
+    let (Some(context_window), Some(output_reserve)) = (context_window, budget.output_limit) else {
+        debug!(
+            request_index,
+            budget_check = "unknown",
+            input_tokens_estimate = estimated_input_tokens,
+            output_token_limit = ?budget.output_limit,
+            context_window = ?context_window,
+            "Full Compact summary request budget check skipped: resolved metadata is incomplete"
+        );
+        return Ok(());
+    };
+    let required = estimated_input_tokens
+        .saturating_add(u64::from(output_reserve))
+        .saturating_add(u64::from(SUMMARY_INPUT_SAFETY_MARGIN_TOKENS));
+    if required > u64::from(context_window) {
+        warn!(
+            request_index,
+            input_tokens_estimate = estimated_input_tokens,
+            output_reserve = output_reserve,
+            context_window,
+            "Full Compact summary request does not fit the compact model window; not sending it"
+        );
+        return Err(AgentError::CompactSummaryInputExceeded {
+            request_index,
+            request_tokens: estimated_input_tokens,
+            output_reserve,
+            safety_margin: SUMMARY_INPUT_SAFETY_MARGIN_TOKENS,
+            context_window,
+        });
+    }
+    Ok(())
+}
+
+/// 摘要指令：模板 + 本次声明的长度目标。
+fn summary_instruction(target_tokens: u32) -> String {
+    SUMMARY_USER_PROMPT.replace("{summary_target_tokens}", &target_tokens.to_string())
+}
+
+/// 重新生成指令：原指令（目标减半）+ 明确要求只输出摘要正文。
+fn regeneration_instruction(target_tokens: u32) -> String {
+    format!(
+        "{}\n\n{}",
+        summary_instruction(target_tokens),
+        SUMMARY_REGENERATION_PROMPT
+    )
+}
+
+/// 恢复对话的输入估算：与 `crate::agent::token` 共用 chars/4 启发式。
+///
+/// 只统计会发给模型的正文（隐藏思考不进入派生请求）；这是近似值，不冒充 usage。
+fn estimate_dialog_tokens(messages: &[ModelMessage]) -> u64 {
+    let chars: u64 = messages
+        .iter()
+        .map(|message| match message {
+            ModelMessage::System { content }
+            | ModelMessage::User { content }
+            | ModelMessage::Assistant { content, .. } => content
+                .iter()
+                .map(estimate_content_chars)
+                .fold(0u64, u64::saturating_add),
+            ModelMessage::ToolResult { result } => result
+                .content
+                .iter()
+                .map(estimate_content_chars)
+                .fold(0u64, u64::saturating_add),
+        })
+        .fold(0u64, u64::saturating_add);
+    chars.div_ceil(4)
+}
+
+fn estimate_content_chars(block: &peri_model::ContentBlock) -> u64 {
+    use peri_model::ContentBlock;
+    match block {
+        ContentBlock::Text { text } => text.chars().count() as u64,
+        ContentBlock::ToolUse { tool_call } => {
+            let arguments = serde_json::to_string(tool_call.arguments()).unwrap_or_default();
+            tool_call
+                .name()
+                .chars()
+                .count()
+                .saturating_add(arguments.chars().count()) as u64
         }
+        // 摘要请求不带工具定义；图片/文档只有占位成本，按有界常量估算。
+        ContentBlock::Image { .. } | ContentBlock::Document { .. } => {
+            crate::agent::token::BINARY_MEDIA_ESTIMATED_TOKENS
+        }
+        ContentBlock::Reasoning { .. } | ContentBlock::RedactedReasoning { .. } => 0,
+        ContentBlock::ToolResult { result } => result
+            .content
+            .iter()
+            .map(estimate_content_chars)
+            .fold(0u64, u64::saturating_add),
     }
 }
 

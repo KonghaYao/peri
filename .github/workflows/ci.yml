@@ -160,14 +160,16 @@ jobs:
                   | binary(=middleware_tests) | binary(=compact_followup_behavior_test)
                   | binary(=compact_failure_adversarial_test))'
 
-            # ARC-COMPACT-001 Verify：Compact 三套对抗套件必须真实执行且命中非零用例
+            # ARC-COMPACT-001 Verify：Compact 四套对抗套件必须真实执行且命中非零用例
             # （--no-tests=fail 保证每套都命中，而不是靠总数）。
             - name: Run Compact adversarial suites (ARC-COMPACT-001)
               shell: bash
               run: >-
                   ./scripts/cargo-rmcp-patched.sh nextest run --locked --workspace --no-tests=fail
                   -E 'package(=peri-agent) & (binary(=compact_pressure_adversarial_test)
-                  | binary(=compact_session_adversarial_test) | binary(=compact_authority_projection_test))'
+                  | binary(=compact_session_adversarial_test)
+                  | binary(=compact_session_manual_adversarial_test)
+                  | binary(=compact_authority_projection_test))'
 
             - name: Run TUI tests (excluding SDK E2E)
               shell: bash
