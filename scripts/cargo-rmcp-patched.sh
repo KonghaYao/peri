@@ -177,4 +177,28 @@ if [[ "$1" == "clippy" ]]; then
     # leading --config flag, so pass the patch config to clippy itself.
     exec cargo clippy --config "$cargo_config_file" "$@"
 fi
+if [[ "$1" == "nextest" ]]; then
+    shift
+    # `cargo nextest` is an external subcommand with the same problem as clippy:
+    # the leading `cargo --config` never reaches the `cargo metadata` / build
+    # invocations that cargo-nextest spawns internally. nextest 0.9.35+ documents
+    # that its own `--config` is handed through to Cargo, so pass the patch
+    # config explicitly after the nextest subcommand.
+    #
+    # Only `run` and `list` take `--config`; other subcommands (show-config,
+    # archive, ...) are forwarded untouched so nextest keeps its own argv.
+    subcommand="${1:-}"
+    case "$subcommand" in
+        run|list)
+            shift
+            exec cargo nextest "$subcommand" --config "$cargo_config_file" "$@"
+            ;;
+        "")
+            exec cargo nextest
+            ;;
+        *)
+            exec cargo nextest "$subcommand" "$@"
+            ;;
+    esac
+fi
 exec cargo --config "$cargo_config_file" "$@"

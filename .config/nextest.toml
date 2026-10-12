@@ -1,0 +1,21 @@
+# cargo nextest 配置：把「测试选择」与「Cargo 编译图」分离。
+#
+# CI 里所有 nextest 调用都使用同一组 Cargo 参数（`--locked --workspace`），
+# 各步骤的测试范围差异只落在命令行 `-E` 过滤器上。nextest 的构建阶段不参与过滤
+# （先按 `cargo test --no-run` 语义构建全部测试二进制，再决定运行哪些），因此
+# 包集合、target、profile 与 feature 投影在整个 job 内保持恒定，步骤切换不再
+# 触发依赖重编译。
+#
+# 这里只放「跨步骤共享、且与 Cargo 选择无关」的规则；每个步骤的范围写在
+# .github/workflows/ci.yml 对应步骤的 `-E` 里，便于就地 review。
+# scripts/ci-test-inventory.sh --check 会核对两侧一致。
+#
+# 版本下限：default-filter 需要 0.9.84，`--no-tests` 默认 fail 需要 0.9.85。
+# CI 固定安装 0.9.148，并且每个步骤显式传 `--no-tests=fail`，不依赖默认值。
+nextest-version = "0.9.85"
+
+[profile.default]
+# 原有 E2E 跳过条件按 package + test 精确迁移，不用裸 `test(...)`：裸匹配会连带
+# 排除其他包里同名的测试。这些用例需要真实 SDK / 外部环境，在 CI 中不执行
+# （范围与迁移前 `cargo test -- --skip ...` 一致）。
+default-filter = "not (package(=peri-acp) & test(host::execution_admission_jsonl) | package(=peri-acp) & test(host::scheduled_admission) | package(=peri-tui) & test(sdk_execution::tests::real_sdk) | package(=peri-middlewares) & test(subagent::tool) | package(=peri-middlewares) & test(mcp::workspace_recovery_tests) | package(=peri-middlewares) & test(mcp::workspace_builtin_tests::bridge_accepts_workspace_owned_task_handle) | package(=peri-middlewares) & test(mcp::tool_bridge::tests::builtin_tool_call_surfaces_timeout_error_after_bridge_deadline))"
