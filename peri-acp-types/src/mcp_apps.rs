@@ -276,6 +276,15 @@ pub enum McpAppsErrorKind {
     SequenceGap,
     /// 容量不足（尚未登记）：**不消耗序号**，登记未发生。
     CapacityExceeded,
+    /// 调用者未获本会话该项能力的 entitlement（R4）。
+    ///
+    /// 唯一事实是「本次调用没有可用的授权事实」：既覆盖可信身份层明确不授权
+    /// （`grant` 返回 `None` 或 grant 不覆盖本次请求），也覆盖**本部署未注入身份层**
+    /// （`Option<Arc<dyn SessionAuthorizationPort>>` 为 `None`）——契约规定未注入
+    /// 同样按拒绝处理，不得回落到「只看 id 是否存在」。与
+    /// [`Self::Forbidden`] 不是同一事实：后者的含义是「本连接不是该附件的承载
+    /// 连接」。
+    EntitlementDenied,
 }
 
 impl McpAppsErrorKind {
@@ -306,6 +315,7 @@ impl McpAppsErrorKind {
             Self::ResultExpired => "result_expired",
             Self::SequenceGap => "sequence_gap",
             Self::CapacityExceeded => "capacity_exceeded",
+            Self::EntitlementDenied => "entitlement_denied",
         }
     }
 }

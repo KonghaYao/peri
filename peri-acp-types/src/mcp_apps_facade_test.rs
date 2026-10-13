@@ -310,6 +310,7 @@ fn error_kinds_have_distinct_stable_keys() {
         McpAppsErrorKind::ResultExpired,
         McpAppsErrorKind::SequenceGap,
         McpAppsErrorKind::CapacityExceeded,
+        McpAppsErrorKind::EntitlementDenied,
     ];
     let keys = kinds.map(McpAppsErrorKind::as_str);
     assert_eq!(
@@ -321,6 +322,7 @@ fn error_kinds_have_distinct_stable_keys() {
             "result_expired",
             "sequence_gap",
             "capacity_exceeded",
+            "entitlement_denied",
         ]
     );
 }
