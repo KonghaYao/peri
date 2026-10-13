@@ -1,9 +1,9 @@
 //! [设计 §6 表 A2–A13 + §8.1 低 5 的 ACP 层] `peri/mcp/apps/*` 七个方法的真实路径回归。
 //!
 //! 真实对象：进程内 MCP peer（记录每次 `tools/call` 的工具名与参数、资源 read /
-//! list）+ 真实连接池 + 真实 bridge/canonical 管线 + 真实 `SessionInvocationService`
-//! + 真实 `SessionInteractionRouter` + 真实 `PoolMcpAppsRelay` + 真实
-//! `RequestLedger` + 真实 `SessionAppsFacade` + 真实 ACP 分发（`host::mcp_apps`）。
+//! list）、真实连接池、真实 bridge/canonical 管线、真实 `SessionInvocationService`、
+//! 真实 `SessionInteractionRouter`、真实 `PoolMcpAppsRelay`、真实 `RequestLedger`、
+//! 真实 `SessionAppsFacade`，以及真实 ACP 分发（`host::mcp_apps`）。
 //!
 //! 被替代的只有两类不可控外部输入：
 //! 1. ACP 客户端帧（stub transport 记录 `session/request_permission` 并按预设应答）；
