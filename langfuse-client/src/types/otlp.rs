@@ -6,6 +6,10 @@ use serde::{Deserialize, Serialize};
 // Spec: https://opentelemetry.io/docs/specs/otlp/
 
 /// OTLP trace export request body
+///
+/// 以下 resource/scope/request 包装类型只由 `types::conversion::ingestion_events_to_otel`
+/// 物化回归使用（契约 §3.5）：非测试构建不构造，故与物化入口同一 `cfg(test)` 门控。
+#[cfg(test)]
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct OtelTraceExportRequest {
     #[serde(rename = "resourceSpans")]
@@ -13,6 +17,7 @@ pub struct OtelTraceExportRequest {
 }
 
 /// A collection of spans from a single resource
+#[cfg(test)]
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct OtelResourceSpan {
@@ -23,6 +28,7 @@ pub struct OtelResourceSpan {
 }
 
 /// Resource attributes identifying the source of telemetry
+#[cfg(test)]
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct OtelResource {
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -30,6 +36,7 @@ pub struct OtelResource {
 }
 
 /// Collection of spans from a single instrumentation scope
+#[cfg(test)]
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct OtelScopeSpan {
@@ -40,6 +47,7 @@ pub struct OtelScopeSpan {
 }
 
 /// Instrumentation scope information
+#[cfg(test)]
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct OtelScope {
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -112,38 +120,4 @@ pub struct OtelAttributeValue {
     pub double_value: Option<f64>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub bool_value: Option<bool>,
-}
-
-impl OtelAttributeValue {
-    pub fn string(v: impl Into<String>) -> Self {
-        Self {
-            string_value: Some(v.into()),
-            int_value: None,
-            double_value: None,
-            bool_value: None,
-        }
-    }
-
-    pub fn int(v: i64) -> Self {
-        Self {
-            string_value: None,
-            int_value: Some(v),
-            double_value: None,
-            bool_value: None,
-        }
-    }
-}
-
-/// Helper to build an attribute
-impl OtelAttribute {
-    pub fn new(key: impl Into<String>, value: OtelAttributeValue) -> Self {
-        Self {
-            key: key.into(),
-            value: Some(value),
-        }
-    }
-
-    pub fn string(key: impl Into<String>, val: impl Into<String>) -> Self {
-        Self::new(key, OtelAttributeValue::string(val))
-    }
 }

@@ -36,6 +36,11 @@ mod workspace;
 #[cfg(not(target_os = "emscripten"))]
 mod workspace_resources;
 pub use lifecycle::{spawn_acp_server, AcpHostHandle, AcpHostShutdownReport};
+// 关闭报告的遥测载荷：`AcpHostShutdownReport::TelemetryFailed` 携带的终态与计数快照。
+// 部署面（TUI）必须能命名它们，才能把「遥测未收敛」与业务失败分开，而调用方不该为此
+// 直依赖 peri-controller / langfuse-client（同 `lib.rs` 的 LangfuseSessionLike re-export）。
+pub use langfuse_client::DeliveryCounts;
+pub use peri_controller::langfuse::LangfuseShutdownReport;
 mod activation;
 mod continuation;
 pub mod controller_ports;
@@ -92,6 +97,8 @@ pub mod stage_builder;
 #[cfg(not(target_os = "emscripten"))]
 pub mod stdio;
 mod task_scope;
+/// 宿主遥测装配（暂存能力注入 + 关闭结果保有规则），见模块文档。
+mod telemetry;
 #[cfg(test)]
 #[path = "unify_wire_baseline_test.rs"]
 mod unify_wire_baseline_tests;

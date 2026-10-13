@@ -31,7 +31,9 @@ fallback。纯 resolver 只使用输入值；system 管发布和更新。模块�
 | MCP 基础配置 | `mcp.rs`：`parse_global`、`parse_project`、`resolve_from_files`、`validate_config`、`server_config_hash` | global/plugin/project 合并、插件手动去重、typed 准入与 cache 关闭优先 |
 | Builtin 环境策略 | `mcp.rs`：`builtin_enabled` | `PERI_MCP_BUILTIN` 解释规则归 core；旧 builtin adapter 只采集 env，不复制规则 |
 | 快照中的插件/普通/bare 投影 | `system.rs`：`mcp_with_plugins`、`bare_mcp`、`cache_policy`、`builtin_mcp_enabled` | 从冻结原始输入派生；插件发现和执行展开留在 middleware |
-| Langfuse | `observability.rs`：`LangfuseConfig`、`resolve`、`ENVIRONMENT_KEYS` | 纯 settings/env 解析，保持 clamp/default/invalid/batch 规则；Debug 脱敏 |
+| Langfuse 基础键 | `observability.rs`：`LangfuseConfig`、`resolve`、`ENVIRONMENT_KEYS`、`LangfuseCompression`、`ConfigValueSource` | 13 个旧键保持 clamp/忽略非法值语义，`batch_max_event_bytes` 默认 4 MiB；Debug 脱敏；`ENVIRONMENT_KEYS` 现为 24 项，新键常量从 `observability_spool` 拼入，不在别处维护第二份清单 |
+| Langfuse spool/编码/预算键 | `observability_spool.rs`：`SPOOL_ENABLED`…`SHUTDOWN_GRACE_SECS`、逐键解析与 `resolve` | 11 个新键逐键选胜出来源（env > `langfuse.*` settings > default），布尔/压缩/非零十进制规则见[环境变量表](../standards/environment-variables.md)；胜出值非法返回 `LangfuseConfigError`，不回退默认；跨键约束（阈值、块大小与预算）归客户端构造期校验 |
+| Langfuse 配置错误 | `observability.rs`：`LangfuseConfigError::Invalid { key, origin, reason }`；`assembly.rs::resolve` | 错误只带键名、来源与原因，不带原值；按来源映射为 `ConfigurationError::InvalidInput`（settings→GlobalFile，env→Environment），拒绝整份快照的发布 |
 | TUI | `ui.rs`：`TuiConfig::{from_extra,sync_to_extra}` | UI 默认值、typed 字段和 extra 保存规则；视图状态留在 TUI |
 
 ## 更新接纳边界
@@ -76,6 +78,7 @@ fallback。纯 resolver 只使用输入值；system 管发布和更新。模块�
 - `settings_test.rs`：固定布局、同文件身份、差异保存、显式 reload、lenient
   错误禁止写错层、unknown 顶层字段保留。
 - `app_test.rs`、`mcp_test.rs`、`observability_test.rs`、`ui_test.rs`、`resources_test.rs`：领域规则。
+- `observability_spool_test.rs`、`assembly_test.rs`：24 键逐项与默认、新键胜出来源与归一化、非法胜出值拒绝快照并保留来源定位、禁用 spool 不改动既有文件。
 - `mcp-packages/config/src/cas_test.rs`：missing/empty 区分、冲突、并发 CAS 与 wire。
 
 典型命令：`cargo test -p peri-config --lib -- system::tests`。

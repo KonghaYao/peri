@@ -1,4 +1,8 @@
 //! 有界注册闸门及按原顺序取出的重放事件。
+//!
+//! 闸门保存的 LLM 事件携带已冻结的输入来源：计费在入闸门前完成，闸门本身不做 IO，
+//! 也不持有 messages/tools 或请求体原文。逐出与拒绝都立即释放对应来源（permit 归还 /
+//! ticket 置取消位），因此缓存满不会让预算被静默占住（契约 §3.3）。
 
 use super::{GateEvent, IncompleteReason, SubagentRegistry, GATE_CACHE_LIMIT};
 
@@ -12,7 +16,9 @@ impl SubagentRegistry {
         if self.gate_cache.len() >= GATE_CACHE_LIMIT {
             // 溢出:逐出最旧事件(丢弃,不重放);若其 agent 的 Start 正在等待 join
             // (pending_starts),该 child 已无法完整重放 → 标 CacheOverflow。
-            if let Some((evicted_agent, _)) = self.gate_cache.pop_front() {
+            if let Some((evicted_agent, evicted)) = self.gate_cache.pop_front() {
+                // 逐出即释放该事件持有的冻结来源（不等待 IO，不等 backlog 排空）。
+                drop(evicted);
                 if self
                     .pending_starts
                     .iter()
@@ -29,7 +35,7 @@ impl SubagentRegistry {
                     "gate_cache 溢出,逐出最旧事件(不重放)"
                 );
             }
-            // 缓存满时拒绝新事件:直接丢弃,按未知处理
+            // 缓存满时拒绝新事件:直接丢弃,按未知处理(其冻结来源在此释放)
             tracing::warn!(
                 target: "langfuse::subagent",
                 %agent_id,
@@ -41,7 +47,8 @@ impl SubagentRegistry {
         true
     }
 
-    /// 取出该 child 的全部 gate 缓存事件(按原顺序),并从缓存移除
+    /// 取出该 child 的全部 gate 缓存事件(按原顺序),并从缓存移除。
+    /// 取出的来源由重放方负责交付或释放。
     pub(crate) fn take_gated_events(&mut self, child_agent_id: &str) -> Vec<GateEvent> {
         let mut taken = Vec::new();
         let mut i = 0;

@@ -184,18 +184,18 @@ impl LangfuseTracer {
                 GateEvent::LlmCallStart {
                     agent_id,
                     step,
-                    messages,
-                    tools,
+                    input,
                 } => {
-                    self.on_llm_start_snapshot_inner(&agent_id, step, messages, tools);
+                    // 重放使用闸门里已冻结的来源，不重新计费、不再克隆原文
+                    self.on_llm_start_snapshot_inner(&agent_id, step, input);
                 }
                 GateEvent::LlmRequestPayload {
                     agent_id,
                     step,
-                    body,
+                    input,
                 } => {
                     self.generation
-                        .on_llm_request_payload(&agent_id, step, body);
+                        .on_llm_request_payload(&agent_id, step, input);
                 }
                 GateEvent::ToolStart {
                     agent_id,

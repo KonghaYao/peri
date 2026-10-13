@@ -5,8 +5,40 @@ use super::turn_error::{failure_error_class, failure_output};
 use super::turn_fallback::GenerationFallbackStatus;
 use super::LangfuseTracer;
 use langfuse_client::types::TraceBody;
-use langfuse_client::{IngestionEvent, ObservationBody, ObservationType};
+use langfuse_client::{IngestionEvent, LangfuseError, ObservationBody, ObservationType};
 use peri_acp_types::session::TurnTelemetryOutcome;
+
+/// turn 尾部 flush 失败的结构化诊断（契约 §3.6）。
+///
+/// 只记录终态分类与交付计数：不带事件正文、input/output、服务端响应或凭据。待交付积压
+/// （`Pending`/`PersistedPending`/`DeliveryIncomplete`）与无事件身份的准备失败都必须照实
+/// 记录，不能被当成"发送成功"或吞掉。
+fn warn_flush_failure(trace_id: &str, error: &LangfuseError) {
+    let (kind, counts, failed_snapshots) = match error {
+        LangfuseError::Pending { counts } => ("pending", Some(counts), 0),
+        LangfuseError::PersistedPending { counts } => ("persisted_pending", Some(counts), 0),
+        LangfuseError::DeliveryIncomplete { counts } => ("delivery_incomplete", Some(counts), 0),
+        LangfuseError::SnapshotPreparationFailed {
+            failed_snapshots,
+            counts,
+        } => ("prepare_failed", Some(counts), *failed_snapshots),
+        _ => ("failed", None, 0),
+    };
+    match counts {
+        Some(counts) => tracing::warn!(
+            trace_id = %trace_id,
+            kind,
+            pending_events = counts.pending_events,
+            persisted_pending_events = counts.persisted_pending_events,
+            failed_events = counts.failed_events,
+            cleanup_pending_objects = counts.cleanup_pending_objects,
+            active_tasks = counts.active_tasks,
+            failed_snapshots,
+            "langfuse: session flush did not confirm delivery"
+        ),
+        None => tracing::warn!(trace_id = %trace_id, "langfuse: session flush failed"),
+    }
+}
 
 impl LangfuseTracer {
     /// 对话轮次开始：创建 Trace 根 span 并推迟 agent-run Observation。
@@ -117,8 +149,8 @@ impl LangfuseTracer {
                 let session = Arc::clone(&self.session);
                 let trace_id = self.trace_id.clone();
                 return tokio::spawn(async move {
-                    if session.flush().await.is_err() {
-                        tracing::warn!(trace_id = %trace_id, "langfuse: session flush failed");
+                    if let Err(error) = session.flush().await {
+                        warn_flush_failure(&trace_id, &error);
                     }
                 });
             }
@@ -179,8 +211,8 @@ impl LangfuseTracer {
         // 最终 flush 保持 fire-and-forget（不阻塞执行管线；pump_done 已先行发出），
         // 常驻进程（TUI/ACP server）无需等待；短生命周期进程由调用方显式 flush。
         tokio::spawn(async move {
-            if session.flush().await.is_err() {
-                tracing::warn!(trace_id = %trace_id, "langfuse: session flush failed");
+            if let Err(error) = session.flush().await {
+                warn_flush_failure(&trace_id, &error);
             }
         })
     }

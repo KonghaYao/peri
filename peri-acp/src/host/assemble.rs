@@ -899,7 +899,9 @@ pub(crate) async fn assemble_server_config_with_mcp_profile(
         plugin_command_entries.clone(),
     );
 
-    // Langfuse 观测（与迁移前 TUI/stdio/print 一致：环境启用时创建）
+    // Langfuse 观测（与迁移前 TUI/stdio/print 一致：环境启用时创建）。
+    // 暂存能力的装配（native 端口与启动恢复）在 `host/telemetry.rs`：本处只把配置与
+    // 装配结果接上，不持有路径或临时目录细节（契约 §6/§7 P4b）。
     let langfuse_config = if session_scoped {
         None
     } else {
@@ -908,19 +910,11 @@ pub(crate) async fn assemble_server_config_with_mcp_profile(
             .map(|snapshot| snapshot.observability().clone())
             .filter(|config| config.public_key.is_some() && config.secret_key.is_some())
     };
-    let (langfuse_session, langfuse_shutdown_owner) = if let Some(config) = langfuse_config {
-        tracing::info!("Langfuse tracing enabled (host mode)");
-        match peri_controller::langfuse::LangfuseSession::new_owned(config, "live".into()).await {
-            Some((session, owner)) => (Some(session), Some(owner)),
-            None => (None, None),
-        }
-    } else {
-        (None, None)
-    };
+    let telemetry = super::telemetry::assemble(langfuse_config).await;
 
     // 指标出口：仅 Langfuse 可用时安装（Langfuse event）；未配置时保持未安装，
     // 指标事件丢弃——不落盘。
-    if let Some(session) = &langfuse_session {
+    if let Some(session) = &telemetry.session {
         let metrics_session: Arc<dyn peri_controller::langfuse::LangfuseSessionLike> =
             session.clone();
         peri_agent::metrics::set_sink(Some(Arc::new(
@@ -968,8 +962,8 @@ pub(crate) async fn assemble_server_config_with_mcp_profile(
         session_resources: session_resources.clone(),
         session_store_shutdown,
         controller: Arc::new(peri_controller::Controller::new(session_resources.clone())),
-        langfuse_session,
-        langfuse_shutdown_owner,
+        langfuse_session: telemetry.session,
+        langfuse_shutdown_owner: telemetry.shutdown_owner,
         // 默认 false（TUI/print 保留全部命令）；stdio 装配点（assemble_stdio_config）
         // 显式置 true，过滤 rewind/clear。
         stdio_command_filter: false,

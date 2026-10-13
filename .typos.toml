@@ -8,6 +8,11 @@ hel = "hel"
 fle = "fle"
 gti = "gti"
 bulder = "bulder"
+# flate2 依赖名分词出的 flate；GOLDEN 流式分片按 ~250 字节硬切产生的跨词残片
+# （stream_test.rs 故意在词中切块，验证任意分块拼接逐字节不变）
+flate = "flate"
+tring = "tring"
+alue = "alue"
 
 [default.extend-identifiers]
 # 用户已有的环境变量名；只豁免该标识符，不自动改名或屏蔽同类拼写错误。

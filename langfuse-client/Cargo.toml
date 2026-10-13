@@ -14,10 +14,25 @@ chrono.workspace = true
 base64 = { version = "0.23.1", features = ["alloc"] }
 tracing.workspace = true
 sha2.workspace = true
+# 受预算约束的内存正文（payload::BudgetedBytes）；版本与锁内一致。
+bytes = "1.12.1"
+# gzip 正文编码（encoding/writer，P2a 消费）；版本与锁内一致。
+flate2 = "1.1.9"
+
+# native 暂存适配器所需的宿主能力（P1c 消费）；WASM/emscripten 只保留有界内存路径，
+# 因此 fs2 与 reqwest/stream 只在 native 目标启用。
+[target.'cfg(all(not(target_arch = "wasm32"), not(target_os = "emscripten")))'.dependencies]
+fs2 = "0.4.3"
+reqwest = { workspace = true, features = ["stream"] }
+futures = { workspace = true }
 
 [dev-dependencies]
 temp-env = "0.3"
 mockito = "1"
+# 集成测试断言默认 gzip 正文（tests/otel_contract.rs 的 HTTP canary）需解压；复用同一版本边。
+flate2 = "1.1.9"
+# native 暂存测试只用 open_at 临时目录，不触碰用户私有目录。
+tempfile.workspace = true
 
 [target.'cfg(not(target_os = "emscripten"))'.dev-dependencies]
 tokio = { workspace = true, features = ["net"] }

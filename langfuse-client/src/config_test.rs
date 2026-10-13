@@ -10,9 +10,146 @@ fn test_batcher_config_default() {
     assert_eq!(config.max_events, 50);
     assert_eq!(config.queue_capacity, 1024);
     assert_eq!(config.max_in_flight, 2);
+    assert_eq!(config.max_event_bytes, 4 * 1024 * 1024);
+    assert_eq!(config.max_batch_bytes, 4 * 1024 * 1024);
+    assert_eq!(config.max_queue_bytes, 16 * 1024 * 1024);
     assert_eq!(config.flush_interval, Duration::from_secs(10));
     assert_eq!(config.backpressure, BackpressurePolicy::DropNew);
-    assert_eq!(config.max_retries, 3);
+}
+
+#[test]
+fn telemetry_defaults_match_the_configuration_table() {
+    let telemetry = TelemetryConfig::default();
+    assert!(telemetry.spool_enabled);
+    assert_eq!(telemetry.compression, Compression::Gzip);
+    assert_eq!(telemetry.input_spool_threshold_bytes, 256 * 1024);
+    assert_eq!(telemetry.payload_memory_threshold_bytes, 256 * 1024);
+    assert_eq!(telemetry.memory_budget_bytes, 32 * 1024 * 1024);
+    assert_eq!(telemetry.prepare_max_in_flight, 1);
+    assert_eq!(telemetry.stream_chunk_bytes, 64 * 1024);
+    assert_eq!(telemetry.spool_quota_bytes, 1024 * 1024 * 1024);
+    assert_eq!(telemetry.spool_ttl, Duration::from_secs(86_400));
+    assert_eq!(telemetry.max_wire_bytes, 4 * 1024 * 1024);
+    assert_eq!(telemetry.shutdown_grace, Duration::from_secs(60));
+    assert_eq!(Compression::default(), Compression::Gzip);
+    telemetry.validate().unwrap();
+}
+
+#[test]
+fn telemetry_rejects_out_of_range_budgets_and_limits() {
+    let invalid = [
+        TelemetryConfig {
+            prepare_max_in_flight: 0,
+            ..Default::default()
+        },
+        TelemetryConfig {
+            prepare_max_in_flight: tokio::sync::Semaphore::MAX_PERMITS + 1,
+            ..Default::default()
+        },
+        TelemetryConfig {
+            memory_budget_bytes: 0,
+            ..Default::default()
+        },
+        TelemetryConfig {
+            stream_chunk_bytes: 0,
+            ..Default::default()
+        },
+        TelemetryConfig {
+            spool_quota_bytes: 0,
+            ..Default::default()
+        },
+        TelemetryConfig {
+            max_wire_bytes: 0,
+            ..Default::default()
+        },
+        TelemetryConfig {
+            input_spool_threshold_bytes: 32 * 1024 * 1024 + 1,
+            ..Default::default()
+        },
+        TelemetryConfig {
+            payload_memory_threshold_bytes: 32 * 1024 * 1024 + 1,
+            ..Default::default()
+        },
+        TelemetryConfig {
+            stream_chunk_bytes: 32 * 1024 * 1024 + 1,
+            ..Default::default()
+        },
+        TelemetryConfig {
+            spool_ttl: Duration::ZERO,
+            ..Default::default()
+        },
+        TelemetryConfig {
+            shutdown_grace: Duration::ZERO,
+            ..Default::default()
+        },
+        TelemetryConfig {
+            spool_ttl: Duration::MAX,
+            ..Default::default()
+        },
+        TelemetryConfig {
+            shutdown_grace: Duration::MAX,
+            ..Default::default()
+        },
+    ];
+    for telemetry in invalid {
+        assert!(
+            matches!(telemetry.validate(), Err(crate::LangfuseError::Config(_))),
+            "非法遥测配置必须被拒绝：{telemetry:?}"
+        );
+    }
+}
+
+#[test]
+fn batcher_validation_includes_telemetry() {
+    let config = BatcherConfig {
+        telemetry: TelemetryConfig {
+            max_wire_bytes: 0,
+            ..Default::default()
+        },
+        ..Default::default()
+    };
+    assert!(matches!(
+        config.validate(),
+        Err(crate::LangfuseError::Config(_))
+    ));
+}
+
+#[test]
+fn batcher_validation_rejects_budgets_that_cannot_isolate_the_progress_partition() {
+    // 8 MiB 足以隔离默认 P，retained 分区仍可用（契约 §4）。
+    let workable = BatcherConfig {
+        telemetry: TelemetryConfig {
+            memory_budget_bytes: 8 * 1024 * 1024,
+            ..Default::default()
+        },
+        ..Default::default()
+    };
+    workable.validate().expect("8 MiB 应能隔离默认进度分区");
+
+    // 装不下 P 的预算必须在配置期拒绝，而不是等构造期才发现。
+    for memory_budget_bytes in [1, 1024, 4 * 1024 * 1024] {
+        let tight = BatcherConfig {
+            telemetry: TelemetryConfig {
+                memory_budget_bytes,
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        assert!(
+            matches!(tight.validate(), Err(crate::LangfuseError::Config(_))),
+            "{memory_budget_bytes} 装不下进度分区，必须配置期拒绝"
+        );
+    }
+
+    // 槽表 checked 乘加溢出同样属于配置错误，不留给运行期。
+    let overflowing = BatcherConfig {
+        queue_capacity: usize::MAX,
+        ..Default::default()
+    };
+    assert!(matches!(
+        overflowing.validate(),
+        Err(crate::LangfuseError::Config(_))
+    ));
 }
 
 #[test]
@@ -105,11 +242,16 @@ fn test_client_config_new_fields_default() {
         batch_max_events: 50,
         batch_flush_interval_secs: 10,
         batch_backpressure: BackpressurePolicy::DropNew,
+        telemetry: TelemetryConfig {
+            spool_enabled: false,
+            ..Default::default()
+        },
     };
     assert_eq!(cfg.trace_sampling, 0.1);
     assert!(cfg.error_span_always);
     assert_eq!(cfg.batch_max_events, 50);
     assert_eq!(cfg.batch_flush_interval_secs, 10);
+    assert!(!cfg.telemetry.spool_enabled);
 }
 
 #[test]
@@ -129,12 +271,23 @@ fn test_batcher_config_from_client() {
         batch_max_events: 100,
         batch_flush_interval_secs: 5,
         batch_backpressure: BackpressurePolicy::Block,
+        telemetry: TelemetryConfig {
+            compression: Compression::None,
+            prepare_max_in_flight: 2,
+            ..Default::default()
+        },
     };
     let batcher_cfg = BatcherConfig::from_client(&client_cfg);
     assert_eq!(batcher_cfg.max_events, 100);
     assert_eq!(batcher_cfg.flush_interval, Duration::from_secs(5));
     assert_eq!(batcher_cfg.backpressure, BackpressurePolicy::Block);
-    assert_eq!(batcher_cfg.max_retries, 3);
+    // 遥测配置逐字段复制，不重新解析来源也不静默回退默认值。
+    assert_eq!(batcher_cfg.telemetry.compression, Compression::None);
+    assert_eq!(batcher_cfg.telemetry.prepare_max_in_flight, 2);
+    assert_eq!(
+        batcher_cfg.telemetry.memory_budget_bytes,
+        client_cfg.telemetry.memory_budget_bytes
+    );
 }
 
 #[test]
@@ -158,11 +311,11 @@ fn test_batcher_invalid_config_is_rejected_before_worker_spawn() {
     for config in invalid {
         let make_client = || LangfuseClient::new("pk-test", "sk-test", "http://127.0.0.1:1", 0);
         assert!(matches!(
-            Batcher::try_new(make_client(), config.clone()),
+            Batcher::try_new(make_client(), config.clone(), None),
             Err(LangfuseError::Config(_))
         ));
         let panic = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-            Batcher::new(make_client(), config);
+            Batcher::new(make_client(), config, None);
         }))
         .expect_err("兼容 new 必须立即 panic，不能返回假就绪对象");
         let message = panic
@@ -174,22 +327,51 @@ fn test_batcher_invalid_config_is_rejected_before_worker_spawn() {
     }
 }
 
+/// 两个公开配置独立构造出内容编码 / wire 上限冲突时返回 `Config`，不任取一个（契约 §3.6）。
+#[test]
+fn test_batcher_construction_rejects_conflicting_export_and_telemetry_encoding() {
+    use crate::{Batcher, LangfuseClient, LangfuseError};
+
+    let conflicts = [
+        crate::client::ExportConfig {
+            compression: Compression::None,
+            ..Default::default()
+        },
+        crate::client::ExportConfig {
+            max_wire_bytes: 1 << 20,
+            ..Default::default()
+        },
+    ];
+    // 故意无 Tokio runtime：冲突必须在启动 worker 之前被拒绝。
+    for export in conflicts {
+        let client = LangfuseClient::new("pk-test", "sk-test", "http://127.0.0.1:1", 0)
+            .with_export_config(export)
+            .expect("独立构造的导出配置本身有效");
+        assert!(matches!(
+            Batcher::try_new(client, BatcherConfig::default(), None),
+            Err(LangfuseError::Config(_))
+        ));
+    }
+}
+
 #[test]
 fn test_batcher_config_validation_keeps_supported_bounds_and_values() {
+    // `queue_capacity` 现在同时受槽表预算约束（契约 §3.1），故与 `max_events` 的 Semaphore
+    // 上限解耦：本用例继续验证支持范围内的值被接受且不被校验重写。
     for max_events in [1, tokio::sync::Semaphore::MAX_PERMITS] {
         let config = BatcherConfig {
             max_events,
             flush_interval: Duration::from_nanos(1),
             backpressure: BackpressurePolicy::DropOldest,
-            max_retries: 99,
-            queue_capacity: max_events,
+            queue_capacity: 4,
             max_in_flight: 1,
             ..Default::default()
         };
         config.validate().unwrap();
         assert_eq!(config.max_events, max_events);
         assert_eq!(config.flush_interval, Duration::from_nanos(1));
-        assert_eq!(config.max_retries, 99, "兼容字段不应被校验或重写");
+        assert_eq!(config.queue_capacity, 4, "配置值不应被校验重写");
+        assert_eq!(config.backpressure, BackpressurePolicy::DropOldest);
     }
 }
 
@@ -202,6 +384,7 @@ async fn test_batcher_maximum_valid_capacity_constructs_and_shuts_down_without_p
             max_events: tokio::sync::Semaphore::MAX_PERMITS,
             ..Default::default()
         },
+        None,
     )
     .expect("有效上限应只设容量约束，不预分配事件数组");
     tokio::time::timeout(Duration::from_secs(5), batcher.shutdown())

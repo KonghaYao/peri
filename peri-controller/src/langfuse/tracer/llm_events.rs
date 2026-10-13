@@ -1,8 +1,13 @@
-use super::event_builder::{new_uuid, now_rfc3339, try_add_or_warn_via_session, VERSION};
+use super::event_builder::{
+    new_uuid, now_rfc3339, try_add_or_warn_via_session, try_add_prepared_or_warn_via_session,
+    VERSION,
+};
 use super::generation::PendingTerminalState;
+use super::input_snapshot::{llm_input_source, mark_rejected_input, GenerationInput};
 use super::registry::{GateEvent, Ownership};
 use super::usage;
 use super::LangfuseTracer;
+use langfuse_client::snapshot::{snapshot_value, SnapshotSource};
 use langfuse_client::types::{EventBody, ObservationLevel};
 use langfuse_client::{GenerationBody, IngestionEvent};
 use peri_agent::messages::BaseMessage;
@@ -12,6 +17,23 @@ use std::sync::Arc;
 
 impl LangfuseTracer {
     // ── LLM Generation 事件 ──────────────────────────────────────────────────
+
+    /// 冻结输入来源；被拒时返回 [`GenerationInput::Rejected`]（batcher 已计入该 generation
+    /// 拒收），不缓存原文、不等待额度（契约 §3.6）。
+    fn freeze_input(&self, source: Arc<dyn SnapshotSource>) -> GenerationInput {
+        match self.session.try_freeze(source) {
+            Ok(frozen) => GenerationInput::Frozen(frozen),
+            Err(error) => {
+                tracing::warn!(
+                    target: "langfuse::tracer",
+                    trace_id = %self.trace_id,
+                    %error,
+                    "LLM input snapshot rejected; generation input is not reported"
+                );
+                GenerationInput::Rejected
+            }
+        }
+    }
 
     /// LLM 调用开始
     pub fn on_llm_start(
@@ -24,7 +46,7 @@ impl LangfuseTracer {
         if !self.sampling.should_emit(&self.trace_id, &self.session_id) {
             return;
         }
-        let _ = self.on_llm_start_inner(agent_id, step, messages, tools);
+        self.on_llm_start_inner(agent_id, step, messages, tools);
     }
 
     /// LLM 调用开始(业务主体;供 gate 重放复用,不重复采样检查)。
@@ -36,12 +58,12 @@ impl LangfuseTracer {
         messages: &[BaseMessage],
         tools: &[ToolDefinition],
     ) -> bool {
-        self.on_llm_start_snapshot_inner(
-            agent_id,
-            step,
-            Arc::new(messages.to_vec()),
-            Arc::new(tools.to_vec()),
-        )
+        // 快照计费先于归属判定与注册闸门：闸门只保存已冻结来源。
+        let input = self.freeze_input(llm_input_source(
+            &Arc::new(messages.to_vec()),
+            &Arc::new(tools.to_vec()),
+        ));
+        self.on_llm_start_snapshot_inner(agent_id, step, input)
     }
 
     pub(crate) fn on_llm_start_snapshot(
@@ -54,25 +76,24 @@ impl LangfuseTracer {
         if !self.sampling.should_emit(&self.trace_id, &self.session_id) {
             return;
         }
-        self.on_llm_start_snapshot_inner(agent_id, step, messages, Arc::new(tools.to_vec()));
+        let input = self.freeze_input(llm_input_source(&messages, &Arc::new(tools.to_vec())));
+        self.on_llm_start_snapshot_inner(agent_id, step, input);
     }
 
+    /// 归属分派；`input` 是已在闸门之前完成计费的冻结来源。
     pub(super) fn on_llm_start_snapshot_inner(
         &mut self,
         agent_id: &str,
         step: usize,
-        messages: Arc<Vec<BaseMessage>>,
-        tools: Arc<Vec<ToolDefinition>>,
+        input: GenerationInput,
     ) -> bool {
         match self.subagent.ownership(agent_id) {
             Ownership::Main => {
-                self.generation
-                    .on_llm_start(agent_id, step, messages, tools);
+                self.generation.on_llm_start(agent_id, step, input);
                 true
             }
             Ownership::Subagent => {
-                self.generation
-                    .on_llm_start(agent_id, step, messages, tools);
+                self.generation.on_llm_start(agent_id, step, input);
                 self.subagent
                     .touch_content_time(agent_id, &peri_time::now_utc_rfc3339());
                 true
@@ -82,8 +103,7 @@ impl LangfuseTracer {
                 if self.subagent.try_gate(GateEvent::LlmCallStart {
                     agent_id: agent_id.to_string(),
                     step,
-                    messages,
-                    tools,
+                    input,
                 }) {
                     tracing::debug!(
                         target: "langfuse::subagent",
@@ -97,7 +117,8 @@ impl LangfuseTracer {
         }
     }
 
-    /// LLM 请求体接收：紧随 on_llm_start 之后，缓存 Provider 实际请求体
+    /// LLM 请求体接收：紧随 on_llm_start 之后，用 Provider 实际请求体替换 fallback。
+    /// 冻结仍先于闸门；冻结被拒时只标记，不改用旧 fallback 冒充实际请求。
     pub fn on_llm_request_payload(
         &mut self,
         agent_id: &str,
@@ -107,13 +128,19 @@ impl LangfuseTracer {
         if !self.sampling.should_emit(&self.trace_id, &self.session_id) {
             return;
         }
-        if self.generation.contains(agent_id, step) {
-            self.generation.on_llm_request_payload(agent_id, step, body);
-        } else if self.subagent.ownership(agent_id) == Ownership::Unknown {
+        let tracked = self.generation.contains(agent_id, step);
+        if !tracked && self.subagent.ownership(agent_id) != Ownership::Unknown {
+            return; // 保留既有静默 no-op
+        }
+        let input = self.freeze_input(snapshot_value(&body));
+        if tracked {
+            self.generation
+                .on_llm_request_payload(agent_id, step, input);
+        } else {
             self.subagent.try_gate(GateEvent::LlmRequestPayload {
                 agent_id: agent_id.to_string(),
                 step,
-                body,
+                input,
             });
         }
     }
@@ -142,8 +169,8 @@ impl LangfuseTracer {
                 step,
                 "on_llm_end: 缺少 LlmCallStart，创建 synthetic generation"
             );
-            self.generation
-                .on_llm_start(agent_id, step, Arc::default(), Arc::default());
+            let input = self.freeze_input(llm_input_source(&Arc::default(), &Arc::default()));
+            self.generation.on_llm_start(agent_id, step, input);
         }
 
         // 必须先解析 parent 再消费 tracker state。未知 ownership 可能由可丢的
@@ -209,6 +236,10 @@ impl LangfuseTracer {
 
         // 合并 retry metadata + token 用量到 metadata 字段（Langfuse UI 可见）
         let mut meta = gen_end.retry_metadata.unwrap_or(serde_json::json!({}));
+        if gen_end.input.is_rejected() {
+            // 冻结被拒：明确标记，不把旧 fallback 当作实际请求上报（契约 §3.6）
+            mark_rejected_input(&mut meta);
+        }
         if start_missing {
             if let Some(obj) = meta.as_object_mut() {
                 obj.insert("start_missing".to_string(), serde_json::json!(true));
@@ -265,13 +296,14 @@ impl LangfuseTracer {
             (None, None, Some(parse_output(output)))
         };
 
+        // input 不再进 body：冻结来源随事件移动到 worker（结束不等 IO，也不克隆原文）
         let gen_body = GenerationBody {
             id: Some(gen_end.gen_id),
             trace_id: Some(self.trace_id.clone()),
             name: Some(format!("step-{}", step)),
             start_time: Some(gen_end.start_time),
             end_time: Some(end_time.clone()),
-            input: Some(gen_end.input_json),
+            input: None,
             output: generation_output,
             metadata: Some(meta),
             level,
@@ -296,12 +328,24 @@ impl LangfuseTracer {
             body: gen_body,
             metadata: None,
         };
-        try_add_or_warn_via_session(
-            &*self.session,
-            event,
-            &self.trace_id,
-            "LLM GenerationCreate",
-        );
+        // 冻结被拒（`Rejected`）时事件不带来源，是直接事件：同一准入实现的直接入口才是它的
+        // 交付路径（`try_add_prepared` 只承载携带来源的事件）；拒收事实已由 metadata 标记。
+        match gen_end.input.into_source() {
+            Some(input) => try_add_prepared_or_warn_via_session(
+                &*self.session,
+                event,
+                Some(input),
+                None,
+                &self.trace_id,
+                "LLM GenerationCreate",
+            ),
+            None => try_add_or_warn_via_session(
+                &*self.session,
+                event,
+                &self.trace_id,
+                "LLM GenerationCreate",
+            ),
+        }
 
         // 缓存命中率警告：input > 10k tokens 且 cache_read / input < 20% 时创建 Event
         if let Some(u) = usage {

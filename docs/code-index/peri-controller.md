@@ -22,6 +22,11 @@ Langfuse 是同一事件分支上的旁路消费者。bridge 负责 v1/v2 转换
 `LangfuseTracer` 持有单轮观测状态，`SubagentRegistry` 是子 agent 归属与生命周期的唯一 owner。
 子模块通过同一 owner 的借用实现注册、缓存和收尾，不另建注册表。
 
+tracer 不再持有输入原文：`tracer/input_snapshot.rs` 把已存在的 `Arc` 借用成
+`SnapshotSource`，`llm_events.rs::freeze_input` 经 `LangfuseSessionLike::try_freeze`
+取得 `InputSource`（小输入内存字节、大输入暂存句柄），冻结计费与落盘由 langfuse-client
+worker 完成，桥接入口不做 IO；冻结被拒时在 metadata 显式标记而不是回退旧输入。
+
 依赖方向为 Controller → Runtime / Resources / peri-acp-types；manifest 中的 peri-agent、
 peri-model 和 langfuse-client 是现行 Langfuse 适配依赖，不能由索引推断已经解耦。
 
@@ -38,7 +43,11 @@ Langfuse HTTP 重试与批次失败日志由 `langfuse-client/src/client.rs` 和
 | 等待、销毁或注入会话 | `peri-controller/src/controller.rs` | `join_session`:364、`destroy_session`:385、`submit_input`:406 | 捕获 Runtime Arc 后调用；销毁返回的已补打事件经 publish 按顺序双投递 |
 | 注入部署端口 | `peri-controller/src/controller.rs` | `Controller::new`、`with_runtime`、`with_mcp_pool`、`with_cron_scheduler`、`with_tool_search` | builder 消费 self 后赋值；对应 pick 方法克隆句柄/配置，不引入共享可写配置 |
 | 调整启动参数 | `peri-controller/src/controller.rs` | `AgentRef`:49、`LiteParams`:70 | 仅承载定义引用、cwd、初始消息和工具；消费与执行归 Agent |
-| 配置与创建 Langfuse 批处理 | `peri-config/src/observability.rs`；`peri-controller/src/langfuse/{config,session}.rs`；`langfuse-client/src/{config,batcher}.rs` | core `resolve` / `LangfuseConfig`；`LangfuseSession::new`；`Batcher::try_new` | settings/env/default/clamp 规则与 secret-redacted Debug 归 core；Controller 消费 projection，batcher 构造校验沿 Option 降级；客户端独占重试语义 |
+| 配置与创建 Langfuse 批处理 | `peri-config/src/observability.rs`；`peri-controller/src/langfuse/{config,session}.rs`；`langfuse-client/src/{config,batcher}.rs` | core `resolve` / `LangfuseConfig`；`LangfuseSession::new`；`Batcher::try_new` | settings/env/default/clamp 规则与 secret-redacted Debug 归 core（新键解析在 `observability_spool.rs`）；Controller 消费 projection，batcher 构造校验沿 Option 降级；客户端独占重试语义 |
+| 借用输入快照来源 | `peri-controller/src/langfuse/tracer/input_snapshot.rs` | `llm_input_source`:41、`GenerationInput`:457、`GenerationInput::into_source`:466、`mark_rejected_input`:480 | 只克隆已存在 `Arc<Vec<BaseMessage>>`/`Arc<Vec<ToolDefinition>>`，不构造 JSON 树、不触达文件路径；`retained_bytes` 零大分配遍历并给保守上界（业务侧显式 reserve 可能超出，见模块限度） |
+| 输入冻结与交付路径 | `peri-controller/src/langfuse/tracer/llm_events.rs` | `freeze_input`:23、`GenerationInput::into_source`；`tracer/event_builder.rs`：`try_add_prepared_or_warn_via_session` | 输入来源在请求期冻结一次并随事件交付（`try_add_prepared`）；被拒事实写 metadata、不伪造旧 fallback；准备失败不混淆为发送失败 |
+| turn-facing 会话能力 | `peri-controller/src/langfuse/session_like.rs` | `try_freeze`、`try_add_prepared`、`memory_budget`、`flush` | 只提供 flush（`Pin<Box<dyn Future … + Send>>`）与预算透传，无 shutdown 权限；预算身份不符由 `TelemetryEvent::try_new` 拒绝 |
+| 装配 spool 能力 | `peri-controller/src/langfuse/session.rs` | `LangfuseSession::{new,new_owned}` 第 3 参 `Option<Arc<dyn SpoolStore>>`；`map_shutdown` | 只接受装配层注入的资源端口，controller 不打开文件系统；关闭结果显式映射 Pending/PersistedPending/DeliveryIncomplete |
 | 关闭部署 Langfuse | `peri-controller/src/langfuse/session.rs` | `LangfuseSession::new_owned`；`LangfuseShutdownOwner::shutdown`；`LangfuseSession::shutdown` | fresh deployment 得到不可克隆的关闭权限；只转发唯一 Batcher join，报告包含已由 turn 观察的累计 HTTP 失败并区分 worker 失败；turn-facing SessionLike 仍只提供 flush（ARC-HOST-SHUTDOWN-001） |
 | 修改 Langfuse 事件入口 | `peri-controller/src/langfuse/bridge.rs` | `LangfuseBridge`:34、`process_event`:92 | 保留统一事件分发与 tracer 锁，trait 入口先持有该 bridge 的 stage 表锁 |
 | 修改 v1 事件转换 | `peri-controller/src/langfuse/bridge/v1_conversion.rs` | `UnifiedLangfuseEvent::from_executor_event` | 无映射事件返回 None；v1 LLM 使用 MAIN_AGENT_KEY，工具优先保留 source_agent_id |

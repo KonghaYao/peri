@@ -1,8 +1,12 @@
 use std::future::Future;
 use std::pin::Pin;
+use std::sync::Arc;
 
 use langfuse_client::types::TraceBody;
-use langfuse_client::{IngestionEvent, LangfuseError};
+use langfuse_client::{
+    FlushReport, IngestionEvent, InputSource, LangfuseError, MemoryBudget, SnapshotSource,
+    TelemetryEvent,
+};
 
 use super::*;
 use crate::langfuse::drop_telemetry::{
@@ -13,6 +17,7 @@ struct FailingSession {
     drops: LangfuseDropRegistry,
     turn_traces: crate::langfuse::TurnTraceRegistry,
     failure: FailureMode,
+    budget: Arc<MemoryBudget>,
 }
 
 enum FailureMode {
@@ -21,19 +26,45 @@ enum FailureMode {
     Unknown,
 }
 
-impl LangfuseSessionLike for FailingSession {
-    fn try_add(&self, _event: IngestionEvent) -> Result<(), LangfuseError> {
-        Err(match self.failure {
+/// 真实预算身份：入队失败用例不绕过预算校验，只是各入口统一返回同一失败分类。
+fn failing_budget() -> Arc<MemoryBudget> {
+    MemoryBudget::new(1024 * 1024).expect("固定的非零测试预算必须被接受")
+}
+
+impl FailureMode {
+    /// 同一失败分类贯穿 `try_add`/`try_freeze`/`try_add_prepared`，不因入口不同而改变。
+    fn error(&self) -> LangfuseError {
+        match self {
             FailureMode::QueueFull => LangfuseError::QueueFull,
             FailureMode::Closed => LangfuseError::ChannelClosed,
             FailureMode::Unknown => {
                 LangfuseError::IngestionApi("private-server-payload".to_string())
             }
-        })
+        }
+    }
+}
+
+impl LangfuseSessionLike for FailingSession {
+    fn try_add(&self, _event: IngestionEvent) -> Result<(), LangfuseError> {
+        Err(self.failure.error())
     }
 
-    fn flush(&self) -> Pin<Box<dyn Future<Output = Result<(), LangfuseError>> + Send + '_>> {
-        Box::pin(async { Ok(()) })
+    fn try_freeze(&self, _source: Arc<dyn SnapshotSource>) -> Result<InputSource, LangfuseError> {
+        Err(self.failure.error())
+    }
+
+    fn try_add_prepared(&self, _event: TelemetryEvent) -> Result<(), LangfuseError> {
+        Err(self.failure.error())
+    }
+
+    fn memory_budget(&self) -> &Arc<MemoryBudget> {
+        &self.budget
+    }
+
+    fn flush(
+        &self,
+    ) -> Pin<Box<dyn Future<Output = Result<FlushReport, LangfuseError>> + Send + '_>> {
+        Box::pin(async { Ok(FlushReport::Complete) })
     }
 
     fn session_id(&self) -> &str {
@@ -55,6 +86,7 @@ fn test_try_add_failure_records_safe_trace_drop_snapshot() {
         drops: LangfuseDropRegistry::new(1),
         turn_traces: crate::langfuse::TurnTraceRegistry::default(),
         failure: FailureMode::QueueFull,
+        budget: failing_budget(),
     };
     let event = IngestionEvent::TraceCreate {
         id: "event-id".to_string(),
@@ -146,6 +178,7 @@ fn congestion_records_every_drop_without_per_event_logs() {
             drops: LangfuseDropRegistry::new(1),
             turn_traces: crate::langfuse::TurnTraceRegistry::default(),
             failure,
+            budget: failing_budget(),
         };
         let recorder = EventRecorder::default();
         tracing::subscriber::with_default(recorder.clone(), || {
@@ -170,6 +203,7 @@ fn unknown_admission_error_is_diagnosed_without_error_or_event_payload() {
         drops: LangfuseDropRegistry::new(1),
         turn_traces: crate::langfuse::TurnTraceRegistry::default(),
         failure: FailureMode::Unknown,
+        budget: failing_budget(),
     };
     let recorder = EventRecorder::default();
     tracing::subscriber::with_default(recorder.clone(), || {

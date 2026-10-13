@@ -1,5 +1,6 @@
 use super::*;
 use langfuse_client::{types::TraceBody, IngestionEvent, LangfuseError};
+use peri_config::observability::LangfuseCompression;
 use peri_controller::langfuse::{LangfuseConfig, LangfuseSession, LangfuseSessionLike};
 use std::future::Future;
 use std::{
@@ -31,9 +32,13 @@ async fn owned_config(
             host: url.into(),
             batch_max_events: 50,
             batch_flush_interval_secs: 60,
+            // mockito 的 body 匹配器看的是 wire 字节；正文压缩由 langfuse-client 自己覆盖，
+            // 这里保持未压缩，让「尾部事件确实上了 wire」按 JSON 原文可核对。
+            compression: LangfuseCompression::None,
             ..Default::default()
         },
         "deployment".into(),
+        None,
     )
     .await
     .unwrap();

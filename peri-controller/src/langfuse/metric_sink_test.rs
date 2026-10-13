@@ -1,7 +1,12 @@
+use std::future::Future;
+use std::pin::Pin;
 use std::sync::{Arc, LazyLock};
 
 use langfuse_client::types::ObservationLevel;
-use langfuse_client::{IngestionEvent, LangfuseError};
+use langfuse_client::{
+    FlushReport, IngestionEvent, InputSource, LangfuseError, MemoryBudget, SnapshotSource,
+    TelemetryEvent,
+};
 use peri_agent::metrics::{MetricEvent, MetricsSink};
 
 use crate::langfuse::drop_telemetry::{
@@ -201,6 +206,8 @@ struct QueueFullSession {
     drop_registry: LangfuseDropRegistry,
     turn_traces: crate::langfuse::TurnTraceRegistry,
     last_trace_id: LazyLock<parking_lot::Mutex<Option<String>>>,
+    /// 真实预算身份：本用例只验证入队失败路径，不绕过预算校验。
+    budget: Arc<MemoryBudget>,
 }
 
 impl LangfuseSessionLike for QueueFullSession {
@@ -211,11 +218,22 @@ impl LangfuseSessionLike for QueueFullSession {
         Err(LangfuseError::QueueFull)
     }
 
+    fn try_freeze(&self, _source: Arc<dyn SnapshotSource>) -> Result<InputSource, LangfuseError> {
+        Err(LangfuseError::QueueFull)
+    }
+
+    fn try_add_prepared(&self, _event: TelemetryEvent) -> Result<(), LangfuseError> {
+        Err(LangfuseError::QueueFull)
+    }
+
+    fn memory_budget(&self) -> &Arc<MemoryBudget> {
+        &self.budget
+    }
+
     fn flush(
         &self,
-    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<(), LangfuseError>> + Send + '_>>
-    {
-        Box::pin(async { Ok(()) })
+    ) -> Pin<Box<dyn Future<Output = Result<FlushReport, LangfuseError>> + Send + '_>> {
+        Box::pin(async { Ok(FlushReport::Complete) })
     }
 
     fn session_id(&self) -> &str {
@@ -237,6 +255,7 @@ fn rejected_metric_is_recorded_in_drop_registry() {
         drop_registry: LangfuseDropRegistry::default(),
         turn_traces: crate::langfuse::TurnTraceRegistry::default(),
         last_trace_id: LazyLock::new(|| parking_lot::Mutex::new(None)),
+        budget: MemoryBudget::new(1024 * 1024).expect("固定的非零测试预算必须被接受"),
     });
     let sink = LangfuseMetricsSink::new(Arc::clone(&session) as Arc<dyn LangfuseSessionLike>);
 
