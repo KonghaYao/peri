@@ -12,6 +12,8 @@
 
 ## 架构速览
 
+同步 SubAgent 工具在子任务超时交接时返回 `status: pending` 及 child/task IDs，不将子 Agent 最后一段文本误报为最终完成；入口 `subagent/tool/{define,execute_fork,execute_resume}.rs`，迟到结果由 `peri-agent` 会话 owner 负责投递。
+
 Emscripten 构建保留 `McpClientPool` 的远端 HTTP MCP 通路和 ACP 会话级 MCP 声明；
 `mcp/builtin` 在该目标的注入策略固定为空，本地 handler、stdio 子进程、
 cron 与 workflow 存储装配均按目标移出依赖图；PTC 已在主线删除。
@@ -59,6 +61,7 @@ MCP Apps 模型签发 lease 保留 canonical dispatcher 与发起会话/turn；�
 `tasks/get` 轮询与 Workspace
 `workspace/taskSnapshot`/`workspace/taskChanges` cursor 对账将终态交给 Manager，
 Manager 先投递带稳定 delivery ID 的 Defer，再发布终态。订阅只有在结算成功，或 `false` 同时有同任务的终态快照证据时才结束；缺失条目与竞争中的结算必须重试。monitor 准入失败沿工具错误返回已存在的 opaque ID，并明确不保证通知、禁止盲目重跑；同键已有 monitor 可复用。回归入口为 `client/subscription_tasks_test.rs` 与 `client/output_store_test.rs`。
+`tasks/get` 连续失败达到阈值仅尝试放弃未知任务，不保证投递与结算成功；已经观测到终态后，本次运行缓存真实结果并重试投递，不以「owner 不可观测」覆盖已知终态。查询恢复非终态会重置失败计数，单次挂起的请求不由重试次数约束。
 Builtin Workspace Bash 提醒只带退出信息与输出文件引用。`McpPoolPort::has_active_tasks` 查询 Manager
 未结清的外部任务供 Agent idle probe 使用。外部 Workspace 的 scope 元数据经部署可信的 MCP 连接传递；builtin 使用同进程 scope authority。
 显式删除可调用 `reconcile_closing_workspace_scope`，在 Agent Manager 不存在时从可信

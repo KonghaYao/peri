@@ -1,4 +1,7 @@
-use super::{pending_tasks_for_closed_epoch, McpClientPool, ScopeTaskRow, ScopeTaskSnapshot};
+use super::{
+    lost_owner_retry_due, pending_tasks_for_closed_epoch, McpClientPool, ScopeTaskRow,
+    ScopeTaskSnapshot, LOST_ABANDON_ATTEMPTS,
+};
 use peri_acp_types::{
     event::{BackgroundTaskResult, ShellOutput},
     mcp::McpSubscriptionPort,
@@ -8,6 +11,27 @@ use peri_acp_types::{
     tasks::{BgTaskKind, TaskTerminalDelivery},
 };
 use std::sync::Arc;
+
+#[test]
+fn unobservable_owner_reaches_retry_limit_and_resets_after_recovery() {
+    let mut attempts = 0;
+    for _ in 1..LOST_ABANDON_ATTEMPTS {
+        assert!(!lost_owner_retry_due(&mut attempts));
+    }
+    assert!(lost_owner_retry_due(&mut attempts));
+    assert_eq!(attempts, LOST_ABANDON_ATTEMPTS);
+
+    attempts = 0;
+    assert!(!lost_owner_retry_due(&mut attempts));
+    assert_eq!(attempts, 1);
+}
+
+#[test]
+fn unobservable_owner_retry_counter_saturates() {
+    let mut attempts = usize::MAX;
+    assert!(lost_owner_retry_due(&mut attempts));
+    assert_eq!(attempts, usize::MAX);
+}
 
 #[test]
 fn close_reconciliation_rejects_reopened_epoch_before_selecting_cancel_targets() {

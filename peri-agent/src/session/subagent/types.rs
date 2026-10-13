@@ -312,7 +312,7 @@ pub struct SubagentSpawnConfig {
 pub struct SubagentSpawned {
     /// 子线程 ID（= 子 session thread_id = 身份键来源）
     pub child_thread_id: String,
-    /// 后台任务 ID（仅 Background 模式；格式 bg-{uuid v7}）
+    /// 后台任务或已移交同步执行的 ID（bg-/sync-{uuid v7}）
     pub task_id: Option<String>,
     /// 子 session（调用方读取 transcript）
     pub session: Arc<Session>,
@@ -320,6 +320,23 @@ pub struct SubagentSpawned {
     pub cancel_token: CancellationToken,
     /// 是否被中断（Sync 模式；Background 模式恒 false）
     pub interrupted: bool,
+    /// 同步子 Agent 的运行中任务，移交给当前进程的子会话 worker 后才填写。
+    pub pending_tasks: Vec<String>,
+}
+
+impl SubagentSpawned {
+    pub fn pending_message(&self) -> Option<String> {
+        (!self.pending_tasks.is_empty()).then(|| {
+            format!(
+                "child_thread_id: {}\nstatus: pending\ntask_id: {}\nPending tasks: {}. \
+                 This sub-agent remains active under its session owner; its final result will \
+                 be delivered when the pending tasks settle. Do not resume this thread while active.",
+                self.child_thread_id,
+                self.task_id.as_deref().expect("pending handoff has registered task ID"),
+                self.pending_tasks.join(", ")
+            )
+        })
+    }
 }
 
 /// Typed failure crossing the Agent-owned subagent boundary.

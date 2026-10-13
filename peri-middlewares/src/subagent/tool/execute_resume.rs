@@ -232,6 +232,10 @@ impl super::SubAgentTool {
         // 4. 统一恢复入口（Agent 层完成校验 / 重建 / 执行 / 收尾）
         let spawned = self.resume(config).await?;
 
+        if let Some(pending) = spawned.pending_message() {
+            return Ok(format!("action: resume\n{pending}"));
+        }
+
         // 5. 返回文本（见方法注释格式约定）
         if let Some(task_id) = &spawned.task_id {
             return Ok(format!(

@@ -34,9 +34,18 @@ fn active_shell_tasks(manager: &crate::agent::async_tasks::TaskManager) -> Vec<B
 /// bounded idle handoff. A completed RCRA pass is only a delegation terminal
 /// once its child tasks and their required queue messages have settled.
 pub(super) async fn run_child_until_terminal(
+    context: StageContext,
+    max_iterations: usize,
+    session: &Arc<Session>,
+) -> LoopResult {
+    run_child_with_handoff_signal(context, max_iterations, session, None).await
+}
+
+pub(super) async fn run_child_with_handoff_signal(
     mut context: StageContext,
     max_iterations: usize,
     session: &Arc<Session>,
+    mut handoff_start: Option<tokio::sync::oneshot::Sender<()>>,
 ) -> LoopResult {
     let Some(manager) = session
         .subagent_host()
@@ -50,14 +59,13 @@ pub(super) async fn run_child_until_terminal(
     let hook_stop_requested = Arc::new(AtomicBool::new(false));
     let shell_reminded = Arc::new(AtomicBool::new(false));
     context.async_ctx.hook_stop_requested = Some(Arc::clone(&hook_stop_requested));
-    // Child task settlement is owned below. A live shell must reach the child
-    // terminal decision immediately, before the general 120-second idle wait.
+    // Child task settlement is owned below. Active tasks must reach the child
+    // terminal decision before the general idle wait can consume another bound.
     let original_idle_probe = context.async_ctx.idle_should_wait.take();
     context.async_ctx.idle_should_wait = Some({
         let manager = Arc::clone(&manager);
-        let shell_reminded = Arc::clone(&shell_reminded);
         Arc::new(move || {
-            if !shell_reminded.load(Ordering::Acquire) && !active_shell_tasks(&manager).is_empty() {
+            if manager.active_count() > 0 {
                 return false;
             }
             original_idle_probe.as_ref().is_some_and(|probe| probe())
@@ -142,6 +150,9 @@ pub(super) async fn run_child_until_terminal(
                 continue;
             }
             return LoopResult::Completed;
+        }
+        if let Some(sender) = handoff_start.take() {
+            let _ = sender.send(());
         }
         tokio::select! {
             biased;
