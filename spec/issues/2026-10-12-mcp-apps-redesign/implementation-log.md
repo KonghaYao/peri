@@ -287,7 +287,7 @@ R1–R9 与追加硬要求）。本批做 S1/S2/S3 + 跨 crate 编译修正；**
 | R5 过渡身份 + `InvocationOrigin::App` 更名 | `AttachmentRoute{attachment_id = record_id, connection_epoch = ConnectionEpoch::initial()}`（类型注释写明 per-View Attachment 属阶段 4）；`InvocationOrigin::App{app_id, attachment_id, connection_epoch, server_generation}`。 |
 | R6 更名/删除授权 | `McpAppBindingLease` → `McpAppInvocationRecord`（字段重构）；删除 `McpAppsInvoker` / `McpAppsInvocationSeam` / `McpAppsInvocationError` 与只覆盖死 seam 的用例（`apps_test.rs::invocation_without_canonical_seam_is_unavailable`）。 |
 | R7 连接关闭 = 该连接全部 Attachment detach | `McpAppBindingRegistry::revoke_connection` → `McpAppsRelayPort::close_connection` 撤销 record + 交付令牌，**不取消执行**；回归 `session_invocation_test.rs::closing_one_app_does_not_cancel_turn_or_other_app` 与 `apps_relay_test.rs::closed_connection_stops_delivery_without_cancelling_execution`。 |
-| R8 串行点在 service；`prompt_in_flight` gate 本批保留 | `SessionAdmissionOwner`（`parking_lot::Mutex` 短锁、持锁无 await；`commit()` 产出携已绑定 peer 的 `DispatchCommit`）；`peri/mcp/invoke` 的 gate 未改动（行为不回退），移除条件=阶段 4 facade 由共同准入决定并发（本日志已记）。 |
+| R8 串行点在 service；`prompt_in_flight` gate 本批保留 | `SessionAdmissionOwner`（`parking_lot::Mutex` 短锁、持锁无 await；`commit()` 产出携已绑定 peer 的 `DispatchCommit`）；`peri/mcp/invoke` 的 gate 未改动（行为不回退），移除条件=阶段 4 facade 由共同准入决定并发（本日志已记）。**【2026-10-13 批 G 取代 + 口径更正】** 该移除条件按字面**不成立**：共同准入决定的是**顺序与资格**（epoch / 撤销键 / record 世代 / peer 绑定 / 一次性资格 / 序号），不决定并发——`commit()` 的短锁在 `drop(revoked)` 之后即释放，到 `dispatch` 之间没有任何互斥。移除条件因此改判为「删掉这条别名独有的假串行」：旧判据读 `SessionState.cancel_token` 的**快照**（不是锁），既不提供真实互斥，又让别名与 canonical 面判决不同。批 G 已删除该字段与检查，别名准入只剩 `known` / `open`。见「4b 批 G」节。 |
 | R9 outcome 记录层区分 ApprovalUnavailable / UserRejected | `ApprovalUnavailableSink`（本次执行的 typed 记录点）+ `BlockApprovalState::approval_unavailable_sink`；permission 单条/批量与 hook `ask` 三处消费 `Unanswered` 时写入原因；`map_dispatch_error` 优先产出 `NotExecuted{ApprovalUnavailable(cause)}`，否则按错误码产出 `UserRejected`；回归 `session_invocation_test.rs::no_online_endpoint_is_not_executed_and_never_reported_as_user_rejection`。`AgentError` 层分类留待阶段 4（移除条件已记）。 |
 
 ### 我做过的判断（超出设计文档）
@@ -569,7 +569,9 @@ session-owned canonical 入口真实可达，`NoOnlineEndpoint` 有了唯一生�
 - 阶段 4：`apps/*` facade 七方法（AppRecord/Attachment 完整模型、per-View 重附着与 epoch
   权威回收、`apps/close` per-App 关闭）、RequestLedger 去重、结果 / 预算回收、
   `SessionAuthorizationPort` 接线、`peri/mcp/invoke` 的 `prompt_in_flight` gate 由共同准入
-  取代（R8 的移除条件）、`AgentError` 层 typed 分类（R9）。
+  取代（R8 的移除条件）、`AgentError` 层 typed 分类（R9）。**（2026-10-13 更新：本清单已逐项完成——
+  facade 七方法 / ledger / 回收 = 4a 批 C、批 D；R9 = 4b 批 E；授权接线 = 4b 批 F；gate = 4b 批 G。其中 gate
+  一项的实际口径是「**删掉该判据**」而不是「由共同准入取代」：后者按字面不成立，见「4b 批 G」与 R8 行的更正。）**
 - 阶段 5：联合切换与验收（A1 `mcp_apps_idle_ownership_test.rs` 的 `Weak<EventBus>` /
   `Weak<catalog>` 探针、A13 无 Arc 回环探针、host 级通知路径回归、文档收尾
   `ARC-MCP-APPS-001` / `ARC-MIDDLEWARE-001` 的「idle 规则链 ≠ 生产链」登记）。
@@ -1067,7 +1069,8 @@ no_online_endpoint_is_not_executed_and_never_reported_as_user_rejection` 保持�
 3. **Host 直调（旧别名 `peri/mcp/invoke`）有意不加门**：`SessionCapability` 没有 Host / invoke 能力项，
    本批不扩契约；该路径的既有约束不变（`InvokeSessionGate` 的 known/open/prompt_in_flight + facade 的
    Host 操作域 + ledger 序号 + 每次调用的 canonical 审批）。移除条件 = 旧别名随外部客户端切换一并删除
-   （S8），若届时仍需要 Host 面授权，再按契约扩能力项。
+   （S8），若届时仍需要 Host 面授权，再按契约扩能力项。**（2026-10-13 批 G 更正：该路径的准入判据只剩
+   `known` / `open`——`prompt_in_flight` 已删除，见「4b 批 G」；「不加门」的结论不变。）**
 4. **canonical 入口 / middleware 记录层仍拿不到 caller**：`SessionInvocationRequest` 无 caller 字段
    （`mcp_apps.rs`），因此不可达的门只能留在 facade 层；record 的 `EntitlementState::Unenforced` 因此
    保持（record 层确实不承载授权结论）。移除条件 = 契约让 canonical 入口携带可信调用者事实
@@ -1075,3 +1078,116 @@ no_online_endpoint_is_not_executed_and_never_reported_as_user_rejection` 保持�
 5. **`session/restore` 仍不是 wire 名**：恢复流程 = `session/load` + `session/resume`（端点注册随二者）。
 6. **`host/workspace.rs` 恰好 1000 行**（`STD-SIZE-001` 阈值上限，未超）：该文件在本批之前已是 999 行，
    本批只净增 1 行即贴边；任何后续改动都应先拆分（不属本批范围）。
+
+## 4b 批 G：R8 取代 —— 删旧别名 `peri/mcp/invoke` 的 `prompt_in_flight` 假串行（2026-10-13，已完成）
+
+### 裁决（root agent，2026-10-13；用户在选项征询中拒绝回答 ⇒ 授权按仓库原则裁决）
+
+**候选 ①a**：删掉 `InvokeSessionGate.prompt_in_flight` 这条判定，别名 `peri/mcp/invoke` 的准入与 canonical 面
+同一判决；保留 `known` / `open` 两个检查与其单测；不新增互斥原语、不新增状态源。
+
+依据：
+
+1. **原则 7（业务规则单一权威）**：候选 ②（gate 改读 admission 的新状态）要在 `SessionState.cancel_token` 之外
+   再登记一份「prompt 在飞」，且受 `peri-middlewares` 不得引用 `peri_acp` 的硬约束必须走依赖反转新增 port
+   ⇒ 同一语义两个状态源 + 新 API 面。
+2. **原则 6（删除优于兼容）**：`InvokeSessionGate` 是全仓孤例（`host/mcp_apps.rs` 定义 + `host/server_loop.rs`
+   唯一生产构造点），判据是 `cancel_token` 的**读快照布尔判定、不是锁**（`server_loop.rs` 持 `sessions` 锁取一次
+   快照后立即释放，invoke 本体在独立任务里跑）⇒ 它不提供真实互斥，只提供「看起来串行」的假象。
+3. **R8 移除条件的口径更正**（见「事实更正」）：原条件「facade 由共同准入决定并发」今天不成立，故把「取代」
+   落实为「删掉别名独有的假串行」。
+4. **对外可见行为变化已被证据限界**：全仓（含 `e2e/`）没有「prompt 真在飞 + 真 invoke」的端到端覆盖；
+   唯一外部脚本 `side-projects/mcp-apps/check-peri.ts:376-392` 是在 prompt 响应**完成之后**才 invoke。
+5. **ARC-MCP-APPS-001 的承诺方向**：契约明文「旧 4 个 wire 名是同一 façade 的薄别名（同一执行链、同一判决、
+   无第二权威）」——删 gate 是**兑现**该承诺，不是新增偏离。
+
+**明确不做（本批排除 + 登记）**：
+
+1. 不做候选 ①b（别名并入 canonical 判决面）：`apps/request` 不暴露 Host 目标、旧信封无 `sourceInvocationRef`，
+   需要新 DTO 与新语义，超本批范围。
+2. 不动 `known` / `open` 两分支：侦察判定它们「生产不可达」是【推断】（被 `capability_disabled` 遮蔽），
+   **未实测**——禁止在推断上删 wire 行为。
+3. 不新增 `SessionCapability` 之外的 Host 面能力项（R4 已裁决为「只接线不注入」）。
+
+### 改动
+
+| 位置 | 改动 |
+| ---- | ---- |
+| `peri-acp/src/host/mcp_apps.rs` | `InvokeSessionGate` 删 `prompt_in_flight` 字段与 `handle_invoke` 的该条检查；类型文档注释写明「本类型只做会话存在性 / 开启状态检查，顺序与资格由 canonical service 的共同准入决定」 |
+| `peri-acp/src/host/server_loop.rs` | `peri/mcp/invoke` 分支的准入快照不再读 `state.cancel_token`（删字段实参 + 注释说明口径） |
+| `peri-acp/src/host/mcp_apps_test.rs` | 删 `invoke_during_prompt_is_policy_denied`（钉死旧假串行的唯一用例），替换为 `invoke_is_admitted_without_session_busy_refusal`；其余 5 处夹具删字段（断言一字未改） |
+| `peri-acp/src/host/mcp_apps_idle_cases_test.rs` | 新增 `concurrent_alias_invokes_are_admitted_and_execute_once_each`：别名 `handle_invoke` × 真 relay × 真 canonical 入口 × 真 peer（该面此前无端到端覆盖） |
+| `peri-acp/src/host/requests_session_endpoint_test.rs` | 新增 `invoke_during_prompt_is_admitted_through_the_real_server_loop`：真实 `ServerLoop` + 真实 `session/new` 装配下**设置**「prompt 在飞」（`SessionState.cancel_token = Some`）后发 `peri/mcp/invoke`，断言拒绝来自 relay 自己的错误面（`unknown_server`）而不是 `policy_denied`（附反向 mutation 证据） |
+| `docs/standards/architecture-contracts.md` | ARC-MCP-APPS-001：宿主调用的错误面改为与现状一致（`approval_unavailable` / `policy_denied` 两分，审批经会话交互门）；「同一判决」补删 gate 的依据与残余（别名未接 `RequestLedger`）；Verify 增两条用例名 |
+| `docs/code-index/peri-acp.md` | 速查表更新段补批 G：`InvokeSessionGate` 只剩 `known` / `open`，别名与 canonical 的差异只剩「不经 ledger」 |
+| `docs/design/mcp-multiplexing.md` | §6.3 宿主调用段最小更正（原文写「没有 canonical 审批上下文时返回 `policy_denied`」，与现状不符） |
+
+### 「原断言 / 为什么必须变 / 改成什么」
+
+1. **原断言**（`mcp_apps_test.rs::invoke_during_prompt_is_policy_denied`）：`handle_invoke(..., gate{prompt_in_flight: true})`
+   ⇒ `error.data["kind"] == "policy_denied"`。
+2. **为什么必须变**：该判据已删除，「prompt 在飞」不再是本面的输入——制造并断言它的代码路径消失
+   （断言一个不存在的输入只会成为僵尸用例）。
+3. **改成**：`invoke_is_admitted_without_session_busy_refusal` —— 同一会话（在册且未关闭）连续两次 invoke 都
+   **走到 relay 执行面**：第一次取到 relay 的真实回执（`toolCallId`），第二次的拒绝来自 relay 自己的错误面
+   （`upstream_protocol_error`），断言「拒绝不是任何会话忙门给出的（那才会是 `policy_denied`）」。
+   「prompt 在飞」这一事实在删除后只能由 **server loop 层**表达（`state.cancel_token`），故它的端到端断言
+   放在 `requests_session_endpoint_test.rs::invoke_during_prompt_is_admitted_through_the_real_server_loop`。
+4. **未改弱的断言**：其余 5 处夹具（`capability_disabled` / `invalid_session` / 关闭会话 `policy_denied` /
+   relay 拒绝不投影成功 / 成功返回 `toolCallId` 且响应无 `updates`）只删了字段，断言逐字未动。
+
+### 证据（原始命令与输出行，2026-10-13）
+
+- `./scripts/cargo-rmcp-patched.sh check --locked -p peri-acp --all-targets`
+  → `Finished \`dev\` profile [unoptimized + debuginfo] target(s) in 21.82s`（exit 0）
+- `./scripts/cargo-rmcp-patched.sh test --locked -p peri-acp --lib`（全量，最终文件状态复跑）
+  → `test result: ok. 897 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 137.76s`（exit 0）
+  （批 F 基线 895：删 1 条旧用例 + 新增 3 条 = 897）
+- `test --locked -p peri-acp --lib -- invoke_is_admitted_without_session_busy_refusal`
+  → `test host::mcp_apps::tests::invoke_is_admitted_without_session_busy_refusal ... ok`
+- `test --locked -p peri-acp --lib -- concurrent_alias_invokes_are_admitted_and_execute_once_each`
+  → `test host::mcp_apps_idle_tests::cases::concurrent_alias_invokes_are_admitted_and_execute_once_each ... ok`
+  （真实 peer 计数断言 `calls == 2`、审批帧 2 条、两个不同 `toolCallId`）
+- `test --locked -p peri-acp --lib -- invoke_during_prompt_is_admitted_through_the_real_server_loop`
+  → `... session_endpoint::invoke_during_prompt_is_admitted_through_the_real_server_loop ... ok`
+  （真实 server loop：会话 `cancel_token = Some` 时 invoke 仍到达 relay 面）
+- **反向验证（mutation）**：把 `host/server_loop.rs` 的快照改成
+  `open: !state.closing && state.cancel_token.is_none()`（等价于旧判据，同一个 wire 形态）后复跑该用例
+  → `FAILED`，`实际: AcpError { code: -32000, message: "MCP Apps relay request failed", data: Some(Object {"kind": String("policy_denied")}) }`
+  （随后已恢复；说明该回归真的咬住被删的判据，不是恒绿）
+- `./scripts/cargo-rmcp-patched.sh clippy --locked -p peri-acp --all-targets -- -D warnings`
+  → `Finished \`dev\` profile [unoptimized + debuginfo] target(s) in 13.26s`（无 warning）
+- `./scripts/cargo-rmcp-patched.sh check --locked --workspace --all-targets`
+  → `Finished \`dev\` profile [unoptimized + debuginfo] target(s) in 27.61s`（exit 0）
+- `bash scripts/check-file-size.sh` → `共扫描 2328 个文件，超阈值 3 个（源码 2 / 测试 1）`（= 既有基线三文件，未新增）
+- `./scripts/cargo-rmcp-patched.sh fmt --all -- --check` → exit 0
+
+### 已知缺口与移除条件
+
+1. **别名未接 `RequestLedger`**（ARC「同一判决」的残余）：别名经 `relay.invoke_app` 走 canonical service 的
+   准入与执行，但没有按 key 去重 / 结果复用 / 容量判决 ⇒ 并发重传会被执行多次。移除条件 = 旧别名随外部客户端
+   切换删除（S8），或为 Host 调用设计 canonical 目标选择面（候选 ①b，超本批范围）。
+2. **`known` / `open` 分支的生产可达性未实测**：被 `capability_disabled` 遮蔽属【推断】；本批据此保留两条
+   wire 行为与其单测，未删。
+3. **「prompt 真在飞 × 真执行」仍无端到端覆盖**：`invoke_during_prompt_is_admitted_through_the_real_server_loop`
+   已覆盖「prompt 在飞 ⇒ 仍被准入并走到 relay 执行面」（用不存在的 server 触发 relay 的既定错误面），但
+   「prompt 在飞 × 真实执行成功」需要在真实 ACP 客户端下让模型轮次与 Host invoke 打同一个应用 server——
+   `side-projects/mcp-apps/check-peri.ts` 目前是在 prompt 响应完成后才 invoke，本批未扩该脚本。
+4. **跨来源执行并发无兜底**（裁决接受的代价）：Host invoke 与模型工具调用可以同时打同一 MCP server；
+   审批互斥仍有 `interaction_gate`，**执行**并发没有替代物——这正是 R8 移除条件口径更正的内容。
+5. **`docs/reference/mcp-ecosystem.md:449` 的文字漂移本批只登记、不改写**（该文件自述「不是仓库架构或协议的
+   事实源」）：它写 `peri/mcp/invoke` 会「新的 MCP `tools/call` + 新 lease + `session/update` 投影新 `toolCallId`」，
+   与 4a 的 R3（Host 调用不产生合成模型卡片）及 S8（lease 表已删除）都不符。以 `ARC-MCP-APPS-001` 为准。
+   `docs/design/mcp-multiplexing.md`（现行设计、被 ARC 引用）只做 §6.3 宿主调用段的最小更正：原写「没有可用的
+   canonical 审批上下文时返回 `policy_denied`」，与现状（接入同一 canonical 入口、审批经会话交互门、
+   `approval_unavailable` / `policy_denied` 两分）不符。
+
+### 事实更正（本批）
+
+1. **「共同准入决定并发」不成立**：`SessionAdmissionOwner::commit()` 只做短锁校验 + 序号分配，锁在
+   `drop(revoked)` 之后释放，到 `dispatch` 之间没有任何互斥 ⇒ 它决定的是**顺序与资格**（runtime epoch /
+   撤销键 / record 世代 / peer 在线与世代 / 一次性资格 / 序号），**不是并发**。R8 的移除条件据此重新定义
+   （见裁决依据第 3 条），旧表述「facade 由共同准入决定并发」不再作为条件。
+2. **旧 gate 不是互斥原语**：它是 `SessionState.cancel_token` 的一次读快照；「prompt 在飞」的判定与
+   prompt 任务实际置 / 清 token 的时刻之间没有同步（**由代码的读写点推得，未实测**）：prompt 任务尚未置 token
+   ⇒ invoke 被放行；`finish_prompt_turn` 已清 token 但 ACP 响应未发出 ⇒ 同样放行。
