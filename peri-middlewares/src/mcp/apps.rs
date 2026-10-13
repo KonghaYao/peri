@@ -11,7 +11,8 @@ use parking_lot::Mutex;
 use peri_acp_types::interaction::{AttachmentId, ConnectionEpoch};
 use peri_acp_types::mcp_apps_facade::{
     AppQualification, AttachmentBinding, AttachmentSummary, ClientViewId, ModelAssociation,
-    RequestNamespaceId, RequestSeq, MAX_ATTACHMENTS_PER_APP,
+    RequestNamespaceId, RequestSeq, APP_RETENTION_MS, MAX_APPS_PER_SESSION, MAX_APP_RECORDS,
+    MAX_ATTACHMENTS_PER_APP,
 };
 use peri_acp_types::tool_invocation::{InvocationId, ToolCallId};
 use peri_acp_types::tool_outcome::RawToolResult;
@@ -22,8 +23,6 @@ use super::session_invocation::{AppDeliveryToken, AttachmentDeliveryToken};
 pub const MCP_APPS_VERSION: &str = "2026-01-26";
 pub const MCP_APP_MIME_TYPE: &str = "text/html;profile=mcp-app";
 pub const MCP_UI_EXTENSION: &str = "io.modelcontextprotocol/ui";
-const BINDING_LEASE_TTL: Duration = Duration::from_secs(300);
-const MAX_RECORDS: usize = 1024;
 
 /// 附件路由：一个 View 的**连接归属 + 投递资格 + 身份事实**。
 ///
@@ -233,7 +232,7 @@ impl McpAppRecord {
             ever_attached: AtomicBool::new(false),
             delivery: AppDeliveryToken::new(),
             initial_result: spec.initial_result,
-            expires_at: peri_time::monotonic_now() + BINDING_LEASE_TTL,
+            expires_at: peri_time::monotonic_now() + Duration::from_millis(APP_RETENTION_MS),
         }
     }
 
@@ -295,7 +294,16 @@ impl McpAppRecord {
 
     /// 记录仍存活：未过期且未撤销（待附着或已附着）；注册表的有界清理用它。
     pub fn is_live(&self) -> bool {
-        peri_time::monotonic_now() < self.expires_at && self.state() != RecordState::Revoked
+        self.is_live_at(peri_time::monotonic_now())
+    }
+
+    /// 在**给定时刻**是否存活（到期判定与时钟解耦的唯一形状）。
+    ///
+    /// 生产路径一律走 [`Self::is_live`]；本方法存在是为了让「等于保留期 ⇒ 仍存活 /
+    /// 超过保留期 ⇒ 已不存活」这条边界可断言（`peri_time` 无测试时钟，`Instant` 是
+    /// 单调时钟、测试内推不动）。
+    pub(crate) fn is_live_at(&self, now: Instant) -> bool {
+        now < self.expires_at && self.state() != RecordState::Revoked
     }
 
     /// 未过期、有当前附件、未撤销：可以受理新的调用。
@@ -409,6 +417,14 @@ pub enum IssueRejection {
         /// 注册表当前登记的世代。
         current: u64,
     },
+    /// 本会话存活记录数已达 `MAX_APPS_PER_SESSION`（单会话**契约**上限）。
+    ///
+    /// 拒绝本次签发、保留既有存活记录：不淘汰（淘汰会让用户正在看的 App 静默
+    /// 消失），与 `MAX_ATTACHMENTS_PER_SESSION` 的「表满显式拒绝」同策。
+    SessionCapacityExceeded {
+        /// 单会话上限（= `MAX_APPS_PER_SESSION`）。
+        limit: u64,
+    },
 }
 
 impl std::fmt::Display for IssueRejection {
@@ -417,6 +433,11 @@ impl std::fmt::Display for IssueRejection {
             Self::IncarnationMismatch { bound, current } => write!(
                 f,
                 "session incarnation mismatch: record bound to {bound}, current {current}"
+            ),
+            Self::SessionCapacityExceeded { limit } => write!(
+                f,
+                "session app record table is full ({limit}); today's record is not issued and \
+                 existing live records are kept"
             ),
         }
     }
@@ -454,7 +475,10 @@ impl McpAppBindingRegistry {
         self.incarnations.lock().get(session_id).copied()
     }
 
-    /// 有界清理：过期 / 已撤销条目出表，超出容量按插入序淘汰（FIFO）。
+    /// 有界清理：过期 / 已撤销条目出表，超出容量淘汰**最旧**记录（并终态撤销）。
+    ///
+    /// 唯一调用点是 [`Self::issue`] 的**登记之后**（4b 批 H 起；登记前调用会让表长
+    /// 可以停在「上限 + 1」，上限就名不副实）。
     ///
     /// 两把锁**顺序获取**（先 `records` 后 `by_id`），与 [`Self::revoke_app`]
     /// 同序，不存在交叉持锁。附件随记录存活：记录出表即撤销其**全部**附件交付
@@ -471,8 +495,12 @@ impl McpAppBindingRegistry {
         {
             let mut by_id = self.by_id.lock();
             by_id.retain(|_, record| record.is_live());
-            while by_id.len() > MAX_RECORDS {
-                let Some(key) = by_id.keys().next().cloned() else {
+            while by_id.len() > MAX_APP_RECORDS as usize {
+                // 淘汰**最旧**：record 身份是 UUID v7（时间有序），按身份取最小即最旧。
+                // 不得用 `keys().next()`——`HashMap` 的迭代序不是插入序，那样会随机
+                // 淘汰，甚至淘汰掉刚签发的记录。同一毫秒内签发的身份之间顺序随机
+                //（尾段是随机位），此时等同「同刻签发者中任选」，可接受。
+                let Some(key) = by_id.keys().min().cloned() else {
                     break;
                 };
                 if let Some(record) = by_id.remove(&key) {
@@ -485,10 +513,23 @@ impl McpAppBindingRegistry {
         }
     }
 
+    /// 本会话**存活**记录数（自己过滤 `is_live()`，不依赖 [`Self::cleanup`] 是否已跑）。
+    fn live_records_of_session(&self, session_id: &str) -> usize {
+        self.by_id
+            .lock()
+            .values()
+            .filter(|record| record.owner_session_id == session_id && record.is_live())
+            .count()
+    }
+
     /// 登记一条新签发的记录。
     ///
     /// 世代一致性是**准入前置**：若本会话已登记世代而记录携带的世代与之不符
     /// （旧环境的迟到签发），拒绝登记——绝不签发世代不符的记录。
+    ///
+    /// 单会话容量（`MAX_APPS_PER_SESSION`）同样是准入前置：已达上限则拒绝本次签发
+    /// 并保留既有存活记录（**不淘汰**——淘汰会让用户正在看的 App 静默消失）。
+    /// 跨会话的注册表容量（`MAX_APP_RECORDS`）在登记后由 [`Self::cleanup`] 按最旧淘汰。
     pub fn issue(&self, record: Arc<McpAppRecord>) -> Result<(), IssueRejection> {
         if let Some(current) = self.session_incarnation(&record.owner_session_id) {
             if record.incarnation != current {
@@ -498,7 +539,11 @@ impl McpAppBindingRegistry {
                 });
             }
         }
-        self.cleanup();
+        if self.live_records_of_session(&record.owner_session_id) >= MAX_APPS_PER_SESSION as usize {
+            return Err(IssueRejection::SessionCapacityExceeded {
+                limit: MAX_APPS_PER_SESSION,
+            });
+        }
         self.records
             .lock()
             .entry((record.server_id.clone(), record.instantiating_tool.clone()))
@@ -507,6 +552,11 @@ impl McpAppBindingRegistry {
         self.by_id
             .lock()
             .insert(record.record_id.clone(), Arc::clone(&record));
+        // 有界清理**在登记之后**：`cleanup` 的前置调用（旧写法）只把表清理到上限就插入，
+        // 于是「表 + 1」在两次签发之间一直存在——上限被算成 `MAX_APP_RECORDS + 1`。
+        // 登记后清理才能让「任何时刻的表长 ≤ 上限」成立（刚签发的记录是最新的，
+        // 淘汰按最旧优先，不会命中它，除非全部记录落在同一毫秒——见 `cleanup` 注释）。
+        self.cleanup();
         Ok(())
     }
 

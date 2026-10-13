@@ -508,3 +508,152 @@ fn raw_result_round_trip_preserves_standard_and_unknown_fields() {
         Some(&raw["structuredContent"])
     );
 }
+
+// ─── 4b 批 H：预算常量的边界（等于上限 ⇒ 通过 / 上限 + 1 ⇒ 既定行为）──────────
+//
+// 这三条用例是「广告 = 实现」的可执行证据：`McpAppsLimits` 广告给客户端的
+// `max_apps_per_session` / `app_retention_ms` 由这些断言钉住。此前这两个字段
+// 只有投影、没有任何强制点（实现侧实际生效的是另一套数字）。
+
+/// 保留期 = 契约值 `APP_RETENTION_MS`，且到期边界恰好落在该值上（不是 300 s 旧值）。
+#[test]
+fn record_retention_is_the_contract_value_and_is_live_until_it() {
+    let issued = record("tool", "token-retention", 7);
+    let remaining = issued.retention_remaining();
+    assert!(
+        remaining <= Duration::from_millis(APP_RETENTION_MS),
+        "保留期不得超过契约值（实测剩余 {remaining:?}）"
+    );
+    assert!(
+        remaining > Duration::from_millis(APP_RETENTION_MS) - Duration::from_secs(1),
+        "保留期必须等于契约值而非实现侧的旧值（实测剩余 {remaining:?}）"
+    );
+
+    // 到期边界（时钟注入；`peri_time` 无测试时钟，单调时钟推不动）：
+    // 「刚好到期」⇒ 已不存活，「到期前 1 ms」⇒ 仍存活。
+    let expires_at = issued.expires_at;
+    assert!(
+        issued.is_live_at(expires_at - Duration::from_millis(1)),
+        "到期前的最后一刻仍存活"
+    );
+    assert!(
+        !issued.is_live_at(expires_at),
+        "到期即终态撤销的判据：`now == expires_at` 不算存活"
+    );
+    assert!(issued.is_live(), "刚签发的记录在生产时钟下存活");
+}
+
+/// 单会话上限（`MAX_APPS_PER_SESSION`）：等于上限 ⇒ 全部签发成功；上限 + 1 ⇒ 显式
+/// 拒绝且**不淘汰**既有存活记录；容量按会话隔离、随撤销释放。
+#[test]
+fn session_capacity_rejects_the_record_over_the_contract_limit_without_evicting() {
+    let registry = McpAppBindingRegistry::default();
+    let mut issued: Vec<Arc<McpAppRecord>> = Vec::new();
+    for index in 0..MAX_APPS_PER_SESSION {
+        let spec = McpAppRecordSpec {
+            owner_session_id: "session".to_string(),
+            ..record_spec("tool", &format!("token-{index}"), 7)
+        };
+        issued.push(Arc::new(McpAppRecord::new(spec)));
+        registry
+            .issue(Arc::clone(issued.last().unwrap()))
+            .expect("等于上限的每一条都必须签发成功（上限是闭区间：恰好 64 条允许）");
+    }
+    assert_eq!(
+        registry.records_for_session("session").len() as u64,
+        MAX_APPS_PER_SESSION
+    );
+
+    let overflow = registry
+        .issue(record("tool", "token-overflow", 7))
+        .expect_err("上限 + 1 必须显式拒绝");
+    assert_eq!(
+        overflow,
+        IssueRejection::SessionCapacityExceeded {
+            limit: MAX_APPS_PER_SESSION
+        }
+    );
+    assert_eq!(
+        registry.records_for_session("session").len() as u64,
+        MAX_APPS_PER_SESSION,
+        "拒绝不得淘汰既有记录（表保持在上限内）"
+    );
+    assert!(
+        issued.iter().all(|record| record.is_live()),
+        "既有存活记录一条都不许被淘汰（用户正在看的 App 不得静默消失）"
+    );
+    assert!(
+        registry.find(&issued[0].record_id).is_some(),
+        "最旧记录也在（拒绝策略与「跨会话容量淘汰」不同）"
+    );
+
+    // 上限是**会话级**：另一个会话不受影响。
+    let other = Arc::new(McpAppRecord::new(McpAppRecordSpec {
+        owner_session_id: "other-session".to_string(),
+        ..record_spec("tool", "token-other", 7)
+    }));
+    registry
+        .issue(other)
+        .expect("会话级上限不跨会话累计（另一个会话仍可签发）");
+
+    // 容量随撤销释放：撤销本会话一条后，上限内又腾出一格。
+    registry.revoke_app(&issued[0].record_id);
+    registry
+        .issue(record("tool", "token-after-revoke", 7))
+        .expect("已撤销记录不再占用会话容量");
+}
+
+/// 注册表级上限（`MAX_APP_RECORDS`，跨会话）：超出即淘汰**最旧**并终态撤销；
+/// 新签发的记录存活。
+#[test]
+fn registry_capacity_evicts_the_oldest_record_across_sessions() {
+    let registry = McpAppBindingRegistry::default();
+    // 单会话上限 64 ⇒ 要跨过注册表上限必须用多个会话（这本身就是两条作用域的证明）：
+    // 会话 = `index / MAX_APPS_PER_SESSION`，每个会话恰好 64 条（等于上限，允许）。
+    let per_session = MAX_APPS_PER_SESSION as usize;
+
+    let oldest = Arc::new(McpAppRecord::new(McpAppRecordSpec {
+        owner_session_id: "s0".to_string(),
+        ..record_spec("tool", "token-oldest", 7)
+    }));
+    registry.issue(Arc::clone(&oldest)).expect("最旧记录可签发");
+    // record 身份是 UUID v7（毫秒时间戳 + 随机尾段）：跨毫秒才能保证「更旧」严格成立。
+    std::thread::sleep(Duration::from_millis(2));
+
+    let mut issued: Vec<Arc<McpAppRecord>> = vec![Arc::clone(&oldest)];
+    for index in 1..=MAX_APP_RECORDS as usize {
+        let spec = McpAppRecordSpec {
+            owner_session_id: format!("s{}", index / per_session),
+            ..record_spec("tool", &format!("token-{index}"), 7)
+        };
+        let record = Arc::new(McpAppRecord::new(spec));
+        registry.issue(Arc::clone(&record)).expect("上限内可签发");
+        issued.push(record);
+    }
+
+    assert_eq!(
+        issued.iter().filter(|record| record.is_live()).count() as u64,
+        MAX_APP_RECORDS,
+        "注册表存活记录数不得超过上限"
+    );
+    assert_eq!(
+        issued
+            .iter()
+            .filter(|record| record.state() == RecordState::Revoked)
+            .count(),
+        1,
+        "超出部分恰好淘汰一条（FIFO 语义：一次只出一进一）"
+    );
+    assert_eq!(
+        oldest.state(),
+        RecordState::Revoked,
+        "淘汰的是**最旧**记录（不是 `HashMap` 迭代序的任意一条）"
+    );
+    assert!(registry.find(&oldest.record_id).is_none(), "被淘汰记录出表");
+    assert!(
+        registry
+            .find(&issued.last().unwrap().record_id)
+            .is_some_and(|record| record.is_live()),
+        "刚签发的记录必须存活（淘汰不得命中新记录）"
+    );
+}

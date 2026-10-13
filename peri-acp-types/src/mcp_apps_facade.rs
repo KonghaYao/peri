@@ -29,31 +29,88 @@ pub use crate::mcp_apps::MCP_APPS_FACADE_VERSION;
 
 // ─── §4.3 预算常量（单一权威）────────────────────────────────────────────────
 //
-// **4a 保守值，4b 依实测调参**：调参只改本节的常量，不得在调用点重复字面量。
+// **本节的数值是契约事实，不是测量结果**：本仓没有生产用量埋点（没有 outcome 字节
+// 直方图、没有单会话条数 / namespace 数分布、没有客户端重试节奏），因此「依实测调参」
+// 在 4b 无法执行——改这些数字前必须先补测量（缺什么、怎么测见实现日志「4b 批 H」）。
+// 在那之前它们的行为由边界测试钉死（等于上限 ⇒ 通过 / 上限 + 1 ⇒ 既定行为），
+// 而不是由「看起来合理」钉死。
+//
+// 纪律：同一个域内的数字只在**本节**定义，调用点必须引用常量、不得复写字面量。
 // 所有新增内存结构都必须由本节的上限约束（设计 §9：有界，不新增数据库 / 文件缓存）。
 
 /// 单会话最多同时存活的 App record 数。
+///
+/// 强制点 = `peri-middlewares` 的记录注册表（`McpAppBindingRegistry::issue`）：
+/// 超过即拒绝本次签发（`IssueRejection::SessionCapacityExceeded`，调用点记 warn），
+/// **不淘汰存活记录**——与 `MAX_ATTACHMENTS_PER_SESSION` 的「表满显式拒绝」同策。
 pub const MAX_APPS_PER_SESSION: u64 = 64;
-/// 单 record 最多附件数（多 tab / 多 View）。
+/// 单 record 最多附件数（多 tab / 多 View）。超限 ⇒ 附着被拒（`CapacityExceeded`）。
 pub const MAX_ATTACHMENTS_PER_APP: u64 = 8;
-/// 单会话最多附件数（跨 record 合计）。
+/// 单会话最多附件数（跨 record 合计）。超限 ⇒ `AttachRejection::TableFull`，
+/// 不淘汰在线附件。
+///
+/// 与 `MAX_ATTACHMENTS_PER_APP` 的关系：`8 × N ≥ 64`（N 为同会话 record 数 ≥ 8）时
+/// **先满的是会话表**，单 record 的 8 只对「同 record 内多 tab」生效。
 pub const MAX_ATTACHMENTS_PER_SESSION: u64 = 64;
 /// 单 namespace 最多未决请求数（pending 不淘汰，但有上限）。
+///
+/// 超限 ⇒ in-band `RequestVerdict::CapacityRejected`，且**不消耗序号**。
 pub const MAX_PENDING_PER_NAMESPACE: u64 = 32;
 /// 单会话最多 namespace 数（Attachment 与 Host 各自一个）。
+///
+/// 超限 ⇒ `NamespaceOpenError::CapacityExceeded`；已销毁 namespace 的去重墓碑容量
+/// 由本值派生（`apps_ledger.rs::DESTROYED_TOMBSTONES`，无独立数字）。
 pub const MAX_NAMESPACES_PER_SESSION: u64 = 64;
-/// 已完成结果保留条数上限（按条数回收）。
+/// 已完成结果保留条数上限（按条数回收）。作用域 = **单 namespace**。
+///
+/// 回收是静默的（无日志）：客户端只能在稍后同 key 重传时看到
+/// `RequestVerdict::ResultExpired`。
 pub const MAX_RETAINED_RESULTS: u64 = 256;
 /// 单条结果字节上限（超过即显式不可用，不做 UI 内容缓存）。
+///
+/// 超限不保留 outcome，但**保留防重事实**（同 key 同指纹 ⇒ `ResultExpired`，
+/// 异指纹 ⇒ `Conflict`）——绝不因超限而重执行。
 pub const MAX_RESULT_BYTES: u64 = 1024 * 1024;
-/// 已完成结果retained 总字节上限。
+/// 已完成结果 retained 总字节上限。作用域 = **单 namespace**（不是会话总量）：
+/// 会话最坏驻留是 `MAX_NAMESPACES_PER_SESSION × MAX_RETAINED_BYTES`，本仓无实测分布
+/// 可用以判断该上界是否可接受（登记见实现日志「4b 批 H」）。
 pub const MAX_RETAINED_BYTES: u64 = 8 * 1024 * 1024;
 /// detach 后的重挂接窗口（毫秒）。到期后该附件不可再挂接。
+///
+/// 它约束的是**附件身份**，不是 record 存活（后者见 `APP_RETENTION_MS`，更宽）。
 pub const DETACH_REATTACH_WINDOW_MS: u64 = 300_000;
 /// 单次 `apps/request` 等待终态的上限（毫秒）。
+///
+/// 到期**如实返回 `Pending`**（不谎报结果）；客户端重试节奏决定它是否够用，本仓无
+/// 客户端重试节奏数据。
 pub const REQUEST_WAIT_TIMEOUT_MS: u64 = 30_000;
 /// App record 的保留期（毫秒）；到期即终态撤销。
+///
+/// 强制点 = `peri-middlewares` 的 `McpAppRecord::new`（`expires_at`），对客户端是
+/// `McpAppsLimits::app_retention_ms`：客户端据此判断「多久之内回到这个 record」。
+/// 与 `DETACH_REATTACH_WINDOW_MS` 是**两个层级**：附件身份 5 分钟后失效，但 record
+/// （及其 raw 结果）在保留期内仍可被新附件附着。
 pub const APP_RETENTION_MS: u64 = 1_800_000;
+/// 记录注册表**跨会话**（进程内）最多同时存活的 App record 数。
+///
+/// 与 `MAX_APPS_PER_SESSION` 是两条不同作用域的边界：后者是**单会话承诺**（广告给
+/// 客户端），本条是进程内存安全阀（**不广告**——客户端无法据此自我约束，也可能同时
+/// 存在多个会话）。超限淘汰最旧（record 身份 = UUID v7，时间有序）并终态撤销。
+pub const MAX_APP_RECORDS: u64 = 1024;
+
+// ─── 同域上限的事实源登记（数值不在本节；此处只登记「谁是权威」，避免无主数字）──
+//
+// 1. `peri-acp/src/host/interaction_router.rs::MAX_ONLINE_ENDPOINTS = 8`：单会话在线
+//    审批 endpoint 表上限，超限 ⇒ 显式拒绝。事实源 = 该文件（本地装配上限，不是
+//    客户端可见预算，故不进 `McpAppsLimits`）。
+// 2. `peri-middlewares/src/mcp/session_invocation.rs::{MAX_OUTCOME_RECORDS,
+//    MAX_OUTCOME_BYTES} = 256 / 1 MiB`：service 侧 invocation outcome 记录（rerun 的
+//    目标来源）容量，作用域 = **会话级 outcome store**、对象 = invocation 记录。
+//    与本节 `MAX_RETAINED_RESULTS` / `MAX_RESULT_BYTES`（ledger 的**请求级**结果槽、
+//    作用域 = 单 namespace）数值相同而语义不同，故**不合并**、不得互相推导：ledger
+//    超限 ⇒ 显式 `ResultExpired` 且保留防重事实；service 超限 ⇒ 不入表 + `warn`。
+// 3. `peri-acp/src/host/apps_ledger.rs::DESTROYED_TOMBSTONES`：由
+//    `MAX_NAMESPACES_PER_SESSION` 派生，无独立数字。
 
 // ─── §1.1 #6：请求域身份 ────────────────────────────────────────────────────
 
@@ -384,6 +441,9 @@ impl Default for McpAppsFeatures {
 }
 
 /// 会话侧实际生效的**预算**（与 §4.3 常量同源；客户端据此自我约束）。
+///
+/// 每个字段都必须有对应的强制点（本模块的常量文档逐条给出）——「广告了但不实现」
+/// 的字段不允许存在（4b 批 H 把两个无消费者的字段接上实现，见实现日志）。
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct McpAppsLimits {
@@ -401,7 +461,8 @@ pub struct McpAppsLimits {
 }
 
 impl McpAppsLimits {
-    /// 实际值：直接取 §4.3 常量（**4a 保守值，4b 依实测调参**）。
+    /// 实际值：直接取 §4.3 常量（**契约事实，非测量结果**；改值前须补测量，
+    /// 见常量块头注释与实现日志「4b 批 H」）。
     pub const fn conservative() -> Self {
         Self {
             max_apps_per_session: MAX_APPS_PER_SESSION,
