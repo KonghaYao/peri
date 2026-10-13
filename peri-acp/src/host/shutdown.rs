@@ -10,6 +10,18 @@ use super::{
     connection::ConnectionContext, task_scope, AcpServerConfig, PromptLocks, SharedSessions,
 };
 
+/// 当前全部会话环境（连接关闭时逐个收口的输入）。
+async fn session_environments(
+    sessions: &SharedSessions,
+) -> Vec<Arc<super::workspace::SessionEnvironment>> {
+    sessions
+        .lock()
+        .await
+        .values()
+        .filter_map(|state| state.environment.clone())
+        .collect()
+}
+
 #[allow(clippy::too_many_arguments)]
 pub(super) async fn shutdown_host(
     task_owner: &mut task_scope::HostTaskOwner,
@@ -27,8 +39,29 @@ pub(super) async fn shutdown_host(
     // Transport EOF is the host's single ownership transaction.
     connection_cancellation.cancel();
     let connection_id = connection.lock().await.id().to_string();
-    if let Some(relay) = cfg.mcp_apps_relay.as_ref() {
-        relay.close_connection(&connection_id);
+    // 连接关闭：每个会话环境各自的路由与 relay 都要收口——该连接在本会话的
+    // endpoint 置离线（其 View 附件随之 detach，进入有界重挂接窗口），relay 侧
+    // 同步撤该连接附件的交付资格。**不撤销 record**（裁决 D6：record 终态撤销只在
+    // `apps/close` / session close / incarnation 换代 / 保留到期），也不取消已
+    // dispatch 的调用（由 invocation owner 收尾，R7/A8）。
+    for environment in session_environments(sessions).await {
+        environment
+            .interaction_router()
+            .retire_connection(&connection_id);
+        if let Some(relay) = environment.cfg.mcp_apps_relay.as_ref() {
+            relay.close_connection(&connection_id);
+        }
+        // Apps 账本：销毁该连接的 Host 操作域（已销毁的 namespace 不得重建）；
+        // 附件 namespace 留在重挂接窗口内，不销毁。
+        if let Some(facade) = environment.apps_facade() {
+            facade.on_connection_retired(&connection_id);
+        }
+    }
+    // 无会话环境（host 级装配）时仍按既有 host 级 relay 收口。
+    if sessions.lock().await.is_empty() {
+        if let Some(relay) = cfg.mcp_apps_relay.as_ref() {
+            relay.close_connection(&connection_id);
+        }
     }
     connection.lock().await.begin_close();
     task_owner.begin_shutdown();

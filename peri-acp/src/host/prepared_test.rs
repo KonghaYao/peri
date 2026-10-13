@@ -103,6 +103,7 @@ async fn prepared_test_host(
         cron_scheduler: None,
         mcp_pool: None,
         mcp_apps_relay: None,
+        mcp_apps_facade: None,
         acp_mcp: None,
         dynamic_mcp: None,
         oauth_event_tx: None,

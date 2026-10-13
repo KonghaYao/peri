@@ -10,7 +10,8 @@ use crate::{
 };
 use agent_client_protocol::schema::v1::{Meta, PromptResponse, StopReason};
 use peri_acp_types::interaction::{
-    ApprovalDecision, ApprovalItem, InteractionContext, InteractionResponse, UserInteractionBroker,
+    ApprovalDecision, ApprovalItem, InteractionContext, InteractionResponse,
+    TrustedInteractionOwner, UserInteractionBroker,
 };
 use peri_acp_types::permission::{PermissionMode, SharedPermissionMode};
 use peri_acp_types::session::{ExecutionFailure, ExecutionFailureKind};
@@ -131,14 +132,23 @@ fn stdio_filters_command(fullname: &str, stdio_command_filter: bool) -> bool {
     stdio_command_filter && matches!(fullname, "core:rewind" | "core:clear")
 }
 
+/// **仅用于没有 session 环境的会话**（无工作区装配：测试 / 退化路径）的兜底
+/// broker：那种会话没有 session 级 endpoint 表可查，因此按本轮的 transport 直接
+/// 投递（与接线前的行为一致）。
+///
+/// 生产会话一律经 [`super::interaction_router::SessionInteractionRouter`]：
+/// endpoint 选择是 session 级事实（在线表 / attachment 纪元 / 请求作用域），
+/// 不得把某一轮的固定 broker 当成 session 级权威。
 pub(crate) fn build_transport_broker(
     transport: &Arc<dyn crate::transport::AcpTransport>,
     session_id: &str,
+    interaction_gate: Arc<tokio::sync::Mutex<()>>,
 ) -> Arc<dyn UserInteractionBroker> {
     Arc::new(
         AcpTransportBroker::new(
             Arc::new(crate::transport::AcpRequestBridge(Arc::clone(transport))),
             session_id.to_string().into(),
+            interaction_gate,
         )
         .with_timeout(crate::broker::ask_user_timeout()),
     )
@@ -146,9 +156,13 @@ pub(crate) fn build_transport_broker(
 
 /// Cron/loop 是被持久注册的代理执行权：每次触发在进入模型前重新审批。
 /// Bypass 按既有模式契约直接允许；其他模式必须有 broker 并明确 Approve。
+///
+/// `owner` 是本次 Host 程序化审批的归属（[`TrustedInteractionOwner::Host`]）：
+/// 调度触发发生在模型 turn 之前，没有 turn 事实可绑定，不得伪造成 Model 归属。
 pub(crate) async fn approve_scheduled_trigger(
     permission_mode: &SharedPermissionMode,
     broker: Option<&Arc<dyn UserInteractionBroker>>,
+    owner: TrustedInteractionOwner,
     task_id: &str,
     prompt: &str,
 ) -> bool {
@@ -159,13 +173,16 @@ pub(crate) async fn approve_scheduled_trigger(
         return false;
     };
     let response = broker
-        .request(InteractionContext::Approval {
-            items: vec![ApprovalItem {
-                tool_call_id: task_id.to_string(),
-                tool_name: "cron_trigger".to_string(),
-                tool_input: serde_json::json!({ "taskId": task_id, "prompt": prompt }),
-            }],
-        })
+        .request(
+            owner,
+            InteractionContext::Approval {
+                items: vec![ApprovalItem {
+                    tool_call_id: task_id.to_string(),
+                    tool_name: "cron_trigger".to_string(),
+                    tool_input: serde_json::json!({ "taskId": task_id, "prompt": prompt }),
+                }],
+            },
+        )
         .await;
     matches!(
         response,
@@ -328,6 +345,8 @@ async fn run_prompt_attempt(
         frozen,
         incoming_recalls,
         workflow_notifications,
+        interaction_gate,
+        interaction_router,
     ) = {
         let mut sessions = sessions.lock().await;
         let state = sessions
@@ -343,6 +362,14 @@ async fn run_prompt_attempt(
             // 后台 continuation 保留 recall；队列承载的新用户输入仍消费 recall。
             take_recall_for_turn(&mut state.recall_items, continuation && !managed_input),
             state.workflow_notifications.clone(),
+            // session-owned 交互互斥门：本轮 broker 借用，不重建（跨轮互斥）。
+            Arc::clone(&state.interaction_gate),
+            // session-owned 交互路由（同一门）：本轮只发布 / 清除 endpoint，
+            // 不缓存某一轮的固定 broker（设计 §3.3 / §7）。
+            state
+                .environment
+                .as_ref()
+                .map(|env| Arc::clone(env.interaction_router())),
         )
     };
     let history = history_payloads
@@ -357,7 +384,22 @@ async fn run_prompt_attempt(
         }
         super::activation::ensure_listener(&session_id, sessions, deployment, sender)?;
     }
-    let broker = build_transport_broker(transport, &session_id);
+    // 交互 endpoint：session 级路由按**本轮正在使用的 transport** 发布当前轮
+    // endpoint（guard 在轮末 / 提前返回时清除）；没有 session 环境（无工作区
+    // 装配的退化会话）时才回落到本轮固定 broker。
+    let (broker, _model_turn_guard): (
+        Arc<dyn UserInteractionBroker>,
+        Option<super::interaction_router::ModelTurnGuard>,
+    ) = match interaction_router.as_ref() {
+        Some(router) => (
+            Arc::clone(router) as Arc<dyn UserInteractionBroker>,
+            router.publish_model_turn(transport),
+        ),
+        None => (
+            build_transport_broker(transport, &session_id, interaction_gate),
+            None,
+        ),
+    };
     let event_sink = Arc::new(TransportEventSink::new(
         Arc::clone(transport),
         session_manager.caps_registry(),

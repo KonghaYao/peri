@@ -20,6 +20,24 @@ enum SessionEndState {
 pub(crate) struct SessionEnvironment {
     pub(crate) cfg: AcpServerConfig,
     activation: tokio_util::sync::CancellationToken,
+    /// session 生命周期令牌：canonical idle 执行（App 回调 / Host invoke）的取消父。
+    ///
+    /// 与 [`Self::activation`] **不是同一个事实**：`activation` 是池初始化哨兵
+    /// （语义「会话已装配」，创建期 `activate()` 即取消，池初始化等它），本令牌只在
+    /// [`Self::shutdown`] 取消。二者混用会让 idle 执行的子令牌自出生即取消——
+    /// `CancellationToken::child_token()` 对已取消父返回**立即取消**的子节点，而
+    /// 审批 hook 走 `biased` select（取消优先于 hook 结果）⇒ 审批永不发出、
+    /// outcome 落 `OutcomeUnknown`，App 回调与 Host invoke 在生产装配下全不可用。
+    session_lifetime: tokio_util::sync::CancellationToken,
+    /// session-owned 交互门：本环境的 router 借用它，`SessionState.interaction_gate`
+    /// 也借用同一 `Arc`（一个 session 恰好一把门，跨轮共享）。
+    interaction_gate: Arc<tokio::sync::Mutex<()>>,
+    /// session-owned 交互路由（按可信归属选审批 endpoint；投递失败原因的诚实产出点：
+    /// `NoOnlineEndpoint` / `OwnerUnmatched` / `AttachmentDetached`，见 `interaction_router.rs`）。
+    ///
+    /// canonical 调用入口由本环境的 relay（`cfg.mcp_apps_relay`）持有，本结构不再
+    /// 另存句柄（无第二消费者即不新增访问面）。
+    interaction_router: Arc<super::interaction_router::SessionInteractionRouter>,
     task_owner: tokio::sync::Mutex<task_scope::HostTaskOwner>,
     mcp_owner: tokio::sync::Mutex<Box<dyn peri_acp_types::ports::McpTaskOwnerPort>>,
     session_id: String,
@@ -28,6 +46,14 @@ pub(crate) struct SessionEnvironment {
     cleanup_tasks: Arc<dyn peri_acp_types::tasks::TaskManager>,
     /// ACP 会话自身的后台任务管理器；Workspace Bash 使用 MCP 侧独立 owner。
     task_manager: Arc<dyn peri_acp_types::tasks::TaskManager>,
+    /// `cfg(test)`：canonical idle 入口（`SessionInvocationService`）的观察面。
+    ///
+    /// 装配点是**注入**取消父的地方，只读环境自己新建的令牌看不到「注入错了哪根」；
+    /// 这里保留 service 句柄，让测试断言它**实际持有**的取消父状态
+    /// （[`Self::session_invocation_cancelled`]）。
+    #[cfg(test)]
+    session_invocation:
+        Option<Arc<peri_middlewares::mcp::session_invocation::SessionInvocationService>>,
     /// 送进 builtin 实例上下文的那份 A24 关闭集（订阅建立门的唯一输入）。
     ///
     /// 生产运行不读它（关闭集已随上下文一次注入 pool），
@@ -366,6 +392,9 @@ impl SessionEnvironment {
             session_mcp_servers: Some(session_mcp_servers.clone()),
         };
         let activation = tokio_util::sync::CancellationToken::new();
+        // session 生命周期令牌：与装配哨兵同点创建，但**不随 `activate()` 取消**
+        // （取消只发生在 `shutdown()`），故 idle 执行的取消父在会话存活期内始终有效。
+        let session_lifetime = tokio_util::sync::CancellationToken::new();
         let mut cfg = assemble::assemble_server_config_with_mcp_profile(
             input,
             source.mcp_profile.clone(),
@@ -419,9 +448,149 @@ impl SessionEnvironment {
                 &disabled_middlewares,
             );
         }
+        // ── session-owned 交互路由 + canonical 调用入口（S4/S5 接线）──
+        //
+        // 装配顺序说明：`SessionInvocationService` 需要 session 身份（请求 / record
+        // 归属校验、准入视图过滤、会话关闭撤销），而 `assemble_server_config_*` 不知道
+        // session id；因此本环境装配点（同一份池、同一份 disabled 集合、同一份
+        // provider 快照）是这两个 session 级对象与 relay 的**唯一**构造点。
+        // relay 在此处注入 canonical 入口 ⇒ 不存在「未装配入口」的运行时状态。
+        let interaction_gate = Arc::new(tokio::sync::Mutex::new(()));
+        let interaction_router =
+            Arc::new(super::interaction_router::SessionInteractionRouter::new(
+                session_id.to_owned(),
+                Arc::clone(&interaction_gate),
+            ));
+        let session_invocation = {
+            let pool = cfg
+                .mcp_pool
+                .as_ref()
+                .and_then(|port| {
+                    Arc::clone(port)
+                        .downcast_arc::<peri_middlewares::mcp::McpClientPool>()
+                        .ok()
+                })
+                .ok_or_else(|| {
+                    AcpError::new(
+                        -32603,
+                        "session MCP pool missing; cannot assemble the canonical invocation entry",
+                    )
+                })?;
+            // 取消父 = **session 生命周期**令牌（不是装配哨兵 `activation`）：
+            // 既作为规则链 `AssemblyContext.cancel`，也作为 service 的 `session_cancel`
+            // （`InvocationCancel::issue` 由它签发子令牌）。
+            let cancel = session_lifetime.clone();
+            let rules = super::workspace_interaction::build_idle_invocation_rules(
+                &peri_middlewares::assembly::ProductionChainAssembler,
+                &cfg,
+                &configuration.provider,
+                &configuration.config,
+                session_id,
+                &cwd,
+                Arc::clone(&interaction_router)
+                    as Arc<dyn peri_acp_types::interaction::UserInteractionBroker>,
+                cancel.clone(),
+                &disabled_middlewares,
+                {
+                    #[cfg(not(target_os = "emscripten"))]
+                    {
+                        workspace_bash_default_run_in_background
+                    }
+                    #[cfg(target_os = "emscripten")]
+                    {
+                        false
+                    }
+                },
+                &host.session_resources,
+                &task_manager, // 会话级管理器（同一实例）：idle 期异步 hook 须挂会话作用域
+            );
+            Arc::new(
+                peri_middlewares::mcp::session_invocation::SessionInvocationService::new(
+                    peri_middlewares::mcp::session_invocation::SessionInvocationInputs {
+                        pool: Arc::clone(&pool),
+                        agent_id: peri_acp_types::identity::AgentId::new(),
+                        session_id: session_id.to_owned(),
+                        cwd: Arc::from(cwd.as_str()),
+                        // hook 输出端口：idle 规则链的 hook 注入只走会话队列（与 turn 路径
+                        // 同一队列实例，见 `SessionAccessPort::v2_message_queue`）。
+                        queue: {
+                            use peri_acp_types::session::SessionAccessPort as _;
+                            let manager = host.session_manager.clone();
+                            let sid = session_id.to_owned();
+                            Arc::new(move || {
+                                manager.v2_message_queue(&sid).unwrap_or_else(|| {
+                                    // 与 `build_stage_context` 同一投影语义（取不到会话队列
+                                    // 时用 detached 队列；生产路径上会话必然已登记）。
+                                    tracing::debug!(
+                                        session_id = %sid,
+                                        "idle invocation queue lookup missed; using a detached queue"
+                                    );
+                                    peri_acp_types::session::MessageQueue::new()
+                                })
+                            })
+                        },
+                        rules: Arc::new(rules),
+                        closed_instances: peri_middlewares::assembly::builtin_closed_instances(
+                            &disabled_middlewares,
+                        ),
+                        session_cancel: cancel,
+                    },
+                ),
+            )
+        };
+        // App 面 relay：canonical 入口在构造期注入（`PoolMcpAppsRelay::new` 必填），
+        // 未装配入口的运行时状态不存在。仅 apps 能力开启时构造（其余情况 App 面
+        // 本就不可达，relay 为 None 即显式拒绝）。
+        if source.mcp_profile.apps_enabled() {
+            let pool = cfg
+                .mcp_pool
+                .as_ref()
+                .and_then(|port| {
+                    Arc::clone(port)
+                        .downcast_arc::<peri_middlewares::mcp::McpClientPool>()
+                        .ok()
+                })
+                .ok_or_else(|| {
+                    AcpError::new(
+                        -32603,
+                        "session MCP pool missing; cannot assemble the MCP Apps relay",
+                    )
+                })?;
+            let runtime_epoch = session_invocation.runtime_epoch();
+            let invocation_port: Arc<dyn peri_acp_types::mcp_apps::SessionInvocationPort> =
+                Arc::clone(&session_invocation)
+                    as Arc<dyn peri_acp_types::mcp_apps::SessionInvocationPort>;
+            let apps_relay = peri_middlewares::mcp::apps_relay::PoolMcpAppsRelay::new(
+                pool,
+                runtime_epoch,
+                Arc::clone(&invocation_port),
+            );
+            // 会话运行时世代登记：签发点（MCP bridge）据此给 App record 盖章，
+            // 未登记即**不签发**。登记与会话环境同寿命（`close_session` 清除），
+            // 登记点就是本装配点（与 relay 同一作用域、同一 epoch）。
+            apps_relay.register_session_incarnation(session_id);
+            let relay: Arc<dyn peri_acp_types::mcp_apps::McpAppsRelayPort> = Arc::new(apps_relay);
+            // facade 与 relay **同点同源**：同一 router、同一 canonical 入口、同一
+            // runtime epoch（纪元不同源会让 record 与 router 的纪元不一致，审批路由
+            // 随即不匹配）；序号权威在 facade 的 ledger，relay 不再持任何序号计数器。
+            cfg.mcp_apps_facade = Some(Arc::new(super::apps_facade::SessionAppsFacade::new(
+                session_id.to_owned(),
+                runtime_epoch,
+                Arc::clone(&interaction_router),
+                Arc::clone(&relay),
+                invocation_port,
+                cfg.host_task_spawner.clone(),
+            )));
+            cfg.mcp_apps_relay = Some(relay);
+        }
         Ok(Some(Arc::new(Self {
             cfg,
             activation,
+            session_lifetime,
+            interaction_gate,
+            interaction_router,
+            #[cfg(test)]
+            session_invocation: Some(Arc::clone(&session_invocation)),
             task_owner: tokio::sync::Mutex::new(task_owner),
             mcp_owner: tokio::sync::Mutex::new(mcp_owner),
             session_id: session_id.to_owned(),
@@ -441,6 +610,24 @@ impl SessionEnvironment {
     pub(crate) fn activate(&self) {
         self.activation.cancel();
     }
+
+    /// session-owned 交互门（`SessionState.interaction_gate` 借用同一 `Arc`）。
+    pub(crate) fn interaction_gate(&self) -> Arc<tokio::sync::Mutex<()>> {
+        Arc::clone(&self.interaction_gate)
+    }
+
+    /// session-owned 交互路由（prompt / App / Host 三个入口共用）。
+    pub(crate) fn interaction_router(
+        &self,
+    ) -> &Arc<super::interaction_router::SessionInteractionRouter> {
+        &self.interaction_router
+    }
+
+    /// session-level MCP Apps facade（`apps/*` 的唯一入口；apps 能力关闭时为 `None`）。
+    pub(crate) fn apps_facade(&self) -> Option<&Arc<super::apps_facade::SessionAppsFacade>> {
+        self.cfg.mcp_apps_facade.as_ref()
+    }
+
     /// 冻结前读取 MetaHarness 覆盖文档（J6/X7/X8）：只经**本会话环境**的真实
     /// builtin `workspace` 实例，等其连接收口后一次性读启用 section。
     ///
@@ -566,6 +753,19 @@ impl SessionEnvironment {
         &self.builtin_closed
     }
 
+    /// `cfg(test)`：canonical idle 执行的取消父（service **实际持有**的那根令牌）
+    /// 是否已取消。
+    ///
+    /// 装配期必须为 `false`（否则 App 回调 / Host invoke 在审批前即被 `biased`
+    /// select 判中断，生产装配下全不可用），[`Self::shutdown`] 之后必须为 `true`。
+    /// `None` = 本环境未构造该入口（装配失败前不可达）。
+    #[cfg(test)]
+    pub(crate) fn session_invocation_cancelled(&self) -> Option<bool> {
+        self.session_invocation
+            .as_ref()
+            .map(|service| service.session_cancelled())
+    }
+
     pub(crate) async fn shutdown(&self) -> bool {
         #[cfg(test)]
         SHUTDOWN_OBSERVATIONS
@@ -573,6 +773,15 @@ impl SessionEnvironment {
             .lock()
             .unwrap()
             .push(self.session_id.clone());
+        // 会话终结的**取消权威**：canonical idle 执行的取消父在此取消，在飞的
+        // App 回调 / Host invoke 有界收尾（幂等；`session/close` 与失败路径排空
+        // 都经此处）。放在排空之前：后续步骤不再接受新执行。
+        self.session_lifetime.cancel();
+        // Apps 域：销毁本层持有的 Host 操作域（已销毁的 namespace 不得重建；
+        // 附件 namespace 随环境丢弃）。**不**取消已 dispatch 的调用。
+        if let Some(facade) = self.cfg.mcp_apps_facade.as_ref() {
+            facade.on_session_closing();
+        }
         // 会话终结即断开本会话声明的 MCP-over-ACP 连接：连接由 client 侧的
         // ACP 通道承载，会话不再存活后既没有归属也不会有入站消息；处置必须在
         // 池关闭之前完成，否则 `mcp/disconnect` 已无出站通道可用。实现幂等，

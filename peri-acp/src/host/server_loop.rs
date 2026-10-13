@@ -34,7 +34,19 @@ impl ServerLoop<'_> {
                     "session/input/snapshot" => {
                         self.spawn_session_io(id, method, params).await;
                     }
-                    "peri/mcp/open" | "peri/mcp/app" | "peri/mcp/resource" | "peri/mcp/invoke" => {
+                    // MCP Apps：七个新方法 + 旧 4 名薄别名（同一执行链，见
+                    // `host/mcp_apps.rs`）。新方法一律按 `sessionId` 定位会话环境。
+                    "peri/mcp/apps/list"
+                    | "peri/mcp/apps/attach"
+                    | "peri/mcp/apps/request"
+                    | "peri/mcp/apps/cancel"
+                    | "peri/mcp/apps/detach"
+                    | "peri/mcp/apps/close"
+                    | "peri/mcp/apps/rerun"
+                    | "peri/mcp/open"
+                    | "peri/mcp/app"
+                    | "peri/mcp/resource"
+                    | "peri/mcp/invoke" => {
                         self.spawn_mcp_apps_request(id, method, params).await;
                     }
                     _ => self.dispatch_request(id, method, params).await,
@@ -99,19 +111,18 @@ impl ServerLoop<'_> {
         let cont_tx = self.cont_tx;
         // Spawn long-running prompt execution so the server loop
         // continues processing session/cancel notifications.
+        // 新 prompt **不再撤销**已有 App record：App 生命周期不绑 turn generation
+        //（设计 §4「新 turn 不撤销 App」；撤销入口是 `apps/close` 与连接关闭）。
         let prompt_session_id = extract_session_id(&params, "").to_string();
-        if !prompt_session_id.is_empty() {
-            let relay = sessions
-                .lock()
-                .await
-                .get(&prompt_session_id)
-                .and_then(|state| state.environment.as_ref())
-                .and_then(|env| env.cfg.mcp_apps_relay.clone())
-                .or_else(|| cfg.mcp_apps_relay.clone());
-            if let Some(relay) = relay {
-                relay.begin_session_turn(&prompt_session_id);
-            }
-        }
+        // 本连接注册为本会话的交互 endpoint：prompt 装配点据此按 transport 发布
+        // 当前轮 endpoint（跨轮不缓存 broker；连接关闭即 retire）。
+        register_session_endpoint(
+            self.sessions,
+            &prompt_session_id,
+            self.connection,
+            self.transport,
+        )
+        .await;
         let sessions = sessions.clone();
         let transport = Arc::clone(transport);
         let prompt_locks = prompt_locks.clone();
@@ -164,6 +175,30 @@ impl ServerLoop<'_> {
         }
     }
 
+    /// 旧别名（`app` / `resource`）的会话定位：本连接必须是该会话的在线 endpoint，
+    /// 且该会话的附件表认识信封里的 `appSessionId`（附件身份）。
+    async fn locate_alias_session(&self, params: &Value) -> Option<String> {
+        let attachment_id = params.get("appSessionId").and_then(Value::as_str)?;
+        let attachment_id =
+            peri_acp_types::interaction::AttachmentId::new(attachment_id.to_string());
+        let connection_id = self.connection.lock().await.id().to_string();
+        let sessions = self.sessions.lock().await;
+        for (session_id, state) in sessions.iter() {
+            if state.closing {
+                continue;
+            }
+            let Some(environment) = state.environment.as_ref() else {
+                continue;
+            };
+            let router = environment.interaction_router();
+            if router.is_online_endpoint(&connection_id) && router.lookup(&attachment_id).is_some()
+            {
+                return Some(session_id.clone());
+            }
+        }
+        None
+    }
+
     async fn spawn_mcp_apps_request(&self, id: RequestId, method: String, params: Value) {
         let diagnostics = ResponseDiagnostics::new(id, &method, &params);
         let transport = self.transport;
@@ -172,21 +207,27 @@ impl ServerLoop<'_> {
         let connection_cancellation = self.connection_cancellation;
         let sessions = self.sessions;
         let transport = Arc::clone(transport);
-        let owner_id = if method == "peri/mcp/open" {
+        // 会话定位：七个新方法带显式 `sessionId`（只定位）；旧 4 名的信封没有该
+        // 字段，按其自有的归属字段反查（`ownerSessionId` / `appSessionId` → 连接
+        // 表的 lease owner）——该反查随旧名删除一并消失（S8）。
+        let owner_id = if method.starts_with("peri/mcp/apps/") {
+            params
+                .get("sessionId")
+                .and_then(Value::as_str)
+                .map(str::to_owned)
+        } else if method == "peri/mcp/open" || method == "peri/mcp/invoke" {
             params
                 .get("ownerSessionId")
                 .and_then(Value::as_str)
                 .map(str::to_owned)
         } else {
-            let state = connection.lock().await;
-            params
-                .get("appSessionId")
-                .and_then(Value::as_str)
-                .and_then(|id| state.app_session(id))
-                .map(|binding| binding.owner_session_id.clone())
+            // 旧 `peri/mcp/app` / `peri/mcp/resource` 的信封只有 `appSessionId`
+            //（= 附件身份，§A-2）：在「本连接为在线 endpoint」的会话中按附件反查
+            //（attachment_id 全局唯一，查询不是状态；不使用任何连接级 lease 表）。
+            self.locate_alias_session(&params).await
         };
-        let environment = match owner_id {
-            Some(id) => self.sessions.lock().await.get(&id).and_then(|state| {
+        let environment = match owner_id.as_deref() {
+            Some(id) => self.sessions.lock().await.get(id).and_then(|state| {
                 (!state.closing)
                     .then(|| state.environment.clone())
                     .flatten()
@@ -197,6 +238,18 @@ impl ServerLoop<'_> {
             .as_ref()
             .and_then(|env| env.cfg.mcp_apps_relay.clone())
             .or_else(|| cfg.mcp_apps_relay.clone());
+        // 会话级 facade（`apps/*` 的唯一入口）：与 relay 同一会话环境、同一 router、
+        // 同一 runtime epoch；未装配（apps 能力关闭 / 非会话级装配）即显式拒绝。
+        let facade = environment
+            .as_ref()
+            .and_then(|env| env.apps_facade().cloned());
+        // session 交互路由：App 回调 / Host invoke 的审批 endpoint 选择与
+        // attachment 路由绑定都经它（连接先注册为本会话的在线 endpoint）；
+        // 新方法的附件绑定由 facade 内部完成，本处不再补丁（S6 起）。
+        if let Some(session_id) = owner_id.as_deref() {
+            register_session_endpoint(self.sessions, session_id, self.connection, self.transport)
+                .await;
+        }
         let connection = Arc::clone(connection);
         let sessions = Arc::clone(sessions);
         let app_spawner = cfg.host_task_spawner.clone();
@@ -213,13 +266,23 @@ impl ServerLoop<'_> {
                     }
                     result = async {
                         match method.as_str() {
-                            "peri/mcp/open" => {
-                                let mut connection = connection.lock().await;
-                                mcp_apps::handle_request(
-                                    &method,
-                                    &params,
-                                    &mut connection,
-                                    relay.as_ref(),
+                            "peri/mcp/apps/rerun" => {
+                                // Host 归属回本连接：session 交互路由按**请求作用域**
+                                // 选择审批 endpoint，与 ledger 校验后的
+                                // `{namespace, seq}` 构成同一对权威值。
+                                let mut request_connection = {
+                                    let connection = connection.lock().await;
+                                    connection.snapshot_for_request()
+                                };
+                                let connection_id = request_connection.id().to_string();
+                                super::interaction_router::scope_host_request_connection(
+                                    connection_id,
+                                    mcp_apps::handle_request(
+                                        &method,
+                                        &params,
+                                        &mut request_connection,
+                                        facade.as_ref(),
+                                    ),
                                 )
                                 .await
                             }
@@ -247,42 +310,23 @@ impl ServerLoop<'_> {
                                     let connection = connection.lock().await;
                                     connection.snapshot_for_request()
                                 };
-                                match mcp_apps::handle_invoke(
-                                    &params,
-                                    &request_connection,
-                                    relay.as_ref(),
-                                    gate,
-                                )
-                                .await
+                                // 请求作用域注入：本连接的 Host 审批归属回本连接
+                                //（session 交互路由按它选 endpoint）。
+                                let invocation = super::interaction_router::scope_host_request_connection(
+                                    request_connection.id().to_string(),
+                                    mcp_apps::handle_invoke(
+                                        &params,
+                                        &request_connection,
+                                        relay.as_ref(),
+                                        facade.as_ref(),
+                                        gate,
+                                    ),
+                                );
+                                match invocation.await
                                 {
-                                    Ok(result) => {
-                                        for update in result.updates {
-                                            let payload = serde_json::to_value(
-                                                agent_client_protocol::schema::v1::SessionNotification::new(
-                                                    agent_client_protocol::schema::v1::SessionId::new(
-                                                        result.session_id.clone(),
-                                                    ),
-                                                    update,
-                                                ),
-                                            )
-                                            .map_err(|_| {
-                                                crate::transport::types::AcpError::new(
-                                                    -32603,
-                                                    "MCP Apps relay request failed",
-                                                )
-                                            })?;
-                                            if let Err(error) = transport
-                                                .send_notification("session/update", payload)
-                                                .await
-                                            {
-                                                tracing::warn!(
-                                                    %error,
-                                                    "MCP Apps invoke session/update send failed"
-                                                );
-                                            }
-                                        }
-                                        Ok(result.value)
-                                    }
+                                    // R3：Host 回调**不得**冒充模型工具调用——结果只经
+                                    // 原请求返回，不发任何合成模型卡片（`session/update`）。
+                                    Ok(result) => Ok(result.value),
                                     Err(error) => Err(error),
                                 }
                             }
@@ -295,7 +339,7 @@ impl ServerLoop<'_> {
                                     &method,
                                     &params,
                                     &mut request_connection,
-                                    relay.as_ref(),
+                                    facade.as_ref(),
                                 )
                                 .await
                             }
@@ -473,13 +517,45 @@ impl ServerLoop<'_> {
             connection.lock().await.commit_initialize();
         }
         if result.is_ok() {
-            if let (Some(session_id), Some(relay)) =
-                (closed_session_id.as_deref(), cfg.mcp_apps_relay.as_ref())
-            {
-                relay.close_session(session_id);
+            // 会话级拆除（`session/close` / `session/delete`）：撤销本会话全部 App
+            // record 与交付令牌、取消 session 层令牌（已 dispatch 的调用由 invocation
+            // owner 收尾）。轮次取消（`session/cancel`）**不**走这里。
+            if let Some(session_id) = closed_session_id.as_deref() {
+                let environment = sessions
+                    .lock()
+                    .await
+                    .get(session_id)
+                    .and_then(|state| state.environment.clone());
+                let relay = environment
+                    .as_ref()
+                    .and_then(|env| env.cfg.mcp_apps_relay.clone())
+                    .or_else(|| cfg.mcp_apps_relay.clone());
+                if let Some(relay) = relay {
+                    relay.close_session(session_id);
+                }
             }
         }
         let setup_session_id = session_setup(&method, &params, result.as_ref().ok());
+        // 会话级 endpoint 注册（审查中 3①）：**连接归属是会话，不是某一轮**。
+        // `session/new` / `session/load` / `session/resume` 建立会话后立刻把当前
+        // 连接登记为在线 endpoint，否则「会话创建后从未 prompt」的连接在调度触发
+        // 审批时不可达（弹窗退化为「未获批准」）。`session/restore` 不是本仓的 wire
+        // 名：恢复流程即 `session/load` + `session/resume`（`requests/session_restore.rs`）。
+        // 注册幂等（同一连接重复注册保留首次纪元），与 `spawn_prompt` 的注册点不冲突。
+        if let Some(session_id) = setup_session_id.as_deref() {
+            if matches!(
+                method.as_str(),
+                "session/new" | "session/load" | "session/resume"
+            ) {
+                register_session_endpoint(
+                    self.sessions,
+                    session_id,
+                    self.connection,
+                    self.transport,
+                )
+                .await;
+            }
+        }
         let response_sent = diagnostics.send(transport.as_ref(), result).await.is_ok();
         if response_sent {
             if let Some(session_id) = setup_session_id {
@@ -534,21 +610,10 @@ impl ServerLoop<'_> {
             }
             return;
         }
-        if method == "session/cancel" {
-            let session_id = extract_session_id(&params, "");
-            if !session_id.is_empty() {
-                let relay = sessions
-                    .lock()
-                    .await
-                    .get(session_id)
-                    .and_then(|state| state.environment.as_ref())
-                    .and_then(|env| env.cfg.mcp_apps_relay.clone())
-                    .or_else(|| cfg.mcp_apps_relay.clone());
-                if let Some(relay) = relay {
-                    relay.close_session(session_id);
-                }
-            }
-        }
+        // `session/cancel` 是**轮次级**取消：只中断本轮的模型执行，**不触碰
+        // Apps 域**（设计 §2 / §4：App record 与已 dispatch 的调用不受 turn
+        // 取消影响）。会话级拆除走 `session/close`（见 `dispatch_request` 的
+        // `closed_session_id` 分支，那里才调用 `close_session`）。
         // session/cancel 可能需要在锁外补发 continuation 请求
         // （race 兜底：bg 结果已 route 为 Defer，但通知可能在 cancel
         // 置位前被 scheduler 跳过）。unbounded send 虽不阻塞，仍统一
@@ -566,6 +631,39 @@ impl ServerLoop<'_> {
                 );
             }
         }
+    }
+}
+
+/// 把当前连接注册为本会话的交互 endpoint（幂等；表满/离线时记 warn 并继续——
+/// 该连接的审批随后按无在线 endpoint 处理，是 fail-closed 而不是静默降级）。
+pub(super) async fn register_session_endpoint(
+    sessions: &SharedSessions,
+    session_id: &str,
+    connection: &Arc<tokio::sync::Mutex<ConnectionContext>>,
+    transport: &Arc<dyn crate::transport::AcpTransport>,
+) {
+    if session_id.is_empty() {
+        return;
+    }
+    let connection_id = connection.lock().await.id().to_string();
+    let environment = sessions
+        .lock()
+        .await
+        .get(session_id)
+        .and_then(|state| state.environment.clone());
+    let Some(environment) = environment else {
+        return;
+    };
+    if let Err(error) = environment
+        .interaction_router()
+        .register_connection(&connection_id, Arc::clone(transport))
+    {
+        tracing::warn!(
+            session_id,
+            connection_id = %connection_id,
+            %error,
+            "session interaction endpoint registration rejected"
+        );
     }
 }
 

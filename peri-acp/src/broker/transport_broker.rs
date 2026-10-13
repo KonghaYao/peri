@@ -13,7 +13,7 @@ use agent_client_protocol_schema::v1::{
 use async_trait::async_trait;
 use peri_acp_types::interaction::{
     ApprovalDecision, ApprovalItem, InteractionContext, InteractionResponse, QuestionAnswer,
-    QuestionItem, UnansweredCause, UserInteractionBroker,
+    QuestionItem, TrustedInteractionOwner, UnansweredCause, UserInteractionBroker,
 };
 
 use crate::transport::RequestTransport;
@@ -34,23 +34,41 @@ pub enum ApprovalMode {
 ///
 /// Each approval item is sent as a separate `RequestPermission` request.
 /// Questions are aggregated into a single `elicitation/create` form.
+///
+/// # endpoint 与互斥门的归属
+///
+/// 本 broker 只是 **session 交互的一轮 endpoint**：`run_prompt` 每轮新建，
+/// 因此它**不拥有**互斥门——[`Self::interaction_gate`] 是从 session 运行时
+/// （`SessionState.interaction_gate`）借来的共享句柄，同一 session 的跨轮
+/// broker（prompt 轮 / scheduled 轮）共用同一把门，Approval/Questions 串行
+/// 语义因此跨轮成立。ACP transport 是可替换 endpoint；不要把某一轮的 broker
+/// 缓存成 session 级权威。
 pub struct AcpTransportBroker {
     transport: Arc<dyn RequestTransport>,
     session_id: SessionId,
     approval_mode: ApprovalMode,
     timeout: Option<Duration>,
-    interaction_gate: tokio::sync::Mutex<()>,
+    /// session-owned 交互互斥门（生命周期 = session，非本轮 broker）：
+    /// 同一 session 内 Approval / Questions 串行，跨轮同样互斥。
+    interaction_gate: Arc<tokio::sync::Mutex<()>>,
 }
 
 impl AcpTransportBroker {
     /// mpsc/TUI 默认装配：审批转发、无超时（与既有行为一致）。
-    pub fn new(transport: Arc<dyn RequestTransport>, session_id: SessionId) -> Self {
+    ///
+    /// `interaction_gate` 必须来自 session 运行时（`SessionState.interaction_gate`）；
+    /// 门由 session 持有，跨轮共享。
+    pub fn new(
+        transport: Arc<dyn RequestTransport>,
+        session_id: SessionId,
+        interaction_gate: Arc<tokio::sync::Mutex<()>>,
+    ) -> Self {
         Self {
             transport,
             session_id,
             approval_mode: ApprovalMode::Forward,
             timeout: None,
-            interaction_gate: tokio::sync::Mutex::new(()),
+            interaction_gate,
         }
     }
 
@@ -92,7 +110,21 @@ pub fn ask_user_timeout() -> Option<Duration> {
 
 #[async_trait]
 impl UserInteractionBroker for AcpTransportBroker {
-    async fn request(&self, context: InteractionContext) -> InteractionResponse {
+    async fn request(
+        &self,
+        owner: TrustedInteractionOwner,
+        context: InteractionContext,
+    ) -> InteractionResponse {
+        // 归属是路由输入：本 endpoint 按它归属答复并留痕（session 交互路由落地
+        // 后，跨 session / 陈旧 Attachment 的归属将在路由层被拒——本批只承载，
+        // 不改变既有 endpoint 选择）。
+        tracing::debug!(
+            owner = %owner,
+            owner_kind = owner.kind(),
+            session_id = %self.session_id,
+            "routing interaction request"
+        );
+
         let context = match context {
             InteractionContext::Approval { items }
                 if self.approval_mode == ApprovalMode::AutoApprove =>

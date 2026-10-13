@@ -48,6 +48,8 @@ async fn test_fork_registers_session_and_copies_history() {
             history: vec![source_message],
             history_payloads: vec![source_payload],
             cancel_token: None,
+            interaction_gate: Arc::new(tokio::sync::Mutex::new(())),
+            host_request_seq: Arc::new(std::sync::atomic::AtomicU64::new(0)),
             continuation_armed: false,
             continuation_epoch: 0,
             continuation_in_flight: false,

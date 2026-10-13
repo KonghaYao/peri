@@ -9,6 +9,7 @@ use agent_client_protocol_schema::v1::{
     SessionForkCapabilities, SessionListCapabilities, SessionResumeCapabilities,
 };
 use agent_client_protocol_schema::ProtocolVersion;
+use peri_acp_types::mcp_apps_facade::McpAppsCapability;
 use peri_acp_types::PeriCaps;
 
 /// Construct the full [`InitializeResponse`] with all session lifecycle
@@ -21,8 +22,15 @@ use peri_acp_types::PeriCaps;
 /// 以 `type: "acp"` 声明 server，agent 经 `mcp/connect` 反向建连）。声明是硬
 /// 前置：未声明的 client 不得假定 agent 会处理 `mcp/message`。
 ///
+/// `apps`（可选）写入同层 `_meta["peri.mcpApps"]`：**只报已实现能力**（未实现
+/// 四项在 `McpAppsFeatures` 上是私有字段，类型层强制）；`None` = 本部署未装配
+/// Apps 后端 ⇒ **不声明**（不声称未接线的能力）。
+///
 /// Used by both TUI (MpscTransport) and stdio transport implementations.
-pub fn build_initialize_response(peri_caps: &PeriCaps) -> InitializeResponse {
+pub fn build_initialize_response(
+    peri_caps: &PeriCaps,
+    apps: Option<&McpAppsCapability>,
+) -> InitializeResponse {
     let caps = AgentCapabilities::new()
         .load_session(true)
         .prompt_capabilities(PromptCapabilities::new().image(true))
@@ -35,6 +43,13 @@ pub fn build_initialize_response(peri_caps: &PeriCaps) -> InitializeResponse {
                 .delete(SessionDeleteCapabilities::new()),
         )
         .mcp_capabilities(McpCapabilities::new().acp(true).http(true));
-    let caps = caps.meta(peri_caps.to_agent_meta());
+    let mut meta = peri_caps.to_agent_meta();
+    if let Some(apps) = apps {
+        meta.insert(
+            "peri.mcpApps".into(),
+            serde_json::to_value(apps).expect("McpAppsCapability 序列化不应失败"),
+        );
+    }
+    let caps = caps.meta(meta);
     InitializeResponse::new(ProtocolVersion::V1).agent_capabilities(caps)
 }

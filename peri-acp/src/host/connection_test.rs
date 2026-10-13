@@ -1,5 +1,4 @@
 use super::*;
-use peri_acp_types::mcp_apps::{AppSessionBinding, MCP_APPS_PROTOCOL_VERSION};
 
 #[test]
 fn deployment_capability_is_immutable_and_close_invalidates_sessions() {
@@ -9,20 +8,13 @@ fn deployment_capability_is_immutable_and_close_invalidates_sessions() {
     connection.commit_initialize();
     assert!(connection.apps_enabled());
 
-    connection.insert_app_session(AppSessionBinding {
-        app_session_id: "app".into(),
-        owner_connection_id: connection.id().into(),
-        owner_session_id: String::new(),
-        server_id: "server".into(),
-        server_generation: 1,
-        resource_uri: "ui://app".into(),
-        instantiating_tool: "open".into(),
-        apps_protocol_version: MCP_APPS_PROTOCOL_VERSION.into(),
-    });
-    assert!(connection.app_session("app").is_some());
+    // 关闭期间能力门必须立即失效；关闭完成后保持失效。
+    // （旧 lease 表已随 S8 删除：别名与新方法的附件身份都由 router 分配，
+    // 连接上下文不再持有任何 App 会话权威。）
     connection.begin_close();
-    assert!(connection.app_session("app").is_none());
+    assert!(!connection.apps_enabled());
     connection.finish_close();
+    assert!(!connection.apps_enabled());
 }
 
 #[test]
