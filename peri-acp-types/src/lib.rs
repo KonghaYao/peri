@@ -18,7 +18,12 @@
 //! - `goal` — goal steering 契约（ThreadGoal/GoalStatus/GoalStore/...）
 //! - `frozen` — 会话冻结数据契约（FrozenData/ThreadPersistence/...）
 //! - `tasks` — 后台任务契约（BgTaskKind/BgRegistryEvent）
-//! - `tools` — 工具契约（ToolDefinition）
+//! - `tools` — 工具契约（ToolDefinition / ToolOutput / 执行身份与来源 / dispatcher 端口）
+//! - `mcp_apps` — MCP Apps relay 契约（旧 4 方法信封 + 版本常量 + `McpAppsRelayPort`）
+//! - `mcp_apps_facade` — 阶段 4a `peri/mcp/apps/*` facade 契约（身份 / 判决 /
+//!   快照 / 能力声明 / 预算常量）
+//! - `tool_invocation` — canonical 执行身份与来源契约（InvocationId/ToolCallId/InvocationOrigin）
+//! - `tool_outcome` — raw 工具结果与远端错误契约（RawToolResult/RemoteToolError 权威定义）
 //! - `compact` — compact 契约（CompactOutcome/FullEscalationReason + 提取函数）
 //! - `error` — 层边界错误契约（AgentError）
 //! - `permission` — 权限模式契约（PermissionMode/SharedPermissionMode）
@@ -58,6 +63,7 @@ pub mod identity;
 pub mod interaction;
 pub mod mcp;
 pub mod mcp_apps;
+pub mod mcp_apps_facade;
 pub mod mcp_skills;
 pub mod messages;
 pub mod meta_harness;
@@ -73,6 +79,7 @@ pub mod projection;
 pub mod runtime;
 pub mod sentinel;
 pub mod session;
+pub mod session_authorization;
 pub mod session_resources;
 pub mod session_store;
 pub mod skills;
@@ -81,6 +88,8 @@ pub mod summary;
 pub mod system_reminder;
 pub mod tasks;
 pub mod thread;
+pub mod tool_invocation;
+pub mod tool_outcome;
 pub mod tools;
 pub mod workflow;
 

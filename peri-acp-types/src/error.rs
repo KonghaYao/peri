@@ -67,6 +67,24 @@ pub enum AgentError {
     #[error("Tool rejected: {tool} - {reason}")]
     ToolRejected { tool: String, reason: String },
 
+    /// 依赖真实 model turn 的准入规则在无活跃 turn 时**不可用**（设计 §4.1）。
+    ///
+    /// 语义边界必须清楚：这不是「失败」，也不是「空操作」，而是「本次执行缺少
+    /// turn 事实，准入无法判定 ⇒ 未执行」。需要 turn 的入口（审批 / HITL / turn
+    /// 绑定的事件投影）据此显式拒绝，不得静默跳过、不得伪造 `step = 0`、也不得
+    /// 借用某一轮的 turn 事实。
+    ///
+    /// 诊断字段：`entry` 点名拒绝的准入入口；`session_id` 是已知的会话身份
+    /// （`None` = 本次执行连会话身份都没有）。**没有 turn_id 字段**：无 turn 正是
+    /// 本错误陈述的事实，伪造一个 turn_id 会与语义矛盾。
+    #[error(
+        "not available without an active model turn: entry={entry}, session_id={session_id:?}"
+    )]
+    NotAvailableWithoutTurn {
+        entry: &'static str,
+        session_id: Option<String>,
+    },
+
     #[error("Serialization error: {0}")]
     SerializationError(#[from] serde_json::Error),
 
@@ -466,6 +484,7 @@ impl AgentError {
             Self::StreamRecoveryExhausted { .. } => "stream_recovery_exhausted",
             Self::MiddlewareError { .. } => "middleware",
             Self::ToolRejected { .. } => "tool_rejected",
+            Self::NotAvailableWithoutTurn { .. } => "not_available_without_turn",
             Self::SerializationError(_) => "serialization",
             Self::Interrupted => "interrupted",
             Self::CompactNoLlm => "compact_no_llm",
