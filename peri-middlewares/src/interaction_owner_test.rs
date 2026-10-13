@@ -164,7 +164,7 @@ fn tool_context_with_real_facts_mints_model_owner() {
 #[test]
 fn untrusted_owner_error_is_explicit_and_diagnosable() {
     let error = untrusted_owner_error("Bash");
-    let AgentError::ToolRejected { tool, reason } = &error else {
+    let AgentError::ToolRejected { tool, reason, .. } = &error else {
         panic!("无归属必须显式拒绝（ToolRejected），实际: {error:?}");
     };
     assert_eq!(tool, "Bash");

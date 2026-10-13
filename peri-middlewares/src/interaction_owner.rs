@@ -16,7 +16,10 @@
 //!
 //! 本模块不做路由决策：归属是给 session 交互路由 / ACP endpoint 的输入。
 
-use peri_acp_types::interaction::{InteractionAttribution, TrustedInteractionOwner};
+use peri_acp_types::error::ToolRejectionCause;
+use peri_acp_types::interaction::{
+    InteractionAttribution, TrustedInteractionOwner, UnansweredCause,
+};
 use peri_agent::error::AgentError;
 use peri_agent::middleware::capabilities as hook_state;
 use peri_agent::tools::ToolContext;
@@ -29,10 +32,17 @@ pub(crate) const UNTRUSTED_OWNER_REASON: &str =
     "交互缺少可信归属（当前执行没有 session / turn 事实），无法送达任何审批 endpoint，操作未执行";
 
 /// 没有可信归属时的显式拒绝（fail-closed，不静默放行）。
+///
+/// typed 原因是 [`ToolRejectionCause::ApprovalUnavailable`] + [`UnansweredCause::OwnerUnmatched`]
+/// （裁决 R9）：归属缺失意味着**没有任何一个可作答方符合本次交互**——是「没有人可以
+/// 决定」，不是用户拒绝。不选 `NoOnlineEndpoint`：本构造函数无法断言「本端一个在线
+/// endpoint 都没有」（那是路由表事实），而 `OwnerUnmatched` 陈述的正是「没有符合本次
+/// 归属的可投递 endpoint」。
 pub(crate) fn untrusted_owner_error(tool: &str) -> AgentError {
     AgentError::ToolRejected {
         tool: tool.to_string(),
         reason: UNTRUSTED_OWNER_REASON.to_string(),
+        cause: ToolRejectionCause::ApprovalUnavailable(UnansweredCause::OwnerUnmatched),
     }
 }
 

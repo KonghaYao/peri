@@ -11,6 +11,11 @@ use peri_agent::{
 
 use crate::hooks::types::HookAction;
 
+/// hook 阻断的 typed 拒绝原因（裁决 R9）：`Block` / `PreventContinuation` 是
+/// **hook 策略**拒绝——没有任何人的决定，也不是「无人可答」。
+const HOOK_POLICY_CAUSE: peri_acp_types::error::ToolRejectionCause =
+    peri_acp_types::error::ToolRejectionCause::PolicyDenied;
+
 /// Action 到 `AgentResult<()>` 的归约：Block / PreventContinuation 转
 /// `AgentError::ToolRejected`，其余视为放行。
 ///
@@ -26,12 +31,14 @@ pub fn resolve_action_to_result(
         HookAction::Block { reason } => Err(AgentError::ToolRejected {
             tool: tool.to_string(),
             reason: reason.clone(),
+            cause: HOOK_POLICY_CAUSE,
         }),
         HookAction::PreventContinuation { stop_reason } => Err(AgentError::ToolRejected {
             tool: tool.to_string(),
             reason: stop_reason
                 .clone()
                 .unwrap_or_else(|| fallback_reason.to_string()),
+            cause: HOOK_POLICY_CAUSE,
         }),
         _ => Ok(()),
     }
@@ -51,12 +58,14 @@ pub fn resolve_action_to_toolcall(
         HookAction::Block { reason } => Err(AgentError::ToolRejected {
             tool: tool_call.name.clone(),
             reason: reason.clone(),
+            cause: HOOK_POLICY_CAUSE,
         }),
         HookAction::PreventContinuation { stop_reason } => Err(AgentError::ToolRejected {
             tool: tool_call.name.clone(),
             reason: stop_reason
                 .clone()
                 .unwrap_or_else(|| fallback_reason.to_string()),
+            cause: HOOK_POLICY_CAUSE,
         }),
         HookAction::ModifyInput { new_input } => Ok(ToolCall {
             id: tool_call.id.clone(),

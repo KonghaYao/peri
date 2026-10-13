@@ -727,7 +727,6 @@ fn idle_source(
         origin,
         cancel: stage.session.turn.cancel_token.as_ref().clone(),
         post_hook_skips: None,
-        approval_unavailable: None,
     }
 }
 

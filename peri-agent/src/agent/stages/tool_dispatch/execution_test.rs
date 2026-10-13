@@ -7,6 +7,8 @@ use crate::session::queue::MessageQueue;
 use crate::session::transcript::MessageTranscript;
 use crate::session::turn::TurnContext;
 use crate::tools::InvocationOrigin;
+use peri_acp_types::error::ToolRejectionCause;
+use peri_acp_types::interaction::UnansweredCause;
 
 #[test]
 fn completed_application_failure_retains_typed_error_without_unknown_classification() {
@@ -39,12 +41,89 @@ fn boxed_known_agent_rejections_preserve_failure_classification() {
             AgentError::ToolRejected {
                 tool: "resume".into(),
                 reason: "denied".into(),
+                // 用户/客户端已作出拒绝决定（本用例只校验错误分类）。
+                cause: peri_acp_types::error::ToolRejectionCause::UserRejected,
             },
             EffectiveToolErrorCode::UserRejected,
         ),
     ] {
         let effective = effective_tool_error_from_boxed(Box::new(error));
         assert_eq!(effective.code, expected);
+    }
+}
+
+/// 用户**已作出**的拒绝决定 ⇒ `USER_REJECTED`（分类不变）。
+#[test]
+fn user_rejection_keeps_user_rejected_classification() {
+    let effective = effective_tool_error(AgentError::ToolRejected {
+        tool: "Write".into(),
+        reason: "用户拒绝".into(),
+        cause: ToolRejectionCause::UserRejected,
+    });
+    assert_eq!(effective.code, EffectiveToolErrorCode::UserRejected);
+    assert_eq!(
+        effective.unanswered_cause(),
+        None,
+        "用户拒绝不得携带「无人可答」原因"
+    );
+}
+
+/// 无人可答 ⇒ `PERMISSION_DENIED` + typed 原因随错误过边界（裁决 R9）。
+#[test]
+fn approval_unavailable_is_permission_denied_with_typed_cause() {
+    let effective = effective_tool_error(AgentError::ToolRejected {
+        tool: "Write".into(),
+        reason: UnansweredCause::NoOnlineEndpoint.reason_text().to_string(),
+        cause: ToolRejectionCause::ApprovalUnavailable(UnansweredCause::NoOnlineEndpoint),
+    });
+    assert_eq!(effective.code, EffectiveToolErrorCode::PermissionDenied);
+    assert_ne!(effective.code, EffectiveToolErrorCode::UserRejected);
+    assert_eq!(
+        effective.unanswered_cause(),
+        Some(UnansweredCause::NoOnlineEndpoint),
+        "「没有人可以决定」必须以 typed 原因随错误过边界"
+    );
+}
+
+/// 本端策略拒绝（hook / 分类器 / 审批机制缺失）既不是用户拒绝，也不是无人可答。
+#[test]
+fn policy_denial_is_permission_denied_without_unanswered_cause() {
+    let effective = effective_tool_error(AgentError::ToolRejected {
+        tool: "Write".into(),
+        reason: "Hook blocked".into(),
+        cause: ToolRejectionCause::PolicyDenied,
+    });
+    assert_eq!(effective.code, EffectiveToolErrorCode::PermissionDenied);
+    assert_ne!(effective.code, EffectiveToolErrorCode::UserRejected);
+    assert_eq!(effective.unanswered_cause(), None);
+}
+
+/// 三种原因经**同一张**分类表（模型面结算与协议错误面共用权威）。
+#[test]
+fn rejection_codes_have_a_single_authority() {
+    for (cause, expected) in [
+        (
+            ToolRejectionCause::UserRejected,
+            EffectiveToolErrorCode::UserRejected,
+        ),
+        (
+            ToolRejectionCause::ApprovalUnavailable(UnansweredCause::OwnerUnmatched),
+            EffectiveToolErrorCode::PermissionDenied,
+        ),
+        (
+            ToolRejectionCause::PolicyDenied,
+            EffectiveToolErrorCode::PermissionDenied,
+        ),
+    ] {
+        assert_eq!(rejection_error_code(cause), expected);
+        assert_eq!(
+            effective_error_code(&AgentError::ToolRejected {
+                tool: "Write".into(),
+                reason: "x".into(),
+                cause,
+            }),
+            expected
+        );
     }
 }
 
@@ -471,7 +550,6 @@ fn idle_source(stage: &StageContext, origin: InvocationOrigin) -> SessionInvocat
         origin,
         cancel: CancellationToken::new(),
         post_hook_skips: None,
-        approval_unavailable: None,
     }
 }
 

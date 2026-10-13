@@ -9,6 +9,7 @@ impl super::SubAgentTool {
         agent_id: &str,
         approval_owner: Option<&peri_agent::interaction::TrustedInteractionOwner>,
     ) -> Result<ClaudeAgent, Box<dyn std::error::Error + Send + Sync>> {
+        use peri_acp_types::error::ToolRejectionCause;
         use peri_agent::interaction::{
             ApprovalDecision, ApprovalItem, InteractionContext, InteractionResponse,
         };
@@ -64,24 +65,46 @@ impl super::SubAgentTool {
                     registry.approve(approval_key);
                 }
                 InteractionResponse::Decisions(decisions) => {
-                    let reason = match decisions.first() {
-                        Some(ApprovalDecision::Reject { reason, .. }) => reason.as_str(),
-                        Some(ApprovalDecision::Respond { message }) => message.as_str(),
-                        Some(ApprovalDecision::Edit { .. }) => {
-                            "MCP Agent activation approval cannot be edited"
+                    // 逐条按「谁作出的决定」分类（裁决 R9）：拒绝 / 文本作答是用户
+                    // 已作出的决定；无法兑现的改参与空决定是本端 fail-closed。
+                    let (reason, cause) = match decisions.first() {
+                        Some(ApprovalDecision::Reject { reason, .. }) => {
+                            (reason.clone(), ToolRejectionCause::UserRejected)
                         }
-                        _ => "MCP Agent activation was not approved",
+                        Some(ApprovalDecision::Respond { message }) => {
+                            (message.clone(), ToolRejectionCause::UserRejected)
+                        }
+                        Some(ApprovalDecision::Edit { .. }) => (
+                            "MCP Agent activation approval cannot be edited".to_string(),
+                            ToolRejectionCause::PolicyDenied,
+                        ),
+                        _ => (
+                            "MCP Agent activation was not approved".to_string(),
+                            ToolRejectionCause::PolicyDenied,
+                        ),
                     };
                     return Err(peri_agent::error::AgentError::ToolRejected {
                         tool: "MCP Agent activation".into(),
-                        reason: reason.to_string(),
+                        reason,
+                        cause,
                     }
                     .into());
                 }
+                // 无人可作答：如实转述原因，不冒充用户决定（裁决 R9）。
+                InteractionResponse::Unanswered { cause } => {
+                    return Err(peri_agent::error::AgentError::ToolRejected {
+                        tool: "MCP Agent activation".into(),
+                        reason: cause.reason_text().to_string(),
+                        cause: ToolRejectionCause::ApprovalUnavailable(cause),
+                    }
+                    .into());
+                }
+                // 协议异常（无法识别的响应形状）：fail-closed 拒绝，不冒充任何人的决定。
                 _ => {
                     return Err(peri_agent::error::AgentError::ToolRejected {
                         tool: "MCP Agent activation".into(),
                         reason: "MCP Agent activation was rejected".into(),
+                        cause: ToolRejectionCause::PolicyDenied,
                     }
                     .into());
                 }

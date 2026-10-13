@@ -140,18 +140,6 @@ pub trait BeforeToolState: StateView + HookOutputState {
     fn tool_origin(&self, _call_id: &str) -> Option<BoundToolOrigin> {
         None
     }
-
-    /// 本次执行的「审批不可用（无人可答）」记录点；`None` = 没有 outcome 记录面。
-    ///
-    /// 与用户拒绝**严格区分**（设计 §3.4）：拒绝是已作出的决定，不可用是没有
-    /// 人可以决定。middleware 在收到 [`crate::interaction::InteractionResponse::Unanswered`]
-    /// 时把原因写进该 sink，调用期窄状态把它并入 outcome 元数据；legacy / 测试
-    /// 适配器返回 `None`（不伪造拒绝原因，仍按原有语义 fail-closed）。
-    fn approval_unavailable_sink(
-        &self,
-    ) -> Option<std::sync::Arc<crate::agent::stages::ApprovalUnavailableSink>> {
-        None
-    }
 }
 
 /// Read-only source facts for approval; no callable tool or mutable catalog handle.

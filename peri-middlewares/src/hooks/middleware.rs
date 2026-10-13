@@ -24,6 +24,7 @@ use std::{collections::HashMap, sync::Arc};
 
 use async_trait::async_trait;
 use parking_lot::RwLock;
+use peri_acp_types::error::ToolRejectionCause;
 use peri_acp_types::system_reminder::{
     ReminderAudience, ReminderAudiences, ReminderCategory, ReminderDelivery, ReminderSeverity,
     ReminderSource, SystemReminder, TrustedSystemReminderFactory, SYSTEM_REMINDER_VERSION,
@@ -218,9 +219,11 @@ impl HookMiddleware {
         }
 
         let Some(broker) = &self.broker else {
+            // 没有审批通道（本端机制缺失）⇒ 未获批准；没有任何人的决定（裁决 R9）。
             return Err(AgentError::ToolRejected {
                 tool: tool_call.name.clone(),
                 reason: HOOK_ASK_UNAVAILABLE_REASON.to_string(),
+                cause: ToolRejectionCause::PolicyDenied,
             });
         };
 
@@ -242,9 +245,11 @@ impl HookMiddleware {
             match peri_time::timeout(self.broker_timeout, broker.request(owner, ctx)).await {
                 Ok(response) => response,
                 Err(_) => {
+                    // 审批未在期限内给出决定：没有任何人的决定（裁决 R9）。
                     return Err(AgentError::ToolRejected {
                         tool: tool_call.name.clone(),
                         reason: HOOK_ASK_TIMEOUT_REASON.to_string(),
+                        cause: ToolRejectionCause::PolicyDenied,
                     });
                 }
             };
@@ -256,16 +261,14 @@ impl HookMiddleware {
                 })
             }
             // 无人可作答（含「本部署没有在线 endpoint」）：按未获批准处理，
-            // 如实转述原因，不伪造「用户拒绝」；原因同时写进 outcome 记录面
-            //（裁决 R9：outcome 记录层必须可区分「无人可答」与「用户拒绝」）。
+            // 如实转述原因，不伪造「用户拒绝」。typed cause 随错误本身走
+            //（裁决 R9：消费方无需任何带外记录点即可区分两类事实）。
             InteractionResponse::Unanswered { cause } => {
-                if let Some(sink) = state.approval_unavailable_sink() {
-                    sink.record(cause);
-                }
-                ApprovalDecision::Reject {
+                return Err(AgentError::ToolRejected {
+                    tool: tool_call.name.clone(),
                     reason: cause.reason_text().to_string(),
-                    source: None,
-                }
+                    cause: ToolRejectionCause::ApprovalUnavailable(cause),
+                });
             }
             _ => ApprovalDecision::Reject {
                 reason: "用户拒绝".to_string(),
@@ -608,6 +611,8 @@ impl Middleware for HookMiddleware {
                     return Err(AgentError::ToolRejected {
                         tool: effective_call.name.clone(),
                         reason: HOOK_DENY_REASON.to_string(),
+                        // hook 判定拒绝：本端策略，不是任何人的决定（裁决 R9）。
+                        cause: ToolRejectionCause::PolicyDenied,
                     });
                 }
 
@@ -691,6 +696,8 @@ impl Middleware for HookMiddleware {
                 return Err(AgentError::ToolRejected {
                     tool: effective_call.name.clone(),
                     reason: HOOK_PERMISSION_DENY_REASON.to_string(),
+                    // hook 判定拒绝：本端策略，不是任何人的决定（裁决 R9）。
+                    cause: ToolRejectionCause::PolicyDenied,
                 });
             }
 
@@ -824,6 +831,8 @@ impl Middleware for HookMiddleware {
                     reason: stop_reason
                         .clone()
                         .unwrap_or_else(|| "Stop hook prevented continuation".to_string()),
+                    // Stop hook 阻断继续：本端策略，不是任何人的决定（裁决 R9）。
+                    cause: ToolRejectionCause::PolicyDenied,
                 });
             }
             _ => {

@@ -131,12 +131,7 @@ async fn test_accept_edit_does_not_auto_approve_external_raw_write() {
     );
     let call = make_tool_call("Write");
     let results = mw
-        .process_batch_with_origins(
-            None,
-            &[call],
-            &[mcp_origin("Write", false)],
-            Some(&test_owner()),
-        )
+        .process_batch_with_origins(&[call], &[mcp_origin("Write", false)], Some(&test_owner()))
         .await;
     assert!(matches!(&results[0], Err(AgentError::ToolRejected { tool, .. }) if tool == "Write"));
 }
@@ -146,12 +141,7 @@ async fn test_builtin_raw_read_keeps_read_policy() {
     let mw = PermissionMiddleware::new(Arc::new(RejectBroker), default_requires_approval);
     let call = make_tool_call("Read");
     let results = mw
-        .process_batch_with_origins(
-            None,
-            &[call],
-            &[mcp_origin("Read", true)],
-            Some(&test_owner()),
-        )
+        .process_batch_with_origins(&[call], &[mcp_origin("Read", true)], Some(&test_owner()))
         .await;
     assert_eq!(results[0].as_ref().unwrap().name, "Read");
 }
@@ -162,7 +152,6 @@ async fn test_external_raw_artifact_cannot_inherit_builtin_no_approval() {
     let call = make_tool_call("artifact");
     let results = mw
         .process_batch_with_origins(
-            None,
             &[call],
             &[mcp_origin("artifact", false)],
             Some(&test_owner()),
@@ -195,19 +184,13 @@ async fn test_auto_mode_classifies_external_mcp_with_server_and_wire_identity() 
     let call = make_tool_call("Write");
     let external = mw
         .process_batch_with_origins(
-            None,
             std::slice::from_ref(&call),
             &[mcp_origin("Write", false)],
             Some(&test_owner()),
         )
         .await;
     let builtin = mw
-        .process_batch_with_origins(
-            None,
-            &[call],
-            &[mcp_origin("Write", true)],
-            Some(&test_owner()),
-        )
+        .process_batch_with_origins(&[call], &[mcp_origin("Write", true)], Some(&test_owner()))
         .await;
     assert!(external[0].is_ok());
     assert!(builtin[0].is_ok());

@@ -25,7 +25,6 @@ use std::sync::Arc;
 
 use tokio_util::sync::CancellationToken;
 
-use peri_acp_types::interaction::UnansweredCause;
 use peri_acp_types::mcp_apps::SkippedPostHook;
 
 use super::StageContext;
@@ -171,39 +170,6 @@ pub struct InvocationContext {
     /// 无 turn 时被显式跳过的事后钩子的记录点（裁决 R2）；`None` = 调用方不要求
     /// 记录（turn 来源的执行不会跳过）。
     post_hook_skips: Option<Arc<PostHookSkipSink>>,
-    /// 「审批不可用（无人可答）」的记录点（裁决 R9）；`None` = 调用方不消费
-    ///（轮次执行由 `AgentError` 层承载）。
-    approval_unavailable: Option<Arc<ApprovalUnavailableSink>>,
-}
-
-/// 「审批不可用（无人可答）」事实的有界记录点（设计 §3.4 / 裁决 R9）。
-///
-/// 与「用户拒绝」严格区分：拒绝是**已作出的决定**，不可用是**没有人可以决定**。
-/// 调用期窄状态把它记进本次执行的 outcome 元数据；`AgentError` 层的 typed 分类
-/// 留待阶段 4（`AgentError::NotAvailableWithoutTurn` 之外的审批细分仍共享
-/// `ToolRejected`）。
-#[derive(Default)]
-pub struct ApprovalUnavailableSink {
-    cause: parking_lot::Mutex<Option<UnansweredCause>>,
-}
-
-impl ApprovalUnavailableSink {
-    pub fn new() -> Self {
-        Self::default()
-    }
-
-    /// 记录一次不可用原因（首次胜出：一次执行至多一个准入决定）。
-    pub fn record(&self, cause: UnansweredCause) {
-        let mut slot = self.cause.lock();
-        if slot.is_none() {
-            *slot = Some(cause);
-        }
-    }
-
-    /// 取走已记录的原因（消费一次）。
-    pub fn take(&self) -> Option<UnansweredCause> {
-        self.cause.lock().take()
-    }
 }
 
 /// 事后钩子跳过事实的有界记录点（裁决 R2）。
@@ -293,7 +259,6 @@ impl InvocationContext {
             cancellation,
             // 轮次入口不跳过事后钩子（有 turn），因此不设跳过记录点。
             post_hook_skips: None,
-            approval_unavailable: None,
         }
     }
 
@@ -464,14 +429,6 @@ impl InvocationContext {
         }
     }
 
-    /// 「审批不可用（无人可答）」的记录点（裁决 R9）。
-    ///
-    /// 消费方据此区分「没有用户可以决定」与「用户拒绝」；`None` = 本次执行没有
-    /// 记录面，调用方丢弃该事实（不伪造拒绝、也不伪造批准）。
-    pub(crate) fn approval_unavailable_sink(&self) -> Option<Arc<ApprovalUnavailableSink>> {
-        self.approval_unavailable.clone()
-    }
-
     /// 是否具备 render 事件端口；idle 执行按构造没有（零模型可见事件）。
     #[cfg(test)]
     pub(crate) fn has_render_events(&self) -> bool {
@@ -509,7 +466,6 @@ impl InvocationContext {
             events: None,
             cancellation: source.cancel,
             post_hook_skips: source.post_hook_skips,
-            approval_unavailable: source.approval_unavailable,
         }
     }
 }
@@ -545,8 +501,6 @@ pub struct SessionInvocationSource {
     pub cancel: CancellationToken,
     /// 事后钩子跳过事实的落点；`None` = 不收集（本入口在无 turn 时会跳过它们）。
     pub post_hook_skips: Option<Arc<PostHookSkipSink>>,
-    /// 「审批不可用」事实的落点；`None` = 不收集。
-    pub approval_unavailable: Option<Arc<ApprovalUnavailableSink>>,
 }
 
 #[cfg(test)]

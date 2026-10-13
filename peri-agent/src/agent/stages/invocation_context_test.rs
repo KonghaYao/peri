@@ -39,7 +39,6 @@ fn idle_source(stage: &StageContext, origin: InvocationOrigin) -> SessionInvocat
         origin,
         cancel: stage.session.turn.cancel_token.as_ref().clone(),
         post_hook_skips: None,
-        approval_unavailable: None,
     }
 }
 

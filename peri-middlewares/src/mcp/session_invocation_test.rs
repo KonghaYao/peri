@@ -854,3 +854,46 @@ async fn source_target_exports_target_from_retained_outcome_record() {
     );
     fixture.shutdown().await;
 }
+
+/// `map_dispatch_error` 的 typed 事实**只**来自错误本身（裁决 R9）：不再有带外
+/// 「无人可答」记录点，两种原因各自如实落账。
+#[test]
+fn map_dispatch_error_reads_typed_cause_without_side_channel() {
+    let unavailable = peri_agent::tools::EffectiveToolError::new(
+        EffectiveToolErrorCode::PermissionDenied,
+        UnansweredCause::OwnerUnmatched.reason_text(),
+    )
+    .with_unanswered_cause(UnansweredCause::OwnerUnmatched);
+    assert_eq!(
+        map_dispatch_error(unavailable, false),
+        SessionInvocationOutcome::NotExecuted {
+            cause: NotExecutedCause::ApprovalUnavailable(UnansweredCause::OwnerUnmatched)
+        },
+        "「没有人可以决定」必须落成 ApprovalUnavailable，不得折叠成用户拒绝"
+    );
+
+    let rejected = peri_agent::tools::EffectiveToolError::new(
+        EffectiveToolErrorCode::UserRejected,
+        "用户拒绝",
+    );
+    assert_eq!(
+        map_dispatch_error(rejected, false),
+        SessionInvocationOutcome::NotExecuted {
+            cause: NotExecutedCause::UserRejected
+        },
+        "已作出的拒绝决定必须落成 UserRejected"
+    );
+
+    // 本端策略拒绝（hook / 分类器 / 审批机制缺失或超时）：既不是用户拒绝，
+    // 也不是无人可答，且不得记成「目标已撤销」。
+    let policy = peri_agent::tools::EffectiveToolError::new(
+        EffectiveToolErrorCode::PermissionDenied,
+        "Hook blocked this call",
+    );
+    assert_eq!(
+        map_dispatch_error(policy, false),
+        SessionInvocationOutcome::NotExecuted {
+            cause: NotExecutedCause::PolicyDenied
+        }
+    );
+}

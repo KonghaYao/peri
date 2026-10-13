@@ -3,6 +3,7 @@ use std::sync::Arc;
 
 use super::*;
 use crate::permission::{PermissionMode, SharedPermissionMode};
+use peri_acp_types::error::ToolRejectionCause;
 use peri_agent::interaction::{
     ApprovalDecision, InteractionContext, InteractionResponse, TrustedInteractionOwner,
     UnansweredCause, UserInteractionBroker,
@@ -126,7 +127,7 @@ async fn test_pretooluse_deny_with_updated_input_rejects_and_never_asks() {
         .await;
 
     match result {
-        Err(AgentError::ToolRejected { tool, reason }) => {
+        Err(AgentError::ToolRejected { tool, reason, .. }) => {
             assert_eq!(tool, "Bash");
             assert!(
                 reason.contains("denied"),
@@ -190,7 +191,14 @@ async fn test_pretooluse_ask_without_broker_is_rejected_not_allowed() {
         .await;
 
     match result {
-        Err(AgentError::ToolRejected { tool, .. }) => assert_eq!(tool, "Bash"),
+        Err(AgentError::ToolRejected { tool, cause, .. }) => {
+            assert_eq!(tool, "Bash");
+            assert_eq!(
+                cause,
+                ToolRejectionCause::PolicyDenied,
+                "本端没有审批通道：不是用户拒绝，也不是无人可答"
+            );
+        }
         other => panic!("ask 无审批端口必须拒绝，got {other:?}"),
     }
 }
@@ -262,7 +270,14 @@ async fn test_pretooluse_ask_broker_timeout_is_rejected() {
         )
         .await;
 
-    assert!(result.is_err(), "ask 审批超时必须拒绝，got {result:?}");
+    match result {
+        Err(AgentError::ToolRejected { cause, .. }) => assert_eq!(
+            cause,
+            ToolRejectionCause::PolicyDenied,
+            "审批未在期限内给出决定：没有任何人的决定"
+        ),
+        other => panic!("ask 审批超时必须拒绝，got {other:?}"),
+    }
     assert_eq!(broker.calls(), 1);
 }
 
@@ -365,7 +380,16 @@ async fn test_pretooluse_ask_transcribes_no_online_endpoint() {
 
     assert_eq!(broker.calls(), 1, "审批必须真的发出过一次交互");
     match result {
-        Err(AgentError::ToolRejected { reason, .. }) => {
+        Err(AgentError::ToolRejected {
+            reason,
+            cause: rejection_cause,
+            ..
+        }) => {
+            assert_eq!(
+                rejection_cause,
+                ToolRejectionCause::ApprovalUnavailable(UnansweredCause::NoOnlineEndpoint),
+                "无人可答必须以 typed 原因过边界（裁决 R9）"
+            );
             assert_eq!(
                 reason,
                 UnansweredCause::NoOnlineEndpoint.reason_text(),
@@ -398,8 +422,16 @@ async fn test_pretooluse_ask_transcribes_non_interactive_client_reason() {
         .await;
 
     match result {
-        Err(AgentError::ToolRejected { reason, .. }) => {
-            assert_eq!(reason, UnansweredCause::NonInteractiveClient.reason_text())
+        Err(AgentError::ToolRejected {
+            reason,
+            cause: rejection_cause,
+            ..
+        }) => {
+            assert_eq!(reason, UnansweredCause::NonInteractiveClient.reason_text());
+            assert_eq!(
+                rejection_cause,
+                ToolRejectionCause::ApprovalUnavailable(UnansweredCause::NonInteractiveClient)
+            );
         }
         other => panic!("无人可作答必须拒绝（未获批准），got {other:?}"),
     }

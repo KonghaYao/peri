@@ -28,15 +28,51 @@ use crate::tools::{
     ToolCallId, ToolExecutionEvidence, ToolExecutionStatus, ToolOutcome, ToolOutput,
 };
 
-pub(super) fn effective_tool_error(error: AgentError) -> EffectiveToolError {
-    let code = match error {
+/// 拒绝原因 → 稳定错误分类（**单一权威**：模型面结算、协议错误面与
+/// [`effective_tool_error`] 共用同一张表，不各自硬编码）。
+///
+/// 「无人可答」与「本端策略拒绝」都**不是**用户拒绝（裁决 R9）：前者是没有人可以
+/// 决定，后者是策略 / 机制拒绝，两者一律映射为 [`EffectiveToolErrorCode::PermissionDenied`]
+///（「未获批准的策略拒绝」），只有**已作出的用户决定**才映射为
+/// [`EffectiveToolErrorCode::UserRejected`]。
+pub(super) fn rejection_error_code(
+    cause: peri_acp_types::error::ToolRejectionCause,
+) -> EffectiveToolErrorCode {
+    match cause {
+        peri_acp_types::error::ToolRejectionCause::UserRejected => {
+            EffectiveToolErrorCode::UserRejected
+        }
+        peri_acp_types::error::ToolRejectionCause::ApprovalUnavailable(_)
+        | peri_acp_types::error::ToolRejectionCause::PolicyDenied => {
+            EffectiveToolErrorCode::PermissionDenied
+        }
+    }
+}
+
+/// `AgentError` → 稳定错误分类（同一权威表的入口）。
+pub(super) fn effective_error_code(error: &AgentError) -> EffectiveToolErrorCode {
+    match error {
         AgentError::ToolNotFound(_) => EffectiveToolErrorCode::UnknownTool,
         AgentError::SerializationError(_) => EffectiveToolErrorCode::InvalidInput,
-        AgentError::ToolRejected { .. } => EffectiveToolErrorCode::UserRejected,
+        AgentError::ToolRejected { cause, .. } => rejection_error_code(*cause),
         AgentError::Interrupted => EffectiveToolErrorCode::Cancelled,
         _ => EffectiveToolErrorCode::ToolFailed,
-    };
-    EffectiveToolError::new(code, error.user_facing_message())
+    }
+}
+
+pub(super) fn effective_tool_error(error: AgentError) -> EffectiveToolError {
+    let mut effective =
+        EffectiveToolError::new(effective_error_code(&error), error.user_facing_message());
+    // typed 事实随错误一起过边界（裁决 R9）：消费方无需任何带外记录点即可区分
+    // 「没有人可以决定」与「用户拒绝」。
+    if let AgentError::ToolRejected {
+        cause: peri_acp_types::error::ToolRejectionCause::ApprovalUnavailable(cause),
+        ..
+    } = error
+    {
+        effective = effective.with_unanswered_cause(cause);
+    }
+    effective
 }
 
 fn effective_tool_error_from_boxed(
@@ -269,11 +305,18 @@ async fn run_before_tool_approvals(
                 }
                 ready_calls.push(modified_call);
             }
-            Err(AgentError::ToolRejected { ref reason, .. }) => {
+            Err(AgentError::ToolRejected {
+                ref reason,
+                ref cause,
+                ..
+            }) => {
                 let raw_call = event_calls.get(&tool_call.id).unwrap_or(tool_call);
                 let mut rejection_result =
                     ToolResult::error(&tool_call.id, &tool_call.name, reason.clone());
-                rejection_result.effective_error_code = Some(EffectiveToolErrorCode::UserRejected);
+                // typed 原因同时落到结果事实（裁决 R9）：模型面只看到文本，协议错误面
+                // （`EffectiveToolDispatcher::dispatch`）据此还原「无人可答 ⇒ 未执行」。
+                rejection_result.effective_error_code = Some(rejection_error_code(*cause));
+                rejection_result.rejection_cause = Some(*cause);
                 if let Some(turn_id) = turn_id {
                     ctx.emit_render(RenderEvent::ToolStarted {
                         turn_id,

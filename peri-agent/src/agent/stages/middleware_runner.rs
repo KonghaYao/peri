@@ -470,12 +470,6 @@ impl hook_state::HookOutputState for BoundApprovalState<'_> {
 }
 
 impl hook_state::BeforeToolState for BoundApprovalState<'_> {
-    fn approval_unavailable_sink(
-        &self,
-    ) -> Option<std::sync::Arc<crate::agent::stages::ApprovalUnavailableSink>> {
-        self.view.context.approval_unavailable_sink()
-    }
-
     fn tool_origin(&self, call_id: &str) -> Option<hook_state::BoundToolOrigin> {
         self.targets
             .get(call_id)

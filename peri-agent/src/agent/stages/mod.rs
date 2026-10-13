@@ -19,8 +19,8 @@ pub mod reason;
 pub mod receive;
 pub mod tool_dispatch;
 pub use invocation_context::{
-    ApprovalUnavailableSink, ExecutionEntryOrigin, InvocationContext, ModelTurnFacts,
-    PostHookSkipSink, SessionInvocationSource,
+    ExecutionEntryOrigin, InvocationContext, ModelTurnFacts, PostHookSkipSink,
+    SessionInvocationSource,
 };
 pub use null_llm::NullReactLLM;
 pub use tool_dispatch::invocation_dispatcher;

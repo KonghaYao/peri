@@ -418,7 +418,7 @@ async fn test_process_batch_broker_timeout_returns_one_result_per_call() {
     assert_eq!(results.len(), calls.len(), "批量超时结果必须与输入等长");
     for (result, call) in results.iter().zip(calls.iter()) {
         match result {
-            Err(AgentError::ToolRejected { tool, reason }) => {
+            Err(AgentError::ToolRejected { tool, reason, .. }) => {
                 assert_eq!(tool, &call.name, "拒绝必须归属原调用，不串线");
                 assert!(reason.contains("超时"), "原因应说明审批超时：{reason}");
             }

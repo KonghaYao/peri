@@ -157,15 +157,17 @@ impl BaseTool for AskUserTool {
                 Err(Box::new(peri_agent::error::AgentError::ToolRejected {
                     tool: "AskUserQuestion".to_string(),
                     reason: "用户拒绝回答".to_string(),
+                    cause: peri_acp_types::error::ToolRejectionCause::UserRejected,
                 }))
             }
             // 无人可作答（客户端声明、无法识别的声明，或本部署没有在线 endpoint）：
-            // 转述真实原因。ToolRejected 只是失败的工具结果（模型侧 is_error），
-            // 不代表用户曾拒绝；绝不把空答案当作回答返回。
+            // 转述真实原因并带上 typed cause。ToolRejected 只是失败的工具结果
+            //（模型侧 is_error），不代表用户曾拒绝；绝不把空答案当作回答返回。
             InteractionResponse::Unanswered { cause } => {
                 Err(Box::new(peri_agent::error::AgentError::ToolRejected {
                     tool: "AskUserQuestion".to_string(),
                     reason: cause.reason_text().to_string(),
+                    cause: peri_acp_types::error::ToolRejectionCause::ApprovalUnavailable(cause),
                 }))
             }
             _ => Err("ask_user_question: unexpected response type".into()),

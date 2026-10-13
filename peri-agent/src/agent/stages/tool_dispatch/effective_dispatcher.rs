@@ -19,6 +19,7 @@ use crate::tools::{
     EffectiveToolCall, EffectiveToolDefinition, EffectiveToolDispatcher, EffectiveToolError,
     EffectiveToolErrorCode, ToolCallId, ToolOutcome, ToolOutput,
 };
+use peri_acp_types::error::ToolRejectionCause;
 
 #[derive(Clone)]
 pub(super) struct StageEffectiveToolDispatcher {
@@ -133,6 +134,12 @@ impl EffectiveToolDispatcher for StageEffectiveToolDispatcher {
                 }
             });
             let mut error = EffectiveToolError::new(code, result.output);
+            // 「无人可答」的 typed 原因随结果事实过边界（裁决 R9）：这一条路径不经过
+            // `effective_tool_error`（错误已在审批阶段结算成 `ToolResult`），因此必须
+            // 显式还原，否则 App / Host 面会退化成「用户拒绝」。
+            if let Some(ToolRejectionCause::ApprovalUnavailable(cause)) = result.rejection_cause {
+                error = error.with_unanswered_cause(cause);
+            }
             if let Some(failure) = result.subagent_failure {
                 error = error.with_subagent_failure(failure);
             }

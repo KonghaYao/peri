@@ -5,6 +5,7 @@ use std::time::Duration;
 use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
 
+use crate::interaction::UnansweredCause;
 use crate::messages::BaseMessage;
 use crate::tool_outcome::{RawToolResult, RemoteToolError};
 
@@ -514,6 +515,13 @@ pub struct EffectiveToolError {
     /// `None` = 失败不来自远端 MCP（本地工具、权限、取消、超时等）。relay 与
     /// ACP 据此转发原始远端错误，不再靠 [`EffectiveToolErrorCode`] 反推。
     pub remote_error: Option<RemoteToolError>,
+    /// 「审批不可用（无人可答）」的 typed 原因（裁决 R9）：只在本次失败是
+    /// [`crate::error::ToolRejectionCause::ApprovalUnavailable`] 时存在。
+    ///
+    /// 与 [`EffectiveToolErrorCode::UserRejected`] 严格区分：userRejected 是
+    /// **已作出的决定**，本字段是**没有人可以决定**。消费方（session outcome /
+    /// relay）据此如实记录 `ApprovalUnavailable`，不靠带外记录点补事实。
+    pub unanswered_cause: Option<UnansweredCause>,
 }
 
 impl EffectiveToolError {
@@ -523,6 +531,7 @@ impl EffectiveToolError {
             message: message.into(),
             subagent_failure: None,
             remote_error: None,
+            unanswered_cause: None,
         }
     }
 
@@ -542,6 +551,17 @@ impl EffectiveToolError {
 
     pub fn remote_error(&self) -> Option<&RemoteToolError> {
         self.remote_error.as_ref()
+    }
+
+    /// 附加「审批不可用（无人可答）」的 typed 原因。
+    pub fn with_unanswered_cause(mut self, cause: UnansweredCause) -> Self {
+        self.unanswered_cause = Some(cause);
+        self
+    }
+
+    /// 「审批不可用（无人可答）」的 typed 原因；`None` = 本次失败与无人可答无关。
+    pub fn unanswered_cause(&self) -> Option<UnansweredCause> {
+        self.unanswered_cause
     }
 }
 

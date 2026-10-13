@@ -335,7 +335,7 @@ async fn test_missing_trusted_owner_is_rejected_without_asking() {
         .downcast_ref::<peri_agent::error::AgentError>()
         .expect("必须保持 AgentError 语义");
     match agent_error {
-        peri_agent::error::AgentError::ToolRejected { tool, reason } => {
+        peri_agent::error::AgentError::ToolRejected { tool, reason, .. } => {
             assert_eq!(tool, "AskUserQuestion");
             assert_eq!(reason, crate::interaction_owner::UNTRUSTED_OWNER_REASON);
         }

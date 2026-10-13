@@ -32,8 +32,7 @@ use peri_acp_types::tools::{
     BaseTool, EffectiveToolError, EffectiveToolErrorCode, ToolContext, ToolOutput,
 };
 use peri_agent::agent::stages::{
-    invocation_dispatcher, ApprovalUnavailableSink, InvocationContext, PostHookSkipSink,
-    SessionInvocationSource,
+    invocation_dispatcher, InvocationContext, PostHookSkipSink, SessionInvocationSource,
 };
 use peri_agent::session::factory::InvocationRuleChain;
 use peri_agent::session::queue::MessageQueue;
@@ -618,7 +617,6 @@ impl SessionInvocationService {
         let catalog = Arc::new(single_tool_catalog(&bound.effective_name, admitted));
 
         let skips = Arc::new(PostHookSkipSink::new());
-        let unanswered = Arc::new(ApprovalUnavailableSink::new());
         let invocation_cancel = InvocationCancel::issue(&self.session_cancel);
         let ctx = InvocationContext::from_source(SessionInvocationSource {
             session_id: Some(self.session_id.clone()),
@@ -634,7 +632,6 @@ impl SessionInvocationService {
             origin: request.origin.clone(),
             cancel: invocation_cancel.token(),
             post_hook_skips: Some(Arc::clone(&skips)),
-            approval_unavailable: Some(Arc::clone(&unanswered)),
         });
         let dispatcher = invocation_dispatcher(ctx, catalog);
         let result = dispatcher
@@ -664,11 +661,7 @@ impl SessionInvocationService {
                 // 管线的粗粒度 code 只作兜底（裁决：策略拒绝 ≠ 目标撤销）。
                 match rejection.lock().take() {
                     Some(cause) => SessionInvocationOutcome::NotExecuted { cause },
-                    None => map_dispatch_error(
-                        error,
-                        unanswered.take(),
-                        self.session_cancel.is_cancelled(),
-                    ),
+                    None => map_dispatch_error(error, self.session_cancel.is_cancelled()),
                 }
             }
         };
@@ -739,13 +732,15 @@ fn single_tool_catalog(name: &str, tool: Arc<dyn BaseTool>) -> SessionToolCatalo
 }
 
 /// 分发失败 → typed 结果事实（不把「未执行」伪装成执行失败）。
+///
+/// 「无人可答」的**唯一**来源是错误自带的 typed 事实（[`EffectiveToolError::unanswered_cause`]，
+/// 裁决 R9）：不再读任何带外记录点，任何消费方都拿到同一份事实。
 fn map_dispatch_error(
     error: EffectiveToolError,
-    unanswered: Option<peri_acp_types::interaction::UnansweredCause>,
     session_cancelled: bool,
 ) -> SessionInvocationOutcome {
-    if let Some(cause) = unanswered {
-        // 裁决 R9：无人可答 ≠ 用户拒绝（两者在 outcome 记录层必须可区分）。
+    if let Some(cause) = error.unanswered_cause() {
+        // 无人可答 ≠ 用户拒绝（两者在 outcome 记录层必须可区分）。
         return SessionInvocationOutcome::NotExecuted {
             cause: NotExecutedCause::ApprovalUnavailable(cause),
         };
@@ -754,8 +749,9 @@ fn map_dispatch_error(
         EffectiveToolErrorCode::UserRejected => SessionInvocationOutcome::NotExecuted {
             cause: NotExecutedCause::UserRejected,
         },
-        // 策略层拒绝（如审批中间件在无审批模式下拒绝）：目标仍有效、也没有用户
-        // 决定发生，不得记成「目标已撤销」。
+        // 策略层拒绝（hook 策略 / 分类器 / 审批机制缺失或超时 / 审批中间件在无审批
+        // 模式下拒绝）：目标仍有效、也没有用户决定发生，不得记成「目标已撤销」，
+        // 也不得记成「用户拒绝」。
         EffectiveToolErrorCode::PermissionDenied => SessionInvocationOutcome::NotExecuted {
             cause: NotExecutedCause::PolicyDenied,
         },
