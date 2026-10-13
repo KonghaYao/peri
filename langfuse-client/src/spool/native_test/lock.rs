@@ -174,6 +174,34 @@ fn concurrent_delete_never_turns_lock_attempts_into_io_faults() {
     assert!(pages > 0, "扫描必须实际执行过");
 }
 
+/// 取锁失败的分类只看**本次 `open` 的错误**，不做事后探测父目录（契约 §5.2）。
+///
+/// CI（ubuntu）里的逃逸形态是「`open` 报 `ENOENT`，而失败后探测仍看见对象目录」：删除竞争下
+/// 目录状态在两次系统调用之间又变了，旧的「父目录还在 ⇒ 当真故障上抛」据此把 `ENOENT` 升级成
+/// `lock spool object` 故障、整页扫描失败。这里用悬挂符号链接确定性构造同一状态——`open` 报
+/// `ENOENT`（末段目标的目录组件不存在）而锁文件的父目录确实是对象目录——判定必须是 `Gone`。
+///
+/// 只在 Unix 生效：Windows 用别的错误码表达该竞争（见 `concurrent_delete_never_turns_...`）。
+#[cfg(unix)]
+#[test]
+fn open_failure_is_classified_by_error_kind_not_by_probing_the_object_dir() {
+    let dir = tempfile::tempdir().expect("temporary root");
+    let fixture = Fixture::open(dir.path().to_path_buf(), route_of(15));
+    let object_dir = fixture.object_dir(id_of(0x73));
+    create_private_dir_all(&object_dir).expect("object directory");
+    let lock_path = object_dir.join("lock");
+    std::os::unix::fs::symlink(object_dir.join("missing").join("target"), &lock_path)
+        .expect("dangling lock symlink");
+    assert!(
+        object_dir.is_dir(),
+        "父目录必须仍在，否则构造的不是逃逸形态"
+    );
+    assert!(matches!(
+        super::super::try_lock_file(&lock_path).expect("lock attempt"),
+        LockAttempt::Gone
+    ));
+}
+
 /// 对端持有 domain 锁是并发竞争，不是「卷不支持 advisory lock」。
 ///
 /// 能力探针只做 `try_lock`（不许阻塞），所以这里直接钉住探针判定：同进程自持 domain 锁时

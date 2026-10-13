@@ -341,15 +341,16 @@ pub(crate) fn write_atomic(path: &Path, bytes: &[u8]) -> io::Result<()> {
 
 /// 锁文件尝试结果：把「条目已被并发删除」与真实 IO 故障分开（契约 §5.2）。
 ///
-/// 并发删除下 `open(2)` 会报 `ENOENT`（Linux）或 `EINVAL`（macOS）：两者都只说明锁文件的
-/// 父目录已经不在了，调用方应把该条目当作不存在，而不是把正常清理竞争升级为扫描失败。
+/// 并发删除下 `open(2)` 会报 `ENOENT`（Linux/macOS）或 `EINVAL`（macOS 实测）：两者都只说明
+/// 条目目录已经不在了，调用方应把该条目当作不存在，而不是把正常清理竞争升级为扫描失败。
+/// 判定只看这次 `open` 的错误本身，见 [`is_concurrent_dir_removal`]。
 #[derive(Debug)]
 pub(crate) enum LockAttempt {
     /// 取得独占锁；句柄存活期间其他 owner 无法领取或删除该条目。
     Free(File),
     /// 其他 owner 已持锁。
     Held,
-    /// 锁文件所在目录已不存在：条目不可领取，不是 IO 故障。
+    /// 条目目录已不存在或正被删除：条目不可领取，不是 IO 故障。
     Gone,
 }
 
@@ -364,13 +365,9 @@ pub(crate) fn try_lock_file(path: &Path) -> io::Result<LockAttempt> {
     }
     let file = match options.open(path) {
         Ok(file) => file,
-        Err(error) => {
-            // 只按「父目录是否仍在」判定竞争：父目录在而打开失败仍是真实故障，照常上抛。
-            if !lock_parent_is_dir(path) {
-                return Ok(LockAttempt::Gone);
-            }
-            return Err(error);
-        }
+        // 条目目录被并发删除：条目不可领取，不是 IO 故障。
+        Err(error) if is_concurrent_dir_removal(&error) => return Ok(LockAttempt::Gone),
+        Err(error) => return Err(error),
     };
     match file.try_lock_exclusive() {
         Ok(()) => Ok(LockAttempt::Free(file)),
@@ -394,9 +391,20 @@ fn is_lock_contention(error: &io::Error) -> bool {
         || CONTENTION_OS_ERROR.is_some_and(|code| error.raw_os_error() == Some(code))
 }
 
-/// 锁文件父目录是否仍是目录；无父目录按不可用处理（不回退到 cwd）。
-fn lock_parent_is_dir(path: &Path) -> bool {
-    path.parent().is_some_and(Path::is_dir)
+/// `open(2)` 失败是否只说明「锁文件所在条目目录已被并发删除」（契约 §5.2）。
+///
+/// - `ENOENT`：路径中的目录组件已不存在，Linux/macOS 的并发删除形态。
+/// - `EINVAL`：macOS 实测 `open(O_CREAT)` 撞上正在被删除的目录；Linux 不产生该形态，Windows 的
+///   `InvalidInput` 是 `ERROR_INVALID_PARAMETER`（语义不同），故只在非 Windows 平台并入。
+///
+/// 判定只看**本次 `open` 的错误本身**，不做事后探测：探测发生在失败之后，两次系统调用之间目录
+/// 状态可以再变——CI（ubuntu）里逃逸成整页扫描失败的 `ENOENT`，只可能来自「`open` 报 `ENOENT`
+/// 而失败后探测仍看见该目录」这一 TOCTOU 形态。本函数的 flags 与 mode 固定且合法、目录布局在
+/// `open_at` 校验，因此这两个错误只可能来自「目录被删」；其他错误（`EACCES`/`EIO`/`ENOTDIR`…）
+/// 照常上抛。
+fn is_concurrent_dir_removal(error: &io::Error) -> bool {
+    error.kind() == io::ErrorKind::NotFound
+        || (cfg!(not(windows)) && error.kind() == io::ErrorKind::InvalidInput)
 }
 
 /// 静态操作名 + 底层错误；不携带路径与凭据。
