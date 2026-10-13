@@ -30,6 +30,30 @@ fn tracer(rate: f64) -> (LangfuseTracer, Arc<FakeLangfuseSession>) {
     (tracer, session)
 }
 
+/// 期望字节口径：对象键递归字典序、数组保序（冻结正文与构建 feature 无关，契约 §3.4）。
+///
+/// 本地实现而非复用产品代码，保持期望值独立于被测实现。
+fn stable_bytes(value: &serde_json::Value) -> String {
+    fn canonical(value: &serde_json::Value) -> serde_json::Value {
+        match value {
+            serde_json::Value::Object(fields) => {
+                let mut keys: Vec<&String> = fields.keys().collect();
+                keys.sort();
+                serde_json::Value::Object(
+                    keys.into_iter()
+                        .map(|key| (key.clone(), canonical(&fields[key])))
+                        .collect(),
+                )
+            }
+            serde_json::Value::Array(items) => {
+                serde_json::Value::Array(items.iter().map(canonical).collect())
+            }
+            other => other.clone(),
+        }
+    }
+    serde_json::to_string(&canonical(value)).expect("stable expectation json")
+}
+
 fn workflow_spans(events: &[IngestionEvent]) -> Vec<&SpanBody> {
     events
         .iter()
@@ -234,9 +258,7 @@ async fn abandoned_generation_keeps_full_fallback_messages_and_tools() {
         description: "lookup description".to_string(),
         parameters: serde_json::json!({"type": "object", "properties": {"query": {"type": "string"}}}),
     }];
-    let expected =
-        serde_json::to_string(&serde_json::json!({"messages": &messages, "tools": &tools}))
-            .expect("基线 JSON");
+    let expected = stable_bytes(&serde_json::json!({"messages": &messages, "tools": &tools}));
     tracer.on_turn_start("input");
     tracer.on_llm_start("main", 0, &messages, &tools);
     tracer.on_llm_retrying("main", 0, 1, 3, 10, "protected error");
@@ -286,7 +308,7 @@ async fn abandoned_generation_prefers_complete_raw_request() {
         .unwrap();
     assert_eq!(
         server.generation_input().as_deref(),
-        Some(raw.to_string().as_str()),
+        Some(stable_bytes(&raw).as_str()),
         "raw 请求到达后必须上报请求体冻结字节，而不是旧 fallback"
     );
 }
@@ -462,7 +484,7 @@ async fn gated_generation_preserves_raw_request_through_late_subagent_join() {
     assert_eq!(generations.len(), 1, "闸门重放后只上报一次 generation");
     assert_eq!(
         generations[0].attributes.get(INPUT_ATTRIBUTE),
-        Some(&raw.to_string()),
+        Some(&stable_bytes(&raw)),
         "迟到 join 的重放必须保留原始请求体字节"
     );
 }

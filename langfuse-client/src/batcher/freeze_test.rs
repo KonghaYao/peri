@@ -44,10 +44,9 @@ fn exact_source(bytes: Vec<u8>) -> (Arc<ExactSource>, Arc<AtomicUsize>) {
     (source, entered)
 }
 
-/// 显式 unsize：`Arc::clone` 的返回值不能就地强转成 trait object。
+/// 显式指定被克隆的具体类型：返回位置再把它 unsize 成 trait object。
 fn dyn_store(store: &Arc<NativeSpool>) -> Arc<dyn SpoolStore> {
-    let clone = Arc::clone(store);
-    clone
+    Arc::<NativeSpool>::clone(store)
 }
 
 fn budget(limit: usize) -> Arc<MemoryBudget> {

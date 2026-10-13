@@ -38,9 +38,10 @@ async fn observe_start_reuses_snapshot_and_fallback_keeps_messages_and_tools() {
         description: "lookup description".to_string(),
         parameters: serde_json::json!({"type": "object"}),
     }];
-    let expected =
-        serde_json::to_string(&serde_json::json!({"messages": messages.as_ref(), "tools": &tools}))
-            .expect("基线 JSON");
+    let expected = stable_bytes(&serde_json::json!({
+        "messages": messages.as_ref(),
+        "tools": &tools,
+    }));
     let event = ObserveEvent::LlmCallStart {
         turn_id: TurnId::new(),
         agent_id,
@@ -120,7 +121,7 @@ async fn observe_raw_request_supersedes_snapshot_for_completed_generation() {
     assert_eq!(Arc::strong_count(&messages), 2);
     assert_eq!(
         server.generation_input().as_deref(),
-        Some(raw.to_string().as_str()),
+        Some(stable_bytes(&raw).as_str()),
         "raw 请求体必须取代 fallback 上线"
     );
 }
@@ -247,6 +248,30 @@ fn collect_spans(value: &serde_json::Value, spans: &mut Vec<SpanView>) {
         }
         _ => {}
     }
+}
+
+/// 期望字节口径：对象键递归字典序、数组保序（冻结正文与构建 feature 无关，契约 §3.4）。
+///
+/// 本地实现而非复用产品代码，保持期望值独立于被测实现。
+fn stable_bytes(value: &serde_json::Value) -> String {
+    fn canonical(value: &serde_json::Value) -> serde_json::Value {
+        match value {
+            serde_json::Value::Object(fields) => {
+                let mut keys: Vec<&String> = fields.keys().collect();
+                keys.sort();
+                serde_json::Value::Object(
+                    keys.into_iter()
+                        .map(|key| (key.clone(), canonical(&fields[key])))
+                        .collect(),
+                )
+            }
+            serde_json::Value::Array(items) => {
+                serde_json::Value::Array(items.iter().map(canonical).collect())
+            }
+            other => other.clone(),
+        }
+    }
+    serde_json::to_string(&canonical(value)).expect("stable expectation json")
 }
 
 /// 真实部署 session：捕获端点 + 有界内存路径（无暂存），冻结/编码/HTTP 全走产品实现。

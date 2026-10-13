@@ -126,7 +126,7 @@ fn zero_and_below_progress_budgets_are_config_errors() {
 
     let budget = deployment(&config());
     // 构造后 `used` 恰为已隔离的进度分区 P：`limit == P` 必须拒收，不能向上取整扩大配置。
-    let progress = budget.used() as usize;
+    let progress = budget.used();
     let tight = BatcherConfig {
         telemetry: crate::config::TelemetryConfig {
             memory_budget_bytes: progress,

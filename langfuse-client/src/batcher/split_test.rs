@@ -160,7 +160,7 @@ fn oversized_raw_span_maps_to_the_frozen_error() {
 fn event_count_limit_splits_batches() {
     let mut limits = limits();
     limits.max_events = 2;
-    let plan = split(&vec![measured(1, 1); 5], &limits).unwrap();
+    let plan = split(&[measured(1, 1); 5], &limits).unwrap();
     let ranges: Vec<_> = plan.batches.iter().map(|b| b.range.clone()).collect();
     assert_eq!(ranges, vec![0..2, 2..4, 4..5]);
     assert_eq!(plan.accounted_len(), 5);

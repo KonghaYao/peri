@@ -38,6 +38,7 @@
 | 冻结来源与事件 | `src/snapshot.rs`：`SnapshotSource`、`SnapshotTicket`、`TelemetryEvent::try_new`、`InputSource` | 只借用已存在 Arc、不重建 JSON 树；事件在 gate 前完成预算预约并持有输出 allowance |
 | 冻结准入与拆批 | `src/batcher/freeze.rs`：`freeze_snapshot`、`InputSpool`、`resolve_event`；`prepare.rs`：`prepare_event`；`split.rs`：`split`、`BatchLimits`、`EventMeasure`、`SplitPlan`、`oversize_reason` | 阈值决定 Inline/Spooled；磁盘失败只允许一次非等待内存回退；编码膨胀按 final OTLP 拆批、超大单条经 `RejectedEvent` 独立拒收 |
 | 正文所有权 | `src/payload.rs`：`BudgetedBytes`、`ExportPayload`、`PayloadBody`、`InputSnapshot` | 正文与 permit 绑定同一预算身份；共享 Bytes 延续 permit 至最后一个引用 |
+| 键序稳定化 | `src/stable_json.rs`：`StableJson`、`StableMap`、`Stable`；`src/snapshot.rs`：`write_stable_json` | 进入 OTLP 正文与冻结正文的 JSON 一律经此序列化：对象键字典序、map 按键排序；输出不随编译期 `serde_json/preserve_order`（workspace 全量构建经 agent-client-protocol 启用）漂移。`write_stable_json` 是键序唯一实现，供本 crate 的 `ValueSource` 与 controller 的 messages/tools fallback 复用 |
 | 统一流式编码 | `src/encoding/{mod,writer,json_string}.rs`：`write_otlp`、`measure_otlp`、`BudgetedWriter`、`write_json_string`、`EscapeWriter` | 计量与写入共用同一 emitter/字段映射；input/output 分块嵌入、metadata 边序列化边转义，不物化整串 |
 | 请求重建 | `src/client_send.rs`：`MemoryCheckpoint`/`FileCheckpoint`、`BodyTaskOwner`；`src/client_body.rs`：`file_body`、`memory_registration` | 文件正文每次 attempt 从字节 0 重开、drain 后才可再次 arm；每次 HTTP 前持久 attempts |
 | 交付结果与恢复 | `src/batcher/result.rs`：`DeliveryCounts`、`FlushReport`、`ShutdownReport`；`src/batcher/recovery.rs`：`RetryQueue`、`RetryEntry`、`HandOff(Plan)`、`scan`、`register_discard` | Pending/PersistedPending/DeliveryIncomplete 按 owner 与待交付事实区分；恢复与 live 事件共用唯一 worker，TTL 不因重试重置；移交只对持久文件正文，内存 payload 仍留在本地 pending |
@@ -54,6 +55,7 @@
 - `src/batcher_{test,shutdown_test}.rs`：失败确认、shutdown 所有权、panic/cancel、DropOldest 与客户端 retry 唯一权威。
 - `src/types/conversion_test.rs`：标准及领域 ID、父引用、完整时间、过滤/拒绝不支持事件与 metadata。
 - `src/encoding/stream_test.rs`：≥100 边界样本的 input/output 逐字节保真、UTF-8 跨块转义、gzip 与 none 共享 OTLP 语义。
+- `src/stable_json_test.rs`：`Value` 保插入序与 `HashMap` 随机序下仍得到字典序字节（`preserve_order` 构建的真实判据）。
 - `src/{memory,payload,snapshot}_test.rs`：预算预留/释放一次、permit 与正文身份绑定、事件来源冲突与 ticket 取消。
 - `src/spool/{native_test,types_test,cleanup_test}.rs`：原子发布、跨进程 claim/quota、8 MiB 配额含 writing 与失败删除、分页扫描与残留回收；取锁语义（不可领取判定、并发删除不被升级为 IO 故障、能力探针竞争）在 `src/spool/native_test/lock.rs`，由 `native_test.rs` 显式 `#[path]` 挂载。
 - `src/batcher/{freeze_test,prepare_test,split_test,spool_test,recovery_test,pending_test,send_test}.rs`：阈值边界、编码膨胀拆批、超大单条拒收、前缀屏障、TTL/恢复与 Pending 计数。

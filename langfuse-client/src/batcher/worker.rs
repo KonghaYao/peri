@@ -98,6 +98,8 @@ pub(super) struct BatchWorker {
 }
 
 impl BatchWorker {
+    // 每个参数都是独立依赖句柄；打包成结构体只是把同一批依赖搬个位置，不多一层语义。
+    #[allow(clippy::too_many_arguments)]
     pub(super) fn new(
         client: LangfuseClient,
         config: &BatcherConfig,
@@ -236,8 +238,9 @@ impl BatchWorker {
         )
     }
 
-    /// 启动恢复：固定页扫描 + 校验；可发送对象进入重试队列，其余登记清理后幂等删除（契约 §5.2）。
-
+    /// 命令分派：`Add` 入缓冲并按限额择机成批，`Flush` 收敛到给定边界后回报。
+    ///
+    /// 启动恢复不在本函数（见 `worker/recover.rs` 模块头，契约 §5.2）。
     pub(super) async fn process(&mut self, command: BatcherCommand, rx: &CommandReceiver) {
         match command {
             BatcherCommand::Add(queued) => {

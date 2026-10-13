@@ -239,14 +239,12 @@ impl BatchWorker {
             Some(Ok((_seq, reserved))) => {
                 self.counters.release_preparing_bytes(reserved as u64);
             }
-            Some(Err(join_error)) => {
-                // 取消/panic 的准备任务不再归还进度账：这里只登记未归属失败，计数保守偏大。
-                if !join_error.is_cancelled() {
-                    self.ledger.record_unscoped_prepare_failure();
-                    error!("Batcher snapshot preparation task did not complete normally");
-                }
+            // 取消/panic 的准备任务不再归还进度账：这里只登记未归属失败，计数保守偏大。
+            Some(Err(join_error)) if !join_error.is_cancelled() => {
+                self.ledger.record_unscoped_prepare_failure();
+                error!("Batcher snapshot preparation task did not complete normally");
             }
-            None => {}
+            Some(Err(_)) | None => {}
         }
     }
 

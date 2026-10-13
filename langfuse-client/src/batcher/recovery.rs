@@ -240,6 +240,8 @@ enum Classified {
 }
 
 /// 批次编码（blocking job）；失败把事件与来源交回调用方按未提交处置。
+// 每个参数都是该批次各自的依赖或输入，彼此没有共同身份；打包成结构体只是搬运同一批值。
+#[allow(clippy::too_many_arguments)]
 pub(super) async fn encode_batch(
     events: Vec<TelemetryEvent>,
     telemetry: TelemetryConfig,
@@ -416,6 +418,9 @@ fn lost_claim() -> LangfuseError {
 
 /// 超期条目：先持久 `TerminalFailed`（不是 HTTP 成功）再交清理协议删除；写不进去则退回条目，
 /// 对象与 claim 都保留，标记待修复、停止自动重试。
+// 退回的条目（含 payload 与 claim）与错误一起交出，Err 因此偏大；这是把条目交回调用方的
+// 唯一通道，装箱只会给错误路径加一次分配，不改变语义。
+#[allow(clippy::result_large_err)]
 pub(super) async fn expire_entry(entry: RetryEntry) -> Result<(), (RetryEntry, LangfuseError)> {
     let PayloadBody::File(object) = &entry.payload.body else {
         return Ok(());

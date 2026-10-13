@@ -29,7 +29,7 @@ use std::io;
 use std::mem::size_of;
 use std::sync::Arc;
 
-use langfuse_client::snapshot::SnapshotSource;
+use langfuse_client::snapshot::{write_stable_json, SnapshotSource};
 use langfuse_client::{InputSource, LangfuseError};
 use peri_agent::messages::{
     BaseMessage, ContentBlock, DocumentSource, ImageSource, MessageContent, ToolCallRequest,
@@ -50,7 +50,7 @@ pub(crate) fn llm_input_source(
 
 /// `{"messages":…,"tools":…}` 的借用视图。
 ///
-/// 信封键序固定为 `messages` < `tools`，与冻结前 `json!` 路径一致（BTreeMap 键序）。
+/// 信封键序固定为 `messages` < `tools`（字典序，与冻结前 `json!` 路径的默认键序一致）。
 struct LlmInputSource {
     messages: Arc<Vec<BaseMessage>>,
     tools: Arc<Vec<ToolDefinition>>,
@@ -97,11 +97,13 @@ impl SnapshotSource for LlmInputSource {
     }
 }
 
-/// 逐元素经 `serde_json::to_value` 写出。
+/// 逐元素经 `serde_json::to_value` 后按键字典序写出。
 ///
-/// 冻结前的路径是 `json!({"messages": …, "tools": …})`，`Value::Object` 按 BTreeMap 键序
-/// 输出；直接序列化结构体会改成声明顺序，使 OTLP input 字符串字节改变（契约 §1 C1 要求
-/// 字节不变）。逐元素 `to_value` 保持同一键序，同时峰值只与单个元素有关，不构造整棵会话树。
+/// 冻结前的路径是 `json!({"messages": …, "tools": …})`，`Value::Object` 在未启用
+/// `serde_json/preserve_order` 时按 BTreeMap 键序输出；直接序列化结构体会改成声明顺序，
+/// 使 OTLP input 字符串字节随编译图改变（契约 §1 C1 要求字节不变、§3.4 要求与构建 feature
+/// 无关）。逐元素 `to_value` + [`write_stable_json`] 固定字典序，同时峰值只与单个元素有关，
+/// 不构造整棵会话树。
 ///
 /// 键序重排必须经 `Value`：流式序列化无法在写出前比较键。该副本因此无法消除，改为在
 /// [`SnapshotSource::retained_bytes`] 里按最大元素计一次（见模块「计量口径」）。
@@ -114,7 +116,7 @@ fn write_sorted_messages(
         if index > 0 {
             write_bytes(out, b",")?;
         }
-        serde_json::to_writer(&mut *out, &serde_json::to_value(message)?)?;
+        write_stable_json(out, &serde_json::to_value(message)?)?;
     }
     write_bytes(out, b"]")
 }
@@ -129,7 +131,7 @@ fn write_sorted_tools(
         if index > 0 {
             write_bytes(out, b",")?;
         }
-        serde_json::to_writer(&mut *out, &serde_json::to_value(tool)?)?;
+        write_stable_json(out, &serde_json::to_value(tool)?)?;
     }
     write_bytes(out, b"]")
 }
@@ -454,6 +456,9 @@ pub(crate) const REJECTED_METADATA_KEY: &str = "input_snapshot_rejected";
 ///
 /// `Frozen` 的来源在请求体到达、结束或取消时被整体移动（不等 IO）；`Rejected` 表示冻结
 /// 准入被拒——batcher 已计入该 generation 拒收，此时上报不得回退到旧 fallback。
+// 大变体是 inline 的来源本身（约 208 字节，无堆分配）；装箱只会把每个 generation 的一次
+// 移动换成一次分配，不减少驻留。
+#[allow(clippy::large_enum_variant)]
 pub(crate) enum GenerationInput {
     /// 已冻结来源：小输入内存字节，大输入暂存句柄。
     Frozen(InputSource),

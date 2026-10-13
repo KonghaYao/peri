@@ -158,10 +158,9 @@ impl ObjectClaim for FakeClaim {
     }
 }
 
-/// 显式 unsize：`Arc::clone` 的返回类型不能就地强转成 trait object。
+/// 显式指定被克隆的具体类型：返回位置再把它 unsize 成 trait object。
 fn dyn_store(store: &Arc<FakeStore>) -> Arc<dyn SpoolStore> {
-    let clone = Arc::clone(store);
-    clone
+    Arc::<FakeStore>::clone(store)
 }
 
 fn registry(store: &Arc<FakeStore>) -> CleanupRegistry {

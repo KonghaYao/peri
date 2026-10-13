@@ -84,6 +84,8 @@ struct FlushAck {
 }
 
 /// Batcher 内部命令（不导出）。
+// `Add` 随事件整份移动（约 1.3 KiB）；装箱会给每个事件加一次分配，而通道本身有界。
+#[allow(clippy::large_enum_variant)]
 enum BatcherCommand {
     Add(QueuedEvent),
     Flush {

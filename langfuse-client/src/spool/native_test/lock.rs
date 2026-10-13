@@ -173,9 +173,11 @@ fn peer_holding_the_domain_lock_is_contention_not_unavailability() {
     };
     assert!(probe_durable_io(&inner).is_ok(), "无竞争时探针必须通过");
 
+    // 只借对端锁文件持锁：允许不存在时新建，已存在时保持原内容。
     let peer = OpenOptions::new()
         .write(true)
         .create(true)
+        .truncate(false)
         .open(inner.domain_lock_path())
         .expect("peer opens domain lock");
     peer.lock_exclusive().expect("peer holds domain lock");

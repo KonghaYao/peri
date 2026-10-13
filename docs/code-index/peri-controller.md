@@ -26,6 +26,8 @@ tracer 不再持有输入原文：`tracer/input_snapshot.rs` 把已存在的 `Ar
 `SnapshotSource`，`llm_events.rs::freeze_input` 经 `LangfuseSessionLike::try_freeze`
 取得 `InputSource`（小输入内存字节、大输入暂存句柄），冻结计费与落盘由 langfuse-client
 worker 完成，桥接入口不做 IO；冻结被拒时在 metadata 显式标记而不是回退旧输入。
+借用适配器的 `write_json` 逐元素 `to_value` 后经 `langfuse_client::snapshot::write_stable_json`
+写出，冻结字节的键序（对象键字典序）与构建 feature 无关。
 
 依赖方向为 Controller → Runtime / Resources / peri-acp-types；manifest 中的 peri-agent、
 peri-model 和 langfuse-client 是现行 Langfuse 适配依赖，不能由索引推断已经解耦。
@@ -44,7 +46,7 @@ Langfuse HTTP 重试与批次失败日志由 `langfuse-client/src/client.rs` 和
 | 注入部署端口 | `peri-controller/src/controller.rs` | `Controller::new`、`with_runtime`、`with_mcp_pool`、`with_cron_scheduler`、`with_tool_search` | builder 消费 self 后赋值；对应 pick 方法克隆句柄/配置，不引入共享可写配置 |
 | 调整启动参数 | `peri-controller/src/controller.rs` | `AgentRef`:49、`LiteParams`:70 | 仅承载定义引用、cwd、初始消息和工具；消费与执行归 Agent |
 | 配置与创建 Langfuse 批处理 | `peri-config/src/observability.rs`；`peri-controller/src/langfuse/{config,session}.rs`；`langfuse-client/src/{config,batcher}.rs` | core `resolve` / `LangfuseConfig`；`LangfuseSession::new`；`Batcher::try_new` | settings/env/default/clamp 规则与 secret-redacted Debug 归 core（新键解析在 `observability_spool.rs`）；Controller 消费 projection，batcher 构造校验沿 Option 降级；客户端独占重试语义 |
-| 借用输入快照来源 | `peri-controller/src/langfuse/tracer/input_snapshot.rs` | `llm_input_source`:41、`GenerationInput`:457、`GenerationInput::into_source`:466、`mark_rejected_input`:480 | 只克隆已存在 `Arc<Vec<BaseMessage>>`/`Arc<Vec<ToolDefinition>>`，不构造 JSON 树、不触达文件路径；`retained_bytes` 零大分配遍历并给保守上界（业务侧显式 reserve 可能超出，见模块限度） |
+| 借用输入快照来源 | `peri-controller/src/langfuse/tracer/input_snapshot.rs` | `llm_input_source`:41、`GenerationInput`:462、`GenerationInput::into_source`:471、`mark_rejected_input`:485 | 只克隆已存在 `Arc<Vec<BaseMessage>>`/`Arc<Vec<ToolDefinition>>`，不构造 JSON 树、不触达文件路径；`retained_bytes` 零大分配遍历并给保守上界（业务侧显式 reserve 可能超出，见模块限度）；`write_json` 逐元素 `to_value` 后经 `langfuse_client::snapshot::write_stable_json` 输出，键序与构建 feature 无关 |
 | 输入冻结与交付路径 | `peri-controller/src/langfuse/tracer/llm_events.rs` | `freeze_input`:23、`GenerationInput::into_source`；`tracer/event_builder.rs`：`try_add_prepared_or_warn_via_session` | 输入来源在请求期冻结一次并随事件交付（`try_add_prepared`）；被拒事实写 metadata、不伪造旧 fallback；准备失败不混淆为发送失败 |
 | turn-facing 会话能力 | `peri-controller/src/langfuse/session_like.rs` | `try_freeze`、`try_add_prepared`、`memory_budget`、`flush` | 只提供 flush（`Pin<Box<dyn Future … + Send>>`）与预算透传，无 shutdown 权限；预算身份不符由 `TelemetryEvent::try_new` 拒绝 |
 | 装配 spool 能力 | `peri-controller/src/langfuse/session.rs` | `LangfuseSession::{new,new_owned}` 第 3 参 `Option<Arc<dyn SpoolStore>>`；`map_shutdown` | 只接受装配层注入的资源端口，controller 不打开文件系统；关闭结果显式映射 Pending/PersistedPending/DeliveryIncomplete |

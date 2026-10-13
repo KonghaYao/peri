@@ -21,6 +21,7 @@ use serde::Serialize;
 use crate::error::LangfuseError;
 use crate::payload::InputSnapshot;
 use crate::snapshot::{InputSource, TelemetryEvent};
+use crate::stable_json::StableJson;
 use crate::types::conversion::EventView;
 
 use json_string::{write_failure, write_quoted};
@@ -307,7 +308,7 @@ impl<'a> OtlpSink<'a> {
         self.begin_attr(key)?;
         self.put(b"\"stringValue\":")?;
         match input {
-            FrozenInput::Value(value) => self.put_json_literal(value)?,
+            FrozenInput::Value(value) => self.put_json_literal(&StableJson(value))?,
             FrozenInput::Source(source) => self.put_frozen(source)?,
         }
         self.put(b"}}")

@@ -28,6 +28,7 @@ use crate::spool::{
     SpoolError, SpoolObject, SpoolPage, SpoolReader, SpoolResult, SpoolState, SpoolStore,
     SpoolUsage,
 };
+use crate::stable_json::StableJson;
 use crate::types::IngestionEvent;
 
 // ─── 固定种子样本 ───────────────────────────────────────────────────
@@ -501,15 +502,20 @@ fn hundred_boundary_inputs_roundtrip_exact_bytes() {
         let span = &spans[0];
         assert_exact(span, sample.input_key, &sample.baseline_input);
         assert_exact(span, sample.output_key, &sample.baseline_output);
+        // metadata 走 stable_json 口径（字典序），期望同样按该口径生成，不依赖构建期 feature。
         assert_exact(
             span,
             sample.metadata_namespace,
-            &serde_json::to_vec(&sample.metadata).expect("metadata bytes"),
+            &serde_json::to_vec(&StableJson(&sample.metadata)).expect("metadata bytes"),
         );
-        for (key, value) in sample.metadata.as_object().expect("object") {
+        let fields = sample.metadata.as_object().expect("object");
+        let mut keys: Vec<&String> = fields.keys().collect();
+        keys.sort_unstable();
+        for key in keys {
+            let value = &fields[key];
             let expected = match value.as_str() {
                 Some(text) => text.as_bytes().to_vec(),
-                None => value.to_string().into_bytes(),
+                None => serde_json::to_vec(&StableJson(value)).expect("field bytes"),
             };
             assert_exact(
                 span,

@@ -7,6 +7,7 @@ pub mod memory;
 pub mod payload;
 pub mod snapshot;
 pub mod spool;
+pub(crate) mod stable_json;
 pub mod types;
 
 // 重导出常用类型

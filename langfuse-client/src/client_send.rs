@@ -101,6 +101,9 @@ impl AttemptCheckpoint for MemoryCheckpoint {
     }
 }
 
+/// checkpoint 写盘的 blocking job 句柄：`Pin<Box<..>>` 让取消 await 时句柄仍归 owner。
+type PendingCheckpointWrite = Pin<Box<JoinHandle<Result<(), LangfuseError>>>>;
+
 /// 文件路径的 attempt checkpoint：独占从 [`crate::spool::SpoolObject`] 取出的交付句柄。
 ///
 /// 每次 `before_attempt` 在 blocking job 里按当前元数据写回 `attempts`、`state=Sending` 与
@@ -116,8 +119,8 @@ pub(crate) struct FileCheckpoint {
     meta: ObjectMeta,
     /// 累计持久水位；`meta.attempts` 始终与它一致。
     attempts: u64,
-    /// 已登记未确认的持久写；`Pin<Box<..>>` 保证取消 await 时句柄仍归 owner。
-    pending: Option<Pin<Box<JoinHandle<Result<(), LangfuseError>>>>>,
+    /// 已登记未确认的持久写；句柄归 owner，await 被取消也不丢。
+    pending: Option<PendingCheckpointWrite>,
 }
 
 impl FileCheckpoint {

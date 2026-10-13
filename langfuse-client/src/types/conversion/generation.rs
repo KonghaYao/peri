@@ -2,12 +2,13 @@ use super::{
     append_common_obs_attrs, build_span, build_status, span_head, CommonAttrs, EventView,
     LangfuseError, OtlpSink,
 };
+use crate::stable_json::StableMap;
 use crate::types::GenerationBody;
 
 /// generation-create → OTLP span；attribute 顺序即输出字节顺序（与旧 serde 基线一致）。
 ///
 /// `model_parameters`/`usage`/`cost_details` 边序列化边转义嵌入 `stringValue`：
-/// 不再先 `to_string` 造整串，`HashMap` 迭代顺序在两个方向上都是同一份。
+/// 不再先 `to_string` 造整串；map 经 [`StableMap`] 按字典序输出，不随 `HashMap` 随机迭代序漂移。
 pub(super) fn generation_create(
     body: &GenerationBody,
     timestamp: &str,
@@ -42,18 +43,25 @@ pub(super) fn generation_create(
         sink.attr_str("langfuse.observation.model.name", model)?;
     }
     if let Some(params) = body.model_parameters.as_ref() {
-        sink.attr_json("langfuse.observation.model.parameters", params)?;
+        sink.attr_json("langfuse.observation.model.parameters", &StableMap(params))?;
     }
     if let Some(usage) = body.usage.as_ref() {
-        sink.attr_json("langfuse.observation.usage_details", usage)?;
+        sink.attr_json("langfuse.observation.usage_details", &StableMap(usage))?;
     }
     if let Some(usage_details) = body.usage_details.as_ref() {
-        for (key, value) in usage_details {
-            sink.attr_int(&format!("gen_ai.usage.{key}"), i64::from(*value))?;
+        let mut keys: Vec<&String> = usage_details.keys().collect();
+        keys.sort_unstable();
+        for key in keys {
+            if let Some(value) = usage_details.get(key) {
+                sink.attr_int(&format!("gen_ai.usage.{key}"), i64::from(*value))?;
+            }
         }
     }
     if let Some(cost_details) = body.cost_details.as_ref() {
-        sink.attr_json("langfuse.observation.cost_details", cost_details)?;
+        sink.attr_json(
+            "langfuse.observation.cost_details",
+            &StableMap(cost_details),
+        )?;
     }
     if let Some(prompt_name) = body.prompt_name.as_deref() {
         sink.attr_str("langfuse.observation.prompt.name", prompt_name)?;

@@ -287,3 +287,29 @@ EXIT=0
 2. **`fmt --all -- --check` 仍 EXIT=1**：仅 `peri-tui/src/acp_client/deployment_test.rs:122`，属跨流改动请求（§9.5-2）。
 3. **未测（与前几轮一致，不宣称产品验收完成）**：真实 Langfuse 端点的可查询性与服务端限额、1000 轮 8 MiB 长会话、512 MiB 积压与 32 MiB 遥测预算的实测 RSS、断网 10 分钟恢复、四持久边界崩溃注入的实机矩阵、WASM/无持久化宿主的运行行为、性能补表、`cargo clippy -D warnings`、`e2e/`。
 4. **待用户裁决**：契约 §10 的 D8（第二次 shutdown 的期望被实测证伪）与 D9（自设行数上限维持或拆分）；本轮未改任何冻结签名、端口、owner 或计量口径，§10.3 的能力探针语义已同步契约 §3.2 与 `docs/standards/architecture-contracts.md`。
+
+## 11. CI 修复（收敛轮三，PR #189 首次 CI 失败后由主 agent 修复）
+
+本节只记录**实际执行过的命令与实测数字**；未执行项一律标为缺口。
+
+### 11.1 失败面与根因
+
+1. CI run `38331869301`（head `502d3d6f7`）三平台 job 全部失败、且同一用例：ubuntu `115083245535`、macos `115083245482`、windows `115083245618`，均在
+   `langfuse-client/src/encoding/stream_test.rs:826` 的 `encoding::tests::frozen_baseline_bytes_are_stable` panic（`assertion left == right failed: none 编码必须逐字节等同旧格式`），job 退出码 100；`Classify changes` 与 `Verify test inventory` 通过。
+2. 根因：`serde_json` 的对象底层随构建期 `preserve_order` feature 变化。CI 的 workspace 全量构建经 `agent-client-protocol`（peri-acp/peri-tui 依赖）启用该 feature（对象保插入序），本地单 crate `-p langfuse-client` 构建不启用（BTreeMap 字典序）：同一份事件因此编出不同字节。冻结格式要求逐字节可复现，旧期望值只在默认 feature 下成立。
+3. CI 用 nextest 且默认 fail-fast：日志只到 `171/2160` 就停（三平台一致），因此首个失败掩盖了同类后续失败。本地按 CI 的 feature 并集复跑 `-p peri-controller -p peri-acp --lib` 抓到 peri-controller 5 个同根因失败（用例与位置见 §11.2-4）。
+
+### 11.2 修复
+
+1. 键序显式化：新增 `langfuse-client/src/stable_json.rs`（`StableJson`/`StableMap`/`Stable`，对象键递归字典序、数组保序）；`encoding/mod.rs` 的 `FrozenInput::Value`、`snapshot.rs` 的 `ValueSource::write_json`、`types/conversion/{metadata.rs,generation.rs}` 的 JSON 属性与 map/展开输出全部改经它。键序不再依赖编译图，输出与未启用 `preserve_order` 时的 `serde_json` 默认字节一致（即原 `none` 基准字节）。
+2. 键序唯一实现：`snapshot.rs` 新增 `pub fn write_stable_json<W: io::Write + ?Sized>(out, value)`，`ValueSource::write_json` 与 controller 的 messages/tools 借用适配器（`peri-controller/src/langfuse/tracer/input_snapshot.rs::write_sorted_messages/sorted_tools`）都调用它。修前 fallback 路径逐元素 `to_value` + `serde_json::to_writer`，在 `preserve_order` 构建下会退回结构体声明序——与 raw 路径（已稳定化）在同一字段上产出两种口径，属同根因的第二处。
+3. 测试期望同口径：`langfuse-client/tests/spool_acceptance.rs` 的 P5 期望字节由文件内 `stable_compact`（递归重排键）生成；`peri-controller` 三个测试文件（`bridge/snapshot_test.rs`、`tracer/input_snapshot_test.rs`、`tracer/production_observation_test.rs`）各加本地 `stable_bytes` 口径，`fallback_baseline` 与 5 处 raw 路径断言改用它。全部期望值都是**测试文件内独立实现**（不复用 `write_stable_json`），判据仍是逐字节相等，未放宽为解析等价。
+4. 5 个 peri-controller 失败用例：`observe_raw_request_supersedes_snapshot_for_completed_generation`（`bridge/snapshot_test.rs`）、`request_end_cancel_order_holds_for_parallel_generations`、`cancel_keeps_terminal_once`（`tracer/input_snapshot_test.rs`）、`abandoned_generation_prefers_complete_raw_request`、`gated_generation_preserves_raw_request_through_late_subagent_join`（`tracer/production_observation_test.rs`）。
+5. `cargo clippy --locked --workspace --all-targets -- -D warnings`（CI 同款入口）首次为红：`langfuse-client` lib 7 + lib test 14 共 21 个 error，逐项修复——
+   `worker.rs` 误置 doc 注释（`empty_line_after_doc_comments`）、`worker.rs`/`recovery.rs` 的参数数（两处 `#[allow(clippy::too_many_arguments)]`）、`recovery.rs::expire_entry` 的 `result_large_err` 与 `batcher.rs` 的 `large_enum_variant`（均为「装箱只是搬家」的显式 allow）、`shutdown.rs` 的嵌套 if 改 match guard、`client_send.rs` 抽 `PendingCheckpointWrite` 类型别名、测试侧 4 处 `let`-返回（`Arc::<T>::clone(store)`）、`memory_test.rs` 无用 `as usize`、`native_test/lock.rs` 未显式 `truncate(false)`、`split_test.rs` 的 `&vec![..]`、`spool_http.rs` 的 `len() > 0`；`peri-controller` 1 个 error（`GenerationInput` 的 `large_enum_variant`，`Frozen(InputSource)` 208 字节，装箱只增加一层间接）同样显式 allow。**未改任何行为、冻结签名或判据。**
+6. 复核：`-p langfuse-client --all-targets -- -D warnings` 已 EXIT=0；workspace 全量 clippy 复跑结论见 §11.4。
+
+### 11.3 两个可疑偶发的判定
+
+1. `langfuse-client/src/batcher/recovery_test.rs::recovery_deferral_keeps_objects_for_the_next_owner` 曾在本地 `-p langfuse-client -p peri-acp --lib` 单跑一次失败（`recovery_test.rs:812`：`fixed 页扫描跨多页：31 条`，断言要求 `recovered > 64`）。判定为负载相关的偶发，证据：CI 日志中该用例 `PASS [0.432s] (40/2160)`（三平台同）；随后单用例连跑 10 轮 10/10 通过（机器同时有其他 worktree 的编译负载，单轮 16–38s）。
+2. `peri-resources` 的 `sessions::sqlite_store::connection::open_tests::incompatible_schema_is_rejected_without_wal_or_database_changes` 在 CI 等价 workspace 测试中失败过一次（`connection_open_test.rs:377` `session database initialization is busy`，既有文件、与本变更集无关），单用例复跑通过（`1 passed`）。同样判为偶发，未改该文件。

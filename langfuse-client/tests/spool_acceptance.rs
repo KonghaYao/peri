@@ -100,6 +100,33 @@ fn raw_measure(event: &IngestionEvent) -> usize {
     serde_json::to_vec(event).expect("event json").len()
 }
 
+/// 冻结输入的期望字节：对象键按字典序、数组保序的紧凑 JSON（与生产稳定编码同一口径）。
+///
+/// `serde_json::Value` 的对象底层随编译期 feature 变化（启用 `preserve_order` 时保插入序），
+/// 期望值不能直接序列化原树；先递归重排键再序列化，结果与 feature 并集无关。这里不复用
+/// `langfuse_client::snapshot::write_stable_json`：期望值须独立于被测实现，否则键序回归会
+/// 在两侧同时发生而不可见。
+fn stable_compact(value: &Value) -> Vec<u8> {
+    fn sorted(value: &Value) -> Value {
+        match value {
+            Value::Array(items) => Value::Array(items.iter().map(sorted).collect()),
+            Value::Object(fields) => {
+                let mut entries: Vec<(&String, &Value)> = fields.iter().collect();
+                entries.sort_unstable_by(|left, right| left.0.cmp(right.0));
+                Value::Object(
+                    entries
+                        .into_iter()
+                        .map(|(key, value)| (key.clone(), sorted(value)))
+                        .collect(),
+                )
+            }
+            scalar => scalar.clone(),
+        }
+    }
+
+    serde_json::to_vec(&sorted(value)).expect("compact json")
+}
+
 /// 直接写出冻结文本的来源：`SnapshotSource` 的公开实现路径（不依赖 crate 内部适配器）。
 struct TextSource(String);
 
@@ -628,12 +655,12 @@ async fn oversized_frozen_input_is_spooled_and_arrives_byte_identically() {
     };
     let batcher = batcher_with(&url, config, ExportConfig::default(), Some(store));
 
-    // 大输入：借用 `Arc<Value>` 的零拷贝公开来源；期望字节就是该树的紧凑 JSON。
+    // 大输入：借用 `Arc<Value>` 的零拷贝公开来源；期望字节是该树按键字典序的紧凑 JSON。
     let value = Arc::new(json!({
         "messages": [{"role": "user", "content": noise(THRESHOLD * 4)}],
         "marker": "spool-marker-3f",
     }));
-    let expected_input = serde_json::to_vec(&value).expect("compact json");
+    let expected_input = stable_compact(&value);
     assert!(
         expected_input.len() >= THRESHOLD,
         "样本（{} 字节）必须达到落盘阈值 {THRESHOLD}",

@@ -14,6 +14,7 @@ use tokio::sync::Notify;
 use crate::error::LangfuseError;
 use crate::memory::{MemoryBudget, MemoryPermit};
 use crate::payload::InputSnapshot;
+use crate::stable_json::StableJson;
 use crate::types::IngestionEvent;
 
 /// 可被遥测借用并按紧凑 JSON 冻结的来源。
@@ -26,6 +27,18 @@ pub trait SnapshotSource: Send + Sync + 'static {
 
     /// 写出紧凑 JSON 字节（不是 OTLP 转义后的字符串）；允许被多次调用。
     fn write_json(&self, out: &mut dyn std::io::Write) -> Result<(), LangfuseError>;
+}
+
+/// 以冻结正文的稳定键序写出 `Value`（对象键字典序、数组保序）。
+///
+/// 冻结字节必须与编译期 `serde_json/preserve_order` 是否启用无关（契约 §3.4）：本 crate 的
+/// [`ValueSource`] 与 controller 的 messages/tools 借用适配器都经这里输出，键序只有一处口径。
+pub fn write_stable_json<W: io::Write + ?Sized>(
+    out: &mut W,
+    value: &serde_json::Value,
+) -> Result<(), LangfuseError> {
+    serde_json::to_writer(out, &StableJson(value))?;
+    Ok(())
 }
 
 /// 冻结准入票据；ticket Drop 只置取消位并唤醒 worker，不 spawn、不积累清理消息。
@@ -194,8 +207,7 @@ impl SnapshotSource for ValueSource {
     }
 
     fn write_json(&self, out: &mut dyn io::Write) -> Result<(), LangfuseError> {
-        serde_json::to_writer(out, &*self.value)?;
-        Ok(())
+        write_stable_json(out, &self.value)
     }
 }
 

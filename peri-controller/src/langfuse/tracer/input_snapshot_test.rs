@@ -322,10 +322,33 @@ fn big_tools() -> Vec<ToolDefinition> {
     }]
 }
 
-/// 冻结前的 fallback 基准字节（`json!` → BTreeMap 键序的紧凑 JSON）。
+/// 期望字节口径：对象键递归字典序、数组保序（冻结正文与构建 feature 无关，契约 §3.4）。
+///
+/// 本地实现而非复用产品代码，保持期望值独立于被测实现。
+fn stable_bytes(value: &serde_json::Value) -> String {
+    fn canonical(value: &serde_json::Value) -> serde_json::Value {
+        match value {
+            serde_json::Value::Object(fields) => {
+                let mut keys: Vec<&String> = fields.keys().collect();
+                keys.sort();
+                serde_json::Value::Object(
+                    keys.into_iter()
+                        .map(|key| (key.clone(), canonical(&fields[key])))
+                        .collect(),
+                )
+            }
+            serde_json::Value::Array(items) => {
+                serde_json::Value::Array(items.iter().map(canonical).collect())
+            }
+            other => other.clone(),
+        }
+    }
+    serde_json::to_string(&canonical(value)).expect("stable expectation json")
+}
+
+/// 冻结前的 fallback 基准字节（`json!` 树按键字典序的紧凑 JSON）。
 fn fallback_baseline(messages: &[BaseMessage], tools: &[ToolDefinition]) -> String {
-    serde_json::to_string(&serde_json::json!({"messages": messages, "tools": tools}))
-        .expect("baseline json")
+    stable_bytes(&serde_json::json!({"messages": messages, "tools": tools}))
 }
 
 /// 有界等待一个真实可观察条件成立（不把 sleep 当作进度证据）。
@@ -567,8 +590,8 @@ async fn request_end_cancel_order_holds_for_parallel_generations() {
 
     let inputs = server.generation_inputs();
     assert_eq!(inputs.len(), 2, "两个 generation 各交付一次: {inputs:?}");
-    assert!(inputs.contains(&serde_json::to_string(&first).unwrap()));
-    assert!(inputs.contains(&serde_json::to_string(&second).unwrap()));
+    assert!(inputs.contains(&stable_bytes(&first)));
+    assert!(inputs.contains(&stable_bytes(&second)));
     assert!(
         !inputs.contains(&fallback),
         "请求体到达后不得再用 fallback 冒充实际请求"
@@ -609,7 +632,7 @@ async fn cancel_keeps_terminal_once() {
     let inputs = server.generation_inputs();
     assert_eq!(
         inputs,
-        vec![serde_json::to_string(&raw).unwrap()],
+        vec![stable_bytes(&raw)],
         "取消只上报一次终态，且 input 是实际请求体"
     );
     wait_for(
@@ -673,10 +696,7 @@ fn borrowed_adapter_matches_baseline_bytes() {
     let source = llm_input_source(&Arc::new(messages.clone()), &Arc::new(tools.clone()));
     let mut bytes = Vec::new();
     source.write_json(&mut bytes).expect("write json");
-    assert_eq!(
-        bytes,
-        serde_json::to_vec(&serde_json::json!({"messages": messages, "tools": tools})).unwrap()
-    );
+    assert_eq!(bytes, fallback_baseline(&messages, &tools).into_bytes());
     let retained = source.retained_bytes().expect("retained bound");
     assert!(
         retained >= bytes.len(),

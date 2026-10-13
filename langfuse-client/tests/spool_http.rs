@@ -415,7 +415,7 @@ async fn retry_reopens_at_zero_after_mid_body_disconnect() {
         assert_content_length(retry, control.len());
         assert_no_transfer_encoding(retry);
         assert!(
-            first.body.len() > 0 && first.body.len() < control.len(),
+            !first.body.is_empty() && first.body.len() < control.len(),
             "首轮必须只读到正文中途【file={file_backed}】"
         );
         assert_eq!(
