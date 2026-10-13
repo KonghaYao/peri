@@ -181,7 +181,8 @@ fn concurrent_delete_never_turns_lock_attempts_into_io_faults() {
 /// `lock spool object` 故障、整页扫描失败。这里用悬挂符号链接确定性构造同一状态——`open` 报
 /// `ENOENT`（末段目标的目录组件不存在）而锁文件的父目录确实是对象目录——判定必须是 `Gone`。
 ///
-/// 只在 Unix 生效：Windows 用别的错误码表达该竞争（见 `concurrent_delete_never_turns_...`）。
+/// 只在 Unix 生效：Windows 用 `ERROR_ACCESS_DENIED` 表达该竞争（见
+/// `access_denied_open_failure_is_classified_as_concurrent_dir_removal`）。
 #[cfg(unix)]
 #[test]
 fn open_failure_is_classified_by_error_kind_not_by_probing_the_object_dir() {
@@ -195,6 +196,35 @@ fn open_failure_is_classified_by_error_kind_not_by_probing_the_object_dir() {
     assert!(
         object_dir.is_dir(),
         "父目录必须仍在，否则构造的不是逃逸形态"
+    );
+    assert!(matches!(
+        super::super::try_lock_file(&lock_path).expect("lock attempt"),
+        LockAttempt::Gone
+    ));
+}
+
+/// Windows 的并发删除形态：删除中的目录 / 条目（delete-pending）让 `open(O_CREAT)` 报
+/// `ERROR_ACCESS_DENIED`（CI run 38398854149 的 Windows job 实测 `Access is denied. (os error 5)`）。
+///
+/// 该形态需要与 `remove_dir_all` 竞争，单机无法确定性复现；这里用「锁路径被目录占位」触发**同一
+/// 错误码**（`CreateFileW` 未带 `FILE_FLAG_BACKUP_SEMANTICS` 时对目录做写打开同样报 5），先钉住
+/// 错误码、再断言分类：代理触发形态漂移时用例红，而不是假绿。真实竞争形态由
+/// `concurrent_delete_never_turns_lock_attempts_into_io_faults` 在 Windows CI 上覆盖。
+#[cfg(windows)]
+#[test]
+fn access_denied_open_failure_is_classified_as_concurrent_dir_removal() {
+    let dir = tempfile::tempdir().expect("temporary root");
+    let lock_path = dir.path().join("lock-is-a-directory");
+    fs::create_dir(&lock_path).expect("place a directory at the lock path");
+    let trigger = OpenOptions::new()
+        .write(true)
+        .create(true)
+        .open(&lock_path)
+        .expect_err("以写模式打开目录必须失败");
+    assert_eq!(
+        trigger.raw_os_error(),
+        Some(5),
+        "触发形态必须是 ERROR_ACCESS_DENIED: {trigger}"
     );
     assert!(matches!(
         super::super::try_lock_file(&lock_path).expect("lock attempt"),

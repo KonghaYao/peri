@@ -413,3 +413,59 @@ EXIT=0
    （§12.3）只证明「既有断言仍全绿」，不证明该竞争已经消失——竞争本身是删除语义的一部分，本轮的修复目标是
    **不再把它升级为 IO 故障**，而不是消除竞争。
 3. 其余仍红项与未测项不变（沿用 §11.6，含契约 §10 的 D8/D9 待裁决项）。
+
+## 13. Windows `ERROR_ACCESS_DENIED` 取锁形态（收敛轮五，2026-10-13，PR #192 CI 失败后由主 agent 修复）
+
+### 13.1 失败面与根因
+
+1. 失败面：CI run `38398854149`（PR #192，head `bbbeb2acf`）的 Windows job（`115301056256`）在步骤
+   `Run workspace tests (excluding ACP, Agent, TUI, middleware and MCP capabilities)` 红，唯一失败用例
+   `langfuse-client spool::native::tests::lock::concurrent_delete_never_turns_lock_attempts_into_io_faults`
+   （`langfuse-client/src/spool/native_test/lock.rs:155:17`）：
+   `list 取锁不得报 IO 故障: telemetry spool lock spool object failed: Access is denied. (os error 5)`；
+   同轮 **ubuntu job 通过**（收敛轮四的修复在 Linux 上生效——该 job 正是轮四的最终判据）、macOS 通过。
+2. 根因：Windows 的并发删除形态是 **`ERROR_ACCESS_DENIED`(5)**——删除中的目录 / 条目（delete-pending）让
+   `open(O_CREAT)` 报「拒绝访问」；收敛轮四改成按**本次 `open` 的错误分类**后只收 `NotFound` 与非 Windows 的
+   `InvalidInput`，该形态落到 `Err` 上抛 ⇒ `list` 整页扫描失败。属**收敛轮四引入的 Windows 回归**
+   （旧判定下 run `38394041455` 的 Windows job 通过；该用例是竞争型，单轮通过与否不能单独定案，最终判据是
+   新一轮 Windows job）。
+3. 证据（本机可查）：Rust std 的 Windows 错误映射（本机工具链 rust-src `library/std/src/sys/io/error/windows.rs`）：
+   `ERROR_ACCESS_DENIED => PermissionDenied`；`ERROR_FILE_NOT_FOUND` / `ERROR_PATH_NOT_FOUND => NotFound`；
+   `ERROR_SHARING_VIOLATION`(32) **不在映射表**（`ERROR_LOCK_VIOLATION`(33) 也不在，已由 `is_lock_contention`
+   单独处理，见 §11.4）。本机无 Windows 运行环境，Windows 行为由 CI 覆盖。
+
+### 13.2 修复（按原始错误码并入；语义、签名、端口、计量口径不变）
+
+1. `langfuse-client/src/spool/native.rs`：`is_concurrent_dir_removal` 增第三个形态——`error.raw_os_error() == Some(5)`。
+   取 `#[cfg(windows)] Some(5)` / `#[cfg(not(windows))] None` 常量（沿用 `is_lock_contention` 的既有模式），按
+   **原始码**匹配而不是 `PermissionDenied` kind：保守收窄到 `ERROR_ACCESS_DENIED`，不把未映射的共享冲突码一并吞掉。
+   `try_lock_file` 三个调用点语义与 `LockAttempt` 三态不变（`list` 跳过、`claim` ⇒ `NotFound`、幂等 `delete` ⇒ `Ok`）。
+2. `langfuse-client/src/spool/native_test/lock.rs`：新增 `#[cfg(windows)]` 确定性回归
+   `access_denied_open_failure_is_classified_as_concurrent_dir_removal`——用「锁路径被目录占位」触发**同一错误码**
+   （`CreateFileW` 未带 `FILE_FLAG_BACKUP_SEMANTICS` 时对目录做写打开报 5），先 `assert_eq!(raw_os_error, Some(5))`
+   钉住触发形态、再断言 `Gone`。该形态需要与 `remove_dir_all` 竞争、单机无法确定性复现；真实竞争形态由同一 job 的
+   `concurrent_delete_never_turns_lock_attempts_into_io_faults` 覆盖。
+3. 未放宽任何既有断言（`concurrent_delete_never_turns_...` 的两条 `is_lock_fault` 断言与 `pages > 0`、
+   `lock_attempt_reports_gone_...`、`peer_holding_the_domain_lock_...`、Unix 的
+   `open_failure_is_classified_by_error_kind_not_by_probing_the_object_dir` 全部逐字未改）；未新增
+   `#[allow]`/`#[ignore]`。
+
+### 13.3 命令证据（收敛轮五）
+
+| 命令 | 结果（输出末尾） |
+| --- | --- |
+| `./scripts/cargo-rmcp-patched.sh test --locked -p langfuse-client --all-targets`（最终文件状态） | EXIT=0；尾部捕获：`spool_acceptance` `4 passed; 0 failed`、`spool_http` `3 passed; 0 failed`、`spool_recovery` `5 passed; 0 failed; 1 ignored` |
+| `./scripts/cargo-rmcp-patched.sh test --locked -p langfuse-client --lib` | `test result: ok. 293 passed; 0 failed; 1 ignored; 0 measured; 0 filtered out; finished in 33.63s`；`spool::native::tests::lock` 四条全 `ok` |
+| `./scripts/cargo-rmcp-patched.sh clippy --locked -p langfuse-client --all-targets -- -D warnings` | EXIT=0（等待批 H coder 的构建锁 2m00s，无 warning） |
+| `./scripts/cargo-rmcp-patched.sh fmt -p langfuse-client -- --check` | EXIT=0 |
+| `rustc --edition 2021 --target x86_64-pc-windows-msvc --emit=metadata --crate-type bin -D warnings`（同源片段：`is_lock_contention` + `is_concurrent_dir_removal`） | EXIT=0（Windows `cfg` 分支可编译；**仅编译检查，非运行验证**，`#[cfg(windows)]` 用例不含在内） |
+| CI run `38398854149` 的 Windows job（失败面） | `lock.rs:155:17` 红（`Access is denied. (os error 5)`）；本轮修复后由 PR #192 新一轮三平台矩阵复核 |
+
+### 13.4 残余与仍红项
+
+1. **错误面不可区分（Windows）**：delete-pending 与真实 ACL 拒绝是同一错误码（5），无法在错误面区分；spool 目录是
+   进程私有目录 ⇒ 该形态不产生（与 §12.4 第 1 条同级登记）。移除条件 = Windows 侧需要区分时，改为查询文件 / 目录
+   状态（delete-pending 判定）或在 spool 目录装配后校验 ACL。
+2. **平台限界**：Windows 真实行为只能由 CI（Windows job）复核；本机只有 §13.3 的编译检查与 macOS 全量复跑
+   （后者不覆盖该分支）。
+3. 其余仍红项与未测项不变（沿用 §12.4，含契约 §10 的 D8/D9 待裁决项）。
