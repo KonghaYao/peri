@@ -313,3 +313,40 @@ EXIT=0
 
 1. `langfuse-client/src/batcher/recovery_test.rs::recovery_deferral_keeps_objects_for_the_next_owner` 曾在本地 `-p langfuse-client -p peri-acp --lib` 单跑一次失败（`recovery_test.rs:812`：`fixed 页扫描跨多页：31 条`，断言要求 `recovered > 64`）。判定为负载相关的偶发，证据：CI 日志中该用例 `PASS [0.432s] (40/2160)`（三平台同）；随后单用例连跑 10 轮 10/10 通过（机器同时有其他 worktree 的编译负载，单轮 16–38s）。
 2. `peri-resources` 的 `sessions::sqlite_store::connection::open_tests::incompatible_schema_is_rejected_without_wal_or_database_changes` 在 CI 等价 workspace 测试中失败过一次（`connection_open_test.rs:377` `session database initialization is busy`，既有文件、与本变更集无关），单用例复跑通过（`1 passed`）。同样判为偶发，未改该文件。
+
+### 11.4 Windows 平台锁竞争与覆盖断言修复（收敛轮三续，2026-10-13）
+
+1. 失败面：CI run `38336790068`（head `8f3688349`）的 Windows job `115098619419` 在 `Run workspace tests` 失败，后续步骤全 skipped，两条失败：
+   - `langfuse-client spool::native::tests::claim_is_exclusive_across_processes`（`langfuse-client/src/spool/native_test.rs:509:42`）：`claim: Io { operation: "lock spool object", source: Os { code: 33, kind: Uncategorized, message: "The process cannot access the file because another process has locked a portion of the file." } }`——`claim` 返回了 `Ok(Err)`，而契约 §5.2/§8 要求对端持锁返回 `Ok(None)`。
+   - `spool::native::tests::lock::concurrent_delete_never_turns_lock_attempts_into_io_faults`（`langfuse-client/src/spool/native_test/lock.rs:153:5`）：`扫描必须实际走到持锁清理分支（否则用例没有覆盖）`。
+2. 根因（两处同源，均为「平台形态假设」）：
+   - Windows 的 `LockFileEx` 在对端持锁时报 `ERROR_LOCK_VIOLATION`(33)，当前 Rust 的 `io::ErrorKind` 为 `Uncategorized` 而非 `WouldBlock`；`try_lock_file` 只按 `error.kind() == WouldBlock` 识别竞争（`native.rs`），Windows 因此落到 `Err(error)` 被包成 `Io { operation: "lock spool object" }`。契约语义（`Held` → `claim` 归 `Ok(None)`、`delete` 归 `Busy`；`probe_durable_io` 不降级为 `Unavailable`）本身没变，错的是判定形态。
+   - 覆盖断言 `corrupt_pages > 0` 把「扫描走到持锁清理」的证据押在并发删除的产物上：Windows 上被占用句柄会使整目录 `remove_dir_all` 失败，摘要不符条目可能根本留不到扫描可见，该断言不可达——属用例自身的平台假设，不是产品缺陷。
+3. 修复（只改判定形态与覆盖证据，语义与签名不动）：
+   - `langfuse-client/src/spool/native.rs` 新增私有 `fn is_lock_contention(error: &io::Error) -> bool`：`error.kind() == io::ErrorKind::WouldBlock || CONTENTION_OS_ERROR.is_some_and(|code| error.raw_os_error() == Some(code))`，`CONTENTION_OS_ERROR` 用 `#[cfg(windows)] Some(33)` / `#[cfg(not(windows))] None`；`try_lock_file` 的 `Err` 分支与 `probe_durable_io` 都改用它（探针 doc 同步指向该函数）。`LockAttempt::{Free,Held,Gone}` 分流、`claim`/`delete`/`list` 的返回语义、端口与签名一律不变。
+   - `spool/native_test/lock.rs`：把循环体内联的「写摘要不符条目」抽成 `write_corrupt_entry(...) -> bool`，在并发循环**之前**确定性铺一条（`id_of(0x5a)`）并断言 `list` 返回 `Err(SpoolError::Corrupt { .. })`——持锁清理分支由此获得与 OS 删除时序无关的证据；删除 `corrupt_pages` 计数与末尾 `corrupt_pages > 0` 断言。
+   - 断言只增不减：循环内 `Err(Corrupt)` 仍计入 `pages`、「`list` 取锁不得报 IO 故障」（`is_lock_fault`）、`pages > 0`、「结束时无 IO 故障」全部保留，并新增 `Err(Corrupt)` 返回形态断言。用例名与文件位置不变。
+4. 本机可验证面与缺口：Windows 错误码路径无法在 macOS 上运行。本机只做 `rustc --edition 2021 --target x86_64-pc-windows-msvc --emit=metadata` 的 `cfg(windows)` 分支编译检查（EXIT=0，同源片段）；真实行为由 Windows CI job 覆盖——`claim_is_exclusive_across_processes`（`claim` 走 `try_lock_file`）与装配期 `probe_durable_io` 都会命中该判定，回归即红。
+
+### 11.5 命令证据（收敛轮三续）
+
+| 命令 | 结果（输出末尾） |
+| --- | --- |
+| `./scripts/cargo-sccache.sh fmt --all` | EXIT=0 |
+| `./scripts/cargo-sccache.sh test --locked -p langfuse-client --lib spool::native` | `14 passed; 0 failed; 1 ignored`（2.05s；含 `claim_is_exclusive_across_processes`、`lock::concurrent_delete_...`、`lock::peer_holding_the_domain_lock_...`） |
+| `./scripts/cargo-sccache.sh test --locked -p langfuse-client --all-targets` | EXIT=0：lib `292 passed; 0 failed; 1 ignored`（22.00s）、`logging` 1、`otel_contract` 1、`spool_acceptance` 4、`spool_http` 3、`spool_recovery` `5 passed; 0 failed; 1 ignored`（5.17s，直接覆盖跨进程取锁与删除竞争） |
+| `./scripts/cargo-sccache.sh clippy --locked -p langfuse-client --all-targets -- -D warnings` | EXIT=0（6.41s） |
+| `rustc --edition 2021 --target x86_64-pc-windows-msvc --emit=metadata`（`is_lock_contention` 同源片段） | EXIT=0（Windows `cfg` 分支可编译；仅编译检查，非运行验证） |
+| `./scripts/cargo-rmcp-patched.sh test --locked -p peri-controller -p peri-acp --lib`（复刻 CI 的 feature 并集：`preserve_order` 生效，上一轮） | `peri-acp lib 827 passed; 0 failed`（134.80s）、`peri-controller lib 180 passed; 0 failed`（5.76s）；EXIT=0 |
+| `./scripts/cargo-rmcp-patched.sh clippy --locked --workspace --all-targets -- -D warnings`（CI 同款入口，上一轮） | EXIT=0 |
+| `./scripts/cargo-sccache.sh test --locked -p langfuse-client --lib -- recovery_deferral_keeps_objects_for_the_next_owner` × 10（偶发判定，上一轮） | 10/10 `1 passed; 0 failed`（单轮 16–38s） |
+| CI run `38331869301` 三平台 job（上一轮失败面） | ubuntu `115083245535`、macos `115083245482`、windows `115083245618` 同一用例红；本轮修复后由 PR #189 新一轮矩阵复核 |
+| 本轮 `git commit` 触发的 pre-commit（check / clippy / fmt / layer-imports） | 结果随提交记录（见 §11.6-3） |
+
+### 11.6 仍红项与缺口（收敛轮三续结束时）
+
+1. **本轮未在本机复跑 CI 全量矩阵**：`-p langfuse-client --all-targets` 覆盖本变更集的直接面，workspace 其余包的完整行列交由远端 CI 覆盖（CI 为 nextest + 三平台）。本变更集未改其源码。
+2. **Windows 真实行为未经本机运行验证**：`ERROR_LOCK_VIOLATION`(33) 的判定只在 Windows 上生效，本机只做编译检查（§11.5 第 5 行）；结论以 Windows CI job 为准。
+3. **本地环境噪声（非回归）**：本机会话环境带 `PERI_WORKFLOW_ALLOW_NPX_FALLBACK=1`（仓库与 CI 均无此变量，亦不在 shell profile），会让 `peri-workflow` 的三个 fail-closed 用例失守（`cli::tests::workflow_cli_fails_closed_without_any_validated_artifact`、`runner::artifact::tests::prepare_fails_closed_without_artifact_and_without_opt_in`、`tool::tests::failed_start_leaves_no_workflow_side_effects`）。证据：`env -u PERI_WORKFLOW_ALLOW_NPX_FALLBACK ... -p peri-workflow --lib` → `177 passed; 0 failed`，带该变量 → `3 failed`。workspace 等价全量测试的判读须去掉该变量。
+4. **待用户裁决不变**：契约 §10 的 D8（第二次 shutdown 的期望被实测证伪）与 D9（自设行数上限维持或拆分）。
+5. **未测项不变**（与前几轮一致，不宣称产品验收完成）：真实 Langfuse 端点/服务端限额、1000 轮 8 MiB 长会话、512 MiB 积压与 32 MiB 遥测预算的实测 RSS、断网 10 分钟恢复、四持久边界崩溃注入的实机矩阵、WASM/无持久化宿主运行行为、性能补表、`e2e/`。

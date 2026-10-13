@@ -264,14 +264,15 @@ fn ensure_layout(inner: &NativeInner) -> SpoolResult<()> {
 
 /// fsync 与 advisory lock 能力探针：不支持即 [`SpoolError::Unavailable`]，不宣称崩溃持久性。
 ///
-/// 探针不阻塞：`WouldBlock` 说明卷支持 advisory lock，只是此刻被同部署的其他 owner 持有
-/// （契约 §5.2 的跨进程竞争），不能降级成「不可用」——紧随其后的启动重建会按 domain 锁排队。
+/// 探针不阻塞：对端持锁说明卷支持 advisory lock，只是此刻被同部署的其他 owner 持有
+/// （契约 §5.2 的跨进程竞争，平台错误形态见 [`is_lock_contention`]），不能降级成「不可用」
+/// ——紧随其后的启动重建会按 domain 锁排队。
 fn probe_durable_io(inner: &NativeInner) -> SpoolResult<()> {
     let probe =
         create_private_file(&inner.domain_lock_path()).map_err(|_| SpoolError::Unavailable)?;
     match probe.try_lock_exclusive() {
         Ok(()) => {}
-        Err(error) if error.kind() == io::ErrorKind::WouldBlock => {}
+        Err(error) if is_lock_contention(&error) => {}
         Err(_) => return Err(SpoolError::Unavailable),
     }
     probe.sync_all().map_err(|_| SpoolError::Unavailable)?;
@@ -373,9 +374,24 @@ pub(crate) fn try_lock_file(path: &Path) -> io::Result<LockAttempt> {
     };
     match file.try_lock_exclusive() {
         Ok(()) => Ok(LockAttempt::Free(file)),
-        Err(error) if error.kind() == io::ErrorKind::WouldBlock => Ok(LockAttempt::Held),
+        Err(error) if is_lock_contention(&error) => Ok(LockAttempt::Held),
         Err(error) => Err(error),
     }
+}
+
+/// 对端持锁在平台上的错误形态。
+///
+/// Unix 是 `WouldBlock`（`EWOULDBLOCK`/`EAGAIN`）；Windows 的 `LockFileEx` 报
+/// `ERROR_LOCK_VIOLATION`（33），当前 Rust 尚未把它映射成 `WouldBlock`。两者都只说明锁被
+/// 另一个 owner 持有，属契约 §5.2 的跨进程竞争，不是 IO 故障。
+fn is_lock_contention(error: &io::Error) -> bool {
+    #[cfg(windows)]
+    const CONTENTION_OS_ERROR: Option<i32> = Some(33);
+    #[cfg(not(windows))]
+    const CONTENTION_OS_ERROR: Option<i32> = None;
+
+    error.kind() == io::ErrorKind::WouldBlock
+        || CONTENTION_OS_ERROR.is_some_and(|code| error.raw_os_error() == Some(code))
 }
 
 /// 锁文件父目录是否仍是目录；无父目录按不可用处理（不回退到 cwd）。

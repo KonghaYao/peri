@@ -59,6 +59,40 @@ fn is_lock_fault(error: &SpoolError) -> bool {
     matches!(error, SpoolError::Io { operation, .. } if operation.starts_with("lock spool"))
 }
 
+/// 写一个摘要与正文不符的条目（扫描读到即走持锁清理分支）；成功创建返回 true。
+fn write_corrupt_entry(
+    objects: &std::path::Path,
+    route: crate::spool::RouteFingerprint,
+    id: ObjectId,
+    body: &[u8],
+) -> bool {
+    let path = objects
+        .join(format!("{:02x}", NativeInner::bucket_of(id)))
+        .join(id_hex(id));
+    let accepted = now_ms();
+    let meta = ObjectMeta {
+        version: DESCRIPTOR_VERSION,
+        id,
+        kind: ObjectKind::Export,
+        route,
+        event_count: 0,
+        encoding: Compression::None,
+        raw_len: body.len() as u64,
+        stored_len: body.len() as u64,
+        // 摘要与正文不符：扫描读到即走持锁清理分支。
+        sha256: Sha256::digest(b"other bytes").into(),
+        accepted_at_ms: accepted,
+        expires_at_ms: accepted + 60_000,
+        attempts: 0,
+        next_attempt_at_ms: None,
+        state: SpoolState::Ready,
+    };
+    let descriptor = native_scan::descriptor_bytes(&meta).expect("descriptor bytes");
+    create_private_dir_all(&path).is_ok()
+        && fs::write(path.join("body"), body).is_ok()
+        && write_atomic(&path.join("meta"), &descriptor).is_ok()
+}
+
 /// 并发删除不得把取锁升级为 IO 故障（契约 §5.2；`tests/spool_recovery` 竞态回归）。
 ///
 /// 复现面：扫描遇到不可读条目（摘要不符）后要持锁清理，此时另一个 owner 正在删除同一对象
@@ -68,6 +102,9 @@ fn is_lock_fault(error: &SpoolError) -> bool {
 /// 竞争线程每轮用**新 ID** 铺一个摘要不符的条目再整目录删除：ID 不复用，因此「条目消失后
 /// 又被重建」不会出现；`remove_dir_all` 逐个文件删除期间仍可能读到瞬时不可读的条目，那属于
 /// 契约显式返回的范畴，本用例只禁止取锁本身报错。
+///
+/// 「持锁清理分支」的覆盖由循环前的确定性条目证明：并发删除的产物依赖 OS 删除语义（Windows
+/// 上被占用句柄会让整目录删除失败，条目可能根本不留到扫描可见），不能拿它当分支覆盖证据。
 #[test]
 fn concurrent_delete_never_turns_lock_attempts_into_io_faults() {
     const BODY: &[u8] = b"corrupt entry body";
@@ -75,6 +112,16 @@ fn concurrent_delete_never_turns_lock_attempts_into_io_faults() {
     let fixture = Fixture::open(dir.path().to_path_buf(), route_of(14));
     let objects = fixture.route_dir().join("objects");
     let route = fixture.route;
+    // 确定性覆盖：单个摘要不符条目在没有并发修改时必须走到持锁清理并显式报损坏。
+    assert!(
+        write_corrupt_entry(&objects, route, id_of(0x5a), BODY),
+        "先写入一个摘要不符条目"
+    );
+    let planted = fixture.store.list(None, 64);
+    assert!(
+        matches!(planted, Err(SpoolError::Corrupt { .. })),
+        "扫描必须先走持锁清理分支: {planted:?}"
+    );
     let stop = Arc::new(AtomicBool::new(false));
     let live: Arc<Mutex<Vec<ObjectId>>> = Arc::new(Mutex::new(Vec::new()));
     let churn = {
@@ -86,29 +133,7 @@ fn concurrent_delete_never_turns_lock_attempts_into_io_faults() {
                 let path = objects
                     .join(format!("{:02x}", NativeInner::bucket_of(id)))
                     .join(id_hex(id));
-                let accepted = now_ms();
-                let meta = ObjectMeta {
-                    version: DESCRIPTOR_VERSION,
-                    id,
-                    kind: ObjectKind::Export,
-                    route,
-                    event_count: 0,
-                    encoding: Compression::None,
-                    raw_len: BODY.len() as u64,
-                    stored_len: BODY.len() as u64,
-                    // 摘要与正文不符：扫描读到即走持锁清理分支。
-                    sha256: Sha256::digest(b"other bytes").into(),
-                    accepted_at_ms: accepted,
-                    expires_at_ms: accepted + 60_000,
-                    attempts: 0,
-                    next_attempt_at_ms: None,
-                    state: SpoolState::Ready,
-                };
-                let descriptor = native_scan::descriptor_bytes(&meta).expect("descriptor bytes");
-                if create_private_dir_all(&path).is_ok()
-                    && fs::write(path.join("body"), BODY).is_ok()
-                    && write_atomic(&path.join("meta"), &descriptor).is_ok()
-                {
+                if write_corrupt_entry(&objects, route, id, BODY) {
                     let mut live = live.lock().expect("live ids");
                     if live.len() >= 32 {
                         live.remove(0);
@@ -121,14 +146,11 @@ fn concurrent_delete_never_turns_lock_attempts_into_io_faults() {
         })
     };
     let deadline = Instant::now() + Duration::from_millis(1500);
-    let (mut pages, mut corrupt_pages) = (0usize, 0usize);
+    let mut pages = 0usize;
     while Instant::now() < deadline {
         match fixture.store.list(None, 64) {
             Ok(_) => pages += 1,
-            Err(SpoolError::Corrupt { .. }) => {
-                pages += 1;
-                corrupt_pages += 1;
-            }
+            Err(SpoolError::Corrupt { .. }) => pages += 1,
             Err(error) => {
                 assert!(!is_lock_fault(&error), "list 取锁不得报 IO 故障: {error}");
                 pages += 1;
@@ -150,10 +172,6 @@ fn concurrent_delete_never_turns_lock_attempts_into_io_faults() {
     stop.store(true, Ordering::Relaxed);
     churn.join().expect("churn thread");
     assert!(pages > 0, "扫描必须实际执行过");
-    assert!(
-        corrupt_pages > 0,
-        "扫描必须实际走到持锁清理分支（否则用例没有覆盖）"
-    );
 }
 
 /// 对端持有 domain 锁是并发竞争，不是「卷不支持 advisory lock」。
