@@ -86,13 +86,20 @@ async fn handle_apps_method(
     }
 }
 
+/// 旧别名 `peri/mcp/invoke` 的**会话存在性**准入快照：只回答「会话是否存在」与
+/// 「是否在关闭中」，不承载任何「忙 / 冲突」判据。
+///
+/// R8 取代：本类型此前的 `prompt_in_flight` 判据读的是 `SessionState.cancel_token`
+/// 的**快照**（不是锁：prompt 与 invoke 之间无锁序、无等待队列），既未提供真实互斥，
+/// 又让别名与 canonical 面（`apps/*` 全链不读 prompt 状态）判决不同。删除后本层
+/// 不再持有 canonical 面之外的会话级判据，只做存在性检查；执行的顺序与资格由
+/// canonical service 的共同准入（`SessionAdmissionOwner`）决定。
 pub(crate) struct InvokeSessionGate {
     pub known: bool,
     /// 会话不在关闭中。
     ///
     /// invoke 会真的执行工具并向该会话下发 `session/update`。
     pub open: bool,
-    pub prompt_in_flight: bool,
 }
 
 /// Host invoke 的响应投影：**只有**原请求的返回值。
@@ -125,9 +132,6 @@ pub(crate) async fn handle_invoke(
         return Err(outer_error(McpAppsErrorKind::InvalidSession));
     }
     if !gate.open {
-        return Err(outer_error(McpAppsErrorKind::PolicyDenied));
-    }
-    if gate.prompt_in_flight {
         return Err(outer_error(McpAppsErrorKind::PolicyDenied));
     }
     let cancellation = connection.cancellation();

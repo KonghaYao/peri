@@ -267,7 +267,6 @@ async fn invoke_disabled_capability_fails_closed() {
         InvokeSessionGate {
             known: true,
             open: true,
-            prompt_in_flight: false,
         },
     )
     .await
@@ -288,7 +287,6 @@ async fn invoke_unknown_session_fails_closed() {
         InvokeSessionGate {
             known: false,
             open: false,
-            prompt_in_flight: false,
         },
     )
     .await
@@ -296,11 +294,38 @@ async fn invoke_unknown_session_fails_closed() {
     assert_eq!(error.data.unwrap()["kind"], "invalid_session");
 }
 
+/// R8 取代（原用例 `invoke_during_prompt_is_policy_denied`，钉死「会话有在飞 prompt ⇒
+/// `policy_denied`」）：准入面**没有**「会话忙 / prompt 在飞」这一维。
+///
+/// 旧判据读 `SessionState.cancel_token` 的布尔快照——prompt 与 invoke 之间无锁序、
+/// 无队列，它不提供真实互斥；却让别名与 canonical 面（`apps/*` 全链不读 prompt 状态）
+/// 判决不同。删除后本面只剩 `known` / `open` 两条检查，故同一会话连续两次 invoke 都
+/// **走到 relay 执行面**：第一次取到 relay 的真实回执，第二次的拒绝来自 relay 自己的
+/// 错误面（`upstream_protocol_error`），而不是任何「会话忙」门（那才会是 `policy_denied`）。
+///
+/// 「prompt 真在飞」这一事实在删除后不再是本面的输入（读 `cancel_token` 的代码已随
+/// R8 消失），因此本用例无法在本层设置它；该场景的证据缺口见
+/// `spec/issues/2026-10-12-mcp-apps-redesign/implementation-log.md` 的「4b 批 G」。
 #[tokio::test]
-async fn invoke_during_prompt_is_policy_denied() {
+async fn invoke_is_admitted_without_session_busy_refusal() {
     let connection = enabled_connection();
     let relay: Arc<dyn McpAppsRelayPort> = Arc::new(StubRelay::invoke_ok());
     let test_facade = TestFacade::new(Arc::clone(&relay), &[connection.id()]);
+    let admitted = handle_invoke(
+        &invoke_params(),
+        &connection,
+        Some(&relay),
+        Some(&test_facade.facade),
+        InvokeSessionGate {
+            known: true,
+            open: true,
+        },
+    )
+    .await
+    .expect("会话存在且未关闭 ⇒ 必须准入并走到 relay 执行面");
+    assert_eq!(admitted.value["toolCallId"], "tool-new-1");
+
+    // 第二次 invoke：准入面无状态可选，拒绝只能来自 relay 自己的错误面。
     let error = handle_invoke(
         &invoke_params(),
         &connection,
@@ -309,12 +334,15 @@ async fn invoke_during_prompt_is_policy_denied() {
         InvokeSessionGate {
             known: true,
             open: true,
-            prompt_in_flight: true,
         },
     )
     .await
     .unwrap_err();
-    assert_eq!(error.data.unwrap()["kind"], "policy_denied");
+    assert_eq!(
+        error.data.unwrap()["kind"],
+        "upstream_protocol_error",
+        "拒绝必须来自 relay（桩只应答一次），而不是准入层的「会话忙」门"
+    );
 }
 
 /// 正在关闭的会话不能执行工具或发送新的工具更新。
@@ -331,7 +359,6 @@ async fn invoke_while_session_is_closing_is_policy_denied() {
         InvokeSessionGate {
             known: true,
             open: false,
-            prompt_in_flight: false,
         },
     )
     .await
@@ -354,7 +381,6 @@ async fn invoke_relay_policy_denial_does_not_project_success() {
         InvokeSessionGate {
             known: true,
             open: true,
-            prompt_in_flight: false,
         },
     )
     .await
@@ -375,7 +401,6 @@ async fn invoke_success_returns_tool_call_id_without_synthetic_model_cards() {
         InvokeSessionGate {
             known: true,
             open: true,
-            prompt_in_flight: false,
         },
     )
     .await

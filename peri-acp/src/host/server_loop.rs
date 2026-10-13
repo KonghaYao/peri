@@ -291,18 +291,18 @@ impl ServerLoop<'_> {
                                     .get("ownerSessionId")
                                     .and_then(Value::as_str)
                                     .unwrap_or_default();
+                                // 会话准入快照 = 存在性 + 未关闭（R8：不再含「prompt 在飞」
+                                // 判据；执行的顺序与资格由 canonical service 的共同准入决定）。
                                 let gate = {
                                     let sessions = sessions.lock().await;
                                     match sessions.get(owner_session_id) {
                                         Some(state) => mcp_apps::InvokeSessionGate {
                                             known: true,
                                             open: !state.closing,
-                                            prompt_in_flight: state.cancel_token.is_some(),
                                         },
                                         None => mcp_apps::InvokeSessionGate {
                                             known: false,
                                             open: false,
-                                            prompt_in_flight: false,
                                         },
                                     }
                                 };

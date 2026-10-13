@@ -445,3 +445,95 @@ fn approval_unavailable_error_kind_is_distinct_from_policy_denial() {
     assert_eq!(kinds[0], "approval_unavailable");
     assert_eq!(kinds[1], "policy_denied");
 }
+
+// ─── R8（批 G）：旧别名的准入面（`handle_invoke` × 真实链路）──────────────
+
+/// 经 `handle_invoke` 的别名准入：生产上 `host/server_loop.rs` 的形态（请求作用域
+/// 绑定本连接 + 会话准入快照 = 存在性 + 未关闭）。
+async fn invoke_through_alias(
+    params: &Value,
+    connection: &crate::host::connection::ConnectionContext,
+    relay: &Arc<dyn McpAppsRelayPort>,
+    facade: &Arc<crate::host::apps_facade::SessionAppsFacade>,
+) -> Result<crate::host::mcp_apps::InvokeHostResult, crate::transport::types::AcpError> {
+    crate::host::interaction_router::scope_host_request_connection(
+        connection.id().to_string(),
+        crate::host::mcp_apps::handle_invoke(
+            params,
+            connection,
+            Some(relay),
+            Some(facade),
+            crate::host::mcp_apps::InvokeSessionGate {
+                known: true,
+                open: true,
+            },
+        ),
+    )
+    .await
+}
+
+/// [R8 · 批 G] 旧别名 `peri/mcp/invoke` 的准入面与并发：会话存在且未关闭 ⇒ 两条
+/// **并发** invoke 都被准入，各自经 canonical 入口真实执行一次。
+///
+/// R8 删除了别名独有的「prompt 在飞 ⇒ `policy_denied`」判据（读
+/// `SessionState.cancel_token` 的快照：既不提供互斥，又让别名与 canonical 面判决
+/// 不同）。本用例把新事实钉在**真实链路**上：准入面只剩存在性检查，别名自身既不
+/// 拒绝也不串行/合并——顺序与资格由共同准入（`SessionAdmissionOwner`）决定。
+#[tokio::test]
+async fn concurrent_alias_invokes_are_admitted_and_execute_once_each() {
+    let transport = FrameTransport::with_choice("allow_once");
+    let fixture = Fixture::new(Arc::clone(&transport)).await;
+
+    // 生产同序（`host/server_loop.rs`）：调用连接先注册为本会话的在线 endpoint。
+    let mut connection = crate::host::connection::ConnectionContext::new(true);
+    connection.commit_initialize();
+    let erased: Arc<dyn AcpTransport> = Arc::clone(&transport) as Arc<dyn AcpTransport>;
+    fixture
+        .router
+        .register_connection(connection.id(), erased)
+        .expect("Host 请求连接必须可注册为在线 endpoint");
+
+    // facade 与 relay **同点同源**（生产由会话环境装配点给出同一对）：Host 归属值
+    // `{namespace, seq}` 来自本 facade 的 Host 操作域与账本。
+    let (_owner, spawner) = crate::host::task_scope::HostTaskOwner::new();
+    let facade = Arc::new(crate::host::apps_facade::SessionAppsFacade::new(
+        SESSION,
+        fixture.relay.runtime_epoch(),
+        Arc::clone(&fixture.router),
+        Arc::clone(&fixture.relay),
+        Arc::clone(&fixture.service) as Arc<dyn SessionInvocationPort>,
+        spawner,
+        crate::host::apps_facade::entitlement::test_support::allow_all(),
+    ));
+    let params = json!({
+        "envelopeVersion": MCP_APPS_ENVELOPE_VERSION,
+        "appsProtocolVersion": MCP_APPS_PROTOCOL_VERSION,
+        "serverId": SERVER,
+        "toolName": APP_TOOL,
+        "ownerSessionId": SESSION,
+        "arguments": {"value": 1}
+    });
+
+    let (first, second) = tokio::join!(
+        invoke_through_alias(&params, &connection, &fixture.relay, &facade),
+        invoke_through_alias(&params, &connection, &fixture.relay, &facade),
+    );
+    let first = first.expect("会话存在且未关闭 ⇒ 第一条 invoke 必须被准入");
+    let second = second.expect("准入面无「会话忙」判据 ⇒ 第二条 invoke 同样被准入");
+
+    assert_ne!(
+        first.value["toolCallId"], second.value["toolCallId"],
+        "两次执行各自持有身份（不是同一结果的复用）"
+    );
+    assert_eq!(
+        fixture.calls(),
+        2,
+        "两条 invoke 都真实到达 peer（无串行、无合并）"
+    );
+    assert_eq!(
+        transport.permission_frames().len(),
+        2,
+        "两条调用各自经过审批（Alias 不绕过 canonical 审批）"
+    );
+    fixture.shutdown().await;
+}

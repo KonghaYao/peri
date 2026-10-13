@@ -372,3 +372,140 @@ async fn session_fork_registers_connection_endpoint_and_scheduled_approval_is_de
         "审批帧必须携带 fork 出来的会话身份"
     );
 }
+
+// ─── R8（批 G）：旧别名 `peri/mcp/invoke` 的准入（真实 server loop 端到端）────────
+
+/// 生产链路（真实 `ServerLoop` + 真实 `session/new` 装配 + 真实会话状态）：会话**有在飞
+/// prompt**（`SessionState.cancel_token = Some`——prompt 任务的登记点写的正是这个字段）
+/// 时，`peri/mcp/invoke` **仍被准入**并走到 relay 执行面：拒绝只能来自 relay 自己的错误面
+/// （本用例给一个不存在的 server ⇒ `unknown_server`），不能是旧
+/// `InvokeSessionGate.prompt_in_flight` 的 `policy_denied`（4b 批 G 已删除该判据）。
+///
+/// 为什么必须走 server loop：被删掉的判据在 `host/server_loop.rs` 的构造点，由
+/// `state.cancel_token` 投影；`handle_invoke` 单测无法设置「prompt 在飞」这一事实。
+///
+/// 反向验证（mutation）：把该快照改回读 `cancel_token`（`open: !state.closing &&
+/// state.cancel_token.is_none()`，同一 wire 形态）后复跑本用例必须失败——实测响应为
+/// `data: {"kind": "policy_denied"}`，即被删判据的原判决。
+#[tokio::test]
+#[serial]
+async fn invoke_during_prompt_is_admitted_through_the_real_server_loop() {
+    let tmp = tempfile::tempdir().unwrap();
+    let target = tmp.path().join("workspace");
+    std::fs::create_dir(&target).unwrap();
+    std::fs::create_dir_all(target.join(".peri")).unwrap();
+    let cwd = target.to_string_lossy().into_owned();
+
+    let config = make_peri_config_with_provider(make_provider_config(
+        "local",
+        "openai",
+        "fixture-key",
+        "fixture-model",
+    ));
+    let provider = LlmProvider::from_config(&config).unwrap();
+    let mut cfg = make_server_config(config, provider, &tmp).await;
+    // apps 能力打开：会话环境装配点据此构造 relay + facade（`apps/*` 与旧别名共用）。
+    cfg.workspace_assembly = Some(crate::host::assemble::WorkspaceAssembly {
+        startup_cwd: cwd.clone(),
+        bare: true,
+        drive_cron_tick: false,
+        mcp_profile: peri_middlewares::mcp::apps::deployment_profile(true),
+        capabilities: Default::default(),
+    });
+    let cfg = Arc::new(cfg);
+
+    // 先建会话（真实 `session/new` 装配），才能把「prompt 在飞」写进它的状态。
+    let mut sessions = HashMap::new();
+    let bootstrap: Arc<dyn crate::transport::AcpTransport> = Arc::new(MockTransport::default());
+    let created = handle_request(
+        "session/new",
+        &json!({"cwd": cwd}),
+        &cfg,
+        &mut sessions,
+        &bootstrap,
+    )
+    .await
+    .expect("session/new 必须成功");
+    let id = created["sessionId"].as_str().unwrap().to_owned();
+    let environment = Arc::clone(
+        sessions[&id]
+            .environment
+            .as_ref()
+            .expect("会话环境（生产装配路径）"),
+    );
+    assert!(
+        environment.cfg.mcp_apps_relay.is_some() && environment.apps_facade().is_some(),
+        "apps 能力必须打开：否则请求会先被 capability_disabled 挡掉，本用例的断言落到空处"
+    );
+
+    sessions.get_mut(&id).unwrap().cancel_token = Some(tokio_util::sync::CancellationToken::new());
+    let sessions: crate::host::SharedSessions = Arc::new(tokio::sync::Mutex::new(sessions));
+
+    let transport = ScriptedTransport::new(vec![
+        (
+            RequestId::Number(1),
+            "initialize",
+            json!({"protocolVersion": 1, "clientCapabilities": {"_meta": {}}}),
+        ),
+        (
+            RequestId::Number(2),
+            "peri/mcp/invoke",
+            json!({
+                "envelopeVersion": peri_acp_types::mcp_apps::MCP_APPS_ENVELOPE_VERSION,
+                "appsProtocolVersion": peri_acp_types::mcp_apps::MCP_APPS_PROTOCOL_VERSION,
+                "serverId": "missing-server",
+                "toolName": "missing-tool",
+                "ownerSessionId": id,
+                "arguments": {}
+            }),
+        ),
+    ]);
+    let erased: Arc<dyn crate::transport::AcpTransport> =
+        Arc::clone(&transport) as Arc<dyn crate::transport::AcpTransport>;
+    let prompt_locks: crate::host::PromptLocks = Arc::new(tokio::sync::Mutex::new(HashMap::new()));
+    let (cont_tx, _cont_rx) = tokio::sync::mpsc::unbounded_channel();
+    let cont_tx = Arc::new(cont_tx);
+    let connection = Arc::new(tokio::sync::Mutex::new(
+        crate::host::connection::ConnectionContext::new(true),
+    ));
+    let cancellation = tokio_util::sync::CancellationToken::new();
+    crate::host::server_loop::ServerLoop {
+        transport: &erased,
+        cfg: &cfg,
+        sessions: &sessions,
+        prompt_locks: &prompt_locks,
+        cont_tx: &cont_tx,
+        connection: &connection,
+        connection_cancellation: &cancellation,
+    }
+    .run()
+    .await;
+
+    // apps 请求是 host-owned 任务（`spawn_mcp_apps_request`）：loop 退出后等它写出响应。
+    let await_response = async {
+        loop {
+            let answered = transport.responses.lock().unwrap().iter().any(
+                |(request_id, _)| matches!(request_id, RequestId::Number(value) if *value == 2),
+            );
+            if answered {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+        }
+    };
+    tokio::time::timeout(std::time::Duration::from_secs(10), await_response)
+        .await
+        .expect("invoke 必须在 10s 内给出响应（真实 server loop 的 host-owned 任务）");
+
+    let error = transport
+        .response(2)
+        .expect_err("目标 server 不存在 ⇒ 必须是 relay 的错误面（不是成功响应）");
+    assert!(
+        error.contains("unknown_server"),
+        "会话有在飞 prompt 时 invoke 必须走到 relay 执行面（relay 的既定错误面 = unknown_server），实际: {error}"
+    );
+    assert!(
+        !error.contains("policy_denied"),
+        "准入不得因「prompt 在飞」拒绝（R8 已删除该判据；那会破坏与 canonical 面的同一判决），实际: {error}"
+    );
+}
