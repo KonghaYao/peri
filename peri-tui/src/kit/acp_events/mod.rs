@@ -27,7 +27,7 @@ pub use crate::kit::tui_render_unit::{TuiAssistantBubble, TuiRenderUnit, TuiUser
 
 use crate::kit::acp_types::{AcpEventData, CacheUsageSample, CurrentTurn};
 use crate::kit::atoms::*;
-use crate::kit::tui_render_unit::{TuiNoteLevel, tui_hash_str};
+use crate::kit::tui_render_unit::{TuiNoteLevel, UserAttachment, tui_hash_str};
 use std::collections::HashMap;
 
 // ---------------------------------------------------------------------------
@@ -234,7 +234,7 @@ impl BridgeState {
     /// Put a user prompt after all output already received from the preceding
     /// turn. A live subagent keeps its container in current_turn, so in that
     /// case the prompt joins the same chronological segment stream.
-    fn push_user_bubble(&mut self, text: String) {
+    fn push_user_bubble(&mut self, text: String, attachments: Vec<UserAttachment>) {
         // A tool result can still arrive after the next prompt is displayed.
         // Preserve its accumulator until ToolEnded; TurnDone retains its normal
         // flush behavior for tools that never emit an end event.
@@ -247,10 +247,11 @@ impl BridgeState {
             self.flush_current_turn();
         }
         if self.current_turn.is_empty() {
-            self.committed
-                .push_back(TuiRenderUnit::TuiUserBubble(TuiUserBubble::new(text)));
+            self.committed.push_back(TuiRenderUnit::TuiUserBubble(
+                TuiUserBubble::with_attachments(text, attachments),
+            ));
         } else {
-            self.current_turn.push_user_bubble(text);
+            self.current_turn.push_user_bubble(text, attachments);
         }
     }
 
@@ -498,7 +499,9 @@ pub(crate) fn dispatch_for_bridge(
 
         // ── Unknown / forward-compat ──
         Unknown { .. } => system::handle_unknown(),
-        LocalUserBubble { text } => turn::handle_local_user_bubble(state, text),
+        LocalUserBubble { text, attachments } => {
+            turn::handle_local_user_bubble(state, text, attachments.clone())
+        }
         UserInputQueueChanged { snapshot } => {
             crate::kit::steer_state::STEERS
                 .state()
@@ -519,7 +522,7 @@ pub(crate) fn dispatch_for_bridge(
                 .state()
                 .write()
                 .claim_delivery(&state.active_session_id, input_id);
-            turn::handle_local_user_bubble(state, text);
+            turn::handle_local_user_bubble(state, text, Vec::new());
         }
         LocalLoadingReset => turn::handle_loading_reset(state),
         PromptFailed { request_id } => turn::handle_prompt_failed(state, request_id),

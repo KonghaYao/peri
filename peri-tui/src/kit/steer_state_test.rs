@@ -710,3 +710,26 @@ fn test_content_without_attachments_stays_plain_text() {
     let content = content_with_attachments("hello", &[]);
     assert_eq!(content, MessageContent::text("hello"));
 }
+
+/// 投递路径的附件展示记录与提交路径同源：字节数取自图片块载荷长度。
+#[test]
+fn test_attachment_displays_from_content_matches_submit_path() {
+    let attachments = vec![
+        PendingAttachment::image("image/png", "AQID"),
+        PendingAttachment::image("image/png", "AQI="),
+    ];
+    let content = content_with_attachments("两张图", &attachments);
+
+    let from_submit = attachment_displays(&attachments);
+    let from_content = attachment_displays_from_content(&content);
+    assert_eq!(from_submit, from_content, "两条路径的展示记录必须一致");
+    assert_eq!(
+        from_submit.iter().map(|a| a.bytes).collect::<Vec<_>>(),
+        vec![3, 2],
+        "字节数 = base64 解码后的载荷长度"
+    );
+
+    // 纯文本内容没有附件记录。
+    assert!(attachment_displays_from_content(&MessageContent::text("hello")).is_empty());
+    assert!(attachment_displays(&[]).is_empty());
+}

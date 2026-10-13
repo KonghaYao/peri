@@ -1,3 +1,4 @@
+use fluent_bundle::FluentValue;
 use unicode_width::UnicodeWidthStr;
 
 use ratatui_kit::ratatui::{
@@ -6,18 +7,77 @@ use ratatui_kit::ratatui::{
     widgets::{Block, Borders},
 };
 
+use crate::i18n;
+use crate::kit::atoms::PendingAttachment;
 use crate::kit::message_area::grid::GridSpec;
+use crate::kit::tui_render_unit::user_attachment_name;
 use peri_theme::atoms::THEME_ATOM;
 
 /// §10 queued 队列在 composer 上方最多显示的行数，超出显示 `· · ·`。
 pub(super) const QUEUE_VISIBLE_MAX: usize = 5;
 
+/// composer 附件标签最多列出的图片名数——再多以 `…` 截断（右侧还有资源线）。
+pub(super) const ATTACHMENT_NAMES_MAX: usize = 3;
+
 fn input_tokens() -> peri_theme::component::InputTokens {
     THEME_ATOM.state().read().component.input
 }
 
-/// §10 composer 边框：title_top 右侧 session title；title_bottom 左侧
-/// `@ N files` + 右侧资源线（`footer_right`：CPU% · MEM · ctx，原状态栏迁移）。
+/// composer 底部左侧的附件标签。
+///
+/// 图片按提交顺序显示（`[图片] 图片 1 · 图片 2`，多张带 `×N`），一眼可辨「这是图片」
+/// 且多张可区分；非图片附件沿用计数文案（`@ N 个文件`）。
+///
+/// [Why 不统一用计数] 粘贴剪贴板图片产生的是上传式附件（`paste.rs`），
+/// `@ N 个文件` 看不出类型，也与 @mention 文件引用混淆。
+pub(super) fn build_attachments_label(attachments: &[PendingAttachment]) -> Option<String> {
+    if attachments.is_empty() {
+        return None;
+    }
+    let images: Vec<&PendingAttachment> = attachments
+        .iter()
+        .filter(|attachment| attachment.media_type.starts_with("image/"))
+        .collect();
+    let mut parts: Vec<String> = Vec::new();
+    if !images.is_empty() {
+        let mut names: Vec<String> = images
+            .iter()
+            .take(ATTACHMENT_NAMES_MAX)
+            .enumerate()
+            .map(|(index, _)| user_attachment_name(index + 1))
+            .collect();
+        if images.len() > names.len() {
+            names.push("…".to_string());
+        }
+        let names = names.join(" · ");
+        parts.push(if images.len() == 1 {
+            i18n::tr_args(
+                "composer-image-attachment",
+                &[("name".to_string(), FluentValue::from(names))],
+            )
+        } else {
+            i18n::tr_args(
+                "composer-image-attachments",
+                &[
+                    ("count".to_string(), FluentValue::from(images.len() as u64)),
+                    ("names".to_string(), FluentValue::from(names)),
+                ],
+            )
+        });
+    }
+    let others = attachments.len() - images.len();
+    if others > 0 {
+        parts.push(i18n::tr_args(
+            "composer-attachments",
+            &[("count".to_string(), FluentValue::from(others as u64))],
+        ));
+    }
+    Some(parts.join(" · "))
+}
+
+/// §10 composer 边框：title_top 右侧 session title；title_bottom 左侧附件标签
+/// （`[图片] 图片 1`，见 [`build_attachments_label`]）+ 右侧资源线
+/// （`footer_right`：CPU% · MEM · ctx，原状态栏迁移）。
 /// 窄屏（§11）逐级隐藏：`show_top=false`（h<12）隐藏 title_top 整行；
 /// `show_bottom=false`（h<8）隐藏 title_bottom。
 /// `max_width` = composer 区域宽度（`use_previous_size`，resize 后次帧收敛）。
@@ -25,7 +85,7 @@ fn input_tokens() -> peri_theme::component::InputTokens {
 pub(super) fn build_composer_block(
     loading: bool,
     session_title: &str,
-    files_label: Option<&str>,
+    attachments_label: Option<&str>,
     footer_right: Option<Line<'static>>,
     show_top: bool,
     show_bottom: bool,
@@ -49,8 +109,8 @@ pub(super) fn build_composer_block(
         }
     }
     if show_bottom {
-        // 左侧附件计数 / 右侧资源线（CPU·MEM·ctx，muted + 资源阈值色）
-        if let Some(f) = files_label {
+        // 左侧附件标签 / 右侧资源线（CPU·MEM·ctx，muted + 资源阈值色）
+        if let Some(f) = attachments_label {
             block = block.title_bottom(Line::from(Span::styled(
                 format!(" {f} "),
                 Style::default().fg(sem.text.muted),

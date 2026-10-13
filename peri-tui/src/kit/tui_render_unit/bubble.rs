@@ -2,10 +2,55 @@ use super::fold::{EntryStatus, FoldState, entry_status_code, fold_state_code};
 use super::hash::{tui_hash_combine, tui_hash_roll, tui_hash_str};
 use super::reminder::{ReminderInfo, detect_reminder};
 
+/// 用户消息携带的附件展示记录——只保留渲染所需字段。
+///
+/// [Why 无载荷] `TuiRenderUnit` 逐帧克隆，图片 base64（单张上限 20 MiB）只能留在
+/// `PENDING_ATTACHMENTS` 与提交请求里；消息区需要的是「这条消息带了哪几张图」的
+/// 记录，而不是图片本身。
+///
+/// [Why 无文件名] 剪贴板图片没有文件名（`paste.rs` 只拿到字节），展示名
+/// `图片 {序号}` 由渲染层按提交顺序本地化，因此这里只需记录顺序（`Vec` 位置）与大小。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct UserAttachment {
+    /// 载荷字节数（解码后）——消息区 meta 行的大小档显示用。
+    pub bytes: usize,
+}
+
+impl UserAttachment {
+    /// 由标准 base64 载荷（无换行）长度推解码字节数：`len / 4 * 3 - 填充位数`。
+    pub fn from_base64_payload(payload: &str) -> Self {
+        let padding = payload
+            .as_bytes()
+            .iter()
+            .rev()
+            .take(2)
+            .filter(|byte| **byte == b'=')
+            .count();
+        let bytes = (payload.len() / 4 * 3).saturating_sub(padding);
+        Self { bytes }
+    }
+}
+
+/// 附件展示名 `图片 {index}`（`index` 1 起）。
+///
+/// 单一事实源：composer 附件标签与消息区附件记录共用，保证同一张图在两处编号一致。
+/// [Why 按序号而非文件名] 剪贴板图片没有文件名（只有字节），序号即身份。
+pub fn user_attachment_name(index: usize) -> String {
+    crate::i18n::tr_args(
+        "attachment-image-name",
+        &[(
+            "index".to_string(),
+            fluent_bundle::FluentValue::from(index as u64),
+        )],
+    )
+}
+
 /// User message bubble -- right-aligned plain text.
 #[derive(Debug, Clone)]
 pub struct TuiUserBubble {
     pub text: String,
+    /// 附件展示记录（按提交顺序）——空 = 纯文本消息。
+    pub attachments: Vec<UserAttachment>,
     /// 内容哈希——rebuild 时用于检测是否需重新渲染
     pub content_hash: u64,
     /// 从文本中检测到的 system-reminder 信息。
@@ -22,10 +67,24 @@ impl TuiUserBubble {
     /// 构造函数——自动从文本中检测 `<system-reminder>` 标签并提取
     /// [`ReminderInfo`]；`source` 填充占位 `None`（协议无来源标记）。
     pub fn new(text: String) -> Self {
-        let content_hash = tui_hash_str(&text);
+        Self::with_attachments(text, Vec::new())
+    }
+
+    /// 带附件的用户气泡。附件记录并入 `content_hash`（渲染缓存 key，见
+    /// `entry_render_cache::ensure`）——否则「同文本、不同附件」不会触发重渲染。
+    /// 无附件时哈希与 [`Self::new`] 逐位一致（不改变既有缓存行为）。
+    pub fn with_attachments(text: String, attachments: Vec<UserAttachment>) -> Self {
+        let mut content_hash = tui_hash_str(&text);
+        for attachment in &attachments {
+            content_hash = tui_hash_combine(content_hash, attachment.bytes as u64);
+        }
+        if !attachments.is_empty() {
+            content_hash = tui_hash_combine(content_hash, attachments.len() as u64);
+        }
         let reminder = detect_reminder(&text);
         TuiUserBubble {
             text,
+            attachments,
             content_hash,
             reminder,
             source: None,
@@ -33,7 +92,7 @@ impl TuiUserBubble {
     }
 }
 
-tui_impl_partial_eq!(TuiUserBubble: text, reminder, source);
+tui_impl_partial_eq!(TuiUserBubble: text, attachments, reminder, source);
 
 /// Agent reply bubble -- left-aligned markdown with optional reasoning block.
 ///

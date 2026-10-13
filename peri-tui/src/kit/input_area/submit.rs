@@ -96,7 +96,8 @@ pub(super) fn dispatch_submit_request<F>(
             } else {
                 // 通过 LOCAL_EVENT_TX 发送 LocalUserBubble 事件到 acp_bridge，
                 // 统一走 dispatch_and_notify → push_view_models 写入路径。
-                send_local_user_bubble(&text);
+                // 气泡带附件展示记录——发送后消息区仍能看到「这条消息带了图片」。
+                send_local_user_bubble(&text, &attachments);
                 send_request(SubmitRequest::AgentText { text, attachments });
             }
         }
@@ -177,14 +178,21 @@ pub(crate) fn is_remote_command(text: &str) -> bool {
 
 /// 发送本地 user bubble 事件（`LocalUserBubble`）到 acp_bridge。
 ///
+/// `attachments` 只用于消息区的附件记录（图片序号 + 大小），不改变上行内容——
+/// 上行载荷仍由 [`SubmitRequest::AgentText`] 携带。
+///
 /// pub(crate)：非 loading 提交路径与 `acp_events::render::drain_input_buffer`
 /// （Slice 3 D4）共用——drain 排队项时镜像非 loading 路径，先本地气泡再提交。
-pub(crate) fn send_local_user_bubble(text: &str) {
+pub(crate) fn send_local_user_bubble(
+    text: &str,
+    attachments: &[crate::kit::atoms::PendingAttachment],
+) {
     use crate::kit::acp_types::AcpEventData;
     if let Some(tx) = LOCAL_EVENT_TX.get() {
         let _ = tx.send(AcpEventWithEpoch {
             event: AcpEventData::LocalUserBubble {
                 text: text.to_string(),
+                attachments: crate::kit::steer_state::attachment_displays(attachments),
             },
             active_session_id: String::new(),
         });

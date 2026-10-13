@@ -281,3 +281,64 @@ fn test_submit_text_loading_clear_shows_notification_without_history_or_buffer()
     assert!(INPUT_BUFFER.state().read().is_empty());
     assert!(crate::kit::atoms::NOTIFICATION.state().read().is_some());
 }
+
+/// 移除一张后再提交：上行内容与输入区呈现同步——只有剩余附件进 content，
+/// 已移除的图片不再出现（不残留引用）。
+#[test]
+#[serial]
+fn test_submit_after_removal_sends_remaining_attachments_only() {
+    use peri_acp_types::messages::ContentBlock;
+
+    reset_submit_side_effect_state();
+    let atom = PENDING_ATTACHMENTS.state();
+    {
+        let mut pending = atom.write();
+        pending.clear();
+        pending.push(crate::kit::atoms::PendingAttachment::image(
+            "image/png",
+            "AQID",
+        ));
+        pending.push(crate::kit::atoms::PendingAttachment::image(
+            "image/png",
+            "BAUG",
+        ));
+    }
+
+    // 空文本 Backspace：移除尾部一张（图片 2）。
+    assert!(super::super::remove_pending_attachment(
+        &crate::components::textarea::TextAreaState::default(),
+        super::super::AttachmentEdge::Last,
+    ));
+
+    let attachments = std::mem::take(&mut *atom.write());
+    assert_eq!(attachments.len(), 1, "输入区只剩一张");
+    assert_eq!(
+        attachments[0].base64_data, "AQID",
+        "保留的是未被移除的图片 1"
+    );
+
+    let content = crate::kit::steer_state::content_with_attachments("看一下", &attachments);
+    let images = content
+        .content_blocks()
+        .iter()
+        .filter(|block| matches!(block, ContentBlock::Image { .. }))
+        .count();
+    assert_eq!(images, 1, "发给模型的内容只含剩余图片");
+
+    let recorder = make_submit_recorder();
+    dispatch_submit_request(
+        SubmitRequest::AgentText {
+            text: "看一下".to_string(),
+            attachments,
+        },
+        false,
+        |request| recorder.lock().push(request),
+    );
+    match recorded_submit(&recorder) {
+        Some(SubmitRequest::AgentText { attachments, .. }) => {
+            assert_eq!(attachments.len(), 1, "下发请求不含已移除图片");
+        }
+        other => panic!("应下发 AgentText, got {other:?}"),
+    }
+    atom.write().clear();
+}

@@ -172,6 +172,7 @@ mod cases {
     fn test_partial_eq_respects_reminder() {
         let a = TuiUserBubble {
             text: "hi".into(),
+            attachments: Vec::new(),
             reminder: Some(ReminderInfo {
                 reminder_type: ReminderType::GenericReminder,
                 summary: "x".into(),
@@ -181,6 +182,7 @@ mod cases {
         };
         let b = TuiUserBubble {
             text: "hi".into(),
+            attachments: Vec::new(),
             reminder: None,
             source: None,
             content_hash: 0,
@@ -194,12 +196,14 @@ mod cases {
     fn test_source_field_partial_eq_and_new_placeholder() {
         let a = TuiUserBubble {
             text: "hi".into(),
+            attachments: Vec::new(),
             reminder: None,
             source: None,
             content_hash: 0,
         };
         let b = TuiUserBubble {
             text: "hi".into(),
+            attachments: Vec::new(),
             reminder: None,
             source: Some("channel".into()),
             content_hash: 0,

@@ -68,6 +68,7 @@ fn test_copy_button_hidden_for_empty_text() {
 fn test_copy_button_hidden_for_user_bubble() {
     let vm = TuiRenderUnit::TuiUserBubble(crate::kit::tui_render_unit::TuiUserBubble {
         text: "my input".to_string(),
+        attachments: Vec::new(),
         content_hash: 4,
         reminder: None,
         source: None,

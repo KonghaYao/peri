@@ -1,6 +1,6 @@
 use crate::i18n;
 use crate::kit::message_area::grid::GridSpec;
-use crate::kit::tui_render_unit::FoldState;
+use crate::kit::tui_render_unit::{FoldState, UserAttachment};
 use crate::truncate::{truncate_by_width, wrap_by_width};
 use fluent_bundle::FluentValue;
 use peri_theme::atoms::THEME_ATOM;
@@ -90,11 +90,14 @@ pub(super) fn render_system_reminder_lines(
 ///   正文行 `[│][gap]` 与其余 entry 同起点。
 /// - 保留用户换行；长 prompt 最多 `USER_BODY_MAX_LINES` 个视觉行，
 ///   超出显示 `… +N lines`（§6.1）。`USER_BODY_MAX_LINES` 计数包含
-///   @image meta 行（§4.4）。
+///   附件记录行与 @image meta 行（§4.4）。
 /// - 正文左侧竖线使用 text.secondary；slash command / `@mention` 局部强调（accent.user）。
 /// - T4（image-p0-p1-spec §4）：`@image <path>` 行识别为 meta 行
 ///   `[Image: {文件名} · {大小}]`（不解析像素），返回 [`ImageLineInfo`]
 ///   列表供点击/hover 屏幕映射。
+/// - 上传式附件（粘贴图片）：正文之前逐张渲染记录行
+///   `[图片] 图片 {序号} · {大小}`——附件不落盘、无 `@image` 文本，这是发送后
+///   唯一可见的「这条消息带了图片」记录（不提供预览/命中映射）。
 pub(super) fn render_user_bubble_lines(
     data: &crate::kit::tui_render_unit::TuiUserBubble,
     grid: &GridSpec,
@@ -102,8 +105,9 @@ pub(super) fn render_user_bubble_lines(
     let sem = THEME_ATOM.state().read().semantic;
     // 空文本 user（rewind/重放路径的 thinking 回传消息建模为 user role，
     // 提取文本为空）→ 渲染 0 行——不产生 turn 节拍空行，避免 thinking
-    // 底下出现悬空空行（§3.2 节拍只属于真实 user prompt）。
-    if data.text.is_empty() {
+    // 底下出现悬空空行（§3.2 节拍只属于真实 user prompt）。带附件的空文本
+    // 提交（图片-only）是真实 prompt，仍要留下附件记录。
+    if data.text.is_empty() && data.attachments.is_empty() {
         return (Vec::new(), Vec::new());
     }
     // §3.2：新 user prompt 前保留 1 个空行（turn 节拍）；空行带竖线前缀
@@ -123,29 +127,35 @@ pub(super) fn render_user_bubble_lines(
     let mut image_lines: Vec<ImageLineInfo> = Vec::new();
     let mut visual_count = 0usize; // 已渲染视觉行
     let mut total = 0usize; // 全部视觉行（含超限部分，用于 `… +N lines`）
+    // 附件记录行先于正文：一条一张，`[图片] 图片 1 · 128.0 KB`——发送后仍能看出
+    // 这条消息带了图片（上传式附件没有可复制的路径文本，只有这里的记录）。
+    for (index, attachment) in data.attachments.iter().enumerate() {
+        push_meta_body_lines(
+            &mut lines,
+            grid,
+            attachment_meta_text(attachment, index + 1),
+            sem.text.secondary,
+            Style::default().fg(sem.text.primary),
+            &mut visual_count,
+            &mut total,
+        );
+    }
     for raw in data.text.lines() {
         let is_image = parse_image_line(raw);
         if let Some(path) = &is_image {
             let (display_path, size_text, managed, meta_text) = build_image_meta_info(path, None);
-            let meta_visuals = wrap_by_width(&meta_text, grid.content_width());
-            total += meta_visuals.len();
-            if visual_count >= USER_BODY_MAX_LINES {
-                continue;
-            }
-            let take = (USER_BODY_MAX_LINES - visual_count).min(meta_visuals.len());
-            let logical_idx = lines.len();
-            for m in &meta_visuals[..take] {
-                let mut spans = cont_prefix(grid, sem.text.secondary);
-                spans.push(Span::styled(
-                    m.clone(),
-                    Style::default().fg(sem.text.primary),
-                ));
-                lines.push(Line::from(spans));
-            }
-            visual_count += take;
+            let (logical_idx, take, meta_len) = push_meta_body_lines(
+                &mut lines,
+                grid,
+                meta_text,
+                sem.text.secondary,
+                Style::default().fg(sem.text.primary),
+                &mut visual_count,
+                &mut total,
+            );
             // 仅完整渲染的 meta 行进入命中映射（被截断的行点击区域与渲染
             // 位置错位——与 footer keepgoing 超宽跳过同一原则）。
-            if take == meta_visuals.len() {
+            if take == meta_len {
                 image_lines.push(ImageLineInfo {
                     logical_idx,
                     path: display_path,
@@ -189,6 +199,55 @@ pub(super) fn render_user_bubble_lines(
         Line::default(),
     ));
     (lines, image_lines)
+}
+
+/// 追加一条 meta 文本（按网格宽度折行）为正文视觉行，并计入 §6.1 行数上限。
+///
+/// 返回 `(首个视觉行的 logical index, 实际渲染的视觉行数, 该 meta 的视觉行总数)`——
+/// 被截断（`take < 总数`）的调用方据此跳过命中映射登记。
+fn push_meta_body_lines(
+    lines: &mut Vec<Line<'static>>,
+    grid: &GridSpec,
+    text: String,
+    prefix_color: ratatui_kit::ratatui::style::Color,
+    text_style: Style,
+    visual_count: &mut usize,
+    total: &mut usize,
+) -> (usize, usize, usize) {
+    let wrapped = wrap_by_width(&text, grid.content_width());
+    *total += wrapped.len();
+    let logical_idx = lines.len();
+    if *visual_count >= USER_BODY_MAX_LINES {
+        return (logical_idx, 0, wrapped.len());
+    }
+    let take = (USER_BODY_MAX_LINES - *visual_count).min(wrapped.len());
+    for segment in &wrapped[..take] {
+        let mut spans = cont_prefix(grid, prefix_color);
+        spans.push(Span::styled(segment.clone(), text_style));
+        lines.push(Line::from(spans));
+    }
+    *visual_count += take;
+    (logical_idx, take, wrapped.len())
+}
+
+/// 附件记录行文本：`[图片] 图片 {序号} · {大小}`。
+///
+/// 大小复用 `@image` meta 行的 [`human_size`] 三档；不解析图片内容（无缩略预览）——
+/// 载荷不在视图模型里（见 `UserAttachment`）。
+fn attachment_meta_text(attachment: &UserAttachment, index: usize) -> String {
+    i18n::tr_args(
+        "user-attachment-image-meta",
+        &[
+            (
+                "name".to_string(),
+                FluentValue::from(crate::kit::tui_render_unit::user_attachment_name(index)),
+            ),
+            (
+                "size".to_string(),
+                FluentValue::from(human_size(attachment.bytes as u64)),
+            ),
+        ],
+    )
 }
 
 /// @image 行识别（§4.4）：原始行（wrap 之前）`trim_start` 后以 `@image ` 开头

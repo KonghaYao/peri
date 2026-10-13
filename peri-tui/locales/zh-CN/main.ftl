@@ -697,6 +697,12 @@ user-image-size-kb = { $count } KB
 user-image-size-mb = { $count } MB
 user-image-open-failed = 打开图片失败
 
+# ---- 粘贴图片附件（上传式附件，无文件名，按粘贴顺序编号）----
+# $index 为附件在同批提交中的序号（1 起）；composer 标签与消息区记录共用同一编号。
+attachment-image-name = 图片 { $index }
+# $size 为人类可读大小（user-image-size-*）。
+user-attachment-image-meta = [图片] { $name } · { $size }
+
 # ---- 图片预览浮层（image-p0-p1-spec §7 T7）----
 # 上下文 overlay 预览：meta 行（$w/$h 为像素尺寸，JPEG/GIF/WebP 未解析时为 0）、
 # 解码中行、手工路径降级提示、校验/解码失败固定文案（不显示原因细节）。
@@ -738,6 +744,9 @@ render-interaction-result-rejected = 已拒绝
 # ---- Composer（§10）----
 
 composer-attachments = @ { $count } 个文件
+# 图片附件（§粘贴图片）：$name 为 `attachment-image-name`，多张带数量与前若干名称。
+composer-image-attachment = [图片] { $name }
+composer-image-attachments = [图片] ×{ $count } · { $names }
 composer-context-usage = { $pct }% ctx
 
 # ---- 消息视图占位符 ----
