@@ -623,7 +623,9 @@ impl SessionInvocationService {
             run_id: None,
             agent_id: self.agent_id,
             cwd: Arc::clone(&self.cwd),
-            messages: Arc::new(Vec::new()),
+            // idle 入口**没有**消息快照（无 `StageContext` ⇒ 无可见消息事实）：
+            // `None` 是事实，不得用空 `Vec` 冒充「历史为空」（4b 批 H）。
+            messages: None,
             context_usage: None,
             session_resources: None,
             resolver: Arc::new(DirectToolInvocationResolver),

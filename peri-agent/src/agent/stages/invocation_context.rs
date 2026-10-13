@@ -376,6 +376,11 @@ impl InvocationContext {
     }
 
     /// 可见消息快照（提交前视图；不含本批 AI 消息）。
+    ///
+    /// 空切片有**两种**来源：idle 入口的「未知」（[`SessionInvocationSource::messages`]
+    /// 为 `None`，本结构内不可区分）与真实空历史。消费方必须按保守语义处理（`subagent`
+    /// 侧的空 ⇒ 回落 `parent_messages` 即属此列）；要在消费侧区分，需改本访问器与
+    /// `StateView::messages()` 的签名，条件见实现日志「4b 批 H」。
     pub(crate) fn messages(&self) -> &[BaseMessage] {
         &self.messages
     }
@@ -452,7 +457,12 @@ impl InvocationContext {
             run_id: source.run_id,
             agent_id: source.agent_id,
             cwd: source.cwd,
-            messages: source.messages,
+            // `None`（未知）⇒ 视图退化为空切片：**这是保守化，不是等价事实**。
+            // 「未知」与「空历史」在本结构内仍不可区分（`messages()` 返回切片，
+            // 剩余半面的收敛条件见实现日志「4b 批 H」）。
+            messages: source
+                .messages
+                .unwrap_or_else(|| Arc::new(Vec::<BaseMessage>::new())),
             context_usage: source.context_usage,
             session_resources: source.session_resources,
             resolver: source.resolver,
@@ -483,8 +493,13 @@ pub struct SessionInvocationSource {
     pub agent_id: AgentId,
     /// 执行时刻的工作目录。
     pub cwd: Arc<str>,
-    /// 执行时刻的可见消息快照。
-    pub messages: Arc<Vec<BaseMessage>>,
+    /// 执行时刻的可见消息快照；**`None` = 本入口没有历史事实**（未知），
+    /// **`Some(空)` = 确实没有历史**（例如会话的第一轮）。
+    ///
+    /// 两者不得混同：idle（App 回调 / Host 调用）入口按构造没有 `StageContext`，
+    /// 因此也没有消息快照——它必须说 `None`，不得用空 `Vec` 冒充「历史为空」这一
+    /// 不同事实。
+    pub messages: Option<Arc<Vec<BaseMessage>>>,
     /// 上下文用量快照；无预算或无估算时为 `None`。
     pub context_usage: Option<ContextUsage>,
     /// 会话资源端口。

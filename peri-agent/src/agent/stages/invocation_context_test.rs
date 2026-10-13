@@ -30,7 +30,7 @@ fn idle_source(stage: &StageContext, origin: InvocationOrigin) -> SessionInvocat
         run_id: None,
         agent_id: stage.session.agent_id,
         cwd: std::sync::Arc::clone(&stage.session.turn.cwd),
-        messages: std::sync::Arc::new(stage.visible_messages()),
+        messages: Some(std::sync::Arc::new(stage.visible_messages())),
         context_usage: None,
         session_resources: None,
         resolver: std::sync::Arc::clone(&stage.runtime.tool_invocation_resolver),
