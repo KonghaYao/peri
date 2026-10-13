@@ -44,9 +44,10 @@
 9. P1-19：[消息内容显示](11-transcript-display.md)中的图片覆盖层。
 10. P1-20：[输入区、状态栏与后台任务栏](12-composer-status.md)中的提示与通知行。
 11. P1-21：[消息内容显示](11-transcript-display.md)中的 KeepGoing 按钮。
-12. P1-22：[输入区、状态栏与后台任务栏](12-composer-status.md)中的资源线与附件计数。
+12. P1-22：[输入区、状态栏与后台任务栏](12-composer-status.md)中的资源线与图片附件标签。
 13. P1-23～P1-25：[消息内容显示](11-transcript-display.md)中的工具呈现和流式模式差分。
-14. P2-01：[输入与消息时序](02-prompt-order.md)中的待发送按钮。
-15. P2-02：[长会话与资源稳定性](09-performance.md)中的大历史预览资源释放。
+14. P1-26：[输入区、状态栏与后台任务栏](12-composer-status.md)中的图片附件整张移除。
+15. P2-01：[输入与消息时序](02-prompt-order.md)中的待发送按钮。
+16. P2-02：[长会话与资源稳定性](09-performance.md)中的大历史预览资源释放。
 
 显示范围的有限枚举及反向核对见 [显示覆盖矩阵](display-coverage.md)。现有 [手工验证清单](../../reference/tui-manual-verification.md) 可补充细部交互巡检。新增场景在可用时链接 active issue；测试优先级用于安排验收，不表示相应问题已修复或通过。

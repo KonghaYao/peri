@@ -240,6 +240,7 @@ fn test_find_selected_subagent_skips_non_subagent_vms() {
     let snap = ViewModelsSnapshot {
         items: im::Vector::from(vec![TuiRenderUnit::TuiUserBubble(TuiUserBubble {
             text: "hi".to_string(),
+            attachments: Vec::new(),
             content_hash: 0,
             reminder: None,
             source: None,

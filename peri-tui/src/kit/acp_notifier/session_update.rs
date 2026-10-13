@@ -297,7 +297,12 @@ pub(super) fn decode_stream_update(params: &Value, session_id: &str) -> StreamUp
                     text,
                 })
             } else {
-                Some(AcpEventData::LocalUserBubble { text })
+                // 历史回放的 chunk 只有文本块（`ContentChunk` 不携带图片块），
+                // 附件记录为空——回放不出「已发过图片」是协议载荷限制，不是丢弃。
+                Some(AcpEventData::LocalUserBubble {
+                    text,
+                    attachments: Vec::new(),
+                })
             }
         }
         _ => None, // unknown tags, including session_info_update (metadata-only, no stream event)

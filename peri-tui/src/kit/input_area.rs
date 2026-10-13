@@ -11,6 +11,7 @@
 // clippy 触发 needless_update 警告。该警告来自宏展开而非用户代码，模块级抑制。
 #![allow(clippy::needless_update)]
 
+mod attachment;
 mod hooks;
 mod image;
 mod paste;
@@ -22,14 +23,15 @@ pub(crate) use popup::{get_cached_slash_items, refresh_slash_items};
 pub(crate) use submit::is_remote_command;
 pub(crate) use submit::send_local_user_bubble;
 
+use attachment::{AttachmentEdge, remove_pending_attachment};
 use hooks::{AreaTracker, CjkGhostFix};
 use popup::{
     filter_files_for_mention, handle_slash_selection, replace_last_mention, reset_mention_popup,
     reset_slash_popup, update_popup_prefix,
 };
 use render::{
-    QUEUE_VISIBLE_MAX, build_composer_block, build_composer_lines, build_queue_lines,
-    footer_separator, popup_height, prompt_and_border_width,
+    QUEUE_VISIBLE_MAX, build_attachments_label, build_composer_block, build_composer_lines,
+    build_queue_lines, footer_separator, popup_height, prompt_and_border_width,
     render_multiline_with_cursor_for_themed,
 };
 use submit::exit_history_mode_if_active;
@@ -305,6 +307,11 @@ pub fn InputArea(props: &InputAreaProps, mut hooks: Hooks) -> impl Into<AnyEleme
                         exit_history_mode_if_active();
                         exit_entry_focus_on_edit();
                         let mut s = state.write();
+                        // 文本为空：Backspace 移除整张附件（一次一张），不逐字符删。
+                        if !is_alt && remove_pending_attachment(&s, AttachmentEdge::Last) {
+                            update_popup_prefix(&s);
+                            return EventResult::Consumed;
+                        }
                         if is_alt {
                             s.delete_word_backward();
                         } else {
@@ -317,6 +324,10 @@ pub fn InputArea(props: &InputAreaProps, mut hooks: Hooks) -> impl Into<AnyEleme
                         exit_history_mode_if_active();
                         exit_entry_focus_on_edit();
                         let mut s = state.write();
+                        if !is_alt && remove_pending_attachment(&s, AttachmentEdge::Last) {
+                            update_popup_prefix(&s);
+                            return EventResult::Consumed;
+                        }
                         if is_alt {
                             s.delete_word_backward();
                         } else {
@@ -329,6 +340,11 @@ pub fn InputArea(props: &InputAreaProps, mut hooks: Hooks) -> impl Into<AnyEleme
                         exit_history_mode_if_active();
                         exit_entry_focus_on_edit();
                         let mut s = state.write();
+                        // 与 Backspace 对称：文本为空时 Delete 从头部移除一张附件。
+                        if !is_alt && remove_pending_attachment(&s, AttachmentEdge::First) {
+                            update_popup_prefix(&s);
+                            return EventResult::Consumed;
+                        }
                         if is_alt {
                             s.delete_word_forward();
                         } else {
@@ -761,21 +777,14 @@ pub fn InputArea(props: &InputAreaProps, mut hooks: Hooks) -> impl Into<AnyEleme
 
     // §10 composer 标题/footer（Slice 3a）：
     // - title_top 右侧 session title；
-    // - title_bottom 左侧 `@ N files`（PENDING_ATTACHMENTS），右侧资源线
-    //   （CPU% · MEM · ctx，原状态栏 Row1 第 4/5/7 项迁移）。
+    // - title_bottom 左侧附件标签（`[图片] 图片 1` / `@ N 个文件`，
+    //   见 render::build_attachments_label），右侧资源线（CPU% · MEM · ctx，
+    //   原状态栏 Row1 第 4/5/7 项迁移）。
     // 窄屏逐级隐藏：h<12（session_title_visible=false）隐藏 title_top 整行；
     // h<8（max_lines=Some(2)）再隐藏 title_bottom。
     let ctx_usage = hooks.use_atom(&CONTEXT_USAGE);
     let attachments_handle = hooks.use_atom(&PENDING_ATTACHMENTS);
-    let files_label = {
-        let n = attachments_handle.read().len();
-        (n > 0).then(|| {
-            i18n::tr_args(
-                "composer-attachments",
-                &[("count".to_string(), FluentValue::from(n as u64))],
-            )
-        })
-    };
+    let attachments_label = build_attachments_label(&attachments_handle.read());
     // 右侧资源线：CPU%（>50 显示）→ MEM（恒显）→ ctx，保持原状态栏顺序；
     // 全部 muted，不启用资源阈值色（与 composer footer 其余文本同色系）。
     let sem = THEME_ATOM.state().read().semantic;
@@ -832,7 +841,7 @@ pub fn InputArea(props: &InputAreaProps, mut hooks: Hooks) -> impl Into<AnyEleme
     let composer_paragraph = Paragraph::new(composer_lines).block(build_composer_block(
         loading,
         shown_session_title,
-        files_label.as_deref(),
+        attachments_label.as_deref(),
         footer_right,
         props.session_title_visible || direct_submitting,
         props.max_lines.is_none(),

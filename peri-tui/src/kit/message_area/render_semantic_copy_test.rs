@@ -69,6 +69,7 @@ fn test_no_role_label_line_rendered() {
     // user：行 0 = leading 空行；行 1 = 正文（无 `You` label）
     let user_vm = TuiRenderUnit::TuiUserBubble(TuiUserBubble {
         text: "hello".to_string(),
+        attachments: Vec::new(),
         reminder: None,
         source: None,
         content_hash: 0,
@@ -349,6 +350,7 @@ fn test_semantic_user_bubble() {
     let grid = GridSpec::grid_for(120);
     let vm = TuiRenderUnit::TuiUserBubble(crate::kit::tui_render_unit::TuiUserBubble {
         text: "重构消息流".to_string(),
+        attachments: Vec::new(),
         source: None,
         reminder: None,
         content_hash: 0,

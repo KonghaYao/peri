@@ -194,7 +194,11 @@ enum TurnSegment {
         content_hash: u64,
     },
     /// A user input delivered while a running subagent keeps this turn open.
-    UserBubble { text: String },
+    UserBubble {
+        text: String,
+        /// 附件展示记录（不含载荷），随投递内容一次冻结。
+        attachments: Vec<crate::kit::tui_render_unit::UserAttachment>,
+    },
 }
 
 impl CurrentTurn {

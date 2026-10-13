@@ -176,9 +176,14 @@ impl CurrentTurn {
 
     /// Keep a delivered user prompt after the already visible assistant output
     /// while a running subagent prevents the parent turn from being archived.
-    pub(crate) fn push_user_bubble(&mut self, text: String) {
+    pub(crate) fn push_user_bubble(
+        &mut self,
+        text: String,
+        attachments: Vec<crate::kit::tui_render_unit::UserAttachment>,
+    ) {
         self.flush_text_segment();
-        self.segments.push(TurnSegment::UserBubble { text });
+        self.segments
+            .push(TurnSegment::UserBubble { text, attachments });
         self.active = true;
         self.invalidate_cache();
     }

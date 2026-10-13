@@ -218,6 +218,7 @@ fn test_external_execution_terminal_preserves_pending_input_rollback_owner() {
             &mut state,
             &AcpEventData::LocalUserBubble {
                 text: "pending B".into(),
+                attachments: Vec::new(),
             },
         );
         dispatch_and_notify(

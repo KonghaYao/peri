@@ -436,6 +436,7 @@ fn test_fold_pass_reasoning_manual_override_survives_following_turn() {
         &mut state,
         &AcpEventData::LocalUserBubble {
             text: "第二个问题".into(),
+            attachments: Vec::new(),
         },
     );
     let snap = VIEW_MODELS.state().read().clone();
@@ -527,6 +528,7 @@ fn test_fold_pass_tool_manual_override_restores_user_modified() {
         &mut state,
         &AcpEventData::LocalUserBubble {
             text: "第二个问题".into(),
+            attachments: Vec::new(),
         },
     );
     let snap = VIEW_MODELS.state().read().clone();
@@ -568,4 +570,36 @@ fn test_push_view_models_for_reset_clears_fold_overrides() {
         "session 复位必须清空 entry 焦点"
     );
     assert!(VIEW_MODELS.state().read().items.is_empty());
+}
+
+/// 粘贴图片附件的本地提交：事件携带的附件记录进入用户气泡（消息区因此能显示
+/// 「这条消息带了图片」），不是只留文本。
+#[test]
+#[serial]
+fn test_local_user_bubble_carries_attachment_records() {
+    let mut state = make_fold_test_state();
+    dispatch_and_notify(
+        &mut state,
+        &AcpEventData::LocalUserBubble {
+            text: "看这张图".into(),
+            attachments: vec![
+                crate::kit::tui_render_unit::UserAttachment { bytes: 45 },
+                crate::kit::tui_render_unit::UserAttachment { bytes: 2048 },
+            ],
+        },
+    );
+
+    let snap = VIEW_MODELS.state().read().clone();
+    let bubble = snap
+        .items
+        .iter()
+        .find_map(|item| match item {
+            TuiRenderUnit::TuiUserBubble(bubble) => Some(bubble.clone()),
+            _ => None,
+        })
+        .expect("应有用户气泡");
+    assert_eq!(bubble.text, "看这张图");
+    assert_eq!(bubble.attachments.len(), 2, "两条附件记录随气泡冻结");
+    assert_eq!(bubble.attachments[0].bytes, 45);
+    assert_eq!(bubble.attachments[1].bytes, 2048);
 }

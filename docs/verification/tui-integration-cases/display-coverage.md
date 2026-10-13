@@ -59,14 +59,15 @@
 | 主区与详情滚动条、浏览态、窄屏、覆盖层 | P0-28～P0-31、P0-62～P0-67 |
 | 主题、语言、Unicode、终端控制字符 | P0-52、P1-18 |
 | 图片覆盖层、footer KeepGoing、通知与快捷提示 | P1-19～P1-21 |
-| Composer 资源线、会话标题与附件计数 | P1-22 |
+| Composer 资源线、会话标题与图片附件标签 | P1-22 |
+| 图片附件整张移除与上行内容同步 | P1-26 |
 
 ## 顶层可见组件
 
 | 源码组件 | 对应用例 |
 | --- | --- |
 | `AppShell`、`SessionColumn`、`Welcome`、`SetupWizard` | P0-01、P0-31、P1-08 |
-| `MessageArea`、`InputArea`、`StatusBar`、`BgTaskArea` | P0-45～P0-57、P1-20～P1-22 |
+| `MessageArea`、`InputArea`、`StatusBar`、`BgTaskArea` | P0-45～P0-57、P1-20～P1-22、P1-26 |
 | `SteerQueue`、`SlashCompletion`、`MentionPopup` | P0-56、P1-10、P2-01 |
 | `ImageOverlay`、`PanelOverlay`、`PopupOverlay` | P0-30、P1-19、P0-62～P0-65 |
 

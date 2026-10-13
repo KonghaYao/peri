@@ -758,3 +758,147 @@ fn test_slash_on_select_non_ui_command_applies_selection() {
     assert_eq!(*ACTIVE_PANEL.state().read(), None);
     assert!(!*WIZARD_ACTIVE.state().read());
 }
+
+// ── 粘贴图片附件：输入区标签与整张移除 ─────────────────────────────────────
+
+use crate::kit::atoms::PendingAttachment;
+
+fn png_attachment() -> PendingAttachment {
+    PendingAttachment::image("image/png", "AQID")
+}
+
+/// 单张图片：标签明示类型与序号，不再只显示 `@ 1 个文件`。
+#[test]
+#[serial]
+fn test_composer_label_single_image_attachment() {
+    crate::kit::atoms::init_atoms();
+    i18n::init(Some("zh-CN"));
+    assert_eq!(
+        build_attachments_label(&[png_attachment()]).as_deref(),
+        Some("[图片] 图片 1")
+    );
+}
+
+/// 多张图片：带数量且逐张可区分（序号与提交顺序一致）。
+#[test]
+#[serial]
+fn test_composer_label_multiple_images_are_distinguishable() {
+    crate::kit::atoms::init_atoms();
+    i18n::init(Some("zh-CN"));
+    let attachments = vec![png_attachment(), png_attachment(), png_attachment()];
+    assert_eq!(
+        build_attachments_label(&attachments).as_deref(),
+        Some("[图片] ×3 · 图片 1 · 图片 2 · 图片 3")
+    );
+}
+
+/// 超过 [`ATTACHMENT_NAMES_MAX`] 张：列前 3 个名称后以 `…` 截断，数量仍完整。
+#[test]
+#[serial]
+fn test_composer_label_caps_listed_names() {
+    crate::kit::atoms::init_atoms();
+    i18n::init(Some("zh-CN"));
+    let attachments = vec![
+        png_attachment(),
+        png_attachment(),
+        png_attachment(),
+        png_attachment(),
+    ];
+    assert_eq!(
+        build_attachments_label(&attachments).as_deref(),
+        Some("[图片] ×4 · 图片 1 · 图片 2 · 图片 3 · …")
+    );
+}
+
+/// 非图片附件保持原计数文案（本次只改图片呈现）。
+#[test]
+#[serial]
+fn test_composer_label_non_image_keeps_file_count() {
+    crate::kit::atoms::init_atoms();
+    i18n::init(Some("zh-CN"));
+    let doc = PendingAttachment {
+        label: "report.pdf".to_string(),
+        media_type: "application/pdf".to_string(),
+        base64_data: "AQID".to_string(),
+    };
+    assert_eq!(
+        build_attachments_label(&[doc]).as_deref(),
+        Some("@ 1 个文件")
+    );
+    assert_eq!(build_attachments_label(&[]), None);
+}
+
+/// 标签 + 边框：composer 底栏确实显示图片标签（端到端，不只测生成函数）。
+#[test]
+#[serial]
+fn test_composer_block_renders_image_attachment_label() {
+    crate::kit::atoms::init_atoms();
+    i18n::init(Some("zh-CN"));
+    let label =
+        build_attachments_label(&[png_attachment(), png_attachment()]).expect("两张图片应有标签");
+    let block = build_composer_block(false, "session", Some(&label), None, true, true, 80);
+    let rows = render_block_text(&block, 80, 4);
+    // 逐格取样会为宽字符补位（CJK 后跟空格），比较前先去空白。
+    let left = rows[3].replace(' ', "");
+    assert!(
+        left.contains("[图片]×2·图片1·图片2"),
+        "title_bottom 左栏应显示图片标签，实际: {:?}",
+        rows[3]
+    );
+    assert!(
+        !left.contains("个文件"),
+        "图片附件不再显示文件计数，实际: {:?}",
+        rows[3]
+    );
+}
+
+/// 新增文案两种语言都落地（缺键会回退成 key 本身）。
+#[test]
+fn test_attachment_label_keys_localized_in_both_locales() {
+    for lang in ["en", "zh-CN"] {
+        let lc = i18n::LcRegistry::new(Some(lang));
+        let name = lc.tr_args(
+            "attachment-image-name",
+            &[("index".to_string(), FluentValue::from(1u64))],
+        );
+        assert_ne!(
+            name, "attachment-image-name",
+            "{lang}: 缺 attachment-image-name"
+        );
+        assert!(name.contains('1'), "{lang}: 序号未代入（{name}）");
+
+        let meta = lc.tr_args(
+            "user-attachment-image-meta",
+            &[
+                ("name".to_string(), FluentValue::from(name.clone())),
+                ("size".to_string(), FluentValue::from("1.0 KB")),
+            ],
+        );
+        assert_ne!(
+            meta, "user-attachment-image-meta",
+            "{lang}: 缺 user-attachment-image-meta"
+        );
+        assert!(
+            meta.contains(&name) && meta.contains("1.0 KB"),
+            "{lang}: {meta}"
+        );
+
+        let single = lc.tr_args(
+            "composer-image-attachment",
+            &[("name".to_string(), FluentValue::from(name.clone()))],
+        );
+        assert!(single.contains(&name), "{lang}: {single}");
+
+        let multi = lc.tr_args(
+            "composer-image-attachments",
+            &[
+                ("count".to_string(), FluentValue::from(2u64)),
+                ("names".to_string(), FluentValue::from(name.clone())),
+            ],
+        );
+        assert!(
+            multi.contains(&name) && multi.contains('2'),
+            "{lang}: {multi}"
+        );
+    }
+}
