@@ -13,7 +13,7 @@ use crate::kit::image_safety::{UrlKind, classify_url, sanitize_for_terminal};
 
 use super::code_block::code_block_lines;
 use super::heading::heading_line;
-use super::list::list_item_line;
+use super::list::{LIST_ITEM_GAP_MAX_DEPTH, list_item_gap, list_item_line};
 use super::scan::ImageInfo;
 use super::span_style::apply_span_styles;
 use super::table::compute_table_col_widths;
@@ -137,7 +137,8 @@ pub(crate) fn rollback_trailing_unstable(
 /// 间距规则（统一）：
 /// - 每个块级元素前加 **恰好一行**空行，除非：
 ///   (a) 是第一个有内容的块
-///   (b) 是连续的列表项（列表项之间无空行）
+///   (b) 是连续的列表项，且 [`list_item_gap`] 判定该深度不插空行
+///   （默认策略：嵌套项紧凑，顶层项之间插空行）
 /// - parser 生成的空 `Paragraph` 是列表分隔哨兵，跳过（间距由本函数统一管理）
 ///   `base_fg` 作为普通段落/列表项文本的兜底前景色（来自 `component.markdown.text`）。
 pub(crate) fn convert_to_segments(
@@ -193,15 +194,24 @@ pub(crate) fn convert_to_segments_with_state(
             continue;
         }
 
-        let is_list_item = matches!(block, ParsedBlock::ListItem(_));
+        let list_depth = match block {
+            ParsedBlock::ListItem(item) => Some(item.depth),
+            _ => None,
+        };
+        let is_list_item = list_depth.is_some();
 
-        // 分隔：非首块 + 非连续列表项 → 确保恰好一行空行
+        // 连续列表项是否保持紧凑（不插空行）：上一块也是列表项，且间距策略判定
+        // 该深度不插空行（见 [`list_item_gap`]）。顶层列表项默认插空行。
+        let tight_list_items = state.prev_was_list_item
+            && list_depth.is_some_and(|depth| !list_item_gap(LIST_ITEM_GAP_MAX_DEPTH, depth));
+
+        // 分隔：非首块 + 非紧凑列表项序列 → 确保恰好一行空行
         if !(state.current_text.is_empty()
             || state
                 .current_text
                 .last()
                 .is_some_and(|l| l.spans.is_empty())
-            || is_list_item && state.prev_was_list_item)
+            || tight_list_items)
         {
             state.current_text.push(Line::default());
         }

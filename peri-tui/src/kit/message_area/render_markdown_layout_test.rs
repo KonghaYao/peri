@@ -346,6 +346,78 @@ fn test_image_same_paragraph_multiple_no_gap() {
     assert_eq!(b_idx - a_idx, 1, "同段多图之间无空行（P1-1）");
 }
 
+// ── 列表项间距（列表项之间空行）─────────────────────────────────────────
+
+/// 顶层列表项之间恰好一行空行（终态路径）。
+#[test]
+fn test_top_level_list_items_separated_by_blank_line() {
+    let vm = assistant_bubble_with_text("- alpha\n- beta\n- gamma", 80);
+    let mut cache = crate::kit::markdown::MarkdownRenderCache::default();
+    let (lines, _, _, _) =
+        super::vm_to_lines_cached(&vm, &GridSpec::grid_for(80), &mut cache, true);
+
+    let index_of = |needle: &str| {
+        lines
+            .iter()
+            .position(|l| line_text(l).contains(needle))
+            .unwrap_or_else(|| panic!("应渲染出列表项 {needle:?}，实际: {:?}", all_text(&lines)))
+    };
+    let (alpha, beta, gamma) = (index_of("alpha"), index_of("beta"), index_of("gamma"));
+    assert_eq!(beta, alpha + 2, "alpha/beta 之间应恰好 1 空行");
+    assert_eq!(gamma, beta + 2, "beta/gamma 之间应恰好 1 空行");
+    assert!(is_blank_separator(&lines[alpha + 1]));
+    assert!(is_blank_separator(&lines[beta + 1]));
+    for idx in [alpha, beta, gamma] {
+        assert!(
+            line_text(&lines[idx]).contains('\u{2022}'),
+            "列表标记应保留，实际: {:?}",
+            line_text(&lines[idx])
+        );
+    }
+}
+
+/// 嵌套列表在渲染层保持紧凑：子项紧跟父项，回到下一个顶层项时插空行
+/// （流式路径；列表不进入 stable chunk，全部在可变尾部渲染）。
+#[test]
+fn test_nested_list_items_stay_compact_between_top_level_items() {
+    let vm = TuiRenderUnit::TuiAssistantBubble(
+        TuiAssistantBubble {
+            started_at: Some(Instant::now()),
+            duration_ms: None,
+            text: "- parent\n  - child a\n  - child b\n- sibling".to_string(),
+            reasoning: None,
+            message_id: None,
+            content_hash: 81,
+        }
+        .into(),
+    );
+    let grid = GridSpec::grid_for(80);
+    let mut md_cache = crate::kit::markdown::MarkdownRenderCache::default();
+    let mut layout = crate::kit::message_area::vm_cache::MarkdownLineCache::default();
+    let (lines, ..) =
+        super::vm_to_lines_cached_with_layout(&vm, &grid, &mut md_cache, Some(&mut layout), false);
+
+    let index_of = |needle: &str| {
+        lines
+            .iter()
+            .position(|l| line_text(l).contains(needle))
+            .unwrap_or_else(|| panic!("应渲染出列表项 {needle:?}，实际: {:?}", all_text(&lines)))
+    };
+    let (parent, child_a, child_b, sibling) = (
+        index_of("parent"),
+        index_of("child a"),
+        index_of("child b"),
+        index_of("sibling"),
+    );
+    assert_eq!(child_a, parent + 1, "子项应紧跟父项，无空行");
+    assert_eq!(child_b, child_a + 1, "同级子项之间无空行");
+    assert!(
+        is_blank_separator(&lines[sibling - 1]),
+        "回到顶层项（sibling）前应有空行，实际: {:?}",
+        line_text(&lines[sibling - 1])
+    );
+}
+
 // ── 终端 resize（宽度变化）───────────────────────────────────────────────
 
 /// 终端 resize 后同一流式消息的 stable chunk 重建：不得 panic。
