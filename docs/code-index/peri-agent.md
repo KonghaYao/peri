@@ -18,7 +18,7 @@ Emscripten 最小入口见 [`peri-wasm`](peri-wasm.md)：复用本 crate 的 `ru
 
 ## 架构速览
 
-同步子 Agent 模型完成后若仍有子任务，`session/subagent/run_sync.rs` 从此刻等待最多 120 秒；超时后由 `SubagentCloseState.sync_workers` 继续持有同一 child 执行，父工具返回含 `child_thread_id`、`sync-{id}` 与活动任务的 Pending 文本。迟到终态经原父会话完成回调与稳定 delivery ID 入队，失败由 owner 保留结果重试；交接后的可见子事件改走独立 bg event pump。无交付回调或没有待结算任务时继续等待，不假装已完成。回归入口 `session::subagent::child_runner::tests`。
+同步子 Agent 模型完成后若仍有子任务，`session/subagent/run_sync.rs` 从此刻等待最多 120 秒（Shell/非 Shell 共用上限）；超时并完成父会话任务登记后，`SubagentCloseState.sync_workers` 继续持有同一 child 执行，父工具返回含 `child_thread_id`、每次执行唯一的 `sync-{run_id}` 与活动任务的 Pending 文本。父侧任务登记防止嵌套委派提前退出；迟到终态按该 run ID 保留稳定 delivery ID，成功投递才结算父任务，失败由 owner 保留结果重试；交接后的可见子事件走独立 bg event pump。关闭不把仍未交付的 worker 当作已结清；无交付回调或没有待结算任务时继续等待，不假装已完成。回归入口 `session::subagent::child_runner::tests` 与 `session::subagent::run_sync::tests`。
 
 Child 当前进程的晚到任务结果由 `session/subagent/child_runner.rs` 保留消费责任，后台与前台委派共享该 runner；bounded idle 退出不直接等价于委派成果完成。Child 准备自然结束但仍持有运行中的 Shell 时，runner 使 RCRA 跳过通用 bounded idle，向当前执行投递一次 Required SystemReminder，提供 Shell 任务 ID 与状态；是否等待或用 Bash 结束进程由模型决定，任务归属不转移。`background.rs` 对事件转发失败继续可靠发布失败终态并结算，不保留已退出 worker 的假 Running。挂起事件在 `RenderEvent` FIFO 中，与恢复后的输出保持顺序；子 Agent forwarder 不将自己的挂起投影到父 Agent。定向入口 `session::subagent::child_runner::tests`、`session::subagent::tests::bound_and_tail_cases` 与 `agent::subagent_event_forwarder`。
 

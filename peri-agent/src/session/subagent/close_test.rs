@@ -126,3 +126,89 @@ async fn abandoned_close_waiter_does_not_lose_resource_barrier() {
     pool.release.notify_one();
     second.await.unwrap().unwrap();
 }
+
+#[tokio::test(start_paused = true)]
+async fn close_waits_for_handoff_delivery_retry_and_preserves_failure_diagnostic() {
+    let session = child(Arc::new(TaskManager::new()), None);
+    let state = session.subagent_host().unwrap().close_state.clone();
+    let (retry_sender, retry_receiver) = tokio::sync::oneshot::channel();
+    let worker_state = state.clone();
+    let worker = state
+        .spawn_sync_worker("child".into(), async move {
+            worker_state.record_sync_delivery_failure("child", "queue rejected result");
+            retry_receiver.await.unwrap();
+            peri_time::sleep(std::time::Duration::from_secs(5)).await;
+            worker_state.settle_sync_delivery("child");
+        })
+        .unwrap();
+    let closing = tokio::spawn(close_subagent_session_scope(session.clone()));
+    let failure = closing.await.unwrap().unwrap_err();
+    assert!(failure.contains("queue rejected result"));
+    assert!(state.is_closing());
+    retry_sender.send(()).unwrap();
+    tokio::task::yield_now().await;
+    assert!(close_subagent_session_scope(session.clone())
+        .await
+        .unwrap_err()
+        .contains("queue rejected result"));
+    tokio::time::advance(std::time::Duration::from_secs(4)).await;
+    assert!(!worker.is_finished());
+    tokio::time::advance(std::time::Duration::from_secs(1)).await;
+    worker.await.unwrap();
+    close_subagent_session_scope(session).await.unwrap();
+}
+
+#[tokio::test]
+async fn worker_delivery_failure_is_not_reported_as_successful_close() {
+    let session = child(Arc::new(TaskManager::new()), None);
+    let state = session.subagent_host().unwrap().close_state.clone();
+    let worker_state = state.clone();
+    state
+        .spawn_sync_worker("child".into(), async move {
+            worker_state.record_sync_delivery_failure("child", "queue unavailable");
+        })
+        .unwrap()
+        .await
+        .unwrap();
+    let error = close_subagent_session_scope(session).await.unwrap_err();
+    assert!(error.contains("child: Incomplete: sync child delivery failed: queue unavailable"));
+}
+
+#[tokio::test]
+async fn worker_explicit_close_does_not_wait_for_itself_but_external_close_does() {
+    let session = child(Arc::new(TaskManager::new()), None);
+    let state = session.subagent_host().unwrap().close_state.clone();
+    let (entered_sender, entered_receiver) = tokio::sync::oneshot::channel();
+    let (release_sender, release_receiver) = tokio::sync::oneshot::channel();
+    let worker_session = session.clone();
+    let worker_state = state.clone();
+    let worker = state
+        .spawn_sync_worker("child".into(), async move {
+            settle_explicit_close(&worker_session, true).await.unwrap();
+            entered_sender.send(()).unwrap();
+            release_receiver.await.unwrap();
+            worker_state.settle_sync_delivery("child");
+        })
+        .unwrap();
+    tokio::time::timeout(std::time::Duration::from_secs(2), entered_receiver)
+        .await
+        .expect("worker must not wait for itself")
+        .unwrap();
+    let closing = tokio::spawn(close_subagent_session_scope(session));
+    tokio::task::yield_now().await;
+    assert!(!closing.is_finished());
+    release_sender.send(()).unwrap();
+    worker.await.unwrap();
+    closing.await.unwrap().unwrap();
+}
+
+#[tokio::test]
+async fn close_rejects_late_worker_registration() {
+    let session = child(Arc::new(TaskManager::new()), None);
+    let state = session.subagent_host().unwrap().close_state.clone();
+    close_subagent_session_scope(session).await.unwrap();
+    let error = state
+        .spawn_sync_worker("late".into(), async {})
+        .unwrap_err();
+    assert!(error.contains("registered after session close began"));
+}

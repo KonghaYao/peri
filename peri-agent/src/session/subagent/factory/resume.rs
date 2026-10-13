@@ -6,7 +6,8 @@ use peri_acp_types::store::PersistedPayload;
 
 use super::super::background::spawn_background_subagent;
 use super::super::run_sync::{
-    handoff_event_handler, run_sync_subagent, run_sync_with_handoff, SyncCompletion,
+    handoff_event_handler, new_sync_task_id, run_sync_subagent, run_sync_with_registered_handoff,
+    SyncCompletion,
 };
 use super::super::types::{SubagentResumeConfig, SubagentRunMode, SubagentSpawned};
 use super::super::v2_bridge::agent_id_from_child_thread;
@@ -308,10 +309,15 @@ pub(super) async fn resume_subagent_impl(
             let run_agent_name = agent_name.clone();
             let run_cwd = cwd.clone();
             let run_session = session.clone();
-            let completion = run_sync_with_handoff(
+            let sync_task_id = new_sync_task_id();
+            let completion = run_sync_with_registered_handoff(
                 session.clone(),
                 thread_id.clone(),
                 agent_name.clone(),
+                parent
+                    .and_then(|session| session.subagent_host())
+                    .and_then(|host| host.task_manager.clone()),
+                Some(sync_task_id.clone()),
                 super::completion_delivery(parent, on_bg_complete),
                 move |handoff_start, handed_off| async move {
                     run_sync_subagent(
@@ -337,13 +343,13 @@ pub(super) async fn resume_subagent_impl(
                 },
             )
             .await?;
-            let (interrupted, pending_tasks) = match completion {
-                SyncCompletion::Finished(interrupted) => (interrupted, Vec::new()),
-                SyncCompletion::Pending(tasks) => (false, tasks),
+            let (interrupted, pending_tasks, pending_task_id) = match completion {
+                SyncCompletion::Finished(interrupted) => (interrupted, Vec::new(), None),
+                SyncCompletion::Pending(tasks) => (false, tasks, Some(sync_task_id)),
             };
             Ok(SubagentSpawned {
                 child_thread_id: thread_id,
-                task_id: None,
+                task_id: pending_task_id,
                 session,
                 cancel_token,
                 interrupted,

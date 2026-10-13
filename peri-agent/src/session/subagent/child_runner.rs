@@ -59,13 +59,13 @@ pub(super) async fn run_child_with_handoff_signal(
     let hook_stop_requested = Arc::new(AtomicBool::new(false));
     let shell_reminded = Arc::new(AtomicBool::new(false));
     context.async_ctx.hook_stop_requested = Some(Arc::clone(&hook_stop_requested));
-    // Child task settlement is owned below. A live shell must reach the child
-    // terminal decision immediately, before the general idle wait on every pass.
+    // Child task settlement is owned below. Active tasks must reach the child
+    // terminal decision before the general idle wait can consume another bound.
     let original_idle_probe = context.async_ctx.idle_should_wait.take();
     context.async_ctx.idle_should_wait = Some({
         let manager = Arc::clone(&manager);
         Arc::new(move || {
-            if !active_shell_tasks(&manager).is_empty() {
+            if manager.active_count() > 0 {
                 return false;
             }
             original_idle_probe.as_ref().is_some_and(|probe| probe())
