@@ -173,9 +173,9 @@
 
 ### ARC-MCP-APPS-001
 
-- **Scope**：ACP MCP Apps relay、binding lease 与工具分派。
-- **Rule**：App 工具调用必须持有 connection-owned binding lease，进入 canonical invocation 与 Permission/HITL；lease 归属、工具白名单、generation 或会话空闲不替代审批。宿主发起调用缺少 canonical 审批上下文时返回 `PolicyDenied`，不调用 MCP server、不签发新 lease，不回落 pool/peer 直调。模型签发 lease 保留当前 canonical dispatcher；关闭、取消与换代仍按既有 lease 生命周期撤销。协议与部署语义见 [MCP Apps relay](../design/mcp-multiplexing.md)。
-- **Verify**：`./scripts/cargo-rmcp-patched.sh test --locked -p peri-middlewares --lib -- mcp::apps`；`./scripts/cargo-rmcp-patched.sh test --locked -p peri-acp --lib -- host::mcp_apps::tests`；拒绝须断言 server 零调用且未签发 lease，ACP 不发布工具成功投影。
+- **Scope**：ACP MCP Apps relay、App 附件身份（SessionAttachment + 纪元 + ledger 序号）与工具分派。
+- **Rule**：App 工具调用必须进入 canonical invocation 与 Permission/HITL；调用资格由**附件身份**（`SessionAttachment` 的 `attachment_id` + `connection_epoch`）与**请求账本序号**（`{namespace, seq}`）承载，连接上下文不再持有 App 会话权威（旧 connection-owned binding lease 与其 lease 表已删除）。仅知 `sessionId`、附件不在本连接、纪元过期、归属或世代不符都不构成资格，且任何一项都不替代审批。宿主发起调用缺少 canonical 审批上下文时返回 `PolicyDenied`，不调用 MCP server、不签发新 record，不回落 pool/peer 直调。模型签发路径保留当前 canonical dispatcher；撤销语义按新模型：`apps/detach` 只摘交付资格（不撤 record、不取消已 dispatch 的执行），`apps/close` / 会话关闭 / incarnation 换代 / 保留到期才终态撤销 record。旧 4 个 wire 名（`peri/mcp/{open,resource,app,invoke}`）是同一 façade 的薄别名（同一执行链、同一判决、无第二权威），删除条件是外部客户端切到 `peri/mcp/apps/*`。协议与部署语义见 [MCP Apps relay](../design/mcp-multiplexing.md)。
+- **Verify**：`./scripts/cargo-rmcp-patched.sh test --locked -p peri-middlewares --lib -- mcp::apps`；`./scripts/cargo-rmcp-patched.sh test --locked -p peri-middlewares --lib -- mcp::session_invocation`；`./scripts/cargo-rmcp-patched.sh test --locked -p peri-acp --lib -- host::apps_facade`；`./scripts/cargo-rmcp-patched.sh test --locked -p peri-acp --lib -- host::mcp_apps`；拒绝须断言 server 零调用且未签发 record，ACP 不发布工具成功投影。
 
 ### ARC-SECRET-001
 
