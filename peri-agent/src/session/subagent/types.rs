@@ -320,6 +320,23 @@ pub struct SubagentSpawned {
     pub cancel_token: CancellationToken,
     /// 是否被中断（Sync 模式；Background 模式恒 false）
     pub interrupted: bool,
+    /// 同步子 Agent 的运行中任务，移交给当前进程的子会话 worker 后才填写。
+    pub pending_tasks: Vec<String>,
+}
+
+impl SubagentSpawned {
+    pub fn pending_message(&self) -> Option<String> {
+        (!self.pending_tasks.is_empty()).then(|| {
+            format!(
+                "child_thread_id: {}\nstatus: pending\ntask_id: sync-{}\nPending tasks: {}. \
+                 This sub-agent remains active under its session owner; its final result will \
+                 be delivered when the pending tasks settle. Do not resume this thread while active.",
+                self.child_thread_id,
+                self.child_thread_id,
+                self.pending_tasks.join(", ")
+            )
+        })
+    }
 }
 
 /// Typed failure crossing the Agent-owned subagent boundary.

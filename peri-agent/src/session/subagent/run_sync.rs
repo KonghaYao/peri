@@ -1,4 +1,11 @@
+use std::future::Future;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
+use std::time::Duration;
+
+use futures::FutureExt;
+use peri_acp_types::tasks::{BgTaskKind, OnBgCompleteFn};
+use tokio::sync::oneshot;
 
 use peri_acp_types::identity::AgentId;
 
@@ -12,13 +19,168 @@ use super::{
     emit_subagent_stop_v2_with_failure, on_subagent_stop_handler, DeregisterGuard,
     SubagentStopV2Input,
 };
-use crate::agent::events::AgentEventHandler;
+use crate::agent::events::{AgentEventHandler, ExecutorEvent, FnEventHandler};
 use crate::agent::stages::LoopResult;
 use crate::agent::subagent_event_forwarder::spawn_subagent_event_forwarder_for_completion;
 use crate::agent::LangfuseBridgeLike;
 use crate::session::factory::{DeregisterRuntimeFn, RegisterRuntimeFn};
 use crate::session::Session;
 use peri_acp_types::session_resources::SessionResources;
+
+pub(super) enum SyncCompletion {
+    Finished(bool),
+    Pending(Vec<String>),
+}
+
+struct CancelSyncWorkerOnDrop(Option<tokio::task::AbortHandle>);
+
+impl Drop for CancelSyncWorkerOnDrop {
+    fn drop(&mut self) {
+        if let Some(worker) = self.0.take() {
+            worker.abort();
+        }
+    }
+}
+
+pub(super) fn handoff_event_handler(
+    original: Option<Arc<dyn AgentEventHandler>>,
+    background: Option<tokio::sync::mpsc::UnboundedSender<ExecutorEvent>>,
+    handed_off: Arc<AtomicBool>,
+) -> Option<Arc<dyn AgentEventHandler>> {
+    if original.is_none() && background.is_none() {
+        return None;
+    }
+    Some(Arc::new(FnEventHandler(move |event| {
+        if handed_off.load(Ordering::Acquire) {
+            if let Some(sender) = &background {
+                if let Err(error) = sender.send(event) {
+                    tracing::error!(%error, "sync child handoff event receiver closed");
+                }
+            } else if let Some(handler) = &original {
+                handler.on_event(event);
+            }
+        } else if let Some(handler) = &original {
+            handler.on_event(event);
+        }
+    })))
+}
+
+pub(super) async fn run_sync_with_handoff<Run, Execution>(
+    session: Arc<Session>,
+    child_thread_id: String,
+    agent_name: String,
+    on_complete: Option<OnBgCompleteFn>,
+    run: Run,
+) -> Result<SyncCompletion, Box<dyn std::error::Error + Send + Sync>>
+where
+    Run: FnOnce(oneshot::Sender<()>, Arc<AtomicBool>) -> Execution + Send + 'static,
+    Execution:
+        Future<Output = Result<bool, Box<dyn std::error::Error + Send + Sync>>> + Send + 'static,
+{
+    let host = session
+        .subagent_host()
+        .ok_or("sync child host unavailable")?;
+    let (handoff_sender, handoff_ready) = oneshot::channel();
+    let handed_off = Arc::new(AtomicBool::new(false));
+    let mut execution = Box::pin(run(handoff_sender, Arc::clone(&handed_off)));
+    tokio::select! {
+        biased;
+        outcome = &mut execution => return Ok(SyncCompletion::Finished(outcome?)),
+        _ = handoff_ready => {},
+    }
+    let (finished_sender, mut finished) = oneshot::channel();
+    let delivery_available = on_complete.is_some();
+    let worker_handed_off = Arc::clone(&handed_off);
+    let settlement = Arc::new(parking_lot::Mutex::new(()));
+    let worker_settlement = Arc::clone(&settlement);
+    let worker_session = Arc::clone(&session);
+    let worker_thread_id = child_thread_id.clone();
+    let worker = host.close_state.sync_workers.spawn(async move {
+        let outcome = std::panic::AssertUnwindSafe(execution)
+            .catch_unwind()
+            .await
+            .unwrap_or_else(|_| {
+                tracing::error!(child_thread_id = %worker_thread_id, "sync child worker panicked");
+                Err("sync child worker panicked".into())
+            });
+        let delivery_required = {
+            let _settlement = worker_settlement.lock();
+            let delivery_required = worker_handed_off.load(Ordering::Acquire);
+            if !delivery_required {
+                let _ = finished_sender.send(outcome);
+                return;
+            }
+            delivery_required
+        };
+        if delivery_required {
+            let result = peri_acp_types::event::BackgroundTaskResult {
+                task_id: format!("sync-{worker_thread_id}"),
+                agent_name,
+                prompt_summary: "synchronous sub-agent handoff".into(),
+                success: matches!(&outcome, Ok(false)),
+                output: match &outcome {
+                    Ok(false) => extract_last_ai_text(&worker_session),
+                    Ok(true) => "Sub-agent was interrupted after handoff".into(),
+                    Err(error) => format!("Sub-agent failed after handoff: {error}"),
+                },
+                tool_calls_count: super::util::count_tool_calls_from_session(&worker_session),
+                duration_ms: 0,
+                timed_out: false,
+                child_thread_id: Some(worker_thread_id.clone()),
+                subagent_failure: None,
+                shell_output: None,
+            };
+            if let Some(delivery) = on_complete {
+                let mut attempts = 0u32;
+                loop {
+                    match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                        delivery(&result, BgTaskKind::Agent)
+                    })) {
+                        Ok(Ok(())) => break,
+                        rejected => {
+                            attempts = attempts.saturating_add(1);
+                            let error = match rejected {
+                                Ok(Err(error)) => error,
+                                Err(_) => "completion callback panicked".into(),
+                                Ok(Ok(())) => unreachable!(),
+                            };
+                            tracing::error!(child_thread_id = %worker_thread_id, %error, attempts, "sync child handoff completion delivery failed; retaining result for retry");
+                            peri_time::sleep(Duration::from_secs(5)).await;
+                        }
+                    }
+                }
+            }
+        }
+        let _ = finished_sender.send(outcome);
+    });
+    let mut cancel_on_drop = CancelSyncWorkerOnDrop(Some(worker.abort_handle()));
+
+    tokio::select! {
+        biased;
+        result = &mut finished => Ok(SyncCompletion::Finished(result.map_err(|_| "sync child worker lost")??)),
+        _ = peri_time::sleep(Duration::from_secs(120)) => {
+            let pending = host.task_manager.as_ref().map(|manager| {
+                manager.pending_handoff_tasks().into_iter().map(|task| {
+                    format!("{} ({:?}; owner: {})", task.task_id, task.kind,
+                        task.owner_session_id.as_deref().unwrap_or(&child_thread_id))
+                }).collect::<Vec<_>>()
+            }).unwrap_or_default();
+            if pending.is_empty() || !delivery_available {
+                return Ok(SyncCompletion::Finished(finished.await.map_err(|_| "sync child worker lost")??));
+            }
+            {
+                let _settlement = settlement.lock();
+                if let Ok(result) = finished.try_recv() {
+                    return Ok(SyncCompletion::Finished(result?));
+                }
+                handed_off.store(true, Ordering::Release);
+            }
+            cancel_on_drop.0 = None;
+            tracing::warn!(%child_thread_id, pending = ?pending, "sync child execution handed off to session-owned worker");
+            Ok(SyncCompletion::Pending(pending))
+        },
+    }
+}
 
 // ─── 同步运行 ────────────────────────────────────────────────────────────────
 
@@ -41,6 +203,7 @@ pub(super) async fn run_sync_subagent(
     v2_ctx: V2SubagentContext,
     session: Arc<Session>,
     mut resume_claim: Option<ResumeClaim>,
+    handoff_start: Option<tokio::sync::oneshot::Sender<()>>,
 ) -> Result<bool, Box<dyn std::error::Error + Send + Sync>> {
     let agent_name = agent_name.to_string();
     let cwd = cwd.to_string();
@@ -107,8 +270,19 @@ pub(super) async fn run_sync_subagent(
     // 运行 v2 ReAct 循环
     let execution_turn = v2_ctx.context.session.turn.clone();
     let mut loop_result =
-        super::child_runner::run_child_until_terminal(v2_ctx.context, max_iterations, &session)
-            .await;
+        std::panic::AssertUnwindSafe(super::child_runner::run_child_with_handoff_signal(
+            v2_ctx.context,
+            max_iterations,
+            &session,
+            handoff_start,
+        ))
+        .catch_unwind()
+        .await
+        .unwrap_or_else(|_| {
+            LoopResult::Error(crate::error::AgentError::Other(anyhow::anyhow!(
+                "sync child execution panicked"
+            )))
+        });
     if let Err(error) = super::lifecycle::flush_session_history(&session).await {
         loop_result = LoopResult::Error(error);
     }

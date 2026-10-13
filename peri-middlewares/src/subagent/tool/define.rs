@@ -335,6 +335,10 @@ impl BaseTool for SubAgentTool {
 
         let spawned = self.spawn(config).await?;
 
+        if let Some(pending) = spawned.pending_message() {
+            return Ok(pending);
+        }
+
         // Interrupted 语义与迁移前一致；文本携带 child_thread_id——主 agent 凭此
         // 找回执行现场（会话资源门面为 None 的测试路径同样带 id：spawned.child_thread_id 恒可用）
         if spawned.interrupted {

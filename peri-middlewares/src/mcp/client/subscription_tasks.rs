@@ -20,11 +20,15 @@ struct ScopeTaskRow {
     task: DetailedTask,
 }
 
-/// Bounded give-up for an unobservable task owner: after this many consecutive
-/// failed 2-second polls (about 10 minutes) the projection is settled as
-/// unresolved instead of staying active forever. The final reminder states that
-/// the remote side effects are unknown.
+/// After this many consecutive failed status queries, attempt to settle an
+/// unobservable owner as unresolved. Settlement itself can still fail, and a
+/// known terminal result must never be replaced by an unresolved reminder.
 const LOST_ABANDON_ATTEMPTS: usize = 300;
+
+fn lost_owner_retry_due(attempts: &mut usize) -> bool {
+    *attempts = attempts.saturating_add(1);
+    *attempts >= LOST_ABANDON_ATTEMPTS
+}
 
 #[derive(Deserialize)]
 struct ScopeTaskSnapshot {
@@ -320,9 +324,9 @@ impl McpClientPool {
         };
         self.task_spawner.spawn(key, async move {
             let mut peer = initial_peer;
-            // Consecutive polls without an observable owner or confirmed
-            // terminal delivery. Reset whenever the owner answers.
-            let mut attempts: usize = 0;
+            let mut lost_owner_attempts: usize = 0;
+            let mut terminal_delivery_failures: usize = 0;
+            let mut known_terminal: Option<DetailedTask> = None;
             loop {
                 let Some(pool) = weak_pool.upgrade() else {
                     break;
@@ -334,48 +338,41 @@ impl McpClientPool {
                 if is_workspace_shell {
                     params.meta = pool.task_scope_meta_for(&server, &session_id);
                 }
-                match peer.get_task(params).await {
-                    Ok(snapshot) if snapshot.task.status().is_terminal() => {
+                let observed = match known_terminal.as_ref() {
+                    Some(task) => Ok(task.clone()),
+                    None => peer.get_task(params).await.map(|snapshot| snapshot.task),
+                };
+                match observed {
+                    Ok(task) if task.status().is_terminal() => {
+                        known_terminal = Some(task.clone());
                         let transition_id = format!("{raw_task_id}:terminal");
-                        let result = pool.deliver_managed_task_status(
-                            &server,
-                            &task_id,
-                            &transition_id,
-                            &snapshot.task,
-                            is_workspace_shell,
-                            manager.as_ref(),
-                        ).await;
+                        let result = pool
+                            .deliver_managed_task_status(
+                                &server,
+                                &task_id,
+                                &transition_id,
+                                &task,
+                                is_workspace_shell,
+                                manager.as_ref(),
+                            )
+                            .await;
                         if let Err(error) = result {
-                            // Bounded give-up: an owner that stays unobservable
-                            // must not keep the task active forever.
-                            let attempts = attempts.saturating_add(1);
-                            if attempts >= LOST_ABANDON_ATTEMPTS {
-                                match manager
-                                    .abandon_external(&task_id, &error)
-                                    .await
-                                {
-                                    Ok(true) => break,
-                                    Ok(false) => {}
-                                    Err(abandon_error) => {
-                                        tracing::warn!(server = %server, task_id = %raw_task_id,
-                                            %abandon_error, "MCP task abandon pending reconciliation");
-                                    }
-                                }
-                            }
-                            tracing::warn!(server = %server, task_id = %raw_task_id, %error,
+                            terminal_delivery_failures =
+                                terminal_delivery_failures.saturating_add(1);
+                            tracing::warn!(server = %server, session_id = %session_id,
+                                task_id = %raw_task_id, terminal_delivery_failures, %error,
                                 "MCP task terminal delivery pending reconciliation");
                         } else {
                             break;
                         }
                     }
                     Ok(_) => {
-                        attempts = 0;
+                        lost_owner_attempts = 0;
                         manager.mark_external_running(&task_id);
                     }
                     Err(error) => {
                         manager.mark_external_lost(&task_id);
-                        let attempts = attempts.saturating_add(1);
-                        if attempts >= LOST_ABANDON_ATTEMPTS {
+                        if lost_owner_retry_due(&mut lost_owner_attempts) {
                             match manager
                                 .abandon_external(
                                     &task_id,
@@ -384,14 +381,20 @@ impl McpClientPool {
                                 .await
                             {
                                 Ok(true) => break,
-                                Ok(false) => {}
+                                Ok(false) => {
+                                    tracing::warn!(server = %server, session_id = %session_id,
+                                        task_id = %raw_task_id, lost_owner_attempts,
+                                        "MCP task abandon not yet committed");
+                                }
                                 Err(abandon_error) => {
-                                    tracing::warn!(server = %server, task_id = %raw_task_id,
+                                    tracing::warn!(server = %server, session_id = %session_id,
+                                        task_id = %raw_task_id, lost_owner_attempts,
                                         %abandon_error, "MCP task abandon pending reconciliation");
                                 }
                             }
                         }
-                        tracing::warn!(server = %server, task_id = %raw_task_id, %error,
+                        tracing::warn!(server = %server, session_id = %session_id,
+                            task_id = %raw_task_id, lost_owner_attempts, %error,
                             "MCP task status unavailable; retrying");
                     }
                 }

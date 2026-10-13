@@ -12,6 +12,7 @@ type CloseReceiver = watch::Receiver<Option<CloseResult>>;
 #[derive(Default)]
 pub struct SubagentCloseState {
     attempt: parking_lot::Mutex<Option<CloseReceiver>>,
+    pub(super) sync_workers: tokio_util::task::TaskTracker,
 }
 
 impl SubagentCloseState {

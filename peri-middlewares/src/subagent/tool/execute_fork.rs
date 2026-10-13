@@ -58,6 +58,10 @@ impl super::SubAgentTool {
 
         let spawned = self.spawn(config).await?;
 
+        if let Some(pending) = spawned.pending_message() {
+            return Ok(pending);
+        }
+
         // Interrupted 语义与迁移前一致；文本携带 child_thread_id（主 agent 凭此恢复）
         if spawned.interrupted {
             return Ok(format!(

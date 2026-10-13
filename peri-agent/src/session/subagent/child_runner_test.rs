@@ -446,6 +446,7 @@ async fn foreground_child_waits_for_nested_result_before_returning() {
             built,
             owner_child,
             None,
+            None,
         )
         .await
     });
@@ -459,6 +460,125 @@ async fn foreground_child_waits_for_nested_result_before_returning() {
     assert!(!owner.await.unwrap().unwrap());
     assert_eq!(result_calls.load(Ordering::SeqCst), 1);
     assert!(super::super::util::extract_last_ai_text(&child).contains("processed nested result"));
+}
+
+#[tokio::test(start_paused = true)]
+async fn sync_child_handoff_returns_pending_and_delivers_late_result() {
+    let (child, manager, built, reminder_calls) = child_with_shell_task(false);
+    let child_id = child.store().thread_id.clone().unwrap();
+    let (delivered_sender, delivered_receiver) = tokio::sync::oneshot::channel();
+    let delivered_sender = parking_lot::Mutex::new(Some(delivered_sender));
+    let delivery_attempts = Arc::new(AtomicUsize::new(0));
+    let attempts = Arc::clone(&delivery_attempts);
+    let delivery: peri_acp_types::tasks::OnBgCompleteFn = Arc::new(move |result, kind| {
+        assert_eq!(kind, BgTaskKind::Agent);
+        if attempts.fetch_add(1, Ordering::SeqCst) == 0 {
+            return Err("transient delivery rejection".into());
+        }
+        if let Some(sender) = delivered_sender.lock().take() {
+            let _ = sender.send(result.clone());
+        }
+        Ok(())
+    });
+    let worker_child = child.clone();
+    let run_id = child_id.clone();
+    let mut call = tokio::spawn(super::super::run_sync::run_sync_with_handoff(
+        child.clone(),
+        child_id.clone(),
+        "fixture".into(),
+        Some(delivery),
+        move |handoff_start, _handed_off| async move {
+            super::super::run_sync::run_sync_subagent(
+                &run_id,
+                "fixture",
+                "/tmp",
+                10,
+                None,
+                None,
+                None,
+                None,
+                None,
+                None,
+                None,
+                None,
+                None,
+                built,
+                worker_child,
+                None,
+                Some(handoff_start),
+            )
+            .await
+        },
+    ));
+
+    let pending = tokio::time::timeout(Duration::from_secs(121), &mut call)
+        .await
+        .expect("parent call must return after the approved bound")
+        .unwrap()
+        .unwrap();
+    let super::super::run_sync::SyncCompletion::Pending(tasks) = pending else {
+        panic!("live shell must be handed off to the session worker");
+    };
+    assert!(tasks.iter().any(|task| task.contains("shell-task")));
+    assert_eq!(reminder_calls.load(Ordering::SeqCst), 1);
+    assert_eq!(manager.active_count(), 1);
+
+    let mut shell_result = nested_result();
+    shell_result.task_id = "shell-task".into();
+    assert!(manager.complete("shell-task", shell_result));
+    let delivered = tokio::time::timeout(Duration::from_secs(8), delivered_receiver)
+        .await
+        .expect("owned child worker must deliver the late result")
+        .unwrap();
+    assert_eq!(
+        delivered.child_thread_id.as_deref(),
+        Some(child_id.as_str())
+    );
+    assert!(delivered.success);
+    assert_eq!(delivered.output, "child answer");
+    assert_eq!(delivery_attempts.load(Ordering::SeqCst), 2);
+    assert_eq!(
+        child
+            .subagent_host()
+            .unwrap()
+            .close_state
+            .sync_workers
+            .len(),
+        0
+    );
+}
+
+#[test]
+fn sync_handoff_routes_late_events_to_background_pump() {
+    use crate::agent::events::{AgentEventHandler, ExecutorEvent, FnEventHandler};
+    use std::sync::atomic::AtomicBool;
+
+    let foreground = Arc::new(AtomicUsize::new(0));
+    let observed = Arc::clone(&foreground);
+    let handler: Arc<dyn AgentEventHandler> = Arc::new(FnEventHandler(move |_| {
+        observed.fetch_add(1, Ordering::SeqCst);
+    }));
+    let (sender, mut receiver) = tokio::sync::mpsc::unbounded_channel();
+    let handed_off = Arc::new(AtomicBool::new(false));
+    let routed = super::super::run_sync::handoff_event_handler(
+        Some(handler),
+        Some(sender),
+        Arc::clone(&handed_off),
+    )
+    .unwrap();
+    let event = || ExecutorEvent::SubagentStarted {
+        agent_name: "fixture".into(),
+        instance_id: "child".into(),
+        parent_tool_call_id: None,
+        is_background: false,
+    };
+    routed.on_event(event());
+    assert_eq!(foreground.load(Ordering::SeqCst), 1);
+    assert!(receiver.try_recv().is_err());
+    handed_off.store(true, Ordering::Release);
+    routed.on_event(event());
+    assert!(receiver.try_recv().is_ok());
+    assert_eq!(foreground.load(Ordering::SeqCst), 1);
 }
 
 #[tokio::test(start_paused = true)]

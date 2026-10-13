@@ -6,7 +6,9 @@ use peri_acp_types::store::{InheritedContext, PersistedPayload};
 
 use super::super::background::spawn_background_subagent;
 use super::super::directives::{build_bg_fork_directive, build_fork_directive};
-use super::super::run_sync::run_sync_subagent;
+use super::super::run_sync::{
+    handoff_event_handler, run_sync_subagent, run_sync_with_handoff, SyncCompletion,
+};
 use super::super::types::{
     ForkDirectiveKind, SubagentRunMode, SubagentSpawnConfig, SubagentSpawned,
 };
@@ -359,31 +361,50 @@ pub(super) async fn spawn_subagent_impl(
 
     match run_mode {
         SubagentRunMode::Sync => {
-            let interrupted = run_sync_subagent(
-                &child_thread_id,
-                &agent_name,
-                &cwd,
-                max_iterations,
-                event_handler,
-                on_subagent_start,
-                on_subagent_stop,
-                session_resources,
-                register_runtime,
-                deregister_runtime,
-                langfuse_bridge,
-                parent_agent_id,
-                parent_tool_call_id,
-                v2_ctx,
+            let run_thread_id = child_thread_id.clone();
+            let run_agent_name = agent_name.clone();
+            let run_cwd = cwd.clone();
+            let run_session = session.clone();
+            let completion = run_sync_with_handoff(
                 session.clone(),
-                None,
+                child_thread_id.clone(),
+                agent_name.clone(),
+                super::completion_delivery(parent, on_bg_complete),
+                move |handoff_start, handed_off| async move {
+                    run_sync_subagent(
+                        &run_thread_id,
+                        &run_agent_name,
+                        &run_cwd,
+                        max_iterations,
+                        handoff_event_handler(event_handler, bg_event_sender, handed_off),
+                        on_subagent_start,
+                        on_subagent_stop,
+                        session_resources,
+                        register_runtime,
+                        deregister_runtime,
+                        langfuse_bridge,
+                        parent_agent_id,
+                        parent_tool_call_id,
+                        v2_ctx,
+                        run_session,
+                        None,
+                        Some(handoff_start),
+                    )
+                    .await
+                },
             )
             .await?;
+            let (interrupted, pending_tasks) = match completion {
+                SyncCompletion::Finished(interrupted) => (interrupted, Vec::new()),
+                SyncCompletion::Pending(tasks) => (false, tasks),
+            };
             Ok(SubagentSpawned {
                 child_thread_id,
                 task_id: None,
                 session,
                 cancel_token,
                 interrupted,
+                pending_tasks,
             })
         }
         SubagentRunMode::Background => {
@@ -417,6 +438,7 @@ pub(super) async fn spawn_subagent_impl(
                 session,
                 cancel_token,
                 interrupted: false,
+                pending_tasks: Vec::new(),
             })
         }
     }
