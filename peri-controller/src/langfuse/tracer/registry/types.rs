@@ -1,9 +1,8 @@
 //! 注册、乱序缓存和观测关闭之间传递的内部数据；不持有独立注册表。
 
 use peri_agent::agent::events::Stage;
-use peri_agent::messages::BaseMessage;
-use peri_agent::tools::ToolDefinition;
 
+use super::super::input_snapshot::GenerationInput;
 use super::super::tool_batch::ToolsBatchFlush;
 
 /// incomplete 诊断原因(终态,不再变化)
@@ -68,7 +67,10 @@ pub(crate) struct SubagentInvocation {
     pub stop_received: bool,
 }
 
-/// 注册闸门缓存的事件(tracer 入参级,重放时直接回放对应 on_* 调用)
+/// 注册闸门缓存的事件(tracer 入参级,重放时直接回放对应 on_* 调用)。
+///
+/// 闸门只保存**已冻结**的输入来源（[`GenerationInput`]），不保存 messages/tools 原文；
+/// 冻结计费发生在入闸门之前，逐出/拒绝时随事件一起释放 permit 或取消 ticket（契约 §3.3）。
 pub(crate) enum GateEvent {
     StageStarted {
         agent_id: String,
@@ -78,13 +80,12 @@ pub(crate) enum GateEvent {
     LlmCallStart {
         agent_id: String,
         step: usize,
-        messages: std::sync::Arc<Vec<BaseMessage>>,
-        tools: std::sync::Arc<Vec<ToolDefinition>>,
+        input: GenerationInput,
     },
     LlmRequestPayload {
         agent_id: String,
         step: usize,
-        body: std::sync::Arc<serde_json::Value>,
+        input: GenerationInput,
     },
     ToolStart {
         agent_id: String,

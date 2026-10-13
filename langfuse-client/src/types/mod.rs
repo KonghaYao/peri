@@ -1,9 +1,11 @@
-mod conversion;
+pub(crate) mod conversion;
 mod otlp;
 pub mod session;
 
 use std::collections::HashMap;
 
+/// 物化回归入口（契约 §3.5）：只由 `conversion_test` / `encoding::stream_test` 使用。
+#[cfg(test)]
 pub(crate) use conversion::ingestion_events_to_otel;
 use serde::{Deserialize, Serialize};
 

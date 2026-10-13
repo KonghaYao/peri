@@ -101,3 +101,41 @@ fn provenance_uses_declared_sources_for_each_domain() {
     );
     assert!(!snapshot.builtin_mcp_enabled());
 }
+
+/// settings 来源的非法观测值把错误定位到 global 文档，并保留结构化原因。
+#[test]
+fn invalid_observability_settings_value_maps_to_global_file() {
+    use crate::observability::{ConfigValueSource, LangfuseConfigError};
+    let directory = tempfile::tempdir().unwrap();
+    let scope = ConfigurationScope::new(
+        directory.path().join("project"),
+        directory.path().join("home/settings.json"),
+    )
+    .unwrap();
+    let inputs = ConfigurationInputs {
+        global: Some(r#"{"langfuse":{"prepare_max_in_flight":0}}"#.into()),
+        workspace: None,
+        project: None,
+        environment: BTreeMap::new(),
+    };
+    let error = crate::ConfigurationSnapshot::resolve(scope, inputs).unwrap_err();
+    assert!(matches!(
+        &error,
+        ConfigurationError::InvalidInput {
+            source_identity: SourceIdentity::GlobalFile,
+            domain: "observability",
+            ..
+        }
+    ));
+    let cause = std::error::Error::source(&error)
+        .and_then(|cause| cause.downcast_ref::<LangfuseConfigError>())
+        .expect("原因链保留结构化解析错误");
+    assert!(matches!(
+        cause,
+        LangfuseConfigError::Invalid {
+            key: "prepare_max_in_flight",
+            origin: ConfigValueSource::Settings,
+            ..
+        }
+    ));
+}

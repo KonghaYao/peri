@@ -188,7 +188,23 @@ pub(crate) fn resolve(
     }
     let mcp = resolve_mcp(scope, inputs, &HashMap::new())?;
     let provider = provider::resolve(&settings, &inputs.environment);
-    let observability = observability::resolve(&global, &inputs.environment);
+    // 新观测键的胜出值非法时拒绝整个快照，并按实际来源定位：settings 来自 global 文档，
+    // 环境来自具名变量本身。
+    let observability = observability::resolve(&global, &inputs.environment).map_err(|error| {
+        let source_identity = match &error {
+            observability::LangfuseConfigError::Invalid { key, origin, .. } => match origin {
+                observability::ConfigValueSource::Settings => SourceIdentity::GlobalFile,
+                observability::ConfigValueSource::Environment => {
+                    SourceIdentity::Environment((*key).to_owned())
+                }
+            },
+        };
+        ConfigurationError::InvalidInput {
+            cause: Box::new(error),
+            source_identity,
+            domain: "observability",
+        }
+    })?;
     let ui = TuiConfig::from_extra(&settings.config.extra);
     let resources = resources::resolve(&global);
     // beta flag 投影由**合并后** settings 派生（workspace 覆盖已生效），来源层对照

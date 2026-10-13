@@ -128,6 +128,13 @@
 - **Boundary**：会话工作区环境的 host/MCP 任务、compact hooks 与 Agent `TaskManager` 必须完成资源排空；会话执行所有权归 `peri-sdk`（ARC-WORKSPACE-001）；事件交付仍按 ARC-EVENT-001 验证。外部共享资源不因会话关闭而取得全局销毁权限。Session 异步任务的执行 owner、显式关闭与异常断线语义以 [目标设计](../design/session-async-tasks.md) 为准；目标尚未完全落地，不把 transport EOF 资源排空等同于远端 MCP task cancel。
 - **Verify**：`cargo test -p peri-acp --lib -- host::task_scope`、`cargo test -p peri-acp --lib -- host::stdio::run_server_integration_tests`、`cargo test -p peri-middlewares --lib -- mcp::task_scope`、`cargo test -p peri-middlewares --lib -- mcp::client`、`cargo test -p peri-tui --lib -- acp_client::deployment::tests`、`cargo test -p peri-middlewares --lib -- test_close_registration_`；ACP `host/stdio/langfuse_shutdown_test.rs` 覆盖实际尾部事件、共享会话与移交 session close owner 的 Incomplete 重试，`transport/mpsc_test.rs` 覆盖显式 close 的双向 pending 与 EOF；`host/stdio/session_store_shutdown_test.rs` 覆盖「排空之前不动用关闭权、排空之后恰好一次」与「未确认的关闭报 Incomplete 且重试重新真实检查」；`cargo test -p peri-resources --test session_resources_contract` 覆盖部署关闭权的交付（crate 外只经 `Resources::into_parts` 取得，具体实例不含关闭）。
 
+### ARC-TELEMETRY-SPOOL-001
+
+- **Scope**：`langfuse-client`（暂存端口与 native 适配器）、`peri-controller`（Langfuse session/tracer 消费）、`peri-acp`（宿主装配注入）、`peri-config`（配置投影）。
+- **Rule**：遥测暂存的资源能力面只在 `langfuse-client` 内定义——sealed 的 `SpoolStore` 端口加 `NativeSpool` 适配器；crate 外只能经 trait 消费，`ObjectId` 只能在 crate 内构造，外部不能伪造对象身份或自实现端口。控制面只消费 trait：`peri-controller` 的 `LangfuseSession::{new,new_owned}` 只接受 `Option<Arc<dyn SpoolStore>>`，不得在 controller 内打开目录/文件或引入文件系统依赖；依赖方向固定为 controller → langfuse-client 端口，禁止新增 `peri-resources → langfuse-client`，也不得反向依赖 `peri-controller`/`peri-acp`。能力由部署装配点按 `spool_enabled` 决定是否注入 native 实现：关闭时不构造 native、不扫描/清理旧对象；未提供能力（None，含 WASM/无持久化宿主）时按分类原因降级到有界内存路径，不得用内存 FS 冒充磁盘卸载。原生工厂与 join 由宿主 task scope 持有并等待，遥测在 Batcher join 前不释放部署资源；关闭结果按 ARC-HOST-SHUTDOWN-001 的 pending/移交语义报告，未确认完成不得报 Complete。
+- **Boundary**：HTTP 重试、编码与 OTLP 字段语义仍归 `langfuse-client` 自身契约；目录布局、锁与 quota 记账属实现细节，只在验证中检查不变量（跨进程独占、失败删除保留 claim/quota；锁文件父目录已被并发删除不得升级为 IO 故障；能力探针对端持锁算竞争，不得降级为 `Unavailable`）。宿主注入点 `peri-acp/src/host/telemetry.rs::assemble` 属契约 §7 P4b：已接线——按 `spool_enabled`、凭据与可解析 route 决定是否打开 native 端口，打开失败只 WARN 并降级为有界内存模式（不阻断遥测）；装配与关闭证据见[实施报告](../../spec/issues/2026-10-12-langfuse-telemetry-spool-report.md)。
+- **Verify**：`cargo test -p langfuse-client --lib -- spool`、`cargo test -p langfuse-client --lib -- memory`、`cargo test -p peri-controller --lib -- langfuse`；人工检查 `langfuse-client/src/spool.rs`（sealed 端口与唯一重导出面）、`langfuse-client/src/spool/native.rs`（唯一 native 构造入口）、`peri-controller/src/langfuse/session.rs` 只持有 trait、`peri-acp` 装配点与 `Cargo.toml` 依赖边未新增反向依赖。
+
 ### ARC-MCP-ACP-001
 
 - **Scope**：`peri-acp-types`（契约）、`peri-middlewares`（`mcp::acp` 实现与 MCP 池归属）、`peri-acp`（host 接线）。

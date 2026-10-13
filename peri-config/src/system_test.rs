@@ -339,6 +339,58 @@ fn failed_resolve_keeps_the_current_snapshot() {
     assert!(Arc::ptr_eq(&current, &system.current(&scope).unwrap()));
 }
 
+/// 新观测键的胜出非法值拒绝整个快照：按实际来源定位、保留结构化原因，且不发布新快照。
+#[test]
+fn invalid_observability_value_rejects_snapshot_by_actual_source() {
+    use crate::observability::{ConfigValueSource, LangfuseCompression, LangfuseConfigError};
+    let temp = tempfile::tempdir().unwrap();
+    let scope = make_scope(temp.path(), "project");
+    let mut inputs = make_inputs(
+        Some(r#"{"langfuse":{"compression":"none","memory_budget_bytes":4096}}"#),
+        None,
+        None,
+    );
+    inputs
+        .environment
+        .insert("LANGFUSE_SPOOL_ENABLED".into(), "on".into());
+    let (source, system) = make_system(&scope, inputs);
+    let current = system.resolve(scope.clone()).unwrap();
+    assert!(current.observability().spool_enabled);
+    assert_eq!(
+        current.observability().compression,
+        LangfuseCompression::None
+    );
+    assert_eq!(current.observability().memory_budget_bytes, 4096);
+
+    // 环境来源非法：定位到具名变量本身，旧快照保持当前值。
+    source.mutate_inputs(&scope, |inputs| {
+        inputs
+            .environment
+            .insert("LANGFUSE_COMPRESSION".into(), "zstd".into());
+    });
+    let error = system.resolve(scope.clone()).unwrap_err();
+    assert!(matches!(
+        &error,
+        ConfigurationError::InvalidInput {
+            source_identity: SourceIdentity::Environment(key),
+            domain: "observability",
+            ..
+        } if key == "LANGFUSE_COMPRESSION"
+    ));
+    let cause = std::error::Error::source(&error)
+        .and_then(|cause| cause.downcast_ref::<LangfuseConfigError>())
+        .expect("原因链保留结构化解析错误");
+    assert!(matches!(
+        cause,
+        LangfuseConfigError::Invalid {
+            key: "LANGFUSE_COMPRESSION",
+            origin: ConfigValueSource::Environment,
+            ..
+        }
+    ));
+    assert!(Arc::ptr_eq(&current, &system.current(&scope).unwrap()));
+}
+
 #[test]
 fn update_rejects_stale_registry_revision_without_writing() {
     let temp = tempfile::tempdir().unwrap();

@@ -1,10 +1,25 @@
 //! 真实 HTTP 背压、flush 屏障与关闭 owner 的排空/join 生命周期回归。
 
-use std::{collections::HashMap, time::Duration};
+use std::{collections::HashMap, io::Read, time::Duration};
 
 use super::*;
+use crate::config::TelemetryConfig;
 use crate::types::TraceBody;
 use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader};
+
+/// 正文按 magic 判压缩：生产默认 gzip，两种情况都解出 OTLP JSON。
+fn request_body(bytes: &[u8]) -> serde_json::Value {
+    let raw = if bytes.starts_with(&[0x1f, 0x8b]) {
+        let mut inflated = Vec::new();
+        flate2::read::GzDecoder::new(bytes)
+            .read_to_end(&mut inflated)
+            .unwrap();
+        inflated
+    } else {
+        bytes.to_vec()
+    };
+    serde_json::from_slice(&raw).unwrap()
+}
 
 fn event(id: &str) -> IngestionEvent {
     IngestionEvent::TraceCreate {
@@ -26,11 +41,11 @@ fn batcher(url: &str) -> Batcher {
             max_events: 1,
             flush_interval: Duration::from_secs(60),
             backpressure: BackpressurePolicy::DropNew,
-            max_retries: 0,
             queue_capacity: 1,
             max_in_flight: 1,
             ..Default::default()
         },
+        None,
     )
 }
 
@@ -76,7 +91,7 @@ async fn gated_ingestion_at(statuses: Vec<u16>, gate_index: usize) -> GatedInges
             let length = headers["content-length"].parse::<usize>().unwrap();
             let mut body = vec![0; length];
             reader.read_exact(&mut body).await.unwrap();
-            bodies.push(serde_json::from_slice(&body).unwrap());
+            bodies.push(request_body(&body));
             if index == gate_index {
                 let (started, release) = first_gate.take().expect("one controlled HTTP gate");
                 started.send(()).unwrap();
@@ -108,11 +123,11 @@ async fn gated_ingestion_at(statuses: Vec<u16>, gate_index: usize) -> GatedInges
     }
 }
 
-async fn park_pending_result(
-    mut shutdown: std::pin::Pin<&mut impl std::future::Future<Output = Result<(), LangfuseError>>>,
+async fn park_pending_result<T>(
+    mut pending: std::pin::Pin<&mut impl std::future::Future<Output = T>>,
 ) {
     std::future::poll_fn(|cx| {
-        assert!(shutdown.as_mut().poll(cx).is_pending());
+        assert!(pending.as_mut().poll(cx).is_pending());
         std::task::Poll::Ready(())
     })
     .await;
@@ -252,11 +267,11 @@ async fn test_shutdown_owner_does_not_wait_for_an_unpolled_blocked_producer() {
             max_events: 1,
             flush_interval: Duration::from_secs(60),
             backpressure: BackpressurePolicy::Block,
-            max_retries: 0,
             queue_capacity: 1,
             max_in_flight: 1,
             ..Default::default()
         },
+        None,
     );
     batcher.add(event("first")).await.unwrap();
     tokio::time::timeout(Duration::from_secs(5), server.started)
@@ -360,7 +375,13 @@ async fn test_shutdown_owner_counts_observed_and_unobserved_http_failures_once()
         "turn confirmation remains incremental"
     );
     let expected = "2 batch submission(s) failed before the flush barrier";
-    for result in [shutdown_result, repeated_result, closed_flush_result] {
+    // shutdown 与关闭后的 flush 各自返回不同结果类型，统一到错误摘要上比较。
+    let observed = [
+        shutdown_result.map(|_| ()),
+        repeated_result.map(|_| ()),
+        closed_flush_result.map(|_| ()),
+    ];
+    for result in observed {
         match result {
             Err(LangfuseError::IngestionApi(summary)) => {
                 assert_eq!(summary, expected);
@@ -381,11 +402,11 @@ async fn assert_drop_oldest_admission_keeps_newest(use_try_add: bool) {
             max_events: 2,
             flush_interval: Duration::from_secs(60),
             backpressure: BackpressurePolicy::DropOldest,
-            max_retries: 0,
             queue_capacity: 2,
             max_in_flight: 1,
             ..Default::default()
         },
+        None,
     );
     batcher.add(event("inflight0")).await.unwrap();
     batcher.add(event("inflight1")).await.unwrap();
@@ -462,11 +483,11 @@ async fn test_backpressure_flush_prefix_is_protected_even_after_waiter_cancellat
                 max_events: 2,
                 flush_interval: Duration::from_secs(60),
                 backpressure: BackpressurePolicy::DropOldest,
-                max_retries: 0,
                 queue_capacity: 2,
                 max_in_flight: 1,
                 ..Default::default()
             },
+            None,
         )
         .unwrap();
         batcher.try_add(event("inflight0")).unwrap();
@@ -511,11 +532,11 @@ async fn test_backpressure_replacement_stays_after_flush_barrier() {
             max_events: 3,
             flush_interval: Duration::from_secs(60),
             backpressure: BackpressurePolicy::DropOldest,
-            max_retries: 0,
             queue_capacity: 3,
             max_in_flight: 1,
             ..Default::default()
         },
+        None,
     );
     for id in ["inflight0", "inflight1", "inflight2"] {
         batcher.try_add(event(id)).unwrap();
@@ -525,24 +546,20 @@ async fn test_backpressure_replacement_stays_after_flush_barrier() {
         .unwrap()
         .unwrap();
     let (ack, response) = oneshot::channel();
-    batcher
-        .admission
-        .send(BatcherCommand::Flush(ack))
-        .await
-        .unwrap();
+    batcher.admission.flush_command(ack).await.unwrap();
     batcher.try_add(event("oldest")).unwrap();
     batcher.try_add(event("kept")).unwrap();
     let replacement = batcher.try_add(event("newest"));
     server.release.send(()).unwrap();
-    let (snapshot, bodies) = tokio::time::timeout(Duration::from_secs(5), async {
-        let snapshot = response.await.expect("Flush ack 不得被驱逐");
+    let (ack, bodies) = tokio::time::timeout(Duration::from_secs(5), async {
+        let ack = response.await.expect("Flush ack 不得被驱逐");
         batcher.shutdown().await.unwrap();
-        (snapshot, server.worker.await.unwrap())
+        (ack, server.worker.await.unwrap())
     })
     .await
     .unwrap();
     assert!(replacement.is_ok());
-    batcher.failures.observe(snapshot).unwrap();
+    batcher.failures.observe(ack.failures).unwrap();
     assert_eq!(
         http_span_ids(&bodies),
         ["inflight0", "inflight1", "inflight2", "kept", "newest"]
@@ -559,11 +576,11 @@ async fn test_flush_barrier_does_not_wait_for_later_http_batch() {
             max_events: 2,
             flush_interval: Duration::from_secs(60),
             backpressure: BackpressurePolicy::Block,
-            max_retries: 0,
             queue_capacity: 2,
             max_in_flight: 1,
             ..Default::default()
         },
+        None,
     );
     batcher.try_add(event("before")).unwrap();
     let mut flush = Box::pin(batcher.flush());
@@ -588,9 +605,76 @@ async fn test_flush_barrier_does_not_wait_for_later_http_batch() {
     assert_eq!(http_span_ids(&bodies), ["before", "after0", "after1"]);
 }
 
+/// [契约 §5.2 / D6] 关闭期限到期不能谎报 Complete，也不能取走或 abort owner：真实阻塞 IO
+/// 跨**两次宿主 shutdown** 收敛到同一终态。第一次只报告 Pending（worker 未 join、事件仍在
+/// 途），放行 IO 后第二次调用必须重入同一个 join 并完成全部交付。
+#[tokio::test]
+async fn test_shutdown_grace_retains_the_owner_across_two_host_shutdowns() {
+    let server = gated_ingestion(vec![200]).await;
+    let batcher = Batcher::try_new(
+        LangfuseClient::new("pk-test", "sk-test", &server.url, 0),
+        BatcherConfig {
+            max_events: 1,
+            flush_interval: Duration::from_secs(60),
+            backpressure: BackpressurePolicy::DropNew,
+            queue_capacity: 1,
+            max_in_flight: 1,
+            telemetry: TelemetryConfig {
+                shutdown_grace: Duration::from_millis(50),
+                ..Default::default()
+            },
+            ..Default::default()
+        },
+        None,
+    )
+    .unwrap();
+    batcher.try_add(event("blocked-io")).unwrap();
+    tokio::time::timeout(Duration::from_secs(5), server.started)
+        .await
+        .unwrap()
+        .unwrap();
+
+    // 首次宿主关闭：HTTP 仍被门控，期限到期只报告 Pending。
+    let first = batcher
+        .shutdown()
+        .await
+        .expect_err("阻塞 IO 未返回时不得报告完成");
+    match first {
+        LangfuseError::Pending { counts } => {
+            assert_eq!(counts.pending_events, 1, "在途事件仍是待交付：{counts:?}");
+            assert_eq!(counts.failed_events, 0, "期限到期不是事件失败：{counts:?}");
+            assert!(
+                counts.active_tasks >= 1,
+                "未 join 的 worker 本身就是活跃任务，不能被当成无活跃任务：{counts:?}"
+            );
+        }
+        other => panic!("期限到期必须报告 Pending，实际 {other:?}"),
+    }
+    assert!(
+        !batcher.worker_is_joined().await,
+        "期限到期不得取走 join 句柄或 abort worker"
+    );
+
+    // 第二次宿主关闭（同一 owner）：放行真实阻塞 IO 后必须收敛到同一终态。
+    server.release.send(()).unwrap();
+    assert!(
+        matches!(batcher.shutdown().await, Ok(ShutdownReport::Complete)),
+        "重入关闭必须在真实 IO 返回后完成交付"
+    );
+    assert!(batcher.worker_is_joined().await);
+    assert_eq!(
+        server.worker.await.unwrap().len(),
+        1,
+        "重入关闭不得重发已接受的事件"
+    );
+}
+
 #[tokio::test]
 async fn test_batcher_legacy_retry_field_never_overrides_client_http_policy() {
-    for (client_retries, legacy_retries, statuses) in [(1, 0, vec![503, 200]), (0, 9, vec![503])] {
+    // 迁移说明：契约 §3.1 已删除 `BatcherConfig` 的旧 `max_retries` 字段（不加 shim），
+    // 本用例保留原用意——HTTP 重试策略只由 client 拥有——改为直接断言请求次数与结果
+    // 完全由 client 的重试上限决定，Batcher 配置面不再提供任何重试开关。
+    for (client_retries, statuses) in [(1, vec![503, 200]), (0, vec![503])] {
         let expected_requests = statuses.len();
         let server = gated_ingestion(statuses).await;
         let batcher = Batcher::try_new(
@@ -599,11 +683,11 @@ async fn test_batcher_legacy_retry_field_never_overrides_client_http_policy() {
                 max_events: 1,
                 flush_interval: Duration::from_secs(60),
                 backpressure: BackpressurePolicy::DropNew,
-                max_retries: legacy_retries,
                 queue_capacity: 1,
                 max_in_flight: 1,
                 ..Default::default()
             },
+            None,
         )
         .unwrap();
         batcher.try_add(event("retryevent")).unwrap();

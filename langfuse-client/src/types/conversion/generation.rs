@@ -1,13 +1,20 @@
 use super::{
-    append_common_obs_attrs, build_span, build_status, LangfuseError, OtelAttribute,
-    OtelAttributeValue, OtelSpan,
+    append_common_obs_attrs, build_span, build_status, span_head, CommonAttrs, EventView,
+    LangfuseError, OtlpSink,
 };
+use crate::stable_json::StableMap;
 use crate::types::GenerationBody;
 
+/// generation-create → OTLP span；attribute 顺序即输出字节顺序（与旧 serde 基线一致）。
+///
+/// `model_parameters`/`usage`/`cost_details` 边序列化边转义嵌入 `stringValue`：
+/// 不再先 `to_string` 造整串；map 经 [`StableMap`] 按字典序输出，不随 `HashMap` 随机迭代序漂移。
 pub(super) fn generation_create(
     body: &GenerationBody,
     timestamp: &str,
-) -> Result<OtelSpan, LangfuseError> {
+    view: &EventView<'_>,
+    sink: &mut OtlpSink<'_>,
+) -> Result<(), LangfuseError> {
     let span = build_span(
         body.trace_id.as_deref(),
         body.id.as_deref(),
@@ -16,76 +23,60 @@ pub(super) fn generation_create(
         body.end_time.as_deref(),
         timestamp,
     )?;
-    let mut attrs = vec![OtelAttribute::string(
-        "langfuse.observation.type",
-        "generation",
-    )];
+    sink.begin_span(
+        &span_head(&span),
+        body.name.as_deref().unwrap_or("generation"),
+    )?;
+    sink.attr_str("langfuse.observation.type", "generation")?;
     append_common_obs_attrs(
-        &mut attrs,
-        body.input.as_ref(),
-        body.output.as_ref(),
-        body.metadata.as_ref(),
-        body.version.as_ref(),
-        body.environment.as_ref(),
-    );
-    if let Some(ref model) = body.model {
-        attrs.push(OtelAttribute::string(
-            "langfuse.observation.model.name",
-            model,
-        ));
+        sink,
+        view,
+        CommonAttrs {
+            input: body.input.as_ref(),
+            output: body.output.as_ref(),
+            metadata: body.metadata.as_ref(),
+            version: body.version.as_ref(),
+            environment: body.environment.as_ref(),
+        },
+    )?;
+    if let Some(model) = body.model.as_deref() {
+        sink.attr_str("langfuse.observation.model.name", model)?;
     }
-    if let Some(ref params) = body.model_parameters {
-        if let Ok(json) = serde_json::to_string(params) {
-            attrs.push(OtelAttribute::string(
-                "langfuse.observation.model.parameters",
-                json,
-            ));
+    if let Some(params) = body.model_parameters.as_ref() {
+        sink.attr_json("langfuse.observation.model.parameters", &StableMap(params))?;
+    }
+    if let Some(usage) = body.usage.as_ref() {
+        sink.attr_json("langfuse.observation.usage_details", &StableMap(usage))?;
+    }
+    if let Some(usage_details) = body.usage_details.as_ref() {
+        let mut keys: Vec<&String> = usage_details.keys().collect();
+        keys.sort_unstable();
+        for key in keys {
+            if let Some(value) = usage_details.get(key) {
+                sink.attr_int(&format!("gen_ai.usage.{key}"), i64::from(*value))?;
+            }
         }
     }
-    if let Some(ref usage) = body.usage {
-        if let Ok(json) = serde_json::to_string(usage) {
-            attrs.push(OtelAttribute::string(
-                "langfuse.observation.usage_details",
-                json,
-            ));
-        }
+    if let Some(cost_details) = body.cost_details.as_ref() {
+        sink.attr_json(
+            "langfuse.observation.cost_details",
+            &StableMap(cost_details),
+        )?;
     }
-    if let Some(ref usage_details) = body.usage_details {
-        for (key, value) in usage_details {
-            attrs.push(OtelAttribute::new(
-                format!("gen_ai.usage.{}", key),
-                OtelAttributeValue::int(*value as i64),
-            ));
-        }
+    if let Some(prompt_name) = body.prompt_name.as_deref() {
+        sink.attr_str("langfuse.observation.prompt.name", prompt_name)?;
     }
-    if let Some(ref cost_details) = body.cost_details {
-        if let Ok(json) = serde_json::to_string(cost_details) {
-            attrs.push(OtelAttribute::string(
-                "langfuse.observation.cost_details",
-                json,
-            ));
-        }
-    }
-    if let Some(ref prompt_name) = body.prompt_name {
-        attrs.push(OtelAttribute::string(
-            "langfuse.observation.prompt.name",
-            prompt_name,
-        ));
-    }
-    if let Some(ref completion_start) = body.completion_start_time {
-        attrs.push(OtelAttribute::string(
+    if let Some(completion_start) = body.completion_start_time.as_deref() {
+        sink.attr_str(
             "langfuse.observation.completion_start_time",
             completion_start,
-        ));
+        )?;
     }
-    if let Some(ref session_id) = body.session_id {
-        attrs.push(OtelAttribute::string("langfuse.session.id", session_id));
+    if let Some(session_id) = body.session_id.as_deref() {
+        sink.attr_str("langfuse.session.id", session_id)?;
     }
-
-    Ok(OtelSpan {
-        name: body.name.clone().or_else(|| Some("generation".into())),
-        attributes: Some(attrs),
-        status: build_status(body.level.as_ref(), body.status_message.as_deref()),
-        ..span
-    })
+    sink.end_span(build_status(
+        body.level.as_ref(),
+        body.status_message.as_deref(),
+    ))
 }
