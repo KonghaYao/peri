@@ -100,8 +100,13 @@ App 来源由 typed `InvocationOrigin::App`（`app_id` / `attachment_id` / `conn
 `SessionInvocationPort::source_target` 据此导出 rerun 目标（查不到 / 跨会话 ⇒ `None`，
 **无回落客户端字段**，裁决 D4）；`close_connection` 改为 detach（不撤销 record），
 附件级撤销不再连带撤销 record（附件身份 ≠ record 身份）；Host invoke 的归属序号
-由 relay 实例内的有界计数器给出（旧进程级静态计数器 `McpAppInvokeRequest::sequence()`
-已删除，S6 由 ledger 的 `RequestSeq` 取代）。
+**不由 relay 持有**（relay 内无任何计数器；旧进程级静态计数器
+`McpAppInvokeRequest::sequence()` 已删除）：新方法用客户端回传、ledger 校验的 `RequestSeq`，
+Host 别名用 `host_attribution` → `RequestLedger::issue_legacy_seq`（4b 批 H 更正旧措辞）。
+记录层预算（4b 批 H）：`McpAppRecord::expires_at` 取契约常量 `APP_RETENTION_MS`（原先误用已删
+lease 模型的 300 s）；签发准入按 `MAX_APPS_PER_SESSION`（超限 `IssueRejection::SessionCapacityExceeded`
+**拒绝且不淘汰存活记录**）；注册表跨会话上限 `MAX_APP_RECORDS` 由 `cleanup()` 在**登记后**
+按最旧（record 身份是 UUID v7）淘汰并终态撤销——原先在登记前清理，表长可停在「上限 + 1」。
 当前 scope 仅用于本进程任务权限与关联，不作为恢复旧执行的证据。
 `tasks/get` 轮询与 Workspace
 `workspace/taskSnapshot`/`workspace/taskChanges` cursor 对账将终态交给 Manager，

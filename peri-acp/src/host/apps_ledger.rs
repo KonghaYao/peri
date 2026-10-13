@@ -481,6 +481,14 @@ impl RequestLedger {
     /// 旧信封没有可重传的业务身份（无 seq / 无附件身份），因此不进入去重表、不产生
     /// 结果槽——它既不能与服务端记录比较指纹，也没有「同 key」概念。归属值仍由本
     /// 账本推进（单调、不复用），随旧别名一并删除（S8）。
+    ///
+    /// **只给不调 `admit` 的调用方用**（当下唯一调用方 = `host_attribution`）：本方法
+    /// 只推进 `last_accepted`、**不登记 pending**，因此它发出的序号若再交给 [`Self::admit`]
+    /// 会命中「`seq <= last_accepted` 且无 pending / 无终态条目」⇒ `ResultExpired`
+    /// （4b 批 H 实测，见实现日志）。要「取号 + 准入」原子完成，需要新的账本入口。
+    ///
+    /// `RequestSeq::new(0)` = namespace 未登记（已销毁或从未创建）：调用方不得把 0
+    /// 当作真实序号传播（`admit` 对 0 一律回 `SequenceGap`）。
     pub(crate) fn issue_legacy_seq(&self, namespace: &RequestNamespaceId) -> RequestSeq {
         let mut state = self.state.write();
         let Some(namespace_state) = state.namespaces.get_mut(namespace) else {

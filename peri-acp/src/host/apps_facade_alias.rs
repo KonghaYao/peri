@@ -78,6 +78,12 @@ impl SessionAppsFacade {
         };
         let attachment_id = attachment.attachment_id().clone();
         let namespace = attachment.namespace().clone();
+        // 序号取「读下一个」：**已知缺陷**（4b 批 H 实测确认，登记在实现日志）——
+        // 同一 namespace 的两次并发别名请求会读到同一序号，后到者被 `admit` 判成
+        // `JoinedPending`（同指纹）或 `Conflict`（异指纹）。修法不是改用
+        // `issue_legacy_seq`（它只推进 `last_accepted`、不登记 pending ⇒ 随后的
+        // `admit` 会把该序号当成「已登记过」并回 `ResultExpired`，实测见实现日志），
+        // 而是需要「取号 + 准入同锁」的新账本入口；未在本批做。
         let seq = self.ledger.next_seq(&namespace);
         let request = AppsRequestRequest {
             session_id: self.session_id.clone(),

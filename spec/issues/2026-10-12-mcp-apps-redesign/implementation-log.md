@@ -557,10 +557,15 @@ session-owned canonical 入口真实可达，`NoOnlineEndpoint` 有了唯一生�
    （本仓默认不注入 ⇒ `apps/*` 默认拒绝）；`EntitlementState::Unenforced` 字段语义不变（record 层
    不承载授权结论，授权是每次请求的事实），见 `peri-middlewares/src/mcp/apps.rs` 的文档与
    「4b 批 F」节。 **`AgentError` 层的 typed 分类**（R9）移除条件不变。
-7. **`McpAppInvokeRequest::sequence()` 仍是进程级静态计数器**（Host 入口序号）：阶段 4 的
-   RequestLedger 会用错（登记项，本批未改）。
-8. **`SessionInvocationSource.messages` 传空 `Vec`**（idle 入口无历史）：属「伪事实」登记项，
-   收敛为 `Option` 需动 peri-agent 契约，随阶段 4 一并处理。
+7. **~~`McpAppInvokeRequest::sequence()` 仍是进程级静态计数器~~（4b 批 H 更正：**该字段与计数器
+   已在 4a-S3 删除**，本条是过期登记）**：现契约里 Host 归属值只有 `HostInvocationRef{namespace, seq}`
+   （`peri-acp-types/src/mcp_apps.rs:91-97`，非 wire DTO），`seq` 由账本推进——新方法用客户端回传并
+   校验的 `RequestSeq`，旧别名用 `RequestLedger::issue_legacy_seq`；全仓无 App 归属序号计数器。
+   详见「4b 批 H」节。
+8. **`SessionInvocationSource.messages` 传空 `Vec`**（idle 入口无历史）：**4b 批 H 已收敛为
+   `Option`**（字段 + `from_source` + 唯一填充点：`None` = 未知，不再用空 `Vec` 冒充「历史为空」）。
+   剩余半面（`InvocationContext.messages` / `StateView::messages()` 仍以空切片表达「未知」）与移除
+   条件见「4b 批 H」节。
 9. **`PermissionDenied` 之外的策略拒绝语义**：`EffectiveToolErrorCode` 无更细分类，非提交后
    复核失败的策略拒绝仍统一为 `PolicyDenied`（已比「记成 TargetRevoked」准确）。
 
@@ -1191,3 +1196,220 @@ no_online_endpoint_is_not_executed_and_never_reported_as_user_rejection` 保持�
 2. **旧 gate 不是互斥原语**：它是 `SessionState.cancel_token` 的一次读快照；「prompt 在飞」的判定与
    prompt 任务实际置 / 清 token 的时刻之间没有同步（**由代码的读写点推得，未实测**）：prompt 任务尚未置 token
    ⇒ invoke 被放行；`finish_prompt_turn` 已清 token 但 ACP 响应未发出 ⇒ 同样放行。
+
+## 4b 批 H：预算常量「广告 = 实现」对齐 + `messages` 收敛为 `Option`（2026-10-13，已完成）
+
+### 裁决（root agent，2026-10-13，8 条）与本次取向
+
+1. **单一权威**（§0.1）：预算 / 回收常量的数值只留 `peri-acp-types/src/mcp_apps_facade.rs`
+   的 §4.3 块；ARC-MCP-APPS-001 只描述语义 + 指向该模块（契约原文本来就没有数字，
+   见「事实更正」第 1 条）。块头改为**「契约事实，不是测量结果」**并写明调参前置条件。
+2. **广告必须等于实现**（§0.2）⇒ 取**分支 2（把实现接到契约值）**。判据逐条：
+   1. 实现侧的 `BINDING_LEASE_TTL = 300 s` / `MAX_RECORDS = 1024` **既无设计理由、也无测试
+      锁定**：`grep -rn "MAX_RECORDS\|BINDING_LEASE_TTL" peri-middlewares/src peri-acp/src`
+      在生产代码外只命中定义本身，测试对保留期只有 `> 0` / `> Duration::ZERO` 的弱断言。
+   2. 300 s 是**已删模型**的残留名：该常量服务的是 4a 删除的 connection-owned binding lease
+      （`git log -S "BINDING_LEASE_TTL" -- peri-middlewares/src/mcp/apps.rs` 只命中特性合并
+      `dea290e89` 与 4a 收敛提交 `13447da1e`；`APP_RETENTION_MS` 由 4a 的 `26ffbd847` 引入
+      且从未接线）。
+   3. 契约值另有**层级理由**：`DETACH_REATTACH_WINDOW_MS`(300 s) 管**附件身份**、
+      `APP_RETENTION_MS`(1800 s) 管**record（含 raw 结果）**，裁决 D6 把「保留到期」列为
+      终态撤销的四个原因之一；实现侧两者相等会让「附件窗口一到、record 同时死掉」。
+   - **代价（不许掩盖）**：record 存活时间 ×6 ⇒ 稳态存活 record 数上升，而 record 的
+     `initial_result` **没有字节上限**（`tool_bridge.rs` 签发点直接 `Arc::new(raw.clone())`，
+     无大小门），绝对上界只有 `MAX_APP_RECORDS` 条数。**本仓无 outcome 字节分布数据**，
+     无法给出内存结论；标定所需事实见本阶段末清单。
+3. **孤儿常量收尾**（§0.3）：两个字段都是对外 wire 承诺（`AppsListResponse.limits` /
+   `AppsAttachResponse.limits` / `McpAppsCapability`）⇒ **不删字段，如实实现**：
+   `MAX_APPS_PER_SESSION` 成为签发准入前置、`APP_RETENTION_MS` 成为 `McpAppRecord::expires_at`。
+4. **同域散落常量**（§0.4）：`BINDING_LEASE_TTL` 删除（并入 `APP_RETENTION_MS`）；
+   `MAX_RECORDS` 上收为 `MAX_APP_RECORDS`（同一块定义 + 注释写明与 `MAX_APPS_PER_SESSION`
+   的**作用域差别**：注册表级 vs 单会话）；`MAX_ONLINE_ENDPOINTS` 与 service 侧
+   `MAX_OUTCOME_RECORDS` / `MAX_OUTCOME_BYTES` **只登记事实源、不合并**（对象与作用域不同，
+   见常量块下方的登记注释）。
+5. **边界测试**（§0.5）：新增 3 条中件层边界 + 1 条等待超时边界；核对既有覆盖后补记：
+   `MAX_ATTACHMENTS_PER_APP` 的「上限 + 1 拒绝」已有（`apps_test.rs:266-269`）、
+   `MAX_ONLINE_ENDPOINTS` 的已有（`interaction_router_test.rs:647-665`，recon 附录第 1 条的
+   「未核实」就此关闭）、`MAX_ATTACHMENTS_PER_SESSION` / `DETACH_REATTACH_WINDOW_MS` /
+   `MAX_PENDING_PER_NAMESPACE` / `MAX_NAMESPACES_PER_SESSION` / ledger 三条预算已有
+   （构造式小预算，recon A3.1-3.2）。
+6. **`messages` 收敛**（§0.6）：做**字段面**（`SessionInvocationSource.messages: Option<...>`），
+   波及面评估见下「剩余半面」——`StateView::messages()` 是 hook 公共能力，2 个 trait 定义 +
+   10 个实现（含 8 个测试适配器）+ 12 个调用点，且当下生产不可达（recon C4.4）⇒ 本批不动。
+7. **别名并发取号**（§0.7）：按「便宜且安全就修，否则只登记」的兜底分支 ⇒ **只登记**。
+   实测反转过程见下「裁决 7 的实测反转」。
+8. **文档**（§0.8）：本节 + 条目 7/8 的更正 + ARC + code-index（`peri-acp-types` /
+   `peri-middlewares` / `peri-acp`）。
+
+### 改动
+
+1. `peri-acp-types/src/mcp_apps_facade.rs`：常量块头重写（契约事实 / 调参前置 / 纪律）；
+   11 条逐条写明**强制点**与超限行为；新增 `MAX_APP_RECORDS`（注册表级上限，不广告）；
+   新增「同域上限的事实源登记」注释块。
+2. `peri-middlewares/src/mcp/apps.rs`：删 `BINDING_LEASE_TTL` / `MAX_RECORDS`；
+   `expires_at = monotonic_now() + APP_RETENTION_MS`；`cleanup()` 用 `MAX_APP_RECORDS`
+   且淘汰改**最旧优先**（原 `by_id.keys().next()` 是 `HashMap` 迭代序，与文档「按插入序淘汰
+   （FIFO）」不符，且可能淘汰刚签发的记录）；`cleanup()` 调用点从「登记前」移到「登记后」
+   （原写法让表长可以停在「上限 + 1」，见「实测发现」）；新增
+   `IssueRejection::SessionCapacityExceeded`、`live_records_of_session`、
+   `is_live_at(now)`（到期边界的时钟注入点；生产路径仍是 `is_live()`）。
+3. `peri-middlewares/src/mcp/apps_test.rs`：3 条边界用例（保留期值 + 恰好到期；会话上限
+   = 64 全通过 / 65 拒绝且不淘汰 / 跨会话隔离 / 撤销后释放；注册表上限淘汰最旧且新记录存活）。
+4. `peri-agent/src/agent/stages/invocation_context.rs`：`SessionInvocationSource.messages`
+   改 `Option<Arc<Vec<BaseMessage>>>`（`None` = 未知，`Some(空)` = 确实没有历史）；
+   `from_source` 把 `None` 退化为空切片并写明「这是保守化，不是等价事实」；
+   `messages()` 访问器补文档说明空切片的两种来源。3 个测试夹具同步为 `Some(...)`。
+5. `peri-middlewares/src/mcp/session_invocation.rs`：唯一填充点 `messages: None`。
+6. `peri-acp/src/host/apps_facade_cases_test.rs`：新增等待超时边界用例。
+7. `peri-acp/src/host/apps_facade_alias.rs`：**只加注释**（登记并发取号缺陷的形状与修法）。
+8. `docs/standards/architecture-contracts.md` ARC-MCP-APPS-001：加「预算数值单一权威 +
+   每个广告字段必须有强制点 + 两个字段已接线」一句；更正别名与 `RequestLedger` 的关系
+   （见「事实更正」第 2 条）。
+
+### 「原断言 / 为什么必须变 / 改成什么」
+
+1. **无**：本批没有删任何断言、没有 `#[ignore]`、没有为过测试放宽 `#[allow]`。
+   `mcp_apps_facade_test.rs:138-141` 的字面量断言（`64` / `8` / `1 MiB` / `300_000`）
+   **全部保持**——本批没有改任何一个契约值。
+2. 唯一被改的既有断言的**旁支**：`peri-middlewares/src/mcp/apps_test.rs` 的三条既有用例
+   断言「保留期 > 0」，含义未变（保留期从 300 s 变 1800 s 后仍为真），故未改。
+3. 3 个测试夹具由 `messages: Arc::new(...)` 改为 `Some(Arc::new(...))`：**不是放宽**，
+   而是类型收敛的必然更新（夹具表达的是「历史已知」，与新语义一致）。
+
+### 证据（原始命令与输出行，2026-10-13）
+
+1. 消费者普查（证明两个字段此前无强制点）：
+   ```
+   $ grep -rn "MAX_APPS_PER_SESSION" --include=*.rs . | grep -v "^./target" | grep -v "^./langfuse-client"
+   ./peri-acp-types/src/mcp_apps_facade.rs:36:  pub const MAX_APPS_PER_SESSION: u64 = 64;
+   ./peri-acp-types/src/mcp_apps_facade.rs:407: max_apps_per_session: MAX_APPS_PER_SESSION,
+   ./peri-acp-types/src/mcp_apps_facade_test.rs:120: assert_eq!(limits.max_apps_per_session, MAX_APPS_PER_SESSION);
+   ./peri-acp-types/src/mcp_apps_facade_test.rs:138: assert_eq!(MAX_APPS_PER_SESSION, 64);
+   ```
+   （`APP_RETENTION_MS` 同形：定义 `:56`、投影 `:417`、测试 `:136`。）
+2. 注册表归属（证明 1024 是**跨会话**上限，不能投影进 `max_apps_per_session`）：
+   `peri-middlewares/src/mcp/client.rs:183` `app_binding_leases: Arc<McpAppBindingRegistry>`，
+   构造于 `:314`；由会话环境装配点 downcast 取得（`peri-acp/src/host/workspace.rs:541-563`）。
+3. **实测发现（既有缺陷）**：`cleanup()` 原来在**登记前**调用 ⇒ 表长可停在「上限 + 1」。
+   首次跑新用例即失败：
+   ```
+   ---- mcp::apps::tests::registry_capacity_evicts_the_oldest_record_across_sessions stdout ----
+   assertion `left == right` failed: 注册表存活记录数不得超过上限
+     left: 1025
+    right: 1024
+   test result: FAILED. 43 passed; 1 failed; 0 ignored; 0 measured; 1796 filtered out; finished in 0.31s
+   ```
+   修（`cleanup()` 移到登记后）后：
+   ```
+   test mcp::apps::tests::registry_capacity_evicts_the_oldest_record_across_sessions ... ok
+   test result: ok. 44 passed; 0 failed; 0 ignored; 0 measured; 1796 filtered out; finished in 0.13s
+   ```
+   命令：`./scripts/cargo-rmcp-patched.sh test --locked -p peri-middlewares --lib -- mcp::apps`
+4. ACP 侧（回退裁决 7 的改动之后，`peri-acp --lib -- host::apps_facade`）：
+   ```
+   test result: ok. 24 passed; 0 failed; 0 ignored; 0 measured; 873 filtered out; finished in 0.20s
+   ```
+   新增的等待超时用例单独复跑：
+   ```
+   test host::apps_facade::tests::cases::request_wait_times_out_into_pending_at_the_contract_bound ... ok
+   test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 897 filtered out; finished in 0.06s
+   ```
+5. ledger / 包级：`host::apps_ledger` 11 passed / 0 failed；`host::mcp_apps` 21 passed / 0 failed；
+   `-p peri-acp-types --lib` 601 passed / 0 failed（命令同 3 的形式，逐包 `-- <filter>`）。
+
+### 交付前验证（原始结论行）
+
+1. `./scripts/cargo-rmcp-patched.sh test --locked -p peri-acp-types --lib` ⇒ `test result: ok. 601 passed; 0 failed; 0 ignored`。
+2. `… -p peri-middlewares --lib` ⇒ `test result: ok. 1838 passed; 0 failed; 2 ignored`（2 例忽略是既有基线，与本批无关）。
+3. `… -p peri-acp --lib` ⇒ `test result: ok. 898 passed; 0 failed; 0 ignored`。
+4. `… -p peri-agent --lib` ⇒ `test result: ok. 1098 passed; 0 failed; 0 ignored`。
+5. `… clippy --locked -p peri-acp-types -p peri-middlewares -p peri-acp -p peri-agent --all-targets -- -D warnings`
+   ⇒ 无告警（`Finished dev profile [unoptimized + debuginfo] target(s) in 1m 24s`）。
+6. `… check --locked --workspace --all-targets` ⇒ `Finished dev profile … in 1m 15s`（无 error / warning：
+   新增 `IssueRejection` 变体未破坏任何 crate 的穷尽匹配，其他 crate 不受影响）。
+7. `bash scripts/check-file-size.sh` ⇒ `共扫描 2328 个文件，超阈值 3 个（源码 2 / 测试 1）`＝既有基线三文件
+   （`peri-tui/src/kit/panels/mcp.rs` 1637、`peri-tui/src/kit/acp_events/system.rs` 1007、
+   `peri-resources/src/sessions/sqlite_store/schema_test.rs` 1038）；本批触及文件最大 947 行。
+8. `./scripts/cargo-rmcp-patched.sh fmt --all -- --check` ⇒ **无输出**（该命令只在有待格式化文件时打印 diff；
+   本项**不是** exit code 证据——命令走管道，`$?` 被管道末端吞掉，故不引用 exit code）。
+
+### 裁决 7 的实测反转（别名并发取号：改后回退，只登记）
+
+1. 首轮实现把 `apps_facade_alias.rs` 的 `next_seq`（读）换成 `issue_legacy_seq`（推进并返回），
+   `issue_legacy_seq` 签名同时收窄为 `Option<RequestSeq>`。测试结果：
+   ```
+   ---- host::apps_facade::tests::cases::concurrent_alias_requests_take_distinct_seq_and_execute_separately stdout ----
+   panicked at peri-acp/src/host/apps_facade_cases_test.rs:941:5:
+   两条都必须是新登记（不是 JoinedPending 的结果复用，也不是 Conflict 的拒绝）
+   failures:
+       host::apps_facade::tests::cases::concurrent_alias_requests_take_distinct_seq_and_execute_separately
+       host::apps_facade::tests::cases::legacy_aliases_round_trip_json_rpc_id_and_attachment_identity
+   test result: FAILED. 23 passed; 2 failed; 0 ignored; 0 measured; 873 filtered out; finished in 0.20s
+   ```
+   ⇒ **既有的**别名往返用例也被打破，不只是新用例。
+2. 单行实验（只把取号那一行换成 `issue_legacy_seq`，其余不动，跑完即回退）：
+   ```
+   $ ./scripts/cargo-rmcp-patched.sh test --locked -p peri-acp --lib -- host::apps_facade::tests::cases::legacy_aliases_round_trip_json_rpc_id_and_attachment_identity
+   panicked at peri-acp/src/host/apps_facade_cases_test.rs:821:10:
+   旧别名必须成功（同一 façade 的薄别名）: AcpError { code: -32000, message: "MCP Apps relay request failed", data: Some(Object {"kind": String("upstream_protocol_error")}) }
+   test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 896 filtered out; finished in 0.03s
+   ```
+3. 根因：`issue_legacy_seq` 只推进 `last_accepted`、**不登记 pending**（它的既有调用方
+   `host_attribution` 之后不走 `admit`）；别名之后仍走 canonical `apps/request` →
+   `admit(seq)`，而 `seq <= last_accepted` 且无 pending / 无终态条目 ⇒
+   `AdmissionVerdict::ResultExpired`（`apps_ledger.rs:510-537`；**该 verdict 由代码推得，未直接实测**——实测到的是错误形状 `upstream_protocol_error`，与 in-band 判决经 `verdict_error` 的 `error_kind()` 兜底这条路径一致）。`ResultExpired` 是 in-band
+   判决，别名层经 `verdict_error` 落到 `error_kind()` 的兜底 ⇒ `upstream_protocol_error`
+   （与实测错误形状一致）。
+4. 处置：按裁决 7 的兜底分支 **回退**（保留一行注释指向本段登记），并登记**正确修法的形状**：
+   需要新的账本入口把「取号 + 准入」放进**同一把写锁**（例如
+   `admit_legacy(namespace, fingerprint) -> AdmissionVerdict`，内部推导 `expected` 序号、
+   做 pending 容量判定、登记 pending 并推进 `last_accepted`），别名层据此跳过二次 `admit`；
+   改动面会触及 canonical `request()` 的准入段（批 F/G 刚动过）⇒ 不属「便宜且安全」。
+5. 副作用登记：别名层把 in-band 判决（`ResultExpired` / `CapacityRejected` 等）压成
+   `upstream_protocol_error` 这一种 `AcpError`，客户端按键不可区分；与 ARC「判决必须能被
+   客户端按键区分」（D3）在**别名**面上不符。修法同上（同一批做），当前无生产消费者证据。
+
+### 已知边界 / 残余与移除条件
+
+1. **预算值仍是未标定值**（本批**没有**、也无法做「实测调参」）：本仓没有
+   outcome 字节分布、单会话结果条数分布、namespace 数分布、客户端重试节奏四类数据。
+   要标定必须先补埋点（`apps_ledger.rs` 的 `complete` 处记录字节数与 namespace 数、
+   `apps_relay` 侧记录 attach 数与重传间隔），跑真实 Host 若干轮再取分位数。
+   本批只做了「广告 = 实现」的对齐，**没有动任何一个数值**。移除条件 = 有上述分布后重新裁决。
+2. **record 的 `initial_result` 无字节上限**（本批新登记）：保留期 ×6 后，单条大 raw 结果
+   的驻留窗口同步变长；上界只有 `MAX_APP_RECORDS` 条数。移除条件 = 给 raw 结果加字节门
+   （像 ledger 的 `MAX_RESULT_BYTES` 那样显式不可用），或凭第 1 条的分布证明不需要。
+3. **`MAX_RETAINED_BYTES` 的作用域是单 namespace**（recon A5.3）：会话最坏驻留
+   `MAX_NAMESPACES_PER_SESSION × MAX_RETAINED_BYTES = 512 MiB` 只是代码算术，不是观测；
+   会话级 `retained_bytes` 只被测试读取、不参与判决。移除条件 = 第 1 条的分布 + 会话级预算裁决。
+4. **别名并发取号**（见上节）：移除条件 = 新增「取号 + 准入同锁」的账本入口，并补一条
+   并发用例（本批已写出、因回退而删除，形状见上节第 2 步的断言）。
+5. **`messages` 的剩余半面**（本批只做字段面）：`InvocationContext.messages` /
+   `StateView::messages()` / `ToolContext` 仍以**空切片**表达「未知」，即
+   `subagent/tool/invocation.rs:110-117` 的「空 ⇒ 回落 `parent_messages`」仍是旧语义
+   （行为未变，是保守化）。收敛条件 = 改 `StateView::messages()` /
+   `middleware::capabilities` 的签名（2 个 trait + 10 个实现 + 12 个调用点）并在消费侧
+   显式区分 `None`；当下生产不可达（recon C4.4：idle 入口只派发单个已绑定工具，
+   `StateView::messages()` 的生产消费者都在 `before_input` 阶段）⇒ 未做。
+6. **两条注册表上限的同毫秒 tie**：`MAX_APP_RECORDS` 淘汰按 record 身份（UUID v7）取最小，
+   同一毫秒内签发的身份之间尾段随机 ⇒ 此时等同「同刻签发者中任选一条」。上限与判决不受影响，
+   但「淘汰的一定是最早那次签发」在该毫秒内不成立。
+7. **归档观察（未修）**：`apps/request` 端到端的 `ResultExpired` 无 facade 层用例
+   （只在 `apps_ledger_test.rs` 单测覆盖）；`REQUEST_WAIT_TIMEOUT_MS` 的等时 / 超时
+   本批补了超时侧（`request_wait_times_out_into_pending_at_the_contract_bound`）。
+
+### 事实更正（本批）
+
+1. **简报 §0 引用的「ARC-MCP-APPS-001 §4.3」并不存在于契约文件**：
+   `grep -n "4\.3\|max_apps_per_session\|app_retention_ms" docs/standards/architecture-contracts.md`
+   无命中——ARC-MCP-APPS-001 的 Rule/Verify 本来就没有预算数字；真正的 §4.3 在计划文档
+   `.peri/plans/mcp-apps-phase4a-design.md:121`。本批据此把「不复写数字 + 指向实现权威」
+   写成契约条款（新增一句），未改写既有文字。
+2. **「别名未接 `RequestLedger`」只对 Host invoke 别名成立**（批 G 措辞收窄）：
+   `peri/mcp/app` / `peri/mcp/resource` 经 `alias_request` → canonical `apps/request` →
+   `ledger.admit`（`apps_facade.rs:453`），因此它们**有**按 key 去重 / 结果复用 / 容量判决
+   （只是 key 由服务端推导）；只有 `peri/mcp/invoke`（Host 路径，经 `host_attribution` 取号、
+   不调 `admit`）确实不经账本判决。ARC 句已按此收窄。
+3. **`docs/code-index/peri-middlewares.md` 的「relay 实例内的有界计数器」是过时措辞**：
+   `grep -rn "counter\|AtomicU64\|seq" peri-middlewares/src/mcp/apps_relay.rs` 无命中——
+   relay 不持任何计数器，序号来自 facade/ledger（本批已更新该行）。
