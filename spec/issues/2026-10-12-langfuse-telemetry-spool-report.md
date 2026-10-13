@@ -341,12 +341,12 @@ EXIT=0
 | `./scripts/cargo-rmcp-patched.sh clippy --locked --workspace --all-targets -- -D warnings`（CI 同款入口，上一轮） | EXIT=0 |
 | `./scripts/cargo-sccache.sh test --locked -p langfuse-client --lib -- recovery_deferral_keeps_objects_for_the_next_owner` × 10（偶发判定，上一轮） | 10/10 `1 passed; 0 failed`（单轮 16–38s） |
 | CI run `38331869301` 三平台 job（上一轮失败面） | ubuntu `115083245535`、macos `115083245482`、windows `115083245618` 同一用例红；本轮修复后由 PR #189 新一轮矩阵复核 |
-| 本轮 `git commit` 触发的 pre-commit（check / clippy / fmt / layer-imports） | 结果随提交记录（见 §11.6-3） |
+| 本轮 `git commit` 触发的 pre-commit（check / clippy / fmt / layer-imports） | 全绿（总 41.81s：check 27.06s、clippy 6.17s、fmt 6.75s、layer-imports 1.76s；依赖门 22 条规则 0 违规），提交 `f78b7a344` |
 
 ### 11.6 仍红项与缺口（收敛轮三续结束时）
 
 1. **本轮未在本机复跑 CI 全量矩阵**：`-p langfuse-client --all-targets` 覆盖本变更集的直接面，workspace 其余包的完整行列交由远端 CI 覆盖（CI 为 nextest + 三平台）。本变更集未改其源码。
 2. **Windows 真实行为未经本机运行验证**：`ERROR_LOCK_VIOLATION`(33) 的判定只在 Windows 上生效，本机只做编译检查（§11.5 第 5 行）；结论以 Windows CI job 为准。
-3. **本地环境噪声（非回归）**：本机会话环境带 `PERI_WORKFLOW_ALLOW_NPX_FALLBACK=1`（仓库与 CI 均无此变量，亦不在 shell profile），会让 `peri-workflow` 的三个 fail-closed 用例失守（`cli::tests::workflow_cli_fails_closed_without_any_validated_artifact`、`runner::artifact::tests::prepare_fails_closed_without_artifact_and_without_opt_in`、`tool::tests::failed_start_leaves_no_workflow_side_effects`）。证据：`env -u PERI_WORKFLOW_ALLOW_NPX_FALLBACK ... -p peri-workflow --lib` → `177 passed; 0 failed`，带该变量 → `3 failed`。workspace 等价全量测试的判读须去掉该变量。
+3. **本地环境噪声（非回归）**：本机会话环境带 `PERI_WORKFLOW_ALLOW_NPX_FALLBACK=1`（仓库与 CI 均无此变量，亦不在 shell profile），会让 `peri-workflow` 的三个 fail-closed 用例失守（`cli::tests::workflow_cli_fails_closed_without_any_validated_artifact`、`runner::artifact::tests::prepare_fails_closed_without_artifact_and_without_opt_in`、`tool::tests::failed_start_leaves_no_workflow_side_effects`）。证据：`env -u PERI_WORKFLOW_ALLOW_NPX_FALLBACK ... -p peri-workflow --lib` → `177 passed; 0 failed`，带该变量 → `3 failed`。该 workspace 等价全量跑走 `cargo test` 默认 fail-fast（第一个失败 target 之后不再启动后续 target），因此 `WS_TEST_EXIT=101` 只代表 `peri-workflow` 之前的目标已跑完；判读 workspace 全量结果必须去掉该变量并按 `--no-fail-fast` 复跑。
 4. **待用户裁决不变**：契约 §10 的 D8（第二次 shutdown 的期望被实测证伪）与 D9（自设行数上限维持或拆分）。
 5. **未测项不变**（与前几轮一致，不宣称产品验收完成）：真实 Langfuse 端点/服务端限额、1000 轮 8 MiB 长会话、512 MiB 积压与 32 MiB 遥测预算的实测 RSS、断网 10 分钟恢复、四持久边界崩溃注入的实机矩阵、WASM/无持久化宿主运行行为、性能补表、`e2e/`。
