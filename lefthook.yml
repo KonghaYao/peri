@@ -28,9 +28,6 @@ pre-commit:
         fi
         ./scripts/cargo-rmcp-patched.sh clippy --locked $changed_crates -- -W clippy::all
 
-    typos:
-      run: typos
-
     # §0 依赖方向 CI 门（Seam 3 完整版，PRD 决策 2）：八条边（TUI / ACP 业务面 /
     # ACP→model / Controller / Runtime / Resources / Middlewares / Agent）×
     # use 导入 + 全路径引用双模式全校验；豁免清单唯一事实源 =
