@@ -337,6 +337,7 @@ EXIT=0
 | `./scripts/cargo-sccache.sh test --locked -p langfuse-client --all-targets` | EXIT=0：lib `292 passed; 0 failed; 1 ignored`（22.00s）、`logging` 1、`otel_contract` 1、`spool_acceptance` 4、`spool_http` 3、`spool_recovery` `5 passed; 0 failed; 1 ignored`（5.17s，直接覆盖跨进程取锁与删除竞争） |
 | `./scripts/cargo-sccache.sh clippy --locked -p langfuse-client --all-targets -- -D warnings` | EXIT=0（6.41s） |
 | `rustc --edition 2021 --target x86_64-pc-windows-msvc --emit=metadata`（`is_lock_contention` 同源片段） | EXIT=0（Windows `cfg` 分支可编译；仅编译检查，非运行验证） |
+| `env -u PERI_WORKFLOW_ALLOW_NPX_FALLBACK ./scripts/cargo-rmcp-patched.sh test --locked --workspace --no-fail-fast --exclude peri-{acp,agent,tui,middlewares,mcp-common,mcp-web,mcp-artifact,mcp-cron,mcp-workspace}`（CI 的 workspace 步骤同口径 + 去本地噪声变量） | EXIT=0：44 个测试 target 全 ok，`2167 passed; 0 failed`（无 `test result: FAILED`） |
 | `./scripts/cargo-rmcp-patched.sh test --locked -p peri-controller -p peri-acp --lib`（复刻 CI 的 feature 并集：`preserve_order` 生效，上一轮） | `peri-acp lib 827 passed; 0 failed`（134.80s）、`peri-controller lib 180 passed; 0 failed`（5.76s）；EXIT=0 |
 | `./scripts/cargo-rmcp-patched.sh clippy --locked --workspace --all-targets -- -D warnings`（CI 同款入口，上一轮） | EXIT=0 |
 | `./scripts/cargo-sccache.sh test --locked -p langfuse-client --lib -- recovery_deferral_keeps_objects_for_the_next_owner` × 10（偶发判定，上一轮） | 10/10 `1 passed; 0 failed`（单轮 16–38s） |
@@ -345,8 +346,8 @@ EXIT=0
 
 ### 11.6 仍红项与缺口（收敛轮三续结束时）
 
-1. **本轮未在本机复跑 CI 全量矩阵**：`-p langfuse-client --all-targets` 覆盖本变更集的直接面，workspace 其余包的完整行列交由远端 CI 覆盖（CI 为 nextest + 三平台）。本变更集未改其源码。
+1. **CI 的 workspace 步骤已在本机复跑通过**：`env -u PERI_WORKFLOW_ALLOW_NPX_FALLBACK ... --workspace --no-fail-fast --exclude peri-{acp,agent,tui,middlewares,mcp-common,mcp-web,mcp-artifact,mcp-cron,mcp-workspace}` → EXIT=0（44 target / 2167 passed，§11.5）。未被本机复跑的是 CI 的第二个测试步骤（per-acp/per-agent/TUI/middlewares/5 个 MCP 能力包）与三平台矩阵，交由远端 CI 覆盖；本变更集未改其源码。
 2. **Windows 真实行为未经本机运行验证**：`ERROR_LOCK_VIOLATION`(33) 的判定只在 Windows 上生效，本机只做编译检查（§11.5 第 5 行）；结论以 Windows CI job 为准。
-3. **本地环境噪声（非回归）**：本机会话环境带 `PERI_WORKFLOW_ALLOW_NPX_FALLBACK=1`（仓库与 CI 均无此变量，亦不在 shell profile），会让 `peri-workflow` 的三个 fail-closed 用例失守（`cli::tests::workflow_cli_fails_closed_without_any_validated_artifact`、`runner::artifact::tests::prepare_fails_closed_without_artifact_and_without_opt_in`、`tool::tests::failed_start_leaves_no_workflow_side_effects`）。证据：`env -u PERI_WORKFLOW_ALLOW_NPX_FALLBACK ... -p peri-workflow --lib` → `177 passed; 0 failed`，带该变量 → `3 failed`。该 workspace 等价全量跑走 `cargo test` 默认 fail-fast（第一个失败 target 之后不再启动后续 target），因此 `WS_TEST_EXIT=101` 只代表 `peri-workflow` 之前的目标已跑完；判读 workspace 全量结果必须去掉该变量并按 `--no-fail-fast` 复跑。
+3. **本地环境噪声（非回归）**：本机会话环境带 `PERI_WORKFLOW_ALLOW_NPX_FALLBACK=1`（仓库与 CI 均无此变量，亦不在 shell profile），会让 `peri-workflow` 的三个 fail-closed 用例失守（`cli::tests::workflow_cli_fails_closed_without_any_validated_artifact`、`runner::artifact::tests::prepare_fails_closed_without_artifact_and_without_opt_in`、`tool::tests::failed_start_leaves_no_workflow_side_effects`）。证据：`env -u PERI_WORKFLOW_ALLOW_NPX_FALLBACK ... -p peri-workflow --lib` → `177 passed; 0 failed`，带该变量 → `3 failed`。该 workspace 等价全量跑走 `cargo test` 默认 fail-fast（第一个失败 target 之后不再启动后续 target），因此带该变量那次 `WS_TEST_EXIT=101` 只代表 `peri-workflow` 之前的目标已跑完；去掉该变量并按 `--no-fail-fast` 复跑即 EXIT=0（§11.5 末段）。
 4. **待用户裁决不变**：契约 §10 的 D8（第二次 shutdown 的期望被实测证伪）与 D9（自设行数上限维持或拆分）。
 5. **未测项不变**（与前几轮一致，不宣称产品验收完成）：真实 Langfuse 端点/服务端限额、1000 轮 8 MiB 长会话、512 MiB 积压与 32 MiB 遥测预算的实测 RSS、断网 10 分钟恢复、四持久边界崩溃注入的实机矩阵、WASM/无持久化宿主运行行为、性能补表、`e2e/`。
