@@ -129,11 +129,15 @@ pub enum RecordState {
 
 /// entitlement（授权凭据）强制执行状态（裁决 R4）。
 ///
-/// 本阶段**不消费** `SessionAuthorizationPort`：凭据层属 SDK 部署方，接线即全拒
-/// （默认 `grant()` 恒 `None`）。用 typed 字段承载该事实，而不是只写注释。
+/// 承载的是**这条 record 自身的凭据事实**，不是部署级强制状态：record 在模型签发点
+/// 创建，早于任何 App 回调，构造入参里也没有授权项。4b 批 F 起，ACP facade 在**每次
+/// 调用**上按能力消费 `SessionAuthorizationPort`（未注入端口 ⇒ 一律拒绝），因此
+/// 「本字段 = `Unenforced`」只表示这条 record 没有承载授权结论，**不**表示部署侧没有
+/// 强制（`implementation-log.md` 的 4b 批 F 节）。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum EntitlementState {
-    /// 未强制：本阶段所有 App / Host 调用都不消费授权凭据。
+    /// record 层未承载授权结论：授权是每次请求的事实（caller × session × capability），
+    /// 由 facade 的门在调用点判定。
     Unenforced,
 }
 

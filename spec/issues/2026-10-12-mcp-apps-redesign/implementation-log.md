@@ -359,8 +359,13 @@ not_available_without_turn`（peri-agent）= `5 passed; 0 failed`；
    （承接既有的「relay 对成功但无 raw 报 UpstreamProtocolError」缺口）。
 4. **`RemoteProtocolError(JsonRpcError)` 仅在 bridge 提供 `RemoteToolError.jsonrpc` 时产生**；
    当前 bridge 尚未在协议失败分支接线远端 JSON-RPC 载荷（既有缺口）。
-5. **`entitlement: Unenforced`**（R4）：本阶段不消费 `SessionAuthorizationPort`；移除条件
-   = SDK/部署身份层提供凭据的批次。
+5. ~~**`entitlement: Unenforced`**（R4）：本阶段不消费 `SessionAuthorizationPort`；移除条件
+   = SDK/部署身份层提供凭据的批次。~~
+   **已关闭（4b 批 F，2026-10-13）**：端口已在 ACP facade 层**按能力消费**（裁决 = 方案 b
+   「只接线不注入」）⇒ 本仓 stdio 装配不注入身份层、`apps/*` 六个受控方法按契约**默认拒绝**
+   （kind = `entitlement_denied`）。残余：canonical 入口 / middleware 记录层仍拿不到 caller，
+   不消费端口；`EntitlementState::Unenforced` 保留（它描述 record 层，不是部署级强制状态）。
+   详见下「4b 批 F」节。
 6. ~~**`AgentError` 层仍未区分 `ApprovalUnavailable` 与 `UserRejected`**（R9 的移除条件）：区分只在 outcome 记录层。~~
    **已关闭（4b 批 E，2026-10-13）**：`AgentError::ToolRejected` 增必填 `cause: ToolRejectionCause`
    （`UserRejected` / `ApprovalUnavailable(UnansweredCause)` / `PolicyDenied`），带外记录点
@@ -548,7 +553,10 @@ session-owned canonical 入口真实可达，`NoOnlineEndpoint` 有了唯一生�
    `mcp_apps_idle_ownership_test.rs`，不在本批）。
 4. **`TaskAccepted(TaskReceipt)` 仍无生产者**（既有缺口，本批未动）。
 5. **`RemoteProtocolError(JsonRpcError)` 仅当 bridge 有 `RemoteToolError.jsonrpc` 时产生**（既有缺口）。
-6. **`entitlement: Unenforced`**（R4）与 **`AgentError` 层的 typed 分类**（R9）移除条件不变。
+6. **`entitlement: Unenforced`**（R4）：**已关闭（4b 批 F，2026-10-13）**——facade 层已按能力强制
+   （本仓默认不注入 ⇒ `apps/*` 默认拒绝）；`EntitlementState::Unenforced` 字段语义不变（record 层
+   不承载授权结论，授权是每次请求的事实），见 `peri-middlewares/src/mcp/apps.rs` 的文档与
+   「4b 批 F」节。 **`AgentError` 层的 typed 分类**（R9）移除条件不变。
 7. **`McpAppInvokeRequest::sequence()` 仍是进程级静态计数器**（Host 入口序号）：阶段 4 的
    RequestLedger 会用错（登记项，本批未改）。
 8. **`SessionInvocationSource.messages` 传空 `Vec`**（idle 入口无历史）：属「伪事实」登记项，
@@ -989,3 +997,81 @@ no_online_endpoint_is_not_executed_and_never_reported_as_user_rejection` 保持�
    无关，属既有兜底语义，本轮未改（登记为诚实性边缘）。
 4. `EffectiveToolError.unanswered_cause` 不派生 serde（`EffectiveToolError` 本身无 serde），
    `ToolResult.rejection_cause` 标 `#[serde(skip)]` ⇒ **wire 面零变化**。
+
+## 4b 批 F：R4 接线（方案 b：只接线不注入，默认全拒）+ `session/fork` 端点注册（2026-10-13，已完成）
+
+### 用户裁决（2026-10-13，原文摘要）
+
+1. **R4 接线方式 = 方案 (b)**：把 `SessionAuthorizationPort` 做成 `AcpServerConfig` 字段供 SDK / 部署侧
+   注入，本仓 stdio 路径留 `None` ⇒ 按契约 `apps/*` 全部拒绝。**代价已知且接受：本地部署的 Apps 面
+   直接不可用**，必须在文档中写明。
+2. 批 F 同时包含修 `session/fork` 的会话级端点注册缺口（侦察的中 3 残余②）。
+
+### 决定
+
+1. **门设在 ACP facade**（`SessionAppsFacade`），不设在 canonical 入口：facade 是唯一同时持有
+   **服务端连接身份**（`ConnectionContext::id`）与**会话身份**（环境构造参数）的层；canonical 入口
+   （`SessionInvocationRequest`）契约里没有 caller 字段，加门要改契约（登记为残余）。
+2. **一个 kind 一个事实**：新增 `McpAppsErrorKind::EntitlementDenied`（wire 键 `entitlement_denied`），
+   不复用 `Forbidden`（后者的既有事实是「本连接不是该附件的承载连接」，`apps_facade.rs` 的
+   `attachment_for_request` / `detach` / `rerun` 三处在用）。该 kind 覆盖「无可用授权事实」这一件事的
+   两个来源：身份层明确不授权、**本部署未注入身份层**（契约 §4.3 规定未注入同样按拒绝处理）。
+3. **caller 身份** = 服务端连接事实（`host/connection.rs` 的 `ConnectionContext::id`，服务端
+   `Uuid::now_v7()`；请求体里的字符串从不参与）。`TrustedCallerId` 的构造本来就公开（`new` / `From`），
+   因此**没有**放宽任何可见性、也没有把信任边界做薄；这与被禁止的「按 id 查得到对象即放行」不同：
+   这里不查任何对象，只把服务端连接身份交给部署侧身份层，由它用自己的已认证事实作答。
+4. **`EntitlementState` 语义不变**：`Unenforced` 描述的是 **record 层**（record 在模型签发点创建，
+   早于任何 App 回调，构造入参里没有授权项），而授权是**每次请求**的事实（caller × session ×
+   capability）。为避免后人误读，只改文档（`peri-middlewares/src/mcp/apps.rs` 的枚举与变体注释），
+   字段与取值不动。
+
+### 改动
+
+| 位置 | 改动 |
+| ---- | ---- |
+| `peri-acp-types/src/mcp_apps.rs` | 新增 `McpAppsErrorKind::EntitlementDenied` + `as_str`；契约测试 `error_kinds_have_distinct_stable_keys` 增该键 |
+| `peri-acp/src/host/mod.rs` | `AcpServerConfig` 增 `pub session_authorization: Option<Arc<dyn SessionAuthorizationPort>>`（部署级注入面；本仓装配置 `None`） |
+| `peri-acp/src/host/workspace.rs` | 会话环境 cfg 从 host 原样带上该字段，并在 facade 构造点传入（生产装配唯一注入路径） |
+| `peri-acp/src/host/apps_facade_entitlement.rs`（新） | `SessionEntitlementGate`：两步义务 `grant` + `covers`，未注入 ⇒ 拒绝；`#[cfg(test)] test_support::allow_all()` = 测试专用身份层 |
+| `peri-acp/src/host/apps_facade.rs` | 六个受控方法按能力门控（`attach`=AttachApps、`request`/`rerun`=AppOperations、`cancel`/`detach`/`close`=ControlApps）；门在定位校验之后；`apps/list` 不在能力面 |
+| `peri-acp/src/host/apps_projection.rs`（新） | 判决 / 未执行投影的**纯移动**（`apps_facade.rs` 原 991 行，接线需余量，`STD-SIZE-001`） |
+| `peri-acp/src/host/server_loop.rs` | 会话级端点注册白名单补 `"session/fork"`（`session_setup` 早认 fork 并派生新会话 id） |
+| `peri-acp/src/host/apps_facade_entitlement_test.rs`（新） | 门控三态 + 能力映射 10 条用例 |
+| `peri-acp/src/host/requests_session_endpoint_test.rs` | 新增 `session/fork` 后「调度审批可达」回归（真实 server loop） |
+| 夹具 | `apps_facade_test.rs` / `mcp_apps_test.rs` 注入测试身份层（生产 stdio 不注入 ⇒ 默认拒绝） |
+
+### 证据（原始命令与输出行）
+
+- `./scripts/cargo-rmcp-patched.sh check --locked -p peri-acp --all-targets` → exit 0（无 warning）
+- `test --locked -p peri-acp --lib`（全量，最终状态）
+  → `test result: ok. 895 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 121.13s`
+- `test --locked -p peri-acp-types --lib`
+  → `test result: ok. 601 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.04s`
+- `test --locked -p peri-acp --lib -- host::apps_facade::tests::entitlement_cases`
+  → `test result: ok. 10 passed; 0 failed; 0 ignored; 0 measured; 885 filtered out; finished in 0.05s`
+- `test --locked -p peri-acp --lib -- history_lifecycle_tests::session_endpoint`
+  → `test result: ok. 3 passed; 0 failed; 0 ignored; 0 measured; 892 filtered out; finished in 2.89s`
+- **反向验证（mutation）**：把 `"session/fork"` 从注册白名单去掉后复跑 fork 用例
+  → `FAILED`，`fork 后调度触发的审批必须可达（端点注册是会话级的），实际: Unanswered { cause: NoOnlineEndpoint }`
+  （随后已恢复；说明回归真的咬住该缺陷，不是恒绿）
+- `clippy --locked -p peri-acp -p peri-acp-types -p peri-middlewares --all-targets -- -D warnings`
+  → `Finished \`dev\` profile [unoptimized + debuginfo] target(s) in 26.19s`（无 warning）
+- `fmt --all -- --check` → exit 0；`scripts/check-file-size.sh` → `超阈值 3 个（源码 2 / 测试 1）`（= 基线三个文件）
+
+### 残余与移除条件
+
+1. **本地部署 Apps 面不可用（方案 b 的既定代价）**：stdio / 本地装配不注入身份层 ⇒ `apps/*` 六个受控方法
+   一律 `entitlement_denied`。移除条件 = 部署侧提供并注入 `SessionAuthorizationPort`（SDK / 服务化部署）。
+2. **`apps/list` 不加门**：契约 `SessionCapability` 只有 `AttachApps` / `AppOperations` / `ControlApps`
+   三项，没有「读 descriptors」的能力项；给它加门需要先扩契约（不预造）。
+3. **Host 直调（旧别名 `peri/mcp/invoke`）有意不加门**：`SessionCapability` 没有 Host / invoke 能力项，
+   本批不扩契约；该路径的既有约束不变（`InvokeSessionGate` 的 known/open/prompt_in_flight + facade 的
+   Host 操作域 + ledger 序号 + 每次调用的 canonical 审批）。移除条件 = 旧别名随外部客户端切换一并删除
+   （S8），若届时仍需要 Host 面授权，再按契约扩能力项。
+4. **canonical 入口 / middleware 记录层仍拿不到 caller**：`SessionInvocationRequest` 无 caller 字段
+   （`mcp_apps.rs`），因此不可达的门只能留在 facade 层；record 的 `EntitlementState::Unenforced` 因此
+   保持（record 层确实不承载授权结论）。移除条件 = 契约让 canonical 入口携带可信调用者事实
+   （需要设计层裁决，不能由调用方自述补齐）。
+5. **`session/restore` 仍不是 wire 名**：恢复流程 = `session/load` + `session/resume`（端点注册随二者）。
+6. **`host/workspace.rs` 恰好 1000 行**（`STD-SIZE-001` 阈值上限，未超）：该文件在本批之前已是 999 行，
+   本批只净增 1 行即贴边；任何后续改动都应先拆分（不属本批范围）。
