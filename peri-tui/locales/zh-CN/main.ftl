@@ -781,6 +781,7 @@ setup-welcome = 欢迎使用 Peri TUI
 paste-truncated = 粘贴已截断至 { $max } 字符
 paste-in-progress = 正在处理剪贴板粘贴，请稍候
 paste-image-failed = 无法粘贴图片：PNG 无效或超过 20 MiB
+paste-terminal-hint = 这里读不到本机剪贴板——请用终端原生粘贴（Cmd+V / Ctrl+Shift+V）
 submit-blocked = 当前请求运行中，稍后再执行该命令
 export-success = 已导出消息文本：{ $path }
 export-fail = 导出消息文本失败：{ $error }

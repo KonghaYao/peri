@@ -6,6 +6,10 @@
 //! `@image <path>` 文本形式仍可由用户手输——其读取面不在本模块。
 //!
 //! 阻塞系统 I/O（剪贴板读取、PNG 编码）全部在独立线程执行，不阻塞 UI 线程。
+//!
+//! Ctrl+V 读的是**本机**剪贴板；SSH、herdr 与无显示环境下本机剪贴板不是用户面前的
+//! 剪贴板，读不到内容时给出终端原生粘贴引导，不静默吞掉按键（终端原生粘贴走
+//! bracketed paste，不受影响）。
 
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -19,6 +23,7 @@ use crate::i18n;
 use crate::kit::atoms::{
     NOTIFICATION, Notification, PENDING_ATTACHMENTS, PREDICTION, PendingAttachment, PredictionState,
 };
+use crate::kit::clipboard;
 use crate::kit::image_safety::MAX_IMAGE_BYTES;
 
 use super::exit_entry_focus_on_edit;
@@ -67,10 +72,25 @@ fn attach_image(bytes: Vec<u8>, media_type: &str) {
         .push(PendingAttachment::image(media_type, base64_encode(&bytes)));
 }
 
+/// 本机剪贴板一次粘贴尝试的终态。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum PasteOutcome {
+    /// 文本已插入，或图片附件已挂上。
+    Pasted,
+    /// 剪贴板为空、类型不支持，或本机读不到剪贴板——尚未向用户解释。
+    Unavailable,
+    /// 已单独通知过用户（图片损坏或超限），不叠加提示。
+    Notified,
+}
+
 /// Ctrl+V：剪贴板 → 输入区。
 ///
 /// 顺序：macOS 原生 PNG → arboard RGBA（编码为 PNG）→ 文本。图片成功即进
 /// `PENDING_ATTACHMENTS`，不修改编辑器文本。粘贴不触发 slash/mention 弹窗。
+///
+/// [Why 远端补提示] 终端原生粘贴（Cmd+V / Ctrl+Shift+V，走 bracketed paste）不受此
+/// 路径影响；但远端与无显示环境下本机剪贴板不是用户的剪贴板，arboard 读不到也不能
+/// 静默——给出引导（见 [`terminal_paste_hint`]）。
 pub(super) fn handle_clipboard_paste(state: State<TextAreaState>, gate: &PasteGate) -> EventResult {
     let Some(permit) = gate.try_acquire() else {
         notify(i18n::tr("paste-in-progress"), 2);
@@ -80,61 +100,84 @@ pub(super) fn handle_clipboard_paste(state: State<TextAreaState>, gate: &PasteGa
     exit_entry_focus_on_edit();
     std::thread::spawn(move || {
         let _permit = permit;
-        #[cfg(target_os = "macos")]
-        match read_pasteboard_png_bytes() {
-            Ok(Some(bytes)) => {
-                attach_image(bytes, "image/png");
-                return;
-            }
-            Ok(None) => {}
-            Err(_) => {
-                notify(i18n::tr("paste-image-failed"), 4);
-                return;
-            }
-        }
-        // ── 图片粘贴分支（arboard RGBA → PNG）──
-        // arboard 的 get_image() 需要新的 Clipboard 实例（之前的 cb 可能已被消费）
-        if let Some(arboard::ImageData {
-            bytes: image_bytes,
-            width,
-            height,
-        }) = arboard::Clipboard::new()
-            .ok()
-            .and_then(|mut clipboard| clipboard.get_image().ok())
+        let outcome = paste_from_local_clipboard(&state);
+        if let Some(key) = terminal_paste_hint(outcome, clipboard::system_clipboard_is_authority())
         {
-            // arboard may already own the clipboard allocation.  Move it out
-            // instead of cloning every RGBA byte before encoding.
-            let rgba = image_bytes.into_owned();
-            if rgba.is_empty() {
-                return;
-            }
-            match png_encode_bytes(&rgba, width, height, max_upload_bytes()) {
-                Ok(png) => {
-                    attach_image(png, "image/png");
-                    return;
-                }
-                Err(_) => {
-                    // 编码失败或超过上传上限：明确告知（不再静默丢弃图片）。
-                    notify(i18n::tr("paste-image-failed"), 4);
-                    return;
-                }
-            }
+            notify(i18n::tr(key), 5);
         }
-
-        // ── 文本粘贴分支 ──
-        let Ok(mut clipboard) = arboard::Clipboard::new() else {
-            return;
-        };
-        let Ok(text) = clipboard.get_text() else {
-            return;
-        };
-        if text.is_empty() {
-            return;
-        }
-        insert_pasted_text(&state, &text);
     });
     *PREDICTION.state().write() = PredictionState::default();
     EventResult::Consumed
+}
+
+/// 无内容可粘贴时的引导 key：只在系统剪贴板不是用户剪贴板（SSH、herdr、无显示环境）
+/// 且本次尚无说明时给——本机读不到内容时保持既有静默，已通知过的失败不叠加。
+fn terminal_paste_hint(
+    outcome: PasteOutcome,
+    system_clipboard_is_authority: bool,
+) -> Option<&'static str> {
+    match outcome {
+        PasteOutcome::Unavailable if !system_clipboard_is_authority => Some("paste-terminal-hint"),
+        _ => None,
+    }
+}
+
+/// 本机剪贴板 → 输入区（macOS PNG → arboard 图片 → arboard 文本）。
+fn paste_from_local_clipboard(state: &State<TextAreaState>) -> PasteOutcome {
+    #[cfg(target_os = "macos")]
+    match read_pasteboard_png_bytes() {
+        Ok(Some(bytes)) => {
+            attach_image(bytes, "image/png");
+            return PasteOutcome::Pasted;
+        }
+        Ok(None) => {}
+        Err(_) => {
+            notify(i18n::tr("paste-image-failed"), 4);
+            return PasteOutcome::Notified;
+        }
+    }
+    // ── 图片粘贴分支（arboard RGBA → PNG）──
+    // arboard 的 get_image() 需要新的 Clipboard 实例（之前的 cb 可能已被消费）
+    if let Some(arboard::ImageData {
+        bytes: image_bytes,
+        width,
+        height,
+    }) = arboard::Clipboard::new()
+        .ok()
+        .and_then(|mut clipboard| clipboard.get_image().ok())
+    {
+        // arboard may already own the clipboard allocation.  Move it out
+        // instead of cloning every RGBA byte before encoding.
+        let rgba = image_bytes.into_owned();
+        if rgba.is_empty() {
+            // 空图片字节：与既有实现一致地结束本次粘贴，不回退文本分支。
+            return PasteOutcome::Unavailable;
+        }
+        match png_encode_bytes(&rgba, width, height, max_upload_bytes()) {
+            Ok(png) => {
+                attach_image(png, "image/png");
+                return PasteOutcome::Pasted;
+            }
+            Err(_) => {
+                // 编码失败或超过上传上限：明确告知（不再静默丢弃图片）。
+                notify(i18n::tr("paste-image-failed"), 4);
+                return PasteOutcome::Notified;
+            }
+        }
+    }
+
+    // ── 文本粘贴分支 ──
+    let Ok(mut clipboard) = arboard::Clipboard::new() else {
+        return PasteOutcome::Unavailable;
+    };
+    let Ok(text) = clipboard.get_text() else {
+        return PasteOutcome::Unavailable;
+    };
+    if text.is_empty() {
+        return PasteOutcome::Unavailable;
+    }
+    insert_pasted_text(state, &text);
+    PasteOutcome::Pasted
 }
 
 /// 终端 bracketed paste（`Event::Paste`）：归一化换行 + 上限截断后插入。

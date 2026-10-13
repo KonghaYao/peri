@@ -9,9 +9,10 @@
 | `TERM` | `dumb` 时关闭颜色并降级 ASCII 字符；其他值按常规能力探测。 | 同上 |
 | `COLORTERM` | `truecolor` 或 `24bit` 宣告 24 位颜色；有其他值时关闭 truecolor 判定，未设置时参考终端品牌。 | 同上 |
 | `TERM_PROGRAM` | 辅助判断 truecolor、italic 和图片协议；Kitty/Ghostty/WezTerm/Warp 可自动选 Kitty，iTerm.app 记录 iTerm2。 | 同上 |
-| `TMUX` | 存在时禁止自动选择图片协议；显式 `PERI_IMAGE` 覆盖优先。复制文本改经 OSC 52 写入终端剪贴板。 | `peri-tui/src/kit/terminal_caps.rs`、`peri-tui/src/kit/clipboard.rs` |
-| `SSH_CONNECTION`、`SSH_CLIENT`、`SSH_TTY` | 任一存在时，文本复制经 OSC 52 发往客户端终端，不写 SSH 服务端的系统剪贴板。 | `peri-tui/src/kit/clipboard.rs` |
-| `HERDR_ENV` | 存在时，文本复制经 OSC 52 发往终端，由 herdr 转发。 | 同上 |
+| `TMUX` | 存在时禁止自动选择图片协议；显式 `PERI_IMAGE` 覆盖优先。终端剪贴板通道下额外发送 `\ePtmux;` DCS 透传副本：tmux 原生 OSC 52 需 `set-clipboard on` 且客户端终端 terminfo 带 `Ms`，透传需 `allow-passthrough on`。 | `peri-tui/src/kit/terminal_caps.rs`、`peri-tui/src/kit/clipboard.rs` |
+| `SSH_CONNECTION`、`SSH_CLIENT`、`SSH_TTY` | 任一存在时，文本复制经 OSC 52 发往客户端终端，不写 SSH 服务端的系统剪贴板；Ctrl+V 读不到本机剪贴板时提示改用终端原生粘贴。 | `peri-tui/src/kit/clipboard.rs`、`peri-tui/src/kit/input_area/paste.rs` |
+| `HERDR_ENV` | 存在时，文本复制经 OSC 52 发往终端，由 herdr 转发；Ctrl+V 同 SSH 处理。 | 同上 |
+| `PERI_CLIPBOARD` | 复制通道覆盖：`native` 强制系统剪贴板，`osc52` 与 `terminal` 强制终端 OSC 52；其他值（含 `auto`）与未设置等价，走自动探测——SSH/herdr 或非 macOS 的 Unix 上无 `DISPLAY`、`WAYLAND_DISPLAY` 时用终端剪贴板，其余用系统剪贴板。大小写与首尾空白不敏感。 | 同上 |
 | `LC_ALL` | 终端 locale 的优先来源；为 `C` 或 `POSIX` 时使用 ASCII 符号。 | 同上 |
 | `LANG` | `LC_ALL` 缺失时的 locale；为 `C` 或 `POSIX` 时使用 ASCII 符号。 | 同上 |
 | `PERI_SCROLL_THROTTLE_MS` | 消息滚动节流毫秒数；有效整数至少按 1 ms 处理，`TuiConfig.scroll_fps` 优先；缺省 50 ms。 | `peri-tui/src/kit/message_area/scroll/throttle.rs` |
