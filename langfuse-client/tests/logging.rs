@@ -75,6 +75,7 @@ async fn retry_and_batch_failure_logs_include_reason_without_secrets() {
             flush_interval: Duration::from_secs(60),
             ..Default::default()
         },
+        None,
     );
     batcher
         .add(IngestionEvent::TraceCreate {
@@ -93,9 +94,11 @@ async fn retry_and_batch_failure_logs_include_reason_without_secrets() {
     assert!(batcher.shutdown().await.is_err());
     failed.assert_async().await;
     let logs = capture.0.lock().unwrap();
+    // 批次级失败日志按新交付语义呈现：可恢复的提交失败是「推迟到下一次允许的重试」，
+    // 终态失败才是 `telemetry delivery terminated`（契约 §3.6 / §4）。
     for expected in [
         "OTLP export transient failure; retrying",
-        "Batcher ingestion submission failed",
+        "telemetry batch deferred to its next allowed retry",
         "error=Ingestion API returned errors: OTLP ingestion HTTP 503 after 0 retries",
         "error=Ingestion API returned errors: OTLP ingestion HTTP 503 after 1 retries",
     ] {

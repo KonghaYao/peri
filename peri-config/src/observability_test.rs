@@ -1,10 +1,36 @@
+//! 旧观测键与整体环境键表的解析回归（契约 §8：旧键无回归）。
+//!
+//! 新增的 spool/compression 新键用例已按 §8 映射迁至 `observability_spool_test.rs`。
+
 use super::{resolve, LangfuseConfig, ENVIRONMENT_KEYS};
 use serde_json::json;
 use std::collections::BTreeMap;
 
+fn resolve_ok(
+    settings: &serde_json::Value,
+    environment: &BTreeMap<String, String>,
+) -> LangfuseConfig {
+    resolve(settings, environment).expect("测试配置必须解析成功")
+}
+
+/// §6 的 11 个新键与默认值。
+const NEW_DEFAULTS: &[(&str, &str)] = &[
+    ("LANGFUSE_SPOOL_ENABLED", "true"),
+    ("LANGFUSE_COMPRESSION", "gzip"),
+    ("LANGFUSE_INPUT_SPOOL_THRESHOLD_BYTES", "262144"),
+    ("LANGFUSE_PAYLOAD_MEMORY_THRESHOLD_BYTES", "262144"),
+    ("LANGFUSE_MEMORY_BUDGET_BYTES", "33554432"),
+    ("LANGFUSE_PREPARE_MAX_IN_FLIGHT", "1"),
+    ("LANGFUSE_STREAM_CHUNK_BYTES", "65536"),
+    ("LANGFUSE_SPOOL_QUOTA_BYTES", "1073741824"),
+    ("LANGFUSE_SPOOL_TTL_SECS", "86400"),
+    ("LANGFUSE_MAX_WIRE_BYTES", "4194304"),
+    ("LANGFUSE_SHUTDOWN_GRACE_SECS", "60"),
+];
+
 #[test]
 fn test_defaults_are_preserved() {
-    let config = resolve(&json!({}), &BTreeMap::new());
+    let config = resolve_ok(&json!({}), &BTreeMap::new());
     assert!(config.public_key.is_none());
     assert!(config.secret_key.is_none());
     assert_eq!(config.host, "https://cloud.langfuse.com");
@@ -13,7 +39,7 @@ fn test_defaults_are_preserved() {
     assert_eq!(config.batch_max_events, 50);
     assert_eq!(config.batch_queue_capacity, 1024);
     assert_eq!(config.batch_max_in_flight, 2);
-    assert_eq!(config.batch_max_event_bytes, 512 * 1024);
+    assert_eq!(config.batch_max_event_bytes, 4 * 1024 * 1024);
     assert_eq!(config.batch_max_bytes, 4 * 1024 * 1024);
     assert_eq!(config.batch_max_queue_bytes, 16 * 1024 * 1024);
     assert_eq!(config.batch_flush_interval_secs, 10);
@@ -22,7 +48,7 @@ fn test_defaults_are_preserved() {
 
 #[test]
 fn test_settings_values_are_parsed_and_sampling_is_clamped() {
-    let config = resolve(
+    let config = resolve_ok(
         &json!({"langfuse": {
             "trace_sampling": 2.5,
             "error_span_always": false,
@@ -69,7 +95,7 @@ fn test_environment_overrides_settings_and_invalid_values_are_ignored() {
         ),
         ("LANGFUSE_USER_ID".to_string(), "operator".to_string()),
     ]);
-    let config = resolve(
+    let config = resolve_ok(
         &json!({"langfuse": {
             "trace_sampling": 0.3,
             "error_span_always": true,
@@ -99,21 +125,28 @@ fn test_environment_boolean_and_sampling_edge_values_are_preserved() {
             "False".to_string(),
         ),
     ]);
-    let config = resolve(&json!({}), &environment);
+    let config = resolve_ok(&json!({}), &environment);
     assert_eq!(config.trace_sampling, 0.0);
     assert!(!config.error_span_always);
 }
 
 #[test]
 fn test_environment_key_list_includes_all_supported_overrides() {
-    assert_eq!(ENVIRONMENT_KEYS.len(), 13);
+    assert_eq!(ENVIRONMENT_KEYS.len(), 24);
     assert!(ENVIRONMENT_KEYS.contains(&"LANGFUSE_SECRET_KEY"));
     assert!(ENVIRONMENT_KEYS.contains(&"LANGFUSE_BATCH_MAX_QUEUE_BYTES"));
+    for (key, _) in NEW_DEFAULTS {
+        assert!(ENVIRONMENT_KEYS.contains(key), "缺少新键 {key}");
+    }
+    let mut unique = ENVIRONMENT_KEYS.to_vec();
+    unique.sort_unstable();
+    unique.dedup();
+    assert_eq!(unique.len(), ENVIRONMENT_KEYS.len(), "环境键不得重复");
 }
 
 #[test]
 fn debug_output_preserves_endpoint_credentials_and_user_identity() {
-    let config = resolve(
+    let config = resolve_ok(
         &json!({}),
         &BTreeMap::from([
             (

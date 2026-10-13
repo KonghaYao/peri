@@ -1,6 +1,10 @@
 //! Turn 结束时按 parent 先于 child 的顺序收束遗留 stage 与 generation。
 
-use super::event_builder::{new_uuid, now_rfc3339, try_add_or_warn_via_session, VERSION};
+use super::event_builder::{
+    new_uuid, now_rfc3339, try_add_or_warn_via_session, try_add_prepared_or_warn_via_session,
+    VERSION,
+};
+use super::input_snapshot::mark_rejected_input;
 use super::stages::StageHandle;
 use super::turn_error::failure_error_class;
 use super::{usage, LangfuseTracer};
@@ -87,9 +91,14 @@ impl LangfuseTracer {
             };
             let terminal = abandoned.terminal.as_ref();
             let lifecycle_incomplete = terminal.is_none();
+            let input = abandoned.input;
             let mut metadata = abandoned
                 .retry_metadata
                 .unwrap_or_else(|| serde_json::json!({}));
+            if input.is_rejected() {
+                // 输入冻结被拒：只留标记，不用旧 fallback 冒充实际请求（契约 §3.6）
+                mark_rejected_input(&mut metadata);
+            }
             if let Some(object) = metadata.as_object_mut() {
                 object.insert(
                     "incomplete".to_string(),
@@ -161,7 +170,7 @@ impl LangfuseTracer {
                 name: Some(format!("step-{}", abandoned.step)),
                 start_time: Some(abandoned.start_time),
                 end_time: Some(end_time.clone()),
-                input: Some(abandoned.input_json),
+                input: None,
                 output,
                 metadata: Some(metadata),
                 level,
@@ -173,17 +182,30 @@ impl LangfuseTracer {
                 session_id: Some(self.session_id.clone()),
                 ..Default::default()
             };
-            try_add_or_warn_via_session(
-                &*self.session,
-                IngestionEvent::GenerationCreate {
-                    id: new_uuid(),
-                    timestamp: end_time,
-                    body,
-                    metadata: None,
-                },
-                &self.trace_id,
-                "incomplete LLM GenerationCreate",
-            );
+            // 冻结被拒（`Rejected`）时事件不带来源，是直接事件，与 live 结束路径同一分派：
+            // 携带来源才用 `try_add_prepared`，否则走同一准入的直接入口。
+            let event = IngestionEvent::GenerationCreate {
+                id: new_uuid(),
+                timestamp: end_time,
+                body,
+                metadata: None,
+            };
+            match input.into_source() {
+                Some(source) => try_add_prepared_or_warn_via_session(
+                    &*self.session,
+                    event,
+                    Some(source),
+                    None,
+                    &self.trace_id,
+                    "incomplete LLM GenerationCreate",
+                ),
+                None => try_add_or_warn_via_session(
+                    &*self.session,
+                    event,
+                    &self.trace_id,
+                    "incomplete LLM GenerationCreate",
+                ),
+            }
         }
     }
 }

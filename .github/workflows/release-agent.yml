@@ -9,8 +9,15 @@ env:
     CARGO_TERM_COLOR: always
 
 jobs:
+    # sidecar 生成前置（与 pre-release 共用同一份实现）。失败即矩阵整体不启动：
+    # 基线 v4.0.2 的失败点是六平台 Rust 编译全部完成之后才在打包阶段发现
+    # npm-packages/@peri-workflow/dist/peri-workflow.js 不存在。
+    sidecar:
+        uses: ./.github/workflows/workflow-sidecar.yml
+
     build:
         name: Build (${{ matrix.target }})
+        needs: sidecar
         runs-on: ${{ matrix.os }}
         strategy:
             fail-fast: false
@@ -50,6 +57,24 @@ jobs:
               with:
                   targets: ${{ matrix.target }}
 
+            # 注册表缓存的恢复排在「需要依赖下载的准备动作」之前：紧随其后的
+            # `update --workspace` 与后续 `--locked` 构建都要用索引与 crate 归档。
+            # key 取根 Cargo.lock（依赖集的真实输入）—— tag 重写只改 workspace 成员
+            # 的版本字段，不改变所需依赖集合，故注册表身份不受重写影响；`**/Cargo.lock`
+            # 会连带匹配与本构建无关的 side-projects 锁文件，收敛到根文件。
+            # patch 内容不进 key：补丁摘要已经在依赖源路径里
+            # （target/peri-rmcp-patches/<patch-sha256>/…，见 scripts/cargo-rmcp-patched.sh），
+            # 补丁一变 Cargo 自行失效受影响单元，比整盘冷启动划算。
+            - name: Cache cargo registry
+              uses: actions/cache@v4
+              with:
+                  path: |
+                      ~/.cargo/registry/index
+                      ~/.cargo/registry/cache
+                      ~/.cargo/git/db
+                  key: ${{ runner.os }}-cargo-${{ hashFiles('Cargo.lock') }}
+                  restore-keys: ${{ runner.os }}-cargo-
+
             - name: Set version from tag
               shell: bash
               run: |
@@ -61,28 +86,27 @@ jobs:
                   # 版本与之一致，故按同一 patch 配置同步一次 lock。
                   ./scripts/cargo-rmcp-patched.sh update --workspace
 
-            - name: Cache cargo registry
-              uses: actions/cache@v4
-              with:
-                  path: |
-                      ~/.cargo/registry/index
-                      ~/.cargo/registry/cache
-                      ~/.cargo/git/db
-                  key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}
-                  restore-keys: ${{ runner.os }}-cargo-
-
-            - name: Cache build artifacts
-              uses: actions/cache@v4
-              with:
-                  path: target
-                  key: ${{ runner.os }}-${{ matrix.target }}-build-${{ hashFiles('**/Cargo.lock') }}
-                  restore-keys: |
-                      ${{ runner.os }}-${{ matrix.target }}-build-
-                      ${{ runner.os }}-${{ matrix.target }}-
+            # 这里不再缓存 target：缓存作用域与其它 tag、分支互相隔离（不同 tag 名的缓存
+            # 不可互读，见 docs.github.com/actions/reference/workflows-and-actions/
+            # dependency-caching），六平台各自的 release 产物缓存只有「同一个 tag 的重跑」
+            # 用得上；而 actions/cache 只在 job 成功时写入，构建失败的那次重跑必然是冷启动，
+            # 命中率实际为零。写入代价却是每次发布约 1GB×6 的压缩与上传，记在仓库 10GB
+            # 缓存额度上。即使 tag 能回落到默认分支缓存，main 的 CI 缓存里也只有 dev/test
+            # profile 的依赖产物，release 构建无法复用。
+            # release 若确实需要热缓存，应由 main 上受控的预热工作流产出与之兼容的产物
+            # （意味着六平台 release profile 构建），其成本必须先实测再决定，本轮不添加。
 
             - name: Install cross
               if: runner.os == 'Linux'
               run: cargo install cross
+
+            # sidecar 已在前置任务里构建并通过身份校验；这里只做下载与布局，
+            # 不再在本矩阵内重复构建 JS（六平台各构建一次既慢又会各自漂移）。
+            - name: Download workflow sidecar
+              uses: actions/download-artifact@v4
+              with:
+                  name: workflow-sidecar
+                  path: sidecar
 
             - name: Build agent-tui (Linux)
               if: runner.os == 'Linux'
@@ -110,16 +134,18 @@ jobs:
             # Rust 侧不嵌入 JS 产物，按该布局消费（peri-workflow/src/runner/artifact.rs）。
             - name: Package binaries (Unix)
               if: matrix.ext == ''
+              env:
+                  SIDECAR_ROOT: sidecar
+                  SIDECAR_IDENTITY: ${{ needs.sidecar.outputs.identity }}
               run: |
                   mkdir -p dist/package
                   cp "target/${{ matrix.target }}/release/peri" dist/package/peri
                   chmod +x dist/package/peri
-                  sidecar_id="$(sha256sum npm-packages/@peri-workflow/dist/peri-workflow.js | cut -d' ' -f1)"
-                  sidecar_id="${sidecar_id:0:12}"
-                  sidecar_dir="dist/package/peri-resources/workflow/${sidecar_id}"
-                  mkdir -p "${sidecar_dir}/dist"
-                  cp npm-packages/@peri-workflow/dist/peri-workflow.js "${sidecar_dir}/dist/peri-workflow.js"
-                  cp npm-packages/@peri-workflow/package.json "${sidecar_dir}/package.json"
+                  # 目录身份来自前置任务，不在本矩阵内由工作树重新计算 —— 重算会让
+                  # 「打包成功但身份与 Rust 侧 pin 不一致」的包有活路。
+                  sidecar_entry="${SIDECAR_ROOT}/peri-resources/workflow/${SIDECAR_IDENTITY}/dist/peri-workflow.js"
+                  test -f "$sidecar_entry" || { echo "missing sidecar entry: $sidecar_entry" >&2; exit 1; }
+                  cp -R "${SIDECAR_ROOT}/peri-resources" dist/package/peri-resources
                   tar -czf "dist/peri-${{ matrix.platform }}.tar.gz" -C dist/package peri peri-resources
                   rm -rf dist/package
                   cd dist
@@ -132,14 +158,15 @@ jobs:
             - name: Package binaries (Windows)
               if: matrix.ext == '.exe'
               shell: pwsh
+              env:
+                  SIDECAR_ROOT: sidecar
+                  SIDECAR_IDENTITY: ${{ needs.sidecar.outputs.identity }}
               run: |
                   New-Item -ItemType Directory -Force -Path dist/package | Out-Null
                   Copy-Item "target/${{ matrix.target }}/release/peri.exe" "dist/package/peri.exe"
-                  $sidecarId = (Get-FileHash -Algorithm SHA256 "npm-packages/@peri-workflow/dist/peri-workflow.js").Hash.ToLower().Substring(0, 12)
-                  $sidecarDir = "dist/package/peri-resources/workflow/$sidecarId"
-                  New-Item -ItemType Directory -Force -Path "$sidecarDir/dist" | Out-Null
-                  Copy-Item "npm-packages/@peri-workflow/dist/peri-workflow.js" "$sidecarDir/dist/peri-workflow.js"
-                  Copy-Item "npm-packages/@peri-workflow/package.json" "$sidecarDir/package.json"
+                  $sidecarEntry = "$env:SIDECAR_ROOT/peri-resources/workflow/$env:SIDECAR_IDENTITY/dist/peri-workflow.js"
+                  if (-not (Test-Path $sidecarEntry)) { throw "missing sidecar entry: $sidecarEntry" }
+                  Copy-Item -Recurse "$env:SIDECAR_ROOT/peri-resources" "dist/package/peri-resources"
                   Compress-Archive -Path "dist/package/*" -DestinationPath "dist/peri-${{ matrix.platform }}.zip"
                   Remove-Item -Recurse -Force dist/package
                   Set-Location dist

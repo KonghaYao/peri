@@ -48,9 +48,9 @@ Compact 的三项环境变量在宿主装配时覆盖 `config.compact`；Agent �
 
 ## Langfuse 与日志
 
-Langfuse 只有 public key 和 secret key **都存在**时才启用。以下环境值覆盖同名 settings 值；数值解析失败则保留 settings 或默认值。队列等容量的最终运行约束还由 Controller/Client 执行。
+Langfuse 只有 public key 和 secret key **都存在**时才启用。以下环境值覆盖同名 settings 值。旧键（`LANGFUSE_PUBLIC_KEY`…`LANGFUSE_USER_ID`）数值解析失败时保留 settings 或默认值，不报错；新键（`LANGFUSE_SPOOL_ENABLED` 起 11 项）逐键选择胜出来源（env > `langfuse.*` settings > default），胜出值非法即返回结构化配置错误、且不发布新配置快照（不回退默认），不接受旧 `PERI_` 别名：布尔键只接受 `true/false/1/0/on/off`，压缩键只接受 `gzip/none`，整数键只接受非零十进制（零、负数、浮点、溢出、空白均拒绝）。跨键约束（input/payload 阈值与读写块不超 `LANGFUSE_MEMORY_BUDGET_BYTES`，并发槽与时限非零）在 langfuse-client 构造期校验；队列等容量的最终运行约束还由 Controller/Client 执行。
 
-| 变量 | 控制什么；缺省值 | 消费入口 |
+| 变量 | 控制什么；有效值与缺省行为 | 消费入口 |
 | --- | --- | --- |
 | `LANGFUSE_PUBLIC_KEY` | Langfuse public key；缺省无。 | `peri-config/src/observability.rs` |
 | `LANGFUSE_SECRET_KEY` | Langfuse secret key；缺省无。 | 同上 |
@@ -60,11 +60,22 @@ Langfuse 只有 public key 和 secret key **都存在**时才启用。以下环�
 | `LANGFUSE_BATCH_MAX_EVENTS` | 单批最大事件数；缺省 50。 | 同上 |
 | `LANGFUSE_BATCH_QUEUE_CAPACITY` | 事件队列容量；缺省 1024。 | 同上 |
 | `LANGFUSE_BATCH_MAX_IN_FLIGHT` | 同时发送的批次数；缺省 2。 | 同上 |
-| `LANGFUSE_BATCH_MAX_EVENT_BYTES` | 单事件字节预算；缺省 512 KiB。 | 同上 |
+| `LANGFUSE_BATCH_MAX_EVENT_BYTES` | 单事件字节预算；缺省 4 MiB。 | 同上 |
 | `LANGFUSE_BATCH_MAX_BYTES` | 单批字节预算；缺省 4 MiB。 | 同上 |
 | `LANGFUSE_BATCH_MAX_QUEUE_BYTES` | 整个队列的字节预算；缺省 16 MiB。 | 同上 |
 | `LANGFUSE_BATCH_FLUSH_INTERVAL` | 批次定时发送间隔（秒）；缺省 10。 | 同上 |
 | `LANGFUSE_USER_ID` | 自定义观测 user 维度；缺省无。 | 同上 |
+| `LANGFUSE_SPOOL_ENABLED` | 磁盘暂存开关；`true`/`false`/`1`/`0`/`on`/`off`（去空白、不分大小写），settings 侧须为 JSON bool；缺省 `true`。`false` 时不构造 native spool：不扫描/恢复/清理旧暂存、不新建磁盘文件，只走有界内存路径。 | `peri-config/src/observability_spool.rs` |
+| `LANGFUSE_COMPRESSION` | 上报正文内容编码；`gzip` 或 `none`（去空白、不分大小写），缺省 `gzip`；`none` 保持未压缩 OTLP 字节。 | `peri-config/src/observability_spool.rs` |
+| `LANGFUSE_INPUT_SPOOL_THRESHOLD_BYTES` | 冻结 input 超过该字节数即转暂存文件；非零十进制整数，缺省 262144。 | `peri-config/src/observability_spool.rs` |
+| `LANGFUSE_PAYLOAD_MEMORY_THRESHOLD_BYTES` | 导出正文超过该字节数即转暂存文件；非零十进制整数，缺省 262144。 | `peri-config/src/observability_spool.rs` |
+| `LANGFUSE_MEMORY_BUDGET_BYTES` | 遥测 retained、工作区与缓冲的总预算字节数；非零十进制整数，缺省 33554432。 | `peri-config/src/observability_spool.rs` |
+| `LANGFUSE_PREPARE_MAX_IN_FLIGHT` | 同时准备的编码任务数；非零十进制整数且不超信号量上限，缺省 1。 | `peri-config/src/observability_spool.rs` |
+| `LANGFUSE_STREAM_CHUNK_BYTES` | 编码读写块字节数；非零十进制整数，缺省 65536。 | `peri-config/src/observability_spool.rs` |
+| `LANGFUSE_SPOOL_QUOTA_BYTES` | 暂存磁盘配额字节数（含临时数据与终态待删除对象）；非零十进制整数，缺省 1073741824。 | `peri-config/src/observability_spool.rs` |
+| `LANGFUSE_SPOOL_TTL_SECS` | 暂存对象存活秒数；非零十进制整数，缺省 86400。 | `peri-config/src/observability_spool.rs` |
+| `LANGFUSE_MAX_WIRE_BYTES` | 压缩后 wire 正文字节上限；非零十进制整数，缺省 4194304。 | `peri-config/src/observability_spool.rs` |
+| `LANGFUSE_SHUTDOWN_GRACE_SECS` | 关闭时等待遥测移交的宽限秒数；非零十进制整数，缺省 60。 | `peri-config/src/observability_spool.rs` |
 | `RUST_LOG` | tracing filter 指令；缺省 `info`，并将 MCP/plugin/rmcp 模块设为 `warn`。 | `peri-agent/src/telemetry/subscriber.rs` |
 | `RUST_LOG_FORMAT` | 恰为 `json` 时输出 JSON 日志；其他值使用普通格式。 | 同上 |
 | `RUST_LOG_FILE` | 日志文件路径/名前缀；缺省 `~/.peri/logs/<service>`，按天轮转。 | 同上 |

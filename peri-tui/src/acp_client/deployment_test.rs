@@ -1,4 +1,5 @@
 use super::*;
+use peri_acp::host::{DeliveryCounts, LangfuseShutdownReport};
 use peri_acp::transport::{
     AcpTransport,
     mpsc::mpsc_transport_pair,
@@ -117,6 +118,75 @@ async fn test_deployment_incomplete_exit_is_visible_and_preserves_business_error
                 format!("{error:#}").contains("original business failure"),
                 business_failed
             );
+        }
+    }
+}
+
+fn counts(pending_events: u64, persisted_pending_events: u64, active_tasks: u64) -> DeliveryCounts {
+    DeliveryCounts {
+        pending_events,
+        persisted_pending_events,
+        failed_events: 0,
+        cleanup_pending_objects: 0,
+        active_tasks,
+    }
+}
+
+/// 遥测未收敛不是业务结果：`Pending`（仍持本地任务/清理 owner）与已完成移交的
+/// `PersistedPending` 都以 `TelemetryFailed` 到达部署面，必须保留原业务结果——成功仍是成功，
+/// 业务失败的原因也不被改写成关闭错误（契约 §7 P4b、§8）。
+#[tokio::test]
+async fn test_deployment_telemetry_pending_never_changes_business_result() {
+    for business_failed in [false, true] {
+        for report in [
+            AcpHostShutdownReport::TelemetryFailed(LangfuseShutdownReport::Pending {
+                counts: counts(3, 1, 1),
+            }),
+            AcpHostShutdownReport::TelemetryFailed(LangfuseShutdownReport::PersistedPending {
+                counts: counts(2, 2, 0),
+            }),
+        ] {
+            let (transport, server) = mpsc_transport_pair();
+            let (client, tx, _notifications) = AcpTuiClient::new(transport);
+            client.spawn_pump(tx);
+            let host = tokio::spawn(async move {
+                let Some(IncomingMessage::Request { id, .. }) = server.recv().await else {
+                    panic!("必须收到实际请求")
+                };
+                let response = if business_failed {
+                    Err(AcpError::new(-32603, "original business failure"))
+                } else {
+                    Ok(json!({}))
+                };
+                server.send_response(id, response).await.unwrap();
+                assert!(server.recv().await.is_none());
+                report
+            });
+            let outcome = finish_operation(
+                async {
+                    client.send_raw_request("session/prompt", json!({})).await?;
+                    Ok(())
+                },
+                &client,
+                async { host.await.unwrap() },
+            )
+            .await;
+            match (business_failed, outcome) {
+                (false, Ok(())) => {}
+                (true, Err(error)) => {
+                    assert!(
+                        format!("{error:#}").contains("original business failure"),
+                        "业务失败必须原样保留：{error:#}"
+                    );
+                    assert!(
+                        !error.to_string().contains("shutdown did not complete"),
+                        "遥测未收敛不得改写业务失败：{error:#}"
+                    );
+                }
+                (_, other) => panic!(
+                    "遥测未收敛改变了业务结果（business_failed={business_failed}）：{other:?}"
+                ),
+            }
         }
     }
 }

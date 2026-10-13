@@ -1,15 +1,21 @@
-use std::sync::Arc;
+use std::collections::HashMap;
+use std::io::{Read, Write};
+use std::net::{TcpListener, TcpStream};
+use std::sync::{Arc, Mutex};
 
 use langfuse_client::{IngestionEvent, SpanBody};
 use peri_acp_types::session::TurnTelemetryOutcome;
 use peri_agent::agent::events::{Stage, StageStatus};
 use peri_agent::messages::BaseMessage;
 use peri_agent::tools::ToolDefinition;
+use peri_config::observability::LangfuseCompression;
 
 use super::stages::MAIN_AGENT_KEY;
 use super::LangfuseTracer;
 use crate::langfuse::config::LangfuseConfig;
 use crate::langfuse::fake_session::FakeLangfuseSession;
+use crate::langfuse::session::LangfuseSession;
+use crate::langfuse::session_like::LangfuseSessionLike;
 
 fn tracer(rate: f64) -> (LangfuseTracer, Arc<FakeLangfuseSession>) {
     let session = FakeLangfuseSession::new("session-observation");
@@ -22,6 +28,30 @@ fn tracer(rate: f64) -> (LangfuseTracer, Arc<FakeLangfuseSession>) {
         },
     );
     (tracer, session)
+}
+
+/// 期望字节口径：对象键递归字典序、数组保序（冻结正文与构建 feature 无关，契约 §3.4）。
+///
+/// 本地实现而非复用产品代码，保持期望值独立于被测实现。
+fn stable_bytes(value: &serde_json::Value) -> String {
+    fn canonical(value: &serde_json::Value) -> serde_json::Value {
+        match value {
+            serde_json::Value::Object(fields) => {
+                let mut keys: Vec<&String> = fields.keys().collect();
+                keys.sort();
+                serde_json::Value::Object(
+                    keys.into_iter()
+                        .map(|key| (key.clone(), canonical(&fields[key])))
+                        .collect(),
+                )
+            }
+            serde_json::Value::Array(items) => {
+                serde_json::Value::Array(items.iter().map(canonical).collect())
+            }
+            other => other.clone(),
+        }
+    }
+    serde_json::to_string(&canonical(value)).expect("stable expectation json")
 }
 
 fn workflow_spans(events: &[IngestionEvent]) -> Vec<&SpanBody> {
@@ -220,14 +250,15 @@ async fn turn_uses_session_attributes_without_session_create() {
 
 #[tokio::test]
 async fn abandoned_generation_keeps_full_fallback_messages_and_tools() {
-    let (mut tracer, session) = tracer(1.0);
+    let server = CaptureServer::start();
+    let mut tracer = capture_tracer(capture_session(&server).await);
     let messages = vec![BaseMessage::human("长上下文🙂".repeat(4096))];
     let tools = vec![ToolDefinition {
         name: "lookup".to_string(),
         description: "lookup description".to_string(),
         parameters: serde_json::json!({"type": "object", "properties": {"query": {"type": "string"}}}),
     }];
-    let expected = serde_json::json!({"messages": &messages, "tools": &tools});
+    let expected = stable_bytes(&serde_json::json!({"messages": &messages, "tools": &tools}));
     tracer.on_turn_start("input");
     tracer.on_llm_start("main", 0, &messages, &tools);
     tracer.on_llm_retrying("main", 0, 1, 3, 10, "protected error");
@@ -235,23 +266,38 @@ async fn abandoned_generation_keeps_full_fallback_messages_and_tools() {
         .on_turn_end(TurnTelemetryOutcome::Completed)
         .await
         .unwrap();
-    let events = session.events_snapshot();
-    let bodies: Vec<_> = events
-        .iter()
-        .filter_map(|event| match event {
-            IngestionEvent::GenerationCreate { body, .. } => Some(body),
-            _ => None,
-        })
+
+    let generations: Vec<_> = server
+        .spans()
+        .into_iter()
+        .filter(|span| span.name.starts_with("step-"))
         .collect();
-    assert_eq!(bodies.len(), 1);
-    assert_eq!(bodies[0].input.as_ref(), Some(&expected));
-    assert_eq!(bodies[0].metadata.as_ref().unwrap()["retry_count"], 1);
-    assert_eq!(bodies[0].metadata.as_ref().unwrap()["incomplete"], true);
+    assert_eq!(generations.len(), 1, "遗留 generation 必须上报一次");
+    assert_eq!(
+        generations[0].attributes.get(INPUT_ATTRIBUTE),
+        Some(&expected),
+        "结束事件必须携带完整 fallback messages/tools 的冻结字节"
+    );
+    assert_eq!(
+        generations[0]
+            .attributes
+            .get("langfuse.observation.metadata.retry_count")
+            .map(String::as_str),
+        Some("1")
+    );
+    assert_eq!(
+        generations[0]
+            .attributes
+            .get("langfuse.observation.metadata.incomplete")
+            .map(String::as_str),
+        Some("true")
+    );
 }
 
 #[tokio::test]
 async fn abandoned_generation_prefers_complete_raw_request() {
-    let (mut tracer, session) = tracer(1.0);
+    let server = CaptureServer::start();
+    let mut tracer = capture_tracer(capture_session(&server).await);
     let raw = serde_json::json!({"model": "provider-model", "messages": [{"content": "完整🙂".repeat(4096)}], "tools": [{"name": "lookup", "schema": {"type": "object"}}], "provider_extra": {"enabled": true}});
     tracer.on_turn_start("input");
     tracer.on_llm_start("main", 0, &[BaseMessage::human("fallback")], &[]);
@@ -260,15 +306,11 @@ async fn abandoned_generation_prefers_complete_raw_request() {
         .on_turn_end(TurnTelemetryOutcome::Completed)
         .await
         .unwrap();
-    let events = session.events_snapshot();
-    let input = events
-        .iter()
-        .find_map(|event| match event {
-            IngestionEvent::GenerationCreate { body, .. } => body.input.as_ref(),
-            _ => None,
-        })
-        .unwrap();
-    assert_eq!(input, &raw);
+    assert_eq!(
+        server.generation_input().as_deref(),
+        Some(stable_bytes(&raw).as_str()),
+        "raw 请求到达后必须上报请求体冻结字节，而不是旧 fallback"
+    );
 }
 
 fn start_subagent(tracer: &mut LangfuseTracer) -> (String, String) {
@@ -404,7 +446,8 @@ async fn cancelled_turn_closes_cached_subagent_once() {
 
 #[tokio::test]
 async fn gated_generation_preserves_raw_request_through_late_subagent_join() {
-    let (mut tracer, session) = tracer(1.0);
+    let server = CaptureServer::start();
+    let mut tracer = capture_tracer(capture_session(&server).await);
     tracer.set_main_agent_id("main".to_string());
     tracer.on_turn_start("input");
     let raw = serde_json::json!({"messages": [{"content": "native🙂".repeat(4096)}], "tools": [{"name": "native-tool"}], "provider_extra": {"enabled": true}});
@@ -433,14 +476,180 @@ async fn gated_generation_preserves_raw_request_through_late_subagent_join() {
         .on_turn_end(TurnTelemetryOutcome::Completed)
         .await
         .unwrap();
-    let events = session.events_snapshot();
-    let bodies: Vec<_> = events
-        .iter()
-        .filter_map(|event| match event {
-            IngestionEvent::GenerationCreate { body, .. } => Some(body),
-            _ => None,
-        })
+    let generations: Vec<_> = server
+        .spans()
+        .into_iter()
+        .filter(|span| span.name.starts_with("step-"))
         .collect();
-    assert_eq!(bodies.len(), 1);
-    assert_eq!(bodies[0].input.as_ref(), Some(&raw));
+    assert_eq!(generations.len(), 1, "闸门重放后只上报一次 generation");
+    assert_eq!(
+        generations[0].attributes.get(INPUT_ATTRIBUTE),
+        Some(&stable_bytes(&raw)),
+        "迟到 join 的重放必须保留原始请求体字节"
+    );
+}
+
+// ── 本地 fixture：真实部署 session + 本地 OTLP 捕获端点（不共享 test_helpers） ─────────
+//
+// 冻结后的 input 只随来源交给部署，正文不再进 generation body（契约 §3.3），因此需要核对
+// 正文的用例改为在真实链路（真实 Batcher/Session + 本地捕获端点）上读取已上线的 OTLP 字节。
+
+/// OTLP 中承载观测 input 的属性键。
+const INPUT_ATTRIBUTE: &str = "langfuse.observation.input";
+
+/// 捕获 OTLP 正文并回 200 `{}` 的本地端点；只读正文，不解析凭据。
+struct CaptureServer {
+    url: String,
+    bodies: Arc<Mutex<Vec<Vec<u8>>>>,
+}
+
+impl CaptureServer {
+    fn start() -> Self {
+        let listener = TcpListener::bind("127.0.0.1:0").expect("bind capture server");
+        let address = listener.local_addr().expect("capture server address");
+        let bodies: Arc<Mutex<Vec<Vec<u8>>>> = Arc::new(Mutex::new(Vec::new()));
+        let sink = Arc::clone(&bodies);
+        std::thread::spawn(move || {
+            for stream in listener.incoming() {
+                let Ok(mut stream) = stream else { continue };
+                if let Some(body) = read_http_body(&mut stream) {
+                    sink.lock().expect("capture sink").push(body);
+                }
+                let _ = stream.write_all(
+                    b"HTTP/1.1 200 OK\r\ncontent-type: application/json\r\ncontent-length: 2\r\n\r\n{}",
+                );
+            }
+        });
+        Self {
+            url: format!("http://{address}"),
+            bodies,
+        }
+    }
+
+    /// 已上线的观测 span（name + 字符串属性），按到达顺序。
+    fn spans(&self) -> Vec<SpanView> {
+        self.bodies
+            .lock()
+            .expect("capture sink")
+            .iter()
+            .flat_map(|body| otlp_spans(body))
+            .collect()
+    }
+
+    /// 已上线的 generation 输入（span 名以 `step-` 开头）；无 generation 时为 `None`。
+    fn generation_input(&self) -> Option<String> {
+        self.spans()
+            .into_iter()
+            .find(|span| span.name.starts_with("step-"))
+            .and_then(|span| span.attributes.get(INPUT_ATTRIBUTE).cloned())
+    }
+}
+
+/// 读一个 HTTP 请求的正文（按 `content-length` 截断）。
+fn read_http_body(stream: &mut TcpStream) -> Option<Vec<u8>> {
+    let mut buffer = Vec::new();
+    let mut chunk = [0u8; 4096];
+    let header_end = loop {
+        let read = stream.read(&mut chunk).ok()?;
+        if read == 0 {
+            return None;
+        }
+        buffer.extend_from_slice(&chunk[..read]);
+        if let Some(index) = buffer.windows(4).position(|window| window == b"\r\n\r\n") {
+            break index + 4;
+        }
+    };
+    let headers = String::from_utf8_lossy(&buffer[..header_end]).to_ascii_lowercase();
+    let length = headers
+        .lines()
+        .find_map(|line| line.strip_prefix("content-length:"))
+        .and_then(|value| value.trim().parse::<usize>().ok())?;
+    let mut body = buffer[header_end..].to_vec();
+    while body.len() < length {
+        let read = stream.read(&mut chunk).ok()?;
+        if read == 0 {
+            break;
+        }
+        body.extend_from_slice(&chunk[..read]);
+    }
+    body.truncate(length);
+    Some(body)
+}
+
+/// OTLP span 视图：名称与字符串属性。
+struct SpanView {
+    name: String,
+    attributes: HashMap<String, String>,
+}
+
+fn otlp_spans(body: &[u8]) -> Vec<SpanView> {
+    let value: serde_json::Value = serde_json::from_slice(body).expect("OTLP 正文必须是 JSON");
+    let mut spans = Vec::new();
+    collect_spans(&value, &mut spans);
+    spans
+}
+
+fn collect_spans(value: &serde_json::Value, spans: &mut Vec<SpanView>) {
+    match value {
+        serde_json::Value::Object(object) => {
+            let name = object.get("name").and_then(|value| value.as_str());
+            let attributes = object.get("attributes").and_then(|value| value.as_array());
+            if let (Some(name), Some(attributes)) = (name, attributes) {
+                let mut map = HashMap::new();
+                for attribute in attributes {
+                    let key = attribute.get("key").and_then(|value| value.as_str());
+                    let text = attribute
+                        .get("value")
+                        .and_then(|value| value.get("stringValue"))
+                        .and_then(|value| value.as_str());
+                    if let (Some(key), Some(text)) = (key, text) {
+                        map.insert(key.to_string(), text.to_string());
+                    }
+                }
+                spans.push(SpanView {
+                    name: name.to_string(),
+                    attributes: map,
+                });
+            }
+            for nested in object.values() {
+                collect_spans(nested, spans);
+            }
+        }
+        serde_json::Value::Array(items) => {
+            for item in items {
+                collect_spans(item, spans);
+            }
+        }
+        _ => {}
+    }
+}
+
+/// 真实部署 session：捕获端点 + 有界内存路径（无暂存），冻结/编码/HTTP 全走产品实现。
+async fn capture_session(server: &CaptureServer) -> Arc<dyn LangfuseSessionLike> {
+    let config = LangfuseConfig {
+        public_key: Some("pk-capture".into()),
+        secret_key: Some("sk-capture".into()),
+        host: server.url.clone(),
+        trace_sampling: 1.0,
+        // 未压缩 OTLP JSON 才能逐字段核对冻结字节；暂存关闭时部署只用内存快照。
+        compression: LangfuseCompression::None,
+        spool_enabled: false,
+        ..Default::default()
+    };
+    Arc::new(
+        LangfuseSession::new(config, "session-observation".into(), None)
+            .await
+            .expect("合法部署配置必须构造出真实 session"),
+    )
+}
+
+fn capture_tracer(session: Arc<dyn LangfuseSessionLike>) -> LangfuseTracer {
+    LangfuseTracer::new(
+        session,
+        "session-observation".to_string(),
+        LangfuseConfig {
+            trace_sampling: 1.0,
+            ..Default::default()
+        },
+    )
 }

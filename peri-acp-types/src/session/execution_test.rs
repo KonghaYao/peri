@@ -21,3 +21,18 @@ fn test_compact_incomplete_response_has_safe_llm_failure() {
         assert!(failure.http_status.is_none());
     }
 }
+
+#[test]
+fn test_compact_recovery_exhausted_has_safe_llm_failure() {
+    let exhausted = AgentError::CompactRecoveryExhausted {
+        attempts: 3,
+        last_reason: crate::error::SummaryRecoveryReason::OutputLimitTruncated,
+    };
+    let failure = ExecutionFailure::from_agent_error(&exhausted);
+    assert_eq!(failure.kind, ExecutionFailureKind::Llm);
+    assert_eq!(exhausted.category_name(), "compact_recovery_exhausted");
+    assert!(failure.public_message.contains("3 summary attempts"));
+    assert!(failure.public_message.contains("no background retry"));
+    assert!(failure.diagnostic.is_none());
+    assert!(failure.http_status.is_none());
+}

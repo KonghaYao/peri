@@ -534,15 +534,17 @@ fn metadata_blob_is_preserved_alongside_named_filterable_fields() {
     body["metadata"] = metadata.clone();
     let wire = wire(&[event("span-create", body)]);
     let span = &spans(&wire)[0];
+    // 键序由 stable_json 固定为字典序，不受构建期 serde_json feature 影响。
+    let expected = "{\"count\":2,\"items\":[1,2],\"label\":\"tools\",\"nested\":{\"ok\":true}}";
     assert_eq!(
         attr(span, "langfuse.observation.metadata"),
-        Some(&json!({"stringValue": metadata.to_string()}))
+        Some(&json!({"stringValue": expected}))
     );
     for (key, value) in [
-        ("label", "tools"),
         ("count", "2"),
-        ("nested", "{\"ok\":true}"),
         ("items", "[1,2]"),
+        ("label", "tools"),
+        ("nested", "{\"ok\":true}"),
     ] {
         assert_eq!(
             attr(span, &format!("langfuse.observation.metadata.{key}")),

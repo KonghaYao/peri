@@ -64,6 +64,9 @@ pub(super) fn spawn_with_sessions(
 
 impl AcpHostHandle {
     /// Wait for real host/resource/telemetry completion; repeated terminal observations are stable.
+    ///
+    /// 未收敛的报告（`Incomplete` 与仍持任务/清理 owner 的遥测 `Pending`）保留原上下文，
+    /// 下一次调用重新执行同一 `finish`；只有真实终态才被缓存并稳定重放。
     pub async fn shutdown(&mut self) -> AcpHostShutdownReport {
         if let Some(report) = &self.terminal {
             return report.clone();
@@ -84,7 +87,7 @@ impl AcpHostHandle {
         self.task.take();
         match result {
             Ok(ExitRound { context, report }) => {
-                if report == AcpHostShutdownReport::Incomplete {
+                if retains_context(&report) {
                     self.retry = Some(context);
                 } else {
                     self.terminal = Some(report.clone());
@@ -99,6 +102,19 @@ impl AcpHostHandle {
                 report
             }
         }
+    }
+}
+
+/// 关闭报告是否仍持本地 owner、必须保留上下文重入（契约 §3.6）。
+///
+/// 遥测侧由 [`LangfuseShutdownReport::retains_ownership`] 判定：仍持任务/清理 owner 的
+/// `Pending` 不得被缓存为终态，只有已完成移交、无本地任务与清理 owner 的
+/// `PersistedPending` 才能缓存终态；其余遥测终态规则不变。
+fn retains_context(report: &AcpHostShutdownReport) -> bool {
+    match report {
+        AcpHostShutdownReport::Incomplete => true,
+        AcpHostShutdownReport::TelemetryFailed(report) => report.retains_ownership(),
+        _ => false,
     }
 }
 

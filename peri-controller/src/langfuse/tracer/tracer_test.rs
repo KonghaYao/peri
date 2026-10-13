@@ -6,6 +6,7 @@
 //! 注意：`on_turn_end()` 内部调用 `tokio::spawn`，因此需要 `#[tokio::test]`
 //! 提供异步运行时。
 
+use super::input_snapshot::GenerationInput;
 use super::*;
 use langfuse_client::ObservationType;
 use peri_acp_types::command::PromptStopReason;
@@ -245,12 +246,9 @@ async fn test_unresolved_llm_parent_is_preserved_until_turn_end_fallback() {
     let (mut t, session) = make_tracer(1.0);
     t.set_main_agent_id("main".to_string());
     t.on_turn_start("turn_1");
-    t.generation.on_llm_start(
-        "unregistered-child",
-        0,
-        Default::default(),
-        Default::default(),
-    );
+    // 追踪器只搬运不透明来源；这里直接登记一个"已 start 但归属不可解析"的 generation。
+    t.generation
+        .on_llm_start("unregistered-child", 0, GenerationInput::Rejected);
 
     t.on_llm_end(
         "unregistered-child",
@@ -431,16 +429,15 @@ async fn test_llm_generation_emits_events() {
         .count();
     assert!(gen_count > 0, "应有至少一个 GenerationCreate 事件");
 
-    // 回归防护：generation 必须携带 input（历史上曾因重构误写成硬编码 None，
-    // 导致所有 generation 的 input 丢失，见 commit 0c0a3313）
-    let gen_input = events.iter().find_map(|e| {
-        if let langfuse_client::IngestionEvent::GenerationCreate { body, .. } = e {
-            body.input.as_ref()
-        } else {
-            None
-        }
+    // 回归防护：input 不再进 body（由部署侧冻结来源承载，见 `input_snapshot_test` 的逐字节
+    // 用例），因此这里的假会话（无冻结能力）必须留下稳定拒收标记，不得静默丢掉 generation input
+    // （历史上曾因重构误写成硬编码 None，导致所有 generation 的 input 丢失，见 commit 0c0a3313）。
+    let rejected = events.iter().any(|e| {
+        matches!(e, langfuse_client::IngestionEvent::GenerationCreate { body, .. }
+            if body.metadata.as_ref().and_then(|meta| meta.get("input_snapshot_rejected"))
+                == Some(&serde_json::json!(true)))
     });
-    assert!(gen_input.is_some(), "GenerationCreate 应携带 input");
+    assert!(rejected, "冻结被拒必须显式标记 input_snapshot_rejected");
 }
 
 #[tokio::test]

@@ -3,4 +3,4 @@
 //! §9 错误模型：仅三类必须类型化——终止类（cancel/interrupt，防 `?` 误报失败）、
 //! 可重试类、协议错误；TurnError 语义保留 Agent 层。
 
-pub use peri_acp_types::error::{AgentError, AgentResult};
+pub use peri_acp_types::error::{AgentError, AgentResult, SummaryRecoveryReason};

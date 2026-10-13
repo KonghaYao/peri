@@ -18,8 +18,38 @@ env:
     CARGO_PROFILE_TEST_DEBUG: "0"
 
 jobs:
+    # 变更分类：只有全部受影响路径都落在「已确认不影响构建与测试」的文档白名单内，
+    # 才跳过 Rust 三平台任务。判定规则与白名单见 scripts/ci-classify-changes.sh。
+    changes:
+        name: Classify changes
+        runs-on: ubuntu-latest
+        timeout-minutes: 5
+        outputs:
+            docs_only: ${{ steps.classify.outputs.docs_only }}
+            reason: ${{ steps.classify.outputs.reason }}
+        steps:
+            - name: Checkout repository
+              uses: actions/checkout@v7
+              with:
+                  # 分类要比较 base..head 的实际 diff。默认浅克隆拿不到 base 提交，
+                  # 那种情况下分类会回退成完整验证（安全，只是不省）。
+                  fetch-depth: 0
+                  persist-credentials: false
+
+            - name: Classify changed paths
+              id: classify
+              env:
+                  EVENT_NAME: ${{ github.event_name }}
+                  PR_BASE_SHA: ${{ github.event.pull_request.base.sha }}
+                  PUSH_BEFORE_SHA: ${{ github.event.before }}
+                  CI_HEAD_SHA: ${{ github.sha }}
+              run: bash scripts/ci-classify-changes.sh
+
     build:
         name: Build (${{ matrix.os }})
+        needs: changes
+        # 纯文档变更不启动 Rust 三平台任务；其余一律完整验证。
+        if: needs.changes.outputs.docs_only != 'true'
         runs-on: ${{ matrix.os }}
         strategy:
             fail-fast: false
@@ -47,63 +77,132 @@ jobs:
                   targets: ${{ matrix.target }}
                   components: clippy
 
+            # 覆盖清单核对：枚举 workspace 的测试目标并检查必跑套件仍在执行范围内，
+            # 在昂贵的构建之前失败。只读 manifest（cargo metadata --no-deps），
+            # 不解析依赖、不联网、不编译。
+            - name: Verify test inventory
+              if: runner.os == 'Linux'
+              run: bash scripts/ci-test-inventory.sh --check
+
+            # 缓存身份由 rust-cache 内建覆盖：rustc 版本/宿主/hash、全仓
+            # Cargo.toml+Cargo.lock 哈希、根 rust-toolchain*、根 .cargo/config.toml，
+            # 以及 RUST*/CARGO* 前缀环境变量（本文件顶部的 debug=0 也在内）。
+            # patch 内容不额外进 key：wrapper 把补丁摘要写进依赖源路径
+            # （target/peri-rmcp-patches/<patch-sha256>/…，见 scripts/cargo-rmcp-patched.sh），
+            # 补丁一变，Cargo 只失效受影响单元并复用其余产物；把摘要塞进 key 会把
+            # 「部分重建」放大成「三平台整盘冷启动」，收益为负。
+            # cache-workspace-crates 与 cache-all-crates 均保持默认 false（已评估，不启用）：
+            # 前者恢复来的产物会被源码指纹立刻作废（本工作区的 crate 几乎每次提交都在变），
+            # 却把清理、压缩、上传的成本按整个 target 计（现 Windows 单平台已约 1.1GB）；
+            # 后者只对本仓在 CI 内额外编译的 crate 有意义，而本 job 没有这类编译
+            # （跨平台工具链由预编译产物安装），故无收益。
+            #
+            # 只在默认分支的 push 写入：PR 与 pre-release/main 仍能读 main 的基线缓存
+            # （GitHub 允许恢复当前分支与默认分支的缓存），但不再每次 push 都写
+            # ~1GB×3。Windows 单次保存约 96 秒（CI #707 实测）因此从「每次运行一次」
+            # 降为「每次 main 合并一次」；main 合并会重建并刷新基线，一次合并后热缓存
+            # 即恢复。代价：改动依赖的 PR 不再持久化自己的增量产物，每次 push 需重编
+            # 新增依赖；若该代价高于收益，回退方式＝删除 save-if 这一行。
             - name: Cache cargo registry and build
               uses: Swatinem/rust-cache@v2
               with:
                   key: ${{ matrix.target }}
+                  save-if: ${{ github.ref == 'refs/heads/main' }}
 
+            # 固定 nextest 版本：--no-tests 的默认值与过滤器语义随版本变化，
+            # 三条平台都由 GitHub Releases 的预编译产物安装（不源码编译）。
+            - name: Install cargo-nextest
+              uses: taiki-e/install-action@v2
+              with:
+                  tool: nextest@0.9.148
+
+            # 保留完整构建：它覆盖 nextest 构建阶段不涉及的非 test 模式目标
+            # （bin/example/bench 的常规构建与链接），且与测试步骤共用同一 package
+            # 根集合与 profile（dev/test 的 debug 已在顶部统一为 0），产物可被后续
+            # 测试步骤直接复用，不是重复编译。
             - name: Build
               shell: bash
               run: ./scripts/cargo-rmcp-patched.sh build --locked --workspace --all-targets
 
+            # 统一测试入口：所有测试步骤共用同一组 Cargo 选择（--locked --workspace），
+            # 测试范围差异只落在 nextest 的 `-E` 过滤器上，因此整个 job 内依赖图、
+            # target、profile 与 feature 投影保持恒定，步骤切换不再触发重编译。
+            # 依据：nextest 先按 `cargo test --no-run` 语义构建，再列出测试，过滤器
+            # 只作用于「列出之后」的选择阶段（nexte.st/docs/design/how-it-works）。
+            #
+            # 跳过条件（原 `-- --skip ...`）集中在 .config/nextest.toml 的 default-filter；
+            # 命令行 `-E` 与 default-filter 取交集（nexte.st/docs/filtersets），
+            # 因此每个步骤都受同一份跳过规则约束，也不会因同名过滤误伤其他包。
+            #
+            # --no-tests=fail（0.9.85 起为默认值，这里显式写出）：过滤器命中零例时
+            # 以退出码 4 失败，整组用例不会被静默跳过。
+            #
             # 分步记录耗时，也确保 Windows 下第一组失败不会被后续成功覆盖。
-            - name: Run workspace tests (excluding ACP, middleware and MCP capabilities)
+            - name: Run workspace tests (excluding ACP, Agent, TUI, middleware and MCP capabilities)
               shell: bash
               run: >-
-                  ./scripts/cargo-rmcp-patched.sh test --locked --workspace --exclude peri-acp --exclude peri-agent --exclude peri-tui --exclude peri-middlewares
-                  --exclude peri-mcp-common --exclude peri-mcp-web --exclude peri-mcp-artifact
-                  --exclude peri-mcp-cron --exclude peri-mcp-workspace
+                  ./scripts/cargo-rmcp-patched.sh nextest run --locked --workspace --no-tests=fail
+                  -E 'not (package(=peri-acp) | package(=peri-agent) | package(=peri-tui) | package(=peri-middlewares)
+                  | package(=peri-mcp-common) | package(=peri-mcp-web) | package(=peri-mcp-artifact)
+                  | package(=peri-mcp-cron) | package(=peri-mcp-workspace))'
 
             - name: Run ACP tests (excluding SDK E2E)
               shell: bash
               run: >-
-                  ./scripts/cargo-rmcp-patched.sh test --locked -p peri-acp --lib
-                  -- --skip host::execution_admission_jsonl --skip host::scheduled_admission
+                  ./scripts/cargo-rmcp-patched.sh nextest run --locked --workspace --no-tests=fail
+                  -E 'package(=peri-acp) & kind(lib)'
 
             - name: Run Agent tests (excluding execution E2E)
               shell: bash
-              run: |
-                  ./scripts/cargo-rmcp-patched.sh test --locked -p peri-agent --lib
-                  ./scripts/cargo-rmcp-patched.sh test --locked -p peri-agent --test middleware_tests --test compact_followup_behavior_test --test compact_failure_adversarial_test
+              run: >-
+                  ./scripts/cargo-rmcp-patched.sh nextest run --locked --workspace --no-tests=fail
+                  -E 'package(=peri-agent) & (kind(lib)
+                  | binary(=middleware_tests) | binary(=compact_followup_behavior_test)
+                  | binary(=compact_failure_adversarial_test))'
 
-            # ARC-COMPACT-001 Verify：Compact 三套对抗套件必须真实执行且命中非零用例。
+            # ARC-COMPACT-001 Verify：Compact 四套对抗套件必须真实执行且命中非零用例
+            # （--no-tests=fail 保证每套都命中，而不是靠总数）。
             - name: Run Compact adversarial suites (ARC-COMPACT-001)
               shell: bash
               run: >-
-                  ./scripts/cargo-rmcp-patched.sh test --locked -p peri-agent
-                  --test compact_pressure_adversarial_test --test compact_session_adversarial_test
-                  --test compact_authority_projection_test
+                  ./scripts/cargo-rmcp-patched.sh nextest run --locked --workspace --no-tests=fail
+                  -E 'package(=peri-agent) & (binary(=compact_pressure_adversarial_test)
+                  | binary(=compact_session_adversarial_test)
+                  | binary(=compact_session_manual_adversarial_test)
+                  | binary(=compact_authority_projection_test))'
 
             - name: Run TUI tests (excluding SDK E2E)
               shell: bash
               run: >-
-                  ./scripts/cargo-rmcp-patched.sh test --locked -p peri-tui --lib --bins --test meta_session_cli
-                  -- --skip sdk_execution::tests::real_sdk
+                  ./scripts/cargo-rmcp-patched.sh nextest run --locked --workspace --no-tests=fail
+                  -E 'package(=peri-tui) & (kind(lib) | kind(bin) | binary(=meta_session_cli))'
 
-            # 涉及进程级全局状态的测试仍须串行执行。
+            # 需要串行的测试不再依靠「整步 --test-threads=1」，而是 .config/nextest.toml 的
+            # serial-process-state 互斥组（max-threads = 1）：串行只施加在这些测试上，
+            # 组之外的用例维持正常并行额度，串行范围也不再随步骤划分漂移。
             - name: Run middleware unit tests (serial, excluding E2E)
               shell: bash
               run: >-
-                  ./scripts/cargo-rmcp-patched.sh test --locked -p peri-middlewares --lib
-                  -- --test-threads=1 --skip subagent::tool --skip mcp::workspace_recovery_tests
-                  --skip mcp::workspace_builtin_tests::bridge_accepts_workspace_owned_task_handle
-                  --skip mcp::tool_bridge::tests::builtin_tool_call_surfaces_timeout_error_after_bridge_deadline
+                  ./scripts/cargo-rmcp-patched.sh nextest run --locked --workspace --no-tests=fail
+                  -E 'package(=peri-middlewares) & kind(lib)'
 
+            # 5 个 MCP 能力包的全部 target 同属 serial-process-state 互斥组。
             - name: Run MCP capability tests (serial)
               shell: bash
               run: >-
-                  ./scripts/cargo-rmcp-patched.sh test --locked -p peri-mcp-common -p peri-mcp-web
-                  -p peri-mcp-artifact -p peri-mcp-cron -p peri-mcp-workspace -- --test-threads=1
+                  ./scripts/cargo-rmcp-patched.sh nextest run --locked --workspace --no-tests=fail
+                  -E 'package(=peri-mcp-common) | package(=peri-mcp-web) | package(=peri-mcp-artifact)
+                  | package(=peri-mcp-cron) | package(=peri-mcp-workspace)'
+
+            # doctest 独立入口：nextest 不支持 doctest（stable Rust 限制），
+            # 范围与原 `cargo test` 一致 —— workspace 去掉 4 个改用显式 target 选择的包。
+            # 这是唯一一个 package 根集合与上面不同的步骤，属于保留原有 doctest 范围的
+            # 有意选择；其编译输出单独归到本步骤，不参与「后续测试重复编译」口径。
+            - name: Run doctests (excluding ACP, Agent, TUI and middleware)
+              shell: bash
+              run: >-
+                  ./scripts/cargo-rmcp-patched.sh test --doc --locked --workspace
+                  --exclude peri-acp --exclude peri-agent --exclude peri-tui --exclude peri-middlewares
 
             - name: Clippy
               shell: bash
@@ -113,3 +212,49 @@ jobs:
                   else
                       ./scripts/cargo-rmcp-patched.sh clippy --locked --workspace --all-targets -- -D warnings
                   fi
+
+    # 汇总检查：只要本 job 运行就给出确定的结论 —— 区分「文档按策略跳过」与
+    # 「代码测试失败 / 取消 / 意外跳过」，避免后者被读成通过。
+    #
+    # 关于 required check：GitHub 的「Troubleshooting required status checks」明确
+    # 「A job is skipped by a conditional → The job reports "Success"」，而**工作流**
+    # 级跳过（path/branch 过滤）才会停在 Pending。因此 build 用 job 级 `if:` 跳过
+    # 不会阻塞合并；本 job 存在是为了给「跳过」一个显式、可读的结论，并可选地作为
+    # 单一 required check（job 名称是稳定标识，改名需同步分支保护配置）。
+    ci-result:
+        name: CI result
+        if: always()
+        needs: [changes, build]
+        runs-on: ubuntu-latest
+        timeout-minutes: 5
+        steps:
+            - name: Summarize
+              env:
+                  CHANGES_RESULT: ${{ needs.changes.result }}
+                  BUILD_RESULT: ${{ needs.build.result }}
+                  DOCS_ONLY: ${{ needs.changes.outputs.docs_only }}
+                  DOCS_REASON: ${{ needs.changes.outputs.reason }}
+              run: |
+                  set -euo pipefail
+                  printf 'changes=%s build=%s docs_only=%s\n' \
+                      "$CHANGES_RESULT" "$BUILD_RESULT" "$DOCS_ONLY"
+                  printf 'reason: %s\n' "$DOCS_REASON"
+
+                  if [[ "$CHANGES_RESULT" != "success" ]]; then
+                      printf '::error::变更分类未成功（%s），无法确认能否跳过重型任务\n' "$CHANGES_RESULT" >&2
+                      exit 1
+                  fi
+
+                  if [[ "$DOCS_ONLY" == "true" ]]; then
+                      printf 'docs-only：按策略跳过 Rust 三平台任务，汇总检查通过\n'
+                      exit 0
+                  fi
+
+                  # 非 docs-only 时三平台任务必须真跑且成功；skipped 说明触发条件
+                  # 出了问题，不能当成通过。
+                  if [[ "$BUILD_RESULT" != "success" ]]; then
+                      printf '::error::Rust 三平台任务结果 = %s（期望 success）\n' "$BUILD_RESULT" >&2
+                      exit 1
+                  fi
+
+                  printf '完整验证通过\n'

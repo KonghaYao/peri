@@ -25,6 +25,17 @@ enum ProviderScenario {
 }
 
 async fn run_print(format: &str, scenario: ProviderScenario, bare: bool) -> std::process::Output {
+    run_print_with_args(format, scenario, bare, &[]).await
+}
+
+/// 与 [`run_print`] 相同，额外追加 CLI 参数：用于断言外部 harness 固定传入的开关
+/// 不会在任务启动前被拒绝。
+async fn run_print_with_args(
+    format: &str,
+    scenario: ProviderScenario,
+    bare: bool,
+    extra_args: &[&str],
+) -> std::process::Output {
     let fixture = tempfile::tempdir().unwrap();
     let big_file = fixture.path().join("big.txt");
     std::fs::write(
@@ -258,6 +269,7 @@ async fn run_print(format: &str, scenario: ProviderScenario, bare: bool) -> std:
         .env("PATH", std::env::var_os("PATH").unwrap_or_default())
         .current_dir(fixture.path())
         .args(["--print", "Reply briefly", "--output-format", format])
+        .args(extra_args)
         // Windows 的 dirs_next::home_dir 不受 HOME/USERPROFILE 覆盖，
         // 启动期的全局配置读取也必须显式指向 fixture。
         .arg("--config-file")
@@ -452,6 +464,26 @@ async fn provider_error_exits_process_with_failure() {
 #[tokio::test]
 async fn standard_mode_answer_exits_process() {
     let output = run_print("text", ProviderScenario::Answer, false).await;
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert_eq!(String::from_utf8(output.stdout).unwrap().trim(), ANSWER);
+}
+
+/// [回归测试] 外部评测 harness 固定传入 `--max-turns`：该开关在 print 路径尚未
+/// 实现（不限制语义迭代次数），但必须在启动前被接受——拒绝会让整条任务零产出
+/// 退出，评测结果被误判成 agent 失败。
+#[tokio::test]
+async fn max_turns_flag_is_accepted_and_ignored() {
+    let output = run_print_with_args(
+        "text",
+        ProviderScenario::Answer,
+        true,
+        &["--max-turns", "50"],
+    )
+    .await;
     assert!(
         output.status.success(),
         "{}",

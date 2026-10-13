@@ -9,7 +9,9 @@ use crate::session::subagent::{
 };
 use crate::session::FrozenContext;
 use crate::tools::BaseTool;
-use peri_acp_types::tasks::{BgTaskKind, BgTaskRegistration, TaskManager as TaskManagerPort};
+use peri_acp_types::tasks::{
+    BgTaskKind, BgTaskRegistration, ExternalTaskRegistration, TaskManager as TaskManagerPort,
+};
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::Duration;
 
@@ -237,6 +239,18 @@ fn child_with_nested_task() -> (
     Arc<AtomicUsize>,
     Arc<AtomicUsize>,
 ) {
+    child_with_nested_task_kind(BgTaskKind::Agent)
+}
+
+fn child_with_nested_task_kind(
+    kind: BgTaskKind,
+) -> (
+    Arc<Session>,
+    Arc<TaskManager>,
+    V2SubagentContext,
+    Arc<AtomicUsize>,
+    Arc<AtomicUsize>,
+) {
     let child_id = uuid::Uuid::now_v7().to_string();
     let child = Session::new(
         Arc::from("/tmp"),
@@ -248,17 +262,33 @@ fn child_with_nested_task() -> (
         task_manager: Some(manager.clone()),
         ..Default::default()
     });
-    TaskManagerPort::register(
-        manager.as_ref(),
-        BgTaskRegistration {
-            task_id: "nested-task".into(),
-            kind: BgTaskKind::Agent,
-            summary: "nested work".into(),
-            pid: None,
-            kill: Some(Box::new(|| {})),
-        },
-    )
-    .unwrap();
+    if kind == BgTaskKind::Mcp {
+        manager
+            .register_external(ExternalTaskRegistration {
+                session_id: child_id.clone(),
+                initiator_session_id: Some(child_id.clone()),
+                owner_identity: "fixture".into(),
+                owner_task_id: "nested-task".into(),
+                kind,
+                summary: "nested work".into(),
+                started_at: None,
+                cancel: Arc::new(|| Box::pin(async { Ok(()) })),
+                on_terminal: Arc::new(|_, _| Box::pin(async { Ok(()) })),
+            })
+            .unwrap();
+    } else {
+        TaskManagerPort::register(
+            manager.as_ref(),
+            BgTaskRegistration {
+                task_id: "nested-task".into(),
+                kind,
+                summary: "nested work".into(),
+                pid: None,
+                kill: Some(Box::new(|| {})),
+            },
+        )
+        .unwrap();
+    }
     child.queue().push(QueuedMessage::prompt(
         MessageSource::UserInput,
         crate::messages::BaseMessage::human("initial child work"),
@@ -284,6 +314,141 @@ fn child_with_nested_task() -> (
         Some(agent_id_from_child_thread(&child_id)),
     );
     (child, manager, built, initial_calls, result_calls)
+}
+
+#[tokio::test(start_paused = true)]
+async fn active_agent_and_mcp_child_tasks_enter_settlement_without_idle_wait() {
+    for kind in [BgTaskKind::Agent, BgTaskKind::Mcp] {
+        let (child, manager, built, initial_calls, result_calls) =
+            child_with_nested_task_kind(kind);
+        let (handoff_sender, handoff_ready) = tokio::sync::oneshot::channel();
+        let owner_child = child.clone();
+        let owner = tokio::spawn(async move {
+            run_child_with_handoff_signal(built.context, 10, &owner_child, Some(handoff_sender))
+                .await
+        });
+        tokio::time::timeout(Duration::from_secs(1), handoff_ready)
+            .await
+            .expect("child must skip the first 120-second idle wait")
+            .unwrap();
+        assert_eq!(initial_calls.load(Ordering::SeqCst), 1);
+        assert!(!owner.is_finished());
+
+        if kind == BgTaskKind::Mcp {
+            let task_id = manager.pending_handoff_tasks()[0].task_id.clone();
+            let mut result = nested_result();
+            result.task_id = task_id.clone();
+            manager
+                .settle_external(&task_id, "terminal", result)
+                .await
+                .unwrap();
+        } else {
+            settle_nested_task(&child, &manager);
+        }
+        assert!(matches!(owner.await.unwrap(), LoopResult::Completed));
+        assert_eq!(
+            result_calls.load(Ordering::SeqCst),
+            usize::from(kind == BgTaskKind::Agent)
+        );
+    }
+}
+
+#[tokio::test(start_paused = true)]
+async fn child_without_active_tasks_keeps_original_idle_exit() {
+    let (child, manager, built, initial_calls, result_calls) = child_with_nested_task();
+    settle_nested_task(&child, &manager);
+    let result = tokio::time::timeout(
+        Duration::from_secs(1),
+        run_child_until_terminal(built.context, 10, &child),
+    )
+    .await
+    .expect("no active tasks must not trigger a settlement wait");
+    assert!(matches!(result, LoopResult::Completed));
+    assert_eq!(initial_calls.load(Ordering::SeqCst), 0);
+    assert_eq!(result_calls.load(Ordering::SeqCst), 1);
+}
+
+#[tokio::test(start_paused = true)]
+async fn sync_child_agent_and_mcp_tasks_handoff_within_one_bound() {
+    for kind in [BgTaskKind::Agent, BgTaskKind::Mcp] {
+        let (child, manager, built, initial_calls, result_calls) =
+            child_with_nested_task_kind(kind);
+        let child_id = child.store().thread_id.clone().unwrap();
+        let (delivered_sender, delivered_receiver) = tokio::sync::oneshot::channel();
+        let delivered_sender = parking_lot::Mutex::new(Some(delivered_sender));
+        let delivery: peri_acp_types::tasks::OnBgCompleteFn = Arc::new(move |result, _| {
+            if let Some(sender) = delivered_sender.lock().take() {
+                let _ = sender.send(result.clone());
+            }
+            Ok(())
+        });
+        let worker_child = child.clone();
+        let run_id = child_id.clone();
+        let call = tokio::spawn(super::super::run_sync::run_sync_with_handoff(
+            child.clone(),
+            child_id,
+            "fixture".into(),
+            Some(delivery),
+            move |handoff_start, _handed_off| async move {
+                super::super::run_sync::run_sync_subagent(
+                    &run_id,
+                    "fixture",
+                    "/tmp",
+                    10,
+                    None,
+                    None,
+                    None,
+                    None,
+                    None,
+                    None,
+                    None,
+                    None,
+                    None,
+                    built,
+                    worker_child,
+                    None,
+                    Some(handoff_start),
+                )
+                .await
+            },
+        ));
+
+        while initial_calls.load(Ordering::SeqCst) == 0 {
+            tokio::task::yield_now().await;
+        }
+        for _ in 0..10 {
+            tokio::task::yield_now().await;
+        }
+        tokio::time::advance(Duration::from_secs(119)).await;
+        tokio::task::yield_now().await;
+        assert!(
+            !call.is_finished(),
+            "{kind:?} handed off before 120 seconds"
+        );
+        tokio::time::advance(Duration::from_secs(2)).await;
+        let pending = call.await.unwrap().unwrap();
+        let super::super::run_sync::SyncCompletion::Pending(tasks) = pending else {
+            panic!("{kind:?} did not hand off by 121 seconds");
+        };
+        let task_id = manager.pending_handoff_tasks()[0].task_id.clone();
+        assert!(tasks.iter().any(|task| task.contains(&task_id)));
+        assert_eq!(manager.active_count(), 1);
+        if kind == BgTaskKind::Mcp {
+            let mut result = nested_result();
+            result.task_id = task_id.clone();
+            manager
+                .settle_external(&task_id, "terminal", result)
+                .await
+                .unwrap();
+        } else {
+            settle_nested_task(&child, &manager);
+        }
+        assert!(delivered_receiver.await.unwrap().success);
+        assert_eq!(
+            result_calls.load(Ordering::SeqCst),
+            usize::from(kind == BgTaskKind::Agent)
+        );
+    }
 }
 
 fn settle_nested_task(child: &Session, manager: &TaskManager) {
@@ -446,6 +611,7 @@ async fn foreground_child_waits_for_nested_result_before_returning() {
             built,
             owner_child,
             None,
+            None,
         )
         .await
     });
@@ -459,6 +625,125 @@ async fn foreground_child_waits_for_nested_result_before_returning() {
     assert!(!owner.await.unwrap().unwrap());
     assert_eq!(result_calls.load(Ordering::SeqCst), 1);
     assert!(super::super::util::extract_last_ai_text(&child).contains("processed nested result"));
+}
+
+#[tokio::test(start_paused = true)]
+async fn sync_child_handoff_returns_pending_and_delivers_late_result() {
+    let (child, manager, built, reminder_calls) = child_with_shell_task(false);
+    let child_id = child.store().thread_id.clone().unwrap();
+    let (delivered_sender, delivered_receiver) = tokio::sync::oneshot::channel();
+    let delivered_sender = parking_lot::Mutex::new(Some(delivered_sender));
+    let delivery_attempts = Arc::new(AtomicUsize::new(0));
+    let attempts = Arc::clone(&delivery_attempts);
+    let delivery: peri_acp_types::tasks::OnBgCompleteFn = Arc::new(move |result, kind| {
+        assert_eq!(kind, BgTaskKind::Agent);
+        if attempts.fetch_add(1, Ordering::SeqCst) == 0 {
+            return Err("transient delivery rejection".into());
+        }
+        if let Some(sender) = delivered_sender.lock().take() {
+            let _ = sender.send(result.clone());
+        }
+        Ok(())
+    });
+    let worker_child = child.clone();
+    let run_id = child_id.clone();
+    let mut call = tokio::spawn(super::super::run_sync::run_sync_with_handoff(
+        child.clone(),
+        child_id.clone(),
+        "fixture".into(),
+        Some(delivery),
+        move |handoff_start, _handed_off| async move {
+            super::super::run_sync::run_sync_subagent(
+                &run_id,
+                "fixture",
+                "/tmp",
+                10,
+                None,
+                None,
+                None,
+                None,
+                None,
+                None,
+                None,
+                None,
+                None,
+                built,
+                worker_child,
+                None,
+                Some(handoff_start),
+            )
+            .await
+        },
+    ));
+
+    let pending = tokio::time::timeout(Duration::from_secs(121), &mut call)
+        .await
+        .expect("parent call must return after the approved bound")
+        .unwrap()
+        .unwrap();
+    let super::super::run_sync::SyncCompletion::Pending(tasks) = pending else {
+        panic!("live shell must be handed off to the session worker");
+    };
+    assert!(tasks.iter().any(|task| task.contains("shell-task")));
+    assert_eq!(reminder_calls.load(Ordering::SeqCst), 1);
+    assert_eq!(manager.active_count(), 1);
+
+    let mut shell_result = nested_result();
+    shell_result.task_id = "shell-task".into();
+    assert!(manager.complete("shell-task", shell_result));
+    let delivered = tokio::time::timeout(Duration::from_secs(8), delivered_receiver)
+        .await
+        .expect("owned child worker must deliver the late result")
+        .unwrap();
+    assert_eq!(
+        delivered.child_thread_id.as_deref(),
+        Some(child_id.as_str())
+    );
+    assert!(delivered.success);
+    assert_eq!(delivered.output, "child answer");
+    assert_eq!(delivery_attempts.load(Ordering::SeqCst), 2);
+    assert_eq!(
+        child
+            .subagent_host()
+            .unwrap()
+            .close_state
+            .sync_workers
+            .len(),
+        0
+    );
+}
+
+#[test]
+fn sync_handoff_routes_late_events_to_background_pump() {
+    use crate::agent::events::{AgentEventHandler, ExecutorEvent, FnEventHandler};
+    use std::sync::atomic::AtomicBool;
+
+    let foreground = Arc::new(AtomicUsize::new(0));
+    let observed = Arc::clone(&foreground);
+    let handler: Arc<dyn AgentEventHandler> = Arc::new(FnEventHandler(move |_| {
+        observed.fetch_add(1, Ordering::SeqCst);
+    }));
+    let (sender, mut receiver) = tokio::sync::mpsc::unbounded_channel();
+    let handed_off = Arc::new(AtomicBool::new(false));
+    let routed = super::super::run_sync::handoff_event_handler(
+        Some(handler),
+        Some(sender),
+        Arc::clone(&handed_off),
+    )
+    .unwrap();
+    let event = || ExecutorEvent::SubagentStarted {
+        agent_name: "fixture".into(),
+        instance_id: "child".into(),
+        parent_tool_call_id: None,
+        is_background: false,
+    };
+    routed.on_event(event());
+    assert_eq!(foreground.load(Ordering::SeqCst), 1);
+    assert!(receiver.try_recv().is_err());
+    handed_off.store(true, Ordering::Release);
+    routed.on_event(event());
+    assert!(receiver.try_recv().is_ok());
+    assert_eq!(foreground.load(Ordering::SeqCst), 1);
 }
 
 #[tokio::test(start_paused = true)]

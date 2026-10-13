@@ -38,6 +38,10 @@ peri-controller = { path = "../peri-controller" }
 peri-model = { path = "../peri-model" }
 peri-middlewares = { path = "../peri-middlewares" }
 peri-resources = { path = "../peri-resources" }
+# 遥测暂存能力面（spool 端口、预算/结果类型）供宿主装配使用。生产接线落 P4b
+# （host/telemetry.rs 组装 native spool，并传入 LangfuseSession::new_owned 的
+# spool 参数）；本行只交付依赖声明，不代表 host 接线已通过。测试面复用同一依赖。
+langfuse-client = { path = "../langfuse-client" }
 agent-client-protocol = { version = "2", features = ["unstable"] }
 # `unstable_mcp_over_acp`：MCP over ACP 的类型（`McpCapabilities` / `McpServer::Acp`
 # / `ConnectMcpRequest`）与 ACP `mcp/*` 方法名。当前由 `agent-client-protocol` 的
@@ -64,7 +68,6 @@ futures.workspace = true
 tempfile.workspace = true
 serial_test.workspace = true
 mockito = "1"
-langfuse-client = { path = "../langfuse-client" }
 # 测试面（requests_test.rs 构造真实 WorkflowMiddleware：WorkflowRun /
 # AgentExecutor 等 registry/runner 类型仅测试构造使用，不构成协议/业务面依赖）
 peri-workflow = { path = "../peri-workflow" }

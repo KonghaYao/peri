@@ -12,7 +12,8 @@
 //! - `sampling.rs`：采样决策器。
 //! - `stages.rs`：ReAct 5 阶段 Span 管理。
 //! - `middleware.rs`：中间件链追踪器。
-//! - `generation.rs`：LLM Generation 生命周期追踪器。
+//! - `generation.rs`：LLM Generation 生命周期追踪器（只保存已冻结输入来源）。
+//! - `input_snapshot.rs`：控制器侧输入来源适配器与冻结状态（借用 `Arc`，不做 IO）。
 //! - `tool_batch.rs`：工具调用批次管理器。
 //! - `registry.rs`：SubAgent 身份注册表(agent_id 查表归属,替代旧 LIFO 栈)。
 //! - `compact.rs`：Compact 操作 Span 追踪器。
@@ -27,6 +28,7 @@
 pub(crate) mod compact;
 mod event_builder;
 mod generation;
+mod input_snapshot;
 mod llm_events;
 pub(crate) mod middleware;
 pub(crate) mod registry;

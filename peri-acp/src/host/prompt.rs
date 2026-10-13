@@ -424,11 +424,7 @@ async fn run_prompt_attempt(
     let provider_name = provider_snapshot.display_name().to_string();
     let provider_model_name = provider_snapshot.model_name().to_string();
     let provider_fp = crate::session::agent_pool::fingerprint(&provider_snapshot);
-    let effective_context_window = if provider_snapshot.context_1m() {
-        1_000_000
-    } else {
-        provider_snapshot.context_window()
-    };
+    let effective_context_window = provider_snapshot.effective_context_window();
     let language = peri_config_snapshot.config.language.clone();
     let mut compact_config = peri_config_snapshot
         .config

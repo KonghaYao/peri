@@ -4,7 +4,7 @@
 //! 与 10+ 处入队的重复代码。所有方法均为纯函数（接收 owned 数据），
 //! 避免与 LangfuseTracer 的可变借用冲突（详见 on_tool_end 借用 workaround）。
 
-use langfuse_client::IngestionEvent;
+use langfuse_client::{IngestionEvent, InputSource, TelemetryEvent};
 
 use super::super::drop_telemetry::{LangfuseDropReason, LangfuseEventKind};
 
@@ -12,13 +12,13 @@ use super::super::session_like::LangfuseSessionLike;
 
 pub(crate) const VERSION: &str = env!("CARGO_PKG_VERSION");
 
-/// 生成 RFC3339 时间戳（毫秒精度，UTC）。
+/// 生成 RFC3339 时间戳（UTC）。
 ///
-/// 统一原文件中的 UTC 墙钟时间戳格式（毫秒精度）
-/// 的 15+ 处重复调用。
+/// [不变量] 与 [`peri_time::now_utc_rfc3339`] 同一份实现：观测的 start_time 由各追踪器直接
+/// 取自该函数，若此处另用毫秒截断，同一毫秒内结束的观测会得到「结束早于开始」的反转时间，
+/// 被 OTLP 校验整条拒绝（契约 §3.3 的结束路径不等 IO，start/end 常落在同一毫秒）。
 pub(crate) fn now_rfc3339() -> String {
-    chrono::DateTime::<chrono::Utc>::from(peri_time::now_wall())
-        .to_rfc3339_opts(chrono::SecondsFormat::Millis, true)
+    peri_time::now_utc_rfc3339()
 }
 
 /// 生成 UUID v7 字符串。
@@ -65,6 +65,38 @@ pub(crate) fn try_add_or_warn_via_session(
                 target: "langfuse::drop",
                 trace_id = %trace_id,
                 "langfuse event was not queued"
+            );
+        }
+    }
+}
+
+/// 将**已冻结输入来源**的观测事件同步入队 session（契约 §3.3）。
+///
+/// 与 [`try_add_or_warn_via_session`] 不是双路径：携带 input/output 来源的事件必须在同一
+/// 部署预算内构造 [`TelemetryEvent`]（`try_new` 校验来源与事件 permit 的预算身份），因此
+/// 只有本入口可用。构造或准入失败时事件与来源一起释放（ticket Drop 置取消位），
+/// 不入队半成品正文；背压原因照旧计数，其余错误作安全诊断。
+pub(crate) fn try_add_prepared_or_warn_via_session(
+    session: &dyn LangfuseSessionLike,
+    event: IngestionEvent,
+    input: Option<InputSource>,
+    output: Option<InputSource>,
+    trace_id: &str,
+    context_msg: &str,
+) {
+    let event_kind = LangfuseEventKind::from_event(&event);
+    let queued = TelemetryEvent::try_new(event, input, output, session.memory_budget())
+        .and_then(|event| session.try_add_prepared(event));
+    if let Err(error) = queued {
+        if let Some(reason) = LangfuseDropReason::from_error(&error) {
+            session.drop_registry().record(trace_id, event_kind, reason);
+        } else {
+            tracing::warn!(
+                target: "langfuse::drop",
+                trace_id = %trace_id,
+                event_kind = ?event_kind,
+                "{} was not queued",
+                context_msg
             );
         }
     }

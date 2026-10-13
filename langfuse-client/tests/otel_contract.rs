@@ -1,7 +1,18 @@
+use std::io::Read;
 use std::sync::{Arc, Mutex};
 
 use langfuse_client::types::{session::SessionBody, TraceBody};
 use langfuse_client::{GenerationBody, IngestionEvent, LangfuseClient, SpanBody};
+
+/// 默认正文编码是 gzip（契约 §5）：wire 断言针对解压后的标准 OTLP JSON，
+/// 压缩只改变 HTTP 正文字节与 header，不改变解压后的字段与值。
+fn gunzip(body: &[u8]) -> Vec<u8> {
+    let mut decoded = Vec::new();
+    flate2::read::GzDecoder::new(body)
+        .read_to_end(&mut decoded)
+        .expect("OTLP body is valid gzip");
+    decoded
+}
 
 fn valid_id(value: &serde_json::Value, length: usize) {
     let text = value.as_str().unwrap();
@@ -19,10 +30,12 @@ async fn exported_http_canary_contains_only_complete_spans_with_valid_parent_con
         .mock("POST", "/api/public/otel/v1/traces")
         .match_header("authorization", "Basic cGs6c2s=")
         .match_header("x-langfuse-ingestion-version", "4")
+        .match_header("content-encoding", "gzip")
         .with_status(200)
         .with_body_from_request(move |request| {
+            let decoded = gunzip(request.body().unwrap());
             *capture.lock().unwrap() =
-                Some(serde_json::from_slice::<serde_json::Value>(request.body().unwrap()).unwrap());
+                Some(serde_json::from_slice::<serde_json::Value>(&decoded).unwrap());
             "{}".into()
         })
         .expect(1)

@@ -1,37 +1,26 @@
 //! LLM Generation 生命周期追踪器。
 //!
 //! 管理单次 LLM 调用从 start → end 的完整生命周期状态：
-//! - on_llm_start：创建 GenerationCached，返回 GenerationStart
-//! - on_llm_request_payload：补充 raw_body 字段
+//! - on_llm_start：创建 GenerationCached（持有已冻结的输入来源）
+//! - on_llm_request_payload：用请求体来源替换 fallback，并释放原引用
 //! - on_llm_retrying：累积重试记录
-//! - on_llm_end：取出缓存数据，返回 GenerationEnd 供外层构造 IngestionEvent
+//! - on_llm_end：取出缓存数据（含输入来源），返回 GenerationEnd 供外层构造 TelemetryEvent
+//!
+//! 追踪器只保存 [`GenerationInput`]：小输入冻结为内存字节、大输入只持暂存句柄；结束/取消
+//! 直接移动来源，不等 IO，也不克隆原文（契约 §3.3）。
 
 use std::collections::HashMap;
-use std::sync::Arc;
 
-use peri_agent::messages::BaseMessage;
-use peri_agent::tools::ToolDefinition;
 use peri_model::TokenUsage;
 
-#[derive(Debug, Clone)]
+use super::input_snapshot::GenerationInput;
+
+/// 单个 generation 的缓存条目；`input` 不可 Clone/Debug（来源与 permit 私有）。
 pub(crate) struct GenerationCached {
     pub gen_id: String,
     pub start_time: String,
-    pub messages: Arc<Vec<BaseMessage>>,
-    pub tools: Arc<Vec<ToolDefinition>>,
-    pub raw_body: Option<Arc<serde_json::Value>>,
-}
-
-impl GenerationCached {
-    fn into_input(self) -> serde_json::Value {
-        match self.raw_body {
-            Some(body) => Arc::unwrap_or_clone(body),
-            None => serde_json::json!({
-                "messages": self.messages.as_ref(),
-                "tools": self.tools.as_ref(),
-            }),
-        }
-    }
+    /// 初始 fallback（messages/tools）或请求体到达后替换成的实际请求来源。
+    pub input: GenerationInput,
 }
 
 #[derive(Debug, Clone)]
@@ -49,7 +38,7 @@ pub(crate) struct GenerationStart {
 pub(crate) struct GenerationEnd {
     pub gen_id: String,
     pub start_time: String,
-    pub input_json: serde_json::Value,
+    pub input: GenerationInput,
     pub retry_metadata: Option<serde_json::Value>,
 }
 
@@ -66,7 +55,7 @@ pub(crate) struct AbandonedGeneration {
     pub step: usize,
     pub gen_id: String,
     pub start_time: String,
-    pub input_json: serde_json::Value,
+    pub input: GenerationInput,
     pub retry_metadata: Option<serde_json::Value>,
     pub terminal: Option<PendingTerminalState>,
 }
@@ -98,8 +87,7 @@ impl GenerationTracker {
         &mut self,
         agent_id: &str,
         step: usize,
-        messages: Arc<Vec<BaseMessage>>,
-        tools: Arc<Vec<ToolDefinition>>,
+        input: GenerationInput,
     ) -> GenerationStart {
         // 新 generation 的 retry 记录按 key 隔离，天然为空，无需清空全局 vec
         let gen_id = format!("gen_{}", uuid::Uuid::now_v7());
@@ -107,9 +95,7 @@ impl GenerationTracker {
         let cached = GenerationCached {
             gen_id: gen_id.clone(),
             start_time: start_time.clone(),
-            messages,
-            tools,
-            raw_body: None,
+            input,
         };
         self.generation_data
             .insert((agent_id.to_string(), step), cached);
@@ -117,16 +103,16 @@ impl GenerationTracker {
         GenerationStart { gen_id, start_time }
     }
 
+    /// 请求体到达：用实际请求来源替换 fallback，旧来源立即释放（ticket Drop 置取消位，
+    /// 不等 IO）；`Rejected` 表示冻结被拒，同样释放 fallback 并显式标记。
     pub(crate) fn on_llm_request_payload(
         &mut self,
         agent_id: &str,
         step: usize,
-        body: Arc<serde_json::Value>,
+        input: GenerationInput,
     ) {
         if let Some(cached) = self.generation_data.get_mut(&(agent_id.to_string(), step)) {
-            cached.raw_body = Some(body);
-            cached.messages = Arc::default();
-            cached.tools = Arc::default();
+            cached.input = input;
         }
         // 未找到时静默 no-op（保留现有行为）
     }
@@ -176,12 +162,12 @@ impl GenerationTracker {
 
         let gen_id = cached.gen_id.clone();
         let start_time = cached.start_time.clone();
-        let input_json = cached.into_input();
+        let input = cached.input;
 
         Some(GenerationEnd {
             gen_id,
             start_time,
-            input_json,
+            input,
             retry_metadata,
         })
     }
@@ -198,14 +184,14 @@ impl GenerationTracker {
                     .map(|retries| build_retry_metadata(&retries));
                 let gen_id = cached.gen_id.clone();
                 let start_time = cached.start_time.clone();
-                let input_json = cached.into_input();
+                let input = cached.input;
                 let terminal = self.pending_terminal.remove(&(agent_id.clone(), step));
                 AbandonedGeneration {
                     agent_id,
                     step,
                     gen_id,
                     start_time,
-                    input_json,
+                    input,
                     retry_metadata,
                     terminal,
                 }

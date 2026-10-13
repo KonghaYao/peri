@@ -1,8 +1,22 @@
 use super::*;
 use crate::types::TraceBody;
-use std::{collections::HashMap, future::Future, time::Duration};
+use std::{collections::HashMap, future::Future, io::Read, time::Duration};
 use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader};
 use tokio::sync::mpsc;
+
+/// 正文按 magic 判压缩：生产默认 gzip，两种情况都解出 OTLP JSON。
+fn request_body(bytes: &[u8]) -> serde_json::Value {
+    let raw = if bytes.starts_with(&[0x1f, 0x8b]) {
+        let mut inflated = Vec::new();
+        flate2::read::GzDecoder::new(bytes)
+            .read_to_end(&mut inflated)
+            .unwrap();
+        inflated
+    } else {
+        bytes.to_vec()
+    };
+    serde_json::from_slice(&raw).unwrap()
+}
 
 fn event(name: &str) -> IngestionEvent {
     IngestionEvent::TraceCreate {
@@ -52,7 +66,7 @@ async fn server(statuses: Vec<u16>) -> Server {
                 }
                 let mut bytes = vec![0; headers["content-length"].parse::<usize>().unwrap()];
                 reader.read_exact(&mut bytes).await.unwrap();
-                let body: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+                let body = request_body(&bytes);
                 let name = body["resourceSpans"][0]["scopeSpans"][0]["spans"][0]["name"]
                     .as_str()
                     .unwrap()
@@ -96,6 +110,7 @@ fn batcher(url: &str) -> Batcher {
             flush_interval: Duration::from_secs(3600),
             ..Default::default()
         },
+        None,
     )
 }
 
@@ -132,8 +147,26 @@ async fn slow_first_batch_allows_second_send_but_concurrency_and_queue_stay_boun
         Err(LangfuseError::IngestionApi(_))
     ));
     server.worker.await.unwrap();
+    // P4a 新增的进度/累计字段不在本用例断言范围：按字段名归一后再逐字段比较旧计数。
     assert_eq!(
-        batcher.stats(),
+        BatcherStats {
+            raw_bytes_total: 0,
+            wire_bytes_total: 0,
+            active_snapshot_bytes: 0,
+            preparing_memory_bytes: 0,
+            memory_queue_bytes: 0,
+            spool_bytes: 0,
+            spool_objects: 0,
+            oldest_pending_age_ms: 0,
+            retry_attempts: 0,
+            recovered_events: 0,
+            expired_events: 0,
+            corrupt_objects: 0,
+            quota_rejections: 0,
+            resource_fallbacks: 0,
+            fallback_reason: None,
+            ..batcher.stats()
+        },
         BatcherStats {
             accepted_events: 4,
             rejected_events: 1,
@@ -144,6 +177,7 @@ async fn slow_first_batch_allows_second_send_but_concurrency_and_queue_stay_boun
             partially_rejected_batches: 0,
             rejected_spans: 0,
             in_flight_batches: 0,
+            ..BatcherStats::default()
         }
     );
 }

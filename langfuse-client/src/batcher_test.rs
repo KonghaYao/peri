@@ -39,12 +39,11 @@ async fn test_batcher_add_and_manual_flush() {
         max_events: 10,
         flush_interval: Duration::from_secs(60),
         backpressure: BackpressurePolicy::DropNew,
-        max_retries: 0,
         queue_capacity: 10,
         max_in_flight: 1,
         ..Default::default()
     };
-    let batcher = Batcher::new(client, config);
+    let batcher = Batcher::new(client, config, None);
 
     batcher.add(create_test_event("1")).await.unwrap();
     batcher.add(create_test_event("2")).await.unwrap();
@@ -71,12 +70,11 @@ async fn test_batcher_auto_flush_on_max_events() {
         max_events: 3,
         flush_interval: Duration::from_secs(60),
         backpressure: BackpressurePolicy::DropNew,
-        max_retries: 0,
         queue_capacity: 3,
         max_in_flight: 1,
         ..Default::default()
     };
-    let batcher = Batcher::new(client, config);
+    let batcher = Batcher::new(client, config, None);
 
     batcher.add(create_test_event("1")).await.unwrap();
     batcher.add(create_test_event("2")).await.unwrap();
@@ -105,12 +103,11 @@ async fn test_batcher_periodic_flush() {
         max_events: 100,
         flush_interval: Duration::from_millis(10),
         backpressure: BackpressurePolicy::DropNew,
-        max_retries: 0,
         queue_capacity: 100,
         max_in_flight: 1,
         ..Default::default()
     };
-    let batcher = Batcher::new(client, config);
+    let batcher = Batcher::new(client, config, None);
 
     batcher.add(create_test_event("1")).await.unwrap();
     tokio::time::sleep(Duration::from_millis(50)).await;
@@ -127,12 +124,11 @@ async fn test_batcher_flush_empty_buffer() {
         max_events: 10,
         flush_interval: Duration::from_secs(60),
         backpressure: BackpressurePolicy::DropNew,
-        max_retries: 0,
         queue_capacity: 10,
         max_in_flight: 1,
         ..Default::default()
     };
-    let batcher = Batcher::new(client, config);
+    let batcher = Batcher::new(client, config, None);
     let result = batcher.flush().await;
     assert!(result.is_ok());
     drop(batcher);
@@ -155,12 +151,11 @@ async fn test_batcher_backpressure_block() {
         max_events: 5,
         flush_interval: Duration::from_secs(60),
         backpressure: BackpressurePolicy::Block,
-        max_retries: 0,
         queue_capacity: 5,
         max_in_flight: 1,
         ..Default::default()
     };
-    let batcher = Batcher::new(client, config);
+    let batcher = Batcher::new(client, config, None);
 
     for i in 0..5 {
         batcher
@@ -191,13 +186,12 @@ async fn test_batcher_graceful_shutdown_on_drop() {
         max_events: 10,
         flush_interval: Duration::from_secs(60),
         backpressure: BackpressurePolicy::DropNew,
-        max_retries: 0,
         queue_capacity: 10,
         max_in_flight: 1,
         ..Default::default()
     };
     {
-        let batcher = Batcher::new(client, config);
+        let batcher = Batcher::new(client, config, None);
         batcher.add(create_test_event("1")).await.unwrap();
         batcher.add(create_test_event("2")).await.unwrap();
         batcher.flush().await.unwrap();
@@ -222,12 +216,11 @@ async fn test_batcher_multiple_flush_cycles() {
         max_events: 2,
         flush_interval: Duration::from_secs(60),
         backpressure: BackpressurePolicy::DropNew,
-        max_retries: 0,
         queue_capacity: 2,
         max_in_flight: 1,
         ..Default::default()
     };
-    let batcher = Batcher::new(client, config);
+    let batcher = Batcher::new(client, config, None);
 
     batcher.add(create_test_event("1")).await.unwrap();
     batcher.add(create_test_event("2")).await.unwrap();
@@ -257,12 +250,11 @@ async fn test_batcher_handles_ingest_error() {
         max_events: 2,
         flush_interval: Duration::from_secs(60),
         backpressure: BackpressurePolicy::DropNew,
-        max_retries: 0,
         queue_capacity: 2,
         max_in_flight: 1,
         ..Default::default()
     };
-    let batcher = Batcher::new(client, config);
+    let batcher = Batcher::new(client, config, None);
 
     batcher.add(create_test_event("1")).await.unwrap();
     batcher.add(create_test_event("2")).await.unwrap();
@@ -314,12 +306,11 @@ async fn test_batcher_with_large_batch() {
         max_events: 50,
         flush_interval: Duration::from_secs(60),
         backpressure: BackpressurePolicy::DropNew,
-        max_retries: 0,
         queue_capacity: 50,
         max_in_flight: 1,
         ..Default::default()
     };
-    let batcher = Batcher::new(client, config);
+    let batcher = Batcher::new(client, config, None);
 
     for i in 0..50 {
         batcher
@@ -350,12 +341,11 @@ async fn test_batcher_backpressure_drop_oldest() {
         max_events: 5,
         flush_interval: Duration::from_secs(60),
         backpressure: BackpressurePolicy::DropOldest,
-        max_retries: 0,
         queue_capacity: 5,
         max_in_flight: 1,
         ..Default::default()
     };
-    let batcher = Batcher::new(client, config);
+    let batcher = Batcher::new(client, config, None);
 
     for i in 0..5 {
         batcher
@@ -385,12 +375,11 @@ async fn test_batcher_backpressure_drop_new() {
         max_events: 2,
         flush_interval: Duration::from_secs(60),
         backpressure: BackpressurePolicy::DropNew,
-        max_retries: 0,
         queue_capacity: 2,
         max_in_flight: 1,
         ..Default::default()
     };
-    let batcher = Batcher::new(client, config);
+    let batcher = Batcher::new(client, config, None);
 
     batcher.add(create_test_event("1")).await.unwrap();
     batcher.add(create_test_event("2")).await.unwrap();
@@ -464,12 +453,11 @@ async fn test_batcher_drop_new_increments_dropped_counter_during_slow_flush() {
         max_events: 2,
         flush_interval: Duration::from_secs(60),
         backpressure: BackpressurePolicy::DropNew,
-        max_retries: 0,
         queue_capacity: 2,
         max_in_flight: 1,
         ..Default::default()
     };
-    let batcher = Batcher::new(client, config);
+    let batcher = Batcher::new(client, config, None);
 
     // 前 2 个事件：run_loop 消费 → buffer 满 → 进入 do_flush（慢 server 延迟 500ms）
     batcher.add(create_test_event("1")).await.unwrap();
@@ -544,11 +532,7 @@ async fn test_try_add_drop_new_returns_queue_full_when_command_channel_is_full()
 // Type inference keeps this helper valid before and after the ack payload change.
 async fn wait_for_unobserved_worker_barrier(batcher: &Batcher) {
     let (tx, rx) = oneshot::channel();
-    batcher
-        .admission
-        .send(BatcherCommand::Flush(tx))
-        .await
-        .unwrap();
+    batcher.admission.flush_command(tx).await.unwrap();
     tokio::time::timeout(Duration::from_secs(5), rx)
         .await
         .expect("worker must reach the FIFO barrier")
@@ -562,16 +546,18 @@ fn failure_barrier_batcher(server_url: &str) -> Batcher {
             max_events: 1,
             flush_interval: Duration::from_secs(60),
             backpressure: BackpressurePolicy::DropNew,
-            max_retries: 0,
             queue_capacity: 1,
             max_in_flight: 1,
             ..Default::default()
         },
+        None,
     )
 }
 
 async fn park_flush_before_observing_result(
-    mut flush: std::pin::Pin<&mut impl std::future::Future<Output = Result<(), LangfuseError>>>,
+    mut flush: std::pin::Pin<
+        &mut impl std::future::Future<Output = Result<FlushReport, LangfuseError>>,
+    >,
 ) {
     std::future::poll_fn(|cx| {
         assert!(flush.as_mut().poll(cx).is_pending());

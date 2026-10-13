@@ -177,6 +177,19 @@ pub trait Model: Send + Sync {
         None
     }
 
+    /// 该模型已解析的上下文窗口（输入 + 输出的总预算，只读）。
+    ///
+    /// 调用方（如 Compact 摘要器）据此判断派生请求是否装得下，**不**用它改写
+    /// 请求参数，也不从主模型的窗口推断摘要模型的窗口。`None` 表示装配处无法
+    /// 解析：调用方必须显式记录为未知并保留 provider 默认行为，不得代填常量或
+    /// 宣称已通过预算检查。
+    ///
+    /// 值由装配处（provider 配置 + 有效窗口标志）在构造模型时写入；协议实现
+    /// 不猜测模型名对应的窗口。
+    fn context_window(&self) -> Option<u32> {
+        None
+    }
+
     /// Freezes the complete request for a durable checkpoint before execution.
     ///
     /// Implementations must satisfy [`crate::PreparedModelCall::new`]'s full

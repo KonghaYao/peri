@@ -1,68 +1,88 @@
+//! 摘要响应分类：把「可提交的完整摘要」「可回填的草稿片段」「本次无可用正文」
+//! 与不可恢复的协议错误分开，供 Full Compact 的有界恢复循环决策。
+//!
+//! 分类只做结构与协议校验，不判断摘要语义是否完整；未闭合的输出一律不是
+//! 可提交摘要，也不能用尾部省略标识伪装成完成。
+
 use peri_model::{ContentBlock, ModelMessage, ModelResponse, StopReason};
 
 use crate::error::{AgentError, AgentResult};
+pub use peri_acp_types::error::SummaryRecoveryReason;
 
-pub(super) enum SummaryAssembly {
-    Complete { text: String, truncated: bool },
-    Continue,
+/// 一次摘要生成响应相对「可提交摘要」的分类。
+#[derive(Debug)]
+pub(super) enum SummaryStep {
+    /// 已得到完整、通过校验的摘要正文。
+    Complete(String),
+    /// 有可用正文但未完成：`chunk` 按原顺序回填，不插入分隔符。
+    Draft {
+        chunk: String,
+        reason: SummaryRecoveryReason,
+    },
+    /// 本次响应没有可用正文（空响应或仅思考内容）。
+    Empty { reason: SummaryRecoveryReason },
 }
 
-pub(super) fn assemble_summary(
-    first: &ModelResponse,
-    second: Option<&ModelResponse>,
-) -> AgentResult<SummaryAssembly> {
-    let first_text = summary_text(first)?;
-    match first.stop_reason() {
-        StopReason::EndTurn => {
-            return postprocess_summary(&first_text)
-                .map(|text| SummaryAssembly::Complete {
-                    text,
-                    truncated: false,
-                })
-                .ok_or(AgentError::CompactEmptyResponse);
-        }
-        StopReason::MaxTokens => {}
+/// 分类一次摘要响应。
+///
+/// `accumulated` 是此前已回填片段的原样拼接结果（不含本次响应），用于识别
+/// 跨响应拆开的控制标签。工具调用、异常 stop 类型与控制标签不成对都是
+/// 不可恢复的协议错误，不产生草稿。
+pub(super) fn classify_summary_step(
+    response: &ModelResponse,
+    accumulated: &str,
+) -> AgentResult<SummaryStep> {
+    let stop_reason = response.stop_reason();
+    let raw = summary_text(response)?;
+    match stop_reason {
+        StopReason::EndTurn | StopReason::MaxTokens => {}
         stop_reason => return Err(incomplete(stop_reason)),
     }
-    if let Some(text) = extract_closed_summary(&first_text).and_then(format_summary) {
-        return Ok(SummaryAssembly::Complete {
-            text,
-            truncated: false,
+    let Some(extracted) = extract(&raw) else {
+        // 控制标签不成对：协议不合法，不猜测正文，也不重新生成。
+        return Err(incomplete(stop_reason));
+    };
+    // 本次响应自身给出的完整摘要优先：模型重写全文时不再拼接先前片段。
+    if let Extracted::Closed(text) = &extracted {
+        if let Some(text) = format_summary(text.clone()) {
+            return Ok(SummaryStep::Complete(text));
+        }
+    }
+    let body = extracted.into_text();
+    let combined = format!("{accumulated}{body}");
+    if let Some(text) = extract_closed_summary(&combined).and_then(format_summary) {
+        return Ok(SummaryStep::Complete(text));
+    }
+    if body.trim().is_empty() {
+        return Ok(SummaryStep::Empty {
+            reason: SummaryRecoveryReason::EmptyResponse,
         });
     }
-    if first_text.trim().is_empty() {
-        return Err(incomplete(&StopReason::MaxTokens));
+    if *stop_reason == StopReason::EndTurn
+        && !has_summary_tag(accumulated)
+        && !has_summary_tag(&body)
+    {
+        // 纯文本摘要兼容：模型完全不使用控制标签且自称结束。
+        return format_summary(combined).map(SummaryStep::Complete).ok_or(
+            AgentError::CompactIncompleteResponse {
+                stop_reason: StopReason::EndTurn,
+            },
+        );
     }
-    let Some(second) = second else {
-        return Ok(SummaryAssembly::Continue);
+    let reason = if *stop_reason == StopReason::MaxTokens {
+        SummaryRecoveryReason::OutputLimitTruncated
+    } else {
+        SummaryRecoveryReason::UnclosedSummary
     };
-    let second_text = summary_text(second)?;
-    let combined = format!("{first_text}{second_text}");
-    match second.stop_reason() {
-        StopReason::EndTurn if !second_text.trim().is_empty() => extract_closed_summary(&combined)
-            .and_then(format_summary)
-            .map(|text| SummaryAssembly::Complete {
-                text,
-                truncated: false,
-            })
-            .ok_or_else(|| incomplete(&StopReason::MaxTokens)),
-        StopReason::MaxTokens => {
-            if let Some(text) = extract_closed_summary(&combined).and_then(format_summary) {
-                return Ok(SummaryAssembly::Complete {
-                    text,
-                    truncated: false,
-                });
-            }
-            let text =
-                postprocess_summary(&combined).ok_or_else(|| incomplete(&StopReason::MaxTokens))?;
-            Ok(SummaryAssembly::Complete {
-                text: format!("{text}\n\n[Summary output limit reached after one continuation. The remaining tail was omitted; consult the original transcript for missing details.]"),
-                truncated: true,
-            })
-        }
-        StopReason::EndTurn => Err(incomplete(&StopReason::MaxTokens)),
-        stop_reason => Err(incomplete(stop_reason)),
-    }
+    Ok(SummaryStep::Draft {
+        chunk: body,
+        reason,
+    })
+}
+
+/// 是否出现摘要控制标签（用于区分「模型不用标签」与「标签未闭合」）。
+fn has_summary_tag(text: &str) -> bool {
+    text.contains("<summary>") || text.contains("</summary>")
 }
 
 fn summary_text(response: &ModelResponse) -> AgentResult<String> {
@@ -80,15 +100,31 @@ fn incomplete(stop_reason: &StopReason) -> AgentError {
     }
 }
 
-/// 后处理 LLM 摘要输出：移除 analysis 块，提取 summary 块，添加前缀
-///
-/// # Safety
-///
-/// 本函数内部使用 `str::find` 返回的字节索引进行切片（`&text[..start]` 等）。
-/// `<analysis>`、`</analysis>`、`<summary>`、`</summary>` 均为纯 ASCII 标签，
-/// `find()` 返回的字节索引即字符边界，不会导致 panic。
-fn postprocess_summary(raw: &str) -> Option<String> {
-    format_summary(extract_summary_text(raw)?)
+// ─── 思考块过滤与提取（单一权威）────────────────────────────────────────────────
+
+/// 思考块过滤结果。
+enum Extracted {
+    /// 找到闭合 `<summary>...</summary>`：其内部正文（已剥离控制标签）。
+    Closed(String),
+    /// 没有闭合 summary：过滤思考块后的正文（保留未闭合控制标签）。
+    Unclosed(String),
+}
+
+impl Extracted {
+    /// 可见正文：闭合时取 summary 内部正文，否则取可拼接正文。
+    fn into_text(self) -> String {
+        match self {
+            Self::Closed(text) | Self::Unclosed(text) => text,
+        }
+    }
+
+    /// 仅闭合 summary 才有正文。
+    fn into_closed(self) -> Option<String> {
+        match self {
+            Self::Closed(text) => Some(text),
+            Self::Unclosed(_) => None,
+        }
+    }
 }
 
 fn format_summary(mut text: String) -> Option<String> {
@@ -106,26 +142,26 @@ fn format_summary(mut text: String) -> Option<String> {
     }
 }
 
-// 只提取思考块之外的闭合 summary，正文中的标签可能是任务讨论的字面量。
-// 没有闭合 summary 时保留原有回退：剥除配对思考块及未闭合思考尾部。
-fn extract_summary_text(raw: &str) -> Option<String> {
-    extract_summary(raw, false)
-}
-
 fn extract_closed_summary(raw: &str) -> Option<String> {
-    extract_summary(raw, true)
+    extract(raw).and_then(Extracted::into_closed)
 }
 
-fn extract_summary(raw: &str, require_closed: bool) -> Option<String> {
-    const TAGS: [(&str, &str, bool); 7] = [
-        ("<summary>", "summary", true),
-        ("<analysis>", "analysis", true),
-        ("</analysis>", "analysis", false),
-        ("<thinking>", "thinking", true),
-        ("</thinking>", "thinking", false),
-        ("<think>", "think", true),
-        ("</think>", "think", false),
-    ];
+/// 思考/分析控制标签：`(标签, 名称, 是否为开标签)`。
+const TAGS: [(&str, &str, bool); 7] = [
+    ("<summary>", "summary", true),
+    ("<analysis>", "analysis", true),
+    ("</analysis>", "analysis", false),
+    ("<thinking>", "thinking", true),
+    ("</thinking>", "thinking", false),
+    ("<think>", "think", true),
+    ("</think>", "think", false),
+];
+
+/// 扫描控制标签：闭合 summary 直接返回其正文；否则返回过滤思考块后的正文。
+///
+/// `None` = 出现未配对的思考/分析结束标签（协议不合法）。标签均为纯 ASCII，
+/// `find()` 返回的字节索引即字符边界，切片不会 panic。
+fn extract(raw: &str) -> Option<Extracted> {
     let mut remaining = raw;
     let mut result = String::new();
     let mut stack = Vec::new();
@@ -145,7 +181,9 @@ fn extract_summary(raw: &str, require_closed: bool) -> Option<String> {
             let body_start = position + tag.len();
             if stack.is_empty() {
                 if let Some(body_len) = remaining[body_start..].find("</summary>") {
-                    return Some(remaining[body_start..body_start + body_len].to_owned());
+                    return Some(Extracted::Closed(
+                        remaining[body_start..body_start + body_len].to_owned(),
+                    ));
                 }
                 // 未闭合 summary 仍走后续思考块过滤，再沿用正文回退。
                 result.push_str(tag);
@@ -163,14 +201,7 @@ fn extract_summary(raw: &str, require_closed: bool) -> Option<String> {
     if stack.is_empty() {
         result.push_str(remaining);
     }
-    if require_closed {
-        return None;
-    }
-    // 到此不存在可提取的闭合 summary；保留既有未闭合 summary 回退。
-    if let Some(start) = result.find("<summary>") {
-        result = result[start + "<summary>".len()..].to_owned();
-    }
-    Some(result)
+    Some(Extracted::Unclosed(result))
 }
 
 #[cfg(test)]
