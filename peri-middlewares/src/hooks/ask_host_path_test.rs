@@ -15,7 +15,8 @@ use crate::permission::{PermissionMode, SharedPermissionMode};
 use peri_agent::agent::react::ToolCall;
 use peri_agent::error::AgentError;
 use peri_agent::interaction::{
-    ApprovalDecision, InteractionContext, InteractionResponse, UserInteractionBroker,
+    ApprovalDecision, InteractionContext, InteractionResponse, TrustedInteractionOwner,
+    UserInteractionBroker,
 };
 use peri_agent::middleware::r#trait::Middleware;
 
@@ -38,7 +39,11 @@ impl RecordingBroker {
 
 #[async_trait::async_trait]
 impl UserInteractionBroker for RecordingBroker {
-    async fn request(&self, _ctx: InteractionContext) -> InteractionResponse {
+    async fn request(
+        &self,
+        _owner: TrustedInteractionOwner,
+        _ctx: InteractionContext,
+    ) -> InteractionResponse {
         self.calls.fetch_add(1, Ordering::SeqCst);
         InteractionResponse::Decisions(vec![ApprovalDecision::Approve {
             source: Some("ask-host-path-test".to_string()),
@@ -86,6 +91,18 @@ fn make_middleware(hooks: Vec<RegisteredHook>, mode: PermissionMode) -> HookMidd
     )
 }
 
+/// 审批态带 turn 身份：交互归属从 state 投影（缺失即显式拒绝）。
+fn approval_state() -> peri_agent::agent::state::AgentState {
+    peri_agent::agent::state::AgentState::new(std::env::temp_dir().to_str().unwrap())
+        .with_turn_identity(
+            "session-test",
+            peri_acp_types::session::ExecutionBinding {
+                turn_id: peri_acp_types::session::TurnId::new(),
+                attempt_id: peri_acp_types::identity::AttemptId::new(),
+            },
+        )
+}
+
 fn bash_call() -> ToolCall {
     ToolCall::new("c1", "Bash", serde_json::json!({"command": "ls"}))
 }
@@ -97,12 +114,7 @@ fn bash_call() -> ToolCall {
 async fn ask_without_host_approval_path_and_without_broker_is_rejected() {
     let mw = make_middleware(vec![ask_hook()], PermissionMode::Default);
 
-    let result = mw
-        .before_tool(
-            &mut peri_agent::agent::state::AgentState::new(std::env::temp_dir().to_str().unwrap()),
-            &bash_call(),
-        )
-        .await;
+    let result = mw.before_tool(&mut approval_state(), &bash_call()).await;
 
     assert!(
         matches!(result, Err(AgentError::ToolRejected { .. })),
@@ -119,12 +131,7 @@ async fn ask_without_host_approval_path_uses_broker_when_present() {
     let mw = make_middleware(vec![ask_hook()], PermissionMode::Default)
         .with_broker(Arc::clone(&broker) as Arc<dyn UserInteractionBroker>);
 
-    let result = mw
-        .before_tool(
-            &mut peri_agent::agent::state::AgentState::new(std::env::temp_dir().to_str().unwrap()),
-            &bash_call(),
-        )
-        .await;
+    let result = mw.before_tool(&mut approval_state(), &bash_call()).await;
 
     assert!(result.is_ok(), "broker 批准后应放行，got {result:?}");
     assert_eq!(broker.calls(), 1, "ask 必须恰好走一次有界审批");
@@ -139,12 +146,7 @@ async fn ask_with_host_approval_path_defers_to_host_without_broker_call() {
         .with_host_approval_path(true)
         .with_broker(Arc::clone(&broker) as Arc<dyn UserInteractionBroker>);
 
-    let result = mw
-        .before_tool(
-            &mut peri_agent::agent::state::AgentState::new(std::env::temp_dir().to_str().unwrap()),
-            &bash_call(),
-        )
-        .await;
+    let result = mw.before_tool(&mut approval_state(), &bash_call()).await;
 
     assert!(result.is_ok(), "宿主会审批时应交宿主路径，got {result:?}");
     assert_eq!(broker.calls(), 0, "不得与宿主权限形成双审批");

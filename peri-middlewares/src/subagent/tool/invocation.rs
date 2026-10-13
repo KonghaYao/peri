@@ -18,6 +18,12 @@ pub(super) struct InvocationArgs {
 
 impl InvocationArgs {
     /// 解析工具入参；`resume_thread_id` 非空但非法（非 UUID）时返回明确错误。
+    ///
+    /// `result_large_err`：本函数对外只剩 `Box<dyn Error>`（调用方看不到具体 Err 类型），
+    /// lint 只是看穿了 `?` 的装箱转换。装箱由调用方完成，这里不额外包装；债务归属契约层
+    /// ——`EffectiveToolError` 携带 `RemoteToolError` 后变大，若后续再触发该 lint，
+    /// 应在契约层决定是否装箱，而不是在本函数堆多层 allow。
+    #[allow(clippy::result_large_err)]
     pub(super) fn parse(
         input: &serde_json::Value,
         parent_cwd: &str,

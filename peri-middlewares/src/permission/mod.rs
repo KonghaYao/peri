@@ -7,7 +7,7 @@ use peri_agent::{
     error::{AgentError, AgentResult},
     interaction::{
         ApprovalDecision, ApprovalItem, InteractionContext, InteractionResponse,
-        UserInteractionBroker,
+        TrustedInteractionOwner, UserInteractionBroker,
     },
     middleware::{
         prompt_sections::{PromptSection, PromptSectionZone},
@@ -39,6 +39,17 @@ pub use shared_mode::{PermissionMode, SharedPermissionMode};
 /// 条目（[`sensitive_tool_entries`] 的查表键）共用同一字面量：同一工具的原始名在本
 /// 模块只允许出现一次，避免两处字面量漂移（effective name 仍只从声明表解析）。
 const CRON_REGISTER_TOOL_NAME: &str = "cron_register";
+
+/// 「审批不可用（无人可答）」的记录点（裁决 R9）：把原因落到本次执行的 outcome
+/// 元数据，供 outcome 记录层区分「没有人可以决定」与「用户拒绝」。
+type ApprovalSink<'a> = Option<&'a Arc<peri_agent::agent::stages::ApprovalUnavailableSink>>;
+
+/// 记录一次「无人可答」；没有记录面时丢弃该事实（不伪造拒绝原因）。
+fn record_unanswered(sink: ApprovalSink<'_>, cause: peri_acp_types::interaction::UnansweredCause) {
+    if let Some(sink) = sink {
+        sink.record(cause);
+    }
+}
 
 /// 默认敏感工具判断规则
 ///
@@ -458,16 +469,17 @@ pub(crate) fn apply_decision(call: &ToolCall, decision: ApprovalDecision) -> Age
 }
 
 impl PermissionMiddleware {
-    /// 批量处理一批工具调用：收集所有需要审批的项，一次性弹窗，返回每个 call 的处理结果
-    pub async fn process_batch(&self, calls: &[ToolCall]) -> Vec<AgentResult<ToolCall>> {
-        self.process_batch_with_origins(calls, &vec![None; calls.len()])
-            .await
-    }
-
+    /// 批量处理一批工具调用：收集所有需要审批的项，一次性弹窗，返回每个 call 的处理结果。
+    ///
+    /// `owner` 是本次审批的可信归属（同一批次 = 同一 turn owner）；`None`
+    /// （无调用期状态）时，需要弹窗的条目按
+    /// [`crate::interaction_owner::UNTRUSTED_OWNER_REASON`] 显式拒绝，不静默放行。
     async fn process_batch_with_origins(
         &self,
+        sink: ApprovalSink<'_>,
         calls: &[ToolCall],
         origins: &[Option<hook_state::BoundToolOrigin>],
+        owner: Option<&TrustedInteractionOwner>,
     ) -> Vec<AgentResult<ToolCall>> {
         let mut results: Vec<AgentResult<ToolCall>> = Vec::with_capacity(calls.len());
 
@@ -485,7 +497,10 @@ impl PermissionMiddleware {
 
             // 有 mode → 使用快照模式决策
             if let Some(mode) = &mode_snapshot {
-                results.push(self.decide_by_mode(mode, call, origins[i].as_ref()).await);
+                results.push(
+                    self.decide_by_mode(sink, mode, call, origins[i].as_ref(), owner)
+                        .await,
+                );
                 continue;
             }
 
@@ -497,7 +512,7 @@ impl PermissionMiddleware {
 
             // 无 mode 但有 broker → 收集后批量弹窗
             return self
-                .batch_broker_approve(broker, calls, origins, i, &mut results)
+                .batch_broker_approve(sink, broker, calls, origins, owner, i, &mut results)
                 .await;
         }
 
@@ -505,11 +520,20 @@ impl PermissionMiddleware {
     }
 
     /// 通过 broker 请求用户审批单个工具调用
+    ///
+    /// `owner` 为本次审批的可信归属；缺失时显式拒绝（fail-closed），不伪造归属。
     async fn broker_approve(
         &self,
+        sink: ApprovalSink<'_>,
+        owner: Option<&TrustedInteractionOwner>,
         broker: &Arc<dyn UserInteractionBroker>,
         tool_call: &ToolCall,
     ) -> AgentResult<ToolCall> {
+        let Some(owner) = owner.cloned() else {
+            return Err(crate::interaction_owner::untrusted_owner_error(
+                &tool_call.name,
+            ));
+        };
         let ctx = InteractionContext::Approval {
             items: vec![ApprovalItem {
                 tool_call_id: tool_call.id.clone(),
@@ -517,20 +541,31 @@ impl PermissionMiddleware {
                 tool_input: tool_call.input.clone(),
             }],
         };
-        let response = match peri_time::timeout(self.broker_timeout, broker.request(ctx)).await {
-            Ok(resp) => resp,
-            Err(_elapsed) => {
-                return Err(AgentError::ToolRejected {
-                    tool: tool_call.name.clone(),
-                    reason: format!("审批超时 ({} 秒)", BROKER_TIMEOUT.as_secs()),
-                });
-            }
-        };
+        let response =
+            match peri_time::timeout(self.broker_timeout, broker.request(owner, ctx)).await {
+                Ok(resp) => resp,
+                Err(_elapsed) => {
+                    return Err(AgentError::ToolRejected {
+                        tool: tool_call.name.clone(),
+                        reason: format!("审批超时 ({} 秒)", BROKER_TIMEOUT.as_secs()),
+                    });
+                }
+            };
         let decision = match response {
             InteractionResponse::Decisions(mut d) => d.pop().unwrap_or(ApprovalDecision::Reject {
                 reason: "用户拒绝".to_string(),
                 source: None,
             }),
+            // 无人可作答（含「本部署没有在线 endpoint」）：按未获批准处理，并如实
+            // 转述原因，绝不伪造「用户拒绝」。原因同时写进 outcome 记录面
+            //（裁决 R9：outcome 记录层必须可区分「无人可答」与「用户拒绝」）。
+            InteractionResponse::Unanswered { cause } => {
+                record_unanswered(sink, cause);
+                ApprovalDecision::Reject {
+                    reason: cause.reason_text().to_string(),
+                    source: None,
+                }
+            }
             _ => ApprovalDecision::Reject {
                 reason: "用户拒绝".to_string(),
                 source: None,
@@ -542,9 +577,11 @@ impl PermissionMiddleware {
     /// 根据共享权限模式决策单个工具调用
     async fn decide_by_mode(
         &self,
+        sink: ApprovalSink<'_>,
         mode: &Arc<SharedPermissionMode>,
         tool_call: &ToolCall,
         origin: Option<&hook_state::BoundToolOrigin>,
+        owner: Option<&TrustedInteractionOwner>,
     ) -> AgentResult<ToolCall> {
         match mode.load() {
             PermissionMode::Bypass => Ok(tool_call.clone()),
@@ -553,7 +590,7 @@ impl PermissionMiddleware {
                     Ok(tool_call.clone())
                 } else {
                     match &self.broker {
-                        Some(broker) => self.broker_approve(broker, tool_call).await,
+                        Some(broker) => self.broker_approve(sink, owner, broker, tool_call).await,
                         None => Ok(tool_call.clone()),
                     }
                 }
@@ -571,7 +608,9 @@ impl PermissionMiddleware {
                             reason: "Auto 模式：分类器拒绝".to_string(),
                         }),
                         Classification::Unsure => match &self.broker {
-                            Some(broker) => self.broker_approve(broker, tool_call).await,
+                            Some(broker) => {
+                                self.broker_approve(sink, owner, broker, tool_call).await
+                            }
                             None => Err(AgentError::ToolRejected {
                                 tool: tool_call.name.clone(),
                                 reason: "Auto 模式：分类器不确定且无 broker".to_string(),
@@ -580,7 +619,7 @@ impl PermissionMiddleware {
                     }
                 }
                 None => match &self.broker {
-                    Some(broker) => self.broker_approve(broker, tool_call).await,
+                    Some(broker) => self.broker_approve(sink, owner, broker, tool_call).await,
                     None => Err(AgentError::ToolRejected {
                         tool: tool_call.name.clone(),
                         reason: "Auto 模式：无分类器且无 broker".to_string(),
@@ -588,7 +627,7 @@ impl PermissionMiddleware {
                 },
             },
             PermissionMode::Default => match &self.broker {
-                Some(broker) => self.broker_approve(broker, tool_call).await,
+                Some(broker) => self.broker_approve(sink, owner, broker, tool_call).await,
                 None => {
                     tracing::warn!("HITL Default 模式但无 broker，拒绝工具调用");
                     Err(anyhow::anyhow!("HITL 审批不可用：未配置 broker").into())
@@ -598,11 +637,16 @@ impl PermissionMiddleware {
     }
 
     /// 无 mode 时原有的批量 broker 审批逻辑（向后兼容）
+    // 审批注入面：与单条路径（`broker_approve`）同形的 sink / broker / owner，
+    // 加上批次切片（calls / origins / start_idx）与结果累积，逐项传递。
+    #[allow(clippy::too_many_arguments)]
     async fn batch_broker_approve(
         &self,
+        sink: ApprovalSink<'_>,
         broker: &Arc<dyn UserInteractionBroker>,
         calls: &[ToolCall],
         origins: &[Option<hook_state::BoundToolOrigin>],
+        owner: Option<&TrustedInteractionOwner>,
         start_idx: usize,
         initial_results: &mut Vec<AgentResult<ToolCall>>,
     ) -> Vec<AgentResult<ToolCall>> {
@@ -620,6 +664,23 @@ impl PermissionMiddleware {
             return results;
         }
 
+        // 无可信归属 ⇒ 本批**待审批**条目显式拒绝（结果长度与输入一致）。
+        //
+        // 粒度与正常路径（本函数末尾的逐条循环）一致：不需要审批的调用照常放行，
+        // 不因同批另一条缺少归属而被连带拒绝。
+        let Some(owner) = owner.cloned() else {
+            for (i, call) in calls.iter().enumerate().skip(start_idx) {
+                if self.requires_approval_for(call, origins[i].as_ref()) {
+                    results.push(Err(crate::interaction_owner::untrusted_owner_error(
+                        &call.name,
+                    )));
+                } else {
+                    results.push(Ok(call.clone()));
+                }
+            }
+            return results;
+        };
+
         let items: Vec<ApprovalItem> = needs_approval
             .iter()
             .map(|(_, c)| ApprovalItem {
@@ -630,24 +691,35 @@ impl PermissionMiddleware {
             .collect();
 
         let ctx = InteractionContext::Approval { items };
-        let response = match peri_time::timeout(self.broker_timeout, broker.request(ctx)).await {
-            Ok(resp) => resp,
-            Err(_elapsed) => {
-                // 批量结果必须与输入等长：`MiddlewareChain::run_before_tools_batch`
-                // 会对长度不符 fail closed，因此超时按每条调用各返一条拒绝，
-                // 不额外插入汇总条目。
-                results.extend(calls.iter().skip(start_idx).map(|c| {
-                    Err(AgentError::ToolRejected {
-                        tool: c.name.clone(),
-                        reason: format!("审批超时 ({} 秒)", BROKER_TIMEOUT.as_secs()),
-                    })
-                }));
-                return results;
-            }
-        };
+        let response =
+            match peri_time::timeout(self.broker_timeout, broker.request(owner, ctx)).await {
+                Ok(resp) => resp,
+                Err(_elapsed) => {
+                    // 批量结果必须与输入等长：`MiddlewareChain::run_before_tools_batch`
+                    // 会对长度不符 fail closed，因此超时按每条调用各返一条拒绝，
+                    // 不额外插入汇总条目。
+                    results.extend(calls.iter().skip(start_idx).map(|c| {
+                        Err(AgentError::ToolRejected {
+                            tool: c.name.clone(),
+                            reason: format!("审批超时 ({} 秒)", BROKER_TIMEOUT.as_secs()),
+                        })
+                    }));
+                    return results;
+                }
+            };
 
         let decisions = match response {
             InteractionResponse::Decisions(d) => d,
+            InteractionResponse::Unanswered { cause } => {
+                record_unanswered(sink, cause);
+                vec![
+                    ApprovalDecision::Reject {
+                        reason: cause.reason_text().to_string(),
+                        source: None,
+                    };
+                    needs_approval.len()
+                ]
+            }
             _ => vec![
                 ApprovalDecision::Reject {
                     reason: "unexpected response".to_string(),
@@ -704,7 +776,11 @@ impl Middleware for PermissionMiddleware {
             .iter()
             .map(|call| state.tool_origin(&call.id))
             .collect();
-        self.process_batch_with_origins(calls, &origins).await
+        // 归属在弹窗前一次性铸造（同一批次 = 同一 turn owner）；缺失即拒绝。
+        let owner = crate::interaction_owner::owner_from_hook_state(state);
+        let sink = state.approval_unavailable_sink();
+        self.process_batch_with_origins(sink.as_ref(), calls, &origins, owner.as_ref())
+            .await
     }
 
     async fn before_tool(
@@ -719,8 +795,20 @@ impl Middleware for PermissionMiddleware {
         }
 
         // 2. 有 mode → 按权限模式决策
+        let sink = state.approval_unavailable_sink();
         if let Some(mode) = &self.mode {
-            return self.decide_by_mode(mode, tool_call, origin.as_ref()).await;
+            // 归属只在真正需要弹窗的分支被消费：Bypass / 免审批分支不铸造、
+            // 不受缺失归属影响（显式 Bypass 仍由原 Permission 权威裁决）。
+            let owner = crate::interaction_owner::owner_from_hook_state(state);
+            return self
+                .decide_by_mode(
+                    sink.as_ref(),
+                    mode,
+                    tool_call,
+                    origin.as_ref(),
+                    owner.as_ref(),
+                )
+                .await;
         }
 
         // 3. 无 mode 且无 broker → 放行（disabled() 路径）
@@ -729,7 +817,9 @@ impl Middleware for PermissionMiddleware {
         };
 
         // 4. 无 mode 但有 broker → 原有弹窗审批逻辑
-        self.broker_approve(broker, tool_call).await
+        let owner = crate::interaction_owner::owner_from_hook_state(state);
+        self.broker_approve(sink.as_ref(), owner.as_ref(), broker, tool_call)
+            .await
     }
 }
 
@@ -740,3 +830,11 @@ mod tests;
 #[cfg(test)]
 #[path = "source_identity_test.rs"]
 mod source_identity_tests;
+
+#[cfg(test)]
+#[path = "untrusted_owner_test.rs"]
+mod untrusted_owner_tests;
+
+#[cfg(test)]
+#[path = "unanswered_test.rs"]
+mod unanswered_tests;

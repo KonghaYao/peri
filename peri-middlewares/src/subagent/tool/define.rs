@@ -191,6 +191,16 @@ impl BaseTool for SubAgentTool {
             is_fork,
         } = InvocationArgs::parse(&input, &self.parent_cwd)?;
 
+        // 父侧模型 tool-call ID 传给子 agent 配置（配置层仍是字符串形状）。
+        let parent_tool_call_id = ctx
+            .tool_call_id
+            .as_ref()
+            .map(|tool_call_id| tool_call_id.as_str().to_string());
+
+        // 本调用的交互归属（MCP Agent 内容绑定审批用）：来自 canonical dispatch
+        // 绑定的真实 turn 事实；缺失时审批路径显式拒绝，不伪造归属。
+        let approval_owner = crate::interaction_owner::owner_from_tool_context(&ctx);
+
         // host 提前获取（resume 校验需要会话资源门面；R-M2 分支优先级）
         let host = self.host();
 
@@ -211,7 +221,8 @@ impl BaseTool for SubAgentTool {
                     prompt,
                     cwd,
                     run_in_background.unwrap_or(false),
-                    ctx.tool_call_id.clone(),
+                    parent_tool_call_id.clone(),
+                    approval_owner,
                 )
                 .await;
         }
@@ -266,14 +277,14 @@ impl BaseTool for SubAgentTool {
                     is_fork,
                     current_messages,
                     model.as_deref(),
-                    ctx.tool_call_id.clone(),
+                    parent_tool_call_id.clone(),
                 )
                 .await;
         }
 
         if is_fork {
             return self
-                .invoke_fork(&prompt, &cwd, current_messages, ctx.tool_call_id.clone())
+                .invoke_fork(&prompt, &cwd, current_messages, parent_tool_call_id.clone())
                 .await;
         }
 
@@ -286,7 +297,8 @@ impl BaseTool for SubAgentTool {
         };
 
         let agent_def = if is_mcp_agent {
-            self.load_and_approve_mcp_agent(&agent_id).await?
+            self.load_and_approve_mcp_agent(&agent_id, approval_owner.as_ref())
+                .await?
         } else {
             match self.load_agent_def(&agent_id).await {
                 Ok(agent) => agent,
@@ -330,7 +342,7 @@ impl BaseTool for SubAgentTool {
             build_result.system_prompt,
             build_result.skill_names,
             cwd,
-            ctx.tool_call_id.clone(),
+            parent_tool_call_id.clone(),
         );
 
         let spawned = self.spawn(config).await?;

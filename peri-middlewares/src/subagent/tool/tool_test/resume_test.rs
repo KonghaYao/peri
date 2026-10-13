@@ -311,6 +311,7 @@ async fn test_resume_missing_resources_is_a_typed_preflight_rejection() {
             "/tmp".into(),
             false,
             None,
+            None,
         )
         .await
         .unwrap_err();
@@ -335,6 +336,7 @@ async fn test_resume_invalid_identity_is_a_typed_preflight_rejection() {
             Some("ping".into()),
             fixture.workspace_cwd(),
             false,
+            None,
             None,
         )
         .await

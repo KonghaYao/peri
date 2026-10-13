@@ -161,7 +161,7 @@ async fn test_bg_register_failure_does_not_execute_task() {
         let invocation = host.fresh_tool_call_id(&format!("register-failure-{index}"));
         let tool = Arc::clone(&tool);
         let cwd = dir.path().to_str().unwrap().to_string();
-        let invocation = Some(invocation);
+        let invocation = Some(invocation.into());
         handles.push(tokio::spawn(async move {
             let mut ctx = peri_agent::tools::ToolContext::new(&[], cwd.as_str());
             ctx.invocation_id = invocation;

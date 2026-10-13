@@ -7,6 +7,7 @@ impl super::SubAgentTool {
     pub(crate) async fn load_and_approve_mcp_agent(
         &self,
         agent_id: &str,
+        approval_owner: Option<&peri_agent::interaction::TrustedInteractionOwner>,
     ) -> Result<ClaudeAgent, Box<dyn std::error::Error + Send + Sync>> {
         use peri_agent::interaction::{
             ApprovalDecision, ApprovalItem, InteractionContext, InteractionResponse,
@@ -31,20 +32,30 @@ impl super::SubAgentTool {
                 .broker
                 .as_ref()
                 .ok_or("MCP Agent activation requires an interaction broker")?;
+            // 归属缺失（无 canonical turn 事实）⇒ 显式拒绝，不伪造归属。
+            let Some(owner) = approval_owner.cloned() else {
+                return Err(crate::interaction_owner::untrusted_owner_error(
+                    "MCP Agent activation",
+                )
+                .into());
+            };
             let response = broker
-                .request(InteractionContext::Approval {
-                    items: vec![ApprovalItem {
-                        tool_call_id: format!("mcp-agent:{}", activated.metadata.id),
-                        tool_name: "MCP Agent activation".to_string(),
-                        tool_input: serde_json::json!({
-                            "origin": activated.metadata.origin,
-                            "name": activated.metadata.name,
-                            "uri": activated.metadata.uri,
-                            "digest": activated.digest,
-                            "effective_tools": effective_tools,
-                        }),
-                    }],
-                })
+                .request(
+                    owner,
+                    InteractionContext::Approval {
+                        items: vec![ApprovalItem {
+                            tool_call_id: format!("mcp-agent:{}", activated.metadata.id),
+                            tool_name: "MCP Agent activation".to_string(),
+                            tool_input: serde_json::json!({
+                                "origin": activated.metadata.origin,
+                                "name": activated.metadata.name,
+                                "uri": activated.metadata.uri,
+                                "digest": activated.digest,
+                                "effective_tools": effective_tools,
+                            }),
+                        }],
+                    },
+                )
                 .await;
             match response {
                 InteractionResponse::Decisions(decisions)

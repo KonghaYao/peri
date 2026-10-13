@@ -1,6 +1,7 @@
 use std::sync::Arc;
 
 use async_trait::async_trait;
+use peri_acp_types::tool_outcome::RawToolResult;
 use peri_agent::tools::BaseTool;
 use rmcp::model::{ContentBlock, Tool};
 use thiserror::Error;
@@ -29,17 +30,6 @@ pub enum ToolCallError {
     },
 }
 
-fn completed_application_error(
-    result: &rmcp::model::CallToolResult,
-) -> Option<peri_acp_types::tools::EffectiveToolError> {
-    (result.is_error == Some(true)).then(|| {
-        peri_acp_types::tools::EffectiveToolError::new(
-            peri_acp_types::tools::EffectiveToolErrorCode::ApplicationFailed,
-            format_contents(&result.content),
-        )
-    })
-}
-
 /// 将单个 MCP tool 包装为 BaseTool 实现
 ///
 /// `Clone` 只复制已有的 String/Value/Arc/gate 字段，不建立新连接、不注册新 lease；
@@ -56,7 +46,7 @@ pub struct McpToolBridge {
     direct: bool,
     server_generation: u64,
     client: Arc<McpClientHandle>,
-    binding_leases: Option<Arc<super::apps::McpAppBindingLeaseRegistry>>,
+    binding_leases: Option<Arc<super::apps::McpAppBindingRegistry>>,
     admission: Option<super::dynamic::admission::DynamicMcpAdmissionGate>,
     output_pool: Option<std::sync::Weak<McpClientPool>>,
     output_session_id: Option<String>,
@@ -224,7 +214,7 @@ impl McpToolBridge {
 
     pub fn with_binding_leases(
         mut self,
-        registry: Arc<super::apps::McpAppBindingLeaseRegistry>,
+        registry: Arc<super::apps::McpAppBindingRegistry>,
     ) -> Self {
         self.binding_leases = Some(registry);
         self
@@ -252,6 +242,14 @@ impl McpToolBridge {
     /// 调用点归 `system_tools::prepare_system_tools`（同 Wave 落地）。
     pub(crate) fn original_tool_name(&self) -> &str {
         &self.tool_name
+    }
+
+    /// 本 bridge 绑定的连接句柄（session-owned 入口的提交复核用它绑定 peer）。
+    ///
+    /// 只暴露句柄引用：wire 调用仍必须经 `invoke_output`（超时 / 输出预算 /
+    /// 任务提升等语义在 bridge 内，不得绕过）。
+    pub(crate) fn client_handle(&self) -> &Arc<McpClientHandle> {
+        &self.client
     }
 }
 
@@ -303,11 +301,30 @@ impl BaseTool for McpToolBridge {
         self.direct
     }
 
+    /// 文本投影落点：只返回模型/UI 投影文本。MCP 的 canonical 落点是
+    /// [`BaseTool::invoke_output`]，本方法在其上丢弃 raw 与 `isError` 事实。
     async fn invoke(
         &self,
         input: serde_json::Value,
         ctx: peri_agent::tools::ToolContext<'_>,
     ) -> Result<String, Box<dyn std::error::Error + Send + Sync>> {
+        Ok(self.invoke_output(input, ctx).await?.text)
+    }
+
+    /// MCP adapter 的 canonical 落点：**先保存 outcome，再投影**。
+    ///
+    /// 远端 `tools/call` 结果以 [`RawToolResult`] 保真随 `outcome` 返回（`content`
+    /// 含多模态块、`structuredContent`、`_meta`、`isError`），调用方（App relay /
+    /// ACP / 模型面）各自从返回值解读，不得经旁路 registry 捞取。
+    ///
+    /// `isError: true` 是工具报告的**结果事实**而不是调用失败：它作为
+    /// [`ToolOutcome::Reported`] 的正常返回值离开本函数。只有 transport/协议层失败
+    /// 才返回 `Err`。
+    async fn invoke_output(
+        &self,
+        input: serde_json::Value,
+        ctx: peri_agent::tools::ToolContext<'_>,
+    ) -> Result<peri_agent::tools::ToolOutput, Box<dyn std::error::Error + Send + Sync>> {
         let _permit = match &self.admission {
             Some(gate) => Some(gate.try_acquire().map_err(|_| {
                 Box::new(ToolCallError::Unavailable {
@@ -387,6 +404,12 @@ impl BaseTool for McpToolBridge {
         let response = match super::tool_request::call_tool(peer, request, timeout).await {
             Ok(response) => response,
             Err(error) => {
+                // 只有真正的传输/协议失败走这条路。远端 JSON-RPC error 的
+                // `code`/`message`/`data` 目前只经 `Display` 进入文本投影；
+                // 移除条件（阶段 2/3）：App relay 需要把上游 JSON-RPC error 转发给 App 时
+                // （需要 App 侧消费方 + Host invoke 入口共用同一出口），在此用
+                // `rmcp::ServiceError::McpError(data)` 构造 `RemoteToolError::from_jsonrpc`
+                // 并挂到 `EffectiveToolError::with_remote_error` 上，不靠 error code 反推。
                 let e = error;
                 return Err(Box::new(
                     if let rmcp::ServiceError::Timeout { timeout } = e {
@@ -486,9 +509,9 @@ impl BaseTool for McpToolBridge {
                     "Its completion reminder is delivered to the initiating session \
                              while that session is live."
                 };
-                return Ok(format!(
+                return Ok(peri_agent::tools::ToolOutput::from_legacy(format!(
                     "Background task started: {public_id}. {delivery_note}"
-                ));
+                )));
             }
             _ => {
                 return Err(Box::new(ToolCallError::CallFailed {
@@ -499,93 +522,146 @@ impl BaseTool for McpToolBridge {
             }
         };
 
-        // 4. 处理 is_error 标志。失败的实例化调用不得签发 App lease。
-        if let Some(application_error) = completed_application_error(&result) {
-            let pool = self.output_pool.as_ref().and_then(std::sync::Weak::upgrade);
-            let reason = format_output(
-                pool.as_deref(),
-                self.output_session_id
-                    .as_deref()
-                    .or(ctx.session_id.as_deref()),
-                application_error.message,
-                true,
-            )
-            .await;
-            return Err(Box::new(peri_acp_types::tools::EffectiveToolError::new(
-                application_error.code,
-                ToolCallError::CallFailed {
-                    server: self.server_name.clone(),
-                    tool: self.tool_name.clone(),
-                    reason,
-                }
-                .to_string(),
-            )));
-        }
+        // 4. 先保存结果事实：`isError: true` 与多模态 content / structuredContent /
+        //    `_meta` 一样属于结果，不再被折叠成错误路径。文本投影是最后一步的派生
+        //    视图，不是事实源（step 6）。
+        //
+        //    保真边界：本值来自 rmcp 解析后的 typed 结果，rmcp `CallToolResult` 没有
+        //    未知字段承接位，因此线上未被 rmcp 建模的顶层扩展字段在此已丢失；要覆盖
+        //    它们需要在 transport 层抓取原始 JSON（见本函数末尾的移除条件）。
+        let raw = RawToolResult::new(serde_json::to_value(&result).map_err(|error| {
+            Box::new(ToolCallError::CallFailed {
+                server: self.server_name.clone(),
+                tool: self.tool_name.clone(),
+                reason: format!("failed to serialize MCP tool result: {error}"),
+            }) as Box<dyn std::error::Error + Send + Sync>
+        })?);
 
-        if let (
-            Some(registry),
-            Some(dispatcher),
-            Some(session_id),
-            Some(turn_generation),
-            Some(invocation_id),
-        ) = (
+        // 5. 实例化调用（模型 / 嵌套 / Host 发起）为带 UI URI 的工具签发**调用记录**。
+        //
+        //    App 自己发起的执行不签发记录：来源判定只看 typed
+        //    [`InvocationOrigin::App`]（取代旧的 `invocation_id.starts_with("mcp-app:")`
+        //    字符串前缀判定）。
+        //
+        //    签发面（阶段 4a，裁决 D5 + 设计 §4）：
+        //    - **`isError:true` 同样签发**：它是结果事实，不是「没有可展示内容」；
+        //      模型的失败调用也可能带 UI（原 `!raw.is_error()` 门已删除）。
+        //    - 模型可见但 app 不可见的工具同样签发，资格为
+        //      [`AppQualification::DisplayOnly`]（可显示、**零 callback 资格**）。
+        //
+        //    记录是**纯数据** + 五层取消令牌中的 App 层：不再携带 dispatcher、
+        //    取消令牌、turn generation、catalog 或 EventBus（设计 §4 删除清单 3）。
+        //    App 回调的执行由 session-owned canonical 入口按 record 身份重新取用。
+        if let (Some(registry), Some(session_id), Some(invocation_id)) = (
             self.binding_leases.as_ref(),
-            ctx.effective_tool_dispatcher.clone(),
             ctx.session_id.clone(),
-            ctx.turn_generation.clone(),
             ctx.invocation_id.clone(),
         ) {
-            if invocation_id.starts_with("mcp-app:") {
-                if let Ok(raw_result) = serde_json::to_value(&result)
-                    .and_then(serde_json::from_value::<peri_acp_types::mcp_apps::RawCallToolResult>)
-                {
-                    registry.record_raw_result(
-                        &invocation_id,
-                        serde_json::to_value(raw_result).unwrap_or(serde_json::Value::Null),
-                    );
+            let app_initiated = ctx
+                .origin
+                .as_ref()
+                .is_some_and(peri_agent::tools::InvocationOrigin::is_app);
+            if !app_initiated {
+                // 展示资格：带 UI URI，且至少对模型或 App 一面可见（两面都不可见的
+                // 工具不得因带 UI URI 而获得展示面）。
+                let ui_tool = self
+                    .client
+                    .tools
+                    .iter()
+                    .find(|tool| tool.name.as_ref() == self.tool_name)
+                    .and_then(|tool| {
+                        let visibility = super::apps::tool_visibility(tool);
+                        if !visibility.model && !visibility.app {
+                            return None;
+                        }
+                        super::apps::tool_resource_uri(tool)
+                            .map(|resource_uri| (resource_uri, visibility))
+                    });
+                if let Some((resource_uri, visibility)) = ui_tool {
+                    let qualification = if visibility.app {
+                        let allowed_tools = match ctx.effective_tool_dispatcher.as_ref() {
+                            Some(dispatcher) => app_allowed_tools(
+                                &self.server_name,
+                                &resource_uri,
+                                &self.client.tools,
+                                dispatcher.as_ref(),
+                            ),
+                            None => std::collections::HashMap::new(),
+                        };
+                        // 白名单为空 ⇒ 没有任何可回调工具，等价于仅可显示。
+                        if allowed_tools.is_empty() {
+                            peri_acp_types::mcp_apps_facade::AppQualification::DisplayOnly
+                        } else {
+                            peri_acp_types::mcp_apps_facade::AppQualification::Interactive {
+                                allowed_tools,
+                            }
+                        }
+                    } else {
+                        peri_acp_types::mcp_apps_facade::AppQualification::DisplayOnly
+                    };
+                    match registry.session_incarnation(&session_id) {
+                        Some(incarnation) => {
+                            // 实例化令牌：本次执行身份的一次性消费键
+                            //（`peri/mcp/open` 用它换取 App 实例）。
+                            let invocation_token = invocation_id.to_string();
+                            let record =
+                                super::apps::McpAppRecord::new(super::apps::McpAppRecordSpec {
+                                    owner_session_id: session_id.clone(),
+                                    server_id: self.server_name.clone(),
+                                    server_generation: self.server_generation,
+                                    resource_uri,
+                                    instantiating_tool: self.tool_name.clone(),
+                                    invocation_id,
+                                    invocation_token,
+                                    tool_call_id: ctx.tool_call_id.clone(),
+                                    incarnation,
+                                    qualification,
+                                    // 实际（审批后 effective）参数：snapshot 的初始输入真相。
+                                    effective_input: input.as_object().cloned().unwrap_or_default(),
+                                    // `Arc` 共享：多 tab attach 不复制同一结果（设计 §9.1）。
+                                    initial_result: std::sync::Arc::new(raw.clone()),
+                                });
+                            if let Err(rejection) = registry.issue(std::sync::Arc::new(record)) {
+                                tracing::warn!(
+                                    server = %self.server_name,
+                                    tool = %self.tool_name,
+                                    %rejection,
+                                    "MCP App record not issued"
+                                );
+                            }
+                        }
+                        None => tracing::warn!(
+                            server = %self.server_name,
+                            tool = %self.tool_name,
+                            session_id = %session_id,
+                            "MCP App record not issued: session incarnation is not registered"
+                        ),
+                    }
                 }
-            } else if let Some(resource_uri) = self
-                .client
-                .tools
-                .iter()
-                .find(|tool| tool.name.as_ref() == self.tool_name)
-                .filter(|tool| super::apps::tool_visibility(tool).app)
-                .and_then(super::apps::tool_resource_uri)
-            {
-                let allowed_tools = app_allowed_tools(
-                    &self.server_name,
-                    &resource_uri,
-                    &self.client.tools,
-                    dispatcher.as_ref(),
-                );
-                registry.issue(super::apps::McpAppBindingLease::new(
-                    session_id,
-                    turn_generation,
-                    self.server_name.clone(),
-                    self.server_generation,
-                    resource_uri,
-                    self.tool_name.clone(),
-                    invocation_id,
-                    allowed_tools,
-                    dispatcher,
-                    ctx.cancellation.clone(),
-                ));
             }
         }
 
-        // 5. 格式化返回（截断超大输出）
+        // 6. 文本投影（截断超大输出）。投影与改动前逐字节一致：`isError` 结果仍带
+        //    失败上下文，模型/ACP 看到的文本不回退，事实由 outcome 承载。
         let formatted = format_contents(&result.content);
         let pool = self.output_pool.as_ref().and_then(std::sync::Weak::upgrade);
-        let output = format_output(
-            pool.as_deref(),
-            self.output_session_id
-                .as_deref()
-                .or(ctx.session_id.as_deref()),
-            formatted,
-            false,
-        )
-        .await;
-        Ok(output)
+        let session_id = self
+            .output_session_id
+            .as_deref()
+            .or(ctx.session_id.as_deref());
+        let text = if raw.is_error() {
+            let reason = format_output(pool.as_deref(), session_id, formatted, true).await;
+            ToolCallError::CallFailed {
+                server: self.server_name.clone(),
+                tool: self.tool_name.clone(),
+                reason,
+            }
+            .to_string()
+        } else {
+            format_output(pool.as_deref(), session_id, formatted, false).await
+        };
+        // 远端 JSON-RPC error 的原始载荷尚未在协议失败分支接线，见该分支注释。
+        Ok(peri_agent::tools::ToolOutput::from_raw_result(text, raw))
     }
 }
 

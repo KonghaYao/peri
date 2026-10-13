@@ -118,15 +118,22 @@ impl BaseTool for AskUserTool {
     async fn invoke(
         &self,
         input: Value,
-        _ctx: peri_agent::tools::ToolContext<'_>,
+        ctx: peri_agent::tools::ToolContext<'_>,
     ) -> Result<String, Box<dyn std::error::Error + Send + Sync>> {
         let questions = parse_questions(input)?;
         let headers: Vec<String> = questions.iter().map(|q| q.header.clone()).collect();
 
+        // 提问归属只能从 canonical dispatch 绑定的真实 turn 事实铸造；缺失即
+        // 显式拒绝（fail-closed），不伪造 turn 身份、不静默跳过。
+        let Some(owner) = crate::interaction_owner::owner_from_tool_context(&ctx) else {
+            return Err(Box::new(crate::interaction_owner::untrusted_owner_error(
+                "AskUserQuestion",
+            )));
+        };
         let ctx = InteractionContext::Questions {
             requests: questions,
         };
-        let response = self.broker.request(ctx).await;
+        let response = self.broker.request(owner, ctx).await;
 
         match response {
             InteractionResponse::Answers(answers) => {
@@ -152,8 +159,8 @@ impl BaseTool for AskUserTool {
                     reason: "用户拒绝回答".to_string(),
                 }))
             }
-            // 客户端声明无人可作答（如 `-p` 打印模式、无法识别的声明）：转述
-            // 真实原因。ToolRejected 只是失败的工具结果（模型侧 is_error），
+            // 无人可作答（客户端声明、无法识别的声明，或本部署没有在线 endpoint）：
+            // 转述真实原因。ToolRejected 只是失败的工具结果（模型侧 is_error），
             // 不代表用户曾拒绝；绝不把空答案当作回答返回。
             InteractionResponse::Unanswered { cause } => {
                 Err(Box::new(peri_agent::error::AgentError::ToolRejected {

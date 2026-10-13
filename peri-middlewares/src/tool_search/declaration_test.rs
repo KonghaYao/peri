@@ -280,13 +280,19 @@ fn build_real_direct_tools() -> Vec<Arc<dyn BaseTool>> {
     use crate::tools::{AskUserTool, TodoWriteTool};
     use parking_lot::RwLock as PLRwLock;
 
-    use peri_agent::interaction::{InteractionContext, InteractionResponse, UserInteractionBroker};
+    use peri_agent::interaction::{
+        InteractionContext, InteractionResponse, TrustedInteractionOwner, UserInteractionBroker,
+    };
 
     /// 声明测试不触发交互——request 永不调用。
     struct NoopBroker;
     #[async_trait::async_trait]
     impl UserInteractionBroker for NoopBroker {
-        async fn request(&self, _ctx: InteractionContext) -> InteractionResponse {
+        async fn request(
+            &self,
+            _owner: TrustedInteractionOwner,
+            _ctx: InteractionContext,
+        ) -> InteractionResponse {
             unreachable!("声明测试不触发用户交互")
         }
     }

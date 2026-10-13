@@ -33,6 +33,8 @@ pub mod attribution;
 pub mod default_system_prompt;
 pub mod hitl;
 pub mod hooks;
+/// 交互归属铸造规则（审批 / 提问共用的单一权威）。
+pub(crate) mod interaction_owner;
 pub mod mcp;
 pub mod middleware;
 pub mod permission;

@@ -224,6 +224,13 @@ impl HookMiddleware {
             });
         };
 
+        // 归属缺失（无 canonical session / turn 事实）⇒ 显式拒绝，不伪造归属。
+        let Some(owner) = crate::interaction_owner::owner_from_hook_state(state) else {
+            return Err(crate::interaction_owner::untrusted_owner_error(
+                &tool_call.name,
+            ));
+        };
+
         let ctx = InteractionContext::Approval {
             items: vec![ApprovalItem {
                 tool_call_id: tool_call.id.clone(),
@@ -231,21 +238,34 @@ impl HookMiddleware {
                 tool_input: tool_call.input.clone(),
             }],
         };
-        let response = match peri_time::timeout(self.broker_timeout, broker.request(ctx)).await {
-            Ok(response) => response,
-            Err(_) => {
-                return Err(AgentError::ToolRejected {
-                    tool: tool_call.name.clone(),
-                    reason: HOOK_ASK_TIMEOUT_REASON.to_string(),
-                });
-            }
-        };
+        let response =
+            match peri_time::timeout(self.broker_timeout, broker.request(owner, ctx)).await {
+                Ok(response) => response,
+                Err(_) => {
+                    return Err(AgentError::ToolRejected {
+                        tool: tool_call.name.clone(),
+                        reason: HOOK_ASK_TIMEOUT_REASON.to_string(),
+                    });
+                }
+            };
         let decision = match response {
             InteractionResponse::Decisions(mut decisions) => {
                 decisions.pop().unwrap_or_else(|| ApprovalDecision::Reject {
                     reason: "用户拒绝".to_string(),
                     source: None,
                 })
+            }
+            // 无人可作答（含「本部署没有在线 endpoint」）：按未获批准处理，
+            // 如实转述原因，不伪造「用户拒绝」；原因同时写进 outcome 记录面
+            //（裁决 R9：outcome 记录层必须可区分「无人可答」与「用户拒绝」）。
+            InteractionResponse::Unanswered { cause } => {
+                if let Some(sink) = state.approval_unavailable_sink() {
+                    sink.record(cause);
+                }
+                ApprovalDecision::Reject {
+                    reason: cause.reason_text().to_string(),
+                    source: None,
+                }
             }
             _ => ApprovalDecision::Reject {
                 reason: "用户拒绝".to_string(),

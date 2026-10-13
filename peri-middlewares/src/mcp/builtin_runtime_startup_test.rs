@@ -605,11 +605,16 @@ async fn closing_web_keeps_artifact_capability_and_real_call() {
     let invocation_fixture =
         invocation_fixture::InvocationFixture::new(bridge.name(), std::slice::from_ref(&input))
             .await;
-    let error = bridge
-        .invoke(input, invocation_fixture.context(0))
+    let output = bridge
+        .invoke_output(input, invocation_fixture.context(0))
         .await
-        .expect_err("不存在的文件必须在建立网络请求之前失败");
-    let message = error.to_string();
+        .expect("缺失文件是工具结果层的失败（线路 error 结果不再是协议错误）");
+    assert_eq!(
+        output.is_error(),
+        Some(true),
+        "缺失文件必须作为 is_error 事实浮出"
+    );
+    let message = output.text;
     assert!(
         message.contains("File not found:"),
         "结果必须保留真实的缺失文件诊断，实际: {message}"

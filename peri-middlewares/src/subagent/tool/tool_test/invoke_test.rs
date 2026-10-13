@@ -558,8 +558,8 @@ async fn test_agent_invoke_parent_host_masks_fallback_runtime_and_store() {
         .with_parent_thread_id(parent_id.clone())
         .with_parent_session(parent);
     let mut ctx = peri_agent::tools::ToolContext::new(&[], &cwd);
-    ctx.invocation_id = Some(invocation_id.to_string());
-    ctx.tool_call_id = Some(invocation_id.to_string());
+    ctx.invocation_id = Some(invocation_id.to_string().into());
+    ctx.tool_call_id = Some(invocation_id.to_string().into());
     let result = tool.invoke(
         serde_json::json!({"fork": true, "run_in_background": true, "prompt": "sync fallback", "cwd": cwd.clone()}),
         ctx,

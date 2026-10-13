@@ -193,8 +193,8 @@ impl HostFixture {
         tool_call_id: String,
     ) -> peri_agent::tools::ToolContext<'a> {
         let mut ctx = peri_agent::tools::ToolContext::new(messages, &self.cwd);
-        ctx.invocation_id = Some(tool_call_id.clone());
-        ctx.tool_call_id = Some(tool_call_id);
+        ctx.invocation_id = Some(tool_call_id.clone().into());
+        ctx.tool_call_id = Some(tool_call_id.into());
         ctx
     }
 
