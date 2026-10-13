@@ -46,6 +46,28 @@ fn attach_image_stores_base64_payload_without_reencoding() {
     state.write().clear();
 }
 
+/// 远端/无显示环境下读不到本机剪贴板要引导终端原生粘贴；本机静默、已通知过的不叠加。
+#[test]
+fn terminal_paste_hint_covers_remote_only() {
+    assert_eq!(
+        terminal_paste_hint(PasteOutcome::Unavailable, false),
+        Some("paste-terminal-hint")
+    );
+    assert_eq!(terminal_paste_hint(PasteOutcome::Unavailable, true), None);
+    assert_eq!(terminal_paste_hint(PasteOutcome::Pasted, false), None);
+    assert_eq!(terminal_paste_hint(PasteOutcome::Notified, false), None);
+}
+
+/// 引导文案两种语言都落地，且说清用终端自己的粘贴键。
+#[test]
+fn terminal_paste_hint_key_is_localized() {
+    for lang in ["en", "zh-CN"] {
+        let hint = crate::i18n::LcRegistry::new(Some(lang)).tr("paste-terminal-hint");
+        assert_ne!(hint, "paste-terminal-hint", "{lang} 缺少文案");
+        assert!(hint.contains("Cmd+V"), "{lang}: {hint}");
+    }
+}
+
 #[cfg(target_os = "macos")]
 mod macos {
     use super::*;

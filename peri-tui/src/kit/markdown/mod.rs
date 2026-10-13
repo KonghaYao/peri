@@ -10,7 +10,7 @@
 //! - `types`：MarkdownSegment, TableData
 //! - `span_style`：apply_span_styles, span_semantic_style
 //! - `heading`：heading_line（不渲染 # 前缀）
-//! - `list`：list_item_line
+//! - `list`：list_item_line、list_item_gap（列表项间空行范围）
 //! - `code_block`：highlight_code_block, code_block_lines, syntect 单例
 //! - `table`：compute_table_col_widths（最长不可断词约束）、table_data_to_lines
 //!   （智能断词换行 + unicode 网格线渲染）
@@ -550,6 +550,10 @@ pub fn parse_markdown_cached(
 #[cfg(test)]
 #[path = "mod_test.rs"]
 mod tests;
+
+#[cfg(test)]
+#[path = "list_test.rs"]
+mod list_tests;
 
 #[cfg(test)]
 #[path = "cache_test.rs"]

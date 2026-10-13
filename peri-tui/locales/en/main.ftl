@@ -781,6 +781,7 @@ setup-welcome = Welcome to Peri TUI
 paste-truncated = Paste truncated to { $max } characters
 paste-in-progress = Clipboard paste in progress, please wait
 paste-image-failed = Could not paste image: invalid PNG or over 20 MiB
+paste-terminal-hint = Cannot read this machine's clipboard here — paste with your terminal (Cmd+V / Ctrl+Shift+V)
 submit-blocked = Request in progress, try again later
 export-success = Exported messages to: { $path }
 export-fail = Failed to export messages: { $error }

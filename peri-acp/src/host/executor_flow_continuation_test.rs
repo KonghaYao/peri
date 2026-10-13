@@ -413,8 +413,16 @@ async fn test_continuation_skips_empty_prompt_push() {
 
     // Act 2：keepgoing（continuation=false，同为空 content）——对比组
     let mut ctx2 = make_session_context(session_id).await;
+    // `make_session_context` 的默认占用者（MockSessionAccess）持有本上下文 store 所在
+    // 的临时目录：接管 session_access 时保留它，否则临时目录随 mock 析构被删除，
+    // 让 v2 执行前的 snapshot 读取落在已删除的库文件上（读取报错即在 Phase 6 之前
+    // 早退，空 Prompt 不入队）。
+    let _fixture_access = ctx2.session_access.take();
     ctx2.session_access =
         Some(Arc::new(sm.clone()) as Arc<dyn peri_acp_types::session::SessionAccessPort>);
+    // 与 `make_session_context_with_manager` 同一接管步：mailbox 挂到会话自己的
+    // inbox（生产装配下两者恒为同一 queue），而不是 mock 的 inbox。
+    execution_fixture::initialize_runtime(&mut ctx2, None);
     ctx2.cancel.cancel();
     let stage_build2 = make_stage_build(&ctx2);
     let turn2 = make_turn_input(
@@ -425,6 +433,18 @@ async fn test_continuation_skips_empty_prompt_push() {
         stage_build2,
     );
     let result2 = run_session_loop(ctx2, turn2).await;
+
+    // 前置不变量：空 Prompt 入队在 v2 执行的 Phase 6，早于它的 snapshot 读取或
+    // stage 装配一旦失败就带着 failure 直接返回（不入队）。先把这条报出来，避免
+    // 夹具环境故障被读成「唤醒信号丢失」。
+    assert!(
+        result2.failure.is_none(),
+        "keepgoing 前置步骤失败，空 Prompt 不可能入队：{:?}",
+        result2
+            .failure
+            .as_ref()
+            .map(|failure| failure.public_message.clone())
+    );
 
     // Assert 2：keepgoing 必须 push 一条空 Prompt——这是唯一的唤醒信号
     // （Receive 消费计数 >0 才推进 Compact/Reason，ARC-KEEPGOING-001）。
