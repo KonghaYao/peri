@@ -25,6 +25,8 @@
 | 关闭与写入结清 | `src/sessions/resources.rs` + `resources/{gate,deployment}.rs` + `data.rs` + `sqlite_store/session_data.rs` + `remote/session_close.rs` | `finish_close` / `close_settlement` / `drain_persistence`；关闭意图与 pending/uncertain 写入仍参与结清，门面按 session root 排空在途写入，不是执行所有权闸门。关闭成功清除 intent；丢响应按持久化事实回读，不比较执行 token。 |
 | schema 清理与远端升级 | `src/sessions/schema_shape.rs` + `src/sessions/schema_cleanup.rs` + `sqlite_store/schema_cleanup.rs` + `remote/schema_upgrade.rs` | `removal_plan`、`check_current_shape`/`check_input_shape`/`dropped_plan`、`RemoteStore::apply_schema_upgrade`；本机在升级事务内按共用声明校验输入形状与待删对象、再删除，远端打开时（只读）用同一份声明探测会话表形状、写打开再在托管批中守卫完整 schema 快照与旧版本，删除和版本推进同提交；仅已识别的 v2 契约（schema 10|11）写打开升级，只读不写，响应丢失/不完整按未决失败；新形状保留 `config`，不再有缓存字段/接口；同名异形目标或外部依赖拒绝，身份/账本/消息 rowid 不变；实库远端发布验收见 active issue |
 
+| 远端当前会话表形状探测 | `src/sessions/remote/session_open.rs` + `remote/schema.rs` | `probe_shape`、`CURRENT_TABLE_PRAGMAS` | 按 canonical 八张表逐条执行只读 `PRAGMA table_xinfo` 并比对列形状；避免远端不支持的 `pragma_table_xinfo(...)` 表值函数；旧契约仍走原有探测路径。 |
+
 ### OAuth 凭证路由（实现完成）
 
 - 契约类型归 `peri-acp-types/src/oauth_credentials.rs`，本地/远端 provider 已在 Resources 落地；凭证表以 `(principal_id, workspace_id, server_key)` 为键，旧机器级凭证在迁移事务中清理；生命周期适配见 `src/sessions/resources/oauth_credentials.rs`。验收见存储 v2 active issue。

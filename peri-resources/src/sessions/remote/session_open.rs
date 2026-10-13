@@ -78,9 +78,9 @@ pub(in crate::sessions::remote) fn open_step(
     }
 }
 
-/// 形状探测（只读、单条 SELECT）：契约与版本决定探哪一份声明（[`schema::shape_probe`]）。
+/// 形状探测（只读）：契约与版本决定探哪一份声明（[`schema::shape_probe`]）。
 ///
-/// 只发 SELECT——探测不写、不建表，也不改任何行；探测结果只服务本次打开的判定，**不是迁移
+/// 只发 SELECT 或 PRAGMA table_xinfo——探测不写、不建表，也不改任何行；探测结果只服务本次打开的判定，**不是迁移
 /// 依据**：写打开的迁移批次自己再读一次形状并在批内守着它（见 `schema_upgrade`）。
 /// 本构建不读的库（契约/版本不认识，或元数据本身读不出身份）没有可探的形状，返回 `None`——
 /// 那一面的拒绝由身份读取单独给出。
@@ -94,7 +94,31 @@ pub(in crate::sessions::remote) async fn probe_shape(
     let Some(probe) = schema::shape_probe(snapshot) else {
         return Ok(None);
     };
-    let rows = store.fetch_rows(&StatementSpec::bare(probe.sql())).await?;
+    let rows = if probe == schema::ShapeProbe::Current {
+        let mut columns = Vec::new();
+        for &(table, sql) in schema::CURRENT_TABLE_PRAGMAS {
+            let rows = store.fetch_rows(&StatementSpec::bare(sql)).await?;
+            for (index, row) in rows.into_iter().enumerate() {
+                if row.len() != 7
+                    || int_at(&row, 0) != Some(index as i64)
+                    || int_at(&row, 6) != Some(0)
+                {
+                    return Err(incomplete_reply(
+                        "session shape pragma returned invalid columns",
+                    ));
+                }
+                columns.push(vec![
+                    Value::Text(table.to_owned()),
+                    row[1].clone(),
+                    row[3].clone(),
+                    row[5].clone(),
+                ]);
+            }
+        }
+        columns
+    } else {
+        store.fetch_rows(&StatementSpec::bare(probe.sql())).await?
+    };
     Ok(Some(probe.check(&schema::decode_column_map(&rows)?)))
 }
 
