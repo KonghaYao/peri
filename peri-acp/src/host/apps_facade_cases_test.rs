@@ -899,3 +899,49 @@ async fn legacy_aliases_round_trip_json_rpc_id_and_attachment_identity() {
     );
     fixture.shutdown().await;
 }
+
+/// [4b 批 H] `REQUEST_WAIT_TIMEOUT_MS`（`apps/request` 同 key 有界等待的上限）：
+/// 到期**如实返回 `Pending`**（软上限——不谎报终态、不取消已 dispatch 的执行）。
+///
+/// 时钟用 `tokio::time::pause()` 推进（`peri-acp/src/host/activation_test.rs:211-212`
+/// 同法）：等待走的是 `tokio::time::timeout_at`，不暂停时钟就只能真等 30 s。
+#[tokio::test]
+async fn request_wait_times_out_into_pending_at_the_contract_bound() {
+    let gate = Arc::new(tokio::sync::Notify::new());
+    let transport = FrameTransport::with_choice("allow_once");
+    let mut fixture = Fixture::with_gate(Arc::clone(&transport), Some(Arc::clone(&gate))).await;
+    let app_id = fixture.instantiate(APP_TOOL, json!({"value": 1})).await;
+    let attached = fixture.attach("conn-1", &app_id, "view-1").await;
+    let binding = attached.attachment.clone();
+    fixture.wait_for_calls(1).await;
+
+    // 第 2 次 wire 调用（App 回调）被 gate 卡住：执行在飞 ⇒ 等待必然到期。
+    tokio::time::pause();
+    let waited = fixture
+        .request_wait(
+            "conn-1",
+            &binding,
+            1,
+            Fixture::tools_call(APP_TOOL, json!({"value": 2})),
+        )
+        .await;
+    assert_eq!(
+        waited.outcome,
+        Some(AppsRequestOutcome::Pending),
+        "等待到期必须如实返回 `Pending`（不得把超时谎报成终态，也不得报错）"
+    );
+
+    // 超时不取消执行：放行 gate 后结果照常收尾（事实不被改写）。
+    fixture.wait_for_calls(2).await;
+    gate.notify_waiters();
+    let outcome = fixture.wait_for_terminal_outcome().await;
+    assert!(
+        matches!(outcome, SessionInvocationOutcome::Completed(_)),
+        "等待超时不得取消已 dispatch 的执行，实际: {outcome:?}"
+    );
+    assert_eq!(
+        fixture.completed_text(&AppsRequestOutcome::ToolsCall(outcome)),
+        "canvas ready"
+    );
+    fixture.shutdown().await;
+}
