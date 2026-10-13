@@ -333,7 +333,7 @@ cargo test -p <crate> --test <target>
 cargo test -p <crate> --test <target> -- --test-threads=1
 
 # pre-commit（不含测试）
-lefthook run pre-commit    # fmt + check + clippy + typos
+lefthook run pre-commit    # fmt + check + clippy + layer-imports
 ```
 
 ### 8.2 Peri TUI E2E（分层门禁）
