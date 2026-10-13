@@ -58,7 +58,8 @@ use peri_agent::{
         stages::{tool_dispatch::dispatch_tools, SharedToolMap, StageContext},
     },
     interaction::{
-        ApprovalDecision, InteractionContext, InteractionResponse, UserInteractionBroker,
+        ApprovalDecision, InteractionContext, InteractionResponse, TrustedInteractionOwner,
+        UserInteractionBroker,
     },
     middleware::{capabilities as hook_state, r#trait::Middleware, MiddlewareChain},
     session::{tool_catalog::SessionToolCatalog, FrozenContext, Session},
@@ -328,7 +329,11 @@ impl RecordingBroker {
 
 #[async_trait]
 impl UserInteractionBroker for RecordingBroker {
-    async fn request(&self, ctx: InteractionContext) -> InteractionResponse {
+    async fn request(
+        &self,
+        _owner: TrustedInteractionOwner,
+        ctx: InteractionContext,
+    ) -> InteractionResponse {
         let InteractionContext::Approval { items } = ctx else {
             return InteractionResponse::Rejected;
         };
@@ -395,6 +400,20 @@ fn make_context(
     peri_agent::agent::events_v2::EventHandles,
     Arc<SessionToolCatalog>,
 ) {
+    make_context_with_session(Some(FIXTURE_SESSION), tools, chain)
+}
+
+/// [`make_context`] 的会话身份可缺省形态：`session_id = None` 表示本次执行
+/// **没有真实 ACP 会话身份**（如子 agent 自建 session），用于证明交互 fail-closed。
+fn make_context_with_session(
+    session_id: Option<&str>,
+    tools: BTreeMap<String, Arc<dyn BaseTool>>,
+    chain: MiddlewareChain,
+) -> (
+    StageContext,
+    peri_agent::agent::events_v2::EventHandles,
+    Arc<SessionToolCatalog>,
+) {
     let session = Session::new(
         Arc::from("/tmp/mcp-host-policy"),
         FrozenContext::builder().build(),
@@ -414,11 +433,13 @@ fn make_context(
         .with_middleware_chain(Arc::new(chain))
         .with_event_bus(Arc::new(event_bus))
         .build();
-    context
-        .session
-        .session_context
-        .write()
-        .insert("session_id".into(), FIXTURE_SESSION.into());
+    if let Some(session_id) = session_id {
+        context
+            .session
+            .session_context
+            .write()
+            .insert("session_id".into(), session_id.into());
+    }
     (context, handles, catalog)
 }
 
@@ -664,6 +685,67 @@ async fn hitl_rejection_never_reaches_the_mcp_server() {
     assert!(
         fixture.log.calls().is_empty(),
         "被拒绝的调用不得触发任何真实 MCP tools/call，实际收到 {:?}",
+        fixture.log.calls()
+    );
+}
+
+/// [回归] **缺少真实会话身份**（如子 agent 自建 session）的 canonical 执行：
+/// 审批归属铸造不出可信事实，因此必须显式拒绝——不静默放行、不用 agent_id 之类
+/// 非会话身份冒充归属、不触发任何 broker 交互、不得到达 MCP wire。
+///
+/// 假身份（`session_id = agent_id`）曾让这条路径「成功地」弹窗审批，使
+/// `untrusted_owner_error` 成为死分支（设计 §4.3 fail-closed）。
+#[tokio::test]
+async fn missing_session_identity_is_fail_closed_and_never_reaches_the_wire() {
+    let fixture = spawn_fixture(false).await;
+    let bridge = fixture.bridge(REQUIRED_TOOL);
+    let effective = effective_name(REQUIRED_TOOL);
+
+    let broker = RecordingBroker::new(true);
+    let chain_seen = Arc::new(Mutex::new(Vec::new()));
+    // broker 恒批准：若归属被伪造出来，本用例会以 Ok 通过——断言因此有判别力。
+    let chain = approval_chain(broker.clone(), Arc::clone(&chain_seen));
+    let tools = bridge_tools(std::slice::from_ref(&bridge));
+    let (context, _events, _catalog) = make_context_with_session(None, tools, chain);
+    let reasoning = Reasoning::with_tools(
+        "",
+        vec![ToolCall::new(
+            "call-unowned",
+            effective.clone(),
+            json!({"note": "no session identity"}),
+        )],
+    );
+
+    let outcome = dispatch_tools(
+        &context,
+        &reasoning,
+        &context.runtime.tool_catalog.snapshot(),
+        &CancellationToken::new(),
+    )
+    .await
+    .expect("无归属的调用应被结算为失败结果，而不是致命错误");
+
+    assert!(
+        broker.seen().is_empty(),
+        "无归属不得触发任何审批交互，实际: {:?}",
+        broker.seen()
+    );
+    let (_, result) = &outcome.results[0];
+    assert!(result.is_error, "无归属必须显式失败，不得静默放行");
+    assert_eq!(result.tool_name, effective);
+    assert!(
+        result.output.contains("缺少可信归属"),
+        "失败原因必须可诊断（含无归属说明），实际: {}",
+        result.output
+    );
+    assert!(
+        !result.output.contains("用户拒绝"),
+        "无归属不是用户拒绝，不得伪装：{}",
+        result.output
+    );
+    assert!(
+        fixture.log.calls().is_empty(),
+        "无归属的调用不得触发任何真实 MCP tools/call，实际收到 {:?}",
         fixture.log.calls()
     );
 }

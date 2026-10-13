@@ -461,6 +461,7 @@ struct RejectingBroker;
 impl peri_agent::interaction::UserInteractionBroker for RejectingBroker {
     async fn request(
         &self,
+        _owner: peri_agent::interaction::TrustedInteractionOwner,
         context: peri_agent::interaction::InteractionContext,
     ) -> peri_agent::interaction::InteractionResponse {
         let peri_agent::interaction::InteractionContext::Approval { items } = context else {

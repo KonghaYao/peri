@@ -39,11 +39,15 @@ async fn test_broker_approval_flow() {
     };
     use peri_agent::interaction::{
         ApprovalDecision, ApprovalItem, InteractionContext, InteractionResponse,
-        UserInteractionBroker,
+        TrustedInteractionOwner, UserInteractionBroker,
     };
 
     let (client, server) = mpsc_transport_pair();
-    let broker = AcpTransportBroker::new(Arc::new(server), SessionId::new("test-session"));
+    let broker = AcpTransportBroker::new(
+        Arc::new(server),
+        SessionId::new("test-session"),
+        Arc::new(tokio::sync::Mutex::new(())),
+    );
 
     // Server side: respond to RequestPermission with approve
     let server_handle = tokio::spawn(async move {
@@ -64,7 +68,14 @@ async fn test_broker_approval_flow() {
             tool_input: json!("ls -la"),
         }],
     };
-    let response = broker.request(ctx).await;
+    let owner = TrustedInteractionOwner::model(
+        "test-session",
+        peri_acp_types::session::ExecutionBinding {
+            turn_id: peri_acp_types::session::TurnId::new(),
+            attempt_id: peri_acp_types::identity::AttemptId::new(),
+        },
+    );
+    let response = broker.request(owner, ctx).await;
     assert!(matches!(response, InteractionResponse::Decisions(decisions)
             if decisions.len() == 1 && matches!(decisions[0], ApprovalDecision::Approve { .. })));
 

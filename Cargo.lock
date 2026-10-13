@@ -3391,6 +3391,7 @@ dependencies = [
  "peri-resources",
  "peri-time",
  "peri-workflow",
+ "rmcp",
  "serde",
  "serde_json",
  "serial_test",
