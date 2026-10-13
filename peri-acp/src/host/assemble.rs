@@ -938,6 +938,9 @@ pub(crate) async fn assemble_server_config_with_mcp_profile(
         mcp_apps_relay,
         // 会话级 facade 由会话环境装配点构造（本函数只做部署级装配）。
         mcp_apps_facade: None,
+        // 部署级 entitlement 身份层：本仓装配**不注入**（裁决 R4 方案 b）⇒ `apps/*`
+        // 默认拒绝。SDK / 服务化部署在拿到本返回值后设置该字段即完成注入（字段 pub）。
+        session_authorization: None,
         acp_mcp,
         dynamic_mcp: Some(dynamic_mcp),
         oauth_event_tx: Some(oauth_event_tx),

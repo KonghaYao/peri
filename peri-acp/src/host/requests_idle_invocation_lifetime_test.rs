@@ -38,6 +38,9 @@ async fn idle_lifetime_server_config(
         make_peri_config_with_provider(make_provider_config("test", "openai", "key", "model"));
     let provider = LlmProvider::from_config(&config).unwrap();
     let mut cfg = make_server_config(config, provider, tmp).await;
+    // 生产 stdio 装配**不注入** entitlement 身份层 ⇒ `apps/*` 默认拒绝（R4 方案 b）；
+    // 本用例走生产装配链路验证 apps 面，故注入「部署侧已接入身份层」的测试端口。
+    cfg.session_authorization = crate::host::apps_facade::entitlement::test_support::allow_all();
     cfg.workspace_assembly = Some(crate::host::assemble::WorkspaceAssembly {
         startup_cwd,
         bare: true,

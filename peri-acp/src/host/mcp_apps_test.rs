@@ -243,6 +243,8 @@ impl TestFacade {
             relay,
             Arc::new(StubInvocation) as Arc<dyn peri_acp_types::mcp_apps::SessionInvocationPort>,
             spawner,
+            // 生产 stdio 装配不注入身份层（默认拒绝）；夹具模拟「部署侧已接入身份层」。
+            crate::host::apps_facade::entitlement::test_support::allow_all(),
         ));
         Self {
             facade,

@@ -22,16 +22,19 @@
 //! 未执行**；不伪造 turn、不自动批准、不静默降级。「未获批准」与「用户拒绝」由
 //! service 的 typed outcome 区分，本层不改写它的结论。
 //!
-//! entitlement（`SessionAuthorizationPort`）在 4a **不被消费**：本层与能力声明都
-//! **不得**声称已强制（`EntitlementState::Unenforced` 保持，§8.2）。
+//! entitlement（`SessionAuthorizationPort`）在本层**按能力强制**（R4，方案 b）：六个受控
+//! 方法先定位（会话 / 在线 endpoint）再问授权，`grant` + `covers` 任一不成立即拒绝
+//! （`EntitlementDenied`）。本仓 stdio 装配**不注入**端口 ⇒ 该面默认拒绝，这是既定
+//! 代价（见 `implementation-log.md` 的「已知缺口与移除条件」）。`EntitlementState::Unenforced`
+//! 描述的是 record 层（签发点早于任何 App 回调），与本层已强制不矛盾（§8.2）。
 
 use std::collections::HashMap;
 use std::sync::Arc;
 
 use peri_acp_types::interaction::{AttachmentId, ConnectionEpoch};
 use peri_acp_types::mcp_apps::{
-    InvocationTarget, McpAppsErrorKind, McpAppsRelayPort, NotExecutedCause,
-    SessionInvocationOutcome, SessionInvocationPort, SessionInvocationRequest,
+    InvocationTarget, McpAppsErrorKind, McpAppsRelayPort, SessionInvocationOutcome,
+    SessionInvocationPort, SessionInvocationRequest,
 };
 use peri_acp_types::mcp_apps_facade::{
     AppAttachRequest, AppAttachSnapshot, AppsAttachRequest, AppsAttachResponse, AppsCancelRequest,
@@ -41,18 +44,21 @@ use peri_acp_types::mcp_apps_facade::{
     DetachVerdict, HostNamespace, McpAppsFeatures, McpAppsLimits, RequestNamespaceId, RequestSeq,
     RequestVerdict, ResourceListRequest, ResourceReadRequest, REQUEST_WAIT_TIMEOUT_MS,
 };
+use peri_acp_types::session_authorization::{SessionAuthorizationPort, SessionCapability};
 use peri_acp_types::tool_invocation::InvocationOrigin;
 use serde_json::Value;
 
 use super::apps_ledger::{
-    not_executed_before_commit, AdmissionVerdict, LedgerBudget, NamespaceKind, NamespaceOpenError,
-    PendingRequest, RequestCancelReason, RequestFingerprint, RequestLedger, RequestOperation,
+    AdmissionVerdict, LedgerBudget, NamespaceKind, NamespaceOpenError, PendingRequest,
+    RequestCancelReason, RequestFingerprint, RequestLedger, RequestOperation,
 };
 use super::interaction_router::{
     AttachRejection, DetachVerdict as RouterDetachVerdict, SessionAttachment,
     SessionInteractionRouter, ViewAttachRequest,
 };
 use crate::transport::types::AcpError;
+use entitlement::SessionEntitlementGate;
+use projection::{admission_verdict, not_executed_outcome, resource_failure, unexecuted_response};
 
 /// MCP Apps 请求的 ACP 错误构造（kind 稳定：客户端按键区分，不得一 kind 多事实）。
 pub(crate) fn apps_error(kind: McpAppsErrorKind) -> AcpError {
@@ -118,6 +124,8 @@ pub(crate) struct SessionAppsFacade {
     /// `apps/list` / `apps/attach` 下发；连接 retire 即销毁（不得复用已销毁的域）。
     host_namespaces: parking_lot::Mutex<HashMap<String, RequestNamespaceId>>,
     spawner: super::task_scope::HostTaskSpawner,
+    /// entitlement 门（未注入身份层 / 未授权一律拒绝；R4）。
+    entitlement: SessionEntitlementGate,
 }
 
 impl SessionAppsFacade {
@@ -128,9 +136,13 @@ impl SessionAppsFacade {
         relay: Arc<dyn McpAppsRelayPort>,
         invocation: Arc<dyn SessionInvocationPort>,
         spawner: super::task_scope::HostTaskSpawner,
+        // 部署级 entitlement 身份层（`None` = 未注入 ⇒ 六个受控方法一律拒绝）。
+        session_authorization: Option<Arc<dyn SessionAuthorizationPort>>,
     ) -> Self {
+        let session_id = session_id.into();
         Self {
-            session_id: session_id.into(),
+            entitlement: SessionEntitlementGate::new(session_id.clone(), session_authorization),
+            session_id,
             runtime_epoch,
             router,
             relay,
@@ -294,6 +306,8 @@ impl SessionAppsFacade {
     ) -> Result<AppsAttachResponse, AcpError> {
         self.ensure_session(&request.session_id)?;
         self.ensure_endpoint(conn)?;
+        self.entitlement
+            .ensure(conn, SessionCapability::AttachApps)?;
         let attachment = match request.reattach.as_ref() {
             Some(observed) => {
                 if observed.attachment_id != attachment_id {
@@ -380,6 +394,8 @@ impl SessionAppsFacade {
     ) -> Result<AppsRequestResponse, AcpError> {
         self.ensure_session(&request.session_id)?;
         self.ensure_endpoint(conn)?;
+        self.entitlement
+            .ensure(conn, SessionCapability::AppOperations)?;
         let attachment =
             self.attachment_for_request(&request.attachment_id, request.epoch, conn)?;
         let namespace = match self.namespace_for_attachment(&attachment) {
@@ -489,6 +505,8 @@ impl SessionAppsFacade {
     ) -> Result<AppsCancelResponse, AcpError> {
         self.ensure_session(&request.session_id)?;
         self.ensure_endpoint(conn)?;
+        self.entitlement
+            .ensure(conn, SessionCapability::ControlApps)?;
         let attachment =
             self.attachment_for_request(&request.attachment_id, request.epoch, conn)?;
         let verdict = self.ledger.cancel(
@@ -508,6 +526,8 @@ impl SessionAppsFacade {
     ) -> Result<AppsDetachResponse, AcpError> {
         self.ensure_session(&request.session_id)?;
         self.ensure_endpoint(conn)?;
+        self.entitlement
+            .ensure(conn, SessionCapability::ControlApps)?;
         let Some(attachment) = self.router.lookup(&request.attachment_id) else {
             return Ok(AppsDetachResponse {
                 verdict: DetachVerdict::UnknownAttachment,
@@ -552,6 +572,8 @@ impl SessionAppsFacade {
     ) -> Result<AppsCloseResponse, AcpError> {
         self.ensure_session(&request.session_id)?;
         self.ensure_endpoint(conn)?;
+        self.entitlement
+            .ensure(conn, SessionCapability::ControlApps)?;
         // 先取 router 侧附件（含 namespace 权威值），再终态撤销：撤销后无法反查。
         let attachments = self.router.attachments_for_app(&request.app_id);
         let outcome = self.relay.close_app(&self.session_id, &request.app_id);
@@ -589,6 +611,9 @@ impl SessionAppsFacade {
     ) -> Result<AppsRequestResponse, AcpError> {
         self.ensure_session(&request.session_id)?;
         self.ensure_endpoint(conn)?;
+        // rerun 最终也执行工具：与 `apps/request` 同一能力门（AppOperations）。
+        self.entitlement
+            .ensure(conn, SessionCapability::AppOperations)?;
         let namespace = self.host_namespace(conn)?;
         if namespace != request.host_namespace {
             // 只能用**本连接**的 Host 域（跨连接 / 陈旧域一律拒绝）。
@@ -928,52 +953,6 @@ impl SessionAppsFacade {
     }
 }
 
-fn admission_verdict(verdict: &AdmissionVerdict) -> RequestVerdict {
-    match verdict {
-        AdmissionVerdict::Accepted { .. } => RequestVerdict::Accepted,
-        AdmissionVerdict::JoinedPending { .. } => RequestVerdict::JoinedPending,
-        AdmissionVerdict::Duplicate { .. } => RequestVerdict::Duplicate,
-        AdmissionVerdict::Conflict => RequestVerdict::Conflict,
-        AdmissionVerdict::ResultExpired => RequestVerdict::ResultExpired,
-        AdmissionVerdict::SequenceGap { expected } => RequestVerdict::SequenceGap {
-            expected: *expected,
-        },
-        AdmissionVerdict::CapacityRejected => RequestVerdict::CapacityRejected,
-        AdmissionVerdict::UnknownNamespace => RequestVerdict::UnknownNamespace,
-    }
-}
-
-fn unexecuted_response(
-    verdict: RequestVerdict,
-    ledger: &RequestLedger,
-    namespace: Option<&RequestNamespaceId>,
-) -> AppsRequestResponse {
-    AppsRequestResponse {
-        verdict,
-        admitted: verdict.is_admitted(),
-        outcome: None,
-        next_seq: namespace
-            .map(|namespace| ledger.next_seq(namespace))
-            .unwrap_or_else(|| RequestSeq::new(1)),
-    }
-}
-
-fn not_executed_outcome() -> AppsRequestOutcome {
-    AppsRequestOutcome::ToolsCall(not_executed_before_commit())
-}
-
-/// 资源操作失败：显式未执行（4a 没有资源级的 `NotExecutedCause` 变体，也不新增；
-/// 失败发生在任何 wire 调用之前，绝不呈现为成功）。
-fn resource_failure(kind: McpAppsErrorKind) -> AppsRequestOutcome {
-    tracing::debug!(
-        kind = kind.as_str(),
-        "MCP Apps resource operation failed before any side effect"
-    );
-    AppsRequestOutcome::ToolsCall(SessionInvocationOutcome::NotExecuted {
-        cause: NotExecutedCause::TargetRevoked,
-    })
-}
-
 fn map_attach_rejection(rejection: AttachRejection) -> AcpError {
     match rejection {
         AttachRejection::EndpointUnavailable => apps_error(McpAppsErrorKind::InvalidSession),
@@ -985,6 +964,14 @@ fn map_attach_rejection(rejection: AttachRejection) -> AcpError {
 
 #[path = "apps_facade_alias.rs"]
 mod alias;
+
+/// 结果投影（准入判决 / 未执行 / 资源失败 → 响应形状）：从本文件拆出（`STD-SIZE-001`）。
+#[path = "apps_projection.rs"]
+mod projection;
+
+/// entitlement 门（R4 消费点）：本文件的子模块，可访问私有字段而不放宽可见性。
+#[path = "apps_facade_entitlement.rs"]
+pub(super) mod entitlement;
 
 #[cfg(test)]
 #[path = "apps_facade_test.rs"]

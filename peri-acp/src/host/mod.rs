@@ -223,6 +223,18 @@ pub struct AcpServerConfig {
     /// 构造（同一 router / 同一 runtime epoch）；apps 能力关闭或未装配会话环境时
     /// 为 `None` ⇒ 请求显式拒绝（fail-closed，不静默降级）。
     pub(crate) mcp_apps_facade: Option<Arc<apps_facade::SessionAppsFacade>>,
+    /// session entitlement 消费端口（裁决 R4 方案 b：**只接线不注入**）。
+    ///
+    /// **部署级字段**：由 SDK / 服务化部署的装配层注入可信身份层实现；本仓 stdio
+    /// 装配（`assemble_stdio_config` 等）恒为 `None`，会话环境装配把它原样传给
+    /// facade 的 entitlement 门 ⇒ `apps/*` 六个受控方法按契约**默认拒绝**
+    /// （`entitlement_denied`）。本地部署的 Apps 面因此不可用，这是既定代价
+    /// （`implementation-log.md`「已知缺口与移除条件」）。
+    ///
+    /// 与 `peri_acp_types::session::SessionAccessPort` **不得互相替代**：它回答
+    /// 「这个调用者是否有这个 session 的这项授权」，不是「按 id 取得到哪个对象」。
+    pub session_authorization:
+        Option<Arc<dyn peri_acp_types::session_authorization::SessionAuthorizationPort>>,
     pub dynamic_mcp: Option<Arc<dyn peri_acp_types::ports::DynamicMcpDeploymentPort>>,
     /// OAuth 授权事件通道（host 级，跨 session）：装配点创建 (tx, rx) 并注入
     /// tx（MCP 授权回调经此转发 AcpEvent），run_acp_server take rx 后 spawn

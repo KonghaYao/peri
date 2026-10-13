@@ -1,6 +1,7 @@
 //! `apps/*` 第二组用例（A2–A13 的其余行）。夹具在 `apps_facade_test.rs` 同模块树。
 
 use super::*;
+use peri_acp_types::mcp_apps::NotExecutedCause;
 
 /// [A2/A12] `apps/close` 撤销交互资格，但**不取消**已 dispatch 的执行；
 /// close 之后同 key 复用不能绕过拒绝（D9 附加）。
@@ -265,8 +266,14 @@ async fn two_sessions_two_connections_do_not_cross_namespaces() {
     let first_transport = FrameTransport::with_choice("allow_once");
     let second_transport = FrameTransport::with_choice("allow_once");
     let mut first = Fixture::new(Arc::clone(&first_transport)).await;
-    let mut second =
-        Fixture::for_session("facade-session-b", Arc::clone(&second_transport), None, 1).await;
+    let mut second = Fixture::for_session(
+        "facade-session-b",
+        Arc::clone(&second_transport),
+        None,
+        1,
+        Fixture::deployment_authorization(),
+    )
+    .await;
 
     let first_app = first.instantiate(APP_TOOL, json!({"value": 1})).await;
     let first_attach = first.attach("conn-1", &first_app, "view-1").await;
@@ -525,8 +532,14 @@ async fn resources_read_and_list_use_bound_server_only() {
 async fn disconnect_after_dispatch_keeps_real_outcome_and_never_reexecutes() {
     let gate = Arc::new(tokio::sync::Notify::new());
     let transport = FrameTransport::with_choice("allow_once");
-    let mut fixture =
-        Fixture::for_session(SESSION, Arc::clone(&transport), Some(Arc::clone(&gate)), 2).await;
+    let mut fixture = Fixture::for_session(
+        SESSION,
+        Arc::clone(&transport),
+        Some(Arc::clone(&gate)),
+        2,
+        Fixture::deployment_authorization(),
+    )
+    .await;
     let app_id = fixture.instantiate(APP_TOOL, json!({"value": 1})).await;
     let attached = fixture.attach("conn-1", &app_id, "view-1").await;
     let binding = attached.attachment.clone();

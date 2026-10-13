@@ -24,6 +24,7 @@ use peri_acp_types::mcp_apps_facade::{
     DetachVerdict, McpAppsFeatures, McpAppsLimits, RequestVerdict,
 };
 use peri_acp_types::permission::{PermissionMode, SharedPermissionMode};
+use peri_acp_types::session_authorization::SessionAuthorizationPort;
 use peri_acp_types::tool_invocation::{InvocationId, InvocationOrigin};
 use peri_acp_types::tools::{EffectiveToolDefinition, EffectiveToolDispatcher, ToolContext};
 use peri_agent::session::factory::InvocationRuleChain;
@@ -354,16 +355,44 @@ impl Fixture {
         Self::with_gate(transport, None).await
     }
 
+    /// 夹具默认注入「部署侧身份层」：生产 stdio 装配**不注入** ⇒ `apps/*` 默认拒绝
+    /// （R4 方案 b 的既定代价）。默认拒绝的语义由 `entitlement_cases` 专门覆盖。
+    fn deployment_authorization() -> Option<Arc<dyn SessionAuthorizationPort>> {
+        super::entitlement::test_support::allow_all()
+    }
+
+    /// 门控用例：显式指定本部署是否注入身份层（`None` = 未注入）。
+    async fn with_authorization(
+        transport: Arc<FrameTransport>,
+        authorization: Option<Arc<dyn SessionAuthorizationPort>>,
+    ) -> Self {
+        Self::for_session(SESSION, transport, None, 1, authorization).await
+    }
+
     async fn with_gate(
         transport: Arc<FrameTransport>,
         gate: Option<Arc<tokio::sync::Notify>>,
     ) -> Self {
-        Self::for_session(SESSION, transport, gate, 1).await
+        Self::for_session(
+            SESSION,
+            transport,
+            gate,
+            1,
+            Self::deployment_authorization(),
+        )
+        .await
     }
 
     /// 两条在线连接（重挂接 / 连接替换场景）。
     async fn with_connections(transport: Arc<FrameTransport>, connections: usize) -> Self {
-        Self::for_session(SESSION, transport, None, connections).await
+        Self::for_session(
+            SESSION,
+            transport,
+            None,
+            connections,
+            Self::deployment_authorization(),
+        )
+        .await
     }
 
     /// `connections`：注册到 router 的在线连接数（`conn-1`、`conn-2`、…）。
@@ -372,6 +401,7 @@ impl Fixture {
         transport: Arc<FrameTransport>,
         gate: Option<Arc<tokio::sync::Notify>>,
         connections: usize,
+        authorization: Option<Arc<dyn SessionAuthorizationPort>>,
     ) -> Self {
         let calls = Arc::new(AtomicUsize::new(0));
         let tool_calls = Arc::new(StdMutex::new(Vec::new()));
@@ -444,6 +474,7 @@ impl Fixture {
             Arc::clone(&relay),
             Arc::clone(&service) as Arc<dyn peri_acp_types::mcp_apps::SessionInvocationPort>,
             spawner,
+            authorization,
         ));
         Self {
             session: session.to_string(),
@@ -855,3 +886,6 @@ fn assert_kind(error: &AcpError, expected: McpAppsErrorKind, context: &str) {
 mod attach_cases;
 #[path = "apps_facade_cases_test.rs"]
 mod cases;
+// entitlement 门控用例（R4）：与夹具同模块树，复用同一 `Fixture`。
+#[path = "apps_facade_entitlement_test.rs"]
+mod entitlement_cases;

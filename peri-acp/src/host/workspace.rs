@@ -580,6 +580,7 @@ impl SessionEnvironment {
                 Arc::clone(&relay),
                 invocation_port,
                 cfg.host_task_spawner.clone(),
+                host.session_authorization.clone(),
             )));
             cfg.mcp_apps_relay = Some(relay);
         }
