@@ -537,15 +537,17 @@ impl ServerLoop<'_> {
         }
         let setup_session_id = session_setup(&method, &params, result.as_ref().ok());
         // 会话级 endpoint 注册（审查中 3①）：**连接归属是会话，不是某一轮**。
-        // `session/new` / `session/load` / `session/resume` 建立会话后立刻把当前
-        // 连接登记为在线 endpoint，否则「会话创建后从未 prompt」的连接在调度触发
-        // 审批时不可达（弹窗退化为「未获批准」）。`session/restore` 不是本仓的 wire
-        // 名：恢复流程即 `session/load` + `session/resume`（`requests/session_restore.rs`）。
+        // `session/new` / `session/fork` / `session/load` / `session/resume` 建立会话后
+        // 立刻把当前连接登记为在线 endpoint，否则「会话建立后从未 prompt」的连接在调度
+        // 触发审批时不可达（弹窗退化为「未获批准」）。`session/fork` 同样派生**新**会话
+        // id（`session_setup`），漏掉它等于 fork 出来的会话没有在线 endpoint。
+        // `session/restore` 不是本仓的 wire 名：恢复流程即 `session/load` +
+        // `session/resume`（`requests/session_restore.rs`）。
         // 注册幂等（同一连接重复注册保留首次纪元），与 `spawn_prompt` 的注册点不冲突。
         if let Some(session_id) = setup_session_id.as_deref() {
             if matches!(
                 method.as_str(),
-                "session/new" | "session/load" | "session/resume"
+                "session/new" | "session/fork" | "session/load" | "session/resume"
             ) {
                 register_session_endpoint(
                     self.sessions,

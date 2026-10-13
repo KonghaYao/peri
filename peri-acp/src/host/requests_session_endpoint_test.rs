@@ -266,3 +266,109 @@ async fn session_without_loop_registration_is_not_deliverable() {
         "反证夹具不需要任何附件"
     );
 }
+
+/// `session/fork` 同样建立**新**会话（`session_setup` 认它并派生新 id）：fork 之后该
+/// 连接必须成为**新会话**的在线 endpoint，否则「fork 后从未 prompt」的连接在调度触发
+/// 审批时不可达——与 3① 同一缺陷形状，只是注册白名单漏了 fork。
+#[tokio::test]
+#[serial]
+async fn session_fork_registers_connection_endpoint_and_scheduled_approval_is_deliverable() {
+    let fixture = Fixture::new().await;
+    let source_id = fixture.id.clone();
+    let sessions: crate::host::SharedSessions = Arc::new(tokio::sync::Mutex::new(HashMap::new()));
+    let mut cfg = fixture.cfg;
+    // 运行期丢失：清空会话表后由真实 server loop 先 `session/load` 恢复源会话，
+    // 再 `session/fork` 派生新会话（fork 要求源会话已在运行期加载）。
+    cfg.workspace_assembly = Some(crate::host::assemble::WorkspaceAssembly {
+        startup_cwd: fixture.cwd.to_string_lossy().into_owned(),
+        bare: true,
+        drive_cron_tick: false,
+        mcp_profile: peri_middlewares::mcp::apps::McpCapabilityProfile::disabled(),
+        capabilities: Default::default(),
+    });
+    let cfg = Arc::new(cfg);
+    let transport = ScriptedTransport::new(vec![
+        (
+            RequestId::Number(1),
+            "initialize",
+            json!({"protocolVersion": 1, "clientCapabilities": {"_meta": {}}}),
+        ),
+        (
+            RequestId::Number(2),
+            "session/load",
+            json!({"sessionId": source_id}),
+        ),
+        (
+            RequestId::Number(3),
+            "session/fork",
+            json!({"sessionId": source_id}),
+        ),
+    ]);
+    let erased: Arc<dyn crate::transport::AcpTransport> =
+        Arc::clone(&transport) as Arc<dyn crate::transport::AcpTransport>;
+
+    let prompt_locks: crate::host::PromptLocks = Arc::new(tokio::sync::Mutex::new(HashMap::new()));
+    let (cont_tx, _cont_rx) = tokio::sync::mpsc::unbounded_channel();
+    let cont_tx = Arc::new(cont_tx);
+    let connection = Arc::new(tokio::sync::Mutex::new(
+        crate::host::connection::ConnectionContext::new(true),
+    ));
+    let cancellation = tokio_util::sync::CancellationToken::new();
+    crate::host::server_loop::ServerLoop {
+        transport: &erased,
+        cfg: &cfg,
+        sessions: &sessions,
+        prompt_locks: &prompt_locks,
+        cont_tx: &cont_tx,
+        connection: &connection,
+        connection_cancellation: &cancellation,
+    }
+    .run()
+    .await;
+
+    transport
+        .response(2)
+        .unwrap_or_else(|error| panic!("session/load 必须返回结果（真实 server loop）：{error}"));
+    let forked = transport
+        .response(3)
+        .unwrap_or_else(|error| panic!("session/fork 必须返回结果（真实 server loop）：{error}"));
+    let forked_id = forked["sessionId"]
+        .as_str()
+        .expect("session/fork 必须返回新会话 id")
+        .to_owned();
+    assert_ne!(forked_id, source_id, "fork 派生的是新会话");
+
+    let environment = {
+        let guard = sessions.lock().await;
+        let state = guard.get(&forked_id).unwrap_or_else(|| {
+            panic!(
+                "session/fork 必须登记新会话；现有键: {:?}",
+                guard.keys().collect::<Vec<_>>()
+            )
+        });
+        state.environment.clone().unwrap_or_else(|| {
+            panic!(
+                "session/fork 必须装配新会话环境（closing={}）",
+                state.closing
+            )
+        })
+    };
+    let response = environment
+        .interaction_router()
+        .request(scheduled_owner(), scheduled_approval())
+        .await;
+    assert!(
+        !matches!(response, InteractionResponse::Unanswered { .. }),
+        "fork 后调度触发的审批必须可达（端点注册是会话级的），实际: {response:?}"
+    );
+    let frames = transport.permission_frames();
+    assert_eq!(
+        frames.len(),
+        1,
+        "审批帧必须送达该连接（弹窗而不是「未获批准」）"
+    );
+    assert_eq!(
+        frames[0]["sessionId"], forked_id,
+        "审批帧必须携带 fork 出来的会话身份"
+    );
+}
