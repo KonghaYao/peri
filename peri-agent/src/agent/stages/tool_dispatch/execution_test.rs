@@ -1,8 +1,12 @@
 use super::*;
+use crate::agent::stages::{
+    ExecutionEntryOrigin, InvocationContext, SessionInvocationSource, StageContext,
+};
 use crate::messages::MessageContent;
 use crate::session::queue::MessageQueue;
 use crate::session::transcript::MessageTranscript;
 use crate::session::turn::TurnContext;
+use crate::tools::InvocationOrigin;
 
 #[test]
 fn completed_application_failure_retains_typed_error_without_unknown_classification() {
@@ -123,9 +127,18 @@ fn make_test_ctx() -> StageContext {
     StageContext::new(turn, transcript, queue)
 }
 
+/// 调用期上下文：模型批次入口（Act 侧投影的真实形状）。
+fn make_invocation(ctx: &StageContext) -> InvocationContext {
+    InvocationContext::from_stage(
+        ctx,
+        ExecutionEntryOrigin::ModelBatch,
+        ctx.session.turn.cancel_token.as_ref().clone(),
+    )
+}
+
 #[tokio::test]
 async fn same_name_calls_have_distinct_invocations_and_original_model_ids() {
-    type Identities = Arc<parking_lot::Mutex<Vec<(String, String, String)>>>;
+    type Identities = Arc<parking_lot::Mutex<Vec<(String, InvocationId, ToolCallId)>>>;
     struct IdentityProbe(Identities);
     #[async_trait::async_trait]
     impl BaseTool for IdentityProbe {
@@ -167,8 +180,13 @@ async fn same_name_calls_have_distinct_invocations_and_original_model_ids() {
         ("model-call-1".into(), tool.clone()),
         ("model-call-2".into(), tool),
     ]);
+    let invocation = make_invocation(&context);
+    let turn = invocation
+        .require_turn("test identity")
+        .expect("active turn");
     let output = dispatch_concurrent(
-        &context,
+        &invocation,
+        Some(turn),
         &calls,
         &HashMap::new(),
         &targets,
@@ -181,11 +199,13 @@ async fn same_name_calls_have_distinct_invocations_and_original_model_ids() {
     assert!(output.iter().all(Result::is_ok));
     let identities = captured.lock();
     assert_eq!(identities.len(), 2);
+    // 契约基线：同一批同名调用的 canonical 执行身份互异，
+    // 且模型 tool-call ID 原样保留，两个身份不得互相替代。
     assert_ne!(identities[0].1, identities[1].1);
     for (session, invocation, model_call) in identities.iter() {
         assert_eq!(session, "current-session");
-        assert_ne!(invocation, model_call);
-        assert!(uuid::Uuid::parse_str(invocation).is_ok());
+        assert_ne!(invocation.as_str(), model_call.as_str());
+        assert!(uuid::Uuid::parse_str(invocation.as_str()).is_ok());
     }
     let model_ids: std::collections::HashSet<_> = identities
         .iter()
@@ -220,8 +240,13 @@ async fn test_dispatch_concurrent_single_tool_succeeds() {
     );
     let raw_calls = HashMap::new();
     let catalog = ctx.runtime.tool_catalog.snapshot();
+    let invocation = make_invocation(&ctx);
+    let turn = invocation
+        .require_turn("test dispatch")
+        .expect("active turn");
     let results = dispatch_concurrent(
-        &ctx,
+        &invocation,
+        Some(turn),
         &ready_calls,
         &raw_calls,
         &target_tools,
@@ -260,8 +285,13 @@ async fn test_dispatch_concurrent_cancelled() {
     );
     let raw_calls = HashMap::new();
     let catalog = ctx.runtime.tool_catalog.snapshot();
+    let invocation = make_invocation(&ctx);
+    let turn = invocation
+        .require_turn("test dispatch")
+        .expect("active turn");
     let results = dispatch_concurrent(
-        &ctx,
+        &invocation,
+        Some(turn),
         &ready_calls,
         &raw_calls,
         &target_tools,
@@ -295,8 +325,13 @@ async fn test_dispatch_concurrent_preserves_typed_subagent_failure() {
     }];
     let raw_calls = HashMap::new();
     let catalog = ctx.runtime.tool_catalog.snapshot();
+    let invocation = make_invocation(&ctx);
+    let turn = invocation
+        .require_turn("test dispatch")
+        .expect("active turn");
     let results = dispatch_concurrent(
-        &ctx,
+        &invocation,
+        Some(turn),
         &ready_calls,
         &raw_calls,
         &target_tools,
@@ -331,7 +366,7 @@ async fn test_settle_results_mixed_ready_settled() {
             name: "Read".to_string(),
             input: serde_json::json!({}),
         }],
-        settled_results: vec![(
+        settled_results: vec![SettledInvocation::unreported(
             ToolCall {
                 id: "call_rejected".to_string(),
                 name: "Bash".to_string(),
@@ -343,13 +378,14 @@ async fn test_settle_results_mixed_ready_settled() {
     let tool_results: Vec<Result<crate::tools::ToolOutput, EffectiveToolError>> =
         vec![Ok(crate::tools::ToolOutput::from_legacy("success output"))];
     let all_tools: HashMap<String, std::sync::Arc<dyn BaseTool>> = HashMap::new();
-    let outcome = settle_results(&ctx, approval, tool_results, false, &all_tools).await;
+    let invocation = make_invocation(&ctx);
+    let outcome = settle_results(&invocation, approval, tool_results, false, &all_tools).await;
     // ready + settled = 2 条
     assert_eq!(outcome.results.len(), 2, "应合并 ready 和 settled 结果");
     // settled 在前，ready 在后
-    assert!(outcome.results[0].1.is_error, "rejected 应是错误");
-    assert!(!outcome.results[1].1.is_error, "ready 工具应成功");
-    assert_eq!(outcome.results[1].1.output, "success output");
+    assert!(outcome.results[0].result.is_error, "rejected 应是错误");
+    assert!(!outcome.results[1].result.is_error, "ready 工具应成功");
+    assert_eq!(outcome.results[1].result.output, "success output");
 }
 
 #[test]
@@ -416,4 +452,157 @@ fn test_effective_cancel_and_timeout_errors_keep_typed_execution_facts() {
         crate::tools::ToolExecutionStatus::TimedOut
     );
     assert!(execution_for_effective_error(EffectiveToolErrorCode::ToolFailed).is_none());
+}
+
+/// idle 执行入口的输入（session 级事实 + typed 来源）：生产路径由
+/// session-owned canonical 入口提供，测试从同一个夹具投影。
+fn idle_source(stage: &StageContext, origin: InvocationOrigin) -> SessionInvocationSource {
+    SessionInvocationSource {
+        session_id: stage.project_session_id(),
+        run_id: None,
+        agent_id: stage.session.agent_id,
+        cwd: std::sync::Arc::clone(&stage.session.turn.cwd),
+        messages: std::sync::Arc::new(stage.visible_messages()),
+        context_usage: None,
+        session_resources: None,
+        resolver: std::sync::Arc::clone(&stage.runtime.tool_invocation_resolver),
+        chain: std::sync::Arc::clone(&stage.runtime.middleware_chain),
+        queue: stage.session.queue.clone(),
+        origin,
+        cancel: CancellationToken::new(),
+        post_hook_skips: None,
+        approval_unavailable: None,
+    }
+}
+
+fn attached_app_origin() -> InvocationOrigin {
+    InvocationOrigin::App {
+        app_id: "app-idle".into(),
+        attachment_id: Some(peri_acp_types::interaction::AttachmentId::new("att-idle")),
+        connection_epoch: Some(peri_acp_types::interaction::ConnectionEpoch::initial()),
+        server_generation: 4,
+    }
+}
+
+/// [回归] idle（无活跃 turn）入口：**模型来源**依赖 turn 的准入规则显式返回 typed
+/// 不可用，不是静默跳过、不是泛化 `Other` 错误（设计 §4.1）。
+///
+/// 错误必须原样携带入口名与已知会话身份，供 idle 入口判别与诊断。
+#[tokio::test]
+async fn idle_entry_returns_typed_not_available_without_turn() {
+    let stage = make_test_ctx();
+    stage
+        .session
+        .session_context
+        .write()
+        .insert("session_id".into(), "session-idle".into());
+    let invocation = InvocationContext::from_source(idle_source(
+        &stage,
+        InvocationOrigin::Model {
+            tool_call_id: ToolCallId::new("call-1"),
+        },
+    ));
+    assert!(
+        invocation.session_id().is_some(),
+        "idle 入口仍持有真实会话身份（缺的是 turn 事实）"
+    );
+
+    let error = match collect_tool_results(
+        &invocation,
+        vec![ToolCall::new("call-1", "Probe", serde_json::json!({}))],
+        &HashMap::new(),
+        &HashMap::new(),
+        &stage.runtime.tool_catalog.snapshot(),
+        &CancellationToken::new(),
+        crate::messages::MessageId::new(),
+        &BaseMessage::ai("call"),
+        None,
+    )
+    .await
+    {
+        Err(error) => error,
+        Ok(_) => panic!("模型来源缺 turn 的准入必须显式不可用，不得静默跳过"),
+    };
+
+    let AgentError::NotAvailableWithoutTurn { entry, session_id } = error else {
+        panic!("必须是 typed 不可用错误（不是 Other / 静默跳过），实际: {error:?}");
+    };
+    assert_eq!(entry, "tool dispatch");
+    assert_eq!(session_id.as_deref(), Some("session-idle"));
+}
+
+/// [回归] App 来源的 idle 执行：`turn: None` 下管线**照常执行**（准入规则与执行
+/// 都不需要 turn 事实），但 ① 不发任何 render 事件、② 不写 `turn_generation`、
+/// ③ 工具拿到的归属是 App 归属（不是伪造的模型归属）。
+#[tokio::test]
+async fn idle_app_invocation_runs_without_turn_facts_or_model_ownership() {
+    type Seen =
+        Arc<parking_lot::Mutex<Vec<Option<peri_acp_types::interaction::InteractionAttribution>>>>;
+    struct AttributionProbe(Seen);
+    #[async_trait::async_trait]
+    impl BaseTool for AttributionProbe {
+        fn name(&self) -> &str {
+            "Probe"
+        }
+        fn description(&self) -> &str {
+            "attribution probe"
+        }
+        fn parameters(&self) -> serde_json::Value {
+            serde_json::json!({})
+        }
+        async fn invoke(
+            &self,
+            _: serde_json::Value,
+            context: crate::tools::ToolContext<'_>,
+        ) -> Result<String, Box<dyn std::error::Error + Send + Sync>> {
+            assert!(
+                context.turn_generation.is_none(),
+                "无 turn 的执行不得写 turn_generation（也不得伪造）"
+            );
+            self.0.lock().push(context.attribution.clone());
+            Ok("ok".into())
+        }
+    }
+
+    let stage = make_test_ctx();
+    stage
+        .session
+        .session_context
+        .write()
+        .insert("session_id".into(), "session-idle".into());
+    let invocation = InvocationContext::from_source(idle_source(&stage, attached_app_origin()));
+    assert!(
+        !invocation.has_render_events(),
+        "idle 执行按构造没有 render 事件端口"
+    );
+
+    let seen: Seen = Arc::default();
+    let tool: Arc<dyn BaseTool> = Arc::new(AttributionProbe(seen.clone()));
+    let outcome = collect_tool_results(
+        &invocation,
+        vec![ToolCall::new("call-1", "Probe", serde_json::json!({}))],
+        &HashMap::new(),
+        &HashMap::from([("call-1".to_string(), tool)]),
+        &stage.runtime.tool_catalog.snapshot(),
+        &CancellationToken::new(),
+        crate::messages::MessageId::new(),
+        &BaseMessage::ai("call"),
+        None,
+    )
+    .await
+    .expect("App 来源的 idle 执行必须照常完成");
+
+    assert_eq!(outcome.results.len(), 1);
+    assert!(!outcome.results[0].result.is_error);
+    assert_eq!(
+        seen.lock().as_slice(),
+        &[Some(
+            peri_acp_types::interaction::InteractionAttribution::app_attachment(
+                "app-idle",
+                "att-idle",
+                peri_acp_types::interaction::ConnectionEpoch::initial()
+            )
+        )],
+        "idle 执行的归属必须是 App 归属（模型 turn 事实缺失时不得伪造）"
+    );
 }

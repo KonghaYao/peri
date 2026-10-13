@@ -9,6 +9,6 @@ pub use invocation::{
 pub use peri_acp_types::tools::{
     BaseTool, BoundToolInvocation, ContextRetention, ContextUsage, EffectiveToolCall,
     EffectiveToolDefinition, EffectiveToolDispatcher, EffectiveToolError, EffectiveToolErrorCode,
-    ToolContext, ToolDefinition, ToolDescription, ToolExecutionEvidence, ToolExecutionStatus,
-    ToolOutput,
+    InvocationId, InvocationOrigin, ToolCallId, ToolContext, ToolDefinition, ToolDescription,
+    ToolExecutionEvidence, ToolExecutionStatus, ToolOutcome, ToolOutput,
 };

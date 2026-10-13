@@ -30,9 +30,32 @@ use crate::{
 /// ```
 pub trait StateView: Send + Sync {
     fn execution_binding(&self) -> Option<peri_acp_types::session::ExecutionBinding>;
+    /// 本 hook 所处 session 的 canonical 身份。
+    ///
+    /// 与 [`Self::execution_binding`] 同源（canonical 阶段投影必须同时给出
+    /// 二者）；`None` 仅出现在 legacy / 测试适配器，表示该状态没有可信 session
+    /// 事实——需要交互归属（审批 / 提问）的 middleware 必须据此拒绝，不得伪造。
+    fn session_id(&self) -> Option<&str> {
+        None
+    }
+    /// 本次执行的**交互归属事实**（谁在问）。
+    ///
+    /// 归属是给 session 交互路由的输入，只能来自真实执行事实（turn 绑定 / App
+    /// 附件 / Host 入口）。`None` = 本状态没有可信归属：需要交互的 middleware
+    /// 必须显式拒绝，不得从 `session_id` / `execution_binding` 二次拼装，也不得
+    /// 伪造归属。
+    fn interaction_attribution(
+        &self,
+    ) -> Option<peri_acp_types::interaction::InteractionAttribution> {
+        None
+    }
     fn cwd(&self) -> &str;
     fn messages(&self) -> &[BaseMessage];
-    fn current_step(&self) -> usize;
+    /// 当前 turn 的 ReAct step；`None` = 本次执行没有活跃 turn。
+    ///
+    /// turn 来源的执行恒为 `Some`；idle（无 turn）执行必须显式处理 `None`，
+    /// 不得把 `0` 当作「第一步」的替身。
+    fn current_step(&self) -> Option<usize>;
 }
 
 /// 追加消息；生产适配器同时写入 transcript 与本次 hook 缓存。
@@ -115,6 +138,18 @@ pub trait BeforeAgentState:
 pub trait BeforeToolState: StateView + HookOutputState {
     /// Identity of the pinned execution target, indexed by immutable call ID.
     fn tool_origin(&self, _call_id: &str) -> Option<BoundToolOrigin> {
+        None
+    }
+
+    /// 本次执行的「审批不可用（无人可答）」记录点；`None` = 没有 outcome 记录面。
+    ///
+    /// 与用户拒绝**严格区分**（设计 §3.4）：拒绝是已作出的决定，不可用是没有
+    /// 人可以决定。middleware 在收到 [`crate::interaction::InteractionResponse::Unanswered`]
+    /// 时把原因写进该 sink，调用期窄状态把它并入 outcome 元数据；legacy / 测试
+    /// 适配器返回 `None`（不伪造拒绝原因，仍按原有语义 fail-closed）。
+    fn approval_unavailable_sink(
+        &self,
+    ) -> Option<std::sync::Arc<crate::agent::stages::ApprovalUnavailableSink>> {
         None
     }
 }
@@ -271,14 +306,22 @@ impl<T: MiddlewareState + ?Sized> StateView for T {
     fn execution_binding(&self) -> Option<peri_acp_types::session::ExecutionBinding> {
         MiddlewareState::execution_binding(self)
     }
+    fn session_id(&self) -> Option<&str> {
+        MiddlewareState::session_id(self)
+    }
+    fn interaction_attribution(
+        &self,
+    ) -> Option<peri_acp_types::interaction::InteractionAttribution> {
+        MiddlewareState::interaction_attribution(self)
+    }
     fn cwd(&self) -> &str {
         MiddlewareState::cwd(self)
     }
     fn messages(&self) -> &[BaseMessage] {
         MiddlewareState::messages(self)
     }
-    fn current_step(&self) -> usize {
-        MiddlewareState::current_step(self)
+    fn current_step(&self) -> Option<usize> {
+        Some(MiddlewareState::current_step(self))
     }
 }
 
@@ -365,47 +408,34 @@ impl<T: MiddlewareState + ?Sized> HookOutputState for T {
         &self,
         reminder: peri_acp_types::system_reminder::TrustedSystemReminder,
     ) {
-        // Info + Passive：进入 canonical transcript 供下一次模型请求看到，但不唤醒新一轮。
-        MiddlewareState::enqueue_v2_message(
-            self,
-            QueuedMessage::system_reminder(
-                MessageKind::Info,
-                MessageSource::SystemInjected,
-                reminder,
-            )
-            .with_policy(MessagePolicy::passive()),
-        );
+        MiddlewareState::enqueue_v2_message(self, hook_output_message(reminder));
     }
 
     fn enqueue_hook_client_notice(
         &self,
         reminder: peri_acp_types::system_reminder::TrustedSystemReminder,
     ) {
-        MiddlewareState::enqueue_v2_message(
-            self,
-            QueuedMessage::system_reminder(
-                MessageKind::Info,
-                MessageSource::SystemInjected,
-                reminder,
-            )
-            .with_policy(MessagePolicy::passive()),
-        );
+        MiddlewareState::enqueue_v2_message(self, hook_output_message(reminder));
     }
 
     fn enqueue_session_start_message(
         &self,
         reminder: peri_acp_types::system_reminder::TrustedSystemReminder,
     ) {
-        MiddlewareState::enqueue_v2_message(
-            self,
-            QueuedMessage::system_reminder(
-                MessageKind::Info,
-                MessageSource::SystemInjected,
-                reminder,
-            )
-            .with_policy(MessagePolicy::passive()),
-        );
+        MiddlewareState::enqueue_v2_message(self, hook_output_message(reminder));
     }
+}
+
+/// hook 输出字段的 canonical 投递形状（`Info` + passive，不唤醒新一轮）。
+///
+/// 三个字段各有确定受众（见 [`HookOutputState`]），但投递形状唯一：这里是该形状的
+/// 唯一权威，`HookOutputState` 的适配器实现与调用期窄状态共用，避免两处各写一份
+/// 队列语义。
+pub(crate) fn hook_output_message(
+    reminder: peri_acp_types::system_reminder::TrustedSystemReminder,
+) -> QueuedMessage {
+    QueuedMessage::system_reminder(MessageKind::Info, MessageSource::SystemInjected, reminder)
+        .with_policy(MessagePolicy::passive())
 }
 
 impl<T: MiddlewareState + ?Sized> InputBatchAppend for T {

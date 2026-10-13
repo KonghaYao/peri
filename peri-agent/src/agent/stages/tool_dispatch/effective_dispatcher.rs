@@ -1,31 +1,37 @@
 //! Effective tool dispatch over the same pinned catalog and invocation pipeline as Act.
 //! Nested calls project effective target identity but do not commit transcript
 //! messages or settle the outer batch's hooks/failure counter.
+//!
+//! 本入口只持有 [`InvocationContext`]（会话事实 + 端口）与 pinned catalog：App/Host
+//! 租约会长期持有它，不得反向把 session 挂上来。
 
 use std::collections::HashMap;
 use std::sync::Arc;
 
 use tokio_util::sync::CancellationToken;
 
-use super::execution::{collect_tool_results, effective_tool_error};
-use super::StageContext;
-use crate::agent::react::{ToolCall, ToolResult};
+use super::execution::{collect_tool_results, effective_tool_error, SettledInvocation};
+use super::InvocationContext;
+use crate::agent::react::ToolCall;
 use crate::messages::{BaseMessage, ToolCallRequest};
 use crate::session::tool_catalog::SessionToolCatalogSnapshot;
 use crate::tools::{
     EffectiveToolCall, EffectiveToolDefinition, EffectiveToolDispatcher, EffectiveToolError,
-    EffectiveToolErrorCode, ToolOutput,
+    EffectiveToolErrorCode, ToolCallId, ToolOutcome, ToolOutput,
 };
 
 #[derive(Clone)]
 pub(super) struct StageEffectiveToolDispatcher {
-    context: StageContext,
+    context: InvocationContext,
     catalog: Arc<SessionToolCatalogSnapshot>,
-    model_tool_call_id: Option<String>,
+    model_tool_call_id: Option<ToolCallId>,
 }
 
 impl StageEffectiveToolDispatcher {
-    pub(super) fn new(context: StageContext, catalog: Arc<SessionToolCatalogSnapshot>) -> Self {
+    pub(super) fn new(
+        context: InvocationContext,
+        catalog: Arc<SessionToolCatalogSnapshot>,
+    ) -> Self {
         Self {
             context,
             catalog,
@@ -33,27 +39,29 @@ impl StageEffectiveToolDispatcher {
         }
     }
 
-    pub(super) fn with_tool_call_id(mut self, tool_call_id: String) -> Self {
+    pub(super) fn with_tool_call_id(mut self, tool_call_id: ToolCallId) -> Self {
         self.model_tool_call_id = Some(tool_call_id);
         self
     }
 
+    // `EffectiveToolError` 携带远端 raw 错误载荷（契约层定义），按值返回即超过 clippy
+    // 的大错误阈值；装箱属于契约层的决定，这里不重复包装。
+    #[allow(clippy::result_large_err)]
     async fn dispatch_result(
         &self,
         call: EffectiveToolCall,
         cancel: CancellationToken,
-    ) -> Result<ToolResult, EffectiveToolError> {
-        let event_invocation_id = call
-            .parent_invocation_id
-            .as_deref()
-            .map(|parent| format!("{parent}/{}", call.invocation_id))
-            .unwrap_or_else(|| call.invocation_id.clone());
+    ) -> Result<SettledInvocation, EffectiveToolError> {
+        // 事件 id 仍表达嵌套链：嵌套执行投影 `outer/inner`，非嵌套使用本次执行身份。
+        let event_invocation_id = match call.origin.parent_invocation_id() {
+            Some(parent) => format!("{parent}/{}", call.invocation_id),
+            None => call.invocation_id.to_string(),
+        };
         let raw_call = ToolCall::new(event_invocation_id, call.tool_name.clone(), call.input);
         let all_tools = self.catalog.tool_map();
         let invocation = self
             .context
-            .runtime
-            .tool_invocation_resolver
+            .resolver()
             .resolve(&raw_call, &all_tools)
             .map_err(effective_tool_error)?;
         let policy_id = invocation.policy_call.id.clone();
@@ -67,8 +75,11 @@ impl StageEffectiveToolDispatcher {
                 raw_call.input.clone(),
             )],
         );
-        let outcome = collect_tool_results(
-            &self.context,
+        collect_tool_results(
+            &self
+                .context
+                .with_single_origin(call.origin)
+                .with_cancellation(cancel.clone()),
             vec![invocation.policy_call],
             &event_calls,
             &target_tools,
@@ -76,21 +87,19 @@ impl StageEffectiveToolDispatcher {
             &cancel,
             ai_message.id(),
             &ai_message,
-            self.model_tool_call_id.as_deref(),
+            self.model_tool_call_id.as_ref().map(ToolCallId::as_str),
         )
         .await
-        .map_err(effective_tool_error)?;
-        outcome
-            .results
-            .into_iter()
-            .next()
-            .map(|(_, result)| result)
-            .ok_or_else(|| {
-                EffectiveToolError::new(
-                    EffectiveToolErrorCode::ToolFailed,
-                    "tool call produced no result",
-                )
-            })
+        .map_err(effective_tool_error)?
+        .results
+        .into_iter()
+        .next()
+        .ok_or_else(|| {
+            EffectiveToolError::new(
+                EffectiveToolErrorCode::ToolFailed,
+                "tool call produced no result",
+            )
+        })
     }
 }
 
@@ -100,9 +109,22 @@ impl EffectiveToolDispatcher for StageEffectiveToolDispatcher {
         &self,
         call: EffectiveToolCall,
         cancel: CancellationToken,
-    ) -> Result<String, EffectiveToolError> {
-        let result = self.dispatch_result(call, cancel.clone()).await?;
+    ) -> Result<ToolOutput, EffectiveToolError> {
+        let SettledInvocation {
+            result, outcome, ..
+        } = self.dispatch_result(call, cancel.clone()).await?;
         if result.is_error {
+            // 已报告结果事实的执行不按协议层失败处理：raw（含远端 `isError`）随
+            // outcome 保真返回，由调用方（App relay / 模型面投影）各自解读。
+            // 未报告事实的失败（本地工具错误、取消、超时）仍以
+            // [`EffectiveToolError`] 返回。
+            if let ToolOutcome::Reported { .. } = outcome {
+                return Ok(ToolOutput {
+                    text: result.output,
+                    execution: result.execution,
+                    outcome,
+                });
+            }
             let code = result.effective_error_code.unwrap_or_else(|| {
                 if cancel.is_cancelled() {
                     EffectiveToolErrorCode::Cancelled
@@ -116,30 +138,10 @@ impl EffectiveToolDispatcher for StageEffectiveToolDispatcher {
             }
             return Err(error);
         }
-        Ok(result.output)
-    }
-
-    async fn dispatch_output(
-        &self,
-        call: EffectiveToolCall,
-        cancel: CancellationToken,
-    ) -> Result<ToolOutput, EffectiveToolError> {
-        let result = self.dispatch_result(call, cancel).await?;
-        if result.is_error && result.execution.is_none() {
-            let mut error = EffectiveToolError::new(
-                result
-                    .effective_error_code
-                    .unwrap_or(EffectiveToolErrorCode::ToolFailed),
-                result.output,
-            );
-            if let Some(failure) = result.subagent_failure {
-                error = error.with_subagent_failure(failure);
-            }
-            return Err(error);
-        }
         Ok(ToolOutput {
             text: result.output,
             execution: result.execution,
+            outcome,
         })
     }
 

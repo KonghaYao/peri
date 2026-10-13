@@ -707,3 +707,152 @@ async fn startup_gate_interrupted_is_propagated_without_commit() {
         "取消时不得发布 ready"
     );
 }
+
+/// idle 执行入口的输入（session 级事实 + typed 来源）。
+fn idle_source(
+    stage: &crate::agent::stages::StageContext,
+    origin: crate::tools::InvocationOrigin,
+) -> crate::agent::stages::SessionInvocationSource {
+    crate::agent::stages::SessionInvocationSource {
+        session_id: stage.project_session_id(),
+        run_id: None,
+        agent_id: stage.session.agent_id,
+        cwd: std::sync::Arc::clone(&stage.session.turn.cwd),
+        messages: std::sync::Arc::new(stage.visible_messages()),
+        context_usage: None,
+        session_resources: None,
+        resolver: std::sync::Arc::clone(&stage.runtime.tool_invocation_resolver),
+        chain: std::sync::Arc::clone(&stage.runtime.middleware_chain),
+        queue: stage.session.queue.clone(),
+        origin,
+        cancel: stage.session.turn.cancel_token.as_ref().clone(),
+        post_hook_skips: None,
+        approval_unavailable: None,
+    }
+}
+
+/// [回归] **模型来源**的审批入口在无 turn 时逐条返回**同一个 typed 不可用错误**
+///（入口名 + 已知 session 身份），不退化成泛化 `MiddlewareError`/`Other`，
+/// 也不静默跳过。
+#[tokio::test]
+async fn bound_approval_without_turn_returns_typed_unavailable_per_call() {
+    let stage = make_context();
+    stage
+        .session
+        .session_context
+        .write()
+        .insert("session_id".into(), "session-idle".into());
+    let invocation = crate::agent::stages::InvocationContext::from_source(idle_source(
+        &stage,
+        crate::tools::InvocationOrigin::Model {
+            tool_call_id: crate::tools::ToolCallId::new("c0"),
+        },
+    ));
+    let calls = vec![
+        crate::agent::react::ToolCall::new("c1", "Write", serde_json::json!({})),
+        crate::agent::react::ToolCall::new("c2", "Read", serde_json::json!({})),
+    ];
+
+    let results =
+        run_before_bound_tools_batch(&invocation, &calls, &std::collections::HashMap::new()).await;
+
+    assert_eq!(results.len(), calls.len(), "结果必须与输入等长");
+    for result in &results {
+        match result {
+            Err(crate::error::AgentError::NotAvailableWithoutTurn { entry, session_id }) => {
+                assert_eq!(*entry, "before_tools_batch", "必须点名审批入口");
+                assert_eq!(session_id.as_deref(), Some("session-idle"));
+            }
+            other => panic!("模型来源缺 turn 必须返回 typed 不可用，实际: {other:?}"),
+        }
+    }
+}
+
+/// [回归] **App 归属**的 idle 准入：无 turn 也**不早退**——既有 before-tool 规则
+/// 照常运行，规则看到的归属是 App 归属（不是伪造的模型归属），且 `step` 为
+/// `None`（不是伪造的 0）。
+#[tokio::test]
+async fn bound_approval_without_turn_runs_rules_for_attributed_app_entry() {
+    use crate::middleware::capabilities as hook_state;
+
+    /// 记录每次 `before_tool` 看到的（归属，`step`）序列（夹具内部类型）。
+    type AttributionLog = std::sync::Arc<
+        parking_lot::Mutex<
+            Vec<(
+                Option<peri_acp_types::interaction::InteractionAttribution>,
+                Option<usize>,
+            )>,
+        >,
+    >;
+
+    struct AttributionRecorder {
+        seen: AttributionLog,
+    }
+
+    #[async_trait::async_trait]
+    impl crate::middleware::Middleware for AttributionRecorder {
+        fn name(&self) -> &str {
+            "attribution-recorder"
+        }
+        async fn before_tool(
+            &self,
+            state: &mut dyn hook_state::BeforeToolState,
+            tool_call: &crate::agent::react::ToolCall,
+        ) -> crate::error::AgentResult<crate::agent::react::ToolCall> {
+            self.seen
+                .lock()
+                .push((state.interaction_attribution(), state.current_step()));
+            Ok(tool_call.clone())
+        }
+    }
+
+    let mut stage = make_context();
+    stage
+        .session
+        .session_context
+        .write()
+        .insert("session_id".into(), "session-idle-app".into());
+    let seen = std::sync::Arc::new(parking_lot::Mutex::new(Vec::new()));
+    let mut chain = crate::middleware::MiddlewareChain::new();
+    chain.add(Box::new(AttributionRecorder { seen: seen.clone() }));
+    stage.runtime.middleware_chain = std::sync::Arc::new(chain);
+
+    let invocation = crate::agent::stages::InvocationContext::from_source(idle_source(
+        &stage,
+        crate::tools::InvocationOrigin::App {
+            app_id: "app-idle".into(),
+            attachment_id: Some(peri_acp_types::interaction::AttachmentId::new("att-idle")),
+            connection_epoch: Some(peri_acp_types::interaction::ConnectionEpoch::initial()),
+            server_generation: 1,
+        },
+    ));
+    let calls = vec![crate::agent::react::ToolCall::new(
+        "c1",
+        "Write",
+        serde_json::json!({}),
+    )];
+
+    let results =
+        run_before_bound_tools_batch(&invocation, &calls, &std::collections::HashMap::new()).await;
+
+    assert_eq!(results.len(), 1);
+    assert!(
+        results[0].is_ok(),
+        "App 归属的 idle 准入必须放行给规则裁决，实际: {:?}",
+        results[0]
+    );
+    assert_eq!(
+        seen.lock().as_slice(),
+        &[(
+            Some(
+                peri_acp_types::interaction::InteractionAttribution::app_attachment(
+                    "app-idle",
+                    "att-idle",
+                    peri_acp_types::interaction::ConnectionEpoch::initial()
+                )
+            ),
+            None,
+        )],
+        "规则必须看到 App 归属，且 step 缺失（不是伪造的 0）"
+    );
+}

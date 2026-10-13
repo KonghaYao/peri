@@ -154,15 +154,17 @@ impl ToolResult {
         tool_name: impl Into<String>,
         output: ToolOutput,
     ) -> Self {
-        let is_error = output.execution.as_ref().is_some_and(|e| {
-            matches!(
-                e.status,
-                ToolExecutionStatus::Failed
-                    | ToolExecutionStatus::Cancelled
-                    | ToolExecutionStatus::TimedOut
-                    | ToolExecutionStatus::RunningAfterTimeout
-            )
-        });
+        // 真实 isError 优先：工具/远端报告失败时不得因为缺少本进程执行证据而降级为成功。
+        let is_error = output.is_error() == Some(true)
+            || output.execution.as_ref().is_some_and(|e| {
+                matches!(
+                    e.status,
+                    ToolExecutionStatus::Failed
+                        | ToolExecutionStatus::Cancelled
+                        | ToolExecutionStatus::TimedOut
+                        | ToolExecutionStatus::RunningAfterTimeout
+                )
+            });
         Self {
             tool_call_id: tool_call_id.into(),
             tool_name: tool_name.into(),
