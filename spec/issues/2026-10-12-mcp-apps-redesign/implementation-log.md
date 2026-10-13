@@ -361,8 +361,10 @@ not_available_without_turn`（peri-agent）= `5 passed; 0 failed`；
    当前 bridge 尚未在协议失败分支接线远端 JSON-RPC 载荷（既有缺口）。
 5. **`entitlement: Unenforced`**（R4）：本阶段不消费 `SessionAuthorizationPort`；移除条件
    = SDK/部署身份层提供凭据的批次。
-6. **`AgentError` 层仍未区分 `ApprovalUnavailable` 与 `UserRejected`**（R9 的移除条件）：
-   区分只在 outcome 记录层；阶段 4 typed 分类批次收敛到 `AgentError`。
+6. ~~**`AgentError` 层仍未区分 `ApprovalUnavailable` 与 `UserRejected`**（R9 的移除条件）：区分只在 outcome 记录层。~~
+   **已关闭（4b 批 E，2026-10-13）**：`AgentError::ToolRejected` 增必填 `cause: ToolRejectionCause`
+   （`UserRejected` / `ApprovalUnavailable(UnansweredCause)` / `PolicyDenied`），带外记录点
+   `ApprovalUnavailableSink` 删除（消费者为 0）；见下「4b 批 E」节。
 
 ### 未做的部分（S4–S6）
 
@@ -891,3 +893,99 @@ service 的 `session_cancel`；`shutdown()` 首个动作取消它（`session/clo
 3. 旧别名（`peri/mcp/{open,resource,app,invoke}`）与其 DTO 按裁决 D1 保留；删除条件写进 trait 文档
    与 ARC-MCP-APPS-001（外部客户端切到 `peri/mcp/apps/*`）。
 4. `apps_facade.rs` 991 行：仍在 1000 以内但已接近上限，后续扩方法需先拆分（登记）。
+
+## 4b 批 E：`AgentError` 层 typed 审批分类（R9，2026-10-13，已完成）
+
+### 问题
+
+「用户拒绝」与「没有人可以决定（审批不可用）」在 `AgentError` 层不可区分：`ToolRejected` 不带原因，
+`effective_tool_error` 把**所有** `ToolRejected` 映射为 `EffectiveToolErrorCode::UserRejected`；
+「无人可答」只能靠 middleware 写带外记录点 `ApprovalUnavailableSink`，由 `SessionInvocationService::invoke`
+在 dispatch 后 `take()` 交给 `map_dispatch_error` 补救。任何不经该 sink 的消费方（turn 路径、日志、
+未来协议面）都拿不到 typed 事实。
+
+### 决定
+
+1. **契约**（`peri-acp-types`）：新增 `ToolRejectionCause { UserRejected, ApprovalUnavailable(UnansweredCause), PolicyDenied }`；
+   `AgentError::ToolRejected` 增**必填** `cause`（无 `Default`、无 `Option::None` 兜底）；
+   `EffectiveToolError` 增 `unanswered_cause: Option<UnansweredCause>`（+ `with_unanswered_cause` / `unanswered_cause()`）。
+2. **第三类原因必须有**：hook `Block` / `PreventContinuation`、分类器 `Deny`、缺 broker、审批超时
+   既不是「用户已决定」，也无法如实填 `UnansweredCause`（`NoOnlineEndpoint` 的唯一含义是「本端一个在线
+   endpoint 都没有」，`Unknown` 的唯一含义是「客户端声明无人可答但取值不可识别」）⇒ 归 `PolicyDenied`
+   （复用仓内既有词汇 `NotExecutedCause::PolicyDenied`）。
+3. **映射单一权威**：`execution.rs::rejection_error_code`（+ `effective_error_code`）是唯一映射表——
+   `UserRejected ⇒ USER_REJECTED`；`ApprovalUnavailable(_) | PolicyDenied ⇒ PERMISSION_DENIED`。
+   审批阶段结算分支不再硬编码 `UserRejected`，并把 cause 写进 `ToolResult.rejection_cause`（`serde(skip)`）。
+4. **App / Host 协议面的通道**：`StageEffectiveToolDispatcher::dispatch` 不经 `effective_tool_error`
+   （错误已在审批阶段结算成 `ToolResult`），因此必须显式由 `rejection_cause` 还原 `unanswered_cause`；
+   `map_dispatch_error` 去掉 sink 参数，改读错误自带的 typed 原因。
+5. **删除带外记录点**（原则 6）：`ApprovalUnavailableSink`、`BeforeToolState::approval_unavailable_sink`、
+   permission 的 `ApprovalSink` 别名与 `record_unanswered`、`SessionInvocationSource.approval_unavailable`
+   全部删除（消费者逐条归零，见下）。
+
+### 产生点 → cause 对照（逐条依据）
+
+| 产生点 | cause | 依据 |
+| ------ | ----- | ---- |
+| `permission::apply_decision` `Reject` / `Respond` | `UserRejected` | 用户/客户端**已作出**决定 |
+| `permission::{broker_approve,batch_broker_approve}` `Unanswered` | `ApprovalUnavailable(cause)` | 交互契约原文转述（不再伪造 `ApprovalDecision::Reject`） |
+| permission 单条 / 批量 broker 超时 | `PolicyDenied` | 逾期未给出决定：没有任何人的决定 |
+| permission 分类器 `Deny` / `Unsure` 且无 broker / Auto 无分类器无 broker | `PolicyDenied` | 本端自动策略 / 本端审批通道缺失 |
+| hook `ask` 无 broker / 超时 | `PolicyDenied` | 同上 |
+| hook `PermissionDecision` deny、`override_denies`、`Stop` 的 `PreventContinuation` | `PolicyDenied` | hook 策略拒绝 |
+| `hooks::action_resolver` `Block` / `PreventContinuation`（4 处） | `PolicyDenied` | 同上 |
+| `interaction_owner::untrusted_owner_error` | `ApprovalUnavailable(OwnerUnmatched)` | 归属缺失 ⇒ 没有符合本次归属的可作答方；不选 `NoOnlineEndpoint`（本处无法断言 endpoint 清单，选了会撒谎） |
+| `AskUserTool` `Rejected` / `Unanswered` | `UserRejected` / `ApprovalUnavailable(cause)` | 用户拒绝回答 vs 无人可答 |
+| `SubAgentTool::load_and_approve_mcp_agent` Reject/Respond | `UserRejected` | 客户端已作出决定 |
+| 同上 `Unanswered`（新增独立分支） | `ApprovalUnavailable(cause)` | 原实现与「协议异常」共用 `_` 分支 |
+| 同上 Edit 不可兑现 / 空决定 / 协议异常 | `PolicyDenied` | 本端 fail-closed，无人的决定 |
+
+### 删除 `ApprovalUnavailableSink` 的消费者对照（原则 6）
+
+| 原消费者 | 新数据源 |
+| -------- | -------- |
+| permission 单条 `record_unanswered` | `AgentError::ToolRejected.cause`（`unanswered_rejection`） |
+| permission 批量 `record_unanswered` | 同上（逐条重建结果，保持与输入**逐位对应**） |
+| hook `ask` 的 sink 写入 | 同上（`cause: ApprovalUnavailable(cause)`） |
+| `SessionInvocationService::invoke` 构造/注入/`take()` | `EffectiveToolError.unanswered_cause`（经 `ToolResult.rejection_cause` 过边界） |
+| `BeforeToolState::approval_unavailable_sink` + `BoundApprovalState` 实现 | 无（接口删除） |
+
+⇒ sink 消费者为 0，删除时无任何行为面退化为「用户拒绝」：`session_invocation_test.rs::
+no_online_endpoint_is_not_executed_and_never_reported_as_user_rejection` 保持绿（未改断言）。
+
+### 证据（原始命令与输出行）
+
+- `./scripts/cargo-rmcp-patched.sh check --locked --workspace --all-targets`
+  → `Finished \`dev\` profile [unoptimized + debuginfo] target(s)`
+- `test --locked -p peri-acp-types --lib` → `test result: ok. 601 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.05s`
+- `test --locked -p peri-middlewares --lib -- --test-threads=1` → `test result: ok. 1835 passed; 0 failed; 2 ignored; 0 measured; 0 filtered out; finished in 451.82s`
+- `test --locked -p peri-acp --lib` → `test result: ok. 884 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 100.38s`
+- `test --locked -p peri-agent --lib` → `test result: ok. 1098 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 7.56s`
+- 定点：`tool_dispatch::execution` 18 passed；`permission::unanswered` 4 passed；
+  `mcp::session_invocation` 9 passed；`hooks::middleware::tests::pretooluse_ask_test` 11 passed；
+  `interaction_owner` 6 passed（均 0 failed）
+- `clippy --locked --workspace --all-targets -- -D warnings` → exit 0
+- `fmt --all -- --check` → exit 0；`scripts/check-layer-imports.sh` → `违规边 0`；
+  `scripts/check-file-size.sh` → `超阈值 3 个（源码 2 / 测试 1）`（基线同三个文件）
+- `typos` → exit 2（625 处，均为既有命中，含 `side-projects/.../echarts.min.js`）；
+  与本次改动文件交集为空
+
+复跑顺序说明（诚实性）：四 crate 全量套件与上表数字跑在同一语义修订上；其后仅对
+`permission/source_identity_test.rs` 做了**纯格式化**（`cargo fmt` 折叠调用参数行），改动后复跑
+`check --workspace --all-targets`、`test -p peri-middlewares --lib -- permission::source_identity`
+（`test result: ok. 5 passed; 0 failed`）、`fmt --all -- --check`（exit 0）与
+`clippy --workspace --all-targets -- -D warnings`（exit 0）。
+
+### 残余与边界
+
+1. `PolicyDenied` 是一个**合并桶**（hook 策略 / 分类器 / 缺 broker / 超时）：下游（`map_dispatch_error`）
+   对四者判决相同（`NotExecuted{PolicyDenied}`），当前无消费者需要更细粒度；若将来需要按「策略 vs
+   机制缺失」分流，再拆变体（不预造）。
+2. **行为变化（有意）**：hook / 分类器 / 缺 broker / 超时被拒的 App·Host 调用，outcome 记录由
+   `user_rejected` 变为 `policy_denied`（更如实；wire 错误种类不变——`mcp_apps.rs` 已把
+   `UserRejected | PolicyDenied` 同投影为 `McpAppsErrorKind::PolicyDenied`）。
+3. `InteractionResponse::Decisions(vec![])`（空决定）与审批上下文里出现的 `Answers` 仍走既有的
+   `_ => ApprovalDecision::Reject { reason: "用户拒绝" }` 兜底（`UserRejected`）；这与「无人可答」
+   无关，属既有兜底语义，本轮未改（登记为诚实性边缘）。
+4. `EffectiveToolError.unanswered_cause` 不派生 serde（`EffectiveToolError` 本身无 serde），
+   `ToolResult.rejection_cause` 标 `#[serde(skip)]` ⇒ **wire 面零变化**。
