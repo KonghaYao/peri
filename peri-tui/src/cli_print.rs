@@ -84,11 +84,9 @@ pub async fn run_print(
         anyhow::bail!("无输入 prompt。用法: peri -p \"你的问题\" 或 echo \"问题\" | peri -p");
     }
 
-    // 这些开关当前在 print 路径没有消费方（`--max-turns` 在 TUI 路径同样未实现；
-    // `--allowed-tools` / `--disallowed-tools` / `--effort` 只被解析与透传，从未生效）。
-    // 静默忽略会让调用方以为限制已经生效，因此显式拒绝而不是继续忽略。
+    // 这些开关当前在 print 路径没有消费方；静默忽略会让调用方以为限制已经生效，
+    // 因此显式拒绝而不是继续忽略。
     let unimplemented = unimplemented_print_flags(
-        max_turns,
         effort_override.as_deref(),
         &allowed_tools,
         &disallowed_tools,
@@ -101,6 +99,16 @@ pub async fn run_print(
     }
 
     let _telemetry = peri_acp::telemetry::init_tracing("peri-print");
+
+    // `--max-turns` 是唯一例外：外部评测 harness 固定传入该参数，拒绝会让整条任务
+    // 在启动前失败。这里接受参数但不实现限制（语义迭代预算另立），只在日志中标记
+    // 未生效，避免调用方误以为轮数受控。
+    if let Some(turns) = max_turns {
+        tracing::warn!(
+            max_turns = turns,
+            "print 模式尚未实现 --max-turns：参数已接受，但不限制语义迭代次数"
+        );
+    }
 
     // 加载配置（经 ConfigSource 承载读写路径决策，与 TUI 同源；print 模式
     // 无保存，但装配面需要一致的来源语义）：
@@ -258,18 +266,17 @@ pub async fn run_print(
     }
 }
 
-/// print 路径未实现的开关（有值即需要显式拒绝）。
+/// print 路径已解析但无消费方的开关（有值即需要显式拒绝）。
 ///
-/// 现状：`--max-turns` 在 TUI 路径同样未实现；`--allowed-tools` /
-/// `--disallowed-tools` / `--effort` 只被解析与透传，没有任何消费方。
+/// `--effort` / `--allowed-tools` / `--disallowed-tools` 只被 CLI 解析与透传，
+/// 从未生效；`--max-turns` 同名开关在 TUI 路径同样未实现，但它在 print 路径被
+/// 接受（见 `run_print`），因此不在此列。
 fn unimplemented_print_flags(
-    max_turns: Option<u32>,
     effort: Option<&str>,
     allowed_tools: &[String],
     disallowed_tools: &[String],
 ) -> Vec<&'static str> {
     [
-        (max_turns.is_some(), "--max-turns"),
         (effort.is_some(), "--effort"),
         (!allowed_tools.is_empty(), "--allowed-tools"),
         (!disallowed_tools.is_empty(), "--disallowed-tools"),
@@ -575,21 +582,16 @@ mod tests {
 
     use super::*;
 
-    /// [回归测试] print 路径不得静默忽略未实现的开关：有值即列名，缺省为空。
+    /// [回归测试] print 路径不得静默忽略未实现的开关：有值即列名，缺省为空；
+    /// `--max-turns` 不在其中——评测 harness 固定传入，必须被接受（未实现限制，
+    /// 由 `run_print` 记录日志），拒绝会让整条调用在启动前失败。
     #[test]
     fn test_unimplemented_print_flags_lists_only_provided_ones() {
-        assert!(unimplemented_print_flags(None, None, &[], &[]).is_empty());
+        assert!(unimplemented_print_flags(None, &[], &[]).is_empty());
+        let allowed = ["Bash".to_string()];
+        let disallowed = ["Edit".to_string()];
         assert_eq!(
-            unimplemented_print_flags(Some(3), None, &[], &[]),
-            vec!["--max-turns"]
-        );
-        assert_eq!(
-            unimplemented_print_flags(
-                None,
-                Some("high"),
-                &["Bash".to_string()],
-                &["Edit".to_string()],
-            ),
+            unimplemented_print_flags(Some("high"), &allowed, &disallowed),
             vec!["--effort", "--allowed-tools", "--disallowed-tools"]
         );
     }

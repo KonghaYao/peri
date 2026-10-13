@@ -1239,3 +1239,7 @@ setup-provider-incomplete = Select at least one provider and complete its ID, AP
 setup-field-id-readonly = ID (read-only)
 msg-history-tool-result-missing = Incomplete history: no tool result recorded. Execution was not resumed.
 shell-detail-status-unobserved = Status: no current execution observed
+
+# ---- Exit hints ----
+
+exit-resume-hint = To resume this session: peri -r { $session }

@@ -1,0 +1,72 @@
+name: Workflow Sidecar
+
+# 正式发布（release-agent）与预发布（pre-release）共用的 sidecar 生成前置。
+#
+# 两个发布流程的 build 矩阵都 needs 本任务，因此 sidecar 的构建与身份校验只要失败，
+# 六个平台的 Rust 编译根本不会启动 —— 基线里 v4.0.2 那种「六平台编译全成功、全部在
+# 打包阶段因缺 JS 而失败」的路径（约 67 runner 分钟）被结构性关掉。
+#
+# 生成规则只有一份（scripts/build-workflow-sidecar.sh），两个发布流程都不再各自
+# 拼一套 dist/package 的 sidecar 布局。
+#
+# workflow_dispatch 入口用于验证短路行为：选一个 fault，确认 sidecar 失败时
+# 依赖它的 build 矩阵处于 skipped 而不是继续编译。
+on:
+    workflow_call:
+        inputs:
+            fault:
+                description: 故障注入（仅用于验证前置失败阻止矩阵）
+                type: string
+                required: false
+                default: none
+        outputs:
+            identity:
+                description: sidecar 内容身份（pin 前 12 位），即 peri-resources/workflow/ 下的目录名
+                value: ${{ jobs.sidecar.outputs.identity }}
+    workflow_dispatch:
+        inputs:
+            fault:
+                description: 故障注入（仅用于验证前置失败阻止矩阵）
+                type: choice
+                options:
+                    - none
+                    - build-failure
+                    - missing-entry
+                    - identity-mismatch
+                default: none
+
+permissions:
+    contents: read
+
+jobs:
+    sidecar:
+        name: Build workflow sidecar
+        runs-on: ubuntu-24.04
+        timeout-minutes: 15
+        outputs:
+            identity: ${{ steps.build.outputs.identity }}
+        steps:
+            - name: Checkout repository
+              uses: actions/checkout@v7
+              with:
+                  persist-credentials: false
+
+            # 产物字节（bundle 内联了 workflow-engine）决定内容身份，因此工具链版本
+            # 必须记录在日志里：bun 升级若改变产物，身份校验会在编译前明确失败，
+            # 而不是让六个平台编译完后才在打包阶段炸掉。
+            - name: Install Bun
+              uses: oven-sh/setup-bun@v2
+
+            - name: Build and verify sidecar
+              id: build
+              env:
+                  PERI_SIDECAR_FAULT: ${{ inputs.fault }}
+              run: ./scripts/build-workflow-sidecar.sh --out-dir dist/workflow-sidecar
+
+            - name: Upload sidecar artifact
+              uses: actions/upload-artifact@v4
+              with:
+                  name: workflow-sidecar
+                  path: dist/workflow-sidecar
+                  if-no-files-found: error
+                  retention-days: 7

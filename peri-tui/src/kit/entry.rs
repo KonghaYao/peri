@@ -48,7 +48,7 @@ use ratatui_kit::{
 /// spawn kit 四链路（notifier / bridge / submit_consumer / service_snapshot），
 /// 进入 ratatui-kit 全屏。
 ///
-/// 返回前调用一次 `teardown_app`，尝试关闭 hooks、MCP、ACP host 与 Langfuse。
+/// 返回前调用一次 `teardown_app`：显式关闭 ACP transport 并等待 host 收口（任务/会话排空后关闭部署资源与 Langfuse）。
 /// 关闭报告不完整时仍会退出并 Drop App，不安排重试，也不保证未完成资源已 join。
 pub async fn run_kit_fullscreen(
     opts: TuiLaunchOptions,
@@ -545,6 +545,10 @@ pub async fn run_kit_fullscreen(
         DisableMouseCapture,
         DisableBracketedPaste
     );
+
+    // 5b. 退出提示——fullscreen 返回时 ratatui-kit 已 restore 终端（RestoreGuard），
+    //     此处 stdout 只归本线程写；无会话（setup 取消、离线模式）不打印。
+    crate::kit::exit_hint::print_resume_hint();
 
     // 6. 退出前触发 shutdown，让后台任务干净退出
     shutdown.cancel();

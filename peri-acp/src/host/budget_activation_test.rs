@@ -3,10 +3,10 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 
 #[tokio::test]
 #[serial]
-async fn budget_boundary_result_is_automatically_processed_by_host_scheduler() {
+async fn late_background_result_is_processed_without_default_iteration_limit() {
     let mut harness = ActivationHarness::new().await;
     harness._mock.remove_async().await;
-    let limit = peri_agent::session::config::SessionConfig::default().max_iterations();
+    let limit = 3;
     let calls = Arc::new(AtomicUsize::new(0));
     let followup_body = Arc::new(std::sync::Mutex::new(None));
     let published_result = Arc::new(std::sync::Mutex::new(None));
@@ -89,7 +89,7 @@ async fn budget_boundary_result_is_automatically_processed_by_host_scheduler() {
             crate::host::PromptOrigin::User, None, &harness.sessions, &harness.locks,
             &harness.transport, &harness.cfg, &harness.sender,
         )).await.unwrap().unwrap();
-    assert_eq!(response["stopReason"], "max_turn_requests");
+    assert_eq!(response["stopReason"], "end_turn");
     tokio::time::timeout(Duration::from_secs(20), async {
         loop {
             let terminals = harness
@@ -100,7 +100,7 @@ async fn budget_boundary_result_is_automatically_processed_by_host_scheduler() {
                 .count();
             let sessions = harness.sessions.lock().await;
             let state = &sessions[&harness.session_id];
-            if terminals >= 2 && state.cancel_token.is_none() && !state.continuation_in_flight {
+            if terminals >= 1 && state.cancel_token.is_none() && !state.continuation_in_flight {
                 break;
             }
             drop(sessions);
@@ -108,7 +108,7 @@ async fn budget_boundary_result_is_automatically_processed_by_host_scheduler() {
         }
     })
     .await
-    .expect("the real scheduler must finish the followup without a manual prompt");
+    .expect("the initial run must consume the late result without a budget continuation");
     assert_eq!(calls.load(Ordering::SeqCst), limit + 1);
     model.assert_async().await;
     let request = followup_body.lock().unwrap().take().unwrap();

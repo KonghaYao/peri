@@ -20,6 +20,30 @@ impl std::fmt::Display for WorkBudgetKind {
     }
 }
 
+/// 摘要恢复未完成的原因（`CompactRecoveryExhausted` 的诊断字段）。
+///
+/// 只表达结构事实：输出被上限截断、模型自称结束但未闭合、本次没有可用正文。
+/// 不声称摘要语义完整，也不把 provider/取消/持久化失败改写成本枚举。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SummaryRecoveryReason {
+    /// 输出达到输出上限且摘要未闭合。
+    OutputLimitTruncated,
+    /// 模型以 EndTurn 结束但摘要未闭合。
+    UnclosedSummary,
+    /// 本次响应没有可用正文（空响应或仅思考内容）。
+    EmptyResponse,
+}
+
+impl std::fmt::Display for SummaryRecoveryReason {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str(match self {
+            Self::OutputLimitTruncated => "output limit reached before the summary closed",
+            Self::UnclosedSummary => "the model stopped without closing the summary",
+            Self::EmptyResponse => "the model returned no usable summary text",
+        })
+    }
+}
+
 /// Agent 层边界错误
 #[derive(Debug, thiserror::Error)]
 pub enum AgentError {
@@ -77,14 +101,21 @@ pub enum AgentError {
     #[error("Full Compact requires LLM instance")]
     CompactNoLlm,
 
-    #[error("Full Compact failed: LLM returned empty summary")]
-    CompactEmptyResponse,
-
-    #[error("Full Compact has no usable summary output budget: {reason}")]
+    #[error("Full Compact has no usable summary budget: {reason}")]
     CompactSummaryBudgetInvalid { reason: &'static str },
 
     #[error("Full Compact failed: summary response did not complete")]
     CompactIncompleteResponse { stop_reason: peri_model::StopReason },
+
+    /// 摘要恢复有界预算耗尽：已有次数与最后一次未完成的原因。
+    ///
+    /// 原始历史未被替换；本轮 Compact 未完成。调用方据此显式结束本轮，
+    /// 不得当作已压缩或已自动恢复。
+    #[error("Full Compact summary recovery exhausted after {attempts} summary requests ({last_reason}). The original history is unchanged and this turn stopped before another model request.")]
+    CompactRecoveryExhausted {
+        attempts: u32,
+        last_reason: SummaryRecoveryReason,
+    },
 
     #[error("Full Compact failed after {attempts} attempts while context usage is {context_tokens}/{context_window} tokens. The turn was stopped before another model request; retry or change the compact model.")]
     CompactRetriesExhausted {
@@ -469,9 +500,9 @@ impl AgentError {
             Self::SerializationError(_) => "serialization",
             Self::Interrupted => "interrupted",
             Self::CompactNoLlm => "compact_no_llm",
-            Self::CompactEmptyResponse => "compact_empty_response",
             Self::CompactSummaryBudgetInvalid { .. } => "compact_summary_budget_invalid",
             Self::CompactIncompleteResponse { .. } => "compact_incomplete_response",
+            Self::CompactRecoveryExhausted { .. } => "compact_recovery_exhausted",
             Self::CompactRetriesExhausted { .. } => "compact_retries_exhausted",
             Self::CompactBudgetUnrecovered { .. } => "compact_budget_unrecovered",
             Self::Other(_) => "other",
@@ -501,6 +532,12 @@ impl AgentError {
             Self::CompactIncompleteResponse { stop_reason } => {
                 format!("Full Compact failed: the summary did not complete ({stop_reason:?}). Retry or change the compact model.")
             }
+            Self::CompactRecoveryExhausted {
+                attempts,
+                last_reason,
+            } => format!(
+                "Full Compact left the original history unchanged after {attempts} summary attempts ({last_reason}). This turn stopped before another model request; no background retry is running. Retry, or change the compact model."
+            ),
             Self::Other(error) => format!("{error:#}"),
             Self::StreamRecoveryExhausted { attempts, source } => {
                 let mut facts = model_error_facts(&source.diagnostic());

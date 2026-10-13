@@ -22,6 +22,7 @@ fn test_default_values() {
         "黑名单默认 4 个工具（Agent/AskUserQuestion/goal/TodoWrite）"
     );
     assert_eq!(config.summary_max_tokens, 16000);
+    assert_eq!(config.summary_max_requests, 3);
     assert_eq!(config.max_consecutive_failures, 3);
 }
 
@@ -34,6 +35,7 @@ fn test_serde_roundtrip() {
         micro_field_keep_head_chars: 600,
         micro_field_keep_tail_chars: 200,
         summary_max_tokens: 8000,
+        summary_max_requests: 5,
         ..Default::default()
     };
     let json = serde_json::to_string(&config).unwrap();
@@ -45,6 +47,7 @@ fn test_serde_roundtrip() {
     assert_eq!(deserialized.micro_field_keep_tail_chars, 200);
     assert!(deserialized.has_valid_micro_field_limits());
     assert_eq!(deserialized.summary_max_tokens, 8000);
+    assert_eq!(deserialized.summary_max_requests, 5);
     assert!((deserialized.micro_compact_threshold - 0.75).abs() < 0.001);
 }
 
@@ -71,6 +74,7 @@ fn test_serde_partial_deserialize() {
     assert!((config.auto_compact_threshold - 0.90).abs() < 0.001);
     assert!(config.auto_compact_enabled);
     assert!((config.micro_compact_threshold - 0.75).abs() < 0.001);
+    assert_eq!(config.summary_max_requests, 3);
 }
 
 #[test]

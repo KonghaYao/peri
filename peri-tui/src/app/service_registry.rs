@@ -131,6 +131,8 @@ impl ProcessResourceMonitor {
 /// claude_settings_override / lc / panic_notify_rx / acp_session_manager
 /// 6 字段退役——前者 service_snapshot 派生不需要，中两者仅 mod.rs 设为 None
 /// 无任何读写，lc 无 services.lc 访问，后两者 launch 写入后无消费者。
+/// （2026-10-11）mcp_pool / mcp_task_owner / mcp_init_rx 退役：遗留 TUI
+/// panel pool 删除，MCP 池与任务 owner 全归 ACP Host 部署持有。
 pub struct ServiceRegistry {
     /// 共享配置：TUI 与 ACP Server 持有同一 `Arc`，写入即时传播。
     pub peri_config: SharedPeriConfig,
@@ -139,9 +141,6 @@ pub struct ServiceRegistry {
     pub permission_mode: Arc<SharedPermissionMode>,
     /// 会话资源门面：Agent transcript/subagent、middleware 与协议面的唯一会话行为入口。
     pub session_resources: Arc<dyn SessionResources>,
-    pub mcp_pool: Option<Arc<peri_middlewares::mcp::McpClientPool>>,
-    pub mcp_task_owner: Option<peri_middlewares::mcp::McpTaskOwner>,
-    pub mcp_init_rx: Option<tokio::sync::watch::Receiver<peri_middlewares::mcp::McpInitStatus>>,
     pub cron: CronState,
     pub plugin_data: Option<PluginLoadResult>,
     /// 进程内存监控（2s 刷新）

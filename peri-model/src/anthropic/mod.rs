@@ -37,6 +37,7 @@ pub struct AnthropicConfig {
     thinking_effort: String,
     enable_cache: bool,
     max_tokens: u32,
+    context_window: Option<u32>,
     runtime: ModelRuntimeConfig,
 }
 
@@ -52,6 +53,7 @@ impl AnthropicConfig {
             thinking_effort: "medium".into(),
             enable_cache: true,
             max_tokens: DEFAULT_MAX_TOKENS,
+            context_window: None,
             runtime: ModelRuntimeConfig::default(),
         }
     }
@@ -73,6 +75,12 @@ impl AnthropicConfig {
         self
     }
 
+    /// 写入装配处已解析的上下文窗口；不传即 `None`（未知，不代填）。
+    pub fn with_context_window(mut self, context_window: Option<u32>) -> Self {
+        self.context_window = context_window;
+        self
+    }
+
     pub fn with_runtime(mut self, runtime: ModelRuntimeConfig) -> Self {
         self.runtime = runtime;
         self
@@ -91,6 +99,7 @@ impl fmt::Debug for AnthropicConfig {
             .field("thinking_effort", &self.thinking_effort)
             .field("enable_cache", &self.enable_cache)
             .field("max_tokens", &self.max_tokens)
+            .field("context_window", &self.context_window)
             .field("runtime", &self.runtime)
             .finish()
     }
@@ -197,6 +206,11 @@ impl crate::Model for AnthropicModel {
     /// 只在两个来源一致时被允许沿用，不借助请求参数覆写它（H6）。
     fn output_token_limit(&self) -> Option<u32> {
         Some(self.config.max_tokens)
+    }
+
+    /// 装配处写入的已解析上下文窗口；未写入即未知。
+    fn context_window(&self) -> Option<u32> {
+        self.config.context_window
     }
 
     fn prepare_request(&self, request: &ModelRequest) -> ModelResult<PreparedModelRequest> {

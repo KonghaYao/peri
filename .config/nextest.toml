@@ -1,0 +1,64 @@
+# cargo nextest 配置：把「测试选择」与「Cargo 编译图」分离。
+#
+# CI 里所有 nextest 调用都使用同一组 Cargo 参数（`--locked --workspace`），
+# 各步骤的测试范围差异只落在命令行 `-E` 过滤器上。nextest 的构建阶段不参与过滤
+# （先按 `cargo test --no-run` 语义构建全部测试二进制，再决定运行哪些），因此
+# 包集合、target、profile 与 feature 投影在整个 job 内保持恒定，步骤切换不再
+# 触发依赖重编译。
+#
+# 这里只放「跨步骤共享、且与 Cargo 选择无关」的规则；每个步骤的范围写在
+# .github/workflows/ci.yml 对应步骤的 `-E` 里，便于就地 review。
+# scripts/ci-test-inventory.sh --check 会核对两侧一致。
+#
+# 版本下限：default-filter 需要 0.9.84，`--no-tests` 默认 fail 需要 0.9.85。
+# CI 固定安装 0.9.148，并且每个步骤显式传 `--no-tests=fail`，不依赖默认值。
+nextest-version = "0.9.85"
+
+[profile.default]
+# 原有 E2E 跳过条件按 package + test 精确迁移，不用裸 `test(...)`：裸匹配会连带
+# 排除其他包里同名的测试。这些用例需要真实 SDK / 外部环境，在 CI 中不执行
+# （范围与迁移前 `cargo test -- --skip ...` 一致）。
+default-filter = "not (package(=peri-acp) & test(host::execution_admission_jsonl) | package(=peri-acp) & test(host::scheduled_admission) | package(=peri-tui) & test(sdk_execution::tests::real_sdk) | package(=peri-middlewares) & test(subagent::tool) | package(=peri-middlewares) & test(mcp::workspace_recovery_tests) | package(=peri-middlewares) & test(mcp::workspace_builtin_tests::bridge_accepts_workspace_owned_task_handle) | package(=peri-middlewares) & test(mcp::tool_bridge::tests::builtin_tool_call_surfaces_timeout_error_after_bridge_deadline))"
+
+# 互斥组：把串行额度收窄到「迁移前靠 --test-threads=1 隐式串行」的那些测试，
+# 而不是整个测试运行。其余测试按正常的 num-cpus 额度并行。
+#
+# 迁移前的串行范围与原因：peri-middlewares 的 lib 单元测试，以及 5 个 MCP 能力包的
+# 全部 target。libtest 会把同一二进制内的测试放在线程里并发执行，这些用例改写进程级
+# 全局状态（std::env 的 HOME / PERI_* 、全局 config path 单例、TUI 全局 atom、
+# OnceLock / 静态 Mutex），只能靠 --test-threads=1 兜住。
+#
+# nextest 是一个测试一个进程，上述进程内状态不再跨测试共享，这类冲突在结构上消失；
+# 仓库中所有 `#[serial]` / `serial_test::serial` 标注保护的都是这一类状态，因此
+# 不需要为它们建组。跨进程共享的资源不受进程隔离保护，但目前的实现是文件排他锁
+# （peri_mcp_common::process_env::lock()，基于 fs2），在 nextest 下依然有效。
+#
+# 因此这里不下「已经证明无冲突」的结论，而是先复刻迁移前的范围：与迁移前等价、
+# 零回归；同时记录迁移新增的并行面 —— nextest 允许不同测试二进制的用例同时运行
+# （迁移前 cargo test 逐个二进制串行执行、只在二进制内部按线程并发）。待实测候选：
+#   - mcp-packages/common 的 shell 类测试、mcp-packages/workspace 的非 terminal 测试
+#   - mcp-packages/config 的全局 CLIENT 单例、mcp-packages/cron 的时间敏感用例
+#   - peri-process/tests/pty_isolation.rs、peri-workflow 的真实 node 用例
+#   - 同一包内 lib 二进制与多个集成测试二进制之间的重叠
+# 收窄条件：某包连续三次三平台通过、且没有新增重试配置，即可移出组；出现一次竞态
+# 证据（而不是推测）则把对应测试并入组，并把证据记在此处。
+#
+# 已记录证据（配置未变，原因随附）：
+#   - 2026-10-12 PR #186 第二轮 macOS：
+#     peri-mcp-workspace 的 terminal::tests::lifecycle_tests::
+#     test_cancelled_foreground_shell_retains_owner_until_process_exit 断言
+#     TaskManager::shutdown 报 Complete，实得 Incomplete；耗时 3.04s，未到
+#     scope.wait() 的 5s 超时，即卡在 unsettled_external / pending_deliveries 未清空的
+#     结算竞态。该包的每个 target 都已在组内串行，重跑即通过，故这条证据不指向并行竞态，
+#     收窄条件仍未满足（三平台连续三次尚未达成）；若再次出现，优先按「整段互斥」回退，
+#     不要放宽断言。
+[test-groups]
+serial-process-state = { max-threads = 1 }
+
+[[profile.default.overrides]]
+filter = 'package(=peri-middlewares) & kind(lib)'
+test-group = 'serial-process-state'
+
+[[profile.default.overrides]]
+filter = 'package(=peri-mcp-common) | package(=peri-mcp-web) | package(=peri-mcp-artifact) | package(=peri-mcp-cron) | package(=peri-mcp-workspace)'
+test-group = 'serial-process-state'

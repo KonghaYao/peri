@@ -21,6 +21,7 @@ pub mod diff_parser;
 pub mod entry;
 pub(crate) mod entry_render_cache;
 pub mod event_handlers;
+pub mod exit_hint;
 pub mod focus_router;
 pub mod hitl_response;
 pub mod image_overlay;
