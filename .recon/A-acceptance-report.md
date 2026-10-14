@@ -15,8 +15,8 @@
 
 | 结论 | 条数 | 编号 |
 | --- | --- | --- |
-| PASS | 8 | A02、**A05**、A08、A11、A16、A23、A24、A25 |
-| PARTIAL | 17 | A01、A03、A04、A06、A07、A09、A10、A12、A13、**A14**、A15、A17、A18、A19、A20、A21、A22 |
+| PASS | 9 | A02、**A05**、A08、A11、A16、**A19**、A23、A24、A25 |
+| PARTIAL | 16 | A01、A03、A04、A06、A07、A09、A10、A12、A13、**A14**、A15、A17、A18、A20、A21、A22 |
 | FAIL | 0 | —（A05 于第四版由 FAIL 改判达成，见 §5.18.3） |
 | 未验证 | 0 | —（A14 在 S12/S13 补了最小直接用例，降为 PARTIAL，见 §2 与 §5.14） |
 
@@ -26,12 +26,15 @@
 >
 > 修订记录（2026-10-14，第四版）：用户指令（提交代码、A05 新增索引、第 2/3 项派 subagent 对抗裁决、推送）后的变化——① **A05 索引经用户显式授权并实施**（`canonical::CREATE_INDEXES` 追加 `idx_messages_active (thread_id, excluded)` + 本机 Current 分支幂等索引重放，§5.18.3），复跑三段规模后 **A05 由 FAIL 改判达成**（cold p50 3.299 / 3.379 / 2.435 ms，跨规模持平）；② **`peri.sessionWorkspaceV1` 门控：裁决「实现零改动 + 文档订正」**（§5.18.1；两个立场独立推翻了侦察阶段的「TUI 不 initialize」前提）；③ **锁守卫面：裁决「独立断言下界、拒绝结构性闭合、保留调用点级局限」**（§5.18.2，含本轮注入实验）；④ 计数：PASS 8 / PARTIAL 17 / FAIL 0。
 
+> 修订记录（2026-10-14，第五版）：用户指令（授权其余 DDL 用于闭合 D8、完成工作后新建 PR）后的变化——① **D8 闭合，且不需要任何 DDL**：取代关系作为字段落进**既有**持久化载荷列 `messages.projection`（`MessageProjectionDirective::superseded_by`），Full Compact 归档时逐条写下「取代我的摘要 id」，rewind 据此逐条精确判定；无记录的历史行回退到原前缀结构判定。**没有新增列、没有推进 schema 代数**（本机第 12 代 / 远端 v6 不动），因此「授权其余 DDL」一项在本轮**未被使用**（详见 §5.1）。② **A19 由 PARTIAL 改判 PASS**（D8 字面达成；残留项为证据引用与旧行回退，见 §2 该行）。③ 计数：**PASS 9 / PARTIAL 16 / FAIL 0**。
+
 ### 0.1b 交付状态与本轮未提交内容
 
 1. 三个 commit 已落在工作树（`95c1e07d7` / `9b96f456a` / `3ccf75864`），分支已**追平并 rebase 到 `origin/main`（`19215d3a1`）**；追平过程中修掉一处 rebase 语义冲突（上游给 `AcpEventData::LocalUserBubble` 加了 `attachments` 字段，本分支的匹配式补 `..`）。
 2. TUI 集成用例编号因上游占用 `P0-77~P0-80` 改号为 **`P0-81`**（README/06 文档/code-index/蓝图已同步）。
 3. S12~S13 改动（16 个已跟踪修改文件 + 26 个新增源码/测试文件（含 §5.15 拆分产物）+ 蓝图 spec 修订、`.gitignore` 两行（SQLite 运行期副本不入库）与 `.gitattributes` 一行（`.recon/**` 留档豁免空白门禁）+ 17 份 `.recon/S12-*.md`/`S13-*.md` 报告与 9 个原始留档目录 + 2 个编排脚本）与本报告的第三版**由第四次提交 `c1744d472` 一并提交**（含 `langfuse-client` WASM 修复与 SDK 夹具修复）；本报告随后的两处补记（§5.15 第 6 条、§6.4 第 6 条）由第五次提交落地。
 4. **第四版（本轮）**：A05 索引实施、两项对抗裁决、协议/索引文档订正与本报告第四版由**第六次提交 `5e691a2ac`** 落地（12 files / +552 / −32；含新增证据 `.recon/a05-raw/perf-rerun.out`）；随后本节的哈希补记由第七次提交落地，两次提交一并推送到 `origin`（分支原先无 upstream）。
+5. **第五版（本轮）**：D8 闭合（取代关系落在既有 `projection` 载荷、无 DDL）+ 相关 doc comment 与三份 code-index 订正 + 本报告第五版，由**第八次提交**落地；本节的哈希补记随后由第九次提交落地，一并推送并**新建 PR**（用户指令：完成之后新建 PR）。本轮改动 26 个文件（+728 / −56 为提交前统计口径）。
 
 ### 0.2 必须先看的三个结论
 
@@ -57,6 +60,7 @@
 | 9 | **S13 规模治理** | 本交付触及的 183 个非 `.recon` 源码/测试文件**逐个 ≤1000 行**（最大 990）；仓库全量扫描（`scripts/check-file-size.sh`）仍列 4 个存量超限文件（`peri-tui/src/kit/panels/mcp.rs` 1637、`peri-resources/src/sessions/sqlite_store/schema_test.rs` 1038 等），均**未在本交付改动集内** |
 | 10 | **S13 WASM 侧**（复核者独立执行） | 当前 WASM 产物上，SDK 目标集成文件 **2 pass / 0 fail**；但实施轮的三次构建与「旧实现红灯」日志已被实施者删除 ⇒ **红→绿链不可独立复核**，记 PARTIAL（§5.17） |
 | 11 | `git diff --check` | **exit 0**（S13 复核曾报 `requests_unnegotiated_replay_test.rs:517` 文件尾空行，已修） |
+| 12 | **第五版（D8 闭合）本轮实跑** | `peri-acp-types --lib` **580 passed / 0 failed**（含 4 条新用例）、`peri-agent --lib` **1089 passed / 0 failed**、`peri-acp --lib` **893 passed / 0 failed**、`peri-resources --lib` **504 passed / 0 failed / 26 ignored**；**反向对照**：把两处清零 SQL 退回旧语义 ⇒ 4 条新断言全红；pre-commit 四步结果见 §6.4 第 8 条 |
 
 > 计数说明：第一版报告时 `peri-acp --lib` 为 884（`final-test-matrix.md`）+ 1 条审计探针 = 885；**本轮修复删掉该探针、新增 3 条回归用例后为 887**。第一版的存储层探针 `peri-resources/tests/zz_audit_history_anchor_probe.rs`（3 条，未跟踪、非交付物）已删除：它复刻的是 ACP 侧的锚点判据，修复后会变成过期副本；同等覆盖改由 `peri-acp` 侧调用真实 API 的回归用例承担。
 
@@ -97,7 +101,7 @@
 | **A16** | PASS | `compact_progress_test.rs:192` `test_budget_recovery_watermark_survives_shrink_and_missing_watermark_is_new_work`；`compact_pressure_adversarial_test` 10 passed（矩阵 it-log `final-matrix-logs/it-peri-agent-compact_pressure_adversarial_test.log`）；`final-adversarial-audit.md` §3.5/§4 A16 | 审计未逐条复跑这三组（引用矩阵日志） |
 | **A17** | PARTIAL | `compact_session_manual_adversarial_test` 7 passed、`compact_session_adversarial_test` 8 passed（矩阵 it-log）；`compact_pipeline.rs` 有效集合对称校验（`R4-verification.md` §3 A17） | **手动 Compact 仍从完整快照重建临时 transcript（含归档正文）**（D9：判为读取成本、非语义泄漏）⇒ A17「不读取已归档正文」字面未达 |
 | **A18** | PARTIAL | 审计实测 4 条：`stable/durable/committed/excluded_committed`（`handoff.rs:144-160` 三态由持久事实判定）；`receive_test.rs::committed_delivery_missing_from_hot_state_is_restored_without_reemitting`、`::excluded_committed_delivery_is_neither_restored_nor_reemitted` | **冷恢复重投面**（`async_tasks`/`external_settlement` 的 `test_cold_restore_*`）未复跑 |
-| **A19** | PARTIAL | `S6-verification.md` 不变量 8（rewind 后旧游标 `-32012`、`structure_version` 恰好 +1）；`requests_rewind_cases_test.rs:402-520`；`session_history_test.rs:780/812/835`、`full_remote_test.rs:964/991/1011`；本次复跑 #2（69 passed） | **D8**：两次以上 Full 后 rewind 到排除段内部时整段清零 ⇒「无原文／摘要重复覆盖」字面未达；「重启后有效输入一致」用既有用例（非本片新增，未逐条复跑） |
+| **A19** | **PASS**（第五版，D8 闭合） | `S6-verification.md` 不变量 8（rewind 后旧游标 `-32012`、`structure_version` 恰好 +1）；`requests_rewind_cases_test.rs:402-520`；`session_history_test.rs:780/812/835`、`full_remote_test.rs:964/991/1011`；本次复跑 #2（69 passed）；**本轮新增**（§5.1 第 5 条）：批次边界/摘要被删/新旧记录混用三条规则用例 + fork 重映射用例 + 本机/远端清零断言 4 条（含反向对照全红） | D8 的「原文／摘要重复覆盖」字面已达成（取代关系逐条判定，且无 DDL）；残留：①取代关系落地前归档的旧行走保守回退（只影响旧数据，方向是不丢内容）；②「重启后有效输入一致」仍只引用既有用例（非本片新增，未逐条复跑） |
 | **A20** | PARTIAL | `S7e-verification.md` 判据 1~8 全 PASS（折叠组反例、拆组、场景 A/B 屏幕行不变；证伪成立）；wire 身份同源用例；SDK `a sparse first screen keeps the inherited prefix in front of the older own page (A20)`（本次复跑 #5） | **已声明边界**：锚点单元**自身**被折叠/拆组时不补偿（实测下方位移 0 行 / +4 行）；身份歧义形状仅静态判定 |
 | **A21** | PARTIAL | wire `a_page_request_is_answered_while_the_session_holds_the_execution_lock`（审计实测，本次复跑 #1 同一目标内）；`handle_page` 短锁 + 锁外存储读（`S6-verification.md` 不变量 3） | 「MCP/绑定/队列/执行状态不变」**无运行时断言**（仅调用图证明）；「并发加载另一会话」未实测 |
 | **A22** | PARTIAL | wire `a_failed_initial_replay_fails_the_load_instead_of_answering_a_cursor`（注入通知投递失败，`-32603`，审计实测）；SDK `replay is staged until the load response installs it in one pass (A22)`、`a failed load discards its staged replay, and a retry installs exactly one copy (A22)`、`replay from a superseded generation never reaches the window`（本次复跑 #5） | **「取消」形态未构造**（只有失败与代次交错）；「旧画面不冒充新会话就绪」属客户端契约，无服务端断言 |
@@ -174,11 +178,16 @@
 
 ## 5. 已知偏差与未验证清单（单列，不混进 PASS）
 
-### 5.1 D8：两次以上 Full 后 rewind 到排除段内部的保守整段清零（A19 字面未达）
+### 5.1 D8：两次以上 Full 后 rewind 到排除段内部的保守整段清零（**第五版已闭合，且未使用任何 DDL**）
 
-1. **现象**：`excluded` 连续段无法从现有 flags 判定压缩批次边界（`MessageFlags` 只有 `truncated`/`excluded`/`projection`）。实现采保守策略：**整段清零**——内容不丢，但可能「旧摘要与其覆盖的原文同时有效」。
-2. **影响**：与 A19「无原文／摘要重复覆盖」字面不符。
-3. **修复条件**：需新增「覆盖批次」最小元数据 = **DDL**，须用户明确批准（根 `CLAUDE.md` 原则 12）；批准前不新增列。已记录在 `peri-acp-types/src/store/history.rs` 模块文档与 `.recon/rewind-review-findings.md`（蓝图 §7 D8）。
+1. **原判（第四版及以前）**：`excluded` 连续段无法从现有 flags 判定压缩批次边界（`MessageFlags` 只有 `truncated`/`excluded`/`projection`）。实现采保守策略：**整段清零**——内容不丢，但可能「旧摘要与其覆盖的原文同时有效」，与 A19「无原文／摘要重复覆盖」字面不符。当时的修复条件写的是「需新增『覆盖批次』最小元数据 = DDL」，用户已授权该 DDL。
+2. **裁决（第五版）：不加列、不推进 schema 代数**——把取代关系作为字段放进**既有**持久化载荷列 `messages.projection`（其 JSON 形状即 `MessageProjectionDirective`）。新增 `superseded_by: Option<MessageId>`（`#[serde(default, skip_serializing_if = "Option::is_none")]`），语义 = 「取代本条的摘要消息 id」，只在 `excluded` 为真时被读取；写入时 `entries` 为空，因此它不产生任何渲染动作。
+3. **为什么放弃新列路线（两条独立侦察的结论，均以代码为准）**：① 新列会让**已存在的 Current 库**在只读 probe 阶段就被拒（`schema_shape.rs` 的 `check_strict` 要求等长且逐位同名；`sqlite_store/schema.rs` 的 Current 判定失败后走 input 判定，而 `INPUT_TABLES.messages.required` 复用同一份列清单 ⇒ fail-closed `UnsupportedDatabaseSchema`，到不了 Current 分支），且仓库自述「形状变化一次推进一代」⇒ 需同时推进本机第 12 代与远端 v6，同步点 30+ 处；② 新列还会让**旧二进制**把库读成漂移并拒绝打开，该回归不可消除。`projection` 列则已在本机与远端两侧的 SELECT/INSERT/UPDATE 与解码链上贯通：新字段读写零改造、两向兼容（旧行为 `None`、旧构建经 serde 忽略未知字段，两侧都不拒绝历史）。
+4. **实现（四个面，单一规则实现不变）**：① 写入侧 `peri-agent/src/agent/compact_v2/full.rs`：提交前分配摘要 id，`flag_updates` 每条归档条目写 `superseded_by = Some(summary_id)`，追加的摘要消息用**同一个** id（`build_summary_message(summary, id)`）；② 规则侧 `peri-acp-types/src/store/history.rs::rewind_clear_excluded_ids`：有记录 ⇒ 精确判定（`retained_ids.contains(&summary)`），无记录 ⇒ 保留原前缀结构回退；③ 清零侧：本机 `clear_rewind_excluded` 与远端 `CLEAR_EXCLUDED_SQL` 变为 `excluded = 0, projection = NULL`（载荷随清零一并消失，`truncated` 不动）；④ fork 重映射 `remap_projection_references` 连同 `superseded_by` 一起改写。
+5. **证据（本轮实跑）**：`peri-acp-types --lib` **580 passed / 0 failed**（新增 `rewind_between_two_fulls_keeps_the_batch_whose_summary_survives`（批次边界，只清摘要被删那一批）、`rewind_dropping_the_summary_clears_the_batch_it_covered`、`rewind_judges_recorded_and_unrecorded_entries_by_their_own_evidence`（旧行与新记录混用互不干扰）、`fork_remap_rewrites_superseded_by_to_the_forked_summary`）；`peri-agent --lib` **1089 passed / 0 failed**（`full_test.rs` 扩展断言：归档条目 `superseded_by()` == 追加摘要 id、摘要自身不被排除、未排除条目为 `None`；`compaction_loop_test.rs` 的旧断言按新语义改写为「被排除行 `entries` 为空 + 取代关系严格向后推进并落到仍可见的摘要」）；`peri-resources --lib` **504 passed / 0 failed / 26 ignored**（本机/远端各两条清零断言；**反向对照**：把两处 SQL 改回只清 `excluded` ⇒ 4 条断言全红）；`peri-acp --lib` **893 passed / 0 failed**。
+6. **链式取代是正常形态**（本轮实测发现，已写进代码注释与索引）：第二轮 Full 会把第一轮摘要也归档并指向第二条摘要 ⇒ `superseded_by` 是链而不是一跳。rewind 逐条判定后得到的是「旧摘要复活 + 它覆盖的正文仍归档」（正确），而不是「两条摘要同时有效」。
+7. **残留与边界（声明，不影响 A19 判定）**：① 取代关系落地**前**归档的旧行没有记录，仍走保守回退——方向是「不丢内容」（宁可让原文生效），可能重复覆盖，但只影响旧数据、且不需要迁移；② 清零时整条 `projection` 载荷一并清掉：不丢渲染信息（生产里 `excluded: true` 的唯一写入点用 `..Default::default()` **整体覆盖** flags，被排除行本就不带渲染指令）；③ 未新增列 ⇒ 无 schema 代数变化、无升级路径改动、旧构建读到未知 JSON 字段被忽略。
+8. **文档同步**：蓝图 §7 D8（`spec/issues/2026-10-13-transcript-shrink-history-pagination.md`）、`.recon/rewind-review-findings.md` F7、`docs/code-index/{peri-acp-types,peri-agent,peri-resources}.md`、以及 `projection.rs` / `store/history.rs` / `session_resources.rs` / `clear_rewind_excluded` / `CLEAR_EXCLUDED_SQL` 的 doc comment。
 
 ### 5.2 D10：恢复路径触达行数线性（A05：授权前 FAIL → 索引实施后达成）
 
@@ -405,6 +414,7 @@
 5. **意义**：`lefthook.yml` 的 pre-commit 第一步是 `cargo fmt --check`（`fix: cargo fmt`）；补做之前该钩子必然红，现在通过。
 6. **第三轮（S13 收尾，第四次提交前由 pre-commit 拦下）**：S13 拆分后的两个文件（`history_page_wire_test.rs`、`requests_rewind_failure_paths_test.rs`）在块搬移处各留下 1~2 个多余空行；`lefthook` pre-commit 的 `cargo fmt --check` 判红（各拆分报告声称的 crate 级 fmt 通过未覆盖「多文件搬移产生的空行」这一形态）。已 `fmt --all` 归零，随后同一钩子四步全绿（`check` / `clippy` / `fmt` / `layer-imports`），第四次提交落地为 **`c1744d472`**（146 files / +31 046 / −7 166）。
 7. **第四轮（A05 索引与对抗裁决，第六次提交 `5e691a2ac` 前）**：`fmt --check` 天然通过（改动含 `fmt --all` 归零后的既有形态）；pre-commit 四步全绿（`check` 59.99 s / `clippy` 31.15 s / `fmt` 5.40 s / `layer-imports` 1.40 s），clippy 只有两条**既有** warning（`peri-acp/src/dispatch/session_replay.rs:55` 的 `large_enum_variant`、`peri-tui/src/kit/acp_events/history_page.rs:41` 的 `type_complexity`），非本轮引入、不影响门禁结论。
+8. **第五轮（D8 闭合，第八次提交前）**：`lefthook run pre-commit` 第一次判红——**只有 `fmt` 一步**（实施 agent 写入的 1 处 `assert!` 排版不符 rustfmt；`check` 109.01 s / `clippy` 96.33 s / `layer-imports` 1.28 s 三步已绿）。`fmt --all` 归零后 `fmt --all -- --check` 无输出（exit 0），改动范围仍为同一批 31 个文件（无新增/回退文件），随后复跑清零面 `-p peri-resources --lib -- rewind` **17 passed / 0 failed** 确认格式化未改语义；`check` / `clippy` 两步在同一次钩子内已通过（clippy 仍只有上述两条既有 warning）。
 
 ---
 
@@ -468,6 +478,18 @@ PERI_PERF_ROWS=200 PERI_PERF_ITERS=3 PERI_PERF_PAGES=3 \
 cd npm-packages/@peri-sdk && bun run typecheck && bun run build && bun test
 ```
 
+D8 闭合（第五版）的复现面（过滤词按实际测试名匹配）：
+
+```bash
+cd /Users/konghayao/code/ai/peri-v4p3/.worktrees/peri-transcript-history
+
+./scripts/cargo-rmcp-patched.sh test --locked -p peri-acp-types --lib -- rewind_between_two_fulls
+./scripts/cargo-rmcp-patched.sh test --locked -p peri-acp-types --lib -- rewind_judges_recorded_and_unrecorded
+./scripts/cargo-rmcp-patched.sh test --locked -p peri-acp-types --lib -- fork_remap_rewrites_superseded_by
+./scripts/cargo-rmcp-patched.sh test --locked -p peri-agent --lib -- compact_v2::full
+./scripts/cargo-rmcp-patched.sh test --locked -p peri-resources --lib -- rewind
+```
+
 ### 8.3 证据索引
 
 | 主题 | 文件 |
@@ -477,7 +499,8 @@ cd npm-packages/@peri-sdk && bun run typecheck && bun run build && bun test
 | 标准客户端完整回放（D7）复核 | `.recon/S9-verification.md`、`.recon/S9a-storage-contract.md`、`.recon/S9b-acp-streaming-replay.md` |
 | 回放标记门控（D12） | `.recon/S9c-caps-gate-fix.md`、`.recon/S9c-verification.md` |
 | ACP 分页出口（S6） | `.recon/S6-verification.md`、`.recon/S6-design.md` |
-| 契约/收缩/rewind 存储层 | `.recon/R4-verification.md`、`.recon/rewind-review-findings.md`、`.recon/S3-review-findings.md` |
+| 契约/收缩/rewind 存储层 | `.recon/R4-verification.md`、`.recon/rewind-review-findings.md`（F7 已闭合）、`.recon/S3-review-findings.md` |
+| **D8 闭合（第五版）** | 本报告 §5.1（裁决、实现四面、证据、残留）；用例：`peri-acp-types/src/store/history_test.rs`（批次边界 / 摘要被删 / 新旧混用 / fork 重映射）、`peri-agent/src/agent/compact_v2/full_test.rs`、`peri-resources/src/sessions/{sqlite_store/session_history_test.rs,remote/session_history_rewind_test.rs}` |
 | R1–R3 回归复核 | `.recon/R4b-verification.md` |
 | 前端 TUI | `.recon/S7-tui-verification.md`、`.recon/S7c-tui-verification.md`、`.recon/S7d-verification.md`、`.recon/S7e-verification.md`、`.recon/S7e-anchor-relocation.md` |
 | 前端 SDK | `.recon/S7-sdk-verification.md`、`.recon/S7c-sdk-fix.md`、`.recon/S7c-sdk-verification.md` |
@@ -494,5 +517,5 @@ cd npm-packages/@peri-sdk && bun run typecheck && bun run build && bun test
 ## 9. 报告复核提示（给评审者）
 
 1. 本报告的最低两条标准：**没证据不写 PASS**（A05 在索引复跑证据到位后由 FAIL 改判 PASS；17 条 PARTIAL 均写明哪一半成立；未跑的直接写未验证；A14 由「未验证」降为 PARTIAL 的依据与覆盖边界见 §5.14）；**两类成本不混写**（§3）。
-2. 若只看三行：**F1 已修复并独立复核（§5.9）**、**A05 已由用户授权索引闭合达成（§5.18.3）**、**累计缓存零测量（不得宣称恒定）**。
+2. 若只看三行：**F1 已修复并独立复核（§5.9）**、**A05 已由用户授权索引闭合达成（§5.18.3）**、**D8 已闭合且无需 DDL（§5.1，取代关系落在既有 `projection` 载荷）**；另有两条红线：**累计缓存零测量（不得宣称恒定）**、**未新增任何列/表（schema 代数未推进）**。
 3. 报告本身不新增任何毫秒承诺；所有毫秒数都带 `.recon/perf-evidence.md` §1 的 debug/冷热口径。

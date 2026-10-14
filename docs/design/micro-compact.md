@@ -295,6 +295,8 @@ MessageFlags {
 
 `MessageProjectionDirective` 包含 `policy_version`（策略版本）和 `entries`（仅含本消息的 action 列表）。不包含 BaseMessage 内容或 Base64——可以安全序列化到 SQLite。
 
+该载荷同时承载一项渲染之外的事实：`superseded_by: Option<MessageId>`（`#[serde(default)]`，`Full Compact` 归档时写入）= **取代本条的摘要消息 id**。写入时 `entries` 为空，因此它不产生任何渲染动作，只在 `excluded` 为真时被读取；rewind 的「清零哪些 `excluded`」据此逐条精确判定（取代它的摘要仍在保留前缀 ⇒ 排除依旧有依据，否则原文重新有效）。没有这条记录的历史行（该字段落地前归档）回退到原有的排除前缀结构判定。清零 `excluded` 的存储路径（本机 `clear_rewind_excluded`、远端 `CLEAR_EXCLUDED_SQL`）会把整条载荷一并清掉，恢复正文的条目不会残留取代记录；字段新增没有改变 `messages` 表形状（仍是同一列、同一代数），旧行反序列化为 `None`、旧构建忽略未知字段。
+
 ### 7.2 批量写入
 
 旧版逐条持久化 `truncated` 标记产生多次写入；当前采用同事务批量投影更新。当前形状已移除会话派生缓存及其失效接口，不再为历史变更维护缓存正文或 epoch。

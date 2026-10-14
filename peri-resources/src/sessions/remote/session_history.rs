@@ -101,9 +101,17 @@ const SET_TITLE_IF_ABSENT_SQL: &str =
 const REWIND_KEEP_THROUGH_SQL: &str = "DELETE FROM messages WHERE thread_id = ?1 AND rowid > ?2";
 const REWIND_REMOVE_FROM_SQL: &str = "DELETE FROM messages WHERE thread_id = ?1 AND rowid >= ?2";
 
-/// rewind 有效视图重建：清零保留前缀里条目的 `excluded`（`truncated`/`projection` 不动）。
+/// rewind 有效视图重建：清零保留前缀里条目的 `excluded`，并把**整条 `projection` 载荷一并
+/// 清掉**（置 NULL）；`truncated` 不动。
+///
+/// 载荷必须随清零一起消失：`projection` 列是 flags 的持久化载荷，其中的 `superseded_by`
+/// 只在 `excluded` 为真时被读取——正文已恢复的条目留着「我被某摘要取代」的记录，下游读到它
+/// 就会拿到一份与有效视图矛盾的投影指令。清掉它不丢任何仍然有效的渲染信息：生产里
+/// `excluded: true` 的唯一写入点是 Full Compact（`peri-agent/src/agent/compact_v2/full.rs`），
+/// 它写 flags 时用 `..Default::default()` 整体覆盖，被排除的行本来就不带渲染指令。
+/// 本机同一语义见 `sqlite_store::session_data::history::clear_rewind_excluded`。
 const CLEAR_EXCLUDED_SQL: &str =
-    "UPDATE messages SET excluded = 0 WHERE thread_id = ?1 AND message_id = ?2";
+    "UPDATE messages SET excluded = 0, projection = NULL WHERE thread_id = ?1 AND message_id = ?2";
 
 /// 精确移除单条条目。
 const REMOVE_MESSAGE_SQL: &str = "DELETE FROM messages WHERE thread_id = ?1 AND message_id = ?2";
@@ -311,10 +319,11 @@ impl RemoteSessionData {
     /// 随后重数计数。
     ///
     /// `clear_excluded` 是保留前缀里要清零 `excluded` 的 id（由调用方从一致读取的完整历史
-    /// 算出）。删除与清零在**同一批**里：只有资格写落定、整批生效才算成功，不存在「删了
-    /// 边界却没恢复原文」的中间状态。前置一致读把「不是本会话的条目」归 `InvalidInput`
-    /// （与本机同一归类）；批内守卫让「读与写之间被删掉」以整批回滚收场而不是静默 0 行，
-    /// 其中 [`GUARD_BOUNDARY_ROWID_SQL`] 专门盯住删除下界本身。
+    /// 算出）；清零同时把整条 `projection` 载荷清掉（`truncated` 不动，理由见
+    /// [`CLEAR_EXCLUDED_SQL`]）。删除与清零在**同一批**里：只有资格写落定、整批生效才算成功，
+    /// 不存在「删了边界却没恢复原文」的中间状态。前置一致读把「不是本会话的条目」归
+    /// `InvalidInput`（与本机同一归类）；批内守卫让「读与写之间被删掉」以整批回滚收场而不是
+    /// 静默 0 行，其中 [`GUARD_BOUNDARY_ROWID_SQL`] 专门盯住删除下界本身。
     ///
     /// 可写性检查必须**先于**边界读取：只读打开时这是写请求，不能因为「边界恰好找不到」
     /// 就以成功收场（本机 `rewind_stored_history` 同样先 `writable()`）。
@@ -744,6 +753,16 @@ mod tests {
     fn rewind_boundaries_differ_only_in_the_comparison() {
         assert!(REWIND_KEEP_THROUGH_SQL.ends_with("rowid > ?2"));
         assert!(REWIND_REMOVE_FROM_SQL.ends_with("rowid >= ?2"));
+    }
+
+    /// 清零语句必须**整条载荷一起清**：`projection` 里的 `superseded_by` 只在 `excluded` 为真
+    /// 时被读取，正文恢复后留着它就是「已生效的条目仍带着『我被某摘要取代』」的矛盾记录。
+    ///
+    /// `truncated` 不许进 SET：它来自 Micro compact，与排除无关，清零必须原样保留。
+    #[test]
+    fn rewind_clearing_excluded_clears_the_whole_projection_payload() {
+        assert!(CLEAR_EXCLUDED_SQL.contains("SET excluded = 0, projection = NULL"));
+        assert!(!CLEAR_EXCLUDED_SQL.contains("truncated"));
     }
 
     /// 操作身份必须区分「同内容的两批追加」：只按内容摘要会让第二批被当成重放静默跳过。

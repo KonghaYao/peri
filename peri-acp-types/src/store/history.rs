@@ -65,8 +65,8 @@ pub struct RewoundHistory {
 ///
 /// - `allocate_id` 注入新 ID：生产用 `MessageId::new()`，测试可用计数器，本函数
 ///   自身不产生随机性。
-/// - flags 只复制「payload 确实存在」的条目；投影条目里指向被复制消息的引用
-///   一并改写到新 ID，否则目标会话会引用 source 的消息。
+/// - flags 只复制「payload 确实存在」的条目；投影里的消息引用（渲染条目与
+///   `superseded_by` 取代关系）一并改写到新 ID，否则目标会话会引用 source 的消息。
 /// - source 只读，本函数不修改任何输入。
 pub fn remap_fork_history(
     source_payloads: &[PersistedPayload],
@@ -171,37 +171,46 @@ pub type RewindFlagEntry = (MessageId, MessageFlags, bool);
 /// rewind 后必须清零 `excluded` 的条目 id（按历史顺序）。
 ///
 /// 输入是 rewind 后**保留的前缀**（canonical 顺序）与它的长度 `keep_len`；输出只列
-/// `excluded` 要从 `true` 改回 `false` 的 id——其余 flag 位（`truncated`、`projection`）
-/// 不因此改变，调用方不得把它们当成「无标记」覆盖回去。
+/// `excluded` 要从 `true` 改回 `false` 的 id。本函数不读也不写 `truncated` 与 `projection`
+/// 载荷：清零是否连带清掉载荷由存储路径决定（两侧都会清，见
+/// [`crate::projection::MessageProjectionDirective::superseded_by`]），调用方不得把
+/// 其余 flag 位当成「无标记」覆盖回去。
 ///
-/// # 依赖的不变量（Full Compact 每次提交都维护）
+/// # 依据：每条排除的取代关系
 ///
-/// Full 排除「当时所有未被排除的 own 非 System 条目」，再在尾部追加一条不被排除的摘要
-/// （见 `compact_v2/full.rs`）。因此 own 区在任意时刻成立：设分界 k，own 区里前 k 个非
-/// System 条目被排除、其余不被排除——排除集合恒为**非 System 条目的前缀**。非 System 的
-/// 祖先条目虽不被排除，但它们的来源是继承上下文（父快照），不在本会话的 own 历史里；
-/// 调用方必须只把 own 历史交给本函数，否则首个祖先条目的不排除会直接终结领导段。
+/// Full Compact 每次提交都排除「当时所有未被排除的 own 非 System 条目」，再在尾部追加一条
+/// 不被排除的摘要（见 `compact_v2/full.rs`），并在同一批里给每条被排除的条目写下**取代它的
+/// 那条摘要 id**（`MessageFlags::superseded_by()`）。本次 rewind 保留前缀之后，一条排除
+/// 是否仍有依据只取决于**它的那条摘要是否还在保留前缀里**：
 ///
-/// # 规则
+/// - 摘要仍在 ⇒ 排除依旧有依据：被取代的原文不进有效视图。
+/// - 摘要已被本次 rewind 删掉 ⇒ 依据消失：清零该条的 `excluded`，原文重新有效。
 ///
-/// 取保留前缀里同样口径的「最长 excluded 前缀」长度 k：
+/// 这个判定逐条成立，因此两次以上 Full 之后回退到排除段内部时，**早先批次**的排除会连同
+/// 它自己的摘要一起保留下来，不会出现「旧摘要与其覆盖的原文同时有效」的重复覆盖
+/// （A19「无原文／摘要重复覆盖」）。
 ///
-/// - 前缀在位置 k 上存在非 System 条目（按不变量它不被排除）→ 它是仍然成立的那次 Full 的
-///   摘要，前 k 条的排除**依旧有依据**；只有 k 之后出现的 `excluded` 属于被本次 rewind
-///   删掉摘要的批次，必须清零。
-/// - 位置 k 上不存在这样的条目 → 摘要已被本次 rewind 删除（或前缀本身就是纯 excluded），
-///   前缀的排除失去依据，前缀内所有 `excluded` 一律清零。
+/// # 未记录取代关系的历史行（保守回退）
 ///
-/// 两条分支正好避开需求点名的两种错误：只删后置摘要而让保留原文继续失效（排除仍在、
-/// 原文读不回来），以及把保留前缀的 `excluded` 全清（旧摘要和它覆盖的原文一起复活）。
-/// 判定只用 `excluded` 的前缀结构与「System 不参与排除」两个既有事实，不依赖摘要文本。
+/// 取代关系落地之前归档的条目没有这个记录，无法逐条判定。对它们沿用原有的**前缀结构**
+/// 判定：设保留前缀的 own 非 System 条目里最长 excluded 前缀长度为 k，位置 k 上存在非
+/// System 条目（按 Full 的不变量，它是一条仍然有效的摘要）⇒ 前 k 条的排除仍有效；
+/// 位置 k 上不存在 ⇒ 摘要已被本次 rewind 删除，前缀内所有 `excluded` 一律清零。
+/// 该回退只在证据缺失时生效，方向始终是「不丢内容」（宁可让原文生效，也不把它留在视图外）。
+///
+/// # 调用方契约
+///
+/// 只把**本会话 own 历史**交给本函数，且必须携带被排除条目的 flags：非 System 的祖先条目
+/// 虽不被排除，但它们的来源是继承上下文（父快照），不在本会话的 own 历史里；首个祖先条目的
+/// 不排除会直接终结领导段。
 ///
 /// `keep_len` 必须不超过 `entries.len()`：调用方由 [`rewind_keep_len`] 在同一份历史上取得，
 /// 越界即调用方违约（切片越界会直接暴露），这里不静默截断。
 pub fn rewind_clear_excluded_ids(entries: &[RewindFlagEntry], keep_len: usize) -> Vec<MessageId> {
     let retained = &entries[..keep_len];
+    let retained_ids: HashSet<MessageId> = retained.iter().map(|(id, _, _)| *id).collect();
     // 领导段长度与「位置 k 上是否有存活的摘要」在**同一次**遍历里得出：
-    // take_while 会吃掉那个不满足谓词的条目，分两步写就会丢位置。
+    // take_while 会吃掉那个不满足谓词的条目，分两步写就会丢位置。只服务无取代记录的行。
     let mut covered = 0usize;
     let mut summary_survives = false;
     for (_, flags, is_system) in retained {
@@ -220,8 +229,16 @@ pub fn rewind_clear_excluded_ids(entries: &[RewindFlagEntry], keep_len: usize) -
         if *is_system {
             continue;
         }
-        if flags.excluded && (!summary_survives || own_position >= covered) {
-            clear.push(*id);
+        if flags.excluded {
+            let still_covered = match flags.superseded_by() {
+                // 精确判定：取代它的摘要仍在保留前缀里，排除依旧有依据。
+                Some(summary) => retained_ids.contains(&summary),
+                // 未记录取代关系：沿用前缀结构判定（保守，见上文）。
+                None => summary_survives && own_position < covered,
+            };
+            if !still_covered {
+                clear.push(*id);
+            }
         }
         own_position += 1;
     }
@@ -262,7 +279,10 @@ pub fn apply_compaction_change(
     Ok(())
 }
 
-/// 改写 flags 中指向已复制消息的投影条目。
+/// 改写 flags 中指向已复制消息的投影引用：渲染条目与取代关系。
+///
+/// 取代关系也是消息引用：`superseded_by` 若留在 source 的摘要上，目标会话的排除判定就锚在
+/// 别的会话——source rewind 掉那条摘要后，目标会误判自己的排除失去依据并复活旧正文。
 fn remap_projection_references(
     mut flags: MessageFlags,
     id_map: &HashMap<MessageId, MessageId>,
@@ -271,6 +291,11 @@ fn remap_projection_references(
         for entry in &mut projection.entries {
             if let Some(remapped) = id_map.get(&entry.message_id) {
                 entry.message_id = *remapped;
+            }
+        }
+        if let Some(summary) = projection.superseded_by.as_mut() {
+            if let Some(remapped) = id_map.get(summary) {
+                *summary = *remapped;
             }
         }
     }

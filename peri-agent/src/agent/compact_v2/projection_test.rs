@@ -20,6 +20,7 @@ fn test_projection_directive_serde_roundtrip() {
                 keep_tail: 200,
             },
         }],
+        superseded_by: None,
     };
     let json = serde_json::to_string(&directive).expect("序列化失败");
     let restored: MessageProjectionDirective = serde_json::from_str(&json).expect("反序列化失败");
@@ -104,6 +105,7 @@ fn test_message_flags_with_projection_serde_roundtrip() {
                 target: ProjectionTarget::Message,
                 action: ProjectionAction::Keep,
             }],
+            superseded_by: None,
         }),
     };
     let json = serde_json::to_string(&flags).expect("序列化失败");

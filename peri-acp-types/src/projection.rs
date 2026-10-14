@@ -61,10 +61,27 @@ pub struct ProjectionActionEntry {
 }
 
 /// 消息级投影指令 — 存储于 MessageFlags 中，可序列化/可恢复
+///
+/// 本类型是 `MessageFlags.projection` 的**持久化载荷形状**（本机与远端的
+/// `messages.projection` 列都是它的 JSON）：以渲染指令为主，另承载一项渲染之外的
+/// 事实——[`Self::superseded_by`] 的 Full Compact 取代关系。
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct MessageProjectionDirective {
     pub policy_version: u32,
     /// 仅含本消息的 action entries，不含 BaseMessage 内容或 Base64
     #[serde(default)]
     pub entries: Vec<ProjectionActionEntry>,
+    /// 取代本条的摘要消息 id（Full Compact 归档时写入）。
+    ///
+    /// **渲染之外的事实**：写入它的同时 `entries` 为空（Full 归档按既有语义清空渲染
+    /// 指令），因此它不产生任何渲染动作；只有 `MessageFlags.excluded` 为真时才被读取，
+    /// rewind 用它精确判定「排除是否仍有依据」（见
+    /// [`crate::store::history::rewind_clear_excluded_ids`]）。
+    ///
+    /// 清零 `excluded` 的存储路径把整条载荷一并清掉（本机 `clear_rewind_excluded`、
+    /// 远端 `session_history::CLEAR_EXCLUDED_SQL`），所以它不会残留在已恢复正文的条目上。旧行没有
+    /// 这个字段（`None`），旧构建读到它也不认识——serde 默认忽略未知字段，两侧都不会因此
+    /// 拒绝历史。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub superseded_by: Option<MessageId>,
 }

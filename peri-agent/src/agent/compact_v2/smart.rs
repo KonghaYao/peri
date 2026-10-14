@@ -34,6 +34,7 @@ pub fn smart_compact(transcript: &mut MessageTranscript, config: &CompactConfig)
                 let directive = crate::agent::compact_v2::projection::MessageProjectionDirective {
                     policy_version: crate::agent::compact_v2::projection::PROJECTION_POLICY_VERSION,
                     entries: vec![action.clone()],
+                    superseded_by: None,
                 };
                 transcript.set_flags_projection(action.message_id, directive);
             }

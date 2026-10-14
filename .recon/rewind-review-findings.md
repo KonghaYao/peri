@@ -26,7 +26,7 @@
 | F4 | 真实缺陷（前端一致性） | `peri-acp/src/session/command/rewind.rs:253-261` vs `host/requests/rewind.rs:294-296` | `RewindCompleted` 事件携带的是 **canonical** 保留前缀（含仍被存活摘要覆盖的正文），只有 wire 的 `history` 字段被改成有效视图。TUI 以该事件为事实源重建整个 transcript 与候选弹窗 → 用户看到模型/存储都不认为有效的条目 | 事件改用 `publish_rewind_view` 之后的**有效视图**（或把有效前缀传进 `execute_rewind`） |
 | F5 | fail-open | `peri-acp/src/session/command/rewind.rs:224` | `if let (Some(store), Some(tid))` 在句柄缺失时**静默跳过** durable 提交，却照旧返回「已执行」并发事件 | 明确区分「无持久化句柄的合法场景」与「应报错」，默认显式失败 |
 | F6 | 记录（不改） | `peri-acp/src/session/command/rewind.rs:122-134` | slash `/rewind` 走 `RemovedIds`：不重建有效视图、仍在内存里定位目标。当前无生产调用者（`dispatch::execute_command` 在本检出无调用方），wire 语义与 RPC 不同 | 仅在文档中标注；若恢复 slash 路由需走同一 plan |
-| F7 | 记录（需裁决） | `peri-acp-types/src/store/history.rs:201` | 两次以上 Full 后回退到「前缀内部」位置时，`excluded` 连续段无法从 flags 判断批次边界 → 采「整段清零」：原文与其摘要同时有效（重复覆盖，不丢内容）。A19「无原文／摘要重复覆盖」在此窄场景未达 | 结构上无法从现有 flags 判定（`MessageFlags` 只有 `truncated/excluded/projection`，`projection` 是 Micro 投影指令，不含批次）。要精确修复需新增「覆盖批次」最小元数据 → 属 DDL，须用户批准；否则保留保守行为并记录 |
+| F7 | 记录（需裁决） | `peri-acp-types/src/store/history.rs:201` | 两次以上 Full 后回退到「前缀内部」位置时，`excluded` 连续段无法从 flags 判断批次边界 → 采「整段清零」：原文与其摘要同时有效（重复覆盖，不丢内容）。A19「无原文／摘要重复覆盖」在此窄场景未达 | 结构上无法从现有 flags 判定（`MessageFlags` 只有 `truncated/excluded/projection`，`projection` 是 Micro 投影指令，不含批次）。要精确修复需新增「覆盖批次」最小元数据 → 属 DDL，须用户批准；否则保留保守行为并记录。**→ 已闭合（无 DDL）：取代关系落进既有 `projection` 载荷（`MessageProjectionDirective::superseded_by`），Full 归档时逐条写下取代它的摘要 id，`rewind_clear_excluded_ids` 据此逐条精确判定；无记录旧行回退保守判定。见验收报告 §5.1 与蓝图 D17.5。** |
 
 ## 测试缺口（随 F1-F5 一并补）
 

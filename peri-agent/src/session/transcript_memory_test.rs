@@ -28,6 +28,7 @@ fn test_ancestor_flags_can_restore_but_cannot_mutate() {
         MessageProjectionDirective {
             policy_version: 2,
             entries: vec![],
+            superseded_by: None,
         },
     );
     transcript.clear_flags(ancestor_id);
@@ -494,6 +495,7 @@ fn test_projection_directive_persists_roundtrip() {
             target: ProjectionTarget::Message,
             action: ProjectionAction::CompactText { max_chars: 100 },
         }],
+        superseded_by: None,
     };
 
     let mut batch = HashMap::new();

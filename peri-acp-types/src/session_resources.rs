@@ -922,7 +922,9 @@ pub trait SessionResources: Send + Sync {
     /// `clear_excluded` 是保留前缀里必须清零 `excluded` 的 id，由调用方从一致读取的完整
     /// own 历史算出（[`crate::store::history::rewind_clear_excluded_ids`] 是唯一规则实现）：
     /// 边界删除与 flags 清零要么都生效、要么都不生效，只生效一半会让热态与随后的冷恢复
-    /// 看到两份不同的历史。清零只改 `excluded`，`truncated`/`projection` 保持原样。
+    /// 看到两份不同的历史。清零同时把整条 `projection` 载荷一并清掉（恢复正文的条目不再
+    /// 携带 `superseded_by` 这类只在 `excluded` 为真时才有意义的投影记录），`truncated`
+    /// 保持原样。
     ///
     /// 未知边界保持「无变更」语义，但**必须如实回报** [`RewindOutcome::BoundaryMissing`]：
     /// 调用方（如 ACP rewind handler）不能把「什么都没做」当成「已按边界重建」，

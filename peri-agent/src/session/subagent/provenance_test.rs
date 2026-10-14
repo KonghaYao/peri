@@ -54,6 +54,7 @@ fn directive(id: MessageId) -> MessageProjectionDirective {
                 preserve_recovery_handle: false,
             },
         }],
+        superseded_by: None,
     }
 }
 

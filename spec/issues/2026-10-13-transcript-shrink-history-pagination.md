@@ -1,6 +1,6 @@
 # 实现蓝图：Full Compact 后 Transcript 收缩与 ACP 历史分页
 
-状态：交付完成（验收报告 `.recon/A-acceptance-report.md`）；两项待裁决已经对抗裁决结案、A05 索引经用户授权并实施（见 D17）。基线 `7f0de56e8`（worktree `.worktrees/peri-transcript-history`，分支 `feat/transcript-shrink-history-pagination`）。
+状态：交付完成（验收报告 `.recon/A-acceptance-report.md`）；两项待裁决已经对抗裁决结案、A05 索引经用户授权并实施、D8 已闭合（取代关系落在既有 `projection` 载荷，无 DDL；见 D17）。基线 `7f0de56e8`（worktree `.worktrees/peri-transcript-history`，分支 `feat/transcript-shrink-history-pagination`）。
 需求源：`/Users/konghayao/Desktop/peri-transcript-history-requirements.md`。
 现状侦察报告：`.recon/A-core-transcript.md`、`B-acp-host.md`、`C-storage-contract.md`、`D-test-infra.md`、`E-tui-sdk.md`（所有行号基于基线 commit）。
 
@@ -158,7 +158,7 @@ Full Compact 成功后，核心热态 Transcript 真正释放已退出有效上�
   处置：协商连接 = 有效视图 + 首游标（现状不变）；未协商连接 = 完整 canonical 回放（继承区 + 全部自有行，含 Full 归档原文），经**向前有界读取**分页流式投递，核心不持有全量。存储需补一个向前 keyset 读取（与向后读取同构，不新增列、不新增依赖）。
 - **D8 rewind 到排除段内部时的「原文与摘要同时有效」= 已知偏差，本轮不修。**
   两轮以上 Full 后回退到前缀内部位置时，`excluded` 连续段无法从现有 flags 判定压缩批次边界（`MessageFlags` 只有 `truncated`/`excluded`/`projection`，后者是 Micro 投影指令）。实现采保守策略：整段清零（内容不丢，但可能旧摘要与其覆盖原文同时有效），与 A19「无原文／摘要重复覆盖」字面不符。
-  精确修复需新增「覆盖批次」最小元数据（属 DDL）；按仓库规则（根 CLAUDE.md 原则 12）须用户明确批准，批准前不新增列。记录为已知偏差，授权后另开切片；`peri-acp-types/src/store/history.rs` 的模块文档与 `.recon/rewind-review-findings.md` 已注明。
+  精确修复需新增「覆盖批次」最小元数据（属 DDL）；按仓库规则（根 CLAUDE.md 原则 12）须用户明确批准，批准前不新增列。记录为已知偏差，授权后另开切片；`peri-acp-types/src/store/history.rs` 的模块文档与 `.recon/rewind-review-findings.md` 已注明。→ **第五版已闭合，且未使用任何 DDL，见 D17.5。**
 - **D9 手动态 Compact 读取 canonical 快照 —— 保留，不视为缺陷。**
   `compact_pipeline.rs` 从完整快照重建临时 transcript（含归档正文）用于 Compact 执行；Full 的摘要输入取有效视图、assembled 输出取有效视图，归档正文既不进摘要也不回写热态，属读取成本而非语义泄漏（REQ-T03 约束的是恢复路径）。
 - **D10 恢复路径的存储触达行数仍是 O(线程行数) —— 实测记录，修复需索引（未授权）。**
@@ -222,6 +222,7 @@ Full Compact 成功后，核心热态 Transcript 真正释放已退出有效上�
   2. **`peri.sessionWorkspaceV1` 门控：裁决「实现零改动 + 文档订正」**（两立场对抗，依据见验收报告 §5.18.1）。两方独立推翻侦察阶段前提「TUI 不 initialize」（TUI 在 `kit/entry.rs:417` 无条件 await `register_ui_commands` ⇒ 发 initialize）；跨连接污染无可达生产路径（正方自认只有夹具可达）；改连接级 `caps()` 对「未 initialize 的连接」零行为差别。订正两处文档：`docs/design/peri-acp-protocol.md` 写明门控事实源是进程级协商值及其与分页按连接判定的差异理由；`peri-tui/src/acp_client/client/requests.rs` 的过期注释。**再开启条件**：同进程多连接生产形态出现、外部客户端跳过 initialize 仍被证实真实消费扩展、TUI initialize 常态失败、需求方要求按连接判定（届时与 `oauth` 家族一次改）。
   3. **锁守卫面：裁决「采纳独立断言下界、拒绝结构性闭合、保留调用点级局限」**（依据见验收报告 §5.18.2）。实测：预算调到 20 ms 时原判别断言仍**绿**（参照值与阈值同源 ⇒ 判别力可被一个数字静默取消）；改用独立下界 `PROBE_WAIT_FLOOR = 200ms` 后同一注入实验**红**（`waited 22.289458ms < 200ms (budget 20ms)`），复原 250 ms **绿**。拒绝正方方案 A/C：代价是移动 production 模块私有原语 + 18 处机械改写，收益仅把「改一个词」抬成「改结构 + diff 可见」，且反方指出的残余（新增入口 / `Duration::from_nanos(1)` / `std::fs` 原生 API）不可消除；同文件内合法零等待与绕过写法逐字同形，文本守卫需行号白名单（本仓无源码扫描守卫先例）。危害评估采纳反方：绕过方向是「更敏感」（fork 继承窗口报假红）而非「更沉默」，真实泄漏在零等待下同样必红。独立复核的硬判据「真实四调用点回退可被检出」**仍未满足**，如实保留 PARTIAL；入口注释已写明「内联零等待不在守卫覆盖内」。
   4. **推送**：A05 索引与两项裁决由第六次提交 `5e691a2ac` 落地，报告第四版与哈希补记随后提交并在同一次推送（新建 upstream）发到 `origin/feat/transcript-shrink-history-pagination`（见验收报告 §0.1b）。
+  5. **D8 闭合：取代关系落进既有 `projection` 载荷，不新增列、不推进 schema 代数（2026-10-14，用户指令：授权其余 DDL 用于闭合 D8、完成工作后新建 PR）。** 新列路线经两条独立侦察否决：①已存在的 Current 库会在只读 probe 阶段被拒（`schema_shape.rs::check_strict` 等长逐位同名 + `sqlite_store/schema.rs` 的 Current 判定失败后走 input 判定 ⇒ fail-closed），且按仓库自述「形状变化一次推进一代」需同时推进本机第 12 代与远端 v6（同步点 30+ 处）；②库变新代后**旧二进制**会把多余列读成漂移并拒绝打开，回归不可消除。改法：`MessageProjectionDirective` 新增 `#[serde(default, skip_serializing_if = "Option::is_none")] superseded_by: Option<MessageId>`（写入时 `entries` 为空 ⇒ 无渲染动作，只在 `excluded` 为真时被读取）——该列已在本机与远端两侧的 SELECT/INSERT/UPDATE 与解码链上贯通，新字段读写零改造、两向兼容。实现四面：Full 归档写取代关系（摘要 id 提交前分配、追加消息用同一 id）、`rewind_clear_excluded_ids` 逐条精确判定（无记录旧行回退）、本机 `clear_rewind_excluded` / 远端 `CLEAR_EXCLUDED_SQL` 清零时连带清掉整条载荷、fork 重映射含 `superseded_by`。证据与残留见验收报告 §5.1；**用户授权的其余 DDL 本轮未被使用**。
 
 ### 待办切片
 

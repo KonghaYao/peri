@@ -1,5 +1,6 @@
 use super::*;
 use peri_acp_types::messages::MessageId;
+use peri_acp_types::projection::MessageProjectionDirective;
 use peri_acp_types::store::history::{rewind_clear_excluded_ids, rewind_keep_len, RewindFlagEntry};
 
 #[tokio::test]
@@ -857,6 +858,205 @@ async fn test_rewind_after_the_second_full_keeps_the_summary_covered_prefix_excl
     let flags = data.load_snapshot(&state.id).await.unwrap().flags;
     assert!(state.covered_by_first.iter().all(|id| flags[id].excluded));
     assert!(state.between_fulls.iter().all(|id| flags[id].excluded));
+}
+
+/// 清零的语义是「原文重新有效」，不是「只改一个 bit」：`projection` 载荷（含只在
+/// `excluded` 为真时被读取的 `superseded_by`）必须随清零一起消失，`truncated` 则原样保留。
+///
+/// 清载荷不丢有效渲染信息：生产里 `excluded: true` 的唯一写入点是 Full Compact
+/// （`peri-agent/src/agent/compact_v2/full.rs`），写 flags 时用 `..Default::default()`
+/// 整体覆盖，被排除的行本来就不带渲染指令。
+#[tokio::test]
+async fn test_rewind_clears_the_whole_projection_payload_of_restored_entries() {
+    let (store, data, directory) = database().await;
+    let workspace = workspace(&store, directory.path()).await;
+    let cwd = workspace.cwd.to_string_lossy().into_owned();
+    let id: ThreadId = "s-rewind-payload".to_owned();
+    data.save_new_session(&session(
+        "s-rewind-payload",
+        &cwd,
+        &workspace,
+        frozen("rewind-payload"),
+    ))
+    .await
+    .unwrap();
+
+    let covered = payloads(2);
+    data.append_history(&id, &covered).await.unwrap();
+    let summary = BaseMessage::human("summary");
+    let summary_id = summary.id();
+    // Full Compact 归档的实际形状：每条被排除的条目写下取代它的摘要 id。`policy_version`
+    // 由存储原样搬运（resources 不解释它），测试取任意 u32；其中一条另带 `truncated`，
+    // 它来自 Micro compact，不是排除的产物。
+    let superseded = |truncated: bool| MessageFlags {
+        truncated,
+        excluded: true,
+        projection: Some(MessageProjectionDirective {
+            policy_version: 2,
+            entries: Vec::new(),
+            superseded_by: Some(summary_id),
+        }),
+    };
+    data.apply_compaction(
+        &id,
+        &CompactionChange {
+            flag_updates: vec![
+                (covered[0].id(), superseded(true)),
+                (covered[1].id(), superseded(false)),
+            ],
+            appended_messages: vec![summary.clone()],
+        },
+    )
+    .await
+    .unwrap();
+
+    // 边界落在摘要之前的第二条上：摘要被本次 rewind 删掉，两条原文的排除一起失去依据。
+    let outcome = rewind_effective_view(&data, &id, RewindBoundary::KeepThrough(covered[1].id()))
+        .await
+        .unwrap();
+    assert_eq!(
+        outcome,
+        peri_acp_types::session_resources::RewindOutcome::Applied
+    );
+
+    let flags = data.load_snapshot(&id).await.unwrap().flags;
+    let restored = flags.get(&covered[0].id()).cloned().unwrap_or_default();
+    assert!(!restored.excluded, "原文必须重新有效");
+    assert!(restored.projection.is_none(), "整条载荷随清零一并清掉");
+    assert!(
+        restored.superseded_by().is_none(),
+        "正文已恢复的条目不得残留取代记录"
+    );
+    assert!(restored.truncated, "truncated 来自另一条路径，清零不得动它");
+    assert_eq!(
+        flags.get(&covered[1].id()).cloned().unwrap_or_default(),
+        MessageFlags::default(),
+        "清零后不再有任何非默认标记（含载荷）"
+    );
+    assert_eq!(
+        stored_ids(&data, &id).await,
+        vec![covered[0].id(), covered[1].id()]
+    );
+}
+
+/// 只有**本次清零**的条目失去载荷：仍被存活摘要覆盖的排除、以及本来就没有标记的条目，
+/// 必须逐位不变（含它们的 `superseded_by` 记录）。
+#[tokio::test]
+async fn test_rewind_leaves_untouched_entries_flags_bit_for_bit() {
+    let (store, data, directory) = database().await;
+    let workspace = workspace(&store, directory.path()).await;
+    let cwd = workspace.cwd.to_string_lossy().into_owned();
+    let id: ThreadId = "s-rewind-untouched".to_owned();
+    data.save_new_session(&session(
+        "s-rewind-untouched",
+        &cwd,
+        &workspace,
+        frozen("rewind-untouched"),
+    ))
+    .await
+    .unwrap();
+
+    // 历史：`A B | S1 | P | E | S2 | C`。第一次 Full 排除 A、B（取代者是 S1），第二次排除 E
+    // （取代者是 S2）；P 是两次 Full 之间追加的、从未被排除的普通条目，C 是最后一次追加的。
+    let covered = payloads(2);
+    data.append_history(&id, &covered).await.unwrap();
+    let first_summary = BaseMessage::human("summary one");
+    let supersede = |truncated: bool, summary: MessageId| MessageFlags {
+        truncated,
+        excluded: true,
+        projection: Some(MessageProjectionDirective {
+            policy_version: 2,
+            entries: Vec::new(),
+            superseded_by: Some(summary),
+        }),
+    };
+    data.apply_compaction(
+        &id,
+        &CompactionChange {
+            flag_updates: vec![
+                (covered[0].id(), supersede(true, first_summary.id())),
+                (covered[1].id(), supersede(false, first_summary.id())),
+            ],
+            appended_messages: vec![first_summary.clone()],
+        },
+    )
+    .await
+    .unwrap();
+    let plain = payloads(1);
+    data.append_history(&id, &plain).await.unwrap();
+    let covered_by_second = payloads(1);
+    data.append_history(&id, &covered_by_second).await.unwrap();
+    let second_summary = BaseMessage::human("summary two");
+    data.apply_compaction(
+        &id,
+        &CompactionChange {
+            flag_updates: vec![(
+                covered_by_second[0].id(),
+                supersede(false, second_summary.id()),
+            )],
+            appended_messages: vec![second_summary.clone()],
+        },
+    )
+    .await
+    .unwrap();
+    let tail = payloads(1);
+    data.append_history(&id, &tail).await.unwrap();
+
+    let before = data.load_snapshot(&id).await.unwrap().flags;
+    // 边界落在 E 上：S2（E 的摘要）与它之后的 C 一起被删 ⇒ 清零集合恰好是 [E]；A、B 的 S1 仍在
+    // 保留前缀里，排除依旧有依据，P 本来就没有标记。
+    let outcome = rewind_effective_view(
+        &data,
+        &id,
+        RewindBoundary::KeepThrough(covered_by_second[0].id()),
+    )
+    .await
+    .unwrap();
+    assert_eq!(
+        outcome,
+        peri_acp_types::session_resources::RewindOutcome::Applied
+    );
+    assert_eq!(
+        stored_ids(&data, &id).await,
+        vec![
+            covered[0].id(),
+            covered[1].id(),
+            first_summary.id(),
+            plain[0].id(),
+            covered_by_second[0].id(),
+        ],
+        "边界之后的摘要与尾部条目被删"
+    );
+
+    let after = data.load_snapshot(&id).await.unwrap().flags;
+    let mut expected = before.clone();
+    // E 清零后没有任何非默认标记，派生视图不再列出它；其余条目必须逐位相同。
+    expected.remove(&covered_by_second[0].id());
+    assert_eq!(
+        after, expected,
+        "只有本次清零的条目改变，未触及的 entries 连载荷一起原样保留"
+    );
+    for (position, message) in covered.iter().enumerate() {
+        let flags = after.get(&message.id()).cloned().unwrap_or_default();
+        assert!(flags.excluded, "存活摘要 S1 覆盖的排除仍有依据");
+        assert_eq!(
+            flags.superseded_by(),
+            Some(first_summary.id()),
+            "未被清零的条目保留它的取代记录（第 {position} 条）"
+        );
+    }
+    assert!(
+        after
+            .get(&covered[0].id())
+            .cloned()
+            .unwrap_or_default()
+            .truncated,
+        "A 的 truncated 未被改动"
+    );
+    assert!(
+        after.get(&plain[0].id()).is_none(),
+        "从未被排除的条目不带任何标记"
+    );
 }
 
 #[tokio::test]

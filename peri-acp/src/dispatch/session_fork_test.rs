@@ -117,6 +117,7 @@ async fn forked_payloads_have_independent_ids_flags_and_compaction_lifecycle() {
                                 preserve_recovery_handle: true,
                             },
                         }],
+                        superseded_by: None,
                     }),
                 },
             )],

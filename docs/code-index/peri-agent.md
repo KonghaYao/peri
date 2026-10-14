@@ -104,7 +104,7 @@ Full 摘要不改变模型思考配置和单次输出上限。未完成的摘要
 | 投影契约测试 | `compact_v2/projection_test.rs`、`projection_render_test.rs`、`projection_restore_test.rs`、`projection_estimate_test.rs`、`projection_tool_use_test.rs` | 分离 serde/provider 契约、模型视图、持久指令恢复、收益估算与非法 ToolUse action；统一过滤 `agent::compact_v2::projection`，legacy input 指令不得修改 canonical 参数 |
 | Micro 执行（按 round 截断） | compact_v2/micro.rs | `micro_compact` |
 | Smart 执行（废弃中，恒 false） | compact_v2/smart.rs | `smart_compact` |
-| Full 执行 | compact_v2/full.rs | `full_compact_inner` 从可见历史（含工具结果）生成结构化摘要，排除 own reminder 等旧历史，仅追加摘要；不从计算实例本机回读 Read/Skill 路径；回归 `full_report_test.rs` / `full_test.rs` / `full_continuation_test.rs`（摘要截断续写、失败保全及远端内容来源） |
+| Full 执行 | compact_v2/full.rs | `full_compact_inner` 从可见历史（含工具结果）生成结构化摘要，排除 own reminder 等旧历史，仅追加摘要；同一批里给每条被归档条目写下取代关系（`MessageFlags::superseded_by` = 本次追加的摘要 id，供 rewind 精确判定排除是否仍有依据）；不从计算实例本机回读 Read/Skill 路径；回归 `full_report_test.rs` / `full_test.rs` / `full_continuation_test.rs`（摘要截断续写、失败保全及远端内容来源） |
 | 摘要响应分类 | compact_v2/summary.rs | `classify_summary_step(response, accumulated)` 只读一次响应与已回填正文，返回 `SummaryStep::{Complete,Draft,Empty}`；不调用模型、不写 transcript、不修改输入；纯函数回归 `summary_test.rs` |
 | 配置 re-export | compact_v2/config.rs | `CompactConfig`（事实源 peri-acp-types）、`CONTINUATION_HINT` |
 | 摘要 prompt 模板 | compact_v2/descriptions/ | summary_system_prompt.md / summary_user_prompt.md |

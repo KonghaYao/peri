@@ -568,6 +568,47 @@ async fn test_full_compact_sqlite_persists_lifecycle_and_preserves_ancestor_and_
     assert!(!stored.flags.contains_key(&own_system));
     assert!(stored.flags[&own_human].excluded);
     assert!(stored.flags[&own_ai].excluded);
+
+    // 取代关系（写入侧契约）：被归档条目在同一批 flags 里记下取代它的摘要 id。
+    for id in [own_human, own_ai] {
+        assert_eq!(
+            stored.flags[&id].superseded_by(),
+            Some(summary.id()),
+            "每条被归档条目必须指向追加的摘要消息 {id:?}"
+        );
+    }
+    // 「每条」由整体核对：存储里带 excluded 的条目恰好是本次被归档的两条。
+    assert_eq!(
+        stored.flags.values().filter(|flags| flags.excluded).count(),
+        2,
+        "本次归档只排除 own Human 与 own AI"
+    );
+    // ② 摘要自身留在有效视图里，且没有取代关系（它取代别人，不被别人取代）。
+    assert!(!transcript.flags(summary.id()).excluded, "摘要不得被排除");
+    assert_eq!(transcript.flags(summary.id()).superseded_by(), None);
+    assert!(
+        stored
+            .flags
+            .get(&summary.id())
+            .is_none_or(|flags| !flags.excluded),
+        "摘要的有效性由 flags 缺省（非 excluded）表达"
+    );
+    // ③ 未被排除的条目不带取代关系。
+    for id in [ancestor.id(), own_system] {
+        assert_eq!(
+            transcript.flags(id).superseded_by(),
+            None,
+            "未被排除的条目不得带取代关系 {id:?}"
+        );
+        assert_eq!(
+            stored
+                .flags
+                .get(&id)
+                .and_then(|flags| flags.superseded_by()),
+            None,
+            "存储侧同样不得给未排除条目写取代关系 {id:?}"
+        );
+    }
 }
 
 #[tokio::test]

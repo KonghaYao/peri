@@ -42,6 +42,7 @@ pub fn micro_compact(transcript: &mut MessageTranscript, config: &CompactConfig)
             MessageProjectionDirective {
                 policy_version: plan.policy_version,
                 entries,
+                superseded_by: None,
             },
         );
     }
