@@ -189,8 +189,10 @@ fn hit_at(row: u16, x_start: u16, x_end: u16) -> ImageLineHit {
         x_end,
         slot_index: 0,
         vm_hash: 7,
-        path: "/tmp/a.png".to_string(),
-        managed: false,
+        identity: crate::kit::message_area::ImageLineIdentity::Path {
+            path: "/tmp/a.png".to_string(),
+            managed: false,
+        },
         size_text: "45 B".to_string(),
         logical_idx: 1,
     }
@@ -265,7 +267,12 @@ fn test_hover_target_for() {
     let st = hover_target_for(&hits, 5, 10, false).expect("命中行 10");
     assert_eq!(st.row, 10);
     assert_eq!(st.logical_idx, 1);
-    assert_eq!(st.path, "/tmp/a.png");
+    match &st.identity {
+        crate::kit::message_area::ImageLineIdentity::Path { path, .. } => {
+            assert_eq!(path, "/tmp/a.png")
+        }
+        other => panic!("命中路径 meta 行应产出 Path 身份，实际 {other:?}"),
+    }
     assert_eq!(st.size_text, "45 B");
 
     assert!(
@@ -293,7 +300,10 @@ fn hover_state(path: &str, row: u16) -> ImageHoverState {
         slot_index: 0,
         logical_idx: 1,
         vm_hash: 7,
-        path: path.to_string(),
+        identity: crate::kit::message_area::ImageLineIdentity::Path {
+            path: path.to_string(),
+            managed: false,
+        },
         size_text: "45 B".to_string(),
     }
 }

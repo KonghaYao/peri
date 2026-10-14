@@ -583,8 +583,14 @@ fn test_local_user_bubble_carries_attachment_records() {
         &AcpEventData::LocalUserBubble {
             text: "看这张图".into(),
             attachments: vec![
-                crate::kit::tui_render_unit::UserAttachment { bytes: 45 },
-                crate::kit::tui_render_unit::UserAttachment { bytes: 2048 },
+                crate::kit::tui_render_unit::UserAttachment {
+                    bytes: 45,
+                    payload_id: 7,
+                },
+                crate::kit::tui_render_unit::UserAttachment {
+                    bytes: 2048,
+                    payload_id: 8,
+                },
             ],
         },
     );

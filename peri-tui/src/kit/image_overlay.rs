@@ -81,7 +81,15 @@ fn cached_picker() -> &'static Picker {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum PreviewTarget {
     Path(String),
-    PendingImage { index: usize, payload_id: u64 },
+    PendingImage {
+        index: usize,
+        payload_id: u64,
+    },
+    /// 已提交附件（消息区记录行 hover）：载荷按 `payload_id` 从有界保留层取。
+    SubmittedImage {
+        name: String,
+        payload_id: u64,
+    },
 }
 
 /// cursor 触发源：光标所在行（按 `\n` 切分 + `cursor_char` 定位）trim 后以
@@ -148,7 +156,17 @@ pub(crate) fn resolve_preview_target() -> Option<PreviewTarget> {
         return None;
     }
     if let Some(hover) = IMAGE_PREVIEW_HOVER.state().read().as_ref() {
-        return Some(PreviewTarget::Path(hover.path.clone()));
+        return Some(match &hover.identity {
+            crate::kit::message_area::ImageLineIdentity::Path { path, .. } => {
+                PreviewTarget::Path(path.clone())
+            }
+            crate::kit::message_area::ImageLineIdentity::Attachment { name, payload_id } => {
+                PreviewTarget::SubmittedImage {
+                    name: name.clone(),
+                    payload_id: *payload_id,
+                }
+            }
+        });
     }
     let snapshot = INPUT_SNAPSHOT.state().read().clone();
     if let Some(path) = cursor_image_path(&snapshot) {
@@ -226,6 +244,9 @@ pub(crate) fn request_preview(target: Option<PreviewTarget>) {
         Some(PreviewTarget::PendingImage { index, payload_id }) => {
             request_pending_attachment_preview(index, payload_id)
         }
+        Some(PreviewTarget::SubmittedImage { name, payload_id }) => {
+            request_submitted_attachment_preview(name, payload_id)
+        }
     }
 }
 
@@ -236,8 +257,6 @@ pub(crate) fn request_preview(target: Option<PreviewTarget>) {
 ///
 /// 载荷身份不匹配（附件已被移除/替换）→ `Idle`：陈旧请求不得显示过期图片。
 fn request_pending_attachment_preview(index: usize, payload_id: u64) {
-    use base64::Engine;
-
     let (name, media_type, payload) = {
         let state = crate::kit::atoms::PENDING_ATTACHMENTS.state();
         let attachments = state.read();
@@ -255,11 +274,33 @@ fn request_pending_attachment_preview(index: usize, payload_id: u64) {
             attachment.base64_data.clone(),
         )
     };
-    let source = PreviewSource::Pending {
-        name: name.clone(),
-        payload_id,
+    let source = PreviewSource::Pending { name, payload_id };
+    spawn_attachment_decode(source, &media_type, &payload);
+}
+
+/// 已提交附件预览（消息区记录行 hover）：载荷来自有界保留层
+/// （[`crate::kit::attachment_retention`]）。**取不到就不预览**——附件被淘汰或
+/// 会话边界清空时退化为 `Idle`，绝不显示别的图片。
+fn request_submitted_attachment_preview(name: String, payload_id: u64) {
+    let payload = {
+        let atom = crate::kit::atoms::RETAINED_ATTACHMENTS.state();
+        let retained = atom.read();
+        let Some(entry) = retained.get(payload_id) else {
+            // 未保留（未提交/被淘汰/超上限）：不预览，也不报错——记录行仍在。
+            *IMAGE_PREVIEW_STATE.state().write() = ImagePreviewState::Idle;
+            return;
+        };
+        (entry.media_type.clone(), entry.base64_data.clone())
     };
-    let Ok(buf) = base64::engine::general_purpose::STANDARD.decode(&payload) else {
+    let source = PreviewSource::Submitted { name, payload_id };
+    spawn_attachment_decode(source, &payload.0, &payload.1);
+}
+
+/// 附件载荷 → 后台解码 → `Ready`（composer 待发送与消息区已提交两条附件流共用）。
+fn spawn_attachment_decode(source: PreviewSource, media_type: &str, payload: &str) {
+    use base64::Engine;
+
+    let Ok(buf) = base64::engine::general_purpose::STANDARD.decode(payload) else {
         *IMAGE_PREVIEW_STATE.state().write() = ImagePreviewState::Error {
             source,
             reason: "format".to_string(),
@@ -273,14 +314,13 @@ fn request_pending_attachment_preview(index: usize, payload_id: u64) {
         };
         return;
     }
-    // 附件恒可自动预览（用户自己粘贴的内容，不经路径分级）：grade 记为 Managed。
+    let mime = static_mime_of(media_type);
+    let size_bytes = buf.len() as u64;
+    let id = PREVIEW_REQUEST_ID.fetch_add(1, Ordering::SeqCst) + 1;
     *IMAGE_PREVIEW_STATE.state().write() = ImagePreviewState::Loading {
         source: source.clone(),
         grade: PathGrade::Managed,
     };
-    let id = PREVIEW_REQUEST_ID.fetch_add(1, Ordering::SeqCst) + 1;
-    let mime = static_mime_of(&media_type);
-    let size_bytes = buf.len() as u64;
     let source_for_thread = source.clone();
     let spawned = std::thread::Builder::new()
         .name("peri-image-decode".to_string())
@@ -718,3 +758,11 @@ pub fn ImageOverlay(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
 #[cfg(test)]
 #[path = "image_overlay_test.rs"]
 mod tests;
+
+#[cfg(test)]
+#[path = "image_overlay_test_support.rs"]
+mod test_support;
+
+#[cfg(test)]
+#[path = "image_overlay_attachment_test.rs"]
+mod attachment_tests;

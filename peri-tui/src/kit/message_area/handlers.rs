@@ -308,8 +308,11 @@ pub(super) fn register_image_click(
             matches!(vm, TuiRenderUnit::TuiUserBubble(_)) && vm.content_hash() == hit.vm_hash
         });
         drop(vm_guard);
-        if matched {
-            try_open_image(&hit.path);
+        if matched
+            && let crate::kit::message_area::ImageLineIdentity::Path { path, .. } = &hit.identity
+        {
+            // 附件记录行没有磁盘文件可打开：命中也不触发 open（避免误开无关路径）。
+            try_open_image(path);
         }
         // 命中（即使 VM 不匹配）也 Consumed——防止点击落到文本选区逻辑
         EventResult::Consumed

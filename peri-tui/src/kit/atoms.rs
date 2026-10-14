@@ -584,8 +584,11 @@ pub(crate) static IMAGE_PREVIEW_HOVER: AtomStatic<
 pub enum PreviewSource {
     /// `@image <path>` 流：磁盘图片路径。
     Path(PathBuf),
-    /// 粘贴流：待发送附件的展示名（`图片 N`）与载荷身份。
+    /// 粘贴流：待发送附件（composer 中）的展示名（`图片 N`）与载荷身份。
     Pending { name: String, payload_id: u64 },
+    /// 粘贴流：已提交附件（消息区记录行）——载荷取自
+    /// [`crate::kit::attachment_retention::RETAINED_ATTACHMENTS`] 有界保留层。
+    Submitted { name: String, payload_id: u64 },
 }
 
 impl PreviewSource {
@@ -597,7 +600,7 @@ impl PreviewSource {
                 .file_name()
                 .map(|name| name.to_string_lossy().into_owned())
                 .unwrap_or_else(|| path.to_string_lossy().into_owned()),
-            Self::Pending { name, .. } => name.clone(),
+            Self::Pending { name, .. } | Self::Submitted { name, .. } => name.clone(),
         }
     }
 }
@@ -633,6 +636,11 @@ pub enum ImagePreviewState {
 
 pub static IMAGE_PREVIEW_STATE: AtomStatic<ImagePreviewState> =
     AtomStatic::new(ImagePreviewState::default);
+
+/// 已提交附件的保留载荷（有界 LRU，见
+/// [`crate::kit::attachment_retention`]）——消息区附件记录行的浮动预览数据源。
+pub static RETAINED_ATTACHMENTS: AtomStatic<crate::kit::attachment_retention::RetainedAttachments> =
+    AtomStatic::new(crate::kit::attachment_retention::RetainedAttachments::default);
 
 /// 输入区快照（§7.3 cursor 触发源）：input_area 渲染 body 每帧
 /// `write_no_update` 写入（同 keepgoing_rect 模式，TUI-RENDER-001 派生缓存），

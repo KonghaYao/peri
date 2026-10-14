@@ -10,15 +10,16 @@
 //! 统一 `reset_atoms()` + `serial_test::serial`（仿 mouse_router_test 模式）。
 
 #[cfg(test)]
+use super::test_support::*;
+#[cfg(test)]
 use super::*;
 use crate::kit::atoms::{
-    ACTIVE_PANEL, FOCUSED_ENTRY, IMAGE_HOVER, IMAGE_PREVIEW_HOVER, IMAGE_PREVIEW_STATE,
-    INPUT_SNAPSHOT, POPUP_KIND, PopupKind, ViewModelsSnapshot,
+    FOCUSED_ENTRY, IMAGE_HOVER, IMAGE_PREVIEW_HOVER, IMAGE_PREVIEW_STATE, INPUT_SNAPSHOT,
+    POPUP_KIND, PopupKind, ViewModelsSnapshot,
 };
 use crate::kit::message_area::ImageHoverState;
 use crate::kit::terminal_caps::GraphicsProtocol;
 use crate::kit::tui_render_unit::TuiRenderUnit;
-use image::{DynamicImage, ImageBuffer, Rgba};
 use ratatui::Terminal;
 use ratatui::backend::TestBackend;
 use ratatui::buffer::Buffer;
@@ -28,65 +29,6 @@ use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc;
 use std::time::Duration;
-
-/// 构造 w×h 纯色 RGBA 图片。
-fn solid_image(w: u32, h: u32) -> DynamicImage {
-    ImageBuffer::<Rgba<u8>, _>::from_pixel(w, h, Rgba([255, 0, 0, 255])).into()
-}
-
-/// 受管理根（tempdir 或任意目录）下写一张可解码 PNG，返回文件路径。
-fn managed_fixture(dir: &Path, name: &str) -> PathBuf {
-    let file = dir.join(name);
-    solid_image(1, 1).save(&file).expect("fixture PNG 写入失败");
-    file
-}
-
-/// 重置预览相关全局 atom，防测试间污染。
-fn reset_atoms() {
-    *IMAGE_PREVIEW_STATE.state().write() = ImagePreviewState::Idle;
-    *IMAGE_HOVER.state().write() = None;
-    *IMAGE_PREVIEW_HOVER.state().write() = None;
-    *INPUT_SNAPSHOT.state().write() = InputSnapshot::default();
-    *FOCUSED_ENTRY.state().write() = None;
-    *POPUP_KIND.state().write() = None;
-    *ACTIVE_PANEL.state().write() = None;
-    *crate::kit::atoms::VIEW_MODELS.state().write() = ViewModelsSnapshot::default();
-}
-
-/// 轮询 IMAGE_PREVIEW_STATE 直至谓词成立；超时返回 false。
-///
-/// 正常 <500ms；窗口放宽至 15s（1500×10ms）：解码跑独立 std::thread，
-/// workspace 并发测试/CI 高负载下线程调度可能延迟数秒（本机压测观测到
-/// 5s 窗口偶发超时）。
-fn wait_state<F: Fn(&ImagePreviewState) -> bool>(pred: F) -> bool {
-    for _ in 0..1500 {
-        let state = IMAGE_PREVIEW_STATE.state().read().clone();
-        if pred(&state) {
-            return true;
-        }
-        std::thread::sleep(Duration::from_millis(10));
-    }
-    false
-}
-
-/// 轮询后台 resize 线程直至结果应用；超时返回 false（正常环境 <100ms）。
-fn wait_for_resize(async_img: &mut AsyncImage) -> bool {
-    for _ in 0..200 {
-        if async_img.poll_completed() {
-            return true;
-        }
-        std::thread::sleep(Duration::from_millis(10));
-    }
-    false
-}
-
-/// 统计 buffer 中所有 cell symbol 里的 kitty transmit 序列数（同 image_preview_test）。
-fn count_transmit(buf: &Buffer) -> usize {
-    buf.content()
-        .iter()
-        .filter(|c| c.symbol().contains("\x1b_G"))
-        .count()
-}
 
 // ── cursor 触发源（§7.6 触发仲裁组）──────────────────────────────────
 
@@ -153,17 +95,6 @@ fn cursor_image_path_trims_whitespace() {
 
 // ── focus 触发源 ────────────────────────────────────────────────────────
 
-/// 写 VIEW_MODELS 单 slot user bubble + FOCUSED_ENTRY 后断言 focus 路径。
-fn view_models_with(text: &str) {
-    let vm = TuiRenderUnit::TuiUserBubble(crate::kit::tui_render_unit::TuiUserBubble::new(
-        text.to_string(),
-    ));
-    *crate::kit::atoms::VIEW_MODELS.state().write() = ViewModelsSnapshot {
-        items: im::Vector::from_iter([vm]),
-        generation: 1,
-    };
-}
-
 #[test]
 #[serial]
 fn focus_image_path_uses_first_image_line() {
@@ -218,7 +149,10 @@ fn resolve_preview_target_priority_hover_cursor_focus() {
         slot_index: 0,
         logical_idx: 1,
         vm_hash: 7,
-        path: "/hov.png".to_string(),
+        identity: crate::kit::message_area::ImageLineIdentity::Path {
+            path: "/hov.png".to_string(),
+            managed: true,
+        },
         size_text: "45 B".to_string(),
     });
     assert_eq!(
@@ -256,7 +190,10 @@ fn resolve_preview_target_ignores_unconfirmed_hover() {
         slot_index: 0,
         logical_idx: 1,
         vm_hash: 7,
-        path: "/hover-too-soon.png".to_string(),
+        identity: crate::kit::message_area::ImageLineIdentity::Path {
+            path: "/hover-too-soon.png".to_string(),
+            managed: true,
+        },
         size_text: "45 B".to_string(),
     });
 
@@ -459,14 +396,6 @@ fn stale_decode_result_is_dropped() {
 }
 
 // ── 渲染（TestBackend，§7.6 渲染测试组）───────────────────────────────
-
-/// 仅覆盖 graphics 字段的能力集合（其余默认全能力）。
-fn caps(graphics: GraphicsProtocol) -> crate::kit::terminal_caps::TerminalCaps {
-    crate::kit::terminal_caps::TerminalCaps {
-        graphics,
-        ..Default::default()
-    }
-}
 
 /// 构造 Ready 状态（路径 + meta + 图片）。
 fn ready_state(path: PathBuf) -> ImagePreviewState {
@@ -750,250 +679,4 @@ fn preview_meta_line_sanitizes_control_chars() {
         !row_text.contains('\x1b'),
         "meta 行不得含 ESC 序列（F3），实际: {row_text:?}"
     );
-}
-
-// ── 粘贴流：待发送附件的浮动预览（回归：上传式附件曾无任何预览来源）──────
-
-/// 待发送附件夹具：`AQID` 不是合法 PNG（只用于触发/身份用例）；真实 PNG
-/// 由 `base64_std` + `solid_image` 生成。
-fn pending_image(base64_data: &str) -> crate::kit::atoms::PendingAttachment {
-    crate::kit::atoms::PendingAttachment::image("image/png", base64_data)
-}
-
-/// 真实 PNG 的标准 base64（供附件解码路径使用）。
-fn solid_png_base64() -> String {
-    use base64::Engine;
-    let dir = tempfile::tempdir().unwrap();
-    let file = dir.path().join("a.png");
-    solid_image(2, 3).save(&file).expect("fixture PNG 写入失败");
-    let bytes = std::fs::read(&file).unwrap();
-    base64::engine::general_purpose::STANDARD.encode(bytes)
-}
-
-/// composer 空文本 + 有附件 → 预览最后一张（刚粘贴的那张），且带载荷身份。
-#[test]
-#[serial]
-fn pending_attachment_target_previews_last_when_composer_empty() {
-    reset_atoms();
-    let state = crate::kit::atoms::PENDING_ATTACHMENTS.state();
-    {
-        let mut pending = state.write();
-        pending.clear();
-        pending.push(pending_image("AQID"));
-        pending.push(pending_image("BAUG"));
-    }
-
-    let snapshot = InputSnapshot::default();
-    assert_eq!(
-        pending_attachment_target(&snapshot),
-        Some(PreviewTarget::PendingImage {
-            index: 1,
-            payload_id: crate::kit::atoms::payload_id_of("BAUG"),
-        }),
-        "预览最后一张附件"
-    );
-
-    // 仲裁：无 hover/cursor/focus 时附件源生效。
-    *INPUT_SNAPSHOT.state().write() = snapshot.clone();
-    assert!(matches!(
-        resolve_preview_target(),
-        Some(PreviewTarget::PendingImage { index: 1, .. })
-    ));
-
-    state.write().clear();
-}
-
-/// 一旦开始输入文本即隐藏（附件预览不遮挡正文）；无附件时无目标。
-#[test]
-#[serial]
-fn pending_attachment_target_hidden_with_text_or_without_attachments() {
-    reset_atoms();
-    let state = crate::kit::atoms::PENDING_ATTACHMENTS.state();
-    {
-        let mut pending = state.write();
-        pending.clear();
-        pending.push(pending_image("AQID"));
-    }
-    let typed = InputSnapshot {
-        text: "看一下这张图".to_string(),
-        cursor_char: 6,
-    };
-    assert_eq!(pending_attachment_target(&typed), None, "有文本 → 不预览");
-
-    state.write().clear();
-    assert_eq!(
-        pending_attachment_target(&InputSnapshot::default()),
-        None,
-        "无附件 → 无目标"
-    );
-}
-
-/// 优先级：光标所在 `@image` 行优先于待发送附件（同类 composer 来源，
-/// 显式路径指哪看哪）；附件又优先于焦点 entry。
-#[test]
-#[serial]
-fn resolve_preview_target_priority_attachment_between_cursor_and_focus() {
-    reset_atoms();
-    let state = crate::kit::atoms::PENDING_ATTACHMENTS.state();
-    {
-        let mut pending = state.write();
-        pending.clear();
-        pending.push(pending_image("AQID"));
-    }
-    view_models_with("@image /focus.png");
-    *FOCUSED_ENTRY.state().write() = Some(FocusedEntry { slot: 0, key: None });
-
-    // cursor 命中 → 路径优先于附件。
-    *INPUT_SNAPSHOT.state().write() = InputSnapshot {
-        text: "@image /cur.png".to_string(),
-        cursor_char: 0,
-    };
-    assert_eq!(
-        resolve_preview_target(),
-        Some(PreviewTarget::Path("/cur.png".to_string()))
-    );
-
-    // cursor 空文本（附件在场）→ 附件优先于 focus。
-    *INPUT_SNAPSHOT.state().write() = InputSnapshot::default();
-    assert!(matches!(
-        resolve_preview_target(),
-        Some(PreviewTarget::PendingImage { index: 0, .. })
-    ));
-
-    // 附件清空 → 回到 focus。
-    state.write().clear();
-    assert_eq!(
-        resolve_preview_target(),
-        Some(PreviewTarget::Path("/focus.png".to_string()))
-    );
-    *FOCUSED_ENTRY.state().write() = None;
-}
-
-/// 请求链路：附件载荷解码到 Ready（展示名 = `图片 N`，meta 来自解码结果）。
-#[test]
-#[serial]
-fn request_pending_attachment_preview_reaches_ready() {
-    reset_atoms();
-    crate::i18n::init(Some("zh-CN"));
-    let payload = solid_png_base64();
-    let state = crate::kit::atoms::PENDING_ATTACHMENTS.state();
-    {
-        let mut pending = state.write();
-        pending.clear();
-        pending.push(pending_image(&payload));
-    }
-
-    request_preview(Some(PreviewTarget::PendingImage {
-        index: 0,
-        payload_id: crate::kit::atoms::payload_id_of(&payload),
-    }));
-
-    assert!(
-        wait_state(|s| matches!(s, ImagePreviewState::Ready { .. })),
-        "附件载荷应解码到 Ready（不依赖磁盘路径）"
-    );
-    match IMAGE_PREVIEW_STATE.state().read().clone() {
-        ImagePreviewState::Ready { source, meta, .. } => {
-            assert_eq!(source.display_name(), "图片 1", "展示名用附件序号");
-            assert!(
-                source.display_name().chars().all(|c| c != '/'),
-                "meta 行不得暴露路径"
-            );
-            assert_eq!((meta.width, meta.height), (2, 3), "尺寸来自解码结果");
-            assert_eq!(meta.mime, "image/png");
-            assert!(meta.size_bytes > 0);
-        }
-        other => panic!("应为 Ready，实际 {other:?}"),
-    }
-    state.write().clear();
-}
-
-/// 陈旧请求（附件已被移除或替换）不得显示过期图片 → Idle。
-#[test]
-#[serial]
-fn request_pending_attachment_preview_stale_payload_goes_idle() {
-    reset_atoms();
-    let state = crate::kit::atoms::PENDING_ATTACHMENTS.state();
-    {
-        let mut pending = state.write();
-        pending.clear();
-        pending.push(pending_image("AQID"));
-    }
-
-    request_preview(Some(PreviewTarget::PendingImage {
-        index: 0,
-        payload_id: crate::kit::atoms::payload_id_of("BAUG"),
-    }));
-    assert!(
-        matches!(*IMAGE_PREVIEW_STATE.state().read(), ImagePreviewState::Idle),
-        "载荷身份不匹配 → Idle（不显示过期图片）"
-    );
-
-    request_preview(Some(PreviewTarget::PendingImage {
-        index: 3,
-        payload_id: crate::kit::atoms::payload_id_of("AQID"),
-    }));
-    assert!(
-        matches!(*IMAGE_PREVIEW_STATE.state().read(), ImagePreviewState::Idle),
-        "越界索引 → Idle"
-    );
-    state.write().clear();
-}
-
-/// 非图片载荷（base64 不是图片）→ Error，不静默失败。
-#[test]
-#[serial]
-fn request_pending_attachment_preview_bad_payload_errors() {
-    reset_atoms();
-    crate::i18n::init(Some("en"));
-    let state = crate::kit::atoms::PENDING_ATTACHMENTS.state();
-    {
-        let mut pending = state.write();
-        pending.clear();
-        pending.push(pending_image("bm90LWEtcG5n"));
-    }
-    request_preview(Some(PreviewTarget::PendingImage {
-        index: 0,
-        payload_id: crate::kit::atoms::payload_id_of("bm90LWEtcG5n"),
-    }));
-    assert!(
-        wait_state(|s| matches!(s, ImagePreviewState::Error { .. })),
-        "非图片载荷应报 Error"
-    );
-    state.write().clear();
-}
-
-/// 渲染路径：附件来源的 meta 行显示展示名（`图片 1`）而非路径。
-#[test]
-#[serial]
-fn preview_meta_line_shows_attachment_name() {
-    crate::i18n::init(Some("zh-CN"));
-    let mut term = Terminal::new(TestBackend::new(40, 20)).unwrap();
-    let rect = Rect::new(10, 4, 24, 12);
-    let caps = caps(GraphicsProtocol::Kitty);
-    let state = ImagePreviewState::Ready {
-        source: crate::kit::atoms::PreviewSource::Pending {
-            name: "图片 1".to_string(),
-            payload_id: 7,
-        },
-        meta: crate::kit::image_safety::ImageMeta {
-            width: 2,
-            height: 3,
-            size_bytes: 68,
-            mime: "image/png",
-        },
-        img: Arc::new(solid_image(2, 3)),
-    };
-    term.draw(|f| draw_preview_overlay(f.buffer_mut(), rect, &state, true, None, &caps))
-        .unwrap();
-    let buf = term.backend().buffer();
-    let row_text: String = (rect.x..rect.x + rect.width)
-        .map(|x| buf[(x, rect.y + 1)].symbol().to_string())
-        .collect();
-    // 逐格取样会为宽字符补位（CJK 后跟空格），比较前先去空白。
-    assert!(
-        row_text.replace(' ', "").contains("图片1"),
-        "meta 行应显示附件展示名，实际: {row_text:?}"
-    );
-    assert!(!row_text.contains('/'), "meta 行不得出现路径: {row_text:?}");
 }

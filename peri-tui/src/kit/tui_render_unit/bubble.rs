@@ -14,6 +14,9 @@ use super::reminder::{ReminderInfo, detect_reminder};
 pub struct UserAttachment {
     /// 载荷字节数（解码后）——消息区 meta 行的大小档显示用。
     pub bytes: usize,
+    /// 载荷身份（与 `PendingAttachment::payload_id` 同源）——消息区附件记录行的
+    /// 浮动预览按它从保留层取载荷；找不到（被淘汰/超上限）即不预览，绝不张冠李戴。
+    pub payload_id: u64,
 }
 
 impl UserAttachment {
@@ -27,7 +30,12 @@ impl UserAttachment {
             .filter(|byte| **byte == b'=')
             .count();
         let bytes = (payload.len() / 4 * 3).saturating_sub(padding);
-        Self { bytes }
+        Self {
+            bytes,
+            // 载荷身份需按原始 base64 计算（本函数只处理解码后长度口径）；
+            // 调用方持有载荷时应以 `PendingAttachment::payload_id` 覆盖。
+            payload_id: 0,
+        }
     }
 }
 

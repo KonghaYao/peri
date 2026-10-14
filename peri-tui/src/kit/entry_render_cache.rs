@@ -182,7 +182,17 @@ impl EntryRenderCache {
             + self
                 .image_lines
                 .iter()
-                .map(|image| image.path.capacity() + image.size_text.capacity())
+                .map(|image| {
+                    let identity = match &image.identity {
+                        crate::kit::message_area::ImageLineIdentity::Path { path, .. } => {
+                            path.capacity()
+                        }
+                        crate::kit::message_area::ImageLineIdentity::Attachment {
+                            name, ..
+                        } => name.capacity(),
+                    };
+                    identity + image.size_text.capacity()
+                })
                 .sum::<usize>()
             + self
                 .interaction
