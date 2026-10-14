@@ -31,6 +31,7 @@ pub(crate) use self::error::{copy_text_at, subagent_error_buttons};
 use self::group::{render_collapsed_group_lines, render_subagent_group_lines};
 use self::helpers::{
     STEP_ENTER, STEP_EXIT, format_completed_duration, place_meta, prefixed_cont_line, step_line,
+    text_line_color,
 };
 pub(crate) use self::interaction::InteractionLayout;
 use self::interaction::render_ask_user_block_lines;
@@ -191,10 +192,10 @@ pub(crate) fn vm_to_lines_cached_with_layout(
         TuiRenderUnit::TuiAssistantBubble(data) => {
             let mut lines: Vec<Line<'static>> = Vec::new();
 
-            // §3.2 垂直节奏：user 与 assistant 正文块上下各保留 1 空行；
-            // 节拍空行带竖线前缀（左缘时间线不断链）。reasoning 是过程 entry，
-            // 不自行增加空行；若后接正文，正文前导空行负责分隔。空 bubble
-            // （无 text 无 reasoning）仍返回 0 行。
+            // §3.2 垂直节奏：Wide/Standard 的正文块分隔由转场台阶承担，不再保留
+            // 节拍空行；Compact/Narrow 无台阶，正文块上下仍各保留 1 空行（带竖线
+            // 前缀，左缘时间线不断链）。reasoning 是过程 entry，不自行增加空行。
+            // 空 bubble（无 text 无 reasoning）仍返回 0 行。
             if data.text.is_empty() && data.reasoning.is_none() {
                 return (lines, None, None, Vec::new());
             }
@@ -215,16 +216,20 @@ pub(crate) fn vm_to_lines_cached_with_layout(
             }
 
             // 内部转场（§6）：reasoning（过程区）→ 正文（文本区）的退出台阶由
-            // 该 entry 自画——entry 内部事务，无跨 slot 依赖；纯 reasoning 块
-            // （无正文）的退出由后续文本 entry 承担。
+            // 该 entry 自画——entry 内部事务，无跨 slot 依赖；线色用正文竖线色
+            // （accent），与下方正文无缝。纯 reasoning 块（无正文）的退出由后续
+            // 文本 entry 承担。
             if data.reasoning.is_some() && !data.text.is_empty() && grid.indent > 0 {
-                lines.push(step_line(STEP_EXIT));
+                lines.push(step_line(STEP_EXIT, line_color));
             }
 
-            // Markdown 正文——上下各 1 空行；wrap 在 content 列宽，行级再套统一前缀。
+            // Markdown 正文——wrap 在 content 列宽，行级再套统一前缀。
             if !data.text.is_empty() {
-                // 前导空行带竖线前缀（与正文同色）——turn 节拍空行不断链。
-                lines.push(prefixed_cont_line(grid, line_color, Line::default()));
+                // 前导空行只在 Compact/Narrow 保留（无台阶，空行作块分隔）；
+                // Wide/Standard 由转场台阶分隔。空行带竖线前缀（与正文同色）。
+                if grid.indent == 0 {
+                    lines.push(prefixed_cont_line(grid, line_color, Line::default()));
+                }
                 let palette_state = peri_theme::atoms::PALETTE_ATOM.state();
                 let palette_guard = palette_state.read();
                 let rendered = if data.started_at.is_none() {
@@ -398,8 +403,9 @@ pub(crate) fn vm_to_lines_cached_with_layout(
                 None
             };
 
-            if !data.text.is_empty() {
-                // 尾随空行同样带竖线前缀——turn 节拍对称且左缘时间线不断链。
+            if !data.text.is_empty() && grid.indent == 0 {
+                // Compact/Narrow：尾随空行带竖线前缀——turn 节拍对称且左缘
+                // 时间线不断链（Wide/Standard 由转场台阶承担分隔）。
                 lines.push(prefixed_cont_line(grid, line_color, Line::default()));
             }
 
@@ -473,8 +479,12 @@ pub(crate) fn vm_to_lines_cached_with_layout(
     let (mut lines, mut copy_button, mut interaction, mut image_lines) = rendered;
     if grid.indent > 0 && !lines.is_empty() {
         let step = match transition {
-            ZoneTransition::EnterProcess => Some(step_line(STEP_ENTER)),
-            ZoneTransition::ExitProcess => Some(step_line(STEP_EXIT)),
+            ZoneTransition::EnterProcess(source) => {
+                Some(step_line(STEP_ENTER, text_line_color(source)))
+            }
+            ZoneTransition::ExitProcess(source) => {
+                Some(step_line(STEP_EXIT, text_line_color(source)))
+            }
             ZoneTransition::None => None,
         };
         if let Some(step) = step {

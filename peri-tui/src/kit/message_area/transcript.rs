@@ -1,7 +1,7 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Arc;
 
-use super::grid::{GridSpec, ZoneTransition};
+use super::grid::{GridSpec, TextLineSource, ZoneTransition};
 use super::selection::{SlotIndex, SlotLines};
 use super::vm_cache::VmCacheSlot;
 use crate::kit::atoms::{TranscriptPublication, ViewModelsSnapshot};
@@ -58,10 +58,22 @@ fn produces_lines(vm: &TuiRenderUnit) -> bool {
     }
 }
 
+/// 台阶线色来源：按 entry 类型映射文本竖线色——user 气泡用 `text.secondary`，
+/// 其余文本区 entry（assistant 正文 / Divider 兜底）用 `accent`；主题值在渲染层
+/// 解析（`render/helpers.rs::text_line_color`）。
+fn text_line_source(vm: &TuiRenderUnit) -> TextLineSource {
+    match vm {
+        TuiRenderUnit::TuiUserBubble(_) => TextLineSource::User,
+        _ => TextLineSource::Assistant,
+    }
+}
+
 /// 计算 slot 的过程区转场形态（§6）：由「本 entry 起点 zone」与「前一个产出行
 /// entry 终点 zone」的差异决定——文本区 → 过程区 = [`ZoneTransition::EnterProcess`]
 /// （入口画 ` ╰─╮`），过程区 → 文本区 = [`ZoneTransition::ExitProcess`]（入口画
-/// ` ╭─╯`），同区接续或时间轴首个 entry = [`ZoneTransition::None`]。
+/// ` ╭─╯`），同区接续或时间轴首个 entry = [`ZoneTransition::None`]。台阶线色
+/// 随所接文本竖线（[`TextLineSource`]）：进入台阶接上方文本 entry、退出台阶接
+/// 下方（承担台阶的当前）文本 entry，转场处颜色不断链。
 ///
 /// [Why] 转场由「转场后的首个 entry」承担：判定只依赖前驱（后向依赖），追加新
 /// entry 只需渲染自身，不回溯翻转任何已渲染 slot；`AssistantBubble` 内部
@@ -80,8 +92,12 @@ pub(super) fn zone_transition(items: &im::Vector<TuiRenderUnit>, slot: usize) ->
             continue;
         }
         return match (end_zone(previous), start) {
-            (EntryZone::Text, EntryZone::Process) => ZoneTransition::EnterProcess,
-            (EntryZone::Process, EntryZone::Text) => ZoneTransition::ExitProcess,
+            (EntryZone::Text, EntryZone::Process) => {
+                ZoneTransition::EnterProcess(text_line_source(previous))
+            }
+            (EntryZone::Process, EntryZone::Text) => {
+                ZoneTransition::ExitProcess(text_line_source(vm))
+            }
             _ => ZoneTransition::None,
         };
     }

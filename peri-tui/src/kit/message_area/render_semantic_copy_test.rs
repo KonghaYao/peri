@@ -1,5 +1,6 @@
 use super::tool_activity_tests::EDIT_DIFF;
 use super::*;
+use crate::kit::message_area::grid::TextLineSource;
 
 // ── [D3 §9] 语义复制：semantic_line_text 变体分派矩阵 ────────────────────
 
@@ -29,10 +30,10 @@ fn test_semantic_plain_lines_strip_prefix() {
         }
         .into(),
     );
-    // 行 0 = 前导空行；行 1 = 段落 1；行 2 = 段间空行；行 3 = 段落 2
-    let l1 = sem_at(&vm, 1, &grid).expect("段落 1");
+    // 行 0 = 段落 1；行 1 = 段间空行；行 2 = 段落 2（Wide 无前导空行）
+    let l1 = sem_at(&vm, 0, &grid).expect("段落 1");
     assert_eq!(l1, "第一行", "段落剥前缀，实际: {l1:?}");
-    let l2 = sem_at(&vm, 3, &grid).expect("段落 2");
+    let l2 = sem_at(&vm, 2, &grid).expect("段落 2");
     assert_eq!(l2, "second line with 中文", "段落剥前缀，实际: {l2:?}");
 }
 
@@ -42,7 +43,7 @@ fn test_no_role_label_line_rendered() {
     crate::i18n::init(Some("en"));
     let grid = GridSpec::grid_for(120);
 
-    // assistant：行 0 = 前导空行；行 1 = 正文（无 `Perihelion` label）
+    // assistant：行 0 = 正文（Wide 无前后空行；无 `Perihelion` label）
     let vm = TuiRenderUnit::TuiAssistantBubble(
         TuiAssistantBubble {
             started_at: None,
@@ -55,18 +56,18 @@ fn test_no_role_label_line_rendered() {
         .into(),
     );
     let lines = vm_to_lines(&vm, &grid);
-    let text = crate::kit::text_selection::line_to_plain_text(&lines[1]);
+    let text = crate::kit::text_selection::line_to_plain_text(&lines[0]);
     assert!(
         !text.contains("Perihelion"),
         "assistant 无 role label，实际: {text:?}"
     );
     assert_eq!(
-        sem_at(&vm, 1, &grid).as_deref(),
+        sem_at(&vm, 0, &grid).as_deref(),
         Some("hello"),
-        "正文从行 1 开始（前后各 1 空行）"
+        "正文从行 0 开始（Wide 无节拍空行）"
     );
 
-    // user：行 0 = leading 空行；行 1 = 正文（无 `You` label）
+    // user：行 0 = 正文（无 `You` label）
     let user_vm = TuiRenderUnit::TuiUserBubble(TuiUserBubble {
         text: "hello".to_string(),
         attachments: Vec::new(),
@@ -75,15 +76,15 @@ fn test_no_role_label_line_rendered() {
         content_hash: 0,
     });
     let ulines = vm_to_lines(&user_vm, &grid);
-    let utext = crate::kit::text_selection::line_to_plain_text(&ulines[1]);
+    let utext = crate::kit::text_selection::line_to_plain_text(&ulines[0]);
     assert!(
         !utext.contains("You"),
         "user 无 role label，实际: {utext:?}"
     );
     assert_eq!(
-        sem_at(&user_vm, 1, &grid).as_deref(),
+        sem_at(&user_vm, 0, &grid).as_deref(),
         Some("hello"),
-        "正文从行 1 开始"
+        "正文从行 0 开始"
     );
 }
 
@@ -355,8 +356,8 @@ fn test_semantic_user_bubble() {
         reminder: None,
         content_hash: 0,
     });
-    // 行 0 = leading 空行；行 1 = 正文（无 role label 行）
-    let body = sem_at(&vm, 1, &grid).expect("正文行");
+    // 行 0 = 正文（Wide 无前后空行；无 role label 行）
+    let body = sem_at(&vm, 0, &grid).expect("正文行");
     assert_eq!(body, "重构消息流", "正文剥前缀，实际: {body:?}");
 }
 
@@ -383,7 +384,7 @@ fn test_semantic_process_prefix_and_step_are_stripped() {
         &mut cache,
         None,
         false,
-        ZoneTransition::EnterProcess,
+        ZoneTransition::EnterProcess(TextLineSource::User),
     );
     assert!(super::is_step_row(&lines[0]), "首行应是入口台阶");
     assert_eq!(
@@ -433,7 +434,7 @@ fn test_semantic_process_prefix_and_step_are_stripped() {
         &mut cache,
         None,
         false,
-        ZoneTransition::EnterProcess,
+        ZoneTransition::EnterProcess(TextLineSource::User),
     );
     let header_idx = lines
         .iter()
@@ -514,7 +515,7 @@ fn test_semantic_process_note_and_todo_strip_prefix() {
         &mut cache,
         None,
         false,
-        ZoneTransition::EnterProcess,
+        ZoneTransition::EnterProcess(TextLineSource::User),
     );
     assert!(
         super::is_step_row(&lines[0]),
@@ -546,7 +547,7 @@ fn test_semantic_process_note_and_todo_strip_prefix() {
         &mut cache,
         None,
         false,
-        ZoneTransition::EnterProcess,
+        ZoneTransition::EnterProcess(TextLineSource::User),
     );
     assert_eq!(
         sem_at_lines(&todo, &lines, 1, &grid).as_deref(),

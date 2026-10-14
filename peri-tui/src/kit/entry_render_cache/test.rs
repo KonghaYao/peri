@@ -1,5 +1,6 @@
 use super::*;
 use crate::kit::acp_bridge::{perf_counters, reset_perf_counters};
+use crate::kit::message_area::grid::TextLineSource;
 use crate::kit::tui_render_unit::{
     EntryStatus, FoldState, TuiAssistantBubble, TuiNoteLevel, TuiReasoningBlock, TuiSystemNote,
 };
@@ -124,7 +125,13 @@ fn zone_transition_flip_rerenders_step() {
         "转场形态不变 → 缓存命中"
     );
     assert_eq!(
-        cache.ensure(&vm, &grid, context, 0, ZoneTransition::EnterProcess),
+        cache.ensure(
+            &vm,
+            &grid,
+            context,
+            0,
+            ZoneTransition::EnterProcess(TextLineSource::User)
+        ),
         EntryInvalidation::Layout,
         "转场翻转 → Layout 级重渲染"
     );

@@ -76,9 +76,13 @@ fn skipped_publications_do_not_rebuild_evicted_unchanged_history() {
         2,
     );
     assert_eq!(transcript.scanned_slots, 256);
-    assert_eq!(transcript.updated_slots, 2);
+    // 2 个内容变化的 slot（128 / 255）+ 1 个视口补建：user 行高 1 行，
+    // height=2 的视口覆盖 slot 0..=1，slot 1 虽未被内容改动但已淘汰、需补建。
+    assert_eq!(transcript.updated_slots, 3);
     assert_eq!(transcript.evictions, 0);
-    assert!(caches[1..128].iter().all(|cache| cache.lines.is_none()));
+    // slot 1 在 height=2 视口内被补建（user 行高 1 行，视口覆盖 0..=1）；
+    // 其余淘汰历史保持未重建。
+    assert!(caches[2..128].iter().all(|cache| cache.lines.is_none()));
     assert!(caches[129..255].iter().all(|cache| cache.lines.is_none()));
     let copied = extract_visual_range_index(
         &index,
@@ -308,7 +312,7 @@ fn local_publication_and_same_length_replacement_keep_old_version() {
         0,
         12,
     );
-    let old_text = old.materialize(127).unwrap().line(1).unwrap().to_string();
+    let old_text = old.materialize(127).unwrap().line(0).unwrap().to_string();
     snapshot.items.set(
         127,
         TuiRenderUnit::TuiUserBubble(TuiUserBubble::new("replacement".into())),
@@ -333,14 +337,14 @@ fn local_publication_and_same_length_replacement_keep_old_version() {
     );
     assert_eq!(transcript.scanned_slots, 1);
     assert_eq!(
-        old.materialize(127).unwrap().line(1).unwrap().to_string(),
+        old.materialize(127).unwrap().line(0).unwrap().to_string(),
         old_text
     );
     assert!(
         current
             .materialize(127)
             .unwrap()
-            .line(1)
+            .line(0)
             .unwrap()
             .to_string()
             .contains("replacement")
@@ -756,14 +760,20 @@ fn zone_transition_matrix_skips_zero_line_entries() {
     let items = im::Vector::from(vec![tool_entry("Read")]);
     assert_eq!(zone_transition(&items, 0), ZoneTransition::None);
 
-    // 文本区 → 过程区 → 过程区：进入处台阶，区内接续
+    // 文本区 → 过程区 → 过程区：进入处台阶（线色随上方 user 文本），区内接续
     let items = im::Vector::from(vec![user(), tool_entry("Read"), tool_entry("Grep")]);
-    assert_eq!(zone_transition(&items, 1), ZoneTransition::EnterProcess);
+    assert_eq!(
+        zone_transition(&items, 1),
+        ZoneTransition::EnterProcess(TextLineSource::User)
+    );
     assert_eq!(zone_transition(&items, 2), ZoneTransition::None);
 
-    // 过程区 → 文本区：退出台阶
+    // 过程区 → 文本区：退出台阶（线色随下方 assistant 正文）
     let items = im::Vector::from(vec![tool_entry("Read"), empty_bubble_entry("answer", None)]);
-    assert_eq!(zone_transition(&items, 1), ZoneTransition::ExitProcess);
+    assert_eq!(
+        zone_transition(&items, 1),
+        ZoneTransition::ExitProcess(TextLineSource::Assistant)
+    );
 
     // 0 行 entry 夹在中间：不参与相邻判定，跨过它看前一个产出行 entry
     let items = im::Vector::from(vec![
@@ -771,19 +781,25 @@ fn zone_transition_matrix_skips_zero_line_entries() {
         empty_bubble_entry("", None),
         tool_entry("Read"),
     ]);
-    assert_eq!(zone_transition(&items, 2), ZoneTransition::EnterProcess);
+    assert_eq!(
+        zone_transition(&items, 2),
+        ZoneTransition::EnterProcess(TextLineSource::User)
+    );
 
     // 纯 reasoning 气泡（起点过程 / 终点过程）→ 后接过程 entry 不画台阶
     let items = im::Vector::from(vec![user(), reasoning_only(), tool_entry("Read")]);
     assert_eq!(zone_transition(&items, 2), ZoneTransition::None);
 
-    // 正文非空的气泡终点在文本区 → 后接过程 entry 画进入台阶
+    // 正文非空的气泡终点在文本区 → 后接过程 entry 画进入台阶（线色随上方 assistant 正文）
     let items = im::Vector::from(vec![
         user(),
         empty_bubble_entry("answer", None),
         tool_entry("Read"),
     ]);
-    assert_eq!(zone_transition(&items, 2), ZoneTransition::EnterProcess);
+    assert_eq!(
+        zone_transition(&items, 2),
+        ZoneTransition::EnterProcess(TextLineSource::Assistant)
+    );
 }
 
 /// §6 首个 entry 即过程区（会话以工具卡开场）：完整渲染路径下首行是过程区

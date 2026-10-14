@@ -1,4 +1,4 @@
-use crate::kit::message_area::grid::{Breakpoint, GridSpec};
+use crate::kit::message_area::grid::{Breakpoint, GridSpec, TextLineSource};
 use crate::kit::terminal_caps::SymbolSet;
 use crate::kit::tui_render_unit::TuiDiffBlock;
 use crate::truncate::truncate_by_width;
@@ -178,11 +178,22 @@ pub(super) const STEP_ENTER: &str = " \u{2570}\u{2500}\u{256e}";
 /// 退出台阶字形（过程区 → 文本区）：` ╭─╯`（镜像）。
 pub(super) const STEP_EXIT: &str = " \u{256d}\u{2500}\u{256f}";
 
-/// 台阶行（宽 4，不含内容）——纯结构 chrome，整行单 span dim 色；由
+/// 台阶行（宽 4，不含内容）——纯结构 chrome，整行单 span；线色 = 所接文本
+/// 竖线色（[`text_line_color`]，转场处颜色不断链）；由
 /// `vm_to_lines_cached_with_layout` 在转场后的首个 entry 行首插入（§6）。
-pub(super) fn step_line(text: &'static str) -> Line<'static> {
+pub(super) fn step_line(text: &'static str, color: Color) -> Line<'static> {
+    Line::from(Span::styled(text, Style::default().fg(color)))
+}
+
+/// 台阶线色（§6）：与所接文本竖线同色——user 文本 `text.secondary`、
+/// assistant 正文 `accent`（Divider 等其余文本区 entry 兜底 assistant）；
+/// 语义见 [`TextLineSource`]。
+pub(super) fn text_line_color(source: TextLineSource) -> Color {
     let sem = THEME_ATOM.state().read().semantic;
-    Line::from(Span::styled(text, Style::default().fg(sem.text.dim)))
+    match source {
+        TextLineSource::User => sem.text.secondary,
+        TextLineSource::Assistant => sem.accent,
+    }
 }
 
 /// 台阶行判定（` ╰─╮` / ` ╭─╯`）——Animation 原位刷新（running header 顺延，

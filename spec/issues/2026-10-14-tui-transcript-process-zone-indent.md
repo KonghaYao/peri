@@ -54,16 +54,22 @@
 8. 不加开关、配置项或环境变量。
 9. 注记（Info）不画 `── label ──` 横线——走普通过程行：左缘标记列 `│` + 正文（与 reasoning 摘要同形）。
 10. 台阶行不进入复制文本、不保留空行。
+11. Wide/Standard 的文本块首尾不再保留节拍空行（§3.2）——块分隔由转场台阶承担；
+    Compact/Narrow 无台阶，保留正文块上下各 1 空行（逐列与改动前一致）。
+12. 台阶线色随所接文本竖线——进入台阶接上方文本 entry、退出台阶接下方文本 entry
+    （user → `text.secondary`、assistant 正文 → `accent`，Divider 兜底 assistant）；
+    entry 内部（reasoning → 正文）台阶用正文色。转场处颜色不断链。
 
 ## 实现落点
 
-- `message_area/grid.rs`：`indent` 字段与断点赋值；`process_marker_col()`、`process_prefix_width()`（`indent == 0` 取 `first_prefix_width()`）、`process_content_width()`；`ZoneTransition { None, EnterProcess, ExitProcess }`。
-- `message_area/render/helpers.rs`：`process_first_prefix`（`indent == 0` 回退 `first_prefix`）、`process_cont_prefix`；`STEP_ENTER` / `STEP_EXIT` / `step_line` / `is_step_line`。
+- `message_area/grid.rs`：`indent` 字段与断点赋值；`process_marker_col()`、`process_prefix_width()`（`indent == 0` 取 `first_prefix_width()`）、`process_content_width()`；`TextLineSource`（台阶线色来源）；`ZoneTransition { None, EnterProcess(TextLineSource), ExitProcess(TextLineSource) }`。
+- `message_area/render/helpers.rs`：`process_first_prefix`（`indent == 0` 回退 `first_prefix`）、`process_cont_prefix`；`STEP_ENTER` / `STEP_EXIT` / `step_line(text, color)` / `text_line_color(source)` / `is_step_line`。
 - `message_area/render.rs`：`vm_to_lines_cached_with_layout` 收 `transition` 入参——非 None 且在 slot 行首插入台阶并顺延各索引；`TuiAssistantBubble` 分支自画内部退出台阶；`running_header_index` / `is_step_row`。
 - `message_area/transcript.rs` / `transcript_index.rs`：`start_zone` / `end_zone` / `produces_lines` / `zone_transition`；按需物化与常驻渲染同用此判定。
 - `entry_render_cache.rs`：`transition` 纳入缓存失效——转场形态翻转触发该 slot 的 Layout 级重渲染，不影响其他 slot。
 - `message_area/render/{tool_card,group,reasoning,system,interaction,error,user,semantic}.rs`：前缀切换到 `process_*`、宽度预算切 `process_content_width()`；语义剥离按 span 结构判定并识别台阶行。
 - `message_area/selection.rs`：台阶行整行跳过 + `local_idx` 台阶顺延。
+- `message_area/render/user.rs` / `render.rs`：文本块节拍空行仅在 `indent == 0`（Compact/Narrow）保留；Wide/Standard 由台阶承担块分隔。
 
 ## 验收
 
@@ -72,7 +78,9 @@
 - [x] 气泡内 reasoning → 正文的退出台阶由气泡自画；纯 reasoning 块（无正文）不画退出台阶。
 - [x] <60 列：与改动前逐列一致（前缀回退基准形态、无台阶；回退路径由测试逐列断言）。
 - [x] 语义复制剥净前缀与台阶；面板（子 Agent 详情）渲染逐列不变。
+- [x] 台阶线色 = 所接文本竖线色（进入台阶接上方文本、退出台阶接下方文本；entry 内部台阶用正文色）——`test_step_line_color_follows_text_line`。
 - [x] Divider 回文本区 `── label ──` 形态；Info 注记走过程行 `│` + label。
+- [x] Wide/Standard 正文块（user 气泡 / assistant 正文）首尾无节拍空行；Compact/Narrow 保留上下各 1 空行（回退路径由测试逐列断言）。
 - [x] 本轮重验：`test --locked -p peri-tui --lib` 1849 passed / 0 failed / 6 ignored（与基线一致）；layer-imports 22 条规则 0 违规；`git diff --check` 干净；check --all-targets / clippy / fmt / doc 见下方验证命令。
 - [x] 按 `DOC-UPDATE-001` 核对受影响路由与事实源；不新增平行文档（`docs/design/tui-chat-workbench.md`、`docs/design/tui-subagent-activity.md`、`docs/design/tui-streaming-markdown-performance.md`、`docs/code-index/peri-tui.md` 已同步）。
 
@@ -83,6 +91,7 @@
 3. `ProcessLead { Branch, Inline }` → `ZoneTransition { None, EnterProcess, ExitProcess }`。
 4. `TuiDivider` 由过程区改归文本区；Info 注记由 `── label ──` 改过程行 `│` + label。
 5. 台阶行引入的索引顺延与语义复制跳过（上文 §11/§12）。
+6. Wide/Standard 文本块首尾节拍空行删除（v1 保留上下各 1 空行）；Compact/Narrow 保留。
 
 ## 验证命令
 

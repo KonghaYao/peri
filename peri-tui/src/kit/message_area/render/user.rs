@@ -87,8 +87,9 @@ pub(super) fn render_system_reminder_lines(
 
 /// §6.1 User prompt：去全宽 bg 与 `❯`；无 role label（`You`），正文直接开始。
 ///
-/// - 首尾各 1 个空行（§3.2 turn 节拍）——空行带竖线前缀，左缘时间线不断链；
-///   正文行 `[│][gap]` 与其余 entry 同起点。
+/// - Compact/Narrow 首尾各 1 个空行（§3.2 turn 节拍）——空行带竖线前缀，
+///   左缘时间线不断链；Wide/Standard 的块分隔由转场台阶承担，不再保留节拍
+///   空行。正文行 `[│][gap]` 与其余 entry 同起点。
 /// - 保留用户换行；长 prompt 最多 `USER_BODY_MAX_LINES` 个视觉行，
 ///   超出显示 `… +N lines`（§6.1）。`USER_BODY_MAX_LINES` 计数包含
 ///   附件记录行与 @image meta 行（§4.4）。
@@ -111,13 +112,18 @@ pub(super) fn render_user_bubble_lines(
     if data.text.is_empty() && data.attachments.is_empty() {
         return (Vec::new(), Vec::new());
     }
-    // §3.2：新 user prompt 前保留 1 个空行（turn 节拍）；空行带竖线前缀
-    // （与正文同色），左缘时间线在节拍空行处不断链。
-    let mut lines: Vec<Line<'static>> = vec![prefixed_cont_line(
-        grid,
-        sem.text.secondary,
-        Line::default(),
-    )];
+    // §3.2：新 user prompt 前的 1 空行（turn 节拍）只在 Compact/Narrow 保留
+    // ——该档无转场台阶，空行承担块分隔；Wide/Standard 由台阶分隔，不再留空行。
+    // 空行带竖线前缀（与正文同色），左缘时间线不断链。
+    let mut lines: Vec<Line<'static>> = if grid.indent == 0 {
+        vec![prefixed_cont_line(
+            grid,
+            sem.text.secondary,
+            Line::default(),
+        )]
+    } else {
+        Vec::new()
+    };
 
     // 正文：保留用户换行；每行按 display width 折行成「视觉行」（§6.1 口径），
     // 最多 USER_BODY_MAX_LINES 个视觉行，超出显示 `… +N lines`（§12：grapheme
@@ -191,14 +197,16 @@ pub(super) fn render_user_bubble_lines(
         spans.push(Span::styled(more, Style::default().fg(sem.text.dim)));
         lines.push(Line::from(spans));
     }
-    // §3.2：user 尾部 1 空行（turn 节拍对称）——分隔后续 thinking/tool；
-    // assistant 正文仍由自身前导空行建立正文块边界。尾随空行同样带竖线前缀，
-    // 左缘时间线连续。
-    lines.push(prefixed_cont_line(
-        grid,
-        sem.text.secondary,
-        Line::default(),
-    ));
+    // §3.2：user 尾部 1 空行（turn 节拍对称）——Compact/Narrow 用空行分隔后续
+    // thinking/tool；Wide/Standard 由转场台阶承担分隔，不再保留。尾随空行带
+    // 竖线前缀，左缘时间线连续。
+    if grid.indent == 0 {
+        lines.push(prefixed_cont_line(
+            grid,
+            sem.text.secondary,
+            Line::default(),
+        ));
+    }
     (lines, image_lines)
 }
 

@@ -41,6 +41,17 @@ pub enum Breakpoint {
     Narrow,
 }
 
+/// 台阶文本侧来源——决定台阶线色（与文本竖线同色，转场处颜色不断链）：
+/// user 文本用 `text.secondary`、assistant 正文用 `accent`；主题色在渲染层
+/// 映射（`render/helpers.rs::text_line_color`）。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TextLineSource {
+    /// user 气泡（含附件记录 / @image meta 行）。
+    User,
+    /// assistant 正文（Divider 等其余文本区 entry 按此兜底）。
+    Assistant,
+}
+
 /// 过程区转场形态（规格 §6）——由 transcript 按相邻 entry 的起止 zone 判定，
 /// 由转场后的首个 entry 承担（后向依赖：只看前一个「产出行 entry」的终点；
 /// 追加新 entry 不回溯翻转已渲染 slot 的形态）。
@@ -48,10 +59,12 @@ pub enum Breakpoint {
 pub enum ZoneTransition {
     /// 无转场：同区接续 / 时间轴首个 entry / 转场后 entry 渲染 0 行。
     None,
-    /// 文本区 → 过程区：entry 入口画进入台阶 ` ╰─╮`（col1 `╰` / col2 `─` / col3 `╮`）。
-    EnterProcess,
-    /// 过程区 → 文本区：entry 入口画退出台阶 ` ╭─╯`（镜像）。
-    ExitProcess,
+    /// 文本区 → 过程区：entry 入口画进入台阶 ` ╰─╮`（col1 `╰` / col2 `─` / col3 `╮`）；
+    /// 来源指上方文本 entry（`╰` 接它的竖线）。
+    EnterProcess(TextLineSource),
+    /// 过程区 → 文本区：entry 入口画退出台阶 ` ╭─╯`（镜像）；来源指下方文本
+    /// entry（即承担本台阶的当前 entry，`╭` 接它的竖线）。
+    ExitProcess(TextLineSource),
 }
 
 /// 网格规格——渲染层所有行渲染器统一消费。

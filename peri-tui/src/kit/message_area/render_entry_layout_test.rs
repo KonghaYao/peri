@@ -1,4 +1,5 @@
 use super::*;
+use crate::kit::message_area::grid::TextLineSource;
 
 // ── 宽度 1 不 panic（回归）──────────────────────────────────────────────
 
@@ -252,7 +253,7 @@ fn test_process_prefix_equal_width_and_duration_flush_right() {
         &mut cache,
         None,
         false,
-        ZoneTransition::EnterProcess,
+        ZoneTransition::EnterProcess(TextLineSource::User),
     );
     // 入口台阶：` ╰─╮`（col1 `╰` 接上方文本竖线 / col3 `╮` 接过程区标记列）
     assert!(super::is_step_row(&lines[0]), "首行应是入口台阶");
@@ -359,7 +360,7 @@ fn test_compact_and_narrow_process_prefix_falls_back_to_baseline() {
             &mut cache,
             None,
             false,
-            ZoneTransition::EnterProcess,
+            ZoneTransition::EnterProcess(TextLineSource::User),
         );
         assert_eq!(
             transited.len(),
@@ -385,8 +386,8 @@ fn test_message_line_colors_follow_role_tokens() {
         )),
         &grid,
     );
-    assert_eq!(user[1].spans[1].content.as_ref(), "\u{2502}");
-    assert_eq!(user[1].spans[1].style.fg, Some(sem.text.secondary));
+    assert_eq!(user[0].spans[1].content.as_ref(), "\u{2502}");
+    assert_eq!(user[0].spans[1].style.fg, Some(sem.text.secondary));
 
     let assistant = vm_to_lines(
         &TuiRenderUnit::TuiAssistantBubble(
@@ -402,8 +403,8 @@ fn test_message_line_colors_follow_role_tokens() {
         ),
         &grid,
     );
-    assert_eq!(assistant[1].spans[1].content.as_ref(), "\u{2502}");
-    assert_eq!(assistant[1].spans[1].style.fg, Some(sem.accent));
+    assert_eq!(assistant[0].spans[1].content.as_ref(), "\u{2502}");
+    assert_eq!(assistant[0].spans[1].style.fg, Some(sem.accent));
 }
 
 /// Narrow 断点：首行 accent 符号退化为 dim bullet（§11）。
@@ -455,10 +456,10 @@ fn test_text_zone_baseline_and_process_zone_indent_columns() {
     );
 
     // user / assistant 正文：文本区前缀 3 段（outer / 竖线 / gap）→ col4
-    assert_eq!(prefix_col(&user[1], 3), text_col, "user 正文起点");
-    assert!(line_text(&user[1]).contains("你好世界"));
-    assert_eq!(prefix_col(&assistant[1], 3), text_col, "assistant 正文起点");
-    assert!(line_text(&assistant[1]).contains("hello"));
+    assert_eq!(prefix_col(&user[0], 3), text_col, "user 正文起点");
+    assert!(line_text(&user[0]).contains("你好世界"));
+    assert_eq!(prefix_col(&assistant[0], 3), text_col, "assistant 正文起点");
+    assert!(line_text(&assistant[0]).contains("hello"));
     // 工具卡首行：过程区前缀 4 段（outer / indent 留空 / 标记 / gap）→ col6
     assert_eq!(prefix_col(&tool[0], 4), process_col, "tool 首行标签起点");
     assert!(tool[0].spans[4].content.contains("Read"));
@@ -466,8 +467,9 @@ fn test_text_zone_baseline_and_process_zone_indent_columns() {
 
 // ── 垂直节奏（§3.2）────────────────────────────────────────────────────
 
-/// user 与 assistant 正文块前后各 1 空行；turn 内 tool 过程 entry 无空行；
-/// 空文本 user（thinking 回传建模）渲染 0 行。
+/// Wide/Standard：正文块分隔由转场台阶承担，user 与 assistant 正文块前后
+/// 不再保留节拍空行；Compact 无台阶，仍保留首尾 1 空行。turn 内 tool 过程
+/// entry 无空行；空文本 user（thinking 回传建模）渲染 0 行。
 #[test]
 fn test_vertical_rhythm_blank_lines() {
     let grid = GridSpec::grid_for(80);
@@ -477,12 +479,12 @@ fn test_vertical_rhythm_blank_lines() {
         &grid,
     );
     assert!(
-        is_rail_blank(&user_lines[0]),
-        "user 前应有 1 空行（带竖线前缀，时间线不断链）"
+        !is_blank_separator(&user_lines[0]),
+        "Wide 下 user 首行应为正文（台阶承担分隔，不再保留前导空行）"
     );
     assert!(
-        user_lines.last().is_some_and(is_rail_blank),
-        "user 后应有 1 空行（turn 节拍对称且带竖线前缀）"
+        !user_lines.last().is_some_and(is_blank_separator),
+        "Wide 下 user 末行应为正文（不再保留尾随空行）"
     );
     let header = header_of(&user_lines);
     assert!(
@@ -510,12 +512,49 @@ fn test_vertical_rhythm_blank_lines() {
         &grid,
     );
     assert!(
-        is_rail_blank(&assistant_lines[0]),
-        "assistant 正文前应有 1 空行（带竖线前缀，时间线不断链）"
+        !is_blank_separator(&assistant_lines[0]),
+        "Wide 下 assistant 正文前不再保留空行"
     );
     assert!(
-        assistant_lines.last().is_some_and(is_rail_blank),
-        "assistant 正文后应有 1 空行（带竖线前缀）"
+        !assistant_lines.last().is_some_and(is_blank_separator),
+        "Wide 下 assistant 正文后不再保留空行"
+    );
+
+    // Compact（无转场台阶）：节拍空行保留，承担正文块分隔
+    let compact = GridSpec::grid_for(59);
+    let user_compact = vm_to_lines(
+        &TuiRenderUnit::TuiUserBubble(crate::kit::tui_render_unit::TuiUserBubble::new("hi".into())),
+        &compact,
+    );
+    assert!(
+        is_rail_blank(&user_compact[0]),
+        "Compact user 前保留 1 空行（带竖线前缀）"
+    );
+    assert!(
+        user_compact.last().is_some_and(is_rail_blank),
+        "Compact user 后保留 1 空行（带竖线前缀）"
+    );
+    let assistant_compact = vm_to_lines(
+        &TuiRenderUnit::TuiAssistantBubble(
+            TuiAssistantBubble {
+                started_at: None,
+                duration_ms: None,
+                text: "reply".into(),
+                reasoning: None,
+                message_id: None,
+                content_hash: 7,
+            }
+            .into(),
+        ),
+        &compact,
+    );
+    assert!(
+        is_rail_blank(&assistant_compact[0]),
+        "Compact assistant 正文前保留 1 空行"
+    );
+    assert!(
+        assistant_compact.last().is_some_and(is_rail_blank),
+        "Compact assistant 正文后保留 1 空行"
     );
 
     // 工具行之间无空行：completed + expanded 展开体（首行 + 输出行）无内部空行
@@ -563,17 +602,122 @@ fn test_empty_user_bubble_renders_zero_lines() {
         lines.len()
     );
 
-    // 非空 user：前导空行 + 正文 + 尾部空行（turn 节拍对称）
+    // 非空 user（Wide）：无节拍空行——首行即正文、末行即正文
     let real_user =
         TuiRenderUnit::TuiUserBubble(crate::kit::tui_render_unit::TuiUserBubble::new("hi".into()));
     let real_lines = vm_to_lines(&real_user, &grid);
     assert!(
-        is_rail_blank(&real_lines[0]),
-        "非空 user 前应有 1 空行（带竖线前缀）"
+        real_lines.first().is_some_and(has_body_content),
+        "Wide 下非空 user 首行即正文（无前导空行）"
     );
     assert!(
-        real_lines.last().is_some_and(is_rail_blank),
-        "非空 user 后应有 1 空行（带竖线前缀）"
+        real_lines.last().is_some_and(has_body_content),
+        "Wide 下非空 user 末行即正文（无尾随空行）"
+    );
+}
+
+// ── 转场台阶线色（§6）──────────────────────────────────────────────────
+
+/// 台阶线色随所接文本竖线：进入台阶接上方文本 entry（user → `text.secondary` /
+/// assistant → `accent`），退出台阶接下方文本 entry（assistant 正文 → `accent`），
+/// entry 内部（reasoning → 正文）台阶用正文色。
+#[test]
+fn test_step_line_color_follows_text_line() {
+    let grid = GridSpec::grid_for(80);
+    let sem = THEME_ATOM.state().read().semantic;
+    let tool = TuiRenderUnit::TuiToolCard(tool_card("Read", "src/main.rs", false, false));
+    let mut cache = crate::kit::markdown::MarkdownRenderCache::default();
+
+    let (user_step, ..) = super::vm_to_lines_cached_with_layout(
+        &tool,
+        &grid,
+        &mut cache,
+        None,
+        false,
+        ZoneTransition::EnterProcess(TextLineSource::User),
+    );
+    assert!(super::is_step_row(&user_step[0]), "首行应是入口台阶");
+    assert_eq!(
+        user_step[0].spans[0].style.fg,
+        Some(sem.text.secondary),
+        "进入台阶线色 = user 文本竖线色"
+    );
+
+    let (assistant_step, ..) = super::vm_to_lines_cached_with_layout(
+        &tool,
+        &grid,
+        &mut cache,
+        None,
+        false,
+        ZoneTransition::EnterProcess(TextLineSource::Assistant),
+    );
+    assert_eq!(
+        assistant_step[0].spans[0].style.fg,
+        Some(sem.accent),
+        "进入台阶线色 = assistant 文本竖线色"
+    );
+
+    let answer = TuiRenderUnit::TuiAssistantBubble(
+        TuiAssistantBubble {
+            started_at: None,
+            duration_ms: None,
+            text: "answer".into(),
+            reasoning: None,
+            message_id: None,
+            content_hash: 9,
+        }
+        .into(),
+    );
+    let (exit_step, ..) = super::vm_to_lines_cached_with_layout(
+        &answer,
+        &grid,
+        &mut cache,
+        None,
+        false,
+        ZoneTransition::ExitProcess(TextLineSource::Assistant),
+    );
+    assert!(super::is_step_row(&exit_step[0]), "首行应是退出台阶");
+    assert_eq!(
+        exit_step[0].spans[0].style.fg,
+        Some(sem.accent),
+        "退出台阶线色 = assistant 正文竖线色"
+    );
+
+    // entry 内部（reasoning → 正文）台阶：正文竖线色
+    let mixed = TuiRenderUnit::TuiAssistantBubble(
+        TuiAssistantBubble {
+            started_at: None,
+            duration_ms: None,
+            text: "body".into(),
+            reasoning: Some(TuiReasoningBlock {
+                text: "思考".into(),
+                fold: FoldState::Collapsed,
+                status: EntryStatus::Completed,
+                is_running: false,
+                started_at: None,
+                duration_ms: Some(1_000),
+            }),
+            message_id: None,
+            content_hash: 10,
+        }
+        .into(),
+    );
+    let (mixed_lines, ..) = super::vm_to_lines_cached_with_layout(
+        &mixed,
+        &grid,
+        &mut cache,
+        None,
+        false,
+        ZoneTransition::None,
+    );
+    let inner_step = mixed_lines
+        .iter()
+        .find(|line| super::is_step_row(line))
+        .expect("reasoning → 正文间应画内部退出台阶");
+    assert_eq!(
+        inner_step.spans[0].style.fg,
+        Some(sem.accent),
+        "内部台阶线色 = 正文竖线色"
     );
 }
 
@@ -597,7 +741,7 @@ fn test_system_reminder_renders_in_process_zone() {
         &mut cache,
         None,
         false,
-        ZoneTransition::EnterProcess,
+        ZoneTransition::EnterProcess(TextLineSource::User),
     );
     assert!(super::is_step_row(&lines[0]), "首行应是入口台阶");
     assert_eq!(line_text(&lines[0]), " \u{2570}\u{2500}\u{256e}");
@@ -633,7 +777,7 @@ fn test_system_reminder_renders_in_process_zone() {
         &mut cache,
         None,
         false,
-        ZoneTransition::EnterProcess,
+        ZoneTransition::EnterProcess(TextLineSource::User),
     );
     let first = &lines[0];
     assert!(

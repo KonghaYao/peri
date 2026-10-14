@@ -1,4 +1,5 @@
 use super::*;
+use crate::kit::message_area::grid::TextLineSource;
 
 // ── Reasoning 三态（§6.3）──────────────────────────────────────────────
 
@@ -778,7 +779,7 @@ fn test_bubble_reasoning_uses_process_zone_body_returns_to_baseline() {
         &mut cache,
         None,
         false,
-        ZoneTransition::EnterProcess,
+        ZoneTransition::EnterProcess(TextLineSource::User),
     );
 
     // 入口台阶（§6）：转场后的 entry 行首独立成行，先于 reasoning header

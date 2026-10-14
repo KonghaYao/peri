@@ -26,8 +26,8 @@ fn test_assistant_bubble_renders_copy_button() {
 
     assert_eq!(
         btn.logical_idx,
-        lines.len() - 2,
-        "按钮行位于正文与尾随空行之间"
+        lines.len() - 1,
+        "Wide 无尾随空行，按钮行为内容末行"
     );
     assert_eq!(
         btn.x_start,
@@ -136,8 +136,8 @@ fn test_assistant_md_paragraph_lines_stay_within_viewport() {
         let w: usize = l.spans.iter().map(|s| s.content.width()).sum();
         assert!(w <= 80, "行 {i} 宽度 {w} 超过视口 80：{:#?}", line_text(l));
     }
-    // 除 leading 空行外，每行第 2 个 span 都是竖线前缀
-    for (i, l) in lines.iter().enumerate().skip(1) {
+    // 每行第 2 个 span 都是竖线前缀（Wide 无 leading 空行，正文行自身带前缀）
+    for (i, l) in lines.iter().enumerate() {
         if l.spans.is_empty() {
             continue;
         }
