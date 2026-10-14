@@ -1,0 +1,24 @@
+[覆盖] requests_rewind_cases_test.rs: 18 个区间无缝覆盖 1..1722
+[覆盖] requests_unnegotiated_replay_test.rs: 19 个区间无缝覆盖 1..1223
+[逐字搬移] requests_rewind_effective_view_test.rs: 6 块全部命中（533 行来源）
+[逐字搬移] requests_rewind_cursor_expiry_test.rs: 1 块全部命中（135 行来源）
+[逐字搬移] requests_rewind_failure_paths_test.rs: 4 块全部命中（355 行来源）
+[逐字搬移] requests_rewind_routing_test.rs: 4 块全部命中（189 行来源）
+[逐字搬移] requests_rewind_inherited_region_test.rs: 1 块全部命中（287 行来源）
+[逐字搬移] requests_unnegotiated_replay_delivery_test.rs: 8 块全部命中（295 行来源）
+[逐字搬移] requests_unnegotiated_replay_fail_closed_test.rs: 4 块全部命中（144 行来源）
+[逐字搬移] requests_unnegotiated_replay_verification_test.rs: 5 块全部命中（280 行来源）
+[父文件保留] requests_rewind_cases_test.rs: 2 块逐字保留
+[父文件保留] requests_unnegotiated_replay_test.rs: 2 块逐字保留
+[无凭空内容] requests_rewind_cases_test.rs: OK
+[无凭空内容] requests_rewind_effective_view_test.rs: OK
+[无凭空内容] requests_rewind_cursor_expiry_test.rs: OK
+[无凭空内容] requests_rewind_failure_paths_test.rs: OK
+[无凭空内容] requests_rewind_routing_test.rs: OK
+[无凭空内容] requests_rewind_inherited_region_test.rs: OK
+[无凭空内容] requests_unnegotiated_replay_test.rs: OK
+[无凭空内容] requests_unnegotiated_replay_delivery_test.rs: OK
+[无凭空内容] requests_unnegotiated_replay_fail_closed_test.rs: OK
+[无凭空内容] requests_unnegotiated_replay_verification_test.rs: OK
+
+VERIFY-OK：全部区间逐字搬移、覆盖无缺口、产物无凭空内容

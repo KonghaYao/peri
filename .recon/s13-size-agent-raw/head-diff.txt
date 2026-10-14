@@ -1,0 +1,15 @@
+9a10,12
+> //!
+> //! 模块结构：条目与暂存模型见 `entry`，持久化接线（前台）见 `persistence_port`，
+> //! 后台 writer 见 `persistence`；`MessageTranscript` 的内存模型、标记与压缩生命周期留在本模块。
+20c23
+< use crate::messages::{BaseMessage, MessageContent, MessageId};
+---
+> use crate::messages::{BaseMessage, MessageId};
+26,28c29
+< use peri_acp_types::system_reminder::{
+<     encode_system_reminder, reminder_egress_allowed, ReminderAudience, TrustedSystemReminder,
+< };
+---
+> use peri_acp_types::system_reminder::{ReminderAudience, TrustedSystemReminder};
+HEAD_DIFF_EXIT=1

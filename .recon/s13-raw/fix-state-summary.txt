@@ -1,0 +1,6 @@
+run=01 exit=0 test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 524 filtered out; finished in 0.46s
+run=02 exit=0 test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 524 filtered out; finished in 0.41s
+run=03 exit=0 test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 524 filtered out; finished in 0.29s
+run=04 exit=0 test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 524 filtered out; finished in 0.30s
+run=05 exit=0 test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 524 filtered out; finished in 0.31s
+run=06 exit=0 test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 524 filtered out; finished in 0.29s

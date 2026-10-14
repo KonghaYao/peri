@@ -1,0 +1,3 @@
+    Checking peri-agent v0.2.0 (/Users/konghayao/code/ai/peri-v4p3/.worktrees/peri-transcript-history/peri-agent)
+    Finished `dev` profile [unoptimized + debuginfo] target(s) in 3.21s
+CLIPPY_EXIT=0

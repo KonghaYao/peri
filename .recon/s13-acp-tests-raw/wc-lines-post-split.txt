@@ -1,0 +1,11 @@
+     243 peri-acp/src/host/requests_rewind_cases_test.rs
+     535 peri-acp/src/host/requests_rewind_effective_view_test.rs
+     136 peri-acp/src/host/requests_rewind_cursor_expiry_test.rs
+     356 peri-acp/src/host/requests_rewind_failure_paths_test.rs
+     191 peri-acp/src/host/requests_rewind_routing_test.rs
+     288 peri-acp/src/host/requests_rewind_inherited_region_test.rs
+     517 peri-acp/src/host/requests_unnegotiated_replay_test.rs
+     296 peri-acp/src/host/requests_unnegotiated_replay_delivery_test.rs
+     145 peri-acp/src/host/requests_unnegotiated_replay_fail_closed_test.rs
+     282 peri-acp/src/host/requests_unnegotiated_replay_verification_test.rs
+    2989 total

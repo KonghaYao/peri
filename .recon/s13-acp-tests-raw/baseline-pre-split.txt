@@ -1,0 +1,14 @@
+== date: 2026-10-14T04:25:59Z
+== HEAD: 3ccf75864c00475c07ffb735de92e0840c10fbca
+== wc -l (pre-split)
+    1722 peri-acp/src/host/requests_rewind_cases_test.rs
+    1223 peri-acp/src/host/requests_unnegotiated_replay_test.rs
+     709 peri-acp/src/host/requests_test.rs
+    3654 total
+== sha256 (pre-split)
+919b95fbf04e20a1262767b87642964ef32b446ce37b2081007d02b1bb49c942  peri-acp/src/host/requests_rewind_cases_test.rs
+f0af6361b0a69fbf7fcb67d77aeb145d52f02a7bb04fc4ed34df653398992b47  peri-acp/src/host/requests_unnegotiated_replay_test.rs
+abbdb7e7e0e0f8233480e1a525ef13257e7968b259b126cad06ca3bdbab7cf09  peri-acp/src/host/requests_test.rs
+== test fn count (pre-split)
+peri-acp/src/host/requests_rewind_cases_test.rs:16
+peri-acp/src/host/requests_unnegotiated_replay_test.rs:15

@@ -1,0 +1,39 @@
+S13 wire 拆分脚本：守恒校验输出（原文，落盘前一次通过）
+========================================================
+
+注意：本目录下的 split.py 只对「拆分前的 1935 行版本」有效，不可对已拆分树重跑。
+（曾对已拆分树重跑一次，因父文件已变为 333 行而触发
+ AssertionError: (691, 756)；该 traceback 已删除，此处恢复为正确的校验输出。）
+
+输入（拆分前）：
+  peri-acp/src/host/history_page_wire_test.rs
+  行数：1935
+  sha256：08cfbfec05e97396cb93290d58929789147334b97ed30061cfd7b93d03b9f702
+
+校验输出：
+  原文件行数：1935
+  原文件 sha256：08cfbfec05e97396cb93290d58929789147334b97ed30061cfd7b93d03b9f702
+  搬移行数：1903；未覆盖：32 行（文档 1-5、导入 6-13、分隔空行 19）
+  ✅ 逐行分区守恒：搬移内容与原文对应行逐字节一致；导入 6-12 保留在父模块
+  各文件行数：wire 333 / initial_cursor 557 / chain 168 / rejection 266 / rewind 127 / caps 542
+
+产出（拆分后，落盘时）：
+  history_page_wire_test.rs              333 行  sha256 ee02d970…
+  history_page_initial_cursor_test.rs    557 行  sha256 665d9d5a…
+  history_page_chain_test.rs             168 行  sha256 cdb9b072…
+  history_page_rejection_test.rs         266 行  sha256 4c1870c8…  （后续追加 R6/R9/R10 → 518 行）
+  history_page_rewind_test.rs            127 行  sha256 9ebb8a0f…
+  history_page_caps_test.rs              542 行  sha256 0e5b95fd…
+
+映射（父文件原 1-based 闭区间）：
+  wire（父）           14-166, 223-268, 691-756, 1411-1435
+  initial_cursor       596-647, 649-689, 919-966, 968-1110, 1674-1783, 1785-1813, 1815-1908, 1910-1935
+  chain                757-846, 848-917
+  rejection            168-221, 270-334, 336-473
+  rewind               475-594
+  caps                 1112-1374, 1376-1409, 1437-1672
+
+未覆盖行说明：
+  1-5    模块级 //! 文档（改写为父模块说明）
+  6-13   use 导入（6-12 逐字节保留在父模块头部，13 为空行）
+  19     分区之间的分隔空行

@@ -1,0 +1,23 @@
+run=01 exit=0 secs=14 test result: ok. 499 passed; 0 failed; 26 ignored; 0 measured; 0 filtered out; finished in 12.90s
+run=02 exit=101 secs=13 test result: FAILED. 498 passed; 1 failed; 26 ignored; 0 measured; 0 filtered out; finished in 12.22s
+   1     thread 'sessions::sqlite_store::connection::open_tests::canonical_database_and_symlink_aliases_share_one_lock_inode' (106870071) panicked at peri-resources/src/sessions/sqlite_store/connection_open_test.rs:452:10:
+run=03 exit=0 secs=15 test result: ok. 499 passed; 0 failed; 26 ignored; 0 measured; 0 filtered out; finished in 13.49s
+run=04 exit=0 secs=13 test result: ok. 499 passed; 0 failed; 26 ignored; 0 measured; 0 filtered out; finished in 12.65s
+run=05 exit=0 secs=14 test result: ok. 499 passed; 0 failed; 26 ignored; 0 measured; 0 filtered out; finished in 13.40s
+run=06 exit=0 secs=13 test result: ok. 499 passed; 0 failed; 26 ignored; 0 measured; 0 filtered out; finished in 12.34s
+run=07 exit=101 secs=15 test result: FAILED. 498 passed; 1 failed; 26 ignored; 0 measured; 0 filtered out; finished in 13.31s
+   1     thread 'sessions::sqlite_store::connection::open_tests::exited_process_releases_initialization_lock_for_retry' (106999757) panicked at peri-resources/src/sessions/sqlite_store/connection_open_test.rs:505:6:
+run=08 exit=0 secs=13 test result: ok. 499 passed; 0 failed; 26 ignored; 0 measured; 0 filtered out; finished in 12.53s
+run=09 exit=0 secs=13 test result: ok. 499 passed; 0 failed; 26 ignored; 0 measured; 0 filtered out; finished in 12.13s
+run=10 exit=0 secs=15 test result: ok. 499 passed; 0 failed; 26 ignored; 0 measured; 0 filtered out; finished in 13.84s
+run=11 exit=0 secs=15 test result: ok. 499 passed; 0 failed; 26 ignored; 0 measured; 0 filtered out; finished in 14.00s
+run=12 exit=0 secs=14 test result: ok. 499 passed; 0 failed; 26 ignored; 0 measured; 0 filtered out; finished in 13.53s
+run=13 exit=0 secs=14 test result: ok. 499 passed; 0 failed; 26 ignored; 0 measured; 0 filtered out; finished in 12.72s
+run=14 exit=0 secs=14 test result: ok. 499 passed; 0 failed; 26 ignored; 0 measured; 0 filtered out; finished in 13.16s
+run=15 exit=0 secs=14 test result: ok. 499 passed; 0 failed; 26 ignored; 0 measured; 0 filtered out; finished in 13.85s
+run=16 exit=0 secs=16 test result: ok. 499 passed; 0 failed; 26 ignored; 0 measured; 0 filtered out; finished in 14.19s
+run=17 exit=0 secs=14 test result: ok. 499 passed; 0 failed; 26 ignored; 0 measured; 0 filtered out; finished in 14.07s
+run=18 exit=0 secs=14 test result: ok. 499 passed; 0 failed; 26 ignored; 0 measured; 0 filtered out; finished in 12.59s
+run=19 exit=0 secs=14 test result: ok. 499 passed; 0 failed; 26 ignored; 0 measured; 0 filtered out; finished in 13.25s
+run=20 exit=101 secs=15 test result: FAILED. 498 passed; 1 failed; 26 ignored; 0 measured; 0 filtered out; finished in 14.06s
+   1     thread 'sessions::sqlite_store::connection::open_tests::canonical_database_and_symlink_aliases_share_one_lock_inode' (107359143) panicked at peri-resources/src/sessions/sqlite_store/connection_open_test.rs:452:10:

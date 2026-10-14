@@ -1,6 +1,6 @@
 # 实现蓝图：Full Compact 后 Transcript 收缩与 ACP 历史分页
 
-状态：实现中。基线 `7f0de56e8`（worktree `.worktrees/peri-transcript-history`，分支 `feat/transcript-shrink-history-pagination`）。
+状态：交付完成（验收报告第三版 `.recon/A-acceptance-report.md`）；遗留两项待用户裁决（A05 索引 = DDL、`sessionWorkspaceV1` 门控，见 D16.6/D16.7）。基线 `7f0de56e8`（worktree `.worktrees/peri-transcript-history`，分支 `feat/transcript-shrink-history-pagination`）。
 需求源：`/Users/konghayao/Desktop/peri-transcript-history-requirements.md`。
 现状侦察报告：`.recon/A-core-transcript.md`、`B-acp-host.md`、`C-storage-contract.md`、`D-test-infra.md`、`E-tui-sdk.md`（所有行号基于基线 commit）。
 
@@ -142,7 +142,7 @@ Full Compact 成功后，核心热态 Transcript 真正释放已退出有效上�
 
 ## 7. 执行状态与决策记录（2026-10-13 晚）
 
-### 已落地（worktree 内未提交，分支 `feat/transcript-shrink-history-pagination`）
+### 已落地（核心三 commit 已提交：`95c1e07d7`/`9b96f456a`/`3ccf75864`，分支已追平 `origin/main` `19215d3a1`；S12/S13 收尾见 D16，由第四次提交落地）
 
 1. **S1/S2 契约与存储**：`ActiveSessionSnapshot` / `load_active_snapshot` / `load_message_flags`；两后端有效范围读取（过滤在存储侧完成），恢复路径移除 `SUM(LENGTH(content))` 聚合。
 2. **S3a/S3b 核心收缩与消费者**：`shrink_after_full_commit` 只在 durable 提交成功后释放已排除 own 条目；Compact 进度改用 `full_watermark: Option<MessageId>`；delivery 三态幂等改按持久事实判定；手动 Compact 身份校验改为有效集合对称比较；subagent 继承区 flags 走 `load_message_flags`（含 `excluded`）。
@@ -207,6 +207,17 @@ Full Compact 成功后，核心热态 Transcript 真正释放已退出有效上�
   **独立复核（`.recon/S11-verification.md`）：该修复可以交付**——判据 1/2/3/4/6/7 PASS、判据 5 PARTIAL（非阻断，已按建议补用例）；无生产可达的反例；不变量「被排除的可展示行 ⊂ 最旧那一段」经唯一写入者 `full.rs:96` + 探针断言验证。
   **本轮登记的既有边界（复核者 §10，与本修复无关）**：页链是「严格早于锚点」的单向链——若将来出现**非前缀排除**（只归档一条中间消息并追加摘要），比锚点更晚的归档行会不可达；当前写入者规则保证形状不可达，修复需另开切片（页链改成按位置区间浏览）。另有 `peri-resources` 冷开锁 5s 抖动（测试基建，预先存在，见蓝图 R8 同类记录）。实施记录：`.recon/S11-f1-fix.md`。
 
+- **D16 S12/S13 收尾轮的决策与处置（2026-10-14）。**
+  1. **拒绝分支持久化**：第一轮的临时探针（未跟踪）转为持久 wire 用例（`history_page_rejection_test.rs` 的 R6/R9/R10，真实 `ServerLoop` + MPSC transport + `dispatch_request`）；拒绝/失败路径**类别覆盖 11/11**（不是参数变体穷尽）；存储侧断言只比较条数，**等长改写不检出**（已披露，不列为 PASS 依据）。
+  2. **A14 最小直接用例**：`a_parent_full_after_fork_leaves_the_child_snapshot_and_pages_intact`（`peri-acp/src/dispatch/session_fork_test.rs:332`，走真实 `apply_compaction`，注入父压缩目标为 `fork_id` 后用例红）；A14 由「未验证」降为 **PARTIAL**。覆盖边界：3 条父自有消息、首页一次读尽（`next_cursor = None`）、无「fork 前 Full」、无多页游标链、无冻结祖先。旧记录的「第二次 Full」更正为「fork 后单次 `apply_compaction`」。
+  3. **锁回归重做**：显式握手建立确定顺序；四处真实释放探测统一走 `probe_initialization_lock_release`（`LOCK_RELEASE_PROBE_BUDGET = 250ms`，预算唯一来源），回退该入口则用例 3/3 红。**残留缺口（独立复核实测，A1 判 FAIL）**：四处调用点绕过共享入口各自内联零等待时用例仍绿 ⇒ 守卫面是「预算的唯一来源」，调用点级绕过为**已声明局限**；250 ms 为容忍窗口（外部持锁 100 ms 绿 / 350 ms 红）；生产锁路径未改。
+  4. **规模治理（STD-SIZE-001）**：本交付触及且超 1000 行的 10 个文件按职责拆分（`peri-acp` 3 个测试文件 → 父 + 子模块；`peri-acp-types`/`peri-agent` 契约与 transcript；`peri-tui`/`peri-resources` 4 个），断言与公开路径零改动。独立复核：183 个非 `.recon` 文件全部 ≤1000（最大 990），拆分/挂载/断言三项 PASS；「含 `.recon` 证据全集」口径的 FAIL 由本节作者裁决为「证据归档不适用 STD-SIZE-001」——存留的 6 个 `.rs.orig` 副本经 sha256 与拆分前提交 `3ccf75864` 逐字节一致（无独有信息），两份超限 `.rs` 副本已删除；`git diff --check` 已修至 exit 0。
+  5. **WASM 基线修复保留**：`langfuse-client/src/batcher/recovery.rs:256` 无线程目标就地编码（修基线 `7f0de56e8` 引入的 telemetry panic）+ SDK 夹具按 gzip magic 解压（产品契约未动）；现状 SDK `bun test` **254 pass / 0 fail**、native `langfuse-client --lib` 292/0/1。**红→绿链不可独立复核**（三次构建与红灯日志已删除；复核判 NOT-VERIFIED，两方一致建议保留）。
+  6. **A05 仍 FAIL（待用户裁决）**：收窄需索引 = DDL 未授权；S13 只读实验（VM 指令计数）证明「固定 rowid 后缀下界」在 rewind 后**丢行**，不可采用。批准索引前 A05 保持 FAIL。
+  7. **`peri.sessionWorkspaceV1` 第四处同类门控差异（待用户裁决，未改）**：5 处读取走进程级 `SessionManager.pending_caps`（`session/caps.rs:12`、`effective_host_caps:31-37`），形状为「连接 A `initialize` 声明过 → 连接 B 从未 `initialize` 也拿到 workspace 字段」。最小修复 = 改读连接级 `ConnectionFacts`（失败关闭，同 `historyPagination`），但会使 TUI 进程内路径丢 workspace 字段 = **行为变更**，须单独批准。
+  8. **DDL 越界如实披露**：S12 侦察沿用前序 A2 的一次性实验脚本时，曾在**副本库**（`.recon/a2-raw/probe-ab.db` 等，非仓库路径、非任何 Peri 会话库）执行 `CREATE INDEX idx_active_b ON messages(thread_id) WHERE excluded = 0`（`index-probe.sql:16/21/24` 的 CREATE/DROP 序列；`S12-verification.md` §2.7 观察到残留）。用户约束为「不授权直接执行数据库 DDL」，**无实验副本豁免** ⇒ 记为越界；此后全部实验只读。生产 schema 与本交付**未新增任何列/表/索引**。
+  9. **流程边界**：复核发现旧记录低估（`S12-gap-tests.md` 的「9/11」实为 **8/11**；A14「第二次 Full」表述不成立），已按 S13 修订记录更正；本蓝图不复述错误口径。
+
 ### 待办切片
 
 | 切片 | 内容 | 依赖 |
@@ -220,6 +231,8 @@ Full Compact 成功后，核心热态 Transcript 真正释放已退出有效上�
 | S7e | 锚点改按渲染侧身份重定位（去跨层坐标），验收须覆盖折叠组形态 | 完成（复核判据 1~8 全 PASS；A20 成立，含已声明边界） |
 | S10 | 终局测试矩阵 + 对抗审计 + A01~A25 验收报告 + 报告复核 | 完成（workflow `01a1377b`）；报告复核判定「需修订后可作验收依据」，已按 M1~M4 + S1~S5 出第二版 |
 | S11 | 修复审计新发现的 F1（P1，初始游标锚点落在不可展示条目）+ 回归用例 + 独立复核 | 完成（见 D15；`.recon/S11-verification.md`） |
+| S12 | 收尾轮：拒绝分支转持久用例、A14 最小用例、冷开锁回归初查、WASM 基线修复、A05 侦察、冒烟与基线 | 完成（workflow `01a137f4`）；独立复核 `S12-verification.md` 判 NEEDS-REVISION → S13 |
+| S13 | 修订轮：A14 复核、拒绝持久用例（11/11 类）、锁回归重做、规模治理（10 文件按职责拆分）、WASM 闭环补做、两份独立复核 | 完成（workflow `01a13888`）；残留见 D16：锁调用点级缺口、WASM 红→绿不可独立复核、A05 与 workspace 门控待裁决 |
 
 ### 编排脚本（ultracode）
 
@@ -232,5 +245,7 @@ Full Compact 成功后，核心热态 Transcript 真正释放已退出有效上�
 | `.recon/workflows/s7d-anchor-and-integration-case.mjs` | S7d 锚点补偿（A20 场景 B）+ TUI 集成用例登记 → 独立复核 | `.recon/S7d-tui-anchor-and-cases.md`、`.recon/S7d-verification.md` |
 | `.recon/workflows/s7e-anchor-identity-relocation.mjs` | S7e 锚点改按渲染侧身份重定位 → 独立复核（含折叠组反例与证伪） | `.recon/S7e-anchor-relocation.md`、`.recon/S7e-verification.md` |
 | `.recon/workflows/s10-final-verification-and-report.mjs` | 终局测试矩阵 → 对抗审计 → 验收报告 A01~A25 → 报告复核 | `.recon/final-test-matrix.md`、`.recon/final-adversarial-audit.md`、`.recon/A-acceptance-report.md`、报告复核 |
+| `.recon/workflows/s12-remaining-items.mjs` | S12 收尾（拒绝持久化、A14 用例、锁初查、WASM 基线修复、A05 侦察、冒烟与基线）→ 独立复核 | `.recon/S12-*.md`（8 份，含 `S12-verification.md`） |
+| `.recon/workflows/s13-revision-round.mjs` | S13 修订（wire 拆分与拒绝持久用例、锁重做、A14 复核、规模治理、WASM 闭环）→ 两份独立复核 | `.recon/S13-*.md`（9 份，含 `S13-verification-size.md`、`S13-verification-behavior.md`） |
 
 D7 的存储契约要点（S9a 落地，供复核对照）：`HistoryForwardCursor{after,tail}` + `HistorySegment{payloads,next_cursor}`；首段返回全部继承区 payload + 最旧若干自有行并同源确定 `tail`；后续段 `rowid > after AND rowid <= tail` 升序推进；不过滤 `excluded`/System；两阶段读取（阶段一 id+rowid+length，阶段二只取本段正文）；锚点消失失败关闭；后端缺席返回 `Unsupported`，ACP 侧显式回退到 `load_session_history` 全量读取并记日志。

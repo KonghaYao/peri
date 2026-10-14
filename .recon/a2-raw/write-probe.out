@@ -1,0 +1,36 @@
+wal
+Run Time: real 0.001 user 0.000078 sys 0.000373
+Run Time: real 0.000 user 0.000005 sys 0.000000
+Run Time: real 0.001 user 0.000114 sys 0.000353
+Run Time: real 0.000 user 0.000057 sys 0.000074
+--- W0 追加 100k 行（只有 idx_messages_thread_id） ---
+Run Time: real 0.000 user 0.000008 sys 0.000000
+Run Time: real 0.335 user 0.071405 sys 0.090730
+--- W1 追加 100k 行（加 idx(thread_id, excluded) 后） ---
+Run Time: real 0.000 user 0.000020 sys 0.000001
+Run Time: real 0.023 user 0.018153 sys 0.004056
+Run Time: real 0.226 user 0.080420 sys 0.128751
+--- W2 追加 100k 行（换成 partial 索引后） ---
+Run Time: real 0.000 user 0.000019 sys 0.000001
+Run Time: real 0.002 user 0.000838 sys 0.001112
+Run Time: real 0.040 user 0.030833 sys 0.009199
+Run Time: real 0.178 user 0.078404 sys 0.087933
+--- U0 标记 100k 行为 excluded=1（只有 partial 索引） ---
+Run Time: real 0.000 user 0.000022 sys 0.000000
+Run Time: real 0.096 user 0.049584 sys 0.028407
+--- U1 标记 100k 行为 excluded=1（无附加索引） ---
+Run Time: real 0.000 user 0.000020 sys 0.000001
+Run Time: real 0.002 user 0.000695 sys 0.000837
+Run Time: real 0.073 user 0.022613 sys 0.045331
+--- U2 标记 100k 行为 excluded=1（有 idx(thread_id, excluded)） ---
+Run Time: real 0.000 user 0.000020 sys 0.000001
+Run Time: real 0.083 user 0.063861 sys 0.016346
+Run Time: real 0.165 user 0.102559 sys 0.038266
+--- 索引占用 ---
+Run Time: real 0.000 user 0.000020 sys 0.000001
+messages|53297152
+sqlite_autoindex_messages_1|6176768
+idx_messages_thread_id|3764224
+idx_active_a|3698688
+sqlite_schema|4096
+Run Time: real 0.031 user 0.020659 sys 0.010603

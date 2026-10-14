@@ -22,6 +22,11 @@ use super::{fork_bound_session, load_fork_source};
 
 const SOURCE: &str = "source";
 
+/// 本文件的用例只读三条短条目：页预算够装下它们即可。取值刻意不引用
+/// `host::history_page::PAGE_BYTE_BUDGET`（那是协议面默认值，与本用例要判的
+/// 「父收缩是否改动子页内容」无关）。
+const FORK_TEST_PAGE_BYTE_BUDGET: usize = 64 * 1024;
+
 async fn open_facade(tmp: &tempfile::TempDir) -> Arc<dyn SessionResources> {
     peri_agent::resources::open_session_resources_with(Some(tmp.path().join("threads.db")))
         .await
@@ -322,4 +327,233 @@ async fn fork_rejects_source_with_incomplete_tool_calls() {
         .expect("门面错误分类必须保留到调用方");
     assert!(matches!(missing.kind(), SessionResourceErrorKind::NotFound));
     assert_eq!(session_ids(&resources).await, vec![SOURCE.to_owned()]);
+}
+
+/// A14 第三句：**既有 fork 之后，父会话再走一次 Full**——子快照与子分页内容都不变。
+///
+/// 与 `forked_payloads_have_independent_ids_flags_and_compaction_lifecycle` 方向相反：
+/// 那条断言「子 Full 不改父」，本用例断言「父收缩不得回流到子」。两条读取都是子侧对外的
+/// 事实源（[`SessionResources::load_session_snapshot`] = 子快照、
+/// [`SessionResources::load_history_page`] = 子分页内容），断言不重新推导存储事实。
+#[tokio::test]
+async fn a_parent_full_after_fork_leaves_the_child_snapshot_and_pages_intact() {
+    let temp = tempfile::tempdir().unwrap();
+    let resources = open_facade(&temp).await;
+    let cwd = temp.path().to_string_lossy().into_owned();
+    create_source(&resources, SOURCE, &cwd).await;
+    let workspace = resources.resolve_workspace(temp.path()).await.unwrap();
+
+    // 父会话自有区：三条都可展示（human / tool_result / ai），供子侧一次读尽。
+    let parent_messages = [
+        BaseMessage::human("父会话问题"),
+        BaseMessage::tool_result("read-a14", "父会话的工具输出"),
+        BaseMessage::ai("父会话回答"),
+    ];
+    resources
+        .append_history(
+            &SOURCE.to_owned(),
+            &parent_messages
+                .iter()
+                .cloned()
+                .map(PersistedPayload::Message)
+                .collect::<Vec<_>>(),
+        )
+        .await
+        .unwrap();
+
+    let source = load_fork_source(&resources, SOURCE).await.unwrap();
+    let (fork_id, _published) = fork_bound_session(
+        &resources,
+        &source,
+        &workspace,
+        "2026-10-13T00:00:00Z".to_owned(),
+    )
+    .await
+    .unwrap();
+
+    // 父收缩之前的子侧事实：快照（身份 + 正文 + flags）与首页（条目身份 + 顺序键 + 游标链）。
+    let before_snapshot = resources.load_session_snapshot(&fork_id).await.unwrap();
+    let before_page = resources
+        .load_history_page(&fork_id, None, 50, FORK_TEST_PAGE_BYTE_BUDGET)
+        .await
+        .unwrap();
+    assert_eq!(
+        before_snapshot.payloads.len(),
+        parent_messages.len(),
+        "先决条件：fork 复制出父会话的全部自有条目"
+    );
+    assert_eq!(
+        before_page.items.len(),
+        parent_messages.len(),
+        "先决条件：子首页一次读尽（否则下面的「等价」可能是两边都空）"
+    );
+    assert!(
+        before_page.next_cursor.is_none(),
+        "先决条件：子历史已到起点，没有更早页"
+    );
+    // 「不变」必须钉在**绝对值**上：先把收缩前的子侧事实对齐父会话的三条原文，
+    // 否则「前后一致」可能只是两边都错成同一个样子。
+    let expected_contents: Vec<String> = parent_messages.iter().map(BaseMessage::content).collect();
+    assert_eq!(
+        before_snapshot
+            .payloads
+            .iter()
+            .filter_map(PersistedPayload::as_message)
+            .map(BaseMessage::content)
+            .collect::<Vec<_>>(),
+        expected_contents,
+        "先决条件：子快照就是父会话复制来的这三条"
+    );
+    assert_eq!(
+        before_page
+            .items
+            .iter()
+            .filter_map(|item| item.payload.as_message())
+            .map(BaseMessage::content)
+            .collect::<Vec<_>>(),
+        expected_contents,
+        "先决条件：子首页内容就是这三条（父收缩之前）"
+    );
+
+    // 父会话的后续 Full：自有条目全部归档 + 追加摘要（与 `PageFixture::archive` 同形状）。
+    let parent_ids: Vec<_> = resources
+        .load_session_snapshot(&SOURCE.to_owned())
+        .await
+        .unwrap()
+        .payloads
+        .iter()
+        .map(PersistedPayload::id)
+        .collect();
+    resources
+        .apply_compaction(
+            &SOURCE.to_owned(),
+            &CompactionChange {
+                flag_updates: parent_ids
+                    .iter()
+                    .map(|id| {
+                        (
+                            *id,
+                            MessageFlags {
+                                excluded: true,
+                                ..Default::default()
+                            },
+                        )
+                    })
+                    .collect(),
+                appended_messages: vec![BaseMessage::ai("父会话摘要")],
+            },
+        )
+        .await
+        .expect("父会话的第二次 Full 必须可提交");
+
+    // 子快照：条目身份、正文、flags 三项逐条等价。
+    let after_snapshot = resources.load_session_snapshot(&fork_id).await.unwrap();
+    assert_eq!(
+        after_snapshot
+            .payloads
+            .iter()
+            .map(PersistedPayload::id)
+            .collect::<Vec<_>>(),
+        before_snapshot
+            .payloads
+            .iter()
+            .map(PersistedPayload::id)
+            .collect::<Vec<_>>(),
+        "父收缩不得改变子快照的条目身份"
+    );
+    assert_eq!(
+        after_snapshot
+            .payloads
+            .iter()
+            .filter_map(PersistedPayload::as_message)
+            .map(BaseMessage::content)
+            .collect::<Vec<_>>(),
+        before_snapshot
+            .payloads
+            .iter()
+            .filter_map(PersistedPayload::as_message)
+            .map(BaseMessage::content)
+            .collect::<Vec<_>>(),
+        "父收缩不得改变子快照的正文（父会话新摘要不得进入子快照）"
+    );
+    assert_eq!(
+        after_snapshot.flags, before_snapshot.flags,
+        "父收缩不得改变子条目的 flags"
+    );
+
+    // 子分页：同一批条目、同一顺序键、同一条游标链。
+    let after_page = resources
+        .load_history_page(&fork_id, None, 50, FORK_TEST_PAGE_BYTE_BUDGET)
+        .await
+        .unwrap();
+    assert_eq!(
+        after_page
+            .items
+            .iter()
+            .map(|item| item.id)
+            .collect::<Vec<_>>(),
+        before_page
+            .items
+            .iter()
+            .map(|item| item.id)
+            .collect::<Vec<_>>(),
+        "父收缩不得改变子分页的条目身份"
+    );
+    assert_eq!(
+        after_page
+            .items
+            .iter()
+            .map(|item| item.position)
+            .collect::<Vec<_>>(),
+        before_page
+            .items
+            .iter()
+            .map(|item| item.position)
+            .collect::<Vec<_>>(),
+        "父收缩不得改变子分页的顺序键"
+    );
+    assert_eq!(
+        after_page
+            .items
+            .iter()
+            .filter_map(|item| item.payload.as_message())
+            .map(BaseMessage::content)
+            .collect::<Vec<_>>(),
+        before_page
+            .items
+            .iter()
+            .filter_map(|item| item.payload.as_message())
+            .map(BaseMessage::content)
+            .collect::<Vec<_>>(),
+        "父会话新摘要不得出现在子分页里"
+    );
+    assert_eq!(
+        after_page.next_cursor, before_page.next_cursor,
+        "父收缩不得改变子浏览的游标链"
+    );
+
+    // 反向对照：这一轮收缩**确实**落在父会话上（否则上面的「不变」是空转）。
+    let after_source = resources
+        .load_session_snapshot(&SOURCE.to_owned())
+        .await
+        .unwrap();
+    assert!(
+        parent_ids.iter().all(|id| after_source
+            .flags
+            .get(id)
+            .is_some_and(|flags| flags.excluded)),
+        "父会话自身的全部自有条目必须已被这次 Full 排除"
+    );
+    assert!(
+        after_source
+            .payloads
+            .iter()
+            .filter_map(PersistedPayload::as_message)
+            .any(|message| message.content() == "父会话摘要"),
+        "父会话必须已追加摘要"
+    );
+    assert!(
+        after_snapshot.flags.values().all(|flags| !flags.excluded),
+        "子条目不得被父会话的 Full 排除"
+    );
 }

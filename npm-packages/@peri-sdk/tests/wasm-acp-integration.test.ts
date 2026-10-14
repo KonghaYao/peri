@@ -39,6 +39,12 @@ async function settled(model: () => number, expected: number, budgetMs = 20_000)
   expect(model(), "the fixture model endpoint was not reached in time").toBeGreaterThanOrEqual(expected);
 }
 
+/** 正文按 magic 判压缩：遥测默认 gzip，两种情况都解出 OTLP JSON（同 langfuse-client 的 batcher_concurrency_test.rs）。 */
+function otlpBody(bytes: Uint8Array): unknown {
+  const raw = bytes[0] === 0x1f && bytes[1] === 0x8b ? Bun.gunzipSync(bytes) : bytes;
+  return JSON.parse(new TextDecoder().decode(raw));
+}
+
 /**
  * 真实链路：打包的 peri-wasm 产物 + 真实 Turso listener + 模拟模型端点。
  * SDK 不启动任何 Peri 或 Workspace 子进程；每个 Session 由 `transportFactory` 装配独立 WASM 实例。
@@ -57,7 +63,7 @@ async function fixture() {
     expect(new URL(request.url).pathname).toBe("/api/public/otel/v1/traces");
     expect(request.headers.get("authorization")).toBe(`Basic ${btoa("pk-test:sk-test")}`);
     expect(request.headers.get("x-langfuse-ingestion-version")).toBe("4");
-    telemetry.push(await request.json());
+    telemetry.push(otlpBody(new Uint8Array(await request.arrayBuffer())));
     return Response.json({});
   } });
   const model = Bun.serve({ hostname: "127.0.0.1", port: 0, async fetch(request) {

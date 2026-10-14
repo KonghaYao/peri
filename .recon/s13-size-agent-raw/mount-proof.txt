@@ -1,0 +1,114 @@
+# 挂载证据（拆分后最终状态，逐条命令原始输出）
+
+$ ./scripts/cargo-rmcp-patched.sh test --locked -p peri-agent --lib -- "session::transcript::tests::persistence_tests::"
+running 12 tests
+test session::transcript::tests::persistence_tests::test_flush_persistence_without_backend_is_ok ... ok
+test session::transcript::tests::persistence_tests::test_drop_without_persistence_is_noop ... ok
+test session::transcript::tests::persistence_tests::test_persistence_budget_exhaustion_is_sticky_and_rejects_writes ... ok
+test session::transcript::tests::persistence_tests::test_drop_flushes_pending_appends_to_store ... ok
+test session::transcript::tests::persistence_tests::test_shutdown_persistence_flushes_pending_and_writer_exits ... ok
+test session::transcript::tests::persistence_tests::test_projection_and_rewind_use_single_behaviors ... ok
+test session::transcript::tests::persistence_tests::test_rebuild_keeps_persistence_writer_alive ... ok
+test session::transcript::tests::persistence_tests::test_full_commit_keeps_excluded_system_entry ... ok
+test session::transcript::tests::persistence_tests::test_full_commit_releases_excluded_own_entries ... ok
+test session::transcript::tests::persistence_tests::test_commit_compaction_lifecycle_is_atomic_or_uncertain ... ok
+test session::transcript::tests::persistence_tests::test_flush_persistence_failure_is_sticky ... ok
+test session::transcript::tests::persistence_tests::test_flush_persistence_makes_appends_visible ... ok
+test result: ok. 12 passed; 0 failed; 0 ignored; 0 measured; 1077 filtered out; finished in 0.62s
+
+$ ./scripts/cargo-rmcp-patched.sh test --locked -p peri-agent --lib -- "session::transcript::tests::memory_tests::"
+running 30 tests
+test session::transcript::tests::memory_tests::test_append_batch ... ok
+test session::transcript::tests::memory_tests::test_excluded_flag ... ok
+test session::transcript::tests::memory_tests::test_commit_without_staging_is_noop ... ok
+test session::transcript::tests::memory_tests::test_loaded_root_history_remains_in_compactable_own_region ... ok
+test session::transcript::tests::memory_tests::test_id_indexing_o1_lookup ... ok
+test session::transcript::tests::memory_tests::test_new_transcript_is_empty ... ok
+test session::transcript::tests::memory_tests::test_append_returns_correct_id ... ok
+test session::transcript::tests::memory_tests::test_clear_flags ... ok
+test session::transcript::tests::memory_tests::test_rebuild_clears_staging ... ok
+test session::transcript::tests::memory_tests::test_rebuild_preserves_ancestor_and_persistence ... ok
+test session::transcript::tests::memory_tests::test_ancestor_flags_can_restore_but_cannot_mutate ... ok
+test session::transcript::tests::memory_tests::test_rewind_clears_staging ... ok
+test session::transcript::tests::memory_tests::test_rewind_into_ancestor_returns_error ... ok
+test session::transcript::tests::memory_tests::test_ancestor_boundary_is_readonly_concept ... ok
+test session::transcript::tests::memory_tests::test_rewind_nonexistent_id_returns_error ... ok
+test session::transcript::tests::memory_tests::test_projection_directive_none_when_not_set ... ok
+test session::transcript::tests::memory_tests::test_projection_directive_persists_roundtrip ... ok
+test session::transcript::tests::memory_tests::test_rebuild_preserves_flags ... ok
+test session::transcript::tests::memory_tests::test_rewind_to_truncates_correctly ... ok
+test session::transcript::tests::memory_tests::test_set_flags_batch ... ok
+test session::transcript::tests::memory_tests::test_set_flags_batch_ignores_default ... ok
+test session::transcript::tests::memory_tests::test_stage_ai_message_overwrites_previous_staging ... ok
+test session::transcript::tests::memory_tests::test_staging_commit_atomic ... ok
+test session::transcript::tests::memory_tests::test_stage_tool_result_without_ai_message_is_noop ... ok
+test session::transcript::tests::memory_tests::test_staging_discard ... ok
+test session::transcript::tests::memory_tests::test_truncated_flag ... ok
+test session::transcript::tests::memory_tests::test_visible_messages_keeps_truncated ... ok
+test session::transcript::tests::memory_tests::test_visible_messages_filters_excluded ... ok
+test session::transcript::tests::memory_tests::test_visible_messages_skips_excluded ... ok
+test session::transcript::tests::memory_tests::test_with_ancestor_sets_boundary ... ok
+test result: ok. 30 passed; 0 failed; 0 ignored; 0 measured; 1059 filtered out; finished in 0.00s
+
+$ ./scripts/cargo-rmcp-patched.sh test --locked -p peri-agent --lib -- "session::transcript::tests::reminder_tests::"
+running 2 tests
+test session::transcript::tests::reminder_tests::diagnostic_only_reminders_reach_neither_model_nor_client ... ok
+test session::transcript::tests::reminder_tests::audience_matrix_splits_model_projection_from_client_snapshot ... ok
+test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 1087 filtered out; finished in 0.00s
+
+$ ./scripts/cargo-rmcp-patched.sh test --locked -p peri-agent --lib -- "session::transcript::tests::persistence_tests::test_drop_flushes_pending_appends_to_store"
+running 1 test
+test session::transcript::tests::persistence_tests::test_drop_flushes_pending_appends_to_store ... ok
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 1088 filtered out; finished in 0.00s
+
+$ ./scripts/cargo-rmcp-patched.sh test --locked -p peri-agent --lib -- "session::transcript::"
+running 47 tests
+test session::transcript::tests::memory_tests::test_excluded_flag ... ok
+test session::transcript::tests::memory_tests::test_id_indexing_o1_lookup ... ok
+test session::transcript::tests::memory_tests::test_commit_without_staging_is_noop ... ok
+test session::transcript::tests::memory_tests::test_append_returns_correct_id ... ok
+test session::transcript::tests::memory_tests::test_append_batch ... ok
+test session::transcript::tests::memory_tests::test_clear_flags ... ok
+test session::transcript::tests::memory_tests::test_ancestor_flags_can_restore_but_cannot_mutate ... ok
+test session::transcript::tests::memory_tests::test_ancestor_boundary_is_readonly_concept ... ok
+test session::transcript::tests::memory_tests::test_loaded_root_history_remains_in_compactable_own_region ... ok
+test session::transcript::tests::memory_tests::test_new_transcript_is_empty ... ok
+test session::transcript::tests::memory_tests::test_projection_directive_none_when_not_set ... ok
+test session::transcript::tests::memory_tests::test_rebuild_clears_staging ... ok
+test session::transcript::tests::memory_tests::test_rebuild_preserves_ancestor_and_persistence ... ok
+test session::transcript::tests::memory_tests::test_rebuild_preserves_flags ... ok
+test session::transcript::projection_tests::reminder_entry_preserves_stable_identity_without_placeholder_state ... ok
+test session::transcript::projection_tests::test_system_reminder_projects_once_as_human ... ok
+test session::transcript::tests::memory_tests::test_projection_directive_persists_roundtrip ... ok
+test session::transcript::tests::memory_tests::test_rewind_into_ancestor_returns_error ... ok
+test session::transcript::tests::memory_tests::test_set_flags_batch ... ok
+test session::transcript::tests::memory_tests::test_rewind_clears_staging ... ok
+test session::transcript::tests::memory_tests::test_staging_discard ... ok
+test session::transcript::tests::memory_tests::test_rewind_nonexistent_id_returns_error ... ok
+test session::transcript::tests::memory_tests::test_staging_commit_atomic ... ok
+test session::transcript::tests::memory_tests::test_visible_messages_keeps_truncated ... ok
+test session::transcript::tests::memory_tests::test_rewind_to_truncates_correctly ... ok
+test session::transcript::tests::memory_tests::test_set_flags_batch_ignores_default ... ok
+test session::transcript::tests::memory_tests::test_stage_ai_message_overwrites_previous_staging ... ok
+test session::transcript::tests::memory_tests::test_stage_tool_result_without_ai_message_is_noop ... ok
+test session::transcript::projection_tests::test_legacy_compact_model_projection_preserves_storage ... ok
+test session::transcript::tests::persistence_tests::test_drop_without_persistence_is_noop ... ok
+test session::transcript::tests::persistence_tests::test_flush_persistence_without_backend_is_ok ... ok
+test session::transcript::tests::reminder_tests::diagnostic_only_reminders_reach_neither_model_nor_client ... ok
+test session::transcript::tests::memory_tests::test_truncated_flag ... ok
+test session::transcript::tests::memory_tests::test_visible_messages_skips_excluded ... ok
+test session::transcript::tests::memory_tests::test_visible_messages_filters_excluded ... ok
+test session::transcript::tests::memory_tests::test_with_ancestor_sets_boundary ... ok
+test session::transcript::tests::persistence_tests::test_drop_flushes_pending_appends_to_store ... ok
+test session::transcript::tests::persistence_tests::test_full_commit_keeps_excluded_system_entry ... ok
+test session::transcript::tests::persistence_tests::test_shutdown_persistence_flushes_pending_and_writer_exits ... ok
+test session::transcript::tests::persistence_tests::test_projection_and_rewind_use_single_behaviors ... ok
+test session::transcript::tests::persistence_tests::test_full_commit_releases_excluded_own_entries ... ok
+test session::transcript::tests::persistence_tests::test_persistence_budget_exhaustion_is_sticky_and_rejects_writes ... ok
+test session::transcript::tests::reminder_tests::audience_matrix_splits_model_projection_from_client_snapshot ... ok
+test session::transcript::tests::persistence_tests::test_commit_compaction_lifecycle_is_atomic_or_uncertain ... ok
+test session::transcript::tests::persistence_tests::test_rebuild_keeps_persistence_writer_alive ... ok
+test session::transcript::tests::persistence_tests::test_flush_persistence_failure_is_sticky ... ok
+test session::transcript::tests::persistence_tests::test_flush_persistence_makes_appends_visible ... ok
+test result: ok. 47 passed; 0 failed; 0 ignored; 0 measured; 1042 filtered out; finished in 0.57s
+

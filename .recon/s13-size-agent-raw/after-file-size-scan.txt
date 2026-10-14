@@ -1,0 +1,13 @@
+📊 大文件扫描：源码阈值 1000 行 / 测试阈值 1000 行
+
+❌ 源码超阈值（Top 30）：
+    1637  peri-tui/src/kit/panels/mcp.rs
+    1013  peri-tui/src/kit/acp_events/system.rs
+
+❌ 测试超阈值（Top 30）：
+    1361  peri-resources/src/sessions/sqlite_store/session_history_perf_test.rs
+    1038  peri-resources/src/sessions/sqlite_store/schema_test.rs
+    1029  peri-resources/src/sessions/remote/full_remote_test.rs
+    1021  peri-tui/src/kit/acp_events_test/session_events_test.rs
+
+共扫描 2333 个文件，超阈值 6 个（源码 2 / 测试 4）

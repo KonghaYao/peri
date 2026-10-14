@@ -1,0 +1,7 @@
+run=01 exit=0 secs=14 test result: ok. 497 passed; 0 failed; 26 ignored; 0 measured; 0 filtered out; finished in 13.13s
+run=02 exit=101 secs=13 test result: FAILED. 495 passed; 2 failed; 26 ignored; 0 measured; 0 filtered out; finished in 12.35s
+   1     thread 'sessions::sqlite_store::connection::open_tests::failed_migration_closes_connections_and_releases_initialization_lock' (106694051) panicked at peri-resources/src/sessions/sqlite_store/connection_open_test.rs:310:62:
+   1     thread 'sessions::sqlite_store::connection::open_tests::incompatible_schema_is_rejected_without_wal_or_database_changes' (106694057) panicked at peri-resources/src/sessions/sqlite_store/connection_open_test.rs:377:66:
+run=03 exit=0 secs=15 test result: ok. 497 passed; 0 failed; 26 ignored; 0 measured; 0 filtered out; finished in 14.00s
+run=04 exit=0 secs=13 test result: ok. 497 passed; 0 failed; 26 ignored; 0 measured; 0 filtered out; finished in 11.79s
+run=05 exit=0 secs=12 test result: ok. 497 passed; 0 failed; 26 ignored; 0 measured; 0 filtered out; finished in 12.14s

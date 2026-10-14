@@ -1,0 +1,182 @@
+{
+  ".recon/s13-acp-tests-raw/original/requests_rewind_cases_test.rs": {
+    "lines": 1722,
+    "plan": {
+      "requests_rewind_cases_test.rs": [
+        [
+          1,
+          222
+        ],
+        [
+          1722,
+          1722
+        ]
+      ],
+      "requests_rewind_cursor_expiry_test.rs": [
+        [
+          483,
+          617
+        ]
+      ],
+      "requests_rewind_effective_view_test.rs": [
+        [
+          223,
+          302
+        ],
+        [
+          303,
+          381
+        ],
+        [
+          382,
+          482
+        ],
+        [
+          618,
+          718
+        ],
+        [
+          840,
+          929
+        ],
+        [
+          1022,
+          1103
+        ]
+      ],
+      "requests_rewind_failure_paths_test.rs": [
+        [
+          719,
+          839
+        ],
+        [
+          930,
+          1021
+        ],
+        [
+          1104,
+          1161
+        ],
+        [
+          1351,
+          1434
+        ]
+      ],
+      "requests_rewind_inherited_region_test.rs": [
+        [
+          1435,
+          1721
+        ]
+      ],
+      "requests_rewind_routing_test.rs": [
+        [
+          1162,
+          1199
+        ],
+        [
+          1200,
+          1243
+        ],
+        [
+          1244,
+          1287
+        ],
+        [
+          1288,
+          1350
+        ]
+      ]
+    },
+    "sha256": "919b95fbf04e20a1262767b87642964ef32b446ce37b2081007d02b1bb49c942"
+  },
+  ".recon/s13-acp-tests-raw/original/requests_unnegotiated_replay_test.rs": {
+    "lines": 1223,
+    "plan": {
+      "requests_unnegotiated_replay_delivery_test.rs": [
+        [
+          505,
+          547
+        ],
+        [
+          548,
+          580
+        ],
+        [
+          581,
+          628
+        ],
+        [
+          773,
+          791
+        ],
+        [
+          792,
+          819
+        ],
+        [
+          820,
+          845
+        ],
+        [
+          846,
+          883
+        ],
+        [
+          884,
+          943
+        ]
+      ],
+      "requests_unnegotiated_replay_fail_closed_test.rs": [
+        [
+          629,
+          673
+        ],
+        [
+          674,
+          701
+        ],
+        [
+          702,
+          732
+        ],
+        [
+          733,
+          772
+        ]
+      ],
+      "requests_unnegotiated_replay_test.rs": [
+        [
+          1,
+          502
+        ],
+        [
+          503,
+          504
+        ]
+      ],
+      "requests_unnegotiated_replay_verification_test.rs": [
+        [
+          944,
+          945
+        ],
+        [
+          946,
+          1041
+        ],
+        [
+          1042,
+          1065
+        ],
+        [
+          1066,
+          1145
+        ],
+        [
+          1146,
+          1223
+        ]
+      ]
+    },
+    "sha256": "f0af6361b0a69fbf7fcb67d77aeb145d52f02a7bb04fc4ed34df653398992b47"
+  }
+}

@@ -1,0 +1,27 @@
+run=01 exit=0 secs=16 test result: ok. 499 passed; 0 failed; 26 ignored; 0 measured; 0 filtered out; finished in 15.44s
+run=02 exit=0 secs=17 test result: ok. 499 passed; 0 failed; 26 ignored; 0 measured; 0 filtered out; finished in 15.94s
+run=03 exit=0 secs=15 test result: ok. 499 passed; 0 failed; 26 ignored; 0 measured; 0 filtered out; finished in 13.92s
+run=04 exit=0 secs=13 test result: ok. 499 passed; 0 failed; 26 ignored; 0 measured; 0 filtered out; finished in 12.39s
+run=05 exit=0 secs=14 test result: ok. 499 passed; 0 failed; 26 ignored; 0 measured; 0 filtered out; finished in 13.48s
+run=06 exit=0 secs=16 test result: ok. 499 passed; 0 failed; 26 ignored; 0 measured; 0 filtered out; finished in 15.65s
+run=07 exit=0 secs=16 test result: ok. 499 passed; 0 failed; 26 ignored; 0 measured; 0 filtered out; finished in 14.41s
+run=08 exit=0 secs=16 test result: ok. 499 passed; 0 failed; 26 ignored; 0 measured; 0 filtered out; finished in 14.26s
+run=09 exit=0 secs=13 test result: ok. 499 passed; 0 failed; 26 ignored; 0 measured; 0 filtered out; finished in 12.59s
+run=10 exit=0 secs=16 test result: ok. 499 passed; 0 failed; 26 ignored; 0 measured; 0 filtered out; finished in 15.26s
+run=11 exit=101 secs=13 test result: FAILED. 492 passed; 7 failed; 26 ignored; 0 measured; 0 filtered out; finished in 12.00s
+   1     thread 'sessions::discovery::tests::test_worktree_ancient_git_needs_no_common_dir_option_or_worktree_command' (107742224) panicked at peri-resources/src/sessions/sqlite_store/discovery_test.rs:521:77:
+   1     thread 'sessions::discovery::tests::test_worktree_git_rejection_is_not_directory_mode' (107742295) panicked at peri-resources/src/sessions/sqlite_store/discovery_test.rs:170:5:
+   1     thread 'sessions::discovery::tests::test_worktree_git_spawn_failure_recovers_within_retries' (107742298) panicked at peri-resources/src/sessions/sqlite_store/discovery_test.rs:147:10:
+   1     thread 'sessions::discovery::tests::test_worktree_legacy_git_discovers_repository_without_version_options' (107742425) panicked at peri-resources/src/sessions/sqlite_store/discovery_test.rs:637:10:
+   1     thread 'sessions::discovery::tests::test_worktree_legacy_not_a_repository_wording_is_directory_mode' (107742426) panicked at peri-resources/src/sessions/sqlite_store/discovery_test.rs:202:37:
+   1     thread 'sessions::discovery::tests::test_worktree_listing_failure_is_not_retried_as_legacy_git' (107742461) panicked at peri-resources/src/sessions/sqlite_store/discovery_test.rs:731:5:
+   1     thread 'sessions::discovery::tests::test_worktree_path_discovery_rejects_unknown_option_echoes' (107742570) panicked at peri-resources/src/sessions/sqlite_store/discovery_test.rs:473:5:
+run=12 exit=0 secs=13 test result: ok. 499 passed; 0 failed; 26 ignored; 0 measured; 0 filtered out; finished in 13.01s
+run=13 exit=0 secs=14 test result: ok. 499 passed; 0 failed; 26 ignored; 0 measured; 0 filtered out; finished in 12.70s
+run=14 exit=0 secs=12 test result: ok. 499 passed; 0 failed; 26 ignored; 0 measured; 0 filtered out; finished in 11.91s
+run=15 exit=0 secs=15 test result: ok. 499 passed; 0 failed; 26 ignored; 0 measured; 0 filtered out; finished in 13.53s
+run=16 exit=0 secs=13 test result: ok. 499 passed; 0 failed; 26 ignored; 0 measured; 0 filtered out; finished in 12.37s
+run=17 exit=0 secs=14 test result: ok. 499 passed; 0 failed; 26 ignored; 0 measured; 0 filtered out; finished in 13.25s
+run=18 exit=0 secs=14 test result: ok. 499 passed; 0 failed; 26 ignored; 0 measured; 0 filtered out; finished in 13.98s
+run=19 exit=0 secs=15 test result: ok. 499 passed; 0 failed; 26 ignored; 0 measured; 0 filtered out; finished in 13.29s
+run=20 exit=0 secs=14 test result: ok. 499 passed; 0 failed; 26 ignored; 0 measured; 0 filtered out; finished in 13.04s

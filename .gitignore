@@ -186,6 +186,8 @@ progress.md
 .claude/autonomy/.lock
 .claude/autonomy/runs.json
 *.db
+*.db-shm
+*.db-wal
 .claude/hooks
 
 vendor/

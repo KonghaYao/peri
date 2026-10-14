@@ -1,0 +1,104 @@
+run=01 exit=101 secs=20 test result: FAILED. 496 passed; 1 failed; 26 ignored; 0 measured; 0 filtered out; finished in 19.35s
+308:test sessions::sqlite_store::connection::open_tests::incompatible_schema_is_rejected_without_wal_or_database_changes ... FAILED
+527:failures:
+529:---- sessions::sqlite_store::connection::open_tests::incompatible_schema_is_rejected_without_wal_or_database_changes stdout ----
+536:failures:
+539:test result: FAILED. 496 passed; 1 failed; 26 ignored; 0 measured; 0 filtered out; finished in 19.35s
+run=02 exit=101 secs=16 test result: FAILED. 495 passed; 2 failed; 26 ignored; 0 measured; 0 filtered out; finished in 16.19s
+312:test sessions::sqlite_store::connection::open_tests::failed_migration_closes_connections_and_releases_initialization_lock ... FAILED
+316:test sessions::sqlite_store::connection::open_tests::incompatible_schema_is_rejected_without_wal_or_database_changes ... FAILED
+527:failures:
+529:---- sessions::sqlite_store::connection::open_tests::failed_migration_closes_connections_and_releases_initialization_lock stdout ----
+535:---- sessions::sqlite_store::connection::open_tests::incompatible_schema_is_rejected_without_wal_or_database_changes stdout ----
+541:failures:
+545:test result: FAILED. 495 passed; 2 failed; 26 ignored; 0 measured; 0 filtered out; finished in 16.19s
+run=03 exit=101 secs=18 test result: FAILED. 496 passed; 1 failed; 26 ignored; 0 measured; 0 filtered out; finished in 17.54s
+326:test sessions::sqlite_store::connection::open_tests::incompatible_schema_is_rejected_without_wal_or_database_changes ... FAILED
+527:failures:
+529:---- sessions::sqlite_store::connection::open_tests::incompatible_schema_is_rejected_without_wal_or_database_changes stdout ----
+536:failures:
+539:test result: FAILED. 496 passed; 1 failed; 26 ignored; 0 measured; 0 filtered out; finished in 17.54s
+run=04 exit=0 secs=19 test result: ok. 497 passed; 0 failed; 26 ignored; 0 measured; 0 filtered out; finished in 19.32s
+run=05 exit=101 secs=19 test result: FAILED. 496 passed; 1 failed; 26 ignored; 0 measured; 0 filtered out; finished in 19.03s
+311:test sessions::sqlite_store::connection::open_tests::failed_migration_closes_connections_and_releases_initialization_lock ... FAILED
+527:failures:
+529:---- sessions::sqlite_store::connection::open_tests::failed_migration_closes_connections_and_releases_initialization_lock stdout ----
+536:failures:
+539:test result: FAILED. 496 passed; 1 failed; 26 ignored; 0 measured; 0 filtered out; finished in 19.03s
+run=06 exit=101 secs=17 test result: FAILED. 496 passed; 1 failed; 26 ignored; 0 measured; 0 filtered out; finished in 16.53s
+311:test sessions::sqlite_store::connection::open_tests::failed_migration_closes_connections_and_releases_initialization_lock ... FAILED
+527:failures:
+529:---- sessions::sqlite_store::connection::open_tests::failed_migration_closes_connections_and_releases_initialization_lock stdout ----
+536:failures:
+539:test result: FAILED. 496 passed; 1 failed; 26 ignored; 0 measured; 0 filtered out; finished in 16.53s
+run=07 exit=101 secs=18 test result: FAILED. 496 passed; 1 failed; 26 ignored; 0 measured; 0 filtered out; finished in 18.57s
+331:test sessions::sqlite_store::connection::open_tests::incompatible_schema_is_rejected_without_wal_or_database_changes ... FAILED
+527:failures:
+529:---- sessions::sqlite_store::connection::open_tests::incompatible_schema_is_rejected_without_wal_or_database_changes stdout ----
+536:failures:
+539:test result: FAILED. 496 passed; 1 failed; 26 ignored; 0 measured; 0 filtered out; finished in 18.57s
+run=08 exit=0 secs=30 test result: ok. 497 passed; 0 failed; 26 ignored; 0 measured; 0 filtered out; finished in 29.90s
+run=09 exit=101 secs=22 test result: FAILED. 496 passed; 1 failed; 26 ignored; 0 measured; 0 filtered out; finished in 21.55s
+310:test sessions::sqlite_store::connection::open_tests::failed_migration_closes_connections_and_releases_initialization_lock ... FAILED
+527:failures:
+529:---- sessions::sqlite_store::connection::open_tests::failed_migration_closes_connections_and_releases_initialization_lock stdout ----
+536:failures:
+539:test result: FAILED. 496 passed; 1 failed; 26 ignored; 0 measured; 0 filtered out; finished in 21.55s
+run=10 exit=0 secs=24 test result: ok. 497 passed; 0 failed; 26 ignored; 0 measured; 0 filtered out; finished in 24.60s
+run=11 exit=0 secs=20 test result: ok. 497 passed; 0 failed; 26 ignored; 0 measured; 0 filtered out; finished in 19.60s
+run=12 exit=101 secs=21 test result: FAILED. 496 passed; 1 failed; 26 ignored; 0 measured; 0 filtered out; finished in 20.51s
+310:test sessions::sqlite_store::connection::open_tests::incompatible_schema_is_rejected_without_wal_or_database_changes ... FAILED
+527:failures:
+529:---- sessions::sqlite_store::connection::open_tests::incompatible_schema_is_rejected_without_wal_or_database_changes stdout ----
+536:failures:
+539:test result: FAILED. 496 passed; 1 failed; 26 ignored; 0 measured; 0 filtered out; finished in 20.51s
+run=13 exit=101 secs=26 test result: FAILED. 496 passed; 1 failed; 26 ignored; 0 measured; 0 filtered out; finished in 26.77s
+322:test sessions::sqlite_store::connection::open_tests::incompatible_schema_is_rejected_without_wal_or_database_changes ... FAILED
+527:failures:
+529:---- sessions::sqlite_store::connection::open_tests::incompatible_schema_is_rejected_without_wal_or_database_changes stdout ----
+536:failures:
+539:test result: FAILED. 496 passed; 1 failed; 26 ignored; 0 measured; 0 filtered out; finished in 26.77s
+run=14 exit=101 secs=15 test result: FAILED. 495 passed; 2 failed; 26 ignored; 0 measured; 0 filtered out; finished in 14.76s
+307:test sessions::sqlite_store::connection::open_tests::initialization_lock_has_a_budget_and_preserves_the_sidecar ... FAILED
+308:test sessions::sqlite_store::connection::open_tests::incompatible_schema_is_rejected_without_wal_or_database_changes ... FAILED
+527:failures:
+529:---- sessions::sqlite_store::connection::open_tests::initialization_lock_has_a_budget_and_preserves_the_sidecar stdout ----
+535:---- sessions::sqlite_store::connection::open_tests::incompatible_schema_is_rejected_without_wal_or_database_changes stdout ----
+541:failures:
+545:test result: FAILED. 495 passed; 2 failed; 26 ignored; 0 measured; 0 filtered out; finished in 14.76s
+run=15 exit=101 secs=16 test result: FAILED. 496 passed; 1 failed; 26 ignored; 0 measured; 0 filtered out; finished in 15.38s
+306:test sessions::sqlite_store::connection::open_tests::incompatible_schema_is_rejected_without_wal_or_database_changes ... FAILED
+527:failures:
+529:---- sessions::sqlite_store::connection::open_tests::incompatible_schema_is_rejected_without_wal_or_database_changes stdout ----
+536:failures:
+539:test result: FAILED. 496 passed; 1 failed; 26 ignored; 0 measured; 0 filtered out; finished in 15.38s
+run=16 exit=101 secs=17 test result: FAILED. 496 passed; 1 failed; 26 ignored; 0 measured; 0 filtered out; finished in 17.31s
+310:test sessions::sqlite_store::connection::open_tests::failed_migration_closes_connections_and_releases_initialization_lock ... FAILED
+527:failures:
+529:---- sessions::sqlite_store::connection::open_tests::failed_migration_closes_connections_and_releases_initialization_lock stdout ----
+536:failures:
+539:test result: FAILED. 496 passed; 1 failed; 26 ignored; 0 measured; 0 filtered out; finished in 17.31s
+run=17 exit=101 secs=20 test result: FAILED. 496 passed; 1 failed; 26 ignored; 0 measured; 0 filtered out; finished in 19.97s
+314:test sessions::sqlite_store::connection::open_tests::failed_migration_closes_connections_and_releases_initialization_lock ... FAILED
+527:failures:
+529:---- sessions::sqlite_store::connection::open_tests::failed_migration_closes_connections_and_releases_initialization_lock stdout ----
+536:failures:
+539:test result: FAILED. 496 passed; 1 failed; 26 ignored; 0 measured; 0 filtered out; finished in 19.97s
+run=18 exit=101 secs=12 test result: FAILED. 496 passed; 1 failed; 26 ignored; 0 measured; 0 filtered out; finished in 12.39s
+311:test sessions::sqlite_store::connection::open_tests::incompatible_schema_is_rejected_without_wal_or_database_changes ... FAILED
+527:failures:
+529:---- sessions::sqlite_store::connection::open_tests::incompatible_schema_is_rejected_without_wal_or_database_changes stdout ----
+536:failures:
+539:test result: FAILED. 496 passed; 1 failed; 26 ignored; 0 measured; 0 filtered out; finished in 12.39s
+run=19 exit=101 secs=12 test result: FAILED. 496 passed; 1 failed; 26 ignored; 0 measured; 0 filtered out; finished in 11.17s
+312:test sessions::sqlite_store::connection::open_tests::incompatible_schema_is_rejected_without_wal_or_database_changes ... FAILED
+527:failures:
+529:---- sessions::sqlite_store::connection::open_tests::incompatible_schema_is_rejected_without_wal_or_database_changes stdout ----
+536:failures:
+539:test result: FAILED. 496 passed; 1 failed; 26 ignored; 0 measured; 0 filtered out; finished in 11.17s
+run=20 exit=101 secs=10 test result: FAILED. 496 passed; 1 failed; 26 ignored; 0 measured; 0 filtered out; finished in 10.83s
+313:test sessions::sqlite_store::connection::open_tests::incompatible_schema_is_rejected_without_wal_or_database_changes ... FAILED
+527:failures:
+529:---- sessions::sqlite_store::connection::open_tests::incompatible_schema_is_rejected_without_wal_or_database_changes stdout ----
+536:failures:
+539:test result: FAILED. 496 passed; 1 failed; 26 ignored; 0 measured; 0 filtered out; finished in 10.83s

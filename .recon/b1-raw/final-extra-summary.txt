@@ -1,0 +1,10 @@
+run=01 exit=0 secs=17 test result: ok. 499 passed; 0 failed; 26 ignored; 0 measured; 0 filtered out; finished in 14.63s
+run=02 exit=0 secs=14 test result: ok. 499 passed; 0 failed; 26 ignored; 0 measured; 0 filtered out; finished in 13.83s
+run=03 exit=0 secs=16 test result: ok. 499 passed; 0 failed; 26 ignored; 0 measured; 0 filtered out; finished in 14.65s
+run=04 exit=0 secs=14 test result: ok. 499 passed; 0 failed; 26 ignored; 0 measured; 0 filtered out; finished in 13.02s
+run=05 exit=0 secs=13 test result: ok. 499 passed; 0 failed; 26 ignored; 0 measured; 0 filtered out; finished in 12.99s
+run=06 exit=0 secs=14 test result: ok. 499 passed; 0 failed; 26 ignored; 0 measured; 0 filtered out; finished in 12.96s
+run=07 exit=0 secs=12 test result: ok. 499 passed; 0 failed; 26 ignored; 0 measured; 0 filtered out; finished in 11.21s
+run=08 exit=0 secs=13 test result: ok. 499 passed; 0 failed; 26 ignored; 0 measured; 0 filtered out; finished in 12.32s
+run=09 exit=0 secs=12 test result: ok. 499 passed; 0 failed; 26 ignored; 0 measured; 0 filtered out; finished in 11.50s
+run=10 exit=0 secs=12 test result: ok. 499 passed; 0 failed; 26 ignored; 0 measured; 0 filtered out; finished in 10.71s

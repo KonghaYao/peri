@@ -164,7 +164,7 @@ fn build_entries(state: &BridgeState, items: &[HistoryPageItem]) -> Vec<PageEntr
                 // （那里会 flush current_turn 并推进 turn 代际）。`input_id` 不参与
                 // 展示（队列认领是执行侧状态），历史页不消费它。
                 AcpEventData::ReplayedUserBubble { text, .. }
-                | AcpEventData::LocalUserBubble { text } => {
+                | AcpEventData::LocalUserBubble { text, .. } => {
                     units.push(TuiRenderUnit::TuiUserBubble(TuiUserBubble::new(text)));
                 }
                 // 其余变体（usage_update / 未知 tag / 无展示形式的投影）在历史投影里
