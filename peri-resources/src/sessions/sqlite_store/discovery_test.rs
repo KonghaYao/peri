@@ -531,6 +531,65 @@ async fn test_worktree_relocated_linked_worktree_stays_inconsistent() {
     ));
 }
 
+/// [回归测试] 裸仓库的 linked worktree：未换位可发现，换位后必须判为不一致。
+///
+/// 裸仓库把主工作树列成 Git 目录自己并标记 `bare`，那个路径恰好等于 common directory：
+/// 成员项若不加区分地接受 Git 目录，换位后的登记位置就会被误判为通过。
+#[tokio::test]
+async fn test_worktree_relocated_linked_worktree_of_bare_repository_stays_inconsistent() {
+    let home = tempfile::tempdir().unwrap();
+    let source = committed_repository(home.path()).await;
+    let bare = home.path().join("bare.git");
+    git_fixture(
+        home.path(),
+        home.path(),
+        &["init", "--bare", "-q", bare.to_str().unwrap()],
+    )
+    .await;
+    git_fixture(
+        &source,
+        home.path(),
+        &["push", "-q", bare.to_str().unwrap(), "HEAD:refs/heads/main"],
+    )
+    .await;
+    let linked = home.path().join("linked tree");
+    git_fixture(
+        &bare,
+        home.path(),
+        &["worktree", "add", "-q", linked.to_str().unwrap(), "main"],
+    )
+    .await;
+    // 未换位时本来就该可发现：排除 `bare` 项不得把这条路一起收紧。
+    let linked_canonical = tokio::fs::canonicalize(&linked).await.unwrap();
+    let (cwd, observed) = observe(&linked).await.unwrap();
+    assert_eq!(cwd, linked_canonical);
+    assert_eq!(observed.discovery.root, linked_canonical);
+    // 用例必须真的落在「列表里有一条路径等于 common directory 的 bare 项」的布局上，
+    // 否则没有覆盖到「Git 目录命中」这一分支。
+    let (_, common, _) = git_reported_locations(&linked, home.path()).await;
+    let listing = git_stdout(&linked, home.path(), &["worktree", "list", "--porcelain"]).await;
+    let bare_entry = listing
+        .lines()
+        .zip(listing.lines().skip(1))
+        .find(|(_, attribute)| *attribute == "bare")
+        .map(|(line, _)| line.trim_start_matches("worktree ").to_string())
+        .expect("裸仓库的列表必须含 bare 项");
+    assert_eq!(
+        tokio::fs::canonicalize(&bare_entry).await.unwrap(),
+        common,
+        "bare 项路径必须等于 common directory"
+    );
+
+    let moved = home.path().join("moved tree");
+    std::fs::rename(&linked, &moved).unwrap();
+
+    let error = observe(&moved).await.unwrap_err();
+    assert!(matches!(
+        error.downcast_ref::<WorkspaceError>(),
+        Some(WorkspaceError::DiscoveryError(message)) if message == "Git worktree membership is inconsistent"
+    ));
+}
+
 /// [回归测试] 旧版 Git 回显未知选项时不得把选项原文当成路径。
 ///
 /// `rev-parse` 对未知的长选项不报错，而是把它当普通参数回显到 stdout（本机 Git

@@ -400,6 +400,37 @@ async fn git_worktree_membership(program: &OsStr, cwd: &Path) -> Result<Worktree
     Ok(WorktreeMembership::Listed(fallback, b'\n'))
 }
 
+/// `worktree list --porcelain` 里的成员路径，跳过 Git 标为 `bare` 的项。
+///
+/// `bare` 项描述的是 Git 目录自己（裸仓库把它列成主工作树），不是任何检出位置，因此
+/// 不能当作成员证据：裸仓库的 linked worktree 被改名换位后，列表里那条 `bare` 的路径
+/// 恰好等于 common directory，用它核对会得出「成员关系一致」。裸仓库本身在更早的
+/// `--is-inside-work-tree` 已经拒绝，这里只是不把它的目录当成检出。
+fn listed_worktree_paths(stdout: &[u8], separator: u8) -> Vec<&[u8]> {
+    let mut members = Vec::new();
+    let mut current: Option<&[u8]> = None;
+    let mut bare = false;
+    for field in stdout.split(|byte| *byte == separator) {
+        if let Some(entry) = field.strip_prefix(b"worktree ") {
+            if let Some(previous) = current.take() {
+                if !bare {
+                    members.push(previous);
+                }
+            }
+            current = Some(entry);
+            bare = false;
+        } else if field == b"bare" {
+            bare = true;
+        }
+    }
+    if let Some(path) = current {
+        if !bare {
+            members.push(path);
+        }
+    }
+    members
+}
+
 /// common Git directory：读 Git 自己写入的 `commondir` 文件。
 ///
 /// `gitrepository-layout` 把这个文件的语义定义为 `$GIT_COMMON_DIR`（相对路径按
@@ -516,25 +547,23 @@ async fn observe_with_git(cwd: &Path, program: &OsStr) -> Result<(PathBuf, Obser
         // 报告为 Git 目录本身，检出路径永不出现在列表里（Git 2.39 实测）。那种布局下这条
         // 交叉核对没有可比的路径证据（位置已由 `rev-parse` 回答），按证据不足跳过，与
         // 「成员关系不一致」区分开；见 docs/design/session-id-environment.md §3.1。
+        // `bare` 项由 `listed_worktree_paths` 排除：它描述 Git 目录自己，路径会等于
+        // common directory，当成成员证据就会放过被换位、元数据未修复的 linked worktree。
         // 普通仓库的 Git 目录在根之下，`worktree list` 的主工作树项是真实目录路径，不会
-        // 等于 Git 目录这两项；被换位、元数据未修复的 linked worktree 仍按不一致拒绝。
+        // 等于 Git 目录这两项，所以换位后的登记位置仍按不一致拒绝。
         let accepted = [root.as_path(), common_dir.as_path(), private_dir.as_path()]
             .map(git_command_path)
             .into_iter()
             .collect::<Result<Vec<_>>>()?;
         if !worktrees.status.success()
-            || !worktrees
-                .stdout
-                .split(|byte| *byte == separator)
-                .any(|field| {
-                    field
-                        .strip_prefix(b"worktree ")
-                        .and_then(|path| std::str::from_utf8(path).ok())
-                        .is_some_and(|path| {
-                            accepted
-                                .iter()
-                                .any(|expected| Path::new(path) == expected.as_path())
-                        })
+            || !listed_worktree_paths(&worktrees.stdout, separator)
+                .into_iter()
+                .any(|path| {
+                    std::str::from_utf8(path).ok().is_some_and(|path| {
+                        accepted
+                            .iter()
+                            .any(|expected| Path::new(path) == expected.as_path())
+                    })
                 })
         {
             return Err(WorkspaceError::DiscoveryError(
