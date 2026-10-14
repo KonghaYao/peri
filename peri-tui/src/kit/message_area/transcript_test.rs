@@ -669,11 +669,12 @@ fn empty_bubble_entry(text: &str, reasoning: Option<TuiReasoningBlock>) -> TuiRe
     )
 }
 
-/// §6 进入分叉只出现在「文本区 → 过程区」的边界：首个 entry 恒 `Inline`（无悬空
-/// 分叉），连续过程 entry 接续不重复画分叉，正文之后再次进入过程区重画一次。
+/// §6 转场台阶只出现在区界：文本区 → 过程区在 entry 入口画进入台阶 `╰─╮`，
+/// 过程区 → 文本区画退出台阶 `╭─╯`；首个 entry 无台阶（无悬空台阶），
+/// 同区接续不重复画。
 #[test]
 #[serial_test::serial]
-fn process_lead_branches_only_at_text_to_process_boundary() {
+fn zone_step_renders_only_at_zone_boundaries() {
     let grid = GridSpec::grid_for(80);
     let context = context();
     let snapshot = ViewModelsSnapshot {
@@ -701,37 +702,41 @@ fn process_lead_branches_only_at_text_to_process_boundary() {
         2,
     );
 
-    let first_line = |slot: usize| -> String {
+    let line_text_at = |slot: usize, index: usize| -> String {
         let lines = caches[slot].lines.as_ref().expect("slot 已渲染");
-        let line = lines.line(0).expect("首行存在");
+        let line = lines.line(index).expect("行存在");
         line.spans.iter().map(|s| s.content.as_ref()).collect()
     };
-    // 首个 entry = user 正文（文本区），其后首个过程 entry 画分叉：col1 = ├、col2–3 = ──
-    let branch = first_line(1);
+    let first_line = |slot: usize| line_text_at(slot, 0);
+    // 首个 entry = user 正文（文本区），内部无台阶
     assert!(
-        branch.starts_with(" \u{251c}\u{2500}\u{2500}"),
-        "实际 {branch:?}"
+        !first_line(0).contains('\u{2570}') && !first_line(0).contains('\u{256d}'),
+        "首个 entry 不画台阶，实际 {:?}",
+        first_line(0)
     );
-    assert!(branch.contains("Read"), "实际 {branch:?}");
-    // 连续过程 entry：仍在过程区，接续（col1 = │，无分叉）
+    // 文本区 → 过程区：入口台阶独立成行，header 在次行（标记列 ✓）
+    assert_eq!(first_line(1), " \u{2570}\u{2500}\u{256e}");
+    let header = line_text_at(1, 1);
+    assert!(header.starts_with("   \u{2713}"), "实际 {header:?}");
+    assert!(header.contains("Read"), "实际 {header:?}");
+    // 连续过程 entry：同区接续，行首即 header（无台阶）
     let inline = first_line(2);
-    assert!(inline.starts_with(" \u{2502}  "), "实际 {inline:?}");
-    assert!(!inline.contains('\u{251c}'), "实际 {inline:?}");
+    assert!(inline.starts_with("   \u{2713}"), "实际 {inline:?}");
     assert!(inline.contains("Grep"), "实际 {inline:?}");
-    // 正文（文本区）之后再次进入过程区：分叉重画
-    let after_text = first_line(4);
-    assert!(
-        after_text.starts_with(" \u{251c}\u{2500}\u{2500}"),
-        "实际 {after_text:?}"
-    );
-    assert!(after_text.contains("Bash"), "实际 {after_text:?}");
+    // 过程区 → 文本区：退出台阶独立成行
+    assert_eq!(first_line(3), " \u{256d}\u{2500}\u{256f}");
+    // 文本区 → 过程区：再次进入画台阶
+    assert_eq!(first_line(4), " \u{2570}\u{2500}\u{256e}");
+    let header = line_text_at(4, 1);
+    assert!(header.contains("Bash"), "实际 {header:?}");
 }
 
-/// §6/§7 相邻判定的边界用例：首个 entry 恒 `Inline`；0 行 entry 跳过（不成为
-/// 「前一个产出行 entry」）；纯 reasoning 气泡终点仍在过程区 → 接续不画分叉。
+/// §6/§7 相邻判定的边界用例：首个 entry 恒 `None`；0 行 entry 跳过（不成为
+/// 「前一个产出行 entry」）；纯 reasoning 气泡终点仍在过程区 → 接续不画台阶；
+/// 正文非空的气泡终点回文本区 → 后接过程 entry 画进入台阶。
 #[test]
 #[serial_test::serial]
-fn process_lead_matrix_skips_zero_line_entries() {
+fn zone_transition_matrix_skips_zero_line_entries() {
     let reasoning_only = || {
         empty_bubble_entry(
             "",
@@ -747,14 +752,18 @@ fn process_lead_matrix_skips_zero_line_entries() {
     };
     let user = || TuiRenderUnit::TuiUserBubble(TuiUserBubble::new("hi".into()));
 
-    // 首个 entry 起点即过程区 → Inline（不画悬空分叉）
+    // 首个 entry 起点即过程区 → None（不画悬空台阶）
     let items = im::Vector::from(vec![tool_entry("Read")]);
-    assert_eq!(process_lead(&items, 0), ProcessLead::Inline);
+    assert_eq!(zone_transition(&items, 0), ZoneTransition::None);
 
-    // 文本区 → 过程区 → 过程区：进入处分叉，区内接续
+    // 文本区 → 过程区 → 过程区：进入处台阶，区内接续
     let items = im::Vector::from(vec![user(), tool_entry("Read"), tool_entry("Grep")]);
-    assert_eq!(process_lead(&items, 1), ProcessLead::Branch);
-    assert_eq!(process_lead(&items, 2), ProcessLead::Inline);
+    assert_eq!(zone_transition(&items, 1), ZoneTransition::EnterProcess);
+    assert_eq!(zone_transition(&items, 2), ZoneTransition::None);
+
+    // 过程区 → 文本区：退出台阶
+    let items = im::Vector::from(vec![tool_entry("Read"), empty_bubble_entry("answer", None)]);
+    assert_eq!(zone_transition(&items, 1), ZoneTransition::ExitProcess);
 
     // 0 行 entry 夹在中间：不参与相邻判定，跨过它看前一个产出行 entry
     let items = im::Vector::from(vec![
@@ -762,26 +771,26 @@ fn process_lead_matrix_skips_zero_line_entries() {
         empty_bubble_entry("", None),
         tool_entry("Read"),
     ]);
-    assert_eq!(process_lead(&items, 2), ProcessLead::Branch);
+    assert_eq!(zone_transition(&items, 2), ZoneTransition::EnterProcess);
 
-    // 纯 reasoning 气泡（起点过程 / 终点过程）→ 后接过程 entry 不画分叉
+    // 纯 reasoning 气泡（起点过程 / 终点过程）→ 后接过程 entry 不画台阶
     let items = im::Vector::from(vec![user(), reasoning_only(), tool_entry("Read")]);
-    assert_eq!(process_lead(&items, 2), ProcessLead::Inline);
+    assert_eq!(zone_transition(&items, 2), ZoneTransition::None);
 
-    // 正文非空的气泡终点在文本区 → 后接过程 entry 画分叉
+    // 正文非空的气泡终点在文本区 → 后接过程 entry 画进入台阶
     let items = im::Vector::from(vec![
         user(),
         empty_bubble_entry("answer", None),
         tool_entry("Read"),
     ]);
-    assert_eq!(process_lead(&items, 2), ProcessLead::Branch);
+    assert_eq!(zone_transition(&items, 2), ZoneTransition::EnterProcess);
 }
 
-/// §6 首个 entry 即过程区（会话以工具卡开场）：完整渲染路径下首行是区内接续
-/// 形态（col2 = 贯通 `│`），不画悬空分叉；后续过程 entry 同样接续。
+/// §6 首个 entry 即过程区（会话以工具卡开场）：完整渲染路径下首行是过程区
+/// 首行形态（标记列状态符号），不画悬空台阶；后续过程 entry 同样接续。
 #[test]
 #[serial_test::serial]
-fn first_process_entry_renders_without_dangling_branch() {
+fn first_process_entry_renders_without_dangling_step() {
     let grid = GridSpec::grid_for(80);
     let context = context();
     let snapshot = ViewModelsSnapshot {
@@ -810,15 +819,18 @@ fn first_process_entry_renders_without_dangling_branch() {
     };
     let head = first_line(0);
     assert!(
-        head.starts_with(" \u{2502}  "),
-        "首个过程 entry 接续形态，实际 {head:?}"
+        head.starts_with("   \u{2713}"),
+        "首个过程 entry 首行形态，实际 {head:?}"
     );
-    assert!(!head.contains('\u{251c}'), "无悬空分叉，实际 {head:?}");
+    assert!(
+        !head.contains('\u{2570}') && !head.contains('\u{256d}'),
+        "无悬空台阶，实际 {head:?}"
+    );
     assert!(head.contains("Read"), "实际 {head:?}");
     let next = first_line(1);
     assert!(
-        !next.contains('\u{251c}'),
-        "区内接续不重复画分叉，实际 {next:?}"
+        next.starts_with("   \u{2713}"),
+        "区内接续不重复画台阶，实际 {next:?}"
     );
     assert!(next.contains("Grep"), "实际 {next:?}");
 }

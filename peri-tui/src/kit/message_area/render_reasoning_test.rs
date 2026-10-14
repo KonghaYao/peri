@@ -746,8 +746,8 @@ fn test_assistant_duration_meta_three_breakpoints() {
     );
 }
 
-/// §6/§7 气泡内混排：reasoning 段走过程区（进入分叉 + 首行/续行同列），正文段回
-/// 基准列（退出不画符）——`lead` 只作用于过程段，正文段前端前缀保持文本区形态。
+/// §6/§7 气泡内混排：reasoning 段走过程区（首行/续行同列），正文段回基准列；
+/// 入口台阶由渲染层插入 entry 行首，reasoning → 正文的退出台阶由 entry 自画。
 #[test]
 fn test_bubble_reasoning_uses_process_zone_body_returns_to_baseline() {
     crate::i18n::init(Some("en"));
@@ -778,43 +778,38 @@ fn test_bubble_reasoning_uses_process_zone_body_returns_to_baseline() {
         &mut cache,
         None,
         false,
-        ProcessLead::Branch,
+        ZoneTransition::EnterProcess,
     );
 
-    // reasoning header（过程区首行）：col1 = ├、col2–3 = ──、col4 = 符号、摘要 col6
-    let header = &lines[0];
+    // 入口台阶（§6）：转场后的 entry 行首独立成行，先于 reasoning header
+    assert!(super::is_step_row(&lines[0]), "首行应是入口台阶");
+    assert_eq!(line_text(&lines[0]), " \u{2570}\u{2500}\u{256e}");
+
+    // reasoning header（过程区首行）：[outer 空][indent 留空][│][gap] + 摘要
+    let header = &lines[1];
     assert_eq!(header.spans[0].content.as_ref(), " ", "outer 空列");
-    assert_eq!(header.spans[1].content.as_ref(), "\u{251c}", "进入分叉");
-    assert_eq!(
-        header.spans[2].content.as_ref(),
-        "\u{2500}\u{2500}",
-        "分叉 fill"
-    );
-    assert_eq!(
-        header.spans[3].content.as_ref(),
-        "\u{2502}",
-        "符号在 fill 之后"
-    );
-    assert_eq!(header.spans[4].content.as_ref(), " ", "符号后的分隔空格");
+    assert_eq!(header.spans[1].content.as_ref(), "  ", "indent 格留空");
+    assert_eq!(header.spans[2].content.as_ref(), "\u{2502}", "标记列竖线");
+    assert_eq!(header.spans[3].content.as_ref(), "  ", "gap");
     let header_text = line_text(header);
     assert!(
         header_text.contains("Thought for 1s"),
         "实际 {header_text:?}"
     );
-    let header_col: usize = header.spans[..5].iter().map(|s| s.content.width()).sum();
+    let header_col: usize = header.spans[..4].iter().map(|s| s.content.width()).sum();
     assert_eq!(header_col, grid.process_prefix_width());
 
-    // reasoning 正文（过程区续行）：`[outer][│][indent + 2 空格]` → 与 header 摘要同列
+    // reasoning 正文（过程区续行）：`[outer 空][indent 留空][│][gap]` → 与 header 摘要同列
     let body = lines
         .iter()
         .find(|l| line_text(l).contains("long thought"))
         .expect("reasoning 正文行");
-    assert_eq!(body.spans[1].content.as_ref(), "\u{2502}");
-    assert_eq!(body.spans[2].content.as_ref(), "    ", "indent + 2 空格");
-    let body_col: usize = body.spans[..3].iter().map(|s| s.content.width()).sum();
+    assert_eq!(body.spans[1].content.as_ref(), "  ", "indent 格留空");
+    assert_eq!(body.spans[2].content.as_ref(), "\u{2502}");
+    let body_col: usize = body.spans[..4].iter().map(|s| s.content.width()).sum();
     assert_eq!(body_col, header_col, "续行与首行同列");
 
-    // 正文段（文本区）：回基准列 4，无分叉
+    // 正文段（文本区）：回基准列 4
     let answer = lines
         .iter()
         .find(|l| line_text(l).contains("正文回答"))
@@ -824,19 +819,27 @@ fn test_bubble_reasoning_uses_process_zone_body_returns_to_baseline() {
     assert_eq!(answer.spans[2].content.as_ref(), "  ", "文本区 gap");
     let answer_col: usize = answer.spans[..3].iter().map(|s| s.content.width()).sum();
     assert_eq!(answer_col, grid.first_prefix_width(), "正文回基准列");
-    assert!(
-        !line_text(answer).contains('\u{251c}'),
-        "退出不画分叉，实际 {:?}",
-        line_text(answer)
-    );
 
-    // 整个气泡只有进入过程区那一处分叉
+    // 两处台阶：入口台阶（entry 行首）+ 内部退出台阶（reasoning → 正文，entry 自画）
+    let step_rows: Vec<usize> = lines
+        .iter()
+        .enumerate()
+        .filter(|(_, l)| super::is_step_row(l))
+        .map(|(index, _)| index)
+        .collect();
+    let thought_index = lines
+        .iter()
+        .position(|l| line_text(l).contains("long thought"))
+        .expect("reasoning 正文行");
+    let answer_index = lines
+        .iter()
+        .position(|l| line_text(l).contains("正文回答"))
+        .expect("正文行");
     assert_eq!(
-        lines
-            .iter()
-            .filter(|l| line_text(l).contains('\u{251c}'))
-            .count(),
-        1,
-        "分叉只出现在 reasoning 首行"
+        step_rows,
+        vec![0, thought_index + 1],
+        "台阶只在区内转场两端"
     );
+    assert_eq!(line_text(&lines[step_rows[1]]), " \u{256d}\u{2500}\u{256f}");
+    assert!(step_rows[1] < answer_index, "退出台阶在正文段之前");
 }

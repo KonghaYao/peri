@@ -10,7 +10,7 @@
 
 > 缩进列自 2026-10-14 起由过程区前缀统一承担（组内行与组头同列，早前的独立常量
 > `SUBAGENT_TOOL_INDENT` 已删除）：见
-> [TUI 消息区：过程区缩进与进入分叉](../../spec/issues/2026-10-14-tui-transcript-process-zone-indent.md)。
+> [TUI 消息区：过程区缩进与转场台阶](../../spec/issues/2026-10-14-tui-transcript-process-zone-indent.md)。
 
 ## 1. 背景与目标
 
@@ -50,18 +50,18 @@ P2 与 P4 共同落实 §8.2「同屏最多一个高显著 spinner」：高显�
 ## 3. 形态规格（Wide / Standard）
 
 ```text
-   ◐ Agent explorer  Inspecting message flow          6 tools   ← subagent 顶层行（现状不变）
-   │   ⠋ Read   src/main.rs                             4s      ← 嵌套工具行（新形态）
-   │   ✓ Bash   cargo test -p peri-tui                 0.4s
-   │   × Edit   render.rs — Failed
-   │   - Error: File not found at src/render.rs                ← 失败原因行（缩进对齐工具行）
+   ◐  Agent explorer  Inspecting message flow         6 tools   ← subagent 顶层行
+   │  ⠋ Read  src/main.rs                             4s        ← 嵌套工具行（新形态）
+   │  ✓ Bash  cargo test -p peri-tui                  0.4s
+   │  × Edit  render.rs — Failed
+   │  - Error: File not found at src/render.rs                  ← 失败原因行（与工具行同列）
 ```
 
 逐列结构（Span 序列）：
 
 | 段 | 内容 | 样式 |
 | --- | --- | --- |
-| ① 过程区续行前缀 | `[outer 空][dim 竖线][indent + 2 空格]`（`process_cont_prefix`，与 subagent 块续行同列；`indent` = 过程区右移量，≥60 列 2 / <60 列 0） | `sem.text.dim` 竖线 |
+| ① 过程区续行前缀 | `[outer 空][indent 留空][dim 竖线][gap]`（`process_cont_prefix`，与 subagent 块续行同列；`indent` = 过程区右移量，≥60 列 2 / <60 列 0） | `sem.text.dim` 竖线 |
 | ② 缩进 | 无独立缩进常量——`indent` 由 ① 前缀统一承担，组内行与组头同列（决策 5） | 无样式 |
 | ③ 状态符号 | running=braille 帧 / success=`✓` / error=`×` | running/success → `sem.text.dim`；error → `sem.status.error` |
 | ④ Verb | `format_tool_name` 本地化动词（Read/Bash/Shell/Edit…） | `sem.text.primary`，**无 bold** |
@@ -135,7 +135,7 @@ Narrow 下符号位省略与主时间线「accent 退化为 bullet」是同一�
 - 选中 subagent 工具行复制 → `{Verb} {summary}`（与主时间线 tool header 语义同口径，
   无符号、无 duration、无竖线/缩进）。
 - 实现要求：`semantic_line_text` / `strip_visual_prefix` 需识别新前缀结构
-  （`process_cont_prefix + 符号 + Verb`），对 `TuiSubAgentGroup` 变体剥除缩进与符号列。
+  （`[outer 空][indent 留空][标记][gap]` + Verb），对 `TuiSubAgentGroup` 变体剥除缩进与符号列。
 - 原因行复制 → 纯错误正文（现状已剥离前缀，缩进后同样剥离）。
 
 ## 9. 交互契约（延续现状，不新增）
@@ -153,7 +153,7 @@ Narrow 下符号位省略与主时间线「accent 退化为 bullet」是同一�
 
 | 位置 | 改动 |
 | --- | --- |
-| 缩进承担 | 无独立常量——缩进列由过程区续行前缀 `process_cont_prefix`（`indent + 2 空格`）承担，组内行与组头同列（决策 5） |
+| 缩进承担 | 无独立常量——缩进列由过程区续行前缀 `process_cont_prefix`（`[outer 空][indent 留空][dim 竖线][gap]`）承担，组内行与组头同列（决策 5） |
 | `subagent_tool_line` | ① 前缀走过程区续行前缀（替代 `first_prefix`）；② label 去 `Modifier::BOLD`；③ 符号色：running/success 用 `sem.text.dim`，error 用 `sem.status.error`；④ error 补 ` — Failed` 错误词（复用 §6.4 的 `msg-status-failed` 逻辑）；⑤ summary 预算与 `place_meta` 的 `used` 计算自然含前缀宽度；⑥ Narrow 断点符号位省略（§6 断点表） |
 | `subagent_error_reason_lines` | 与工具行同列（过程区续行前缀） |
 | `semantic_line_text` | `TuiSubAgentGroup` 变体：子工具行语义 `{Verb} {summary}`，剥竖线+缩进+符号 |
@@ -164,7 +164,7 @@ Narrow 下符号位省略与主时间线「accent 退化为 bullet」是同一�
 
 ## 11. 测试要点
 
-1. **层级结构**：subagent 工具行首列 = `[outer 空][│][indent + 2 空格]`，正文起点与组头同列；
+1. **层级结构**：subagent 工具行首列 = `[outer 空][indent 留空][│][gap]`，正文起点与组头同列；
 2. **bold 缺失**：工具行 Verb span 无 `Modifier::BOLD`（对照主时间线工具行有）；
 3. **符号色**：running/success 符号 `fg == text.dim`；error 符号 `fg == status.error`；
 4. **错误词**：error 工具行含 ` — Failed`（bold + error 色），原因行与工具行同列；

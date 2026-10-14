@@ -362,15 +362,15 @@ fn test_semantic_user_bubble() {
 
 // ── [S3 §9] 过程区前缀（缩进 + 分叉）不进入复制语义 ──────────────────────
 
-/// 过程区行（进入分叉 `├──` / 区内 `│` + 缩进填充）复制时剥净前缀：`│`/`├`/`─`
-/// 与缩进空格都不出现在语义文本里；工具行（header + 输出）与气泡混排
-/// （reasoning 过程段 + md 正文段）逐行成立。
+/// 过程区行（首行标记列符号 + `│` 续行 + 缩进留空）复制时剥净前缀：状态符号、
+/// `│` 与缩进空格都不出现在语义文本里；工具行（header + 输出）与气泡混排
+/// （reasoning 过程段 + md 正文段）逐行成立；台阶行（§6）返回空语义。
 #[test]
-fn test_semantic_process_prefix_and_branch_are_stripped() {
+fn test_semantic_process_prefix_and_step_are_stripped() {
     crate::i18n::init(Some("en"));
     let grid = GridSpec::grid_for(80);
 
-    // 工具卡：进入分叉形态（col1 ├）
+    // 工具卡：进入过程区（入口台阶独立成行）
     let tool = TuiRenderUnit::TuiToolCard(TuiToolCard {
         fold: FoldState::Expanded,
         output_summary: "out1\nout2".into(),
@@ -383,30 +383,31 @@ fn test_semantic_process_prefix_and_branch_are_stripped() {
         &mut cache,
         None,
         false,
-        ProcessLead::Branch,
+        ZoneTransition::EnterProcess,
     );
-    assert!(
-        line_text(&lines[0]).contains('\u{251c}'),
-        "首行应是进入分叉，实际 {:?}",
-        line_text(&lines[0])
-    );
+    assert!(super::is_step_row(&lines[0]), "首行应是入口台阶");
     assert_eq!(
         sem_at_lines(&tool, &lines, 0, &grid).as_deref(),
-        Some("Read src/main.rs \u{2014} 2 lines"),
-        "header 复制 label + summary + 完成后缀（无符号 / 分叉 / duration）"
+        Some(""),
+        "台阶行无用户内容（复制层整行跳过）"
     );
     assert_eq!(
         sem_at_lines(&tool, &lines, 1, &grid).as_deref(),
+        Some("Read src/main.rs \u{2014} 2 lines"),
+        "header 复制 label + summary + 完成后缀（无符号 / 台阶 / duration）"
+    );
+    assert_eq!(
+        sem_at_lines(&tool, &lines, 2, &grid).as_deref(),
         Some("out1"),
         "输出行剥离缩进前缀"
     );
     assert_eq!(
-        sem_at_lines(&tool, &lines, 2, &grid).as_deref(),
+        sem_at_lines(&tool, &lines, 3, &grid).as_deref(),
         Some("out2"),
         "输出行剥离缩进前缀"
     );
 
-    // 气泡混排：reasoning 走过程区（首行分叉 / 续行缩进），正文回基准列
+    // 气泡混排：reasoning 走过程区（首行标记列 `│` / 续行缩进），正文回基准列
     let bubble = TuiRenderUnit::TuiAssistantBubble(
         TuiAssistantBubble {
             started_at: None,
@@ -432,7 +433,7 @@ fn test_semantic_process_prefix_and_branch_are_stripped() {
         &mut cache,
         None,
         false,
-        ProcessLead::Branch,
+        ZoneTransition::EnterProcess,
     );
     let header_idx = lines
         .iter()
@@ -441,7 +442,7 @@ fn test_semantic_process_prefix_and_branch_are_stripped() {
     assert_eq!(
         sem_at_lines(&bubble, &lines, header_idx, &grid).as_deref(),
         Some("Thought for 1s \u{b7} 1 lines"),
-        "reasoning 摘要剥净分叉前缀"
+        "reasoning 摘要剥净前缀"
     );
     let thought_idx = lines
         .iter()
@@ -462,13 +463,16 @@ fn test_semantic_process_prefix_and_branch_are_stripped() {
         "正文段回基准列"
     );
 
-    // 全量属性：语义文本不含任何结构字形，也不以缩进空格开头
+    // 全量属性：语义文本不含任何结构字形（含台阶字形），也不以缩进空格开头
     for idx in 0..lines.len() {
         let Some(text) = sem_at_lines(&bubble, &lines, idx, &grid) else {
             continue;
         };
         assert!(
-            !text.contains('\u{2502}') && !text.contains('\u{251c}') && !text.contains('\u{2500}'),
+            !text.contains('\u{2502}')
+                && !text.contains('\u{2500}')
+                && !text.contains('\u{2570}')
+                && !text.contains('\u{256d}'),
             "行 {idx} 语义文本残留结构字形：{text:?}"
         );
         assert!(
@@ -478,7 +482,9 @@ fn test_semantic_process_prefix_and_branch_are_stripped() {
     }
 }
 
-/// 语义提取辅助：对已渲染行按 `local_idx` 取语义文本（复制路径口径）。
+/// 语义提取辅助：对已渲染行按 `local_idx` 取语义文本（复制路径口径）——
+/// 与提取层同源：台阶行整行跳过（空语义），其后各行按「VM 自身行序」顺延
+/// 1（入口台阶占 slot 行首）。
 fn sem_at_lines(
     vm: &TuiRenderUnit,
     lines: &[Line<'static>],
@@ -486,11 +492,12 @@ fn sem_at_lines(
     grid: &GridSpec,
 ) -> Option<String> {
     let line = lines.get(local_idx)?;
-    semantic_line_text(vm, local_idx, line, grid)
+    let step_offset = usize::from(lines.first().is_some_and(super::is_step_row));
+    semantic_line_text(vm, local_idx.saturating_sub(step_offset), line, grid)
 }
 
 /// 过程区符号行（系统 note / Todo 摘要）复制时同样剥净前缀与状态符号：
-/// 首行语义 = 正文（`!` / `◼` 不进剪贴板），续行剥缩进。
+/// 首行语义 = 正文（`!` / `◼` 不进剪贴板），续行剥缩进，入口台阶行返回空语义。
 #[test]
 fn test_semantic_process_note_and_todo_strip_prefix() {
     let grid = GridSpec::grid_for(80);
@@ -507,20 +514,25 @@ fn test_semantic_process_note_and_todo_strip_prefix() {
         &mut cache,
         None,
         false,
-        ProcessLead::Branch,
+        ZoneTransition::EnterProcess,
     );
     assert!(
-        line_text(&lines[0]).contains('\u{251c}'),
-        "note 首行应是进入分叉，实际 {:?}",
+        super::is_step_row(&lines[0]),
+        "note 首行应是入口台阶，实际 {:?}",
         line_text(&lines[0])
     );
     assert_eq!(
         sem_at_lines(&note, &lines, 0, &grid).as_deref(),
-        Some("warning line"),
-        "符号行剥净分叉前缀与 `!`"
+        Some(""),
+        "台阶行无用户内容"
     );
     assert_eq!(
         sem_at_lines(&note, &lines, 1, &grid).as_deref(),
+        Some("warning line"),
+        "符号行剥净前缀与 `!`"
+    );
+    assert_eq!(
+        sem_at_lines(&note, &lines, 2, &grid).as_deref(),
         Some("second line"),
         "续行剥净缩进"
     );
@@ -534,10 +546,10 @@ fn test_semantic_process_note_and_todo_strip_prefix() {
         &mut cache,
         None,
         false,
-        ProcessLead::Branch,
+        ZoneTransition::EnterProcess,
     );
     assert_eq!(
-        sem_at_lines(&todo, &lines, 0, &grid).as_deref(),
+        sem_at_lines(&todo, &lines, 1, &grid).as_deref(),
         Some("3/7 tasks \u{b7} Running tests"),
         "Todo 摘要行剥净前缀与 `◼`"
     );

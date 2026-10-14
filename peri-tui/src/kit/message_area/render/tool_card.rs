@@ -1,5 +1,5 @@
 use crate::i18n;
-use crate::kit::message_area::grid::{Breakpoint, GridSpec, ProcessLead};
+use crate::kit::message_area::grid::{Breakpoint, GridSpec};
 use crate::kit::tui_render_unit::{
     FoldState, TuiDiffBlock, TuiHunkLineKind, TuiTodoChangeKind, TuiTodoPresentation, TuiToolCard,
     TuiToolPresentation,
@@ -22,21 +22,18 @@ const TOOL_OUTPUT_MAX_LINES: usize = 4;
 
 /// §6.4 Tool activity：compact 行，不是重型 card。
 ///
-/// - 首行 `[outer][│|├][indent 填充][◐|✓|×][空格]{Verb}`（单 bold 锚点）`{summary}`
-///   + 后缀 + duration 三档——过程区右移 `indent`，进入分叉由 `lead` 决定（§3/§6）。
-/// - 续行 `[outer][│][indent + 2 空格]{内容}`：与首行标签同列（§4/§5）。
+/// - 首行 `[outer][留空][◐|✓|×][gap]{Verb}`（单 bold 锚点）`{summary}` 加
+///   suffix 与 duration 三档——状态符号占过程区左缘标记列（§3）；进入/退出
+///   台阶由入口包装统一插入（§6）。
+/// - 续行 `[outer][留空][│][gap]{内容}`：与首行标签同列（§4/§5）。
 /// - summary 着色：Bash → syntax.command；Read/Write/Edit → syntax.path；其余 muted。
 /// - error：× + status.error 符号色 + 明确错误词（`— Failed`），正文不整块染红。
 /// - running（Preview）：仅活动行（运行中无 output）；completed：折叠单行 /
 ///   展开输出（≤4 行）；Bash 展开显示 `$ command` + 分隔线 + 输出。
-pub(super) fn render_tool_card_lines(
-    data: &TuiToolCard,
-    grid: &GridSpec,
-    lead: ProcessLead,
-) -> Vec<Line<'static>> {
+pub(super) fn render_tool_card_lines(data: &TuiToolCard, grid: &GridSpec) -> Vec<Line<'static>> {
     let plan = project_tool_render_plan(data, grid);
     let resolved = resolve_tool_render_plan(data, plan);
-    render_tool_plan(data, resolved, grid, lead)
+    render_tool_plan(data, resolved, grid)
 }
 
 /// Presentation 只投影 header/detail 候选内容；状态、fold、prefix 与时长由
@@ -122,7 +119,6 @@ fn render_tool_plan(
     data: &TuiToolCard,
     plan: ResolvedToolRenderPlan,
     grid: &GridSpec,
-    lead: ProcessLead,
 ) -> Vec<Line<'static>> {
     let sem = THEME_ATOM.state().read().semantic;
     let (status_symbol, symbol_color) =
@@ -132,9 +128,9 @@ fn render_tool_plan(
     } else {
         status_symbol
     };
-    let mut spans = process_first_prefix(grid, &symbol, Style::default().fg(symbol_color), lead);
+    let mut spans = process_first_prefix(grid, &symbol, Style::default().fg(symbol_color));
     if data.is_error {
-        // 错误符号恒在前缀的倒数第二位（末位是分隔空格）——窄屏首行前缀把符号位
+        // 错误符号恒在前缀的倒数第二位（末位是 gap）——窄屏首行前缀把符号位
         // 退化为 bullet，错误态换回显式错误符号（§15 error 永不隐藏）。
         let symbol_span = spans.len().saturating_sub(2);
         spans[symbol_span] = Span::styled(sym().error, Style::default().fg(symbol_color));

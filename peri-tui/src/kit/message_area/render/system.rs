@@ -1,4 +1,4 @@
-use crate::kit::message_area::grid::{GridSpec, ProcessLead};
+use crate::kit::message_area::grid::GridSpec;
 use crate::kit::tui_render_unit::{TuiDivider, TuiNoteLevel, TuiSystemNote, TuiTodoSummary};
 use crate::truncate::truncate_by_width;
 use peri_theme::atoms::THEME_ATOM;
@@ -6,19 +6,20 @@ use ratatui_kit::ratatui::style::{Color, Modifier, Style};
 use ratatui_kit::ratatui::text::{Line, Span};
 use unicode_width::UnicodeWidthStr;
 
-use super::helpers::{process_cont_prefix, process_first_prefix, sym};
+use super::helpers::{first_prefix, process_cont_prefix, process_first_prefix, sym};
 
-/// §6.6 System event：普通事件单行 divider；warning/error 用符号 + accent。
+/// §6.6 System event：普通事件单行注记；warning/error 用符号 + accent。
 ///
-/// - Info：`── {来源文本} ──…`（divider 填满过程区正文列）。
+/// - Info：`[│][gap]{来源文本}`（左缘标记列 `│` + 正文，[用户定案
+///   2026-10-14] 不再画 `── label ──` 横线——注记是过程行，与 reasoning
+///   摘要同形）。
 /// - Warning/Error：`[!|×]{文本}` + 后续行 muted（错误含恢复动作文本）。
 ///
-/// 全部行属过程区（§7 sysnote = 过程/过程）：首行符号在 fill 之后，正文列与
+/// 全部行属过程区（§7 sysnote = 过程/过程）：首行符号占左缘标记列，正文列与
 /// 续行同列（§3/§4），宽度预算同步收窄为 `process_content_width()`（§8 右缘不动）。
 pub(super) fn render_system_note_lines(
     data: &TuiSystemNote,
     grid: &GridSpec,
-    lead: ProcessLead,
 ) -> Vec<Line<'static>> {
     let sem = THEME_ATOM.state().read().semantic;
     if data.level == TuiNoteLevel::Error {
@@ -30,7 +31,7 @@ pub(super) fn render_system_note_lines(
                     let style = Style::default()
                         .fg(sem.status.error)
                         .add_modifier(Modifier::BOLD);
-                    let mut spans = process_first_prefix(grid, sym().error, style, lead);
+                    let mut spans = process_first_prefix(grid, sym().error, style);
                     if grid.is_narrow() {
                         // Narrow 回退形态把符号位降级为 bullet（§11）；错误行保留
                         // `×`——错误信号优先于窄屏降级。
@@ -67,16 +68,24 @@ pub(super) fn render_system_note_lines(
 
     match data.level {
         TuiNoteLevel::Info => {
+            // [用户定案 2026-10-14] 注记不画 `── label ──` 横线——走普通过程行：
+            // 左缘标记列 `│` + 正文（与 reasoning 摘要同形），不填充行尾。
             let label = clean.first().cloned().unwrap_or_default();
-            vec![divider_with_label_line(grid, &label, lead)]
+            let mut spans =
+                process_first_prefix(grid, "\u{2502}", Style::default().fg(sem.text.dim));
+            spans.push(Span::styled(
+                truncate_by_width(&label, grid.process_content_width()),
+                Style::default().fg(sem.text.dim),
+            ));
+            vec![Line::from(spans)]
         }
         TuiNoteLevel::Warning => {
             let (symbol, color) = (sym().warning, sem.status.warning);
-            render_note_lines(grid, symbol, color, &clean, lead)
+            render_note_lines(grid, symbol, color, &clean)
         }
         TuiNoteLevel::Error => {
             let (symbol, color) = (sym().error, sem.status.error);
-            render_note_lines(grid, symbol, color, &clean, lead)
+            render_note_lines(grid, symbol, color, &clean)
         }
     }
 }
@@ -86,7 +95,6 @@ fn render_note_lines(
     symbol: &str,
     color: Color,
     clean: &[String],
-    lead: ProcessLead,
 ) -> Vec<Line<'static>> {
     let sem = THEME_ATOM.state().read().semantic;
     let mut lines = Vec::new();
@@ -99,7 +107,6 @@ fn render_note_lines(
                 grid,
                 symbol,
                 Style::default().fg(color).add_modifier(Modifier::BOLD),
-                lead,
             )
         } else {
             process_cont_prefix(grid, sem.text.dim)
@@ -117,24 +124,24 @@ fn render_note_lines(
             grid,
             symbol,
             Style::default().fg(color),
-            lead,
         )));
     }
     lines
 }
 
-/// `── {label} ──…` divider 行（label 为 None 时纯分隔线），填满过程区正文列——
-/// 前缀右移 `indent` 后预算同步收窄，行右缘与文本区行一致（§8 右缘不动）。
-fn divider_with_label_line(grid: &GridSpec, label: &str, lead: ProcessLead) -> Line<'static> {
+/// `── {label} ──…` divider 行（label 为 None 时纯分隔线），填满 content 列——
+/// turn 边界属文本区装饰（非机器活动，§7 zone 判定同源）：走基准前缀
+/// （accent 列 `─` 符号 + gap），不参与过程区缩进与转场台阶（§6）。
+fn divider_with_label_line(grid: &GridSpec, label: &str) -> Line<'static> {
     let sem = THEME_ATOM.state().read().semantic;
-    let content = grid.process_content_width();
+    let content = grid.content_width();
     let inner = match label {
         "" => "\u{2500}\u{2500}".to_string(),
         l => format!("\u{2500}\u{2500} {l}"),
     };
     let inner = truncate_by_width(&inner, content);
     let fill = content.saturating_sub(inner.width());
-    let mut spans = process_first_prefix(grid, "\u{2500}", Style::default().fg(sem.text.dim), lead);
+    let mut spans = first_prefix(grid, "\u{2500}", Style::default().fg(sem.text.dim));
     spans.push(Span::styled(
         format!("{}{}", inner, "\u{2500}".repeat(fill)),
         Style::default().fg(sem.text.dim),
@@ -143,23 +150,18 @@ fn divider_with_label_line(grid: &GridSpec, label: &str, lead: ProcessLead) -> L
 }
 
 /// 分隔线：turn 边界 divider（无 label → 纯分隔线；有 label → `── label ──`）。
-pub(super) fn render_divider_lines(
-    data: &TuiDivider,
-    grid: &GridSpec,
-    lead: ProcessLead,
-) -> Vec<Line<'static>> {
+pub(super) fn render_divider_lines(data: &TuiDivider, grid: &GridSpec) -> Vec<Line<'static>> {
     let label = data.label.as_deref().unwrap_or("");
-    vec![divider_with_label_line(grid, label, lead)]
+    vec![divider_with_label_line(grid, label)]
 }
 
 /// §6.9 Todo 进度摘要行：`[◼][gap]{3/7 tasks · Running tests}`（过程区首行形态）。
 pub(super) fn render_todo_summary_lines(
     data: &TuiTodoSummary,
     grid: &GridSpec,
-    lead: ProcessLead,
 ) -> Vec<Line<'static>> {
     let sem = THEME_ATOM.state().read().semantic;
-    let mut spans = process_first_prefix(grid, "\u{25fc}", Style::default().fg(sem.accent), lead);
+    let mut spans = process_first_prefix(grid, "\u{25fc}", Style::default().fg(sem.accent));
     spans.push(Span::styled(
         truncate_by_width(&data.text, grid.process_content_width()),
         Style::default().fg(sem.text.muted),

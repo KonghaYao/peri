@@ -285,9 +285,9 @@ impl SlotIndex {
         }
         let (items, grid, context, frame) = self.source.as_ref()?;
         let mut cache = EntryRenderCache::default();
-        // 与常驻渲染同一 lease 判定：相邻 entry 决定过程区进入形态（§6）。
-        let lead = super::transcript::process_lead(items, slot);
-        cache.ensure(items.get(slot)?, grid, context.clone(), *frame, lead);
+        // 与常驻渲染同一转场判定：相邻 entry 决定过程区进入/退出台阶（§6）。
+        let transition = super::transcript::zone_transition(items, slot);
+        cache.ensure(items.get(slot)?, grid, context.clone(), *frame, transition);
         Some(Arc::new(match cache.markdown_lines().stable_overlay() {
             Some((start, stable)) => SlotLines::composite(Arc::clone(cache.lines()), start, stable),
             None => SlotLines::single(Arc::clone(cache.lines())),

@@ -12,7 +12,7 @@ Markdown 高亮预算在 `kit/markdown/code_block.rs`，超限保留原文，仅
 
 显式停止入口 `src/acp_client/client/requests.rs::cancel` 在当前交互 gate 内读取会话与 managed run，结清本地待处理交互后发送 `session/cancel` 通知。通知发送不等于执行已静止，loading/交互终结仍等待执行结束通知；回归见 `src/acp_client/client/cancel_test.rs`。
 
-> 速查表：把「我想做什么」映射到文件。细节以代码为准。更新：2026-10-14（消息区过程区缩进与进入分叉：文本区基准列不动，非文本 entry 在 ≥60 列右移 2 格、首个进入 entry 画 `├──`，右缘与面板形态不变）。更新：2026-09-30（Session ID/environment：删除 dirty 恢复风险弹窗、RecoverDirty 和 reset 交互；保留 load reservation、只读准入投影与普通确认）。
+> 速查表：把「我想做什么」映射到文件。细节以代码为准。更新：2026-10-14（消息区过程区缩进与转场台阶：文本区基准列不动，非文本 entry 在 ≥60 列右移 2 格、左缘标记落 col3、文本区↔过程区转场由首个 entry 画 1 行台阶 ` ╰─╮` / ` ╭─╯`，右缘与面板形态不变）。更新：2026-09-30（Session ID/environment：删除 dirty 恢复风险弹窗、RecoverDirty 和 reset 交互；保留 load reservation、只读准入投影与普通确认）。
 > 依据：peri-tui/CLAUDE.md、docs/standards/architecture-contracts.md、docs/design/tui-acp-data-flow.md、源码
 
 ## 架构速览
@@ -109,7 +109,7 @@ core `ConfigSource::save(expected_revision, &PeriConfig)` 返回 accepted snapsh
 | --- | --- | --- |
 | MessageArea（消息流 + footer + keepgoing 按钮） | `message_area/mod.rs`（MessageArea :92） | 消息流渲染主组件；滚动/点击/选区事件注册；footer 行与 keepgoing 按钮命中 |
 | footer/spinner 行 | `message_area/footer.rs` | `build_footer_lines`（:100）：loading spinner / summary / todo 行 + `KeepGoingLayout`（:85）；防抖期按钮禁用样式 |
-| GridSpec 网格 | `message_area/grid.rs`（`grid_for` :88 / `line_width` :173）+ `layout.rs`（`center_band_area` :22 / `CenterBandHook` :42） | 断点（`Breakpoint` :32）、文本区基准列与过程区缩进（`indent`：≥60 列 +2；`ProcessLead` 进入分叉；`process_prefix_width` / `process_content_width`）及行首/续行前缀宽度；全部行渲染的对齐基准。过程区右缘（`line_width`）与整带居中不变。content 触顶后整条带按 `left_pad` 居中（`band_width` = 前缀 + content + metadata gutter + 滚动条列 = 117），MessageArea / InputArea / StatusBar / BgTaskArea 都经 hook 把 `drawer.area` 收进该带，左右边缘互相对齐。例外：滚动条是窗口级 chrome（`props.rs::ScrollbarHook` :52），必须在 band hook **之前**注册以捕获收窄前的整幅矩形，渲染与命中测试（`scroll/event.rs`）共用它，锚在终端最右列 |
+| GridSpec 网格 | `message_area/grid.rs`（`grid_for` :88 / `line_width` :173）+ `layout.rs`（`center_band_area` :22 / `CenterBandHook` :42） | 断点（`Breakpoint` :32）、文本区基准列与过程区缩进（`indent`：≥60 列 +2；`ZoneTransition` 转场台阶；`process_marker_col` / `process_prefix_width` / `process_content_width`）及行首/续行前缀宽度；全部行渲染的对齐基准。过程区右缘（`line_width`）与整带居中不变。content 触顶后整条带按 `left_pad` 居中（`band_width` = 前缀 + content + metadata gutter + 滚动条列 = 117），MessageArea / InputArea / StatusBar / BgTaskArea 都经 hook 把 `drawer.area` 收进该带，左右边缘互相对齐。例外：滚动条是窗口级 chrome（`props.rs::ScrollbarHook` :52），必须在 band hook **之前**注册以捕获收窄前的整幅矩形，渲染与命中测试（`scroll/event.rs`）共用它，锚在终端最右列 |
 | scroll 滚动引擎 | `message_area/scroll.rs` + `scroll/{event,gesture,auto_follow}.rs` | `handle_event`；滚轮节流、拖拽选中、键盘滚动、吸底跟随；文本手势持有 Drag/Up pointer capture，拖出消息带或进入滚动条列仍收尾，越界终点夹到视口，Up 不受节流并更新复制终点；回归见 `scroll/gesture_test.rs` |
 | 滚动条外观 | `scrollbar_chrome.rs` + `message_area/props.rs` + `panels/subagent_detail.rs` | `draw_scrollbar` 统一主体与 subagent 详情的留白滑块、上下箭头和主题色；各视图提供自身的内容高度、偏移及右侧绘制区域 |
 | 语义选区 | `message_area/selection.rs` | 拖拽选区与语义复制（`map_slice_to_semantic` :469，复制时剥视觉前缀） |
@@ -119,8 +119,8 @@ core `ConfigSource::save(expected_revision, &PeriConfig)` 返回 accepted snapsh
 | Assistant VM 共享 payload | `src/kit/tui_render_unit/{unit.rs,bubble.rs,shared_bubble_test.rs}` + `src/kit/acp_types/current_turn/{projection.rs,projection_test.rs}` | assistant 气泡通过 Arc 进入 im 快照，节点 COW 不深拷贝正文/推理；变更 fold/终态时显式复制，旧快照保持不可变。计量区分 source→VM 文本物化与气泡 Clone 的正文/推理字节；非 allocator/RSS 指标 |
 | Markdown 缓存生命周期 | `src/kit/markdown/{mod.rs,cache_lifecycle_test.rs,code_block.rs,code_block_test.rs}` | terminal full parse 释放流式原文 buffer；高亮缓存共享 Arc，按 32 条 / 4 MiB 高亮 payload 预算淘汰，超预算单项不入缓存；旧增量 convert API 只编入测试，生产 ConvertState 保留 |
 | Markdown 流式边界 | `src/kit/markdown/{boundary.rs,boundary_test.rs,mod.rs}` + `src/kit/message_area/{mod.rs,vm_cache.rs}` | 单次逐行扫描跨 fence 内部空行冻结已闭合代码块；后续只解析可变尾部，stable chunks 共享 Arc；引用、列表、表格与未闭合 fence 保守保留，terminal full parse 校正；尾部图片字节范围映射回完整输入；内外层 key 包含正文前景与代码背景，变化时从 parsed blocks 重物化 |
-| Transcript 增量布局与预算 | `src/kit/message_area/{transcript.rs,transcript_index.rs,vm_cache.rs}` + `src/kit/acp_events/render.rs` | generation 连续的 publication 后缀提示驱动持久树点更新；可见动画不扫描历史；轻量行高与 Weak 行缓存分离，主区 16 MiB 派生预算，冷复制按 slot 临时恢复；过程区进入形态（`process_lead`）按相邻 entry 起止 zone 判定，lead 翻转只重渲染对应 slot |
-| 共享 entry 缓存与内存计量 | `src/kit/entry_render_cache.rs` + `src/kit/markdown/{memory.rs,memory_test.rs}` | 真实主消息/详情共享内容、布局（含过程区 lead 翻转）、主题、语言、occurrence 与 surface 失效；retained_bytes 递归容量计量、同 cache Arc 去重，非 RSS 指标 |
+| Transcript 增量布局与预算 | `src/kit/message_area/{transcript.rs,transcript_index.rs,vm_cache.rs}` + `src/kit/acp_events/render.rs` | generation 连续的 publication 后缀提示驱动持久树点更新；可见动画不扫描历史；轻量行高与 Weak 行缓存分离，主区 16 MiB 派生预算，冷复制按 slot 临时恢复；过程区转场形态（`zone_transition`）按相邻 entry 起止 zone 判定，形态翻转只重渲染对应 slot |
+| 共享 entry 缓存与内存计量 | `src/kit/entry_render_cache.rs` + `src/kit/markdown/{memory.rs,memory_test.rs}` | 真实主消息/详情共享内容、布局（含过程区转场形态翻转）、主题、语言、occurrence 与 surface 失效；retained_bytes 递归容量计量、同 cache Arc 去重，非 RSS 指标 |
 | Subagent 详情缓存 | `src/kit/panels/{subagent_detail.rs,subagent_detail_cache.rs,subagent_detail_cache_test.rs}` + `src/kit/panel_scroll.rs` | 自定义 viewport 绘制、完整 usize 高度、既有鼠标节流中的虚拟滚动目标；8 MiB 派生预算，不物化全历史 ScrollView buffer |
 | 后台 subagent 文本合帧 | `src/kit/{bg_task_live.rs,bg_task_live_test.rs,bg_publication_test.rs,acp_bridge.rs}` | BgStream 独占累积正文/推理并维护增量 hash；独立 50ms deadline 发布 BG_LIVE_DETAIL，不受主流 Streaming/Block/None 与主 turn 结束影响；工具/终态/接收关闭 flush，会话边界清空，同会话 replay 保留 dirty stream 并重新安排 deadline |
 | subagent 工具行 | `message_area/render/group.rs` | `render_subagent_group_lines`（:28）、`subagent_tool_line`（:93，组内工具行与组头同列：过程区续行前缀、无独立缩进、label 无 bold）、`subagent_error_reason_lines`（错误预览最多三行，× 复制完整原文） |

@@ -1,5 +1,5 @@
 use crate::i18n;
-use crate::kit::message_area::grid::{GridSpec, ProcessLead};
+use crate::kit::message_area::grid::GridSpec;
 use crate::kit::tui_render_unit::{FoldState, UserAttachment};
 use crate::truncate::{truncate_by_width, wrap_by_width};
 use fluent_bundle::FluentValue;
@@ -18,13 +18,12 @@ const USER_BODY_MAX_LINES: usize = 6;
 
 // ── 各变体渲染函数（Slice 3：统一网格 + 无气泡 + 垂直节奏）──────────────
 
-/// 系统提醒（§7：过程区 entry）——首行 `[outer][│ 或 ├][indent 填充][符号][空格]`
-/// 后接折叠标记与标题，续行 `[outer][│][indent + 2 空格]` 与首行标签同列
-/// （§4/§5）；折行预算取 `process_content_width()`（§8 右缘不动）。
+/// 系统提醒（§7：过程区 entry）——首行 `[outer 空][indent 留空][标记][gap]`
+/// 后接折叠标记与标题，续行与首行标签同列（§3/§4/§5）；折行预算取
+/// `process_content_width()`（§8 右缘不动）。
 pub(super) fn render_system_reminder_lines(
     data: &crate::kit::tui_render_unit::TuiSystemReminder,
     grid: &GridSpec,
-    lead: ProcessLead,
 ) -> Vec<Line<'static>> {
     let sem = THEME_ATOM.state().read().semantic;
     let marker = if data.legacy {
@@ -56,7 +55,7 @@ pub(super) fn render_system_reminder_lines(
     } else {
         sym().collapsed
     };
-    let mut spans = process_first_prefix(grid, symbol, Style::default().fg(sem.text.dim), lead);
+    let mut spans = process_first_prefix(grid, symbol, Style::default().fg(sem.text.dim));
     spans.push(Span::styled(
         truncate_by_width(&heading, grid.process_content_width()),
         Style::default().fg(sem.text.dim),

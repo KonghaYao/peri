@@ -1,5 +1,5 @@
 use crate::i18n;
-use crate::kit::message_area::grid::{GridSpec, ProcessLead};
+use crate::kit::message_area::grid::GridSpec;
 use crate::kit::tui_render_unit::{
     FoldState, TuiCollapsedGroup, TuiRenderUnit, TuiSubAgentGroup, TuiToolCard,
 };
@@ -23,12 +23,12 @@ pub(super) const SUBAGENT_TOOL_LINES: usize = 3;
 ///
 /// 停止递归内联铺开——嵌套消息不进入主时间轴（Enter 打开详情面板）。
 ///
-/// 过程区缩进只由过程区前缀承担（进入分叉由 `lead` 决定）：组头与组内工具行、
-/// 失败原因行同列，不再叠加子工具级缩进。
+/// 过程区缩进只由过程区前缀承担：组头与组内工具行、失败原因行同列，不再叠加
+/// 子工具级缩进；文本区 → 过程区的入口台阶由 render 层在转场后的 entry 行首
+/// 插入（§6），组内渲染器不感知转场。
 pub(super) fn render_subagent_group_lines(
     data: &TuiSubAgentGroup,
     grid: &GridSpec,
-    lead: ProcessLead,
 ) -> Vec<Line<'static>> {
     // parent 终态由 canonical is_error 决定（SubagentStopped.is_error）；
     // nested child tool error 保持局部可见但不提升 block error。
@@ -45,11 +45,11 @@ pub(super) fn render_subagent_group_lines(
         .take(SUBAGENT_TOOL_LINES)
         .collect();
     let mut lines: Vec<Line<'static>> = if recent.is_empty() {
-        // 无工具时组头行即 entry 首行——消费离开文本区时的进入分叉（lead）。
-        vec![subagent_entry_line(data, grid, lead)]
+        // 无工具时组头行即 entry 首行。
+        vec![subagent_entry_line(data, grid)]
     } else {
         // 工具行结构上是过程区续行（永远不是 entry 首行，设计文档 §3）——统一走
-        // 续行前缀，组头/工具行/原因行同列；进入分叉因此不落在工具行上。
+        // 续行前缀，组头/工具行/原因行同列；入口台阶因此不落在工具行上。
         recent.iter().map(|t| subagent_tool_line(t, grid)).collect()
     };
     // 失败原因行（§6.7 failed 显示错误原因），优先级：canonical error_reason
@@ -62,14 +62,10 @@ pub(super) fn render_subagent_group_lines(
     lines
 }
 
-fn subagent_entry_line(
-    data: &TuiSubAgentGroup,
-    grid: &GridSpec,
-    lead: ProcessLead,
-) -> Line<'static> {
+fn subagent_entry_line(data: &TuiSubAgentGroup, grid: &GridSpec) -> Line<'static> {
     let sem = THEME_ATOM.state().read().semantic;
     let (symbol, color) = status_symbol_and_color(data.is_running, data.is_error, &sem);
-    let mut spans = process_first_prefix(grid, &symbol, Style::default().fg(color), lead);
+    let mut spans = process_first_prefix(grid, &symbol, Style::default().fg(color));
     let name = if data.agent_name.trim().is_empty() {
         &data.agent_id
     } else {
@@ -85,8 +81,8 @@ fn subagent_entry_line(
 }
 
 /// §6.7 单个子工具调用行（设计文档 §3 形态规格）：
-/// `[outer][│][indent + 2 空格][⠋|✓|×] {Verb}  {summary}  {duration}`——嵌套从属
-/// 弱化形态：过程区续行前缀 + 无 bold label + dim 符号，与主时间线 tool
+/// `[outer 空][indent 留空][│][gap]{⠋|✓|×} {Verb}  {summary}  {duration}`——嵌套
+/// 从属弱化形态：过程区续行前缀 + 无 bold label + dim 符号，与主时间线 tool
 /// activity row（bold primary + 状态色符号）差异化（P2）；error 符号与错误词
 /// 不弱化（P3 错误不弱化）。全部行（含首行）走过程区续行风格——工具行永远
 /// 不是独立 entry 首行，结构上即从属；缩进由过程区前缀承担（与组头同列）。
@@ -213,15 +209,15 @@ pub(super) fn subagent_error_reason(data: &TuiSubAgentGroup) -> Option<&str> {
     }
 }
 
-/// §7 折叠分组行：`[outer][│|├][indent 填充][▸][空格]{title}[ · N failed]`（title
+/// §7 折叠分组行：`[outer 空][indent 留空][▸|▾][gap]{title}[ · N failed]`（title
 /// 含隐藏数，如 `Read 3 · Glob 2`；failed 后缀仅组后相邻 error 数 >0 时渲染，D2）。
 ///
-/// 展开时组内成员按过程区接续渲染（`vm_to_lines_cached` 固定 [`ProcessLead::Inline`]）
-/// ——同区继续，不重复画进入分叉；成员与组头同列。
+/// 展开时组内成员按过程区接续渲染（`vm_to_lines_cached` 固定
+/// [`ZoneTransition::None`](crate::kit::message_area::grid::ZoneTransition::None)）
+/// ——同区继续，不重复画入口台阶；成员与组头同列。
 pub(super) fn render_collapsed_group_lines(
     data: &TuiCollapsedGroup,
     grid: &GridSpec,
-    lead: ProcessLead,
 ) -> Vec<Line<'static>> {
     let sem = THEME_ATOM.state().read().semantic;
     let expanded = data.fold == FoldState::Expanded;
@@ -230,7 +226,7 @@ pub(super) fn render_collapsed_group_lines(
     } else {
         sym().collapsed
     };
-    let mut spans = process_first_prefix(grid, symbol, Style::default().fg(sem.text.dim), lead);
+    let mut spans = process_first_prefix(grid, symbol, Style::default().fg(sem.text.dim));
     // 先截 title 使 (title + failed 后缀) 总宽 ≤ 过程区预算——失败数不可被截断吞掉
     // （§15「error 永不隐藏」），title 截断在前。
     let suffix = if data.failed_count > 0 {

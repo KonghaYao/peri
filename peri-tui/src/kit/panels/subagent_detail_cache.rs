@@ -15,7 +15,7 @@ use ratatui_kit::ratatui::{
 use crate::kit::entry_render_cache::{
     EntryInvalidation, EntryRenderCache, EntryRenderContext, EntrySurface,
 };
-use crate::kit::message_area::grid::{GridSpec, ProcessLead};
+use crate::kit::message_area::grid::{GridSpec, ZoneTransition};
 use crate::kit::message_area::selection::WrappedLineInfo;
 use crate::kit::tui_render_unit::{FoldKey, FoldState, TuiRenderUnit, TuiSubAgentGroup};
 
@@ -68,10 +68,10 @@ impl DetailSlot {
         context: EntryRenderContext,
         frame: u64,
     ) {
-        // 面板沿用基准列（`indent = 0`），无过程区进入分叉形态。
+        // 面板沿用基准列（`indent = 0`），无过程区转场台阶形态。
         let invalidation = self
             .entry
-            .ensure(vm, grid, context, frame, ProcessLead::Inline);
+            .ensure(vm, grid, context, frame, ZoneTransition::None);
         if !self.resident
             || matches!(
                 invalidation,

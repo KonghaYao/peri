@@ -1,5 +1,5 @@
 use crate::i18n;
-use crate::kit::message_area::grid::{GridSpec, ProcessLead};
+use crate::kit::message_area::grid::GridSpec;
 use crate::kit::tui_render_unit::{FoldState, TuiAskUserBlock};
 use crate::truncate::truncate_by_width;
 use peri_theme::atoms::THEME_ATOM;
@@ -20,13 +20,12 @@ use super::helpers::{process_cont_prefix, process_first_prefix, sym};
 /// 不破坏按 content_hash 分片的渲染缓存，G3）。本函数只返回静态
 /// `[label]` 行 + 布局信息 [`InteractionLayout`]（选项行的逻辑行与列区间）。
 ///
-/// 行属过程区（§7 askuser = 过程/过程）：首行符号在 fill 之后（§3），续行内容
-/// 与首行同列（§4）；`option_cols` 的逻辑列随之右移，否则点击/高亮按列命中会
-/// 落在缩进空格上。
+/// 行属过程区（§7 askuser = 过程/过程）：首行状态符号落在标记列（§3），续行
+/// 内容与首行同列（§4）；`option_cols` 的逻辑列随之右移，否则点击/高亮按列
+/// 命中会落在缩进空格上。
 pub(super) fn render_ask_user_block_lines(
     data: &TuiAskUserBlock,
     grid: &GridSpec,
-    lead: ProcessLead,
 ) -> (Vec<Line<'static>>, Option<InteractionLayout>) {
     let sem = THEME_ATOM.state().read().semantic;
     let content = grid.process_content_width();
@@ -43,12 +42,8 @@ pub(super) fn render_ask_user_block_lines(
             }
         };
         lines.push(Line::from({
-            let mut spans = process_first_prefix(
-                grid,
-                sym().warning,
-                Style::default().fg(sem.status.warning),
-                lead,
-            );
+            let mut spans =
+                process_first_prefix(grid, sym().warning, Style::default().fg(sem.status.warning));
             spans.push(Span::styled(
                 title,
                 Style::default()
@@ -136,7 +131,7 @@ pub(super) fn render_ask_user_block_lines(
         i18n::tr("render-user-answered")
     };
     lines.push(Line::from({
-        let mut spans = process_first_prefix(grid, symbol, Style::default().fg(color), lead);
+        let mut spans = process_first_prefix(grid, symbol, Style::default().fg(color));
         spans.push(Span::styled(
             truncate_by_width(&title, content),
             Style::default().fg(color).add_modifier(Modifier::BOLD),

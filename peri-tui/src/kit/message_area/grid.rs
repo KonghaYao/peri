@@ -11,7 +11,8 @@
 //! - `accent`：固定 1 cell，块首行放类型/状态符号，续行放 dim 竖线。
 //! - `gap`：默认 2 cells；Compact/Narrow 缩为 1（§11）。
 //! - `content`：文本区基准列（user/AI 正文共享左起点）；过程区在其上再右移
-//!   `indent` 格并画进入分叉（§1/§3）——最大可读宽度 100 cells。
+//!   `indent` 格——左缘标记列随之为 `outer + indent`（col1 的文本竖线不再
+//!   贯穿，转场处由台阶 `╰─╮` / `╭─╯` 连接，§1/§3/§6）——最大可读宽度 100 cells。
 //! - `gutter`：metadata（duration / 计数）右对齐列，最多 12 cells。
 //! - `scroll`：最右 1 cell 留给滚动条 thumb（文本不进该列）。
 //! - 断点（§11）：Wide ≥ 100 / Standard 60–99 / Compact 40–59 / Narrow < 40。
@@ -40,13 +41,17 @@ pub enum Breakpoint {
     Narrow,
 }
 
-/// 过程区进入形态（规格 §6）——由 transcript 按相邻 entry 的起止 zone 判定。
+/// 过程区转场形态（规格 §6）——由 transcript 按相邻 entry 的起止 zone 判定，
+/// 由转场后的首个 entry 承担（后向依赖：只看前一个「产出行 entry」的终点；
+/// 追加新 entry 不回溯翻转已渲染 slot 的形态）。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum ProcessLead {
-    /// 进入分叉：entry 起点为过程区，且前一个「产出行 entry」的终点为文本区。
-    Branch,
-    /// 区内接续（含时间轴首个 entry）：不画分叉。
-    Inline,
+pub enum ZoneTransition {
+    /// 无转场：同区接续 / 时间轴首个 entry / 转场后 entry 渲染 0 行。
+    None,
+    /// 文本区 → 过程区：entry 入口画进入台阶 ` ╰─╮`（col1 `╰` / col2 `─` / col3 `╮`）。
+    EnterProcess,
+    /// 过程区 → 文本区：entry 入口画退出台阶 ` ╭─╯`（镜像）。
+    ExitProcess,
 }
 
 /// 网格规格——渲染层所有行渲染器统一消费。
@@ -59,7 +64,9 @@ pub struct GridSpec {
     /// accent 与 content 之间的 gap（Wide/Standard=2，Compact/Narrow=1）。
     pub gap: u16,
     /// 过程区相对基准列的右移量（Wide/Standard=2，Compact/Narrow=0）——
-    /// 右移量占用 content 列宽，右缘不变（§8）。
+    /// 右移量占用 content 列宽，右缘不变（§8）；同时决定过程区左缘标记列
+    /// （[`Self::process_marker_col`]：`outer + indent`）与转场台阶形态
+    /// （§6，`> 0` 才画）；`== 0` 时过程区前缀回退基准形态（§9）。
     pub indent: u16,
     /// content 列宽（文本区基准列；≤ 100）。
     pub content: u16,
@@ -153,17 +160,21 @@ impl GridSpec {
         self.content.saturating_sub(self.indent).max(1) as usize
     }
 
-    /// 过程区前缀总宽度，即过程区正文起点列（§3/§5）——`indent > 0` 时 =
-    /// `indent + 4`（outer 1 + 竖线/分叉 1 + `indent` 填充 + 符号 1 + 空格 1）；
-    /// `indent == 0`（Compact/Narrow）前缀回退基准形态（§9），取
-    /// [`Self::first_prefix_width`]。分叉行与区内行等宽，wrap map、可视高度与
-    /// 列映射不因是否分叉变化（§5）。
+    /// 过程区左缘标记列（0 起）——进入/退出台阶的接点，首行状态符号与续行
+    /// 竖线的落点：accent 标记列右移 `indent` 格（col1 的文本竖线投影位让给
+    /// 台阶在转场处接管）。`indent == 0`（Compact/Narrow）标记留在 accent 列，
+    /// 与 [`Self::first_prefix`] 回退形态逐列一致（§9）。
+    pub fn process_marker_col(&self) -> u16 {
+        self.outer + self.indent
+    }
+
+    /// 过程区前缀总宽度，即过程区正文起点列（§3）——`outer + indent 留空 +
+    /// 标记 1 格 + gap`，`indent == 2` 时 = 6（旧形态 `indent + 4` 同值，
+    /// 正文列不因本次形态调整移动）；`indent == 0`（Compact/Narrow）取
+    /// [`Self::first_prefix_width`]（§9）。台阶行（入口 `╰─╮` / 退出 `╭─╯`，
+    /// 宽 4）不含内容，wrap map、可视高度与列映射不因台阶是否出现变化。
     pub fn process_prefix_width(&self) -> usize {
-        if self.indent == 0 {
-            self.first_prefix_width()
-        } else {
-            (self.indent + 4) as usize
-        }
+        (self.process_marker_col() + self.accent + self.gap) as usize
     }
 
     /// 单行最大宽度 = band_width - 1（最右 1 列留给滚动条 thumb）。

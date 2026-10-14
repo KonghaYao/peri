@@ -48,25 +48,29 @@ fn test_subagent_running_shows_recent_tool_lines() {
         texts[0]
     );
 
-    // 首列结构：`[outer 空][│][indent + 2 空格]`（过程区续行前缀，§4）——工具行
+    // 首列结构：`[outer 空][indent 留空][│][gap]`（过程区续行前缀，§4）——工具行
     // 永远不是独立 entry 首行（不再用 first_prefix）；组头与组内工具行同列
     // （§5 组内缩进合并为总 `indent`），正文起点 = 过程区前缀宽（col6）
     let sem = THEME_ATOM.state().read().semantic;
     let s = &lines[0].spans;
     assert_eq!(s[0].content, " ", "outer 空列");
-    assert_eq!(s[1].content, "\u{2502}", "续行竖线");
-    assert_eq!(s[2].content, "    ", "indent + 2 空格（80 列 = 4）");
     assert_eq!(
-        s[..3].iter().map(|sp| sp.content.width()).sum::<usize>(),
+        s[1].content, "  ",
+        "indent 格留空（col1 竖线位让给转场台阶）"
+    );
+    assert_eq!(s[2].content, "\u{2502}", "续行标记竖线");
+    assert_eq!(s[3].content, "  ", "gap 分隔");
+    assert_eq!(
+        s[..4].iter().map(|sp| sp.content.width()).sum::<usize>(),
         grid.process_prefix_width(),
         "工具行正文起点 = 过程区前缀宽"
     );
     // 符号 span（符号 + 分隔空格）dim 色（P2 低显著，对照主时间线 status.running）
     assert_eq!(
-        s[3].style.fg,
+        s[4].style.fg,
         Some(sem.text.dim),
         "running 符号 fg = text.dim，实际 {:?}",
-        s[3].style
+        s[4].style
     );
     // Verb span 无 BOLD（P2 权重弱化——bold 是主时间线工具的专属锚点）
     let verb = lines[0]
@@ -224,9 +228,9 @@ fn test_subagent_running_with_failed_tool_shows_reason() {
         "错误词 bold，实际 {:?}",
         failed_span.style
     );
-    // 原因行与工具行同列对齐（`[outer 空][│][gap][2 格缩进]` 前缀）
+    // 原因行与工具行同列对齐（`[outer 空][indent 留空][│][gap]` 前缀）
     assert!(
-        texts[2].starts_with(" \u{2502}    "),
+        texts[2].starts_with("   \u{2502}  "),
         "原因行缩进与工具行对齐，实际 {:?}",
         texts[2]
     );
@@ -291,12 +295,12 @@ fn test_subagent_failed_reason_line_and_completed() {
             .contains("loop failed: llm error"),
         "原因行优先 canonical reason，实际 {text:?}"
     );
-    // 原因行（非 running 分支同样走 cont_prefix + 2 格缩进，与工具行同列）
+    // 原因行（非 running 分支同样走 process_cont_prefix，与工具行同列）
     assert!(
         text.lines()
             .nth(1)
             .unwrap_or("")
-            .starts_with(" \u{2502}    "),
+            .starts_with("   \u{2502}  "),
         "failed 原因行缩进对齐，实际 {text:?}"
     );
 
@@ -491,7 +495,8 @@ fn test_collapsed_group_line_with_failed_count() {
     );
 }
 
-/// Divider：无 label 纯分隔线填满过程区正文列；有 label 显示 `── label ──`。
+/// Divider：turn 边界属文本区装饰（§7）——基线形态 `[outer][─][gap]` +
+/// `── label ──…` 填满 content 列；不参与过程区缩进与转场台阶（§6）。
 #[test]
 fn test_divider_lines() {
     let grid = GridSpec::grid_for(80);
@@ -503,9 +508,12 @@ fn test_divider_lines() {
         &grid,
     );
     let text = line_text(&plain[0]);
-    // 过程区首行前缀（§3）：`[outer][│][indent 填充][─][空格]`——分隔线本体在前缀之后。
-    assert!(text.starts_with(" \u{2502}  \u{2500} "), "实际 {text:?}");
-    let body: String = text.chars().skip(grid.process_prefix_width()).collect();
+    // 文本区基准前缀（§3.1）：`[outer 空][accent ─][gap]`——分隔线本体在前缀之后。
+    assert!(
+        text.starts_with(" \u{2500}  \u{2500}\u{2500}"),
+        "实际 {text:?}"
+    );
+    let body: String = text.chars().skip(grid.first_prefix_width()).collect();
     assert!(body.contains("\u{2500}"), "divider 线");
     assert!(
         body.chars().all(|c| c == '\u{2500}'),
@@ -513,8 +521,8 @@ fn test_divider_lines() {
     );
     assert_eq!(
         plain[0].width(),
-        grid.process_prefix_width() + grid.process_content_width(),
-        "分隔线铺满过程区正文列（右缘与文本区行一致）"
+        grid.first_prefix_width() + grid.content_width(),
+        "分隔线铺满文本区正文列"
     );
 
     let labeled = vm_to_lines(

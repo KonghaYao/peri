@@ -53,11 +53,13 @@ active issue。
 - 非模态 Inspector 打开时 composer 保持可见；Modal 打开时背景完全 inert；
 - transcript 延续 `GridSpec`、语义 theme token 与响应式断点；组件不得硬编码颜色；
 - 文本区（user 气泡与 assistant 正文）保持基准列；工具卡片、系统注记/提醒、提问块、
-  Todo 摘要、分隔线、折叠组与气泡内 reasoning 等过程区 entry 在 Wide/Standard（≥60 列）
+  Todo 摘要、折叠组与气泡内 reasoning 等过程区 entry 在 Wide/Standard（≥60 列）
   整体右移 2 格，其正文可用宽度相应收窄 2 格，右缘（duration 等 metadata 对齐列）
-  和整带居中不变；
-- 过程区仅在从文本区进入时由首个 entry 首行画 `├──` 分叉；退出不画符号，主竖线 `│`
-  贯穿不换列；Compact/Narrow（<60 列）保持无缩进、无分叉；
+  和整带居中不变；turn 边界分隔线属文本区（`── label ──` 基准形态），不参与缩进；
+- 过程区由**转场台阶**接回文本区：进入 ` ╰─╮`、退出 ` ╭─╯`（各 1 行、宽 4，col1 `╰`/`╭`
+  接上方文本竖线，col3 `╮`/`╯` 接过程区左缘标记列），台阶由转场后的首个 entry 在行首插入；
+  过程区左缘标记（工具行 icon、其余行 `│`）落 col3、正文 col6；Compact/Narrow（<60 列）
+  保持无缩进、无台阶，逐列与改动前一致；
 - 子 Agent 组内工具行与组头同列；
 - expanded preview 的视觉行数有界，超出时明确显示 `Open details` 与完整性状态。
 

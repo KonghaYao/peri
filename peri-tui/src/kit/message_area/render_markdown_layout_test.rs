@@ -401,7 +401,7 @@ fn test_nested_list_items_stay_compact_between_top_level_items() {
         &mut md_cache,
         Some(&mut layout),
         false,
-        ProcessLead::Inline,
+        ZoneTransition::None,
     );
 
     let index_of = |needle: &str| {
@@ -458,7 +458,7 @@ fn test_assistant_bubble_resize_rebuilds_stable_chunks_without_panic() {
             &mut md_cache,
             Some(&mut layout),
             false,
-            ProcessLead::Inline,
+            ZoneTransition::None,
         );
 
         let (_, stable) = layout
@@ -503,7 +503,7 @@ fn test_streaming_table_without_leading_pipe_stays_visible() {
         &mut md_cache,
         Some(&mut layout),
         false,
-        ProcessLead::Inline,
+        ZoneTransition::None,
     );
 
     let stable_text: String = layout

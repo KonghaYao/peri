@@ -164,7 +164,7 @@ fn test_empty_assistant_bubble_returns_zero_lines() {
 // ── 网格前缀结构（§3.1）───────────────────────────────────────────────
 
 /// 前 `n` 个前缀 span 的累计宽度（正文起点列）——`n` 由该行所属区的前缀形态决定
-/// （文本区 3 段 / 过程区首行 5 段 / 过程区续行 3 段）。
+/// （文本区 3 段 / 过程区 4 段：outer / indent 留空 / 标记 / gap）。
 fn prefix_col(line: &Line<'static>, n: usize) -> usize {
     line.spans
         .iter()
@@ -173,8 +173,9 @@ fn prefix_col(line: &Line<'static>, n: usize) -> usize {
         .sum::<usize>()
 }
 
-/// 过程区首行前缀 = `[outer 空][│/├][indent 填充][符号][空格]`（§3）；
-/// 续行前缀 = `[outer 空][│][indent + 2 空格]`（§4）——符号不再占 accent 列。
+/// 过程区前缀 = `[outer 空][indent 留空][标记][gap]`（§3/§4）——首行标记为状态
+/// 符号、续行标记为 `│`，标记列同为 col1 的文本竖线位右移 `indent`（col3 0 起）；
+/// 文本竖线不再贯穿过程段，转场由台阶行连接（§6）。
 #[test]
 fn test_prefix_structure_first_and_continuation() {
     let grid = GridSpec::grid_for(80); // Standard: outer=1 accent=1 gap=2 indent=2 content=74
@@ -189,23 +190,22 @@ fn test_prefix_structure_first_and_continuation() {
     );
     assert_eq!(
         first.spans[1].content.as_ref(),
-        "\u{2502}",
-        "accent 列 = 贯通竖线（Inline 不画分叉）"
+        "  ",
+        "indent 格留空（col1 竖线位让给转场台阶）"
     );
-    assert_eq!(first.spans[2].content.as_ref(), "  ", "indent 格填充");
     assert_eq!(
-        first.spans[3].content.as_ref(),
+        first.spans[2].content.as_ref(),
         "\u{2713}",
-        "状态符号在 fill 之后（col4）"
+        "状态符号占左缘标记列（col3 0 起）"
     );
-    assert_eq!(first.spans[4].content.as_ref(), " ", "符号后的分隔空格");
+    assert_eq!(first.spans[3].content.as_ref(), "  ", "gap 分隔");
     assert_eq!(
-        prefix_col(first, 5),
+        prefix_col(first, 4),
         grid.process_prefix_width(),
-        "首行标签列 = indent + 4"
+        "首行标签列 = 过程区前缀宽（6，与旧形态同列）"
     );
 
-    // 续行前缀 = [outer 空][│][indent + 2 空格]——与首行标签同列（§5）
+    // 续行前缀 = [outer 空][indent 留空][│][gap]——与首行标签同列（§5）
     let tool = TuiRenderUnit::TuiToolCard(TuiToolCard {
         fold: FoldState::Expanded,
         output_summary: "line1\nline2".into(),
@@ -215,23 +215,28 @@ fn test_prefix_structure_first_and_continuation() {
     let cont = lines
         .iter()
         .find(|l| {
-            l.spans.len() >= 3
-                && l.spans[1].content.as_ref() == "\u{2502}"
-                && l.spans[2].content.as_ref() == "    "
+            l.spans.len() >= 4
+                && l.spans[2].content.as_ref() == "\u{2502}"
+                && l.spans[3].content.as_ref() == "  "
         })
         .expect("展开体应有续行前缀");
     assert_eq!(cont.spans[0].content.as_ref(), " ");
-    assert_eq!(cont.spans[1].content.as_ref(), "\u{2502}");
-    assert_eq!(cont.spans[2].content.as_ref(), "    ", "indent + 2 空格");
+    assert_eq!(cont.spans[1].content.as_ref(), "  ", "indent 格留空");
     assert_eq!(
-        prefix_col(cont, 3),
+        cont.spans[2].content.as_ref(),
+        "\u{2502}",
+        "续行标记 = 竖线"
+    );
+    assert_eq!(
+        prefix_col(cont, 4),
         grid.process_prefix_width(),
         "续行内容与首行标签同列"
     );
 }
 
-/// 过程区首行（分叉 / 区内）与续行前缀同宽（§5）——wrap map、可视高度与列映射
-/// 不因是否分叉变化；duration 仍右对齐到带右缘（§8，跳过最右滚动条列）。
+/// 过程区首行（标记符号）与续行（`│`）前缀同宽（§5）——wrap map、可视高度与列
+/// 映射不因标记字形变化；duration 仍右对齐到带右缘（§8，跳过最右滚动条列）。
+/// 转场台阶行（§6）独立成行、宽 4，不占过程区前缀列。
 #[test]
 fn test_process_prefix_equal_width_and_duration_flush_right() {
     let grid = GridSpec::grid_for(80);
@@ -247,29 +252,38 @@ fn test_process_prefix_equal_width_and_duration_flush_right() {
         &mut cache,
         None,
         false,
-        ProcessLead::Branch,
+        ZoneTransition::EnterProcess,
     );
-    let first = &lines[0];
-    assert_eq!(first.spans[1].content.as_ref(), "\u{251c}", "进入分叉 ├");
+    // 入口台阶：` ╰─╮`（col1 `╰` 接上方文本竖线 / col3 `╮` 接过程区标记列）
+    assert!(super::is_step_row(&lines[0]), "首行应是入口台阶");
+    assert_eq!(line_text(&lines[0]), " \u{2570}\u{2500}\u{256e}");
+    assert_eq!(lines[0].width(), 4, "台阶行宽 4（不含内容）");
+    let first = &lines[1];
+    // 展开态首行标记 = 折叠符（`▾`），落在过程区左缘标记列（0 起 col3）
     assert_eq!(
-        first.spans[2].content.as_ref(),
-        "\u{2500}\u{2500}",
-        "分叉 fill 用 ─ 连贯，宽度 = indent"
+        prefix_col(first, 2),
+        grid.process_marker_col() as usize,
+        "标记落在过程区左缘标记列"
+    );
+    assert_eq!(
+        first.spans[2].content.width(),
+        1,
+        "标记独占 1 格（首行前缀 = outer / indent 留空 / 标记 / gap 四段）"
     );
     let cont = lines
         .iter()
         .find(|l| {
             l.spans.len() >= 3
-                && l.spans[1].content.as_ref() == "\u{2502}"
-                && l.spans[2].content.as_ref() == "    "
+                && l.spans[2].content.as_ref() == "\u{2502}"
+                && l.spans[3].content.as_ref() == "  "
         })
         .expect("展开体应有续行前缀");
     assert_eq!(
-        prefix_col(first, 5),
-        prefix_col(cont, 3),
-        "分叉行与续行前缀等宽"
+        prefix_col(first, 4),
+        prefix_col(cont, 4),
+        "标记行与续行前缀等宽"
     );
-    assert_eq!(prefix_col(first, 5), grid.process_prefix_width());
+    assert_eq!(prefix_col(first, 4), grid.process_prefix_width());
     // duration 右对齐：整行铺到 line_width（右缘留滚动条列），行尾即 duration。
     assert_eq!(
         first.width(),
@@ -284,7 +298,7 @@ fn test_process_prefix_equal_width_and_duration_flush_right() {
     assert!(line_text(first).contains("Read"), "标签仍在 col6 之后");
 }
 
-/// Compact/Narrow（<60 列）过程区前缀回退基准形态（§9）：无缩进、无分叉，
+/// Compact/Narrow（<60 列）过程区前缀回退基准形态（§9）：无缩进、无台阶，
 /// 逐列与改动前一致。
 #[test]
 fn test_compact_and_narrow_process_prefix_falls_back_to_baseline() {
@@ -294,13 +308,11 @@ fn test_compact_and_narrow_process_prefix_falls_back_to_baseline() {
         let grid = GridSpec::grid_for(term);
         assert_eq!(grid.indent, 0, "term={term}: <60 列不缩进");
         let style = Style::default();
-        for lead in [ProcessLead::Branch, ProcessLead::Inline] {
-            assert_eq!(
-                process_first_prefix(&grid, "\u{2713}", style, lead),
-                first_prefix(&grid, "\u{2713}", style),
-                "term={term}: 首行前缀恒回退（符号占 accent 列，不画分叉）"
-            );
-        }
+        assert_eq!(
+            process_first_prefix(&grid, "\u{2713}", style),
+            first_prefix(&grid, "\u{2713}", style),
+            "term={term}: 首行前缀恒回退（符号占 accent 列，不缩进）"
+        );
         assert_eq!(
             process_cont_prefix(&grid, dim),
             cont_prefix(&grid, dim),
@@ -323,8 +335,8 @@ fn test_compact_and_narrow_process_prefix_falls_back_to_baseline() {
         );
         let text = line_text(first);
         assert!(
-            !text.contains('\u{251c}') && !text.contains('\u{2500}'),
-            "term={term}: 无分叉字形，实际 {text:?}"
+            !text.contains('\u{2500}') && !super::is_step_row(first),
+            "term={term}: 无台阶字形，实际 {text:?}"
         );
         assert_eq!(
             prefix_col(first, 3),
@@ -336,6 +348,27 @@ fn test_compact_and_narrow_process_prefix_falls_back_to_baseline() {
                 .iter()
                 .all(|l| l.width() <= grid.first_prefix_width() + grid.content_width()),
             "term={term}: 行宽不超基准前缀 + content 预算"
+        );
+
+        // 转场形态存在也不落台阶（§9：Compact/Narrow 无缩进即无台阶）——逐列
+        // 与改动前一致，仅前缀回退形态。
+        let mut cache = crate::kit::markdown::MarkdownRenderCache::default();
+        let (transited, ..) = super::vm_to_lines_cached_with_layout(
+            &vm,
+            &grid,
+            &mut cache,
+            None,
+            false,
+            ZoneTransition::EnterProcess,
+        );
+        assert_eq!(
+            transited.len(),
+            lines.len(),
+            "term={term}: 台阶不占行（无缩进不画台阶）"
+        );
+        assert!(
+            transited.iter().all(|l| !super::is_step_row(l)),
+            "term={term}: 回退形态不出现台阶行"
         );
     }
 }
@@ -426,9 +459,9 @@ fn test_text_zone_baseline_and_process_zone_indent_columns() {
     assert!(line_text(&user[1]).contains("你好世界"));
     assert_eq!(prefix_col(&assistant[1], 3), text_col, "assistant 正文起点");
     assert!(line_text(&assistant[1]).contains("hello"));
-    // 工具卡首行：过程区前缀 5 段（outer / 竖线 / fill / 符号 / 空格）→ col6
-    assert_eq!(prefix_col(&tool[0], 5), process_col, "tool 首行标签起点");
-    assert!(tool[0].spans[5].content.contains("Read"));
+    // 工具卡首行：过程区前缀 4 段（outer / indent 留空 / 标记 / gap）→ col6
+    assert_eq!(prefix_col(&tool[0], 4), process_col, "tool 首行标签起点");
+    assert!(tool[0].spans[4].content.contains("Read"));
 }
 
 // ── 垂直节奏（§3.2）────────────────────────────────────────────────────
@@ -546,8 +579,8 @@ fn test_empty_user_bubble_renders_zero_lines() {
 
 // ── 系统提醒：过程区（§7）──────────────────────────────────────────────
 
-/// 系统提醒属过程区 entry（§7）：进入分叉落在首行、标题列与续行内容同列（§3/§5）；
-/// <60 列回退基准形态（§9）——提醒行不留在文本基准列。
+/// 系统提醒属过程区 entry（§7）：入口台阶独立成行、标题列与续行内容同列
+/// （§3/§5）；<60 列回退基准形态（§9）——提醒行不留在文本基准列。
 #[test]
 fn test_system_reminder_renders_in_process_zone() {
     crate::i18n::init(Some("en"));
@@ -564,17 +597,18 @@ fn test_system_reminder_renders_in_process_zone() {
         &mut cache,
         None,
         false,
-        ProcessLead::Branch,
+        ZoneTransition::EnterProcess,
     );
-    let first = &lines[0];
-    assert_eq!(first.spans[1].content.as_ref(), "\u{251c}", "进入分叉 ├");
+    assert!(super::is_step_row(&lines[0]), "首行应是入口台阶");
+    assert_eq!(line_text(&lines[0]), " \u{2570}\u{2500}\u{256e}");
+    let first = &lines[1];
     assert_eq!(
         first.spans[2].content.as_ref(),
-        "\u{2500}\u{2500}",
-        "分叉 fill 宽度 = indent"
+        super::helpers::sym().expanded,
+        "折叠标记占左缘标记列"
     );
     assert_eq!(
-        prefix_col(first, 5),
+        prefix_col(first, 4),
         grid.process_prefix_width(),
         "标题列 = 过程区前缀宽"
     );
@@ -582,15 +616,15 @@ fn test_system_reminder_renders_in_process_zone() {
         .iter()
         .find(|line| line_text(line).contains("first line"))
         .expect("展开提醒应显示正文");
-    assert_eq!(body.spans[1].content.as_ref(), "\u{2502}", "续行竖线");
-    assert_eq!(body.spans[2].content.as_ref(), "    ", "indent + 2 空格");
+    assert_eq!(body.spans[2].content.as_ref(), "\u{2502}", "续行竖线");
+    assert_eq!(body.spans[1].content.as_ref(), "  ", "indent 格留空");
     assert_eq!(
-        prefix_col(body, 3),
+        prefix_col(body, 4),
         grid.process_prefix_width(),
         "正文与标题同列"
     );
 
-    // <60 列：前缀回退基准形态（符号回 accent 列、无分叉）——逐列与改动前一致
+    // <60 列：前缀回退基准形态（符号回 accent 列、无台阶）——逐列与改动前一致
     let narrow = GridSpec::grid_for(59);
     let mut cache = crate::kit::markdown::MarkdownRenderCache::default();
     let (lines, ..) = super::vm_to_lines_cached_with_layout(
@@ -599,9 +633,13 @@ fn test_system_reminder_renders_in_process_zone() {
         &mut cache,
         None,
         false,
-        ProcessLead::Branch,
+        ZoneTransition::EnterProcess,
     );
     let first = &lines[0];
+    assert!(
+        !super::is_step_row(first),
+        "回退形态不插台阶（无缩进即无台阶）"
+    );
     assert_eq!(first.spans[0].content.as_ref(), " ", "outer 空列");
     assert_eq!(
         first.spans[1].content.as_ref(),
@@ -614,7 +652,7 @@ fn test_system_reminder_renders_in_process_zone() {
         "正文回基准列"
     );
     let text = line_text(first);
-    assert!(!text.contains('\u{251c}'), "无分叉字形，实际 {text:?}");
+    assert!(!text.contains('\u{2500}'), "无台阶字形，实际 {text:?}");
 }
 
 // ── 正文裁剪与右缘元数据（gutter 不入正文预算）──────────────────────────

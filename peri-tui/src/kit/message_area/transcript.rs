@@ -1,7 +1,7 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Arc;
 
-use super::grid::{GridSpec, ProcessLead};
+use super::grid::{GridSpec, ZoneTransition};
 use super::selection::{SlotIndex, SlotLines};
 use super::vm_cache::VmCacheSlot;
 use crate::kit::atoms::{TranscriptPublication, ViewModelsSnapshot};
@@ -13,7 +13,7 @@ const HEAVY_CACHE_BUDGET: usize = 16 * 1024 * 1024;
 /// entry 在时间轴上的起止列区间（§7）：文本区 = 基准列，过程区 = 右移 `indent`。
 ///
 /// 相邻判定只看「本 entry 起点 zone」与「前一个产出行 entry 的终点 zone」——
-/// 从文本区进入过程区画分叉，区内接续不画符。
+/// 文本区进入过程区画进入台阶、过程区回到文本区画退出台阶，同区接续不画符。
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum EntryZone {
     Text,
@@ -21,23 +21,25 @@ enum EntryZone {
 }
 
 /// entry 起点 zone（§7）：AssistantBubble 有 reasoning 时 reasoning 先行 → 过程区，
-/// 否则与正文同为文本区；其余变体（工具卡片 / 子 Agent 组 / 折叠组 / 系统 / 交互 /
-/// 分隔线 / Todo）整体属过程区。
+/// 否则与正文同为文本区；UserBubble 与 turn 边界 Divider 属文本区；其余变体
+/// （工具卡片 / 子 Agent 组 / 折叠组 / 系统 / 交互 / Todo）整体属过程区。
 fn start_zone(vm: &TuiRenderUnit) -> EntryZone {
     match vm {
         TuiRenderUnit::TuiAssistantBubble(data) if data.reasoning.is_some() => EntryZone::Process,
-        TuiRenderUnit::TuiAssistantBubble(_) | TuiRenderUnit::TuiUserBubble(_) => EntryZone::Text,
+        TuiRenderUnit::TuiAssistantBubble(_)
+        | TuiRenderUnit::TuiUserBubble(_)
+        | TuiRenderUnit::TuiDivider(_) => EntryZone::Text,
         _ => EntryZone::Process,
     }
 }
 
 /// entry 终点 zone（§7）：AssistantBubble 正文非空 → 文本区，否则等于起点
-/// （纯 reasoning 块整块留在过程区）。
+/// （纯 reasoning 块整块留在过程区）；Divider 属文本区。
 fn end_zone(vm: &TuiRenderUnit) -> EntryZone {
     match vm {
         TuiRenderUnit::TuiAssistantBubble(data) if !data.text.is_empty() => EntryZone::Text,
         TuiRenderUnit::TuiAssistantBubble(_) => start_zone(vm),
-        TuiRenderUnit::TuiUserBubble(_) => EntryZone::Text,
+        TuiRenderUnit::TuiUserBubble(_) | TuiRenderUnit::TuiDivider(_) => EntryZone::Text,
         _ => EntryZone::Process,
     }
 }
@@ -56,29 +58,34 @@ fn produces_lines(vm: &TuiRenderUnit) -> bool {
     }
 }
 
-/// 计算 slot 的过程区进入形态（§6）：entry 起点为过程区、且前一个「产出行 entry」
-/// 终点为文本区 → [`ProcessLead::Branch`]；首个 entry 恒 [`ProcessLead::Inline`]
-/// （避免悬空分叉）。区间首 slot 也读 `items[slot - 1]`——相邻关系不因重建区间而变。
+/// 计算 slot 的过程区转场形态（§6）：由「本 entry 起点 zone」与「前一个产出行
+/// entry 终点 zone」的差异决定——文本区 → 过程区 = [`ZoneTransition::EnterProcess`]
+/// （入口画 ` ╰─╮`），过程区 → 文本区 = [`ZoneTransition::ExitProcess`]（入口画
+/// ` ╭─╯`），同区接续或时间轴首个 entry = [`ZoneTransition::None`]。
+///
+/// [Why] 转场由「转场后的首个 entry」承担：判定只依赖前驱（后向依赖），追加新
+/// entry 只需渲染自身，不回溯翻转任何已渲染 slot；`AssistantBubble` 内部
+/// reasoning → 正文的转场由该 entry 渲染时自画（entry 内部事务，无跨 slot 依赖）。
+/// 区间首 slot 也读 `items[slot - 1]`——相邻关系不因重建区间而变。
 ///
 /// transcript_index 的按需物化同用此判定，保证按需重渲染与常驻渲染同列。
-pub(super) fn process_lead(items: &im::Vector<TuiRenderUnit>, slot: usize) -> ProcessLead {
+pub(super) fn zone_transition(items: &im::Vector<TuiRenderUnit>, slot: usize) -> ZoneTransition {
     let Some(vm) = items.get(slot) else {
-        return ProcessLead::Inline;
+        return ZoneTransition::None;
     };
-    if start_zone(vm) != EntryZone::Process {
-        return ProcessLead::Inline;
-    }
+    let start = start_zone(vm);
     for index in (0..slot).rev() {
         let previous = &items[index];
         if !produces_lines(previous) {
             continue;
         }
-        return match end_zone(previous) {
-            EntryZone::Text => ProcessLead::Branch,
-            EntryZone::Process => ProcessLead::Inline,
+        return match (end_zone(previous), start) {
+            (EntryZone::Text, EntryZone::Process) => ZoneTransition::EnterProcess,
+            (EntryZone::Process, EntryZone::Text) => ZoneTransition::ExitProcess,
+            _ => ZoneTransition::None,
         };
     }
-    ProcessLead::Inline
+    ZoneTransition::None
 }
 
 #[derive(Default)]
@@ -193,17 +200,18 @@ impl Transcript {
                 if matches!(vm, TuiRenderUnit::TuiAskUserBlock(block) if block.pending) {
                     self.anchors.insert(slot);
                 }
-                // lead 翻转（相邻 entry 的 zone 变化）必须重渲染该 slot（不影响其他
-                // slot）；已淘汰的 slot 没有行可改，等回到视口时按当时的 lead 渲染。
-                let lead = process_lead(&snapshot.items, slot);
-                let lead_flipped =
-                    caches[slot].lines.is_some() && caches[slot].entry.lead() != Some(lead);
+                // 转场翻转（相邻 entry 的 zone 变化）必须重渲染该 slot（不影响
+                // 其他 slot）；已淘汰的 slot 没有行可改，等回到视口时按当时的
+                // 转场形态渲染。
+                let transition = zone_transition(&snapshot.items, slot);
+                let transition_flipped = caches[slot].lines.is_some()
+                    && caches[slot].entry.transition() != Some(transition);
                 if global
                     || slot >= previous_length
                     || !caches[slot].matches_content(vm)
-                    || lead_flipped
+                    || transition_flipped
                 {
-                    self.ensure_slot(slot, vm, caches, grid, width, &context, frame, lead);
+                    self.ensure_slot(slot, vm, caches, grid, width, &context, frame, transition);
                     self.enforce_budget(caches, &pinned);
                 }
             }
@@ -220,7 +228,7 @@ impl Transcript {
             .map(|(&slot, _)| slot)
             .collect();
         for slot in animated {
-            let lead = process_lead(&snapshot.items, slot);
+            let transition = zone_transition(&snapshot.items, slot);
             self.ensure_slot(
                 slot,
                 &snapshot.items[slot],
@@ -229,12 +237,12 @@ impl Transcript {
                 width,
                 &context,
                 frame,
-                lead,
+                transition,
             );
         }
         for slot in viewport.clone() {
             if caches[slot].lines.is_none() {
-                let lead = process_lead(&snapshot.items, slot);
+                let transition = zone_transition(&snapshot.items, slot);
                 self.ensure_slot(
                     slot,
                     &snapshot.items[slot],
@@ -243,7 +251,7 @@ impl Transcript {
                     width,
                     &context,
                     frame,
-                    lead,
+                    transition,
                 );
             }
             self.touch(slot);
@@ -268,11 +276,13 @@ impl Transcript {
         width: u16,
         context: &EntryRenderContext,
         frame: u64,
-        lead: ProcessLead,
+        transition: ZoneTransition,
     ) {
         let cache = &mut caches[slot];
         drop(cache.lines.take());
-        let invalidation = cache.entry.ensure(vm, &grid, context.clone(), frame, lead);
+        let invalidation = cache
+            .entry
+            .ensure(vm, &grid, context.clone(), frame, transition);
         let layout_changed = matches!(
             invalidation,
             EntryInvalidation::Content | EntryInvalidation::Layout
@@ -374,7 +384,7 @@ impl Transcript {
         let context = self.context.clone().unwrap();
         for slot in viewport.clone() {
             if caches[slot].lines.is_none() {
-                let lead = process_lead(&snapshot.items, slot);
+                let transition = zone_transition(&snapshot.items, slot);
                 self.ensure_slot(
                     slot,
                     &snapshot.items[slot],
@@ -383,7 +393,7 @@ impl Transcript {
                     self.width,
                     &context,
                     self.frame.unwrap(),
-                    lead,
+                    transition,
                 );
             }
             self.touch(slot);

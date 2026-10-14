@@ -9,7 +9,7 @@ use std::sync::Arc;
 use crate::i18n;
 #[cfg(test)]
 use crate::kit::message_area::grid::Breakpoint;
-use crate::kit::message_area::grid::{GridSpec, ProcessLead};
+use crate::kit::message_area::grid::{GridSpec, ZoneTransition};
 use crate::kit::tui_render_unit::TuiRenderUnit;
 use peri_theme::atoms::THEME_ATOM;
 use ratatui_kit::prelude::*;
@@ -29,7 +29,9 @@ mod user;
 
 pub(crate) use self::error::{copy_text_at, subagent_error_buttons};
 use self::group::{render_collapsed_group_lines, render_subagent_group_lines};
-use self::helpers::{format_completed_duration, place_meta, prefixed_cont_line};
+use self::helpers::{
+    STEP_ENTER, STEP_EXIT, format_completed_duration, place_meta, prefixed_cont_line, step_line,
+};
 pub(crate) use self::interaction::InteractionLayout;
 use self::interaction::render_ask_user_block_lines;
 use self::reasoning::render_reasoning_block;
@@ -144,8 +146,8 @@ pub(crate) fn vm_to_lines(vm: &TuiRenderUnit, grid: &GridSpec) -> Vec<Line<'stat
 /// 其余变体恒 None / 空 Vec。
 ///
 /// 与 [`vm_to_lines_cached_with_layout`] 同逻辑，不带 markdown stable overlay；
-/// 过程区形态固定 [`ProcessLead::Inline`]：本入口服务嵌套渲染（折叠组内成员 /
-/// 详情面板）与测试，孤立渲染的 entry 前面没有文本 entry，恒无进入分叉（§6）。
+/// 转场形态固定 [`ZoneTransition::None`]：本入口服务嵌套渲染（折叠组内成员 /
+/// 详情面板）与测试，孤立渲染的 entry 没有相邻 entry 可判定转场（§6）。
 pub(crate) fn vm_to_lines_cached(
     vm: &TuiRenderUnit,
     grid: &GridSpec,
@@ -163,26 +165,29 @@ pub(crate) fn vm_to_lines_cached(
         md_cache,
         None,
         render_copy_button,
-        ProcessLead::Inline,
+        ZoneTransition::None,
     )
 }
 
-/// `lead` 为 entry 的过程区进入形态（§6，transcript 按相邻 entry 的起止 zone 判定）：
-/// AssistantBubble 的 reasoning 段消费它，正文段保持基准列（退出不画符）。
+/// `transition` 为 entry 的过程区转场形态（§6，transcript 按相邻 entry 的起止
+/// zone 判定）：入口台阶行（进入 ` ╰─╮` / 退出 ` ╭─╯`）统一在本入口插入并顺延
+/// 各 layout 索引；`AssistantBubble` 内部 reasoning → 正文的转场由该分支自画
+/// （entry 内部事务）；正文段保持基准列。
 pub(crate) fn vm_to_lines_cached_with_layout(
     vm: &TuiRenderUnit,
     grid: &GridSpec,
     md_cache: &mut crate::kit::markdown::MarkdownRenderCache,
     md_lines: Option<&mut crate::kit::message_area::vm_cache::MarkdownLineCache>,
     render_copy_button: bool,
-    lead: ProcessLead,
+    transition: ZoneTransition,
 ) -> (
     Vec<Line<'static>>,
     Option<CopyButtonInfo>,
     Option<InteractionLayout>,
     Vec<ImageLineInfo>,
 ) {
-    match vm {
+    let mut md_lines = md_lines;
+    let rendered = match vm {
         TuiRenderUnit::TuiAssistantBubble(data) => {
             let mut lines: Vec<Line<'static>> = Vec::new();
 
@@ -202,11 +207,18 @@ pub(crate) fn vm_to_lines_cached_with_layout(
                 (theme.component.markdown.text, theme.semantic.accent)
             };
 
-            // 推理块（§6.3）——视觉独立 entry，消费过程区进入形态（lead）
+            // 推理块（§6.3）——视觉独立 entry；入口台阶由本函数统一插入
             if let Some(ref reasoning) = data.reasoning {
-                lines.extend(render_reasoning_block(reasoning, grid, lead));
+                lines.extend(render_reasoning_block(reasoning, grid));
                 // 块尾不加空行（running/completed 一致）——与工具卡片紧凑布局
                 // 对齐；正文紧随其后，由 md 渲染自身节奏负责分段。
+            }
+
+            // 内部转场（§6）：reasoning（过程区）→ 正文（文本区）的退出台阶由
+            // 该 entry 自画——entry 内部事务，无跨 slot 依赖；纯 reasoning 块
+            // （无正文）的退出由后续文本 entry 承担。
+            if data.reasoning.is_some() && !data.text.is_empty() && grid.indent > 0 {
+                lines.push(step_line(STEP_EXIT));
             }
 
             // Markdown 正文——上下各 1 空行；wrap 在 content 列宽，行级再套统一前缀。
@@ -232,7 +244,7 @@ pub(crate) fn vm_to_lines_cached_with_layout(
                         md_cache,
                     )
                 };
-                if let Some(layout) = md_lines {
+                if let Some(layout) = md_lines.as_deref_mut() {
                     layout.stable_start = Some(lines.len());
                     let stable_lines: Vec<_> =
                         rendered
@@ -395,64 +407,111 @@ pub(crate) fn vm_to_lines_cached_with_layout(
         }
         TuiRenderUnit::TuiUserBubble(data) => {
             if let Some(ref info) = data.reminder {
-                return (
+                // 折叠提醒（单行）仍参与入口台阶：不早返回，交给统一包装。
+                (
                     render_reminder_condensed(info, grid),
                     None,
                     None,
                     Vec::new(),
-                );
+                )
+            } else {
+                let (lines, image_lines) = render_user_bubble_lines(data, grid);
+                (lines, None, None, image_lines)
             }
-            let (lines, image_lines) = render_user_bubble_lines(data, grid);
-            (lines, None, None, image_lines)
         }
         TuiRenderUnit::TuiToolCard(data) => (
-            render_tool_card_lines(data, grid, lead),
-            data.is_error.then(|| error::icon_button(grid, 0, lead)),
+            render_tool_card_lines(data, grid),
+            data.is_error.then(|| error::icon_button(grid, 0)),
             None,
             Vec::new(),
         ),
         TuiRenderUnit::TuiSystemNote(data) => (
-            render_system_note_lines(data, grid, lead),
+            render_system_note_lines(data, grid),
             (data.level == crate::kit::tui_render_unit::TuiNoteLevel::Error)
-                .then(|| error::icon_button(grid, 0, lead)),
+                .then(|| error::icon_button(grid, 0)),
             None,
             Vec::new(),
         ),
         TuiRenderUnit::TuiSystemReminder(data) => (
-            render_system_reminder_lines(data, grid, lead),
+            render_system_reminder_lines(data, grid),
             None,
             None,
             Vec::new(),
         ),
         TuiRenderUnit::TuiSubAgentGroup(data) => (
-            render_subagent_group_lines(data, grid, lead),
+            render_subagent_group_lines(data, grid),
             None,
             None,
             Vec::new(),
         ),
         TuiRenderUnit::TuiCollapsedGroup(data) => (
-            render_collapsed_group_lines(data, grid, lead),
+            render_collapsed_group_lines(data, grid),
             None,
             None,
             Vec::new(),
         ),
-        TuiRenderUnit::TuiDivider(data) => (
-            render_divider_lines(data, grid, lead),
-            None,
-            None,
-            Vec::new(),
-        ),
+        TuiRenderUnit::TuiDivider(data) => {
+            (render_divider_lines(data, grid), None, None, Vec::new())
+        }
         TuiRenderUnit::TuiAskUserBlock(data) => {
-            let (lines, layout) = render_ask_user_block_lines(data, grid, lead);
+            let (lines, layout) = render_ask_user_block_lines(data, grid);
             (lines, None, layout, Vec::new())
         }
         TuiRenderUnit::TuiTodoSummary(data) => (
-            render_todo_summary_lines(data, grid, lead),
+            render_todo_summary_lines(data, grid),
             None,
             None,
             Vec::new(),
         ),
+    };
+
+    // 入口台阶（§6）：由转场后的首个 entry 在行首插入（Compact/Narrow 无缩进
+    // 即无台阶，§9）；0 行 entry（空 bubble / 空 prompt）不产生台阶。台阶行
+    // 使后续行索引 +1——copy / interaction / image 的 logical_idx 与 markdown
+    // stable overlay 起点同步顺延（台阶行由本函数插入，各 renderer 产出的
+    // 索引以自身行序为基准）。
+    let (mut lines, mut copy_button, mut interaction, mut image_lines) = rendered;
+    if grid.indent > 0 && !lines.is_empty() {
+        let step = match transition {
+            ZoneTransition::EnterProcess => Some(step_line(STEP_ENTER)),
+            ZoneTransition::ExitProcess => Some(step_line(STEP_EXIT)),
+            ZoneTransition::None => None,
+        };
+        if let Some(step) = step {
+            lines.insert(0, step);
+            if let Some(button) = copy_button.as_mut() {
+                button.logical_idx += 1;
+            }
+            if let Some(layout) = interaction.as_mut() {
+                for row in &mut layout.option_rows {
+                    *row += 1;
+                }
+            }
+            for info in image_lines.iter_mut() {
+                info.logical_idx += 1;
+            }
+            if let Some(layout) = md_lines
+                && let Some(start) = layout.stable_start.as_mut()
+            {
+                *start += 1;
+            }
+        }
     }
+    (lines, copy_button, interaction, image_lines)
+}
+
+/// running reasoning header 在 entry lines 中的索引：入口台阶（§6）占 lines[0]
+/// 时 running header 顺延到 lines[1]。Animation 原位刷新（`EntryRenderCache`）
+/// 据此定位——按台阶字形判定，替换目标不因转场形态漂移；无行时返回 None。
+pub(crate) fn running_header_index(lines: &[Line<'static>]) -> Option<usize> {
+    let first = lines.first()?;
+    Some(usize::from(helpers::is_step_line(first)))
+}
+
+/// 台阶行判定（§6 ` ╰─╮` / ` ╭─╯`）——语义复制在提取层整行跳过纯结构 chrome
+/// （`selection.rs`），复制文本里不出现台阶字形、也不为其保留空行。
+pub(crate) fn is_step_row(line: &Line<'static>) -> bool {
+    helpers::is_step_line(line)
 }
 
 #[cfg(test)]

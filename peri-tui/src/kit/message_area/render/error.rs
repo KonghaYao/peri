@@ -1,6 +1,6 @@
 use super::CopyButtonInfo;
 use super::group::{SUBAGENT_TOOL_LINES, subagent_error_reason};
-use crate::kit::message_area::grid::{GridSpec, ProcessLead};
+use crate::kit::message_area::grid::GridSpec;
 use crate::kit::tui_render_unit::{TuiNoteLevel, TuiRenderUnit};
 use crate::truncate::truncate_by_width;
 use unicode_segmentation::UnicodeSegmentation;
@@ -41,20 +41,14 @@ pub(super) fn preview_lines(text: &str, width: usize, limit: usize) -> Vec<Strin
 
 /// 首行错误符号的点击列区间（§6.4 工具 / §6.6 系统错误共用）。
 ///
-/// 过程区首行的符号排在分叉与填充之后（§3），命中列随 `indent` 右移；分叉行与
-/// 区内行前缀等宽（§5），进入形态（`lead`）不改变符号列。
-pub(super) fn icon_button(
-    grid: &GridSpec,
-    logical_idx: usize,
-    _lead: ProcessLead,
-) -> CopyButtonInfo {
+/// 过程区首行的符号落在标记列 [`GridSpec::process_marker_col`]（§3），命中列随
+/// `indent` 右移；首行与区内行前缀等宽（§5），转场台阶不改变符号列。
+pub(super) fn icon_button(grid: &GridSpec, logical_idx: usize) -> CopyButtonInfo {
     // `indent == 0`（Compact/Narrow）回退形态里符号仍占 accent 列（§9）。
     let x_start = if grid.indent == 0 {
         grid.outer
     } else {
-        grid.outer
-            .saturating_add(grid.accent)
-            .saturating_add(grid.indent)
+        grid.process_marker_col()
     };
     CopyButtonInfo {
         logical_idx,

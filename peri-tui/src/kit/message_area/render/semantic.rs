@@ -3,12 +3,8 @@ use crate::kit::tui_render_unit::{TuiRenderUnit, TuiToolCard};
 use unicode_width::UnicodeWidthStr;
 
 use super::group::SUBAGENT_TOOL_LINES;
+use super::helpers::is_step_line;
 use super::tool_card::projected_tool_header_text;
-
-/// 过程区结构字形（§10：`│`/`├` 与竖线同口径硬编码，不随 `SymbolSet` 降级）
-/// ——与 `helpers` 的 `process_*_prefix` 同源，前缀识别按这些字形比对。
-const PROCESS_BAR: &str = "\u{2502}";
-const PROCESS_BRANCH: &str = "\u{251c}";
 
 /// §9 语义复制（D3）：按 VM 变体从渲染行提取「语义文本」——复制内容而非
 /// 屏幕像素。供 `extract_visual_range`（selection.rs）在复制时调用（事件时点，
@@ -19,9 +15,11 @@ const PROCESS_BRANCH: &str = "\u{251c}";
 /// 全量 markdown 解析，§15 线性度违背）；渲染行与缓存行同源，结果等价。
 ///
 /// 变体分派：
+/// - 转场台阶行（§6 ` ╰─╮` / ` ╭─╯`）：纯结构 chrome，无用户内容 → 空语义
+///   （提取层 [`super::is_step_row`] 对该行整行跳过，不进入复制文本）；
 /// - 普通行（user/reasoning/assistant md/tool 输出/system/divider 等）：剥离行首
-///   网格前缀——文本区 `outer + accent + gap`，过程区 `indent + 4`（含分叉与
-///   状态符号，§3/§4）；`line_to_plain_text` 无符号；
+///   网格前缀——文本区 `outer + accent + gap`，过程区 `outer + indent 留空 +
+///   标记 + gap`（标记为状态符号或 `│`，§3/§4）；`line_to_plain_text` 无符号；
 /// - tool header 行：`{Verb} {summary}{suffix}`（label + summary + 完成后缀，
 ///   无符号、无 duration——§9「Read header 复制 path，Bash header 复制
 ///   command」）；
@@ -29,13 +27,18 @@ const PROCESS_BRANCH: &str = "\u{251c}";
 /// - diff 行：剥离行号 gutter 列，保留 `+`/`-` patch 标记与正文（§9）；
 /// - code block 行：再剥离 `│ ` gutter（现状无语言标签行/行号——§9 已确认）。
 ///
-/// 未命中变体回退前缀剥离结果（保留现有语义）。
+/// [`local_idx`] 按「VM 自身行序」计（不含 render 层在 slot 行首插入的入口台阶
+/// 行）——提取层已按台阶占位顺延，变体分派（tool header / 子 agent 工具行）据此
+/// 定位；未命中变体回退前缀剥离结果（保留现有语义）。
 pub(crate) fn semantic_line_text(
     vm: &TuiRenderUnit,
     local_idx: usize,
     line: &ratatui_kit::ratatui::text::Line<'static>,
     grid: &GridSpec,
 ) -> Option<String> {
+    if is_step_line(line) {
+        return Some(String::new());
+    }
     let plain = crate::kit::text_selection::line_to_plain_text(line);
     let stripped = strip_visual_prefix(line, &plain, grid, local_idx);
     match vm {
@@ -64,8 +67,8 @@ pub(crate) fn semantic_line_text(
             Some(stripped)
         }
         TuiRenderUnit::TuiSubAgentGroup(data) => {
-            // 组内工具行/原因行与组头同列（§5 合并为总 `indent`）——`[outer 空][│]
-            // [indent + 2 空格][符号] {Verb}  {summary}` / `... [符号/对齐] {错误正文}`；
+            // 组内工具行/原因行与组头同列（§5 合并为总 `indent`）——`[outer 空]
+            // [indent 留空][│][gap]{符号} {Verb}  {summary}` / `... [符号/对齐] {错误正文}`；
             // strip_visual_prefix 已剥过程区前缀，剩余部分带「符号/对齐」标记 2 格。
             // 有工具时行序为最近工具最新在前 → 原因行；无工具时首行是可打开详情的
             // Agent 入口。
@@ -156,17 +159,15 @@ fn strip_reason_marker(text: &str) -> String {
 ///
 /// 前缀形态按 span 结构识别（与 `helpers` 的前缀构造同源）：
 /// - 文本区：`[outer 空][符号或竖线 1 格][gap 空格]`，宽 `outer + accent + gap`；
-/// - 过程区首行（§3）：`[outer 空][│ 或 ├][indent 格填充][符号 1 格][空格]`，
-///   宽 `process_prefix_width()` = `indent + 4`（分叉 fill 用 `─`，区内行用空格）；
-/// - 过程区续行（§4）：`[outer 空][│][indent + 2 空格]`，同宽。
+/// - 过程区（§3/§4）：`[outer 空][indent 格留空][标记 1 格][gap 空格]`，宽
+///   `process_prefix_width()`——首行标记为状态符号、续行为 `│`，同构同宽。
 ///
 /// [Why] 结构识别而非「按 local_idx 取首行/续行定宽」：气泡内 reasoning 段
 /// （过程区）与正文段（文本区）同属一个 VM 逐行混排，折叠组展开还把嵌套 entry
 /// 的行拼进同一 VM——首行/续行与「过程区/文本区」并非一一对应，宽度只能按行首
-/// span 边界与内容形状判定。`indent == gap` 时过程区 `Inline` 首行与文本行前缀
-/// 前 `outer + accent + gap` 格逐列同形（区分判据见 `process_first_prefix_len`），
-/// 故先试过程区形态；`indent == 0`（Compact/Narrow）渲染层回退基准形态（§9），
-/// 过程区形态不参与匹配。
+/// span 边界与内容形状判定。文本区与过程区前缀总宽同为 6（`indent = gap` 时），
+/// 按 span 结构区分（区分判据见 `process_prefix_len`），故先试过程区形态；
+/// `indent == 0`（Compact/Narrow）渲染层回退基准形态（§9），过程区形态不参与匹配。
 ///
 /// 结构不符（无前缀行，如 md 复制按钮行的前导空格）不剥离——兜底保留原样；
 /// 入参 `local_idx` 因此不再参与判定（调用点签名保持：行索引仍是提取层的坐标）。
@@ -191,29 +192,27 @@ fn prefix_byte_len(
     line: &ratatui_kit::ratatui::text::Line<'static>,
     grid: &GridSpec,
 ) -> Option<usize> {
-    // 零宽 span（空行 / 空段）不承载前缀，先过滤；前缀最多 5 段
-    // （outer / 竖线 / 填充 / 符号 / 空格），取前 5 段即可判定。
+    // 零宽 span（空行 / 空段）不承载前缀，先过滤；前缀最多 4 段
+    // （outer / indent 留空 / 标记 / gap），取前 4 段即可判定。
     let head: Vec<&ratatui_kit::ratatui::text::Span<'static>> = line
         .spans
         .iter()
         .filter(|span| !span.content.is_empty())
-        .take(5)
+        .take(4)
         .collect();
-    process_first_prefix_len(&head, grid)
-        .or_else(|| process_cont_prefix_len(&head, grid))
-        .or_else(|| base_prefix_len(&head, grid))
+    process_prefix_len(&head, grid).or_else(|| base_prefix_len(&head, grid))
 }
 
-/// 过程区首行前缀（§3）的 byte 长度：`[outer 空][│ 或 ├][indent 格填充]
-/// [符号 1 格][空格]`——符号在 fill 之后（accent 列退化为贯通的 `│`/`├`），
-/// 剥离须连同符号；`indent == 0` 时渲染层走基准形态（§9），不匹配。
+/// 过程区前缀（§3/§4）的 byte 长度：`[outer 空][indent 格留空][标记 1 格]
+/// [gap 空格]`——首行标记为状态符号、续行为 `│`（标记列同为
+/// `outer + indent`），两形态同构同宽，剥离口径合一。
 ///
-/// [Why] `Inline`（填充空白）额外要求符号与竖线同一样式：`indent == gap` 时
-/// 本形态与文本行 `[outer][│][gap] + 内容` 在前 3 段逐列同形，仅靠 span 边界
-/// 无法区分；`process_first_prefix` 用同一 `style` 画竖线/填充/符号（进入形态
-/// 是一个整体 chrome），而文本行的内容段来自 markdown 调色板——样式相等即
-/// 「符号属于前缀 chrome」。分叉行（填充 `─`）不与任何文本形态混淆，无需此判。
-fn process_first_prefix_len(
+/// [Why] 结构识别而非字形比对：标记是随内容变化的符号集（`✓`/`×`/braille 帧/
+/// 折叠符/`│`），逐一枚举既易漏又随字符集降级漂移；而「`indent` 格留空 + 单格
+/// 非空标记 + `gap` 空格」的 span 结构在网格里唯一——文本区前缀的 accent 是单格
+/// 符号（宽度 1，不等于 `indent` 格留空），两形态不会互认。`indent == 0`
+/// （Compact/Narrow）渲染层回退基准形态（§9），过程区形态不参与匹配。
+fn process_prefix_len(
     head: &[&ratatui_kit::ratatui::text::Span<'static>],
     grid: &GridSpec,
 ) -> Option<usize> {
@@ -221,54 +220,18 @@ fn process_first_prefix_len(
     if indent == 0 {
         return None;
     }
-    let [outer, line_glyph, fill, symbol, space, ..] = head else {
-        return None;
-    };
-    if outer.content != " " {
-        return None;
-    }
-    // Inline 填充空白（符号需与前缀同 chrome 样式）；Branch 填充 `─` 与 `├`
-    // 连成分叉。
-    let inline = line_glyph.content == PROCESS_BAR
-        && is_spaces(&fill.content, indent)
-        && symbol.style == line_glyph.style;
-    let branch = line_glyph.content == PROCESS_BRANCH && is_dashes(&fill.content, indent);
-    if !(inline || branch)
-        || symbol.content.width() != 1
-        || symbol.content.trim().is_empty()
-        || space.content != " "
-    {
-        return None;
-    }
-    Some(
-        outer.content.len()
-            + line_glyph.content.len()
-            + fill.content.len()
-            + symbol.content.len()
-            + space.content.len(),
-    )
-}
-
-/// 过程区续行前缀（§4）的 byte 长度：`[outer 空][│][indent + 2 空格]`——
-/// 内容与首行标签同列（§5 首行/续行前缀同宽）。
-fn process_cont_prefix_len(
-    head: &[&ratatui_kit::ratatui::text::Span<'static>],
-    grid: &GridSpec,
-) -> Option<usize> {
-    let indent = grid.indent as usize;
-    if indent == 0 {
-        return None;
-    }
-    let [outer, line_glyph, fill, ..] = head else {
+    let [outer, pad, marker, gap, ..] = head else {
         return None;
     };
     if outer.content != " "
-        || line_glyph.content != PROCESS_BAR
-        || !is_spaces(&fill.content, indent + 2)
+        || !is_spaces(&pad.content, indent)
+        || marker.content.width() != 1
+        || marker.content.trim().is_empty()
+        || !is_spaces(&gap.content, grid.gap as usize)
     {
         return None;
     }
-    Some(outer.content.len() + line_glyph.content.len() + fill.content.len())
+    Some(outer.content.len() + pad.content.len() + marker.content.len() + gap.content.len())
 }
 
 /// 基准前缀（文本区）的 byte 长度：`[outer 空][符号或竖线 1 格][gap 空格]`——
@@ -289,14 +252,9 @@ fn base_prefix_len(
     Some(outer.content.len() + accent.content.len() + gap.content.len())
 }
 
-/// `text` 是否恰为 `width` 个 ASCII 空格——前缀间隔列（gap / 过程区缩进）口径。
+/// `text` 是否恰为 `width` 个 ASCII 空格——前缀间隔列（gap / 过程区缩进留空）口径。
 fn is_spaces(text: &str, width: usize) -> bool {
     text.len() == width && text.bytes().all(|byte| byte == b' ')
-}
-
-/// `text` 是否恰为 `width` 个 `─`——分叉行 fill 口径。
-fn is_dashes(text: &str, width: usize) -> bool {
-    text.chars().count() == width && text.chars().all(|ch| ch == '\u{2500}')
 }
 
 /// §9 diff 行语义：`{行号列} {符号} {正文}` → `{符号} {正文}`（剥行号 gutter，
