@@ -502,6 +502,7 @@ fn test_multi_turn_reasoning_preserved_in_committed() {
         &mut state,
         &AcpEventData::LocalUserBubble {
             text: "第一个问题".into(),
+            attachments: Vec::new(),
         },
     );
     dispatch_and_notify(&mut state, &AcpEventData::PromptStarted);
@@ -528,6 +529,7 @@ fn test_multi_turn_reasoning_preserved_in_committed() {
         &mut state,
         &AcpEventData::LocalUserBubble {
             text: "第二个问题".into(),
+            attachments: Vec::new(),
         },
     );
     dispatch_and_notify(&mut state, &AcpEventData::PromptStarted);

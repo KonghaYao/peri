@@ -696,6 +696,13 @@ user-image-size-kb = { $count } KB
 user-image-size-mb = { $count } MB
 user-image-open-failed = Failed to open image
 
+# ---- Pasted image attachments (upload-style, no file name, numbered by paste order) ----
+# $index is the attachment's position in the submitted batch (1-based); the composer
+# label and the message-area record share the same numbering.
+attachment-image-name = Image { $index }
+# $size is a human-readable size (user-image-size-*).
+user-attachment-image-meta = [Image] { $name } · { $size }
+
 # ---- image preview overlay (image-p0-p1-spec §7 T7) ----
 # 上下文 overlay 预览：meta 行（$w/$h 为像素尺寸，JPEG/GIF/WebP 未解析时为 0）、
 # 解码中行、手工路径降级提示、校验/解码失败固定文案（不显示原因细节）。
@@ -738,6 +745,10 @@ render-interaction-result-rejected = Rejected
 # ---- Composer (spec §10) ----
 
 composer-attachments = @ { $count } files
+# Image attachments (pasted images): $name is `attachment-image-name`; multiple
+# images add the count and the first few names.
+composer-image-attachment = [Image] { $name }
+composer-image-attachments = [Image] ×{ $count } · { $names }
 composer-context-usage = { $pct }% ctx
 
 # ---- Message View Placeholders ----

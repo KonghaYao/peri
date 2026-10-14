@@ -26,7 +26,9 @@ mod reminder;
 mod tool_card;
 mod unit;
 
-pub use bubble::{TuiAssistantBubble, TuiReasoningBlock, TuiUserBubble};
+pub use bubble::{
+    TuiAssistantBubble, TuiReasoningBlock, TuiUserBubble, UserAttachment, user_attachment_name,
+};
 pub use diff::{TuiDiffBlock, TuiHunk, TuiHunkLine, TuiHunkLineKind, diff_change_counts};
 pub use fold::{
     EntryStatus, FoldKey, FoldState, FoldTarget, entry_status_code, fold_for_status,

@@ -130,7 +130,11 @@ pub enum ImageSafetyError {
     Decode(#[from] png::DecodingError),
 }
 
-/// 受管理图片目录根（`~/.peri/images`；与 `input_area.rs` 粘贴落盘规则一致）。
+/// 受管理图片目录根（`~/.peri/images`）。
+///
+/// [现状] 仅用于给用户手输的 `@image <path>` 路径分级/预览；粘贴图片走上传式附件
+/// （base64 直进 `PENDING_ATTACHMENTS`，不落盘，见 `input_area/paste.rs`），
+/// 因此新粘贴的图片不会出现在这里，也没有需要清理的临时文件。
 pub fn managed_images_root() -> PathBuf {
     dirs_next::home_dir()
         .unwrap_or_else(|| PathBuf::from("."))

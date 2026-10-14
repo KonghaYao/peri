@@ -45,7 +45,10 @@ fn test_stale_turn_interrupted_does_not_rollback_new_turn() {
     };
     dispatch_and_notify(
         &mut state,
-        &AcpEventData::LocalUserBubble { text: "A".into() },
+        &AcpEventData::LocalUserBubble {
+            text: "A".into(),
+            attachments: Vec::new(),
+        },
     );
     dispatch_and_notify(
         &mut state,
@@ -56,7 +59,10 @@ fn test_stale_turn_interrupted_does_not_rollback_new_turn() {
     // PromptSubmitted 尚未发出（B 排队中或 submit_consumer 仍在等 A 的 RPC）。
     dispatch_and_notify(
         &mut state,
-        &AcpEventData::LocalUserBubble { text: "B".into() },
+        &AcpEventData::LocalUserBubble {
+            text: "B".into(),
+            attachments: Vec::new(),
+        },
     );
     INPUT_BUFFER
         .state()
@@ -177,7 +183,10 @@ fn test_turn_interrupted_zero_output_rollback_still_works() {
     };
     dispatch_and_notify(
         &mut state,
-        &AcpEventData::LocalUserBubble { text: "A".into() },
+        &AcpEventData::LocalUserBubble {
+            text: "A".into(),
+            attachments: Vec::new(),
+        },
     );
     dispatch_and_notify(
         &mut state,
@@ -269,7 +278,10 @@ fn test_turn_interrupted_archive_branch_drains_input_buffer() {
     };
     dispatch_and_notify(
         &mut state,
-        &AcpEventData::LocalUserBubble { text: "A".into() },
+        &AcpEventData::LocalUserBubble {
+            text: "A".into(),
+            attachments: Vec::new(),
+        },
     );
     dispatch_and_notify(
         &mut state,
@@ -356,7 +368,10 @@ fn test_stale_turn_interrupted_request_id_mismatch() {
     // turn A：LocalUserBubble + PromptSubmitted(A1)
     dispatch_and_notify(
         &mut state,
-        &AcpEventData::LocalUserBubble { text: "A".into() },
+        &AcpEventData::LocalUserBubble {
+            text: "A".into(),
+            attachments: Vec::new(),
+        },
     );
     dispatch_and_notify(
         &mut state,
@@ -367,7 +382,10 @@ fn test_stale_turn_interrupted_request_id_mismatch() {
     // turn B：LocalUserBubble + PromptSubmitted(B1)——B 走完整 RPC 路径（主导排序）
     dispatch_and_notify(
         &mut state,
-        &AcpEventData::LocalUserBubble { text: "B".into() },
+        &AcpEventData::LocalUserBubble {
+            text: "B".into(),
+            attachments: Vec::new(),
+        },
     );
     dispatch_and_notify(
         &mut state,
@@ -475,7 +493,10 @@ fn test_stale_turn_interrupted_queued_branch_still_stale() {
     };
     dispatch_and_notify(
         &mut state,
-        &AcpEventData::LocalUserBubble { text: "A".into() },
+        &AcpEventData::LocalUserBubble {
+            text: "A".into(),
+            attachments: Vec::new(),
+        },
     );
     dispatch_and_notify(
         &mut state,
@@ -486,7 +507,10 @@ fn test_stale_turn_interrupted_queued_branch_still_stale() {
     // B 排队中：仅 LocalUserBubble，无 PromptSubmitted（is_loading gate 阻断 RPC）
     dispatch_and_notify(
         &mut state,
-        &AcpEventData::LocalUserBubble { text: "B".into() },
+        &AcpEventData::LocalUserBubble {
+            text: "B".into(),
+            attachments: Vec::new(),
+        },
     );
     INPUT_BUFFER
         .state()
@@ -566,7 +590,10 @@ fn test_stale_turn_interrupted_drain_is_idempotent() {
     // turn A 运行中
     dispatch_and_notify(
         &mut state,
-        &AcpEventData::LocalUserBubble { text: "A".into() },
+        &AcpEventData::LocalUserBubble {
+            text: "A".into(),
+            attachments: Vec::new(),
+        },
     );
     dispatch_and_notify(
         &mut state,
@@ -577,7 +604,10 @@ fn test_stale_turn_interrupted_drain_is_idempotent() {
     // B 排队中（仅 LocalUserBubble，无 RPC）
     dispatch_and_notify(
         &mut state,
-        &AcpEventData::LocalUserBubble { text: "B".into() },
+        &AcpEventData::LocalUserBubble {
+            text: "B".into(),
+            attachments: Vec::new(),
+        },
     );
     INPUT_BUFFER
         .state()
@@ -669,7 +699,10 @@ fn test_turn_interrupted_current_request_id_rollback() {
     };
     dispatch_and_notify(
         &mut state,
-        &AcpEventData::LocalUserBubble { text: "A".into() },
+        &AcpEventData::LocalUserBubble {
+            text: "A".into(),
+            attachments: Vec::new(),
+        },
     );
     dispatch_and_notify(
         &mut state,
@@ -755,7 +788,10 @@ fn test_turn_interrupted_none_request_id_falls_back() {
     };
     dispatch_and_notify(
         &mut state,
-        &AcpEventData::LocalUserBubble { text: "A".into() },
+        &AcpEventData::LocalUserBubble {
+            text: "A".into(),
+            attachments: Vec::new(),
+        },
     );
     dispatch_and_notify(
         &mut state,
@@ -827,7 +863,10 @@ fn test_double_cancel_request_id_pairs() {
     // A 提交并运行
     dispatch_and_notify(
         &mut state,
-        &AcpEventData::LocalUserBubble { text: "A".into() },
+        &AcpEventData::LocalUserBubble {
+            text: "A".into(),
+            attachments: Vec::new(),
+        },
     );
     dispatch_and_notify(
         &mut state,
@@ -838,7 +877,10 @@ fn test_double_cancel_request_id_pairs() {
     // A 被取消后用户提交 B（完整 RPC 路径）
     dispatch_and_notify(
         &mut state,
-        &AcpEventData::LocalUserBubble { text: "B".into() },
+        &AcpEventData::LocalUserBubble {
+            text: "B".into(),
+            attachments: Vec::new(),
+        },
     );
     dispatch_and_notify(
         &mut state,

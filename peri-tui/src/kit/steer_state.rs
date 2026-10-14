@@ -10,6 +10,7 @@ use tokio::sync::mpsc::UnboundedSender;
 
 use super::atoms::{self, PendingAttachment};
 use super::steer_queue::{SteerItemState, SteerQueueAction, SteerQueueItem};
+use super::tui_render_unit::UserAttachment;
 
 pub(crate) static STEERS: Atom<SteerState> = Atom::new(SteerState::default);
 pub(crate) static STEER_TX: OnceLock<UnboundedSender<SteerCommand>> = OnceLock::new();
@@ -565,6 +566,32 @@ pub(crate) fn content_with_attachments(
     MessageContent::blocks(blocks)
 }
 
+/// 待发送附件 → 展示记录（提交路径）：只取渲染所需的顺序与大小，不带 base64 载荷。
+pub(crate) fn attachment_displays(attachments: &[PendingAttachment]) -> Vec<UserAttachment> {
+    attachments
+        .iter()
+        .map(|attachment| UserAttachment::from_base64_payload(&attachment.base64_data))
+        .collect()
+}
+
+/// 投递内容 → 展示记录（投递路径）：与 [`attachment_displays`] 同源口径——两条
+/// 提交路径的图片块由 [`content_with_attachments`] 逐字节复制，大小必然一致。
+pub(crate) fn attachment_displays_from_content(content: &MessageContent) -> Vec<UserAttachment> {
+    let MessageContent::Blocks(blocks) = content else {
+        return Vec::new();
+    };
+    blocks
+        .iter()
+        .filter_map(|block| match block {
+            ContentBlock::Image {
+                source: ImageSource::Base64 { data, .. },
+            } => Some(UserAttachment::from_base64_payload(data)),
+            _ => None,
+        })
+        .collect()
+}
+
+/// 把已投递内容里的图片块还原为待发送附件（撤回路径用）。
 pub(crate) fn attachments_from_content(content: &MessageContent) -> Vec<PendingAttachment> {
     let MessageContent::Blocks(blocks) = content else {
         return Vec::new();

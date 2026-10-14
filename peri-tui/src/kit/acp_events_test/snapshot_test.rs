@@ -8,7 +8,10 @@ fn p0_new_prompt_follows_unarchived_previous_answer() {
     let mut state = make_fold_test_state();
     dispatch_and_notify(
         &mut state,
-        &AcpEventData::LocalUserBubble { text: "q1".into() },
+        &AcpEventData::LocalUserBubble {
+            text: "q1".into(),
+            attachments: Vec::new(),
+        },
     );
     dispatch_and_notify(
         &mut state,
@@ -20,7 +23,10 @@ fn p0_new_prompt_follows_unarchived_previous_answer() {
     );
     dispatch_and_notify(
         &mut state,
-        &AcpEventData::LocalUserBubble { text: "q2".into() },
+        &AcpEventData::LocalUserBubble {
+            text: "q2".into(),
+            attachments: Vec::new(),
+        },
     );
 
     let sequence: Vec<_> = VIEW_MODELS
@@ -62,7 +68,10 @@ fn p0_new_prompt_preserves_running_tool_result() {
     let mut state = make_fold_test_state();
     dispatch_and_notify(
         &mut state,
-        &AcpEventData::LocalUserBubble { text: "q1".into() },
+        &AcpEventData::LocalUserBubble {
+            text: "q1".into(),
+            attachments: Vec::new(),
+        },
     );
     dispatch_and_notify(
         &mut state,
@@ -76,7 +85,10 @@ fn p0_new_prompt_preserves_running_tool_result() {
     );
     dispatch_and_notify(
         &mut state,
-        &AcpEventData::LocalUserBubble { text: "q2".into() },
+        &AcpEventData::LocalUserBubble {
+            text: "q2".into(),
+            attachments: Vec::new(),
+        },
     );
     dispatch_and_notify(
         &mut state,
@@ -111,7 +123,10 @@ fn test_snapshot_turn_divider_before_new_user_prompt() {
     // Turn 1：user + answer → TurnDone（committed = [user1, answer1]）
     dispatch_and_notify(
         &mut state,
-        &AcpEventData::LocalUserBubble { text: "q1".into() },
+        &AcpEventData::LocalUserBubble {
+            text: "q1".into(),
+            attachments: Vec::new(),
+        },
     );
     dispatch_and_notify(
         &mut state,
@@ -126,7 +141,10 @@ fn test_snapshot_turn_divider_before_new_user_prompt() {
     // Turn 2 流式期间：committed = [user1, answer1, user2]
     dispatch_and_notify(
         &mut state,
-        &AcpEventData::LocalUserBubble { text: "q2".into() },
+        &AcpEventData::LocalUserBubble {
+            text: "q2".into(),
+            attachments: Vec::new(),
+        },
     );
     dispatch_and_notify(
         &mut state,
@@ -163,7 +181,10 @@ fn test_snapshot_no_divider_for_first_turn_or_inside_turn() {
     let mut state = make_fold_test_state();
     dispatch_and_notify(
         &mut state,
-        &AcpEventData::LocalUserBubble { text: "q1".into() },
+        &AcpEventData::LocalUserBubble {
+            text: "q1".into(),
+            attachments: Vec::new(),
+        },
     );
     dispatch_and_notify(
         &mut state,

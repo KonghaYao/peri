@@ -212,6 +212,7 @@ fn test_turn_done_clears_last_submitted_text() {
         &mut state,
         &AcpEventData::LocalUserBubble {
             text: "hello".into(),
+            attachments: Vec::new(),
         },
     );
     dispatch_and_notify(

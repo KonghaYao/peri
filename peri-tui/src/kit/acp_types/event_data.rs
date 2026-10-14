@@ -116,8 +116,12 @@ pub enum AcpEventData {
     TurnSuspended,
 
     /// TUI 内部事件：本地用户提交的 UserBubble。仅 TUI 内部使用，不走 ACP 协议。
+    ///
+    /// `attachments` 为附件的展示记录（图片序号与大小，不含 base64 载荷）——
+    /// 提交那一刻从 `PENDING_ATTACHMENTS` 摘出，让消息区能显示「这条消息带了图片」。
     LocalUserBubble {
         text: String,
+        attachments: Vec<crate::kit::tui_render_unit::UserAttachment>,
     },
 
     /// TUI 内部事件：`/clear` 失败后的 loading 复位请求。

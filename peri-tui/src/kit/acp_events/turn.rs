@@ -333,7 +333,11 @@ pub(super) fn handle_session_replay_done(state: &mut BridgeState) {
     super::render::push_acp_state(state);
 }
 
-pub(super) fn handle_local_user_bubble(state: &mut BridgeState, text: &str) {
+pub(super) fn handle_local_user_bubble(
+    state: &mut BridgeState,
+    text: &str,
+    attachments: Vec<crate::kit::tui_render_unit::UserAttachment>,
+) {
     state.last_submitted_text = Some(SubmittedInputRollback {
         text: text.to_owned(),
         request_id: None,
@@ -342,7 +346,7 @@ pub(super) fn handle_local_user_bubble(state: &mut BridgeState, text: &str) {
     // 判定的基准（注意 session replay 的 user_message_chunk 也走本变体，但 replay
     // 期间无 turn 运行、无 TurnInterrupted 到达，递增不会造成误判）。
     state.turn_generation = state.turn_generation.wrapping_add(1);
-    state.push_user_bubble(text.to_string());
+    state.push_user_bubble(text.to_string(), attachments);
     state.publish_barrier();
     super::render::push_acp_state(state);
 }
@@ -376,7 +380,11 @@ pub(super) fn handle_user_input_delivered(
     }
     state.last_submitted_text = None;
     state.variant = 1;
-    state.push_user_bubble(content.text_content());
+    // 投递的时刻才显示气泡：附件展示记录从投递内容还原（图片块只留序号与大小）。
+    state.push_user_bubble(
+        content.text_content(),
+        crate::kit::steer_state::attachment_displays_from_content(content),
+    );
     state.publish_barrier();
     super::render::push_acp_state(state);
 }

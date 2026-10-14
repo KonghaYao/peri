@@ -104,7 +104,7 @@ fn test_drain_input_buffer_sends_local_user_bubble_once() {
         // 恰一条 LocalUserBubble（FIFO 首条）
         match rx.try_recv() {
             Ok(ev) => match ev.event {
-                AcpEventData::LocalUserBubble { text } => {
+                AcpEventData::LocalUserBubble { text, .. } => {
                     assert_eq!(text, "first", "drain 应先发首条排队项的气泡")
                 }
                 other => panic!("drain 应发 LocalUserBubble, got {other:?}"),
@@ -114,7 +114,7 @@ fn test_drain_input_buffer_sends_local_user_bubble_once() {
         // 第二条排队项的气泡
         match rx.try_recv() {
             Ok(ev) => match ev.event {
-                AcpEventData::LocalUserBubble { text } => assert_eq!(text, "second"),
+                AcpEventData::LocalUserBubble { text, .. } => assert_eq!(text, "second"),
                 other => panic!("drain 应发 LocalUserBubble, got {other:?}"),
             },
             Err(e) => panic!("drain 应发出第二条气泡, got {e:?}"),

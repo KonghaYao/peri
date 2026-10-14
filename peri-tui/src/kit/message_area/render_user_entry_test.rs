@@ -371,3 +371,85 @@ fn test_render_image_hover_line_truncates() {
     );
     assert!(!text.ends_with("a.png"), "超宽时尾部被截断，实际 {text:?}");
 }
+
+// ── 上传式附件（粘贴图片）：消息区附件记录 ──────────────────────────────
+
+use crate::kit::tui_render_unit::UserAttachment;
+
+/// 文本 + 附件：正文之外多一行附件记录（图片标识 + 名称 + 大小）。
+#[test]
+fn test_user_bubble_renders_attachment_record_with_text() {
+    crate::i18n::init(Some("en"));
+    let grid = GridSpec::grid_for(120);
+    let vm = TuiRenderUnit::TuiUserBubble(TuiUserBubble::with_attachments(
+        "look at this".into(),
+        vec![UserAttachment { bytes: 45 }],
+    ));
+    let lines = vm_to_lines(&vm, &grid);
+    let text = all_text(&lines);
+    assert!(
+        text.contains("[Image] Image 1 · 45 B"),
+        "附件记录行（标识 · 名称 · 大小），实际: {text:?}"
+    );
+    assert!(text.contains("look at this"), "正文保留，实际: {text:?}");
+}
+
+/// 图片-only 提交（空文本 + 附件）：必须留下附件记录（此前渲染 0 行）。
+#[test]
+fn test_user_bubble_image_only_renders_attachment_record() {
+    crate::i18n::init(Some("en"));
+    let grid = GridSpec::grid_for(120);
+    let vm = TuiRenderUnit::TuiUserBubble(TuiUserBubble::with_attachments(
+        String::new(),
+        vec![UserAttachment { bytes: 2048 }],
+    ));
+    let lines = vm_to_lines(&vm, &grid);
+    assert_eq!(lines.len(), 3, "leading 空行 + 附件记录 + 尾部空行");
+    let text = all_text(&lines);
+    assert!(text.contains("[Image] Image 1 · 2.0 KB"), "实际: {text:?}");
+}
+
+/// 多张附件逐张编号，可区分（名称与提交顺序一致）。
+#[test]
+fn test_user_bubble_numbers_multiple_attachments() {
+    crate::i18n::init(Some("en"));
+    let grid = GridSpec::grid_for(120);
+    let vm = TuiRenderUnit::TuiUserBubble(TuiUserBubble::with_attachments(
+        "two shots".into(),
+        vec![UserAttachment { bytes: 45 }, UserAttachment { bytes: 2048 }],
+    ));
+    let text = all_text(&vm_to_lines(&vm, &grid));
+    assert!(
+        text.contains("[Image] Image 1 · 45 B"),
+        "第一张，实际: {text:?}"
+    );
+    assert!(
+        text.contains("[Image] Image 2 · 2.0 KB"),
+        "第二张，实际: {text:?}"
+    );
+}
+
+/// 空文本 + 无附件（rewind/thinking 回传等）仍渲染 0 行——不产生悬空 turn 节拍。
+#[test]
+fn test_user_bubble_empty_text_without_attachments_renders_nothing() {
+    crate::i18n::init(Some("en"));
+    let grid = GridSpec::grid_for(120);
+    let vm = TuiRenderUnit::TuiUserBubble(TuiUserBubble::new(String::new()));
+    assert!(vm_to_lines(&vm, &grid).is_empty());
+}
+
+/// 非图片的 @文件引用不受影响：正文原样渲染，且不产生附件记录行。
+#[test]
+fn test_user_bubble_file_mention_unaffected_by_attachment_record() {
+    crate::i18n::init(Some("en"));
+    let grid = GridSpec::grid_for(120);
+    let vm = TuiRenderUnit::TuiUserBubble(TuiUserBubble::new("read @src/main.rs please".into()));
+    let lines = vm_to_lines(&vm, &grid);
+    assert_eq!(lines.len(), 3, "leading 空行 + 正文 + 尾部空行");
+    let text = all_text(&lines);
+    assert!(
+        text.contains("@src/main.rs"),
+        "文件引用原样，实际: {text:?}"
+    );
+    assert!(!text.contains("[Image]"), "非图片引用不产生附件记录");
+}

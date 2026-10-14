@@ -9,6 +9,52 @@ fn test_tui_hash_str_different_input_different_output() {
     assert_ne!(tui_hash_str("hello"), tui_hash_str("world"));
 }
 
+// ── 附件展示记录（粘贴图片）─────────────────────────────────────────────
+
+/// base64 载荷长度 → 解码字节数（只看长度与填充位，不解码内容）。
+#[test]
+fn test_user_attachment_bytes_from_base64_payload() {
+    assert_eq!(UserAttachment::from_base64_payload("AQID").bytes, 3);
+    assert_eq!(UserAttachment::from_base64_payload("AQI=").bytes, 2);
+    assert_eq!(UserAttachment::from_base64_payload("AA==").bytes, 1);
+    assert_eq!(UserAttachment::from_base64_payload("").bytes, 0);
+}
+
+/// 附件进 content_hash（渲染缓存 key）：同文本不同附件必须触发重渲染；
+/// 无附件时与 `new` 的哈希逐位一致（不改变既有缓存行为）。
+#[test]
+fn test_user_bubble_attachments_join_content_hash() {
+    let plain = TuiUserBubble::new("hi".into());
+    let none = TuiUserBubble::with_attachments("hi".into(), Vec::new());
+    assert_eq!(
+        plain.content_hash, none.content_hash,
+        "无附件不改变哈希（既有缓存行为不变）"
+    );
+
+    let one = TuiUserBubble::with_attachments("hi".into(), vec![UserAttachment { bytes: 45 }]);
+    let two = TuiUserBubble::with_attachments(
+        "hi".into(),
+        vec![UserAttachment { bytes: 45 }, UserAttachment { bytes: 2048 }],
+    );
+    assert_ne!(plain.content_hash, one.content_hash, "带附件必须改变哈希");
+    assert_ne!(
+        one.content_hash, two.content_hash,
+        "附件数量/大小不同 → 哈希不同"
+    );
+}
+
+/// 附件是内容的一部分：进 partial_eq（附件不同 → 气泡不等）。
+#[test]
+fn test_user_bubble_partial_eq_respects_attachments() {
+    let a = TuiUserBubble::with_attachments("hi".into(), vec![UserAttachment { bytes: 45 }]);
+    let b = TuiUserBubble::with_attachments("hi".into(), vec![UserAttachment { bytes: 46 }]);
+    assert_ne!(a, b, "附件不同 → 应不等");
+    assert_eq!(
+        a,
+        TuiUserBubble::with_attachments("hi".into(), vec![UserAttachment { bytes: 45 }])
+    );
+}
+
 // ── TuiRenderUnit::content_hash() dispatch ──────────────────────────
 
 #[test]
@@ -16,6 +62,7 @@ fn test_content_hash_returns_inner_field_for_each_variant() {
     // 验证 content_hash() 方法正确派发到各变体的内部字段
     let user = TuiRenderUnit::TuiUserBubble(TuiUserBubble {
         text: "u".into(),
+        attachments: Vec::new(),
         reminder: None,
         source: None,
         content_hash: 11,
@@ -288,12 +335,14 @@ fn test_reasoning_collapsed_accessor_maps_fold() {
 fn test_user_bubble_partial_eq_ignores_content_hash() {
     let a = TuiUserBubble {
         text: "hi".into(),
+        attachments: Vec::new(),
         reminder: None,
         source: None,
         content_hash: 1,
     };
     let b = TuiUserBubble {
         text: "hi".into(),
+        attachments: Vec::new(),
         reminder: None,
         source: None,
         content_hash: 2,
@@ -305,12 +354,14 @@ fn test_user_bubble_partial_eq_ignores_content_hash() {
 fn test_user_bubble_partial_eq_respects_text() {
     let a = TuiUserBubble {
         text: "hi".into(),
+        attachments: Vec::new(),
         reminder: None,
         source: None,
         content_hash: 0,
     };
     let b = TuiUserBubble {
         text: "ho".into(),
+        attachments: Vec::new(),
         reminder: None,
         source: None,
         content_hash: 0,
