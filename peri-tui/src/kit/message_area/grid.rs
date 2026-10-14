@@ -1,4 +1,4 @@
-//! Transcript 水平网格（规格 §3.1）——所有 entry 共享的左对齐时间轴。
+//! Transcript 水平网格（规格 §3.1）——文本共享基准列，过程区右移 `indent`。
 //!
 //! ```text
 //! |←— left_pad —→|←————————— band_width —————————→|← 余量 →|
@@ -10,7 +10,8 @@
 //!   焦点条在其上叠加，不造成内容列位移）。
 //! - `accent`：固定 1 cell，块首行放类型/状态符号，续行放 dim 竖线。
 //! - `gap`：默认 2 cells；Compact/Narrow 缩为 1（§11）。
-//! - `content`：所有消息共享左起点；最大可读宽度 100 cells。
+//! - `content`：文本区基准列（user/AI 正文共享左起点）；过程区在其上再右移
+//!   `indent` 格并画进入分叉（§1/§3）——最大可读宽度 100 cells。
 //! - `gutter`：metadata（duration / 计数）右对齐列，最多 12 cells。
 //! - `scroll`：最右 1 cell 留给滚动条 thumb（文本不进该列）。
 //! - 断点（§11）：Wide ≥ 100 / Standard 60–99 / Compact 40–59 / Narrow < 40。
@@ -39,6 +40,15 @@ pub enum Breakpoint {
     Narrow,
 }
 
+/// 过程区进入形态（规格 §6）——由 transcript 按相邻 entry 的起止 zone 判定。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ProcessLead {
+    /// 进入分叉：entry 起点为过程区，且前一个「产出行 entry」的终点为文本区。
+    Branch,
+    /// 区内接续（含时间轴首个 entry）：不画分叉。
+    Inline,
+}
+
 /// 网格规格——渲染层所有行渲染器统一消费。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct GridSpec {
@@ -48,7 +58,10 @@ pub struct GridSpec {
     pub accent: u16,
     /// accent 与 content 之间的 gap（Wide/Standard=2，Compact/Narrow=1）。
     pub gap: u16,
-    /// content 列宽（所有 entry 正文共享左起点；≤ 100）。
+    /// 过程区相对基准列的右移量（Wide/Standard=2，Compact/Narrow=0）——
+    /// 右移量占用 content 列宽，右缘不变（§8）。
+    pub indent: u16,
+    /// content 列宽（文本区基准列；≤ 100）。
     pub content: u16,
     /// 居中带宽度（消息区 / 输入区实际区域宽度，含最右滚动条列）——
     /// 组件的区域宽度（`MsgAreaTracker` / `AreaTracker`）与 `line_width()` 由它派生。
@@ -84,12 +97,19 @@ impl GridSpec {
         } else {
             2
         };
+        // 过程区缩进（§1）：Wide/Standard（≥60）右移 2 格；Compact/Narrow 保持现状。
+        let indent = if matches!(bp, Breakpoint::Wide | Breakpoint::Standard) {
+            2
+        } else {
+            0
+        };
         let content = (term_width.saturating_sub(6)).clamp(1, MAX_CONTENT_WIDTH);
         let band_width = (1 + 1 + gap + content + MAX_META_GUTTER + 1).min(term_width);
         Self {
             outer: 1,
             accent: 1,
             gap,
+            indent,
             content,
             band_width,
             left_pad: term_width.saturating_sub(band_width) / 2,
@@ -107,6 +127,8 @@ impl GridSpec {
         g.content = content;
         g.band_width = content.saturating_add(2);
         g.left_pad = 0;
+        // 嵌套面板沿用基准列：过程区缩进只作用于消息区主时间轴，面板保持现状。
+        g.indent = 0;
         g
     }
 
@@ -123,6 +145,25 @@ impl GridSpec {
     /// 续行前缀总宽度（outer 空 cell + dim 竖线 + gap）。
     pub fn cont_prefix_width(&self) -> usize {
         (self.outer + self.accent + self.gap) as usize
+    }
+
+    /// 过程区正文可用宽度 = `content - indent`（下限 1）——
+    /// 右移量从左缘让出，右缘不动（§8）。
+    pub fn process_content_width(&self) -> usize {
+        self.content.saturating_sub(self.indent).max(1) as usize
+    }
+
+    /// 过程区前缀总宽度，即过程区正文起点列（§3/§5）——`indent > 0` 时 =
+    /// `indent + 4`（outer 1 + 竖线/分叉 1 + `indent` 填充 + 符号 1 + 空格 1）；
+    /// `indent == 0`（Compact/Narrow）前缀回退基准形态（§9），取
+    /// [`Self::first_prefix_width`]。分叉行与区内行等宽，wrap map、可视高度与
+    /// 列映射不因是否分叉变化（§5）。
+    pub fn process_prefix_width(&self) -> usize {
+        if self.indent == 0 {
+            self.first_prefix_width()
+        } else {
+            (self.indent + 4) as usize
+        }
     }
 
     /// 单行最大宽度 = band_width - 1（最右 1 列留给滚动条 thumb）。
@@ -181,6 +222,61 @@ mod tests {
         assert_eq!(GridSpec::grid_for(60).gap, 2);
         assert_eq!(GridSpec::grid_for(59).gap, 1);
         assert_eq!(GridSpec::grid_for(39).gap, 1);
+    }
+
+    /// 过程区缩进断点矩阵（§1）：Wide/Standard（≥60 列）右移 2 格；
+    /// Compact/Narrow 与嵌套面板（with_content）保持基准列（无缩进、无分叉）。
+    #[test]
+    fn indent_by_breakpoint() {
+        for term in [200u16, 120, 100, 99, 80, 60] {
+            assert_eq!(
+                GridSpec::grid_for(term).indent,
+                2,
+                "term={term}：≥60 列过程区右移 2 格"
+            );
+        }
+        for term in [59u16, 40, 39, 20, 6] {
+            assert_eq!(
+                GridSpec::grid_for(term).indent,
+                0,
+                "term={term}：<60 列不缩进"
+            );
+        }
+        assert_eq!(GridSpec::with_content(100).indent, 0, "嵌套面板沿用基准列");
+    }
+
+    /// 过程区几何（§5/§8）：首行/续行前缀同宽（`indent + 4`），正文预算 =
+    /// `content - indent`，两者之和恒等于文本区（前缀 + content）——右缘不动。
+    /// `<60` 列缩进为 0：预算回退基准，逐列与改动前一致（§9）。
+    #[test]
+    fn process_geometry_keeps_right_edge() {
+        for term in [60u16, 80, 100, 120, 200] {
+            let g = GridSpec::grid_for(term);
+            let indent = g.indent as usize;
+            assert_eq!(
+                g.process_prefix_width(),
+                g.first_prefix_width() + indent,
+                "term={term}：过程区前缀 = 基准前缀 + indent（分叉行与续行等宽）"
+            );
+            assert_eq!(
+                g.process_content_width(),
+                g.content_width() - indent,
+                "term={term}：过程区正文预算 = content - indent"
+            );
+            assert_eq!(
+                g.process_prefix_width() + g.process_content_width(),
+                g.first_prefix_width() + g.content_width(),
+                "term={term}：前缀 + 正文之和与文本区一致（右缘不动）"
+            );
+        }
+        for term in [59u16, 39] {
+            let g = GridSpec::grid_for(term);
+            assert_eq!(
+                g.process_content_width(),
+                g.content_width(),
+                "term={term}：indent == 0 时正文预算回退基准"
+            );
+        }
     }
 
     /// 未触顶（content < 100）：带宽 = 终端宽、不居中、满行宽度 = 终端宽 - 1——

@@ -1,6 +1,6 @@
 use super::CopyButtonInfo;
-use super::group::{SUBAGENT_TOOL_INDENT, SUBAGENT_TOOL_LINES, subagent_error_reason};
-use crate::kit::message_area::grid::GridSpec;
+use super::group::{SUBAGENT_TOOL_LINES, subagent_error_reason};
+use crate::kit::message_area::grid::{GridSpec, ProcessLead};
 use crate::kit::tui_render_unit::{TuiNoteLevel, TuiRenderUnit};
 use crate::truncate::truncate_by_width;
 use unicode_segmentation::UnicodeSegmentation;
@@ -39,12 +39,34 @@ pub(super) fn preview_lines(text: &str, width: usize, limit: usize) -> Vec<Strin
     lines
 }
 
-pub(super) fn icon_button(grid: &GridSpec, logical_idx: usize) -> CopyButtonInfo {
+/// 首行错误符号的点击列区间（§6.4 工具 / §6.6 系统错误共用）。
+///
+/// 过程区首行的符号排在分叉与填充之后（§3），命中列随 `indent` 右移；分叉行与
+/// 区内行前缀等宽（§5），进入形态（`lead`）不改变符号列。
+pub(super) fn icon_button(
+    grid: &GridSpec,
+    logical_idx: usize,
+    _lead: ProcessLead,
+) -> CopyButtonInfo {
+    // `indent == 0`（Compact/Narrow）回退形态里符号仍占 accent 列（§9）。
+    let x_start = if grid.indent == 0 {
+        grid.outer
+    } else {
+        grid.outer
+            .saturating_add(grid.accent)
+            .saturating_add(grid.indent)
+    };
     CopyButtonInfo {
         logical_idx,
-        x_start: grid.outer,
-        x_end: grid.outer.saturating_add(grid.accent),
+        x_start,
+        x_end: x_start.saturating_add(grid.accent),
     }
+}
+
+/// 过程区续行内容起始列（组内工具行 / 失败原因行的符号列）——`process_prefix_width()`
+/// 已按断点覆盖回退形态（`indent == 0` 取基准前缀宽，§9）。
+fn process_content_col(grid: &GridSpec) -> u16 {
+    grid.process_prefix_width() as u16
 }
 
 pub(crate) fn subagent_error_buttons(vm: &TuiRenderUnit, grid: &GridSpec) -> Vec<CopyButtonInfo> {
@@ -61,9 +83,7 @@ pub(crate) fn subagent_error_buttons(vm: &TuiRenderUnit, grid: &GridSpec) -> Vec
         })
         .take(SUBAGENT_TOOL_LINES)
         .collect::<Vec<_>>();
-    let symbol_column = grid
-        .cont_prefix_width()
-        .saturating_add(SUBAGENT_TOOL_INDENT) as u16;
+    let symbol_column = process_content_col(grid);
     let mut buttons = recent
         .iter()
         .enumerate()

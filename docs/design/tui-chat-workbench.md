@@ -52,6 +52,13 @@ active issue。
 - Standard/Compact 使用非模态 bottom drawer；Narrow 可使用全屏详情页；
 - 非模态 Inspector 打开时 composer 保持可见；Modal 打开时背景完全 inert；
 - transcript 延续 `GridSpec`、语义 theme token 与响应式断点；组件不得硬编码颜色；
+- 文本区（user 气泡与 assistant 正文）保持基准列；工具卡片、系统注记/提醒、提问块、
+  Todo 摘要、分隔线、折叠组与气泡内 reasoning 等过程区 entry 在 Wide/Standard（≥60 列）
+  整体右移 2 格，其正文可用宽度相应收窄 2 格，右缘（duration 等 metadata 对齐列）
+  和整带居中不变；
+- 过程区仅在从文本区进入时由首个 entry 首行画 `├──` 分叉；退出不画符号，主竖线 `│`
+  贯穿不换列；Compact/Narrow（<60 列）保持无缩进、无分叉；
+- 子 Agent 组内工具行与组头同列；
 - expanded preview 的视觉行数有界，超出时明确显示 `Open details` 与完整性状态。
 
 Tool row 的 `verb` 使用可信 title/canonical name；`primary object` 回答“对什么做”，路径

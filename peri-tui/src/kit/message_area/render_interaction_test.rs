@@ -98,3 +98,52 @@ fn test_interaction_completed_expanded_shows_question() {
     assert!(text.contains("[✓ Deny]"), "选中项 ✓ 标记，实际 {text:?}");
     assert!(text.contains("[Allow once]"), "未选项仍可见，实际 {text:?}");
 }
+
+/// §6.8/§3 选项列区间（`InteractionLayout.option_cols`）随过程区前缀宽右移：
+/// 命中区间等于渲染行里 `[label]` 的实际列区间（不落在缩进空格上）；
+/// <60 列前缀回退基准形态（§9）时列区间同样跟随。
+#[test]
+fn test_interaction_option_cols_follow_process_prefix_width() {
+    crate::i18n::init(Some("en"));
+    let vm = TuiRenderUnit::TuiAskUserBlock(pending_permission_block());
+    for term in [80u16, 59] {
+        let grid = GridSpec::grid_for(term);
+        let expected_col = if grid.indent == 0 {
+            grid.cont_prefix_width()
+        } else {
+            grid.process_prefix_width()
+        };
+        let mut cache = crate::kit::markdown::MarkdownRenderCache::default();
+        let (lines, _, layout, _) = super::vm_to_lines_cached(&vm, &grid, &mut cache, true);
+        let layout = layout.expect("pending 态返回选项布局");
+        assert_eq!(layout.option_rows.len(), 1, "term={term}: 横向共享一行");
+        let row = layout.option_rows[0];
+
+        // 渲染列：累计前序 span 宽度 + 同 span 内前导文本宽度
+        let mut col = 0usize;
+        let mut rendered = None;
+        for span in &lines[row].spans {
+            if let Some(pos) = span.content.find("[Allow once]") {
+                rendered = Some(col + span.content[..pos].width());
+            }
+            col += span.content.width();
+        }
+        let rendered = rendered.expect("term={term}: 选项行含 [Allow once]");
+        assert_eq!(rendered, expected_col, "term={term}: 选项列 = 过程区前缀宽");
+        assert_eq!(
+            layout.option_cols[0],
+            Some((rendered as u16, (rendered + "[Allow once]".width()) as u16)),
+            "term={term}: 命中区间与渲染列一致"
+        );
+        let (second_start, _) = layout.option_cols[1].expect("term={term}: 第二选项可命中");
+        assert_eq!(
+            second_start as usize,
+            rendered + "[Allow once]".width() + 2,
+            "term={term}: 选项间 2 空格分隔"
+        );
+        // ≥60 列：选项已右移，不再落在文本区基准列
+        if grid.indent > 0 {
+            assert!(rendered > grid.first_prefix_width());
+        }
+    }
+}

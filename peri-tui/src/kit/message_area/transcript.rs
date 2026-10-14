@@ -1,7 +1,7 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Arc;
 
-use super::grid::GridSpec;
+use super::grid::{GridSpec, ProcessLead};
 use super::selection::{SlotIndex, SlotLines};
 use super::vm_cache::VmCacheSlot;
 use crate::kit::atoms::{TranscriptPublication, ViewModelsSnapshot};
@@ -9,6 +9,77 @@ use crate::kit::entry_render_cache::{EntryInvalidation, EntryRenderContext};
 use crate::kit::tui_render_unit::TuiRenderUnit;
 
 const HEAVY_CACHE_BUDGET: usize = 16 * 1024 * 1024;
+
+/// entry 在时间轴上的起止列区间（§7）：文本区 = 基准列，过程区 = 右移 `indent`。
+///
+/// 相邻判定只看「本 entry 起点 zone」与「前一个产出行 entry 的终点 zone」——
+/// 从文本区进入过程区画分叉，区内接续不画符。
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum EntryZone {
+    Text,
+    Process,
+}
+
+/// entry 起点 zone（§7）：AssistantBubble 有 reasoning 时 reasoning 先行 → 过程区，
+/// 否则与正文同为文本区；其余变体（工具卡片 / 子 Agent 组 / 折叠组 / 系统 / 交互 /
+/// 分隔线 / Todo）整体属过程区。
+fn start_zone(vm: &TuiRenderUnit) -> EntryZone {
+    match vm {
+        TuiRenderUnit::TuiAssistantBubble(data) if data.reasoning.is_some() => EntryZone::Process,
+        TuiRenderUnit::TuiAssistantBubble(_) | TuiRenderUnit::TuiUserBubble(_) => EntryZone::Text,
+        _ => EntryZone::Process,
+    }
+}
+
+/// entry 终点 zone（§7）：AssistantBubble 正文非空 → 文本区，否则等于起点
+/// （纯 reasoning 块整块留在过程区）。
+fn end_zone(vm: &TuiRenderUnit) -> EntryZone {
+    match vm {
+        TuiRenderUnit::TuiAssistantBubble(data) if !data.text.is_empty() => EntryZone::Text,
+        TuiRenderUnit::TuiAssistantBubble(_) => start_zone(vm),
+        TuiRenderUnit::TuiUserBubble(_) => EntryZone::Text,
+        _ => EntryZone::Process,
+    }
+}
+
+/// entry 是否产出渲染行——0 行 entry（空 bubble / 空 user prompt）不参与相邻判定（§7）。
+/// 判定条件与 `render::vm_to_lines_cached_with_layout` 的 0 行早返回同源，两处须同步。
+fn produces_lines(vm: &TuiRenderUnit) -> bool {
+    match vm {
+        TuiRenderUnit::TuiAssistantBubble(data) => {
+            !(data.text.is_empty() && data.reasoning.is_none())
+        }
+        TuiRenderUnit::TuiUserBubble(data) => {
+            data.reminder.is_some() || !data.text.is_empty() || !data.attachments.is_empty()
+        }
+        _ => true,
+    }
+}
+
+/// 计算 slot 的过程区进入形态（§6）：entry 起点为过程区、且前一个「产出行 entry」
+/// 终点为文本区 → [`ProcessLead::Branch`]；首个 entry 恒 [`ProcessLead::Inline`]
+/// （避免悬空分叉）。区间首 slot 也读 `items[slot - 1]`——相邻关系不因重建区间而变。
+///
+/// transcript_index 的按需物化同用此判定，保证按需重渲染与常驻渲染同列。
+pub(super) fn process_lead(items: &im::Vector<TuiRenderUnit>, slot: usize) -> ProcessLead {
+    let Some(vm) = items.get(slot) else {
+        return ProcessLead::Inline;
+    };
+    if start_zone(vm) != EntryZone::Process {
+        return ProcessLead::Inline;
+    }
+    for index in (0..slot).rev() {
+        let previous = &items[index];
+        if !produces_lines(previous) {
+            continue;
+        }
+        return match end_zone(previous) {
+            EntryZone::Text => ProcessLead::Branch,
+            EntryZone::Process => ProcessLead::Inline,
+        };
+    }
+    ProcessLead::Inline
+}
 
 #[derive(Default)]
 pub(super) struct Transcript {
@@ -122,8 +193,17 @@ impl Transcript {
                 if matches!(vm, TuiRenderUnit::TuiAskUserBlock(block) if block.pending) {
                     self.anchors.insert(slot);
                 }
-                if global || slot >= previous_length || !caches[slot].matches_content(vm) {
-                    self.ensure_slot(slot, vm, caches, grid, width, &context, frame);
+                // lead 翻转（相邻 entry 的 zone 变化）必须重渲染该 slot（不影响其他
+                // slot）；已淘汰的 slot 没有行可改，等回到视口时按当时的 lead 渲染。
+                let lead = process_lead(&snapshot.items, slot);
+                let lead_flipped =
+                    caches[slot].lines.is_some() && caches[slot].entry.lead() != Some(lead);
+                if global
+                    || slot >= previous_length
+                    || !caches[slot].matches_content(vm)
+                    || lead_flipped
+                {
+                    self.ensure_slot(slot, vm, caches, grid, width, &context, frame, lead);
                     self.enforce_budget(caches, &pinned);
                 }
             }
@@ -140,6 +220,7 @@ impl Transcript {
             .map(|(&slot, _)| slot)
             .collect();
         for slot in animated {
+            let lead = process_lead(&snapshot.items, slot);
             self.ensure_slot(
                 slot,
                 &snapshot.items[slot],
@@ -148,10 +229,12 @@ impl Transcript {
                 width,
                 &context,
                 frame,
+                lead,
             );
         }
         for slot in viewport.clone() {
             if caches[slot].lines.is_none() {
+                let lead = process_lead(&snapshot.items, slot);
                 self.ensure_slot(
                     slot,
                     &snapshot.items[slot],
@@ -160,6 +243,7 @@ impl Transcript {
                     width,
                     &context,
                     frame,
+                    lead,
                 );
             }
             self.touch(slot);
@@ -184,10 +268,11 @@ impl Transcript {
         width: u16,
         context: &EntryRenderContext,
         frame: u64,
+        lead: ProcessLead,
     ) {
         let cache = &mut caches[slot];
         drop(cache.lines.take());
-        let invalidation = cache.entry.ensure(vm, &grid, context.clone(), frame);
+        let invalidation = cache.entry.ensure(vm, &grid, context.clone(), frame, lead);
         let layout_changed = matches!(
             invalidation,
             EntryInvalidation::Content | EntryInvalidation::Layout
@@ -289,6 +374,7 @@ impl Transcript {
         let context = self.context.clone().unwrap();
         for slot in viewport.clone() {
             if caches[slot].lines.is_none() {
+                let lead = process_lead(&snapshot.items, slot);
                 self.ensure_slot(
                     slot,
                     &snapshot.items[slot],
@@ -297,6 +383,7 @@ impl Transcript {
                     self.width,
                     &context,
                     self.frame.unwrap(),
+                    lead,
                 );
             }
             self.touch(slot);

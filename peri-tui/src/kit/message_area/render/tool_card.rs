@@ -1,5 +1,5 @@
 use crate::i18n;
-use crate::kit::message_area::grid::{Breakpoint, GridSpec};
+use crate::kit::message_area::grid::{Breakpoint, GridSpec, ProcessLead};
 use crate::kit::tui_render_unit::{
     FoldState, TuiDiffBlock, TuiHunkLineKind, TuiTodoChangeKind, TuiTodoPresentation, TuiToolCard,
     TuiToolPresentation,
@@ -12,8 +12,9 @@ use ratatui_kit::ratatui::text::{Line, Span};
 use unicode_width::UnicodeWidthStr;
 
 use super::helpers::{
-    compact_output_lines, cont_prefix, diff_change_summary, first_prefix, fit_summary_to_content,
-    format_completed_duration, format_running_duration, place_meta, status_symbol_and_color, sym,
+    compact_output_lines, diff_change_summary, fit_summary_to_content, format_completed_duration,
+    format_running_duration, place_meta, process_cont_prefix, process_first_prefix,
+    status_symbol_and_color, sym,
 };
 
 /// 工具输出展开的最大行数（与历史 expanded 行为一致）。
@@ -21,15 +22,21 @@ const TOOL_OUTPUT_MAX_LINES: usize = 4;
 
 /// §6.4 Tool activity：compact 行，不是重型 card。
 ///
-/// - 首行 `[◐|✓|×][gap]{Verb}`（单 bold 锚点）`{summary}` + 后缀 + duration 三档。
+/// - 首行 `[outer][│|├][indent 填充][◐|✓|×][空格]{Verb}`（单 bold 锚点）`{summary}`
+///   + 后缀 + duration 三档——过程区右移 `indent`，进入分叉由 `lead` 决定（§3/§6）。
+/// - 续行 `[outer][│][indent + 2 空格]{内容}`：与首行标签同列（§4/§5）。
 /// - summary 着色：Bash → syntax.command；Read/Write/Edit → syntax.path；其余 muted。
 /// - error：× + status.error 符号色 + 明确错误词（`— Failed`），正文不整块染红。
 /// - running（Preview）：仅活动行（运行中无 output）；completed：折叠单行 /
 ///   展开输出（≤4 行）；Bash 展开显示 `$ command` + 分隔线 + 输出。
-pub(super) fn render_tool_card_lines(data: &TuiToolCard, grid: &GridSpec) -> Vec<Line<'static>> {
+pub(super) fn render_tool_card_lines(
+    data: &TuiToolCard,
+    grid: &GridSpec,
+    lead: ProcessLead,
+) -> Vec<Line<'static>> {
     let plan = project_tool_render_plan(data, grid);
     let resolved = resolve_tool_render_plan(data, plan);
-    render_tool_plan(data, resolved, grid)
+    render_tool_plan(data, resolved, grid, lead)
 }
 
 /// Presentation 只投影 header/detail 候选内容；状态、fold、prefix 与时长由
@@ -115,6 +122,7 @@ fn render_tool_plan(
     data: &TuiToolCard,
     plan: ResolvedToolRenderPlan,
     grid: &GridSpec,
+    lead: ProcessLead,
 ) -> Vec<Line<'static>> {
     let sem = THEME_ATOM.state().read().semantic;
     let (status_symbol, symbol_color) =
@@ -124,11 +132,14 @@ fn render_tool_plan(
     } else {
         status_symbol
     };
-    let mut spans = first_prefix(grid, &symbol, Style::default().fg(symbol_color));
+    let mut spans = process_first_prefix(grid, &symbol, Style::default().fg(symbol_color), lead);
     if data.is_error {
-        spans[1] = Span::styled(sym().error, Style::default().fg(symbol_color));
+        // 错误符号恒在前缀的倒数第二位（末位是分隔空格）——窄屏首行前缀把符号位
+        // 退化为 bullet，错误态换回显式错误符号（§15 error 永不隐藏）。
+        let symbol_span = spans.len().saturating_sub(2);
+        spans[symbol_span] = Span::styled(sym().error, Style::default().fg(symbol_color));
     }
-    let label = truncate_by_width(&plan.label, grid.content_width().max(1));
+    let label = truncate_by_width(&plan.label, grid.process_content_width().max(1));
     let label_width = label.width();
     spans.push(Span::styled(
         label,
@@ -137,15 +148,16 @@ fn render_tool_plan(
             .add_modifier(Modifier::BOLD),
     ));
 
-    let error_word = if data.is_error && grid.content_width() > label_width.saturating_add(2) {
-        format!(" \u{2014} {}", i18n::tr("msg-status-failed"))
-    } else {
-        String::new()
-    };
+    let error_word =
+        if data.is_error && grid.process_content_width() > label_width.saturating_add(2) {
+            format!(" \u{2014} {}", i18n::tr("msg-status-failed"))
+        } else {
+            String::new()
+        };
     let fixed_width = error_word.width() + plan.suffix.width() + 2;
     let used_width = label_width;
     let budget = grid
-        .content_width()
+        .process_content_width()
         .saturating_sub(used_width + fixed_width)
         .max(1);
     let summary = truncate_by_width(&plan.summary, budget);
@@ -174,6 +186,9 @@ fn render_tool_plan(
         data.completed_duration_ms
             .and_then(format_completed_duration)
     };
+    // 正文裁剪先于 gutter 放置（helpers `fit_summary_to_content` 的调用约定）：
+    // 裁剪会改变行宽，`used` 必须在裁剪后重算，duration 才落在带右缘。
+    fit_summary_to_content(&mut spans, grid);
     let used: usize = spans.iter().map(|span| span.content.width()).sum();
     if let Some(meta) = duration_text
         .as_deref()
@@ -181,13 +196,13 @@ fn render_tool_plan(
     {
         spans.extend(meta);
     }
-    fit_summary_to_content(&mut spans, grid);
 
     let mut lines = vec![Line::from(spans)];
     if data.is_error {
         if data.fold != FoldState::Collapsed {
-            for text in super::error::preview_lines(&data.output_summary, grid.content_width(), 2) {
-                let mut spans = cont_prefix(grid, sem.accents.tool);
+            let width = grid.process_content_width();
+            for text in super::error::preview_lines(&data.output_summary, width, 2) {
+                let mut spans = process_cont_prefix(grid, sem.accents.tool);
                 spans.push(Span::styled(text, Style::default().fg(sem.status.error)));
                 lines.push(Line::from(spans));
             }
@@ -196,7 +211,7 @@ fn render_tool_plan(
     }
     if data.fold != FoldState::Collapsed {
         for detail in plan.details {
-            let mut spans = cont_prefix(grid, sem.accents.tool);
+            let mut spans = process_cont_prefix(grid, sem.accents.tool);
             spans.extend(detail.spans);
             lines.push(Line::from(spans));
         }
@@ -227,7 +242,7 @@ fn project_todo_tool(
 ) -> ToolRenderPlan {
     let sem = THEME_ATOM.state().read().semantic;
     const TODO_DETAIL_PREFIX_WIDTH: usize = 2;
-    let detail_width = grid.content_width().max(1);
+    let detail_width = grid.process_content_width().max(1);
     let label = format!("TodoUpdate ({}/{})", todo.completed_count, todo.total_count);
     let completed_details: Vec<Line<'static>> = todo
         .changes
@@ -275,7 +290,8 @@ fn project_todo_tool(
 
 fn project_generic_tool(data: &TuiToolCard, grid: &GridSpec) -> ToolRenderPlan {
     let sem = THEME_ATOM.state().read().semantic;
-    let content = grid.content_width();
+    // 展开体都是过程区续行——正文可用宽度 = 过程区预算（§8，右缘不动）。
+    let content = grid.process_content_width();
     // builtin 一等工具的模型面名字是 effective name（`mcp__workspace__Bash`）：
     // 按名判定先经 IF-D15 归一 helper 换回原始工具名，未命中回落原样。
     let name = original_tool_name_of_effective(&data.tool_name).unwrap_or(data.tool_name.as_str());
@@ -357,7 +373,8 @@ fn project_generic_tool(data: &TuiToolCard, grid: &GridSpec) -> ToolRenderPlan {
 ///   `… +N more lines`。
 fn render_diff_lines(diff: &TuiDiffBlock, grid: &GridSpec) -> Vec<Line<'static>> {
     let sem = THEME_ATOM.state().read().semantic;
-    let content = grid.content_width();
+    // diff 行是过程区续行：正文预算用过程区宽度（§8）。
+    let content = grid.process_content_width();
     // 行号列宽度（4 位右对齐 + 1 空格）——窄屏先隐藏（§6.5）。
     let show_gutter = !matches!(grid.bp, Breakpoint::Compact | Breakpoint::Narrow);
     let mut lines: Vec<Line<'static>> = Vec::new();
@@ -498,10 +515,10 @@ pub(super) fn completed_header_suffix(data: &TuiToolCard) -> String {
     }
 }
 
-/// 内容列铺满的 dim 分隔线；统一 renderer 负责添加续行前缀。
+/// 过程区续行内铺满的 dim 分隔线；统一 renderer 负责添加续行前缀。
 fn divider_fill_line(grid: &GridSpec) -> Line<'static> {
     Line::from(Span::styled(
-        "\u{2500}".repeat(grid.content_width()),
+        "\u{2500}".repeat(grid.process_content_width()),
         Style::default().fg(THEME_ATOM.state().read().semantic.text.dim),
     ))
 }

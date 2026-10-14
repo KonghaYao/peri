@@ -5,7 +5,7 @@ use peri_theme::theme::ThemeDefinition;
 use ratatui_kit::ratatui::text::Line;
 
 use crate::kit::markdown::MarkdownRenderCache;
-use crate::kit::message_area::grid::GridSpec;
+use crate::kit::message_area::grid::{GridSpec, ProcessLead};
 use crate::kit::message_area::render::{
     CopyButtonInfo, ImageLineInfo, InteractionLayout, vm_to_lines_cached_with_layout,
 };
@@ -39,6 +39,7 @@ pub(crate) struct EntryRenderCache {
     hash: Option<u64>,
     variant: Option<Discriminant<TuiRenderUnit>>,
     grid: Option<GridSpec>,
+    lead: Option<ProcessLead>,
     context: Option<EntryRenderContext>,
     frame: u64,
     markdown: MarkdownRenderCache,
@@ -56,6 +57,7 @@ impl EntryRenderCache {
         grid: &GridSpec,
         context: EntryRenderContext,
         frame: u64,
+        lead: ProcessLead,
     ) -> EntryInvalidation {
         let variant = std::mem::discriminant(vm);
         let identity_changed = self.variant != Some(variant)
@@ -63,7 +65,10 @@ impl EntryRenderCache {
                 previous.occurrence != context.occurrence || previous.surface != context.surface
             });
         let content_changed = identity_changed || self.hash != Some(vm.content_hash());
+        // lead 翻转（相邻 entry 的起止 zone 变化，§6）改变本 slot 的行前缀列——
+        // 按 Layout 级重渲染本 slot，不牵动其他 slot 的缓存。
         let layout_changed = self.grid != Some(*grid)
+            || self.lead != Some(lead)
             || self.context.as_ref().is_none_or(|previous| {
                 previous.language != context.language
                     || !Arc::ptr_eq(&previous.theme, &context.theme)
@@ -91,7 +96,7 @@ impl EntryRenderCache {
                     && let Some(first) = Arc::make_mut(&mut self.lines).first_mut()
                 {
                     *first = crate::kit::message_area::render::render_running_reasoning_header(
-                        reasoning, grid,
+                        reasoning, grid, lead,
                     );
                 }
             } else {
@@ -101,6 +106,7 @@ impl EntryRenderCache {
                     &mut self.markdown,
                     None,
                     context.surface == EntrySurface::Message,
+                    lead,
                 );
                 self.lines = Arc::new(lines);
                 self.copy_button = copy_button;
@@ -115,6 +121,7 @@ impl EntryRenderCache {
                 &mut self.markdown,
                 Some(&mut self.markdown_lines),
                 context.surface == EntrySurface::Message,
+                lead,
             );
             self.lines = Arc::new(lines);
             self.copy_button = copy_button;
@@ -124,6 +131,7 @@ impl EntryRenderCache {
         self.hash = Some(vm.content_hash());
         self.variant = Some(variant);
         self.grid = Some(*grid);
+        self.lead = Some(lead);
         self.context = Some(context);
         self.frame = frame;
         invalidation
@@ -131,6 +139,11 @@ impl EntryRenderCache {
 
     pub(crate) fn lines(&self) -> &Arc<Vec<Line<'static>>> {
         &self.lines
+    }
+
+    /// 上次渲染所用的过程区进入形态——transcript 据此判断 lead 翻转（§6）。
+    pub(crate) fn lead(&self) -> Option<ProcessLead> {
+        self.lead
     }
 
     pub(crate) fn markdown_lines(&self) -> &MarkdownLineCache {

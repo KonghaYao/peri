@@ -359,3 +359,186 @@ fn test_semantic_user_bubble() {
     let body = sem_at(&vm, 1, &grid).expect("正文行");
     assert_eq!(body, "重构消息流", "正文剥前缀，实际: {body:?}");
 }
+
+// ── [S3 §9] 过程区前缀（缩进 + 分叉）不进入复制语义 ──────────────────────
+
+/// 过程区行（进入分叉 `├──` / 区内 `│` + 缩进填充）复制时剥净前缀：`│`/`├`/`─`
+/// 与缩进空格都不出现在语义文本里；工具行（header + 输出）与气泡混排
+/// （reasoning 过程段 + md 正文段）逐行成立。
+#[test]
+fn test_semantic_process_prefix_and_branch_are_stripped() {
+    crate::i18n::init(Some("en"));
+    let grid = GridSpec::grid_for(80);
+
+    // 工具卡：进入分叉形态（col1 ├）
+    let tool = TuiRenderUnit::TuiToolCard(TuiToolCard {
+        fold: FoldState::Expanded,
+        output_summary: "out1\nout2".into(),
+        ..tool_card("Read", "src/main.rs", false, false)
+    });
+    let mut cache = crate::kit::markdown::MarkdownRenderCache::default();
+    let (lines, ..) = super::vm_to_lines_cached_with_layout(
+        &tool,
+        &grid,
+        &mut cache,
+        None,
+        false,
+        ProcessLead::Branch,
+    );
+    assert!(
+        line_text(&lines[0]).contains('\u{251c}'),
+        "首行应是进入分叉，实际 {:?}",
+        line_text(&lines[0])
+    );
+    assert_eq!(
+        sem_at_lines(&tool, &lines, 0, &grid).as_deref(),
+        Some("Read src/main.rs \u{2014} 2 lines"),
+        "header 复制 label + summary + 完成后缀（无符号 / 分叉 / duration）"
+    );
+    assert_eq!(
+        sem_at_lines(&tool, &lines, 1, &grid).as_deref(),
+        Some("out1"),
+        "输出行剥离缩进前缀"
+    );
+    assert_eq!(
+        sem_at_lines(&tool, &lines, 2, &grid).as_deref(),
+        Some("out2"),
+        "输出行剥离缩进前缀"
+    );
+
+    // 气泡混排：reasoning 走过程区（首行分叉 / 续行缩进），正文回基准列
+    let bubble = TuiRenderUnit::TuiAssistantBubble(
+        TuiAssistantBubble {
+            started_at: None,
+            duration_ms: None,
+            text: "正文回答".to_string(),
+            reasoning: Some(TuiReasoningBlock {
+                text: "long thought".to_string(),
+                fold: FoldState::Expanded,
+                status: EntryStatus::Completed,
+                is_running: false,
+                started_at: None,
+                duration_ms: Some(1_000),
+            }),
+            message_id: None,
+            content_hash: 2,
+        }
+        .into(),
+    );
+    let mut cache = crate::kit::markdown::MarkdownRenderCache::default();
+    let (lines, ..) = super::vm_to_lines_cached_with_layout(
+        &bubble,
+        &grid,
+        &mut cache,
+        None,
+        false,
+        ProcessLead::Branch,
+    );
+    let header_idx = lines
+        .iter()
+        .position(|l| line_text(l).contains("Thought for 1s"))
+        .expect("reasoning header");
+    assert_eq!(
+        sem_at_lines(&bubble, &lines, header_idx, &grid).as_deref(),
+        Some("Thought for 1s \u{b7} 1 lines"),
+        "reasoning 摘要剥净分叉前缀"
+    );
+    let thought_idx = lines
+        .iter()
+        .position(|l| line_text(l).contains("long thought"))
+        .expect("reasoning 正文");
+    assert_eq!(
+        sem_at_lines(&bubble, &lines, thought_idx, &grid).as_deref(),
+        Some("long thought"),
+        "reasoning 续行剥净缩进"
+    );
+    let answer_idx = lines
+        .iter()
+        .position(|l| line_text(l).contains("正文回答"))
+        .expect("正文行");
+    assert_eq!(
+        sem_at_lines(&bubble, &lines, answer_idx, &grid).as_deref(),
+        Some("正文回答"),
+        "正文段回基准列"
+    );
+
+    // 全量属性：语义文本不含任何结构字形，也不以缩进空格开头
+    for idx in 0..lines.len() {
+        let Some(text) = sem_at_lines(&bubble, &lines, idx, &grid) else {
+            continue;
+        };
+        assert!(
+            !text.contains('\u{2502}') && !text.contains('\u{251c}') && !text.contains('\u{2500}'),
+            "行 {idx} 语义文本残留结构字形：{text:?}"
+        );
+        assert!(
+            !text.starts_with(' '),
+            "行 {idx} 语义文本残留缩进空格：{text:?}"
+        );
+    }
+}
+
+/// 语义提取辅助：对已渲染行按 `local_idx` 取语义文本（复制路径口径）。
+fn sem_at_lines(
+    vm: &TuiRenderUnit,
+    lines: &[Line<'static>],
+    local_idx: usize,
+    grid: &GridSpec,
+) -> Option<String> {
+    let line = lines.get(local_idx)?;
+    semantic_line_text(vm, local_idx, line, grid)
+}
+
+/// 过程区符号行（系统 note / Todo 摘要）复制时同样剥净前缀与状态符号：
+/// 首行语义 = 正文（`!` / `◼` 不进剪贴板），续行剥缩进。
+#[test]
+fn test_semantic_process_note_and_todo_strip_prefix() {
+    let grid = GridSpec::grid_for(80);
+
+    let note = TuiRenderUnit::TuiSystemNote(TuiSystemNote {
+        text: "warning line\nsecond line".to_string(),
+        level: TuiNoteLevel::Warning,
+        content_hash: 7,
+    });
+    let mut cache = crate::kit::markdown::MarkdownRenderCache::default();
+    let (lines, ..) = super::vm_to_lines_cached_with_layout(
+        &note,
+        &grid,
+        &mut cache,
+        None,
+        false,
+        ProcessLead::Branch,
+    );
+    assert!(
+        line_text(&lines[0]).contains('\u{251c}'),
+        "note 首行应是进入分叉，实际 {:?}",
+        line_text(&lines[0])
+    );
+    assert_eq!(
+        sem_at_lines(&note, &lines, 0, &grid).as_deref(),
+        Some("warning line"),
+        "符号行剥净分叉前缀与 `!`"
+    );
+    assert_eq!(
+        sem_at_lines(&note, &lines, 1, &grid).as_deref(),
+        Some("second line"),
+        "续行剥净缩进"
+    );
+
+    let todo =
+        TuiRenderUnit::TuiTodoSummary(TuiTodoSummary::new("3/7 tasks \u{b7} Running tests".into()));
+    let mut cache = crate::kit::markdown::MarkdownRenderCache::default();
+    let (lines, ..) = super::vm_to_lines_cached_with_layout(
+        &todo,
+        &grid,
+        &mut cache,
+        None,
+        false,
+        ProcessLead::Branch,
+    );
+    assert_eq!(
+        sem_at_lines(&todo, &lines, 0, &grid).as_deref(),
+        Some("3/7 tasks \u{b7} Running tests"),
+        "Todo 摘要行剥净前缀与 `◼`"
+    );
+}

@@ -355,7 +355,8 @@ fn test_reasoning_preview_tail_shows_end_of_long_line() {
     );
     let lines = vm_to_lines(&vm, &grid);
 
-    // content = 74 → 304 字符折 5 个视觉行，取最后 4 行（HEAD 所在第 1 行被挤出）。
+    // 过程区正文宽 = 74 - 2 = 72 → 304 字符折 5 个视觉行，取最后 4 行
+    // （HEAD 所在第 1 行被挤出）。
     assert_eq!(lines.len(), 5, "块高应为 1 header + 4 tail");
     assert_eq!(body_vline_count(&lines), 4, "Preview tail 应为 4 行");
     let tail_first = line_text(&nth_nonempty_line(&lines, 1));
@@ -375,13 +376,14 @@ fn test_reasoning_preview_tail_shows_end_of_long_line() {
 }
 
 /// 4→5 视觉行跨越后块高恒定 `1 + min(n, 4)`——流式增长不再引起高度跳动（§6.3）。
+/// 行宽按过程区正文预算（§8：`content - indent`）折算视觉行数。
 #[test]
 fn test_reasoning_height_stable_across_4_to_5_visual_lines() {
     crate::i18n::init(Some("en"));
     let grid = GridSpec::grid_for(80);
     for n in [3usize, 4, 5, 6, 8] {
         let reasoning = TuiReasoningBlock {
-            text: "a".repeat(74 * n),
+            text: "a".repeat(grid.process_content_width() * n),
             fold: FoldState::Preview,
             status: EntryStatus::Running,
             is_running: true,
@@ -741,5 +743,100 @@ fn test_assistant_duration_meta_three_breakpoints() {
     assert!(
         !all_text(&compact).contains("12.4s"),
         "Compact 应隐藏 duration"
+    );
+}
+
+/// §6/§7 气泡内混排：reasoning 段走过程区（进入分叉 + 首行/续行同列），正文段回
+/// 基准列（退出不画符）——`lead` 只作用于过程段，正文段前端前缀保持文本区形态。
+#[test]
+fn test_bubble_reasoning_uses_process_zone_body_returns_to_baseline() {
+    crate::i18n::init(Some("en"));
+    let grid = GridSpec::grid_for(80);
+    let reasoning = TuiReasoningBlock {
+        text: "long thought".to_string(),
+        fold: FoldState::Expanded,
+        status: EntryStatus::Completed,
+        is_running: false,
+        started_at: None,
+        duration_ms: Some(1_000),
+    };
+    let vm = TuiRenderUnit::TuiAssistantBubble(
+        TuiAssistantBubble {
+            started_at: None,
+            duration_ms: None,
+            text: "正文回答".to_string(),
+            reasoning: Some(reasoning),
+            message_id: None,
+            content_hash: 1,
+        }
+        .into(),
+    );
+    let mut cache = crate::kit::markdown::MarkdownRenderCache::default();
+    let (lines, ..) = super::vm_to_lines_cached_with_layout(
+        &vm,
+        &grid,
+        &mut cache,
+        None,
+        false,
+        ProcessLead::Branch,
+    );
+
+    // reasoning header（过程区首行）：col1 = ├、col2–3 = ──、col4 = 符号、摘要 col6
+    let header = &lines[0];
+    assert_eq!(header.spans[0].content.as_ref(), " ", "outer 空列");
+    assert_eq!(header.spans[1].content.as_ref(), "\u{251c}", "进入分叉");
+    assert_eq!(
+        header.spans[2].content.as_ref(),
+        "\u{2500}\u{2500}",
+        "分叉 fill"
+    );
+    assert_eq!(
+        header.spans[3].content.as_ref(),
+        "\u{2502}",
+        "符号在 fill 之后"
+    );
+    assert_eq!(header.spans[4].content.as_ref(), " ", "符号后的分隔空格");
+    let header_text = line_text(header);
+    assert!(
+        header_text.contains("Thought for 1s"),
+        "实际 {header_text:?}"
+    );
+    let header_col: usize = header.spans[..5].iter().map(|s| s.content.width()).sum();
+    assert_eq!(header_col, grid.process_prefix_width());
+
+    // reasoning 正文（过程区续行）：`[outer][│][indent + 2 空格]` → 与 header 摘要同列
+    let body = lines
+        .iter()
+        .find(|l| line_text(l).contains("long thought"))
+        .expect("reasoning 正文行");
+    assert_eq!(body.spans[1].content.as_ref(), "\u{2502}");
+    assert_eq!(body.spans[2].content.as_ref(), "    ", "indent + 2 空格");
+    let body_col: usize = body.spans[..3].iter().map(|s| s.content.width()).sum();
+    assert_eq!(body_col, header_col, "续行与首行同列");
+
+    // 正文段（文本区）：回基准列 4，无分叉
+    let answer = lines
+        .iter()
+        .find(|l| line_text(l).contains("正文回答"))
+        .expect("正文行");
+    assert_eq!(answer.spans[0].content.as_ref(), " ");
+    assert_eq!(answer.spans[1].content.as_ref(), "\u{2502}");
+    assert_eq!(answer.spans[2].content.as_ref(), "  ", "文本区 gap");
+    let answer_col: usize = answer.spans[..3].iter().map(|s| s.content.width()).sum();
+    assert_eq!(answer_col, grid.first_prefix_width(), "正文回基准列");
+    assert!(
+        !line_text(answer).contains('\u{251c}'),
+        "退出不画分叉，实际 {:?}",
+        line_text(answer)
+    );
+
+    // 整个气泡只有进入过程区那一处分叉
+    assert_eq!(
+        lines
+            .iter()
+            .filter(|l| line_text(l).contains('\u{251c}'))
+            .count(),
+        1,
+        "分叉只出现在 reasoning 首行"
     );
 }

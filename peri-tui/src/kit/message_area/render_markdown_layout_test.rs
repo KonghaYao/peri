@@ -395,8 +395,14 @@ fn test_nested_list_items_stay_compact_between_top_level_items() {
     let grid = GridSpec::grid_for(80);
     let mut md_cache = crate::kit::markdown::MarkdownRenderCache::default();
     let mut layout = crate::kit::message_area::vm_cache::MarkdownLineCache::default();
-    let (lines, ..) =
-        super::vm_to_lines_cached_with_layout(&vm, &grid, &mut md_cache, Some(&mut layout), false);
+    let (lines, ..) = super::vm_to_lines_cached_with_layout(
+        &vm,
+        &grid,
+        &mut md_cache,
+        Some(&mut layout),
+        false,
+        ProcessLead::Inline,
+    );
 
     let index_of = |needle: &str| {
         lines
@@ -452,6 +458,7 @@ fn test_assistant_bubble_resize_rebuilds_stable_chunks_without_panic() {
             &mut md_cache,
             Some(&mut layout),
             false,
+            ProcessLead::Inline,
         );
 
         let (_, stable) = layout
@@ -490,8 +497,14 @@ fn test_streaming_table_without_leading_pipe_stays_visible() {
     let grid = GridSpec::grid_for(80);
     let mut md_cache = crate::kit::markdown::MarkdownRenderCache::default();
     let mut layout = crate::kit::message_area::vm_cache::MarkdownLineCache::default();
-    let (lines, ..) =
-        super::vm_to_lines_cached_with_layout(&vm, &grid, &mut md_cache, Some(&mut layout), false);
+    let (lines, ..) = super::vm_to_lines_cached_with_layout(
+        &vm,
+        &grid,
+        &mut md_cache,
+        Some(&mut layout),
+        false,
+        ProcessLead::Inline,
+    );
 
     let stable_text: String = layout
         .stable_overlay()

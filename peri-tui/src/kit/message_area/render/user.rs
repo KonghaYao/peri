@@ -1,5 +1,5 @@
 use crate::i18n;
-use crate::kit::message_area::grid::GridSpec;
+use crate::kit::message_area::grid::{GridSpec, ProcessLead};
 use crate::kit::tui_render_unit::{FoldState, UserAttachment};
 use crate::truncate::{truncate_by_width, wrap_by_width};
 use fluent_bundle::FluentValue;
@@ -9,16 +9,22 @@ use ratatui_kit::ratatui::text::{Line, Span};
 use unicode_width::UnicodeWidthStr;
 
 use super::ImageLineInfo;
-use super::helpers::{cont_prefix, first_prefix, prefixed_cont_line, sym};
+use super::helpers::{
+    cont_prefix, first_prefix, prefixed_cont_line, process_cont_prefix, process_first_prefix, sym,
+};
 
 /// 用户 prompt 正文最多展示的视觉行数（§6.1），超出显示 `… +N lines`。
 const USER_BODY_MAX_LINES: usize = 6;
 
 // ── 各变体渲染函数（Slice 3：统一网格 + 无气泡 + 垂直节奏）──────────────
 
+/// 系统提醒（§7：过程区 entry）——首行 `[outer][│ 或 ├][indent 填充][符号][空格]`
+/// 后接折叠标记与标题，续行 `[outer][│][indent + 2 空格]` 与首行标签同列
+/// （§4/§5）；折行预算取 `process_content_width()`（§8 右缘不动）。
 pub(super) fn render_system_reminder_lines(
     data: &crate::kit::tui_render_unit::TuiSystemReminder,
     grid: &GridSpec,
+    lead: ProcessLead,
 ) -> Vec<Line<'static>> {
     let sem = THEME_ATOM.state().read().semantic;
     let marker = if data.legacy {
@@ -50,9 +56,9 @@ pub(super) fn render_system_reminder_lines(
     } else {
         sym().collapsed
     };
-    let mut spans = first_prefix(grid, symbol, Style::default().fg(sem.text.dim));
+    let mut spans = process_first_prefix(grid, symbol, Style::default().fg(sem.text.dim), lead);
     spans.push(Span::styled(
-        truncate_by_width(&heading, grid.content_width()),
+        truncate_by_width(&heading, grid.process_content_width()),
         Style::default().fg(sem.text.dim),
     ));
     let mut lines = vec![Line::from(spans)];
@@ -63,22 +69,18 @@ pub(super) fn render_system_reminder_lines(
                 "reminder-relayed-from",
                 &[("name".into(), FluentValue::from(relay.label()))],
             );
-            lines.push(prefixed_cont_line(
-                grid,
-                sem.accents.reasoning,
-                Line::from(Span::styled(text, Style::default().fg(sem.text.dim))),
-            ));
+            let mut spans = process_cont_prefix(grid, sem.accents.reasoning);
+            spans.push(Span::styled(text, Style::default().fg(sem.text.dim)));
+            lines.push(Line::from(spans));
         }
         for text in data
             .body
             .lines()
-            .flat_map(|line| wrap_by_width(line, grid.content_width()))
+            .flat_map(|line| wrap_by_width(line, grid.process_content_width()))
         {
-            lines.push(prefixed_cont_line(
-                grid,
-                sem.accents.reasoning,
-                Line::from(Span::styled(text, Style::default().fg(sem.text.muted))),
-            ));
+            let mut spans = process_cont_prefix(grid, sem.accents.reasoning);
+            spans.push(Span::styled(text, Style::default().fg(sem.text.muted)));
+            lines.push(Line::from(spans));
         }
     }
     lines
@@ -398,6 +400,10 @@ fn emphasize_user_line(
 
 /// 用户消息内的 system-reminder（§6.1/§6.6）：按来源型 system event 渲染——
 /// 首行 `[!][gap]{来源 label}`，续行 `[│][gap]{摘要}`。
+///
+/// 位置属**文本区**（在用户气泡内，随 `TuiUserBubble` 的文本区 zone）：走基准前缀与
+/// `content_width()`，不参与过程区缩进/分叉——独立成 entry 的提醒才走过程区
+/// （[`render_system_reminder_lines`]）。
 pub(super) fn render_reminder_condensed(
     info: &crate::kit::tui_render_unit::ReminderInfo,
     grid: &GridSpec,

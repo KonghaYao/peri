@@ -105,10 +105,30 @@ fn system_error_icon_is_a_copy_target_even_on_narrow_terminals() {
         );
         let button = button.unwrap();
         assert_eq!(button.logical_idx, 0);
-        assert_eq!((button.x_start, button.x_end), (grid.outer, grid.outer + 1));
+        // 命中列 = 渲染行里错误符号的实际列：≥60 列符号排在过程区 fill 之后（§3），
+        // <60 列前缀回退基准形态、符号占 accent 列（§9）——按钮恒与符号同列。
+        let symbol_span = lines[0]
+            .spans
+            .iter()
+            .position(|span| span.content.as_ref() == super::super::helpers::sym().error)
+            .expect("首行应含错误符号（error 永不隐藏）");
+        let symbol_col: u16 = lines[0].spans[..symbol_span]
+            .iter()
+            .map(|span| span.content.width() as u16)
+            .sum();
         assert_eq!(
-            lines[0].spans[1].content,
-            super::super::helpers::sym().error
+            symbol_col,
+            if grid.indent == 0 {
+                grid.outer
+            } else {
+                grid.outer + grid.accent + grid.indent
+            },
+            "width={width}: 符号列随过程区缩进右移"
+        );
+        assert_eq!(
+            (button.x_start, button.x_end),
+            (symbol_col, symbol_col + 1),
+            "width={width}: 命中列与渲染符号列一致"
         );
         assert_eq!(
             copy_text_at(&vm, button.logical_idx).as_deref(),

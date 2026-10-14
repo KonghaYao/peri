@@ -1,4 +1,4 @@
-use crate::kit::message_area::grid::{Breakpoint, GridSpec};
+use crate::kit::message_area::grid::{Breakpoint, GridSpec, ProcessLead};
 use crate::kit::terminal_caps::SymbolSet;
 use crate::kit::tui_render_unit::TuiDiffBlock;
 use crate::truncate::truncate_by_width;
@@ -134,6 +134,52 @@ pub(super) fn cont_prefix(grid: &GridSpec, color: Color) -> Vec<Span<'static>> {
     ]
 }
 
+/// 过程区首行前缀（§3）：`[outer 空][│/├][fill][符号][空格]`——
+/// `Branch` 的 fill 用 `─` 与 `├` 连成进入分叉，`Inline` 的 fill 用空格；
+/// 状态符号在 fill 之后（accent 列退化为贯通的 `│`/`├`）。
+///
+/// `indent == 0`（Compact/Narrow）回退 [`first_prefix`]：符号回 accent 列、
+/// 不缩进不画分叉（§9，与改动前逐列一致）。
+pub(super) fn process_first_prefix(
+    grid: &GridSpec,
+    symbol: &str,
+    style: Style,
+    lead: ProcessLead,
+) -> Vec<Span<'static>> {
+    if grid.indent == 0 {
+        return first_prefix(grid, symbol, style);
+    }
+    let mut spans = vec![Span::raw(" ")];
+    match lead {
+        ProcessLead::Branch => {
+            spans.push(Span::styled("\u{251c}", style));
+            spans.push(Span::styled("\u{2500}".repeat(grid.indent as usize), style));
+        }
+        ProcessLead::Inline => {
+            spans.push(Span::styled("\u{2502}", style));
+            spans.push(Span::raw(" ".repeat(grid.indent as usize)));
+        }
+    }
+    spans.push(Span::styled(symbol.to_string(), style));
+    spans.push(Span::raw(" "));
+    spans
+}
+
+/// 过程区续行前缀（§4）：`[outer 空][│][indent + 2 空格]`——内容与首行标签同列
+/// （§5 首行/续行前缀同宽）。
+///
+/// `indent == 0`（Compact/Narrow）回退 [`cont_prefix`]（§9）。
+pub(super) fn process_cont_prefix(grid: &GridSpec, color: Color) -> Vec<Span<'static>> {
+    if grid.indent == 0 {
+        return cont_prefix(grid, color);
+    }
+    vec![
+        Span::raw(" "),
+        Span::styled("\u{2502}", Style::default().fg(color)),
+        Span::raw(" ".repeat(grid.indent as usize + 2)),
+    ]
+}
+
 /// 给一行套上续行前缀；Markdown 段落空行也保留 accent 竖线。
 pub(super) fn prefixed_cont_line(
     grid: &GridSpec,
@@ -178,13 +224,27 @@ pub(super) fn place_meta(
 }
 
 /// 用 `truncate_by_width` 截断超宽行内最后一个可变 span（summary），
-/// 保证整行宽度 ≤ content（避免 Paragraph 在视口宽度处二次折行破坏 wrap_map）。
+/// 保证正文（含前缀）宽度 ≤ 前缀宽 + 正文预算（避免 Paragraph 在视口宽度处
+/// 二次折行破坏 wrap_map）。
 ///
 /// 只统计非空白 span 的真实内容宽度——Wide/Standard 断点的右对齐定位填充
-/// （`place_meta` 生成的前导空格）不是内容，不参与超宽判定（否则
-/// 右对齐的 duration/计数会被误截成 `…`）。
+/// （`place_meta` 生成的前导空格）不是内容，不参与超宽判定。
+///
+/// [Why] 上限按行所属区域取：过程区行的前缀比文本区宽 `indent`（§3/§4）且
+/// 正文预算同步收窄为 `process_content_width()`（§8 右缘不动），故上限 =
+/// `process_prefix_width() + process_content_width()`；Compact/Narrow
+/// （`indent == 0`）前缀回退基准形态，保持改动前口径（§9）。
+///
+/// [Call order] 须在 `place_meta` 追加 gutter 元数据**之前**调用：否则右对齐的
+/// duration/计数会成为「最后一个非空白 span」被截成存根（`0.4s` → `0`）——
+/// gutter 在正文预算之外，不参与正文裁剪。裁剪后重算 `used` 再放置元数据，
+/// 右缘仍落在 `line_width()`。
 pub(super) fn fit_summary_to_content(spans: &mut Vec<Span<'static>>, grid: &GridSpec) {
-    let content = grid.content_width();
+    let content = if grid.indent == 0 {
+        grid.content_width()
+    } else {
+        grid.process_prefix_width() + grid.process_content_width()
+    };
     let content_total: usize = spans
         .iter()
         .filter(|s| !s.content.trim().is_empty())

@@ -1,4 +1,4 @@
-use crate::kit::message_area::grid::GridSpec;
+use crate::kit::message_area::grid::{GridSpec, ProcessLead};
 use crate::kit::tui_render_unit::{FoldState, TuiReasoningBlock};
 use crate::truncate::wrap_by_width;
 use peri_theme::atoms::THEME_ATOM;
@@ -6,7 +6,7 @@ use ratatui_kit::ratatui::style::{Modifier, Style};
 use ratatui_kit::ratatui::text::{Line, Span};
 use unicode_width::UnicodeWidthStr;
 
-use super::helpers::{cont_prefix, first_prefix, place_meta};
+use super::helpers::{place_meta, process_cont_prefix, process_first_prefix};
 
 /// Expanded reasoning 正文的最大行数（防超长推理块撑爆视口）。
 const REASONING_BODY_MAX_LINES: usize = 100;
@@ -24,6 +24,9 @@ const REASONING_BODY_MAX_LINES: usize = 100;
 /// - [用户需求] 首行 icon 三态统一为竖线 `│`（与正文续行前缀同形，视觉连续）；
 ///   状态感由颜色承担（Running=status.running / Completed=dim）。
 ///
+/// 行属过程区（§7 reasoning = 过程/过程）：首行符号在分叉/填充之后，正文列与
+/// 续行同列（§3/§4），wrap 宽度取 `process_content_width()`（§8 右缘不动）。
+///
 /// §6.3 视觉行单一事实源：先按 `\n` 分行、逐行 wrap 成视觉行，再丢弃 trim 空行。
 /// tail / 摘要 N / Expanded 正文共用此序列——渲染行数与滚动高度天然一致。
 fn reasoning_visual_lines(text: &str, width: usize) -> Vec<String> {
@@ -36,6 +39,7 @@ fn reasoning_visual_lines(text: &str, width: usize) -> Vec<String> {
 pub(super) fn render_reasoning_block(
     reasoning: &TuiReasoningBlock,
     grid: &GridSpec,
+    lead: ProcessLead,
 ) -> Vec<Line<'static>> {
     let sem = THEME_ATOM.state().read().semantic;
     let caps = *crate::kit::atoms::TERMINAL_CAPS.state().read();
@@ -50,7 +54,7 @@ pub(super) fn render_reasoning_block(
 
     let mut lines: Vec<Line<'static>> = Vec::new();
     // 一次 wrap 出视觉行序列（tail / 摘要 N / Expanded 正文共用，§6.3 单一事实源）。
-    let visual_lines = reasoning_visual_lines(&reasoning.text, grid.content_width());
+    let visual_lines = reasoning_visual_lines(&reasoning.text, grid.process_content_width());
     let line_count = visual_lines.len();
 
     if reasoning.is_running {
@@ -60,7 +64,7 @@ pub(super) fn render_reasoning_block(
         // Preview，Collapsed 只能来自用户覆盖——Space 切换必须有视觉反馈）。
         // 首行 icon 统一竖线（用户需求）；活动感由 running 色 + elapsed + tail
         // 增长承担（§8.2 动画帧不再用于 reasoning）。
-        lines.push(render_running_reasoning_header(reasoning, grid));
+        lines.push(render_running_reasoning_header(reasoning, grid, lead));
 
         let tail_max = match reasoning.fold {
             FoldState::Expanded => REASONING_BODY_MAX_LINES,
@@ -68,7 +72,7 @@ pub(super) fn render_reasoning_block(
             FoldState::Collapsed => 0,
         };
         for tail in visual_lines.iter().rev().take(tail_max).rev() {
-            let mut spans = cont_prefix(grid, sem.accents.reasoning);
+            let mut spans = process_cont_prefix(grid, sem.accents.reasoning);
             spans.push(Span::styled(tail.clone(), body_style));
             lines.push(Line::from(spans));
         }
@@ -92,13 +96,14 @@ pub(super) fn render_reasoning_block(
         } else {
             format!("Thought · {} lines", line_count)
         };
-        let mut spans = first_prefix(grid, "\u{2502}", Style::default().fg(sem.text.dim));
+        let mut spans =
+            process_first_prefix(grid, "\u{2502}", Style::default().fg(sem.text.dim), lead);
         spans.push(Span::styled(summary, Style::default().fg(sem.text.dim)));
         lines.push(Line::from(spans));
 
         if reasoning.fold == FoldState::Expanded {
             for body_line in visual_lines.iter().take(REASONING_BODY_MAX_LINES) {
-                let mut spans = cont_prefix(grid, sem.accents.reasoning);
+                let mut spans = process_cont_prefix(grid, sem.accents.reasoning);
                 spans.push(Span::styled(body_line.clone(), body_style));
                 lines.push(Line::from(spans));
             }
@@ -107,12 +112,20 @@ pub(super) fn render_reasoning_block(
     lines
 }
 
+/// Running 状态行（§6.3）：`│ Thinking…` + elapsed（`place_meta` 右对齐到带右缘，
+/// §8 右缘不动）。
 pub(crate) fn render_running_reasoning_header(
     reasoning: &TuiReasoningBlock,
     grid: &GridSpec,
+    lead: ProcessLead,
 ) -> Line<'static> {
     let sem = THEME_ATOM.state().read().semantic;
-    let mut spans = first_prefix(grid, "\u{2502}", Style::default().fg(sem.status.running));
+    let mut spans = process_first_prefix(
+        grid,
+        "\u{2502}",
+        Style::default().fg(sem.status.running),
+        lead,
+    );
     // 对齐工具卡片语言（§6.4 硬编码英文口径，避免中英混杂）；信息层级
     // 低于工具——label 用 muted（工具 label 为 primary+bold），活动感由
     // ◐（running 色）承担。

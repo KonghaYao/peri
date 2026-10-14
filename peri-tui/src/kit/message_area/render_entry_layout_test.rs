@@ -163,10 +163,21 @@ fn test_empty_assistant_bubble_returns_zero_lines() {
 
 // ── 网格前缀结构（§3.1）───────────────────────────────────────────────
 
-/// 块首行前缀 = [outer 空][accent 符号][gap]；续行前缀 = [outer 空][│][gap]。
+/// 前 `n` 个前缀 span 的累计宽度（正文起点列）——`n` 由该行所属区的前缀形态决定
+/// （文本区 3 段 / 过程区首行 5 段 / 过程区续行 3 段）。
+fn prefix_col(line: &Line<'static>, n: usize) -> usize {
+    line.spans
+        .iter()
+        .take(n)
+        .map(|s| s.content.width())
+        .sum::<usize>()
+}
+
+/// 过程区首行前缀 = `[outer 空][│/├][indent 填充][符号][空格]`（§3）；
+/// 续行前缀 = `[outer 空][│][indent + 2 空格]`（§4）——符号不再占 accent 列。
 #[test]
 fn test_prefix_structure_first_and_continuation() {
-    let grid = GridSpec::grid_for(80); // Standard: outer=1 accent=1 gap=2 content=74
+    let grid = GridSpec::grid_for(80); // Standard: outer=1 accent=1 gap=2 indent=2 content=74
     let vm = TuiRenderUnit::TuiToolCard(tool_card("Read", "src/main.rs", false, false));
     let lines = vm_to_lines(&vm, &grid);
 
@@ -176,15 +187,25 @@ fn test_prefix_structure_first_and_continuation() {
         " ",
         "首行第 1 列 = outer 空 cell"
     );
-    assert_eq!(first.spans[1].content.as_ref(), "\u{2713}", "accent 列 = ✓");
-    // gap 后 content 列：span 索引 3（outer/符号/gap）
-    let content_col = first.spans[..3]
-        .iter()
-        .map(|s| s.content.width())
-        .sum::<usize>();
-    assert_eq!(content_col, grid.first_prefix_width());
+    assert_eq!(
+        first.spans[1].content.as_ref(),
+        "\u{2502}",
+        "accent 列 = 贯通竖线（Inline 不画分叉）"
+    );
+    assert_eq!(first.spans[2].content.as_ref(), "  ", "indent 格填充");
+    assert_eq!(
+        first.spans[3].content.as_ref(),
+        "\u{2713}",
+        "状态符号在 fill 之后（col4）"
+    );
+    assert_eq!(first.spans[4].content.as_ref(), " ", "符号后的分隔空格");
+    assert_eq!(
+        prefix_col(first, 5),
+        grid.process_prefix_width(),
+        "首行标签列 = indent + 4"
+    );
 
-    // 续行前缀 = [outer 空][│][gap]
+    // 续行前缀 = [outer 空][│][indent + 2 空格]——与首行标签同列（§5）
     let tool = TuiRenderUnit::TuiToolCard(TuiToolCard {
         fold: FoldState::Expanded,
         output_summary: "line1\nline2".into(),
@@ -193,17 +214,130 @@ fn test_prefix_structure_first_and_continuation() {
     let lines = vm_to_lines(&tool, &grid);
     let cont = lines
         .iter()
-        .find(|l| l.spans.len() >= 2 && l.spans[1].content.as_ref() == "\u{2502}")
+        .find(|l| {
+            l.spans.len() >= 3
+                && l.spans[1].content.as_ref() == "\u{2502}"
+                && l.spans[2].content.as_ref() == "    "
+        })
         .expect("展开体应有续行前缀");
     assert_eq!(cont.spans[0].content.as_ref(), " ");
     assert_eq!(cont.spans[1].content.as_ref(), "\u{2502}");
+    assert_eq!(cont.spans[2].content.as_ref(), "    ", "indent + 2 空格");
     assert_eq!(
-        cont.spans[..3]
-            .iter()
-            .map(|s| s.content.width())
-            .sum::<usize>(),
-        grid.cont_prefix_width()
+        prefix_col(cont, 3),
+        grid.process_prefix_width(),
+        "续行内容与首行标签同列"
     );
+}
+
+/// 过程区首行（分叉 / 区内）与续行前缀同宽（§5）——wrap map、可视高度与列映射
+/// 不因是否分叉变化；duration 仍右对齐到带右缘（§8，跳过最右滚动条列）。
+#[test]
+fn test_process_prefix_equal_width_and_duration_flush_right() {
+    let grid = GridSpec::grid_for(80);
+    let tool = TuiRenderUnit::TuiToolCard(TuiToolCard {
+        fold: FoldState::Expanded,
+        output_summary: "out1\nout2".into(),
+        ..tool_card("Read", "src/main.rs", false, false)
+    });
+    let mut cache = crate::kit::markdown::MarkdownRenderCache::default();
+    let (lines, ..) = super::vm_to_lines_cached_with_layout(
+        &tool,
+        &grid,
+        &mut cache,
+        None,
+        false,
+        ProcessLead::Branch,
+    );
+    let first = &lines[0];
+    assert_eq!(first.spans[1].content.as_ref(), "\u{251c}", "进入分叉 ├");
+    assert_eq!(
+        first.spans[2].content.as_ref(),
+        "\u{2500}\u{2500}",
+        "分叉 fill 用 ─ 连贯，宽度 = indent"
+    );
+    let cont = lines
+        .iter()
+        .find(|l| {
+            l.spans.len() >= 3
+                && l.spans[1].content.as_ref() == "\u{2502}"
+                && l.spans[2].content.as_ref() == "    "
+        })
+        .expect("展开体应有续行前缀");
+    assert_eq!(
+        prefix_col(first, 5),
+        prefix_col(cont, 3),
+        "分叉行与续行前缀等宽"
+    );
+    assert_eq!(prefix_col(first, 5), grid.process_prefix_width());
+    // duration 右对齐：整行铺到 line_width（右缘留滚动条列），行尾即 duration。
+    assert_eq!(
+        first.width(),
+        grid.line_width() as usize,
+        "右对齐铺满带右缘"
+    );
+    assert_eq!(
+        first.spans.last().unwrap().content.as_ref(),
+        "0.4s",
+        "duration 落在右缘"
+    );
+    assert!(line_text(first).contains("Read"), "标签仍在 col6 之后");
+}
+
+/// Compact/Narrow（<60 列）过程区前缀回退基准形态（§9）：无缩进、无分叉，
+/// 逐列与改动前一致。
+#[test]
+fn test_compact_and_narrow_process_prefix_falls_back_to_baseline() {
+    use super::helpers::{cont_prefix, first_prefix, process_cont_prefix, process_first_prefix};
+    let dim = THEME_ATOM.state().read().semantic.text.dim;
+    for term in [59u16, 39] {
+        let grid = GridSpec::grid_for(term);
+        assert_eq!(grid.indent, 0, "term={term}: <60 列不缩进");
+        let style = Style::default();
+        for lead in [ProcessLead::Branch, ProcessLead::Inline] {
+            assert_eq!(
+                process_first_prefix(&grid, "\u{2713}", style, lead),
+                first_prefix(&grid, "\u{2713}", style),
+                "term={term}: 首行前缀恒回退（符号占 accent 列，不画分叉）"
+            );
+        }
+        assert_eq!(
+            process_cont_prefix(&grid, dim),
+            cont_prefix(&grid, dim),
+            "term={term}: 续行前缀恒回退"
+        );
+
+        let vm = TuiRenderUnit::TuiToolCard(tool_card("Read", "src/main.rs", false, false));
+        let lines = vm_to_lines(&vm, &grid);
+        let first = &lines[0];
+        assert_eq!(
+            first.spans[..3]
+                .iter()
+                .map(|s| s.content.as_ref())
+                .collect::<Vec<_>>(),
+            first_prefix(&grid, super::helpers::sym().success, style)
+                .iter()
+                .map(|s| s.content.as_ref())
+                .collect::<Vec<_>>(),
+            "term={term}: 渲染首行前缀 = 基准形态（outer / 符号 / gap）"
+        );
+        let text = line_text(first);
+        assert!(
+            !text.contains('\u{251c}') && !text.contains('\u{2500}'),
+            "term={term}: 无分叉字形，实际 {text:?}"
+        );
+        assert_eq!(
+            prefix_col(first, 3),
+            grid.first_prefix_width(),
+            "term={term}: 正文回基准列"
+        );
+        assert!(
+            lines
+                .iter()
+                .all(|l| l.width() <= grid.first_prefix_width() + grid.content_width()),
+            "term={term}: 行宽不超基准前缀 + content 预算"
+        );
+    }
 }
 
 /// 用户与 AI 正文左侧竖线分别使用次等色和主题色。
@@ -252,11 +386,14 @@ fn test_narrow_accent_bullet() {
     );
 }
 
-/// 所有 entry 的正文（content 列）起点一致（§3.1：禁止不同 entry 不同正文起点）。
+/// 分层列坐标（§2/§3）：user/AI 正文留在基准列（col4）；过程区 entry（工具卡）
+/// 首行标签右移 `indent` 到 col6。
 #[test]
-fn test_content_column_aligned_across_entries() {
+fn test_text_zone_baseline_and_process_zone_indent_columns() {
     let grid = GridSpec::grid_for(80);
-    let content_col = grid.first_prefix_width();
+    let text_col = grid.first_prefix_width();
+    let process_col = grid.process_prefix_width();
+    assert_eq!((text_col, process_col), (4, 6), "基准列 4 / 过程区列 6");
 
     let user = vm_to_lines(
         &TuiRenderUnit::TuiUserBubble(crate::kit::tui_render_unit::TuiUserBubble::new(
@@ -284,22 +421,14 @@ fn test_content_column_aligned_across_entries() {
         &grid,
     );
 
-    // user 正文与其余 entry 正文同列（§3.1；无 role label 行）
-    let user_body_line = &user[1];
-    // 找到第一个非前缀文本 span（前缀 = outer + accent + gap）
-    let text_start = |l: &Line<'static>| -> usize {
-        let mut col = 0;
-        for span in &l.spans {
-            if col >= content_col {
-                return col;
-            }
-            col += span.content.width();
-        }
-        col
-    };
-    assert_eq!(text_start(user_body_line), content_col, "user 正文起点");
-    assert_eq!(text_start(&tool[0]), content_col, "tool 首行起点");
-    assert_eq!(text_start(&assistant[1]), content_col, "assistant 正文起点");
+    // user / assistant 正文：文本区前缀 3 段（outer / 竖线 / gap）→ col4
+    assert_eq!(prefix_col(&user[1], 3), text_col, "user 正文起点");
+    assert!(line_text(&user[1]).contains("你好世界"));
+    assert_eq!(prefix_col(&assistant[1], 3), text_col, "assistant 正文起点");
+    assert!(line_text(&assistant[1]).contains("hello"));
+    // 工具卡首行：过程区前缀 5 段（outer / 竖线 / fill / 符号 / 空格）→ col6
+    assert_eq!(prefix_col(&tool[0], 5), process_col, "tool 首行标签起点");
+    assert!(tool[0].spans[5].content.contains("Read"));
 }
 
 // ── 垂直节奏（§3.2）────────────────────────────────────────────────────
@@ -413,4 +542,124 @@ fn test_empty_user_bubble_renders_zero_lines() {
         real_lines.last().is_some_and(is_rail_blank),
         "非空 user 后应有 1 空行（带竖线前缀）"
     );
+}
+
+// ── 系统提醒：过程区（§7）──────────────────────────────────────────────
+
+/// 系统提醒属过程区 entry（§7）：进入分叉落在首行、标题列与续行内容同列（§3/§5）；
+/// <60 列回退基准形态（§9）——提醒行不留在文本基准列。
+#[test]
+fn test_system_reminder_renders_in_process_zone() {
+    crate::i18n::init(Some("en"));
+    let mut reminder = TuiSystemReminder::legacy("first line\nsecond line".into());
+    reminder.fold = FoldState::Expanded;
+    reminder.recompute_hash();
+    let vm = TuiRenderUnit::TuiSystemReminder(reminder);
+
+    let grid = GridSpec::grid_for(80);
+    let mut cache = crate::kit::markdown::MarkdownRenderCache::default();
+    let (lines, ..) = super::vm_to_lines_cached_with_layout(
+        &vm,
+        &grid,
+        &mut cache,
+        None,
+        false,
+        ProcessLead::Branch,
+    );
+    let first = &lines[0];
+    assert_eq!(first.spans[1].content.as_ref(), "\u{251c}", "进入分叉 ├");
+    assert_eq!(
+        first.spans[2].content.as_ref(),
+        "\u{2500}\u{2500}",
+        "分叉 fill 宽度 = indent"
+    );
+    assert_eq!(
+        prefix_col(first, 5),
+        grid.process_prefix_width(),
+        "标题列 = 过程区前缀宽"
+    );
+    let body = lines
+        .iter()
+        .find(|line| line_text(line).contains("first line"))
+        .expect("展开提醒应显示正文");
+    assert_eq!(body.spans[1].content.as_ref(), "\u{2502}", "续行竖线");
+    assert_eq!(body.spans[2].content.as_ref(), "    ", "indent + 2 空格");
+    assert_eq!(
+        prefix_col(body, 3),
+        grid.process_prefix_width(),
+        "正文与标题同列"
+    );
+
+    // <60 列：前缀回退基准形态（符号回 accent 列、无分叉）——逐列与改动前一致
+    let narrow = GridSpec::grid_for(59);
+    let mut cache = crate::kit::markdown::MarkdownRenderCache::default();
+    let (lines, ..) = super::vm_to_lines_cached_with_layout(
+        &vm,
+        &narrow,
+        &mut cache,
+        None,
+        false,
+        ProcessLead::Branch,
+    );
+    let first = &lines[0];
+    assert_eq!(first.spans[0].content.as_ref(), " ", "outer 空列");
+    assert_eq!(
+        first.spans[1].content.as_ref(),
+        super::helpers::sym().expanded,
+        "符号回到 accent 列"
+    );
+    assert_eq!(
+        prefix_col(first, 3),
+        narrow.first_prefix_width(),
+        "正文回基准列"
+    );
+    let text = line_text(first);
+    assert!(!text.contains('\u{251c}'), "无分叉字形，实际 {text:?}");
+}
+
+// ── 正文裁剪与右缘元数据（gutter 不入正文预算）──────────────────────────
+
+/// 正文裁剪在 gutter 放置之前执行（`fit_summary_to_content` 调用约定）：
+/// summary 宽度落进「旧口径越界、新口径内」的区间时，duration 保持完整并右对齐
+/// 带右缘——不得被裁成存根（§6.4/§8）。
+///
+/// 80 列：`content = 74` / `indent = 2` / 过程区前缀 6 / `line_width = 79`；
+/// `content_total = 前缀 6 + label 4 + " " + summary s + duration 4`，
+/// `s ∈ {60, 61, 62}` 时 `content_total ∈ {75, 76, 77}` > 74（旧上限）且
+/// `used + 2 + 4 ≤ 79`（duration 仍右对齐）。
+#[test]
+fn test_summary_fit_keeps_duration_intact_and_flush_right() {
+    let grid = GridSpec::grid_for(80);
+    for summary_len in [60usize, 61, 62] {
+        let summary = "x".repeat(summary_len);
+        let mut card = tool_card("Read", &summary, false, false);
+        card.output_summary.clear(); // 去掉 ` — N lines` 后缀，隔离正文与 duration 两段
+        assert_eq!(
+            card.completed_duration_ms,
+            Some(400),
+            "duration span = 0.4s"
+        );
+        let lines = vm_to_lines(&TuiRenderUnit::TuiToolCard(card), &grid);
+        let first = &lines[0];
+        assert_eq!(
+            first.width(),
+            grid.line_width() as usize,
+            "summary={summary_len}: duration 仍右对齐带右缘"
+        );
+        assert_eq!(
+            first.spans.last().unwrap().content.as_ref(),
+            "0.4s",
+            "summary={summary_len}: duration 不应被正文裁剪波及"
+        );
+        let summary_span = first
+            .spans
+            .iter()
+            .find(|span| span.content.starts_with(" xxx"))
+            .expect("summary span");
+        assert_eq!(
+            summary_span.content.as_ref(),
+            format!(" {summary}"),
+            "summary={summary_len}: 正文预算内不裁剪"
+        );
+    }
 }

@@ -297,9 +297,17 @@ fn test_system_note_levels() {
     let warn_lines = vm_to_lines(&warn_vm, &grid);
     let header = header_of(&warn_lines);
     assert!(header.contains('!'), "warning 符号 !，实际 {header:?}");
-    assert!(
-        warn_lines[0].spans[1].style.fg == Some(sem.status.warning),
-        "warning accent 色"
+    // 符号在过程区 fill 之后（§3）——按内容定位符号 span，别按列下标猜。
+    let symbol_span = warn_lines[0]
+        .spans
+        .iter()
+        .find(|sp| sp.content.contains('!'))
+        .expect("warning 符号 span");
+    assert_eq!(
+        symbol_span.style.fg,
+        Some(sem.status.warning),
+        "warning 符号用 warning accent 色，实际 {:?}",
+        symbol_span.style
     );
 
     // Error → `×` + error accent 首行；正文 muted
