@@ -15,14 +15,16 @@
 
 | 结论 | 条数 | 编号 |
 | --- | --- | --- |
-| PASS | 7 | A02、A08、A11、A16、A23、A24、A25 |
+| PASS | 8 | A02、**A05**、A08、A11、A16、A23、A24、A25 |
 | PARTIAL | 17 | A01、A03、A04、A06、A07、A09、A10、A12、A13、**A14**、A15、A17、A18、A19、A20、A21、A22 |
-| FAIL | 1 | A05 |
+| FAIL | 0 | —（A05 于第四版由 FAIL 改判达成，见 §5.18.3） |
 | 未验证 | 0 | —（A14 在 S12/S13 补了最小直接用例，降为 PARTIAL，见 §2 与 §5.14） |
 
 > 修订记录（2026-10-14，第二版）：本轮修复了审计新发现的 **F1（P1）** 并独立复核（§5.9），A15 由 **FAIL 升为 PARTIAL**（F1 反例消失；剩余缺口是「不触发迁移/自动摘要」缺负向用例）。同时按 `A-acceptance-report-audit.md` 的 4 项必须修订（M1~M4）与 5 项建议修订（S1~S5）改写了本报告。
 >
 > 修订记录（2026-10-14，第三版）：S12 收尾轮（`S12-*.md` 7 份 + 独立复核 `S12-verification.md`，判定 NEEDS-REVISION）与 S13 修订轮（`S13-*.md` 9 份 + 两份独立复核）后的变化——① 拒绝路径由临时探针转为 **11/11 类持久用例**（§5.14）；② **A14 由「未验证」降为 PARTIAL**（补了 fork 后父压缩不改子快照的最小直接用例，覆盖范围见 §2）；③ **文件规模治理**：本交付触及且超 1000 行的 10 个文件已按职责拆分（§5.15）；④ 锁回归测试重做为确定性握手并统一释放探测入口（能力边界见 §5.16）；⑤ WASM telemetry panic 修复保留，但运行时红→绿证据不完整（§5.17）。**A05 判定不变（FAIL），且 S13 独立实验进一步证明「固定 rowid 下界」会在 rewind 后丢行，必须 DDL 才能收敛。**
+>
+> 修订记录（2026-10-14，第四版）：用户指令（提交代码、A05 新增索引、第 2/3 项派 subagent 对抗裁决、推送）后的变化——① **A05 索引经用户显式授权并实施**（`canonical::CREATE_INDEXES` 追加 `idx_messages_active (thread_id, excluded)` + 本机 Current 分支幂等索引重放，§5.18.3），复跑三段规模后 **A05 由 FAIL 改判达成**（cold p50 3.299 / 3.379 / 2.435 ms，跨规模持平）；② **`peri.sessionWorkspaceV1` 门控：裁决「实现零改动 + 文档订正」**（§5.18.1；两个立场独立推翻了侦察阶段的「TUI 不 initialize」前提）；③ **锁守卫面：裁决「独立断言下界、拒绝结构性闭合、保留调用点级局限」**（§5.18.2，含本轮注入实验）；④ 计数：PASS 8 / PARTIAL 17 / FAIL 0。
 
 ### 0.1b 交付状态与本轮未提交内容
 
@@ -33,7 +35,7 @@
 ### 0.2 必须先看的三个结论
 
 1. **F1（P1，已修复并独立复核）**：初始游标锚点曾取「有效视图最旧一条 own payload」，当这条是不被 Full 排除、又从不进入客户端渲染的 **System 身份条目**（subagent / fork / bg 子会话的真实形状）时，`nextCursor = null` 或锚点之后的归档永不交付 ⇒ **该会话的压缩原文在界面上不可达**。现锚点改为「最旧**可展示**条目」（判据与分页出口同源），并补了两条真实回归用例（§5.9）。受影响的验收：**A15、A20、A06** 的该形态已解除。
-2. **D10（已知偏差，仍是唯一的 FAIL 面）**：恢复路径的**内存与解码字节有界**成立，但**触达行数 = O(线程行数)**，实测耗时随归档线性（10k/100k/1M = 11.109 / 98.182 / 1081.927 ms，debug 构建）⇒ **A05 的「不随归档条数线性增长」未达成**。修复需覆盖 `(thread_id, excluded)` 的索引 = **DDL，未获授权**。S13 独立实验（只读，VM 指令计数，20 万行合成库）：归档 10k/100k/200k 时 `SQLITE_VM_OPS = 50 036 / 500 036 / 1 000 036`、返回行数恒为 3 ⇒ 线性属实；同实验用「固定 rowid 后缀下界」模拟 rewind 后的收窄，出现 `lost_rowids=[1,2]` ⇒ **无 DDL 的候选收窄会丢行，不可采用**（`.recon/S13-verification-behavior.md` §5.2）。**待裁决**：是否批准新增 `(thread_id, excluded)`（或 `WHERE excluded = 0` 的部分索引）。
+2. **D10（已闭合，第四版）**：授权前恢复路径的**内存与解码字节有界**成立，但**触达行数 = O(线程行数)**，实测耗时随归档线性（10k/100k/1M = 11.109 / 98.182 / 1081.927 ms，debug 构建）⇒ A05 当时**未达成**。2026-10-14 用户显式授权新增 `(thread_id, excluded)` 索引（`idx_messages_active`），复跑后 cold p50 **3.299 / 3.379 / 2.435 ms 跨规模持平** ⇒ **A05 达成**（§5.18.3）。保留的支撑证据：S13 独立实验（只读，VM 指令计数，20 万行合成库）10k/100k/200k → `SQLITE_VM_OPS = 50 036 / 500 036 / 1 000 036`、返回行数恒为 3 ⇒ 线性属实；同实验用「固定 rowid 后缀下界」模拟 rewind 后的收窄出现 `lost_rowids=[1,2]` ⇒ **无 DDL 的候选收窄会丢行，不可采用**（`.recon/S13-verification-behavior.md` §5.2）——这正是本条只能靠索引闭合的理由。
 3. **两类成本必须分开读**（§3）：初始恢复成本有实测数字（三规模）；**持续浏览后的累计缓存没有任何测量**，「分页已保证客户端累计内存恒定」这句话本任务不支持，任何地方都不得写。
 
 ### 0.3 作者本次复跑（新增的一手证据，其余全部引用 `.recon/`）
@@ -80,7 +82,7 @@
 | **A02** | PASS | `compact_cancel_test.rs:512/536/559/594`（含 `…after_sql_commit_requires_reload_and_keeps_summary` = 提交后确认丢失）；`transcript_test.rs:196` `test_commit_compaction_lifecycle_is_atomic_or_uncertain`；`compact_failure_adversarial_test` 21 passed（矩阵 it-log） | 无阻塞缺口；未做「确认丢失」的端到端 UI 面 |
 | **A03** | PARTIAL | `test_full_report_arriving_during_summary_stays_available`（实测，报告形态）；`full.rs` 边界采集 | **用户输入（Human）形态无专门用例**；「不重复注入」的计数没有断言 |
 | **A04** | PARTIAL | `perf-evidence.md` §3（计划断言 4 条，三段全过）、§4（排除正文解码 **0 条**、解码字节恒 196 971 B）、§5.1（不可解码归档探针：对照组 `load_session_snapshot` 失败、处理组 `load_active_snapshot` 成功）；本次复跑 #4 | 正文零解码与聚合消除成立；**扫描量只算部分满足**——三条语句在该线程索引范围内逐行回表，触达上界 = 线程总行数（D10） |
-| **A05** | FAIL | `perf-evidence.md` §4/§4.1/§8：cold p50 **11.109 / 98.182 / 1081.927 ms**（10k/100k/1M），hot p50 同量级；查询次数（语句数 7）、返回条数（3）、字节（196 971）、行数探针均有记录；**S13 独立实验**（只读、VM 指令计数）：10k/100k/200k → `SQLITE_VM_OPS` 50 036 / 500 036 / 1 000 036，返回 3 行（`.recon/S13-verification-behavior.md` §5.1） | **「不随归档条数线性增长」未达成**（每 10× 行数 ≈ 10× 耗时）；**峰值内存未采样**（§7.2）；无 DDL 的收窄候选（固定 rowid 后缀下界）在模拟 rewind 后**丢行**（同报告 §5.2）⇒ **该条只能靠批准索引闭合，属待裁决项** |
+| **A05** | PASS（第四版改判） | 授权前证据：`perf-evidence.md` §4/§4.1/§8 cold p50 **11.109 / 98.182 / 1081.927 ms**、hot 同量级，语句数 7、返回 3 条、196 971 B、行数探针 10 003 / 100 003 / 1 000 003；S13 独立实验（只读、VM 指令计数）10k/100k/200k → `SQLITE_VM_OPS` 50 036 / 500 036 / 1 000 036。**索引实施后复跑**（`.recon/a05-raw/perf-rerun.out`、`perf-evidence.md` §4.2/§8.1）：cold p50 **3.299 / 3.379 / 2.435 ms**、hot p50 2.322 / 2.092 / 2.105 ms，三段同量级；计划三条有效范围语句改为 `USING INDEX idx_messages_active (thread_id=? AND excluded=?)` | **达成**：跨规模耗时持平（对照授权前 11.109 → 1081.927 的线性曲线）。代价：索引 ≈25 B/行（1M 档 +25.3 MB ≈1.7%）；升级首次补建耗时未测量；**峰值内存仍未采样**（§7.2） |
 | **A06** | PARTIAL | `perf-evidence.md` §4.1（1M 上 20 页：`items=50`、`bytes=57 700`、`position` 999 954→999 004 严格递减、单页 2.0–3.6 ms）；wire `initial_load_cursor_walks_the_archived_range_without_overlapping_the_first_screen`（审计实测）；`session_history_page_test.rs:152`（空页仍推进游标，不假终点） | 20 页数字是**历史证据**（终局矩阵未复跑）；**R3** 反向读取的索引项触达随深度线性 |
 | **A07** | PARTIAL | `perf-evidence.md` §5.2（6×1 250 000 B：独占一页、`oversize=true`、`position` 6→5→4、游标前进）；两阶段 = `HistoryPagePlan::plan`（`history_page.rs:597`）与 `materialize`（`:643`）+ `session_history_page_test.rs:189`（候选行不可解码证明阶段二不取它）；`history_page_test.rs:184/226/311` | 夹具是 **6 条不是 100 条**；峰值内存未采样；阶段一 `length(CAST(content AS BLOB))` 仍把最多 `limit+1` 条候选正文读进引擎寄存器（R2，静态+标志位） |
 | **A08** | PASS | wire `the_same_cursor_replays_equivalent_pages_and_limit_only_changes_page_boundaries`（**attempt 2..=3 重放**，逐项等价断言）；SDK `concurrent calls with the same cursor and limit share one request`、`repeated and overlapping pages merge idempotently`（本次复跑 #5：25/0） | 未在 TUI 渲染层做「每条只显示一次」的端到端断言 |
@@ -122,7 +124,7 @@
 
 1. **成立的一半**：内存与解码字节**与归档规模无关**——三段解码正文恒为 196 971 B、被排除 own 正文解码 0 条；`perf-evidence.md` §5.1 的探针（归档正文写成不可解码占位）证明「一条都没进解码器」：对照组 `load_session_snapshot` 失败、处理组 `load_active_snapshot` 成功且字节不变。
 2. **未达成的一半**：耗时**随归档行数线性增长**（每 10× 行数 ≈ 10× 耗时），成因见 §4。
-3. **未覆盖**：`A04/A05` 的 1M 档在终局矩阵与审计中**均未复跑**（`final-test-matrix.md` §4 第 1 条、`final-adversarial-audit.md` §4.4 第 1 条）；本报告只引用 `perf-evidence.md`，并以本次复跑的 200 行档确认**计划形状与探针口径**未变（恢复冷 p50 1.426 ms / 热 0.945 ms、行数探针 203、其中 excluded 200）。
+3. **未覆盖**：`A04/A05` 的 1M 档在终局矩阵与审计中**均未复跑**（`final-test-matrix.md` §4 第 1 条、`final-adversarial-audit.md` §4.4 第 1 条）（第四版：A05 的 1M 档已由 §5.18.3 复跑覆盖，本段其余未覆盖项不变）；本报告只引用 `perf-evidence.md`，并以本次复跑的 200 行档确认**计划形状与探针口径**未变（恢复冷 p50 1.426 ms / 热 0.945 ms、行数探针 203、其中 excluded 200）。
 
 ### 3.2 第二类：持续浏览后累计缓存
 
@@ -167,7 +169,7 @@
 1. **恢复路径仍是 O(线程行数)**（D10 / `perf-evidence.md` §8、`S9-boundedness.md` §6 R4）：内存与解码字节有界，触达行数无界。**修复所需索引（覆盖 `(thread_id, excluded)` 或等价）属 DDL**——需求 §8 明确不授权直接执行 DDL，仓库根 `CLAUDE.md` 原则 12 要求用户批准；**本任务未改 schema**，批准后另开切片复跑三规模即可闭环。
 2. **分页反向读取的索引项触达随深度线性**（R3），表行与字节有界；`perf-evidence.md` §8 原来的「分页不受影响」指的只是表行，`S9-boundedness.md` 已收紧该表述。
 3. **标准客户端完整回放的「有界」是有限定的**：canonical 历史不再整份物化、新增向前段读取行触达 ≈ `limit+1` 成立；但**有效集合仍整份物化**（`prepare_existing`），该读取触达行数 = O(线程行数)（`S9-boundedness.md` §0 最后一行、§5.1）。同时：回退分支（后端不支持段读取）仍走全量物化（R7，有 warn、交付内容完整）。
-4. **计划形状有界 ≠ 触达行数有界**——这是 `perf-evidence.md` §8 的核心发现，本报告据此把 A04 判为 PARTIAL、A05 判为 FAIL。
+4. **计划形状有界 ≠ 触达行数有界**——这是 `perf-evidence.md` §8 的核心发现，本报告据此把 A04 判为 PARTIAL、A05 判为 FAIL（A05 的 FAIL 已于第四版随索引实施撤销，见 §5.18.3）。
 
 ## 5. 已知偏差与未验证清单（单列，不混进 PASS）
 
@@ -177,11 +179,11 @@
 2. **影响**：与 A19「无原文／摘要重复覆盖」字面不符。
 3. **修复条件**：需新增「覆盖批次」最小元数据 = **DDL**，须用户明确批准（根 `CLAUDE.md` 原则 12）；批准前不新增列。已记录在 `peri-acp-types/src/store/history.rs` 模块文档与 `.recon/rewind-review-findings.md`（蓝图 §7 D8）。
 
-### 5.2 D10：恢复路径触达行数线性（A05 未达成，修复需索引 = DDL 未授权）
+### 5.2 D10：恢复路径触达行数线性（A05：授权前 FAIL → 索引实施后达成）
 
-1. **实测**：cold p50 11.109 / 98.182 / 1081.927 ms（10k/100k/1M）；行数探针 10 003 / 100 003 / 1 000 003；三段返回的有效集合完全相同（3 条 / 196 971 B）。
-2. **机制**：`ACTIVE_PAYLOADS_SQL` / `ACTIVE_FLAGS_SQL` / `ACTIVE_ENTRY_POSITIONS_SQL` 的计划都是 `SEARCH messages USING INDEX idx_messages_thread_id (thread_id=?)`，该索引不覆盖 `excluded`/`content` ⇒ 逐行回表判定。
-3. **修复方向**：新增覆盖 `(thread_id, excluded)`（或 `(thread_id, excluded, rowid)`）的索引 ⇒ **DDL，未授权、未做**；批准后另开切片复跑三个规模即可闭环。
+1. **授权前实测（基线，保留）**：cold p50 11.109 / 98.182 / 1081.927 ms（10k/100k/1M）；行数探针 10 003 / 100 003 / 1 000 003；三段返回的有效集合完全相同（3 条 / 196 971 B）。
+2. **机制（授权前）**：`ACTIVE_PAYLOADS_SQL` / `ACTIVE_FLAGS_SQL` / `ACTIVE_ENTRY_POSITIONS_SQL` 的计划都是 `SEARCH messages USING INDEX idx_messages_thread_id (thread_id=?)`，该索引不覆盖 `excluded`/`content` ⇒ 逐行回表判定。
+3. **修复与闭环（2026-10-14）**：用户显式授权新增 `(thread_id, excluded)` 索引 ⇒ 落点 `canonical.rs::CREATE_INDEXES`（`idx_messages_active`）+ 本机 Current 分支幂等索引重放；复跑（`.recon/a05-raw/perf-rerun.out`、`perf-evidence.md` §4.2/§8.1）：cold p50 **3.299 / 3.379 / 2.435 ms** 跨规模持平，计划三条语句全部改为 `… USING INDEX idx_messages_active (thread_id=? AND excluded=?)`；代价 ≈25 B/行（1M 档 +25.3 MB ≈1.7%），升级首次补建耗时未测量。细节见 §5.18.3。
 
 ### 5.3 R1：回放中途 rewind 删 `tail` 行 → SQLite 复用 rowid（「行集合同源」不成立）
 
@@ -264,7 +266,7 @@
 8. **SDK 测试（S13 后已更新）**：此前 `bun test` 全量 252 pass / 2 fail（默认环境）或 253 pass / 1 fail（解除 `mise` 阻塞后），失败为 WASM telemetry 导出 panic（`langfuse-client/src/batcher/recovery.rs:256`，基线 `7f0de56e8` 引入，**非本切片引入**）。S13 已修该 panic 与夹具 gzip 解析，现全量 **254 pass / 0 fail**；**修复保留**，但红→绿链不可独立复核，见 §5.17。
 9. **TUI 实现者证据不可信（流程记录）**：S7c 的 TUI 修复 agent 在 200 轮迭代上限被中断且一度使 lib test 不可编译，S7c/S7e 的权威记录是**复核者报告**（`.recon/S7c-tui-fix.md` 不存在）。
 10. **未验证清单（宁多勿少）**：
-    1. A04/A05/A06/A07 的性能用例（`history_perf_tests` 5 条 `#[ignore]`）未在终局矩阵复跑；云后端 21 条 `#[ignore]` 未跑；人工 TUI 用例、`e2e/`、真实外部 stdio 客户端、真实云端一致性均未跑；「HEAD 源码同源对照」未做（禁 git 写操作 + 磁盘限制）；峰值内存 RSS 未采样。
+    1. A04/A05/A06/A07 的性能用例（`history_perf_tests` 5 条 `#[ignore]`）未在终局矩阵复跑（第四版：这 5 条已在 A05 复跑中全部执行、全绿，见 §5.18.3；**终局矩阵本身仍未复跑**）；云后端 21 条 `#[ignore]` 未跑；人工 TUI 用例、`e2e/`、真实外部 stdio 客户端、真实云端一致性均未跑；「HEAD 源码同源对照」未做（禁 git 写操作 + 磁盘限制）；峰值内存 RSS 未采样。
     2. `peri.sessionWorkspaceV1` 键的**门控来源未定位**（`final-adversarial-audit.md` §3.3 补充事实、§4.4 第 11 条）。
     3. 「拒绝不得触发一次 initial load」只有 `history.len()` 不变的**间接**证明，**缺通知全量断言**（同文 §3.2 缺口、§4.4 第 14 条）。
     4. 本轮 F1 修复的独立复核报告为 `S11-verification.md`；其**未覆盖**：真实 TUI/SDK 端到端（只到 ACP 层真实 API），以及「锚点落在历史中间（更早方向仍有可展示行）」的客户端消费面。
@@ -299,7 +301,7 @@
 3. **修复与保护面**：四处真实调用点（`connection_open_test.rs:168/329/396/453`）不再各自携带预算字面量，统一走 `probe_initialization_lock_release`（`:21-22`，预算常量 `LOCK_RELEASE_PROBE_BUDGET = 250ms`）；新用例走**同一个函数**——把该入口退回零等待写法，用例 **3/3 红**。生产锁路径（`connection.rs`）**未改**。
 4. **残留边界（独立复核实测，A1 判 FAIL）**：把四处调用点**绕过共享入口**、各自内联回 `Duration::ZERO` 时，新回归仍 **3/3 绿**。即：守卫覆盖的是「预算的唯一来源（helper）」，不是调用点自身的写法；调用点级绕过属未覆盖写法（`S13-verification-behavior.md` §4）。
 5. **容忍窗口**：250 ms 是容忍窗口而非机制修复——本机实测外部持锁 100 ms → 绿、350 ms → 红（边界落在 (100ms, 350ms]）。使用方需知：>250 ms 量级的继承持锁仍会红。
-6. **结论**：本条为 **PARTIAL**（确定性证据达标、唯一预算来源受保护），调用点级绕过缺口**如实声明为已知局限**，不冒充「已护住四处调用点」。
+6. **结论**：本条为 **PARTIAL**（确定性证据达标、唯一预算来源受保护），调用点级绕过缺口**如实声明为已知局限**，不冒充「已护住四处调用点」。（第四版：本条已由对抗裁决结案——判别断言改用独立下界、拒绝结构性闭合、调用点级缺口维持已声明局限，见 §5.18.2。）
 
 ### 5.17 WASM telemetry 修复：保留，但红→绿链不可独立复核（A3，S12→S13）
 
@@ -308,6 +310,50 @@
 3. **实施者报告的红→绿链（待核实陈述）**：三次重建（修复在位 `ac7f334b…` ×2 相同 vs 退回 HEAD `7b45dfa5…`，产物哈希随源码变化）；退回后目标用例红（上述 panic + `Aborted()`，`TARGET_EXIT=1`），字节级还原后同一用例绿（`TARGET_EXIT=0`）；另修掉夹具侧 gzip 解析问题（按 magic `1f 8b 08` 解压，产品 gzip 契约未动）。绿灯覆盖：目标用例 1 pass、该文件 2 pass、SDK `bun test` **254 pass / 0 fail**（S12 记录 252/2）；native `langfuse-client --lib` **292 passed / 0 failed / 1 ignored**。
 4. **独立复核的结论（NOT-VERIFIED）**：复核者独立执行当前 WASM 集成文件 **2 pass / 0 fail**，但实施者引用的三次构建与旧实现红灯日志（`/tmp/a3-wasm-closure/`）**已全部删除**，无法独立确认旧实现红灯真实执行；本次不得将静态分析或 native 测试替代 WASM 红灯（`S13-verification-behavior.md` §6）。
 5. **裁断**：**保留修复**（两方复核一致建议保留；回退会在真实 WASM 运行时 abort）。状态记为 **PARTIAL**：当前 runtime 通过为实测，历史红→绿链为不可独立复核的实施者陈述。复现建议：保留两版源码哈希、两版构建日志、两版运行原始输出及退出码。
+
+### 5.18 两项待裁决的对抗裁决（第四版新增，2026-10-14）
+
+四个只读对抗 agent（`plan`，两主题各一正一反，**不含写权限**；prompt 内钉死 worktree 路径、禁 git 写、禁 DDL、只读）分别产出立场文书，由本报告作者核对证据、补做注入实验后裁决。原始立场文书为过程产物（`.peri/plans/`，未入库），结论与证据落在这里。
+
+#### 5.18.1 `peri.sessionWorkspaceV1` 门控：裁决「实现零改动 + 文档订正」
+
+1. **形状**：5 处读取走**进程级** `SessionManager::effective_host_caps()`——`session_restore.rs:326/393/428`、`session_lifecycle.rs:570`、`storage_v2.rs:40`；未 initialize 时回落 `all_enabled`（`peri-acp/src/session/caps.rs:31-37`，本轮复核原文）。分页相反：`ConnectionFacts::history_pagination()` 按**当前连接**失败关闭（`host/connection.rs:69-77`，「调用约定」段落已写明不得改用进程级）。
+2. **两方独立推翻的前提**：侦察阶段简报称「TUI 不 initialize ⇒ 改连接级会丢 TUI 的 workspace 字段」。正方与反方各自查到 **TUI 确实发 initialize**：`peri-tui/src/kit/entry.rs:417` 无条件 await `register_ui_commands`，该方法发 `initialize`（`acp_client/client/requests.rs:78-89`，基座 `all_enabled`、`peri.oauth=false`），host 侧落 `set_pending_caps` + `commit_initialize`。⇒ 该成本论据**不成立**，「改连接级会破坏 TUI」不能作为维持现状的理由。
+3. **可达性（两方一致的硬事实）**：跨连接污染需要「同进程两个连接共享一个 `SessionManager`」。全仓无此调用点：每 host 一个 `ConnectionContext`（`host/mod.rs:381`），四种部署形态（TUI/print/stdio/wasm）各自一进程一连接。正方**自认未能证明可达**（「目前只有夹具可达」）；唯一不需要多连接就能触达的偏差是「外部 stdio 客户端跳过 initialize ⇒ 拿到全能力兜底」，而该形状是本交付**已声明边界**（A25 保留③、`caps.rs:29-31` 文档）。
+4. **改与不改的收益差**：改读连接级 `ConnectionFacts::caps()`（保留兜底）对「未 initialize 的连接」**零行为差别**（两处同样回落 `all_enabled`，`host/connection.rs:54-58`），只把 6 个装配点改成传 facts；改成失败关闭则要动 ≥12 处夹具（`requests_workspace_cases_test.rs`/`requests_workspace_storage_v2_test.rs` 等），并把同族进程级门控（`mcp_oauth.rs:64/125/162/211` 等）拆成三种判据——一致性债换一个不可达形状的收益。
+5. **裁决**：**实现零改动**。本轮只做两处文档订正：① `docs/design/peri-acp-protocol.md` 工作区扩展段写明门控事实源是进程级协商值、与分页按连接判定的差异及理由；② 修正 `peri-tui/src/acp_client/client/requests.rs` 的「TUI 无协议 initialize 握手」过期注释（该注释正是简报误判的来源）。
+6. **再开启条件（写进蓝图 D17.2）**：出现同进程多连接的生产形态；或外部客户端跳过 initialize 被证实真实消费工作区扩展；或 TUI 的 initialize 常态失败；或需求方明确要求按连接判定——届时与 `oauth` 家族一起改，不做单点差异。
+
+#### 5.18.2 锁守卫面：采纳独立断言下界，拒绝结构性闭合，保留调用点级局限（仍 PARTIAL）
+
+1. **本轮新增注入实验（本机实测）**：把 `LOCK_RELEASE_PROBE_BUDGET` 从 250 ms 调到 **20 ms**，回归用例 `release_probe_waits_out_an_external_holder` **仍然绿**——判别断言 `waited + SLACK >= BUDGET` 的参照值与阈值同源，改小常量即让断言恒真，判别力被**静默取消**。这是正方主张中唯一可复现的一条，反方未覆盖。
+2. **修复（测试内 8 行）**：判别断言改用独立下界 `PROBE_WAIT_FLOOR = 200ms`（不引用被测预算）。同一注入实验复跑 → **红**（`release probe gave up before its budget …: waited 22.289458ms < 200ms (budget 20ms)`）；把预算复原为 250 ms → **绿**（0.32 s）。原判别力不受影响（守卫入口退回零等待时 S13 实测 `0.484 ms`，`0.484 + 50 < 200` 必红，与修复前同向）。
+3. **拒绝结构性闭合（正方方案 A/C）**：真实代价 = 移动 production 模块私有原语（`connection.rs:259` 无 `pub`，测试是它的子模块）+ 18 处机械改写；收益仅把绕过从「改一个词」抬成「改结构 + diff 可见」（正方自陈）。反方指出残余不可消除：新增入口、`Duration::from_nanos(1)`、`std::fs` 原生 API（同文件 `:476` 已在用）。且同文件内**合法的零等待**（`:442/:456/:632/:646` 等负向断言）与绕过写法逐字同形 ⇒ 文本守卫必须带行号白名单，白名单本身是新的豁免通道；本仓无源码扫描式守卫先例（`peri-acp/src/event/variant_coverage_test.rs` 是正向存在性检查，不可类推）。
+4. **危害评估采纳反方**：绕过方向是「更敏感」而非「更沉默」——零等待会把 fork 继承窗口报成假红（S12 实测 20 轮 16 红），而真实泄漏在零等待下同样必红（探测拿不到锁即报 `busy`）。因此调用点级缺口的影响是 **flaky/噪声（Cry Wolf）**，不是漏检。
+5. **未满足的判据如实保留**：独立复核的硬判据「真实四调用点回退可被检出」**仍未满足**（本轮未改四处调用点写法）。裁决按「测试卫生纪律、非生产风险」降级处理，代价与理由见上；`probe_initialization_lock_release`（`connection_open_test.rs:16-23`）入口注释已写明「调用点自己内联零等待探测不在本守卫覆盖内」。
+6. **结论**：本条维持 **PARTIAL**（确定性握手 + 唯一预算来源受保护 + 判别断言与被测常量解耦；调用点级写法缺口为已声明局限）。修复后的新断言同时是策略断言：预算低于约 150 ms 会让该用例变红，需人来裁决，而不是让守卫悄悄失效。
+
+#### 5.18.3 A05 索引：用户授权后实施并复跑（A05 由 FAIL 改判达成）
+
+1. **授权**：用户显式授权 A05 所需的新增索引（本条是本次唯一获授权的 DDL；其余 DDL 仍未授权）。
+2. **实施（canonical 单一来源）**：`peri-resources/src/sessions/canonical.rs::CREATE_INDEXES` 追加
+   `CREATE INDEX IF NOT EXISTS idx_messages_active ON messages(thread_id, excluded)`；本机
+   `sqlite_store/schema.rs` 的 **Current 分支**补一次幂等索引重放（形状判定只覆盖表与列，
+   不补则上一版构建建出的库永远拿不到新索引）；新建、v11 迁移终点、远端初始化与远端升级批次
+   都经同一份清单，未各自改动。新用例 `current_shape_open_backfills_a_missing_canonical_index`
+   （删掉索引 → 重开 → 补回 + 版本不变，`peri-resources` lib **500 passed / 0 failed / 26 ignored**，
+   本次实跑）。
+3. **复跑（默认口径 10k/100k/1M，iters=20/pages=20）**：`.recon/a05-raw/perf-rerun.out`
+   （`5 passed; 0 failed`，104.74 s）；恢复 cold p50 **3.299 / 3.379 / 2.435 ms**、hot p50
+   2.322 / 2.092 / 2.105 ms，跨规模持平；对照授权前 11.109 / 98.182 / 1 081.927 ms。
+   计划证据：`load_active_payloads_on`、`load_active_flags_on`、`read_active_entry_positions`
+   三段都改为 `SEARCH messages USING INDEX idx_messages_active (thread_id=? AND excluded=?)`。
+4. **代价与边界**：索引占用 ≈**25 B/行**（10k/100k/1M 三点一致：+249 856 / +2 498 560 /
+   +25 280 512 B，1M 档约占库体 1.7%）；`idx_messages_thread_id` **保留**（只按线程取全部行的路径
+   仍用，如分页阶段一与 `read_history_page_bounds`）；升级路径**首次补建**耗时未测量（已列入
+   `perf-evidence.md` §4.2 未测量项）。
+5. **判定**：A05「恢复工作量不随归档条数线性增长」**达成**（原 FAIL 撤销）。§2 的 A05 行与
+   §0.1 计数已同步。
 
 ---
 
@@ -424,7 +470,7 @@ cd npm-packages/@peri-sdk && bun run typecheck && bun run build && bun test
 
 | 主题 | 文件 |
 | --- | --- |
-| 性能与计划（A04/A05/A06/A07） | `.recon/perf-evidence.md`（§1 口径、§3 计划、§4/§4.1 三规模、§5 补充用例、§7 未测量、§8 触达行数） |
+| 性能与计划（A04/A05/A06/A07） | `.recon/perf-evidence.md`（§1 口径、§3 计划、§4/§4.1 三规模、§4.2 索引在位复跑、§5 补充用例、§7 未测量、§8/§8.1 触达行数与其闭合）；复跑原始输出 `.recon/a05-raw/perf-rerun.out` |
 | 段读取有界性与 R1~R11 | `.recon/S9-boundedness.md`（+ `.recon/S9-boundedness-raw.log`） |
 | 标准客户端完整回放（D7）复核 | `.recon/S9-verification.md`、`.recon/S9a-storage-contract.md`、`.recon/S9b-acp-streaming-replay.md` |
 | 回放标记门控（D12） | `.recon/S9c-caps-gate-fix.md`、`.recon/S9c-verification.md` |
@@ -445,6 +491,6 @@ cd npm-packages/@peri-sdk && bun run typecheck && bun run build && bun test
 
 ## 9. 报告复核提示（给评审者）
 
-1. 本报告的最低两条标准：**没证据不写 PASS**（A05 判 FAIL、17 条 PARTIAL 均写明哪一半成立；A14 由「未验证」降为 PARTIAL 的依据与覆盖边界见 §5.14）；**两类成本不混写**（§3）。
-2. 若只看三行：**F1 已修复并独立复核（§5.9）**、**A05 未达成（需索引 = DDL 未授权，唯一 FAIL）**、**累计缓存零测量（不得宣称恒定）**。
+1. 本报告的最低两条标准：**没证据不写 PASS**（A05 在索引复跑证据到位后由 FAIL 改判 PASS；17 条 PARTIAL 均写明哪一半成立；未跑的直接写未验证；A14 由「未验证」降为 PARTIAL 的依据与覆盖边界见 §5.14）；**两类成本不混写**（§3）。
+2. 若只看三行：**F1 已修复并独立复核（§5.9）**、**A05 已由用户授权索引闭合达成（§5.18.3）**、**累计缓存零测量（不得宣称恒定）**。
 3. 报告本身不新增任何毫秒承诺；所有毫秒数都带 `.recon/perf-evidence.md` §1 的 debug/冷热口径。

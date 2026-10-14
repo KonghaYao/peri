@@ -22,9 +22,11 @@
 //!    `excluded`，夹具直接落成同一个行状态。
 //! 3. 计划：对**生产语句原文**加 `EXPLAIN QUERY PLAN` 前缀（语句文本从实现的常量取，不复制
 //!    SQL），断言里禁止 `messages` 全表扫描与任何全历史聚合。
-//! 4. 扫描行数：`SELECT COUNT(*) ... WHERE thread_id = ?1` 行数探针。计划里对 `messages` 的
-//!    访问是 `idx_messages_thread_id` 的范围搜索，而该索引对 `excluded`/`content` 不覆盖，
-//!    因此范围行数就是这一步允许触达的行数上界（报告写明用的是哪一种方法）。
+//! 4. 扫描行数：`SELECT COUNT(*) ... WHERE thread_id = ?1` 行数探针给出**线程全部行数**这个
+//!    上界。有效范围读取（payloads/flags/positions）的计划是 `SEARCH messages USING INDEX
+//!    idx_messages_active (thread_id=? AND excluded=?)`——两列都在索引里定界，命中数 = 有效
+//!    条数，正文回表也只取命中的行。sqlx 公开面上没有「实际触达行数」计数器（本任务不新增
+//!    依赖），因此定界结论由计划形状 + 跨规模耗时共同给出，行数探针照旧记录但不冒充触达行数。
 //! 5. 字节：只报告实测值——解码回来的 payload 正文字节、`dbstat`/`page_count` 的落库占用。
 //!    页级实际读盘字节在 sqlx 公开面上不可观测（本任务不得新增依赖），报告里标为未测量。
 //! 6. 查询次数：按代码路径逐条列出（`file:line`），不冒充执行期计数。

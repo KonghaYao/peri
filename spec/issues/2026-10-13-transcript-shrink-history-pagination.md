@@ -1,6 +1,6 @@
 # 实现蓝图：Full Compact 后 Transcript 收缩与 ACP 历史分页
 
-状态：交付完成（验收报告第三版 `.recon/A-acceptance-report.md`）；遗留两项待用户裁决（A05 索引 = DDL、`sessionWorkspaceV1` 门控，见 D16.6/D16.7）。基线 `7f0de56e8`（worktree `.worktrees/peri-transcript-history`，分支 `feat/transcript-shrink-history-pagination`）。
+状态：交付完成（验收报告 `.recon/A-acceptance-report.md`）；两项待裁决已经对抗裁决结案、A05 索引经用户授权并实施（见 D17）。基线 `7f0de56e8`（worktree `.worktrees/peri-transcript-history`，分支 `feat/transcript-shrink-history-pagination`）。
 需求源：`/Users/konghayao/Desktop/peri-transcript-history-requirements.md`。
 现状侦察报告：`.recon/A-core-transcript.md`、`B-acp-host.md`、`C-storage-contract.md`、`D-test-infra.md`、`E-tui-sdk.md`（所有行号基于基线 commit）。
 
@@ -213,10 +213,15 @@ Full Compact 成功后，核心热态 Transcript 真正释放已退出有效上�
   3. **锁回归重做**：显式握手建立确定顺序；四处真实释放探测统一走 `probe_initialization_lock_release`（`LOCK_RELEASE_PROBE_BUDGET = 250ms`，预算唯一来源），回退该入口则用例 3/3 红。**残留缺口（独立复核实测，A1 判 FAIL）**：四处调用点绕过共享入口各自内联零等待时用例仍绿 ⇒ 守卫面是「预算的唯一来源」，调用点级绕过为**已声明局限**；250 ms 为容忍窗口（外部持锁 100 ms 绿 / 350 ms 红）；生产锁路径未改。
   4. **规模治理（STD-SIZE-001）**：本交付触及且超 1000 行的 10 个文件按职责拆分（`peri-acp` 3 个测试文件 → 父 + 子模块；`peri-acp-types`/`peri-agent` 契约与 transcript；`peri-tui`/`peri-resources` 4 个），断言与公开路径零改动。独立复核：183 个非 `.recon` 文件全部 ≤1000（最大 990），拆分/挂载/断言三项 PASS；「含 `.recon` 证据全集」口径的 FAIL 由本节作者裁决为「证据归档不适用 STD-SIZE-001」——存留的 6 个 `.rs.orig` 副本经 sha256 与拆分前提交 `3ccf75864` 逐字节一致（无独有信息），两份超限 `.rs` 副本已删除；`git diff --check` 已修至 exit 0。
   5. **WASM 基线修复保留**：`langfuse-client/src/batcher/recovery.rs:256` 无线程目标就地编码（修基线 `7f0de56e8` 引入的 telemetry panic）+ SDK 夹具按 gzip magic 解压（产品契约未动）；现状 SDK `bun test` **254 pass / 0 fail**、native `langfuse-client --lib` 292/0/1。**红→绿链不可独立复核**（三次构建与红灯日志已删除；复核判 NOT-VERIFIED，两方一致建议保留）。
-  6. **A05 仍 FAIL（待用户裁决）**：收窄需索引 = DDL 未授权；S13 只读实验（VM 指令计数）证明「固定 rowid 后缀下界」在 rewind 后**丢行**，不可采用。批准索引前 A05 保持 FAIL。
-  7. **`peri.sessionWorkspaceV1` 第四处同类门控差异（待用户裁决，未改）**：5 处读取走进程级 `SessionManager.pending_caps`（`session/caps.rs:12`、`effective_host_caps:31-37`），形状为「连接 A `initialize` 声明过 → 连接 B 从未 `initialize` 也拿到 workspace 字段」。最小修复 = 改读连接级 `ConnectionFacts`（失败关闭，同 `historyPagination`），但会使 TUI 进程内路径丢 workspace 字段 = **行为变更**，须单独批准。
-  8. **DDL 越界如实披露**：S12 侦察沿用前序 A2 的一次性实验脚本时，曾在**副本库**（`.recon/a2-raw/probe-ab.db` 等，非仓库路径、非任何 Peri 会话库）执行 `CREATE INDEX idx_active_b ON messages(thread_id) WHERE excluded = 0`（`index-probe.sql:16/21/24` 的 CREATE/DROP 序列；`S12-verification.md` §2.7 观察到残留）。用户约束为「不授权直接执行数据库 DDL」，**无实验副本豁免** ⇒ 记为越界；此后全部实验只读。生产 schema 与本交付**未新增任何列/表/索引**。
+  6. **A05 仍 FAIL（待用户裁决）**：收窄需索引 = DDL 未授权；S13 只读实验（VM 指令计数）证明「固定 rowid 后缀下界」在 rewind 后**丢行**，不可采用。批准索引前 A05 保持 FAIL。→ **已裁决并实施，见 D17.1。**
+  7. **`peri.sessionWorkspaceV1` 第四处同类门控差异（待用户裁决，未改）**：5 处读取走进程级 `SessionManager.pending_caps`（`session/caps.rs:12`、`effective_host_caps:31-37`），形状为「连接 A `initialize` 声明过 → 连接 B 从未 `initialize` 也拿到 workspace 字段」。最小修复 = 改读连接级 `ConnectionFacts`（失败关闭，同 `historyPagination`），但会使 TUI 进程内路径丢 workspace 字段 = **行为变更**，须单独批准。→ **已裁决（维持实现），见 D17.2；该条对 TUI 的成本描述经两方对抗复核后推翻。**
+  8. **DDL 越界如实披露**：S12 侦察沿用前序 A2 的一次性实验脚本时，曾在**副本库**（`.recon/a2-raw/probe-ab.db` 等，非仓库路径、非任何 Peri 会话库）执行 `CREATE INDEX idx_active_b ON messages(thread_id) WHERE excluded = 0`（`index-probe.sql:16/21/24` 的 CREATE/DROP 序列；`S12-verification.md` §2.7 观察到残留）。用户约束为「不授权直接执行数据库 DDL」，**无实验副本豁免** ⇒ 记为越界；此后全部实验只读。生产 schema 在本条记录时点**未新增任何列/表/索引**（2026-10-14 用户显式授权 A05 索引后另计，见 D17.1）。
   9. **流程边界**：复核发现旧记录低估（`S12-gap-tests.md` 的「9/11」实为 **8/11**；A14「第二次 Full」表述不成立），已按 S13 修订记录更正；本蓝图不复述错误口径。
+- **D17 两项待裁决的对抗裁决与 A05 索引授权（2026-10-14，用户指令：提交代码、A05 新增索引、第 2/3 项派 subagent 对抗决策、推送远程）。**
+  1. **A05 索引：用户显式授权，已实施。** 形状与 A2 实验同形：`(thread_id, excluded)`。落点是 canonical 单一来源——`peri-resources/src/sessions/canonical.rs` 的 `CREATE_INDEXES` 追加 `CREATE INDEX IF NOT EXISTS idx_messages_active ON messages(thread_id, excluded)`；本机 `sqlite_store/schema.rs` 的 **Current 分支**补一次幂等索引重放（形状判定只覆盖表与列，否则上一版构建建出的库永远拿不到新索引）；新建、v11 迁移终点、远端初始化与远端升级批次全部经同一清单，无需各自改动。新增用例 `current_shape_open_backfills_a_missing_canonical_index`（删索引 → 重开 → 补回 + 版本不变）。证据：`.recon/a05-raw/perf-rerun.out`、`.recon/perf-evidence.md` §8 复跑与验收报告 §5.18.3。**授权范围仅此一条索引**，其余 DDL 仍未授权。
+  2. **`peri.sessionWorkspaceV1` 门控：裁决「实现零改动 + 文档订正」**（两立场对抗，依据见验收报告 §5.18.1）。两方独立推翻侦察阶段前提「TUI 不 initialize」（TUI 在 `kit/entry.rs:417` 无条件 await `register_ui_commands` ⇒ 发 initialize）；跨连接污染无可达生产路径（正方自认只有夹具可达）；改连接级 `caps()` 对「未 initialize 的连接」零行为差别。订正两处文档：`docs/design/peri-acp-protocol.md` 写明门控事实源是进程级协商值及其与分页按连接判定的差异理由；`peri-tui/src/acp_client/client/requests.rs` 的过期注释。**再开启条件**：同进程多连接生产形态出现、外部客户端跳过 initialize 仍被证实真实消费扩展、TUI initialize 常态失败、需求方要求按连接判定（届时与 `oauth` 家族一次改）。
+  3. **锁守卫面：裁决「采纳独立断言下界、拒绝结构性闭合、保留调用点级局限」**（依据见验收报告 §5.18.2）。实测：预算调到 20 ms 时原判别断言仍**绿**（参照值与阈值同源 ⇒ 判别力可被一个数字静默取消）；改用独立下界 `PROBE_WAIT_FLOOR = 200ms` 后同一注入实验**红**（`waited 22.289458ms < 200ms (budget 20ms)`），复原 250 ms **绿**。拒绝正方方案 A/C：代价是移动 production 模块私有原语 + 18 处机械改写，收益仅把「改一个词」抬成「改结构 + diff 可见」，且反方指出的残余（新增入口 / `Duration::from_nanos(1)` / `std::fs` 原生 API）不可消除；同文件内合法零等待与绕过写法逐字同形，文本守卫需行号白名单（本仓无源码扫描守卫先例）。危害评估采纳反方：绕过方向是「更敏感」（fork 继承窗口报假红）而非「更沉默」，真实泄漏在零等待下同样必红。独立复核的硬判据「真实四调用点回退可被检出」**仍未满足**，如实保留 PARTIAL；入口注释已写明「内联零等待不在守卫覆盖内」。
+  4. **推送**：本裁决与 A05 索引实施由新增提交落地后推送 `origin/feat/transcript-shrink-history-pagination`（见验收报告 §0.1b）。
 
 ### 待办切片
 

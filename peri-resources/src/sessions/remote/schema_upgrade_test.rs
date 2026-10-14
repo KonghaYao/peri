@@ -398,6 +398,7 @@ async fn assert_upgraded(fixture: &Fixture) {
         "idx_bindings_workspace",
         "idx_threads_updated",
         "idx_threads_workspace_archived",
+        "idx_messages_active",
     ] {
         assert_eq!(
             fixture

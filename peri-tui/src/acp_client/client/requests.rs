@@ -55,9 +55,9 @@ impl AcpTuiClient {
     /// 上送 ui 域命令明细（设计 §88 / Phase 3 caps 通道：`clientCapabilities._meta.
     /// peri.uiCommands` 明细数组）。
     ///
-    /// TUI 内部 Mpsc 路径无协议 initialize 握手，host 默认以
-    /// [`PeriCaps::all_enabled`] 兜底（含 11 条旧兜底 ui 明细）。本方法显式协商
-    /// caps：以 all_enabled 为基座、关闭 TUI 不消费的 `peri.oauth` 专用通道、
+    /// TUI 走进程内 MPSC 传输，没有传输层握手，但同样显式发 initialize——本方法就是那次
+    /// 协商；在它之前 host 请求面以 [`PeriCaps::all_enabled`] 兜底（含 11 条旧兜底 ui 明细）。
+    /// 本方法以 all_enabled 为基座、关闭 TUI 不消费的 `peri.oauth` 专用通道、
     /// 替换 `ui_commands` 为 TUI 实时明细，经 initialize 请求送达 host
     /// （`handle_request` "initialize" 分支 → `set_pending_caps`
     /// → 首个 session/new 的 `ensure_session_caps` 取协商值 → `send_available_commands_update`

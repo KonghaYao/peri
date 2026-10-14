@@ -46,6 +46,13 @@ TUI 的所有主动行为通过标准 ACP JSON-RPC 方法调用。不定义自�
   仍参与执行准入，不能在当前宿主同名目录静默装配另一环境。
 - `session/load` / `session/resume` 不取得或校验执行所有权，不返回所有权只读准入或前任 owner 警告。唯一执行者与跨实例协调由 `peri-sdk` 管理；Peri 保留环境、绑定、frozen 与持久化完整性检查，历史通过独立只读入口查询。
 
+工作区扩展的门控事实源是**进程级协商值**（`SessionManager::effective_host_caps`）：同一 host 内
+完成过 initialize 的连接所属请求面共享该值，从未 initialize 的连接按 [`PeriCaps::all_enabled`]
+兜底（A25 保留③，实现见 `peri-acp/src/session/caps.rs`）。历史分页相反：按**发起连接**的
+`ConnectionFacts::history_pagination()` 失败关闭判定。两者差异是有意的——分页决定这次
+`session/load` 回放什么内容，必须与连接绑定；工作区扩展表达的是本 host 的装配事实。
+同进程多连接接管的部署形态一旦出现，工作区门控需与分页一起改为按连接判定。
+
 历史分页由 initialize 的 `peri.historyPagination: true` 显式协商，**不改标准 `session/load`
 语义**：未协商的连接始终得到标准完整回放。协商过的连接可带非空 `cursor` 请求更早一页，
 此时 `session/load` 不重新装配会话（不占执行生命周期锁、不做任务绑定 / MCP 接纳 / 命令广播 /

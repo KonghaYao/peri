@@ -1,0 +1,347 @@
+# A05 索引复跑：工作树 HEAD=37149c90f（A05 改动未提交）
+# 命令：./scripts/cargo-rmcp-patched.sh test --locked -p peri-resources --lib -- history_perf_tests --ignored --nocapture
+# 环境变量：默认（PERI_PERF_ROWS=10000,100000,1000000、ITERS=20、PAGES=20）
+# 开始：2026-10-14T06:27:50Z
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 1.15s
+     Running unittests src/lib.rs (target/debug/deps/peri_resources-5e5b2d6b81e29ee9)
+
+running 5 tests
+== 环境 ==
+== EXPLAIN（VDBE 字节码，生产语句原文；参数未绑定） ==
+  · HISTORY_PAGE_ROWS_SQL（分页阶段一，带游标） — 语句: SELECT message_id, rowid, length(CAST(content AS BLOB))
+    FROM messages
+    WHERE thread_id = ?1 AND (?2 IS NULL OR rowid < (
+        SELECT m.rowid FROM messages m WHERE m.thread_id = ?1 AND m.message_id = ?2))
+    ORDER BY rowid DESC LIMIT ?3
+         0 Init               0   42    0  0  
+         1 Noop               2    5    0  0  
+         2 Variable           3    1    0  0  
+         3 MustBeInt          1    0    0  0  
+         4 IfNot              1   41    0  0  
+         5 OpenRead           0   12    0  0 4 
+         6 OpenRead           3   20    0  2 k(2,,) 
+         7 Variable           1    2    0  0  
+         8 IsNull             2   41    0  0  
+         9 Affinity           2    1    0  0 B 
+        10 SeekLE             3   41    2  0 1 
+        11 IdxLT              3   41    2  0 1 
+        12 DeferredSeek       3    0    0  0  
+        13 IsNull             3   33    0  0  
+        14 IdxRowid           3    4    0  0  
+        15 BeginSubrtn        0    6    0  0  
+        16 Once               0   31    0  0  
+        17 Null               0    7    7  0  
+        18 Integer            1    8    0  0  
+        19 OpenRead           1   12    0  0 2 
+        20 OpenRead           4   13    0  2 k(2,,) 
+        21 Variable           2    9    0  0  
+        22 IsNull             9   31    0  0  
+        23 Affinity           9    1    0  0 B 
+        24 SeekGE             4   31    9  0 1 
+        25 IdxGT              4   31    9  0 1 
+        26 DeferredSeek       4    0    1  0  
+        27 Column             1    1   10  0  
+        28 Ne                11   31   10 82 BINARY-8 
+        29 IdxRowid           4    7    0  0  
+        30 DecrJumpZero       8   31    0  0  
+        31 Return             6   16    1  0  
+        32 Ge                 7   40    4 83  
+        33 Column             0    0   12  0  
+        34 IdxRowid           3   13    0  0  
+        35 Column             0    3    4  0  
+        36 Cast               4   65    0  0  
+        37 Function           0    4   14  0 length(1) 
+        38 ResultRow         12    3    0  0  
+        39 DecrJumpZero       1   41    0  0  
+        40 Prev               3   11    1  0  
+        41 Halt               0    0    0  0  
+        42 Transaction        0    0   14  1 0 
+        43 Variable           2    3    0  0  
+        44 Variable           1   11    0  0  
+        45 Goto               0    1    0  0  
+  · HISTORY_SEGMENT_NEXT_SQL（回放非首段） — 语句: SELECT message_id, rowid, length(CAST(content AS BLOB))
+    FROM messages
+    WHERE thread_id = ?1 AND rowid > ?2 AND rowid <= ?3
+    ORDER BY rowid ASC LIMIT ?4
+         0 Init               0   27    0  0  
+         1 Noop               1    5    0  0  
+         2 Variable           4    1    0  0  
+         3 MustBeInt          1    0    0  0  
+         4 IfNot              1   26    0  0  
+         5 OpenRead           0   12    0  0 4 
+         6 OpenRead           2   20    0  0 k(2,,) 
+         7 Variable           1    2    0  0  
+         8 IsNull             2   26    0  0  
+         9 Variable           2    3    0  0  
+        10 IsNull             3   26    0  0  
+        11 Affinity           2    2    0  0 BC 
+        12 SeekGT             2   26    2  0 2 
+        13 Variable           3    3    0  0  
+        14 IsNull             3   26    0  0  
+        15 Affinity           3    1    0  0 C 
+        16 IdxGT              2   26    2  0 2 
+        17 DeferredSeek       2    0    0  0  
+        18 Column             0    0    4  0  
+        19 IdxRowid           2    5    0  0  
+        20 Column             0    3    7  0  
+        21 Cast               7   65    0  0  
+        22 Function           0    7    6  0 length(1) 
+        23 ResultRow          4    3    0  0  
+        24 DecrJumpZero       1   26    0  0  
+        25 Next               2   16    1  0  
+        26 Halt               0    0    0  0  
+        27 Transaction        0    0   14  1 0 
+        28 Goto               0    1    0  0  
+  · 对照：SELECT length(content)（无 CAST） — 语句: SELECT length(content) FROM messages WHERE thread_id = ?1
+         0 Init               0   14    0  0  
+         1 OpenRead           0   12    0  0 4 
+         2 OpenRead           1   25    0  2 k(3,,,) 
+         3 Variable           1    1    0  0  
+         4 IsNull             1   13    0  0  
+         5 Affinity           1    1    0  0 B 
+         6 SeekGE             1   13    1  0 1 
+         7 IdxGT              1   13    1  0 1 
+         8 DeferredSeek       1    0    0  0  
+         9 Column             0    3    3 64  
+        10 Function           0    3    2  0 length(1) 
+        11 ResultRow          2    1    0  0  
+        12 Next               1    7    0  0  
+        13 Halt               0    0    0  0  
+        14 Transaction        0    0   14  1 0 
+        15 Goto               0    1    0  0  
+  平台: macos aarch64
+  CPU: Apple M5 Pro
+  rustc: rustc 1.99.0 (b940084d7 2026-09-28)
+binary: rustc
+commit-hash: b940084d7eb6a299eb4bfeb8e34901bc051e7ac4
+commit-date: 2026-09-28
+host: aarch64-apple-darwin
+release: 1.99.0
+LLVM version: 23.1.1
+  夹具：有效 3 条 × 65536 字节；归档正文 1024 字节；页 limit=50 目标=524288 字节；iters=20 pages=20
+
+== 归档 10000 行 ==
+  夹具分相：生成（uuid + 正文 + 序列化）0.00s，批量 INSERT 0.00s（500 行/语句）
+== 探针：6 条 8 KiB 归档行 + 3 条 64 KiB 有效行 + 1 条不可解码行（rowid 最大），limit=3 ==
+    第 1 段: payloads=3 next_cursor=true
+    第 2 段: payloads=3 next_cursor=true
+    第 3 段: payloads=3 next_cursor=true
+    第 4 段失败: session data is corrupt: history entry is not decodable
+  夹具分相：生成（uuid + 正文 + 序列化）0.13s，批量 INSERT 0.23s（500 行/语句）
+  夹具分相：生成（uuid + 正文 + 序列化）0.00s，批量 INSERT 0.00s（500 行/语句）
+== 字节预算夹具：200 条 × 约 20480 字节正文（合计 4121290 字节），页目标 524288 字节 ==
+    首屏页: items=18 bytes=506076（96.5% 预算）p_ms=7.551 语句数（代码路径）= 21
+test sessions::sqlite_store::session_data::history_perf_tests::cases::history_perf_byte_budget_bounds_page_length ... ok
+== 段长/字节预算实测：limit=50 预算=98304 字节 ==
+  夹具分相：生成（uuid + 正文 + 序列化）0.22s，批量 INSERT 0.17s（500 行/语句）
+    段: payloads=6 bytes=49902 超预算=false next_cursor=true
+    段: payloads=1 bytes=65657 超预算=false next_cursor=true
+    段: payloads=1 bytes=65657 超预算=false next_cursor=true
+== oversize 夹具：6 条 × >1 MiB 正文（合计 7500750 字节），页目标 524288 字节 ==
+    段: payloads=1 bytes=65657 超预算=false next_cursor=false
+    合计推进 9 条自有行 / 246873 字节（夹具：6 归档 + 3 有效）
+    第 1 页（有效段）: items=3 bytes=196971 oversize=0
+    第 2 页: items=1 bytes=1250125 oversize=true position=6 语句数（代码路径）= 4 p_ms=11.230
+    第 3 页: items=1 bytes=1250125 oversize=true position=5 语句数（代码路径）= 4 p_ms=8.376
+    第 4 页: items=1 bytes=1250125 oversize=true position=4 语句数（代码路径）= 4 p_ms=8.389
+test sessions::sqlite_store::session_data::history_perf_tests::cases::history_perf_oversize_page_carries_one_body ... ok
+  夹具分相：生成（uuid + 正文 + 序列化）0.03s，批量 INSERT 0.59s（500 行/语句）
+== 探针夹具：归档 10000 行，正文为不可解码占位（45 字节/行，合计 450000 字节） ==
+  夹具分相：生成（uuid + 正文 + 序列化）0.00s，批量 INSERT 0.00s（500 行/语句）
+  对照组 load_session_snapshot 失败（预期）：session data is corrupt: stored session data is not readable
+  处理组 load_active_snapshot 成功：payloads=3 flags=1 解码正文字节=196971（归档 10000 行正文一条未解码）
+test sessions::sqlite_store::session_data::history_perf_tests::cases::history_perf_excluded_bodies_are_never_decoded ... ok
+    反例（删 tail 行 + 追加）：续段 payloads=1 含新行=true 含被删行=false next_cursor=false
+test sessions::sqlite_store::session_data::history_perf_tests::audit::audit_segment_lookahead_and_plan_shape ... ok
+  夹具分相：生成（uuid + 正文 + 序列化）0.41s，批量 INSERT 0.97s（500 行/语句）
+  夹具：messages=10003 行（归档 10000，有效 3），归档正文合计 11518890 字节，有效正文合计 196971 字节，库文件 14970880 字节，夹具生成 1.7s
+  sqlite_version: 3.46.0
+  page_size/page_count: 4096/3655
+  messages 表落库占用（dbstat）: 13889536 字节
+  -- 计划（EXPLAIN QUERY PLAN，生产语句原文） --
+  · load_meta_on — 语句: SELECT t.id, t.title, t.cwd, t.created_at, t.updated_at, t.message_count,
+    0 as content_size,
+    t.parent_thread_id, t.snapshot_at_message_id, t.hidden, t.cancel_policy, t.config, t.agent_status FROM threads t WHERE t.id = ?1
+      #3 SEARCH t USING INDEX sqlite_autoindex_threads_1 (id=?)
+  · binding_row_state_on — 语句: SELECT schema_version, project_id, workspace_id, relative_cwd
+         FROM session_bindings WHERE thread_id = ?1
+      #3 SEARCH session_bindings USING INDEX sqlite_autoindex_session_bindings_1 (thread_id=?)
+  · frozen_bytes_on — 语句: SELECT frozen_context FROM threads WHERE id = ?1
+      #3 SEARCH threads USING INDEX sqlite_autoindex_threads_1 (id=?)
+  · load_active_payloads_on — 语句: SELECT message_id, content FROM messages WHERE thread_id = ?1 AND excluded = 0 ORDER BY rowid
+      #4 SEARCH messages USING INDEX idx_messages_active (thread_id=? AND excluded=?)
+  · load_active_flags_on — 语句: SELECT message_id, truncated, excluded, projection FROM messages WHERE thread_id = ?1 AND excluded = 0 AND (truncated = 1 OR projection IS NOT NULL)
+      #3 SEARCH messages USING INDEX idx_messages_active (thread_id=? AND excluded=?)
+  · load_inherited_context_on — 语句: SELECT inherited_context FROM threads WHERE id = ?1
+      #3 SEARCH threads USING INDEX sqlite_autoindex_threads_1 (id=?)
+  · resolve_ancestor_chain_on — 语句: SELECT parent_thread_id FROM threads WHERE id = ?1
+      #3 SEARCH threads USING INDEX sqlite_autoindex_threads_1 (id=?)
+  · require_session（分页路径） — 语句: SELECT 1 FROM threads WHERE id = ?1
+      #2 SEARCH threads USING COVERING INDEX sqlite_autoindex_threads_1 (id=?)
+  · read_active_entry_positions — 语句: SELECT message_id, rowid FROM messages WHERE thread_id = ?1 AND excluded = 0 ORDER BY rowid ASC
+      #4 SEARCH messages USING INDEX idx_messages_active (thread_id=? AND excluded=?)
+  · read_history_page_bounds — 语句: SELECT
+        (SELECT m.message_id FROM messages m WHERE m.thread_id = t.id ORDER BY m.rowid ASC LIMIT 1),
+        (SELECT m.rowid FROM messages m WHERE m.thread_id = t.id AND m.message_id = ?2)
+    FROM threads t WHERE t.id = ?1
+      #2 SEARCH t USING COVERING INDEX sqlite_autoindex_threads_1 (id=?)
+      #9 CORRELATED SCALAR SUBQUERY 1
+      #19 SEARCH m USING INDEX idx_messages_thread_id (thread_id=?)
+      #31 CORRELATED SCALAR SUBQUERY 2
+      #36 SEARCH m USING INDEX sqlite_autoindex_messages_1 (message_id=?)
+  · read_history_page/阶段一 — 语句: SELECT message_id, rowid, length(CAST(content AS BLOB))
+    FROM messages
+    WHERE thread_id = ?1 AND (?2 IS NULL OR rowid < (
+        SELECT m.rowid FROM messages m WHERE m.thread_id = ?1 AND m.message_id = ?2))
+    ORDER BY rowid DESC LIMIT ?3
+      #7 SEARCH messages USING INDEX idx_messages_thread_id (thread_id=?)
+      #18 SCALAR SUBQUERY 1
+      #23 SEARCH m USING INDEX sqlite_autoindex_messages_1 (message_id=?)
+  · read_page_bodies/阶段二 — 语句: SELECT content FROM messages WHERE thread_id = ?1 AND message_id = ?2
+      #3 SEARCH messages USING INDEX sqlite_autoindex_messages_1 (message_id=?)
+  计划采集耗时 0.006s
+  恢复实测：payloads=3 flags=1 解码正文字节=196971 | 范围内行数（探针）=10003 其中 excluded=10000
+  恢复的语句数（代码路径逐条列出，非执行期计数）：恢复链 7 条（session_data.rs 的 load_active_snapshot）+ 该链不含分页/位置读取
+  恢复 cold（每次新句柄，SQLite 页缓存为空）: n=20 p50=3.299ms p95=6.027ms min=2.818ms max=6.165ms mean=3.759ms
+      返回 payload=3 flags=1 解码正文字节=196971
+  恢复 hot（同一句柄连续读取）: n=20 p50=2.322ms p95=4.351ms min=1.645ms max=4.470ms mean=2.532ms
+      返回 payload=3 flags=1 解码正文字节=196971
+
+== 归档 100000 行 ==
+  夹具分相：生成（uuid + 正文 + 序列化）4.35s，批量 INSERT 6.98s（500 行/语句）
+  夹具：messages=100003 行（归档 100000，有效 3），归档正文合计 115288890 字节，有效正文合计 196971 字节，库文件 147185664 字节，夹具生成 11.7s
+  sqlite_version: 3.46.0
+  page_size/page_count: 4096/35934
+  messages 表落库占用（dbstat）: 137072640 字节
+  -- 计划（EXPLAIN QUERY PLAN，生产语句原文） --
+  · load_meta_on — 语句: SELECT t.id, t.title, t.cwd, t.created_at, t.updated_at, t.message_count,
+    0 as content_size,
+    t.parent_thread_id, t.snapshot_at_message_id, t.hidden, t.cancel_policy, t.config, t.agent_status FROM threads t WHERE t.id = ?1
+      #3 SEARCH t USING INDEX sqlite_autoindex_threads_1 (id=?)
+  · binding_row_state_on — 语句: SELECT schema_version, project_id, workspace_id, relative_cwd
+         FROM session_bindings WHERE thread_id = ?1
+      #3 SEARCH session_bindings USING INDEX sqlite_autoindex_session_bindings_1 (thread_id=?)
+  · frozen_bytes_on — 语句: SELECT frozen_context FROM threads WHERE id = ?1
+      #3 SEARCH threads USING INDEX sqlite_autoindex_threads_1 (id=?)
+  · load_active_payloads_on — 语句: SELECT message_id, content FROM messages WHERE thread_id = ?1 AND excluded = 0 ORDER BY rowid
+      #4 SEARCH messages USING INDEX idx_messages_active (thread_id=? AND excluded=?)
+  · load_active_flags_on — 语句: SELECT message_id, truncated, excluded, projection FROM messages WHERE thread_id = ?1 AND excluded = 0 AND (truncated = 1 OR projection IS NOT NULL)
+      #3 SEARCH messages USING INDEX idx_messages_active (thread_id=? AND excluded=?)
+  · load_inherited_context_on — 语句: SELECT inherited_context FROM threads WHERE id = ?1
+      #3 SEARCH threads USING INDEX sqlite_autoindex_threads_1 (id=?)
+  · resolve_ancestor_chain_on — 语句: SELECT parent_thread_id FROM threads WHERE id = ?1
+      #3 SEARCH threads USING INDEX sqlite_autoindex_threads_1 (id=?)
+  · require_session（分页路径） — 语句: SELECT 1 FROM threads WHERE id = ?1
+      #2 SEARCH threads USING COVERING INDEX sqlite_autoindex_threads_1 (id=?)
+  · read_active_entry_positions — 语句: SELECT message_id, rowid FROM messages WHERE thread_id = ?1 AND excluded = 0 ORDER BY rowid ASC
+      #4 SEARCH messages USING INDEX idx_messages_active (thread_id=? AND excluded=?)
+  · read_history_page_bounds — 语句: SELECT
+        (SELECT m.message_id FROM messages m WHERE m.thread_id = t.id ORDER BY m.rowid ASC LIMIT 1),
+        (SELECT m.rowid FROM messages m WHERE m.thread_id = t.id AND m.message_id = ?2)
+    FROM threads t WHERE t.id = ?1
+      #2 SEARCH t USING COVERING INDEX sqlite_autoindex_threads_1 (id=?)
+      #9 CORRELATED SCALAR SUBQUERY 1
+      #19 SEARCH m USING INDEX idx_messages_thread_id (thread_id=?)
+      #31 CORRELATED SCALAR SUBQUERY 2
+      #36 SEARCH m USING INDEX sqlite_autoindex_messages_1 (message_id=?)
+  · read_history_page/阶段一 — 语句: SELECT message_id, rowid, length(CAST(content AS BLOB))
+    FROM messages
+    WHERE thread_id = ?1 AND (?2 IS NULL OR rowid < (
+        SELECT m.rowid FROM messages m WHERE m.thread_id = ?1 AND m.message_id = ?2))
+    ORDER BY rowid DESC LIMIT ?3
+      #7 SEARCH messages USING INDEX idx_messages_thread_id (thread_id=?)
+      #18 SCALAR SUBQUERY 1
+      #23 SEARCH m USING INDEX sqlite_autoindex_messages_1 (message_id=?)
+  · read_page_bodies/阶段二 — 语句: SELECT content FROM messages WHERE thread_id = ?1 AND message_id = ?2
+      #3 SEARCH messages USING INDEX sqlite_autoindex_messages_1 (message_id=?)
+  计划采集耗时 0.017s
+  恢复实测：payloads=3 flags=1 解码正文字节=196971 | 范围内行数（探针）=100003 其中 excluded=100000
+  恢复的语句数（代码路径逐条列出，非执行期计数）：恢复链 7 条（session_data.rs 的 load_active_snapshot）+ 该链不含分页/位置读取
+  恢复 cold（每次新句柄，SQLite 页缓存为空）: n=20 p50=3.379ms p95=4.631ms min=2.466ms max=6.227ms mean=3.351ms
+      返回 payload=3 flags=1 解码正文字节=196971
+  恢复 hot（同一句柄连续读取）: n=20 p50=2.092ms p95=2.490ms min=1.430ms max=2.772ms mean=2.002ms
+      返回 payload=3 flags=1 解码正文字节=196971
+
+== 归档 1000000 行 ==
+test sessions::sqlite_store::session_data::history_perf_tests::cases::history_perf_restore_and_paging_evidence has been running for over 60 seconds
+  夹具分相：生成（uuid + 正文 + 序列化）35.92s，批量 INSERT 51.45s（500 行/语句）
+  夹具：messages=1000003 行（归档 1000000，有效 3），归档正文合计 1153888890 字节，有效正文合计 196971 字节，库文件 1470291968 字节，夹具生成 87.7s
+  sqlite_version: 3.46.0
+  page_size/page_count: 4096/358958
+  messages 表落库占用（dbstat）: 1368969216 字节
+  -- 计划（EXPLAIN QUERY PLAN，生产语句原文） --
+  · load_meta_on — 语句: SELECT t.id, t.title, t.cwd, t.created_at, t.updated_at, t.message_count,
+    0 as content_size,
+    t.parent_thread_id, t.snapshot_at_message_id, t.hidden, t.cancel_policy, t.config, t.agent_status FROM threads t WHERE t.id = ?1
+      #3 SEARCH t USING INDEX sqlite_autoindex_threads_1 (id=?)
+  · binding_row_state_on — 语句: SELECT schema_version, project_id, workspace_id, relative_cwd
+         FROM session_bindings WHERE thread_id = ?1
+      #3 SEARCH session_bindings USING INDEX sqlite_autoindex_session_bindings_1 (thread_id=?)
+  · frozen_bytes_on — 语句: SELECT frozen_context FROM threads WHERE id = ?1
+      #3 SEARCH threads USING INDEX sqlite_autoindex_threads_1 (id=?)
+  · load_active_payloads_on — 语句: SELECT message_id, content FROM messages WHERE thread_id = ?1 AND excluded = 0 ORDER BY rowid
+      #4 SEARCH messages USING INDEX idx_messages_active (thread_id=? AND excluded=?)
+  · load_active_flags_on — 语句: SELECT message_id, truncated, excluded, projection FROM messages WHERE thread_id = ?1 AND excluded = 0 AND (truncated = 1 OR projection IS NOT NULL)
+      #3 SEARCH messages USING INDEX idx_messages_active (thread_id=? AND excluded=?)
+  · load_inherited_context_on — 语句: SELECT inherited_context FROM threads WHERE id = ?1
+      #3 SEARCH threads USING INDEX sqlite_autoindex_threads_1 (id=?)
+  · resolve_ancestor_chain_on — 语句: SELECT parent_thread_id FROM threads WHERE id = ?1
+      #3 SEARCH threads USING INDEX sqlite_autoindex_threads_1 (id=?)
+  · require_session（分页路径） — 语句: SELECT 1 FROM threads WHERE id = ?1
+      #2 SEARCH threads USING COVERING INDEX sqlite_autoindex_threads_1 (id=?)
+  · read_active_entry_positions — 语句: SELECT message_id, rowid FROM messages WHERE thread_id = ?1 AND excluded = 0 ORDER BY rowid ASC
+      #4 SEARCH messages USING INDEX idx_messages_active (thread_id=? AND excluded=?)
+  · read_history_page_bounds — 语句: SELECT
+        (SELECT m.message_id FROM messages m WHERE m.thread_id = t.id ORDER BY m.rowid ASC LIMIT 1),
+        (SELECT m.rowid FROM messages m WHERE m.thread_id = t.id AND m.message_id = ?2)
+    FROM threads t WHERE t.id = ?1
+      #2 SEARCH t USING COVERING INDEX sqlite_autoindex_threads_1 (id=?)
+      #9 CORRELATED SCALAR SUBQUERY 1
+      #19 SEARCH m USING INDEX idx_messages_thread_id (thread_id=?)
+      #31 CORRELATED SCALAR SUBQUERY 2
+      #36 SEARCH m USING INDEX sqlite_autoindex_messages_1 (message_id=?)
+  · read_history_page/阶段一 — 语句: SELECT message_id, rowid, length(CAST(content AS BLOB))
+    FROM messages
+    WHERE thread_id = ?1 AND (?2 IS NULL OR rowid < (
+        SELECT m.rowid FROM messages m WHERE m.thread_id = ?1 AND m.message_id = ?2))
+    ORDER BY rowid DESC LIMIT ?3
+      #7 SEARCH messages USING INDEX idx_messages_thread_id (thread_id=?)
+      #18 SCALAR SUBQUERY 1
+      #23 SEARCH m USING INDEX sqlite_autoindex_messages_1 (message_id=?)
+  · read_page_bodies/阶段二 — 语句: SELECT content FROM messages WHERE thread_id = ?1 AND message_id = ?2
+      #3 SEARCH messages USING INDEX sqlite_autoindex_messages_1 (message_id=?)
+  计划采集耗时 0.003s
+  恢复实测：payloads=3 flags=1 解码正文字节=196971 | 范围内行数（探针）=1000003 其中 excluded=1000000
+  恢复的语句数（代码路径逐条列出，非执行期计数）：恢复链 7 条（session_data.rs 的 load_active_snapshot）+ 该链不含分页/位置读取
+  恢复 cold（每次新句柄，SQLite 页缓存为空）: n=20 p50=2.435ms p95=2.900ms min=1.970ms max=2.990ms mean=2.423ms
+      返回 payload=3 flags=1 解码正文字节=196971
+  恢复 hot（同一句柄连续读取）: n=20 p50=2.105ms p95=2.401ms min=1.664ms max=2.768ms mean=2.078ms
+      返回 payload=3 flags=1 解码正文字节=196971
+  -- 分页：20 页 × limit=50 / 目标 524288 字节（同一句柄） --
+    第  1 页: items=50 bytes=251209 oversize=0 最旧 position=999954 语句数（代码路径）= 53 p_ms=7.103
+    第  2 页: items=50 bytes=57700 oversize=0 最旧 position=999904 语句数（代码路径）= 53 p_ms=6.873
+    第  3 页: items=50 bytes=57700 oversize=0 最旧 position=999854 语句数（代码路径）= 53 p_ms=6.134
+    第  4 页: items=50 bytes=57700 oversize=0 最旧 position=999804 语句数（代码路径）= 53 p_ms=12.667
+    第  5 页: items=50 bytes=57700 oversize=0 最旧 position=999754 语句数（代码路径）= 53 p_ms=4.920
+    第  6 页: items=50 bytes=57700 oversize=0 最旧 position=999704 语句数（代码路径）= 53 p_ms=3.676
+    第  7 页: items=50 bytes=57700 oversize=0 最旧 position=999654 语句数（代码路径）= 53 p_ms=4.460
+    第  8 页: items=50 bytes=57700 oversize=0 最旧 position=999604 语句数（代码路径）= 53 p_ms=10.883
+    第  9 页: items=50 bytes=57700 oversize=0 最旧 position=999554 语句数（代码路径）= 53 p_ms=3.302
+    第 10 页: items=50 bytes=57700 oversize=0 最旧 position=999504 语句数（代码路径）= 53 p_ms=4.049
+    第 11 页: items=50 bytes=57700 oversize=0 最旧 position=999454 语句数（代码路径）= 53 p_ms=3.886
+    第 12 页: items=50 bytes=57700 oversize=0 最旧 position=999404 语句数（代码路径）= 53 p_ms=4.463
+    第 13 页: items=50 bytes=57700 oversize=0 最旧 position=999354 语句数（代码路径）= 53 p_ms=4.592
+    第 14 页: items=50 bytes=57700 oversize=0 最旧 position=999304 语句数（代码路径）= 53 p_ms=5.135
+    第 15 页: items=50 bytes=57700 oversize=0 最旧 position=999254 语句数（代码路径）= 53 p_ms=4.769
+    第 16 页: items=50 bytes=57700 oversize=0 最旧 position=999204 语句数（代码路径）= 53 p_ms=4.392
+    第 17 页: items=50 bytes=57700 oversize=0 最旧 position=999154 语句数（代码路径）= 53 p_ms=3.396
+    第 18 页: items=50 bytes=57700 oversize=0 最旧 position=999104 语句数（代码路径）= 53 p_ms=3.183
+    第 19 页: items=50 bytes=57700 oversize=0 最旧 position=999054 语句数（代码路径）= 53 p_ms=3.061
+    第 20 页: items=50 bytes=57700 oversize=0 最旧 position=999004 语句数（代码路径）= 53 p_ms=2.765
+  分页 hot（无游标首屏，重复读）: n=20 p50=3.327ms p95=3.945ms min=2.905ms max=4.010ms mean=3.364ms
+  分页 20 页连续遍历（含游标页）: n=20 p50=4.463ms p95=10.883ms min=2.765ms max=12.667ms mean=5.185ms
+test sessions::sqlite_store::session_data::history_perf_tests::cases::history_perf_restore_and_paging_evidence ... ok
+
+test result: ok. 5 passed; 0 failed; 0 ignored; 0 measured; 521 filtered out; finished in 104.74s
+
+exit=0 结束：2026-10-14T06:29:37Z

@@ -18,6 +18,10 @@ const LOCK_RELEASE_PROBE_BUDGET: Duration = Duration::from_millis(250);
 ///
 /// 四个真实调用点与回归用例 `release_probe_waits_out_an_external_holder` 共用这一处，
 /// 等待预算只有这一个来源——它被退回零等待，回归用例即红。
+///
+/// 新增「持有者 `drop` 后锁应已归还」这类探测一律经本入口；调用点自己内联零等待探测
+/// **不在本守卫覆盖内**（已在 `.recon/S13-lock-test.md` §4.7 实测登记：那种写法绕过
+/// 本入口后回归仍绿），内联零等待会把 fork 继承窗口报成假红。
 async fn probe_initialization_lock_release(path: &Path) -> Result<std::fs::File> {
     lock_schema_open(path, LOCK_RELEASE_PROBE_BUDGET).await
 }
@@ -104,6 +108,41 @@ async fn registration_upgrade_fixture(path: &Path) {
     .await
     .unwrap();
     connection.close().await.unwrap();
+}
+
+/// 索引集随后续构建演进，而形状判定只看表与列：当前形状（版本已是最新）的库缺了新索引时，
+/// 写打开必须按 canonical 清单幂等补齐。否则上一版构建建出的库永远拿不到新索引，
+/// 有效范围读取会退化成逐行过滤（A05）。
+#[tokio::test]
+async fn current_shape_open_backfills_a_missing_canonical_index() {
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("threads.db");
+    let store = SqliteThreadStore::new(&path).await.unwrap();
+    // 模拟上一版构建建出的库：删掉新索引后，版本与形状都不变，打开路径仍判 Current。
+    sqlx::raw_sql("DROP INDEX idx_messages_active")
+        .execute(&store.database.pool)
+        .await
+        .unwrap();
+    store.close().await;
+
+    let reopened = SqliteThreadStore::new(&path).await.unwrap();
+    let (present,): (i64,) = sqlx::query_as(
+        "SELECT COUNT(*) FROM sqlite_schema WHERE type = 'index' AND name = 'idx_messages_active'",
+    )
+    .fetch_one(&reopened.database.pool)
+    .await
+    .unwrap();
+    assert_eq!(present, 1, "当前形状的库在写打开时必须补回 canonical 索引");
+    reopen_close_keeps_version(&reopened).await;
+}
+
+/// 补齐是幂等的：再打开一次不改变版本，也不影响既有对象。
+async fn reopen_close_keeps_version(store: &SqliteThreadStore) {
+    let (version,): (i64,) = sqlx::query_as("PRAGMA user_version")
+        .fetch_one(&store.database.pool)
+        .await
+        .unwrap();
+    assert_eq!(version, CURRENT_SCHEMA_VERSION);
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
@@ -571,8 +610,15 @@ fn initialization_lock_holder_child_process() {
 
 /// 断言释放探测的等待时长时容许的测量/调度偏差。
 ///
-/// 与被测语义无关：只把「等待不得短于预算」写成下界断言，避免定时器粒度造成的假红。
+/// 与被测语义无关：只把「等待不得短于下界」写成下界断言，避免定时器粒度造成的假红。
 const PROBE_WAIT_MEASUREMENT_SLACK: Duration = Duration::from_millis(50);
+
+/// 判别断言的独立下界：**不引用**被测的 [`LOCK_RELEASE_PROBE_BUDGET`]。
+///
+/// 参照值与阈值同源时，改小预算常量即可让断言恒真——判别力被静默取消（实测：预算
+/// 调到 20 ms 时本用例仍绿）。下界与预算是两个独立事实：断言变红要么说明等待没有真正
+/// 发生，要么说明预算已被调到低于下界，两种都必须有人来看一眼。
+const PROBE_WAIT_FLOOR: Duration = Duration::from_millis(200);
 
 /// 断言探测因锁仍被持有而放弃（`session database initialization is busy`）。
 fn assert_initialization_lock_busy(result: Result<std::fs::File>) {
@@ -631,15 +677,16 @@ async fn release_probe_waits_out_an_external_holder() {
     // 步骤 2：受控首次 WouldBlock——持有者未收到放行信号。
     assert_initialization_lock_busy(lock_schema_open(&path, Duration::ZERO).await);
 
-    // 步骤 3：判别断言。持锁期间探测只能在预算耗尽后放弃。
+    // 步骤 3：判别断言。持锁期间探测只能在预算耗尽后放弃；下界是独立常量
+    // （`PROBE_WAIT_FLOOR`），把预算调小不会让这条断言变成恒真。
     let started = peri_time::monotonic_now();
     let error = probe_initialization_lock_release(&path).await.unwrap_err();
     let waited = peri_time::elapsed_since(started);
     assert_initialization_lock_busy(Err(error));
     assert!(
-        waited + PROBE_WAIT_MEASUREMENT_SLACK >= LOCK_RELEASE_PROBE_BUDGET,
+        waited + PROBE_WAIT_MEASUREMENT_SLACK >= PROBE_WAIT_FLOOR,
         "release probe gave up before its budget while the holder still held the lock: \
-         waited {waited:?} < {LOCK_RELEASE_PROBE_BUDGET:?}"
+         waited {waited:?} < {PROBE_WAIT_FLOOR:?} (budget {LOCK_RELEASE_PROBE_BUDGET:?})"
     );
 
     // 步骤 4：锁整段调用都被持有。
