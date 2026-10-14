@@ -782,13 +782,15 @@ async fn legacy_bootstrap_applies_request_declared_mcp_servers() {
     assert!(environment.shutdown().await);
 }
 
-/// M5 缺陷 2：bootstrap 之后（接纳失败）必须排空已激活环境，不留半成品。
+/// 不属于本地 legacy 接纳范围的目标（有父线程的无绑定子会话）在装配资源环境**之前**
+/// 如实失败：不 bootstrap、不写绑定/frozen、不发布会话，失败文案给出可完成的下一步。
 ///
-/// 注入：把一个“有父线程的无绑定子会话”当作 legacy 接纳目标——资源环境先
-/// bootstrap，随后 `adopt_legacy_session` 按真实规则拒绝（child 不可接纳）。
+/// 有父线程 ⇒ 不是可接纳的 legacy root，归属重建在接纳前就拒绝，因此没有环境需要排空；
+/// 「bootstrap 之后的失败必须排空已激活环境」由
+/// `legacy_post_adoption_load_failure_drains_environment_without_rollback` 覆盖。
 #[tokio::test]
 #[serial]
-async fn legacy_adopt_failure_drains_bootstrapped_environment() {
+async fn unadoptable_legacy_target_fails_before_bootstrap() {
     let tmp = tempfile::tempdir().unwrap();
     let _home = HomeDirGuard::set(tmp.path());
     let cwd = std::fs::canonicalize(tmp.path())
@@ -833,15 +835,16 @@ async fn legacy_adopt_failure_drains_bootstrapped_environment() {
     )
     .await
     .expect_err("有父线程的无绑定会话不得被 legacy 接纳");
+    assert_eq!(error.code, -32010, "{error:?}");
     assert!(!error.message.is_empty(), "原始错误原因必须保留: {error:?}");
     assert!(sessions.is_empty(), "失败不得发布会话");
     assert!(bridge.load_session_binding(&id).await.unwrap().is_none());
     assert!(bridge.load_frozen_snapshot(&id).await.unwrap().is_none());
-    // 环境已排空：shutdown 观察面记录了该会话的环境关闭。
+    // 该会话从未 bootstrap：失败发生在装配资源环境之前，没有半成品需要排空。
     let shutdowns = crate::host::workspace::take_shutdown_observations();
     assert!(
-        shutdowns.iter().any(|session| session == &id),
-        "bootstrap 失败路径必须排空环境（观察到的 shutdown: {shutdowns:?}）"
+        !shutdowns.iter().any(|session| session == &id),
+        "拒绝必须发生在装配之前（观察到的 shutdown: {shutdowns:?}）"
     );
 }
 

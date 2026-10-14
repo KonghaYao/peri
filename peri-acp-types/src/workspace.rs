@@ -180,6 +180,13 @@ pub enum WorkspaceError {
     ExecutionBindingMismatch,
     #[error("session has no execution binding")]
     BindingMissing,
+    /// 无绑定的历史会话：本机现有证据证明不了它的执行归属（原归属行从未被本机
+    /// 观测过、目录已不在、或观测到的目录已属于别的归属）。历史仍按 ID 可读；
+    /// 文案要给出的下一步是可完成的动作，不要求产品中不存在的「重绑」操作。
+    #[error(
+        "this historical session has no execution binding and its location cannot be verified on this machine; history stays readable — start a new session in that directory to continue"
+    )]
+    UnverifiedLegacyOwner,
     #[error("session binding version or data is unsupported")]
     InvalidBinding,
     /// 会话存储以只读方式打开：历史可读，登记新工作区与新会话不可用。

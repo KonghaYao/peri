@@ -591,6 +591,23 @@ pub trait SessionResources: Send + Sync {
         frozen: &FrozenSnapshotBytes,
     ) -> SessionResourceResult<()>;
 
+    /// 为无绑定的本机历史会话重建可复核的执行归属：幂等、可重跑。
+    ///
+    /// 后置条件：会话已有绑定时只按既有事实复核；没有绑定时按保存的 cwd 在本机重新
+    /// 观测，原归属行从未被观测过（无执行证据的迁移期历史归组行）才把会话归属收敛到
+    /// 观测出的 Workspace，行上已有证据则失败（
+    /// [`WorkspaceError::UnverifiedLegacyOwner`]），不静默改绑。
+    /// 返回的 Workspace 与 `threads.workspace_id` 一致，接纳可直接使用它；
+    /// 无法用当前证据证明归属时如实失败，历史仍按 ID 可读。
+    async fn relink_unbound_session(
+        &self,
+        _id: &ThreadId,
+    ) -> SessionResourceResult<ResolvedWorkspace> {
+        Err(SessionResourceError::new(
+            SessionResourceErrorKind::Unsupported,
+        ))
+    }
+
     // ── 读取 ──
 
     /// 一次一致读取：metadata、binding 分类、frozen 状态、own payload/flags、inherited。

@@ -263,6 +263,13 @@ impl SessionDataPort for SqliteSessionData {
             ));
         }
         let binding = SessionBinding::from_workspace(workspace);
+        // 展示投影（无观测快照，项目 id 由会话 id 派生）不是可接纳的执行证据：接受它
+        // 只会在下一句的项目关系比对里失败，并把「没有绑定」误报成「绑定数据不支持」。
+        if workspace.discovery_snapshot.is_none() {
+            return Err(SessionResourceError::new(
+                SessionResourceErrorKind::Workspace(WorkspaceError::UnverifiedLegacyOwner),
+            ));
+        }
         sqlx::query(
             "INSERT OR IGNORE INTO projects(id, locator, object_identity) VALUES (?1, ?2, ?1)",
         )

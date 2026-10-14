@@ -215,6 +215,24 @@ pub(super) async fn migrate_shape(connection: &mut SqliteConnection) -> Result<(
     if !violations.is_empty() {
         bail!("storage v11 migration broke foreign keys");
     }
+    // 迁移不读文件系统，因此无法为「没有旧绑定、也没有可引用的执行登记证据」的历史会话
+    // 建出绑定的位置事实（`session_bindings.project_id` 是非空列，不伪造过去的快照）。
+    // 这些会话保留归属行、保持只读历史，由本机首次打开时按保存 cwd 的当前观测证据重建
+    // （`relink_unbound_session`）；无法核实的保持只读。这里不静默跳过：如实报告数量。
+    let (unbound,): (i64,) = sqlx::query_as(
+        "SELECT COUNT(*) FROM threads t
+         LEFT JOIN session_bindings b ON b.thread_id = t.id
+         WHERE b.thread_id IS NULL",
+    )
+    .fetch_one(&mut *connection)
+    .await?;
+    if unbound != 0 {
+        tracing::warn!(
+            sessions = unbound,
+            "storage v11 migration left historical sessions without execution bindings; \
+             they stay readable and are re-linked on demand from the saved directory evidence"
+        );
+    }
     sqlx::query("PRAGMA user_version = 11")
         .execute(&mut *connection)
         .await?;

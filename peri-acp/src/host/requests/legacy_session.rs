@@ -102,8 +102,19 @@ pub(super) async fn prepare_for_restore(
     }
     let _ = expected_cwd;
     // 执行资格（本机可用执行目录）先于任何读取：异机/远端执行环境在此失败，
-    // 不会去读本机同名路径。
-    let workspace = resolve_saved_workspace(cfg, &meta).await?;
+    // 不会去读本机同名路径。归属来源按 frozen 分两条：
+    // - 有 frozen、缺绑定：这是「已认领过、绑定记录丢失」的会话，只按既有事实复核，
+    //   不重建归属（接纳本身由数据面拒绝，保持 write-once 语义）。
+    // - 无 frozen 的历史会话：迁移期可能只留下没有执行证据的归组行，先按保存 cwd 的
+    //   当前观测证据重建归属（幂等、可重跑）；证据不足时如实失败（历史仍可读），
+    //   不静默改绑。
+    let workspace = match snapshot.frozen {
+        FrozenState::Present(_) => resolve_saved_workspace(cfg, &meta).await?,
+        FrozenState::LegacyAbsent => resources
+            .relink_unbound_session(&meta.id)
+            .await
+            .map_err(resource_error)?,
+    };
     let workspace_cwd = workspace.cwd.to_string_lossy().into_owned();
     match snapshot.frozen {
         // frozen 已存在但绑定缺失：接纳只补绑定并保持既有字节（write-once），随后

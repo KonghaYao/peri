@@ -1,8 +1,13 @@
 # peri-acp 代码索引
 
 Legacy 首次接纳在 `host/requests/legacy_session.rs` 消费
-`PreparedSessionInputs.legacy.saved_cwd` 作为保存目录事实源；配置与 frozen
-仍按准备阶段解析出的 workspace 构建，回归见 `host/requests_legacy_test.rs`。
+`PreparedSessionInputs.legacy.saved_cwd` 作为保存目录事实源；无 frozen 的无绑定历史会话
+在接纳前先经 `SessionResources::relink_unbound_session` 按当前观测重建归属（幂等、
+可重跑），核实不了按可操作错误拒绝、历史保持可读（有 frozen 缺绑定的会话只按既有事实
+复核，不重建归属）；归属重建失败发生在装配资源环境之前（不 bootstrap、不写绑定/frozen），
+配置与 frozen
+仍按准备阶段解析出的 workspace 构建，回归见 `host/requests_legacy_test.rs` 与
+peri-resources 的 `sessions/resources_legacy_relink_test.rs`。
 
 输入提交性能入口：`host/requests/session_io.rs` 在短会话锁内选择已绑定环境，队列 IO 在锁外执行；`host/server_loop.rs::spawn_session_io` 将输入快照 放入 host-owned 请求任务，普通变更与生命周期操作保留原有接收顺序。`host/session_io_test.rs` 覆盖挂起输入操作时快照继续推进、全局会话锁可用与关闭拒绝。
 
