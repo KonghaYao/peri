@@ -4,7 +4,8 @@ use super::*;
 // ── md 复制按钮 ─────────────────────────────────────────────────────────
 
 /// 顶层渲染（render_copy_button=true）时，超过 MD_COPY_MIN_CHARS（400）字符的
-/// AssistantBubble 的正文后、尾随空行前追加复制按钮行（右对齐在 content 列右缘）。
+/// AssistantBubble 的正文后、尾随空行前追加复制按钮行：行首是正文竖线前缀
+/// （左缘时间线不断链），按钮块右对齐在 content 列右缘。
 #[test]
 fn test_assistant_bubble_renders_copy_button() {
     crate::i18n::init(Some("en"));
@@ -18,16 +19,28 @@ fn test_assistant_bubble_renders_copy_button() {
     let text: String = btn_line.spans.iter().map(|s| s.content.as_ref()).collect();
     let btn_width = 2 + crate::i18n::tr("msg-copy-md").width();
     let line_width = grid.first_prefix_width() + grid.content_width();
+    let prefix_width = grid.cont_prefix_width();
+    // 前缀 = 正文续行前缀（outer 空 + 竖线 + gap），随后填充空格把按钮右对齐
+    let prefix = format!(" \u{2502}{}", " ".repeat(grid.gap as usize));
     assert_eq!(
         text,
-        format!("{}{}", " ".repeat(line_width - btn_width), " Copy "),
-        "按钮行 = 前导填充空格（右对齐）+ 左右各 1 空格 + i18n 按钮文本"
+        format!(
+            "{}{}{}",
+            prefix,
+            " ".repeat(line_width - prefix_width - btn_width),
+            " Copy "
+        ),
+        "按钮行 = 正文竖线前缀 + 前导填充空格（右对齐）+ 左右各 1 空格 + i18n 按钮文本"
+    );
+    assert_eq!(
+        btn_line.spans[1].style.fg, lines[0].spans[1].style.fg,
+        "按钮行竖线色 = 正文竖线色"
     );
 
     assert_eq!(
         btn.logical_idx,
-        lines.len() - 2,
-        "按钮行位于正文与尾随空行之间"
+        lines.len() - 1,
+        "Wide 无尾随空行，按钮行为内容末行"
     );
     assert_eq!(
         btn.x_start,
@@ -136,8 +149,8 @@ fn test_assistant_md_paragraph_lines_stay_within_viewport() {
         let w: usize = l.spans.iter().map(|s| s.content.width()).sum();
         assert!(w <= 80, "行 {i} 宽度 {w} 超过视口 80：{:#?}", line_text(l));
     }
-    // 除 leading 空行外，每行第 2 个 span 都是竖线前缀
-    for (i, l) in lines.iter().enumerate().skip(1) {
+    // 每行第 2 个 span 都是竖线前缀（Wide 无 leading 空行，正文行自身带前缀）
+    for (i, l) in lines.iter().enumerate() {
         if l.spans.is_empty() {
             continue;
         }
@@ -395,8 +408,14 @@ fn test_nested_list_items_stay_compact_between_top_level_items() {
     let grid = GridSpec::grid_for(80);
     let mut md_cache = crate::kit::markdown::MarkdownRenderCache::default();
     let mut layout = crate::kit::message_area::vm_cache::MarkdownLineCache::default();
-    let (lines, ..) =
-        super::vm_to_lines_cached_with_layout(&vm, &grid, &mut md_cache, Some(&mut layout), false);
+    let (lines, ..) = super::vm_to_lines_cached_with_layout(
+        &vm,
+        &grid,
+        &mut md_cache,
+        Some(&mut layout),
+        false,
+        ZoneTransition::None,
+    );
 
     let index_of = |needle: &str| {
         lines
@@ -452,6 +471,7 @@ fn test_assistant_bubble_resize_rebuilds_stable_chunks_without_panic() {
             &mut md_cache,
             Some(&mut layout),
             false,
+            ZoneTransition::None,
         );
 
         let (_, stable) = layout
@@ -490,8 +510,14 @@ fn test_streaming_table_without_leading_pipe_stays_visible() {
     let grid = GridSpec::grid_for(80);
     let mut md_cache = crate::kit::markdown::MarkdownRenderCache::default();
     let mut layout = crate::kit::message_area::vm_cache::MarkdownLineCache::default();
-    let (lines, ..) =
-        super::vm_to_lines_cached_with_layout(&vm, &grid, &mut md_cache, Some(&mut layout), false);
+    let (lines, ..) = super::vm_to_lines_cached_with_layout(
+        &vm,
+        &grid,
+        &mut md_cache,
+        Some(&mut layout),
+        false,
+        ZoneTransition::None,
+    );
 
     let stable_text: String = layout
         .stable_overlay()

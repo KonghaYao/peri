@@ -9,11 +9,11 @@ use std::sync::Arc;
 use crate::i18n;
 #[cfg(test)]
 use crate::kit::message_area::grid::Breakpoint;
-use crate::kit::message_area::grid::GridSpec;
+use crate::kit::message_area::grid::{GridSpec, ZoneTransition};
 use crate::kit::tui_render_unit::TuiRenderUnit;
 use peri_theme::atoms::THEME_ATOM;
 use ratatui_kit::prelude::*;
-use ratatui_kit::ratatui::style::{Modifier, Style};
+use ratatui_kit::ratatui::style::{Color, Modifier, Style};
 use ratatui_kit::ratatui::text::{Line, Span};
 use unicode_width::UnicodeWidthStr;
 
@@ -29,7 +29,10 @@ mod user;
 
 pub(crate) use self::error::{copy_text_at, subagent_error_buttons};
 use self::group::{render_collapsed_group_lines, render_subagent_group_lines};
-use self::helpers::{format_completed_duration, place_meta, prefixed_cont_line};
+use self::helpers::{
+    STEP_ENTER, STEP_EXIT, cont_prefix, format_completed_duration, place_meta, prefixed_cont_line,
+    process_prefixed_cont_line, step_line, text_line_color,
+};
 pub(crate) use self::interaction::InteractionLayout;
 use self::interaction::render_ask_user_block_lines;
 use self::reasoning::render_reasoning_block;
@@ -83,12 +86,13 @@ const MD_COPY_MIN_CHARS: usize = 400;
 
 /// 生成 md 复制按钮行（AssistantBubble 内容末尾）。
 ///
-/// 布局：行尾右对齐的 ` Copy `——整个反色块（含左右 1 空格）即按钮视觉，
-/// 前导无样式空格把按钮推到 content 列右缘（继承消息区背景，视觉上不留痕迹）；
-/// 点击区域与反色块完全重合（[x_start, x_end) = 按钮块本身，不含前导空格）。
-/// 宽度不足（按钮行会被折行）时返回 None——调用方不渲染按钮行，避免
-/// 点击区域与实际渲染位置错位（同 footer keepgoing 的 m4 fix）。
-fn copy_button_line(grid: &GridSpec) -> Option<(Line<'static>, u16, u16)> {
+/// 布局：行首接正文续行前缀（`[outer 空][竖线][gap]`，竖线色 = 正文竖线色，
+/// 左缘时间线不断链），按钮块右对齐在 content 列右缘；竖线与按钮之间是无样式
+/// 空格（继承消息区背景，视觉上不留痕迹）；点击区域与反色块完全重合
+/// （[x_start, x_end) = 按钮块本身，不含前缀与填充空格）。
+/// 宽度不足（按钮块与竖线前缀重叠，或按钮行会被折行）时返回 None——调用方
+/// 不渲染按钮行，避免点击区域与实际渲染位置错位（同 footer keepgoing 的 m4 fix）。
+fn copy_button_line(grid: &GridSpec, line_color: Color) -> Option<(Line<'static>, u16, u16)> {
     let semantic = THEME_ATOM.state().read().semantic;
     let btn_text = i18n::tr("msg-copy-md");
     let btn_span = Span::styled(
@@ -101,14 +105,15 @@ fn copy_button_line(grid: &GridSpec) -> Option<(Line<'static>, u16, u16)> {
     let btn_width = btn_span.width();
     // 按钮行宽度 = 前缀（outer+accent+gap）+ content——按钮右对齐在 content 列右缘。
     let line_width = grid.first_prefix_width() + grid.content_width();
-    if btn_width > line_width {
+    let prefix_width = grid.cont_prefix_width();
+    if prefix_width + btn_width > line_width {
         return None;
     }
-    // 右对齐：前导无样式空格（默认样式，渲染时继承消息区背景）占满按钮左侧。
-    let line = Line::from(vec![
-        Span::raw(" ".repeat(line_width - btn_width)),
-        btn_span,
-    ]);
+    // 右对齐：竖线前缀之后的填充空格为默认样式（渲染时继承消息区背景）。
+    let mut spans = cont_prefix(grid, line_color);
+    spans.push(Span::raw(" ".repeat(line_width - prefix_width - btn_width)));
+    spans.push(btn_span);
+    let line = Line::from(spans);
     let x_start = (line_width - btn_width) as u16;
     let x_end = line_width as u16;
     Some((line, x_start, x_end))
@@ -142,6 +147,10 @@ pub(crate) fn vm_to_lines(vm: &TuiRenderUnit, grid: &GridSpec) -> Vec<Line<'stat
 /// 的 interaction block（§6.8）有值（选项行布局，供视口 post-pass 高亮与
 /// 点击热区）；第四项仅 UserBubble 的 @image 行有值（§4 T4，点击/hover 映射）；
 /// 其余变体恒 None / 空 Vec。
+///
+/// 与 [`vm_to_lines_cached_with_layout`] 同逻辑，不带 markdown stable overlay；
+/// 转场形态固定 [`ZoneTransition::None`]：本入口服务嵌套渲染（折叠组内成员 /
+/// 详情面板）与测试，孤立渲染的 entry 没有相邻 entry 可判定转场（§6）。
 pub(crate) fn vm_to_lines_cached(
     vm: &TuiRenderUnit,
     grid: &GridSpec,
@@ -153,29 +162,43 @@ pub(crate) fn vm_to_lines_cached(
     Option<InteractionLayout>,
     Vec<ImageLineInfo>,
 ) {
-    vm_to_lines_cached_with_layout(vm, grid, md_cache, None, render_copy_button)
+    vm_to_lines_cached_with_layout(
+        vm,
+        grid,
+        md_cache,
+        None,
+        render_copy_button,
+        ZoneTransition::None,
+    )
 }
 
+/// `transition` 为 entry 的过程区转场形态（§6，transcript 按相邻 entry 的起止
+/// zone 判定）：入口台阶行（进入 ` ╰─╮` / 退出 ` ╭─╯`）统一在本入口插入并顺延
+/// 各 layout 索引；`AssistantBubble` 内部 reasoning → 正文的转场由该分支自画
+/// （entry 内部事务）；正文段保持基准列。
 pub(crate) fn vm_to_lines_cached_with_layout(
     vm: &TuiRenderUnit,
     grid: &GridSpec,
     md_cache: &mut crate::kit::markdown::MarkdownRenderCache,
     md_lines: Option<&mut crate::kit::message_area::vm_cache::MarkdownLineCache>,
     render_copy_button: bool,
+    transition: ZoneTransition,
 ) -> (
     Vec<Line<'static>>,
     Option<CopyButtonInfo>,
     Option<InteractionLayout>,
     Vec<ImageLineInfo>,
 ) {
-    match vm {
+    let mut md_lines = md_lines;
+    let rendered = match vm {
         TuiRenderUnit::TuiAssistantBubble(data) => {
             let mut lines: Vec<Line<'static>> = Vec::new();
 
-            // §3.2 垂直节奏：user 与 assistant 正文块上下各保留 1 空行；
-            // 节拍空行带竖线前缀（左缘时间线不断链）。reasoning 是过程 entry，
-            // 不自行增加空行；若后接正文，正文前导空行负责分隔。空 bubble
-            // （无 text 无 reasoning）仍返回 0 行。
+            // §3.2 垂直节奏：Wide/Standard 的正文块分隔由转场台阶承担，不再保留
+            // 节拍空行；Compact/Narrow 无台阶，正文块上下仍各保留 1 空行（带竖线
+            // 前缀，左缘时间线不断链）。短回复并入过程带、与过程 entry 之间不画
+            // 台阶，上下也各保留 1 空行（过程带前缀）作分隔。reasoning 是过程
+            // entry，不自行增加空行。空 bubble（无 text 无 reasoning）仍返回 0 行。
             if data.text.is_empty() && data.reasoning.is_none() {
                 return (lines, None, None, Vec::new());
             }
@@ -188,23 +211,55 @@ pub(crate) fn vm_to_lines_cached_with_layout(
                 (theme.component.markdown.text, theme.semantic.accent)
             };
 
-            // 推理块（§6.3）——视觉独立 entry
+            // 短回复（§6，`TuiAssistantBubble::is_brief`）：正文并入过程带——
+            // 行前缀走过程区形态（缩进 + 标记列竖线）、wrap 宽度收窄为
+            // `process_content_width`；与相邻过程区不画转场台阶（zone 判定见
+            // `transcript::start_zone`）。长回复与 Compact/Narrow（indent == 0，
+            // 过程区前缀回退基准形态）走文本区形态。
+            let brief = data.is_brief();
+            let body_width = if brief {
+                grid.process_content_width()
+            } else {
+                grid.content_width()
+            };
+            let body_line = |line: Line<'static>| -> Line<'static> {
+                if brief {
+                    process_prefixed_cont_line(grid, line_color, line)
+                } else {
+                    prefixed_cont_line(grid, line_color, line)
+                }
+            };
+
+            // 推理块（§6.3）——视觉独立 entry；入口台阶由本函数统一插入
             if let Some(ref reasoning) = data.reasoning {
                 lines.extend(render_reasoning_block(reasoning, grid));
                 // 块尾不加空行（running/completed 一致）——与工具卡片紧凑布局
                 // 对齐；正文紧随其后，由 md 渲染自身节奏负责分段。
             }
 
-            // Markdown 正文——上下各 1 空行；wrap 在 content 列宽，行级再套统一前缀。
+            // 内部转场（§6）：reasoning（过程区）→ 正文（文本区）的退出台阶由
+            // 该 entry 自画——entry 内部事务，无跨 slot 依赖；线色用正文竖线色
+            // （accent），与下方正文无缝。纯 reasoning 块（无正文）的退出由后续
+            // 文本 entry 承担。短回复正文同属过程区（无 zone 跳变）→ 不画台阶。
+            if !brief && data.reasoning.is_some() && !data.text.is_empty() && grid.indent > 0 {
+                lines.push(step_line(STEP_EXIT, line_color));
+            }
+
+            // Markdown 正文——wrap 在 `body_width`（长回复 content 列宽、短回复
+            // 过程带收窄宽度），行级再套统一前缀（`body_line`）。
             if !data.text.is_empty() {
-                // 前导空行带竖线前缀（与正文同色）——turn 节拍空行不断链。
-                lines.push(prefixed_cont_line(grid, line_color, Line::default()));
+                // 前导空行：Compact/Narrow（无台阶，空行作块分隔）与短回复
+                // （过程带内不画台阶，空行承担分隔）保留；Wide/Standard 长回复
+                // 由转场台阶分隔。空行带竖线前缀（与正文同色）。
+                if grid.indent == 0 || brief {
+                    lines.push(body_line(Line::default()));
+                }
                 let palette_state = peri_theme::atoms::PALETTE_ATOM.state();
                 let palette_guard = palette_state.read();
                 let rendered = if data.started_at.is_none() {
                     crate::kit::markdown::parse_markdown_terminal(
                         &data.text,
-                        grid.content_width(),
+                        body_width,
                         *palette_guard,
                         md_text_fg,
                         md_cache,
@@ -212,48 +267,41 @@ pub(crate) fn vm_to_lines_cached_with_layout(
                 } else {
                     crate::kit::markdown::parse_markdown_chunks_cached(
                         &data.text,
-                        grid.content_width(),
+                        body_width,
                         *palette_guard,
                         md_text_fg,
                         md_cache,
                     )
                 };
-                if let Some(layout) = md_lines {
+                if let Some(layout) = md_lines.as_deref_mut() {
                     layout.stable_start = Some(lines.len());
-                    let stable_lines: Vec<_> =
-                        rendered
-                            .stable
-                            .iter()
-                            .enumerate()
-                            .map(|(chunk_index, chunk)| {
-                                let identity = Arc::as_ptr(chunk) as usize;
-                                if layout
-                                    .stable
-                                    .get(chunk_index)
-                                    .is_some_and(|cached| cached.identity == identity)
+                    let stable_lines: Vec<_> = rendered
+                        .stable
+                        .iter()
+                        .enumerate()
+                        .map(|(chunk_index, chunk)| {
+                            let identity = Arc::as_ptr(chunk) as usize;
+                            if layout
+                                .stable
+                                .get(chunk_index)
+                                .is_some_and(|cached| cached.identity == identity)
+                            {
+                                return (identity, Vec::new());
+                            }
+                            let mut chunk_lines = Vec::new();
+                            if chunk_index > 0 {
+                                chunk_lines.push(body_line(Line::default()));
+                            }
+                            for segment in chunk.iter() {
+                                if let crate::kit::markdown::MarkdownSegment::Text(seg_lines) =
+                                    segment
                                 {
-                                    return (identity, Vec::new());
+                                    chunk_lines.extend(seg_lines.iter().cloned().map(&body_line));
                                 }
-                                let mut chunk_lines = Vec::new();
-                                if chunk_index > 0 {
-                                    chunk_lines.push(prefixed_cont_line(
-                                        grid,
-                                        line_color,
-                                        Line::default(),
-                                    ));
-                                }
-                                for segment in chunk.iter() {
-                                    if let crate::kit::markdown::MarkdownSegment::Text(seg_lines) =
-                                        segment
-                                    {
-                                        chunk_lines.extend(seg_lines.iter().cloned().map(|line| {
-                                            prefixed_cont_line(grid, line_color, line)
-                                        }));
-                                    }
-                                }
-                                (Arc::as_ptr(chunk) as usize, chunk_lines)
-                            })
-                            .collect();
+                            }
+                            (Arc::as_ptr(chunk) as usize, chunk_lines)
+                        })
+                        .collect();
                     layout.retain_and_wrap(grid.line_width(), stable_lines);
                     for chunk in &layout.stable {
                         lines.resize(
@@ -264,17 +312,12 @@ pub(crate) fn vm_to_lines_cached_with_layout(
                 } else {
                     for (chunk_index, chunk) in rendered.stable.iter().enumerate() {
                         if chunk_index > 0 {
-                            lines.push(prefixed_cont_line(grid, line_color, Line::default()));
+                            lines.push(body_line(Line::default()));
                         }
                         for segment in chunk.iter() {
                             if let crate::kit::markdown::MarkdownSegment::Text(seg_lines) = segment
                             {
-                                lines.extend(
-                                    seg_lines
-                                        .iter()
-                                        .cloned()
-                                        .map(|line| prefixed_cont_line(grid, line_color, line)),
-                                );
+                                lines.extend(seg_lines.iter().cloned().map(&body_line));
                             }
                         }
                     }
@@ -303,19 +346,19 @@ pub(crate) fn vm_to_lines_cached_with_layout(
                         _ => seg_idx > 0 && !lines.last().is_some_and(|l| l.spans.is_empty()),
                     };
                     if gap {
-                        lines.push(prefixed_cont_line(grid, line_color, Line::default()));
+                        lines.push(body_line(Line::default()));
                     }
                     match seg {
                         crate::kit::markdown::MarkdownSegment::Text(seg_lines) => {
                             for line in seg_lines {
-                                lines.push(prefixed_cont_line(grid, line_color, line.clone()));
+                                lines.push(body_line(line.clone()));
                             }
                         }
                         crate::kit::markdown::MarkdownSegment::Image(img) => {
                             // 降级行已在 convert 阶段折行（wrap_styled_line），
                             // 前缀/空行逻辑与 Text 分支一致。
                             for line in &img.lines {
-                                lines.push(prefixed_cont_line(grid, line_color, line.clone()));
+                                lines.push(body_line(line.clone()));
                             }
                         }
                         crate::kit::markdown::MarkdownSegment::Table(data) => {
@@ -326,10 +369,10 @@ pub(crate) fn vm_to_lines_cached_with_layout(
                             let table_lines = crate::kit::markdown::table_data_to_lines(
                                 data,
                                 &table_theme,
-                                grid.content_width(),
+                                body_width,
                             );
                             for tl in table_lines {
-                                lines.push(prefixed_cont_line(grid, line_color, tl));
+                                lines.push(body_line(tl));
                             }
                         }
                     }
@@ -356,7 +399,7 @@ pub(crate) fn vm_to_lines_cached_with_layout(
             // 仅当内容超过 MD_COPY_MIN_CHARS 字符（chars().count() 口径）才渲染。
             let copy_button = if render_copy_button && data.text.chars().count() > MD_COPY_MIN_CHARS
             {
-                if let Some((btn_line, x_start, x_end)) = copy_button_line(grid) {
+                if let Some((btn_line, x_start, x_end)) = copy_button_line(grid, line_color) {
                     // 不插空行：按钮紧贴内容末行，视觉上更紧凑
                     let logical_idx = lines.len();
                     lines.push(btn_line);
@@ -372,24 +415,27 @@ pub(crate) fn vm_to_lines_cached_with_layout(
                 None
             };
 
-            if !data.text.is_empty() {
-                // 尾随空行同样带竖线前缀——turn 节拍对称且左缘时间线不断链。
-                lines.push(prefixed_cont_line(grid, line_color, Line::default()));
+            if !data.text.is_empty() && (grid.indent == 0 || brief) {
+                // 尾随空行：Compact/Narrow 与短回复保留——turn 节拍对称且左缘
+                // 时间线不断链（Wide/Standard 长回复由转场台阶承担分隔）。
+                lines.push(body_line(Line::default()));
             }
 
             (lines, copy_button, None, Vec::new())
         }
         TuiRenderUnit::TuiUserBubble(data) => {
             if let Some(ref info) = data.reminder {
-                return (
+                // 折叠提醒（单行）仍参与入口台阶：不早返回，交给统一包装。
+                (
                     render_reminder_condensed(info, grid),
                     None,
                     None,
                     Vec::new(),
-                );
+                )
+            } else {
+                let (lines, image_lines) = render_user_bubble_lines(data, grid);
+                (lines, None, None, image_lines)
             }
-            let (lines, image_lines) = render_user_bubble_lines(data, grid);
-            (lines, None, None, image_lines)
         }
         TuiRenderUnit::TuiToolCard(data) => (
             render_tool_card_lines(data, grid),
@@ -435,7 +481,59 @@ pub(crate) fn vm_to_lines_cached_with_layout(
             None,
             Vec::new(),
         ),
+    };
+
+    // 入口台阶（§6）：由转场后的首个 entry 在行首插入（Compact/Narrow 无缩进
+    // 即无台阶，§9）；0 行 entry（空 bubble / 空 prompt）不产生台阶。台阶行
+    // 使后续行索引 +1——copy / interaction / image 的 logical_idx 与 markdown
+    // stable overlay 起点同步顺延（台阶行由本函数插入，各 renderer 产出的
+    // 索引以自身行序为基准）。
+    let (mut lines, mut copy_button, mut interaction, mut image_lines) = rendered;
+    if grid.indent > 0 && !lines.is_empty() {
+        let step = match transition {
+            ZoneTransition::EnterProcess(source) => {
+                Some(step_line(STEP_ENTER, text_line_color(source)))
+            }
+            ZoneTransition::ExitProcess(source) => {
+                Some(step_line(STEP_EXIT, text_line_color(source)))
+            }
+            ZoneTransition::None => None,
+        };
+        if let Some(step) = step {
+            lines.insert(0, step);
+            if let Some(button) = copy_button.as_mut() {
+                button.logical_idx += 1;
+            }
+            if let Some(layout) = interaction.as_mut() {
+                for row in &mut layout.option_rows {
+                    *row += 1;
+                }
+            }
+            for info in image_lines.iter_mut() {
+                info.logical_idx += 1;
+            }
+            if let Some(layout) = md_lines
+                && let Some(start) = layout.stable_start.as_mut()
+            {
+                *start += 1;
+            }
+        }
     }
+    (lines, copy_button, interaction, image_lines)
+}
+
+/// running reasoning header 在 entry lines 中的索引：入口台阶（§6）占 lines[0]
+/// 时 running header 顺延到 lines[1]。Animation 原位刷新（`EntryRenderCache`）
+/// 据此定位——按台阶字形判定，替换目标不因转场形态漂移；无行时返回 None。
+pub(crate) fn running_header_index(lines: &[Line<'static>]) -> Option<usize> {
+    let first = lines.first()?;
+    Some(usize::from(helpers::is_step_line(first)))
+}
+
+/// 台阶行判定（§6 ` ╰─╮` / ` ╭─╯`）——语义复制在提取层整行跳过纯结构 chrome
+/// （`selection.rs`），复制文本里不出现台阶字形、也不为其保留空行。
+pub(crate) fn is_step_row(line: &Line<'static>) -> bool {
+    helpers::is_step_line(line)
 }
 
 #[cfg(test)]

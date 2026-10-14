@@ -94,6 +94,14 @@ impl TuiUserBubble {
 
 tui_impl_partial_eq!(TuiUserBubble: text, attachments, reminder, source);
 
+/// 短回复阈值（字符数，`chars().count()` 口径）：AI 正文**少于**该值时按
+/// 过程区形态渲染（缩进 2 格并入过程带）；user 气泡永远不缩进（§6）。
+///
+/// 取值 120：本机会话全量统计（43.17 万条 assistant 消息中 6.8 万条有可见文本）
+/// 显示正文长度 P50 = 68 / P75 = 157 / P90 = 649，分布无天然双峰谷底——120 是
+/// 落在 P50 与 P75 之间的产品取舍，不是数据断点。
+pub const BRIEF_REPLY_MAX_CHARS: usize = 120;
+
 /// Agent reply bubble -- left-aligned markdown with optional reasoning block.
 ///
 /// Tool invocations are **siblings** (separate `TuiToolCard` entries), not
@@ -236,6 +244,14 @@ impl TuiAssistantBubble {
             // 不含 duration_code——时变，不属于身份。
         }
         h
+    }
+
+    /// 是否短回复（`text` 字符数 < [`BRIEF_REPLY_MAX_CHARS`]）——文本区/过程区
+    /// 形态判定：zone 归属（`transcript::start_zone`/`end_zone`）与渲染前缀
+    /// （`render.rs` 正文行）共用，单一权威。空 text（纯 reasoning / 工具轮）
+    /// 恒为 true——渲染上无正文可缩进，zone 由 reasoning 分支决定。
+    pub fn is_brief(&self) -> bool {
+        self.text.chars().count() < BRIEF_REPLY_MAX_CHARS
     }
 }
 

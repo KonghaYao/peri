@@ -192,7 +192,9 @@ pub fn SubAgentDetailPanel(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
     });
 
     // 面板绘制区域（上一帧）——嵌套渲染 wrap 宽度 + 滚轮仲裁
-    let grid = GridSpec::grid_for(area.width.max(2));
+    let mut grid = GridSpec::grid_for(area.width.max(2));
+    // 嵌套面板沿用基准列：过程区缩进只作用于消息区主时间轴，本 issue 不改变面板形态。
+    grid.indent = 0;
 
     // 嵌套渲染：组内 view_models → vm_to_lines_cached（复用统一水平网格与
     // markdown 增量缓存；md 复制按钮关闭——嵌套内容不提供复制按钮）。

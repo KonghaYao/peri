@@ -1,5 +1,6 @@
 use super::tool_activity_tests::EDIT_DIFF;
 use super::*;
+use crate::kit::message_area::grid::TextLineSource;
 
 // ── [D3 §9] 语义复制：semantic_line_text 变体分派矩阵 ────────────────────
 
@@ -13,27 +14,48 @@ pub(super) fn sem_at(vm: &TuiRenderUnit, local_idx: usize, grid: &GridSpec) -> O
     semantic_line_text(vm, local_idx, line, grid)
 }
 
-/// 普通 assistant 正文行：剥前缀列（outer + accent + gap），无符号无竖线。
+/// 普通 assistant 正文行：剥前缀列——长回复剥文本区前缀（outer + accent + gap）、
+/// 短回复并入过程带后剥过程区前缀（outer + indent 留空 + 标记 + gap）；两形态
+/// 语义一致：无符号无竖线。
 #[test]
 fn test_semantic_plain_lines_strip_prefix() {
     let grid = GridSpec::grid_for(120);
-    let vm = TuiRenderUnit::TuiAssistantBubble(
-        TuiAssistantBubble {
-            started_at: None,
-            duration_ms: None,
-            // 两个 markdown 段落（段落间渲染空行）
-            text: "第一行\n\nsecond line with 中文".to_string(),
-            reasoning: None,
-            message_id: None,
-            content_hash: 0,
-        }
-        .into(),
-    );
-    // 行 0 = 前导空行；行 1 = 段落 1；行 2 = 段间空行；行 3 = 段落 2
-    let l1 = sem_at(&vm, 1, &grid).expect("段落 1");
-    assert_eq!(l1, "第一行", "段落剥前缀，实际: {l1:?}");
-    let l2 = sem_at(&vm, 3, &grid).expect("段落 2");
-    assert_eq!(l2, "second line with 中文", "段落剥前缀，实际: {l2:?}");
+    // 短回复（<120 字）并入过程带；长回复追加第 3 段超阈值 → 留在文本区。
+    // `first_row`：短回复行 0 = 前导空行（过程带前缀），正文自 1 起；
+    // 长回复（Wide/Standard 长文本无节拍空行）正文自 0 起。
+    for (label, text, first_row) in [
+        (
+            "短回复",
+            "第一行\n\nsecond line with 中文".to_string(),
+            1usize,
+        ),
+        (
+            "长回复",
+            format!("第一行\n\nsecond line with 中文\n\n{}", "pad ".repeat(40)),
+            0usize,
+        ),
+    ] {
+        let vm = TuiRenderUnit::TuiAssistantBubble(
+            TuiAssistantBubble {
+                started_at: None,
+                duration_ms: None,
+                // 两个 markdown 段落（段落间渲染空行）
+                text,
+                reasoning: None,
+                message_id: None,
+                content_hash: 0,
+            }
+            .into(),
+        );
+        // 行序：正文段落 1 → 段间空行 → 段落 2（相对 `first_row`）
+        let l1 = sem_at(&vm, first_row, &grid).expect("段落 1");
+        assert_eq!(l1, "第一行", "{label}: 段落剥前缀，实际: {l1:?}");
+        let l2 = sem_at(&vm, first_row + 2, &grid).expect("段落 2");
+        assert_eq!(
+            l2, "second line with 中文",
+            "{label}: 段落剥前缀，实际: {l2:?}"
+        );
+    }
 }
 
 /// §6.1/§6.2 无 role label 行：`You` / `Perihelion` 不渲染，正文从第 1 行开始。
@@ -42,7 +64,7 @@ fn test_no_role_label_line_rendered() {
     crate::i18n::init(Some("en"));
     let grid = GridSpec::grid_for(120);
 
-    // assistant：行 0 = 前导空行；行 1 = 正文（无 `Perihelion` label）
+    // assistant：行 0 = 前导空行（短回复并入过程带）；行 1 = 正文（无 `Perihelion` label）
     let vm = TuiRenderUnit::TuiAssistantBubble(
         TuiAssistantBubble {
             started_at: None,
@@ -63,10 +85,10 @@ fn test_no_role_label_line_rendered() {
     assert_eq!(
         sem_at(&vm, 1, &grid).as_deref(),
         Some("hello"),
-        "正文从行 1 开始（前后各 1 空行）"
+        "正文从行 1 开始（短回复前导空行带过程带前缀）"
     );
 
-    // user：行 0 = leading 空行；行 1 = 正文（无 `You` label）
+    // user：行 0 = 正文（无 `You` label）
     let user_vm = TuiRenderUnit::TuiUserBubble(TuiUserBubble {
         text: "hello".to_string(),
         attachments: Vec::new(),
@@ -75,15 +97,15 @@ fn test_no_role_label_line_rendered() {
         content_hash: 0,
     });
     let ulines = vm_to_lines(&user_vm, &grid);
-    let utext = crate::kit::text_selection::line_to_plain_text(&ulines[1]);
+    let utext = crate::kit::text_selection::line_to_plain_text(&ulines[0]);
     assert!(
         !utext.contains("You"),
         "user 无 role label，实际: {utext:?}"
     );
     assert_eq!(
-        sem_at(&user_vm, 1, &grid).as_deref(),
+        sem_at(&user_vm, 0, &grid).as_deref(),
         Some("hello"),
-        "正文从行 1 开始"
+        "正文从行 0 开始"
     );
 }
 
@@ -355,7 +377,202 @@ fn test_semantic_user_bubble() {
         reminder: None,
         content_hash: 0,
     });
-    // 行 0 = leading 空行；行 1 = 正文（无 role label 行）
-    let body = sem_at(&vm, 1, &grid).expect("正文行");
+    // 行 0 = 正文（Wide 无前后空行；无 role label 行）
+    let body = sem_at(&vm, 0, &grid).expect("正文行");
     assert_eq!(body, "重构消息流", "正文剥前缀，实际: {body:?}");
+}
+
+// ── [S3 §9] 过程区前缀（缩进 + 分叉）不进入复制语义 ──────────────────────
+
+/// 过程区行（首行标记列符号 + `│` 续行 + 缩进留空）复制时剥净前缀：状态符号、
+/// `│` 与缩进空格都不出现在语义文本里；工具行（header + 输出）与气泡混排
+/// （reasoning 过程段 + md 正文段）逐行成立；台阶行（§6）返回空语义。
+#[test]
+fn test_semantic_process_prefix_and_step_are_stripped() {
+    crate::i18n::init(Some("en"));
+    let grid = GridSpec::grid_for(80);
+
+    // 工具卡：进入过程区（入口台阶独立成行）
+    let tool = TuiRenderUnit::TuiToolCard(TuiToolCard {
+        fold: FoldState::Expanded,
+        output_summary: "out1\nout2".into(),
+        ..tool_card("Read", "src/main.rs", false, false)
+    });
+    let mut cache = crate::kit::markdown::MarkdownRenderCache::default();
+    let (lines, ..) = super::vm_to_lines_cached_with_layout(
+        &tool,
+        &grid,
+        &mut cache,
+        None,
+        false,
+        ZoneTransition::EnterProcess(TextLineSource::User),
+    );
+    assert!(super::is_step_row(&lines[0]), "首行应是入口台阶");
+    assert_eq!(
+        sem_at_lines(&tool, &lines, 0, &grid).as_deref(),
+        Some(""),
+        "台阶行无用户内容（复制层整行跳过）"
+    );
+    assert_eq!(
+        sem_at_lines(&tool, &lines, 1, &grid).as_deref(),
+        Some("Read src/main.rs \u{2014} 2 lines"),
+        "header 复制 label + summary + 完成后缀（无符号 / 台阶 / duration）"
+    );
+    assert_eq!(
+        sem_at_lines(&tool, &lines, 2, &grid).as_deref(),
+        Some("out1"),
+        "输出行剥离缩进前缀"
+    );
+    assert_eq!(
+        sem_at_lines(&tool, &lines, 3, &grid).as_deref(),
+        Some("out2"),
+        "输出行剥离缩进前缀"
+    );
+
+    // 气泡混排：reasoning 走过程区（首行标记列 `│` / 续行缩进），正文回基准列
+    let bubble = TuiRenderUnit::TuiAssistantBubble(
+        TuiAssistantBubble {
+            started_at: None,
+            duration_ms: None,
+            text: "正文回答".to_string(),
+            reasoning: Some(TuiReasoningBlock {
+                text: "long thought".to_string(),
+                fold: FoldState::Expanded,
+                status: EntryStatus::Completed,
+                is_running: false,
+                started_at: None,
+                duration_ms: Some(1_000),
+            }),
+            message_id: None,
+            content_hash: 2,
+        }
+        .into(),
+    );
+    let mut cache = crate::kit::markdown::MarkdownRenderCache::default();
+    let (lines, ..) = super::vm_to_lines_cached_with_layout(
+        &bubble,
+        &grid,
+        &mut cache,
+        None,
+        false,
+        ZoneTransition::EnterProcess(TextLineSource::User),
+    );
+    let header_idx = lines
+        .iter()
+        .position(|l| line_text(l).contains("Thought for 1s"))
+        .expect("reasoning header");
+    assert_eq!(
+        sem_at_lines(&bubble, &lines, header_idx, &grid).as_deref(),
+        Some("Thought for 1s \u{b7} 1 lines"),
+        "reasoning 摘要剥净前缀"
+    );
+    let thought_idx = lines
+        .iter()
+        .position(|l| line_text(l).contains("long thought"))
+        .expect("reasoning 正文");
+    assert_eq!(
+        sem_at_lines(&bubble, &lines, thought_idx, &grid).as_deref(),
+        Some("long thought"),
+        "reasoning 续行剥净缩进"
+    );
+    let answer_idx = lines
+        .iter()
+        .position(|l| line_text(l).contains("正文回答"))
+        .expect("正文行");
+    assert_eq!(
+        sem_at_lines(&bubble, &lines, answer_idx, &grid).as_deref(),
+        Some("正文回答"),
+        "正文段回基准列"
+    );
+
+    // 全量属性：语义文本不含任何结构字形（含台阶字形），也不以缩进空格开头
+    for idx in 0..lines.len() {
+        let Some(text) = sem_at_lines(&bubble, &lines, idx, &grid) else {
+            continue;
+        };
+        assert!(
+            !text.contains('\u{2502}')
+                && !text.contains('\u{2500}')
+                && !text.contains('\u{2570}')
+                && !text.contains('\u{256d}'),
+            "行 {idx} 语义文本残留结构字形：{text:?}"
+        );
+        assert!(
+            !text.starts_with(' '),
+            "行 {idx} 语义文本残留缩进空格：{text:?}"
+        );
+    }
+}
+
+/// 语义提取辅助：对已渲染行按 `local_idx` 取语义文本（复制路径口径）——
+/// 与提取层同源：台阶行整行跳过（空语义），其后各行按「VM 自身行序」顺延
+/// 1（入口台阶占 slot 行首）。
+fn sem_at_lines(
+    vm: &TuiRenderUnit,
+    lines: &[Line<'static>],
+    local_idx: usize,
+    grid: &GridSpec,
+) -> Option<String> {
+    let line = lines.get(local_idx)?;
+    let step_offset = usize::from(lines.first().is_some_and(super::is_step_row));
+    semantic_line_text(vm, local_idx.saturating_sub(step_offset), line, grid)
+}
+
+/// 过程区符号行（系统 note / Todo 摘要）复制时同样剥净前缀与状态符号：
+/// 首行语义 = 正文（`!` / `◼` 不进剪贴板），续行剥缩进，入口台阶行返回空语义。
+#[test]
+fn test_semantic_process_note_and_todo_strip_prefix() {
+    let grid = GridSpec::grid_for(80);
+
+    let note = TuiRenderUnit::TuiSystemNote(TuiSystemNote {
+        text: "warning line\nsecond line".to_string(),
+        level: TuiNoteLevel::Warning,
+        content_hash: 7,
+    });
+    let mut cache = crate::kit::markdown::MarkdownRenderCache::default();
+    let (lines, ..) = super::vm_to_lines_cached_with_layout(
+        &note,
+        &grid,
+        &mut cache,
+        None,
+        false,
+        ZoneTransition::EnterProcess(TextLineSource::User),
+    );
+    assert!(
+        super::is_step_row(&lines[0]),
+        "note 首行应是入口台阶，实际 {:?}",
+        line_text(&lines[0])
+    );
+    assert_eq!(
+        sem_at_lines(&note, &lines, 0, &grid).as_deref(),
+        Some(""),
+        "台阶行无用户内容"
+    );
+    assert_eq!(
+        sem_at_lines(&note, &lines, 1, &grid).as_deref(),
+        Some("warning line"),
+        "符号行剥净前缀与 `!`"
+    );
+    assert_eq!(
+        sem_at_lines(&note, &lines, 2, &grid).as_deref(),
+        Some("second line"),
+        "续行剥净缩进"
+    );
+
+    let todo =
+        TuiRenderUnit::TuiTodoSummary(TuiTodoSummary::new("3/7 tasks \u{b7} Running tests".into()));
+    let mut cache = crate::kit::markdown::MarkdownRenderCache::default();
+    let (lines, ..) = super::vm_to_lines_cached_with_layout(
+        &todo,
+        &grid,
+        &mut cache,
+        None,
+        false,
+        ZoneTransition::EnterProcess(TextLineSource::User),
+    );
+    assert_eq!(
+        sem_at_lines(&todo, &lines, 1, &grid).as_deref(),
+        Some("3/7 tasks \u{b7} Running tests"),
+        "Todo 摘要行剥净前缀与 `◼`"
+    );
 }

@@ -7,7 +7,7 @@ use ratatui_kit::ratatui::style::{Modifier, Style};
 use ratatui_kit::ratatui::text::{Line, Span};
 use unicode_width::UnicodeWidthStr;
 
-use super::helpers::{cont_prefix, first_prefix, sym};
+use super::helpers::{process_cont_prefix, process_first_prefix, sym};
 
 /// §6.8 Interaction block（Slice 4 双轨）：pending 态 `! Approval required` /
 /// 问题摘要 / 选项行（横向 `[Allow once]  [Deny]`，Narrow 垂直排列）；
@@ -19,12 +19,16 @@ use super::helpers::{cont_prefix, first_prefix, sym};
 /// 态），由 mod.rs 视口 post-pass 应用（与 focus/hover post-pass 同模式，
 /// 不破坏按 content_hash 分片的渲染缓存，G3）。本函数只返回静态
 /// `[label]` 行 + 布局信息 [`InteractionLayout`]（选项行的逻辑行与列区间）。
+///
+/// 行属过程区（§7 askuser = 过程/过程）：首行状态符号落在标记列（§3），续行
+/// 内容与首行同列（§4）；`option_cols` 的逻辑列随之右移，否则点击/高亮按列
+/// 命中会落在缩进空格上。
 pub(super) fn render_ask_user_block_lines(
     data: &TuiAskUserBlock,
     grid: &GridSpec,
 ) -> (Vec<Line<'static>>, Option<InteractionLayout>) {
     let sem = THEME_ATOM.state().read().semantic;
-    let content = grid.content_width();
+    let content = grid.process_content_width();
     let mut lines: Vec<Line<'static>> = Vec::new();
 
     if data.pending {
@@ -39,7 +43,7 @@ pub(super) fn render_ask_user_block_lines(
         };
         lines.push(Line::from({
             let mut spans =
-                first_prefix(grid, sym().warning, Style::default().fg(sem.status.warning));
+                process_first_prefix(grid, sym().warning, Style::default().fg(sem.status.warning));
             spans.push(Span::styled(
                 title,
                 Style::default()
@@ -49,7 +53,7 @@ pub(super) fn render_ask_user_block_lines(
             spans
         }));
         if !data.question.is_empty() {
-            let mut spans = cont_prefix(grid, sem.text.dim);
+            let mut spans = process_cont_prefix(grid, sem.text.dim);
             spans.push(Span::styled(
                 truncate_by_width(&data.question, content),
                 Style::default().fg(sem.text.muted),
@@ -66,7 +70,7 @@ pub(super) fn render_ask_user_block_lines(
         if grid.is_narrow() || data.options.len() <= 1 {
             for label in &data.options {
                 let text = format!("[{label}]");
-                let mut spans = cont_prefix(grid, sem.text.dim);
+                let mut spans = process_cont_prefix(grid, sem.text.dim);
                 spans.push(Span::styled(
                     truncate_by_width(&text, content),
                     Style::default().fg(sem.text.primary),
@@ -83,7 +87,10 @@ pub(super) fn render_ask_user_block_lines(
                 .map(|o| format!("[{o}]"))
                 .collect::<Vec<_>>()
                 .join("  ");
-            let mut spans = cont_prefix(grid, sem.text.dim);
+            let mut spans = process_cont_prefix(grid, sem.text.dim);
+            // 选项文本起始列 = 过程区续行前缀的实际宽度（`indent == 0` 时前缀
+            // 回退 cont_prefix，§9）——与渲染出的 spans 同源，命中列不会漂移。
+            let prefix_w: usize = spans.iter().map(|s| s.content.width()).sum();
             spans.push(Span::styled(
                 truncate_by_width(&text, content),
                 Style::default().fg(sem.text.primary),
@@ -91,7 +98,6 @@ pub(super) fn render_ask_user_block_lines(
             lines.push(Line::from(spans));
             // 每选项的列区间（逻辑列 = 前缀宽 + 前序选项累计宽；超宽截断的行
             // 不生成点击区间——点击事件按列命中，超宽部分不可点）。
-            let prefix_w = grid.cont_prefix_width();
             let mut col = prefix_w;
             for label in &data.options {
                 let w = format!("[{label}]").width();
@@ -125,7 +131,7 @@ pub(super) fn render_ask_user_block_lines(
         i18n::tr("render-user-answered")
     };
     lines.push(Line::from({
-        let mut spans = first_prefix(grid, symbol, Style::default().fg(color));
+        let mut spans = process_first_prefix(grid, symbol, Style::default().fg(color));
         spans.push(Span::styled(
             truncate_by_width(&title, content),
             Style::default().fg(color).add_modifier(Modifier::BOLD),
@@ -138,7 +144,7 @@ pub(super) fn render_ask_user_block_lines(
         return (lines, None);
     }
     if !data.question.is_empty() {
-        let mut spans = cont_prefix(grid, sem.text.dim);
+        let mut spans = process_cont_prefix(grid, sem.text.dim);
         spans.push(Span::styled(
             truncate_by_width(&data.question, content),
             Style::default().fg(sem.text.muted),
@@ -154,7 +160,7 @@ pub(super) fn render_ask_user_block_lines(
             .and_then(|r| data.options.iter().position(|o| o == r));
         if grid.is_narrow() || data.options.len() <= 1 {
             for (i, label) in data.options.iter().enumerate() {
-                let mut spans = cont_prefix(grid, sem.text.dim);
+                let mut spans = process_cont_prefix(grid, sem.text.dim);
                 let is_chosen = Some(i) == chosen_idx;
                 let text = if is_chosen {
                     format!("[{} {label}]", sym().success)
@@ -185,7 +191,7 @@ pub(super) fn render_ask_user_block_lines(
                 })
                 .collect::<Vec<_>>()
                 .join("  ");
-            let mut spans = cont_prefix(grid, sem.text.dim);
+            let mut spans = process_cont_prefix(grid, sem.text.dim);
             spans.push(Span::styled(
                 truncate_by_width(&text, content),
                 Style::default().fg(sem.text.primary),
@@ -196,7 +202,7 @@ pub(super) fn render_ask_user_block_lines(
     // 历史 items 问答对（旧数据兼容；生产路径 items 恒空）。
     for item in &data.items {
         let text = format!("{} \u{2192} {}", item.header, item.answer);
-        let mut spans = cont_prefix(grid, sem.text.dim);
+        let mut spans = process_cont_prefix(grid, sem.text.dim);
         spans.push(Span::styled(
             truncate_by_width(&text, content),
             Style::default().fg(sem.text.muted),

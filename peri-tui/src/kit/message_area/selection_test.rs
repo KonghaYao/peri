@@ -493,16 +493,16 @@ fn test_extract_semantic_plain_middle_line() {
     let rendered_blank = crate::kit::text_selection::line_to_plain_text(&slots[0][2]);
     assert!(
         rendered_blank.contains('│'),
-        "Markdown 段落空行应继续显示 accent 竖线，实际: {rendered_blank:?}"
+        "Markdown 段落空行应继续显示竖线，实际: {rendered_blank:?}"
     );
-    // 行 0 = leading 空行；行 1 = 段落 1；行 2 = 段间空行；行 3 = 段落 2——
-    // 完整选择（跨逻辑行选区，中间行）
+    // 短回复（<120 字）并入过程带 → 行 0 = 前导空行；行 1 = 段落 1；
+    // 行 2 = 段间空行；行 3 = 段落 2——完整选择（跨逻辑行选区，中间行）
     let text = extract_visual_range(
         &slots,
         &offsets,
         &wm,
         (0, 0),
-        (3, 20),
+        (3, grid.line_width()),
         grid.line_width(),
         Some(&vms),
         Some(grid),

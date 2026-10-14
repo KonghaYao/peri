@@ -6,19 +6,24 @@ use ratatui_kit::ratatui::style::{Color, Modifier, Style};
 use ratatui_kit::ratatui::text::{Line, Span};
 use unicode_width::UnicodeWidthStr;
 
-use super::helpers::{cont_prefix, first_prefix, sym};
+use super::helpers::{first_prefix, process_cont_prefix, process_first_prefix, sym};
 
-/// §6.6 System event：普通事件单行 divider；warning/error 用符号 + accent。
+/// §6.6 System event：普通事件单行注记；warning/error 用符号 + accent。
 ///
-/// - Info：`── {来源文本} ──…`（divider 填满 content 列）。
-/// - Warning/Error：`[!|×][gap]{文本}` + 后续行 muted（错误含恢复动作文本）。
+/// - Info：`[│][gap]{来源文本}`（左缘标记列 `│` + 正文，[用户定案
+///   2026-10-14] 不再画 `── label ──` 横线——注记是过程行，与 reasoning
+///   摘要同形）。
+/// - Warning/Error：`[!|×]{文本}` + 后续行 muted（错误含恢复动作文本）。
+///
+/// 全部行属过程区（§7 sysnote = 过程/过程）：首行符号占左缘标记列，正文列与
+/// 续行同列（§3/§4），宽度预算同步收窄为 `process_content_width()`（§8 右缘不动）。
 pub(super) fn render_system_note_lines(
     data: &TuiSystemNote,
     grid: &GridSpec,
 ) -> Vec<Line<'static>> {
     let sem = THEME_ATOM.state().read().semantic;
     if data.level == TuiNoteLevel::Error {
-        return super::error::preview_lines(&data.text, grid.content_width(), 3)
+        return super::error::preview_lines(&data.text, grid.process_content_width(), 3)
             .into_iter()
             .enumerate()
             .map(|(index, text)| {
@@ -26,11 +31,15 @@ pub(super) fn render_system_note_lines(
                     let style = Style::default()
                         .fg(sem.status.error)
                         .add_modifier(Modifier::BOLD);
-                    let mut spans = first_prefix(grid, sym().error, style);
-                    spans[1] = Span::styled(sym().error, style);
+                    let mut spans = process_first_prefix(grid, sym().error, style);
+                    if grid.is_narrow() {
+                        // Narrow 回退形态把符号位降级为 bullet（§11）；错误行保留
+                        // `×`——错误信号优先于窄屏降级。
+                        spans[1] = Span::styled(sym().error, style);
+                    }
                     spans
                 } else {
-                    cont_prefix(grid, sem.text.dim)
+                    process_cont_prefix(grid, sem.text.dim)
                 };
                 spans.push(Span::styled(
                     text,
@@ -59,8 +68,16 @@ pub(super) fn render_system_note_lines(
 
     match data.level {
         TuiNoteLevel::Info => {
+            // [用户定案 2026-10-14] 注记不画 `── label ──` 横线——走普通过程行：
+            // 左缘标记列 `│` + 正文（与 reasoning 摘要同形），不填充行尾。
             let label = clean.first().cloned().unwrap_or_default();
-            vec![divider_with_label_line(grid, &label)]
+            let mut spans =
+                process_first_prefix(grid, "\u{2502}", Style::default().fg(sem.text.dim));
+            spans.push(Span::styled(
+                truncate_by_width(&label, grid.process_content_width()),
+                Style::default().fg(sem.text.dim),
+            ));
+            vec![Line::from(spans)]
         }
         TuiNoteLevel::Warning => {
             let (symbol, color) = (sym().warning, sem.status.warning);
@@ -86,24 +103,24 @@ fn render_note_lines(
             continue;
         }
         let mut spans = if i == 0 {
-            first_prefix(
+            process_first_prefix(
                 grid,
                 symbol,
                 Style::default().fg(color).add_modifier(Modifier::BOLD),
             )
         } else {
-            cont_prefix(grid, sem.text.dim)
+            process_cont_prefix(grid, sem.text.dim)
         };
         let fg = if i == 0 { color } else { sem.text.muted };
         spans.push(Span::styled(
-            truncate_by_width(text, grid.content_width()),
+            truncate_by_width(text, grid.process_content_width()),
             Style::default().fg(fg),
         ));
         lines.push(Line::from(spans));
     }
     if lines.is_empty() {
         // 空 note 兜底：至少渲染一条符号行
-        lines.push(Line::from(first_prefix(
+        lines.push(Line::from(process_first_prefix(
             grid,
             symbol,
             Style::default().fg(color),
@@ -112,7 +129,9 @@ fn render_note_lines(
     lines
 }
 
-/// `── {label} ──…` divider 行（label 为 None 时纯分隔线），填满 content 列。
+/// `── {label} ──…` divider 行（label 为 None 时纯分隔线），填满 content 列——
+/// turn 边界属文本区装饰（非机器活动，§7 zone 判定同源）：走基准前缀
+/// （accent 列 `─` 符号 + gap），不参与过程区缩进与转场台阶（§6）。
 fn divider_with_label_line(grid: &GridSpec, label: &str) -> Line<'static> {
     let sem = THEME_ATOM.state().read().semantic;
     let content = grid.content_width();
@@ -136,15 +155,15 @@ pub(super) fn render_divider_lines(data: &TuiDivider, grid: &GridSpec) -> Vec<Li
     vec![divider_with_label_line(grid, label)]
 }
 
-/// §6.9 Todo 进度摘要行：`[◼][gap]{3/7 tasks · Running tests}`。
+/// §6.9 Todo 进度摘要行：`[◼][gap]{3/7 tasks · Running tests}`（过程区首行形态）。
 pub(super) fn render_todo_summary_lines(
     data: &TuiTodoSummary,
     grid: &GridSpec,
 ) -> Vec<Line<'static>> {
     let sem = THEME_ATOM.state().read().semantic;
-    let mut spans = first_prefix(grid, "\u{25fc}", Style::default().fg(sem.accent));
+    let mut spans = process_first_prefix(grid, "\u{25fc}", Style::default().fg(sem.accent));
     spans.push(Span::styled(
-        truncate_by_width(&data.text, grid.content_width()),
+        truncate_by_width(&data.text, grid.process_content_width()),
         Style::default().fg(sem.text.muted),
     ));
     vec![Line::from(spans)]

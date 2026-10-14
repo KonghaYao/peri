@@ -9,13 +9,18 @@ use ratatui_kit::ratatui::text::{Line, Span};
 use unicode_width::UnicodeWidthStr;
 
 use super::ImageLineInfo;
-use super::helpers::{cont_prefix, first_prefix, prefixed_cont_line, sym};
+use super::helpers::{
+    cont_prefix, first_prefix, prefixed_cont_line, process_cont_prefix, process_first_prefix, sym,
+};
 
 /// 用户 prompt 正文最多展示的视觉行数（§6.1），超出显示 `… +N lines`。
 const USER_BODY_MAX_LINES: usize = 6;
 
 // ── 各变体渲染函数（Slice 3：统一网格 + 无气泡 + 垂直节奏）──────────────
 
+/// 系统提醒（§7：过程区 entry）——首行 `[outer 空][indent 留空][标记][gap]`
+/// 后接折叠标记与标题，续行与首行标签同列（§3/§4/§5）；折行预算取
+/// `process_content_width()`（§8 右缘不动）。
 pub(super) fn render_system_reminder_lines(
     data: &crate::kit::tui_render_unit::TuiSystemReminder,
     grid: &GridSpec,
@@ -50,9 +55,9 @@ pub(super) fn render_system_reminder_lines(
     } else {
         sym().collapsed
     };
-    let mut spans = first_prefix(grid, symbol, Style::default().fg(sem.text.dim));
+    let mut spans = process_first_prefix(grid, symbol, Style::default().fg(sem.text.dim));
     spans.push(Span::styled(
-        truncate_by_width(&heading, grid.content_width()),
+        truncate_by_width(&heading, grid.process_content_width()),
         Style::default().fg(sem.text.dim),
     ));
     let mut lines = vec![Line::from(spans)];
@@ -63,22 +68,18 @@ pub(super) fn render_system_reminder_lines(
                 "reminder-relayed-from",
                 &[("name".into(), FluentValue::from(relay.label()))],
             );
-            lines.push(prefixed_cont_line(
-                grid,
-                sem.accents.reasoning,
-                Line::from(Span::styled(text, Style::default().fg(sem.text.dim))),
-            ));
+            let mut spans = process_cont_prefix(grid, sem.accents.reasoning);
+            spans.push(Span::styled(text, Style::default().fg(sem.text.dim)));
+            lines.push(Line::from(spans));
         }
         for text in data
             .body
             .lines()
-            .flat_map(|line| wrap_by_width(line, grid.content_width()))
+            .flat_map(|line| wrap_by_width(line, grid.process_content_width()))
         {
-            lines.push(prefixed_cont_line(
-                grid,
-                sem.accents.reasoning,
-                Line::from(Span::styled(text, Style::default().fg(sem.text.muted))),
-            ));
+            let mut spans = process_cont_prefix(grid, sem.accents.reasoning);
+            spans.push(Span::styled(text, Style::default().fg(sem.text.muted)));
+            lines.push(Line::from(spans));
         }
     }
     lines
@@ -86,8 +87,9 @@ pub(super) fn render_system_reminder_lines(
 
 /// §6.1 User prompt：去全宽 bg 与 `❯`；无 role label（`You`），正文直接开始。
 ///
-/// - 首尾各 1 个空行（§3.2 turn 节拍）——空行带竖线前缀，左缘时间线不断链；
-///   正文行 `[│][gap]` 与其余 entry 同起点。
+/// - Compact/Narrow 首尾各 1 个空行（§3.2 turn 节拍）——空行带竖线前缀，
+///   左缘时间线不断链；Wide/Standard 的块分隔由转场台阶承担，不再保留节拍
+///   空行。正文行 `[│][gap]` 与其余 entry 同起点。
 /// - 保留用户换行；长 prompt 最多 `USER_BODY_MAX_LINES` 个视觉行，
 ///   超出显示 `… +N lines`（§6.1）。`USER_BODY_MAX_LINES` 计数包含
 ///   附件记录行与 @image meta 行（§4.4）。
@@ -110,13 +112,18 @@ pub(super) fn render_user_bubble_lines(
     if data.text.is_empty() && data.attachments.is_empty() {
         return (Vec::new(), Vec::new());
     }
-    // §3.2：新 user prompt 前保留 1 个空行（turn 节拍）；空行带竖线前缀
-    // （与正文同色），左缘时间线在节拍空行处不断链。
-    let mut lines: Vec<Line<'static>> = vec![prefixed_cont_line(
-        grid,
-        sem.text.secondary,
-        Line::default(),
-    )];
+    // §3.2：新 user prompt 前的 1 空行（turn 节拍）只在 Compact/Narrow 保留
+    // ——该档无转场台阶，空行承担块分隔；Wide/Standard 由台阶分隔，不再留空行。
+    // 空行带竖线前缀（与正文同色），左缘时间线不断链。
+    let mut lines: Vec<Line<'static>> = if grid.indent == 0 {
+        vec![prefixed_cont_line(
+            grid,
+            sem.text.secondary,
+            Line::default(),
+        )]
+    } else {
+        Vec::new()
+    };
 
     // 正文：保留用户换行；每行按 display width 折行成「视觉行」（§6.1 口径），
     // 最多 USER_BODY_MAX_LINES 个视觉行，超出显示 `… +N lines`（§12：grapheme
@@ -190,14 +197,16 @@ pub(super) fn render_user_bubble_lines(
         spans.push(Span::styled(more, Style::default().fg(sem.text.dim)));
         lines.push(Line::from(spans));
     }
-    // §3.2：user 尾部 1 空行（turn 节拍对称）——分隔后续 thinking/tool；
-    // assistant 正文仍由自身前导空行建立正文块边界。尾随空行同样带竖线前缀，
-    // 左缘时间线连续。
-    lines.push(prefixed_cont_line(
-        grid,
-        sem.text.secondary,
-        Line::default(),
-    ));
+    // §3.2：user 尾部 1 空行（turn 节拍对称）——Compact/Narrow 用空行分隔后续
+    // thinking/tool；Wide/Standard 由转场台阶承担分隔，不再保留。尾随空行带
+    // 竖线前缀，左缘时间线连续。
+    if grid.indent == 0 {
+        lines.push(prefixed_cont_line(
+            grid,
+            sem.text.secondary,
+            Line::default(),
+        ));
+    }
     (lines, image_lines)
 }
 
@@ -398,6 +407,10 @@ fn emphasize_user_line(
 
 /// 用户消息内的 system-reminder（§6.1/§6.6）：按来源型 system event 渲染——
 /// 首行 `[!][gap]{来源 label}`，续行 `[│][gap]{摘要}`。
+///
+/// 位置属**文本区**（在用户气泡内，随 `TuiUserBubble` 的文本区 zone）：走基准前缀与
+/// `content_width()`，不参与过程区缩进/分叉——独立成 entry 的提醒才走过程区
+/// （[`render_system_reminder_lines`]）。
 pub(super) fn render_reminder_condensed(
     info: &crate::kit::tui_render_unit::ReminderInfo,
     grid: &GridSpec,
