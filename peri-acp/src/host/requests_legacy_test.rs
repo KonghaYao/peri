@@ -782,15 +782,15 @@ async fn legacy_bootstrap_applies_request_declared_mcp_servers() {
     assert!(environment.shutdown().await);
 }
 
-/// 不属于本地 legacy 接纳范围的目标（有父线程的无绑定子会话）在装配资源环境**之前**
-/// 如实失败：不 bootstrap、不写绑定/frozen、不发布会话，失败文案给出可完成的下一步。
+/// 父会话未被本机核实接纳的无绑定子会话在装配资源环境**之前**如实失败：不 bootstrap、
+/// 不写绑定/frozen、不发布会话，失败文案给出可完成的下一步（先加载父会话）。
 ///
-/// 有父线程 ⇒ 不是可接纳的 legacy root，归属重建在接纳前就拒绝，因此没有环境需要排空；
-/// 「bootstrap 之后的失败必须排空已激活环境」由
+/// 子会话的归属继承自父会话，父会话没有可继承的绑定 ⇒ 子会话不另立归属，归属复核在
+/// 接纳前就拒绝，因此没有环境需要排空；「bootstrap 之后的失败必须排空已激活环境」由
 /// `legacy_post_adoption_load_failure_drains_environment_without_rollback` 覆盖。
 #[tokio::test]
 #[serial]
-async fn unadoptable_legacy_target_fails_before_bootstrap() {
+async fn unverified_parent_child_session_fails_before_bootstrap() {
     let tmp = tempfile::tempdir().unwrap();
     let _home = HomeDirGuard::set(tmp.path());
     let cwd = std::fs::canonicalize(tmp.path())
@@ -812,7 +812,8 @@ async fn unadoptable_legacy_target_fails_before_bootstrap() {
         mcp_profile: peri_middlewares::mcp::apps::McpCapabilityProfile::disabled(),
         capabilities: Default::default(),
     });
-    // 有父线程 ⇒ 不是可接纳的 legacy root（adopt 会拒绝）；父线程必须真实存在。
+    // 有父线程：绑定身份继承自父会话，父会话未被本机核实 ⇒ 子会话自己也不成立。
+    // 父线程必须真实存在（读父会话的绑定事实就是本分支的第一步）。
     let parent_id = bridge
         .create_thread(peri_agent::thread::ThreadMeta::new_at(
             cwd.to_str().unwrap(),
@@ -834,8 +835,13 @@ async fn unadoptable_legacy_target_fails_before_bootstrap() {
         &transport,
     )
     .await
-    .expect_err("有父线程的无绑定会话不得被 legacy 接纳");
+    .expect_err("父会话未被核实的子会话不得被 legacy 接纳");
     assert_eq!(error.code, -32010, "{error:?}");
+    assert!(
+        error.message.contains("load the parent session first"),
+        "文案必须给出可完成的下一步：{}",
+        error.message
+    );
     assert!(!error.message.is_empty(), "原始错误原因必须保留: {error:?}");
     assert!(sessions.is_empty(), "失败不得发布会话");
     assert!(bridge.load_session_binding(&id).await.unwrap().is_none());
@@ -848,16 +854,16 @@ async fn unadoptable_legacy_target_fails_before_bootstrap() {
     );
 }
 
-/// M5 缺陷 2：接纳成功但后续 load（history 读取）失败时，也必须排空已激活环境；
-/// 写一次接纳本身不回滚。
+/// 子会话继承父会话的绑定身份与冻结输入：父会话（无绑定的 legacy root）先按当前观测
+/// 证据接纳，子会话随后接纳——绑定逐字一致、frozen 用父的已持久字节，不重建、不另立。
 #[tokio::test]
 #[serial]
-async fn legacy_post_adoption_load_failure_drains_environment_without_rollback() {
+async fn legacy_child_session_inherits_the_verified_parent_binding() {
     let tmp = tempfile::tempdir().unwrap();
     let _home = HomeDirGuard::set(tmp.path());
     let cwd = std::fs::canonicalize(tmp.path())
         .unwrap()
-        .join("legacy-post-adoption");
+        .join("legacy-tree");
     std::fs::create_dir(&cwd).unwrap();
     let config =
         make_peri_config_with_provider(make_provider_config("test", "openai", "test", "model"));
@@ -874,109 +880,58 @@ async fn legacy_post_adoption_load_failure_drains_environment_without_rollback()
         mcp_profile: peri_middlewares::mcp::apps::McpCapabilityProfile::disabled(),
         capabilities: Default::default(),
     });
-    // 注入：controller 的历史读取失败——接纳（binding/frozen write-once）照常完成，
-    // 失败落在发布前的 payload 读取；失败路径必须排空已激活的 bootstrap 环境。
-    let failing = Arc::new(FailingHistoryLoad {
-        inner: Arc::clone(&cfg.session_resources),
-    });
-    cfg.controller = Arc::new(peri_controller::Controller::new(failing));
-    let id = old_thread(&bridge, &cwd).await;
+    let parent = old_thread(&bridge, &cwd).await;
+    let mut child_meta =
+        peri_agent::thread::ThreadMeta::new_at(cwd.to_str().unwrap(), peri_time::now_wall());
+    child_meta.parent_thread_id = Some(parent.clone());
+    let child = bridge.create_thread(child_meta).await.unwrap();
+    bridge
+        .append_message(
+            &child,
+            peri_acp_types::messages::BaseMessage::human("legacy child message"),
+        )
+        .await
+        .unwrap();
     let transport: Arc<dyn crate::transport::AcpTransport> = Arc::new(MockTransport::default());
     let mut sessions = HashMap::new();
-    let error = handle_request(
+
+    // 父会话先接纳（无 frozen root 的重链路径）：绑定与 frozen 一次成立。
+    handle_request(
         "session/load",
-        &json!({"sessionId": id}),
+        &json!({"sessionId": parent}),
         &cfg,
         &mut sessions,
         &transport,
     )
     .await
-    .expect_err("history 读取失败不得发布会话");
-    assert!(
-        error.message.contains("session history load failed"),
-        "原始错误原因必须保留: {error:?}"
+    .unwrap();
+    let parent_binding = bridge.load_session_binding(&parent).await.unwrap().unwrap();
+    let parent_frozen = bridge.load_frozen_snapshot(&parent).await.unwrap().unwrap();
+
+    // 子会话接纳：没有自己的观测快照与内容读取，绑定与冻结输入都来自父会话。
+    handle_request(
+        "session/load",
+        &json!({"sessionId": child}),
+        &cfg,
+        &mut sessions,
+        &transport,
+    )
+    .await
+    .unwrap();
+    assert_eq!(
+        bridge.load_session_binding(&child).await.unwrap().unwrap(),
+        parent_binding
     );
-    assert!(sessions.is_empty(), "失败不得发布会话");
-    // 接纳是 write-once 的原子事实：不回滚；环境必须已排空。
-    assert!(
-        bridge.load_frozen_snapshot(&id).await.unwrap().is_some(),
-        "write-once 接纳事实保留（不回滚已提交的 frozen）"
+    assert_eq!(
+        bridge.load_frozen_snapshot(&child).await.unwrap().unwrap(),
+        parent_frozen
     );
-    let shutdowns = crate::host::workspace::take_shutdown_observations();
-    assert!(
-        shutdowns.iter().any(|session| session == &id),
-        "接纳后的 load 失败必须排空已激活环境（观察到的 shutdown: {shutdowns:?}）"
+    assert_eq!(
+        sessions[&child].history[0].content(),
+        "legacy child message"
     );
+    assert!(sessions.contains_key(&parent), "父会话必须已发布");
 }
 
-// ── M5 注入夹具：历史读取失败（其余逐项转发真实门面）──────────────────────────
-//
-// 与 `host/session_io_test.rs` 的 `BlockedWorkQuery` 同模式：真实门面 + 单点故障
-// 注入，不能用内存替身伪造接纳事实。只有 `load_active_snapshot` 返回可解释的冲突
-// 错误，其余方法逐项转发同一库句柄的门面。
-//
-// 注入面必须是**发布路径真正调用的读取**：接纳前的 `prepare_for_restore` /
-// `load_frozen_bytes` 走 `cfg.session_resources`（真实门面），发布前的有效历史读取
-// 走 `cfg.controller`（本夹具）——单点正落在接纳完成与发布之间。
-
-/// 单点故障：`load_active_snapshot` 一律返回冲突错误（发布前的有效历史读取）。
-struct FailingHistoryLoad {
-    inner: Arc<dyn SessionResources>,
-}
-
-macro_rules! forward_session_resources_except_history {
-    ($( $method:ident ( $( $argument:ident : $kind:ty ),* ) -> $output:ty; )*) => {
-        #[async_trait]
-        impl SessionResources for FailingHistoryLoad {
-            $(async fn $method(&self, $( $argument: $kind ),*) -> SessionResourceResult<$output> {
-                self.inner.$method($( $argument ),*).await
-            })*
-
-            async fn load_active_snapshot(
-                &self,
-                _id: &ThreadId,
-            ) -> SessionResourceResult<peri_acp_types::session_resources::ActiveSessionSnapshot>
-            {
-                Err(SessionResourceError::conflict(
-                    "injected: session history load failed",
-                ))
-            }
-        }
-    };
-}
-
-forward_session_resources_except_history! {
-    inspect_availability(session: Option<&ThreadId>) -> SessionAvailability;
-    resolve_workspace(cwd: &std::path::Path) -> ResolvedWorkspace;
-    validate_session(id: &ThreadId, workspace: &ResolvedWorkspace) -> ();
-    finish_close(id: &ThreadId) -> ();
-    close_settlement(id: &ThreadId) -> CloseSettlement;
-    create_session(input: &NewSession) -> ();
-    abandon_initialization(id: &ThreadId) -> ();
-    begin_initialization(draft: &NewSessionDraft) -> Arc<dyn SessionInitialization>;
-    discard_incomplete_initialization(id: &ThreadId) -> ();
-    adopt_legacy_session(id: &ThreadId, saved_cwd: &str, workspace: &ResolvedWorkspace, frozen: &FrozenSnapshotBytes) -> ();
-    load_session_snapshot(id: &ThreadId) -> SessionSnapshot;
-    load_session_history(id: &ThreadId) -> Vec<PersistedPayload>;
-    load_session_binding(id: &ThreadId) -> BindingState;
-    validate_bound_workspace(id: &ThreadId, check: BindingRecheck) -> ResolvedWorkspace;
-    load_session_meta(id: &ThreadId) -> ThreadMeta;
-    list_sessions(query: &ScopedThreadQuery) -> ScopedThreadPage;
-    list_children(parent: &ThreadId) -> Vec<ThreadMeta>;
-    list_session_tree(root: &ThreadId) -> Vec<ThreadMeta>;
-    append_history(id: &ThreadId, payloads: &[PersistedPayload]) -> ();
-    append_reminder_if_absent(id: &ThreadId, message_id: MessageId, reminder: &TrustedSystemReminder) -> bool;
-    mark_session_closing(id: &ThreadId) -> ();
-    is_session_closing(id: &ThreadId) -> bool;
-    save_fork(fork: &ForkSnapshot) -> ();
-    save_child(child: &ChildSnapshot) -> ();
-    claim_child_resume(child: &ThreadId, root: &ThreadId) -> Box<dyn ChildResumeClaim>;
-    apply_compaction(id: &ThreadId, change: &CompactionChange) -> ();
-    apply_message_projections(id: &ThreadId, updates: &[(MessageId, MessageFlags)]) -> ();
-    rewind_history(id: &ThreadId, boundary: RewindBoundary, clear_excluded: &[MessageId]) -> RewindOutcome;
-    remove_history_entries(id: &ThreadId, ids: &[MessageId]) -> ();
-    update_session_meta(id: &ThreadId, patch: &SessionMetaPatch) -> ();
-    delete_session_tree(id: &ThreadId) -> ();
-    recover_session_persistence(id: &ThreadId) -> PersistenceRecovery;
-    drain_persistence(id: &ThreadId) -> ();
-}
+#[path = "requests_legacy_failure_test.rs"]
+mod failure_tests;

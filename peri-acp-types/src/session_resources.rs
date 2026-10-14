@@ -579,10 +579,12 @@ pub trait SessionResources: Send + Sync {
     /// 不在这里被销毁。
     async fn discard_incomplete_initialization(&self, id: &ThreadId) -> SessionResourceResult<()>;
 
-    /// 接纳已确认的本机 legacy 会话：binding 与缺失的 frozen 一起成立。
+    /// 接纳已确认的本机 legacy 会话：补上缺失的绑定，frozen 缺省时一并定格。
     ///
     /// 竞争时返回胜者事实，不返回 CAS 布尔值；`saved_cwd` 必须是会话保存的原始
-    /// 路径（不允许调用方借接纳顺手改绑）。
+    /// 路径（不允许调用方借接纳顺手改绑）。既有 frozen 字节是唯一事实源：只补空列、
+    /// 不因候选覆盖（write-once），也就没有「已认领过」与「从未认领」的区别。
+    /// 子会话的绑定身份必须与父会话逐字一致（父绑定尚未成立时如实拒绝）。
     async fn adopt_legacy_session(
         &self,
         id: &ThreadId,

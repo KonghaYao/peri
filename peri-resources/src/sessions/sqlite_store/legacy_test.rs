@@ -277,6 +277,7 @@ async fn legacy_adoption_rejects_changed_cwd_and_child_without_losing_history() 
     meta.cwd = cwd.to_str().unwrap().to_owned();
     meta.parent_thread_id = Some(parent.clone());
     store.update_meta(&id, meta.clone()).await.unwrap();
+    // 父会话未被本机核实接纳（没有绑定行）：子会话不另立归属，如实拒绝。
     let error = store
         .adopt_legacy_thread(&id, cwd.to_str().unwrap(), &workspace, "snapshot")
         .await
@@ -307,7 +308,7 @@ async fn legacy_adoption_rejects_changed_cwd_and_child_without_losing_history() 
 }
 
 #[tokio::test]
-async fn legacy_adoption_rejects_unbound_frozen_session_without_losing_canonical_data() {
+async fn legacy_adoption_backfills_binding_and_keeps_the_native_frozen_snapshot() {
     use peri_acp_types::workspace::WorkspaceError;
     let dir = tempfile::tempdir().unwrap();
     let cwd = std::fs::canonicalize(dir.path()).unwrap();
@@ -342,15 +343,15 @@ async fn legacy_adoption_rejects_unbound_frozen_session_without_losing_canonical
     let store = SqliteThreadStore::new(dir.path().join("threads.db"))
         .await
         .unwrap();
-    let error = store
-        .adopt_legacy_thread(&id, cwd.to_str().unwrap(), &workspace, "snapshot")
+    // 已认领过、绑定记录丢失：接纳补上绑定，既有 frozen 字节是唯一事实源，候选不写入。
+    store
+        .adopt_legacy_thread(&id, cwd.to_str().unwrap(), &workspace, "replacement")
         .await
-        .unwrap_err();
-    assert!(matches!(
-        error.downcast_ref::<WorkspaceError>(),
-        Some(WorkspaceError::InvalidBinding)
-    ));
-    assert!(store.load_session_binding(&id).await.unwrap().is_none());
+        .unwrap();
+    assert_eq!(
+        store.validate_session_binding(&id).await.unwrap(),
+        workspace
+    );
     assert_eq!(
         store.load_frozen_snapshot(&id).await.unwrap().as_deref(),
         Some("native snapshot")
@@ -363,6 +364,20 @@ async fn legacy_adoption_rejects_unbound_frozen_session_without_losing_canonical
         serde_json::to_value(store.load_messages(&id).await.unwrap()).unwrap(),
         messages
     );
+    // 借接纳改绑 cwd 仍然失败（改绑不因绑定缺失而放开）。
+    let error = store
+        .adopt_legacy_thread(
+            &id,
+            cwd.join("changed").to_str().unwrap(),
+            &workspace,
+            "snapshot",
+        )
+        .await
+        .unwrap_err();
+    assert!(matches!(
+        error.downcast_ref::<WorkspaceError>(),
+        Some(WorkspaceError::ExecutionBindingMismatch)
+    ));
     store.close().await;
 }
 

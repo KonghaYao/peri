@@ -3,8 +3,11 @@
 Legacy 首次接纳在 `host/requests/legacy_session.rs` 消费
 `PreparedSessionInputs.legacy.saved_cwd` 作为保存目录事实源；无 frozen 的无绑定历史会话
 在接纳前先经 `SessionResources::relink_unbound_session` 按当前观测重建归属（幂等、
-可重跑），核实不了按可操作错误拒绝、历史保持可读（有 frozen 缺绑定的会话只按既有事实
-复核，不重建归属）；归属重建失败发生在装配资源环境之前（不 bootstrap、不写绑定/frozen），
+可重跑），核实不了按可操作错误拒绝、历史保持可读（有 frozen 缺绑定的会话只按既有观测
+复核，不重建归属，接纳只补绑定、不回写既有字节）；子会话走
+`prepare_child_for_restore`——不另立归属、不 bootstrap，绑定与冻结输入逐字继承父会话，
+父会话未被本机核实即按 `WorkspaceError::UnverifiedParentBinding` 拒绝（下一步是先加载
+父会话）。归属重建失败发生在装配资源环境之前（不 bootstrap、不写绑定/frozen），
 配置与 frozen
 仍按准备阶段解析出的 workspace 构建，回归见 `host/requests_legacy_test.rs` 与
 peri-resources 的 `sessions/resources_legacy_relink_test.rs`。

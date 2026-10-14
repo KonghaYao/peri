@@ -187,6 +187,12 @@ pub enum WorkspaceError {
         "this historical session has no execution binding and its location cannot be verified on this machine; history stays readable — start a new session in that directory to continue"
     )]
     UnverifiedLegacyOwner,
+    /// 无绑定的子会话：绑定身份继承自父会话，而父会话还没被本机核实接纳（没有绑定
+    /// 或绑定待复核）。子会话不另立归属，先加载父会话完成接纳，再打开本会话。
+    #[error(
+        "this child session inherits its execution binding from its parent session, which is not verified on this machine yet; load the parent session first, then reopen this one"
+    )]
+    UnverifiedParentBinding,
     #[error("session binding version or data is unsupported")]
     InvalidBinding,
     /// 会话存储以只读方式打开：历史可读，登记新工作区与新会话不可用。
