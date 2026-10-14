@@ -28,7 +28,7 @@
 
 1. 三个 commit 已落在工作树（`95c1e07d7` / `9b96f456a` / `3ccf75864`），分支已**追平并 rebase 到 `origin/main`（`19215d3a1`）**；追平过程中修掉一处 rebase 语义冲突（上游给 `AcpEventData::LocalUserBubble` 加了 `attachments` 字段，本分支的匹配式补 `..`）。
 2. TUI 集成用例编号因上游占用 `P0-77~P0-80` 改号为 **`P0-81`**（README/06 文档/code-index/蓝图已同步）。
-3. S12~S13 改动（16 个已跟踪修改文件 + 26 个新增源码/测试文件（含 §5.15 拆分产物）+ 蓝图 spec 修订、`.gitignore` 两行（SQLite 运行期副本不入库）与 `.gitattributes` 一行（`.recon/**` 留档豁免空白门禁）+ 17 份 `.recon/S12-*.md`/`S13-*.md` 报告与 9 个原始留档目录 + 2 个编排脚本）与本报告的第三版**由第四次提交一并提交**（含 `langfuse-client` WASM 修复与 SDK 夹具修复；该提交哈希以 `git log -1` 为准）。
+3. S12~S13 改动（16 个已跟踪修改文件 + 26 个新增源码/测试文件（含 §5.15 拆分产物）+ 蓝图 spec 修订、`.gitignore` 两行（SQLite 运行期副本不入库）与 `.gitattributes` 一行（`.recon/**` 留档豁免空白门禁）+ 17 份 `.recon/S12-*.md`/`S13-*.md` 报告与 9 个原始留档目录 + 2 个编排脚本）与本报告的第三版**由第四次提交 `c1744d472` 一并提交**（含 `langfuse-client` WASM 修复与 SDK 夹具修复）；本报告随后的两处补记（§5.15 第 6 条、§6.4 第 6 条）由第五次提交落地。
 
 ### 0.2 必须先看的三个结论
 
@@ -290,7 +290,7 @@
 3. **挂载真实**：拆分产出的用例文件逐个过滤运行均**非空跑**（复核抽查 23 个文件各 1 passed）；五个 crate 拆分前后 lib 计数一致（`peri-acp` 893、`peri-tui` 1859、`peri-resources` 499、`peri-agent` 1089、`peri-acp-types` 576）。
 4. **独立复核**（`S13-verification-size.md`）：183 个非 `.recon` 源码/测试文件全部 ≤1000 行（最大 990）；职责拆分、挂载、断言零改动均 PASS；五个 crate 独立全量 **4916 passed / 0 failed / 32 ignored**。
 5. **复核 FAIL 的口径与已处置部分**：复核按「含 `.recon/` 证据的完整文件集合」口径判 FAIL（381 文件中 14 个超限，全在 `.recon/`）。其中 2 个是**未忽略的 `.rs` 原始副本**（`s13-acp-tests-raw/original/`）：本节作者核对 `sha256` 与 `git show HEAD:<path>` 字节一致后**已删除**（可从 HEAD 随时取回，不损失信息）；其余为日志/`.orig` 副本，属**证据归档**而非源码，不做机械拆碎——本节作者裁决：`STD-SIZE-001` 的适用对象是源码/测试，证据日志按归档保留（复核者明确不擅自豁免，故由本节作者明示此裁决）。**补充核对**：存留的 6 个 `.rs.orig` 副本（`s13-size-agent-raw/`、`s13-size-tui-resources-raw/`）`sha256` 与拆分前提交 `3ccf75864` 的对应文件逐字节一致 ⇒ 无独有信息，保留只为阅读便利，随时可由 git 取回。
-6. 复核另发现 `git diff --check` 门禁失败（`requests_unnegotiated_replay_test.rs:517` 文件尾空行），本节作者已修复；全仓 `git diff --check` 现 **exit 0**。
+6. 复核另发现 `git diff --check` 门禁失败（`requests_unnegotiated_replay_test.rs:517` 文件尾空行），本节作者已修复；全仓 `git diff --check` 现 **exit 0**。另：拆分在 `history_page_wire_test.rs` / `requests_rewind_failure_paths_test.rs` 各留下 1~2 个多余空行，被第四次提交前的 `lefthook` `cargo fmt --check` 拦下并已 `fmt --all` 归零（见 §6.4 第 6 条）。
 
 ### 5.16 锁回归重做与残留调用点缺口（A1，S13）
 
@@ -356,6 +356,7 @@
 3. **处置**：在 worktree 内执行 `cargo fmt --all`。改动前后逐行比对 `git status`：**仅** `peri-tui/src/kit/acp_bridge_cancel_test.rs` 从「已修改」回到与 HEAD 完全一致（它此前的差异**只是排版**，被格式化还原 ⇒ 该文件最终不交付差异）；**没有**新增任何被改动的文件，`git diff --stat` 由 145 files / +9 219 / −853 变为 **144 files / +9 289 / −860**（同一批文件内的换行重排）。
 4. **复验（全部本轮重跑）**：`fmt --all -- --check` = **0 diff**；`check --locked --all-targets`（5 crate）**exit 0**；`peri-acp --lib` **887/0**、`peri-tui --lib` **1817/0/6 ignored**、`peri-resources --lib` **497/0/26 ignored**。格式化不改变语义（`acp_bridge_cancel_test.rs` 还原为 HEAD 版后 TUI 全量仍 1817/0）。
 5. **意义**：`lefthook.yml` 的 pre-commit 第一步是 `cargo fmt --check`（`fix: cargo fmt`）；补做之前该钩子必然红，现在通过。
+6. **第三轮（S13 收尾，第四次提交前由 pre-commit 拦下）**：S13 拆分后的两个文件（`history_page_wire_test.rs`、`requests_rewind_failure_paths_test.rs`）在块搬移处各留下 1~2 个多余空行；`lefthook` pre-commit 的 `cargo fmt --check` 判红（各拆分报告声称的 crate 级 fmt 通过未覆盖「多文件搬移产生的空行」这一形态）。已 `fmt --all` 归零，随后同一钩子四步全绿（`check` / `clippy` / `fmt` / `layer-imports`），第四次提交落地为 **`c1744d472`**（146 files / +31 046 / −7 166）。
 
 ---
 
