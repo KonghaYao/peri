@@ -170,6 +170,11 @@ impl RemoteTransport for SqliteTransport {
             .map_err(error_of)?;
         let mut results = Vec::new();
         for statement in statements {
+            if statement.sql.contains("FROM pragma_table_xinfo") {
+                return Err(SdkError::Error(
+                    "v1 Hrana does not support table-valued pragma_table_xinfo".into(),
+                ));
+            }
             let rows = query(&statement)
                 .fetch_all(&mut *transaction)
                 .await

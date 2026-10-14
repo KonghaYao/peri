@@ -159,12 +159,12 @@ fn decode_columns(rows: &[Vec<Value>]) -> SessionResourceResult<Vec<ColumnShape>
     rows.iter()
         .map(|row| {
             Ok(ColumnShape {
-                name: text_at(row, 0).ok_or_else(unsupported)?.to_owned(),
-                kind: text_at(row, 1).ok_or_else(unsupported)?.to_owned(),
-                not_null: int_at(row, 2).ok_or_else(unsupported)?,
-                default: optional_string(row, 3)?,
-                primary_key: int_at(row, 4).ok_or_else(unsupported)?,
-                hidden: int_at(row, 5).ok_or_else(unsupported)?,
+                name: text_at(row, 1).ok_or_else(unsupported)?.to_owned(),
+                kind: text_at(row, 2).ok_or_else(unsupported)?.to_owned(),
+                not_null: int_at(row, 3).ok_or_else(unsupported)?,
+                default: optional_string(row, 4)?,
+                primary_key: int_at(row, 5).ok_or_else(unsupported)?,
+                hidden: int_at(row, 6).ok_or_else(unsupported)?,
             })
         })
         .collect()
@@ -178,7 +178,7 @@ pub(super) struct MigrationRead {
     objects: Vec<SchemaObject>,
     /// `threads` 的完整列形状（含类型与默认值）：退役缓存列的判定要它，不是迁移输入判定。
     thread_columns: Vec<ColumnShape>,
-    /// 迁移输入各表的列形状（[`schema_shape::INPUT_COLUMNS_SQL`]，与本机迁移同一份读法）。
+    /// 迁移输入各表的列形状（逐表 PRAGMA，沿用本机迁移的输入形状声明）。
     input_columns: HashMap<String, Vec<schema_shape::ActualColumn>>,
     /// 搬到之前的 `messages` 行数（结果守卫的基准）。`None` = 输入形状里没有这张表——
     /// 那时形状判定会以「不认识的输入」拒绝整条迁移，守卫本身不会被构造。
@@ -230,20 +230,38 @@ pub(super) async fn upgrade(
 /// 生产（[`upgrade`]）与批次构造的离线断言共用这一处读法：批次里的守卫按这里读到的事实
 /// 复核，两者因此逐列同源。
 pub(super) async fn read_input(store: &RemoteStore) -> SessionResourceResult<MigrationRead> {
-    let shape = store
-        .read_batch(vec![
-            StatementSpec::bare(schema_cleanup::SCHEMA_OBJECTS_SQL),
-            StatementSpec::bare(schema_cleanup::THREAD_COLUMNS_SQL),
-            StatementSpec::bare(schema_shape::INPUT_COLUMNS_SQL),
-        ])
-        .await?;
+    let mut statements = vec![StatementSpec::bare(schema_cleanup::SCHEMA_OBJECTS_SQL)];
+    for table in schema_shape::INPUT_TABLES {
+        let sql = schema::ShapeProbe::pragma_table_xinfo(table.name)
+            .ok_or_else(|| incomplete_reply("remote upgrade input table is not supported"))?;
+        statements.push(StatementSpec::bare(sql));
+    }
+    let shape = store.read_batch(statements).await?;
+    let mut columns = Vec::new();
+    for (table, rows) in schema_shape::INPUT_TABLES.iter().zip(shape.iter().skip(1)) {
+        for row in rows {
+            let (Some(name), Some(not_null), Some(primary_key)) =
+                (row.get(1), row.get(3), row.get(5))
+            else {
+                return Err(incomplete_reply(
+                    "remote upgrade input returned an incomplete column",
+                ));
+            };
+            columns.push(vec![
+                Value::Text(table.name.to_owned()),
+                name.clone(),
+                not_null.clone(),
+                primary_key.clone(),
+            ]);
+        }
+    }
     let mut read = MigrationRead {
         sessions: Vec::new(),
         bindings: Vec::new(),
         registrations: Vec::new(),
         objects: decode_objects(&shape[0])?,
         thread_columns: decode_columns(&shape[1])?,
-        input_columns: schema::decode_column_map(&shape[2])?,
+        input_columns: schema::decode_column_map(&columns)?,
         messages_count: None,
     };
     if read.thread_columns.is_empty() {
