@@ -137,6 +137,72 @@ pub fn build_middleware_chain<A: MiddlewareChainAssembler>(
     assembler.assemble(&production_blueprint(), ctx)
 }
 
+// ── idle 准入规则链（设计 §3.2 / root 裁决 R1）──────────────────────────────
+
+/// idle 准入规则蓝本：由 [`production_blueprint`] **白名单派生**，不另写一份槽位清单。
+///
+/// 只保留能在**没有 turn 事实**下正确运行的准入规则：
+///
+/// - [`ChainSlot::Hook`]：PreToolUse 规则的输入全是 session 级事实（hook 组 /
+///   cwd / 权限模式 / broker / 任务管理器），无需 turn；`ask` 路径的审批归属由
+///   调用方铸造的 `InteractionAttribution` 提供。
+/// - [`ChainSlot::Permission`]：审批规则同样只消费 session 级事实（权限模式 /
+///   broker / auto-classifier）；需要 turn 的部分只是事件与 `step` 写入，
+///   由管线在 `turn: None` 下显式不发。
+///
+/// **被排除的槽位及原因**（每个都必须写明「为何无法在无 turn 下运行」）：
+///
+/// | 槽位 | 排除原因 |
+/// |---|---|
+/// | `DefaultSystemPrompt` / `Lang` / `AgentsMd` / `Plugin` / `Skills` / `SkillPreload` / `AtMention` / `Image` | 上下文注入器：产出要写进**模型请求**，idle 入口按构造没有模型请求 |
+/// | `GitAttribution` | 依赖 turn 的 git 快照投影（无 turn 时无快照事实可注） |
+/// | `Todo` | 写 turn 级 todo 通道与 `step` 进度，idle 无 `step` 事实 |
+/// | `AskUser` | 提问通道由**模型工具**触发（`AskUserQuestion` 工具在 `collect_tools` 暴露），idle 不产生模型可见工具视图 |
+/// | `SubAgent` | 子代理需要父 turn 身份与 transcript 继承事实，idle 没有 |
+/// | `Mcp` | 目录准入由本入口自己经 `McpAdmissionPreparation` 完成（同一原语），
+///   链上实例会重复提供工具面并写 notifier 副作用 |
+/// | `ToolSearch` | 面向模型 deferred 工具检索，idle 不产生模型可见目录 |
+/// | `Goal` | goal steering 依附模型循环，idle 没有循环 |
+pub fn invocation_rule_blueprint() -> Vec<ChainSlot> {
+    production_blueprint()
+        .into_iter()
+        .filter(|slot| matches!(slot, ChainSlot::Hook | ChainSlot::Permission))
+        .collect()
+}
+
+/// idle 准入规则链（与 per-turn 生产链**不同类型**的窄链）。
+///
+/// 类型分工（root 审查要求）：per-turn `ChainAssembly.chain` 不能直接注入
+/// session-owned 服务——那会让 session 服务挂住 per-turn 对象（`StageContext`
+/// / `EventBus` / pinned catalog）。唯一生产构造入口是
+/// [`build_invocation_rule_chain`]（派生蓝本 + 同一 `ProductionChainAssembler`）。
+pub struct InvocationRuleChain(Arc<MiddlewareChain>);
+
+impl InvocationRuleChain {
+    /// 由**派生蓝本装配产物**构造（生产入口经 [`build_invocation_rule_chain`]；
+    /// 测试可用它包住手写链以覆盖规则路径）。
+    pub fn from_derived_blueprint(chain: MiddlewareChain) -> Self {
+        Self(Arc::new(chain))
+    }
+
+    /// 规则链的共享句柄（`InvocationContext` 执行期借用；不得用于 turn 链装配）。
+    pub fn shared(&self) -> Arc<MiddlewareChain> {
+        Arc::clone(&self.0)
+    }
+}
+
+/// 按 idle 准入规则蓝本装配窄链（同一装配器、同一上下文类型）。
+///
+/// `Context` / `Output` 固定为生产装配类型：调用方无法用它装配轮次链或
+/// 拿到轮次 `ChainAssembly`。
+pub fn build_invocation_rule_chain<A>(assembler: &A, ctx: &AssemblyContext) -> InvocationRuleChain
+where
+    A: MiddlewareChainAssembler<Context = AssemblyContext, Output = ChainAssembly>,
+{
+    let ChainAssembly { chain, .. } = assembler.assemble(&invocation_rule_blueprint(), ctx);
+    InvocationRuleChain::from_derived_blueprint(chain)
+}
+
 // ── 装配上下文（L5：自 peri-middlewares/src/assembly.rs 迁入）────────────────
 //
 // 链装配上下文与产物的类型事实源归本层（§2 装配归 Agent 层 session 工厂）：

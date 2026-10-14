@@ -164,8 +164,8 @@ impl peri_acp_types::tools::EffectiveToolDispatcher for CatalogDispatcher {
         &self,
         _call: peri_acp_types::tools::EffectiveToolCall,
         _cancel: tokio_util::sync::CancellationToken,
-    ) -> Result<String, peri_acp_types::tools::EffectiveToolError> {
-        Ok(String::new())
+    ) -> Result<peri_acp_types::tools::ToolOutput, peri_acp_types::tools::EffectiveToolError> {
+        Ok(peri_acp_types::tools::ToolOutput::from_legacy(String::new()))
     }
 
     fn tools(&self) -> Vec<peri_acp_types::tools::EffectiveToolDefinition> {
@@ -224,8 +224,8 @@ impl peri_acp_types::tools::EffectiveToolDispatcher for BoundDispatcher {
         &self,
         _call: peri_acp_types::tools::EffectiveToolCall,
         _cancel: tokio_util::sync::CancellationToken,
-    ) -> Result<String, peri_acp_types::tools::EffectiveToolError> {
-        Ok(String::new())
+    ) -> Result<peri_acp_types::tools::ToolOutput, peri_acp_types::tools::EffectiveToolError> {
+        Ok(peri_acp_types::tools::ToolOutput::from_legacy(String::new()))
     }
 
     fn tools(&self) -> Vec<peri_acp_types::tools::EffectiveToolDefinition> {
@@ -710,27 +710,227 @@ async fn builtin_tool_call_surfaces_timeout_error_after_bridge_deadline() {
         handler.entered_count()
     );
 }
-#[test]
-fn completed_mcp_error_response_retains_known_application_failure() {
-    let result = rmcp::model::CallToolResult::error(vec![rmcp::model::ContentBlock::text(
-        "FileNotFound: missing-file.txt",
-    )]);
-    let error = super::completed_application_error(&result).unwrap();
-    assert_eq!(
-        error.code,
-        peri_acp_types::tools::EffectiveToolErrorCode::ApplicationFailed,
-    );
-    assert_eq!(error.message, "FileNotFound: missing-file.txt");
+/// 固定 raw 结果的真实 MCP server 夹具：工具每次调用返回同一份 `CallToolResult`
+/// （按线上 JSON 构造，覆盖多模态 content / structuredContent / `_meta` / `isError`）。
+struct RawResultHandler {
+    tool: Tool,
+    result: rmcp::model::CallToolResult,
 }
 
-#[test]
-fn completed_mcp_success_does_not_infer_failure_from_content() {
-    let mut result = rmcp::model::CallToolResult::success(vec![rmcp::model::ContentBlock::text(
-        "FileNotFound -32603 transport disconnected",
-    )]);
-    assert!(super::completed_application_error(&result).is_none());
-    result.is_error = None;
-    assert!(super::completed_application_error(&result).is_none());
+impl ServerHandler for RawResultHandler {
+    fn get_info(&self) -> rmcp::model::ServerConfig {
+        rmcp::model::ServerConfig::new(
+            rmcp::model::ServerCapabilities::builder()
+                .enable_tools()
+                .build(),
+        )
+        .with_server_info(rmcp::model::Implementation::new(
+            "peri-raw-fixture",
+            "tool_bridge_test",
+        ))
+    }
+
+    async fn list_tools(
+        &self,
+        _request: Option<rmcp::model::PaginatedRequestParams>,
+        _context: rmcp::service::RequestContext<rmcp::service::RoleServer>,
+    ) -> Result<rmcp::model::ListToolsResult, rmcp::ErrorData> {
+        Ok(rmcp::model::ListToolsResult::with_all_items(vec![self
+            .tool
+            .clone()]))
+    }
+
+    async fn call_tool(
+        &self,
+        _request: rmcp::model::CallToolRequestParams,
+        _context: rmcp::service::RequestContext<rmcp::service::RoleServer>,
+    ) -> Result<rmcp::model::CallToolResponse, rmcp::ErrorData> {
+        Ok(rmcp::model::CallToolResponse::Complete(self.result.clone()))
+    }
+}
+
+/// 建立「真实 duplex + 真实 serve_server + 真实 bridge」的夹具，返回 bridge、会话
+/// 上下文工厂与关闭句柄。`result` 按线上 JSON 构造（含未知顶层键时由 rmcp 解析规则决定）。
+async fn raw_result_fixture(
+    session_id: &str,
+    result: serde_json::Value,
+) -> (
+    McpToolBridge,
+    CurrentInvocationFixture,
+    crate::mcp::builtin::runtime::BuiltinServerTask,
+    crate::mcp::client::McpServiceWrapper,
+    Arc<McpClientPool>,
+) {
+    let tool: Tool = serde_json::from_value(serde_json::json!({
+        "name": "raw_fixture",
+        "description": "raw 结果保真夹具",
+        "inputSchema": { "type": "object", "properties": {} }
+    }))
+    .expect("夹具工具必须能被 rmcp Tool 接收");
+    let handler = RawResultHandler {
+        tool: tool.clone(),
+        result: serde_json::from_value(result).expect("夹具结果必须能被 CallToolResult 接收"),
+    };
+    let transport =
+        crate::mcp::builtin::runtime::spawn_builtin_transport_with_handler("raw-fixture", handler);
+    let crate::mcp::builtin::runtime::BuiltinTransport {
+        io, server_task, ..
+    } = transport;
+    let service = crate::mcp::client::serve_client_auto(
+        io,
+        &crate::mcp::apps::McpCapabilityProfile::disabled(),
+        std::time::Duration::from_secs(5),
+    )
+    .await
+    .expect("夹具握手不得超时（同进程链路）")
+    .expect("夹具握手不得失败");
+    let peer = service.peer().clone();
+    let pool = Arc::new(McpClientPool::new_empty());
+    let manager: Arc<dyn peri_acp_types::tasks::TaskManager> =
+        Arc::new(peri_agent::agent::async_tasks::TaskManager::new());
+    pool.bind_session_task_manager(session_id, &manager);
+    let bridge = McpToolBridge::new(
+        "raw-fixture",
+        &tool,
+        Arc::new(McpClientHandle {
+            name: "raw-fixture".to_string(),
+            version: None,
+            connected_at: None,
+            protocol_version: None,
+            cache_version: None,
+            peer: Some(peer),
+            tools: vec![tool.clone()],
+            resources: vec![],
+            status: ClientStatus::Connected,
+            oauth_status: Default::default(),
+            source: None,
+            url: None,
+            skills_capable: false,
+        }),
+    )
+    .with_output_store(&pool, Some(session_id));
+    let fixture =
+        CurrentInvocationFixture::new(session_id, "raw_fixture", &[serde_json::json!({})]).await;
+    // bridge 只持 `Weak<McpClientPool>`：pool 的强引用必须由用例持有，否则任务归属查询失败。
+    (bridge, fixture, server_task, service, pool)
+}
+
+/// 夹具收尾：先关 client（断开 duplex ⇒ server 读到 EOF），再等 server task 收敛。
+async fn converge_raw_result_fixture(
+    mut server_task: crate::mcp::builtin::runtime::BuiltinServerTask,
+    mut service: crate::mcp::client::McpServiceWrapper,
+) {
+    service
+        .close_with_timeout(crate::mcp::builtin::runtime::BUILTIN_CONVERGE_TIMEOUT)
+        .await
+        .expect("client service 必须能收敛");
+    let exit = server_task
+        .converge(crate::mcp::builtin::runtime::BUILTIN_CONVERGE_TIMEOUT)
+        .await;
+    assert!(
+        matches!(
+            exit,
+            crate::mcp::builtin::runtime::BuiltinServerExit::Quit(_)
+        ),
+        "builtin server task 必须在有界收敛内靠 EOF 自然退出（不得 abort）: {exit:?}"
+    );
+}
+
+/// 带内失败与多模态结果必须是**正常返回值**：`isError: true` 走
+/// `ToolOutcome::Reported { is_error: true }`，raw 保留 content（含图片块）/
+/// structuredContent / `_meta`，模型面文本投影与改动前逐字一致。
+#[tokio::test]
+async fn in_band_error_returns_raw_outcome_and_keeps_multimodal_content() {
+    let (bridge, fixture, transport, service, _pool) = raw_result_fixture(
+        "raw-outcome-session",
+        serde_json::json!({
+            "content": [
+                {"type": "text", "text": "boom: fixture failure"},
+                {"type": "image", "data": "aW1n", "mimeType": "image/png"}
+            ],
+            "structuredContent": {"code": 7, "items": [1, 2]},
+            "isError": true,
+            "_meta": {"ui": {"domain": "fixture"}, "vendorExt": {"nested": true}}
+        }),
+    )
+    .await;
+
+    let output = bridge
+        .invoke_output(serde_json::json!({}), fixture.context(0, "."))
+        .await
+        .expect("带内 isError 不得走错误路径：它必须是正常返回值");
+
+    assert_eq!(
+        output.is_error(),
+        Some(true),
+        "远端报告的 isError 必须作为结果事实浮出，不得推断"
+    );
+    let raw = output.raw().expect("MCP adapter 必须携带 raw 结果");
+    assert!(raw.is_error());
+    assert_eq!(
+        raw.content().len(),
+        2,
+        "多模态 content 必须逐块保留（含图片块）: {:?}",
+        raw.content()
+    );
+    assert_eq!(raw.content()[0]["text"], "boom: fixture failure");
+    assert_eq!(raw.content()[1]["type"], "image");
+    assert_eq!(
+        raw.structured_content(),
+        Some(&serde_json::json!({"code": 7, "items": [1, 2]})),
+        "structuredContent 必须保真"
+    );
+    let meta = raw.meta().expect("_meta 必须保真");
+    assert_eq!(
+        meta.get("ui"),
+        Some(&serde_json::json!({"domain": "fixture"}))
+    );
+    assert_eq!(
+        meta.get("vendorExt"),
+        Some(&serde_json::json!({"nested": true})),
+        "未知扩展字段不得丢弃"
+    );
+    // 模型面文本投影与改动前一致（失败上下文 + 逐块投影），模型行为不回退。
+    assert_eq!(
+        output.text,
+        "MCP 服务器 \"raw-fixture\" 工具 \"raw_fixture\" 调用失败: boom: fixture failure\n[image: image/png]"
+    );
+    // 文本投影路径（`BaseTool::invoke`）保持字符串语义。
+    assert_eq!(
+        bridge
+            .invoke(serde_json::json!({}), fixture.context(0, "."))
+            .await
+            .expect("文本投影路径必须同样成功"),
+        output.text
+    );
+
+    converge_raw_result_fixture(transport, service).await;
+}
+
+/// 成功结果同样携带 raw；`isError` 缺失即「未报告失败」，不得不从 content 文本推测。
+#[tokio::test]
+async fn successful_result_carries_raw_without_inferring_failure_from_text() {
+    let (bridge, fixture, transport, service, _pool) = raw_result_fixture(
+        "raw-success-session",
+        serde_json::json!({
+            "content": [{"type": "text", "text": "FileNotFound -32603 transport disconnected"}],
+            "isError": false
+        }),
+    )
+    .await;
+
+    let output = bridge
+        .invoke_output(serde_json::json!({}), fixture.context(0, "."))
+        .await
+        .expect("成功结果必须返回 Ok");
+    assert_eq!(output.is_error(), Some(false));
+    assert_eq!(
+        output.text, "FileNotFound -32603 transport disconnected",
+        "非失败结果的文本投影不加失败前缀（不得从文本反推失败）"
+    );
+    assert!(output.raw().is_some());
+
+    converge_raw_result_fixture(transport, service).await;
 }
 
 // ── M7：单项工具 description 字节预算 ────────────────────────────────────────

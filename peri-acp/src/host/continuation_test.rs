@@ -8,7 +8,8 @@ use std::sync::{
 };
 
 use peri_acp_types::interaction::{
-    ApprovalDecision, InteractionContext, InteractionResponse, UserInteractionBroker,
+    ApprovalDecision, InteractionContext, InteractionResponse, TrustedInteractionOwner,
+    UserInteractionBroker,
 };
 use peri_acp_types::permission::{PermissionMode, SharedPermissionMode};
 use peri_acp_types::tasks::BgTaskKind;
@@ -21,11 +22,20 @@ use super::{
 };
 use crate::session::executor::ContinuationRequest;
 
+/// Host 程序化审批归属（与生产 `SCHEDULED_TRIGGER_NAMESPACE` 同形）。
+fn scheduled_owner(seq: u64) -> TrustedInteractionOwner {
+    TrustedInteractionOwner::host(super::super::SCHEDULED_TRIGGER_NAMESPACE, seq)
+}
+
 struct FixedBroker(InteractionResponse);
 
 #[async_trait::async_trait]
 impl UserInteractionBroker for FixedBroker {
-    async fn request(&self, _ctx: InteractionContext) -> InteractionResponse {
+    async fn request(
+        &self,
+        _owner: TrustedInteractionOwner,
+        _ctx: InteractionContext,
+    ) -> InteractionResponse {
         self.0.clone()
     }
 }
@@ -34,8 +44,14 @@ impl UserInteractionBroker for FixedBroker {
 async fn test_scheduled_trigger_permission_contract() {
     let bypass = SharedPermissionMode::new(PermissionMode::Bypass);
     assert!(
-        super::super::prompt::approve_scheduled_trigger(bypass.as_ref(), None, "task-1", "status")
-            .await
+        super::super::prompt::approve_scheduled_trigger(
+            bypass.as_ref(),
+            None,
+            scheduled_owner(1),
+            "task-1",
+            "status",
+        )
+        .await
     );
 
     let default = SharedPermissionMode::new(PermissionMode::Default);
@@ -43,6 +59,7 @@ async fn test_scheduled_trigger_permission_contract() {
         !super::super::prompt::approve_scheduled_trigger(
             default.as_ref(),
             None,
+            scheduled_owner(2),
             "task-1",
             "status"
         )
@@ -57,6 +74,7 @@ async fn test_scheduled_trigger_permission_contract() {
         super::super::prompt::approve_scheduled_trigger(
             default.as_ref(),
             Some(&broker),
+            scheduled_owner(3),
             "task-1",
             "status"
         )
@@ -75,6 +93,8 @@ fn make_session_state(armed: bool, epoch: u64) -> SessionState {
         history: vec![],
         history_payloads: vec![],
         cancel_token: None,
+        interaction_gate: Arc::new(tokio::sync::Mutex::new(())),
+        host_request_seq: Arc::new(std::sync::atomic::AtomicU64::new(0)),
         frozen: None,
         recall_items: vec![],
         agent_pool: crate::session::agent_pool::AgentPool::new(),

@@ -168,6 +168,8 @@ async fn make_server_config_with(
         cron_scheduler: None,
         mcp_pool,
         mcp_apps_relay: None,
+        mcp_apps_facade: None,
+        session_authorization: None,
         acp_mcp: None,
         dynamic_mcp: None,
         oauth_event_tx: None,

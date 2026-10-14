@@ -209,7 +209,7 @@ async fn test_before_tool_block() {
 
     assert!(result.is_err());
     match result.unwrap_err() {
-        AgentError::ToolRejected { tool, reason } => {
+        AgentError::ToolRejected { tool, reason, .. } => {
             assert_eq!(tool, "Bash");
             assert!(!reason.is_empty());
         }
@@ -340,7 +340,7 @@ async fn test_before_tool_fires_permission_request() {
 
     assert!(result.is_err());
     match result.unwrap_err() {
-        AgentError::ToolRejected { tool, reason } => {
+        AgentError::ToolRejected { tool, reason, .. } => {
             assert_eq!(tool, "Write");
             assert!(!reason.is_empty());
         }
@@ -695,6 +695,7 @@ async fn test_stopfailure_only_fires_on_api_errors() {
     let err = peri_agent::error::AgentError::ToolRejected {
         tool: "Bash".to_string(),
         reason: "denied".to_string(),
+        cause: peri_acp_types::error::ToolRejectionCause::UserRejected,
     };
     let result = mw.on_error(&mut state, &err).await;
     assert!(result.is_ok(), "ToolRejected should not fire StopFailure");

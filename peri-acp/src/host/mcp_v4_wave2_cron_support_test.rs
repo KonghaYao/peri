@@ -5,7 +5,8 @@ use peri_acp_types::{
     cron::CronSchedulerPort,
     event::ExecutorEvent,
     interaction::{
-        ApprovalDecision, InteractionContext, InteractionResponse, UserInteractionBroker,
+        ApprovalDecision, InteractionContext, InteractionResponse, TrustedInteractionOwner,
+        UserInteractionBroker,
     },
     ports::McpTaskOwnerPort,
 };
@@ -278,7 +279,11 @@ impl ToolApprovalBroker {
 
 #[async_trait::async_trait]
 impl UserInteractionBroker for ToolApprovalBroker {
-    async fn request(&self, context: InteractionContext) -> InteractionResponse {
+    async fn request(
+        &self,
+        _owner: TrustedInteractionOwner,
+        context: InteractionContext,
+    ) -> InteractionResponse {
         match context {
             InteractionContext::Approval { items } => {
                 self.requests

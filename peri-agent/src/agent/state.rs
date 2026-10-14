@@ -33,6 +33,19 @@ pub struct AgentState {
     /// Receive / End 阶段统一消费。
     #[serde(skip)]
     pub v2_queue: MessageQueue,
+    /// legacy / 测试适配器**显式声明**的 turn 身份（session + turn/attempt）。
+    ///
+    /// 生产路径不经本类型：审批态由调用期窄状态（`BoundApprovalState`）与
+    /// `AgentContext` 从 `StageContext` 投影真实事实。本字段只让绕过 v2 装配的
+    /// 调用方（测试）声明所模拟的 turn —— 两个字段必须由
+    /// [`AgentState::with_turn_identity`] 一起设置，不允许只设其一。
+    ///
+    /// 缺失即「无可信交互归属」：需要归属的 middleware 必须显式拒绝交互，
+    /// 不得伪造 turn 身份。
+    #[serde(skip)]
+    session_id: Option<String>,
+    #[serde(skip)]
+    execution_binding: Option<peri_acp_types::session::ExecutionBinding>,
 }
 
 impl std::fmt::Debug for AgentState {
@@ -74,8 +87,33 @@ impl AgentState {
         self
     }
 
+    /// 声明本 state 代表的 turn 身份（session + turn/attempt）。
+    ///
+    /// 只服务 legacy / 测试适配器：生产审批态由 `BoundApprovalState` /
+    /// `AgentContext` 从 `StageContext` 投影，不经本方法。缺失声明时交互归属
+    /// 无法铸造，需要归属的 middleware 会显式拒绝。
+    pub fn with_turn_identity(
+        mut self,
+        session_id: impl Into<String>,
+        binding: peri_acp_types::session::ExecutionBinding,
+    ) -> Self {
+        self.session_id = Some(session_id.into());
+        self.execution_binding = Some(binding);
+        self
+    }
+
     pub fn get_context(&self, key: &str) -> Option<&str> {
         self.context.get(key).map(|s| s.as_str())
+    }
+
+    /// legacy / 测试声明的 session 身份（见 [`Self::with_turn_identity`]）。
+    pub fn declared_session_id(&self) -> Option<&str> {
+        self.session_id.as_deref()
+    }
+
+    /// legacy / 测试声明的 turn/attempt 身份（见 [`Self::with_turn_identity`]）。
+    pub fn declared_execution_binding(&self) -> Option<peri_acp_types::session::ExecutionBinding> {
+        self.execution_binding.clone()
     }
 
     pub fn set_context(&mut self, key: impl Into<String>, value: impl Into<String>) {

@@ -22,7 +22,9 @@ use async_trait::async_trait;
 use futures::stream;
 use peri_acp_types::{
     event::ExecutorEvent,
-    interaction::{InteractionContext, InteractionResponse, UserInteractionBroker},
+    interaction::{
+        InteractionContext, InteractionResponse, TrustedInteractionOwner, UserInteractionBroker,
+    },
     messages::{BaseMessage, MessageContent},
     permission::{PermissionMode, SharedPermissionMode},
 };
@@ -271,7 +273,11 @@ struct NoopBroker;
 
 #[async_trait]
 impl UserInteractionBroker for NoopBroker {
-    async fn request(&self, _ctx: InteractionContext) -> InteractionResponse {
+    async fn request(
+        &self,
+        _owner: TrustedInteractionOwner,
+        _ctx: InteractionContext,
+    ) -> InteractionResponse {
         InteractionResponse::Rejected
     }
 }

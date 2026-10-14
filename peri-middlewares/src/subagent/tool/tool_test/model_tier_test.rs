@@ -377,8 +377,8 @@ async fn test_resume_thread_id_ignores_model_field() {
     durable_face.attach_session_host(&parent);
     let mut ctx = peri_agent::tools::ToolContext::new(&[], &cwd);
     let tool_call = durable_face.fresh_tool_call_id("resume-model");
-    ctx.invocation_id = Some(tool_call.clone());
-    ctx.tool_call_id = Some(tool_call);
+    ctx.invocation_id = Some(tool_call.clone().into());
+    ctx.tool_call_id = Some(tool_call.into());
     let result = t
         .invoke(
             serde_json::json!({

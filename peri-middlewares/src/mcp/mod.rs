@@ -1,4 +1,6 @@
 pub mod acp;
+// Session-owned MCP 准入准备原语（readiness/candidate 面；与链槽解耦）。
+pub(crate) mod admission;
 pub mod agent_registry;
 pub mod apps;
 pub mod apps_invoke;
@@ -20,7 +22,9 @@ pub mod middleware;
 pub mod oauth_flow;
 pub mod reconnect;
 pub mod resource_cache;
+// session-owned canonical 调用入口（App 回调与 Host invoke 的共同准入面）。
 pub mod resource_tool;
+pub mod session_invocation;
 pub(crate) mod skill_activation;
 pub(crate) mod skill_discovery;
 pub(crate) mod system_tools;
@@ -33,9 +37,9 @@ pub use acp::AcpMcpService;
 pub use agent_registry::{ActivatedMcpAgent, McpAgentMetadata, McpAgentRegistry};
 pub use apps::{
     canonical_resource_uri, raw_resource, raw_tool, tool_resource_uri, tool_visibility,
-    McpAppsInvocationError, McpAppsInvocationSeam, McpAppsInvoker, McpCapabilityProfile,
-    RawCallToolResult, RawMcpResource, RawMcpTool, ToolVisibility, MCP_APPS_VERSION,
-    MCP_APP_MIME_TYPE, MCP_UI_EXTENSION,
+    AttachmentRoute, EntitlementState, IssueRejection, McpAppBindingRegistry, McpAppRecord,
+    McpAppRecordSpec, McpCapabilityProfile, RawMcpResource, RawMcpTool, RecordState,
+    ToolVisibility, MCP_APPS_VERSION, MCP_APP_MIME_TYPE, MCP_UI_EXTENSION,
 };
 pub use auth_store::{OAuthCredentialClient, PerServerCredentialStore};
 pub use callback_server::{parse_code_from_url, CallbackError, OAuthCallbackServer};

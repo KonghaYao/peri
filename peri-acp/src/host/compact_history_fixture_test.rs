@@ -290,6 +290,8 @@ fn make_host_sessions(ctx: &SessionContext, payloads: Vec<PersistedPayload>) -> 
             .collect(),
         history_payloads: payloads,
         cancel_token: Some(ctx.cancel.clone()),
+        interaction_gate: Arc::new(tokio::sync::Mutex::new(())),
+        host_request_seq: Arc::new(std::sync::atomic::AtomicU64::new(0)),
         continuation_armed: false,
         continuation_epoch: 0,
         continuation_in_flight: false,

@@ -58,8 +58,8 @@ impl InvocationFixture {
         assert!(index < self.count);
         let mut context =
             ToolContext::new(&[], ".").with_session_identity(&self.session_id, "fixture-turn");
-        context.invocation_id = Some(format!("invocation-{index}"));
-        context.tool_call_id = Some(format!("call-{index}"));
+        context.invocation_id = Some(format!("invocation-{index}").into());
+        context.tool_call_id = Some(format!("call-{index}").into());
         context.session_resources = Some(self.resources.clone());
         context
     }

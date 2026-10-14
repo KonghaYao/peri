@@ -735,8 +735,8 @@ pub(crate) fn preset_child_ctx(
     let cwd: &'static str = Box::leak(cwd.to_string().into_boxed_str());
     let mut ctx = peri_agent::tools::ToolContext::new(&EMPTY, cwd);
     let tool_call_id = format!("fixture-resume-tool-call:{child_id}");
-    ctx.invocation_id = Some(tool_call_id.clone());
-    ctx.tool_call_id = Some(tool_call_id);
+    ctx.invocation_id = Some(tool_call_id.clone().into());
+    ctx.tool_call_id = Some(tool_call_id.into());
     ctx
 }
 
@@ -848,6 +848,9 @@ mod resume_test;
 mod sections_parity_test;
 #[path = "tool_test/session_isolation_test.rs"]
 mod session_isolation_test;
+
+#[path = "tool_test/mcp_activation_owner_test.rs"]
+mod mcp_activation_owner_test;
 
 /// W5 关闭矩阵 E2E（生产链路）：agent 面关闭（`SubAgentMiddleware` 链槽关闭位 =
 /// `SUB_AGENT_FACE_CLOSED_KEY`）⇒ 本地来源**不可发现、不可激活**，且**零磁盘兜底**

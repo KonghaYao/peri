@@ -11,13 +11,19 @@ mod async_context;
 pub mod compact;
 mod compact_progress;
 mod context_builder;
+mod invocation_context;
 pub mod middleware_runner;
 mod null_llm;
 mod queue_to_transcript;
 pub mod reason;
 pub mod receive;
 pub mod tool_dispatch;
+pub use invocation_context::{
+    ExecutionEntryOrigin, InvocationContext, ModelTurnFacts, PostHookSkipSink,
+    SessionInvocationSource,
+};
 pub use null_llm::NullReactLLM;
+pub use tool_dispatch::invocation_dispatcher;
 
 use std::collections::{BTreeMap, HashMap};
 use std::sync::atomic::{AtomicU32, Ordering};
@@ -128,6 +134,24 @@ pub struct StageContext {
 }
 
 impl StageContext {
+    /// canonical session 身份投影（`session_context["session_id"]`）。
+    ///
+    /// **单一权威**：调用期事实（`InvocationContext`）与 middleware 状态
+    /// （`AgentContext`）都从这里取 session 身份，不得各自复写投影规则。
+    ///
+    /// **缺失即 `None`**：`session_id` 是 ACP 会话身份，只有真实会话才能给出
+    /// （主 agent 在 `StageContext` 构造期写入；子 agent 自建 session 没有
+    /// thread 绑定时不写）。`agent_id` 是执行实例身份，不是会话身份，**不得**
+    /// 用作回退——否则会铸造出「可信会话归属」的事实，让审批的 fail-closed
+    /// 守卫（`interaction_owner::untrusted_owner_error`）变成死分支。
+    pub(crate) fn project_session_id(&self) -> Option<String> {
+        self.session
+            .session_context
+            .read()
+            .get("session_id")
+            .cloned()
+    }
+
     /// 测试最小上下文：仅传会话实体，运行时依赖按测试行为填充。
     ///
     /// **注意**：此构造函数仅用于单元测试。生产代码请用 `StageContextBuilder`。

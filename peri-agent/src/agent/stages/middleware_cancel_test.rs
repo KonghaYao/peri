@@ -1,6 +1,6 @@
 use super::*;
 use crate::agent::react::{AgentOutput, ReactLLM, Reasoning};
-use crate::agent::stages::{run_react_loop, LoopResult};
+use crate::agent::stages::{run_react_loop, ExecutionEntryOrigin, InvocationContext, LoopResult};
 use crate::error::{AgentError, AgentResult};
 use crate::messages::{BaseMessage, MessageContent};
 use crate::middleware::{Middleware, MiddlewareChain};
@@ -317,7 +317,17 @@ async fn cancel_pending_batch_approval_preserves_result_count() {
         crate::agent::react::ToolCall::new("first", "Read", serde_json::json!({})),
         crate::agent::react::ToolCall::new("second", "Read", serde_json::json!({})),
     ];
-    let mut approval = Box::pin(run_before_tools_batch(&context, &calls));
+    let invocation = InvocationContext::from_stage(
+        &context,
+        ExecutionEntryOrigin::ModelBatch,
+        context.session.turn.cancel_token.as_ref().clone(),
+    );
+    let no_bound_targets = std::collections::HashMap::new();
+    let mut approval = Box::pin(run_before_bound_tools_batch(
+        &invocation,
+        &calls,
+        &no_bound_targets,
+    ));
     tokio::time::timeout(Duration::from_secs(2), async {
         tokio::select! {
             _ = entered.notified() => {},

@@ -181,9 +181,12 @@ pub async fn replay_session_history(
                 subagent_failure,
                 ..
             } => {
+                // 历史 transcript 只持久化文本投影，不保留 raw 结果：这里如实标为
+                // `Unreported`，不从文本推断成功/失败（is_error 直接用消息自身事实）。
                 let result_text = ToolOutput {
                     text: extract_text(content),
                     execution: execution.clone(),
+                    outcome: peri_acp_types::tools::ToolOutcome::Unreported,
                 }
                 .projected_text(None);
                 let mut update = project_tool_completion(

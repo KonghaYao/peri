@@ -26,6 +26,8 @@ use crate::{dispatch, transport::types::AcpError};
 
 #[path = "session_restore.rs"]
 pub(crate) mod restore;
+#[path = "session_apps_capability.rs"]
+mod session_apps_capability;
 pub(crate) use restore::{handle_context, handle_load, handle_metadata, handle_resume};
 use restore::{identity_response, prepare_existing, response_identity};
 
@@ -139,9 +141,12 @@ pub(crate) fn handle_initialize(params: &Value, cfg: &AcpServerConfig) -> Result
     // 暂存 caps，session/new 时 consume
     cfg.session_manager.set_pending_caps(peri_caps.clone());
 
-    let resp = dispatch::build_initialize_response(&peri_caps);
+    let apps = apps_capability(cfg);
+    let resp = dispatch::build_initialize_response(&peri_caps, apps.as_ref());
     serde_json::to_value(resp).map_err(|e| AcpError::new(-32603, format!("Serialize failed: {e}")))
 }
+
+use session_apps_capability::apps_capability;
 
 pub(super) fn enabled_meta_sections(cfg: &AcpServerConfig) -> std::collections::HashSet<String> {
     cfg.peri_config
@@ -442,6 +447,11 @@ pub(crate) async fn new_session_from_prepared(
             history: Vec::new(),
             history_payloads: Vec::new(),
             cancel_token: None,
+            // session-owned 交互门：环境自带（router 借用同一 Arc，跨轮共享）。
+            interaction_gate: super::super::workspace_interaction::session_interaction_gate(
+                &environment,
+            ),
+            host_request_seq: Arc::new(std::sync::atomic::AtomicU64::new(0)),
             continuation_armed: false,
             continuation_epoch: 0,
             continuation_in_flight: false,
@@ -847,6 +857,11 @@ pub(crate) async fn handle_fork(
                 .collect(),
             history_payloads: copied_payloads,
             cancel_token: None,
+            // session-owned 交互门：环境自带（router 借用同一 Arc，跨轮共享）。
+            interaction_gate: super::super::workspace_interaction::session_interaction_gate(
+                &environment,
+            ),
+            host_request_seq: Arc::new(std::sync::atomic::AtomicU64::new(0)),
             continuation_armed: false,
             continuation_epoch: 0,
             continuation_in_flight: false,

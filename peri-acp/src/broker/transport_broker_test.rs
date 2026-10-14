@@ -13,6 +13,23 @@ use serde_json::json;
 
 use super::*;
 
+/// 测试用 session-owned 交互门：与生产同语义（session 持有、broker 借用）。
+fn interaction_gate() -> Arc<tokio::sync::Mutex<()>> {
+    Arc::new(tokio::sync::Mutex::new(()))
+}
+
+/// 测试用可信归属（模型 turn owner）——本文件只验证 endpoint 行为，
+/// 归属值不参与裁决。
+fn owner() -> TrustedInteractionOwner {
+    TrustedInteractionOwner::model(
+        "s1",
+        peri_acp_types::session::ExecutionBinding {
+            turn_id: peri_acp_types::session::TurnId::new(),
+            attempt_id: peri_acp_types::identity::AttemptId::new(),
+        },
+    )
+}
+
 /// 三形态问题集（与 stdio 双端测试同构）：单选 / 多选 / 自由文本。
 fn sample_questions() -> Vec<QuestionItem> {
     vec![
@@ -504,7 +521,7 @@ async fn request_with_first_pending_marker(
     context: InteractionContext,
     marker: oneshot::Sender<()>,
 ) -> InteractionResponse {
-    let request = broker.request(context);
+    let request = broker.request(owner(), context);
     tokio::pin!(request);
     let mut marker = Some(marker);
     poll_fn(|cx| match request.as_mut().poll(cx) {
@@ -528,11 +545,19 @@ async fn test_interaction_gate_serializes_whole_approval_before_questions() {
         releases,
         ..
     } = causal_fixture();
-    let broker = Arc::new(AcpTransportBroker::new(transport, SessionId::new("s1")));
+    let broker = Arc::new(AcpTransportBroker::new(
+        transport,
+        SessionId::new("s1"),
+        interaction_gate(),
+    ));
 
     let first = tokio::spawn({
         let broker = Arc::clone(&broker);
-        async move { broker.request(approval_context_with_items(2)).await }
+        async move {
+            broker
+                .request(owner(), approval_context_with_items(2))
+                .await
+        }
     });
     assert_eq!(
         next_entered(&mut entered_rx).await,
@@ -592,11 +617,15 @@ async fn test_interaction_gate_cancelled_waiter_does_not_block_third_request() {
         releases,
         ..
     } = causal_fixture();
-    let broker = Arc::new(AcpTransportBroker::new(transport, SessionId::new("s1")));
+    let broker = Arc::new(AcpTransportBroker::new(
+        transport,
+        SessionId::new("s1"),
+        interaction_gate(),
+    ));
 
     let first = tokio::spawn({
         let broker = Arc::clone(&broker);
-        async move { broker.request(approval_context()).await }
+        async move { broker.request(owner(), approval_context()).await }
     });
     assert_eq!(
         next_entered(&mut entered_rx).await,
@@ -630,7 +659,7 @@ async fn test_interaction_gate_cancelled_waiter_does_not_block_third_request() {
 
     let third = tokio::spawn({
         let broker = Arc::clone(&broker);
-        async move { broker.request(questions_context()).await }
+        async move { broker.request(owner(), questions_context()).await }
     });
     assert_eq!(next_entered(&mut entered_rx).await, "elicitation/create");
     releases.add_permits(1);
@@ -649,56 +678,8 @@ async fn test_interaction_gate_cancelled_waiter_does_not_block_third_request() {
     );
 }
 
-#[tokio::test]
-async fn test_interaction_gate_is_per_broker_instance() {
-    let CausalFixture {
-        transport,
-        mut entered_rx,
-        calls,
-        releases,
-        ..
-    } = causal_fixture();
-    let broker_a = Arc::new(AcpTransportBroker::new(
-        transport.clone(),
-        SessionId::new("session-a"),
-    ));
-    let broker_b = Arc::new(AcpTransportBroker::new(
-        transport,
-        SessionId::new("session-b"),
-    ));
-
-    let first = tokio::spawn(async move { broker_a.request(approval_context()).await });
-    assert_eq!(
-        next_entered(&mut entered_rx).await,
-        "session/request_permission"
-    );
-
-    let (pending_tx, pending_rx) = oneshot::channel();
-    let second = tokio::spawn(request_with_first_pending_marker(
-        broker_b,
-        questions_context(),
-        pending_tx,
-    ));
-    pending_rx
-        .await
-        .expect("second broker must report its first Pending poll");
-    assert_eq!(
-        calls.lock().unwrap().len(),
-        2,
-        "separate broker instances must not share a global interaction gate"
-    );
-    assert_eq!(next_entered(&mut entered_rx).await, "elicitation/create");
-
-    releases.add_permits(2);
-    assert!(matches!(
-        first.await.unwrap(),
-        InteractionResponse::Decisions(_)
-    ));
-    assert!(matches!(
-        second.await.unwrap(),
-        InteractionResponse::Answers(_)
-    ));
-}
+#[path = "transport_broker_session_gate_test.rs"]
+mod session_gate;
 
 #[tokio::test]
 async fn test_auto_approve_bypasses_busy_transport_gate() {
@@ -709,16 +690,18 @@ async fn test_auto_approve_bypasses_busy_transport_gate() {
         releases,
         ..
     } = causal_fixture();
-    let broker =
-        Arc::new(AcpTransportBroker::new(transport, SessionId::new("s1")).with_auto_approve());
+    let broker = Arc::new(
+        AcpTransportBroker::new(transport, SessionId::new("s1"), interaction_gate())
+            .with_auto_approve(),
+    );
 
     let questions = tokio::spawn({
         let broker = Arc::clone(&broker);
-        async move { broker.request(questions_context()).await }
+        async move { broker.request(owner(), questions_context()).await }
     });
     assert_eq!(next_entered(&mut entered_rx).await, "elicitation/create");
 
-    let approval = broker.request(approval_context_with_items(2));
+    let approval = broker.request(owner(), approval_context_with_items(2));
     tokio::pin!(approval);
     let first_poll = poll_fn(|cx| Poll::Ready(approval.as_mut().poll(cx))).await;
     let Poll::Ready(InteractionResponse::Decisions(decisions)) = first_poll else {
@@ -749,9 +732,13 @@ async fn test_approval_mode_auto_approve_never_calls_transport() {
         calls: Arc::clone(&calls),
         behavior: Behavior::Pending,
     };
-    let broker =
-        AcpTransportBroker::new(Arc::new(transport), SessionId::new("s1")).with_auto_approve();
-    let resp = broker.request(approval_context()).await;
+    let broker = AcpTransportBroker::new(
+        Arc::new(transport),
+        SessionId::new("s1"),
+        interaction_gate(),
+    )
+    .with_auto_approve();
+    let resp = broker.request(owner(), approval_context()).await;
     let InteractionResponse::Decisions(decisions) = resp else {
         panic!("auto-approve 应返回 Decisions: {resp:?}");
     };
@@ -778,8 +765,12 @@ async fn test_approval_mode_forward_sends_request_permission() {
             "outcome": { "outcome": "selected", "optionId": "allow_once" }
         })),
     };
-    let broker = AcpTransportBroker::new(Arc::new(transport), SessionId::new("s1"));
-    let resp = broker.request(approval_context()).await;
+    let broker = AcpTransportBroker::new(
+        Arc::new(transport),
+        SessionId::new("s1"),
+        interaction_gate(),
+    );
+    let resp = broker.request(owner(), approval_context()).await;
     let InteractionResponse::Decisions(decisions) = resp else {
         panic!("forward 应返回 Decisions: {resp:?}");
     };
@@ -797,12 +788,19 @@ async fn test_questions_timeout_returns_rejected() {
         calls: Arc::clone(&calls),
         behavior: Behavior::Pending,
     };
-    let broker = AcpTransportBroker::new(Arc::new(transport), SessionId::new("s1"))
-        .with_timeout(Some(Duration::from_millis(50)));
+    let broker = AcpTransportBroker::new(
+        Arc::new(transport),
+        SessionId::new("s1"),
+        interaction_gate(),
+    )
+    .with_timeout(Some(Duration::from_millis(50)));
     let resp = broker
-        .request(InteractionContext::Questions {
-            requests: sample_questions(),
-        })
+        .request(
+            owner(),
+            InteractionContext::Questions {
+                requests: sample_questions(),
+            },
+        )
         .await;
     assert!(
         matches!(resp, InteractionResponse::Rejected),
@@ -827,11 +825,18 @@ async fn test_questions_transport_error_returns_empty_answers() {
             Err(AcpError::new(-32000, "transport closed"))
         }
     }
-    let broker = AcpTransportBroker::new(Arc::new(ErrorTransport), SessionId::new("s1"));
+    let broker = AcpTransportBroker::new(
+        Arc::new(ErrorTransport),
+        SessionId::new("s1"),
+        interaction_gate(),
+    );
     let resp = broker
-        .request(InteractionContext::Questions {
-            requests: sample_questions(),
-        })
+        .request(
+            owner(),
+            InteractionContext::Questions {
+                requests: sample_questions(),
+            },
+        )
         .await;
     let InteractionResponse::Answers(answers) = resp else {
         panic!("transport 错误应返回空 Answers: {resp:?}");

@@ -94,7 +94,9 @@ impl Middleware for HumanInTheLoopMiddleware {
 mod tests {
     use async_trait::async_trait;
     use peri_agent::{
-        interaction::{InteractionContext, InteractionResponse, UserInteractionBroker},
+        interaction::{
+            InteractionContext, InteractionResponse, TrustedInteractionOwner, UserInteractionBroker,
+        },
         middleware::prompt_sections::PromptSectionZone,
     };
 
@@ -105,7 +107,11 @@ mod tests {
 
     #[async_trait]
     impl UserInteractionBroker for AutoAnswerBroker {
-        async fn request(&self, _ctx: InteractionContext) -> InteractionResponse {
+        async fn request(
+            &self,
+            _owner: TrustedInteractionOwner,
+            _ctx: InteractionContext,
+        ) -> InteractionResponse {
             InteractionResponse::Decisions(vec![])
         }
     }

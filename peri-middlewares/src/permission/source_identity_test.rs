@@ -7,7 +7,11 @@ struct RejectBroker;
 
 #[async_trait]
 impl UserInteractionBroker for RejectBroker {
-    async fn request(&self, ctx: InteractionContext) -> InteractionResponse {
+    async fn request(
+        &self,
+        _owner: TrustedInteractionOwner,
+        ctx: InteractionContext,
+    ) -> InteractionResponse {
         match ctx {
             InteractionContext::Approval { items } => InteractionResponse::Decisions(
                 items
@@ -21,6 +25,18 @@ impl UserInteractionBroker for RejectBroker {
             _ => InteractionResponse::Decisions(vec![]),
         }
     }
+}
+
+/// 测试用可信归属（模型 turn）：本文件验证审批判定链，归属取自 fixture 声明的
+/// turn 身份，不涉及归属裁决。
+fn test_owner() -> TrustedInteractionOwner {
+    TrustedInteractionOwner::model(
+        "session-test",
+        peri_acp_types::session::ExecutionBinding {
+            turn_id: peri_acp_types::session::TurnId::new(),
+            attempt_id: peri_acp_types::identity::AttemptId::new(),
+        },
+    )
 }
 
 fn make_tool_call(name: &str) -> ToolCall {
@@ -41,7 +57,14 @@ struct BoundState {
 
 impl StateView for BoundState {
     fn execution_binding(&self) -> Option<peri_acp_types::session::ExecutionBinding> {
-        None
+        Some(peri_acp_types::session::ExecutionBinding {
+            turn_id: peri_acp_types::session::TurnId::new(),
+            attempt_id: peri_acp_types::identity::AttemptId::new(),
+        })
+    }
+
+    fn session_id(&self) -> Option<&str> {
+        Some("session-test")
     }
     fn cwd(&self) -> &str {
         "/tmp"
@@ -49,8 +72,8 @@ impl StateView for BoundState {
     fn messages(&self) -> &[BaseMessage] {
         &[]
     }
-    fn current_step(&self) -> usize {
-        0
+    fn current_step(&self) -> Option<usize> {
+        Some(0)
     }
 }
 
@@ -108,7 +131,7 @@ async fn test_accept_edit_does_not_auto_approve_external_raw_write() {
     );
     let call = make_tool_call("Write");
     let results = mw
-        .process_batch_with_origins(&[call], &[mcp_origin("Write", false)])
+        .process_batch_with_origins(&[call], &[mcp_origin("Write", false)], Some(&test_owner()))
         .await;
     assert!(matches!(&results[0], Err(AgentError::ToolRejected { tool, .. }) if tool == "Write"));
 }
@@ -118,7 +141,7 @@ async fn test_builtin_raw_read_keeps_read_policy() {
     let mw = PermissionMiddleware::new(Arc::new(RejectBroker), default_requires_approval);
     let call = make_tool_call("Read");
     let results = mw
-        .process_batch_with_origins(&[call], &[mcp_origin("Read", true)])
+        .process_batch_with_origins(&[call], &[mcp_origin("Read", true)], Some(&test_owner()))
         .await;
     assert_eq!(results[0].as_ref().unwrap().name, "Read");
 }
@@ -128,7 +151,11 @@ async fn test_external_raw_artifact_cannot_inherit_builtin_no_approval() {
     let mw = PermissionMiddleware::new(Arc::new(RejectBroker), default_requires_approval);
     let call = make_tool_call("artifact");
     let results = mw
-        .process_batch_with_origins(&[call], &[mcp_origin("artifact", false)])
+        .process_batch_with_origins(
+            &[call],
+            &[mcp_origin("artifact", false)],
+            Some(&test_owner()),
+        )
         .await;
     assert!(
         matches!(&results[0], Err(AgentError::ToolRejected { tool, .. }) if tool == "artifact")
@@ -156,10 +183,14 @@ async fn test_auto_mode_classifies_external_mcp_with_server_and_wire_identity() 
     );
     let call = make_tool_call("Write");
     let external = mw
-        .process_batch_with_origins(std::slice::from_ref(&call), &[mcp_origin("Write", false)])
+        .process_batch_with_origins(
+            std::slice::from_ref(&call),
+            &[mcp_origin("Write", false)],
+            Some(&test_owner()),
+        )
         .await;
     let builtin = mw
-        .process_batch_with_origins(&[call], &[mcp_origin("Write", true)])
+        .process_batch_with_origins(&[call], &[mcp_origin("Write", true)], Some(&test_owner()))
         .await;
     assert!(external[0].is_ok());
     assert!(builtin[0].is_ok());

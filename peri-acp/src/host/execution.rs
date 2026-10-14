@@ -48,7 +48,7 @@ pub(super) async fn approve_schedule(
     let mut params = serde_json::json!({});
     let notifications = ExecutionNotifications::from_params(&mut params)?;
     let cancel = tokio_util::sync::CancellationToken::new();
-    {
+    let (interaction_gate, host_request_seq, interaction_router) = {
         let mut sessions = sessions.lock().await;
         let state = sessions
             .get_mut(&request.session_id)
@@ -58,16 +58,47 @@ pub(super) async fn approve_schedule(
         }
         state.cancel_token = Some(cancel.clone());
         state.continuation_in_flight = true;
-    }
+        (
+            Arc::clone(&state.interaction_gate),
+            state
+                .host_request_seq
+                .fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+                + 1,
+            // 调度触发没有请求作用域连接：Host 归属按 session 交互路由的
+            // 唯一在线 endpoint 规则投递（多 endpoint 时 fail-closed）。
+            state
+                .environment
+                .as_ref()
+                .map(|env| Arc::clone(env.interaction_router())),
+        )
+    };
+    // Host 程序化审批归属：调度触发先于模型 turn，没有 turn 事实可绑定，
+    // 序号取本 session 的 Host 请求序号（单调，不随轮次回退）。
+    let approval_owner = peri_acp_types::interaction::TrustedInteractionOwner::host(
+        super::SCHEDULED_TRIGGER_NAMESPACE,
+        host_request_seq,
+    );
     let shutdown = cfg.host_task_spawner.shutdown_token();
     let result = async {
         notifications
             .start(&request.session_id, mailbox.generation(), cfg, transport)
             .await?;
-        let broker = super::prompt::build_transport_broker(transport, &request.session_id);
+        // 审批 endpoint：有 session 交互路由时用它（Host 归属按唯一在线 endpoint
+        // 或请求作用域投递；无在线 endpoint ⇒ 未获批准）；退化会话才回落本轮 broker。
+        let broker: Arc<dyn peri_acp_types::interaction::UserInteractionBroker> =
+            match interaction_router.as_ref() {
+                Some(router) => Arc::clone(router)
+                    as Arc<dyn peri_acp_types::interaction::UserInteractionBroker>,
+                None => super::prompt::build_transport_broker(
+                    transport,
+                    &request.session_id,
+                    interaction_gate,
+                ),
+            };
         let approval = super::prompt::approve_scheduled_trigger(
             permission.as_ref(),
             Some(&broker),
+            approval_owner,
             &request.trigger.task_id,
             &request.trigger.prompt,
         );

@@ -174,17 +174,22 @@ async fn maximum_foreground_timeout_retains_logs_and_cancellable_task() {
     .await;
     let bash = bridge(&pair, "Bash", true).await;
     let started = std::time::Instant::now();
-    let result = tokio::time::timeout(
+    let receipt = tokio::time::timeout(
         Duration::from_secs(140),
-        bash.invoke(
+        bash.invoke_output(
             json!({"command":"echo live-marker; exec sleep 180", "timeout":120000}),
             ToolContext::new(&[], &cwd).with_session_identity(SESSION_ID, "recovery-turn"),
         ),
     )
     .await
     .unwrap()
-    .unwrap_err()
-    .to_string();
+    .expect("超时提升是可恢复的 isError 结果（正常返回值），不是协议错误");
+    assert_eq!(
+        receipt.is_error(),
+        Some(true),
+        "超时提升必须报告工具失败（isError 是结果事实）"
+    );
+    let result = receipt.text;
     assert!(started.elapsed() >= Duration::from_secs(120));
     assert!(
         result.contains("task_id: shell-") && result.contains("pid: "),

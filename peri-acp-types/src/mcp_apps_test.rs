@@ -122,3 +122,84 @@ fn app_resource_requires_exact_uri_mime_and_one_body() {
     assert!(resource.is_valid_app_resource("ui://app"));
     assert!(!resource.is_valid_app_resource("ui://other"));
 }
+
+// ─── SessionInvocationPort 契约（session-owned canonical 入口） ────────────────
+
+#[test]
+fn invocation_targets_keep_app_and_host_identity_distinct() {
+    let app = InvocationTarget::App {
+        record_id: "app-session-1".into(),
+        tool_name: "show_canvas".into(),
+        arguments: serde_json::Map::new(),
+    };
+    let host = InvocationTarget::Host {
+        server_id: "cursor-canvas".into(),
+        tool_name: "show_canvas".into(),
+        arguments: serde_json::Map::new(),
+    };
+    assert_ne!(app, host, "App record 身份与 Host server 身份不得混用");
+}
+
+#[test]
+fn not_executed_distinguishes_missing_approval_from_user_rejection() {
+    // 设计 §3.4：没有人在线**不是**用户拒绝——两者必须是不同的 typed 事实，
+    // 否则消费侧会把「无人可答」当成「用户不同意」。
+    let unavailable = NotExecutedCause::ApprovalUnavailable(UnansweredCause::NoOnlineEndpoint);
+    let rejected = NotExecutedCause::UserRejected;
+    assert_ne!(unavailable, rejected);
+    assert_ne!(
+        unavailable,
+        NotExecutedCause::ApprovalUnavailable(UnansweredCause::NonInteractiveClient),
+        "原因本身也必须保留（不得折叠成单一 Unavailable）"
+    );
+}
+
+#[test]
+fn outcome_record_carries_explicitly_skipped_post_hooks() {
+    // 裁决 R2：无 turn 时被跳过的事后钩子必须写进 outcome 记录（结构化），
+    // 而不是只在日志里出现一次。
+    let record = SessionInvocationOutcomeRecord {
+        invocation_id: crate::tool_invocation::InvocationId::new("inv-1"),
+        // rerun 目标权威：记录必须随结果保留服务端目标身份（裁决 D4）。
+        target: Some(crate::mcp_apps_facade::TargetIdentity {
+            server_id: "server-1".to_string(),
+            wire_tool_name: "show_canvas".to_string(),
+            effective_tool_name: "mcp__server-1__show_canvas".to_string(),
+        }),
+        outcome: SessionInvocationOutcome::Completed(crate::tool_outcome::RawToolResult::new(
+            json!({
+                "content": [{"type": "text", "text": "ok"}]
+            }),
+        )),
+        skipped_post_hooks: vec![
+            SkippedPostHook::AfterToolNotAvailableWithoutTurn,
+            SkippedPostHook::OnErrorNotAvailableWithoutTurn,
+        ],
+    };
+    assert_eq!(
+        record
+            .target
+            .as_ref()
+            .map(|target| target.wire_tool_name.as_str()),
+        Some("show_canvas"),
+        "目标身份随结果保留（不回落客户端字段）"
+    );
+    // 记录可编码（有界存储按字节预算判定，见 `InvocationOutcomeStore`）。
+    let encoded = serde_json::to_value(&record).expect("outcome 记录必须可序列化");
+    assert_eq!(
+        encoded["target"]["effectiveToolName"],
+        "mcp__server-1__show_canvas"
+    );
+    assert!(matches!(
+        record.outcome,
+        SessionInvocationOutcome::Completed(_)
+    ));
+    assert_eq!(
+        record.skipped_post_hooks[0].as_str(),
+        "after_tool:not_available_without_turn"
+    );
+    assert_eq!(
+        record.skipped_post_hooks[1].as_str(),
+        "on_error:not_available_without_turn"
+    );
+}

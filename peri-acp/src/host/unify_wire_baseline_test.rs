@@ -33,6 +33,8 @@ use serde_json::{json, Value};
 use crate::dispatch::commands::build_available_commands_update;
 use crate::host::notify::{send_available_commands_update, send_session_info_update_with_title};
 use crate::session::command::register_builtins;
+use peri_acp_types::mcp_apps::MCP_APPS_HTML_MIME;
+
 use crate::transport::types::{AcpError, IncomingMessage, RequestId};
 use crate::transport::AcpTransport;
 
@@ -366,7 +368,10 @@ fn test_initialize_response_wire_baseline() {
         skill_names: true,
         ..Default::default()
     };
-    let resp = crate::dispatch::build_initialize_response(&caps);
+    let apps = peri_acp_types::mcp_apps_facade::McpAppsCapability::backend(vec![
+        peri_acp_types::mcp_apps::MCP_APPS_HTML_MIME.to_string(),
+    ]);
+    let resp = crate::dispatch::build_initialize_response(&caps, Some(&apps));
     let v = serde_json::to_value(resp).expect("InitializeResponse 序列化不应失败");
 
     // 顶层键（空值省略规则）
@@ -410,6 +415,52 @@ fn test_initialize_response_wire_baseline() {
     assert_eq!(meta["peri.agentEvent"], false);
     assert_eq!(meta["peri.rewind"], false);
     assert_eq!(meta["peri.uiCommands"], json!([]));
+
+    // `_meta.peri.mcpApps`（阶段 4a-S7 新增断言；旧断言一条不删）：facade 版本 +
+    // **只报已实现**的 backend features（未实现四项恒 false）。
+    let apps_meta = &meta["peri.mcpApps"];
+    assert_eq!(
+        apps_meta["facadeVersion"],
+        peri_acp_types::mcp_apps::MCP_APPS_FACADE_VERSION,
+        "facade 版本必须随能力声明下发（与 apps 协议版本 / 信封版本三者不同数字）"
+    );
+    assert_eq!(
+        apps_meta["appsProtocolVersion"],
+        peri_acp_types::mcp_apps::MCP_APPS_PROTOCOL_VERSION
+    );
+    assert_eq!(apps_meta["mimeTypes"], json!([MCP_APPS_HTML_MIME]));
+    let features = &apps_meta["backendFeatures"];
+    for k in [
+        "toolsCall",
+        "resourcesRead",
+        "resourcesList",
+        "cancel",
+        "detachReattach",
+        "rerun",
+    ] {
+        assert_eq!(features[k], true, "已实现能力必须声明: {k}");
+    }
+    for k in [
+        "toolListChanged",
+        "resourceSubscriptions",
+        "sampling",
+        "logging",
+    ] {
+        assert_eq!(features[k], false, "未实现能力不得声明: {k}");
+    }
+    assert_eq!(
+        apps_meta["limits"]["maxAttachmentsPerApp"],
+        peri_acp_types::mcp_apps_facade::MAX_ATTACHMENTS_PER_APP,
+        "limits 与 §4.3 常量同源（单一权威）"
+    );
+
+    // 未装配 Apps 后端时不声明该键（不声称未接线的能力）。
+    let without_apps =
+        serde_json::to_value(crate::dispatch::build_initialize_response(&caps, None)).unwrap();
+    assert!(
+        without_apps["agentCapabilities"]["_meta"]["peri.mcpApps"].is_null(),
+        "未装配 Apps 后端不得声明 peri.mcpApps: {without_apps}"
+    );
 }
 
 // ── 通知 payload ↔ schema typed 往返保真（批 3 后 Value 直发无 typed 中间层）──

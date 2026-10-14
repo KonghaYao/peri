@@ -15,6 +15,8 @@ use super::*;
 use crate::mcp::apps::McpCapabilityProfile;
 use crate::mcp::client::DiscoveryEvidence;
 use peri_acp_types::plugin::McpServerConfig;
+// 准入 candidate 的 DTO 由 `mcp::admission` 拥有（不再经 `super::*` 透出）。
+use peri_agent::session::tool_catalog::{StartupRequiredTool, StartupToolUpdate};
 use rmcp::{service::RoleClient, transport::async_rw::AsyncRwTransport};
 use std::time::Duration;
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader, DuplexStream, ReadHalf, WriteHalf};
@@ -792,7 +794,7 @@ async fn remote_workspace_uses_discovered_tools_even_with_builtin_workspace_clos
 
     let mw = McpMiddleware::new(Arc::clone(fixture.pool()))
         .with_builtin_closures(BTreeSet::from(["workspace".to_string()]));
-    let snapshot = mw.await_system_ready().await.unwrap();
+    let snapshot = mw.admission().await_system_ready().await.unwrap();
     assert_eq!(snapshot.bridges.len(), 1);
     assert_eq!(snapshot.bridges[0].name(), "RemoteOnly");
     assert!(snapshot.bridges[0].is_direct());
@@ -800,7 +802,7 @@ async fn remote_workspace_uses_discovered_tools_even_with_builtin_workspace_clos
 
     let (_, generation) = fixture.connect("workspace", vec![]).await;
     fixture.ready("workspace", generation);
-    let snapshot = mw.await_system_ready().await.unwrap();
+    let snapshot = mw.admission().await_system_ready().await.unwrap();
     assert!(
         snapshot.bridges.is_empty(),
         "empty live tools/list is valid"

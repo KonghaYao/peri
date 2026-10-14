@@ -1,5 +1,30 @@
 use super::*;
 
+/// 等待任务表清空（`active_count == 0`）。
+///
+/// 任务完成是异步链路（进程退出 → stdout/stderr 收尾 → `registry.complete()`），
+/// 固定 `sleep(2300ms)` 留下的余量（约 500ms）在慢 runner 上不够：CI run
+/// 38403027486 的 macOS job 在断言点仍读到 `active_count == 1`（left: 1）。
+/// 改为进度轮询（上限 `NO_ACTIVE_TASKS_TIMEOUT`）；超时后仍以同一断言失败，
+/// 并报告实际等待时长（真卡住不会被掩盖）。
+#[cfg(unix)]
+async fn wait_for_no_active_tasks(registry: &peri_agent::agent::async_tasks::TaskManager) {
+    /// 轮询上限：远大于进程寿命（2s）与旧固定余量，留足慢 runner 的调度空间。
+    const NO_ACTIVE_TASKS_TIMEOUT: Duration = Duration::from_secs(15);
+    const POLL_STEP: Duration = Duration::from_millis(25);
+
+    let started = Instant::now();
+    while registry.active_count() != 0 && started.elapsed() < NO_ACTIVE_TASKS_TIMEOUT {
+        tokio::time::sleep(POLL_STEP).await;
+    }
+    assert_eq!(
+        registry.active_count(),
+        0,
+        "完成后 active_count 应归零（等待上限 {NO_ACTIVE_TASKS_TIMEOUT:?}，实际等待 {:?}）",
+        started.elapsed()
+    );
+}
+
 // ── stdin null + 超时诊断分流（issue: bash 错误原因定位）──────────────────────
 
 /// stdin 重定向为 /dev/null：read 立即 EOF 返回，不挂死到超时。
@@ -72,9 +97,8 @@ async fn test_sync_timeout_promote_no_output_diagnoses_stall() {
     );
     assert!(err.contains("kill"), "应说明 kill 方式: {err}");
 
-    // 等 promote 续跑任务收尾，避免残留注册
-    tokio::time::sleep(Duration::from_millis(2300)).await;
-    assert_eq!(registry.active_count(), 0, "完成后 active_count 应归零");
+    // 等 promote 续跑任务收尾，避免残留注册（轮询等待，见 wait_for_no_active_tasks）
+    wait_for_no_active_tasks(&registry).await;
 }
 
 /// 同步超时 promote 且有输出：文案应如实说明"有进展、续跑合理"。
@@ -107,8 +131,7 @@ async fn test_sync_timeout_promote_with_output_notes_progress() {
         "有输出分支不应走无输出文案: {err}"
     );
 
-    tokio::time::sleep(Duration::from_millis(2300)).await;
-    assert_eq!(registry.active_count(), 0, "完成后 active_count 应归零");
+    wait_for_no_active_tasks(&registry).await;
 }
 
 #[test]
