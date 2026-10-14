@@ -438,6 +438,43 @@ fn test_user_bubble_empty_text_without_attachments_renders_nothing() {
     assert!(vm_to_lines(&vm, &grid).is_empty());
 }
 
+/// 附件记录行不破坏 @image 命中映射：逻辑行索引随附件行顺移，hover 仍指向
+/// 正确的 meta 行（浮动预览的定位来源）。
+#[test]
+fn test_attachment_records_keep_image_line_hit_mapping() {
+    crate::i18n::init(Some("en"));
+    let dir = tempfile::tempdir().unwrap();
+    let file = dir.path().join("a.png");
+    std::fs::write(&file, TINY_PNG).unwrap();
+    let grid = GridSpec::grid_for(120);
+    let vm = TuiRenderUnit::TuiUserBubble(TuiUserBubble::with_attachments(
+        format!("@image {}\nhello", file.display()),
+        vec![UserAttachment { bytes: 45 }],
+    ));
+    let mut cache = crate::kit::markdown::MarkdownRenderCache::default();
+    let (lines, _, _, image_lines) = super::vm_to_lines_cached(&vm, &grid, &mut cache, true);
+
+    assert_eq!(image_lines.len(), 1, "附件在场时 @image 行仍产生命中映射");
+    let info = &image_lines[0];
+    assert_eq!(
+        info.logical_idx,
+        2,
+        "索引 = 节拍空行 + 1 条附件记录 + 首行 @image（实际行: {:?}）",
+        lines.first().map(|_| "")
+    );
+    assert_eq!(
+        info.path,
+        file.canonicalize().unwrap().to_str().unwrap(),
+        "命中的仍是 @image 路径"
+    );
+    assert!(info.size_text.contains('B'));
+    assert!(
+        all_text(&lines).contains("[Image] Image 1 · 45 B"),
+        "附件记录行同时渲染"
+    );
+    assert!(all_text(&lines).contains("[Image: a.png ·"));
+}
+
 /// 非图片的 @文件引用不受影响：正文原样渲染，且不产生附件记录行。
 #[test]
 fn test_user_bubble_file_mention_unaffected_by_attachment_record() {

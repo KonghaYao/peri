@@ -364,6 +364,7 @@ fn test_steer_attachment_content_survives_roundtrip() {
         label: "image".to_owned(),
         media_type: "image/png".to_owned(),
         base64_data: "AQID".to_owned(),
+        payload_id: crate::kit::atoms::payload_id_of("AQID"),
     }];
     let content = content_with_attachments("  image\n", &attachments);
     let recovered = attachments_from_content(&content);

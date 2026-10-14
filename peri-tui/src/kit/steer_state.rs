@@ -601,11 +601,7 @@ pub(crate) fn attachments_from_content(content: &MessageContent) -> Vec<PendingA
         .filter_map(|block| match block {
             ContentBlock::Image {
                 source: ImageSource::Base64 { media_type, data },
-            } => Some(PendingAttachment {
-                label: media_type.clone(),
-                media_type: media_type.clone(),
-                base64_data: data.clone(),
-            }),
+            } => Some(PendingAttachment::image(media_type.clone(), data.clone())),
             _ => None,
         })
         .collect()
