@@ -25,7 +25,7 @@ use serde::{Deserialize, Serialize};
 use crate::messages::{BaseMessage, MessageId};
 use crate::projection::MessageProjectionDirective;
 use crate::system_reminder::{
-    decode_system_reminder_json, SystemReminder, TrustedSystemReminder,
+    decode_system_reminder_json, reminder_egress_allowed, SystemReminder, TrustedSystemReminder,
     TrustedSystemReminderFactory,
 };
 use crate::thread::{ThreadId, ThreadListEntry, ThreadMeta};
@@ -55,6 +55,21 @@ impl PersistedPayload {
         match self {
             Self::Message(message) => Some(message),
             Self::SystemReminder { .. } => None,
+        }
+    }
+
+    /// 客户端可展示性：System 条目与 Model-only reminder 没有客户端渲染形式。
+    ///
+    /// 与回放出口的过滤同源（`dispatch::session_replay` 的 `!is_system()` 与
+    /// `TransportEventSink::push_system_reminder` 的受众判定）。历史分页据此跳过这类行，
+    /// 但**不影响它的读取位置**：位置按行推进，展示按本条规则过滤。
+    pub fn displayable_to_client(&self) -> bool {
+        match self {
+            Self::Message(message) => !message.is_system(),
+            Self::SystemReminder { reminder, .. } => reminder_egress_allowed(
+                reminder.as_reminder(),
+                crate::system_reminder::ReminderAudience::Tui,
+            ),
         }
     }
 }

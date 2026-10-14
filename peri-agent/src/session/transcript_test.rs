@@ -256,6 +256,146 @@ async fn test_commit_compaction_lifecycle_is_atomic_or_uncertain() {
     );
 }
 
+/// Full Compact 提交成功后收缩：被排除的 own 条目连同 id 索引与 flags 一起释放，
+/// 祖先区、System 与未排除 own 条目按原顺序保留；三个容器按保留数重建（旧分配释放）。
+#[tokio::test]
+async fn test_full_commit_releases_excluded_own_entries() {
+    let store = mock_store();
+    let ancestor = make_human("ancestor snapshot");
+    let ancestor_id = ancestor.id();
+    let mut transcript = MessageTranscript::new()
+        .with_ancestor(vec![ancestor])
+        .with_persistence(store.clone(), "shrink".to_string());
+
+    // 条目数要明显多于保留数，容量差异才能证明旧分配确实被释放。
+    let system_id = transcript.append(BaseMessage::system("session identity"));
+    let kept_id = transcript.append(make_ai("kept history"));
+    transcript.set_truncated(kept_id, true);
+    let released_ids: Vec<MessageId> = (0..24)
+        .map(|idx| transcript.append(make_human(&format!("excluded {idx}"))))
+        .collect();
+    transcript.flush_persistence().await.unwrap();
+
+    let entries_capacity_before = transcript.entries.capacity();
+    let id_index_capacity_before = transcript.id_index.capacity();
+    let flags_capacity_before = transcript.flags.capacity();
+
+    let summary = make_human("compaction summary");
+    let summary_id = summary.id();
+    transcript
+        .commit_compaction_lifecycle(CompactionChange {
+            flag_updates: released_ids
+                .iter()
+                .map(|id| {
+                    (
+                        *id,
+                        MessageFlags {
+                            excluded: true,
+                            ..Default::default()
+                        },
+                    )
+                })
+                .collect(),
+            appended_messages: vec![summary],
+        })
+        .await
+        .unwrap();
+
+    // 保留：祖先、System、未排除条目与本次追加的摘要，顺序不变。
+    let kept_ids: Vec<MessageId> = transcript
+        .entries()
+        .iter()
+        .map(TranscriptEntry::id)
+        .collect();
+    assert_eq!(
+        kept_ids,
+        vec![ancestor_id, system_id, kept_id, summary_id],
+        "收缩只释放被排除的 own 条目，并保持剩余顺序"
+    );
+
+    // 释放：条目、id 索引与 flags 都不留痕。
+    for id in &released_ids {
+        assert!(transcript.get(*id).is_none(), "被排除条目必须被释放");
+        assert!(
+            !transcript.id_index.contains_key(id),
+            "被释放条目的下标必须一并移除"
+        );
+        assert!(
+            !transcript.flags.contains_key(id),
+            "被释放条目的标记必须一并移除"
+        );
+        assert!(transcript.get_flags(*id).is_none());
+    }
+    assert!(
+        transcript.flags(kept_id).truncated,
+        "未排除条目的标记不得被收缩改写"
+    );
+
+    // 有效集合等于剩余条目，不含任何被释放 id。
+    let active_ids: Vec<MessageId> = transcript
+        .active_payloads()
+        .iter()
+        .map(PersistedPayload::id)
+        .collect();
+    assert_eq!(active_ids, kept_ids);
+
+    // 容量按保留数重建：不再为被释放条目留位。
+    assert!(entries_capacity_before > kept_ids.len());
+    assert_eq!(transcript.entries.capacity(), kept_ids.len());
+    assert!(
+        transcript.id_index.capacity() < id_index_capacity_before,
+        "id 索引容量必须随释放下降（before={id_index_capacity_before}, after={}）",
+        transcript.id_index.capacity()
+    );
+    assert!(
+        transcript.flags.capacity() < released_ids.len(),
+        "flags 表重建后不得再为被释放条目留容量（before={flags_capacity_before}, after={}）",
+        transcript.flags.capacity()
+    );
+}
+
+/// 防御性边界：System 条目即使带 `excluded` 也不因收缩消失（当前 Full 不排除它们，
+/// 这条锁住的是「收缩只释放被明确排除的非 System own 条目」）。
+#[tokio::test]
+async fn test_full_commit_keeps_excluded_system_entry() {
+    let store = mock_store();
+    let mut transcript =
+        MessageTranscript::new().with_persistence(store.clone(), "shrink-system".to_string());
+    let system_id = transcript.append(BaseMessage::system("session identity"));
+    let dropped = transcript.append(make_human("excluded"));
+    transcript.flush_persistence().await.unwrap();
+
+    transcript
+        .commit_compaction_lifecycle(CompactionChange {
+            flag_updates: vec![
+                (
+                    system_id,
+                    MessageFlags {
+                        excluded: true,
+                        ..Default::default()
+                    },
+                ),
+                (
+                    dropped,
+                    MessageFlags {
+                        excluded: true,
+                        ..Default::default()
+                    },
+                ),
+            ],
+            appended_messages: Vec::new(),
+        })
+        .await
+        .unwrap();
+
+    assert!(transcript.get(system_id).is_some(), "System 条目必须保留");
+    assert!(transcript.get(dropped).is_none(), "非 System 条目必须释放");
+    assert!(
+        transcript.flags(system_id).excluded,
+        "保留条目的标记原样保留"
+    );
+}
+
 /// rebuild 保留持久化绑定：写入继续到同一个后端，顺序与既有历史都不丢。
 ///
 /// rebuild 只替换内存视图（compact 的 canonical 变更由 `commit_compaction_lifecycle`

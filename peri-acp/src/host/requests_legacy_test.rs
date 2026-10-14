@@ -4,8 +4,8 @@ use peri_acp_types::messages::MessageId;
 use peri_acp_types::session_resources::{
     BindingRecheck, BindingState, ChildResumeClaim, ChildSnapshot, CloseSettlement, ForkSnapshot,
     FrozenSnapshotBytes, NewSession, NewSessionDraft, PersistenceRecovery, RewindBoundary,
-    SessionAvailability, SessionInitialization, SessionMetaPatch, SessionResourceError,
-    SessionResourceResult, SessionResources, SessionSnapshot,
+    RewindOutcome, SessionAvailability, SessionInitialization, SessionMetaPatch,
+    SessionResourceError, SessionResourceResult, SessionResources, SessionSnapshot,
 };
 use peri_acp_types::store::{CompactionChange, MessageFlags, PersistedPayload};
 use peri_acp_types::system_reminder::TrustedSystemReminder;
@@ -909,10 +909,14 @@ async fn legacy_post_adoption_load_failure_drains_environment_without_rollback()
 // ── M5 注入夹具：历史读取失败（其余逐项转发真实门面）──────────────────────────
 //
 // 与 `host/session_io_test.rs` 的 `BlockedWorkQuery` 同模式：真实门面 + 单点故障
-// 注入，不能用内存替身伪造接纳事实。只有 `load_session_history` 返回可解释的冲突
+// 注入，不能用内存替身伪造接纳事实。只有 `load_active_snapshot` 返回可解释的冲突
 // 错误，其余方法逐项转发同一库句柄的门面。
+//
+// 注入面必须是**发布路径真正调用的读取**：接纳前的 `prepare_for_restore` /
+// `load_frozen_bytes` 走 `cfg.session_resources`（真实门面），发布前的有效历史读取
+// 走 `cfg.controller`（本夹具）——单点正落在接纳完成与发布之间。
 
-/// 单点故障：`load_session_history` 一律返回冲突错误。
+/// 单点故障：`load_active_snapshot` 一律返回冲突错误（发布前的有效历史读取）。
 struct FailingHistoryLoad {
     inner: Arc<dyn SessionResources>,
 }
@@ -925,10 +929,11 @@ macro_rules! forward_session_resources_except_history {
                 self.inner.$method($( $argument ),*).await
             })*
 
-            async fn load_session_history(
+            async fn load_active_snapshot(
                 &self,
                 _id: &ThreadId,
-            ) -> SessionResourceResult<Vec<PersistedPayload>> {
+            ) -> SessionResourceResult<peri_acp_types::session_resources::ActiveSessionSnapshot>
+            {
                 Err(SessionResourceError::conflict(
                     "injected: session history load failed",
                 ))
@@ -949,6 +954,7 @@ forward_session_resources_except_history! {
     discard_incomplete_initialization(id: &ThreadId) -> ();
     adopt_legacy_session(id: &ThreadId, saved_cwd: &str, workspace: &ResolvedWorkspace, frozen: &FrozenSnapshotBytes) -> ();
     load_session_snapshot(id: &ThreadId) -> SessionSnapshot;
+    load_session_history(id: &ThreadId) -> Vec<PersistedPayload>;
     load_session_binding(id: &ThreadId) -> BindingState;
     validate_bound_workspace(id: &ThreadId, check: BindingRecheck) -> ResolvedWorkspace;
     load_session_meta(id: &ThreadId) -> ThreadMeta;
@@ -964,7 +970,7 @@ forward_session_resources_except_history! {
     claim_child_resume(child: &ThreadId, root: &ThreadId) -> Box<dyn ChildResumeClaim>;
     apply_compaction(id: &ThreadId, change: &CompactionChange) -> ();
     apply_message_projections(id: &ThreadId, updates: &[(MessageId, MessageFlags)]) -> ();
-    rewind_history(id: &ThreadId, boundary: RewindBoundary) -> ();
+    rewind_history(id: &ThreadId, boundary: RewindBoundary, clear_excluded: &[MessageId]) -> RewindOutcome;
     remove_history_entries(id: &ThreadId, ids: &[MessageId]) -> ();
     update_session_meta(id: &ThreadId, patch: &SessionMetaPatch) -> ();
     delete_session_tree(id: &ThreadId) -> ();

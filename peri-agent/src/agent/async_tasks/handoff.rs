@@ -140,23 +140,42 @@ pub(crate) async fn write_pending_handoff(
     }
     .await;
     match committed {
-        Ok(_) => {
+        // (a) 本次提交成功：安装到热态视图。
+        Ok(true) => {
             session
                 .transcript
                 .write()
                 .mirror_committed_reminder(delivery_id, reminder);
-            tracing::warn!(
-                pending = handoff.tasks.len(),
-                waited_ms = handoff.waited.as_millis() as u64,
-                "bounded wait expired; pending task handoff recorded"
-            );
-            handoff.tasks.len()
         }
+        // 持久化事实已存在但热态没有（如 Full Compact 收缩释放了它）：
+        // (b) 仍有效 → 补安装；(c) 已排除 → 不安装（归档原文不得回灌热态）。
+        // 两种状态都不发射事件：本函数只写账本，交接由下一轮 Receive 呈现。
+        Ok(false) => match resources
+            .load_message_flags(&thread_id, &[delivery_id])
+            .await
+        {
+            Ok(flags) => {
+                if !flags.get(&delivery_id).is_some_and(|flags| flags.excluded) {
+                    session
+                        .transcript
+                        .write()
+                        .mirror_committed_reminder(delivery_id, reminder);
+                }
+            }
+            // 读不到排除事实时保守跳过补安装；记录本身已提交，仍计入返回值。
+            Err(error) => tracing::warn!(%error, "bounded-wait handoff flag lookup failed"),
+        },
         Err(error) => {
             tracing::warn!(%error, "bounded-wait handoff persistence failed");
-            0
+            return 0;
         }
     }
+    tracing::warn!(
+        pending = handoff.tasks.len(),
+        waited_ms = handoff.waited.as_millis() as u64,
+        "bounded wait expired; pending task handoff recorded"
+    );
+    handoff.tasks.len()
 }
 
 /// Build the handoff reminder (pure: content is the observable contract).

@@ -39,10 +39,32 @@ pub(super) struct SqliteTransport {
     fail_column_drop: AtomicBool,
     fail_recovery_drop: AtomicBool,
     change_schema: AtomicBool,
-    /// 批次下发前的并发写入（测试用 SQL 字面量）：模拟两批读取与批次之间别的连接改了库。
-    pub(super) before_batch: Mutex<Option<&'static str>>,
+    /// 批次下发前的并发写入（测试用 SQL 文本）：模拟两批读取与批次之间别的连接改了库。
+    ///
+    /// 文本由测试在运行时拼（`String` 而不是 `&'static str`）：并发写入要引用夹具里
+    /// 运行期才知道的 id 与 rowid。
+    pub(super) before_batch: Mutex<Option<String>>,
     drop_reply: AtomicBool,
     truncate_reply: AtomicBool,
+}
+
+impl SqliteTransport {
+    /// 干净夹具：只给一个真 SQLite 池，故障开关全部关闭。
+    ///
+    /// 给测试自己建库的同类（见 `session_history_page_test.rs`）复用同一份传输面，
+    /// 不必知道故障开关的字段形状。
+    pub(super) fn for_test(pool: SqlitePool) -> Self {
+        Self {
+            pool,
+            writes: AtomicUsize::new(0),
+            fail_column_drop: AtomicBool::new(false),
+            fail_recovery_drop: AtomicBool::new(false),
+            change_schema: AtomicBool::new(false),
+            before_batch: Mutex::new(None),
+            drop_reply: AtomicBool::new(false),
+            truncate_reply: AtomicBool::new(false),
+        }
+    }
 }
 
 fn query(spec: &StatementSpec) -> sqlx::query::Query<'static, Sqlite, SqliteArguments> {
@@ -113,8 +135,8 @@ impl RemoteTransport for SqliteTransport {
         // 守卫不跨 await（否则这个 future 不是 `Send`）。
         let concurrent = self.before_batch.lock().unwrap().take();
         if let Some(sql) = concurrent {
-            // 语句文本来自本文件的静态夹具，不含外部输入。
-            sqlx::raw_sql(sqlx::AssertSqlSafe(sql.to_owned()))
+            // 语句文本来自本文件与同模块测试的静态夹具，不含外部输入。
+            sqlx::raw_sql(sqlx::AssertSqlSafe(sql))
                 .execute(&self.pool)
                 .await
                 .map_err(error_of)?;

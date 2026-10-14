@@ -6,8 +6,8 @@ use peri_acp_types::{
     messages::MessageId,
     session_resources::{
         ChildResumeClaim, ChildSnapshot, ForkSnapshot, FrozenSnapshotBytes, NewSession,
-        NewSessionMeta, PersistenceRecovery, RewindBoundary, SessionAvailability, SessionMetaPatch,
-        SessionResourceResult, SessionResources, SessionSnapshot,
+        NewSessionMeta, PersistenceRecovery, RewindBoundary, RewindOutcome, SessionAvailability,
+        SessionMetaPatch, SessionResourceResult, SessionResources, SessionSnapshot,
     },
     store::{CompactionChange, MessageFlags, PersistedPayload},
     thread::{ThreadId, ThreadMeta},
@@ -234,8 +234,11 @@ impl SessionResources for CompactStore {
         &self,
         id: &ThreadId,
         boundary: RewindBoundary,
-    ) -> SessionResourceResult<()> {
-        self.inner.rewind_history(id, boundary).await
+        clear_excluded: &[MessageId],
+    ) -> SessionResourceResult<RewindOutcome> {
+        self.inner
+            .rewind_history(id, boundary, clear_excluded)
+            .await
     }
 
     async fn remove_history_entries(
@@ -289,6 +292,7 @@ fn make_host_sessions(ctx: &SessionContext, payloads: Vec<PersistedPayload>) -> 
             .filter_map(|payload| payload.as_message().cloned())
             .collect(),
         history_payloads: payloads,
+        structure_version: 0,
         cancel_token: Some(ctx.cancel.clone()),
         continuation_armed: false,
         continuation_epoch: 0,

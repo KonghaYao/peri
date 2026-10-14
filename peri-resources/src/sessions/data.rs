@@ -7,10 +7,14 @@
 //!   选择机制实现。
 //! - 业务侧拿不到本 trait：门面（`SessionResourcesImpl`）是唯一调用方，也是唯一注入点。
 use async_trait::async_trait;
+use peri_acp_types::history_page::{
+    HistoryCursor, HistoryForwardCursor, HistoryPage, HistoryPageBounds, HistorySegment,
+};
 use peri_acp_types::messages::MessageId;
 use peri_acp_types::session_resources::{
-    BindingState, ChildSnapshot, ForkSnapshot, FrozenSnapshotBytes, NewSession,
-    PersistenceRecovery, RewindBoundary, SessionMetaPatch, SessionResourceResult, SessionSnapshot,
+    ActiveSessionSnapshot, BindingState, ChildSnapshot, ForkSnapshot, FrozenSnapshotBytes,
+    NewSession, PersistenceRecovery, RewindBoundary, RewindOutcome, SessionMetaPatch,
+    SessionResourceResult, SessionSnapshot,
 };
 use peri_acp_types::store::{CompactionChange, MessageFlags, PersistedPayload};
 use peri_acp_types::system_reminder::TrustedSystemReminder;
@@ -18,6 +22,7 @@ use peri_acp_types::thread::{ThreadId, ThreadMeta};
 use peri_acp_types::workspace::{
     ResolvedWorkspace, ScopedThreadPage, ScopedThreadQuery, SessionBinding,
 };
+use std::collections::HashMap;
 
 use super::failure::invalid_input;
 
@@ -140,6 +145,16 @@ pub(crate) trait SessionDataPort: Send + Sync {
     /// 一致读取：meta/binding 分类/frozen 状态/own payload+flags/inherited。
     async fn load_snapshot(&self, id: &ThreadId) -> SessionResourceResult<SessionSnapshot>;
 
+    /// 一次一致读取的执行关键有效视图：与 [`Self::load_snapshot`] 同一份 facts，
+    /// 但 payload 与 flags 只覆盖**未排除**的 own 条目。
+    ///
+    /// 排除判定是存储事实，过滤必须发生在读取条件里（`excluded = 0`），使已排除正文
+    /// 根本不进入内存——不允许「先全量读回再在 Rust 里过滤」。
+    async fn load_active_snapshot(
+        &self,
+        id: &ThreadId,
+    ) -> SessionResourceResult<ActiveSessionSnapshot>;
+
     /// 轻量绑定分类（不加载历史）：记录事实三种——绑定与本机登记一致、绑定指向的登记
     /// 已不存在（含子会话没有绑定行）、无绑定行。`LegacyConfirmed` 由门面按本机来源
     /// 证据联合判定，不在这里冒充。
@@ -150,6 +165,87 @@ pub(crate) trait SessionDataPort: Send + Sync {
         &self,
         id: &ThreadId,
     ) -> SessionResourceResult<Vec<PersistedPayload>>;
+
+    /// 有界读取一页历史（更早方向），含已排除的归档条目；语义见
+    /// [`peri_acp_types::session_resources::SessionResources::load_history_page`]。
+    ///
+    /// 默认失败：空页在契约里是「更早方向没有内容了」的合法含义，没有实现分页读取的后端
+    /// 不得拿它冒充，也不得只读一段再截断。
+    async fn load_history_page(
+        &self,
+        _id: &ThreadId,
+        _cursor: Option<&HistoryCursor>,
+        _limit: usize,
+        _byte_budget: usize,
+    ) -> SessionResourceResult<HistoryPage> {
+        Err(
+            peri_acp_types::session_resources::SessionResourceError::new(
+                peri_acp_types::session_resources::SessionResourceErrorKind::Unsupported,
+            ),
+        )
+    }
+
+    /// 自有有效条目的存储序键（`message_id → 存储序键`），语义见
+    /// [`peri_acp_types::session_resources::SessionResources::load_entry_positions`]。
+    ///
+    /// 默认失败：给不出存储序键的后端不能拿一副空表冒充「这些条目没有位置」——调用方会据此
+    /// 认为它们不在本线程（继承区），把继承条目排到自有条目之间。
+    async fn load_entry_positions(
+        &self,
+        _id: &ThreadId,
+    ) -> SessionResourceResult<std::collections::HashMap<peri_acp_types::messages::MessageId, u64>>
+    {
+        Err(
+            peri_acp_types::session_resources::SessionResourceError::new(
+                peri_acp_types::session_resources::SessionResourceErrorKind::Unsupported,
+            ),
+        )
+    }
+
+    /// 有界读取浏览范围边界（一次单行查询），语义见
+    /// [`peri_acp_types::session_resources::SessionResources::history_page_bounds`]。
+    ///
+    /// 默认失败：没有这条读取的后端给不出「有没有更早内容」的事实，不得用猜出来的起点
+    /// 或空范围冒充。
+    async fn history_page_bounds(
+        &self,
+        _id: &ThreadId,
+    ) -> SessionResourceResult<HistoryPageBounds> {
+        Err(
+            peri_acp_types::session_resources::SessionResourceError::new(
+                peri_acp_types::session_resources::SessionResourceErrorKind::Unsupported,
+            ),
+        )
+    }
+
+    /// 有界读取一段 canonical 完整历史（向前方向），语义见
+    /// [`peri_acp_types::session_resources::SessionResources::load_history_segment`]。
+    ///
+    /// 默认失败：空段在契约里是「回放结束」的合法含义，没有实现这条读取的后端不得拿它冒充
+    /// ——调用方必须能看见「这次回放读不完」，再决定显式回退到全量读取还是让本次读取失败。
+    async fn load_history_segment(
+        &self,
+        _id: &ThreadId,
+        _cursor: Option<&HistoryForwardCursor>,
+        _limit: usize,
+        _byte_budget: usize,
+    ) -> SessionResourceResult<HistorySegment> {
+        Err(
+            peri_acp_types::session_resources::SessionResourceError::new(
+                peri_acp_types::session_resources::SessionResourceErrorKind::Unsupported,
+            ),
+        )
+    }
+
+    /// 按给定 id 集合读取 flags（有界）：只查这些 id，不做全历史扫描。
+    ///
+    /// 与 [`Self::load_session_history`] 同一条派生视图规则：只返回非默认标记；
+    /// 已排除条目的标记也如实返回（调用方常要按标记决定展示原文还是投影视图）。
+    async fn load_message_flags(
+        &self,
+        id: &ThreadId,
+        ids: &[MessageId],
+    ) -> SessionResourceResult<HashMap<MessageId, MessageFlags>>;
 
     /// 小型 metadata 投影（不加载历史或大快照）。
     async fn load_meta(&self, id: &ThreadId) -> SessionResourceResult<ThreadMeta>;
@@ -272,12 +368,17 @@ pub(crate) trait SessionDataPort: Send + Sync {
         updates: &[(MessageId, MessageFlags)],
     ) -> SessionResourceResult<()>;
 
-    /// 按显式边界 rewind。
+    /// 按显式边界 rewind，并在同一事务里清零 `clear_excluded` 里 id 的 `excluded`。
+    ///
+    /// 删除与清零同属一次提交：调用方算出的清零集合来自同一次一致读取，只生效一半会让
+    /// 有效视图与边界不一致。未知边界保持无变更语义，但以
+    /// [`RewindOutcome::BoundaryMissing`] 如实回报「本次没有生效」。
     async fn rewind_history(
         &self,
         id: &ThreadId,
         boundary: RewindBoundary,
-    ) -> SessionResourceResult<()>;
+        clear_excluded: &[MessageId],
+    ) -> SessionResourceResult<RewindOutcome>;
 
     /// 按 id 集合精确移除历史条目。
     async fn remove_history_entries(

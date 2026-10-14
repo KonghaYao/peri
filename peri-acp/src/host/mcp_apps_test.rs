@@ -85,7 +85,7 @@ impl McpAppsRelayPort for StubRelay {
 
 fn enabled_connection() -> ConnectionContext {
     let mut connection = ConnectionContext::new(true);
-    connection.commit_initialize();
+    connection.commit_initialize(peri_acp_types::PeriCaps::default());
     connection
 }
 
@@ -124,7 +124,7 @@ fn initial_binding_uses_stable_apps_version() {
 #[tokio::test]
 async fn invoke_disabled_capability_fails_closed() {
     let mut connection = ConnectionContext::new(false);
-    connection.commit_initialize();
+    connection.commit_initialize(peri_acp_types::PeriCaps::default());
     let relay: Arc<dyn McpAppsRelayPort> = Arc::new(StubRelay::invoke_ok());
     let error = handle_invoke(
         &invoke_params(),

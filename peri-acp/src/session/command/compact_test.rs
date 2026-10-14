@@ -241,6 +241,19 @@ impl BoundSession {
             .collect()
     }
 
+    /// 磁盘上的**有效**消息（未排除 own 条目）：Full Compact 提交后宿主热态的形状
+    /// （D1 收缩 + `active_payloads`）。完整历史仍含被排除原文。
+    async fn active_messages(&self) -> Vec<BaseMessage> {
+        self.resources
+            .load_active_snapshot(&self.thread_id)
+            .await
+            .expect("加载有效视图失败")
+            .payloads
+            .iter()
+            .filter_map(|payload| payload.as_message().cloned())
+            .collect()
+    }
+
     /// 已持久化的投影 flag。
     async fn stored_flags(&self) -> HashMap<MessageId, MessageFlags> {
         self.snapshot().await.flags

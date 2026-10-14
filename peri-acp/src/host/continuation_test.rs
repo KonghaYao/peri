@@ -74,6 +74,7 @@ fn make_session_state(armed: bool, epoch: u64) -> SessionState {
         closing: false,
         history: vec![],
         history_payloads: vec![],
+        structure_version: 0,
         cancel_token: None,
         frozen: None,
         recall_items: vec![],

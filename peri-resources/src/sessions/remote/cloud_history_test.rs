@@ -223,7 +223,7 @@ async fn history_flow(target: &CloudTarget, run: &str) -> Result<(), String> {
 
     // rewind：保留到第二条（删除 ordinal 更大的条目）。
     writer
-        .rewind_history(&root, RewindBoundary::KeepThrough(second.id()))
+        .rewind_history(&root, RewindBoundary::KeepThrough(second.id()), &[])
         .await
         .map_err(failure)?;
     let kept = reader.load_snapshot(&root).await.map_err(failure)?;
@@ -239,7 +239,7 @@ async fn history_flow(target: &CloudTarget, run: &str) -> Result<(), String> {
 
     // 未知边界：保持无变更（仍是与本机同一语义）。
     writer
-        .rewind_history(&root, RewindBoundary::KeepThrough(foreign.id()))
+        .rewind_history(&root, RewindBoundary::KeepThrough(foreign.id()), &[])
         .await
         .map_err(failure)?;
     let unchanged = reader.load_snapshot(&root).await.map_err(failure)?;
@@ -250,7 +250,7 @@ async fn history_flow(target: &CloudTarget, run: &str) -> Result<(), String> {
 
     // RemoveFrom：从目标开始移除。
     writer
-        .rewind_history(&root, RewindBoundary::RemoveFrom(second.id()))
+        .rewind_history(&root, RewindBoundary::RemoveFrom(second.id()), &[])
         .await
         .map_err(failure)?;
     let removed = reader.load_snapshot(&root).await.map_err(failure)?;

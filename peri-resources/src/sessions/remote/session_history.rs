@@ -18,13 +18,16 @@
 //! ## 派生规则
 //!
 //! `message_count` 是存储列，按本机同一规则**重数**（不是自增）；`content_size` 不落列，
-//! 读取时由投影现算。
+//! 也没有生产消费者：投影只保留列位、不再现算全历史字节数（见
+//! [`super::session_sql`] 的 `meta_columns!`）。
 //! 远端没有这个消费者，因此历史变更不产生缓存失效动作。
 
 use std::collections::HashSet;
 
 use peri_acp_types::messages::{BaseMessage, MessageId};
-use peri_acp_types::session_resources::{RewindBoundary, SessionResourceResult};
+use peri_acp_types::session_resources::{
+    RewindBoundary, RewindOutcome, SessionResourceError, SessionResourceResult,
+};
 use peri_acp_types::store::{
     deserialize_persisted_payload, serialize_persisted_payload, CompactionChange, MessageFlags,
     PersistedPayload,
@@ -58,6 +61,16 @@ const GUARD_MESSAGE_FOREIGN_SQL: &str = "INSERT INTO peri_store_meta(singleton)
     SELECT 0 WHERE EXISTS (
         SELECT 1 FROM messages WHERE message_id = ?1 AND thread_id <> ?2)";
 
+/// rewind 的删除下界必须仍是批外读到的**同一行**：中止整批。
+///
+/// 边界 `rowid` 是在批外解析的，而删掉尾部行之后新追加的行会复用这些 `rowid`
+/// （本机同一事实，见 `HISTORY_PAGE_ROWS_SQL` 的注记）。少了这条守卫，一次并发追加
+/// 的合规条目会落进 `rowid >= 边界` 的删除区间，被这次 rewind 一并删掉——它从未被
+/// 本次操作看见，也没有任何前置一致读或清零守卫能拦住它。
+const GUARD_BOUNDARY_ROWID_SQL: &str = "INSERT INTO peri_store_meta(singleton)
+    SELECT 0 WHERE NOT EXISTS (
+        SELECT 1 FROM messages WHERE thread_id = ?1 AND message_id = ?2 AND rowid = ?3)";
+
 // ─── 效果语句 ─────────────────────────────────────────────────────────────────
 
 /// 追加一条历史行：列清单与 `session_sql::INSERT_MESSAGE_SQL`（以及本机 `messages` 的插入）
@@ -87,6 +100,10 @@ const SET_TITLE_IF_ABSENT_SQL: &str =
 /// rewind 两个显式边界：比较按 `rowid`（canonical 历史顺序的载体，与本机同一句形态）。
 const REWIND_KEEP_THROUGH_SQL: &str = "DELETE FROM messages WHERE thread_id = ?1 AND rowid > ?2";
 const REWIND_REMOVE_FROM_SQL: &str = "DELETE FROM messages WHERE thread_id = ?1 AND rowid >= ?2";
+
+/// rewind 有效视图重建：清零保留前缀里条目的 `excluded`（`truncated`/`projection` 不动）。
+const CLEAR_EXCLUDED_SQL: &str =
+    "UPDATE messages SET excluded = 0 WHERE thread_id = ?1 AND message_id = ?2";
 
 /// 精确移除单条条目。
 const REMOVE_MESSAGE_SQL: &str = "DELETE FROM messages WHERE thread_id = ?1 AND message_id = ?2";
@@ -286,42 +303,112 @@ impl RemoteSessionData {
             .map(|_| ())
     }
 
-    /// 按显式边界 rewind。
+    /// 按显式边界 rewind，并在同一批内重建保留前缀的有效视图。
     ///
-    /// 边界不在本会话里时**保持无变更并成功**——这是本机的既有语义（未知截止点不动历史），
-    /// 不是「静默忽略失败」。边界存在时以它的 `rowid` 为界：`KeepThrough` 保留到该条为止，
-    /// `RemoveFrom` 从该条起删除，随后重数计数。
+    /// 边界不在本会话里时**保持无变更**——这是本机的既有语义（未知截止点不动历史），
+    /// 此时也不清零 flags，结果以 [`RewindOutcome::BoundaryMissing`] 如实上报。边界存在时
+    /// 以它的 `rowid` 为界：`KeepThrough` 保留到该条为止，`RemoveFrom` 从该条起删除，
+    /// 随后重数计数。
+    ///
+    /// `clear_excluded` 是保留前缀里要清零 `excluded` 的 id（由调用方从一致读取的完整历史
+    /// 算出）。删除与清零在**同一批**里：只有资格写落定、整批生效才算成功，不存在「删了
+    /// 边界却没恢复原文」的中间状态。前置一致读把「不是本会话的条目」归 `InvalidInput`
+    /// （与本机同一归类）；批内守卫让「读与写之间被删掉」以整批回滚收场而不是静默 0 行，
+    /// 其中 [`GUARD_BOUNDARY_ROWID_SQL`] 专门盯住删除下界本身。
+    ///
+    /// 可写性检查必须**先于**边界读取：只读打开时这是写请求，不能因为「边界恰好找不到」
+    /// 就以成功收场（本机 `rewind_stored_history` 同样先 `writable()`）。
     pub(super) async fn write_rewind(
         &self,
         id: &ThreadId,
         boundary: RewindBoundary,
-    ) -> SessionResourceResult<()> {
+        clear_excluded: &[MessageId],
+    ) -> SessionResourceResult<RewindOutcome> {
+        self.ensure_writable().await?;
         let message = boundary.message_id();
         let Some(rowid) = self.boundary_rowid(id, message).await? else {
-            return Ok(());
+            return Ok(RewindOutcome::BoundaryMissing);
         };
+        let mut seen = HashSet::with_capacity(clear_excluded.len());
+        let unique = clear_excluded
+            .iter()
+            .copied()
+            .filter(|message| seen.insert(*message))
+            .collect::<Vec<_>>();
+        if !self.missing_session_messages(id, &unique).await?.is_empty() {
+            return Err(invalid_input(
+                "rewind flag target is not a history entry of this session",
+            ));
+        }
         let (sql, direction) = match boundary {
             RewindBoundary::KeepThrough(_) => (REWIND_KEEP_THROUGH_SQL, "keep_through"),
             RewindBoundary::RemoveFrom(_) => (REWIND_REMOVE_FROM_SQL, "remove_from"),
         };
-        let effects = vec![
-            StatementSpec::new(
-                sql,
-                vec![Value::Text(id.as_str().to_owned()), codec::int_value(rowid)],
-            ),
-            refresh_statement(id, &timestamp()),
-        ];
+        let mut effects = Vec::with_capacity(unique.len() * 2 + 3);
+        // 守卫在删除之前：边界行必须仍以同一 rowid 存在，否则整批不生效。
+        effects.push(StatementSpec::new(
+            GUARD_BOUNDARY_ROWID_SQL,
+            vec![
+                Value::Text(id.as_str().to_owned()),
+                Value::Text(message_label(message)),
+                codec::int_value(rowid),
+            ],
+        ));
+        effects.push(StatementSpec::new(
+            sql,
+            vec![Value::Text(id.as_str().to_owned()), codec::int_value(rowid)],
+        ));
+        for message in &unique {
+            // 守卫在删除之后求值：清零集合必须落在保留前缀里，越界的 id 会让整批回滚。
+            effects.push(guard_message_statement(id, *message));
+            effects.push(StatementSpec::new(
+                CLEAR_EXCLUDED_SQL,
+                vec![
+                    Value::Text(id.as_str().to_owned()),
+                    Value::Text(message_label(*message)),
+                ],
+            ));
+        }
+        effects.push(refresh_statement(id, &timestamp()));
         // 方向进摘要：同一个边界上的 `KeepThrough` 与 `RemoveFrom` 是**两个操作**，
         // 只按 (会话, 边界, rowid) 摘要会让后者撞上前者的操作 id，被当成重放静默跳过。
-        let inputs = vec![
+        // 清零集合同样进摘要：同一边界上「只删除」与「删除 + 恢复原文」也不是同一个操作。
+        let mut inputs = vec![
             id.as_str().to_owned(),
             direction.to_owned(),
             message_label(message),
             rowid.to_string(),
         ];
-        self.commit_effects("rewind_history", &inputs, effects, id)
+        inputs.extend(unique.iter().map(|message| message_label(*message)));
+        match self
+            .commit_effects("rewind_history", &inputs, effects, id)
             .await
-            .map(|_| ())
+        {
+            Ok(_) => Ok(RewindOutcome::Applied),
+            Err(error) => Err(self.boundary_race_error(id, message, rowid, error).await),
+        }
+    }
+
+    /// 整批失败时区分「边界行在批内被改动」与其它失败。
+    ///
+    /// 守卫只保证整批不生效，不区分是哪一条守卫。失败之后重读一次边界行：`rowid` 变了
+    /// 或行没了，就是并发改动越过了删除下界——这一类的处置是「先重读再决定」，不是重复
+    /// 提交（`Conflict` 的语义），也不是输入错误。重读只在失败路径上发生。
+    async fn boundary_race_error(
+        &self,
+        id: &ThreadId,
+        message: MessageId,
+        rowid: i64,
+        error: SessionResourceError,
+    ) -> SessionResourceError {
+        match self.boundary_rowid(id, message).await {
+            Ok(Some(current)) if current == rowid => error,
+            Ok(_) => SessionResourceError::conflict(
+                "rewind boundary row changed while the batch was in flight; the batch was aborted",
+            ),
+            // 重读本身失败：不掩盖原始失败，交回调用方按原类别处置。
+            Err(_) => error,
+        }
     }
 
     /// 按 id 集合精确移除历史条目。
@@ -604,10 +691,12 @@ mod tests {
 
     #[test]
     fn every_statement_is_static_and_fully_bound() {
-        let cases: [(&str, usize); 10] = [
+        let cases: [(&str, usize); 12] = [
             (GUARD_SESSION_ABSENT_SQL, 1),
             (GUARD_MESSAGE_NOT_IN_SESSION_SQL, 2),
             (GUARD_MESSAGE_FOREIGN_SQL, 2),
+            // 边界守卫同时钉住会话、条目与**批外读到的那个 rowid** 三个绑定值。
+            (GUARD_BOUNDARY_ROWID_SQL, 3),
             // 追加语句里 `?2`（会话 id）被主查询与取序号的子查询共用，因此是 7 个占位符。
             (APPEND_MESSAGE_SQL, 7),
             (UPDATE_FLAGS_SQL, 5),
@@ -615,6 +704,7 @@ mod tests {
             (REFRESH_COUNTS_SQL, 3),
             (SET_TITLE_IF_ABSENT_SQL, 2),
             (REWIND_KEEP_THROUGH_SQL, 2),
+            (CLEAR_EXCLUDED_SQL, 2),
             (REMOVE_MESSAGE_SQL, 2),
             (SELECT_ROWID_SQL, 2),
         ];
@@ -631,6 +721,7 @@ mod tests {
             GUARD_SESSION_ABSENT_SQL,
             GUARD_MESSAGE_NOT_IN_SESSION_SQL,
             GUARD_MESSAGE_FOREIGN_SQL,
+            GUARD_BOUNDARY_ROWID_SQL,
         ] {
             assert!(
                 sql.starts_with("INSERT INTO peri_store_meta(singleton)"),
@@ -642,6 +733,10 @@ mod tests {
         assert!(GUARD_SESSION_ABSENT_SQL.contains("NOT EXISTS"));
         assert!(GUARD_MESSAGE_NOT_IN_SESSION_SQL.contains("thread_id = ?1 AND message_id = ?2"));
         assert!(GUARD_MESSAGE_FOREIGN_SQL.contains("thread_id <> ?2"));
+        // 删除下界：边界行必须仍以**批外读到的那个 rowid** 存在（rowid 会被复用）。
+        assert!(
+            GUARD_BOUNDARY_ROWID_SQL.contains("thread_id = ?1 AND message_id = ?2 AND rowid = ?3")
+        );
     }
 
     /// 两个 rewind 边界只差一个比较符：`KeepThrough` 保留到该条、`RemoveFrom` 从该条起删。

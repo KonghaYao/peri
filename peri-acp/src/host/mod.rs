@@ -49,6 +49,7 @@ mod execution;
 #[cfg(test)]
 #[path = "executor_flow_test.rs"]
 mod executor_flow_tests;
+mod history_page;
 
 #[cfg(test)]
 #[path = "executor_flow_beta_flag_test.rs"]
@@ -129,7 +130,7 @@ pub(crate) use continuation::{
 pub(crate) use notify::{extract_session_id, handle_notification, send_session_info_update};
 pub(crate) use prompt::run_prompt;
 pub(crate) use prompt_dispatch::{dispatch_prompt_turn, PromptOrigin};
-pub(crate) use requests::handle_request;
+pub(crate) use requests::handle_request_for_connection;
 
 // ── Session state ────────────────────────────────────────────────────────────
 
@@ -143,8 +144,16 @@ pub(crate) struct SessionState {
     pub(crate) environment: Option<Arc<workspace::SessionEnvironment>>,
     pub(crate) closing: bool,
     pub(crate) history: Vec<BaseMessage>,
-    /// Canonical persisted history; `history` is a compatibility projection for legacy commands.
+    /// 当前**有效**的持久化历史（excluded 正文不在其中）；`history` 是它的 legacy 投影，
+    /// 供旧命令消费。完整 canonical 历史（含 excluded 原文）只从存储读取。
     pub(crate) history_payloads: Vec<peri_acp_types::store::PersistedPayload>,
+    /// 会话结构版本：**破坏历史范围**的提交（rewind / 精确删除）成功一次即 `+1`
+    /// （REQ-T04 末段、验收 A19「旧 cursor 失效」）。
+    ///
+    /// 内存计数器，不落盘：本仓不加 DDL，且它保护的正是「本次运行内已发出的游标」。
+    /// 进程重启后归零——重启后的旧游标仍要过存储那一关（锚点/范围身份查表）。
+    /// **追加消息与 Full/Smart compact 不推进它**：REQ-H02 要求一次在途浏览不被它们打断。
+    pub(crate) structure_version: u64,
     pub(crate) cancel_token: Option<CancellationToken>,
     pub(crate) continuation_armed: bool,
     pub(crate) continuation_epoch: u64,

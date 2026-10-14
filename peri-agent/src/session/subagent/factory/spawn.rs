@@ -176,8 +176,8 @@ pub(super) async fn spawn_subagent_impl(
     if !inherited.payloads.is_empty() {
         if let (Some(store), Some(parent_id)) = (&session_resources, &parent_thread_id) {
             // 继承来源是一次**一致快照**：canonical payload（含 reminder）与 flags 同一次
-            // 读取，不再分 load_inherited_context / load_payloads / load_message_flags 三次。
-            let snapshot = store.load_session_snapshot(parent_id).await?;
+            // 读取。正文只取父会话当前有效条目——已排除正文不再是继承来源。
+            let snapshot = store.load_active_snapshot(parent_id).await?;
             let mut canonical = snapshot
                 .inherited
                 .payloads
@@ -199,20 +199,23 @@ pub(super) async fn spawn_subagent_impl(
                 .payloads
                 .iter()
                 .map(PersistedPayload::id)
-                .collect::<std::collections::HashSet<_>>();
+                .collect::<Vec<_>>();
+            // 继承区**必须**带上父会话当时的失效标记：有效视图的 flags 只覆盖未排除 id，
+            // 而父会话已压缩的继承前缀仍会以正文形式进入子会话继承区。缺了这些标记，
+            // 子会话会把父会话已经退出有效上下文的原文当成活跃上下文发给模型。
+            // 有界读取（按继承 id 取，含 excluded）避免为此全量加载父历史。
             inherited.flags = snapshot.inherited.flags;
-            inherited.flags.extend(
-                snapshot
-                    .flags
-                    .into_iter()
-                    .filter(|(id, _)| inherited_ids.contains(id)),
-            );
+            inherited
+                .flags
+                .extend(store.load_message_flags(parent_id, &inherited_ids).await?);
         } else if let Some(parent) = parent {
             // 无持久化路径（测试/遗留）：只能用父会话内存副本对齐 canonical 与 flags。
+            // 继承区只可能落在父会话热态仍有效的条目上——已排除条目自己不构成继承来源，
+            // 父会话 Full Compact 释放它们之后这里取不到 canonical 是正确结果。
             let transcript = parent.transcript();
             let transcript = transcript.read();
             let canonical = transcript
-                .persisted_payloads()
+                .active_payloads()
                 .into_iter()
                 .map(|payload| (payload.id(), payload))
                 .collect::<std::collections::HashMap<_, _>>();
@@ -240,7 +243,8 @@ pub(super) async fn spawn_subagent_impl(
         let parent_id = parent_thread_id
             .clone()
             .ok_or("spawn_subagent: 持久化 child 需要 parent thread id（无父会话则无继承来源）")?;
-        let snapshot = store.load_session_snapshot(&parent_id).await?;
+        // 本步只消费 binding/frozen/meta：读有效视图，不加载 own 正文。
+        let snapshot = store.load_active_snapshot(&parent_id).await?;
         let binding = match &snapshot.binding {
             peri_acp_types::session_resources::BindingState::Bound(binding) => binding.clone(),
             other => {

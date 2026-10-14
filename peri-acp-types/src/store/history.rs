@@ -35,6 +35,25 @@ pub struct ForkedHistory {
     pub flags: HashMap<MessageId, MessageFlags>,
 }
 
+impl ForkedHistory {
+    /// 有效视图：已排除条目不在其中（与 `ActiveSessionSnapshot::payloads` 同一规则）。
+    ///
+    /// 复制结果本身保留完整 canonical 历史；只有发布到内存会话状态的那份集合
+    /// 取有效视图，否则 Full Compact 释放的正文会随 fork 回到执行上下文。
+    pub fn active_payloads(&self) -> Vec<PersistedPayload> {
+        self.payloads
+            .iter()
+            .filter(|payload| {
+                !self
+                    .flags
+                    .get(&payload.id())
+                    .is_some_and(|flags| flags.excluded)
+            })
+            .cloned()
+            .collect()
+    }
+}
+
 /// rewind 结果：保留的 payload 与此前存在、现在被移除的 id（按历史顺序）。
 #[derive(Clone, Debug)]
 pub struct RewoundHistory {
@@ -142,6 +161,71 @@ pub fn rewind_keep_len(ids: &[MessageId], boundary: RewindBoundary) -> Result<us
         RewindBoundary::KeepThrough(_) => index + 1,
         RewindBoundary::RemoveFrom(_) => index,
     })
+}
+
+/// rewind 有效视图重建的条目视图：id、flags 与「是否 System 角色消息」。
+///
+/// System 不参与排除（Full Compact 明确跳过它们），因此判定 excluded 段时也跳过。
+pub type RewindFlagEntry = (MessageId, MessageFlags, bool);
+
+/// rewind 后必须清零 `excluded` 的条目 id（按历史顺序）。
+///
+/// 输入是 rewind 后**保留的前缀**（canonical 顺序）与它的长度 `keep_len`；输出只列
+/// `excluded` 要从 `true` 改回 `false` 的 id——其余 flag 位（`truncated`、`projection`）
+/// 不因此改变，调用方不得把它们当成「无标记」覆盖回去。
+///
+/// # 依赖的不变量（Full Compact 每次提交都维护）
+///
+/// Full 排除「当时所有未被排除的 own 非 System 条目」，再在尾部追加一条不被排除的摘要
+/// （见 `compact_v2/full.rs`）。因此 own 区在任意时刻成立：设分界 k，own 区里前 k 个非
+/// System 条目被排除、其余不被排除——排除集合恒为**非 System 条目的前缀**。非 System 的
+/// 祖先条目虽不被排除，但它们的来源是继承上下文（父快照），不在本会话的 own 历史里；
+/// 调用方必须只把 own 历史交给本函数，否则首个祖先条目的不排除会直接终结领导段。
+///
+/// # 规则
+///
+/// 取保留前缀里同样口径的「最长 excluded 前缀」长度 k：
+///
+/// - 前缀在位置 k 上存在非 System 条目（按不变量它不被排除）→ 它是仍然成立的那次 Full 的
+///   摘要，前 k 条的排除**依旧有依据**；只有 k 之后出现的 `excluded` 属于被本次 rewind
+///   删掉摘要的批次，必须清零。
+/// - 位置 k 上不存在这样的条目 → 摘要已被本次 rewind 删除（或前缀本身就是纯 excluded），
+///   前缀的排除失去依据，前缀内所有 `excluded` 一律清零。
+///
+/// 两条分支正好避开需求点名的两种错误：只删后置摘要而让保留原文继续失效（排除仍在、
+/// 原文读不回来），以及把保留前缀的 `excluded` 全清（旧摘要和它覆盖的原文一起复活）。
+/// 判定只用 `excluded` 的前缀结构与「System 不参与排除」两个既有事实，不依赖摘要文本。
+///
+/// `keep_len` 必须不超过 `entries.len()`：调用方由 [`rewind_keep_len`] 在同一份历史上取得，
+/// 越界即调用方违约（切片越界会直接暴露），这里不静默截断。
+pub fn rewind_clear_excluded_ids(entries: &[RewindFlagEntry], keep_len: usize) -> Vec<MessageId> {
+    let retained = &entries[..keep_len];
+    // 领导段长度与「位置 k 上是否有存活的摘要」在**同一次**遍历里得出：
+    // take_while 会吃掉那个不满足谓词的条目，分两步写就会丢位置。
+    let mut covered = 0usize;
+    let mut summary_survives = false;
+    for (_, flags, is_system) in retained {
+        if *is_system {
+            continue;
+        }
+        if !flags.excluded {
+            summary_survives = true;
+            break;
+        }
+        covered += 1;
+    }
+    let mut clear = Vec::new();
+    let mut own_position = 0usize;
+    for (id, flags, is_system) in retained {
+        if *is_system {
+            continue;
+        }
+        if flags.excluded && (!summary_survives || own_position >= covered) {
+            clear.push(*id);
+        }
+        own_position += 1;
+    }
+    clear
 }
 
 /// 按边界裁剪 canonical payload，返回保留部分与被移除的 id。

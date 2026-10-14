@@ -182,7 +182,7 @@ async fn test_reminder_provenance_separates_harness_envelope_from_user_forgery()
     ));
 
     // 条目身份：只有 harness 产出者成为 Reminder；用户伪造标签保持普通消息。
-    let payloads = session.transcript().read().persisted_payloads();
+    let payloads = session.transcript().read().active_payloads();
     assert_eq!(
         payloads
             .iter()

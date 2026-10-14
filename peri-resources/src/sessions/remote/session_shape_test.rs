@@ -29,21 +29,19 @@ use super::sql::StatementSpec;
 
 // ─── 投影与下标同源 ───────────────────────────────────────────────────────────
 
-/// 从投影文本抽出列名（content_size 子查询按一列计）。
+/// 从投影文本抽出列名（带别名的列取别名，普通列取列引用）。
 fn projected_columns(projection: &str) -> Vec<String> {
     let mut columns = Vec::new();
     for line in projection.lines() {
-        let line = line.trim();
-        if line.starts_with("(SELECT") {
-            columns.push("content_size".to_owned());
-            continue;
-        }
         for part in line.split(',') {
-            let name = part
-                .split_whitespace()
-                .next()
-                .unwrap_or("")
-                .trim_end_matches(',');
+            let part = part.trim();
+            if part.is_empty() {
+                continue;
+            }
+            let name = match part.rsplit_once(" as ") {
+                Some((_, alias)) => alias.trim(),
+                None => part.split_whitespace().next().unwrap_or(""),
+            };
             if !name.is_empty() {
                 columns.push(name.to_owned());
             }
@@ -648,6 +646,7 @@ fn read_statements_are_read_only_and_parameterized() {
         session_sql::select_tree_statement("s"),
         session_sql::select_messages_statement("s"),
         session_sql::select_root_statement("s"),
+        session_sql::select_active_messages_statement("s"),
     ];
     for spec in &single_id_reads {
         assert!(
@@ -666,6 +665,37 @@ fn read_statements_are_read_only_and_parameterized() {
         page.params.len(),
         8,
         "scope/游标/上限与归档状态都是绑定参数"
+    );
+}
+
+/// 有效视图与有界 flags 的范围条件写在语句里：不把「先全量读回再在 Rust 里过滤」当实现。
+#[test]
+fn active_and_bounded_flag_reads_carry_their_own_scope_conditions() {
+    let active = session_sql::select_active_messages_statement("s");
+    assert!(active.is_read_only(), "有效视图读取不得写: {}", active.sql);
+    assert!(
+        active.sql.contains("excluded = 0"),
+        "排除条件必须落在语句里: {}",
+        active.sql
+    );
+    assert_eq!(active.params, vec![Value::Text("s".to_owned())]);
+    // 语句文本静态：换一个会话只有绑定值不同。
+    assert_eq!(
+        active.sql,
+        session_sql::select_active_messages_statement("other").sql
+    );
+
+    let flags = session_sql::select_message_flags_statement("s", "m");
+    assert!(flags.is_read_only(), "flags 读取不得写: {}", flags.sql);
+    assert_eq!(flags.sql.matches('?').count(), 2, "绑定会话与条目两个值");
+    assert!(!flags.sql.contains('\''), "值只能走绑定: {}", flags.sql);
+    assert_eq!(
+        flags.params,
+        vec![Value::Text("s".to_owned()), Value::Text("m".to_owned())]
+    );
+    assert_eq!(
+        flags.sql,
+        session_sql::select_message_flags_statement("other", "other-message").sql
     );
 }
 

@@ -855,6 +855,12 @@ async fn test_adopt_legacy_session_rejects_unbound_frozen_canonical_data() {
 #[path = "session_history_test.rs"]
 mod history_tests;
 
+#[path = "session_history_page_test.rs"]
+mod history_page_tests;
+
+#[path = "session_history_segment_test.rs"]
+mod history_segment_tests;
+
 #[tokio::test]
 async fn close_intent_survives_reopen_and_finishes_without_execution_owner() {
     use peri_acp_types::session_resources::CloseSettlement;

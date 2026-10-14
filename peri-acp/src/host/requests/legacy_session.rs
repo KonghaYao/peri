@@ -41,12 +41,13 @@ pub(super) async fn resolve_saved_workspace(
 }
 
 /// 读取接纳后的持久 frozen 字节（write-once 后唯一事实源）。
+/// 只消费 frozen：读有效视图，不加载 own 正文。
 async fn persisted_frozen_bytes(
     resources: &Arc<dyn peri_acp_types::session_resources::SessionResources>,
     id: &str,
 ) -> Result<String, AcpError> {
     let snapshot = resources
-        .load_session_snapshot(&id.to_owned())
+        .load_active_snapshot(&id.to_owned())
         .await
         .map_err(resource_error)?;
     match snapshot.frozen {
@@ -92,8 +93,9 @@ pub(super) async fn prepare_for_restore(
 ) -> Result<Option<LegacyAdoption>, AcpError> {
     let resources = cfg.session_resources.clone();
     let id = session_id.to_owned();
+    // 接纳只消费 meta/binding/frozen：读有效视图，不加载 own 正文。
     let snapshot = resources
-        .load_session_snapshot(&id)
+        .load_active_snapshot(&id)
         .await
         .map_err(resource_error)?;
     let meta = snapshot.meta.clone();

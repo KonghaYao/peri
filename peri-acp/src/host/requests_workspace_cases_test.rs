@@ -891,6 +891,7 @@ async fn prompt_without_frozen_snapshot_fails_closed() {
             closing: false,
             history: Vec::new(),
             history_payloads: Vec::new(),
+            structure_version: 0,
             cancel_token: None,
             continuation_armed: false,
             continuation_epoch: 0,

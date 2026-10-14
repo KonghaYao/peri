@@ -70,19 +70,28 @@ pub(in crate::sessions) enum BindingRowState {
     Absent,
 }
 
+/// 绑定行读取的语句原文（主键单行；计划证据与生产读取同一份文本）。
+pub(in crate::sessions) const BINDING_ROW_STATE_SQL: &str =
+    "SELECT schema_version, project_id, workspace_id, relative_cwd
+         FROM session_bindings WHERE thread_id = ?1";
+
+/// 会话自身 frozen 列的语句原文（主键单行；计划证据与生产读取同一份文本）。
+pub(in crate::sessions) const FROZEN_CONTEXT_SQL: &str =
+    "SELECT frozen_context FROM threads WHERE id = ?1";
+
+/// 会话存在性判据的语句原文（主键单行；计划证据与生产读取同一份文本）。
+pub(in crate::sessions) const THREAD_EXISTS_SQL: &str = "SELECT 1 FROM threads WHERE id = ?1";
+
 /// 绑定行的事实分类；不判断 legacy（那是本机来源证据与执行面的联合结论）。
 pub(in crate::sessions) async fn binding_row_state_on(
     connection: &mut SqliteConnection,
     id: &ThreadId,
 ) -> SessionResourceResult<BindingRowState> {
-    let row: Option<(i64, String, String, String)> = sqlx::query_as(
-        "SELECT schema_version, project_id, workspace_id, relative_cwd
-         FROM session_bindings WHERE thread_id = ?1",
-    )
-    .bind(id.as_str())
-    .fetch_optional(&mut *connection)
-    .await
-    .map_err(|error| map_sqlx(&error))?;
+    let row: Option<(i64, String, String, String)> = sqlx::query_as(BINDING_ROW_STATE_SQL)
+        .bind(id.as_str())
+        .fetch_optional(&mut *connection)
+        .await
+        .map_err(|error| map_sqlx(&error))?;
     let Some((version, project_id, workspace_id, relative_cwd)) = row else {
         return Ok(BindingRowState::Absent);
     };
@@ -103,11 +112,10 @@ pub(in crate::sessions) async fn frozen_bytes_on(
     connection: &mut SqliteConnection,
     id: &ThreadId,
 ) -> anyhow::Result<Option<String>> {
-    let row: Option<(Option<String>,)> =
-        sqlx::query_as("SELECT frozen_context FROM threads WHERE id = ?1")
-            .bind(id.as_str())
-            .fetch_optional(&mut *connection)
-            .await?;
+    let row: Option<(Option<String>,)> = sqlx::query_as(FROZEN_CONTEXT_SQL)
+        .bind(id.as_str())
+        .fetch_optional(&mut *connection)
+        .await?;
     match row {
         Some((frozen,)) => Ok(frozen),
         None => anyhow::bail!("session row is missing"),
@@ -169,7 +177,7 @@ pub(in crate::sessions) async fn thread_exists_on(
     connection: &mut SqliteConnection,
     id: &ThreadId,
 ) -> anyhow::Result<bool> {
-    let row: Option<(i64,)> = sqlx::query_as("SELECT 1 FROM threads WHERE id = ?1")
+    let row: Option<(i64,)> = sqlx::query_as(THREAD_EXISTS_SQL)
         .bind(id.as_str())
         .fetch_optional(&mut *connection)
         .await?;

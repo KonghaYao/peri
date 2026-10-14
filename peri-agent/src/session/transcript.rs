@@ -4,10 +4,11 @@
 //! - **MessageId 寻址**：内部维护 `HashMap<MessageId, usize>` 索引表，O(1) 查找
 //! - **只追加优先**：正常 ReAct 循环中消息仅尾部追加，禁止 prepend/中间插入
 //! - **Staging 两阶段写入**：AI 消息 + ToolResult 原子提交
-//! - **标记代替删除**：`truncated` / `excluded` 标记用于 Compact，消息本体不变
+//! - **标记代替删除**：Compact 先以 `truncated` / `excluded` 标记表达失效，消息本体不变；
+//!   Full Compact 在 store 确认提交后才释放被排除的 own 条目（见 `shrink_after_full_commit`）
 //! - **异步持久化**：append 后通过 unbounded_channel 异步触发 ThreadStore 写入
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::{
     atomic::{AtomicU8, Ordering},
     Arc,
@@ -107,7 +108,7 @@ impl TranscriptEntry {
     }
 
     /// Canonical model projection shared by normal Reason and compact rendering.
-    /// 转为 canonical 持久化载荷（与 `persisted_payloads` 同一映射，不另立格式）。
+    /// 转为 canonical 持久化载荷（与 `active_payloads` 同一映射，不另立格式）。
     pub fn into_payload(self) -> PersistedPayload {
         match self {
             Self::Message(message) => PersistedPayload::Message(message),
@@ -387,10 +388,15 @@ impl MessageTranscript {
         &self.entries
     }
 
-    /// Canonical persistence snapshot preserving message/reminder discriminants and stable IDs.
-    pub fn persisted_payloads(&self) -> Vec<PersistedPayload> {
+    /// 热态当前**有效**（未排除）的 canonical 载荷快照。
+    ///
+    /// 只覆盖热 transcript 里仍然有效的条目：Full Compact 提交成功后，被排除的 own
+    /// 历史已经释放，不再出现在这里。需要**完整历史**（含已排除正文）时必须读存储，
+    /// 走 [`SessionResources::load_session_history`]，不从热态导出。
+    pub fn active_payloads(&self) -> Vec<PersistedPayload> {
         self.entries
             .iter()
+            .filter(|entry| !self.flags(entry.id()).excluded)
             .cloned()
             .map(|entry| match entry {
                 TranscriptEntry::Message(message) => PersistedPayload::Message(message),
@@ -516,6 +522,14 @@ impl MessageTranscript {
     /// 按 id 获取条目（O(1)）
     pub fn get(&self, id: MessageId) -> Option<&TranscriptEntry> {
         self.id_index.get(&id).map(|&idx| &self.entries[idx])
+    }
+
+    /// 该 id 之后（时间线更晚）的条目切片；id 已不在 transcript 时返回 `None`。
+    ///
+    /// 供以稳定身份锚定时间线位置的消费者使用（收缩/重排后位置不再可比）。
+    pub fn entries_after(&self, id: MessageId) -> Option<&[TranscriptEntry]> {
+        let idx = *self.id_index.get(&id)?;
+        Some(&self.entries[idx + 1..])
     }
 
     /// 获取消息标记（无标记时返回默认值）
@@ -767,9 +781,69 @@ impl MessageTranscript {
             ));
         }
         self.apply_compaction_lifecycle_memory(&lifecycle);
+        // 收缩夹在「内存标记已应用」与 `mark_committed` 之间：上一行的 store 调用已是
+        // 本次 compaction 的 durable commit 点（失败在前直接返回），此刻释放被排除条目
+        // 的原文不会让内存领先于磁盘事实；反过来先释放再提交则相反——提交失败时原文
+        // 已丢，热态只剩「不确定」，重载也自证不了上一份视图。收缩不改持久化事实，也不
+        // 触碰不确定态语义，因此插在这里最紧。
+        self.shrink_after_full_commit();
         self.compaction_commit_state.mark_committed();
 
         Ok(())
+    }
+
+    /// 释放被本次 Full 排除的 own 条目，连同其 id 索引与 flags。
+    ///
+    /// 只由 [`Self::commit_compaction_lifecycle`] 在 store 确认提交后调用。祖先区
+    /// （`entries[..ancestor_len]`）的语义与容量由父会话/冻结继承决定，这里整体不动；
+    /// `staged`、持久化句柄与配置字段同样保持原样。System 条目即使带 `excluded` 也保留：
+    /// 当前 Full 不排除它们（见 `compact_v2/full.rs` 的 flag 采集），这里不为「删除
+    /// 会话身份/协议载体」背书。剩余条目按原顺序重建三个容器，旧容量随之释放。
+    fn shrink_after_full_commit(&mut self) {
+        if self.ancestor_len >= self.entries.len() {
+            return;
+        }
+        let mut keep_count = self.ancestor_len;
+        let mut released: Vec<MessageId> = Vec::new();
+        for entry in self.entries.iter().skip(self.ancestor_len) {
+            let excluded = self
+                .flags
+                .get(&entry.id())
+                .is_some_and(|flags| flags.excluded);
+            if excluded && !matches!(entry.as_message(), Some(BaseMessage::System { .. })) {
+                released.push(entry.id());
+            } else {
+                keep_count += 1;
+            }
+        }
+        if released.is_empty() {
+            return;
+        }
+        let released: HashSet<MessageId> = released.into_iter().collect();
+
+        let mut entries = Vec::with_capacity(keep_count);
+        let mut id_index = HashMap::with_capacity(keep_count);
+        for entry in std::mem::take(&mut self.entries) {
+            let id = entry.id();
+            if released.contains(&id) {
+                continue;
+            }
+            id_index.insert(id, entries.len());
+            entries.push(entry);
+        }
+        self.entries = entries;
+        self.id_index = id_index;
+
+        // 只随被释放条目一起丢掉它们的标记；其余标记（truncated / projection 等）
+        // 原样保留，收缩不得顺手改写未排除条目的可见性。
+        let mut flags = HashMap::with_capacity(self.flags.len().saturating_sub(released.len()));
+        for (id, value) in std::mem::take(&mut self.flags) {
+            if released.contains(&id) {
+                continue;
+            }
+            flags.insert(id, value);
+        }
+        self.flags = flags;
     }
 
     /// 应用已成功持久化的 compaction lifecycle，不发送普通 PersistOp。

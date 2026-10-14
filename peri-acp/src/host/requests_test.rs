@@ -31,6 +31,9 @@ mod history_lifecycle_tests;
 #[path = "requests_legacy_test.rs"]
 mod legacy_tests;
 
+#[path = "requests_unnegotiated_replay_test.rs"]
+mod unnegotiated_replay_tests;
+
 #[path = "requests_update_config_test.rs"]
 mod update_config_tests;
 
@@ -340,6 +343,7 @@ async fn register_session_with_history(
             closing: false,
             history,
             history_payloads,
+            structure_version: 0,
             cancel_token: None,
             continuation_armed: false,
             continuation_epoch: 0,
@@ -558,6 +562,10 @@ impl PluginManagerPort for MockPluginManager {
 #[path = "user_input_test.rs"]
 mod user_input_tests;
 
+/// 历史分页的 wire 级用例：与 `user_input_tests` 同一夹具面（真实门面 + ServerLoop）。
+#[path = "history_page_wire_test.rs"]
+mod history_page_wire_tests;
+
 #[path = "requests/plugin_search_test.rs"]
 mod plugin_search_tests;
 
@@ -684,6 +692,7 @@ async fn register_session_with_workflow(
             closing: false,
             history: Vec::new(),
             history_payloads: Vec::new(),
+            structure_version: 0,
             cancel_token: None,
             continuation_armed: false,
             continuation_epoch: 0,

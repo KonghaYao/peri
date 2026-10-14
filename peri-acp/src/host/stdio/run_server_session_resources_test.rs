@@ -47,6 +47,7 @@ async fn test_fork_registers_session_and_copies_history() {
             closing: false,
             history: vec![source_message],
             history_payloads: vec![source_payload],
+            structure_version: 0,
             cancel_token: None,
             continuation_armed: false,
             continuation_epoch: 0,

@@ -129,7 +129,11 @@ async fn forked_payloads_have_independent_ids_flags_and_compaction_lifecycle() {
     .await
     .unwrap();
 
-    assert_eq!(copied_payloads.len(), source_payloads.len());
+    assert_eq!(
+        copied_payloads.len(),
+        source_payloads.len(),
+        "source 无已排除条目：发布集合与复制结果一致"
+    );
     assert!(source_payloads
         .iter()
         .zip(&copied_payloads)
@@ -192,6 +196,87 @@ async fn forked_payloads_have_independent_ids_flags_and_compaction_lifecycle() {
     let source_snapshot = resources.load_session_snapshot(&source_id).await.unwrap();
     assert!(source_snapshot.flags[&source_tool_id].truncated);
     assert!(!source_snapshot.flags[&source_tool_id].excluded);
+}
+
+#[tokio::test]
+async fn fork_publishes_effective_payloads_and_keeps_released_bodies_in_storage() {
+    let temp = tempfile::tempdir().unwrap();
+    let resources = open_facade(&temp).await;
+    let cwd = temp.path().to_string_lossy().into_owned();
+    create_source(&resources, SOURCE, &cwd).await;
+    let workspace = resources.resolve_workspace(temp.path()).await.unwrap();
+    let source_id = SOURCE.to_owned();
+
+    // Full Compact 后的 source：两条原文被排除，摘要成为唯一有效条目。
+    let released = [
+        BaseMessage::human("released question"),
+        BaseMessage::ai("released answer"),
+    ]
+    .iter()
+    .cloned()
+    .map(PersistedPayload::Message)
+    .collect::<Vec<_>>();
+    resources
+        .append_history(&source_id, &released)
+        .await
+        .unwrap();
+    resources
+        .apply_compaction(
+            &source_id,
+            &CompactionChange {
+                flag_updates: released
+                    .iter()
+                    .map(|payload| {
+                        (
+                            payload.id(),
+                            MessageFlags {
+                                excluded: true,
+                                ..Default::default()
+                            },
+                        )
+                    })
+                    .collect(),
+                appended_messages: vec![BaseMessage::ai("source summary")],
+            },
+        )
+        .await
+        .unwrap();
+
+    let source = load_fork_source(&resources, SOURCE).await.unwrap();
+    let (fork_id, published) = fork_bound_session(
+        &resources,
+        &source,
+        &workspace,
+        "2026-10-13T00:00:00Z".to_owned(),
+    )
+    .await
+    .unwrap();
+
+    assert_eq!(published.len(), 1, "发布集合只含有效条目");
+    assert_eq!(
+        published[0].as_message().unwrap().content(),
+        "source summary",
+        "发布集合必须是 Full Compact 后的有效视图"
+    );
+    // 完整 canonical 历史（含已排除原文）随复制进目标存储：只有内存发布面收缩。
+    let stored = resources.load_session_history(&fork_id).await.unwrap();
+    assert_eq!(stored.len(), 3);
+    assert!(stored.iter().any(|payload| payload
+        .as_message()
+        .is_some_and(|message| message.content() == "released question")));
+    // 目标有效视图与发布集合逐条一致（同一份排除事实）。
+    let active = resources.load_active_snapshot(&fork_id).await.unwrap();
+    assert_eq!(
+        active
+            .payloads
+            .iter()
+            .map(PersistedPayload::id)
+            .collect::<Vec<_>>(),
+        published
+            .iter()
+            .map(PersistedPayload::id)
+            .collect::<Vec<_>>()
+    );
 }
 
 #[tokio::test]

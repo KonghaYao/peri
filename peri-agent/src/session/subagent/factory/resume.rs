@@ -93,7 +93,8 @@ pub(super) async fn resume_subagent_impl(
     // 绑定校验用一次一致快照：child 的绑定必须与 owning parent 完全相同，且两者同根。
     // 存在性是本函数的第一个校验分支：快照读取报 `NotFound` 即「thread not found」，
     // 与后续 `ResumeClaim` 的状态校验分开报错（不能把「不存在」说成「仍处于运行态」）。
-    let child_snapshot = match session_resources.load_session_snapshot(&thread_id).await {
+    // 本步只消费 binding：读有效视图，不加载 own 正文。
+    let child_snapshot = match session_resources.load_active_snapshot(&thread_id).await {
         Ok(snapshot) => snapshot,
         Err(error)
             if matches!(
@@ -115,7 +116,7 @@ pub(super) async fn resume_subagent_impl(
     if binding.is_some() {
         let parent_id = super::spawn::parent_thread_id_of(parent)
             .ok_or("bound child resume requires its owning parent session")?;
-        let parent_snapshot = session_resources.load_session_snapshot(&parent_id).await?;
+        let parent_snapshot = session_resources.load_active_snapshot(&parent_id).await?;
         let parent_binding = match &parent_snapshot.binding {
             peri_acp_types::session_resources::BindingState::Bound(binding) => binding.clone(),
             _ => return Err("bound subagent parent has no execution binding".into()),
@@ -152,8 +153,9 @@ pub(super) async fn resume_subagent_impl(
     // the worker that performed the active write.
     let restored = async {
         // 一次一致快照：inherit 区与自有 payload/flags 同一次读取（不再分三次）。
+        // 恢复只重建有效视图：已排除 own 正文不属于续聊的当前上下文。
         let snapshot = session_resources
-            .load_session_snapshot(&thread_id)
+            .load_active_snapshot(&thread_id)
             .await
             .map_err(|error| anyhow::anyhow!("{error}"))?;
         let mut inherited = snapshot.inherited;

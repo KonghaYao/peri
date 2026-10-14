@@ -343,9 +343,10 @@ async fn restore_committed_context(
         .zip(thread_id)
         .ok_or_else(|| anyhow::anyhow!("compact persistence is unavailable"))?;
     // 一次一致快照：inherit 区、自有 payload 与 flags 来自同一次读取，不再分三次
-    // 取（分次读会把「先 payload 后 flags」的跨时刻结果当成一份历史）。
+    // 取（分次读会把「先 payload 后 flags」的跨时刻结果当成一份历史）。命令提交后的
+    // 权威上下文只含当前有效条目：已排除正文由收缩释放，读它就等于先全量再过滤。
     let snapshot = store
-        .load_session_snapshot(thread_id)
+        .load_active_snapshot(thread_id)
         .await
         .map_err(|error| anyhow::anyhow!("{error}"))?;
     let own = snapshot.payloads;
@@ -375,5 +376,5 @@ async fn restore_committed_context(
     let messages =
         crate::session::exec::compact_pipeline::assemble_compact_messages(&transcript, &None)
             .messages;
-    Ok((transcript.persisted_payloads(), messages))
+    Ok((transcript.active_payloads(), messages))
 }

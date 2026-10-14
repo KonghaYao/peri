@@ -294,8 +294,10 @@ async fn test_full_compact_summarizes_and_excludes_canonical_report() {
             .contains("REPORT_TAIL_FACT"),
         "Full 摘要请求必须包含超过旧 2000 字符预览的报告结论"
     );
-    assert!(transcript.flags(reminder_id).excluded);
-    assert!(transcript.get(reminder_id).is_some());
+    assert!(
+        transcript.get(reminder_id).is_none(),
+        "Full 提交后已排除条目必须从热态释放（持久化事实仍带 excluded）"
+    );
     assert!(!transcript
         .visible_model_messages()
         .unwrap()
@@ -337,8 +339,10 @@ async fn full_excludes_loaded_root_history() {
     .unwrap();
 
     assert_eq!(result.affected_count, 2);
-    assert!(transcript.flags(question.id()).excluded);
-    assert!(transcript.flags(answer.id()).excluded);
+    assert!(
+        transcript.get(question.id()).is_none() && transcript.get(answer.id()).is_none(),
+        "Full 提交后已加载的旧历史必须从热态释放"
+    );
     let provider_messages = transcript.visible_model_messages().unwrap();
     assert_eq!(
         provider_messages.len(),
@@ -438,13 +442,10 @@ async fn full_compact_uses_historical_tool_results_without_local_file_re_read() 
     assert!(model_input.contains("REMOTE_SKILL_MARKER"));
     assert!(!model_input.contains("LOCAL_FILE_MARKER"));
     assert!(!model_input.contains("LOCAL_SKILL_MARKER"));
-    assert!(transcript.flags(read).excluded);
-    assert!(transcript.flags(result).excluded);
-    assert!(transcript.entries().iter().any(|entry| entry.id() == read));
-    assert!(transcript
-        .entries()
-        .iter()
-        .any(|entry| entry.id() == result));
+    assert!(
+        transcript.get(read).is_none() && transcript.get(result).is_none(),
+        "Full 提交后 own 工具配对必须从热态释放"
+    );
     assert_eq!(transcript.visible_messages().len(), 1, "Full 仅追加摘要");
 }
 
@@ -507,12 +508,20 @@ async fn test_full_compact_sqlite_persists_lifecycle_and_preserves_ancestor_and_
         "成功提交的 Full Compact 必须标记为 history replacement"
     );
     assert!(
+        transcript.get(ancestor.id()).is_some(),
+        "ancestor 必须留在热态"
+    );
+    assert!(
         !transcript.flags(ancestor.id()).excluded,
         "ancestor 不得被排除"
     );
+    assert!(transcript.get(own_system).is_some(), "System 必须留在热态");
     assert!(!transcript.flags(own_system).excluded, "System 不得被排除");
-    assert!(transcript.flags(own_human).excluded, "own Human 必须被排除");
-    assert!(transcript.flags(own_ai).excluded, "own AI 必须被排除");
+    assert!(
+        transcript.get(own_human).is_none(),
+        "own Human 必须从热态释放"
+    );
+    assert!(transcript.get(own_ai).is_none(), "own AI 必须从热态释放");
 
     let summary = transcript
         .entries()
@@ -527,8 +536,14 @@ async fn test_full_compact_sqlite_persists_lifecycle_and_preserves_ancestor_and_
         .load_session_snapshot(&thread_id)
         .await
         .expect("加载 SQLite 快照失败");
+    // 热态只剩有效集合，因此与存储的**有效视图**逐条对齐；完整历史（含被释放的
+    // excluded 原文与标记）仍留在存储里，由上面的 `stored` 核对。
+    let active = store
+        .load_active_snapshot(&thread_id)
+        .await
+        .expect("加载 SQLite 有效视图失败");
     assert_eq!(
-        stored
+        active
             .payloads
             .iter()
             .map(PersistedPayload::id)
@@ -538,7 +553,7 @@ async fn test_full_compact_sqlite_persists_lifecycle_and_preserves_ancestor_and_
             .iter()
             .map(|entry| entry.id())
             .collect::<Vec<_>>(),
-        "内存与 SQLite history 必须一致"
+        "内存与 SQLite 有效视图必须一致"
     );
     assert!(transcript
         .entries()

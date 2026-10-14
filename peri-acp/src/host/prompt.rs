@@ -608,6 +608,9 @@ pub(super) async fn finish_prompt_turn(
             );
             // The writer barrier completes before PromptResult is built, even on cancel
             // or model/forwarder failure. Early failures return the previous snapshot.
+            // The snapshot carries the effective payload set only: bodies released by a
+            // successful Full Compact are absent (excluded), and `history` is derived
+            // from the same range. Full canonical history is reconstructed from storage.
             state.history_payloads = result.persisted_payloads;
             state.history = state
                 .history_payloads

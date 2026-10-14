@@ -22,10 +22,14 @@ pub mod clear;
 pub mod compact;
 pub mod rewind;
 
+/// rewind 持久化提交方式（ACP 请求路径按边界原子提交，见 [`rewind::DurableRewindCommit`]）。
+pub use rewind::DurableRewindCommit;
 /// Rewind 文件复原相关符号——供 dispatch 层（`session/rewind-preview` 预算）
 /// 复用 `extract_file_changes` / `FileChange`；`execute_rewind` 为 slash 与
-/// RPC 双入口共享执行体（Phase 5 Step 5）。
-pub(crate) use rewind::{execute_rewind, extract_file_changes, FileChange};
+/// RPC 双入口共享执行体（Phase 5 Step 5），`DurableRewindCommit` 是它的提交方式，
+/// `RewindExecution`/`RewindDurability` 是它的结果（RPC 路径据此区分「已生效」与
+/// 「边界已不在存储里」）。
+pub(crate) use rewind::{execute_rewind, extract_file_changes, FileChange, RewindDurability};
 
 /// 路由条目契约 re-export（execute_command RPC 域/等级检查消费）。
 pub use peri_acp_types::command::command_route::RouteEntry;

@@ -374,7 +374,8 @@ impl SessionResources for MockSessionResources {
         &self,
         id: &ThreadId,
         boundary: RewindBoundary,
-    ) -> SessionResourceResult<()> {
+        clear_excluded: &[MessageId],
+    ) -> SessionResourceResult<RewindOutcome> {
         self.ensure_writable()?;
         self.injection.lock().unwrap().rewind_calls += 1;
         let target = boundary.message_id();
@@ -394,22 +395,28 @@ impl SessionResources for MockSessionResources {
                 .iter()
                 .position(|payload| payload.id() == target),
         };
+        // 未知边界与真实后端同一语义：不动历史、也不清零，但如实回报「没生效」。
         let Some(len) = keep else {
-            return Err(SessionResourceError::new(
-                SessionResourceErrorKind::NotFound,
-            ));
+            return Ok(RewindOutcome::BoundaryMissing);
         };
         let removed: Vec<MessageId> = region.payloads[len..]
             .iter()
             .map(PersistedPayload::id)
             .collect();
+        let cleared = clear_excluded.to_vec();
         self.with_region(id, |region| {
             region.payloads.truncate(len);
             for removed_id in &removed {
                 region.flags.remove(removed_id);
             }
+            // 有效视图重建与边界删除同属一次提交：mock 也一并生效，只清 excluded 位。
+            for cleared_id in &cleared {
+                if let Some(flags) = region.flags.get_mut(cleared_id) {
+                    flags.excluded = false;
+                }
+            }
         });
-        Ok(())
+        Ok(RewindOutcome::Applied)
     }
 
     async fn remove_history_entries(

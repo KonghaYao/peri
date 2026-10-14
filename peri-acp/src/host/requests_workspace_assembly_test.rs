@@ -20,6 +20,7 @@ fn retain_failed_assembly(
             closing: true,
             history: Vec::new(),
             history_payloads: Vec::new(),
+            structure_version: 0,
             cancel_token: None,
             continuation_armed: false,
             continuation_epoch: 0,

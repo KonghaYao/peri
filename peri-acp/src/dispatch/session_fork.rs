@@ -56,6 +56,9 @@ pub(crate) async fn load_fork_source(
 
 /// 一次保存 fork 目标：纯 ID 映射在前，门面保存 meta/binding/frozen/payload/flags。
 ///
+/// 返回目标 id 与**有效视图** payload（供 `SessionState::history_payloads` 发布；
+/// 已排除条目只留在目标存储里）。
+///
 /// 目标复用 source 的 binding 与冻结字节；`created_at` 与目标 identity 由构建层
 /// 生成一次（重试不重建）。
 pub(crate) async fn fork_bound_session(
@@ -72,6 +75,9 @@ pub(crate) async fn fork_bound_session(
     // SQLite 的 message_id 是库级主键：复用 source ID 会让写入静默丢行，因此复制前
     // 先做纯 ID 重映射（adapter 不重复执行 fork 算法）。
     let forked = remap_fork_history(&source.payloads, &source.flags, MessageId::new);
+    // 新会话状态只发布有效集合：已排除正文随复制进目标存储（完整 canonical 历史），
+    // 但不回到内存执行上下文。
+    let published = forked.active_payloads();
     let target_id = uuid::Uuid::now_v7().to_string();
     resources
         .save_fork(&ForkSnapshot {
@@ -90,17 +96,17 @@ pub(crate) async fn fork_bound_session(
                 frozen: source.frozen.clone(),
             },
             source_id: source.thread_id.clone(),
-            payloads: forked.payloads.clone(),
+            payloads: forked.payloads,
             flags: forked.flags,
         })
         .await?;
     tracing::info!(
         source = %source.thread_id,
         new = %target_id,
-        msg_count = forked.payloads.len(),
+        msg_count = published.len(),
         "Session forked"
     );
-    Ok((target_id, forked.payloads))
+    Ok((target_id, published))
 }
 
 /// 已绑定 source 才可 fork：legacy/外来/缺绑定都不是「可复制的执行身份」。
