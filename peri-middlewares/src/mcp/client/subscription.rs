@@ -14,7 +14,7 @@ use rmcp::{
 };
 use serde_json::json;
 
-use super::{McpClientPool, McpServiceWrapper};
+use super::{McpClientPool, McpServiceWrapper, SUBSCRIPTION_LISTEN_TIMEOUT};
 
 #[path = "subscription_tasks.rs"]
 mod tasks;
@@ -331,16 +331,24 @@ impl McpClientPool {
             tracing::info!(server = %server, "订阅配置已移除，订阅循环退出");
             return None;
         };
-        match peer.listen(filter).await {
-            Ok(new_subscription) => {
+        match peri_time::timeout(SUBSCRIPTION_LISTEN_TIMEOUT, peer.listen(filter)).await {
+            Ok(Ok(new_subscription)) => {
                 tracing::info!(server = %server, "订阅流重新建立");
                 Some(new_subscription)
             }
-            Err(e) => {
+            Ok(Err(e)) => {
                 tracing::warn!(
                     server = %server,
                     error = %e,
                     "重新 listen 失败，订阅循环退出"
+                );
+                None
+            }
+            Err(_) => {
+                tracing::warn!(
+                    server = %server,
+                    timeout_secs = SUBSCRIPTION_LISTEN_TIMEOUT.as_secs(),
+                    "重新 listen 超时，订阅循环退出"
                 );
                 None
             }
@@ -471,8 +479,13 @@ pub(crate) async fn setup_subscription(
     name: &str,
     sub: &McpSubscriptionsConfig,
 ) {
-    match rs.peer().listen(build_subscription_filter(sub)).await {
-        Ok(subscription) => {
+    match peri_time::timeout(
+        SUBSCRIPTION_LISTEN_TIMEOUT,
+        rs.peer().listen(build_subscription_filter(sub)),
+    )
+    .await
+    {
+        Ok(Ok(subscription)) => {
             pool.spawn_subscription_loop(name, subscription).await;
             tracing::info!(
                 server = %name,
@@ -480,11 +493,18 @@ pub(crate) async fn setup_subscription(
                 "subscriptions/listen 已建立"
             );
         }
-        Err(e) => {
+        Ok(Err(e)) => {
             tracing::warn!(
                 server = %name,
                 error = %e,
                 "subscriptions/listen 建立失败（server 可能不支持）"
+            );
+        }
+        Err(_) => {
+            tracing::warn!(
+                server = %name,
+                timeout_secs = SUBSCRIPTION_LISTEN_TIMEOUT.as_secs(),
+                "subscriptions/listen 建立超时（连接仍可用）"
             );
         }
     }

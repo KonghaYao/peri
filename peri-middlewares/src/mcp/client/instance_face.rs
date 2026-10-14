@@ -24,8 +24,6 @@ use rmcp::model::{
 use rmcp::service::ServiceError;
 use tokio::sync::mpsc;
 
-/// 宿主面资源订阅的建立上界（含 ack 往返；同进程 builtin 实例即时确认）。
-const INSTANCE_SUBSCRIPTION_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
 /// 宿主面订阅的通知缓冲；满即丢弃（唤醒信号，消费方按快照补读）。
 const INSTANCE_SUBSCRIPTION_BUFFER: usize = 64;
 
@@ -203,14 +201,14 @@ impl McpClientPool {
         let filter = SubscriptionFilter::builder()
             .resource_subscriptions([uri.to_string()])
             .build();
-        let subscription = peri_time::timeout(INSTANCE_SUBSCRIPTION_TIMEOUT, peer.listen(filter))
+        let subscription = peri_time::timeout(SUBSCRIPTION_LISTEN_TIMEOUT, peer.listen(filter))
             .await
             .map_err(|_| {
                 ResourceError::ReadFailed {
                     server: instance.to_string(),
                     reason: format!(
                         "subscription setup timed out after {}s",
-                        INSTANCE_SUBSCRIPTION_TIMEOUT.as_secs()
+                        SUBSCRIPTION_LISTEN_TIMEOUT.as_secs()
                     ),
                 }
                 .to_string()
