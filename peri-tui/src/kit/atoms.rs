@@ -240,18 +240,36 @@ pub struct PendingAttachment {
     pub label: String,
     pub media_type: String,
     pub base64_data: String,
+    /// 载荷身份——创建时按 `base64_data` 算一次。
+    ///
+    /// [Why] 图片预览等消费者按「载荷是否变化」决定要不要重做（预览状态机逐帧
+    /// 比较来源身份），比较整块 base64 会把每帧变成 O(载荷)；这里只比较 u64。
+    /// 进程内身份，不跨进程稳定。
+    pub payload_id: u64,
 }
 
 impl PendingAttachment {
     /// 以图片 MIME 与标准 base64 载荷构造待发送附件。
     pub fn image(media_type: impl Into<String>, base64_data: impl Into<String>) -> Self {
         let media_type = media_type.into();
+        let base64_data = base64_data.into();
+        let payload_id = payload_id_of(&base64_data);
         Self {
             label: media_type.clone(),
             media_type,
-            base64_data: base64_data.into(),
+            base64_data,
+            payload_id,
         }
     }
+}
+
+/// 载荷身份：对 base64 文本做一次进程内哈希（粘贴路径已在后台线程完成编码，
+/// 这里的 O(载荷) 不落在 UI 线程的常规路径上）。
+pub fn payload_id_of(base64_data: &str) -> u64 {
+    use std::hash::{Hash, Hasher};
+    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    base64_data.hash(&mut hasher);
+    hasher.finish()
 }
 
 impl std::fmt::Debug for PendingAttachment {
@@ -556,24 +574,61 @@ pub(crate) static IMAGE_PREVIEW_HOVER: AtomStatic<
     Option<crate::kit::message_area::ImageHoverState>,
 > = AtomStatic::new(|| None);
 
+/// 预览对象身份（§7.3）。
+///
+/// [Why 显式区分来源] 预览状态机、meta 行与绘制都只需要「展示名 + 像素」；
+/// `@image <path>` 流用磁盘路径，粘贴流的待发送附件没有路径、也没有磁盘文件
+/// （上传式，见 `input_area/paste.rs`）。用 `PathBuf` 冒充附件名会掩盖这一点，
+/// 故身份显式化为两种来源。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum PreviewSource {
+    /// `@image <path>` 流：磁盘图片路径。
+    Path(PathBuf),
+    /// 粘贴流：待发送附件的展示名（`图片 N`）与载荷身份。
+    Pending { name: String, payload_id: u64 },
+}
+
+impl PreviewSource {
+    /// 展示名（meta 行用）：路径流取 `file_name`（不暴露绝对路径，§6.2-5）；
+    /// 附件流直接取展示名。
+    pub fn display_name(&self) -> String {
+        match self {
+            Self::Path(path) => path
+                .file_name()
+                .map(|name| name.to_string_lossy().into_owned())
+                .unwrap_or_else(|| path.to_string_lossy().into_owned()),
+            Self::Pending { name, .. } => name.clone(),
+        }
+    }
+}
+
 /// 图片预览状态机（image-p0-p1-spec §7.3 T7）：写入边界为事件/effect 与后台
 /// 解码线程，渲染 body 只读（TUI-RENDER-001）。默认 `Idle`（无预览）。
 #[derive(Debug, Clone, Default)]
 pub enum ImagePreviewState {
     #[default]
     Idle,
-    /// 后台解码中（T5 全链校验已通过；`grade` 为分级结果）。
-    Loading { path: PathBuf, grade: PathGrade },
-    /// 解码完成：像素数据以 `Arc` 共享给 overlay 渲染（同路径重复请求复用）。
+    /// 后台解码中（路径流已过 T5 全链校验；`grade` 为分级结果）。
+    Loading {
+        source: PreviewSource,
+        grade: PathGrade,
+    },
+    /// 解码完成：像素数据以 `Arc` 共享给 overlay 渲染（同来源重复请求复用）。
     Ready {
-        path: PathBuf,
+        source: PreviewSource,
         meta: ImageMeta,
         img: Arc<DynamicImage>,
     },
     /// 手工路径/非受管理目录（§6.1 Q6）：仅文本 meta 行降级，不触发解码。
-    Degraded { path: PathBuf, reason: String },
+    Degraded {
+        source: PreviewSource,
+        reason: String,
+    },
     /// 校验/解码失败：固定错误文案（安全降级，reason 仅内部诊断，不含路径）。
-    Error { path: PathBuf, reason: String },
+    Error {
+        source: PreviewSource,
+        reason: String,
+    },
 }
 
 pub static IMAGE_PREVIEW_STATE: AtomStatic<ImagePreviewState> =
