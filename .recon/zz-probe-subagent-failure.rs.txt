@@ -1,0 +1,242 @@
+//! [对抗审计临时探针 2026-10-13]
+//!
+//! 问题：未协商 peri 能力的标准 ACP 客户端在 `session/load` 回放里，是否会收到
+//! `_meta.peri.subagentFailure`（Peri 私有字段）？
+//!
+//! 静态链路（读代码得到的假设）：
+//! 1. `event/tool_projection.rs::project_tool_completion` 在 `failure: Some(_)` 时**无条件**
+//!    写 `_meta.peri.subagentFailure`；
+//! 2. `dispatch/session_replay.rs` 的 `BaseMessage::Tool` 分支把 `subagent_failure.as_ref()`
+//!    原样传给它，不按 caps 门控；
+//! 3. `replay_tool_update` 只在 `replay_meta` 给出值（`caps.replay == true`）时 extend，
+//!    caps 关闭时**不剔除**已写入的 `peri` 字段；
+//! 4. 未协商路径 `replay_canonical_history_streamed` 走同一份 `project_message_updates`。
+//!
+//! 本探针用真实 `ServerLoop` + MPSC 抓 wire 事实。本文件是审计临时产物。
+use super::*;
+use crate::transport::AcpTransport;
+use peri_acp_types::error::{SafeModelErrorDiagnostic, SafeSubagentFailure};
+use peri_acp_types::messages::BaseMessage;
+use peri_acp_types::store::PersistedPayload;
+use peri_acp_types::PeriCaps;
+use serde_json::{json, Value};
+use tokio_util::sync::CancellationToken;
+
+fn collect_keys(value: &Value, out: &mut Vec<String>) {
+    match value {
+        Value::Object(map) => {
+            for (key, child) in map {
+                out.push(key.clone());
+                collect_keys(child, out);
+            }
+        }
+        Value::Array(items) => items.iter().for_each(|item| collect_keys(item, out)),
+        _ => {}
+    }
+}
+
+async fn drain_notifications(
+    client: &crate::transport::mpsc::MpscClientTransport,
+) -> Vec<(String, Value)> {
+    let mut out = Vec::new();
+    loop {
+        tokio::select! {
+            biased;
+            incoming = client.recv() => match incoming {
+                Some(crate::transport::types::IncomingMessage::Notification { method, params }) => {
+                    out.push((method, params))
+                }
+                Some(_) => {}
+                None => break,
+            },
+            _ = std::future::ready(()) => break,
+        }
+    }
+    out
+}
+
+fn probe_caps() -> PeriCaps {
+    PeriCaps {
+        history_pagination: true,
+        replay: true,
+        ..Default::default()
+    }
+}
+
+/// 起真实 `ServerLoop`（复制 `history_page_wire_test::spawn_loop` 的最小形态）。
+async fn probe_spawn_loop(
+    cfg: Arc<AcpServerConfig>,
+    sessions: crate::host::SharedSessions,
+    connection_caps: Option<PeriCaps>,
+) -> (
+    Arc<crate::transport::mpsc::MpscClientTransport>,
+    tokio::task::JoinHandle<()>,
+) {
+    let (client, server) = crate::transport::mpsc::mpsc_transport_pair();
+    let client = Arc::new(client);
+    let server: Arc<dyn AcpTransport> = Arc::new(server);
+    let task = tokio::spawn(async move {
+        let locks = Arc::new(tokio::sync::Mutex::new(HashMap::new()));
+        let (cont_tx, _cont_rx) = tokio::sync::mpsc::unbounded_channel();
+        let cont_tx = Arc::new(cont_tx);
+        let mut context = crate::host::connection::ConnectionContext::new(false);
+        if let Some(caps) = connection_caps {
+            context.commit_initialize(caps);
+        }
+        let connection = Arc::new(tokio::sync::Mutex::new(context));
+        let cancellation = CancellationToken::new();
+        crate::host::server_loop::ServerLoop {
+            transport: &server,
+            cfg: &cfg,
+            sessions: &sessions,
+            prompt_locks: &locks,
+            cont_tx: &cont_tx,
+            connection: &connection,
+            connection_cancellation: &cancellation,
+        }
+        .run()
+        .await;
+    });
+    (client, task)
+}
+
+async fn probe_fixture(
+    tmp: &tempfile::TempDir,
+) -> (
+    Arc<AcpServerConfig>,
+    crate::host::SharedSessions,
+    String,
+) {
+    let config = make_peri_config_with_provider(make_provider_config(
+        "a",
+        "openai",
+        "unused-test-key",
+        "gpt-4o",
+    ));
+    let provider = LlmProvider::from_config(&config).unwrap();
+    let cfg = Arc::new(make_server_config(config, provider, tmp).await);
+    let mut sessions = HashMap::new();
+    let sid = register_session_with_history(&mut sessions, tmp.path().to_str().unwrap(), &cfg).await;
+    // 夹具再追加一条带 subagent_failure 的工具结果：这是历史页 / 回放里实际会出现的 payload。
+    let failure = SafeSubagentFailure::new(
+        "child-1",
+        SafeModelErrorDiagnostic::from_model(
+            peri_model::ModelError::http_status(429, "provider.example", Some("req-1")).diagnostic(),
+        ),
+    )
+    .expect("valid safe failure");
+    let tool = BaseMessage::tool_result_with_execution_and_failure(
+        "tc-probe",
+        "child failed",
+        true,
+        None,
+        Some(failure),
+    );
+    cfg.session_resources
+        .append_history(&sid, &[PersistedPayload::Message(tool)])
+        .await
+        .unwrap();
+    (
+        cfg,
+        Arc::new(tokio::sync::Mutex::new(sessions)),
+        sid,
+    )
+}
+
+#[tokio::test]
+#[serial]
+async fn zz_probe_unnegotiated_load_wire_fields() {
+    let tmp = tempfile::TempDir::new().unwrap();
+    let (cfg, sessions, sid) = probe_fixture(&tmp).await;
+    let (client, task) = probe_spawn_loop(Arc::clone(&cfg), sessions, None).await;
+
+    client
+        .send_request(
+            "initialize",
+            json!({
+                "protocolVersion": 1,
+                "clientCapabilities": { "fs": { "readTextFile": true, "writeTextFile": false } },
+            }),
+        )
+        .await
+        .expect("标准 initialize 必须成功");
+    let response = client
+        .send_request("session/load", json!({ "sessionId": sid }))
+        .await
+        .expect("未协商连接 load 必须成功");
+    let notifications = drain_notifications(&client).await;
+    task.abort();
+
+    let mut keys = Vec::new();
+    collect_keys(&response, &mut keys);
+    for (method, params) in &notifications {
+        if params.to_string().contains("subagentFailure") {
+            let update = &params["update"];
+            println!(
+                "PROBE-UNNEGOTIATED: method={method} sessionUpdate={:?}",
+                update["sessionUpdate"]
+            );
+            println!("PROBE-UNNEGOTIATED: offending _meta = {}", update["_meta"]);
+        }
+        collect_keys(params, &mut keys);
+    }
+    let unique: std::collections::BTreeSet<&String> = keys.iter().collect();
+    let peri_fields: Vec<&String> = unique
+        .iter()
+        .copied()
+        .filter(|key| key.starts_with("peri") || *key == "subagentFailure")
+        .collect();
+    println!("PROBE-UNNEGOTIATED: peri-ish fields on wire = {peri_fields:?}");
+    println!("PROBE-UNNEGOTIATED: all unique keys = {unique:?}");
+    let six: Vec<&str> = vec![
+        "periReplay",
+        "periLoadGeneration",
+        "nextCursor",
+        "snapshotToken",
+        "periEntryId",
+        "periPosition",
+    ];
+    let six_hits: Vec<&String> = unique
+        .iter()
+        .copied()
+        .filter(|key| six.contains(&key.as_str()))
+        .collect();
+    println!("PROBE-UNNEGOTIATED: six-field hits = {six_hits:?}");
+    assert!(
+        peri_fields.is_empty(),
+        "反例：未协商连接收到 Peri 私有字段 {peri_fields:?}（六字段命中 = {six_hits:?}）"
+    );
+}
+
+/// 对照：协商连接（caps 全开）同样 load → `periReplay` 等字段应出现，证明夹具非空转。
+#[tokio::test]
+#[serial]
+async fn zz_probe_negotiated_load_wire_fields() {
+    let tmp = tempfile::TempDir::new().unwrap();
+    let (cfg, sessions, sid) = probe_fixture(&tmp).await;
+    let (client, task) = probe_spawn_loop(Arc::clone(&cfg), sessions, Some(probe_caps())).await;
+
+    let response = client
+        .send_request("session/load", json!({ "sessionId": sid }))
+        .await
+        .expect("协商连接 load 必须成功");
+    let notifications = drain_notifications(&client).await;
+    task.abort();
+
+    let mut keys = Vec::new();
+    collect_keys(&response, &mut keys);
+    for (_method, params) in &notifications {
+        collect_keys(params, &mut keys);
+    }
+    let unique: std::collections::BTreeSet<&String> = keys.iter().collect();
+    let peri_fields: Vec<&String> = unique
+        .iter()
+        .copied()
+        .filter(|key| key.starts_with("peri") || *key == "subagentFailure")
+        .collect();
+    println!("PROBE-NEGOTIATED: peri-ish fields on wire = {peri_fields:?}");
+    assert!(
+        peri_fields.iter().any(|key| key.as_str() == "periReplay"),
+        "对照组应出现 periReplay: {peri_fields:?}"
+    );
+}

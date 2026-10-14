@@ -1,0 +1,248 @@
+// ═══════════════════ S11 独立对抗性复核探针（非交付物；复核后删除）═══════════════════
+//
+// 复核者（independent verifier）添加，用于证伪 `initial_history_cursor` 的锚点规则。
+// 源码留档：`.recon/S11-verify-probe.rs.txt`。跑完即从此文件删除。
+
+use peri_acp_types::session_resources::ChildSnapshot;
+use peri_acp_types::store::InheritedContext;
+use peri_acp_types::system_reminder::{
+    ReminderAudience, ReminderAudiences, ReminderCategory, ReminderDelivery, ReminderSeverity,
+    ReminderSource, SystemReminder, TrustedSystemReminderFactory, SYSTEM_REMINDER_VERSION,
+};
+
+/// 只有 Model 受众的 canonical reminder：`displayable_to_client()` = false。
+fn s11_model_only_reminder(body: &str) -> PersistedPayload {
+    let reminder = TrustedSystemReminderFactory::for_producer()
+        .construct(SystemReminder {
+            version: SYSTEM_REMINDER_VERSION,
+            category: ReminderCategory::Task,
+            source: ReminderSource("s11_probe".into()),
+            kind: "probe".into(),
+            severity: ReminderSeverity::Info,
+            delivery: ReminderDelivery::Configurable,
+            audiences: ReminderAudiences(vec![ReminderAudience::Model]),
+            body: body.to_owned(),
+            summary: None,
+            metadata: serde_json::json!({}),
+        })
+        .unwrap();
+    PersistedPayload::SystemReminder {
+        id: MessageId::new(),
+        reminder,
+    }
+}
+
+/// 子会话身份 System 条目（`session/subagent/factory/spawn.rs` 的持久化形状）。
+fn s11_identity(text: &str) -> PersistedPayload {
+    PersistedPayload::Message(BaseMessage::system(text))
+}
+
+/// 真实 Full 形状：把**全部未排除的自有 non-System 条目**标 excluded，并追加一条摘要消息
+/// （照抄 `peri-agent/src/agent/compact_v2/full.rs:86-126` 的 flag_updates 选择规则）。
+async fn s11_full_like(cfg: &AcpServerConfig, sid: &str, summary: &str) -> MessageId {
+    let snapshot = cfg.session_resources.load_session_snapshot(&sid.to_string()).await.unwrap();
+    let flag_updates: Vec<(MessageId, MessageFlags)> = snapshot
+        .payloads
+        .iter()
+        .filter(|payload| !snapshot.flags.get(&payload.id()).is_some_and(|f| f.excluded))
+        .filter(|payload| !matches!(payload.as_message(), Some(BaseMessage::System { .. })))
+        .map(|payload| {
+            (
+                payload.id(),
+                MessageFlags {
+                    excluded: true,
+                    ..Default::default()
+                },
+            )
+        })
+        .collect();
+    let summary_message = BaseMessage::ai(summary);
+    let summary_id = summary_message.id();
+    cfg.session_resources
+        .apply_compaction(
+            &sid.to_string(),
+            &CompactionChange {
+                flag_updates,
+                appended_messages: vec![summary_message],
+            },
+        )
+        .await
+        .unwrap();
+    summary_id
+}
+
+/// 真实子会话：`save_child` 落继承区（与 subagent spawn 的生产入口同一个 API）。
+async fn s11_save_child(
+    cfg: &AcpServerConfig,
+    cwd: &str,
+    parent: &str,
+    inherited: Vec<PersistedPayload>,
+) -> String {
+    let snapshot = cfg
+        .session_resources
+        .load_session_snapshot(&parent.to_string())
+        .await
+        .unwrap();
+    let BindingState::Bound(binding) = snapshot.binding else {
+        panic!("父会话必须有执行绑定")
+    };
+    let FrozenState::Present(frozen) = snapshot.frozen else {
+        panic!("父会话必须有已保存的 frozen 快照")
+    };
+    let child_id = uuid::Uuid::now_v7().to_string();
+    cfg.session_resources
+        .save_child(&ChildSnapshot {
+            target: NewSession {
+                thread_id: child_id.clone(),
+                created_at: chrono::Utc::now().to_rfc3339(),
+                meta: NewSessionMeta {
+                    title: Some("s11 child".into()),
+                    cwd: cwd.to_owned(),
+                    parent_thread_id: Some(parent.to_owned()),
+                    hidden: true,
+                    cancel_policy: Default::default(),
+                    snapshot_at_message_id: None,
+                },
+                binding,
+                frozen,
+            },
+            parent_id: parent.to_owned(),
+            root_id: parent.to_owned(),
+            inherited: InheritedContext {
+                payloads: inherited,
+                flags: Default::default(),
+            },
+        })
+        .await
+        .unwrap();
+    child_id
+}
+
+/// canonical 形状快照：`(有效视图, 全部自有行 id 顺序, 被排除行 id)`。
+async fn s11_shape(cfg: &AcpServerConfig, sid: &str) -> (Vec<PersistedPayload>, Vec<MessageId>, Vec<MessageId>) {
+    let canonical = cfg.session_resources.load_session_snapshot(&sid.to_string()).await.unwrap();
+    let effective = cfg
+        .session_resources
+        .load_active_snapshot(&sid.to_string())
+        .await
+        .unwrap()
+        .payloads;
+    let excluded = canonical
+        .payloads
+        .iter()
+        .filter(|payload| canonical.flags.get(&payload.id()).is_some_and(|f| f.excluded))
+        .map(PersistedPayload::id)
+        .collect();
+    (
+        effective,
+        canonical.payloads.iter().map(PersistedPayload::id).collect(),
+        excluded,
+    )
+}
+
+/// 生产不变量：**没有任何被排除的可展示行比某个未被排除的可展示行更晚**
+/// （即排除集是「最旧那一段」，锚点选出的最旧可展示条目必然比全部归档行更晚）。
+/// 返回违反者，供断言直接打印。
+async fn s11_exclusion_invariant_violations(cfg: &AcpServerConfig, sid: &str) -> Vec<(MessageId, MessageId)> {
+    let canonical = cfg.session_resources.load_session_snapshot(&sid.to_string()).await.unwrap();
+    // 方向：被排除的可展示行**不得**晚于任何未被排除的可展示行（排除集必须是最旧那一段）。
+    let mut first_effective: Option<MessageId> = None;
+    let mut violations = Vec::new();
+    for payload in &canonical.payloads {
+        let excluded = canonical
+            .flags
+            .get(&payload.id())
+            .is_some_and(|flags| flags.excluded);
+        if !payload.displayable_to_client() {
+            continue;
+        }
+        match (excluded, first_effective) {
+            (false, None) => first_effective = Some(payload.id()),
+            (true, Some(effective)) => violations.push((payload.id(), effective)),
+            _ => {}
+        }
+    }
+    violations
+}
+
+/// 走完一整条页链（直到 `nextCursor = null`），返回逐页的可展示条目 id（页内历史正序）。
+async fn s11_walk_chain(
+    cfg: &AcpServerConfig,
+    sid: &str,
+    first: peri_acp_types::history_page::HistoryCursor,
+    limit: usize,
+) -> Vec<Vec<MessageId>> {
+    let mut pages = Vec::new();
+    let mut next = Some(first);
+    for _ in 0..16 {
+        let Some(cursor) = next else { return pages };
+        let page = crate::dispatch::load_history_page(
+            cfg.controller.as_ref(),
+            sid,
+            &cursor,
+            limit,
+            history_page::PAGE_BYTE_BUDGET,
+        )
+        .await
+        .expect("页链必须可读");
+        pages.push(page.items.iter().map(|item| item.id).collect());
+        next = page.next_cursor;
+    }
+    panic!("页链没有收敛");
+}
+
+/// 判据 1 / 3（反例构造）：**有效视图里一条可展示条目都没有**，但存储里还有一条更老的
+/// **可展示**归档行（h1）。兜底锚点必须是「最新一条有效行」（model-only reminder），
+/// 才可能把 h1 翻出来；退回有效视图第一条（System）会直接谎称「没有更早历史」。
+
+// ═══════════════════ S11 复核探针（第二批；非交付物，跑完删除）═══════════════════
+
+/// 判据 3（形状之二）：有效视图 = [身份 System, model-only reminder]（一条可展示条目都没有，
+/// 也没有任何归档行）。兜底锚点取「最新一条有效行」→ 给一个游标 → 下一页是空页 → 然后收尾。
+/// 断言：不谎称「没有更早历史」的方向不制造重复/漏项（没有任何可展示行丢失），
+/// 且空页不打断浏览链。
+#[tokio::test]
+#[serial]
+async fn s11_probe_system_plus_model_only_reminder_yields_empty_page_not_a_lie() {
+    let tmp = tempfile::TempDir::new().unwrap();
+    let fixture = PageFixture::new(&tmp).await;
+    let sid = create_bound_fixture(
+        &fixture.cfg,
+        tmp.path().to_str().unwrap(),
+        Some("s11-system-plus-reminder"),
+    )
+    .await;
+    let system = s11_identity("identity");
+    let reminder = s11_model_only_reminder("model-only note");
+    fixture
+        .cfg
+        .session_resources
+        .append_history(&sid, &[system.clone(), reminder.clone()])
+        .await
+        .unwrap();
+
+    let (effective, _, excluded) = s11_shape(&fixture.cfg, &sid).await;
+    assert_eq!(
+        effective.iter().map(PersistedPayload::id).collect::<Vec<_>>(),
+        vec![system.id(), reminder.id()],
+        "形状前提：有效视图 = [System, model-only reminder]"
+    );
+    assert!(excluded.is_empty(), "形状前提：没有任何归档行");
+
+    let initial = crate::dispatch::initial_history_cursor(&fixture.cfg.controller, &sid)
+        .await
+        .unwrap();
+    let cursor = initial
+        .next_cursor
+        .expect("兜底锚点是 reminder（不是范围起点），会给出游标");
+    assert_eq!(cursor.anchor, reminder.id(), "兜底锚点 = 最新一条有效行");
+
+    let pages = s11_walk_chain(&fixture.cfg, &sid, cursor, 50).await;
+    assert_eq!(pages.len(), 1, "只有一页：{pages:?}");
+    assert!(pages[0].is_empty(), "这一页整页不可展示（System 被过滤）");
+    // 关键：这一形状下没有任何可展示 canonical 行，所以空页不构成漏项；
+    // 游标也不是「谎报有更早历史」——它确实指向 System 行（位置照常推进）。
+    let canonical_displayable: Vec<MessageId> = vec![];
+    let delivered: Vec<MessageId> = pages.iter().flatten().copied().collect();
+    assert_eq!(delivered, canonical_displayable, "没有可展示行可丢");
+}

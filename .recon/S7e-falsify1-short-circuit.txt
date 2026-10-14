@@ -1,0 +1,50 @@
+   Compiling peri-tui v0.2.0 (/Users/konghayao/code/ai/peri-v4p3/.worktrees/peri-transcript-history/peri-tui)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 1m 35s
+     Running unittests src/lib.rs (target/debug/deps/peri_tui-c74b60c404b979a4)
+
+running 11 tests
+test kit::message_area::viewport_anchor::tests::relocate_survives_neighbouring_tool_cards_collapsing_into_one_group ... ok
+test kit::message_area::viewport_anchor::e2e_tests::a20_e2e_collapsed_group_shape_keeps_the_anchored_unit_screen_row ... FAILED
+test kit::message_area::viewport_anchor::e2e_tests::a20_e2e_middle_gap_fill_does_not_move_the_viewport ... FAILED
+test kit::message_area::viewport_anchor::tests::capture_and_relocate_keep_the_anchored_unit_on_its_screen_row ... ok
+test kit::message_area::viewport_anchor::e2e_tests::a20_e2e_insert_above_viewport_keeps_the_anchored_unit_screen_row ... FAILED
+test kit::message_area::viewport_anchor::tests::relocate_does_not_clamp_a_within_unit_offset_that_outgrew_the_unit ... ok
+test kit::message_area::viewport_anchor::tests::relocate_is_zero_when_the_inserted_block_is_below_the_viewport ... ok
+test kit::message_area::viewport_anchor::tests::relocate_refuses_when_the_anchored_unit_was_absorbed_into_a_group ... ok
+test kit::message_area::viewport_anchor::e2e_tests::a20_e2e_group_split_keeps_the_anchored_unit_screen_row ... FAILED
+test kit::message_area::viewport_anchor::tests::target_for_skips_follow_bottom_and_bottom_sentinel ... ok
+test kit::message_area::viewport_anchor::tests::relocate_refuses_when_identity_is_missing_or_ambiguous ... ok
+
+failures:
+
+---- kit::message_area::viewport_anchor::e2e_tests::a20_e2e_collapsed_group_shape_keeps_the_anchored_unit_screen_row stdout ----
+
+thread 'kit::message_area::viewport_anchor::e2e_tests::a20_e2e_collapsed_group_shape_keeps_the_anchored_unit_screen_row' (100083857) panicked at peri-tui/src/kit/message_area/viewport_anchor_e2e_test.rs:256:10:
+并入帧必须产出重定位（身份认得出来）
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+---- kit::message_area::viewport_anchor::e2e_tests::a20_e2e_middle_gap_fill_does_not_move_the_viewport stdout ----
+
+thread 'kit::message_area::viewport_anchor::e2e_tests::a20_e2e_middle_gap_fill_does_not_move_the_viewport' (100083860) panicked at peri-tui/src/kit/message_area/viewport_anchor_e2e_test.rs:256:10:
+并入帧必须产出重定位（身份认得出来）
+
+---- kit::message_area::viewport_anchor::e2e_tests::a20_e2e_insert_above_viewport_keeps_the_anchored_unit_screen_row stdout ----
+
+thread 'kit::message_area::viewport_anchor::e2e_tests::a20_e2e_insert_above_viewport_keeps_the_anchored_unit_screen_row' (100083859) panicked at peri-tui/src/kit/message_area/viewport_anchor_e2e_test.rs:256:10:
+并入帧必须产出重定位（身份认得出来）
+
+---- kit::message_area::viewport_anchor::e2e_tests::a20_e2e_group_split_keeps_the_anchored_unit_screen_row stdout ----
+
+thread 'kit::message_area::viewport_anchor::e2e_tests::a20_e2e_group_split_keeps_the_anchored_unit_screen_row' (100083858) panicked at peri-tui/src/kit/message_area/viewport_anchor_e2e_test.rs:256:10:
+并入帧必须产出重定位（身份认得出来）
+
+
+failures:
+    kit::message_area::viewport_anchor::e2e_tests::a20_e2e_collapsed_group_shape_keeps_the_anchored_unit_screen_row
+    kit::message_area::viewport_anchor::e2e_tests::a20_e2e_group_split_keeps_the_anchored_unit_screen_row
+    kit::message_area::viewport_anchor::e2e_tests::a20_e2e_insert_above_viewport_keeps_the_anchored_unit_screen_row
+    kit::message_area::viewport_anchor::e2e_tests::a20_e2e_middle_gap_fill_does_not_move_the_viewport
+
+test result: FAILED. 7 passed; 4 failed; 0 ignored; 0 measured; 1812 filtered out; finished in 0.10s
+
+error: test failed, to rerun pass `-p peri-tui --lib`

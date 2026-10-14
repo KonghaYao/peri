@@ -1,0 +1,27 @@
+bun test v1.4.2 (744846f84)
+
+tests/zz-s7c-verify.test.ts:
+(pass) S1 独立探针：Compact 失败的展示收敛 > S1-a command_feedback(error) 让 compactionStatus 离开 running 并在 view 可见 [5.52ms]
+(pass) S1 独立探针：Compact 失败的展示收敛 > S1-b command_feedback(warning) 收敛为 cancelled [0.81ms]
+(pass) S1 独立探针：Compact 失败的展示收敛 > S1-c【缺口探针】compact_started 之前的真实失败反馈没有任何展示 [0.41ms]
+(pass) S1 独立探针：Compact 失败的展示收敛 > S1-d 终态不被后续反馈改写，且其它命令的反馈不改写已完成的 Compact [0.47ms]
+(pass) S1 独立探针：Compact 失败的展示收敛 > S1-e 自动 Compact 失败经 agent_execution_failed 收敛（轮次失败路径） [1.04ms]
+(pass) S1 独立探针：Compact 失败的展示收敛 > S1-f【风险探针】Compact 运行期间其它命令的 warning 会被记成 cancelled [0.52ms]
+(pass) S3 独立探针：跨路径块身份 > S3-a 页先落库、回放后到：同一个块（块身份一致） [1.51ms]
+(pass) S3 独立探针：跨路径块身份 > S3-b 回放先落库、页后到：同一个块 [0.68ms]
+(pass) S3 独立探针：跨路径块身份 > S3-c 同一 messageId 的两个不同正文子项仍各自成块 [0.70ms]
+(pass) S2 独立探针：原始事件流与文档投影 > S2-a 首屏回放在 stream() 逐条到达，文档仍暂存到响应后一次安装 [2.51ms]
+(pass) S2 独立探针：原始事件流与文档投影 > S2-b 失败代次：文档不留痕；stream() 在失败前不可消费，队列随失败丢弃 [0.71ms]
+(pass) S4 独立探针：可区分的原因 > S4-a 窗口存在但 nextCursor=null → exhausted（不是未协商） [0.68ms]
+(pass) S4 独立探针：可区分的原因 > S4-b 响应没有窗口 → not_negotiated [0.22ms]
+(pass) S4 独立探针：可区分的原因 > S4-c rewind 之后 → invalidated（与 exhausted 区分） [0.62ms]
+(pass) A22 独立探针：代次暂存与重试 > A22-a 失败丢弃 + 同会话重试恰好一份 + 失败代次迟到不污染 [0.53ms]
+(pass) A22 独立探针：代次暂存与重试 > A22-b 订阅先于 load：响应前到达的回放一条不漏（不漏消息） [0.45ms]
+(pass) S5 独立探针：公开出口 > S5-a 导出名可消费，取值与文档一致 [0.04ms]
+(pass) S5 独立探针：公开出口 > S5-b 历史页 oversize 标记可从 view 读 [0.28ms]
+
+ 18 pass
+ 0 fail
+ 46 expect() calls
+Ran 18 tests across 1 file. [202.00ms]
+PROBE EXIT=0

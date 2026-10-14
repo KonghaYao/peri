@@ -1,0 +1,25 @@
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 0.23s
+     Running unittests src/lib.rs (target/debug/deps/peri_acp-ec56433c3d2253bf)
+
+running 2 tests
+PROBE-UNNEGOTIATED: method=session/update sessionUpdate=String("tool_call_update")
+PROBE-UNNEGOTIATED: offending _meta = {"peri":{"subagentFailure":{"child_thread_id":"child-1","category":"http_status","message":"HTTP 429, request id: req-1, provider: provider.example","causes":[],"diagnostic":{"category":"http_status","status":429,"provider":"provider.example","request_id":"req-1","transport":null,"protocol":null,"retry_attempts":null,"retry_kind":null,"message":null,"body":null,"causes":[]}}}}
+PROBE-UNNEGOTIATED: peri-ish fields on wire = ["peri", "subagentFailure"]
+PROBE-UNNEGOTIATED: all unique keys = {"_meta", "availableModes", "body", "category", "causes", "child_thread_id", "configOptions", "content", "currentModeId", "currentValue", "description", "diagnostic", "id", "message", "messageId", "modes", "name", "options", "peri", "protocol", "provider", "rawOutput", "request_id", "retry_attempts", "retry_kind", "sessionId", "sessionUpdate", "status", "subagentFailure", "text", "toolCallId", "transport", "type", "update", "value"}
+PROBE-UNNEGOTIATED: six-field hits = []
+
+thread 'host::requests::tests::zz_adversarial_probe_tests::zz_probe_unnegotiated_load_wire_fields' (102210807) panicked at peri-acp/src/host/zz_adversarial_probe_test.rs:205:5:
+反例：未协商连接收到 Peri 私有字段 ["peri", "subagentFailure"]（六字段命中 = []）
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+test host::requests::tests::zz_adversarial_probe_tests::zz_probe_unnegotiated_load_wire_fields ... FAILED
+PROBE-NEGOTIATED: peri-ish fields on wire = ["peri.sessionWorkspaceV1", "periEntryId", "periLoadGeneration", "periPosition", "periReplay"]
+test host::requests::tests::zz_adversarial_probe_tests::zz_probe_negotiated_load_wire_fields ... ok
+
+failures:
+
+failures:
+    host::requests::tests::zz_adversarial_probe_tests::zz_probe_unnegotiated_load_wire_fields
+
+test result: FAILED. 1 passed; 1 failed; 0 ignored; 0 measured; 884 filtered out; finished in 0.16s
+
+error: test failed, to rerun pass `-p peri-acp --lib`

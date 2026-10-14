@@ -1,0 +1,27 @@
+bun test v1.4.2 (744846f84)
+
+tests/zz-verification-repro.test.ts:
+(pass) verification repro (independent) > A22: a failed load discards its staged replay, and a retry installs exactly one copy [5.25ms]
+136 |     // 真实失败载体：peri-acp/src/event/mapper.rs 把反馈经 AcpEvent::CommandFeedback（type=command_feedback）投递。
+137 |     docs.accept({ jsonrpc: "2.0", method: "peri/agent_event", params: { sessionId: "s1", event_json: JSON.stringify({
+138 |       type: "command_feedback", value: { level: "error", message: "compact failed", channel: "uiOnly" },
+139 |     }) } });
+140 |     // 记录当前行为：失败后没有展示、compactionStatus 不收敛（A12 要求「失败状态正确」）。
+141 |     expect(info.get("compactionStatus")).toBe("running");
+                                               ^
+error: expect(received).toBe(expected)
+
+Expected: "running"
+Received: "failed"
+
+      at <anonymous> (/Users/konghayao/code/ai/peri-v4p3/.worktrees/peri-transcript-history/npm-packages/@peri-sdk/tests/zz-verification-repro.test.ts:141:42)
+(fail) verification repro (independent) > A12: a failed compact leaves compactionStatus stuck at running (current behaviour) [14.42ms]
+(pass) verification repro (independent) > A12: after an auto compact the live turn keeps streaming into the same entry [1.13ms]
+(pass) verification repro (independent) > A15 probe: a first screen without earlier history reports reason not_negotiated [0.48ms]
+(fail) verification repro (independent) > probe: the same entryId reaching the doc from a page and from a replay keeps one block [0.67ms]
+  ^ this test is marked as failing but it passed. Remove `.failing` if tested behavior now works
+
+ 3 pass
+ 2 fail
+ 20 expect() calls
+Ran 5 tests across 1 file. [82.00ms]
