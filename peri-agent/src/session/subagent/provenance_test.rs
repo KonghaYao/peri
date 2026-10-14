@@ -273,7 +273,7 @@ async fn test_sqlite_subagent_spawn_full_micro_cold_resume_preserves_provenance(
     let resumed = SessionFactory::resume_subagent(Some(&parent), config)
         .await
         .unwrap();
-    {
+    let archived_ids = {
         let arc = resumed.session.transcript();
         let transcript = arc.read();
         assert_eq!(transcript.ancestor_len(), parent_messages.len());
@@ -310,7 +310,9 @@ async fn test_sqlite_subagent_spawn_full_micro_cold_resume_preserves_provenance(
                 "有效视图不携带归档条目的排除标记"
             );
         }
-        drop(transcript);
+        archived_ids
+    };
+    {
         // 归档原文仍在存储里可读：收缩是「不再由核心热态持有」，不是物理删除。
         let archived = reopened
             .load_session_history(&peri_acp_types::thread::ThreadId::from(child_id.clone()))

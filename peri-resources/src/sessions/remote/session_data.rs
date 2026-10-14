@@ -154,7 +154,7 @@ impl RemoteSessionData {
         ));
         let store = factory.connect().await?;
         // 打开路径的两份只读事实：身份（版本 + 契约 + store id）与**会话表形状**。后者按契约
-        // 声明的代数探测（只发 SELECT），读得动的库必须相符——形状不符即拒绝，不下发任何读写。
+        // 声明的代数探测（只读 SELECT/PRAGMA），读得动的库必须相符——形状不符即拒绝，不下发任何读写。
         let read = store.read_identity().await?;
         let shape = probe_shape(&store, &read).await?;
         let (store_id, initialization) = match open_step(read, shape, access)? {

@@ -416,6 +416,13 @@ impl SessionResources for SessionResourcesImpl {
             .await
     }
 
+    async fn relink_unbound_session(
+        &self,
+        id: &ThreadId,
+    ) -> SessionResourceResult<ResolvedWorkspace> {
+        SessionResourcesImpl::relink_unbound_session(self, id).await
+    }
+
     // ── 读取 ──
 
     async fn load_session_snapshot(&self, id: &ThreadId) -> SessionResourceResult<SessionSnapshot> {

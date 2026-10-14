@@ -33,6 +33,8 @@ pub(crate) mod compact_config;
 mod connection;
 mod lifecycle;
 mod workspace;
+/// session 级交互装配（idle 准入规则链 / 交互门取用）；见模块文档。
+mod workspace_interaction;
 #[cfg(not(target_os = "emscripten"))]
 mod workspace_resources;
 pub use lifecycle::{spawn_acp_server, AcpHostHandle, AcpHostShutdownReport};
@@ -50,11 +52,20 @@ mod execution;
 #[path = "executor_flow_test.rs"]
 mod executor_flow_tests;
 mod history_page;
+/// session-owned 交互路由（按可信归属选审批 endpoint；投递失败原因的诚实产出点：
+/// `NoOnlineEndpoint` / `OwnerUnmatched` / `AttachmentDetached`，见 `interaction_router.rs`）。
+mod interaction_router;
 
+/// MCP Apps facade（七个 `peri/mcp/apps/*` 方法）与请求账本（设计 4a §1.3/§4.4）。
+mod apps_facade;
+mod apps_ledger;
 #[cfg(test)]
 #[path = "executor_flow_beta_flag_test.rs"]
 mod executor_flow_beta_flag_tests;
 mod mcp_apps;
+#[cfg(test)]
+#[path = "mcp_apps_idle_test.rs"]
+mod mcp_apps_idle_tests;
 // V-02（W4）的 host seam 断言：首个 LLM 请求的三个冻结 effective name、能力关闭的
 // 首个请求面、`PERI_MCP_BUILTIN=off` 语义、启动 fatal 投影、BLOCKED 缺口复证。
 // 模块名参与 `cargo test` 过滤（`host::mcp_v4_builtin`），故不沿用 `mod tests`。
@@ -134,6 +145,12 @@ pub(crate) use requests::handle_request_for_connection;
 
 // ── Session state ────────────────────────────────────────────────────────────
 
+/// Host 程序化交互命名空间：cron / loop 调度触发的进入模型前审批。
+///
+/// 与 [`peri_acp_types::tool_invocation::InvocationOrigin::Host`] 同族（Host 入口
+/// 命名空间）；交互归属用它 + session 级单调序号定位一次 Host 请求。
+pub(crate) const SCHEDULED_TRIGGER_NAMESPACE: &str = "peri/cron/scheduled-trigger";
+
 pub(crate) struct SessionState {
     // 以下字段 stdio 路径的 typed handler（host::stdio）需要读写，批 1 起
     // 提升为 pub(crate)；其余沿用 host 内部模块可见性。
@@ -155,6 +172,18 @@ pub(crate) struct SessionState {
     /// **追加消息与 Full/Smart compact 不推进它**：REQ-H02 要求一次在途浏览不被它们打断。
     pub(crate) structure_version: u64,
     pub(crate) cancel_token: Option<CancellationToken>,
+    /// **session-owned 交互互斥门**：同一 session 内 Approval / Questions 串行。
+    ///
+    /// 生命周期 = 本 session 状态（跨轮存活），不随某一轮的 broker 重建：
+    /// `run_prompt` 每轮新建 `AcpTransportBroker`（ACP transport 是可替换
+    /// endpoint），但都借用本句柄，跨轮互斥因此成立（设计 §4.3）。session
+    /// 关闭/重建（`session/close` → 本结构 remove；`session/load` 新建）后
+    /// 得到新门，旧门的等待者随旧 session 一起结束。
+    pub(crate) interaction_gate: Arc<tokio::sync::Mutex<()>>,
+    /// **session 级 Host 入口请求序号**：Host 程序化交互归属
+    /// （[`peri_acp_types::interaction::TrustedInteractionOwner::Host`]）的
+    /// `seq` 单调来源，同一 session 内只增不减。
+    pub(crate) host_request_seq: Arc<std::sync::atomic::AtomicU64>,
     pub(crate) continuation_armed: bool,
     pub(crate) continuation_epoch: u64,
     pub(crate) continuation_in_flight: bool,
@@ -197,6 +226,24 @@ pub struct AcpServerConfig {
     pub(crate) acp_mcp: Option<Arc<dyn peri_acp_types::ports::AcpMcpServerPort>>,
     /// Optional stdio-only MCP Apps backend. Absence keeps the capability fail closed.
     pub mcp_apps_relay: Option<Arc<dyn peri_acp_types::mcp_apps::McpAppsRelayPort>>,
+    /// 会话级 MCP Apps facade（七个 `peri/mcp/apps/*` 方法的唯一实现）。
+    ///
+    /// **会话级字段**：由会话环境装配点（`host/workspace.rs`）与 relay 同点同源
+    /// 构造（同一 router / 同一 runtime epoch）；apps 能力关闭或未装配会话环境时
+    /// 为 `None` ⇒ 请求显式拒绝（fail-closed，不静默降级）。
+    pub(crate) mcp_apps_facade: Option<Arc<apps_facade::SessionAppsFacade>>,
+    /// session entitlement 消费端口（裁决 R4 方案 b：**只接线不注入**）。
+    ///
+    /// **部署级字段**：由 SDK / 服务化部署的装配层注入可信身份层实现；本仓 stdio
+    /// 装配（`assemble_stdio_config` 等）恒为 `None`，会话环境装配把它原样传给
+    /// facade 的 entitlement 门 ⇒ `apps/*` 六个受控方法按契约**默认拒绝**
+    /// （`entitlement_denied`）。本地部署的 Apps 面因此不可用，这是既定代价
+    /// （`implementation-log.md`「已知缺口与移除条件」）。
+    ///
+    /// 与 `peri_acp_types::session::SessionAccessPort` **不得互相替代**：它回答
+    /// 「这个调用者是否有这个 session 的这项授权」，不是「按 id 取得到哪个对象」。
+    pub session_authorization:
+        Option<Arc<dyn peri_acp_types::session_authorization::SessionAuthorizationPort>>,
     pub dynamic_mcp: Option<Arc<dyn peri_acp_types::ports::DynamicMcpDeploymentPort>>,
     /// OAuth 授权事件通道（host 级，跨 session）：装配点创建 (tx, rx) 并注入
     /// tx（MCP 授权回调经此转发 AcpEvent），run_acp_server take rx 后 spawn

@@ -227,11 +227,13 @@ agent 侧收到 `peri/mcp/app` 时按序校验，任一失败按 §8 返回：
 6. **capability 已启用**：当前 ACP connection 声明 Apps/UI capability，且对应 MCP connection profile 已向 server 传播并完成协商。
 7. **权限路径有效**：App 工具调用进入 canonical invocation/HITL seam；不得直接调用低层 MCP peer 绕过审批，稳定规则见 ARC-MCP-APPS-001。
 
-现行模型签发 lease 保存 Act 阶段的 canonical dispatcher，后续 App 调用复用该审批
-路径。宿主 `peri/mcp/invoke`（含重开 UI 后重新调用）没有可用的 canonical 审批上下文时
-返回 `policy_denied`，不调用 MCP server、不签发 lease；不能以 pool 直调、历史审批、
-工具白名单或“会话空闲”替代当前调用的授权。恢复该入口必须接入同一审批能力，
-不创建独立的默认批准路径。
+现行模型签发 record 保存 Act 阶段的 canonical dispatcher，后续 App 调用复用该审批
+路径。宿主 `peri/mcp/invoke`（含重开 UI 后重新调用）接入同一条 canonical 入口：
+目标由客户端字段给出、审批经会话交互门取得，拿不到在线 endpoint 时按事实返回
+「未获批准」`approval_unavailable`（用户拒绝才是 `policy_denied`），不调用 MCP server、
+不签发新 record；不能以 pool 直调、历史审批、工具白名单或“会话空闲”替代当前调用的授权。
+该别名的准入判据只有「会话存在 + 未关闭」，不含「prompt 在飞」这类会话忙判据；
+稳定规则见 ARC-MCP-APPS-001。
 
 `ui/initialize` 属于下游 Web Host ↔ App 的协议握手，Peri 不以 `appInfo.name` 推导授权。Peri session 应由下游针对已发现的 `{serverId, resourceUri, tool binding}` 显式创建/绑定，并将随后 payload 限制在该绑定内。
 

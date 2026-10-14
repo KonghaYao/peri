@@ -45,7 +45,8 @@ use peri_acp_types::builtin_mcp::{find as find_builtin_instance, original_tool_n
 use peri_acp_types::{
     event::{ExecutorEvent, TurnStatus},
     interaction::{
-        ApprovalDecision, InteractionContext, InteractionResponse, UserInteractionBroker,
+        ApprovalDecision, InteractionContext, InteractionResponse, TrustedInteractionOwner,
+        UserInteractionBroker,
     },
     permission::{PermissionMode, SharedPermissionMode},
     session::ExecutionFailureKind,
@@ -151,7 +152,11 @@ impl RecordingBroker {
 
 #[async_trait]
 impl UserInteractionBroker for RecordingBroker {
-    async fn request(&self, context: InteractionContext) -> InteractionResponse {
+    async fn request(
+        &self,
+        _owner: TrustedInteractionOwner,
+        context: InteractionContext,
+    ) -> InteractionResponse {
         match context {
             InteractionContext::Approval { items } => {
                 self.requests.fetch_add(1, Ordering::SeqCst);

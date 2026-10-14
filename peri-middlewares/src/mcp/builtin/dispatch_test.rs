@@ -81,8 +81,8 @@ mod invocation_fixture {
         pub(super) fn context(&self, index: usize) -> ToolContext<'_> {
             let mut context = ToolContext::new(&[], ".")
                 .with_session_identity(FIXTURE_SESSION_ID, "fixture-turn");
-            context.invocation_id = Some(format!("invocation-{index}"));
-            context.tool_call_id = Some(format!("call-{index}"));
+            context.invocation_id = Some(format!("invocation-{index}").into());
+            context.tool_call_id = Some(format!("call-{index}").into());
             context
         }
     }
@@ -335,33 +335,34 @@ async fn call_tool_smoke_and_effective_bridge_round_trip() {
         );
 
         let failure_bridge = bridge_of(&bridges, effective_of(case.fail_tool));
-        let bridged_error = failure_bridge
-            .invoke(case.fail_input.clone(), invocation_fixture.context(1))
+        let bridged_failure = failure_bridge
+            .invoke_output(case.fail_input.clone(), invocation_fixture.context(1))
             .await
-            .expect_err("工具级失败经桥必须 Err（桥把 error 结果转成 ApplicationFailed）");
-        match bridged_error.downcast_ref::<peri_acp_types::tools::EffectiveToolError>() {
-            Some(error) => {
-                assert_eq!(
-                    error.code,
-                    peri_acp_types::tools::EffectiveToolErrorCode::ApplicationFailed
-                );
-                assert_eq!(
-                    error.message,
-                    ToolCallError::CallFailed {
-                        server: case.instance.into(),
-                        tool: case.fail_tool.into(),
-                        reason: failure_text.into(),
-                    }
-                    .to_string(),
-                    "{}: 桥接失败原因必须与线路失败文本逐字一致",
-                    case.instance
-                );
+            .expect("工具级失败是线路 error 结果：必须是正常返回值，不是协议错误");
+        assert_eq!(
+            bridged_failure.is_error(),
+            Some(true),
+            "{}: 线路 error 结果必须作为 is_error 事实浮出",
+            case.instance
+        );
+        assert!(
+            bridged_failure
+                .raw()
+                .is_some_and(|raw| raw.is_error() && raw.content()[0]["text"] == failure_text),
+            "{}: raw 结果必须保真承载线路 error 文本",
+            case.instance
+        );
+        assert_eq!(
+            bridged_failure.text,
+            ToolCallError::CallFailed {
+                server: case.instance.into(),
+                tool: case.fail_tool.into(),
+                reason: failure_text.into(),
             }
-            other => panic!(
-                "{}: 期望 ApplicationFailed（reason = 线路失败文本），实际 {other:?}",
-                case.instance
-            ),
-        }
+            .to_string(),
+            "{}: 桥接失败原因必须与线路失败文本逐字一致",
+            case.instance
+        );
 
         println!(
             "[W2 dispatch/source] instance={} success=1 error=1 bridged=2",

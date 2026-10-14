@@ -40,7 +40,7 @@ use peri_acp_types::session_resources::SessionResourceErrorKind;
 use peri_acp_types::store::PersistedPayload;
 use peri_acp_types::system_reminder::{reminder_egress_allowed, ReminderAudience, SystemReminder};
 use peri_acp_types::thread::ThreadId;
-use peri_acp_types::tools::ToolOutput;
+use peri_acp_types::tools::{ToolOutcome, ToolOutput};
 use peri_acp_types::PeriCaps;
 use peri_controller::Controller;
 
@@ -54,9 +54,15 @@ use crate::event::tool_projection::{project_tool_completion, project_tool_start}
 #[derive(Clone, Debug)]
 pub enum ProjectedUpdate {
     /// `session/update` 载荷（user/agent chunk、thought chunk、tool call 及其更新）。
-    Session(SessionUpdate),
+    Session(Box<SessionUpdate>),
     /// `peri/unstable_event` 的结构化 system-reminder 载荷（legacy compact 提示）。
     SystemReminder(SystemReminder),
+}
+
+impl ProjectedUpdate {
+    fn session(update: SessionUpdate) -> Self {
+        Self::Session(Box::new(update))
+    }
 }
 
 /// 条目身份（`entryId`）的**唯一**格式：`{会话 id}:{payload id}`。
@@ -435,7 +441,7 @@ async fn send_projected(
 ) -> Result<(), ReplayError> {
     match update {
         ProjectedUpdate::Session(update) => {
-            let notif = SessionNotification::new(SessionId::new(session_id.to_string()), update);
+            let notif = SessionNotification::new(SessionId::new(session_id.to_string()), *update);
             sender.send(notif).await
         }
         ProjectedUpdate::SystemReminder(reminder) => {
@@ -467,7 +473,7 @@ pub fn project_message_updates(
                 }
                 return updates;
             }
-            updates.push(ProjectedUpdate::Session(SessionUpdate::UserMessageChunk(
+            updates.push(ProjectedUpdate::session(SessionUpdate::UserMessageChunk(
                 replay_chunk(
                     ContentBlock::Text(TextContent::new(extract_text(content))),
                     caps,
@@ -487,7 +493,7 @@ pub fn project_message_updates(
 
             let blocks = match content {
                 PeriMessageContent::Text(s) => {
-                    updates.push(ProjectedUpdate::Session(SessionUpdate::AgentMessageChunk(
+                    updates.push(ProjectedUpdate::session(SessionUpdate::AgentMessageChunk(
                         replay_chunk(
                             ContentBlock::Text(TextContent::new(s.clone())),
                             caps,
@@ -498,7 +504,7 @@ pub fn project_message_updates(
                     // 纯文本 AI 消息无 blocks，tool_calls 由下方单独处理
                     for tc in tool_calls {
                         let tool_call = project_tool_start(&tc.id, &tc.name, &tc.arguments);
-                        updates.push(ProjectedUpdate::Session(SessionUpdate::ToolCall(
+                        updates.push(ProjectedUpdate::session(SessionUpdate::ToolCall(
                             replay_tool(tool_call, caps, marks),
                         )));
                     }
@@ -511,7 +517,7 @@ pub fn project_message_updates(
             for block in blocks {
                 match block {
                     PeriContentBlock::Reasoning { text, .. } => {
-                        updates.push(ProjectedUpdate::Session(SessionUpdate::AgentThoughtChunk(
+                        updates.push(ProjectedUpdate::session(SessionUpdate::AgentThoughtChunk(
                             replay_chunk(
                                 ContentBlock::Text(TextContent::new(text.clone())),
                                 caps,
@@ -521,7 +527,7 @@ pub fn project_message_updates(
                         )));
                     }
                     PeriContentBlock::Text { text } => {
-                        updates.push(ProjectedUpdate::Session(SessionUpdate::AgentMessageChunk(
+                        updates.push(ProjectedUpdate::session(SessionUpdate::AgentMessageChunk(
                             replay_chunk(
                                 ContentBlock::Text(TextContent::new(text.clone())),
                                 caps,
@@ -533,7 +539,7 @@ pub fn project_message_updates(
                     PeriContentBlock::ToolUse { id, name, input } => {
                         emitted_ids.insert(id.clone());
                         let tc = project_tool_start(id, name, input);
-                        updates.push(ProjectedUpdate::Session(SessionUpdate::ToolCall(
+                        updates.push(ProjectedUpdate::session(SessionUpdate::ToolCall(
                             replay_tool(tc, caps, marks),
                         )));
                     }
@@ -546,7 +552,7 @@ pub fn project_message_updates(
             for tc in tool_calls {
                 if !emitted_ids.contains(&tc.id) {
                     let tool_call = project_tool_start(&tc.id, &tc.name, &tc.arguments);
-                    updates.push(ProjectedUpdate::Session(SessionUpdate::ToolCall(
+                    updates.push(ProjectedUpdate::session(SessionUpdate::ToolCall(
                         replay_tool(tool_call, caps, marks),
                     )));
                 }
@@ -563,6 +569,7 @@ pub fn project_message_updates(
             let result_text = ToolOutput {
                 text: extract_text(content),
                 execution: execution.clone(),
+                outcome: ToolOutcome::Unreported,
             }
             .projected_text(None);
             let mut update = project_tool_completion(
@@ -573,7 +580,7 @@ pub fn project_message_updates(
             );
             // 历史 rawOutput 保持字符串；live adapter 保留 JSON 解析兼容行为。
             update.fields.raw_output = Some(serde_json::Value::String(result_text));
-            updates.push(ProjectedUpdate::Session(SessionUpdate::ToolCallUpdate(
+            updates.push(ProjectedUpdate::session(SessionUpdate::ToolCallUpdate(
                 replay_tool_update(update, caps, marks),
             )));
         }

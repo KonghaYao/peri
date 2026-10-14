@@ -22,7 +22,9 @@ use peri_agent::{
         AgentCancellationToken,
     },
     goal::{GoalController, GoalViewSnapshot},
-    interaction::{InteractionContext, InteractionResponse, UserInteractionBroker},
+    interaction::{
+        InteractionContext, InteractionResponse, TrustedInteractionOwner, UserInteractionBroker,
+    },
     session::factory::{build_middleware_chain, production_blueprint, ChainSlot},
     tools::BaseTool,
 };
@@ -57,7 +59,11 @@ struct FakeBroker;
 
 #[async_trait]
 impl UserInteractionBroker for FakeBroker {
-    async fn request(&self, _ctx: InteractionContext) -> InteractionResponse {
+    async fn request(
+        &self,
+        _owner: TrustedInteractionOwner,
+        _ctx: InteractionContext,
+    ) -> InteractionResponse {
         InteractionResponse::Rejected
     }
 }

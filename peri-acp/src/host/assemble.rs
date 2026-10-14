@@ -774,16 +774,13 @@ pub(crate) async fn assemble_server_config_with_mcp_profile(
             Arc::new(peri_middlewares::mcp::AcpMcpService::new(pool))
                 as Arc<dyn peri_acp_types::ports::AcpMcpServerPort>
         });
-    let mcp_apps_relay: Option<Arc<dyn peri_acp_types::mcp_apps::McpAppsRelayPort>> =
-        if mcp_profile.apps_enabled() {
-            mcp_pool_concrete.clone().map(|pool| {
-                Arc::new(peri_middlewares::mcp::apps_relay::PoolMcpAppsRelay::new(
-                    pool,
-                )) as Arc<dyn peri_acp_types::mcp_apps::McpAppsRelayPort>
-            })
-        } else {
-            None
-        };
+    // MCP Apps relay：**不在本层构造**。它需要 session-owned canonical 调用入口
+    //（`SessionInvocationService` 必须知道 session id / 关闭集 / 规则链），这些事实
+    // 在本函数之外（`host/workspace.rs` 的会话环境装配点，与同一份池同作用域）
+    // 才具备；host 级装配（`session_scoped = false`）无池，本就不产生 relay。
+    // 因此这里显式留空：App 面不可用时请求按能力关闭拒绝，而不是构造一个未接线
+    // 的 relay。
+    let mcp_apps_relay: Option<Arc<dyn peri_acp_types::mcp_apps::McpAppsRelayPort>> = None;
 
     // ── 资源类/业务面端口默认实现（构造下沉：ACP Host = 部署单元）──
     let tool_search_index: Arc<dyn ToolSearchPort> =
@@ -939,6 +936,11 @@ pub(crate) async fn assemble_server_config_with_mcp_profile(
         cron_scheduler,
         mcp_pool,
         mcp_apps_relay,
+        // 会话级 facade 由会话环境装配点构造（本函数只做部署级装配）。
+        mcp_apps_facade: None,
+        // 部署级 entitlement 身份层：本仓装配**不注入**（裁决 R4 方案 b）⇒ `apps/*`
+        // 默认拒绝。SDK / 服务化部署在拿到本返回值后设置该字段即完成注入（字段 pub）。
+        session_authorization: None,
         acp_mcp,
         dynamic_mcp: Some(dynamic_mcp),
         oauth_event_tx: Some(oauth_event_tx),

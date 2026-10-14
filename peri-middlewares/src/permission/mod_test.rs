@@ -11,7 +11,11 @@ struct AutoApproveBroker;
 
 #[async_trait]
 impl UserInteractionBroker for AutoApproveBroker {
-    async fn request(&self, ctx: InteractionContext) -> InteractionResponse {
+    async fn request(
+        &self,
+        _owner: TrustedInteractionOwner,
+        ctx: InteractionContext,
+    ) -> InteractionResponse {
         match ctx {
             InteractionContext::Approval { items } => InteractionResponse::Decisions(
                 items
@@ -29,7 +33,11 @@ struct AutoRejectBroker;
 
 #[async_trait]
 impl UserInteractionBroker for AutoRejectBroker {
-    async fn request(&self, ctx: InteractionContext) -> InteractionResponse {
+    async fn request(
+        &self,
+        _owner: TrustedInteractionOwner,
+        ctx: InteractionContext,
+    ) -> InteractionResponse {
         match ctx {
             InteractionContext::Approval { items } => InteractionResponse::Decisions(
                 items
@@ -45,6 +53,20 @@ impl UserInteractionBroker for AutoRejectBroker {
     }
 }
 
+/// 测试用审批态：声明本 state 模拟的 turn 身份（交互归属的唯一来源）。
+///
+/// 生产审批态由 `BoundApprovalState` / `AgentContext` 从 `StageContext` 投影；
+/// 本 helper 只让绕过 v2 装配的单测能给出可信归属，避免审批被归属缺失拒绝。
+fn approval_state() -> AgentState {
+    AgentState::new("/tmp").with_turn_identity(
+        "session-test",
+        peri_acp_types::session::ExecutionBinding {
+            turn_id: peri_acp_types::session::TurnId::new(),
+            attempt_id: peri_acp_types::identity::AttemptId::new(),
+        },
+    )
+}
+
 fn make_tool_call(name: &str) -> ToolCall {
     ToolCall {
         id: "test-id".to_string(),
@@ -56,7 +78,7 @@ fn make_tool_call(name: &str) -> ToolCall {
 #[tokio::test]
 async fn test_disabled_allows_all() {
     let mw = PermissionMiddleware::disabled();
-    let mut state = AgentState::new("/tmp");
+    let mut state = approval_state();
     let tc = make_tool_call("Bash");
     let result = mw.before_tool(&mut state, &tc).await.unwrap();
     assert_eq!(result.name, "Bash");
@@ -65,7 +87,7 @@ async fn test_disabled_allows_all() {
 #[tokio::test]
 async fn test_approve_passes_through() {
     let mw = PermissionMiddleware::new(Arc::new(AutoApproveBroker), default_requires_approval);
-    let mut state = AgentState::new("/tmp");
+    let mut state = approval_state();
     let tc = make_tool_call("Bash");
     let result = mw.before_tool(&mut state, &tc).await.unwrap();
     assert_eq!(result.name, "Bash");
@@ -74,7 +96,7 @@ async fn test_approve_passes_through() {
 #[tokio::test]
 async fn test_reject_returns_error() {
     let mw = PermissionMiddleware::new(Arc::new(AutoRejectBroker), default_requires_approval);
-    let mut state = AgentState::new("/tmp");
+    let mut state = approval_state();
     let tc = make_tool_call("Bash");
     let result = mw.before_tool(&mut state, &tc).await;
     assert!(matches!(result, Err(AgentError::ToolRejected { .. })));
@@ -83,7 +105,7 @@ async fn test_reject_returns_error() {
 #[tokio::test]
 async fn test_read_file_not_intercepted() {
     let mw = PermissionMiddleware::new(Arc::new(AutoRejectBroker), default_requires_approval);
-    let mut state = AgentState::new("/tmp");
+    let mut state = approval_state();
     let tc = make_tool_call("Read");
     let result = mw.before_tool(&mut state, &tc).await.unwrap();
     assert_eq!(result.name, "Read");
@@ -149,7 +171,11 @@ async fn test_edit_modifies_input() {
 
     #[async_trait]
     impl UserInteractionBroker for EditBroker {
-        async fn request(&self, ctx: InteractionContext) -> InteractionResponse {
+        async fn request(
+            &self,
+            _owner: TrustedInteractionOwner,
+            ctx: InteractionContext,
+        ) -> InteractionResponse {
             match ctx {
                 InteractionContext::Approval { items } => InteractionResponse::Decisions(
                     items
@@ -165,7 +191,7 @@ async fn test_edit_modifies_input() {
     }
 
     let mw = PermissionMiddleware::new(Arc::new(EditBroker), default_requires_approval);
-    let mut state = AgentState::new("/tmp");
+    let mut state = approval_state();
     let tc = make_tool_call("Bash");
     let result = mw.before_tool(&mut state, &tc).await.unwrap();
     assert_eq!(result.name, "Bash");
@@ -178,7 +204,11 @@ async fn test_respond_returns_error_with_reason() {
 
     #[async_trait]
     impl UserInteractionBroker for RespondBroker {
-        async fn request(&self, ctx: InteractionContext) -> InteractionResponse {
+        async fn request(
+            &self,
+            _owner: TrustedInteractionOwner,
+            ctx: InteractionContext,
+        ) -> InteractionResponse {
             match ctx {
                 InteractionContext::Approval { items } => InteractionResponse::Decisions(
                     items
@@ -194,7 +224,7 @@ async fn test_respond_returns_error_with_reason() {
     }
 
     let mw = PermissionMiddleware::new(Arc::new(RespondBroker), default_requires_approval);
-    let mut state = AgentState::new("/tmp");
+    let mut state = approval_state();
     let tc = make_tool_call("Bash");
     let result = mw.before_tool(&mut state, &tc).await;
     match result {
@@ -247,7 +277,7 @@ fn make_mw_with_mode(
 #[tokio::test]
 async fn test_bypass_permissions_allows_all() {
     let mw = make_mw_with_mode(PermissionMode::Bypass, None);
-    let mut state = AgentState::new("/tmp");
+    let mut state = approval_state();
     let tc = make_tool_call("Bash");
     let result = mw.before_tool(&mut state, &tc).await.unwrap();
     assert_eq!(result.name, "Bash");
@@ -256,7 +286,7 @@ async fn test_bypass_permissions_allows_all() {
 #[tokio::test]
 async fn test_accept_edits_allows_write_file() {
     let mw = make_mw_with_mode(PermissionMode::AcceptEdit, None);
-    let mut state = AgentState::new("/tmp");
+    let mut state = approval_state();
     let tc = make_tool_call("Write");
     let result = mw.before_tool(&mut state, &tc).await.unwrap();
     assert_eq!(result.name, "Write");
@@ -265,7 +295,7 @@ async fn test_accept_edits_allows_write_file() {
 #[tokio::test]
 async fn test_accept_edits_approves_bash_via_broker() {
     let mw = make_mw_with_mode(PermissionMode::AcceptEdit, None);
-    let mut state = AgentState::new("/tmp");
+    let mut state = approval_state();
     let tc = make_tool_call("Bash");
     let result = mw.before_tool(&mut state, &tc).await.unwrap();
     assert_eq!(result.name, "Bash");
@@ -274,7 +304,7 @@ async fn test_accept_edits_approves_bash_via_broker() {
 #[tokio::test]
 async fn test_default_mode_approves_bash_via_broker() {
     let mw = make_mw_with_mode(PermissionMode::Default, None);
-    let mut state = AgentState::new("/tmp");
+    let mut state = approval_state();
     let tc = make_tool_call("Bash");
     let result = mw.before_tool(&mut state, &tc).await.unwrap();
     assert_eq!(result.name, "Bash");
@@ -286,7 +316,7 @@ async fn test_auto_mode_allow() {
         PermissionMode::AutoMode,
         Some(Arc::new(MockClassifier::new(Classification::Allow))),
     );
-    let mut state = AgentState::new("/tmp");
+    let mut state = approval_state();
     let tc = make_tool_call("Bash");
     let result = mw.before_tool(&mut state, &tc).await.unwrap();
     assert_eq!(result.name, "Bash");
@@ -298,7 +328,7 @@ async fn test_auto_mode_deny() {
         PermissionMode::AutoMode,
         Some(Arc::new(MockClassifier::new(Classification::Deny))),
     );
-    let mut state = AgentState::new("/tmp");
+    let mut state = approval_state();
     let tc = make_tool_call("Bash");
     let result = mw.before_tool(&mut state, &tc).await;
     assert!(matches!(result, Err(AgentError::ToolRejected { .. })));
@@ -310,7 +340,7 @@ async fn test_auto_mode_unsure_falls_back_to_broker() {
         PermissionMode::AutoMode,
         Some(Arc::new(MockClassifier::new(Classification::Unsure))),
     );
-    let mut state = AgentState::new("/tmp");
+    let mut state = approval_state();
     let tc = make_tool_call("Bash");
     let result = mw.before_tool(&mut state, &tc).await.unwrap();
     assert_eq!(result.name, "Bash");
@@ -319,7 +349,7 @@ async fn test_auto_mode_unsure_falls_back_to_broker() {
 #[tokio::test]
 async fn test_auto_mode_no_classifier_falls_back_to_broker() {
     let mw = make_mw_with_mode(PermissionMode::AutoMode, None);
-    let mut state = AgentState::new("/tmp");
+    let mut state = approval_state();
     let tc = make_tool_call("Bash");
     let result = mw.before_tool(&mut state, &tc).await.unwrap();
     assert_eq!(result.name, "Bash");
@@ -333,7 +363,8 @@ async fn test_process_batch_bypass_permissions() {
         make_tool_call("Write"),
         make_tool_call("Read"),
     ];
-    let results = mw.process_batch(&calls).await;
+    let mut state = approval_state();
+    let results = mw.before_tools_batch(&mut state, &calls).await;
     assert_eq!(results.len(), 3);
     assert!(results.iter().all(|r| r.is_ok()));
 }
@@ -346,7 +377,8 @@ async fn test_process_batch_accept_edits_mixed() {
         make_tool_call("Bash"),
         make_tool_call("Read"),
     ];
-    let results = mw.process_batch(&calls).await;
+    let mut state = approval_state();
+    let results = mw.before_tools_batch(&mut state, &calls).await;
     assert_eq!(results.len(), 3);
     assert!(results[0].is_ok(), "write_file 应放行");
     assert!(
@@ -366,7 +398,11 @@ async fn test_process_batch_broker_timeout_returns_one_result_per_call() {
     struct HangingBroker;
     #[async_trait]
     impl UserInteractionBroker for HangingBroker {
-        async fn request(&self, _ctx: InteractionContext) -> InteractionResponse {
+        async fn request(
+            &self,
+            _owner: TrustedInteractionOwner,
+            _ctx: InteractionContext,
+        ) -> InteractionResponse {
             std::future::pending::<()>().await;
             unreachable!()
         }
@@ -376,12 +412,13 @@ async fn test_process_batch_broker_timeout_returns_one_result_per_call() {
         .with_broker_timeout(std::time::Duration::from_millis(50));
     let calls = vec![make_tool_call("Bash"), make_tool_call("Write")];
 
-    let results = mw.process_batch(&calls).await;
+    let mut state = approval_state();
+    let results = mw.before_tools_batch(&mut state, &calls).await;
 
     assert_eq!(results.len(), calls.len(), "批量超时结果必须与输入等长");
     for (result, call) in results.iter().zip(calls.iter()) {
         match result {
-            Err(AgentError::ToolRejected { tool, reason }) => {
+            Err(AgentError::ToolRejected { tool, reason, .. }) => {
                 assert_eq!(tool, &call.name, "拒绝必须归属原调用，不串线");
                 assert!(reason.contains("超时"), "原因应说明审批超时：{reason}");
             }
@@ -400,7 +437,7 @@ async fn test_process_batch_broker_timeout_returns_one_result_per_call() {
 #[tokio::test]
 async fn test_cron_register_requires_approval_in_default_mode() {
     let mw = make_mw_with_mode(PermissionMode::Default, None);
-    let mut state = AgentState::new("/tmp");
+    let mut state = approval_state();
     let tc = make_tool_call("cron_register");
     // AutoApproveBroker → 审批通过（说明确实进入了审批路径；Read 等非敏感
     // 工具根本不经过 broker）
@@ -411,7 +448,7 @@ async fn test_cron_register_requires_approval_in_default_mode() {
 #[tokio::test]
 async fn test_cron_register_allowed_in_bypass_mode() {
     let mw = make_mw_with_mode(PermissionMode::Bypass, None);
-    let mut state = AgentState::new("/tmp");
+    let mut state = approval_state();
     let tc = make_tool_call("cron_register");
     let result = mw.before_tool(&mut state, &tc).await.unwrap();
     assert_eq!(result.name, "cron_register");
@@ -423,7 +460,7 @@ async fn test_cron_register_not_edit_tool_in_accept_edit_mode() {
     // cron_register 仍走审批（AutoApproveBroker 通过）
     assert!(!is_edit_tool("cron_register"));
     let mw = make_mw_with_mode(PermissionMode::AcceptEdit, None);
-    let mut state = AgentState::new("/tmp");
+    let mut state = approval_state();
     let tc = make_tool_call("cron_register");
     let result = mw.before_tool(&mut state, &tc).await.unwrap();
     assert_eq!(result.name, "cron_register");
@@ -438,7 +475,11 @@ async fn test_broker_hang_rejects_with_timeout() {
     struct HangingBroker;
     #[async_trait]
     impl UserInteractionBroker for HangingBroker {
-        async fn request(&self, _ctx: InteractionContext) -> InteractionResponse {
+        async fn request(
+            &self,
+            _owner: TrustedInteractionOwner,
+            _ctx: InteractionContext,
+        ) -> InteractionResponse {
             // 永不返回，模拟 broker 挂起
             std::future::pending::<()>().await;
             unreachable!()
@@ -447,7 +488,7 @@ async fn test_broker_hang_rejects_with_timeout() {
 
     let mw = PermissionMiddleware::new(Arc::new(HangingBroker), default_requires_approval)
         .with_broker_timeout(std::time::Duration::from_millis(500));
-    let mut state = AgentState::new("/tmp");
+    let mut state = approval_state();
     let tc = make_tool_call("Bash");
 
     let result = mw.before_tool(&mut state, &tc).await;

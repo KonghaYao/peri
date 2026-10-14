@@ -180,7 +180,7 @@ pub struct McpClientPool {
     /// 进程启动时冻结的 deployment capability profile；初始连接和重连复用。
     pub(crate) capability_profile: super::apps::McpCapabilityProfile,
     /// 初始模型 MCP tool invocation 签发、`peri/mcp/open` 单次消费的租约。
-    pub(crate) app_binding_leases: Arc<super::apps::McpAppBindingLeaseRegistry>,
+    pub(crate) app_binding_leases: Arc<super::apps::McpAppBindingRegistry>,
     /// System MCP 启动准入事实（IF-M3）：配置清单状态 + 每台 server 的本代发现
     /// 证据 + 独立 watch revision。所有写入都必须经由成功/失败的生产路径。
     pub(crate) system_readiness: SystemReadinessTracker,
@@ -311,7 +311,7 @@ impl McpClientPool {
             task_scope_tokens: parking_lot::RwLock::new(HashMap::new()),
             resource_cache: super::resource_cache::McpResourceCache::new(),
             capability_profile,
-            app_binding_leases: Arc::new(super::apps::McpAppBindingLeaseRegistry::default()),
+            app_binding_leases: Arc::new(super::apps::McpAppBindingRegistry::default()),
             system_readiness: SystemReadinessTracker::new(),
             acp_owners: parking_lot::RwLock::new(HashMap::new()),
             acp_connections: parking_lot::RwLock::new(HashMap::new()),
@@ -340,7 +340,33 @@ impl McpClientPool {
         Self::new_empty_with_cache_policy(McpCachePolicy::Enabled)
     }
 
-    #[cfg(test)]
+    /// 空池（跨 crate 集成测试夹具；`test-support` 特性）。
+    ///
+    /// 与 [`Self::new_empty`] 同形：真实池 + 真实生命周期，只是尚未连接任何 server。
+    /// 生产构建不启用该特性，因此不进入生产 API 面。
+    #[cfg(feature = "test-support")]
+    pub fn new_empty_for_tests() -> Self {
+        Self::new_empty_with_cache_policy(McpCachePolicy::Enabled)
+    }
+
+    /// 装入一个**已经建立连接**的客户端句柄（跨 crate 集成测试夹具；`test-support`）。
+    ///
+    /// 生产路径的句柄注册归 `run_initialize` / 动态 MCP 连接面；本入口只让测试能
+    /// 构造「真实 peer + 真实池」的夹具，返回该句柄的服务端世代。
+    #[cfg(feature = "test-support")]
+    pub fn install_client_for_tests(&self, handle: Arc<McpClientHandle>) -> u64 {
+        let generation = self.advance_handle_generation(&handle);
+        self.clients.write().insert(handle.name.clone(), handle);
+        generation
+    }
+
+    /// 移除一个客户端句柄（跨 crate 集成测试夹具的清理路径；`test-support`）。
+    #[cfg(feature = "test-support")]
+    pub fn remove_client_for_tests(&self, server_name: &str) {
+        self.clients.write().remove(server_name);
+    }
+
+    #[cfg(any(test, feature = "test-support"))]
     pub(crate) fn new_empty_with_cache_policy(policy: McpCachePolicy) -> Self {
         let mut pool = Self::new_pending();
         pool.bind_workspace_scope(peri_acp_types::workspace::WorkspaceId::new())

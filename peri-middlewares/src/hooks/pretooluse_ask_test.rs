@@ -3,8 +3,10 @@ use std::sync::Arc;
 
 use super::*;
 use crate::permission::{PermissionMode, SharedPermissionMode};
+use peri_acp_types::error::ToolRejectionCause;
 use peri_agent::interaction::{
-    ApprovalDecision, InteractionContext, InteractionResponse, UserInteractionBroker,
+    ApprovalDecision, InteractionContext, InteractionResponse, TrustedInteractionOwner,
+    UnansweredCause, UserInteractionBroker,
 };
 
 // === H4：PreToolUse 决策归并（deny 零执行 / ask 有界审批） ===
@@ -14,6 +16,8 @@ enum BrokerReply {
     Approve,
     Reject,
     Pending,
+    /// 无人可作答（客户端声明，或本端没有任何在线审批 endpoint）。
+    Unanswered(UnansweredCause),
 }
 
 struct RecordingBroker {
@@ -38,7 +42,11 @@ impl RecordingBroker {
 
 #[async_trait::async_trait]
 impl UserInteractionBroker for RecordingBroker {
-    async fn request(&self, ctx: InteractionContext) -> InteractionResponse {
+    async fn request(
+        &self,
+        _owner: TrustedInteractionOwner,
+        ctx: InteractionContext,
+    ) -> InteractionResponse {
         self.calls.fetch_add(1, Ordering::SeqCst);
         self.contexts.lock().push(ctx);
         match self.reply {
@@ -52,8 +60,21 @@ impl UserInteractionBroker for RecordingBroker {
                 source: None,
             }]),
             BrokerReply::Pending => std::future::pending().await,
+            BrokerReply::Unanswered(cause) => InteractionResponse::Unanswered { cause },
         }
     }
+}
+
+/// 审批态带 turn 身份：交互归属从 state 投影（缺失即显式拒绝）。
+fn approval_state() -> peri_agent::agent::state::AgentState {
+    peri_agent::agent::state::AgentState::new(std::env::temp_dir().to_str().unwrap())
+        .with_turn_identity(
+            "session-test",
+            peri_acp_types::session::ExecutionBinding {
+                turn_id: peri_acp_types::session::TurnId::new(),
+                attempt_id: peri_acp_types::identity::AttemptId::new(),
+            },
+        )
 }
 
 fn make_middleware_with_broker(
@@ -100,13 +121,13 @@ async fn test_pretooluse_deny_with_updated_input_rejects_and_never_asks() {
 
     let result = mw
         .before_tool(
-            &mut peri_agent::agent::state::AgentState::new(std::env::temp_dir().to_str().unwrap()),
+            &mut approval_state(),
             &bash_call(serde_json::json!({"command": "rm -rf /"})),
         )
         .await;
 
     match result {
-        Err(AgentError::ToolRejected { tool, reason }) => {
+        Err(AgentError::ToolRejected { tool, reason, .. }) => {
             assert_eq!(tool, "Bash");
             assert!(
                 reason.contains("denied"),
@@ -140,7 +161,7 @@ async fn test_pretooluse_deny_wins_over_allow_hook_in_chain() {
 
     let result = mw
         .before_tool(
-            &mut peri_agent::agent::state::AgentState::new(std::env::temp_dir().to_str().unwrap()),
+            &mut approval_state(),
             &bash_call(serde_json::json!({"command": "rm -rf /"})),
         )
         .await;
@@ -164,13 +185,20 @@ async fn test_pretooluse_ask_without_broker_is_rejected_not_allowed() {
 
     let result = mw
         .before_tool(
-            &mut peri_agent::agent::state::AgentState::new(std::env::temp_dir().to_str().unwrap()),
+            &mut approval_state(),
             &bash_call(serde_json::json!({"command": "ls"})),
         )
         .await;
 
     match result {
-        Err(AgentError::ToolRejected { tool, .. }) => assert_eq!(tool, "Bash"),
+        Err(AgentError::ToolRejected { tool, cause, .. }) => {
+            assert_eq!(tool, "Bash");
+            assert_eq!(
+                cause,
+                ToolRejectionCause::PolicyDenied,
+                "本端没有审批通道：不是用户拒绝，也不是无人可答"
+            );
+        }
         other => panic!("ask 无审批端口必须拒绝，got {other:?}"),
     }
 }
@@ -186,7 +214,7 @@ async fn test_pretooluse_ask_broker_approve_proceeds_once() {
 
     let result = mw
         .before_tool(
-            &mut peri_agent::agent::state::AgentState::new(std::env::temp_dir().to_str().unwrap()),
+            &mut approval_state(),
             &bash_call(serde_json::json!({"command": "ls"})),
         )
         .await;
@@ -206,7 +234,7 @@ async fn test_pretooluse_ask_broker_reject_is_rejected() {
 
     let result = mw
         .before_tool(
-            &mut peri_agent::agent::state::AgentState::new(std::env::temp_dir().to_str().unwrap()),
+            &mut approval_state(),
             &bash_call(serde_json::json!({"command": "ls"})),
         )
         .await;
@@ -237,12 +265,19 @@ async fn test_pretooluse_ask_broker_timeout_is_rejected() {
 
     let result = mw
         .before_tool(
-            &mut peri_agent::agent::state::AgentState::new(std::env::temp_dir().to_str().unwrap()),
+            &mut approval_state(),
             &bash_call(serde_json::json!({"command": "ls"})),
         )
         .await;
 
-    assert!(result.is_err(), "ask 审批超时必须拒绝，got {result:?}");
+    match result {
+        Err(AgentError::ToolRejected { cause, .. }) => assert_eq!(
+            cause,
+            ToolRejectionCause::PolicyDenied,
+            "审批未在期限内给出决定：没有任何人的决定"
+        ),
+        other => panic!("ask 审批超时必须拒绝，got {other:?}"),
+    }
     assert_eq!(broker.calls(), 1);
 }
 
@@ -260,7 +295,7 @@ async fn test_pretooluse_ask_defers_to_host_dialog_without_double_approval() {
 
     let result = mw
         .before_tool(
-            &mut peri_agent::agent::state::AgentState::new(std::env::temp_dir().to_str().unwrap()),
+            &mut approval_state(),
             &bash_call(serde_json::json!({"command": "ls"})),
         )
         .await;
@@ -281,11 +316,123 @@ async fn test_pretooluse_allow_does_not_bypass_host_permission() {
 
     let result = mw
         .before_tool(
-            &mut peri_agent::agent::state::AgentState::new(std::env::temp_dir().to_str().unwrap()),
+            &mut approval_state(),
             &bash_call(serde_json::json!({"command": "ls"})),
         )
         .await;
 
     assert!(result.is_ok(), "allow 后仍交宿主权限路径，got {result:?}");
     assert_eq!(broker.calls(), 0, "hook allow 不得代替宿主审批");
+}
+
+// === H4 边界：ask 的归属缺失与「无人可作答」 ===
+
+/// 无归属的审批态：既不声明 session 身份，也不声明 turn 身份（子 agent 自建
+/// session 的真实形状）。归属铸造只能从真实事实出发，缺失即 fail-closed。
+fn state_without_owner() -> peri_agent::agent::state::AgentState {
+    peri_agent::agent::state::AgentState::new(std::env::temp_dir().to_str().unwrap())
+}
+
+fn ask_hook() -> RegisteredHook {
+    pretooluse_command_hook(
+        r#"{"hook_specific_output":{"hookEventName":"PreToolUse","permissionDecision":"ask"}}"#,
+    )
+}
+
+/// [回归] ask 缺可信归属 ⇒ 显式拒绝，零 broker 交互（不弹窗、不放行）。
+#[cfg(unix)]
+#[tokio::test]
+async fn test_pretooluse_ask_without_trusted_owner_is_rejected_without_asking() {
+    let broker = RecordingBroker::new(BrokerReply::Approve);
+    let mw = make_middleware_with_broker(vec![ask_hook()], PermissionMode::Bypass, broker.clone());
+
+    let result = mw
+        .before_tool(
+            &mut state_without_owner(),
+            &bash_call(serde_json::json!({"command": "ls"})),
+        )
+        .await;
+
+    match result {
+        Err(AgentError::ToolRejected { reason, .. }) => assert_eq!(
+            reason,
+            crate::interaction_owner::UNTRUSTED_OWNER_REASON,
+            "拒绝原因必须是单一权威的无归属说明"
+        ),
+        other => panic!("ask 缺归属必须显式拒绝（不是放行、不是交宿主），got {other:?}"),
+    }
+    assert_eq!(broker.calls(), 0, "缺归属不得发出任何审批交互");
+}
+
+/// [回归] ask 收到「无在线审批 endpoint」⇒ 未获批准 + 如实转述，不伪装成用户拒绝。
+#[cfg(unix)]
+#[tokio::test]
+async fn test_pretooluse_ask_transcribes_no_online_endpoint() {
+    let broker = RecordingBroker::new(BrokerReply::Unanswered(UnansweredCause::NoOnlineEndpoint));
+    let mw = make_middleware_with_broker(vec![ask_hook()], PermissionMode::Bypass, broker.clone());
+
+    let result = mw
+        .before_tool(
+            &mut approval_state(),
+            &bash_call(serde_json::json!({"command": "ls"})),
+        )
+        .await;
+
+    assert_eq!(broker.calls(), 1, "审批必须真的发出过一次交互");
+    match result {
+        Err(AgentError::ToolRejected {
+            reason,
+            cause: rejection_cause,
+            ..
+        }) => {
+            assert_eq!(
+                rejection_cause,
+                ToolRejectionCause::ApprovalUnavailable(UnansweredCause::NoOnlineEndpoint),
+                "无人可答必须以 typed 原因过边界（裁决 R9）"
+            );
+            assert_eq!(
+                reason,
+                UnansweredCause::NoOnlineEndpoint.reason_text(),
+                "必须如实转述原因，不得改写"
+            );
+            assert_ne!(reason.as_str(), "用户拒绝", "不得伪装成「用户拒绝」");
+            assert!(
+                reason.contains("在线的审批 endpoint"),
+                "原因必须点明无在线 endpoint: {reason}"
+            );
+        }
+        other => panic!("无人可作答必须拒绝（未获批准），got {other:?}"),
+    }
+}
+
+/// [回归] ask 收到客户端自述无交互能力（`-p` 打印模式）⇒ 同样如实转述。
+#[cfg(unix)]
+#[tokio::test]
+async fn test_pretooluse_ask_transcribes_non_interactive_client_reason() {
+    let broker = RecordingBroker::new(BrokerReply::Unanswered(
+        UnansweredCause::NonInteractiveClient,
+    ));
+    let mw = make_middleware_with_broker(vec![ask_hook()], PermissionMode::Bypass, broker.clone());
+
+    let result = mw
+        .before_tool(
+            &mut approval_state(),
+            &bash_call(serde_json::json!({"command": "ls"})),
+        )
+        .await;
+
+    match result {
+        Err(AgentError::ToolRejected {
+            reason,
+            cause: rejection_cause,
+            ..
+        }) => {
+            assert_eq!(reason, UnansweredCause::NonInteractiveClient.reason_text());
+            assert_eq!(
+                rejection_cause,
+                ToolRejectionCause::ApprovalUnavailable(UnansweredCause::NonInteractiveClient)
+            );
+        }
+        other => panic!("无人可作答必须拒绝（未获批准），got {other:?}"),
+    }
 }

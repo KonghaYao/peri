@@ -351,3 +351,121 @@ EXIT=0
 3. **本地环境噪声（非回归）**：本机会话环境带 `PERI_WORKFLOW_ALLOW_NPX_FALLBACK=1`（仓库与 CI 均无此变量，亦不在 shell profile），会让 `peri-workflow` 的三个 fail-closed 用例失守（`cli::tests::workflow_cli_fails_closed_without_any_validated_artifact`、`runner::artifact::tests::prepare_fails_closed_without_artifact_and_without_opt_in`、`tool::tests::failed_start_leaves_no_workflow_side_effects`）。证据：`env -u PERI_WORKFLOW_ALLOW_NPX_FALLBACK ... -p peri-workflow --lib` → `177 passed; 0 failed`，带该变量 → `3 failed`。该 workspace 等价全量跑走 `cargo test` 默认 fail-fast（第一个失败 target 之后不再启动后续 target），因此带该变量那次 `WS_TEST_EXIT=101` 只代表 `peri-workflow` 之前的目标已跑完；去掉该变量并按 `--no-fail-fast` 复跑即 EXIT=0（§11.5 末段）。
 4. **待用户裁决不变**：契约 §10 的 D8（第二次 shutdown 的期望被实测证伪）与 D9（自设行数上限维持或拆分）。
 5. **未测项不变**（与前几轮一致，不宣称产品验收完成）：真实 Langfuse 端点/服务端限额、1000 轮 8 MiB 长会话、512 MiB 积压与 32 MiB 遥测预算的实测 RSS、断网 10 分钟恢复、四持久边界崩溃注入的实机矩阵、WASM/无持久化宿主运行行为、性能补表、`e2e/`。
+
+## 12. 取锁判定改为错误分类（收敛轮四，2026-10-13，PR #192 CI 失败后由主 agent 修复）
+
+### 12.1 失败面与根因
+
+1. 失败面：CI run `38394041455`（PR #192，head `c1900cf61`）的 ubuntu job 在步骤
+   `Run workspace tests (excluding ACP, Agent, TUI, middleware and MCP capabilities)` 红，唯一失败用例
+   `langfuse-client spool::native::tests::lock::concurrent_delete_never_turns_lock_attempts_into_io_faults`
+   （`langfuse-client/src/spool/native_test/lock.rs:155:17`）：
+   `list 取锁不得报 IO 故障: telemetry spool lock spool object failed: No such file or directory (os error 2)`；
+   `gh run rerun --failed` 复跑仍在同一位置红（同轮 macOS / Windows job 通过）。该变更集（PR #192）未触碰
+   `langfuse-client`：此 crate 的代码来自 main 的 PR #189（收敛轮三续）。
+2. 根因（由代码构造推得，不是「不明偶发」）：`spool/native.rs::try_lock_file` 的旧判定在 `open` 失败**之后**
+   再探测父目录（`lock_parent_is_dir`，语义「父目录仍在 ⇒ 当真故障上抛」）。在 `list` 路径上，这个 `ENOENT` 想
+   逃逸成 `lock spool object` 故障，唯一可能是**失败后的这次探测仍看见条目目录**——`open` 与探测是两次系统
+   调用，其间目录状态可以再变（TOCTOU）。契约 §5.2 要求分开的「条目已被并发删除」与「真实 IO 故障」由此被
+   重新混同，正常清理竞争升级为整页扫描失败。同类窗口在 §10.1 的 OS 级复现里已被观测到：macOS 8 线程复现中
+   `EINVAL` 有约 10% 出现在父目录仍可见时——旧判定会把这些瞬态错误当真故障上抛。
+3. 可复现性限制（不宣称已在 Linux 上复现该窗口）：本轮本机（macOS）复现实验（8s × 4 建锁文件线程 × 4 删除
+   线程，同一目录）只观测到 `ENOENT` 156390 次、`EINVAL` 2 次，**全部**伴随父目录已消失；本机也没有 Linux
+   运行环境。因此 Linux 侧的内核路径未实测——修复依据是「逃逸路径按构造消除」，最终确认由远端 CI 的 ubuntu
+   job 给出（§12.3 末行）。
+
+### 12.2 修复（只改判定形态；语义、签名、端口、计量口径不变）
+
+1. `langfuse-client/src/spool/native.rs`：`try_lock_file` 的 `open` 失败分支改为只看**本次错误**——新增私有
+   `fn is_concurrent_dir_removal(error: &io::Error) -> bool`（`NotFound` ⇒ 真；`InvalidInput` ⇒ 真，但只在非
+   Windows 平台并入：macOS 实测该形态是「目录正在被删除」，Windows 的 `InvalidInput` 是
+   `ERROR_INVALID_PARAMETER`，语义不同），命中即 `LockAttempt::Gone`；删除事后探测 `lock_parent_is_dir`
+   （原则 6：删除优于兼容）。其他错误（`EACCES`/`EIO`/`ENOTDIR`…）照常上抛；三个调用点的语义与
+   `LockAttempt` 三态完全不变（`list` 跳过该条目、`claim` ⇒ `NotFound`、幂等 `delete` ⇒ `Ok`）。
+2. `langfuse-client/src/spool/native_test/lock.rs`：新增确定性回归
+   `open_failure_is_classified_by_error_kind_not_by_probing_the_object_dir`——用悬挂符号链接构造 CI 上的同一状态
+   （`open` 报 `ENOENT`，而锁文件的父目录**仍是**对象目录），断言必须是 `Gone`。该用例在旧判定下红（§12.3
+   反向验证），钉住的是「分类不依赖事后探测」这条规则，而不是某个平台的时序运气。
+3. 未放宽任何既有断言：`concurrent_delete_never_turns_lock_attempts_into_io_faults`（`is_lock_fault` 两条断言与
+   `pages > 0`）、`lock_attempt_reports_gone_instead_of_io_error_when_parent_is_deleted`、
+   `peer_holding_the_domain_lock_is_contention_not_unavailability` 全部逐字未改；未新增 `#[allow]`/`#[ignore]`。
+
+### 12.3 命令证据（收敛轮四）
+
+| 命令 | 结果（输出末尾） |
+| --- | --- |
+| `./scripts/cargo-rmcp-patched.sh test --locked -p langfuse-client --lib -- spool::native` | `15 passed; 0 failed; 1 ignored; 0 measured; 278 filtered out; finished in 2.11s` |
+| **反向验证（mutation）**：把判定改回「事后探测父目录」后复跑 `-- spool::native::tests::lock` | `open_failure_is_classified_by_error_kind_not_by_probing_the_object_dir ... FAILED`；`lock attempt: Os { code: 2, kind: NotFound, message: "No such file or directory" }`（随后已恢复，`git diff` 无残留） |
+| `./scripts/cargo-rmcp-patched.sh test --locked -p langfuse-client --all-targets`（最终文件状态） | EXIT=0：lib `293 passed; 0 failed; 1 ignored`（30.29s）、`logging` 1、`otel_contract` 1、`spool_acceptance` 4、`spool_http` 3、`spool_recovery` `5 passed; 0 failed; 1 ignored`（5.00s） |
+| `./scripts/cargo-rmcp-patched.sh clippy --locked -p langfuse-client --all-targets -- -D warnings` | EXIT=0（5.85s）。首版判定写成 `match` 被 `clippy::match_like_matches_macro` 拦下，改成等价布尔表达式后通过——**未用 `#[allow]` 压制** |
+| `./scripts/cargo-rmcp-patched.sh fmt --all -- --check` | EXIT=0 |
+| `bash scripts/check-file-size.sh` | `共扫描 2328 个文件，超阈值 3 个（源码 2 / 测试 1）`（= 既有基线三文件，未新增；`native.rs` 493→501、`native_test/lock.rs` 208→236） |
+| 本机 OS 级复现实验（macOS，Python 同 syscall：4 建 + 4 `rmtree`，8s） | `ENOENT` × 156390、`EINVAL` × 2，全部 `parent_visible=False` ⇒ 本机未观测到「失败后仍看见目录」的窗口（§12.1 第 3 条） |
+| CI run `38394041455`（失败面，ubuntu job）+ `rerun --failed` | 两次都在 `lock.rs:155:17` 同一用例红；本轮修复后由 PR #192 新一轮三平台矩阵复核 |
+
+### 12.4 残余与仍红项
+
+1. **该判定的语义边界**：`ENOENT`（以及 macOS 的 `EINVAL`）现在一律判为「条目不可领取」，其中包含一种非竞争
+   形态：锁文件位置被外部替换成悬挂符号链接时不再 loud 报错（`claim` 归 `NotFound`、幂等 `delete` 归 `Ok`）。
+   该位置在私有目录（0700 / 文件 0600）内、适配器自身从不创建符号链接 ⇒ 只可能来自外部篡改；移除条件 = 出现
+   「需要在该形态上暴露硬错误」的需求（届时在判 `Gone` 前先看 `symlink_metadata` 是否为符号链接）。
+2. **平台限界**：Linux 真实行为只能由 CI（ubuntu job）覆盖，Windows 由 Windows job 覆盖；macOS 的本机复跑
+   （§12.3）只证明「既有断言仍全绿」，不证明该竞争已经消失——竞争本身是删除语义的一部分，本轮的修复目标是
+   **不再把它升级为 IO 故障**，而不是消除竞争。
+3. 其余仍红项与未测项不变（沿用 §11.6，含契约 §10 的 D8/D9 待裁决项）。
+
+## 13. Windows `ERROR_ACCESS_DENIED` 取锁形态（收敛轮五，2026-10-13，PR #192 CI 失败后由主 agent 修复）
+
+### 13.1 失败面与根因
+
+1. 失败面：CI run `38398854149`（PR #192，head `bbbeb2acf`）的 Windows job（`115301056256`）在步骤
+   `Run workspace tests (excluding ACP, Agent, TUI, middleware and MCP capabilities)` 红，唯一失败用例
+   `langfuse-client spool::native::tests::lock::concurrent_delete_never_turns_lock_attempts_into_io_faults`
+   （`langfuse-client/src/spool/native_test/lock.rs:155:17`）：
+   `list 取锁不得报 IO 故障: telemetry spool lock spool object failed: Access is denied. (os error 5)`；
+   同轮 **ubuntu job 通过**（收敛轮四的修复在 Linux 上生效——该 job 正是轮四的最终判据）、macOS 通过。
+2. 根因：Windows 的并发删除形态是 **`ERROR_ACCESS_DENIED`(5)**——删除中的目录 / 条目（delete-pending）让
+   `open(O_CREAT)` 报「拒绝访问」；收敛轮四改成按**本次 `open` 的错误分类**后只收 `NotFound` 与非 Windows 的
+   `InvalidInput`，该形态落到 `Err` 上抛 ⇒ `list` 整页扫描失败。属**收敛轮四引入的 Windows 回归**
+   （旧判定下 run `38394041455` 的 Windows job 通过；该用例是竞争型，单轮通过与否不能单独定案，最终判据是
+   新一轮 Windows job）。
+3. 证据（本机可查）：Rust std 的 Windows 错误映射（本机工具链 rust-src `library/std/src/sys/io/error/windows.rs`）：
+   `ERROR_ACCESS_DENIED => PermissionDenied`；`ERROR_FILE_NOT_FOUND` / `ERROR_PATH_NOT_FOUND => NotFound`；
+   `ERROR_SHARING_VIOLATION`(32) **不在映射表**（`ERROR_LOCK_VIOLATION`(33) 也不在，已由 `is_lock_contention`
+   单独处理，见 §11.4）。本机无 Windows 运行环境，Windows 行为由 CI 覆盖。
+
+### 13.2 修复（按原始错误码并入；语义、签名、端口、计量口径不变）
+
+1. `langfuse-client/src/spool/native.rs`：`is_concurrent_dir_removal` 增第三个形态——`error.raw_os_error() == Some(5)`。
+   取 `#[cfg(windows)] Some(5)` / `#[cfg(not(windows))] None` 常量（沿用 `is_lock_contention` 的既有模式），按
+   **原始码**匹配而不是 `PermissionDenied` kind：保守收窄到 `ERROR_ACCESS_DENIED`，不把未映射的共享冲突码一并吞掉。
+   `try_lock_file` 三个调用点语义与 `LockAttempt` 三态不变（`list` 跳过、`claim` ⇒ `NotFound`、幂等 `delete` ⇒ `Ok`）。
+2. `langfuse-client/src/spool/native_test/lock.rs`：新增 `#[cfg(windows)]` 确定性回归
+   `access_denied_open_failure_is_classified_as_concurrent_dir_removal`——用「锁路径被目录占位」触发**同一错误码**
+   （`CreateFileW` 未带 `FILE_FLAG_BACKUP_SEMANTICS` 时对目录做写打开报 5），先 `assert_eq!(raw_os_error, Some(5))`
+   钉住触发形态、再断言 `Gone`。该形态需要与 `remove_dir_all` 竞争、单机无法确定性复现；真实竞争形态由同一 job 的
+   `concurrent_delete_never_turns_lock_attempts_into_io_faults` 覆盖。
+3. 未放宽任何既有断言（`concurrent_delete_never_turns_...` 的两条 `is_lock_fault` 断言与 `pages > 0`、
+   `lock_attempt_reports_gone_...`、`peer_holding_the_domain_lock_...`、Unix 的
+   `open_failure_is_classified_by_error_kind_not_by_probing_the_object_dir` 全部逐字未改）；未新增
+   `#[allow]`/`#[ignore]`。
+
+### 13.3 命令证据（收敛轮五）
+
+| 命令 | 结果（输出末尾） |
+| --- | --- |
+| `./scripts/cargo-rmcp-patched.sh test --locked -p langfuse-client --all-targets`（最终文件状态） | EXIT=0；尾部捕获：`spool_acceptance` `4 passed; 0 failed`、`spool_http` `3 passed; 0 failed`、`spool_recovery` `5 passed; 0 failed; 1 ignored` |
+| `./scripts/cargo-rmcp-patched.sh test --locked -p langfuse-client --lib` | `test result: ok. 293 passed; 0 failed; 1 ignored; 0 measured; 0 filtered out; finished in 33.63s`；`spool::native::tests::lock` 四条全 `ok` |
+| `./scripts/cargo-rmcp-patched.sh clippy --locked -p langfuse-client --all-targets -- -D warnings` | EXIT=0（等待批 H coder 的构建锁 2m00s，无 warning） |
+| `./scripts/cargo-rmcp-patched.sh fmt -p langfuse-client -- --check` | EXIT=0 |
+| `rustc --edition 2021 --target x86_64-pc-windows-msvc --emit=metadata --crate-type bin -D warnings`（同源片段：`is_lock_contention` + `is_concurrent_dir_removal`） | EXIT=0（Windows `cfg` 分支可编译；**仅编译检查，非运行验证**，`#[cfg(windows)]` 用例不含在内） |
+| CI run `38398854149` 的 Windows job（失败面） | `lock.rs:155:17` 红（`Access is denied. (os error 5)`）；本轮修复后由 PR #192 新一轮三平台矩阵复核 |
+
+### 13.4 残余与仍红项
+
+1. **错误面不可区分（Windows）**：delete-pending 与真实 ACL 拒绝是同一错误码（5），无法在错误面区分；spool 目录是
+   进程私有目录 ⇒ 该形态不产生（与 §12.4 第 1 条同级登记）。移除条件 = Windows 侧需要区分时，改为查询文件 / 目录
+   状态（delete-pending 判定）或在 spool 目录装配后校验 ACL。
+2. **平台限界**：Windows 真实行为只能由 CI（Windows job）复核；本机只有 §13.3 的编译检查与 macOS 全量复跑
+   （后者不覆盖该分支）。
+3. 其余仍红项与未测项不变（沿用 §12.4，含契约 §10 的 D8/D9 待裁决项）。

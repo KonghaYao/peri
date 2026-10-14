@@ -38,8 +38,8 @@ use crate::kit::tui_render_unit::{TuiRenderUnit, TuiSystemReminder, TuiUserBubbl
 /// 页边界会把 `tool_call` 与它的 `tool_call_update` 分到相邻两页，而**更晚**的一页
 /// 先被读到——那时卡片还不存在。留着它，等起点页并进来时补齐；会话一换就作废
 /// （结果不能跨会话错配到同 id 的卡片上）。
-static PENDING_TOOL_ENDS: Mutex<Option<(String, HashMap<String, (String, bool)>)>> =
-    Mutex::new(None);
+type PendingToolResults = HashMap<String, (String, bool)>;
+static PENDING_TOOL_ENDS: Mutex<Option<(String, PendingToolResults)>> = Mutex::new(None);
 
 /// 并入一页（桥接任务内调用；调用方已保证事件串行）。
 pub(super) fn handle_history_page_loaded(state: &mut BridgeState, response: &HistoryPageResponse) {
@@ -269,7 +269,7 @@ fn complete_unit(unit: TuiRenderUnit, output_summary: &str, is_error: bool) -> T
 }
 
 /// 在未配对终点表上执行一段操作（会话身份与表内容同源：换会话即作废）。
-fn with_pending<R>(f: impl FnOnce(&mut HashMap<String, (String, bool)>) -> R) -> R {
+fn with_pending<R>(f: impl FnOnce(&mut PendingToolResults) -> R) -> R {
     let session_id = atoms::ACTIVE_SESSION_ID.state().read().clone();
     let mut guard = PENDING_TOOL_ENDS.lock();
     let (session, pending) = guard.get_or_insert_with(|| (session_id.clone(), HashMap::new()));

@@ -270,3 +270,21 @@ async fn test_shutdown_does_not_treat_kill_request_as_external_completion() {
     .unwrap();
     assert_eq!(manager.shutdown().await, TaskShutdownReport::Incomplete);
 }
+
+/// [批 D · 装配面 no-op] `without_session_scope`：作用域已关闭 ⇒ 任何后台接管
+/// （`spawn_owned` / `begin_external_execution`）都被准入拒绝，且不建新作用域
+/// （不冒充会话级管理器）。
+#[tokio::test]
+async fn task_manager_without_session_scope_rejects_background_admission() {
+    let manager = TaskManager::without_session_scope();
+    assert!(
+        manager.spawn_owned(Box::pin(async {})).is_err(),
+        "无会话作用域 ⇒ 不得接收后台任务（调用方按未执行 + 告警处理）"
+    );
+    assert!(
+        manager.begin_external_execution("hook").is_err(),
+        "无会话作用域 ⇒ 外部执行证据也不得被接管"
+    );
+    // 作用域已关闭且没有任何在飞任务 ⇒ 关闭报告仍可给出 Complete（不悬挂）。
+    assert_eq!(manager.shutdown().await, TaskShutdownReport::Complete);
+}

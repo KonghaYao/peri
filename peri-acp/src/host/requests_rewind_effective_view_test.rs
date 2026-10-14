@@ -261,7 +261,6 @@ async fn test_rewind_then_prompt_matches_a_cold_restore_at_the_model_boundary() 
 }
 
 /// 保留前缀里仍成立的排除必须原样保留：摘要活着时，被它覆盖的正文不因 rewind 复活。
-
 ///
 /// 与上一个用例互为反面——清零集合为空的分支，热态与 wire 都只能是有效视图
 /// （目标之后的原文被移除，但目标之前的归档区不受影响）。

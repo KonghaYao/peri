@@ -57,6 +57,7 @@ impl super::SubAgentTool {
         cwd: String,
         run_in_background: bool,
         parent_tool_call_id: Option<String>,
+        approval_owner: Option<peri_agent::interaction::TrustedInteractionOwner>,
     ) -> Result<String, Box<dyn std::error::Error + Send + Sync>> {
         let host = self.host();
         // Live 执行是 active 的事实源。投递只做同步查找和入队，不能跨 load_meta
@@ -169,7 +170,8 @@ impl super::SubAgentTool {
             )
         } else {
             let agent_def = if title.starts_with("mcp__") {
-                self.load_and_approve_mcp_agent(&title).await?
+                self.load_and_approve_mcp_agent(&title, approval_owner.as_ref())
+                    .await?
             } else {
                 self.load_agent_def_for_resume(&title)
                     .await

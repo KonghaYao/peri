@@ -187,6 +187,7 @@ async fn after_tool_failure_short_circuits_without_reclassifying_error() {
             is_error: false,
             execution: None,
             effective_error_code: None,
+            rejection_cause: None,
             subagent_failure: None,
         };
         let error = chain
@@ -307,6 +308,7 @@ async fn test_after_tool_sequential_order() {
         is_error: false,
         execution: None,
         effective_error_code: None,
+        rejection_cause: None,
         subagent_failure: None,
     };
     chain
@@ -359,6 +361,7 @@ async fn test_before_tools_batch_mixed_approval() {
                         Err(AgentError::ToolRejected {
                             tool: c.name.clone(),
                             reason: "拒绝第二个".to_string(),
+                            cause: peri_acp_types::error::ToolRejectionCause::UserRejected,
                         })
                     } else {
                         Ok(c.clone())
@@ -485,6 +488,7 @@ async fn test_before_tools_batch_long_result_preserves_rejection_and_stops_chain
                         Err(AgentError::ToolRejected {
                             tool: call.name.clone(),
                             reason: "denied".to_string(),
+                            cause: peri_acp_types::error::ToolRejectionCause::UserRejected,
                         })
                     } else {
                         Ok(call.clone())
@@ -542,7 +546,7 @@ async fn test_before_tools_batch_long_result_preserves_rejection_and_stops_chain
 
     assert!(matches!(
         &results[0],
-        Err(AgentError::ToolRejected { tool, reason })
+        Err(AgentError::ToolRejected { tool, reason, .. })
             if tool == "tool1" && reason == "denied"
     ));
     assert!(matches!(

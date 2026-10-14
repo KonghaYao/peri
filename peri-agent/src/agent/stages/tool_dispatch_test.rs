@@ -375,7 +375,10 @@ async fn test_handle_consecutive_failures_success_resets() {
         input: serde_json::json!({}),
     };
     let ok_result = ToolResult::success("call_1", "Read", "ok");
-    handle_consecutive_failures(&ctx, &[(ok_call, ok_result)]);
+    handle_consecutive_failures(
+        &ctx,
+        &[execution::SettledInvocation::unreported(ok_call, ok_result)],
+    );
     assert_eq!(
         ctx.compact
             .consecutive_failures

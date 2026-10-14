@@ -1,5 +1,30 @@
 use super::*;
 
+/// 等待任务表清空（`active_count == 0`）。
+///
+/// 任务完成是异步链路（进程退出 → stdout/stderr 收尾 → `registry.complete()`），
+/// 固定 `sleep(2300ms)` 留下的余量（约 500ms）在慢 runner 上不够：CI run
+/// 38403027486 的 macOS job 在断言点仍读到 `active_count == 1`（left: 1）。
+/// 改为进度轮询（上限 `NO_ACTIVE_TASKS_TIMEOUT`）；超时后仍以同一断言失败，
+/// 并报告实际等待时长（真卡住不会被掩盖）。
+#[cfg(unix)]
+async fn wait_for_no_active_tasks(registry: &peri_agent::agent::async_tasks::TaskManager) {
+    /// 轮询上限：远大于进程寿命（2s）与旧固定余量，留足慢 runner 的调度空间。
+    const NO_ACTIVE_TASKS_TIMEOUT: Duration = Duration::from_secs(15);
+    const POLL_STEP: Duration = Duration::from_millis(25);
+
+    let started = Instant::now();
+    while registry.active_count() != 0 && started.elapsed() < NO_ACTIVE_TASKS_TIMEOUT {
+        tokio::time::sleep(POLL_STEP).await;
+    }
+    assert_eq!(
+        registry.active_count(),
+        0,
+        "完成后 active_count 应归零（等待上限 {NO_ACTIVE_TASKS_TIMEOUT:?}，实际等待 {:?}）",
+        started.elapsed()
+    );
+}
+
 // ── stdin null + 超时诊断分流（issue: bash 错误原因定位）──────────────────────
 
 /// stdin 重定向为 /dev/null：read 立即 EOF 返回，不挂死到超时。
@@ -72,9 +97,8 @@ async fn test_sync_timeout_promote_no_output_diagnoses_stall() {
     );
     assert!(err.contains("kill"), "应说明 kill 方式: {err}");
 
-    // 等 promote 续跑任务收尾，避免残留注册
-    tokio::time::sleep(Duration::from_millis(2300)).await;
-    assert_eq!(registry.active_count(), 0, "完成后 active_count 应归零");
+    // 等 promote 续跑任务收尾，避免残留注册（轮询等待，见 wait_for_no_active_tasks）
+    wait_for_no_active_tasks(&registry).await;
 }
 
 /// 同步超时 promote 且有输出：文案应如实说明"有进展、续跑合理"。
@@ -107,8 +131,7 @@ async fn test_sync_timeout_promote_with_output_notes_progress() {
         "有输出分支不应走无输出文案: {err}"
     );
 
-    tokio::time::sleep(Duration::from_millis(2300)).await;
-    assert_eq!(registry.active_count(), 0, "完成后 active_count 应归零");
+    wait_for_no_active_tasks(&registry).await;
 }
 
 #[test]
@@ -204,6 +227,13 @@ async fn test_bash_group_cleanup_settles_descendant_after_parent_exit() {
 
 // ── command not found 诊断（issue: bash 错误原因定位）────────────────────────
 
+/// 用例内显式前台期限：本组用例断言的是 `command not found` 诊断文本，与前台
+/// 期限无关，但默认 15s 把 shell 冷启动一并算进窗口（Windows 上是 PowerShell
+/// 冷启动）。CI run 38521037079 的 Windows job 因此判失败：同一用例常态 0.9s
+/// （本分支上一次运行）/ 1.7s（main，同一提交内容），抖动时卡满默认期限。
+/// 抬到 60s 只放大环境余量，不放宽任何断言。
+const HINT_CASE_FOREGROUND_TIMEOUT_MS: u64 = 60_000;
+
 /// 命令不存在：输出尾部附带 PATH 候选或环境类兜底诊断，
 /// 供模型直接采取行动（换命令名 / 检查 PATH 与虚拟环境）。
 #[tokio::test]
@@ -211,7 +241,10 @@ async fn test_bash_command_not_found_appends_hint() {
     let tool = BashTool::new(std::env::temp_dir().to_str().unwrap());
     let result = tool
         .invoke(
-            serde_json::json!({"command": "xx_q1w2e3_not_a_real_cmd_xx"}),
+            serde_json::json!({
+                "command": "xx_q1w2e3_not_a_real_cmd_xx",
+                "timeout": HINT_CASE_FOREGROUND_TIMEOUT_MS,
+            }),
             peri_agent::tools::ToolContext::new(&[], "."),
         )
         .await
@@ -234,7 +267,10 @@ async fn test_bash_non_127_failure_has_no_command_hint() {
     let tool = BashTool::new(std::env::temp_dir().to_str().unwrap());
     let result = tool
         .invoke(
-            serde_json::json!({"command": "ls /definitely-not-a-real-dir-xx"}),
+            serde_json::json!({
+                "command": "ls /definitely-not-a-real-dir-xx",
+                "timeout": HINT_CASE_FOREGROUND_TIMEOUT_MS,
+            }),
             peri_agent::tools::ToolContext::new(&[], "."),
         )
         .await

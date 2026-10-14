@@ -4,6 +4,7 @@ use super::{
     database::SqliteSessionDatabase,
     discovery::{self, Discovery, Observation},
 };
+use crate::sessions::failure::not_found;
 use anyhow::{Context, Result};
 use peri_acp_types::{
     thread::{ThreadId, ThreadListEntry, ThreadMeta},
@@ -63,6 +64,37 @@ fn binding_cwd(root: &Path, relative: &Path) -> PathBuf {
     }
 }
 
+/// 本次观测能否作为该归属行记录的执行证据。
+///
+/// 行上还没有已记录快照时（迁移建出的历史惰性行），本次观测就是它的第一条证据：
+/// 没有已记录的 Git 布局可以被这条目录模式观测改写，因此不要求 Git 回答。行上已有
+/// 快照且与本次不同时，只有 Git 回答过的观测可以改写它——Git 不可用的目录模式观测
+/// 证明不了原仓库消失了。
+fn may_write_observation(recorded: Option<&str>, current: &str, git_answered: bool) -> bool {
+    match recorded {
+        None => true,
+        Some(recorded) => recorded == current || git_answered,
+    }
+}
+
+#[test]
+fn observation_write_follows_recorded_evidence_and_git_answer() {
+    // 从未观测过的历史归组行接受第一条目录模式观测（迁移期行没有可被改写的布局）。
+    assert!(may_write_observation(None, "directory", false));
+    // 行上已有快照：同一快照照写，不同快照只接受 Git 回答过的观测。
+    assert!(may_write_observation(
+        Some("repository"),
+        "repository",
+        false
+    ));
+    assert!(may_write_observation(Some("repository"), "directory", true));
+    assert!(!may_write_observation(
+        Some("repository"),
+        "directory",
+        false
+    ));
+}
+
 impl SqliteSessionDatabase {
     pub(super) async fn resolve_workspace_impl(&self, cwd: &Path) -> Result<ResolvedWorkspace> {
         let (cwd, observed) = discovery::observe(cwd).await?;
@@ -103,7 +135,7 @@ impl SqliteSessionDatabase {
             Some((id, project, recorded, recorded_identity)) => {
                 // 目录模式的变化必须以 Git 的回答为准：只读目录观测（Git 没回答）不能
                 // 证明已记录的仓库消失了，保持 fail-closed，而不是把仓库改写成普通目录。
-                if recorded.as_deref() != Some(snapshot.as_str()) && !git_answered {
+                if !may_write_observation(recorded.as_deref(), &snapshot, git_answered) {
                     return Err(WorkspaceError::NeedsRelink.into());
                 }
                 // 项目归属只在**该路径换了文件对象**时随证据移动：对象身份没变，说明这是
@@ -169,6 +201,69 @@ impl SqliteSessionDatabase {
             relative_cwd,
             discovery_snapshot: Some(snapshot),
         })
+    }
+
+    /// 把无绑定会话的历史归属收敛到本机可证实的 Workspace（幂等修复，可重跑）。
+    ///
+    /// 只允许一种改写：会话没有绑定行，且原归属行**从未被本机观测过**（`project_id`
+    /// 与 `discovery` 都为 NULL 的迁移期历史归组行——它的路径只是保存 cwd 的归组，
+    /// 不构成执行证据）。行上已有证据说明本机认识那个目录，改写会静默改绑，直接
+    /// 拒绝；已有绑定行同理（绑定事实先到，修复入口只按既有事实回答，不覆盖）。
+    pub(super) async fn relink_unbound_ownership_impl(
+        &self,
+        id: &ThreadId,
+        workspace: &ResolvedWorkspace,
+    ) -> Result<()> {
+        self.require_writable()?;
+        let mut tx = self.pool.begin_with("BEGIN IMMEDIATE").await?;
+        let row: Option<(Option<String>, String)> =
+            sqlx::query_as("SELECT parent_thread_id, workspace_id FROM threads WHERE id = ?1")
+                .bind(id.as_str())
+                .fetch_optional(&mut *tx)
+                .await?;
+        let Some((parent, owner)) = row else {
+            return Err(not_found().into());
+        };
+        if parent.is_some() {
+            // 子会话继承父会话的归属，不按自身保存的 cwd 另建归属。
+            return Err(WorkspaceError::UnverifiedLegacyOwner.into());
+        }
+        let bound: Option<(String,)> =
+            sqlx::query_as("SELECT thread_id FROM session_bindings WHERE thread_id = ?1")
+                .bind(id.as_str())
+                .fetch_optional(&mut *tx)
+                .await?;
+        if bound.is_some() {
+            return Err(WorkspaceError::ExecutionBindingMismatch.into());
+        }
+        if owner == workspace.workspace_id.to_string() {
+            return Ok(());
+        }
+        let recorded: Option<(Option<String>, Option<String>)> =
+            sqlx::query_as("SELECT project_id, discovery FROM workspaces WHERE id = ?1")
+                .bind(&owner)
+                .fetch_optional(&mut *tx)
+                .await?;
+        if !matches!(recorded, Some((None, None))) {
+            return Err(WorkspaceError::UnverifiedLegacyOwner.into());
+        }
+        // 目标归属必须就是本次观测写下的那一行：修复只收敛归属，不制造无证据的归属。
+        let target: Option<(String,)> =
+            sqlx::query_as("SELECT id FROM workspaces WHERE id = ?1 AND project_id = ?2")
+                .bind(workspace.workspace_id.to_string())
+                .bind(workspace.project_id.to_string())
+                .fetch_optional(&mut *tx)
+                .await?;
+        if target.is_none() {
+            return Err(WorkspaceError::UnverifiedLegacyOwner.into());
+        }
+        sqlx::query("UPDATE threads SET workspace_id = ?1 WHERE id = ?2")
+            .bind(workspace.workspace_id.to_string())
+            .bind(id.as_str())
+            .execute(&mut *tx)
+            .await?;
+        tx.commit().await?;
+        Ok(())
     }
 
     /// 本次观测的项目记录：定位与对象证据同时一致才复用（Git linked worktree 换位后

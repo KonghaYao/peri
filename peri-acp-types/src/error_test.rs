@@ -273,3 +273,34 @@ fn bounded_causes_report_text_and_node_truncation() {
     assert!(causes.iter().all(|cause| cause.chars().count() <= 2_001));
     assert_eq!(causes[63], "[TRUNCATED: additional causes omitted]");
 }
+
+/// [回归] 「无活跃 turn 不可用」是 typed 事实，不是泛化的 `Other`：契约层必须
+/// 能独立分类与诊断（入口名 + 已知会话身份），供阶段 2.4 的 idle 准入判别。
+#[test]
+fn not_available_without_turn_is_a_typed_category_with_diagnostics() {
+    let error = AgentError::NotAvailableWithoutTurn {
+        entry: "before_tools_batch",
+        session_id: Some("session-7".to_string()),
+    };
+    assert_eq!(error.category_name(), "not_available_without_turn");
+    assert_eq!(
+        ExecutionFailure::from_agent_error(&error)
+            .error_category
+            .as_deref(),
+        Some("not_available_without_turn")
+    );
+    let text = error.to_string();
+    assert!(text.contains("before_tools_batch"), "必须点名入口: {text}");
+    assert!(text.contains("session-7"), "必须给出已知会话身份: {text}");
+
+    // 会话身份也可缺失（idle 入口可能连 session 都没有）：仍须可诊断。
+    let bare = AgentError::NotAvailableWithoutTurn {
+        entry: "tool dispatch",
+        session_id: None,
+    };
+    assert!(bare.to_string().contains("tool dispatch"));
+    assert!(
+        !matches!(bare, AgentError::Other(_)),
+        "typed 不可用不得退化成泛化 Other"
+    );
+}

@@ -111,8 +111,8 @@ impl MessageFixture {
     ) -> Result<String, Box<dyn std::error::Error + Send + Sync>> {
         let mut ctx = peri_agent::tools::ToolContext::new(&[], self.dir.path().to_str().unwrap());
         let tool_call = self.host.fresh_tool_call_id("active-message");
-        ctx.invocation_id = Some(tool_call.clone());
-        ctx.tool_call_id = Some(tool_call);
+        ctx.invocation_id = Some(tool_call.clone().into());
+        ctx.tool_call_id = Some(tool_call.into());
         self.tool.invoke(input, ctx).await
     }
 
@@ -374,8 +374,8 @@ async fn test_active_message_cross_session_is_rejected_without_spawning() {
     let stranger = stranger_host.bind(make_subagent_tool(Vec::new()));
     let mut stranger_ctx = peri_agent::tools::ToolContext::new(&[], ".");
     let stranger_tool_call = stranger_host.fresh_tool_call_id("stranger");
-    stranger_ctx.invocation_id = Some(stranger_tool_call.clone());
-    stranger_ctx.tool_call_id = Some(stranger_tool_call);
+    stranger_ctx.invocation_id = Some(stranger_tool_call.clone().into());
+    stranger_ctx.tool_call_id = Some(stranger_tool_call.into());
     let error = stranger
         .invoke(
             serde_json::json!({"resume_thread_id": id, "prompt": "other session"}),

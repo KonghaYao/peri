@@ -444,3 +444,8 @@ async fn read_only_store_keeps_history_readable_but_rejects_load_and_close_mutat
         .unwrap());
     assert!(fixture.bridge.load_meta(&id).await.is_ok());
 }
+
+// 中 3① 回归（会话级端点注册）与本节同模块树：复用上面的 `Fixture`（真实 session/new
+// 装配 + 持久 stored 会话，供 `session/load` 恢复）。
+#[path = "requests_session_endpoint_test.rs"]
+mod session_endpoint;

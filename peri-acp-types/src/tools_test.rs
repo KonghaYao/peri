@@ -7,11 +7,64 @@ fn tool_context_keeps_model_call_identity_independent_from_invocation() {
     let context = ToolContext::new(&[], "/tmp");
     assert!(context.tool_call_id.is_none());
     assert!(context.invocation_id.is_none());
+    assert!(context.origin.is_none());
     assert!(context.session_resources.is_none());
     let context = context.with_tool_call_id("model-call");
-    assert_eq!(context.tool_call_id.as_deref(), Some("model-call"));
+    assert_eq!(
+        context.tool_call_id.as_ref().map(ToolCallId::as_str),
+        Some("model-call")
+    );
     assert!(context.invocation_id.is_none());
+    assert!(context.origin.is_none());
     assert!(!context.cancellation.is_cancelled());
+}
+
+#[test]
+fn with_invocation_binds_execution_identity_and_origin_together() {
+    let dispatcher: std::sync::Arc<dyn EffectiveToolDispatcher> =
+        std::sync::Arc::new(StubDispatcher);
+    let context = ToolContext::new(&[], "/tmp")
+        .with_invocation(
+            dispatcher,
+            InvocationId::new("inv-1"),
+            InvocationOrigin::Model {
+                tool_call_id: ToolCallId::new("model-call"),
+            },
+            tokio_util::sync::CancellationToken::new(),
+        )
+        .with_tool_call_id("model-call");
+
+    assert!(context.effective_tool_dispatcher.is_some());
+    assert_eq!(
+        context.invocation_id.as_ref().map(InvocationId::as_str),
+        Some("inv-1")
+    );
+    assert_eq!(
+        context.origin.as_ref().and_then(|o| o.model_tool_call_id()),
+        Some(&ToolCallId::new("model-call"))
+    );
+    // 两个身份分开存放：模型 tool-call ID 不参与执行身份，执行身份也不由模型决定。
+    assert_ne!(
+        context.invocation_id.as_ref().unwrap().as_str(),
+        context.tool_call_id.as_ref().unwrap().as_str()
+    );
+}
+
+struct StubDispatcher;
+
+#[async_trait::async_trait]
+impl EffectiveToolDispatcher for StubDispatcher {
+    async fn dispatch(
+        &self,
+        _call: EffectiveToolCall,
+        _cancel: tokio_util::sync::CancellationToken,
+    ) -> Result<ToolOutput, EffectiveToolError> {
+        Ok(ToolOutput::from_legacy("ok"))
+    }
+
+    fn tools(&self) -> Vec<EffectiveToolDefinition> {
+        Vec::new()
+    }
 }
 
 #[test]
@@ -166,6 +219,78 @@ fn test_tool_output_default_keeps_execution_evidence_unknown() {
     let output = ToolOutput::from_legacy("ordinary result");
     assert_eq!(output.text, "ordinary result");
     assert_eq!(output.execution, None);
+    // legacy 语义：结果与执行状态都未报告，不得推断。
+    assert_eq!(output.outcome(), &ToolOutcome::Unreported);
+    assert_eq!(output.is_error(), None);
+    assert!(output.raw().is_none());
+}
+
+#[test]
+fn legacy_tool_output_serializes_without_outcome_field() {
+    // 新增 outcome 字段不改变 legacy 输出的 wire 形状。
+    assert_eq!(
+        serde_json::to_value(ToolOutput::from_legacy("plain")).unwrap(),
+        serde_json::json!({"text": "plain"})
+    );
+    // 旧数据（无 outcome 键）反序列化仍为未报告。
+    let decoded: ToolOutput = serde_json::from_value(serde_json::json!({"text": "plain"})).unwrap();
+    assert_eq!(decoded, ToolOutput::from_legacy("plain"));
+}
+
+#[test]
+fn raw_result_output_reports_real_is_error_and_keeps_raw() {
+    let raw = crate::tool_outcome::RawToolResult::new(serde_json::json!({
+        "content": [{"type": "text", "text": "boom"}],
+        "isError": true
+    }));
+    let output = ToolOutput::from_raw_result("boom", raw.clone());
+
+    assert_eq!(output.is_error(), Some(true));
+    assert_eq!(output.raw(), Some(&raw));
+    assert_eq!(output.text, "boom");
+    let encoded = serde_json::to_value(&output).unwrap();
+    assert_eq!(encoded["outcome"]["kind"], "reported");
+    assert_eq!(encoded["outcome"]["is_error"], true);
+    assert_eq!(encoded["outcome"]["raw"]["isError"], true);
+}
+
+#[test]
+fn reported_outcome_without_raw_keeps_failure_flag() {
+    let output = ToolOutput::with_outcome("failed", ToolOutcome::reported(true));
+    assert_eq!(output.is_error(), Some(true));
+    assert!(output.raw().is_none());
+}
+
+#[test]
+fn unreported_outcome_never_reports_failure() {
+    assert_eq!(ToolOutcome::default(), ToolOutcome::Unreported);
+    assert!(ToolOutcome::default().is_unreported());
+    assert_eq!(ToolOutcome::default().is_error(), None);
+}
+
+#[test]
+fn effective_tool_error_carries_remote_mcp_raw_error() {
+    let error = EffectiveToolError::new(EffectiveToolErrorCode::ToolFailed, "remote failed")
+        .with_remote_error(crate::tool_outcome::RemoteToolError::from_jsonrpc(
+            crate::tool_outcome::JsonRpcError {
+                code: -32602,
+                message: "invalid params".into(),
+                data: Some(serde_json::json!({"field": "name"})),
+            },
+        ));
+
+    let remote = error.remote_error().unwrap();
+    assert_eq!(remote.jsonrpc.as_ref().unwrap().code, -32602);
+    assert_eq!(
+        remote.jsonrpc.as_ref().unwrap().data,
+        Some(serde_json::json!({"field": "name"}))
+    );
+    // 未携带远端错误时保持 None，调用方不得从 code 反推远端语义。
+    assert!(
+        EffectiveToolError::new(EffectiveToolErrorCode::Cancelled, "cancelled")
+            .remote_error()
+            .is_none()
+    );
 }
 
 #[test]

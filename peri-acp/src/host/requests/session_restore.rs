@@ -214,6 +214,11 @@ pub(crate) async fn prepare_existing(
                 session_id: id.to_owned(),
                 thread_id: id.to_owned(),
                 cwd,
+                // session-owned 交互门：环境自带（router 借用同一 Arc，跨轮共享）——
+                // 必须在 move 环境之前取用。
+                interaction_gate: crate::host::workspace_interaction::session_interaction_gate(
+                    &environment,
+                ),
                 environment,
                 closing: false,
                 history: payloads
@@ -225,6 +230,7 @@ pub(crate) async fn prepare_existing(
                 cancel_token: None,
                 // 本分支无持久执行恢复：恢复准入一律以「无续跑」状态发布。
                 continuation_armed: false,
+                host_request_seq: Arc::new(std::sync::atomic::AtomicU64::new(0)),
                 continuation_epoch: 0,
                 continuation_in_flight: false,
                 continuation_mq_steering_pending: false,

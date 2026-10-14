@@ -1,6 +1,3 @@
-use std::collections::HashMap;
-
-use peri_acp_types::mcp_apps::AppSessionBinding;
 use peri_acp_types::PeriCaps;
 
 #[allow(dead_code)]
@@ -22,7 +19,6 @@ pub(crate) struct ConnectionContext {
     /// 「**当前连接**声明了什么」。需要按连接分流的判定（历史分页等）读这里。
     negotiated_caps: Option<PeriCaps>,
     apps_enabled: bool,
-    app_sessions: HashMap<String, AppSessionBinding>,
     cancellation: tokio_util::sync::CancellationToken,
 }
 
@@ -34,7 +30,6 @@ impl ConnectionContext {
             initialized: false,
             negotiated_caps: None,
             apps_enabled,
-            app_sessions: HashMap::new(),
             cancellation: tokio_util::sync::CancellationToken::new(),
         }
     }
@@ -81,23 +76,6 @@ impl ConnectionContext {
         self.initialized && self.lifecycle == ConnectionLifecycle::Open && self.apps_enabled
     }
 
-    #[allow(dead_code)]
-    pub(crate) fn insert_app_session(&mut self, binding: AppSessionBinding) -> bool {
-        if self.apps_enabled() && binding.owner_connection_id == self.id {
-            self.app_sessions
-                .insert(binding.app_session_id.clone(), binding);
-            true
-        } else {
-            false
-        }
-    }
-
-    pub(crate) fn app_session(&self, id: &str) -> Option<&AppSessionBinding> {
-        self.apps_enabled()
-            .then(|| self.app_sessions.get(id))
-            .flatten()
-    }
-
     pub(crate) fn snapshot_for_request(&self) -> Self {
         Self {
             id: self.id.clone(),
@@ -105,7 +83,6 @@ impl ConnectionContext {
             initialized: self.initialized,
             negotiated_caps: self.negotiated_caps.clone(),
             apps_enabled: self.apps_enabled,
-            app_sessions: self.app_sessions.clone(),
             cancellation: self.cancellation.clone(),
         }
     }
@@ -117,13 +94,11 @@ impl ConnectionContext {
     pub(crate) fn begin_close(&mut self) {
         self.lifecycle = ConnectionLifecycle::Closing;
         self.cancellation.cancel();
-        self.app_sessions.clear();
     }
 
     #[allow(dead_code)]
     pub(crate) fn finish_close(&mut self) {
         self.lifecycle = ConnectionLifecycle::Closed;
-        self.app_sessions.clear();
     }
 
     pub(crate) fn id(&self) -> &str {

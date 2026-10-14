@@ -111,6 +111,8 @@ async fn register_child_with_inherited_history(
             history_payloads: effective,
             structure_version: 0,
             cancel_token: None,
+            interaction_gate: std::sync::Arc::new(tokio::sync::Mutex::new(())),
+            host_request_seq: std::sync::Arc::new(std::sync::atomic::AtomicU64::new(0)),
             continuation_armed: false,
             continuation_epoch: 0,
             continuation_in_flight: false,

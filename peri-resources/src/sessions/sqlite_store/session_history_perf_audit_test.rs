@@ -177,7 +177,7 @@ async fn audit_segment_lookahead_and_plan_shape() {
         }
     }
     println!("    合计推进 {total_rows} 条自有行 / {total_bytes} 字节（夹具：6 归档 + 3 有效）");
-    assert_eq!(total_rows, (6 + LIVE_ENTRIES) as usize, "回放必须不重不漏");
+    assert_eq!(total_rows, 6 + LIVE_ENTRIES, "回放必须不重不漏");
     assert_eq!(
         total_bytes,
         fixture.archived_bytes + fixture.live_bytes,

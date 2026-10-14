@@ -174,6 +174,64 @@ fn concurrent_delete_never_turns_lock_attempts_into_io_faults() {
     assert!(pages > 0, "扫描必须实际执行过");
 }
 
+/// 取锁失败的分类只看**本次 `open` 的错误**，不做事后探测父目录（契约 §5.2）。
+///
+/// CI（ubuntu）里的逃逸形态是「`open` 报 `ENOENT`，而失败后探测仍看见对象目录」：删除竞争下
+/// 目录状态在两次系统调用之间又变了，旧的「父目录还在 ⇒ 当真故障上抛」据此把 `ENOENT` 升级成
+/// `lock spool object` 故障、整页扫描失败。这里用悬挂符号链接确定性构造同一状态——`open` 报
+/// `ENOENT`（末段目标的目录组件不存在）而锁文件的父目录确实是对象目录——判定必须是 `Gone`。
+///
+/// 只在 Unix 生效：Windows 用 `ERROR_ACCESS_DENIED` 表达该竞争（见
+/// `access_denied_open_failure_is_classified_as_concurrent_dir_removal`）。
+#[cfg(unix)]
+#[test]
+fn open_failure_is_classified_by_error_kind_not_by_probing_the_object_dir() {
+    let dir = tempfile::tempdir().expect("temporary root");
+    let fixture = Fixture::open(dir.path().to_path_buf(), route_of(15));
+    let object_dir = fixture.object_dir(id_of(0x73));
+    create_private_dir_all(&object_dir).expect("object directory");
+    let lock_path = object_dir.join("lock");
+    std::os::unix::fs::symlink(object_dir.join("missing").join("target"), &lock_path)
+        .expect("dangling lock symlink");
+    assert!(
+        object_dir.is_dir(),
+        "父目录必须仍在，否则构造的不是逃逸形态"
+    );
+    assert!(matches!(
+        super::super::try_lock_file(&lock_path).expect("lock attempt"),
+        LockAttempt::Gone
+    ));
+}
+
+/// Windows 的并发删除形态：删除中的目录 / 条目（delete-pending）让 `open(O_CREAT)` 报
+/// `ERROR_ACCESS_DENIED`（CI run 38398854149 的 Windows job 实测 `Access is denied. (os error 5)`）。
+///
+/// 该形态需要与 `remove_dir_all` 竞争，单机无法确定性复现；这里用「锁路径被目录占位」触发**同一
+/// 错误码**（`CreateFileW` 未带 `FILE_FLAG_BACKUP_SEMANTICS` 时对目录做写打开同样报 5），先钉住
+/// 错误码、再断言分类：代理触发形态漂移时用例红，而不是假绿。真实竞争形态由
+/// `concurrent_delete_never_turns_lock_attempts_into_io_faults` 在 Windows CI 上覆盖。
+#[cfg(windows)]
+#[test]
+fn access_denied_open_failure_is_classified_as_concurrent_dir_removal() {
+    let dir = tempfile::tempdir().expect("temporary root");
+    let lock_path = dir.path().join("lock-is-a-directory");
+    fs::create_dir(&lock_path).expect("place a directory at the lock path");
+    let trigger = OpenOptions::new()
+        .write(true)
+        .create(true)
+        .open(&lock_path)
+        .expect_err("以写模式打开目录必须失败");
+    assert_eq!(
+        trigger.raw_os_error(),
+        Some(5),
+        "触发形态必须是 ERROR_ACCESS_DENIED: {trigger}"
+    );
+    assert!(matches!(
+        super::super::try_lock_file(&lock_path).expect("lock attempt"),
+        LockAttempt::Gone
+    ));
+}
+
 /// 对端持有 domain 锁是并发竞争，不是「卷不支持 advisory lock」。
 ///
 /// 能力探针只做 `try_lock`（不许阻塞），所以这里直接钉住探针判定：同进程自持 domain 锁时

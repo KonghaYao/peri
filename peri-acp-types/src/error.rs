@@ -3,6 +3,8 @@
 //! `AgentError` 为 Agent 层边界错误枚举（终止类语义：Interrupted 等防 `?`
 //! 误报失败），事实源归契约层；`peri-agent::error` 保留 re-export。
 
+use crate::interaction::UnansweredCause;
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum WorkBudgetKind {
     ReasonRequests,
@@ -42,6 +44,36 @@ impl std::fmt::Display for SummaryRecoveryReason {
             Self::EmptyResponse => "the model returned no usable summary text",
         })
     }
+}
+
+/// `AgentError::ToolRejected` 的 typed 拒绝原因（裁决 R9）。
+///
+/// 解决一个已登记的具体混同：`ToolRejected` 过去不带原因，于是「用户拒绝」与
+/// 「没有人可以决定（审批不可用）」在下游（`EffectiveToolError` / outcome 记录）
+/// 只能共享 `UserRejected`，可区分性只剩诊断文本。
+///
+/// **没有默认值**：本枚举不实现 `Default`，`ToolRejected` 也不接受
+/// `Option::None` 兜底——每个构造点必须显式陈述原因，否则两类事实会重新混在一起。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ToolRejectionCause {
+    /// 用户 / 客户端**已作出**拒绝决定（`ApprovalDecision::Reject` / `Respond` /
+    /// deny 判定，或用户拒绝回答提问）。
+    UserRejected,
+    /// **没有人可以决定**（无人可答）：交互无法送达任何可作答方，或客户端声明
+    /// 无人可作答。原因取自交互契约的 [`UnansweredCause`]，本变体不自行解释原因。
+    ///
+    /// 与 [`Self::UserRejected`] 严格区分：这是**本端 / 客户端事实**，不是任何人的
+    /// 决定；实现方不得把它投影成用户拒绝，也不得据此放行（fail-closed 不变）。
+    ApprovalUnavailable(UnansweredCause),
+    /// 本端策略或审批机制拒绝，且**没有任何人的决定**：hook 的 `Block` /
+    /// `PreventContinuation` / deny 判定、自动分类器的 `Deny`、审批通道缺失
+    /// （未配置 broker）或审批未在期限内给出决定（超时）。
+    ///
+    /// 与 [`Self::ApprovalUnavailable`] 的分工是**唯一**的：本变体成立时**没有**
+    /// 「交互无法投递到可作答方」的事实（原因是本端策略 / 机制本身），因此不存在
+    /// 可如实填写的 [`UnansweredCause`]；反过来，凡是「没有人可作答」必须用
+    /// [`Self::ApprovalUnavailable`]，不得为省事压进本变体。
+    PolicyDenied,
 }
 
 /// Agent 层边界错误
@@ -89,7 +121,31 @@ pub enum AgentError {
     MiddlewareError { middleware: String, reason: String },
 
     #[error("Tool rejected: {tool} - {reason}")]
-    ToolRejected { tool: String, reason: String },
+    ToolRejected {
+        tool: String,
+        reason: String,
+        /// typed 拒绝原因（裁决 R9）：**必填**，「用户拒绝」与「没有人可以决定」
+        /// 不允许再共享同一构造形状。
+        cause: ToolRejectionCause,
+    },
+
+    /// 依赖真实 model turn 的准入规则在无活跃 turn 时**不可用**（设计 §4.1）。
+    ///
+    /// 语义边界必须清楚：这不是「失败」，也不是「空操作」，而是「本次执行缺少
+    /// turn 事实，准入无法判定 ⇒ 未执行」。需要 turn 的入口（审批 / HITL / turn
+    /// 绑定的事件投影）据此显式拒绝，不得静默跳过、不得伪造 `step = 0`、也不得
+    /// 借用某一轮的 turn 事实。
+    ///
+    /// 诊断字段：`entry` 点名拒绝的准入入口；`session_id` 是已知的会话身份
+    /// （`None` = 本次执行连会话身份都没有）。**没有 turn_id 字段**：无 turn 正是
+    /// 本错误陈述的事实，伪造一个 turn_id 会与语义矛盾。
+    #[error(
+        "not available without an active model turn: entry={entry}, session_id={session_id:?}"
+    )]
+    NotAvailableWithoutTurn {
+        entry: &'static str,
+        session_id: Option<String>,
+    },
 
     #[error("Serialization error: {0}")]
     SerializationError(#[from] serde_json::Error),
@@ -497,6 +553,7 @@ impl AgentError {
             Self::StreamRecoveryExhausted { .. } => "stream_recovery_exhausted",
             Self::MiddlewareError { .. } => "middleware",
             Self::ToolRejected { .. } => "tool_rejected",
+            Self::NotAvailableWithoutTurn { .. } => "not_available_without_turn",
             Self::SerializationError(_) => "serialization",
             Self::Interrupted => "interrupted",
             Self::CompactNoLlm => "compact_no_llm",

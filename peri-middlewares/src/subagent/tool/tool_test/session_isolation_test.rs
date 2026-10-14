@@ -106,8 +106,8 @@ async fn nested_delegation_uses_direct_parent_catalog_and_inbox() {
     );
     let mut nested_ctx = ToolContext::new(&[], &cwd);
     let nested_tool_call = format!("fixture-nested-tool-call:{}", uuid::Uuid::now_v7());
-    nested_ctx.invocation_id = Some(nested_tool_call.clone());
-    nested_ctx.tool_call_id = Some(nested_tool_call);
+    nested_ctx.invocation_id = Some(nested_tool_call.clone().into());
+    nested_ctx.tool_call_id = Some(nested_tool_call.into());
     let output = bound[0]
         .invoke(
             serde_json::json!({"prompt": "nested", "fork": true, "run_in_background": true}),

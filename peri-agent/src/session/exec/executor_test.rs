@@ -18,7 +18,9 @@ use peri_acp_types::{
     event::{
         EventMessage, EventPublisher, EventSink, EventSubscriber, ExecutorEvent, SubscriptionError,
     },
-    interaction::{InteractionContext, InteractionResponse, UserInteractionBroker},
+    interaction::{
+        InteractionContext, InteractionResponse, TrustedInteractionOwner, UserInteractionBroker,
+    },
     messages::{BaseMessage, ContentBlock, ImageSource, MessageContent},
     permission::{PermissionMode, SharedPermissionMode},
     ports::{AgentCatalogPort, ToolSearchPort},
@@ -97,7 +99,11 @@ struct NoopBroker;
 
 #[async_trait]
 impl UserInteractionBroker for NoopBroker {
-    async fn request(&self, _ctx: InteractionContext) -> InteractionResponse {
+    async fn request(
+        &self,
+        _owner: TrustedInteractionOwner,
+        _ctx: InteractionContext,
+    ) -> InteractionResponse {
         InteractionResponse::Rejected
     }
 }

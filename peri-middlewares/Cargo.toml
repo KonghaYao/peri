@@ -5,6 +5,11 @@ edition.workspace = true
 description = "Rust Agent middleware implementations, aligned with @langgraph-js/agent-middlewares"
 license = "Apache-2.0"
 
+[features]
+# 跨 crate 集成测试夹具（**生产构建不启用**）：允许在测试中构造真实空池并装入
+# 进程内 MCP peer，供 `peri-acp` 的 idle / Host invoke 端到端测试使用。
+test-support = []
+
 [dependencies]
 peri-agent = { path = "../peri-agent" }
 peri-acp-types = { path = "../peri-acp-types" }

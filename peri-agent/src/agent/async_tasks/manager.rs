@@ -606,6 +606,19 @@ impl TaskManager {
         }
     }
 
+    /// 作用域**已关闭**的实例：任何后台接管（`spawn_owned` /
+    /// `begin_external_execution`）都被准入拒绝，调用方按「未执行 + 告警」处理。
+    ///
+    /// 装配面用于「拿到的任务管理器不是本部署的具体类型」这一失败分支：它**不**
+    /// 冒充会话级管理器——既不建游离作用域，也不静默接收任务；与真正拿不到
+    /// 会话级管理器的后果（后台 hook 不进入会话作用域）相比，显式不执行是
+    /// fail-closed 的诚实结果。
+    pub fn without_session_scope() -> Self {
+        let manager = Self::new();
+        manager.registry.scope.close();
+        manager
+    }
+
     /// 访问底层 registry（workflow 适配 / ACP 侧 Snapshot 等场景）
     pub fn registry(&self) -> &Arc<BackgroundTaskRegistry> {
         &self.registry

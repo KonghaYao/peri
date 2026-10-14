@@ -397,7 +397,7 @@ mod tests {
     fn effective_view_drops_still_excluded_and_restores_cleared_bodies() {
         let covered = BaseMessage::human("covered by the removed summary");
         let summary = BaseMessage::human("summary that the rewind deletes");
-        let retained = vec![
+        let retained = [
             PersistedPayload::Message(covered.clone()),
             PersistedPayload::Message(summary.clone()),
         ];
@@ -432,7 +432,7 @@ mod tests {
         let inherited = BaseMessage::human("inherited from the parent session");
         let archived_body = BaseMessage::human("own body still covered by the summary");
         let summary = BaseMessage::ai("summary removed by the rewind");
-        let retained = vec![
+        let retained = [
             PersistedPayload::Message(inherited.clone()),
             PersistedPayload::Message(archived_body.clone()),
             PersistedPayload::Message(summary),

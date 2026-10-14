@@ -21,6 +21,26 @@ pub trait MiddlewareState: Send + Sync {
         None
     }
 
+    /// 本 state 代表的 canonical session 身份（与 `execution_binding` 同源）。
+    ///
+    /// 默认 `None`（legacy / 测试适配器）：交互归属因此无法铸造，需要归属的
+    /// middleware 必须显式拒绝；生产 v2 适配器（`AgentContext`）与调用期窄状态
+    /// 从 `StageContext` / `InvocationContext` 投影真实值。
+    fn session_id(&self) -> Option<&str> {
+        None
+    }
+
+    /// 本次执行的交互归属事实（与 `session_id` / `execution_binding` 同源）。
+    ///
+    /// 默认 `None`（legacy / 测试适配器）：需要交互归属的 middleware 必须显式
+    /// 拒绝；生产 v2 适配器（`AgentContext`）从 `StageContext` 的 turn 事实投影，
+    /// 调用期窄状态从 `InvocationContext` 投影。
+    fn interaction_attribution(
+        &self,
+    ) -> Option<peri_acp_types::interaction::InteractionAttribution> {
+        None
+    }
+
     fn cwd(&self) -> &str;
 
     fn messages(&self) -> &[BaseMessage];
@@ -80,6 +100,25 @@ pub trait MiddlewareState: Send + Sync {
 /// 通过显式 `AgentState::method(self, ...)` 调用避免与 `MiddlewareState` 自身方法递归。
 /// `String` 参数满足 `AgentState` 的 `impl Into<String>` 约束（`String: Into<String>`）。
 impl MiddlewareState for AgentState {
+    fn execution_binding(&self) -> Option<peri_acp_types::session::ExecutionBinding> {
+        AgentState::declared_execution_binding(self)
+    }
+
+    fn session_id(&self) -> Option<&str> {
+        AgentState::declared_session_id(self)
+    }
+
+    /// legacy / 测试适配器：显式声明的 turn 身份投影为模型归属
+    ///（`AgentState::with_turn_identity`）。声明缺失 ⇒ `None`（fail-closed），
+    /// 不从 `current_step` 之类的非身份字段拼装。
+    fn interaction_attribution(
+        &self,
+    ) -> Option<peri_acp_types::interaction::InteractionAttribution> {
+        let session_id = AgentState::declared_session_id(self)?;
+        let binding = AgentState::declared_execution_binding(self)?;
+        Some(peri_acp_types::interaction::InteractionAttribution::model_turn(session_id, binding))
+    }
+
     fn cwd(&self) -> &str {
         AgentState::cwd(self)
     }

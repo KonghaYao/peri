@@ -110,6 +110,11 @@ pub struct ToolResult {
     pub execution: Option<ToolExecutionEvidence>,
     #[serde(skip)]
     pub effective_error_code: Option<crate::tools::EffectiveToolErrorCode>,
+    /// typed 拒绝原因（裁决 R9）：只在本次结果是 `AgentError::ToolRejected` 的
+    /// 结算结果时存在。与 `effective_error_code` 同为进程内事实（`serde(skip)`，
+    /// 不进 wire），供 canonical 协议错误面还原「无人可答 ≠ 用户拒绝」。
+    #[serde(skip)]
+    pub rejection_cause: Option<peri_acp_types::error::ToolRejectionCause>,
     /// Safe typed facts for a child agent failure.  Raw causes stay inside the
     /// child and are never serialized into the canonical tool result.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -129,6 +134,7 @@ impl ToolResult {
             is_error: false,
             execution: None,
             effective_error_code: None,
+            rejection_cause: None,
             subagent_failure: None,
         }
     }
@@ -145,6 +151,7 @@ impl ToolResult {
             is_error: true,
             execution: None,
             effective_error_code: None,
+            rejection_cause: None,
             subagent_failure: None,
         }
     }
@@ -154,15 +161,17 @@ impl ToolResult {
         tool_name: impl Into<String>,
         output: ToolOutput,
     ) -> Self {
-        let is_error = output.execution.as_ref().is_some_and(|e| {
-            matches!(
-                e.status,
-                ToolExecutionStatus::Failed
-                    | ToolExecutionStatus::Cancelled
-                    | ToolExecutionStatus::TimedOut
-                    | ToolExecutionStatus::RunningAfterTimeout
-            )
-        });
+        // 真实 isError 优先：工具/远端报告失败时不得因为缺少本进程执行证据而降级为成功。
+        let is_error = output.is_error() == Some(true)
+            || output.execution.as_ref().is_some_and(|e| {
+                matches!(
+                    e.status,
+                    ToolExecutionStatus::Failed
+                        | ToolExecutionStatus::Cancelled
+                        | ToolExecutionStatus::TimedOut
+                        | ToolExecutionStatus::RunningAfterTimeout
+                )
+            });
         Self {
             tool_call_id: tool_call_id.into(),
             tool_name: tool_name.into(),
@@ -170,6 +179,7 @@ impl ToolResult {
             is_error,
             execution: output.execution,
             effective_error_code: None,
+            rejection_cause: None,
             subagent_failure: None,
         }
     }

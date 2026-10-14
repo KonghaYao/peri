@@ -5,7 +5,9 @@ use std::time::Duration;
 use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
 
+use crate::interaction::UnansweredCause;
 use crate::messages::BaseMessage;
+use crate::tool_outcome::{RawToolResult, RemoteToolError};
 
 /// Stable execution state carried alongside a tool's bounded display text.
 ///
@@ -114,27 +116,139 @@ impl ToolExecutionEvidence {
     }
 }
 
-/// Tool text plus optional execution evidence.
+/// 工具结果的 typed 事实。
+///
+/// 三个事实来源必须分开，任何一方缺省都不得由另一方推断：
+/// - [`ToolOutcome`]：工具/远端 MCP 自身报告的结果（真实 `isError` + raw 载荷）；
+/// - [`ToolExecutionEvidence`]：本进程侧的执行状态（进程存活、退出码、落盘引用）；
+/// - [`EffectiveToolError`]：transport/权限/取消等协议层失败。
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum ToolOutcome {
+    /// 未报告：工具没有提供结构化结果（legacy `BaseTool::invoke` 路径）。调用方
+    /// 必须保留这份不确定性，不得读作成功、失败或完成。
+    Unreported,
+    /// 已报告工具自身的结果。
+    Reported {
+        /// 工具自身报告的错误标志（MCP `isError`）。与 transport/协议失败不同：
+        /// 调用本身成功，但工具在带内报告失败。
+        is_error: bool,
+        /// 无损 raw 结果；`None` = 该工具没有 raw 载荷（本地工具）。
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        raw: Option<RawToolResult>,
+    },
+}
+
+impl Default for ToolOutcome {
+    /// 缺省即「未报告」：反序列化旧数据或缺失字段时不引入成功/失败的假设。
+    fn default() -> Self {
+        Self::Unreported
+    }
+}
+
+impl ToolOutcome {
+    /// 从无损 raw 结果构造；`is_error` 取 raw 的 `isError`，不额外推断。
+    pub fn from_raw(raw: RawToolResult) -> Self {
+        Self::Reported {
+            is_error: raw.is_error(),
+            raw: Some(raw),
+        }
+    }
+
+    /// 工具如实报告结果但没有 raw 载荷（本地工具）。
+    pub fn reported(is_error: bool) -> Self {
+        Self::Reported {
+            is_error,
+            raw: None,
+        }
+    }
+
+    /// 是否为 legacy 未报告状态。
+    pub fn is_unreported(&self) -> bool {
+        matches!(self, Self::Unreported)
+    }
+
+    /// `Some(true/false)` = 工具如实报告；`None` = 未报告，不得推断。
+    pub fn is_error(&self) -> Option<bool> {
+        match self {
+            Self::Unreported => None,
+            Self::Reported { is_error, .. } => Some(*is_error),
+        }
+    }
+
+    /// 无损 raw 结果（若工具提供）。
+    pub fn raw(&self) -> Option<&RawToolResult> {
+        match self {
+            Self::Unreported => None,
+            Self::Reported { raw, .. } => raw.as_ref(),
+        }
+    }
+}
+
+/// Tool text plus optional execution evidence and typed result outcome.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ToolOutput {
     pub text: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub execution: Option<ToolExecutionEvidence>,
+    /// 工具结果事实。缺省 [`ToolOutcome::Unreported`]：legacy 工具仍按不确定处理，
+    /// 其序列化形状与新增该字段之前一致（不写入 `outcome`）。
+    #[serde(default, skip_serializing_if = "ToolOutcome::is_unreported")]
+    pub outcome: ToolOutcome,
 }
 
 impl ToolOutput {
+    /// Legacy 契约：只有文本，执行状态与结果事实都未报告。
     pub fn from_legacy(text: impl Into<String>) -> Self {
         Self {
             text: text.into(),
             execution: None,
+            outcome: ToolOutcome::Unreported,
         }
     }
 
+    /// 携带本进程执行证据构造。执行证据不是工具结果：`outcome` 仍为
+    /// [`ToolOutcome::Unreported`]，需要报告结果的工具请用
+    /// [`ToolOutput::with_outcome`] / [`ToolOutput::from_raw_result`]。
     pub fn with_execution(text: impl Into<String>, execution: ToolExecutionEvidence) -> Self {
         Self {
             text: text.into(),
             execution: Some(execution),
+            outcome: ToolOutcome::Unreported,
         }
+    }
+
+    /// 从无损 raw 结果构造（MCP adapter 落点）：`is_error` 取 raw 的 `isError`。
+    pub fn from_raw_result(text: impl Into<String>, raw: RawToolResult) -> Self {
+        Self {
+            text: text.into(),
+            execution: None,
+            outcome: ToolOutcome::from_raw(raw),
+        }
+    }
+
+    /// 携带显式 typed outcome 构造（可与执行证据组合）。
+    pub fn with_outcome(text: impl Into<String>, outcome: ToolOutcome) -> Self {
+        Self {
+            text: text.into(),
+            execution: None,
+            outcome,
+        }
+    }
+
+    /// 工具结果事实；[`ToolOutcome::Unreported`] = legacy 契约未报告。
+    pub fn outcome(&self) -> &ToolOutcome {
+        &self.outcome
+    }
+
+    /// 真实 `isError`：`Some(true/false)` = 工具如实报告；`None` = 未报告，不得推断。
+    pub fn is_error(&self) -> Option<bool> {
+        self.outcome.is_error()
+    }
+
+    /// 无损 raw 结果（若工具提供）。
+    pub fn raw(&self) -> Option<&RawToolResult> {
+        self.outcome.raw()
     }
 
     /// Produce the bounded model/live-event projection while retaining a
@@ -348,15 +462,9 @@ pub enum ContextRetention {
     Recomputable,
 }
 
-/// 可由宿主工具发起的 canonical effective-tool 调用。
-#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct EffectiveToolCall {
-    pub invocation_id: String,
-    pub tool_name: String,
-    pub input: serde_json::Value,
-    pub parent_invocation_id: Option<String>,
-}
+// canonical 执行身份与来源的权威定义在 `tool_invocation`（见其模块文档）；
+// 此处 re-export，消费方沿用 `tools::InvocationId` 等路径。
+pub use crate::tool_invocation::{EffectiveToolCall, InvocationId, InvocationOrigin, ToolCallId};
 
 /// 当前 turn 可供程序化调用的工具声明。
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
@@ -403,6 +511,17 @@ pub struct EffectiveToolError {
     /// Typed child failure facts, when this effective call crossed a subagent
     /// boundary.  The textual message remains the user-facing projection.
     pub subagent_failure: Option<Box<crate::error::SafeSubagentFailure>>,
+    /// 远端 MCP 的 raw 错误事实（JSON-RPC `error` / 带内 `isError` 载荷）。
+    /// `None` = 失败不来自远端 MCP（本地工具、权限、取消、超时等）。relay 与
+    /// ACP 据此转发原始远端错误，不再靠 [`EffectiveToolErrorCode`] 反推。
+    pub remote_error: Option<RemoteToolError>,
+    /// 「审批不可用（无人可答）」的 typed 原因（裁决 R9）：只在本次失败是
+    /// [`crate::error::ToolRejectionCause::ApprovalUnavailable`] 时存在。
+    ///
+    /// 与 [`EffectiveToolErrorCode::UserRejected`] 严格区分：userRejected 是
+    /// **已作出的决定**，本字段是**没有人可以决定**。消费方（session outcome /
+    /// relay）据此如实记录 `ApprovalUnavailable`，不靠带外记录点补事实。
+    pub unanswered_cause: Option<UnansweredCause>,
 }
 
 impl EffectiveToolError {
@@ -411,6 +530,8 @@ impl EffectiveToolError {
             code,
             message: message.into(),
             subagent_failure: None,
+            remote_error: None,
+            unanswered_cause: None,
         }
     }
 
@@ -422,29 +543,42 @@ impl EffectiveToolError {
     pub fn subagent_failure(&self) -> Option<&crate::error::SafeSubagentFailure> {
         self.subagent_failure.as_deref()
     }
+
+    pub fn with_remote_error(mut self, remote: RemoteToolError) -> Self {
+        self.remote_error = Some(remote);
+        self
+    }
+
+    pub fn remote_error(&self) -> Option<&RemoteToolError> {
+        self.remote_error.as_ref()
+    }
+
+    /// 附加「审批不可用（无人可答）」的 typed 原因。
+    pub fn with_unanswered_cause(mut self, cause: UnansweredCause) -> Self {
+        self.unanswered_cause = Some(cause);
+        self
+    }
+
+    /// 「审批不可用（无人可答）」的 typed 原因；`None` = 本次失败与无人可答无关。
+    pub fn unanswered_cause(&self) -> Option<UnansweredCause> {
+        self.unanswered_cause
+    }
 }
 
 /// 宿主工具进入 Agent canonical dispatch 的显式端口。
 #[async_trait]
 pub trait EffectiveToolDispatcher: Send + Sync {
+    /// 执行一次 canonical effective call 并返回 typed outcome。
+    ///
+    /// 唯一入口（不再区分 `dispatch` / `dispatch_output`）：模型/UI 文本投影在
+    /// [`ToolOutput::text`]，真实 `isError` 与无损 raw 结果在 [`ToolOutput::outcome`]，
+    /// 本进程执行事实在 [`ToolOutput::execution`]。协议层失败（含远端 raw 错误）以
+    /// [`EffectiveToolError`] 返回。
     async fn dispatch(
         &self,
         call: EffectiveToolCall,
         cancel: tokio_util::sync::CancellationToken,
-    ) -> Result<String, EffectiveToolError>;
-
-    /// Execute an effective call while retaining typed evidence when the
-    /// target owns lifecycle facts. The compatibility default deliberately
-    /// leaves legacy string-only dispatches unknown.
-    async fn dispatch_output(
-        &self,
-        call: EffectiveToolCall,
-        cancel: tokio_util::sync::CancellationToken,
-    ) -> Result<ToolOutput, EffectiveToolError> {
-        self.dispatch(call, cancel)
-            .await
-            .map(ToolOutput::from_legacy)
-    }
+    ) -> Result<ToolOutput, EffectiveToolError>;
 
     fn tools(&self) -> Vec<EffectiveToolDefinition>;
 
@@ -486,13 +620,23 @@ pub struct ToolContext<'a> {
     pub cwd: &'a str,
     /// 当前 canonical dispatch 能力；仅 dispatch 中调用工具时存在。
     pub effective_tool_dispatcher: Option<std::sync::Arc<dyn EffectiveToolDispatcher>>,
-    /// 当前执行 invocation ID。
-    pub invocation_id: Option<String>,
-    pub tool_call_id: Option<String>,
+    /// 当前 canonical 执行身份；`None` = 不在 canonical dispatch 中。
+    pub invocation_id: Option<InvocationId>,
+    /// 当前执行的来源（模型 / 嵌套 / App / Host）；与 [`Self::invocation_id`] 同生共死。
+    pub origin: Option<InvocationOrigin>,
+    /// 模型 tool-call ID（与原始模型消息/卡片配对）；非模型发起时为 `None`。
+    /// 与 [`Self::invocation_id`] 语义独立，不得互相替代。
+    pub tool_call_id: Option<ToolCallId>,
     /// 当前外层调用的取消令牌。
     pub cancellation: tokio_util::sync::CancellationToken,
     /// 当前 Agent session identity；仅 canonical dispatch 中存在。
     pub session_id: Option<String>,
+    /// 本次 canonical 执行的**交互归属事实**（谁在问）；`None` = 本次执行没有
+    /// 可信归属（不在 canonical dispatch 中，或投影缺失）。
+    ///
+    /// 交互归属（工具发起审批 / 提问时）只能从这里取：工具不得自行生成归属、
+    /// 不得从字符串或 ID 推断，缺失即显式拒绝（fail-closed）。
+    pub attribution: Option<crate::interaction::InteractionAttribution>,
     /// Trusted terminal-reminder route into this (initiating) session's
     /// canonical transcript. `None` = no current delivery route available.
     pub task_terminal_delivery: Option<std::sync::Arc<dyn crate::tasks::TaskTerminalDelivery>>,
@@ -510,9 +654,11 @@ impl<'a> ToolContext<'a> {
             cwd,
             effective_tool_dispatcher: None,
             invocation_id: None,
+            origin: None,
             tool_call_id: None,
             cancellation: tokio_util::sync::CancellationToken::new(),
             session_id: None,
+            attribution: None,
             task_terminal_delivery: None,
             turn_generation: None,
             session_resources: None,
@@ -526,19 +672,26 @@ impl<'a> ToolContext<'a> {
         self
     }
 
-    pub fn with_effective_tool_dispatcher(
+    /// 绑定一次 canonical dispatch 的执行身份、来源与取消令牌。
+    ///
+    /// 执行身份只与 canonical dispatch 能力同时存在：能发起 canonical dispatch
+    /// 的上下文才有 invocation 身份与来源。
+    pub fn with_invocation(
         mut self,
         dispatcher: std::sync::Arc<dyn EffectiveToolDispatcher>,
-        invocation_id: impl Into<String>,
+        invocation_id: InvocationId,
+        origin: InvocationOrigin,
         cancellation: tokio_util::sync::CancellationToken,
     ) -> Self {
         self.effective_tool_dispatcher = Some(dispatcher);
-        self.invocation_id = Some(invocation_id.into());
+        self.invocation_id = Some(invocation_id);
+        self.origin = Some(origin);
         self.cancellation = cancellation;
         self
     }
 
-    pub fn with_tool_call_id(mut self, tool_call_id: impl Into<String>) -> Self {
+    /// 只写模型 tool-call ID：与原始模型消息/卡片配对，不涉及执行身份。
+    pub fn with_tool_call_id(mut self, tool_call_id: impl Into<ToolCallId>) -> Self {
         self.tool_call_id = Some(tool_call_id.into());
         self
     }
@@ -550,6 +703,19 @@ impl<'a> ToolContext<'a> {
     ) -> Self {
         self.session_id = Some(session_id.into());
         self.turn_generation = Some(turn_generation.into());
+        self
+    }
+
+    /// 绑定本次 canonical 执行的交互归属事实。
+    ///
+    /// 只有拿得到真实事实的调用方才绑定：canonical dispatch 从 `TurnContext`
+    /// 投影模型归属，idle 入口（App / Host）从 typed 来源派生。缺失时交互必须被
+    /// 显式拒绝，不得伪造归属。
+    pub fn with_attribution(
+        mut self,
+        attribution: crate::interaction::InteractionAttribution,
+    ) -> Self {
+        self.attribution = Some(attribution);
         self
     }
 
@@ -592,16 +758,23 @@ pub trait BaseTool: Send + Sync {
         }
     }
 
-    /// 执行工具，输入为 JSON Value
+    /// 执行工具，输入为 JSON Value。
+    ///
+    /// 这是本地/legacy 工具的落点：只返回文本投影。**不是** MCP adapter 的落点——
+    /// MCP 工具必须实现 [`BaseTool::invoke_output`]，否则 canonical dispatch 与
+    /// ACP 只能拿到文本投影，raw 结果与真实 `isError` 在此丢失。
     async fn invoke(
         &self,
         input: serde_json::Value,
         ctx: ToolContext<'_>,
     ) -> Result<String, Box<dyn std::error::Error + Send + Sync>>;
 
-    /// Execute with optional typed evidence. The compatibility default keeps
-    /// legacy tools' execution state unknown; only tools that own process or
-    /// lifecycle facts should override this method.
+    /// 执行工具并返回 typed outcome（无损 raw 结果 + 真实 `isError`）。
+    ///
+    /// 默认实现委托 [`BaseTool::invoke`]，语义明确为「raw 缺失」：
+    /// [`ToolOutput::outcome`] 为 [`ToolOutcome::Unreported`]，
+    /// [`ToolOutput::is_error`] 返回 `None`，调用方不得推断成功或失败。只有确实
+    /// 持有 raw 结果的工具（MCP adapter、远端工具）才应覆盖本方法。
     async fn invoke_output(
         &self,
         input: serde_json::Value,

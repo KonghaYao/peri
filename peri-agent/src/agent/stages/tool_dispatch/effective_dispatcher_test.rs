@@ -1,7 +1,9 @@
 use super::*;
+use crate::agent::stages::{ExecutionEntryOrigin, InvocationContext, StageContext};
 use crate::middleware::{capabilities as hook_state, Middleware, MiddlewareChain};
 use crate::session::{queue::MessageQueue, transcript::MessageTranscript, turn::TurnContext};
 use crate::tools::BaseTool;
+use crate::tools::InvocationOrigin;
 use serde_json::json;
 
 #[tokio::test]
@@ -92,7 +94,12 @@ async fn nested_dispatch_keeps_pinned_target_and_does_not_commit_outer_batch() {
         .tool_catalog
         .pin_working_tools(&ctx.runtime.tools.read())
         .unwrap();
-    let dispatcher = StageEffectiveToolDispatcher::new(ctx.clone(), catalog);
+    let invocation = InvocationContext::from_stage(
+        &ctx,
+        ExecutionEntryOrigin::ModelBatch,
+        ctx.session.turn.cancel_token.as_ref().clone(),
+    );
+    let dispatcher = StageEffectiveToolDispatcher::new(invocation.clone(), catalog);
     assert_eq!(
         dispatcher.admitted_mcp_tool_name("pinned", "wire_target"),
         Some("Target".into())
@@ -116,14 +123,16 @@ async fn nested_dispatch_keeps_pinned_target_and_does_not_commit_outer_batch() {
                 invocation_id: "inner".into(),
                 tool_name: "Target".into(),
                 input: json!({}),
-                parent_invocation_id: Some("outer".into()),
+                origin: InvocationOrigin::Nested {
+                    parent_invocation_id: "outer".into(),
+                },
             },
             CancellationToken::new(),
         )
         .await
         .unwrap();
 
-    assert_eq!(output, "pinned");
+    assert_eq!(output.text, "pinned");
     assert_eq!(*trace.lock(), vec![("after_tool", 1)]);
     assert_eq!(
         transcript
@@ -149,4 +158,89 @@ async fn nested_dispatch_keeps_pinned_target_and_does_not_commit_outer_batch() {
         }
     }
     assert_eq!(ids, vec!["outer/inner", "outer/inner"]);
+}
+
+#[tokio::test]
+async fn reported_in_band_result_keeps_raw_fact_instead_of_protocol_error() {
+    struct ReportingTool;
+    #[async_trait::async_trait]
+    impl BaseTool for ReportingTool {
+        fn name(&self) -> &str {
+            "Reporting"
+        }
+        fn description(&self) -> &str {
+            "reports an in-band failure with a raw payload"
+        }
+        fn parameters(&self) -> serde_json::Value {
+            json!({})
+        }
+        async fn invoke(
+            &self,
+            _input: serde_json::Value,
+            _ctx: crate::tools::ToolContext<'_>,
+        ) -> Result<String, Box<dyn std::error::Error + Send + Sync>> {
+            unreachable!("typed tools must be reached through invoke_output")
+        }
+        async fn invoke_output(
+            &self,
+            _input: serde_json::Value,
+            _ctx: crate::tools::ToolContext<'_>,
+        ) -> Result<crate::tools::ToolOutput, Box<dyn std::error::Error + Send + Sync>> {
+            let raw = serde_json::json!({
+                "content": [{"type": "text", "text": "remote failure"}],
+                "isError": true,
+            });
+            Ok(crate::tools::ToolOutput::from_raw_result(
+                "remote failure",
+                peri_acp_types::tool_outcome::RawToolResult::new(raw),
+            ))
+        }
+    }
+    let turn = TurnContext::new(Arc::from("/tmp"), Arc::new(CancellationToken::new()));
+    let transcript = Arc::new(parking_lot::RwLock::new(MessageTranscript::new()));
+    let ctx = StageContext::builder(turn, transcript, MessageQueue::new()).build();
+    ctx.runtime
+        .tools
+        .write()
+        .insert("Reporting".into(), Arc::new(ReportingTool));
+    let catalog = ctx
+        .runtime
+        .tool_catalog
+        .pin_working_tools(&ctx.runtime.tools.read())
+        .unwrap();
+    let invocation = InvocationContext::from_stage(
+        &ctx,
+        ExecutionEntryOrigin::ModelBatch,
+        ctx.session.turn.cancel_token.as_ref().clone(),
+    );
+    let dispatcher = StageEffectiveToolDispatcher::new(invocation, catalog);
+
+    let output = dispatcher
+        .dispatch(
+            EffectiveToolCall {
+                invocation_id: "app-call".into(),
+                tool_name: "Reporting".into(),
+                input: json!({}),
+                origin: InvocationOrigin::App {
+                    app_id: "app-1".into(),
+                    attachment_id: Some(peri_acp_types::interaction::AttachmentId::new("conn-1")),
+                    connection_epoch: Some(peri_acp_types::interaction::ConnectionEpoch::new(1)),
+                    server_generation: 1,
+                },
+            },
+            CancellationToken::new(),
+        )
+        .await
+        .expect("已报告结果事实的带内失败不是协议层失败");
+
+    assert_eq!(output.is_error(), Some(true));
+    match output.outcome() {
+        crate::tools::ToolOutcome::Reported { is_error, raw } => {
+            assert!(is_error);
+            let raw = raw.as_ref().expect("raw 载荷必须保真返回");
+            assert!(raw.is_error());
+            assert_eq!(raw.content().len(), 1);
+        }
+        other => panic!("已报告结果必须保留 typed outcome，实际: {other:?}"),
+    }
 }

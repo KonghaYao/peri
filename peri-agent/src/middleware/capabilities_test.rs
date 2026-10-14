@@ -1,4 +1,5 @@
 //! 通过生产 runner 验证窄接口的消息、目录和队列能力。
+use std::collections::HashMap;
 use std::sync::{
     atomic::{AtomicBool, Ordering},
     Arc,
@@ -11,7 +12,9 @@ use crate::middleware::{capabilities as hook_state, Middleware, MiddlewareChain}
 use crate::{
     agent::{
         react::{AgentOutput, Reasoning, ToolCall, ToolResult},
-        stages::{middleware_runner, SharedToolMap, StageContext},
+        stages::{
+            middleware_runner, ExecutionEntryOrigin, InvocationContext, SharedToolMap, StageContext,
+        },
     },
     error::AgentResult,
     messages::{BaseMessage, MessageContent},
@@ -250,7 +253,7 @@ impl Middleware for QueueProbe {
         call: &ToolCall,
     ) -> AgentResult<ToolCall> {
         assert_eq!(state.cwd(), "/tmp/capabilities");
-        assert_eq!(state.current_step(), 0);
+        assert_eq!(state.current_step(), Some(0));
         let mut modified = call.clone();
         modified.input = serde_json::json!({ "approved": true });
         Ok(modified)
@@ -281,11 +284,18 @@ async fn tool_and_agent_feedback_use_queue_capability_without_writing_history() 
     let ctx = context_with(QueueProbe);
     let inbox = SessionInbox::new(Arc::new(ctx.session.queue.clone()));
     let call = ToolCall::new("call", "probe", serde_json::json!({}));
-    let mut approved = middleware_runner::run_before_tools_batch(&ctx, &[call]).await;
+    let invocation = InvocationContext::from_stage(
+        &ctx,
+        ExecutionEntryOrigin::ModelBatch,
+        ctx.session.turn.cancel_token.as_ref().clone(),
+    );
+    let mut approved =
+        middleware_runner::run_before_bound_tools_batch(&invocation, &[call], &HashMap::new())
+            .await;
     let approved = approved.remove(0).unwrap();
     assert_eq!(approved.input, serde_json::json!({ "approved": true }));
     let result = ToolResult::success("call", "probe", "done");
-    middleware_runner::run_after_tool(&ctx, &approved, &result)
+    middleware_runner::run_after_tool(&invocation, &approved, &result)
         .await
         .unwrap();
     let output = middleware_runner::run_after_agent(&ctx, AgentOutput::new("done", 1))

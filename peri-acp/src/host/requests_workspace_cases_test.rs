@@ -422,8 +422,17 @@ async fn worktree_scheduled_approval_uses_session_permission_and_rejects_closed_
         .unwrap();
     assert_eq!(permission.load(), PermissionMode::Default);
     assert!(
-        !crate::host::prompt::approve_scheduled_trigger(permission.as_ref(), None, "task", "run")
-            .await
+        !crate::host::prompt::approve_scheduled_trigger(
+            permission.as_ref(),
+            None,
+            peri_acp_types::interaction::TrustedInteractionOwner::host(
+                crate::host::SCHEDULED_TRIGGER_NAMESPACE,
+                1,
+            ),
+            "task",
+            "run",
+        )
+        .await
     );
     sessions.lock().await.get_mut(id).unwrap().closing = true;
     assert!(
@@ -893,6 +902,8 @@ async fn prompt_without_frozen_snapshot_fails_closed() {
             history_payloads: Vec::new(),
             structure_version: 0,
             cancel_token: None,
+            interaction_gate: Arc::new(tokio::sync::Mutex::new(())),
+            host_request_seq: Arc::new(std::sync::atomic::AtomicU64::new(0)),
             continuation_armed: false,
             continuation_epoch: 0,
             continuation_in_flight: false,

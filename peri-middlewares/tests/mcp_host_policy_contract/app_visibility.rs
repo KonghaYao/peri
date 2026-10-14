@@ -25,17 +25,26 @@ impl BaseTool for AppCaller {
             .effective_tool_dispatcher
             .as_ref()
             .expect("app dispatcher must be available");
+        // 工具内再调用工具 = 嵌套执行：外层执行身份由 `ctx.invocation_id` 给出
+        // （`origin` 是 typed 来源，不再用字符串前缀推断）。
+        let parent_invocation_id = ctx
+            .invocation_id
+            .clone()
+            .expect("nested dispatch requires the enclosing invocation identity");
         Ok(dispatcher
             .dispatch(
                 peri_acp_types::tools::EffectiveToolCall {
                     invocation_id: "app-call".into(),
                     tool_name: effective_name(APP_ONLY_TOOL),
                     input: json!({"id": "n1"}),
-                    parent_invocation_id: None,
+                    origin: peri_acp_types::tools::InvocationOrigin::Nested {
+                        parent_invocation_id,
+                    },
                 },
                 CancellationToken::new(),
             )
-            .await?)
+            .await?
+            .text)
     }
 }
 

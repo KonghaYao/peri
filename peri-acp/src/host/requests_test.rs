@@ -178,6 +178,8 @@ async fn build_server_config(
         cron_scheduler: None,
         mcp_pool: None,
         mcp_apps_relay: None,
+        mcp_apps_facade: None,
+        session_authorization: None,
         acp_mcp: None,
         dynamic_mcp: None,
         oauth_event_tx: None,
@@ -345,6 +347,8 @@ async fn register_session_with_history(
             history_payloads,
             structure_version: 0,
             cancel_token: None,
+            interaction_gate: Arc::new(tokio::sync::Mutex::new(())),
+            host_request_seq: Arc::new(std::sync::atomic::AtomicU64::new(0)),
             continuation_armed: false,
             continuation_epoch: 0,
             continuation_in_flight: false,
@@ -611,6 +615,9 @@ mod beta_flags;
 #[path = "requests_agent_catalog_test.rs"]
 mod agent_catalog;
 
+#[path = "requests_idle_invocation_lifetime_test.rs"]
+mod idle_invocation_lifetime;
+
 #[path = "requests_skill_resources_test.rs"]
 mod skill_resources;
 
@@ -694,6 +701,8 @@ async fn register_session_with_workflow(
             history_payloads: Vec::new(),
             structure_version: 0,
             cancel_token: None,
+            interaction_gate: Arc::new(tokio::sync::Mutex::new(())),
+            host_request_seq: Arc::new(std::sync::atomic::AtomicU64::new(0)),
             continuation_armed: false,
             continuation_epoch: 0,
             continuation_in_flight: false,

@@ -591,6 +591,23 @@ pub trait SessionResources: Send + Sync {
         frozen: &FrozenSnapshotBytes,
     ) -> SessionResourceResult<()>;
 
+    /// 为无绑定的本机历史会话重建可复核的执行归属：幂等、可重跑。
+    ///
+    /// 后置条件：会话已有绑定时只按既有事实复核；没有绑定时按保存的 cwd 在本机重新
+    /// 观测，原归属行从未被观测过（无执行证据的迁移期历史归组行）才把会话归属收敛到
+    /// 观测出的 Workspace，行上已有证据则失败（
+    /// [`WorkspaceError::UnverifiedLegacyOwner`]），不静默改绑。
+    /// 返回的 Workspace 与 `threads.workspace_id` 一致，接纳可直接使用它；
+    /// 无法用当前证据证明归属时如实失败，历史仍按 ID 可读。
+    async fn relink_unbound_session(
+        &self,
+        _id: &ThreadId,
+    ) -> SessionResourceResult<ResolvedWorkspace> {
+        Err(SessionResourceError::new(
+            SessionResourceErrorKind::Unsupported,
+        ))
+    }
+
     // ── 读取 ──
 
     /// 一次一致读取：metadata、binding 分类、frozen 状态、own payload/flags、inherited。
@@ -967,25 +984,8 @@ pub trait SessionResources: Send + Sync {
     async fn drain_persistence(&self, id: &ThreadId) -> SessionResourceResult<()>;
 }
 
-/// 部署生命周期关闭端口：关闭整个会话存储的**唯一**入口。
-///
-/// 门面（[`SessionResources`]）是业务句柄：可以克隆、可以注入 Agent/Controller/
-/// middleware，它只提供会话行为与必要的收敛能力（恢复、排空）。**关闭整个存储不是
-/// 业务行为**——那会让任何持有句柄的调用方获得全局销毁权，因此关闭权单独由本端口
-/// 承载，并由部署装配（TUI/print/stdio 的宿主配置）在**自己的任务排空之后**调用一次。
-///
-/// 实现必须把两件事分开：
-///
-/// - 关闭**不可逆地**停止新写入，但「停止新写入」不等于「已关闭」：只有真实检查
-///   （在途写入、未决持久化）全部结清并确实关闭数据面之后才确认关闭，此后的重复调用
-///   才幂等成功；
-/// - 失败或被取消的关闭不构成确认，重复调用必须重新检查。未确认期间该存储的恢复与
-///   排空仍然可用（业务句柄不受影响），否则第一次关闭失败就再也没有收敛路径。
-#[async_trait]
-pub trait SessionStoreShutdownPort: Send + Sync {
-    /// 排空之后关闭会话存储；只有确认关闭才返回 `Ok`。
-    async fn shutdown(&self) -> SessionResourceResult<()>;
-}
+mod lifecycle;
+pub use lifecycle::SessionStoreShutdownPort;
 
 #[cfg(test)]
 #[path = "session_resources_test.rs"]

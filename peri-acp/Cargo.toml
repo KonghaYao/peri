@@ -76,6 +76,12 @@ sqlx.workspace = true
 # 测试面虚拟时钟（`tokio::time::pause`）：R29/F02 的桥层 120s 期限不真等 120 秒。
 # 与 peri-agent / peri-tui 的既有写法同形（dev-dependencies，resolver = "2" 下不进入生产构建）。
 tokio = { workspace = true, features = ["test-util"] }
+# MCP Apps idle / Host invoke 的真实 peer 夹具（进程内 duplex server + 计数
+# `tools/call`）：只用于测试，生产路径经 peri-middlewares 的池访问 MCP。
+rmcp = { workspace = true, features = ["client", "transport-async-rw", "server"] }
+# `test-support`：跨 crate 夹具入口（空池 + 装入进程内 peer）。dev-dependency 的
+# 特性只在本 crate 的测试构建生效，不进生产 API 面。
+peri-middlewares = { path = "../peri-middlewares", features = ["test-support"] }
 
 [target.'cfg(not(target_os = "emscripten"))'.dependencies]
 peri-mcp-common.workspace = true

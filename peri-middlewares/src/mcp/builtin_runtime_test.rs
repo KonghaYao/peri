@@ -70,7 +70,8 @@ use peri_agent::agent::react::ToolCall;
 use peri_agent::agent::AgentCancellationToken;
 use peri_agent::error::{AgentError, AgentResult};
 use peri_agent::interaction::{
-    ApprovalDecision, InteractionContext, InteractionResponse, UserInteractionBroker,
+    ApprovalDecision, InteractionContext, InteractionResponse, TrustedInteractionOwner,
+    UserInteractionBroker,
 };
 use peri_agent::middleware::capabilities as hook_state;
 use peri_agent::session::tool_catalog::{StartupRequiredTool, StartupToolUpdate};
@@ -526,7 +527,11 @@ impl RecordingBroker {
 
 #[async_trait]
 impl UserInteractionBroker for RecordingBroker {
-    async fn request(&self, context: InteractionContext) -> InteractionResponse {
+    async fn request(
+        &self,
+        _owner: TrustedInteractionOwner,
+        context: InteractionContext,
+    ) -> InteractionResponse {
         self.requests.fetch_add(1, Ordering::SeqCst);
         match context {
             InteractionContext::Approval { items } => {
@@ -858,7 +863,17 @@ async fn run_approval_chain(
     middleware: &PermissionMiddleware,
     call: &ToolCall,
 ) -> Vec<AgentResult<ToolCall>> {
-    middleware.process_batch(std::slice::from_ref(call)).await
+    // 审批态带 turn 身份：交互归属从 state 投影（缺失即显式拒绝）。
+    let mut state = peri_agent::agent::state::AgentState::new("/tmp").with_turn_identity(
+        "session-test",
+        peri_acp_types::session::ExecutionBinding {
+            turn_id: peri_acp_types::session::TurnId::new(),
+            attempt_id: peri_acp_types::identity::AttemptId::new(),
+        },
+    );
+    middleware
+        .before_tools_batch(&mut state, std::slice::from_ref(call))
+        .await
 }
 
 // ══════════════════════════════════════════════════════════════════════════════════
