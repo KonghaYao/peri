@@ -231,7 +231,7 @@ pub(super) fn identity_read_plan() -> Vec<StatementSpec> {
 
 /// 打开路径要探测的形状代数：由契约与版本决定（[`shape_probe`]）。
 ///
-/// 探测各用一条只读 SELECT 读回列形状（`schema_shape` 的同一份声明与判定；本机与远端共用），
+/// 远端逐表执行只读 PRAGMA 读回列形状（`schema_shape` 的同一份声明与判定；本机与远端共用），
 /// 判定不宽容：读得懂的库其形状必须与契约声明的代数逐项相符。
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(super) enum ShapeProbe {
@@ -259,12 +259,36 @@ pub(super) const CURRENT_TABLE_PRAGMAS: &[(&str, &str)] = &[
 ];
 
 impl ShapeProbe {
-    /// 探测语句（只读、单条 SELECT；缺表在结果里没有行，由判定区分「缺表」与「空形状」）。
+    /// 本机 SQLite 测试使用的单条 SELECT；远端打开使用逐表 PRAGMA，避免不兼容的表值函数。
     pub(super) fn sql(self) -> &'static str {
         match self {
             Self::Current => schema_shape::CURRENT_COLUMNS_SQL,
             Self::Input => schema_shape::INPUT_COLUMNS_SQL,
         }
+    }
+
+    pub(super) fn table_names(self) -> impl Iterator<Item = &'static str> {
+        match self {
+            Self::Current => schema_shape::CURRENT_TABLES
+                .iter()
+                .map(|table| table.name)
+                .collect::<Vec<_>>(),
+            Self::Input => schema_shape::INPUT_TABLES
+                .iter()
+                .map(|table| table.name)
+                .collect::<Vec<_>>(),
+        }
+        .into_iter()
+    }
+
+    pub(super) fn pragma_table_xinfo(table: &str) -> Option<&'static str> {
+        CURRENT_TABLE_PRAGMAS
+            .iter()
+            .find_map(|&(name, sql)| (name == table).then_some(sql))
+            .or_else(|| {
+                (table == "session_environments")
+                    .then_some("PRAGMA table_xinfo('session_environments')")
+            })
     }
 
     /// 读回的列形状 → 判定结论（纯函数）。诊断只说明「哪张表/哪一列不符」，不含会话内容。
