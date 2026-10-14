@@ -1,7 +1,7 @@
 # A：验收报告（需求 §9 A01~A25）
 
 - 日期：2026-10-14（CST）；**第三版**（第一版经 `.recon/A-acceptance-report-audit.md` 复核为「需修订后可作验收依据」；第二版按 M1~M4 修订并加入 F1 修复轮；第三版加入 S12 收尾轮与 S13 修订轮：拒绝分支持久化、A14 最小直接用例、文件规模治理、锁回归重做、WASM 基线修复，修订记录见 §0.1）
-- worktree：`/Users/konghayao/code/ai/peri-v4p3/.worktrees/peri-transcript-history`；分支 `feat/transcript-shrink-history-pagination`（**核心交付已提交**：`95c1e07d7` 存储/ACP/Agent、`9b96f456a` 前端、`3ccf75864` 文档与证据；S12~S13 收尾轮改动与本报告由第四次提交一并提交，见 §0.1b）
+- worktree：`/Users/konghayao/code/ai/peri-v4p3/.worktrees/peri-transcript-history`；分支 `feat/transcript-shrink-history-pagination`（**核心交付已提交**：`95c1e07d7` 存储/ACP/Agent、`9b96f456a` 前端、`3ccf75864` 文档与证据；S12~S13 收尾轮改动与本报告由第四次提交一并提交、第四版（A05 索引与两项对抗裁决）由第六次提交 `5e691a2ac` 落地，见 §0.1b）
 - 需求：`/Users/konghayao/Desktop/peri-transcript-history-requirements.md`（§9 验收表 A01~A25、§5.3 ACP 标准边界、§10 不在本任务内）
 - 蓝图与决策：`spec/issues/2026-10-13-transcript-shrink-history-pagination.md` §7（D1~D15、切片状态 S1~S11、编排脚本）
 - 证据目录：`.recon/`（R4/S6/R4b 复核、perf-evidence、S9*/S7*/S11 报告、final-test-matrix、final-adversarial-audit、A-acceptance-report-audit）
@@ -31,6 +31,7 @@
 1. 三个 commit 已落在工作树（`95c1e07d7` / `9b96f456a` / `3ccf75864`），分支已**追平并 rebase 到 `origin/main`（`19215d3a1`）**；追平过程中修掉一处 rebase 语义冲突（上游给 `AcpEventData::LocalUserBubble` 加了 `attachments` 字段，本分支的匹配式补 `..`）。
 2. TUI 集成用例编号因上游占用 `P0-77~P0-80` 改号为 **`P0-81`**（README/06 文档/code-index/蓝图已同步）。
 3. S12~S13 改动（16 个已跟踪修改文件 + 26 个新增源码/测试文件（含 §5.15 拆分产物）+ 蓝图 spec 修订、`.gitignore` 两行（SQLite 运行期副本不入库）与 `.gitattributes` 一行（`.recon/**` 留档豁免空白门禁）+ 17 份 `.recon/S12-*.md`/`S13-*.md` 报告与 9 个原始留档目录 + 2 个编排脚本）与本报告的第三版**由第四次提交 `c1744d472` 一并提交**（含 `langfuse-client` WASM 修复与 SDK 夹具修复）；本报告随后的两处补记（§5.15 第 6 条、§6.4 第 6 条）由第五次提交落地。
+4. **第四版（本轮）**：A05 索引实施、两项对抗裁决、协议/索引文档订正与本报告第四版由**第六次提交 `5e691a2ac`** 落地（12 files / +552 / −32；含新增证据 `.recon/a05-raw/perf-rerun.out`）；随后本节的哈希补记由第七次提交落地，两次提交一并推送到 `origin`（分支原先无 upstream）。
 
 ### 0.2 必须先看的三个结论
 
@@ -403,6 +404,7 @@
 4. **复验（全部本轮重跑）**：`fmt --all -- --check` = **0 diff**；`check --locked --all-targets`（5 crate）**exit 0**；`peri-acp --lib` **887/0**、`peri-tui --lib` **1817/0/6 ignored**、`peri-resources --lib` **497/0/26 ignored**。格式化不改变语义（`acp_bridge_cancel_test.rs` 还原为 HEAD 版后 TUI 全量仍 1817/0）。
 5. **意义**：`lefthook.yml` 的 pre-commit 第一步是 `cargo fmt --check`（`fix: cargo fmt`）；补做之前该钩子必然红，现在通过。
 6. **第三轮（S13 收尾，第四次提交前由 pre-commit 拦下）**：S13 拆分后的两个文件（`history_page_wire_test.rs`、`requests_rewind_failure_paths_test.rs`）在块搬移处各留下 1~2 个多余空行；`lefthook` pre-commit 的 `cargo fmt --check` 判红（各拆分报告声称的 crate 级 fmt 通过未覆盖「多文件搬移产生的空行」这一形态）。已 `fmt --all` 归零，随后同一钩子四步全绿（`check` / `clippy` / `fmt` / `layer-imports`），第四次提交落地为 **`c1744d472`**（146 files / +31 046 / −7 166）。
+7. **第四轮（A05 索引与对抗裁决，第六次提交 `5e691a2ac` 前）**：`fmt --check` 天然通过（改动含 `fmt --all` 归零后的既有形态）；pre-commit 四步全绿（`check` 59.99 s / `clippy` 31.15 s / `fmt` 5.40 s / `layer-imports` 1.40 s），clippy 只有两条**既有** warning（`peri-acp/src/dispatch/session_replay.rs:55` 的 `large_enum_variant`、`peri-tui/src/kit/acp_events/history_page.rs:41` 的 `type_complexity`），非本轮引入、不影响门禁结论。
 
 ---
 
