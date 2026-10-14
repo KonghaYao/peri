@@ -21,7 +21,7 @@ pub(super) fn hover_target_for(
             slot_index: h.slot_index,
             logical_idx: h.logical_idx,
             vm_hash: h.vm_hash,
-            path: h.path.clone(),
+            identity: h.identity.clone(),
             size_text: h.size_text.clone(),
         })
 }

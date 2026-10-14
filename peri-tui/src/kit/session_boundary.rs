@@ -25,6 +25,8 @@ pub fn project_session_boundary(target_session_id: Option<&str>) {
         state.is_loading = false;
     }
     atoms::INPUT_BUFFER.state().write().clear();
+    // 已提交附件的保留载荷随会话释放（不为上一个会话继续占内存）。
+    atoms::RETAINED_ATTACHMENTS.state().write().clear();
     *atoms::HITL_PENDING.state().write() = None;
     *atoms::ASK_USER_PENDING.state().write() = None;
     atoms::OAUTH_INFO.set(None);

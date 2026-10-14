@@ -31,10 +31,25 @@ fn test_user_bubble_attachments_join_content_hash() {
         "无附件不改变哈希（既有缓存行为不变）"
     );
 
-    let one = TuiUserBubble::with_attachments("hi".into(), vec![UserAttachment { bytes: 45 }]);
+    let one = TuiUserBubble::with_attachments(
+        "hi".into(),
+        vec![UserAttachment {
+            bytes: 45,
+            payload_id: 7,
+        }],
+    );
     let two = TuiUserBubble::with_attachments(
         "hi".into(),
-        vec![UserAttachment { bytes: 45 }, UserAttachment { bytes: 2048 }],
+        vec![
+            UserAttachment {
+                bytes: 45,
+                payload_id: 7,
+            },
+            UserAttachment {
+                bytes: 2048,
+                payload_id: 8,
+            },
+        ],
     );
     assert_ne!(plain.content_hash, one.content_hash, "带附件必须改变哈希");
     assert_ne!(
@@ -46,12 +61,30 @@ fn test_user_bubble_attachments_join_content_hash() {
 /// 附件是内容的一部分：进 partial_eq（附件不同 → 气泡不等）。
 #[test]
 fn test_user_bubble_partial_eq_respects_attachments() {
-    let a = TuiUserBubble::with_attachments("hi".into(), vec![UserAttachment { bytes: 45 }]);
-    let b = TuiUserBubble::with_attachments("hi".into(), vec![UserAttachment { bytes: 46 }]);
+    let a = TuiUserBubble::with_attachments(
+        "hi".into(),
+        vec![UserAttachment {
+            bytes: 45,
+            payload_id: 7,
+        }],
+    );
+    let b = TuiUserBubble::with_attachments(
+        "hi".into(),
+        vec![UserAttachment {
+            bytes: 46,
+            payload_id: 9,
+        }],
+    );
     assert_ne!(a, b, "附件不同 → 应不等");
     assert_eq!(
         a,
-        TuiUserBubble::with_attachments("hi".into(), vec![UserAttachment { bytes: 45 }])
+        TuiUserBubble::with_attachments(
+            "hi".into(),
+            vec![UserAttachment {
+                bytes: 45,
+                payload_id: 7
+            }]
+        )
     );
 }
 

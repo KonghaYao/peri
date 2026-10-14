@@ -380,7 +380,9 @@ pub(super) fn handle_user_input_delivered(
     }
     state.last_submitted_text = None;
     state.variant = 1;
-    // 投递的时刻才显示气泡：附件展示记录从投递内容还原（图片块只留序号与大小）。
+    // 投递的时刻才显示气泡：附件展示记录从投递内容还原（图片块只留序号与大小），
+    // 同时把载荷放进有界保留层供消息区 hover 预览。
+    crate::kit::steer_state::retain_submitted_from_content(content);
     state.push_user_bubble(
         content.text_content(),
         crate::kit::steer_state::attachment_displays_from_content(content),

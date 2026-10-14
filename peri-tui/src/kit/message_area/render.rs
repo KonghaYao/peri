@@ -66,11 +66,8 @@ pub(crate) struct CopyButtonInfo {
 pub(crate) struct ImageLineInfo {
     /// slot 内逻辑行索引（wrap_map 中该 meta 行的 visual_start）。
     pub(super) logical_idx: usize,
-    /// 展示路径（T5 canonicalize 后；失败时为原始文本）——open 目标 + hover 显示。
-    pub(crate) path: String,
-    /// 受管理目录内（~/.peri/images）→ 自动预览候选；手工路径 → 仅文本
-    /// （差异在 T7 预览，本任务显示层两者一致，§6.1 Q6）。
-    pub(super) managed: bool,
+    /// 行身份（路径 meta 行 / 附件记录行）——open 目标、hover 显示与预览目标。
+    pub(crate) identity: super::hits::ImageLineIdentity,
     /// 重建期算好的大小文案（B/KB/MB 或 missing）——hover 渲染复用，
     /// hover 时不再 stat（§4.4 stat 时机取舍）。
     pub(crate) size_text: String,

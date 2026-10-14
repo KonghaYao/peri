@@ -1,6 +1,6 @@
 use crate::i18n;
 use crate::kit::message_area::grid::GridSpec;
-use crate::kit::tui_render_unit::{FoldState, UserAttachment};
+use crate::kit::tui_render_unit::FoldState;
 use crate::truncate::{truncate_by_width, wrap_by_width};
 use fluent_bundle::FluentValue;
 use peri_theme::atoms::THEME_ATOM;
@@ -130,15 +130,36 @@ pub(super) fn render_user_bubble_lines(
     // 附件记录行先于正文：一条一张，`[图片] 图片 1 · 128.0 KB`——发送后仍能看出
     // 这条消息带了图片（上传式附件没有可复制的路径文本，只有这里的记录）。
     for (index, attachment) in data.attachments.iter().enumerate() {
-        push_meta_body_lines(
+        let name = crate::kit::tui_render_unit::user_attachment_name(index + 1);
+        let size_text = human_size(attachment.bytes as u64);
+        let meta_text = i18n::tr_args(
+            "user-attachment-image-meta",
+            &[
+                ("name".to_string(), FluentValue::from(name.clone())),
+                ("size".to_string(), FluentValue::from(size_text.clone())),
+            ],
+        );
+        let (logical_idx, take, meta_len) = push_meta_body_lines(
             &mut lines,
             grid,
-            attachment_meta_text(attachment, index + 1),
+            meta_text,
             sem.text.secondary,
             Style::default().fg(sem.text.primary),
             &mut visual_count,
             &mut total,
         );
+        // 完整渲染的行才登记 hover 命中（与 @image meta 行同一取舍：截断行会错位）。
+        // 身份用 `payload_id`：预览载荷从有界保留层取，取不到就不预览。
+        if take == meta_len {
+            image_lines.push(ImageLineInfo {
+                logical_idx,
+                identity: crate::kit::message_area::ImageLineIdentity::Attachment {
+                    name,
+                    payload_id: attachment.payload_id,
+                },
+                size_text,
+            });
+        }
     }
     for raw in data.text.lines() {
         let is_image = parse_image_line(raw);
@@ -158,8 +179,10 @@ pub(super) fn render_user_bubble_lines(
             if take == meta_len {
                 image_lines.push(ImageLineInfo {
                     logical_idx,
-                    path: display_path,
-                    managed,
+                    identity: crate::kit::message_area::ImageLineIdentity::Path {
+                        path: display_path,
+                        managed,
+                    },
                     size_text,
                 });
             }
@@ -228,26 +251,6 @@ fn push_meta_body_lines(
     }
     *visual_count += take;
     (logical_idx, take, wrapped.len())
-}
-
-/// 附件记录行文本：`[图片] 图片 {序号} · {大小}`。
-///
-/// 大小复用 `@image` meta 行的 [`human_size`] 三档；不解析图片内容（无缩略预览）——
-/// 载荷不在视图模型里（见 `UserAttachment`）。
-fn attachment_meta_text(attachment: &UserAttachment, index: usize) -> String {
-    i18n::tr_args(
-        "user-attachment-image-meta",
-        &[
-            (
-                "name".to_string(),
-                FluentValue::from(crate::kit::tui_render_unit::user_attachment_name(index)),
-            ),
-            (
-                "size".to_string(),
-                FluentValue::from(human_size(attachment.bytes as u64)),
-            ),
-        ],
-    )
 }
 
 /// @image 行识别（§4.4）：原始行（wrap 之前）`trim_start` 后以 `@image ` 开头
@@ -342,16 +345,30 @@ pub(crate) fn render_image_hover_line(
     grid: &GridSpec,
     sem: &peri_theme::semantic::SemanticTokens,
 ) -> Line<'static> {
-    let text = i18n::tr_args(
-        "user-image-meta",
-        &[
-            ("name".to_string(), FluentValue::from(hover.path.as_str())),
-            (
-                "size".to_string(),
-                FluentValue::from(hover.size_text.as_str()),
-            ),
-        ],
-    );
+    // 路径身份 hover 显示绝对路径（定位用）；附件身份没有路径可展示，显示
+    // 与正文同一形态的 `[图片] 名称 · 大小`。
+    let text = match &hover.identity {
+        crate::kit::message_area::ImageLineIdentity::Path { path, .. } => i18n::tr_args(
+            "user-image-meta",
+            &[
+                ("name".to_string(), FluentValue::from(path.as_str())),
+                (
+                    "size".to_string(),
+                    FluentValue::from(hover.size_text.as_str()),
+                ),
+            ],
+        ),
+        crate::kit::message_area::ImageLineIdentity::Attachment { name, .. } => i18n::tr_args(
+            "user-attachment-image-meta",
+            &[
+                ("name".to_string(), FluentValue::from(name.as_str())),
+                (
+                    "size".to_string(),
+                    FluentValue::from(hover.size_text.as_str()),
+                ),
+            ],
+        ),
+    };
     // §4.6 path 显示注入：路径进终端前过 T5 sanitize（控制字符过滤）。
     let text = crate::kit::image_safety::sanitize_for_terminal(&text);
     let clipped = truncate_by_width(&text, grid.content_width());

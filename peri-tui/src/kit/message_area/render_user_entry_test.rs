@@ -309,12 +309,15 @@ fn test_user_image_line_info_collected() {
     assert_eq!(image_lines.len(), 1, "仅 @image 行产生映射信息");
     let info = &image_lines[0];
     assert_eq!(info.logical_idx, 1, "首行是 turn 节拍空行，meta 行在索引 1");
+    let crate::kit::message_area::ImageLineIdentity::Path { path, managed } = &info.identity else {
+        panic!("路径 meta 行应产出 Path 身份: {:?}", info.identity);
+    };
     assert_eq!(
-        info.path,
+        path,
         file.canonicalize().unwrap().to_str().unwrap(),
         "展示路径为 canonicalize 后路径"
     );
-    assert!(!info.managed);
+    assert!(!managed);
     assert!(info.size_text.contains("B"));
     assert!(all_text(&lines).contains("[Image: a.png ·"));
 }
@@ -330,7 +333,10 @@ fn test_render_image_hover_line_absolute_path_highlight() {
         slot_index: 0,
         logical_idx: 1,
         vm_hash: 7,
-        path: "/long/path/to/very/deep/directory/a.png".into(),
+        identity: crate::kit::message_area::ImageLineIdentity::Path {
+            path: "/long/path/to/very/deep/directory/a.png".into(),
+            managed: true,
+        },
         size_text: "45 B".into(),
     };
     let line = super::render_image_hover_line(&hover, &grid, &sem);
@@ -359,7 +365,10 @@ fn test_render_image_hover_line_truncates() {
         slot_index: 0,
         logical_idx: 1,
         vm_hash: 7,
-        path: "/this/is/a/very/long/absolute/path/with/many/segments/a.png".into(),
+        identity: crate::kit::message_area::ImageLineIdentity::Path {
+            path: "/this/is/a/very/long/absolute/path/with/many/segments/a.png".into(),
+            managed: true,
+        },
         size_text: "45 B".into(),
     };
     let line = super::render_image_hover_line(&hover, &grid, &sem);
@@ -375,6 +384,22 @@ fn test_render_image_hover_line_truncates() {
 // ── 上传式附件（粘贴图片）：消息区附件记录 ──────────────────────────────
 
 use crate::kit::tui_render_unit::UserAttachment;
+use fluent_bundle::FluentValue;
+
+/// 附件记录行的期望文本（按**当前**语言构造）——断言不写死语言字面量，
+/// 避免与并行测试的 `i18n::init` 相互干扰。
+fn expected_attachment_record(index: usize, size: &str) -> String {
+    i18n::tr_args(
+        "user-attachment-image-meta",
+        &[
+            (
+                "name".to_string(),
+                FluentValue::from(crate::kit::tui_render_unit::user_attachment_name(index)),
+            ),
+            ("size".to_string(), FluentValue::from(size)),
+        ],
+    )
+}
 
 /// 文本 + 附件：正文之外多一行附件记录（图片标识 + 名称 + 大小）。
 #[test]
@@ -383,12 +408,15 @@ fn test_user_bubble_renders_attachment_record_with_text() {
     let grid = GridSpec::grid_for(120);
     let vm = TuiRenderUnit::TuiUserBubble(TuiUserBubble::with_attachments(
         "look at this".into(),
-        vec![UserAttachment { bytes: 45 }],
+        vec![UserAttachment {
+            bytes: 45,
+            payload_id: 7,
+        }],
     ));
     let lines = vm_to_lines(&vm, &grid);
     let text = all_text(&lines);
     assert!(
-        text.contains("[Image] Image 1 · 45 B"),
+        text.contains(&expected_attachment_record(1, "45 B")),
         "附件记录行（标识 · 名称 · 大小），实际: {text:?}"
     );
     assert!(text.contains("look at this"), "正文保留，实际: {text:?}");
@@ -401,12 +429,18 @@ fn test_user_bubble_image_only_renders_attachment_record() {
     let grid = GridSpec::grid_for(120);
     let vm = TuiRenderUnit::TuiUserBubble(TuiUserBubble::with_attachments(
         String::new(),
-        vec![UserAttachment { bytes: 2048 }],
+        vec![UserAttachment {
+            bytes: 2048,
+            payload_id: 8,
+        }],
     ));
     let lines = vm_to_lines(&vm, &grid);
     assert_eq!(lines.len(), 3, "leading 空行 + 附件记录 + 尾部空行");
     let text = all_text(&lines);
-    assert!(text.contains("[Image] Image 1 · 2.0 KB"), "实际: {text:?}");
+    assert!(
+        text.contains(&expected_attachment_record(1, "2.0 KB")),
+        "实际: {text:?}"
+    );
 }
 
 /// 多张附件逐张编号，可区分（名称与提交顺序一致）。
@@ -416,15 +450,24 @@ fn test_user_bubble_numbers_multiple_attachments() {
     let grid = GridSpec::grid_for(120);
     let vm = TuiRenderUnit::TuiUserBubble(TuiUserBubble::with_attachments(
         "two shots".into(),
-        vec![UserAttachment { bytes: 45 }, UserAttachment { bytes: 2048 }],
+        vec![
+            UserAttachment {
+                bytes: 45,
+                payload_id: 7,
+            },
+            UserAttachment {
+                bytes: 2048,
+                payload_id: 8,
+            },
+        ],
     ));
     let text = all_text(&vm_to_lines(&vm, &grid));
     assert!(
-        text.contains("[Image] Image 1 · 45 B"),
+        text.contains(&expected_attachment_record(1, "45 B")),
         "第一张，实际: {text:?}"
     );
     assert!(
-        text.contains("[Image] Image 2 · 2.0 KB"),
+        text.contains(&expected_attachment_record(2, "2.0 KB")),
         "第二张，实际: {text:?}"
     );
 }
@@ -436,6 +479,57 @@ fn test_user_bubble_empty_text_without_attachments_renders_nothing() {
     let grid = GridSpec::grid_for(120);
     let vm = TuiRenderUnit::TuiUserBubble(TuiUserBubble::new(String::new()));
     assert!(vm_to_lines(&vm, &grid).is_empty());
+}
+
+/// 附件记录行与 @image meta 行各自登记命中，索引互不错位（hover 定位来源）。
+#[test]
+fn test_attachment_records_keep_image_line_hit_mapping() {
+    crate::i18n::init(Some("en"));
+    let dir = tempfile::tempdir().unwrap();
+    let file = dir.path().join("a.png");
+    std::fs::write(&file, TINY_PNG).unwrap();
+    let grid = GridSpec::grid_for(120);
+    let vm = TuiRenderUnit::TuiUserBubble(TuiUserBubble::with_attachments(
+        format!("@image {}\nhello", file.display()),
+        vec![UserAttachment {
+            bytes: 45,
+            payload_id: 7,
+        }],
+    ));
+    let mut cache = crate::kit::markdown::MarkdownRenderCache::default();
+    let (lines, _, _, image_lines) = super::vm_to_lines_cached(&vm, &grid, &mut cache, true);
+
+    assert_eq!(image_lines.len(), 2, "附件记录行与 @image 行各一条命中");
+    // 行序：节拍空行(0) → 附件记录(1) → @image meta(2)。
+    assert_eq!(image_lines[0].logical_idx, 1, "附件记录行索引不移位");
+    match &image_lines[0].identity {
+        crate::kit::message_area::ImageLineIdentity::Attachment { name, payload_id } => {
+            // 展示名随当前语言本地化，断言与同一来源比较（避免测试间语言污染）。
+            assert_eq!(
+                name,
+                &crate::kit::tui_render_unit::user_attachment_name(1),
+                "展示名按提交顺序"
+            );
+            assert_eq!(*payload_id, 7, "身份锚定保留层载荷");
+        }
+        other => panic!("附件记录行应产出 Attachment 身份，实际 {other:?}"),
+    }
+    assert_eq!(image_lines[0].size_text, "45 B");
+
+    assert_eq!(image_lines[1].logical_idx, 2, "@image 行索引随附件行顺移");
+    match &image_lines[1].identity {
+        crate::kit::message_area::ImageLineIdentity::Path { path, .. } => assert_eq!(
+            path,
+            file.canonicalize().unwrap().to_str().unwrap(),
+            "命中的仍是 @image 路径"
+        ),
+        other => panic!("@image 行应产出 Path 身份，实际 {other:?}"),
+    }
+    assert!(image_lines[1].size_text.contains('B'));
+
+    let text = all_text(&lines);
+    assert!(text.contains("45 B"), "附件记录行含大小档，实际: {text:?}");
+    assert!(text.contains("[Image: a.png ·"), "@image meta 行渲染");
 }
 
 /// 非图片的 @文件引用不受影响：正文原样渲染，且不产生附件记录行。

@@ -10,15 +10,16 @@
 //! 统一 `reset_atoms()` + `serial_test::serial`（仿 mouse_router_test 模式）。
 
 #[cfg(test)]
+use super::test_support::*;
+#[cfg(test)]
 use super::*;
 use crate::kit::atoms::{
-    ACTIVE_PANEL, FOCUSED_ENTRY, IMAGE_HOVER, IMAGE_PREVIEW_HOVER, IMAGE_PREVIEW_STATE,
-    INPUT_SNAPSHOT, POPUP_KIND, PopupKind, ViewModelsSnapshot,
+    FOCUSED_ENTRY, IMAGE_HOVER, IMAGE_PREVIEW_HOVER, IMAGE_PREVIEW_STATE, INPUT_SNAPSHOT,
+    POPUP_KIND, PopupKind, ViewModelsSnapshot,
 };
 use crate::kit::message_area::ImageHoverState;
 use crate::kit::terminal_caps::GraphicsProtocol;
 use crate::kit::tui_render_unit::TuiRenderUnit;
-use image::{DynamicImage, ImageBuffer, Rgba};
 use ratatui::Terminal;
 use ratatui::backend::TestBackend;
 use ratatui::buffer::Buffer;
@@ -28,65 +29,6 @@ use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc;
 use std::time::Duration;
-
-/// 构造 w×h 纯色 RGBA 图片。
-fn solid_image(w: u32, h: u32) -> DynamicImage {
-    ImageBuffer::<Rgba<u8>, _>::from_pixel(w, h, Rgba([255, 0, 0, 255])).into()
-}
-
-/// 受管理根（tempdir 或任意目录）下写一张可解码 PNG，返回文件路径。
-fn managed_fixture(dir: &Path, name: &str) -> PathBuf {
-    let file = dir.join(name);
-    solid_image(1, 1).save(&file).expect("fixture PNG 写入失败");
-    file
-}
-
-/// 重置预览相关全局 atom，防测试间污染。
-fn reset_atoms() {
-    *IMAGE_PREVIEW_STATE.state().write() = ImagePreviewState::Idle;
-    *IMAGE_HOVER.state().write() = None;
-    *IMAGE_PREVIEW_HOVER.state().write() = None;
-    *INPUT_SNAPSHOT.state().write() = InputSnapshot::default();
-    *FOCUSED_ENTRY.state().write() = None;
-    *POPUP_KIND.state().write() = None;
-    *ACTIVE_PANEL.state().write() = None;
-    *crate::kit::atoms::VIEW_MODELS.state().write() = ViewModelsSnapshot::default();
-}
-
-/// 轮询 IMAGE_PREVIEW_STATE 直至谓词成立；超时返回 false。
-///
-/// 正常 <500ms；窗口放宽至 15s（1500×10ms）：解码跑独立 std::thread，
-/// workspace 并发测试/CI 高负载下线程调度可能延迟数秒（本机压测观测到
-/// 5s 窗口偶发超时）。
-fn wait_state<F: Fn(&ImagePreviewState) -> bool>(pred: F) -> bool {
-    for _ in 0..1500 {
-        let state = IMAGE_PREVIEW_STATE.state().read().clone();
-        if pred(&state) {
-            return true;
-        }
-        std::thread::sleep(Duration::from_millis(10));
-    }
-    false
-}
-
-/// 轮询后台 resize 线程直至结果应用；超时返回 false（正常环境 <100ms）。
-fn wait_for_resize(async_img: &mut AsyncImage) -> bool {
-    for _ in 0..200 {
-        if async_img.poll_completed() {
-            return true;
-        }
-        std::thread::sleep(Duration::from_millis(10));
-    }
-    false
-}
-
-/// 统计 buffer 中所有 cell symbol 里的 kitty transmit 序列数（同 image_preview_test）。
-fn count_transmit(buf: &Buffer) -> usize {
-    buf.content()
-        .iter()
-        .filter(|c| c.symbol().contains("\x1b_G"))
-        .count()
-}
 
 // ── cursor 触发源（§7.6 触发仲裁组）──────────────────────────────────
 
@@ -153,17 +95,6 @@ fn cursor_image_path_trims_whitespace() {
 
 // ── focus 触发源 ────────────────────────────────────────────────────────
 
-/// 写 VIEW_MODELS 单 slot user bubble + FOCUSED_ENTRY 后断言 focus 路径。
-fn view_models_with(text: &str) {
-    let vm = TuiRenderUnit::TuiUserBubble(crate::kit::tui_render_unit::TuiUserBubble::new(
-        text.to_string(),
-    ));
-    *crate::kit::atoms::VIEW_MODELS.state().write() = ViewModelsSnapshot {
-        items: im::Vector::from_iter([vm]),
-        generation: 1,
-    };
-}
-
 #[test]
 #[serial]
 fn focus_image_path_uses_first_image_line() {
@@ -207,7 +138,10 @@ fn resolve_preview_target_priority_hover_cursor_focus() {
         text: "@image /cur.png".to_string(),
         cursor_char: 0,
     };
-    assert_eq!(resolve_preview_target(), Some("/cur.png".to_string()));
+    assert_eq!(
+        resolve_preview_target(),
+        Some(PreviewTarget::Path("/cur.png".to_string()))
+    );
 
     // hover 与 cursor 同时命中 → hover 优先。
     *IMAGE_PREVIEW_HOVER.state().write() = Some(ImageHoverState {
@@ -215,20 +149,32 @@ fn resolve_preview_target_priority_hover_cursor_focus() {
         slot_index: 0,
         logical_idx: 1,
         vm_hash: 7,
-        path: "/hov.png".to_string(),
+        identity: crate::kit::message_area::ImageLineIdentity::Path {
+            path: "/hov.png".to_string(),
+            managed: true,
+        },
         size_text: "45 B".to_string(),
     });
-    assert_eq!(resolve_preview_target(), Some("/hov.png".to_string()));
+    assert_eq!(
+        resolve_preview_target(),
+        Some(PreviewTarget::Path("/hov.png".to_string()))
+    );
 
     // hover 清空、cursor 命中、focus 命中 → cursor 优先于 focus。
     *IMAGE_PREVIEW_HOVER.state().write() = None;
     view_models_with("@image /focus.png");
     *FOCUSED_ENTRY.state().write() = Some(FocusedEntry { slot: 0, key: None });
-    assert_eq!(resolve_preview_target(), Some("/cur.png".to_string()));
+    assert_eq!(
+        resolve_preview_target(),
+        Some(PreviewTarget::Path("/cur.png".to_string()))
+    );
 
     // cursor 清空 → focus。
     *INPUT_SNAPSHOT.state().write() = InputSnapshot::default();
-    assert_eq!(resolve_preview_target(), Some("/focus.png".to_string()));
+    assert_eq!(
+        resolve_preview_target(),
+        Some(PreviewTarget::Path("/focus.png".to_string()))
+    );
 
     // 全部清空 → None（Idle）。
     *FOCUSED_ENTRY.state().write() = None;
@@ -244,7 +190,10 @@ fn resolve_preview_target_ignores_unconfirmed_hover() {
         slot_index: 0,
         logical_idx: 1,
         vm_hash: 7,
-        path: "/hover-too-soon.png".to_string(),
+        identity: crate::kit::message_area::ImageLineIdentity::Path {
+            path: "/hover-too-soon.png".to_string(),
+            managed: true,
+        },
         size_text: "45 B".to_string(),
     });
 
@@ -263,7 +212,10 @@ fn resolve_preview_target_occluded_returns_none() {
         text: "@image /cur.png".to_string(),
         cursor_char: 0,
     };
-    assert_eq!(resolve_preview_target(), Some("/cur.png".to_string()));
+    assert_eq!(
+        resolve_preview_target(),
+        Some(PreviewTarget::Path("/cur.png".to_string()))
+    );
     *POPUP_KIND.state().write() = Some(PopupKind::Confirm);
     assert_eq!(resolve_preview_target(), None, "弹窗遮挡 → 隐藏（§7.5）");
 }
@@ -302,7 +254,11 @@ fn request_preview_managed_reaches_ready() {
     );
     let state = IMAGE_PREVIEW_STATE.state().read().clone();
     match state {
-        ImagePreviewState::Ready { path, meta, .. } => {
+        ImagePreviewState::Ready { source, meta, .. } => {
+            let path = match source {
+                crate::kit::atoms::PreviewSource::Path(path) => path.clone(),
+                other => panic!("路径流应携带路径，实际 {other:?}"),
+            };
             assert_eq!(meta.width, 1, "1×1 fixture");
             assert_eq!(meta.height, 1);
             assert_eq!(meta.mime, "image/png");
@@ -383,7 +339,7 @@ fn request_preview_none_clears_to_idle() {
     reset_atoms();
     // 先制造一个非 Idle 状态（直接写 atom，避免依赖解码时序）。
     *IMAGE_PREVIEW_STATE.state().write() = ImagePreviewState::Error {
-        path: "/tmp/a.png".into(),
+        source: crate::kit::atoms::PreviewSource::Path("/tmp/a.png".into()),
         reason: "test".into(),
     };
     request_preview(None);
@@ -417,9 +373,11 @@ fn stale_decode_result_is_dropped() {
         Ok(solid_image(4, 4))
     });
     assert!(
-        wait_state(
-            |s| matches!(s, ImagePreviewState::Ready { path, .. } if path.ends_with("b.png"))
-        ),
+        wait_state(|s| matches!(
+            s,
+            ImagePreviewState::Ready { source, .. }
+                if source.display_name().ends_with("b.png")
+        )),
         "B 应先完成并写入 Ready"
     );
     tx_release.send(()).unwrap(); // 放行 A 的陈旧解码
@@ -427,8 +385,11 @@ fn stale_decode_result_is_dropped() {
     std::thread::sleep(Duration::from_millis(150));
     let state = IMAGE_PREVIEW_STATE.state().read().clone();
     match state {
-        ImagePreviewState::Ready { path, .. } => {
-            assert!(path.ends_with("b.png"), "陈旧结果被丢弃，保持 B")
+        ImagePreviewState::Ready { source, .. } => {
+            assert!(
+                source.display_name().ends_with("b.png"),
+                "陈旧结果被丢弃，保持 B"
+            )
         }
         other => panic!("expected Ready(b), got {other:?}"),
     }
@@ -436,18 +397,10 @@ fn stale_decode_result_is_dropped() {
 
 // ── 渲染（TestBackend，§7.6 渲染测试组）───────────────────────────────
 
-/// 仅覆盖 graphics 字段的能力集合（其余默认全能力）。
-fn caps(graphics: GraphicsProtocol) -> crate::kit::terminal_caps::TerminalCaps {
-    crate::kit::terminal_caps::TerminalCaps {
-        graphics,
-        ..Default::default()
-    }
-}
-
 /// 构造 Ready 状态（路径 + meta + 图片）。
 fn ready_state(path: PathBuf) -> ImagePreviewState {
     ImagePreviewState::Ready {
-        path,
+        source: crate::kit::atoms::PreviewSource::Path(path),
         meta: crate::kit::image_safety::ImageMeta {
             width: 1,
             height: 1,
@@ -504,7 +457,7 @@ fn draw_preview_overlay_degraded_no_escape() {
     let mut term = Terminal::new(TestBackend::new(40, 20)).unwrap();
     let rect = Rect::new(10, 4, 24, 12);
     let state = ImagePreviewState::Degraded {
-        path: "/tmp/a.png".into(),
+        source: crate::kit::atoms::PreviewSource::Path("/tmp/a.png".into()),
         reason: crate::i18n::tr("image-preview-degraded"),
     };
     let caps = caps(GraphicsProtocol::Kitty);
@@ -713,7 +666,7 @@ fn preview_meta_line_sanitizes_control_chars() {
     let rect = Rect::new(10, 4, 24, 12);
     let caps = caps(GraphicsProtocol::Kitty);
     let state = ImagePreviewState::Loading {
-        path: "/tmp/a\x1b[31m.png".into(),
+        source: crate::kit::atoms::PreviewSource::Path("/tmp/a\x1b[31m.png".into()),
         grade: crate::kit::image_safety::PathGrade::Managed,
     };
     term.draw(|f| draw_preview_overlay(f.buffer_mut(), rect, &state, true, None, &caps))
