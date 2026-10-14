@@ -140,6 +140,16 @@ impl LocalExecutionPort for LocalExecution {
         self.resolve_workspace(cwd).await
     }
 
+    async fn relink_unbound_ownership(
+        &self,
+        id: &ThreadId,
+        workspace: &ResolvedWorkspace,
+    ) -> Result<()> {
+        self.database
+            .relink_unbound_ownership_impl(id, workspace)
+            .await
+    }
+
     async fn validate_binding_value(
         &self,
         binding: &SessionBinding,
