@@ -277,7 +277,8 @@ v2 使用当前形状（schema 11）；旧库形状升级路径和远端事务�
 | 同一 Git 项目的主工作树 `/repo` 与 linked worktree `/feature` | 两个 Workspace，分别以各自 worktree 根为 path |
 | 机器 A 从两个不同的非 Git 目录打开 | 两个 Workspace，各自 path 为启动 cwd |
 | 机器 A 再次从 `/repo` 打开 | 复用原 Workspace ID，创建新的 Session ID |
-| 迁移后无绑定的历史会话再次打开 | 首次本机接纳按保存 cwd 的当前观测重建归属并写绑定（幂等、可重跑）；核实不了保持只读、按 ID 可读 |
+| 迁移后无绑定的历史会话再次打开 | 首次本机接纳按保存 cwd 的当前观测重建归属并写绑定（幂等、可重跑）；核实不了保持只读、按 ID 可读；已认领过但绑定记录丢失（有 frozen 无绑定）的会话只补绑定，既有 frozen 字节不回写 |
+| 无绑定的子会话再次打开 | 归属继承自父会话：父会话已在本机核实接纳时绑定身份与 frozen 逐字继承（不重建、不另立），父会话未被核实即拒绝并提示先加载父会话 |
 | Git 暂不可用时从 `/repo/src` 打开，之后才发现根 `/repo` | 旧 Workspace 保留 `unverified` 的 `/repo/src`，新会话使用 `/repo`；不静默移动旧 Session |
 | `/repo` 被删除后同路径重建 | `(machine_id, path)` 仍指同一 Workspace；旧 Session 的执行仍需独立判断环境可用性 |
 | Session 被归档 | 普通列表不显示，归档列表显示，按 ID 历史可读 |
@@ -363,7 +364,7 @@ SQLite 的表重建在事务外处理外键开关并在提交前运行外键检�
 | --- | --- | --- | --- |
 | 本机有绑定及登记 | 旧登记的 root；同 worktree 子目录不拆分 | root Session 的 environment；child 继承 | 在改写旧登记前复制最后观测值，标 `legacy_last_observation`；不能声称创建时证据 |
 | 远端有绑定但无登记 | 保存 cwd 减去已校验 relative_cwd；组内逐条交叉核对 | 保存的 environment | 保留旧绑定 UUID；缺远端快照时只读历史，不自动补造 |
-| 无绑定但有可信本机登记（仅本地模式） | 保存 cwd 可证实的所属 root | 保存的 environment | 不伪造过去的快照；按本地 legacy 接纳规则执行——首次接纳按当前观测重建归属（幂等、可重跑），原归属行已有执行证据或已有绑定时不静默改绑，本机核实不了即保持只读并给可完成的下一步；远端不接纳 legacy |
+| 无绑定但有可信本机登记（仅本地模式） | 保存 cwd 可证实的所属 root | 保存的 environment | 不伪造过去的快照；按本地 legacy 接纳规则执行——首次接纳按当前观测重建归属（幂等、可重跑），原归属行已有执行证据或已有绑定时不静默改绑，本机核实不了即保持只读并给可完成的下一步；有 frozen 缺绑定的会话只补绑定（write-once），子会话绑定身份继承父会话；远端不接纳 legacy |
 | 无法证实 Git 根的旧记录 | 保存 cwd，`path_source=unverified` | 已知原 env；未知来源为 legacy_unknown | 历史可读；不因归组获得执行资格 |
 
 表中「执行证据」列记录压缩前形状的迁移规则；当前形状绑定 UUID 统一改写为会话归属行 ID，

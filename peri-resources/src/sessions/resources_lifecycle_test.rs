@@ -48,8 +48,10 @@ async fn test_delete_cascades_canonical_data_and_allows_identity_reuse() {
     fixture.shutdown().await.unwrap();
 }
 
+/// 已认领过、绑定记录在迁移中丢失的历史会话：历史按 ID 保持可读；接纳只补绑定，
+/// 既有 frozen 字节是唯一事实源（本次候选不写入），元数据与历史不受影响。
 #[tokio::test]
-async fn test_unbound_frozen_session_remains_readable_and_cannot_be_automatically_adopted() {
+async fn test_unbound_frozen_session_backfills_binding_and_keeps_the_canonical_bytes() {
     let fixture = Fixture::new().await;
     let id = "s-unbound-frozen-history".to_owned();
     fixture.create(&id).await;
@@ -78,7 +80,7 @@ async fn test_unbound_frozen_session_remains_readable_and_cannot_be_automaticall
         serde_json::to_value(&before.meta).unwrap()
     );
     let workspace = fixture.workspace().await;
-    let error = reopened
+    reopened
         .adopt_legacy_session(
             &id,
             &after.meta.cwd,
@@ -86,18 +88,22 @@ async fn test_unbound_frozen_session_remains_readable_and_cannot_be_automaticall
             &FrozenSnapshotBytes::new("replacement".to_owned()),
         )
         .await
-        .unwrap_err();
-    assert!(
-        matches!(
-            error_kind(&error),
-            SessionResourceErrorKind::Workspace(WorkspaceError::InvalidBinding)
-        ),
-        "unclaimed recovered session must not be mutated: {error}"
+        .unwrap();
+    let adopted = reopened.load_session_snapshot(&id).await.unwrap();
+    assert_eq!(
+        adopted.binding,
+        BindingState::Bound(Fixture::binding(&workspace)),
+        "接纳补上缺失的绑定"
     );
-    let rejected = reopened.load_session_snapshot(&id).await.unwrap();
-    assert_eq!(rejected.binding, BindingState::Missing);
-    assert_eq!(rejected.frozen, before.frozen);
-    assert_eq!(rejected.payloads.len(), 1);
+    assert_eq!(
+        adopted.frozen, before.frozen,
+        "候选字节不覆盖既有 frozen（write-once）"
+    );
+    assert_eq!(adopted.payloads.len(), 1);
+    assert_eq!(
+        serde_json::to_value(&adopted.meta).unwrap(),
+        serde_json::to_value(&before.meta).unwrap()
+    );
 }
 
 #[tokio::test]

@@ -4,14 +4,18 @@
 //! 文档 → 定稿 frozen → 原子 write-once 接纳（frozen+binding）→ 发布」。bootstrap
 //! 只装配资源环境（MCP 池 + builtin workspace 实例），**不运行 Agent / 项目 hook**；
 //! 竞争输家不改写既有字节，按 winner 的持久字节重新定格输入。
+//!
+//! 子会话走另一条：不 bootstrap、不重建归属与冻结输入，绑定与 frozen 逐字继承父会话
+//! ——— 前提是父会话已在本机核实接纳，否则如实拒绝（见 `prepare_child_for_restore`）。
 
 use std::collections::HashMap;
 use std::sync::Arc;
 
 use peri_acp_types::{
-    session_resources::{BindingState, FrozenSnapshotBytes, FrozenState},
-    thread::ThreadMeta,
-    workspace::ResolvedWorkspace,
+    plugin::McpServerConfig,
+    session_resources::{BindingState, FrozenSnapshotBytes, FrozenState, SessionSnapshot},
+    thread::{ThreadId, ThreadMeta},
+    workspace::{ResolvedWorkspace, WorkspaceError},
 };
 
 use super::{decode_frozen_snapshot, AcpError, AcpServerConfig};
@@ -84,6 +88,9 @@ async fn drain_on_failure(
 /// 只读存储与远端执行环境在更早的资格检查被拒，不会走到本函数）。无 frozen 的
 /// legacy 会话按保存的 cwd 接纳：先装配资源环境并读取内容，再以**定稿 frozen +
 /// binding** 作为一次 write-once 接纳；竞争输家读取 winner 字节重新定格。
+///
+/// 子会话不在这里重建归属：绑定与冻结输入逐字继承父会话，父会话未被本机核实
+/// 接纳时如实拒绝（见 [`prepare_child_for_restore`]）。
 pub(super) async fn prepare_for_restore(
     cfg: &AcpServerConfig,
     session_id: &str,
@@ -101,6 +108,13 @@ pub(super) async fn prepare_for_restore(
         return Ok(None);
     }
     let _ = expected_cwd;
+    // 子会话的归属继承自父会话：子会话自己没有可重建的归属（父链就是它的归属
+    // 证据），由父会话的已成立绑定决定它能否在本机执行。
+    if let Some(parent_id) = meta.parent_thread_id.clone() {
+        return prepare_child_for_restore(cfg, &snapshot, &parent_id, effective_servers)
+            .await
+            .map(Some);
+    }
     // 执行资格（本机可用执行目录）先于任何读取：异机/远端执行环境在此失败，
     // 不会去读本机同名路径。归属来源按 frozen 分两条：
     // - 有 frozen、缺绑定：这是「已认领过、绑定记录丢失」的会话，只按既有事实复核，
@@ -245,4 +259,63 @@ pub(super) async fn prepare_for_restore(
             }
         }
     }
+}
+
+/// 子会话的 legacy 接纳：不重建归属、不读目录内容，绑定与冻结输入逐字继承父会话。
+///
+/// 父会话必须已经被本机核实接纳（有绑定、有已持久 frozen）。子会话的归属只能从父
+/// 已成立的事实继承，不能由子会话自己重新观测：父会话还没核实过时如实拒绝，并把
+/// 「先加载父会话」作为可完成的下一步——不代父接纳（接纳是父会话自己的写事实），
+/// 也不为子会话临时装配环境（子会话的冻结输入就是父的已持久字节，不需要重建）。
+async fn prepare_child_for_restore(
+    cfg: &AcpServerConfig,
+    snapshot: &SessionSnapshot,
+    parent_id: &str,
+    effective_servers: HashMap<String, McpServerConfig>,
+) -> Result<LegacyAdoption, AcpError> {
+    let resources = cfg.session_resources.clone();
+    let meta = &snapshot.meta;
+    let parent_thread_id = ThreadId::from(parent_id.to_owned());
+    let parent = resources
+        .load_session_snapshot(&parent_thread_id)
+        .await
+        .map_err(resource_error)?;
+    let BindingState::Bound(_) = &parent.binding else {
+        return Err(workspace_error(WorkspaceError::UnverifiedParentBinding));
+    };
+    let workspace = resources
+        .validate_bound_workspace(
+            &parent_thread_id,
+            peri_acp_types::session_resources::BindingRecheck::Recorded,
+        )
+        .await
+        .map_err(resource_error)?;
+    let parent_frozen = match parent.frozen {
+        FrozenState::Present(bytes) => bytes,
+        // 父会话有绑定却没有 frozen：没有可继承的冻结输入（绑定与 frozen 一起成立），
+        // 这里如实失败，不按当前目录重冻。
+        FrozenState::LegacyAbsent => {
+            return Err(AcpError::new(
+                -32603,
+                "Parent session has no frozen snapshot",
+            ))
+        }
+    };
+    // 未知版本由解码器回答，存储层不表达它（与根会话同一错误权威）。
+    decode_frozen_snapshot(parent_frozen.as_str()).map_err(workspace_error)?;
+    // 子会话自己的 frozen 若已存在就是它的事实源（write-once 只补空列）；缺失时按
+    // 父的已持久字节补齐——`save_child` 的同一不变量：child frozen == root 已存字节。
+    let id = ThreadId::from(meta.id.clone());
+    resources
+        .adopt_legacy_session(&id, &meta.cwd, &workspace, &parent_frozen)
+        .await
+        .map_err(resource_error)?;
+    let persisted = persisted_frozen_bytes(&resources, &meta.id).await?;
+    let workspace_cwd = workspace.cwd.to_string_lossy().into_owned();
+    let mut prepared = PreparedSessionInputs::prepare_restore(cfg, &workspace_cwd, &persisted)?;
+    prepared.session_mcp_servers = effective_servers;
+    Ok(LegacyAdoption {
+        prepared,
+        environment: None,
+    })
 }
