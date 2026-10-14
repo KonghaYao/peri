@@ -172,7 +172,7 @@ impl Migrated {
             &mut connection,
             "bound-root",
             root_text,
-            &machine,
+            machine,
             "已绑定的历史",
         )
         .await;
@@ -180,7 +180,7 @@ impl Migrated {
             &mut connection,
             "unbound-root",
             root_text,
-            &machine,
+            machine,
             "无绑定历史（仓库根）",
         )
         .await;
@@ -188,7 +188,7 @@ impl Migrated {
             &mut connection,
             "unbound-sub",
             sub.to_str().unwrap(),
-            &machine,
+            machine,
             "无绑定历史（子目录）",
         )
         .await;
@@ -196,7 +196,7 @@ impl Migrated {
             &mut connection,
             "unbound-gone",
             db.path().join("gone").to_str().unwrap(),
-            &machine,
+            machine,
             "无绑定历史（目录已不在）",
         )
         .await;
