@@ -511,7 +511,17 @@ async fn observe_with_git(cwd: &Path, program: &OsStr) -> Result<(PathBuf, Obser
     if let WorktreeMembership::Listed(worktrees, separator) =
         git_worktree_membership(program, &cwd).await?
     {
-        let expected = git_command_path(&root)?;
+        // 成员项接受两类路径：本次工作树的根，以及本次工作树的 Git 目录。后者覆盖
+        // absorbed submodule 布局——Git 目录位于工作树之外时，`worktree list` 把主工作树
+        // 报告为 Git 目录本身，检出路径永不出现在列表里（Git 2.39 实测）。那种布局下这条
+        // 交叉核对没有可比的路径证据（位置已由 `rev-parse` 回答），按证据不足跳过，与
+        // 「成员关系不一致」区分开；见 docs/design/session-id-environment.md §3.1。
+        // 普通仓库的 Git 目录在根之下，`worktree list` 的主工作树项是真实目录路径，不会
+        // 等于 Git 目录这两项；被换位、元数据未修复的 linked worktree 仍按不一致拒绝。
+        let accepted = [root.as_path(), common_dir.as_path(), private_dir.as_path()]
+            .map(git_command_path)
+            .into_iter()
+            .collect::<Result<Vec<_>>>()?;
         if !worktrees.status.success()
             || !worktrees
                 .stdout
@@ -520,7 +530,11 @@ async fn observe_with_git(cwd: &Path, program: &OsStr) -> Result<(PathBuf, Obser
                     field
                         .strip_prefix(b"worktree ")
                         .and_then(|path| std::str::from_utf8(path).ok())
-                        .is_some_and(|path| Path::new(path) == expected)
+                        .is_some_and(|path| {
+                            accepted
+                                .iter()
+                                .any(|expected| Path::new(path) == expected.as_path())
+                        })
                 })
         {
             return Err(WorkspaceError::DiscoveryError(

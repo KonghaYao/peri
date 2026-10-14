@@ -449,6 +449,88 @@ async fn test_worktree_common_dir_matches_git_reported_locations() {
     );
 }
 
+/// [回归测试] absorbed submodule 的检出必须可被发现。
+///
+/// submodule 的 Git 目录位于 superproject 的 `.git/modules/...` 下，`worktree list` 把
+/// 主工作树报告为 Git 目录本身，检出路径永不出现在列表里（Git 2.39 实测）。成员核对若
+/// 只接受检出路径，这类目录就完全建不了会话，与设计 §3.3「嵌套仓库、submodule 使用
+/// cwd 所属的最近 Git 仓库」冲突。
+#[tokio::test]
+async fn test_worktree_submodule_checkout_is_discoverable() {
+    let home = tempfile::tempdir().unwrap();
+    let source = committed_repository(home.path()).await;
+    let superproject = home.path().join("superproject");
+    tokio::fs::create_dir(&superproject).await.unwrap();
+    git_fixture(&superproject, home.path(), &["init", "-q"]).await;
+    git_fixture(
+        &superproject,
+        home.path(),
+        &[
+            "-c",
+            "protocol.file.allow=always",
+            "submodule",
+            "add",
+            "-q",
+            source.to_str().unwrap(),
+            "prototypes/p0/turso",
+        ],
+    )
+    .await;
+
+    let checkout = tokio::fs::canonicalize(superproject.join("prototypes/p0/turso"))
+        .await
+        .unwrap();
+    let (cwd, observed) = observe(&checkout).await.unwrap();
+    assert_eq!(cwd, checkout);
+    assert_eq!(observed.discovery.root, checkout);
+    let (root, common, private) = git_reported_locations(&checkout, home.path()).await;
+    assert_eq!(observed.discovery.root, root);
+    assert_eq!(
+        observed.discovery.common_dir.as_deref(),
+        Some(common.as_path())
+    );
+    assert_eq!(
+        observed.discovery.private_dir.as_deref(),
+        Some(private.as_path())
+    );
+    // 用例必须真的落在「Git 目录位于工作树之外」的布局上，否则没有覆盖到这个分支。
+    assert!(
+        !private.starts_with(&checkout),
+        "submodule 的 Git 目录必须在检出之外：{private:?}"
+    );
+    assert!(
+        !common.starts_with(&checkout),
+        "submodule 的 common directory 必须在检出之外：{common:?}"
+    );
+    observed.discovery.revalidate(&checkout).await.unwrap();
+}
+
+/// [回归测试] 接受 submodule 布局不得放过换位后元数据陈旧的 linked worktree。
+///
+/// 直接改名（不经 `git worktree move`）只移动了目录，登记位置仍是旧路径：`worktree list`
+/// 报告旧路径，成员核对必须继续判为不一致。
+#[tokio::test]
+async fn test_worktree_relocated_linked_worktree_stays_inconsistent() {
+    let home = tempfile::tempdir().unwrap();
+    let repository = committed_repository(home.path()).await;
+    let linked = home.path().join("linked tree");
+    git_fixture(
+        &repository,
+        home.path(),
+        &["worktree", "add", "-qb", "linked", linked.to_str().unwrap()],
+    )
+    .await;
+
+    let moved = home.path().join("moved tree");
+    std::fs::rename(&linked, &moved).unwrap();
+
+    let error = observe(&moved).await.unwrap_err();
+    assert!(matches!(
+        error.downcast_ref::<WorkspaceError>(),
+        Some(WorkspaceError::DiscoveryError(message)) if message == "Git worktree membership is inconsistent"
+    ));
+}
+
 /// [回归测试] 旧版 Git 回显未知选项时不得把选项原文当成路径。
 ///
 /// `rev-parse` 对未知的长选项不报错，而是把它当普通参数回显到 stdout（本机 Git
