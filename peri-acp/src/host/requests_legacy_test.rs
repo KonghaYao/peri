@@ -782,15 +782,15 @@ async fn legacy_bootstrap_applies_request_declared_mcp_servers() {
     assert!(environment.shutdown().await);
 }
 
-/// 不属于本地 legacy 接纳范围的目标（有父线程的无绑定子会话）在装配资源环境**之前**
-/// 如实失败：不 bootstrap、不写绑定/frozen、不发布会话，失败文案给出可完成的下一步。
+/// 父会话未被本机核实接纳的无绑定子会话在装配资源环境**之前**如实失败：不 bootstrap、
+/// 不写绑定/frozen、不发布会话，失败文案给出可完成的下一步（先加载父会话）。
 ///
-/// 有父线程 ⇒ 不是可接纳的 legacy root，归属重建在接纳前就拒绝，因此没有环境需要排空；
-/// 「bootstrap 之后的失败必须排空已激活环境」由
+/// 子会话的归属继承自父会话，父会话没有可继承的绑定 ⇒ 子会话不另立归属，归属复核在
+/// 接纳前就拒绝，因此没有环境需要排空；「bootstrap 之后的失败必须排空已激活环境」由
 /// `legacy_post_adoption_load_failure_drains_environment_without_rollback` 覆盖。
 #[tokio::test]
 #[serial]
-async fn unadoptable_legacy_target_fails_before_bootstrap() {
+async fn unverified_parent_child_session_fails_before_bootstrap() {
     let tmp = tempfile::tempdir().unwrap();
     let _home = HomeDirGuard::set(tmp.path());
     let cwd = std::fs::canonicalize(tmp.path())
@@ -812,7 +812,8 @@ async fn unadoptable_legacy_target_fails_before_bootstrap() {
         mcp_profile: peri_middlewares::mcp::apps::McpCapabilityProfile::disabled(),
         capabilities: Default::default(),
     });
-    // 有父线程 ⇒ 不是可接纳的 legacy root（adopt 会拒绝）；父线程必须真实存在。
+    // 有父线程：绑定身份继承自父会话，父会话未被本机核实 ⇒ 子会话自己也不成立。
+    // 父线程必须真实存在（读父会话的绑定事实就是本分支的第一步）。
     let parent_id = bridge
         .create_thread(peri_agent::thread::ThreadMeta::new_at(
             cwd.to_str().unwrap(),
@@ -834,8 +835,13 @@ async fn unadoptable_legacy_target_fails_before_bootstrap() {
         &transport,
     )
     .await
-    .expect_err("有父线程的无绑定会话不得被 legacy 接纳");
+    .expect_err("父会话未被核实的子会话不得被 legacy 接纳");
     assert_eq!(error.code, -32010, "{error:?}");
+    assert!(
+        error.message.contains("load the parent session first"),
+        "文案必须给出可完成的下一步：{}",
+        error.message
+    );
     assert!(!error.message.is_empty(), "原始错误原因必须保留: {error:?}");
     assert!(sessions.is_empty(), "失败不得发布会话");
     assert!(bridge.load_session_binding(&id).await.unwrap().is_none());
@@ -846,6 +852,85 @@ async fn unadoptable_legacy_target_fails_before_bootstrap() {
         !shutdowns.iter().any(|session| session == &id),
         "拒绝必须发生在装配之前（观察到的 shutdown: {shutdowns:?}）"
     );
+}
+
+/// 子会话继承父会话的绑定身份与冻结输入：父会话（无绑定的 legacy root）先按当前观测
+/// 证据接纳，子会话随后接纳——绑定逐字一致、frozen 用父的已持久字节，不重建、不另立。
+#[tokio::test]
+#[serial]
+async fn legacy_child_session_inherits_the_verified_parent_binding() {
+    let tmp = tempfile::tempdir().unwrap();
+    let _home = HomeDirGuard::set(tmp.path());
+    let cwd = std::fs::canonicalize(tmp.path())
+        .unwrap()
+        .join("legacy-tree");
+    std::fs::create_dir(&cwd).unwrap();
+    let config =
+        make_peri_config_with_provider(make_provider_config("test", "openai", "test", "model"));
+    let (mut cfg, bridge) = make_server_config_with_bridge(
+        config.clone(),
+        LlmProvider::from_config(&config).unwrap(),
+        &tmp,
+    )
+    .await;
+    cfg.workspace_assembly = Some(crate::host::assemble::WorkspaceAssembly {
+        startup_cwd: cwd.to_str().unwrap().to_owned(),
+        bare: true,
+        drive_cron_tick: false,
+        mcp_profile: peri_middlewares::mcp::apps::McpCapabilityProfile::disabled(),
+        capabilities: Default::default(),
+    });
+    let parent = old_thread(&bridge, &cwd).await;
+    let mut child_meta =
+        peri_agent::thread::ThreadMeta::new_at(cwd.to_str().unwrap(), peri_time::now_wall());
+    child_meta.parent_thread_id = Some(parent.clone());
+    let child = bridge.create_thread(child_meta).await.unwrap();
+    bridge
+        .append_message(
+            &child,
+            peri_acp_types::messages::BaseMessage::human("legacy child message"),
+        )
+        .await
+        .unwrap();
+    let transport: Arc<dyn crate::transport::AcpTransport> = Arc::new(MockTransport::default());
+    let mut sessions = HashMap::new();
+
+    // 父会话先接纳（无 frozen root 的重链路径）：绑定与 frozen 一次成立。
+    handle_request(
+        "session/load",
+        &json!({"sessionId": parent}),
+        &cfg,
+        &mut sessions,
+        &transport,
+    )
+    .await
+    .unwrap();
+    let parent_binding = bridge.load_session_binding(&parent).await.unwrap().unwrap();
+    let parent_frozen = bridge.load_frozen_snapshot(&parent).await.unwrap().unwrap();
+
+    // 子会话接纳：没有自己的观测快照与内容读取，绑定与冻结输入都来自父会话。
+    handle_request(
+        "session/load",
+        &json!({"sessionId": child}),
+        &cfg,
+        &mut sessions,
+        &transport,
+    )
+    .await
+    .unwrap();
+    assert_eq!(
+        bridge.load_session_binding(&child).await.unwrap().unwrap(),
+        parent_binding
+    );
+    assert_eq!(
+        bridge.load_frozen_snapshot(&child).await.unwrap().unwrap(),
+        parent_frozen
+    );
+    assert_eq!(
+        sessions[&child].history[0].content(),
+        "legacy child message"
+    );
+    assert!(sessions.contains_key(&parent), "父会话必须已发布");
 }
 
 /// M5 缺陷 2：接纳成功但后续 load（history 读取）失败时，也必须排空已激活环境；

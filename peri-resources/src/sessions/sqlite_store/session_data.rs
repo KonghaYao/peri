@@ -4,8 +4,8 @@ use std::sync::Arc;
 
 use super::database::SqliteSessionDatabase;
 use super::failure::{
-    commit_failure, corrupt, execution_failure, invalid_input, map_sqlx, not_found, read_failure,
-    unavailable, write_failure,
+    commit_failure, corrupt, invalid_input, map_sqlx, not_found, read_failure, unavailable,
+    write_failure,
 };
 use super::row_mapping::extract_title;
 use super::session_rows::{
@@ -253,16 +253,29 @@ impl SessionDataPort for SqliteSessionData {
         let Some((cwd, parent, owner_workspace_id)) = row else {
             return Err(not_found());
         };
-        // 保存的绝对 cwd 是接纳依据；调用方不能借接纳顺手改绑或接纳 child。
-        if cwd != saved_cwd
-            || parent.is_some()
-            || owner_workspace_id != workspace.workspace_id.to_string()
-        {
+        // 保存的绝对 cwd 是接纳依据；调用方不能借接纳顺手改绑。
+        if cwd != saved_cwd || owner_workspace_id != workspace.workspace_id.to_string() {
             return Err(SessionResourceError::new(
                 SessionResourceErrorKind::Workspace(WorkspaceError::ExecutionBindingMismatch),
             ));
         }
         let binding = SessionBinding::from_workspace(workspace);
+        // 子会话不另立归属：绑定身份逐字继承父会话（`save_child` 的同一不变量，
+        // 父子 cwd 一致也在调用方成立）。接纳因此只在父会话的绑定行已经成立、
+        // 且与本绑定一致时放行——父会话还没被本机核实过时如实拒绝，不代父接纳。
+        if let Some(parent) = parent.as_deref() {
+            let parent_id = ThreadId::from(parent.to_owned());
+            match binding_row_state_on(&mut tx, &parent_id).await? {
+                BindingRowState::Bound(parent_binding) if parent_binding == binding => {}
+                _ => {
+                    return Err(SessionResourceError::new(
+                        SessionResourceErrorKind::Workspace(
+                            WorkspaceError::ExecutionBindingMismatch,
+                        ),
+                    ))
+                }
+            }
+        }
         // 展示投影（无观测快照，项目 id 由会话 id 派生）不是可接纳的执行证据：接受它
         // 只会在下一句的项目关系比对里失败，并把「没有绑定」误报成「绑定数据不支持」。
         if workspace.discovery_snapshot.is_none() {
@@ -305,9 +318,9 @@ impl SessionDataPort for SqliteSessionData {
                 }
             }
             BindingRowState::Absent => {
-                let saved_frozen = frozen_bytes_on(&mut tx, id).await.map_err(read_failure)?;
-                validate_unbound_legacy_frozen(saved_frozen.as_deref())
-                    .map_err(execution_failure)?;
+                // 缺绑定就是接纳的全部前提：frozen 列已有字节（迁移前已认领、绑定
+                // 记录缺失的历史会话）同样是 legacy 现场，字节本身是唯一事实源——
+                // COALESCE 只补空列，已有字节不因候选而改变（write-once）。
                 sqlx::query(
                     "UPDATE threads SET frozen_context = COALESCE(frozen_context, ?1) WHERE id = ?2",
                 )

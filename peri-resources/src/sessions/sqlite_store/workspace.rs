@@ -414,14 +414,29 @@ impl SqliteSessionDatabase {
             return Err(WorkspaceError::Unavailable.into());
         }
         let mut tx = self.pool.begin_with("BEGIN IMMEDIATE").await?;
-        let (cwd, parent, frozen, owner): (String, Option<String>, Option<String>, String) = sqlx::query_as(
-            "SELECT cwd, parent_thread_id, frozen_context, workspace_id FROM threads WHERE id = ?",
-        )
-        .bind(id)
-        .fetch_one(&mut *tx)
-        .await?;
-        if cwd != saved_cwd || parent.is_some() || owner != workspace.workspace_id.to_string() {
+        let (cwd, parent, owner): (String, Option<String>, String) =
+            sqlx::query_as("SELECT cwd, parent_thread_id, workspace_id FROM threads WHERE id = ?")
+                .bind(id)
+                .fetch_one(&mut *tx)
+                .await?;
+        if cwd != saved_cwd || owner != workspace.workspace_id.to_string() {
             return Err(WorkspaceError::ExecutionBindingMismatch.into());
+        }
+        let binding = SessionBinding::from_workspace(workspace);
+        // 子会话不另立归属：绑定身份逐字继承父会话，父会话的绑定行必须已经成立且与本
+        // 绑定一致（与 `SessionDataPort::adopt_legacy_session` 同一规则）。
+        if let Some(parent) = parent.as_deref() {
+            let parent_id = ThreadId::from(parent.to_owned());
+            let parent_binding: Option<BindingRow> = sqlx::query_as(
+                "SELECT schema_version, project_id, workspace_id, relative_cwd FROM session_bindings WHERE thread_id = ?",
+            )
+            .bind(&parent_id)
+            .fetch_optional(&mut *tx)
+            .await?;
+            match parent_binding.map(decode_binding).transpose()? {
+                Some(parent_binding) if parent_binding == binding => {}
+                _ => return Err(WorkspaceError::ExecutionBindingMismatch.into()),
+            }
         }
         let canonical = tokio::fs::canonicalize(&cwd)
             .await
@@ -439,7 +454,8 @@ impl SqliteSessionDatabase {
                 return Err(WorkspaceError::ExecutionBindingMismatch.into());
             }
         } else {
-            super::session_data::validate_unbound_legacy_frozen(frozen.as_deref())?;
+            // 缺绑定就是接纳的全部前提：frozen 列已有字节同样是 legacy 现场，字节本身
+            // 是唯一事实源——COALESCE 只补空列，已有字节不因候选而改变（write-once）。
             sqlx::query(
                 "UPDATE threads SET frozen_context = COALESCE(frozen_context, ?) WHERE id = ?",
             )

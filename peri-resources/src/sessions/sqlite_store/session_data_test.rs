@@ -810,8 +810,10 @@ async fn test_adopt_legacy_session_preserves_canonical_metadata_and_history() {
     assert_eq!(data.machine_id_of(&id).await.unwrap(), Some(machine));
 }
 
+/// 已认领过、但绑定记录在迁移中丢失的历史会话：接纳补上绑定，既有 frozen 字节保持
+/// 不变（write-once）——本次候选不写入，元数据与历史也不受影响。
 #[tokio::test]
-async fn test_adopt_legacy_session_rejects_unbound_frozen_canonical_data() {
+async fn test_adopt_legacy_session_backfills_binding_and_keeps_the_canonical_bytes() {
     let (store, data, directory) = database().await;
     let workspace = workspace(&store, directory.path()).await;
     let cwd = workspace.cwd.to_string_lossy().into_owned();
@@ -827,19 +829,14 @@ async fn test_adopt_legacy_session_rejects_unbound_frozen_canonical_data() {
         .unwrap();
     let before = data.load_snapshot(&id).await.unwrap();
     assert_eq!(before.binding, BindingState::Missing);
-    let error = data
-        .adopt_legacy_session(&id, &cwd, &workspace, &frozen("replacement"))
+    assert_eq!(before.frozen, FrozenState::Present(frozen("canonical")));
+
+    data.adopt_legacy_session(&id, &cwd, &workspace, &frozen("replacement"))
         .await
-        .unwrap_err();
-    assert!(matches!(
-        error.kind(),
-        peri_acp_types::session_resources::SessionResourceErrorKind::Workspace(
-            peri_acp_types::workspace::WorkspaceError::InvalidBinding
-        )
-    ));
+        .unwrap();
     let after = data.load_snapshot(&id).await.unwrap();
-    assert_eq!(after.binding, before.binding);
-    assert_eq!(after.frozen, before.frozen);
+    assert_eq!(after.binding, BindingState::Bound(binding_of(&workspace)));
+    assert_eq!(after.frozen, FrozenState::Present(frozen("canonical")));
     assert_eq!(
         serde_json::to_value(&after.meta).unwrap(),
         serde_json::to_value(&before.meta).unwrap()
@@ -847,6 +844,96 @@ async fn test_adopt_legacy_session_rejects_unbound_frozen_canonical_data() {
     assert_eq!(
         payload_bytes(&after.payloads),
         payload_bytes(&before.payloads)
+    );
+}
+
+/// 子会话不另立归属：父会话的绑定行已经成立且身份逐字一致时才接纳（绑定身份继承、
+/// 缺失的 frozen 按父的已持久字节补齐）；父会话未被本机核实（没有绑定）时如实拒绝，
+/// 不代父接纳，也不写子会话的任何事实。
+#[tokio::test]
+async fn test_adopt_legacy_session_child_inherits_the_verified_parent_binding() {
+    let (store, data, directory) = database().await;
+    let workspace = workspace(&store, directory.path()).await;
+    let cwd = workspace.cwd.to_string_lossy().into_owned();
+    data.save_new_session(&session("s-parent", &cwd, &workspace, frozen("parent")))
+        .await
+        .unwrap();
+    let mut child = session("s-legacy-child", &cwd, &workspace, frozen("parent"));
+    child.meta.parent_thread_id = Some("s-parent".to_owned());
+    data.save_child(&ChildSnapshot {
+        target: child,
+        parent_id: "s-parent".to_owned(),
+        root_id: "s-parent".to_owned(),
+        inherited: Default::default(),
+    })
+    .await
+    .unwrap();
+    // 迁移现场：子会话没有绑定行，frozen 列也没有字节。
+    sqlx::query("DELETE FROM session_bindings WHERE thread_id = 's-legacy-child'")
+        .execute(&store.database.pool)
+        .await
+        .unwrap();
+    sqlx::query("UPDATE threads SET frozen_context = NULL WHERE id = 's-legacy-child'")
+        .execute(&store.database.pool)
+        .await
+        .unwrap();
+
+    // 父会话未被本机核实：子会话不能自己成立归属。
+    sqlx::query("DELETE FROM session_bindings WHERE thread_id = 's-parent'")
+        .execute(&store.database.pool)
+        .await
+        .unwrap();
+    let error = data
+        .adopt_legacy_session(
+            &"s-legacy-child".to_owned(),
+            &cwd,
+            &workspace,
+            &frozen("parent"),
+        )
+        .await
+        .unwrap_err();
+    assert!(
+        matches!(
+            error.kind(),
+            peri_acp_types::session_resources::SessionResourceErrorKind::Workspace(
+                peri_acp_types::workspace::WorkspaceError::ExecutionBindingMismatch
+            )
+        ),
+        "{error}"
+    );
+    let refused = data
+        .load_snapshot(&"s-legacy-child".to_owned())
+        .await
+        .unwrap();
+    assert_eq!(refused.binding, BindingState::ExternalOrUnregistered);
+    assert_eq!(refused.frozen, FrozenState::LegacyAbsent);
+
+    // 父会话核实接纳后：子会话继承同一绑定身份与父的已持久字节。
+    data.adopt_legacy_session(&"s-parent".to_owned(), &cwd, &workspace, &frozen("parent"))
+        .await
+        .unwrap();
+    let parent = data.load_snapshot(&"s-parent".to_owned()).await.unwrap();
+    assert_eq!(parent.binding, BindingState::Bound(binding_of(&workspace)));
+    data.adopt_legacy_session(
+        &"s-legacy-child".to_owned(),
+        &cwd,
+        &workspace,
+        &frozen("parent"),
+    )
+    .await
+    .unwrap();
+    let adopted = data
+        .load_snapshot(&"s-legacy-child".to_owned())
+        .await
+        .unwrap();
+    assert_eq!(adopted.binding, parent.binding);
+    assert_eq!(adopted.frozen, parent.frozen);
+    assert_eq!(
+        data.list_children(&"s-parent".to_owned())
+            .await
+            .unwrap()
+            .len(),
+        1
     );
 }
 
