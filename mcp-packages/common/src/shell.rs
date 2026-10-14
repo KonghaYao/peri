@@ -173,6 +173,11 @@ impl Drop for ShellExecutionGuard {
                     if let Some(child) = &mut child {
                         child.wait().await?;
                     }
+                    // 首次 terminate 与子进程 fork 之间存在窗口：正处于 fork 中间
+                    // 状态的子进程会继承组 ID 却收不到那次 SIGKILL，leader 退出后
+                    // 继续存活并使组探测永远不满足。leader 已被回收后组成员不再
+                    // 增长，此处补杀一次以覆盖这类漏网进程。
+                    tree.terminate();
                     tree.wait_for_exit().await;
                     Ok::<(), std::io::Error>(())
                 };
