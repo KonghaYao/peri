@@ -408,3 +408,19 @@ fn identity_decoding_rejects_shapes_it_cannot_explain() {
     assert!(decode_identity(&[Value::Null, Value::Null, Value::Null]).is_none());
     assert!(decode_identity(&[]).is_none());
 }
+
+#[test]
+fn current_remote_shape_uses_only_declared_tables_and_read_only_pragmas() {
+    let tables = super::schema::CURRENT_TABLE_PRAGMAS;
+    assert_eq!(
+        tables.len(),
+        crate::sessions::schema_shape::CURRENT_TABLES.len()
+    );
+    for ((name, sql), shape) in tables
+        .iter()
+        .zip(crate::sessions::schema_shape::CURRENT_TABLES)
+    {
+        assert_eq!(*name, shape.name);
+        assert_eq!(*sql, format!("PRAGMA table_xinfo('{name}')"));
+    }
+}

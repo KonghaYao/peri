@@ -227,6 +227,13 @@ async fn test_bash_group_cleanup_settles_descendant_after_parent_exit() {
 
 // ── command not found 诊断（issue: bash 错误原因定位）────────────────────────
 
+/// 用例内显式前台期限：本组用例断言的是 `command not found` 诊断文本，与前台
+/// 期限无关，但默认 15s 把 shell 冷启动一并算进窗口（Windows 上是 PowerShell
+/// 冷启动）。CI run 38521037079 的 Windows job 因此判失败：同一用例常态 0.9s
+/// （本分支上一次运行）/ 1.7s（main，同一提交内容），抖动时卡满默认期限。
+/// 抬到 60s 只放大环境余量，不放宽任何断言。
+const HINT_CASE_FOREGROUND_TIMEOUT_MS: u64 = 60_000;
+
 /// 命令不存在：输出尾部附带 PATH 候选或环境类兜底诊断，
 /// 供模型直接采取行动（换命令名 / 检查 PATH 与虚拟环境）。
 #[tokio::test]
@@ -234,7 +241,10 @@ async fn test_bash_command_not_found_appends_hint() {
     let tool = BashTool::new(std::env::temp_dir().to_str().unwrap());
     let result = tool
         .invoke(
-            serde_json::json!({"command": "xx_q1w2e3_not_a_real_cmd_xx"}),
+            serde_json::json!({
+                "command": "xx_q1w2e3_not_a_real_cmd_xx",
+                "timeout": HINT_CASE_FOREGROUND_TIMEOUT_MS,
+            }),
             peri_agent::tools::ToolContext::new(&[], "."),
         )
         .await
@@ -257,7 +267,10 @@ async fn test_bash_non_127_failure_has_no_command_hint() {
     let tool = BashTool::new(std::env::temp_dir().to_str().unwrap());
     let result = tool
         .invoke(
-            serde_json::json!({"command": "ls /definitely-not-a-real-dir-xx"}),
+            serde_json::json!({
+                "command": "ls /definitely-not-a-real-dir-xx",
+                "timeout": HINT_CASE_FOREGROUND_TIMEOUT_MS,
+            }),
             peri_agent::tools::ToolContext::new(&[], "."),
         )
         .await

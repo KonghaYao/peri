@@ -21,7 +21,7 @@
 //!
 //! 三条硬规则：
 //!
-//! - **读不写**：身份/版本读取与形状探测只有 SELECT（`identity_read_plan` 可离线断言）。
+//! - **读不写**：身份/版本读取与形状探测只有 SELECT 和只读 PRAGMA（`identity_read_plan` 可离线断言）。
 //! - **未知不覆盖**：版本高于本构建、契约不符或形状不可解释时一律拒绝，不做 DDL、
 //!   不猜列形状；初始化只在「确定不存在」时创建，已存在时读回而不改写。
 //! - **唯一身份**：`store_id` 由首次初始化竞争产生（元数据行主键），失败者读胜者，
@@ -240,6 +240,23 @@ pub(super) enum ShapeProbe {
     /// 迁移输入形状（`v2` + 10|11）：搬运输入的上下界，外加要删除对象的严格判定。
     Input,
 }
+
+pub(super) const CURRENT_TABLE_PRAGMAS: &[(&str, &str)] = &[
+    ("machines", "PRAGMA table_xinfo('machines')"),
+    ("projects", "PRAGMA table_xinfo('projects')"),
+    ("workspaces", "PRAGMA table_xinfo('workspaces')"),
+    ("threads", "PRAGMA table_xinfo('threads')"),
+    ("messages", "PRAGMA table_xinfo('messages')"),
+    ("session_bindings", "PRAGMA table_xinfo('session_bindings')"),
+    (
+        "mcp_oauth_credentials",
+        "PRAGMA table_xinfo('mcp_oauth_credentials')",
+    ),
+    (
+        "session_close_intents",
+        "PRAGMA table_xinfo('session_close_intents')",
+    ),
+];
 
 impl ShapeProbe {
     /// 探测语句（只读、单条 SELECT；缺表在结果里没有行，由判定区分「缺表」与「空形状」）。
