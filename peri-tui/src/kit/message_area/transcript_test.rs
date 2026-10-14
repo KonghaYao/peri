@@ -687,7 +687,8 @@ fn zone_step_renders_only_at_zone_boundaries() {
             TuiRenderUnit::TuiUserBubble(TuiUserBubble::new("hi".into())),
             tool_entry("Read"),
             tool_entry("Grep"),
-            empty_bubble_entry("answer", None),
+            // 长回复（≥120 字）→ 文本区，参与转场
+            empty_bubble_entry(&"answer ".repeat(20), None),
             tool_entry("Bash"),
         ]),
     };
@@ -735,12 +736,66 @@ fn zone_step_renders_only_at_zone_boundaries() {
     assert!(header.contains("Bash"), "实际 {header:?}");
 }
 
+/// §6/§7 短回复（<120 字）并入过程区：与相邻过程 entry 同区接续，双向都不画
+/// 转场台阶；正文行取过程带前缀（缩进 + 标记列竖线）。
+#[test]
+#[serial_test::serial]
+fn brief_reply_stays_in_process_zone_without_step() {
+    let grid = GridSpec::grid_for(80);
+    let context = context();
+    let snapshot = ViewModelsSnapshot {
+        generation: 1,
+        items: im::Vector::from(vec![
+            TuiRenderUnit::TuiUserBubble(TuiUserBubble::new("hi".into())),
+            tool_entry("Read"),
+            empty_bubble_entry("answer", None),
+            tool_entry("Bash"),
+        ]),
+    };
+    let mut transcript = Transcript::default();
+    let mut caches = Vec::new();
+    transcript.prepare(
+        &snapshot,
+        &TranscriptPublication::default(),
+        &mut caches,
+        grid,
+        grid.line_width(),
+        context,
+        0,
+        0,
+        0,
+        2,
+    );
+
+    let line_text_at = |slot: usize, index: usize| -> String {
+        let lines = caches[slot].lines.as_ref().expect("slot 已渲染");
+        let line = lines.line(index).expect("行存在");
+        line.spans.iter().map(|s| s.content.as_ref()).collect()
+    };
+    // user → 过程区（Read）：进入台阶独立成行
+    assert_eq!(line_text_at(1, 0), " \u{2570}\u{2500}\u{256e}");
+    // Read → 短回复：同区接续，无退出台阶；正文取过程带前缀，上下各 1 过程带空行
+    assert_eq!(line_text_at(2, 0), "   \u{2502}  ");
+    assert_eq!(line_text_at(2, 1), "   \u{2502}  answer");
+    assert_eq!(line_text_at(2, 2), "   \u{2502}  ");
+    // 短回复 → Bash：仍同区接续，无进入台阶
+    let bash_head = line_text_at(3, 0);
+    assert!(
+        !bash_head.contains('\u{2570}') && !bash_head.contains('\u{256d}'),
+        "短回复后接过程 entry 不画台阶，实际 {bash_head:?}"
+    );
+    assert!(bash_head.contains("Bash"), "实际 {bash_head:?}");
+}
+
 /// §6/§7 相邻判定的边界用例：首个 entry 恒 `None`；0 行 entry 跳过（不成为
 /// 「前一个产出行 entry」）；纯 reasoning 气泡终点仍在过程区 → 接续不画台阶；
-/// 正文非空的气泡终点回文本区 → 后接过程 entry 画进入台阶。
+/// 短回复（<120 字）气泡同属过程区 → 双向都不画台阶；长正文气泡终点回文本区
+/// → 后接过程 entry 画进入台阶。
 #[test]
 #[serial_test::serial]
 fn zone_transition_matrix_skips_zero_line_entries() {
+    let long_answer = || empty_bubble_entry(&"answer ".repeat(20), None);
+    let brief_answer = || empty_bubble_entry("answer", None);
     let reasoning_only = || {
         empty_bubble_entry(
             "",
@@ -768,12 +823,16 @@ fn zone_transition_matrix_skips_zero_line_entries() {
     );
     assert_eq!(zone_transition(&items, 2), ZoneTransition::None);
 
-    // 过程区 → 文本区：退出台阶（线色随下方 assistant 正文）
-    let items = im::Vector::from(vec![tool_entry("Read"), empty_bubble_entry("answer", None)]);
+    // 过程区 → 文本区：长正文退出台阶（线色随下方 assistant 正文）
+    let items = im::Vector::from(vec![tool_entry("Read"), long_answer()]);
     assert_eq!(
         zone_transition(&items, 1),
         ZoneTransition::ExitProcess(TextLineSource::Assistant)
     );
+
+    // 短回复终点仍在过程区：与前置过程 entry 接续，不画退出台阶
+    let items = im::Vector::from(vec![tool_entry("Read"), brief_answer()]);
+    assert_eq!(zone_transition(&items, 1), ZoneTransition::None);
 
     // 0 行 entry 夹在中间：不参与相邻判定，跨过它看前一个产出行 entry
     let items = im::Vector::from(vec![
@@ -790,15 +849,33 @@ fn zone_transition_matrix_skips_zero_line_entries() {
     let items = im::Vector::from(vec![user(), reasoning_only(), tool_entry("Read")]);
     assert_eq!(zone_transition(&items, 2), ZoneTransition::None);
 
-    // 正文非空的气泡终点在文本区 → 后接过程 entry 画进入台阶（线色随上方 assistant 正文）
-    let items = im::Vector::from(vec![
-        user(),
-        empty_bubble_entry("answer", None),
-        tool_entry("Read"),
-    ]);
+    // 长正文气泡终点在文本区 → 后接过程 entry 画进入台阶（线色随上方 assistant 正文）
+    let items = im::Vector::from(vec![user(), long_answer(), tool_entry("Read")]);
     assert_eq!(
         zone_transition(&items, 2),
         ZoneTransition::EnterProcess(TextLineSource::Assistant)
+    );
+
+    // 短回复气泡终点仍在过程区 → 后接过程 entry 接续，不画进入台阶
+    let items = im::Vector::from(vec![user(), brief_answer(), tool_entry("Read")]);
+    assert_eq!(zone_transition(&items, 2), ZoneTransition::None);
+
+    // turn 边界 Divider（文本区装饰）：进出两向台阶线色都随它自身（text.dim）
+    let divider = || {
+        TuiRenderUnit::TuiDivider(crate::kit::tui_render_unit::TuiDivider {
+            label: None,
+            content_hash: 9,
+        })
+    };
+    let items = im::Vector::from(vec![tool_entry("Read"), divider()]);
+    assert_eq!(
+        zone_transition(&items, 1),
+        ZoneTransition::ExitProcess(TextLineSource::Divider)
+    );
+    let items = im::Vector::from(vec![divider(), tool_entry("Read")]);
+    assert_eq!(
+        zone_transition(&items, 1),
+        ZoneTransition::EnterProcess(TextLineSource::Divider)
     );
 }
 

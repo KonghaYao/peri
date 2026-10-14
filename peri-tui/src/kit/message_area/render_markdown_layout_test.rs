@@ -4,7 +4,8 @@ use super::*;
 // ── md 复制按钮 ─────────────────────────────────────────────────────────
 
 /// 顶层渲染（render_copy_button=true）时，超过 MD_COPY_MIN_CHARS（400）字符的
-/// AssistantBubble 的正文后、尾随空行前追加复制按钮行（右对齐在 content 列右缘）。
+/// AssistantBubble 的正文后、尾随空行前追加复制按钮行：行首是正文竖线前缀
+/// （左缘时间线不断链），按钮块右对齐在 content 列右缘。
 #[test]
 fn test_assistant_bubble_renders_copy_button() {
     crate::i18n::init(Some("en"));
@@ -18,10 +19,22 @@ fn test_assistant_bubble_renders_copy_button() {
     let text: String = btn_line.spans.iter().map(|s| s.content.as_ref()).collect();
     let btn_width = 2 + crate::i18n::tr("msg-copy-md").width();
     let line_width = grid.first_prefix_width() + grid.content_width();
+    let prefix_width = grid.cont_prefix_width();
+    // 前缀 = 正文续行前缀（outer 空 + 竖线 + gap），随后填充空格把按钮右对齐
+    let prefix = format!(" \u{2502}{}", " ".repeat(grid.gap as usize));
     assert_eq!(
         text,
-        format!("{}{}", " ".repeat(line_width - btn_width), " Copy "),
-        "按钮行 = 前导填充空格（右对齐）+ 左右各 1 空格 + i18n 按钮文本"
+        format!(
+            "{}{}{}",
+            prefix,
+            " ".repeat(line_width - prefix_width - btn_width),
+            " Copy "
+        ),
+        "按钮行 = 正文竖线前缀 + 前导填充空格（右对齐）+ 左右各 1 空格 + i18n 按钮文本"
+    );
+    assert_eq!(
+        btn_line.spans[1].style.fg, lines[0].spans[1].style.fg,
+        "按钮行竖线色 = 正文竖线色"
     );
 
     assert_eq!(

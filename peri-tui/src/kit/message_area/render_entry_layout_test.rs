@@ -351,6 +351,35 @@ fn test_compact_and_narrow_process_prefix_falls_back_to_baseline() {
             "term={term}: 行宽不超基准前缀 + content 预算"
         );
 
+        // 短回复（<120 字）的过程带判定在 <60 列不改变渲染：无缩进即无过程带，
+        // 正文仍取基准前缀（逐列与改动前一致）
+        let brief = TuiRenderUnit::TuiAssistantBubble(
+            TuiAssistantBubble {
+                started_at: None,
+                duration_ms: None,
+                text: "reply".into(),
+                reasoning: None,
+                message_id: None,
+                content_hash: 0,
+            }
+            .into(),
+        );
+        let brief_lines = vm_to_lines(&brief, &grid);
+        let brief_body = brief_lines
+            .iter()
+            .find(|l| line_text(l).contains("reply"))
+            .expect("短回复正文行");
+        assert_eq!(
+            prefix_col(brief_body, 3),
+            grid.first_prefix_width(),
+            "term={term}: 短回复正文回基准列（与长回复同列）"
+        );
+        assert_eq!(
+            brief_body.spans[1].content.as_ref(),
+            "\u{2502}",
+            "term={term}: 短回复仍取基准竖线前缀"
+        );
+
         // 转场形态存在也不落台阶（§9：Compact/Narrow 无缩进即无台阶）——逐列
         // 与改动前一致，仅前缀回退形态。
         let mut cache = crate::kit::markdown::MarkdownRenderCache::default();
@@ -374,7 +403,8 @@ fn test_compact_and_narrow_process_prefix_falls_back_to_baseline() {
     }
 }
 
-/// 用户与 AI 正文左侧竖线分别使用次等色和主题色。
+/// 用户与 AI 正文左侧竖线分别使用次等色和主题色——长回复竖线在文本区 accent
+/// 列，短回复并入过程带后竖线退到标记列，两者同取 `accent`。
 #[test]
 fn test_message_line_colors_follow_role_tokens() {
     let grid = GridSpec::grid_for(80);
@@ -389,12 +419,13 @@ fn test_message_line_colors_follow_role_tokens() {
     assert_eq!(user[0].spans[1].content.as_ref(), "\u{2502}");
     assert_eq!(user[0].spans[1].style.fg, Some(sem.text.secondary));
 
+    // 长回复（≥120 字）留在文本区：竖线在 accent 列（spans[1]）
     let assistant = vm_to_lines(
         &TuiRenderUnit::TuiAssistantBubble(
             TuiAssistantBubble {
                 started_at: None,
                 duration_ms: None,
-                text: "assistant message".into(),
+                text: "assistant message ".repeat(10),
                 reasoning: None,
                 message_id: None,
                 content_hash: 1,
@@ -405,6 +436,24 @@ fn test_message_line_colors_follow_role_tokens() {
     );
     assert_eq!(assistant[0].spans[1].content.as_ref(), "\u{2502}");
     assert_eq!(assistant[0].spans[1].style.fg, Some(sem.accent));
+
+    // 短回复（<120 字）并入过程带：正文前有 1 空行，竖线在过程区标记列（spans[2]），同色 accent
+    let brief = vm_to_lines(
+        &TuiRenderUnit::TuiAssistantBubble(
+            TuiAssistantBubble {
+                started_at: None,
+                duration_ms: None,
+                text: "short answer".into(),
+                reasoning: None,
+                message_id: None,
+                content_hash: 2,
+            }
+            .into(),
+        ),
+        &grid,
+    );
+    assert_eq!(brief[1].spans[2].content.as_ref(), "\u{2502}");
+    assert_eq!(brief[1].spans[2].style.fg, Some(sem.accent));
 }
 
 /// Narrow 断点：首行 accent 符号退化为 dim bullet（§11）。
@@ -420,8 +469,8 @@ fn test_narrow_accent_bullet() {
     );
 }
 
-/// 分层列坐标（§2/§3）：user/AI 正文留在基准列（col4）；过程区 entry（工具卡）
-/// 首行标签右移 `indent` 到 col6。
+/// 分层列坐标（§2/§3）：user/AI 长正文留在基准列（col4）；过程区 entry（工具卡、
+/// 短回复 AI 正文）起点右移 `indent` 到 col6。
 #[test]
 fn test_text_zone_baseline_and_process_zone_indent_columns() {
     let grid = GridSpec::grid_for(80);
@@ -445,7 +494,8 @@ fn test_text_zone_baseline_and_process_zone_indent_columns() {
                 // [Slice 1] 正文时长（§6.2 `12.4s`）：测试构造默认无起点/冻结值。
                 started_at: None,
                 duration_ms: None,
-                text: "hello".into(),
+                // 长回复（≥120 字）留在文本区——短回复并入过程带的列位见下方断言
+                text: "hello ".repeat(30),
                 reasoning: None,
                 message_id: None,
                 content_hash: 5,
@@ -454,22 +504,45 @@ fn test_text_zone_baseline_and_process_zone_indent_columns() {
         ),
         &grid,
     );
+    let brief = vm_to_lines(
+        &TuiRenderUnit::TuiAssistantBubble(
+            TuiAssistantBubble {
+                started_at: None,
+                duration_ms: None,
+                text: "hello".into(),
+                reasoning: None,
+                message_id: None,
+                content_hash: 6,
+            }
+            .into(),
+        ),
+        &grid,
+    );
 
-    // user / assistant 正文：文本区前缀 3 段（outer / 竖线 / gap）→ col4
+    // user / assistant 长正文：文本区前缀 3 段（outer / 竖线 / gap）→ col4
     assert_eq!(prefix_col(&user[0], 3), text_col, "user 正文起点");
     assert!(line_text(&user[0]).contains("你好世界"));
-    assert_eq!(prefix_col(&assistant[0], 3), text_col, "assistant 正文起点");
+    assert_eq!(
+        prefix_col(&assistant[0], 3),
+        text_col,
+        "assistant 长正文起点"
+    );
     assert!(line_text(&assistant[0]).contains("hello"));
     // 工具卡首行：过程区前缀 4 段（outer / indent 留空 / 标记 / gap）→ col6
     assert_eq!(prefix_col(&tool[0], 4), process_col, "tool 首行标签起点");
     assert!(tool[0].spans[4].content.contains("Read"));
+    // 短回复正文：同过程区前缀 4 段 → col6（行 0 = 前导空行，行 1 = 正文）
+    assert!(is_rail_blank(&brief[0]), "短回复前保留 1 空行");
+    assert_eq!(prefix_col(&brief[1], 4), process_col, "短回复正文起点");
+    assert!(line_text(&brief[1]).contains("hello"));
 }
 
 // ── 垂直节奏（§3.2）────────────────────────────────────────────────────
 
-/// Wide/Standard：正文块分隔由转场台阶承担，user 与 assistant 正文块前后
-/// 不再保留节拍空行；Compact 无台阶，仍保留首尾 1 空行。turn 内 tool 过程
-/// entry 无空行；空文本 user（thinking 回传建模）渲染 0 行。
+/// Wide/Standard：长回复正文块分隔由转场台阶承担，user 与 assistant 长正文块
+/// 前后不再保留节拍空行；短回复并入过程带（无台阶）→ 上下各 1 空行作分隔；
+/// Compact 无台阶，长正文仍保留首尾 1 空行。turn 内 tool 过程 entry 无空行；
+/// 空文本 user（thinking 回传建模）渲染 0 行。
 #[test]
 fn test_vertical_rhythm_blank_lines() {
     let grid = GridSpec::grid_for(80);
@@ -496,13 +569,14 @@ fn test_vertical_rhythm_blank_lines() {
         "无 role label 文本，实际: {header:?}"
     );
 
+    // Wide：长回复（≥120 字）留在文本区 → 前后不保留空行（台阶承担分隔）
     let assistant_lines = vm_to_lines(
         &TuiRenderUnit::TuiAssistantBubble(
             TuiAssistantBubble {
                 // [Slice 1] 正文时长（§6.2 `12.4s`）：测试构造默认无起点/冻结值。
                 started_at: None,
                 duration_ms: None,
-                text: "reply".into(),
+                text: "reply ".repeat(30),
                 reasoning: None,
                 message_id: None,
                 content_hash: 6,
@@ -513,11 +587,40 @@ fn test_vertical_rhythm_blank_lines() {
     );
     assert!(
         !is_blank_separator(&assistant_lines[0]),
-        "Wide 下 assistant 正文前不再保留空行"
+        "Wide 下 assistant 长正文前不再保留空行"
     );
     assert!(
         !assistant_lines.last().is_some_and(is_blank_separator),
-        "Wide 下 assistant 正文后不再保留空行"
+        "Wide 下 assistant 长正文后不再保留空行"
+    );
+
+    // Wide：短回复并入过程带（与过程 entry 之间不画台阶）→ 上下各 1 空行
+    let brief_lines = vm_to_lines(
+        &TuiRenderUnit::TuiAssistantBubble(
+            TuiAssistantBubble {
+                started_at: None,
+                duration_ms: None,
+                text: "reply".into(),
+                reasoning: None,
+                message_id: None,
+                content_hash: 8,
+            }
+            .into(),
+        ),
+        &grid,
+    );
+    assert!(
+        is_rail_blank(&brief_lines[0]),
+        "Wide 下短回复前保留 1 空行（过程带前缀）"
+    );
+    assert!(
+        brief_lines.last().is_some_and(is_rail_blank),
+        "Wide 下短回复后保留 1 空行（过程带前缀）"
+    );
+    assert!(
+        !is_blank_separator(&brief_lines[1]) && line_text(&brief_lines[1]).contains("reply"),
+        "短回复正文在空行之后，实际: {:?}",
+        line_text(&brief_lines[1])
     );
 
     // Compact（无转场台阶）：节拍空行保留，承担正文块分隔
@@ -618,9 +721,10 @@ fn test_empty_user_bubble_renders_zero_lines() {
 
 // ── 转场台阶线色（§6）──────────────────────────────────────────────────
 
-/// 台阶线色随所接文本竖线：进入台阶接上方文本 entry（user → `text.secondary` /
-/// assistant → `accent`），退出台阶接下方文本 entry（assistant 正文 → `accent`），
-/// entry 内部（reasoning → 正文）台阶用正文色。
+/// 台阶线色随所接文本左侧线条：进入台阶接上方文本 entry（user → `text.secondary` /
+/// assistant → `accent` / divider → `text.dim`），退出台阶接下方文本 entry
+/// （assistant 正文 → `accent` / divider → `text.dim`），entry 内部
+/// （reasoning → 正文）台阶用正文色。
 #[test]
 fn test_step_line_color_follows_text_line() {
     let grid = GridSpec::grid_for(80);
@@ -661,7 +765,8 @@ fn test_step_line_color_follows_text_line() {
         TuiAssistantBubble {
             started_at: None,
             duration_ms: None,
-            text: "answer".into(),
+            // 长回复（≥120 字）回文本区 → 入口/退出台阶参与转场
+            text: "answer ".repeat(20),
             reasoning: None,
             message_id: None,
             content_hash: 9,
@@ -683,12 +788,12 @@ fn test_step_line_color_follows_text_line() {
         "退出台阶线色 = assistant 正文竖线色"
     );
 
-    // entry 内部（reasoning → 正文）台阶：正文竖线色
+    // entry 内部（reasoning → 长正文）台阶：正文竖线色
     let mixed = TuiRenderUnit::TuiAssistantBubble(
         TuiAssistantBubble {
             started_at: None,
             duration_ms: None,
-            text: "body".into(),
+            text: "body ".repeat(30),
             reasoning: Some(TuiReasoningBlock {
                 text: "思考".into(),
                 fold: FoldState::Collapsed,
@@ -718,6 +823,87 @@ fn test_step_line_color_follows_text_line() {
         inner_step.spans[0].style.fg,
         Some(sem.accent),
         "内部台阶线色 = 正文竖线色"
+    );
+
+    // 短回复（<120 字）正文同属过程区（无 zone 跳变）：不画内部台阶，正文
+    // 走过程带前缀（标记列竖线）
+    let brief_mixed = TuiRenderUnit::TuiAssistantBubble(
+        TuiAssistantBubble {
+            started_at: None,
+            duration_ms: None,
+            text: "短答复".into(),
+            reasoning: Some(TuiReasoningBlock {
+                text: "思考".into(),
+                fold: FoldState::Collapsed,
+                status: EntryStatus::Completed,
+                is_running: false,
+                started_at: None,
+                duration_ms: Some(1_000),
+            }),
+            message_id: None,
+            content_hash: 12,
+        }
+        .into(),
+    );
+    let (brief_mixed_lines, ..) = super::vm_to_lines_cached_with_layout(
+        &brief_mixed,
+        &grid,
+        &mut cache,
+        None,
+        false,
+        ZoneTransition::None,
+    );
+    assert!(
+        !brief_mixed_lines.iter().any(super::is_step_row),
+        "短回复不画内部/入口台阶"
+    );
+    // 按正文文本定位（首尾另有过程带空行，`last()` 会取到尾随空行）
+    let brief_body = brief_mixed_lines
+        .iter()
+        .find(|line| line.spans.iter().any(|s| s.content.contains("短答复")))
+        .expect("正文行");
+    assert_eq!(
+        brief_body.spans[2].content.as_ref(),
+        "\u{2502}",
+        "正文并入过程带（标记列竖线）"
+    );
+
+    // turn 边界 Divider（文本区装饰，`── label ──` 左侧线色 text.dim）：
+    // 退出台阶接下方 divider、进入台阶接上方 divider，线色都取 dim。
+    let divider = TuiRenderUnit::TuiDivider(TuiDivider {
+        label: None,
+        content_hash: 11,
+    });
+    let (divider_exit, ..) = super::vm_to_lines_cached_with_layout(
+        &divider,
+        &grid,
+        &mut cache,
+        None,
+        false,
+        ZoneTransition::ExitProcess(TextLineSource::Divider),
+    );
+    assert!(
+        super::is_step_row(&divider_exit[0]),
+        "divider 前应是退出台阶"
+    );
+    assert_eq!(
+        divider_exit[0].spans[0].style.fg,
+        Some(sem.text.dim),
+        "退出台阶线色 = divider 左侧线色"
+    );
+
+    let (divider_enter, ..) = super::vm_to_lines_cached_with_layout(
+        &tool,
+        &grid,
+        &mut cache,
+        None,
+        false,
+        ZoneTransition::EnterProcess(TextLineSource::Divider),
+    );
+    assert_eq!(
+        divider_enter[0].spans[0].style.fg,
+        Some(sem.text.dim),
+        "进入台阶线色 = 上方 divider 左侧线色"
     );
 }
 

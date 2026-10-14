@@ -41,15 +41,18 @@ pub enum Breakpoint {
     Narrow,
 }
 
-/// 台阶文本侧来源——决定台阶线色（与文本竖线同色，转场处颜色不断链）：
-/// user 文本用 `text.secondary`、assistant 正文用 `accent`；主题色在渲染层
-/// 映射（`render/helpers.rs::text_line_color`）。
+/// 台阶文本侧来源——决定台阶线色（与所接文本的左侧线条同色，转场处颜色
+/// 不断链）：user 文本 `text.secondary`、assistant 正文 `accent`、Divider
+/// `text.dim`（与其 `── label ──` 同色）；主题色在渲染层映射
+/// （`render/helpers.rs::text_line_color`）。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum TextLineSource {
     /// user 气泡（含附件记录 / @image meta 行）。
     User,
-    /// assistant 正文（Divider 等其余文本区 entry 按此兜底）。
+    /// assistant 正文。
     Assistant,
+    /// turn 边界 Divider（`── label ──`）。
+    Divider,
 }
 
 /// 过程区转场形态（规格 §6）——由 transcript 按相邻 entry 的起止 zone 判定，

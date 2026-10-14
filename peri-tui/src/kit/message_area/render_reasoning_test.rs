@@ -747,7 +747,7 @@ fn test_assistant_duration_meta_three_breakpoints() {
     );
 }
 
-/// §6/§7 气泡内混排：reasoning 段走过程区（首行/续行同列），正文段回基准列；
+/// §6/§7 气泡内混排：reasoning 段走过程区（首行/续行同列），长正文段回基准列；
 /// 入口台阶由渲染层插入 entry 行首，reasoning → 正文的退出台阶由 entry 自画。
 #[test]
 fn test_bubble_reasoning_uses_process_zone_body_returns_to_baseline() {
@@ -765,7 +765,10 @@ fn test_bubble_reasoning_uses_process_zone_body_returns_to_baseline() {
         TuiAssistantBubble {
             started_at: None,
             duration_ms: None,
-            text: "正文回答".to_string(),
+            // 长回复（≥120 字）：正文回文本区，与 reasoning 段之间有内部退出台阶；
+            // 短回复正文留在过程带（不画台阶）的形态见
+            // `render_entry_layout_test::test_step_line_color_follows_text_line` 等用例。
+            text: format!("正文回答{}", "x".repeat(200)),
             reasoning: Some(reasoning),
             message_id: None,
             content_hash: 1,

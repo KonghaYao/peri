@@ -52,16 +52,21 @@ active issue。
 - Standard/Compact 使用非模态 bottom drawer；Narrow 可使用全屏详情页；
 - 非模态 Inspector 打开时 composer 保持可见；Modal 打开时背景完全 inert；
 - transcript 延续 `GridSpec`、语义 theme token 与响应式断点；组件不得硬编码颜色；
-- 文本区（user 气泡与 assistant 正文）保持基准列；工具卡片、系统注记/提醒、提问块、
-  Todo 摘要、折叠组与气泡内 reasoning 等过程区 entry 在 Wide/Standard（≥60 列）
-  整体右移 2 格，其正文可用宽度相应收窄 2 格，右缘（duration 等 metadata 对齐列）
-  和整带居中不变；turn 边界分隔线属文本区（`── label ──` 基准形态），不参与缩进；
+- 文本区（user 气泡与 assistant 长正文）保持基准列（块内所有行——含 md 复制按钮行——
+  同带竖线前缀，左缘时间线不断链）；工具卡片、系统注记/提醒、提问块、
+  Todo 摘要、折叠组、气泡内 reasoning，以及 **assistant 短回复**（`TuiAssistantBubble::is_brief`：
+  `chars().count() < 120`；空正文的纯 reasoning/工具轮恒为短回复）等过程区 entry 在
+  Wide/Standard（≥60 列）整体右移 2 格，其正文可用宽度相应收窄 2 格，右缘（duration 等
+  metadata 对齐列）和整带居中不变；短回复判定只作用于 assistant——user 气泡永不缩进；
+  turn 边界分隔线属文本区（`── label ──` 基准形态），不参与缩进；
 - 过程区由**转场台阶**接回文本区：进入 ` ╰─╮`、退出 ` ╭─╯`（各 1 行、宽 4，col1 `╰`/`╭`
-  接上方文本竖线，col3 `╮`/`╯` 接过程区左缘标记列），台阶线色与所接文本竖线同色
-  （user → `text.secondary`、assistant 正文 → `accent`），台阶由转场后的首个 entry 在行首插入；
+  接上方文本竖线，col3 `╮`/`╯` 接过程区左缘标记列），台阶线色与所接文本的左侧线条同色
+  （user → `text.secondary`、assistant 正文 → `accent`、divider → `text.dim`），台阶由转场后的首个 entry 在行首插入；
   过程区左缘标记（工具行 icon、其余行 `│`）落 col3、正文 col6；Wide/Standard 的文本块
-  首尾不再保留节拍空行（块分隔由台阶承担）；Compact/Narrow（<60 列）保持无缩进、无台阶，
-  保留正文块上下各 1 空行作分隔，逐列与改动前一致；
+  首尾不再保留节拍空行（块分隔由台阶承担）；短回复与相邻过程 entry 同区接续（进出都不画
+  台阶）、气泡内 reasoning → 短回复正文同理不画内部台阶——正文上下各保留 1 行过程带前缀
+  空行作分隔；Compact/Narrow（<60 列）保持无缩进、无台阶，保留正文块上下各 1 空行作分隔，
+  短回复判定不改变渲染形态，逐列与改动前一致；
 - 子 Agent 组内工具行与组头同列；
 - expanded preview 的视觉行数有界，超出时明确显示 `Open details` 与完整性状态。
 

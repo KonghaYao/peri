@@ -20,12 +20,16 @@ enum EntryZone {
     Process,
 }
 
-/// entry 起点 zone（§7）：AssistantBubble 有 reasoning 时 reasoning 先行 → 过程区，
-/// 否则与正文同为文本区；UserBubble 与 turn 边界 Divider 属文本区；其余变体
-/// （工具卡片 / 子 Agent 组 / 折叠组 / 系统 / 交互 / Todo）整体属过程区。
+/// entry 起点 zone（§7）：AssistantBubble 有 reasoning 时 reasoning 先行 → 过程区；
+/// 短回复（`text` 字符数 < `BRIEF_REPLY_MAX_CHARS`，见 `TuiAssistantBubble::is_brief`）
+/// 整体并入过程区（缩进形态）；其余 AssistantBubble 与 UserBubble、turn 边界
+/// Divider 属文本区；其余变体（工具卡片 / 子 Agent 组 / 折叠组 / 系统 / 交互 /
+/// Todo）整体属过程区。human（user 气泡）不参与短回复缩进。
 fn start_zone(vm: &TuiRenderUnit) -> EntryZone {
     match vm {
-        TuiRenderUnit::TuiAssistantBubble(data) if data.reasoning.is_some() => EntryZone::Process,
+        TuiRenderUnit::TuiAssistantBubble(data) if data.reasoning.is_some() || data.is_brief() => {
+            EntryZone::Process
+        }
         TuiRenderUnit::TuiAssistantBubble(_)
         | TuiRenderUnit::TuiUserBubble(_)
         | TuiRenderUnit::TuiDivider(_) => EntryZone::Text,
@@ -33,11 +37,13 @@ fn start_zone(vm: &TuiRenderUnit) -> EntryZone {
     }
 }
 
-/// entry 终点 zone（§7）：AssistantBubble 正文非空 → 文本区，否则等于起点
-/// （纯 reasoning 块整块留在过程区）；Divider 属文本区。
+/// entry 终点 zone（§7）：AssistantBubble 正文非空且非短回复 → 文本区；否则等于
+/// 起点（纯 reasoning 块与短回复整块留在过程区）；Divider 属文本区。
 fn end_zone(vm: &TuiRenderUnit) -> EntryZone {
     match vm {
-        TuiRenderUnit::TuiAssistantBubble(data) if !data.text.is_empty() => EntryZone::Text,
+        TuiRenderUnit::TuiAssistantBubble(data) if !data.text.is_empty() && !data.is_brief() => {
+            EntryZone::Text
+        }
         TuiRenderUnit::TuiAssistantBubble(_) => start_zone(vm),
         TuiRenderUnit::TuiUserBubble(_) | TuiRenderUnit::TuiDivider(_) => EntryZone::Text,
         _ => EntryZone::Process,
@@ -58,12 +64,14 @@ fn produces_lines(vm: &TuiRenderUnit) -> bool {
     }
 }
 
-/// 台阶线色来源：按 entry 类型映射文本竖线色——user 气泡用 `text.secondary`，
-/// 其余文本区 entry（assistant 正文 / Divider 兜底）用 `accent`；主题值在渲染层
-/// 解析（`render/helpers.rs::text_line_color`）。
+/// 台阶线色来源：按 entry 类型映射文本区左侧线条色——user 气泡用
+/// `text.secondary`、assistant 正文用 `accent`、Divider 用 `text.dim`（与
+/// `── label ──` 同色）；主题值在渲染层解析（`render/helpers.rs::text_line_color`）。
 fn text_line_source(vm: &TuiRenderUnit) -> TextLineSource {
     match vm {
         TuiRenderUnit::TuiUserBubble(_) => TextLineSource::User,
+        TuiRenderUnit::TuiDivider(_) => TextLineSource::Divider,
+        // 文本区 entry 只剩 AssistantBubble（含正文）→ 正文竖线色。
         _ => TextLineSource::Assistant,
     }
 }
@@ -72,8 +80,8 @@ fn text_line_source(vm: &TuiRenderUnit) -> TextLineSource {
 /// entry 终点 zone」的差异决定——文本区 → 过程区 = [`ZoneTransition::EnterProcess`]
 /// （入口画 ` ╰─╮`），过程区 → 文本区 = [`ZoneTransition::ExitProcess`]（入口画
 /// ` ╭─╯`），同区接续或时间轴首个 entry = [`ZoneTransition::None`]。台阶线色
-/// 随所接文本竖线（[`TextLineSource`]）：进入台阶接上方文本 entry、退出台阶接
-/// 下方（承担台阶的当前）文本 entry，转场处颜色不断链。
+/// 随所接文本的左侧线条（[`TextLineSource`]）：进入台阶接上方文本 entry、
+/// 退出台阶接下方（承担台阶的当前）文本 entry，转场处颜色不断链。
 ///
 /// [Why] 转场由「转场后的首个 entry」承担：判定只依赖前驱（后向依赖），追加新
 /// entry 只需渲染自身，不回溯翻转任何已渲染 slot；`AssistantBubble` 内部
