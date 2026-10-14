@@ -23,6 +23,16 @@ mod agent_event;
 mod interaction;
 mod session_update;
 
+/// 解码一条**历史投影**子项（历史页 `subItems[].update`）为回放语义事件。
+///
+/// 形状解释与实时 `session/update` 共用一份实现（[`session_update`]），但强制走回放
+/// 分支：历史页子项本来就是历史，不能因为 wire 上缺少 `periReplay` 标记就落成流式变体
+/// （那会把历史当成正在产出的内容）。`token_count` 与历史投影无关，丢弃。
+pub(crate) fn decode_history_sub_item(update: &Value) -> Option<AcpEventData> {
+    let params = serde_json::json!({ "update": update });
+    session_update::decode_stream_update_with(&params, "", true).event
+}
+
 use crate::acp_client::{AcpNotification, AcpTuiClient, InteractionOwner};
 use crate::i18n;
 use crate::kit::acp_types::{AcpEventData, AcpEventWithEpoch};
@@ -131,10 +141,23 @@ fn forward_notification(
             event,
             data,
         } => {
-            let decoded = AcpEventData::decode(&event, data);
+            let decoded = AcpEventData::decode(&event, data.clone());
             if matches!(decoded, AcpEventData::Unknown { .. }) {
                 debug!(event = %event, "kit ACP notifier: unknown unstable_event, dropping");
                 return None;
+            }
+            // 回放条目位置标记与 `session/update` 路径同一份提取（`_meta` 或 data 顶层）；
+            // reminder 的戳摊在 data 顶层（`session_restore` 与 session/update 同一份拼装）。
+            // 必须先于内容事件到达桥接任务：没有它，首屏「自有条目只有 reminder」时区间
+            // 索引为空，更早历史会被插到继承前缀之前（REQ-H01-6、A20）。
+            if let Some((entry_id, position)) = session_update::decode_entry_marks(&data) {
+                let mark = AcpEventWithEpoch {
+                    event: AcpEventData::ReplayEntryMarked { entry_id, position },
+                    active_session_id: session_id.clone(),
+                };
+                if let Err(e) = bridge_tx.send(mark) {
+                    warn!(error = %e, "kit ACP notifier: bridge_tx closed, dropping entry mark");
+                }
             }
             let wrapped = wrap_with_session(decoded, session_id);
             if let Err(e) = bridge_tx.send(wrapped) {
@@ -261,7 +284,7 @@ fn convert_agent_event(event: AcpEvent) -> Option<AcpEventData> {
 /// Decoding is pure; commands, plan, and spinner publication stay synchronous here.
 fn handle_session_update(
     params: Value,
-    _bridge_tx: &mpsc::UnboundedSender<AcpEventWithEpoch>,
+    bridge_tx: &mpsc::UnboundedSender<AcpEventWithEpoch>,
     session_id: &str,
 ) -> Option<AcpEventData> {
     let update = params.get("update")?;
@@ -286,6 +309,19 @@ fn handle_session_update(
             let decoded = session_update::decode_stream_update(&params, session_id);
             if let Some(token_count) = decoded.token_count {
                 *SPINNER_TOKEN_COUNT.state().write() = token_count;
+            }
+            if decoded.event.is_some()
+                && let Some((entry_id, position)) = session_update::decode_entry_marks(update)
+            {
+                // 条目位置标记必须先于内容事件到达桥接任务：桥接用它登记该条目的
+                // 展示区间（首屏区间索引的唯一来源，见 `history_paging`）。
+                let mark = AcpEventWithEpoch {
+                    event: AcpEventData::ReplayEntryMarked { entry_id, position },
+                    active_session_id: session_id.to_string(),
+                };
+                if let Err(e) = bridge_tx.send(mark) {
+                    warn!(error = %e, "kit ACP notifier: bridge_tx closed, dropping entry mark");
+                }
             }
             decoded.event
         }

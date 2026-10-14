@@ -331,3 +331,57 @@ async fn test_non_terminal_tool_update_is_not_forwarded_as_tool_end() {
     assert_notifier_reached_barrier(&notif_tx, &mut bridge_rx).await;
     shutdown.cancel();
 }
+
+/// REQ-H01-6 / A20：`peri/unstable_event`（回放 reminder）的条目戳摊在 `data` 顶层，
+/// 必须先于内容事件注入 `ReplayEntryMarked`——首屏「自有条目只有 reminder」时，
+/// 这是区间索引的唯一来源（缺了它更早历史会越过继承前缀）。
+#[tokio::test]
+async fn test_unstable_event_reminder_entry_marks_precede_content() {
+    let (notif_tx, mut bridge_rx, shutdown) = spawn_test_notifier();
+    notif_tx
+        .send(AcpNotification::UnstableEvent {
+            session_id: "s1".into(),
+            event: "system-reminder".into(),
+            data: json!({
+                "reminder": {
+                    "version": 1,
+                    "category": "security",
+                    "source": "permission",
+                    "kind": "mode_changed",
+                    "severity": "warning",
+                    "delivery": "required",
+                    "audiences": ["tui"],
+                    "body": "reminder body",
+                    "summary": "权限模式已变更",
+                    "metadata": {}
+                },
+                "replay": true,
+                "periLoadGeneration": "gen-1",
+                "periEntryId": "s1:own-reminder",
+                "periPosition": 42
+            }),
+        })
+        .unwrap();
+
+    let mark = bridge_rx
+        .recv()
+        .await
+        .expect("entry mark must arrive first");
+    assert!(
+        matches!(
+            mark.event,
+            AcpEventData::ReplayEntryMarked { ref entry_id, position }
+                if entry_id == "s1:own-reminder" && position == 42
+        ),
+        "unexpected first event: {mark:?}"
+    );
+    let reminder = bridge_rx
+        .recv()
+        .await
+        .expect("reminder must follow its mark");
+    assert!(
+        matches!(reminder.event, AcpEventData::SystemReminder { .. }),
+        "unexpected second event: {reminder:?}"
+    );
+    shutdown.cancel();
+}

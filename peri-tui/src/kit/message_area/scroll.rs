@@ -24,10 +24,13 @@ pub(super) use self::gesture::{DragAction, drag_step, freeze_down_index, settle_
 use self::gesture::{entry_click_target, freeze_down, is_click};
 use self::gesture::{selection_bounds_on_release, selection_captures_pointer, selection_position};
 use self::throttle::apply_scroll;
-pub(super) use self::throttle::{DragThrottle, SCROLL_PADDING, flush_scroll_if_due};
+pub(super) use self::throttle::{
+    DragThrottle, SCROLL_PADDING, flush_scroll_if_due, project_viewport_after_pending,
+};
 pub(crate) use self::throttle::{SCROLL_LINES, ScrollThrottle, scroll_frame_ms};
 #[cfg(test)]
 use self::throttle::{apply_delta_to_offset, is_reverse_direction};
+use super::viewport_anchor::PrependRelocation;
 #[cfg(test)]
 use crate::kit::message_area::props::ScrollbarFields;
 #[cfg(test)]
@@ -127,6 +130,10 @@ pub(super) struct AutoFollowCtx {
     /// 触发「新会话首次批量加载」的强制滚底路径。
     pub bridge_reset_counter: u64,
     pub prev_reset_counter: State<u64>,
+    /// [REQ-C01-3 / A20] 本次发布的重定位结果（渲染侧在 `Transcript::prepare` 里用
+    /// 「发布前锚点身份 + 发布后新索引」换算；一次性值，取处见 `message_area/mod.rs`）。
+    /// `None` = 本帧没有并入、或锚点身份在新窗口里认不出（一律不补偿）。
+    pub prepend_relocation: Option<PrependRelocation>,
     /// [Slice 4 §6.8]「等待时锚定此 block」：pending interaction block 的视觉
     /// 行范围（core 行，含起点/终点）。有值时视口对齐到 block 底部（浏览态与
     /// 跟随态均生效——§6.8：不得被新 streaming chunk 滚出视口）；block 完成

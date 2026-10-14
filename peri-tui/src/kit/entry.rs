@@ -357,6 +357,17 @@ pub async fn run_kit_fullscreen(
         let _ =
             atoms::THREAD_LOAD_TX.set(ThreadLoadDispatcher::new(thread_load_tx, client.clone()));
 
+        // 4b2a. HISTORY_PAGES channel：message_area 滚动触发 → history_page_consumer。
+        // 与 THREAD_LOAD 分开：历史页只读浏览，不参与会话装配、生命周期锁与 load
+        // reservation（未取 reservation 的请求不阻塞提交，也不改会话绑定）。
+        let (history_pages_tx, history_pages_rx) = mpsc::unbounded_channel();
+        let _ = atoms::HISTORY_PAGES_TX.set(history_pages_tx);
+        let _history_page_consumer = crate::kit::history_page_consumer::spawn_history_page_consumer(
+            client.clone(),
+            history_pages_rx,
+            shutdown.clone(),
+        );
+
         // 4a2. CANCEL channel：event_handlers Ctrl+C → cancel_consumer
         let (cancel_tx, cancel_rx) = mpsc::unbounded_channel::<()>();
         let _ = atoms::CANCEL_TX.set(cancel_tx);

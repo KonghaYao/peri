@@ -4,7 +4,7 @@
 
 use super::*;
 use crate::kit::acp_types::CurrentTurn;
-use crate::kit::atoms::{PERI_CONFIG_HANDLE, RENDER_HEARTBEAT, THREAD_LOAD_TX};
+use crate::kit::atoms::{PERI_CONFIG_HANDLE, RENDER_HEARTBEAT};
 use crate::kit::tui_render_unit::{TuiAssistantBubble, TuiReasoningBlock, TuiRenderUnit};
 
 pub(super) fn handle_turn_done(state: &mut BridgeState) {
@@ -35,26 +35,30 @@ pub(super) fn handle_turn_done(state: &mut BridgeState) {
     state.publish_barrier();
     super::render::push_acp_state(state);
 
-    // C2: compact 命令完成后触发 session/load 重放。
-    // S4.1 方案 B：命令 compact（Immediate）后无流事件，标志保持到 TurnDone；
-    // agent 内部 auto-compact 后标志已被后续流事件清除（见 dispatch_and_notify
-    // 入口的流事件判定）。原 `current_turn.is_empty()` 判定失效——flush 之后
-    // current_turn 恒空、失去区分能力（Issue 2026-08-05），已删除。
+    // REQ-C02 / A12: 手动 Compact 完成后**不再**触发完整 session/load 重放。
+    // 已加载的历史窗口、翻页进度与阅读位置原样保留——模型上下文收缩不等于界面
+    // 删除历史。Compact 提示由 handle_compact_completed 直接注入当前视图
+    // （inject_system_note），本次 flush 把它并入 committed；因此这里只清标志，
+    // 并清掉仅用于「跨同会话 replay 重建提示」的 PENDING_COMPACT_NOTE：触发
+    // 重放的路径已消失，残留的 atom 只会在后续同会话 load 时冒出一条过期提示。
+    //
+    // 标志本身保留：handle_command_feedback 依它去重紧随 compact 的 UiOnly
+    // 反馈（Timeline 上只出现一条完成提示）；agent 内部 auto-compact 后由
+    // dispatch_for_bridge 入口的流事件判定清标志（见 acp_events/mod.rs）。
     if state.compact_just_completed {
         state.compact_just_completed = false;
-        if let Some(tx) = THREAD_LOAD_TX.get() {
-            let session_id = state.active_session_id.clone();
-            tracing::info!(
-                session_id = %session_id,
-                "TurnDone: compact completed, triggering session/load replay"
-            );
-            let _ = tx.send(session_id);
-        }
+        crate::kit::atoms::PENDING_COMPACT_NOTE.set(None);
+        tracing::info!(
+            session_id = %state.active_session_id,
+            committed_len = state.committed.len(),
+            "TurnDone: compact completed, history window kept (no session/load)"
+        );
     }
 
     // (g) C1: agent 完成本轮——drain INPUT_BUFFER，按顺序重新提交。
-    // compact replay 必须先同步取得 load reservation，否则 drain 出来的首条
-    // prompt 仍可能抢在异步 session/load consumer 前绑定旧 Stable session。
+    // 排队输入与本轮结束之间不再有异步 session/load 竞争（thread 切换的重放
+    // 仍由 ThreadLoadDispatcher 在同步边界取得 load reservation，见
+    // thread_load_consumer.rs）。
     super::render::drain_input_buffer();
 }
 
@@ -427,6 +431,17 @@ pub(super) fn handle_committed_assistant_text(
     text: &str,
     reasoning: &Option<String>,
 ) {
+    let vm = committed_assistant_unit(text, reasoning);
+    state.committed.push_back(vm);
+    // Replay publication 由 bridge scheduler 合帧；避免每条历史消息完整扫描 committed。
+    super::render::push_acp_state(state);
+}
+
+/// 非流式 assistant 消息（回放 / 历史页）的展示单元——**不写任何状态**。
+///
+/// 历史页与回放共用同一份构造：两者的入口差别只在「怎么进窗口」（回放 push_back、
+/// 历史页按区间插入，见 `acp_events::history_page`）。
+pub(super) fn committed_assistant_unit(text: &str, reasoning: &Option<String>) -> TuiRenderUnit {
     // 完整消息（非流式）→ reasoning 视为已完成：按 §7 表折叠为单行。
     // [G1] hash 统一走 TuiAssistantBubble::compute_hash（含 fold/status）。
     let reason_block = reasoning.as_ref().map(|r| TuiReasoningBlock {
@@ -455,8 +470,5 @@ pub(super) fn handle_committed_assistant_text(
         content_hash: 0,
     };
     bubble.recompute_hash();
-    let vm = TuiRenderUnit::TuiAssistantBubble(bubble.into());
-    state.committed.push_back(vm);
-    // Replay publication 由 bridge scheduler 合帧；避免每条历史消息完整扫描 committed。
-    super::render::push_acp_state(state);
+    TuiRenderUnit::TuiAssistantBubble(bubble.into())
 }

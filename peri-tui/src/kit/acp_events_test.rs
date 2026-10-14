@@ -31,6 +31,8 @@ mod diff_grouping_test;
 mod fold_test;
 #[path = "acp_events_test/group_incremental_test.rs"]
 mod group_incremental_test;
+#[path = "acp_events_test/history_page_test.rs"]
+mod history_page_test;
 #[path = "acp_events_test/history_runtime_test.rs"]
 mod history_runtime_test;
 #[path = "acp_events_test/input_buffer_test.rs"]
@@ -87,7 +89,7 @@ fn ensure_cache_warning_enabled_for_tests() {
 }
 
 // 此 fixture 会清空全局 TODO_ITEMS / VIEW_MODELS 等 atom，调用测试必须使用 #[serial]。
-fn make_fold_test_state() -> BridgeState {
+pub(crate) fn make_fold_test_state() -> BridgeState {
     crate::kit::atoms::init_atoms();
     ensure_cache_warning_enabled_for_tests();
     *FOLD_OVERRIDES.state().write() = std::collections::HashMap::new();

@@ -762,15 +762,17 @@ fn test_unknown_and_empty_compact_strategy_use_full_unmeasured_detail() {
     }
 }
 
-/// C2: compact 完成后 TurnDone 触发 session/load 重放。
+/// REQ-C02 / A12: Compact 完成后 TurnDone **不再**触发 session/load 重放。
 ///
-/// 场景 A：命令 compact（Immediate）后无流事件 → 触发 THREAD_LOAD_TX。
-/// 场景 B：agent 内部 auto-compact 后有后续流事件 → 标志被清除，不触发。
+/// 场景 A：命令 compact（Immediate）后无流事件 → TurnDone 只清标志与桥接 note，
+/// 已加载窗口与 Compact 提示原地保留，THREAD_LOAD_TX 保持空闲。
+/// 场景 B：agent 内部 auto-compact 后有后续流事件 → 标志被清除，同样不触发。
 ///
-/// 注：THREAD_LOAD_TX 是 OnceLock，两场景合并为单测试以避免 set 冲突。
+/// 注：THREAD_LOAD_TX 是 OnceLock，两场景合并为单测试以避免 set 冲突；这里保留
+/// dispatcher 的装配只为断言「没有任何 load 请求被派发」。
 #[tokio::test]
 #[serial]
-async fn test_compact_turndone_reload() {
+async fn test_compact_turndone_keeps_window_without_reload() {
     use tokio::sync::mpsc;
 
     // ── 场景 A：命令 compact → 触发 reload ──────────────────────────
@@ -782,9 +784,17 @@ async fn test_compact_turndone_reload() {
         crate::acp_client::AcpTuiClient::new(client_transport);
     let (tx_a, mut rx_a) =
         mpsc::unbounded_channel::<crate::kit::thread_load_consumer::ThreadLoadRequest>();
-    let _ = THREAD_LOAD_TX.set(crate::kit::thread_load_consumer::ThreadLoadDispatcher::new(
-        tx_a, client,
-    ));
+    // THREAD_LOAD_TX 是 OnceLock：set 失败（已被占用）时 sender 不是本用例持有的
+    // `tx_a`，下面两条 `rx_a` 空断言会退化成真空（rx 永远为空、怎么都通过）。装配
+    // 必须显式确认成功，让「断言不再指向本用例的通道」成为可见失败。
+    if THREAD_LOAD_TX
+        .set(crate::kit::thread_load_consumer::ThreadLoadDispatcher::new(
+            tx_a, client,
+        ))
+        .is_err()
+    {
+        panic!("THREAD_LOAD_TX 已被占用：本用例的「不触发 reload」断言会变成真空");
+    }
 
     let mut state = BridgeState {
         variant: 0,
@@ -831,18 +841,45 @@ async fn test_compact_turndone_reload() {
         "场景 A: manual compact 的 UiOnly CommandFeedback 应写入 PENDING_COMPACT_NOTE"
     );
 
+    // REQ-C02 / A12: 已加载窗口必须先有一条旧消息——TurnDone 之后它必须还在。
+    state.committed.push_back(TuiRenderUnit::TuiUserBubble(
+        crate::kit::tui_render_unit::TuiUserBubble::new("compact 之前已加载的旧消息".into()),
+    ));
+
     dispatch_and_notify(&mut state, &AcpEventData::TurnDone);
 
-    let received = rx_a
-        .try_recv()
-        .ok()
-        .map(|request| request.thread_id().to_string());
-    assert_eq!(
-        received.as_deref(),
-        Some("test-session"),
-        "场景 A: THREAD_LOAD_TX 应收到 session_id"
+    assert!(
+        rx_a.try_recv().is_err(),
+        "场景 A: 手动 Compact 完成后不得再触发 session/load（REQ-C02）"
     );
-    assert!(!state.compact_just_completed, "场景 A: flag 应清除"); // ── 场景 B：agent 内部 compact → 不触发 reload ──────────────────
+    assert!(!state.compact_just_completed, "场景 A: flag 应清除");
+    // 已加载窗口保留：旧消息仍在原位，Compact 提示按既有文案落在同一视图里。
+    assert_eq!(
+        state.committed.len(),
+        2,
+        "场景 A: 已加载窗口未被整体替换（旧消息 + Compact 提示）"
+    );
+    assert!(
+        matches!(
+            &state.committed[0],
+            TuiRenderUnit::TuiUserBubble(bubble) if bubble.text.contains("已加载的旧消息")
+        ),
+        "场景 A: 旧消息仍在窗口首位"
+    );
+    assert!(
+        state.committed.iter().any(|unit| matches!(
+            unit,
+            TuiRenderUnit::TuiSystemNote(note) if note.text.contains("已压缩 2 条消息")
+        )),
+        "场景 A: Compact 提示仍落在当前视图"
+    );
+    assert!(
+        crate::kit::atoms::PENDING_COMPACT_NOTE
+            .state()
+            .read()
+            .is_none(),
+        "场景 A: 无 replay 可跨，桥接 note 不再残留"
+    ); // ── 场景 B：agent 内部 compact → 不触发 reload ──────────────────
     // S4.1 红测试改造：按真实时序（CompactCompleted → 流事件 → TurnDone）
     // 构造，并补 rx 空断言。修复前流事件不清除 compact_just_completed 标志
     // → TurnDone 误发送（rx 非空，测试红）；修复后标志被流事件清除 → rx 空。

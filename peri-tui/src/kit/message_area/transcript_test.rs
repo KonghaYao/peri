@@ -45,6 +45,7 @@ fn skipped_publications_do_not_rebuild_evicted_unchanged_history() {
         0,
         0,
         2,
+        0,
     );
     transcript.evict_to_budget(&mut caches, &(0..1), 0);
     assert!(caches[1..].iter().all(|cache| cache.lines.is_none()));
@@ -73,6 +74,7 @@ fn skipped_publications_do_not_rebuild_evicted_unchanged_history() {
         0,
         0,
         2,
+        0,
     );
     assert_eq!(transcript.scanned_slots, 256);
     assert_eq!(transcript.updated_slots, 2);
@@ -116,6 +118,7 @@ fn cold_history_layout_changes_match_fresh_height_and_semantic_copy() {
         0,
         0,
         2,
+        0,
     );
     for grid in [GridSpec::grid_for(40), GridSpec::grid_for(40)] {
         transcript.evict_to_budget(&mut caches, &(0..0), 0);
@@ -132,6 +135,7 @@ fn cold_history_layout_changes_match_fresh_height_and_semantic_copy() {
             0,
             0,
             2,
+            0,
         );
         assert_eq!(transcript.updated_slots, snapshot.items.len());
         let mut fresh = Transcript::default();
@@ -146,6 +150,7 @@ fn cold_history_layout_changes_match_fresh_height_and_semantic_copy() {
             0,
             0,
             2,
+            0,
         );
         assert_eq!(current.total_visual(), expected.total_visual());
         assert_eq!(current.total_logical(), expected.total_logical());
@@ -235,6 +240,7 @@ fn immutable_render_snapshot_allows_publication_before_derivation() {
         0,
         0,
         2,
+        0,
     );
     assert_eq!(old_index.slot_count(), 64);
     push_view_models_for_reset();
@@ -268,6 +274,7 @@ fn warm_frames_skip_history_and_reuse_index_for_growing_histories() {
             0,
             0,
             12,
+            0,
         );
         let warm = transcript.prepare(
             &snapshot,
@@ -280,6 +287,7 @@ fn warm_frames_skip_history_and_reuse_index_for_growing_histories() {
             0,
             0,
             12,
+            0,
         );
         assert!(Arc::ptr_eq(&old, &warm));
         assert_eq!(transcript.scanned_slots, 0);
@@ -306,6 +314,7 @@ fn local_publication_and_same_length_replacement_keep_old_version() {
         0,
         0,
         12,
+        0,
     );
     let old_text = old.materialize(127).unwrap().line(1).unwrap().to_string();
     snapshot.items.set(
@@ -329,6 +338,7 @@ fn local_publication_and_same_length_replacement_keep_old_version() {
         0,
         0,
         12,
+        0,
     );
     assert_eq!(transcript.scanned_slots, 1);
     assert_eq!(
@@ -420,6 +430,7 @@ fn bridge_publication_after_local_fold_updates_resident_and_appended_entries() {
             0,
             0,
             100,
+            0,
         );
         let TuiRenderUnit::TuiAssistantBubble(bubble) = &bridge.committed[0] else {
             panic!("expected assistant bubble");
@@ -449,6 +460,7 @@ fn bridge_publication_after_local_fold_updates_resident_and_appended_entries() {
             0,
             0,
             100,
+            0,
         );
         assert_eq!(index.slot_count(), published.items.len());
         let copied = extract_visual_range_index(
@@ -498,6 +510,7 @@ fn eviction_releases_old_frame_payload_and_cold_unicode_copy_matches_warm() {
         0,
         0,
         4,
+        0,
     );
     let old_lines = Arc::downgrade(caches[0].lines.as_ref().unwrap());
     let end = index.total_visual().saturating_sub(1);
@@ -550,6 +563,7 @@ fn visible_oversize_exception_and_reset_are_explicit() {
         0,
         0,
         2,
+        0,
     );
     transcript.evict_to_budget(&mut caches, &(0..1), 0);
     assert!(caches[0].lines.is_some());
@@ -566,6 +580,7 @@ fn visible_oversize_exception_and_reset_are_explicit() {
         1,
         0,
         2,
+        0,
     );
     assert_eq!(empty.total_visual(), 0);
     assert_eq!(transcript.retained_bytes, 0);
@@ -597,6 +612,7 @@ fn test_viewport_width_correction_rebuilds_visual_index() {
         0,
         0,
         20,
+        0,
     );
     let corrected = transcript.prepare(
         &snapshot,
@@ -609,6 +625,7 @@ fn test_viewport_width_correction_rebuilds_visual_index() {
         0,
         0,
         20,
+        0,
     );
     let fresh = Transcript::default().prepare(
         &snapshot,
@@ -621,6 +638,7 @@ fn test_viewport_width_correction_rebuilds_visual_index() {
         0,
         0,
         20,
+        0,
     );
     assert_eq!(
         corrected.total_visual(),

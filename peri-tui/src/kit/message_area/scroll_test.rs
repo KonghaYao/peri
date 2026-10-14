@@ -1,5 +1,7 @@
 //! Tests
 use super::*;
+use crate::kit::history_paging::tests::{drain_pages_channel, pages_channel};
+use serial_test::serial;
 
 // ── ScrollPos（usize 滚动状态）测试 ───────────────────────────────────
 
@@ -657,3 +659,110 @@ fn test_gesture_up_settle_decision() {
     // 两者都无：无需复位，现状 return Consumed
     assert!(!settle_up(false, false));
 }
+
+// ── [REQ-C01-1] 历史翻页触发（滚动事件路径）─────────────────────────────
+//
+// 触发不能只挂在渲染 effect 上：effect deps 不含滚动偏移 / follow_bottom，
+// 空闲会话（无 turn、无内容变化）里滚到已载入窗口顶端时 deps 不变、
+// `use_effect` 不重跑（ratatui-kit 0.10.3 `hooks/use_effect.rs`：deps 相等即跳过），
+// 于是完全没有触发源。且滚轮的 offset 要等节流 flush 才落地，只看当帧事实
+// 会漏掉「整段上滚落到顶端」那一次滚动。
+
+/// 节流窗口内的 pending 必须能投影出「落地后贴向前边界」这件事。
+#[test]
+fn test_project_pending_scroll_lands_at_top() {
+    // 连续两格滚轮（3 行/格）还在节流窗口里：offset 未落地仍是 5，落地后是 0。
+    let (landed, landed_follow) =
+        project_viewport_after_pending(5, -(SCROLL_LINES as i32) * 2, 100, 20);
+    assert_eq!(landed, 0, "pending 落地后视口到已载入窗口顶端");
+    assert!(!landed_follow, "离开底部 → 浏览态");
+    // 哨兵（scroll_to_bottom 设置的 usize::MAX）先归一化再应用 pending——
+    // 与 apply_pending 同口径，否则上滚要先"滚空气"。
+    let (landed, _) = project_viewport_after_pending(usize::MAX, -(SCROLL_LINES as i32), 100, 20);
+    assert_eq!(landed, 77);
+    // 内容不足一屏（稀疏首屏形态）：落地仍停在顶端。
+    let (landed, _) = project_viewport_after_pending(0, -(SCROLL_LINES as i32), 5, 20);
+    assert_eq!(landed, 0);
+}
+
+/// 滚动事件路径的决策层：当帧事实未贴边、pending 落地后贴边 → 必须派发取页，
+/// 且请求带冻结的会话身份与游标（走真实 `HISTORY_PAGES_TX` 通道观察）。
+#[test]
+#[serial]
+fn test_scroll_lands_at_top_dispatches_older_page_request() {
+    crate::kit::atoms::init_atoms();
+    crate::kit::history_paging::reset_browsing_state();
+    drain_pages_channel();
+    crate::kit::history_paging::note_initial_cursor(
+        "s1",
+        Some("tok".to_string()),
+        Some("c1".to_string()),
+    );
+
+    // 当帧事实（offset 尚未落地，仍在向前边界 2 行之外）判定为「未贴边」——
+    // 修复前的事件路径只看它，因此这一次滚动不派发任何请求。
+    assert!(!crate::kit::history_paging::viewport_at_forward_boundary(
+        false, 5, 100, 20
+    ));
+
+    // 整段上滚（两格 = 6 行）落地后 offset = 0：必须派发一次。
+    assert!(
+        event::request_older_page_at_scroll_facts(false, 5, -(SCROLL_LINES as i32) * 2, 100, 20),
+        "pending 落地后贴向前边界 → 派发取页"
+    );
+    let rx = pages_channel();
+    let request = rx.lock().try_recv().expect("one dispatched request");
+    assert_eq!(request.session_id, "s1");
+    assert_eq!(request.snapshot_token, "tok");
+    assert_eq!(request.cursor, "c1");
+    assert_eq!(request.limit, crate::kit::history_paging::PAGE_LIMIT);
+    // 相同 cursor 已在途 → 后续滚动事件合并为 no-op（REQ-C01-2）。
+    assert!(!event::request_older_page_at_scroll_facts(
+        false, 0, 0, 100, 20
+    ));
+    assert!(rx.lock().try_recv().is_err(), "在途请求只派发一次");
+}
+
+/// 离开向前边界时不触发（避免滚动事件路径无谓发请求）。
+#[test]
+#[serial]
+fn test_scroll_away_from_top_does_not_dispatch() {
+    crate::kit::atoms::init_atoms();
+    crate::kit::history_paging::reset_browsing_state();
+    drain_pages_channel();
+    crate::kit::history_paging::note_initial_cursor(
+        "s1",
+        Some("tok".to_string()),
+        Some("c1".to_string()),
+    );
+
+    // 浏览态、视口离顶端很远、pending 也只向上走一小段 → 不派发。
+    assert!(!event::request_older_page_at_scroll_facts(
+        false,
+        40,
+        -(SCROLL_LINES as i32),
+        200,
+        20
+    ));
+    // 跟随态且内容超一屏（看的是尾部）→ 不派发。
+    assert!(!event::request_older_page_at_scroll_facts(
+        true, 180, 0, 200, 20
+    ));
+    assert!(pages_channel().lock().try_recv().is_err(), "不派发任何请求");
+    assert!(
+        crate::kit::atoms::HISTORY_PAGING
+            .state()
+            .read()
+            .in_flight
+            .is_none()
+    );
+}
+
+// ── [REQ-C01-3 / A20] 阅读锚点不跳动 ────────────────────────────────────
+//
+// 用例不在这里：锚点补偿已由「桥接槽位包络 + 高度差」改为**渲染侧身份重定位**
+// （`message_area::viewport_anchor`），判据不再能被一份手工构造的槽位表表达。
+// 覆盖位置：
+//   - `viewport_anchor_test.rs`：捕获 / 重定位 / 单元内位移 / 认不出身份的安全方向；
+//   - `viewport_anchor_e2e_test.rs`：真实发布路径（`handle_history_page_loaded` →
+//     `push_view_models` → `Transcript::prepare`），含折叠组导致的槽位数变化形状。

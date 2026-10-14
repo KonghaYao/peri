@@ -430,19 +430,28 @@ impl AcpTuiClient {
         }
 
         let params = json!({ "sessionId": session_id, "cwd": effective_cwd, "model": model });
-        let result = self
+        let loaded = match self
             .transport
             .send_request("session/load", params.clone())
-            .await;
-        if let Err(error) = result {
-            *self.restore_error.lock().unwrap() = Some(error.to_string());
-            self.lifecycle.fail_transition(start.generation);
-            transition.disarm();
-            if self.projection_mode == ClientProjectionMode::Interactive {
-                crate::kit::session_boundary::project_session_boundary(None);
+            .await
+        {
+            Ok(loaded) => loaded,
+            Err(error) => {
+                *self.restore_error.lock().unwrap() = Some(error.to_string());
+                self.lifecycle.fail_transition(start.generation);
+                transition.disarm();
+                if self.projection_mode == ClientProjectionMode::Interactive {
+                    crate::kit::session_boundary::project_session_boundary(None);
+                }
+                return Err(error);
             }
-            return Err(error);
-        }
+        };
+        // 本次浏览身份（REQ §5.2 `nextCursor` / `snapshotToken`）：只有协商过分页能力的
+        // 连接才有这两个字段，未协商时两者都是 None，触发侧因此永不请求历史页。
+        // 响应解码失败不改变 load 的成败——浏览能力降级，会话本身已经装配成功。
+        let (snapshot_token, next_cursor) =
+            crate::kit::history_paging::decode_session_cursor(&loaded);
+        crate::kit::history_paging::note_initial_cursor(session_id, snapshot_token, next_cursor);
         self.lifecycle
             .commit_stable(start.generation, session_id.to_string());
         self.finish_session_initialization(start.generation, session_id)

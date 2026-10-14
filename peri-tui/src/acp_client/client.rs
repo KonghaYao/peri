@@ -15,6 +15,7 @@ use super::interaction_lifecycle::{InteractionLifecycle, InteractionOwner, Inter
 use super::interaction_settlement::spawn_settlement_worker;
 use session::SessionLoadReservationState;
 
+mod history_page;
 mod interaction;
 mod pump;
 mod requests;

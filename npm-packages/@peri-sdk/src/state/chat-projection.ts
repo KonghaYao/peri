@@ -3,6 +3,16 @@ import { DocModel } from "./doc-model";
 import { TurnMachine } from "./turn-machine";
 import { decodeMessagesJson, object, string, toolContentText, type RecordValue } from "./protocol";
 
+/**
+ * 规范历史替换（`replaceHistory`）的两种语义。Compact 不再走这条路（REQ-C02）：
+ * 只有 rewind 这种「服务端真的删掉了尾部行、范围变了」的调用才会重建窗口。
+ */
+export type HistoryReplaceMode =
+    /** 默认：历史是唯一事实源，实时执行状态随之清空（首窗安装等冷路径）。 */
+    | "reset-execution"
+    /** rewind：窗口失效并刷新，但当前 turn／request 与未决交互保留（REQ-C02）。 */
+    | "preserve-execution";
+
 /** Live chat aggregation and canonical transcript replacement share entry identities. */
 export class ChatProjection {
     private replayEpoch = 0;
@@ -131,11 +141,29 @@ export class ChatProjection {
         return true;
     }
 
-    replaceHistory(raw: unknown, keepTurnOpen: boolean): boolean {
+    /**
+     * 用一份规范消息列表重建聊天窗口。
+     *
+     * `preserve-execution`（rewind）：实时执行身份与未决交互是独立于历史窗口的事实，
+     * 重建后原样恢复——历史范围变化不等于当前 turn 结束（REQ-C02）。
+     */
+    replaceHistory(raw: unknown, mode: HistoryReplaceMode = "reset-execution"): boolean {
         const messages = decodeMessagesJson(raw);
         if (!messages) return false;
+        const preserveExecution = mode === "preserve-execution";
         this.replayEpoch++;
         this.docs.transactBoth(() => {
+            // 实时执行身份在重建前快照：resetChat 只清历史窗口，不继承 turn 生命周期。
+            const info = this.docs.info();
+            const live = preserveExecution
+                ? {
+                    activeTurnId: info.get("activeTurnId"),
+                    activeTurnStatus: info.get("activeTurnStatus"),
+                    activeAssistantEntryId: info.get("activeAssistantEntryId"),
+                    activeRequestId: info.get("activeRequestId"),
+                    pendingRequestId: info.get("pendingRequestId"),
+                }
+                : null;
             this.docs.resetChat();
             let turnId = "history:0";
             let lastAssistantEntryId: string | null = null;
@@ -166,11 +194,19 @@ export class ChatProjection {
             for (const [id, tool] of this.docs.tools()) {
                 const outcome = completedTools.get(id);
                 // A tool_use without its matching tool result is incomplete, even in a canonical snapshot.
-                tool.set("status", outcome === undefined ? keepTurnOpen ? "running" : "cancelled" : outcome.failed ? "error" : "completed");
+                tool.set("status", outcome === undefined ? "cancelled" : outcome.failed ? "error" : "completed");
                 if (outcome) this.docs.payloads.set(tool, "result", { contentText: outcome.failed && !outcome.resultText.trim()
                     ? "Tool execution failed" : outcome.resultText });
             }
-            this.turns.resetAfterHistory(turnId, lastAssistantEntryId, keepTurnOpen);
+            if (live) {
+                // 逐字段恢复：缺失即为缺失（原值为 undefined 时不写回 null 覆盖）。
+                for (const [key, value] of Object.entries(live)) {
+                    if (value === undefined) info.delete(key);
+                    else info.set(key, value);
+                }
+            } else {
+                this.turns.resetAfterHistory(turnId, lastAssistantEntryId, false);
+            }
         });
         return true;
     }

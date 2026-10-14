@@ -193,13 +193,13 @@ pub(super) fn handle_command_feedback(state: &mut BridgeState, fb: &TuiCommandFe
             state.inject_system_note(fb.message.clone(), level);
         }
     }
-    // Phase 5 Step 7 补遗（Step 8 回归修复）：compact 手动完成的 CommandFeedback
-    // SystemNote 会被紧随的 session/load replay（BRIDGE_RESET_COUNTER reset）
-    // 清空——8/8 aecc2834 的 PENDING_COMPACT_NOTE 跨 replay 桥接随 Step 7
-    // 删除后，文案移交 CommandFeedback 渲染时未保留该机制（e2e compact-command
-    // waitFor 完成提示 120s 超时）。仅 UiOnly 且 compact 完成场景写入：auto
-    // compact 无 replay 触发不写、非 compact 命令无 replay 不写，防残留串到
-    // 后续 thread 切换的 reset。
+    // compact 手动完成的 CommandFeedback SystemNote 可能被随后的
+    // BRIDGE_RESET_COUNTER 重置清空（committed 整体重建）——aecc2834 的
+    // PENDING_COMPACT_NOTE 桥接在文案移交 CommandFeedback 渲染时曾丢失该机制
+    // （e2e compact-command waitFor 完成提示 120s 超时），这里恢复写入。仅 UiOnly
+    // 且 compact 完成场景写入：其它命令不写，防残留串到后续 thread 切换的 reset。
+    // （REQ-C02 / A12 之后 manual compact 不再触发 session/load replay，但 reset
+    // 边界仍然存在。）
     if fb.channel == FeedbackChannel::UiOnly
         && state.compact_just_completed
         && crate::kit::atoms::PENDING_COMPACT_NOTE
@@ -489,6 +489,12 @@ pub(crate) fn hitl_input_summary(input: &Value) -> String {
 }
 
 pub(super) fn handle_rewind_completed(state: &mut BridgeState, messages_json: &str) {
+    // rewind 改变了会话的有效范围：旧 `nextCursor` / `snapshotToken` / 区间索引 /
+    // 在途认领在新窗口下都不再对应任何条目。先失效浏览状态，rewind 时刻已在途、
+    // 之后才返回的页会在消费侧与桥接侧都被判为过期（REQ-C01-5、A11；
+    // 服务端同时会对旧 cursor 回 -32012）。TUI 不在 rewind 后自动重新 load，
+    // 因此下一次翻页要等新的初始 load 建立浏览身份——旧 cursor 本已失效。
+    crate::kit::history_paging::reset_browsing_state();
     // H3: rewind 完成——反序列化 messages_json 为 Vec<Value>，按 role
     // 映射为 TuiRenderUnit，替换 state.committed。
     let messages: Result<Vec<Value>, _> = serde_json::from_str(messages_json);
