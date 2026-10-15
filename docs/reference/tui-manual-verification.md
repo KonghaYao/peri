@@ -132,7 +132,6 @@
 
 - [ ] HITL approval popup
 - [ ] OAuth popup
-- [ ] AskUser popup
 - [ ] Rewind popup
 
 每个 popup 检查：
@@ -150,6 +149,8 @@
 - [ ] 无 popup / panel 时，Esc 不触发异常状态
 
 ### AskUser 面板特别检查
+
+AskUser 已从 popup 迁移为 Panel（由 agent 提问被动触发，不在上面的 panel 清单里）：
 
 - [ ] 显示的问题与 agent 实际问题一致
 - [ ] 选择选项后 UI 状态正确更新
