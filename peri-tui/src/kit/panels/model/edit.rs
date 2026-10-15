@@ -1,7 +1,9 @@
 //! Model edit actions and their common save/publication boundary.
 //!
 //! The shared PeriConfig remains the only mutable configuration owner. Each
-//! action releases its write guard before committing its immutable snapshot.
+//! action builds its candidate on a clone, persists it, and only a successful
+//! save commits the handle, the local projection and the ACP push — a failed
+//! save must not leave the panel showing a switch that never reached disk.
 
 use super::{
     FIELD_CONTEXT_1M, FIELD_EFFORT, FIELD_MAX_TOKENS, FIELD_MODEL, FIELD_PROVIDER, PROFILE_KEYS,
@@ -13,14 +15,18 @@ use crate::kit::atoms::{
     SERVICE_SNAPSHOT,
 };
 use fluent_bundle::FluentValue;
+use std::sync::Arc;
 use std::time::Duration;
+
+/// 宿主配置句柄（面板动作的提交目标；进程级固定，不随活动会话变化）。
+type PeriHandle = Arc<parking_lot::RwLock<PeriConfig>>;
 
 /// Effort 五级
 const EFFORT_LEVELS: &[&str] = &["low", "medium", "high", "xhigh", "max"];
 /// Max tokens 预设
 const MAX_TOKEN_PRESETS: &[u32] = &[4096, 8192, 16000, 32000, 64000];
 
-/// 切换左侧光标指向的档位为 active profile（立即写入 + 持久化 + 推送 ACP）。
+/// 切换左侧光标指向的档位为 active profile（先落盘、成功才切换内存并推送 ACP）。
 /// pub(crate)：状态栏模型快速切换弹窗复用此切换逻辑。
 pub(crate) fn switch_active_alias(idx: usize) {
     let Some(key) = PROFILE_KEYS.get(idx) else {
@@ -29,22 +35,23 @@ pub(crate) fn switch_active_alias(idx: usize) {
     let Some(handle) = PERI_CONFIG_HANDLE.get() else {
         return;
     };
-    let mut cfg = handle.write();
-    if cfg.config.active_alias != *key {
-        cfg.config.active_alias = key.to_string();
+    let candidate = {
+        let mut candidate = handle.read().clone();
+        candidate.config.active_alias = key.to_string();
+        candidate
+    };
+    if commit_snapshot(handle, candidate, ModelChange::ActiveAlias(key.to_string())) {
         tracing::info!(alias = key, "ModelPanel: active_alias switched");
     }
-    let snap = cfg.clone();
-    drop(cfg);
-    commit_snapshot(snap, ModelChange::ActiveAlias(key.to_string()));
 }
 
-/// 编辑右侧字段（forward=true 前进 / false 后退）。立即写入 + 持久化 + 推送 ACP。
+/// 编辑右侧字段（forward=true 前进 / false 后退）。先落盘、成功才切换内存并推送 ACP。
 pub(super) fn edit_field(alias: String, field: usize, forward: bool) {
     let Some(handle) = PERI_CONFIG_HANDLE.get() else {
         return;
     };
-    let mut cfg = handle.write();
+    // 候选镜像：所有写入先落在副本上，落盘成功前不动句柄。
+    let mut cfg = handle.read().clone();
 
     // 先读取当前值（不可变，纯 clone），避免跨 guard 的字段级借用冲突
     let provider_ids: Vec<String> = cfg.config.providers.iter().map(|p| p.id.clone()).collect();
@@ -186,9 +193,7 @@ pub(super) fn edit_field(alias: String, field: usize, forward: bool) {
         }
         _ => return,
     }
-    let snap = cfg.clone();
-    drop(cfg);
-    commit_snapshot(snap, ModelChange::ProfileField(alias));
+    commit_snapshot(handle, cfg, ModelChange::ProfileField(alias));
 }
 
 /// Describes only the immediate display changes made by this action.
@@ -198,18 +203,28 @@ enum ModelChange {
     ProfileField(String),
 }
 
-/// Save failure reports a notification but does not roll back the edited config
-/// or prevent local publication and the existing asynchronous ACP push.
-fn commit_snapshot(snap: PeriConfig, change: ModelChange) {
-    notify_save_result(crate::config::save_effective(&snap));
-    project_model_change(&snap, change);
+/// 提交边界：**保存成功才提交**内存、本地投影与 ACP 推送。
+///
+/// 保存失败时句柄保持已持久化的值（面板不会显示未落盘的切换），也不推送未落盘
+/// 的配置；失败经 `NOTIFICATION` 提示原因。
+/// 返回是否已持久化——调用方据此决定日志等本地副作用。
+fn commit_snapshot(handle: &PeriHandle, candidate: PeriConfig, change: ModelChange) -> bool {
+    let result = crate::config::save_effective(&candidate);
+    let persisted = result.is_ok();
+    notify_save_result(result);
+    if !persisted {
+        return false;
+    }
+    *handle.write() = candidate.clone();
+    project_model_change(&candidate, change);
     tokio::spawn(async move {
         if let Some(client) = ACP_CLIENT_HANDLE.get()
-            && let Err(e) = client.update_config(&snap).await
+            && let Err(e) = client.update_config(&candidate).await
         {
             tracing::warn!(error = %e, "ModelPanel: update_config push failed");
         }
     });
+    true
 }
 
 fn project_model_change(snap: &PeriConfig, change: ModelChange) {

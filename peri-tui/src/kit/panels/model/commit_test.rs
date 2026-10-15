@@ -186,7 +186,9 @@ impl Fixture {
         );
     }
 
-    async fn expect_request(&self, save_succeeded: bool, fail_rpc: bool) {
+    /// 断言一次成功动作的推送帧：磁盘、内存与线上配置三者一致，且不带 sessionId。
+    /// `fail_rpc` 让 host 侧回错误，用于断言推送失败不回滚也不重发。
+    async fn expect_request(&self, fail_rpc: bool) {
         let IncomingMessage::Request { id, method, params } = self.recv().await else {
             panic!("expected update request")
         };
@@ -195,13 +197,7 @@ impl Fixture {
             params.get("sessionId").is_none(),
             "complete host configuration must not target the active workspace"
         );
-        if save_succeeded {
-            self.assert_disk_and_frame(&params);
-        } else {
-            assert!(self.config.try_write().is_some());
-            let wire: PeriConfig = serde_json::from_value(params["config"].clone()).unwrap();
-            assert_eq!(wire, *self.config.read());
-        }
+        self.assert_disk_and_frame(&params);
         self.server
             .send_response(
                 id,
@@ -215,8 +211,9 @@ impl Fixture {
             .unwrap();
     }
 
+    /// 保存成功且推送成功的一次动作。
     async fn expect_notification(&self) {
-        self.expect_request(true, false).await;
+        self.expect_request(false).await;
     }
 
     async fn finish(mut self) {
@@ -251,14 +248,14 @@ fn model_commit_switch_persists_workspace_before_request() {
                 snapshot, before,
                 "host edits must not overwrite the active session projection"
             );
-            fixture.expect_request(true, false).await;
+            fixture.expect_request(false).await;
             assert_eq!(
                 std::fs::read(&fixture.global).unwrap(),
                 fixture.original_global
             );
             // Re-selecting the active alias still pushes the same saved snapshot.
             switch_active_alias(3);
-            fixture.expect_request(true, false).await;
+            fixture.expect_request(false).await;
             fixture.finish().await;
         },
     );
@@ -284,7 +281,7 @@ fn model_commit_active_provider_updates_mapping_and_request() {
             );
             assert_eq!(snapshot.memory_mb, 42);
             assert!(MODEL_HIGHLIGHT_UNTIL.get().is_none());
-            fixture.expect_request(true, false).await;
+            fixture.expect_request(false).await;
             fixture.finish().await;
         },
     );
@@ -312,16 +309,20 @@ fn model_commit_inactive_edit_preserves_display_and_notifies() {
 }
 
 #[test]
-fn model_commit_save_failure_keeps_memory_and_still_requests() {
+fn model_commit_save_failure_keeps_memory_and_pushes_nothing() {
     isolated(
-        "model_commit_save_failure_keeps_memory_and_still_requests",
+        "model_commit_save_failure_keeps_memory_and_pushes_nothing",
         async {
             let fixture = Fixture::new(false);
             fixture.create_session().await;
+            // 让保存目标不可写：把配置文件换成同名目录
             std::fs::remove_file(&fixture.target).unwrap();
             std::fs::create_dir(&fixture.target).unwrap();
             edit_field("sonnet".into(), FIELD_CONTEXT_1M, true);
-            assert!(fixture.config.read().config.profiles.sonnet.context_1m);
+            assert!(
+                !fixture.config.read().config.profiles.sonnet.context_1m,
+                "保存失败不得留下「已切换」的内存假象"
+            );
             let failed_notice = NOTIFICATION
                 .state()
                 .read()
@@ -333,10 +334,17 @@ fn model_commit_save_failure_keeps_memory_and_still_requests() {
                 failed_notice.contains("Configuration save failed:"),
                 "{failed_notice}"
             );
-            fixture.expect_request(false, true).await;
+            // 失败的动作不得推送未落盘的配置。子进程跑在 current-thread runtime 上：
+            // 推送任务只能在本 await 里被驱动，因此「等待帧通道」足以判定没有推送。
+            assert!(
+                tokio::time::timeout(Duration::from_millis(500), fixture.server.recv())
+                    .await
+                    .is_err(),
+                "保存失败不得推送配置"
+            );
             fixture.finish().await;
             assert!(
-                PERI_CONFIG_HANDLE
+                !PERI_CONFIG_HANDLE
                     .get()
                     .unwrap()
                     .read()
@@ -354,6 +362,33 @@ fn model_commit_save_failure_keeps_memory_and_still_requests() {
                     .message
                     .clone(),
                 failed_notice
+            );
+        },
+    );
+}
+
+/// 推送失败（host 返回错误）不回滚已落盘的内存，也不重发——推送只是发布，
+/// 落盘结果才是面板显示的依据。
+#[test]
+fn model_commit_rpc_failure_keeps_saved_state_without_retry() {
+    isolated(
+        "model_commit_rpc_failure_keeps_saved_state_without_retry",
+        async {
+            let fixture = Fixture::new(false);
+            fixture.create_session().await;
+            edit_field("sonnet".into(), FIELD_CONTEXT_1M, true);
+            assert!(fixture.config.read().config.profiles.sonnet.context_1m);
+            fixture.expect_request(true).await;
+            fixture.finish().await;
+            assert!(
+                PERI_CONFIG_HANDLE
+                    .get()
+                    .unwrap()
+                    .read()
+                    .config
+                    .profiles
+                    .sonnet
+                    .context_1m
             );
         },
     );
