@@ -19,7 +19,7 @@
 | A 固定基线与契约 | 已完成 | 只读侦查：面板/弹窗清单、按类矩阵（只读/配置/资源/复合）、确认身份审计、hook/render 边界、快照审计、测试清单；基线测试与体积见下 |
 | B 共享列表与正确交互 | 已完成 | Hooks、MCP 迁移并拆文件；MCP 详情稳定身份 + effect 收敛；共享视口已扩展到批次 C 的全部固定行高面板 |
 | C 操作机制与简单面板 | 已完成 | Cron、Memory、Tasks、Agent、Status、Goal 六个面板已迁移；`application/operations/` 原语落地并接入 Plugin 搜索与操作；收口把 Cron 会话守卫、Tasks 取消与 Workflow kill 一并接入原语（作用域 = 会话 id + `BRIDGE_RESET_COUNTER`） |
-| D 宿主配置与向导 | 基本完成 | Config、Model、Login、Theme 四个面板已迁移（命中同源、渲染边界、确认身份、保存失败如实展示）；「集中配置服务」已落地（`kit/config_service.rs` 单一权威：候选落盘 → 成功才提交 → 失败可见），并据此修正 `delete_provider` 的失败发布。剩余：向导字段未开始 |
+| D 宿主配置与向导 | 已完成 | Config、Model、Login、Theme 四个面板已迁移（命中同源、渲染边界、确认身份、保存失败如实展示）；「集中配置服务」已落地（`kit/config_service.rs` 单一权威：候选落盘 → 成功才提交 → 失败可见），并据此修正 `delete_provider` 的失败发布。向导按同批缺陷类审计后**无适用改动**（证据见下「向导审计」），未改结构 |
 | E 复杂面板与快照 | 已完成 | Workflow 渲染体副作用清零 + kill 固定 run id/完成门；ThreadBrowser 归档/删除逐项身份复验；Plugin 详情按稳定身份定位、缓存刷新归作用域；`service_snapshot.rs` 753→228 行按职责拆分，投影收敛为单一发布入口 |
 | F 详情、弹窗和清理 | 已完成（范围调整） | ConfirmPopup 加版本守卫（所见动作锁定）；删除无消费者的 `popups/ask_user_popup.rs`（386 行）；「详情迁移共享外壳」经复核无第二真实用例，按设计 §5.1 不做投机抽象 |
 | G 整体验收与文档固化 | 进行中 | 本 issue + design + code-index + 手册已更新；体积配对测量完成（**+0.230%，未通过不增长门槛**）；e2e L0 跑完 9/11（2 个失败经基线对照判定为预存，见下），**e2e 门禁未过**；Linux `.text` 口径与真实终端手测未做 |
@@ -78,6 +78,31 @@
   外部凭据，未跑）；真实终端手测未做。**e2e 门禁未通过**（首轮失败 2 > 预算 0），不作为
   本分支交付结论。
 
+## 向导审计（批次 D 剩余项，结论：无适用改动）
+
+按同批缺陷类逐项核查 `kit/setup_wizard.rs`、`kit/setup_wizard/{handler,render}.rs`、
+`app/setup_wizard/mod.rs`：
+
+1. **渲染体内写状态**：`kit/setup_wizard/render.rs` 全文 0 处 `.write()`；组件 `SetupWizard`
+   的渲染段（`kit/setup_wizard.rs:139-180`）只读状态，写操作只在事件处理与 async effect 内。
+2. **hook 顺序**：`use_atom`/`use_effect`/`use_async_effect`/`use_hook`/`use_event_handler_with_options`
+   全部位于组件体前段（`:37-137`），其后无早退分支。
+3. **保存/应用失败如实展示**：`finish_setup` 保存失败 → `report_setup_failure("setup-save-failed")`，
+   激活/句柄缺失失败 → `"setup-activation-failed"`；两者只写 `save_in_progress=false` +
+   `submit_error`，不置 `WIZARD_ACTIVE=false`、不置 `SETUP_COMPLETED`，向导保持打开
+   （`:185-227`）；错误行参与渲染（`handler.rs:183` 的 `error_rows`）。「Enter 只请求保存、
+   完成标记由成功路径发布」由既有用例 `kit/setup_wizard/handler_test.rs::
+   test_save_enter_sets_busy_without_claiming_completion` 锁定。
+4. **密钥**：三处展示点（`render.rs:338/574/673`）均经 `mask_api_key`（首尾各留 4 位，短串全掩），
+   无明文回显。
+5. **配置来源不变**：`save_setup`（`app/setup_wizard/mod.rs:543-563`）仍为
+   `CONFIG_SOURCE_HANDLE.reload_merged()`（无 source 时 `config::load()`）→ `merge_setup`
+   → `LlmProvider::from_config` 校验 → `save_effective`；未新增第二套持久化路径。
+
+未做：向导面向同一结果的结构性迁移（例如把 730 行的 `render.rs` 按步骤拆分）不在方案口径内；
+`finish_setup` 的失败分支需要注入保存接缝才能单测，本批不引入该接缝（E2E `fresh-setup.test.ts`
+覆盖成功路径）。
+
 ## 已完成（按提交）
 
 | 提交 | 内容 |
@@ -108,6 +133,7 @@
 | `dd4f907d5` | 删除无调用者的 legacy 清理路径 `popup_overlay::close_ask_user_popup_for_request/for_owner`（30 行，旧弹窗删除后已无调用者）；`docs/reference/tui-manual-verification.md` 的 popup 清单与 AskUser 检查项同步为面板路径 |
 | `51ea726ab` | 文档固化：设计文档补作用域/已接入清单/快照发布单点/确认版本守卫/面板职责映射表（17 面板）；`docs/code-index/peri-tui.md`、`peri-tui/CLAUDE.md`、本 issue 同步批次 G 的测试/体积/e2e 证据 |
 | `e65718878` | 批次 D 收口：新增 `kit/config_service.rs` 作为四个配置面板「候选落盘 → 成功才提交 → 失败可见」的单一权威，6 个落盘点收敛；`delete_provider` 失败不再改内存与推送 ACP；新增 `config_service_test.rs` 与删除候选构造回归 |
+| `497f080c2` | 批次 D 文档：设计文档增「配置落盘边界」；code-index 增该规则路由；本 issue 更新批次表/用例数/证据/清理/决策 9-11 与三笔提交补记；`display-coverage.md` 同步 AskUser popup 删除 |
 
 ## 交付证据（方案 §11）
 
@@ -167,9 +193,9 @@
 
 ## 待完成 / 风险
 
-1. 批次 D 剩余：向导字段未开始（Config/Model/Login/Theme 已迁移，「集中配置服务」已落地）。
-   `delete_provider` 的落盘失败路径无单测覆盖（需进程级句柄），仅覆盖候选构造的纯函数判定，
-   生产行为待人工验证。
+1. 批次 D 已收口（含向导审计结论）；未做的向导工作是「面向同一结果的结构性迁移」与
+   `finish_setup` 失败分支的单测（需注入保存接缝），不在本次授权口径内。`delete_provider`
+   的落盘失败路径无单测覆盖（需进程级句柄），仅覆盖候选构造的纯函数判定，生产行为待人工验证。
 2. 「详情迁移共享外壳」（方案原批次 F 项）经复核不做：`panel_shell!` 与 `panel_scroll` 已共享外壳，
    `ScrollbarGeometry` 全仓唯一使用者是 SubAgentDetail，无第二真实用例，按设计 §5.1 拒绝投机抽象。
 3. 客户端内部超时目前仍映射为失败而非结果未知——区分它需要客户端返回类型化错误，字符串匹配不予采用；
@@ -182,3 +208,6 @@
 7. 迁移期间面板新旧实现并存属批次内允许状态；每完成一个面板即删除其被替代逻辑，不留双写。
 8. 预先存在、本批未改动：`peri-tui/src/kit/acp_events/system.rs` 为 1007 行（基线同为 1007 行，
    本批 diff 为空），超出 STD-SIZE-001 的 1000 行上限；不在本批授权范围，仅记录，未顺手重构。
+9. 密钥掩码存在两套样式：向导 `mask_api_key`（`••••`，保留首尾各 4 位）、Login
+   `mask_api_key_display`（`*`，保留末 4 位）。两者都是正确掩码、无明文泄漏，统一属展示一致性
+   改动（会改变其中一处的可见输出），待产品决策，本批不改。
