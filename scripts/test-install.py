@@ -18,6 +18,8 @@ INSTALLER = Path(__file__).resolve().with_name("install.sh")
 VERSION_TAG = "agent-v9.9.9"
 # 随包 workflow sidecar 的内容身份目录（安装器不解析其值，仅透传布局）。
 SIDECAR_ID = "0123456789ab"
+# 代理测试用镜像前缀：mock curl 剥离它之后按真实 URL 路由，日志里保留实际请求 URL。
+MIRROR_PREFIX = "https://mirror.test/"
 
 
 class StableInstallerTests(unittest.TestCase):
@@ -50,6 +52,10 @@ while [ "$#" -gt 0 ]; do
     shift
 done
 printf '%s\\n' "$url" >> "$MOCK_DOWNLOAD_LOG"
+# 镜像前缀在断言用的日志之后剥离，路由始终基于真实 URL
+case "$url" in
+    https://mirror.test/*) url="${url#https://mirror.test/}" ;;
+esac
 case "$url" in
     https://api.github.com/*)
         /bin/cat "$MOCK_RELEASE_JSON"
@@ -88,6 +94,9 @@ esac
             "MOCK_DOWNLOAD_FAILURE": "",
         }
         self.environment.pop("PERI_INSTALL_PLATFORM", None)
+        # 宿主环境的代理变量会改变下载 URL 的断言基准
+        self.environment.pop("GITHUB_PROXY", None)
+        self.environment.pop("GITHUB_API_PROXY", None)
 
     def write_command(self, name, contents):
         path = self.commands / name
@@ -200,6 +209,36 @@ esac
         self.environment.pop("PERI_INSTALL_VERSION")
         result = self.run_installer()
         self.assert_install_succeeded(result, payload)
+
+    def test_pinned_version_skips_api(self):
+        # 固定版本按发布命名契约直接拼 URL，api.github.com 不必可达
+        archive, payload = self.make_archive()
+        self.write_release([(archive.name, True), (f"{archive.name}.sha256", True)])
+        result = self.run_installer()
+        self.assert_install_succeeded(result, payload)
+        self.assertNotIn("api.github.com", self.download_log.read_text())
+
+    def test_api_proxy_covers_release_lookup(self):
+        archive, payload = self.make_archive()
+        self.write_release([(archive.name, True), (f"{archive.name}.sha256", True)])
+        self.environment.pop("PERI_INSTALL_VERSION")
+        self.environment["GITHUB_API_PROXY"] = f"{MIRROR_PREFIX}https://api.github.com"
+        result = self.run_installer()
+        self.assert_install_succeeded(result, payload)
+        self.assertIn(f"{MIRROR_PREFIX}https://api.github.com/repos/konghayao/peri/releases",
+                      self.download_log.read_text())
+
+    def test_download_proxy_covers_asset_and_checksum(self):
+        # 固定版本 + 下载代理：除制品与校验和外不产生其他请求，且两者都改写为代理 URL
+        archive, payload = self.make_archive()
+        self.write_release([(archive.name, True), (f"{archive.name}.sha256", True)])
+        self.environment["GITHUB_PROXY"] = f"{MIRROR_PREFIX}https://github.com"
+        result = self.run_installer()
+        self.assert_install_succeeded(result, payload)
+        downloads = [line for line in self.download_log.read_text().splitlines() if line]
+        self.assertEqual(len(downloads), 2, downloads)
+        for url in downloads:
+            self.assertTrue(url.startswith(f"{MIRROR_PREFIX}https://github.com/"), url)
 
     def test_checksum_entry_not_matching_asset_is_rejected(self):
         archive, _ = self.make_archive()

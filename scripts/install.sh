@@ -6,9 +6,11 @@ export LC_ALL=C
 # Usage: curl -fsSL https://raw.githubusercontent.com/konghayao/peri/main/scripts/install.sh | bash
 #
 # Options:
-#   PERI_INSTALL_VERSION   Specific version tag (e.g. agent-v1.17), empty = latest
+#   PERI_INSTALL_VERSION   Specific version tag (e.g. agent-v1.17), empty = latest.
+#                          Pinned installs skip the GitHub API entirely.
 #   PERI_INSTALL_DIR       Install directory (default: $HOME/.peri)
 #   GITHUB_PROXY           GitHub download proxy prefix (replaces https://github.com in download URL)
+#   GITHUB_API_PROXY       GitHub API proxy prefix (replaces https://api.github.com in API URL)
 #   GITHUB_TOKEN           GitHub personal access token (bypasses API rate limiting)
 #   PERI_NO_PATH_HINT      Set to 1 to skip PATH hint
 #   PERI_INSTALL_PLATFORM  Override platform detection (e.g. linux-x86_64, macos-aarch64)
@@ -16,6 +18,7 @@ export LC_ALL=C
 # Example:
 #   PERI_INSTALL_VERSION=agent-v1.17 bash install.sh
 #   GITHUB_PROXY=https://ghproxy.com/https://github.com curl ... | bash
+#   GITHUB_API_PROXY=https://gh-proxy.com/https://api.github.com curl ... | bash
 #   GITHUB_TOKEN=ghp_xxx curl ... | bash
 
 RED='\033[0;31m'
@@ -65,6 +68,8 @@ detect_platform() {
 }
 
 # --- Download with optional proxy ---
+# 下载（github.com/releases/download/*）与查询（api.github.com）是两个域名，镜像对二者的
+# 支持并不一致（多数只代理下载路径），因此代理变量分开配置。
 get_download_url() {
     local url="$1"
     local proxy="${GITHUB_PROXY:-}"
@@ -75,14 +80,44 @@ get_download_url() {
     fi
 }
 
+get_api_url() {
+    local url="$1"
+    local proxy="${GITHUB_API_PROXY:-}"
+    if [[ -n "${proxy}" ]]; then
+        echo "${url/https:\/\/api.github.com/${proxy}}"
+    else
+        echo "${url}"
+    fi
+}
+
 # --- GitHub API request (with optional token) ---
 github_api() {
-    local url="$1"
+    local url
+    url=$(get_api_url "$1")
     local auth_header=""
     if [[ -n "${GITHUB_TOKEN:-}" ]]; then
         auth_header="-H Authorization: Bearer ${GITHUB_TOKEN}"
     fi
     curl -fsSL ${auth_header:-} "${url}" 2>/dev/null
+}
+
+# API 不可达时给出可行出路：代理需单独配置，或改用固定版本安装（该路径不查询 API）。
+api_unreachable_hint() {
+    warn "GitHub API (api.github.com) is unreachable."
+    echo "    - Set GITHUB_API_PROXY if your network needs an API mirror"
+    echo "    - Or pin PERI_INSTALL_VERSION=<tag> to install without the API"
+}
+
+# 下载失败时尽力区分“tag 不存在”与“该平台无制品”：固定版本路径没有预取资产清单，
+# API 可达时补一次。查不到就只留通用提示，不掩盖原始失败。
+report_release_assets() {
+    local releases_json assets
+    releases_json=$(github_api "${GITHUB_API}/releases/tags/$1") || return 0
+    assets=$(echo "${releases_json}" | tr ',' '\n' | grep -F '"browser_download_url"' | cut -d'"' -f4 || true)
+    [[ -z "${assets}" ]] && return 0
+    echo ""
+    warn "Assets published in $1:"
+    echo "${assets}" | sed 's/^/  - /'
 }
 
 # --- SHA-256 verification (sha256sum or shasum) ---
@@ -192,6 +227,7 @@ cleanup_old_versions() {
 main() {
     INSTALL_DIR="${PERI_INSTALL_DIR:-${HOME}/.peri}"
     GITHUB_API="https://api.github.com/repos/konghayao/peri"
+    RELEASES_DOWNLOAD_BASE="https://github.com/konghayao/peri/releases/download"
 
     echo ""
     info "Peri Agent Installer"
@@ -200,18 +236,20 @@ main() {
     PLATFORM=$(detect_platform)
     ASSET_NAME="peri-${PLATFORM}.tar.gz"
 
-    # Fetch release info
+    # 解析版本与资产 URL。固定版本时不查询 API：下载地址由 tag 与发布命名契约
+    # （<asset>、checksums.txt）唯一确定，受限网络中 api.github.com 不必可达。
+    RELEASE_JSON=""
+    CHECKSUMS_URL=""
     if [[ -n "${PERI_INSTALL_VERSION:-}" ]]; then
         VERSION_TAG="${PERI_INSTALL_VERSION}"
-        step "Fetching release: ${VERSION_TAG}..."
-        RELEASE_JSON=$(github_api "${GITHUB_API}/releases/tags/${VERSION_TAG}") || {
-            error "Failed to fetch release '${VERSION_TAG}'. Does this tag exist?"
-            exit 1
-        }
+        ASSET_DOWNLOAD_URL="${RELEASES_DOWNLOAD_BASE}/${VERSION_TAG}/${ASSET_NAME}"
+        CHECKSUMS_URL="${RELEASES_DOWNLOAD_BASE}/${VERSION_TAG}/checksums.txt"
+        info "Found release: ${VERSION_TAG} (pinned; GitHub API not queried)"
     else
         step "Fetching latest agent release..."
         RELEASES_JSON=$(github_api "${GITHUB_API}/releases?per_page=30") || {
             error "Failed to fetch releases from GitHub."
+            api_unreachable_hint
             exit 1
         }
         # Find latest agent-* tag
@@ -224,21 +262,23 @@ main() {
         # Fetch the specific release for asset list
         RELEASE_JSON=$(github_api "${GITHUB_API}/releases/tags/${VERSION_TAG}") || {
             error "Failed to fetch release '${VERSION_TAG}'."
+            api_unreachable_hint
             exit 1
         }
-    fi
+        info "Found release: ${VERSION_TAG}"
 
-    info "Found release: ${VERSION_TAG}"
+        # Find matching asset（按精确文件名匹配，避免命中同前缀的 <asset>.sha256 校验和文件）
+        ASSET_DOWNLOAD_URL=$(echo "${RELEASE_JSON}" | tr ',' '\n' | grep -F '"browser_download_url"' | grep -F "/${ASSET_NAME}\"" | head -1 | cut -d'"' -f4 || true)
 
-    # Find matching asset（按精确文件名匹配，避免命中同前缀的 <asset>.sha256 校验和文件）
-    ASSET_DOWNLOAD_URL=$(echo "${RELEASE_JSON}" | tr ',' '\n' | grep -F '"browser_download_url"' | grep -F "/${ASSET_NAME}\"" | head -1 | cut -d'"' -f4 || true)
+        if [[ -z "${ASSET_DOWNLOAD_URL}" ]]; then
+            error "No binary found for platform '${PLATFORM}'."
+            echo ""
+            echo "Available assets:"
+            echo "${RELEASE_JSON}" | tr ',' '\n' | grep -F '"browser_download_url"' | cut -d'"' -f4 | sed 's/^/  - /'
+            exit 1
+        fi
 
-    if [[ -z "${ASSET_DOWNLOAD_URL}" ]]; then
-        error "No binary found for platform '${PLATFORM}'."
-        echo ""
-        echo "Available assets:"
-        echo "${RELEASE_JSON}" | tr ',' '\n' | grep -F '"browser_download_url"' | cut -d'"' -f4 | sed 's/^/  - /'
-        exit 1
+        CHECKSUMS_URL=$(echo "${RELEASE_JSON}" | tr ',' '\n' | grep -F '"browser_download_url"' | grep -F '/checksums.txt"' | head -1 | cut -d'"' -f4 || true)
     fi
 
     info "Binary: ${ASSET_NAME}"
@@ -258,16 +298,19 @@ main() {
     fi
 
     step "Downloading..."
-    curl -fSL --progress-bar "${FINAL_URL}" -o "${TARBALL}" || {
-        error "Download failed."
+    if ! curl -fSL --progress-bar "${FINAL_URL}" -o "${TARBALL}"; then
+        error "Download failed: ${FINAL_URL}"
+        if [[ -z "${RELEASE_JSON}" ]]; then
+            report_release_assets "${VERSION_TAG}"
+            warn "Check that '${VERSION_TAG}' exists and publishes ${ASSET_NAME}."
+        fi
         exit 1
-    }
+    fi
 
     # 校验 SHA-256：逐资产 <asset>.sha256 自本版本起发布；旧 Release 只有 checksums.txt
     # 清单（待旧版本退场后可删除回退分支）。
     step "Verifying checksum..."
     if ! curl -fSL "$(get_download_url "${ASSET_DOWNLOAD_URL}.sha256")" -o "${CHECKSUM_FILE}" 2>/dev/null; then
-        CHECKSUMS_URL=$(echo "${RELEASE_JSON}" | tr ',' '\n' | grep -F '"browser_download_url"' | grep -F '/checksums.txt"' | head -1 | cut -d'"' -f4 || true)
         if [[ -z "${CHECKSUMS_URL}" ]]; then
             error "No checksum published for ${ASSET_NAME}."
             rm -f "${TARBALL}"
