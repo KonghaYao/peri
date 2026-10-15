@@ -10,9 +10,10 @@
 use crate::app::panel_types::PanelKind;
 use crate::i18n;
 use crate::kit::atoms::{
-    ACP_CLIENT_HANDLE, LANG_VERSION, THREAD_BROWSER_ARCHIVED, THREAD_BROWSER_SCOPE, THREAD_LIST,
-    THREAD_LIST_ERROR, THREAD_LIST_HAS_MORE, THREAD_LIST_PAGE_COUNT, THREAD_LIST_PAGE_SIZE,
-    THREAD_LOAD_TX, ThreadBrowserScope, ThreadSummary,
+    ACP_CLIENT_HANDLE, ACTIVE_SESSION_ID, BRIDGE_RESET_COUNTER, LANG_VERSION, NOTIFICATION,
+    Notification, THREAD_BROWSER_ARCHIVED, THREAD_BROWSER_SCOPE, THREAD_LIST, THREAD_LIST_ERROR,
+    THREAD_LIST_HAS_MORE, THREAD_LIST_PAGE_COUNT, THREAD_LIST_PAGE_SIZE, THREAD_LOAD_TX,
+    ThreadBrowserScope, ThreadSummary,
 };
 use crate::kit::list_nav::{next_selection, previous_selection};
 use crate::kit::panel_mouse::{AreaTracker, ListLayout, hit_item, is_scrollbar_column};
@@ -27,6 +28,7 @@ use ratatui_kit::{
         widgets::Paragraph,
     },
 };
+use std::time::Duration;
 
 #[path = "thread_browser/history_preview.rs"]
 mod history_preview;
@@ -220,18 +222,14 @@ pub fn ThreadBrowserPanel(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
                             if let Some(sid) = confirm_delete.read().clone() {
                                 if let Some(client) = ACP_CLIENT_HANDLE.get() {
                                     let client = client.clone();
+                                    // 请求带上发起时刻的列表身份，响应回来时据此复验。
+                                    let view = ThreadListViewKey::current();
                                     tokio::spawn(async move {
-                                        match client.delete_session(&sid).await {
-                                            Ok(()) => tracing::info!(
-                                                session_id = %sid,
-                                                "thread browser: session deleted"
-                                            ),
-                                            Err(e) => tracing::warn!(
-                                                session_id = %sid,
-                                                error = %e,
-                                                "thread browser: session delete failed"
-                                            ),
-                                        }
+                                        let outcome = client
+                                            .delete_session(&sid)
+                                            .await
+                                            .map_err(|error| error.to_string());
+                                        apply_delete_outcome(&view, &sid, outcome);
                                     });
                                 } else {
                                     tracing::warn!(
@@ -277,22 +275,18 @@ pub fn ThreadBrowserPanel(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
                     }
                     KeyCode::Char('a') => {
                         if let Some(sid) = selected_id.read().clone()
-                            && let Some(client) = ACP_CLIENT_HANDLE.get() {
+                            && let Some(client) = ACP_CLIENT_HANDLE.get()
+                        {
                             let client = client.clone();
+                            // 归档方向与落地判据都取自这次请求捕获的视图身份：目标归档态由
+                            // `view.archived` 取反得到（不再用渲染期隐式捕获的 `archived_view`）。
+                            let view = ThreadListViewKey::current();
                             tokio::spawn(async move {
-                                match client.set_session_archived(&sid, !archived_view).await {
-                                    Ok(()) => {
-                                        THREAD_LIST.state().write().retain(|thread| thread.id != sid);
-                                        THREAD_LIST_ERROR.set(None);
-                                    }
-                                    Err(error) => {
-                                        THREAD_LIST_ERROR.set(Some(format!(
-                                            "{}: {error}",
-                                            i18n::tr("thread-browser-archive-error")
-                                        )));
-                                        tracing::warn!(session_id = %sid, %error, "thread browser: archive action failed");
-                                    }
-                                }
+                                let outcome = client
+                                    .set_session_archived(&sid, !view.archived)
+                                    .await
+                                    .map_err(|error| error.to_string());
+                                apply_archive_outcome(&view, &sid, outcome);
                             });
                         }
                     }
@@ -620,6 +614,124 @@ pub fn ThreadBrowserPanel(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
             Text(text: Line::styled(i18n::tr("thread-browser-preview-actions"), muted_style))
         }
     })
+}
+
+// ── 会话动作回写的视图身份 ──────────────────────────────────────────────
+//
+// 归档与删除都是「先发请求、响应稍后返回」：面板状态只能由发起这次请求的那个列表来
+// 回写。请求期间会话可能已切换、bridge 可能已重建、scope / 归档视图可能已切走，
+// 这些都会换掉列表的归属——不认身份就会把陈旧结果写进新列表。
+
+/// 一次线程列表查询的身份：活动会话、前端重置代次与两个过滤条件。
+///
+/// 发起请求时捕获，响应返回后逐项复验；不一致即整条丢弃——此刻的列表属于另一个
+/// 查询，后续刷新会反映真实状态。
+#[derive(PartialEq, Eq, Debug)]
+struct ThreadListViewKey {
+    /// 发起请求时的活动会话（`ACTIVE_SESSION_ID`）。
+    session_id: String,
+    /// 前端重置代次（`BRIDGE_RESET_COUNTER`）——同一会话号下 bridge 重建也换掉列表。
+    bridge_reset: u64,
+    /// 列表过滤条件：项目 / 工作区 / 全部。
+    scope: ThreadBrowserScope,
+    /// 列表过滤条件：当前是否归档视图。
+    archived: bool,
+}
+
+impl ThreadListViewKey {
+    /// 现取当前身份——捕获与复验共用这一处，保证两侧判据同源。
+    fn current() -> Self {
+        Self {
+            session_id: ACTIVE_SESSION_ID.state().read().clone(),
+            bridge_reset: BRIDGE_RESET_COUNTER.get(),
+            scope: THREAD_BROWSER_SCOPE.get(),
+            archived: THREAD_BROWSER_ARCHIVED.get(),
+        }
+    }
+
+    /// 回写时刻的身份是否仍是请求发出时的这一个。
+    fn still_current(&self) -> bool {
+        *self == Self::current()
+    }
+}
+
+/// 归档 / 取消归档响应的落地。
+///
+/// `target_session_id` 是被操作的会话（列表里的条目），与视图身份里的活动会话不同。
+/// 身份不符即整条丢弃（不写 `THREAD_LIST`、不写 `THREAD_LIST_ERROR`）：这次响应描述的
+/// 是另一个查询的列表。丢弃只留日志。
+fn apply_archive_outcome(
+    view: &ThreadListViewKey,
+    target_session_id: &str,
+    outcome: Result<(), String>,
+) {
+    if !view.still_current() {
+        tracing::warn!(
+            target_session_id = %target_session_id,
+            "thread browser: archive response discarded, list view belongs to another query"
+        );
+        return;
+    }
+    match outcome {
+        Ok(()) => {
+            // 归档与取消归档都让该条离开当前视图（另一侧视图由后续刷新带回）。
+            THREAD_LIST
+                .state()
+                .write()
+                .retain(|thread| thread.id != target_session_id);
+            THREAD_LIST_ERROR.set(None);
+        }
+        Err(error) => {
+            THREAD_LIST_ERROR.set(Some(format!(
+                "{}: {error}",
+                i18n::tr("thread-browser-archive-error")
+            )));
+            tracing::warn!(
+                target_session_id = %target_session_id,
+                %error,
+                "thread browser: archive action failed"
+            );
+        }
+    }
+}
+
+/// 删除响应的落地：失败必须让用户看见；成功不改列表——条目由后续刷新收敛
+/// （现状语义，不做乐观删除）。身份不符同样整条丢弃：目标已属于另一个列表，
+/// 提示没有对照物。删除目标的固定来自确认时的 `confirm_delete`（见事件分支）。
+fn apply_delete_outcome(
+    view: &ThreadListViewKey,
+    target_session_id: &str,
+    outcome: Result<(), String>,
+) {
+    if !view.still_current() {
+        tracing::warn!(
+            target_session_id = %target_session_id,
+            "thread browser: delete response discarded, list view belongs to another query"
+        );
+        return;
+    }
+    match outcome {
+        Ok(()) => tracing::info!(
+            target_session_id = %target_session_id,
+            "thread browser: session deleted"
+        ),
+        Err(error) => {
+            notify_delete_failed(&error);
+            tracing::warn!(
+                target_session_id = %target_session_id,
+                %error,
+                "thread browser: session delete failed"
+            );
+        }
+    }
+}
+
+/// 删除失败的可见提示（与归档失败同型：本地化前缀 + 服务端错误）。
+fn notify_delete_failed(error: &str) {
+    *NOTIFICATION.state().write() = Some(Notification {
+        message: format!("{}: {error}", i18n::tr("thread-browser-delete-error")),
+        until: peri_time::monotonic_now() + Duration::from_secs(2),
+    });
 }
 
 fn request_more_threads() {
