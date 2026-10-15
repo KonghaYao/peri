@@ -16,7 +16,8 @@ use ratatui_kit::{
 use crate::app::panel_types::PanelKind;
 use crate::i18n;
 use crate::kit::atoms::{
-    CRON_ACTION_ERROR, CRON_JOBS, CronJobSummary, LANG_VERSION, SERVICE_PROJECTION_ERROR,
+    CRON_ACTION_ERROR, CRON_JOBS, CronJobSummary, LANG_VERSION, NOTIFICATION, Notification,
+    SERVICE_PROJECTION_ERROR,
 };
 use crate::kit::list_nav::{next_selection, previous_selection};
 use crate::kit::panel_mouse::{AreaTracker, hit_item, is_scrollbar_column};
@@ -254,6 +255,20 @@ fn cron_action(method: &'static str, id: &str) {
     actions::dispatch(method, id);
 }
 
+/// 提示「确认的删除目标已消失」——走跨面板的确认目标守卫文案。
+///
+/// 确认期间列表刷新使目标不在列表里时，本次删除不执行（删除不可逆，不回退为按下标
+/// 取「现在这一项」）；这是一次被放弃的操作，必须让用户看到，不能只留日志。
+fn notify_delete_target_missing(job_id: &str) {
+    *NOTIFICATION.state().write() = Some(Notification {
+        message: i18n::tr_args(
+            "app-confirm-target-missing",
+            &[("target".to_string(), FluentValue::from(job_id))],
+        ),
+        until: peri_time::monotonic_now() + std::time::Duration::from_secs(2),
+    });
+}
+
 /// 面板事件处理——判定集中在这里，组件只做注册；测试可经挂载探针取真实句柄后直接投喂。
 fn handle_cron_event(event: Event, ctx: &CronEventCtx<'_>) -> EventResult {
     handle_cron_event_with(event, ctx, cron_action)
@@ -311,6 +326,7 @@ fn handle_cron_event_with(
                         job_id = %target,
                         "confirm target no longer in list, delete skipped"
                     );
+                    notify_delete_target_missing(&target);
                 }
                 *ctx.confirm_delete.write() = None;
             }
