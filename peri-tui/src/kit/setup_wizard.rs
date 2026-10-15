@@ -1,6 +1,6 @@
 //! ratatui-kit SetupWizard —— 完整交互式配置向导。
 //!
-//! 四步向导：Language → Choose → Form → Done。
+//! 五步向导：Language → Choose → Preset → Form → Done。
 //! 状态存储在 `SETUP_WIZARD` atom 中，显隐由 `WIZARD_ACTIVE` 控制。
 
 #![allow(clippy::needless_update)]
@@ -25,7 +25,10 @@ mod handler;
 mod render;
 
 use self::handler::{handle_wizard_event, wizard_click};
-use self::render::{render_choose_step, render_done_step, render_form_step, render_language_step};
+use self::render::{
+    render_choose_step, render_done_step, render_form_step, render_language_step,
+    render_preset_step,
+};
 
 // ── 主组件 ────────────────────────────────────────────────────────────────────
 
@@ -139,6 +142,7 @@ pub fn SetupWizard(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
         SetupStep::Choose => {
             render_choose_step(&state, dim, accent, cursor_color, text_color, error_color)
         }
+        SetupStep::Preset => render_preset_step(&state, dim, accent, cursor_color, text_color),
         SetupStep::Form => render_form_step(
             &state,
             dim,

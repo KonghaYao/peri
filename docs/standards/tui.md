@@ -29,7 +29,7 @@
 ### TUI-I18N-001
 
 - **Scope**：TUI 面向用户的文本。
-- **Rule**：只翻译用户可见界面文本；日志、错误、协议、标识符和路径保持原样。新增文本时同步增加 `peri-tui/locales/en/main.ftl` 与 `peri-tui/locales/zh-CN/main.ftl` key，代码用 `i18n::tr`/`tr_args`，需要动态切换的组件订阅 `LANG_VERSION`。
+- **Rule**：只翻译用户可见界面文本；日志、错误、协议、标识符和路径保持原样。新增文本时同步增加 `peri-tui/locales/en/main.ftl` 与 `peri-tui/locales/zh-CN/main.ftl` key，代码用 `i18n::tr`/`tr_args`，需要动态切换的组件订阅 `LANG_VERSION`。例外：内置供应商预设的品牌摘要（`provider_presets` 的 `summary`）为固定中文内联文案，不随界面语言切换。
 - **Verify**：`cargo test -p peri-tui --lib`；人工核对两份 FTL、调用 key 和语言订阅。
 
 ### TUI-TEXT-001

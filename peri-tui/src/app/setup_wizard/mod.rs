@@ -2,13 +2,17 @@
 //!
 //! 完整交互式向导流程：
 //! 1. Language  → 选择界面语言（en / zh-CN）
-//! 2. Choose    → 选择配置来源（手动输入 / 从 Claude Code 迁移）
-//! 3. Form      → 多 Provider 列表浏览 + 编辑详情
-//! 4. Done      → 确认并保存
+//! 2. Choose    → 选择配置来源（手动输入 / 从 Claude Code 迁移 / 供应商预设）
+//! 3. Preset    → 从内置预设选一家，预填端点与四档模型
+//! 4. Form      → 多 Provider 列表浏览 + 编辑详情
+//! 5. Done      → 确认并保存
 //!
 //! 状态通过 `atoms::SETUP_WIZARD` 管理，组件通过 `WIZARD_ACTIVE` 控制显隐。
 
 use serde::{Deserialize, Serialize};
+
+mod provider_presets;
+pub use provider_presets::{PROVIDER_PRESETS, ProviderPreset};
 
 // ── 步骤枚举 ──────────────────────────────────────────────────────────────────
 
@@ -16,6 +20,7 @@ use serde::{Deserialize, Serialize};
 pub enum SetupStep {
     Language,
     Choose,
+    Preset,
     Form,
     Done,
 }
@@ -24,21 +29,21 @@ pub enum SetupStep {
 pub enum SetupSource {
     CustomApi,
     MigrateClaudeCode,
-    PeriFreeService,
+    ProviderPreset,
 }
 
 impl SetupSource {
     pub const ALL: [Self; 3] = [
         Self::CustomApi,
         Self::MigrateClaudeCode,
-        Self::PeriFreeService,
+        Self::ProviderPreset,
     ];
 
     pub fn label(&self) -> &'static str {
         match self {
             Self::CustomApi => "setup-source-custom-api",
             Self::MigrateClaudeCode => "setup-source-migrate",
-            Self::PeriFreeService => "setup-source-peri-free",
+            Self::ProviderPreset => "setup-source-preset",
         }
     }
 
@@ -46,27 +51,9 @@ impl SetupSource {
         match self {
             Self::CustomApi => "setup-source-custom-desc",
             Self::MigrateClaudeCode => "setup-source-migrate-desc",
-            Self::PeriFreeService => "setup-source-peri-free-desc",
+            Self::ProviderPreset => "setup-source-preset-desc",
         }
     }
-}
-
-/// Peri Code 免费服务快速配置（与 tavily-search/.peri/settings.json 中的
-/// provider 配置等同：公共网关、固定档位模型）。
-pub const PERI_FREE_BASE_URL: &str = "https://tavily.claude-code-best.win/peri-model/v1";
-pub const PERI_FREE_API_KEY: &str = "public";
-pub const PERI_FREE_PROVIDER_ID: &str = "peri";
-/// 顺序：fable → opus → sonnet → haiku
-pub const PERI_FREE_MODEL_IDS: [&str; 4] = ["peri-fable", "peri-opus", "peri-sonnet", "peri-haiku"];
-
-/// 构造 Peri Code 免费服务的 Provider 快速配置
-pub fn peri_free_provider() -> MigratedProvider {
-    let mut mp = MigratedProvider::new(ProviderType::OpenAiCompatible);
-    mp.provider_id = PERI_FREE_PROVIDER_ID.to_string();
-    mp.base_url = PERI_FREE_BASE_URL.to_string();
-    mp.api_key = PERI_FREE_API_KEY.to_string();
-    mp.aliases = PERI_FREE_MODEL_IDS.map(|s| s.to_string());
-    mp
 }
 
 // ── 语言选项 ──────────────────────────────────────────────────────────────────
@@ -119,14 +106,14 @@ impl ProviderType {
 
     pub fn default_model_ids(&self) -> [&'static str; 4] {
         match self {
-            // 顺序：fable → opus → sonnet → haiku（fable 复用 opus 档模型）
+            // 顺序：fable → opus → sonnet → haiku
             Self::Anthropic => [
-                "claude-opus-4-6",
-                "claude-opus-4-6",
-                "claude-sonnet-4-6",
-                "claude-haiku-4-5-20251001",
+                "claude-fable-5-1",
+                "claude-opus-5-5",
+                "claude-sonnet-5-5",
+                "claude-haiku-5-5",
             ],
-            Self::OpenAiCompatible => ["gpt-5.5", "gpt-5.5", "gpt-4o", "gpt-4o-mini"],
+            Self::OpenAiCompatible => ["gpt-6-astra", "gpt-6-astra", "gpt-6.1-sol", "gpt-6-luna"],
         }
     }
 }
@@ -143,6 +130,10 @@ pub struct MigratedProvider {
     pub api_key: String,
     pub aliases: [String; 4],
     pub selected: bool,
+    /// 由预设声明：保存时套用固定档位配置而非默认 opus 档位绑定
+    /// （见 `apply_fixed_tier_profiles`）
+    #[serde(default)]
+    pub fixed_tiers: bool,
 }
 
 impl MigratedProvider {
@@ -155,6 +146,7 @@ impl MigratedProvider {
             api_key: String::new(),
             aliases: pt.default_model_ids().map(|s| s.to_string()),
             selected: true,
+            fixed_tiers: false,
         }
     }
 
@@ -284,6 +276,8 @@ pub struct SetupWizardState {
     pub step: SetupStep,
     pub source: SetupSource,
     pub choose_cursor: usize,
+    #[serde(default)]
+    pub preset_cursor: usize,
     pub language: String,
     pub language_cursor: usize,
     pub providers: Vec<MigratedProvider>,
@@ -310,6 +304,7 @@ impl Default for SetupWizardState {
             step: SetupStep::Language,
             source: SetupSource::CustomApi,
             choose_cursor: 0,
+            preset_cursor: 0,
             language: "en".to_string(),
             language_cursor: 0,
             providers: vec![MigratedProvider::new(ProviderType::Anthropic)],
@@ -450,6 +445,8 @@ pub fn state_from_config(cfg: &crate::config::PeriConfig) -> SetupWizardState {
                     },
                 ],
                 selected: true,
+                // 既有配置不记录档位来源，重进向导按默认档位绑定处理
+                fixed_tiers: false,
             }
         })
         .collect::<Vec<_>>();
@@ -480,6 +477,7 @@ pub fn mask_api_key(key: &str) -> String {
 pub fn build_wizard_config(state: &SetupWizardState) -> crate::config::PeriConfig {
     let mut cfg = crate::config::PeriConfig::default();
     let mut first_id = String::new();
+    let mut fixed_tiers = false;
 
     for mp in &state.providers {
         if !mp.selected {
@@ -503,13 +501,16 @@ pub fn build_wizard_config(state: &SetupWizardState) -> crate::config::PeriConfi
         };
         if first_id.is_empty() {
             first_id = provider.id.clone();
+            fixed_tiers = mp.fixed_tiers;
         }
         cfg.config.providers.push(provider);
     }
 
     if !first_id.is_empty() {
-        if state.source == SetupSource::PeriFreeService {
-            apply_peri_free_profiles(&mut cfg.config, &first_id);
+        // 预设声明固定档位的 provider（当前为 Peri Code 免费服务网关）套用其网关
+        // 要求的档位配置；其余来源与预设沿用默认 opus 档位绑定。
+        if fixed_tiers {
+            apply_fixed_tier_profiles(&mut cfg.config, &first_id);
         } else {
             cfg.config.active_alias = "opus".to_string();
             if let Some(profile) = cfg.config.profiles.get_mut("opus") {
@@ -522,9 +523,9 @@ pub fn build_wizard_config(state: &SetupWizardState) -> crate::config::PeriConfi
     cfg
 }
 
-/// 应用 Peri Code 免费服务的档位配置（与 tavily-search/.peri/settings.json
-/// 的 profiles 等同：active_alias=sonnet，各档 effort 固定，provider 绑定）。
-fn apply_peri_free_profiles(cfg: &mut crate::config::AppConfig, provider_id: &str) {
+/// 应用固定档位配置（与 Peri Code 免费服务网关一致：active_alias=sonnet，
+/// 各档 effort 固定，provider 绑定）。
+fn apply_fixed_tier_profiles(cfg: &mut crate::config::AppConfig, provider_id: &str) {
     cfg.active_alias = "sonnet".to_string();
     for (alias, effort) in [
         ("fable", "max"),
@@ -802,3 +803,7 @@ pub async fn test_connectivity(base_url: &str) -> (bool, String) {
 #[cfg(test)]
 #[path = "setup_wizard_test.rs"]
 mod tests;
+
+#[cfg(test)]
+#[path = "provider_presets_test.rs"]
+mod provider_presets_tests;

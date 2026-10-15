@@ -142,10 +142,10 @@ setup-welcome-title =  ── Peri Setup ── Welcome
 setup-choose-provider =  Choose how to configure your provider:
 setup-source-custom-api = Custom API
 setup-source-migrate = Migrate from Claude Code
-setup-source-peri-free = Peri Code Free Service
+setup-source-preset = Provider presets
 setup-source-custom-desc = Manually enter provider details
 setup-source-migrate-desc = Import config from ~/.claude/
-setup-source-peri-free-desc = One-click Peri Code free gateway, no API key needed
+setup-source-preset-desc = Pre-fill endpoint and model tiers for a known provider
 setup-key-confirm = :Confirm
 setup-key-select = :Select
 setup-key-quit = :Quit
@@ -183,6 +183,9 @@ setup-no-providers = No providers configured. Add one by selecting "Custom API" 
 setup-language-title = ── Peri Setup ── Language
 setup-language-prompt = Choose your interface language:
 setup-language-press-enter = Press Enter to confirm
+
+setup-preset-title =  ── Peri Setup ── Provider presets
+setup-preset-prompt =   Choose a provider preset:
 
 # ---- Config Panel ----
 
