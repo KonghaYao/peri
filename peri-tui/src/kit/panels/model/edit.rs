@@ -12,7 +12,6 @@ use crate::config::PeriConfig;
 use crate::i18n;
 use crate::kit::atoms::{
     ACP_CLIENT_HANDLE, MODEL_HIGHLIGHT_UNTIL, NOTIFICATION, Notification, PERI_CONFIG_HANDLE,
-    SERVICE_SNAPSHOT,
 };
 use fluent_bundle::FluentValue;
 use std::sync::Arc;
@@ -239,19 +238,21 @@ fn project_model_change(snap: &PeriConfig, change: ModelChange) {
         ModelChange::ProfileField(alias) => (alias, false),
     };
     let resolved = resolve_model_name_for_alias(&snap.config, &alias);
-    let s_handle = SERVICE_SNAPSHOT.state();
-    let mut svc = s_handle.read().clone();
+    // 只提交本次确实改动的字段：整快照 clone 后回写会覆盖同期的进程/服务投影
+    // （方案 §7.2 禁止分别 clone 后替换整个快照）。
+    let mut update = crate::kit::service_snapshot::SessionFieldUpdate::default();
     if switch_active {
-        svc.model_alias = alias.clone();
+        update.model_alias = Some(alias.clone());
     }
     if switch_active || alias == snap.config.active_alias {
-        svc.model_name = resolved;
-        svc.effort = snap
-            .config
-            .profiles
-            .get(&alias)
-            .map(|p| p.effort.clone())
-            .unwrap_or_else(|| "xhigh".to_string());
+        update.model_name = Some(resolved);
+        update.effort = Some(
+            snap.config
+                .profiles
+                .get(&alias)
+                .map(|p| p.effort.clone())
+                .unwrap_or_else(|| "xhigh".to_string()),
+        );
         // Preserve the immediate projection contract: alias switching leaves
         // provider_name for the periodic snapshot; only active edits update it.
         if !switch_active {
@@ -263,11 +264,11 @@ fn project_model_change(snap: &PeriConfig, change: ModelChange) {
                 .map(|p| p.provider_type.clone())
                 .unwrap_or_default();
             if !provider_type.is_empty() {
-                svc.provider_name = provider_type;
+                update.provider_name = Some(provider_type);
             }
         }
     }
-    *s_handle.write() = svc;
+    crate::kit::service_snapshot::publish_session_fields(update);
     if switch_active {
         *MODEL_HIGHLIGHT_UNTIL.state().write() =
             Some(peri_time::monotonic_now() + Duration::from_secs(2));
