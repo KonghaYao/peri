@@ -18,21 +18,65 @@
 | --- | --- | --- |
 | A 固定基线与契约 | 已完成 | 只读侦查：面板/弹窗清单、按类矩阵（只读/配置/资源/复合）、确认身份审计、hook/render 边界、快照审计、测试清单；基线测试与体积见下 |
 | B 共享列表与正确交互 | 已完成 | Hooks、MCP 迁移并拆文件；MCP 详情稳定身份 + effect 收敛；共享视口已扩展到批次 C 的全部固定行高面板 |
-| C 操作机制与简单面板 | 基本完成 | Cron、Memory、Tasks、Agent、Status、Goal 六个面板已迁移；`application/operations/` 原语落地并接入 Plugin 搜索与操作。剩余：Cron 会话级守卫与 Tasks 取消尚未接入原语（无显式代次/票据） |
+| C 操作机制与简单面板 | 已完成 | Cron、Memory、Tasks、Agent、Status、Goal 六个面板已迁移；`application/operations/` 原语落地并接入 Plugin 搜索与操作；收口把 Cron 会话守卫、Tasks 取消与 Workflow kill 一并接入原语（作用域 = 会话 id + `BRIDGE_RESET_COUNTER`） |
 | D 宿主配置与向导 | 基本完成 | Config、Model、Login、Theme 四个面板已迁移（命中同源、渲染边界、确认身份、保存失败如实展示）。剩余：「集中配置服务」抽象与向导字段未开始 |
-| E 复杂面板与快照 | 未开始（已侦查） | Plugin、ThreadBrowser、Workflow 缺陷已逐行确认；快照拆分边界已确认（提交/失效门必须保持单点） |
-| F 详情、弹窗和清理 | 未开始 | 详情迁移共享外壳；AskUserPopup 渲染体内写状态；`confirm_popup` 执行时重读全局 payload 的语义待核 |
-| G 整体验收与文档固化 | 进行中 | 本 issue + design 随批次更新；体积/性能对照、Linux 口径与 e2e 未跑 |
+| E 复杂面板与快照 | 已完成 | Workflow 渲染体副作用清零 + kill 固定 run id/完成门；ThreadBrowser 归档/删除逐项身份复验；Plugin 详情按稳定身份定位、缓存刷新归作用域；`service_snapshot.rs` 753→228 行按职责拆分，投影收敛为单一发布入口 |
+| F 详情、弹窗和清理 | 已完成（范围调整） | ConfirmPopup 加版本守卫（所见动作锁定）；删除无消费者的 `popups/ask_user_popup.rs`（386 行）；「详情迁移共享外壳」经复核无第二真实用例，按设计 §5.1 不做投机抽象 |
+| G 整体验收与文档固化 | 进行中 | 本 issue + design + code-index + 手册已更新；体积配对测量完成（**+0.230%，未通过不增长门槛**）；e2e L0 跑完 9/11（2 个失败经基线对照判定为预存，见下），**e2e 门禁未过**；Linux `.text` 口径与真实终端手测未做 |
 
 ## 基线（可复现）
 
 - 测试：`./scripts/cargo-rmcp-patched.sh test --locked -p peri-tui --lib` 在 `56a8ccd8d` 为
-  **1845 passed / 0 failed / 6 ignored**；本分支当前为 **1956 passed / 0 failed / 6 ignored**。
-- 二进制（macOS ARM64，release，`strip = "symbols"`）：干净基线构建 `/tmp/peri-tui-baseline`
-  （detached 于 `56a8ccd8d`）= **21,745,968 bytes**。当前分支的对照构建与 Linux `.text`
-  归属尚未测量，批次 G 补齐；未测量的平台不得宣称通过。
+  **1845 passed / 0 failed / 6 ignored**；本分支当前为 **1999 passed / 0 failed / 6 ignored**（同命令、同机器）。
+- 二进制（macOS ARM64，release，`strip = "symbols"`）：基线 worktree `/tmp/peri-tui-baseline`
+  （detached 于 `56a8ccd8d`）与当前 worktree 用同一条命令配对构建后对比字节数，见下方测量记录。
+  Linux `.text` 归属尚未测量；未测量的平台不得宣称通过。
 - 性能口径（批次 G 执行，需配对测量中位数）：warm frame `scanned_slots=0/updated_slots=0`、
-  缓存重绘 `full_parses=0`、同 key ≤1 在途查询、整体中位数退化 ≤10%。
+  缓存重绘 `full_parses=0`、同 key ≤1 在途查询已有确定性断言；30 轮配对中位数退化 ≤10% 未测。
+
+## 体积配对测量记录（批次 G）
+
+- 测量条件：macOS ARM64；同一命令
+  `./scripts/cargo-rmcp-patched.sh build --locked --release -p peri-tui --bin peri`；两个 worktree
+  各自独立 target 目录、同一 toolchain、同一 `Cargo.lock`；release profile 为
+  `strip = "symbols"` / `opt-level = "z"` / `lto = "fat"` / `codegen-units = 1`，未改动。
+- 基线：`/tmp/peri-tui-baseline`（detached `56a8ccd8d`，工作区干净，`git status` 无输出）→
+  **21,745,968 B**；`size -m`：`__TEXT` 20,086,784、`__text` 14,076,828。
+- 当前：本分支工作区 → **21,795,936 B**；`size -m`：`__TEXT` 20,119,552、`__text` 14,096,172。
+- 差值：**+49,968 B（+0.230%）**；`__TEXT` +32,768 B；`__text` +19,344 B。
+- **门槛判定：未通过。** 方案默认门槛是「stripped 文件不增长」，本次整包增长 0.23%，
+  如实记录，不宣称体积收益。差值原因（按方案要求单列）：
+  1. 新增正确性路径：稳定身份类型（`plugin/identity.rs`、`ThreadListViewKey`）、快照补丁结构与
+     单点发布（`SnapshotPatch` / `commit_projection` / `publish_session_fields`）、完成门接入与
+     结果可见通知（Cron/Tasks/Workflow）、新增 i18n key。
+  2. 被替代实现的删除不产生 release 差异：删除 `ask_user_popup.rs`（386 行）与
+     `close_ask_user_popup_*`（30 行）前后各构建一次，产物字节完全相同（21,795,936 B），
+     即 LTO 早已消除这些未使用代码——源码行数下降不能替代字节差值。
+- 口径限制：release 已 `strip = "symbols"`，无法做符号级 TUI / 公共依赖归属统计，只报整包与
+  section 口径；方案 §3.3 的前轮 `.text` 归属来自 Linux 端专门统计，本机不可复现。
+  **Linux x86_64 未测**，不用 macOS 比例换算。
+
+## e2e 真实终端验收（批次 G）
+
+- 命令：`cd e2e && npm run e2e:l0`（L0 PR 冒烟，11 个文件，串行、无 retry）。
+- 结果：**9/11 通过 / 2 失败**（总耗时 7m28s；通过项含 plugin 卸载冻结回归、legacy history
+  升级、workspace MCP resources、tool-cards、fresh-setup 等）。
+- 失败项（隔离重跑稳定复现，非 flake）：
+  1. `tests/scenarios/workspace-slow-git.test.ts` —— 「一次准入至多一轮发现」断言：
+     窗口内发现 8 次（期望 ≤3）。
+  2. `tests/smoke/viewport-40x8.test.ts` —— 40×8 下等待 turn footer 超时（180s）。
+- **预存判定（非本分支引入）**：在干净基线 worktree `/tmp/peri-tui-baseline`（detached `56a8ccd8d`，
+  `git status` 无输出）用同一命令跑同一对用例，**同样失败**：slow-git 发现 7 次（>3），
+  viewport-40x8 同样 footer 超时 3m08s。本分支相对基线只改 `peri-tui/` 与文档（未改
+  `e2e/`、`helpers/`、peri-sdk / peri-acp / peri-agent），失败数值亦接近，判定为预存失败。
+- 处理：按方案「发现的现有失败单列，不被重构掩盖」，如实记录并单列跟进，本批不修
+  （涉及后端 workspace 发现计数与 replay 驱动机制，超出本批授权范围）。
+- 补充用例（覆盖本批改动的面板交互）：`npm run e2e -- --file tests/panels/model-switch.test.ts
+  --serial --retry 0` → **1/1 通过**（14s；`/model` 面板左右分栏、字段切换与宿主 settings.json 持久化）。
+  L0 内已通过的 plugin 卸载冻结回归与 legacy history 升级分别覆盖 Plugin 与 ThreadBrowser 面板。
+- 未执行：`npm run e2e:l0` 之外的 L1 全量（`tests/panels/plugin.test.ts` 依赖 LLM Judge 与
+  外部凭据，未跑）；真实终端手测未做。**e2e 门禁未通过**（首轮失败 2 > 预算 0），不作为
+  本分支交付结论。
 
 ## 已完成（按提交）
 
@@ -54,6 +98,27 @@
 | `bc6140eac` | Login：删除确认冻结 provider id、目标消失不请求并提示、编辑态回退改由 effect 承担、Edit 视图拆分 |
 | `02f36814d` | Tasks：三段行表统一绘制/命中/取消解析、选中收敛、取消身份与结果可见、鼠标 click as enter、测试拆文件 |
 | `1f9aa8c71` | Agent/Status/Goal：hook 顺序修正、Agent 命中改用实测视口（修 1 列偏差）、点击选择、cursor 收敛、Status 首次有测试 |
+| `8b9da336c` | 文档同步：设计、本 issue、`docs/code-index/peri-tui.md` 与 `peri-tui/CLAUDE.md` 更新到批次 C/D 收口前状态 |
+| `11898b7c7` | Workflow：渲染体 7 处 `.write()` 移入 effect 边界；选中身份 index→run id；`kill_run` 无会话不发空串、发送前校验目标存在、结果经通知可见；守卫选 `CompletionGate`（同时覆盖换会话与面板卸载）；判定抽 `handle_workflow_event` + `WorkflowEventCtx`；删 `index_for_run_id`/`clamp_run_selection`；workflow.rs 859 行 + 14 用例 |
+| `207c14a33` | ThreadBrowser：归档/删除回写按捕获的身份（`ThreadListViewKey` = 会话 + 重置代次 + 作用域 + 归档视图）逐项复验，不符只告警不写列表；归档方向用捕获身份；删除失败给出可见通知；新增 9 用例 |
+| `dad81ed6c` | `service_snapshot.rs` 753→228 行，拆 `commit`/`commit_test`/`file_scan`/`memory_scan`/`session_metadata`/`thread_list_refresh`；单点发布入口 `commit_projection`（短锁内逐字段 compare-and-set、保留 PartialEq 短路）；失效门 `identity_is_current` 单点；`SERVICE_SNAPSHOT` 写锁只留在 `commit.rs`；`model/edit.rs` 最后一处整快照回写改走窄入口 `publish_session_fields` |
+| `d8f6f0eee` | Plugin：新增 `plugin/identity.rs`（已安装项/市场条目稳定身份，`plugin_id()` 与请求同源）；详情与市场详情按身份定位并逐项复验，身份消失即清理走不可用提示；删除 `operation_loading` 字符串标志与延迟写线程，缓存仅由成功且复验通过的市场请求触发；新增 `plugin/guard_test.rs` 10 用例 |
+| `4cbe66ffa` | ConfirmPopup：`ConfirmPayload.version` + 渲染帧快照（所见动作），执行前比对版本，不一致不执行不关闭并提示；删除无消费者的 `popups/ask_user_popup.rs`（386 行）与其测试、模块声明，保留仍有消费者的 `PopupKind::AskUser`/`popup_text_shell!` |
+| `7abae1806` | C 收口：Cron 会话守卫、Tasks 取消、Workflow kill 统一接入 `OperationScope`（会话 id + `BRIDGE_RESET_COUNTER`）与完成门；同作用域同目标在途重复触发判定为「拒绝」；新增 `tasks/tests/operations.rs` 与 cron/tasks 回归 |
+
+## 交付证据（方案 §11）
+
+1. **职责映射**：见设计文档「面板职责映射」（17 个面板 × 状态 owner / 数据来源 / 动作入口 / 完成门）。
+2. **依赖检查**：每笔提交的 `check-layer-imports.sh`（22 条规则）0 违规；`application/operations/`
+   为纯状态机、不读 kit atoms；`panels/shared/list.rs` 只做几何推导，无 RPC 与文件 I/O。
+3. **行为记录**：`./scripts/cargo-rmcp-patched.sh test --locked -p peri-tui --lib` 由 1845 增至
+   **1999 passed / 0 failed / 6 ignored**（净增 154 例，含 11 个新增测试文件）；新增覆盖确认期间
+   列表刷新、切会话旧响应、关闭重开、结果未知三态、同 key 在途唯一、快照提交门与失效门。
+4. **性能与体积记录**：见「基线」节。
+5. **清理记录**：删除 `popups/ask_user_popup.rs`（386 行）及其测试与模块声明；删除
+   `popup_overlay::close_ask_user_popup_for_request/for_owner`（旧弹窗删除后已无调用者的
+   legacy 清理路径）；删除 `operation_loading` 字符串标志与延迟写线程；删除
+   `index_for_run_id`/`clamp_run_selection`；批次 B/C 已删除被替代的 MCP/Cron/Memory 旧实现。
 
 ## 决策记录（本次授权内的裁决）
 
@@ -68,20 +133,23 @@
 
 ## 已确认缺陷（批次 A 审计，按最新状态标注）
 
-- 已修复 Cron：删除确认按下标重取；已修复 Memory：可见项写死与区域来源不一致；已修复 Tasks：取消按下标取 `task_id`、无会话静默发送、越界静默关面板；已修复 Config/Model：保存失败静默或假装成功；已修复 Theme：渲染期写状态、hook 顺序、命中差 1 行、选择身份漂移；已修复 Login：删除确认按 cursor 重取、渲染期写状态；已修复 Agent/Goal：hook 排在条件分支之后；已修复 Plugin 搜索/操作：把各自的票据与代次实现收敛到共享原语。
-- 待修复 Workflow（批次 E）：渲染体内写 `active_run`/`run_sync_missing`/`preselect_key` 与 `phase_sel`/`agent_sel`；`kill_run` 无快照代次校验、无活动会话时按空串发送。
-- 待修复 Plugin（批次 E）：插件详情与市场详情按 index 定位，而列表每 2s 被重写；任意键清 `operation_loading` 并按会话无关方式刷盘缓存。
-- 待修复 ThreadBrowser（批次 E）：归档回写无会话/代次/过滤复验。
-- 待修复 AskUserPopup（批次 F）：payload 指纹变化分支在渲染体内写状态。
-- 待核 `confirm_popup`（批次 F）：确认执行时重读全局 `CONFIRM_PAYLOAD`（非展示时副本），未校验版本。
-- 未接入原语：`cron/actions.rs` 会话级守卫仍无显式代次；Tasks 取消仍无票据/完成门（连按 Enter 会重复发送，依赖服务端幂等）。
+- 已修复（批次 A 审计清单）：Cron 删除确认按下标重取；Memory 可见项写死与区域来源不一致；Tasks 取消按下标取 `task_id`、无会话静默发送、越界静默关面板；Config/Model 保存失败静默或假装成功；Theme 渲染期写状态、hook 顺序、命中差 1 行、选择身份漂移；Login 删除确认按 cursor 重取、渲染期写状态；Agent/Goal hook 排在条件分支之后；Plugin 搜索/操作把各自的票据与代次收敛到共享原语。
+- 已修复（批次 E）：Workflow 渲染体内写 `active_run`/`run_sync_missing`/`preselect_key`/`phase_sel`/`agent_sel` 已移入 effect；`kill_run` 改为固定 run id 并加完成门（无活动会话不再按空串发送，目标消失有可见提示）；选中身份由下标改为 run id。Plugin 详情/市场详情按稳定身份定位（`plugin/identity.rs`），删除 `operation_loading` 字符串标志与延迟写线程，缓存仅由成功且身份复验通过的市场请求触发。ThreadBrowser 归档/删除逐项身份复验，不符只告警不写列表，删除失败可见。`service_snapshot.rs` 拆分后最后一个整快照回写点（`model/edit.rs`）改走窄入口 `publish_session_fields`。
+- 已修复（批次 F）：`confirm_popup` 改为执行前比对版本（`ConfirmPayload.version`），不一致则不执行、不关闭并给出 `popup-confirm-superseded` 提示；无消费者的 `popups/ask_user_popup.rs` 及测试整文件删除。
+- 已接入原语：`cron/actions.rs` 会话守卫、Tasks 取消、Workflow kill 均改用 `OperationScope`（会话 id + `BRIDGE_RESET_COUNTER`）+ 完成门；同作用域同目标的在途重复触发判定为「拒绝」（不发、不提示）。
 
 ## 待完成 / 风险
 
-1. 批次 E：Plugin、ThreadBrowser、Workflow 迁移与 `service_snapshot.rs`（753 行）按职责拆分；拆分必须保持「提交与失效门」单点，不得分散进各刷新单元。
-2. 批次 F：详情外壳统一、弹窗生命周期、已确认无消费者路径的清理。
-3. 批次 C/D 收口：Cron 会话守卫与 Tasks 取消接入原语；「集中配置服务」抽象与向导字段。
-4. 客户端内部超时目前仍映射为失败而非结果未知——区分它需要客户端返回类型化错误，字符串匹配不予采用。
+1. 批次 D 剩余：「集中配置服务」抽象与向导字段未开始（其余 Config/Model/Login/Theme 已迁移）。
+2. 「详情迁移共享外壳」（方案原批次 F 项）经复核不做：`panel_shell!` 与 `panel_scroll` 已共享外壳，
+   `ScrollbarGeometry` 全仓唯一使用者是 SubAgentDetail，无第二真实用例，按设计 §5.1 拒绝投机抽象。
+3. 客户端内部超时目前仍映射为失败而非结果未知——区分它需要客户端返回类型化错误，字符串匹配不予采用；
+   插件搜索取消仍为静默丢弃（无结果呈现）。Cron 操作 10s 超时同理未类型化。
+4. 不接管已发送变更的任务所有权（方案 §6.2）：本批只落请求协调的最小状态门。
 5. Status 面板在 60×18 下内容被裁切（页签栏与内容均分内区高度），本批明确不新增滚动能力，待产品决策。
-6. 体积与性能对照未做（见基线）；Linux 口径、e2e 与真实终端手测未执行。
+6. 体积与性能对照：体积已配对测量（未达不增长门槛）；30 轮性能配对中位数、Linux `.text` 口径、
+   真实终端手测未执行。e2e L0 有 2 个**预存失败**（`workspace-slow-git`、`viewport-40x8`，
+   基线同样失败，见上），需单独立项跟进，本批未修。
 7. 迁移期间面板新旧实现并存属批次内允许状态；每完成一个面板即删除其被替代逻辑，不留双写。
+8. 预先存在、本批未改动：`peri-tui/src/kit/acp_events/system.rs` 为 1007 行（基线同为 1007 行，
+   本批 diff 为空），超出 STD-SIZE-001 的 1000 行上限；不在本批授权范围，仅记录，未顺手重构。

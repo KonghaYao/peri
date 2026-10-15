@@ -38,13 +38,13 @@ ACP notification → acp_notifier → acp_bridge / BridgeState
 - `ACTIVE_EXECUTION_CWD` 仅在 session 初始化提交后发布，驱动路径展示、文件补全和本地导出；启动 cwd 独立保留给新会话。Hooks / Plugin / MCP 面板按 active session ID 查询实际环境，不能持续回写启动快照。
 - History 面板使用单行会话列表与固定详情/操作栏；按容器高度计算视口，列表和只读预览各持有独立滚动状态。刷新按 thread ID 保留选择，执行操作使用已选身份，删除确认固定待删 ID，不能用旧索引查新列表决定目标。
 - 面板列表的可见范围、滚动起点与鼠标命中由 `kit/panels/shared/list.rs` 的同一次推导给出（`ListMetrics` + `ListViewport`），不写死可见项常量；面板高度以 `panel_overlay::panel_height` 为唯一权威。详情与操作绑定业务稳定身份（id/name/path）而非列表下标；目标消失由 `use_effect` 在更新阶段收敛，渲染只读状态。分段列表、可变行高与无列表面板可不接入该机制，但须在面板内写明理由与替代做法。契约见 [TUI 面板架构](../docs/design/tui-panel-architecture.md)。
-- 面板操作的作用域与完成门由 `application/operations/` 统一表达（`OperationScope` / `CompletionGate` / `OperationOutcome`）：发起取票、完成校验代次与作用域、取消按结果未知表达；面板不自建票据或代次。确认执行只按确认时固定的稳定身份，目标消失则不执行并给可见提示，不回退为按下标取当前项。事件判定集中在 `handle_<panel>_event(event, ctx)`，组件只做注册。
+- 面板操作的作用域与完成门由 `application/operations/` 统一表达（`OperationScope` / `CompletionGate` / `OperationOutcome`）：发起取票、完成校验代次与作用域、取消按结果未知表达；面板不自建票据或代次，同作用域同目标的在途重复触发判定为拒绝（不发、不提示）。确认执行只按确认时固定的稳定身份，目标消失则不执行并给可见提示，不回退为按下标取当前项。事件判定集中在 `handle_<panel>_event(event, ctx)`，组件只做注册。
 - Config / Model / Login / Theme 的持久配置仍编辑宿主启动时选中的 `ConfigSource`，面板明确标识“宿主配置”和实际保存路径；权限切换（配置行、Shift+Tab、slash）及会话模型选择等运行请求继续按 session ID 路由。整份配置上送不带 session ID；切换会话不重定位宿主配置写入。同配置源会话刷新 provider 连接并失效模型缓存，保留各自的模型/profile 选择和 frozen 数据。
 - render body 不写 atom；render 内派生缓存使用既有无通知写入模式，副作用放在事件或 effect 边界。
 - 同一个 `State` 的读守卫不得跨过对该状态的写：在条件或 `match` 里「先 `read()` 再在同一表达式内 `write()`」会自锁挂死（内部 RwLock 同线程不可重入），表现为测试永久挂起而非 panic。先把值取到局部变量（`.clone()` / 拷贝）再写，测试探针与事件处理同样适用。
 - cancel 关闭 reverse interaction owner，不等于执行终态已确认；匹配当前 execution 的 done 仍须透传一次以结束 loading，重复 done 与旧 execution 终态不得影响新 turn。
 - 消息区按 generation 验证 publication，复用不可变布局；冷缓存保持选择、复制与高度。主消息/详情共用 entry 缓存；预算不含 canonical 历史、轻量索引或整体 RSS。
-- Cron/MCP 经 ACP 消费；快照/last-good 按 session generation 隔离，失败可见；无会话明确标注启动插件/Hooks。scheduler/pool 及关闭权属宿主。
+- Cron/MCP 经 ACP 消费；快照/last-good 按 session generation 隔离，失败可见；无会话明确标注启动插件/Hooks。scheduler/pool 及关闭权属宿主。服务快照的投影写入保持单点：唯一发布入口是 `kit/service_snapshot/commit.rs` 的 `commit_projection`（短锁内逐字段 compare-and-set，失败即整体放弃），会话字段用窄入口 `publish_session_fields`；`SERVICE_SNAPSHOT` 写锁与失效门只允许出现在 `commit.rs`，刷新单元只产出 patch。
 - Assistant VM 的完整气泡以 `Arc<TuiAssistantBubble>` 发布，快照与 im 节点 COW 共享不可变 payload；修改 fold/终态前先判定是否真的变化，再复制或 `Arc::make_mut`，不能改动旧快照。后台流式累积仍持有独占正文，不能把共享发布气泡直接当逐 chunk 写入缓冲。
 - Markdown 稳定分片仅冻结安全空行边界，fence 内部空行不能切断代码块；引用、列表、表格与未闭合 fence 保留可变尾部，terminal full parse 校正。正文前景与代码背景须同时进入内外层缓存 key，主题变化只复用 parsed blocks，不复用旧样式。
 - `#[component]` 的 hooks 必须在所有条件分支、`match` 与提前返回前按稳定顺序调用。

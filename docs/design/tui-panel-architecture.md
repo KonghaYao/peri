@@ -79,6 +79,11 @@
 详情仍指向同一对象。详情目标消失时由更新阶段的 effect 收敛回列表，渲染过程不写状态。
 详情视图的行构造、按钮布局与命中几何是纯推导，渲染与命中共用同一结果。
 
+共享外壳只提取真实重复：目前由 `panel_shell!` 提供框线与底栏，`panel_height` /
+`panel_content_rows`（`kit/panel_overlay.rs`）与 `panels/shared/list.rs` 的视口提供高度、
+滚动与命中，其他「详情外壳」不因形态相似而抽取——例如滚动条几何（`ScrollbarGeometry`）
+目前唯一使用者是 SubAgent 详情，保持面板私有，不预先抽象成通用组件。
+
 ### 操作作用域与完成门
 
 面板操作用三元组表达作用域：会话身份、面板代次与取消标记。发起操作时取票并固定目标
@@ -90,13 +95,16 @@
 
 原语已落在 `application/operations/`（`OperationScope` / `OperationTicket` /
 `CompletionGate` / `OperationOutcome`）：保持纯状态机，不读 atom，作用域由调用方构造，
-依赖方向不反向指向 `kit`。已迁移插件搜索与插件操作；面板关闭由门的 `Drop` 取消在途票，
-取消表达为 `OutcomeUnknown`。
+依赖方向不反向指向 `kit`。作用域是「活动会话 id + 前端重置代次（`BRIDGE_RESET_COUNTER`）」，
+请求代次由门自己维护；面板关闭由门的 `Drop` 取消在途票，取消表达为 `OutcomeUnknown`。
 
-尚未落地（按 active issue 记录）：会话级守卫（Cron 动作）仍无显式代次；搜索路径的取消仍是
-静默丢弃而不产生结果；已发送变更的任务所有权与应用层结果跟踪（方案 §6.2）未接管，本层
-只做请求协调；客户端内部超时目前仍映射为失败而非结果未知（区分它需要客户端返回类型化
-错误，字符串匹配不予采用）。
+已接入：插件搜索与插件操作、Cron 动作、Tasks 取消、Workflow 终止运行。同作用域同目标的
+在途请求不再重复发送；晚到结果经 `accept` 拒收后只留日志，不改动可见状态（面板已关闭也
+不产生提示——关闭是观察者状态，不是业务终态）。
+
+尚未落地（按 active issue 记录）：搜索路径的取消仍是静默丢弃而不产生结果；已发送变更的任务
+所有权与应用层结果跟踪（方案 §6.2）未接管，本层只做请求协调；客户端内部超时目前仍映射为
+失败而非结果未知（区分它需要客户端返回类型化错误，字符串匹配不予采用）。
 
 「确认的目标消失」是统一的守卫结果：确认时固定的身份在列表刷新后已不存在则不执行，
 给出可见提示（`app-confirm-target-missing`），不回退为按下标取「现在这一项」。
@@ -106,10 +114,44 @@
 面板消费的列表、计数与错误来自 `service_snapshot` 等投影协调器：它们按类别维护上次
 成功值与本次错误，并用变更失效与节流减少查询。面板只订阅投影，不直接写回投影字段。
 
+投影写入保持单点：唯一发布入口是 `service_snapshot/commit.rs` 的 `commit_projection`
+（短锁内逐字段 compare-and-set，身份失效则整体放弃），会话级写入走窄入口
+`publish_session_fields`；`SERVICE_SNAPSHOT` 写锁与失效门只允许出现在 `commit.rs`，
+刷新单元只负责采样并产出 patch；拆分不得把提交或失效门分散进各刷新单元。
+
+### 面板职责映射
+
+每个面板的状态 owner、数据来源、动作入口与完成门（`file:line` 以代码为准）：
+
+| 面板 | 状态 owner | 数据来源 | 动作入口 | 作用域 / 完成门 |
+| --- | --- | --- | --- | --- |
+| Hooks | `HOOK_LIST` | `plugin/list` 投影 | `handle_hooks_event` | 无 mutation（只读） |
+| MCP | `MCP_SERVERS` + 面板内 `view`/`detail_key` | `mcp/list` 投影 | `handle_mcp_event` | 无 mutation；详情按 server 名，目标消失由 effect 收敛 |
+| Cron | `CRON_JOBS` + 面板内 `selected`/`confirm_delete` | `cron/list` 投影 | `handle_cron_event` → `actions::dispatch` | `OperationScope` + `CompletionGate`；确认固定 `job.id` |
+| Memory | `MEMORY_LIST` | 本地扫描 `memory_scan.rs` | `handle_memory_event` | 无 mutation（只读，编辑器经既有入口） |
+| Tasks | `BG_TASKS`/`BG_TASK_REVISION` + 面板内 `CancelGates` | bridge `handle_bg_task_snapshot` + `CRON_JOBS` + `VIEW_MODELS` | `handle_tasks_event` → `dispatch_cancel` | `OperationScope` + `CompletionGate`；同目标在途重复触发为拒绝 |
+| Agent | 面板内 `cursor`（只读） | `SERVICE_SNAPSHOT` + `VIEW_MODELS` | `handle_agent_event` | 无 mutation（只读） |
+| Status | 面板内 `active_tab`（只读） | `SERVICE_SNAPSHOT` + `VIEW_MODELS` | `handle_status_event` | 无 mutation（只读） |
+| Goal | `GOAL_SNAPSHOT` | bridge `handle_goal_snapshot` | 内联 handler | 无 mutation（只读） |
+| Config | `PERI_CONFIG_HANDLE` | 宿主配置 handle | `handle_config_event` → `activate_row` | CAS 保存，失败回滚不投影 |
+| Model | `PERI_CONFIG_HANDLE` | 宿主配置 handle | `handle_model_event` → `switch_active_alias` | CAS 保存；保存失败不写内存、不投影 |
+| Login | `PROVIDER_LIST` | providers 投影 + 配置 handle | `handle_login_event` → `save_login_edit` | 候选副本落盘成功后才发布；按 provider id 定位 |
+| Theme | 面板内 `selected_theme`/`original_theme` + 模块内目录缓存 | 本地目录扫描 + 下载 | `handle_theme_event` → `trigger_download_themes` | 下载任务唯一租约（`DownloadRun::try_claim`） |
+| Plugin | `PLUGIN_LIST` + `DiscoverState`/`OperationState` | `plugin/list` 投影 + marketplace 只读缓存 | `handle_search_event` / `handle_panel_event` | `OperationScope` + `CompletionGate`；身份见 `plugin/identity.rs` |
+| ThreadBrowser | `THREAD_LIST` + 浏览作用域 atoms | `thread_list_refresh` 分页 cursor | 内联 handler + `request_more_threads` | 归档/删除按 `ThreadListViewKey` 逐项复验 |
+| Workflow | `WORKFLOW_SNAPSHOT`（独立轮询单元） | `workflow/list_runs`（2s 轮询） | `handle_workflow_event` → `dispatch_kill` | `OperationScope` + `CompletionGate`；发送前 `snapshot_contains_run` |
+| AskUser | `ASK_USER_PENDING` + 面板内 `FormState` | bridge `handle_ask_user` | 内联 handler | owner 指纹重置；提交携固定 owner/request_id |
+| SubAgentDetail | `SELECTED_SUBAGENT_ID` | `VIEW_MODELS` / `BG_LIVE_DETAIL` | 内联 handler | 无 mutation（只读） |
+
+固定行高列表统一走 `panels/shared/list.rs` 视口；分段（Tasks）、可变行高（Agent）与无列表
+（Status、Goal）面板按「公共组件边界」自持测量，理由写在各自文件内。
+
 ## 键位与优先级约定
 
 - Esc 由面板内的子视图（详情、表单、确认）先消费，再落到面板关闭。
 - 确认类状态是面板内的一次性门：进入确认后，列表刷新不改变待执行目标。
+- 确认弹窗执行的是「渲染时看到的那次动作」：版本与渲染帧不一致时不执行、不关闭，
+  并给出被替代提示（`popup-confirm-superseded`），等待用户对当前内容重新确认。
 - 主题、语言与终端尺寸变化对面板是普通更新，不触发面板重建。
 
 ## 验证要求
