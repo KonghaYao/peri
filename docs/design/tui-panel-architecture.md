@@ -109,6 +109,22 @@
 「确认的目标消失」是统一的守卫结果：确认时固定的身份在列表刷新后已不存在则不执行，
 给出可见提示（`app-confirm-target-missing`），不回退为按下标取「现在这一项」。
 
+### 配置落盘边界
+
+四个配置编辑面板（Config / Model / Login / Theme）共用同一条写入规则，规则只有一份实现：
+`kit/config_service.rs::persist_candidate`。
+
+1. 调用方在候选副本上改（不动全局 handle），把候选交给 `persist_candidate`。
+2. 该入口落盘并给出可见提示：成功写 `config-saved`（1s），失败写 `tracing::warn` 与
+   `config-save-failed`（2s，带原因），返回 `false`。
+3. 只有返回 `true` 时调用方才提交内存句柄、投影与 ACP 推送——失败时用户看到的仍是已
+   持久化的值。不可逆动作同样适用（删除 provider 落盘失败则不删：不能显示一个重启后
+   会复活的结果）。
+
+被收敛的是「落盘 + 提示」这一真实重复的边界；候选的构造方式与成功后的发布动作（提交
+哪些句柄、是否推送 ACP）属各面板语义，不并入公共实现。测试经 `persist_candidate_with`
+注入落盘结果，不写真实磁盘。
+
 ### 快照与投影
 
 面板消费的列表、计数与错误来自 `service_snapshot` 等投影协调器：它们按类别维护上次
