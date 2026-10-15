@@ -12,13 +12,14 @@
 //! 行结构、可见窗口与鼠标命中由 `viewport` 模块的行表统一推导（绘制、命中、取消目标
 //! 解析读同一份结果）。
 
-use std::time::Duration;
+use std::{collections::HashMap, time::Duration};
 
 use crate::app::panel_types::PanelKind;
+use crate::application::operations::{CompletionGate, OperationScope, OperationTicket};
 use crate::i18n;
 use crate::kit::atoms::{
-    ACP_CLIENT_HANDLE, BG_TASKS, BgTaskEntry, CRON_JOBS, CronJobSummary, LANG_VERSION,
-    NOTIFICATION, Notification, VIEW_MODELS,
+    ACP_CLIENT_HANDLE, ACTIVE_SESSION_ID, BG_TASKS, BRIDGE_RESET_COUNTER, BgTaskEntry, CRON_JOBS,
+    CronJobSummary, LANG_VERSION, NOTIFICATION, Notification, VIEW_MODELS,
 };
 use crate::kit::list_nav::{next_selection, previous_selection};
 use crate::kit::panel_mouse::{AreaTracker, is_scrollbar_column};
@@ -52,11 +53,24 @@ const NO_SESSION_HINT_KEY: &str = "panel-tasks-cancel-no-session";
 /// 取消目标已不在列表里时的提示 key——不发请求，且结果必须对用户可见。
 const TARGET_GONE_HINT_KEY: &str = "panel-tasks-cancel-target-gone";
 
+type CancelGates = HashMap<String, CompletionGate>;
+
 #[component]
 pub fn TasksPanel(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
     // TUI-HOOK-001：全部 hook 在条件分支与渲染体之前按稳定顺序调用。
     let theme_def = hooks.use_atom(&THEME_ATOM);
     let selected = hooks.use_state(|| 0usize);
+    let cancel_gates = hooks.use_state(CancelGates::default);
+    let _ = hooks.use_atom(&ACTIVE_SESSION_ID);
+    let _ = hooks.use_atom(&BRIDGE_RESET_COUNTER);
+    let cancel_scope = current_scope();
+    hooks.use_effect(
+        {
+            let scope = cancel_scope.clone();
+            move || reset_cancel_scope(&mut cancel_gates.write(), scope)
+        },
+        cancel_scope.clone(),
+    );
     // 外部滚动状态——面板滚轮仲裁（panel_scroll.rs）驱动，统一 3 行/格 + 节流
     let sv = hooks.use_state(ScrollViewState::default);
 
@@ -110,6 +124,8 @@ pub fn TasksPanel(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
         selected,
         viewport: viewport.clone(),
         bg_tasks: bg_tasks.clone(),
+        cancel_gates,
+        cancel_scope,
     };
     hooks.use_event_handler_with_options(
         EventScope::Current,
@@ -119,7 +135,11 @@ pub fn TasksPanel(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
     );
 
     #[cfg(test)]
-    tests::visit_mounted_panel(tests::MountedPanel { selected, area });
+    tests::visit_mounted_panel(tests::MountedPanel {
+        selected,
+        area,
+        cancel_gates,
+    });
 
     let theme = theme_def.read();
     let sel = viewport.selected();
@@ -180,6 +200,8 @@ struct TasksEventCtx {
     selected: State<usize>,
     viewport: TasksViewport,
     bg_tasks: Vec<BgTaskEntry>,
+    cancel_gates: State<CancelGates>,
+    cancel_scope: OperationScope,
 }
 
 /// 面板事件处理——判定集中在这里、组件只做注册，测试可经 `tests::MountedPanel`
@@ -232,7 +254,7 @@ fn activate_row(ctx: &TasksEventCtx, index: usize) {
     match ctx.viewport.cancel_action(index, &ctx.bg_tasks) {
         // 请求真的交给发送侧才关闭面板：没发出去时 dispatch 已提示用户，面板留在原地
         CancelAction::Cancel(target) => {
-            if dispatch_cancel(target) {
+            if dispatch_cancel(target, ctx.cancel_scope.clone(), ctx.cancel_gates) {
                 close_panel();
             }
         }
@@ -248,13 +270,42 @@ fn activate_row(ctx: &TasksEventCtx, index: usize) {
 ///
 /// 会话身份缺失时不发请求：旧实现取 `unwrap_or_default()` 的空串 sessionId，请求必然
 /// 被拒，而用户看不到任何原因；这里提示用户并保持面板打开。
-fn dispatch_cancel(target: CancelTarget) -> bool {
-    let Some(session_id) = active_session_id() else {
+fn dispatch_cancel(target: CancelTarget, scope: OperationScope, gates: State<CancelGates>) -> bool {
+    if scope.session_id().is_empty()
+        || scope != current_scope()
+        || active_session_id().as_deref() != Some(scope.session_id())
+    {
         tracing::warn!(target: "tasks-panel", "no active session, cancel skipped");
         notify(i18n::tr(NO_SESSION_HINT_KEY));
         return false;
+    }
+    // 目标有效性由当帧行表的 CancelAction 判定；不能用后来刷新的列表替换用户所见身份。
+    let ticket = {
+        let mut gates = gates.write();
+        let gate = gates.entry(target.task_id.clone()).or_default();
+        if gate.is_pending() && gate.scope_matches(&scope) {
+            tracing::debug!(task_id = %target.task_id, "duplicate task cancel skipped");
+            return false;
+        }
+        gate.begin(scope)
     };
-    send_cancel(session_id, target)
+    send_cancel(ticket, gates, target)
+}
+
+fn reset_cancel_scope(gates: &mut CancelGates, scope: OperationScope) {
+    gates.retain(|_, gate| !gate.reset_scope(scope.clone()));
+}
+
+fn current_scope() -> OperationScope {
+    // 测试仍经既有会话接缝注入；生产作用域只取当前前端投影。
+    #[cfg(test)]
+    if let Some(forced) = tests::forced_session() {
+        return OperationScope::new(forced.unwrap_or_default(), BRIDGE_RESET_COUNTER.get());
+    }
+    OperationScope::new(
+        ACTIVE_SESSION_ID.state().read().clone(),
+        BRIDGE_RESET_COUNTER.get(),
+    )
 }
 
 /// 取消请求要带的会话身份；拿不到时为 None。
@@ -269,43 +320,91 @@ fn active_session_id() -> Option<String> {
 }
 
 /// 真正发出取消请求；返回是否交给发送侧。
-fn send_cancel(session_id: String, target: CancelTarget) -> bool {
+fn send_cancel(ticket: OperationTicket, gates: State<CancelGates>, target: CancelTarget) -> bool {
     // 测试接缝：测试构建下把请求交给接缝记录并直接返回，不 spawn——真实发送分支只能由
     // 人工 / 端到端验证覆盖（单测进程里 ACP_CLIENT_HANDLE 未必可用）。
     #[cfg(test)]
-    if tests::intercept_cancel_request(&session_id, &target) {
+    if tests::intercept_cancel_request(ticket.scope().session_id(), &target) {
+        tests::capture_cancel_ticket(ticket, gates, target);
         return true;
     }
     let Some(client) = ACP_CLIENT_HANDLE.get().cloned() else {
         tracing::warn!(target: "tasks-panel", "ACP_CLIENT_HANDLE not set, cancel skipped");
+        gates.write().remove(&target.task_id);
         notify(i18n::tr(NO_SESSION_HINT_KEY));
         return false;
     };
-    let CancelTarget { task_id, kind } = target;
+    // 发出前检查身份与目标；已发出的变更仍由 ACP 处理，不因面板关闭撤销。
+    if ticket.is_cancelled()
+        || ticket.scope() != &current_scope()
+        || client.current_session_id().as_deref() != Some(ticket.scope().session_id())
+    {
+        gates.write().remove(&target.task_id);
+        notify(i18n::tr(NO_SESSION_HINT_KEY));
+        return false;
+    }
     tokio::spawn(async move {
-        match client.cancel_bg_task(&session_id, &task_id).await {
-            Ok(value) => tracing::info!(
+        // spawn 被调度前可能已发生会话重置；此时只能丢弃，不能给新会话提示。
+        // 交给发送侧后自动关闭面板不撤销发送，只复检数据作用域。
+        if ticket.scope() != &current_scope()
+            || client.current_session_id().as_deref() != Some(ticket.scope().session_id())
+        {
+            tracing::debug!(task_id = %target.task_id, "stale task cancel skipped before send");
+            return;
+        }
+        let result = client
+            .cancel_bg_task(ticket.scope().session_id(), &target.task_id)
+            .await;
+        complete_cancel(gates, &ticket, &target, result);
+    });
+    true
+}
+
+fn complete_cancel(
+    gates: State<CancelGates>,
+    ticket: &OperationTicket,
+    target: &CancelTarget,
+    result: Result<serde_json::Value, peri_acp::transport::types::AcpError>,
+) -> bool {
+    if ticket.scope() != &current_scope() {
+        tracing::warn!(task_id = %target.task_id, ?result, "task cancel result dropped: scope changed");
+        return false;
+    }
+    let Some(mut gates) = gates.try_write() else {
+        tracing::warn!(task_id = %target.task_id, ?result, "task cancel result dropped: observer gone, outcome unknown");
+        return false;
+    };
+    let Some(gate) = gates.get_mut(&target.task_id) else {
+        tracing::debug!(task_id = %target.task_id, "task cancel result dropped: no pending target");
+        return false;
+    };
+    if !gate.accept(ticket) {
+        tracing::debug!(task_id = %target.task_id, "task cancel result dropped: stale ticket");
+        return false;
+    }
+    // 保留目标门的代次，旧票不能在后续同目标请求中再次生效。
+    let CancelTarget { task_id, kind } = target;
+    match result {
+        Ok(value) => tracing::info!(
+            task_id = %task_id,
+            kind = %kind,
+            ?value,
+            "tasks panel: cancel bg task"
+        ),
+        Err(error) => {
+            tracing::warn!(
                 task_id = %task_id,
                 kind = %kind,
-                ?value,
-                "tasks panel: cancel bg task"
-            ),
-            Err(error) => {
-                tracing::warn!(
-                    task_id = %task_id,
-                    kind = %kind,
-                    %error,
-                    "tasks panel: cancel bg task failed"
-                );
-                // 请求已发出而结果失败：面板此时已关闭，必须给用户可见反馈——把失败
-                // 当作静默日志会让用户以为任务已取消（结果未知不得呈现为取消成功）。
-                notify(i18n::tr_args(
-                    "panel-tasks-cancel-failed",
-                    &[("detail".to_string(), FluentValue::from(error.to_string()))],
-                ));
-            }
+                %error,
+                "tasks panel: cancel bg task failed"
+            );
+            // 只有完成门接纳的失败才发布提示；关闭面板不等于取消业务成功。
+            notify(i18n::tr_args(
+                "panel-tasks-cancel-failed",
+                &[("detail".to_string(), FluentValue::from(error.to_string()))],
+            ));
         }
-    });
+    }
     true
 }
 

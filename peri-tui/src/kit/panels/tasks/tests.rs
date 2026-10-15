@@ -14,6 +14,7 @@ use ratatui_kit::crossterm::event::{KeyEvent, KeyModifiers, MouseEvent};
 use ratatui_kit::ratatui::buffer::Buffer;
 use serial_test::serial;
 
+mod operations;
 mod source;
 mod viewport;
 
@@ -36,6 +37,7 @@ thread_local! {
     static CANCEL_REQUESTS: RefCell<Vec<(String, CancelTarget)>> = const { RefCell::new(Vec::new()) };
     /// 接缝是否接管取消请求。
     static CANCEL_ARMED: Cell<bool> = const { Cell::new(false) };
+    static CANCEL_TICKETS: RefCell<Vec<(OperationTicket, State<CancelGates>, CancelTarget)>> = const { RefCell::new(Vec::new()) };
     /// 强制的会话身份：`Some(None)` = 无活动会话。
     static FORCED_SESSION: RefCell<Option<Option<String>>> = const { RefCell::new(None) };
 }
@@ -52,6 +54,14 @@ pub(super) fn intercept_cancel_request(session_id: &str, target: &CancelTarget) 
     true
 }
 
+pub(super) fn capture_cancel_ticket(
+    ticket: OperationTicket,
+    gates: State<CancelGates>,
+    target: CancelTarget,
+) {
+    CANCEL_TICKETS.with(|tickets| tickets.borrow_mut().push((ticket, gates, target)));
+}
+
 /// 测试接缝：强制取消动作看到的会话身份（生产路径按 ACP client 解析）。
 pub(super) fn forced_session() -> Option<Option<String>> {
     FORCED_SESSION.with(|slot| slot.borrow().clone())
@@ -63,6 +73,7 @@ struct CancelGuard;
 impl CancelGuard {
     fn install() -> Self {
         CANCEL_REQUESTS.with(|list| list.borrow_mut().clear());
+        CANCEL_TICKETS.with(|tickets| tickets.borrow_mut().clear());
         CANCEL_ARMED.with(|armed| armed.set(true));
         Self
     }
@@ -76,6 +87,7 @@ impl Drop for CancelGuard {
     fn drop(&mut self) {
         CANCEL_ARMED.with(|armed| armed.set(false));
         CANCEL_REQUESTS.with(|list| list.borrow_mut().clear());
+        CANCEL_TICKETS.with(|tickets| tickets.borrow_mut().clear());
     }
 }
 
@@ -227,6 +239,7 @@ impl Drop for NotificationGuard {
 
 pub(super) struct MountedPanel {
     pub(super) selected: State<usize>,
+    pub(super) cancel_gates: State<CancelGates>,
     /// 组件上一帧的绘制区域（`AreaTracker`）——测试据此与渲染同源推导行号。
     pub(super) area: Option<Rect>,
 }
@@ -318,6 +331,8 @@ impl MountedPanel {
             &super::TasksEventCtx {
                 area: Some(self.area()),
                 selected: self.selected,
+                cancel_gates: self.cancel_gates,
+                cancel_scope: current_scope(),
                 viewport,
                 bg_tasks,
             },

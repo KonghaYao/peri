@@ -47,6 +47,18 @@ fn list_metrics(jobs_empty: bool) -> ListMetrics {
 pub fn CronPanel(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
     let theme_def = hooks.use_atom(&THEME_ATOM);
     let selected = hooks.use_state(|| 0usize);
+    let action_gates = hooks.use_state(actions::ActionGates::default);
+    let session = hooks.use_atom(&crate::kit::atoms::ACTIVE_SESSION_ID);
+    let reset = hooks.use_atom(&crate::kit::atoms::BRIDGE_RESET_COUNTER);
+    let action_scope =
+        crate::application::operations::OperationScope::new(session.read().clone(), *reset.read());
+    hooks.use_effect(
+        {
+            let scope = action_scope.clone();
+            move || actions::reset_scope(&mut action_gates.write(), scope)
+        },
+        action_scope.clone(),
+    );
     // 待删任务的稳定身份（job.id）；None = 不在确认模式。
     // 进入确认时固定 id，确认执行按 id 定位——确认期间列表刷新/重排不会把删除落到别的任务。
     let confirm_delete = hooks.use_state(|| Option::<String>::None);
@@ -86,6 +98,8 @@ pub fn CronPanel(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
                     area,
                     selected,
                     confirm_delete,
+                    action_gates,
+                    action_scope: action_scope.clone(),
                     viewport,
                     jobs: &jobs_for_events,
                 },
@@ -97,6 +111,7 @@ pub fn CronPanel(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
     tests::visit_mounted_panel(tests::MountedPanel {
         selected,
         confirm_delete,
+        action_gates,
     });
 
     let sel = *selected.read();
@@ -250,11 +265,6 @@ pub fn CronPanel(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
     })
 }
 
-/// H1g：cron 动作出口（toggle/remove）。service_snapshot 下次 tick 自动刷新 UI（≤2s）。
-fn cron_action(method: &'static str, id: &str) {
-    actions::dispatch(method, id);
-}
-
 /// 提示「确认的删除目标已消失」——走跨面板的确认目标守卫文案。
 ///
 /// 确认期间列表刷新使目标不在列表里时，本次删除不执行（删除不可逆，不回退为按下标
@@ -271,10 +281,12 @@ fn notify_delete_target_missing(job_id: &str) {
 
 /// 面板事件处理——判定集中在这里，组件只做注册；测试可经挂载探针取真实句柄后直接投喂。
 fn handle_cron_event(event: Event, ctx: &CronEventCtx<'_>) -> EventResult {
-    handle_cron_event_with(event, ctx, cron_action)
+    handle_cron_event_with(event, ctx, |method, id| {
+        actions::dispatch(method, id, ctx.action_scope.clone(), ctx.action_gates);
+    })
 }
 
-/// 事件判定本体：动作出口注入（生产路径 = [`cron_action`]，测试 = 捕获闭包），
+/// 事件判定本体：动作出口注入（生产路径 = `actions::dispatch`，测试 = 捕获闭包），
 /// 使「对哪个 id 做什么」可断言而不触发真实 RPC（仿 `config::toggle_beta_flag_with`）。
 fn handle_cron_event_with(
     event: Event,
@@ -387,6 +399,8 @@ struct CronEventCtx<'a> {
     selected: State<usize>,
     /// 待删任务的稳定身份（job.id）；None = 不在确认模式
     confirm_delete: State<Option<String>>,
+    action_gates: State<actions::ActionGates>,
+    action_scope: crate::application::operations::OperationScope,
     viewport: ListViewport,
     jobs: &'a [CronJobSummary],
 }

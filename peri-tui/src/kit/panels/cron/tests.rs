@@ -107,6 +107,7 @@ thread_local! {
 pub(super) struct MountedPanel {
     pub(super) selected: State<usize>,
     pub(super) confirm_delete: State<Option<String>>,
+    pub(super) action_gates: State<super::actions::ActionGates>,
 }
 
 /// 卸载时清空 visitor：断言 panic 也不把句柄泄漏给同线程的后续用例。
@@ -128,7 +129,7 @@ pub(super) fn visit_mounted_panel(panel: MountedPanel) {
 }
 
 /// 挂载面板并渲染 `frames` 帧；visitor 每帧收到 (帧序号, 当前句柄)，返回末帧缓冲。
-fn mount_panel_frames(
+pub(super) fn mount_panel_frames(
     frames: usize,
     mut visitor: impl FnMut(usize, MountedPanel) + 'static,
 ) -> Buffer {
@@ -154,6 +155,41 @@ fn mount_panel(mut visitor: impl FnMut(MountedPanel) + 'static) -> Buffer {
     mount_panel_frames(1, move |_, panel| visitor(panel))
 }
 
+struct ResetGuard(u64);
+
+impl Drop for ResetGuard {
+    fn drop(&mut self) {
+        crate::kit::atoms::BRIDGE_RESET_COUNTER.set(self.0);
+    }
+}
+
+#[test]
+#[serial]
+fn reset_effect_cancels_pending_ticket_on_next_frame() {
+    let _atoms = PanelAtomsGuard::install(vec![job(0)]);
+    let _reset = ResetGuard(crate::kit::atoms::BRIDGE_RESET_COUNTER.get());
+    let mut ticket = None;
+    mount_panel_frames(3, move |frame, panel| match frame {
+        1 => {
+            ticket = Some(
+                panel
+                    .action_gates
+                    .write()
+                    .entry("job0".into())
+                    .or_default()
+                    .begin(super::actions::current_scope()),
+            );
+            crate::kit::atoms::BRIDGE_RESET_COUNTER
+                .set(crate::kit::atoms::BRIDGE_RESET_COUNTER.get() + 1);
+        }
+        2 => {
+            assert!(ticket.as_ref().unwrap().is_cancelled());
+            assert!(panel.action_gates.read().is_empty());
+        }
+        _ => {}
+    });
+}
+
 impl MountedPanel {
     /// 走真实事件入口（动作出口注入捕获闭包）：视口按 `TEST_AREA` 推导，与组件渲染同源。
     fn event(&self, event: Event, captured: &Captured) -> EventResult {
@@ -175,6 +211,8 @@ impl MountedPanel {
                 area: Some(area),
                 selected: self.selected,
                 confirm_delete: self.confirm_delete,
+                action_gates: self.action_gates,
+                action_scope: super::actions::current_scope(),
                 viewport,
                 jobs: &jobs,
             },
