@@ -135,6 +135,7 @@
 | `e65718878` | 批次 D 收口：新增 `kit/config_service.rs` 作为四个配置面板「候选落盘 → 成功才提交 → 失败可见」的单一权威，6 个落盘点收敛；`delete_provider` 失败不再改内存与推送 ACP；新增 `config_service_test.rs` 与删除候选构造回归 |
 | `497f080c2` | 批次 D 文档：设计文档增「配置落盘边界」；code-index 增该规则路由；本 issue 更新批次表/用例数/证据/清理/决策 9-11 与三笔提交补记；`display-coverage.md` 同步 AskUser popup 删除 |
 | `b68e1f033` | 向导审计结论文档化（批次 D 剩余项：无适用改动 + 逐条证据），批次 D 标记完成；记录密钥掩码两套样式待产品决策 |
+| `66fc0fa24` | 配置落盘边界写入 `peri-tui/CLAUDE.md`（不变量 + 任务路由），补记 `b68e1f033` |
 
 ## 交付证据（方案 §11）
 
@@ -145,10 +146,16 @@
    **2002 passed / 0 failed / 6 ignored**（净增 157 例，含 12 个新增测试文件）；新增覆盖确认期间
    列表刷新、切会话旧响应、关闭重开、结果未知三态、同 key 在途唯一、快照提交门与失效门、
    配置落盘边界（成功/失败提示与失败不发布）、删除候选取舍。
-   已知 flake（预先存在、与本批改动无关，单跑必过）：`kit::panels::tasks::tests::operations::
-   reset_before_completion_discards_cancel_notification` 与 `kit::panels::plugin::guard_tests::
-   stale_session_or_reset_event_cannot_cancel_new_loading`——把改动 stash 掉的基线循环同样出现
-   （基线 10 轮失败 2 次），改动后 15 轮失败 2 次；收口后连续 6 轮全绿。
+   已知 flake（预先存在、与本批改动无关，单跑必过）：`kit::steer_consumer::tests` 的两例
+   （`test_slow_session_preparation_is_not_capped_by_receipt_deadline`、
+   `test_shutdown_during_preparation_keeps_unadmitted_input_identity`）、`kit::panels::tasks::
+   tests::operations::reset_before_completion_discards_cancel_notification`、
+   `kit::panels::plugin::guard_tests::stale_session_or_reset_event_cannot_cancel_new_loading`。
+   证据：这些模块本批 diff 为空；失败例隔离重跑 3/3 通过；`steer_consumer` 全模块隔离 10/10
+   通过；收口后 15 轮全量出现 2 轮失败（1 轮 2 例 `steer_consumer`、1 轮 1 例 plugin guard），
+   其余 13 轮 2002 全绿；基线 worktree `56a8ccd8d` 同命令 9 轮全绿（基线例数 1845、采样时负载
+   更低），并行 worker 把改动 stash 后的基线 10 轮出现 2 例 plugin guard。抖动面是跨用例共享
+   全局 atom + 超时驱动的用例，属预存测试隔离问题，单列跟进，本批不修。
 4. **性能与体积记录**：见「基线」节。
 5. **清理记录**：删除 `popups/ask_user_popup.rs`（386 行）及其测试与模块声明；删除
    `popup_overlay::close_ask_user_popup_for_request/for_owner`（旧弹窗删除后已无调用者的
