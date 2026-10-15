@@ -156,13 +156,15 @@ pub fn McpPanel(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
         move |event| {
             handle_mcp_event(
                 event,
-                area,
-                view,
-                selected,
-                detail_key,
-                detail_btn,
-                viewport,
-                &servers_for_closure,
+                &McpEventCtx {
+                    area,
+                    view,
+                    selected,
+                    detail_key,
+                    detail_btn,
+                    viewport,
+                    servers: &servers_for_closure,
+                },
             )
         },
     );
@@ -338,16 +340,7 @@ pub fn McpPanel(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
 /// root 输入层，层内投递序只按注册序——本面板注册在 `PopupOverlay` 之前，若继续
 /// 消费按键，OAuth/HITL 等弹窗就收不到任何键（focus_router 目标优先级
 /// Popup > Panel）。故弹窗占用前景时整体 Ignored。
-fn handle_mcp_event(
-    event: Event,
-    area: Option<Rect>,
-    view: State<McpView>,
-    selected: State<usize>,
-    detail_key: State<Option<String>>,
-    detail_btn: State<usize>,
-    viewport: ListViewport,
-    servers: &[McpServerSummary],
-) -> EventResult {
+fn handle_mcp_event(event: Event, ctx: &McpEventCtx<'_>) -> EventResult {
     if popup_owns_foreground() {
         return EventResult::Ignored;
     }
@@ -357,21 +350,21 @@ fn handle_mcp_event(
         let Some((row, col)) = left_down(mouse) else {
             return EventResult::Ignored;
         };
-        let Some(area) = area else {
+        let Some(area) = ctx.area else {
             return EventResult::Consumed;
         };
 
-        if *view.read() != McpView::Detail {
+        if *ctx.view.read() != McpView::Detail {
             // 列表视图：区域内左键点击 = 选中该项并执行 Enter（click as enter）。
             // 命中布局与绘制窗口同源（viewport）。
             if !is_scrollbar_column(mouse, area)
-                && let Some(idx) = hit_item(mouse, area, viewport.hit_layout())
-                && let Some(summary) = servers.get(idx)
+                && let Some(idx) = hit_item(mouse, area, ctx.viewport.hit_layout())
+                && let Some(summary) = ctx.servers.get(idx)
             {
-                *selected.write() = idx;
-                *detail_key.write() = Some(summary.name.clone());
-                *detail_btn.write() = default_detail_btn(summary);
-                *view.write() = McpView::Detail;
+                *ctx.selected.write() = idx;
+                *ctx.detail_key.write() = Some(summary.name.clone());
+                *ctx.detail_btn.write() = default_detail_btn(summary);
+                *ctx.view.write() = McpView::Detail;
             }
             return EventResult::Consumed;
         }
@@ -382,7 +375,7 @@ fn handle_mcp_event(
             return EventResult::Consumed;
         }
         let content_row = row.saturating_sub(area.y).saturating_sub(1);
-        let Some(summary) = detail_server(servers, &detail_key.read()) else {
+        let Some(summary) = detail_server(ctx.servers, &ctx.detail_key.read()) else {
             return EventResult::Consumed;
         };
         // 按钮命中：行号与列偏移取自渲染同源的 detail_buttons（header 右对齐
@@ -393,7 +386,7 @@ fn handle_mcp_event(
             }
             let x = area.x.saturating_add(button.col);
             if col >= x && col < x.saturating_add(button.hit_width) {
-                activate_detail_btn(button.sel, summary, &view, &detail_btn);
+                activate_detail_btn(button.sel, summary, &ctx.view, &ctx.detail_btn);
                 return EventResult::Consumed;
             }
         }
@@ -407,22 +400,22 @@ fn handle_mcp_event(
         return EventResult::Ignored;
     }
 
-    if *view.read() == McpView::Detail {
+    if *ctx.view.read() == McpView::Detail {
         // ── 详情视图：←→ 选按钮，Enter 激活，Esc 返回列表 ──
         match key.code {
             KeyCode::Esc => {
-                *detail_key.write() = None;
-                *view.write() = McpView::List;
+                *ctx.detail_key.write() = None;
+                *ctx.view.write() = McpView::List;
             }
             KeyCode::Left | KeyCode::Right => {
-                let Some(summary) = detail_server(servers, &detail_key.read()) else {
+                let Some(summary) = detail_server(ctx.servers, &ctx.detail_key.read()) else {
                     return EventResult::Consumed;
                 };
                 // 选择索引空间 = detail_actions（header 复制 → 底行 授权/返回）；
                 // 只有一个按钮（[ 返回 ]）时无选择余地。
                 let count = detail_actions(summary).len();
                 if count > 1 {
-                    let mut b = detail_btn.write();
+                    let mut b = ctx.detail_btn.write();
                     *b = if key.code == KeyCode::Right {
                         (*b + 1) % count
                     } else {
@@ -431,9 +424,9 @@ fn handle_mcp_event(
                 }
             }
             KeyCode::Enter => {
-                let b = *detail_btn.read();
-                if let Some(summary) = detail_server(servers, &detail_key.read()) {
-                    activate_detail_btn(b, summary, &view, &detail_btn);
+                let b = *ctx.detail_btn.read();
+                if let Some(summary) = detail_server(ctx.servers, &ctx.detail_key.read()) {
+                    activate_detail_btn(b, summary, &ctx.view, &ctx.detail_btn);
                 }
             }
             _ => {}
@@ -445,19 +438,19 @@ fn handle_mcp_event(
     match key.code {
         KeyCode::Esc => close_panel(),
         KeyCode::Enter => {
-            let sel = *selected.read();
-            if let Some(summary) = servers.get(sel) {
-                *detail_key.write() = Some(summary.name.clone());
-                *detail_btn.write() = default_detail_btn(summary);
-                *view.write() = McpView::Detail;
+            let sel = *ctx.selected.read();
+            if let Some(summary) = ctx.servers.get(sel) {
+                *ctx.detail_key.write() = Some(summary.name.clone());
+                *ctx.detail_btn.write() = default_detail_btn(summary);
+                *ctx.view.write() = McpView::Detail;
             }
         }
         KeyCode::Up => {
-            let mut s = selected.write();
+            let mut s = ctx.selected.write();
             *s = previous_selection(*s);
         }
         KeyCode::Down => {
-            let mut s = selected.write();
+            let mut s = ctx.selected.write();
             let count = MCP_SERVERS.state().read().len();
             if count > 0 {
                 *s = next_selection(*s, count);
@@ -466,6 +459,20 @@ fn handle_mcp_event(
         _ => {}
     }
     EventResult::Consumed
+}
+
+/// 事件处理上下文：本帧视口 + 面板句柄 + 列表快照。
+///
+/// `State<T>` 无公开构造 API，只能从组件挂载取得；集中成一个结构体，事件入口
+/// 签名不再随状态/视口增长（渲染与鼠标命中必须共用同一个 `viewport`）。
+struct McpEventCtx<'a> {
+    area: Option<Rect>,
+    view: State<McpView>,
+    selected: State<usize>,
+    detail_key: State<Option<String>>,
+    detail_btn: State<usize>,
+    viewport: ListViewport,
+    servers: &'a [McpServerSummary],
 }
 
 /// 激活详情视图按钮：索引对应 `detail_actions`（header 复制 → 底行 授权/返回）。

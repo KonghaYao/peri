@@ -555,13 +555,15 @@ impl MountedPanel {
         );
         super::handle_mcp_event(
             event,
-            Some(TEST_AREA),
-            self.view,
-            self.selected,
-            self.detail_key,
-            self.detail_btn,
-            viewport,
-            &servers,
+            &super::McpEventCtx {
+                area: Some(TEST_AREA),
+                view: self.view,
+                selected: self.selected,
+                detail_key: self.detail_key,
+                detail_btn: self.detail_btn,
+                viewport,
+                servers: &servers,
+            },
         )
     }
 }

@@ -111,8 +111,11 @@ fn visible_items_follow_panel_height() {
 
 // ── 鼠标与键盘同语义（click as enter）─────────────────────────────────────
 
+/// 挂载探针的访问器：`State<T>` 无公开构造 API，句柄只能从真实挂载中捕获。
+type MountVisitor = Option<Box<dyn FnOnce(MountedPanel)>>;
+
 thread_local! {
-    static MOUNT_VISITOR: std::cell::RefCell<Option<Box<dyn FnOnce(MountedPanel)>>> =
+    static MOUNT_VISITOR: std::cell::RefCell<MountVisitor> =
         const { std::cell::RefCell::new(None) };
 }
 
