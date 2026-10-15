@@ -194,19 +194,13 @@ fn persist_and_notify(snap: &crate::config::PeriConfig) {
     }
 }
 
-/// 删除当前选中的 provider：从 PERI_CONFIG_HANDLE 移除 + 刷新 + 持久化 + 推送 ACP
-pub(super) fn delete_provider(selected_index: usize) {
+/// 删除指定身份的 provider：从 PERI_CONFIG_HANDLE 移除 + 刷新 + 持久化 + 推送 ACP。
+///
+/// 身份（provider id）由调用方在确认门下冻结，这里不再按列表下标重取目标——列表每 tick
+/// 重派生，按下标重取会在确认期间漂移到另一个 provider（删除不可逆）。
+pub(super) fn delete_provider(provider_id: &str) {
     let Some(handle) = PERI_CONFIG_HANDLE.get() else {
         return;
-    };
-
-    let provider_id = {
-        let provider_state = PROVIDER_LIST.state();
-        let store_read = provider_state.read();
-        match store_read.get(selected_index) {
-            Some(p) => p.id.clone(),
-            None => return,
-        }
     };
 
     let removed = {

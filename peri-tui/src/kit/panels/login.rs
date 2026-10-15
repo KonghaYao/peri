@@ -10,21 +10,25 @@
 
 use crate::app::panel_types::PanelKind;
 use crate::i18n;
-use crate::kit::atoms::{PROVIDER_LIST, ProviderSummary};
+use crate::kit::atoms::{NOTIFICATION, Notification, PROVIDER_LIST, ProviderSummary};
 use crate::kit::list_nav::{next_selection, previous_selection, scroll_start_for_selected};
 use crate::kit::panel_mouse::{AreaTracker, is_scrollbar_column};
+use fluent_bundle::FluentValue;
 use peri_acp::provider::config::ProviderConfig;
 use peri_theme::atoms::THEME_ATOM;
 use ratatui_kit::{
-    crossterm::event::{Event, KeyCode, KeyEventKind, KeyModifiers, MouseButton, MouseEventKind},
+    crossterm::event::{
+        Event, KeyCode, KeyEventKind, KeyModifiers, MouseButton, MouseEvent, MouseEventKind,
+    },
     prelude::*,
     ratatui::{
-        layout::Constraint,
-        style::{Modifier, Style, Stylize},
+        layout::{Constraint, Rect},
+        style::{Style, Stylize},
         text::{Line, Span},
         widgets::Paragraph,
     },
 };
+use std::time::Duration;
 
 mod config_store;
 mod edit_handler;
@@ -32,9 +36,7 @@ mod render;
 
 use self::config_store::delete_provider;
 use self::edit_handler::{enter_login_edit_mode, handle_login_edit_keys, handle_login_paste};
-use self::render::{
-    make_hint_line_for_login, mask_api_key_display, provider_type_label, render_login_edit_line,
-};
+use self::render::make_hint_line_for_login;
 
 // ── Login 编辑模式类型 ─────────────────────────────────────────────────────────
 
@@ -183,8 +185,12 @@ impl LoginEditState {
 
 // ── 主组件 ────────────────────────────────────────────────────────────────────
 
+/// Browse 列表视口常量（渲染、命中与翻页共用）
+const VISIBLE_ITEMS: usize = 3;
+
 #[component]
 pub fn LoginPanel(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
+    // ── hooks：无条件、稳定顺序（TUI-HOOK-001）──
     let theme_def = hooks.use_atom(&THEME_ATOM);
     let cursor = hooks.use_state(|| 0usize);
     // 外部滚动状态——面板滚轮仲裁（panel_scroll.rs）驱动，统一 3 行/格 + 节流
@@ -197,6 +203,8 @@ pub fn LoginPanel(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
     let providers: Vec<ProviderSummary> = store.read().clone();
     let _ = store;
     let count = providers.len();
+    // 删除确认门的目标身份（provider id，进入确认时冻结）——确认期间列表刷新不改变目标
+    let confirm_delete_target = hooks.use_state(|| None::<String>);
 
     // 面板绘制区域（上一帧）——鼠标点击行号反推
     let area;
@@ -204,199 +212,49 @@ pub fn LoginPanel(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
         let tracker = hooks.use_hook(AreaTracker::new);
         area = tracker.rect;
     }
+    // 面板上一帧区域（滚轮仲裁注册用）——hook 前置，渲染段不再调用 hook
+    let previous_size = hooks.use_previous_size();
 
     // Browse 列表视口常量（与渲染共用）
-    const VISIBLE_ITEMS: usize = 3;
-
-    // Browse 编辑动作：Enter 与鼠标左键点击共用（click as enter）
-    let providers_for_closure = providers.clone();
-    let enter_edit_row = move || {
-        let sel = *cursor.read();
-        let provider_state = PROVIDER_LIST.state();
-        let store_read = provider_state.read();
-        if sel < store_read.len() {
-            let provider_id = store_read[sel].id.clone();
-            drop(store_read);
-            enter_login_edit_mode(
-                &mut edit_state.write(),
-                &mut edit_focus.write(),
-                &mut edit_cursor.write(),
-                &provider_id,
-            );
-            *mode.write() = LoginPanelMode::Edit;
-        }
-    };
-
-    // ConfirmDelete 确认动作：Enter 与鼠标左键点击共用
-    let confirm_delete = move || {
-        delete_provider(*cursor.read());
-        *mode.write() = LoginPanelMode::Browse;
-    };
-
-    // Browse 行命中：每项 3 或 4 行（base_url 存在时 4），线性累加反推
-    fn hit_browse_item(
-        mouse: &ratatui_kit::crossterm::event::MouseEvent,
-        area: ratatui_kit::ratatui::layout::Rect,
-        providers: &[ProviderSummary],
-        scroll_start: usize,
-    ) -> Option<usize> {
-        if mouse.kind != MouseEventKind::Down(MouseButton::Left) {
-            return None;
-        }
-        let row = mouse.row;
-        // 顶部/底部边框行不命中
-        if row <= area.y || row >= area.y + area.height.saturating_sub(1) {
-            return None;
-        }
-        let visual = row - area.y - 1;
-        let content_height = area.height.saturating_sub(2);
-        if visual >= content_height {
-            return None;
-        }
-        // header 2 行（标题 + 空行）
-        if visual < 2 {
-            return None;
-        }
-        let mut cur = 2u16;
-        for (i, p) in providers
-            .iter()
-            .enumerate()
-            .skip(scroll_start)
-            .take(VISIBLE_ITEMS)
-        {
-            let item_h = if p.base_url.is_some() { 4u16 } else { 3u16 };
-            if visual >= cur && visual < cur + item_h {
-                return Some(i);
-            }
-            cur += item_h;
-        }
-        None
-    }
     let browse_scroll_start = scroll_start_for_selected(*cursor.read(), count, VISIBLE_ITEMS);
 
+    // Edit 模式缺少编辑状态（状态异常）时回退到 Browse：写在 effect 边界而不是渲染体
+    // （TUI-RENDER-001），且发生在渲染之前，本帧即渲染 Browse 视图（时机不变）
+    let edit_state_missing = *mode.read() == LoginPanelMode::Edit && edit_state.read().is_none();
+    hooks.use_effect(
+        move || fallback_to_browse(mode, edit_state_missing),
+        (edit_state_missing,),
+    );
+
+    let event_ctx = LoginEventCtx {
+        area,
+        cursor,
+        mode,
+        edit_state,
+        edit_focus,
+        edit_cursor,
+        confirm_delete_target,
+        providers: providers.clone(), // 本帧列表快照：命中与动作目标同源
+        scroll_start: browse_scroll_start,
+    };
     hooks.use_event_handler_with_options(
         EventScope::Current,
         EventPriority::Normal,
         EventOptions { hit_test: true },
-        {
-            move |event| {
-                // 鼠标：区域内左键点击 = 执行对应模式的 Enter 动作（click as enter）
-                if let Event::Mouse(mouse) = event {
-                    if mouse.kind != MouseEventKind::Down(MouseButton::Left) {
-                        return EventResult::Ignored;
-                    }
-                    let Some(area) = area else {
-                        return EventResult::Ignored;
-                    };
-                    if *mode.read() == LoginPanelMode::ConfirmDelete {
-                        confirm_delete();
-                        return EventResult::Consumed;
-                    }
-                    if *mode.read() == LoginPanelMode::Browse
-                        && !is_scrollbar_column(&mouse, area)
-                        && let Some(idx) = hit_browse_item(
-                            &mouse,
-                            area,
-                            &providers_for_closure,
-                            browse_scroll_start,
-                        )
-                    {
-                        *cursor.write() = idx;
-                        enter_edit_row();
-                        return EventResult::Consumed;
-                    }
-                    // 区域内点击（未命中行 / Edit 模式）也消费，防止穿透
-                    return EventResult::Consumed;
-                }
-                // 粘贴事件：仅编辑模式下处理
-                if let Event::Paste(paste_text) = &event {
-                    if *mode.read() == LoginPanelMode::Edit
-                        && *edit_focus.read() != LoginEditField::ProviderType
-                    {
-                        let mut es_guard = edit_state.write();
-                        let mut ec_guard = edit_cursor.write();
-                        if let Some(ref mut es) = *es_guard {
-                            handle_login_paste(&mut ec_guard, es, *edit_focus.read(), paste_text);
-                        }
-                        return EventResult::Consumed;
-                    }
-                    return EventResult::Ignored;
-                }
-
-                let Event::Key(key) = event else {
-                    return EventResult::Ignored;
-                };
-                if key.kind != KeyEventKind::Press {
-                    return EventResult::Ignored;
-                }
-
-                // ConfirmDelete 模式：优先处理（不依赖 mode match）
-                if *mode.read() == LoginPanelMode::ConfirmDelete {
-                    match key.code {
-                        KeyCode::Enter => confirm_delete(),
-                        _ => {
-                            // Esc 或任意其他键：取消删除
-                            *mode.write() = LoginPanelMode::Browse;
-                        }
-                    }
-                    return EventResult::Consumed;
-                }
-
-                let current_mode = *mode.read();
-
-                match current_mode {
-                    LoginPanelMode::Browse => match key.code {
-                        KeyCode::Esc => close_panel(),
-                        KeyCode::Up => {
-                            let mut c = cursor.write();
-                            *c = previous_selection(*c);
-                        }
-                        KeyCode::Down => {
-                            let latest = PROVIDER_LIST.state().read().len();
-                            let mut c = cursor.write();
-                            if latest > 0 {
-                                *c = next_selection(*c, latest);
-                            }
-                        }
-                        // Ctrl+N：新建 provider（进入编辑模式，空表单）
-                        KeyCode::Char('n') if key.modifiers.contains(KeyModifiers::CONTROL) => {
-                            *edit_state.write() = Some(LoginEditState::default_empty());
-                            *edit_focus.write() = LoginEditField::ProviderType;
-                            *edit_cursor.write() = 0;
-                            *mode.write() = LoginPanelMode::Edit;
-                        }
-                        // Ctrl+D：删除当前选中的 provider（进入确认模式）
-                        KeyCode::Char('d') if key.modifiers.contains(KeyModifiers::CONTROL) => {
-                            if count > 0 {
-                                *mode.write() = LoginPanelMode::ConfirmDelete;
-                            }
-                        }
-                        // Enter：进入编辑模式
-                        KeyCode::Enter => enter_edit_row(),
-                        _ => {}
-                    },
-                    LoginPanelMode::Edit => {
-                        let mut m_guard = mode.write();
-                        let mut es_guard = edit_state.write();
-                        let mut ef_guard = edit_focus.write();
-                        let mut ec_guard = edit_cursor.write();
-                        handle_login_edit_keys(
-                            &mut m_guard,
-                            &mut es_guard,
-                            &mut ef_guard,
-                            &mut ec_guard,
-                            &key,
-                        );
-                    }
-                    LoginPanelMode::ConfirmDelete => {
-                        // 在 match 之前已处理并 return；编译器需要匹配臂以保持穷尽性
-                    }
-                }
-                EventResult::Consumed
-            }
-        },
+        move |event| handle_login_event(event, &event_ctx),
     );
 
+    #[cfg(test)]
+    tests::visit_mounted_panel(tests::MountedPanel {
+        cursor,
+        mode,
+        edit_state,
+        edit_focus,
+        edit_cursor,
+        confirm_delete_target,
+    });
+
+    // ── 渲染段（只读；状态写入都在上面的 effect / 事件边界，TUI-RENDER-001）──
     let sel = *cursor.read();
     let semantic = theme_def.read().semantic;
     let cursor_color = semantic.status.warning;
@@ -423,11 +281,10 @@ pub fn LoginPanel(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
                 )]));
             } else {
                 // 视口跟随
-                let scroll_start = scroll_start_for_selected(sel, count, VISIBLE_ITEMS);
                 for (i, p) in providers
                     .iter()
                     .enumerate()
-                    .skip(scroll_start)
+                    .skip(browse_scroll_start)
                     .take(VISIBLE_ITEMS)
                 {
                     let is_cursor = i == sel;
@@ -487,148 +344,33 @@ pub fn LoginPanel(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
         }
         LoginPanelMode::Edit => {
             let es_opt = edit_state.read();
-            if let Some(ref es) = *es_opt {
-                let ef = *edit_focus.read();
-                let ec = *edit_cursor.read();
-
-                let is_new = es.original_provider_id.is_empty();
-                let title_key = if is_new {
-                    "login-panel-title-new"
-                } else {
-                    "login-panel-title-edit"
-                };
-                let title_text = if is_new {
-                    format!("  {}", i18n::tr(title_key))
-                } else {
-                    format!("  {}: {}", i18n::tr(title_key), es.original_provider_id)
-                };
-                lines.push(Line::from(vec![Span::styled(
-                    title_text,
-                    Style::new().fg(focus_color).bold(),
-                )]));
-                lines.push(Line::from(""));
-
-                // ── 标准字段：Type（toggle）+ ID / BaseUrl / ApiKey（文本输入）
-                // 布局与 setup_wizard 的 render_edit 一致：focus 时 ❯ + focus 色 label
-                let type_focused = ef == LoginEditField::ProviderType;
-                let type_prefix = if type_focused { "❯ " } else { "  " };
-                let type_style = if type_focused {
-                    Style::default()
-                        .fg(focus_color)
-                        .add_modifier(Modifier::BOLD)
-                } else {
-                    Style::default().fg(dim)
-                };
-                lines.push(Line::from(vec![
-                    Span::styled(type_prefix, Style::default().fg(cursor_color)),
-                    Span::styled(
-                        format!("{}: ", i18n::tr(LoginEditField::ProviderType.i18n_key())),
-                        type_style,
-                    ),
-                    Span::styled(
-                        format!("[{}]", i18n::tr(provider_type_label(&es.provider_type))),
-                        Style::default().fg(text_color).add_modifier(Modifier::BOLD),
-                    ),
-                ]));
-
-                for field in &[
-                    LoginEditField::ProviderId,
-                    LoginEditField::BaseUrl,
-                    LoginEditField::ApiKey,
-                ] {
-                    let is_focused = *field == ef;
-                    let display_val = if *field == LoginEditField::ApiKey {
-                        // API Key 脱敏显示（编辑时也只显示脱敏版本 + 实际输入体现在光标位置）
-                        mask_api_key_display(es.field_value(*field))
-                    } else {
-                        es.field_value(*field).to_string()
-                    };
-                    lines.push(render_login_edit_line(
-                        i18n::tr(field.i18n_key()),
-                        display_val,
-                        is_focused,
-                        ec,
-                        cursor_color,
+            match es_opt.as_ref() {
+                Some(es) => lines.extend(render::build_edit_lines(
+                    es,
+                    *edit_focus.read(),
+                    *edit_cursor.read(),
+                    &render::LoginRenderColors {
+                        cursor: cursor_color,
                         dim,
-                        text_color,
-                        focus_color,
-                    ));
-                }
-
-                // ── Model 分组标题（与 setup_wizard 一致）
-                lines.push(Line::from(""));
-                lines.push(Line::from(Span::styled(
-                    i18n::tr("login-model-label"),
-                    Style::default().fg(dim).add_modifier(Modifier::BOLD),
-                )));
-
-                // ── Fable / Opus / Sonnet / Haiku 模型名
-                for field in &[
-                    LoginEditField::FableModel,
-                    LoginEditField::OpusModel,
-                    LoginEditField::SonnetModel,
-                    LoginEditField::HaikuModel,
-                ] {
-                    lines.push(render_login_edit_line(
-                        i18n::tr(field.i18n_key()),
-                        es.field_value(*field).to_string(),
-                        *field == ef,
-                        ec,
-                        cursor_color,
-                        dim,
-                        text_color,
-                        focus_color,
-                    ));
-                }
-
-                // ── 确认按钮（参考 setup_wizard 的 Confirm 行：focus 时 ❯ + 强调色）
-                let cf_focused = ef == LoginEditField::Confirm;
-                let cf_prefix = if cf_focused { "❯ " } else { "  " };
-                let cf_style = if cf_focused {
-                    Style::default()
-                        .fg(cursor_color)
-                        .add_modifier(Modifier::BOLD)
-                } else {
-                    Style::default().fg(dim)
-                };
-                lines.push(Line::from(""));
-                lines.push(Line::from(vec![
-                    Span::styled(cf_prefix, Style::default().fg(cursor_color)),
-                    Span::styled(format!("  {}", i18n::tr("login-confirm")), cf_style),
-                ]));
-
-                lines.push(Line::from(""));
-                lines.push(make_hint_line_for_login(
-                    vec![
-                        (
-                            "\u{2191}/\u{2193}".to_string(),
-                            i18n::tr("hint-login-field"),
-                        ),
-                        (
-                            "\u{2190}/\u{2192}/Space".to_string(),
-                            i18n::tr("hint-login-toggle"),
-                        ),
-                        ("Enter".to_string(), i18n::tr("hint-login-confirm")),
-                        ("Esc".to_string(), i18n::tr("hint-login-back")),
-                    ],
-                    dim,
-                    focus_color,
-                ));
-            } else {
-                // 状态异常：回退到 Browse
-                lines.push(Line::from(vec![Span::styled(
+                        text: text_color,
+                        focus: focus_color,
+                    },
+                )),
+                // 状态异常：effect 边界已在渲染前回退到 Browse；此处仅为保持 match 穷尽
+                None => lines.push(Line::from(vec![Span::styled(
                     "  Internal error: invalid edit state",
                     Style::new().fg(semantic.status.error),
-                )]));
-                *mode.write() = LoginPanelMode::Browse;
+                )])),
             }
         }
         LoginPanelMode::ConfirmDelete => {
-            let sel = *cursor.read();
-            let provider_name = providers
-                .get(sel)
-                .map(|p| p.id.as_str())
-                .unwrap_or("(unknown)");
+            // 目标取确认时冻结的身份：确认期间列表刷新不改变待执行目标
+            let provider_name = confirm_delete_target.read().clone().unwrap_or_default();
+            let provider_name = if provider_name.is_empty() {
+                "(unknown)"
+            } else {
+                provider_name.as_str()
+            };
 
             lines.push(Line::from(vec![Span::styled(
                 format!("  {}", i18n::tr("login-panel-title-confirm-delete")),
@@ -658,11 +400,7 @@ pub fn LoginPanel(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
     let content = Paragraph::new(ratatui::text::Text::from(lines));
 
     // 面板滚轮仲裁注册（每帧覆盖写入，area 用上一帧组件区域）
-    crate::kit::panel_scroll::register_panel_scroll(
-        PanelKind::Login,
-        hooks.use_previous_size(),
-        sv,
-    );
+    crate::kit::panel_scroll::register_panel_scroll(PanelKind::Login, previous_size, sv);
 
     panel_shell!(PanelKind::Login, {
             ScrollView(
@@ -674,6 +412,275 @@ pub fn LoginPanel(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
                 Text(text: content)
             }
     })
+}
+
+// ── 事件判定与面板动作 ────────────────────────────────────────────────────────
+
+/// 面板事件处理——判定集中在这里、组件只做注册，测试经 `tests::mount_panel` 取得真实
+/// 句柄后直接投喂事件（`State<T>` 无公开构造 API）。鼠标与键盘共用同一批动作函数。
+fn handle_login_event(event: Event, ctx: &LoginEventCtx) -> EventResult {
+    // 模式快照：`State::read()` 的读守卫不能跨过本帧的状态写入（同线程自锁）
+    let current_mode = *ctx.mode.read();
+
+    // 鼠标：区域内左键点击 = 执行对应模式的 Enter 动作（click as enter）
+    if let Event::Mouse(mouse) = event {
+        if mouse.kind != MouseEventKind::Down(MouseButton::Left) {
+            return EventResult::Ignored;
+        }
+        let Some(area) = ctx.area else {
+            return EventResult::Ignored;
+        };
+        if current_mode == LoginPanelMode::ConfirmDelete {
+            confirm_delete(ctx);
+            return EventResult::Consumed;
+        }
+        if current_mode == LoginPanelMode::Browse
+            && !is_scrollbar_column(&mouse, area)
+            && let Some(idx) = hit_browse_item(&mouse, area, &ctx.providers, ctx.scroll_start)
+        {
+            *ctx.cursor.write() = idx;
+            enter_edit_row(ctx);
+            return EventResult::Consumed;
+        }
+        // 区域内点击（未命中行 / Edit 模式）也消费，防止穿透
+        return EventResult::Consumed;
+    }
+    // 粘贴事件：仅编辑模式下处理
+    if let Event::Paste(paste_text) = &event {
+        if current_mode == LoginPanelMode::Edit
+            && *ctx.edit_focus.read() != LoginEditField::ProviderType
+        {
+            let mut es_guard = ctx.edit_state.write();
+            let mut ec_guard = ctx.edit_cursor.write();
+            if let Some(ref mut es) = *es_guard {
+                handle_login_paste(&mut ec_guard, es, *ctx.edit_focus.read(), paste_text);
+            }
+            return EventResult::Consumed;
+        }
+        return EventResult::Ignored;
+    }
+
+    let Event::Key(key) = event else {
+        return EventResult::Ignored;
+    };
+    if key.kind != KeyEventKind::Press {
+        return EventResult::Ignored;
+    }
+
+    // ConfirmDelete 模式：优先处理（不依赖 mode match）
+    if current_mode == LoginPanelMode::ConfirmDelete {
+        match key.code {
+            KeyCode::Enter => confirm_delete(ctx),
+            _ => {
+                // Esc 或任意其他键：取消删除（一次性门，目标一并清空）
+                *ctx.mode.write() = LoginPanelMode::Browse;
+                *ctx.confirm_delete_target.write() = None;
+            }
+        }
+        return EventResult::Consumed;
+    }
+
+    match current_mode {
+        LoginPanelMode::Browse => match key.code {
+            KeyCode::Esc => close_panel(),
+            KeyCode::Up => {
+                let mut c = ctx.cursor.write();
+                *c = previous_selection(*c);
+            }
+            KeyCode::Down => {
+                let latest = PROVIDER_LIST.state().read().len();
+                let mut c = ctx.cursor.write();
+                if latest > 0 {
+                    *c = next_selection(*c, latest);
+                }
+            }
+            // Ctrl+N：新建 provider（进入编辑模式，空表单）
+            KeyCode::Char('n') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                *ctx.edit_state.write() = Some(LoginEditState::default_empty());
+                *ctx.edit_focus.write() = LoginEditField::ProviderType;
+                *ctx.edit_cursor.write() = 0;
+                *ctx.mode.write() = LoginPanelMode::Edit;
+            }
+            // Ctrl+D：固定待删除身份后进入确认模式
+            KeyCode::Char('d') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                begin_confirm_delete(ctx);
+            }
+            // Enter：进入编辑模式
+            KeyCode::Enter => enter_edit_row(ctx),
+            _ => {}
+        },
+        LoginPanelMode::Edit => {
+            let mut m_guard = ctx.mode.write();
+            let mut es_guard = ctx.edit_state.write();
+            let mut ef_guard = ctx.edit_focus.write();
+            let mut ec_guard = ctx.edit_cursor.write();
+            handle_login_edit_keys(
+                &mut m_guard,
+                &mut es_guard,
+                &mut ef_guard,
+                &mut ec_guard,
+                &key,
+            );
+        }
+        LoginPanelMode::ConfirmDelete => {
+            // 在 match 之前已处理并 return；编译器需要匹配臂以保持穷尽性
+        }
+    }
+    EventResult::Consumed
+}
+
+/// 事件处理上下文：本帧区域 + 面板句柄 + 列表快照。
+///
+/// `State<T>` 无公开构造 API，只能从组件挂载取得；集中成一个结构体，事件入口签名不再
+/// 随状态增长（鼠标命中与动作目标必须共用同一个本帧列表快照与视口起点）。
+struct LoginEventCtx {
+    area: Option<Rect>,
+    cursor: State<usize>,
+    mode: State<LoginPanelMode>,
+    edit_state: State<Option<LoginEditState>>,
+    edit_focus: State<LoginEditField>,
+    edit_cursor: State<usize>,
+    /// 删除确认门冻结的目标身份（provider id）
+    confirm_delete_target: State<Option<String>>,
+    /// 本帧 provider 快照：命中索引与动作目标同源
+    providers: Vec<ProviderSummary>,
+    scroll_start: usize,
+}
+
+/// Edit 模式缺少编辑状态时的回退（effect 边界）：渲染只读状态（TUI-RENDER-001）。
+fn fallback_to_browse(mode: State<LoginPanelMode>, edit_state_missing: bool) {
+    if !edit_state_missing {
+        return;
+    }
+    // 先取快照再写：`read()` 的读守卫跨过 `write()` 会在同一线程自锁
+    let current_mode = *mode.read();
+    if current_mode == LoginPanelMode::Edit {
+        *mode.write() = LoginPanelMode::Browse;
+    }
+}
+
+/// Browse 行命中：每项 3 或 4 行（base_url 存在时 4），线性累加反推
+fn hit_browse_item(
+    mouse: &MouseEvent,
+    area: Rect,
+    providers: &[ProviderSummary],
+    scroll_start: usize,
+) -> Option<usize> {
+    if mouse.kind != MouseEventKind::Down(MouseButton::Left) {
+        return None;
+    }
+    let row = mouse.row;
+    // 顶部/底部边框行不命中
+    if row <= area.y || row >= area.y + area.height.saturating_sub(1) {
+        return None;
+    }
+    let visual = row - area.y - 1;
+    let content_height = area.height.saturating_sub(2);
+    if visual >= content_height {
+        return None;
+    }
+    // header 2 行（标题 + 空行）
+    if visual < 2 {
+        return None;
+    }
+    let mut cur = 2u16;
+    for (i, p) in providers
+        .iter()
+        .enumerate()
+        .skip(scroll_start)
+        .take(VISIBLE_ITEMS)
+    {
+        let item_h = if p.base_url.is_some() { 4u16 } else { 3u16 };
+        if visual >= cur && visual < cur + item_h {
+            return Some(i);
+        }
+        cur += item_h;
+    }
+    None
+}
+
+/// Browse 进入编辑：目标按当前列表下标解析 provider id（编辑路径随后按稳定 id 定位）。
+fn enter_edit_row(ctx: &LoginEventCtx) {
+    let sel = *ctx.cursor.read();
+    let provider_state = PROVIDER_LIST.state();
+    let store_read = provider_state.read();
+    if sel < store_read.len() {
+        let provider_id = store_read[sel].id.clone();
+        drop(store_read);
+        enter_login_edit_mode(
+            &mut ctx.edit_state.write(),
+            &mut ctx.edit_focus.write(),
+            &mut ctx.edit_cursor.write(),
+            &provider_id,
+        );
+        *ctx.mode.write() = LoginPanelMode::Edit;
+    }
+}
+
+/// Ctrl+D：固定待删除身份（provider id）后进入确认门。
+///
+/// 身份取自当前投影列表而非进入确认时的下标：列表每 tick 重派生，下标在确认期间会漂移。
+fn begin_confirm_delete(ctx: &LoginEventCtx) {
+    let sel = *ctx.cursor.read();
+    let target = PROVIDER_LIST.state().read().get(sel).map(|p| p.id.clone());
+    if let Some(target) = target {
+        *ctx.confirm_delete_target.write() = Some(target);
+        *ctx.mode.write() = LoginPanelMode::ConfirmDelete;
+    }
+}
+
+/// 确认删除：目标按确认时冻结的身份解析，与编辑路径同一身份口径（provider id）。
+///
+/// 目标已不在当前列表（列表刷新 / 他处删除）时不发送请求、不误删其他项，并给出可见提示。
+fn confirm_delete(ctx: &LoginEventCtx) {
+    let target = ctx.confirm_delete_target.read().clone();
+    // 一次性门：无论删除是否发出，确认态都在本分支内清除（同一次确认不会连发）
+    *ctx.mode.write() = LoginPanelMode::Browse;
+    *ctx.confirm_delete_target.write() = None;
+
+    let Some(target) = target else {
+        return;
+    };
+    if provider_list_contains(&target) {
+        request_delete_provider(&target);
+    } else {
+        notify_delete_target_missing(&target);
+    }
+}
+
+/// 目标身份是否仍在当前投影列表里。
+fn provider_list_contains(provider_id: &str) -> bool {
+    PROVIDER_LIST
+        .state()
+        .read()
+        .iter()
+        .any(|p| p.id == provider_id)
+}
+
+/// 发出删除请求（生产路径：`config_store` 按身份删除）。
+///
+/// 测试构建下请求交给接缝记录并直接返回——单元测试不触碰真实配置与磁盘
+/// （`PERI_CONFIG_HANDLE` 是进程级 `OnceLock`，测试进程无法安装）。
+fn request_delete_provider(provider_id: &str) {
+    #[cfg(test)]
+    if tests::intercept_delete_request(provider_id) {
+        return;
+    }
+    delete_provider(provider_id);
+}
+
+/// 提示「删除目标已消失」——走本面板既有提示机制（`NOTIFICATION`，同保存失败提示）。
+///
+/// 复用跨面板的确认目标守卫文案：与 Cron 的删除确认同一个语义（确认时固定的身份
+/// 在列表刷新后已不存在，操作未执行），不借用插件删除失败的文案。
+fn notify_delete_target_missing(provider_id: &str) {
+    *NOTIFICATION.state().write() = Some(Notification {
+        message: i18n::tr_args(
+            "app-confirm-target-missing",
+            &[("target".to_string(), FluentValue::from(provider_id))],
+        ),
+        until: peri_time::monotonic_now() + Duration::from_secs(2),
+    });
 }
 
 // ── Browse 模式辅助函数 ───────────────────────────────────────────────────────
