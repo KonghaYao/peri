@@ -6,7 +6,7 @@ use ratatui_kit::ratatui::style::{Color, Modifier, Style};
 use ratatui_kit::ratatui::text::{Line, Span};
 use unicode_width::UnicodeWidthStr;
 
-use super::helpers::{prefixed_cont_line, process_cont_prefix, process_first_prefix, sym};
+use super::helpers::{process_cont_prefix, process_first_prefix, sym};
 
 /// §6.6 System event：普通事件单行注记；warning/error 用符号 + accent。
 ///
@@ -154,16 +154,10 @@ fn divider_with_label_line(grid: &GridSpec, label: &str) -> Line<'static> {
     ])
 }
 
-/// The rule sits two rows above the next prompt. Compact/Narrow already add
-/// their own leading blank row in `render_user_bubble_lines`.
+/// The rule is the only row before the next user prompt.
 pub(super) fn render_divider_lines(data: &TuiDivider, grid: &GridSpec) -> Vec<Line<'static>> {
     let label = data.label.as_deref().unwrap_or("");
-    let mut lines = vec![divider_with_label_line(grid, label)];
-    if grid.indent > 0 {
-        let color = THEME_ATOM.state().read().semantic.text.secondary;
-        lines.push(prefixed_cont_line(grid, color, Line::default()));
-    }
-    lines
+    vec![divider_with_label_line(grid, label)]
 }
 
 /// §6.9 Todo 进度摘要行：`[◼][gap]{3/7 tasks · Running tests}`（过程区首行形态）。

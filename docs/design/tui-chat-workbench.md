@@ -58,7 +58,7 @@ active issue。
   `chars().count() < 120`；空正文的纯 reasoning/工具轮恒为短回复）等过程区 entry 在
   Wide/Standard（≥60 列）整体右移 2 格，其正文可用宽度相应收窄 2 格，右缘（duration 等
   metadata 对齐列）和整带居中不变；短回复判定只作用于 assistant——user 气泡永不缩进；
-  后续 user prompt 前固定保留 turn 分隔线与一行空白：分隔线左缘以 `├` 接续文本区竖线，
+  后续 user prompt 前固定保留 turn 分隔线，下一行直接显示 prompt：分隔线左缘以 `├` 接续文本区竖线，
   穿过 gap 后铺满正文列；分隔线属文本区，不参与缩进，随 prompt 一起保留至回合结束后；
 - 过程区由**转场台阶**接回文本区：进入 ` ╰─╮`、退出 ` ╭─╯`（各 1 行、宽 4，col1 `╰`/`╭`
   接上方文本竖线，col3 `╮`/`╯` 接过程区左缘标记列），台阶线色与所接文本的左侧线条同色
@@ -66,8 +66,8 @@ active issue。
   过程区左缘标记（工具行 icon、其余行 `│`）落 col3、正文 col6；Wide/Standard 的文本块
   首尾不再保留节拍空行（块分隔由台阶承担）；短回复与相邻过程 entry 同区接续（进出都不画
   台阶）、气泡内 reasoning → 短回复正文同理不画内部台阶——正文上下各保留 1 行过程带前缀
-  空行作分隔；Compact/Narrow（<60 列）保持无缩进、无台阶，保留正文块上下各 1 空行作分隔，
-  短回复判定不改变渲染形态，逐列与改动前一致；
+  空行作分隔；Compact/Narrow（<60 列）保持无缩进、无台阶，assistant 正文保留上下各 1 空行，
+  user prompt 在所有宽度下无前导空行，Compact/Narrow 仅保留尾部空行；
 - 子 Agent 组内工具行与组头同列；
 - expanded preview 的视觉行数有界，超出时明确显示 `Open details` 与完整性状态。
 

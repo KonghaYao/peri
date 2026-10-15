@@ -495,7 +495,7 @@ fn test_collapsed_group_line_with_failed_count() {
     );
 }
 
-/// Divider 接续左侧竖线，下一行是带竖线的空行。
+/// Divider 接续左侧竖线，下一行直接是用户正文。
 #[test]
 fn test_divider_lines() {
     let grid = GridSpec::grid_for(80);
@@ -517,8 +517,7 @@ fn test_divider_lines() {
         grid.first_prefix_width() + grid.content_width(),
         "分隔线铺满文本区正文列"
     );
-    assert_eq!(plain.len(), 2);
-    assert_eq!(line_text(&plain[1]), " \u{2502}  ");
+    assert_eq!(plain.len(), 1);
 
     let labeled = vm_to_lines(
         &TuiRenderUnit::TuiDivider(TuiDivider {
@@ -544,9 +543,8 @@ fn test_divider_lines() {
         )),
         &compact,
     );
-    assert_eq!(rule.len(), 1, "窄屏横线后复用 prompt 的前导空行");
-    assert_eq!(line_text(&prompt[0]), " \u{2502} ");
-    assert!(line_text(&prompt[1]).contains("next prompt"));
+    assert_eq!(rule.len(), 1, "窄屏横线只占一行");
+    assert!(line_text(&prompt[0]).contains("next prompt"));
 }
 
 /// TuiTodoSummary：`◼ {3/7 tasks · Running tests}`。
