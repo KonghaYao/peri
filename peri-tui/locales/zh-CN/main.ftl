@@ -141,10 +141,10 @@ setup-welcome-title =  ── Peri 设置 ── 欢迎
 setup-choose-provider =  选择如何配置你的 Provider：
 setup-source-custom-api = Custom API
 setup-source-migrate = 从 Claude Code 迁移
-setup-source-peri-free = Peri Code 免费服务
+setup-source-preset = 供应商预设
 setup-source-custom-desc = 手动输入 Provider 详情
 setup-source-migrate-desc = 从 ~/.claude/ 导入配置
-setup-source-peri-free-desc = 一键填入 Peri Code 免费网关，无需 API Key
+setup-source-preset-desc = 一键填入主流厂商的端点与四档模型
 setup-key-confirm = :确认
 setup-key-select = :选择
 setup-key-quit = :退出
@@ -182,6 +182,9 @@ setup-no-providers = 未配置任何 Provider，请选择"Custom API"或从 Clau
 setup-language-title = ── Peri 设置 ── 语言
 setup-language-prompt = 选择界面语言：
 setup-language-press-enter = 按 Enter 确认
+
+setup-preset-title =  ── Peri 设置 ── 供应商预设
+setup-preset-prompt =   选择供应商预设：
 
 # ---- Config Panel ----
 

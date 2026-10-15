@@ -61,23 +61,25 @@ fn test_mask_api_key() {
 }
 
 #[test]
-fn test_peri_free_provider_fields() {
-    let mp = peri_free_provider();
+fn test_free_gateway_preset_fields() {
+    let preset = &PROVIDER_PRESETS[PROVIDER_PRESETS.len() - 1];
+    let mp = preset.to_migrated();
     assert_eq!(mp.provider_id, "peri");
-    assert_eq!(mp.base_url, PERI_FREE_BASE_URL);
+    assert_eq!(mp.base_url, preset.base_url);
     assert_eq!(mp.api_key, "public");
     assert_eq!(mp.provider_type, ProviderType::OpenAiCompatible);
-    assert_eq!(mp.aliases, PERI_FREE_MODEL_IDS.map(String::from));
+    assert_eq!(mp.aliases, preset.models.map(String::from));
     assert!(mp.selected, "免费服务应默认选中");
     assert!(mp.is_complete(), "免费服务配置应视为完整");
+    assert!(mp.fixed_tiers, "免密钥网关需要固定档位");
 }
 
 #[test]
-fn test_build_wizard_config_peri_free_profiles() {
+fn test_build_wizard_config_fixed_tier_profiles() {
+    let preset = &PROVIDER_PRESETS[PROVIDER_PRESETS.len() - 1];
     let state = SetupWizardState {
         step: SetupStep::Form,
-        source: SetupSource::PeriFreeService,
-        providers: vec![peri_free_provider()],
+        providers: vec![preset.to_migrated()],
         language: "zh-CN".to_string(),
         ..Default::default()
     };
@@ -89,7 +91,7 @@ fn test_build_wizard_config_peri_free_profiles() {
     assert_eq!(cfg.config.providers.len(), 1);
     let p = &cfg.config.providers[0];
     assert_eq!(p.id, "peri");
-    assert_eq!(p.base_url, PERI_FREE_BASE_URL);
+    assert_eq!(p.base_url, preset.base_url);
     assert_eq!(p.api_key, "public");
     assert_eq!(
         [
@@ -98,7 +100,7 @@ fn test_build_wizard_config_peri_free_profiles() {
             p.models.sonnet.as_str(),
             p.models.haiku.as_str()
         ],
-        PERI_FREE_MODEL_IDS
+        preset.models
     );
     assert_eq!(cfg.config.profiles.fable.effort, "max");
     assert_eq!(cfg.config.profiles.opus.effort, "medium");
@@ -127,10 +129,40 @@ fn test_build_wizard_config_custom_api_keeps_opus_only() {
     let cfg = build_wizard_config(&state);
     assert_eq!(cfg.config.active_alias, "opus", "手动配置默认档位仍为 opus");
     assert_eq!(cfg.config.profiles.opus.provider, "anthropic");
-    // 非 Peri 免费服务来源：其余档位保持默认
+    // 无固定档位的 provider：其余档位保持默认
     assert!(cfg.config.profiles.fable.is_default());
     assert!(cfg.config.profiles.sonnet.is_default());
     assert!(cfg.config.profiles.haiku.is_default());
+}
+
+/// [回归测试] 固定档位跟随 provider 自带的预设标志，不做 provider_id 反查。
+#[test]
+fn test_build_wizard_config_fixed_tiers_follow_provider_not_id() {
+    // 手动配置即使复用网关 id 与 Key，也不套固定档位
+    let mut manual = MigratedProvider::new(ProviderType::OpenAiCompatible);
+    manual.provider_id = "peri".into();
+    manual.api_key = "public".into();
+    let cfg = build_wizard_config(&SetupWizardState {
+        providers: vec![manual],
+        ..Default::default()
+    });
+    assert_eq!(cfg.config.active_alias, "opus");
+
+    // 预设 provider 改 id 后仍保留固定档位，并绑定到新 id
+    let mut from_preset = PROVIDER_PRESETS[PROVIDER_PRESETS.len() - 1].to_migrated();
+    from_preset.provider_id = "my-gateway".into();
+    let cfg = build_wizard_config(&SetupWizardState {
+        providers: vec![from_preset],
+        ..Default::default()
+    });
+    assert_eq!(cfg.config.active_alias, "sonnet");
+    for alias in ["fable", "opus", "sonnet", "haiku"] {
+        assert_eq!(
+            cfg.config.profiles.get(alias).unwrap().provider,
+            "my-gateway",
+            "{alias} 档位应绑定新 id"
+        );
+    }
 }
 
 struct EnvKeys(Vec<(&'static str, Option<std::ffi::OsString>)>);
@@ -167,7 +199,7 @@ impl Drop for EnvKeys {
 fn test_needs_setup_empty_alias_matches_runtime_resolution() {
     let _env = EnvKeys::clear();
     let mut cfg = build_wizard_config(&SetupWizardState {
-        providers: vec![peri_free_provider()],
+        providers: vec![PROVIDER_PRESETS[PROVIDER_PRESETS.len() - 1].to_migrated()],
         ..Default::default()
     });
     cfg.config.active_alias.clear();
@@ -179,7 +211,7 @@ fn test_needs_setup_empty_alias_matches_runtime_resolution() {
 #[test]
 fn test_reopened_setup_preserves_active_profile_and_provider_metadata() {
     let mut cfg = build_wizard_config(&SetupWizardState {
-        providers: vec![peri_free_provider()],
+        providers: vec![PROVIDER_PRESETS[PROVIDER_PRESETS.len() - 1].to_migrated()],
         ..Default::default()
     });
     cfg.config.active_alias = "haiku".into();
@@ -220,16 +252,31 @@ fn test_reopened_setup_preserves_active_profile_and_provider_metadata() {
 
 #[test]
 fn test_wizard_replaces_broken_active_selection_with_usable_profile() {
+    // 普通 provider：修复为默认档位绑定 opus
     let mut cfg = crate::config::PeriConfig::default();
     cfg.config.active_alias = "missing".into();
+    let mut plain = MigratedProvider::new(ProviderType::Anthropic);
+    plain.api_key = "sk-test".into();
     let draft = SetupWizardState {
         from_command: true,
-        providers: vec![peri_free_provider()],
+        providers: vec![plain],
         ..Default::default()
     };
     let merged = merge_setup(&draft, cfg);
     assert!(crate::app::agent::LlmProvider::from_config(&merged).is_some());
     assert_eq!(merged.config.active_alias, "opus");
+
+    // 免密钥网关预设：采用其固定档位配置的 active_alias
+    let mut cfg = crate::config::PeriConfig::default();
+    cfg.config.active_alias = "missing".into();
+    let draft = SetupWizardState {
+        from_command: true,
+        providers: vec![PROVIDER_PRESETS[PROVIDER_PRESETS.len() - 1].to_migrated()],
+        ..Default::default()
+    };
+    let merged = merge_setup(&draft, cfg);
+    assert!(crate::app::agent::LlmProvider::from_config(&merged).is_some());
+    assert_eq!(merged.config.active_alias, "sonnet");
 }
 
 /// [回归测试] 删除、粘贴等所有文本修改均经过同一失效入口。
@@ -361,7 +408,7 @@ fn test_new_provider_type_change_keeps_matching_default_identity() {
 #[test]
 fn test_persisted_provider_id_cannot_be_edited_or_saved_as_another_id() {
     let cfg = build_wizard_config(&SetupWizardState {
-        providers: vec![peri_free_provider()],
+        providers: vec![PROVIDER_PRESETS[PROVIDER_PRESETS.len() - 1].to_migrated()],
         ..Default::default()
     });
     let mut draft = state_from_config(&cfg);
@@ -379,14 +426,15 @@ fn test_persisted_provider_id_cannot_be_edited_or_saved_as_another_id() {
 #[test]
 fn test_provider_identity_provenance_survives_state_roundtrip() {
     let cfg = build_wizard_config(&SetupWizardState {
-        providers: vec![peri_free_provider()],
+        providers: vec![PROVIDER_PRESETS[PROVIDER_PRESETS.len() - 1].to_migrated()],
         ..Default::default()
     });
     let state = state_from_config(&cfg);
     let encoded = serde_json::to_value(state).unwrap();
     let restored: SetupWizardState = serde_json::from_value(encoded).unwrap();
     assert!(!restored.providers[0].provider_id_is_editable());
-    let mut old_provider = serde_json::to_value(peri_free_provider()).unwrap();
+    let mut old_provider =
+        serde_json::to_value(PROVIDER_PRESETS[PROVIDER_PRESETS.len() - 1].to_migrated()).unwrap();
     old_provider
         .as_object_mut()
         .unwrap()
