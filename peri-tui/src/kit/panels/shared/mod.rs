@@ -1,6 +1,6 @@
 //! 面板公共交互机制——只承载已有面板中真实重复的绘制与命中逻辑。
 //!
-//! 设计约束（见 `docs/design/tui-panel-architecture.md` §公共组件）：
+//! 设计约束（见 `docs/design/tui-panel-architecture.md` §公共组件边界）：
 //!
 //! - **绘制与命中同源**：可见范围、滚动起点与鼠标命中由同一份布局结果推导，
 //!   面板不再各自维护 `VISIBLE_ITEMS` 常量。
