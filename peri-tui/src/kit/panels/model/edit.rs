@@ -9,11 +9,7 @@ use super::{
     FIELD_CONTEXT_1M, FIELD_EFFORT, FIELD_MAX_TOKENS, FIELD_MODEL, FIELD_PROVIDER, PROFILE_KEYS,
 };
 use crate::config::PeriConfig;
-use crate::i18n;
-use crate::kit::atoms::{
-    ACP_CLIENT_HANDLE, MODEL_HIGHLIGHT_UNTIL, NOTIFICATION, Notification, PERI_CONFIG_HANDLE,
-};
-use fluent_bundle::FluentValue;
+use crate::kit::atoms::{ACP_CLIENT_HANDLE, MODEL_HIGHLIGHT_UNTIL, PERI_CONFIG_HANDLE};
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -205,13 +201,10 @@ enum ModelChange {
 /// 提交边界：**保存成功才提交**内存、本地投影与 ACP 推送。
 ///
 /// 保存失败时句柄保持已持久化的值（面板不会显示未落盘的切换），也不推送未落盘
-/// 的配置；失败经 `NOTIFICATION` 提示原因。
+/// 的配置；失败提示由 [`crate::kit::config_service::persist_candidate`] 统一给出。
 /// 返回是否已持久化——调用方据此决定日志等本地副作用。
 fn commit_snapshot(handle: &PeriHandle, candidate: PeriConfig, change: ModelChange) -> bool {
-    let result = crate::config::save_effective(&candidate);
-    let persisted = result.is_ok();
-    notify_save_result(result);
-    if !persisted {
+    if !crate::kit::config_service::persist_candidate(&candidate) {
         return false;
     }
     *handle.write() = candidate.clone();
@@ -294,27 +287,4 @@ fn resolve_model_name_for_alias(app_config: &crate::config::AppConfig, alias: &s
         })
         .filter(|m| !m.is_empty())
         .unwrap_or_else(|| alias.to_string())
-}
-
-fn notify_save_result(result: Result<(), anyhow::Error>) {
-    match result {
-        Ok(()) => {
-            *NOTIFICATION.state().write() = Some(Notification {
-                message: i18n::tr("config-saved").to_string(),
-                until: peri_time::monotonic_now() + Duration::from_secs(1),
-            });
-        }
-        Err(e) => {
-            *NOTIFICATION.state().write() = Some(Notification {
-                message: i18n::tr_args(
-                    "config-save-failed",
-                    &[(
-                        "error".to_string(),
-                        FluentValue::from(e.to_string().as_str()),
-                    )],
-                ),
-                until: peri_time::monotonic_now() + Duration::from_secs(2),
-            });
-        }
-    }
 }

@@ -44,26 +44,6 @@ fn notify(message: String, ttl: Duration) {
     });
 }
 
-/// 保存成功提示。
-fn notify_saved() {
-    notify(i18n::tr("config-saved"), Duration::from_secs(1));
-}
-
-/// 保存失败提示：携带失败原因（面板既有的失败呈现机制）。
-fn notify_save_failed(error: &anyhow::Error) {
-    tracing::warn!(error = %error, "ConfigPanel: 配置保存失败");
-    notify(
-        i18n::tr_args(
-            "config-save-failed",
-            &[(
-                "error".to_string(),
-                FluentValue::from(error.to_string().as_str()),
-            )],
-        ),
-        Duration::from_secs(2),
-    );
-}
-
 /// 取一次性初始化的句柄：缺失时留下**可见**的失败记录并返回 `None`。
 ///
 /// 正常生命周期内句柄在 `App::new` 之后必然存在；缺失意味着进程初始化不完整，
@@ -84,7 +64,7 @@ fn require_handle<'a, T>(handle: Option<&'a T>, name: &str) -> Option<&'a T> {
 
 /// 静态行表与实现不一致（行未接线）：如实报告失败，不静默保存未发生的写入。
 fn unhandled_row(row: usize) {
-    notify_save_failed(&anyhow::anyhow!(
+    crate::kit::config_service::notify_save_failed(&anyhow::anyhow!(
         "config row {row} is not wired to an action"
     ));
 }
@@ -128,27 +108,22 @@ impl Candidate {
 
     /// 保存候选：成功才提交句柄（TUI 字段与宿主配置一起），失败只提示。
     ///
-    /// 返回是否已持久化——调用方据此决定本地副作用（如语言注册表重建）是否执行。
+    /// 落盘与提示规则见 [`crate::kit::config_service`]；返回是否已持久化——调用方
+    /// 据此决定本地副作用（如语言注册表重建）是否执行。
     fn save(
         self,
         handle: &PeriHandle,
         save: impl FnOnce(&PeriConfig) -> anyhow::Result<()>,
     ) -> bool {
         let Self { peri, tui } = self;
-        match save(&peri) {
-            Ok(()) => {
-                if let Some((tui_handle, tui)) = tui {
-                    *tui_handle.write() = tui;
-                }
-                *handle.write() = peri;
-                notify_saved();
-                true
-            }
-            Err(error) => {
-                notify_save_failed(&error);
-                false
-            }
+        if !crate::kit::config_service::persist_candidate_with(&peri, save) {
+            return false;
         }
+        if let Some((tui_handle, tui)) = tui {
+            *tui_handle.write() = tui;
+        }
+        *handle.write() = peri;
+        true
     }
 }
 
@@ -223,7 +198,9 @@ fn activate_base_row_with(
                 let alias = candidate.peri.config.active_alias.clone();
                 let Some(profile) = candidate.peri.config.profiles.get_mut(&alias) else {
                     // 活动档位不存在：没有任何字段可改，如实报告失败而非提示「已保存」。
-                    notify_save_failed(&anyhow::anyhow!("active profile `{alias}` not found"));
+                    crate::kit::config_service::notify_save_failed(&anyhow::anyhow!(
+                        "active profile `{alias}` not found"
+                    ));
                     return;
                 };
                 profile.context_1m = !profile.context_1m;

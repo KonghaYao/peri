@@ -8,6 +8,7 @@
 
 use super::*;
 
+use super::config_store::delete_candidate;
 use crate::kit::atoms::PROVIDER_LIST;
 use ratatui_kit::crossterm::event::{Event, KeyEvent, MouseButton, MouseEvent, MouseEventKind};
 use ratatui_kit::prelude::{EventResult, State, element};
@@ -370,5 +371,53 @@ fn edit_mode_without_state_renders_browse_in_the_same_frame() {
     assert!(
         !text.contains("Internal error"),
         "渲染段不得改写状态（回退由 effect 承担）：\n{text}"
+    );
+}
+
+/// 含给定 provider 身份的宿主配置——只服务于删除候选的纯函数回归。
+fn config_with_providers(ids: &[&str]) -> crate::config::PeriConfig {
+    let mut cfg = crate::config::PeriConfig::default();
+    cfg.config.providers = ids
+        .iter()
+        .map(|id| ProviderConfig {
+            id: (*id).to_string(),
+            provider_type: "anthropic".to_string(),
+            ..Default::default()
+        })
+        .collect();
+    cfg
+}
+
+/// 删除候选（纯函数）：目标存在才产出「移除后」的副本，且不改源配置。
+///
+/// 真实删除路径要进程级 `PERI_CONFIG_HANDLE`（测试进程不可安装），这里覆盖候选取舍
+/// 这一唯一不依赖句柄的判定：无候选 = 调用方跳过落盘，重复删除不产生写入。
+#[test]
+fn delete_candidate_prunes_copy_only_when_target_exists() {
+    let cfg = config_with_providers(&["alpha", "beta"]);
+
+    let candidate = delete_candidate(&cfg, "alpha").expect("目标存在时必须产出候选");
+    assert_eq!(
+        candidate
+            .config
+            .providers
+            .iter()
+            .map(|p| p.id.as_str())
+            .collect::<Vec<_>>(),
+        vec!["beta"],
+        "候选移除的只能是目标身份"
+    );
+    assert_eq!(
+        cfg.config
+            .providers
+            .iter()
+            .map(|p| p.id.as_str())
+            .collect::<Vec<_>>(),
+        vec!["alpha", "beta"],
+        "候选构造在副本上进行，不得改动源配置"
+    );
+    assert!(
+        delete_candidate(&cfg, "gamma").is_none(),
+        "目标已不在配置里时无候选：调用方跳过落盘与发布"
     );
 }

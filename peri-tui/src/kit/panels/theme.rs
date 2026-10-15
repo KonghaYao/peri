@@ -10,7 +10,6 @@
 //! - Esc → 恢复原始主题色并关闭面板
 
 use std::collections::HashMap;
-use std::time::Duration;
 
 use fluent_bundle::FluentValue;
 use ratatui_kit::prelude::Atom as AtomStatic;
@@ -27,9 +26,7 @@ use ratatui_kit::{
 
 use crate::app::panel_types::PanelKind;
 use crate::i18n;
-use crate::kit::atoms::{
-    LANG_VERSION, NOTIFICATION, Notification, PERI_CONFIG_HANDLE, TUI_CONFIG_HANDLE,
-};
+use crate::kit::atoms::{LANG_VERSION, PERI_CONFIG_HANDLE, TUI_CONFIG_HANDLE};
 use crate::kit::list_nav::{
     clamp_selection, next_selection, previous_selection, scroll_start_for_selected,
 };
@@ -133,26 +130,10 @@ fn persist_theme(name: &str) {
     tui_snapshot.sync_to_extra(&mut peri.config.extra);
     let snap = peri.clone();
     drop(peri);
-    match crate::config::save_effective(&snap) {
-        Ok(()) => {
-            *NOTIFICATION.state().write() = Some(Notification {
-                message: i18n::tr("config-saved").to_string(),
-                until: peri_time::monotonic_now() + Duration::from_secs(1),
-            });
-        }
-        Err(e) => {
-            tracing::error!("failed to persist theme '{}': {}", name, e);
-            *NOTIFICATION.state().write() = Some(Notification {
-                message: i18n::tr_args(
-                    "config-save-failed",
-                    &[(
-                        "error".to_string(),
-                        FluentValue::from(e.to_string().as_str()),
-                    )],
-                ),
-                until: peri_time::monotonic_now() + Duration::from_secs(2),
-            });
-        }
+    // 失败提示与错误日志由 config_service 统一给出；这里补一条带主题名的 error
+    // 日志，保留「哪个主题落盘失败」的定位信息。
+    if !crate::kit::config_service::persist_candidate(&snap) {
+        tracing::error!("failed to persist theme '{}'", name);
     }
 }
 
@@ -184,26 +165,9 @@ fn toggle_daily_color() {
     tui_snapshot.sync_to_extra(&mut peri.config.extra);
     let snap = peri.clone();
     drop(peri);
-    match crate::config::save_effective(&snap) {
-        Ok(()) => {
-            *NOTIFICATION.state().write() = Some(Notification {
-                message: i18n::tr("config-saved").to_string(),
-                until: peri_time::monotonic_now() + Duration::from_secs(1),
-            });
-        }
-        Err(e) => {
-            tracing::error!("failed to toggle daily_color: {}", e);
-            *NOTIFICATION.state().write() = Some(Notification {
-                message: i18n::tr_args(
-                    "config-save-failed",
-                    &[(
-                        "error".to_string(),
-                        FluentValue::from(e.to_string().as_str()),
-                    )],
-                ),
-                until: peri_time::monotonic_now() + Duration::from_secs(2),
-            });
-        }
+    // 同上：失败提示由 config_service 统一给出，这里保留 daily_color 的定位信息。
+    if !crate::kit::config_service::persist_candidate(&snap) {
+        tracing::error!("failed to toggle daily_color");
     }
 }
 
