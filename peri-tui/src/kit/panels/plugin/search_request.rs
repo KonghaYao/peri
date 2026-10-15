@@ -1,26 +1,26 @@
 //! Request responses are owned by a search ticket, independently of legacy notifications.
 
-use super::{
-    PluginSearchResultItem,
-    discover::{SearchSession, SearchTicket},
-};
+use super::PluginSearchResultItem;
 use crate::acp_client::AcpTuiClient;
+use crate::application::operations::OperationTicket;
 use std::{sync::Arc, time::Duration};
 
 pub(super) type SearchResult = Result<Vec<PluginSearchResultItem>, String>;
 
 pub(super) fn launch_search(
-    ticket: SearchTicket,
+    ticket: OperationTicket,
+    query: String,
     client: Option<Arc<AcpTuiClient>>,
     // Return an unconsumed result when the hook is temporarily borrowed.
-    complete: impl Fn(&SearchTicket, SearchResult) -> Option<SearchResult> + Send + 'static,
+    complete: impl Fn(&OperationTicket, SearchResult) -> Option<SearchResult> + Send + 'static,
 ) -> tokio::task::JoinHandle<()> {
     tokio::spawn(async move {
         let mut result = if let Some(client) = client {
-            let params = serde_json::json!({"query": ticket.query, "sessionId": ticket.session.id});
+            let params =
+                serde_json::json!({"query": query, "sessionId": ticket.scope().session_id()});
             tokio::select! {
                 biased;
-                _ = ticket.cancelled.cancelled() => return,
+                _ = ticket.token().cancelled() => return,
                 result = client.send_raw_request("plugin/search", params) => result,
             }
             .map_err(|error| error.to_string())
@@ -29,7 +29,8 @@ pub(super) fn launch_search(
             Err("ACP client not available".into())
         };
         loop {
-            if ticket.cancelled.is_cancelled() || SearchSession::current() != ticket.session {
+            // 作用域一变化，本次响应即失去归属：静默丢弃，不写面板状态。
+            if ticket.is_cancelled() || ticket.scope() != &super::current_scope() {
                 return;
             }
             let Some(unconsumed) = complete(&ticket, result) else {
@@ -41,7 +42,7 @@ pub(super) fn launch_search(
             // owner Drop, edit, and reset cancel the ticket and this wait.
             tokio::select! {
                 biased;
-                _ = ticket.cancelled.cancelled() => return,
+                _ = ticket.token().cancelled() => return,
                 _ = peri_time::sleep(Duration::from_millis(1)) => {}
             }
         }

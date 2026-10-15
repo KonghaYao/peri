@@ -1,9 +1,6 @@
 //! Request/notification/bridge/render regression for plugin search completion.
 
-use super::{
-    discover::{DiscoverState, SearchSession},
-    render, search_request,
-};
+use super::{current_scope, discover::DiscoverState, render, search_request};
 use crate::acp_client::AcpTuiClient;
 use crate::kit::atoms::{ACTIVE_SESSION_ID, BRIDGE_RESET_COUNTER};
 use peri_acp::transport::{
@@ -88,21 +85,24 @@ async fn completed_search_view(fail: bool) -> String {
         observed_tx,
     );
     let status = Arc::new(parking_lot::Mutex::new(DiscoverState::default()));
-    status.lock().reset_session(SearchSession::current());
+    status.lock().reset_session(current_scope());
     status.lock().editor.insert_str("compiler");
-    let ticket = status
-        .lock()
-        .begin_search(SearchSession::current())
-        .unwrap();
+    // 提交时固定查询文本，与面板处理提交的方式一致。
+    let query = status.lock().editor.text.clone();
+    let ticket = status.lock().begin_search(current_scope()).unwrap();
     let status_for_request = Arc::downgrade(&status);
     let client = Arc::new(client);
-    let request =
-        search_request::launch_search(ticket, Some(client.clone()), move |ticket, result| {
+    let request = search_request::launch_search(
+        ticket,
+        query,
+        Some(client.clone()),
+        move |ticket, result| {
             if let Some(status) = status_for_request.upgrade() {
                 status.lock().complete(ticket, result);
             }
             None
-        });
+        },
+    );
 
     let incoming = tokio::time::timeout(Duration::from_secs(2), server.recv())
         .await
@@ -254,7 +254,7 @@ fn item(name: &str) -> super::PluginSearchResultItem {
 
 fn search_owner() -> Arc<parking_lot::Mutex<DiscoverState>> {
     let mut state = DiscoverState::default();
-    state.reset_session(SearchSession::current());
+    state.reset_session(current_scope());
     state.editor.insert_str("compiler");
     Arc::new(parking_lot::Mutex::new(state))
 }
@@ -263,14 +263,20 @@ fn launch_owned(
     owner: &Arc<parking_lot::Mutex<DiscoverState>>,
     client: &Arc<AcpTuiClient>,
 ) -> tokio::task::JoinHandle<()> {
-    let ticket = owner.lock().begin_search(SearchSession::current()).unwrap();
+    let query = owner.lock().editor.text.clone();
+    let ticket = owner.lock().begin_search(current_scope()).unwrap();
     let weak = Arc::downgrade(owner);
-    search_request::launch_search(ticket, Some(client.clone()), move |ticket, result| {
-        if let Some(owner) = weak.upgrade() {
-            owner.lock().complete(ticket, result);
-        }
-        None
-    })
+    search_request::launch_search(
+        ticket,
+        query,
+        Some(client.clone()),
+        move |ticket, result| {
+            if let Some(owner) = weak.upgrade() {
+                owner.lock().complete(ticket, result);
+            }
+            None
+        },
+    )
 }
 
 async fn receive_search(
@@ -343,11 +349,11 @@ async fn plugin_search_session_switch_and_close_invalidate_pending_response() {
             "close" => owner.lock().close(),
             "reset" => {
                 *BRIDGE_RESET_COUNTER.state().write() += 1;
-                owner.lock().reset_session(SearchSession::current());
+                owner.lock().reset_session(current_scope());
             }
             _ => {
                 *ACTIVE_SESSION_ID.state().write() = "after".into();
-                owner.lock().reset_session(SearchSession::current());
+                owner.lock().reset_session(current_scope());
             }
         }
         let _ = server.send_response(id, Ok(response("stale-result"))).await;
@@ -394,15 +400,19 @@ async fn plugin_search_busy_projection_retries_once_accepted_or_exits_on_cancel(
         let (client, _, _) = AcpTuiClient::new(transport);
         client.force_stable_for_test("busy-projection", true);
         let owner = search_owner();
-        let ticket = owner.lock().begin_search(SearchSession::current()).unwrap();
+        let query = owner.lock().editor.text.clone();
+        let ticket = owner.lock().begin_search(current_scope()).unwrap();
         let weak = Arc::downgrade(&owner);
         let accepted = Arc::new(AtomicBool::new(false));
         let accepted_for_callback = accepted.clone();
         let projections = Arc::new(AtomicUsize::new(0));
         let projections_for_callback = projections.clone();
         let (refused_tx, mut refused_rx) = mpsc::unbounded_channel();
-        let request =
-            search_request::launch_search(ticket, Some(Arc::new(client)), move |ticket, result| {
+        let request = search_request::launch_search(
+            ticket,
+            query,
+            Some(Arc::new(client)),
+            move |ticket, result| {
                 if !accepted_for_callback.load(Ordering::SeqCst) {
                     let _ = refused_tx.send(());
                     return Some(result);
@@ -412,7 +422,8 @@ async fn plugin_search_busy_projection_retries_once_accepted_or_exits_on_cancel(
                     projections_for_callback.fetch_add(1, Ordering::SeqCst);
                 }
                 None
-            });
+            },
+        );
         let id = receive_search(&server).await;
         server
             .send_response(id, Ok(response("delivered-after-render")))
@@ -507,7 +518,7 @@ fn plugin_search_keyboard_and_mouse_reach_the_same_submission_action() {
     };
     use ratatui_kit::ratatui::layout::Rect;
     let mut state = DiscoverState::default();
-    state.reset_session(SearchSession::current());
+    state.reset_session(current_scope());
     let area = Some(Rect::new(0, 0, 80, 20));
     let key = |code| Event::Key(KeyEvent::new(code, KeyModifiers::NONE));
     for c in "compiler".chars() {
@@ -554,7 +565,7 @@ fn plugin_search_remote_selection_uses_the_displayed_identity_for_detail_and_ins
     for mouse in [false, true] {
         let owner = search_owner();
         let mut state = owner.lock();
-        let ticket = state.begin_search(SearchSession::current()).unwrap();
+        let ticket = state.begin_search(current_scope()).unwrap();
         state.complete(&ticket, Ok(vec![item("remote-selection")]));
         state.focused = false;
         let event = if mouse {

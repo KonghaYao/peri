@@ -1,3 +1,4 @@
+use super::super::current_scope;
 use super::*;
 use crate::kit::atoms::{ACTIVE_SESSION_ID, BRIDGE_RESET_COUNTER};
 use peri_acp::transport::{
@@ -96,17 +97,20 @@ fn old_session_completion_cannot_clear_a_new_pending_operation() {
     let mut state = OperationState::default();
     let first = state.begin(
         PluginOperation::installed("enable", &plugin("local")).unwrap(),
-        SearchSession::default(),
+        OperationScope::default(),
     );
-    let mut new_session = SearchSession::default();
-    new_session.id = "another-session".into();
     let second = state.begin(
         PluginOperation::installed("update", &plugin("local")).unwrap(),
-        new_session,
+        OperationScope::new("another-session", 0),
     );
-    assert!(!state.complete(&first, Err("late failure".into())));
+    assert!(!state.complete(
+        &first,
+        OperationOutcome::Failed {
+            reason: "late failure".into()
+        }
+    ));
     assert_eq!(state.pending_action(), Some("update"));
-    assert!(state.complete(&second, Ok(())));
+    assert!(state.complete(&second, OperationOutcome::Succeeded));
     assert!(state.pending_action().is_none());
     assert!(state.error.is_none());
 }
@@ -185,14 +189,17 @@ async fn marketplace_requests_preserve_ticket_context_and_surface_backend_failur
         client.force_stable_for_test("plugin-operation-session", true);
         client.spawn_pump(notification_tx);
         let state = Arc::new(parking_lot::Mutex::new(OperationState::default()));
-        let ticket = state
-            .lock()
-            .begin(operation.clone(), SearchSession::current());
+        let ticket = state.lock().begin(operation.clone(), current_scope());
         let complete_state = state.clone();
-        let task = launch(ticket, Some(Arc::new(client)), move |ticket, result| {
-            complete_state.lock().complete(ticket, result);
-            None
-        });
+        let task = launch(
+            ticket,
+            operation.clone(),
+            Some(Arc::new(client)),
+            move |ticket, outcome| {
+                complete_state.lock().complete(ticket, outcome);
+                None
+            },
+        );
         let incoming = tokio::time::timeout(Duration::from_secs(2), server.recv())
             .await
             .unwrap()
@@ -229,13 +236,11 @@ async fn marketplace_requests_preserve_ticket_context_and_surface_backend_failur
 async fn missing_client_leaves_loading_and_preserves_visible_error() {
     let _guard = SessionGuard::new();
     let state = Arc::new(parking_lot::Mutex::new(OperationState::default()));
-    let ticket = state.lock().begin(
-        PluginOperation::installed("enable", &plugin("user")).unwrap(),
-        SearchSession::current(),
-    );
+    let operation = PluginOperation::installed("enable", &plugin("user")).unwrap();
+    let ticket = state.lock().begin(operation.clone(), current_scope());
     let complete_state = state.clone();
-    launch(ticket, None, move |ticket, result| {
-        complete_state.lock().complete(ticket, result);
+    launch(ticket, operation, None, move |ticket, outcome| {
+        complete_state.lock().complete(ticket, outcome);
         None
     })
     .await
@@ -253,15 +258,18 @@ async fn wire_result(response: Result<Value, AcpError>, late: bool) -> Option<St
     client.force_stable_for_test("plugin-operation-session", true);
     client.spawn_pump(notification_tx);
     let state = Arc::new(parking_lot::Mutex::new(OperationState::default()));
-    let ticket = state.lock().begin(
-        PluginOperation::installed("disable", &plugin("project")).unwrap(),
-        SearchSession::current(),
-    );
+    let operation = PluginOperation::installed("disable", &plugin("project")).unwrap();
+    let ticket = state.lock().begin(operation.clone(), current_scope());
     let complete_state = state.clone();
-    let task = launch(ticket, Some(Arc::new(client)), move |ticket, result| {
-        complete_state.lock().complete(ticket, result);
-        None
-    });
+    let task = launch(
+        ticket,
+        operation,
+        Some(Arc::new(client)),
+        move |ticket, outcome| {
+            complete_state.lock().complete(ticket, outcome);
+            None
+        },
+    );
     let incoming = tokio::time::timeout(Duration::from_secs(2), server.recv())
         .await
         .unwrap()
@@ -275,7 +283,7 @@ async fn wire_result(response: Result<Value, AcpError>, late: bool) -> Option<St
     assert_eq!(params["enable"], false);
     if late {
         BRIDGE_RESET_COUNTER.set(BRIDGE_RESET_COUNTER.get().wrapping_add(1));
-        state.lock().reset_session(SearchSession::current());
+        state.lock().reset_session(current_scope());
     }
     server.send_response(id, response).await.unwrap();
     tokio::time::timeout(Duration::from_secs(2), task)
@@ -398,16 +406,21 @@ impl MountedPanel {
         let ticket = self
             .operation
             .write()
-            .begin(operation, SearchSession::current());
+            .begin(operation.clone(), current_scope());
         let state = self.operation;
-        let task = launch(ticket.clone(), Some(client), move |ticket, result| {
-            if let Some(mut state) = state.try_write() {
-                state.complete(ticket, result);
-                None
-            } else {
-                Some(result)
-            }
-        });
+        let task = launch(
+            ticket.clone(),
+            operation,
+            Some(client),
+            move |ticket, outcome| {
+                if let Some(mut state) = state.try_write() {
+                    state.complete(ticket, outcome);
+                    None
+                } else {
+                    Some(outcome)
+                }
+            },
+        );
         (ticket, task)
     }
 }
@@ -548,17 +561,17 @@ fn mounted_late_timeout_response_cannot_clear_new_pending_ticket() {
                 .await
                 .unwrap();
             tokio::task::yield_now().await;
-            assert!(
-                !panel
-                    .operation
-                    .write()
-                    .complete(&old, Err("late failure".into()))
-            );
+            assert!(!panel.operation.write().complete(
+                &old,
+                OperationOutcome::Failed {
+                    reason: "late failure".into()
+                }
+            ));
             assert_eq!(panel.operation.read().pending_action(), Some("update"));
             assert!(panel.operation.read().error.is_none());
             assert_eq!(
-                panel.operation.read().pending.as_ref().unwrap().generation,
-                new.generation
+                panel.operation.read().gate.pending_generation(),
+                Some(new.generation())
             );
             server
                 .send_response(new_id, Ok(json!({"success": true})))
@@ -600,7 +613,7 @@ fn mounted_escape_cancels_only_client_wait_then_allows_panel_exit() {
                 ));
                 task.await.unwrap();
                 assert!(panel.operation.read().pending_action().is_none());
-                assert!(old.cancelled.is_cancelled());
+                assert!(old.is_cancelled());
                 assert!(
                     panel
                         .operation
@@ -692,16 +705,18 @@ fn mounted_missing_client_and_server_failure_remain_visible() {
         let text = mount_panel(move |panel| {
             paused_runtime().block_on(async {
                 let (client, server) = controlled_client();
-                let ticket = panel.operation.write().begin(
-                    PluginOperation::installed("enable", &plugin("user")).unwrap(),
-                    SearchSession::current(),
-                );
+                let operation = PluginOperation::installed("enable", &plugin("user")).unwrap();
+                let ticket = panel
+                    .operation
+                    .write()
+                    .begin(operation.clone(), current_scope());
                 let state = panel.operation;
                 let task = launch(
                     ticket,
+                    operation,
                     (!missing_client).then_some(client),
-                    move |ticket, result| {
-                        state.write().complete(ticket, result);
+                    move |ticket, outcome| {
+                        state.write().complete(ticket, outcome);
                         None
                     },
                 );

@@ -1,5 +1,7 @@
-use super::discover::SearchSession;
 use crate::acp_client::AcpTuiClient;
+use crate::application::operations::{
+    CompletionGate, OperationOutcome, OperationScope, OperationTicket, OutcomeUnknownReason,
+};
 use crate::kit::atoms::{ACP_CLIENT_HANDLE, PluginSummary};
 use crate::kit::panel_mouse::{ListLayout, hit_item, is_scrollbar_column};
 use ratatui_kit::crossterm::event::{Event, KeyCode, KeyEventKind};
@@ -7,7 +9,6 @@ use ratatui_kit::prelude::State;
 use ratatui_kit::ratatui::layout::Rect;
 use serde_json::{Value, json};
 use std::{sync::Arc, time::Duration};
-use tokio_util::sync::CancellationToken;
 
 const OPERATION_TIMEOUT: Duration = Duration::from_secs(10);
 
@@ -119,93 +120,97 @@ impl PluginOperation {
     }
 }
 
-#[derive(Clone)]
-pub(super) struct OperationTicket {
-    pub session: SearchSession,
-    operation: PluginOperation,
-    generation: u64,
-    cancelled: CancellationToken,
-}
-
+/// 插件操作的面板状态。
+///
+/// 在途身份（作用域、代次、取消令牌）与过期拒收由 `application::operations` 的
+/// 完成门持有；这里只保留插件自己的在途动作标签、待确认目标与反馈文案。
 #[derive(Default)]
 pub(super) struct OperationState {
-    session: SearchSession,
-    generation: u64,
-    pending: Option<OperationTicket>,
+    gate: CompletionGate,
+    /// 在途动作标签：footer 文案与 Esc 判定用。原语不认识插件动作。
+    pending_action: Option<&'static str>,
     pub confirmation: Option<PluginOperation>,
     pub error: Option<String>,
 }
 
-impl Drop for OperationState {
-    fn drop(&mut self) {
-        self.cancel();
+/// 完成词汇 → 面板反馈文案。文案属视图层，原语只给枚举。
+fn outcome_message(outcome: &OperationOutcome) -> Option<String> {
+    match outcome {
+        OperationOutcome::Succeeded => None,
+        OperationOutcome::Failed { reason } => Some(reason.clone()),
+        OperationOutcome::OutcomeUnknown { reason } => Some(match reason {
+            OutcomeUnknownReason::WaitCancelled => {
+                crate::i18n::tr("panel-plugin-operation-wait-cancelled")
+            }
+            OutcomeUnknownReason::ObserverGone => {
+                crate::i18n::tr("panel-plugin-operation-session-changed")
+            }
+            OutcomeUnknownReason::TimedOut => crate::i18n::tr("panel-plugin-operation-timed-out"),
+        }),
     }
 }
 
 impl OperationState {
-    fn cancel(&mut self) {
-        if let Some(ticket) = self.pending.take() {
-            ticket.cancelled.cancel();
-        }
-    }
-
+    /// Esc：停止本地等待。结果记为「未确认」——远端可能仍在执行，
+    /// 不能显示为成功，也不能显示为已撤销。
     pub fn cancel_wait(&mut self) -> bool {
-        let Some(ticket) = self.pending.take() else {
+        let Some(action) = self.pending_action else {
             return false;
         };
-        ticket.cancelled.cancel();
-        self.error = Some(crate::i18n::tr("panel-plugin-operation-wait-cancelled"));
-        tracing::warn!(session_id = %ticket.session.id, method = ticket.operation.method,
+        self.gate.cancel();
+        self.pending_action = None;
+        self.error = outcome_message(&OperationOutcome::OutcomeUnknown {
+            reason: OutcomeUnknownReason::WaitCancelled,
+        });
+        tracing::warn!(session_id = %self.gate.scope().session_id(), action,
             "Plugin client wait cancelled; server outcome unknown");
         true
     }
 
-    pub fn reset_session(&mut self, session: SearchSession) {
-        if self.session != session {
-            self.cancel();
+    pub fn reset_session(&mut self, scope: OperationScope) {
+        // 只认作用域变化：同作用域重复投影（每帧 effect）不得打断在途操作。
+        if self.gate.reset_scope(scope) {
+            self.pending_action = None;
             self.confirmation = None;
             self.error = None;
-            self.session = session;
         }
+    }
+
+    /// 是否有在途操作：与完成门同源，不另存一份在途标志。
+    pub fn is_pending(&self) -> bool {
+        self.gate.is_pending()
     }
 
     pub fn pending_action(&self) -> Option<&'static str> {
-        self.pending.as_ref().map(|ticket| ticket.operation.action)
+        debug_assert_eq!(
+            self.pending_action.is_some(),
+            self.gate.is_pending(),
+            "在途动作标签与完成门必须同生共死"
+        );
+        self.pending_action
     }
 
-    pub fn begin(&mut self, operation: PluginOperation, session: SearchSession) -> OperationTicket {
-        self.reset_session(session.clone());
-        self.cancel();
+    pub fn begin(&mut self, operation: PluginOperation, scope: OperationScope) -> OperationTicket {
         self.error = None;
         self.confirmation = None;
-        self.generation = self
-            .generation
-            .checked_add(1)
-            .expect("plugin operation generation exhausted");
-        let ticket = OperationTicket {
-            session,
-            operation,
-            generation: self.generation,
-            cancelled: CancellationToken::new(),
-        };
-        self.pending = Some(ticket.clone());
+        let ticket = self.gate.begin(scope);
+        self.pending_action = Some(operation.action);
         ticket
     }
 
-    pub fn complete(&mut self, ticket: &OperationTicket, result: Result<(), String>) -> bool {
-        if self.session != ticket.session
-            || self.pending.as_ref().map(|pending| pending.generation) != Some(ticket.generation)
-        {
+    /// 落地一次完成：只有通过完成门的结果才能改写面板状态，晚到的旧结果返回 false。
+    pub fn complete(&mut self, ticket: &OperationTicket, outcome: OperationOutcome) -> bool {
+        if !self.gate.accept(ticket) {
             return false;
         }
-        self.pending = None;
-        self.error = result.err();
+        self.pending_action = None;
+        self.error = outcome_message(&outcome);
         true
     }
 }
 
 pub(super) fn handle_pending_event(event: &Event, state: State<OperationState>) -> bool {
-    let pending = state.read().pending_action().is_some();
+    let pending = state.read().is_pending();
     if pending
         && matches!(event, Event::Key(key) if key.kind == KeyEventKind::Press && key.code == KeyCode::Esc)
     {
@@ -215,16 +220,19 @@ pub(super) fn handle_pending_event(event: &Event, state: State<OperationState>) 
 }
 
 pub(super) fn dispatch(operation: PluginOperation, state: State<OperationState>) {
-    let ticket = state.write().begin(operation, SearchSession::current());
+    let ticket = state
+        .write()
+        .begin(operation.clone(), super::current_scope());
     drop(launch(
         ticket,
+        operation,
         ACP_CLIENT_HANDLE.get().cloned(),
-        move |ticket, result| {
+        move |ticket, outcome| {
             if let Some(mut state) = state.try_write() {
-                state.complete(ticket, result);
+                state.complete(ticket, outcome);
                 None
             } else {
-                Some(result)
+                Some(outcome)
             }
         },
     ));
@@ -232,95 +240,107 @@ pub(super) fn dispatch(operation: PluginOperation, state: State<OperationState>)
 
 pub(super) fn launch(
     ticket: OperationTicket,
+    operation: PluginOperation,
     client: Option<Arc<AcpTuiClient>>,
-    complete: impl Fn(&OperationTicket, Result<(), String>) -> Option<Result<(), String>>
-    + Send
-    + 'static,
+    complete: impl Fn(&OperationTicket, OperationOutcome) -> Option<OperationOutcome> + Send + 'static,
 ) -> tokio::task::JoinHandle<()> {
     let identity = client.as_ref().and_then(|client| {
         client
             .stable_session_identity()
-            .filter(|identity| identity.0 == ticket.session.id)
+            .filter(|identity| identity.0 == ticket.scope().session_id())
     });
     tokio::spawn(async move {
-        let mut result = if let Some(client) = client.as_ref() {
-            let mut params = ticket.operation.params.clone();
-            params["sessionId"] = json!(ticket.session.id);
-            tokio::select! {
+        let mut outcome = if let Some(client) = client.as_ref() {
+            let mut params = operation.params.clone();
+            params["sessionId"] = json!(ticket.scope().session_id());
+            match tokio::select! {
                 biased;
-                _ = ticket.cancelled.cancelled() => return,
+                _ = ticket.token().cancelled() => return,
                 result = peri_time::timeout(OPERATION_TIMEOUT, async {
                     let identity = identity.as_ref().ok_or_else(|| {
                         "ACP session not available for plugin operation".to_string()
                     })?;
-                    client.send_session_request(identity, ticket.operation.method, params)
+                    client.send_session_request(identity, operation.method, params)
                         .await.map_err(|error| error.to_string())
-                }) => result.unwrap_or_else(|_| {
-                    Err(crate::i18n::tr("panel-plugin-operation-timed-out"))
-                }),
-            }
-            .and_then(|value| {
-                if value.get("success").and_then(Value::as_bool) == Some(true) {
-                    Ok(())
-                } else {
-                    Err(format!("Invalid plugin operation response: {value}"))
+                }) => result,
+            } {
+                // 响应形状是插件自己的业务约定：success 非 true 一律按失败。
+                Ok(Ok(value)) if value.get("success").and_then(Value::as_bool) == Some(true) => {
+                    OperationOutcome::Succeeded
                 }
-            })
+                Ok(Ok(value)) => OperationOutcome::Failed {
+                    reason: format!("Invalid plugin operation response: {value}"),
+                },
+                Ok(Err(error)) => OperationOutcome::Failed { reason: error },
+                // 客户端等待结束不代表服务端没执行：这是结果未确认，不是失败。
+                Err(_) => OperationOutcome::OutcomeUnknown {
+                    reason: OutcomeUnknownReason::TimedOut,
+                },
+            }
         } else {
-            Err("ACP client not available".into())
+            OperationOutcome::Failed {
+                reason: "ACP client not available".into(),
+            }
         };
         if let Some(client) = client.as_ref()
             && identity.is_some()
             && client.stable_session_identity() != identity
         {
-            if let Err(error) = &result {
-                tracing::error!(session_id = %ticket.session.id, method = ticket.operation.method,
-                    %error, "Stale plugin operation failed");
+            if let OperationOutcome::Failed { reason } = &outcome {
+                tracing::error!(session_id = %ticket.scope().session_id(), method = operation.method,
+                    %reason, "Stale plugin operation failed");
             }
-            result = Err(crate::i18n::tr("panel-plugin-operation-session-changed"));
+            // 会话身份已替换：已发出的变更失去归属，既不称成功也不称失败。
+            outcome = OperationOutcome::OutcomeUnknown {
+                reason: OutcomeUnknownReason::ObserverGone,
+            };
         }
-        if result.is_ok()
+        // 插件业务特有副作用：marketplace 目录变更成功后刷新本地缓存。
+        if matches!(outcome, OperationOutcome::Succeeded)
             && matches!(
-                ticket.operation.method,
+                operation.method,
                 "marketplace/add" | "marketplace/remove" | "marketplace/refresh"
             )
         {
             tokio::select! {
                 biased;
-                _ = ticket.cancelled.cancelled() => return,
+                _ = ticket.token().cancelled() => return,
                 refresh = peri_time::timeout(OPERATION_TIMEOUT, tokio::task::spawn_blocking(|| {
                     super::data::refresh_discover_cache();
                     super::data::refresh_marketplace_cache();
                 })) => match refresh {
                     Ok(Ok(())) => {}
-                    Ok(Err(error)) => result = Err(format!("Marketplace cache refresh failed: {error}")),
-                    Err(error) => result = Err(format!("Marketplace operation succeeded; cache refresh timed out: {error}")),
+                    Ok(Err(error)) => outcome = OperationOutcome::Failed { reason: format!("Marketplace cache refresh failed: {error}") },
+                    Err(error) => outcome = OperationOutcome::Failed { reason: format!("Marketplace operation succeeded; cache refresh timed out: {error}") },
                 }
             }
         }
-        if let Err(error) = &result {
-            tracing::error!(session_id = %ticket.session.id, method = ticket.operation.method, %error, "Plugin operation failed");
+        if let OperationOutcome::Failed { reason } = &outcome {
+            tracing::error!(session_id = %ticket.scope().session_id(), method = operation.method, %reason, "Plugin operation failed");
         }
         loop {
-            if ticket.cancelled.is_cancelled() || SearchSession::current() != ticket.session {
+            // 作用域已变：本次结果不再属于当前面板，静默丢弃。
+            if ticket.is_cancelled() || ticket.scope() != &super::current_scope() {
                 return;
             }
             if let Some(client) = client.as_ref()
                 && identity.is_some()
                 && client.stable_session_identity() != identity
             {
-                let error = crate::i18n::tr("panel-plugin-operation-session-changed");
-                tracing::warn!(session_id = %ticket.session.id, method = ticket.operation.method,
-                    %error, "Discarding stale plugin operation result");
-                result = Err(error);
+                let reason = crate::i18n::tr("panel-plugin-operation-session-changed");
+                tracing::warn!(session_id = %ticket.scope().session_id(), method = operation.method,
+                    %reason, "Discarding stale plugin operation result");
+                outcome = OperationOutcome::OutcomeUnknown {
+                    reason: OutcomeUnknownReason::ObserverGone,
+                };
             }
-            let Some(unconsumed) = complete(&ticket, result) else {
+            let Some(unconsumed) = complete(&ticket, outcome) else {
                 return;
             };
-            result = unconsumed;
+            outcome = unconsumed;
             tokio::select! {
                 biased;
-                _ = ticket.cancelled.cancelled() => return,
+                _ = ticket.token().cancelled() => return,
                 _ = peri_time::sleep(Duration::from_millis(1)) => {}
             }
         }

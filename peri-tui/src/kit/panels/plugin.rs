@@ -5,6 +5,7 @@
 //! 无 ScrollView——避免其内置 handler 与自定义 ↑/↓ 冲突。
 
 use crate::app::panel_types::PanelKind;
+use crate::application::operations::OperationScope;
 use crate::components::textarea::TextAreaState;
 use crate::i18n;
 use crate::kit::atoms::{
@@ -25,7 +26,7 @@ use ratatui_kit::ratatui::{
 mod data;
 mod discover;
 mod discover_handler;
-use discover::{DiscoverState, SearchSession};
+use discover::DiscoverState;
 mod operation;
 mod panel_handler;
 mod render;
@@ -45,6 +46,17 @@ use self::render::{
     render_detail, render_discover_detail, render_discover_list, render_errors, render_installed,
     render_marketplaces,
 };
+
+/// 当前活动会话的操作作用域。
+///
+/// 面板是会话投影的消费者，取值留在这一侧；`application::operations` 只接受调用方
+/// 构造好的作用域，自己不读 atoms。
+fn current_scope() -> OperationScope {
+    OperationScope::new(
+        ACTIVE_SESSION_ID.state().read().clone(),
+        BRIDGE_RESET_COUNTER.get(),
+    )
+}
 
 // ── Search state machine ───────────────────────────────────────────────
 
@@ -162,14 +174,12 @@ pub fn PluginPanel(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
     hooks.use_atom(&LANG_VERSION);
     hooks.use_atom(&ACTIVE_SESSION_ID);
     hooks.use_atom(&BRIDGE_RESET_COUNTER);
-    discover
-        .write_no_update()
-        .reset_session(SearchSession::current());
-    let operation_session = SearchSession::current();
-    let session_for_effect = operation_session.clone();
+    discover.write_no_update().reset_session(current_scope());
+    let operation_scope = current_scope();
+    let scope_for_effect = operation_scope.clone();
     hooks.use_effect(
-        move || operation.write().reset_session(session_for_effect),
-        operation_session,
+        move || operation.write().reset_session(scope_for_effect),
+        operation_scope,
     );
     let count = plugins.len();
 
