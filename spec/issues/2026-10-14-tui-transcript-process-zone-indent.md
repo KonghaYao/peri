@@ -33,7 +33,7 @@
 7. **entry 起止 zone**：
    - `TuiUserBubble` = 文本/文本（user 永不缩进，不参与短回复判定）；
    - `TuiAssistantBubble` = 起点（有 reasoning 或**短回复** → 过程，否则文本），终点（正文非空且**非短回复** → 文本，否则等于起点）；
-   - `TuiDivider` = 文本/文本——turn 边界装饰属文本区，走基准前缀 `── label ──` 形态，不参与过程区缩进与台阶；
+   - `TuiDivider` = 文本/文本——turn 边界装饰属文本区；后续 user prompt 前固定画 `├──…` 横线，下一行直接显示 prompt，不参与过程区缩进与台阶；
    - 渲染 0 行的 entry 不参与相邻判定；
    - 其余 entry（ToolCard / SubAgentGroup / CollapsedGroup / SystemNote / SystemReminder / AskUserBlock / TodoSummary）= 过程/过程。
 8. **右缘不动**：`place_meta` 仍右对齐到 `line_width()`（带右缘，跳过滚动条列）；过程区正文可用宽度 = `content - indent`；`band_width` 与整带居中不变。
@@ -66,11 +66,11 @@
 9. 注记（Info）不画 `── label ──` 横线——走普通过程行：左缘标记列 `│` + 正文（与 reasoning 摘要同形）。
 10. 台阶行不进入复制文本、不保留空行。
 11. Wide/Standard 的文本块首尾不再保留节拍空行（§3.2）——块分隔由转场台阶承担；
-    Compact/Narrow 无台阶，保留正文块上下各 1 空行（逐列与改动前一致）；短回复（决策 13）
-    无台阶可用，正文上下同样各保留 1 空行（过程带前缀，与 Compact/Narrow 同形）。
+    Compact/Narrow 无台阶，assistant 正文上下各保留 1 空行；user prompt 无前导空行、仅保留尾部空行。
+    短回复（决策 13）无台阶可用，正文上下仍各保留 1 空行（过程带前缀）。
 12. 台阶线色随所接文本的左侧线条——进入台阶接上方文本 entry、退出台阶接下方文本 entry
-    （user → `text.secondary`、assistant 正文 → `accent`、Divider → `text.dim`，与
-    `── label ──` 同色）；entry 内部（reasoning → 正文）台阶用正文色。转场处颜色不断链。
+    （user → `text.secondary`、assistant 正文 → `accent`、Divider → `text.secondary`，与
+    `├──…` 同色）；entry 内部（reasoning → 正文）台阶用正文色。转场处颜色不断链。
 13. 短回复阈值：< 120 字（`chars().count()` 口径，用户拍板；依据见布局规格 §13）——AI
     回复少于该字数时正文并入过程带（缩进），human 永远不缩进。不改开关/配置项（决策 8）。
 14. 转场台阶与过程带形态的门控是**阈值 + 缩进**两条正交条件：短回复只在 `indent > 0`
@@ -85,7 +85,7 @@
 - `entry_render_cache.rs`：`transition` 纳入缓存失效——转场形态翻转触发该 slot 的 Layout 级重渲染，不影响其他 slot。
 - `message_area/render/{tool_card,group,reasoning,system,interaction,error,user,semantic}.rs`：前缀切换到 `process_*`、宽度预算切 `process_content_width()`；语义剥离按 span 结构判定并识别台阶行。
 - `message_area/selection.rs`：台阶行整行跳过 + `local_idx` 台阶顺延。
-- `message_area/render/user.rs` / `render.rs`：文本块节拍空行仅在 `indent == 0`（Compact/Narrow）保留；Wide/Standard 由台阶承担块分隔；短回复（`brief`）无台阶，正文上下各 1 空行经 `body_line` 走过程带前缀（条件 `indent == 0 || brief`）。
+- `message_area/render/user.rs` / `render.rs`：user prompt 所有宽度无前导空行，Compact/Narrow 只保留尾部空行；assistant 长正文节拍空行仅在 `indent == 0` 保留，短回复（`brief`）正文上下各 1 空行经 `body_line` 走过程带前缀（条件 `indent == 0 || brief`）。
 - `kit/tui_render_unit/bubble.rs`：`BRIEF_REPLY_MAX_CHARS`（= 120）与 `TuiAssistantBubble::is_brief()`——zone 判定与渲染前缀共用的单一权威。
 - `message_area/render.rs`（短回复路径）：`body_width`（短回复取 `process_content_width()`，否则 `content_width()`）与 `body_line`（短回复走 `process_prefixed_cont_line`）统一供 markdown / 表格 / 图片 / 段间空行使用；内部台阶条件加 `!brief`。
 - `message_area/render/helpers.rs`：`process_prefixed_cont_line`（`indent == 0` 回退 `prefixed_cont_line`）。
@@ -98,10 +98,10 @@
 - [x] 气泡内 reasoning → 正文的退出台阶由气泡自画；纯 reasoning 块（无正文）不画退出台阶。
 - [x] <60 列：与改动前逐列一致（前缀回退基准形态、无台阶；回退路径由测试逐列断言）。
 - [x] 语义复制剥净前缀与台阶；面板（子 Agent 详情）渲染逐列不变。
-- [x] 台阶线色 = 所接文本左侧线条色（进入台阶接上方文本、退出台阶接下方文本；user → `text.secondary`、assistant → `accent`、divider → `text.dim`；entry 内部台阶用正文色）——`test_step_line_color_follows_text_line`。
+- [x] 台阶线色 = 所接文本左侧线条色（进入台阶接上方文本、退出台阶接下方文本；user → `text.secondary`、assistant → `accent`、divider → `text.secondary`；entry 内部台阶用正文色）——`test_step_line_color_follows_text_line`。
 - [x] 文本块内所有行保持竖线前缀（含 md 复制按钮行，右对齐与点击区域不变），左缘时间线不断链——`test_assistant_bubble_renders_copy_button`。
-- [x] Divider 回文本区 `── label ──` 形态；Info 注记走过程行 `│` + label。
-- [x] Wide/Standard 正文块（user 气泡 / assistant 正文）首尾无节拍空行；Compact/Narrow 保留上下各 1 空行（回退路径由测试逐列断言）；短回复（无台阶）上下各 1 行过程带前缀空行——`test_vertical_rhythm_wide_and_compact` / `brief_reply_stays_in_process_zone_without_step`。
+- [x] Divider 保持文本区形态；现为后续 prompt 前 `├──…` 横线，下一行直接是正文；Info 注记走过程行 `│` + label。
+- [x] User prompt 所有宽度无前导空行；Compact/Narrow 仍保留尾部空行与 assistant 正文上下空行；短回复（无台阶）上下各 1 行过程带前缀空行——`test_vertical_rhythm_blank_lines` / `brief_reply_stays_in_process_zone_without_step`。
 - [x] 本轮重验：`test --locked -p peri-tui --lib` 1849 passed / 0 failed / 6 ignored（与基线一致）；layer-imports 22 条规则 0 违规；`git diff --check` 干净；check --all-targets / clippy / fmt / doc 见下方验证命令。
 - [x] 按 `DOC-UPDATE-001` 核对受影响路由与事实源；不新增平行文档（`docs/design/tui-chat-workbench.md`、`docs/design/tui-subagent-activity.md`、`docs/design/tui-streaming-markdown-performance.md`、`docs/code-index/peri-tui.md` 已同步）。
 - [x] 短回复（<120 字）正文并入过程带（前缀 col6、wrap 宽度 `process_content_width`）；与相邻过程 entry 同区接续（进出无台阶），气泡内 reasoning → 短回复正文无内部台阶——`brief_reply_stays_in_process_zone_without_step` / `test_step_line_color_follows_text_line`。
@@ -117,7 +117,7 @@
 3. `ProcessLead { Branch, Inline }` → `ZoneTransition { None, EnterProcess, ExitProcess }`。
 4. `TuiDivider` 由过程区改归文本区；Info 注记由 `── label ──` 改过程行 `│` + label。
 5. 台阶行引入的索引顺延与语义复制跳过（上文 §11/§12）。
-6. Wide/Standard 文本块首尾节拍空行删除（v1 保留上下各 1 空行）；Compact/Narrow 保留；短回复（无台阶）上下各补 1 行过程带前缀空行。
+6. Wide/Standard 文本块首尾节拍空行删除（v1 保留上下各 1 空行）；Compact/Narrow 的 assistant 正文保留，user prompt 只留尾部空行；短回复（无台阶）上下各补 1 行过程带前缀空行。
 
 ## 验证命令
 

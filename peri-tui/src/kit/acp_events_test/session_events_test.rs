@@ -588,12 +588,13 @@ fn test_multi_turn_reasoning_preserved_in_committed() {
 
     // 验证 VIEW_MODELS snapshot
     let snapshot = VIEW_MODELS.state().read().clone();
-    assert_eq!(snapshot.items.len(), 4);
+    assert_eq!(snapshot.items.len(), 5);
+    assert!(matches!(snapshot.items[2], TuiRenderUnit::TuiDivider(_)));
 
     // [Slice 2] 折叠语义重定义：TurnDone 后 phase 离开 PromptRunning →
     // 全部 reasoning 状态 Completed → spec §7 表折叠为单行（Collapsed）。
     // 旧语义"仅最后一个 reasoning 展开"已由状态机取代。
-    for (idx, label) in [(1usize, "Turn 1"), (3usize, "Turn 2")] {
+    for (idx, label) in [(1usize, "Turn 1"), (4usize, "Turn 2")] {
         match &snapshot.items[idx] {
             TuiRenderUnit::TuiAssistantBubble(d) => {
                 let r = d.reasoning.as_ref().unwrap();

@@ -222,10 +222,10 @@ fn immutable_render_snapshot_allows_publication_before_derivation() {
     writer.join().unwrap();
     let (current, current_publication) = read_render_snapshot();
     assert_eq!(captured.generation, publication.generation);
-    assert_eq!(captured.items.len(), 64);
+    assert_eq!(captured.items.len(), 127);
     assert_eq!(current.generation, current_publication.generation);
     assert!(current.generation > captured_generation);
-    assert_eq!(current.items.len(), 65);
+    assert_eq!(current.items.len(), 129);
     let grid = GridSpec::grid_for(80);
     let mut transcript = Transcript::default();
     let mut caches = Vec::new();
@@ -241,7 +241,7 @@ fn immutable_render_snapshot_allows_publication_before_derivation() {
         0,
         2,
     );
-    assert_eq!(old_index.slot_count(), 64);
+    assert_eq!(old_index.slot_count(), 127);
     push_view_models_for_reset();
     let (reset, reset_publication) = read_render_snapshot();
     assert!(reset.items.is_empty());
@@ -860,7 +860,7 @@ fn zone_transition_matrix_skips_zero_line_entries() {
     let items = im::Vector::from(vec![user(), brief_answer(), tool_entry("Read")]);
     assert_eq!(zone_transition(&items, 2), ZoneTransition::None);
 
-    // turn 边界 Divider（文本区装饰）：进出两向台阶线色都随它自身（text.dim）
+    // turn 边界 Divider（文本区装饰）：进出两向台阶线色都随它自身（text.secondary）
     let divider = || {
         TuiRenderUnit::TuiDivider(crate::kit::tui_render_unit::TuiDivider {
             label: None,

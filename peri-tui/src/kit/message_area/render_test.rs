@@ -135,6 +135,9 @@ fn tool_card(tool_name: &str, summary: &str, is_error: bool, is_running: bool) -
 #[path = "render_entry_layout_test.rs"]
 mod entry_layout_tests;
 
+#[path = "render_vertical_rhythm_test.rs"]
+mod vertical_rhythm_tests;
+
 #[path = "render_user_entry_test.rs"]
 mod user_entry_tests;
 

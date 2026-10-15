@@ -186,7 +186,7 @@ pub(super) fn step_line(text: &'static str, color: Color) -> Line<'static> {
 }
 
 /// 台阶线色（§6）：与所接文本的左侧线条同色——user 文本 `text.secondary`、
-/// assistant 正文 `accent`、Divider `text.dim`（与其 `── label ──` 同色）；
+/// assistant 正文 `accent`、Divider `text.secondary`（与其 `├──…` 同色）；
 /// 语义见 [`TextLineSource`]。色值须与各文本渲染器的实际前缀色保持同步
 /// （`render/user.rs` / `render.rs` 正文 / `render/system.rs` divider）。
 pub(super) fn text_line_color(source: TextLineSource) -> Color {
@@ -194,7 +194,7 @@ pub(super) fn text_line_color(source: TextLineSource) -> Color {
     match source {
         TextLineSource::User => sem.text.secondary,
         TextLineSource::Assistant => sem.accent,
-        TextLineSource::Divider => sem.text.dim,
+        TextLineSource::Divider => sem.text.secondary,
     }
 }
 

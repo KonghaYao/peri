@@ -65,7 +65,7 @@ fn produces_lines(vm: &TuiRenderUnit) -> bool {
 }
 
 /// 台阶线色来源：按 entry 类型映射文本区左侧线条色——user 气泡用
-/// `text.secondary`、assistant 正文用 `accent`、Divider 用 `text.dim`（与
+/// `text.secondary`、assistant 正文用 `accent`、Divider 用 `text.secondary`（与
 /// `── label ──` 同色）；主题值在渲染层解析（`render/helpers.rs::text_line_color`）。
 fn text_line_source(vm: &TuiRenderUnit) -> TextLineSource {
     match vm {

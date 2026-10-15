@@ -19,8 +19,8 @@ use std::sync::Mutex;
 /// generation 每次调用递增+1。
 ///
 /// 快照后处理流水线（均为纯视觉变换，不触碰 segment↔cache 对齐）：
-/// 1. turn 边界 `TuiDivider`（§6.6：committed 与 current_turn 之间）；
-/// 2. `apply_fold_pass`（spec §7 表 + FOLD_OVERRIDES）；
+/// 1. `apply_fold_pass`（spec §7 表 + FOLD_OVERRIDES）；
+/// 2. 按完整消息顺序投影 turn 分隔线（随下一条用户 prompt 保留）；
 /// 3. todo 进度摘要行（§6.9：TODO_ITEMS 派生，插在最终回答前）；
 /// 4. `group_successful_tools`（§7：相邻成功工具压成 `TuiCollapsedGroup`）。
 pub(crate) fn push_view_models(state: &mut BridgeState) {
@@ -56,7 +56,7 @@ pub(crate) fn push_view_models(state: &mut BridgeState) {
 
     let overrides_state = FOLD_OVERRIDES.state();
     let overrides = overrides_state.read();
-    let mut items = state
+    let items = state
         .folded_history
         .project(&state.committed, state.phase, &overrides);
 
@@ -74,28 +74,8 @@ pub(crate) fn push_view_models(state: &mut BridgeState) {
         __t = peri_time::monotonic_now();
     }
 
-    // [§6.6] turn 边界 divider：committed 末尾是**新 turn 的用户 prompt**（≥2 项，
-    // 说明存在上一 turn 内容）且 current_turn 有内容时，在 prompt 之前插一条
-    // 无 label 分隔线——committed|current_turn 边界本身通常是「prompt ↔ 回复」
-    // 的同一 turn 内部，不能直接用它；以「末项为 user bubble」判定新 turn 起点。
     let history = items.clone();
     let active_start = history.len().saturating_sub(1);
-    if items.len() >= 2
-        && matches!(items.back(), Some(TuiRenderUnit::TuiUserBubble(_)))
-        && !state.current_turn.is_empty()
-        && !matches!(
-            items.get(items.len() - 2),
-            Some(TuiRenderUnit::TuiDivider(_))
-        )
-    {
-        items.insert(
-            items.len() - 1,
-            TuiRenderUnit::TuiDivider(TuiDivider {
-                label: None,
-                content_hash: 0,
-            }),
-        );
-    }
     let previous_generation = VIEW_MODELS.state().read().generation;
     let confirmed_prefix =
         TRANSCRIPT_HISTORY
@@ -111,7 +91,16 @@ pub(crate) fn push_view_models(state: &mut BridgeState) {
                     0
                 }
             });
+    let preceding_prompts = history
+        .iter()
+        .take(confirmed_prefix)
+        .filter(|vm| is_visible_user_prompt(vm))
+        .count();
+    let confirmed_prefix = confirmed_prefix + preceding_prompts.saturating_sub(1);
+    let (mut items, has_history_prompt) = decorated_history(&history);
+    let visual_active_start = items.len();
     join_into(&mut items, active);
+    insert_turn_dividers(&mut items, visual_active_start, has_history_prompt);
     #[cfg(test)]
     {
         crate::kit::acp_bridge::observe_perf(
@@ -197,6 +186,65 @@ static TODO_SUMMARY_CACHE: Mutex<Option<(u64, u64, String)>> = Mutex::new(None);
 
 static TRANSCRIPT_HISTORY: Mutex<Option<(im::Vector<TuiRenderUnit>, usize, u64)>> =
     Mutex::new(None);
+struct DividerHistoryCache {
+    raw: im::Vector<TuiRenderUnit>,
+    decorated: im::Vector<TuiRenderUnit>,
+    has_prompt: bool,
+}
+
+static DIVIDER_HISTORY: Mutex<Option<DividerHistoryCache>> = Mutex::new(None);
+
+fn is_visible_user_prompt(vm: &TuiRenderUnit) -> bool {
+    matches!(vm, TuiRenderUnit::TuiUserBubble(user) if !user.text.is_empty() || !user.attachments.is_empty())
+}
+
+/// History is immutable during a streaming turn. Reuse its decorated tree so
+/// each token only inserts dividers for newly appended active entries.
+fn decorated_history(history: &im::Vector<TuiRenderUnit>) -> (im::Vector<TuiRenderUnit>, bool) {
+    let mut cache = DIVIDER_HISTORY.lock().unwrap();
+    if let Some(cached) = cache.as_ref()
+        && (cached.raw.ptr_eq(history) || (history.is_inline() && &cached.raw == history))
+    {
+        return (cached.decorated.clone(), cached.has_prompt);
+    }
+    let mut decorated = history.clone();
+    let has_prompt = insert_turn_dividers(&mut decorated, 0, false);
+    *cache = Some(DividerHistoryCache {
+        raw: history.clone(),
+        decorated: decorated.clone(),
+        has_prompt,
+    });
+    (decorated, has_prompt)
+}
+
+/// Put the rule immediately before every user prompt after the first one.
+/// This projection depends only on transcript order, so completion and replay
+/// cannot remove a rule that was already visible. Keep `committed` free of
+/// presentation rows, since cancellation and replay address its real messages.
+fn insert_turn_dividers(
+    items: &mut im::Vector<TuiRenderUnit>,
+    start: usize,
+    mut seen_prompt: bool,
+) -> bool {
+    let mut index = start;
+    while index < items.len() {
+        if is_visible_user_prompt(&items[index]) {
+            if seen_prompt {
+                items.insert(
+                    index,
+                    TuiRenderUnit::TuiDivider(TuiDivider {
+                        label: None,
+                        content_hash: 0,
+                    }),
+                );
+                index += 1;
+            }
+            seen_prompt = true;
+        }
+        index += 1;
+    }
+    seen_prompt
+}
 
 /// [§6.9] 从 `TODO_ITEMS` 派生活动 turn 的 todo 进度摘要行。
 ///
