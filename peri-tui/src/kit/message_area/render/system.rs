@@ -149,7 +149,7 @@ fn divider_with_label_line(grid: &GridSpec, label: &str) -> Line<'static> {
                 inner,
                 "\u{2500}".repeat(fill)
             ),
-            Style::default().fg(sem.text.dim),
+            Style::default().fg(sem.text.secondary),
         ),
     ])
 }

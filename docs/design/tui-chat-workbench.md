@@ -62,7 +62,7 @@ active issue。
   穿过 gap 后铺满正文列；分隔线属文本区，不参与缩进，随 prompt 一起保留至回合结束后；
 - 过程区由**转场台阶**接回文本区：进入 ` ╰─╮`、退出 ` ╭─╯`（各 1 行、宽 4，col1 `╰`/`╭`
   接上方文本竖线，col3 `╮`/`╯` 接过程区左缘标记列），台阶线色与所接文本的左侧线条同色
-  （user → `text.secondary`、assistant 正文 → `accent`、divider → `text.dim`），台阶由转场后的首个 entry 在行首插入；
+  （user → `text.secondary`、assistant 正文 → `accent`、divider → `text.secondary`），台阶由转场后的首个 entry 在行首插入；
   过程区左缘标记（工具行 icon、其余行 `│`）落 col3、正文 col6；Wide/Standard 的文本块
   首尾不再保留节拍空行（块分隔由台阶承担）；短回复与相邻过程 entry 同区接续（进出都不画
   台阶）、气泡内 reasoning → 短回复正文同理不画内部台阶——正文上下各保留 1 行过程带前缀

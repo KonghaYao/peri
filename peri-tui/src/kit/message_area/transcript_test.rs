@@ -860,7 +860,7 @@ fn zone_transition_matrix_skips_zero_line_entries() {
     let items = im::Vector::from(vec![user(), brief_answer(), tool_entry("Read")]);
     assert_eq!(zone_transition(&items, 2), ZoneTransition::None);
 
-    // turn 边界 Divider（文本区装饰）：进出两向台阶线色都随它自身（text.dim）
+    // turn 边界 Divider（文本区装饰）：进出两向台阶线色都随它自身（text.secondary）
     let divider = || {
         TuiRenderUnit::TuiDivider(crate::kit::tui_render_unit::TuiDivider {
             label: None,

@@ -540,8 +540,8 @@ fn test_text_zone_baseline_and_process_zone_indent_columns() {
 // ── 转场台阶线色（§6）──────────────────────────────────────────────────
 
 /// 台阶线色随所接文本左侧线条：进入台阶接上方文本 entry（user → `text.secondary` /
-/// assistant → `accent` / divider → `text.dim`），退出台阶接下方文本 entry
-/// （assistant 正文 → `accent` / divider → `text.dim`），entry 内部
+/// assistant → `accent` / divider → `text.secondary`），退出台阶接下方文本 entry
+/// （assistant 正文 → `accent` / divider → `text.secondary`），entry 内部
 /// （reasoning → 正文）台阶用正文色。
 #[test]
 fn test_step_line_color_follows_text_line() {
@@ -686,8 +686,8 @@ fn test_step_line_color_follows_text_line() {
         "正文并入过程带（标记列竖线）"
     );
 
-    // turn 边界 Divider（文本区装饰，`── label ──` 左侧线色 text.dim）：
-    // 退出台阶接下方 divider、进入台阶接上方 divider，线色都取 dim。
+    // turn 边界 Divider（文本区装饰，`── label ──` 左侧线色 text.secondary）：
+    // 退出台阶接下方 divider、进入台阶接上方 divider，线色都取 secondary。
     let divider = TuiRenderUnit::TuiDivider(TuiDivider {
         label: None,
         content_hash: 11,
@@ -706,7 +706,7 @@ fn test_step_line_color_follows_text_line() {
     );
     assert_eq!(
         divider_exit[0].spans[0].style.fg,
-        Some(sem.text.dim),
+        Some(sem.text.secondary),
         "退出台阶线色 = divider 左侧线色"
     );
 
@@ -720,7 +720,7 @@ fn test_step_line_color_follows_text_line() {
     );
     assert_eq!(
         divider_enter[0].spans[0].style.fg,
-        Some(sem.text.dim),
+        Some(sem.text.secondary),
         "进入台阶线色 = 上方 divider 左侧线色"
     );
 }

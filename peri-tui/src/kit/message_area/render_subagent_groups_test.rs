@@ -499,6 +499,7 @@ fn test_collapsed_group_line_with_failed_count() {
 #[test]
 fn test_divider_lines() {
     let grid = GridSpec::grid_for(80);
+    let sem = THEME_ATOM.state().read().semantic;
     let plain = vm_to_lines(
         &TuiRenderUnit::TuiDivider(TuiDivider {
             label: None,
@@ -512,6 +513,7 @@ fn test_divider_lines() {
         "实际 {text:?}"
     );
     assert!(text.chars().skip(2).all(|c| c == '\u{2500}'));
+    assert_eq!(plain[0].spans[1].style.fg, Some(sem.text.secondary));
     assert_eq!(
         plain[0].width(),
         grid.first_prefix_width() + grid.content_width(),
@@ -545,6 +547,7 @@ fn test_divider_lines() {
     );
     assert_eq!(rule.len(), 1, "窄屏横线只占一行");
     assert!(line_text(&prompt[0]).contains("next prompt"));
+    assert_eq!(rule[0].spans[1].style.fg, prompt[0].spans[1].style.fg);
 }
 
 /// TuiTodoSummary：`◼ {3/7 tasks · Running tests}`。

@@ -69,7 +69,7 @@
     Compact/Narrow 无台阶，assistant 正文上下各保留 1 空行；user prompt 无前导空行、仅保留尾部空行。
     短回复（决策 13）无台阶可用，正文上下仍各保留 1 空行（过程带前缀）。
 12. 台阶线色随所接文本的左侧线条——进入台阶接上方文本 entry、退出台阶接下方文本 entry
-    （user → `text.secondary`、assistant 正文 → `accent`、Divider → `text.dim`，与
+    （user → `text.secondary`、assistant 正文 → `accent`、Divider → `text.secondary`，与
     `├──…` 同色）；entry 内部（reasoning → 正文）台阶用正文色。转场处颜色不断链。
 13. 短回复阈值：< 120 字（`chars().count()` 口径，用户拍板；依据见布局规格 §13）——AI
     回复少于该字数时正文并入过程带（缩进），human 永远不缩进。不改开关/配置项（决策 8）。
@@ -98,7 +98,7 @@
 - [x] 气泡内 reasoning → 正文的退出台阶由气泡自画；纯 reasoning 块（无正文）不画退出台阶。
 - [x] <60 列：与改动前逐列一致（前缀回退基准形态、无台阶；回退路径由测试逐列断言）。
 - [x] 语义复制剥净前缀与台阶；面板（子 Agent 详情）渲染逐列不变。
-- [x] 台阶线色 = 所接文本左侧线条色（进入台阶接上方文本、退出台阶接下方文本；user → `text.secondary`、assistant → `accent`、divider → `text.dim`；entry 内部台阶用正文色）——`test_step_line_color_follows_text_line`。
+- [x] 台阶线色 = 所接文本左侧线条色（进入台阶接上方文本、退出台阶接下方文本；user → `text.secondary`、assistant → `accent`、divider → `text.secondary`；entry 内部台阶用正文色）——`test_step_line_color_follows_text_line`。
 - [x] 文本块内所有行保持竖线前缀（含 md 复制按钮行，右对齐与点击区域不变），左缘时间线不断链——`test_assistant_bubble_renders_copy_button`。
 - [x] Divider 保持文本区形态；现为后续 prompt 前 `├──…` 横线，下一行直接是正文；Info 注记走过程行 `│` + label。
 - [x] User prompt 所有宽度无前导空行；Compact/Narrow 仍保留尾部空行与 assistant 正文上下空行；短回复（无台阶）上下各 1 行过程带前缀空行——`test_vertical_rhythm_blank_lines` / `brief_reply_stays_in_process_zone_without_step`。

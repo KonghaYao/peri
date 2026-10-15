@@ -1,6 +1,6 @@
 # peri-tui 代码索引
 
-Turn 分隔线由 `kit/acp_events/render.rs::insert_turn_dividers` 按完整消息顺序投影，位置固定在第二条及之后的真实 user prompt 前；`committed` 只存真实消息。`message_area/render/system.rs::render_divider_lines` 画连接左侧竖线的横线，`render/user.rs::render_user_bubble_lines` 在所有宽度下直接绘制 prompt 正文。回归见 `acp_events_test/snapshot_test.rs::test_snapshot_turn_divider_before_new_user_prompt` 与 `message_area/render_subagent_groups_test.rs::test_divider_lines`。
+Turn 分隔线由 `kit/acp_events/render.rs::insert_turn_dividers` 按完整消息顺序投影，位置固定在第二条及之后的真实 user prompt 前；`committed` 只存真实消息。`message_area/render/system.rs::render_divider_lines` 画连接左侧竖线的横线，颜色与 user 左侧竖线同为 `text.secondary`；`render/user.rs::render_user_bubble_lines` 在所有宽度下直接绘制 prompt 正文。回归见 `acp_events_test/snapshot_test.rs::test_snapshot_turn_divider_before_new_user_prompt` 与 `message_area/render_subagent_groups_test.rs::test_divider_lines`。
 
 输入延迟入口：`kit/steer_consumer.rs` 合并后台 Refresh，用户 Enqueue 不等待慢刷新；`acp_client/client/steer.rs` 在身份绑定/请求登记边界持 gate，普通回执等待在锁外，snapshot 回包用 typed identity 重验。`client/pump.rs` 接收普通 ACP 响应与通知，不再转发 SDK 执行准入；回归见 `client/latency_test.rs`。
 
