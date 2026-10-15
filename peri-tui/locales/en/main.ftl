@@ -52,6 +52,7 @@ history-agent-running = Agent is running, cannot open history panel
 
 # model command
 config-save-failed = Configuration save failed: { $error }
+config-handle-missing = Configuration unavailable: { $handle } is not initialized
 
 # effort command
 effort-set = Reasoning effort set to { $effort }
@@ -439,6 +440,11 @@ app-plugin-updating = Updating marketplace: { $name }
 app-plugin-delete-failed = Delete failed: { $error }
 app-plugin-add-failed = Add failed: { $error }
 app-plugin-added = Marketplace added: { $name } (fetching content...)
+
+# ---- Panel Confirm Target Guard ----
+
+# 确认期间被确认的对象消失（退出确认时按稳定身份定位失败）；操作未执行。
+app-confirm-target-missing = Confirm target no longer exists: { $target }
 
 # Background Agent Bar
 bg-bar-focus-hint = Press Esc to exit focus
@@ -1101,6 +1107,9 @@ panel-tasks-empty-hint-1 =   Cron jobs are scheduled via /loop command;
 panel-tasks-empty-hint-2 =   SubAgents are spawned by Task / SubAgent tools.
 panel-tasks-nav-hint =   ↑/↓::navigate  Enter::cancel  Esc::close
 panel-tasks-nav-hint-close =   ↑/↓::navigate  Enter::close  Esc::close
+panel-tasks-cancel-no-session =   Cancellation not sent: no active session
+panel-tasks-cancel-target-gone =   Cancellation not sent: the task is no longer in the list
+panel-tasks-cancel-failed =   Cancellation failed: { $detail }
 
 # ---- Theme Panel ----
 panel-theme-active-mark =  *

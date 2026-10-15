@@ -51,6 +51,7 @@ history-agent-running = Agent 运行中，无法打开历史面板
 
 # model command
 config-save-failed = 配置保存失败: { $error }
+config-handle-missing = 配置不可用: { $handle } 未初始化
 
 # effort command
 effort-set = 推理力度已设为 { $effort }
@@ -440,6 +441,11 @@ app-plugin-updating = 正在更新 marketplace: { $name }
 app-plugin-delete-failed = 删除失败: { $error }
 app-plugin-add-failed = 添加失败: { $error }
 app-plugin-added = Marketplace 已添加: { $name } (正在获取内容...)
+
+# ---- 面板确认目标守卫 ----
+
+# 确认期间被确认的对象消失（退出确认时按稳定身份定位失败）；操作未执行。
+app-confirm-target-missing = 确认的目标已不存在: { $target }
 
 # 后台 Agent 管理栏
 bg-bar-focus-hint = 按 Esc 退出聚焦
@@ -1099,6 +1105,9 @@ panel-tasks-empty-hint-1 =   通过 /loop 命令调度定时任务；
 panel-tasks-empty-hint-2 =   子代理由 Task / SubAgent 工具创建。
 panel-tasks-nav-hint =   ↑/↓::导航  Enter::取消  Esc::关闭
 panel-tasks-nav-hint-close =   ↑/↓::导航  Enter::关闭  Esc::关闭
+panel-tasks-cancel-no-session =   未发送取消请求: 当前无活动会话
+panel-tasks-cancel-target-gone =   未发送取消请求: 任务已不在列表中
+panel-tasks-cancel-failed =   取消任务失败: { $detail }
 
 # ---- Theme Panel ----
 panel-theme-active-mark =  *
