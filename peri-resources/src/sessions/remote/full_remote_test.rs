@@ -222,6 +222,7 @@ async fn virtual_remote_cold_recovery_and_read_only_fallbacks() {
     let transport = Arc::new(SqliteTransport {
         pool: pool.clone(),
         writes: AtomicUsize::new(0),
+        read_batches: AtomicUsize::new(0),
         fail_column_drop: AtomicBool::new(false),
         fail_recovery_drop: AtomicBool::new(false),
         change_schema: AtomicBool::new(false),
@@ -356,6 +357,7 @@ async fn remote_only_cold_recovery_uses_saved_evidence_and_old_distinct_registra
     let transport = Arc::new(SqliteTransport {
         pool: pool.clone(),
         writes: AtomicUsize::new(0),
+        read_batches: AtomicUsize::new(0),
         fail_column_drop: AtomicBool::new(false),
         fail_recovery_drop: AtomicBool::new(false),
         change_schema: AtomicBool::new(false),

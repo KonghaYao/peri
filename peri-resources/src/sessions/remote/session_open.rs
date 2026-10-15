@@ -78,9 +78,23 @@ pub(in crate::sessions::remote) fn open_step(
     }
 }
 
-/// 形状探测（只读）：契约与版本决定探哪一份声明（[`schema::shape_probe`]）。
+/// 只读旧契约打开的末次身份校验；升级或身份替换期间不能交付旧版读法。
+pub(in crate::sessions::remote) fn verify_legacy_open_identity(
+    initial: &StoreIdentityRead,
+    final_read: &StoreIdentityRead,
+) -> SessionResourceResult<()> {
+    if initial == final_read {
+        Ok(())
+    } else {
+        Err(unsupported_behavior(
+            "remote store schema changed during read-only open",
+        ))
+    }
+}
+
+/// 形状探测（单次只读批）：契约与版本决定探哪一份声明（[`schema::shape_probe`]）。
 ///
-/// 只发 SELECT 或 PRAGMA table_xinfo——探测不写、不建表，也不改任何行；探测结果只服务本次打开的判定，**不是迁移
+/// 只发只读 PRAGMA/SELECT——探测不写、不建表，也不改任何行；探测结果只服务本次打开的判定，**不是迁移
 /// 依据**：写打开的迁移批次自己再读一次形状并在批内守着它（见 `schema_upgrade`）。
 /// 本构建不读的库（契约/版本不认识，或元数据本身读不出身份）没有可探的形状，返回 `None`——
 /// 那一面的拒绝由身份读取单独给出。
@@ -94,32 +108,70 @@ pub(in crate::sessions::remote) async fn probe_shape(
     let Some(probe) = schema::shape_probe(snapshot) else {
         return Ok(None);
     };
-    let rows = if probe == schema::ShapeProbe::Current {
-        let mut columns = Vec::new();
-        for &(table, sql) in schema::CURRENT_TABLE_PRAGMAS {
-            let rows = store.fetch_rows(&StatementSpec::bare(sql)).await?;
-            for (index, row) in rows.into_iter().enumerate() {
-                if row.len() != 7
-                    || int_at(&row, 0) != Some(index as i64)
-                    || int_at(&row, 6) != Some(0)
-                {
-                    return Err(incomplete_reply(
-                        "session shape pragma returned invalid columns",
-                    ));
-                }
-                columns.push(vec![
-                    Value::Text(table.to_owned()),
-                    row[1].clone(),
-                    row[3].clone(),
-                    row[5].clone(),
-                ]);
-            }
+    let tables: Vec<_> = probe.table_names().collect();
+    let mut statements: Vec<_> = tables
+        .iter()
+        .map(|table| {
+            schema::ShapeProbe::pragma_table_xinfo(table)
+                .map(StatementSpec::bare)
+                .ok_or_else(|| incomplete_reply("remote shape probe table is not supported"))
+        })
+        .collect::<SessionResourceResult<_>>()?;
+    if probe == schema::ShapeProbe::Current {
+        statements.push(StatementSpec::bare(schema::CURRENT_INDEX_DEFINITIONS_SQL));
+    }
+    let mut results = store.read_batch(statements).await?.into_iter();
+    let mut columns = Vec::new();
+    let mut missing_close_intents = false;
+    for table in tables {
+        let rows = results
+            .next()
+            .ok_or_else(|| incomplete_reply("missing shape result set"))?;
+        if table == "session_close_intents" && rows.is_empty() {
+            missing_close_intents = true;
         }
-        columns
-    } else {
-        store.fetch_rows(&StatementSpec::bare(probe.sql())).await?
-    };
-    Ok(Some(probe.check(&schema::decode_column_map(&rows)?)))
+        for (index, row) in rows.into_iter().enumerate() {
+            if row.len() != 7 || int_at(&row, 0) != Some(index as i64) || int_at(&row, 6) != Some(0)
+            {
+                return Err(incomplete_reply(
+                    "session shape pragma returned invalid columns",
+                ));
+            }
+            columns.push(vec![
+                Value::Text(table.to_owned()),
+                row[1].clone(),
+                row[3].clone(),
+                row[5].clone(),
+            ]);
+        }
+    }
+    let shape = probe.check(&schema::decode_column_map(&columns)?);
+    if shape == StoreShapeRead::Consistent && probe == schema::ShapeProbe::Current {
+        let indexes = results
+            .next()
+            .ok_or_else(|| incomplete_reply("missing index result set"))?;
+        if indexes
+            .iter()
+            .any(|row| row.len() != 3 || !row.iter().all(|value| matches!(value, Value::Text(_))))
+        {
+            return Err(incomplete_reply(
+                "session index probe returned invalid columns",
+            ));
+        }
+        let missing_indexes =
+            schema::current_indexes_missing(&indexes).map_err(StoreShapeRead::Drifted);
+        let missing_indexes = match missing_indexes {
+            Ok(missing) => missing,
+            Err(drifted) => return Ok(Some(drifted)),
+        };
+        if missing_indexes || missing_close_intents {
+            return Ok(Some(StoreShapeRead::NeedsCurrentRepair {
+                missing_indexes,
+                missing_close_intents,
+            }));
+        }
+    }
+    Ok(Some(shape))
 }
 
 /// 形状判定：本构建读得动的库必须探测过，且形状要么相符、要么**还没建立**。
@@ -132,6 +184,7 @@ pub(in crate::sessions::remote) async fn probe_shape(
 fn accept_shape(shape: Option<StoreShapeRead>, access: StoreAccess) -> SessionResourceResult<()> {
     match shape {
         Some(StoreShapeRead::Consistent) => Ok(()),
+        Some(StoreShapeRead::NeedsCurrentRepair { .. }) => Ok(()),
         Some(StoreShapeRead::Unbuilt) if access == StoreAccess::ReadWrite => Ok(()),
         Some(StoreShapeRead::Unbuilt) => Err(unsupported_behavior(
             "read-only open of a remote store without its session tables",

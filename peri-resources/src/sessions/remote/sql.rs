@@ -43,7 +43,9 @@ impl StatementSpec {
     #[cfg(test)]
     pub(super) fn is_read_only(&self) -> bool {
         let head = self.sql.trim_start().to_ascii_uppercase();
-        head.starts_with("SELECT") || head.starts_with("WITH")
+        head.starts_with("SELECT")
+            || head.starts_with("WITH")
+            || head.starts_with("PRAGMA TABLE_XINFO(")
     }
 }
 

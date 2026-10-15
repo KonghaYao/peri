@@ -231,7 +231,7 @@ pub(super) fn identity_read_plan() -> Vec<StatementSpec> {
 
 /// 打开路径要探测的形状代数：由契约与版本决定（[`shape_probe`]）。
 ///
-/// 探测各用一条只读 SELECT 读回列形状（`schema_shape` 的同一份声明与判定；本机与远端共用），
+/// 远端在同一只读批内逐表执行 PRAGMA 读回列形状（`schema_shape` 的同一份声明与判定），
 /// 判定不宽容：读得懂的库其形状必须与契约声明的代数逐项相符。
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(super) enum ShapeProbe {
@@ -258,13 +258,82 @@ pub(super) const CURRENT_TABLE_PRAGMAS: &[(&str, &str)] = &[
     ),
 ];
 
+/// 与列形状一起读取；缺失的 canonical 索引由可写打开补齐。
+pub(super) const CURRENT_INDEX_DEFINITIONS_SQL: &str =
+    "SELECT name, tbl_name, sql FROM sqlite_master WHERE type = 'index' AND name NOT LIKE 'sqlite_%'";
+
+fn same_index_sql(actual: &str, canonical: &str) -> bool {
+    actual
+        .bytes()
+        .filter(|byte| !byte.is_ascii_whitespace())
+        .map(|byte| byte.to_ascii_lowercase())
+        .eq(canonical
+            .bytes()
+            .filter(|byte| !byte.is_ascii_whitespace())
+            .map(|byte| byte.to_ascii_lowercase()))
+}
+
+/// 必要索引缺失可以补建；同名异形必须拒绝，`IF NOT EXISTS` 无法修正它。
+pub(super) fn current_indexes_missing(rows: &[Vec<Value>]) -> Result<bool, String> {
+    let mut missing = false;
+    for create in crate::sessions::canonical::CREATE_INDEXES {
+        let name = create
+            .split_whitespace()
+            .nth(5)
+            .expect("canonical CREATE INDEX must declare its name");
+        let table = create
+            .split_whitespace()
+            .nth(7)
+            .and_then(|on| on.split('(').next())
+            .expect("canonical CREATE INDEX must name a table");
+        let expected_sql = create.replacen("IF NOT EXISTS ", "", 1);
+        let row = rows
+            .iter()
+            .find(|row| text_at(row, 0).is_some_and(|actual| actual.eq_ignore_ascii_case(name)));
+        match row {
+            None => missing = true,
+            Some(row)
+                if text_at(row, 1).is_some_and(|actual| actual.eq_ignore_ascii_case(table))
+                    && text_at(row, 2).is_some_and(|actual| {
+                        same_index_sql(actual, &expected_sql) || same_index_sql(actual, create)
+                    }) => {}
+            Some(_) => return Err(format!("index {name} definition drifted")),
+        }
+    }
+    Ok(missing)
+}
+
 impl ShapeProbe {
-    /// 探测语句（只读、单条 SELECT；缺表在结果里没有行，由判定区分「缺表」与「空形状」）。
+    /// 本机 SQLite 测试使用的单条 SELECT；远端打开使用逐表 PRAGMA，避免不兼容的表值函数。
     pub(super) fn sql(self) -> &'static str {
         match self {
             Self::Current => schema_shape::CURRENT_COLUMNS_SQL,
             Self::Input => schema_shape::INPUT_COLUMNS_SQL,
         }
+    }
+
+    pub(super) fn table_names(self) -> impl Iterator<Item = &'static str> {
+        match self {
+            Self::Current => schema_shape::CURRENT_TABLES
+                .iter()
+                .map(|table| table.name)
+                .collect::<Vec<_>>(),
+            Self::Input => schema_shape::INPUT_TABLES
+                .iter()
+                .map(|table| table.name)
+                .collect::<Vec<_>>(),
+        }
+        .into_iter()
+    }
+
+    pub(super) fn pragma_table_xinfo(table: &str) -> Option<&'static str> {
+        CURRENT_TABLE_PRAGMAS
+            .iter()
+            .find_map(|&(name, sql)| (name == table).then_some(sql))
+            .or_else(|| {
+                (table == "session_environments")
+                    .then_some("PRAGMA table_xinfo('session_environments')")
+            })
     }
 
     /// 读回的列形状 → 判定结论（纯函数）。诊断只说明「哪张表/哪一列不符」，不含会话内容。
@@ -298,6 +367,11 @@ pub(super) enum StoreShapeRead {
     Unbuilt,
     /// 与契约声明的代数相符。
     Consistent,
+    /// 列形状完整，但关闭意图表或必要索引缺失；可写打开定向补齐。
+    NeedsCurrentRepair {
+        missing_indexes: bool,
+        missing_close_intents: bool,
+    },
     /// 与声明不符：带上**具体哪个判定失败**（诊断），调用方一律折算成拒绝。
     Drifted(String),
 }
