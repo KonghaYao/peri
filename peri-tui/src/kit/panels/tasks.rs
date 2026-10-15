@@ -1,32 +1,60 @@
 //! ratatui-kit TasksPanel component.
 //!
 //! H1g（Iteration 14）：聚合多源任务视图——
+//! - 后台任务（从 BG_TASKS atom）
 //! - Cron 任务（从 CRON_JOBS atom）
 //! - SubAgent 运行时（从 VIEW_MODELS 扫描 TuiSubAgentGroup）
 //!
-//! 只读面板。Cron 任务的 enable/disable/delete 在 Cron 面板；SubAgent 详情
-//! 在 Agent 面板。本面板提供跨调度源的"任务总览"。
+//! 三段拼在同一个连续选中下标空间里（后台段在最前），提供跨调度源的"任务总览"。
+//! Cron 任务的 enable/disable/delete 在 Cron 面板、SubAgent 详情在 Agent 面板，
+//! 故本面板的行内动作只有「取消后台任务」（选中该行按 Enter，或左键点击该行）。
+//!
+//! 行结构、可见窗口与鼠标命中由 `viewport` 模块的行表统一推导（绘制、命中、取消目标
+//! 解析读同一份结果）。
+
+use std::time::Duration;
 
 use crate::app::panel_types::PanelKind;
 use crate::i18n;
-use crate::kit::atoms::{ACP_CLIENT_HANDLE, BG_TASKS, CRON_JOBS, LANG_VERSION, VIEW_MODELS};
+use crate::kit::atoms::{
+    ACP_CLIENT_HANDLE, BG_TASKS, BgTaskEntry, CRON_JOBS, CronJobSummary, LANG_VERSION,
+    NOTIFICATION, Notification, VIEW_MODELS,
+};
 use crate::kit::list_nav::{next_selection, previous_selection};
+use crate::kit::panel_mouse::{AreaTracker, is_scrollbar_column};
+use crate::kit::panels::shared::list::content_rows;
 use crate::kit::tui_render_unit::{TuiRenderUnit, TuiSubAgentGroup};
 use fluent_bundle::FluentValue;
 use peri_theme::atoms::THEME_ATOM;
+use peri_theme::theme::ThemeDefinition;
 use ratatui_kit::{
-    crossterm::event::{Event, KeyCode, KeyEventKind},
+    crossterm::event::{Event, KeyCode, KeyEventKind, MouseButton, MouseEventKind},
     prelude::*,
     ratatui::{
-        layout::Constraint,
+        layout::{Constraint, Rect},
         style::{Style, Stylize},
         text::{Line, Span},
         widgets::Paragraph,
     },
 };
 
+mod viewport;
+use self::viewport::{
+    CancelAction, CancelTarget, SegmentCounts, TaskSegment, TasksRow, TasksViewport,
+};
+
+/// 取消请求因无活动会话而未发出时的提示 key。
+///
+/// [Why] 按面板归属命名（TUI-I18N-001）：文案要表达的是「取消没有发出，因为需要活跃
+/// 会话」，而不是 Cron 面板的同类提示，借用会让两处文案互相牵制。
+const NO_SESSION_HINT_KEY: &str = "panel-tasks-cancel-no-session";
+
+/// 取消目标已不在列表里时的提示 key——不发请求，且结果必须对用户可见。
+const TARGET_GONE_HINT_KEY: &str = "panel-tasks-cancel-target-gone";
+
 #[component]
 pub fn TasksPanel(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
+    // TUI-HOOK-001：全部 hook 在条件分支与渲染体之前按稳定顺序调用。
     let theme_def = hooks.use_atom(&THEME_ATOM);
     let selected = hooks.use_state(|| 0usize);
     // 外部滚动状态——面板滚轮仲裁（panel_scroll.rs）驱动，统一 3 行/格 + 节流
@@ -34,12 +62,12 @@ pub fn TasksPanel(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
 
     // Background Tasks（从 BG_TASKS atom）
     let bg_store = hooks.use_atom(&BG_TASKS);
-    let bg_tasks = bg_store.read().clone();
+    let bg_tasks: Vec<BgTaskEntry> = bg_store.read().clone();
     let _ = bg_store;
 
     // Cron
     let cron_store = hooks.use_atom(&CRON_JOBS);
-    let cron_jobs = cron_store.read().clone();
+    let cron_jobs: Vec<CronJobSummary> = cron_store.read().clone();
     let _ = cron_store;
 
     // SubAgent（从 VIEW_MODELS 扫描）
@@ -48,324 +76,87 @@ pub fn TasksPanel(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
     let _ = vm_store;
     let _ = hooks.use_atom(&LANG_VERSION);
 
-    let bg_count = bg_tasks.len();
-    let cron_count = cron_jobs.len();
-    let subagent_count = subagents.len();
-    let total = bg_count + cron_count + subagent_count;
+    let counts = SegmentCounts {
+        background: bg_tasks.len(),
+        cron: cron_jobs.len(),
+        subagent: subagents.len(),
+    };
 
-    hooks.use_event_handler(EventScope::Current, EventPriority::Normal, {
-        move |event| {
-            let Event::Key(key) = event else {
-                return EventResult::Ignored;
-            };
-            if key.kind != KeyEventKind::Press {
-                return EventResult::Ignored;
-            }
-            match key.code {
-                KeyCode::Esc => close_panel(),
-                KeyCode::Enter => {
-                    // All session task handles use the same ACP cancellation route.
-                    let sel = *selected.read();
-                    let bg_count = BG_TASKS.state().read().len();
-                    if sel < bg_count
-                        && let Some(task) = BG_TASKS.state().read().get(sel)
-                    {
-                        let task_id = task.task_id.clone();
-                        let kind = task.kind.clone();
-                        if let Some(client) = ACP_CLIENT_HANDLE.get() {
-                            let client = client.clone();
-                            let sid = client.current_session_id().unwrap_or_default();
-                            tokio::spawn(async move {
-                                let result = client.cancel_bg_task(&sid, &task_id).await;
-                                match result {
-                                    Ok(v) => tracing::info!(
-                                        task_id = %task_id,
-                                        kind = %kind,
-                                        ?v,
-                                        "tasks panel: cancel bg task"
-                                    ),
-                                    Err(e) => tracing::warn!(
-                                        task_id = %task_id,
-                                        kind = %kind,
-                                        error = %e,
-                                        "tasks panel: cancel bg task failed"
-                                    ),
-                                }
-                            });
-                        } else {
-                            tracing::warn!(target: "tasks-panel", "ACP_CLIENT_HANDLE not set, cancel skipped");
-                        }
-                    }
-                    close_panel()
-                }
-                KeyCode::Up => {
-                    let mut s = selected.write();
-                    *s = previous_selection(*s);
-                }
-                KeyCode::Down => {
-                    let mut s = selected.write();
-                    let total = BG_TASKS.state().read().len()
-                        + CRON_JOBS.state().read().len()
-                        + collect_subagents(&VIEW_MODELS.state().read()).len();
-                    if total > 0 {
-                        *s = next_selection(*s, total);
-                    }
-                }
-                _ => {}
-            }
-            EventResult::Consumed
-        }
-    });
-
-    let sel = *selected.read();
-    let mut lines: Vec<Line<'_>> = Vec::new();
-
-    // 摘要
-    lines.push(Line::from(vec![
-        Span::styled(
-            i18n::tr("panel-tasks-total-label"),
-            Style::new().fg(theme_def.read().semantic.text.muted),
-        ),
-        Span::styled(
-            format!("{}", total),
-            Style::new()
-                .fg(theme_def.read().semantic.text.primary)
-                .bold(),
-        ),
-        Span::styled(
-            i18n::tr_args(
-                "panel-tasks-breakdown",
-                &[
-                    ("bg".to_string(), FluentValue::from(bg_count as i64)),
-                    ("cron".to_string(), FluentValue::from(cron_count as i64)),
-                    (
-                        "subagent".to_string(),
-                        FluentValue::from(subagent_count as i64),
-                    ),
-                ],
-            ),
-            Style::new().fg(theme_def.read().semantic.text.dim),
-        ),
-    ]));
-    lines.push(Line::from(""));
-
-    // Background Tasks section
-    if !bg_tasks.is_empty() {
-        lines.push(Line::from(vec![Span::styled(
-            i18n::tr_args(
-                "panel-tasks-section-bg",
-                &[("count".to_string(), FluentValue::from(bg_count as i64))],
-            ),
-            Style::new()
-                .fg(theme_def.read().semantic.border.active)
-                .bold(),
-        )]));
-        for (i, task) in bg_tasks.iter().enumerate() {
-            let row_idx = i;
-            let is_selected = row_idx == sel;
-            let cursor = if is_selected { ">" } else { " " };
-            let name_style = if is_selected {
-                Style::new()
-                    .fg(theme_def.read().component.panel.title)
-                    .bold()
-            } else {
-                Style::new().fg(theme_def.read().semantic.text.primary)
-            };
-            let kind_str = match task.kind.as_str() {
-                "shell" => i18n::tr("panel-tasks-kind-sh"),
-                "agent" => i18n::tr("panel-tasks-kind-ag"),
-                "workflow" => i18n::tr("panel-tasks-kind-wf"),
-                _ => i18n::tr("panel-tasks-kind-unknown"),
-            };
-            // shell 任务的 summary 是脚本本身，无展示意义 → 只显示 pid
-            let is_shell = task.kind.as_str() == "shell";
-            let pid_str = task
-                .pid
-                .map(|p| {
-                    i18n::tr_args(
-                        "panel-tasks-pid",
-                        &[("pid".to_string(), FluentValue::from(p as i64))],
-                    )
-                })
-                .unwrap_or_default();
-            // 按终端显示宽度截断（CJK 双宽按 2 列计），避免字符数截断导致行溢出
-            let detail = if is_shell {
-                pid_str
-            } else {
-                format!(
-                    "{}{}",
-                    crate::truncate::truncate_by_width(&task.summary, 60),
-                    pid_str
-                )
-            };
-            lines.push(Line::from(vec![
-                Span::styled(
-                    format!(" {} ", cursor),
-                    Style::new().fg(theme_def.read().component.panel.title),
-                ),
-                Span::styled(
-                    kind_str,
-                    Style::new().fg(theme_def.read().semantic.text.dim),
-                ),
-                Span::styled(format!(" {} ", task.task_id), name_style),
-                Span::styled(
-                    detail,
-                    Style::new().fg(theme_def.read().semantic.text.muted),
-                ),
-            ]));
-        }
-        lines.push(Line::from(""));
+    // 面板绘制区域（上一帧）——鼠标行号反推与滚轮仲裁共用这一份区域
+    let area;
+    {
+        let tracker = hooks.use_hook(AreaTracker::new);
+        area = tracker.rect;
     }
 
-    // Cron section
-    if !cron_jobs.is_empty() {
-        lines.push(Line::from(vec![Span::styled(
-            i18n::tr_args(
-                "panel-tasks-section-cron",
-                &[("count".to_string(), FluentValue::from(cron_count as i64))],
-            ),
-            Style::new()
-                .fg(theme_def.read().semantic.border.active)
-                .bold(),
-        )]));
-        for (i, job) in cron_jobs.iter().enumerate() {
-            let row_idx = bg_count + i;
-            let is_selected = row_idx == sel;
-            let cursor = if is_selected { ">" } else { " " };
-            let name_style = if is_selected {
-                Style::new()
-                    .fg(theme_def.read().component.panel.title)
-                    .bold()
-            } else {
-                Style::new().fg(theme_def.read().semantic.text.primary)
-            };
-            let (status_icon, status_color) = if job.enabled {
-                ("\u{25cf}", theme_def.read().semantic.status.success)
-            } else {
-                ("\u{25cb}", theme_def.read().semantic.text.muted)
-            };
-            let next_str = job
-                .next_fire
-                .map(|t| t.format("%H:%M:%S").to_string())
-                .unwrap_or_else(|| i18n::tr("common-na"));
+    // 视口：内容区行数 → 三段行表。绘制（`rows`）、鼠标命中（`hit_item`）与取消目标
+    // 解析（`cancel_action`）共用这一份结果，绘制与命中不会各算一遍。
+    let (_term_w, term_h) = hooks.use_terminal_size();
+    let viewport =
+        TasksViewport::for_content_rows(content_rows(area, term_h), counts, *selected.read());
 
-            // 按终端显示宽度截断（CJK 双宽按 2 列计），避免字符数截断导致行溢出
-            let prompt_preview: String = crate::truncate::truncate_by_width(&job.prompt, 50);
-            lines.push(Line::from(vec![
-                Span::styled(
-                    format!(" {} ", cursor),
-                    Style::new().fg(theme_def.read().component.panel.title),
-                ),
-                Span::styled(status_icon, Style::new().fg(status_color)),
-                Span::styled(
-                    format!(" {} ", job.expression),
-                    Style::new().fg(theme_def.read().semantic.text.dim),
-                ),
-                Span::styled(prompt_preview, name_style),
-                Span::styled(
-                    format!("  @{}", next_str),
-                    Style::new().fg(theme_def.read().semantic.text.muted),
-                ),
-            ]));
-        }
-        lines.push(Line::from(""));
-    }
+    // 列表刷新（任务完成/取消、SubAgent 数量变化）会让选中下标越界：在 effect 边界收敛
+    // 到当帧长度，保证高亮行始终存在（渲染只读状态，不写状态）。
+    let selected_now = *selected.read();
+    let converged = viewport.selected();
+    hooks.use_effect(
+        move || *selected.write() = converged,
+        (selected_now, converged),
+    );
 
-    // SubAgent section
-    if !subagents.is_empty() {
-        lines.push(Line::from(vec![Span::styled(
-            i18n::tr_args(
-                "panel-tasks-section-subagent",
-                &[(
-                    "count".to_string(),
-                    FluentValue::from(subagent_count as i64),
-                )],
-            ),
-            Style::new()
-                .fg(theme_def.read().semantic.border.active)
-                .bold(),
-        )]));
-        for (i, sa) in subagents.iter().enumerate() {
-            let row_idx = bg_count + cron_count + i;
-            let is_selected = row_idx == sel;
-            let cursor = if is_selected { ">" } else { " " };
-            let name_style = if is_selected {
-                Style::new()
-                    .fg(theme_def.read().component.panel.title)
-                    .bold()
-            } else {
-                Style::new().fg(theme_def.read().semantic.text.primary)
-            };
-            let collapsed_marker = if sa.collapsed {
-                Span::styled(
-                    i18n::tr("panel-tasks-collapsed"),
-                    Style::new().fg(theme_def.read().semantic.text.muted),
-                )
-            } else {
-                Span::styled(
-                    i18n::tr("panel-tasks-live"),
-                    Style::new().fg(theme_def.read().semantic.status.success),
-                )
-            };
-            lines.push(Line::from(vec![
-                Span::styled(
-                    format!(" {} ", cursor),
-                    Style::new().fg(theme_def.read().component.panel.title),
-                ),
-                Span::styled(sa.agent_name.clone(), name_style),
-                Span::styled(
-                    format!("  [{}]", sa.agent_id),
-                    Style::new().fg(theme_def.read().semantic.text.dim),
-                ),
-                collapsed_marker,
-                Span::styled(
-                    i18n::tr_args(
-                        "panel-tasks-msgs",
-                        &[(
-                            "count".to_string(),
-                            FluentValue::from(sa.view_models.len() as i64),
-                        )],
-                    ),
-                    Style::new().fg(theme_def.read().semantic.text.muted),
-                ),
-            ]));
-        }
-    }
+    // 事件上下文随渲染帧重建：取消目标的身份解析读当帧快照，不读按键帧的 atom。
+    let event_ctx = TasksEventCtx {
+        area,
+        selected,
+        viewport: viewport.clone(),
+        bg_tasks: bg_tasks.clone(),
+    };
+    hooks.use_event_handler_with_options(
+        EventScope::Current,
+        EventPriority::Normal,
+        EventOptions { hit_test: true },
+        move |event| handle_tasks_event(event, &event_ctx),
+    );
 
-    if total == 0 {
-        lines.push(Line::from(vec![Span::styled(
-            i18n::tr("panel-tasks-empty"),
-            Style::new()
-                .fg(theme_def.read().semantic.text.muted)
-                .italic(),
-        )]));
-        lines.push(Line::from(vec![Span::styled(
-            i18n::tr("panel-tasks-empty-hint-1"),
-            Style::new().fg(theme_def.read().semantic.text.dim),
-        )]));
-        lines.push(Line::from(vec![Span::styled(
-            i18n::tr("panel-tasks-empty-hint-2"),
-            Style::new().fg(theme_def.read().semantic.text.dim),
-        )]));
-    }
+    #[cfg(test)]
+    tests::visit_mounted_panel(tests::MountedPanel { selected, area });
 
-    lines.push(Line::from(""));
-    // Enter 仅在选中后台任务行时取消该任务；Cron / SubAgent 行 Enter 只关闭面板。
+    let theme = theme_def.read();
+    let sel = viewport.selected();
+    let bg_count = counts.background;
+    // Enter 仅取消后台任务行；Cron / SubAgent 行的 Enter 关闭面板。提示与动作同判据：
+    // 下标空间里后台段在最前，`sel < bg_count` 即「选中行是后台任务行」。
     let nav_hint = if sel < bg_count {
         i18n::tr("panel-tasks-nav-hint")
     } else {
         i18n::tr("panel-tasks-nav-hint-close")
     };
-    lines.push(Line::from(nav_hint).fg(theme_def.read().semantic.text.dim));
+
+    // 逐行渲染当帧行表：行数、行顺序与行身份都由行表决定，鼠标命中查的是同一张表。
+    let mut lines: Vec<Line<'static>> = Vec::with_capacity(viewport.rows().len());
+    for row in viewport.rows() {
+        lines.push(match *row {
+            TasksRow::Summary => summary_line(&theme, counts),
+            TasksRow::SectionHeader(segment) => section_header_line(segment, counts, &theme),
+            TasksRow::Item(index) => item_line(
+                index, counts, &bg_tasks, &cron_jobs, &subagents, sel, &theme,
+            ),
+            TasksRow::EmptyTitle => Line::from(vec![Span::styled(
+                i18n::tr("panel-tasks-empty"),
+                Style::new().fg(theme.semantic.text.muted).italic(),
+            )]),
+            TasksRow::EmptyHintCron => hint_line("panel-tasks-empty-hint-1", &theme),
+            TasksRow::EmptyHintSubagent => hint_line("panel-tasks-empty-hint-2", &theme),
+            TasksRow::Blank => Line::from(""),
+            TasksRow::NavHint => Line::from(nav_hint.clone()).fg(theme.semantic.text.dim),
+        });
+    }
 
     let content = Paragraph::new(ratatui::text::Text::from(lines));
 
-    // 面板滚轮仲裁注册（每帧覆盖写入，area 用上一帧组件区域）
-    crate::kit::panel_scroll::register_panel_scroll(
-        PanelKind::Tasks,
-        hooks.use_previous_size(),
-        sv,
-    );
+    // 面板滚轮仲裁注册（每帧覆盖写入；区域与鼠标命中同源，均为 AreaTracker 结果，
+    // 首帧未测量时为 0 尺寸）
+    crate::kit::panel_scroll::register_panel_scroll(PanelKind::Tasks, area.unwrap_or_default(), sv);
 
     panel_shell!(PanelKind::Tasks, {
             ScrollView(
@@ -377,6 +168,366 @@ pub fn TasksPanel(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
                 Text(text: content)
             }
     })
+}
+
+/// 事件处理上下文：当帧视口 + 当帧后台任务快照。
+///
+/// `State<T>` 无公开构造 API，只能从组件挂载取得；`viewport` 与 `bg_tasks` 都来自
+/// 渲染这一帧（`use_event_handler` 的闭包每帧重建），因此按键解析出的身份就是用户
+/// 看到的那一行——不按键帧重读 atom 按下标取身份。
+struct TasksEventCtx {
+    area: Option<Rect>,
+    selected: State<usize>,
+    viewport: TasksViewport,
+    bg_tasks: Vec<BgTaskEntry>,
+}
+
+/// 面板事件处理——判定集中在这里、组件只做注册，测试可经 `tests::MountedPanel`
+/// 捕获真实句柄后直接投喂事件。
+fn handle_tasks_event(event: Event, ctx: &TasksEventCtx) -> EventResult {
+    // ── 鼠标：区域内左键点击某行 = 选中该行并执行该行的 Enter 语义（click as enter）──
+    if let Event::Mouse(mouse) = event {
+        if let Some(area) = ctx.area
+            && !is_scrollbar_column(&mouse, area)
+            && let Some(index) = ctx.viewport.hit_item(&mouse, area)
+        {
+            *ctx.selected.write() = index;
+            activate_row(ctx, index);
+            return EventResult::Consumed;
+        }
+        return match mouse.kind {
+            MouseEventKind::Down(MouseButton::Left) => EventResult::Consumed,
+            _ => EventResult::Ignored,
+        };
+    }
+    let Event::Key(key) = event else {
+        return EventResult::Ignored;
+    };
+    if key.kind != KeyEventKind::Press {
+        return EventResult::Ignored;
+    }
+    match key.code {
+        KeyCode::Esc => close_panel(),
+        KeyCode::Enter => match ctx.viewport.selected_item() {
+            Some(index) => activate_row(ctx, index),
+            // 列表为空：没有可取消的行，沿用既有语义只关闭面板（提示同样是 Enter::close）
+            None => close_panel(),
+        },
+        // 导航一律基于当帧收敛后的选中值：列表刚刷新过也不会从越界位置起跳
+        KeyCode::Up => {
+            let mut s = ctx.selected.write();
+            *s = previous_selection(ctx.viewport.selected());
+        }
+        KeyCode::Down => {
+            let mut s = ctx.selected.write();
+            *s = next_selection(ctx.viewport.selected(), ctx.viewport.counts().total());
+        }
+        _ => {}
+    }
+    EventResult::Consumed
+}
+
+/// 行动作——键盘 Enter 与鼠标点击共用（click as enter）。
+fn activate_row(ctx: &TasksEventCtx, index: usize) {
+    match ctx.viewport.cancel_action(index, &ctx.bg_tasks) {
+        // 请求真的交给发送侧才关闭面板：没发出去时 dispatch 已提示用户，面板留在原地
+        CancelAction::Cancel(target) => {
+            if dispatch_cancel(target) {
+                close_panel();
+            }
+        }
+        // 该行在渲染帧里是可取消的后台任务行，但身份已不在当帧快照里：不发请求，
+        // 提示用户并保持面板打开——静默关闭会让用户以为任务已被取消。
+        CancelAction::TargetGone => notify(i18n::tr(TARGET_GONE_HINT_KEY)),
+        // Cron / SubAgent 行本面板不取消它们，既有语义是 Enter 关闭面板
+        CancelAction::NotCancelable => close_panel(),
+    }
+}
+
+/// 面板发出的取消请求；返回是否交给发送侧（未交给时已给用户可见提示）。
+///
+/// 会话身份缺失时不发请求：旧实现取 `unwrap_or_default()` 的空串 sessionId，请求必然
+/// 被拒，而用户看不到任何原因；这里提示用户并保持面板打开。
+fn dispatch_cancel(target: CancelTarget) -> bool {
+    let Some(session_id) = active_session_id() else {
+        tracing::warn!(target: "tasks-panel", "no active session, cancel skipped");
+        notify(i18n::tr(NO_SESSION_HINT_KEY));
+        return false;
+    };
+    send_cancel(session_id, target)
+}
+
+/// 取消请求要带的会话身份；拿不到时为 None。
+fn active_session_id() -> Option<String> {
+    // 测试接缝：单测进程里 ACP_CLIENT_HANDLE 由其它用例的 OnceLock 决定，构造不出可控
+    // 的会话环境，故允许测试注入（`None` = 无活动会话）。生产分支语义不变。
+    #[cfg(test)]
+    if let Some(forced) = tests::forced_session() {
+        return forced;
+    }
+    ACP_CLIENT_HANDLE.get()?.current_session_id()
+}
+
+/// 真正发出取消请求；返回是否交给发送侧。
+fn send_cancel(session_id: String, target: CancelTarget) -> bool {
+    // 测试接缝：测试构建下把请求交给接缝记录并直接返回，不 spawn——真实发送分支只能由
+    // 人工 / 端到端验证覆盖（单测进程里 ACP_CLIENT_HANDLE 未必可用）。
+    #[cfg(test)]
+    if tests::intercept_cancel_request(&session_id, &target) {
+        return true;
+    }
+    let Some(client) = ACP_CLIENT_HANDLE.get().cloned() else {
+        tracing::warn!(target: "tasks-panel", "ACP_CLIENT_HANDLE not set, cancel skipped");
+        notify(i18n::tr(NO_SESSION_HINT_KEY));
+        return false;
+    };
+    let CancelTarget { task_id, kind } = target;
+    tokio::spawn(async move {
+        match client.cancel_bg_task(&session_id, &task_id).await {
+            Ok(value) => tracing::info!(
+                task_id = %task_id,
+                kind = %kind,
+                ?value,
+                "tasks panel: cancel bg task"
+            ),
+            Err(error) => {
+                tracing::warn!(
+                    task_id = %task_id,
+                    kind = %kind,
+                    %error,
+                    "tasks panel: cancel bg task failed"
+                );
+                // 请求已发出而结果失败：面板此时已关闭，必须给用户可见反馈——把失败
+                // 当作静默日志会让用户以为任务已取消（结果未知不得呈现为取消成功）。
+                notify(i18n::tr_args(
+                    "panel-tasks-cancel-failed",
+                    &[("detail".to_string(), FluentValue::from(error.to_string()))],
+                ));
+            }
+        }
+    });
+    true
+}
+
+/// 状态栏通知（6s 过期）——取消未能发出的原因必须对用户可见，不能只留日志。
+fn notify(message: String) {
+    NOTIFICATION.set(Some(Notification {
+        message,
+        until: peri_time::monotonic_now() + Duration::from_secs(6),
+    }));
+}
+
+/// 摘要行：任务总数与三段明细。
+fn summary_line(theme: &ThemeDefinition, counts: SegmentCounts) -> Line<'static> {
+    Line::from(vec![
+        Span::styled(
+            i18n::tr("panel-tasks-total-label"),
+            Style::new().fg(theme.semantic.text.muted),
+        ),
+        Span::styled(
+            format!("{}", counts.total()),
+            Style::new().fg(theme.semantic.text.primary).bold(),
+        ),
+        Span::styled(
+            i18n::tr_args(
+                "panel-tasks-breakdown",
+                &[
+                    (
+                        "bg".to_string(),
+                        FluentValue::from(counts.background as i64),
+                    ),
+                    ("cron".to_string(), FluentValue::from(counts.cron as i64)),
+                    (
+                        "subagent".to_string(),
+                        FluentValue::from(counts.subagent as i64),
+                    ),
+                ],
+            ),
+            Style::new().fg(theme.semantic.text.dim),
+        ),
+    ])
+}
+
+/// 段标题行（含该段项数）。
+fn section_header_line(
+    segment: TaskSegment,
+    counts: SegmentCounts,
+    theme: &ThemeDefinition,
+) -> Line<'static> {
+    let (key, count) = match segment {
+        TaskSegment::Background => ("panel-tasks-section-bg", counts.background),
+        TaskSegment::Cron => ("panel-tasks-section-cron", counts.cron),
+        TaskSegment::SubAgent => ("panel-tasks-section-subagent", counts.subagent),
+    };
+    Line::from(vec![Span::styled(
+        i18n::tr_args(
+            key,
+            &[("count".to_string(), FluentValue::from(count as i64))],
+        ),
+        Style::new().fg(theme.semantic.border.active).bold(),
+    )])
+}
+
+/// 任务行——全量下标与段顺序同源，落到所属段的渲染器。
+fn item_line(
+    index: usize,
+    counts: SegmentCounts,
+    bg_tasks: &[BgTaskEntry],
+    cron_jobs: &[CronJobSummary],
+    subagents: &[TuiSubAgentGroup],
+    selected: usize,
+    theme: &ThemeDefinition,
+) -> Line<'static> {
+    let is_selected = index == selected;
+    if index < counts.background {
+        background_task_line(&bg_tasks[index], is_selected, theme)
+    } else if index < counts.background + counts.cron {
+        cron_job_line(&cron_jobs[index - counts.background], is_selected, theme)
+    } else {
+        subagent_line(
+            &subagents[index - counts.background - counts.cron],
+            is_selected,
+            theme,
+        )
+    }
+}
+
+/// 后台任务行：光标、类型标记、任务 id 与详情（shell 任务只显示 pid）。
+fn background_task_line(
+    task: &BgTaskEntry,
+    selected: bool,
+    theme: &ThemeDefinition,
+) -> Line<'static> {
+    let kind_str = match task.kind.as_str() {
+        "shell" => i18n::tr("panel-tasks-kind-sh"),
+        "agent" => i18n::tr("panel-tasks-kind-ag"),
+        "workflow" => i18n::tr("panel-tasks-kind-wf"),
+        _ => i18n::tr("panel-tasks-kind-unknown"),
+    };
+    // shell 任务的 summary 是脚本本身，无展示意义 → 只显示 pid
+    let is_shell = task.kind.as_str() == "shell";
+    let pid_str = task
+        .pid
+        .map(|p| {
+            i18n::tr_args(
+                "panel-tasks-pid",
+                &[("pid".to_string(), FluentValue::from(p as i64))],
+            )
+        })
+        .unwrap_or_default();
+    // 按终端显示宽度截断（CJK 双宽按 2 列计），避免字符数截断导致行溢出
+    let detail = if is_shell {
+        pid_str
+    } else {
+        format!(
+            "{}{}",
+            crate::truncate::truncate_by_width(&task.summary, 60),
+            pid_str
+        )
+    };
+    Line::from(vec![
+        Span::styled(
+            cursor_marker(selected),
+            Style::new().fg(theme.component.panel.title),
+        ),
+        Span::styled(kind_str, Style::new().fg(theme.semantic.text.dim)),
+        Span::styled(
+            format!(" {} ", task.task_id),
+            row_name_style(selected, theme),
+        ),
+        Span::styled(detail, Style::new().fg(theme.semantic.text.muted)),
+    ])
+}
+
+/// Cron 任务行：光标、启用状态、表达式、提示词预览与下次触发时间。
+fn cron_job_line(job: &CronJobSummary, selected: bool, theme: &ThemeDefinition) -> Line<'static> {
+    let (status_icon, status_color) = if job.enabled {
+        ("\u{25cf}", theme.semantic.status.success)
+    } else {
+        ("\u{25cb}", theme.semantic.text.muted)
+    };
+    let next_str = job
+        .next_fire
+        .map(|t| t.format("%H:%M:%S").to_string())
+        .unwrap_or_else(|| i18n::tr("common-na"));
+    // 按终端显示宽度截断（CJK 双宽按 2 列计），避免字符数截断导致行溢出
+    let prompt_preview: String = crate::truncate::truncate_by_width(&job.prompt, 50);
+    Line::from(vec![
+        Span::styled(
+            cursor_marker(selected),
+            Style::new().fg(theme.component.panel.title),
+        ),
+        Span::styled(status_icon, Style::new().fg(status_color)),
+        Span::styled(
+            format!(" {} ", job.expression),
+            Style::new().fg(theme.semantic.text.dim),
+        ),
+        Span::styled(prompt_preview, row_name_style(selected, theme)),
+        Span::styled(
+            format!("  @{}", next_str),
+            Style::new().fg(theme.semantic.text.muted),
+        ),
+    ])
+}
+
+/// SubAgent 行：光标、名称、agent id、折叠状态与消息数。
+fn subagent_line(sa: &TuiSubAgentGroup, selected: bool, theme: &ThemeDefinition) -> Line<'static> {
+    let collapsed_marker = if sa.collapsed {
+        Span::styled(
+            i18n::tr("panel-tasks-collapsed"),
+            Style::new().fg(theme.semantic.text.muted),
+        )
+    } else {
+        Span::styled(
+            i18n::tr("panel-tasks-live"),
+            Style::new().fg(theme.semantic.status.success),
+        )
+    };
+    Line::from(vec![
+        Span::styled(
+            cursor_marker(selected),
+            Style::new().fg(theme.component.panel.title),
+        ),
+        Span::styled(sa.agent_name.clone(), row_name_style(selected, theme)),
+        Span::styled(
+            format!("  [{}]", sa.agent_id),
+            Style::new().fg(theme.semantic.text.dim),
+        ),
+        collapsed_marker,
+        Span::styled(
+            i18n::tr_args(
+                "panel-tasks-msgs",
+                &[(
+                    "count".to_string(),
+                    FluentValue::from(sa.view_models.len() as i64),
+                )],
+            ),
+            Style::new().fg(theme.semantic.text.muted),
+        ),
+    ])
+}
+
+/// 行首选中光标（选中行才显示 `>`）。
+fn cursor_marker(selected: bool) -> String {
+    let cursor = if selected { ">" } else { " " };
+    format!(" {} ", cursor)
+}
+
+/// 行名样式：选中行高亮加粗。
+fn row_name_style(selected: bool, theme: &ThemeDefinition) -> Style {
+    if selected {
+        Style::new().fg(theme.component.panel.title).bold()
+    } else {
+        Style::new().fg(theme.semantic.text.primary)
+    }
+}
+
+/// 空态引导行。
+fn hint_line(key: &str, theme: &ThemeDefinition) -> Line<'static> {
+    Line::from(vec![Span::styled(
+        i18n::tr(key),
+        Style::new().fg(theme.semantic.text.dim),
+    )])
 }
 
 /// 从 ViewModelsSnapshot 派生去重 SubAgent 列表。
@@ -414,82 +565,4 @@ fn close_panel() {
 }
 
 #[cfg(test)]
-mod tests {
-    #[test]
-    fn test_tasks_enter_still_cancels_not_open_detail() {
-        let src = include_str!("tasks.rs");
-        let main_src = src.split("#[cfg(test)]").next().expect("tasks module body");
-        assert!(
-            main_src.contains("cancel_bg_task") || main_src.contains("kill_workflow_run"),
-            "Tasks Enter 应取消 bg 任务"
-        );
-        assert!(
-            !main_src.contains("open_panel"),
-            "Tasks 面板 Enter 不得打开 SubAgent/Shell 详情抽屉"
-        );
-    }
-
-    /// P0-74：底部导航提示必须描述真实动作——后台任务行 Enter 取消，Cron / SubAgent 行 Enter 只关闭。
-    #[test]
-    fn test_tasks_nav_hint_describes_cancel_not_open() {
-        let src = include_str!("tasks.rs");
-        let main_src = src.split("#[cfg(test)]").next().expect("tasks module body");
-        assert!(
-            !main_src.contains("common-nav-enter-close"),
-            "Tasks 面板不得复用 Enter::open 语义的通用提示"
-        );
-
-        // 动作侧：Enter 只在选中后台任务行时取消（sel < bg_count），其余行走 close_panel
-        let enter_arm = main_src
-            .split("KeyCode::Enter =>")
-            .nth(1)
-            .and_then(|rest| rest.split("KeyCode::Up =>").next())
-            .expect("Tasks Enter 分支存在");
-        assert!(
-            enter_arm.contains("sel < bg_count") && enter_arm.contains("cancel_bg_task"),
-            "Tasks Enter 的真实动作是仅对后台任务行取消；动作语义变化须同步提示与该用例"
-        );
-
-        // 提示侧：按选中行落在哪个分组选择 key
-        let hint_branch = main_src
-            .split("let nav_hint = if sel < bg_count")
-            .nth(1)
-            .and_then(|rest| rest.split("lines.push(Line::from(nav_hint))").next())
-            .expect("Tasks 提示选择分支存在");
-        assert!(
-            hint_branch.contains(r#"i18n::tr("panel-tasks-nav-hint")"#),
-            "后台任务行提示须使用 Tasks 取消专属 key"
-        );
-        assert!(
-            hint_branch.contains(r#"i18n::tr("panel-tasks-nav-hint-close")"#),
-            "Cron / SubAgent 行提示须使用关闭专属 key"
-        );
-
-        for lang in ["en", "zh-CN"] {
-            let reg = crate::i18n::LcRegistry::new(Some(lang));
-            let cancel = reg.tr("panel-tasks-nav-hint");
-            assert!(
-                !cancel.contains("Enter::open"),
-                "{lang} 提示不得把取消伪装成打开：{cancel}"
-            );
-            assert!(
-                cancel.contains("Enter::cancel") || cancel.contains("Enter::取消"),
-                "{lang} 提示须标明 Enter 取消：{cancel}"
-            );
-
-            let close = reg.tr("panel-tasks-nav-hint-close");
-            assert!(
-                !close.contains("Enter::open"),
-                "{lang} 提示不得把关闭伪装成打开：{close}"
-            );
-            assert!(
-                close.contains("Enter::close") || close.contains("Enter::关闭"),
-                "{lang} 非后台任务行提示须标明 Enter 关闭：{close}"
-            );
-            assert!(
-                !close.contains("Enter::cancel") && !close.contains("Enter::取消"),
-                "{lang} 非后台任务行 Enter 不取消，提示不得声称取消：{close}"
-            );
-        }
-    }
-}
+mod tests;
