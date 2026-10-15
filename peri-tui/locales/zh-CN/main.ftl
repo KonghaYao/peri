@@ -1128,6 +1128,9 @@ workflow-no-runs = 当前会话无工作流运行
 workflow-footer-shortcuts = Tab::切换运行 · Shift+Tab::上一个 · ←/→::切换面板 · ↑/↓::导航 · Enter::终止运行 · Esc::关闭
 workflow-phases-header = 阶段（共 { $count } 个 agent）
 workflow-model-header = 模型
+workflow-kill-no-session = 无活动会话，无法终止运行
+workflow-kill-failed = 终止运行失败
+workflow-kill-requested = 已请求终止运行 { $run }
 
 # ---- AskUser Panel ----
 panel-ask-user-empty =   暂无待答问题。

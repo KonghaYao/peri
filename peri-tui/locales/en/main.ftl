@@ -1130,6 +1130,9 @@ workflow-no-runs = No workflow runs in current session
 workflow-footer-shortcuts = Tab::next-run · Shift+Tab::prev-run · ←/→::pane · ↑/↓::navigate · Enter::kill-run · Esc::close
 workflow-phases-header = Phases ({ $count } agents)
 workflow-model-header = Model
+workflow-kill-no-session = No active session; cannot stop the workflow run
+workflow-kill-failed = Could not stop workflow run
+workflow-kill-requested = Stop requested for run { $run }
 
 # ---- AskUser Panel ----
 panel-ask-user-empty =   No pending questions.
