@@ -99,16 +99,16 @@ pub fn spawn_thread_load_consumer(
                                     let wf_c = bg_tasks.iter().filter(|t| t.kind == "workflow").count();
 
                                     *atoms::CONFIRM_PAYLOAD.state().write() =
-                                        Some(atoms::ConfirmPayload {
-                                            title: i18n::tr("thread-switch-confirm-title"),
-                                            message: i18n::tr_args(
+                                        Some(atoms::ConfirmPayload::new(
+                                            i18n::tr("thread-switch-confirm-title"),
+                                            i18n::tr_args(
                                                 "thread-switch-bg-tasks-message",
                                                 &[(
                                                     "count".into(),
                                                     FluentValue::from(bg_tasks.len() as i64),
                                                 )],
                                             ),
-                                            details: vec![
+                                            vec![
                                                 i18n::tr_args(
                                                     "thread-switch-task-counts",
                                                     &[
@@ -119,10 +119,8 @@ pub fn spawn_thread_load_consumer(
                                                 ),
                                                 i18n::tr("thread-switch-bg-note"),
                                             ],
-                                            pending_action: atoms::ConfirmAction::ThreadSwitch(
-                                                thread_id.clone(),
-                                            ),
-                                        });
+                                            atoms::ConfirmAction::ThreadSwitch(thread_id.clone()),
+                                        ));
                                     *atoms::POPUP_KIND.state().write() = Some(atoms::PopupKind::Confirm);
                                     true
                                 } else {

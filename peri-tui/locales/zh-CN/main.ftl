@@ -1183,6 +1183,7 @@ popup-ask-user-title =  用户问答
 risk-choice-cancel = 取消（默认）
 
 popup-confirm-empty =   暂无待确认项。
+popup-confirm-superseded = 确认内容已更新，请重新确认。
 popup-confirm-action-hint =   Enter: 确认  Esc: 取消
 popup-confirm-title =  确认
 popup-confirm-reject-title = 拒绝回答

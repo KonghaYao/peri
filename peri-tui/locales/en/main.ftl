@@ -1185,6 +1185,7 @@ popup-ask-user-title =  Ask User
 risk-choice-cancel = Cancel (default)
 
 popup-confirm-empty =   No pending confirmation.
+popup-confirm-superseded =   The confirmation changed; review and confirm again.
 popup-confirm-action-hint =   Enter: confirm  Esc: cancel
 popup-confirm-title =  Confirm 
 popup-confirm-reject-title = Reject Answer

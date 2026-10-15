@@ -23,7 +23,8 @@ use crate::acp_client::AcpTuiClient;
 use crate::acp_client::InteractionOwner;
 use crate::i18n;
 
-/// AskUser 用户操作——由 AskUserPopup 在 Enter/Esc 时通过 ASK_USER_RESPONSE_TX 发送。
+/// AskUser 用户操作——由 `AskUserPanel`（Enter 提交 / Esc 请求拒绝）与 `ConfirmPopup`
+/// （确认拒绝）经 ASK_USER_RESPONSE_TX 发送。
 #[derive(Debug, Clone)]
 pub enum AskUserResponseAction {
     /// 用户提交答案；answers 为 `BTreeMap<String, Value>` 的 serde_json Value。

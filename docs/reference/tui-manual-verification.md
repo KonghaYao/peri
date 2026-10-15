@@ -149,12 +149,12 @@
 - [ ] 无 popup 但有 panel 时，Esc 关闭 panel
 - [ ] 无 popup / panel 时，Esc 不触发异常状态
 
-### AskUserPopup 特别检查
+### AskUser 面板特别检查
 
 - [ ] 显示的问题与 agent 实际问题一致
 - [ ] 选择选项后 UI 状态正确更新
 - [ ] 按 Enter 后是否真的把答案提交回 agent
-- [ ] 如果只关闭 popup、不提交答案，记录为独立问题跟进
+- [ ] 如果只关闭面板、不提交答案，记录为独立问题跟进
 
 ## 6. StatusBar
 
