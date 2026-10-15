@@ -200,13 +200,37 @@ fn assert_connected_with_fixture_tool(pool: &McpClientPool) {
     );
 }
 
-#[tokio::test]
+async fn wait_for_listen_request(listen_requests: &AtomicUsize, expected_count: usize) {
+    for _ in 0..5_000 {
+        if listen_requests.load(Ordering::SeqCst) >= expected_count {
+            return;
+        }
+        tokio::task::yield_now().await;
+    }
+    assert!(
+        listen_requests.load(Ordering::SeqCst) >= expected_count,
+        "fixture server did not receive the subscriptions/listen request"
+    );
+}
+
+async fn wait_for_task<T>(task: tokio::task::JoinHandle<T>, description: &str) -> T {
+    for _ in 0..5_000 {
+        if task.is_finished() {
+            return task.await.expect(description);
+        }
+        tokio::task::yield_now().await;
+    }
+    panic!("{description}");
+}
+
+#[tokio::test(start_paused = true)]
 async fn initialize_continues_after_unanswered_subscription_handshake() {
     let timeout = super::super::client::SUBSCRIPTION_LISTEN_TIMEOUT;
     let (url, listen_requests, server) = start_subscription_server().await;
-    let pool = tokio::time::timeout(timeout * 2, initialize_pool(url))
-        .await
-        .expect("initialization must continue after subscription timeout");
+    let initialization = tokio::spawn(async move { initialize_pool(url).await });
+    wait_for_listen_request(&listen_requests, 1).await;
+    tokio::time::advance(timeout).await;
+    let pool = wait_for_task(initialization, "initialization task should finish").await;
     assert_connected_with_fixture_tool(&pool);
     assert_eq!(listen_requests.load(Ordering::SeqCst), 1);
 
@@ -215,19 +239,23 @@ async fn initialize_continues_after_unanswered_subscription_handshake() {
     let _ = server.await;
 }
 
-#[tokio::test]
+#[tokio::test(start_paused = true)]
 async fn reconnect_continues_after_unanswered_subscription_handshake() {
     let timeout = super::super::client::SUBSCRIPTION_LISTEN_TIMEOUT;
     let (url, listen_requests, server) = start_subscription_server().await;
-    let pool = tokio::time::timeout(timeout * 2, initialize_pool(url))
-        .await
-        .expect("initial connection must continue after subscription timeout");
+    let initialization = tokio::spawn(async move { initialize_pool(url).await });
+    wait_for_listen_request(&listen_requests, 1).await;
+    tokio::time::advance(timeout).await;
+    let pool = wait_for_task(initialization, "initialization task should finish").await;
     assert_connected_with_fixture_tool(&pool);
     assert_eq!(listen_requests.load(Ordering::SeqCst), 1);
 
-    tokio::time::timeout(timeout * 2, pool.reconnect("server", None))
+    let reconnect_pool = Arc::clone(&pool);
+    let reconnect = tokio::spawn(async move { reconnect_pool.reconnect("server", None).await });
+    wait_for_listen_request(&listen_requests, 2).await;
+    tokio::time::advance(timeout).await;
+    wait_for_task(reconnect, "reconnect task should finish")
         .await
-        .expect("reconnect must continue after subscription timeout")
         .expect("connection remains usable after subscription timeout");
     assert_connected_with_fixture_tool(&pool);
     assert_eq!(listen_requests.load(Ordering::SeqCst), 2);
