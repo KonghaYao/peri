@@ -331,9 +331,9 @@ pub(crate) struct MountedPanel {
     pub discover: State<super::super::discover::DiscoverState>,
     pub action_index: State<usize>,
     pub confirm_action: State<Option<String>>,
-    pub operation_loading: State<Option<String>>,
-    pub detail_plugin_idx: State<Option<usize>>,
-    pub marketplace_detail: State<Option<usize>>,
+    pub marketplace_confirmation: State<Option<super::super::MarketplaceIdentity>>,
+    pub detail_plugin: State<Option<super::super::InstalledIdentity>>,
+    pub marketplace_detail: State<Option<super::super::MarketplaceIdentity>>,
     pub marketplace_detail_action: State<usize>,
     pub add_marketplace_input: State<crate::components::textarea::TextAreaState>,
     pub add_marketplace_active: State<bool>,
@@ -359,21 +359,22 @@ impl MountedPanel {
         use super::super::search_handler;
         search_handler::handle_search_event(
             event,
+            &current_scope(),
             None,
             self.active_tab,
             self.discover,
-            self.detail_plugin_idx,
+            self.detail_plugin,
             self.marketplace_detail,
             self.marketplace_detail_action,
             self.confirm_action,
-            self.operation_loading,
+            self.marketplace_confirmation,
             self.operation,
             self.add_marketplace_input,
             self.add_marketplace_active,
         )
     }
 
-    fn event(&self, event: Event) -> ratatui_kit::EventResult {
+    pub(crate) fn event(&self, event: Event) -> ratatui_kit::EventResult {
         use super::super::panel_handler;
         use ratatui_kit::EventResult;
         let result = self.search_event(event.clone());
@@ -382,15 +383,16 @@ impl MountedPanel {
         }
         panel_handler::handle_panel_event(
             event,
+            &current_scope(),
             None,
             self.selected,
             self.active_tab,
             self.discover,
             self.action_index,
             self.confirm_action,
-            self.operation_loading,
+            self.marketplace_confirmation,
             self.operation,
-            self.detail_plugin_idx,
+            self.detail_plugin,
             self.marketplace_detail,
             self.marketplace_detail_action,
             self.add_marketplace_input,
@@ -425,7 +427,14 @@ impl MountedPanel {
     }
 }
 
-fn mount_panel(visitor: impl FnOnce(MountedPanel) + 'static) -> String {
+pub(crate) fn mount_panel(visitor: impl FnOnce(MountedPanel) + 'static) -> String {
+    mount_panel_frames(1, visitor)
+}
+
+pub(crate) fn mount_panel_frames(
+    frames: usize,
+    visitor: impl FnOnce(MountedPanel) + 'static,
+) -> String {
     let _catalog_guard = super::super::data::empty_catalog_for_test();
     use crate::app::panel_types::PanelKind;
     use crate::kit::atoms::{ACTIVE_PANEL, OPEN_PANELS};
@@ -445,8 +454,12 @@ fn mount_panel(visitor: impl FnOnce(MountedPanel) + 'static) -> String {
         assert!(slot.borrow().is_none());
         *slot.borrow_mut() = Some(Box::new(visitor));
     });
-    let buffer =
-        ratatui_kit::test_util::render_frame(element!(super::super::PluginPanel()), 160, 40);
+    let buffer = ratatui_kit::test_util::render_frames(
+        element!(super::super::PluginPanel()),
+        160,
+        40,
+        frames,
+    );
     buffer.content.iter().map(|cell| cell.symbol()).collect()
 }
 
@@ -779,13 +792,14 @@ fn mounted_unmanaged_or_ambiguous_mutations_report_reason_without_pending() {
             mount_panel(move |panel| {
                 paused_runtime().block_on(async {
                     let (_client, server) = controlled_client();
-                    *panel.detail_plugin_idx.write() = Some(0);
+                    let identity = super::super::InstalledIdentity::new(&summary, current_scope());
+                    *panel.detail_plugin.write() = Some(identity.clone());
                     installed_action(
                         action,
                         &summary,
                         panel.operation,
                         panel.confirm_action,
-                        panel.detail_plugin_idx,
+                        panel.detail_plugin,
                     );
                     assert_eq!(
                         panel.operation.read().error.as_deref(),
@@ -793,7 +807,7 @@ fn mounted_unmanaged_or_ambiguous_mutations_report_reason_without_pending() {
                     );
                     assert!(panel.operation.read().pending_action().is_none());
                     assert!(panel.operation.read().confirmation.is_none());
-                    assert_eq!(*panel.detail_plugin_idx.read(), Some(0));
+                    assert_eq!(*panel.detail_plugin.read(), Some(identity));
                     assert!(
                         tokio::time::timeout(Duration::from_millis(1), server.recv())
                             .await

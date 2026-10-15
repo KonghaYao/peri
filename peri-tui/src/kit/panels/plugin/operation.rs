@@ -53,11 +53,7 @@ pub(super) struct PluginOperation {
 
 impl PluginOperation {
     pub fn installed(action: &str, plugin: &PluginSummary) -> Result<Self, String> {
-        let plugin_id = if plugin.marketplace.is_empty() {
-            plugin.name.clone()
-        } else {
-            format!("{}@{}", plugin.name, plugin.marketplace)
-        };
+        let plugin_id = super::InstalledIdentity::new(plugin, super::current_scope()).plugin_id();
         let (action, method) = match action {
             "enable" => ("enable", "plugin/toggle"),
             "disable" => ("disable", "plugin/toggle"),
@@ -211,6 +207,9 @@ impl OperationState {
 
 pub(super) fn handle_pending_event(event: &Event, state: State<OperationState>) -> bool {
     let pending = state.read().is_pending();
+    if !state.read().gate.scope_matches(&super::current_scope()) {
+        return pending;
+    }
     if pending
         && matches!(event, Event::Key(key) if key.kind == KeyEventKind::Press && key.code == KeyCode::Esc)
     {
@@ -220,6 +219,10 @@ pub(super) fn handle_pending_event(event: &Event, state: State<OperationState>) 
 }
 
 pub(super) fn dispatch(operation: PluginOperation, state: State<OperationState>) {
+    #[cfg(test)]
+    if super::guard_tests::intercept_dispatch(&operation) {
+        return;
+    }
     let ticket = state
         .write()
         .begin(operation.clone(), super::current_scope());
@@ -295,6 +298,9 @@ pub(super) fn launch(
                 reason: OutcomeUnknownReason::ObserverGone,
             };
         }
+        if ticket.is_cancelled() || ticket.scope() != &super::current_scope() {
+            return;
+        }
         // 插件业务特有副作用：marketplace 目录变更成功后刷新本地缓存。
         if matches!(outcome, OperationOutcome::Succeeded)
             && matches!(
@@ -302,16 +308,28 @@ pub(super) fn launch(
                 "marketplace/add" | "marketplace/remove" | "marketplace/refresh"
             )
         {
+            let refresh_ticket = ticket.clone();
+            let refresh_cancel = ticket.token().child_token();
+            let refresh_worker_cancel = refresh_cancel.clone();
+            let refresh_client = client.clone();
+            let refresh_identity = identity.clone();
             tokio::select! {
                 biased;
                 _ = ticket.token().cancelled() => return,
-                refresh = peri_time::timeout(OPERATION_TIMEOUT, tokio::task::spawn_blocking(|| {
-                    super::data::refresh_discover_cache();
-                    super::data::refresh_marketplace_cache();
+                refresh = peri_time::timeout(OPERATION_TIMEOUT, tokio::task::spawn_blocking(move || {
+                    let is_current = || !refresh_worker_cancel.is_cancelled()
+                        && !refresh_ticket.is_cancelled()
+                        && refresh_ticket.scope() == &super::current_scope()
+                        && refresh_client.as_ref().is_some_and(|client| client.stable_session_identity() == refresh_identity);
+                    super::data::refresh_discover_cache(&is_current);
+                    super::data::refresh_marketplace_cache(&is_current);
                 })) => match refresh {
                     Ok(Ok(())) => {}
                     Ok(Err(error)) => outcome = OperationOutcome::Failed { reason: format!("Marketplace cache refresh failed: {error}") },
-                    Err(error) => outcome = OperationOutcome::Failed { reason: format!("Marketplace operation succeeded; cache refresh timed out: {error}") },
+                    Err(error) => {
+                        refresh_cancel.cancel();
+                        outcome = OperationOutcome::Failed { reason: format!("Marketplace operation succeeded; cache refresh timed out: {error}") };
+                    },
                 }
             }
         }
@@ -352,10 +370,10 @@ pub(super) fn installed_action(
     plugin: &PluginSummary,
     state: State<OperationState>,
     confirm_action: State<Option<String>>,
-    detail_plugin_idx: State<Option<usize>>,
+    detail_plugin: State<Option<super::InstalledIdentity>>,
 ) {
     if action == "back" {
-        *detail_plugin_idx.write() = None;
+        *detail_plugin.write() = None;
         return;
     }
     match PluginOperation::installed(action, plugin) {
@@ -365,7 +383,7 @@ pub(super) fn installed_action(
                 *confirm_action.write() = Some("uninstall".into());
             } else {
                 dispatch(operation, state);
-                *detail_plugin_idx.write() = None;
+                *detail_plugin.write() = None;
             }
         }
         Err(error) => {
@@ -380,25 +398,45 @@ pub(super) fn installed_action(
 pub(super) fn confirm_uninstall(
     state: State<OperationState>,
     confirm_action: State<Option<String>>,
-    detail_plugin_idx: State<Option<usize>>,
+    detail_plugin: State<Option<super::InstalledIdentity>>,
 ) {
+    let valid = detail_plugin.read().as_ref().is_some_and(|key| {
+        key.resolve(
+            &crate::kit::atoms::PLUGIN_LIST.state().read(),
+            &super::current_scope(),
+        )
+        .is_some()
+    });
     let operation = state.write().confirmation.take();
     *confirm_action.write() = None;
-    *detail_plugin_idx.write() = None;
-    if let Some(operation) = operation {
+    *detail_plugin.write() = None;
+    if valid && let Some(operation) = operation {
         dispatch(operation, state);
+    } else {
+        state.write().error = Some(crate::i18n::tr("panel-plugin-management-unsupported"));
     }
 }
 
 pub(super) fn confirm_marketplace_remove(
-    name: String,
+    identity: Option<super::MarketplaceIdentity>,
     state: State<OperationState>,
     confirm_action: State<Option<String>>,
-    operation_loading: State<Option<String>>,
+    marketplace_confirmation: State<Option<super::MarketplaceIdentity>>,
 ) {
     *confirm_action.write() = None;
-    *operation_loading.write() = None;
-    dispatch(PluginOperation::marketplace_remove(name), state);
+    *marketplace_confirmation.write() = None;
+    let entries = super::data::get_marketplace_cache();
+    if let Some(entry) = identity
+        .as_ref()
+        .and_then(|key| key.resolve(&entries, &super::current_scope()))
+    {
+        dispatch(
+            PluginOperation::marketplace_remove(entry.name.clone()),
+            state,
+        );
+    } else {
+        state.write().error = Some(crate::i18n::tr("panel-plugin-management-unsupported"));
+    }
 }
 
 #[cfg(test)]
