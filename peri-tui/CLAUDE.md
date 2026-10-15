@@ -25,6 +25,7 @@ ACP notification → acp_notifier → acp_bridge / BridgeState
 | 增量布局与派生缓存预算 | `src/kit/message_area/transcript.rs`、`transcript_index.rs`、`src/kit/entry_render_cache.rs` |
 | 键盘、鼠标、焦点与事件优先级 | `src/kit/event_handlers.rs`、`src/kit/focus_router.rs` |
 | 面板、弹窗与确认交互 | `src/kit/panels/`、`src/kit/popups/`、`src/kit/panel_overlay.rs`；面板操作的作用域与完成门在 `src/application/operations/` |
+| 配置落盘与保存提示（Config / Model / Login / Theme） | `src/kit/config_service.rs`（`persist_candidate`）+ 各面板动作入口 |
 | 国际化与主题 | `src/i18n/`、`locales/`、`peri-theme` atoms |
 | 测试 | 与目标模块同目录的 `*_test.rs` 或 `#[cfg(test)]` 模块 |
 
@@ -39,7 +40,7 @@ ACP notification → acp_notifier → acp_bridge / BridgeState
 - History 面板使用单行会话列表与固定详情/操作栏；按容器高度计算视口，列表和只读预览各持有独立滚动状态。刷新按 thread ID 保留选择，执行操作使用已选身份，删除确认固定待删 ID，不能用旧索引查新列表决定目标。
 - 面板列表的可见范围、滚动起点与鼠标命中由 `kit/panels/shared/list.rs` 的同一次推导给出（`ListMetrics` + `ListViewport`），不写死可见项常量；面板高度以 `panel_overlay::panel_height` 为唯一权威。详情与操作绑定业务稳定身份（id/name/path）而非列表下标；目标消失由 `use_effect` 在更新阶段收敛，渲染只读状态。分段列表、可变行高与无列表面板可不接入该机制，但须在面板内写明理由与替代做法。契约见 [TUI 面板架构](../docs/design/tui-panel-architecture.md)。
 - 面板操作的作用域与完成门由 `application/operations/` 统一表达（`OperationScope` / `CompletionGate` / `OperationOutcome`）：发起取票、完成校验代次与作用域、取消按结果未知表达；面板不自建票据或代次，同作用域同目标的在途重复触发判定为拒绝（不发、不提示）。确认执行只按确认时固定的稳定身份，目标消失则不执行并给可见提示，不回退为按下标取当前项。事件判定集中在 `handle_<panel>_event(event, ctx)`，组件只做注册。
-- Config / Model / Login / Theme 的持久配置仍编辑宿主启动时选中的 `ConfigSource`，面板明确标识“宿主配置”和实际保存路径；权限切换（配置行、Shift+Tab、slash）及会话模型选择等运行请求继续按 session ID 路由。整份配置上送不带 session ID；切换会话不重定位宿主配置写入。同配置源会话刷新 provider 连接并失效模型缓存，保留各自的模型/profile 选择和 frozen 数据。
+- Config / Model / Login / Theme 的持久配置仍编辑宿主启动时选中的 `ConfigSource`，面板明确标识“宿主配置”和实际保存路径；权限切换（配置行、Shift+Tab、slash）及会话模型选择等运行请求继续按 session ID 路由。整份配置上送不带 session ID；切换会话不重定位宿主配置写入。同配置源会话刷新 provider 连接并失效模型缓存，保留各自的模型/profile 选择和 frozen 数据。四个面板的落盘与可见提示只有一份实现（`src/kit/config_service.rs`）：候选先落盘，成功才提交内存句柄、投影与 ACP，失败只提示不改可见状态——不可逆动作（删除 provider）同样适用。
 - render body 不写 atom；render 内派生缓存使用既有无通知写入模式，副作用放在事件或 effect 边界。
 - 同一个 `State` 的读守卫不得跨过对该状态的写：在条件或 `match` 里「先 `read()` 再在同一表达式内 `write()`」会自锁挂死（内部 RwLock 同线程不可重入），表现为测试永久挂起而非 panic。先把值取到局部变量（`.clone()` / 拷贝）再写，测试探针与事件处理同样适用。
 - cancel 关闭 reverse interaction owner，不等于执行终态已确认；匹配当前 execution 的 done 仍须透传一次以结束 loading，重复 done 与旧 execution 终态不得影响新 turn。

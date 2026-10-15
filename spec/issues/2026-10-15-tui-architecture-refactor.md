@@ -134,6 +134,7 @@
 | `51ea726ab` | 文档固化：设计文档补作用域/已接入清单/快照发布单点/确认版本守卫/面板职责映射表（17 面板）；`docs/code-index/peri-tui.md`、`peri-tui/CLAUDE.md`、本 issue 同步批次 G 的测试/体积/e2e 证据 |
 | `e65718878` | 批次 D 收口：新增 `kit/config_service.rs` 作为四个配置面板「候选落盘 → 成功才提交 → 失败可见」的单一权威，6 个落盘点收敛；`delete_provider` 失败不再改内存与推送 ACP；新增 `config_service_test.rs` 与删除候选构造回归 |
 | `497f080c2` | 批次 D 文档：设计文档增「配置落盘边界」；code-index 增该规则路由；本 issue 更新批次表/用例数/证据/清理/决策 9-11 与三笔提交补记；`display-coverage.md` 同步 AskUser popup 删除 |
+| `b68e1f033` | 向导审计结论文档化（批次 D 剩余项：无适用改动 + 逐条证据），批次 D 标记完成；记录密钥掩码两套样式待产品决策 |
 
 ## 交付证据（方案 §11）
 
