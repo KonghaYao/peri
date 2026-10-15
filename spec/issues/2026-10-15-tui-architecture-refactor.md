@@ -17,17 +17,17 @@
 | 批次 | 状态 | 证据 / 备注 |
 | --- | --- | --- |
 | A 固定基线与契约 | 已完成 | 只读侦查：面板/弹窗清单、按类矩阵（只读/配置/资源/复合）、确认身份审计、hook/render 边界、快照审计、测试清单；基线测试与体积见下 |
-| B 共享列表与正确交互 | 基本完成 | Hooks、MCP 已迁移并拆文件；MCP 详情稳定身份 + effect 收敛；剩余：把共享视口扩展到批次 C 面板 |
-| C 操作机制与简单面板 | 进行中 | Cron、Memory 已迁移（稳定确认目标、视口/命中同源）；Tasks、Agent、Status、Goal 进行中；「作用域与完成门」原语落 `application/operations/` 并先迁移 Plugin 搜索/操作 |
-| D 宿主配置与向导 | 进行中 | Theme、Login 正确性修复中（渲染体写状态、hook 顺序、命中差 1 行、Provider 删除身份）；Config、Model 迁移中（命中同源、保存失败如实展示） |
-| E 复杂面板与快照 | 未开始（已侦查） | Plugin、ThreadBrowser、Workflow 缺陷已逐行确认；快照拆分边界已确认（提交/失效门保持单点） |
+| B 共享列表与正确交互 | 已完成 | Hooks、MCP 迁移并拆文件；MCP 详情稳定身份 + effect 收敛；共享视口已扩展到批次 C 的全部固定行高面板 |
+| C 操作机制与简单面板 | 基本完成 | Cron、Memory、Tasks、Agent、Status、Goal 六个面板已迁移；`application/operations/` 原语落地并接入 Plugin 搜索与操作。剩余：Cron 会话级守卫与 Tasks 取消尚未接入原语（无显式代次/票据） |
+| D 宿主配置与向导 | 基本完成 | Config、Model、Login、Theme 四个面板已迁移（命中同源、渲染边界、确认身份、保存失败如实展示）。剩余：「集中配置服务」抽象与向导字段未开始 |
+| E 复杂面板与快照 | 未开始（已侦查） | Plugin、ThreadBrowser、Workflow 缺陷已逐行确认；快照拆分边界已确认（提交/失效门必须保持单点） |
 | F 详情、弹窗和清理 | 未开始 | 详情迁移共享外壳；AskUserPopup 渲染体内写状态；`confirm_popup` 执行时重读全局 payload 的语义待核 |
-| G 整体验收与文档固化 | 进行中（文档随批次同步） | 本 issue + design 已建；体积/性能对照与 Linux 口径待补 |
+| G 整体验收与文档固化 | 进行中 | 本 issue + design 随批次更新；体积/性能对照、Linux 口径与 e2e 未跑 |
 
 ## 基线（可复现）
 
 - 测试：`./scripts/cargo-rmcp-patched.sh test --locked -p peri-tui --lib` 在 `56a8ccd8d` 为
-  **1845 passed / 0 failed / 6 ignored**；本分支当前为 **1876 passed / 0 failed / 6 ignored**。
+  **1845 passed / 0 failed / 6 ignored**；本分支当前为 **1956 passed / 0 failed / 6 ignored**。
 - 二进制（macOS ARM64，release，`strip = "symbols"`）：干净基线构建 `/tmp/peri-tui-baseline`
   （detached 于 `56a8ccd8d`）= **21,745,968 bytes**。当前分支的对照构建与 Linux `.text`
   归属尚未测量，批次 G 补齐；未测量的平台不得宣称通过。
@@ -38,38 +38,50 @@
 
 | 提交 | 内容 |
 | --- | --- |
-| `6ce250fe5` | `panels/shared/list` 共享列表视口（`ListMetrics`/`ListViewport`/`content_rows`）；`panel_height`/`panel_content_rows` 抽出为唯一权威；Hooks 面板接入（删除写死可见项、click as enter、滚动条列排除、区域同源） |
-| `af32b490d` | MCP 面板接入共享视口；详情改稳定身份（server 名）并由 `use_effect` 收敛；列表左键点击进详情；新增动态视口/稳定身份/目标消失/点击进详情回归；`mcp.rs` 拆分出 `mcp/detail.rs` 与 `mcp/tests.rs`（该提交消息只写了拆分，迁移内容同属本提交） |
-| `c43d537d7` | `McpEventCtx` 收敛事件入口签名（消除 clippy `too_many_arguments`）；`hooks_test` 探针类型别名 |
-| `753ca0fda` | 目标设计 `docs/design/tui-panel-architecture.md`；本 issue；`peri-tui/CLAUDE.md` 不变量；代码索引与 README 路由同步 |
-| `0f3015a18` | Memory 面板接入共享视口（删 `VISIBLE_ITEMS = 13`、具名 `handle_memory_event`、滚动区域与命中同源、编辑器打开加测试接缝），新增 7 个面板级用例 |
-| `4c79289b2` | Cron 面板：确认删除改为持有 `job.id`（刷新/重排不删错任务）、确认态一次性清除的完成门、目标消失不删并留痕、事件入口具名化 + 动作出口可注入、区域同源，新增 9 个面板级用例 |
+| `6ce250fe5` | `panels/shared/list` 共享列表视口（`ListMetrics`/`ListViewport`/`content_rows`）；`panel_height`/`panel_content_rows` 抽出为唯一权威；Hooks 面板接入 |
+| `af32b490d` | MCP 面板接入共享视口；详情改稳定身份（server 名）并由 `use_effect` 收敛；点击进详情；`mcp.rs` 拆出 `mcp/detail.rs`、`mcp/tests.rs`（提交消息只写了拆分，迁移内容同属该提交） |
+| `c43d537d7` | `McpEventCtx` 收敛事件入口签名；`hooks_test` 探针类型别名 |
+| `753ca0fda` | 目标设计 `docs/design/tui-panel-architecture.md`、本 issue、`peri-tui/CLAUDE.md` 不变量与路由同步 |
+| `0f3015a18` | Memory 面板接入共享视口（删写死可见项、具名 `handle_memory_event`、滚动区域与命中同源、编辑器打开测试接缝） |
+| `4c79289b2` | Cron 面板：确认删除改为持有 `job.id`、确认态一次性清除的完成门、目标消失不删、事件入口具名化 + 动作出口可注入、区域同源 |
+| `51f4b01b2` | issue 文档同步批次 C/D 进度与决策记录（上一轮） |
+| `928837700` | i18n：确认目标守卫文案与 Tasks 取消三态文案（不再借用 Cron 与空态文案） |
+| `bff52f09c` | Cron 确认目标消失时给出可见提示 |
+| `5b85c4832` | `application/operations/` 操作作用域与完成门原语（纯状态机、Drop 取消、结果未知三态）；Plugin 搜索与操作接入并删除被替代实现 |
+| `60bf42af3` | Config：命中/绘制同源、保存失败如实展示（候选副本落盘成功才提交）、按职责拆 `config/rows.rs` 与 `config/actions.rs` |
+| `6828a7eba` | Model：命中/绘制同源、保存失败不再假装成功（不写内存、不投影、不推送） |
+| `0f1d6b351` | Theme：hooks 前置、三处渲染期副作用移到 effect、命中表头补回预览标题行、选择身份改为主题名 |
+| `bc6140eac` | Login：删除确认冻结 provider id、目标消失不请求并提示、编辑态回退改由 effect 承担、Edit 视图拆分 |
+| `02f36814d` | Tasks：三段行表统一绘制/命中/取消解析、选中收敛、取消身份与结果可见、鼠标 click as enter、测试拆文件 |
+| `1f9aa8c71` | Agent/Status/Goal：hook 顺序修正、Agent 命中改用实测视口（修 1 列偏差）、点击选择、cursor 收敛、Status 首次有测试 |
 
 ## 决策记录（本次授权内的裁决）
 
-1. **依赖方向**：`application/operations/` 保持纯状态机，不读 kit atoms；`OperationScope` 由调用方构造，避免 `application → kit` 反向依赖（取值留在装配层/适配器）。
-2. **超时**：不给 `send_raw_request` 增加超时——不在本批授权范围，保持既有语义；插件搜索仍是无时限路径，记为未决风险。
+1. **依赖方向**：`application/operations/` 保持纯状态机，不读 kit atoms；`OperationScope` 由调用方构造，避免 `application → kit` 反向依赖。
+2. **超时**：不给 `send_raw_request` 增加超时——不在本批授权范围，保持既有语义；插件搜索仍是无时限路径。
 3. **代次过滤**：把只带会话身份的退化实现升级为带显式代次，属落实设计 §6.1「请求序号过滤被替代请求」，不视为产品行为变更。
 4. **任务所有权**：本批只落「请求协调」的最小状态门；已发送变更的任务所有权与应用层结果跟踪留待后续，如实记为未完成。
-5. **确认目标消失的提示**：Cron 目标消失当前只留 `tracing::warn` 并退出确认态，无 locale 文案；是否需要用户可见提示待定（需新增 locale key）。
+5. **确认目标消失的提示**：统一为可见提示并共用跨面板文案 `app-confirm-target-missing`（Cron 与 Login 同一语义）。
+6. **滚轮语义**：视口接管后滚轮不再滚出被裁剪的行（可见范围即窗口、窗口跟随选中项），已在批次 B 接受，各面板一致，记于设计文档。
+7. **Cron/子代理行的 Enter**：保持「关闭面板」的既有语义（与 `panel-tasks-nav-hint-close` 文案及既有用例一致）；只有可取消的后台任务行执行取消。
+8. **行高可变面板**：Agent 不接入共享视口，复用既有逐行测量；分段列表（Tasks）自建行表。两者都在文件内写明理由与替代做法。
 
-## 已确认缺陷（批次 A 审计，尚未全部修复）
+## 已确认缺陷（批次 A 审计，按最新状态标注）
 
-- 已修复 Cron：删除确认只存 `bool`、执行时按当前下标重取——`4c79289b2` 改为持有 `job.id`，并加「目标消失不删」「重复 Enter 不连发」完成门；toggle 连按的门仍待共享原语。
-- 已修复 Memory：可见项写死 13、滚动区域与命中区域来源不一致——`0f3015a18` 统一为 `ListViewport` 与 `AreaTracker`。
-- Login（批次 D）：`delete_provider(cursor)` 在确认执行时按 cursor 重新读 `PROVIDER_LIST` 取 ID（修复中）。
-- Theme（批次 D）：渲染体内 `preview_cache.write().insert(...)` 两处；`use_state` 初始化器内切换主题 atoms；命中表头比绘制少算 1 行（修复中）。
-- Tasks（批次 C）：取消任务在 RPC 前按当前下标取 `task_id`、无活动会话时 `unwrap_or_default()` 静默发送、选中越界时静默关面板（修复中）。Workflow kill 同型。
-- Workflow（批次 E）：渲染体内写 `active_run`/`run_sync_missing`/`preselect_key`；`phase_sel`/`agent_sel` 亦在渲染体内 `.write()`；`kill_run` 无快照代次校验。
-- Plugin（批次 E）：插件详情与市场详情按 index 定位，而列表每 2s 被重写。
-- ThreadBrowser（批次 E）：归档回写无会话/代次/过滤复验；任意键清 `operation_loading` 并按会话无关方式刷盘缓存。
-- AskUserPopup（批次 F）：payload 指纹变化分支在渲染体内写 `focused`/`answers`/`focused_option`/`session_fingerprint`。
-- `confirm_popup`：确认执行时重读全局 `CONFIRM_PAYLOAD`（不是展示时的副本），未校验版本。
+- 已修复 Cron：删除确认按下标重取；已修复 Memory：可见项写死与区域来源不一致；已修复 Tasks：取消按下标取 `task_id`、无会话静默发送、越界静默关面板；已修复 Config/Model：保存失败静默或假装成功；已修复 Theme：渲染期写状态、hook 顺序、命中差 1 行、选择身份漂移；已修复 Login：删除确认按 cursor 重取、渲染期写状态；已修复 Agent/Goal：hook 排在条件分支之后；已修复 Plugin 搜索/操作：把各自的票据与代次实现收敛到共享原语。
+- 待修复 Workflow（批次 E）：渲染体内写 `active_run`/`run_sync_missing`/`preselect_key` 与 `phase_sel`/`agent_sel`；`kill_run` 无快照代次校验、无活动会话时按空串发送。
+- 待修复 Plugin（批次 E）：插件详情与市场详情按 index 定位，而列表每 2s 被重写；任意键清 `operation_loading` 并按会话无关方式刷盘缓存。
+- 待修复 ThreadBrowser（批次 E）：归档回写无会话/代次/过滤复验。
+- 待修复 AskUserPopup（批次 F）：payload 指纹变化分支在渲染体内写状态。
+- 待核 `confirm_popup`（批次 F）：确认执行时重读全局 `CONFIRM_PAYLOAD`（非展示时副本），未校验版本。
+- 未接入原语：`cron/actions.rs` 会话级守卫仍无显式代次；Tasks 取消仍无票据/完成门（连按 Enter 会重复发送，依赖服务端幂等）。
 
 ## 待完成 / 风险
 
-1. 批次 C 剩余：Tasks、Agent、Status、Goal 迁移；`application/operations` 落地后迁移 Plugin 搜索/操作，随后接入 Cron 的 toggle 完成门与 Tasks 的取消票据。
-2. 批次 D 剩余：Theme/Login/Config/Model 迁移收尾；「集中配置服务」抽象与向导字段未开始。
-3. 批次 E/F 未开始；快照拆分必须保持「提交与失效门」单点，不得分散进各刷新单元。
-4. 体积与性能对照未做（见基线）；Linux 口径缺失。
-5. 迁移期间面板新旧实现并存，属批次内允许状态；每完成一个面板即删除其被替代逻辑，不留双写。
+1. 批次 E：Plugin、ThreadBrowser、Workflow 迁移与 `service_snapshot.rs`（753 行）按职责拆分；拆分必须保持「提交与失效门」单点，不得分散进各刷新单元。
+2. 批次 F：详情外壳统一、弹窗生命周期、已确认无消费者路径的清理。
+3. 批次 C/D 收口：Cron 会话守卫与 Tasks 取消接入原语；「集中配置服务」抽象与向导字段。
+4. 客户端内部超时目前仍映射为失败而非结果未知——区分它需要客户端返回类型化错误，字符串匹配不予采用。
+5. Status 面板在 60×18 下内容被裁切（页签栏与内容均分内区高度），本批明确不新增滚动能力，待产品决策。
+6. 体积与性能对照未做（见基线）；Linux 口径、e2e 与真实终端手测未执行。
+7. 迁移期间面板新旧实现并存属批次内允许状态；每完成一个面板即删除其被替代逻辑，不留双写。

@@ -24,7 +24,7 @@ ACP notification → acp_notifier → acp_bridge / BridgeState
 | 消息渲染、滚动、选择 | `src/kit/message_area/`、`src/kit/markdown/`、`src/kit/text_selection.rs` |
 | 增量布局与派生缓存预算 | `src/kit/message_area/transcript.rs`、`transcript_index.rs`、`src/kit/entry_render_cache.rs` |
 | 键盘、鼠标、焦点与事件优先级 | `src/kit/event_handlers.rs`、`src/kit/focus_router.rs` |
-| 面板、弹窗与确认交互 | `src/kit/panels/`、`src/kit/popups/`、`src/kit/panel_overlay.rs` |
+| 面板、弹窗与确认交互 | `src/kit/panels/`、`src/kit/popups/`、`src/kit/panel_overlay.rs`；面板操作的作用域与完成门在 `src/application/operations/` |
 | 国际化与主题 | `src/i18n/`、`locales/`、`peri-theme` atoms |
 | 测试 | 与目标模块同目录的 `*_test.rs` 或 `#[cfg(test)]` 模块 |
 
@@ -37,9 +37,11 @@ ACP notification → acp_notifier → acp_bridge / BridgeState
 - 会话列表经 ACP 的 `peri.sessionWorkspaceV1` scope 查询：默认 Project、可切 Workspace / All；分页未结束时数量标明“已加载/还有更多”，向下键、PageDown 或 End 接近已加载末尾时追加下一页，重复按键合并同页请求。未绑定旧历史继续列出，`v` 通过只读 history RPC 预览且不切换执行会话；`-c` 精确选择启动工作区内当前相对目录，`-r` / 普通恢复先查询保存 binding 或旧会话保存的 cwd，再由 load 接纳旧根。查询或恢复失败不得通过 `ensure_session` 无声新建或把排队输入发给旧会话。会话执行唯一性与接管由 `peri-sdk` 负责；TUI 不投影 ownership 只读准入、不请求取回执行权或接管 proof、不维护 `SESSION_READ_ONLY`。执行环境不可用时 load 明确失败，history 预览仍可读。宿主在响应 `session/load` 前回放历史，每次可能回放的 load 前均须 `project_session_boundary`，防止消息区重复；客户端 prompt request lease、load reservation 与 operation gate 只协调请求和交互生命周期，不代表会话执行所有权。
 - `ACTIVE_EXECUTION_CWD` 仅在 session 初始化提交后发布，驱动路径展示、文件补全和本地导出；启动 cwd 独立保留给新会话。Hooks / Plugin / MCP 面板按 active session ID 查询实际环境，不能持续回写启动快照。
 - History 面板使用单行会话列表与固定详情/操作栏；按容器高度计算视口，列表和只读预览各持有独立滚动状态。刷新按 thread ID 保留选择，执行操作使用已选身份，删除确认固定待删 ID，不能用旧索引查新列表决定目标。
-- 面板列表的可见范围、滚动起点与鼠标命中由 `kit/panels/shared/list.rs` 的同一次推导给出（`ListMetrics` + `ListViewport`），不写死可见项常量；面板高度以 `panel_overlay::panel_height` 为唯一权威。详情与操作绑定业务稳定身份（id/name/path）而非列表下标；目标消失由 `use_effect` 在更新阶段收敛，渲染只读状态。契约见 [TUI 面板架构](../docs/design/tui-panel-architecture.md)。
+- 面板列表的可见范围、滚动起点与鼠标命中由 `kit/panels/shared/list.rs` 的同一次推导给出（`ListMetrics` + `ListViewport`），不写死可见项常量；面板高度以 `panel_overlay::panel_height` 为唯一权威。详情与操作绑定业务稳定身份（id/name/path）而非列表下标；目标消失由 `use_effect` 在更新阶段收敛，渲染只读状态。分段列表、可变行高与无列表面板可不接入该机制，但须在面板内写明理由与替代做法。契约见 [TUI 面板架构](../docs/design/tui-panel-architecture.md)。
+- 面板操作的作用域与完成门由 `application/operations/` 统一表达（`OperationScope` / `CompletionGate` / `OperationOutcome`）：发起取票、完成校验代次与作用域、取消按结果未知表达；面板不自建票据或代次。确认执行只按确认时固定的稳定身份，目标消失则不执行并给可见提示，不回退为按下标取当前项。事件判定集中在 `handle_<panel>_event(event, ctx)`，组件只做注册。
 - Config / Model / Login / Theme 的持久配置仍编辑宿主启动时选中的 `ConfigSource`，面板明确标识“宿主配置”和实际保存路径；权限切换（配置行、Shift+Tab、slash）及会话模型选择等运行请求继续按 session ID 路由。整份配置上送不带 session ID；切换会话不重定位宿主配置写入。同配置源会话刷新 provider 连接并失效模型缓存，保留各自的模型/profile 选择和 frozen 数据。
 - render body 不写 atom；render 内派生缓存使用既有无通知写入模式，副作用放在事件或 effect 边界。
+- 同一个 `State` 的读守卫不得跨过对该状态的写：在条件或 `match` 里「先 `read()` 再在同一表达式内 `write()`」会自锁挂死（内部 RwLock 同线程不可重入），表现为测试永久挂起而非 panic。先把值取到局部变量（`.clone()` / 拷贝）再写，测试探针与事件处理同样适用。
 - cancel 关闭 reverse interaction owner，不等于执行终态已确认；匹配当前 execution 的 done 仍须透传一次以结束 loading，重复 done 与旧 execution 终态不得影响新 turn。
 - 消息区按 generation 验证 publication，复用不可变布局；冷缓存保持选择、复制与高度。主消息/详情共用 entry 缓存；预算不含 canonical 历史、轻量索引或整体 RSS。
 - Cron/MCP 经 ACP 消费；快照/last-good 按 session generation 隔离，失败可见；无会话明确标注启动插件/Hooks。scheduler/pool 及关闭权属宿主。
