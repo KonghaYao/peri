@@ -33,7 +33,7 @@
 7. **entry 起止 zone**：
    - `TuiUserBubble` = 文本/文本（user 永不缩进，不参与短回复判定）；
    - `TuiAssistantBubble` = 起点（有 reasoning 或**短回复** → 过程，否则文本），终点（正文非空且**非短回复** → 文本，否则等于起点）；
-   - `TuiDivider` = 文本/文本——turn 边界装饰属文本区，走基准前缀 `── label ──` 形态，不参与过程区缩进与台阶；
+   - `TuiDivider` = 文本/文本——turn 边界装饰属文本区；后续 user prompt 前固定画 `├──…` 横线与一行空白，不参与过程区缩进与台阶；
    - 渲染 0 行的 entry 不参与相邻判定；
    - 其余 entry（ToolCard / SubAgentGroup / CollapsedGroup / SystemNote / SystemReminder / AskUserBlock / TodoSummary）= 过程/过程。
 8. **右缘不动**：`place_meta` 仍右对齐到 `line_width()`（带右缘，跳过滚动条列）；过程区正文可用宽度 = `content - indent`；`band_width` 与整带居中不变。
@@ -100,7 +100,7 @@
 - [x] 语义复制剥净前缀与台阶；面板（子 Agent 详情）渲染逐列不变。
 - [x] 台阶线色 = 所接文本左侧线条色（进入台阶接上方文本、退出台阶接下方文本；user → `text.secondary`、assistant → `accent`、divider → `text.dim`；entry 内部台阶用正文色）——`test_step_line_color_follows_text_line`。
 - [x] 文本块内所有行保持竖线前缀（含 md 复制按钮行，右对齐与点击区域不变），左缘时间线不断链——`test_assistant_bubble_renders_copy_button`。
-- [x] Divider 回文本区 `── label ──` 形态；Info 注记走过程行 `│` + label。
+- [x] Divider 保持文本区形态；现为后续 prompt 前 `├──…` 横线与一行空白；Info 注记走过程行 `│` + label。
 - [x] Wide/Standard 正文块（user 气泡 / assistant 正文）首尾无节拍空行；Compact/Narrow 保留上下各 1 空行（回退路径由测试逐列断言）；短回复（无台阶）上下各 1 行过程带前缀空行——`test_vertical_rhythm_wide_and_compact` / `brief_reply_stays_in_process_zone_without_step`。
 - [x] 本轮重验：`test --locked -p peri-tui --lib` 1849 passed / 0 failed / 6 ignored（与基线一致）；layer-imports 22 条规则 0 违规；`git diff --check` 干净；check --all-targets / clippy / fmt / doc 见下方验证命令。
 - [x] 按 `DOC-UPDATE-001` 核对受影响路由与事实源；不新增平行文档（`docs/design/tui-chat-workbench.md`、`docs/design/tui-subagent-activity.md`、`docs/design/tui-streaming-markdown-performance.md`、`docs/code-index/peri-tui.md` 已同步）。

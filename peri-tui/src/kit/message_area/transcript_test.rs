@@ -222,10 +222,10 @@ fn immutable_render_snapshot_allows_publication_before_derivation() {
     writer.join().unwrap();
     let (current, current_publication) = read_render_snapshot();
     assert_eq!(captured.generation, publication.generation);
-    assert_eq!(captured.items.len(), 64);
+    assert_eq!(captured.items.len(), 127);
     assert_eq!(current.generation, current_publication.generation);
     assert!(current.generation > captured_generation);
-    assert_eq!(current.items.len(), 65);
+    assert_eq!(current.items.len(), 129);
     let grid = GridSpec::grid_for(80);
     let mut transcript = Transcript::default();
     let mut caches = Vec::new();
@@ -241,7 +241,7 @@ fn immutable_render_snapshot_allows_publication_before_derivation() {
         0,
         2,
     );
-    assert_eq!(old_index.slot_count(), 64);
+    assert_eq!(old_index.slot_count(), 127);
     push_view_models_for_reset();
     let (reset, reset_publication) = read_render_snapshot();
     assert!(reset.items.is_empty());

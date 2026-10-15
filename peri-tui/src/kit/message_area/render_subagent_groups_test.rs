@@ -495,8 +495,7 @@ fn test_collapsed_group_line_with_failed_count() {
     );
 }
 
-/// Divider：turn 边界属文本区装饰（§7）——基线形态 `[outer][─][gap]` +
-/// `── label ──…` 填满 content 列；不参与过程区缩进与转场台阶（§6）。
+/// Divider 接续左侧竖线，下一行是带竖线的空行。
 #[test]
 fn test_divider_lines() {
     let grid = GridSpec::grid_for(80);
@@ -508,22 +507,18 @@ fn test_divider_lines() {
         &grid,
     );
     let text = line_text(&plain[0]);
-    // 文本区基准前缀（§3.1）：`[outer 空][accent ─][gap]`——分隔线本体在前缀之后。
     assert!(
-        text.starts_with(" \u{2500}  \u{2500}\u{2500}"),
+        text.starts_with(" \u{251c}\u{2500}\u{2500}"),
         "实际 {text:?}"
     );
-    let body: String = text.chars().skip(grid.first_prefix_width()).collect();
-    assert!(body.contains("\u{2500}"), "divider 线");
-    assert!(
-        body.chars().all(|c| c == '\u{2500}'),
-        "正文列全为分隔线，实际 {body:?}"
-    );
+    assert!(text.chars().skip(2).all(|c| c == '\u{2500}'));
     assert_eq!(
         plain[0].width(),
         grid.first_prefix_width() + grid.content_width(),
         "分隔线铺满文本区正文列"
     );
+    assert_eq!(plain.len(), 2);
+    assert_eq!(line_text(&plain[1]), " \u{2502}  ");
 
     let labeled = vm_to_lines(
         &TuiRenderUnit::TuiDivider(TuiDivider {
@@ -534,6 +529,24 @@ fn test_divider_lines() {
     );
     let text = line_text(&labeled[0]);
     assert!(text.contains("Round 3"), "label 可见");
+
+    let compact = GridSpec::grid_for(50);
+    let rule = vm_to_lines(
+        &TuiRenderUnit::TuiDivider(TuiDivider {
+            label: None,
+            content_hash: 0,
+        }),
+        &compact,
+    );
+    let prompt = vm_to_lines(
+        &TuiRenderUnit::TuiUserBubble(crate::kit::tui_render_unit::TuiUserBubble::new(
+            "next prompt".into(),
+        )),
+        &compact,
+    );
+    assert_eq!(rule.len(), 1, "窄屏横线后复用 prompt 的前导空行");
+    assert_eq!(line_text(&prompt[0]), " \u{2502} ");
+    assert!(line_text(&prompt[1]).contains("next prompt"));
 }
 
 /// TuiTodoSummary：`◼ {3/7 tasks · Running tests}`。

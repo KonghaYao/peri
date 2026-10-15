@@ -6,7 +6,7 @@ use ratatui_kit::ratatui::style::{Color, Modifier, Style};
 use ratatui_kit::ratatui::text::{Line, Span};
 use unicode_width::UnicodeWidthStr;
 
-use super::helpers::{first_prefix, process_cont_prefix, process_first_prefix, sym};
+use super::helpers::{prefixed_cont_line, process_cont_prefix, process_first_prefix, sym};
 
 /// §6.6 System event：普通事件单行注记；warning/error 用符号 + accent。
 ///
@@ -129,9 +129,8 @@ fn render_note_lines(
     lines
 }
 
-/// `── {label} ──…` divider 行（label 为 None 时纯分隔线），填满 content 列——
-/// turn 边界属文本区装饰（非机器活动，§7 zone 判定同源）：走基准前缀
-/// （accent 列 `─` 符号 + gap），不参与过程区缩进与转场台阶（§6）。
+/// Turn boundary: the left timeline joins the rule at `├`, then the rule
+/// crosses the gap and fills the content columns.
 fn divider_with_label_line(grid: &GridSpec, label: &str) -> Line<'static> {
     let sem = THEME_ATOM.state().read().semantic;
     let content = grid.content_width();
@@ -141,18 +140,30 @@ fn divider_with_label_line(grid: &GridSpec, label: &str) -> Line<'static> {
     };
     let inner = truncate_by_width(&inner, content);
     let fill = content.saturating_sub(inner.width());
-    let mut spans = first_prefix(grid, "\u{2500}", Style::default().fg(sem.text.dim));
-    spans.push(Span::styled(
-        format!("{}{}", inner, "\u{2500}".repeat(fill)),
-        Style::default().fg(sem.text.dim),
-    ));
-    Line::from(spans)
+    Line::from(vec![
+        Span::raw(" "),
+        Span::styled(
+            format!(
+                "\u{251c}{}{}{}",
+                "\u{2500}".repeat(grid.gap as usize),
+                inner,
+                "\u{2500}".repeat(fill)
+            ),
+            Style::default().fg(sem.text.dim),
+        ),
+    ])
 }
 
-/// 分隔线：turn 边界 divider（无 label → 纯分隔线；有 label → `── label ──`）。
+/// The rule sits two rows above the next prompt. Compact/Narrow already add
+/// their own leading blank row in `render_user_bubble_lines`.
 pub(super) fn render_divider_lines(data: &TuiDivider, grid: &GridSpec) -> Vec<Line<'static>> {
     let label = data.label.as_deref().unwrap_or("");
-    vec![divider_with_label_line(grid, label)]
+    let mut lines = vec![divider_with_label_line(grid, label)];
+    if grid.indent > 0 {
+        let color = THEME_ATOM.state().read().semantic.text.secondary;
+        lines.push(prefixed_cont_line(grid, color, Line::default()));
+    }
+    lines
 }
 
 /// §6.9 Todo 进度摘要行：`[◼][gap]{3/7 tasks · Running tests}`（过程区首行形态）。

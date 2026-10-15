@@ -51,7 +51,7 @@ pub enum TextLineSource {
     User,
     /// assistant 正文。
     Assistant,
-    /// turn 边界 Divider（`── label ──`）。
+    /// turn 边界 Divider（`├──…`）。
     Divider,
 }
 

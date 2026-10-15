@@ -1,5 +1,7 @@
 # peri-tui 代码索引
 
+Turn 分隔线由 `kit/acp_events/render.rs::insert_turn_dividers` 按完整消息顺序投影，位置固定在第二条及之后的真实 user prompt 前；`committed` 只存真实消息。`message_area/render/system.rs::render_divider_lines` 画连接左侧竖线的横线，下一行留白。回归见 `acp_events_test/snapshot_test.rs::test_snapshot_turn_divider_before_new_user_prompt` 与 `message_area/render_subagent_groups_test.rs::test_divider_lines`。
+
 输入延迟入口：`kit/steer_consumer.rs` 合并后台 Refresh，用户 Enqueue 不等待慢刷新；`acp_client/client/steer.rs` 在身份绑定/请求登记边界持 gate，普通回执等待在锁外，snapshot 回包用 typed identity 重验。`client/pump.rs` 接收普通 ACP 响应与通知，不再转发 SDK 执行准入；回归见 `client/latency_test.rs`。
 
 输入反馈仍遵循 [待发送队列设计](../design/user-input-queue.md)：`kit/steer_state.rs::direct_submitting` 驱动 composer “正在提交…”，不是 Delivered 气泡。消息区用 `message_area/vm_cache.rs::read_render_snapshot` 短锁复制一致 VM/publication 后锁外派生；Transcript 跳代只重建实际变化的内容键，冷历史、布局和复制回归见 `transcript_test.rs`。

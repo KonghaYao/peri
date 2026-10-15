@@ -58,7 +58,8 @@ active issue。
   `chars().count() < 120`；空正文的纯 reasoning/工具轮恒为短回复）等过程区 entry 在
   Wide/Standard（≥60 列）整体右移 2 格，其正文可用宽度相应收窄 2 格，右缘（duration 等
   metadata 对齐列）和整带居中不变；短回复判定只作用于 assistant——user 气泡永不缩进；
-  turn 边界分隔线属文本区（`── label ──` 基准形态），不参与缩进；
+  后续 user prompt 前固定保留 turn 分隔线与一行空白：分隔线左缘以 `├` 接续文本区竖线，
+  穿过 gap 后铺满正文列；分隔线属文本区，不参与缩进，随 prompt 一起保留至回合结束后；
 - 过程区由**转场台阶**接回文本区：进入 ` ╰─╮`、退出 ` ╭─╯`（各 1 行、宽 4，col1 `╰`/`╭`
   接上方文本竖线，col3 `╮`/`╯` 接过程区左缘标记列），台阶线色与所接文本的左侧线条同色
   （user → `text.secondary`、assistant 正文 → `accent`、divider → `text.dim`），台阶由转场后的首个 entry 在行首插入；
