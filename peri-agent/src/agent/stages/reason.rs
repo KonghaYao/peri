@@ -75,13 +75,14 @@ pub async fn run_reason(input: ReasonInput) -> AgentResult<ReasonOutput> {
     // 取出 messages 快照（避免跨 await 持有 RwLockReadGuard）。
     // 直接构建为 Arc<Vec>：LlmCallStart 与 LLM 调用共享同一份，避免二次深拷贝。
     // 修订未变时复用准备阶段已渲染的视图（同一次 Reason 内只渲染一次）。
+    // 无论成功失败都释放缓存槽：正文副本不跨 Act 常驻，错误路径也不留整份正文。
     let messages_snapshot: std::sync::Arc<Vec<crate::messages::BaseMessage>> = {
         let guard = ctx.session.transcript.read();
         let capabilities = ctx.runtime.llm.provider_capabilities();
-        ctx.model_view.view(&guard, &capabilities)?
+        let view = ctx.model_view.view(&guard, &capabilities);
+        ctx.model_view.release();
+        view?
     };
-    // 快照已持有自己的 Arc：释放缓存槽，正文副本不跨 Act 常驻。
-    ctx.model_view.release();
 
     let tools_owned: Vec<std::sync::Arc<dyn crate::tools::BaseTool>> = catalog
         .tools
