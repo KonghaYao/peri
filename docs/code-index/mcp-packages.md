@@ -56,6 +56,7 @@ Workspace 后台 Bash 当前运行时入口：`workspace/src/shell_tasks.rs` 持
 - `peri-acp-types` 持有 builtin 实例与工具声明、名称及 direct/deferred 策略。插件 crate 不复制这些策略表。
 - 各插件 crate 内测试覆盖工具行为、handler 路由和 RMCP wire；host transport、dispatch、bridge、policy、tick 与 pool lifecycle 测试留在对应宿主 crate。
 - 失败恢复指引由工具在失败点生成（`ToolFailure { recovery, detail }`），宿主不做事后文本匹配：路径候选在 `workspace/src/filesystem/path_hints.rs`（Read / Edit / Glob / Grep / folder_operations 的"目标不存在"分支；Edit 的 `old_string not found` 文本失败除外），命令候选在 `workspace/src/shell_hints.rs`（exit 127 + command-not-found 文案，或 exit 1 + PowerShell `FullyQualifiedErrorId: CommandNotFoundException`），两者共用 `workspace/src/fuzzy.rs` 的 Skim 排序。原 `peri-agent` / `peri-middlewares` 的 error_suggest 框架已删除。
+- Bash 完成路径的执行证据描述**整个进程组**，不是前台 shell：组内仍有成员时状态为 `running`（有 task_manager，已登记并带 `task_id`）或 `unknown`（无 task_manager，无法登记），两种情况都不声明退出码；只有组已结束才声明退出码。判断来自 `ShellExecutionGuard` 的进程组观测，不用 `command.contains('&')` 之类的命令文本启发式（`&&`、`2>&1` 不产生脱离进程）。回归在 `workspace/src/terminal_process_group_test.rs`。
 
 ## 验证
 
