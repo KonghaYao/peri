@@ -212,6 +212,33 @@ fn should_preserve_tool(tool_name: &str, config: &CompactConfig) -> bool {
     false
 }
 
+// ─── 测试专用调用计数 ───────────────────────────────────────────────────────────
+//
+// 按线程隔离，避免 cargo test 并发执行时测试之间互相污染计数；
+// 计划复用（一次规划 + 多次应用）由 trigger_test 断言调用次数恒为 1。
+
+#[cfg(test)]
+thread_local! {
+    static PLAN_MICRO_CALLS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
+/// 重置当前线程的 `plan_micro` 调用计数（测试专用）。
+#[cfg(test)]
+pub fn reset_plan_micro_calls() {
+    PLAN_MICRO_CALLS.with(|calls| calls.set(0));
+}
+
+/// 读取当前线程的 `plan_micro` 调用次数（测试专用）。
+#[cfg(test)]
+pub fn plan_micro_call_count() -> usize {
+    PLAN_MICRO_CALLS.with(std::cell::Cell::get)
+}
+
+#[cfg(test)]
+fn count_plan_micro_call() {
+    PLAN_MICRO_CALLS.with(|calls| calls.set(calls.get() + 1));
+}
+
 /// 生成 Micro Compact 计划（纯数据，零副作用）
 ///
 /// 遍历 TurnGroup，跳过最近 `micro_compact_stale_steps` 轮，对每个 tool exchange
@@ -228,6 +255,9 @@ pub fn plan_micro(
     config: &CompactConfig,
     skip_existing_truncated: bool,
 ) -> MicroCompactPlan {
+    #[cfg(test)]
+    count_plan_micro_call();
+
     let groups = TurnGroup::collect(transcript);
 
     let total_groups = groups.len();

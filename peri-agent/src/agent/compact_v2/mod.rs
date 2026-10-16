@@ -119,6 +119,7 @@ pub fn determine_compact_action(budget: f64, config: &CompactConfig) -> CompactA
 /// - Full 重试预算在实际需要 Full 时统一检查，耗尽返回结构化失败
 /// - force=true：直接 Full
 /// - 计算 budget_pct，判定 Micro/Smart/Skip
+/// - 计划只规划一次：dry-run 的 plan 直接交给 apply_micro_plan 落地，不二次规划
 /// - Micro：dry-run plan_micro → 检查 estimated_tokens_saved →
 ///   - 满足 target：apply Micro
 ///   - 不足且 budget >= force_full_threshold：跳过 Micro apply → 直接 Full
@@ -292,8 +293,8 @@ pub async fn run_compact(
             }
 
             if plan.estimated_tokens_saved >= reclaim_target && plan.has_changes() {
-                // Micro 满足回收目标 → 应用
-                let affected = micro::micro_compact(transcript, config);
+                // Micro 满足回收目标 → 应用（复用 dry-run 计划，不二次规划）
+                let affected = micro::apply_micro_plan(transcript, &plan);
                 *consecutive_failures = 0;
                 debug!(
                     saved = plan.estimated_tokens_saved,
@@ -320,7 +321,7 @@ pub async fn run_compact(
                 // 设计决策：Micro 每轮都提供实际收益（truncated 标记持久化到 transcript），
                 // 因此先执行 micro_compact 再叠加 Full——即使 Full 失败，Micro 的截断仍然生效。
                 // Smart 路径（`mod.rs:304`）有相同模式：先 Smart 再 Full，Full 失败不影响 Smart 结果。
-                let micro_affected = micro::micro_compact(transcript, config);
+                let micro_affected = micro::apply_micro_plan(transcript, &plan);
                 // 注意：estimated_tokens_saved 使用 dry-run 估计
                 // 实际 micro 应用后的节省可能略有不同，但 plan 是最佳可用近似
                 debug!(
@@ -358,8 +359,8 @@ pub async fn run_compact(
                 }
                 full_result
             } else {
-                // 不足但未达 Full 阈值 → 应用 Micro（部分收益也好）
-                let affected = micro::micro_compact(transcript, config);
+                // 不足但未达 Full 阈值 → 应用 Micro（部分收益也好），复用 dry-run 计划
+                let affected = micro::apply_micro_plan(transcript, &plan);
                 *consecutive_failures = 0;
                 debug!(
                     saved = plan.estimated_tokens_saved,
@@ -411,7 +412,7 @@ pub async fn run_compact(
             // Smart Compact 已废弃，委托给 Micro Compact
             tracing::warn!("Smart Compact is deprecated, falling back to Micro Compact");
             let plan = plan_micro(transcript, config, true);
-            let affected = micro::micro_compact(transcript, config);
+            let affected = micro::apply_micro_plan(transcript, &plan);
             let estimated_tokens_saved = plan.estimated_tokens_saved;
 
             // 空结果 → 无可 compact 消息
