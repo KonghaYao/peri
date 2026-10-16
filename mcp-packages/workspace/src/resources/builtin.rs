@@ -162,3 +162,8 @@ pub(crate) fn builtin_skill_records(budget: &ResourceBudget) -> Vec<SkillRecord>
 #[cfg(test)]
 #[path = "builtin_test.rs"]
 mod tests;
+
+/// 派发 Skill 的能力预检契约（表格 vs 定义、预检正负例）。
+#[cfg(test)]
+#[path = "builtin_skill_capability_test.rs"]
+mod builtin_skill_capability_tests;

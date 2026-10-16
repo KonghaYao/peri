@@ -116,10 +116,10 @@ async fn nested_delegation_uses_direct_parent_catalog_and_inbox() {
         .await
         .unwrap();
     let nested_id = output
-        .split("(thread: ")
+        .split("child_thread_id: ")
         .nth(1)
         .unwrap()
-        .split(')')
+        .split_whitespace()
         .next()
         .unwrap()
         .to_string();

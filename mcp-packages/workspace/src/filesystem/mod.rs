@@ -2,6 +2,7 @@ pub(crate) mod draft;
 pub mod edit;
 pub mod folder;
 pub mod glob;
+pub(crate) mod glob_patterns;
 pub mod grep;
 pub(crate) mod grep_args;
 pub(crate) mod grep_format;

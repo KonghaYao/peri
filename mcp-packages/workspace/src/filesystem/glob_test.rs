@@ -333,6 +333,27 @@ async fn test_glob_invalid_pattern_returns_error() {
     );
 }
 
+/// 报错文案承诺的 `{foo,bar}` 枚举必须真的可用：glob crate 只把 `{` 当字面量，
+/// 未展开时会静默返回 No files found。
+#[tokio::test]
+async fn test_glob_brace_enumeration_matches_each_alternative() {
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::write(dir.path().join("a.rs"), "").unwrap();
+    std::fs::write(dir.path().join("b.txt"), "").unwrap();
+    std::fs::write(dir.path().join("c.md"), "").unwrap();
+    let tool = GlobFilesTool::new(dir.path().to_str().unwrap());
+    let result = tool
+        .invoke(
+            serde_json::json!({"pattern": "*.{rs,txt}"}),
+            peri_agent::tools::ToolContext::new(&[], "."),
+        )
+        .await
+        .unwrap();
+    assert!(result.contains("a.rs"), "应命中 .rs 分支: {result}");
+    assert!(result.contains("b.txt"), "应命中 .txt 分支: {result}");
+    assert!(!result.contains("c.md"), "不应命中未列出分支: {result}");
+}
+
 // ─── plan_walk：walk 边界规划（白盒纯函数）──────────────────────
 
 #[test]

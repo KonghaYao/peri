@@ -586,6 +586,13 @@ impl BackgroundTaskRegistry {
                 duration_ms: 0,
                 output_preview: None,
                 initiator_session_id: task.initiator_session_id.clone(),
+                // 线程身份的事实源是注册时的 live inbox；取快照进投影，终态回收
+                // inbox（complete 时 close、active 条目 retain 移除）后机器消费者
+                // 仍能拿真实身份，不必按到达顺序猜测或由 `bg-` 前缀推导。
+                child_thread_id: task
+                    .agent_inbox
+                    .as_ref()
+                    .map(|inbox| inbox.thread_id.clone()),
             },
         );
         tasks.insert(task.id.clone(), task);

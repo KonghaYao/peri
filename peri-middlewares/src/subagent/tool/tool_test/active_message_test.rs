@@ -121,10 +121,10 @@ impl MessageFixture {
         input["prompt"] = serde_json::json!("initial task");
         let result = self.invoke(input).await.unwrap();
         let id = result
-            .split("(thread: ")
+            .split("child_thread_id: ")
             .nth(1)
             .unwrap()
-            .split(')')
+            .split_whitespace()
             .next()
             .unwrap()
             .to_owned();

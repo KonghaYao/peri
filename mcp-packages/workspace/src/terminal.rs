@@ -785,9 +785,20 @@ impl BashTool {
                     Ok(g) => g.clone(),
                     Err(poisoned) => poisoned.into_inner().clone(),
                 };
-                let mut output = merge_output(&stdout, &stderr, status.code());
+                // 整组是否仍有成员的观测必须先于清理动作落地：后面的
+                // confirm_stopped / release_unmanaged 会改写守卫状态，之后无法再回答
+                // 「刚才是否有子进程脱离」。这是进程组的真实观测（ESRCH / job 状态），
+                // 不能用 `command.contains('&')` 之类的命令文本启发式代替——`&&` 与
+                // `2>&1` 都不产生脱离的进程。
+                let group_still_alive = !execution.is_stopped();
+                let exit_code = if group_still_alive {
+                    None
+                } else {
+                    status.code()
+                };
+                let mut output = merge_output(&stdout, &stderr, exit_code);
                 let mut background_task_id = None;
-                if execution.is_stopped() {
+                if !group_still_alive {
                     execution.confirm_stopped();
                     output_capture.cleanup().await;
                 } else if let Some(manager) = &self.task_manager {
@@ -838,10 +849,10 @@ impl BashTool {
                     text.push_str(&hint);
                 }
                 let execution_status = if background_task_id.is_some() {
+                    // 整组活着并由任务所有者持有：前台 shell 的退出码不属于整组。
                     ToolExecutionStatus::Running
-                } else if command.contains('&') && status.success() {
-                    // Without a task manager we cannot account for children
-                    // left behind by shell background syntax.
+                } else if group_still_alive {
+                    // 无任务管理器时无法登记脱离的子进程，其外部副作用不可核对。
                     ToolExecutionStatus::Unknown
                 } else if status.success() {
                     ToolExecutionStatus::Completed
@@ -854,7 +865,7 @@ impl BashTool {
                     text,
                     ToolExecutionEvidence {
                         status: execution_status,
-                        exit_code: status.code(),
+                        exit_code,
                         output_truncated,
                         output_ref,
                         task_id: background_task_id,

@@ -29,7 +29,7 @@ When to use:
 - For tasks requiring specialized persona or behavior defined in agent configuration files
 - For parallelizable sub-tasks that do not depend on each other's results
 - When you need to break a complex task into smaller, independently executable pieces
-- **When an Agent call returns an interrupted/error message or a background notification contains `child_thread_id: xxx (resume with Agent(resume_thread_id: xxx))` and the task still needs to be completed, resume the execution with `Agent(resume_thread_id: xxx)` instead of launching a new sub-agent** — this avoids repeating work already done and losing side effects
+- **When an Agent call returns an interrupted/error message, or a background launch receipt or completion notification contains `child_thread_id: xxx (resume with Agent(resume_thread_id: xxx))`, and the task still needs to be completed, resume the execution with `Agent(resume_thread_id: xxx)` instead of launching a new sub-agent** — this avoids repeating work already done and losing side effects. Every receipt that names a `child_thread_id` also prints the exact `resume_thread_id` to pass; copy it from there and never derive it from a task id. 若目标仍 active，必须带非空 `prompt` 才能发送补充指令；只有 non-active 线程续跑时才能省略 `prompt`。
 
 Return format:
 - If the sub-agent made tool calls, the result includes a summary of tools used followed by the final response
@@ -39,6 +39,7 @@ Background execution (run_in_background: true):
 - Runs the sub-agent asynchronously while the main agent continues immediately.
 - No fixed limit on concurrent background tasks.
 - The main agent will be notified when the task completes via a system message.
+- The launch receipt reports the task id (`bg-...`) and the sub-agent's thread identity, printed as `child_thread_id: xxx (resume with Agent(resume_thread_id: xxx))`. Keep that `child_thread_id` for a later resume; the task id is a different identity and cannot be used to resume. 启动后通常仍 active：若要补充任务，使用 `Agent(resume_thread_id: xxx, prompt: "补充指令")`；不要用省略 prompt 的调用轮询状态。
 - **Only use when you genuinely need to continue working while the sub-agent runs** (e.g., offloading a long-running code review while you proceed with other edits). For most cases, run sub-agents synchronously to integrate their results immediately.
 
 Send or resume (resume_thread_id):
@@ -47,4 +48,4 @@ Send or resume (resume_thread_id):
 - **Non-active thread:** the persisted transcript is replayed and execution resumes, returning `action: resume`. `prompt` is optional; omitting it implicitly continues the task. `run_in_background: true` selects background execution for this resume.
 - Active threads without a live background receiver in this session (including crash leftovers or another session's tasks) return an error. They are not silently resumed or recreated.
 - Both paths take priority over `subagent_type` and `fork`; those fields are ignored. Sending requires no additional tool or parameters.
-- **Common failures**: (1) passing `subagent_type` or `fork` together with `resume_thread_id` — harmless, they are ignored; resume always wins. (2) passing a background `task_id` (`bg-...`) or any other non-UUID value — rejected with an error: a task_id cannot be used to resume; use the `child_thread_id` from the interrupted/error/bg notification text, or omit `resume_thread_id` to start a new sub-agent. (3) `thread not found` / `invalid thread id` → the id is stale or malformed; use the `child_thread_id` exactly as returned in the interrupted/error/bg notification text.
+- **Common failures**: (1) passing `subagent_type` or `fork` together with `resume_thread_id` — harmless, they are ignored; resume always wins. (2) passing a background `task_id` (`bg-...`), that same UUID with the `bg-` prefix stripped, or any other non-thread value — rejected with an error: a task id is not a thread identity and removing its prefix does not make it one （`task_id` 与 `child_thread_id` 是独立身份，不得从其中一个推导另一个）. Use the `child_thread_id` from the interrupted/error/bg launch receipt or notification text — the value printed as `child_thread_id: xxx (resume with Agent(resume_thread_id: xxx))` — or omit `resume_thread_id` to start a new sub-agent. (3) `thread not found` / `invalid thread id` → the id is stale, wrong, or malformed; use the `child_thread_id` exactly as returned in the interrupted/error/bg launch receipt or notification text.

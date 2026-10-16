@@ -851,3 +851,73 @@ async fn standalone_default_run_in_background_drives_schema_and_call_path() {
         Some(peri_acp_types::tasks::TaskShutdownReport::Complete)
     );
 }
+
+/// [回归测试] 后台 shell 被并发上限拒绝时，wire 上的错误必须保留上限事实，而不是
+/// 折叠成不透明的 `shell task launch failed`；命令文本不进入错误文本，上限不变。
+#[tokio::test]
+async fn concurrent_limit_rejection_keeps_limit_facts_on_the_wire() {
+    use peri_agent::agent::async_tasks::BackgroundTaskRegistry;
+
+    let dir = tempfile::tempdir().expect("workspace");
+    let server = WorkspaceMcpServer::standalone(dir.path().to_string_lossy(), false);
+    let capabilities = ClientCapabilities::builder().enable_tasks().build();
+    let (client, server_task) = connect(server.clone(), capabilities).await;
+    let mut task_ids = Vec::new();
+    for index in 0..BackgroundTaskRegistry::SHELL_LIMIT {
+        let request = CallToolRequestParams::new("Bash").with_arguments(
+            serde_json::json!({"command": format!("sleep 30 # {index}"), "run_in_background": true})
+                .as_object()
+                .expect("object")
+                .clone(),
+        );
+        let CallToolResponse::Task(created) = client
+            .peer()
+            .call_tool_once(request)
+            .await
+            .expect("capacity shell")
+        else {
+            panic!("expected task handle")
+        };
+        task_ids.push(created.task.task_id);
+    }
+    let request = CallToolRequestParams::new("Bash").with_arguments(
+        serde_json::json!({"command": "sleep 30 # over-limit", "run_in_background": true})
+            .as_object()
+            .expect("object")
+            .clone(),
+    );
+    let error = client
+        .peer()
+        .call_tool_once(request)
+        .await
+        .expect_err("over-limit background shell must be rejected");
+    let text = error.to_string();
+    assert!(
+        text.contains(&format!(
+            "shell {}/{}",
+            BackgroundTaskRegistry::SHELL_LIMIT,
+            BackgroundTaskRegistry::SHELL_LIMIT
+        )),
+        "wire error must keep limit facts: {text}"
+    );
+    assert!(
+        !text.contains("sleep 30"),
+        "wire error must not carry the command: {text}"
+    );
+
+    for task_id in &task_ids {
+        client
+            .peer()
+            .cancel_task(CancelTaskParams::new(task_id))
+            .await
+            .expect("cancel ack");
+    }
+    drop(client);
+    server_task.await.expect("server closed");
+    assert_eq!(
+        tokio::time::timeout(Duration::from_secs(10), server.shutdown_shell_tasks())
+            .await
+            .expect("process cleanup deadline"),
+        Some(peri_acp_types::tasks::TaskShutdownReport::Complete)
+    );
+}
