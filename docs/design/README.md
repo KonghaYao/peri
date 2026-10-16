@@ -61,6 +61,7 @@ draft、proposal、可行性探查、审计报告和未采纳方案不进入本�
 | TUI Chat Workbench | [tui-chat-workbench.md](tui-chat-workbench.md) | `spec/history/2026-08.md`（2026-08-10 条目） |
 | SubAgent 活动行 | [tui-subagent-activity.md](tui-subagent-activity.md) | TUI redesign active issue |
 | Workflow as MCP | [workflow-mcp.md](workflow-mcp.md) | [Workflow as MCP 实施](../../spec/issues/2026-10-11-workflow-as-mcp.md)；builtin 实例迁移、任务资源 + 回填信道与旧链删除进行中 |
+| TUI 面板架构 | [tui-panel-architecture.md](tui-panel-architecture.md) | [TUI 面板架构重构](../../spec/issues/2026-10-15-tui-architecture-refactor.md)；面板外壳、共享视口、事件入口、操作作用域与完成门、快照发布单点、确认版本守卫已落地；未完成项见该 issue |
 
 ## 维护要求
 

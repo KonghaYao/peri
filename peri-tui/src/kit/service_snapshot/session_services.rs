@@ -1,3 +1,8 @@
+//! 会话服务协调器：查询 Plugin、MCP 和 Cron，并隔离各服务的本次错误。
+//!
+//! 同一 session-generation 保留 last-good；代次变化由 reset_services 清理缓存。
+//! 无可查询会话时只允许带启动提示的静态 hooks/plugins，不直接发布任何 atom。
+
 use serde::Deserialize;
 use serde_json::json;
 
@@ -28,6 +33,51 @@ impl Default for SessionServices {
                 ..Default::default()
             },
             cron_jobs: Vec::new(),
+        }
+    }
+}
+
+pub(super) struct ServiceObservation {
+    pub hooks: Vec<HookSummary>,
+    pub plugins: Vec<PluginSummary>,
+    pub error: Option<String>,
+}
+
+impl SessionServices {
+    pub(super) async fn refresh(
+        &mut self,
+        source: &super::SnapshotSource,
+        session_id: &str,
+        identity: &Option<(String, u64)>,
+    ) -> ServiceObservation {
+        if let Some(client) = &source.client
+            && !session_id.is_empty()
+            && identity.as_ref().is_some_and(|owner| owner.0 == session_id)
+        {
+            let error = query(client, session_id, self).await;
+            return ServiceObservation {
+                hooks: self.hooks.clone(),
+                plugins: self.plugins.clone(),
+                error,
+            };
+        }
+        *self = Self::default();
+        let error = Some(crate::i18n::tr(if session_id.is_empty() {
+            "service-projection-startup"
+        } else if source.client.is_none() {
+            "service-projection-no-client"
+        } else {
+            "service-projection-session-unavailable"
+        }));
+        let (hooks, plugins) = if session_id.is_empty() {
+            (source.hooks.clone(), source.plugins.clone())
+        } else {
+            (Vec::new(), Vec::new())
+        };
+        ServiceObservation {
+            hooks,
+            plugins,
+            error,
         }
     }
 }

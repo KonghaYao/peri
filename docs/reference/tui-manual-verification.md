@@ -42,13 +42,13 @@
 | `/config` | Config |
 | `/status` | Status |
 | `/tasks` | Tasks |
-| `/agents` | Agents |
+| `/agent` | Agent |
 | `/memory` | Memory |
 | `/mcp` | MCP |
 | `/hooks` | Hooks |
-| `/plugins` | Plugins |
-| `/cron` | Cron |
-| `/workflow` | Workflow |
+| `/plugin` | Plugin |
+| `/cron-list` | Cron |
+| `/workflows` | Workflow |
 | `/login` | Login |
 | `/threads` | Threads |
 
@@ -132,7 +132,6 @@
 
 - [ ] HITL approval popup
 - [ ] OAuth popup
-- [ ] AskUser popup
 - [ ] Rewind popup
 
 每个 popup 检查：
@@ -149,12 +148,14 @@
 - [ ] 无 popup 但有 panel 时，Esc 关闭 panel
 - [ ] 无 popup / panel 时，Esc 不触发异常状态
 
-### AskUserPopup 特别检查
+### AskUser 面板特别检查
+
+AskUser 已从 popup 迁移为 Panel（由 agent 提问被动触发，不在上面的 panel 清单里）：
 
 - [ ] 显示的问题与 agent 实际问题一致
 - [ ] 选择选项后 UI 状态正确更新
 - [ ] 按 Enter 后是否真的把答案提交回 agent
-- [ ] 如果只关闭 popup、不提交答案，记录为独立问题跟进
+- [ ] 如果只关闭面板、不提交答案，记录为独立问题跟进
 
 ## 6. StatusBar
 

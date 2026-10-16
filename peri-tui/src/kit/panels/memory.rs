@@ -9,20 +9,27 @@
 use crate::app::panel_types::PanelKind;
 use crate::i18n;
 use crate::kit::atoms::{LANG_VERSION, MEMORY_LIST, MemoryEntry};
-use crate::kit::list_nav::{next_selection, previous_selection, scroll_start_for_selected};
-use crate::kit::panel_mouse::{AreaTracker, ListLayout, hit_item, is_scrollbar_column};
+use crate::kit::list_nav::{next_selection, previous_selection};
+use crate::kit::panel_mouse::{AreaTracker, hit_item, is_scrollbar_column};
+use crate::kit::panels::shared::list::{ListMetrics, ListViewport, content_rows};
 use fluent_bundle::FluentValue;
 use peri_theme::atoms::THEME_ATOM;
 use ratatui_kit::{
     crossterm::event::{Event, KeyCode, KeyEventKind, MouseButton, MouseEventKind},
     prelude::*,
     ratatui::{
-        layout::Constraint,
+        layout::{Constraint, Rect},
         style::{Style, Stylize},
         text::{Line, Span},
         widgets::Paragraph,
     },
 };
+
+/// 列表行度量：header 3 行（统计、导航提示、空行）+ 每项 1 行 + footer 0 行。
+///
+/// 渲染的 header 与命中布局此前由 `VISIBLE_ITEMS = 13`（按面板高度 18 手算）
+/// 与手写 `ListLayout` 各自表达；现在两者都取自同一个 `ListViewport`。
+const LIST_METRICS: ListMetrics = ListMetrics::new(3, 1, 0);
 
 #[component]
 pub fn MemoryPanel(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
@@ -36,85 +43,42 @@ pub fn MemoryPanel(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
     let _ = hooks.use_atom(&LANG_VERSION);
     let count = entries.len();
 
-    // 面板绘制区域（上一帧）——鼠标点击行号反推
+    // 面板绘制区域（上一帧）——鼠标点击行号反推，同时供滚轮仲裁注册
     let area;
     {
         let tracker = hooks.use_hook(AreaTracker::new);
         area = tracker.rect;
     }
 
-    // 视口跟随：让选中项始终可见（issue 2026-07-06-panels-selection-no-scroll-follow）。
-    // panel 高度 18 - border 2 - header 3 = 13 行；每项 1 行 → 可见 13 个。
-    const VISIBLE_ITEMS: usize = 13;
-    let scroll_start = scroll_start_for_selected(*selected.read(), entries.len(), VISIBLE_ITEMS);
+    // 列表视口：可见项数由面板内容区行数推导（首帧未测量时用 `panel_overlay` 的预测
+    // 高度），绘制（`window`）与鼠标命中（`hit_layout`）共用这一份结果，选中项保持
+    // 可见（issue 2026-07-06-panels-selection-no-scroll-follow）。
+    let (_term_w, term_h) = hooks.use_terminal_size();
+    let viewport = ListViewport::for_content_rows(
+        content_rows(area, term_h),
+        LIST_METRICS,
+        entries.len(),
+        *selected.read(),
+    );
 
     hooks.use_event_handler_with_options(
         EventScope::Current,
         EventPriority::Normal,
         EventOptions { hit_test: true },
-        {
-            move |event| {
-                // 鼠标：区域内左键点击 = 选中该项并执行 Enter 动作（click as enter）
-                if let Event::Mouse(mouse) = event {
-                    if let Some(area) = area
-                        && !is_scrollbar_column(&mouse, area)
-                        && let Some(idx) = hit_item(
-                            &mouse,
-                            area,
-                            ListLayout {
-                                header_rows: 3,
-                                item_rows: 1,
-                                footer_rows: 0,
-                                visible_items: VISIBLE_ITEMS as u16,
-                                scroll_start,
-                                item_count: count,
-                            },
-                        )
-                    {
-                        *selected.write() = idx;
-                        let entries = MEMORY_LIST.state().read().clone();
-                        if let Some(entry) = entries.get(idx) {
-                            open_memory_in_editor(&entry.path);
-                        }
-                        return EventResult::Consumed;
-                    }
-                    return match mouse.kind {
-                        MouseEventKind::Down(MouseButton::Left) => EventResult::Consumed,
-                        _ => EventResult::Ignored,
-                    };
-                }
-                let Event::Key(key) = event else {
-                    return EventResult::Ignored;
-                };
-                if key.kind != KeyEventKind::Press {
-                    return EventResult::Ignored;
-                }
-                match key.code {
-                    KeyCode::Esc => close_panel(),
-                    KeyCode::Up => {
-                        let mut s = selected.write();
-                        *s = previous_selection(*s);
-                    }
-                    KeyCode::Down => {
-                        let mut s = selected.write();
-                        let count = MEMORY_LIST.state().read().len();
-                        if count > 0 {
-                            *s = next_selection(*s, count);
-                        }
-                    }
-                    KeyCode::Enter => {
-                        let sel = *selected.read();
-                        let entries = MEMORY_LIST.state().read().clone();
-                        if let Some(entry) = entries.get(sel) {
-                            open_memory_in_editor(&entry.path);
-                        }
-                    }
-                    _ => {}
-                }
-                EventResult::Consumed
-            }
+        move |event| {
+            handle_memory_event(
+                event,
+                &MemoryEventCtx {
+                    area,
+                    selected,
+                    viewport,
+                },
+            )
         },
     );
+
+    #[cfg(test)]
+    tests::visit_mounted_panel(tests::MountedPanel { selected });
 
     let sel = *selected.read();
     let mut lines: Vec<Line<'_>> = Vec::new();
@@ -147,12 +111,7 @@ pub fn MemoryPanel(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
             Style::new().fg(theme_def.read().semantic.text.muted),
         )]));
     } else {
-        for (i, entry) in entries
-            .iter()
-            .enumerate()
-            .skip(scroll_start)
-            .take(VISIBLE_ITEMS)
-        {
+        for (i, entry) in viewport.window(&entries) {
             let is_selected = i == sel;
             let cursor = if is_selected { ">" } else { " " };
             let name_style = if is_selected {
@@ -187,10 +146,11 @@ pub fn MemoryPanel(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
 
     let content = Paragraph::new(ratatui::text::Text::from(lines));
 
-    // 面板滚轮仲裁注册（每帧覆盖写入，area 用上一帧组件区域）
+    // 面板滚轮仲裁注册（每帧覆盖写入；区域与列表命中同源，均取自 AreaTracker，
+    // 首帧未测量时为 0 尺寸，下一帧起生效——首帧滚轮不经本面板仲裁）
     crate::kit::panel_scroll::register_panel_scroll(
         PanelKind::Memory,
-        hooks.use_previous_size(),
+        area.unwrap_or_default(),
         sv,
     );
 
@@ -267,6 +227,13 @@ fn open_memory_in_editor(rel_path: &str) {
     use std::path::PathBuf;
     use std::process::Command;
 
+    // 测试构建：请求交给接缝记录并直接返回，单元测试绝不 spawn 真实编辑器进程；
+    // 路径解析与 spawn 的错误分支因此只能由人工/端到端验证覆盖。
+    #[cfg(test)]
+    if tests::intercept_editor_open(rel_path) {
+        return;
+    }
+
     let Some(home) = dirs_next::home_dir() else {
         tracing::warn!("open_memory_in_editor: home_dir unknown");
         return;
@@ -293,6 +260,73 @@ fn open_memory_in_editor(rel_path: &str) {
     tracing::info!(?full, bin, "MemoryPanel: spawning editor");
     if let Err(e) = cmd.spawn() {
         tracing::warn!(?e, bin, "MemoryPanel: editor spawn failed");
+    }
+}
+
+/// 面板事件处理——判定集中在这里、组件只做注册，测试可经 `tests::mount_panel`
+/// 捕获真实句柄后直接投喂事件（`State<T>` 无公开构造 API）。
+///
+/// 鼠标命中与绘制共用 `ctx.viewport`（`hit_layout()` / `window()` 同源），
+/// 面板高度变化时两者看到的可见项数一致。
+fn handle_memory_event(event: Event, ctx: &MemoryEventCtx) -> EventResult {
+    // 鼠标：区域内左键点击 = 选中该项并执行 Enter 动作（click as enter）
+    if let Event::Mouse(mouse) = event {
+        if let Some(area) = ctx.area
+            && !is_scrollbar_column(&mouse, area)
+            && let Some(idx) = hit_item(&mouse, area, ctx.viewport.hit_layout())
+        {
+            *ctx.selected.write() = idx;
+            open_entry_at(idx);
+            return EventResult::Consumed;
+        }
+        return match mouse.kind {
+            MouseEventKind::Down(MouseButton::Left) => EventResult::Consumed,
+            _ => EventResult::Ignored,
+        };
+    }
+    let Event::Key(key) = event else {
+        return EventResult::Ignored;
+    };
+    if key.kind != KeyEventKind::Press {
+        return EventResult::Ignored;
+    }
+    match key.code {
+        KeyCode::Esc => close_panel(),
+        KeyCode::Up => {
+            let mut s = ctx.selected.write();
+            *s = previous_selection(*s);
+        }
+        KeyCode::Down => {
+            let mut s = ctx.selected.write();
+            let count = MEMORY_LIST.state().read().len();
+            if count > 0 {
+                *s = next_selection(*s, count);
+            }
+        }
+        KeyCode::Enter => {
+            let sel = *ctx.selected.read();
+            open_entry_at(sel);
+        }
+        _ => {}
+    }
+    EventResult::Consumed
+}
+
+/// 事件处理上下文：本帧视口 + 面板句柄。
+///
+/// `State<T>` 无公开构造 API，只能从组件挂载取得；集中成一个结构体，事件入口
+/// 签名不再随状态/视口增长（渲染与鼠标命中必须共用同一个 `viewport`）。
+struct MemoryEventCtx {
+    area: Option<Rect>,
+    selected: State<usize>,
+    viewport: ListViewport,
+}
+
+/// 打开当前列表第 `idx` 项——动作时从最新的 `MEMORY_LIST` 取条目（列表刷新会换
+/// 下标，进入时缓存 path 会打开错文件），path 直接交给 `open_memory_in_editor`。
+fn open_entry_at(idx: usize) {
+    if let Some(entry) = MEMORY_LIST.state().read().get(idx) {
+        open_memory_in_editor(&entry.path);
     }
 }
 

@@ -4,16 +4,25 @@
 use super::*;
 use crate::app::service_registry::ProcessResourceMonitor;
 use crate::kit::atoms::McpInitPhase;
+use crate::kit::atoms::{
+    CRON_JOBS, CURRENT_SESSION_TITLE, FILE_LIST, HOOK_LIST, HookSummary, MCP_SERVERS, PLUGIN_LIST,
+    SERVICE_PROJECTION_ERROR, SERVICE_SNAPSHOT, ServiceSnapshot, THREAD_LIST, ThreadBrowserScope,
+    ThreadSummary,
+};
+use crate::kit::service_snapshot::file_scan::scan_cwd_files_shallow;
 use chrono::Utc;
 use peri_acp::transport::{AcpTransport, mpsc::mpsc_transport_pair, types::IncomingMessage};
+use peri_acp_types::permission::{PermissionMode, SharedPermissionMode};
 use serde_json::{Value, json};
 use serial_test::serial;
+use std::time::Instant;
 
 fn reset_snapshot_atoms() {
     crate::kit::atoms::init_atoms();
     ACTIVE_EXECUTION_CWD.set(None);
     ACTIVE_SESSION_ID.set(String::new());
     THREAD_BROWSER_SCOPE.set(ThreadBrowserScope::Project);
+    THREAD_BROWSER_ARCHIVED.set(false);
     THREAD_LIST_PAGE_COUNT.set(1);
     THREAD_LIST_ERROR.set(None);
     THREAD_LIST.state().write().clear();
@@ -22,7 +31,10 @@ fn reset_snapshot_atoms() {
 
 fn isolated_refresh() -> SlowSnapshotRefresh {
     SlowSnapshotRefresh {
-        next_memory_scan: Instant::now() + Duration::from_secs(3600),
+        memory: memory_scan::MemoryScan {
+            next: Instant::now() + Duration::from_secs(3600),
+            entries: Vec::new(),
+        },
         ..SlowSnapshotRefresh::default()
     }
 }
@@ -160,6 +172,35 @@ async fn active_execution_directory_invalidates_file_cache_and_updates_title() {
     assert_eq!(MCP_SERVERS.state().read()[0].name, "target-mcp");
     ACTIVE_EXECUTION_CWD.set(None);
     ACTIVE_SESSION_ID.set(String::new());
+}
+
+#[tokio::test]
+#[serial]
+async fn closing_session_clears_session_projection_on_next_commit() {
+    reset_snapshot_atoms();
+    let directory = tempfile::tempdir().unwrap();
+    let (client, _queries) = snapshot_client(directory.path().to_str().unwrap()).await;
+    let mut source = make_minimal_source(Some(client));
+    source.cwd = directory.path().to_str().unwrap().into();
+    let mut refresh = isolated_refresh();
+    ACTIVE_SESSION_ID.set("00000000-0000-0000-0000-000000000003".into());
+    tick_once(&source, &mut refresh).await.unwrap();
+    assert_eq!(*CURRENT_SESSION_TITLE.state().read(), "Session title");
+    assert!(!CRON_JOBS.state().read().is_empty());
+    ACTIVE_SESSION_ID.set(String::new());
+    tick_once(&source, &mut refresh).await.unwrap();
+    assert!(CURRENT_SESSION_TITLE.state().read().is_empty());
+    assert!(HOOK_LIST.state().read().is_empty());
+    assert!(PLUGIN_LIST.state().read().is_empty());
+    assert!(MCP_SERVERS.state().read().is_empty());
+    assert!(CRON_JOBS.state().read().is_empty());
+    let snapshot = SERVICE_SNAPSHOT.state().read().clone();
+    assert_eq!(snapshot.cron_total, 0);
+    assert_eq!(snapshot.cron_enabled, 0);
+    assert_eq!(snapshot.mcp.init_phase, McpInitPhase::Failed);
+    assert_eq!(snapshot.model_alias, "");
+    assert_eq!(snapshot.permission_mode, "default");
+    assert_eq!(snapshot.effort, "xhigh");
 }
 
 #[tokio::test]
@@ -519,8 +560,11 @@ mod startup {
     fn start(source: SnapshotSource, shutdown: CancellationToken) -> tokio::task::JoinHandle<()> {
         // 外部文件扫描在已有独立测试覆盖；调度测试不读取开发者 HOME，也不依赖磁盘耗时。
         let refresh = SlowSnapshotRefresh {
-            file_cwd: source.cwd.clone(),
-            next_file_scan: Instant::now() + Duration::from_secs(3600),
+            files: file_scan::FileScan {
+                cwd: source.cwd.clone(),
+                next: Instant::now() + Duration::from_secs(3600),
+                entries: Vec::new(),
+            },
             ..isolated_refresh()
         };
         tokio::spawn(run_service_snapshot(source, shutdown, refresh))

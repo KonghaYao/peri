@@ -6,26 +6,39 @@ use ratatui_kit::crossterm::event::{Event, KeyCode, KeyEventKind, MouseButton, M
 use ratatui_kit::prelude::{EventResult, State};
 use ratatui_kit::ratatui::layout::Rect;
 
-use super::data::{get_marketplace_cache, refresh_discover_cache};
+use super::data::get_marketplace_cache;
 use super::{VISIBLE_ITEMS, action_list, cycle_backward, cycle_forward};
 
 #[allow(clippy::too_many_arguments)]
 pub(super) fn handle_panel_event(
     event: Event,
+    event_scope: &crate::application::operations::OperationScope,
     area: Option<Rect>,
     selected: State<usize>,
     active_tab: State<PluginViewTab>,
     discover: State<super::discover::DiscoverState>,
     action_index: State<usize>,
     confirm_action: State<Option<String>>,
-    operation_loading: State<Option<String>>,
+    marketplace_confirmation: State<Option<super::MarketplaceIdentity>>,
     operation: State<super::operation::OperationState>,
-    detail_plugin_idx: State<Option<usize>>,
-    marketplace_detail: State<Option<usize>>,
+    detail_plugin: State<Option<super::InstalledIdentity>>,
+    marketplace_detail: State<Option<super::MarketplaceIdentity>>,
     marketplace_detail_action: State<usize>,
     add_marketplace_input: State<TextAreaState>,
     add_marketplace_active: State<bool>,
 ) -> EventResult {
+    if event_scope != &super::current_scope() {
+        return EventResult::Consumed;
+    }
+    if super::identity::reconcile_details(
+        detail_plugin,
+        marketplace_detail,
+        marketplace_confirmation,
+        confirm_action,
+        operation,
+    ) {
+        return EventResult::Consumed;
+    }
     if super::operation::handle_pending_event(&event, operation) {
         return EventResult::Consumed;
     }
@@ -39,29 +52,27 @@ pub(super) fn handle_panel_event(
             if let Some(action) = confirmation
                 && matches!(mouse.kind, MouseEventKind::Down(MouseButton::Left))
             {
-                let saved_loading = operation_loading.read().clone();
+                let saved_marketplace = marketplace_confirmation.read().clone();
                 match action.as_str() {
                     "uninstall" => {
                         super::operation::confirm_uninstall(
                             operation,
                             confirm_action,
-                            detail_plugin_idx,
+                            detail_plugin,
                         );
                     }
                     "delete_marketplace" => {
                         super::operation::confirm_marketplace_remove(
-                            saved_loading.unwrap_or_default(),
+                            saved_marketplace,
                             operation,
                             confirm_action,
-                            operation_loading,
+                            marketplace_confirmation,
                         );
                     }
                     _ => {
-                        // 未知确认动作：安全起见也从独立线程写 state
-                        std::thread::spawn(move || {
-                            *confirm_action.write() = None;
-                            *operation_loading.write() = None;
-                        });
+                        *confirm_action.write() = None;
+                        *marketplace_confirmation.write() = None;
+                        operation.write().confirmation = None;
                     }
                 }
                 return EventResult::Consumed;
@@ -84,9 +95,12 @@ pub(super) fn handle_panel_event(
                 )
             {
                 *marketplace_detail_action.write() = idx;
-                let s = marketplace_detail.read().unwrap_or(0);
-                let entries = get_marketplace_cache(); // 非阻塞缓存读取
-                if let Some(entry) = entries.get(s.saturating_sub(1)) {
+                let identity = marketplace_detail.read().clone();
+                let entries = get_marketplace_cache();
+                if let Some(entry) = identity
+                    .as_ref()
+                    .and_then(|key| key.resolve(&entries, event_scope))
+                {
                     match idx {
                         0 => {
                             super::operation::dispatch(
@@ -99,7 +113,7 @@ pub(super) fn handle_panel_event(
                         _ => {
                             // Delete
                             *confirm_action.write() = Some("delete_marketplace".into());
-                            *operation_loading.write() = Some(entry.name.clone());
+                            *marketplace_confirmation.write() = identity.clone();
                         }
                     }
                 }
@@ -108,16 +122,16 @@ pub(super) fn handle_panel_event(
                 return EventResult::Consumed;
             }
             // ── Installed 详情：点击 action 行 = 执行（Enter @L738）──
-            // 提取 detail_plugin_idx 的 guard：if-let scrutinee 临时 guard
-            // 存活到块结束，块内多次 write detail_plugin_idx 会死锁。
-            let detail_plugin_opt = *detail_plugin_idx.read();
-            if detail_plugin_opt.is_some()
-                && let Some(detail) = detail_plugin_opt
-                && let Some(detail_p) = PLUGIN_LIST.state().read().get(detail).cloned()
+            // 提取 detail_plugin 的 guard：if-let scrutinee 临时 guard
+            // 存活到块结束，块内多次 write detail_plugin 会死锁。
+            let detail_plugin_opt = detail_plugin.read().clone();
+            let plugins = PLUGIN_LIST.state().read().clone();
+            if let Some(detail) = detail_plugin_opt
+                && let Some(detail_p) = detail.resolve(&plugins, event_scope)
                 && let Some(idx) = super::operation::detail_action_index(
                     &event,
                     Some(area),
-                    &detail_p,
+                    detail_p,
                     *action_index.read(),
                 )
             {
@@ -126,10 +140,10 @@ pub(super) fn handle_panel_event(
                 if let Some(action) = actions.get(idx) {
                     super::operation::installed_action(
                         action,
-                        &detail_p,
+                        detail_p,
                         operation,
                         confirm_action,
-                        detail_plugin_idx,
+                        detail_plugin,
                     );
                 }
                 return EventResult::Consumed;
@@ -153,7 +167,10 @@ pub(super) fn handle_panel_event(
                         },
                     ) {
                         *selected.write() = idx;
-                        *detail_plugin_idx.write() = Some(idx);
+                        *detail_plugin.write() =
+                            PLUGIN_LIST.state().read().get(idx).map(|plugin| {
+                                super::InstalledIdentity::new(plugin, event_scope.clone())
+                            });
                         *action_index.write() = 0;
                         return EventResult::Consumed;
                     }
@@ -195,7 +212,11 @@ pub(super) fn handle_panel_event(
                     ) {
                         let s = idx + 1;
                         *selected.write() = s;
-                        *marketplace_detail.write() = Some(s);
+                        *marketplace_detail.write() = get_marketplace_cache()
+                            .get(s.saturating_sub(1))
+                            .map(|entry| {
+                                super::MarketplaceIdentity::new(entry, event_scope.clone())
+                            });
                         *marketplace_detail_action.write() = 0;
                         return EventResult::Consumed;
                     }
@@ -214,19 +235,8 @@ pub(super) fn handle_panel_event(
     if key.kind != KeyEventKind::Press {
         return EventResult::Ignored;
     }
-    let in_detail = detail_plugin_idx.read().is_some();
+    let in_detail = detail_plugin.read().is_some();
     let in_marketplace_detail = marketplace_detail.read().is_some();
-
-    // 任意键盘事件清除 operation_loading（操作完成后用户按任意键消除 loading 状态）
-    // 注意：read() 可能持有读锁，write() 需要写锁——必须先将读值提取到局部变量
-    // 让读锁释放后再写，否则在 std::sync::RwLock 上触发死锁。
-    let has_loading = operation_loading.read().is_some();
-    let no_confirm = confirm_action.read().is_none();
-    if has_loading && no_confirm {
-        *operation_loading.write() = None;
-        tokio::task::spawn_blocking(refresh_discover_cache);
-        return EventResult::Consumed;
-    }
 
     // ── Marketplace detail 模式 ──
     if in_marketplace_detail {
@@ -244,9 +254,12 @@ pub(super) fn handle_panel_event(
                 EventResult::Consumed
             }
             KeyCode::Enter => {
-                let s = marketplace_detail.read().unwrap_or(0);
-                let entries = get_marketplace_cache(); // 非阻塞缓存读取
-                if let Some(entry) = entries.get(s.saturating_sub(1)) {
+                let identity = marketplace_detail.read().clone();
+                let entries = get_marketplace_cache();
+                if let Some(entry) = identity
+                    .as_ref()
+                    .and_then(|key| key.resolve(&entries, event_scope))
+                {
                     match *marketplace_detail_action.read() {
                         0 => {
                             super::operation::dispatch(
@@ -259,7 +272,7 @@ pub(super) fn handle_panel_event(
                         _ => {
                             // Delete
                             *confirm_action.write() = Some("delete_marketplace".into());
-                            *operation_loading.write() = Some(entry.name.clone());
+                            *marketplace_confirmation.write() = identity.clone();
                         }
                     }
                 }
@@ -284,39 +297,32 @@ pub(super) fn handle_panel_event(
         // ── 确认模式优先 ──
         (_, true, KeyCode::Enter) => {
             let action = confirm_action.read().clone().unwrap_or_default();
-            let saved_loading = operation_loading.read().clone();
+            let saved_marketplace = marketplace_confirmation.read().clone();
 
             match action.as_str() {
                 "uninstall" => {
-                    super::operation::confirm_uninstall(
-                        operation,
-                        confirm_action,
-                        detail_plugin_idx,
-                    );
+                    super::operation::confirm_uninstall(operation, confirm_action, detail_plugin);
                 }
                 "delete_marketplace" => {
                     super::operation::confirm_marketplace_remove(
-                        saved_loading.unwrap_or_default(),
+                        saved_marketplace,
                         operation,
                         confirm_action,
-                        operation_loading,
+                        marketplace_confirmation,
                     );
                 }
                 _ => {
-                    // 未知确认动作：安全起见也从独立线程写 state
-                    std::thread::spawn(move || {
-                        *confirm_action.write() = None;
-                        *operation_loading.write() = None;
-                    });
+                    *confirm_action.write() = None;
+                    *marketplace_confirmation.write() = None;
+                    operation.write().confirmation = None;
                 }
             }
         }
         (_, true, _) => {
-            // 任意非 Enter 键关闭确认弹窗（独立线程避免 RwLock 重入）
-            std::thread::spawn(move || {
-                *confirm_action.write() = None;
-                *operation_loading.write() = None;
-            });
+            // 读守卫已释放，确认取消在当前事件内同步完成。
+            *confirm_action.write() = None;
+            *marketplace_confirmation.write() = None;
+            operation.write().confirmation = None;
         }
         // ── Tab/Shift+Tab 切换视图 ──
         (false, false, KeyCode::Tab) => {
@@ -337,7 +343,10 @@ pub(super) fn handle_panel_event(
                 let s = *selected.read();
                 let c = PLUGIN_LIST.state().read().len();
                 if c > 0 {
-                    *detail_plugin_idx.write() = Some(s);
+                    *detail_plugin.write() =
+                        PLUGIN_LIST.state().read().get(s).map(|plugin| {
+                            super::InstalledIdentity::new(plugin, event_scope.clone())
+                        });
                     *action_index.write() = 0;
                 }
             } else if *active_tab.read() == PluginViewTab::Discover {
@@ -352,7 +361,9 @@ pub(super) fn handle_panel_event(
                     *add_marketplace_input.write() = TextAreaState::default();
                 } else if entries.get(s.saturating_sub(1)).is_some() {
                     // Enter marketplace detail
-                    *marketplace_detail.write() = Some(s);
+                    *marketplace_detail.write() = get_marketplace_cache()
+                        .get(s.saturating_sub(1))
+                        .map(|entry| super::MarketplaceIdentity::new(entry, event_scope.clone()));
                     *marketplace_detail_action.write() = 0;
                 }
             } else if *active_tab.read() == PluginViewTab::Errors {
@@ -363,8 +374,12 @@ pub(super) fn handle_panel_event(
         }
         // ── Detail: Enter → 执行操作 ──
         (true, false, KeyCode::Enter) => {
-            let idx = detail_plugin_idx.read().unwrap_or(0);
-            if let Some(p) = PLUGIN_LIST.state().read().get(idx) {
+            let identity = detail_plugin.read().clone();
+            let plugins = PLUGIN_LIST.state().read().clone();
+            if let Some(p) = identity
+                .as_ref()
+                .and_then(|key| key.resolve(&plugins, event_scope))
+            {
                 let actions = action_list(p.enabled);
                 let ai =
                     super::operation::detail_action_index(&event, area, p, *action_index.read());
@@ -374,15 +389,19 @@ pub(super) fn handle_panel_event(
                         p,
                         operation,
                         confirm_action,
-                        detail_plugin_idx,
+                        detail_plugin,
                     );
                 }
             }
         }
         // ── Detail: ↑/↓ 导航操作菜单 ──
         (true, false, KeyCode::Up) => {
-            let idx = detail_plugin_idx.read().unwrap_or(0);
-            if let Some(p) = PLUGIN_LIST.state().read().get(idx) {
+            let identity = detail_plugin.read().clone();
+            let plugins = PLUGIN_LIST.state().read().clone();
+            if let Some(p) = identity
+                .as_ref()
+                .and_then(|key| key.resolve(&plugins, event_scope))
+            {
                 let actions = action_list(p.enabled);
                 let ai = *action_index.read();
                 *action_index.write() = if ai == 0 {
@@ -393,8 +412,12 @@ pub(super) fn handle_panel_event(
             }
         }
         (true, false, KeyCode::Down) => {
-            let idx = detail_plugin_idx.read().unwrap_or(0);
-            if let Some(p) = PLUGIN_LIST.state().read().get(idx) {
+            let identity = detail_plugin.read().clone();
+            let plugins = PLUGIN_LIST.state().read().clone();
+            if let Some(p) = identity
+                .as_ref()
+                .and_then(|key| key.resolve(&plugins, event_scope))
+            {
                 let actions = action_list(p.enabled);
                 let ai = *action_index.read();
                 *action_index.write() = if ai + 1 >= actions.len() { 0 } else { ai + 1 };

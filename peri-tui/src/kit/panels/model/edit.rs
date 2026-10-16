@@ -1,26 +1,27 @@
 //! Model edit actions and their common save/publication boundary.
 //!
 //! The shared PeriConfig remains the only mutable configuration owner. Each
-//! action releases its write guard before committing its immutable snapshot.
+//! action builds its candidate on a clone, persists it, and only a successful
+//! save commits the handle, the local projection and the ACP push — a failed
+//! save must not leave the panel showing a switch that never reached disk.
 
 use super::{
     FIELD_CONTEXT_1M, FIELD_EFFORT, FIELD_MAX_TOKENS, FIELD_MODEL, FIELD_PROVIDER, PROFILE_KEYS,
 };
 use crate::config::PeriConfig;
-use crate::i18n;
-use crate::kit::atoms::{
-    ACP_CLIENT_HANDLE, MODEL_HIGHLIGHT_UNTIL, NOTIFICATION, Notification, PERI_CONFIG_HANDLE,
-    SERVICE_SNAPSHOT,
-};
-use fluent_bundle::FluentValue;
+use crate::kit::atoms::{ACP_CLIENT_HANDLE, MODEL_HIGHLIGHT_UNTIL, PERI_CONFIG_HANDLE};
+use std::sync::Arc;
 use std::time::Duration;
+
+/// 宿主配置句柄（面板动作的提交目标；进程级固定，不随活动会话变化）。
+type PeriHandle = Arc<parking_lot::RwLock<PeriConfig>>;
 
 /// Effort 五级
 const EFFORT_LEVELS: &[&str] = &["low", "medium", "high", "xhigh", "max"];
 /// Max tokens 预设
 const MAX_TOKEN_PRESETS: &[u32] = &[4096, 8192, 16000, 32000, 64000];
 
-/// 切换左侧光标指向的档位为 active profile（立即写入 + 持久化 + 推送 ACP）。
+/// 切换左侧光标指向的档位为 active profile（先落盘、成功才切换内存并推送 ACP）。
 /// pub(crate)：状态栏模型快速切换弹窗复用此切换逻辑。
 pub(crate) fn switch_active_alias(idx: usize) {
     let Some(key) = PROFILE_KEYS.get(idx) else {
@@ -29,22 +30,23 @@ pub(crate) fn switch_active_alias(idx: usize) {
     let Some(handle) = PERI_CONFIG_HANDLE.get() else {
         return;
     };
-    let mut cfg = handle.write();
-    if cfg.config.active_alias != *key {
-        cfg.config.active_alias = key.to_string();
+    let candidate = {
+        let mut candidate = handle.read().clone();
+        candidate.config.active_alias = key.to_string();
+        candidate
+    };
+    if commit_snapshot(handle, candidate, ModelChange::ActiveAlias(key.to_string())) {
         tracing::info!(alias = key, "ModelPanel: active_alias switched");
     }
-    let snap = cfg.clone();
-    drop(cfg);
-    commit_snapshot(snap, ModelChange::ActiveAlias(key.to_string()));
 }
 
-/// 编辑右侧字段（forward=true 前进 / false 后退）。立即写入 + 持久化 + 推送 ACP。
+/// 编辑右侧字段（forward=true 前进 / false 后退）。先落盘、成功才切换内存并推送 ACP。
 pub(super) fn edit_field(alias: String, field: usize, forward: bool) {
     let Some(handle) = PERI_CONFIG_HANDLE.get() else {
         return;
     };
-    let mut cfg = handle.write();
+    // 候选镜像：所有写入先落在副本上，落盘成功前不动句柄。
+    let mut cfg = handle.read().clone();
 
     // 先读取当前值（不可变，纯 clone），避免跨 guard 的字段级借用冲突
     let provider_ids: Vec<String> = cfg.config.providers.iter().map(|p| p.id.clone()).collect();
@@ -186,9 +188,7 @@ pub(super) fn edit_field(alias: String, field: usize, forward: bool) {
         }
         _ => return,
     }
-    let snap = cfg.clone();
-    drop(cfg);
-    commit_snapshot(snap, ModelChange::ProfileField(alias));
+    commit_snapshot(handle, cfg, ModelChange::ProfileField(alias));
 }
 
 /// Describes only the immediate display changes made by this action.
@@ -198,18 +198,25 @@ enum ModelChange {
     ProfileField(String),
 }
 
-/// Save failure reports a notification but does not roll back the edited config
-/// or prevent local publication and the existing asynchronous ACP push.
-fn commit_snapshot(snap: PeriConfig, change: ModelChange) {
-    notify_save_result(crate::config::save_effective(&snap));
-    project_model_change(&snap, change);
+/// 提交边界：**保存成功才提交**内存、本地投影与 ACP 推送。
+///
+/// 保存失败时句柄保持已持久化的值（面板不会显示未落盘的切换），也不推送未落盘
+/// 的配置；失败提示由 [`crate::kit::config_service::persist_candidate`] 统一给出。
+/// 返回是否已持久化——调用方据此决定日志等本地副作用。
+fn commit_snapshot(handle: &PeriHandle, candidate: PeriConfig, change: ModelChange) -> bool {
+    if !crate::kit::config_service::persist_candidate(&candidate) {
+        return false;
+    }
+    *handle.write() = candidate.clone();
+    project_model_change(&candidate, change);
     tokio::spawn(async move {
         if let Some(client) = ACP_CLIENT_HANDLE.get()
-            && let Err(e) = client.update_config(&snap).await
+            && let Err(e) = client.update_config(&candidate).await
         {
             tracing::warn!(error = %e, "ModelPanel: update_config push failed");
         }
     });
+    true
 }
 
 fn project_model_change(snap: &PeriConfig, change: ModelChange) {
@@ -224,19 +231,21 @@ fn project_model_change(snap: &PeriConfig, change: ModelChange) {
         ModelChange::ProfileField(alias) => (alias, false),
     };
     let resolved = resolve_model_name_for_alias(&snap.config, &alias);
-    let s_handle = SERVICE_SNAPSHOT.state();
-    let mut svc = s_handle.read().clone();
+    // 只提交本次确实改动的字段：整快照 clone 后回写会覆盖同期的进程/服务投影
+    // （方案 §7.2 禁止分别 clone 后替换整个快照）。
+    let mut update = crate::kit::service_snapshot::SessionFieldUpdate::default();
     if switch_active {
-        svc.model_alias = alias.clone();
+        update.model_alias = Some(alias.clone());
     }
     if switch_active || alias == snap.config.active_alias {
-        svc.model_name = resolved;
-        svc.effort = snap
-            .config
-            .profiles
-            .get(&alias)
-            .map(|p| p.effort.clone())
-            .unwrap_or_else(|| "xhigh".to_string());
+        update.model_name = Some(resolved);
+        update.effort = Some(
+            snap.config
+                .profiles
+                .get(&alias)
+                .map(|p| p.effort.clone())
+                .unwrap_or_else(|| "xhigh".to_string()),
+        );
         // Preserve the immediate projection contract: alias switching leaves
         // provider_name for the periodic snapshot; only active edits update it.
         if !switch_active {
@@ -248,11 +257,11 @@ fn project_model_change(snap: &PeriConfig, change: ModelChange) {
                 .map(|p| p.provider_type.clone())
                 .unwrap_or_default();
             if !provider_type.is_empty() {
-                svc.provider_name = provider_type;
+                update.provider_name = Some(provider_type);
             }
         }
     }
-    *s_handle.write() = svc;
+    crate::kit::service_snapshot::publish_session_fields(update);
     if switch_active {
         *MODEL_HIGHLIGHT_UNTIL.state().write() =
             Some(peri_time::monotonic_now() + Duration::from_secs(2));
@@ -278,27 +287,4 @@ fn resolve_model_name_for_alias(app_config: &crate::config::AppConfig, alias: &s
         })
         .filter(|m| !m.is_empty())
         .unwrap_or_else(|| alias.to_string())
-}
-
-fn notify_save_result(result: Result<(), anyhow::Error>) {
-    match result {
-        Ok(()) => {
-            *NOTIFICATION.state().write() = Some(Notification {
-                message: i18n::tr("config-saved").to_string(),
-                until: peri_time::monotonic_now() + Duration::from_secs(1),
-            });
-        }
-        Err(e) => {
-            *NOTIFICATION.state().write() = Some(Notification {
-                message: i18n::tr_args(
-                    "config-save-failed",
-                    &[(
-                        "error".to_string(),
-                        FluentValue::from(e.to_string().as_str()),
-                    )],
-                ),
-                until: peri_time::monotonic_now() + Duration::from_secs(2),
-            });
-        }
-    }
 }

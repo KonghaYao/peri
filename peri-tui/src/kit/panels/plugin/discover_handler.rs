@@ -1,7 +1,7 @@
 //! Discover input decisions and their UI/RPC effects share one selected identity.
 
 use super::PluginSearchResultItem;
-use super::discover::{DiscoverState, SearchSession};
+use super::discover::DiscoverState;
 use super::{DiscoverDetailAction, VISIBLE_ITEMS, close_panel, data::get_discover_cache};
 use crate::kit::atoms::ACP_CLIENT_HANDLE;
 use crate::kit::list_nav::{next_selection, previous_selection, scroll_start_for_selected};
@@ -219,11 +219,12 @@ pub(super) fn handle_event(
         SearchEffect::Consumed => {}
         SearchEffect::ClosePanel => close_panel(),
         SearchEffect::Submit => {
-            let session = SearchSession::current();
-            let ticket = discover.write().begin_search(session);
+            let query = discover.read().editor.text.clone();
+            let ticket = discover.write().begin_search(super::current_scope());
             if let Some(ticket) = ticket {
                 drop(super::search_request::launch_search(
                     ticket,
+                    query,
                     ACP_CLIENT_HANDLE.get().cloned(),
                     move |ticket, result| {
                         if let Some(mut state) = discover.try_write() {
