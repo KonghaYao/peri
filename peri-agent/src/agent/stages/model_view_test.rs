@@ -546,3 +546,97 @@ async fn test_run_reason_releases_view_when_preparation_is_cancelled() {
         "提前取消路径不得把整份正文留在缓存槽里"
     );
 }
+
+/// 验收：Micro 判定但未落地（空计划未达 Full 阈值）时缓存保留，Reason 仍复用。
+///
+/// 这类路径 transcript 修订号不变，属 OPT-03 的「无变化范围内只构建一次」范围：
+/// 只有确实要构造 Full 摘要视图才允许放弃缓存。
+#[tokio::test]
+async fn test_micro_not_applied_keeps_cached_view_for_reason() {
+    let cwd: Arc<str> = Arc::from("/tmp/model-view-micro-not-applied");
+    let session = Session::new(cwd, FrozenContext::builder().build(), None);
+    let turn = session.start_turn();
+    // 1_000 token 估算 / 1_200 窗口 ≈ 83%：越过 Micro 阈值，仍在 Full 阈值以下
+    let ctx = StageContext::builder(turn, session.transcript(), session.queue().clone())
+        .with_context_budget(ContextBudget::new(1_200))
+        .with_compact_config(CompactConfig::default())
+        .build();
+    ctx.session
+        .transcript
+        .write()
+        .append(human(&"x".repeat(4_000)));
+
+    ctx.model_view.reset();
+    let output = super::compact::run_compact(CompactInput {
+        context: ctx.clone(),
+        has_tool_calls: false,
+    })
+    .await
+    .expect("Compact 阶段不得失败");
+
+    assert!(!output.compacted, "空计划未达 Full 阈值：本轮不得产生变更");
+    assert_eq!(ctx.model_view.render_count(), 1, "Compact 检查渲染一次");
+    assert!(
+        ctx.model_view.is_cached(),
+        "未落地的 Micro 路径必须保留缓存槽：没有第二份正文需要让位"
+    );
+
+    let _ = run_reason(ReasonInput {
+        context: ctx.clone(),
+        has_tool_calls: false,
+    })
+    .await;
+
+    assert_eq!(
+        ctx.model_view.render_count(),
+        1,
+        "无变化路径上 Compact 检查 + Reason 快照合计只应渲染一次"
+    );
+}
+
+/// 验收：Shadow mode（不应用任何变更）同样保留缓存，不因 Compact 检查多渲染一次。
+#[tokio::test]
+async fn test_shadow_mode_keeps_cached_view_for_reason() {
+    let cwd: Arc<str> = Arc::from("/tmp/model-view-shadow-mode");
+    let session = Session::new(cwd, FrozenContext::builder().build(), None);
+    let turn = session.start_turn();
+    // 高压预算（超过 Full 阈值）：shadow 仍然只估算、不应用，也不得触发 Full 摘要
+    let ctx = StageContext::builder(turn, session.transcript(), session.queue().clone())
+        .with_context_budget(ContextBudget::new(1_000))
+        .with_compact_config(CompactConfig {
+            shadow_mode_enabled: true,
+            ..Default::default()
+        })
+        .build();
+    ctx.session
+        .transcript
+        .write()
+        .append(human(&"x".repeat(4_000)));
+
+    ctx.model_view.reset();
+    let output = super::compact::run_compact(CompactInput {
+        context: ctx.clone(),
+        has_tool_calls: false,
+    })
+    .await
+    .expect("Compact 阶段不得失败");
+
+    assert!(!output.compacted, "shadow mode 不得应用任何变更");
+    assert_eq!(ctx.model_view.render_count(), 1, "Compact 检查渲染一次");
+    assert!(
+        ctx.model_view.is_cached(),
+        "shadow 路径不构造摘要视图，缓存必须保留"
+    );
+
+    let _ = run_reason(ReasonInput {
+        context: ctx.clone(),
+        has_tool_calls: false,
+    })
+    .await;
+
+    assert_eq!(
+        ctx.model_view.render_count(),
+        1,
+        "shadow 路径上 Compact 检查 + Reason 快照合计只应渲染一次"
+    );
+}

@@ -12,7 +12,8 @@
 //!
 //! 生命周期一律按「同一时刻至多一份整份正文存活」约束，三条约束分别由三处实现：
 //! 1. 键不匹配时先丢旧项、再渲染新视图（[`ModelViewScope::view`]）；
-//! 2. 确定要真正压缩后、Full 另建摘要视图之前释放（`stages::compact`）；
+//! 2. 只有确实要构造 Full 摘要视图时释放（`compact_v2::FullSummaryNotice`，由
+//!    `stages::compact` 传入）；无变化路径不释放，缓存继续复用；
 //! 3. 退出准备作用域统一释放，hook 错误与提前取消等返回路径都不留正文
 //!    （[`ModelViewScope::release_guard`]）。
 

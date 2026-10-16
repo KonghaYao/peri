@@ -152,6 +152,7 @@ async fn test_micro_effective_no_full_overlay() {
         false,
         &mut failures,
         "/tmp",
+        None,
     )
     .await;
     assert_eq!(result.strategy, CompactStrategy::Micro, "应走 Micro");
@@ -187,6 +188,7 @@ async fn test_micro_invalid_upgrades_to_full() {
         false,
         &mut failures,
         "/tmp",
+        None,
     )
     .await;
     // budget=0.80 < threshold=0.95 → 走 "不足但未达 Full 阈值" 路径 → 应用 Micro
@@ -228,6 +230,7 @@ async fn test_micro_effective_full_overlay() {
         false,
         &mut failures,
         "/tmp",
+        None,
     )
     .await;
     // Full 无 LLM 失败，但已应用的 Micro 必须仍是有效策略视图。
@@ -268,6 +271,7 @@ async fn test_micro_then_full_success_does_not_double_count_affected_messages() 
         false,
         &mut failures,
         "/tmp",
+        None,
     )
     .await;
 
@@ -329,6 +333,7 @@ async fn test_force_full_failure_preserves_persistent_excluded_flags_after_prior
         true,
         &mut consecutive_failures,
         &dir.path().to_string_lossy(),
+        None,
     )
     .await;
 
@@ -366,6 +371,7 @@ async fn test_force_triggers_full_directly() {
         true,
         &mut failures,
         "/tmp",
+        None,
     )
     .await;
     assert_eq!(result.strategy, CompactStrategy::Full);
@@ -401,6 +407,7 @@ async fn test_full_without_llm_fails_no_panic() {
         false,
         &mut failures,
         "/tmp",
+        None,
     )
     .await;
     // budget=0.80 → Micro → 满足 target → 只走 Micro
@@ -437,6 +444,7 @@ async fn test_micro_applied_then_full_failure_is_not_reported_as_full_completion
         false,
         &mut failures,
         "/tmp",
+        None,
     )
     .await;
 
@@ -497,6 +505,7 @@ async fn test_estimated_tokens_saved_reflected_in_result() {
         false,
         &mut failures,
         "/tmp",
+        None,
     )
     .await;
 
@@ -545,6 +554,7 @@ async fn test_estimated_tokens_saved_increases_with_more_rounds() {
             false,
             &mut failures,
             "/tmp",
+            None,
         )
         .await
         .estimated_tokens_saved
@@ -586,6 +596,7 @@ async fn test_run_compact_smart_applied_then_full_failure_preserves_effects() {
         false,
         &mut failures,
         "/tmp",
+        None,
     )
     .await;
 
@@ -655,6 +666,7 @@ async fn test_smart_then_full_success_aggregates_metrics() {
         false,
         &mut failures,
         "/tmp",
+        None,
     )
     .await;
 
@@ -689,6 +701,7 @@ async fn test_run_compact_failure_limit_returns_explicit_full_failure() {
         false,
         &mut failures,
         "/tmp",
+        None,
     )
     .await;
 
@@ -741,6 +754,7 @@ async fn test_run_compact_micro_shadow_mode_returns_shadowed_without_changes() {
         false,
         &mut failures,
         "/tmp",
+        None,
     )
     .await;
 
@@ -784,6 +798,7 @@ async fn test_run_compact_smart_shadow_mode_returns_shadowed_without_changes() {
         false,
         &mut failures,
         "/tmp",
+        None,
     )
     .await;
 
@@ -834,6 +849,7 @@ async fn test_micro_satisfied_reclaim_applies_once_from_dry_run_plan() {
         false,
         &mut failures,
         "/tmp",
+        None,
     )
     .await;
 

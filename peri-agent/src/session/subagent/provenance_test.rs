@@ -124,6 +124,7 @@ async fn compact(session: &Arc<Session>, cwd: &str) {
         true,
         &mut 0,
         cwd,
+        None,
     )
     .await;
     *transcript.write() = owned;

@@ -188,6 +188,7 @@ async fn test_audit_excluded_savings_must_not_suppress_full() {
         false,
         &mut failures,
         dir.path().to_str().unwrap(),
+        None,
     )
     .await;
     assert_eq!(

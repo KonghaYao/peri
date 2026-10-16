@@ -135,11 +135,6 @@ async fn compact_core(input: CompactInput) -> (crate::error::AgentResult<Compact
             tracing::trace!(step, "Compact 压力样本已消费，等待新 usage 或工具增长");
             break 'compact_core Ok(CompactOutput { compacted: false });
         }
-        // 确定要真正执行压缩：本轮 Compact 会改写 transcript，Full 更会在 compact_v2
-        // 内独立构造摘要视图（整份历史正文）。先释放模型视图槽，避免整个摘要请求期间
-        // 多驻留一份历史正文。Skip 路径在上方提前 break，缓存继续供 Reason 复用。
-        ctx.model_view.release();
-
         let compact_strategy = match compact_action {
             crate::agent::compact_v2::CompactAction::Smart => {
                 crate::agent::events::CompactStrategy::Smart
@@ -203,6 +198,11 @@ async fn compact_core(input: CompactInput) -> (crate::error::AgentResult<Compact
                 .write()
                 .consume_pressure_sample(key);
         }
+
+        // Full 会在 compact_v2 内另建一份整份历史视图作为摘要请求。只有确实要构造摘要
+        // 视图时才释放本槽（否则整个摘要请求期间多驻留一份历史正文）；Micro/Smart 未
+        // 落地、shadow、空计划未达 Full 阈值等路径没有第二份正文，缓存继续供 Reason 复用。
+        let before_full_summary = || ctx.model_view.release();
 
         // 包在 select! biased 中：cancel 优先，避免 Full Compact 的长 LLM 调用阻塞中断。
         // 注：run_compact 内部不感知 turn cancel_token，必须在此层显式 select。
@@ -284,6 +284,7 @@ async fn compact_core(input: CompactInput) -> (crate::error::AgentResult<Compact
                 false, // force=false（自动触发）
                 &mut consecutive,
                 ctx.cwd(),
+                Some(&before_full_summary),
             ) => r,
         };
 
