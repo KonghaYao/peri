@@ -319,8 +319,8 @@ async fn run_v2_compact_with_cancel(
             true,
             consecutive_failures,
             cwd,
-
-            None,        ) => r,
+            None,
+        ) => r,
     };
 
     // 模型完成与取消可在同一次 poll 内同时发生；返回反馈前仍以取消为先。
