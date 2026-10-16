@@ -565,7 +565,7 @@ theme-navigate = 浏览
 
 # ---- 历史浏览器 ----
 
-thread-browser-title =  恢复会话 ({ $cursor }/{ $total }) 
+thread-browser-title = 恢复会话
 thread-browser-search-placeholder = 搜索…
 thread-browser-empty =   （暂无对话）
 thread-browser-no-match =   （无匹配对话）
@@ -947,6 +947,7 @@ panel-mcp-oauth-start-failed = MCP 授权启动失败：{ $error }
 panel-mcp-oauth-start-no-session = MCP 授权启动失败：没有活动会话
 panel-mcp-icon-connected = ✔
 panel-mcp-icon-error = ✗
+panel-mcp-icon-unknown = ?
 panel-mcp-cache-hit = 缓存命中
 panel-mcp-cache-version-hit = 缓存版本命中
 panel-mcp-cache-protocol-hit = 协议缓存命中
@@ -1227,11 +1228,14 @@ steer-session-unavailable = 会话未能建立：{ $error }。原稿已保留。
 
 thread-browser-project = 项目
 thread-browser-workspace = 工作区
-thread-browser-scope-count =   { $scope } · { $count } 个会话
-thread-browser-scope-loaded =   { $scope } · 已加载 { $count } 个会话 · 还有更多
+thread-browser-count = 已加载 { $count } 个会话
+thread-browser-count-more = 已加载 { $count } 个会话 · 还有更多
+thread-browser-filter-label = 筛选：
+thread-browser-status-label = 状态：
+thread-browser-status-active = 活跃
 thread-browser-messages = { $count } 条消息
 panel-threads-more-hint =   ↑/↓::浏览（到末尾自动加载）  PgUp/PgDn::翻页  Tab::范围  n::更多  d::删除
-thread-browser-all = 全部历史
+thread-browser-all = 全部
 thread-browser-selected = 选中：{ $title }
 thread-browser-selected-path = 路径：{ $path } · ID：{ $id }
 thread-browser-actions = ↑↓ 选择  Enter 继续  v 查看  Tab 范围  a 归档/恢复  r 切换归档  d 删除  Esc 关闭

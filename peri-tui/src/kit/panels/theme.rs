@@ -115,6 +115,10 @@ fn persisted_theme_name() -> String {
 }
 
 /// 持久化当前选中主题到 settings.json。
+///
+/// 候选在副本上构造，落盘成功才提交句柄——失败时 `TUI_CONFIG_HANDLE` /
+/// `PERI_CONFIG_HANDLE` 仍是已持久化的值（面板按句柄显示已保存主题）。主题预览不经此处：
+/// 它由 `switch_theme_atoms` 承担。
 fn persist_theme(name: &str) {
     let Some(tui_handle) = TUI_CONFIG_HANDLE.get() else {
         return;
@@ -122,19 +126,25 @@ fn persist_theme(name: &str) {
     let Some(peri_handle) = PERI_CONFIG_HANDLE.get() else {
         return;
     };
-    let mut tui = tui_handle.write();
-    tui.theme = Some(name.to_string());
-    let tui_snapshot = tui.clone();
-    drop(tui);
-    let mut peri = peri_handle.write();
-    tui_snapshot.sync_to_extra(&mut peri.config.extra);
-    let snap = peri.clone();
-    drop(peri);
+    let mut candidate_tui = tui_handle.read().clone();
+    candidate_tui.theme = Some(name.to_string());
+    let mut candidate = peri_handle.read().clone();
+    candidate_tui.sync_to_extra(&mut candidate.config.extra);
+
     // 失败提示与错误日志由 config_service 统一给出；这里补一条带主题名的 error
     // 日志，保留「哪个主题落盘失败」的定位信息。
-    if !crate::kit::config_service::persist_candidate(&snap) {
+    if !crate::kit::config_service::persist_candidate(&candidate) {
         tracing::error!("failed to persist theme '{}'", name);
+        return;
     }
+
+    // 提交：与候选同一变换，提交后按当前句柄值同步 extra。
+    let snapshot = {
+        let mut tui = tui_handle.write();
+        tui.theme = Some(name.to_string());
+        tui.clone()
+    };
+    snapshot.sync_to_extra(&mut peri_handle.write().config.extra);
 }
 
 /// 读取持久化配置中的 daily_color 开关状态。
@@ -146,6 +156,9 @@ fn daily_color_enabled() -> bool {
 }
 
 /// 切换每日色彩的开关状态，并持久化到 settings.json。
+///
+/// 同 [`persist_theme`]：候选在副本上算，落盘成功才提交句柄——失败时开关显示保持
+/// 已持久化的值。
 fn toggle_daily_color() {
     let Some(tui_handle) = TUI_CONFIG_HANDLE.get() else {
         return;
@@ -153,22 +166,29 @@ fn toggle_daily_color() {
     let Some(peri_handle) = PERI_CONFIG_HANDLE.get() else {
         return;
     };
-    let mut tui = tui_handle.write();
-    tui.daily_color = !tui.daily_color;
+    let mut candidate_tui = tui_handle.read().clone();
+    candidate_tui.daily_color = !candidate_tui.daily_color;
     // 开启时清除旧日期，使启动时立即生效
-    if tui.daily_color {
-        tui.daily_color_date = None;
+    if candidate_tui.daily_color {
+        candidate_tui.daily_color_date = None;
     }
-    let tui_snapshot = tui.clone();
-    drop(tui);
-    let mut peri = peri_handle.write();
-    tui_snapshot.sync_to_extra(&mut peri.config.extra);
-    let snap = peri.clone();
-    drop(peri);
+    let mut candidate = peri_handle.read().clone();
+    candidate_tui.sync_to_extra(&mut candidate.config.extra);
+
     // 同上：失败提示由 config_service 统一给出，这里保留 daily_color 的定位信息。
-    if !crate::kit::config_service::persist_candidate(&snap) {
+    if !crate::kit::config_service::persist_candidate(&candidate) {
         tracing::error!("failed to toggle daily_color");
+        return;
     }
+
+    // 提交：取候选算好的值，避免在提交阶段二次取反。
+    let snapshot = {
+        let mut tui = tui_handle.write();
+        tui.daily_color = candidate_tui.daily_color;
+        tui.daily_color_date = candidate_tui.daily_color_date.clone();
+        tui.clone()
+    };
+    snapshot.sync_to_extra(&mut peri_handle.write().config.extra);
 }
 
 const VISIBLE_ITEMS: usize = 8;

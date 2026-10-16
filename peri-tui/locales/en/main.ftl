@@ -564,7 +564,7 @@ theme-navigate = Navigate
 
 # ---- Thread Browser ----
 
-thread-browser-title =  Resume Session ({ $cursor }/{ $total }) 
+thread-browser-title = Resume Session
 thread-browser-search-placeholder = Search…
 thread-browser-empty =   (No conversations yet)
 thread-browser-no-match =   (No matching conversations)
@@ -949,6 +949,7 @@ panel-mcp-oauth-start-failed = MCP authorization failed to start: { $error }
 panel-mcp-oauth-start-no-session = MCP authorization failed to start: no active session
 panel-mcp-icon-connected = ✔
 panel-mcp-icon-error = ✗
+panel-mcp-icon-unknown = ?
 panel-mcp-cache-hit = CACHE hit
 panel-mcp-cache-version-hit = CACHE version hit
 panel-mcp-cache-protocol-hit = CACHE protocol hit
@@ -1229,11 +1230,14 @@ steer-session-unavailable = Session could not be established: { $error }. Your d
 
 thread-browser-project = Project
 thread-browser-workspace = Workspace
-thread-browser-scope-count =   { $scope } · { $count } sessions
-thread-browser-scope-loaded =   { $scope } · { $count } sessions loaded · more available
+thread-browser-count = { $count } sessions loaded
+thread-browser-count-more = { $count } sessions loaded · more available
+thread-browser-filter-label = Filter:
+thread-browser-status-label = Status:
+thread-browser-status-active = Active
 thread-browser-messages = { $count } messages
 panel-threads-more-hint =   ↑/↓::browse (loads more at end)  PgUp/PgDn::page  Tab::scope  n::more  d::delete
-thread-browser-all = All history
+thread-browser-all = All
 thread-browser-selected = Selected: { $title }
 thread-browser-selected-path = Path: { $path } · ID: { $id }
 thread-browser-actions = ↑↓ select  Enter resume  v view  Tab scope  a archive/restore  r archived view  d delete  Esc close

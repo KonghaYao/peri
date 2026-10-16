@@ -599,14 +599,10 @@ fn hit_browse_item(
     None
 }
 
-/// Browse 进入编辑：目标按当前列表下标解析 provider id（编辑路径随后按稳定 id 定位）。
+/// Browse 进入编辑：目标取自本帧列表快照（与命中同源），编辑路径随后按稳定 id 定位。
 fn enter_edit_row(ctx: &LoginEventCtx) {
     let sel = *ctx.cursor.read();
-    let provider_state = PROVIDER_LIST.state();
-    let store_read = provider_state.read();
-    if sel < store_read.len() {
-        let provider_id = store_read[sel].id.clone();
-        drop(store_read);
+    if let Some(provider_id) = ctx.providers.get(sel).map(|p| p.id.clone()) {
         enter_login_edit_mode(
             &mut ctx.edit_state.write(),
             &mut ctx.edit_focus.write(),
@@ -619,10 +615,12 @@ fn enter_edit_row(ctx: &LoginEventCtx) {
 
 /// Ctrl+D：固定待删除身份（provider id）后进入确认门。
 ///
-/// 身份取自当前投影列表而非进入确认时的下标：列表每 tick 重派生，下标在确认期间会漂移。
+/// 身份取自本帧列表快照（`ctx.providers`，与命中同源）：投影列表每 tick 重派生，按下标
+/// 取实时列表会在「渲染到事件」之间漂移到另一项。确认期间列表刷新由 `confirm_delete`
+/// 按冻结身份校验实时列表兜住。
 fn begin_confirm_delete(ctx: &LoginEventCtx) {
     let sel = *ctx.cursor.read();
-    let target = PROVIDER_LIST.state().read().get(sel).map(|p| p.id.clone());
+    let target = ctx.providers.get(sel).map(|p| p.id.clone());
     if let Some(target) = target {
         *ctx.confirm_delete_target.write() = Some(target);
         *ctx.mode.write() = LoginPanelMode::ConfirmDelete;
