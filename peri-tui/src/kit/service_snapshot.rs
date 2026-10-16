@@ -17,8 +17,8 @@ use tracing::{debug, warn};
 use crate::acp_client::AcpTuiClient;
 use crate::app::service_registry::{ProcessResourceMonitor, SharedPeriConfig};
 use crate::kit::atoms::{
-    ACTIVE_EXECUTION_CWD, ACTIVE_SESSION_ID, THREAD_BROWSER_ARCHIVED, THREAD_BROWSER_SCOPE,
-    THREAD_LIST_ERROR, THREAD_LIST_HAS_MORE, THREAD_LIST_PAGE_COUNT,
+    ACTIVE_EXECUTION_CWD, ACTIVE_SESSION_ID, BRIDGE_RESET_COUNTER, THREAD_BROWSER_ARCHIVED,
+    THREAD_BROWSER_SCOPE, THREAD_LIST_ERROR, THREAD_LIST_HAS_MORE, THREAD_LIST_PAGE_COUNT,
 };
 
 mod commit;
@@ -138,6 +138,9 @@ async fn tick_once(
     };
     let base_metadata = SessionMetadata::from_config(&src.peri_config, src.permission_mode.load());
     let now = peri_time::monotonic_now();
+    // 重置代次与 cwd 一同在首个 await 之前采样：本次 tick 的整批观察值都归这一个代次，
+    // 期间发生的会话边界会让提交门拒绝整批。
+    let bridge_reset = BRIDGE_RESET_COUNTER.get();
     let active_cwd = ACTIVE_EXECUTION_CWD.state().read().clone();
     let cwd = active_cwd.clone().unwrap_or_else(|| src.cwd.clone());
     let scope = THREAD_BROWSER_SCOPE.get();
@@ -183,6 +186,7 @@ async fn tick_once(
         scope,
         archived,
         page_count,
+        bridge_reset,
     };
     let patches = [
         SnapshotPatch::Cwd(cwd),

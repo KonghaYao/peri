@@ -95,6 +95,18 @@ fn test_tasks_nav_hint_describes_cancel_not_open() {
         "Tasks Enter 的真实动作是仅对后台任务行取消；动作语义变化须同步提示与该用例"
     );
 
+    // 取消臂必须把请求真的交给发送侧：只关闭面板的实现同样包含 dispatch_cancel
+    // 定义、也能通过上面的断言，却会静默吞掉用户看到的取消。
+    let cancel_arm = main_src
+        .split("CancelAction::Cancel(target) =>")
+        .nth(1)
+        .and_then(|rest| rest.split("CancelAction::TargetGone").next())
+        .expect("Tasks 取消分支存在");
+    assert!(
+        cancel_arm.contains("dispatch_cancel(target"),
+        "后台任务行的取消必须分派 dispatch_cancel：{cancel_arm}"
+    );
+
     // 取消只可能来自后台任务段的行（段边界取自当帧行表）
     let viewport_src = include_str!("../viewport.rs");
     assert!(

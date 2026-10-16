@@ -18,6 +18,7 @@ fn reset() -> ProjectionIdentity {
         scope: ThreadBrowserScope::Project,
         archived: false,
         page_count: 1,
+        bridge_reset: BRIDGE_RESET_COUNTER.get(),
     }
 }
 
@@ -109,7 +110,7 @@ async fn every_identity_dimension_rejects_the_entire_batch_without_any_atom_writ
     let (transport, _server) = mpsc_transport_pair();
     let (client, _, _) = AcpTuiClient::new(transport);
     client.force_stable_for_test("session", false);
-    for dimension in 0..7 {
+    for dimension in 0..8 {
         let mut identity = reset();
         ACTIVE_SESSION_ID.set("session".into());
         identity.session_id = "session".into();
@@ -122,6 +123,7 @@ async fn every_identity_dimension_rejects_the_entire_batch_without_any_atom_writ
             4 => THREAD_LIST_PAGE_COUNT.set(2),
             5 => identity.session_generation.as_mut().unwrap().1 += 1,
             6 => identity.session_generation = None,
+            7 => BRIDGE_RESET_COUNTER.set(BRIDGE_RESET_COUNTER.get().wrapping_add(1)),
             _ => unreachable!(),
         }
         // 所有输出都持有读借用，任何越过失效门的写入都会导致测试失败。
@@ -156,4 +158,30 @@ async fn every_identity_dimension_rejects_the_entire_batch_without_any_atom_writ
     }
     reset();
     client.close();
+}
+
+/// 启动后的空会话窗口里新建会话：`project_session_boundary(None)` 前后会话号同为空串、
+/// 会话代次同为 `None`，六项身份分不出边界两侧，只有重置代次前进。此时代次必须单独
+/// 拒绝边界前采样的整批观察值——否则跨边界的供应商/模型/cwd/列表值会在过渡期发布。
+#[test]
+#[serial]
+fn bridge_reset_alone_rejects_a_batch_captured_before_the_boundary() {
+    let identity = reset();
+    let before = BRIDGE_RESET_COUNTER.get();
+    BRIDGE_RESET_COUNTER.set(before.wrapping_add(1));
+    assert_eq!(*ACTIVE_SESSION_ID.state().read(), identity.session_id);
+    assert_eq!(identity.session_generation, None);
+    let snapshot_before = SERVICE_SNAPSHOT.state().read().clone();
+    assert!(
+        !commit_projection(
+            None,
+            &identity,
+            &[SnapshotPatch::Cwd("stale".into())],
+            ProjectionAtoms::default()
+        ),
+        "重置代次前进后必须拒绝整批发布"
+    );
+    assert_eq!(*SERVICE_SNAPSHOT.state().read(), snapshot_before);
+    BRIDGE_RESET_COUNTER.set(before);
+    reset();
 }

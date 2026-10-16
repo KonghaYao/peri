@@ -133,7 +133,9 @@
 投影写入保持单点：唯一发布入口是 `service_snapshot/commit.rs` 的 `commit_projection`
 （短锁内逐字段 compare-and-set，身份失效则整体放弃），会话级写入走窄入口
 `publish_session_fields`；`SERVICE_SNAPSHOT` 写锁与失效门只允许出现在 `commit.rs`，
-刷新单元只负责采样并产出 patch；拆分不得把提交或失效门分散进各刷新单元。
+刷新单元只负责采样并产出 patch；拆分不得把提交或失效门分散进各刷新单元。整批身份含
+会话号、会话代次、执行 cwd、列表视图与前端重置代次（`BRIDGE_RESET_COUNTER`）：边界前后
+会话号同为空串的过渡态，靠代次拒收边界前采样的整批。
 
 ### 面板职责映射
 

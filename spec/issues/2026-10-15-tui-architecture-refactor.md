@@ -160,6 +160,24 @@
    基线未重现这两例，改记为「来源未确定」并列入待完成。
 3. 复核后未采纳的部分：无。
 
+### 第三轮（`ddb105320` 快照）
+
+1. **`BRIDGE_RESET_COUNTER` 未纳入 `ProjectionIdentity`**（属实，已修）：`tick_once` 采样
+   六项身份后还要 await 会话服务与会话元数据刷新；启动后的空会话窗口里第一次 `new_session`
+   会走 `project_session_boundary(None)`——会话号前后同为空串、会话代次前后同为 `None`
+   （过渡态恒为 `None`）、执行 cwd 前后同为 `None`，六项身份分不出边界两侧，重置代次前进后
+   提交门仍会接受边界前采样的整批并发布到 `SERVICE_SNAPSHOT` / `THREAD_LIST` /
+   `MEMORY_LIST` 等 atom。现把前端重置代次作为第七项身份：`tick_once` 在首个 await 之前采样，
+   `identity_is_current` 逐项比较。依据同源：`thread_browser.rs` 的列表回写身份已含
+   `bridge_reset`（「同一会话号下 bridge 重建也换掉列表」），服务快照发布 `THREAD_LIST`
+   本就该用同一代次。回归：新增
+   `bridge_reset_alone_rejects_a_batch_captured_before_the_boundary`（六项不变、仅代次前进
+   仍须拒绝且不写 atom），身份维度循环由 7 维扩到 8 维。
+2. **Tasks 源码用例：取消臂只关面板也能通过**（属实，已补断言）：
+   `CancelAction::Cancel(target)` 臂现在必须含 `dispatch_cancel(target`；否则「取消只关闭面板」
+   的实现照样通过既有的 `cancel_bg_task` 存在性断言。
+3. 复核后未采纳的部分：无。
+
 ## 已完成（按提交）
 
 | 提交 | 内容 |
@@ -219,6 +237,15 @@
    足以归为预先存在。抖动记录：收口后 15 轮全量 2 轮失败（1 轮 2 例 `steer_consumer`、1 轮
    1 例 plugin guard），其余 13 轮全绿；基线例数 1845 且采样时负载更低，基线对照本身不构成
    证明。抖动面是跨用例共享全局 atom + 超时驱动的用例，单列跟进，本批不修。
+   第三轮修复后本机复跑 10 轮：5 轮全绿（**2006 passed**），5 轮各 1 例失败，其中 4 轮捕获到
+   用例名且均为同一例
+   `kit::panels::plugin::guard_tests::stale_session_or_reset_event_cannot_cancel_new_loading`
+   （隔离 5/5 通过；另 1 轮未捕获名称，形态相同）。**机制已定位**：该用例断言
+   `handle_search_event` 返回 `Consumed`，而 `search_handler` 首行按
+   `focus_router::popup_owns_foreground()` 整体让路，后者读全局 `POPUP_KIND`——并行运行的
+   非 `#[serial]` 用例只要此刻有弹窗（HITL / OAuth / Confirm / AskUser）打开，本用例就会在
+   `guard_test.rs:233` 收到 `Ignored`。即同一「跨用例共享全局 atom」抖动面，与本批 diff 无关；
+   本轮采样时本机 load average 45–66（`uptime`），抖动率高于先前 15 轮采样，与负载一致。
    CI 可移植性：`tasks/tests/source.rs` 与 `agent_test.rs` 的源码头扫描原先隐含「检出为 LF」——
    `windows-latest` 检出为 CRLF 时 `"\n}\n"` 切不开组件体、断言越界扫到测试模块（CI 实报
    TUI-RENDER-001；`agent_test.rs` 同款会静默弱化而非报错）。现读入即归一为 LF；本地以 CRLF

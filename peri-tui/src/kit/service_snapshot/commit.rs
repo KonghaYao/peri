@@ -8,11 +8,12 @@
 use crate::acp_client::AcpTuiClient;
 use crate::kit::atoms::ServiceSnapshot;
 use crate::kit::atoms::{
-    ACTIVE_EXECUTION_CWD, ACTIVE_SESSION_ID, CRON_JOBS, CURRENT_SESSION_TITLE, FILE_LIST,
-    HOOK_LIST, Handle, MCP_SERVERS, MEMORY_LIST, McpServerSummary, MemoryEntry, PLUGIN_LIST,
-    PROVIDER_LIST, PluginSummary, ProviderSummary, SERVICE_PROJECTION_ERROR, SERVICE_SNAPSHOT,
-    THREAD_BROWSER_ARCHIVED, THREAD_BROWSER_SCOPE, THREAD_LIST, THREAD_LIST_ERROR,
-    THREAD_LIST_HAS_MORE, THREAD_LIST_PAGE_COUNT, ThreadBrowserScope, ThreadSummary,
+    ACTIVE_EXECUTION_CWD, ACTIVE_SESSION_ID, BRIDGE_RESET_COUNTER, CRON_JOBS,
+    CURRENT_SESSION_TITLE, FILE_LIST, HOOK_LIST, Handle, MCP_SERVERS, MEMORY_LIST,
+    McpServerSummary, MemoryEntry, PLUGIN_LIST, PROVIDER_LIST, PluginSummary, ProviderSummary,
+    SERVICE_PROJECTION_ERROR, SERVICE_SNAPSHOT, THREAD_BROWSER_ARCHIVED, THREAD_BROWSER_SCOPE,
+    THREAD_LIST, THREAD_LIST_ERROR, THREAD_LIST_HAS_MORE, THREAD_LIST_PAGE_COUNT,
+    ThreadBrowserScope, ThreadSummary,
 };
 use crate::kit::atoms::{CronJobSummary, HookSummary, McpStatusSnapshot};
 
@@ -25,6 +26,11 @@ pub(super) struct ProjectionIdentity {
     pub(super) scope: ThreadBrowserScope,
     pub(super) archived: bool,
     pub(super) page_count: u32,
+    /// 前端重置代次。会话边界的清场与回退分支把会话号置空（`None` 目标），此时
+    /// `session_id` 前后同为空串、`session_generation` 前后同为 `None`——单看上面六项
+    /// 分不出批次落在边界哪一侧。`BRIDGE_RESET_COUNTER` 是边界自己的代次，纳入后跨
+    /// 边界的批次一律整批放弃；列表面板的回写身份也用同一代次。
+    pub(super) bridge_reset: u64,
 }
 
 /// 进程采样字段，只能更新 `memory_mb` 与 `cpu_percent`。
@@ -264,12 +270,14 @@ fn identity_is_current(client: Option<&AcpTuiClient>, expected: &ProjectionIdent
     let current_scope = THREAD_BROWSER_SCOPE.get();
     let current_archived = THREAD_BROWSER_ARCHIVED.get();
     let current_page_count = THREAD_LIST_PAGE_COUNT.get();
+    let current_bridge_reset = BRIDGE_RESET_COUNTER.get();
     current_cwd == expected.active_cwd
         && current_session == expected.session_id
         && current_generation == expected.session_generation
         && current_scope == expected.scope
         && current_archived == expected.archived
         && current_page_count == expected.page_count
+        && current_bridge_reset == expected.bridge_reset
 }
 
 fn write_if_changed<T>(state: &Handle<T>, next: T)

@@ -45,7 +45,7 @@ ACP notification → acp_notifier → acp_bridge / BridgeState
 - 同一个 `State` 的读守卫不得跨过对该状态的写：在条件或 `match` 里「先 `read()` 再在同一表达式内 `write()`」会自锁挂死（内部 RwLock 同线程不可重入），表现为测试永久挂起而非 panic。先把值取到局部变量（`.clone()` / 拷贝）再写，测试探针与事件处理同样适用。
 - cancel 关闭 reverse interaction owner，不等于执行终态已确认；匹配当前 execution 的 done 仍须透传一次以结束 loading，重复 done 与旧 execution 终态不得影响新 turn。
 - 消息区按 generation 验证 publication，复用不可变布局；冷缓存保持选择、复制与高度。主消息/详情共用 entry 缓存；预算不含 canonical 历史、轻量索引或整体 RSS。
-- Cron/MCP 经 ACP 消费；快照/last-good 按 session generation 隔离，失败可见；无会话明确标注启动插件/Hooks。scheduler/pool 及关闭权属宿主。服务快照的投影写入保持单点：唯一发布入口是 `kit/service_snapshot/commit.rs` 的 `commit_projection`（短锁内逐字段 compare-and-set，失败即整体放弃），会话字段用窄入口 `publish_session_fields`；`SERVICE_SNAPSHOT` 写锁与失效门只允许出现在 `commit.rs`，刷新单元只产出 patch。
+- Cron/MCP 经 ACP 消费；快照/last-good 按 session generation 与前端重置代次隔离，失败可见；无会话明确标注启动插件/Hooks。scheduler/pool 及关闭权属宿主。服务快照的投影写入保持单点：唯一发布入口是 `kit/service_snapshot/commit.rs` 的 `commit_projection`（短锁内逐字段 compare-and-set，失败即整体放弃），会话字段用窄入口 `publish_session_fields`；`SERVICE_SNAPSHOT` 写锁与失效门只允许出现在 `commit.rs`，刷新单元只产出 patch。
 - Assistant VM 的完整气泡以 `Arc<TuiAssistantBubble>` 发布，快照与 im 节点 COW 共享不可变 payload；修改 fold/终态前先判定是否真的变化，再复制或 `Arc::make_mut`，不能改动旧快照。后台流式累积仍持有独占正文，不能把共享发布气泡直接当逐 chunk 写入缓冲。
 - Markdown 稳定分片仅冻结安全空行边界，fence 内部空行不能切断代码块；引用、列表、表格与未闭合 fence 保留可变尾部，terminal full parse 校正。正文前景与代码背景须同时进入内外层缓存 key，主题变化只复用 parsed blocks，不复用旧样式。
 - `#[component]` 的 hooks 必须在所有条件分支、`match` 与提前返回前按稳定顺序调用。
