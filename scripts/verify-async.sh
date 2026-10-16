@@ -22,8 +22,8 @@
 #   load 会互相推高）留待实测数据需要时再加。
 #
 # 证据口径（对齐 TEST-EVIDENCE-001）：回执记录本次验证的快照 =
-#   HEAD + `git diff HEAD` 哈希 + 未跟踪文件清单哈希。`read` 会把回执快照与当前
-#   工作区比对，不一致即判定 stale——stale 回执不能当作当前代码的证据。started
+#   HEAD + `git diff HEAD` 哈希 + 未跟踪文件（路径与内容）哈希。`read` 会把回执快照与
+#   当前工作区比对，不一致即判定 stale——stale 回执不能当作当前代码的证据。started
 #   通知本身不算通过，判定只看每个 step 的 exit status。
 #
 # 命令范围（CI 同款入口的本地副本）：
@@ -48,7 +48,7 @@ cargo_script="$repo_root/scripts/cargo-rmcp-patched.sh"
 
 now_utc() { date -u +%Y-%m-%dT%H:%M:%SZ; }
 
-# 工作区快照：HEAD + 已跟踪改动的 diff 哈希 + 未跟踪文件清单哈希
+# 工作区快照：HEAD + 已跟踪改动的 diff 哈希 + 未跟踪文件的路径与内容哈希
 snapshot_json() {
     VT_ROOT="$repo_root" python3 - <<'PY'
 import hashlib
@@ -69,7 +69,22 @@ branch = git("rev-parse", "--abbrev-ref", "HEAD").decode().strip()
 # workspace，其 gitlink 提交与工作树由并发的其他会话改动，若计入会让回执在无关
 # 噪声下反复被判 stale。子模块状态单独记录，仅作说明、不参与比对。
 diff = git("diff", "HEAD", "--ignore-submodules=all")
-untracked = git("ls-files", "--others", "--exclude-standard")
+# 未跟踪文件要连内容一起哈希：只哈希路径清单时，改一个未跟踪源文件的正文（路径不变）
+# 不会让指纹变化，read 会把旧回执当成 fresh——回执就不再是当前代码的证据（TEST-EVIDENCE-001）。
+untracked_paths = [p for p in git("ls-files", "--others", "--exclude-standard", "-z").split(b"\0") if p]
+uh = hashlib.sha256()
+for path in sorted(untracked_paths):
+    uh.update(path + b"\0")
+    try:
+        with open(os.path.join(root, path.decode()), "rb") as fh:
+            while True:
+                chunk = fh.read(1 << 16)
+                if not chunk:
+                    break
+                uh.update(chunk)
+    except OSError:
+        uh.update(b"<unreadable>")  # 读不到也要让指纹变化，不能静默当作没改
+untracked = uh.digest() if untracked_paths else b""
 submodules = git("submodule", "status", check=False)
 
 
@@ -83,7 +98,7 @@ print(json.dumps({
     "diff_hash": short(diff),
     "untracked_hash": short(untracked),
     "submodules_hash": short(submodules),
-    "dirty": bool(diff.strip()) or bool(untracked.strip()),
+    "dirty": bool(diff.strip()) or bool(untracked_paths),
 }))
 PY
 }
@@ -339,12 +354,12 @@ for step in receipt.get("steps", []):
 lines.append("not_run: " + "; ".join(receipt.get("not_run", [])))
 if submodules_drifted:
     lines.append("说明：子模块状态已变（不属于 cargo workspace，不计入快照比对）")
-if not same:
-    fails = [s for s in receipt.get("steps", []) if s["status"] == "fail"]
-    for step in fails:
-        if step.get("tail"):
-            lines.append(f"--- {step['name']} tail ---")
-            lines.append(step["tail"])
+# 失败步骤的 tail 无条件打印：verdict=fail 且快照 fresh 才是要立刻处理的情形，
+# 只在 stale 时打印会把「刚跑出来的失败」藏起来、反过来展示过期的失败。
+for step in receipt.get("steps", []):
+    if step["status"] == "fail" and step.get("tail"):
+        lines.append(f"--- {step['name']} tail ---")
+        lines.append(step["tail"])
 if live:
     lines.append(f"注意：另有验证在跑（pid {os.environ.get('VR_LOCK_PID', '?')}，开始 {os.environ.get('VR_RUNNING_SINCE', '?')}）")
 print("\n".join(lines))
