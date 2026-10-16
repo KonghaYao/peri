@@ -461,8 +461,8 @@ pub fn ThreadBrowserPanel(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
             item_meta_style,
         )]));
     } else {
-        // 相对时间列：列宽取本帧列表里最宽的时间文本（夹在 6..=12），语言与时间
-        // 跨度变化时列宽稳定，滚动不抖动。
+        // 相对时间列：列宽取本帧列表里最宽的时间文本（下限 6），语言与时间跨度
+        // 变化时列宽稳定，滚动不抖动。
         let time_labels: Vec<String> = threads.iter().map(relative_time_label).collect();
         let time_col_width = time_column_width(&time_labels);
         for (i, entry) in threads.iter().enumerate() {
@@ -883,9 +883,11 @@ fn chip_span(label: String, active: bool, active_style: Style, idle_style: Style
     )
 }
 
-/// 相对时间列宽——本帧列表中时间文本的最大显示宽度，夹在 `[6, 12]`。
+/// 相对时间列宽——本帧列表中时间文本的最大显示宽度，下限 6。
 ///
-/// 定宽是为了让标题列对齐：逐行自适应宽度会让标题在每行错位。
+/// 定宽是为了让标题列对齐：逐行自适应宽度会让标题在每行错位。这里只设下限、不设上限——
+/// 上限一旦小于某行标签的实际宽度，该行 `pad_display_width` 无从补白，标题就会比同帧
+/// 其它行右移（英文 `1000 days ago` 已是 13 列）。
 fn time_column_width(labels: &[String]) -> usize {
     use unicode_width::UnicodeWidthStr;
     labels
@@ -893,10 +895,12 @@ fn time_column_width(labels: &[String]) -> usize {
         .map(|label| label.width())
         .max()
         .unwrap_or(0)
-        .clamp(6, 12)
+        .max(6)
 }
 
 /// 按终端显示宽度右侧补空格——`{:<width$}` 按字符数补白，中文时间文本会错位。
+///
+/// 不截断超宽文本；调用方以 [`time_column_width`] 保证 `width` 不小于本帧任何标签。
 fn pad_display_width(text: &str, width: usize) -> String {
     use unicode_width::UnicodeWidthStr;
     let used = text.width();

@@ -1,16 +1,20 @@
 //! 面板源码约束（TUI-HOOK-001 / TUI-RENDER-001）与导航提示文案的一致性回归。
 
-/// 面板组件源码。
-fn tasks_source() -> &'static str {
-    include_str!("../../tasks.rs")
+/// 面板组件源码；读入即归一为 LF。
+///
+/// 源码头扫描必须与检出换行符无关：Windows 检出为 CRLF 时 `"\n}\n"` 切不开组件体，
+/// 断言会越过组件体扫到文件末尾的测试模块（windows-latest 曾因此报 TUI-RENDER-001）。
+fn tasks_source() -> String {
+    include_str!("../../tasks.rs").replace("\r\n", "\n")
 }
 
 /// 组件体：文件末尾的 `mod tests;` 之后只剩测试模块声明。
-fn panel_source() -> &'static str {
+fn panel_source() -> String {
     tasks_source()
         .split("mod tests;")
         .next()
         .expect("tasks 模块体存在")
+        .to_owned()
 }
 
 /// TUI-HOOK-001：组件内全部 hook 在条件分支与渲染体之前；渲染体不写 atom、不起副作用。

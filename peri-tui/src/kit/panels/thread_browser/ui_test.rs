@@ -333,6 +333,8 @@ fn relative_time_buckets_by_elapsed_minutes() {
 /// 时间列补白按终端显示宽度：中文时间文本用 `{:<width$}` 会少补空格。
 #[test]
 fn time_column_pads_by_display_width_not_char_count() {
+    use unicode_width::UnicodeWidthStr;
+
     assert_eq!(pad_display_width("abc", 6), "abc   ");
     assert_eq!(pad_display_width("刚刚", 6), "刚刚  ", "中文 2 字符占 4 列");
     assert_eq!(pad_display_width("12 天前", 6), "12 天前", "已达标不裁剪");
@@ -345,10 +347,20 @@ fn time_column_pads_by_display_width_not_char_count() {
         7,
         "取最宽条目"
     );
+    // 列宽必须容纳本帧最宽标签，否则该行补白失败、标题比同帧其它行右移。
     assert_eq!(
-        time_column_width(&["x".repeat(40)]),
-        12,
-        "超宽时间文本夹在上界"
+        time_column_width(&["1000 days ago".to_owned()]),
+        13,
+        "超宽时间文本撑开列宽而不是被列宽截断"
+    );
+    let wide = ["2 hours ago", "1000 days ago"].map(str::to_owned);
+    let column = time_column_width(&wide);
+    assert_eq!(
+        wide.iter()
+            .map(|label| pad_display_width(label, column).width())
+            .collect::<Vec<_>>(),
+        vec![column, column],
+        "同帧所有行补白到同一列宽"
     );
 }
 

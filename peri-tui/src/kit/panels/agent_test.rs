@@ -142,7 +142,9 @@ fn test_collect_subagents_recurses_into_nested_subagent() {
 /// 只读 Info 面板（333c51d4）：Enter 与 Esc 一样关闭面板，提示必须描述真实动作。
 #[test]
 fn test_agent_nav_hint_describes_close_not_open() {
-    let src = include_str!("agent.rs");
+    // 归一为 LF 后再切分：Windows 检出为 CRLF 时 `"#[cfg(test)]\n#[path"` 匹配不到，
+    // `split` 会退回整份文件，断言范围静默扩大（弱化用例而非报错）。
+    let src = include_str!("agent.rs").replace("\r\n", "\n");
     // 面板主体 = 测试模块声明之前（`#[cfg(test)]` 现在也用于组件内的测试探针，
     // 故按模块声明切分，口径与迁移前一致）
     let main_src = src
