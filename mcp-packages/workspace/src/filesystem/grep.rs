@@ -57,6 +57,7 @@ use peri_mcp_common::shell::persist_truncated_output;
 
 /// 核心搜索函数（同步，在 spawn_blocking 中运行）。
 ///
+/// `glob_filters`：invoke 已校验并编译的 `-g`/`type` 过滤器（空切片 = 不过滤）。
 /// `cancelled`：invoke 超时置位。置位后 sink 立即停止当前文件搜索、walker 在
 /// 检查点（walk 闭包开头、文件完成后）`Quit` 终止整个遍历。`stopped`（sink 与
 /// walker 共享）由输出预算（行数/字节）置位，语义详见 grep_format.rs SearchSink
@@ -64,6 +65,7 @@ use peri_mcp_common::shell::persist_truncated_output;
 /// 模式数完当前文件再停（保证计数正确）。
 fn execute_search(
     parsed: &ParsedArgs,
+    glob_filters: &[glob::Pattern],
     cwd: &str,
     head_limit: usize,
     cancelled: Arc<AtomicBool>,
@@ -130,12 +132,9 @@ fn execute_search(
         builder.max_depth(Some(depth));
     }
 
-    // 预编译 glob 过滤器
-    let glob_filters: Vec<glob::Pattern> = parsed
-        .glob_filters
-        .iter()
-        .filter_map(|g| glob::Pattern::new(g).ok())
-        .collect();
+    // `-g` glob 过滤器与 type 映射已在 invoke 中编译校验一次，
+    // 这里只按文件名词法匹配（语法错误在调用前即报错，不进入遍历）。
+    let glob_filters = glob_filters.to_vec();
 
     // 共享状态
     // `results` 存 (排序 key=display_path, 输出行)：并行遍历下 push 顺序 = 线程调度
@@ -584,6 +583,19 @@ impl BaseTool for GrepTool {
             Err(e) => return Err(ToolFailure::new("Invalid output_mode. Use content, files_with_matches, count, or files_without_matches.", format!("Error: {e}")).into()),
         };
 
+        // glob 语法在遍历前校验一次：非法过滤器报错，不退化成「搜索全部文件」，
+        // 也不在 walker 热循环里重复编译（`*.{ts,tsx}` 在这里展开成多个 pattern）。
+        let glob_filters = match super::glob_patterns::compile_glob_filters(&parsed.glob_filters) {
+            Ok(filters) => filters,
+            Err(e) => {
+                return Err(ToolFailure::new(
+                    "Invalid glob pattern. Close every bracket and brace; supported glob syntax is `*`, `?`, `[abc]` and `{a,b}` alternation (e.g. \"*.{ts,tsx}\", \"*.rs\").",
+                    format!("Error: {e}"),
+                )
+                .into());
+            }
+        };
+
         let head_limit = grep_input.head_limit;
 
         let cwd = self.cwd.clone();
@@ -595,7 +607,7 @@ impl BaseTool for GrepTool {
             SEARCH_TIMEOUT,
             tokio::task::spawn_blocking({
                 let cancelled = Arc::clone(&cancelled);
-                move || execute_search(&parsed, &cwd, head_limit, cancelled)
+                move || execute_search(&parsed, &glob_filters, &cwd, head_limit, cancelled)
             }),
         )
         .await;

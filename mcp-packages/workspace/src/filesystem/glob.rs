@@ -52,9 +52,10 @@ fn soft_warn_pattern(pattern: &str) -> Option<&'static str> {
 /// 返回 pattern 中第一个元字符（`* ? [ {`）的字节下标。
 ///
 /// 注意：glob 0.3.3 无反斜杠转义——`\` 是字面字符，`\*` 中 `*` 仍是元字符
-/// （`Pattern::escape` 用 `[x]` 包裹而非 `\`）。`{` 在 glob 0.3.3 中也没有
-/// 交替语义（按字面匹配），这里按保守集合识别：把 `{` 当作元字符只会让剪枝
-/// 更保守（回退全遍历），不影响正确性。若未来升级 glob 版本，需重审此集合。
+/// （`Pattern::escape` 用 `[x]` 包裹而非 `\`）。`{` 在 glob crate 中也没有
+/// 交替语义（按字面匹配）；交替由 `glob_patterns.rs` 在编译前展开，这里把 `{`
+/// 当元字符仍只会让剪枝更保守（回退全遍历），不影响正确性。若未来升级 glob
+/// 版本或改变展开位置，需重审此集合。
 fn first_meta_index(pattern: &str) -> Option<usize> {
     pattern
         .char_indices()
@@ -161,7 +162,7 @@ fn collect_files(
     base: &Path,
     walk_root: &Path,
     consumed: usize,
-    pattern: &glob::Pattern,
+    patterns: &[glob::Pattern],
     plan: &WalkPlan,
     cancelled: &AtomicBool,
     results: &mut Vec<(Option<SystemTime>, String)>,
@@ -207,7 +208,7 @@ fn collect_files(
                     let abs_path = e.path().to_string_lossy().to_string();
                     if let Ok(rel) = e.path().strip_prefix(base) {
                         let rel_str = rel.to_string_lossy().replace('\\', "/");
-                        if pattern.matches(&rel_str) {
+                        if patterns.iter().any(|pattern| pattern.matches(&rel_str)) {
                             // mtime 在收集时读取一次并缓存，排序阶段不再做任何 syscall。
                             let mtime = e.metadata().ok().and_then(|m| m.modified().ok());
                             results.push((mtime, abs_path));
@@ -230,7 +231,7 @@ fn collect_files(
 /// 排序 + 组装输出（同步，与 collect_files 一起在 spawn_blocking 中运行）。
 fn run_glob(
     base: &Path,
-    pattern: &glob::Pattern,
+    patterns: &[glob::Pattern],
     plan: &WalkPlan,
     cancelled: &AtomicBool,
 ) -> String {
@@ -242,7 +243,7 @@ fn run_glob(
         base,
         &walk_root,
         consumed,
-        pattern,
+        patterns,
         plan,
         cancelled,
         &mut results,
@@ -372,8 +373,9 @@ impl BaseTool for GlobFilesTool {
         })?;
 
         // Pattern 语法预校验 + 只编译一次：collect_files 复用编译结果，
-        // 不再在逐文件热循环里重复 glob::Pattern::new。
-        let compiled = glob::Pattern::new(pattern).map_err(|e| {
+        // 不再在逐文件热循环里重复 glob::Pattern::new。`{foo,bar}` 交替在这里展开
+        // 成多个 pattern（glob crate 本身只按字面匹配 `{`）。
+        let compiled = super::glob_patterns::compile_glob_patterns(pattern).map_err(|e| {
             ToolFailure::new(
                 "Pattern syntax error. Use a valid glob pattern, e.g. *.rs (current dir), **/*.rs (recursive), src/**/*.rs, or {foo,bar}.rs (enumeration); brackets like [abc] must be closed.",
                 format!("Error: Pattern syntax error in {pattern:?}: {e}"),
