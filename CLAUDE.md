@@ -37,27 +37,28 @@ v4 分阶段推进存算分离。阶段状态以代码、契约测试及 active 
 ## 行事风格
 
 - **像研究员一样判断，像工程师一样交付。** 区分观察、推断和假设，以代码、复现或实验支持结论；说明局限，不补造数字，不把命令启动当成完成。
-- 汇报风格：用户有阅读障碍，需要你减少汇报字数，多多使用 order list 结构化表达。
+- 汇报风格：用户有阅读障碍，减少字数，多用 order list 结构化表达。
 
 ## 事实源与任务路由
 
 先读 [标准索引](docs/standards/index.md)，区分现状与目标。按 `docs/code-index/` 核实入口、同步变更。Peri loader 不继承父目录，须显式读取模块指引。
 
 | 任务 | 先读 |
-| ------------------------------------------------------------ | ----------------------------------------------------------- |
+| --- | --- |
 | Agent loop、Compact、provider、session | `peri-agent/CLAUDE.md` + architecture/rust |
 | ACP host、stdio、prompt、event、caps | `peri-acp/CLAUDE.md` + architecture/rust |
 | Controller/Runtime、cancel、Langfuse | architecture/rust + 对应 code-index |
 | MCP（含内置实例）、plugin、skills、subagent、HITL、工具 | middlewares 与 `mcp-packages/CLAUDE.md` + architecture/rust |
 | Workflow | middleware guide + `docs/code-index/peri-workflow.md` |
-| TUI | `peri-tui/CLAUDE.md` + tui/rust |
+| TUI | `peri-tui/CLAUDE.md` + tui/rust；集成用例 `docs/verification/tui-integration-cases/` |
 | E2E | `e2e/CLAUDE.md` + testing |
+| 交付验证 | `scripts/check-changed.sh`、`scripts/verify-async.sh`（开工先读 read） |
 | 文档站 | `peri-cool/CLAUDE.md` + documentation |
 | 历史学习 | `.claude/skills/learn-from-history/SKILL.md` |
 
-简称指同名标准文件，architecture 指 `architecture-contracts.md`；跨层、prompt、事件、工具、链序或安全变更读 architecture，Git 操作读 `git.md`，指引维护读 `documentation.md`。
+简称指同名标准，architecture 指 `architecture-contracts.md`；跨层、prompt、事件、工具、链序或安全变更读 architecture，Git 操作读 `git.md`，指引维护读 `documentation.md`。
 
-设计：`docs/design/README.md`；需求：`spec/issues/`；历史：`spec/global/problems.md`；TUI 集成测试用例权威目录：`docs/verification/tui-integration-cases/README.md`。主路径 `peri-tui → peri-acp → peri-agent::run_react_loop`；退出语义查 Agent 指引，workspace 查 `Cargo.toml`。
+设计：`docs/design/README.md`；需求：`spec/issues/`；历史：`spec/global/problems.md`。主路径 `peri-tui → peri-acp → peri-agent::run_react_loop`；退出语义查 Agent 指引，workspace 查 `Cargo.toml`。
 
 ## Workspace 命令
 
