@@ -49,10 +49,7 @@ fn test_view_rebuilds_after_content_change() {
     transcript.append(human("second"));
     let after = scope.view(&transcript, &caps).expect("内容变更后重建");
 
-    assert!(
-        !Arc::ptr_eq(&before, &after),
-        "内容变更后不得复用旧视图"
-    );
+    assert!(!Arc::ptr_eq(&before, &after), "内容变更后不得复用旧视图");
     assert_eq!(scope.render_count(), 2);
     assert_eq!(after.len(), 2);
     assert_eq!(after[1].content(), "second");
@@ -74,7 +71,10 @@ fn test_view_does_not_reuse_across_transcript_instances() {
         right.view_revision().revision,
         "构造前提：两个实例的修订号相同"
     );
-    assert_ne!(left.view_revision().instance, right.view_revision().instance);
+    assert_ne!(
+        left.view_revision().instance,
+        right.view_revision().instance
+    );
 
     let left_view = scope.view(&left, &caps).expect("左实例视图");
     let right_view = scope.view(&right, &caps).expect("右实例视图");

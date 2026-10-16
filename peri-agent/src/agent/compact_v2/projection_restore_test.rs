@@ -71,12 +71,7 @@ fn excluded_legacy_directive_does_not_invalidate_visible_history() {
         super::projection::plan_from_persisted_directives(&transcript, PROJECTION_POLICY_VERSION),
         PersistedDirectiveRestore::Absent
     ));
-    let projected = render_llm_view(
-        &transcript,
-        &[],
-        &ProviderCapabilities::default(),
-    )
-    .unwrap();
+    let projected = render_llm_view(&transcript, &[], &ProviderCapabilities::default()).unwrap();
     assert_eq!(projected.len(), 1);
     assert_eq!(projected[0].id(), visible);
     assert_eq!(projected[0].content(), "visible message");

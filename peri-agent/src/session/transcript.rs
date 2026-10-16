@@ -9,7 +9,7 @@
 
 use std::collections::HashMap;
 use std::sync::{
-    atomic::{AtomicU8, AtomicU64, Ordering},
+    atomic::{AtomicU64, AtomicU8, Ordering},
     Arc,
 };
 

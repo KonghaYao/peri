@@ -969,7 +969,10 @@ fn assert_revision_advanced(
     case: &str,
 ) -> TranscriptRevision {
     let current = transcript.view_revision();
-    assert_eq!(current.instance, previous.instance, "{case}: 实例身份不得变化");
+    assert_eq!(
+        current.instance, previous.instance,
+        "{case}: 实例身份不得变化"
+    );
     assert!(
         current.revision > previous.revision,
         "{case}: 修订号必须前进（旧模型视图一律失效），previous={previous:?} current={current:?}"
@@ -1018,9 +1021,7 @@ fn test_view_revision_advances_on_model_view_mutations() {
     ));
     rev = assert_revision_advanced(&t, rev, "mirror_committed_reminder");
 
-    assert!(t.mirror_committed_payload(PersistedPayload::Message(make_human(
-        "mirrored payload"
-    ))));
+    assert!(t.mirror_committed_payload(PersistedPayload::Message(make_human("mirrored payload"))));
     rev = assert_revision_advanced(&t, rev, "mirror_committed_payload");
 
     // 同长度替换：消息数量不变也必须失效
@@ -1076,7 +1077,11 @@ fn test_view_revision_advances_on_model_view_mutations() {
 
     // Full Compact 完成标记本身不改变模型视图
     t.mark_full_compaction_committed();
-    assert_eq!(t.view_revision(), rev, "mark_full_compaction_committed 不改视图");
+    assert_eq!(
+        t.view_revision(),
+        rev,
+        "mark_full_compaction_committed 不改视图"
+    );
 
     // rebuild：整体替换内容，实例身份保留、修订号前进
     let rebuilt = t.rebuild(vec![(make_human("rebuilt"), MessageFlags::default())]);

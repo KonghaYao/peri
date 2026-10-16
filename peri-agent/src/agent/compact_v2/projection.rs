@@ -511,7 +511,10 @@ fn project_content(
 /// 对 tool result 的完整文本流应用 CompactToolResult action。
 ///
 /// 消费 owned 内容：不需要截断时原样返回（不复制正文）。
-fn project_tool_result_content(content: MessageContent, action: &ProjectionAction) -> MessageContent {
+fn project_tool_result_content(
+    content: MessageContent,
+    action: &ProjectionAction,
+) -> MessageContent {
     let ProjectionAction::CompactToolResult {
         keep_head,
         keep_tail,
