@@ -96,6 +96,7 @@ impl StageContextBuilder {
             async_ctx: self.async_ctx,
             goal_controller: self.goal_controller,
             recall_buffer: Arc::new(RwLock::new(Vec::new())),
+            model_view: Arc::new(super::model_view::ModelViewScope::default()),
         }
     }
 }

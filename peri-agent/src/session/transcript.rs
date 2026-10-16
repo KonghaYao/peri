@@ -9,7 +9,7 @@
 
 use std::collections::HashMap;
 use std::sync::{
-    atomic::{AtomicU8, Ordering},
+    atomic::{AtomicU8, AtomicU64, Ordering},
     Arc,
 };
 
@@ -59,6 +59,24 @@ impl CompactionCommitState {
         self.0.store(2, Ordering::SeqCst);
     }
 }
+
+// ─── TranscriptRevision ───────────────────────────────────────────────────────
+
+/// Transcript 内容修订标识：实例身份 + 单调修订号。
+///
+/// 用于判定同一执行准备范围内的模型视图能否复用。实例身份必须参与比较：
+/// Compact 阶段会把 transcript 整体从 `RwLock` 中换出（`std::mem::take`），
+/// 换入的是全新空实例；只比较修订号会把新实例的内容误判成旧实例的内容。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct TranscriptRevision {
+    /// 实例身份（进程内唯一，不随内容变化）
+    pub instance: u64,
+    /// 内容修订号：任何改变 entries / flags / reminder 的写入都会自增
+    pub revision: u64,
+}
+
+/// 实例身份分配器：仅用于区分不同的 [`MessageTranscript`] 实例。
+static TRANSCRIPT_INSTANCE_SEQ: AtomicU64 = AtomicU64::new(1);
 
 // ─── TranscriptEntry ──────────────────────────────────────────────────────────
 
@@ -228,6 +246,10 @@ pub struct MessageTranscript {
     session_resources: Option<Arc<dyn SessionResources>>,
     /// 待持久化预算（与 writer 共享）：条数/字节有界，预留失败即 sticky 失败。
     budget: Option<Arc<PersistenceBudget>>,
+    /// 实例身份（见 [`TranscriptRevision`]）
+    view_instance: u64,
+    /// 内容修订号（见 [`TranscriptRevision`]）
+    view_revision: u64,
 }
 
 impl std::fmt::Debug for MessageTranscript {
@@ -272,7 +294,27 @@ impl MessageTranscript {
             compaction_commit_state: CompactionCommitState::default(),
             session_resources: None,
             budget: None,
+            view_instance: TRANSCRIPT_INSTANCE_SEQ.fetch_add(1, Ordering::Relaxed),
+            view_revision: 0,
         }
+    }
+
+    /// 内容修订标识（模型视图复用的判定输入）。
+    pub fn view_revision(&self) -> TranscriptRevision {
+        TranscriptRevision {
+            instance: self.view_instance,
+            revision: self.view_revision,
+        }
+    }
+
+    /// 内容发生可能改变模型视图的变更后自增修订号。
+    ///
+    /// 只增不改，且不能用量代理：同长度替换（`replace_by_id`）、flag 覆写
+    /// （truncated/excluded/projection）、reminder 镜像都会改变模型可见内容。
+    /// Staging（`stage_ai_message` / `stage_tool_result`）不进入模型视图，
+    /// 提交（[`Self::commit_staged`]）时才递增。
+    fn bump_view_revision(&mut self) {
+        self.view_revision = self.view_revision.wrapping_add(1);
     }
 
     fn push_loaded_payload(&mut self, payload: PersistedPayload) {
@@ -284,6 +326,7 @@ impl MessageTranscript {
         };
         self.id_index.insert(entry.id(), self.entries.len());
         self.entries.push(entry);
+        self.bump_view_revision();
     }
 
     /// 装载主 Agent 已持久化的历史，保持为可压缩的自有消息。
@@ -320,6 +363,7 @@ impl MessageTranscript {
             self.entries.push(TranscriptEntry::Message(msg.clone()));
         }
         self.ancestor_len = len;
+        self.bump_view_revision();
         self
     }
 
@@ -429,6 +473,7 @@ impl MessageTranscript {
         self.id_index.insert(id, idx);
         self.entries
             .push(TranscriptEntry::Reminder { id, reminder });
+        self.bump_view_revision();
         self.persist_appended_entry(self.entries[idx].clone());
         id
     }
@@ -448,6 +493,7 @@ impl MessageTranscript {
         self.id_index.insert(id, idx);
         self.entries
             .push(TranscriptEntry::Reminder { id, reminder });
+        self.bump_view_revision();
         true
     }
 
@@ -581,6 +627,7 @@ impl MessageTranscript {
         let idx = self.entries.len();
         self.id_index.insert(id, idx);
         self.entries.push(TranscriptEntry::Message(message));
+        self.bump_view_revision();
         // 异步持久化（先同步预留额度；无法预留时只留 sticky 失败，不假装已保存）
         self.persist_appended_entry(self.entries[idx].clone());
         id
@@ -597,6 +644,9 @@ impl MessageTranscript {
             ids.push(id);
             self.persist_appended_entry(self.entries[idx].clone());
         }
+        if !ids.is_empty() {
+            self.bump_view_revision();
+        }
         ids
     }
 
@@ -607,6 +657,8 @@ impl MessageTranscript {
     pub fn replace_by_id(&mut self, message: BaseMessage) {
         if let Some(&idx) = self.id_index.get(&message.id()) {
             self.entries[idx] = TranscriptEntry::Message(message);
+            // 同长度替换同样改变模型可见内容，必须递增修订号
+            self.bump_view_revision();
         }
     }
 
@@ -657,6 +709,7 @@ impl MessageTranscript {
             self.entries.push(TranscriptEntry::Message(tool_result));
             self.persist_appended_entry(self.entries[idx].clone());
         }
+        self.bump_view_revision();
     }
 
     /// 丢弃暂存数据（Cancel/Error 时调用）
@@ -688,6 +741,7 @@ impl MessageTranscript {
             return;
         }
         self.flags.entry(id).or_default().truncated = value;
+        self.bump_view_revision();
         let flags = self.flags[&id].clone();
         self.persist_flags(id, flags);
     }
@@ -698,6 +752,7 @@ impl MessageTranscript {
             return;
         }
         self.flags.entry(id).or_default().excluded = value;
+        self.bump_view_revision();
         let flags = self.flags[&id].clone();
         self.persist_flags(id, flags);
     }
@@ -714,6 +769,7 @@ impl MessageTranscript {
         let existing = self.flags.get(&id).cloned().unwrap_or_default();
         let flags = history::flags_with_projection(&existing, directive);
         self.flags.insert(id, flags.clone());
+        self.bump_view_revision();
         self.persist_flags(id, flags);
     }
 
@@ -723,6 +779,7 @@ impl MessageTranscript {
             return;
         }
         self.flags.remove(&id);
+        self.bump_view_revision();
         self.persist_flags(id, MessageFlags::default());
     }
 
@@ -730,10 +787,15 @@ impl MessageTranscript {
     ///
     /// 仅插入非默认标记，不触发持久化（持久化已有完整 flags 数据）。
     pub fn set_flags_batch(&mut self, batch: std::collections::HashMap<MessageId, MessageFlags>) {
+        let mut changed = false;
         for (id, flags) in batch {
             if flags != MessageFlags::default() {
                 self.flags.insert(id, flags);
+                changed = true;
             }
+        }
+        if changed {
+            self.bump_view_revision();
         }
     }
 
@@ -805,6 +867,7 @@ impl MessageTranscript {
             self.id_index.insert(id, idx);
             self.entries.push(TranscriptEntry::Message(message.clone()));
         }
+        self.bump_view_revision();
     }
 
     // ── 重建 ──────────────────────────────────────────────────────────────────
@@ -841,6 +904,9 @@ impl MessageTranscript {
             compaction_commit_state: self.compaction_commit_state.clone(),
             session_resources: self.session_resources.take(),
             budget: self.budget.take(),
+            view_instance: self.view_instance,
+            // 重建整体替换内容：修订号必须前进（旧视图一律失效）
+            view_revision: self.view_revision.wrapping_add(1),
         }
     }
 
@@ -881,6 +947,7 @@ impl MessageTranscript {
             self.id_index.remove(rid);
             self.flags.remove(rid);
         }
+        self.bump_view_revision();
 
         // 异步持久化 rewind（保留目标本身的 KeepThrough 边界）
         if let Some(reserved) = self.reserve_persistence(Reservation::marker(1)) {
