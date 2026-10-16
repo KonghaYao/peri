@@ -167,6 +167,7 @@
 | `c7e9b2a14` | 如实记录全量测试抖动与基线对照（PR #231 评审指出其中 tasks 用例的归属有误，后由 `1ab44ef81` 的文档提交修正） |
 | `1ab44ef81` | 处理 PR #231 评审：login 动作目标改取本帧快照（与命中同源）、theme 落盘成功才提交句柄、补 `panel-mcp-icon-unknown` 文案；flake 归属与新的待完成项随后记入本文档 |
 | `ae987c22b` | ThreadBrowser 样式对齐参考稿（表头两行 + 筛选/状态 chip、行首相对时间列、选中行整行填充），Status / Plugin 激活 tab 同款白底白字一并修（底色改取 `semantic.surface.selection`）；`TUI-THEME-001` 补填充色 token 规则、手工清单 slash 名改回代码注册值 |
+| `d304bee40` | 处理 PR #231 第二轮评审 + windows-latest CI：时间列宽改「只设下限」（上限小于实际标签宽度会让该行标题右移）；`tasks/tests/source.rs` 与 `agent_test.rs` 的源码头扫描读入归一为 LF（CRLF 检出下前者报 TUI-RENDER-001、后者静默弱化）；flake 归属按证据分级、补待完成项 |
 
 ## 交付证据（方案 §11）
 
