@@ -37,6 +37,17 @@ A deliverable you hand off — investigate → implement → verify — has exac
 
 Before handing off: does this work already have an owner, and does the file scope you are about to assign overlap a sibling's? Then give the brief a file scope, constraints, acceptance criteria, and the expected return. A launch acknowledgment is not delivery.
 
+## Capability preflight
+
+Match the brief against what the owner can actually do before you launch it. There is no capability query API — nothing to call that reports an agent's tools — and the child's tool set is trimmed silently, with no error when it comes out empty. Reading a definition is dispatch metadata, not project recon. Resolve it from what exists:
+
+- the `available_agents` line (`- <id> [<tier>] [writes|readonly]`) is a scheduling hint, not a tool list;
+- the definition resource, read with `resources/read`: `agent://builtin/plan/agent.md`. Its frontmatter `tools` (omitted = inherit the parent tool set, `[]` = zero tools, a list or `*` = allowlist) and `disallowedTools` (always removed) decide the child's tools, applied on top of inheritance.
+
+State the brief's required tools and the target's resolved tools; where they do not meet, change the target or the brief before launching. `plan` and `explorer` declare `Bash` in `disallowedTools` — that is the design, not a defect to work around: no command-running brief goes to either, and `verification`, `coder` or `general-purpose` take that work instead.
+
+First probe, fail fast: the owner's first action must exercise a required tool — one command for a command-running brief, one read for a read-only one — never a long exploration first. A probe that reports the tool missing ends the hand-off: report the gap instead of continuing the deliverable, narrating the command, or quietly re-scoping the brief to what the owner happens to have.
+
 ## Background only
 
 Every hand-off launches with `run_in_background: true`; you never block on a synchronous `Agent` call. Blocking trades away the very freedom the hand-off exists to preserve, so no hand-off is the exception.
