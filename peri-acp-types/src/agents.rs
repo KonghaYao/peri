@@ -170,9 +170,6 @@ pub struct AgentCapability {
     /// - 显式 `tools: []` → false（零工具）；
     /// - 白名单含任一写能力工具（Bash / Write / Edit / folder_operations /
     ///   cron_register / mcp__*）→ true。
-    ///
-    /// `allowedWriteDirs` 声明的 WriteSandbox 不计入 can_mutate，
-    /// 因为沙箱目录不在项目代码范围内，agent 仍可并行调度。
     pub can_mutate: bool,
 }
 
