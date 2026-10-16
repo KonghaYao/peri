@@ -110,6 +110,11 @@ pub struct AcpTuiClient {
     session_workspace: Arc<std::sync::atomic::AtomicBool>,
     execution_cwd: watch::Sender<Option<String>>,
     restore_error: Arc<Mutex<Option<String>>>,
+    /// 关闭旧会话失败（`-32010` incomplete）后仍未完成的切换：旧身份与被打断的
+    /// 加载目标。`fail_transition` 会清掉 lifecycle 里的旧身份，若不在这里留住，
+    /// 下一次建立会话会直接 `session/new`，把服务端仍处于 Closing 的旧会话和用户
+    /// 原本要加载的历史一起丢掉。见 `session::PendingClose`。
+    pending_close: Arc<Mutex<Option<session::PendingClose>>>,
     #[cfg(test)]
     transition_commit_hook:
         Arc<Mutex<Option<mpsc::UnboundedSender<tokio::sync::oneshot::Sender<()>>>>>,
@@ -184,6 +189,7 @@ impl AcpTuiClient {
             session_workspace: Arc::new(std::sync::atomic::AtomicBool::new(false)),
             execution_cwd: watch::channel(None).0,
             restore_error: Arc::new(Mutex::new(None)),
+            pending_close: Arc::new(Mutex::new(None)),
             #[cfg(test)]
             transition_commit_hook: Arc::new(Mutex::new(None)),
         };
