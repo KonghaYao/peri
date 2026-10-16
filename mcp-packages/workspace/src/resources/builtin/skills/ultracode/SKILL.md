@@ -39,25 +39,28 @@ Write the brief's required tools next to the resolved target tools for every sta
 
 | target | runs commands | why |
 | --- | --- | --- |
-| `coder` | yes | `tools` allowlist 含 `Bash` |
-| `explorer` | no | `disallowedTools` 含 `Bash`（只读探索，设计如此） |
+| `coder` | yes | 未声明 `tools`，继承基础工具；`disallowedTools` 只移除 `Agent` |
+| `explorer` | yes | 未声明 `tools`，继承基础工具；`disallowedTools` 只移除 `Agent` |
 | `general-purpose` | yes | `tools: "*"` |
-| `plan` | no | `disallowedTools` 含 `Bash`（只读设计，不放宽） |
-| `verification` | yes | 未声明 `tools`，继承基础工具；`disallowedTools` 只移除 `Agent`/`Write`/`Edit` |
-| `web-researcher` | yes | `tools` allowlist 含 `Bash`（无 `Glob`/`Grep`/`Edit`） |
+| `plan` | yes | 未声明 `tools`，继承基础工具；`disallowedTools` 只移除 `Agent` |
+| `verification` | yes | 未声明 `tools`，继承基础工具；`disallowedTools` 只移除 `Agent` |
+| `web-researcher` | yes | 未声明 `tools`，继承基础工具；`disallowedTools` 只移除 `Agent` |
 
 The table is a claim about the shipped definitions (`mcp-packages/workspace/src/resources/builtin/agents/*.md`, readable as `agent://<scope>/<id>/agent.md`) and is locked against them by `resources/builtin_skill_capability_test.rs`; change a definition and the table must change with it.
 
-An empty effective tool set is a dispatch error, not a warning: `agentType: 'plan'` with `allowedTools: ['Bash']`, or any brief whose required tools the target lacks, intersects to nothing — and the stage still runs, because neither this tool nor the engine fails on it.
+An empty effective tool set is a dispatch error, not a warning: `agentType: 'plan'` with `allowedTools: []`, or any brief whose required tools the target lacks, intersects to nothing — and the stage still runs, because neither this tool nor the engine fails on it.
 
-Fail fast with the first probe: an agent's first action must exercise one of the brief's required tools — one command for a command-running brief, one read for a read-only one — never a long exploration first. A probe that reports the tool missing ends that stage: report the gap (`plan` cannot run `cargo test`), do not keep going, do not narrate the command in place of running it, and do not widen the definition's permissions to make the stage work.
+Fail fast with the first probe: an agent's first action must exercise one of the brief's required tools — one command for a command-running brief, one read for a read-only one — never a long exploration first. A probe that reports the tool missing ends that stage: report the gap (the selected target has no `Bash` after tool filtering), do not keep going, do not narrate the command in place of running it, and do not widen the definition's permissions to make the stage work.
 
 ```javascript
-// ✅ 只读 brief 派给只读目标：所需工具 `Read`/`Grep`/`Glob` 都在，不需要 `Bash`
+// ✅ 只读 brief 派给 explorer：所需工具 `Read`/`Grep`/`Glob` 都在，且任务约束仍要求只读
 () => agent('列出派发路径的调用点', { label: 'recon', agentType: 'explorer', allowedTools: ['Read', 'Grep', 'Glob'] })
 
-// ❌ 派发前就被预检拦下：`plan` 无 Bash，allowedTools 加不回被定义移除的工具
+// ✅ 需要命令证据时派给当前继承 Bash 的 plan；brief 仍限定其只执行指定检查
 () => agent('运行 cargo test 并报告结果', { agentType: 'plan', allowedTools: ['Bash'] })
+
+// ❌ 空工具集不能满足任何需工具的 brief，必须改派或调整明确的允许范围
+() => agent('运行 cargo test 并报告结果', { agentType: 'plan', allowedTools: [] })
 ```
 
 ## How to Use

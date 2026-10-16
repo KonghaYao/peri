@@ -44,7 +44,7 @@ Match the brief against what the owner can actually do before you launch it. The
 - the `available_agents` line (`- <id> [<tier>] [writes|readonly]`) is a scheduling hint, not a tool list;
 - the definition resource, read with `resources/read`: `agent://builtin/plan/agent.md`. Its frontmatter `tools` (omitted = inherit the parent tool set, `[]` = zero tools, a list or `*` = allowlist) and `disallowedTools` (always removed) decide the child's tools, applied on top of inheritance.
 
-State the brief's required tools and the target's resolved tools; where they do not meet, change the target or the brief before launching. `plan` and `explorer` declare `Bash` in `disallowedTools` — that is the design, not a defect to work around: no command-running brief goes to either, and `verification`, `coder` or `general-purpose` take that work instead.
+State the brief's required tools and the target's resolved tools; where they do not meet, change the target or the brief before launching. `plan` and `explorer` currently inherit the base tool set just like the other builtin agents; their read-only role is a prompt-level instruction, not a tool boundary. Assign command-running work according to the brief's required evidence and actual resolved tools, and preserve the read-only task scope when delegating exploration.
 
 First probe, fail fast: the owner's first action must exercise a required tool — one command for a command-running brief, one read for a read-only one — never a long exploration first. A probe that reports the tool missing ends the hand-off: report the gap instead of continuing the deliverable, narrating the command, or quietly re-scoping the brief to what the owner happens to have.
 

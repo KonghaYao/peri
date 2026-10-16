@@ -22,7 +22,6 @@ use serde_json::Value;
 
 /// 派发 Skill 的注册表名（`BUILTIN_SKILLS` 的键）。
 const ULTRACODE: &str = "ultracode";
-const MULTITASK: &str = "multitask";
 
 /// 定义声明的工具边界（与宿主 `filter_tools` 文档口径一致：大小写不敏感；
 /// `tools` 省略或独占 `*` = 继承，`tools: []` = 零工具，列表 = 白名单）。
@@ -251,26 +250,26 @@ fn capability_table_check_rejects_tampered_rows() {
     let mutants = [
         (
             "把 plan 的能力改错",
-            replace_once(&body, "| `plan` | no |", "| `plan` | yes |"),
+            replace_once(&body, "| `plan` | yes |", "| `plan` | no |"),
             "`plan`",
         ),
         (
             "少一行目标",
-            replace_once(&body, "| `explorer` | no |", "| `explorer` |"),
+            replace_once(&body, "| `explorer` | yes |", "| explorer | yes |"),
             "explorer",
         ),
         (
             "凭空多一行目标",
             replace_once(
                 &body,
-                "| `plan` | no |",
-                "| `ghost` | yes | 幽灵目标 |\n| `plan` | no |",
+                "| `plan` | yes |",
+                "| `ghost` | yes | 幽灵目标 |\n| `plan` | yes |",
             ),
             "ghost",
         ),
         (
             "取值非法",
-            replace_once(&body, "| `plan` | no |", "| `plan` | maybe |"),
+            replace_once(&body, "| `plan` | yes |", "| `plan` | maybe |"),
             "maybe",
         ),
     ];
@@ -292,38 +291,27 @@ fn capability_table_check_rejects_tampered_rows() {
 fn preflight_gaps_expose_missing_tools_before_dispatch() {
     let targets = builtin_targets();
 
-    // 正例：需要跑命令的 brief 落到保留 Bash 的目标，预检放行。
-    let verification = preflight_gaps(target(&targets, "verification"), &["Bash"], None);
-    assert_eq!(
-        verification.gaps,
-        Vec::<String>::new(),
-        "verification 保留 Bash，跑命令的 brief 可派发"
-    );
-
-    // 负例：本轮的真实模式——目标无 Bash，brief 却要求运行命令。
-    // 第一个探针（这里就是预检本身）必须在派发前给出缺口名。
+    // 正例：当前 shipped 定义里 plan 继承基础工具，Bash brief 可派发。
     let plan = preflight_gaps(target(&targets, "plan"), &["Bash"], None);
-    assert_eq!(plan.gaps, vec!["Bash".to_string()]);
-    assert!(
-        plan.permitted.is_empty(),
-        "plan 的有效工具集里不能有命令执行能力"
-    );
+    assert_eq!(plan.gaps, Vec::<String>::new());
+    assert!(plan.permitted.contains(&"Bash".to_string()));
 
-    // 负例：workflow `allowedTools` 不能把定义已移除的工具加回来。
-    let narrowed = preflight_gaps(target(&targets, "plan"), &["Bash"], Some(&["Bash"]));
-    assert_eq!(narrowed.gaps, vec!["Bash".to_string()]);
+    // 负例：显式收窄为空时，预检须发现 Bash 缺口。
+    let empty = preflight_gaps(target(&targets, "plan"), &["Bash"], Some(&[]));
+    assert_eq!(empty.gaps, vec!["Bash".to_string()]);
+    assert!(empty.permitted.is_empty());
 
-    // 正例：只读 brief 派给 plan 是合法路线（正确做法是改 brief/目标，不是放宽定义）。
+    // 正例：只读 brief 派给 plan 是合法路线；提示词约束其任务范围。
     let readonly = preflight_gaps(target(&targets, "plan"), &["Read", "Grep"], None);
     assert_eq!(readonly.gaps, Vec::<String>::new());
 
-    // 负例：`allowedTools` 只能收窄，不能扩权。
-    let narrowed_read = preflight_gaps(
+    // 负例：allowedTools 只能收窄继承边界。
+    let narrowed = preflight_gaps(
         target(&targets, "verification"),
         &["Bash"],
         Some(&["Read", "Grep"]),
     );
-    assert_eq!(narrowed_read.gaps, vec!["Bash".to_string()]);
+    assert_eq!(narrowed.gaps, vec!["Bash".to_string()]);
 }
 
 #[test]
@@ -363,42 +351,20 @@ fn preflight_reads_frontmatter_not_a_hardcoded_target_list() {
 }
 
 #[test]
-fn dispatch_skills_name_every_command_incapable_target() {
-    let command_incapable: Vec<String> = builtin_targets()
-        .into_iter()
-        .filter(|target| !target.runs_commands())
-        .map(|target| target.id)
-        .collect();
-    assert!(
-        !command_incapable.is_empty(),
-        "没有无命令能力的目标时，本测试失去对照"
+fn preflight_cannot_restore_tools_denied_by_definition() {
+    // builtin 当前均继承 Bash，用合成定义保留禁止工具的负向覆盖。
+    let denied = capability_of(
+        "fixture-denied",
+        "---\nname: fixture-denied\ndescription: d\ndisallowedTools: [Bash]\n---\nbody\n",
     );
+    let result = preflight_gaps(&denied, &["Bash"], Some(&["Bash"]));
+    assert_eq!(result.gaps, vec!["Bash".to_string()]);
+    assert!(result.permitted.is_empty());
 
-    // 派发方可能只加载了其中一个 Skill，因此两份都须点名。
-    for skill in [ULTRACODE, MULTITASK] {
-        let body = skill_body(skill);
-        let missing: Vec<&String> = command_incapable
-            .iter()
-            .filter(|id| !body.contains(&format!("`{id}`")))
-            .collect();
-        assert!(
-            missing.is_empty(),
-            "{skill} 未点名无命令能力的目标：{missing:?}（派发方会照旧派命令给它们）"
-        );
-    }
-
-    // 负例：抽掉一处点名后，同一个检查必须报缺（证明上面不是恒绿）。
-    let stripped = replace_once(skill_body(MULTITASK), "`plan`", "plan");
-    let still_missing: Vec<&str> = command_incapable
-        .iter()
-        .filter(|id| !stripped.contains(&format!("`{id}`")))
-        .map(String::as_str)
-        .collect();
-    assert_eq!(
-        still_missing,
-        vec!["plan"],
-        "抽掉点名后同一检查必须报缺，否则上面的正例没有判别力"
-    );
+    // 同一定义仍可满足只读 brief，避免把所有派发都判成失败。
+    let readonly = preflight_gaps(&denied, &["Read"], Some(&["Read"]));
+    assert!(readonly.gaps.is_empty());
+    assert_eq!(readonly.permitted, vec!["Read".to_string()]);
 }
 
 #[test]
