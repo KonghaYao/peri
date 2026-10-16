@@ -19,6 +19,10 @@ pub async fn run_reason(input: ReasonInput) -> AgentResult<ReasonOutput> {
 
     tracing::trace!(step, has_tool_calls = input.has_tool_calls, "Reason 阶段");
 
+    // 准备阶段的全部退出路径（hook 错误、提前取消、取快照失败）都不得把整份正文留在
+    // 缓存槽里：入口持有作用域守卫，函数退出时统一释放，不必在每个返回点手写 release。
+    let _view_release = ctx.model_view.release_guard();
+
     // 固定准备阶段之前的视图；Full reset/Micro 缩减本身不应触发第二次评估。
     super::compact::context_pressure::refresh(ctx)?;
 
@@ -74,14 +78,15 @@ pub async fn run_reason(input: ReasonInput) -> AgentResult<ReasonOutput> {
 
     // 取出 messages 快照（避免跨 await 持有 RwLockReadGuard）。
     // 直接构建为 Arc<Vec>：LlmCallStart 与 LLM 调用共享同一份，避免二次深拷贝。
-    let messages_snapshot: std::sync::Arc<Vec<crate::messages::BaseMessage>> =
-        std::sync::Arc::new({
-            let guard = ctx.session.transcript.read();
-            crate::agent::compact_v2::projection::render_persisted_llm_view(
-                &guard,
-                &ctx.runtime.llm.provider_capabilities(),
-            )?
-        });
+    // 修订未变时复用准备阶段已渲染的视图（同一次 Reason 内只渲染一次）。
+    // 快照取出后立即释放缓存槽：正文副本不跨 Act 常驻（错误路径由入口的作用域守卫兜底）。
+    let messages_snapshot: std::sync::Arc<Vec<crate::messages::BaseMessage>> = {
+        let guard = ctx.session.transcript.read();
+        let capabilities = ctx.runtime.llm.provider_capabilities();
+        let view = ctx.model_view.view(&guard, &capabilities);
+        ctx.model_view.release();
+        view?
+    };
 
     let tools_owned: Vec<std::sync::Arc<dyn crate::tools::BaseTool>> = catalog
         .tools

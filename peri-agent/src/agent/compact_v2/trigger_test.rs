@@ -1,7 +1,9 @@
 //! run_compact 新触发流程测试
 
 use crate::agent::compact_v2::config::CompactConfig;
-use crate::agent::compact_v2::planner::{ContextPressure, FullEscalationReason};
+use crate::agent::compact_v2::planner::{
+    plan_micro_call_count, reset_plan_micro_calls, ContextPressure, FullEscalationReason,
+};
 use crate::agent::compact_v2::{
     determine_compact_action, run_compact, CompactAction, CompactOutcome,
 };
@@ -87,6 +89,15 @@ fn pressure_from_budget(budget_pct: f64) -> ContextPressure {
     }
 }
 
+/// 断言本轮 run_compact 只规划了一次 Micro 计划（dry-run 计划被 apply 复用）。
+fn assert_planned_once() {
+    assert_eq!(
+        plan_micro_call_count(),
+        1,
+        "Micro/Smart 计划每轮只应规划一次，应用必须复用 dry-run 计划"
+    );
+}
+
 // ── determine_compact_action 测试 ──────────────────────────────────────
 
 #[test]
@@ -132,6 +143,7 @@ async fn test_micro_effective_no_full_overlay() {
     let config = CompactConfig::default();
     let mut failures = 0u32;
     let pressure = pressure_from_budget(0.80);
+    reset_plan_micro_calls();
     let result = run_compact(
         &mut t,
         None,
@@ -140,11 +152,13 @@ async fn test_micro_effective_no_full_overlay() {
         false,
         &mut failures,
         "/tmp",
+        None,
     )
     .await;
     assert_eq!(result.strategy, CompactStrategy::Micro, "应走 Micro");
     assert!(result.affected_count >= 5, "Micro 有效，不应升级 Full");
     assert!(result.summary.is_none(), "Micro 无摘要");
+    assert_planned_once();
 }
 
 #[tokio::test]
@@ -165,6 +179,7 @@ async fn test_micro_invalid_upgrades_to_full() {
     let mut failures = 0u32;
     // budget=0.80 (< 0.95) → Micro 应用（部分收益），不升级 Full
     let pressure = pressure_from_budget(0.80);
+    reset_plan_micro_calls();
     let result = run_compact(
         &mut t,
         None,
@@ -173,6 +188,7 @@ async fn test_micro_invalid_upgrades_to_full() {
         false,
         &mut failures,
         "/tmp",
+        None,
     )
     .await;
     // budget=0.80 < threshold=0.95 → 走 "不足但未达 Full 阈值" 路径 → 应用 Micro
@@ -182,6 +198,13 @@ async fn test_micro_invalid_upgrades_to_full() {
         "budget 低于 Full 阈值时应走 Micro"
     );
     assert_eq!(failures, 0, "Micro 不应计失败");
+    assert!(
+        result.estimated_tokens_saved < pressure.target_reclaim_tokens(),
+        "本场景收益应低于回收目标（不足未达阈值），实际 saved={} target={}",
+        result.estimated_tokens_saved,
+        pressure.target_reclaim_tokens()
+    );
+    assert_planned_once();
 }
 
 #[tokio::test]
@@ -198,6 +221,7 @@ async fn test_micro_effective_full_overlay() {
     let mut failures = 0u32;
     // budget=0.98 (196000 tokens) → 远高于 threshold → 直接 Full（无 LLM 降级）
     let pressure = pressure_from_budget(0.98);
+    reset_plan_micro_calls();
     let result = run_compact(
         &mut t,
         None,
@@ -206,6 +230,7 @@ async fn test_micro_effective_full_overlay() {
         false,
         &mut failures,
         "/tmp",
+        None,
     )
     .await;
     // Full 无 LLM 失败，但已应用的 Micro 必须仍是有效策略视图。
@@ -219,6 +244,7 @@ async fn test_micro_effective_full_overlay() {
         CompactOutcome::MicroAppliedThenFullFailed,
         "结果应明确表示 Micro 已应用而 Full 失败"
     );
+    assert_planned_once();
 }
 
 #[tokio::test]
@@ -245,6 +271,7 @@ async fn test_micro_then_full_success_does_not_double_count_affected_messages() 
         false,
         &mut failures,
         "/tmp",
+        None,
     )
     .await;
 
@@ -306,6 +333,7 @@ async fn test_force_full_failure_preserves_persistent_excluded_flags_after_prior
         true,
         &mut consecutive_failures,
         &dir.path().to_string_lossy(),
+        None,
     )
     .await;
 
@@ -343,6 +371,7 @@ async fn test_force_triggers_full_directly() {
         true,
         &mut failures,
         "/tmp",
+        None,
     )
     .await;
     assert_eq!(result.strategy, CompactStrategy::Full);
@@ -378,6 +407,7 @@ async fn test_full_without_llm_fails_no_panic() {
         false,
         &mut failures,
         "/tmp",
+        None,
     )
     .await;
     // budget=0.80 → Micro → 满足 target → 只走 Micro
@@ -414,6 +444,7 @@ async fn test_micro_applied_then_full_failure_is_not_reported_as_full_completion
         false,
         &mut failures,
         "/tmp",
+        None,
     )
     .await;
 
@@ -474,6 +505,7 @@ async fn test_estimated_tokens_saved_reflected_in_result() {
         false,
         &mut failures,
         "/tmp",
+        None,
     )
     .await;
 
@@ -522,6 +554,7 @@ async fn test_estimated_tokens_saved_increases_with_more_rounds() {
             false,
             &mut failures,
             "/tmp",
+            None,
         )
         .await
         .estimated_tokens_saved
@@ -554,6 +587,7 @@ async fn test_run_compact_smart_applied_then_full_failure_preserves_effects() {
         ..Default::default()
     };
     let mut failures = 0u32;
+    reset_plan_micro_calls();
     let result = run_compact(
         &mut t,
         None,
@@ -562,6 +596,7 @@ async fn test_run_compact_smart_applied_then_full_failure_preserves_effects() {
         false,
         &mut failures,
         "/tmp",
+        None,
     )
     .await;
 
@@ -575,6 +610,7 @@ async fn test_run_compact_smart_applied_then_full_failure_preserves_effects() {
         CompactOutcome::SmartAppliedThenFullFailed,
         "结果必须精确表示 Smart 已应用而 Full 失败"
     );
+    assert_planned_once();
     assert!(
         t.entries()
             .iter()
@@ -630,6 +666,7 @@ async fn test_smart_then_full_success_aggregates_metrics() {
         false,
         &mut failures,
         "/tmp",
+        None,
     )
     .await;
 
@@ -664,6 +701,7 @@ async fn test_run_compact_failure_limit_returns_explicit_full_failure() {
         false,
         &mut failures,
         "/tmp",
+        None,
     )
     .await;
 
@@ -707,6 +745,7 @@ async fn test_run_compact_micro_shadow_mode_returns_shadowed_without_changes() {
         ..Default::default()
     };
     let mut failures = 0u32;
+    reset_plan_micro_calls();
     let result = run_compact(
         &mut t,
         None,
@@ -715,6 +754,7 @@ async fn test_run_compact_micro_shadow_mode_returns_shadowed_without_changes() {
         false,
         &mut failures,
         "/tmp",
+        None,
     )
     .await;
 
@@ -730,6 +770,7 @@ async fn test_run_compact_micro_shadow_mode_returns_shadowed_without_changes() {
             .all(|entry| !t.flags(entry.id()).truncated),
         "shadow mode 绝不应改写 transcript"
     );
+    assert_planned_once();
 }
 
 #[tokio::test]
@@ -748,6 +789,7 @@ async fn test_run_compact_smart_shadow_mode_returns_shadowed_without_changes() {
         ..Default::default()
     };
     let mut failures = 0u32;
+    reset_plan_micro_calls();
     let result = run_compact(
         &mut t,
         None,
@@ -756,6 +798,7 @@ async fn test_run_compact_smart_shadow_mode_returns_shadowed_without_changes() {
         false,
         &mut failures,
         "/tmp",
+        None,
     )
     .await;
 
@@ -771,4 +814,57 @@ async fn test_run_compact_smart_shadow_mode_returns_shadowed_without_changes() {
             .all(|entry| !t.flags(entry.id()).truncated),
         "shadow mode 绝不应改写 transcript"
     );
+    assert_planned_once();
+}
+
+/// Micro 计划达标（estimated_tokens_saved ≥ reclaim_target）时：
+/// 只走 Micro、不叠加 Full，且计划只规划一次。
+#[tokio::test]
+async fn test_micro_satisfied_reclaim_applies_once_from_dry_run_plan() {
+    let mut t = MessageTranscript::new();
+    // 本用例的 save 量必须真正超过 reclaim_target，故不能复用固定 501 字符的
+    // make_tool_result 辅助（它忽略传入文本）。
+    let long_output = "x".repeat(20_000);
+    for i in 0..8 {
+        t.append(make_human(&format!("q {}", i)));
+        t.append(make_ai_with_tool("", "Bash", &format!("c_{}", i)));
+        t.append(BaseMessage::tool_result(
+            format!("c_{}", i),
+            MessageContent::text(long_output.clone()),
+        ));
+    }
+
+    let config = CompactConfig {
+        micro_compact_stale_steps: 1,
+        ..Default::default()
+    };
+    let mut failures = 0u32;
+    let pressure = pressure_from_budget(0.80);
+    reset_plan_micro_calls();
+    let result = run_compact(
+        &mut t,
+        None,
+        &config,
+        &pressure,
+        false,
+        &mut failures,
+        "/tmp",
+        None,
+    )
+    .await;
+
+    assert!(
+        result.estimated_tokens_saved >= pressure.target_reclaim_tokens(),
+        "本场景应满足回收目标，实际 saved={} target={}",
+        result.estimated_tokens_saved,
+        pressure.target_reclaim_tokens()
+    );
+    assert_eq!(result.outcome(), CompactOutcome::MicroApplied);
+    assert_eq!(result.strategy, CompactStrategy::Micro);
+    assert_eq!(failures, 0, "达标的 Micro 不应计失败");
+    assert!(
+        result.affected_count > 0,
+        "达标路径必须真实应用计划（affected_count > 0）"
+    );
+    assert_planned_once();
 }

@@ -4,12 +4,11 @@ use crate::agent::stages::StageContext;
 use crate::error::AgentResult;
 
 pub(crate) fn refresh(ctx: &StageContext) -> AgentResult<bool> {
+    // 视图只依赖 transcript 内容与 provider 能力：修订未变时复用上一次渲染结果。
     let messages = {
         let transcript = ctx.session.transcript.read();
-        crate::agent::compact_v2::projection::render_persisted_llm_view(
-            &transcript,
-            &ctx.runtime.llm.provider_capabilities(),
-        )?
+        let capabilities = ctx.runtime.llm.provider_capabilities();
+        ctx.model_view.view(&transcript, &capabilities)?
     };
     let tools: Vec<_> = ctx
         .runtime

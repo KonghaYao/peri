@@ -47,7 +47,7 @@ fn test_renderer_preserves_tool_use_for_illegal_block_actions() {
         ..Default::default()
     };
 
-    let projected = render_llm_view(&transcript, &plan, &ProviderCapabilities::default())
+    let projected = render_llm_view(&transcript, &plan.actions, &ProviderCapabilities::default())
         .expect("非法组合应防御性 no-op");
     let BaseMessage::Ai {
         content,

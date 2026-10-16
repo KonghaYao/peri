@@ -13,6 +13,7 @@ mod compact_progress;
 mod context_builder;
 mod invocation_context;
 pub mod middleware_runner;
+mod model_view;
 mod null_llm;
 mod queue_to_transcript;
 pub mod reason;
@@ -45,6 +46,7 @@ use crate::session::{MessageQueue, MessageTranscript, QueuedMessage};
 use crate::tools::{BaseTool, DirectToolInvocationResolver, ToolInvocationResolver};
 
 pub use async_context::AsyncContext;
+use model_view::ModelViewScope;
 
 /// 共享工具注册表类型别名（避免 clippy::type_complexity）
 pub type SharedToolMap = Arc<RwLock<BTreeMap<String, Arc<dyn BaseTool>>>>;
@@ -131,6 +133,9 @@ pub struct StageContext {
     /// 调用结束后由 middleware_runner 把 AgentContext 内部
     /// recall_buffer drain 到本缓冲区，循环结束后由 executor 统一取出。
     pub recall_buffer: Arc<RwLock<Vec<String>>>,
+    /// Reason 准备阶段的模型视图复用槽（生命周期由 `run_reason` 显式划定：
+    /// 入口 reset、取到请求快照后 release）。
+    pub(crate) model_view: Arc<ModelViewScope>,
 }
 
 impl StageContext {
@@ -212,6 +217,7 @@ impl StageContext {
             },
             goal_controller: None,
             recall_buffer: rbuf,
+            model_view: Arc::new(ModelViewScope::default()),
         }
     }
 
@@ -807,6 +813,11 @@ pub async fn run_react_loop(context: StageContext, max_iterations: usize) -> Loo
             // ── Compact ──
             // Compact 输出（compacted 标志）当前无调用方：compact 的副作用已直接
             // 写入 transcript/flags 与事件流，此处仅保留阶段观测与错误传播。
+            //
+            // 模型视图复用槽从本轮 Compact 检查起算（本轮 Compact 判断前的 refresh
+            // 与随后 Reason 的准备检查、请求快照共用同一份同版本视图）；每轮迭代
+            // 入口清空，缓存不跨迭代常驻。
+            context.model_view.reset();
             if let Err(e) = run_stage(&context, Stage::Compact, || async {
                 compact::run_compact(CompactInput {
                     context: context.clone(),
@@ -933,3 +944,7 @@ mod terminal_wake_tests;
 #[cfg(test)]
 #[path = "bounded_wait_exit_test.rs"]
 mod bounded_wait_exit_tests;
+
+#[cfg(test)]
+#[path = "model_view_test.rs"]
+mod model_view_tests;

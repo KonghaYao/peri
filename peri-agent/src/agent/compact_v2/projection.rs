@@ -111,8 +111,20 @@ pub const CORRUPTED_PROJECTION: &str = "message truncated without projection dir
 #[derive(Debug)]
 pub enum PersistedDirectiveRestore {
     Absent,
-    Valid(MicroCompactPlan),
+    Valid(RestoredProjectionDirectives),
     Invalid,
+}
+
+/// 已恢复并校验通过的持久化投影指令。
+///
+/// 只表达恢复结果本身，**不携带收益估算指标**：普通 Reason、上下文压力检查与
+/// 恢复视图入口都不参与 Compact 决策，不应为估算付出正文扫描与复制成本。
+/// 需要收益口径时走 [`estimate_projection_chars`]（Compact 决策路径）。
+#[derive(Debug, Clone, Default)]
+pub struct RestoredProjectionDirectives {
+    pub policy_version: u32,
+    /// 按 transcript 顺序恢复出的可执行 action
+    pub actions: Vec<ProjectionActionEntry>,
 }
 
 /// 当前 renderer 可安全执行、且不会直接或间接影响 ToolCall/ToolUse 的 action。
@@ -131,6 +143,8 @@ fn is_safe_projection_action(message: &BaseMessage, entry: &ProjectionActionEntr
 }
 
 /// 从 transcript 中恢复当前可解码的 projection directive。
+///
+/// 纯恢复：只校验并收集可执行 action，不做收益估算（估算属 Compact 决策路径）。
 pub fn plan_from_persisted_directives(
     transcript: &MessageTranscript,
     expected_version: u32,
@@ -141,10 +155,12 @@ pub fn plan_from_persisted_directives(
 
     for msg in &visible {
         let id = msg.id();
-        let flags = transcript.flags(id);
+        // 只读查询：不克隆 projection directive 本体
+        let projection = transcript.projection_ref(id);
+        let truncated = transcript.is_truncated(id);
 
-        match flags.projection {
-            Some(ref directive) => {
+        match projection {
+            Some(directive) => {
                 has_any_directive = true;
                 if directive.policy_version != expected_version {
                     return PersistedDirectiveRestore::Invalid;
@@ -164,7 +180,7 @@ pub fn plan_from_persisted_directives(
                 // G1: fail-closed on unknown directives
                 // truncated=true + projection=None + not excluded = corrupted state
                 // （visible_messages() 已过滤 excluded，此处消息必然非 excluded）
-                if flags.truncated {
+                if truncated {
                     return PersistedDirectiveRestore::Invalid;
                 }
                 // 无 truncated 标记 → 正常跳过，不生成投影 action
@@ -176,55 +192,66 @@ pub fn plan_from_persisted_directives(
         return PersistedDirectiveRestore::Absent;
     }
 
-    // 统计：去重 message_id 数量
-    let changed_messages: usize = actions
-        .iter()
-        .map(|a| a.message_id)
-        .collect::<HashSet<_>>()
-        .len();
-    // 统计：CompactToolInput 中的所有字段总数
-    let changed_fields: usize = actions
-        .iter()
-        .filter_map(|a| match &a.action {
-            ProjectionAction::CompactToolInput { fields, .. } => Some(fields.len()),
-            _ => None,
-        })
-        .sum();
-    // 持久化 directive 无 stale/retention 筛选 → no_op_candidates = 0
-    let no_op_candidates = 0;
-
-    // 估算 token（与 plan_micro 保持一致）
-    let (before_chars, after_chars) = estimate_projection_chars(transcript, &actions);
-    let before = before_chars / 4;
-    let after = after_chars / 4;
-    let estimated_tokens_saved = before_chars.saturating_sub(after_chars) / 4;
-
-    PersistedDirectiveRestore::Valid(MicroCompactPlan {
+    PersistedDirectiveRestore::Valid(RestoredProjectionDirectives {
         policy_version: expected_version,
-        target_reclaim_tokens: 0, // 持久化 directive 不依赖 dynamic config target
         actions,
-        estimated_before_tokens: before,
-        estimated_after_tokens: after,
-        estimated_tokens_saved,
-        changed_messages,
-        changed_fields,
-        no_op_candidates,
     })
+}
+
+// ─── 测试专用调用计数 ───────────────────────────────────────────────────────────
+//
+// 按线程隔离，避免 cargo test 并发执行时测试之间互相污染计数；
+// 纯恢复路径（`plan_from_persisted_directives`）不得调用字符估算，由
+// projection_restore_test 断言调用次数恒为 0。
+
+#[cfg(test)]
+thread_local! {
+    static ESTIMATE_CALLS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
+/// 重置当前线程的字符估算调用计数（测试专用）。
+#[cfg(test)]
+pub(crate) fn reset_estimate_calls() {
+    ESTIMATE_CALLS.with(|calls| calls.set(0));
+}
+
+/// 读取当前线程的字符估算调用次数（测试专用）。
+#[cfg(test)]
+pub(crate) fn estimate_call_count() -> usize {
+    ESTIMATE_CALLS.with(std::cell::Cell::get)
+}
+
+#[cfg(test)]
+fn count_estimate_call() {
+    ESTIMATE_CALLS.with(|calls| calls.set(calls.get() + 1));
 }
 
 /// 对指定 actions 列表估算实际会被投影的字符数。
 ///
 /// 仅统计 `CompactToolInput` 指定的顶层 string 字段，以及成功 `ToolResult` 的 text；
 /// 找不到目标、不符合类型或 helper 不会缩短时均不计入。
+///
+/// 匹配用一次性构建的 message_id 索引（预期 O(M+A)），正文只做字符统计不复制。
 pub(crate) fn estimate_projection_chars(
     transcript: &MessageTranscript,
     actions: &[ProjectionActionEntry],
 ) -> (u64, u64) {
+    #[cfg(test)]
+    count_estimate_call();
+
     let mut before = 0u64;
     let mut after = 0u64;
 
+    let mut actions_by_id: HashMap<MessageId, Vec<&ProjectionActionEntry>> = HashMap::new();
+    for action in actions {
+        actions_by_id
+            .entry(action.message_id)
+            .or_default()
+            .push(action);
+    }
+
     for entry in transcript.entries() {
-        if transcript.flags(entry.id()).excluded {
+        if transcript.is_excluded(entry.id()) {
             continue;
         }
         let Some(message) = entry.as_message() else {
@@ -238,11 +265,10 @@ pub(crate) fn estimate_projection_chars(
         else {
             continue;
         };
-        let candidates: Vec<_> = actions
-            .iter()
-            .filter(|action| action.message_id == message.id())
-            .collect();
-        let Some(action) = effective_tool_result_action(&candidates) else {
+        let Some(candidates) = actions_by_id.get(&message.id()) else {
+            continue;
+        };
+        let Some(action) = effective_tool_result_action(candidates) else {
             continue;
         };
         let ProjectionAction::CompactToolResult {
@@ -253,10 +279,11 @@ pub(crate) fn estimate_projection_chars(
         else {
             continue;
         };
-        let text = content.text_content();
-        if let Some(projected) = apply_head_tail(&text, *keep_head, *keep_tail) {
-            before += text.chars().count() as u64;
-            after += projected.chars().count() as u64;
+        if let Some((total_chars, projected_chars)) =
+            projection_char_counts(content, *keep_head, *keep_tail)
+        {
+            before += total_chars as u64;
+            after += projected_chars as u64;
         }
     }
 
@@ -291,10 +318,12 @@ pub(crate) fn render_persisted_llm_view(
     caps: &ProviderCapabilities,
 ) -> AgentResult<Vec<BaseMessage>> {
     match plan_from_persisted_directives(transcript, PROJECTION_POLICY_VERSION) {
-        PersistedDirectiveRestore::Valid(plan) => match render_llm_view(transcript, &plan, caps) {
-            Ok(view) => return crate::messages::tool_pairing::repair_model_tool_pairing(view),
-            Err(error) => tracing::warn!(%error, "已提交投影渲染失败，保留 canonical 内容"),
-        },
+        PersistedDirectiveRestore::Valid(restored) => {
+            match render_llm_view(transcript, &restored.actions, caps) {
+                Ok(view) => return crate::messages::tool_pairing::repair_model_tool_pairing(view),
+                Err(error) => tracing::warn!(%error, "已提交投影渲染失败，保留 canonical 内容"),
+            }
+        }
         PersistedDirectiveRestore::Invalid => {
             tracing::warn!("持久化 directive 无效；保留 canonical 内容，不重新规划");
         }
@@ -305,42 +334,36 @@ pub(crate) fn render_persisted_llm_view(
 
 // ─── render_llm_view ──────────────────────────────────────────────────────────
 
-/// 根据 plan 和 provider 能力渲染 LLM 可见消息列表。
+/// 根据 actions 和 provider 能力渲染 LLM 可见消息列表。
 ///
 /// 纯函数：不修改 transcript，不写 flags，不调数据库。
+/// 只消费 action，不依赖 `MicroCompactPlan` 的收益指标——恢复路径没有估算值。
 pub fn render_llm_view(
     transcript: &MessageTranscript,
-    plan: &MicroCompactPlan,
+    actions: &[ProjectionActionEntry],
     caps: &ProviderCapabilities,
 ) -> AgentResult<Vec<BaseMessage>> {
     // 1. 使用与 normal Reason 相同的 canonical projection，确保 reminder 恰好一次且非空。
     let visible = transcript.visible_model_messages()?;
 
-    // 2. 按 message_id 索引 plan.actions
+    // 2. 消费 owned 消息：无 action 的消息直接移动，不做第二次正文复制。
     let mut actions_by_id: HashMap<MessageId, Vec<&ProjectionActionEntry>> = HashMap::new();
-    for action in &plan.actions {
+    for action in actions {
         actions_by_id
             .entry(action.message_id)
             .or_default()
             .push(action);
     }
 
-    // 3. 逐消息投影
     let mut projected = Vec::with_capacity(visible.len());
-    for msg in &visible {
-        let id = msg.id();
-        match actions_by_id.get(&id) {
-            Some(entries) => {
-                projected.push(project_message(msg, entries, caps));
-            }
-            None => {
-                // 没有 action → 原样保留
-                projected.push((*msg).clone());
-            }
+    for msg in visible {
+        match actions_by_id.get(&msg.id()) {
+            Some(entries) => projected.push(project_message(msg, entries, caps)),
+            None => projected.push(msg),
         }
     }
 
-    // 4. 验证
+    // 3. 验证
     validate_projected_view(&projected, caps)?;
 
     Ok(projected)
@@ -348,9 +371,11 @@ pub fn render_llm_view(
 
 // ─── project_message ──────────────────────────────────────────────────────────
 
-/// 对单条消息应用投影 action
+/// 对单条消息应用投影 action。
+///
+/// 消费 owned 消息：不需要投影的分支直接移动原对象，需要投影的分支才重建内容。
 fn project_message(
-    msg: &BaseMessage,
+    msg: BaseMessage,
     entries: &[&ProjectionActionEntry],
     caps: &ProviderCapabilities,
 ) -> BaseMessage {
@@ -372,22 +397,20 @@ fn project_message(
         // （移除 Base64 payload，保留占位符）
         BaseMessage::Human { id, content } => {
             if block_actions.is_empty() {
-                return msg.clone();
+                return BaseMessage::Human { id, content };
             }
-            let projected_content = project_content(content, &block_actions, caps);
             BaseMessage::Human {
-                id: *id,
-                content: projected_content,
+                id,
+                content: project_content(&content, &block_actions, caps),
             }
         }
         BaseMessage::System { id, content } => {
             if block_actions.is_empty() {
-                return msg.clone();
+                return BaseMessage::System { id, content };
             }
-            let projected_content = project_content(content, &block_actions, caps);
             BaseMessage::System {
-                id: *id,
-                content: projected_content,
+                id,
+                content: project_content(&content, &block_actions, caps),
             }
         }
 
@@ -398,12 +421,18 @@ fn project_message(
         } => {
             // ToolCall 与 ToolUse 是 canonical execution data。无论 plan 中包含何种
             // legacy/非法组合，renderer 都只允许投影独立的非 ToolUse content block。
-            let projected_content = project_content(content, &block_actions, caps);
-
+            // 无 block action 时内容不变，直接移动（不改写正文与 tool_calls）。
+            if block_actions.is_empty() {
+                return BaseMessage::Ai {
+                    id,
+                    content,
+                    tool_calls,
+                };
+            }
             BaseMessage::Ai {
-                id: *id,
-                content: projected_content,
-                tool_calls: tool_calls.clone(),
+                id,
+                content: project_content(&content, &block_actions, caps),
+                tool_calls,
             }
         }
 
@@ -415,24 +444,24 @@ fn project_message(
             execution,
             subagent_failure,
         } => {
-            if *is_error {
-                return msg.clone(); // 错误结果不变
-            }
-
-            // Message 与 block 0 是同一逻辑 ToolResult 文本；重复或冲突时
-            // fail-closed，不执行任何投影。estimator 复用同一选择函数。
-            let content_action =
-                effective_tool_result_action(entries).unwrap_or(&ProjectionAction::Keep);
-
-            let projected_content = project_tool_result_content(content, content_action);
+            // 消息级 action 只作用于成功结果；错误结果保持不变。
+            let content = if is_error {
+                content
+            } else {
+                // Message 与 block 0 是同一逻辑 ToolResult 文本；重复或冲突时
+                // fail-closed，不执行任何投影。estimator 复用同一选择函数。
+                let content_action =
+                    effective_tool_result_action(entries).unwrap_or(&ProjectionAction::Keep);
+                project_tool_result_content(content, content_action)
+            };
 
             BaseMessage::Tool {
-                id: *id,
-                tool_call_id: tool_call_id.clone(),
-                content: projected_content,
-                is_error: *is_error,
-                execution: execution.clone(),
-                subagent_failure: subagent_failure.clone(),
+                id,
+                tool_call_id,
+                content,
+                is_error,
+                execution,
+                subagent_failure,
             }
         }
     }
@@ -480,8 +509,10 @@ fn project_content(
 }
 
 /// 对 tool result 的完整文本流应用 CompactToolResult action。
+///
+/// 消费 owned 内容：不需要截断时原样返回（不复制正文）。
 fn project_tool_result_content(
-    content: &MessageContent,
+    content: MessageContent,
     action: &ProjectionAction,
 ) -> MessageContent {
     let ProjectionAction::CompactToolResult {
@@ -490,13 +521,23 @@ fn project_tool_result_content(
         ..
     } = action
     else {
-        return content.clone();
+        return content;
     };
 
-    let text = content.text_content();
-    apply_head_tail(&text, *keep_head, *keep_tail)
-        .map(MessageContent::text)
-        .unwrap_or_else(|| content.clone())
+    match content {
+        // 纯文本是常见情形：直接切片截断，避免拼接后再复制。
+        MessageContent::Text(text) => match apply_head_tail(&text, *keep_head, *keep_tail) {
+            Some(projected) => MessageContent::text(projected),
+            None => MessageContent::Text(text),
+        },
+        other => {
+            let text = other.text_content();
+            match apply_head_tail(&text, *keep_head, *keep_tail) {
+                Some(projected) => MessageContent::text(projected),
+                None => other,
+            }
+        }
+    }
 }
 
 // ─── project_block ────────────────────────────────────────────────────────────
@@ -587,9 +628,7 @@ fn project_block(
 /// 仅当截断后的文本确实更短时返回 Some，避免省略标记使短文本膨胀。
 fn apply_head_tail(text: &str, head_chars: usize, tail_chars: usize) -> Option<String> {
     let total: usize = text.chars().count();
-    if total <= head_chars.saturating_add(tail_chars) {
-        return None;
-    }
+    let (_, projected) = head_tail_geometry(total, head_chars, tail_chars)?;
 
     let head: String = text.chars().take(head_chars).collect();
     let tail: String = text
@@ -602,9 +641,55 @@ fn apply_head_tail(text: &str, head_chars: usize, tail_chars: usize) -> Option<S
         .collect();
     let skipped = total.saturating_sub(head_chars + tail_chars);
     let sentinel = peri_acp_types::sentinel::format_projection_sentinel_v1(skipped);
-    let projected = format!("{head}\n{sentinel}\n{tail}");
+    let projected_text = format!("{head}\n{sentinel}\n{tail}");
+    debug_assert_eq!(
+        projected_text.chars().count(),
+        projected,
+        "head/tail 几何与实际渲染必须一致"
+    );
 
-    (projected.chars().count() < total).then_some(projected)
+    Some(projected_text)
+}
+
+/// head/tail 投影的几何：`(原始字符数, 投影后字符数)`；`None` 表示不缩短。
+///
+/// 与 [`apply_head_tail`] 共用同一几何规则（sentinel 由同一格式化函数给出），
+/// 供只统计字符数、不复制正文的调用方使用。
+fn head_tail_geometry(
+    total: usize,
+    head_chars: usize,
+    tail_chars: usize,
+) -> Option<(usize, usize)> {
+    if total <= head_chars.saturating_add(tail_chars) {
+        return None;
+    }
+    let skipped = total.saturating_sub(head_chars + tail_chars);
+    let sentinel_chars = peri_acp_types::sentinel::format_projection_sentinel_v1(skipped)
+        .chars()
+        .count();
+    // head + "\n" + sentinel + "\n" + tail
+    let projected = head_chars + 1 + sentinel_chars + 1 + tail_chars;
+    (projected < total).then_some((total, projected))
+}
+
+/// 统计消息正文中参与 tool result 投影的字符数（不复制正文）。
+///
+/// 与 [`apply_head_tail`] 的输入口径一致：`Text` 直接计数，`Blocks` / `Raw`
+/// 按 text block 拼接后计数（拼接结果只用于计数，不驻留）。
+fn projected_text_char_count(content: &MessageContent) -> usize {
+    match content {
+        MessageContent::Text(text) => text.chars().count(),
+        other => other.text_content().chars().count(),
+    }
+}
+
+/// 单条 tool result 的投影字符数 `(before, after)`；`None` 表示投影不缩短。
+fn projection_char_counts(
+    content: &MessageContent,
+    head_chars: usize,
+    tail_chars: usize,
+) -> Option<(usize, usize)> {
+    head_tail_geometry(projected_text_char_count(content), head_chars, tail_chars)
 }
 
 // ─── validate_projected_view ──────────────────────────────────────────────────
