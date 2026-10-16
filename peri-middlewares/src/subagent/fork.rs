@@ -123,12 +123,6 @@ pub fn filter_tools(
         .collect()
 }
 
-/// Whether an agent declaration permits tools injected outside parent-tool inheritance.
-/// Explicit `tools: []` is a strict zero-tool boundary.
-pub(crate) fn allows_injected_tools(allowed: &ToolsValue) -> bool {
-    !matches!(allowed, ToolsValue::NoTools)
-}
-
 /// Extract [`AgentOverrides`] from already-parsed agent definition fields.
 ///
 /// Returns `None` when all fields are empty (no overrides needed).

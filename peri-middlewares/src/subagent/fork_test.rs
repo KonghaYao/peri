@@ -90,15 +90,6 @@ fn test_filter_explicit_zero_tools() {
     );
 }
 
-/// [回归测试] 显式 `tools: []` 也必须禁止 build_agent_from_def 后注入的工具。
-///
-/// 历史背景：WriteSandbox 不走父工具继承；若它在零工具 agent 上仍被注入，
-/// `tools: []` 就不再代表严格的零工具边界。
-#[test]
-fn test_explicit_zero_tools_rejects_injected_tools() {
-    assert!(!allows_injected_tools(&ToolsValue::NoTools));
-}
-
 #[test]
 fn test_filter_allowlist() {
     let parent_tools = vec![make_tool("Read"), make_tool("Write"), make_tool("Glob")];
@@ -305,10 +296,12 @@ fn list(names: &[&str]) -> ToolsValue {
     ToolsValue::List(names.iter().map(|s| s.to_string()).collect())
 }
 
-/// [安全回归] explorer.md 的 `disallowedTools` 是裸名
-/// （`[Agent, Write, Edit, Bash, folder_operations, cron_register]`），而迁移后
-/// 父工具集的名字是模型面 effective name（`mcp__workspace__*`）。精确比较裸名会
-/// 静默不命中 ⇒ explorer 的只读保证被绕过；本用例锁定归一后的真裁剪。
+/// [安全回归] 声明侧 `disallowedTools` 写裸名（`Write` / `Bash` …），而父工具集的
+/// 名字是模型面 effective name（`mcp__workspace__*`）。精确比较裸名会静默不命中
+/// ⇒ 声明侧的 disallow 失效；本用例锁定归一后的真裁剪。
+///
+/// 夹具是合成裸名清单：builtin agent 现只在 `disallowedTools` 保留 `Agent`，不再
+/// disallow 读写类工具，因此该清单不对应任一 builtin agent 的当前声明。
 #[test]
 fn explorer_disallow_matches_workspace_effective_name() {
     let mut parent: Vec<Arc<dyn BaseTool>> = peri_acp_types::builtin_mcp::find("workspace")
@@ -339,7 +332,7 @@ fn explorer_disallow_matches_workspace_effective_name() {
         let effective = effective_name_of("workspace", original);
         assert!(
             !names.contains(&effective),
-            "裸名 `{original}` 必须归一命中 `{effective}`（explorer 只读保证），实际保留：{names:?}"
+            "裸名 `{original}` 必须归一命中 `{effective}`（声明侧 disallow 生效），实际保留：{names:?}"
         );
     }
     assert!(

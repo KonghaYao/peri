@@ -500,7 +500,6 @@ fn runtime_scalar(env: &PromptEnv, read: impl Fn(&PromptRuntimeEnv) -> String) -
 /// [`AgentCatalogEntry::model_tier`] 承载的 typed 值渲染（M2），渲染面不消费
 /// 原始 YAML 文本；`access` 为 readonly/writes——由 [`AgentCapability::can_mutate`]
 /// 保守导出（无法证明无项目写能力时标 writes，见 `infer_agent_capability`）。
-/// 带 allowedWriteDirs 的 agent 仍可能标 readonly，因其仅写沙箱目录。
 /// agent_id 即 subagent_type 参数值（文件名去掉 .md），作为主标识符。
 ///
 /// **不注入自由 description**：description 是仓库本地元数据（可能来自被 clone

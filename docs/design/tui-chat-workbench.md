@@ -120,7 +120,7 @@ Presenter 管线固定为：
 | 工具族 | Inline 对象与结果 | Inspector 重点 |
 | --- | --- | --- |
 | `Read` / `Glob` / `Grep` / `folder_operations` | path、query、range、count | excerpt、matches、entries、完整性 |
-| `Write` / `Edit` / `SandboxWrite` | path、scope、变更摘要 | structured effect、diff、sandbox roots |
+| `Write` / `Edit` | path、scope、变更摘要 | structured effect、diff |
 | `Bash` | 脱敏 command、exit/background/timeout | stdout、stderr、exit、运行 tail |
 | `WebFetch` / `WebSearch` | host/query、status/count | 结果 descriptor 与截断状态 |
 | `artifact` | public upload、TTL | 已脱敏 URL、大小与公开边界 |
