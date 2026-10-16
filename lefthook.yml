@@ -15,13 +15,14 @@ pre-commit:
       run: ./scripts/cargo-rmcp-patched.sh check --locked
 
     # A3 收窄：clippy 只跑本次改动直接涉及的 crate
-    # （scripts/precommit-changed-crates.sh 产出 -p 参数；脚本内含边界规则）。
-    # check 保持全量（类型门不放松）；全量 clippy 由 CI 兜底。
+    # （scripts/changed-crate-args.sh --direct-only 产出 -p 参数；目录→package 映射
+    # 由 cargo metadata 派生，不再依赖手写清单）。
+    # check 保持全量（类型门不放松）；全量 clippy 由 CI 与 scripts/verify-async.sh 兜底。
     # 无 crate 命中时直接通过、不调用 cargo。
     clippy:
       glob: "*.rs"
       run: |
-        changed_crates="$(bash scripts/precommit-changed-crates.sh)"
+        changed_crates="$(bash scripts/changed-crate-args.sh --direct-only)"
         if [ -z "$changed_crates" ]; then
           echo "[clippy] 改动未命中任何 workspace crate，跳过（全量 clippy 见 CI）"
           exit 0
