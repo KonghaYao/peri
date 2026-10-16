@@ -135,6 +135,11 @@ async fn compact_core(input: CompactInput) -> (crate::error::AgentResult<Compact
             tracing::trace!(step, "Compact 压力样本已消费，等待新 usage 或工具增长");
             break 'compact_core Ok(CompactOutput { compacted: false });
         }
+        // 确定要真正执行压缩：本轮 Compact 会改写 transcript，Full 更会在 compact_v2
+        // 内独立构造摘要视图（整份历史正文）。先释放模型视图槽，避免整个摘要请求期间
+        // 多驻留一份历史正文。Skip 路径在上方提前 break，缓存继续供 Reason 复用。
+        ctx.model_view.release();
+
         let compact_strategy = match compact_action {
             crate::agent::compact_v2::CompactAction::Smart => {
                 crate::agent::events::CompactStrategy::Smart

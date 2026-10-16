@@ -9,6 +9,12 @@
 //! 与随后的 Reason 准备），取到正式请求快照后 [`ModelViewScope::release`]。缓存因此
 //! 不跨迭代常驻（Compact 会用 `std::mem::take` 整体换出 transcript，跨执行复用等于
 //! 拿旧实例的内容猜新实例）。
+//!
+//! 生命周期一律按「同一时刻至多一份整份正文存活」约束，三条约束分别由三处实现：
+//! 1. 键不匹配时先丢旧项、再渲染新视图（[`ModelViewScope::view`]）；
+//! 2. 确定要真正压缩后、Full 另建摘要视图之前释放（`stages::compact`）；
+//! 3. 退出准备作用域统一释放，hook 错误与提前取消等返回路径都不留正文
+//!    （[`ModelViewScope::release_guard`]）。
 
 #[cfg(test)]
 use std::sync::atomic::Ordering;
@@ -26,6 +32,9 @@ struct CachedModelView {
     revision: TranscriptRevision,
     capabilities: ProviderCapabilities,
     messages: Arc<Vec<BaseMessage>>,
+    /// 测试观察点：本项持有一份整份正文，随缓存项一起释放（只需析构副作用）。
+    #[cfg(test)]
+    _live: LiveViewHandle,
 }
 
 /// 执行准备范围内的模型视图复用槽。
@@ -47,6 +56,40 @@ pub struct ModelViewScope {
     /// 实际重新渲染次数（测试观察点：证明修订未变时没有重建视图）。
     #[cfg(test)]
     renders: std::sync::atomic::AtomicUsize,
+    /// 槽内视图正文句柄数与其峰值（测试观察点：重建路径上同时存活的正文至多一份）。
+    #[cfg(test)]
+    liveness: Arc<ViewLiveness>,
+}
+
+/// 测试观察点：同一时刻由本槽持有的视图正文句柄数与峰值。
+///
+/// 峰值直接对应「重建期间两份整份正文同时存活」：旧项未先释放就写入新项时，
+/// 写入瞬间两份正文同时存在，峰值升到 2。
+#[cfg(test)]
+#[derive(Default)]
+struct ViewLiveness {
+    live: std::sync::atomic::AtomicUsize,
+    peak: std::sync::atomic::AtomicUsize,
+}
+
+/// 与一份槽内视图正文同生共死的计数句柄。
+#[cfg(test)]
+struct LiveViewHandle(Arc<ViewLiveness>);
+
+#[cfg(test)]
+impl LiveViewHandle {
+    fn acquire(liveness: &Arc<ViewLiveness>) -> Self {
+        let live = liveness.live.fetch_add(1, Ordering::Relaxed) + 1;
+        liveness.peak.fetch_max(live, Ordering::Relaxed);
+        Self(Arc::clone(liveness))
+    }
+}
+
+#[cfg(test)]
+impl Drop for LiveViewHandle {
+    fn drop(&mut self) {
+        self.0.live.fetch_sub(1, Ordering::Relaxed);
+    }
 }
 
 impl ModelViewScope {
@@ -55,6 +98,9 @@ impl ModelViewScope {
     /// 调用方必须已经持有 transcript 读锁（`&MessageTranscript`），这样「读修订 →
     /// 命中判断 → 渲染 → 写回」在同一个锁周期内完成：不会把渲染期间被写入的新内容
     /// 当作旧修订缓存，也不需要跨 `await` 持锁。
+    ///
+    /// 键不匹配时旧视图已经不可复用，必须先把它移出槽再渲染：否则旧正文会一直存活
+    /// 到新视图渲染结束，重建期间两份整份正文同时驻留。
     pub(crate) fn view(
         &self,
         transcript: &MessageTranscript,
@@ -62,7 +108,7 @@ impl ModelViewScope {
     ) -> AgentResult<Arc<Vec<BaseMessage>>> {
         let revision = transcript.view_revision();
 
-        if let Some(hit) = self.hit(revision, capabilities) {
+        if let Some(hit) = self.take_matching(revision, capabilities) {
             return Ok(hit);
         }
 
@@ -85,6 +131,14 @@ impl ModelViewScope {
         *self.cached.lock() = None;
     }
 
+    /// 取作用域守卫：守卫析构时释放缓存槽。
+    ///
+    /// 准备阶段的退出路径不止一条（hook 错误、提前取消、取快照失败），在入口持有
+    /// 守卫即可让全部路径统一释放，不必在每个返回点手写 [`Self::release`]。
+    pub(crate) fn release_guard(&self) -> ModelViewReleaseGuard<'_> {
+        ModelViewReleaseGuard(self)
+    }
+
     /// 测试观察点：实际渲染次数。
     #[cfg(test)]
     pub(crate) fn render_count(&self) -> usize {
@@ -97,15 +151,29 @@ impl ModelViewScope {
         self.cached.lock().is_some()
     }
 
-    fn hit(
+    /// 测试观察点：槽内视图正文句柄数的峰值（重建路径上必须至多为 1）。
+    #[cfg(test)]
+    pub(crate) fn peak_live_views(&self) -> usize {
+        self.liveness.peak.load(Ordering::Relaxed)
+    }
+
+    /// 命中则返回共享视图；未命中时**当场丢弃**槽内旧视图并返回 `None`。
+    fn take_matching(
         &self,
         revision: TranscriptRevision,
         capabilities: &ProviderCapabilities,
     ) -> Option<Arc<Vec<BaseMessage>>> {
-        let cached = self.cached.lock();
-        let cached = cached.as_ref()?;
-        (cached.revision == revision && cached.capabilities == *capabilities)
-            .then(|| Arc::clone(&cached.messages))
+        let mut cached = self.cached.lock();
+        match cached.as_ref() {
+            Some(entry) if entry.revision == revision && entry.capabilities == *capabilities => {
+                Some(Arc::clone(&entry.messages))
+            }
+            _ => {
+                // 槽为空或键不匹配：旧视图已不可复用，退出锁区前丢弃其正文。
+                *cached = None;
+                None
+            }
+        }
     }
 
     fn store(
@@ -114,10 +182,23 @@ impl ModelViewScope {
         capabilities: ProviderCapabilities,
         messages: Arc<Vec<BaseMessage>>,
     ) {
+        #[cfg(test)]
+        let live = LiveViewHandle::acquire(&self.liveness);
         *self.cached.lock() = Some(CachedModelView {
             revision,
             capabilities,
             messages,
+            #[cfg(test)]
+            _live: live,
         });
+    }
+}
+
+/// 退出准备作用域时释放缓存槽的守卫（见 [`ModelViewScope::release_guard`]）。
+pub(crate) struct ModelViewReleaseGuard<'a>(&'a ModelViewScope);
+
+impl Drop for ModelViewReleaseGuard<'_> {
+    fn drop(&mut self) {
+        self.0.release();
     }
 }
