@@ -576,6 +576,12 @@ impl AgentExecutor for WorkflowAgentExecutor {
             drop(handle);
         }
 
+        // 外部执行 guard 持有的 tracker token 只有 drop 才释放；若它活到函数返回，
+        // `close_session_scope` 会等在同一 tracker 上直到 `ExecutionScope::wait` 的
+        // 5 秒预算耗尽，把每次正常 run 的结清都记成失败（并按 scope 数逐次累加）。
+        // 未确认执行仍由 `ExternalGuard::drop` 写入 uncertainty 记录，不掩盖证据缺失。
+        drop(execution_guard);
+
         close_session_scope(&session, &session_id).await;
 
         projected.result

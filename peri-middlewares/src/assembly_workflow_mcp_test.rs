@@ -164,6 +164,10 @@ async fn run_workflow_mcp(scenario: Scenario<'_>) -> Outcome {
     } = scenario;
     let calls = Arc::new(parking_lot::Mutex::new(Vec::new()));
     let pool = Arc::new(McpClientPool::new_empty());
+    // 夹具直接把已连接的句柄装进池，池自身的 catalog 初始化不会运行；不置位时
+    // 会话收尾会等满 `wait_for_task_owner_catalog` 的 10 秒超时并把结清记成失败，
+    // 掩盖「收尾是否消耗 ExecutionScope 预算」这一断言的信号。
+    pool.mark_initialized();
     let (client_io, server_io) = tokio::io::duplex(8192);
     let source = SyncSource {
         calls: calls.clone(),
@@ -245,6 +249,7 @@ async fn run_workflow_mcp(scenario: Scenario<'_>) -> Outcome {
         })
     });
     let executor = WorkflowAgentExecutor::new(ctx);
+    let run_started = std::time::Instant::now();
     let result = executor
         .execute(
             serde_json::from_value(json!({
@@ -256,6 +261,7 @@ async fn run_workflow_mcp(scenario: Scenario<'_>) -> Outcome {
             .unwrap(),
         )
         .await;
+    let run_elapsed = run_started.elapsed();
     let agent_session_id = {
         let sessions = pool.session_bindings.read().registered_sessions();
         assert_eq!(sessions.len(), 1);
@@ -274,6 +280,16 @@ async fn run_workflow_mcp(scenario: Scenario<'_>) -> Outcome {
             .session_close_settled(),
         "workflow run 收尾必须结清子会话作用域：父会话关闭要求 child idle，\
          否则 verify_environment_close 以 -32010 拒绝父会话关闭"
+    );
+    // 收尾结清必须真的成功，而不是等 5 秒超时后把失败当作「已清理」：外部执行
+    // guard 持有的 tracker token 只有 drop 才释放，若它活到函数返回，
+    // close_session_scope 会白等 `ExecutionScope::wait` 的 5 秒预算，并在日志里
+    // 留下一条「scope close incomplete」。只在 execute() 返回后看 settled 抓不到
+    // （那时 guard 已销毁），所以这里同时约束耗时。
+    assert!(
+        run_elapsed < Duration::from_secs(4),
+        "workflow run 结清子会话不得消耗 ExecutionScope 的 5 秒超时预算（实测 {run_elapsed:?}）：\
+         外部执行 guard 必须在 close_session_scope 之前释放 tracker token"
     );
     assert_ne!(agent_session_id, SPOOFED);
     assert_ne!(agent_session_id, ROOT);

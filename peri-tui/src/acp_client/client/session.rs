@@ -89,6 +89,37 @@ impl Drop for SessionLoadReservation {
     }
 }
 
+/// ACP 明示的 close incomplete：旧会话资源尚未释放，同一 `session/close` 可重试。
+const INCOMPLETE_CLOSE_CODE: i64 = -32010;
+
+/// 一个尚未关闭成功的旧会话，以及失败时被打断的切换目标。
+///
+/// 关闭失败后 lifecycle 只留下 `NoSession`，旧身份随之消失；没有这份记录，下一次
+/// 输入会绕过关闭直接 `session/new`——服务端的旧会话可能仍在 Closing、资源未释放，
+/// 而用户原本要加载的历史会被静默换成空会话。只有 `-32010` 属于可重试语义，其余
+/// 错误没有可行路径，不保留身份（`from_close_failure`）。
+#[derive(Debug)]
+pub(super) struct PendingClose {
+    /// 必须先关闭成功才能建立新会话的旧身份。
+    pub(super) session_id: String,
+    /// 失败时用户原本要加载的会话；`Some` 时下一次建立会话先完成这次加载，
+    /// 而不是新建空会话。新建路径为 `None`：重试同一路径自然回到「新建」。
+    pub(super) resume_load: Option<String>,
+}
+
+impl PendingClose {
+    fn from_close_failure(
+        session_id: &str,
+        resume_load: Option<String>,
+        error: &AcpError,
+    ) -> Option<Self> {
+        (error.code == INCOMPLETE_CLOSE_CODE).then(|| Self {
+            session_id: session_id.to_owned(),
+            resume_load,
+        })
+    }
+}
+
 #[cfg(test)]
 #[path = "recovery_test.rs"]
 mod recovery_tests;
@@ -137,8 +168,10 @@ impl AcpTuiClient {
             crate::kit::session_boundary::project_session_boundary(None);
         }
         self.settle_claims_owned(start.claims).await;
-        let old_id = start.from;
-        if let Some(ref old_sid) = old_id {
+        // 上一次关闭失败留下的旧身份优先：`fail_transition` 之后 lifecycle 不再保留
+        // 它，但服务端可能仍在 Closing，绕过它就会把旧会话与用户意图一起丢掉。
+        let close_target = self.pending_close_target().or(start.from);
+        if let Some(ref old_sid) = close_target {
             if let Err(error) = self.close_previous_session(old_sid).await {
                 self.lifecycle.fail_transition(start.generation);
                 transition.disarm();
@@ -146,15 +179,18 @@ impl AcpTuiClient {
                     crate::kit::session_boundary::project_session_boundary(None);
                 }
                 // 旧会话清理失败不写入粘滞 `restore_error`：那会让后续每次
-                // 建立/发送都被同一条陈旧错误拦截且无从清除。保持可重试。
+                // 建立/发送都被同一条陈旧错误拦截且无从清除。改记待关闭身份，
+                // 下一次建立会话先重放同一关闭。
                 *self.restore_error.lock().unwrap() = None;
+                self.remember_close_failure(old_sid, None, &error);
                 tracing::warn!(
                     session_id = %old_sid,
                     %error,
-                    "previous session close incomplete; retry is allowed"
+                    "previous session close incomplete; kept pending for retry"
                 );
                 return Err(error);
             }
+            self.clear_pending_close();
         }
 
         let params = json!({ "cwd": cwd, "model": model });
@@ -206,7 +242,7 @@ impl AcpTuiClient {
     ///
     /// `-32010`（close incomplete）是 ACP 明示的可重试错误：在预算内重放同一
     /// 请求，与 `@peri-sdk` 的 `closeUntilSettled` 同一语义。重放耗尽仍不完整
-    /// 时返回最后一次错误；调用方保持状态可重试，不把它写成粘滞
+    /// 时返回最后一次错误；调用方保留待关闭身份并保持可重试，不把它写成粘滞
     /// `restore_error`。
     async fn close_previous_session(&self, session_id: &str) -> Result<(), AcpError> {
         const INCOMPLETE_CLOSE_CODE: i64 = -32010;
@@ -226,6 +262,39 @@ impl AcpTuiClient {
                 }
             }
         }
+    }
+
+    /// 记录一次关闭失败：只有 `-32010` 保留待关闭身份（其余错误没有重试路径）。
+    fn remember_close_failure(
+        &self,
+        session_id: &str,
+        resume_load: Option<String>,
+        error: &AcpError,
+    ) {
+        *self.pending_close.lock().unwrap() =
+            PendingClose::from_close_failure(session_id, resume_load, error);
+    }
+
+    fn clear_pending_close(&self) {
+        *self.pending_close.lock().unwrap() = None;
+    }
+
+    /// 尚未关闭成功的旧会话身份；存在时下一次建立会话必须先关闭它。
+    fn pending_close_target(&self) -> Option<String> {
+        self.pending_close
+            .lock()
+            .unwrap()
+            .as_ref()
+            .map(|pending| pending.session_id.clone())
+    }
+
+    /// 被关闭失败打断的加载目标；存在时下一次建立会话先完成这次加载。
+    fn pending_resume_load(&self) -> Option<String> {
+        self.pending_close
+            .lock()
+            .unwrap()
+            .as_ref()
+            .and_then(|pending| pending.resume_load.clone())
     }
 
     #[cfg(test)]
@@ -288,6 +357,11 @@ impl AcpTuiClient {
                 continue;
             }
             self.check_restore_error()?;
+            // 上一次加载 B 被关闭失败打断：先完成同一加载（`load_session_under_gate`
+            // 内部会先重放关闭 A），不要把用户的历史意图换成新建空会话。
+            if let Some(target) = self.pending_resume_load() {
+                return self.load_session_under_gate(&target, cwd, model).await;
+            }
             return self.new_session_under_gate(cwd, model).await;
         }
     }
@@ -445,10 +519,11 @@ impl AcpTuiClient {
             crate::kit::session_boundary::project_session_boundary(Some(session_id));
         }
         self.settle_claims_owned(start.claims).await;
-        let old_id = start.from;
-        if let Some(ref old_sid) = old_id
-            && old_sid != session_id
-        {
+        let close_target = self
+            .pending_close_target()
+            .or(start.from)
+            .filter(|candidate| *candidate != session_id);
+        if let Some(ref old_sid) = close_target {
             if let Err(error) = self.close_previous_session(old_sid).await {
                 self.lifecycle.fail_transition(start.generation);
                 transition.disarm();
@@ -457,14 +532,18 @@ impl AcpTuiClient {
                 }
                 // 与 `new_session_under_gate` 同一口径：清理旧会话失败不是
                 // 恢复失败，不写入粘滞 `restore_error`（含本函数入口的占位）。
+                // 额外记住本次要加载的目标，避免用户的历史意图被换成空会话。
                 *self.restore_error.lock().unwrap() = None;
+                self.remember_close_failure(old_sid, Some(session_id.to_owned()), &error);
                 tracing::warn!(
                     session_id = %old_sid,
+                    target_session_id = %session_id,
                     %error,
-                    "previous session close incomplete; retry is allowed"
+                    "previous session close incomplete; kept pending for retry"
                 );
                 return Err(error);
             }
+            self.clear_pending_close();
         }
 
         let params = json!({ "sessionId": session_id, "cwd": effective_cwd, "model": model });

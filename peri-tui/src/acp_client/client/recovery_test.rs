@@ -112,6 +112,25 @@ async fn assert_no_request(server: &MpscServerTransport, window: Duration) {
     }
 }
 
+/// 等客户端请求；若请求方任务先结束（成功或失败），把真实结果暴露出来——
+/// 只等 wire 会把它报成 5 秒超时，看不出客户端为什么没发请求。
+async fn next_request_or_task(
+    server: &MpscServerTransport,
+    task: &mut tokio::task::JoinHandle<Result<String, AcpError>>,
+) -> (RequestId, String, Value) {
+    loop {
+        tokio::select! {
+            result = &mut *task => panic!("客户端未发出请求就结束: {result:?}"),
+            message = server.recv() => {
+                let Some(IncomingMessage::Request { id, method, params }) = message else {
+                    continue;
+                };
+                return (id, method, params);
+            }
+        }
+    }
+}
+
 /// 协商到 `session/load` 请求按其结果回答为止，返回 load 的请求参数。
 async fn reach_load(server: &MpscServerTransport, response: Result<Value, AcpError>) -> Value {
     let (id, method, params) = next_request(server).await;
@@ -224,11 +243,12 @@ async fn close_incomplete_is_replayed_before_establishing_next_session() {
     assert_eq!(client.current_session_id().as_deref(), Some("second"));
 }
 
-/// 关闭旧会话持续 incomplete：失败必须保持可重试——不得写入粘滞
-/// `restore_error`，否则后续每次发送/建立都被同一条陈旧错误拦截。
+/// 关闭旧会话持续 incomplete：失败后必须保留旧身份，下一次建立会话先重放同一
+/// 关闭——不得绕过关闭直接 `session/new`（服务端旧会话可能仍在 Closing），也不得
+/// 写入粘滞 `restore_error`（那会让后续每次发送/建立都被同一条陈旧错误拦截）。
 #[tokio::test]
 #[serial_test::serial]
-async fn incomplete_close_failure_stays_retryable() {
+async fn incomplete_close_failure_keeps_old_session_pending() {
     let _guard = UiAtomsGuard::capture();
     let (client, server) = interactive_client();
     let opener = client.clone();
@@ -275,6 +295,13 @@ async fn incomplete_close_failure_stays_retryable() {
     let retry_client = client.clone();
     let retry = tokio::spawn(async move { retry_client.new_session("/w", None).await });
     let (id, method, params) = next_request(&server).await;
+    assert_eq!(
+        method, "session/close",
+        "重试必须先完成同一个关闭，而不是绕过它新建会话"
+    );
+    assert_eq!(params["sessionId"], "first");
+    server.send_response(id, Ok(json!({}))).await.unwrap();
+    let (id, method, params) = next_request(&server).await;
     assert_eq!(method, "session/new");
     assert_eq!(params["cwd"], "/w");
     server
@@ -282,5 +309,77 @@ async fn incomplete_close_failure_stays_retryable() {
         .await
         .unwrap();
     assert_eq!(retry.await.unwrap().unwrap(), "second");
+    assert!(client.check_restore_error().is_ok());
+}
+
+/// 关闭 A 失败打断「加载 B」：下一次输入必须继续关闭 A 并完成加载 B，不得改去
+/// 新建空会话——那会静默丢掉用户要的历史上下文。
+#[tokio::test]
+#[serial_test::serial]
+async fn incomplete_close_keeps_pending_load_target() {
+    let _guard = UiAtomsGuard::capture();
+    let (client, server) = interactive_client();
+    let opener = client.clone();
+    let first = tokio::spawn(async move { opener.new_session("/w", None).await });
+    let (id, method, _) = next_request(&server).await;
+    assert_eq!(method, "session/new");
+    server
+        .send_response(id, Ok(json!({ "sessionId": "first" })))
+        .await
+        .unwrap();
+    assert_eq!(first.await.unwrap().unwrap(), "first");
+
+    let switcher = client.clone();
+    let mut attempt = tokio::spawn(async move { switcher.load_session(TARGET, "/w", None).await });
+    let (id, method, params) = next_request_or_task(&server, &mut attempt).await;
+    assert_eq!(method, "peri/session_context");
+    assert_eq!(params["sessionId"], TARGET);
+    server
+        .send_response(id, Ok(context(EFFECTIVE_CWD)))
+        .await
+        .unwrap();
+
+    let error = loop {
+        tokio::select! {
+            result = &mut attempt => break result.unwrap().unwrap_err(),
+            message = server.recv() => {
+                let Some(IncomingMessage::Request { id, method, params }) = message else {
+                    panic!("关闭预算内客户端只应重放 session/close");
+                };
+                assert_eq!(method, "session/close");
+                assert_eq!(params["sessionId"], "first");
+                server
+                    .send_response(id, Err(AcpError::new(-32010, "Session close incomplete")))
+                    .await
+                    .unwrap();
+            }
+        }
+    };
+    assert_eq!(error.code, -32010);
+    assert!(!client.has_session(), "关闭失败后本会话身份不再保留");
+
+    // 下一次输入：先关闭同一个「first」，然后完成被打断的加载。
+    let sender = client.clone();
+    let mut resumed = tokio::spawn(async move { sender.ensure_session("/w", None).await });
+    let (id, method, params) = next_request_or_task(&server, &mut resumed).await;
+    assert_eq!(method, "peri/session_context");
+    assert_eq!(params["sessionId"], TARGET);
+    server
+        .send_response(id, Ok(context(EFFECTIVE_CWD)))
+        .await
+        .unwrap();
+    let (id, method, params) = next_request_or_task(&server, &mut resumed).await;
+    assert_eq!(method, "session/close", "重试必须先完成同一个关闭");
+    assert_eq!(params["sessionId"], "first");
+    server.send_response(id, Ok(json!({}))).await.unwrap();
+    let (id, method, params) = next_request_or_task(&server, &mut resumed).await;
+    assert_eq!(
+        method, "session/load",
+        "必须完成被打断的加载，而不是新建空会话"
+    );
+    assert_eq!(params["sessionId"], TARGET);
+    server.send_response(id, Ok(json!({}))).await.unwrap();
+    assert_eq!(resumed.await.unwrap().unwrap(), TARGET);
+    assert_eq!(client.current_session_id().as_deref(), Some(TARGET));
     assert!(client.check_restore_error().is_ok());
 }
