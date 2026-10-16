@@ -17,8 +17,8 @@
 ### TUI-THEME-001
 
 - **Scope**：非组件主题读取。
-- **Rule**：组件用 hook 订阅主题 atom；非组件按“两步绑定”取得主题值并在 guard 生命周期内完成复制，禁止保存悬垂引用。禁止硬编码颜色。
-- **Verify**：`cargo check -p peri-tui`；人工检查主题读取来自 `peri-theme` atoms，且没有新增硬编码色值。
+- **Rule**：组件用 hook 订阅主题 atom；非组件按“两步绑定”取得主题值并在 guard 生命周期内完成复制，禁止保存悬垂引用。禁止硬编码颜色。填充块（选中行、激活 chip / tab、按钮）的底色取表面或状态 token（`semantic.surface.*`、`semantic.status.*`、`semantic.accent`、`component.popup.action_primary`、`*_bg`）；文本 token（`semantic.text.*`、`component.panel.title`、`component.panel.row_selected`）只作前景色，不得用作底色——dark / dracula 等主题里它们等于 `text.primary`，会渲染成白底白字。
+- **Verify**：`cargo check -p peri-tui`；人工检查主题读取来自 `peri-theme` atoms，没有新增硬编码色值，也没有 `.bg(<文本 token>)`。
 
 ### TUI-EVENT-001
 

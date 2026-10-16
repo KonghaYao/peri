@@ -55,27 +55,29 @@ pub fn StatusPanel(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
     let tab = *active_tab.read();
 
     // ── Tab bar ──────────────────────────────────────────────────────
+    // 激活 tab 是填充块：底色取 selection 表面（与消息区「当前项」同源）。
+    // `component.panel.title` 是前景 token，dark / dracula 下等于 `text.primary`，
+    // 用作底色会白底白字。
+    let active_tab_style = Style::new()
+        .fg(theme_def.read().semantic.text.primary)
+        .bg(theme_def.read().semantic.surface.selection)
+        .bold();
+    let inactive_tab_style = Style::new().fg(theme_def.read().semantic.text.muted);
     let tab_bar = Paragraph::new(Line::from(vec![
         Span::styled(
             i18n::tr("status-tab-service"),
             if tab == TAB_SERVICE {
-                Style::new()
-                    .fg(theme_def.read().semantic.text.primary)
-                    .bg(theme_def.read().component.panel.title)
-                    .bold()
+                active_tab_style
             } else {
-                Style::new().fg(theme_def.read().semantic.text.muted)
+                inactive_tab_style
             },
         ),
         Span::styled(
             i18n::tr("status-tab-context"),
             if tab == TAB_CONTEXT {
-                Style::new()
-                    .fg(theme_def.read().semantic.text.primary)
-                    .bg(theme_def.read().component.panel.title)
-                    .bold()
+                active_tab_style
             } else {
-                Style::new().fg(theme_def.read().semantic.text.muted)
+                inactive_tab_style
             },
         ),
     ]));

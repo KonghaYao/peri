@@ -42,13 +42,13 @@
 | `/config` | Config |
 | `/status` | Status |
 | `/tasks` | Tasks |
-| `/agents` | Agents |
+| `/agent` | Agent |
 | `/memory` | Memory |
 | `/mcp` | MCP |
 | `/hooks` | Hooks |
-| `/plugins` | Plugins |
-| `/cron` | Cron |
-| `/workflow` | Workflow |
+| `/plugin` | Plugin |
+| `/cron-list` | Cron |
+| `/workflows` | Workflow |
 | `/login` | Login |
 | `/threads` | Threads |
 

@@ -327,9 +327,11 @@ pub fn PluginPanel(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
     let warning_color = guard.semantic.status.warning;
     let success_color = guard.semantic.status.success;
     let title_color = guard.component.panel.title;
+    // 激活 tab 是填充块：底色取 selection 表面，不用前景 token（dark / dracula
+    // 下 `panel.title` 等于 `text.primary`，会白底白字）。
     let active_tab_style = Style::new()
         .fg(guard.semantic.text.primary)
-        .bg(title_color)
+        .bg(guard.semantic.surface.selection)
         .bold();
     let inactive_tab_style = muted_style;
 

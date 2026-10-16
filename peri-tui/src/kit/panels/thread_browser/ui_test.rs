@@ -287,3 +287,85 @@ fn view_key_captures_session_generation_scope_and_archive_view() {
     BRIDGE_RESET_COUNTER.set(8);
     assert!(!view.still_current(), "bridge 重建后旧身份立即失效");
 }
+
+// ── 相对时间列与过滤器 chip ────────────────────────────────────────────
+
+/// 相对时间按时长分档：刚刚 / 分钟 / 小时 / 天；缺失更新时间用 `common-na`。
+#[test]
+fn relative_time_buckets_by_elapsed_minutes() {
+    crate::i18n::init(Some("en"));
+    let now: chrono::DateTime<chrono::Utc> = peri_time::now_wall().into();
+
+    assert_eq!(format_relative_time(now), "just now");
+    assert_eq!(
+        format_relative_time(now - chrono::Duration::minutes(5)),
+        "5 minutes ago"
+    );
+    assert_eq!(
+        format_relative_time(now - chrono::Duration::minutes(1)),
+        "1 minute ago",
+        "单数不加 s"
+    );
+    assert_eq!(
+        format_relative_time(now - chrono::Duration::hours(2)),
+        "2 hours ago"
+    );
+    assert_eq!(
+        format_relative_time(now - chrono::Duration::hours(23)),
+        "23 hours ago"
+    );
+    assert_eq!(
+        format_relative_time(now - chrono::Duration::days(14)),
+        "14 days ago",
+        "超过一天不再细分小时"
+    );
+
+    let missing = ThreadSummary {
+        id: "t".to_owned(),
+        title: None,
+        cwd: "/tmp".to_owned(),
+        message_count: 0,
+        updated_at: None,
+    };
+    assert_eq!(relative_time_label(&missing), i18n::tr("common-na"));
+}
+
+/// 时间列补白按终端显示宽度：中文时间文本用 `{:<width$}` 会少补空格。
+#[test]
+fn time_column_pads_by_display_width_not_char_count() {
+    assert_eq!(pad_display_width("abc", 6), "abc   ");
+    assert_eq!(pad_display_width("刚刚", 6), "刚刚  ", "中文 2 字符占 4 列");
+    assert_eq!(pad_display_width("12 天前", 6), "12 天前", "已达标不裁剪");
+    assert_eq!(pad_display_width("abcdefgh", 6), "abcdefgh", "超宽不截断");
+
+    assert_eq!(time_column_width(&[]), 6, "空列表取下界");
+    assert_eq!(time_column_width(&["刚刚".to_owned()]), 6, "低于下界取下界");
+    assert_eq!(
+        time_column_width(&["刚刚".to_owned(), "12 天前".to_owned()]),
+        7,
+        "取最宽条目"
+    );
+    assert_eq!(
+        time_column_width(&["x".repeat(40)]),
+        12,
+        "超宽时间文本夹在上界"
+    );
+}
+
+/// chip 两侧留白成块，选中态带底色、未选中态无底色。
+#[test]
+fn chip_span_marks_selection_with_background() {
+    let active = Style::new().bg(ratatui_kit::ratatui::style::Color::Red);
+    let idle = Style::new();
+
+    let selected = chip_span("项目".to_owned(), true, active, idle);
+    assert_eq!(selected.content.as_ref(), " 项目 ");
+    assert_eq!(
+        selected.style.bg,
+        Some(ratatui_kit::ratatui::style::Color::Red)
+    );
+
+    let unselected = chip_span("全部".to_owned(), false, active, idle);
+    assert_eq!(unselected.content.as_ref(), " 全部 ");
+    assert_eq!(unselected.style.bg, None);
+}
