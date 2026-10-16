@@ -606,7 +606,7 @@ async fn test_run_react_loop_successful_full_does_not_recompact_excluded_history
         );
         let canonical = transcript.visible_model_messages().unwrap();
         let projected =
-            projection::render_llm_view(&transcript, &plan, &Default::default()).unwrap();
+            projection::render_llm_view(&transcript, &plan.actions, &Default::default()).unwrap();
         assert_eq!(
             serde_json::to_value(canonical).unwrap(),
             serde_json::to_value(projected).unwrap(),

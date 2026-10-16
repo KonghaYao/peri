@@ -35,8 +35,8 @@ pub use planner::{plan_micro, ApplyReport, CompactPolicy, ContextPressure, FullE
 pub use projection::{
     plan_from_persisted_directives, render_llm_view, MessageProjectionDirective, MicroCompactPlan,
     PersistedDirectiveRestore, ProjectionAction, ProjectionActionEntry, ProjectionTarget,
-    ProviderCapabilities, ProviderProtocol, CORRUPTED_PROJECTION, DIRECTIVE_VERSION_MISMATCH,
-    NO_PERSISTED_DIRECTIVES, PROJECTION_POLICY_VERSION,
+    ProviderCapabilities, ProviderProtocol, RestoredProjectionDirectives, CORRUPTED_PROJECTION,
+    DIRECTIVE_VERSION_MISMATCH, NO_PERSISTED_DIRECTIVES, PROJECTION_POLICY_VERSION,
 };
 
 // ─── CompactResult ───────────────────────────────────────────────────────────────

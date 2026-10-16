@@ -523,6 +523,29 @@ impl MessageTranscript {
         self.flags.get(&id).cloned().unwrap_or_default()
     }
 
+    /// 只读获取消息标记；无标记时返回 `None`。
+    ///
+    /// 与 [`Self::flags`] 的区别：不克隆 `projection` directive 本体。
+    /// 只读查询（是否 excluded/truncated、取 directive 引用）一律走此接口。
+    pub fn flags_ref(&self, id: MessageId) -> Option<&MessageFlags> {
+        self.flags.get(&id)
+    }
+
+    /// 该消息是否被排除在模型视图之外（不克隆 flags）。
+    pub fn is_excluded(&self, id: MessageId) -> bool {
+        self.flags_ref(id).is_some_and(|flags| flags.excluded)
+    }
+
+    /// 该消息是否已被 Micro Compact 标记截断（不克隆 flags）。
+    pub fn is_truncated(&self, id: MessageId) -> bool {
+        self.flags_ref(id).is_some_and(|flags| flags.truncated)
+    }
+
+    /// 只读获取该消息的投影指令（不克隆 directive）。
+    pub fn projection_ref(&self, id: MessageId) -> Option<&MessageProjectionDirective> {
+        self.flags_ref(id)?.projection.as_ref()
+    }
+
     /// 按 id 获取消息标记，消息不存在时返回 None
     ///
     /// 与 `flags()` 不同：此方法先确认 id 存在于索引表中，

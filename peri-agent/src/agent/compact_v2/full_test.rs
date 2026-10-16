@@ -152,7 +152,7 @@ async fn test_audit_full_excluded_history_must_not_be_micro_candidate() {
     let (_dir, transcript) = make_audit_full_history().await;
     let plan = plan_micro(&transcript, &CompactConfig::default(), true);
     let before = transcript.visible_model_messages().unwrap();
-    let after = projection::render_llm_view(&transcript, &plan, &Default::default()).unwrap();
+    let after = projection::render_llm_view(&transcript, &plan.actions, &Default::default()).unwrap();
     assert_eq!(
         serde_json::to_value(before).unwrap(),
         serde_json::to_value(after).unwrap()

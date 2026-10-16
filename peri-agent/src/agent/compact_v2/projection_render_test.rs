@@ -85,7 +85,7 @@ fn canonical_reminder_renders_once_with_and_without_directives() {
         },
     ] {
         let projected =
-            render_llm_view(&transcript, &plan, &ProviderCapabilities::default()).unwrap();
+            render_llm_view(&transcript, &plan.actions, &ProviderCapabilities::default()).unwrap();
         let reminders: Vec<_> = projected
             .iter()
             .filter(|message| message.id() == reminder_id)
@@ -123,7 +123,7 @@ fn test_blocks_image_projection_removes_base64() {
     };
 
     let caps = ProviderCapabilities::default();
-    let projected = render_llm_view(&transcript, &plan, &caps).expect("render_llm_view 应成功");
+    let projected = render_llm_view(&transcript, &plan.actions, &caps).expect("render_llm_view 应成功");
 
     // 投影后不应含 Base64 payload
     let blocks = projected[0].content_blocks();
@@ -167,7 +167,7 @@ fn test_blocks_document_projection_removes_base64() {
     };
 
     let caps = ProviderCapabilities::default();
-    let projected = render_llm_view(&transcript, &plan, &caps).expect("render_llm_view 应成功");
+    let projected = render_llm_view(&transcript, &plan.actions, &caps).expect("render_llm_view 应成功");
 
     let blocks = projected[0].content_blocks();
     let has_doc_base64 = blocks.iter().any(|b| {
@@ -220,7 +220,7 @@ fn legacy_tool_input_projection_preserves_selected_long_fields_and_tool_use() {
         ..Default::default()
     };
 
-    let projected = render_llm_view(&transcript, &plan, &ProviderCapabilities::default())
+    let projected = render_llm_view(&transcript, &plan.actions, &ProviderCapabilities::default())
         .expect("render_llm_view 应成功");
     let BaseMessage::Ai {
         content,
@@ -281,7 +281,7 @@ fn test_tool_input_projection_short_or_invalid_selected_fields_are_noops() {
             ..Default::default()
         };
 
-        let projected = render_llm_view(&transcript, &plan, &ProviderCapabilities::default())
+        let projected = render_llm_view(&transcript, &plan.actions, &ProviderCapabilities::default())
             .expect("render_llm_view 应成功");
         let BaseMessage::Ai { tool_calls, .. } = &projected[0] else {
             panic!("第一条消息应为 Ai 消息");
@@ -321,7 +321,7 @@ fn regression_glob_short_pattern_projection_contains_no_compact_note() {
         ..Default::default()
     };
 
-    let projected = render_llm_view(&transcript, &plan, &ProviderCapabilities::default())
+    let projected = render_llm_view(&transcript, &plan.actions, &ProviderCapabilities::default())
         .expect("render_llm_view 应成功");
     let BaseMessage::Ai { tool_calls, .. } = &projected[0] else {
         panic!("第一条消息应为 Ai 消息");
@@ -368,7 +368,7 @@ fn test_short_tool_result_compact_action_is_direct_render_noop() {
         ..Default::default()
     };
 
-    let projected = render_llm_view(&transcript, &plan, &ProviderCapabilities::default())
+    let projected = render_llm_view(&transcript, &plan.actions, &ProviderCapabilities::default())
         .expect("render_llm_view 应成功");
     assert_eq!(
         projected[1].content(),
@@ -422,7 +422,7 @@ fn test_tool_result_projection_compacts_complete_multi_block_text_stream() {
         "A".repeat(300) + &"B".repeat(50),
         "B".repeat(100)
     );
-    let projected = render_llm_view(&transcript, &plan, &ProviderCapabilities::default())
+    let projected = render_llm_view(&transcript, &plan.actions, &ProviderCapabilities::default())
         .expect("render_llm_view 应成功");
     let BaseMessage::Tool { content, .. } = &projected[1] else {
         panic!("第二条消息应为 Tool 消息");
@@ -473,7 +473,7 @@ fn test_tool_result_projection_keeps_multi_block_content_at_or_below_total_limit
         ..Default::default()
     };
 
-    let projected = render_llm_view(&transcript, &plan, &ProviderCapabilities::default())
+    let projected = render_llm_view(&transcript, &plan.actions, &ProviderCapabilities::default())
         .expect("render_llm_view 应成功");
     let BaseMessage::Tool { content, .. } = &projected[1] else {
         panic!("第二条消息应为 Tool 消息");
@@ -519,7 +519,7 @@ fn test_tool_result_projection_uses_action_policy_below_planner_threshold() {
         ..Default::default()
     };
 
-    let projected = render_llm_view(&transcript, &plan, &ProviderCapabilities::default())
+    let projected = render_llm_view(&transcript, &plan.actions, &ProviderCapabilities::default())
         .expect("render_llm_view 应成功");
     let BaseMessage::Tool { content, .. } = &projected[1] else {
         panic!("第二条消息应为 Tool 消息");
@@ -565,7 +565,7 @@ fn test_tool_result_projection_uses_exact_head_tail_format() {
         ..Default::default()
     };
 
-    let projected = render_llm_view(&transcript, &plan, &ProviderCapabilities::default())
+    let projected = render_llm_view(&transcript, &plan.actions, &ProviderCapabilities::default())
         .expect("render_llm_view 应成功");
     assert_eq!(projected[1].content(), "abc\n... [496 字符已省略] ...\nyz");
 }
@@ -601,7 +601,7 @@ fn test_tool_result_projection_keeps_head_tail() {
     };
 
     let caps = ProviderCapabilities::default();
-    let projected = render_llm_view(&transcript, &plan, &caps).expect("render_llm_view 应成功");
+    let projected = render_llm_view(&transcript, &plan.actions, &caps).expect("render_llm_view 应成功");
 
     // ToolResult 内容应被截断
     if let BaseMessage::Tool { content, .. } = &projected[1] {
@@ -645,7 +645,7 @@ fn test_error_tool_result_is_unchanged() {
     };
 
     let caps = ProviderCapabilities::default();
-    let projected = render_llm_view(&transcript, &plan, &caps).expect("render_llm_view 应成功");
+    let projected = render_llm_view(&transcript, &plan.actions, &caps).expect("render_llm_view 应成功");
 
     // 错误 ToolResult 应保持不变
     if let BaseMessage::Tool {
@@ -687,7 +687,7 @@ fn test_cjk_projection_uses_character_boundary() {
     };
 
     let caps = ProviderCapabilities::default();
-    let projected = render_llm_view(&transcript, &plan, &caps).expect("render_llm_view 应成功");
+    let projected = render_llm_view(&transcript, &plan.actions, &caps).expect("render_llm_view 应成功");
 
     if let BaseMessage::Tool { content, .. } = &projected[1] {
         let text = content.text_content();
@@ -729,7 +729,7 @@ fn test_signed_reasoning_not_partially_truncated() {
         protocol: ProviderProtocol::Anthropic,
         signed_reasoning_must_be_whole: true,
     };
-    let projected = render_llm_view(&transcript, &plan, &caps).expect("render_llm_view 应成功");
+    let projected = render_llm_view(&transcript, &plan.actions, &caps).expect("render_llm_view 应成功");
 
     // 签名不应被局部截断
     let blocks = projected[0].content_blocks();
@@ -758,7 +758,7 @@ fn test_render_llm_view_no_actions_passthrough() {
     let plan = MicroCompactPlan::default();
     let caps = ProviderCapabilities::default();
 
-    let projected = render_llm_view(&transcript, &plan, &caps).expect("render_llm_view 应成功");
+    let projected = render_llm_view(&transcript, &plan.actions, &caps).expect("render_llm_view 应成功");
     assert_eq!(projected.len(), 2, "无 action 时应保留全部可见消息");
 }
 
@@ -794,7 +794,7 @@ fn test_human_and_system_are_unchanged() {
     };
 
     let caps = ProviderCapabilities::default();
-    let projected = render_llm_view(&transcript, &plan, &caps).expect("render_llm_view 应成功");
+    let projected = render_llm_view(&transcript, &plan.actions, &caps).expect("render_llm_view 应成功");
 
     // Human/System 永不变
     assert_eq!(projected[0].content(), "hello");
