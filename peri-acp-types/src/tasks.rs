@@ -73,6 +73,14 @@ pub struct TaskRecord {
     /// 快照/增量事件携带它，root 面板据此归属子会话发起的任务（只读投影）。
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub initiator_session_id: Option<String>,
+    /// 后台 Agent 任务的 child thread 身份（注册时从 live inbox 取的真实值）。
+    ///
+    /// 与 `task_id` 是两个领域身份：`task_id` 形如 `bg-{uuid}` 是任务账本身份，
+    /// 本字段是 Agent 会话（线程）身份，恢复该子会话必须用它；**不得由 `bg-` 前缀
+    /// 推导或互相改写**（两值独立生成，仅前段相同）。`None` = 非 Agent 任务
+    /// （Shell / Workflow / Mcp）或注册时没有 live inbox。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub child_thread_id: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -457,5 +465,41 @@ impl TaskManager for NoopTaskManager {
         _timed_out: bool,
         _shell_output: Option<crate::event::ShellOutput>,
     ) {
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::TaskRecord;
+
+    /// `child_thread_id` 是可选增量字段：旧 JSON（无该键）继续可反序列化，
+    /// `None` 时不序列化该键，`Some` 时 roundtrip 保真。
+    #[test]
+    fn task_record_child_thread_id_is_backward_compatible() {
+        let legacy = serde_json::json!({
+            "task_id": "bg-01a1407d-c445-7ac3-a7ab-db7f4535cb10",
+            "kind": "agent",
+            "summary": "identity",
+            "started_at": "2026-10-16T00:00:00Z",
+            "status": "running",
+            "duration_ms": 0,
+            "output_preview": null,
+        });
+        let record: TaskRecord = serde_json::from_value(legacy).unwrap();
+        assert!(record.child_thread_id.is_none());
+        assert!(serde_json::to_value(&record)
+            .unwrap()
+            .get("child_thread_id")
+            .is_none());
+
+        let mut record = record;
+        record.child_thread_id = Some("01a1407d-c445-7ac3-a7ab-db6d6e66266c".into());
+        let value = serde_json::to_value(&record).unwrap();
+        assert_eq!(
+            value["child_thread_id"],
+            "01a1407d-c445-7ac3-a7ab-db6d6e66266c"
+        );
+        let back: TaskRecord = serde_json::from_value(value).unwrap();
+        assert_eq!(back.child_thread_id, record.child_thread_id);
     }
 }

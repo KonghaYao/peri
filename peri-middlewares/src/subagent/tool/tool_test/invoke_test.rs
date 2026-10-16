@@ -212,9 +212,11 @@ async fn test_agent_reserved_fields_parsed() {
         .await
         .unwrap();
     // 保留字段不影响执行：durable 后台路径返回可恢复的启动回执
-    // （child_thread_id 可继续，任务立即注册）。
+    // （child_thread_id 经规范句直接给出，任务立即注册）。
     assert!(
-        result.contains("Background task bg-") && result.contains("thread:"),
+        result.contains("Background task bg-")
+            && result.contains("(resume with Agent(resume_thread_id:")
+            && !result.contains("(thread: "),
         "Should start normally: {}",
         result
     );

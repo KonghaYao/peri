@@ -46,7 +46,8 @@ impl super::SubAgentTool {
     /// 组装 [`SubagentResumeConfig`](peri_agent::session::subagent::SubagentResumeConfig) 经 [`SessionFactory::resume_subagent`](peri_agent::session::subagent::SessionFactory::resume_subagent) 执行。
     ///
     /// 返回文本与 spawn 路径一致：
-    /// - Background → 启动确认（task_id 文本，execute_bg.rs 同款；thread 恒存在 → 带 thread）
+    /// - Background → 启动确认（task_id 文本 + 规范句 `child_thread_id: {id}
+    ///   (resume with Agent(resume_thread_id: {id}))`，execute_bg.rs 同款）
     /// - interrupted → slice 1 格式（`child_thread_id: {id}` + 恢复提示）
     /// - 完成 → `child_thread_id: {id}\n{result}`（会话资源门面恒存在）
     /// - 错误 → 原样 Err（agent 层已带 `resume_subagent:` 前缀）
@@ -240,10 +241,13 @@ impl super::SubAgentTool {
 
         // 5. 返回文本（见方法注释格式约定）
         if let Some(task_id) = &spawned.task_id {
+            // 与 execute_bg.rs 同形：新 task 身份 + 可直接复用的线程身份规范句
+            // （与 bg 完成通知逐字同形），不保留无指引的 `(thread: …)` 标注。
             return Ok(format!(
-                "action: resume\nBackground task {} started (thread: {}). You will be notified when it completes. \
-                 You can continue with other tasks in the meantime.",
-                task_id, spawned.child_thread_id
+                "action: resume\nBackground task {} started. You will be notified when it completes. \
+                 You can continue with other tasks in the meantime.\n\
+                 child_thread_id: {} (resume with Agent(resume_thread_id: {}))",
+                task_id, spawned.child_thread_id, spawned.child_thread_id
             ));
         }
 

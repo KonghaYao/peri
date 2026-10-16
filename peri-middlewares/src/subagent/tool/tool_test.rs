@@ -840,6 +840,8 @@ mod mock_model;
 mod model_tier_test;
 #[path = "tool_test/resume_failure_test.rs"]
 mod resume_failure_test;
+#[path = "tool_test/resume_identity_test.rs"]
+mod resume_identity_test;
 #[path = "tool_test/resume_integration_test.rs"]
 mod resume_integration_test;
 #[path = "tool_test/resume_test.rs"]

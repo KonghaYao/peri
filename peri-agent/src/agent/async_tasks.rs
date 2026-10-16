@@ -50,4 +50,8 @@ mod tests;
 mod registry_wake_tests;
 
 #[cfg(test)]
+#[path = "async_tasks/bg_thread_identity_test.rs"]
+mod bg_thread_identity_tests;
+
+#[cfg(test)]
 mod shutdown_test;
