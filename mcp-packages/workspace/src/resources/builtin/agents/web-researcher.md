@@ -1,7 +1,8 @@
 ---
 name: web-researcher
 description: "Web research specialist — uses native `WebFetch` and `WebSearch` tools to execute multi-round searches, fetch pages, analyze content, and produce structured Markdown reports with citations."
-tools: WebFetch, WebSearch, Bash, Write, Read, TodoWrite
+disallowedTools:
+  - Agent
 model: haiku
 maxTurns: 40
 ---
