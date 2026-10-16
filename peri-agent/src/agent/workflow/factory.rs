@@ -33,8 +33,6 @@ pub struct WorkflowAgentDefinition {
     pub disallowed_tools: Vec<String>,
     /// agent.md 声明、需要预加载的 skills。
     pub skill_names: Vec<String>,
-    /// agent.md 声明的沙箱写目录；有声明且 tools 非 `[]` 时注入 SandboxWrite。
-    pub allowed_write_dirs: Vec<String>,
     /// agent.md 的 ReAct 最大轮数；0 表示使用默认值。
     pub max_iterations: usize,
     /// agent.md 对标准 subagent prompt 的 persona/tone/proactiveness 覆盖。
@@ -80,14 +78,6 @@ pub trait WorkflowAgentFactory: Send + Sync {
         execution_manager: Option<Arc<dyn peri_acp_types::tasks::TaskManager>>,
         mcp_skill_registry: Option<Arc<peri_acp_types::mcp_skills::McpSkillRegistry>>,
     ) -> Vec<Box<dyn BaseTool>>;
-
-    /// 为 agent.md 的 `allowedWriteDirs` 创建最小权限的 SandboxWrite 工具。
-    /// 定义中的 `tools: []` / `disallowedTools` 边界由调用方先行检查。
-    fn build_sandbox_write_tool(
-        &self,
-        cwd: &str,
-        allowed_dirs: &[String],
-    ) -> Option<Box<dyn BaseTool>>;
 
     /// 装配 workflow agent 中间件链（frozen CLAUDE.md / skills summary / HITL
     /// broker+permission_mode 语义自 `ctx` 读取；`model_name` 供
