@@ -15,6 +15,7 @@ use peri_acp_types::{
     event::BackgroundTaskResult,
     tasks::{BgShellHandle, BgTaskKind, OnBgCompleteFn, TaskManager, TaskShutdownReport},
 };
+use peri_agent::agent::async_tasks::BackgroundRegistryError;
 use rmcp::{
     model::{
         CallToolResult, ContentBlock, DetailedTask, GetTaskResult, Task, TaskPayload, TaskStatus,
@@ -314,8 +315,8 @@ impl ShellTasks {
             manager.spawn_shell(command, cwd, timeout_ms, Some(callback))
         })
         .await
-        .map_err(|_| McpError::internal_error("shell task launch failed", None))?
-        .map_err(|_| McpError::internal_error("shell task launch failed", None))?;
+        .map_err(shell_launch_worker_error)?
+        .map_err(shell_launch_registration_error)?;
         let now = peri_time::now_utc_rfc3339();
         let mut record = DetailedTask::new(
             Task::new(&handle.task_id, TaskStatus::Working, &now, &now)
@@ -629,6 +630,96 @@ impl ShellTasks {
     pub(crate) async fn shutdown(&self) -> TaskShutdownReport {
         self.manager.shutdown().await
     }
+}
+
+/// Model-facing classification of a background shell launch failure.
+///
+/// The boxed error comes out of the injected execution environment and may
+/// embed command text or environment payloads, so the message is built from
+/// structural facts only; the raw diagnostic is recorded by tracing, and the
+/// worker panic payload by the process-level panic hook. Distinguishing the
+/// registry's concurrent-limit rejection from a real launch failure is the
+/// reason this classification exists; the limit itself is unchanged.
+enum ShellLaunchFailure {
+    WorkerPanicked,
+    WorkerCancelled,
+    WorkerStopped,
+    ConcurrentLimit {
+        kind: String,
+        current: usize,
+        limit: usize,
+    },
+    Unclassified,
+}
+
+impl ShellLaunchFailure {
+    fn of_join_error(error: &tokio::task::JoinError) -> Self {
+        if error.is_panic() {
+            Self::WorkerPanicked
+        } else if error.is_cancelled() {
+            Self::WorkerCancelled
+        } else {
+            Self::WorkerStopped
+        }
+    }
+
+    /// `KindConcurrentLimit` is the only launch error with structural
+    /// backpressure facts today; other variants stay opaque rather than having
+    /// their free-form fields echoed to the model.
+    fn of_registration_error(error: &(dyn std::error::Error + Send + Sync + 'static)) -> Self {
+        match error.downcast_ref::<BackgroundRegistryError>() {
+            Some(BackgroundRegistryError::KindConcurrentLimit {
+                kind,
+                current,
+                limit,
+            }) => Self::ConcurrentLimit {
+                kind: kind.clone(),
+                current: *current,
+                limit: *limit,
+            },
+            _ => Self::Unclassified,
+        }
+    }
+
+    fn message(&self) -> String {
+        match self {
+            Self::WorkerPanicked => {
+                "background shell task launch worker panicked before registration".to_owned()
+            }
+            Self::WorkerCancelled => {
+                "background shell task launch worker was cancelled before registration".to_owned()
+            }
+            Self::WorkerStopped => {
+                "background shell task launch worker stopped before registration".to_owned()
+            }
+            Self::ConcurrentLimit {
+                kind,
+                current,
+                limit,
+            } => format!(
+                "background shell concurrency limit reached ({kind} {current}/{limit}); cancel a running background shell task or wait for one to finish before retrying"
+            ),
+            Self::Unclassified => {
+                "background shell task could not be started; the underlying diagnostic is recorded in the server log".to_owned()
+            }
+        }
+    }
+}
+
+fn shell_launch_worker_error(error: tokio::task::JoinError) -> McpError {
+    tracing::error!(error = %error, "background shell launch worker did not return");
+    McpError::internal_error(ShellLaunchFailure::of_join_error(&error).message(), None)
+}
+
+fn shell_launch_registration_error(error: Box<dyn std::error::Error + Send + Sync>) -> McpError {
+    tracing::error!(
+        error = %error,
+        "background shell task launch failed before registration"
+    );
+    McpError::internal_error(
+        ShellLaunchFailure::of_registration_error(error.as_ref()).message(),
+        None,
+    )
 }
 
 pub(crate) struct ScopeAdmission {
