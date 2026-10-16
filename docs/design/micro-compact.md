@@ -51,7 +51,7 @@ graph TB
     DECISION --> VIEW
 ```
 
-整个流程中唯一有副作用的步骤是 `micro_compact()`——它修改 Transcript 的 flags，并异步写数据库。`plan_micro()` 和 `render_llm_view()` 都是纯函数。
+整个流程中唯一有副作用的步骤是 `apply_micro_plan()`——它修改 Transcript 的 flags，并异步写数据库（`micro_compact()` 是其「plan + apply」包装；`run_compact` 直接复用 dry-run 计划调用前者，不再二次规划）。`plan_micro()` 和 `render_llm_view()` 都是纯函数。
 
 ### 2.1 模块关系
 
@@ -60,7 +60,7 @@ graph TB
 | `compact_v2/planner.rs` | `plan_micro()`——生成压缩计划（纯函数）。还包含 `TurnGroup` 分组逻辑和 `ContextPressure`。 |
 | `compact_v2/projection.rs` | `render_llm_view()`——根据计划把 Transcript 渲染成 LLM 可见的消息列表（纯函数）。 |
 | `compact_v2/mod.rs` | `run_compact()`——串联 planner + 决策 + 应用。 |
-| `compact_v2/micro.rs` | `micro_compact()`——调用 planner 生成计划，然后应用 `truncated` 标记。只有 ~20 行。 |
+| `compact_v2/micro.rs` | `apply_micro_plan()`——把已生成的计划按 message_id 分组落地为 `truncated` 标记 + projection directive；`micro_compact()` 是其「调 planner + apply」的薄包装。计划只规划一次：`run_compact` 的 dry-run 结果直接交给 `apply_micro_plan`。 |
 | `compact_v2/smart.rs` | `smart_compact()`——规则驱动的消息保留策略，同样通过 planner 生成计划。已收缩为 `plan_micro` 兼容入口（带 deprecation warning，趋向 Micro Compact）。 |
 | `compact_v2/config.rs` | `CompactConfig` 纯数据契约已归位 `peri-acp-types::compact`（配置来源为外部配置文件，跨层共享），本文件仅保留 re-export 保兼容。 |
 | `stages/reason.rs` | Reason 阶段——调用 `render_llm_view()` 获取压缩后的消息列表，替代旧版 `truncated_content(100)`。 |
@@ -241,7 +241,7 @@ sequenceDiagram
 ```mermaid
 flowchart TD
     PM["plan_micro() · dry run"] --> Q1{"estimated_tokens_saved<br/>≥ reclaim_target ?"}
-    Q1 -->|"✅ 够用了"| APPLY["micro_compact() 应用"]
+    Q1 -->|"✅ 够用了"| APPLY["apply_micro_plan() 应用"]
     Q1 -->|"❌ 不够"| Q2{"预算逼近上限<br/>budget ≥ auto_compact_threshold ?"}
     Q2 -->|"是"| FULL["提交有效 Micro<br/>再尝试 Full Compact"]
     Q2 -->|"否"| PARTIAL["虽然不够，聊胜于无<br/>应用 Micro"]
@@ -373,7 +373,7 @@ SQLite 的 `projection TEXT` 列通过幂等迁移添加。恢复时 `load_messa
 
 1. **Planner 纯函数**：`plan_micro()` 零副作用。这是 dry-run、Skip-Micro-when-Full、shadow mode 的前提。如果不纯，每一步决策都可能产生不可逆的副作用。
 
-2. **Micro 收缩为 thin wrapper**：核心逻辑在 planner 和 projection。`micro_compact()` 只有 ~20 行——调 planner、应用 flag。Smart 同样通过 planner 兼容入口。保持代码焦点集中。
+2. **Micro 收缩为 thin wrapper**：核心逻辑在 planner 和 projection。`micro_compact()` 只有 ~20 行——调 planner、应用 flag。Smart 同样通过 planner 兼容入口。保持代码焦点集中。计划与应用分离：同一轮 dry-run 的计划只规划一次，落地走 `apply_micro_plan()`（同一消息的多个 action 合并进同一条 directive，按 message_id 分组）。
 
 3. **默认 Preserve**：`ContextRetention` 默认值是 `Preserve`——没有显式声明的工具一律不压缩。旧版黑名单默认是空的（全部压缩），过于激进。
 
