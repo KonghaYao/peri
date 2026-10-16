@@ -76,6 +76,8 @@ async fn background_launch_receipt_names_reusable_child_thread_id() {
         )),
         "启动回执必须携带规范句: {receipt}"
     );
+    assert!(receipt.contains("While active, include a non-empty prompt"));
+    assert!(receipt.contains("omit prompt only when resuming a non-active thread"));
     assert!(
         !receipt.contains("(thread: "),
         "启动回执不得保留无指引的裸线程标注: {receipt}"

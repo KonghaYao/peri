@@ -589,7 +589,7 @@ impl BaseTool for GrepTool {
             Ok(filters) => filters,
             Err(e) => {
                 return Err(ToolFailure::new(
-                    "Invalid glob pattern. Close every bracket and brace; supported glob syntax is `*`, `?`, `[abc]` and `{a,b}` alternation (e.g. \"*.{ts,tsx}\", \"*.rs\").",
+                    "Invalid glob pattern. Close character classes and comma-separated alternation groups; supported glob syntax is `*`, `?`, `[abc]` and `{a,b}` alternation (e.g. \"*.{ts,tsx}\", \"*.rs\").",
                     format!("Error: {e}"),
                 )
                 .into());

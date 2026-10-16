@@ -632,14 +632,10 @@ impl ShellTasks {
     }
 }
 
-/// Model-facing classification of a background shell launch failure.
+/// 后台 shell 启动失败分类。
 ///
-/// The boxed error comes out of the injected execution environment and may
-/// embed command text or environment payloads, so the message is built from
-/// structural facts only; the raw diagnostic is recorded by tracing, and the
-/// worker panic payload by the process-level panic hook. Distinguishing the
-/// registry's concurrent-limit rejection from a real launch failure is the
-/// reason this classification exists; the limit itself is unchanged.
+/// 执行环境的自由文本错误可能包含命令、环境变量或 panic payload。
+/// 模型响应与此处 tracing 均只使用结构化分类，不重复输出这些原始内容。
 enum ShellLaunchFailure {
     WorkerPanicked,
     WorkerCancelled,
@@ -681,6 +677,16 @@ impl ShellLaunchFailure {
         }
     }
 
+    fn class(&self) -> &'static str {
+        match self {
+            Self::WorkerPanicked => "worker_panicked",
+            Self::WorkerCancelled => "worker_cancelled",
+            Self::WorkerStopped => "worker_stopped",
+            Self::ConcurrentLimit { .. } => "concurrent_limit",
+            Self::Unclassified => "unclassified",
+        }
+    }
+
     fn message(&self) -> String {
         match self {
             Self::WorkerPanicked => {
@@ -700,26 +706,28 @@ impl ShellLaunchFailure {
                 "background shell concurrency limit reached ({kind} {current}/{limit}); cancel a running background shell task or wait for one to finish before retrying"
             ),
             Self::Unclassified => {
-                "background shell task could not be started; the underlying diagnostic is recorded in the server log".to_owned()
+                "background shell task could not be started; failure class: unclassified".to_owned()
             }
         }
     }
 }
 
 fn shell_launch_worker_error(error: tokio::task::JoinError) -> McpError {
-    tracing::error!(error = %error, "background shell launch worker did not return");
-    McpError::internal_error(ShellLaunchFailure::of_join_error(&error).message(), None)
+    let failure = ShellLaunchFailure::of_join_error(&error);
+    tracing::error!(
+        failure_class = failure.class(),
+        "background shell launch worker did not return"
+    );
+    McpError::internal_error(failure.message(), None)
 }
 
 fn shell_launch_registration_error(error: Box<dyn std::error::Error + Send + Sync>) -> McpError {
+    let failure = ShellLaunchFailure::of_registration_error(error.as_ref());
     tracing::error!(
-        error = %error,
+        failure_class = failure.class(),
         "background shell task launch failed before registration"
     );
-    McpError::internal_error(
-        ShellLaunchFailure::of_registration_error(error.as_ref()).message(),
-        None,
-    )
+    McpError::internal_error(failure.message(), None)
 }
 
 pub(crate) struct ScopeAdmission {

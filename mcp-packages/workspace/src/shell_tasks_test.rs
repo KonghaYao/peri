@@ -414,8 +414,7 @@ async fn settle_shell_capacity(owner: &ShellTasks) {
 ///
 /// 历史背景：两处 `map_err(|_| ...)` 曾把 `JoinError`（worker panic）与执行环境
 /// 返回的 boxed error 折叠成同一条 `shell task launch failed`，模型无法区分内部
-/// 故障与真实启动失败；折叠同时丢弃了原因。修复后模型面只投影分类，原始诊断
-/// 走 tracing，panic payload 由进程级 hook 记录。
+/// 故障与真实启动失败；修复后模型面和此处 tracing 只投影分类，不重复记录自由文本。
 #[tokio::test]
 async fn panicked_launch_worker_reports_classification_without_raw_payload() {
     let mut owner = ShellTasks::new();
@@ -441,7 +440,7 @@ async fn panicked_launch_worker_reports_classification_without_raw_payload() {
 /// [回归测试] 不可分类的 boxed error 不得原样回显到模型面。
 ///
 /// fixture 的 `String` 错误不可 downcast（std 私有 `StringError`），因此只能走
-/// 稳定兜底文案；原始文本保留在 tracing。
+/// 稳定兜底文案；tracing 同样不记录原始文本。
 #[tokio::test]
 async fn unclassified_launch_failure_does_not_echo_underlying_error_text() {
     let mut owner = ShellTasks::new();

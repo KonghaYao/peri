@@ -246,7 +246,9 @@ impl super::SubAgentTool {
             return Ok(format!(
                 "action: resume\nBackground task {} started. You will be notified when it completes. \
                  You can continue with other tasks in the meantime.\n\
-                 child_thread_id: {} (resume with Agent(resume_thread_id: {}))",
+                 child_thread_id: {} (resume with Agent(resume_thread_id: {}))\n\
+                 While active, include a non-empty prompt to send supplemental instructions; \
+                 omit prompt only when resuming a non-active thread.",
                 task_id, spawned.child_thread_id, spawned.child_thread_id
             ));
         }

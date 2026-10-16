@@ -42,7 +42,7 @@ Before handing off: does this work already have an owner, and does the file scop
 Match the brief against what the owner can actually do before you launch it. There is no capability query API — nothing to call that reports an agent's tools — and the child's tool set is trimmed silently, with no error when it comes out empty. Reading a definition is dispatch metadata, not project recon. Resolve it from what exists:
 
 - the `available_agents` line (`- <id> [<tier>] [writes|readonly]`) is a scheduling hint, not a tool list;
-- the definition resource, read with `resources/read`: `agent://builtin/plan/agent.md`. Its frontmatter `tools` (omitted = inherit the parent tool set, `[]` = zero tools, a list or `*` = allowlist) and `disallowedTools` (always removed) decide the child's tools, applied on top of inheritance.
+- the definition resource, read with `mcp_read_resource`（未暴露时先用工具搜索发现；底层 MCP 方法是 `resources/read`）: `agent://builtin/plan/agent.md`. Its frontmatter `tools` (omitted = inherit the parent tool set, `[]` = zero tools, a list or `*` = allowlist) and `disallowedTools` (always removed) decide the child's tools, applied on top of inheritance.
 
 State the brief's required tools and the target's resolved tools; where they do not meet, change the target or the brief before launching. `plan` and `explorer` currently inherit the base tool set just like the other builtin agents; their read-only role is a prompt-level instruction, not a tool boundary. Assign command-running work according to the brief's required evidence and actual resolved tools, and preserve the read-only task scope when delegating exploration.
 

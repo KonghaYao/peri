@@ -70,13 +70,18 @@ async fn test_untracked_leftover_child_reports_unknown_without_exit_code() {
     let output = timeout(
         Duration::from_secs(10),
         tool.invoke_output(
-            serde_json::json!({"command": LEFTOVER_CHILD, "timeout": 5000}),
+            serde_json::json!({"command": format!("{LEFTOVER_CHILD} exit 7"), "timeout": 5000}),
             peri_agent::tools::ToolContext::new(&[], "."),
         ),
     )
     .await
     .expect("后台语法命令必须有界返回")
     .unwrap();
+    assert!(
+        !output.text.contains("[Exit code:"),
+        "存活进程组的正文不能声明退出码: {}",
+        output.text
+    );
     let evidence = output.execution.expect("完成路径必须带执行证据");
     assert_eq!(
         evidence.status,
@@ -117,13 +122,18 @@ async fn test_tracked_leftover_child_reports_running_without_exit_code() {
     let output = timeout(
         Duration::from_secs(10),
         tool.invoke_output(
-            serde_json::json!({"command": LEFTOVER_CHILD, "timeout": 5000}),
+            serde_json::json!({"command": format!("{LEFTOVER_CHILD} exit 7"), "timeout": 5000}),
             peri_agent::tools::ToolContext::new(&[], "."),
         ),
     )
     .await
     .expect("后台语法命令必须有界返回")
     .unwrap();
+    assert!(
+        !output.text.contains("[Exit code:"),
+        "存活进程组的正文不能声明退出码: {}",
+        output.text
+    );
     let evidence = output.execution.expect("完成路径必须带执行证据");
     assert_eq!(
         evidence.status,

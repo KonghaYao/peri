@@ -785,13 +785,18 @@ impl BashTool {
                     Ok(g) => g.clone(),
                     Err(poisoned) => poisoned.into_inner().clone(),
                 };
-                let mut output = merge_output(&stdout, &stderr, status.code());
                 // 整组是否仍有成员的观测必须先于清理动作落地：后面的
                 // confirm_stopped / release_unmanaged 会改写守卫状态，之后无法再回答
                 // 「刚才是否有子进程脱离」。这是进程组的真实观测（ESRCH / job 状态），
                 // 不能用 `command.contains('&')` 之类的命令文本启发式代替——`&&` 与
                 // `2>&1` 都不产生脱离的进程。
                 let group_still_alive = !execution.is_stopped();
+                let exit_code = if group_still_alive {
+                    None
+                } else {
+                    status.code()
+                };
+                let mut output = merge_output(&stdout, &stderr, exit_code);
                 let mut background_task_id = None;
                 if !group_still_alive {
                     execution.confirm_stopped();
@@ -853,13 +858,6 @@ impl BashTool {
                     ToolExecutionStatus::Completed
                 } else {
                     ToolExecutionStatus::Failed
-                };
-                // 只有整组已结束时退出码才描述这次执行；组内仍有成员时它是前台 shell 的
-                // 局部事实，声明出去会被离线分析按非终态证据判为冲突而整条降级。
-                let exit_code = if group_still_alive {
-                    None
-                } else {
-                    status.code()
                 };
                 let output_truncated =
                     output_ref.is_some() || text.chars().count() < output.chars().count();

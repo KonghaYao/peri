@@ -195,6 +195,7 @@ fn preflight_gaps(
     let mut gaps = Vec::new();
     for tool in required {
         let narrowed_out = allowed_tools
+            .filter(|allowed| !allowed.is_empty())
             .is_some_and(|allowed| !allowed.iter().any(|item| item.eq_ignore_ascii_case(tool)));
         if target.permits(tool) && !narrowed_out {
             permitted.push((*tool).to_string());
@@ -296,10 +297,9 @@ fn preflight_gaps_expose_missing_tools_before_dispatch() {
     assert_eq!(plan.gaps, Vec::<String>::new());
     assert!(plan.permitted.contains(&"Bash".to_string()));
 
-    // 负例：显式收窄为空时，预检须发现 Bash 缺口。
+    // workflow 空白名单与省略一致，不同于定义 tools: [] 的零工具边界。
     let empty = preflight_gaps(target(&targets, "plan"), &["Bash"], Some(&[]));
-    assert_eq!(empty.gaps, vec!["Bash".to_string()]);
-    assert!(empty.permitted.is_empty());
+    assert_eq!(empty, plan);
 
     // 正例：只读 brief 派给 plan 是合法路线；提示词约束其任务范围。
     let readonly = preflight_gaps(target(&targets, "plan"), &["Read", "Grep"], None);
