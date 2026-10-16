@@ -1,4 +1,5 @@
 use super::*;
+use crate::kit::message_area::grid::TextLineSource;
 
 // ── Reasoning 三态（§6.3）──────────────────────────────────────────────
 
@@ -355,7 +356,8 @@ fn test_reasoning_preview_tail_shows_end_of_long_line() {
     );
     let lines = vm_to_lines(&vm, &grid);
 
-    // content = 74 → 304 字符折 5 个视觉行，取最后 4 行（HEAD 所在第 1 行被挤出）。
+    // 过程区正文宽 = 74 - 2 = 72 → 304 字符折 5 个视觉行，取最后 4 行
+    // （HEAD 所在第 1 行被挤出）。
     assert_eq!(lines.len(), 5, "块高应为 1 header + 4 tail");
     assert_eq!(body_vline_count(&lines), 4, "Preview tail 应为 4 行");
     let tail_first = line_text(&nth_nonempty_line(&lines, 1));
@@ -375,13 +377,14 @@ fn test_reasoning_preview_tail_shows_end_of_long_line() {
 }
 
 /// 4→5 视觉行跨越后块高恒定 `1 + min(n, 4)`——流式增长不再引起高度跳动（§6.3）。
+/// 行宽按过程区正文预算（§8：`content - indent`）折算视觉行数。
 #[test]
 fn test_reasoning_height_stable_across_4_to_5_visual_lines() {
     crate::i18n::init(Some("en"));
     let grid = GridSpec::grid_for(80);
     for n in [3usize, 4, 5, 6, 8] {
         let reasoning = TuiReasoningBlock {
-            text: "a".repeat(74 * n),
+            text: "a".repeat(grid.process_content_width() * n),
             fold: FoldState::Preview,
             status: EntryStatus::Running,
             is_running: true,
@@ -742,4 +745,105 @@ fn test_assistant_duration_meta_three_breakpoints() {
         !all_text(&compact).contains("12.4s"),
         "Compact 应隐藏 duration"
     );
+}
+
+/// §6/§7 气泡内混排：reasoning 段走过程区（首行/续行同列），长正文段回基准列；
+/// 入口台阶由渲染层插入 entry 行首，reasoning → 正文的退出台阶由 entry 自画。
+#[test]
+fn test_bubble_reasoning_uses_process_zone_body_returns_to_baseline() {
+    crate::i18n::init(Some("en"));
+    let grid = GridSpec::grid_for(80);
+    let reasoning = TuiReasoningBlock {
+        text: "long thought".to_string(),
+        fold: FoldState::Expanded,
+        status: EntryStatus::Completed,
+        is_running: false,
+        started_at: None,
+        duration_ms: Some(1_000),
+    };
+    let vm = TuiRenderUnit::TuiAssistantBubble(
+        TuiAssistantBubble {
+            started_at: None,
+            duration_ms: None,
+            // 长回复（≥120 字）：正文回文本区，与 reasoning 段之间有内部退出台阶；
+            // 短回复正文留在过程带（不画台阶）的形态见
+            // `render_entry_layout_test::test_step_line_color_follows_text_line` 等用例。
+            text: format!("正文回答{}", "x".repeat(200)),
+            reasoning: Some(reasoning),
+            message_id: None,
+            content_hash: 1,
+        }
+        .into(),
+    );
+    let mut cache = crate::kit::markdown::MarkdownRenderCache::default();
+    let (lines, ..) = super::vm_to_lines_cached_with_layout(
+        &vm,
+        &grid,
+        &mut cache,
+        None,
+        false,
+        ZoneTransition::EnterProcess(TextLineSource::User),
+    );
+
+    // 入口台阶（§6）：转场后的 entry 行首独立成行，先于 reasoning header
+    assert!(super::is_step_row(&lines[0]), "首行应是入口台阶");
+    assert_eq!(line_text(&lines[0]), " \u{2570}\u{2500}\u{256e}");
+
+    // reasoning header（过程区首行）：[outer 空][indent 留空][│][gap] + 摘要
+    let header = &lines[1];
+    assert_eq!(header.spans[0].content.as_ref(), " ", "outer 空列");
+    assert_eq!(header.spans[1].content.as_ref(), "  ", "indent 格留空");
+    assert_eq!(header.spans[2].content.as_ref(), "\u{2502}", "标记列竖线");
+    assert_eq!(header.spans[3].content.as_ref(), "  ", "gap");
+    let header_text = line_text(header);
+    assert!(
+        header_text.contains("Thought for 1s"),
+        "实际 {header_text:?}"
+    );
+    let header_col: usize = header.spans[..4].iter().map(|s| s.content.width()).sum();
+    assert_eq!(header_col, grid.process_prefix_width());
+
+    // reasoning 正文（过程区续行）：`[outer 空][indent 留空][│][gap]` → 与 header 摘要同列
+    let body = lines
+        .iter()
+        .find(|l| line_text(l).contains("long thought"))
+        .expect("reasoning 正文行");
+    assert_eq!(body.spans[1].content.as_ref(), "  ", "indent 格留空");
+    assert_eq!(body.spans[2].content.as_ref(), "\u{2502}");
+    let body_col: usize = body.spans[..4].iter().map(|s| s.content.width()).sum();
+    assert_eq!(body_col, header_col, "续行与首行同列");
+
+    // 正文段（文本区）：回基准列 4
+    let answer = lines
+        .iter()
+        .find(|l| line_text(l).contains("正文回答"))
+        .expect("正文行");
+    assert_eq!(answer.spans[0].content.as_ref(), " ");
+    assert_eq!(answer.spans[1].content.as_ref(), "\u{2502}");
+    assert_eq!(answer.spans[2].content.as_ref(), "  ", "文本区 gap");
+    let answer_col: usize = answer.spans[..3].iter().map(|s| s.content.width()).sum();
+    assert_eq!(answer_col, grid.first_prefix_width(), "正文回基准列");
+
+    // 两处台阶：入口台阶（entry 行首）+ 内部退出台阶（reasoning → 正文，entry 自画）
+    let step_rows: Vec<usize> = lines
+        .iter()
+        .enumerate()
+        .filter(|(_, l)| super::is_step_row(l))
+        .map(|(index, _)| index)
+        .collect();
+    let thought_index = lines
+        .iter()
+        .position(|l| line_text(l).contains("long thought"))
+        .expect("reasoning 正文行");
+    let answer_index = lines
+        .iter()
+        .position(|l| line_text(l).contains("正文回答"))
+        .expect("正文行");
+    assert_eq!(
+        step_rows,
+        vec![0, thought_index + 1],
+        "台阶只在区内转场两端"
+    );
+    assert_eq!(line_text(&lines[step_rows[1]]), " \u{256d}\u{2500}\u{256f}");
+    assert!(step_rows[1] < answer_index, "退出台阶在正文段之前");
 }

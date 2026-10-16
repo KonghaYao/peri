@@ -1,3 +1,0 @@
-test result: ok. 1801 passed; 0 failed; 6 ignored; 0 measured; 0 filtered out; finished in 23.67s
-
-[04:02:53] TUI TEST EXIT=0

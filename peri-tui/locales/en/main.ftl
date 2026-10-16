@@ -52,6 +52,7 @@ history-agent-running = Agent is running, cannot open history panel
 
 # model command
 config-save-failed = Configuration save failed: { $error }
+config-handle-missing = Configuration unavailable: { $handle } is not initialized
 
 # effort command
 effort-set = Reasoning effort set to { $effort }
@@ -142,10 +143,10 @@ setup-welcome-title =  ── Peri Setup ── Welcome
 setup-choose-provider =  Choose how to configure your provider:
 setup-source-custom-api = Custom API
 setup-source-migrate = Migrate from Claude Code
-setup-source-peri-free = Peri Code Free Service
+setup-source-preset = Provider presets
 setup-source-custom-desc = Manually enter provider details
 setup-source-migrate-desc = Import config from ~/.claude/
-setup-source-peri-free-desc = One-click Peri Code free gateway, no API key needed
+setup-source-preset-desc = Pre-fill endpoint and model tiers for a known provider
 setup-key-confirm = :Confirm
 setup-key-select = :Select
 setup-key-quit = :Quit
@@ -183,6 +184,9 @@ setup-no-providers = No providers configured. Add one by selecting "Custom API" 
 setup-language-title = ── Peri Setup ── Language
 setup-language-prompt = Choose your interface language:
 setup-language-press-enter = Press Enter to confirm
+
+setup-preset-title =  ── Peri Setup ── Provider presets
+setup-preset-prompt =   Choose a provider preset:
 
 # ---- Config Panel ----
 
@@ -437,6 +441,11 @@ app-plugin-delete-failed = Delete failed: { $error }
 app-plugin-add-failed = Add failed: { $error }
 app-plugin-added = Marketplace added: { $name } (fetching content...)
 
+# ---- Panel Confirm Target Guard ----
+
+# 确认期间被确认的对象消失（退出确认时按稳定身份定位失败）；操作未执行。
+app-confirm-target-missing = Confirm target no longer exists: { $target }
+
 # Background Agent Bar
 bg-bar-focus-hint = Press Esc to exit focus
 
@@ -555,7 +564,7 @@ theme-navigate = Navigate
 
 # ---- Thread Browser ----
 
-thread-browser-title =  Resume Session ({ $cursor }/{ $total }) 
+thread-browser-title = Resume Session
 thread-browser-search-placeholder = Search…
 thread-browser-empty =   (No conversations yet)
 thread-browser-no-match =   (No matching conversations)
@@ -940,6 +949,7 @@ panel-mcp-oauth-start-failed = MCP authorization failed to start: { $error }
 panel-mcp-oauth-start-no-session = MCP authorization failed to start: no active session
 panel-mcp-icon-connected = ✔
 panel-mcp-icon-error = ✗
+panel-mcp-icon-unknown = ?
 panel-mcp-cache-hit = CACHE hit
 panel-mcp-cache-version-hit = CACHE version hit
 panel-mcp-cache-protocol-hit = CACHE protocol hit
@@ -1098,6 +1108,9 @@ panel-tasks-empty-hint-1 =   Cron jobs are scheduled via /loop command;
 panel-tasks-empty-hint-2 =   SubAgents are spawned by Task / SubAgent tools.
 panel-tasks-nav-hint =   ↑/↓::navigate  Enter::cancel  Esc::close
 panel-tasks-nav-hint-close =   ↑/↓::navigate  Enter::close  Esc::close
+panel-tasks-cancel-no-session =   Cancellation not sent: no active session
+panel-tasks-cancel-target-gone =   Cancellation not sent: the task is no longer in the list
+panel-tasks-cancel-failed =   Cancellation failed: { $detail }
 
 # ---- Theme Panel ----
 panel-theme-active-mark =  *
@@ -1118,6 +1131,9 @@ workflow-no-runs = No workflow runs in current session
 workflow-footer-shortcuts = Tab::next-run · Shift+Tab::prev-run · ←/→::pane · ↑/↓::navigate · Enter::kill-run · Esc::close
 workflow-phases-header = Phases ({ $count } agents)
 workflow-model-header = Model
+workflow-kill-no-session = No active session; cannot stop the workflow run
+workflow-kill-failed = Could not stop workflow run
+workflow-kill-requested = Stop requested for run { $run }
 
 # ---- AskUser Panel ----
 panel-ask-user-empty =   No pending questions.
@@ -1170,6 +1186,7 @@ popup-ask-user-title =  Ask User
 risk-choice-cancel = Cancel (default)
 
 popup-confirm-empty =   No pending confirmation.
+popup-confirm-superseded =   The confirmation changed; review and confirm again.
 popup-confirm-action-hint =   Enter: confirm  Esc: cancel
 popup-confirm-title =  Confirm 
 popup-confirm-reject-title = Reject Answer
@@ -1213,16 +1230,20 @@ steer-session-unavailable = Session could not be established: { $error }. Your d
 
 thread-browser-project = Project
 thread-browser-workspace = Workspace
-thread-browser-scope-count =   { $scope } · { $count } sessions
-thread-browser-scope-loaded =   { $scope } · { $count } sessions loaded · more available
+thread-browser-count = { $count } sessions loaded
+thread-browser-count-more = { $count } sessions loaded · more available
+thread-browser-filter-label = Filter:
+thread-browser-status-label = Status:
+thread-browser-status-active = Active
 thread-browser-messages = { $count } messages
 panel-threads-more-hint =   ↑/↓::browse (loads more at end)  PgUp/PgDn::page  Tab::scope  n::more  d::delete
-thread-browser-all = All history
+thread-browser-all = All
 thread-browser-selected = Selected: { $title }
 thread-browser-selected-path = Path: { $path } · ID: { $id }
 thread-browser-actions = ↑↓ select  Enter resume  v view  Tab scope  a archive/restore  r archived view  d delete  Esc close
 thread-browser-actions-compact = Enter resume  a toggle  r archived  d delete  Esc close
 thread-browser-archived = Archived
+thread-browser-delete-error = Could not delete session
 thread-browser-archive-error = Could not update archive status
 thread-browser-machine = { $name } ({ $id }) · { $count } workspaces
 thread-browser-preview-actions = v back  ↑↓ scroll  PgUp/PgDn page  Esc close

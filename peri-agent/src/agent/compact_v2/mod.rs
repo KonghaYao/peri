@@ -35,8 +35,8 @@ pub use planner::{plan_micro, ApplyReport, CompactPolicy, ContextPressure, FullE
 pub use projection::{
     plan_from_persisted_directives, render_llm_view, MessageProjectionDirective, MicroCompactPlan,
     PersistedDirectiveRestore, ProjectionAction, ProjectionActionEntry, ProjectionTarget,
-    ProviderCapabilities, ProviderProtocol, CORRUPTED_PROJECTION, DIRECTIVE_VERSION_MISMATCH,
-    NO_PERSISTED_DIRECTIVES, PROJECTION_POLICY_VERSION,
+    ProviderCapabilities, ProviderProtocol, RestoredProjectionDirectives, CORRUPTED_PROJECTION,
+    DIRECTIVE_VERSION_MISMATCH, NO_PERSISTED_DIRECTIVES, PROJECTION_POLICY_VERSION,
 };
 
 // ─── CompactResult ───────────────────────────────────────────────────────────────
@@ -82,6 +82,16 @@ impl CompactResult {
 
 // ─── 顶层入口 ───────────────────────────────────────────────────────────────────
 
+/// Full 摘要视图构造前的通知（[`run_compact`] 的最后一个参数）。
+///
+/// Full 在 [`full::full_compact_inner`] 内为摘要请求另建一份整份历史模型视图。持有等价
+/// 视图副本的调用方（模型视图复用槽）必须在这份视图构造**之前**放弃自己那份，否则两份
+/// 整份正文会在整个摘要请求期间同时存活。决策发生在 `compact_v2` 内部、调用方拿不到
+/// 「即将 Full」的信号，因此由调用方传入一次性通知：本模块只在**确实要构造摘要视图**时
+/// 调用它。Micro/Smart 未落地、shadow、空计划未达 Full 阈值等不渲染摘要视图的路径不
+/// 通知，缓存照常复用。
+pub type FullSummaryNotice<'a> = &'a (dyn Fn() + Send + Sync);
+
 /// Compact 阶段动作
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum CompactAction {
@@ -119,11 +129,15 @@ pub fn determine_compact_action(budget: f64, config: &CompactConfig) -> CompactA
 /// - Full 重试预算在实际需要 Full 时统一检查，耗尽返回结构化失败
 /// - force=true：直接 Full
 /// - 计算 budget_pct，判定 Micro/Smart/Skip
+/// - 计划只规划一次：dry-run 的 plan 直接交给 apply_micro_plan 落地，不二次规划
 /// - Micro：dry-run plan_micro → 检查 estimated_tokens_saved →
 ///   - 满足 target：apply Micro
 ///   - 不足且 budget >= force_full_threshold：跳过 Micro apply → 直接 Full
 ///   - 不足但未达 Full 阈值：apply Micro（部分收益也好）
 /// - Smart：规则驱动保留关键消息，逻辑同 Micro
+///
+/// `before_full_summary` 只在确实要构造摘要视图时调用一次（见 [`FullSummaryNotice`]）。
+#[allow(clippy::too_many_arguments)] // 参数是 Compact 决策的既有输入，包一层结构体只会挪动调用点噪声
 pub async fn run_compact(
     transcript: &mut MessageTranscript,
     llm: Option<&dyn peri_model::Model>,
@@ -132,6 +146,7 @@ pub async fn run_compact(
     force: bool,
     consecutive_failures: &mut u32,
     cwd: &str,
+    before_full_summary: Option<FullSummaryNotice<'_>>,
 ) -> CompactResult {
     let before_visible_len = transcript.visible_messages().len();
 
@@ -163,6 +178,7 @@ pub async fn run_compact(
             consecutive_failures,
             cwd,
             FullEscalationReason::ManualForce,
+            before_full_summary,
         )
         .await;
     }
@@ -268,6 +284,7 @@ pub async fn run_compact(
                         consecutive_failures,
                         cwd,
                         FullEscalationReason::ForceThresholdExceeded,
+                        before_full_summary,
                     )
                     .await;
                 }
@@ -292,8 +309,8 @@ pub async fn run_compact(
             }
 
             if plan.estimated_tokens_saved >= reclaim_target && plan.has_changes() {
-                // Micro 满足回收目标 → 应用
-                let affected = micro::micro_compact(transcript, config);
+                // Micro 满足回收目标 → 应用（复用 dry-run 计划，不二次规划）
+                let affected = micro::apply_micro_plan(transcript, &plan);
                 *consecutive_failures = 0;
                 debug!(
                     saved = plan.estimated_tokens_saved,
@@ -320,7 +337,7 @@ pub async fn run_compact(
                 // 设计决策：Micro 每轮都提供实际收益（truncated 标记持久化到 transcript），
                 // 因此先执行 micro_compact 再叠加 Full——即使 Full 失败，Micro 的截断仍然生效。
                 // Smart 路径（`mod.rs:304`）有相同模式：先 Smart 再 Full，Full 失败不影响 Smart 结果。
-                let micro_affected = micro::micro_compact(transcript, config);
+                let micro_affected = micro::apply_micro_plan(transcript, &plan);
                 // 注意：estimated_tokens_saved 使用 dry-run 估计
                 // 实际 micro 应用后的节省可能略有不同，但 plan 是最佳可用近似
                 debug!(
@@ -338,6 +355,7 @@ pub async fn run_compact(
                     consecutive_failures,
                     cwd,
                     FullEscalationReason::InsufficientReclaim,
+                    before_full_summary,
                 )
                 .await;
                 // Full 成功时，其 excluded transition 已覆盖 Micro affected messages；
@@ -358,8 +376,8 @@ pub async fn run_compact(
                 }
                 full_result
             } else {
-                // 不足但未达 Full 阈值 → 应用 Micro（部分收益也好）
-                let affected = micro::micro_compact(transcript, config);
+                // 不足但未达 Full 阈值 → 应用 Micro（部分收益也好），复用 dry-run 计划
+                let affected = micro::apply_micro_plan(transcript, &plan);
                 *consecutive_failures = 0;
                 debug!(
                     saved = plan.estimated_tokens_saved,
@@ -411,7 +429,7 @@ pub async fn run_compact(
             // Smart Compact 已废弃，委托给 Micro Compact
             tracing::warn!("Smart Compact is deprecated, falling back to Micro Compact");
             let plan = plan_micro(transcript, config, true);
-            let affected = micro::micro_compact(transcript, config);
+            let affected = micro::apply_micro_plan(transcript, &plan);
             let estimated_tokens_saved = plan.estimated_tokens_saved;
 
             // 空结果 → 无可 compact 消息
@@ -432,6 +450,7 @@ pub async fn run_compact(
                         consecutive_failures,
                         cwd,
                         FullEscalationReason::ForceThresholdExceeded,
+                        before_full_summary,
                     )
                     .await;
                 }
@@ -465,6 +484,7 @@ pub async fn run_compact(
                         consecutive_failures,
                         cwd,
                         FullEscalationReason::ForceThresholdExceeded,
+                        before_full_summary,
                     )
                     .await;
                     // Full 成功时，其 excluded transition 已覆盖 Smart affected messages；
@@ -511,6 +531,7 @@ pub async fn run_compact(
                     consecutive_failures,
                     cwd,
                     FullEscalationReason::InsufficientReclaim,
+                    before_full_summary,
                 )
                 .await;
                 // Smart 已在 Full 前实际应用；无论 Full 成功与否，指标都必须
@@ -536,6 +557,7 @@ pub async fn run_compact(
 /// `full_compact_inner` 内共用一个有界计数器；这里不再重试空摘要，避免内外
 /// 层次数相乘。`max_consecutive_failures` 只作为跨 Full 调用的失败预算与兼容
 /// 字段保留。
+#[allow(clippy::too_many_arguments)] // 与 run_compact 共用同一组决策输入，单独包结构体会偏离调用语义
 async fn run_full_or_degrade(
     transcript: &mut MessageTranscript,
     llm: Option<&dyn peri_model::Model>,
@@ -544,6 +566,7 @@ async fn run_full_or_degrade(
     consecutive_failures: &mut u32,
     cwd: &str,
     escalation_reason: FullEscalationReason,
+    before_full_summary: Option<FullSummaryNotice<'_>>,
 ) -> CompactResult {
     let before_visible_len = transcript.visible_messages().len();
     let error = if *consecutive_failures >= config.max_consecutive_failures {
@@ -553,6 +576,10 @@ async fn run_full_or_degrade(
             context_window: pressure.context_window,
         }
     } else {
+        // 摘要视图即将整份构造（重试预算已耗尽时此分支不进入，也不通知）。
+        if let Some(notice) = before_full_summary {
+            notice();
+        }
         match full::full_compact_inner(transcript, llm, config, cwd).await {
             Ok(mut result) => {
                 *consecutive_failures = 0;

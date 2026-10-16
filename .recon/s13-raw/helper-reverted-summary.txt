@@ -1,3 +1,0 @@
-run=01 exit=101 test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 524 filtered out; finished in 0.02s
-run=02 exit=101 test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 524 filtered out; finished in 0.06s
-run=03 exit=101 test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 524 filtered out; finished in 0.09s

@@ -64,6 +64,7 @@ async fn remote_two_full_fixture(
     let transport = Arc::new(SqliteTransport {
         pool: pool.clone(),
         writes: AtomicUsize::new(0),
+        read_batches: AtomicUsize::new(0),
         fail_column_drop: AtomicBool::new(false),
         fail_recovery_drop: AtomicBool::new(false),
         change_schema: AtomicBool::new(false),

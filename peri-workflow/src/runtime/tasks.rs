@@ -547,6 +547,46 @@ impl WorkflowTaskTable {
             .collect()
     }
 
+    /// 某 run 下未终态任务数（`maxAgents` 门限用；只计数，不 clone 记录）。
+    ///
+    /// 只返回计数：准入判定不需要任务正文。计数与 [`Self::publish`] 分属不同临界区，
+    /// 结果仅作为发布前的准入提示；幂等与 kill 栅栏仍由发布路径在自身临界区裁决。
+    pub fn active_count_for_run(&self, run_id: &str) -> usize {
+        let inner = self.inner.lock();
+        Self::count_states_locked(&inner, run_id, |state| !state.is_terminal())
+    }
+
+    /// 某 run 下执行中（`executing`）任务数（`maxConcurrency` 容量用；只计数，
+    /// 不 clone 记录）。
+    ///
+    /// 与 [`Self::mark_executing`] 分属不同临界区：返回值用于容量门限，唯一 claim
+    /// 仍由 `mark_executing` 的临界区裁决（计数不构成准入保证）。
+    pub fn executing_count_for_run(&self, run_id: &str) -> usize {
+        let inner = self.inner.lock();
+        Self::count_states_locked(&inner, run_id, |state| {
+            state == WorkflowTaskState::Executing
+        })
+    }
+
+    /// 持锁内的按 run 状态计数：遍历 `order` 用 `tasks.get` 借用过滤，不 clone 记录。
+    fn count_states_locked(
+        inner: &TableInner,
+        run_id: &str,
+        matches: impl Fn(WorkflowTaskState) -> bool,
+    ) -> usize {
+        inner
+            .order
+            .iter()
+            .filter(|(run, _)| run == run_id)
+            .filter(|key| {
+                inner
+                    .tasks
+                    .get(*key)
+                    .is_some_and(|entry| matches(entry.record.state))
+            })
+            .count()
+    }
+
     /// 某 run 下指定 agent 的任务（单 agent kill 路径）。
     pub fn for_agent(&self, run_id: &str, agent_id: u64) -> Vec<WorkflowTaskRecord> {
         self.for_run(run_id)

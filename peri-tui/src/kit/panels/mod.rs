@@ -36,6 +36,7 @@ pub mod mcp;
 pub mod memory;
 pub mod model;
 pub mod plugin;
+pub(crate) mod shared;
 pub mod shell_detail;
 pub mod status;
 pub mod subagent_detail;

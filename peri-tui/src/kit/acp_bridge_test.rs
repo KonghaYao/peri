@@ -207,9 +207,10 @@ async fn test_replay_persisted_history_publishes_final_assistant_in_order() {
         let actual: Vec<_> = snapshot
             .items
             .iter()
-            .map(|item| match item {
-                TuiRenderUnit::TuiUserBubble(bubble) => (true, bubble.text.clone()),
-                TuiRenderUnit::TuiAssistantBubble(bubble) => (false, bubble.text.clone()),
+            .filter_map(|item| match item {
+                TuiRenderUnit::TuiUserBubble(bubble) => Some((true, bubble.text.clone())),
+                TuiRenderUnit::TuiAssistantBubble(bubble) => Some((false, bubble.text.clone())),
+                TuiRenderUnit::TuiDivider(_) => None,
                 other => panic!("非预期回放条目：{other:?}"),
             })
             .collect();

@@ -1,3 +1,2 @@
 patches/*.patch whitespace=-blank-at-eol
 patches/emscripten/*.patch whitespace=-blank-at-eol
-.recon/** whitespace=-blank-at-eol,-blank-at-eof

@@ -78,6 +78,25 @@ pub(super) fn wizard_click(
                 return true;
             }
         }
+        SetupStep::Preset => {
+            // 布局：空行 + prompt + 空行（header 3），每预设 1 行
+            if let Some(idx) = hit_item(
+                mouse,
+                area,
+                ListLayout {
+                    header_rows: 3,
+                    item_rows: 1,
+                    footer_rows: 0,
+                    visible_items: PROVIDER_PRESETS.len() as u16,
+                    scroll_start: 0,
+                    item_count: PROVIDER_PRESETS.len(),
+                },
+            ) {
+                state.preset_cursor = idx;
+                handle_preset_keys(state, enter);
+                return true;
+            }
+        }
         SetupStep::Form => match state.form_mode {
             FormMode::Browse => {
                 // 布局：空行 + 每 provider 7 行（base_url 非空时 8 行）+ submit 行（无滚动）
@@ -199,6 +218,7 @@ pub(super) fn handle_wizard_event(event: Event, mut state: SetupWizardState) -> 
     match state.step {
         SetupStep::Language => handle_language_keys(&mut state, key),
         SetupStep::Choose => handle_choose_keys(&mut state, key),
+        SetupStep::Preset => handle_preset_keys(&mut state, key),
         SetupStep::Form => handle_form_keys(&mut state, key),
         SetupStep::Done => handle_done_keys(&mut state, key),
     }
@@ -261,9 +281,12 @@ fn handle_choose_keys(state: &mut SetupWizardState, key: ratatui_kit::crossterm:
                         return;
                     }
                 }
-                SetupSource::PeriFreeService => {
-                    state.providers = vec![peri_free_provider()];
-                    state.active_provider = 0;
+                SetupSource::ProviderPreset => {
+                    // 预设来源：先进入 Preset 步骤挑选供应商，provider 列表在确认预设后重建
+                    state.submit_error = None;
+                    state.preset_cursor = 0;
+                    state.step = SetupStep::Preset;
+                    return;
                 }
                 SetupSource::CustomApi => {
                     state.providers = vec![MigratedProvider::new(ProviderType::Anthropic)];
@@ -278,6 +301,40 @@ fn handle_choose_keys(state: &mut SetupWizardState, key: ratatui_kit::crossterm:
         Esc => {
             state.submit_error = None;
             state.step = SetupStep::Language;
+        }
+        _ => {}
+    }
+}
+
+/// Preset 步骤：选择内置供应商预设，确认后以其为唯一 provider 进入编辑页。
+fn handle_preset_keys(state: &mut SetupWizardState, key: ratatui_kit::crossterm::event::KeyEvent) {
+    use KeyCode::*;
+    match key.code {
+        Up => {
+            state.submit_error = None;
+            state.preset_cursor =
+                (state.preset_cursor + PROVIDER_PRESETS.len() - 1) % PROVIDER_PRESETS.len();
+        }
+        Down => {
+            state.submit_error = None;
+            state.preset_cursor = (state.preset_cursor + 1) % PROVIDER_PRESETS.len();
+        }
+        Enter | Char(' ') => {
+            state.submit_error = None;
+            let preset = &PROVIDER_PRESETS[state.preset_cursor];
+            state.providers = vec![preset.to_migrated()];
+            state.active_provider = 0;
+            // provider 列表被重建，浏览光标复位到首项，避免沿用旧列表位置
+            state.browse_cursor = 0;
+            state.invalidate_connectivity();
+            state.step = SetupStep::Form;
+            state.form_mode = FormMode::Edit;
+            state.form_focus = FormField::ApiKey;
+            state.edit_cursor_pos = get_raw_field_value(state).chars().count();
+        }
+        Esc => {
+            state.submit_error = None;
+            state.step = SetupStep::Choose;
         }
         _ => {}
     }

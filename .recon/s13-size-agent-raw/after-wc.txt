@@ -1,8 +1,0 @@
-     805 peri-agent/src/session/transcript.rs
-     107 peri-agent/src/session/transcript/entry.rs
-     191 peri-agent/src/session/transcript/persistence_port.rs
-      33 peri-agent/src/session/transcript_test.rs
-     436 peri-agent/src/session/transcript_persistence_test.rs
-     563 peri-agent/src/session/transcript_memory_test.rs
-     105 peri-agent/src/session/transcript_reminder_test.rs
-    2240 total

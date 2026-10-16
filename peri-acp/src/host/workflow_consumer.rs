@@ -28,8 +28,7 @@ use std::time::Duration;
 use peri_acp_types::ports::{McpPoolPort, McpResourceSubscription};
 use peri_acp_types::workflow::{AgentExecutor, AgentRunParams};
 use peri_mcp_workflow::{
-    ClaimOutcome, WorkflowRuntime, WorkflowTaskRecord, WorkflowTaskState, TASKS_URI,
-    WORKFLOW_CONSUMER_META_KEY,
+    ClaimOutcome, WorkflowRuntime, WorkflowTaskRecord, TASKS_URI, WORKFLOW_CONSUMER_META_KEY,
 };
 use serde::Deserialize;
 use serde_json::{json, Map, Value};
@@ -297,12 +296,7 @@ async fn scan(
         // `maxConcurrency`，在执行数取自任务表（单一真相，不另立计数）。达到上限的
         // 任务留在 `published`（排队），由后续唤醒处理。
         if let Some(capacity) = runtime.run_capacity(&task.run_id) {
-            let executing = runtime
-                .tasks()
-                .for_run(&task.run_id)
-                .iter()
-                .filter(|record| record.state == WorkflowTaskState::Executing)
-                .count();
+            let executing = runtime.tasks().executing_count_for_run(&task.run_id);
             if executing >= capacity as usize {
                 continue;
             }

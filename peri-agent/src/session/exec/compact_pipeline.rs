@@ -338,6 +338,7 @@ async fn run_v2_compact_with_cancel(
             true,
             consecutive_failures,
             cwd,
+            None,
         ) => r,
     };
 

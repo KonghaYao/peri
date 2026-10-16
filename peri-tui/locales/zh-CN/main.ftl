@@ -51,6 +51,7 @@ history-agent-running = Agent 运行中，无法打开历史面板
 
 # model command
 config-save-failed = 配置保存失败: { $error }
+config-handle-missing = 配置不可用: { $handle } 未初始化
 
 # effort command
 effort-set = 推理力度已设为 { $effort }
@@ -141,10 +142,10 @@ setup-welcome-title =  ── Peri 设置 ── 欢迎
 setup-choose-provider =  选择如何配置你的 Provider：
 setup-source-custom-api = Custom API
 setup-source-migrate = 从 Claude Code 迁移
-setup-source-peri-free = Peri Code 免费服务
+setup-source-preset = 供应商预设
 setup-source-custom-desc = 手动输入 Provider 详情
 setup-source-migrate-desc = 从 ~/.claude/ 导入配置
-setup-source-peri-free-desc = 一键填入 Peri Code 免费网关，无需 API Key
+setup-source-preset-desc = 一键填入主流厂商的端点与四档模型
 setup-key-confirm = :确认
 setup-key-select = :选择
 setup-key-quit = :退出
@@ -182,6 +183,9 @@ setup-no-providers = 未配置任何 Provider，请选择"Custom API"或从 Clau
 setup-language-title = ── Peri 设置 ── 语言
 setup-language-prompt = 选择界面语言：
 setup-language-press-enter = 按 Enter 确认
+
+setup-preset-title =  ── Peri 设置 ── 供应商预设
+setup-preset-prompt =   选择供应商预设：
 
 # ---- Config Panel ----
 
@@ -438,6 +442,11 @@ app-plugin-delete-failed = 删除失败: { $error }
 app-plugin-add-failed = 添加失败: { $error }
 app-plugin-added = Marketplace 已添加: { $name } (正在获取内容...)
 
+# ---- 面板确认目标守卫 ----
+
+# 确认期间被确认的对象消失（退出确认时按稳定身份定位失败）；操作未执行。
+app-confirm-target-missing = 确认的目标已不存在: { $target }
+
 # 后台 Agent 管理栏
 bg-bar-focus-hint = 按 Esc 退出聚焦
 
@@ -556,7 +565,7 @@ theme-navigate = 浏览
 
 # ---- 历史浏览器 ----
 
-thread-browser-title =  恢复会话 ({ $cursor }/{ $total }) 
+thread-browser-title = 恢复会话
 thread-browser-search-placeholder = 搜索…
 thread-browser-empty =   （暂无对话）
 thread-browser-no-match =   （无匹配对话）
@@ -938,6 +947,7 @@ panel-mcp-oauth-start-failed = MCP 授权启动失败：{ $error }
 panel-mcp-oauth-start-no-session = MCP 授权启动失败：没有活动会话
 panel-mcp-icon-connected = ✔
 panel-mcp-icon-error = ✗
+panel-mcp-icon-unknown = ?
 panel-mcp-cache-hit = 缓存命中
 panel-mcp-cache-version-hit = 缓存版本命中
 panel-mcp-cache-protocol-hit = 协议缓存命中
@@ -1096,6 +1106,9 @@ panel-tasks-empty-hint-1 =   通过 /loop 命令调度定时任务；
 panel-tasks-empty-hint-2 =   子代理由 Task / SubAgent 工具创建。
 panel-tasks-nav-hint =   ↑/↓::导航  Enter::取消  Esc::关闭
 panel-tasks-nav-hint-close =   ↑/↓::导航  Enter::关闭  Esc::关闭
+panel-tasks-cancel-no-session =   未发送取消请求: 当前无活动会话
+panel-tasks-cancel-target-gone =   未发送取消请求: 任务已不在列表中
+panel-tasks-cancel-failed =   取消任务失败: { $detail }
 
 # ---- Theme Panel ----
 panel-theme-active-mark =  *
@@ -1116,6 +1129,9 @@ workflow-no-runs = 当前会话无工作流运行
 workflow-footer-shortcuts = Tab::切换运行 · Shift+Tab::上一个 · ←/→::切换面板 · ↑/↓::导航 · Enter::终止运行 · Esc::关闭
 workflow-phases-header = 阶段（共 { $count } 个 agent）
 workflow-model-header = 模型
+workflow-kill-no-session = 无活动会话，无法终止运行
+workflow-kill-failed = 终止运行失败
+workflow-kill-requested = 已请求终止运行 { $run }
 
 # ---- AskUser Panel ----
 panel-ask-user-empty =   暂无待答问题。
@@ -1168,6 +1184,7 @@ popup-ask-user-title =  用户问答
 risk-choice-cancel = 取消（默认）
 
 popup-confirm-empty =   暂无待确认项。
+popup-confirm-superseded = 确认内容已更新，请重新确认。
 popup-confirm-action-hint =   Enter: 确认  Esc: 取消
 popup-confirm-title =  确认
 popup-confirm-reject-title = 拒绝回答
@@ -1211,16 +1228,20 @@ steer-session-unavailable = 会话未能建立：{ $error }。原稿已保留。
 
 thread-browser-project = 项目
 thread-browser-workspace = 工作区
-thread-browser-scope-count =   { $scope } · { $count } 个会话
-thread-browser-scope-loaded =   { $scope } · 已加载 { $count } 个会话 · 还有更多
+thread-browser-count = 已加载 { $count } 个会话
+thread-browser-count-more = 已加载 { $count } 个会话 · 还有更多
+thread-browser-filter-label = 筛选：
+thread-browser-status-label = 状态：
+thread-browser-status-active = 活跃
 thread-browser-messages = { $count } 条消息
 panel-threads-more-hint =   ↑/↓::浏览（到末尾自动加载）  PgUp/PgDn::翻页  Tab::范围  n::更多  d::删除
-thread-browser-all = 全部历史
+thread-browser-all = 全部
 thread-browser-selected = 选中：{ $title }
 thread-browser-selected-path = 路径：{ $path } · ID：{ $id }
 thread-browser-actions = ↑↓ 选择  Enter 继续  v 查看  Tab 范围  a 归档/恢复  r 切换归档  d 删除  Esc 关闭
 thread-browser-actions-compact = Enter 继续  a 切换归档  r 归档页  d 删除  Esc 关闭
 thread-browser-archived = 已归档
+thread-browser-delete-error = 删除会话失败
 thread-browser-archive-error = 更新归档状态失败
 thread-browser-machine = { $name }（{ $id }）· { $count } 个工作区
 thread-browser-preview-actions = v 返回  ↑↓ 滚动  PgUp/PgDn 翻页  Esc 关闭

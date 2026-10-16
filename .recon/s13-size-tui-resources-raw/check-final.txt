@@ -1,3 +1,0 @@
-    Checking peri-resources v0.2.0 (/Users/konghayao/code/ai/peri-v4p3/.worktrees/peri-transcript-history/peri-resources)
-    Checking peri-tui v0.2.0 (/Users/konghayao/code/ai/peri-v4p3/.worktrees/peri-transcript-history/peri-tui)
-    Finished `dev` profile [unoptimized + debuginfo] target(s) in 1m 03s

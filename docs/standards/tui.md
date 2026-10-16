@@ -17,8 +17,8 @@
 ### TUI-THEME-001
 
 - **Scope**：非组件主题读取。
-- **Rule**：组件用 hook 订阅主题 atom；非组件按“两步绑定”取得主题值并在 guard 生命周期内完成复制，禁止保存悬垂引用。禁止硬编码颜色。
-- **Verify**：`cargo check -p peri-tui`；人工检查主题读取来自 `peri-theme` atoms，且没有新增硬编码色值。
+- **Rule**：组件用 hook 订阅主题 atom；非组件按“两步绑定”取得主题值并在 guard 生命周期内完成复制，禁止保存悬垂引用。禁止硬编码颜色。填充块（选中行、激活 chip / tab、按钮）的底色取表面或状态 token（`semantic.surface.*`、`semantic.status.*`、`semantic.accent`、`component.popup.action_primary`、`*_bg`）；文本 token（`semantic.text.*`、`component.panel.title`、`component.panel.row_selected`）只作前景色，不得用作底色——dark / dracula 等主题里它们等于 `text.primary`，会渲染成白底白字。
+- **Verify**：`cargo check -p peri-tui`；人工检查主题读取来自 `peri-theme` atoms，没有新增硬编码色值，也没有 `.bg(<文本 token>)`。
 
 ### TUI-EVENT-001
 
@@ -29,7 +29,7 @@
 ### TUI-I18N-001
 
 - **Scope**：TUI 面向用户的文本。
-- **Rule**：只翻译用户可见界面文本；日志、错误、协议、标识符和路径保持原样。新增文本时同步增加 `peri-tui/locales/en/main.ftl` 与 `peri-tui/locales/zh-CN/main.ftl` key，代码用 `i18n::tr`/`tr_args`，需要动态切换的组件订阅 `LANG_VERSION`。
+- **Rule**：只翻译用户可见界面文本；日志、错误、协议、标识符和路径保持原样。新增文本时同步增加 `peri-tui/locales/en/main.ftl` 与 `peri-tui/locales/zh-CN/main.ftl` key，代码用 `i18n::tr`/`tr_args`，需要动态切换的组件订阅 `LANG_VERSION`。例外：内置供应商预设的品牌摘要（`provider_presets` 的 `summary`）为固定中文内联文案，不随界面语言切换。
 - **Verify**：`cargo test -p peri-tui --lib`；人工核对两份 FTL、调用 key 和语言订阅。
 
 ### TUI-TEXT-001

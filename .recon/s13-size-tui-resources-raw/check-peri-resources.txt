@@ -1,4 +1,0 @@
-    Checking peri-acp-types v0.2.0 (/Users/konghayao/code/ai/peri-v4p3/.worktrees/peri-transcript-history/peri-acp-types)
-    Checking peri-workflow v0.2.0 (/Users/konghayao/code/ai/peri-v4p3/.worktrees/peri-transcript-history/peri-workflow)
-    Checking peri-resources v0.2.0 (/Users/konghayao/code/ai/peri-v4p3/.worktrees/peri-transcript-history/peri-resources)
-    Finished `dev` profile [unoptimized + debuginfo] target(s) in 25.97s

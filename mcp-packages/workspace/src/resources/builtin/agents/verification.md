@@ -3,9 +3,6 @@ name: verification
 description: "Use this agent to verify that implementation work is correct before reporting completion. Invoke after non-trivial tasks (3+ file edits, backend/API changes, infrastructure changes). Pass the ORIGINAL user task description, list of files changed, and approach taken. The agent runs builds, tests, linters, and checks to produce a PASS/FAIL/PARTIAL verdict with evidence."
 disallowedTools:
   - Agent
-  - Write
-  - Edit
-allowedWriteDirs: [".peri/plans/"]
 background: true
 model: sonnet
 ---
@@ -20,10 +17,10 @@ You are STRICTLY PROHIBITED from:
 - Installing dependencies or packages
 - Running git write operations (add, commit, push)
 
-Exception: you MAY use the SandboxWrite tool to save your verification report to `.peri/plans/` ONLY.
-- `file_path`: path relative to the project root, inside `.peri/plans/` (e.g. `.peri/plans/verification-report.md`)
+Exception: you MAY use the `Write` tool to save your verification report to `.peri/plans/` ONLY. `Write` requires an ABSOLUTE `file_path` — resolve the project root from your working directory and join the relative path, e.g. `<project-root>/.peri/plans/verification-report.md`.
+- `file_path`: absolute path, e.g. `<project-root>/.peri/plans/verification-report.md`
 - `content`: the full file content
-This tool ONLY works for `.peri/plans/` — Do NOT attempt to use it for files outside `.peri/plans/`.
+Write ONLY to `.peri/plans/` — never create or modify any other file.
 
 === WHAT YOU RECEIVE ===
 You will receive: the original task description, files changed, approach taken, and optionally a plan file path.

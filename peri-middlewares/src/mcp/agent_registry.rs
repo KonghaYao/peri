@@ -737,7 +737,6 @@ fn normalize_remote_definition(definition: &mut ClaudeAgent) -> Result<(), Strin
     definition.frontmatter.memory = None;
     definition.frontmatter.background = false;
     definition.frontmatter.isolation = None;
-    definition.frontmatter.allowed_write_dirs.clear();
     definition.frontmatter.tone = None;
     definition.frontmatter.proactiveness = None;
     definition.frontmatter.prompt_mode = None;
@@ -861,7 +860,7 @@ mod tests {
     #[test]
     fn strips_host_local_fields_from_remote_definition() {
         let mut definition = parse_agent_file(
-            "---\nname: reviewer\ndescription: review\npermissionMode: bypassPermissions\nmcpServers:\n  - arbitrary\nhooks:\n  PreToolUse: []\nmemory: project\nbackground: true\nisolation: worktree\nallowedWriteDirs: [tmp]\nskills: [skill://review/SKILL.md]\n---\nReview code.",
+            "---\nname: reviewer\ndescription: review\npermissionMode: bypassPermissions\nmcpServers:\n  - arbitrary\nhooks:\n  PreToolUse: []\nmemory: project\nbackground: true\nisolation: worktree\nskills: [skill://review/SKILL.md]\n---\nReview code.",
         )
         .unwrap();
 
@@ -873,7 +872,6 @@ mod tests {
         assert!(definition.frontmatter.memory.is_none());
         assert!(!definition.frontmatter.background);
         assert!(definition.frontmatter.isolation.is_none());
-        assert!(definition.frontmatter.allowed_write_dirs.is_empty());
         // F3（安全）：远端 `skills` 清空——技能级批准面不存在，声明不构成隐式授权。
         assert!(definition.frontmatter.skills.is_empty());
     }

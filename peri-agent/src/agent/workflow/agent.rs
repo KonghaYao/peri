@@ -360,21 +360,6 @@ impl AgentExecutor for WorkflowAgentExecutor {
                         .is_none_or(|allowed| tool_name_in(allowed, tool.name()))
                     && !tool_name_in(&definition.disallowed_tools, tool.name())
             });
-            if !definition.allowed_write_dirs.is_empty()
-                && definition
-                    .allowed_tools
-                    .as_ref()
-                    .is_none_or(|allowed| !allowed.is_empty())
-                && !tool_name_in(&definition.disallowed_tools, "SandboxWrite")
-            {
-                if let Some(sandbox_write) = self
-                    .ctx
-                    .middleware_factory
-                    .build_sandbox_write_tool(&self.ctx.cwd, &definition.allowed_write_dirs)
-                {
-                    tools.push(sandbox_write);
-                }
-            }
         }
         if let Some(allowed) = params
             .allowed_tools

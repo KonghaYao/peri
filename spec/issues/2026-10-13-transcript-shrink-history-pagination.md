@@ -185,7 +185,7 @@ Full Compact 成功后，核心热态 Transcript 真正释放已退出有效上�
   处置：S7c 修复轮（TUI 8 条 + SDK 5 条，含「必须能失败的测试」要求），随后双路独立复核。产品级「仍 PARTIAL」条目（如锚点机制）在 S7c 报告与 S10 验收报告里如实标注，不假装达成。
   S7c 复核结果：**TUI**（`.recon/S7c-tui-verification.md`）D1/D2/D3/D4/D5/D8 由 FAIL 转 PASS（每条都有证伪对照：把修复点退回去，用例即 FAIL），D6 锚点为「已量化 + 已计价」的 PARTIAL（插入点在视口上方时同单元屏幕行不变；插入点在视口下方时会整体推动 = 插入高度），D7 部分完成（code-index 已同步，集成用例未登记）；全量 lib 1807 passed / 0 failed。**SDK**（`.recon/S7c-sdk-verification.md`）8/8 PASS（Compact 失败收敛走真实 `command_feedback` 载体、`test.failing` 转正、三种 reason 可区分、导出与 README/code-index 一致）；残留 P3：`compact_started` 之前的真实 Compact 失败在 SDK 侧仍无展示（非本轮引入）。
   流程记录：S7c 的 TUI 修复 agent 在 200 轮迭代上限被中断（未落报告，末次编辑一度使 lib test 不可编译），由独立复核者复现并做了一处最小测试修复（保留原意的显式失败，见复核报告 §10）；TUI 侧权威记录因此是**复核者报告**（`.recon/S7c-tui-fix.md` 不存在）。
-  集成用例（D7）已在 S7d 补齐：`docs/verification/tui-integration-cases/06-transcript-ui.md` 新增 `P0-81`（滚动加载更早历史 + 迟到页/游标），README 执行顺序同步；复核判 PASS（编号/章节/链接/索引四项约定）。**编号变更（2026-10-14，追平 origin/main 时发现冲突）**：登记时编号为 `P0-77`，上游 PR #193/#194 已把 `P0-77～P0-80` 分配给 `16-clipboard-transport.md`，故本用例改号为 `P0-81`；`docs/code-index/peri-tui.md` 已同步，`.recon/` 内既有报告保留当时的 `P0-77` 写法（历史记录不改写）。
+  集成用例（D7）已在 S7d 补齐：`docs/verification/tui-integration-cases/06-transcript-ui.md` 新增 `P0-82`（滚动加载更早历史 + 迟到页/游标），README 执行顺序同步；复核判 PASS（编号/章节/链接/索引四项约定）。**编号变更（2026-10-14，追平 origin/main 时发现冲突）**：登记时编号为 `P0-77`，上游 PR #193/#194 已把 `P0-77～P0-80` 分配给 `16-clipboard-transport.md`，故本用例改号为 `P0-81`；**再改号（2026-10-16，合并最新 main 时）**：main 的 #230 已把 `P0-81` 分配给 `17-setup-wizard.md`（首次配置向导），故本用例再改号为 `P0-82`；`docs/code-index/peri-tui.md` 已同步，`.recon/` 内既有报告保留当时的 `P0-77` 写法（历史记录不改写）。
 - **D14 锚点补偿不得跨层使用槽位坐标（S7d 引入 → S7e 重做）。**
   S7d 把补偿规则从「按总行数增量」改成「只补偿视口上方的插入高度」：几何判定经证伪证明有效，但实现**把桥接侧槽位坐标当成渲染侧槽位坐标**——`HISTORY_PREPEND_MARK` 存的是 `state.committed` 下标（`acp_events/history_page.rs:78`），消费方却用它索引发布后的 `snapshot.items`（`transcript.rs:117`）；发布前「相邻成功工具卡压成折叠组」（`render.rs:140/461/658`）会让槽位数变少（复核实测：桥接 4 槽 vs 渲染 3 槽），于是两个方向都会出错：过补偿（包络终点 == 渲染槽数 → 取整窗视觉总行数 → 视口被推到窗口底部）或不补偿（终点越界 → `None`）。
   处置（S7e）：改按**渲染侧身份重定位**——记录视口顶部可见单元的稳定身份 + 单元内位移，并合后用同一身份在新索引重查并令 `new_offset = new_visual_start - within_unit_offset`；身份消失则不补偿（安全方向）。跨层槽位包络语义从 `HISTORY_PREPEND_MARK` 移除。验收必须覆盖「插入把原有相邻工具卡合并成折叠组」形态（复核者的反例构造在 `.recon/S7d-verify-probe.rs.txt`）。产物：`.recon/S7d-verification.md`（根因判定）、`.recon/S7e-anchor-relocation.md`、`.recon/S7e-verification.md`。
@@ -233,7 +233,7 @@ Full Compact 成功后，核心热态 Transcript 真正释放已退出有效上�
 | S9c | 回放标记判据改为当前连接（D12）+ 验证报告的 R1/R2/R8/R9 文档与测试修正 | 完成（修复 + 独立复核 6/6 PASS） |
 | S7 | 前端（REQ-C01~C03、REQ-H04 客户端侧）：TUI 取消 Compact 强制 reload、滚动分页与区间合并；SDK 增量合并、Compact/rewind 分流、按 `loadGeneration` 暂存与丢弃 | 已落地（S7a/S7b），双路复核完成（TUI 1 FAIL + SDK 1 FAIL → S7c） |
 | S7c | 前端缺陷修复轮（D13）：TUI 触发接线/rewind 失效/超时/区间/锚点/文档；SDK Compact 失败收敛、stream 行为、块身份、错误语义、公开出口 | 完成（TUI 6 PASS + 2 PARTIAL；SDK 8/8 PASS；见 D13） |
-| S7d | 锚点补偿改为「只补偿视口上方的插入高度」（A20 场景 B）+ 登记 TUI 集成用例（P0-81，登记时编号 P0-77，冲突后改号） | 完成：用例登记 PASS；锚点改动因跨层槽位坐标缺陷被复核判 FAIL（D14）→ S7e |
+| S7d | 锚点补偿改为「只补偿视口上方的插入高度」（A20 场景 B）+ 登记 TUI 集成用例（P0-82，登记时编号 P0-77，两次冲突后改号） | 完成：用例登记 PASS；锚点改动因跨层槽位坐标缺陷被复核判 FAIL（D14）→ S7e |
 | S7e | 锚点改按渲染侧身份重定位（去跨层坐标），验收须覆盖折叠组形态 | 完成（复核判据 1~8 全 PASS；A20 成立，含已声明边界） |
 | S10 | 终局测试矩阵 + 对抗审计 + A01~A25 验收报告 + 报告复核 | 完成（workflow `01a1377b`）；报告复核判定「需修订后可作验收依据」，已按 M1~M4 + S1~S5 出第二版 |
 | S11 | 修复审计新发现的 F1（P1，初始游标锚点落在不可展示条目）+ 回归用例 + 独立复核 | 完成（见 D15；`.recon/S11-verification.md`） |

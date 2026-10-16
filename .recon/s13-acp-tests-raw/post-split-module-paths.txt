@@ -1,8 +1,0 @@
-   8 unnegotiated_replay_tests::delivery_tests
-   6 rewind_cases::effective_view_tests
-   4 unnegotiated_replay_tests::fail_closed_tests
-   4 rewind_cases::routing_tests
-   4 rewind_cases::failure_paths_tests
-   3 unnegotiated_replay_tests::verification_tests
-   1 rewind_cases::inherited_region_tests
-   1 rewind_cases::cursor_expiry_tests

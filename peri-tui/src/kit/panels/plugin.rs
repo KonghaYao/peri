@@ -5,6 +5,7 @@
 //! 无 ScrollView——避免其内置 handler 与自定义 ↑/↓ 冲突。
 
 use crate::app::panel_types::PanelKind;
+use crate::application::operations::OperationScope;
 use crate::components::textarea::TextAreaState;
 use crate::i18n;
 use crate::kit::atoms::{
@@ -25,12 +26,18 @@ use ratatui_kit::ratatui::{
 mod data;
 mod discover;
 mod discover_handler;
-use discover::{DiscoverState, SearchSession};
+use discover::DiscoverState;
+mod identity;
+use identity::{InstalledIdentity, MarketplaceIdentity};
 mod operation;
 mod panel_handler;
 mod render;
 mod search_handler;
 mod search_request;
+
+#[cfg(test)]
+#[path = "plugin/guard_test.rs"]
+mod guard_tests;
 
 #[cfg(test)]
 #[path = "plugin/hint_test.rs"]
@@ -45,6 +52,17 @@ use self::render::{
     render_detail, render_discover_detail, render_discover_list, render_errors, render_installed,
     render_marketplaces,
 };
+
+/// 当前活动会话的操作作用域。
+///
+/// 面板是会话投影的消费者，取值留在这一侧；`application::operations` 只接受调用方
+/// 构造好的作用域，自己不读 atoms。
+fn current_scope() -> OperationScope {
+    OperationScope::new(
+        ACTIVE_SESSION_ID.state().read().clone(),
+        BRIDGE_RESET_COUNTER.get(),
+    )
+}
 
 // ── Search state machine ───────────────────────────────────────────────
 
@@ -106,6 +124,7 @@ enum MsStatus {
 #[allow(dead_code)]
 struct MsEntry {
     name: String,
+    source: peri_middlewares::plugin::MarketplaceSource,
     source_label: String,
     plugin_count: usize,
     installed_count: usize,
@@ -143,18 +162,18 @@ pub fn PluginPanel(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
     let theme_def = hooks.use_atom(&THEME_ATOM);
     let selected = hooks.use_state(|| 0usize);
     let active_tab = hooks.use_state(|| PluginViewTab::Installed);
-    let detail_plugin_idx = hooks.use_state(|| Option::<usize>::None);
+    let detail_plugin = hooks.use_state(|| Option::<InstalledIdentity>::None);
     let action_index = hooks.use_state(|| 0usize);
     let confirm_action = hooks.use_state(|| Option::<String>::None);
     let cursor_visible = hooks.use_state(|| true);
     let cursor_last_toggle = hooks.use_state(peri_time::monotonic_now);
-    let operation_loading = hooks.use_state(|| Option::<String>::None);
+    let marketplace_confirmation = hooks.use_state(|| Option::<MarketplaceIdentity>::None);
     let operation = hooks.use_state(operation::OperationState::default);
     let projection_error = hooks.use_atom(&SERVICE_PROJECTION_ERROR);
     let add_marketplace_input = hooks.use_state(TextAreaState::default);
     let add_marketplace_active = hooks.use_state(|| false);
     // Marketplace detail state
-    let marketplace_detail = hooks.use_state(|| Option::<usize>::None);
+    let marketplace_detail = hooks.use_state(|| Option::<MarketplaceIdentity>::None);
     let marketplace_detail_action = hooks.use_state(|| 0usize);
     let discover = hooks.use_state(DiscoverState::default);
     let store = hooks.use_atom(&PLUGIN_LIST);
@@ -162,15 +181,43 @@ pub fn PluginPanel(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
     hooks.use_atom(&LANG_VERSION);
     hooks.use_atom(&ACTIVE_SESSION_ID);
     hooks.use_atom(&BRIDGE_RESET_COUNTER);
-    discover
-        .write_no_update()
-        .reset_session(SearchSession::current());
-    let operation_session = SearchSession::current();
-    let session_for_effect = operation_session.clone();
-    hooks.use_effect(
-        move || operation.write().reset_session(session_for_effect),
-        operation_session,
+    discover.write_no_update().reset_session(current_scope());
+    let operation_scope = current_scope();
+    let scope_for_effect = operation_scope.clone();
+    let catalog = get_marketplace_cache();
+    let detail_keys = (
+        operation_scope.clone(),
+        plugins
+            .iter()
+            .map(|p| InstalledIdentity::new(p, operation_scope.clone()))
+            .collect::<Vec<_>>(),
+        catalog
+            .iter()
+            .map(|entry| MarketplaceIdentity::new(entry, operation_scope.clone()))
+            .collect::<Vec<_>>(),
+        detail_plugin.read().clone(),
+        marketplace_detail.read().clone(),
+        marketplace_confirmation.read().clone(),
     );
+    hooks.use_effect(
+        move || {
+            if scope_for_effect != current_scope() {
+                return;
+            }
+            operation.write().reset_session(scope_for_effect);
+            identity::reconcile_details(
+                detail_plugin,
+                marketplace_detail,
+                marketplace_confirmation,
+                confirm_action,
+                operation,
+            );
+        },
+        detail_keys,
+    );
+    let search_scope = operation_scope.clone();
+    let panel_scope = operation_scope;
+
     let count = plugins.len();
 
     // RENDER_HEARTBEAT: 驱动 cursor blink（Discover 搜索框）
@@ -193,14 +240,15 @@ pub fn PluginPanel(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
         move |event| {
             search_handler::handle_search_event(
                 event,
+                &search_scope,
                 area,
                 active_tab,
                 discover,
-                detail_plugin_idx,
+                detail_plugin,
                 marketplace_detail,
                 marketplace_detail_action,
                 confirm_action,
-                operation_loading,
+                marketplace_confirmation,
                 operation,
                 add_marketplace_input,
                 add_marketplace_active,
@@ -216,15 +264,16 @@ pub fn PluginPanel(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
         move |event| {
             panel_handler::handle_panel_event(
                 event,
+                &panel_scope,
                 area,
                 selected,
                 active_tab,
                 discover,
                 action_index,
                 confirm_action,
-                operation_loading,
+                marketplace_confirmation,
                 operation,
-                detail_plugin_idx,
+                detail_plugin,
                 marketplace_detail,
                 marketplace_detail_action,
                 add_marketplace_input,
@@ -241,8 +290,8 @@ pub fn PluginPanel(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
         discover,
         action_index,
         confirm_action,
-        operation_loading,
-        detail_plugin_idx,
+        marketplace_confirmation,
+        detail_plugin,
         marketplace_detail,
         marketplace_detail_action,
         add_marketplace_input,
@@ -252,7 +301,7 @@ pub fn PluginPanel(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
     // ── 构建行 ──
     let sel = *selected.read();
     let current_tab = *active_tab.read();
-    let detail_idx = *detail_plugin_idx.read();
+    let detail_identity = detail_plugin.read().clone();
     let ai = *action_index.read();
     let scroll_start = scroll_start_for_selected(sel, count, VISIBLE_ITEMS);
 
@@ -278,9 +327,11 @@ pub fn PluginPanel(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
     let warning_color = guard.semantic.status.warning;
     let success_color = guard.semantic.status.success;
     let title_color = guard.component.panel.title;
+    // 激活 tab 是填充块：底色取 selection 表面，不用前景 token（dark / dracula
+    // 下 `panel.title` 等于 `text.primary`，会白底白字）。
     let active_tab_style = Style::new()
         .fg(guard.semantic.text.primary)
-        .bg(title_color)
+        .bg(guard.semantic.surface.selection)
         .bold();
     let inactive_tab_style = muted_style;
 
@@ -338,9 +389,8 @@ pub fn PluginPanel(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
             title_color,
             title_style,
         );
-    } else if let Some(mp_sel) = *marketplace_detail.read() {
-        let entries = get_marketplace_cache();
-        if let Some(entry) = entries.get(mp_sel.saturating_sub(1)) {
+    } else if let Some(identity) = marketplace_detail.read().as_ref() {
+        if let Some(entry) = identity.resolve(&catalog, &current_scope()) {
             let ma = *marketplace_detail_action.read();
             // Title
             lines.push(Line::from(vec![Span::styled(
@@ -388,8 +438,8 @@ pub fn PluginPanel(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
                 ]));
             }
         }
-    } else if let Some(di) = detail_idx {
-        if let Some(p) = plugins.get(di) {
+    } else if let Some(identity) = detail_identity.as_ref() {
+        if let Some(p) = identity.resolve(&plugins, &current_scope()) {
             let confirm_text = confirm_action.read().clone();
             render_detail(
                 &mut lines,
@@ -461,7 +511,10 @@ pub fn PluginPanel(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
                 *add_marketplace_active.read(),
                 add_marketplace_input.read().text.as_str(),
                 confirm_action.read().clone().as_deref(),
-                operation_loading.read().clone().as_deref(),
+                marketplace_confirmation
+                    .read()
+                    .as_ref()
+                    .map(|key| key.name.as_str()),
             ),
             PluginViewTab::Errors => render_errors(
                 &mut lines,
@@ -487,20 +540,11 @@ pub fn PluginPanel(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
             action_label(op),
             i18n::tr("panel-plugin-operation-wait-hint")
         )
-    } else if let Some(ref op) = *operation_loading.read() {
-        match op.as_str() {
-            "uninstall" => format!("{}...", i18n::tr("panel-plugin-action-uninstall")),
-            "enable" => format!("{}...", i18n::tr("panel-plugin-action-enable")),
-            "disable" => format!("{}...", i18n::tr("panel-plugin-action-disable")),
-            "install" => format!("{}...", i18n::tr("panel-plugin-action-install")),
-            "update" => format!("{}...", i18n::tr("panel-plugin-action-update")),
-            _ => format!("{}...", op),
-        }
     } else if confirm_action.read().is_some() {
         i18n::tr("panel-plugin-confirm-hint")
     } else if discover_read.detail.is_some() {
         i18n::tr("panel-plugin-detail-hint")
-    } else if detail_idx.is_some() {
+    } else if detail_identity.is_some() {
         i18n::tr("panel-plugin-detail-hint")
     } else if marketplace_detail.read().is_some() {
         i18n::tr("panel-plugin-marketplace-detail-hint")

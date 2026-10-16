@@ -3,6 +3,10 @@
 //! S6c：双 Tab（Service / Context）——Service Tab 直接从 `SERVICE_SNAPSHOT` atom
 //! 读 CPU/MEM/provider/model/permission_mode/cron 统计，**无需任何 mock**。
 //! Context Tab 暂显示占位（context token 计数需要 S11 解耦后从 ACP 流接入）。
+//!
+//! hook 顺序（TUI-HOOK-001）：`hooks.use_*` 无条件排在函数体前部，条件分支与提前
+//! `return` 一律排在其后——某条分支少调一个 hook，框架就会按下标取到错位的 hook
+//! 而 panic（ratatui-kit `Hooks::use_hook`）。
 
 use ratatui_kit::{
     crossterm::event::{Event, KeyCode, KeyEventKind},
@@ -41,53 +45,39 @@ pub fn StatusPanel(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
 
     let _lang_ver = hooks.use_atom(&LANG_VERSION);
 
-    hooks.use_event_handler(EventScope::Current, EventPriority::Normal, {
-        move |event| {
-            let Event::Key(key) = event else {
-                return EventResult::Ignored;
-            };
-            if key.kind != KeyEventKind::Press {
-                return EventResult::Ignored;
-            }
-            match key.code {
-                KeyCode::Esc => close_panel(),
-                KeyCode::Left => {
-                    *active_tab.write() = TAB_SERVICE;
-                }
-                KeyCode::Right => {
-                    *active_tab.write() = TAB_CONTEXT;
-                }
-                // Esc 由 PanelOverlay 上层处理
-                _ => {}
-            }
-            EventResult::Consumed
-        }
+    hooks.use_event_handler(EventScope::Current, EventPriority::Normal, move |event| {
+        handle_status_event(event, active_tab)
     });
+
+    #[cfg(test)]
+    tests::visit_mounted_panel(tests::MountedPanel { active_tab });
 
     let tab = *active_tab.read();
 
     // ── Tab bar ──────────────────────────────────────────────────────
+    // 激活 tab 是填充块：底色取 selection 表面（与消息区「当前项」同源）。
+    // `component.panel.title` 是前景 token，dark / dracula 下等于 `text.primary`，
+    // 用作底色会白底白字。
+    let active_tab_style = Style::new()
+        .fg(theme_def.read().semantic.text.primary)
+        .bg(theme_def.read().semantic.surface.selection)
+        .bold();
+    let inactive_tab_style = Style::new().fg(theme_def.read().semantic.text.muted);
     let tab_bar = Paragraph::new(Line::from(vec![
         Span::styled(
             i18n::tr("status-tab-service"),
             if tab == TAB_SERVICE {
-                Style::new()
-                    .fg(theme_def.read().semantic.text.primary)
-                    .bg(theme_def.read().component.panel.title)
-                    .bold()
+                active_tab_style
             } else {
-                Style::new().fg(theme_def.read().semantic.text.muted)
+                inactive_tab_style
             },
         ),
         Span::styled(
             i18n::tr("status-tab-context"),
             if tab == TAB_CONTEXT {
-                Style::new()
-                    .fg(theme_def.read().semantic.text.primary)
-                    .bg(theme_def.read().component.panel.title)
-                    .bold()
+                active_tab_style
             } else {
-                Style::new().fg(theme_def.read().semantic.text.muted)
+                inactive_tab_style
             },
         ),
     ]));
@@ -354,3 +344,29 @@ fn close_panel() {
     // I19-A: 弹栈而非清空整个栈，避免同时打开多个不同组面板时关闭一个会全部关闭
     crate::kit::panel_registry::close_active_panel();
 }
+
+/// 面板事件处理——判定集中在这里，组件只做注册；测试经挂载探针取得句柄后直接投喂事件。
+fn handle_status_event(event: Event, active_tab: State<usize>) -> EventResult {
+    let Event::Key(key) = event else {
+        return EventResult::Ignored;
+    };
+    if key.kind != KeyEventKind::Press {
+        return EventResult::Ignored;
+    }
+    match key.code {
+        KeyCode::Esc => close_panel(),
+        KeyCode::Left => {
+            *active_tab.write() = TAB_SERVICE;
+        }
+        KeyCode::Right => {
+            *active_tab.write() = TAB_CONTEXT;
+        }
+        // Esc 由 PanelOverlay 上层处理
+        _ => {}
+    }
+    EventResult::Consumed
+}
+
+#[cfg(test)]
+#[path = "status_test.rs"]
+mod tests;

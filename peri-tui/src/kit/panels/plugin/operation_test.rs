@@ -1,3 +1,4 @@
+use super::super::current_scope;
 use super::*;
 use crate::kit::atoms::{ACTIVE_SESSION_ID, BRIDGE_RESET_COUNTER};
 use peri_acp::transport::{
@@ -96,17 +97,20 @@ fn old_session_completion_cannot_clear_a_new_pending_operation() {
     let mut state = OperationState::default();
     let first = state.begin(
         PluginOperation::installed("enable", &plugin("local")).unwrap(),
-        SearchSession::default(),
+        OperationScope::default(),
     );
-    let mut new_session = SearchSession::default();
-    new_session.id = "another-session".into();
     let second = state.begin(
         PluginOperation::installed("update", &plugin("local")).unwrap(),
-        new_session,
+        OperationScope::new("another-session", 0),
     );
-    assert!(!state.complete(&first, Err("late failure".into())));
+    assert!(!state.complete(
+        &first,
+        OperationOutcome::Failed {
+            reason: "late failure".into()
+        }
+    ));
     assert_eq!(state.pending_action(), Some("update"));
-    assert!(state.complete(&second, Ok(())));
+    assert!(state.complete(&second, OperationOutcome::Succeeded));
     assert!(state.pending_action().is_none());
     assert!(state.error.is_none());
 }
@@ -185,14 +189,17 @@ async fn marketplace_requests_preserve_ticket_context_and_surface_backend_failur
         client.force_stable_for_test("plugin-operation-session", true);
         client.spawn_pump(notification_tx);
         let state = Arc::new(parking_lot::Mutex::new(OperationState::default()));
-        let ticket = state
-            .lock()
-            .begin(operation.clone(), SearchSession::current());
+        let ticket = state.lock().begin(operation.clone(), current_scope());
         let complete_state = state.clone();
-        let task = launch(ticket, Some(Arc::new(client)), move |ticket, result| {
-            complete_state.lock().complete(ticket, result);
-            None
-        });
+        let task = launch(
+            ticket,
+            operation.clone(),
+            Some(Arc::new(client)),
+            move |ticket, outcome| {
+                complete_state.lock().complete(ticket, outcome);
+                None
+            },
+        );
         let incoming = tokio::time::timeout(Duration::from_secs(2), server.recv())
             .await
             .unwrap()
@@ -229,13 +236,11 @@ async fn marketplace_requests_preserve_ticket_context_and_surface_backend_failur
 async fn missing_client_leaves_loading_and_preserves_visible_error() {
     let _guard = SessionGuard::new();
     let state = Arc::new(parking_lot::Mutex::new(OperationState::default()));
-    let ticket = state.lock().begin(
-        PluginOperation::installed("enable", &plugin("user")).unwrap(),
-        SearchSession::current(),
-    );
+    let operation = PluginOperation::installed("enable", &plugin("user")).unwrap();
+    let ticket = state.lock().begin(operation.clone(), current_scope());
     let complete_state = state.clone();
-    launch(ticket, None, move |ticket, result| {
-        complete_state.lock().complete(ticket, result);
+    launch(ticket, operation, None, move |ticket, outcome| {
+        complete_state.lock().complete(ticket, outcome);
         None
     })
     .await
@@ -253,15 +258,18 @@ async fn wire_result(response: Result<Value, AcpError>, late: bool) -> Option<St
     client.force_stable_for_test("plugin-operation-session", true);
     client.spawn_pump(notification_tx);
     let state = Arc::new(parking_lot::Mutex::new(OperationState::default()));
-    let ticket = state.lock().begin(
-        PluginOperation::installed("disable", &plugin("project")).unwrap(),
-        SearchSession::current(),
-    );
+    let operation = PluginOperation::installed("disable", &plugin("project")).unwrap();
+    let ticket = state.lock().begin(operation.clone(), current_scope());
     let complete_state = state.clone();
-    let task = launch(ticket, Some(Arc::new(client)), move |ticket, result| {
-        complete_state.lock().complete(ticket, result);
-        None
-    });
+    let task = launch(
+        ticket,
+        operation,
+        Some(Arc::new(client)),
+        move |ticket, outcome| {
+            complete_state.lock().complete(ticket, outcome);
+            None
+        },
+    );
     let incoming = tokio::time::timeout(Duration::from_secs(2), server.recv())
         .await
         .unwrap()
@@ -275,7 +283,7 @@ async fn wire_result(response: Result<Value, AcpError>, late: bool) -> Option<St
     assert_eq!(params["enable"], false);
     if late {
         BRIDGE_RESET_COUNTER.set(BRIDGE_RESET_COUNTER.get().wrapping_add(1));
-        state.lock().reset_session(SearchSession::current());
+        state.lock().reset_session(current_scope());
     }
     server.send_response(id, response).await.unwrap();
     tokio::time::timeout(Duration::from_secs(2), task)
@@ -323,9 +331,9 @@ pub(crate) struct MountedPanel {
     pub discover: State<super::super::discover::DiscoverState>,
     pub action_index: State<usize>,
     pub confirm_action: State<Option<String>>,
-    pub operation_loading: State<Option<String>>,
-    pub detail_plugin_idx: State<Option<usize>>,
-    pub marketplace_detail: State<Option<usize>>,
+    pub marketplace_confirmation: State<Option<super::super::MarketplaceIdentity>>,
+    pub detail_plugin: State<Option<super::super::InstalledIdentity>>,
+    pub marketplace_detail: State<Option<super::super::MarketplaceIdentity>>,
     pub marketplace_detail_action: State<usize>,
     pub add_marketplace_input: State<crate::components::textarea::TextAreaState>,
     pub add_marketplace_active: State<bool>,
@@ -351,21 +359,22 @@ impl MountedPanel {
         use super::super::search_handler;
         search_handler::handle_search_event(
             event,
+            &current_scope(),
             None,
             self.active_tab,
             self.discover,
-            self.detail_plugin_idx,
+            self.detail_plugin,
             self.marketplace_detail,
             self.marketplace_detail_action,
             self.confirm_action,
-            self.operation_loading,
+            self.marketplace_confirmation,
             self.operation,
             self.add_marketplace_input,
             self.add_marketplace_active,
         )
     }
 
-    fn event(&self, event: Event) -> ratatui_kit::EventResult {
+    pub(crate) fn event(&self, event: Event) -> ratatui_kit::EventResult {
         use super::super::panel_handler;
         use ratatui_kit::EventResult;
         let result = self.search_event(event.clone());
@@ -374,15 +383,16 @@ impl MountedPanel {
         }
         panel_handler::handle_panel_event(
             event,
+            &current_scope(),
             None,
             self.selected,
             self.active_tab,
             self.discover,
             self.action_index,
             self.confirm_action,
-            self.operation_loading,
+            self.marketplace_confirmation,
             self.operation,
-            self.detail_plugin_idx,
+            self.detail_plugin,
             self.marketplace_detail,
             self.marketplace_detail_action,
             self.add_marketplace_input,
@@ -398,21 +408,33 @@ impl MountedPanel {
         let ticket = self
             .operation
             .write()
-            .begin(operation, SearchSession::current());
+            .begin(operation.clone(), current_scope());
         let state = self.operation;
-        let task = launch(ticket.clone(), Some(client), move |ticket, result| {
-            if let Some(mut state) = state.try_write() {
-                state.complete(ticket, result);
-                None
-            } else {
-                Some(result)
-            }
-        });
+        let task = launch(
+            ticket.clone(),
+            operation,
+            Some(client),
+            move |ticket, outcome| {
+                if let Some(mut state) = state.try_write() {
+                    state.complete(ticket, outcome);
+                    None
+                } else {
+                    Some(outcome)
+                }
+            },
+        );
         (ticket, task)
     }
 }
 
-fn mount_panel(visitor: impl FnOnce(MountedPanel) + 'static) -> String {
+pub(crate) fn mount_panel(visitor: impl FnOnce(MountedPanel) + 'static) -> String {
+    mount_panel_frames(1, visitor)
+}
+
+pub(crate) fn mount_panel_frames(
+    frames: usize,
+    visitor: impl FnOnce(MountedPanel) + 'static,
+) -> String {
     let _catalog_guard = super::super::data::empty_catalog_for_test();
     use crate::app::panel_types::PanelKind;
     use crate::kit::atoms::{ACTIVE_PANEL, OPEN_PANELS};
@@ -432,8 +454,12 @@ fn mount_panel(visitor: impl FnOnce(MountedPanel) + 'static) -> String {
         assert!(slot.borrow().is_none());
         *slot.borrow_mut() = Some(Box::new(visitor));
     });
-    let buffer =
-        ratatui_kit::test_util::render_frame(element!(super::super::PluginPanel()), 160, 40);
+    let buffer = ratatui_kit::test_util::render_frames(
+        element!(super::super::PluginPanel()),
+        160,
+        40,
+        frames,
+    );
     buffer.content.iter().map(|cell| cell.symbol()).collect()
 }
 
@@ -548,17 +574,17 @@ fn mounted_late_timeout_response_cannot_clear_new_pending_ticket() {
                 .await
                 .unwrap();
             tokio::task::yield_now().await;
-            assert!(
-                !panel
-                    .operation
-                    .write()
-                    .complete(&old, Err("late failure".into()))
-            );
+            assert!(!panel.operation.write().complete(
+                &old,
+                OperationOutcome::Failed {
+                    reason: "late failure".into()
+                }
+            ));
             assert_eq!(panel.operation.read().pending_action(), Some("update"));
             assert!(panel.operation.read().error.is_none());
             assert_eq!(
-                panel.operation.read().pending.as_ref().unwrap().generation,
-                new.generation
+                panel.operation.read().gate.pending_generation(),
+                Some(new.generation())
             );
             server
                 .send_response(new_id, Ok(json!({"success": true})))
@@ -600,7 +626,7 @@ fn mounted_escape_cancels_only_client_wait_then_allows_panel_exit() {
                 ));
                 task.await.unwrap();
                 assert!(panel.operation.read().pending_action().is_none());
-                assert!(old.cancelled.is_cancelled());
+                assert!(old.is_cancelled());
                 assert!(
                     panel
                         .operation
@@ -692,16 +718,18 @@ fn mounted_missing_client_and_server_failure_remain_visible() {
         let text = mount_panel(move |panel| {
             paused_runtime().block_on(async {
                 let (client, server) = controlled_client();
-                let ticket = panel.operation.write().begin(
-                    PluginOperation::installed("enable", &plugin("user")).unwrap(),
-                    SearchSession::current(),
-                );
+                let operation = PluginOperation::installed("enable", &plugin("user")).unwrap();
+                let ticket = panel
+                    .operation
+                    .write()
+                    .begin(operation.clone(), current_scope());
                 let state = panel.operation;
                 let task = launch(
                     ticket,
+                    operation,
                     (!missing_client).then_some(client),
-                    move |ticket, result| {
-                        state.write().complete(ticket, result);
+                    move |ticket, outcome| {
+                        state.write().complete(ticket, outcome);
                         None
                     },
                 );
@@ -764,13 +792,14 @@ fn mounted_unmanaged_or_ambiguous_mutations_report_reason_without_pending() {
             mount_panel(move |panel| {
                 paused_runtime().block_on(async {
                     let (_client, server) = controlled_client();
-                    *panel.detail_plugin_idx.write() = Some(0);
+                    let identity = super::super::InstalledIdentity::new(&summary, current_scope());
+                    *panel.detail_plugin.write() = Some(identity.clone());
                     installed_action(
                         action,
                         &summary,
                         panel.operation,
                         panel.confirm_action,
-                        panel.detail_plugin_idx,
+                        panel.detail_plugin,
                     );
                     assert_eq!(
                         panel.operation.read().error.as_deref(),
@@ -778,7 +807,7 @@ fn mounted_unmanaged_or_ambiguous_mutations_report_reason_without_pending() {
                     );
                     assert!(panel.operation.read().pending_action().is_none());
                     assert!(panel.operation.read().confirmation.is_none());
-                    assert_eq!(*panel.detail_plugin_idx.read(), Some(0));
+                    assert_eq!(*panel.detail_plugin.read(), Some(identity));
                     assert!(
                         tokio::time::timeout(Duration::from_millis(1), server.recv())
                             .await

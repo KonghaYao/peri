@@ -3,7 +3,8 @@
 //! 用户问答面板——当 agent 调用 AskUserQuestion 工具时，自动作为 Panel 内联渲染
 //! 在 MessageArea 和 InputArea 之间（替代弹窗形式）。
 //!
-//! 面板逻辑复用 ask_user_popup 的 Tab 交互模型，但通过 panel_shell! 渲染。
+//! 面板逻辑沿用列表导航（Tab 切换问题、↑/↓ 移动高亮）与提交/拒绝路径，
+//! 通过 panel_shell! 渲染。
 
 use crate::app::panel_types::PanelKind;
 use crate::components::textarea::wrap_text as textarea_wrap;
@@ -222,15 +223,15 @@ pub fn AskUserPanel(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
                     let Some(snapshot) = interaction_for_closure.as_ref() else {
                         return EventResult::Consumed;
                     };
-                    let payload = crate::kit::atoms::ConfirmPayload {
-                        title: i18n::tr("popup-confirm-reject-title"),
-                        message: i18n::tr("popup-confirm-reject-message"),
-                        details: vec![],
-                        pending_action: crate::kit::atoms::ConfirmAction::RejectAskUser {
+                    let payload = crate::kit::atoms::ConfirmPayload::new(
+                        i18n::tr("popup-confirm-reject-title"),
+                        i18n::tr("popup-confirm-reject-message"),
+                        vec![],
+                        crate::kit::atoms::ConfirmAction::RejectAskUser {
                             owner: snapshot.owner.clone(),
                             request_id_json: snapshot.request_id_json.clone(),
                         },
-                    };
+                    );
                     *crate::kit::atoms::CONFIRM_PAYLOAD.state().write() = Some(payload);
                     crate::kit::popup_overlay::open_popup(crate::kit::atoms::PopupKind::Confirm);
                     EventResult::Consumed

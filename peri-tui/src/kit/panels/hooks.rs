@@ -5,10 +5,10 @@
 //! 插件 hooks/<event>.json 中声明，UI 不修改。
 
 use ratatui_kit::{
-    crossterm::event::{Event, KeyCode, KeyEventKind, KeyModifiers},
+    crossterm::event::{Event, KeyCode, KeyEventKind, KeyModifiers, MouseButton, MouseEventKind},
     prelude::*,
     ratatui::{
-        layout::Constraint,
+        layout::{Constraint, Rect},
         style::{Style, Stylize},
         text::{Line, Span},
         widgets::Paragraph,
@@ -18,7 +18,9 @@ use ratatui_kit::{
 use crate::app::panel_types::PanelKind;
 use crate::i18n;
 use crate::kit::atoms::{HOOK_LIST, HookSummary, LANG_VERSION};
-use crate::kit::list_nav::{next_selection, previous_selection, scroll_start_for_selected};
+use crate::kit::list_nav::{next_selection, previous_selection};
+use crate::kit::panel_mouse::{AreaTracker, hit_item, is_scrollbar_column};
+use crate::kit::panels::shared::list::{ListMetrics, ListViewport, content_rows};
 use fluent_bundle::FluentValue;
 use peri_theme::atoms::THEME_ATOM;
 
@@ -56,49 +58,30 @@ pub fn HooksPanel(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
     let _lang_ver = hooks.use_atom(&LANG_VERSION);
     let count = hook_list.len();
 
-    hooks.use_event_handler(EventScope::Current, EventPriority::Normal, {
-        move |event| {
-            let Event::Key(key) = event else {
-                return EventResult::Ignored;
-            };
-            if key.kind != KeyEventKind::Press {
-                return EventResult::Ignored;
-            }
-            match key.code {
-                KeyCode::Esc => {
-                    close_panel();
-                }
-                KeyCode::Enter => {
-                    close_panel();
-                }
-                KeyCode::Up => {
-                    let mut s = selected.write();
-                    *s = previous_selection(*s);
-                }
-                KeyCode::Down => {
-                    let mut s = selected.write();
-                    let count = HOOK_LIST.state().read().len();
-                    if count > 0 {
-                        *s = next_selection(*s, count);
-                    }
-                }
-                KeyCode::Char('c') if key.modifiers.contains(KeyModifiers::CONTROL) => {
-                    return EventResult::Ignored;
-                }
-                _ => {}
-            }
-            EventResult::Consumed
-        }
-    });
+    // 面板内容区行数（实测区域优先，首帧用 panel_overlay 的预测高度）与列表视口：
+    // 绘制与鼠标命中共用这一份结果，面板高度随终端变化时可见项数随之变化。
+    let (_term_w, term_h) = hooks.use_terminal_size();
+    let area = hooks.use_hook(AreaTracker::new).rect;
+    let viewport = ListViewport::for_content_rows(
+        content_rows(area, term_h),
+        // header 3 行（统计、只读提示、空行）+ 每项 3 行（名称行、matcher 行、命令行）+ footer 2 行
+        ListMetrics::new(3, 3, 2),
+        hook_list.len(),
+        *selected.read(),
+    );
+
+    hooks.use_event_handler_with_options(
+        EventScope::Current,
+        EventPriority::Normal,
+        EventOptions { hit_test: true },
+        move |event| handle_hooks_event(event, area, selected, viewport),
+    );
+
+    #[cfg(test)]
+    tests::visit_mounted_panel(tests::MountedPanel { selected });
 
     let sel = *selected.read();
     let mut lines: Vec<Line<'_>> = Vec::new();
-
-    // 视口跟随：让选中项始终可见（issue 2026-07-06-panels-selection-no-scroll-follow）。
-    // panel 高度 18 - border 2 - header 3 - footer 2 = 11 行；每项 3 行 → 可见 3 个。
-    // matcher 缺失时占位空行，保证每项固定 3 行（视口计算依赖）。
-    const VISIBLE_ITEMS: usize = 3;
-    let scroll_start = scroll_start_for_selected(sel, hook_list.len(), VISIBLE_ITEMS);
 
     // Stats line
     lines.push(Line::from(vec![Span::styled(
@@ -128,12 +111,8 @@ pub fn HooksPanel(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
             Style::new().fg(theme_def.read().semantic.text.muted),
         )]));
     } else {
-        for (i, entry) in hook_list
-            .iter()
-            .enumerate()
-            .skip(scroll_start)
-            .take(VISIBLE_ITEMS)
-        {
+        // matcher 缺失时占位空行，保证每项固定 3 行（视口计算依赖）。
+        for (i, entry) in viewport.window(&hook_list) {
             let is_selected = i == sel;
             let cursor = if is_selected { ">" } else { " " };
             let name_style = if is_selected {
@@ -192,12 +171,8 @@ pub fn HooksPanel(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
 
     let content = Paragraph::new(ratatui::text::Text::from(lines));
 
-    // 面板滚轮仲裁注册（每帧覆盖写入，area 用上一帧组件区域）
-    crate::kit::panel_scroll::register_panel_scroll(
-        PanelKind::Hooks,
-        hooks.use_previous_size(),
-        sv,
-    );
+    // 面板滚轮仲裁注册（每帧覆盖写入；区域与列表命中同源，首帧未测量时为 0 尺寸）
+    crate::kit::panel_scroll::register_panel_scroll(PanelKind::Hooks, area.unwrap_or_default(), sv);
 
     panel_shell!(PanelKind::Hooks, {
             ScrollView(
@@ -214,6 +189,60 @@ pub fn HooksPanel(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
 fn close_panel() {
     // I19-A: 弹栈而非清空整个栈，避免同时打开多个不同组面板时关闭一个会全部关闭
     crate::kit::panel_registry::close_active_panel();
+}
+
+/// 面板事件处理——判定集中在这里，组件只做注册，测试可直接投喂事件。
+fn handle_hooks_event(
+    event: Event,
+    area: Option<Rect>,
+    selected: State<usize>,
+    viewport: ListViewport,
+) -> EventResult {
+    // 鼠标：区域内左键点击 = 选中该项并执行 Enter 动作（click as enter）
+    if let Event::Mouse(mouse) = event {
+        if let Some(area) = area
+            && !is_scrollbar_column(&mouse, area)
+            && let Some(idx) = hit_item(&mouse, area, viewport.hit_layout())
+        {
+            *selected.write() = idx;
+            close_panel();
+            return EventResult::Consumed;
+        }
+        return match mouse.kind {
+            MouseEventKind::Down(MouseButton::Left) => EventResult::Consumed,
+            _ => EventResult::Ignored,
+        };
+    }
+    let Event::Key(key) = event else {
+        return EventResult::Ignored;
+    };
+    if key.kind != KeyEventKind::Press {
+        return EventResult::Ignored;
+    }
+    match key.code {
+        KeyCode::Esc => {
+            close_panel();
+        }
+        KeyCode::Enter => {
+            close_panel();
+        }
+        KeyCode::Up => {
+            let mut s = selected.write();
+            *s = previous_selection(*s);
+        }
+        KeyCode::Down => {
+            let mut s = selected.write();
+            let count = HOOK_LIST.state().read().len();
+            if count > 0 {
+                *s = next_selection(*s, count);
+            }
+        }
+        KeyCode::Char('c') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+            return EventResult::Ignored;
+        }
+        _ => {}
+    }
+    EventResult::Consumed
 }
 
 #[cfg(test)]

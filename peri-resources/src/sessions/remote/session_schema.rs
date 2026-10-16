@@ -17,7 +17,9 @@
 //! （身份 + 形状探测，见 [`super::session_open`]）通过之后执行，已初始化时读回而不改写任何行。
 
 use super::sql::StatementSpec;
-use crate::sessions::canonical::{CREATE_INDEXES, CREATE_TABLES};
+use crate::sessions::canonical::{
+    CREATE_INDEXES, CREATE_SESSION_CLOSE_INTENTS_TABLE_SQL, CREATE_TABLES,
+};
 
 /// 初始化本任务 schema 的语句集：建表段 + 索引段，**一条语句一个 spec**。
 ///
@@ -30,4 +32,18 @@ pub(super) fn initialization_plan() -> Vec<StatementSpec> {
         .chain(CREATE_INDEXES)
         .map(|sql| StatementSpec::bare(sql))
         .collect()
+}
+
+pub(super) fn repair_plan(
+    missing_indexes: bool,
+    missing_close_intents: bool,
+) -> Vec<StatementSpec> {
+    let mut plan = Vec::new();
+    if missing_close_intents {
+        plan.push(StatementSpec::bare(CREATE_SESSION_CLOSE_INTENTS_TABLE_SQL));
+    }
+    if missing_indexes {
+        plan.extend(CREATE_INDEXES.iter().map(|sql| StatementSpec::bare(sql)));
+    }
+    plan
 }

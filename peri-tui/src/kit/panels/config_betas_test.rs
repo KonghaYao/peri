@@ -4,11 +4,12 @@
 //! 切换写入的候选快照与保存失败回滚。
 
 use super::*;
-use crate::kit::atoms::PERI_CONFIG_HANDLE;
+use crate::kit::atoms::{NOTIFICATION, PERI_CONFIG_HANDLE};
 use peri_acp_types::beta_flags::{BETA_FLAGS, BetaFlag, FULL_ASYNC_TOOLS};
 
 /// 确保配置句柄存在（OnceLock：其他用例可能已建立，此处只保证非空）。
-fn ensure_config_handle() -> std::sync::Arc<parking_lot::RwLock<crate::config::PeriConfig>> {
+pub(super) fn ensure_config_handle()
+-> std::sync::Arc<parking_lot::RwLock<crate::config::PeriConfig>> {
     let _ = PERI_CONFIG_HANDLE.set(std::sync::Arc::new(parking_lot::RwLock::new(
         crate::config::PeriConfig::default(),
     )));
@@ -98,16 +99,20 @@ fn test_toggle_beta_flag_persists_candidate_snapshot() {
 
     let saved = std::sync::Arc::new(parking_lot::Mutex::new(None));
     let captured = std::sync::Arc::clone(&saved);
-    toggle_beta_flag_with(FULL_ASYNC_TOOLS, move |candidate| {
-        *captured.lock() = Some(
-            candidate
-                .config
-                .betas
-                .get(FULL_ASYNC_TOOLS)
-                .unwrap_or(false),
-        );
-        Ok(())
-    });
+    toggle_beta_flag_with(
+        PERI_CONFIG_HANDLE.get(),
+        FULL_ASYNC_TOOLS,
+        move |candidate| {
+            *captured.lock() = Some(
+                candidate
+                    .config
+                    .betas
+                    .get(FULL_ASYNC_TOOLS)
+                    .unwrap_or(false),
+            );
+            Ok(())
+        },
+    );
 
     assert_eq!(
         *saved.lock(),
@@ -124,7 +129,7 @@ fn test_toggle_beta_flag_save_failure_rolls_back_memory_view() {
     let handle = ensure_config_handle();
     handle.write().config.betas.set(FULL_ASYNC_TOOLS, false);
 
-    toggle_beta_flag_with(FULL_ASYNC_TOOLS, |_| {
+    toggle_beta_flag_with(PERI_CONFIG_HANDLE.get(), FULL_ASYNC_TOOLS, |_| {
         Err(anyhow::anyhow!("configuration revision conflict"))
     });
 

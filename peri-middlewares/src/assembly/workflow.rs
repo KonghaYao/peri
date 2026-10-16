@@ -218,14 +218,6 @@ impl WorkflowAgentFactory for BuiltinWorkflowAgentFactory {
         tools
     }
 
-    fn build_sandbox_write_tool(
-        &self,
-        cwd: &str,
-        allowed_dirs: &[String],
-    ) -> Option<Box<dyn BaseTool>> {
-        WorkflowAgentMiddlewareFactory.build_sandbox_write_tool(cwd, allowed_dirs)
-    }
-
     fn build_middlewares(
         &self,
         ctx: &WorkflowAgentContext,
@@ -347,7 +339,6 @@ async fn resolve_agent_definition_via_registry(
         allowed_tools,
         disallowed_tools: frontmatter.disallowed_tools.to_vec(),
         skill_names: frontmatter.skills,
-        allowed_write_dirs: frontmatter.allowed_write_dirs,
         max_iterations: frontmatter
             .max_turns
             .map(|turns| turns as usize)
@@ -374,24 +365,6 @@ impl WorkflowAgentFactory for WorkflowAgentMiddlewareFactory {
         mcp_skill_registry: Option<Arc<peri_acp_types::mcp_skills::McpSkillRegistry>>,
     ) -> Vec<Box<dyn BaseTool>> {
         Self::workflow_tools(cwd, disabled, execution_manager, mcp_skill_registry)
-    }
-
-    fn build_sandbox_write_tool(
-        &self,
-        cwd: &str,
-        allowed_dirs: &[String],
-    ) -> Option<Box<dyn BaseTool>> {
-        match peri_mcp_workspace::filesystem::WriteSandboxTool::new(cwd, allowed_dirs.to_vec()) {
-            Ok(tool) => Some(Box::new(tool)),
-            Err(error) => {
-                tracing::warn!(
-                    %error,
-                    sandbox_dirs = ?allowed_dirs,
-                    "workflow agent: failed to construct SandboxWrite"
-                );
-                None
-            }
-        }
     }
 
     fn build_middlewares(

@@ -3,8 +3,9 @@ use super::*;
 // ── SubAgent 单行（§6.7）───────────────────────────────────────────────
 
 /// §6.7 running 子 agent：显示最近 ≤3 个子工具调用行（最新在前）。
-/// 工具行为嵌套从属弱化形态（设计文档 §3）：续行竖线 + 2 格缩进 + 无 bold label
-/// + dim 符号——与主时间轴 tool activity row（bold primary + 状态色）差异化。
+/// 工具行为嵌套从属弱化形态（设计文档 §3）：过程区续行前缀、无 bold label、
+/// dim 符号——与主时间轴 tool activity row（bold primary + 状态色）差异化；
+/// 组内缩进已合并为总 `indent`（§5），与组头同列。
 #[test]
 fn test_subagent_running_shows_recent_tool_lines() {
     let grid = GridSpec::grid_for(80);
@@ -47,14 +48,23 @@ fn test_subagent_running_shows_recent_tool_lines() {
         texts[0]
     );
 
-    // 首列结构：`[outer 空][│][gap][2 格缩进]`（设计文档 §11 层级结构）——
-    // 工具行永远不是独立 entry 首行（不再用 first_prefix），正文起点 = content + 2
+    // 首列结构：`[outer 空][indent 留空][│][gap]`（过程区续行前缀，§4）——工具行
+    // 永远不是独立 entry 首行（不再用 first_prefix）；组头与组内工具行同列
+    // （§5 组内缩进合并为总 `indent`），正文起点 = 过程区前缀宽（col6）
     let sem = THEME_ATOM.state().read().semantic;
     let s = &lines[0].spans;
     assert_eq!(s[0].content, " ", "outer 空列");
-    assert_eq!(s[1].content, "\u{2502}", "续行竖线");
-    assert_eq!(s[2].content, "  ", "gap（80 列 = 2）");
-    assert_eq!(s[3].content, "  ", "2 格缩进 SUBAGENT_TOOL_INDENT");
+    assert_eq!(
+        s[1].content, "  ",
+        "indent 格留空（col1 竖线位让给转场台阶）"
+    );
+    assert_eq!(s[2].content, "\u{2502}", "续行标记竖线");
+    assert_eq!(s[3].content, "  ", "gap 分隔");
+    assert_eq!(
+        s[..4].iter().map(|sp| sp.content.width()).sum::<usize>(),
+        grid.process_prefix_width(),
+        "工具行正文起点 = 过程区前缀宽"
+    );
     // 符号 span（符号 + 分隔空格）dim 色（P2 低显著，对照主时间线 status.running）
     assert_eq!(
         s[4].style.fg,
@@ -116,12 +126,13 @@ fn test_subagent_without_tools_keeps_detail_entry_across_statuses() {
     }
 }
 
-/// Narrow 断点：符号位省略（设计文档 §6 断点表）——`[outer][│][gap=1][2 格缩进]`
-/// 后直接是 Verb，无 braille/✓/× 字符；错误信号由错误词与原因行兜底。
+/// Narrow 断点：符号位省略（设计文档 §6 断点表）——`[outer][│][gap=1]` 后直接是
+/// Verb（<60 列不缩进，§9 前缀回退基准形态），无 braille/✓/× 字符；错误信号由
+/// 错误词与原因行兜底。
 #[test]
 fn test_subagent_tool_line_narrow_omits_symbol() {
     crate::i18n::init(Some("en"));
-    let grid = GridSpec::grid_for(30); // Narrow: gap=1
+    let grid = GridSpec::grid_for(30); // Narrow: indent=0 gap=1
     let running = subagent_group(
         im::Vector::from(vec![TuiRenderUnit::TuiToolCard(tool_card(
             "Read",
@@ -138,8 +149,8 @@ fn test_subagent_tool_line_narrow_omits_symbol() {
     let s = &lines[0].spans;
     assert_eq!(s[0].content, " ", "outer 空列");
     assert_eq!(s[1].content, "\u{2502}", "续行竖线");
-    assert_eq!(s[2].content, " ", "Narrow gap=1");
-    assert_eq!(s[3].content, "  ", "2 格缩进 SUBAGENT_TOOL_INDENT");
+    assert_eq!(s[2].content, " ", "Narrow gap=1（无缩进）");
+    assert_eq!(s[3].content, "Read", "符号位省略后直接是 Verb");
     let text = line_text(&lines[0]);
     assert!(
         !is_running_frame(&text) && !text.contains('✓') && !text.contains('×'),
@@ -217,9 +228,9 @@ fn test_subagent_running_with_failed_tool_shows_reason() {
         "错误词 bold，实际 {:?}",
         failed_span.style
     );
-    // 原因行与工具行同列对齐（`[outer 空][│][gap][2 格缩进]` 前缀）
+    // 原因行与工具行同列对齐（`[outer 空][indent 留空][│][gap]` 前缀）
     assert!(
-        texts[2].starts_with(" \u{2502}    "),
+        texts[2].starts_with("   \u{2502}  "),
         "原因行缩进与工具行对齐，实际 {:?}",
         texts[2]
     );
@@ -284,12 +295,12 @@ fn test_subagent_failed_reason_line_and_completed() {
             .contains("loop failed: llm error"),
         "原因行优先 canonical reason，实际 {text:?}"
     );
-    // 原因行（非 running 分支同样走 cont_prefix + 2 格缩进，与工具行同列）
+    // 原因行（非 running 分支同样走 process_cont_prefix，与工具行同列）
     assert!(
         text.lines()
             .nth(1)
             .unwrap_or("")
-            .starts_with(" \u{2502}    "),
+            .starts_with("   \u{2502}  "),
         "failed 原因行缩进对齐，实际 {text:?}"
     );
 
@@ -484,10 +495,11 @@ fn test_collapsed_group_line_with_failed_count() {
     );
 }
 
-/// Divider：无 label 纯分隔线填满 content 列；有 label 显示 `── label ──`。
+/// Divider 接续左侧竖线，下一行直接是用户正文。
 #[test]
 fn test_divider_lines() {
     let grid = GridSpec::grid_for(80);
+    let sem = THEME_ATOM.state().read().semantic;
     let plain = vm_to_lines(
         &TuiRenderUnit::TuiDivider(TuiDivider {
             label: None,
@@ -496,8 +508,18 @@ fn test_divider_lines() {
         &grid,
     );
     let text = line_text(&plain[0]);
-    assert!(text.contains("\u{2500}"), "divider 线");
-    assert!(text.trim().chars().all(|c| c == '\u{2500}' || c == ' '));
+    assert!(
+        text.starts_with(" \u{251c}\u{2500}\u{2500}"),
+        "实际 {text:?}"
+    );
+    assert!(text.chars().skip(2).all(|c| c == '\u{2500}'));
+    assert_eq!(plain[0].spans[1].style.fg, Some(sem.text.secondary));
+    assert_eq!(
+        plain[0].width(),
+        grid.first_prefix_width() + grid.content_width(),
+        "分隔线铺满文本区正文列"
+    );
+    assert_eq!(plain.len(), 1);
 
     let labeled = vm_to_lines(
         &TuiRenderUnit::TuiDivider(TuiDivider {
@@ -508,6 +530,24 @@ fn test_divider_lines() {
     );
     let text = line_text(&labeled[0]);
     assert!(text.contains("Round 3"), "label 可见");
+
+    let compact = GridSpec::grid_for(50);
+    let rule = vm_to_lines(
+        &TuiRenderUnit::TuiDivider(TuiDivider {
+            label: None,
+            content_hash: 0,
+        }),
+        &compact,
+    );
+    let prompt = vm_to_lines(
+        &TuiRenderUnit::TuiUserBubble(crate::kit::tui_render_unit::TuiUserBubble::new(
+            "next prompt".into(),
+        )),
+        &compact,
+    );
+    assert_eq!(rule.len(), 1, "窄屏横线只占一行");
+    assert!(line_text(&prompt[0]).contains("next prompt"));
+    assert_eq!(rule[0].spans[1].style.fg, prompt[0].spans[1].style.fg);
 }
 
 /// TuiTodoSummary：`◼ {3/7 tasks · Running tests}`。

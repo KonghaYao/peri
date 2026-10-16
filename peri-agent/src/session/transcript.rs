@@ -30,6 +30,11 @@ use peri_acp_types::system_reminder::{ReminderAudience, TrustedSystemReminder};
 
 use persistence::{PersistenceBudget, Reservation};
 
+#[path = "transcript_view.rs"]
+mod view;
+
+pub use view::TranscriptRevision;
+
 /// 待持久化积压默认上限（条数）。
 ///
 /// 覆盖 channel 队列 + writer 待批量 + in-flight 批次三处；阈值是保守上界，
@@ -138,6 +143,10 @@ pub struct MessageTranscript {
     session_resources: Option<Arc<dyn SessionResources>>,
     /// 待持久化预算（与 writer 共享）：条数/字节有界，预留失败即 sticky 失败。
     budget: Option<Arc<PersistenceBudget>>,
+    /// 实例身份（见 [`TranscriptRevision`]）
+    view_instance: u64,
+    /// 内容修订号（见 [`TranscriptRevision`]）
+    view_revision: u64,
 }
 
 impl std::fmt::Debug for MessageTranscript {
@@ -182,6 +191,8 @@ impl MessageTranscript {
             compaction_commit_state: CompactionCommitState::default(),
             session_resources: None,
             budget: None,
+            view_instance: view::next_instance_id(),
+            view_revision: 0,
         }
     }
 
@@ -194,6 +205,7 @@ impl MessageTranscript {
         };
         self.id_index.insert(entry.id(), self.entries.len());
         self.entries.push(entry);
+        self.bump_view_revision();
     }
 
     /// 装载主 Agent 已持久化的历史，保持为可压缩的自有消息。
@@ -230,6 +242,7 @@ impl MessageTranscript {
             self.entries.push(TranscriptEntry::Message(msg.clone()));
         }
         self.ancestor_len = len;
+        self.bump_view_revision();
         self
     }
 
@@ -287,6 +300,7 @@ impl MessageTranscript {
         self.id_index.insert(id, idx);
         self.entries
             .push(TranscriptEntry::Reminder { id, reminder });
+        self.bump_view_revision();
         self.persist_appended_entry(self.entries[idx].clone());
         id
     }
@@ -306,6 +320,7 @@ impl MessageTranscript {
         self.id_index.insert(id, idx);
         self.entries
             .push(TranscriptEntry::Reminder { id, reminder });
+        self.bump_view_revision();
         true
     }
 
@@ -323,33 +338,6 @@ impl MessageTranscript {
             self.thread_id.as_ref()?.clone(),
             self.persist_tx_handle(),
         ))
-    }
-
-    /// 获取所有**可见**消息的 owned Arc 快照（跳过 excluded 标记的消息）
-    ///
-    /// 用于在事件边界（如 `RenderEvent::TurnCompleted`）向 TUI/ACP 消费方传递
-    /// 权威 transcript 快照。这是客户端出口：只有声明
-    /// [`ReminderAudience::Tui`] 的 canonical reminder 进入快照，Model-only 内容
-    /// （如 recall）不得出现在客户端 wire 上。
-    ///
-    /// **注意**：构建快照时仍会逐条深拷贝消息本体（需要过滤 excluded 并取得
-    /// 独立所有权，无法与内部 `entries` 直接共享）；Arc 只保证快照在后续
-    /// 事件管道多级传递时不再被重复深拷贝。
-    pub fn visible_snapshot(&self) -> Arc<Vec<BaseMessage>> {
-        let filtered: Vec<BaseMessage> = self
-            .entries
-            .iter()
-            .filter(|entry| {
-                let f = self.flags.get(&entry.id());
-                match f {
-                    None => true,
-                    Some(flags) => !flags.excluded,
-                }
-            })
-            .filter(|entry| entry.visible_to(ReminderAudience::Tui))
-            .map(|entry| entry.project_message().expect("validated transcript entry"))
-            .collect();
-        Arc::new(filtered)
     }
 
     pub fn with_compaction_commit_state(mut self, state: CompactionCommitState) -> Self {
@@ -384,20 +372,6 @@ impl MessageTranscript {
         Some(&self.entries[idx + 1..])
     }
 
-    /// 获取消息标记（无标记时返回默认值）
-    pub fn flags(&self, id: MessageId) -> MessageFlags {
-        self.flags.get(&id).cloned().unwrap_or_default()
-    }
-
-    /// 按 id 获取消息标记，消息不存在时返回 None
-    ///
-    /// 与 `flags()` 不同：此方法先确认 id 存在于索引表中，
-    /// 不存在则返回 `None`（而非返回默认标记）。
-    pub fn get_flags(&self, id: MessageId) -> Option<MessageFlags> {
-        self.id_index.get(&id)?;
-        Some(self.flags(id))
-    }
-
     /// 祖先消息数量
     pub fn ancestor_len(&self) -> usize {
         self.ancestor_len
@@ -424,6 +398,7 @@ impl MessageTranscript {
         let idx = self.entries.len();
         self.id_index.insert(id, idx);
         self.entries.push(TranscriptEntry::Message(message));
+        self.bump_view_revision();
         // 异步持久化（先同步预留额度；无法预留时只留 sticky 失败，不假装已保存）
         self.persist_appended_entry(self.entries[idx].clone());
         id
@@ -440,6 +415,9 @@ impl MessageTranscript {
             ids.push(id);
             self.persist_appended_entry(self.entries[idx].clone());
         }
+        if !ids.is_empty() {
+            self.bump_view_revision();
+        }
         ids
     }
 
@@ -450,6 +428,8 @@ impl MessageTranscript {
     pub fn replace_by_id(&mut self, message: BaseMessage) {
         if let Some(&idx) = self.id_index.get(&message.id()) {
             self.entries[idx] = TranscriptEntry::Message(message);
+            // 同长度替换同样改变模型可见内容，必须递增修订号
+            self.bump_view_revision();
         }
     }
 
@@ -500,6 +480,7 @@ impl MessageTranscript {
             self.entries.push(TranscriptEntry::Message(tool_result));
             self.persist_appended_entry(self.entries[idx].clone());
         }
+        self.bump_view_revision();
     }
 
     /// 丢弃暂存数据（Cancel/Error 时调用）
@@ -531,6 +512,7 @@ impl MessageTranscript {
             return;
         }
         self.flags.entry(id).or_default().truncated = value;
+        self.bump_view_revision();
         let flags = self.flags[&id].clone();
         self.persist_flags(id, flags);
     }
@@ -541,6 +523,7 @@ impl MessageTranscript {
             return;
         }
         self.flags.entry(id).or_default().excluded = value;
+        self.bump_view_revision();
         let flags = self.flags[&id].clone();
         self.persist_flags(id, flags);
     }
@@ -557,6 +540,7 @@ impl MessageTranscript {
         let existing = self.flags.get(&id).cloned().unwrap_or_default();
         let flags = history::flags_with_projection(&existing, directive);
         self.flags.insert(id, flags.clone());
+        self.bump_view_revision();
         self.persist_flags(id, flags);
     }
 
@@ -566,6 +550,7 @@ impl MessageTranscript {
             return;
         }
         self.flags.remove(&id);
+        self.bump_view_revision();
         self.persist_flags(id, MessageFlags::default());
     }
 
@@ -573,10 +558,15 @@ impl MessageTranscript {
     ///
     /// 仅插入非默认标记，不触发持久化（持久化已有完整 flags 数据）。
     pub fn set_flags_batch(&mut self, batch: std::collections::HashMap<MessageId, MessageFlags>) {
+        let mut changed = false;
         for (id, flags) in batch {
             if flags != MessageFlags::default() {
                 self.flags.insert(id, flags);
+                changed = true;
             }
+        }
+        if changed {
+            self.bump_view_revision();
         }
     }
 
@@ -708,6 +698,7 @@ impl MessageTranscript {
             self.id_index.insert(id, idx);
             self.entries.push(TranscriptEntry::Message(message.clone()));
         }
+        self.bump_view_revision();
     }
 
     // ── 重建 ──────────────────────────────────────────────────────────────────
@@ -744,6 +735,9 @@ impl MessageTranscript {
             compaction_commit_state: self.compaction_commit_state.clone(),
             session_resources: self.session_resources.take(),
             budget: self.budget.take(),
+            view_instance: self.view_instance,
+            // 重建整体替换内容：修订号必须前进（旧视图一律失效）
+            view_revision: self.view_revision.wrapping_add(1),
         }
     }
 
@@ -784,6 +778,7 @@ impl MessageTranscript {
             self.id_index.remove(rid);
             self.flags.remove(rid);
         }
+        self.bump_view_revision();
 
         // 异步持久化 rewind（保留目标本身的 KeepThrough 边界）
         if let Some(reserved) = self.reserve_persistence(Reservation::marker(1)) {

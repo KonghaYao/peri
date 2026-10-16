@@ -223,18 +223,24 @@ impl BackgroundTaskRegistry {
         }
     }
 
+    /// 取任务投影快照。
+    ///
+    /// `revision` 与记录副本在同一锁区取出，保证两者来自同一时点；排序在锁外
+    /// 进行，避免持锁期间做 O(n log n) 排序阻塞注册 / 完成路径。
     pub fn snapshot(&self) -> TaskSnapshot {
-        let projection = self.projection.lock();
-        let mut tasks: Vec<TaskRecord> = projection.records.values().cloned().collect();
+        let (revision, mut tasks): (u64, Vec<TaskRecord>) = {
+            let projection = self.projection.lock();
+            (
+                projection.revision,
+                projection.records.values().cloned().collect(),
+            )
+        };
         tasks.sort_by(|a, b| {
             a.started_at
                 .cmp(&b.started_at)
                 .then_with(|| a.task_id.cmp(&b.task_id))
         });
-        TaskSnapshot {
-            revision: projection.revision,
-            tasks,
-        }
+        TaskSnapshot { revision, tasks }
     }
 
     pub(super) fn projection_status(&self, task_id: &str) -> Option<String> {

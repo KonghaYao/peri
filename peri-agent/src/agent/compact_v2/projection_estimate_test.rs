@@ -196,7 +196,7 @@ fn duplicate_or_conflicting_tool_result_actions_fail_closed_for_render_and_estim
             ..Default::default()
         };
         let rendered =
-            render_llm_view(&transcript, &plan, &ProviderCapabilities::default()).unwrap();
+            render_llm_view(&transcript, &plan.actions, &ProviderCapabilities::default()).unwrap();
         assert_eq!(rendered[1].content(), "x".repeat(600));
         assert_eq!(estimate_projection_chars(&transcript, &actions), (0, 0));
     }

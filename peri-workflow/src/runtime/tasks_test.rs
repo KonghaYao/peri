@@ -439,6 +439,95 @@ fn for_agent_filters_within_run() {
 }
 
 #[test]
+fn count_for_run_separates_active_states_and_runs() {
+    let (table, _rx) = make_table();
+    table.publish("t-1".into(), make_params("run-1", 1));
+    table.publish("t-2".into(), make_params("run-1", 2));
+    table.publish("t-3".into(), make_params("run-1", 3));
+    table.publish("t-4".into(), make_params("run-2", 1));
+    assert!(matches!(
+        table.mark_executing("run-1", "t-2", CancellationToken::new()),
+        ClaimOutcome::Claimed(_)
+    ));
+    assert!(matches!(
+        table.settle(
+            "run-1",
+            "t-3",
+            SettleAdmission::AnyActive,
+            WorkflowTaskState::Completed,
+            Some(ok_result()),
+            None
+        ),
+        SettleOutcome::Settled(_)
+    ));
+
+    assert_eq!(
+        table.active_count_for_run("run-1"),
+        2,
+        "未终态计数含 published 与 executing"
+    );
+    assert_eq!(
+        table.executing_count_for_run("run-1"),
+        1,
+        "执行中计数只含 executing"
+    );
+    assert_eq!(table.active_count_for_run("run-2"), 1, "计数按 run 隔离");
+    assert_eq!(table.executing_count_for_run("run-2"), 0);
+    assert_eq!(table.active_count_for_run("missing"), 0, "未知 run 计 0");
+    assert_eq!(table.executing_count_for_run("missing"), 0);
+}
+
+#[test]
+fn counts_survive_retention_eviction_of_terminal_tasks() {
+    let (table, _rx) = make_table();
+    table.publish("t-1".into(), make_params("run-1", 1));
+    table.settle(
+        "run-1",
+        "t-1",
+        SettleAdmission::AnyActive,
+        WorkflowTaskState::Cancelled,
+        None,
+        Some("killed".into()),
+    );
+    table.publish("t-2".into(), make_params("run-1", 2));
+    assert!(matches!(
+        table.mark_executing("run-1", "t-2", CancellationToken::new()),
+        ClaimOutcome::Claimed(_)
+    ));
+    assert_eq!(table.active_count_for_run("run-1"), 1);
+    assert_eq!(table.executing_count_for_run("run-1"), 1);
+
+    // 保留窗口之后：终态任务被淘汰，活跃任务永不淘汰（计数口径不变）。
+    table.trim_at(now_ms() + TASK_RETENTION_MS);
+    assert_eq!(
+        table.active_count_for_run("run-1"),
+        1,
+        "终态任务淘汰不改变未终态计数"
+    );
+    assert_eq!(
+        table.executing_count_for_run("run-1"),
+        1,
+        "活跃任务不被淘汰，执行中计数保留"
+    );
+
+    // 最后一个任务结算并过期后计数归零（order 与 tasks 同步淘汰）。
+    assert!(matches!(
+        table.settle(
+            "run-1",
+            "t-2",
+            SettleAdmission::ExecutingOnly,
+            WorkflowTaskState::Completed,
+            Some(ok_result()),
+            None
+        ),
+        SettleOutcome::Settled(_)
+    ));
+    table.trim_at(now_ms() + TASK_RETENTION_MS * 2);
+    assert_eq!(table.active_count_for_run("run-1"), 0);
+    assert_eq!(table.executing_count_for_run("run-1"), 0);
+}
+
+#[test]
 fn terminal_state_helpers() {
     assert!(!WorkflowTaskState::Published.is_terminal());
     assert!(!WorkflowTaskState::Executing.is_terminal());

@@ -36,6 +36,7 @@ pub(super) const DISCOVERY: &str = r#"{"root":"/tmp","common_dir":null,"private_
 pub(super) struct SqliteTransport {
     pub(super) pool: SqlitePool,
     pub(super) writes: AtomicUsize,
+    pub(super) read_batches: AtomicUsize,
     fail_column_drop: AtomicBool,
     fail_recovery_drop: AtomicBool,
     change_schema: AtomicBool,
@@ -57,6 +58,7 @@ impl SqliteTransport {
         Self {
             pool,
             writes: AtomicUsize::new(0),
+            read_batches: AtomicUsize::new(0),
             fail_column_drop: AtomicBool::new(false),
             fail_recovery_drop: AtomicBool::new(false),
             change_schema: AtomicBool::new(false),
@@ -185,6 +187,7 @@ impl RemoteTransport for SqliteTransport {
         &self,
         statements: Vec<StatementSpec>,
     ) -> turso_serverless::Result<Vec<Vec<Vec<Value>>>> {
+        self.read_batches.fetch_add(1, Ordering::SeqCst);
         let mut connection = self.pool.acquire().await.map_err(error_of)?;
         let mut transaction = connection
             .begin_with("BEGIN DEFERRED")
@@ -192,6 +195,11 @@ impl RemoteTransport for SqliteTransport {
             .map_err(error_of)?;
         let mut results = Vec::new();
         for statement in statements {
+            if statement.sql.contains("FROM pragma_table_xinfo") {
+                return Err(SdkError::Error(
+                    "v1 Hrana does not support table-valued pragma_table_xinfo".into(),
+                ));
+            }
             let rows = query(&statement)
                 .fetch_all(&mut *transaction)
                 .await
@@ -282,6 +290,7 @@ impl Fixture {
         let transport = Arc::new(SqliteTransport {
             pool,
             writes: AtomicUsize::new(0),
+            read_batches: AtomicUsize::new(0),
             fail_column_drop: AtomicBool::new(false),
             fail_recovery_drop: AtomicBool::new(false),
             change_schema: AtomicBool::new(false),

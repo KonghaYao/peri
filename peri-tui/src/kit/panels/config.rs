@@ -4,118 +4,45 @@
 //! write + 调用 config::save_effective 持久化到当前生效层（全局或工作区，
 //! 路径决策由 ConfigSource 加载时确定）。permission_mode
 //! 经 session/set_mode 修改当前会话运行权限，不写宿主持久配置。
+//!
+//! 职责划分：本文件是组件外壳（hooks、事件注册、渲染窗口）；行模型与行显示在
+//! [`rows`]，写入与保存边界在 [`actions`]。两边都以行模型的下标为身份。
+
+mod actions;
+mod rows;
+
+use self::actions::*;
+use self::rows::*;
 
 use crate::app::panel_types::PanelKind;
-use crate::config::TuiConfig;
 use crate::i18n;
-use crate::kit::atoms::{
-    LANG_VERSION, NOTIFICATION, Notification, PERI_CONFIG_HANDLE, PERMISSION_MODE_HANDLE,
-    TUI_CONFIG_HANDLE,
-};
+use crate::kit::atoms::{LANG_VERSION, SERVICE_SNAPSHOT};
 use crate::kit::list_nav::{next_selection, previous_selection};
-use crate::kit::panel_mouse::{AreaTracker, ListLayout, hit_item, is_scrollbar_column};
-use fluent_bundle::FluentValue;
-use peri_acp_types::beta_flags::BETA_FLAGS;
-use peri_acp_types::permission::PermissionMode;
+use crate::kit::panel_mouse::{AreaTracker, hit_item, is_scrollbar_column};
+use crate::kit::panels::shared::list::{ListMetrics, ListViewport, content_rows};
 use peri_theme::atoms::THEME_ATOM;
 use ratatui_kit::{
     crossterm::event::{Event, KeyCode, KeyEventKind, MouseButton, MouseEventKind},
     prelude::*,
     ratatui::{
-        layout::Constraint,
+        layout::{Constraint, Rect},
         style::{Style, Stylize},
         text::{Line, Span},
         widgets::Paragraph,
     },
 };
-use std::time::Duration;
 
-// ---------------------------------------------------------------------------
-// Row type
-// ---------------------------------------------------------------------------
-
-#[derive(Clone)]
-enum RowType {
-    Toggle,
-    Cycle(&'static [&'static str]),
-}
-
-// ---------------------------------------------------------------------------
-// 配置行——每行绑定 PeriConfig 或 SharedPermissionMode 的真实字段
-// ---------------------------------------------------------------------------
-
-const ROW_SHOW_DIFF: usize = 0;
-const ROW_CACHE_WARN: usize = 1;
-const ROW_STREAMING: usize = 2;
-const ROW_1M_CONTEXT: usize = 3;
-const ROW_LANGUAGE: usize = 4;
-const ROW_ACTIVE_ALIAS: usize = 5;
-const ROW_PERMISSION_MODE: usize = 6;
-const ROW_SCROLL_FPS: usize = 7;
-
-const STREAMING_OPTS: &[&str] = &["streaming", "block", "none"];
-const LANGUAGE_OPTS: &[&str] = &["en", "zh-CN"];
-const ALIAS_OPTS: &[&str] = &["fable", "opus", "sonnet", "haiku"];
-const PERMISSION_OPTS: &[&str] = &["default", "accept-edit", "auto-mode", "bypass"];
-const FPS_OPTS: &[&str] = &["60", "30", "20"];
-
-const CONFIG_ROWS: &[(&str, RowType)] = &[
-    ("config-field-diff", RowType::Toggle),
-    ("config-field-cache-warning", RowType::Toggle),
-    ("config-field-streaming", RowType::Cycle(STREAMING_OPTS)),
-    ("config-field-1m-context", RowType::Toggle),
-    ("config-field-language", RowType::Cycle(LANGUAGE_OPTS)),
-    ("config-field-active-alias", RowType::Cycle(ALIAS_OPTS)),
-    (
-        "config-field-permission-mode",
-        RowType::Cycle(PERMISSION_OPTS),
-    ),
-    ("config-field-scroll-fps", RowType::Cycle(FPS_OPTS)),
-];
-
-// ─── 行模型：基础行 + 注册表驱动的 beta flag 区块 ────────────────────────────
-//
-// 基础行仍是静态表；beta flag 区块按注册表顺序（`BETA_FLAGS`）逐条渲染 Toggle 行。
-// 区块标题行也是行模型的一员（不可激活），使「每项一行」的命中契约（滚动 / 鼠标点击）
-// 与既有面板能力保持一致。
-
-/// 行模型的单行。
-#[derive(Clone, Copy, PartialEq, Eq, Debug)]
-enum ConfigRow {
-    /// 基础行（`CONFIG_ROWS` 索引）。
-    Base(usize),
-    /// beta 区块标题行：承载「新会话生效」标注，不可激活。
-    BetaSection,
-    /// 注册表条目（索引指向 `BETA_FLAGS`）：Toggle 行。
-    BetaFlag(usize),
-}
-
-/// 当前行模型（注册表为空时不渲染空区块）。
-fn config_rows() -> Vec<ConfigRow> {
-    let mut rows: Vec<ConfigRow> = (0..CONFIG_ROWS.len()).map(ConfigRow::Base).collect();
-    if !BETA_FLAGS.is_empty() {
-        rows.push(ConfigRow::BetaSection);
-        rows.extend((0..BETA_FLAGS.len()).map(ConfigRow::BetaFlag));
-    }
-    rows
-}
-
-/// beta flag 行的描述：优先 i18n key `beta-desc-<id>`，缺失回退注册表 canonical 文本。
+/// 列表行度量：header 2 行（标题、空行）+ 每行 1 行 + footer 2 行（空行、导航提示）。
 ///
-/// `i18n::tr` 未命中时原样返回 key（见 `i18n::format_key`），据此判定缺失。
-fn beta_description(id: &str, canonical: &str) -> String {
-    let key = format!("beta-desc-{id}");
-    let translated = i18n::tr(&key);
-    if translated == key {
-        canonical.to_string()
-    } else {
-        translated
-    }
-}
+/// 渲染与鼠标命中都取自本度量推导出的同一 `ListViewport`；此前命中布局用
+/// `visible_items = 整表行数, scroll_start = 0`，与渲染各算一份。
+const LIST_METRICS: ListMetrics = ListMetrics::new(2, 1, 2);
 
 #[component]
 pub fn ConfigPanel(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
-    hooks.use_atom(&crate::kit::atoms::SERVICE_SNAPSHOT);
+    // hooks 全部无条件前置（TUI-HOOK-001）：这里到事件注册之间不得出现条件分支或
+    // 提前 return——渲染路径变化时 hook 数量与类型必须一致。
+    hooks.use_atom(&SERVICE_SNAPSHOT);
     let theme_def = hooks.use_atom(&THEME_ATOM);
     let cursor = hooks.use_state(|| 0usize);
     // 外部滚动状态——面板滚轮仲裁（panel_scroll.rs）驱动，统一 3 行/格 + 节流
@@ -125,89 +52,46 @@ pub fn ConfigPanel(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
     let bump = hooks.use_state(|| 0u32);
     let _lang_ver = hooks.use_atom(&LANG_VERSION);
 
-    // 面板绘制区域（上一帧）——鼠标点击行号反推
-    let area;
-    {
-        let tracker = hooks.use_hook(AreaTracker::new);
-        area = tracker.rect;
-    }
+    // 面板绘制区域（上一帧）——鼠标行号反推与滚轮仲裁注册共用这一份区域。
+    let area = hooks.use_hook(AreaTracker::new).rect;
     let rows = config_rows();
     let row_count = rows.len();
+
+    // 列表视口：绘制（window）与鼠标命中（hit_layout）共用同一实例，可见行数由
+    // 面板内容区行数推导——终端/面板高度变化后两者一起变化。
+    let (_term_w, term_h) = hooks.use_terminal_size();
+    let viewport = ListViewport::for_content_rows(
+        content_rows(area, term_h),
+        LIST_METRICS,
+        row_count,
+        *cursor.read(),
+    );
 
     hooks.use_event_handler_with_options(
         EventScope::Current,
         EventPriority::Normal,
         EventOptions { hit_test: true },
-        {
-            move |event| {
-                // 鼠标：区域内左键点击 = 选中该项并执行 Enter 动作（click as enter）
-                if let Event::Mouse(mouse) = event {
-                    if let Some(area) = area
-                        && !is_scrollbar_column(&mouse, area)
-                        && let Some(idx) = hit_item(
-                            &mouse,
-                            area,
-                            ListLayout {
-                                header_rows: 2,
-                                item_rows: 1,
-                                footer_rows: 2,
-                                visible_items: row_count as u16,
-                                scroll_start: 0,
-                                item_count: row_count,
-                            },
-                        )
-                    {
-                        *cursor.write() = idx;
-                        activate_row(idx, true);
-                        *bump.write() += 1;
-                        return EventResult::Consumed;
-                    }
-                    return match mouse.kind {
-                        MouseEventKind::Down(MouseButton::Left) => EventResult::Consumed,
-                        _ => EventResult::Ignored,
-                    };
-                }
-                let Event::Key(key) = event else {
-                    return EventResult::Ignored;
-                };
-                if key.kind != KeyEventKind::Press {
-                    return EventResult::Ignored;
-                }
-                let sel = *cursor.read();
-
-                match key.code {
-                    KeyCode::Esc => {
-                        close_panel();
-                    }
-                    KeyCode::Up => {
-                        *cursor.write() = previous_selection(sel);
-                    }
-                    KeyCode::Down => {
-                        *cursor.write() = next_selection(sel, row_count);
-                    }
-                    KeyCode::Char(' ') | KeyCode::Enter => {
-                        activate_row(sel, true);
-                        *bump.write() += 1;
-                    }
-                    KeyCode::Left => {
-                        activate_row(sel, false);
-                        *bump.write() += 1;
-                    }
-                    KeyCode::Right => {
-                        activate_row(sel, true);
-                        *bump.write() += 1;
-                    }
-                    _ => {}
-                }
-                EventResult::Consumed
-            }
+        move |event| {
+            handle_config_event(
+                event,
+                &ConfigEventCtx {
+                    area,
+                    cursor,
+                    bump,
+                    viewport,
+                    row_count,
+                },
+            )
         },
     );
+
+    #[cfg(test)]
+    tests::visit_mounted_panel(tests::MountedPanel { cursor, bump });
 
     // 读取 bump 强制 ratatui-kit 把这个值当作依赖（无此 read 调用则不会重渲染）
     let _ = *bump.read();
 
-    // ---- Render ----
+    // ---- Render ----（只读状态：TUI-RENDER-001，写状态只在事件与 effect 边界）
     let sel = *cursor.read();
     let mut lines: Vec<Line<'_>> = Vec::new();
 
@@ -219,108 +103,10 @@ pub fn ConfigPanel(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
     )]));
     lines.push(Line::from(""));
 
-    for (i, row) in rows.iter().enumerate() {
-        let is_active = i == sel;
-        let cursor_mark = if is_active { "> " } else { "  " };
-        let label_style = if is_active {
-            Style::new()
-                .fg(theme_def.read().component.panel.title)
-                .bold()
-        } else {
-            Style::new().fg(theme_def.read().semantic.text.primary)
-        };
-
-        // beta 区块标题行：不可激活，只承载「新会话生效」标注。
-        if let ConfigRow::BetaSection = row {
-            lines.push(Line::from(vec![
-                Span::styled(cursor_mark, Style::new()),
-                Span::styled(
-                    i18n::tr("config-beta-section"),
-                    Style::new()
-                        .fg(theme_def.read().semantic.text.muted)
-                        .italic(),
-                ),
-            ]));
-            continue;
-        }
-
-        // beta flag 行：注册表 id + 当前生效层覆盖值 + 描述（i18n 优先）。
-        if let ConfigRow::BetaFlag(flag_index) = row {
-            let flag = &BETA_FLAGS[*flag_index];
-            let val = read_beta_toggle(flag.id);
-            let (on_text, off_text) = toggle_texts(val);
-            let (on_style, off_style) = toggle_styles(&theme_def.read(), val);
-            lines.push(Line::from(vec![
-                Span::styled(
-                    cursor_mark,
-                    Style::new().fg(theme_def.read().component.panel.title),
-                ),
-                Span::styled(format!("{:<22}", flag.id), label_style),
-                Span::styled(on_text, on_style),
-                Span::styled(" ", Style::new()),
-                Span::styled(off_text, off_style),
-                Span::styled(
-                    format!("  {}", beta_description(flag.id, flag.description)),
-                    Style::new().fg(theme_def.read().semantic.text.dim),
-                ),
-            ]));
-            continue;
-        }
-
-        let ConfigRow::Base(base_row) = row else {
-            continue;
-        };
-        let (label, row_type) = &CONFIG_ROWS[*base_row];
-        let i = *base_row;
-
-        let value_line = match row_type {
-            RowType::Toggle => {
-                let val = read_toggle(i);
-                let (on_text, off_text) = toggle_texts(val);
-                let (on_style, off_style) = toggle_styles(&theme_def.read(), val);
-                Line::from(vec![
-                    Span::styled(
-                        cursor_mark,
-                        Style::new().fg(theme_def.read().component.panel.title),
-                    ),
-                    Span::styled(format!("{:<22}", i18n::tr(label)), label_style),
-                    Span::styled(on_text, on_style),
-                    Span::styled(" ", Style::new()),
-                    Span::styled(off_text, off_style),
-                ])
-            }
-            RowType::Cycle(options) => {
-                let idx = read_cycle_idx(i, options);
-                let mut spans = vec![
-                    Span::styled(
-                        cursor_mark,
-                        Style::new().fg(theme_def.read().component.panel.title),
-                    ),
-                    Span::styled(format!("{:<22}", i18n::tr(label)), label_style),
-                ];
-                for (j, opt) in options.iter().enumerate() {
-                    let label = cycle_display_label(opt);
-                    if j == idx {
-                        spans.push(Span::styled(
-                            format!("[{}]", label),
-                            Style::new()
-                                .fg(theme_def.read().semantic.status.success)
-                                .bold(),
-                        ));
-                    } else {
-                        spans.push(Span::styled(
-                            format!(" {}", label),
-                            Style::new().fg(theme_def.read().semantic.text.muted),
-                        ));
-                    }
-                    if j < options.len() - 1 {
-                        spans.push(Span::styled(" ", Style::new()));
-                    }
-                }
-                Line::from(spans)
-            }
-        };
-        lines.push(value_line);
+    // 只渲染视口窗口内的行——面板矮于行数时窗口跟随选中项滚动，
+    // 鼠标命中（`hit_layout`）看到的是同一窗口。
+    for (i, row) in viewport.window(&rows) {
+        lines.push(build_row_line(*row, i == sel, &theme_def.read()));
     }
 
     // Footer hints — use single i18n key for consistency
@@ -330,10 +116,11 @@ pub fn ConfigPanel(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
 
     let content = Paragraph::new(ratatui::text::Text::from(lines));
 
-    // 面板滚轮仲裁注册（每帧覆盖写入，area 用上一帧组件区域）
+    // 面板滚轮仲裁注册（每帧覆盖写入；区域与列表命中同源，均取 AreaTracker 的上一帧
+    // 区域，首帧未测量时为 0 尺寸，下一帧起生效——首帧滚轮不经本面板仲裁）
     crate::kit::panel_scroll::register_panel_scroll(
         PanelKind::Config,
-        hooks.use_previous_size(),
+        area.unwrap_or_default(),
         sv,
     );
 
@@ -349,564 +136,78 @@ pub fn ConfigPanel(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
     })
 }
 
-// ---------------------------------------------------------------------------
-// 真实读写：通过 PERI_CONFIG_HANDLE / PERMISSION_MODE_HANDLE 操作
-// ---------------------------------------------------------------------------
-
-/// ON / OFF 文本对（`[ON] OFF` / ` ON [OFF]`）。
-fn toggle_texts(val: bool) -> (String, String) {
-    let on_label = i18n::tr("config-value-on");
-    let off_label = i18n::tr("config-value-off");
-    if val {
-        (format!("[{}]", on_label), format!(" {}", off_label))
-    } else {
-        (format!(" {}", on_label), format!("[{}]", off_label))
-    }
-}
-
-/// ON / OFF 样式对（生效项高亮绿色，未生效项红色 / 灰）。
-fn toggle_styles(theme_def: &peri_theme::theme::ThemeDefinition, val: bool) -> (Style, Style) {
-    let on_style = if val {
-        Style::new().fg(theme_def.semantic.status.success).bold()
-    } else {
-        Style::new().fg(theme_def.semantic.text.muted)
-    };
-    let off_style = if val {
-        Style::new().fg(theme_def.semantic.text.muted)
-    } else {
-        Style::new().fg(theme_def.semantic.status.error).bold()
-    };
-    (on_style, off_style)
-}
-
-/// beta flag 行的显示值：**合并后**的有效值（未设置与显式 false 均显示为关闭）。
+/// 面板事件处理——判定集中在这里、组件只做注册，测试可经 `tests::mount_panel`
+/// 捕获真实句柄后直接投喂事件（`State<T>` 无公开构造 API）。
 ///
-/// 有效值由权威面按合并规则计算；`PERI_CONFIG_HANDLE` 持有的就是该合并视图，
-/// 面板只按 id 读它，不自行合并来源层。
-fn read_beta_toggle(id: &str) -> bool {
-    PERI_CONFIG_HANDLE
-        .get()
-        .map(|handle| handle.read().config.betas.get(id).unwrap_or(false))
-        .unwrap_or(false)
+/// 鼠标命中与绘制共用 `ctx.viewport`（`hit_layout()` / `window()` 同源）。
+fn handle_config_event(event: Event, ctx: &ConfigEventCtx) -> EventResult {
+    // 鼠标：区域内左键点击 = 选中该项并执行 Enter 动作（click as enter）
+    if let Event::Mouse(mouse) = event {
+        if let Some(area) = ctx.area
+            && !is_scrollbar_column(&mouse, area)
+            && let Some(idx) = hit_item(&mouse, area, ctx.viewport.hit_layout())
+        {
+            *ctx.cursor.write() = idx;
+            activate_row(idx, true);
+            *ctx.bump.write() += 1;
+            return EventResult::Consumed;
+        }
+        return match mouse.kind {
+            MouseEventKind::Down(MouseButton::Left) => EventResult::Consumed,
+            _ => EventResult::Ignored,
+        };
+    }
+    let Event::Key(key) = event else {
+        return EventResult::Ignored;
+    };
+    if key.kind != KeyEventKind::Press {
+        return EventResult::Ignored;
+    }
+    let sel = *ctx.cursor.read();
+
+    match key.code {
+        KeyCode::Esc => {
+            close_panel();
+        }
+        KeyCode::Up => {
+            *ctx.cursor.write() = previous_selection(sel);
+        }
+        KeyCode::Down => {
+            *ctx.cursor.write() = next_selection(sel, ctx.row_count);
+        }
+        KeyCode::Char(' ') | KeyCode::Enter => {
+            activate_row(sel, true);
+            *ctx.bump.write() += 1;
+        }
+        KeyCode::Left => {
+            activate_row(sel, false);
+            *ctx.bump.write() += 1;
+        }
+        KeyCode::Right => {
+            activate_row(sel, true);
+            *ctx.bump.write() += 1;
+        }
+        _ => {}
+    }
+    EventResult::Consumed
 }
 
-/// 切换 beta flag：写当前生效层的 `config.betas[id]` 并经 `save_effective`（CAS）持久化。
+/// 事件处理上下文：本帧视口 + 面板句柄 + 行模型长度。
 ///
-/// 保存失败保持内存视图不变（回滚本次写入）并提示错误——面板始终显示已持久化的值；
-/// 已运行会话不受影响（值随装配冻结，新区块标注「新会话生效」）。
-fn toggle_beta_flag(id: &str) {
-    toggle_beta_flag_with(id, crate::config::save_effective);
-}
-
-/// 切换与持久化本体（保存入口注入，便于测试失败路径）。
-fn toggle_beta_flag_with(
-    id: &str,
-    save: impl FnOnce(&crate::config::PeriConfig) -> anyhow::Result<()>,
-) {
-    let Some(handle) = PERI_CONFIG_HANDLE.get() else {
-        return;
-    };
-    let previous = {
-        let mut cfg = handle.write();
-        let current = cfg.config.betas.get(id).unwrap_or(false);
-        cfg.config.betas.set(id, !current);
-        current
-    };
-    let snapshot = handle.read().clone();
-    match save(&snapshot) {
-        Ok(()) => {
-            *NOTIFICATION.state().write() = Some(Notification {
-                message: i18n::tr("config-saved").to_string(),
-                until: peri_time::monotonic_now() + Duration::from_secs(1),
-            });
-        }
-        Err(error) => {
-            // 保存失败：内存视图回滚到上一次的值（不发布未持久化的开关）。
-            handle.write().config.betas.set(id, previous);
-            *NOTIFICATION.state().write() = Some(Notification {
-                message: i18n::tr_args(
-                    "config-save-failed",
-                    &[(
-                        "error".to_string(),
-                        FluentValue::from(error.to_string().as_str()),
-                    )],
-                ),
-                until: peri_time::monotonic_now() + Duration::from_secs(2),
-            });
-        }
-    }
-}
-
-/// 读取 toggle 字段当前值（true=ON / false=OFF）。
-fn read_toggle(row: usize) -> bool {
-    match row {
-        ROW_SHOW_DIFF => TUI_CONFIG_HANDLE
-            .get()
-            .map(|h| h.read().diff_enabled)
-            .unwrap_or(false),
-        ROW_CACHE_WARN => PERI_CONFIG_HANDLE
-            .get()
-            .map(|h| h.read().config.show_cache_warning.unwrap_or(false))
-            .unwrap_or(false),
-        ROW_1M_CONTEXT => PERI_CONFIG_HANDLE
-            .get()
-            .map(|h| {
-                let c = h.read();
-                c.config
-                    .profiles
-                    .get(&c.config.active_alias)
-                    .map(|p| p.context_1m)
-                    .unwrap_or(false)
-            })
-            .unwrap_or(false),
-        _ => false,
-    }
-}
-
-/// 读取 cycle 字段当前选项索引。
-fn read_cycle_idx(row: usize, options: &[&str]) -> usize {
-    match row {
-        ROW_STREAMING => {
-            let cur = TUI_CONFIG_HANDLE
-                .get()
-                .map(|h| h.read().streaming_mode.clone())
-                .unwrap_or_default()
-                .unwrap_or_else(|| "streaming".to_string());
-            options.iter().position(|o| *o == cur.as_str()).unwrap_or(0)
-        }
-        ROW_LANGUAGE => {
-            let cur = PERI_CONFIG_HANDLE
-                .get()
-                .map(|h| h.read().config.language.clone())
-                .unwrap_or_default()
-                .unwrap_or_else(|| "en".to_string());
-            options.iter().position(|o| *o == cur.as_str()).unwrap_or(0)
-        }
-        ROW_ACTIVE_ALIAS => {
-            let cur = PERI_CONFIG_HANDLE
-                .get()
-                .map(|h| h.read().config.active_alias.clone())
-                .unwrap_or_default();
-            // default sonnet：按名称查找索引，避免 ALIAS_OPTS 顺序变化导致硬编码漂移
-            let default_idx = options.iter().position(|o| *o == "sonnet").unwrap_or(0);
-            if cur.is_empty() {
-                default_idx
-            } else {
-                options
-                    .iter()
-                    .position(|o| *o == cur.as_str())
-                    .unwrap_or(default_idx)
-            }
-        }
-        ROW_PERMISSION_MODE => {
-            let snapshot = crate::kit::atoms::SERVICE_SNAPSHOT
-                .state()
-                .read()
-                .permission_mode
-                .clone();
-            let cur = if snapshot.is_empty() {
-                PERMISSION_MODE_HANDLE
-                    .get()
-                    .map(|mode| permission_mode_label(mode.load()))
-                    .unwrap_or("default")
-                    .to_string()
-            } else {
-                snapshot
-            };
-            options
-                .iter()
-                .position(|option| *option == cur)
-                .unwrap_or(0)
-        }
-        ROW_SCROLL_FPS => {
-            let cur = TUI_CONFIG_HANDLE
-                .get()
-                .map(|h| {
-                    h.read()
-                        .scroll_fps
-                        .map(|fps| fps.to_string())
-                        .unwrap_or_else(|| "20".to_string())
-                })
-                .unwrap_or_else(|| "20".to_string());
-            options.iter().position(|o| *o == cur.as_str()).unwrap_or(0)
-        }
-        _ => 0,
-    }
-}
-
-/// 激活某行：toggle 反转，cycle forward=true 前进 / forward=false 后退。
-///
-/// 行模型分发：基础行沿用既有逐字段写入；beta flag 行写 `config.betas[id]` 并经
-/// `save_effective`（CAS）持久化；区块标题行不可激活。
-fn activate_row(row: usize, forward: bool) {
-    match config_rows().get(row) {
-        Some(ConfigRow::BetaFlag(flag_index)) => toggle_beta_flag(BETA_FLAGS[*flag_index].id),
-        Some(ConfigRow::BetaSection) | None => {}
-        Some(ConfigRow::Base(base_row)) => activate_base_row(*base_row, forward),
-    }
-}
-
-/// 基础行激活（索引 = `CONFIG_ROWS`）。
-fn activate_base_row(row: usize, forward: bool) {
-    let Some(handle) = PERI_CONFIG_HANDLE.get() else {
-        return;
-    };
-    let row_type = &CONFIG_ROWS[row].1;
-    match row_type {
-        RowType::Toggle => {
-            let mut cfg = handle.write();
-            match row {
-                ROW_SHOW_DIFF => {
-                    // TUI field: write to TUI_CONFIG_HANDLE + sync to PeriConfig.extra
-                    drop(cfg);
-                    let tui_handle = TUI_CONFIG_HANDLE.get();
-                    let tui_handle = match tui_handle {
-                        Some(h) => h,
-                        None => return,
-                    };
-                    let mut tui = tui_handle.write();
-                    tui.diff_enabled = !tui.diff_enabled;
-                    let tui_snapshot = tui.clone();
-                    drop(tui);
-                    // sync to PeriConfig.extra and save
-                    let mut peri = handle.write();
-                    tui_snapshot.sync_to_extra(&mut peri.config.extra);
-                    let cfg_snapshot = peri.clone();
-                    drop(peri);
-                    match crate::config::save_effective(&cfg_snapshot) {
-                        Ok(()) => {
-                            *NOTIFICATION.state().write() = Some(Notification {
-                                message: i18n::tr("config-saved").to_string(),
-                                until: peri_time::monotonic_now() + Duration::from_secs(1),
-                            });
-                        }
-                        Err(e) => {
-                            *NOTIFICATION.state().write() = Some(Notification {
-                                message: i18n::tr_args(
-                                    "config-save-failed",
-                                    &[(
-                                        "error".to_string(),
-                                        FluentValue::from(e.to_string().as_str()),
-                                    )],
-                                ),
-                                until: peri_time::monotonic_now() + Duration::from_secs(2),
-                            });
-                        }
-                    }
-                    return;
-                }
-                ROW_CACHE_WARN => {
-                    let cur = cfg.config.show_cache_warning.unwrap_or(false);
-                    cfg.config.show_cache_warning = Some(!cur);
-                }
-                ROW_1M_CONTEXT => {
-                    let alias = cfg.config.active_alias.clone();
-                    if let Some(profile) = cfg.config.profiles.get_mut(&alias) {
-                        profile.context_1m = !profile.context_1m;
-                    }
-                }
-                _ => {}
-            }
-            // drop guard before save（save 借 &cfg）
-            let cfg_snapshot = cfg.clone();
-            drop(cfg);
-            match crate::config::save_effective(&cfg_snapshot) {
-                Ok(()) => {
-                    *NOTIFICATION.state().write() = Some(Notification {
-                        message: i18n::tr("config-saved").to_string(),
-                        until: peri_time::monotonic_now() + Duration::from_secs(1),
-                    });
-                }
-                Err(e) => {
-                    *NOTIFICATION.state().write() = Some(Notification {
-                        message: i18n::tr_args(
-                            "config-save-failed",
-                            &[(
-                                "error".to_string(),
-                                FluentValue::from(e.to_string().as_str()),
-                            )],
-                        ),
-                        until: peri_time::monotonic_now() + Duration::from_secs(2),
-                    });
-                }
-            }
-        }
-        RowType::Cycle(options) => {
-            let cur_idx = read_cycle_idx(row, options);
-            let next = if forward {
-                (cur_idx + 1) % options.len()
-            } else {
-                (cur_idx + options.len() - 1) % options.len()
-            };
-            let new_val = options[next];
-            match row {
-                ROW_STREAMING => {
-                    // TUI field: write to TUI_CONFIG_HANDLE + sync to PeriConfig.extra
-                    let tui_handle = match TUI_CONFIG_HANDLE.get() {
-                        Some(h) => h,
-                        None => return,
-                    };
-                    let mut tui = tui_handle.write();
-                    tui.streaming_mode = Some(new_val.to_string());
-                    let tui_snapshot = tui.clone();
-                    drop(tui);
-                    let mut peri = handle.write();
-                    tui_snapshot.sync_to_extra(&mut peri.config.extra);
-                    let snap = peri.clone();
-                    drop(peri);
-                    match crate::config::save_effective(&snap) {
-                        Ok(()) => {
-                            *NOTIFICATION.state().write() = Some(Notification {
-                                message: i18n::tr("config-saved").to_string(),
-                                until: peri_time::monotonic_now() + Duration::from_secs(1),
-                            });
-                        }
-                        Err(e) => {
-                            *NOTIFICATION.state().write() = Some(Notification {
-                                message: i18n::tr_args(
-                                    "config-save-failed",
-                                    &[(
-                                        "error".to_string(),
-                                        FluentValue::from(e.to_string().as_str()),
-                                    )],
-                                ),
-                                until: peri_time::monotonic_now() + Duration::from_secs(2),
-                            });
-                        }
-                    }
-                }
-                ROW_LANGUAGE => {
-                    let mut cfg = handle.write();
-                    cfg.config.language = Some(new_val.to_string());
-                    let snap = cfg.clone();
-                    drop(cfg);
-                    match crate::config::save_effective(&snap) {
-                        Ok(()) => {
-                            *NOTIFICATION.state().write() = Some(Notification {
-                                message: i18n::tr("config-saved").to_string(),
-                                until: peri_time::monotonic_now() + Duration::from_secs(1),
-                            });
-                        }
-                        Err(e) => {
-                            *NOTIFICATION.state().write() = Some(Notification {
-                                message: i18n::tr_args(
-                                    "config-save-failed",
-                                    &[(
-                                        "error".to_string(),
-                                        FluentValue::from(e.to_string().as_str()),
-                                    )],
-                                ),
-                                until: peri_time::monotonic_now() + Duration::from_secs(2),
-                            });
-                        }
-                    }
-                    // i18n: 语言切换时重建 LcRegistry 并递增版本号，触发所有组件重渲染
-                    crate::i18n::switch(new_val);
-                }
-                ROW_ACTIVE_ALIAS => {
-                    let mut cfg = handle.write();
-                    cfg.config.active_alias = new_val.to_string();
-                    let snap = cfg.clone();
-                    drop(cfg);
-                    match crate::config::save_effective(&snap) {
-                        Ok(()) => {
-                            *NOTIFICATION.state().write() = Some(Notification {
-                                message: i18n::tr("config-saved").to_string(),
-                                until: peri_time::monotonic_now() + Duration::from_secs(1),
-                            });
-                        }
-                        Err(e) => {
-                            *NOTIFICATION.state().write() = Some(Notification {
-                                message: i18n::tr_args(
-                                    "config-save-failed",
-                                    &[(
-                                        "error".to_string(),
-                                        FluentValue::from(e.to_string().as_str()),
-                                    )],
-                                ),
-                                until: peri_time::monotonic_now() + Duration::from_secs(2),
-                            });
-                        }
-                    }
-                }
-                ROW_PERMISSION_MODE => {
-                    if let Some(mode) = parse_permission_mode(new_val) {
-                        crate::kit::permission_mode::request(permission_mode_label(mode));
-                    }
-                }
-                ROW_SCROLL_FPS => {
-                    // TUI field: write to TUI_CONFIG_HANDLE + sync to PeriConfig.extra
-                    let tui_handle = match TUI_CONFIG_HANDLE.get() {
-                        Some(h) => h,
-                        None => return,
-                    };
-                    let mut tui = tui_handle.write();
-                    tui.scroll_fps = Some(new_val.parse::<u32>().unwrap_or(20));
-                    let tui_snapshot = tui.clone();
-                    drop(tui);
-                    let mut peri = handle.write();
-                    tui_snapshot.sync_to_extra(&mut peri.config.extra);
-                    let snap = peri.clone();
-                    drop(peri);
-                    match crate::config::save_effective(&snap) {
-                        Ok(()) => {
-                            *NOTIFICATION.state().write() = Some(Notification {
-                                message: i18n::tr("config-saved").to_string(),
-                                until: peri_time::monotonic_now() + Duration::from_secs(1),
-                            });
-                        }
-                        Err(e) => {
-                            *NOTIFICATION.state().write() = Some(Notification {
-                                message: i18n::tr_args(
-                                    "config-save-failed",
-                                    &[(
-                                        "error".to_string(),
-                                        FluentValue::from(e.to_string().as_str()),
-                                    )],
-                                ),
-                                until: peri_time::monotonic_now() + Duration::from_secs(2),
-                            });
-                        }
-                    }
-                }
-                _ => {}
-            }
-        }
-    }
-}
-
-/// 将 cycle 选项的内部值转换为 i18n 展示文本。
-/// 对于 streaming/language 选项走 i18n 翻译；alias/permission 等暂保持原样。
-fn cycle_display_label(opt: &str) -> String {
-    match opt {
-        "streaming" => i18n::tr("config-streaming-value-streaming").to_string(),
-        "block" => i18n::tr("config-streaming-value-block").to_string(),
-        "none" => i18n::tr("config-streaming-value-none").to_string(),
-        "en" => i18n::tr("config-language-value-en").to_string(),
-        "zh-CN" => i18n::tr("config-language-value-zh").to_string(),
-        "60" => i18n::tr("config-fps-value-60").to_string(),
-        "30" => i18n::tr("config-fps-value-30").to_string(),
-        "20" => i18n::tr("config-fps-value-20").to_string(),
-        other => other.to_string(),
-    }
+/// `State<T>` 无公开构造 API，只能从组件挂载取得；集中成一个结构体，事件入口
+/// 签名不再随状态/视口增长（渲染、鼠标命中与滚轮仲裁必须共用同一份区域与视口）。
+struct ConfigEventCtx {
+    area: Option<Rect>,
+    cursor: State<usize>,
+    bump: State<u32>,
+    viewport: ListViewport,
+    /// 行模型长度（行模型由静态表派生，长度即键盘导航的上界）
+    row_count: usize,
 }
 
 fn close_panel() {
     // I19-A: 弹栈而非清空整个栈，避免同时打开多个不同组面板时关闭一个会全部关闭
     crate::kit::panel_registry::close_active_panel();
-}
-
-fn permission_mode_label(m: PermissionMode) -> &'static str {
-    match m {
-        PermissionMode::Default => "default",
-        PermissionMode::AcceptEdit => "accept-edit",
-        PermissionMode::AutoMode => "auto-mode",
-        PermissionMode::Bypass => "bypass",
-    }
-}
-
-/// 纯函数：toggle 行的值反转。返回反转后的新值（无效 row 返回 None）。
-/// 仅处理 PeriConfig 上的非 TUI 字段。
-#[allow(dead_code)]
-fn apply_toggle_row(cfg: &mut crate::config::PeriConfig, row: usize) -> Option<bool> {
-    let new_val = match row {
-        ROW_CACHE_WARN => {
-            let cur = cfg.config.show_cache_warning.unwrap_or(false);
-            cfg.config.show_cache_warning = Some(!cur);
-            !cur
-        }
-        ROW_1M_CONTEXT => {
-            let alias = cfg.config.active_alias.clone();
-            cfg.config
-                .profiles
-                .get_mut(&alias)
-                .map(|p| {
-                    p.context_1m = !p.context_1m;
-                    p.context_1m
-                })
-                .unwrap_or(false)
-        }
-        _ => return None,
-    };
-    Some(new_val)
-}
-
-/// 纯函数：cycle 行前进/后退并写入 PeriConfig 新值。返回新选项在 options 中的索引。
-/// 仅处理 PeriConfig 上的非 TUI 字段。
-#[allow(dead_code)]
-fn apply_cycle_row(
-    cfg: &mut crate::config::PeriConfig,
-    row: usize,
-    forward: bool,
-) -> Option<usize> {
-    let options: &[&str] = match row {
-        ROW_LANGUAGE => LANGUAGE_OPTS,
-        ROW_ACTIVE_ALIAS => ALIAS_OPTS,
-        ROW_PERMISSION_MODE => PERMISSION_OPTS,
-        _ => return None,
-    };
-    let cur_idx = match row {
-        ROW_LANGUAGE => LANGUAGE_OPTS
-            .iter()
-            .position(|s| cfg.config.language.as_deref() == Some(*s))
-            .unwrap_or(0),
-        ROW_ACTIVE_ALIAS => ALIAS_OPTS
-            .iter()
-            .position(|s| cfg.config.active_alias == *s)
-            .unwrap_or(0),
-        ROW_PERMISSION_MODE => 0, // 不持久化
-        _ => return None,
-    };
-    let next = if forward {
-        (cur_idx + 1) % options.len()
-    } else {
-        (cur_idx + options.len() - 1) % options.len()
-    };
-    let new_val = options[next];
-    match row {
-        ROW_LANGUAGE => cfg.config.language = Some(new_val.to_string()),
-        ROW_ACTIVE_ALIAS => cfg.config.active_alias = new_val.to_string(),
-        ROW_PERMISSION_MODE => {} // 由 PERMISSION_MODE_HANDLE 处理
-        _ => return None,
-    }
-    Some(next)
-}
-
-fn parse_permission_mode(s: &str) -> Option<PermissionMode> {
-    match s {
-        "default" => Some(PermissionMode::Default),
-        "accept-edit" => Some(PermissionMode::AcceptEdit),
-        "auto-mode" => Some(PermissionMode::AutoMode),
-        "bypass" => Some(PermissionMode::Bypass),
-        _ => None,
-    }
-}
-
-/// 纯函数：cycle 行前进/后退并写入 TuiConfig 新值。返回新选项在 options 中的索引。
-#[allow(dead_code)]
-fn apply_cycle_row_tui(cfg: &mut TuiConfig, row: usize, forward: bool) -> Option<usize> {
-    let options: &[&str] = match row {
-        ROW_STREAMING => STREAMING_OPTS,
-        _ => return None,
-    };
-    let cur_idx = match row {
-        ROW_STREAMING => STREAMING_OPTS
-            .iter()
-            .position(|s| cfg.streaming_mode.as_deref() == Some(*s))
-            .unwrap_or(0),
-        _ => return None,
-    };
-    let next = if forward {
-        (cur_idx + 1) % options.len()
-    } else {
-        (cur_idx + options.len() - 1) % options.len()
-    };
-    let new_val = options[next];
-    match row {
-        ROW_STREAMING => cfg.streaming_mode = Some(new_val.to_string()),
-        _ => return None,
-    }
-    Some(next)
 }
 
 #[cfg(test)]

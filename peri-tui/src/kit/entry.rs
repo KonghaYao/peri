@@ -344,7 +344,7 @@ pub async fn run_kit_fullscreen(
         let (rewind_tx, rewind_rx) = mpsc::unbounded_channel();
         let _ = atoms::REWIND_ACTION_TX.set(rewind_tx);
 
-        // 4b1. ASK_USER_RESPONSE channel：AskUserPopup → ask_user_consumer
+        // 4b1. ASK_USER_RESPONSE channel：AskUserPanel / 拒绝确认 → ask_user_consumer
         let (ask_user_tx, ask_user_rx) = mpsc::unbounded_channel::<AskUserResponseAction>();
         let _ = atoms::ASK_USER_RESPONSE_TX.set(ask_user_tx);
 

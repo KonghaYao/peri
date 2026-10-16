@@ -176,14 +176,20 @@ fn shape_probe_follows_the_readable_surface() {
     }
 }
 
-/// 探测只发 SELECT：形状探测不能建表、不能写行，也不带参数。
+/// 远端形状探测逐表只发 PRAGMA，不使用服务端不支持的表值函数。
 #[test]
-fn shape_probes_are_read_only_selects() {
+fn shape_probes_use_read_only_pragmas_for_every_declared_table() {
     for probe in [ShapeProbe::Current, ShapeProbe::Input] {
-        let spec = StatementSpec::bare(probe.sql());
-        assert!(spec.is_read_only(), "{probe:?} 必须是只读语句");
-        assert!(spec.params.is_empty(), "{probe:?} 不带参数");
-        assert!(spec.sql.contains("pragma_table_xinfo"), "{probe:?}");
+        for table in probe.table_names() {
+            let sql = ShapeProbe::pragma_table_xinfo(table).expect("声明里的表必须有只读 PRAGMA");
+            let spec = StatementSpec::bare(sql);
+            assert!(spec.is_read_only(), "{probe:?} 的 {table} 必须是只读语句");
+            assert!(spec.params.is_empty(), "{probe:?} 的 {table} 不带参数");
+            assert!(
+                !spec.sql.contains("FROM pragma_table_xinfo"),
+                "{probe:?} 的 {table}"
+            );
+        }
     }
 }
 

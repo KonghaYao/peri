@@ -58,7 +58,8 @@ Selection、semantic copy、hover/focus、entry click、scroll、anchor、auto-f
 
 ## 共享 entry 渲染与缓存预算
 
-主消息与 SubAgent 详情使用同一 `EntryRenderCache`，以内容、完整 GridSpec、主题 identity、
+主消息与 SubAgent 详情使用同一 `EntryRenderCache`，以内容、完整 GridSpec、过程区转场形态
+（`ZoneTransition`：文本区↔过程区的台阶翻转只失效该 entry）、主题 identity、
 语言、occurrence 与 surface 管理失效；解析、布局和动画装饰分别更新。
 详情以真实视口绘制，完整 `usize` 高度与虚拟滚动目标参与既有面板鼠标仲裁，不创建全历史
 ScrollView buffer，也不通过截断内容伪造视口优化。

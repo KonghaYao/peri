@@ -2,9 +2,11 @@
 # Usage: irm https://raw.githubusercontent.com/konghayao/peri/main/scripts/install.ps1 | iex
 #
 # Options:
-#   $env:PERI_INSTALL_VERSION   Specific version tag (e.g. agent-v1.17), empty = latest
+#   $env:PERI_INSTALL_VERSION   Specific version tag (e.g. agent-v1.17), empty = latest.
+#                               Pinned installs skip the GitHub API entirely.
 #   $env:PERI_INSTALL_DIR       Install directory (default: $env:USERPROFILE\.peri)
 #   $env:GITHUB_PROXY           GitHub download proxy prefix (replaces https://github.com)
+#   $env:GITHUB_API_PROXY       GitHub API proxy prefix (replaces https://api.github.com)
 #   $env:GITHUB_TOKEN           GitHub personal access token (bypasses API rate limiting)
 #   $env:PERI_NO_PATH_HINT      Set to 1 to skip PATH hint
 #   $env:PERI_INSTALL_PLATFORM  Override platform detection (e.g. windows-x86_64)
@@ -12,6 +14,7 @@
 # Example:
 #   $env:PERI_INSTALL_VERSION="agent-v1.17"; irm ... | iex
 #   $env:GITHUB_PROXY="https://ghproxy.com/https://github.com"; irm ... | iex
+#   $env:GITHUB_API_PROXY="https://gh-proxy.com/https://api.github.com"; irm ... | iex
 
 $ErrorActionPreference = "Stop"
 $ProgressPreference = "SilentlyContinue"
@@ -49,10 +52,20 @@ function Detect-Platform {
 }
 
 # --- Download with optional proxy ---
+# 下载（github.com/releases/download/*）与查询（api.github.com）是两个域名，镜像对二者的
+# 支持并不一致（多数只代理下载路径），因此代理变量分开配置。
 function Get-DownloadUrl {
     param([string]$Url)
     if ($env:GITHUB_PROXY) {
         return $Url -replace 'https://github\.com', $env:GITHUB_PROXY
+    }
+    return $Url
+}
+
+function Get-ApiUrl {
+    param([string]$Url)
+    if ($env:GITHUB_API_PROXY) {
+        return $Url -replace 'https://api\.github\.com', $env:GITHUB_API_PROXY
     }
     return $Url
 }
@@ -64,8 +77,39 @@ function Invoke-GitHubApi {
     if ($env:GITHUB_TOKEN) {
         $headers["Authorization"] = "Bearer $env:GITHUB_TOKEN"
     }
-    $response = Invoke-RestMethod -Uri $Url -Headers $headers -ErrorAction SilentlyContinue
+    $response = Invoke-RestMethod -Uri (Get-ApiUrl $Url) -Headers $headers -ErrorAction SilentlyContinue
     return $response
+}
+
+# HTTP 错误被 -ErrorAction SilentlyContinue 吞成 $null，网络异常才抛异常；两者都归为不可用，
+# 由调用方统一提示。
+function Invoke-GitHubApiOrNull {
+    param([string]$Url)
+    try {
+        return Invoke-GitHubApi $Url
+    } catch {
+        return $null
+    }
+}
+
+# API 不可达时给出可行出路：代理需单独配置，或改用固定版本安装（该路径不查询 API）。
+function Write-ApiHint {
+    warn "GitHub API (api.github.com) is unreachable."
+    Write-Host "    - Set GITHUB_API_PROXY if your network needs an API mirror"
+    Write-Host "    - Or pin PERI_INSTALL_VERSION=<tag> to install without the API"
+}
+
+# 下载失败时尽力区分“tag 不存在”与“该平台无制品”：固定版本路径没有预取资产清单，
+# API 可达时补一次。查不到就只留通用提示，不掩盖原始失败。
+function Show-PublishedAssets {
+    param([string]$ReleaseUrl, [string]$Tag)
+    $release = Invoke-GitHubApiOrNull $ReleaseUrl
+    if (-not $release) { return }
+    $names = @($release.assets | ForEach-Object { $_.name })
+    if ($names.Count -eq 0) { return }
+    Write-Host ""
+    warn "Assets published in ${Tag}:"
+    $names | ForEach-Object { Write-Host "  - $_" }
 }
 
 # --- Cleanup Old Versions ---
@@ -116,6 +160,7 @@ function Clean-OldVersions {
 function Main {
     $InstallDir = if ($env:PERI_INSTALL_DIR) { $env:PERI_INSTALL_DIR } else { Join-Path $env:USERPROFILE ".peri" }
     $GitHubApi = "https://api.github.com/repos/konghayao/peri"
+    $ReleasesDownloadBase = "https://github.com/konghayao/peri/releases/download"
 
     Write-Host ""
     info "Peri Agent Installer (Windows)"
@@ -125,22 +170,21 @@ function Main {
     $AssetName = "peri-${Platform}.zip"
     $ExeName = "peri.exe"
 
-    # Fetch release info
+    # 解析版本与资产 URL。固定版本时不查询 API：下载地址由 tag 与发布命名契约
+    # （<asset>、checksums.txt）唯一确定，受限网络中 api.github.com 不必可达。
+    $Release = $null
+    $ChecksumsUrl = $null
     if ($env:PERI_INSTALL_VERSION) {
         $VersionTag = $env:PERI_INSTALL_VERSION
-        step "Fetching release: $VersionTag..."
-        try {
-            $Release = Invoke-GitHubApi "$GitHubApi/releases/tags/$VersionTag"
-        } catch {
-            error "Failed to fetch release '$VersionTag'. Does this tag exist?"
-            exit 1
-        }
+        $DownloadUrl = "$ReleasesDownloadBase/$VersionTag/$AssetName"
+        $ChecksumsUrl = "$ReleasesDownloadBase/$VersionTag/checksums.txt"
+        info "Found release: $VersionTag (pinned; GitHub API not queried)"
     } else {
         step "Fetching latest agent release..."
-        try {
-            $Releases = Invoke-GitHubApi "$GitHubApi/releases?per_page=30"
-        } catch {
+        $Releases = Invoke-GitHubApiOrNull "$GitHubApi/releases?per_page=30"
+        if (-not $Releases) {
             error "Failed to fetch releases from GitHub."
+            Write-ApiHint
             exit 1
         }
 
@@ -151,27 +195,29 @@ function Main {
             exit 1
         }
 
-        try {
-            $Release = Invoke-GitHubApi "$GitHubApi/releases/tags/$VersionTag"
-        } catch {
+        $Release = Invoke-GitHubApiOrNull "$GitHubApi/releases/tags/$VersionTag"
+        if (-not $Release) {
             error "Failed to fetch release '$VersionTag'."
+            Write-ApiHint
             exit 1
         }
+        info "Found release: $VersionTag"
+
+        # Find matching asset
+        $Asset = $Release.assets | Where-Object { $_.name -eq $AssetName }
+        if (-not $Asset) {
+            error "No binary found for platform '$Platform'."
+            Write-Host ""
+            Write-Host "Available assets:"
+            $Release.assets | ForEach-Object { Write-Host "  - $($_.name)" }
+            exit 1
+        }
+
+        $DownloadUrl = $Asset.browser_download_url
+        $ChecksumsAsset = $Release.assets | Where-Object { $_.name -eq "checksums.txt" }
+        if ($ChecksumsAsset) { $ChecksumsUrl = $ChecksumsAsset.browser_download_url }
     }
 
-    info "Found release: $VersionTag"
-
-    # Find matching asset
-    $Asset = $Release.assets | Where-Object { $_.name -eq $AssetName }
-    if (-not $Asset) {
-        error "No binary found for platform '$Platform'."
-        Write-Host ""
-        Write-Host "Available assets:"
-        $Release.assets | ForEach-Object { Write-Host "  - $($_.name)" }
-        exit 1
-    }
-
-    $DownloadUrl = $Asset.browser_download_url
     info "Binary: $AssetName"
 
     # Create install directory
@@ -190,7 +236,11 @@ function Main {
     try {
         Invoke-WebRequest -Uri $FinalUrl -OutFile $ZipPath
     } catch {
-        error "Download failed: $_"
+        error "Download failed: $FinalUrl"
+        if (-not $Release) {
+            Show-PublishedAssets -ReleaseUrl "$GitHubApi/releases/tags/$VersionTag" -Tag $VersionTag
+            warn "Check that '$VersionTag' exists and publishes $AssetName."
+        }
         exit 1
     }
 
@@ -198,27 +248,27 @@ function Main {
     # older releases only ship the checksums.txt manifest (drop the fallback once
     # those releases are gone).
     step "Verifying checksum..."
-    $ChecksumAsset = $Release.assets | Where-Object { $_.name -eq "$AssetName.sha256" }
-    if ($ChecksumAsset) {
-        $ChecksumUrl = $ChecksumAsset.browser_download_url
-    } else {
-        $ChecksumsAsset = $Release.assets | Where-Object { $_.name -eq "checksums.txt" }
-        if (-not $ChecksumsAsset) {
+    $ChecksumPath = "$ZipPath.sha256"
+    $PerAssetChecksum = $true
+    try {
+        Invoke-WebRequest -Uri (Get-DownloadUrl "$DownloadUrl.sha256") -OutFile $ChecksumPath
+    } catch {
+        $PerAssetChecksum = $false
+    }
+    if (-not $PerAssetChecksum) {
+        if (-not $ChecksumsUrl) {
             error "No checksum published for $AssetName."
             Remove-Item -Force $ZipPath -ErrorAction SilentlyContinue
             exit 1
         }
         warn "Per-asset checksum missing; falling back to checksums.txt"
-        $ChecksumUrl = $ChecksumsAsset.browser_download_url
-    }
-
-    try {
-        $ChecksumPath = "$ZipPath.sha256"
-        Invoke-WebRequest -Uri (Get-DownloadUrl $ChecksumUrl) -OutFile $ChecksumPath
-    } catch {
-        error "Checksum download failed: $_"
-        Remove-Item -Force $ZipPath -ErrorAction SilentlyContinue
-        exit 1
+        try {
+            Invoke-WebRequest -Uri (Get-DownloadUrl $ChecksumsUrl) -OutFile $ChecksumPath
+        } catch {
+            error "Checksum download failed: $_"
+            Remove-Item -Force $ZipPath -ErrorAction SilentlyContinue
+            exit 1
+        }
     }
 
     $Expected = $null

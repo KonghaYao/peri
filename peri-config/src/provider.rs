@@ -2,8 +2,8 @@ use std::collections::BTreeMap;
 
 use crate::app::{AppConfig, PeriConfig, ProfileConfig, ProviderConfig};
 
-const DEFAULT_ANTHROPIC_MODEL: &str = "claude-sonnet-4-6";
-const DEFAULT_OPENAI_MODEL: &str = "gpt-4o";
+const DEFAULT_ANTHROPIC_MODEL: &str = "claude-sonnet-5-5";
+const DEFAULT_OPENAI_MODEL: &str = "gpt-6.1-sol";
 const DEFAULT_OPENAI_BASE_URL: &str = "https://api.openai.com/v1";
 
 #[derive(Debug, Clone, PartialEq, Eq)]

@@ -2,6 +2,11 @@ use std::sync::OnceLock;
 
 use super::{MsEntry, MsStatus, PluginSearchResultItem};
 
+// 测试记录刷新入口；不替换真实刷盘路径，可断言事件没有启动后台刷新。
+#[cfg(test)]
+pub(super) static REFRESH_ATTEMPTS: std::sync::atomic::AtomicUsize =
+    std::sync::atomic::AtomicUsize::new(0);
+
 // ── Discover cache (non-reactive, safe in render body) ────────────────
 
 /// Discover 插件列表缓存——避免 render body 中同步读盘。
@@ -27,12 +32,19 @@ pub(super) fn get_discover_cache() -> Vec<PluginSearchResultItem> {
     guard.as_ref().unwrap().clone()
 }
 
-pub(super) fn refresh_discover_cache() {
-    // 先在锁外执行磁盘 I/O，再拿锁替换数据
+pub(super) fn refresh_discover_cache(is_current: &impl Fn() -> bool) {
+    #[cfg(test)]
+    REFRESH_ATTEMPTS.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+    // 读盘前与发布前都验证票据；阻塞任务取消后仍可能继续运行。
+    if !is_current() {
+        return;
+    }
     let data = load_discover_plugins_from_disk();
     if let Some(cache) = DISCOVER_CACHE.get() {
         let mut guard = cache.lock();
-        *guard = Some(data);
+        if is_current() {
+            *guard = Some(data);
+        }
     }
 }
 
@@ -72,6 +84,13 @@ impl Drop for EmptyCatalogGuard {
     }
 }
 
+#[cfg(test)]
+pub(super) fn set_marketplaces_for_test(entries: Vec<MsEntry>) {
+    *MARKETPLACE_CACHE
+        .get_or_init(|| parking_lot::Mutex::new(None))
+        .lock() = Some(entries);
+}
+
 pub(super) fn get_marketplace_cache() -> Vec<MsEntry> {
     let cache = MARKETPLACE_CACHE.get_or_init(|| parking_lot::Mutex::new(None));
     {
@@ -89,12 +108,18 @@ pub(super) fn get_marketplace_cache() -> Vec<MsEntry> {
     guard.as_ref().unwrap().clone()
 }
 
-pub(super) fn refresh_marketplace_cache() {
-    // 先在锁外执行磁盘 I/O，再拿锁替换数据
+pub(super) fn refresh_marketplace_cache(is_current: &impl Fn() -> bool) {
+    #[cfg(test)]
+    REFRESH_ATTEMPTS.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+    if !is_current() {
+        return;
+    }
     let data = load_marketplace_data();
     if let Some(cache) = MARKETPLACE_CACHE.get() {
         let mut guard = cache.lock();
-        *guard = Some(data);
+        if is_current() {
+            *guard = Some(data);
+        }
     }
 }
 
@@ -175,6 +200,7 @@ fn load_marketplace_data() -> Vec<MsEntry> {
 
             MsEntry {
                 name,
+                source: km.source.clone(),
                 source_label: match &km.source {
                     peri_middlewares::plugin::MarketplaceSource::GitHub { repo } => {
                         format!("github:{}", repo)

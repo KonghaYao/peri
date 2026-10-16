@@ -9,8 +9,6 @@ use tracing::debug;
 use crate::agent::compact_v2::config::CompactConfig;
 use crate::session::transcript::MessageTranscript;
 
-use super::projection::ProjectionTarget;
-
 /// Smart Compact：规则驱动，从尾部前向遍历，保留关键消息，其余标记 truncated
 ///
 /// 现通过 plan_micro 的兼容入口生成计划再应用。
@@ -21,25 +19,13 @@ use super::projection::ProjectionTarget;
 pub fn smart_compact(transcript: &mut MessageTranscript, config: &CompactConfig) -> (usize, u64) {
     tracing::warn!("Smart Compact is deprecated and will be removed. Converging to Micro Compact.");
     let plan = super::planner::plan_micro(transcript, config, true);
+    // 返回语义保持不变：affected 是 action 条数，不是去重消息数。
     let affected = plan.actions.len();
     let saved = plan.estimated_tokens_saved;
 
-    for action in &plan.actions {
-        match &action.target {
-            ProjectionTarget::Message
-            | ProjectionTarget::ContentBlock { .. }
-            | ProjectionTarget::ToolCall { .. } => {
-                // 统一使用 set_flags_projection 持久化 directive（与 micro_compact 一致）
-                // set_flags_projection 同时设置 truncated=true + projection directive
-                let directive = crate::agent::compact_v2::projection::MessageProjectionDirective {
-                    policy_version: crate::agent::compact_v2::projection::PROJECTION_POLICY_VERSION,
-                    entries: vec![action.clone()],
-                    superseded_by: None,
-                };
-                transcript.set_flags_projection(action.message_id, directive);
-            }
-        }
-    }
+    // 统一走 apply_micro_plan：按 message_id 分组写入 directive，
+    // 同一消息的多个 action 不再互相覆盖（旧实现逐 action 写单条 directive）。
+    super::micro::apply_micro_plan(transcript, &plan);
 
     if affected > 0 {
         debug!(

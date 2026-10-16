@@ -194,8 +194,12 @@ impl RelocationProbe {
     }
 }
 
-/// 跑一轮真实发布：首屏发布 → `prepare` → 并入一页发布 → `prepare`（锚点落在
-/// `anchor_slot` 顶行之下 1 行的位置）。
+/// 跑一轮真实发布：首屏发布 → `prepare` → 并入一页发布 → `prepare`。
+///
+/// 锚点 = 视口顶行所在的**渲染单元**：`anchor_slot` 是它在旧布局里的槽位，`within_unit`
+/// 是顶行落在这个单元起点之下多少行（单元只有 1 行时只能传 0）。顶行必须真的落在这个
+/// 单元里——否则捕获会退化成下一个单元或越界返回 `None`（不补偿），用例判据会静默失效，
+/// 因此这里显式断言。
 ///
 /// `prepare` 的参数与 `message_area/mod.rs` 的生产调用一致（同一份 grid / context /
 /// reset，`scroll_y` 取当帧视口事实，`merge_epoch` 取 `HISTORY_PREPEND_EPOCH`）。
@@ -203,6 +207,7 @@ fn publish_then_relocate(
     state: &mut BridgeState,
     token: &str,
     anchor_slot: usize,
+    within_unit: usize,
     response: HistoryPageResponse,
 ) -> RelocationProbe {
     let grid = GridSpec::grid_for(80);
@@ -227,8 +232,13 @@ fn publish_then_relocate(
         crate::kit::atoms::HISTORY_PREPEND_EPOCH.get(),
     );
     let epoch_before = crate::kit::atoms::HISTORY_PREPEND_EPOCH.get();
-    // 视口顶行落在锚点单元内（+1 行），这样「单元内位移」参与判据，不能退化成 0。
-    let scroll_y = before.slot_visual_start(anchor_slot).expect("锚点单元起始") + 1;
+    // 视口顶行落在锚点单元内（`within_unit` 行），这样「单元内位移」参与判据，不能退化成 0。
+    let scroll_y = before.slot_visual_start(anchor_slot).expect("锚点单元起始") + within_unit;
+    assert_eq!(
+        before.visual_lookup(scroll_y).map(|slot| slot.slot_index),
+        Some(anchor_slot),
+        "视口顶行必须落在锚点单元内（within_unit={within_unit} 越界，捕获会退化）"
+    );
 
     dispatch_landing_page(state, token, response);
     assert!(
@@ -280,11 +290,11 @@ fn a20_e2e_insert_above_viewport_keeps_the_anchored_unit_screen_row() {
         vec![("s1:old", 10, vec![sub(0, user_update("old one"))])],
     );
 
-    let probe = publish_then_relocate(&mut state, "tok", 1, short);
-    let before_slot = 1;
-    // 渲染窗口 = 继承前缀 + 更早条目 + 自有条目 → 自有条目落到槽位 2。
-    let after_slot = 2;
-    assert_eq!(probe.after.slot_count(), 3, "插入一个单元的发布");
+    let probe = publish_then_relocate(&mut state, "tok", 2, 0, short);
+    let before_slot = 2;
+    // 渲染窗口 = 继承前缀 + divider + 更早条目 + divider + 自有条目 → 自有条目落到槽位 4。
+    let after_slot = 4;
+    assert_eq!(probe.after.slot_count(), 5, "插入一个单元的发布");
     assert_eq!(
         probe.screen_row(&probe.after, after_slot, probe.target()),
         probe.screen_row(&probe.before, before_slot, probe.scroll_y),
@@ -312,8 +322,8 @@ fn a20_e2e_middle_gap_fill_does_not_move_the_viewport() {
         vec![("s1:mid", 50, vec![sub(0, user_update("between"))])],
     );
 
-    let probe = publish_then_relocate(&mut state, "tok", 0, gap);
-    assert_eq!(probe.after.slot_count(), 3, "缺口页插到 a 与 b 之间");
+    let probe = publish_then_relocate(&mut state, "tok", 0, 0, gap);
+    assert_eq!(probe.after.slot_count(), 5, "缺口页插到 a 与 b 之间");
     assert_eq!(
         probe.target(),
         probe.scroll_y,
@@ -348,11 +358,13 @@ fn a20_e2e_collapsed_group_shape_keeps_the_anchored_unit_screen_row() {
         ],
     );
 
-    let probe = publish_then_relocate(&mut state, "tok", 1, tools);
+    let probe = publish_then_relocate(&mut state, "tok", 2, 0, tools);
 
-    // 两把尺子不同的实测事实（同一份发布，同一时刻）：
+    // 两把尺子的实测事实（同一份发布，同一时刻）：
     //   桥接 committed = [继承, 卡 t1, 卡 t2, 自有] = 4 槽；
-    //   渲染 VIEW_MODELS = [继承, GROUP(2 张卡), 自有] = 3 槽。
+    //   渲染 VIEW_MODELS = [继承, GROUP(2 张卡), turn divider, 自有] = 4 槽。
+    // 计数在这份夹具上相等（折叠 −1 槽、divider +1 槽），下标因此巧合对齐；跨层坐标
+    // 不可互换的形态由下面的拆组用例覆盖，本条覆盖的是**高度**必须按渲染布局算。
     assert_eq!(
         state.committed.len(),
         4,
@@ -360,8 +372,8 @@ fn a20_e2e_collapsed_group_shape_keeps_the_anchored_unit_screen_row() {
     );
     assert_eq!(
         probe.after.slot_count(),
-        3,
-        "渲染槽位数少 1——相邻成功工具卡被压成折叠组"
+        4,
+        "渲染槽位数（相邻成功工具卡压成折叠组 −1、turn divider +1）"
     );
     assert!(
         matches!(
@@ -371,24 +383,31 @@ fn a20_e2e_collapsed_group_shape_keeps_the_anchored_unit_screen_row() {
         "槽位 1 必须是折叠组"
     );
 
-    // 锚点身份（自有气泡）在渲染坐标里的下标是 2，在桥接坐标里是 3——**不同**，
-    // 这正是旧路径错位的原因；新路径只认身份。
-    let own_in_render = 2usize;
+    // 插入块在**渲染布局**里的净增行数：折叠组 + divider 的实际行数，减去旧布局里自有
+    // 单元上方已有的那 1 行 divider。
+    let own_in_render = 3usize;
     let inserted_rows = probe
         .after
         .slot_visual_start(own_in_render)
         .expect("自有单元起始")
-        - probe.after.slot_visual_start(1).expect("折叠组起始");
-    assert_eq!(inserted_rows, 1, "折叠组在渲染布局里只占 1 行");
+        - probe.after.slot_visual_start(1).expect("折叠组起始")
+        - (probe.before.slot_visual_start(2).expect("自有单元起始")
+            - probe.before.slot_visual_start(1).expect("divider 起始"));
     assert_eq!(
         probe.screen_row(&probe.after, own_in_render, probe.target()),
-        probe.screen_row(&probe.before, 1, probe.scroll_y),
+        probe.screen_row(&probe.before, 2, probe.scroll_y),
         "折叠组形态：同一可见单元屏幕行不变（A20）"
     );
     assert_eq!(
         probe.target() as isize - probe.scroll_y as isize,
         inserted_rows as isize,
-        "重定位量 = 插入块在**渲染布局**里的真实高度（1 行），而不是桥接槽位数（2 张卡 = 2 槽）"
+        "重定位量 = 插入块在**渲染布局**里的净增高度（{inserted_rows} 行）"
+    );
+    let bridge_inserted_slots = 2isize;
+    assert_ne!(
+        probe.target() as isize - probe.scroll_y as isize,
+        bridge_inserted_slots,
+        "不是桥接槽位数（两张卡 = 2 槽）"
     );
 }
 
@@ -447,7 +466,7 @@ fn a20_e2e_group_split_keeps_the_anchored_unit_screen_row() {
         vec![("s1:mid", 15, vec![sub(0, user_update("between-cards"))])],
     );
 
-    let probe = publish_then_relocate(&mut state, "tok", 1, split);
+    let probe = publish_then_relocate(&mut state, "tok", 1, 1, split);
 
     // 发布前：两张卡相邻 → 一张折叠组，渲染侧槽位 = [GROUP(2 张卡), 自有]。
     assert!(
@@ -460,8 +479,8 @@ fn a20_e2e_group_split_keeps_the_anchored_unit_screen_row() {
         ),
         "首屏两张成功卡必须已经成组"
     );
-    // 发布后：组被拆开 → 槽位变多（组 → 卡 + 中间条目 + 卡）。
-    let own_after = 3usize;
+    // 发布后：组被拆开且中间条目自带 turn divider → 槽位变多（组 → 卡 + 中间条目 + 卡 + divider）。
+    let own_after = 4usize;
     assert!(
         probe.after.slot_count() > probe.before.slot_count(),
         "拆组后槽位数必须变多（{} → {}）",

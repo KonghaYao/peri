@@ -1,1 +1,0 @@
-EXP module-only: N=20 RED=0 GREEN=20  args=[sessions::sqlite_store::connection::open_tests --test-threads=13]

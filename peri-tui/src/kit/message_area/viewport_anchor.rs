@@ -56,6 +56,11 @@
 //!    之前），所以「快照可见 = 代数可见」。**调用点必须保持「快照读早于代数读」**
 //!    （`message_area/mod.rs`：`read_render_snapshot()` 在 `HISTORY_PREPEND_EPOCH.get()`
 //!    之前）——这是本条不变量成立的唯一前提。
+//! 5. **锚点行落在纯展示行（turn divider）上**：divider 的内容身份是常量（`content_hash`
+//!    恒为 0、`label` 为 `None`），新窗口里出现 ≥2 枚即判歧义 → 不补偿。turn divider 投影
+//!    （`acp_events::render` 的 `insert_turn_dividers`：第 2 条起每条 prompt 前一行）
+//!    让这一形态在浏览态常见；修复方向是让 divider 行改按「其后真实单元 + 负偏移」派生
+//!    锚点（`offset_within_unit` 需带符号，见边界 2 的越界口径）。
 //!
 //! 移除条件：`SlotIndex` 能给出「单元内嵌套子项的视觉起点」后，边界 1 可以按子项身份
 //! 细化；本模块的存在理由（跨层槽位不可互换）不会因此消失。

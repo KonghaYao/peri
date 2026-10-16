@@ -5,7 +5,12 @@
 > 上位设计：[TUI Chat 与 Tool Activity Workbench](tui-chat-workbench.md)。如有冲突，
 > 以上位设计为准。
 
-实现现状：`peri-tui/src/kit/message_area/render.rs`（`subagent_tool_line`、`render_subagent_group_lines`、`subagent_error_reason_line`）
+实现现状：`peri-tui/src/kit/message_area/render/group.rs`（`subagent_tool_line`、
+`render_subagent_group_lines`、`subagent_error_reason_lines`）。
+
+> 缩进列自 2026-10-14 起由过程区前缀统一承担（组内行与组头同列，早前的独立常量
+> `SUBAGENT_TOOL_INDENT` 已删除）：见
+> [TUI 消息区：过程区缩进与转场台阶](../../spec/issues/2026-10-14-tui-transcript-process-zone-indent.md)。
 
 ## 1. 背景与目标
 
@@ -45,19 +50,19 @@ P2 与 P4 共同落实 §8.2「同屏最多一个高显著 spinner」：高显�
 ## 3. 形态规格（Wide / Standard）
 
 ```text
-   ◐ Agent explorer  Inspecting message flow          6 tools   ← subagent 顶层行（现状不变）
-   │   ⠋ Read   src/main.rs                             4s      ← 嵌套工具行（新形态）
-   │   ✓ Bash   cargo test -p peri-tui                 0.4s
-   │   × Edit   render.rs — Failed
-   │   - Error: File not found at src/render.rs                ← 失败原因行（缩进对齐工具行）
+   ◐  Agent explorer  Inspecting message flow         6 tools   ← subagent 顶层行
+   │  ⠋ Read  src/main.rs                             4s        ← 嵌套工具行（新形态）
+   │  ✓ Bash  cargo test -p peri-tui                  0.4s
+   │  × Edit  render.rs — Failed
+   │  - Error: File not found at src/render.rs                  ← 失败原因行（与工具行同列）
 ```
 
 逐列结构（Span 序列）：
 
 | 段 | 内容 | 样式 |
 | --- | --- | --- |
-| ① 续行前缀 | `[outer 空][dim 竖线][gap]`（`cont_prefix`，与 subagent 块续行同列） | `sem.text.dim` 竖线 |
-| ② 缩进 | `  ` 固定 2 格（常量 `SUBAGENT_TOOL_INDENT = 2`） | 无样式 |
+| ① 过程区续行前缀 | `[outer 空][indent 留空][dim 竖线][gap]`（`process_cont_prefix`，与 subagent 块续行同列；`indent` = 过程区右移量，≥60 列 2 / <60 列 0） | `sem.text.dim` 竖线 |
+| ② 缩进 | 无独立缩进常量——`indent` 由 ① 前缀统一承担，组内行与组头同列（决策 5） | 无样式 |
 | ③ 状态符号 | running=braille 帧 / success=`✓` / error=`×` | running/success → `sem.text.dim`；error → `sem.status.error` |
 | ④ Verb | `format_tool_name` 本地化动词（Read/Bash/Shell/Edit…） | `sem.text.primary`，**无 bold** |
 | ⑤ 摘要 | `input_summary` 截断（预算减去缩进与 duration 列） | `sem.text.muted` |
@@ -67,17 +72,18 @@ P2 与 P4 共同落实 §8.2「同屏最多一个高显著 spinner」：高显�
 要点：
 
 - **缩进固定 2 格而非对齐 subagent 摘要**——流式下最近 3 行持续轮换，固定缩进保证前缀列稳定
-  （与 `SUBAGENT_NAME_WIDTH = 16` 定宽同理，§6.7「running 摘要更新不改前缀列」）。
+  （与 `SUBAGENT_NAME_WIDTH = 16` 定宽同理，§6.7「running 摘要更新不改前缀列」）；该 2 格自
+  2026-10-14 起由过程区前缀统一承担（组头与组内行同列，决策 5），不再有独立常量。
 - **不用 `├─`/`└─` 树状末梢字符**——最近 3 行窗口滚动时末梢字符会跳动闪烁，且与现有
   「竖线续行」体系冲突；统一竖线 + 缩进即可表达层级，且实现与 wrap_map/语义复制零摩擦。
-- ②③④⑤⑥⑦ 共用 `first_prefix` 之外的构造路径：全部行（含首行）走 `cont_prefix` 风格，
-  使 subagent 工具行**永远不是独立 entry 首行**——结构上即从属。
+- ②③④⑤⑥⑦ 共用 `first_prefix` 之外的构造路径：全部行（含首行）走过程区续行前缀
+  （`process_cont_prefix`），使 subagent 工具行**永远不是独立 entry 首行**——结构上即从属。
 
 ## 4. 与主时间线工具对照
 
 | 维度 | 主时间线工具（§6.4） | subagent 工具行（本设计） |
 | --- | --- | --- |
-| 正文起点列 | content 列（块首行前缀后） | content + 2（缩进） |
+| 正文起点列 | 过程区列（≥60 列 = col6，§3） | 与组头同列（同一过程区前缀） |
 | 行首竖线 | 仅展开体续行 | 每行都有（块内从属） |
 | Verb | bold + `text.primary` | 无 bold + `text.primary` |
 | 状态符号 | 状态色（`status.running/success/error`） | running/success → `text.dim`；error → `status.error` |
@@ -101,7 +107,7 @@ P2 与 P4 共同落实 §8.2「同屏最多一个高显著 spinner」：高显�
 
 - 无工具时（subagent 刚启动、子工具尚未路由）回退单行 activity 摘要——现状行为不变
   （`render_subagent_group_lines` 的 running 分支已处理）。
-- 失败原因行 `subagent_error_reason_line` 的缩进与工具行对齐（content + 2），
+- 失败原因行 `subagent_error_reason_lines` 与工具行同列（过程区续行前缀），
   与工具行同属一层级；正文保持 muted 不整块染红（§6.7 现状口径）。
 
 ## 6. 断点降级（§11）
@@ -110,8 +116,8 @@ P2 与 P4 共同落实 §8.2「同屏最多一个高显著 spinner」：高显�
 | --- | --- | --- | --- | --- |
 | Wide ≥ 100 | 2 格 | 完整（braille/✓/×） | 右对齐 | 有 |
 | Standard 60–99 | 2 格 | 完整 | 右对齐 | 有 |
-| Compact 40–59 | 2 格 | 完整 | 隐藏（§11 非关键 duration） | 有 |
-| Narrow < 40 | 2 格 | 退化：符号位省略（`│  Read  src…`） | 无 | 有 |
+| Compact 40–59 | 0 格（过程区前缀回退基准形态） | 完整 | 隐藏（§11 非关键 duration） | 有 |
+| Narrow < 40 | 0 格（同上） | 退化：符号位省略（`│  Read  src…`） | 无 | 有 |
 
 Narrow 下符号位省略与主时间线「accent 退化为 bullet」是同一降级哲学（§11）——
 极端窄屏接受状态字符丢失，错误信号由错误词与原因行兜底。
@@ -129,7 +135,7 @@ Narrow 下符号位省略与主时间线「accent 退化为 bullet」是同一�
 - 选中 subagent 工具行复制 → `{Verb} {summary}`（与主时间线 tool header 语义同口径，
   无符号、无 duration、无竖线/缩进）。
 - 实现要求：`semantic_line_text` / `strip_visual_prefix` 需识别新前缀结构
-  （`cont_prefix + 2 缩进 + 符号 + Verb`），对 `TuiSubAgentGroup` 变体剥除缩进与符号列。
+  （`[outer 空][indent 留空][标记][gap]` + Verb），对 `TuiSubAgentGroup` 变体剥除缩进与符号列。
 - 原因行复制 → 纯错误正文（现状已剥离前缀，缩进后同样剥离）。
 
 ## 9. 交互契约（延续现状，不新增）
@@ -143,13 +149,13 @@ Narrow 下符号位省略与主时间线「accent 退化为 bullet」是同一�
 
 ## 10. 实现落点
 
-文件：`peri-tui/src/kit/message_area/render.rs`
+文件：`peri-tui/src/kit/message_area/render/group.rs`
 
 | 位置 | 改动 |
 | --- | --- |
-| 新增常量 | `SUBAGENT_TOOL_INDENT: usize = 2`（紧邻 `SUBAGENT_TOOL_LINES`） |
-| `subagent_tool_line` | ① 前缀改为 `cont_prefix` + 2 空格缩进（替代 `first_prefix`）；② label 去 `Modifier::BOLD`；③ 符号色：running/success 用 `sem.text.dim`，error 用 `sem.status.error`（不能直接复用 `status_symbol_and_color` 的色，需参数化或就地处理）；④ error 补 ` — Failed` 错误词（复用 §6.4 的 `msg-status-failed` 逻辑）；⑤ summary 预算与 `place_meta` 的 `used` 计算自然含缩进宽度，budget 需再减 `SUBAGENT_TOOL_INDENT`；⑥ Narrow 断点符号位省略（§6 断点表） |
-| `subagent_error_reason_line` | 前缀改为 `cont_prefix` + 2 空格缩进（与工具行同列） |
+| 缩进承担 | 无独立常量——缩进列由过程区续行前缀 `process_cont_prefix`（`[outer 空][indent 留空][dim 竖线][gap]`）承担，组内行与组头同列（决策 5） |
+| `subagent_tool_line` | ① 前缀走过程区续行前缀（替代 `first_prefix`）；② label 去 `Modifier::BOLD`；③ 符号色：running/success 用 `sem.text.dim`，error 用 `sem.status.error`；④ error 补 ` — Failed` 错误词（复用 §6.4 的 `msg-status-failed` 逻辑）；⑤ summary 预算与 `place_meta` 的 `used` 计算自然含前缀宽度；⑥ Narrow 断点符号位省略（§6 断点表） |
+| `subagent_error_reason_lines` | 与工具行同列（过程区续行前缀） |
 | `semantic_line_text` | `TuiSubAgentGroup` 变体：子工具行语义 `{Verb} {summary}`，剥竖线+缩进+符号 |
 | `render_test.rs` | 更新 subagent 相关断言：前缀宽度、无 bold、符号 dim 色、error 词、缩进列 |
 
@@ -158,10 +164,10 @@ Narrow 下符号位省略与主时间线「accent 退化为 bullet」是同一�
 
 ## 11. 测试要点
 
-1. **层级结构**：subagent 工具行首列 = `[outer 空][│][gap][2 空格]`，正文起点 = `content + 2`；
+1. **层级结构**：subagent 工具行首列 = `[outer 空][indent 留空][│][gap]`，正文起点与组头同列；
 2. **bold 缺失**：工具行 Verb span 无 `Modifier::BOLD`（对照主时间线工具行有）；
 3. **符号色**：running/success 符号 `fg == text.dim`；error 符号 `fg == status.error`；
-4. **错误词**：error 工具行含 ` — Failed`（bold + error 色），原因行缩进与工具行一致；
+4. **错误词**：error 工具行含 ` — Failed`（bold + error 色），原因行与工具行同列；
 5. **断点矩阵**：Compact 无 duration；Narrow 无符号位且不 panic（宽度 1 回归）；
 6. **语义复制**：选中工具行 → `{Verb} {summary}`，无 `✓`/`│`/前导空格；
 7. **NO_COLOR**：剥离颜色后仍可辨（缩进 + 竖线 + 符号字符 + bold 有无）。

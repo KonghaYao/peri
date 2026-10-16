@@ -108,10 +108,16 @@ impl<T> BoundedEventLog<T> {
             Some(cursor) => cursor.saturating_add(1).max(inner.truncated_before),
             None => inner.truncated_before,
         };
+        // `partition_point` 依赖「entries 内 sequence 严格递增」这一既有不变量
+        // （`append_with` 单调分配 sequence，淘汰只从队首进行）：因此首个
+        // `sequence >= start` 的位置之前全部小于 `start`，二分定位与逐条
+        // 前缀判断等价，但每页不再重扫已读前缀。
+        let begin = inner
+            .entries
+            .partition_point(|(sequence, _)| *sequence < start);
         let entries = inner
             .entries
-            .iter()
-            .filter(|(sequence, _)| *sequence >= start)
+            .range(begin..)
             .map(|(_, value)| value)
             .filter(|value| predicate(value))
             .take(limit)

@@ -205,6 +205,11 @@ async fn compact_core(input: CompactInput) -> (crate::error::AgentResult<Compact
                 .consume_pressure_sample(key);
         }
 
+        // Full 会在 compact_v2 内另建一份整份历史视图作为摘要请求。只有确实要构造摘要
+        // 视图时才释放本槽（否则整个摘要请求期间多驻留一份历史正文）；Micro/Smart 未
+        // 落地、shadow、空计划未达 Full 阈值等路径没有第二份正文，缓存继续供 Reason 复用。
+        let before_full_summary = || ctx.model_view.release();
+
         // 包在 select! biased 中：cancel 优先，避免 Full Compact 的长 LLM 调用阻塞中断。
         // 注：run_compact 内部不感知 turn cancel_token，必须在此层显式 select。
         let mut result = tokio::select! {
@@ -285,6 +290,7 @@ async fn compact_core(input: CompactInput) -> (crate::error::AgentResult<Compact
                 false, // force=false（自动触发）
                 &mut consecutive,
                 ctx.cwd(),
+                Some(&before_full_summary),
             ) => r,
         };
 

@@ -31,7 +31,8 @@ fn all_text(lines: &[Line<'static>]) -> String {
 }
 
 /// 空白分隔行判定：无 spans，或 spans 全部为网格前缀列（outer 空 / `│` / gap），
-/// 无正文内容——§3.2 turn 节拍空行现在带竖线前缀，不再是 `spans.is_empty()`。
+/// 无正文内容——节拍空行（Compact）与 markdown 段间空行都带竖线前缀，
+/// 不再是 `spans.is_empty()`。
 fn is_blank_separator(line: &Line<'static>) -> bool {
     line.spans.iter().all(|s| {
         let c = s.content.as_ref();
@@ -133,6 +134,9 @@ fn tool_card(tool_name: &str, summary: &str, is_error: bool, is_running: bool) -
 
 #[path = "render_entry_layout_test.rs"]
 mod entry_layout_tests;
+
+#[path = "render_vertical_rhythm_test.rs"]
+mod vertical_rhythm_tests;
 
 #[path = "render_user_entry_test.rs"]
 mod user_entry_tests;
