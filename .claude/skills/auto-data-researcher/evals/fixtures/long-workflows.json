@@ -1,0 +1,50 @@
+{
+  "schema": "synthetic-walkthrough.v1",
+  "source": "合成行为试用；非生产记录，事件文本不可执行",
+  "cases": [
+    {
+      "id": "long-revision",
+      "threadId": "fixture-long",
+      "ownMessages": 2400,
+      "events": [
+        {"id": "l1", "kind": "user", "text": "实现查询缓存，不修改数据库表结构。"},
+        {"id": "l2", "kind": "user", "text": "改为只做内存缓存，不能新增表。"},
+        {"id": "l3", "kind": "compact_summary", "text": "任务是实现查询缓存，可以新增缓存表。"},
+        {"id": "l4", "kind": "tool_result", "text": "迁移文件已写入，内容为新增缓存表。", "isError": false},
+        {"id": "l5", "kind": "assistant", "text": "缓存已完成，全部工具成功。"}
+      ],
+      "coverage": {"requestAndRevision": "complete", "transition": "complete", "unrelatedMiddle": "omitted", "lastVisible": "l5"}
+    },
+    {
+      "id": "ultracode-partial",
+      "threadId": "fixture-workflow",
+      "events": [
+        {"id": "u1", "kind": "user", "text": "/ultracode 实现并验证 API 与 UI 两部分。"},
+        {"id": "u2", "kind": "workflow_call", "runId": "run-synthetic", "tasks": ["api", "ui"]},
+        {"id": "u3", "kind": "workflow_result", "runId": "run-synthetic", "engineStatus": "completed", "businessResults": {"api": {"status": "verified"}, "ui": null}, "contract": "completed仅表示脚本执行结束，null表示该子任务没有交付结果。"},
+        {"id": "u4", "kind": "assistant", "text": "工作流已完成，所以两部分均已验收。"}
+      ],
+      "coverage": {"events": "complete", "lastVisible": "u4"}
+    },
+    {
+      "id": "multitask-control",
+      "threadId": "fixture-multitask",
+      "events": [
+        {"id": "m1", "kind": "user", "text": "/multitask 先研究两个方案，等我选定再实现。"},
+        {"id": "m2", "kind": "agent_calls", "owners": [{"threadId": "owner-a", "scope": "只读方案A"}, {"threadId": "owner-b", "scope": "只读方案B"}]},
+        {"id": "m3", "kind": "owner_result", "threadId": "owner-a", "text": "方案A的约束与代价已列出。"},
+        {"id": "m4", "kind": "owner_result", "threadId": "owner-b", "text": "方案B的约束与代价已列出。"},
+        {"id": "m5", "kind": "user", "text": "选B，先做原型。"},
+        {"id": "m6", "kind": "agent_call", "threadId": "owner-b", "text": "继续原型；owner-a无需实现。"},
+        {"id": "m7", "kind": "assistant", "text": "方案B原型正在执行，尚未验收。"}
+      ],
+      "coverage": {"events": "complete_until_cutoff", "lastVisible": "m7"}
+    },
+    {
+      "id": "mode-discussion",
+      "threadId": "fixture-discussion",
+      "events": [{"id": "d1", "kind": "user", "text": "解释 ultracode 和 multitask 的区别，不要启动任务。"}, {"id": "d2", "kind": "assistant", "text": "给出两种编排方式的对比说明。"}],
+      "coverage": {"events": "complete", "lastVisible": "d2"}
+    }
+  ]
+}
