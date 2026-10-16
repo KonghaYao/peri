@@ -103,6 +103,22 @@
 `finish_setup` 的失败分支需要注入保存接缝才能单测，本批不引入该接缝（E2E `fresh-setup.test.ts`
 覆盖成功路径）。
 
+## PR #231 评审处理（CodeRabbit，`c7e9b2a` 快照）
+
+1. **login 动作目标与命中同源**（属实，已修 `1ab44ef81`）：`enter_edit_row` /
+   `begin_confirm_delete` 原先按光标下标读实时 `PROVIDER_LIST`，而命中来自本帧快照
+   `ctx.providers`，投影每 2s 重派生——渲染到事件之间列表一变就会作用到另一项。现两者同源；
+   确认门的实时列表校验仍由 `confirm_delete` / `provider_list_contains` 承担。
+2. **theme 失败后句柄保留未保存值**（属实，已修 `1ab44ef81`）：`persist_theme` /
+   `toggle_daily_color` 原先先写 `TUI_CONFIG_HANDLE` / `PERI_CONFIG_HANDLE` 再落盘，失败后
+   面板显示的仍是未保存值，违反本批写进设计文档的契约。现改为候选副本落盘成功才提交句柄；
+   主题预览仍由 `switch_theme_atoms` 承担（不经句柄），预览行为不变。
+3. **`panel-mcp-icon-unknown` 缺 key**（属实，已修 `1ab44ef81`）：`mcp/detail.rs` 对未知状态
+   调该 key，两个 locale 都未定义，界面会显示原始 key。已补 en / zh-CN。
+4. **flake 归属错误**（属实，本质是文档问题，已改）：见「交付证据 3」。新用例不能靠基线对照
+   归为预先存在，已改记为「本批引入的隔离问题」并列入待完成项。
+5. 复核后未采纳的部分：无。四条全部属实。
+
 ## 已完成（按提交）
 
 | 提交 | 内容 |
@@ -136,6 +152,8 @@
 | `497f080c2` | 批次 D 文档：设计文档增「配置落盘边界」；code-index 增该规则路由；本 issue 更新批次表/用例数/证据/清理/决策 9-11 与三笔提交补记；`display-coverage.md` 同步 AskUser popup 删除 |
 | `b68e1f033` | 向导审计结论文档化（批次 D 剩余项：无适用改动 + 逐条证据），批次 D 标记完成；记录密钥掩码两套样式待产品决策 |
 | `66fc0fa24` | 配置落盘边界写入 `peri-tui/CLAUDE.md`（不变量 + 任务路由），补记 `b68e1f033` |
+| `c7e9b2a14` | 如实记录全量测试抖动与基线对照（PR #231 评审指出其中 tasks 用例的归属有误，后由 `1ab44ef81` 的文档提交修正） |
+| `1ab44ef81` | 处理 PR #231 评审：login 动作目标改取本帧快照（与命中同源）、theme 落盘成功才提交句柄、补 `panel-mcp-icon-unknown` 文案；flake 归属与新的待完成项随后记入本文档 |
 
 ## 交付证据（方案 §11）
 
@@ -146,16 +164,17 @@
    **2002 passed / 0 failed / 6 ignored**（净增 157 例，含 12 个新增测试文件）；新增覆盖确认期间
    列表刷新、切会话旧响应、关闭重开、结果未知三态、同 key 在途唯一、快照提交门与失效门、
    配置落盘边界（成功/失败提示与失败不发布）、删除候选取舍。
-   已知 flake（预先存在、与本批改动无关，单跑必过）：`kit::steer_consumer::tests` 的两例
-   （`test_slow_session_preparation_is_not_capped_by_receipt_deadline`、
-   `test_shutdown_during_preparation_keeps_unadmitted_input_identity`）、`kit::panels::tasks::
-   tests::operations::reset_before_completion_discards_cancel_notification`、
-   `kit::panels::plugin::guard_tests::stale_session_or_reset_event_cannot_cancel_new_loading`。
-   证据：这些模块本批 diff 为空；失败例隔离重跑 3/3 通过；`steer_consumer` 全模块隔离 10/10
-   通过；收口后 15 轮全量出现 2 轮失败（1 轮 2 例 `steer_consumer`、1 轮 1 例 plugin guard），
+   已知 flake——**已修正归属**（PR #231 评审指出）：`kit::panels::tasks::tests::operations::
+   reset_before_completion_discards_cancel_notification` 不属于「预先存在」：该用例由本批
+   `7abae1806` 新增（`tasks/tests/operations.rs` 是新文件），基线 `56a8ccd8d` 不含它，基线
+   对照无法证明它此前会抖。它的失败在收口后 15 轮里出现 1 轮（该用例已 `#[serial]`，读写的
+   `BRIDGE_RESET_COUNTER` 是跨用例共享的全局 atom），**按本批引入的隔离问题记为待完成项**。
+   其余三例（`kit::steer_consumer::tests` 两例、`kit::panels::plugin::guard_tests` 一例）仍是
+   预先存在：这些模块本批 diff 为空，失败例隔离重跑 3/3 通过、`steer_consumer` 全模块隔离
+   10/10 通过；收口后 15 轮全量 2 轮失败（1 轮 2 例 `steer_consumer`、1 轮 1 例 plugin guard），
    其余 13 轮 2002 全绿；基线 worktree `56a8ccd8d` 同命令 9 轮全绿（基线例数 1845、采样时负载
    更低），并行 worker 把改动 stash 后的基线 10 轮出现 2 例 plugin guard。抖动面是跨用例共享
-   全局 atom + 超时驱动的用例，属预存测试隔离问题，单列跟进，本批不修。
+   全局 atom + 超时驱动的用例，单列跟进，本批不修。
 4. **性能与体积记录**：见「基线」节。
 5. **清理记录**：删除 `popups/ask_user_popup.rs`（386 行）及其测试与模块声明；删除
    `popup_overlay::close_ask_user_popup_for_request/for_owner`（旧弹窗删除后已无调用者的
@@ -219,3 +238,10 @@
 9. 密钥掩码存在两套样式：向导 `mask_api_key`（`••••`，保留首尾各 4 位）、Login
    `mask_api_key_display`（`*`，保留末 4 位）。两者都是正确掩码、无明文泄漏，统一属展示一致性
    改动（会改变其中一处的可见输出），待产品决策，本批不改。
+10. `kit::panels::tasks::tests::operations::reset_before_completion_discards_cancel_notification`
+    是本批新增用例（`7abae1806`），其抖动属本批引入的测试隔离问题：用例已 `#[serial]`，但读取的
+    `BRIDGE_RESET_COUNTER` 是跨用例共享的全局 atom，非 serial 的写入者仍能干扰。修法（把相关写入
+    者一并纳入 serial，或让断言不依赖全局计数值）未在本批做，列为待完成。
+11. 无测试校验「`i18n::tr` 的字面量 key 存在于 `locales/*/main.ftl`」——`panel-mcp-icon-unknown`
+    缺失就是这样漏到评审阶段的（PR #231 第 3 条）。补一条扫描源码字面量 key 的回归测试属新工作，
+    本批不引入，列为待完成。
