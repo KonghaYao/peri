@@ -91,6 +91,80 @@ fn page_where_filters_without_losing_sequence_metadata() {
 }
 
 #[test]
+fn page_where_resumes_from_middle_tail_and_future_cursor() {
+    let log = BoundedEventLog::new(8);
+    for value in [1, 2, 3, 4, 5] {
+        log.append(value);
+    }
+    let middle = log.page_where(Some(2), 2, |_| true);
+    assert_eq!(middle.entries, vec![3, 4], "中间游标从 cursor+1 起读");
+    assert_eq!(middle.head_sequence, 5);
+    assert_eq!(middle.truncated_before, 1);
+
+    let tail = log.page_where(Some(4), 10, |_| true);
+    assert_eq!(tail.entries, vec![5], "尾游标读到 head 为止");
+
+    let exhausted = log.page_where(Some(5), 10, |_| true);
+    assert!(exhausted.entries.is_empty(), "游标等于 head：空页");
+    assert_eq!(exhausted.head_sequence, 5);
+
+    let future = log.page_where(Some(99), 10, |_| true);
+    assert!(future.entries.is_empty(), "未来游标（> head）返回空页");
+    assert_eq!(future.head_sequence, 5, "未来游标不回退已提交上界");
+    assert_eq!(future.truncated_before, 1);
+}
+
+#[test]
+fn page_where_on_empty_log_and_zero_limit_are_empty() {
+    let empty_log: BoundedEventLog<u32> = BoundedEventLog::new(4);
+    let page = empty_log.page_where(None, 10, |_| true);
+    assert!(page.entries.is_empty());
+    assert_eq!(page.head_sequence, 0);
+    assert_eq!(page.truncated_before, 1);
+
+    let log = BoundedEventLog::new(8);
+    for value in [1, 2, 3] {
+        log.append(value);
+    }
+    let zero_limit = log.page_where(None, 0, |_| true);
+    assert!(zero_limit.entries.is_empty(), "limit = 0 → 空页");
+    assert_eq!(zero_limit.head_sequence, 3, "空页仍携带水位元数据");
+}
+
+#[test]
+fn page_where_stale_cursor_starts_at_retention_boundary() {
+    let log = BoundedEventLog::new(2);
+    for value in [1, 2, 3, 4] {
+        log.append(value);
+    }
+    // 保留边界 3：旧游标与 None 都从边界起读，页内 truncated_before 表达断档。
+    let stale = log.page_where(Some(1), 10, |_| true);
+    assert_eq!(stale.entries, vec![3, 4], "旧游标不得重读已淘汰条目");
+    assert_eq!(stale.truncated_before, 3);
+
+    let from_none = log.page_where(None, 10, |_| true);
+    assert_eq!(from_none.entries, vec![3, 4]);
+}
+
+#[test]
+fn page_where_applies_predicate_after_start_and_keeps_order() {
+    let log = BoundedEventLog::new(8);
+    for value in [1, 2, 3, 4, 5, 6] {
+        log.append(value);
+    }
+    let filtered = log.page_where(Some(1), 2, |value| value % 2 == 0);
+    assert_eq!(
+        filtered.entries,
+        vec![2, 4],
+        "谓词在游标定位之后生效，按 sequence 升序取前 2 条"
+    );
+
+    let none_matched = log.page_where(Some(3), 10, |value| *value > 100);
+    assert!(none_matched.entries.is_empty(), "谓词全不命中：空页");
+    assert_eq!(none_matched.head_sequence, 6);
+}
+
+#[test]
 fn latest_returns_tail_in_ascending_order() {
     let log = BoundedEventLog::new(8);
     for value in [1, 2, 3, 4, 5] {
