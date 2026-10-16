@@ -177,3 +177,110 @@ async fn load_ignores_legacy_execution_admission_metadata() {
     assert!(CONFIRM_PAYLOAD.state().read().is_none());
     assert_no_request(&server, Duration::from_millis(50)).await;
 }
+
+/// `/clear` 先关闭旧会话：`-32010` 是 ACP 明示的可重试错误，客户端必须在预算内
+/// 重放同一 `session/close`，而不是把 incomplete 当成切换失败。
+#[tokio::test]
+#[serial_test::serial]
+async fn close_incomplete_is_replayed_before_establishing_next_session() {
+    let _guard = UiAtomsGuard::capture();
+    let (client, server) = interactive_client();
+    let opener = client.clone();
+    let first = tokio::spawn(async move { opener.new_session("/w", None).await });
+    let (id, method, params) = next_request(&server).await;
+    assert_eq!(method, "session/new");
+    assert_eq!(params["cwd"], "/w");
+    server
+        .send_response(id, Ok(json!({ "sessionId": "first" })))
+        .await
+        .unwrap();
+    assert_eq!(first.await.unwrap().unwrap(), "first");
+
+    let reopener = client.clone();
+    let second = tokio::spawn(async move { reopener.new_session("/w", None).await });
+    let (id, method, params) = next_request(&server).await;
+    assert_eq!(method, "session/close");
+    assert_eq!(params["sessionId"], "first");
+    server
+        .send_response(id, Err(AcpError::new(-32010, "Session close incomplete")))
+        .await
+        .unwrap();
+    let (id, method, params) = next_request(&server).await;
+    assert_eq!(method, "session/close");
+    assert_eq!(
+        params["sessionId"], "first",
+        "incomplete 必须重放同一关闭请求"
+    );
+    server.send_response(id, Ok(json!({}))).await.unwrap();
+    let (id, method, params) = next_request(&server).await;
+    assert_eq!(method, "session/new");
+    assert_eq!(params["cwd"], "/w");
+    server
+        .send_response(id, Ok(json!({ "sessionId": "second" })))
+        .await
+        .unwrap();
+    assert_eq!(second.await.unwrap().unwrap(), "second");
+    assert!(client.check_restore_error().is_ok());
+    assert_eq!(client.current_session_id().as_deref(), Some("second"));
+}
+
+/// 关闭旧会话持续 incomplete：失败必须保持可重试——不得写入粘滞
+/// `restore_error`，否则后续每次发送/建立都被同一条陈旧错误拦截。
+#[tokio::test]
+#[serial_test::serial]
+async fn incomplete_close_failure_stays_retryable() {
+    let _guard = UiAtomsGuard::capture();
+    let (client, server) = interactive_client();
+    let opener = client.clone();
+    let first = tokio::spawn(async move { opener.new_session("/w", None).await });
+    let (id, method, _) = next_request(&server).await;
+    assert_eq!(method, "session/new");
+    server
+        .send_response(id, Ok(json!({ "sessionId": "first" })))
+        .await
+        .unwrap();
+    assert_eq!(first.await.unwrap().unwrap(), "first");
+
+    let reopener = client.clone();
+    let mut attempt = tokio::spawn(async move { reopener.new_session("/w", None).await });
+    let mut replays = 0usize;
+    let error = loop {
+        tokio::select! {
+            result = &mut attempt => break result.unwrap().unwrap_err(),
+            message = server.recv() => {
+                let Some(IncomingMessage::Request { id, method, params }) = message else {
+                    panic!("关闭预算内客户端只应重放 session/close");
+                };
+                assert_eq!(method, "session/close");
+                assert_eq!(params["sessionId"], "first");
+                replays += 1;
+                server
+                    .send_response(id, Err(AcpError::new(-32010, "Session close incomplete")))
+                    .await
+                    .unwrap();
+            }
+        }
+    };
+    assert_eq!(error.code, -32010);
+    assert!(
+        replays > 1,
+        "incomplete 必须在预算内重放：replays={replays}"
+    );
+    assert!(
+        client.check_restore_error().is_ok(),
+        "关闭失败不得写入粘滞错误"
+    );
+    assert!(!client.has_session(), "关闭失败后本会话身份不再保留");
+
+    let retry_client = client.clone();
+    let retry = tokio::spawn(async move { retry_client.new_session("/w", None).await });
+    let (id, method, params) = next_request(&server).await;
+    assert_eq!(method, "session/new");
+    assert_eq!(params["cwd"], "/w");
+    server
+        .send_response(id, Ok(json!({ "sessionId": "second" })))
+        .await
+        .unwrap();
+    assert_eq!(retry.await.unwrap().unwrap(), "second");
+    assert!(client.check_restore_error().is_ok());
+}

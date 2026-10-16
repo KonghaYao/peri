@@ -543,6 +543,7 @@ impl AgentExecutor for WorkflowAgentExecutor {
             Err(detail) => {
                 drop(context);
                 let _ = await_workflow_forwarder(event_bus, forwarder_handle).await;
+                close_session_scope(&session, &session_id).await;
                 return AgentRunResult::Dead {
                     reason: Some("execution-blocked".into()),
                     detail: Some(detail),
@@ -575,7 +576,30 @@ impl AgentExecutor for WorkflowAgentExecutor {
             drop(handle);
         }
 
+        close_session_scope(&session, &session_id).await;
+
         projected.result
+    }
+}
+
+/// 结清 workflow 子会话作用域（幂等）。
+///
+/// workflow agent 的 session 使用独立取消令牌，父会话关闭不会级联到它；
+/// 若不在本 run 收尾时结清，其 workspace 任务作用域与外部执行证据会一直
+/// 保留在会话 MCP 池绑定中，父会话关闭将被 `verify_environment_close` 以
+/// `Incomplete: child ... resources or required messages unfinished` 拒绝
+/// （-32010），且父会话停在半关闭态，重试也无法成功。
+///
+/// 失败只记录：run 结果已产出，清理不完整不得改写结果语义。
+async fn close_session_scope(session: &Arc<crate::session::Session>, session_id: &str) {
+    if let Err(error) =
+        crate::session::subagent::close_subagent_session_scope(session.clone()).await
+    {
+        warn!(
+            session_id = %session_id,
+            %error,
+            "workflow agent session scope close incomplete"
+        );
     }
 }
 

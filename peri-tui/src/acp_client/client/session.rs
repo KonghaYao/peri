@@ -139,15 +139,21 @@ impl AcpTuiClient {
         self.settle_claims_owned(start.claims).await;
         let old_id = start.from;
         if let Some(ref old_sid) = old_id {
-            let params = json!({ "sessionId": old_sid });
-            if let Err(e) = self.transport.send_request("session/close", params).await {
+            if let Err(error) = self.close_previous_session(old_sid).await {
                 self.lifecycle.fail_transition(start.generation);
                 transition.disarm();
                 if self.projection_mode == ClientProjectionMode::Interactive {
                     crate::kit::session_boundary::project_session_boundary(None);
                 }
-                *self.restore_error.lock().unwrap() = Some(e.to_string());
-                return Err(e);
+                // 旧会话清理失败不写入粘滞 `restore_error`：那会让后续每次
+                // 建立/发送都被同一条陈旧错误拦截且无从清除。保持可重试。
+                *self.restore_error.lock().unwrap() = None;
+                tracing::warn!(
+                    session_id = %old_sid,
+                    %error,
+                    "previous session close incomplete; retry is allowed"
+                );
+                return Err(error);
             }
         }
 
@@ -194,6 +200,32 @@ impl AcpTuiClient {
             crate::kit::acp_events::request_bg_task_snapshot();
         }
         Ok(session_id)
+    }
+
+    /// Close the previous session before switching identity.
+    ///
+    /// `-32010`（close incomplete）是 ACP 明示的可重试错误：在预算内重放同一
+    /// 请求，与 `@peri-sdk` 的 `closeUntilSettled` 同一语义。重放耗尽仍不完整
+    /// 时返回最后一次错误；调用方保持状态可重试，不把它写成粘滞
+    /// `restore_error`。
+    async fn close_previous_session(&self, session_id: &str) -> Result<(), AcpError> {
+        const INCOMPLETE_CLOSE_CODE: i64 = -32010;
+        const DRAIN_BUDGET: std::time::Duration = std::time::Duration::from_secs(3);
+        const RETRY_INTERVAL: std::time::Duration = std::time::Duration::from_millis(50);
+        let deadline = std::time::Instant::now() + DRAIN_BUDGET;
+        loop {
+            let params = json!({ "sessionId": session_id });
+            match self.transport.send_request("session/close", params).await {
+                Ok(_) => return Ok(()),
+                Err(error) => {
+                    let now = std::time::Instant::now();
+                    if error.code != INCOMPLETE_CLOSE_CODE || now >= deadline {
+                        return Err(error);
+                    }
+                    tokio::time::sleep(RETRY_INTERVAL.min(deadline - now)).await;
+                }
+            }
+        }
     }
 
     #[cfg(test)]
@@ -417,15 +449,21 @@ impl AcpTuiClient {
         if let Some(ref old_sid) = old_id
             && old_sid != session_id
         {
-            let params = json!({ "sessionId": old_sid });
-            if let Err(e) = self.transport.send_request("session/close", params).await {
+            if let Err(error) = self.close_previous_session(old_sid).await {
                 self.lifecycle.fail_transition(start.generation);
                 transition.disarm();
                 if self.projection_mode == ClientProjectionMode::Interactive {
                     crate::kit::session_boundary::project_session_boundary(None);
                 }
-                *self.restore_error.lock().unwrap() = Some(e.to_string());
-                return Err(e);
+                // 与 `new_session_under_gate` 同一口径：清理旧会话失败不是
+                // 恢复失败，不写入粘滞 `restore_error`（含本函数入口的占位）。
+                *self.restore_error.lock().unwrap() = None;
+                tracing::warn!(
+                    session_id = %old_sid,
+                    %error,
+                    "previous session close incomplete; retry is allowed"
+                );
+                return Err(error);
             }
         }
 

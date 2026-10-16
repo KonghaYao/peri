@@ -261,11 +261,20 @@ async fn run_workflow_mcp(scenario: Scenario<'_>) -> Outcome {
         assert_eq!(sessions.len(), 1);
         sessions[0].clone()
     };
-    assert!(pool
+    let agent_manager = pool
         .session_bindings
         .read()
         .manager(&agent_session_id)
-        .is_some());
+        .expect("workflow agent 会话必须绑定 TaskManager");
+    assert!(
+        agent_manager
+            .as_any()
+            .downcast_ref::<TaskManager>()
+            .expect("workflow agent 绑定 peri-agent TaskManager")
+            .session_close_settled(),
+        "workflow run 收尾必须结清子会话作用域：父会话关闭要求 child idle，\
+         否则 verify_environment_close 以 -32010 拒绝父会话关闭"
+    );
     assert_ne!(agent_session_id, SPOOFED);
     assert_ne!(agent_session_id, ROOT);
     if let Some(token) = pool
