@@ -129,6 +129,7 @@ fn test_view_revision_advances_on_model_view_mutations() {
         MessageProjectionDirective {
             policy_version: 2,
             entries: vec![],
+            superseded_by: None,
         },
     );
     rev = assert_revision_advanced(&t, rev, "set_flags_projection");

@@ -409,6 +409,27 @@ pub enum AcpEventData {
     PluginActionResult(PluginActionResult),
     /// `"plugin-search-result"` — Discover 搜索返回。
     PluginSearchResult(PluginSearchResult),
+
+    // -- 本地事件（不来自 wire）--------------------------------------------
+    /// 历史页响应（`session/load` + cursor 的响应体）经消费者注入桥接任务。
+    ///
+    /// 它不是 wire 事件：`history_page_consumer` 在 RPC 之后构造它，走
+    /// `LOCAL_EVENT_TX` 与本地提交同一入口，从而与 `committed` 的其它写入者
+    /// 串行（REQ-C01、A23）。
+    HistoryPageLoaded {
+        response: Box<crate::kit::history_paging::HistoryPageResponse>,
+    },
+
+    /// 回放条目位置标记：从 wire 的 `_meta.periEntryId` / `_meta.periPosition` 解出，
+    /// 由 notifier 在实际回放通知**之前**注入桥接任务。
+    ///
+    /// 它让客户端知道「本条目的展示单元从哪个槽位开始」——首屏的区间索引据此建立，
+    /// 之后的更早历史才能插到正确区间（REQ-H01-6、A20），并按 `entryId` 与首屏去重。
+    /// 继承区条目没有 position，因此不会有本事件。
+    ReplayEntryMarked {
+        entry_id: String,
+        position: u64,
+    },
 }
 
 impl AcpEventData {

@@ -296,8 +296,10 @@ async fn test_full_compact_summarizes_and_excludes_canonical_report() {
             .contains("REPORT_TAIL_FACT"),
         "Full 摘要请求必须包含超过旧 2000 字符预览的报告结论"
     );
-    assert!(transcript.flags(reminder_id).excluded);
-    assert!(transcript.get(reminder_id).is_some());
+    assert!(
+        transcript.get(reminder_id).is_none(),
+        "Full 提交后已排除条目必须从热态释放（持久化事实仍带 excluded）"
+    );
     assert!(!transcript
         .visible_model_messages()
         .unwrap()
@@ -339,8 +341,10 @@ async fn full_excludes_loaded_root_history() {
     .unwrap();
 
     assert_eq!(result.affected_count, 2);
-    assert!(transcript.flags(question.id()).excluded);
-    assert!(transcript.flags(answer.id()).excluded);
+    assert!(
+        transcript.get(question.id()).is_none() && transcript.get(answer.id()).is_none(),
+        "Full 提交后已加载的旧历史必须从热态释放"
+    );
     let provider_messages = transcript.visible_model_messages().unwrap();
     assert_eq!(
         provider_messages.len(),
@@ -440,13 +444,10 @@ async fn full_compact_uses_historical_tool_results_without_local_file_re_read() 
     assert!(model_input.contains("REMOTE_SKILL_MARKER"));
     assert!(!model_input.contains("LOCAL_FILE_MARKER"));
     assert!(!model_input.contains("LOCAL_SKILL_MARKER"));
-    assert!(transcript.flags(read).excluded);
-    assert!(transcript.flags(result).excluded);
-    assert!(transcript.entries().iter().any(|entry| entry.id() == read));
-    assert!(transcript
-        .entries()
-        .iter()
-        .any(|entry| entry.id() == result));
+    assert!(
+        transcript.get(read).is_none() && transcript.get(result).is_none(),
+        "Full 提交后 own 工具配对必须从热态释放"
+    );
     assert_eq!(transcript.visible_messages().len(), 1, "Full 仅追加摘要");
 }
 
@@ -509,12 +510,20 @@ async fn test_full_compact_sqlite_persists_lifecycle_and_preserves_ancestor_and_
         "成功提交的 Full Compact 必须标记为 history replacement"
     );
     assert!(
+        transcript.get(ancestor.id()).is_some(),
+        "ancestor 必须留在热态"
+    );
+    assert!(
         !transcript.flags(ancestor.id()).excluded,
         "ancestor 不得被排除"
     );
+    assert!(transcript.get(own_system).is_some(), "System 必须留在热态");
     assert!(!transcript.flags(own_system).excluded, "System 不得被排除");
-    assert!(transcript.flags(own_human).excluded, "own Human 必须被排除");
-    assert!(transcript.flags(own_ai).excluded, "own AI 必须被排除");
+    assert!(
+        transcript.get(own_human).is_none(),
+        "own Human 必须从热态释放"
+    );
+    assert!(transcript.get(own_ai).is_none(), "own AI 必须从热态释放");
 
     let summary = transcript
         .entries()
@@ -529,8 +538,14 @@ async fn test_full_compact_sqlite_persists_lifecycle_and_preserves_ancestor_and_
         .load_session_snapshot(&thread_id)
         .await
         .expect("加载 SQLite 快照失败");
+    // 热态只剩有效集合，因此与存储的**有效视图**逐条对齐；完整历史（含被释放的
+    // excluded 原文与标记）仍留在存储里，由上面的 `stored` 核对。
+    let active = store
+        .load_active_snapshot(&thread_id)
+        .await
+        .expect("加载 SQLite 有效视图失败");
     assert_eq!(
-        stored
+        active
             .payloads
             .iter()
             .map(PersistedPayload::id)
@@ -540,7 +555,7 @@ async fn test_full_compact_sqlite_persists_lifecycle_and_preserves_ancestor_and_
             .iter()
             .map(|entry| entry.id())
             .collect::<Vec<_>>(),
-        "内存与 SQLite history 必须一致"
+        "内存与 SQLite 有效视图必须一致"
     );
     assert!(transcript
         .entries()
@@ -555,6 +570,47 @@ async fn test_full_compact_sqlite_persists_lifecycle_and_preserves_ancestor_and_
     assert!(!stored.flags.contains_key(&own_system));
     assert!(stored.flags[&own_human].excluded);
     assert!(stored.flags[&own_ai].excluded);
+
+    // 取代关系（写入侧契约）：被归档条目在同一批 flags 里记下取代它的摘要 id。
+    for id in [own_human, own_ai] {
+        assert_eq!(
+            stored.flags[&id].superseded_by(),
+            Some(summary.id()),
+            "每条被归档条目必须指向追加的摘要消息 {id:?}"
+        );
+    }
+    // 「每条」由整体核对：存储里带 excluded 的条目恰好是本次被归档的两条。
+    assert_eq!(
+        stored.flags.values().filter(|flags| flags.excluded).count(),
+        2,
+        "本次归档只排除 own Human 与 own AI"
+    );
+    // ② 摘要自身留在有效视图里，且没有取代关系（它取代别人，不被别人取代）。
+    assert!(!transcript.flags(summary.id()).excluded, "摘要不得被排除");
+    assert_eq!(transcript.flags(summary.id()).superseded_by(), None);
+    assert!(
+        stored
+            .flags
+            .get(&summary.id())
+            .is_none_or(|flags| !flags.excluded),
+        "摘要的有效性由 flags 缺省（非 excluded）表达"
+    );
+    // ③ 未被排除的条目不带取代关系。
+    for id in [ancestor.id(), own_system] {
+        assert_eq!(
+            transcript.flags(id).superseded_by(),
+            None,
+            "未被排除的条目不得带取代关系 {id:?}"
+        );
+        assert_eq!(
+            stored
+                .flags
+                .get(&id)
+                .and_then(|flags| flags.superseded_by()),
+            None,
+            "存储侧同样不得给未排除条目写取代关系 {id:?}"
+        );
+    }
 }
 
 #[tokio::test]

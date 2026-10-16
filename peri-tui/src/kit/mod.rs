@@ -24,6 +24,8 @@ pub(crate) mod entry_render_cache;
 pub mod event_handlers;
 pub mod exit_hint;
 pub mod focus_router;
+pub mod history_page_consumer;
+pub mod history_paging;
 pub mod hitl_response;
 pub mod image_overlay;
 pub mod image_preview;

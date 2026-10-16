@@ -2,6 +2,21 @@ import { DocModel } from "./doc-model";
 import { TurnMachine } from "./turn-machine";
 import { finite, object, string, type RecordValue } from "./protocol";
 
+/**
+ * Compact 展示状态（Session Doc 的 `compactionStatus`）。
+ *
+ * `running` 只表示「已开始、还没上报终态」；`completed` / `failed` / `cancelled` 都是
+ * 终态。手动与自动 Compact 共用这一份取值，失败必须离开 `running`（REQ-C02、验收 A12）。
+ */
+export const COMPACTION_STATUS = {
+    running: "running",
+    completed: "completed",
+    failed: "failed",
+    cancelled: "cancelled",
+} as const;
+
+export type CompactionStatus = typeof COMPACTION_STATUS[keyof typeof COMPACTION_STATUS];
+
 /** Display-safe session metadata; chat content and task lifecycles live in their own modules. */
 export class SessionProjection {
     constructor(private readonly docs: DocModel, private readonly turns: TurnMachine) {}
@@ -159,13 +174,28 @@ export class SessionProjection {
             this.turns.exit("completed");
             return true;
         }
-        if (type === "agent_execution_failed") return this.turns.exit("error");
+        if (type === "agent_execution_failed") {
+            // 轮次失败时 Compact 不可能再上报终态：不能让展示停在 running（A12）。
+            this.settleCompaction(COMPACTION_STATUS.failed);
+            return this.turns.exit("error");
+        }
+        if (type === "command_feedback" && value) {
+            // 手动 Compact 的失败/取消只经这条通道到达：pipeline 的 EarlyReturn / Cancelled
+            // 映射成 `AcpEvent::CommandFeedback`（`{level, message, channel}`，
+            // peri-acp/src/event/mod.rs）。反馈本身不带命令名，所以只有确认「有 Compact
+            // 正在进行」时才把它当成 Compact 的终态；其它命令的反馈不得改写 Compact 展示。
+            const message = string(value.message);
+            const level = string(value.level);
+            if (level === "error") return this.settleCompaction(COMPACTION_STATUS.failed, message);
+            if (level === "warning") return this.settleCompaction(COMPACTION_STATUS.cancelled, message);
+            return false;
+        }
         if (type === "compact_started") {
-            info.set("compactionStatus", "running");
+            info.set("compactionStatus", COMPACTION_STATUS.running);
             return true;
         }
         if (type === "compact_completed" && value) {
-            const safe: RecordValue = { status: "completed" };
+            const safe: RecordValue = { status: COMPACTION_STATUS.completed };
             const trigger = string(value.trigger);
             const strategy = string(value.strategy);
             if (trigger === "auto" || trigger === "manual") safe.trigger = trigger;
@@ -175,7 +205,7 @@ export class SessionProjection {
                 if (number !== null) safe[field] = number;
             }
             info.set("compaction", safe);
-            info.set("compactionStatus", "completed");
+            info.set("compactionStatus", COMPACTION_STATUS.completed);
             return true;
         }
         if (type === "rewind_completed") {
@@ -183,5 +213,20 @@ export class SessionProjection {
             return true;
         }
         return false;
+    }
+
+    /**
+     * Compact 的终态收敛（REQ-C02、A12）：只有确实在进行的 Compact 接受终态，
+     * 终态一旦上报就不再被后续信号改写（`compact_completed` 之后紧跟的通用命令反馈
+     * 不得把它翻回失败）。`compaction` 展示始终描述**最近一次** Compact 的终态。
+     */
+    private settleCompaction(status: CompactionStatus, message?: string | null): boolean {
+        const info = this.docs.info();
+        if (info.get("compactionStatus") !== COMPACTION_STATUS.running) return false;
+        const display: RecordValue = { status };
+        if (message) display.message = message;
+        info.set("compaction", display);
+        info.set("compactionStatus", status);
+        return true;
     }
 }

@@ -2,6 +2,7 @@ import type { JsonRpcNotification } from "../transport/types";
 import type { AgentOptions } from "../agent/types";
 import { ChatProjection } from "./chat-projection";
 import { DocModel } from "./doc-model";
+import { HistoryMerge, decodeHistoryPageItems, historyEntryRefOf } from "./history-merge";
 import { InputQueueProjection } from "./input-queue-projection";
 import { InteractionProjection } from "./interaction-projection";
 import { decodeAgentEvent, object, string } from "./protocol";
@@ -9,16 +10,35 @@ import { SessionProjection } from "./session-projection";
 import { TaskProjection } from "./task-projection";
 import { TurnMachine, type TurnExitStatus } from "./turn-machine";
 
+/**
+ * 已加载历史窗口的浏览身份与翻页进度（REQ-C01、REQ-H02）。
+ *
+ * `snapshotToken` 是**同一次浏览**的范围身份：页与页、页与首屏只在同一个 token 内可比。
+ * rewind／重新初始 load 之后旧 token 一律作废，旧范围响应整页丢弃。
+ */
+type HistoryWindow = { snapshotToken: string; nextCursor: string | null };
+
+/** 一页响应的合并结果；`stale` = 会话或浏览快照已变（验收 A11），`malformed` = 形状不合契约。 */
+export type HistoryPageMerge = {
+    applied: number;
+    nextCursor: string | null;
+    status: "merged" | "stale" | "malformed";
+};
+
 /** One Agent's live ACP projection. Session.start filters sessionId before accept. */
 export class SessionDocs {
     private readonly model = new DocModel();
     private readonly turns = new TurnMachine(this.model);
     private readonly chatProjection = new ChatProjection(this.model, this.turns);
+    private readonly historyMerge = new HistoryMerge(this.model);
     private readonly sessionProjection = new SessionProjection(this.model, this.turns);
     private readonly taskProjection = new TaskProjection(this.model);
     private readonly inputQueue = new InputQueueProjection(this.model);
     private readonly interaction = new InteractionProjection(this.model);
     private readonly seenEvents = new Set<string>();
+    private historyWindow: HistoryWindow | null = null;
+    /** 窗口被 rewind 作废：游标没了，但「范围失效」与「从未协商」是两回事（验收 A11）。 */
+    private historyInvalidated = false;
     private taskSnapshotInFlight = false;
     private destroyed = false;
 
@@ -34,12 +54,71 @@ export class SessionDocs {
         this.model.transactBoth(() => { for (const notification of notifications) this.accept(notification); });
     }
 
+    /**
+     * 一次安装本次初始 load 的回放批次（REQ-H04）：整批只发一次 Yjs 事务，
+     * 观察者看到的是「装完」的快照，不存在半份首屏。
+     */
+    acceptHistoryBatch(notifications: Iterable<JsonRpcNotification>): void {
+        if (this.destroyed) return;
+        this.acceptBatch(notifications);
+    }
+
+    /** 记录本次初始 load 的浏览身份与首游标；响应未协商分页时窗口为空。 */
+    seedHistoryWindow(response: unknown): void {
+        if (this.destroyed) return;
+        const value = object(response);
+        const snapshotToken = string(value?.snapshotToken);
+        this.historyWindow = snapshotToken
+            ? { snapshotToken, nextCursor: string(value?.nextCursor) }
+            : null;
+        this.historyInvalidated = false;
+    }
+
+    /** 翻页进度：更早方向的下一游标；`null` = 没有可用游标（未协商／已作废／没有更早内容）。 */
+    historyCursor(): string | null { return this.historyWindow?.nextCursor ?? null; }
+    /** 窗口是否存在：有窗口但游标为 `null` 表示**更早方向确实没有内容**（验收 A15）。 */
+    historyWindowOpen(): boolean { return this.historyWindow !== null; }
+    /** 窗口是否因 rewind 作废（不是「本连接从未协商过分页」）。 */
+    historyWindowInvalidated(): boolean { return this.historyInvalidated; }
+
+    /** rewind：范围真的变了，游标与浏览身份一起作废，翻页要等下一次初始 load 才恢复。 */
+    invalidateHistoryWindow(): void {
+        this.historyWindow = null;
+        this.historyInvalidated = true;
+    }
+
+    /**
+     * 合并一页历史（REQ-C01、REQ-H01-3）：按 `entryId` + 子项位置幂等并进正确区间，
+     * 只改历史窗口，不碰实时执行状态、plan／任务／输入队列与未决交互。
+     */
+    mergeHistoryPage(sessionId: string, response: unknown): HistoryPageMerge {
+        if (this.destroyed) return { applied: 0, nextCursor: null, status: "stale" };
+        const value = object(response);
+        const items = decodeHistoryPageItems(value?.items);
+        const snapshotToken = string(value?.snapshotToken);
+        const responseSession = string(value?.sessionId);
+        if (!value || items === null) return { applied: 0, nextCursor: null, status: "malformed" };
+        const window = this.historyWindow;
+        if (!window || !snapshotToken || snapshotToken !== window.snapshotToken
+            || (responseSession !== null && responseSession !== sessionId))
+            return { applied: 0, nextCursor: null, status: "stale" };
+        let applied = 0;
+        this.model.transactBoth(() => {
+            for (const item of items) if (this.historyMerge.applyEntry(item, item.subItems)) applied++;
+        });
+        const nextCursor = string(value.nextCursor);
+        this.historyWindow = { snapshotToken, nextCursor };
+        return { applied, nextCursor, status: "merged" };
+    }
+
     destroy(): void {
         if (this.destroyed) return;
         this.destroyed = true;
         this.interaction.abortAll();
         this.taskProjection.setSnapshotRequester(null);
         this.seenEvents.clear();
+        this.historyMerge.reset();
+        this.invalidateHistoryWindow();
         this.model.destroy();
     }
     completeTurn(status: TurnExitStatus = "completed"): boolean {
@@ -100,10 +179,16 @@ export class SessionDocs {
         if (notification.method === "session/update") {
             const update = object(params.update);
             if (!update) return;
-            const previousTurn = this.turns.activeTurn();
-            accepted = this.chatProjection.accept(update, params) || this.sessionProjection.acceptUpdate(update, params);
-            if (string(update.sessionUpdate) === "user_message_chunk" && previousTurn !== this.turns.activeTurn()) {
-                this.interaction.abortAll();
+            // 带条目身份的回放／历史页子项走历史投影：不建 active turn、不伪造用户输入。
+            const entryRef = historyEntryRefOf(update);
+            if (entryRef) {
+                accepted = this.historyMerge.applyEntry(entryRef, [{ position: null, update }]);
+            } else {
+                const previousTurn = this.turns.activeTurn();
+                accepted = this.chatProjection.accept(update, params) || this.sessionProjection.acceptUpdate(update, params);
+                if (string(update.sessionUpdate) === "user_message_chunk" && previousTurn !== this.turns.activeTurn()) {
+                    this.interaction.abortAll();
+                }
             }
         } else if (notification.method === "peri/agent_event") {
             const event = decodeAgentEvent(params.event_json);
@@ -129,11 +214,20 @@ export class SessionDocs {
             this.model.info().set("pendingRequestId", requestId);
             return true;
         }
-        if ((type === "compact_completed" || type === "rewind_completed") && value) {
-            if (!this.chatProjection.replaceHistory(value.messages_json, false)) return false;
-            this.interaction.abortAll();
-            this.sessionProjection.acceptAgentEvent(type, value);
-            return true;
+        if (type === "compact_completed" && value) {
+            // REQ-C02 / A12：Compact 不整表替换。模型上下文收缩不等于界面删除历史，
+            // 已加载窗口、翻页 cursor 进度、当前 turn／流式输出与未决交互全部保留；
+            // 这里只更新既有 Compact 展示语义（compaction / compactionStatus）。
+            return this.sessionProjection.acceptAgentEvent(type, value);
+        }
+        if (type === "rewind_completed" && value) {
+            // 与 Compact 分开处理：rewind 是范围真的变了（服务端推进结构版本、删除尾部行），
+            // 窗口失效并刷新（`replaceHistory`），旧游标一并作废；但执行状态与未决交互保留。
+            const refreshed = this.chatProjection.replaceHistory(value.messages_json, "preserve-execution");
+            this.historyMerge.reset();
+            this.invalidateHistoryWindow();
+            const observed = this.sessionProjection.acceptAgentEvent(type, value);
+            return refreshed || observed;
         }
         return this.inputQueue.acceptAgentEvent(type, value)
             || this.sessionProjection.acceptAgentEvent(type, value)

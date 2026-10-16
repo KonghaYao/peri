@@ -34,15 +34,9 @@ pub struct ThreadLoadRequest {
     _reservation: SessionLoadReservation,
 }
 
-impl ThreadLoadRequest {
-    #[cfg(test)]
-    pub(crate) fn thread_id(&self) -> &str {
-        &self.thread_id
-    }
-}
-
-/// Synchronous producer boundary shared by browser, confirm popup, and compact
-/// replay. Reserving here avoids relying on async consumer scheduling order.
+/// Synchronous producer boundary shared by the thread browser and the confirm
+/// popup (manual compact no longer schedules a replay, REQ-C02 / A12).
+/// Reserving here avoids relying on async consumer scheduling order.
 #[derive(Clone)]
 pub struct ThreadLoadDispatcher {
     tx: mpsc::UnboundedSender<ThreadLoadRequest>,

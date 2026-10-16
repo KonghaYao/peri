@@ -22,6 +22,8 @@ export type EntryView = {
     role: "user" | "assistant";
     status: string;
     messageId?: string;
+    /** 历史分页标记：该条目内容超过页字节目标（REQ §5.2 的 `oversize`）。 */
+    historyOversize?: boolean;
     tokenUsage?: Record<string, unknown>;
     blocks: EntryBlockView[];
 };
@@ -171,6 +173,8 @@ function entryView(value: unknown, tools: Y.Map<unknown> | null, cache: ReadCach
         };
         const messageId = str(entry.get("messageId"));
         if (messageId) result.messageId = messageId;
+        // 历史分页的 oversize 标记：消费方据此决定是否按需取正文（REQ §5.2）。
+        if (entry.get("historyOversize") === true) result.historyOversize = true;
         const usage = record(entry.get("tokenUsage"));
         if (usage) result.tokenUsage = usage;
         return result;

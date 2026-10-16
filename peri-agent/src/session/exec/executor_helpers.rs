@@ -77,6 +77,8 @@ pub struct ExecOutcome {
     /// A Full Compact committed during this turn and replaced prior visible history.
     pub history_replaced_by_compaction: bool,
     /// Canonical transcript snapshot captured after the persistence barrier.
+    /// 只含**有效**（未排除）条目：Full Compact 提交释放的 own 原文不在其中，
+    /// 完整历史（含归档原文）只能从存储读取。
     pub persisted_payloads: Vec<peri_acp_types::store::PersistedPayload>,
     /// Durable state could not be rolled back or verified; host must invalidate the session.
     pub persistence_inconsistent: bool,

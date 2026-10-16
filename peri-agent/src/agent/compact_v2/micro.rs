@@ -51,6 +51,7 @@ pub fn apply_micro_plan(transcript: &mut MessageTranscript, plan: &MicroCompactP
             MessageProjectionDirective {
                 policy_version: plan.policy_version,
                 entries,
+                superseded_by: None,
             },
         );
     }

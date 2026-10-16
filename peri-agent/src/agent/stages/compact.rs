@@ -190,7 +190,13 @@ async fn compact_core(input: CompactInput) -> (crate::error::AgentResult<Compact
 
         // G6: 记录 compact 前的可见消息数，供 cancel arm 发射 MessagesCompacted 事件使用
         let before_visible_len = transcript_owned.visible_messages().len();
-        let before_entries_len = transcript_owned.len();
+        // 「同一工作单元」判定必须在 Full 改动 transcript 之前采集：Full 追加的摘要不是
+        // 新工作，收缩释放条目后位置也不可比（水印用末尾摘要的稳定身份）。
+        let new_work_before_full = ctx
+            .compact
+            .budget_recovery
+            .lock()
+            .new_work_since_full(&transcript_owned);
 
         if let Some(key) = pressure_sample {
             ctx.compact
@@ -406,7 +412,7 @@ async fn compact_core(input: CompactInput) -> (crate::error::AgentResult<Compact
                     ctx.compact
                         .budget_recovery
                         .lock()
-                        .record_full_applied(&transcript, before_entries_len);
+                        .record_full_applied(&transcript, new_work_before_full);
                 }
                 // P1-3: 直接操作 StageContext.token_tracker
                 ctx.compact.token_tracker.write().reset();

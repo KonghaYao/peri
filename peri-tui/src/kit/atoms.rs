@@ -491,6 +491,31 @@ pub static HITL_RESPONSE_TX: OnceLock<UnboundedSender<HitlResponseAction>> = Onc
 pub static THREAD_LOAD_TX: OnceLock<crate::kit::thread_load_consumer::ThreadLoadDispatcher> =
     OnceLock::new();
 
+/// 历史页请求通道——滚动触发（message_area）→ history_page_consumer。
+///
+/// 与 `THREAD_LOAD_TX` 刻意分开：历史页是只读浏览，不参与会话装配、生命周期锁与
+/// load reservation（未取 reservation 的请求不会阻塞提交，也不会改会话绑定）。
+pub static HISTORY_PAGES_TX: OnceLock<
+    UnboundedSender<crate::kit::history_page_consumer::HistoryPageRequest>,
+> = OnceLock::new();
+
+/// 历史分页浏览状态（快照身份 / 下一游标 / 在途请求）。
+///
+/// 写入方只有三处：初始 load 响应（`note_initial_cursor`）、触发侧认领在途请求、
+/// 消费侧结算（成功推进游标 / 失败记录原因）。会话边界由
+/// `project_session_boundary` 清空——它同时清空 committed，两者必须同源。
+pub(crate) static HISTORY_PAGING: AtomStatic<crate::kit::history_paging::HistoryPagingState> =
+    AtomStatic::new(crate::kit::history_paging::HistoryPagingState::default);
+
+/// 更早历史并入窗口的代数——桥接任务每次成功并入一页时 +1。
+///
+/// 这是桥接侧对渲染侧唯一的并合事实：它**只表达「发生过一次并合」**，不携带任何
+/// 槽位号（桥接 `committed` 槽位与发布后渲染槽位是两把尺子，曾经用槽位包络跨层传递
+/// 导致过补偿，见 `.recon/S7d-verification.md` §5.1）。渲染侧 `Transcript::prepare`
+/// 把它与「本次快照发布」配对后，用**锚点身份重定位**（`message_area::viewport_anchor`）
+/// 换算视口目标偏移；只有翻页会改它，流式追加不会。
+pub static HISTORY_PREPEND_EPOCH: AtomStatic<u64> = AtomStatic::new(|| 0);
+
 pub static PERI_CONFIG_HANDLE: OnceLock<
     std::sync::Arc<parking_lot::RwLock<crate::config::PeriConfig>>,
 > = OnceLock::new();
@@ -615,13 +640,14 @@ pub static CURRENT_SESSION_TITLE: AtomStatic<String> = AtomStatic::new(String::n
 /// 会通过正常事件流到达，确保 committed 清空。
 pub static BRIDGE_RESET_COUNTER: AtomStatic<u64> = AtomStatic::new(|| 0);
 
-/// 跨 session/load replay 存活的 compact 完成提示（manual /compact 的
-/// CommandFeedback UiOnly 消息；replay 的 BRIDGE_RESET_COUNTER 重置会清空
-/// committed（含已注入的 SystemNote），bridge reset 分支据此重建到
-/// current_turn 后消费清空——机制沿袭 aecc2834（issue
-/// 2026-08-08-e2e-compact-command-screenshot-too-early），Phase 5 Step 7
-/// 文案移交 CommandFeedback 后由 handle_command_feedback 写入）。None =
-/// 无待重建提示。
+/// compact 完成提示（manual `/compact` 的 CommandFeedback UiOnly 消息），跨**同会话
+/// reset 边界**存活：BRIDGE_RESET_COUNTER 重置会清空 committed（含已注入的
+/// SystemNote），bridge reset 分支据此重建到 current_turn 后消费清空；TurnDone 与
+/// 切换会话都清空。REQ-C02 / A12 之后 manual compact 不再触发 session/load replay，
+/// 本 atom 只服务 reset 搬运，语义上不再有「跨 replay」。写入点：
+/// `handle_compact_completed` / `handle_command_feedback`（去重紧随 compact 的
+/// UiOnly 反馈——机制沿袭 aecc2834，issue
+/// 2026-08-08-e2e-compact-command-screenshot-too-early）。None = 无待重建提示。
 pub static PENDING_COMPACT_NOTE: AtomStatic<Option<String>> = AtomStatic::new(|| None);
 
 /// TUI 内部事件通道——input_area 本地提交通过此 channel 发送 LocalUserBubble

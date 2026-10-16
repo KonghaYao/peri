@@ -430,7 +430,7 @@ impl Fixture {
         let mut connection_contexts: Vec<(String, ConnectionContext)> = Vec::new();
         for index in 1..=connections {
             let mut context = ConnectionContext::new(true);
-            context.commit_initialize();
+            context.commit_initialize(peri_acp_types::PeriCaps::default());
             let erased: Arc<dyn AcpTransport> = Arc::clone(&transport) as Arc<dyn AcpTransport>;
             router
                 .register_connection(context.id(), erased)

@@ -89,6 +89,7 @@ pub struct V2ExecuteRequest {
     pub session_resources: Option<Arc<dyn SessionResources>>,
     pub thread_id: Option<String>,
     pub agent_input: AgentInput,
+    /// 有效集合的持久化历史（同 `TurnInput::history_payloads`）：已排除正文不在此列。
     pub history_payloads: Vec<peri_acp_types::store::PersistedPayload>,
     pub history: Vec<BaseMessage>,
     pub cached_llm: Option<CachedLlmInstances>,
@@ -146,9 +147,10 @@ pub async fn build_and_execute_agent_v2(req: V2ExecuteRequest) -> ExecOutcome {
                 Default::default(),
             ));
         };
-        // 一次一致快照：继承区与 flags 同一次读取，避免跨时刻拼接。
+        // 一次一致快照：继承区与 flags 同一次读取，避免跨时刻拼接。启动只消费
+        // 执行关键的有效视图（继承区 + flags），已排除 own 正文不进入内存。
         let snapshot = store
-            .load_session_snapshot(tid)
+            .load_active_snapshot(tid)
             .await
             .map_err(|error| anyhow::anyhow!("{error}"))?;
         Ok((snapshot.inherited, snapshot.flags))
@@ -510,7 +512,9 @@ pub async fn build_and_execute_agent_v2(req: V2ExecuteRequest) -> ExecOutcome {
                 transcript.visible_messages().into_iter().cloned().collect();
             (
                 messages,
-                transcript.persisted_payloads(),
+                // 跨 turn 快照只携带当前有效集合（与上面的 visible 出口同一范围）：
+                // 被 Full Compact 释放的 own 历史不在其中，完整历史走存储读取。
+                transcript.active_payloads(),
                 transcript.full_compaction_committed(),
             )
         };

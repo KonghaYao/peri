@@ -25,6 +25,7 @@
 //! 以 `compact_config` 投影（ACP 装配点按 `load_compact_config` 语义预填，
 //! env overrides 每轮重新应用，语义保持）。
 
+use std::collections::HashSet;
 use std::sync::Arc;
 
 use peri_acp_types::command::{
@@ -33,8 +34,9 @@ use peri_acp_types::command::{
 };
 use peri_acp_types::compact::CompactConfig;
 use peri_acp_types::event::CompactTrigger;
-use peri_acp_types::messages::BaseMessage;
+use peri_acp_types::messages::{BaseMessage, MessageId};
 use peri_acp_types::session_resources::DataCapabilities;
+use peri_acp_types::store::PersistedPayload;
 use tokio_util::sync::CancellationToken as AgentCancellationToken;
 use tracing::{info, warn};
 
@@ -153,9 +155,8 @@ pub async fn run_pipeline(ctx: CommandContext) -> PipelineOutcome {
         }
     }
 
-    // 阶段 5: 已存在的 thread 从一次一致快照重建。Host 跨 turn 保留 canonical
-    // history（含 excluded 原文），先核对完整消息身份与顺序，再恢复 flags 供 Full
-    // 选择可见内容；不能拿 visible view 与 canonical 输入比较。
+    // 阶段 5: 已存在的 thread 从一次一致快照重建。先核对消息身份与顺序，再恢复
+    // flags 供 Full 选择可见内容；不能拿 visible view 与 canonical 输入比较。
     let snapshot = match session_resources.load_session_snapshot(&thread_id).await {
         Ok(snapshot) => snapshot,
         Err(error) => {
@@ -167,14 +168,6 @@ pub async fn run_pipeline(ctx: CommandContext) -> PipelineOutcome {
             };
         }
     };
-    // 仅用普通消息投影校验调用方身份；真正的摘要输入恢复完整 payload。
-    let persisted_history: Vec<BaseMessage> = snapshot
-        .inherited
-        .payloads
-        .iter()
-        .chain(&snapshot.payloads)
-        .filter_map(|payload| payload.as_message().cloned())
-        .collect();
     let mut transcript = MessageTranscript::new().with_compaction_commit_state(commit_state);
     if snapshot.payloads.is_empty() && snapshot.inherited.payloads.is_empty() {
         if history.is_empty() {
@@ -197,10 +190,34 @@ pub async fn run_pipeline(ctx: CommandContext) -> PipelineOutcome {
             };
         }
     } else {
-        let history_matches = persisted_history.len() == history.len()
+        // 调用方身份只按**有效集合**校验（spec D3）：成功 Full 提交会释放热态里的
+        // excluded 原文（D1 transcript shrink），宿主下一轮带回的历史天然只剩有效
+        // 条目。两侧用同一次快照的 flags 对称剔除 excluded 后比较 id 序列；调用方
+        // 多带的未知 id 仍会因长度不符被拒绝，校验强度不降。
+        let excluded_ids: HashSet<MessageId> = snapshot
+            .inherited
+            .flags
+            .iter()
+            .chain(snapshot.flags.iter())
+            .filter(|(_, flags)| flags.excluded)
+            .map(|(id, _)| *id)
+            .collect();
+        let persisted_history: Vec<&BaseMessage> = snapshot
+            .inherited
+            .payloads
+            .iter()
+            .chain(&snapshot.payloads)
+            .filter(|payload| !excluded_ids.contains(&payload.id()))
+            .filter_map(PersistedPayload::as_message)
+            .collect();
+        let command_history: Vec<&BaseMessage> = history
+            .iter()
+            .filter(|message| !excluded_ids.contains(&message.id()))
+            .collect();
+        let history_matches = persisted_history.len() == command_history.len()
             && persisted_history
                 .iter()
-                .zip(&history)
+                .zip(&command_history)
                 .all(|(persisted, incoming)| persisted.id() == incoming.id());
         if !history_matches {
             warn!("compact: persisted canonical history does not match command history");
@@ -210,6 +227,8 @@ pub async fn run_pipeline(ctx: CommandContext) -> PipelineOutcome {
                 message: "compact persistence context mismatch".to_string(),
             };
         }
+        // 校验通过后从完整快照重建：excluded 原文仍是 canonical 历史的一部分，
+        // Full 只对有效条目落 flags。
         transcript = transcript
             .with_ancestor_payloads(snapshot.inherited.payloads)
             .with_own_payloads(snapshot.payloads);

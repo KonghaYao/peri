@@ -17,12 +17,16 @@
 //! 只读入口（`AccessMode::ReadOnly`）不得靠创建一个临时未绑定会话绕过执行授权。
 //! 旧 `ThreadStore`（[`crate::store::ThreadStore`]）是迁移桥，见其模块文档。
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::path::Path;
 use std::sync::Arc;
 
 use async_trait::async_trait;
 
+use crate::history_page::{
+    HistoryCursor, HistoryCursorError, HistoryForwardCursor, HistoryPage, HistoryPageBounds,
+    HistorySegment,
+};
 use crate::messages::MessageId;
 use crate::store::{CompactionChange, InheritedContext, MessageFlags, PersistedPayload};
 use crate::system_reminder::TrustedSystemReminder;
@@ -30,6 +34,10 @@ use crate::thread::{AgentStatus, CancelPolicy, ThreadId, ThreadMeta};
 use crate::workspace::{
     ResolvedWorkspace, ScopedThreadPage, ScopedThreadQuery, SessionBinding, WorkspaceError,
 };
+
+// 历史读取视图与 rewind 契约类型按职责拆入子模块 `history`（见该模块文档）；
+// `pub use` 重导出保持既有公开路径 `crate::session_resources::X` 可用。
+pub mod history;
 
 // ─── 能力与准入 ────────────────────────────────────────────────────────────────
 
@@ -236,23 +244,8 @@ pub struct SessionSnapshot {
 
 // ─── 定向更新 ──────────────────────────────────────────────────────────────────
 
-/// rewind 边界：区分「保留到目标」与「从目标开始移除」。
-///
-/// transcript rewind 保留目标本身，ACP 用户 rewind 移除目标及以后；两者语义不可
-/// 合并，合并会把「保留到目标」失真成「删掉目标」。
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum RewindBoundary {
-    KeepThrough(MessageId),
-    RemoveFrom(MessageId),
-}
-
-impl RewindBoundary {
-    pub fn message_id(&self) -> MessageId {
-        match self {
-            Self::KeepThrough(id) | Self::RemoveFrom(id) => *id,
-        }
-    }
-}
+// rewind 与有界读取视图的类型本体（本交付新增）在同名子模块 `history`。
+pub use history::{ActiveSessionSnapshot, RewindBoundary, RewindOutcome};
 
 /// 定向 metadata 更新：`None` 表示不更新，`Some(None)` 表示清除。
 ///
@@ -324,6 +317,11 @@ pub enum SessionResourceErrorKind {
     Conflict {
         detail: String,
     },
+    /// 历史分页游标不能用于本次读取：分类见 [`HistoryCursorError`]。
+    ///
+    /// 单独一类是为了让出口把「坏游标」映射成参数错误、把「失效游标」映射成需要重新
+    /// 开始的错误；两者都不得降级成首屏或空页。
+    Cursor(HistoryCursorError),
     Internal {
         detail: String,
     },
@@ -431,12 +429,14 @@ impl std::fmt::Display for SessionResourceError {
             SessionResourceErrorKind::Conflict { detail } => {
                 ("state conflicts with request", detail.as_str())
             }
+            SessionResourceErrorKind::Cursor(_) => ("history cursor is unusable", ""),
             SessionResourceErrorKind::Internal { detail } => {
                 ("internal storage error", detail.as_str())
             }
         };
         match &self.kind {
             SessionResourceErrorKind::Workspace(error) => write!(f, "{reason}: {error}"),
+            SessionResourceErrorKind::Cursor(error) => write!(f, "{reason}: {error}"),
             _ if detail.is_empty() => {
                 write!(f, "{reason} ({:?})", self.effect)
             }
@@ -615,6 +615,47 @@ pub trait SessionResources: Send + Sync {
     /// 一次一致读取：metadata、binding 分类、frozen 状态、own payload/flags、inherited。
     async fn load_session_snapshot(&self, id: &ThreadId) -> SessionResourceResult<SessionSnapshot>;
 
+    /// 一次一致读取的执行关键有效视图：同一份 metadata/binding/frozen/inherited，
+    /// 但 `payloads` 只含未排除的 own 条目、`flags` 只含活跃 id。
+    ///
+    /// 默认实现是**完整读取再过滤**的回退路径，供测试替身等非生产后端使用；它不满足
+    /// REQ-T03「恢复路径不得先全量再过滤」。**生产后端必须覆写**本方法，让过滤发生在
+    /// 存储层（与 [`Self::load_session_history`] 同样的读取条件加上未排除约束），
+    /// 使已排除正文根本不进入内存。
+    async fn load_active_snapshot(
+        &self,
+        id: &ThreadId,
+    ) -> SessionResourceResult<ActiveSessionSnapshot> {
+        let SessionSnapshot {
+            meta,
+            binding,
+            frozen,
+            payloads,
+            flags,
+            inherited,
+        } = self.load_session_snapshot(id).await?;
+        // 排除只认 flags 事实：没有标记的 payload 视为未排除，不猜测。
+        let excluded: HashSet<MessageId> = flags
+            .iter()
+            .filter(|(_, flags)| flags.excluded)
+            .map(|(id, _)| *id)
+            .collect();
+        let mut flags = flags;
+        flags.retain(|id, _| !excluded.contains(id));
+        let payloads = payloads
+            .into_iter()
+            .filter(|payload| !excluded.contains(&payload.id()))
+            .collect();
+        Ok(ActiveSessionSnapshot {
+            meta,
+            binding,
+            frozen,
+            inherited,
+            payloads,
+            flags,
+        })
+    }
+
     /// 轻量绑定分类：只回答本机能否验证这条会话的绑定，不加载历史、不启动发现。
     ///
     /// 与 [`Self::load_session_snapshot`] 的同一套分类规则，供只关心绑定/workspace 的
@@ -637,6 +678,137 @@ pub trait SessionResources: Send + Sync {
         &self,
         id: &ThreadId,
     ) -> SessionResourceResult<Vec<PersistedPayload>>;
+
+    /// 有界读取一页历史（向「更早」方向）：**包含已排除的归档条目**。
+    ///
+    /// - `cursor = None`：首屏，从最新一行开始；`Some` 时按游标锚点继续向更早读。
+    /// - `limit`：本页最多推进的行数（不可展示的行同样占位）。
+    /// - `byte_budget`：页内条目编码字节之和的上限；单条超预算时独占一页并带
+    ///   [`crate::history_page::HistoryPageItem::oversized`] 标记。
+    ///
+    /// 读取分两阶段（见 [`crate::history_page::HistoryPagePlan`]）：阶段一只读 id + 存储序键
+    /// + 正文长度（最多 `limit + 1` 行，不取正文），阶段二只取本页那些行的正文。多读的
+    /// 那一条候选行只回答「更早方向还有没有内容」，它的正文**永远不得进内存**（REQ-H03：
+    /// 不得先批量物化再裁页）。
+    ///
+    /// 语义（与存储层实现同源，见 [`crate::history_page::HistoryPagePlan::plan`]）：
+    ///
+    /// - 不过滤 `excluded`：归档区正是分页要读的东西。
+    /// - System 条目与 Model-only reminder 不返回，但位置照常推进；是否还有更早内容按
+    ///   **未过滤**的行数判定，因此连续的不可展示条目不会假造终点。
+    /// - 游标不可用（形式错误、跨会话、锚点或浏览范围起点已不存在）必须失败，不得回退成
+    ///   首屏，也不得用空页掩盖。
+    ///
+    /// 默认实现失败（`Unsupported`）：空页在契约里是「更早方向没有内容了」的合法含义，
+    /// 没实现这条读取的后端不能拿它冒充。
+    async fn load_history_page(
+        &self,
+        _id: &ThreadId,
+        _cursor: Option<&HistoryCursor>,
+        _limit: usize,
+        _byte_budget: usize,
+    ) -> SessionResourceResult<HistoryPage> {
+        Err(SessionResourceError::new(
+            SessionResourceErrorKind::Unsupported,
+        ))
+    }
+
+    /// 有界读取**一段 canonical 完整历史**（向前方向）：未协商 `peri.historyPagination` 的
+    /// 标准客户端完整回放的读取入口（需求 §5.3）。
+    ///
+    /// 与 [`Self::load_history_page`]（向「更早」翻页、读归档区）是两条读取，方向与过滤规则
+    /// 都不同：这条读的是**完整历史**（继承区 + 全部自有行，含 Full 归档原文），核心不必
+    /// 重新持有整份历史，出口按段流式投影。
+    ///
+    /// - `cursor = None`：本次回放的**首段**。返回**全部继承区 payload**（来自单行
+    ///   `inherited_context` 快照；继承区在本切片不分页）加上自有行中 `rowid` 最小的若干行；
+    ///   同一次读取里把 `tail` 定为该线程自有行当前最大 `rowid`，作为本次回放的固定上界。
+    /// - `cursor = Some`：从 `after` 之后继续（`rowid > after`），且**不得越过 `tail`**
+    ///   （判定用 `rowid <= tail`；不要求 `tail` 那一行仍存在——上界是一个数值）。
+    ///   已知边界（本契约不保证，也不加校验）：`tail` 那一行被删（rewind 的尾部切除）之后，
+    ///   SQLite 会把它的 `rowid` 复用给新插入的行，这类新行因此落在 `(after, tail]` 内被本次
+    ///   回放读到，而被删行的内容静默消失；回放游标没有结构版本可比（`.recon/S9-boundedness.md`
+    ///   第 3.4 节第 6 点与第 6 节 R1 的实测）。
+    /// - `limit`：本段最多推进的自有行数；`byte_budget`：段内正文编码字节之和的上限。
+    ///   单条超预算时独占一段并**完整交付正文**（完整回放不允许静默丢内容）。读取分两阶段：
+    ///   阶段一最多取 `limit + 1` 行，只回答「id + 存储序键 + 正文长度」（多读的那一条用来判断
+    ///   「还有没有更多」）；阶段二只取本段那些行的正文。阶段一的正文**不越过 SQL 边界、不进
+    ///   解码器**（`SELECT` 列表里没有正文），但长度表达式 `length(CAST(content AS BLOB))` 会让
+    ///   SQLite 关掉 length-arg 优化，引擎仍可能把候选行的正文读进寄存器——包括那一条永不被
+    ///   返回的 lookahead 行（代价是每段多一次 I/O 与瞬时内存，不改变返回集与解码字节；
+    ///   实测见 `.recon/S9-boundedness.md` 第 3.4 节第 3 点与第 6 节 R2）。
+    /// - **不过滤 `excluded`，也不过 System / model-only reminder**：这是完整回放，可展示性
+    ///   过滤属于调用方（ACP 投影）。
+    /// - 锚点消失**失败关闭**：`after` 指定的行已不在存储里即失败（不得回退成从头开始，也
+    ///   不得用空段冒充结束；与 [`Self::load_history_page`] 的游标过期同一处置）。首段的
+    ///   `tail` 与首段返回的行同出于一次一致读取；此后各段只按 `rowid` 区间读取，**不**校验
+    ///   行集合仍与首段同源（见上面的 rowid 复用边界）。
+    /// - `next_cursor = None` **只**表示「没有更多自有行了」（已到 `tail`，或本来就没有行）。
+    ///
+    /// 默认实现失败（`Unsupported`）：空段在契约里是「回放结束」的合法含义，没实现这条读取
+    /// 的后端不能拿它冒充——调用方据此**显式**回退到 [`Self::load_session_history`] 的全量
+    /// 读取，或让本次读取失败，两条路都要看得见。
+    async fn load_history_segment(
+        &self,
+        _id: &ThreadId,
+        _cursor: Option<&HistoryForwardCursor>,
+        _limit: usize,
+        _byte_budget: usize,
+    ) -> SessionResourceResult<HistorySegment> {
+        Err(SessionResourceError::new(
+            SessionResourceErrorKind::Unsupported,
+        ))
+    }
+
+    /// 有界读取浏览范围边界（一次单行查询）：该会话自有历史最旧一条 + 范围身份。
+    ///
+    /// 与 [`Self::load_history_page`] 的首屏边界**同一份事实**（同一条查询的同一形状），
+    /// 供初始 load 判断「更早方向还有没有内容」（没有就是 `nextCursor = null`）并铸造第一个
+    /// 游标，见 [`HistoryPageBounds`]。它不得退化成扫描线程或聚合：调用发生在初始 load 上。
+    ///
+    /// 默认实现失败（`Unsupported`）：没有这条读取的后端给不出「有没有更早内容」的事实，
+    /// 也不该拿一个猜出来的起点或空范围冒充一个正常回答。
+    async fn history_page_bounds(
+        &self,
+        _id: &ThreadId,
+    ) -> SessionResourceResult<HistoryPageBounds> {
+        Err(SessionResourceError::new(
+            SessionResourceErrorKind::Unsupported,
+        ))
+    }
+
+    /// 自有**有效**条目的存储序键（`position` 的事实源）：`message_id → 存储序键`。
+    ///
+    /// 用途：初始 load 的回放要把每条自有条目打上**与页可比**的位置（REQ-H01-3、REQ §5.2 的
+    /// `entryId` / `position`），客户端才能把后到的页并进稀疏首屏的正确区间。只读 id 与序键，
+    /// **不读正文**；范围与 [`Self::load_active_snapshot`] 的自有区同一读取条件
+    /// （`excluded = 0`），因此只回答「这一条自有有效条目在哪」，不做全历史扫描。
+    ///
+    /// 继承区条目**不在**其中（它们在本线程没有行）：调用方必须把缺席解释为「不是本线程的
+    /// 自有条目」，不得当成默认位置或 0——那会把继承条目排到自有条目之间。
+    ///
+    /// 默认实现返回空 map（非生产后端的回退）；生产后端必须覆写。未覆写的后端给不出位置，
+    /// 回放只打 `entryId` 不打位置戳：这是**能力缺失**，客户端不得把它读成「没有更早历史」。
+    async fn load_entry_positions(
+        &self,
+        _id: &ThreadId,
+    ) -> SessionResourceResult<HashMap<MessageId, u64>> {
+        Ok(HashMap::new())
+    }
+
+    /// 按给定 id 集合读取 flags，范围有界：只回答这些 id 的标记，不做全历史扫描。
+    ///
+    /// 默认实现返回空 map（非生产后端的回退，不满足分页路径的读取范围要求；
+    /// 生产后端应覆写为按 id 集合的有界查询）。调用方必须**保守**解释缺席：
+    /// 不在返回 map 里的 id 是「未知」，不是「默认标记」——把缺席当默认会把没读到
+    /// 的排除/投影事实误判成未标记。
+    async fn load_message_flags(
+        &self,
+        _id: &ThreadId,
+        _ids: &[MessageId],
+    ) -> SessionResourceResult<HashMap<MessageId, MessageFlags>> {
+        Ok(HashMap::new())
+    }
 
     /// 小型 metadata 投影；不加载历史或大快照。
     async fn load_session_meta(&self, id: &ThreadId) -> SessionResourceResult<ThreadMeta>;
@@ -764,12 +936,25 @@ pub trait SessionResources: Send + Sync {
         updates: &[(MessageId, MessageFlags)],
     ) -> SessionResourceResult<()>;
 
-    /// 按显式边界 rewind；派生计数与缓存同步更新。
+    /// 按显式边界 rewind，并在**同一次提交**里重建该边界的有效视图。
+    ///
+    /// `clear_excluded` 是保留前缀里必须清零 `excluded` 的 id，由调用方从一致读取的完整
+    /// own 历史算出（[`crate::store::history::rewind_clear_excluded_ids`] 是唯一规则实现）：
+    /// 边界删除与 flags 清零要么都生效、要么都不生效，只生效一半会让热态与随后的冷恢复
+    /// 看到两份不同的历史。清零同时把整条 `projection` 载荷一并清掉（恢复正文的条目不再
+    /// 携带 `superseded_by` 这类只在 `excluded` 为真时才有意义的投影记录），`truncated`
+    /// 保持原样。
+    ///
+    /// 未知边界保持「无变更」语义，但**必须如实回报** [`RewindOutcome::BoundaryMissing`]：
+    /// 调用方（如 ACP rewind handler）不能把「什么都没做」当成「已按边界重建」，
+    /// 否则热态会被改写成存储里不存在的那份。transcript 同步路径（KeepThrough）是
+    /// 唯一按「缺失即无操作」消费该结果的调用方，理由见其调用点注释。
     async fn rewind_history(
         &self,
         id: &ThreadId,
         boundary: RewindBoundary,
-    ) -> SessionResourceResult<()>;
+        clear_excluded: &[MessageId],
+    ) -> SessionResourceResult<RewindOutcome>;
 
     /// 按 id 集合精确移除历史条目。
     async fn remove_history_entries(
@@ -801,25 +986,8 @@ pub trait SessionResources: Send + Sync {
     async fn drain_persistence(&self, id: &ThreadId) -> SessionResourceResult<()>;
 }
 
-/// 部署生命周期关闭端口：关闭整个会话存储的**唯一**入口。
-///
-/// 门面（[`SessionResources`]）是业务句柄：可以克隆、可以注入 Agent/Controller/
-/// middleware，它只提供会话行为与必要的收敛能力（恢复、排空）。**关闭整个存储不是
-/// 业务行为**——那会让任何持有句柄的调用方获得全局销毁权，因此关闭权单独由本端口
-/// 承载，并由部署装配（TUI/print/stdio 的宿主配置）在**自己的任务排空之后**调用一次。
-///
-/// 实现必须把两件事分开：
-///
-/// - 关闭**不可逆地**停止新写入，但「停止新写入」不等于「已关闭」：只有真实检查
-///   （在途写入、未决持久化）全部结清并确实关闭数据面之后才确认关闭，此后的重复调用
-///   才幂等成功；
-/// - 失败或被取消的关闭不构成确认，重复调用必须重新检查。未确认期间该存储的恢复与
-///   排空仍然可用（业务句柄不受影响），否则第一次关闭失败就再也没有收敛路径。
-#[async_trait]
-pub trait SessionStoreShutdownPort: Send + Sync {
-    /// 排空之后关闭会话存储；只有确认关闭才返回 `Ok`。
-    async fn shutdown(&self) -> SessionResourceResult<()>;
-}
+mod lifecycle;
+pub use lifecycle::SessionStoreShutdownPort;
 
 #[cfg(test)]
 #[path = "session_resources_test.rs"]

@@ -117,7 +117,8 @@ async fn upgrade_guards_registrations_written_after_its_snapshot() {
     *fixture.transport.before_batch.lock().unwrap() = Some(
         "INSERT INTO workspaces (id, project_id, root, root_identity, discovery) VALUES
          ('22222222-2222-4222-8222-222222222222', 'project', '/concurrent', 'concurrent identity',
-          '{\"root\":\"/concurrent\",\"common_dir\":null,\"private_dir\":null}')",
+          '{\"root\":\"/concurrent\",\"common_dir\":null,\"private_dir\":null}')"
+            .to_owned(),
     );
     assert!(
         schema_upgrade::upgrade(&fixture.store(StoreAccess::ReadWrite), &fixture.snapshot)

@@ -1,4 +1,4 @@
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 
@@ -17,11 +17,17 @@ use crate::sessions::data::ensure_child_relation;
 use crate::sessions::data::ChildResumeRecord;
 use crate::sessions::data::SessionDataPort;
 use async_trait::async_trait;
+use peri_acp_types::history_page::{
+    message_id_of, resolve_browsing_range, HistoryCursor, HistoryCursorError, HistoryForwardCursor,
+    HistoryPage, HistoryPageBounds, HistoryPageCandidate, HistoryPagePlan, HistoryPageRow,
+    HistorySegment, HistorySegmentPlan,
+};
 use peri_acp_types::messages::MessageId;
 use peri_acp_types::session_resources::{
-    BindingState, ChildSnapshot, CloseSettlement, ForkSnapshot, FrozenSnapshotBytes, FrozenState,
-    NewSession, NewSessionDraft, PersistenceRecovery, RewindBoundary, SessionMetaPatch,
-    SessionResourceError, SessionResourceErrorKind, SessionResourceResult, SessionSnapshot,
+    ActiveSessionSnapshot, BindingState, ChildSnapshot, CloseSettlement, ForkSnapshot,
+    FrozenSnapshotBytes, FrozenState, NewSession, NewSessionDraft, PersistenceRecovery,
+    RewindBoundary, RewindOutcome, SessionMetaPatch, SessionResourceError,
+    SessionResourceErrorKind, SessionResourceResult, SessionSnapshot,
 };
 use peri_acp_types::store::{
     serialize_persisted_payload, CompactionChange, InheritedContext, MessageFlags, PersistedPayload,
@@ -387,6 +393,55 @@ impl SessionDataPort for SqliteSessionData {
         })
     }
 
+    async fn load_active_snapshot(
+        &self,
+        id: &ThreadId,
+    ) -> SessionResourceResult<ActiveSessionSnapshot> {
+        // 与 `load_snapshot` 同一次读取视图、同一套分类规则，差别只有范围：
+        // payload 与 flags 的读取条件都带 `excluded = 0`，已排除正文与已排除条目的
+        // 标记都不进入内存（不先全量再过滤）。
+        let mut connection = self
+            .database
+            .pool
+            .acquire()
+            .await
+            .map_err(|error| map_sqlx(&error))?;
+        let mut tx = sqlx::Connection::begin(&mut *connection)
+            .await
+            .map_err(|error| map_sqlx(&error))?;
+        let meta = context::load_meta_on(&mut tx, id)
+            .await
+            .map_err(read_failure)?;
+        let parent = meta.parent_thread_id.clone();
+        let binding = match binding_row_state_on(&mut tx, id).await? {
+            BindingRowState::Bound(binding) => BindingState::Bound(binding),
+            BindingRowState::Absent if parent.is_some() => BindingState::ExternalOrUnregistered,
+            BindingRowState::Absent => BindingState::Missing,
+        };
+        let frozen = match frozen_bytes_on(&mut tx, id).await.map_err(read_failure)? {
+            Some(bytes) => FrozenState::Present(FrozenSnapshotBytes::new(bytes)),
+            None => FrozenState::LegacyAbsent,
+        };
+        let payloads = context::load_active_payloads_on(&mut tx, id)
+            .await
+            .map_err(read_failure)?;
+        let flags = compaction::load_active_flags_on(&mut tx, id)
+            .await
+            .map_err(read_failure)?;
+        let inherited = context::load_inherited_context_on(&mut tx, id)
+            .await
+            .map_err(read_failure)?;
+        tx.commit().await.map_err(|error| map_sqlx(&error))?;
+        Ok(ActiveSessionSnapshot {
+            meta,
+            binding,
+            frozen,
+            inherited,
+            payloads,
+            flags,
+        })
+    }
+
     async fn load_binding(&self, id: &ThreadId) -> SessionResourceResult<BindingState> {
         // 与 `load_snapshot` 同一条分类规则、同一次读取视图，只是不读历史与 frozen。
         let mut connection = self
@@ -430,6 +485,48 @@ impl SessionDataPort for SqliteSessionData {
             .map_err(read_failure)?;
         tx.commit().await.map_err(|error| map_sqlx(&error))?;
         Ok(payloads)
+    }
+
+    async fn load_history_page(
+        &self,
+        id: &ThreadId,
+        cursor: Option<&HistoryCursor>,
+        limit: usize,
+        byte_budget: usize,
+    ) -> SessionResourceResult<HistoryPage> {
+        self.read_history_page(id, cursor, limit, byte_budget).await
+    }
+
+    async fn history_page_bounds(&self, id: &ThreadId) -> SessionResourceResult<HistoryPageBounds> {
+        self.read_history_page_bounds(id).await
+    }
+
+    async fn load_history_segment(
+        &self,
+        id: &ThreadId,
+        cursor: Option<&HistoryForwardCursor>,
+        limit: usize,
+        byte_budget: usize,
+    ) -> SessionResourceResult<HistorySegment> {
+        self.read_history_segment(id, cursor, limit, byte_budget)
+            .await
+    }
+
+    async fn load_entry_positions(
+        &self,
+        id: &ThreadId,
+    ) -> SessionResourceResult<HashMap<MessageId, u64>> {
+        self.read_active_entry_positions(id).await
+    }
+
+    async fn load_message_flags(
+        &self,
+        id: &ThreadId,
+        ids: &[MessageId],
+    ) -> SessionResourceResult<HashMap<MessageId, MessageFlags>> {
+        compaction::load_flags_for_ids(&self.database, id, ids)
+            .await
+            .map_err(read_failure)
     }
 
     async fn load_meta(&self, id: &ThreadId) -> SessionResourceResult<ThreadMeta> {
@@ -820,8 +917,10 @@ impl SessionDataPort for SqliteSessionData {
         &self,
         id: &ThreadId,
         boundary: RewindBoundary,
-    ) -> SessionResourceResult<()> {
-        self.rewind_stored_history(id, boundary).await
+        clear_excluded: &[MessageId],
+    ) -> SessionResourceResult<RewindOutcome> {
+        self.rewind_stored_history(id, boundary, clear_excluded)
+            .await
     }
 
     async fn remove_history_entries(
@@ -862,3 +961,10 @@ impl SessionDataPort for SqliteSessionData {
         Ok(())
     }
 }
+
+/// 有界读取的性能证据（需求 §9 A04/A05/A06/A07）：默认 `#[ignore]`，不拖慢默认测试。
+///
+/// 运行命令、原始输出与数字见 `.recon/perf-evidence.md`。
+#[cfg(test)]
+#[path = "session_history_perf_test.rs"]
+mod history_perf_tests;

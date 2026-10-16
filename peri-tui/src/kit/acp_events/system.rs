@@ -2,33 +2,49 @@
 //! FileSuggestions, Interaction events (HitlPending, AskUser, RewindPreview,
 //! RewindCompleted, OauthNeeded), Background Tasks, Plugin events, WorkflowProgress,
 //! Unknown.
+//!
+//! 模块结构：Interaction 事件（HitlPending / AskUser 弹窗与授权块）见 `interaction`，
+//! Background Tasks（快照 / 增量与任务生命周期）见 `bg_task`；系统提示与提醒、
+//! rewind / OAuth 结果、插件与 workflow 事件留在本模块。
 
 use super::*;
 use crate::i18n;
-use crate::kit::acp_types::{
-    BgTaskEntry, FeedbackChannel, FeedbackLevel, PendingInteraction, TuiCommandFeedback,
-};
+use crate::kit::acp_types::{FeedbackChannel, FeedbackLevel, TuiCommandFeedback};
 use crate::kit::atoms::PluginSummary;
-use crate::kit::atoms::{
-    ACP_CLIENT_HANDLE, ACTIVE_SESSION_ID, ASK_USER_PENDING, BG_DISPLAY, BG_TASK_REVISION, BG_TASKS,
-    NOTIFICATION, PLUGIN_LIST, PREDICTION, RENDER_HEARTBEAT,
-};
-use crate::kit::bg_task_identity::upsert_identity_from_started;
-use crate::kit::bg_task_live::{
-    mark_task_cancelled, mark_task_completed, seed_live_from_started,
-    seed_live_from_terminal_snapshot, seed_unobserved_snapshot,
-};
+use crate::kit::atoms::{NOTIFICATION, PLUGIN_LIST, PREDICTION, RENDER_HEARTBEAT};
 use crate::kit::tui_render_unit::{
-    DisplayTrusted, InteractionKind, ReminderRelay, TuiAskUserBlock, TuiNoteLevel, TuiRenderUnit,
-    TuiSystemReminder,
+    DisplayTrusted, ReminderRelay, TuiNoteLevel, TuiRenderUnit, TuiSystemReminder,
 };
 use fluent_bundle::FluentValue;
 use peri_acp_types::event_data::{
-    AskUser, BudgetWarning, HitlPending, OauthNeeded, PluginActionResult, PluginSnapshot,
-    Prediction, PredictionAction, RewindMessage, RewindPreview, SystemNotification,
+    BudgetWarning, OauthNeeded, PluginActionResult, PluginSnapshot, Prediction, PredictionAction,
+    RewindMessage, RewindPreview, SystemNotification,
 };
 use serde_json::Value;
 use std::time::Duration;
+
+// ── Sub-modules ──
+mod bg_task;
+mod interaction;
+
+// ── Re-exports ──
+// 搬移后保持既有调用路径可用：`system::handle_bg_task_*` / `system::request_bg_task_snapshot`、
+// `system::handle_{hitl_pending,ask_user,interaction_terminal}`（生产调用方：本模块 `acp_events/mod.rs`）。
+pub(crate) use self::bg_task::request_bg_task_snapshot;
+pub(super) use self::bg_task::{
+    handle_bg_task_cancelled, handle_bg_task_completed, handle_bg_task_snapshot,
+    handle_bg_task_started, handle_bg_task_updated,
+};
+pub(super) use self::interaction::{
+    handle_ask_user, handle_hitl_pending, handle_interaction_terminal,
+};
+
+// 仅测试引用的既有路径（`acp_events_test/bg_task_live_test.rs`、`interaction_test.rs`）；
+// 按 `acp_events/mod.rs` 既有先例用 `#[cfg(test)]` 门控，非测试构建不产生空转导入。
+#[cfg(test)]
+pub(crate) use self::bg_task::apply_bg_task_snapshot;
+#[cfg(test)]
+pub(crate) use self::interaction::hitl_input_summary;
 
 pub(super) fn handle_budget_warning(state: &mut BridgeState, bw: &BudgetWarning) {
     // 上下文使用率超过阈值警告——注入 TuiSystemNote 到 current_turn 内部。
@@ -193,13 +209,13 @@ pub(super) fn handle_command_feedback(state: &mut BridgeState, fb: &TuiCommandFe
             state.inject_system_note(fb.message.clone(), level);
         }
     }
-    // Phase 5 Step 7 补遗（Step 8 回归修复）：compact 手动完成的 CommandFeedback
-    // SystemNote 会被紧随的 session/load replay（BRIDGE_RESET_COUNTER reset）
-    // 清空——8/8 aecc2834 的 PENDING_COMPACT_NOTE 跨 replay 桥接随 Step 7
-    // 删除后，文案移交 CommandFeedback 渲染时未保留该机制（e2e compact-command
-    // waitFor 完成提示 120s 超时）。仅 UiOnly 且 compact 完成场景写入：auto
-    // compact 无 replay 触发不写、非 compact 命令无 replay 不写，防残留串到
-    // 后续 thread 切换的 reset。
+    // compact 手动完成的 CommandFeedback SystemNote 可能被随后的
+    // BRIDGE_RESET_COUNTER 重置清空（committed 整体重建）——aecc2834 的
+    // PENDING_COMPACT_NOTE 桥接在文案移交 CommandFeedback 渲染时曾丢失该机制
+    // （e2e compact-command waitFor 完成提示 120s 超时），这里恢复写入。仅 UiOnly
+    // 且 compact 完成场景写入：其它命令不写，防残留串到后续 thread 切换的 reset。
+    // （REQ-C02 / A12 之后 manual compact 不再触发 session/load replay，但 reset
+    // 边界仍然存在。）
     if fb.channel == FeedbackChannel::UiOnly
         && state.compact_just_completed
         && crate::kit::atoms::PENDING_COMPACT_NOTE
@@ -236,259 +252,13 @@ pub(super) fn handle_prediction(p: &Prediction) {
 
 pub(super) fn handle_file_suggestions() {}
 
-pub(super) fn handle_hitl_pending(
-    state: &mut BridgeState,
-    pending: &PendingInteraction<HitlPending>,
-) {
-    // I21-A：保存 payload 到 HITL_PENDING atom，供 HitlPopup 读取真实数据
-    *crate::kit::atoms::HITL_PENDING.state().write() = Some(pending.clone());
-    state.popup_kind = Some(crate::kit::atoms::PopupKind::Hitl);
-    state.variant = 2;
-    // [Slice 4 §6.8] 双轨：inline transcript block（可见 + 可聚焦 + 结果回写）
-    // 与 HITL 弹窗（模态操作层）并存。block 按事件到达位置 push 到 committed
-    // ——不进 CurrentTurn 缓存（sync_cache 段对齐不可破坏）。
-    let block = build_permission_block(pending);
-    // [§6.8 模态互斥] 同 request_id 的 pending block 已存在（事件重放/重连/
-    // 重试重复到达）→ 跳过注入——重复 pending 块永远不会被 resolve（单响应
-    // 事件只匹配首个），会以「可聚焦假象」永久滞留 transcript。
-    if !committed_has_pending(state, &pending.owner) {
-        state
-            .committed
-            .push_back(TuiRenderUnit::TuiAskUserBlock(block));
-    }
-    state.publish_barrier();
-    super::render::push_popup_kind(state);
-    super::render::push_acp_state(state);
-}
-
-pub(super) fn handle_ask_user(state: &mut BridgeState, pending: &PendingInteraction<AskUser>) {
-    // I21-B：保存 payload 到 ASK_USER_PENDING atom，供 AskUserPanel 读取真实数据。
-    // 通过 panel_registry 打开 AskUser 面板（非弹窗），内联在 MessageArea 下方。
-    *ASK_USER_PENDING.state().write() = Some(pending.clone());
-    crate::kit::panel_registry::open_panel(crate::app::panel_types::PanelKind::AskUser);
-    state.variant = 2;
-    // [Slice 4 §6.8] 双轨：inline transcript block 与 AskUser 面板（模态操作层）
-    // 并存；block push 到 committed（时序即事件到达位置）。
-    let block = build_ask_user_block(pending);
-    // [§6.8 模态互斥] 同 request_id 的 pending block 已存在 → 跳过注入
-    // （重复 pending 块不会被 resolve，永久滞留）。
-    if !committed_has_pending(state, &pending.owner) {
-        state
-            .committed
-            .push_back(TuiRenderUnit::TuiAskUserBlock(block));
-    }
-    state.publish_barrier();
-    super::render::push_acp_state(state);
-}
-
-/// [§6.8] committed 中是否已存在同 request_id 的 pending interaction block。
-/// request_id 缺失（测试构造/协议异常）时按「无 pending 同源块」处理（不拦截）。
-fn committed_has_pending(state: &BridgeState, owner: &crate::acp_client::InteractionOwner) -> bool {
-    state.committed.iter().any(|vm| {
-        matches!(vm, TuiRenderUnit::TuiAskUserBlock(a) if a.pending && a.owner.as_ref() == Some(owner))
-    })
-}
-
-/// §6.8 结果回写（Slice 4）：扫描 committed 中 pending 的 interaction block，
-/// 按 `request_id` 匹配 → clone + `pending=false` + `result` + `recompute_hash`，
-/// 再原位 `set`（im::Vector COW）。匹配不到时 no-op（防御：本地事件迟到 /
-/// 重复到达幂等）。
-pub(super) fn handle_interaction_terminal(
-    state: &mut BridgeState,
-    owner: &crate::acp_client::InteractionOwner,
-    outcome: &crate::acp_client::InteractionUiOutcome,
-) {
-    let result = match outcome {
-        crate::acp_client::InteractionUiOutcome::Resolved { result } => result.clone(),
-        crate::acp_client::InteractionUiOutcome::Expired { .. } => {
-            i18n::tr("render-interaction-result-rejected")
-        }
-    };
-    {
-        let atom = crate::kit::atoms::HITL_PENDING.state();
-        let mut pending = atom.write();
-        if pending
-            .as_ref()
-            .is_some_and(|pending| pending.owner == *owner)
-        {
-            *pending = None;
-            if *crate::kit::atoms::POPUP_KIND.state().read()
-                == Some(crate::kit::atoms::PopupKind::Hitl)
-            {
-                *crate::kit::atoms::POPUP_KIND.state().write() = None;
-            }
-        }
-    }
-    {
-        let atom = ASK_USER_PENDING.state();
-        let mut pending = atom.write();
-        if pending
-            .as_ref()
-            .is_some_and(|pending| pending.owner == *owner)
-        {
-            *pending = None;
-            crate::kit::panel_registry::close_panel(crate::app::panel_types::PanelKind::AskUser);
-            if *crate::kit::atoms::POPUP_KIND.state().read()
-                == Some(crate::kit::atoms::PopupKind::AskUser)
-            {
-                *crate::kit::atoms::POPUP_KIND.state().write() = None;
-            }
-        }
-    }
-    {
-        let atom = crate::kit::atoms::CONFIRM_PAYLOAD.state();
-        let mut confirm = atom.write();
-        if confirm.as_ref().is_some_and(|payload| {
-            matches!(
-                &payload.pending_action,
-                crate::kit::atoms::ConfirmAction::RejectAskUser { owner: pending_owner, .. }
-                    if pending_owner == owner
-            )
-        }) {
-            *confirm = None;
-            if *crate::kit::atoms::POPUP_KIND.state().read()
-                == Some(crate::kit::atoms::PopupKind::Confirm)
-            {
-                *crate::kit::atoms::POPUP_KIND.state().write() = None;
-            }
-        }
-    }
-    let mut updated: Option<(usize, TuiRenderUnit)> = None;
-    for (i, vm) in state.committed.iter().enumerate() {
-        if let TuiRenderUnit::TuiAskUserBlock(a) = vm
-            && a.pending
-            && a.owner.as_ref() == Some(owner)
-        {
-            let mut b = a.clone();
-            b.pending = false;
-            b.result = Some(result.clone());
-            // 结果回写后收束为结果行（§7 completed → Collapsed）——
-            // 手动展开的覆盖由折叠 pass 依据 FOLD_OVERRIDES 恢复。
-            if !b.user_modified {
-                b.fold = crate::kit::tui_render_unit::fold_for_status(
-                    crate::kit::tui_render_unit::FoldTarget::Interaction,
-                    crate::kit::tui_render_unit::EntryStatus::Completed,
-                );
-            }
-            b.recompute_hash();
-            updated = Some((i, TuiRenderUnit::TuiAskUserBlock(b)));
-            break;
-        }
-    }
-    if let Some((i, vm)) = updated {
-        state.committed.set(i, vm);
-    }
-    state.publish_barrier();
-    super::render::push_acp_state(state);
-}
-
-/// 构造 Permission（HITL）interaction block（§6.8）：
-/// `! Approval required` / `{verb} wants to run: {input_summary}` /
-/// `[Allow once] [Deny]`（D6：`[Always allow]` 为协议依赖项，不渲染）。
-/// `request_id` 与 payload 从同一个 composite event 取得。
-fn build_permission_block(pending: &PendingInteraction<HitlPending>) -> TuiAskUserBlock {
-    let hp = &pending.payload;
-    let mut verb = hp.tool_name.clone();
-    if verb.is_empty() {
-        verb = i18n::tr("render-interaction-tool-unknown");
-    }
-    let question = i18n::tr_args(
-        "render-interaction-question-permission",
-        &[
-            ("verb".to_string(), FluentValue::from(verb.as_str())),
-            (
-                "summary".to_string(),
-                FluentValue::from(hitl_input_summary(&hp.tool_input).as_str()),
-            ),
-        ],
-    );
-    let mut block = TuiAskUserBlock {
-        items: Vec::new(),
-        is_error: false,
-        kind: InteractionKind::Permission,
-        pending: true,
-        verb,
-        question,
-        options: vec![
-            i18n::tr("render-interaction-allow-once"),
-            i18n::tr("render-interaction-deny"),
-        ],
-        result: None,
-        request_id: Some(pending.request_id_json.clone()),
-        owner: Some(pending.owner.clone()),
-        question_ids: Vec::new(),
-        fold: crate::kit::tui_render_unit::FoldState::Expanded,
-        user_modified: false,
-        content_hash: 0,
-    };
-    block.recompute_hash();
-    block
-}
-
-/// 构造 AskUser interaction block（§6.8）：首问 header/options 摘要。
-/// 多问题表单的完整编辑保留在 AskUser 面板（双轨 D5）；inline 只承担首问
-/// 的快速回答（其余问题提交空字符串，协议结构完整）。
-fn build_ask_user_block(pending: &PendingInteraction<AskUser>) -> TuiAskUserBlock {
-    let au = &pending.payload;
-    let first = au.questions.first();
-    let question = match first {
-        Some(q) if !q.header.is_empty() => q.header.clone(),
-        Some(q) if !q.question.is_empty() => q.question.clone(),
-        _ => i18n::tr("render-interaction-title-ask-user"),
-    };
-    let options: Vec<String> = first
-        .map(|q| q.options.iter().map(|o| o.label.clone()).collect())
-        .unwrap_or_default();
-    let mut block = TuiAskUserBlock {
-        items: Vec::new(),
-        is_error: false,
-        kind: InteractionKind::AskUser,
-        pending: true,
-        verb: "AskUser".to_string(),
-        question,
-        options,
-        result: None,
-        request_id: Some(pending.request_id_json.clone()),
-        owner: Some(pending.owner.clone()),
-        question_ids: au.questions.iter().map(|q| q.id.clone()).collect(),
-        fold: crate::kit::tui_render_unit::FoldState::Expanded,
-        user_modified: false,
-        content_hash: 0,
-    };
-    block.recompute_hash();
-    block
-}
-
-/// 从 HITL tool_input raw JSON 提取人类可读的输入摘要。
-/// 优先提取工具主要对象字段（command/path/query/url/pattern），
-/// fallback 紧凑 JSON——hitl_popup 的 pretty JSON 保留为弹窗展示。
-pub(crate) fn hitl_input_summary(input: &Value) -> String {
-    if let Some(obj) = input.as_object() {
-        for key in [
-            "command",
-            "path",
-            "query",
-            "url",
-            "file_path",
-            "pattern",
-            "name",
-            "description",
-        ] {
-            if let Some(v) = obj.get(key)
-                && let Some(s) = v.as_str()
-                && !s.is_empty()
-            {
-                return s.to_string();
-            }
-        }
-    }
-    match serde_json::to_string(input) {
-        Ok(s) if !s.is_empty() && s != "null" => s,
-        _ => i18n::tr("render-interaction-tool-unknown"),
-    }
-}
-
 pub(super) fn handle_rewind_completed(state: &mut BridgeState, messages_json: &str) {
+    // rewind 改变了会话的有效范围：旧 `nextCursor` / `snapshotToken` / 区间索引 /
+    // 在途认领在新窗口下都不再对应任何条目。先失效浏览状态，rewind 时刻已在途、
+    // 之后才返回的页会在消费侧与桥接侧都被判为过期（REQ-C01-5、A11；
+    // 服务端同时会对旧 cursor 回 -32012）。TUI 不在 rewind 后自动重新 load，
+    // 因此下一次翻页要等新的初始 load 建立浏览身份——旧 cursor 本已失效。
+    crate::kit::history_paging::reset_browsing_state();
     // H3: rewind 完成——反序列化 messages_json 为 Vec<Value>，按 role
     // 映射为 TuiRenderUnit，替换 state.committed。
     let messages: Result<Vec<Value>, _> = serde_json::from_str(messages_json);
@@ -654,281 +424,6 @@ pub(super) fn handle_oauth_restored(state: &mut BridgeState, server_name: &str) 
     );
     state.inject_system_note(text, TuiNoteLevel::Info);
     super::render::push_acp_state(state);
-}
-
-// ── §4.7 Background Tasks ──
-
-pub(crate) fn apply_bg_task_snapshot(tasks: &[BgTaskEntry], revision: Option<u64>) -> bool {
-    if let (Some(incoming), Some(current)) = (revision, *BG_TASK_REVISION.state().read())
-        && incoming < current
-    {
-        return false;
-    }
-    *BG_TASK_REVISION.state().write() = revision;
-    let tasks_vec: Vec<BgTaskEntry> = tasks.to_vec();
-    BG_TASKS.state().write().clone_from(&tasks_vec);
-    let previous_display = BG_DISPLAY.state().read().clone();
-    let observed_live = crate::kit::atoms::BG_LIVE_DETAIL.state().read().clone();
-    // 从快照全量构造 BG_DISPLAY 条目
-    let entries: Vec<crate::kit::atoms::BgDisplayEntry> = tasks
-        .iter()
-        .filter_map(|t| {
-            let terminal = bg_task_terminal(t.status.as_deref());
-            let previous = previous_display.iter().find(|row| row.id == t.task_id);
-            let active = matches!(t.status.as_deref(), None | Some("running"))
-                && previous.is_some_and(|row| row.is_active)
-                && observed_live.get(&t.task_id).is_some_and(|detail| {
-                    detail.status == crate::kit::atoms::BgLiveStatus::Running
-                });
-            if !terminal && !active {
-                return None;
-            }
-            Some(crate::kit::atoms::BgDisplayEntry {
-                id: t.task_id.clone(),
-                linked_agent_id: previous.and_then(|row| row.linked_agent_id.clone()),
-                agent_type: t.kind.clone(),
-                desc: bg_task_description(&t.summary, t.status.as_deref()),
-                is_active: active,
-                is_error: matches!(t.status.as_deref(), Some("failed" | "cancelled")),
-                current_tool: previous.and_then(|row| row.current_tool.clone()),
-                tool_count: previous.map_or(0, |row| row.tool_count),
-                created_at: previous.map_or_else(peri_time::monotonic_now, |row| row.created_at),
-                completed_at: terminal.then(peri_time::monotonic_now),
-            })
-        })
-        .collect();
-    BG_DISPLAY.state().write().clone_from(&entries);
-    for t in tasks {
-        upsert_identity_from_started(&t.task_id, &t.kind, &t.summary, t.pid);
-        if let Some(status) = t
-            .status
-            .as_deref()
-            .filter(|status| bg_task_terminal(Some(status)))
-        {
-            seed_live_from_terminal_snapshot(&t.task_id, &t.kind, &t.summary, t.pid, status);
-        } else if !entries
-            .iter()
-            .any(|row| row.id == t.task_id && row.is_active)
-        {
-            seed_unobserved_snapshot(&t.task_id, &t.kind, &t.summary, t.pid);
-        }
-    }
-    true
-}
-
-fn bg_task_description(summary: &str, status: Option<&str>) -> String {
-    match status {
-        Some("lost") => format!("{summary} · {}", i18n::tr("bg-task-status-lost")),
-        Some("reconciling") => {
-            format!("{summary} · {}", i18n::tr("bg-task-status-reconciling"))
-        }
-        _ => summary.to_owned(),
-    }
-}
-
-fn bg_task_terminal(status: Option<&str>) -> bool {
-    matches!(status, Some("completed" | "failed" | "cancelled"))
-}
-
-pub(super) fn handle_bg_task_snapshot(
-    state: &mut BridgeState,
-    tasks: &[BgTaskEntry],
-    revision: Option<u64>,
-) {
-    if !apply_bg_task_snapshot(tasks, revision) {
-        return;
-    }
-    super::render::push_acp_state(state);
-}
-
-pub(crate) fn request_bg_task_snapshot() {
-    let Some(client) = ACP_CLIENT_HANDLE.get().cloned() else {
-        return;
-    };
-    let session_id = ACTIVE_SESSION_ID.state().read().clone();
-    if session_id.is_empty() {
-        return;
-    }
-    tokio::spawn(async move {
-        let result = client
-            .send_raw_request(
-                "session/bg-tasks",
-                serde_json::json!({ "sessionId": session_id }),
-            )
-            .await;
-        let Ok(value) = result else {
-            return;
-        };
-        if ACTIVE_SESSION_ID.state().read().as_str() != session_id {
-            return;
-        }
-        let revision = value.get("revision").and_then(Value::as_u64);
-        let Some(tasks) = value.get("tasks").cloned() else {
-            return;
-        };
-        if let Ok(tasks) = serde_json::from_value::<Vec<BgTaskEntry>>(tasks) {
-            apply_bg_task_snapshot(&tasks, revision);
-        }
-    });
-}
-
-fn accept_bg_task_delta(revision: Option<u64>) -> bool {
-    let Some(revision) = revision else {
-        return true;
-    };
-    if let Some(current) = *BG_TASK_REVISION.state().read() {
-        if revision <= current {
-            return false;
-        }
-        if revision > current.saturating_add(1) {
-            request_bg_task_snapshot();
-            return false;
-        }
-    }
-    *BG_TASK_REVISION.state().write() = Some(revision);
-    true
-}
-
-pub(super) fn handle_bg_task_started(_state: &mut BridgeState, entry: &BgTaskEntry) {
-    if !accept_bg_task_delta(entry.revision) {
-        return;
-    }
-    // A snapshot can arrive before a buffered started event. Keep one row per
-    // task and do not resurrect a task that has already reached a terminal state.
-    if BG_TASKS
-        .state()
-        .read()
-        .iter()
-        .any(|task| task.task_id == entry.task_id && bg_task_terminal(task.status.as_deref()))
-    {
-        return;
-    }
-    {
-        let tasks = BG_TASKS.state();
-        let mut tasks = tasks.write();
-        if let Some(existing) = tasks.iter_mut().find(|t| t.task_id == entry.task_id) {
-            *existing = entry.clone();
-        } else {
-            tasks.push(entry.clone());
-        }
-    }
-    upsert_identity_from_started(&entry.task_id, &entry.kind, &entry.summary, entry.pid);
-    seed_live_from_started(&entry.task_id, &entry.kind, &entry.summary, entry.pid);
-    let display_entry = crate::kit::atoms::BgDisplayEntry {
-        id: entry.task_id.clone(),
-        linked_agent_id: None,
-        agent_type: entry.kind.clone(),
-        desc: bg_task_description(&entry.summary, entry.status.as_deref()),
-        is_active: true,
-        is_error: false,
-        current_tool: None,
-        tool_count: 0,
-        created_at: peri_time::monotonic_now(),
-        completed_at: None,
-    };
-    let display = BG_DISPLAY.state();
-    let mut display = display.write();
-    if let Some(existing) = display.iter_mut().find(|e| e.id == entry.task_id) {
-        existing.agent_type = entry.kind.clone();
-        existing.desc = bg_task_description(&entry.summary, entry.status.as_deref());
-        existing.is_active = true;
-        existing.completed_at = None;
-    } else {
-        display.push(display_entry);
-    }
-}
-
-pub(super) fn handle_bg_task_completed(
-    task_id: &str,
-    success: bool,
-    duration_ms: u64,
-    output_preview: Option<String>,
-    revision: Option<u64>,
-) {
-    if !accept_bg_task_delta(revision) {
-        return;
-    }
-    BG_TASKS.state().write().retain(|t| t.task_id != *task_id);
-    mark_task_completed(task_id, success, duration_ms, output_preview);
-    // 标记后台显示条目为完成（保留 3s 后自动清除）
-    let now = peri_time::monotonic_now();
-    if let Some(entry) = BG_DISPLAY
-        .state()
-        .write()
-        .iter_mut()
-        .find(|e| e.id == *task_id)
-    {
-        entry.is_active = false;
-        entry.is_error = !success;
-        entry.completed_at = Some(now);
-    }
-    let msg = if success {
-        i18n::tr_args(
-            "app-note-bg-task-completed",
-            &[(
-                "duration".into(),
-                FluentValue::from(duration_ms as f64 / 1000.0),
-            )],
-        )
-    } else {
-        i18n::tr_args(
-            "app-note-bg-task-failed",
-            &[(
-                "duration".into(),
-                FluentValue::from(duration_ms as f64 / 1000.0),
-            )],
-        )
-    };
-    NOTIFICATION
-        .state()
-        .write()
-        .replace(crate::kit::atoms::Notification {
-            message: msg,
-            until: peri_time::monotonic_now() + Duration::from_millis(1500),
-        });
-}
-
-pub(super) fn handle_bg_task_cancelled(task_id: &str, reason: &str, revision: Option<u64>) {
-    if !accept_bg_task_delta(revision) {
-        return;
-    }
-    BG_TASKS.state().write().retain(|t| t.task_id != *task_id);
-    mark_task_cancelled(task_id, reason);
-    // 标记后台显示条目为失败（3s 倒计时）
-    let now = peri_time::monotonic_now();
-    if let Some(entry) = BG_DISPLAY
-        .state()
-        .write()
-        .iter_mut()
-        .find(|e| e.id == *task_id)
-    {
-        entry.is_active = false;
-        entry.is_error = true;
-        entry.completed_at = Some(now);
-    }
-}
-
-pub(super) fn handle_bg_task_updated(task_id: &str, status: &str, revision: Option<u64>) {
-    if !accept_bg_task_delta(revision) {
-        return;
-    }
-    let tasks = BG_TASKS.state();
-    let mut tasks = tasks.write();
-    if let Some(task) = tasks.iter_mut().find(|task| task.task_id == task_id) {
-        task.status = Some(status.to_owned());
-        let description = bg_task_description(&task.summary, task.status.as_deref());
-        if let Some(entry) = BG_DISPLAY
-            .state()
-            .write()
-            .iter_mut()
-            .find(|entry| entry.id == task_id)
-        {
-            entry.desc = description;
-        }
-    }
-    let snapshot = tasks.clone();
-    drop(tasks);
-    apply_bg_task_snapshot(&snapshot, revision);
 }
 
 // ── §4.9 Plugin events ──

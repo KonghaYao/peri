@@ -33,6 +33,7 @@ impl ReplaySender for CollectSender {
         _session_id: &str,
         _reminder: &peri_acp_types::system_reminder::SystemReminder,
         _caps: &PeriCaps,
+        _marks: &EntryMarks<'_>,
     ) -> Result<(), ReplayError> {
         // 本 fixture 只收集标准 SessionUpdate；结构化 reminder 由专用测试 sender 覆盖。
         Ok(())
@@ -47,10 +48,139 @@ async fn collect_replay(history: Vec<BaseMessage>) -> Vec<SessionUpdate> {
         replay: true,
         ..PeriCaps::default()
     };
-    replay_session_history("s1", &history, &sender, &caps)
+    // 位置表留空：这些用例只验证 `session/update` 出口的字段，存储序位置由历史分页
+    // 用例覆盖（`host/history_page_wire_test.rs` 的合并契约断言）。
+    let positions = HashMap::new();
+    let generation = LoadGeneration::from_client("gen-1");
+    let marks = ReplayMarks::new(&generation, "s1", &positions);
+    replay_session_history("s1", &history, &sender, &caps, &marks)
         .await
         .expect("replay 发送失败");
     sender.updates.into_inner().unwrap()
+}
+
+/// REQ-H04：回放通知带本次 load 的代次（紧挨 `periReplay`），未协商的连接一个私有字段都不带。
+#[tokio::test]
+async fn replay_notifications_carry_the_load_generation_next_to_the_replay_marker() {
+    let generation = LoadGeneration::from_client("gen-42");
+    let positions = HashMap::new();
+    let marks = ReplayMarks::new(&generation, "s1", &positions);
+    let negotiated = PeriCaps {
+        replay: true,
+        ..PeriCaps::default()
+    };
+    let sender = CollectSender {
+        updates: std::sync::Mutex::new(Vec::new()),
+    };
+    replay_session_history(
+        "s1",
+        &[BaseMessage::human("hello")],
+        &sender,
+        &negotiated,
+        &marks,
+    )
+    .await
+    .unwrap();
+    let updates = sender.updates.into_inner().unwrap();
+    let meta = serde_json::to_value(&updates[0]).unwrap()["_meta"].clone();
+    assert_eq!(meta["periReplay"], serde_json::Value::Bool(true));
+    assert_eq!(meta["periLoadGeneration"], "gen-42");
+
+    let sender = CollectSender {
+        updates: std::sync::Mutex::new(Vec::new()),
+    };
+    // 未协商分页：回放不带条目身份 / 位置戳（`periReplay` 仍按 `caps.replay` 单独判定）。
+    let no_pagination = ReplayMarks::without_entry_marks(&generation, "s1");
+    replay_session_history(
+        "s1",
+        &[BaseMessage::human("hello")],
+        &sender,
+        &negotiated,
+        &no_pagination,
+    )
+    .await
+    .unwrap();
+    let updates = sender.updates.into_inner().unwrap();
+    let meta = serde_json::to_value(&updates[0]).unwrap()["_meta"].clone();
+    assert_eq!(meta["periReplay"], serde_json::Value::Bool(true));
+    assert_eq!(meta["periLoadGeneration"], "gen-42");
+    assert!(
+        meta.get("periEntryId").is_none() && meta.get("periPosition").is_none(),
+        "未协商分页的连接不得到条目身份 / 位置戳：{meta}"
+    );
+
+    let sender = CollectSender {
+        updates: std::sync::Mutex::new(Vec::new()),
+    };
+    replay_session_history(
+        "s1",
+        &[BaseMessage::human("hello")],
+        &sender,
+        &PeriCaps::default(),
+        &no_pagination,
+    )
+    .await
+    .unwrap();
+    let updates = sender.updates.into_inner().unwrap();
+    assert_eq!(
+        serde_json::to_value(&updates[0]).unwrap()["_meta"],
+        serde_json::Value::Null,
+        "未协商回放标记的连接不引入 Peri 私有字段"
+    );
+}
+
+/// REQ-H01-3 / 合并契约：协商过分页的连接在初始回放里拿到**与历史页可比**的条目身份与
+/// 位置戳（`periEntryId` / `periPosition`），本线程没有行的条目只有身份、没有位置。
+#[tokio::test]
+async fn replay_marks_carry_the_same_entry_identity_and_position_as_a_history_page() {
+    let generation = LoadGeneration::from_client("gen-merge");
+    let visible = BaseMessage::human("hello");
+    let inherited = BaseMessage::ai("from the frozen prefix");
+    let mut positions = HashMap::new();
+    positions.insert(visible.id(), 42_u64);
+    let marks = ReplayMarks::new(&generation, "s1", &positions);
+    let sender = CollectSender {
+        updates: std::sync::Mutex::new(Vec::new()),
+    };
+
+    replay_session_history(
+        "s1",
+        &[visible.clone(), inherited.clone()],
+        &sender,
+        &PeriCaps {
+            replay: true,
+            history_pagination: true,
+            ..PeriCaps::default()
+        },
+        &marks,
+    )
+    .await
+    .unwrap();
+    let updates = sender.updates.into_inner().unwrap();
+    let own = serde_json::to_value(&updates[0]).unwrap();
+    let own_meta = own["_meta"].clone();
+    assert_eq!(
+        own_meta["periEntryId"],
+        serde_json::json!(entry_id("s1", visible.id())),
+        "回放与历史页必须给出同一个身份字符串"
+    );
+    assert_eq!(
+        own_meta["periPosition"],
+        serde_json::json!(42),
+        "位置戳就是历史页 `items[].position` 的那把尺子"
+    );
+
+    let inherited_update = serde_json::to_value(&updates[1]).unwrap();
+    let inherited_meta = inherited_update["_meta"].clone();
+    assert_eq!(
+        inherited_meta["periEntryId"],
+        serde_json::json!(entry_id("s1", inherited.id())),
+        "继承条目没有存储行，但仍然带身份"
+    );
+    assert!(
+        inherited_meta.get("periPosition").is_none(),
+        "继承条目在本线程没有行，不得编造位置：{inherited_meta}"
+    );
 }
 
 #[tokio::test]
@@ -80,7 +210,10 @@ async fn persisted_reminder_is_not_replayed_as_user_content() {
     let sender = CollectSender {
         updates: std::sync::Mutex::new(Vec::new()),
     };
-    replay_persisted_session_history("s1", &history, &sender, &PeriCaps::default())
+    let positions = HashMap::new();
+    let generation = LoadGeneration::from_client("gen-1");
+    let marks = ReplayMarks::new(&generation, "s1", &positions);
+    replay_persisted_session_history("s1", &history, &sender, &PeriCaps::default(), &marks)
         .await
         .unwrap();
     let updates = sender.updates.into_inner().unwrap();
@@ -361,6 +494,9 @@ async fn test_replay_tool_completion_keeps_raw_output_compatibility_and_failure_
             let sender = CollectSender {
                 updates: std::sync::Mutex::new(Vec::new()),
             };
+            let positions = HashMap::new();
+            let generation = LoadGeneration::from_client("gen-1");
+            let marks = ReplayMarks::new(&generation, "s1", &positions);
             replay_session_history(
                 "s1",
                 &[BaseMessage::tool_result_with_execution_and_failure(
@@ -375,6 +511,7 @@ async fn test_replay_tool_completion_keeps_raw_output_compatibility_and_failure_
                     replay: replay_cap,
                     ..PeriCaps::default()
                 },
+                &marks,
             )
             .await
             .unwrap();

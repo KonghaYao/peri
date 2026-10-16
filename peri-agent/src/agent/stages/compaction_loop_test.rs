@@ -622,14 +622,47 @@ async fn test_run_react_loop_successful_full_does_not_recompact_excluded_history
     crate::session::transcript::MessageTranscript::flush_via_tx(&tx)
         .await
         .unwrap();
-    let flags = store.load_session_snapshot(&thread_id).await.unwrap().flags;
-    assert_eq!(
-        flags
-            .values()
-            .filter(|flag| flag.excluded && flag.projection.is_some())
-            .count(),
-        0
+    // 被排除行不得残留**渲染指令**（否则后续 Micro 会作用到 excluded 历史）；新语义下
+    // Full 归档行必带一条空投影指令，只承载取代关系，取代目标是本次追加的摘要。
+    let snapshot = store.load_session_snapshot(&thread_id).await.unwrap();
+    let flags = &snapshot.flags;
+    let position: std::collections::HashMap<_, _> = snapshot
+        .payloads
+        .iter()
+        .enumerate()
+        .map(|(index, payload)| (payload.id(), index))
+        .collect();
+    let archived: Vec<_> = flags.iter().filter(|(_, flag)| flag.excluded).collect();
+    assert!(
+        !archived.is_empty(),
+        "两次 Full 后应存在被排除的归档行，否则本断言失去意义"
     );
+    for (id, flag) in archived {
+        let directive = flag
+            .projection
+            .as_ref()
+            .unwrap_or_else(|| panic!("Full 归档行必须记录取代关系: {id:?}"));
+        assert!(
+            directive.entries.is_empty(),
+            "被排除行不得残留渲染指令: {id:?}"
+        );
+        // 取代链必须严格向后推进，并最终落到仍可见的摘要：两次 Full 后，第一批归档行指向
+        // 的第一条摘要会被第二批再次归档（指向第二条摘要），所以只查一跳不足。
+        let mut cursor = *id;
+        while flags.get(&cursor).is_some_and(|flag| flag.excluded) {
+            let summary = flags[&cursor]
+                .superseded_by()
+                .unwrap_or_else(|| panic!("Full 归档行必须记录取代它的摘要 id: {cursor:?}"));
+            let (Some(&from), Some(&to)) = (position.get(&cursor), position.get(&summary)) else {
+                panic!("取代关系必须指向已持久化消息: {cursor:?} -> {summary:?}");
+            };
+            assert!(
+                to > from,
+                "取代关系必须指向后追加的摘要: {cursor:?} -> {summary:?}"
+            );
+            cursor = summary;
+        }
+    }
 }
 
 /// [回归测试] 工具结果已进入 transcript 后，下一轮 Compact 必须看见其新增压力。

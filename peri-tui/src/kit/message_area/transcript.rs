@@ -3,6 +3,7 @@ use std::sync::Arc;
 
 use super::grid::{GridSpec, TextLineSource, ZoneTransition};
 use super::selection::{SlotIndex, SlotLines};
+use super::viewport_anchor::{PrependRelocation, ViewportAnchor};
 use super::vm_cache::VmCacheSlot;
 use crate::kit::atoms::{TranscriptPublication, ViewModelsSnapshot};
 use crate::kit::entry_render_cache::{EntryInvalidation, EntryRenderContext};
@@ -128,6 +129,13 @@ pub(super) struct Transcript {
     retained_bytes: usize,
     clock: u64,
     frame: Option<u64>,
+    /// [REQ-C01-3 / A20] 最近一次发布的重定位结果（仅当该次发布与一次更早历史并入配对）。
+    /// 渲染 body 取走（一次性）后交给 `run_auto_follow` 的并入分支消费；
+    /// 语义与身份口径见 [`super::viewport_anchor`]。
+    prepend: Option<PrependRelocation>,
+    /// 已观测并配对的并入代数（`HISTORY_PREPEND_EPOCH`）——只在观测到**发布变化**
+    /// 时推进，因此「epoch 先于发布被读到」不会漏配（见 `viewport_anchor` 模块文档 4.）。
+    merge_epoch_seen: u64,
     pub(super) scanned_slots: usize,
     pub(super) updated_slots: usize,
     pub(super) evictions: usize,
@@ -148,6 +156,7 @@ impl Transcript {
         reset: u64,
         scroll_y: usize,
         height: usize,
+        merge_epoch: u64,
     ) -> Arc<SlotIndex> {
         self.scanned_slots = 0;
         self.updated_slots = 0;
@@ -191,6 +200,18 @@ impl Transcript {
             0
         } else {
             snapshot.items.len()
+        };
+        // ── [REQ-C01-3 / A20] 发布**前**的锚点：旧布局此刻仍在位 ──
+        // 身份重定位的两半都必须在这里做：`self.index` 还是上一次发布的索引
+        // （旧槽位 + 旧 items），下一个分支就会把它改写成新快照的布局。`capture`
+        // 只认渲染侧事实（索引 + scroll_y），不接收任何桥接槽位号。
+        let published = self
+            .generation
+            .is_some_and(|generation| generation != snapshot.generation);
+        let prepend_anchor = if published {
+            ViewportAnchor::capture(&self.index, scroll_y)
+        } else {
+            None
         };
         if global || changed {
             let length = snapshot.items.len();
@@ -239,6 +260,26 @@ impl Transcript {
                     self.enforce_budget(caches, &pinned);
                 }
             }
+        }
+        // ── [REQ-C01-3 / A20] 发布**后**的重定位：同一身份在新索引里重查视觉起点 ──
+        // 只在「本次发布」与「一次更早历史并入」配对时产出：`HISTORY_PREPEND_EPOCH`
+        // 仍是唯一的跨层事实（并合发生过），`merge_epoch_seen` 只在观测到发布变化时
+        // 推进——epoch 早于/晚于发布被读到都不会漏配。身份认不出（被替换 / 被并入
+        // 折叠组而消失 / 新窗口里出现多次）→ `relocate` 返回 `None` → 不补偿。
+        // `from_offset` 取**未夹取**的当帧 scroll_y：它就是旧布局上视口顶行的位置。
+        self.prepend = None;
+        if published {
+            if merge_epoch != self.merge_epoch_seen {
+                self.prepend = prepend_anchor.and_then(|anchor| {
+                    anchor
+                        .relocate(&self.index)
+                        .map(|target_offset| PrependRelocation {
+                            from_offset: scroll_y,
+                            target_offset,
+                        })
+                });
+            }
+            self.merge_epoch_seen = merge_epoch;
         }
         let scroll_y = scroll_y.min(self.index.total_visual().saturating_sub(height));
         let viewport = self.index.visible_slots(scroll_y, height);
@@ -395,6 +436,14 @@ impl Transcript {
 
     pub(super) fn anchor(&self) -> Option<usize> {
         self.anchors.first().copied()
+    }
+
+    /// [REQ-C01-3 / A20] 取走本次发布的重定位结果（**一次性**）。
+    ///
+    /// 渲染 body 在 `prepare` 之后调用一次并交给 `run_auto_follow` 的并入分支；
+    /// 取走后不会在后续帧被重复应用（否则非并入帧会用陈旧目标覆盖用户的滚动）。
+    pub(super) fn take_prepend_relocation(&mut self) -> Option<PrependRelocation> {
+        self.prepend.take()
     }
 
     pub(super) fn warm_visible(

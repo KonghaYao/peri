@@ -248,7 +248,7 @@ R1–R9 与追加硬要求）。本批做 S1/S2/S3 + 跨 crate 编译修正；**
   `SessionInvocationPort`；六步管线（归属校验 → 目标绑定 → 既有 before-tool 规则 →
   批准覆盖最终目标 → `SessionAdmissionOwner` 串行裁决 → 先写 outcome 再投影）；
   `AdmittedPeerTool`（`invoke_output` 内先 `commit.recheck()` 再调 bridge）+
-  `InvocationOutcomeStore`（条数 256 有界，单条超 1 MiB 显式 `PayloadTooLarge`）+ 
+  `InvocationOutcomeStore`（条数 256 有界，单条超 1 MiB 显式 `PayloadTooLarge`）+
   `InvocationCancel`（service 签发，父为 session 层）。
 - `mcp/session_invocation/admission.rs`（新）：`SessionAdmissionOwner`（短锁无 await；
   epoch / 撤销 / record 状态 / 世代全过后产出 `DispatchCommit`）、`RevocationKey`

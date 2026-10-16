@@ -7,6 +7,7 @@
 mod agent;
 mod compact;
 mod fold;
+mod history_page;
 pub(crate) mod render;
 mod streaming;
 mod subagent;
@@ -140,7 +141,9 @@ pub struct BridgeState {
     pub generation: u64,
     /// 当前活跃 session 的 ID。事件携带的 active_session_id 不匹配时丢弃。
     pub active_session_id: String,
-    /// `/compact` 命令刚刚完成，TurnDone 时需触发 session/load 重放。
+    /// `/compact` 刚刚完成、且本轮尚无后续流事件。REQ-C02 / A12：TurnDone
+    /// **不再**触发 session/load 重放；标志只用于两件事——清掉仅服务同会话
+    /// reset 边界的 `PENDING_COMPACT_NOTE`，以及去重紧随 compact 的 UiOnly 反馈。
     /// S4.1 方案 B：CompactCompleted 置位后，任何流事件（TextChunk/
     /// ReasoningChunk/ToolStarted/ToolEnded/SubagentStarted）到达即清除——
     /// 命令 compact 后无流事件，标志保持；agent 内部 auto-compact 后标志被
@@ -325,13 +328,16 @@ pub(crate) fn dispatch_for_bridge(
     event: &AcpEventData,
 ) -> PublicationIntent {
     state.publication_intent = PublicationIntent::None;
+    // 回放条目区间登记需要「本事件推入了哪个槽位」——在 handler 之前取长度。
+    let committed_len_before = state.committed.len();
     use AcpEventData::*;
     // S4.1 方案 B：CompactCompleted 置 compact_just_completed 后，任何流事件
     // 到达即清除标志——agent 内部 auto-compact 后 ReAct 循环继续产出，流事件
     // （TextChunk/ReasoningChunk/ToolStarted/ToolEnded/SubagentStarted/
     // ToolCount/Progress）必然紧随；命令 /compact（Immediate）后无流事件，
-    // 标志保持到 TurnDone 触发 session/load 重放。无需知道 compact 触发来源
-    // （Issue 2026-08-05）。清单与 issue 声明清单保持同步（含 ToolCount/Progress）。
+    // 标志保持到 TurnDone——届时只清标志与 `PENDING_COMPACT_NOTE`，不触发重放
+    // （REQ-C02 / A12）。无需知道 compact 触发来源（Issue 2026-08-05）。清单与
+    // issue 声明清单保持同步（含 ToolCount/Progress）。
     if matches!(
         event,
         TextChunk(_)
@@ -364,7 +370,11 @@ pub(crate) fn dispatch_for_bridge(
         }
         CacheUsageUpdated(sample) => turn::handle_cache_usage_updated(state, sample),
         SessionReplayStarted => turn::handle_session_replay_started(state),
-        SessionReplayDone => turn::handle_session_replay_done(state),
+        SessionReplayDone => {
+            // 回放结束：关闭正在铺的条目区间（首屏区间索引在此定型）。
+            crate::kit::history_paging::close_own_entry();
+            turn::handle_session_replay_done(state)
+        }
         TurnDone => turn::handle_turn_done(state),
         AgentDone { request_id } => turn::handle_agent_done(state, request_id),
         TurnInterrupted { reason, request_id } => {
@@ -541,6 +551,15 @@ pub(crate) fn dispatch_for_bridge(
             output_summary,
             is_error,
         } => tool::handle_replay_tool_ended(state, tool_id, output_summary, *is_error),
+        // 历史分页：整页并入窗口（本地事件，非 wire；见 `acp_events::history_page`）。
+        // 它只动 committed，不碰执行 / 审批 / Todo / 输入状态（REQ-C01-6、A24）。
+        HistoryPageLoaded { response } => {
+            history_page::handle_history_page_loaded(state, response.as_ref())
+        }
+        // 回放条目位置标记：只登记区间，不产生展示单元。
+        ReplayEntryMarked { entry_id, position } => {
+            crate::kit::history_paging::mark_own_entry(entry_id, *position)
+        }
 
         // ── §4.7 Background Tasks ──
         BgTaskSnapshot { tasks, revision } => {
@@ -576,11 +595,34 @@ pub(crate) fn dispatch_for_bridge(
     }
 
     let requested = std::mem::take(&mut state.publication_intent);
+    // 回放条目区间：这些变体各自在末尾推入**恰好一个**展示单元，槽位即
+    // `committed.len() - 1`。计数不符（例如 user 气泡落进 current_turn，或
+    // reminder 前 `flush_current_turn` 并入了流式产出）时不登记，避免把区间错标到
+    // 别的条目上。
+    //
+    // reminder（含 fallback）必须在集合里：首屏自有条目**只有 reminder** 是合法
+    // 形状，漏登记会让区间索引为空、更早历史插到继承前缀之前（REQ-H01-6、A20）。
+    if state.committed.len() == committed_len_before + 1
+        && matches!(
+            event,
+            CommittedAssistantText { .. }
+                | ReplayToolStarted { .. }
+                | ReplayedUserBubble { .. }
+                | LocalUserBubble { .. }
+                | SystemReminder { .. }
+                | SystemReminderFallback { .. }
+        )
+    {
+        crate::kit::history_paging::note_own_entry_unit(committed_len_before);
+    }
     if requested != PublicationIntent::None {
         requested
     } else if matches!(
         event,
-        CommittedAssistantText { .. } | ReplayToolStarted { .. } | ReplayToolEnded { .. }
+        CommittedAssistantText { .. }
+            | ReplayToolStarted { .. }
+            | ReplayToolEnded { .. }
+            | HistoryPageLoaded { .. }
     ) {
         PublicationIntent::Deferred
     } else {
@@ -654,4 +696,4 @@ fn extract_message_text(msg: &serde_json::Value) -> String {
 
 #[cfg(test)]
 #[path = "../acp_events_test.rs"]
-mod acp_events_test;
+pub(crate) mod acp_events_test;

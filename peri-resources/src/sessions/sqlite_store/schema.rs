@@ -180,6 +180,14 @@ impl SqliteSessionDatabase {
         let mut connection = self.pool.acquire().await?;
         let state = inspect(&mut connection).await?;
         if state == SchemaState::Current {
+            // 形状判定只覆盖表与列，索引不在其中：`CREATE_INDEXES` 会随后续构建演进，
+            // 当前形状的库同样要按清单幂等补齐（`IF NOT EXISTS`），否则升级上来的库
+            // 永远拿不到新索引。语句文本来自 `canonical` 的静态清单，不含外部输入。
+            for statement in canonical::CREATE_INDEXES {
+                sqlx::raw_sql(AssertSqlSafe((*statement).to_owned()))
+                    .execute(&mut *connection)
+                    .await?;
+            }
             sqlx::query(canonical::CREATE_SESSION_CLOSE_INTENTS_TABLE_SQL)
                 .execute(&mut *connection)
                 .await?;

@@ -13,7 +13,7 @@ use peri_acp_types::messages::{BaseMessage, MessageId};
 use peri_acp_types::session_resources::{
     AccessMode, BindingRecheck, BindingState, ChildResumeClaim, ChildSnapshot, DataCapabilities,
     ForkSnapshot, FrozenSnapshotBytes, FrozenState, NewSession, NewSessionMeta,
-    PersistenceRecovery, RewindBoundary, SessionAvailability, SessionMetaPatch,
+    PersistenceRecovery, RewindBoundary, RewindOutcome, SessionAvailability, SessionMetaPatch,
     SessionResourceError, SessionResourceErrorKind, SessionResourceResult, SessionResources,
     SessionSnapshot,
 };

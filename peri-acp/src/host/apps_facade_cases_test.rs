@@ -320,7 +320,7 @@ async fn two_sessions_two_connections_do_not_cross_namespaces() {
 
     // 仅知 sessionId（连接不是该会话在线 endpoint）不能 attach。
     let mut stranger = ConnectionContext::new(true);
-    stranger.commit_initialize();
+    stranger.commit_initialize(peri_acp_types::PeriCaps::default());
     let stranger_result = crate::host::mcp_apps::handle_request(
         "peri/mcp/apps/attach",
         &json!({"sessionId": first.session, "appId": first_app, "clientViewId": "view-z"}),

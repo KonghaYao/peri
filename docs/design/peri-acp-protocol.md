@@ -27,7 +27,7 @@ TUI 的所有主动行为通过标准 ACP JSON-RPC 方法调用。不定义自�
 | 方法 | 参数 | 返回值 | 语义 |
 |------|------|--------|------|
 | `session/new` | `{ cwd?, mcpServers? }` | `{ sessionId, ... }` | 创建新会话；可返回 modes、models、configOptions 等协商字段 |
-| `session/load` | `{ sessionId, cwd?, mcpServers? }` | `{ ... }` | 加载指定会话并重放历史；响应可含 modes、models、configOptions，不创建新身份 |
+| `session/load` | `{ sessionId, cwd?, mcpServers? }`；分页时 `{ sessionId, cursor, limit? }` | `{ ... }` | 加载指定会话并重放历史；响应可含 modes、models、configOptions，不创建新身份。带 `cursor` 时是历史页模式（Peri 协商扩展，见下） |
 | `session/resume` | `{ sessionId, cwd? }` | `{}` | 复用已有 session_id 继续会话；经统一 host lifecycle handler 处理 |
 | `session/close` | `{ sessionId }` | `{}` | 关闭会话 |
 | `session/fork` | `{ sessionId, cwd?, mcpServers? }` | `{ sessionId, ... }` | 指定源会话并复制到新线程；返回值中的 sessionId 是新身份 |
@@ -45,6 +45,37 @@ TUI 的所有主动行为通过标准 ACP JSON-RPC 方法调用。不定义自�
   请求 cwd 不作为路径认领或 mismatch 拒绝门槛；保存目录、机器环境与绑定完整性
   仍参与执行准入，不能在当前宿主同名目录静默装配另一环境。
 - `session/load` / `session/resume` 不取得或校验执行所有权，不返回所有权只读准入或前任 owner 警告。唯一执行者与跨实例协调由 `peri-sdk` 管理；Peri 保留环境、绑定、frozen 与持久化完整性检查，历史通过独立只读入口查询。
+
+工作区扩展的门控事实源是**进程级协商值**（`SessionManager::effective_host_caps`）：同一 host 内
+完成过 initialize 的连接所属请求面共享该值，从未 initialize 的连接按 [`PeriCaps::all_enabled`]
+兜底（A25 保留③，实现见 `peri-acp/src/session/caps.rs`）。历史分页相反：按**发起连接**的
+`ConnectionFacts::history_pagination()` 失败关闭判定。两者差异是有意的——分页决定这次
+`session/load` 回放什么内容，必须与连接绑定；工作区扩展表达的是本 host 的装配事实。
+同进程多连接接管的部署形态一旦出现，工作区门控需与分页一起改为按连接判定。
+
+历史分页由 initialize 的 `peri.historyPagination: true` 显式协商，**不改标准 `session/load`
+语义**：未协商的连接始终得到标准完整回放。协商过的连接可带非空 `cursor` 请求更早一页，
+此时 `session/load` 不重新装配会话（不占执行生命周期锁、不做任务绑定 / MCP 接纳 / 命令广播 /
+continuation 调度），响应改为 `{ sessionId, snapshotToken, nextCursor, items }`；`nextCursor`
+为 `null` 只表示更早方向没有可展示内容。能力按**当前连接**的协商结果判定，重连后重新分流；
+未协商却带 `cursor`/`limit`、游标坏 / 跨会话 / 已失效、`cursor` 与 setup 参数同现都明确拒绝，
+不降级为初始 load。字段语义、页预算与条目身份的事实源是 `peri-acp-types::history_page` 与
+`docs/code-index/peri-acp.md`。
+
+初始 `session/load` 可带可选 `loadGeneration`（非空字符串，缺省由服务端生成）：它在协商过
+`replay` 的连接上以 `_meta.periLoadGeneration` 同时出现在成功响应与本次全部重放通知（含
+reminder 出口），客户端据此把通知与那次 load 配对；历史页带该字段是坏请求。历史重放投递
+失败使 `session/load` 失败（`-32603`），不返回半回放的「成功」响应；服务端已装配的会话态
+保持完整，留给下一次 load 原位修复。
+
+协商过分页的连接在同一份 `_meta` 上还会拿到条目身份与位置：`periEntryId`（`{会话}:{payload}`，
+与历史页 `items[].entryId` 共用 `dispatch::entry_id` 这一份格式）与 `periPosition`（该条目在**存储序**中的位置，`rowid` 原样给出的不透明整数；继承条目
+在本线程没有行，因此只有身份、没有位置）。历史页 `items[].position` 给的是同一把尺子，
+`subItems[].position` 则是该子项在本条 payload 投影序列中的下标。客户端只能在同一个
+`snapshotToken` 内比较 `position`（用于排序与区间合并，把后到的页并进稀疏首屏的正确区间），
+不得解释其数值、不得跨快照比较（rewind / 精确删除会删尾部行并让新行复用 rowid），也不要
+把它当成时间戳或行号。页严格更早于上一页，页内按历史正序，合并契约的完整表述见
+`peri-acp::host::history_page` 模块文档。
 
 类型事实源为 `peri-acp-types::workspace`；身份、恢复与执行准入约束见
 [会话身份与工作区设计](session-id-environment.md)。

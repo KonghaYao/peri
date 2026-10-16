@@ -104,6 +104,33 @@ pub(super) fn is_reverse_direction(pending_delta: i32, delta: i32) -> bool {
     pending_delta != 0 && (pending_delta > 0) != (delta > 0)
 }
 
+/// 纯函数：把「节流窗口内还没落地的滚动量」投影成 flush 之后的视口事实
+/// `(offset, follow_bottom)`。
+///
+/// 与 `apply_pending` 同一口径（哨兵归一化 → 应用 delta → 同步 follow 判定），
+/// 因此两处必须一起改。用途：滚动事件在**节流窗口内**判定视口是否贴到向前边界
+/// （REQ-C01-1）——只看当帧 `scroll_state.offset()` 会漏掉整段还在 `pending_delta`
+/// 里的上滚：那一次滚动的落地结果（offset=0）要等下一帧 flush 才可见，而空闲会话
+/// 没有后续事件可依赖，翻页与失败重试都会永远不触发。
+pub(in crate::kit::message_area) fn project_viewport_after_pending(
+    offset: usize,
+    pending_delta: i32,
+    content_length: usize,
+    viewport_length: usize,
+) -> (usize, bool) {
+    let max_scroll = content_length.saturating_sub(viewport_length);
+    let offset = if offset > max_scroll {
+        max_scroll
+    } else {
+        offset
+    };
+    let landed = apply_delta_to_offset(offset, pending_delta, max_scroll);
+    (
+        landed,
+        super::auto_follow::should_follow_after_user_scroll(max_scroll, landed),
+    )
+}
+
 /// 把一段滚动量（正=向下，负=向上）推入 scroll_state，并同步 follow 状态。
 fn apply_pending(
     pending: i32,

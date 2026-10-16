@@ -239,7 +239,7 @@ enum Classified {
     Failed { expired: bool },
 }
 
-/// 批次编码（blocking job）；失败把事件与来源交回调用方按未提交处置。
+/// 批次编码（native 走 blocking job，无线程目标就地编码）；失败把事件与来源交回调用方按未提交处置。
 // 每个参数都是该批次各自的依赖或输入，彼此没有共同身份；打包成结构体只是搬运同一批值。
 #[allow(clippy::too_many_arguments)]
 pub(super) async fn encode_batch(
@@ -253,16 +253,27 @@ pub(super) async fn encode_batch(
     counters: Arc<Counters>,
 ) -> Result<ExportPayload, LangfuseError> {
     let max_wire_bytes = export.max_wire_bytes;
-    tokio::task::spawn_blocking(move || {
+    let job = move || -> Result<ExportPayload, LangfuseError> {
         let writer =
             BudgetedWriter::new(&telemetry, budget, spool, context, max_wire_bytes, cleanup)?;
         let payload = export::encode(&events, writer, &export)?;
         // 原文/线包累计字节按本进程产生或接手的 payload 计一次，重试不重复累计。
         counters.account_payload(payload.raw_len, payload.wire_len);
         Ok(payload)
-    })
-    .await
-    .map_err(|_| LangfuseError::IngestionApi("OTLP batch encoding job did not complete".into()))?
+    };
+    // 无线程目标（WASM/emscripten 未启用 pthread）派生 worker 线程必失败，而 `task::spawn_blocking`
+    // 没有 tokio 给 `fs` 那样的内联 shim，只会 abort 整个模块：就地编码。批次受 `max_wire_bytes`
+    // 约束，是有界同步工作；native 保持 blocking 池，行为与错误映射不变。
+    #[cfg(any(target_arch = "wasm32", target_os = "emscripten"))]
+    {
+        job()
+    }
+    #[cfg(all(not(target_arch = "wasm32"), not(target_os = "emscripten")))]
+    {
+        tokio::task::spawn_blocking(job).await.map_err(|_| {
+            LangfuseError::IngestionApi("OTLP batch encoding job did not complete".into())
+        })?
+    }
 }
 
 /// 一次发送周期：live 批次与恢复对象共用，只有 `Delivered` 才能被当成交付。文件路径先把终态写入

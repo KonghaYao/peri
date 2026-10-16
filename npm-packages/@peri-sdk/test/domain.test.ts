@@ -391,7 +391,8 @@ describe("ManagedAgents lifecycle", () => {
     const session = await agent.session.start("existing");
     expect(session.id).toBe("existing");
     const load = transport.calls.find((call) => call.method === "session/load")?.params as any;
-    expect(load).toEqual({ cwd: agent.path, mcpServers: [], sessionId: "existing" });
+    // 初始 load 带本次代次（REQ §5.2 `loadGeneration`）；其余 setup 参数不变。
+    expect(load).toEqual({ cwd: agent.path, mcpServers: [], sessionId: "existing", loadGeneration: expect.any(String) });
   });
 
   test("loading uses the stored path without an Agent path", async () => {
@@ -404,7 +405,7 @@ describe("ManagedAgents lifecycle", () => {
     const agent = new ManagedAgents({ kv: new MemoryClaims() }).createAgent({ id: "loaded", sandbox });
     await agent.session.start("existing");
     expect(transport.calls.find((call) => call.method === "session/load")?.params)
-      .toEqual({ cwd: "/persisted/workspace", mcpServers: [], sessionId: "existing" });
+      .toEqual({ cwd: "/persisted/workspace", mcpServers: [], sessionId: "existing", loadGeneration: expect.any(String) });
     expect(agent.session.path).toBe("/persisted/workspace");
     expect((await agent.getSessions())[0]?.cwd).toBe("/persisted/workspace");
   });

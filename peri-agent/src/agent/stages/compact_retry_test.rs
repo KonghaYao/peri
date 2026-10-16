@@ -221,12 +221,38 @@ async fn test_compact_retry_recovers_inside_tool_loop() {
         .load_session_snapshot(&bound.thread_id)
         .await
         .unwrap();
-    for message in transcript.entries().iter().take(3) {
+    // 热态已释放被排除的旧工作（收缩），因此按持久化事实核对「成功摘要替换旧工作」：
+    // 摘要（含 CONTINUATION_HINT）之前的历史必须全部带 excluded；摘要与其后的新工作
+    // 不在本次压缩范围内，不得被标记。
+    let summary_index = snapshot
+        .payloads
+        .iter()
+        .position(|payload| {
+            payload.as_message().is_some_and(|message| {
+                message
+                    .content()
+                    .contains(crate::agent::compact_v2::CONTINUATION_HINT)
+            })
+        })
+        .expect("持久化历史必须包含 continuation 摘要");
+    assert!(summary_index > 0, "摘要之前必须有被替换的旧工作");
+    for payload in &snapshot.payloads[..summary_index] {
         assert!(
-            snapshot.flags[&message.id()].excluded,
-            "成功摘要必须在持久化历史中替换旧工作"
+            snapshot
+                .flags
+                .get(&payload.id())
+                .is_some_and(|flags| flags.excluded),
+            "成功摘要之前的历史必须在持久化事实中被排除（{:?}）",
+            payload.id()
         );
     }
+    assert!(
+        transcript
+            .entries()
+            .iter()
+            .all(|entry| !transcript.flags(entry.id()).excluded),
+        "收缩后热态不得残留被排除条目"
+    );
 }
 
 /// [回归测试] 连续空摘要不得静默禁用 Compact 并继续发送超预算请求。

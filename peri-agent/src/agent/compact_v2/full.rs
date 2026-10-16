@@ -4,8 +4,10 @@
 //! 1. 从包含 canonical reminder 的可见模型上下文派生摘要请求
 //! 2. LLM 生成结构化摘要；未完成时在同一次 Full 内用**有界恢复循环**补齐
 //! 3. 后处理摘要
-//! 4. 快照内自有的普通历史和 reminder 标 excluded（保留 System / ancestor）
-//! 5. 追加 Human 摘要消息（带 CONTINUATION_HINT，wrap 在 system-reminder 标签中）
+//! 4. 快照内自有的普通历史和 reminder 标 excluded（保留 System / ancestor），同一批 flags
+//!    里写下取代关系：被归档条目记下第 5 步那条摘要的 id
+//! 5. 追加 Human 摘要消息（带 CONTINUATION_HINT，wrap 在 system-reminder 标签中），id 在
+//!    提交前先分配，供第 4 步引用
 //!
 //! 历史工具调用及结果留存在 transcript 中；不会从计算实例本机重新读取 Workspace 文件。
 //!
@@ -18,13 +20,14 @@ use tokio_util::sync::CancellationToken;
 use tracing::{debug, info, warn};
 
 use self::summary::{classify_summary_step, SummaryRecoveryReason, SummaryStep};
+use super::projection::{MessageProjectionDirective, PROJECTION_POLICY_VERSION};
 use crate::agent::{
     compact_v2::{config::CompactConfig, CompactOutcome},
     events::CompactStrategy,
     model_bridge::{map_model_error, AgentModelBridge},
 };
 use crate::error::{AgentError, AgentResult};
-use crate::messages::BaseMessage;
+use crate::messages::{BaseMessage, MessageId};
 use crate::session::transcript::MessageTranscript;
 use crate::session::MessageFlags;
 use crate::thread::CompactionChange;
@@ -65,8 +68,13 @@ the instructions above and close the summary within the reduced target. Do not c
 /// 1. 从包含 canonical reminder 的可见模型上下文派生摘要请求
 /// 2. LLM 生成结构化摘要（未完成时同一次 Full 内有界恢复）
 /// 3. 后处理摘要
-/// 4. 快照内自有的普通历史和 reminder 标 excluded（保留 System / ancestor）
-/// 5. 追加 Human 摘要消息（带 CONTINUATION_HINT，wrap 在 system-reminder 标签中）
+/// 4. 快照内自有的普通历史和 reminder 标 excluded（保留 System / ancestor），同一批 flags
+///    里写下取代关系：每条被归档条目记下第 5 步那条摘要的 id（`superseded_by`）
+/// 5. 追加 Human 摘要消息（带 CONTINUATION_HINT，wrap 在 system-reminder 标签中），其 id
+///    在第 4 步之前分配，因此两处指向同一条消息
+///
+/// 排除与取代关系必须在**同一次原子提交**里落地：只写排除会让 rewind 失去逐条依据，
+/// 只写取代关系则原文仍然可见。
 pub(super) async fn full_compact_inner(
     transcript: &mut MessageTranscript,
     llm: Option<&dyn peri_model::Model>,
@@ -83,6 +91,9 @@ pub(super) async fn full_compact_inner(
     let before_visible_len = visible.len();
     // 先固定本次快照的 own IDs；await 期间到达 inbox 的新结果不属于本次摘要。
     // ancestor 与 System 仍由各自 owner 管理；canonical reminder 不是豁免历史。
+    // 追加的摘要 id 同样在提交前分配：同一批 flags 里每条被归档条目都指向它，
+    // 追加时必须恰好用这个 id（见下方 `build_summary_message`）。
+    let summary_id = MessageId::new();
     let flag_updates: Vec<_> = transcript
         .entries()
         .iter()
@@ -94,6 +105,13 @@ pub(super) async fn full_compact_inner(
                 entry.id(),
                 MessageFlags {
                     excluded: true,
+                    // 归档即「被本次摘要取代」：entries 为空（Full 不写渲染指令，被排除
+                    // 条目也不渲染），只承载这条渲染之外的事实，供 rewind 精确判定。
+                    projection: Some(MessageProjectionDirective {
+                        policy_version: PROJECTION_POLICY_VERSION,
+                        entries: Vec::new(),
+                        superseded_by: Some(summary_id),
+                    }),
                     ..Default::default()
                 },
             )
@@ -121,7 +139,7 @@ pub(super) async fn full_compact_inner(
     transcript
         .commit_compaction_lifecycle(CompactionChange {
             flag_updates,
-            appended_messages: vec![build_summary_message(&summary)],
+            appended_messages: vec![build_summary_message(&summary, summary_id)],
         })
         .await?;
     transcript.mark_full_compaction_committed();
@@ -446,13 +464,17 @@ fn estimate_content_chars(block: &peri_model::ContentBlock) -> u64 {
     }
 }
 
-/// 构造 Full Compact 的 Human 摘要消息。
-fn build_summary_message(summary: &str) -> BaseMessage {
+/// 构造 Full Compact 的 Human 摘要消息，并使用调用方预先分配的 `id`。
+///
+/// id 不是在这里现取的：同一批 `flag_updates` 里每条被归档条目都把 `id` 记为
+/// [`MessageProjectionDirective::superseded_by`]，两处必须指向同一条消息。
+fn build_summary_message(summary: &str, id: MessageId) -> BaseMessage {
     BaseMessage::human(format!(
         "{}\n\n{}",
         crate::agent::compact_v2::CONTINUATION_HINT,
         summary
     ))
+    .with_message_id(id)
 }
 
 /// 提取旧格式压缩文件/Skill 元信息（事实源 peri-acp-types::compact）

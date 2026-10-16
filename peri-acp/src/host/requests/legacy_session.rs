@@ -13,7 +13,7 @@ use std::sync::Arc;
 
 use peri_acp_types::{
     plugin::McpServerConfig,
-    session_resources::{BindingState, FrozenSnapshotBytes, FrozenState, SessionSnapshot},
+    session_resources::{ActiveSessionSnapshot, BindingState, FrozenSnapshotBytes, FrozenState},
     thread::{ThreadId, ThreadMeta},
     workspace::{ResolvedWorkspace, WorkspaceError},
 };
@@ -45,12 +45,13 @@ pub(super) async fn resolve_saved_workspace(
 }
 
 /// 读取接纳后的持久 frozen 字节（write-once 后唯一事实源）。
+/// 只消费 frozen：读有效视图，不加载 own 正文。
 async fn persisted_frozen_bytes(
     resources: &Arc<dyn peri_acp_types::session_resources::SessionResources>,
     id: &str,
 ) -> Result<String, AcpError> {
     let snapshot = resources
-        .load_session_snapshot(&id.to_owned())
+        .load_active_snapshot(&id.to_owned())
         .await
         .map_err(resource_error)?;
     match snapshot.frozen {
@@ -99,8 +100,9 @@ pub(super) async fn prepare_for_restore(
 ) -> Result<Option<LegacyAdoption>, AcpError> {
     let resources = cfg.session_resources.clone();
     let id = session_id.to_owned();
+    // 接纳只消费 meta/binding/frozen：读有效视图，不加载 own 正文。
     let snapshot = resources
-        .load_session_snapshot(&id)
+        .load_active_snapshot(&id)
         .await
         .map_err(resource_error)?;
     let meta = snapshot.meta.clone();
@@ -269,7 +271,7 @@ pub(super) async fn prepare_for_restore(
 /// 也不为子会话临时装配环境（子会话的冻结输入就是父的已持久字节，不需要重建）。
 async fn prepare_child_for_restore(
     cfg: &AcpServerConfig,
-    snapshot: &SessionSnapshot,
+    snapshot: &ActiveSessionSnapshot,
     parent_id: &str,
     effective_servers: HashMap<String, McpServerConfig>,
 ) -> Result<LegacyAdoption, AcpError> {
@@ -277,7 +279,7 @@ async fn prepare_child_for_restore(
     let meta = &snapshot.meta;
     let parent_thread_id = ThreadId::from(parent_id.to_owned());
     let parent = resources
-        .load_session_snapshot(&parent_thread_id)
+        .load_active_snapshot(&parent_thread_id)
         .await
         .map_err(resource_error)?;
     let BindingState::Bound(_) = &parent.binding else {

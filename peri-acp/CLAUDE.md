@@ -30,6 +30,8 @@
 - workspace 资源输入使用 `snapshot.resources().disable_bundled_skills`，不重新读取全局关闭位；技能回归 fixture 必须使用与生产 source 一致的选中 global 路径。需要新值时显式 reload 并重新取得 snapshot，旧 pool 固定旧 Arc，没有 hot watcher。lenient 无 authority 仅临时可读，不可写。
 - `ConfigSource::save(expected_revision, &PeriConfig)` 返回 accepted snapshot；持久 configOptions / update_config 必须 candidate → 验证 → 保存成功 → 从 accepted snapshot 发布，失败不更新 live provider / agent cache、不 notify、不返回成功。revision 在编辑开始捕获，不得提交时换成最新版；远程 wire 与延迟 UI draft 的基线 token 仍需审计，见配置 active issue。
 - `SessionManager` 在每条 session/new、load、resume 或 fork 路径注册 session caps；发送扩展事件前按该 session 的 caps 门控。
+- `session/load` 无 `cursor` = 初始 load、带合法 `cursor` = 历史页：模式在进入生命周期路由前由 `host/history_page.rs::classify` 唯一解析，锁策略与响应后 setup 都由模式决定。历史页不取执行生命周期锁、不做绑定 / MCP 接纳 / 广播 / 续跑，也不在全局 sessions 锁内做存储 I/O；未协商却带分页字段即拒绝，不降级为初始 load。扩展能力按**当前连接**的 `ConnectionContext::caps` 判定，不读会话级 registry（重连后能力重新协商）。
+- `SessionState::structure_version` 只在 rewind 持久化提交**成功**时 `+1`（恰好一次，失败分支不得触碰）：它让已发出的历史游标在存储委派之前失效，客户端处置与「锚点被删」同为 `-32012`。回放投递失败使 `session/load` 整体失败（`-32603`，不返回半回放成功，也不跑成功路径后处理）：已发布的会话态保持完整并留给下次 load 经 `AlreadyLive` 原位修复。初始 load 的代次（客户端可选或服务端生成）经 `_meta.periLoadGeneration` 同时出现在成功响应与本次全部重放（含 reminder 出口），门控仍是 `caps.replay`。
 - 新增 `ExecutorEvent` 或 ACP 扩展事件时，覆盖发射、ACP mapper/forwarder、caps 门控（如适用）和客户端消费；不能只增加枚举或单一发送点。
 - 给 Hub/Web 的事件投影必须从 canonical event 映射为版本化 allowlist DTO；不得复用包含消息、路径、输出或错误正文的 TUI 私有 `event_json`。`peri.agentActivity` 是该安全摘要面，legacy `peri.agentEvent` wire 保持独立兼容。
 - session 创建时构建并复用 frozen 数据；Prompt 与 SubAgent 不得在会话中途重读导致前缀漂移。
@@ -50,6 +52,7 @@ cargo check -p peri-acp
 cargo test -p peri-acp --lib
 cargo test -p peri-acp --lib -- host::task_scope
 cargo test -p peri-acp --lib -- acp_mcp
+cargo test -p peri-acp --lib -- history_page
 cargo test -p peri-acp --lib mapper
 cargo test -p peri-controller --test langfuse_e2e
 cargo test -p peri-acp --doc
@@ -57,7 +60,7 @@ cargo test -p peri-acp --doc
 
 ## Verify
 
-- session/caps 改动：运行相关 crate 测试，并人工检查所有创建、加载、恢复、fork 入口均在 session 就绪后注册 caps。
+- session/caps 改动：运行相关 crate 测试，并人工检查所有创建、加载、恢复、fork 入口均在 session 就绪后注册 caps；`session/load` 分页改动另跑 `cargo test -p peri-acp --lib -- history_page`，并确认分页路径未取得生命周期锁、未在全局 sessions 锁内做存储 I/O。
 - 事件改动：运行 mapper 测试，并人工沿服务端发送点到 TUI/stdio 客户端检查新增事件覆盖；现有 mapper 测试不自动证明全链路完整。
 - Prompt、middleware 或 Langfuse 改动：按 `ARC-FROZEN-001`、`ARC-MIDDLEWARE-001`、`ARC-SECRET-001` 逐项核对。
 - 配置规则改动：先读 `../peri-config/CLAUDE.md` 与 `../docs/design/configuration-authority.md`；领域回归在 core，ACP 验证消费与装配接线。插件生命周期、hook 格式及存储/执行 credentials 仍遵守专属能力边界。

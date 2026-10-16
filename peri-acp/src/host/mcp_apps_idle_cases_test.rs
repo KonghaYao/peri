@@ -486,7 +486,7 @@ async fn concurrent_alias_invokes_are_admitted_and_execute_once_each() {
 
     // 生产同序（`host/server_loop.rs`）：调用连接先注册为本会话的在线 endpoint。
     let mut connection = crate::host::connection::ConnectionContext::new(true);
-    connection.commit_initialize();
+    connection.commit_initialize(peri_acp_types::PeriCaps::default());
     let erased: Arc<dyn AcpTransport> = Arc::clone(&transport) as Arc<dyn AcpTransport>;
     fixture
         .router

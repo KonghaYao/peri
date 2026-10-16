@@ -67,10 +67,11 @@ test("permission-pending tool resumes and ACP replay uses the same public card f
     expect(tool.get("result")).toEqual({ contentText: "file contents" });
 });
 
-test("canonical history reconstructs tool arguments and result content", () => {
+// Compact 不再整表替换（REQ-C02）：规范历史重建仍由 rewind 承担（与 tool-payloads 同一取向）。
+test("canonical rewind history reconstructs tool arguments and result content", () => {
     const docs = new SessionDocs();
     docs.accept({ jsonrpc: "2.0", method: "peri/agent_event", params: {
-        sessionId: "s1", event_json: JSON.stringify({ type: "compact_completed", value: {
+        sessionId: "s1", event_json: JSON.stringify({ type: "rewind_completed", value: {
             messages_json: JSON.stringify([
                 { role: "user", id: "u1", content: "read" },
                 { role: "assistant", id: "a1", content: [{ type: "tool_use", id: "call-1", name: "Read", input: { path: "README.md" } }] },

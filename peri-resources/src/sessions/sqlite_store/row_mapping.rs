@@ -7,8 +7,14 @@ use chrono::{DateTime, Utc};
 use peri_acp_types::thread::{AgentStatus, CancelPolicy, ThreadMeta};
 use std::str::FromStr;
 
+/// 元数据行投影；字段顺序与 [`ThreadRow`] 一致。
+///
+/// `content_size` 没有落列（`threads` 表里没有这一列），也没有生产消费者：此前的
+/// `SUM(LENGTH(content))` 相关子查询每次读取都要聚合整份历史，恢复热路径与列表都随历史
+/// 增长而变慢。这里保留列位（别名 + 常量 0）以维持行形状与解码下标，**不做聚合**；
+/// 需要真实字节数时应另设按需读取，不把全历史聚合塞回这条投影。
 pub(super) const THREAD_META_COLUMNS: &str = "t.id, t.title, t.cwd, t.created_at, t.updated_at, t.message_count,
-    (SELECT COALESCE(SUM(LENGTH(m.content)), 0) FROM messages m WHERE m.thread_id = t.id) as content_size,
+    0 as content_size,
     t.parent_thread_id, t.snapshot_at_message_id, t.hidden, t.cancel_policy, t.config, t.agent_status";
 
 /// 元数据行形状；字段顺序与上方列常量一致。

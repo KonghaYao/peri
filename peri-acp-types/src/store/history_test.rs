@@ -46,6 +46,7 @@ fn directive_referencing(id: MessageId) -> MessageProjectionDirective {
             target: ProjectionTarget::Message,
             action: ProjectionAction::CompactText { max_chars: 10 },
         }],
+        superseded_by: None,
     }
 }
 
@@ -107,6 +108,43 @@ fn fork_remap_rewrites_projection_references_and_drops_foreign_flags() {
     // source 只读：变换不得修改输入。
     assert_eq!(payload_ids(&source_payloads), payloads_before);
     assert_eq!(source_flags, flags_before);
+}
+
+#[test]
+fn fork_remap_rewrites_superseded_by_to_the_forked_summary() {
+    let archived = PersistedPayload::Message(BaseMessage::human("archived"));
+    let summary = PersistedPayload::Message(BaseMessage::ai("summary"));
+    let source_payloads = vec![archived.clone(), summary.clone()];
+    let mut source_flags = HashMap::new();
+    source_flags.insert(
+        archived.id(),
+        MessageFlags {
+            truncated: false,
+            excluded: true,
+            projection: Some(MessageProjectionDirective {
+                policy_version: 1,
+                entries: Vec::new(),
+                superseded_by: Some(summary.id()),
+            }),
+        },
+    );
+
+    let forked = remap_fork_history(&source_payloads, &source_flags, deterministic_ids());
+
+    let flags = forked
+        .flags
+        .get(&forked.payloads[0].id())
+        .expect("forked flags");
+    assert_eq!(
+        flags.superseded_by(),
+        Some(forked.payloads[1].id()),
+        "取代关系必须指向 fork 目标里的摘要"
+    );
+    assert_ne!(
+        flags.superseded_by(),
+        Some(summary.id()),
+        "源 id 不得残留在目标会话：源会话 rewind 掉摘要会让目标误判排除失去依据"
+    );
 }
 
 #[test]
@@ -304,4 +342,251 @@ fn appended_payloads_preserve_message_identity() {
 
     assert_eq!(payloads.len(), 1);
     assert_eq!(payloads[0].id(), message.id());
+}
+
+// ─── rewind 有效视图重建：excluded 清零集合 ────────────────────────────────────
+
+/// rewind 判定输入的 id：由序号派生（本模块不产生随机性）。
+fn entry_id(index: u128) -> MessageId {
+    MessageId::from(uuid::Uuid::from_u128(index))
+}
+
+/// rewind 判定输入：`(id, excluded, 是否 System)`。
+fn flag_entry(index: u128, excluded: bool, is_system: bool) -> (MessageId, MessageFlags, bool) {
+    (
+        entry_id(index),
+        MessageFlags {
+            excluded,
+            ..Default::default()
+        },
+        is_system,
+    )
+}
+
+/// 带取代记录的排除条目：Full Compact 归档时写入 `superseded_by`，`entries` 为空
+/// （取代关系是渲染之外的事实，见 `MessageProjectionDirective::superseded_by`）。
+fn superseded_entry(index: u128, summary_index: u128) -> (MessageId, MessageFlags, bool) {
+    let (id, mut flags, is_system) = flag_entry(index, true, false);
+    flags.projection = Some(MessageProjectionDirective {
+        policy_version: 1,
+        entries: Vec::new(),
+        superseded_by: Some(entry_id(summary_index)),
+    });
+    (id, flags, is_system)
+}
+
+/// 非 System 条的 id 序列：断言输出顺序与集合一起成立。
+fn entry_ids(entries: &[(MessageId, MessageFlags, bool)]) -> Vec<MessageId> {
+    entries.iter().map(|(id, _, _)| *id).collect()
+}
+
+#[test]
+fn rewind_without_any_compaction_clears_nothing() {
+    // (a) 没有任何 Full：前缀里不存在 excluded，清零集合为空。
+    let entries = vec![flag_entry(1, false, false), flag_entry(2, false, false)];
+
+    assert_eq!(rewind_clear_excluded_ids(&entries, 0), Vec::new());
+    assert_eq!(rewind_clear_excluded_ids(&entries, 2), Vec::new());
+}
+
+#[test]
+fn rewind_inside_the_excluded_block_restores_every_retained_body() {
+    // (b) 一次 Full：A、B 被排除，摘要 S 不被排除。rewind 落在被排除区内时摘要被删掉，
+    // 保留前缀的排除失去依据：A、B 都必须恢复有效（不能只删摘要）。
+    let entries = vec![
+        flag_entry(1, true, false),
+        flag_entry(2, true, false),
+        flag_entry(3, false, false),
+    ];
+
+    assert_eq!(
+        rewind_clear_excluded_ids(&entries, 1),
+        vec![entries[0].0],
+        "只保留 A：A 失去依据，必须恢复"
+    );
+    assert_eq!(
+        rewind_clear_excluded_ids(&entries, 2),
+        vec![entries[0].0, entries[1].0],
+        "保留 A、B：两条都失去依据"
+    );
+}
+
+#[test]
+fn rewind_after_the_block_keeps_the_prefix_excluded() {
+    // (c) 一次 Full 且摘要存活：前缀 A、B 的排除仍由 S 支撑，不能被清零
+    // （清零会同时恢复旧摘要和它覆盖的原文）。
+    let entries = vec![
+        flag_entry(1, true, false),
+        flag_entry(2, true, false),
+        flag_entry(3, false, false),
+    ];
+
+    assert_eq!(rewind_clear_excluded_ids(&entries, 3), Vec::new());
+}
+
+#[test]
+fn rewind_after_surviving_summary_clears_only_entries_beyond_the_run() {
+    // (c') 摘要之后仍有 excluded（违反不变量时也不得误清前缀）：只清 k 之后的。
+    let entries = vec![
+        flag_entry(1, true, false),
+        flag_entry(2, true, false),
+        flag_entry(3, false, false),
+        flag_entry(4, true, false),
+    ];
+
+    assert_eq!(rewind_clear_excluded_ids(&entries, 4), vec![entries[3].0]);
+}
+
+#[test]
+fn rewind_between_two_fulls_restores_what_the_removed_summary_covered() {
+    // (d) 两次 Full：A、B 由第一次覆盖，S1、C 由第二次覆盖（S1 本身被第二次排除），
+    // 第二次的摘要 S2 不被排除。rewind 落在两次之间 → S2 被删，保留前缀整段失去依据。
+    let entries = vec![
+        flag_entry(1, true, false),
+        flag_entry(2, true, false),
+        flag_entry(3, true, false),
+        flag_entry(4, true, false),
+        flag_entry(5, false, false),
+    ];
+
+    assert_eq!(
+        rewind_clear_excluded_ids(&entries, 3),
+        vec![entries[0].0, entries[1].0, entries[2].0]
+    );
+    assert_eq!(
+        rewind_clear_excluded_ids(&entries, 4),
+        vec![entries[0].0, entries[1].0, entries[2].0, entries[3].0]
+    );
+}
+
+#[test]
+fn rewind_after_the_second_full_changes_nothing() {
+    // (e) 第二次 Full 的摘要仍然存活：整段排除仍有依据，一个都不清（不能全清）。
+    let entries = vec![
+        flag_entry(1, true, false),
+        flag_entry(2, true, false),
+        flag_entry(3, true, false),
+        flag_entry(4, true, false),
+        flag_entry(5, false, false),
+    ];
+
+    assert_eq!(rewind_clear_excluded_ids(&entries, 5), Vec::new());
+    // 摘要之后新追加的条目（不被排除）不影响判定。
+    let mut extended = entries.clone();
+    extended.push(flag_entry(6, false, false));
+    assert_eq!(rewind_clear_excluded_ids(&extended, 6), Vec::new());
+}
+
+#[test]
+fn rewind_counts_the_excluded_run_ignoring_system_entries() {
+    // (f) System 条目既不计入领导段长度，也不进清零集合（Full 从不排除它们）。
+    let with_summary = vec![
+        flag_entry(1, true, false),
+        flag_entry(2, false, true),
+        flag_entry(3, true, false),
+        flag_entry(4, false, false),
+    ];
+    assert_eq!(
+        rewind_clear_excluded_ids(&with_summary, 4),
+        Vec::new(),
+        "跳过 System 后领导段长度为 2，位置 2 的摘要存活"
+    );
+
+    let without_summary = vec![
+        flag_entry(1, true, false),
+        flag_entry(2, false, true),
+        flag_entry(3, true, false),
+    ];
+    assert_eq!(
+        rewind_clear_excluded_ids(&without_summary, 3),
+        vec![without_summary[0].0, without_summary[2].0],
+        "没有存活摘要时前缀的 non-System excluded 全部清零"
+    );
+
+    let excluded_system = vec![flag_entry(1, true, false), flag_entry(2, true, true)];
+    assert_eq!(
+        rewind_clear_excluded_ids(&excluded_system, 2),
+        vec![excluded_system[0].0],
+        "System 条目的 flags 不属于本函数的判定范围"
+    );
+}
+
+#[test]
+fn rewind_clear_ids_stay_within_the_retained_prefix() {
+    // 清零集合永远取自保留前缀：被 rewind 删掉的条目不进集合（否则存储侧会去改已删除的行）。
+    let entries = vec![
+        flag_entry(1, true, false),
+        flag_entry(2, true, false),
+        flag_entry(3, true, false),
+    ];
+
+    let clear = rewind_clear_excluded_ids(&entries, 2);
+    assert_eq!(clear, vec![entries[0].0, entries[1].0]);
+    assert_eq!(
+        entry_ids(&entries),
+        vec![entries[0].0, entries[1].0, entries[2].0]
+    );
+    assert!(!clear.contains(&entries[2].0));
+}
+
+#[test]
+fn rewind_between_two_fulls_keeps_the_batch_whose_summary_survives() {
+    // (g) D8 批次边界：A、B 由 S1 取代，C、D 由 S2 取代。保留前缀止于 C、D 之后
+    // （S2 被本次 rewind 删掉）⇒ 清零集合只含 C、D：A、B 的摘要 S1 仍在保留前缀里，
+    // 排除依旧有依据，不能清零（清零会让旧摘要 S1 与被它覆盖的 A、B 同时有效）。
+    let entries = vec![
+        superseded_entry(1, 3),
+        superseded_entry(2, 3),
+        flag_entry(3, false, false),
+        superseded_entry(4, 6),
+        superseded_entry(5, 6),
+        flag_entry(6, false, false),
+    ];
+
+    assert_eq!(
+        rewind_clear_excluded_ids(&entries, 5),
+        vec![entries[3].0, entries[4].0],
+        "只清 C、D：它们的摘要 S2 已被 rewind 删掉"
+    );
+}
+
+#[test]
+fn rewind_dropping_the_summary_clears_the_batch_it_covered() {
+    // (h) 保留前缀止于 S1 之前 ⇒ A、B 的取代依据随摘要一起消失，两条都必须恢复有效。
+    let entries = vec![
+        superseded_entry(1, 3),
+        superseded_entry(2, 3),
+        flag_entry(3, false, false),
+        superseded_entry(4, 6),
+        superseded_entry(5, 6),
+        flag_entry(6, false, false),
+    ];
+
+    assert_eq!(
+        rewind_clear_excluded_ids(&entries, 2),
+        vec![entries[0].0, entries[1].0]
+    );
+    assert_eq!(
+        rewind_clear_excluded_ids(&entries, 1),
+        vec![entries[0].0],
+        "只保留 A：它的摘要不在保留前缀里"
+    );
+}
+
+#[test]
+fn rewind_judges_recorded_and_unrecorded_entries_by_their_own_evidence() {
+    // (i) 同一保留前缀里既有取代记录落地前的旧行，也有带记录的条目：
+    // 旧行按前缀结构判定（摘要 S 存活 ⇒ 保持排除），带记录的条目按自己的摘要判定
+    // （它指向的摘要已被 rewind 删掉 ⇒ 清零）。两者互不干扰。
+    let entries = vec![
+        flag_entry(1, true, false),
+        superseded_entry(2, 9),
+        flag_entry(3, false, false),
+    ];
+
+    assert_eq!(
+        rewind_clear_excluded_ids(&entries, 3),
+        vec![entries[1].0],
+        "旧行走保守回退，带记录的条目走精确判定"
+    );
 }

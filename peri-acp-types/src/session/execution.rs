@@ -193,6 +193,8 @@ fn truncate_chars(value: &str, max_chars: usize) -> String {
 /// 执行句柄经本类型回传）。
 pub struct PromptResult {
     /// Canonical transcript snapshot captured after Agent persistence barrier.
+    /// 只含**有效**（未排除）条目：Full Compact 提交释放的 own 原文不在其中，
+    /// 完整历史（含归档原文）只能从存储读取。
     pub persisted_payloads: Vec<crate::store::PersistedPayload>,
     /// 执行后的消息历史。
     pub messages: Vec<BaseMessage>,

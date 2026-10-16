@@ -50,11 +50,14 @@ use super::session_schema;
 use super::sql::StatementSpec;
 use crate::sessions::data::{ChildResumeRecord, SessionDataPort};
 use async_trait::async_trait;
+use peri_acp_types::history_page::{
+    HistoryCursor, HistoryForwardCursor, HistoryPage, HistoryPageBounds, HistorySegment,
+};
 use peri_acp_types::messages::MessageId;
 use peri_acp_types::session_resources::{
-    BindingState, ChildSnapshot, ForkSnapshot, FrozenSnapshotBytes, NewSession,
-    PersistenceRecovery, RewindBoundary, SessionMetaPatch, SessionResourceError,
-    SessionResourceErrorKind, SessionResourceResult, SessionSnapshot,
+    ActiveSessionSnapshot, BindingState, ChildSnapshot, ForkSnapshot, FrozenSnapshotBytes,
+    NewSession, PersistenceRecovery, RewindBoundary, RewindOutcome, SessionMetaPatch,
+    SessionResourceError, SessionResourceErrorKind, SessionResourceResult, SessionSnapshot,
 };
 use peri_acp_types::store::{CompactionChange, MessageFlags, PersistedPayload};
 use peri_acp_types::system_reminder::TrustedSystemReminder;
@@ -265,6 +268,15 @@ impl RemoteSessionData {
             return Err(retired_connection());
         }
         Ok(store)
+    }
+
+    /// 只读打开的访问意图下，先于任何「读前置事实」拒绝写入。
+    ///
+    /// mutation 层自己也会拒绝只读写入，但那发生在**发起写入**时：读前置事实之后提前
+    /// 返回成功的路径（如「未知边界 = 无变更」）会绕过它，让只读请求以成功收场。
+    /// 本机 adapter 的同类路径先 `writable()` 再读边界，这里保持同一顺序。
+    pub(super) async fn ensure_writable(&self) -> SessionResourceResult<()> {
+        self.store().await?.access().ensure_writable()
     }
 
     /// 失效代际的重建：建立新连接、重核实身份、替换槽位、关闭退场连接。
@@ -641,6 +653,28 @@ impl SessionDataPort for RemoteSessionData {
         self.read_snapshot(id).await
     }
 
+    async fn load_active_snapshot(
+        &self,
+        id: &ThreadId,
+    ) -> SessionResourceResult<ActiveSessionSnapshot> {
+        self.read_active_snapshot(id).await
+    }
+
+    async fn load_message_flags(
+        &self,
+        id: &ThreadId,
+        ids: &[MessageId],
+    ) -> SessionResourceResult<HashMap<MessageId, MessageFlags>> {
+        self.read_message_flags(id, ids).await
+    }
+
+    async fn load_entry_positions(
+        &self,
+        id: &ThreadId,
+    ) -> SessionResourceResult<HashMap<MessageId, u64>> {
+        self.read_active_entry_positions(id).await
+    }
+
     async fn load_binding(&self, id: &ThreadId) -> SessionResourceResult<BindingState> {
         self.read_binding_state(id).await
     }
@@ -650,6 +684,31 @@ impl SessionDataPort for RemoteSessionData {
         id: &ThreadId,
     ) -> SessionResourceResult<Vec<PersistedPayload>> {
         self.read_history(id).await
+    }
+
+    async fn load_history_page(
+        &self,
+        id: &ThreadId,
+        cursor: Option<&HistoryCursor>,
+        limit: usize,
+        byte_budget: usize,
+    ) -> SessionResourceResult<HistoryPage> {
+        self.read_history_page(id, cursor, limit, byte_budget).await
+    }
+
+    async fn history_page_bounds(&self, id: &ThreadId) -> SessionResourceResult<HistoryPageBounds> {
+        self.read_history_page_bounds(id).await
+    }
+
+    async fn load_history_segment(
+        &self,
+        id: &ThreadId,
+        cursor: Option<&HistoryForwardCursor>,
+        limit: usize,
+        byte_budget: usize,
+    ) -> SessionResourceResult<HistorySegment> {
+        self.read_history_segment(id, cursor, limit, byte_budget)
+            .await
     }
 
     async fn load_meta(&self, id: &ThreadId) -> SessionResourceResult<ThreadMeta> {
@@ -805,8 +864,9 @@ impl SessionDataPort for RemoteSessionData {
         &self,
         id: &ThreadId,
         boundary: RewindBoundary,
-    ) -> SessionResourceResult<()> {
-        self.write_rewind(id, boundary).await
+        clear_excluded: &[MessageId],
+    ) -> SessionResourceResult<RewindOutcome> {
+        self.write_rewind(id, boundary, clear_excluded).await
     }
 
     async fn remove_history_entries(

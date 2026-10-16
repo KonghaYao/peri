@@ -1,6 +1,7 @@
 import { describe, expect, test } from "bun:test";
 import * as Y from "yjs";
 import { SessionDocs } from "../src/state/session-docs";
+import { COMPACTION_STATUS } from "../src/state/session-projection";
 import { MemoryKV } from "../src/kv/memory-kv";
 import { ManagedAgents } from "../src/managed/managed-agents";
 import { Sandbox } from "../src/sandbox/sandbox";
@@ -104,9 +105,9 @@ describe("ACP to Yjs session documents", () => {
     expect(call.get("status")).toBe("completed");
   });
 
-  test("a canonical snapshot does not claim an unpaired tool call succeeded", () => {
+  test("a canonical rewind snapshot does not claim an unpaired tool call succeeded", () => {
     const docs = new SessionDocs();
-    docs.accept(legacyEvent("s1", "compact_completed", {
+    docs.accept(legacyEvent("s1", "rewind_completed", {
       messages_json: JSON.stringify([
         { role: "user", id: USER_ONE, content: "Run a tool" },
         {
@@ -152,12 +153,31 @@ describe("ACP to Yjs session documents", () => {
     expect(info.get("activeTurnStatus")).toBe("completed");
   });
 
-  test("an assistant chunk after rewind clears the active turn cannot create a ghost turn", () => {
+  test("rewind keeps the live turn, its request identity, and pending interactions", () => {
     const docs = new SessionDocs();
     docs.accept(textChunk("s1", "user_message_chunk", USER_ONE, "Before rewind"));
+    docs.accept(textChunk("s1", "agent_message_chunk", ASSISTANT_ONE, "partial answer"));
+    const info = docs.session.getMap<unknown>("root").get("session") as Y.Map<unknown>;
+    const liveTurn = info.get("activeTurnId");
+    const liveStatus = info.get("activeTurnStatus");
+    const liveRequest = info.get("activeRequestId");
+    docs.accept(legacyEvent("s1", "user_input_run_started", { request_id: "request-live" }));
+    expect(info.get("pendingRequestId")).toBe("request-live");
+    const pending = new Y.Map<unknown>();
+    pending.set("1", { id: 1, kind: "permission", sessionId: "s1", toolCallId: "call-1" });
+    info.set("pendingInteractions", pending);
+    info.set("activeTurnInteractionStatus", "awaiting_permission");
+
     docs.accept(legacyEvent("s1", "rewind_completed", { messages_json: "[]" }));
-    docs.accept(textChunk("s1", "agent_message_chunk", ASSISTANT_ONE, "stale output"));
+
+    // 范围真的变了：窗口按保留消息刷新（这里为空），但执行状态与未决交互不能跟着清空。
     expect(entries(docs)).toHaveLength(0);
+    expect(info.get("activeTurnId")).toBe(liveTurn);
+    expect(info.get("activeTurnStatus")).toBe(liveStatus);
+    expect(info.get("activeRequestId")).toBe(liveRequest);
+    expect(info.get("pendingRequestId")).toBe("request-live");
+    expect(info.get("pendingInteractions")).toBe(pending);
+    expect(info.get("activeTurnInteractionStatus")).toBe("awaiting_permission");
   });
 
   test("replayed notifications with an explicit event id do not append text twice", () => {
@@ -444,10 +464,22 @@ describe("ACP to Yjs session documents", () => {
     expect(root.get("toolCalls")).toBe(toolsMap);
   });
 
-  test("compact replaces old chat content with the committed snapshot", () => {
+  test("compact keeps the loaded window, live turn, and pending interactions", () => {
     const docs = new SessionDocs();
+    // 翻页进度是浏览身份的一部分：Compact 不得把下一 cursor 跳回已加载的区间（REQ-C02）。
+    docs.seedHistoryWindow({ snapshotToken: "snapshot-1", nextCursor: "cursor-earlier" });
     docs.accept(textChunk("s1", "user_message_chunk", USER_ONE, "Old question"));
     docs.accept(textChunk("s1", "agent_message_chunk", ASSISTANT_ONE, "Old answer"));
+    docs.accept(update("s1", "tool_call", { toolCallId: "call-live", title: "Read", status: "in_progress" }));
+    docs.accept(legacyEvent("s1", "user_input_run_started", { request_id: "request-live" }));
+    const info = docs.session.getMap<unknown>("root").get("session") as Y.Map<unknown>;
+    const liveTurn = info.get("activeTurnId");
+    const liveStatus = info.get("activeTurnStatus");
+    const liveRequest = info.get("activeRequestId");
+    const pending = new Y.Map<unknown>();
+    pending.set("1", { id: 1, kind: "permission", sessionId: "s1", toolCallId: "call-live" });
+    info.set("pendingInteractions", pending);
+    const before = entries(docs).map((entry) => entry.get("entryId"));
 
     const committed = [
       { role: "user", id: USER_TWO, content: "Current question" },
@@ -459,12 +491,134 @@ describe("ACP to Yjs session documents", () => {
       estimated_tokens_saved: 100, files: [], skills: [],
     }));
 
-    const visible = entries(docs);
-    expect(visible).toHaveLength(2);
-    expect(textOf(visible[0]!, "text")).toBe("Current question");
-    expect(textOf(visible[1]!, "text")).toBe("Current answer");
-    expect(JSON.stringify(docs.chat.getMap("root").toJSON())).not.toContain("Old question");
-    expect(JSON.stringify(docs.chat.getMap("root").toJSON())).not.toContain("Old answer");
+    // REQ-C02 / A12：模型上下文收缩不等于界面删除历史——已加载窗口逐条保留。
+    expect(entries(docs).map((entry) => entry.get("entryId"))).toEqual(before);
+    expect(textOf(entries(docs)[0]!, "text")).toBe("Old question");
+    expect(textOf(entries(docs)[1]!, "text")).toBe("Old answer");
+    expect(JSON.stringify(docs.chat.getMap("root").toJSON())).not.toContain("Current question");
+    // Compact 展示语义仍走既有元数据；执行状态与未决交互保留。
+    expect(info.get("compactionStatus")).toBe("completed");
+    expect(info.get("compaction")).toMatchObject({ status: "completed", trigger: "auto", strategy: "full" });
+    expect(info.get("activeTurnId")).toBe(liveTurn);
+    expect(info.get("activeTurnStatus")).toBe(liveStatus);
+    expect(info.get("activeRequestId")).toBe(liveRequest);
+    expect(info.get("pendingRequestId")).toBe("request-live");
+    expect(info.get("pendingInteractions")).toBe(pending);
+    // 未完成工具保持实时状态，不因 Compact 被批量中止。
+    const tools = docs.chat.getMap<unknown>("root").get("toolCalls") as Y.Map<Y.Map<unknown>>;
+    expect(tools.get("call-live")?.get("status")).toBe("running");
+    // 已加载窗口由翻页扩大过：Compact 不能重置游标进度。
+    expect(docs.historyCursor()).toBe("cursor-earlier");
+    expect(docs.historyWindowInvalidated()).toBe(false);
+  });
+
+  test("compact failure only updates the failure display", () => {
+    const docs = new SessionDocs();
+    docs.accept(textChunk("s1", "user_message_chunk", USER_ONE, "Keep me"));
+    docs.accept(update("s1", "tool_call", { toolCallId: "call-live", title: "Read", status: "in_progress" }));
+    docs.accept(legacyEvent("s1", "compact_started", {}));
+    const info = docs.session.getMap<unknown>("root").get("session") as Y.Map<unknown>;
+    expect(info.get("compactionStatus")).toBe("running");
+    docs.accept(legacyEvent("s1", "agent_execution_failed", { message: "provider detail" }));
+
+    // 失败只反映在执行状态上：消息区与工具状态不被清空。
+    expect(entries(docs)).toHaveLength(2);
+    expect(textOf(entries(docs)[0]!, "text")).toBe("Keep me");
+    expect(info.get("activeTurnStatus")).toBe("error");
+    const tools = docs.chat.getMap<unknown>("root").get("toolCalls") as Y.Map<Y.Map<unknown>>;
+    expect(tools.get("call-live")?.get("status")).toBe("cancelled");
+    // 轮次失败时 Compact 没有上报终态：展示收敛为失败，不能停在 running（A12）。
+    expect(info.get("compactionStatus")).toBe(COMPACTION_STATUS.failed);
+    expect(info.get("compaction")).toMatchObject({ status: COMPACTION_STATUS.failed });
+  });
+
+  test("a manual compact failure converges the compact display (A12)", () => {
+    const docs = new SessionDocs();
+    docs.accept(textChunk("s1", "user_message_chunk", USER_ONE, "Keep me"));
+    docs.accept(update("s1", "tool_call", { toolCallId: "call-live", title: "Read", status: "in_progress" }));
+    docs.accept(legacyEvent("s1", "compact_started", {}));
+    const info = docs.session.getMap<unknown>("root").get("session") as Y.Map<unknown>;
+    expect(info.get("compactionStatus")).toBe("running");
+
+    // 手动 Compact 的真实失败载体：pipeline EarlyReturn → CommandFeedback(Error, UiOnly)
+    // → AcpEvent::CommandFeedback（peri-acp/src/event/{mod.rs,mapper.rs}），
+    // 经 peri/agent_event 以 `{type, value:{level, message, channel}}` 抵达。
+    docs.accept(legacyEvent("s1", "command_feedback", {
+      level: "error", message: "compact produced no effect", channel: "uiOnly",
+    }));
+
+    expect(info.get("compactionStatus")).toBe(COMPACTION_STATUS.failed);
+    expect(info.get("compaction")).toMatchObject({
+      status: COMPACTION_STATUS.failed, message: "compact produced no effect",
+    });
+    // 失败只更新失败展示：消息区、工具与未决交互不被清空。
+    expect(entries(docs)).toHaveLength(2);
+    expect(textOf(entries(docs)[0]!, "text")).toBe("Keep me");
+    const tools = docs.chat.getMap<unknown>("root").get("toolCalls") as Y.Map<Y.Map<unknown>>;
+    expect(tools.get("call-live")?.get("status")).toBe("running");
+  });
+
+  test("a cancelled manual compact converges the compact display (A12)", () => {
+    const docs = new SessionDocs();
+    docs.accept(textChunk("s1", "user_message_chunk", USER_ONE, "Keep me"));
+    docs.accept(legacyEvent("s1", "compact_started", {}));
+    const info = docs.session.getMap<unknown>("root").get("session") as Y.Map<unknown>;
+
+    // 取消不是执行失败：服务端发 Warning「compact cancelled」（compact_pipeline.rs 的
+    // PipelineOutcome::Cancelled 分支），SDK 侧同样必须离开 running。
+    docs.accept(legacyEvent("s1", "command_feedback", {
+      level: "warning", message: "compact cancelled", channel: "uiOnly",
+    }));
+
+    expect(info.get("compactionStatus")).toBe(COMPACTION_STATUS.cancelled);
+    expect(info.get("compaction")).toMatchObject({
+      status: COMPACTION_STATUS.cancelled, message: "compact cancelled",
+    });
+    // 取消同样只更新展示：已加载的窗口逐条保留（user + assistant 占位）。
+    expect(entries(docs)).toHaveLength(2);
+    expect(textOf(entries(docs)[0]!, "text")).toBe("Keep me");
+  });
+
+  test("feedback from another command never rewrites the compact display (A12)", () => {
+    const docs = new SessionDocs();
+    docs.accept(legacyEvent("s1", "compact_started", {}));
+    docs.accept(legacyEvent("s1", "compact_completed", {
+      trigger: "manual", strategy: "full", affected_count: 2, estimated_tokens_saved: 100,
+      messages_json: JSON.stringify([]),
+    }));
+    const info = docs.session.getMap<unknown>("root").get("session") as Y.Map<unknown>;
+    const compaction = info.get("compaction");
+
+    // 没有进行中的 Compact 时，命令反馈与本展示无关（feedback 不带命令名）。
+    docs.accept(legacyEvent("s1", "command_feedback", {
+      level: "error", message: "/clear failed", channel: "uiOnly",
+    }));
+
+    expect(info.get("compactionStatus")).toBe("completed");
+    expect(info.get("compaction")).toBe(compaction);
+  });
+
+  test("after a compact the live turn keeps streaming into the same entry (REQ-C02)", () => {
+    const docs = new SessionDocs();
+    docs.seedHistoryWindow({ snapshotToken: "snapshot-1", nextCursor: "cursor-earlier" });
+    docs.accept(textChunk("s1", "user_message_chunk", USER_ONE, "Question"));
+    docs.accept(textChunk("s1", "agent_message_chunk", ASSISTANT_ONE, "partial answer"));
+    const info = docs.session.getMap<unknown>("root").get("session") as Y.Map<unknown>;
+    const liveTurn = info.get("activeTurnId");
+    const liveEntry = info.get("activeAssistantEntryId");
+
+    docs.accept(legacyEvent("s1", "compact_completed", {
+      trigger: "auto", strategy: "full", affected_count: 2, estimated_tokens_saved: 10,
+      messages_json: JSON.stringify([{ role: "user", id: USER_TWO, content: "compacted transcript" }]),
+    }));
+    // Compact 之后的流式增量仍落在同一个 turn / 同一条 assistant 条目。
+    docs.accept(textChunk("s1", "agent_message_chunk", ASSISTANT_ONE, " continued"));
+
+    expect(entries(docs).map((entry) => entry.get("entryId"))).toEqual([`turn:${USER_ONE}:user`, `turn:${USER_ONE}:assistant`]);
+    expect(textOf(entries(docs)[1]!, "text")).toBe("partial answer continued");
+    expect(info.get("activeTurnId")).toBe(liveTurn);
+    expect(info.get("activeAssistantEntryId")).toBe(liveEntry);
+    expect(docs.historyCursor()).toBe("cursor-earlier");
   });
 
   test("unknown and malformed notifications leave both documents unchanged", () => {

@@ -44,6 +44,7 @@ fn test_plan_from_persisted_directives_version_mismatch_is_invalid() {
         MessageProjectionDirective {
             policy_version: PROJECTION_POLICY_VERSION + 1,
             entries: vec![],
+            superseded_by: None,
         },
     );
 
@@ -62,6 +63,7 @@ fn excluded_legacy_directive_does_not_invalidate_visible_history() {
         MessageProjectionDirective {
             policy_version: PROJECTION_POLICY_VERSION + 1,
             entries: vec![],
+            superseded_by: None,
         },
     );
     transcript.set_excluded(excluded, true);
@@ -111,6 +113,7 @@ fn test_plan_from_persisted_directives_wrong_message_id_is_invalid() {
                     preserve_recovery_handle: false,
                 },
             }],
+            superseded_by: None,
         },
     );
 
@@ -172,6 +175,7 @@ fn test_persisted_restore_keeps_only_independent_tool_result_action() {
                     action: ProjectionAction::CompactText { max_chars: 1 },
                 },
             ],
+            superseded_by: None,
         },
     );
     transcript.set_flags_projection(
@@ -187,6 +191,7 @@ fn test_persisted_restore_keeps_only_independent_tool_result_action() {
                     preserve_recovery_handle: false,
                 },
             }],
+            superseded_by: None,
         },
     );
 
@@ -241,6 +246,7 @@ fn test_render_llm_view_from_persisted_tool_result_directive() {
                     preserve_recovery_handle: false,
                 },
             }],
+            superseded_by: None,
         },
     );
 
@@ -280,6 +286,7 @@ fn test_plan_from_persisted_directives_does_not_estimate_chars() {
                     preserve_recovery_handle: false,
                 },
             }],
+            superseded_by: None,
         },
     );
 

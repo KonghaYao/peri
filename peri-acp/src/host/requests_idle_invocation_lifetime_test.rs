@@ -353,7 +353,7 @@ async fn session_new_assembled_facade_runs_app_callback_end_to_end() {
     //（server_loop 的生产注册点见 `dispatch_request`；本用例直调 `handle_request`
     // 与 facade，故显式登记同一连接身份）。
     let mut connection = crate::host::connection::ConnectionContext::new(true);
-    connection.commit_initialize();
+    connection.commit_initialize(peri_acp_types::PeriCaps::default());
     environment
         .interaction_router()
         .register_connection(connection.id(), Arc::clone(&erased))

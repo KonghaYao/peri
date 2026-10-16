@@ -390,6 +390,7 @@ fn persisted_result_projection_and_interrupted_tail_share_the_repaired_view() {
                     preserve_recovery_handle: false,
                 },
             }],
+            superseded_by: None,
         },
     );
     transcript.append(BaseMessage::human("continue"));

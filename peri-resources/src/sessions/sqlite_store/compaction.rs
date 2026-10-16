@@ -7,7 +7,7 @@ use peri_acp_types::{
     store::{CompactionChange, MessageFlags},
     thread::ThreadId,
 };
-use sqlx::SqliteConnection;
+use sqlx::{AssertSqlSafe, SqliteConnection};
 use std::collections::HashMap;
 
 pub(super) async fn delete_messages(
@@ -149,6 +149,16 @@ pub(super) async fn load_message_flags(
     load_flags_on(&mut connection, thread_id).await
 }
 
+/// 按 id 集合读取 flags（有界）：只查给定 id，不做全历史扫描。
+pub(super) async fn load_flags_for_ids(
+    database: &SqliteSessionDatabase,
+    thread_id: &ThreadId,
+    ids: &[peri_acp_types::messages::MessageId],
+) -> Result<HashMap<peri_acp_types::messages::MessageId, MessageFlags>> {
+    let mut connection = database.pool.acquire().await?;
+    load_flags_for_ids_on(&mut connection, thread_id, ids).await
+}
+
 /// flags 是派生视图：只返回非默认标记。
 ///
 /// 损坏的 `message_id` 或无法解释的 projection 是数据故障，不是「没有标记」：
@@ -165,6 +175,61 @@ pub(super) async fn load_flags_on(
     .fetch_all(&mut *connection)
     .await?;
 
+    decode_flag_rows(rows)
+}
+
+/// 有效范围 flags 的语句原文（计划证据与生产读取同一份文本，见 `session_history_perf_test.rs`）。
+pub(in crate::sessions) const ACTIVE_FLAGS_SQL: &str =
+    "SELECT message_id, truncated, excluded, projection FROM messages \
+             WHERE thread_id = ?1 AND excluded = 0 AND (truncated = 1 OR projection IS NOT NULL)";
+
+/// 有效范围的 flags：与有效 payload 同一过滤条件（`excluded = 0`），
+/// 因此已排除条目的标记不返回。`excluded = 1` 分支在此条件下恒不成立，故不列出。
+pub(super) async fn load_active_flags_on(
+    connection: &mut SqliteConnection,
+    thread_id: &ThreadId,
+) -> Result<HashMap<peri_acp_types::messages::MessageId, MessageFlags>> {
+    let rows: Vec<(String, bool, bool, Option<String>)> = sqlx::query_as(ACTIVE_FLAGS_SQL)
+        .bind(thread_id.as_str())
+        .fetch_all(&mut *connection)
+        .await?;
+
+    decode_flag_rows(rows)
+}
+
+/// 给定 id 集合的 flags：范围由调用方的 id 列表界定（空列表不查库，直接是空结果）。
+///
+/// 占位符个数随 id 数量生成，值全部走绑定参数：语句里不出现任何 id 文本。
+pub(super) async fn load_flags_for_ids_on(
+    connection: &mut SqliteConnection,
+    thread_id: &ThreadId,
+    ids: &[peri_acp_types::messages::MessageId],
+) -> Result<HashMap<peri_acp_types::messages::MessageId, MessageFlags>> {
+    if ids.is_empty() {
+        return Ok(HashMap::new());
+    }
+    let placeholders = (2..=ids.len() + 1)
+        .map(|position| format!("?{position}"))
+        .collect::<Vec<_>>()
+        .join(", ");
+    let mut query = sqlx::query_as(AssertSqlSafe(format!(
+        "SELECT message_id, truncated, excluded, projection FROM messages \
+             WHERE thread_id = ?1 AND message_id IN ({placeholders}) \
+               AND (truncated = 1 OR excluded = 1 OR projection IS NOT NULL)"
+    )))
+    .bind(thread_id.as_str());
+    for id in ids {
+        query = query.bind(id.as_uuid().to_string());
+    }
+    let rows: Vec<(String, bool, bool, Option<String>)> = query.fetch_all(&mut *connection).await?;
+
+    decode_flag_rows(rows)
+}
+
+/// 行 → flags（行内 ID 必须是可解释的 uuid；projection 不可读即失败）。
+fn decode_flag_rows(
+    rows: Vec<(String, bool, bool, Option<String>)>,
+) -> Result<HashMap<peri_acp_types::messages::MessageId, MessageFlags>> {
     let mut flags = HashMap::with_capacity(rows.len());
     for (id_str, truncated, excluded, projection_json) in rows {
         let id = uuid::Uuid::parse_str(&id_str)

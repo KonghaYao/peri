@@ -11,6 +11,16 @@
 //! 4. 从 SQLite 持久化中删除被移除的消息
 //! 5. 发送 RewindCompleted 事件通知 TUI 刷新（重建信号，保留原样）
 //!
+//! 事件载荷是「提交成功后**有效**的保留前缀」：调用方按边界计划算出（见
+//! [`DurableRewindCommit::Boundary`] 的 `effective_history`），与发布到热态、以及 RPC 响应里的
+//! wire `history` 同源；canonical 前缀（含仍被存活摘要覆盖的正文）不得进事件，
+//! 否则 TUI 以它重建出的 transcript 与模型、存储都不一致。
+//!
+//! **无持久化后端的上下文**（[`CommandContext::session_resources`] 为 `None` 且
+//! `thread_id` 也为 `None`，即该结构文档声明的打印/测试路径）只截断内存历史：这种上下文
+//! 没有可与之分叉的存储，durable 提交按「无事可做」处理并**显式记一条日志**；只有一半句柄
+//! 缺失（有门面无 thread id，或反之）是装配错误，按硬失败处理、不发事件。
+//!
 //! RPC 路径（`dispatch/rewind.rs`）复用本模块的 [`execute_rewind`] 共享执行体，
 //! RPC wire（serde RewindArgs + preview_fingerprint）保持不变。
 
@@ -19,6 +29,7 @@ mod events;
 use peri_acp_types::builtin_mcp::original_tool_name_of_effective;
 use peri_acp_types::command::{ArgKind, ArgSpec, ArgsSchema, FlagSpec};
 use peri_acp_types::messages::{BaseMessage, ContentBlock, MessageId};
+use peri_acp_types::session_resources::RewindOutcome;
 use tracing::{debug, warn};
 
 use super::{CommandContext, CommandFeedback, CommandResult, FeedbackChannel, FeedbackLevel};
@@ -114,22 +125,77 @@ impl peri_acp_types::command::CommandHandler for RewindCommand {
         }
 
         peri_acp_types::command::CommandOutcome::Done(
-            execute_rewind(ctx, target_message_id, revert_files).await,
+            execute_rewind(
+                ctx,
+                target_message_id,
+                revert_files,
+                DurableRewindCommit::RemovedIds,
+            )
+            .await
+            .result,
         )
     }
+}
+
+/// rewind 的持久化提交方式：一次提交要么按边界重建有效视图，要么只按被移除条目的 id
+/// 精确删除——两种语义都由存储的显式边界/精确删除原语承载，执行体不做第二次调用。
+pub enum DurableRewindCommit {
+    /// 按显式边界原子提交：删除边界之后的条目，并在**同一事务**里清零
+    /// `clear_excluded` 的 `excluded`（ACP 请求路径；清零集合由调用方从同一次一致读取的
+    /// 完整自有历史算出，[`peri_acp_types::store::history::rewind_clear_excluded_ids`]
+    /// 是唯一规则实现）。
+    Boundary {
+        boundary: peri_acp_types::session_resources::RewindBoundary,
+        clear_excluded: Vec<MessageId>,
+        /// `RewindCompleted` 事件载荷：提交成功后的**有效视图**（与热态发布同源）。
+        ///
+        /// 调用方按同一边界计划从 canonical 历史算出。执行体不能自己从入参 `history` 推导：
+        /// 那是含归档正文的 canonical 前缀，事件一旦携带它，TUI 会把存储与模型都不认为
+        /// 有效的条目重新画出来（REQ-T04 的有效视图约束）。
+        effective_history: Vec<BaseMessage>,
+    },
+    /// 只按被移除条目的 id 精确删除（slash 路径：调用方持有的是展示投影，没有完整
+    /// 历史读取，也就没有清零依据；有效视图重建属于 ACP rewind）。
+    RemovedIds,
+}
+
+/// durable 提交的实际效力：调用方据此决定能不能改内存热态。
+///
+/// 存储的「未知边界 = 无变更」与「本上下文没有持久化后端」是两件事：前者是**失败**（本地
+/// 存储没动，热态若发布就分叉），后者是**无事可做**（没有可与之分叉的存储）。
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum RewindDurability {
+    /// 存储按本次请求改动了历史（`RemovedIds` 的幂等精确删除同样记这里）。
+    Applied,
+    /// 边界目标在写入时已不在存储里：删除与清零都没有发生（[`RewindOutcome::BoundaryMissing`]）。
+    BoundaryMissing,
+    /// 文档化的无持久化后端上下文：本次只改了内存。
+    NoPersistenceBackend,
+}
+
+/// 共享执行体的输出：命令结果 + durable 提交效力。
+pub(crate) struct RewindExecution {
+    pub result: CommandResult,
+    pub durability: RewindDurability,
 }
 
 /// 共享执行体（slash 与 RPC 双入口复用；Phase 5 Step 5 新增 pub(crate) 函数）。
 ///
 /// 原 `RewindCommand.execute` 的 Step 2-6 逻辑原样迁入；错误分支（解析失败 /
-/// 未找到目标 / 持久化删除失败）改 `feedback(Error, UiOnly)`（原 RewindError
+/// 未找到目标 / 持久化提交失败）改 `feedback(Error, UiOnly)`（原 RewindError
 /// 事件通道已删除）；成功 summary → `feedback(Info, UiOnly)`；
 /// `RewindCompleted` 事件保留（TUI 重建信号）。
+///
+/// `commit` 决定 Step 5 的存储调用：提交失败即整体失败（文件复原不外泄、事件不发），
+/// 内存改动由调用方在成功之后进行。边界提交「没生效」（
+/// [`RewindDurability::BoundaryMissing`]）同样按失败收场：本地存储一行未动，事件与成功
+/// 反馈都会让调用方发布一份不存在的历史。
 pub(crate) async fn execute_rewind(
     ctx: CommandContext,
     target_message_id: String,
     revert_files: bool,
-) -> CommandResult {
+    commit: DurableRewindCommit,
+) -> RewindExecution {
     let history = &ctx.history;
 
     // Step 2: 定位目标消息
@@ -142,15 +208,7 @@ pub(crate) async fn execute_rewind(
         None => {
             let msg = format!("rewind: 未找到目标消息 {target_message_id}");
             warn!(msg);
-            return CommandResult {
-                messages: ctx.history,
-                stop_reason: PromptStopReason::EndTurn,
-                feedback: Some(CommandFeedback {
-                    level: FeedbackLevel::Error,
-                    message: msg,
-                    channel: FeedbackChannel::UiOnly,
-                }),
-            };
+            return rewind_failed(ctx.history, msg, RewindDurability::Applied);
         }
     };
 
@@ -175,15 +233,7 @@ pub(crate) async fn execute_rewind(
             if let Err(error) = result {
                 let msg = format!("rewind: 文件回退失败，历史保持不变: {error}");
                 warn!(msg);
-                return CommandResult {
-                    messages: ctx.history,
-                    stop_reason: PromptStopReason::EndTurn,
-                    feedback: Some(CommandFeedback {
-                        level: FeedbackLevel::Error,
-                        message: msg,
-                        channel: FeedbackChannel::UiOnly,
-                    }),
-                };
+                return rewind_failed(ctx.history, msg, RewindDurability::Applied);
             }
         }
     }
@@ -191,49 +241,127 @@ pub(crate) async fn execute_rewind(
     // Step 4: 验证 ToolUse/ToolResult 配对完整性
     validate_tool_pairing(&retained_messages);
 
-    // Step 5: 从持久化中删除被移除的消息（一次门面行为，缓存/计数同事务维护）。
-    // 用户 rewind 的边界是 RemoveFrom：目标消息及其之后全部移除（与 transcript 的
-    // KeepThrough 不同义，两者都经同一门面的显式边界执行）。
+    // Step 5: 持久化提交（一次门面行为，缓存/计数同事务维护）。用户 rewind 的边界是
+    // RemoveFrom：目标消息及其之后全部移除（与 transcript 的 KeepThrough 不同义）。
+    // 提交方式由调用方给出，本函数只负责在「文件复原成功之后、事件之前」执行一次。
+    //
+    // 句柄缺失的两种含义分开处置（F5：不再静默跳过）：
+    // - 两个都缺 = `CommandContext` 文档声明的「无持久化后端」上下文（打印/测试路径）：
+    //   没有可与之分叉的存储，durable 提交无事可做，但仍显式记一条日志；
+    // - 只缺一个 = 装配错误（有门面没 thread id，或反之）：无法把提交落到具体会话上，
+    //   按硬失败收场——不发事件、不改内存。
     let removed_ids: Vec<MessageId> = removed_messages.iter().map(|m| m.id()).collect();
-    if let (Some(store), Some(tid)) = (&ctx.session_resources, &ctx.thread_id) {
-        if !removed_ids.is_empty() {
-            match store.remove_history_entries(tid, &removed_ids).await {
-                Ok(()) => debug!(count = removed_ids.len(), "rewind: 持久化消息已删除"),
-                Err(e) => {
-                    let msg = format!("rewind: 持久化删除失败: {e}");
+    let durability = match (&ctx.session_resources, &ctx.thread_id) {
+        (Some(store), Some(tid)) => {
+            let committed = match &commit {
+                DurableRewindCommit::Boundary {
+                    boundary,
+                    clear_excluded,
+                    ..
+                } => store
+                    .rewind_history(tid, *boundary, clear_excluded)
+                    .await
+                    .map(durability_of),
+                DurableRewindCommit::RemovedIds if removed_ids.is_empty() => {
+                    Ok(RewindDurability::Applied)
+                }
+                DurableRewindCommit::RemovedIds => store
+                    .remove_history_entries(tid, &removed_ids)
+                    .await
+                    .map(|()| RewindDurability::Applied),
+            };
+            match committed {
+                Ok(RewindDurability::Applied) => {
+                    debug!(removed = removed_ids.len(), "rewind: 持久化已提交");
+                    RewindDurability::Applied
+                }
+                // 存储一行未动：热态与存储会分叉，按失败收场（RPC 路径据此报可区分错误）。
+                Ok(missing @ RewindDurability::BoundaryMissing) => {
+                    let msg = format!(
+                        "rewind: 边界目标已不在存储里（存储未改动，已回滚 {removed_count} 条消息未生效）"
+                    );
                     warn!(msg);
-                    return CommandResult {
-                        messages: ctx.history,
-                        stop_reason: PromptStopReason::EndTurn,
-                        feedback: Some(CommandFeedback {
-                            level: FeedbackLevel::Error,
-                            message: msg,
-                            channel: FeedbackChannel::UiOnly,
-                        }),
-                    };
+                    return rewind_failed(ctx.history, msg, missing);
+                }
+                Ok(RewindDurability::NoPersistenceBackend) => unreachable!(
+                    "存储提交不返回 NoPersistenceBackend：它只表示本上下文没有持久化后端"
+                ),
+                Err(e) => {
+                    let msg = format!("rewind: 持久化提交失败: {e}");
+                    warn!(msg);
+                    return rewind_failed(ctx.history, msg, RewindDurability::Applied);
                 }
             }
         }
-    }
+        (None, None) => {
+            warn!(
+                session_id = %ctx.session_id,
+                "rewind: 上下文没有持久化后端，仅截断内存历史（durable 提交无事可做）"
+            );
+            RewindDurability::NoPersistenceBackend
+        }
+        (store, tid) => {
+            let msg = format!(
+                "rewind: 持久化句柄不完整（session_resources={}, thread_id={}），拒绝在内存里假成功",
+                store.is_some(),
+                tid.is_some(),
+            );
+            warn!(msg);
+            return rewind_failed(ctx.history, msg, RewindDurability::Applied);
+        }
+    };
 
-    // Step 6: 发送 RewindCompleted 事件（重建信号，保留原样）
+    // Step 6: 发送 RewindCompleted 事件（重建信号）。载荷是**有效视图**：调用方在边界
+    // 提交里给出（与热态发布、wire `history` 同源），不是入参里的 canonical 前缀。
     let summary = format!("已回滚 {removed_count} 条消息");
-    events::emit_rewind_completed(
-        &ctx.event_sink,
-        &ctx.session_id,
-        summary.clone(),
-        retained_messages.clone(),
-    )
-    .await;
+    let completed = match commit {
+        DurableRewindCommit::Boundary {
+            effective_history, ..
+        } => effective_history,
+        DurableRewindCommit::RemovedIds => retained_messages.clone(),
+    };
+    events::emit_rewind_completed(&ctx.event_sink, &ctx.session_id, summary.clone(), completed)
+        .await;
 
-    CommandResult {
-        messages: retained_messages,
-        stop_reason: PromptStopReason::EndTurn,
-        feedback: Some(CommandFeedback {
-            level: FeedbackLevel::Info,
-            message: summary,
-            channel: FeedbackChannel::UiOnly,
-        }),
+    RewindExecution {
+        result: CommandResult {
+            messages: retained_messages,
+            stop_reason: PromptStopReason::EndTurn,
+            feedback: Some(CommandFeedback {
+                level: FeedbackLevel::Info,
+                message: summary,
+                channel: FeedbackChannel::UiOnly,
+            }),
+        },
+        durability,
+    }
+}
+
+/// 存储结果 → 执行体的效力表达（一一对应，不做折叠）。
+fn durability_of(outcome: RewindOutcome) -> RewindDurability {
+    match outcome {
+        RewindOutcome::Applied => RewindDurability::Applied,
+        RewindOutcome::BoundaryMissing => RewindDurability::BoundaryMissing,
+    }
+}
+
+/// 失败收场：错误反馈（UiOnly）+ 提交前的内存历史原样交还，不发事件。
+fn rewind_failed(
+    history: Vec<BaseMessage>,
+    message: String,
+    durability: RewindDurability,
+) -> RewindExecution {
+    RewindExecution {
+        result: CommandResult {
+            messages: history,
+            stop_reason: PromptStopReason::EndTurn,
+            feedback: Some(CommandFeedback {
+                level: FeedbackLevel::Error,
+                message,
+                channel: FeedbackChannel::UiOnly,
+            }),
+        },
+        durability,
     }
 }
 

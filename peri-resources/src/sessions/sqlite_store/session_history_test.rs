@@ -140,10 +140,11 @@ async fn test_rewind_boundaries_are_distinct_and_unknown_cutoffs_change_nothing(
         .await
         .unwrap();
 
-    // 未知截止点：无变更（保留现有 rewind 语义）。
+    // 未知截止点：无变更（保留现有 rewind 语义）；本用例只验边界语义，不涉及 flags 重建。
     data.rewind_history(
         &"s-rewind".to_owned(),
         RewindBoundary::RemoveFrom(peri_acp_types::messages::MessageId::new()),
+        &[],
     )
     .await
     .unwrap();
@@ -160,6 +161,7 @@ async fn test_rewind_boundaries_are_distinct_and_unknown_cutoffs_change_nothing(
     data.rewind_history(
         &"s-rewind".to_owned(),
         RewindBoundary::KeepThrough(history[1].id()),
+        &[],
     )
     .await
     .unwrap();
@@ -178,6 +180,7 @@ async fn test_rewind_boundaries_are_distinct_and_unknown_cutoffs_change_nothing(
     data.rewind_history(
         &"s-rewind".to_owned(),
         RewindBoundary::RemoveFrom(history[1].id()),
+        &[],
     )
     .await
     .unwrap();
@@ -487,3 +490,153 @@ async fn test_restart_preserves_canonical_snapshot_and_history() {
         2
     );
 }
+
+// ─── 有效视图与有界 flags ─────────────────────────────────────────────────────
+
+#[tokio::test]
+async fn test_active_snapshot_reads_only_unexcluded_entries() {
+    let (store, data, directory) = database().await;
+    let workspace = workspace(&store, directory.path()).await;
+    let cwd = workspace.cwd.to_string_lossy().into_owned();
+    data.save_new_session(&session("s-active", &cwd, &workspace, frozen("active")))
+        .await
+        .unwrap();
+    let history = payloads(3);
+    data.append_history(&"s-active".to_owned(), &history)
+        .await
+        .unwrap();
+
+    // 一条被排除、一条被截断：排除条目既不进有效 payload，也不进有效 flags；
+    // 截断条目仍然有效（投影视图照常返回标记）。
+    let summary = BaseMessage::ai("summary");
+    let summary_id = summary.id();
+    data.apply_compaction(
+        &"s-active".to_owned(),
+        &CompactionChange {
+            flag_updates: vec![
+                (
+                    history[1].id(),
+                    peri_acp_types::store::MessageFlags {
+                        truncated: false,
+                        excluded: true,
+                        projection: None,
+                    },
+                ),
+                (
+                    history[2].id(),
+                    peri_acp_types::store::MessageFlags {
+                        truncated: true,
+                        excluded: false,
+                        projection: None,
+                    },
+                ),
+            ],
+            appended_messages: vec![summary],
+        },
+    )
+    .await
+    .unwrap();
+
+    let active = data
+        .load_active_snapshot(&"s-active".to_owned())
+        .await
+        .unwrap();
+    assert_eq!(
+        active
+            .payloads
+            .iter()
+            .map(PersistedPayload::id)
+            .collect::<Vec<_>>(),
+        vec![history[0].id(), history[2].id(), summary_id]
+    );
+    assert!(
+        !active.flags.contains_key(&history[1].id()),
+        "已排除条目的标记不出现在有效视图里"
+    );
+    assert!(active.flags[&history[2].id()].truncated);
+    assert_eq!(active.meta.message_count, 4);
+
+    // 完整读取仍然给出归档区：排除只影响有效视图，不改变存储事实。
+    let full = data.load_snapshot(&"s-active".to_owned()).await.unwrap();
+    assert_eq!(full.payloads.len(), 4);
+    assert!(full.flags[&history[1].id()].excluded);
+}
+
+#[tokio::test]
+async fn test_message_flags_read_is_bounded_to_the_given_ids() {
+    let (store, data, directory) = database().await;
+    let workspace = workspace(&store, directory.path()).await;
+    let cwd = workspace.cwd.to_string_lossy().into_owned();
+    data.save_new_session(&session("s-flags", &cwd, &workspace, frozen("flags")))
+        .await
+        .unwrap();
+    data.save_new_session(&session(
+        "s-flags-other",
+        &cwd,
+        &workspace,
+        frozen("flags-other"),
+    ))
+    .await
+    .unwrap();
+    let history = payloads(3);
+    let other = payloads(1);
+    data.append_history(&"s-flags".to_owned(), &history)
+        .await
+        .unwrap();
+    data.append_history(&"s-flags-other".to_owned(), &other)
+        .await
+        .unwrap();
+    data.apply_message_projections(
+        &"s-flags".to_owned(),
+        &[
+            (
+                history[0].id(),
+                peri_acp_types::store::MessageFlags {
+                    truncated: true,
+                    excluded: false,
+                    projection: None,
+                },
+            ),
+            (
+                history[1].id(),
+                peri_acp_types::store::MessageFlags {
+                    truncated: false,
+                    excluded: true,
+                    projection: None,
+                },
+            ),
+        ],
+    )
+    .await
+    .unwrap();
+
+    // 只问其中一条：别的条目的标记不返回（范围有界，不扫全历史）。
+    let flags = data
+        .load_message_flags(&"s-flags".to_owned(), &[history[1].id()])
+        .await
+        .unwrap();
+    assert_eq!(flags.len(), 1);
+    assert!(flags[&history[1].id()].excluded);
+
+    // 空集合：不查库，直接是空结果。
+    assert!(data
+        .load_message_flags(&"s-flags".to_owned(), &[])
+        .await
+        .unwrap()
+        .is_empty());
+    // 未标记的条目不在派生视图里（默认值不是标记）。
+    assert!(data
+        .load_message_flags(&"s-flags".to_owned(), &[history[2].id()])
+        .await
+        .unwrap()
+        .is_empty());
+    // 别会话的 id 不会命中：范围包含会话归属。
+    assert!(data
+        .load_message_flags(&"s-flags".to_owned(), &[other[0].id()])
+        .await
+        .unwrap()
+        .is_empty());
+}
+
+#[path = "session_history_rewind_test.rs"]
+mod rewind_tests;

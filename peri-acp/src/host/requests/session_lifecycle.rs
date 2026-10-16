@@ -30,6 +30,7 @@ pub(crate) mod restore;
 mod session_apps_capability;
 pub(crate) use restore::{handle_context, handle_load, handle_metadata, handle_resume};
 use restore::{identity_response, prepare_existing, response_identity};
+use session_apps_capability::apps_capability;
 
 /// fork source 读取/保存失败 → ACP 错误。
 ///
@@ -131,12 +132,7 @@ pub(crate) fn handle_initialize(params: &Value, cfg: &AcpServerConfig) -> Result
     info!(protocol_version = %version, "ACP initialize");
 
     // 解析 clientCapabilities._meta 中的 peri 自定义 flag
-    let peri_caps = params
-        .get("clientCapabilities")
-        .and_then(|c| c.get("_meta"))
-        .and_then(|m| m.as_object())
-        .map(PeriCaps::from_client_meta)
-        .unwrap_or_default();
+    let peri_caps = initialize_peri_caps(params);
 
     // 暂存 caps，session/new 时 consume
     cfg.session_manager.set_pending_caps(peri_caps.clone());
@@ -146,7 +142,18 @@ pub(crate) fn handle_initialize(params: &Value, cfg: &AcpServerConfig) -> Result
     serde_json::to_value(resp).map_err(|e| AcpError::new(-32603, format!("Serialize failed: {e}")))
 }
 
-use session_apps_capability::apps_capability;
+/// `initialize` 请求声明的 peri caps（唯一解析点）。
+///
+/// 两处消费同一份事实：会话级暂存（`set_pending_caps`，供会话能力投影）与
+/// 连接级协商值（`ConnectionContext`，供按当前连接分流的判定）。
+pub(crate) fn initialize_peri_caps(params: &Value) -> PeriCaps {
+    params
+        .get("clientCapabilities")
+        .and_then(|c| c.get("_meta"))
+        .and_then(|m| m.as_object())
+        .map(PeriCaps::from_client_meta)
+        .unwrap_or_default()
+}
 
 pub(super) fn enabled_meta_sections(cfg: &AcpServerConfig) -> std::collections::HashSet<String> {
     cfg.peri_config
@@ -446,6 +453,7 @@ pub(crate) async fn new_session_from_prepared(
             closing: false,
             history: Vec::new(),
             history_payloads: Vec::new(),
+            structure_version: 0,
             cancel_token: None,
             // session-owned 交互门：环境自带（router 借用同一 Arc，跨轮共享）。
             interaction_gate: super::super::workspace_interaction::session_interaction_gate(
@@ -502,8 +510,9 @@ async fn committed_frozen_state(
     resources: &Arc<dyn peri_acp_types::session_resources::SessionResources>,
     session_id: &str,
 ) -> Result<bool, AcpError> {
+    // 判据只读 frozen：有效视图足够，不加载 own 正文。
     let snapshot = resources
-        .load_session_snapshot(&session_id.to_owned())
+        .load_active_snapshot(&session_id.to_owned())
         .await
         .map_err(super::super::workspace::resource_error)?;
     match snapshot.frozen {
@@ -761,7 +770,7 @@ pub(crate) async fn handle_fork(
         .frozen
         .clone()
         .ok_or_else(|| AcpError::new(-32603, "Fork frozen snapshot is missing"))?;
-    let (new_thread_id, copied_payloads) = dispatch::fork_bound_session(
+    let (new_thread_id, published_payloads) = dispatch::fork_bound_session(
         &cfg.session_resources,
         &fork_source,
         &workspace,
@@ -851,11 +860,12 @@ pub(crate) async fn handle_fork(
             cwd: cwd.to_string(),
             environment: environment.clone(),
             closing: false,
-            history: copied_payloads
+            history: published_payloads
                 .iter()
                 .filter_map(|payload| payload.as_message().cloned())
                 .collect(),
-            history_payloads: copied_payloads,
+            history_payloads: published_payloads,
+            structure_version: 0,
             cancel_token: None,
             // session-owned 交互门：环境自带（router 借用同一 Arc，跨轮共享）。
             interaction_gate: super::super::workspace_interaction::session_interaction_gate(

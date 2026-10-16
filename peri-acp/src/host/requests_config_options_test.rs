@@ -38,6 +38,7 @@ fn seeded_sessions(provider: &LlmProvider) -> HashMap<String, SessionState> {
             closing: false,
             history: Vec::new(),
             history_payloads: Vec::new(),
+            structure_version: 0,
             cancel_token: None,
             interaction_gate: Arc::new(tokio::sync::Mutex::new(())),
             host_request_seq: Arc::new(std::sync::atomic::AtomicU64::new(0)),

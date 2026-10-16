@@ -15,7 +15,10 @@ use tracing::warn;
 use crate::{
     provider::PeriConfig,
     session::{
-        command::{execute_rewind, extract_file_changes, CommandContext},
+        command::{
+            execute_rewind, extract_file_changes, CommandContext, DurableRewindCommit,
+            RewindDurability,
+        },
         event_sink::EventSink,
         executor::PromptStopReason,
     },
@@ -229,6 +232,7 @@ pub async fn rewind_execute(
     frozen_skill_summary: Option<Arc<String>>,
     frozen_system_prompt: Option<Arc<String>>,
     mcp_pool: Option<Arc<dyn peri_acp_types::ports::McpPoolPort>>,
+    commit: DurableRewindCommit,
 ) -> Result<Value, AcpError> {
     // P0 修复：参数预验证。参数错误直接以 RPC 错误形式返回（TUI 才能感知
     // 并展示失败）；执行失败经共享执行体 feedback(Error, UiOnly) 收敛
@@ -311,7 +315,9 @@ pub async fn rewind_execute(
     ctx.frozen_system_prompt = frozen_system_prompt;
 
     // Phase 5 Step 5：共享执行体（slash 与 RPC 双入口复用）。
-    let mut result = execute_rewind(ctx, args.target_message_id, args.revert_files).await;
+    let execution = execute_rewind(ctx, args.target_message_id, args.revert_files, commit).await;
+    let durability = execution.durability;
+    let mut result = execution.result;
     let rewind_error = result
         .feedback
         .as_ref()
@@ -323,12 +329,23 @@ pub async fn rewind_execute(
     emit_command_feedback(event_sink, &session_id, &mut result).await;
 
     // 与 execute-command dispatch 一致：Immediate 命令绕过 agent event pump，
-    // 必须手动 signal completion（TRAP: issue_2026-05-29-immediate-command-missing-push-done）。
+    // 必须手动 signal completion（TRAP: issue_2026-06-29-immediate-command-missing-push-done）。
     // 命令 turn 无 request_id（None）。
     event_sink.push_done(&session_id, "end_turn", None).await;
 
     if result.stop_reason == PromptStopReason::Cancelled {
         return Err(AcpError::new(-32603, "rewind cancelled"));
+    }
+    // 边界提交「没生效」必须与普通失败可区分：存储一行未动，调用方（TUI）要先重读再决定，
+    // 而不是把它当成一次执行失败。`data.reason` 是稳定分类（映射表见
+    // `crate::dispatch::session_load` 的模块文档，-32013 取本仓未占用的 server error 值）。
+    if durability == RewindDurability::BoundaryMissing {
+        return Err(AcpError::new(
+            -32013,
+            rewind_error
+                .unwrap_or_else(|| "rewind: boundary is no longer in stored history".into()),
+        )
+        .with_data(json!({ "reason": "rewind_boundary_missing" })));
     }
     if let Some(error) = rewind_error {
         return Err(AcpError::new(-32603, error));
@@ -339,6 +356,8 @@ pub async fn rewind_execute(
         "status": "executed",
         // P1：携带截断后的 history，调用方（TUI 进程内 ACP server）回写
         // SessionState.history，保证后续候选/预算查询与事件一致。
+        // 注意：Host 路径不再依赖该回写——`host/requests/rewind.rs` 在提交成功后
+        // 用存储的权威结果自行重建热态（本字段的截断前缀含仍被归档的正文）。
         "history": history,
     }))
 }

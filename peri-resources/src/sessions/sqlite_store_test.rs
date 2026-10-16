@@ -778,6 +778,7 @@ async fn test_update_message_flags_persists_projection() {
             target: ProjectionTarget::Message,
             action: ProjectionAction::Exclude,
         }],
+        superseded_by: None,
     };
 
     let dir = tempdir().unwrap();

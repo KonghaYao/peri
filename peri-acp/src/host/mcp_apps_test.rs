@@ -120,7 +120,7 @@ impl McpAppsRelayPort for StubRelay {
 
 fn enabled_connection() -> ConnectionContext {
     let mut connection = ConnectionContext::new(true);
-    connection.commit_initialize();
+    connection.commit_initialize(peri_acp_types::PeriCaps::default());
     connection
 }
 
@@ -257,7 +257,7 @@ impl TestFacade {
 #[tokio::test]
 async fn invoke_disabled_capability_fails_closed() {
     let mut connection = ConnectionContext::new(false);
-    connection.commit_initialize();
+    connection.commit_initialize(peri_acp_types::PeriCaps::default());
     let relay: Arc<dyn McpAppsRelayPort> = Arc::new(StubRelay::invoke_ok());
     let error = handle_invoke(
         &invoke_params(),
@@ -467,7 +467,7 @@ async fn legacy_aliases_and_new_methods_share_the_same_facade_requirement() {
 #[tokio::test]
 async fn capability_disabled_connection_is_refused_for_new_methods() {
     let mut connection = ConnectionContext::new(false);
-    connection.commit_initialize();
+    connection.commit_initialize(peri_acp_types::PeriCaps::default());
     let error = handle_request("peri/mcp/apps/list", &json!({}), &mut connection, None)
         .await
         .unwrap_err();

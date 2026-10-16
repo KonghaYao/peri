@@ -160,11 +160,31 @@ pub(super) fn handle_replay_tool_started(
     if tool_name == "TodoWrite" {
         state.record_todo_started(tool_id.to_string(), raw_input.clone());
     }
-    let presentation = crate::kit::tool_semantics::presentation_for(
+    let card = replay_tool_started_unit(
+        tool_id,
         tool_name,
+        input_summary,
         raw_input,
         state.last_successful_todos.as_ref(),
     );
+    state.committed.push_back(card);
+    // Replay publication 由 bridge scheduler 合帧；避免每条历史工具事件完整发布。
+    super::render::push_acp_state(state);
+}
+
+/// 结果缺失态的工具卡片（回放与历史页共用的静态起点）——**不写任何状态**。
+///
+/// 历史页并入走本函数而不是 [`handle_replay_tool_started`]：后者会登记 TodoWrite
+/// 基线（`record_todo_started`），那是执行侧状态，翻页不得触碰（REQ-C01-6、A24）。
+pub(super) fn replay_tool_started_unit(
+    tool_id: &str,
+    tool_name: &str,
+    input_summary: &str,
+    raw_input: &serde_json::Value,
+    last_successful_todos: Option<&crate::kit::tool_semantics::TodoSnapshot>,
+) -> TuiRenderUnit {
+    let presentation =
+        crate::kit::tool_semantics::presentation_for(tool_name, raw_input, last_successful_todos);
     let card = TuiToolCard {
         tool_id: tool_id.to_string(),
         tool_name: tool_name.to_string(),
@@ -183,9 +203,7 @@ pub(super) fn handle_replay_tool_started(
     };
     let mut card = card;
     card.recompute_hash();
-    state.committed.push_back(TuiRenderUnit::TuiToolCard(card));
-    // Replay publication 由 bridge scheduler 合帧；避免每条历史工具事件完整发布。
-    super::render::push_acp_state(state);
+    TuiRenderUnit::TuiToolCard(card)
 }
 
 pub(super) fn handle_replay_tool_ended(
@@ -216,40 +234,7 @@ fn update_committed_tool_card(
         if let TuiRenderUnit::TuiToolCard(card) = &state.committed[i]
             && card.tool_id == tool_id
         {
-            let updated = TuiToolCard {
-                tool_id: card.tool_id.clone(),
-                tool_name: card.tool_name.clone(),
-                input_summary: card.input_summary.clone(),
-                output_summary: output_summary.to_string(),
-                is_error,
-                is_running: false,
-                running_duration_ms: None,
-                completed_duration_ms: card.completed_duration_ms,
-                // [G-Diff] ReplayToolEnded 是 replay 路径唯一有输出的点——
-                // 在此解析 diff（is_error 时解析器 skip；path hint 复用
-                // input_summary——Edit/Write 摘要即 file_path 口径）。
-                diff: super::super::acp_types::parse_tool_diff(
-                    &card.tool_name,
-                    output_summary,
-                    is_error,
-                    Some(card.input_summary.clone()),
-                ),
-                presentation: card.presentation.clone(),
-                // 基础 fold 跟随终态；用户覆盖仍由派生折叠投影接管。
-                fold: fold_for_status(
-                    FoldTarget::Tool,
-                    if is_error {
-                        EntryStatus::Error
-                    } else {
-                        EntryStatus::Completed
-                    },
-                ),
-                user_modified: card.user_modified,
-                tool_calls_count: card.tool_calls_count,
-                content_hash: 0,
-            };
-            let mut updated = updated;
-            updated.recompute_hash();
+            let updated = completed_tool_card(card, output_summary, is_error);
             state.committed = state
                 .committed
                 .update(i, TuiRenderUnit::TuiToolCard(updated));
@@ -257,4 +242,47 @@ fn update_committed_tool_card(
         }
     }
     false
+}
+
+/// 由「结果缺失」卡片派生终态卡片（回放与历史页共用）——**不写任何状态**。
+pub(super) fn completed_tool_card(
+    card: &TuiToolCard,
+    output_summary: &str,
+    is_error: bool,
+) -> TuiToolCard {
+    let updated = TuiToolCard {
+        tool_id: card.tool_id.clone(),
+        tool_name: card.tool_name.clone(),
+        input_summary: card.input_summary.clone(),
+        output_summary: output_summary.to_string(),
+        is_error,
+        is_running: false,
+        running_duration_ms: None,
+        completed_duration_ms: card.completed_duration_ms,
+        // [G-Diff] ReplayToolEnded 是 replay 路径唯一有输出的点——
+        // 在此解析 diff（is_error 时解析器 skip；path hint 复用
+        // input_summary——Edit/Write 摘要即 file_path 口径）。
+        diff: super::super::acp_types::parse_tool_diff(
+            &card.tool_name,
+            output_summary,
+            is_error,
+            Some(card.input_summary.clone()),
+        ),
+        presentation: card.presentation.clone(),
+        // 基础 fold 跟随终态；用户覆盖仍由派生折叠投影接管。
+        fold: fold_for_status(
+            FoldTarget::Tool,
+            if is_error {
+                EntryStatus::Error
+            } else {
+                EntryStatus::Completed
+            },
+        ),
+        user_modified: card.user_modified,
+        tool_calls_count: card.tool_calls_count,
+        content_hash: 0,
+    };
+    let mut updated = updated;
+    updated.recompute_hash();
+    updated
 }

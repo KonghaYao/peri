@@ -1,4 +1,7 @@
 use super::*;
+use peri_acp_types::messages::MessageId;
+use peri_acp_types::session_resources::RewindBoundary;
+use peri_acp_types::store::PersistedPayload;
 
 #[tokio::test]
 async fn remote_close_intent_finishes_without_execution_ownership() {
@@ -588,3 +591,153 @@ async fn remote_only_cold_recovery_uses_saved_evidence_and_old_distinct_registra
         b"broken local SQLite"
     );
 }
+
+/// 有效视图与有界 flags 在本机/远端必须是同一套语义，且过滤发生在存储层：
+/// 本用例用 SQLite 扮演的远端服务端真跑一遍生产语句。
+#[tokio::test]
+async fn remote_active_snapshot_and_bounded_flags_filter_at_the_storage_layer() {
+    use super::super::environment::RemoteWorkspaceEnvironment;
+    use peri_acp_types::messages::BaseMessage;
+    use peri_acp_types::session_resources::{
+        FrozenSnapshotBytes, NewSession, NewSessionMeta, SessionResources,
+    };
+    use peri_acp_types::store::{MessageFlags, PersistedPayload};
+    use peri_acp_types::thread::CancelPolicy;
+    use peri_acp_types::workspace::SessionBinding;
+
+    let directory = tempfile::tempdir().unwrap();
+    let pool = SqlitePoolOptions::new()
+        .max_connections(4)
+        .connect_with(
+            sqlx::sqlite::SqliteConnectOptions::new()
+                .filename(directory.path().join("filter-wire.db"))
+                .create_if_missing(true)
+                .foreign_keys(false),
+        )
+        .await
+        .unwrap();
+    for statement in super::super::session_schema::initialization_plan() {
+        sqlx::query(statement.sql).execute(&pool).await.unwrap();
+    }
+    sqlx::query(schema::CREATE_STORE_META_SQL)
+        .execute(&pool)
+        .await
+        .unwrap();
+    sqlx::query(super::super::ledger::CREATE_OP_LEDGER_SQL)
+        .execute(&pool)
+        .await
+        .unwrap();
+    sqlx::query("INSERT INTO peri_store_meta VALUES (0, ?1, 'filter-test', ?2, 'now')")
+        .bind(schema::REMOTE_SCHEMA_VERSION)
+        .bind(schema::STORE_CONTRACT)
+        .execute(&pool)
+        .await
+        .unwrap();
+    let transport = Arc::new(SqliteTransport {
+        pool: pool.clone(),
+        writes: AtomicUsize::new(0),
+        read_batches: AtomicUsize::new(0),
+        fail_column_drop: AtomicBool::new(false),
+        fail_recovery_drop: AtomicBool::new(false),
+        change_schema: AtomicBool::new(false),
+        before_batch: Mutex::new(None),
+        drop_reply: AtomicBool::new(false),
+        truncate_reply: AtomicBool::new(false),
+    });
+    let machine = uuid::Uuid::new_v4().to_string();
+    let workspace_dir = directory.path().join("workspace");
+    std::fs::create_dir(&workspace_dir).unwrap();
+    let environment =
+        RemoteWorkspaceEnvironment::virtual_workspace(&machine, workspace_dir.clone()).unwrap();
+    let facade = virtual_remote_facade(transport, environment);
+    let workspace = facade.resolve_workspace(&workspace_dir).await.unwrap();
+    let session_id = "remote-filter".to_owned();
+    facade
+        .create_session(&NewSession {
+            thread_id: session_id.clone(),
+            created_at: chrono::Utc::now().to_rfc3339(),
+            meta: NewSessionMeta {
+                title: None,
+                cwd: workspace_dir.to_str().unwrap().to_owned(),
+                parent_thread_id: None,
+                hidden: false,
+                cancel_policy: CancelPolicy::Cascade,
+                snapshot_at_message_id: None,
+            },
+            binding: SessionBinding::from_workspace(&workspace),
+            frozen: FrozenSnapshotBytes::new("{}"),
+        })
+        .await
+        .unwrap();
+    let history = vec![
+        PersistedPayload::Message(BaseMessage::human("message 0")),
+        PersistedPayload::Message(BaseMessage::human("message 1")),
+        PersistedPayload::Message(BaseMessage::human("message 2")),
+    ];
+    facade.append_history(&session_id, &history).await.unwrap();
+    facade
+        .apply_message_projections(
+            &session_id,
+            &[
+                (
+                    history[1].id(),
+                    MessageFlags {
+                        truncated: false,
+                        excluded: true,
+                        projection: None,
+                    },
+                ),
+                (
+                    history[2].id(),
+                    MessageFlags {
+                        truncated: true,
+                        excluded: false,
+                        projection: None,
+                    },
+                ),
+            ],
+        )
+        .await
+        .unwrap();
+
+    // 有效视图：已排除正文与标记都不返回，截断条目照常返回。
+    let active = facade.load_active_snapshot(&session_id).await.unwrap();
+    assert_eq!(
+        active
+            .payloads
+            .iter()
+            .map(PersistedPayload::id)
+            .collect::<Vec<_>>(),
+        vec![history[0].id(), history[2].id()]
+    );
+    assert!(!active.flags.contains_key(&history[1].id()));
+    assert!(active.flags[&history[2].id()].truncated);
+
+    // 完整读取仍然给出归档区：排除只影响有效视图。
+    let full = facade.load_session_snapshot(&session_id).await.unwrap();
+    assert_eq!(full.payloads.len(), 3);
+    assert!(full.flags[&history[1].id()].excluded);
+
+    // 有界 flags：只回答给定的 id；空集合不查库；未标记条目不在派生视图里。
+    let flags = facade
+        .load_message_flags(&session_id, &[history[1].id()])
+        .await
+        .unwrap();
+    assert_eq!(flags.len(), 1);
+    assert!(flags[&history[1].id()].excluded);
+    assert!(facade
+        .load_message_flags(&session_id, &[])
+        .await
+        .unwrap()
+        .is_empty());
+    assert!(facade
+        .load_message_flags(&session_id, &[history[0].id()])
+        .await
+        .unwrap()
+        .is_empty());
+}
+
+// rewind 有效视图合同（远端批）见子模块；本文件经 schema_upgrade_test.rs `include!` 装载，
+// 装载方式下需显式声明子模块。
+#[path = "full_remote_rewind_test.rs"]
+mod full_remote_rewind_tests;

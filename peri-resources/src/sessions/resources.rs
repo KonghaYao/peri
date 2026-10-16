@@ -7,6 +7,7 @@ mod gate;
 mod lifecycle;
 mod oauth_credentials;
 
+use std::collections::HashMap;
 use std::path::Path;
 #[cfg(not(target_os = "emscripten"))]
 use std::path::PathBuf;
@@ -14,13 +15,17 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use async_trait::async_trait;
+use peri_acp_types::history_page::{
+    HistoryCursor, HistoryForwardCursor, HistoryPage, HistoryPageBounds, HistorySegment,
+};
 use peri_acp_types::messages::MessageId;
 use peri_acp_types::session_resources::{
-    AccessMode, BindingRecheck, BindingState, ChildResumeClaim, ChildSnapshot, CloseSettlement,
-    DataCapabilities, ExecutionAvailability, ForkSnapshot, FrozenSnapshotBytes, FrozenState,
-    NewSession, NewSessionDraft, PersistenceRecovery, RewindBoundary, SessionAvailability,
-    SessionInitialization, SessionMetaPatch, SessionResourceError, SessionResourceErrorKind,
-    SessionResourceResult, SessionResources, SessionSnapshot,
+    AccessMode, ActiveSessionSnapshot, BindingRecheck, BindingState, ChildResumeClaim,
+    ChildSnapshot, CloseSettlement, DataCapabilities, ExecutionAvailability, ForkSnapshot,
+    FrozenSnapshotBytes, FrozenState, NewSession, NewSessionDraft, PersistenceRecovery,
+    RewindBoundary, RewindOutcome, SessionAvailability, SessionInitialization, SessionMetaPatch,
+    SessionResourceError, SessionResourceErrorKind, SessionResourceResult, SessionResources,
+    SessionSnapshot,
 };
 use peri_acp_types::store::{CompactionChange, MessageFlags, PersistedPayload};
 use peri_acp_types::thread::{AgentStatus, ThreadId, ThreadMeta};
@@ -426,6 +431,16 @@ impl SessionResources for SessionResourcesImpl {
         Ok(snapshot)
     }
 
+    async fn load_active_snapshot(
+        &self,
+        id: &ThreadId,
+    ) -> SessionResourceResult<ActiveSessionSnapshot> {
+        // 与完整快照同一条分类规则：数据端只回答绑定事实，`LegacyConfirmed` 由门面判定。
+        let mut snapshot = self.gate.data().load_active_snapshot(id).await?;
+        snapshot.binding = self.classify_binding(id, snapshot.binding).await?;
+        Ok(snapshot)
+    }
+
     async fn load_session_binding(&self, id: &ThreadId) -> SessionResourceResult<BindingState> {
         let state = self.gate.data().load_binding(id).await?;
         self.classify_binding(id, state).await
@@ -444,6 +459,51 @@ impl SessionResources for SessionResourcesImpl {
         id: &ThreadId,
     ) -> SessionResourceResult<Vec<PersistedPayload>> {
         self.gate.data().load_session_history(id).await
+    }
+
+    async fn load_history_page(
+        &self,
+        id: &ThreadId,
+        cursor: Option<&HistoryCursor>,
+        limit: usize,
+        byte_budget: usize,
+    ) -> SessionResourceResult<HistoryPage> {
+        self.gate
+            .data()
+            .load_history_page(id, cursor, limit, byte_budget)
+            .await
+    }
+
+    async fn history_page_bounds(&self, id: &ThreadId) -> SessionResourceResult<HistoryPageBounds> {
+        self.gate.data().history_page_bounds(id).await
+    }
+
+    async fn load_history_segment(
+        &self,
+        id: &ThreadId,
+        cursor: Option<&HistoryForwardCursor>,
+        limit: usize,
+        byte_budget: usize,
+    ) -> SessionResourceResult<HistorySegment> {
+        self.gate
+            .data()
+            .load_history_segment(id, cursor, limit, byte_budget)
+            .await
+    }
+
+    async fn load_entry_positions(
+        &self,
+        id: &ThreadId,
+    ) -> SessionResourceResult<HashMap<MessageId, u64>> {
+        self.gate.data().load_entry_positions(id).await
+    }
+
+    async fn load_message_flags(
+        &self,
+        id: &ThreadId,
+        ids: &[MessageId],
+    ) -> SessionResourceResult<HashMap<MessageId, MessageFlags>> {
+        self.gate.data().load_message_flags(id, ids).await
     }
 
     async fn load_session_meta(&self, id: &ThreadId) -> SessionResourceResult<ThreadMeta> {
@@ -641,9 +701,14 @@ impl SessionResources for SessionResourcesImpl {
         &self,
         id: &ThreadId,
         boundary: RewindBoundary,
-    ) -> SessionResourceResult<()> {
+        clear_excluded: &[MessageId],
+    ) -> SessionResourceResult<RewindOutcome> {
         self.gate
-            .with_mutation(id, || self.gate.data().rewind_history(id, boundary))
+            .with_mutation(id, || {
+                self.gate
+                    .data()
+                    .rewind_history(id, boundary, clear_excluded)
+            })
             .await
     }
 

@@ -13,6 +13,7 @@ use std::path::PathBuf;
 use std::str::FromStr;
 
 use chrono::{DateTime, Utc};
+use peri_acp_types::messages::MessageId;
 use peri_acp_types::session_resources::{
     SessionResourceError, SessionResourceErrorKind, SessionResourceResult,
 };
@@ -171,6 +172,17 @@ pub(super) fn decode_message_row(values: &[Value]) -> SessionResourceResult<Pers
 /// 历史行里的 flags 部分：`message_id, content, truncated, excluded, projection`。
 pub(super) fn decode_message_flags_row(values: &[Value]) -> SessionResourceResult<MessageFlags> {
     decode_flags(values, 2, 3, 4)
+}
+
+/// 仅有 flags 的投影行：`message_id, truncated, excluded, projection`（有界 flags 读取）。
+///
+/// 行内 ID 必须可解释为 uuid：不可解释是数据故障，不静默丢行。
+pub(super) fn decode_flag_row(
+    values: &[Value],
+) -> SessionResourceResult<(MessageId, MessageFlags)> {
+    let row_id = text_field(values, 0, "message id")?;
+    let id = uuid::Uuid::parse_str(&row_id).map_err(|_| corrupt("message id is not a uuid"))?;
+    Ok((id.into(), decode_flags(values, 1, 2, 3)?))
 }
 
 /// 单条 payload 文本 → 领域值；行内 ID 必须与主键一致（与本地读取同一复核）。
