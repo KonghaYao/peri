@@ -147,12 +147,7 @@ impl AgentTaskSink for RuntimeAgentTaskSink {
         // 重复发布幂等：已登记的任务直接接受，不重复计入 maxAgents。
         if self.tasks.get(&run_id, &task_id).is_none() {
             if let Some(Some(maximum)) = self.budgets.get(&run_id).map(|budget| budget.max_agents) {
-                let active = self
-                    .tasks
-                    .for_run(&run_id)
-                    .iter()
-                    .filter(|record| !record.state.is_terminal())
-                    .count() as u64;
+                let active = self.tasks.active_count_for_run(&run_id) as u64;
                 if active >= maximum {
                     return AgentTaskPublish::LimitBreach(format!(
                         "workflow exceeded maxAgents ({maximum})"
