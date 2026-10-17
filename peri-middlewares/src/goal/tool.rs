@@ -35,8 +35,8 @@ impl GoalTool {
         "Long-running goal tracking tool. Use the action parameter to select an operation:\n\
 - create: Create a goal (objective required). Only one goal per session.\n\
 - complete: Declare the goal complete (verified by an auxiliary LLM; returns reason if not met)\n\
-- block: Declare an unsolvable blocker (reason required)\n\
-- clear: Clear the current goal (releases the singleton slot, works on terminal states too)\n\
+- block: Declare a blocker preventing progress (reason required). The session automatically retries the goal every 3 minutes until it completes or is cleared\n\
+- clear: Clear the current goal (releases the singleton slot, works on terminal states too; also stops automatic recovery)\n\
 - get: Query current goal status";
 
     async fn handle_create(
@@ -126,7 +126,11 @@ impl GoalTool {
             .block_goal(reason.to_string())
             .await
             .map_err(|e| -> Box<dyn std::error::Error + Send + Sync> { e.into() })?;
-        Ok(format!("Goal marked as blocked: {reason}"))
+        Ok(format!(
+            "Goal marked as blocked: {reason}\n\
+             The session will retry the goal in 3 minutes. When woken, re-check the \
+             blocker: continue if it is resolved, or call goal(block, reason) again."
+        ))
     }
 
     async fn handle_clear(&self) -> Result<String, Box<dyn std::error::Error + Send + Sync>> {

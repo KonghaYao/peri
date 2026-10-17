@@ -10,6 +10,7 @@ use peri_agent::middleware::r#trait::Middleware;
 struct MockController {
     snapshot: parking_lot::Mutex<GoalViewSnapshot>,
     continuation_count: std::sync::atomic::AtomicU64,
+    recovery_acknowledged: std::sync::atomic::AtomicU64,
 }
 
 #[async_trait]
@@ -30,6 +31,10 @@ impl GoalController for MockController {
         self.continuation_count
             .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         Ok(())
+    }
+    async fn acknowledge_recovery(&self) {
+        self.recovery_acknowledged
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
     }
     fn snapshot(&self) -> GoalViewSnapshot {
         self.snapshot.lock().clone()
@@ -84,6 +89,7 @@ async fn test_after_agent_background_tasks_suppress_and_resume_goal() {
             let controller = Arc::new(MockController {
                 snapshot: parking_lot::Mutex::new(make_active_snapshot()),
                 continuation_count: std::sync::atomic::AtomicU64::new(0),
+                recovery_acknowledged: std::sync::atomic::AtomicU64::new(0),
             });
             let mw = GoalMiddleware::new(controller.clone(), None);
             let output = AgentOutput::new("等待后台完成", 1);
@@ -190,6 +196,7 @@ fn test_collect_tools_returns_goal_tool() {
     let controller = Arc::new(MockController {
         snapshot: parking_lot::Mutex::new(make_active_snapshot()),
         continuation_count: std::sync::atomic::AtomicU64::new(0),
+        recovery_acknowledged: std::sync::atomic::AtomicU64::new(0),
     }) as Arc<dyn GoalController>;
     let mw = GoalMiddleware::new(controller, None);
 
@@ -208,6 +215,7 @@ async fn test_after_agent_goal_active_注入_steering_并设_block_continue() {
     let controller = Arc::new(MockController {
         snapshot: parking_lot::Mutex::new(make_active_snapshot()),
         continuation_count: std::sync::atomic::AtomicU64::new(0),
+        recovery_acknowledged: std::sync::atomic::AtomicU64::new(0),
     });
     let mw = GoalMiddleware::new(controller.clone(), None);
     let mut state = AgentState::new("/tmp");
@@ -252,6 +260,7 @@ async fn test_after_agent_no_goal_放行_不注入() {
     let controller = Arc::new(MockController {
         snapshot: parking_lot::Mutex::new(GoalViewSnapshot::default()),
         continuation_count: std::sync::atomic::AtomicU64::new(0),
+        recovery_acknowledged: std::sync::atomic::AtomicU64::new(0),
     }) as Arc<dyn GoalController>;
     let mw = GoalMiddleware::new(controller, None);
     let mut state = AgentState::new("/tmp");
@@ -277,6 +286,7 @@ async fn test_after_agent_existing_block_continue_不干预() {
     let controller = Arc::new(MockController {
         snapshot: parking_lot::Mutex::new(make_active_snapshot()),
         continuation_count: std::sync::atomic::AtomicU64::new(0),
+        recovery_acknowledged: std::sync::atomic::AtomicU64::new(0),
     });
     let mw = GoalMiddleware::new(controller.clone(), None);
     let mut state = AgentState::new("/tmp");
@@ -307,6 +317,7 @@ async fn test_after_agent_terminal_重置_pending_rounds() {
     let mock = Arc::new(MockController {
         snapshot: parking_lot::Mutex::new(make_active_snapshot()),
         continuation_count: std::sync::atomic::AtomicU64::new(0),
+        recovery_acknowledged: std::sync::atomic::AtomicU64::new(0),
     });
     let controller: Arc<dyn GoalController> = mock.clone();
     let mw = GoalMiddleware::new(controller, None);
@@ -357,5 +368,52 @@ async fn test_after_agent_terminal_重置_pending_rounds() {
         drained_msg.len(),
         2,
         "应累积 2 条 goal steering Defer（两次 active），终态 r2 不 push"
+    );
+}
+
+#[tokio::test]
+async fn test_after_agent_active_goal_acknowledges_recovery() {
+    let mock = Arc::new(MockController {
+        snapshot: parking_lot::Mutex::new(make_active_snapshot()),
+        continuation_count: std::sync::atomic::AtomicU64::new(0),
+        recovery_acknowledged: std::sync::atomic::AtomicU64::new(0),
+    });
+    let mw = GoalMiddleware::new(mock.clone(), None);
+    let mut state = AgentState::new("/tmp");
+
+    Middleware::after_agent(&mw, &mut state, &AgentOutput::new("恢复轮次完成", 1))
+        .await
+        .unwrap();
+
+    assert_eq!(
+        mock.recovery_acknowledged
+            .load(std::sync::atomic::Ordering::Relaxed),
+        1,
+        "成功运行的 active goal turn 必须确认恢复，停止周期重试"
+    );
+}
+
+#[tokio::test]
+async fn test_after_agent_blocked_goal_does_not_acknowledge_recovery() {
+    let mut blocked = make_active_snapshot();
+    blocked.status = Some(GoalStatus::Blocked);
+    blocked.blocked_reason = Some("network outage".to_string());
+    let mock = Arc::new(MockController {
+        snapshot: parking_lot::Mutex::new(blocked),
+        continuation_count: std::sync::atomic::AtomicU64::new(0),
+        recovery_acknowledged: std::sync::atomic::AtomicU64::new(0),
+    });
+    let mw = GoalMiddleware::new(mock.clone(), None);
+    let mut state = AgentState::new("/tmp");
+
+    Middleware::after_agent(&mw, &mut state, &AgentOutput::new("阻塞回复", 1))
+        .await
+        .unwrap();
+
+    assert_eq!(
+        mock.recovery_acknowledged
+            .load(std::sync::atomic::Ordering::Relaxed),
+        0,
+        "blocked 状态的 turn 不是恢复确认"
     );
 }

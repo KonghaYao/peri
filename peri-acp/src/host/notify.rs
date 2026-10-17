@@ -58,6 +58,8 @@ pub(crate) fn handle_notification(
                 state.continuation_epoch += 1;
                 if let Some(runtime) = cfg.session_manager.get_session(session_id) {
                     runtime.activation.suppress();
+                    // 显式用户取消终止当前 blocked 周期的自动恢复；新 prompt 不取消。
+                    runtime.goal_state.cancel_recovery();
                 }
                 state.continuation_mq_steering_pending = false;
                 let Some(token) = state.cancel_token.as_ref() else {

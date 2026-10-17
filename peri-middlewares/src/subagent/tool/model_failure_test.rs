@@ -292,11 +292,11 @@ async fn run_sync_fixture(fixture: FailureFixture, status: Option<u16>) -> SyncF
     ));
     // HTTP 400 不可重试：单次请求即失败。其余场景走满 `RetryConfig::max_attempts`
     // ——含「可见增量后中断」：该路径不再整轮作废，而是保留部分输出续跑，
-    // 1 次初始请求 + 5 次续跑 = 6 次后耗尽。
+    // 1 次初始请求 + 9 次续跑 = 10 次后耗尽。
     let expected_requests = if status.is_some_and(|status| status == 400) {
         1
     } else {
-        6
+        10
     };
     assert_eq!(provider.request_count(), expected_requests);
     let tool_message = {
@@ -471,7 +471,7 @@ async fn sync_http_429_reaches_parent_canonical_result_with_safe_identity() {
     );
     assert_eq!(
         fixture.tool_message["subagent_failure"]["diagnostic"]["retry_attempts"],
-        6
+        10
     );
 }
 
@@ -568,7 +568,7 @@ async fn background_http_429_consumes_typed_result_and_safe_notification() {
         failure.diagnostic().expect("model diagnostic").request_id(),
         Some("req-429")
     );
-    assert_eq!(provider.request_count(), 6);
+    assert_eq!(provider.request_count(), 10);
     let encoded_result = serde_json::to_vec(&result).expect("background result JSON");
     let decoded_result: BackgroundTaskResult =
         serde_json::from_slice(&encoded_result).expect("background result roundtrip");

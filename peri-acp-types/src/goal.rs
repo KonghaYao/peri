@@ -115,6 +115,21 @@ impl ThreadGoal {
             .filter(|&b| b > 0)
             .map(|b| self.accounting.tokens_used as f32 / b as f32)
     }
+
+    /// 为一次系统恢复尝试重新打开 blocked goal。
+    ///
+    /// `Blocked` 对公开状态机仍是终态（[`GoalStatus::can_transition_to`] 不变）；
+    /// 只有会话级恢复调度器可以调用本方法，给 agent 一次处理瞬时阻断的机会。
+    /// 非 `Blocked` 状态返回 false。
+    pub fn reopen_for_recovery(&mut self, at: SystemTime) -> bool {
+        if self.status != GoalStatus::Blocked {
+            return false;
+        }
+        self.status = GoalStatus::Active;
+        self.blocked_reason = None;
+        self.updated_at = at.into();
+        true
+    }
 }
 
 // ─── store ─────────────────────────────────────────────────────────────────────
@@ -200,6 +215,17 @@ pub trait GoalController: Send + Sync {
     async fn increment_continuation(&self) -> Result<(), String> {
         Ok(())
     }
+
+    /// 一次恢复轮次已成功运行，停止周期重试。
+    ///
+    /// 默认 no-op 保持第三方/测试控制器兼容。
+    async fn acknowledge_recovery(&self) {}
+
+    /// 一次可恢复的终态错误结束了当前 turn，但 goal 仍为 Active。
+    ///
+    /// `reason` 是稳定的短标签（如 `model_error` / `compact_failed`），
+    /// 调度器据此安排下一轮恢复尝试。默认 no-op。
+    async fn recover_after_error(&self, _reason: &str) {}
 
     /// 只读快照（get action + after_agent 判断用）
     fn snapshot(&self) -> GoalViewSnapshot;

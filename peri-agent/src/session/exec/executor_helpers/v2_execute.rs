@@ -405,6 +405,8 @@ pub async fn build_and_execute_agent_v2(req: V2ExecuteRequest) -> ExecOutcome {
     // Phase 7: 运行 v2 ReAct 循环
     // langfuse v2: capture turn_id before move, emit TurnStarted
     let loop_turn_id = v2_out.context.turn_id().to_string();
+    let goal_controller = v2_out.context.goal_controller.clone();
+    let loop_turn = Arc::clone(&v2_out.context.session.turn);
     {
         // TurnStarted 是事件流的一部分，发射点统一经 EventPublisher
         // （v1 直发路径的身份：turn_id 取自 v2 循环，agent_id 为空降级）。
@@ -424,6 +426,18 @@ pub async fn build_and_execute_agent_v2(req: V2ExecuteRequest) -> ExecOutcome {
         );
     }
     let loop_result = run_react_loop(v2_out.context, DEFAULT_AGENT_MAX_ITERATIONS).await;
+
+    // 终止错误也要让 active goal 有机会恢复：模型/流/compact/工具等失败结束
+    // 当前 turn 后，GoalState 按恢复间隔重新投递 Required 消息；用户取消、
+    // 预算耗尽与确定性配置错误由 `goal_recovery_reason` 排除。
+    if let LoopResult::Error(error) = &loop_result {
+        crate::goal::schedule_goal_recovery_after_error(
+            goal_controller.as_ref(),
+            error,
+            loop_turn.is_cancelled(),
+        )
+        .await;
+    }
 
     if matches!(&loop_result, LoopResult::Completed) {
         let queue = v2_out.session.queue();

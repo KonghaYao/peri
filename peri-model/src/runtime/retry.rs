@@ -96,7 +96,7 @@ pub struct RetryConfig {
 impl Default for RetryConfig {
     fn default() -> Self {
         Self {
-            max_attempts: 6,
+            max_attempts: 10,
             base_delay: Duration::from_millis(500),
             max_delay: Duration::from_secs(32),
             jitter: true,
