@@ -25,10 +25,12 @@
 
 pub mod controller;
 pub mod model;
+pub mod recovery;
 pub mod store;
 pub mod view;
 
 pub use controller::{is_active as is_goal_active, GoalController};
 pub use model::{GoalAccounting, GoalStatus, ThreadGoal};
+pub use recovery::{goal_recovery_reason, schedule_goal_recovery_after_error};
 pub use store::{GoalStore, GoalStoreError, InMemoryGoalStore};
 pub use view::{GoalStateView, GoalViewSnapshot};

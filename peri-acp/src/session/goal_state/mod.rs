@@ -5,12 +5,25 @@
 //!
 //! 并发模型：read-and-reset + epoch（本 Task 先实现基础读写，account_progress 的
 //! read-and-reset 在 Task 6 实现）。
+//!
+//! Blocked goal 的周期恢复见 [`recovery`]：会话装配时注入 mailbox 与间隔，
+//! `block` 后按间隔重开 goal 并投递 Required Defer。
+
+mod recovery;
 
 use std::sync::Arc;
+use std::time::Duration;
 
 use async_trait::async_trait;
 use parking_lot::RwLock;
 use peri_acp_types::goal::{GoalStatus, GoalStore, ThreadGoal};
+use peri_acp_types::session::MessageQueue;
+
+use recovery::{RecoveryControl, RecoverySchedule, RecoveryTrigger};
+
+/// Blocked goal 的默认恢复间隔；装配方经 [`GoalState::with_recovery`] 注入，
+/// 测试可缩短。
+pub(crate) const DEFAULT_GOAL_RECOVERY_INTERVAL: Duration = Duration::from_secs(3 * 60);
 
 /// Goal 快照（只读视图，供 middleware / TUI 读取）
 #[derive(Debug, Clone, Default)]
@@ -54,16 +67,45 @@ struct GoalStateInner {
     pending_token_delta: u64,
     /// 待 flush 的 time 增量（秒）
     pending_time_delta_seconds: u64,
+    /// blocked goal 周期恢复控制（队列与间隔在 GoalState 上）。
+    recovery: RecoveryControl,
 }
 
 /// 并发安全的状态句柄
 #[derive(Clone)]
 pub struct GoalState {
     inner: Arc<RwLock<GoalStateInner>>,
+    /// None = 本实例不启用 blocked 自动恢复（单测/无宿主场景）。
+    recovery: Option<RecoverySchedule>,
 }
 
 impl GoalState {
     pub fn new(store: Arc<dyn GoalStore>, thread_id: String) -> Self {
+        Self::with_schedule(store, thread_id, None)
+    }
+
+    /// 会话装配入口：为 blocked goal 启用周期恢复。
+    ///
+    /// `interval` 为 0 时等同于未启用。恢复提醒投递到 `queue`，经既有
+    /// activation / continuation 通路唤醒 agent。
+    pub(crate) fn with_recovery(
+        store: Arc<dyn GoalStore>,
+        thread_id: String,
+        queue: MessageQueue,
+        interval: Duration,
+    ) -> Self {
+        Self::with_schedule(
+            store,
+            thread_id,
+            Some(RecoverySchedule::new(queue, interval)),
+        )
+    }
+
+    fn with_schedule(
+        store: Arc<dyn GoalStore>,
+        thread_id: String,
+        recovery: Option<RecoverySchedule>,
+    ) -> Self {
         Self {
             inner: Arc::new(RwLock::new(GoalStateInner {
                 goal: None,
@@ -73,7 +115,9 @@ impl GoalState {
                 pending_user_message: None,
                 pending_token_delta: 0,
                 pending_time_delta_seconds: 0,
+                recovery: RecoveryControl::default(),
             })),
+            recovery,
         }
     }
 
@@ -91,6 +135,9 @@ impl GoalState {
             guard.objective_just_updated = true;
             (guard.thread_id.clone(), guard.store.clone())
         };
+
+        // 新 goal 取代旧 goal：旧 blocked 周期的恢复调度立即失效。
+        self.cancel_recovery();
 
         // 短锁：lock 在块作用域结束即释放，store.save 是长操作但不持锁
         if let Err(e) = store.save(&thread_id, new_goal).await {
@@ -110,6 +157,9 @@ impl GoalState {
             (guard.thread_id.clone(), guard.store.clone())
         };
 
+        // goal 已清空：停止未完成的 blocked 恢复调度。
+        self.cancel_recovery();
+
         if let Err(e) = store.delete(&thread_id).await {
             tracing::warn!(error = %e, "GoalState: store delete 失败");
             return Err(e);
@@ -128,7 +178,7 @@ impl GoalState {
         target: GoalStatus,
         reason: String,
     ) -> Result<(), String> {
-        let (thread_id, store, goal_clone) = {
+        let (thread_id, store, goal_clone, blocked) = {
             let mut guard = self.inner.write();
             let goal = guard
                 .goal
@@ -153,15 +203,30 @@ impl GoalState {
                 goal.blocked_reason = Some(reason.clone());
             }
             let goal_clone = goal.clone();
+            let blocked = matches!(target, GoalStatus::Blocked)
+                .then(|| (goal.goal_id.clone(), reason.clone()));
             // 终态清零 pending_user_message（终态不需要用户消息）
             if target.is_terminal() {
                 guard.pending_user_message = None;
             }
-            (guard.thread_id.clone(), guard.store.clone(), goal_clone)
+            (
+                guard.thread_id.clone(),
+                guard.store.clone(),
+                goal_clone,
+                blocked,
+            )
         };
 
         // best-effort store 写入（短锁已释放）
         let _ = store.save(&thread_id, goal_clone).await;
+
+        match blocked {
+            Some((goal_id, reason)) => {
+                self.arm_recovery(&goal_id, RecoveryTrigger::Blocked { reason })
+            }
+            None if target == GoalStatus::Complete => self.cancel_recovery(),
+            None => {}
+        }
         Ok(())
     }
 
@@ -313,6 +378,14 @@ impl peri_acp_types::goal::GoalController for GoalState {
             tracing::warn!(error = %e, "GoalState: continuation store save 失败，保留内存计数");
         }
         Ok(())
+    }
+
+    async fn acknowledge_recovery(&self) {
+        self.mark_recovery_acknowledged();
+    }
+
+    async fn recover_after_error(&self, reason: &str) {
+        self.arm_error_recovery(reason);
     }
 
     fn snapshot(&self) -> peri_acp_types::goal::GoalViewSnapshot {

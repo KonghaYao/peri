@@ -334,6 +334,8 @@ impl SessionManager {
             peri_acp_types::session::cancel_cascade_agents(session.active_agents.values());
             session.cancel_token.cancel();
             session.task_manager.cancel_all();
+            // blocked goal 的周期恢复不能越过会话关闭继续唤醒。
+            session.goal_state.cancel_recovery();
         }
     }
 
@@ -384,6 +386,8 @@ impl SessionManager {
             // CancellationToken has no reset() — once cancelled it stays cancelled.
             session.cancel_token.cancel();
             session.cancel_token = CancellationToken::new();
+            // 用户取消同样终止当前恢复周期，避免取消后 3 分钟自动唤醒。
+            session.goal_state.cancel_recovery();
         }
     }
 

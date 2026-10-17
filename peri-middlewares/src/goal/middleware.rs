@@ -88,13 +88,21 @@ impl Middleware for GoalMiddleware {
         state: &mut dyn hook_state::AfterAgentState,
         output: &peri_agent::agent::react::AgentOutput,
     ) -> AgentResult<peri_agent::agent::react::AgentOutput> {
+        let snap = self.controller.snapshot();
+
+        // 一次成功运行的 agent turn 证明恢复唤醒已抵达模型：停止 blocked
+        // goal 的周期重试，后续由普通 goal steering 接管。即使前置中间件已
+        // 设置 block_continue 或后台任务暂停注入，也不影响该确认。
+        if peri_agent::goal::is_goal_active(&snap) {
+            self.controller.acknowledge_recovery().await;
+        }
+
         // 1. 前面已有 block_continue（如 HookMiddleware stop block）→ 不干预
         if output.block_continue.is_some() {
             return Ok(output.clone());
         }
 
         // 2. 检查 goal 状态
-        let snap = self.controller.snapshot();
         if !peri_agent::goal::is_goal_active(&snap) {
             // 无 goal 或终态 → 重置计数器 + 放行
             self.pending_rounds.store(0, Ordering::Relaxed);

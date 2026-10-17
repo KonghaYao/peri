@@ -75,6 +75,9 @@ impl SessionManager {
         task_manager: Option<Arc<dyn peri_acp_types::tasks::TaskManager>>,
     ) -> AcpSession {
         let task_manager = task_manager.unwrap_or_else(|| self.new_session_task_manager());
+        // Session-level queue is shared by the executor and the blocked-goal
+        // recovery scheduler; build it before GoalState so both hold the same handle.
+        let v2_message_queue = peri_acp_types::session::MessageQueue::new();
 
         AcpSession {
             session_id: session_id.to_string(),
@@ -94,11 +97,13 @@ impl SessionManager {
             model_alias: self.inner.peri_config.config.active_alias.clone(),
             permission_mode: SharedPermissionMode::new(PermissionMode::AutoMode),
             active_agents: HashMap::new(),
-            goal_state: crate::session::goal_state::GoalState::new(
+            goal_state: crate::session::goal_state::GoalState::with_recovery(
                 Arc::new(peri_acp_types::goal::InMemoryGoalStore::new()),
                 session_id.to_string(),
+                v2_message_queue.clone(),
+                crate::session::goal_state::DEFAULT_GOAL_RECOVERY_INTERVAL,
             ),
-            v2_message_queue: peri_acp_types::session::MessageQueue::new(),
+            v2_message_queue,
             activation: Arc::new(super::SessionActivation::default()),
             session_inbox: None,
             user_input_mailbox: None,
