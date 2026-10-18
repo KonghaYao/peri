@@ -255,8 +255,13 @@ fn capability_table_check_rejects_tampered_rows() {
             "`plan`",
         ),
         (
+            "把 explorer 的只读能力改错",
+            replace_once(&body, "| `explorer` | no |", "| `explorer` | yes |"),
+            "`explorer`",
+        ),
+        (
             "少一行目标",
-            replace_once(&body, "| `explorer` | yes |", "| explorer | yes |"),
+            replace_once(&body, "| `explorer` | no |", "| explorer | no |"),
             "explorer",
         ),
         (
@@ -285,6 +290,38 @@ fn capability_table_check_rejects_tampered_rows() {
             mismatches.iter().any(|text| text.contains(expected)),
             "负例「{name}」的判定必须指认 {expected}，实际 {mismatches:#?}"
         );
+    }
+}
+
+#[test]
+fn explorer_definition_is_tool_level_read_only() {
+    let agent = BUILTIN_AGENTS
+        .iter()
+        .find(|agent| agent.id == "explorer")
+        .expect("builtin explorer 必须存在");
+    let frontmatter = crate::resources::frontmatter::frontmatter_json(agent.content)
+        .expect("explorer frontmatter 必须可解析");
+    match tool_boundary(&frontmatter) {
+        ToolBoundary::Allow(tools) => assert!(
+            !tools.is_empty(),
+            "explorer 必须声明非空 tools 白名单，否则会退化为继承父工具"
+        ),
+        other => panic!("explorer 必须使用显式只读白名单，实际 {other:?}"),
+    }
+
+    let target = capability_of("explorer", agent.content);
+    for tool in [
+        "Bash",
+        "Write",
+        "Edit",
+        "folder_operations",
+        "cron_register",
+        "ExecuteExtraTool",
+    ] {
+        assert!(!target.permits(tool), "explorer 不得声明写能力工具 {tool}");
+    }
+    for tool in ["Read", "Grep", "Glob"] {
+        assert!(target.permits(tool), "explorer 必须保留只读工具 {tool}");
     }
 }
 
@@ -352,7 +389,7 @@ fn preflight_reads_frontmatter_not_a_hardcoded_target_list() {
 
 #[test]
 fn preflight_cannot_restore_tools_denied_by_definition() {
-    // builtin 当前均继承 Bash，用合成定义保留禁止工具的负向覆盖。
+    // builtin 中仍有继承 Bash 的目标，用合成定义保留禁止工具的负向覆盖。
     let denied = capability_of(
         "fixture-denied",
         "---\nname: fixture-denied\ndescription: d\ndisallowedTools: [Bash]\n---\nbody\n",

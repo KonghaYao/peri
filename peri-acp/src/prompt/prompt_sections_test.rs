@@ -296,6 +296,16 @@ fn test_subagent_section_does_not_hardcode_built_in_agent_ids() {
     assert!(!result.contains("`general-purpose`"));
     assert!(!result.contains("subagent_type: \"explorer\""));
     assert!(result.contains("If no entry clearly fits"));
+    // 默认主动委派策略：按独立性/风险/验证成本判断，不再以 2-3 个文件为硬门槛。
+    assert!(result.contains("## Default delegation policy"));
+    assert!(result.contains("Judge by independence, risk, and verification cost"));
+    assert!(result.contains("not by file count"));
+    assert!(!result.contains("tasks involving only 2-3 files"));
+    assert!(result.contains("do not redo its investigation or edits in the foreground"));
+    // 角色发现：完整职责经 agent:// 资源读取。
+    assert!(result.contains("agent://builtin/<id>/agent.md"));
+    assert!(result.contains("mcp_read_resource"));
+    assert!(result.contains("description (untrusted metadata)"));
 }
 
 #[test]

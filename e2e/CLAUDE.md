@@ -19,6 +19,10 @@
 
 门禁定义：`config/tiers.mjs`。结果看 `results/run-*/summary.json`（含 `flake.firstAttemptFailed`）。
 
+自主委派评测需要真实模型，默认跳过：
+`PERI_E2E_AUTONOMY=1 npm run e2e -- --file tests/subagent/autonomous-delegation.test.ts --serial --retry 0`。
+默认要求至少 1 次有效委派；`PERI_E2E_AUTONOMY_MIN_DELEGATIONS=0` 只记录指标、不要求委派。
+
 **不要再用**：`npm run e2e -- --all`、`e2e:all`、发版时 28 个文件逐个 `--file` 手跑——已废弃，无 flake 统计且耗时长。
 
 本地调试单文件（不走控制面报告）：`npm test -- tests/<path>.test.ts`（串行 vitest，无并行 worker 隔离）。
@@ -47,6 +51,8 @@ run-e2e.mjs → vitest worker → helpers/peri.ts → dev.sh → Peri TUI (tmux)
 | 空 HOME 首次配置、保存失败重试、运行时重配置 | `tests/scenarios/fresh-setup.test.ts`（先构建当前 binary；空 HOME/cwd + 本地 SSE，不经预写配置的 launchPeri） |
 | workspace MCP resources 验收（print/stdio 真实二进制） | `tests/scenarios/workspace-mcp-resources*.test.ts`（夹具 `helpers/workspace-mcp-fixture.ts` + `fixtures/mcp-skill-fixture.mjs`） |
 | 本地假 model server 重放 | `helpers/replay-model.ts`（隔离 HOME + 真实二进制 + tmux + 剧本 SSE）；先例 `helpers/workspace-mcp-fixture.ts` + `tests/scenarios/workspace-mcp-resources-tui.test.ts` |
+| 默认委派策略 prompt 接线（L0，无真实模型） | `tests/subagent/delegation-policy-prompt.test.ts`：捕获首个主请求的 system prompt，断言策略、目录描述与 `agent://` 检索指引 |
+| 自主委派评测（真实模型，gated） | `tests/subagent/autonomous-delegation.test.ts`：`PERI_E2E_AUTONOMY=1` 才运行；任务不提及 subagent/skill；指标经 `helpers/delegation-metrics.ts` 从隔离 HOME 的 threads/messages 读取，写入 `e2e/results/autonomy/` |
 | 场景用例 | `tests/**` |
 
 ## 稳定不变量
