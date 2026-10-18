@@ -83,12 +83,13 @@ async fn off_has_zero_builtin_injection() {
             "off 时不得有任何 tick 驱动者（已到期任务在 2.4s 内零触发）: {observed:?}"
         );
         // ④ 模型面：四个实例的 effective name / 裸名都不得出现。
-        let faces = probe_tool_faces(
-            "off（零注入）",
-            fixture.session_context("mcp-v4-wave2-off").await,
-            "web fetch artifact cron",
-        )
-        .await;
+        let ctx = fixture.session_context("mcp-v4-wave2-off").await;
+        ctx.shared_tools.write().insert(
+            "FixtureDeferredTool".to_string(),
+            Arc::new(FixtureDeferredTool),
+        );
+        let faces =
+            probe_tool_faces("off（零注入）", ctx, "web fetch artifact cron fixtureprobe").await;
         for (instance, _) in WAVE2_INSTANCES {
             for name in declared_effective_names(instance) {
                 assert!(
@@ -131,8 +132,11 @@ async fn off_has_zero_builtin_injection() {
             );
         }
         assert!(
-            !faces.searched.is_empty(),
-            "正控制：搜索/执行面必须仍可用（off 只关 builtin 注入，不移除搜索面）: {:?}",
+            faces
+                .searched
+                .iter()
+                .any(|tool| tool == "FixtureDeferredTool"),
+            "正控制：搜索/执行面必须命中夹具注入的非 builtin deferred 工具: {:?}",
             faces.searched
         );
         println!(
