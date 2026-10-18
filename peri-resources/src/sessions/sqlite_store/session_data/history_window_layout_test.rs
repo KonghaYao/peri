@@ -463,6 +463,54 @@ async fn inherited_page_candidates_use_layout_and_stay_bounded() {
     );
 }
 
+/// bounds 语句是窗口打开与 Full compact 的公共入口，不得物化冻结前缀。
+///
+/// 旧语句里的 `t.inherited_context IS NULL OR t.inherited_context = ''` 会让 SQLite 为
+/// 16 MiB 列额外分配约 16 MiB（即使结果列根本未被使用）。这里把 `history_window_bounds`
+/// 整体放进测量区间：边界 SQL 与增量 inherited 事实读取都必须与正文大小无关。
+///
+/// ```text
+/// ./scripts/cargo-rmcp-patched.sh test --locked -p peri-resources --lib -- \
+///     bounds_query_does_not_materialize_inherited_context --ignored --nocapture --test-threads=1
+/// ```
+#[tokio::test]
+#[ignore = "16 MiB 夹具与分配测量；显式运行，见用例文档"]
+async fn bounds_query_does_not_materialize_inherited_context() {
+    let large = PersistedPayload::Message(BaseMessage::human("F".repeat(LARGE_BYTES)));
+    let (_store, data, _directory, id) = session_with_inherited(&[large], "parent").await;
+
+    let before = sqlite_peak_reset();
+    let bounds = data.history_window_bounds(&id).await.unwrap();
+    let incremental_extra = sqlite_peak_extra(before);
+
+    assert!(
+        bounds.own_latest.is_none(),
+        "fixture stores the payload only in the inherited context"
+    );
+    assert!(
+        bounds.inherited.snapshot().is_some(),
+        "incremental facts path must still report the frozen prefix"
+    );
+    println!(
+        "bounds incremental_sqlite_extra={} MiB",
+        incremental_extra as f64 / (1024.0 * 1024.0),
+    );
+    assert!(
+        incremental_extra < 8 * 1024 * 1024,
+        "bounds query must not materialize inherited_context, got {incremental_extra} bytes"
+    );
+}
+
+/// 静态守卫：bounds SQL 不得再引用 `inherited_context` 列。
+#[test]
+fn bounds_sql_does_not_reference_inherited_context() {
+    assert!(
+        !super::history::HISTORY_WINDOW_BOUNDS_SQL.contains("inherited_context"),
+        "bounds SQL must not touch the inherited_context column: {}",
+        super::history::HISTORY_WINDOW_BOUNDS_SQL
+    );
+}
+
 /// inherited 布局分页行为：锚点、方向、include_anchor 与游标语义。
 #[tokio::test]
 async fn inherited_page_layout_matches_anchor_and_direction() {
