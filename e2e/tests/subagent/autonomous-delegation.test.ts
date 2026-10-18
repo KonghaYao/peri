@@ -20,8 +20,9 @@
  */
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { execFile } from "node:child_process";
-import { cp, mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
+import { cp, mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { promisify } from "node:util";
+import { pathToFileURL } from "node:url";
 import os from "node:os";
 import path from "node:path";
 import { buildPeriForE2e } from "../../helpers/build.js";
@@ -64,7 +65,15 @@ async function runCommand(
 
 async function acceptance(work: string): Promise<{ ok: boolean; output: string }> {
   const tests = await runCommand(work, ["--test"]);
-  const hidden = await runCommand(work, ["acceptance.mjs"]);
+  // hidden acceptance 只从夹具读取，工作区不保留副本；把相对 packages 导入
+  // 改写为 work 下的绝对 file URL，确保校验的是模型实际修改的文件。
+  const source = await readFile(path.join(FIXTURE, "acceptance.mjs"), "utf8");
+  const packagesUrl = pathToFileURL(path.join(work, "packages") + path.sep).href;
+  const hidden = await runCommand(work, [
+    "--input-type=module",
+    "-e",
+    source.replaceAll('"./packages/', `"${packagesUrl}`),
+  ]);
   return {
     ok: tests.ok && hidden.ok && hidden.output.includes("AUTONOMY_ACCEPTANCE_OK"),
     output: `--- node --test ---\n${tests.output}\n--- acceptance.mjs ---\n${hidden.output}`,
@@ -91,7 +100,10 @@ describeAutonomy("subagent: autonomous delegation (real model, gated)", () => {
     { timeout: 900_000 },
     async () => {
       work = await mkdtemp(path.join(os.tmpdir(), "peri-autonomy-work-"));
-      await cp(FIXTURE, work, { recursive: true });
+      await cp(FIXTURE, work, {
+        recursive: true,
+        filter: (source) => path.basename(source) !== "acceptance.mjs",
+      });
       home = createE2EModelHome();
       tester = await launchPeri({ cwd: work, env: { HOME: home } });
 
@@ -105,10 +117,14 @@ describeAutonomy("subagent: autonomous delegation (real model, gated)", () => {
           "short summary of the changes.",
       );
 
-      let result = { ok: false, output: "" };
+      let firstPass = { ok: false, output: "" };
+      let passedAt: number | undefined;
       while (Date.now() - startedAt < ACCEPTANCE_TIMEOUT_MS) {
-        result = await acceptance(work);
-        if (result.ok) break;
+        firstPass = await acceptance(work);
+        if (firstPass.ok) {
+          passedAt = Date.now();
+          break;
+        }
         await new Promise((resolve) => setTimeout(resolve, 5_000));
       }
 
@@ -117,12 +133,16 @@ describeAutonomy("subagent: autonomous delegation (real model, gated)", () => {
       } catch (error) {
         console.log(`[autonomy] screen did not stabilize: ${String(error)}`);
       }
-      const durationMs = Date.now() - startedAt;
+
+      // 稳定等待期间可能发生回归：完成后必须再验收一次。
+      const afterStabilization = await acceptance(work);
+      const quality = firstPass.ok && afterStabilization.ok;
+      const durationMs = (passedAt ?? Date.now()) - startedAt;
       const metrics = readDelegationMetrics(home);
       const report = {
         scenario: "autonomous-delegation",
         durationMs,
-        quality: result.ok,
+        quality,
         ...metrics,
       };
 
@@ -134,9 +154,15 @@ describeAutonomy("subagent: autonomous delegation (real model, gated)", () => {
         `${JSON.stringify(report, null, 2)}\n`,
       );
       console.log(`[autonomy] ${JSON.stringify(report)}`);
-      if (!result.ok) console.log(result.output);
+      if (!firstPass.ok) console.log(firstPass.output);
+      if (!afterStabilization.ok) {
+        console.log(`--- post-stabilization regression ---\n${afterStabilization.output}`);
+      }
 
-      expect(result.ok, `验收未通过：\n${result.output}`).toBe(true);
+      expect(
+        quality,
+        `验收未通过：\nfirst pass:\n${firstPass.output}\nafter stabilization:\n${afterStabilization.output}`,
+      ).toBe(true);
       if (MIN_DELEGATIONS > 0) {
         expect(
           metrics.effectiveDelegation,
