@@ -162,13 +162,13 @@ curl -sS -X POST "$PERI_ARTIFACTS_URL/upload" \
 | `File too large` | 超过 10 MB |
 | `Upload failed` | 连不上服务：地址写错、DNS、超时、网络不通 |
 | `HTTP <status>` | 服务返回非 2xx；优先附带 body 中的 `error`，否则附带截断后的 body |
-| `Upload error` | 服务在 JSON 里返回了 `error`（包括 HTTP 2xx 的情况） |
+| `Upload error` | HTTP 2xx 但 JSON 里返回了 `error`（非 2xx 走 `HTTP <status>`） |
 | `Failed to parse response` | 响应不是合法 JSON（会附带截断后的 body 片段） |
 | `Failed to read response` | 响应体读取失败（例如被压缩编码噎住） |
 | `Artifact response has no usable URL` | 2xx 但 `url` 缺失或为空白 |
 | `Artifact response URL is invalid` | `url` 不是绝对 `http` / `https` 地址 |
 
-错误文本里的 body 最多保留 4 KiB，超出部分会被截断，避免超大响应淹没工具输出。
+错误文本（响应 body 或 2xx 响应的 `error` 字段）最多保留 4 KiB，超出部分会被截断，避免超大响应淹没工具输出。
 
 ## 6. 排查
 

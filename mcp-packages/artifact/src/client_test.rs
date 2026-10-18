@@ -139,6 +139,16 @@ fn success_status_with_error_field_is_a_failure() {
 }
 
 #[test]
+fn server_error_field_is_capped_to_keep_model_output_bounded() {
+    let body = serde_json::json!({ "error": "y".repeat(MAX_ERROR_BODY_BYTES * 4) }).to_string();
+    let error =
+        ArtifactClient::interpret_upload_response(reqwest::StatusCode::OK, &body).unwrap_err();
+    let message = error.to_string();
+    assert!(message.len() < MAX_ERROR_BODY_BYTES + 200, "{message}");
+    assert!(message.contains("truncated"), "{message}");
+}
+
+#[test]
 fn malformed_json_is_a_parse_error() {
     let error =
         ArtifactClient::interpret_upload_response(reqwest::StatusCode::OK, "<html>not json</html>")

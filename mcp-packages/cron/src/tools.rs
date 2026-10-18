@@ -102,7 +102,7 @@ impl BaseTool for CronListTool {
     }
 
     fn description(&self) -> &str {
-        "List all registered cron/scheduled tasks with their status, next fire time (UTC), and prompt. The first token of each line is the full task ID accepted by cron_remove."
+        "List all registered cron/scheduled tasks with their status, next fire time (UTC), and prompt. Each line starts with `- ` followed by the full task ID accepted by cron_remove."
     }
 
     fn parameters(&self) -> Value {

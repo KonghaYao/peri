@@ -135,7 +135,9 @@ impl ArtifactClient {
             })?;
 
         if let Some(error) = parsed.error {
-            return Err(ArtifactError::Server { error });
+            return Err(ArtifactError::Server {
+                error: truncate_error_body(error.trim()),
+            });
         }
 
         let url = parsed.url.trim();
