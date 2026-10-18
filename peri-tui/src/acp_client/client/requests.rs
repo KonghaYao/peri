@@ -7,6 +7,9 @@ use serde_json::{Value, json};
 
 use super::AcpTuiClient;
 
+/// 配置类 RPC 的本地回执上限；持锁等待无界会连带阻塞后续输入提交。
+const CONFIG_REQUEST_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
+
 #[cfg(test)]
 #[path = "cancel_test.rs"]
 mod cancel_tests;
@@ -204,10 +207,13 @@ impl AcpTuiClient {
             .current_session_id()
             .ok_or_else(|| AcpError::new(-32603, "no active session"))?;
         let params = json!({ "sessionId": session_id, "configId": "model", "value": alias });
-        let _ = self
-            .transport
-            .send_request("session/set_config_option", params)
-            .await?;
+        peri_time::timeout(
+            CONFIG_REQUEST_TIMEOUT,
+            self.transport
+                .send_request("session/set_config_option", params),
+        )
+        .await
+        .map_err(|_| AcpError::new(-32603, "set model timed out"))??;
         Ok(())
     }
 
@@ -225,10 +231,12 @@ impl AcpTuiClient {
             mode => mode,
         };
         let params = json!({ "sessionId": session_id, "modeId": wire_mode });
-        let _ = self
-            .transport
-            .send_request("session/set_mode", params)
-            .await?;
+        peri_time::timeout(
+            CONFIG_REQUEST_TIMEOUT,
+            self.transport.send_request("session/set_mode", params),
+        )
+        .await
+        .map_err(|_| AcpError::new(-32603, "set mode timed out"))??;
         if self.projection_mode == super::ClientProjectionMode::Interactive {
             crate::kit::atoms::SERVICE_SNAPSHOT
                 .state()

@@ -32,6 +32,7 @@ fn make_steer_bridge() -> (BridgeState, RestoreSteers) {
                 original_draft: "等待".into(),
                 state: UserInputState::Queued,
             }],
+            terminal_items: vec![],
         },
         epoch,
         true,

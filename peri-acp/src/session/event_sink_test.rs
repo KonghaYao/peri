@@ -80,6 +80,7 @@ async fn test_user_input_events_use_queue_capability_without_duplicate_chat_proj
             original_draft: "用户原文".into(),
             state: peri_acp_types::session::UserInputState::Queued,
         }],
+        terminal_items: vec![],
     };
     sink.push_event("s1", &ExecutorEvent::UserInputQueueChanged(snapshot), 0)
         .await;

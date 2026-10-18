@@ -438,6 +438,7 @@ fn test_user_input_notifier_preserves_queue_snapshot_revision() {
         revision: 9,
         active_request_id: Some("run".into()),
         items: vec![],
+        terminal_items: vec![],
     };
     let event = convert_agent_event(AcpEvent::UserInputQueueChanged {
         snapshot: snapshot.clone(),

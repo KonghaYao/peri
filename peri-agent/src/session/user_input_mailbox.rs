@@ -14,12 +14,15 @@ use peri_acp_types::{
     session::{
         DispatchUserInputsRequest, EnqueueUserInputRequest, MessageSource, QueuedMessage,
         SessionInbox, TakeBackUserInputRequest, TurnId, UserInput, UserInputItemResult,
-        UserInputQueueItem, UserInputQueueReceipt, UserInputQueueSnapshot, UserInputState,
+        UserInputQueueItem, UserInputQueueReceipt, UserInputQueueSnapshot,
+        UserInputQueueTerminalItem, UserInputState,
     },
 };
 use tokio_util::sync::CancellationToken;
 
 const PENDING_CAPACITY: usize = 32;
+/// 终态只在客户端补确认所需的时间窗内保留；超出后按接受顺序淘汰最旧记录。
+const TERMINAL_CAPACITY: usize = 128;
 
 /// 预留的单次执行身份；失效 ticket 不能启动或结算后来的一次执行。
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -205,9 +208,9 @@ impl UserInputMailbox {
             if state.active.is_none() || state.paused {
                 state.paused = false;
                 promote_next(&mut state);
-            } else {
-                self.wake_suspended_locked(&mut state);
             }
+            // 已 ready 的输入不再走 promotion；这里必须允许直接交接给当前挂起执行。
+            self.wake_suspended_locked(&mut state);
         }
         let results = results_for(&state, std::slice::from_ref(&request.input_id));
         let receipt = self.remember(&mut state, &request.command_id, fingerprint, results, None);
@@ -290,6 +293,7 @@ impl UserInputMailbox {
             });
         if taken_back.is_some() {
             state.revision += 1;
+            prune_terminal_records(&mut state);
         }
         let results = results_for(&state, std::slice::from_ref(&request.input_id));
         let receipt = self.remember(
@@ -552,8 +556,12 @@ impl UserInputMailbox {
                         .as_ref()
                         .is_some_and(|cancel| !cancel.is_cancelled())
             })
-            || !promote_next(state)
         {
+            return false;
+        }
+        // ready 可能在 enqueue 与 idle 之间已经完成 promotion；不能因未再次
+        // promote 而跳过交接，否则输入会停在 ready 且当前执行收不到。
+        if state.ready.is_empty() && !promote_next(state) {
             return false;
         }
         // 交接即占用本次 idle，后续 enqueue 不能在 Receive 开始前追加第二条。
@@ -613,6 +621,7 @@ impl UserInputMailbox {
             return delivered;
         }
         state.revision += 1;
+        prune_terminal_records(&mut state);
         let snapshot = self.snapshot_locked(&state);
         drop(state);
         self.publish(snapshot);
@@ -717,6 +726,16 @@ impl UserInputMailbox {
                     state: record.state,
                 })
                 .collect(),
+            // 终态不随 pending 项消失：客户端据此补齐丢失的交付确认。
+            terminal_items: state
+                .records
+                .iter()
+                .filter(|record| is_terminal(record.state))
+                .map(|record| UserInputQueueTerminalItem {
+                    input_id: record.input.input_id.clone(),
+                    state: record.state,
+                })
+                .collect(),
         }
     }
 
@@ -790,6 +809,36 @@ fn is_pending(state: UserInputState) -> bool {
         state,
         UserInputState::Queued | UserInputState::Dispatching | UserInputState::Claimed
     )
+}
+
+fn is_terminal(state: UserInputState) -> bool {
+    matches!(state, UserInputState::Delivered | UserInputState::Withdrawn)
+}
+
+/// 保留有限的终态窗口供客户端对账；淘汰最旧记录并同步清理通知去重集合。
+fn prune_terminal_records(state: &mut MailboxState) {
+    let terminal_count = state
+        .records
+        .iter()
+        .filter(|record| is_terminal(record.state))
+        .count();
+    let mut excess = terminal_count.saturating_sub(TERMINAL_CAPACITY);
+    if excess == 0 {
+        return;
+    }
+    let mut removed: Vec<String> = Vec::new();
+    state.records.retain(|record| {
+        if excess > 0 && is_terminal(record.state) {
+            excess -= 1;
+            removed.push(record.input.input_id.clone());
+            false
+        } else {
+            true
+        }
+    });
+    for input_id in removed {
+        state.delivered_notifications.remove(&input_id);
+    }
 }
 
 fn matches_id(record: &InputRecord, ids: &[MessageId]) -> bool {

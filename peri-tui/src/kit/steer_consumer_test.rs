@@ -48,6 +48,7 @@ async fn test_slow_refresh_does_not_queue_new_enqueue() {
             revision: 1,
             active_request_id: None,
             items: vec![],
+            terminal_items: vec![],
         },
         7,
         true,
@@ -165,6 +166,7 @@ async fn test_steer_uncertain_receipt_retries_identical_command_and_input() {
             revision: 1,
             active_request_id: None,
             items: vec![],
+            terminal_items: vec![],
         },
         7,
         true,
@@ -252,6 +254,7 @@ async fn test_steer_uncertain_receipt_retries_identical_command_and_input() {
                 revision: 1,
                 active_request_id: None,
                 items: vec![],
+                terminal_items: vec![],
             },
             8,
             true,
@@ -470,6 +473,7 @@ async fn test_steer_queued_retry_never_replays_into_a_new_server_generation() {
         revision: 1,
         active_request_id: None,
         items: vec![],
+        terminal_items: vec![],
     };
     let mut projection = SteerState::default();
     projection.reset_session("s", 7);

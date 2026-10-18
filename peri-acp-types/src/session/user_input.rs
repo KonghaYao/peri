@@ -34,6 +34,14 @@ pub struct UserInputQueueItem {
     pub state: UserInputState,
 }
 
+/// 已终结输入的轻量记录；客户端用它补齐丢失的 `UserInputDelivered` 或撤回确认。
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct UserInputQueueTerminalItem {
+    pub input_id: String,
+    pub state: UserInputState,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct UserInputQueueSnapshot {
@@ -45,6 +53,9 @@ pub struct UserInputQueueSnapshot {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub active_request_id: Option<String>,
     pub items: Vec<UserInputQueueItem>,
+    /// 有界保留的终态记录（Delivered/Withdrawn）；用于客户端恢复丢包确认。
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub terminal_items: Vec<UserInputQueueTerminalItem>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

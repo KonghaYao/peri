@@ -1,5 +1,5 @@
 use super::*;
-use peri_acp_types::session::UserInputQueueItem;
+use peri_acp_types::session::{UserInputQueueItem, UserInputQueueTerminalItem};
 
 fn make_input(id: &str) -> UserInput {
     UserInput {
@@ -22,6 +22,7 @@ fn make_snapshot(revision: u64) -> UserInputQueueSnapshot {
             original_draft: input.original_draft,
             state: UserInputState::Queued,
         }],
+        terminal_items: vec![],
     }
 }
 
@@ -541,6 +542,83 @@ fn test_steer_idle_submission_skips_queue_until_delivery() {
     assert!(state.claim_delivery("s", "b"), "确认后仍须生成正式聊天气泡");
     assert!(!state.direct_submitting("s", 1), "送达后立即撤掉反馈");
     assert!(!state.claim_delivery("s", "b"), "重复确认不得重复生成气泡");
+}
+
+/// [回归测试] 交付事件丢失后，终态快照必须清除“提交中”，并保留正文用于补气泡。
+#[test]
+fn test_steer_terminal_delivered_snapshot_recovers_lost_delivery() {
+    let mut state = make_idle_state();
+    let input = make_input("b");
+    state.begin(make_command(SteerCommandKind::Enqueue(input.clone())));
+    assert!(state.direct_submitting("s", 1));
+
+    let mut terminal = make_snapshot(3);
+    terminal.items.clear();
+    terminal.terminal_items = vec![UserInputQueueTerminalItem {
+        input_id: input.input_id.clone(),
+        state: UserInputState::Delivered,
+    }];
+    assert!(state.accept_snapshot(terminal, 1, true));
+
+    assert!(!state.direct_submitting("s", 1), "终态必须撤掉提交中");
+    assert!(state.rows("s").is_empty(), "终态不应继续留在待发送区");
+    let session = state.sessions.get("s").unwrap();
+    assert!(
+        session.recovery_sent.contains(&input.input_id),
+        "终态对账应只补发一次交付确认"
+    );
+    assert!(
+        session.submitted.contains_key(&input.input_id),
+        "本地正文保留到 claim_delivery 为止"
+    );
+
+    assert!(state.claim_delivery("s", &input.input_id));
+    assert!(!state.claim_delivery("s", &input.input_id));
+    let session = state.sessions.get("s").unwrap();
+    assert!(!session.submitted.contains_key(&input.input_id));
+}
+
+/// [回归测试] Withdrawn 是确定未执行：清除提交中，但不能伪造交付气泡。
+#[test]
+fn test_steer_terminal_withdrawn_snapshot_clears_submission_without_delivery() {
+    let mut state = make_idle_state();
+    let input = make_input("c");
+    state.begin(make_command(SteerCommandKind::Enqueue(input.clone())));
+    assert!(state.direct_submitting("s", 1));
+
+    let mut terminal = make_snapshot(3);
+    terminal.items.clear();
+    terminal.terminal_items = vec![UserInputQueueTerminalItem {
+        input_id: input.input_id.clone(),
+        state: UserInputState::Withdrawn,
+    }];
+    assert!(state.accept_snapshot(terminal, 1, true));
+
+    assert!(!state.direct_submitting("s", 1));
+    let session = state.sessions.get("s").unwrap();
+    assert!(
+        !session.recovery_sent.contains(&input.input_id),
+        "撤回不能触发交付确认"
+    );
+    assert!(
+        !session.submitted.contains_key(&input.input_id),
+        "撤回是终态，正文无需保留"
+    );
+}
+
+/// [回归测试] 快照中完全缺失不等于已交付：未知状态必须保持提交中。
+#[test]
+fn test_steer_missing_input_does_not_assume_delivery() {
+    let mut state = make_idle_state();
+    let input = make_input("d");
+    state.begin(make_command(SteerCommandKind::Enqueue(input)));
+    assert!(state.direct_submitting("s", 1));
+
+    let mut empty = make_snapshot(3);
+    empty.items.clear();
+    assert!(state.accept_snapshot(empty, 1, true));
+
+    assert!(state.direct_submitting("s", 1), "未知状态不能当作成功交付");
 }
 
 fn make_idle_state() -> SteerState {
