@@ -417,14 +417,16 @@ impl SteerState {
             }
         }
         if definitely_rejected && !settled_unknown {
-            let before = session.pending.len();
             session
                 .pending
                 .retain(|pending| pending.command_id != command.command_id);
-            // 只有本次调用真正移除了待发送命令才恢复草稿：致命失败已把
-            // `NotSent` 输入放进 `recovered`，迟到的明确拒绝不得再生成一份。
-            if session.pending.len() != before
-                && let SteerCommandKind::Enqueue(input) = &command.kind
+            // 明确拒绝只在尚未生成恢复稿时补一份：致命失败已把 `NotSent`
+            // 输入放进 `recovered`，迟到的明确拒绝不得再生成重复草稿。
+            if let SteerCommandKind::Enqueue(input) = &command.kind
+                && !session
+                    .recovered
+                    .iter()
+                    .any(|recovered| recovered.input.input_id == input.input_id)
             {
                 session.recovered.push(RecoveredInput {
                     epoch: session.epoch,
