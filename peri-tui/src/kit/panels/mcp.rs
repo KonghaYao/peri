@@ -25,6 +25,8 @@ use crate::kit::focus_router::popup_owns_foreground;
 use crate::kit::list_nav::{next_selection, previous_selection};
 use crate::kit::panel_mouse::{AreaTracker, hit_item, is_scrollbar_column, left_down};
 use crate::kit::panels::shared::list::{ListMetrics, ListViewport, content_rows};
+use crate::kit::slash_completion::SlashActionKind;
+use crate::kit::slash_projection::SlashCommandEntry;
 use fluent_bundle::FluentValue;
 use peri_theme::atoms::THEME_ATOM;
 use ratatui_kit::{
@@ -40,7 +42,7 @@ use ratatui_kit::{
 
 mod detail;
 use self::detail::{
-    DETAIL_FALLBACK_WIDTH, DetailAction, build_detail_lines, default_detail_btn,
+    DETAIL_FALLBACK_WIDTH, DetailAction, SkillEntry, build_detail_lines, default_detail_btn,
     derive_status_style, detail_action_at, detail_actions, detail_buttons,
 };
 
@@ -67,6 +69,37 @@ fn detail_server<'a>(
     servers.iter().find(|s| s.name == key)
 }
 
+/// server 名 → 命令面域名（末段小写；与 host 侧 `mcp_source_key` 同源）。
+fn server_domain_key(name: &str) -> String {
+    name.rsplit_once(':')
+        .map(|(_, domain)| domain)
+        .unwrap_or(name)
+        .to_lowercase()
+}
+
+/// 命令面投影 → 每 server 的 MCP skill 表。
+///
+/// 只接受 [`SlashActionKind::McpSkill`]：其他域（如 `plugin:*`）的 fullname 同样
+/// 可能含冒号，仅按分段归组会把它们混入 server 技能表。键为 fullname 首段
+/// 小写（与 host 侧 `mcp_source_key` 同源）。
+fn group_mcp_skills(entries: &[SlashCommandEntry]) -> HashMap<String, Vec<SkillEntry>> {
+    let mut map: HashMap<String, Vec<SkillEntry>> = HashMap::new();
+    for entry in entries {
+        if entry.kind != SlashActionKind::McpSkill {
+            continue;
+        }
+        if let Some((server, _)) = entry.fullname.split_once(':') {
+            map.entry(server.to_lowercase())
+                .or_default()
+                .push(SkillEntry {
+                    name: entry.fullname.clone(),
+                    description: entry.description.clone(),
+                });
+        }
+    }
+    map
+}
+
 #[component]
 pub fn McpPanel(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
     let theme_def = hooks.use_atom(&THEME_ATOM);
@@ -83,28 +116,16 @@ pub fn McpPanel(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
     let connected_total = snap_store.read().mcp.connected;
     let config_total = snap_store.read().mcp.total;
     let _ = snap_store;
-    // 每 server 已注入的 MCP skill 命令数（决策 1：命令面 fullname =
+    // 每 server 已注入的 MCP skill 命令（决策 1：命令面 fullname =
     // `{server}:{skill}`，来自 available_commands_update 投影；discovery
     // 完成 → 注册表 on_change → 广播 → 本 atom 自动刷新，无需轮询）。
     // 命令面首段 = server 名末段小写（mcp_source_key 派生，与 host 侧
     // 同源），查询时按同规则归一。
     let cmd_store = hooks.use_atom(&AVAILABLE_SLASH_COMMANDS);
-    let skills_by_server: HashMap<String, usize> = {
-        let mut m: HashMap<String, usize> = HashMap::new();
-        for entry in cmd_store.read().iter() {
-            if let Some((server, _)) = entry.fullname.split_once(':') {
-                *m.entry(server.to_string()).or_insert(0) += 1;
-            }
-        }
-        m
-    };
+    // 每 server 的 MCP skill 命令（决策 1：命令面 fullname = `{server}:{skill}`）。
+    // 键为 fullname 首段小写（命令面的 server 域名），供列表计数与详情技能表共用。
+    let skills_by_server = group_mcp_skills(cmd_store.read().as_slice());
     let _ = cmd_store;
-    let mcp_domain_key = |name: &str| -> String {
-        name.rsplit_once(':')
-            .map(|(_, n)| n)
-            .unwrap_or(name)
-            .to_lowercase()
-    };
     let _ = hooks.use_atom(&LANG_VERSION);
 
     // 视图状态：List ⇄ Detail（OAuth 授权入口）
@@ -139,13 +160,16 @@ pub fn McpPanel(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
         move || {
             *detail_key.write() = None;
             *detail_btn.write() = 0;
+            *sv.write() = ScrollViewState::default();
             *view.write() = McpView::List;
         },
         (detail_missing,),
     );
 
-    // 事件闭包另持一份 servers 副本（与渲染端共用同一 atom 副本）
+    // 事件闭包另持一份 servers / 技能快照（与渲染端共用同一 atom 副本；详情
+    // 鼠标命中需要与渲染相同的技能行数）。
     let servers_for_closure = servers.clone();
+    let skills_for_closure = skills_by_server.clone();
 
     hooks.use_event_handler_with_options(
         EventScope::Current,
@@ -162,8 +186,10 @@ pub fn McpPanel(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
                     selected,
                     detail_key,
                     detail_btn,
+                    sv,
                     viewport,
                     servers: &servers_for_closure,
+                    skills_by_server: &skills_for_closure,
                 },
             )
         },
@@ -175,6 +201,7 @@ pub fn McpPanel(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
         selected,
         detail_key,
         detail_btn,
+        sv,
     });
 
     let sel = *selected.read();
@@ -183,8 +210,13 @@ pub fn McpPanel(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
     if *view.read() == McpView::Detail {
         // ── 详情视图（OAuth 授权入口）──
         if let Some(summary) = detail_server(&servers, &detail_key.read()) {
+            let skills = skills_by_server
+                .get(&server_domain_key(&summary.name))
+                .map(Vec::as_slice)
+                .unwrap_or(&[]);
             lines = build_detail_lines(
                 summary,
+                skills,
                 *detail_btn.read(),
                 &theme_def.read(),
                 content_width,
@@ -282,9 +314,9 @@ pub fn McpPanel(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
                                 "skills".to_string(),
                                 FluentValue::from(
                                     skills_by_server
-                                        .get(&mcp_domain_key(&s.name))
-                                        .copied()
-                                        .unwrap_or(0) as i64,
+                                        .get(&server_domain_key(&s.name))
+                                        .map_or(0, Vec::len)
+                                        as i64,
                                 ),
                             ),
                         ],
@@ -364,6 +396,9 @@ fn handle_mcp_event(event: Event, ctx: &McpEventCtx<'_>) -> EventResult {
                 *ctx.selected.write() = idx;
                 *ctx.detail_key.write() = Some(summary.name.clone());
                 *ctx.detail_btn.write() = default_detail_btn(summary);
+                // 详情总是从顶部开始：列表的滚动偏移不得带入详情（否则按钮
+                // 命中行与可见行错位）。
+                *ctx.sv.write() = ScrollViewState::default();
                 *ctx.view.write() = McpView::Detail;
             }
             return EventResult::Consumed;
@@ -374,19 +409,30 @@ fn handle_mcp_event(event: Event, ctx: &McpEventCtx<'_>) -> EventResult {
         if row < area.y.saturating_add(1) {
             return EventResult::Consumed;
         }
-        let content_row = row.saturating_sub(area.y).saturating_sub(1);
+        // 内容行号 = 屏幕行 − 边框 + 滚动偏移：ScrollView 滚动后，可见的首行
+        // 对应内容区第 offset 行。不加偏移会把滚动后的按钮判成未滚动行，
+        // 导致点击失效/误触 header 复制按钮。
+        let content_row = row
+            .saturating_sub(area.y)
+            .saturating_sub(1)
+            .saturating_add(ctx.sv.read().offset().y);
         let Some(summary) = detail_server(ctx.servers, &ctx.detail_key.read()) else {
             return EventResult::Consumed;
         };
+        // 技能行数参与表格行数推导：与渲染使用同一份快照。
+        let skills_count = ctx
+            .skills_by_server
+            .get(&server_domain_key(&summary.name))
+            .map_or(0, Vec::len);
         // 按钮命中：行号与列偏移取自渲染同源的 detail_buttons（header 右对齐
         // 复制按钮与底行按钮），列按显示宽度计算（CJK label 双宽）
-        for button in detail_buttons(summary, area.width) {
+        for button in detail_buttons(summary, skills_count, area.width) {
             if content_row != button.row {
                 continue;
             }
             let x = area.x.saturating_add(button.col);
             if col >= x && col < x.saturating_add(button.hit_width) {
-                activate_detail_btn(button.sel, summary, &ctx.view, &ctx.detail_btn);
+                activate_detail_btn(button.sel, summary, &ctx.view, &ctx.detail_btn, &ctx.sv);
                 return EventResult::Consumed;
             }
         }
@@ -405,6 +451,7 @@ fn handle_mcp_event(event: Event, ctx: &McpEventCtx<'_>) -> EventResult {
         match key.code {
             KeyCode::Esc => {
                 *ctx.detail_key.write() = None;
+                *ctx.sv.write() = ScrollViewState::default();
                 *ctx.view.write() = McpView::List;
             }
             KeyCode::Left | KeyCode::Right => {
@@ -426,7 +473,7 @@ fn handle_mcp_event(event: Event, ctx: &McpEventCtx<'_>) -> EventResult {
             KeyCode::Enter => {
                 let b = *ctx.detail_btn.read();
                 if let Some(summary) = detail_server(ctx.servers, &ctx.detail_key.read()) {
-                    activate_detail_btn(b, summary, &ctx.view, &ctx.detail_btn);
+                    activate_detail_btn(b, summary, &ctx.view, &ctx.detail_btn, &ctx.sv);
                 }
             }
             _ => {}
@@ -442,6 +489,7 @@ fn handle_mcp_event(event: Event, ctx: &McpEventCtx<'_>) -> EventResult {
             if let Some(summary) = ctx.servers.get(sel) {
                 *ctx.detail_key.write() = Some(summary.name.clone());
                 *ctx.detail_btn.write() = default_detail_btn(summary);
+                *ctx.sv.write() = ScrollViewState::default();
                 *ctx.view.write() = McpView::Detail;
             }
         }
@@ -471,29 +519,36 @@ struct McpEventCtx<'a> {
     selected: State<usize>,
     detail_key: State<Option<String>>,
     detail_btn: State<usize>,
+    /// 面板滚动状态：详情鼠标命中必须加上 `offset().y`（渲染在 ScrollView 内）。
+    sv: State<ScrollViewState>,
     viewport: ListViewport,
     servers: &'a [McpServerSummary],
+    /// 当前命令面技能快照（详情鼠标命中按 server 域名取行数）。
+    skills_by_server: &'a HashMap<String, Vec<SkillEntry>>,
 }
 
 /// 激活详情视图按钮：索引对应 `detail_actions`（header 复制 → 底行 授权/返回）。
 /// 键盘 Enter / 鼠标左键点击共用。复制留在详情视图（错误原文仍需对照阅读）；
-/// 授权/返回回到列表。
+/// 授权/返回回到列表，并重置滚动偏移（列表总是从顶部开始）。
 fn activate_detail_btn(
     idx: usize,
     summary: &McpServerSummary,
     view: &ReactiveHandle<McpView, SingleWaker>,
     detail_btn: &ReactiveHandle<usize, SingleWaker>,
+    sv: &ReactiveHandle<ScrollViewState, SingleWaker>,
 ) {
     match detail_action_at(summary, idx) {
         Some(DetailAction::CopyError) => copy_error_summary(summary),
         Some(DetailAction::Auth) => {
             start_oauth(summary.name.clone());
             *detail_btn.write() = 0;
+            *sv.write() = ScrollViewState::default();
             *view.write() = McpView::List;
         }
         // 索引失效（详情打开期间列表被刷新）等同 [ 返回 ]
         Some(DetailAction::Back) | None => {
             *detail_btn.write() = 0;
+            *sv.write() = ScrollViewState::default();
             *view.write() = McpView::List;
         }
     }
@@ -591,6 +646,10 @@ fn oauth_start_failure_message(response: &serde_json::Value) -> Option<String> {
         None
     }
 }
+
+#[cfg(test)]
+#[path = "mcp/detail_tables_test.rs"]
+mod detail_tables_test;
 
 #[cfg(test)]
 mod tests;

@@ -480,7 +480,11 @@ impl peri_acp_types::ports::McpPoolPort for CatalogPool {
 
 #[tokio::test]
 async fn test_mcp_list_projects_connection_meta() {
-    use peri_acp_types::ports::{McpServerConnectionStatus, McpServerInfo, McpServerOAuthStatus};
+    use peri_acp_types::plugin::McpSubscriptionsConfig;
+    use peri_acp_types::ports::{
+        McpResourceInfo, McpServerConnectionStatus, McpServerInfo, McpServerOAuthStatus,
+        McpToolInfo,
+    };
     let tmp = tempfile::TempDir::new().unwrap();
     let peri_config = make_peri_config_with_provider(make_provider_config(
         "a",
@@ -503,6 +507,21 @@ async fn test_mcp_list_projects_connection_meta() {
                 oauth_status: McpServerOAuthStatus::None,
                 tool_count: 3,
                 resource_count: 1,
+                tools: vec![McpToolInfo {
+                    name: "search".to_string(),
+                    description: Some("Search docs".to_string()),
+                }],
+                resources: vec![McpResourceInfo {
+                    uri: "agent://builtin/reviewer/agent.md".to_string(),
+                    name: Some("reviewer".to_string()),
+                    description: Some("Reviews code".to_string()),
+                }],
+                subscriptions: Some(McpSubscriptionsConfig {
+                    resources: vec!["file:///notes/1.md".to_string()],
+                    tools_list_changed: true,
+                    prompts_list_changed: false,
+                    resources_list_changed: true,
+                }),
                 version: Some("9.9.9".to_string()),
                 connected_at: Some("2026-10-11T06:32:05Z".to_string()),
                 protocol_version: Some("2026-07-28".to_string()),
@@ -516,6 +535,9 @@ async fn test_mcp_list_projects_connection_meta() {
                 oauth_status: McpServerOAuthStatus::None,
                 tool_count: 0,
                 resource_count: 0,
+                tools: Vec::new(),
+                resources: Vec::new(),
+                subscriptions: None,
                 version: None,
                 connected_at: None,
                 protocol_version: None,
@@ -562,6 +584,33 @@ async fn test_mcp_list_projects_connection_meta() {
     );
     assert_eq!(response["servers"][0]["errorSummary"], Value::Null);
     assert_eq!(response["servers"][0]["url"], Value::Null);
+    // 详情表格数据：工具/资源原样投影；订阅按 McpSubscriptionsConfig 的
+    // camelCase 字段名序列化。
+    assert_eq!(
+        response["servers"][0]["tools"],
+        json!([{"name": "search", "description": "Search docs"}])
+    );
+    assert_eq!(
+        response["servers"][0]["resources"],
+        json!([{
+            "uri": "agent://builtin/reviewer/agent.md",
+            "name": "reviewer",
+            "description": "Reviews code",
+        }])
+    );
+    assert_eq!(
+        response["servers"][0]["subscriptions"],
+        json!({
+            "resources": ["file:///notes/1.md"],
+            "toolsListChanged": true,
+            "promptsListChanged": false,
+            "resourcesListChanged": true,
+        })
+    );
+    // 无投影/无订阅的服务器：空数组与 null（不是缺字段）。
+    assert_eq!(response["servers"][1]["tools"], json!([]));
+    assert_eq!(response["servers"][1]["resources"], json!([]));
+    assert_eq!(response["servers"][1]["subscriptions"], Value::Null);
 }
 
 #[tokio::test]

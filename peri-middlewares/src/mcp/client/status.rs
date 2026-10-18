@@ -2,6 +2,7 @@
 
 use super::{ClientStatus, McpClientHandle, McpClientPool, OAuthStatus, ServerInfo};
 use peri_acp_types::plugin::ConfigSource;
+use peri_acp_types::ports::{McpResourceInfo, McpToolInfo};
 use std::sync::Arc;
 
 /// 传输形态三分类（IF-D11）：builtin 身份来自运行时标记 `source`，其余保持既有推断。
@@ -40,6 +41,34 @@ pub(super) fn mcp_error_summary(status: &ClientStatus) -> Option<String> {
     let summary = reason.trim();
     let summary: String = summary.chars().take(160).collect();
     (!summary.is_empty()).then_some(summary)
+}
+
+/// 句柄工具 → 面板投影；条目/文本上限在 ACP 端口投影侧统一执行。
+fn handle_tool_projection(handle: &McpClientHandle) -> Vec<McpToolInfo> {
+    handle
+        .tools
+        .iter()
+        .map(|tool| McpToolInfo {
+            name: tool.name.to_string(),
+            description: tool
+                .description
+                .as_ref()
+                .map(|description| description.to_string()),
+        })
+        .collect()
+}
+
+/// 句柄资源 → 面板投影；空名称归一为 None。
+fn handle_resource_projection(handle: &McpClientHandle) -> Vec<McpResourceInfo> {
+    handle
+        .resources
+        .iter()
+        .map(|resource| McpResourceInfo {
+            uri: resource.uri.clone(),
+            name: (!resource.name.trim().is_empty()).then(|| resource.name.clone()),
+            description: resource.description.clone(),
+        })
+        .collect()
 }
 
 /// MCP 状态变化 → 通知文本（每台一行：上线带工具数，失败报名字 + 错误）。
@@ -156,8 +185,10 @@ impl McpClientPool {
     }
 
     pub fn server_infos(&self) -> Vec<ServerInfo> {
-        self.clients
-            .read()
+        let clients = self.clients.read();
+        // 订阅项来自配置：与 clients 一样只持一次读锁，避免逐项重复加锁。
+        let configs = self.configs.read();
+        clients
             .values()
             .map(|h| ServerInfo {
                 name: h.name.clone(),
@@ -172,6 +203,11 @@ impl McpClientPool {
                 cache_status: self.cache_status_for(&h.name),
                 tool_count: h.tools.len(),
                 resource_count: h.resources.len(),
+                tools: handle_tool_projection(h),
+                resources: handle_resource_projection(h),
+                subscriptions: configs
+                    .get(&h.name)
+                    .and_then(|config| config.subscriptions.clone()),
                 oauth_status: h.oauth_status.clone(),
                 source: h.source.clone(),
                 url: h.url.clone(),
@@ -205,6 +241,11 @@ impl McpClientPool {
                 cache_status: self.cache_status_for(&h.name),
                 tool_count: h.tools.len(),
                 resource_count: h.resources.len(),
+                tools: handle_tool_projection(h),
+                resources: handle_resource_projection(h),
+                subscriptions: configs
+                    .get(&h.name)
+                    .and_then(|config| config.subscriptions.clone()),
                 oauth_status: h.oauth_status.clone(),
                 source: h.source.clone(),
                 url: h.url.clone(),
@@ -229,6 +270,9 @@ impl McpClientPool {
                     cache_status: self.cache_status_for(name),
                     tool_count: 0,
                     resource_count: 0,
+                    tools: Vec::new(),
+                    resources: Vec::new(),
+                    subscriptions: sc.subscriptions.clone(),
                     oauth_status: OAuthStatus::default(),
                     source: sc.source.clone(),
                     url: sc.url.clone(),

@@ -171,6 +171,40 @@ pub struct PluginSummary {
     pub load_error: Option<String>,
 }
 
+/// `mcp/list` 的单个工具投影（详情表格数据）。
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct McpToolSummary {
+    pub name: String,
+    pub description: Option<String>,
+}
+
+/// `mcp/list` 的单个资源投影（详情表格数据；agent 代理从此派生）。
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct McpResourceSummary {
+    pub uri: String,
+    pub name: Option<String>,
+    pub description: Option<String>,
+}
+
+/// `mcp/list` 的订阅项投影。
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct McpSubscriptionsSummary {
+    pub resources: Vec<String>,
+    pub tools_list_changed: bool,
+    pub prompts_list_changed: bool,
+    pub resources_list_changed: bool,
+}
+
+impl McpSubscriptionsSummary {
+    /// 无资源订阅且全部列表变化标志关闭 = 空订阅（详情显示空节）。
+    pub fn is_empty(&self) -> bool {
+        self.resources.is_empty()
+            && !self.tools_list_changed
+            && !self.prompts_list_changed
+            && !self.resources_list_changed
+    }
+}
+
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct McpServerSummary {
     pub name: String,
@@ -186,6 +220,16 @@ pub struct McpServerSummary {
     pub error_summary: Option<String>,
     pub transport: String,
     pub tools_count: usize,
+    /// 工具的有界投影（`mcp/list` 的 tools，至多 64 条）；全量计数见
+    /// [`Self::tools_count`]。
+    pub tools: Vec<McpToolSummary>,
+    /// 资源的有界投影（`mcp/list` 的 resources，至多 64 条）；全量计数见
+    /// [`Self::resources_count`]。
+    pub resources: Vec<McpResourceSummary>,
+    /// 资源全量计数（`mcp/list` 的 resourcesCount）。
+    pub resources_count: usize,
+    /// 配置声明的订阅项（`mcp/list` 的 subscriptions）。
+    pub subscriptions: Option<McpSubscriptionsSummary>,
     /// OAuth 待授权标记（oauth_status == NeedsAuthorization）：面板据此
     /// 显示"授权"按钮（Enter 触发 mcp/oauth_start）。
     pub needs_auth: bool,

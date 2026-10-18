@@ -2,8 +2,9 @@
 
 use super::detail::{
     DETAIL_HEADER_ROW, DETAIL_RIGHT_RESERVE, DETAIL_WRAP_WIDTH, DetailAction, DetailButton,
-    build_detail_lines, button_style, cache_status_label_key, default_detail_btn, detail_action_at,
-    detail_actions, detail_btn_row, detail_buttons, detail_error_lines, format_connected_at,
+    SkillEntry, build_detail_lines, button_style, cache_status_label_key, default_detail_btn,
+    detail_action_at, detail_actions, detail_btn_row, detail_buttons, detail_error_lines,
+    format_connected_at,
 };
 use super::{McpView, detail_copy_text};
 use crate::i18n;
@@ -19,24 +20,36 @@ use peri_acp_types::event_data::OauthNeeded;
 use ratatui_kit::crossterm::event::{
     Event, KeyCode, KeyEvent, KeyModifiers, MouseButton, MouseEvent, MouseEventKind,
 };
-use ratatui_kit::prelude::{EventResult, State, element};
+use ratatui_kit::prelude::{EventResult, ScrollViewState, State, element};
 use ratatui_kit::ratatui::buffer::Buffer;
-use ratatui_kit::ratatui::layout::Rect;
+use ratatui_kit::ratatui::layout::{Position, Rect};
 use serial_test::serial;
 
 /// 测试用面板内容宽度（82 列 + 滚动条预留 → 默认面板宽度量级）。
-const TEST_WIDTH: u16 = 60;
+pub(super) const TEST_WIDTH: u16 = 60;
 
-fn detail_lines(summary: &McpServerSummary, btn_sel: usize) -> Vec<ratatui::text::Line<'static>> {
+pub(super) fn detail_lines(
+    summary: &McpServerSummary,
+    btn_sel: usize,
+) -> Vec<ratatui::text::Line<'static>> {
+    detail_lines_with_skills(summary, &[], btn_sel)
+}
+
+pub(super) fn detail_lines_with_skills(
+    summary: &McpServerSummary,
+    skills: &[SkillEntry],
+    btn_sel: usize,
+) -> Vec<ratatui::text::Line<'static>> {
     build_detail_lines(
         summary,
+        skills,
         btn_sel,
         &peri_theme::builtin::dark_theme(),
         TEST_WIDTH,
     )
 }
 
-fn line_text(line: &ratatui::text::Line<'_>) -> String {
+pub(super) fn line_text(line: &ratatui::text::Line<'_>) -> String {
     line.spans
         .iter()
         .map(|span| span.content.as_ref())
@@ -44,7 +57,7 @@ fn line_text(line: &ratatui::text::Line<'_>) -> String {
 }
 
 /// 渲染出的行下标（needle 为按钮渲染文本——复制按钮无方括号、底行按钮带方括号）。
-fn rendered_row(lines: &[ratatui::text::Line<'_>], needle: &str) -> usize {
+pub(super) fn rendered_row(lines: &[ratatui::text::Line<'_>], needle: &str) -> usize {
     lines
         .iter()
         .position(|line| line_text(line).contains(needle))
@@ -52,7 +65,7 @@ fn rendered_row(lines: &[ratatui::text::Line<'_>], needle: &str) -> usize {
 }
 
 fn copy_button(summary: &McpServerSummary, width: u16) -> DetailButton {
-    detail_buttons(summary, width)
+    detail_buttons(summary, 0, width)
         .into_iter()
         .find(|button| button.action == DetailAction::CopyError)
         .expect("有错误摘要必须布局复制按钮")
@@ -68,7 +81,10 @@ fn span_with<'a>(line: &'a ratatui::text::Line<'a>, text: &str) -> &'a ratatui::
 
 #[test]
 fn detail_button_row_counts_empty_url_value_line() {
-    assert_eq!(detail_btn_row(&McpServerSummary::default()), 9);
+    assert_eq!(
+        detail_btn_row(&McpServerSummary::default(), 0, TEST_WIDTH),
+        21
+    );
 }
 
 /// `mcp/oauth_start` 的 Ok 响应失败判定：仅 `success=false`（conflict）触发
@@ -131,7 +147,7 @@ fn detail_button_row_matches_rendered_button_line() {
         let lines = detail_lines(&summary, 0);
         let back = DetailAction::Back.text(&i18n::tr("panel-mcp-detail-btn-back"));
         let rendered = rendered_row(&lines, &back);
-        assert_eq!(rendered, detail_btn_row(&summary) as usize);
+        assert_eq!(rendered, detail_btn_row(&summary, 0, TEST_WIDTH) as usize);
     }
 }
 
@@ -231,6 +247,7 @@ fn header_copy_button_is_right_aligned_and_survives_narrow_width() {
     for width in [80u16, 60, 40, 24, 12] {
         let lines = build_detail_lines(
             &summary,
+            &[],
             1, // 默认落在 [ 返回 ]：复制按钮为未选中态
             &peri_theme::builtin::dark_theme(),
             width,
@@ -321,7 +338,7 @@ fn detail_button_columns_match_rendered_lines() {
         ..McpServerSummary::default()
     };
     let lines = detail_lines(&summary, 0);
-    for button in detail_buttons(&summary, TEST_WIDTH) {
+    for button in detail_buttons(&summary, 0, TEST_WIDTH) {
         let line = lines
             .get(button.row as usize)
             .expect("按钮行必须在渲染范围内");
@@ -369,7 +386,7 @@ fn detail_actions_order_and_default_selection() {
     );
     assert_eq!(
         detail_actions(&summary).len(),
-        detail_buttons(&summary, TEST_WIDTH).len(),
+        detail_buttons(&summary, 0, TEST_WIDTH).len(),
         "键盘选择索引空间必须与渲染按钮一一对应"
     );
     assert_eq!(detail_action_at(&summary, 3), None);
@@ -452,14 +469,14 @@ fn detail_button_row_shifts_with_error_summary() {
         ..McpServerSummary::default()
     };
     // 单行错误：错误标题 + 摘要 + 空行 = 3 行（复制按钮与标题同行，不占行）
-    assert_eq!(detail_btn_row(&with_error), 12);
+    assert_eq!(detail_btn_row(&with_error, 0, TEST_WIDTH), 24);
     // 换行行数增长 → 按钮行同步下移（120 字符按 52 宽 = 3 行）
     let long_error = McpServerSummary {
         error_summary: Some("E".repeat(120)),
         ..McpServerSummary::default()
     };
     assert_eq!(detail_error_lines(&long_error), Some(3));
-    assert_eq!(detail_btn_row(&long_error), 14);
+    assert_eq!(detail_btn_row(&long_error, 0, TEST_WIDTH), 26);
 }
 
 #[test]
@@ -508,6 +525,8 @@ pub(super) struct MountedPanel {
     pub(super) selected: State<usize>,
     pub(super) detail_key: State<Option<String>>,
     pub(super) detail_btn: State<usize>,
+    /// 面板滚动状态（详情鼠标命中的行号偏移来源）。
+    pub(super) sv: State<ScrollViewState>,
 }
 
 /// 卸载时清空 visitor：断言 panic 也不把句柄泄漏给同线程的后续用例。
@@ -553,6 +572,7 @@ impl MountedPanel {
             servers.len(),
             *self.selected.read(),
         );
+        let skills = std::collections::HashMap::new();
         super::handle_mcp_event(
             event,
             &super::McpEventCtx {
@@ -561,8 +581,10 @@ impl MountedPanel {
                 selected: self.selected,
                 detail_key: self.detail_key,
                 detail_btn: self.detail_btn,
+                sv: self.sv,
                 viewport,
                 servers: &servers,
+                skills_by_server: &skills,
             },
         )
     }
@@ -796,6 +818,100 @@ fn click_on_scrollbar_column_does_not_open_detail() {
         assert_eq!(*panel.view.read(), McpView::List);
         assert!(panel.detail_key.read().is_none());
     });
+}
+
+/// 详情滚动后，鼠标命中必须加上 `ScrollViewState` 偏移：滚到可见区的按钮可点，
+/// 未滚动时的旧行号不会误触 header 复制按钮。
+#[test]
+#[serial]
+fn detail_click_accounts_for_scroll_offset() {
+    let _guard = ForegroundGuard::capture();
+    *ACTIVE_PANEL.state().write() = Some(PanelKind::Mcp);
+    *POPUP_KIND.state().write() = None;
+    *MCP_SERVERS.state().write() = vec![server("alpha")];
+
+    mount_panel(|panel| {
+        *panel.view.write() = McpView::Detail;
+        *panel.detail_key.write() = Some("alpha".into());
+        let offset = 8u16;
+        *panel.sv.write() = ScrollViewState::with_offset(Position::new(0, offset));
+
+        // 默认详情 24 行、按钮在内容行 21（TEST_AREA 60 宽）；滚动 8 行后按钮
+        // 落在屏幕内容行 13。先点内容行 1：加偏移后是内容行 9，不得命中任何按钮。
+        assert_eq!(
+            panel.event(left_down(TEST_AREA.y + 1 + 1, 2)),
+            EventResult::Consumed
+        );
+        assert_eq!(
+            *panel.view.read(),
+            McpView::Detail,
+            "偏移后的旧行号不得命中按钮"
+        );
+
+        let btn_row = detail_btn_row(&server("alpha"), 0, TEST_AREA.width);
+        let screen_row = TEST_AREA.y + 1 + btn_row - offset;
+        assert_eq!(panel.event(left_down(screen_row, 2)), EventResult::Consumed);
+        assert_eq!(
+            *panel.view.read(),
+            McpView::List,
+            "滚动后点击 [ 返回 ] 必须生效"
+        );
+        assert_eq!(panel.sv.read().offset().y, 0, "退出详情必须重置滚动偏移");
+    });
+}
+
+/// 进入/退出详情都从顶部开始：列表与详情的滚动偏移不得互相污染。
+#[test]
+#[serial]
+fn entering_and_leaving_detail_resets_scroll_offset() {
+    let _guard = ForegroundGuard::capture();
+    *ACTIVE_PANEL.state().write() = Some(PanelKind::Mcp);
+    *POPUP_KIND.state().write() = None;
+    *MCP_SERVERS.state().write() = vec![server("alpha")];
+
+    mount_panel(|panel| {
+        *panel.sv.write() = ScrollViewState::with_offset(Position::new(0, 5));
+        // 内容行 3 = 第一项的第二行（列表 header 2 行 + 每项 2 行）。
+        assert_eq!(panel.event(left_down(4, 5)), EventResult::Consumed);
+        assert_eq!(*panel.view.read(), McpView::Detail);
+        assert_eq!(panel.sv.read().offset().y, 0, "进入详情必须重置偏移");
+
+        *panel.sv.write() = ScrollViewState::with_offset(Position::new(0, 5));
+        assert_eq!(panel.event(key(KeyCode::Esc)), EventResult::Consumed);
+        assert_eq!(*panel.view.read(), McpView::List);
+        assert_eq!(panel.sv.read().offset().y, 0, "退出详情必须重置偏移");
+    });
+}
+
+/// 技能归组只接受 `McpSkill`：其他域（plugin/user 等）即使 fullname 带冒号
+/// 也不得混入 server 的技能表。
+#[test]
+fn skills_grouping_only_accepts_mcp_skill_kind() {
+    use crate::kit::slash_completion::SlashActionKind;
+    use crate::kit::slash_projection::SlashCommandEntry;
+
+    let entry = |fullname: &str, kind: SlashActionKind| SlashCommandEntry {
+        fullname: fullname.into(),
+        kind,
+        description: format!("{fullname} description"),
+        ..SlashCommandEntry::default()
+    };
+    let entries = vec![
+        entry("demo:hello", SlashActionKind::McpSkill),
+        entry("demo:other", SlashActionKind::McpSkill),
+        // 与 server 域名同名但非 MCP 域：不得混入。
+        entry("demo:plugin-command", SlashActionKind::Command),
+        entry("demo:user-skill", SlashActionKind::Skill),
+        // 无冒号的 MCP skill 不归属任何 server。
+        entry("lonely", SlashActionKind::McpSkill),
+    ];
+    let grouped = super::group_mcp_skills(&entries);
+    assert_eq!(grouped.len(), 1);
+    let names: Vec<&str> = grouped["demo"]
+        .iter()
+        .map(|skill| skill.name.as_str())
+        .collect();
+    assert_eq!(names, vec!["demo:hello", "demo:other"]);
 }
 
 /// 稳定身份回归：列表刷新改变目标下标后，详情仍指向进入时的同名 server。
