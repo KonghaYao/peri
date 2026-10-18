@@ -215,8 +215,14 @@ struct RecordingSink(Mutex<Vec<ExecutorEvent>>);
 
 #[async_trait]
 impl EventSink for RecordingSink {
-    async fn push_event(&self, _: &str, event: &ExecutorEvent, _: u32) {
+    async fn push_event(
+        &self,
+        _: &str,
+        event: &ExecutorEvent,
+        _: u32,
+    ) -> Result<(), peri_acp_types::event::EventSinkError> {
         self.0.lock().push(event.clone());
+        Ok(())
     }
 
     async fn push_done(&self, _: &str, _: &str, _: Option<&str>) {}

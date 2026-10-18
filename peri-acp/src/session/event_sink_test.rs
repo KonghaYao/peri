@@ -82,18 +82,20 @@ async fn test_user_input_events_use_queue_capability_without_duplicate_chat_proj
         }],
         terminal_items: vec![],
     };
-    sink.push_event("s1", &ExecutorEvent::UserInputQueueChanged(snapshot), 0)
+    let _ = sink
+        .push_event("s1", &ExecutorEvent::UserInputQueueChanged(snapshot), 0)
         .await;
-    sink.push_event(
-        "s1",
-        &ExecutorEvent::UserInputDelivered {
-            input_id: "input-1".into(),
-            generation: "generation-1".into(),
-            content: MessageContent::text("用户原文"),
-        },
-        0,
-    )
-    .await;
+    let _ = sink
+        .push_event(
+            "s1",
+            &ExecutorEvent::UserInputDelivered {
+                input_id: "input-1".into(),
+                generation: "generation-1".into(),
+                content: MessageContent::text("用户原文"),
+            },
+            0,
+        )
+        .await;
     let notifications = transport.notifications.lock().unwrap();
     assert_eq!(
         notifications.len(),
@@ -128,8 +130,8 @@ async fn test_user_input_events_fail_closed_without_queue_capability() {
         generation: "generation-1".into(),
         content: MessageContent::text("不应泄漏的输入"),
     };
-    sink.push_event("s1", &event, 0).await;
-    sink.push_event("unregistered", &event, 0).await;
+    let _ = sink.push_event("s1", &event, 0).await;
+    let _ = sink.push_event("unregistered", &event, 0).await;
     assert!(
         transport.notifications.lock().unwrap().is_empty(),
         "legacy 能力或缺失 session caps 均不得隐式开启队列正文事件"
@@ -166,18 +168,19 @@ async fn test_user_input_queue_capability_includes_paired_done() {
 #[tokio::test]
 async fn push_event_forwards_compact_started() {
     let (transport, sink) = compact_test_sink();
-    sink.push_event(
-        "s1",
-        &ExecutorEvent::CompactStarted {
-            turn_id: "turn-1".into(),
-            agent_id: "agent-1".into(),
-            step: 3,
-            strategy: peri_acp_types::event::CompactStrategy::Micro,
-            trigger: peri_acp_types::event::CompactTrigger::Auto,
-        },
-        0,
-    )
-    .await;
+    let _ = sink
+        .push_event(
+            "s1",
+            &ExecutorEvent::CompactStarted {
+                turn_id: "turn-1".into(),
+                agent_id: "agent-1".into(),
+                step: 3,
+                strategy: peri_acp_types::event::CompactStrategy::Micro,
+                trigger: peri_acp_types::event::CompactTrigger::Auto,
+            },
+            0,
+        )
+        .await;
 
     let notifications = transport.notifications.lock().unwrap();
     let event_json = notifications[0].1["event_json"].as_str().unwrap();
@@ -188,21 +191,22 @@ async fn push_event_forwards_compact_started() {
 #[tokio::test]
 async fn push_event_forwards_compact_completed_details() {
     let (transport, sink) = compact_test_sink();
-    sink.push_event(
-        "s1",
-        &ExecutorEvent::CompactCompleted {
-            summary: String::new(),
-            messages: vec![],
-            trigger: peri_acp_types::event::CompactTrigger::Auto,
-            strategy: peri_acp_types::event::CompactStrategy::Micro,
-            affected_count: 7,
-            estimated_tokens_saved: 2048,
-            files: vec![],
-            skills: vec!["tdd".into()],
-        },
-        0,
-    )
-    .await;
+    let _ = sink
+        .push_event(
+            "s1",
+            &ExecutorEvent::CompactCompleted {
+                summary: String::new(),
+                messages: vec![],
+                trigger: peri_acp_types::event::CompactTrigger::Auto,
+                strategy: peri_acp_types::event::CompactStrategy::Micro,
+                affected_count: 7,
+                estimated_tokens_saved: 2048,
+                files: vec![],
+                skills: vec!["tdd".into()],
+            },
+            0,
+        )
+        .await;
 
     let notifications = transport.notifications.lock().unwrap();
     let event_json = notifications[0].1["event_json"].as_str().unwrap();
@@ -231,20 +235,21 @@ async fn push_event_forwards_goal_snapshot_details() {
         },
     );
     let sink = TransportEventSink::new(transport.clone(), caps);
-    sink.push_event(
-        "s1",
-        &ExecutorEvent::GoalSnapshot {
-            objective: Some("ship goal panel".into()),
-            status: Some(peri_acp_types::goal::GoalStatus::Active),
-            token_budget: None,
-            tokens_used: 0,
-            time_used_seconds: 0,
-            continuation_count: 3,
-            blocked_reason: None,
-        },
-        0,
-    )
-    .await;
+    let _ = sink
+        .push_event(
+            "s1",
+            &ExecutorEvent::GoalSnapshot {
+                objective: Some("ship goal panel".into()),
+                status: Some(peri_acp_types::goal::GoalStatus::Active),
+                token_budget: None,
+                tokens_used: 0,
+                time_used_seconds: 0,
+                continuation_count: 3,
+                blocked_reason: None,
+            },
+            0,
+        )
+        .await;
 
     let notifications = transport.notifications.lock().unwrap();
     let event_json = notifications[0].1["event_json"].as_str().unwrap();
@@ -275,15 +280,16 @@ async fn push_event_forwards_rewind_completed() {
     );
     let sink = TransportEventSink::new(transport.clone(), caps);
 
-    sink.push_event(
-        "s1",
-        &ExecutorEvent::RewindCompleted {
-            summary: "已回滚 2 条消息".to_string(),
-            messages: vec![msg()],
-        },
-        0,
-    )
-    .await;
+    let _ = sink
+        .push_event(
+            "s1",
+            &ExecutorEvent::RewindCompleted {
+                summary: "已回滚 2 条消息".to_string(),
+                messages: vec![msg()],
+            },
+            0,
+        )
+        .await;
 
     let notifications = transport.notifications.lock().unwrap();
     assert_eq!(
@@ -323,18 +329,19 @@ async fn push_event_forwards_llm_retrying() {
     );
     let sink = TransportEventSink::new(transport.clone(), caps);
 
-    sink.push_event(
-        "s1",
-        &ExecutorEvent::LlmRetrying {
-            attempt: 1,
-            max_attempts: 6,
-            delay_ms: 500,
-            error: "transport".into(),
-            diagnostic: None,
-        },
-        0,
-    )
-    .await;
+    let _ = sink
+        .push_event(
+            "s1",
+            &ExecutorEvent::LlmRetrying {
+                attempt: 1,
+                max_attempts: 6,
+                delay_ms: 500,
+                error: "transport".into(),
+                diagnostic: None,
+            },
+            0,
+        )
+        .await;
 
     let notifications = transport.notifications.lock().unwrap();
     assert_eq!(notifications.len(), 1);
@@ -367,15 +374,16 @@ async fn push_event_drops_rewind_completed_without_cap() {
     caps.insert("s1".to_string(), PeriCaps::default());
     let sink = TransportEventSink::new(transport.clone(), caps);
 
-    sink.push_event(
-        "s1",
-        &ExecutorEvent::RewindCompleted {
-            summary: "s".to_string(),
-            messages: vec![],
-        },
-        0,
-    )
-    .await;
+    let _ = sink
+        .push_event(
+            "s1",
+            &ExecutorEvent::RewindCompleted {
+                summary: "s".to_string(),
+                messages: vec![],
+            },
+            0,
+        )
+        .await;
 
     assert!(
         transport.notifications.lock().unwrap().is_empty(),
@@ -398,16 +406,17 @@ async fn push_event_forwards_command_feedback_wire() {
     );
     let sink = TransportEventSink::new(transport.clone(), caps);
 
-    sink.push_event(
-        "s1",
-        &ExecutorEvent::CommandFeedback(peri_acp_types::command::CommandFeedback {
-            level: peri_acp_types::command::FeedbackLevel::Info,
-            message: "命令完成".to_string(),
-            channel: peri_acp_types::command::FeedbackChannel::UiOnly,
-        }),
-        0,
-    )
-    .await;
+    let _ = sink
+        .push_event(
+            "s1",
+            &ExecutorEvent::CommandFeedback(peri_acp_types::command::CommandFeedback {
+                level: peri_acp_types::command::FeedbackLevel::Info,
+                message: "命令完成".to_string(),
+                channel: peri_acp_types::command::FeedbackChannel::UiOnly,
+            }),
+            0,
+        )
+        .await;
 
     let notifications = transport.notifications.lock().unwrap();
     assert_eq!(
@@ -451,18 +460,19 @@ async fn push_event_emits_only_safe_activity_when_cap_is_declared() {
     );
     let sink = TransportEventSink::new(transport.clone(), caps);
 
-    sink.push_event(
-        "s1",
-        &ExecutorEvent::SubagentStopped {
-            agent_name: "reviewer".into(),
-            result: "SECRET_RESULT_SENTINEL".into(),
-            is_error: false,
-            instance_id: "raw-instance-id".into(),
-            subagent_failure: None,
-        },
-        0,
-    )
-    .await;
+    let _ = sink
+        .push_event(
+            "s1",
+            &ExecutorEvent::SubagentStopped {
+                agent_name: "reviewer".into(),
+                result: "SECRET_RESULT_SENTINEL".into(),
+                is_error: false,
+                instance_id: "raw-instance-id".into(),
+                subagent_failure: None,
+            },
+            0,
+        )
+        .await;
 
     let notifications = transport.notifications.lock().unwrap();
     assert_eq!(notifications.len(), 1);
@@ -487,18 +497,19 @@ async fn test_subagent_completion_keeps_activity_safe_before_legacy_output() {
         },
     );
     let sink = TransportEventSink::new(transport.clone(), caps);
-    sink.push_event(
-        "s1",
-        &ExecutorEvent::SubagentStopped {
-            agent_name: "explorer".into(),
-            result: "PRIVATE_RESULT_SENTINEL".into(),
-            is_error: false,
-            instance_id: "private-instance-id".into(),
-            subagent_failure: None,
-        },
-        0,
-    )
-    .await;
+    let _ = sink
+        .push_event(
+            "s1",
+            &ExecutorEvent::SubagentStopped {
+                agent_name: "explorer".into(),
+                result: "PRIVATE_RESULT_SENTINEL".into(),
+                is_error: false,
+                instance_id: "private-instance-id".into(),
+                subagent_failure: None,
+            },
+            0,
+        )
+        .await;
 
     let notifications = transport.notifications.lock().unwrap();
     assert_eq!(notifications.len(), 2, "两个已协商的事件面均应收到通知");
@@ -546,18 +557,19 @@ async fn subagent_stopped_wire_carries_only_safe_failure_facts() {
     )
     .expect("valid safe failure");
 
-    sink.push_event(
-        "s1",
-        &ExecutorEvent::SubagentStopped {
-            agent_name: "explorer".into(),
-            result: "safe summary".into(),
-            is_error: true,
-            instance_id: "instance-1".into(),
-            subagent_failure: Some(failure),
-        },
-        0,
-    )
-    .await;
+    let _ = sink
+        .push_event(
+            "s1",
+            &ExecutorEvent::SubagentStopped {
+                agent_name: "explorer".into(),
+                result: "safe summary".into(),
+                is_error: true,
+                instance_id: "instance-1".into(),
+                subagent_failure: Some(failure),
+            },
+            0,
+        )
+        .await;
 
     let notifications = transport.notifications.lock().unwrap();
     assert_eq!(notifications.len(), 1);
@@ -590,16 +602,17 @@ async fn push_event_does_not_emit_activity_without_exact_cap() {
         },
     );
     let sink = TransportEventSink::new(transport.clone(), caps);
-    sink.push_event(
-        "s1",
-        &ExecutorEvent::ContextWarning {
-            used_tokens: 90,
-            total_tokens: 100,
-            percentage: 0.9,
-        },
-        0,
-    )
-    .await;
+    let _ = sink
+        .push_event(
+            "s1",
+            &ExecutorEvent::ContextWarning {
+                used_tokens: 90,
+                total_tokens: 100,
+                percentage: 0.9,
+            },
+            0,
+        )
+        .await;
     assert!(transport.notifications.lock().unwrap().is_empty());
 }
 
@@ -631,16 +644,17 @@ async fn push_event_places_source_identity_in_acp_meta() {
     caps.insert("s1".to_string(), PeriCaps::default());
     let sink = TransportEventSink::new(transport.clone(), caps);
 
-    sink.push_event(
-        "s1",
-        &ExecutorEvent::TextChunk {
-            message_id: MessageId::new(),
-            chunk: "child output".to_string(),
-            source_agent_id: Some("child-agent-1".to_string()),
-        },
-        0,
-    )
-    .await;
+    let _ = sink
+        .push_event(
+            "s1",
+            &ExecutorEvent::TextChunk {
+                message_id: MessageId::new(),
+                chunk: "child output".to_string(),
+                source_agent_id: Some("child-agent-1".to_string()),
+            },
+            0,
+        )
+        .await;
 
     let notifications = transport.notifications.lock().unwrap();
     assert_eq!(
@@ -662,20 +676,21 @@ async fn auxiliary_usage_places_source_identity_in_top_level_acp_meta() {
         },
     );
     let sink = TransportEventSink::new(transport.clone(), caps);
-    sink.push_event(
-        "s1",
-        &ExecutorEvent::LlmCallEnd {
-            step: 0,
-            model: "aux-model".into(),
-            output: String::new(),
-            usage: Some(peri_acp_types::model::TokenUsage::new(100, 1)),
-            stop_reason: None,
-            request_id: Some("aux-request".into()),
-            source_agent_id: Some("workflow-agent".into()),
-        },
-        200_000,
-    )
-    .await;
+    let _ = sink
+        .push_event(
+            "s1",
+            &ExecutorEvent::LlmCallEnd {
+                step: 0,
+                model: "aux-model".into(),
+                output: String::new(),
+                usage: Some(peri_acp_types::model::TokenUsage::new(100, 1)),
+                stop_reason: None,
+                request_id: Some("aux-request".into()),
+                source_agent_id: Some("workflow-agent".into()),
+            },
+            200_000,
+        )
+        .await;
 
     let notifications = transport.notifications.lock().unwrap();
     assert_eq!(notifications[0].0, "session/update");
@@ -764,15 +779,16 @@ async fn model_only_and_diagnostic_only_reminders_never_reach_the_client_wire() 
                 vec![ReminderAudience::Model, ReminderAudience::Tui],
             ),
         ] {
-            sink.push_event(
-                "s1",
-                &ExecutorEvent::SystemReminder {
-                    reminder,
-                    source_agent_id: None,
-                },
-                0,
-            )
-            .await;
+            let _ = sink
+                .push_event(
+                    "s1",
+                    &ExecutorEvent::SystemReminder {
+                        reminder,
+                        source_agent_id: None,
+                    },
+                    0,
+                )
+                .await;
         }
         assert!(
             transport.notifications.lock().unwrap().is_empty(),
@@ -797,19 +813,20 @@ async fn client_audience_reminders_follow_caps_with_and_without_structured_wire(
             },
         );
         let sink = TransportEventSink::new(transport.clone(), caps);
-        sink.push_event(
-            "s1",
-            &ExecutorEvent::SystemReminder {
-                reminder: reminder_for_test(
-                    "client_notice",
-                    ReminderDelivery::Required,
-                    vec![ReminderAudience::Tui],
-                ),
-                source_agent_id: None,
-            },
-            0,
-        )
-        .await;
+        let _ = sink
+            .push_event(
+                "s1",
+                &ExecutorEvent::SystemReminder {
+                    reminder: reminder_for_test(
+                        "client_notice",
+                        ReminderDelivery::Required,
+                        vec![ReminderAudience::Tui],
+                    ),
+                    source_agent_id: None,
+                },
+                0,
+            )
+            .await;
 
         let notifications = transport.notifications.lock().unwrap();
         assert_eq!(notifications.len(), 1, "标准事件与专用 push 不得双发");
@@ -847,19 +864,20 @@ async fn system_reminder_source_agent_id_is_carried_only_when_relayed_structural
     let sink = TransportEventSink::new(transport.clone(), caps);
 
     // 1. 子 Agent 转发：结构化事件携带 source_agent_id。
-    sink.push_event(
-        "s1",
-        &ExecutorEvent::SystemReminder {
-            reminder: reminder_for_test(
-                "relayed_notice",
-                ReminderDelivery::Required,
-                vec![ReminderAudience::Tui],
-            ),
-            source_agent_id: Some("child-thread-42".into()),
-        },
-        0,
-    )
-    .await;
+    let _ = sink
+        .push_event(
+            "s1",
+            &ExecutorEvent::SystemReminder {
+                reminder: reminder_for_test(
+                    "relayed_notice",
+                    ReminderDelivery::Required,
+                    vec![ReminderAudience::Tui],
+                ),
+                source_agent_id: Some("child-thread-42".into()),
+            },
+            0,
+        )
+        .await;
     {
         let notifications = transport.notifications.lock().unwrap();
         assert_eq!(notifications.len(), 1);
@@ -871,19 +889,20 @@ async fn system_reminder_source_agent_id_is_carried_only_when_relayed_structural
     }
 
     // 2. 本会话自身提醒：省略 source_agent_id 键。
-    sink.push_event(
-        "s1",
-        &ExecutorEvent::SystemReminder {
-            reminder: reminder_for_test(
-                "local_notice",
-                ReminderDelivery::Required,
-                vec![ReminderAudience::Tui],
-            ),
-            source_agent_id: None,
-        },
-        0,
-    )
-    .await;
+    let _ = sink
+        .push_event(
+            "s1",
+            &ExecutorEvent::SystemReminder {
+                reminder: reminder_for_test(
+                    "local_notice",
+                    ReminderDelivery::Required,
+                    vec![ReminderAudience::Tui],
+                ),
+                source_agent_id: None,
+            },
+            0,
+        )
+        .await;
     {
         let notifications = transport.notifications.lock().unwrap();
         assert_eq!(notifications.len(), 2);
@@ -901,19 +920,20 @@ async fn system_reminder_source_agent_id_is_carried_only_when_relayed_structural
             ..PeriCaps::default()
         },
     );
-    sink.push_event(
-        "s1",
-        &ExecutorEvent::SystemReminder {
-            reminder: reminder_for_test(
-                "relayed_fallback",
-                ReminderDelivery::Required,
-                vec![ReminderAudience::Tui],
-            ),
-            source_agent_id: Some("child-thread-42".into()),
-        },
-        0,
-    )
-    .await;
+    let _ = sink
+        .push_event(
+            "s1",
+            &ExecutorEvent::SystemReminder {
+                reminder: reminder_for_test(
+                    "relayed_fallback",
+                    ReminderDelivery::Required,
+                    vec![ReminderAudience::Tui],
+                ),
+                source_agent_id: Some("child-thread-42".into()),
+            },
+            0,
+        )
+        .await;
     let notifications = transport.notifications.lock().unwrap();
     assert_eq!(notifications.len(), 3);
     assert_eq!(notifications[2].1["event"], "system-reminder-fallback");
@@ -922,3 +942,6 @@ async fn system_reminder_source_agent_id_is_carried_only_when_relayed_structural
         "fallback 文本形态无展开渲染面，不带归属键"
     );
 }
+
+#[path = "event_sink_failure_test.rs"]
+mod failure_tests;

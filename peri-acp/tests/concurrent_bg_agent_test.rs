@@ -124,7 +124,7 @@ async fn test_bg_event_pump_receives_all_completions() {
     // Spawn bg event pump (same pattern as executor.rs:346-355)
     let pump_handle = tokio::spawn(async move {
         while let Some(bg_event) = bg_rx.recv().await {
-            bg_sink.push_event(&bg_session_id, &bg_event, bg_cw).await;
+            let _ = bg_sink.push_event(&bg_session_id, &bg_event, bg_cw).await;
         }
     });
 

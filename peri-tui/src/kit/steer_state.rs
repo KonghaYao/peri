@@ -11,7 +11,6 @@ use tokio::sync::mpsc::UnboundedSender;
 use super::atoms::{self, PendingAttachment};
 use super::steer_queue::{SteerItemState, SteerQueueAction, SteerQueueItem};
 use super::tui_render_unit::UserAttachment;
-use crate::kit::acp_types::{AcpEventData, AcpEventWithEpoch};
 
 pub(crate) static STEERS: Atom<SteerState> = Atom::new(SteerState::default);
 pub(crate) static STEER_TX: OnceLock<UnboundedSender<SteerCommand>> = OnceLock::new();
@@ -43,10 +42,8 @@ struct SessionSteers {
     delivered: HashSet<String>,
     // 仅影响待发送区展示；正式聊天气泡仍由 Delivered 确认。
     direct_submissions: HashSet<String>,
-    // 已受理但尚未收到交付确认的输入正文；用于从终态快照补投递气泡。
-    submitted: HashMap<String, UserInput>,
-    // 已按终态快照补发过确认的输入，避免每次轮询重复入队。
-    recovery_sent: HashSet<String>,
+    // 致命执行失败后已结算但结果未知的输入身份；只用于对账，不再投影为 Submitting。
+    failed_unknown: HashSet<String>,
 }
 
 impl SessionSteers {
@@ -74,11 +71,7 @@ impl SessionSteers {
         for (input_id, state) in &terminal {
             if matches!(state, UserInputState::Delivered | UserInputState::Withdrawn) {
                 self.direct_submissions.remove(input_id);
-            }
-            if *state == UserInputState::Withdrawn {
-                // 撤回是终态，不再需要正文补投递，避免长期保留输入内容。
-                self.submitted.remove(input_id);
-                self.recovery_sent.remove(input_id);
+                self.failed_unknown.remove(input_id);
             }
         }
         // 终态已经回答了 Enqueue 命令的结果；丢失的回执不应继续显示 Submitting 或重试。
@@ -102,29 +95,8 @@ impl SessionSteers {
         for command_id in settled_commands {
             self.queued_at.remove(&command_id);
         }
-        let recoveries: Vec<AcpEventData> = terminal
-            .into_iter()
-            .filter(|(_, state)| *state == UserInputState::Delivered)
-            .filter(|(input_id, _)| self.submitted.contains_key(input_id))
-            .filter(|(input_id, _)| self.recovery_sent.insert(input_id.clone()))
-            .filter_map(|(input_id, _)| {
-                self.submitted
-                    .get(&input_id)
-                    .map(|input| AcpEventData::UserInputDelivered {
-                        generation: snapshot.generation.clone(),
-                        input_id,
-                        content: input.content.clone(),
-                    })
-            })
-            .collect();
-        if let Some(tx) = atoms::LOCAL_EVENT_TX.get() {
-            for event in recoveries {
-                let _ = tx.send(AcpEventWithEpoch {
-                    event,
-                    active_session_id: snapshot.session_id.clone(),
-                });
-            }
-        }
+        // Delivered 的气泡只由事件泵按有序交付日志推送；终态快照只清除提交反馈。
+        // 这里合成气泡会绕过 assistant 输出所在 FIFO，无法证明插入位置。
     }
 }
 
@@ -165,7 +137,7 @@ impl SteerState {
         session.snapshot = None;
         session.queued_at.clear();
         session.direct_submissions.clear();
-        session.recovery_sent.clear();
+        session.failed_unknown.clear();
         for recovered in &mut session.recovered {
             recovered.epoch = epoch;
         }
@@ -223,11 +195,6 @@ impl SteerState {
                 })
         {
             session.direct_submissions.insert(input.input_id.clone());
-        }
-        if let SteerCommandKind::Enqueue(input) = &command.kind {
-            session
-                .submitted
-                .insert(input.input_id.clone(), input.clone());
         }
         session
             .queued_at
@@ -320,8 +287,6 @@ impl SteerState {
             previous.queued_at.remove(&command.command_id);
             if let SteerCommandKind::Enqueue(input) = &command.kind {
                 direct = previous.direct_submissions.remove(&input.input_id);
-                previous.submitted.remove(&input.input_id);
-                previous.recovery_sent.remove(&input.input_id);
             }
             previous
                 .pending
@@ -352,8 +317,6 @@ impl SteerState {
                 .pending
                 .retain(|pending| pending.command_id != command.command_id);
             if let SteerCommandKind::Enqueue(input) = &command.kind {
-                session.submitted.remove(&input.input_id);
-                session.recovery_sent.remove(&input.input_id);
                 session.recovered.push(RecoveredInput {
                     epoch: session.epoch,
                     input: input.clone(),
@@ -364,12 +327,39 @@ impl SteerState {
         // 结果不明确时仍保留原请求和输入身份；不改走旧 prompt 或重新生成 ID。
     }
 
+    /// 致命执行失败（含交付日志溢出）必须结束本地提交反馈，避免用户停留在
+    /// “正在提交…”而看不到显式错误；真正的气泡仍不会被伪造。
+    ///
+    /// pending Enqueue 的结果已不可知：从投影中移除并保留 input_id 供后续
+    /// 终态快照对账，不自动重发，也不生成气泡。
+    pub(crate) fn fail_session_submissions(&mut self, session_id: &str) {
+        if let Some(session) = self.sessions.get_mut(session_id) {
+            session.direct_submissions.clear();
+            let settled: Vec<(String, String)> = session
+                .pending
+                .iter()
+                .filter_map(|command| match &command.kind {
+                    SteerCommandKind::Enqueue(input) => {
+                        Some((command.command_id.clone(), input.input_id.clone()))
+                    }
+                    _ => None,
+                })
+                .collect();
+            session
+                .pending
+                .retain(|command| !matches!(command.kind, SteerCommandKind::Enqueue(_)));
+            for (command_id, input_id) in settled {
+                session.queued_at.remove(&command_id);
+                session.failed_unknown.insert(input_id);
+            }
+        }
+    }
+
     pub(crate) fn claim_delivery(&mut self, session_id: &str, input_id: &str) -> bool {
         let session = self.sessions.entry(session_id.to_owned()).or_default();
         let inserted = session.delivered.insert(input_id.to_owned());
         session.direct_submissions.remove(input_id);
-        session.submitted.remove(input_id);
-        session.recovery_sent.remove(input_id);
+        session.failed_unknown.remove(input_id);
         session.pending.retain(|command| {
             !matches!(&command.kind, SteerCommandKind::Enqueue(input) if input.input_id == input_id)
         });

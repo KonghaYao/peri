@@ -174,28 +174,42 @@ pub(super) fn ensure_mailbox(
                                     message.event
                                 {
                                     if snapshot.generation == generation {
-                                        sink.push_event(
-                                            &sid,
-                                            &ExecutorEvent::UserInputQueueChanged(snapshot),
-                                            0,
-                                        )
-                                        .await;
+                                        if let Err(error) = sink
+                                            .push_event(
+                                                &sid,
+                                                &ExecutorEvent::UserInputQueueChanged(snapshot),
+                                                0,
+                                            )
+                                            .await
+                                        {
+                                            tracing::warn!(
+                                                error = %error,
+                                                "user input snapshot send failed"
+                                            );
+                                        }
                                     }
                                 }
                             }
                             Ok(_) => {}
                             Err(peri_controller::SubscriptionError::Lagged(skipped)) => {
                                 tracing::warn!(skipped, "user input queue subscription lagged");
-                                // 广播落后会丢失 UserInputDelivered；立即补发当前快照，
-                                // 由客户端按终态记录补齐交付确认。
+                                // 广播落后会丢失快照；立即补发当前快照。Delivered 本身由
+                                // 事件泵的交付日志补发，客户端不再从终态合成气泡。
                                 let snapshot = lag_mailbox.snapshot();
                                 if snapshot.generation == generation {
-                                    sink.push_event(
-                                        &sid,
-                                        &ExecutorEvent::UserInputQueueChanged(snapshot),
-                                        0,
-                                    )
-                                    .await;
+                                    if let Err(error) = sink
+                                        .push_event(
+                                            &sid,
+                                            &ExecutorEvent::UserInputQueueChanged(snapshot),
+                                            0,
+                                        )
+                                        .await
+                                    {
+                                        tracing::warn!(
+                                            error = %error,
+                                            "lagged user input snapshot send failed"
+                                        );
+                                    }
                                 }
                             }
                             Err(peri_controller::SubscriptionError::Closed) => break,

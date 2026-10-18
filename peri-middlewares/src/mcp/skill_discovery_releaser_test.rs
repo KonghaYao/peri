@@ -13,7 +13,8 @@ impl peri_acp_types::event::EventSink for NoopEventSink {
         _session_id: &str,
         _event: &peri_acp_types::event::ExecutorEvent,
         _context_window: u32,
-    ) {
+    ) -> Result<(), peri_acp_types::event::EventSinkError> {
+        Ok(())
     }
 
     async fn push_done(&self, _session_id: &str, _stop_reason: &str, _request_id: Option<&str>) {}

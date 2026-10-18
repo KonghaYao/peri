@@ -7,14 +7,21 @@ use async_trait::async_trait;
 
 use crate::command::command_handler::{CommandHandler, CommandOutcome};
 use crate::command::{CommandContext, CommandResult, PromptStopReason};
-use crate::event::{EventSink, ExecutorEvent};
+use crate::event::{EventSink, EventSinkError, ExecutorEvent};
 
 /// 假事件 sink：仅实现必须方法，默认方法留空。
 struct NoopSink;
 
 #[async_trait]
 impl EventSink for NoopSink {
-    async fn push_event(&self, _session_id: &str, _event: &ExecutorEvent, _context_window: u32) {}
+    async fn push_event(
+        &self,
+        _session_id: &str,
+        _event: &ExecutorEvent,
+        _context_window: u32,
+    ) -> Result<(), EventSinkError> {
+        Ok(())
+    }
 
     async fn push_done(&self, _session_id: &str, _stop_reason: &str, _request_id: Option<&str>) {}
 }

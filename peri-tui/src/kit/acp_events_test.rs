@@ -59,6 +59,8 @@ mod render_cache_invalidation_test;
 mod session_events_test;
 #[path = "acp_events_test/snapshot_test.rs"]
 mod snapshot_test;
+#[path = "acp_events_test/steer_boundary_test.rs"]
+mod steer_boundary_test;
 #[path = "acp_events_test/steer_test.rs"]
 mod steer_test;
 #[path = "acp_events_test/streaming_test.rs"]

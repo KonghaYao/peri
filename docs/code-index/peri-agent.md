@@ -1,7 +1,7 @@
 # peri-agent 代码索引
 
 
-输入交付回归：`session/user_input_mailbox/delivery_notification_test.rs` 覆盖 Claim 后快照抢先投影、重复 Receive、publication generation、恢复与失效。Mailbox 的通知去重身份独立于状态投影；`mark_committed_deliveries` 核对实际 delivery，恢复仍由已持久事实重放，不新增持久“客户端已收到”记录。
+输入交付回归：`session/user_input_mailbox/delivery_notification_test.rs` 覆盖 Claim 后快照抢先投影、重复 Receive、publication generation、恢复与失效。Mailbox 的通知去重身份独立于状态投影；`mark_committed_deliveries` 核对实际 delivery，恢复仍由已持久事实重放，不新增持久“客户端已收到”记录。`user_input_mailbox.rs` 的 `pending_delivery_notifications`/`ack_delivery_notification` 保存有界进程内交付日志；交付槽位在 enqueue 时预留，容量不足在 Claim 前拒绝（`user_input_mailbox/window.rs` 承担展示/账本/日志存储辅助）。`session/exec/executor_helpers/event_pump.rs` 在推送任何后续事件前按 Receive 顺序补发 Delivered（sink 确认后才 ack；失败保留日志并有界重试，耗尽后发 `AgentExecutionFailed` 且跳过正常 done），`event_pump_test.rs` 覆盖 B→A、assistant 输出前补发、mid-turn 并发交付、assistant 文本重试、尾部失败、重复抑制与 flush。
 
 
 错误诊断入口：`peri-acp-types/src/error.rs` 的 `AgentError::category_name` / `cause_chain` 保留实际错误；`session/exec/executor_helpers/v2_execute.rs` 的 fatal 漏斗记录 session/turn、分类与原因链。`ExecutionFailure` 将 `error_category`、`causes` 及 Model diagnostic 显式交给 ACP/遥测，不以通用公开提示替代诊断。重试与中断由 `session/retry_events.rs` / `agent/model_bridge.rs` 保留底层原因；内容不脱敏，长度与终止语义仍按 ARC-SECRET-001 和原执行契约约束。

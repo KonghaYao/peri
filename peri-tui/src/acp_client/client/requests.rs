@@ -22,6 +22,10 @@ mod caps_tests;
 #[path = "session_request_test.rs"]
 mod session_request_tests;
 
+#[cfg(test)]
+#[path = "steer_config_timeout_test.rs"]
+mod steer_config_timeout_tests;
+
 impl AcpTuiClient {
     pub(crate) fn stable_session_identity(&self) -> Option<(String, u64)> {
         self.lifecycle.stable_identity()

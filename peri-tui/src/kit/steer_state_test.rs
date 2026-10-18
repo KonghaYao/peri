@@ -544,9 +544,42 @@ fn test_steer_idle_submission_skips_queue_until_delivery() {
     assert!(!state.claim_delivery("s", "b"), "重复确认不得重复生成气泡");
 }
 
-/// [回归测试] 交付事件丢失后，终态快照必须清除“提交中”，并保留正文用于补气泡。
 #[test]
-fn test_steer_terminal_delivered_snapshot_recovers_lost_delivery() {
+fn fatal_execution_failure_clears_submitting_feedback() {
+    let mut state = make_idle_state();
+    let input = make_input("f");
+    state.begin(make_command(SteerCommandKind::Enqueue(input.clone())));
+    assert!(state.direct_submitting("s", 1));
+    // direct submission 会隐藏同 ID 的 row；这里直接验证 pending Enqueue 的
+    // Submitting 投影本身，再确认失败结算会移除它。
+    state
+        .sessions
+        .get_mut("s")
+        .unwrap()
+        .direct_submissions
+        .clear();
+    assert!(
+        state
+            .rows("s")
+            .iter()
+            .any(|row| row.state == SteerItemState::Submitting)
+    );
+    state.fail_session_submissions("s");
+    assert!(!state.direct_submitting("s", 1));
+    assert!(
+        state.rows("s").is_empty(),
+        "失败结算后不得继续投影 Submitting"
+    );
+    let session = state.sessions.get("s").unwrap();
+    assert!(session.failed_unknown.contains(&input.input_id));
+    assert!(!session.pending.iter().any(|command| {
+        matches!(&command.kind, SteerCommandKind::Enqueue(pending) if pending.input_id == input.input_id)
+    }));
+}
+
+/// [回归测试] 终态快照只清除提交反馈；气泡必须由有序事件泵的 Delivered 生成。
+#[test]
+fn test_steer_terminal_delivered_snapshot_does_not_synthesize_a_bubble() {
     let mut state = make_idle_state();
     let input = make_input("b");
     state.begin(make_command(SteerCommandKind::Enqueue(input.clone())));
@@ -564,18 +597,13 @@ fn test_steer_terminal_delivered_snapshot_recovers_lost_delivery() {
     assert!(state.rows("s").is_empty(), "终态不应继续留在待发送区");
     let session = state.sessions.get("s").unwrap();
     assert!(
-        session.recovery_sent.contains(&input.input_id),
-        "终态对账应只补发一次交付确认"
-    );
-    assert!(
-        session.submitted.contains_key(&input.input_id),
-        "本地正文保留到 claim_delivery 为止"
+        !session.delivered.contains(&input.input_id),
+        "终态快照不得伪造 Delivered；气泡由事件泵按序推送"
     );
 
+    // 真正的事件到达后才生成一次气泡；重复事件不重复生成。
     assert!(state.claim_delivery("s", &input.input_id));
     assert!(!state.claim_delivery("s", &input.input_id));
-    let session = state.sessions.get("s").unwrap();
-    assert!(!session.submitted.contains_key(&input.input_id));
 }
 
 /// [回归测试] Withdrawn 是确定未执行：清除提交中，但不能伪造交付气泡。
@@ -597,12 +625,8 @@ fn test_steer_terminal_withdrawn_snapshot_clears_submission_without_delivery() {
     assert!(!state.direct_submitting("s", 1));
     let session = state.sessions.get("s").unwrap();
     assert!(
-        !session.recovery_sent.contains(&input.input_id),
+        !session.delivered.contains(&input.input_id),
         "撤回不能触发交付确认"
-    );
-    assert!(
-        !session.submitted.contains_key(&input.input_id),
-        "撤回是终态，正文无需保留"
     );
 }
 

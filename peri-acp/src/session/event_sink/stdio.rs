@@ -133,7 +133,7 @@ impl EventSink for StdioEventSink {
         reminder: &peri_acp_types::system_reminder::SystemReminder,
         replay: bool,
         source_agent_id: Option<&str>,
-    ) {
+    ) -> Result<(), peri_acp_types::event::EventSinkError> {
         match reminder_carriage(&self.caps, reminder) {
             StdioReminderCarriage::FilteredOut => {
                 debug!(
@@ -143,7 +143,7 @@ impl EventSink for StdioEventSink {
                     replay,
                     "stdio sink: system reminder is not addressed to the client audience"
                 );
-                return;
+                return Ok(());
             }
             StdioReminderCarriage::NotCarried => {
                 debug!(
@@ -153,7 +153,7 @@ impl EventSink for StdioEventSink {
                     replay,
                     "stdio sink: client did not negotiate peri.systemReminder; the structured reminder is not carried"
                 );
-                return;
+                return Ok(());
             }
             StdioReminderCarriage::Structured => {}
         }
@@ -165,18 +165,27 @@ impl EventSink for StdioEventSink {
         };
         if let Err(e) = self.cx.send_notification(notification) {
             error!(error = %e, "StdioEventSink: failed to send system reminder");
+            return Err(peri_acp_types::event::EventSinkError::new(format!(
+                "stdio system reminder failed: {e}"
+            )));
         }
+        Ok(())
     }
 
-    async fn push_event(&self, _session_id: &str, event: &ExecutorEvent, context_window: u32) {
+    async fn push_event(
+        &self,
+        _session_id: &str,
+        event: &ExecutorEvent,
+        context_window: u32,
+    ) -> Result<(), peri_acp_types::event::EventSinkError> {
         if let ExecutorEvent::SystemReminder {
             reminder,
             source_agent_id,
         } = event
         {
             self.push_system_reminder(_session_id, reminder, false, source_agent_id.as_deref())
-                .await;
-            return;
+                .await?;
+            return Ok(());
         }
         let mapped = map_event(event, context_window, &self.caps);
         for m in mapped {
@@ -188,10 +197,13 @@ impl EventSink for StdioEventSink {
                 );
                 if let Err(e) = self.cx.send_notification(notif) {
                     error!(error = %e, "StdioEventSink: failed to send SessionNotification");
-                    break;
+                    return Err(peri_acp_types::event::EventSinkError::new(format!(
+                        "stdio session notification failed: {e}"
+                    )));
                 }
             }
         }
+        Ok(())
     }
 
     async fn push_done(&self, _session_id: &str, _stop_reason: &str, _request_id: Option<&str>) {

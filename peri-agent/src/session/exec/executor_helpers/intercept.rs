@@ -86,16 +86,20 @@ pub async fn emit_command_feedback(
     result: &mut CommandResult,
 ) {
     if let Some(fb) = result.feedback.take() {
-        sink.push_event(
-            session_id,
-            &ExecutorEvent::CommandFeedback(CommandFeedback {
-                level: fb.level,
-                message: fb.message.clone(),
-                channel: fb.channel,
-            }),
-            0,
-        )
-        .await;
+        if let Err(error) = sink
+            .push_event(
+                session_id,
+                &ExecutorEvent::CommandFeedback(CommandFeedback {
+                    level: fb.level,
+                    message: fb.message.clone(),
+                    channel: fb.channel,
+                }),
+                0,
+            )
+            .await
+        {
+            tracing::warn!(session_id, error = %error, "command feedback event send failed");
+        }
         if fb.channel == FeedbackChannel::Session {
             result.messages.push(BaseMessage::system(fb.message));
         }

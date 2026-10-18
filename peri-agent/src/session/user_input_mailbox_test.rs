@@ -1,6 +1,9 @@
 use super::*;
 use peri_acp_types::session::MessageQueue;
 
+#[path = "user_input_mailbox_terminal_test.rs"]
+mod terminal_tests;
+
 fn make_mailbox() -> (Arc<UserInputMailbox>, Arc<SessionInbox>) {
     let inbox = Arc::new(SessionInbox::new(Arc::new(MessageQueue::new())));
     (
@@ -899,6 +902,8 @@ fn test_mailbox_terminal_snapshot_is_bounded() {
         let id = messages[0].message().unwrap().id();
         mailbox.mark_claimed(&[id]);
         mailbox.mark_delivered(&[id]);
+        // 本测试只验证终态展示有界；模拟事件泵立即确认交付日志。
+        mailbox.ack_delivery_notification(&input.input_id);
     }
 
     let snapshot = mailbox.snapshot();

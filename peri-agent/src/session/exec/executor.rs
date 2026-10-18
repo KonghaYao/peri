@@ -422,6 +422,7 @@ pub async fn run_session_loop(ctx: SessionContext, turn: TurnInput) -> PromptRes
         langfuse_on_turn_start,
         langfuse_on_turn_end,
         request_id: ctx.request_id.clone(),
+        delivery_journal: ctx.user_input_mailbox.clone(),
     });
 
     // 把会 move/借用 的资源直接传入 build_and_execute_agent。

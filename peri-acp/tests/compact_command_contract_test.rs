@@ -18,11 +18,17 @@ struct AuditSink(Mutex<Vec<String>>, Mutex<Vec<String>>);
 
 #[async_trait]
 impl EventSink for AuditSink {
-    async fn push_event(&self, _: &str, event: &ExecutorEvent, _: u32) {
+    async fn push_event(
+        &self,
+        _: &str,
+        event: &ExecutorEvent,
+        _: u32,
+    ) -> Result<(), peri_acp_types::event::EventSinkError> {
         self.0
             .lock()
             .unwrap()
             .push(serde_json::to_string(event).unwrap());
+        Ok(())
     }
     async fn push_done(&self, _: &str, reason: &str, _: Option<&str>) {
         self.1.lock().unwrap().push(reason.to_owned());

@@ -80,7 +80,18 @@ transcript flush 与事件 forwarder 收尾，确认自然成功；同一 attemp
 
 队列快照、运行开始及投递结果均由 Agent 发 canonical v2 事件，经 Controller、ACP 映射与
 能力门控到达 TUI，不进入公开 activity 摘要。Delivered 与随后 assistant 输出处于本轮同一
-render FIFO，稳定 input ID 用于 live/replay 去重，复用原 `TuiUserBubble`。
+render FIFO，稳定 input ID 用于 live/replay 去重，复用原 `TuiUserBubble`。事件泵在推送
+任何后续事件前，按 mailbox 的进程内交付日志以 Receive 实际顺序补发 `UserInputDelivered`；
+交付槽位在 enqueue 准入时预留，容量不足在消费/Claimed 之前拒绝，不会在消息写入 transcript
+后才失败。sink 未确认写出前不 ack，失败保留日志并有界重试；重试耗尽显式失败，不以普通
+done 收尾。TUI 不从终态快照合成气泡，终态只清除提交反馈。
+
+投递语义是 **at-least-once**：sink 返回错误不证明客户端未收到；未 ack 的 Delivered 可能重复
+投递，消费端必须按稳定 input ID 幂等去重。客户端事件重试有界；耗尽后发送
+`AgentExecutionFailed`（该通知本身复用同一有界重试）并跳过正常 done。若连失败通知也不可达，
+TUI 依赖通知通道关闭路径收敛（`ACP_STATE.is_loading=false`、清空排队输入、显示断连提示），
+执行泵仍会发送 `pump_done` 释放 prompt；该恢复不依赖失败事件被送达，前提是 transport 关闭
+能够被 notifier 观察到。
 
 运行开始的服务端 request ID 与 done 配对，客户端据此建立权限确认和 AskUser 的运行 owner。
 新建/加载会话在同一个 operation gate 内绑定队列 generation 并恢复实际运行身份，之后才
