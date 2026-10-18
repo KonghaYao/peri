@@ -1,4 +1,37 @@
+use async_trait::async_trait;
+use peri_agent::tools::BaseTool;
+use serde_json::json;
+
 use super::*;
+
+/// 夹具 deferred 工具：只用于让首个 Reason 的动态贡献包含 "## Deferred Tools"。
+///
+/// 生产环境的 deferred 目录来自 MCP 等工具；本用例验证的是装配顺序，不应
+/// 依赖某个具体业务工具是否可见。
+struct FixtureDeferredTool;
+
+#[async_trait]
+impl BaseTool for FixtureDeferredTool {
+    fn name(&self) -> &str {
+        "FixtureDeferredTool"
+    }
+
+    fn description(&self) -> &str {
+        "Fixture-only deferred tool used to assert dynamic prompt contributions."
+    }
+
+    fn parameters(&self) -> serde_json::Value {
+        json!({"type": "object", "properties": {}})
+    }
+
+    async fn invoke(
+        &self,
+        _input: serde_json::Value,
+        _ctx: peri_agent::tools::ToolContext<'_>,
+    ) -> Result<String, Box<dyn std::error::Error + Send + Sync>> {
+        Ok(String::new())
+    }
+}
 
 /// [回归测试] production 首个 Reason 必须看到同一 middleware chain 在
 /// before_agent 后生成的 ToolSearch dynamic prompt contribution。
@@ -13,6 +46,12 @@ async fn test_production_first_reason_sees_after_before_agent_dynamic_contributi
         requests: Arc::clone(&requests),
     }) as Arc<dyn Model>;
     let mut ctx = make_session_context("dynamic-first-reason").await;
+    // Q01 将 AgentResult 移出模型可见目录后，夹具必须自带一个 deferred 工具，
+    // 否则 "## Deferred Tools" 段因目录为空而缺席，本用例就失去断言对象。
+    ctx.shared_tools.write().insert(
+        "FixtureDeferredTool".to_string(),
+        Arc::new(FixtureDeferredTool),
+    );
     ctx.primary_llm_factory = Some(Arc::new(move || Arc::clone(&model)));
     let frozen = frozen_with_dynamic_prompt_policy("DYNAMIC_BASE_SENTINEL", &[]);
     let (out, _) = make_stage_build(&ctx)(make_stage_request(frozen, None)).unwrap();
@@ -40,6 +79,7 @@ async fn test_production_first_reason_sees_after_before_agent_dynamic_contributi
     assert_eq!(system.matches("DYNAMIC_BASE_SENTINEL").count(), 1);
     assert_eq!(system.matches("## Deferred Tools").count(), 1);
     let tool_search = &system[tool_search_offset..];
+    assert_eq!(tool_search.matches("FixtureDeferredTool").count(), 1);
     assert_eq!(
         tool_search
             .matches("Discover deferred tools by name or keyword")

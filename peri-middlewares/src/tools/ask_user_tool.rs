@@ -34,7 +34,6 @@ impl AskUserTool {
 struct InputOption {
     label: String,
     description: Option<String>,
-    _preview: Option<String>,
 }
 
 #[derive(serde::Deserialize)]

@@ -247,12 +247,12 @@ Git postcondition 只比较 Workflow 前后发生变化的路径，已有且未�
 
 两条路径共用 `resume_from` 机制：
 
-1. **resume-only**（`resumeFromRunId` 且无 `script`/`scriptPath`）：内核读 `state.json`（校验 run_id 与请求一致、拒绝路径穿越与非 UUID 目录名、拒绝仍在运行的状态）与 journal，按原 `args`/`max_concurrency`/limits 重启。
+1. **resume-only**（`resumeFromRunId` 且无 `script`/`scriptPath`）：内核读 `state.json`（校验 run_id 与请求一致、拒绝路径穿越与非 UUID 目录名、拒绝仍在运行的状态）与 journal，按原 `args`/`max_concurrency`/limits 重启。该形态只接受 `resumeFromRunId`（`strictPreflight:false` 为允许的 no-op；`strictPreflight:true` 与 start 同文案拒绝）；`args`、`maxAgents`、`maxToolCalls`、`maxElapsedMs`、`budgetTotal`、`maxConcurrency`、`name`、`writeIntent`、`script`/`scriptPath` 等启动期字段一律显式拒绝，不会被静默忽略——改变输入须携带完整 script（或 `scriptPath`）+ `resumeFromRunId` 走 journal 重放路径。
 2. **journal 缓存重放**（携带 script 的 `resumeFromRunId`）：`read_all_strict` 读取上一 run journal，仅把从 `seq=0` 开始的连续 `ok` 前缀交给 Node；首个 dead/skipped 及后缀重新执行，Node 按调用 key 匹配前缀。
 
 - 缺失、IO 错误、损坏 JSON、序号不连续/重复均报错，不得降级成无缓存新运行；序号损坏需依据工作包 checkpoint 显式重新规划。
 - Node 仍按调用 key 匹配前缀，不能用调用缓存代替工作包依赖与产物有效性检查。
-- `state.json` 保存启动 `args` 与并发数并原样恢复；legacy 缺失参数不可重建，并发兼容默认 3；改变契约或恢复计划时通过 `Workflow` 工具显式传完整新 args。
+- `state.json` 保存启动 `args` 与并发数并原样恢复；legacy 缺失参数不可重建，并发兼容默认 3；改变契约或恢复计划时通过 `Workflow` 工具显式传完整新 script（或 `scriptPath`）+ `resumeFromRunId`。
 - 现有 budget/limits 是物理运行上限，不是跨运行计费账本；cache-hit 不重复计数。
 
 ---

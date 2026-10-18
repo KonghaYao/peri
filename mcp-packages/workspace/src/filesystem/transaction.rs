@@ -98,39 +98,6 @@ pub(crate) enum CommitError {
     Io(std::io::Error),
 }
 
-pub(crate) fn target_key(cwd: &str, file_path: &str) -> PathBuf {
-    let path = Path::new(file_path);
-    let raw = if path.is_absolute() {
-        path.to_path_buf()
-    } else {
-        Path::new(cwd).join(path)
-    };
-    let normalized = logical_path_key(&raw);
-    if let Ok(canonical) = normalized.canonicalize() {
-        return canonical;
-    }
-
-    let mut ancestor = normalized.as_path();
-    let mut suffix = Vec::new();
-    while !ancestor.exists() {
-        let Some(name) = ancestor.file_name() else {
-            return normalized;
-        };
-        suffix.push(name.to_os_string());
-        let Some(parent) = ancestor.parent() else {
-            return normalized;
-        };
-        ancestor = parent;
-    }
-    let Ok(mut key) = ancestor.canonicalize() else {
-        return normalized;
-    };
-    for component in suffix.into_iter().rev() {
-        key.push(component);
-    }
-    key
-}
-
 pub(crate) fn logical_path_key(path: &Path) -> PathBuf {
     let mut normalized = PathBuf::new();
     for component in path.components() {

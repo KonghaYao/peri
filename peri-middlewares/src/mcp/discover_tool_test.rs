@@ -95,11 +95,259 @@ fn tool_metadata_is_deferred_meta() {
     assert_eq!(tool.namespace(), Some("meta"));
     let params = tool.parameters();
     assert_eq!(params["type"], "object");
+    let branches = params["oneOf"].as_array().unwrap();
+    assert_eq!(branches.len(), 3);
+    for (branch, (method, required)) in branches.iter().zip([
+        ("search", "query"),
+        ("list", "server"),
+        ("detail", "server"),
+    ]) {
+        assert_eq!(branch["properties"]["method"]["enum"], json!([method]));
+        assert_eq!(branch["required"], json!(["method", "params"]));
+        assert_eq!(branch["additionalProperties"], false);
+        let nested = &branch["properties"]["params"];
+        assert_eq!(nested["required"], json!([required]));
+        assert_eq!(nested["additionalProperties"], false);
+    }
     assert_eq!(
-        params["properties"]["method"]["enum"],
-        json!(["search", "list", "detail"])
+        branches[0]["properties"]["params"]["properties"]["max_results"],
+        json!({"type": "integer", "minimum": 0, "maximum": 20, "default": 5})
     );
-    assert_eq!(params["required"], json!(["method"]));
+    assert_eq!(
+        branches[1]["properties"]["params"]["properties"]["domain"]["enum"],
+        json!(["tools", "resources", "skills", "agents"])
+    );
+    for field in [
+        "execution_name",
+        "original_name",
+        "server",
+        "direct",
+        "agents",
+    ] {
+        assert!(tool.description().contains(field));
+    }
+    assert!(!tool.description().contains("三域"));
+}
+
+struct CatalogTool {
+    name: &'static str,
+    original: &'static str,
+    direct: bool,
+    visible: bool,
+}
+
+#[async_trait]
+impl BaseTool for CatalogTool {
+    fn name(&self) -> &str {
+        self.name
+    }
+    fn description(&self) -> &str {
+        "目录专属描述"
+    }
+    fn parameters(&self) -> Value {
+        json!({"type": "object"})
+    }
+    fn mcp_server_name(&self) -> Option<&str> {
+        Some("plugin:foo.bar")
+    }
+    fn mcp_tool_name(&self) -> Option<&str> {
+        Some(self.original)
+    }
+    fn is_direct(&self) -> bool {
+        self.direct
+    }
+    fn visible_to_model(&self) -> bool {
+        self.visible
+    }
+    async fn invoke(
+        &self,
+        _: Value,
+        _: ToolContext<'_>,
+    ) -> Result<String, Box<dyn std::error::Error + Send + Sync>> {
+        panic!("发现不得执行目标工具")
+    }
+}
+
+fn make_catalog() -> SharedToolMap {
+    let entries = [
+        CatalogTool {
+            name: "Read",
+            original: "Read",
+            direct: true,
+            visible: true,
+        },
+        CatalogTool {
+            name: "mcp__plugin_foo_bar__action",
+            original: "action",
+            direct: false,
+            visible: true,
+        },
+        CatalogTool {
+            name: "WorkflowAgentResult",
+            original: "WorkflowAgentResult",
+            direct: false,
+            visible: false,
+        },
+    ];
+    Arc::new(RwLock::new(
+        entries
+            .into_iter()
+            .map(|tool| (tool.name.to_string(), Arc::new(tool) as Arc<dyn BaseTool>))
+            .collect(),
+    ))
+}
+
+fn make_catalog_pool() -> Arc<McpClientPool> {
+    let pool = Arc::new(McpClientPool::new_empty());
+    insert_handle(
+        &pool,
+        make_handle(
+            "plugin:foo.bar",
+            vec![
+                make_tool("action", "目录专属描述"),
+                make_tool("WorkflowAgentResult", "目录专属描述"),
+                make_tool("removed", "目录专属描述"),
+            ],
+            vec![],
+        ),
+    );
+    pool
+}
+
+/// [回归测试] 原始 pool 名称不能代替执行目录，隐藏和已撤下工具不得泄漏。
+#[tokio::test]
+async fn test_search_catalog_entries_resolve_and_list_uses_execution_names() {
+    let catalog = make_catalog();
+    let slot = Arc::new(RwLock::new(Some(catalog.clone())));
+    let tool = DiscoverMCPTool::new(make_catalog_pool(), None).with_catalog_slot(&slot);
+    assert_eq!(
+        Arc::strong_count(&slot),
+        1,
+        "工具不得强持槽而形成目录引用环"
+    );
+    let result = invoke(&tool, "search", json!({"query": "目录专属描述"})).await;
+    let entries = result.as_array().unwrap();
+    assert_eq!(entries.len(), 2);
+    for entry in entries {
+        let name = entry["execution_name"].as_str().unwrap();
+        let target = peri_agent::tools::DirectToolInvocationResolver
+            .resolve_model_target(name, &catalog.read())
+            .unwrap();
+        assert_eq!(entry["original_name"], target.mcp_tool_name().unwrap());
+        assert_eq!(entry["server"], "plugin:foo.bar");
+        assert_eq!(entry["direct"], target.is_direct());
+        assert!(target.visible_to_model());
+        assert!(entry["tool"]["inputSchema"].is_object());
+    }
+    let deferred = entries
+        .iter()
+        .find(|entry| entry["direct"] == false)
+        .unwrap();
+    assert_eq!(deferred["execution_name"], "mcp__plugin_foo_bar__action");
+    assert_eq!(
+        deferred["tool"],
+        serde_json::to_value(make_tool("action", "目录专属描述")).unwrap()
+    );
+    let listed = invoke(
+        &tool,
+        "list",
+        json!({"server": "plugin:foo.bar", "domain": "tools"}),
+    )
+    .await;
+    assert_eq!(listed, result);
+    let summary = invoke(&tool, "list", json!({"server": "plugin:foo.bar"})).await;
+    assert_eq!(summary["tools"], listed);
+    for query in ["mcp__plugin_foo_bar__action", "action"] {
+        assert_eq!(
+            invoke(&tool, "search", json!({"query": query})).await,
+            json!([deferred])
+        );
+    }
+}
+
+#[tokio::test]
+async fn test_no_catalog_slot_retains_raw_diagnostic_snapshot() {
+    let pool = make_catalog_pool();
+    let tool = DiscoverMCPTool::new(pool, None);
+    assert_eq!(
+        invoke(
+            &tool,
+            "list",
+            json!({"server": "plugin:foo.bar", "domain": "tools"})
+        )
+        .await,
+        json!(["action", "WorkflowAgentResult", "removed"])
+    );
+    assert_eq!(
+        invoke(&tool, "search", json!({"query": "action"})).await,
+        json!([{"type": "tool", "server": "plugin:foo.bar", "tool": make_tool("action", "目录专属描述")} ])
+    );
+}
+
+struct CatalogState(SharedToolMap);
+
+impl peri_agent::middleware::state::MiddlewareState for CatalogState {
+    fn cwd(&self) -> &str {
+        "/tmp"
+    }
+    fn messages(&self) -> &[peri_agent::messages::BaseMessage] {
+        &[]
+    }
+    fn add_message(&mut self, _: peri_agent::messages::BaseMessage) {}
+    fn replace_message(&mut self, _: peri_agent::messages::BaseMessage) -> bool {
+        false
+    }
+    fn current_step(&self) -> usize {
+        0
+    }
+    fn push_recall(&mut self, _: String) {}
+    fn drain_recall(&mut self) -> Vec<String> {
+        vec![]
+    }
+    fn v2_queue(&self) -> &peri_agent::session::MessageQueue {
+        unreachable!()
+    }
+    fn local_tools(&self) -> Option<&SharedToolMap> {
+        Some(&self.0)
+    }
+}
+
+/// [回归测试] 已收集的 DiscoverMCP 必须跟随两个发布钩子的当前目录。
+#[tokio::test]
+async fn test_middleware_publishes_initial_and_replacement_catalog() {
+    use peri_agent::middleware::r#trait::Middleware;
+    let middleware = crate::mcp::middleware::McpMiddleware::new(make_catalog_pool());
+    let discover = middleware
+        .collect_tools("/tmp")
+        .into_iter()
+        .find(|tool| tool.name() == "DiscoverMCP")
+        .unwrap();
+    middleware
+        .before_agent(&mut CatalogState(make_catalog()))
+        .await
+        .unwrap();
+    let request = json!({"method": "search", "params": {"query": "目录专属描述"}});
+    let result = discover
+        .invoke(request.clone(), ToolContext::new(&[], "/tmp"))
+        .await
+        .unwrap();
+    assert_eq!(
+        serde_json::from_str::<Value>(&result)
+            .unwrap()
+            .as_array()
+            .unwrap()
+            .len(),
+        2
+    );
+    middleware
+        .before_reason_catalog(&mut CatalogState(Arc::new(RwLock::new(Default::default()))))
+        .await
+        .unwrap();
+    let result = discover
+        .invoke(request, ToolContext::new(&[], "/tmp"))
+        .await
+        .unwrap();
+    assert_eq!(serde_json::from_str::<Value>(&result).unwrap(), json!([]));
 }
 
 // ─── search ────────────────────────────────────────────────────────────────

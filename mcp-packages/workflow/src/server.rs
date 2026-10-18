@@ -257,8 +257,10 @@ impl WorkflowMcpServer {
     ///
     /// resume-only（`resumeFromRunId` 且无 `script`/`scriptPath`）走内核 `resume`
     /// （设计 §6.3「resume = 携带 `resumeFromRunId` 调 `Workflow`」，ACP 不拼装
-    /// 参数）；其余输入语义不变，仍走 `start`（含 `resumeFromRunId` + script 的
-    /// journal 缓存重放语义）。两条路径共用同一组屏障与错误层级。
+    /// 参数）；启动期覆盖字段由 `params::validate_resume_only_input` 显式拒绝——
+    /// resume 只从 `state.json` 恢复输入，改变输入须携带完整 script 走 journal 重放。
+    /// 其余输入语义不变，仍走 `start`（含 `resumeFromRunId` + script 的 journal
+    /// 缓存重放语义）。两条路径共用同一组屏障与错误层级。
     ///
     /// 参数校验归 `WorkflowRuntime` 单一权威，其 `Err(String)` 保持工具级
     /// 业务失败（不按错误文本猜协议错误码）。
@@ -279,7 +281,12 @@ impl WorkflowMcpServer {
             );
         }
         let outcome = match resume_only_run_id(arguments) {
-            Some(run_id) => runtime.resume(run_id).await,
+            Some(run_id) => {
+                match peri_workflow::runtime::params::validate_resume_only_input(arguments) {
+                    Ok(()) => runtime.resume(run_id).await,
+                    Err(error) => return DispatchOutcome::tool_err(error),
+                }
+            }
             None => runtime.start_run(arguments.clone()).await,
         };
         match outcome {

@@ -396,26 +396,103 @@ fn test_offset_schema_forbids_guessed_large_values() {
     );
 }
 
+/// [回归测试] limit 缺省只读 2000 行，不能声明读完整文件。
+#[test]
+fn test_limit_schema_declares_default_2000_lines() {
+    let params = ReadFileTool::new("/tmp").parameters();
+    let desc = params["properties"]["limit"]["description"]
+        .as_str()
+        .unwrap();
+    assert!(
+        desc.contains("2000") && desc.contains("Defaults"),
+        "应声明默认行数：{desc}"
+    );
+    assert!(
+        desc.contains("continuation offset"),
+        "应说明续读 offset：{desc}"
+    );
+    assert!(!desc.contains("whole file"), "不能承诺读取全文：{desc}");
+}
+
+#[test]
+fn test_parameters_do_not_declare_pages() {
+    let params = ReadFileTool::new("/tmp").parameters();
+    assert!(params["properties"].get("pages").is_none());
+}
+
+/// [回归测试] 未实现的 PDF 页选择必须返回真实失败，不能返回成功占位。
 #[tokio::test]
-async fn test_pdf_with_pages_returns_placeholder() {
-    let tool = ReadFileTool::new("/tmp");
-    let result = tool
+async fn test_pdf_pages_parameter_is_rejected() {
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::write(dir.path().join("test.pdf"), "%PDF-1.4").unwrap();
+    let tool = ReadFileTool::new(dir.path().to_str().unwrap());
+    let error = tool
         .invoke(
             serde_json::json!({"file_path": "test.pdf", "pages": "1-5"}),
             peri_agent::tools::ToolContext::new(&[], "."),
         )
         .await
+        .unwrap_err();
+    assert!(error.downcast_ref::<ToolFailure>().is_some());
+    let message = error.to_string();
+    assert!(message.contains("pages") && message.contains("not supported"));
+    assert!(!message.contains("PDF READING NOT YET SUPPORTED"));
+    assert!(message.contains("Use the `Bash` tool with a PDF reader command"));
+}
+
+#[tokio::test]
+async fn test_pdf_pages_missing_file_is_rejected_before_existence_check() {
+    let dir = tempfile::tempdir().unwrap();
+    let tool = ReadFileTool::new(dir.path().to_str().unwrap());
+    let error = tool
+        .invoke(
+            serde_json::json!({"file_path": "missing.pdf", "pages": "1-5"}),
+            peri_agent::tools::ToolContext::new(&[], "."),
+        )
+        .await
+        .unwrap_err()
+        .to_string();
+    assert!(error.contains("pages") && error.contains("not supported"));
+    assert!(!error.contains("File not found"));
+}
+
+#[tokio::test]
+async fn test_read_rejects_all_non_null_pages_for_text_files() {
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::write(dir.path().join("test.txt"), "text").unwrap();
+    let tool = ReadFileTool::new(dir.path().to_str().unwrap());
+    for pages in [
+        serde_json::json!(""),
+        serde_json::json!("1-5"),
+        serde_json::json!(1),
+        serde_json::json!(false),
+        serde_json::json!([]),
+        serde_json::json!({}),
+    ] {
+        let error = tool
+            .invoke(
+                serde_json::json!({"file_path": "test.txt", "pages": pages}),
+                peri_agent::tools::ToolContext::new(&[], "."),
+            )
+            .await
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("pages") && error.contains("not supported"));
+    }
+}
+
+#[tokio::test]
+async fn test_read_null_pages_keeps_normal_text_behavior() {
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::write(dir.path().join("test.txt"), "text").unwrap();
+    let result = ReadFileTool::new(dir.path().to_str().unwrap())
+        .invoke(
+            serde_json::json!({"file_path": "test.txt", "pages": null}),
+            peri_agent::tools::ToolContext::new(&[], "."),
+        )
+        .await
         .unwrap();
-    assert!(
-        result.contains("PDF READING NOT YET SUPPORTED"),
-        "should return placeholder: {result}"
-    );
-    // 指引必须用**模型面名字**（裸名已无提供面）：逐字断言注册表的冻结字面量，
-    // 不用查表派生期望值（同源派生会让「查询改坏」自洽通过）。
-    assert!(
-        result.contains("Use the `Bash` tool with a PDF reader command"),
-        "PDF 占位提示必须以模型面名字指引 Bash: {result}"
-    );
+    assert!(result.contains("1\ttext"));
 }
 
 #[tokio::test]

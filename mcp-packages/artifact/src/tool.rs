@@ -185,8 +185,8 @@ impl BaseTool for ArtifactTool {
             raw_content
         };
 
-        let output = self.client.upload(&content, ttl).await;
-        Ok(output)
+        let response = self.client.upload(&content, ttl).await?;
+        Ok(ArtifactClient::format_output(&response))
     }
 }
 

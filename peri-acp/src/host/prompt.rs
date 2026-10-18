@@ -274,7 +274,7 @@ async fn run_prompt_attempt(
     // v2 路径下 MessageQueue 由 run_session_loop 从 session_manager.v2_message_queue
     // 解析（executor.rs:368），不再作为 PromptExecutionContext 字段传入。
 
-    // Parse optional background task results for synthetic tool_use + tool_result injection
+    // 解析后台结果，由 AsyncRouter 作为 Defer system reminder 投递。
     let bg_results: Vec<peri_acp_types::event::BackgroundTaskResult> = params
         .get("bgResults")
         .map(|v| serde_json::from_value(v.clone()).unwrap_or_default())

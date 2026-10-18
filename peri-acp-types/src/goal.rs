@@ -203,6 +203,16 @@ pub trait GoalController: Send + Sync {
     /// 声明完成。状态转换非法时返回 Err。
     async fn complete_goal(&self) -> Result<(), String>;
 
+    /// 仅当当前 goal 的身份仍为 `expected_goal_id` 时完成。
+    ///
+    /// 默认实现退化为 [`Self::complete_goal`]，保持第三方/测试控制器可用；
+    /// 该退化不具备身份校验，验证期间 goal 被替换后仍可能完成新 goal。
+    /// 需要 race-proof 语义的实现（生产 `GoalState`）必须覆盖本方法，
+    /// 在同一个写锁内完成身份比对与状态写入。
+    async fn complete_goal_if_current(&self, _expected_goal_id: &str) -> Result<(), String> {
+        self.complete_goal().await
+    }
+
     /// 声明阻塞。reason 必填。状态转换非法时返回 Err。
     async fn block_goal(&self, reason: String) -> Result<(), String>;
 
@@ -241,6 +251,8 @@ pub fn is_active(snap: &GoalViewSnapshot) -> bool {
 /// 只读快照（与 GoalSnapshot 平行，但定义在契约层避免依赖）
 #[derive(Debug, Clone, Default)]
 pub struct GoalViewSnapshot {
+    /// 当前 goal 的身份；`None` = 无 goal 或第三方控制器未提供
+    pub goal_id: Option<String>,
     pub objective: Option<String>,
     pub status: Option<GoalStatus>,
     pub token_budget: Option<u64>,

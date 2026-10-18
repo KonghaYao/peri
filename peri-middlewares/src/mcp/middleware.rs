@@ -16,7 +16,7 @@ use peri_acp_types::system_reminder::{
     ReminderSource, SystemReminder, TrustedSystemReminderFactory, SYSTEM_REMINDER_VERSION,
 };
 use peri_agent::{
-    agent::AgentCancellationToken,
+    agent::{stages::SharedToolMap, AgentCancellationToken},
     middleware::r#trait::Middleware,
     session::{MessageKind, MessageSource as QueueMessageSource, QueuedMessage},
     tools::BaseTool,
@@ -54,6 +54,7 @@ pub struct McpMiddleware {
     /// 会话 id：MCP 事实面（工具 / 概览 / 发现）按 ACP 连接归属过滤，
     /// `None` = 未装配会话上下文（print 模式 / 既有测试），不过滤。
     session_id: Option<String>,
+    discover_catalog: Arc<parking_lot::RwLock<Option<SharedToolMap>>>,
     /// session 取消令牌（发现任务持有；触发后 before_agent 不再投影/spawn）
     cancel: AgentCancellationToken,
     /// 是否已向模型提示过 tool search 用法（每个会话实例恰好一次）
@@ -94,11 +95,16 @@ impl McpMiddleware {
             registry: None,
             command_registry: None,
             session_id: None,
+            discover_catalog: Arc::new(parking_lot::RwLock::new(None)),
             cancel: AgentCancellationToken::new(),
             hint_sent: AtomicBool::new(false),
             builtin_closures: BTreeSet::new(),
             sub_agent_face_closed: false,
         }
+    }
+
+    fn publish_discover_catalog(&self, state: &dyn hook_state::CatalogState) {
+        *self.discover_catalog.write() = state.local_tools().cloned();
     }
 
     /// 注入会话 id（装配槽位调用）：ACP 声明的 server 只对本会话可见。
@@ -607,6 +613,7 @@ impl Middleware for McpMiddleware {
             .with_session(self.session_id.clone())
             .with_local_face_closed(sub_agent_face_closed);
         let discover_tool = DiscoverMCPTool::new(Arc::clone(&self.pool), self.registry.clone())
+            .with_catalog_slot(&self.discover_catalog)
             .with_agent_registry(Arc::new(agent_registry));
         tools.push(Box::new(match self.session_id.clone() {
             Some(session_id) => discover_tool.with_session_id(session_id),
@@ -669,9 +676,18 @@ impl Middleware for McpMiddleware {
     ///   命令面）。
     async fn before_agent(
         &self,
-        _state: &mut dyn hook_state::BeforeAgentState,
+        state: &mut dyn hook_state::BeforeAgentState,
     ) -> peri_agent::error::AgentResult<()> {
+        self.publish_discover_catalog(state);
         self.ensure_discovery();
+        Ok(())
+    }
+
+    async fn before_reason_catalog(
+        &self,
+        state: &mut dyn hook_state::CatalogState,
+    ) -> peri_agent::error::AgentResult<()> {
+        self.publish_discover_catalog(state);
         Ok(())
     }
 

@@ -12,7 +12,7 @@ pub(super) struct InvocationArgs {
     /// 显式与缺省必须分开承载：只有显式 `true` 会与「后台能力未装配」的场景
     /// （MCP Agent / resume）冲突，缺省不得把它们推进报错路径。
     pub(super) run_in_background: Option<bool>,
-    pub(super) cwd: String,
+    pub(super) cwd: Option<String>,
     pub(super) is_fork: bool,
 }
 
@@ -26,8 +26,14 @@ impl InvocationArgs {
     #[allow(clippy::result_large_err)]
     pub(super) fn parse(
         input: &serde_json::Value,
-        parent_cwd: &str,
     ) -> Result<Self, Box<dyn std::error::Error + Send + Sync>> {
+        // 未实现的隔离必须在任何 spawn/resume/fork 副作用之前拒绝。
+        if input.get("isolation").is_some_and(|value| !value.is_null()) {
+            return Err(EffectiveToolError::new(
+                EffectiveToolErrorCode::InvalidInput,
+                "isolation is not supported: the Agent tool does not create worktrees; remove the isolation parameter",
+            ).into());
+        }
         // resume_thread_id 的三分语义（「不填 = 新建」）：
         // - 字段缺失 / 非字符串 / 空串 → 未提供，走新建路径（LLM 表达「省略」时常用
         //   ""；它等同未填，不得被当成恢复意图；错误类型的宽容解码与 model / cwd /
@@ -73,8 +79,7 @@ impl InvocationArgs {
         let cwd = input
             .get("cwd")
             .and_then(|v| v.as_str())
-            .unwrap_or(parent_cwd)
-            .to_string();
+            .map(str::to_string);
         let is_fork = input.get("fork").and_then(|v| v.as_bool()).unwrap_or(false)
             || subagent_type.as_deref() == Some("fork");
 
@@ -105,6 +110,36 @@ fn invalid_resume_thread_id(raw: &str) -> EffectiveToolError {
 }
 
 impl super::SubAgentTool {
+    pub(super) async fn validate_cwd(
+        &self,
+        explicit_cwd: Option<&str>,
+    ) -> Result<String, Box<dyn std::error::Error + Send + Sync>> {
+        if let Some(cwd) = explicit_cwd {
+            let requested = tokio::fs::canonicalize(cwd).await.map_err(|error| {
+                EffectiveToolError::new(
+                    EffectiveToolErrorCode::InvalidInput,
+                    format!("cannot resolve explicit Agent.cwd: {error}"),
+                )
+            })?;
+            let parent = tokio::fs::canonicalize(&self.parent_cwd)
+                .await
+                .map_err(|error| {
+                    EffectiveToolError::new(
+                        EffectiveToolErrorCode::InvalidInput,
+                        format!("cannot resolve parent cwd for Agent.cwd validation: {error}"),
+                    )
+                })?;
+            if requested != parent {
+                return Err(EffectiveToolError::new(
+                    EffectiveToolErrorCode::InvalidInput,
+                    "Agent.cwd must resolve to the parent cwd; per-child Workspace rebinding is not supported",
+                ).into());
+            }
+        }
+        // 工具仍绑定父 Workspace；等价路径也统一使用父目录的表示。
+        Ok(self.parent_cwd.clone())
+    }
+
     /// Prefer the current ToolContext over the before_agent snapshot. Remove only
     /// the trailing AI tool call whose ToolResult has not arrived yet.
     pub(super) fn current_messages(&self, live_messages: &[BaseMessage]) -> Vec<BaseMessage> {

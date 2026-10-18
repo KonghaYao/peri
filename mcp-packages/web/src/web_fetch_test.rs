@@ -124,7 +124,7 @@ mod real_http_round_trip {
     use peri_agent::tools::{BaseTool, ToolContext};
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
-    use crate::web_fetch::WebFetchTool;
+    use crate::web_fetch::{read_body_capped, WebFetchTool};
 
     /// 合法的 Tavily /extract 响应：**故意不含** `failed_results` —— 生产结构
     /// （`web_fetch.rs` 的 `TavilyExtractResponse`）上有 `#[serde(default)]`，
@@ -140,12 +140,17 @@ mod real_http_round_trip {
 
     /// 本地回环 HTTP 桩：接受一次连接，读到请求头后回一段固定原文响应。
     ///
+    /// `declared_content_length` 为 `None` 时不发送 `Content-Length`，由
+    /// `Connection: close` 界定正文（覆盖压缩/流式场景）。
+    ///
     /// 返回 `(base_url, 请求头任务)`；任务的值是请求头原文，供断言请求行与「不发
     /// auth header」，**不得**打印（§9 规则 7：不打印 headers）。
-    async fn spawn_response_stub(
+    async fn spawn_stub(
         status_line: &'static str,
-        body: &'static str,
+        body: impl Into<String>,
+        declared_content_length: Option<usize>,
     ) -> (String, tokio::task::JoinHandle<String>) {
+        let body = body.into();
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
             .await
             .expect("本地桩必须能绑定回环端口");
@@ -168,15 +173,26 @@ mod real_http_round_trip {
                 }
             }
             let head = String::from_utf8_lossy(&received).into_owned();
-            let response = format!(
-                "{status_line}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
-                body.len()
-            );
+            let response = match declared_content_length {
+                Some(len) => format!(
+                    "{status_line}\r\nContent-Type: application/json\r\nContent-Length: {len}\r\nConnection: close\r\n\r\n{body}"
+                ),
+                None => format!(
+                    "{status_line}\r\nContent-Type: application/json\r\nConnection: close\r\n\r\n{body}"
+                ),
+            };
             let _ = socket.write_all(response.as_bytes()).await;
             let _ = socket.flush().await;
             head
         });
         (format!("http://127.0.0.1:{port}"), handle)
+    }
+
+    async fn spawn_response_stub(
+        status_line: &'static str,
+        body: &'static str,
+    ) -> (String, tokio::task::JoinHandle<String>) {
+        spawn_stub(status_line, body, Some(body.len())).await
     }
 
     #[tokio::test]
@@ -285,5 +301,137 @@ mod real_http_round_trip {
             text.contains("extract upstream down"),
             "非 2xx 的响应体须进入错误文本: {text}"
         );
+    }
+
+    /// 非 http(s) scheme 在本地被拒绝，不会向提取后端发起任何请求。
+    #[tokio::test]
+    async fn test_webfetch_invoke_rejects_non_http_scheme() {
+        // 不可达端点：若 scheme 校验缺失，错误会变成连接失败而不是 scheme 错误。
+        let tool = WebFetchTool::with_endpoint_for_test("http://127.0.0.1:1");
+
+        for url in ["file:///etc/passwd", "ftp://example.com/x"] {
+            let err = tool
+                .invoke(serde_json::json!({"url": url}), ToolContext::new(&[], "."))
+                .await
+                .expect_err("非 http(s) scheme 必须在本地被拒绝");
+            assert!(
+                err.to_string().contains("Unsupported URL scheme"),
+                "URL {url} 应因 scheme 被拒绝，实际：{err}"
+            );
+        }
+
+        let err = tool
+            .invoke(
+                serde_json::json!({"url": "not a url"}),
+                ToolContext::new(&[], "."),
+            )
+            .await
+            .expect_err("非法 URL 必须在本地被拒绝");
+        assert!(
+            err.to_string().contains("Invalid URL"),
+            "非法 URL 应解析失败，实际：{err}"
+        );
+    }
+
+    /// 声明超过 10 MiB 的 `Content-Length` 在读取正文前快速失败。
+    #[tokio::test]
+    async fn test_webfetch_invoke_rejects_declared_content_length_over_cap() {
+        let (base_url, _head) =
+            spawn_stub("HTTP/1.1 200 OK", "{}", Some(10 * 1024 * 1024 + 1)).await;
+        let tool = WebFetchTool::with_endpoint_for_test(&base_url);
+
+        let err = tool
+            .invoke(
+                serde_json::json!({"url": "https://example.com/page"}),
+                ToolContext::new(&[], "."),
+            )
+            .await
+            .expect_err("Content-Length 超限必须失败");
+
+        let text = err.to_string();
+        assert!(text.contains("exceeds"), "应报告超限：{text}");
+        assert!(text.contains("10485761"), "应包含声明长度：{text}");
+        assert!(
+            !text.contains("Failed to parse extract response"),
+            "必须在 JSON 解析前失败：{text}"
+        );
+    }
+
+    /// 无 `Content-Length` 时以流式累计为准：超过 cap 立即失败。
+    #[tokio::test]
+    async fn test_read_body_capped_rejects_stream_over_cap_without_content_length() {
+        let (base_url, _head) = spawn_stub("HTTP/1.1 200 OK", "x".repeat(32), None).await;
+        let resp = reqwest::Client::new()
+            .get(&base_url)
+            .send()
+            .await
+            .expect("本地桩必须返回响应");
+        assert!(resp.content_length().is_none(), "桩不得声明 Content-Length");
+
+        let err = read_body_capped(resp, 16)
+            .await
+            .expect_err("流式正文超过 cap 必须失败");
+        assert!(err.contains("exceeds"), "实际错误：{err}");
+    }
+
+    /// 无 `Content-Length` 且正文恰好等于 cap：读取成功（边界不误杀）。
+    #[tokio::test]
+    async fn test_read_body_capped_accepts_stream_at_cap_without_content_length() {
+        let (base_url, _head) = spawn_stub("HTTP/1.1 200 OK", "x".repeat(32), None).await;
+        let resp = reqwest::Client::new()
+            .get(&base_url)
+            .send()
+            .await
+            .expect("本地桩必须返回响应");
+
+        let body = read_body_capped(resp, 32)
+            .await
+            .expect("恰好等于 cap 的正文必须接受");
+        assert_eq!(body.len(), 32);
+    }
+
+    /// 非 2xx 正文同样受 4 KiB 显示上限约束，状态码保留。
+    #[tokio::test]
+    async fn test_webfetch_invoke_non_2xx_body_is_bounded_in_error() {
+        let (base_url, _head) =
+            spawn_stub("HTTP/1.1 502 Bad Gateway", "q".repeat(8192), None).await;
+        let tool = WebFetchTool::with_endpoint_for_test(&base_url);
+
+        let err = tool
+            .invoke(
+                serde_json::json!({"url": "https://example.com/page"}),
+                ToolContext::new(&[], "."),
+            )
+            .await
+            .expect_err("502 必须返回 Err");
+
+        let text = err.to_string();
+        assert!(
+            text.contains("Extract API returned HTTP 502"),
+            "错误文本须含状态：{text}"
+        );
+        assert_eq!(
+            text.matches('q').count(),
+            4096,
+            "错误正文必须截断到 4 KiB 显示上限"
+        );
+    }
+
+    /// 非 2xx 分支同样在读取正文前执行 `Content-Length` 上限预检。
+    #[tokio::test]
+    async fn test_webfetch_invoke_non_2xx_declared_length_over_cap_is_rejected() {
+        let (base_url, _head) =
+            spawn_stub("HTTP/1.1 502 Bad Gateway", "{}", Some(10 * 1024 * 1024 + 1)).await;
+        let tool = WebFetchTool::with_endpoint_for_test(&base_url);
+
+        let err = tool
+            .invoke(
+                serde_json::json!({"url": "https://example.com/page"}),
+                ToolContext::new(&[], "."),
+            )
+            .await
+            .expect_err("非 2xx 的超限正文必须失败");
+
+        assert!(err.to_string().contains("exceeds"), "应报告超限：{err}");
     }
 }

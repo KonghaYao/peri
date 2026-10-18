@@ -43,10 +43,12 @@
 //!   由 V-02/V-03 的其他文件覆盖。
 
 use crate::transport::AcpTransport;
+use async_trait::async_trait;
 use peri_acp_types::{
     interaction::UserInteractionBroker,
     session::{ExecutionFailureKind, MessageSource},
 };
+use peri_agent::tools::BaseTool;
 use peri_model::Model;
 use serde_json::json;
 
@@ -385,6 +387,35 @@ fn idle_transport() -> Arc<dyn AcpTransport> {
 struct ToolFaces {
     direct: Vec<String>,
     searched: Vec<String>,
+}
+
+/// 夹具 deferred 工具：给搜索面正控制一个稳定的非 builtin 命中项。
+///
+/// Q01 将 AgentResult 移出模型可见目录后，搜索面不再天然含有 deferred 工具；
+/// 需要正控制的用例自行注入本工具，而不是依赖某个业务工具的可见性。
+pub(super) struct FixtureDeferredTool;
+
+#[async_trait]
+impl BaseTool for FixtureDeferredTool {
+    fn name(&self) -> &str {
+        "FixtureDeferredTool"
+    }
+
+    fn description(&self) -> &str {
+        "Fixture-only deferred tool for search-surface positive controls (fixtureprobe)."
+    }
+
+    fn parameters(&self) -> serde_json::Value {
+        json!({"type": "object", "properties": {}})
+    }
+
+    async fn invoke(
+        &self,
+        _input: serde_json::Value,
+        _ctx: peri_agent::tools::ToolContext<'_>,
+    ) -> Result<String, Box<dyn std::error::Error + Send + Sync>> {
+        Ok(String::new())
+    }
 }
 
 /// 脚本化调用一次 `SearchExtraTools`（A20 的唯一等价对照面），取回两类工具名。

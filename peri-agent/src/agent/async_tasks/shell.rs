@@ -48,6 +48,46 @@ fn min_timeout_ms() -> u64 {
     }
 }
 
+/// timeout 参数不满足数值契约。
+///
+/// 缺失/`null` 表示未设置，不属于错误；字符串、bool、对象、数组、负数与小数
+/// 一律报错，不再静默回落到默认值。整数值浮点（如 `15000.0`）归一化为整数。
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+#[error(
+    "invalid `{parameter}`: expected an integer number of milliseconds >= 0 (null or omitted means unset); received {received}"
+)]
+pub struct TimeoutParseError {
+    parameter: &'static str,
+    received: String,
+}
+
+/// 严格解析 `timeout` 字段（毫秒）。
+///
+/// - 缺失 / `null` → `Ok(None)`（调用方决定默认语义）
+/// - 非负整数 → `Ok(Some(ms))`
+/// - 整数值浮点（`15000.0`）→ 归一化为 `Ok(Some(15000))`，兼容旧 `number` schema
+/// - 小数、负数、字符串、bool、对象、数组 → [`TimeoutParseError`]
+pub fn parse_timeout_ms(
+    input: &serde_json::Value,
+    parameter: &'static str,
+) -> Result<Option<u64>, TimeoutParseError> {
+    let Some(value) = input.get(parameter) else {
+        return Ok(None);
+    };
+    if value.is_null() {
+        return Ok(None);
+    }
+    let parsed = value.as_u64().or_else(|| {
+        let number = value.as_f64()?;
+        (number.is_finite() && number.fract() == 0.0 && number >= 0.0 && number <= u64::MAX as f64)
+            .then_some(number as u64)
+    });
+    parsed.map(Some).ok_or_else(|| TimeoutParseError {
+        parameter,
+        received: value.to_string(),
+    })
+}
+
 /// 解析前台（同步）timeout：结果恒为有界值。
 ///
 /// 返回 `(生效毫秒, 请求值被改写时的原始值)`：
@@ -55,12 +95,14 @@ fn min_timeout_ms() -> u64 {
 /// - 显式 `0` → [`FOREGROUND_MAX_TIMEOUT_MS`]（`0` 不能表示"不超时"），原始值为 `Some(0)`
 /// - 显式 > [`FOREGROUND_MAX_TIMEOUT_MS`] → 上限值，原始值为请求值（供回执说明）
 /// - 其余 → 请求值，并按平台下限兜底（Unix 1ms / Windows 5000ms）
-pub fn parse_foreground_timeout(input: &serde_json::Value) -> (u64, Option<u64>) {
-    match input.get("timeout").and_then(|v| v.as_u64()) {
-        None => (FOREGROUND_DEFAULT_TIMEOUT_MS, None),
-        Some(0) => (FOREGROUND_MAX_TIMEOUT_MS, Some(0)),
-        Some(ms) if ms > FOREGROUND_MAX_TIMEOUT_MS => (FOREGROUND_MAX_TIMEOUT_MS, Some(ms)),
-        Some(ms) => (ms.max(min_timeout_ms()), None),
+pub fn parse_foreground_timeout(
+    input: &serde_json::Value,
+) -> Result<(u64, Option<u64>), TimeoutParseError> {
+    match parse_timeout_ms(input, "timeout")? {
+        None => Ok((FOREGROUND_DEFAULT_TIMEOUT_MS, None)),
+        Some(0) => Ok((FOREGROUND_MAX_TIMEOUT_MS, Some(0))),
+        Some(ms) if ms > FOREGROUND_MAX_TIMEOUT_MS => Ok((FOREGROUND_MAX_TIMEOUT_MS, Some(ms))),
+        Some(ms) => Ok((ms.max(min_timeout_ms()), None)),
     }
 }
 
@@ -68,10 +110,12 @@ pub fn parse_foreground_timeout(input: &serde_json::Value) -> (u64, Option<u64>)
 ///
 /// - 未传 / 显式 `0` → None
 /// - 显式 >0 → clamp 到 [min, `BACKGROUND_MAX_TIMEOUT_MS`]
-pub fn parse_background_timeout(input: &serde_json::Value) -> Option<u64> {
-    match input.get("timeout").and_then(|v| v.as_u64()) {
-        None | Some(0) => None,
-        Some(ms) => Some(ms.clamp(min_timeout_ms(), BACKGROUND_MAX_TIMEOUT_MS)),
+pub fn parse_background_timeout(
+    input: &serde_json::Value,
+) -> Result<Option<u64>, TimeoutParseError> {
+    match parse_timeout_ms(input, "timeout")? {
+        None | Some(0) => Ok(None),
+        Some(ms) => Ok(Some(ms.clamp(min_timeout_ms(), BACKGROUND_MAX_TIMEOUT_MS))),
     }
 }
 

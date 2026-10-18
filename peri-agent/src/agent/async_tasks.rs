@@ -29,8 +29,8 @@ pub use registry::{
 };
 pub use shell::{
     bg_shell_task_id, finalize_bg_shell, parse_background_timeout, parse_foreground_timeout,
-    truncate_bytes, BACKGROUND_MAX_TIMEOUT_MS, FOREGROUND_DEFAULT_TIMEOUT_MS,
-    FOREGROUND_MAX_TIMEOUT_MS,
+    parse_timeout_ms, truncate_bytes, TimeoutParseError, BACKGROUND_MAX_TIMEOUT_MS,
+    FOREGROUND_DEFAULT_TIMEOUT_MS, FOREGROUND_MAX_TIMEOUT_MS,
 };
 pub use shell_executor::ShellExecutor;
 

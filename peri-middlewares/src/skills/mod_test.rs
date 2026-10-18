@@ -47,6 +47,25 @@ fn registry_with(server: &str, skills: Vec<SkillMetadata>) -> Arc<McpSkillRegist
     reg
 }
 
+/// [回归测试] 来源不是工具命名空间；workspace 与特殊 server 名都不得拼造路由。
+#[test]
+fn test_annotation_keeps_source_without_fabricating_tool_prefix() {
+    for server in ["workspace", "plugin:foo.bar"] {
+        let meta = fake_skill(server, "project", "hello");
+        let annotated = annotate_mcp_content(&meta, "# Body");
+        assert_eq!(
+            annotated.lines().next().unwrap(),
+            format!(
+            "This skill is served by MCP server \"{server}\", uri: skill://project/hello/SKILL.md."
+        )
+        );
+        assert!(!annotated.contains("mcp__"));
+        assert!(!annotated.contains("SearchExtraTools"));
+        assert!(!annotated.contains("ExecuteExtraTool"));
+        assert!(annotated.ends_with("\n\n# Body"));
+    }
+}
+
 // ─── 摘要渲染与来源标签（D4 / J1）─────────────────────────────────────────
 
 #[test]

@@ -33,6 +33,7 @@ use std::{
 
 use base64::Engine as _;
 use peri_acp_types::mcp::{McpNotificationMessageKind, MCP_MESSAGE_KIND_META_KEY};
+use peri_agent::agent::async_tasks::parse_background_timeout;
 use peri_agent::tools::{BaseTool, ToolContext, ToolExecutionStatus};
 use rmcp::{
     model::{
@@ -255,11 +256,9 @@ impl WorkspaceMcpServer {
                 .and_then(|args| args.get("command"))
                 .and_then(serde_json::Value::as_str)
                 .ok_or_else(|| McpError::invalid_params("missing Bash command", None))?;
-            let timeout = arguments
-                .and_then(|args| args.get("timeout"))
-                .and_then(serde_json::Value::as_u64)
-                .filter(|timeout| *timeout > 0)
-                .map(|timeout| timeout.min(600_000));
+            let timeout_input = serde_json::Value::Object(arguments.cloned().unwrap_or_default());
+            let timeout = parse_background_timeout(&timeout_input)
+                .map_err(|error| McpError::invalid_params(error.to_string(), None))?;
             let task = tasks
                 .spawn_scoped(command.into(), self.cwd.clone(), timeout, scope)
                 .await?;

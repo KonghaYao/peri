@@ -6,8 +6,7 @@ use super::*;
 /// 非 UUID 非空值 → 明确错误（保留原始值），不得静默忽略该字段。
 #[test]
 fn test_resume_thread_id_parse_is_three_way() {
-    let parse =
-        |input: serde_json::Value| super::super::invocation::InvocationArgs::parse(&input, "/tmp");
+    let parse = |input: serde_json::Value| super::super::invocation::InvocationArgs::parse(&input);
 
     // 缺省 / null / 空串（含纯空白）：等同未填，走新建路径。
     for omitted in [

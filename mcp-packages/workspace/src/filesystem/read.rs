@@ -145,11 +145,7 @@ impl BaseTool for ReadFileTool {
                 "limit": {
                     "type": "integer",
                     "minimum": 1,
-                    "description": "The number of lines to read. Only provide if the file is too large to read in a single call. Not providing this parameter reads the whole file (recommended)"
-                },
-                "pages": {
-                    "type": "string",
-                    "description": "For PDF files, the page range to read, e.g. '1-5', '3', '10-20'. Only applies to PDF files"
+                    "description": "The maximum number of lines to read. Defaults to 2000 when omitted; use the continuation offset shown in the output to read further."
                 }
             },
             "required": ["file_path"]
@@ -176,23 +172,14 @@ impl BaseTool for ReadFileTool {
 
         let resolved = resolve_path(&self.cwd, file_path);
 
-        let pages = input["pages"].as_str().map(|s| s.to_string());
-
-        // PDF + pages: 返回占位提示
-        if let Some(ext) = resolved.extension().and_then(|e| e.to_str()) {
-            if ext.eq_ignore_ascii_case("pdf") && pages.is_some() {
-                return Ok(format!(
-                    "[PDF READING NOT YET SUPPORTED]\n\nFile path: {}\nPDF reading with page selection is not yet implemented. {} as a workaround.",
-                    resolved.display(),
-                    // 指引指代 builtin 终端工具时必须用**模型面名字**（裸名已无提供面）；
-                    // 查表未命中的兜底不含工具名，不得回落到裸名。
-                    peri_acp_types::builtin_mcp::effective_name_of("workspace", "Bash").map_or(
-                        "Use a shell command with a PDF reader".to_string(),
-                        |name| format!("Use the `{name}` tool with a PDF reader command"),
-                    ),
-                ));
-            }
-            // PDF 但未提供 pages → 继续走到下面的二进制检测，返回 BINARY FILE DETECTED
+        if input.get("pages").is_some_and(|pages| !pages.is_null()) {
+            let workaround = peri_acp_types::builtin_mcp::effective_name_of("workspace", "Bash")
+                .map_or_else(
+                    || "Use a shell command with a PDF reader".to_string(),
+                    |name| format!("Use the `{name}` tool with a PDF reader command"),
+                );
+            let message = format!("The 'pages' parameter is not supported by Read. {workaround}.");
+            return Err(ToolFailure::new(message.clone(), message).into());
         }
 
         if let Some(ext) = resolved.extension().and_then(|e| e.to_str()) {

@@ -921,3 +921,121 @@ async fn concurrent_limit_rejection_keeps_limit_facts_on_the_wire() {
         Some(peri_acp_types::tasks::TaskShutdownReport::Complete)
     );
 }
+
+/// [回归测试] owned 后台路径曾把整数值浮点 timeout 当作未设置（无限运行）。
+/// `timeout: 100.0` 必须在 wire 上按 100ms 生效，命令来不及写出 sentinel。
+#[tokio::test]
+async fn background_integral_float_timeout_is_normalized_on_the_wire() {
+    let dir = tempfile::tempdir().expect("workspace");
+    let finished = dir.path().join("finished");
+    let server = WorkspaceMcpServer::standalone(dir.path().to_string_lossy(), false);
+    let (client, server_task) = connect(
+        server.clone(),
+        ClientCapabilities::builder().enable_tasks().build(),
+    )
+    .await;
+    let request = CallToolRequestParams::new("Bash").with_arguments(
+        serde_json::json!({
+            "command": "sleep 30; printf done > finished",
+            "run_in_background": true,
+            "timeout": 100.0
+        })
+        .as_object()
+        .expect("object")
+        .clone(),
+    );
+    let CallToolResponse::Task(created) = client
+        .peer()
+        .call_tool_once(request)
+        .await
+        .expect("background task")
+    else {
+        panic!("expected task handle")
+    };
+    let task_id = created.task.task_id;
+    let terminal = tokio::time::timeout(Duration::from_secs(5), async {
+        loop {
+            let snapshot = client
+                .peer()
+                .get_task(GetTaskParams::new(&task_id))
+                .await
+                .expect("task status");
+            if snapshot.task.status().is_terminal() {
+                break snapshot;
+            }
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+    })
+    .await
+    .expect("integral float timeout must terminate the background command");
+    assert_eq!(terminal.task.status(), TaskStatus::Completed);
+    assert!(
+        !finished.exists(),
+        "timeout must stop the command before it writes the sentinel"
+    );
+
+    drop(client);
+    server_task.await.expect("server closed");
+    assert_eq!(
+        tokio::time::timeout(Duration::from_secs(10), server.shutdown_shell_tasks())
+            .await
+            .expect("process cleanup deadline"),
+        Some(peri_acp_types::tasks::TaskShutdownReport::Complete)
+    );
+}
+
+/// [回归测试] 非整数 timeout 必须在 wire 上以 invalid_params 拒绝，且进程未启动。
+#[tokio::test]
+async fn background_invalid_timeout_is_rejected_before_spawn() {
+    let dir = tempfile::tempdir().expect("workspace");
+    let sentinel = dir.path().join("spawned");
+    let server = WorkspaceMcpServer::standalone(dir.path().to_string_lossy(), false);
+    let (client, server_task) = connect(
+        server.clone(),
+        ClientCapabilities::builder().enable_tasks().build(),
+    )
+    .await;
+    for invalid in [
+        serde_json::json!("15000"),
+        serde_json::json!(1.5),
+        serde_json::json!(-1),
+    ] {
+        let request = CallToolRequestParams::new("Bash").with_arguments(
+            serde_json::json!({
+                "command": "printf spawned > spawned",
+                "run_in_background": true,
+                "timeout": invalid
+            })
+            .as_object()
+            .expect("object")
+            .clone(),
+        );
+        let error = client
+            .peer()
+            .call_tool_once(request)
+            .await
+            .expect_err("invalid timeout must fail");
+        let rmcp::ServiceError::McpError(error) = error else {
+            panic!("expected MCP error, got {error}")
+        };
+        assert_eq!(error.code, rmcp::model::ErrorCode::INVALID_PARAMS);
+        let message = error.message.to_string();
+        assert!(
+            message.contains("timeout")
+                && message.contains("integer")
+                && message.contains(&invalid.to_string()),
+            "错误应包含参数名、期望格式与收到值: {message}"
+        );
+    }
+    tokio::time::sleep(Duration::from_millis(100)).await;
+    assert!(!sentinel.exists(), "参数校验必须先于进程启动");
+
+    drop(client);
+    server_task.await.expect("server closed");
+    assert_eq!(
+        tokio::time::timeout(Duration::from_secs(10), server.shutdown_shell_tasks())
+            .await
+            .expect("process cleanup deadline"),
+        Some(peri_acp_types::tasks::TaskShutdownReport::Complete)
+    );
+}

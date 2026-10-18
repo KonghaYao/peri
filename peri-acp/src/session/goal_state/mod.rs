@@ -178,12 +178,29 @@ impl GoalState {
         target: GoalStatus,
         reason: String,
     ) -> Result<(), String> {
+        self.set_status_with_reason_if_current(target, reason, None)
+            .await
+    }
+
+    /// set_status 带可选 goal 身份校验；身份比对与状态写入在同一写锁内完成。
+    async fn set_status_with_reason_if_current(
+        &self,
+        target: GoalStatus,
+        reason: String,
+        expected_goal_id: Option<&str>,
+    ) -> Result<(), String> {
         let (thread_id, store, goal_clone, blocked) = {
             let mut guard = self.inner.write();
             let goal = guard
                 .goal
                 .as_mut()
                 .ok_or_else(|| "无活跃 goal，无法 set_status".to_string())?;
+
+            if let Some(expected) = expected_goal_id {
+                if goal.goal_id != expected {
+                    return Err("goal 已被替换或清除，未完成本次完成请求".to_string());
+                }
+            }
 
             if !goal.status.can_transition_to(&target) {
                 return Err(format!(
@@ -310,6 +327,7 @@ impl peri_acp_types::goal::GoalStateView for GoalState {
     fn snapshot(&self) -> peri_acp_types::goal::GoalViewSnapshot {
         let snap = self.snapshot();
         peri_acp_types::goal::GoalViewSnapshot {
+            goal_id: snap.goal_id,
             objective: snap.objective,
             status: snap.status,
             token_budget: snap.token_budget,
@@ -350,6 +368,15 @@ impl peri_acp_types::goal::GoalController for GoalState {
 
     async fn complete_goal(&self) -> Result<(), String> {
         self.set_status(GoalStatus::Complete).await
+    }
+
+    async fn complete_goal_if_current(&self, expected_goal_id: &str) -> Result<(), String> {
+        self.set_status_with_reason_if_current(
+            GoalStatus::Complete,
+            String::new(),
+            Some(expected_goal_id),
+        )
+        .await
     }
 
     async fn block_goal(&self, reason: String) -> Result<(), String> {

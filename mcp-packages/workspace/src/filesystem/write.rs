@@ -4,7 +4,8 @@ use serde_json::Value;
 use std::sync::{Arc, Mutex};
 
 use super::draft::{draft_hint_en, DraftAccessError, DraftStore};
-use super::transaction::{target_key, with_target_lock, CommitError, SENTINEL_REJECTION};
+use super::resolve_path;
+use super::transaction::{with_target_lock, CommitError, SENTINEL_REJECTION};
 
 const WRITE_FILE_DESCRIPTION: &str = include_str!("descriptions/write.md");
 const WRITE_IO_ERROR: &str = "Write failed while committing the file.";
@@ -213,7 +214,7 @@ impl BaseTool for WriteFileTool {
                 "The 'file_path' parameter is required for the Write tool.",
             )
         })?;
-        let target = target_key(&self.cwd, file_path);
+        let target = resolve_path(&self.cwd, file_path);
         let target_id = target.to_string_lossy().to_string();
         let content = input["content"]
             .as_str()

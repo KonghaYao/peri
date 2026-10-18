@@ -4,16 +4,11 @@ use serde_json::json;
 
 const AGENT_RESULT_DESCRIPTION: &str = include_str!("descriptions/agent_result.md");
 
-/// AgentResult 工具：合成 tool_use 占位符
+/// AgentResult 工具：保留历史 tool_use 身份与客户端显示映射。
 ///
-/// 此工具**不**供 LLM 主动查询。后台任务完成时，系统通过
-/// `prompt_with_bg_results` 把结构化结果作为新一轮 user message 提交，
-/// server 端 `executor.rs` 把结果转成合成 `AgentResult` tool_use +
-/// tool_result 块插入 LLM 上下文。
-///
-/// 此工具存在的唯一目的是让 ToolRegistry 能识别 `AgentResult` 工具名，
-/// 从而在合成 tool_use 块出现时不会触发 "unknown tool" 错误。`invoke`
-/// 永远返回引导文本，提示 LLM 不要再调用。
+/// 当前后台结果由 AsyncRouter 作为 Defer system reminder 自动投递，
+/// 不再合成工具调用。此工具不对模型公开，也不查询任务状态；
+/// `invoke` 仅返回引导文本。
 pub struct AgentResultTool;
 
 impl Default for AgentResultTool {
@@ -32,6 +27,10 @@ impl AgentResultTool {
 impl BaseTool for AgentResultTool {
     fn name(&self) -> &str {
         "AgentResult"
+    }
+
+    fn visible_to_model(&self) -> bool {
+        false
     }
 
     fn description(&self) -> &str {
@@ -59,7 +58,7 @@ impl BaseTool for AgentResultTool {
         _input: serde_json::Value,
         _ctx: peri_agent::tools::ToolContext<'_>,
     ) -> Result<String, Box<dyn std::error::Error + Send + Sync>> {
-        Ok("Background task results are delivered to you automatically when tasks complete—do not call this tool. If you cannot see results yet, the task is still running; wait for the completion notification before acting on its output."
+        Ok("Background task results are delivered automatically when tasks complete. This tool does not query task state and must not be called."
             .to_string())
     }
 }

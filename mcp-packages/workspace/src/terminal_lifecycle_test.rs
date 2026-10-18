@@ -1,5 +1,28 @@
 use super::*;
 
+/// 小数 timeout 必须在前台进程启动前显式失败，不能静默回落到默认值。
+#[tokio::test]
+async fn test_invalid_fractional_timeout_fails_before_spawn() {
+    let fixture = tempfile::tempdir().unwrap();
+    let tool = BashTool::new(fixture.path().to_str().unwrap());
+    let error = tool
+        .invoke(
+            serde_json::json!({"command": "printf spawned > sentinel", "timeout": 1.5}),
+            peri_agent::tools::ToolContext::new(&[], "."),
+        )
+        .await
+        .expect_err("fractional timeout must fail")
+        .to_string();
+    assert!(
+        error.contains("timeout") && error.contains("1.5") && error.contains("integer"),
+        "错误应说明参数、收到值与期望格式: {error}"
+    );
+    assert!(
+        !fixture.path().join("sentinel").exists(),
+        "参数校验必须先于进程启动"
+    );
+}
+
 #[cfg(unix)]
 #[tokio::test]
 async fn test_cancelled_foreground_shell_retains_owner_until_process_exit() {
