@@ -336,8 +336,10 @@ pub async fn build_and_execute_agent_v2(req: V2ExecuteRequest) -> ExecOutcome {
                     _ => None,
                 };
                 let session_seq = publisher.publish_event(&sid, &source, exec_ev);
-                // 序号在发布时补打；绑定后事件泵才能按水位在后续 assistant
-                // 输出之前补发该交付。绑定迟到时事件本身已按序推送，由泵 ack 收敛。
+                // 序号在发布时补打；绑定后事件泵可在序号更小的后续事件之前
+                // 补发该交付。render 事件若在 EventBus 有界通道被丢弃，
+                // 本回调不会执行，日志条目保持未绑定，只能在本轮尾部补发：
+                // 气泡不会丢失，但可能落在本轮回答之后（不会越过更早的回答）。
                 if let (Some(input_id), Some(session_seq)) = (delivered_input, session_seq) {
                     if let Some(mailbox) = delivery_mailbox.as_ref() {
                         mailbox.bind_delivery_sequence(&input_id, session_seq);

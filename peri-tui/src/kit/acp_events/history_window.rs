@@ -380,8 +380,10 @@ pub(super) fn handle_window_page_loaded(
                 );
             }
             // 空页已由 consumer 按方向清空游标（EOF/无更多行）；再按驻留边缘回写会
-            // 把该方向重新“点亮”，导致对同一 cursor 无限重试。
-            if !response.items.is_empty() {
+            // 把该方向重新“点亮”，导致对同一 cursor 无限重试。adopt-only 页同样
+            // 不建段：此时布局为空，边缘游标是 `(None, None)`，回写会覆盖
+            // `settle_window_response` 从 open 响应写入的边界。
+            if !response.items.is_empty() && state.window.segment_count() > 0 {
                 let (edge_before, edge_after) = state.window.edge_cursors();
                 history_page_consumer::note_window_cursors(edge_before, edge_after);
             }
@@ -456,12 +458,16 @@ fn prepare_open_display(
             )?);
             // 摘除后仍有 live 尾部时，open 页中越过旧展示水位的条目已经由 live
             // 路径展示：只登记身份，阻止后续翻页重复插入。
+            // `live_empty` 必须参与：流式 turn 中 open 页可能包含尚未经 live
+            // 路径渲染的新条目，此时 adopt 会把正文藏起来；宁可让页插入，
+            // 也不丢内容（见 `reopen_after_streaming_turn_does_not_duplicate_prior_page`）。
             adopt_enabled = live_empty
                 && !state.committed.is_empty()
                 && snapshot.max_displayed_position.is_some();
-            if adopt_enabled && snapshot.displayed_slot_ranges.is_empty() {
-                // adopt-only：账本没有可摘除的正文，剩余 committed 全是 live 尾部。
-                // 本页未被 adopt 的条目属于 live 之前的历史，必须插到其前面。
+            if snapshot.displayed_slot_ranges.is_empty() && !state.committed.is_empty() {
+                // adopt-only：账本没有可摘除的正文，剩余 committed 全是 live 尾部
+                // （无论 live 区域当前是否为空）。本页未被 adopt 的条目属于 live
+                // 之前的历史，必须插到其前面。
                 insert_slot = Some(0);
             }
         } else if live_empty {

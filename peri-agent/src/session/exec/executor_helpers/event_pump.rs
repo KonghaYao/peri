@@ -164,8 +164,9 @@ async fn pump_process(
     emitted_deliveries: &mut DeliveryEmissions,
     cutoff: DeliveryCutoff,
 ) -> Result<(), EventSinkError> {
-    // 交付确认必须先于任何后续 assistant 输出进入 sink。这样即使 render
-    // UserInputDelivered 被丢弃、或订阅发生 Lagged，气泡也不会落到回答之后。
+    // 交付确认必须先于任何后续 assistant 输出进入 sink。可提前补发的只有
+    // 已绑定 `session_seq` 的条目；render 事件被丢弃导致未绑定的条目会在
+    // 尾部补发——不丢失，但可能落在本轮回答之后（不越过更早的回答）。
     flush_deliveries(ctx, emitted_deliveries, cutoff).await?;
     // 队列快照由会话订阅投递，运行开始由宿主在执行前可靠发送；本轮泵跳过两者。
     if matches!(

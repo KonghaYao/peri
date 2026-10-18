@@ -867,6 +867,32 @@ fn definite_reject_after_fatal_failure_upgrades_unknown_to_recoverable_draft() {
     assert_eq!(recovered.content.content_blocks().len(), 2);
 }
 
+/// 致命失败已把 `NotSent` 输入恢复为草稿；随后迟到的明确拒绝不得再恢复一次。
+#[test]
+fn definite_reject_after_not_sent_fatal_settlement_does_not_duplicate_draft() {
+    let mut state = make_idle_state();
+    let input = input_with_attachment("f", "确定未发出");
+    let mut command = make_command(SteerCommandKind::Enqueue(input.clone()));
+    command.generation = None;
+    state.begin(command.clone());
+    state.fail_session_submissions("s");
+    assert_eq!(state.sessions.get("s").unwrap().recovered.len(), 1);
+
+    state.reject(&command, true);
+    assert_eq!(
+        state.sessions.get("s").unwrap().recovered.len(),
+        1,
+        "同一 input_id 只能有一份恢复稿"
+    );
+    assert_eq!(
+        state.pending_recovery_ids("s"),
+        vec![input.input_id.clone()]
+    );
+    let recovered = state.recover("s", 1, true).unwrap();
+    assert_eq!(recovered.input_id, input.input_id);
+    assert!(state.recover("s", 1, true).is_none(), "不得恢复第二份草稿");
+}
+
 /// [回归测试] 终态快照只清除提交反馈；气泡必须由有序事件泵的 Delivered 生成。
 #[test]
 fn test_steer_terminal_delivered_snapshot_does_not_synthesize_a_bubble() {

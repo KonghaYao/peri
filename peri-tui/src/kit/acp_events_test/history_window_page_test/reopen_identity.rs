@@ -138,6 +138,11 @@ fn adopt_only_ledger_survives_next_identity_switch() {
 
     // 第二个身份只返回已由 live 尾部展示的条目：adopt-only，不建段。
     let identity = WindowIdentity::new("s1", "gen-2", 8, "snap-2");
+    // 模拟 `settle_window_response` 已把 open 响应边界写入 consumer。
+    crate::kit::atoms::HISTORY_WINDOW_PAGING
+        .state()
+        .write()
+        .before_cursor = Some("before-2".into());
     dispatch_open(
         &mut state,
         "r-open-2",
@@ -148,6 +153,15 @@ fn adopt_only_ledger_survives_next_identity_switch() {
     push_view_models(&mut state);
     assert_eq!(state.window.displayed_entry_count(), 1);
     assert_eq!(state.window.segment_count(), 0);
+    assert_eq!(
+        crate::kit::atoms::HISTORY_WINDOW_PAGING
+            .state()
+            .read()
+            .before_cursor
+            .as_deref(),
+        Some("before-2"),
+        "adopt-only open 不得用空布局边缘覆盖响应写入的游标"
+    );
 
     // 再来一次 flush 后，第三个身份返回上一轮回答与新回答。
     state
@@ -232,6 +246,62 @@ fn adopt_only_reopen_places_older_history_before_live_tail() {
         committed_texts(&state),
         vec!["one", "answer", "third"],
         "adopt-only 之后重取的历史必须插到 live 尾部之前"
+    );
+}
+
+/// 流式 turn 期间重开：账本只有 adopt 身份时，open 页的更早历史仍须插到
+/// live 尾部之前，不能因为 `live_empty == false` 而追加到末尾。
+#[test]
+#[serial]
+fn streaming_reopen_places_older_history_before_live_tail() {
+    use crate::kit::tui_render_unit::{TuiRenderUnit, TuiUserBubble};
+
+    let (mut state, _guard) = state_with_window();
+    load_page(
+        &mut state,
+        "r1",
+        WindowPagePlacement::Tail,
+        vec![text_item("m1", 10, "one")],
+    );
+
+    let display_generation = state.generation;
+    state
+        .committed
+        .push_back(TuiRenderUnit::TuiUserBubble(TuiUserBubble::new(
+            "answer".to_string(),
+        )));
+    push_view_models(&mut state);
+
+    // adopt-only：window 只登记身份，不建段；committed 保留 live 尾部。
+    let identity = WindowIdentity::new("s1", "gen-2", 8, "snap-2");
+    dispatch_open(
+        &mut state,
+        "r-open-2",
+        identity,
+        display_generation,
+        vec![text_item("m2", 20, "answer")],
+    );
+    push_view_models(&mut state);
+    assert_eq!(state.window.displayed_entry_count(), 1);
+    assert_eq!(state.window.segment_count(), 0);
+
+    // 新 turn 正在流式输出：live 区域非空，adopt 不启用。
+    state.current_turn.append_text("streaming", Some("m-live"));
+    let display_generation = state.generation;
+    let identity = WindowIdentity::new("s1", "gen-3", 9, "snap-3");
+    dispatch_open(
+        &mut state,
+        "r-open-3",
+        identity,
+        display_generation,
+        vec![text_item("m0", 5, "zero")],
+    );
+    push_view_models(&mut state);
+
+    assert_eq!(
+        committed_texts(&state),
+        vec!["zero", "answer"],
+        "更早的历史必须插到 live 尾部之前"
     );
 }
 
