@@ -90,6 +90,9 @@ pub struct RuntimeServices {
     pub tool_invocation_resolver: Arc<dyn ToolInvocationResolver>,
     pub middleware_chain: Arc<MiddlewareChain>,
     pub event_bus: Arc<EventBus>,
+    /// 事件发射端口：阶段在本轮执行期直接发射/预留序号（交付事件必须在进入
+    /// 有损 EventBus 前固化排序位置）。`v2_execute` 在 stage 构建后注入。
+    pub event_publisher: Option<Arc<dyn peri_acp_types::event::EventPublisher>>,
     /// Deferred tools 外部注册表（ExecuteExtraTool 代理执行用）
     pub shared_tools: Option<SharedToolMap>,
 }
@@ -193,6 +196,7 @@ impl StageContext {
                 tool_invocation_resolver: Arc::new(DirectToolInvocationResolver),
                 middleware_chain: mw_chain,
                 event_bus: ebus,
+                event_publisher: None,
                 shared_tools: None,
             },
             compact: CompactContext {
@@ -243,6 +247,7 @@ impl StageContext {
                 tool_invocation_resolver: Arc::new(DirectToolInvocationResolver),
                 middleware_chain: Arc::new(MiddlewareChain::new()),
                 event_bus: Arc::new(EventBus::new(Default::default()).0),
+                event_publisher: None,
                 shared_tools: None,
             },
             compact: CompactContext {

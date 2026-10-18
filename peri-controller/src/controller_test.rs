@@ -345,6 +345,45 @@ async fn publish_event_preserves_source_message_id_when_session_is_unregistered(
     assert_eq!(received.envelope.message_id.as_deref(), Some("message-1"));
 }
 
+#[tokio::test]
+async fn publish_event_with_reserved_sequence_reuses_the_watermark() {
+    let runtime = Arc::new(Runtime::new());
+    runtime.register("s1", MockHandle::new()).unwrap();
+    let controller = Controller::new(temp_facade().await).with_runtime(runtime);
+    let mut sub = controller.subscribe();
+
+    // Receive 在进入有损通道前预留水位；发布时复用该序号而非重新分配。
+    let reserved = controller
+        .reserve_session_seq("s1")
+        .expect("registered session reserves");
+    assert_eq!(reserved, SessionSeq::initial());
+    let published = controller.publish_event_with_sequence(
+        "s1",
+        &ev("t1", "a1"),
+        peri_acp_types::event::ExecutorEvent::SystemNotification {
+            text: "delivered".into(),
+            level: "info".into(),
+        },
+        reserved,
+    );
+    assert_eq!(published, Some(reserved));
+    assert_eq!(sub.recv().await.unwrap().envelope.session_seq, reserved);
+
+    // 预留序号已被消费；后续普通发布严格递增。
+    let next = controller
+        .publish_event(
+            "s1",
+            &ev("t2", "a1"),
+            peri_acp_types::event::ExecutorEvent::SystemNotification {
+                text: "answer".into(),
+                level: "info".into(),
+            },
+        )
+        .expect("registered session stamps");
+    assert!(next > reserved);
+    assert_eq!(sub.recv().await.unwrap().envelope.session_seq, next);
+}
+
 // ─── sessions 存储通道（既有访问路径不回归） ───────────────────────────────────
 
 #[tokio::test]

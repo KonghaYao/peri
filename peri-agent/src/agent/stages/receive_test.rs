@@ -47,6 +47,49 @@ fn make_context() -> StageContext {
     StageContext::new(turn, session.transcript(), session.queue().clone())
 }
 
+/// 只支持预留的发射端口：Receive 必须在进入有损通道前调用 reserve，
+/// 不得在阶段内直接发布事件。
+struct ReservingPublisher {
+    next: parking_lot::Mutex<peri_acp_types::identity::SessionSeq>,
+    reserved: std::sync::atomic::AtomicUsize,
+    published: std::sync::atomic::AtomicUsize,
+}
+
+impl ReservingPublisher {
+    fn new() -> Self {
+        Self {
+            next: parking_lot::Mutex::new(peri_acp_types::identity::SessionSeq::initial()),
+            reserved: std::sync::atomic::AtomicUsize::new(0),
+            published: std::sync::atomic::AtomicUsize::new(0),
+        }
+    }
+}
+
+impl peri_acp_types::event::EventPublisher for ReservingPublisher {
+    fn publish_event(
+        &self,
+        _session_id: &str,
+        _source: &peri_acp_types::runtime::UnstampedEvent,
+        _event: ExecutorEvent,
+    ) -> Option<peri_acp_types::identity::SessionSeq> {
+        self.published
+            .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        None
+    }
+
+    fn reserve_session_seq(
+        &self,
+        _session_id: &str,
+    ) -> Option<peri_acp_types::identity::SessionSeq> {
+        self.reserved
+            .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        let mut next = self.next.lock();
+        let seq = *next;
+        *next = next.next();
+        Some(seq)
+    }
+}
+
 /// 排空本轮发射的 `SystemReminder` 事件并计数（交付去重的可观察出口）。
 fn drain_system_reminder_events(handles: &mut EventHandles) -> usize {
     let mut count = 0;
@@ -644,6 +687,77 @@ async fn test_receive_user_input_delivery_keeps_identity_order_and_render_fifo()
         "顺序不按历史队列位置重排"
     );
     assert!(mailbox.snapshot().items.is_empty(), "写入后从待发送区移除");
+}
+
+#[tokio::test]
+async fn test_receive_reserves_delivery_sequence_before_render_channel() {
+    use crate::agent::events_v2::{EventBus, RenderEvent};
+    use crate::session::user_input_mailbox::UserInputMailbox;
+    use peri_acp_types::identity::SessionSeq;
+    use peri_acp_types::session::{EnqueueUserInputRequest, SessionInbox};
+    use tokio_util::sync::CancellationToken;
+
+    let mut context = make_context();
+    // 生产 stage builder 会写入 canonical session 身份；测试构造器为空，显式补齐。
+    context
+        .session
+        .session_context
+        .write()
+        .insert("session_id".into(), "session".into());
+    let inbox = Arc::new(SessionInbox::new(Arc::new(context.session.queue.clone())));
+    let mailbox = UserInputMailbox::new("session".into(), inbox, Arc::new(|_| {}));
+    mailbox
+        .attach_external_attempt(CancellationToken::new(), false)
+        .unwrap();
+    let request = EnqueueUserInputRequest {
+        session_id: "session".into(),
+        generation: mailbox.generation().into(),
+        command_id: "enqueue-first".into(),
+        input_id: uuid::Uuid::now_v7().to_string(),
+        content: MessageContent::text("问题"),
+        original_draft: "问题".into(),
+    };
+    mailbox.enqueue(&request).unwrap();
+    mailbox.enter_idle();
+    context.session.user_input_mailbox = Some(mailbox.clone());
+
+    let publisher = Arc::new(ReservingPublisher::new());
+    context.runtime.event_publisher = Some(publisher.clone());
+    let (bus, mut handles) = EventBus::new(Default::default());
+    context.runtime.event_bus = Arc::new(bus);
+
+    run_receive(ReceiveInput {
+        context: context.clone(),
+    })
+    .await
+    .unwrap();
+
+    // 序号在 emit_render 之前已预留并绑定：即使 render 事件丢失，泵也能按
+    // 该水位在后续回答之前补发。
+    assert_eq!(
+        publisher.reserved.load(std::sync::atomic::Ordering::SeqCst),
+        1,
+        "每条交付必须预留且仅预留一次序号"
+    );
+    assert_eq!(
+        publisher
+            .published
+            .load(std::sync::atomic::Ordering::SeqCst),
+        0,
+        "阶段内不得绕过有损通道直接发布"
+    );
+    assert_eq!(
+        mailbox.delivery_sequence(&request.input_id),
+        Some(SessionSeq::initial()),
+        "预留序号必须在事件进入通道前写入交付日志"
+    );
+    assert!(
+        matches!(
+            handles.render_rx.recv().await.unwrap(),
+            RenderEvent::UserInputDelivered { .. }
+        ),
+        "wire 事件仍按原链路进入 render 通道"
+    );
 }
 
 #[tokio::test]

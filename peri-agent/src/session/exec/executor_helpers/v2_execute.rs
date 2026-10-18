@@ -9,7 +9,7 @@ use peri_acp_types::{
     event_v2::EventHandles,
     frozen::{ChildHandlerFactory, ThreadPersistence},
     goal::GoalController,
-    identity::EventDeliveryClass,
+    identity::{EventDeliveryClass, SessionSeq},
     messages::BaseMessage,
     runtime::UnstampedEvent,
     session::ExecutionFailure,
@@ -28,9 +28,45 @@ use crate::agent::{
 use crate::session::exec::executor::FrozenSessionData;
 use crate::session::exec::stage_builder::{CachedLlmInstances, V2AgentOutput};
 use crate::session::memory_probe;
+use crate::session::user_input_mailbox::UserInputMailbox;
 use crate::session::MessageTranscript;
 
 use super::ExecOutcome;
+
+/// 发布 forwarder 收到的一条事件，并在交付事件上复用 Receive 预留的序号。
+///
+/// 交付事件进入有损 render 通道前，Receive 已把预留序号绑定到交付日志；这里
+/// 必须复用同一条序号发布，避免为同一交付再分配新序号。未预留（无 mailbox /
+/// 无预留能力 / 条目已被泵 ack）时回退为发布时补打。
+///
+/// 返回实际发布序号（降级路径可能为 `None`）；调用方据此维持日志绑定。
+fn publish_forwarded_event(
+    publisher: &dyn EventPublisher,
+    session_id: &str,
+    source: &UnstampedEvent,
+    exec_ev: ExecutorEvent,
+    mailbox: Option<&UserInputMailbox>,
+) -> Option<SessionSeq> {
+    let delivered_input = match &exec_ev {
+        ExecutorEvent::UserInputDelivered { input_id, .. } => Some(input_id.clone()),
+        _ => None,
+    };
+    let reserved_seq = delivered_input
+        .as_deref()
+        .and_then(|input_id| mailbox?.delivery_sequence(input_id));
+    let session_seq = match reserved_seq {
+        Some(session_seq) => {
+            publisher.publish_event_with_sequence(session_id, source, exec_ev, session_seq)
+        }
+        None => publisher.publish_event(session_id, source, exec_ev),
+    };
+    if let (Some(input_id), Some(session_seq)) = (delivered_input, session_seq) {
+        if let Some(mailbox) = mailbox {
+            mailbox.bind_delivery_sequence(&input_id, session_seq);
+        }
+    }
+    session_seq
+}
 
 /// EventBus forwarder 启动器闭包（ACP 侧持有 Langfuse bridge 构造；
 /// 参数 = event_handles / 主 agent_id / 事件消费闭包）。
@@ -219,6 +255,9 @@ pub async fn build_and_execute_agent_v2(req: V2ExecuteRequest) -> ExecOutcome {
         .write()
         .reset_full_compaction_committed();
     v2_out.context.session.user_input_mailbox = req.user_input_mailbox.clone();
+    // 交付事件在 Receive 阶段进入有损 EventBus 前预留序号（见 receive.rs），
+    // 因此阶段上下文需要同一发射端口。
+    v2_out.context.runtime.event_publisher = Some(Arc::clone(&req.publisher));
     if let Some(mailbox) = &req.user_input_mailbox {
         v2_out.session.set_user_input_mailbox(mailbox.clone());
     }
@@ -331,20 +370,13 @@ pub async fn build_and_execute_agent_v2(req: V2ExecuteRequest) -> ExecOutcome {
             v2_out.event_handles,
             agent_id,
             Box::new(move |source, exec_ev| {
-                let delivered_input = match &exec_ev {
-                    ExecutorEvent::UserInputDelivered { input_id, .. } => Some(input_id.clone()),
-                    _ => None,
-                };
-                let session_seq = publisher.publish_event(&sid, &source, exec_ev);
-                // 序号在发布时补打；绑定后事件泵可在序号更小的后续事件之前
-                // 补发该交付。render 事件若在 EventBus 有界通道被丢弃，
-                // 本回调不会执行，日志条目保持未绑定，只能在本轮尾部补发：
-                // 气泡不会丢失，但可能落在本轮回答之后（不会越过更早的回答）。
-                if let (Some(input_id), Some(session_seq)) = (delivered_input, session_seq) {
-                    if let Some(mailbox) = delivery_mailbox.as_ref() {
-                        mailbox.bind_delivery_sequence(&input_id, session_seq);
-                    }
-                }
+                publish_forwarded_event(
+                    publisher.as_ref(),
+                    &sid,
+                    &source,
+                    exec_ev,
+                    delivery_mailbox.as_deref(),
+                );
             }),
         )
     };
@@ -831,3 +863,7 @@ fn log_loop_terminal(
 #[cfg(test)]
 #[path = "terminal_diagnostic_test.rs"]
 mod diagnostic_tests;
+
+#[cfg(test)]
+#[path = "v2_execute_test.rs"]
+mod forwarder_tests;

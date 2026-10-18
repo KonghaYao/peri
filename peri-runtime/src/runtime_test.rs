@@ -205,6 +205,27 @@ async fn stamp_fills_session_id_and_seq_monotonic() {
     assert!(matches!(err, RuntimeError::UnknownSession(_)));
 }
 
+#[tokio::test]
+async fn reserved_seq_is_used_once_and_clock_stays_monotonic() {
+    let rt = Runtime::new();
+    rt.register("s1", MockHandle::new(true, vec![])).unwrap();
+
+    // 预留进水位，但不发布事件；用预留序号补打时不再推进时钟。
+    let reserved = rt.reserve_seq("s1").unwrap();
+    assert_eq!(reserved, SessionSeq::initial());
+    let stamped = rt.stamp_reserved("s1", &ev("t1", "a1"), reserved).unwrap();
+    assert_eq!(stamped.session_seq, reserved);
+    assert_eq!(stamped.session_id, "s1");
+
+    // 预留序号被使用后，下一次正常补打必须严格大于它（不回退/不复用）。
+    let next = rt.stamp("s1", &ev("t2", "a1")).unwrap();
+    assert!(next.session_seq > reserved);
+
+    // 未注册 session 不能预留（调用方回退为发布时补打）。
+    let err = rt.reserve_seq("missing").unwrap_err();
+    assert!(matches!(err, RuntimeError::UnknownSession(_)));
+}
+
 // ─── 销毁顺序（§9） ──────────────────────────────────────────────────────────
 
 #[tokio::test]

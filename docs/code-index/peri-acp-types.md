@@ -141,6 +141,7 @@ typed schema、默认值、领域合并、scope/revision/explain/update 归
 | 功能 | 入口/关键点 |
 | --- | --- |
 | v1 协议化载体 | `ExecutorEvent`（:307，仅 ACP 协议序列化面使用，Agent 层禁止构造）；`EventMessage`（:603，envelope + event 包装）；`FnEventHandler`（:635） |
+| 事件发布端口 | `EventPublisher`：`publish_event`；默认方法 `reserve_session_seq`（默认 None）与 `publish_event_with_sequence`（默认回退 `publish_event`）。上层实现可覆盖以支持“先预留序号、经有损通道后再补打”，未覆盖方保持原语义 |
 | 载荷 DTO | `CompactFileInfo`（:143）、`TodoEntry`（:150）、`WorkflowProgressPayload`（:171）、`CompactTrigger`（:253）、`CompactThreshold`（:267）等 |
 
 ### messages（src/messages/）

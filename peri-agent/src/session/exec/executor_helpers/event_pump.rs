@@ -74,7 +74,8 @@ impl DeliveryEmissions {
 /// 交付日志的推送水位。
 ///
 /// `session_seq` 是事件与交付顺序的唯一权威：只允许在序号严格更小的当前事件
-/// 之前补发已绑定序号的交付。未绑定序号的条目只能在尾部补发。
+/// 之前补发已绑定序号的交付。Receive 在进入有损 render 通道前完成预留与绑定，
+/// 未绑定条目只来自无预留能力的降级路径，只能在尾部补发。
 #[derive(Clone, Copy)]
 enum DeliveryCutoff {
     /// 订阅路径：只发 `session_seq < 当前事件序号` 的交付。
@@ -164,9 +165,10 @@ async fn pump_process(
     emitted_deliveries: &mut DeliveryEmissions,
     cutoff: DeliveryCutoff,
 ) -> Result<(), EventSinkError> {
-    // 交付确认必须先于任何后续 assistant 输出进入 sink。可提前补发的只有
-    // 已绑定 `session_seq` 的条目；render 事件被丢弃导致未绑定的条目会在
-    // 尾部补发——不丢失，但可能落在本轮回答之后（不越过更早的回答）。
+    // 交付确认必须先于任何后续 assistant 输出进入 sink。Receive 在把交付事件
+    // 放入有损 render 通道前已预留 `session_seq` 并绑定日志条目，因此即使 wire
+    // 事件被丢弃，也能在下一个更大序号的事件之前按序补发；只有无预留能力的
+    // 降级路径（未注册 session）才会留到尾部。
     flush_deliveries(ctx, emitted_deliveries, cutoff).await?;
     // 队列快照由会话订阅投递，运行开始由宿主在执行前可靠发送；本轮泵跳过两者。
     if matches!(

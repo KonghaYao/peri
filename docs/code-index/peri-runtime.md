@@ -20,6 +20,7 @@ crate 仅依赖 `peri-acp-types` 的跨层契约，不依赖具体 Agent 或上�
 | 注册或刷新句柄 | `src/runtime.rs` | `register`、`register_or_replace`、`SessionEntry::new` | register 拒绝重复登记；replace 创建新的登记归属，保留已有事件 clock，即使传入相同句柄 Arc 也独立于旧销毁 |
 | 查找会话 | `src/runtime.rs` | `handle`、`contains`、`session_ids` | 读登记表；handle 克隆句柄，外部调用均在表锁之外；列表不保证顺序 |
 | 补打事件身份与序列 | `src/runtime.rs` | `stamp`、`EventClock::stamp` | 表读锁内定位当前登记，clock 锁内递增 seq 并复制身份；未登记返回 UnknownSession |
+| 预留在有损通道前固化的事件序号 | `src/runtime.rs` | `reserve_seq`、`stamp_reserved`、`EventClock::reserve` | reserve 只取 seq 并推进时钟、不构造 envelope；stamp_reserved 复用预留序号且不再推进；预留未使用会留下空洞，单调性不受影响；调用方负责同一 session 归属 |
 | 转发执行和输入 | `src/runtime.rs` | `run`、`join`、`submit_input` | 查找句柄后转发；run/input 错误保留 anyhow 来源并包装边界错误；join 返回是否如期结束 |
 | 转发取消 | `src/runtime.rs` | `cancel` | 原样转发 CancelRequest，最终取消语义与幂等判定归句柄实现（ARC-CANCEL-001） |
 | 销毁会话 | `src/runtime.rs` | `destroy` | 捕获登记，按停收、取消、join、超时 abort、persist、drain、移除顺序收尾；只移除捕获的登记，旧事件使用捕获的 clock；同一登记并发销毁等待并仅首次返回事件 |

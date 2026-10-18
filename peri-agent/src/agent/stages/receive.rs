@@ -234,9 +234,22 @@ pub(super) async fn run_receive_with_budget(
         }
         if let Some(mailbox) = &input.context.session.user_input_mailbox {
             let delivered = mailbox.mark_delivered(&user_ids);
+            let session_id = input.context.project_session_id();
             for (id, content) in user_inputs {
                 let input_id = id.as_uuid().to_string();
                 if delivered.contains(&input_id) {
+                    // 进入有损 render 通道前固化排序位置：先预留 session_seq 并
+                    // 绑定交付日志，再 emit。这样即使 render 事件被通道丢弃（或
+                    // 迟到），泵仍能在下一个更大序号的事件之前按 Receive 顺序
+                    // 补发，不会落到本轮回答之后或被后续输入超越。
+                    if let (Some(publisher), Some(session_id)) = (
+                        input.context.runtime.event_publisher.as_ref(),
+                        session_id.as_deref(),
+                    ) {
+                        if let Some(session_seq) = publisher.reserve_session_seq(session_id) {
+                            mailbox.bind_delivery_sequence(&input_id, session_seq);
+                        }
+                    }
                     input
                         .context
                         .runtime
