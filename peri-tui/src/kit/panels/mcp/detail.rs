@@ -317,10 +317,7 @@ fn agent_row(resource: &McpResourceSummary) -> Option<TableRow> {
     }
     let path = &resource.uri[scheme_end + 3..];
     // query / fragment 不属于路径段，避免把参数误当代理名。
-    let path = path
-        .split(|ch| ch == '?' || ch == '#')
-        .next()
-        .unwrap_or(path);
+    let path = path.split(['?', '#']).next().unwrap_or(path);
     let segments: Vec<&str> = path
         .split('/')
         .filter(|segment| !segment.is_empty())
