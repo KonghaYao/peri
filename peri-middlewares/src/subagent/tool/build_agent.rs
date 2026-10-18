@@ -71,6 +71,21 @@ impl super::SubAgentTool {
             "build_agent_from_def: tool filter results"
         );
 
+        // 白名单声明非空却被父工具集裁剪成空集 = 静默失能；`tools: []` 是
+        // 显式零工具，不在此告警。只记录不改变行为（裁剪语义不变）。
+        if let peri_mcp_core::agent_definition::ToolsValue::List(names) =
+            &agent_def.frontmatter.tools
+        {
+            if !names.is_empty() && filtered_tools.is_empty() {
+                tracing::warn!(
+                    agent_id = %agent_name,
+                    allowed = ?names,
+                    parent_count = self.parent_tools.len(),
+                    "agent allowlist resolved to an empty tool set"
+                );
+            }
+        }
+
         // 2. Model alias → LLM factory
         // 工具参数覆盖（model_override）优先于 frontmatter；档位大小写不敏感
         //（档位均为 ASCII，`to_ascii_lowercase` 与 `Profiles::get` 的

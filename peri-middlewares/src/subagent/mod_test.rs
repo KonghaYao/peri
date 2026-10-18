@@ -339,16 +339,20 @@ fn test_capability_omitted_tools_with_disallowed_write_edit_is_writes() {
     );
 }
 
-/// omitted tools + 显式 disallow 全部核心写能力工具（含 Bash / folder_operations
-/// / cron_register）→ 可证明无项目写能力 → readonly。
+/// omitted tools + 显式 disallow 全部已知核心写能力工具（含 Bash / folder_operations
+/// / cron_register）→ 仍标 writes。
+///
+/// 继承面还包含无法静态证明只读的 `mcp__*` 工具与 `ExecuteExtraTool` deferred
+/// 执行入口；用「已知核心工具都被 disallow」推断 readonly 会与解析后的工具集
+/// 漂移。只有显式白名单或 `tools: []` 能证明只读。
 #[test]
-fn test_capability_omitted_tools_fully_disallowed_is_readonly() {
+fn test_capability_omitted_tools_with_all_known_writes_disallowed_is_writes() {
     let cap = capability_from_yaml(
         "name: a\ndescription: d\ndisallowedTools:\n  - Bash\n  - Write\n  - Edit\n  - folder_operations\n  - cron_register\n",
     );
     assert!(
-        !cap.can_mutate,
-        "完全 disallow 核心写能力工具后应标 readonly"
+        cap.can_mutate,
+        "继承父工具时无法排除 MCP / deferred 写入口，必须保守标 writes"
     );
 }
 
@@ -402,6 +406,71 @@ fn test_capability_whitelist_write_disallowed_is_readonly() {
 fn test_capability_whitelist_mcp_prefix_is_writes() {
     let cap = capability_from_yaml("name: a\ndescription: d\ntools: [Read, mcp__files]\n");
     assert!(cap.can_mutate, "mcp__* 无法证明只读，应保守标 writes");
+}
+
+/// `ExecuteExtraTool` 可执行 deferred 的外部写工具，白名单含它不得标 readonly。
+#[test]
+fn test_capability_whitelist_execute_extra_tool_is_writes() {
+    let cap = capability_from_yaml("name: a\ndescription: d\ntools: [Read, ExecuteExtraTool]\n");
+    assert!(
+        cap.can_mutate,
+        "ExecuteExtraTool 是 deferred 执行入口，无法证明只读"
+    );
+}
+
+/// explorer 的只读白名单是工具级裁剪：解析结果非空，且与 capability 标签一致。
+#[test]
+fn test_explorer_readonly_allowlist_resolves_to_read_tools() {
+    let content = "---\nname: explorer\ndescription: d\ntools: [Read, Grep, Glob]\ndisallowedTools: [Agent]\n---\n\nbody\n";
+    let agent = parse_agent_file(content).expect("explorer fixture 必须可解析");
+    let capability = infer_agent_capability(&agent.frontmatter).expect("档位合法");
+    assert!(!capability.can_mutate, "只读白名单必须标 readonly");
+
+    let parent_tools: Vec<_> = [
+        "Read",
+        "Grep",
+        "Glob",
+        "Bash",
+        "Write",
+        "Edit",
+        "folder_operations",
+    ]
+    .into_iter()
+    .map(|name| -> std::sync::Arc<dyn BaseTool> {
+        struct T(&'static str);
+        #[async_trait::async_trait]
+        impl BaseTool for T {
+            fn name(&self) -> &str {
+                self.0
+            }
+            fn description(&self) -> &str {
+                "fixture"
+            }
+            fn parameters(&self) -> serde_json::Value {
+                serde_json::json!({})
+            }
+            async fn invoke(
+                &self,
+                _input: serde_json::Value,
+                _ctx: peri_agent::tools::ToolContext<'_>,
+            ) -> Result<String, Box<dyn std::error::Error + Send + Sync>> {
+                Ok("ok".to_string())
+            }
+        }
+        std::sync::Arc::new(T(name))
+    })
+    .collect();
+    let filtered = crate::subagent::fork::filter_tools(
+        &parent_tools,
+        &agent.frontmatter.tools,
+        &agent.frontmatter.disallowed_tools,
+    );
+    let names: Vec<&str> = filtered.iter().map(|tool| tool.name()).collect();
+    assert_eq!(
+        names,
+        vec!["Read", "Grep", "Glob"],
+        "explorer 只保留只读工具（silent trimming 不得产出空集）"
+    );
 }
 
 // ─── A4 生效名归一（IF-D6 判定型 ③ / IF-D15）─────────────────────────────
@@ -531,13 +600,13 @@ fn builtin_web_tool_whitelist_is_readonly() {
     );
 }
 
-/// [安全回归] 用户用**模型面 effective name** 写 `disallowedTools`
-/// （`mcp__workspace__Bash` …）时，必须与写裸名一样命中 `MUTATION_CORE` 判定；
-/// 否则「核心写能力已被完全 disallow」的 readonly 结论失效，模块被误判为仍可写。
+/// [安全回归] 用户用**模型面 effective name** 写 `tools` / `disallowedTools`
+/// （`mcp__workspace__Bash` …）时，必须与写裸名一样命中写能力判定；否则
+/// 「核心写能力已被完全 disallow」的 readonly 结论失效，模块被误判为仍可写。
 /// 名字从注册表派生（测试不硬编码 `mcp__*` 字面量）。
 #[test]
 fn fully_disallowed_with_workspace_effective_names_is_readonly() {
-    let disallow = |names: &[(&str, &str)]| {
+    let names = |names: &[(&str, &str)]| {
         names
             .iter()
             .map(|(instance, original)| format!("  - {}", effective_name_of(instance, original)))
@@ -546,8 +615,15 @@ fn fully_disallowed_with_workspace_effective_names_is_readonly() {
     };
 
     let cap = capability_from_yaml(&format!(
-        "name: a\ndescription: d\ndisallowedTools:\n{}\n",
-        disallow(&[
+        "name: a\ndescription: d\ntools:\n  - Read\n{}\ndisallowedTools:\n{}\n",
+        names(&[
+            ("workspace", "Bash"),
+            ("workspace", "Write"),
+            ("workspace", "Edit"),
+            ("workspace", "folder_operations"),
+            ("cron", "cron_register"),
+        ]),
+        names(&[
             ("workspace", "Bash"),
             ("workspace", "Write"),
             ("workspace", "Edit"),
@@ -557,14 +633,21 @@ fn fully_disallowed_with_workspace_effective_names_is_readonly() {
     ));
     assert!(
         !cap.can_mutate,
-        "effective name 写全五个核心写能力工具后应标 readonly（omitted tools 路径）"
+        "effective name 写全五个核心写能力工具后应标 readonly（白名单路径）"
     );
 
     // 对照：少覆盖一个（Write）⇒ 必须仍标 writes（证明上面的 readonly 来自归一
     // 命中，而不是「任何名字都被算作覆盖」）。
     let partial = capability_from_yaml(&format!(
-        "name: a\ndescription: d\ndisallowedTools:\n{}\n",
-        disallow(&[
+        "name: a\ndescription: d\ntools:\n  - Read\n{}\ndisallowedTools:\n{}\n",
+        names(&[
+            ("workspace", "Bash"),
+            ("workspace", "Write"),
+            ("workspace", "Edit"),
+            ("workspace", "folder_operations"),
+            ("cron", "cron_register"),
+        ]),
+        names(&[
             ("workspace", "Bash"),
             ("workspace", "Edit"),
             ("workspace", "folder_operations"),
