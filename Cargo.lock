@@ -3648,6 +3648,7 @@ dependencies = [
  "serde_json",
  "tempfile",
  "tokio",
+ "tracing",
 ]
 
 [[package]]
@@ -3689,6 +3690,7 @@ dependencies = [
  "peri-acp-types",
  "peri-agent",
  "peri-mcp-common",
+ "peri-mcp-web",
  "peri-model",
  "peri-resources",
  "peri-time",

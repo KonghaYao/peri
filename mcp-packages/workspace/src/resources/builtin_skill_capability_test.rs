@@ -2,8 +2,8 @@
 //! shipped Agent 定义逐行一致，靠定义现算维持，不靠关键词断言。
 //!
 //! 证据结构（正向与负向都可执行）：
-//! 1. 事实来源是定义本身：能力表每行由 [`BUILTIN_AGENTS`] 的 frontmatter
-//!    （`tools` / `disallowedTools`）现算；
+//! 1. 事实来源是定义本身：能力表每行由 shipped 定义现算——workspace 实例发布
+//!    [`BUILTIN_AGENTS`]，web 实例发布 `web-researcher`（`peri_mcp_web::BUILTIN_AGENTS`）；
 //! 2. Skill 侧只有一份可机读投影（`` | `id` | yes/no | … | ``）；缺行、多行、
 //!    取值非法、与定义冲突都判失败；
 //! 3. 负例证明判别力：同一 checker 对**篡改过的表**必须报错，不是恒绿断言；
@@ -18,6 +18,7 @@ use super::*;
 
 use peri_acp_types::builtin_mcp::BUILTIN_MCP_INSTANCES;
 use peri_acp_types::workspace_resources::{agent_uri, ResourceScope, AGENT_ENTRY_FILE};
+use peri_mcp_web::BUILTIN_AGENTS as WEB_BUILTIN_AGENTS;
 use serde_json::Value;
 
 /// 派发 Skill 的注册表名（`BUILTIN_SKILLS` 的键）。
@@ -71,7 +72,7 @@ struct Preflight {
 
 /// 从定义文本现算声明面能力（builtin 与合成 fixture 走同一条路径）。
 fn capability_of(id: &str, content: &str) -> TargetCapability {
-    let frontmatter = crate::resources::frontmatter::frontmatter_json(content)
+    let frontmatter = peri_mcp_common::agent_definition::frontmatter::frontmatter_json(content)
         .unwrap_or_else(|| panic!("{id} 的 frontmatter 必须可解析"));
     TargetCapability {
         id: id.to_string(),
@@ -81,10 +82,19 @@ fn capability_of(id: &str, content: &str) -> TargetCapability {
 }
 
 /// shipped builtin Agent 的声明面能力（事实来源，不复制常量）。
+///
+/// 定义按 provider 归属分仓：workspace 实例发布 coder / explorer /
+/// general-purpose / plan / verification，web 实例发布 web-researcher。
+/// ultracode 的能力表覆盖两者，因此这里同时枚举两张静态表。
 fn builtin_targets() -> Vec<TargetCapability> {
     BUILTIN_AGENTS
         .iter()
         .map(|agent| capability_of(agent.id, agent.content))
+        .chain(
+            WEB_BUILTIN_AGENTS
+                .iter()
+                .map(|agent| capability_of(agent.id, agent.content)),
+        )
         .collect()
 }
 
@@ -125,8 +135,9 @@ fn skill_body(name: &str) -> &'static str {
         .iter()
         .find(|skill| skill.name == name)
         .unwrap_or_else(|| panic!("builtin 技能 {name} 必须存在"));
-    let (_, body) = crate::resources::frontmatter::split_frontmatter(skill.content)
-        .unwrap_or_else(|| panic!("{name} 必须有 frontmatter"));
+    let (_, body) =
+        peri_mcp_common::agent_definition::frontmatter::split_frontmatter(skill.content)
+            .unwrap_or_else(|| panic!("{name} 必须有 frontmatter"));
     body
 }
 
@@ -299,8 +310,9 @@ fn explorer_definition_is_tool_level_read_only() {
         .iter()
         .find(|agent| agent.id == "explorer")
         .expect("builtin explorer 必须存在");
-    let frontmatter = crate::resources::frontmatter::frontmatter_json(agent.content)
-        .expect("explorer frontmatter 必须可解析");
+    let frontmatter =
+        peri_mcp_common::agent_definition::frontmatter::frontmatter_json(agent.content)
+            .expect("explorer frontmatter 必须可解析");
     match tool_boundary(&frontmatter) {
         ToolBoundary::Allow(tools) => assert!(
             !tools.is_empty(),

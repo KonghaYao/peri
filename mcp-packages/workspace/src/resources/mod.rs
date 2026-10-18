@@ -36,7 +36,6 @@ use thiserror::Error;
 
 pub(crate) mod agents;
 pub(crate) mod builtin;
-pub(crate) mod frontmatter;
 pub(crate) mod instructions;
 pub(crate) mod meta;
 pub(crate) mod path;

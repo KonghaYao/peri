@@ -594,7 +594,7 @@ impl MountedPanel {
 ///
 /// effect 在组件体内同步执行、先于 visitor：第 N 帧 visitor 观察到的是本帧
 /// 更新阶段收敛后的状态，因此「改状态 → 下一帧断言效果」的用例至少渲染 2 帧。
-fn mount_panel_frames(
+pub(super) fn mount_panel_frames(
     frames: usize,
     mut visitor: impl FnMut(usize, MountedPanel) + 'static,
 ) -> Buffer {
@@ -644,7 +644,7 @@ fn server(name: &str) -> McpServerSummary {
 }
 
 /// 前景相关 atom 的保存/恢复——断言失败也不污染其它测试。
-struct ForegroundGuard {
+pub(super) struct ForegroundGuard {
     popup: Option<PopupKind>,
     oauth: Option<OauthNeeded>,
     panel: Option<PanelKind>,
@@ -652,7 +652,7 @@ struct ForegroundGuard {
 }
 
 impl ForegroundGuard {
-    fn capture() -> Self {
+    pub(super) fn capture() -> Self {
         Self {
             popup: *POPUP_KIND.state().read(),
             oauth: OAUTH_INFO.state().read().clone(),
@@ -883,6 +883,8 @@ fn entering_and_leaving_detail_resets_scroll_offset() {
     });
 }
 
+/// 回归：详情内容必须真正撑开 ScrollView 的滚动缓冲区。
+///
 /// 技能归组只接受 `McpSkill`：其他域（plugin/user 等）即使 fullname 带冒号
 /// 也不得混入 server 的技能表。
 #[test]

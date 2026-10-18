@@ -346,6 +346,11 @@ pub fn McpPanel(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
             Style::new().fg(theme_def.read().semantic.status.warning),
         ));
     }
+    // 内容行数即滚动缓冲区高度：Paragraph 不换行（长行由面板裁切），每行恰占
+    // 1 个视觉行。必须显式传给 `View`——ScrollView 按子节点约束推导内容高度，
+    // 而 `Text` 默认 `Constraint::Percentage(100)` 会与视口等高，内容永不溢出，
+    // 渲染期把外部滚动偏移钳回 0（滚轮因此完全失效）。
+    let content_height = u16::try_from(lines.len()).unwrap_or(u16::MAX);
     let content = Paragraph::new(ratatui::text::Text::from(lines));
 
     // 面板滚轮仲裁注册（每帧覆盖写入；区域与列表命中同源，首帧未测量时为 0 尺寸）
@@ -358,7 +363,12 @@ pub fn McpPanel(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
                 width: Constraint::Fill(1),
                 height: Constraint::Fill(1),
             ) {
-                Text(text: content)
+                View(
+                    width: Constraint::Fill(1),
+                    height: Constraint::Length(content_height),
+                ) {
+                    Text(text: content)
+                }
             }
     })
 }
@@ -650,6 +660,10 @@ fn oauth_start_failure_message(response: &serde_json::Value) -> Option<String> {
 #[cfg(test)]
 #[path = "mcp/detail_tables_test.rs"]
 mod detail_tables_test;
+
+#[cfg(test)]
+#[path = "mcp/scroll_test.rs"]
+mod scroll_test;
 
 #[cfg(test)]
 mod tests;

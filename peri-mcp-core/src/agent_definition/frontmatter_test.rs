@@ -1,4 +1,4 @@
-//! `resources::frontmatter` 的解析证据：分隔符识别、verbatim JSON 转换与
+//! `agent_definition::frontmatter` 的解析证据：分隔符识别、verbatim JSON 转换与
 //! name/description 门闩。
 
 use super::*;

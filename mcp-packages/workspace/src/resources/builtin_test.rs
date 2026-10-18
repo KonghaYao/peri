@@ -14,10 +14,11 @@ fn builtin_registry_names_match_frontmatter() {
     assert_eq!(names.len(), len, "builtin 名称唯一");
 
     for skill in BUILTIN_SKILLS {
-        let map = crate::resources::frontmatter::frontmatter_json(skill.content)
+        let map = peri_mcp_common::agent_definition::frontmatter::frontmatter_json(skill.content)
             .unwrap_or_else(|| panic!("{} frontmatter 必须可解析", skill.name));
-        let (name, description) = crate::resources::frontmatter::frontmatter_summary(&map)
-            .unwrap_or_else(|| panic!("{} 必须有 name/description", skill.name));
+        let (name, description) =
+            peri_mcp_common::agent_definition::frontmatter::frontmatter_summary(&map)
+                .unwrap_or_else(|| panic!("{} 必须有 name/description", skill.name));
         assert_eq!(name, skill.name, "注册表名必须与 frontmatter name 一致");
         assert!(!description.is_empty());
     }

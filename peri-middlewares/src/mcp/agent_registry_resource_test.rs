@@ -1,11 +1,12 @@
 //! `McpAgentRegistry` 的来源/会话/关闭过滤证据（W5 第 1 步）。
 //!
-//! 用**合成句柄**（真实 `Resource` 投影 + `ConfigSource::Builtin{workspace}`，
-//! 无 wire）覆盖目录投影与选择策略；正文激活需要真实 peer，由 provider 用例与
-//! ACP 端到端用例覆盖。
+//! 用**合成句柄**（真实 `Resource` 投影 + host-assigned `ConfigSource`，无 wire）
+//! 覆盖目录投影与选择策略；正文激活需要真实 peer，由 provider 用例与 ACP
+//! 端到端用例覆盖。
 //!
 //! 覆盖：host-assigned 来源（外部 server 的同 scheme 资源按远端处理）、
-//! E13 优先级（project → builtin → plugin）、builtin 开关、A24 关闭集、
+//! 任意宿主绑定 builtin 实例（`workspace` / `web`）的本地来源、E13 优先级
+//! （project → builtin → plugin）、builtin 开关、A24 关闭集、
 //! `SubAgentMiddleware` 链槽关闭位、跨来源同名并存。
 
 use std::sync::Arc;
@@ -86,6 +87,24 @@ fn pool_with(handles: Vec<(String, Arc<McpClientHandle>)>) -> Arc<McpClientPool>
         }
     }
     pool
+}
+
+/// 注入 A24 关闭集（上下文单次注入；同一 pool 只允许一次）。
+fn set_closed_instances(pool: &Arc<McpClientPool>, instances: &[&str]) {
+    pool.set_builtin_instance_context(Arc::new(
+        crate::mcp::builtin::context::BuiltinInstanceContext {
+            cwd: "/tmp".to_string(),
+            cron: None,
+            closed: instances.iter().map(|name| name.to_string()).collect(),
+            workspace: None,
+            workflow: None,
+            workspace_resources: None,
+            workspace_bash_default_run_in_background: false,
+            task_scope_authority: std::sync::OnceLock::new(),
+            skills_face_closed: false,
+        },
+    ))
+    .expect("上下文单次注入");
 }
 
 const LIST_AGENT: &str = r#"{"name":"local","description":"Local agent","tools":"Read, Grep"}"#;
@@ -231,16 +250,30 @@ fn isolated_model_error_tracks_current_resources_and_face_closure() {
 }
 
 #[test]
-fn local_entries_come_only_from_the_host_bound_workspace_instance() {
+fn local_entries_come_from_host_bound_resource_sources_only() {
     let trusted = workspace_handle(vec![agent_resource(
         ResourceScope::Project,
         None,
         "local",
         LIST_AGENT,
     )]);
-    // 外部 server 即使占用同名 `workspace` 也不被当作本地来源。
+    // 另一个宿主绑定的 builtin 实例（web）同样提供本地来源：
+    // `web-researcher` 定义随 web 实例发布，id 保持裸名。
+    let web = handle(
+        "web",
+        Some(ConfigSource::Builtin {
+            instance: "web".to_string(),
+        }),
+        vec![agent_resource(
+            ResourceScope::Builtin,
+            None,
+            "web-researcher",
+            BUILTIN_AGENT,
+        )],
+    );
+    // 未带 host-assigned 来源的同名/外部 server 不被当作本地来源。
     let impostor = handle(
-        "workspace",
+        "workspace_2",
         None,
         vec![agent_resource(
             ResourceScope::Builtin,
@@ -261,6 +294,7 @@ fn local_entries_come_only_from_the_host_bound_workspace_instance() {
     );
     let pool = pool_with(vec![
         ("workspace".to_string(), trusted),
+        ("web".to_string(), web),
         ("workspace_2".to_string(), impostor),
         ("external".to_string(), remote),
     ]);
@@ -271,12 +305,27 @@ fn local_entries_come_only_from_the_host_bound_workspace_instance() {
         .iter()
         .filter(|entry| entry.source.is_local())
         .collect();
-    assert_eq!(local.len(), 1, "只有宿主绑定的实例产生本地条目");
-    assert_eq!(local[0].id, "local");
+    assert_eq!(local.len(), 2, "宿主绑定的 builtin 实例都产生本地条目");
+    let local_ids: Vec<(&str, &str)> = local
+        .iter()
+        .map(|entry| (entry.id.as_str(), entry.origin.as_str()))
+        .collect();
+    assert!(
+        local_ids.contains(&("local", "workspace")),
+        "local ids: {local_ids:?}"
+    );
+    assert!(
+        local_ids.contains(&("web-researcher", "web")),
+        "local ids: {local_ids:?}"
+    );
     assert_eq!(
-        local[0].source,
+        local
+            .iter()
+            .find(|entry| entry.id == "web-researcher")
+            .expect("web-researcher")
+            .source,
         AgentSource::Local {
-            scope: ResourceScope::Project,
+            scope: ResourceScope::Builtin,
             plugin_name: None
         }
     );
@@ -288,7 +337,7 @@ fn local_entries_come_only_from_the_host_bound_workspace_instance() {
         .collect();
     // id 段按 provider 口径净化（`_` → `-`）。
     assert!(
-        remote_ids.iter().any(|id| id.contains("coder")),
+        remote_ids.contains(&"mcp__workspace-2__coder"),
         "remote ids: {remote_ids:?}"
     );
     assert!(remote_ids.contains(&"mcp__external__local"));
@@ -426,25 +475,7 @@ fn closed_instance_and_closed_chain_slot_drop_local_entries() {
         "workspace".to_string(),
         workspace_handle(resources.clone()),
     )]);
-    closed_pool
-        .set_builtin_instance_context(Arc::new(
-            crate::mcp::builtin::context::BuiltinInstanceContext {
-                cwd: "/tmp".to_string(),
-                cron: None,
-                closed: {
-                    let mut set = std::collections::BTreeSet::new();
-                    set.insert("workspace".to_string());
-                    set
-                },
-                workspace: None,
-                workflow: None,
-                workspace_resources: None,
-                workspace_bash_default_run_in_background: false,
-                task_scope_authority: std::sync::OnceLock::new(),
-                skills_face_closed: false,
-            },
-        ))
-        .expect("上下文单次注入");
+    set_closed_instances(&closed_pool, &["workspace"]);
     let closed_registry = McpAgentRegistry::new(closed_pool);
     assert!(closed_registry
         .entries()
@@ -593,4 +624,32 @@ fn unknown_model_tier_entries_are_isolated_from_the_catalog() {
         "inherit",
         "未指定档位展示 inherit"
     );
+}
+
+#[test]
+fn closed_web_instance_drops_web_researcher_instead_of_projecting_it_remotely() {
+    // F8 对非 workspace 的 builtin 实例同样成立：关闭的 web 实例不得把
+    // `web-researcher` 定义投影成 `mcp__web__*` 远端条目（否则关闭后仍可激活）。
+    let resources = vec![agent_resource(
+        ResourceScope::Builtin,
+        None,
+        "web-researcher",
+        BUILTIN_AGENT,
+    )];
+    let pool = pool_with(vec![(
+        "web".to_string(),
+        handle(
+            "web",
+            Some(ConfigSource::Builtin {
+                instance: "web".to_string(),
+            }),
+            resources,
+        ),
+    )]);
+    set_closed_instances(&pool, &["web"]);
+
+    let registry = McpAgentRegistry::new(pool);
+    assert!(registry.entries().is_empty(), "关闭实例 ⇒ 无任何条目");
+    assert!(registry.resolve("mcp__web__web-researcher").is_err());
+    assert!(registry.resolve_local("web-researcher", true).is_err());
 }
