@@ -131,7 +131,9 @@ reminder 出口），客户端据此把通知与那次 load 配对；历史页�
 - `committedTail`/`checkpointId` 可为 `null`；没有已确认 Full checkpoint 时不得伪造。
 - `snapshotToken` 由服务端铸造，绑定投影/预算版本、source、范围身份、`committedTail` 与
   `sessionGeneration`；客户端不可解析、不可自造，只能原样回传。
-- `beforeCursor`/`afterCursor` 必须出现；`null` 只表示该方向在当前 snapshot 内没有更多可读行。
+- `beforeCursor`/`afterCursor` 必须出现，且分别锚定**本页最旧/最新行**：非空表示该邻接方向
+  仍有可读行，`null` 只表示该方向在当前 snapshot 内没有更多可读行。两个游标可以同时非空；
+  `open(latest, before)` 的页包含 durable tail 时 `afterCursor=null` 是预期结果。
   `beforeCursor`/`afterCursor`/`readTicket`/`committedTail` 均为不透明值，客户端只可原样回传，
   不得解释或跨 snapshot 比较。
 - `items[]` 含 `entryId`、`source`、`position`（inherited 为 `null`）、`oversize`、
@@ -153,6 +155,8 @@ snapshotToken }`；`source` 参与客户端请求形状，服务端以 readTicke
 不信任客户端自行改写。`offset` 缺省 0，`maxBytes` 缺省 64 KiB、最大 256 KiB。响应为
 `{ entryId, offset, bytes: number[], nextOffset: null | number, complete: bool }`，`bytes` 是
 JSON 数字数组（原始 UTF-8 字节），`complete=false` 时 `nextOffset` 必须等于 `offset + bytes.len()`。
+分块按原始字节切分，块边界可能落在多字节字符中间；客户端负责跨块重组，并在展示/导出前按
+UTF-8 边界裁剪（只允许跳过开头 1–3 字节的跨块残片并显式标记，真实损坏必须报错）。
 读取受当前 snapshot tail 与本次 open/page/seek 返回的 oversize descriptor 白名单约束；
 非 oversize 条目、越 tail 或非本 snapshot 的条目返回 `-32016`，不退回完整历史读取。未协商
 `peri.historyWindowV1` 时该方法与 `history` 请求一样返回 `-32601`。
@@ -201,11 +205,12 @@ JSON 数字数组（原始 UTF-8 字节），`complete=false` 时 `nextOffset` �
 **后端边界**
 
 本机 SQLite 实现 `history_window_bounds`/`load_history_window_page`/`seek_history_window`/
-`load_history_body_chunk` 与 inherited 冻结读取；inherited 分页/seek 用 `json_each` keyset，
-正文分块用 `substr`，`ancestor_thread_id` 取 `threads.parent_thread_id`（旧数据无该字段时为
-`null`）。remote/emscripten adapter 未覆写这些端口，默认返回 `Unsupported`（出口 `-32603`），
-不得返回空页或空历史；能力协商成功不等于后端支持，因此这些后端不构成可用的窗口/继承实现。
-窗口能力默认关闭；未启用时旧分页路径保持原行为。
+`load_history_body_chunk` 与 inherited 冻结读取；canonical inherited 分页/seek 按冻结布局的
+数组下标与原始 span 增量计算长度，正文分块经 blob 句柄增量读取；只有非 canonical 信封才
+回退 `json_each` keyset 与 `substr`。`ancestor_thread_id` 取 `threads.parent_thread_id`（旧数据
+无该字段时为 `null`）。remote/emscripten adapter 未覆写这些端口，默认返回 `Unsupported`
+（出口 `-32603`），不得返回空页或空历史；能力协商成功不等于后端支持，因此这些后端不构成
+可用的窗口/继承实现。窗口能力默认关闭；未启用时旧分页路径保持原行为。
 
 
 协商过分页的连接在同一份 `_meta` 上还会拿到条目身份与位置：`periEntryId`（`{会话}:{payload}`，

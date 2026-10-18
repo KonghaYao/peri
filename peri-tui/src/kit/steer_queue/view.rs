@@ -247,6 +247,11 @@ impl QueueView {
             let y = area.y.saturating_add(1).saturating_add(row as u16);
             let row_area = Rect::new(area.x, y, area.width, 1);
             frame.rows.push((item.id.clone(), row_area));
+            // 结果未知的输入不提供发送/取回控件：换身份重发或取回都会破坏
+            // “可能已发出”的身份约束。
+            if item.state == SteerItemState::Uncertain {
+                continue;
+            }
             if area.width >= actions_width {
                 frame.controls.push(Control {
                     area: Rect::new(area.right().saturating_sub(actions_width), y, send_width, 1),
@@ -299,12 +304,19 @@ impl Widget for QueueView {
             let actions_width = send_width.saturating_add(edit_width).saturating_add(1);
             for (id, row) in &frame.rows {
                 if let Some(item) = self.items.iter().find(|item| item.id == *id) {
-                    let text_width = if row.width >= actions_width {
+                    let text = if item.state == SteerItemState::Uncertain {
+                        format!("{} {}", crate::i18n::tr("steer-item-uncertain"), item.text)
+                    } else {
+                        item.text.clone()
+                    };
+                    let text_width = if item.state == SteerItemState::Uncertain {
+                        row.width
+                    } else if row.width >= actions_width {
                         row.width.saturating_sub(actions_width.saturating_add(1))
                     } else {
                         row.width
                     };
-                    Paragraph::new(preview(&item.text, usize::from(text_width)))
+                    Paragraph::new(preview(&text, usize::from(text_width)))
                         .render(Rect::new(row.x, row.y, text_width, 1), buffer);
                 }
             }

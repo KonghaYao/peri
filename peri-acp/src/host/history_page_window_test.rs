@@ -109,8 +109,86 @@ async fn open_latest_pages_backwards_and_reports_metadata() {
     .expect("before page must succeed");
     assert_eq!(fetched["items"].as_array().unwrap().len(), 1);
     assert!(fetched["beforeCursor"].is_null());
+    // 更早页与 durable tail 之间仍有行：必须暴露更晚方向的内侧游标，
+    // 否则尾段被淘汰后无法向下补回（页到达 tail 时 afterCursor 才为 null）。
+    assert!(
+        fetched["afterCursor"].is_string(),
+        "a before page must expose the newer direction: {fetched}"
+    );
     assert_eq!(fetched["readTicket"], opened["readTicket"]);
     assert_eq!(fetched["committedTail"], opened["committedTail"]);
+
+    let returned = page(
+        &client,
+        &sid,
+        &opened["snapshotToken"],
+        &opened["readTicket"],
+        "afterCursor",
+        &fetched["afterCursor"],
+        2,
+    )
+    .await
+    .expect("the later cursor from a before page must be usable");
+    let returned_ids: Vec<&str> = returned["items"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter_map(|item| item["entryId"].as_str())
+        .collect();
+    assert_eq!(returned_ids.len(), 2);
+    assert!(
+        returned["afterCursor"].is_null(),
+        "the returned page reaches the durable tail: {returned}"
+    );
+
+    task.abort();
+}
+
+#[tokio::test]
+#[serial]
+async fn open_entry_direction_after_returns_the_anchor() {
+    let tmp = tempfile::TempDir::new().unwrap();
+    let fixture = PageFixture::new(&tmp).await;
+    let sid = fixture.sid.clone();
+    let own = fixture.own_ids().await;
+    assert!(own.len() >= 3, "fixture provides three own entries");
+    let anchor = own[1];
+    let anchor_entry = peri_acp_types::history_window::HistoryEntryId::new(&sid, anchor).encode();
+    let cfg = Arc::clone(&fixture.cfg);
+    let (client, _sessions, task) = spawn_loop(cfg, fixture.sessions, Some(window_caps())).await;
+
+    let opened = open(
+        &client,
+        &sid,
+        json!({
+            "kind": "open",
+            "direction": "after",
+            "anchor": { "kind": "entry", "entryId": anchor_entry, "source": "own" },
+            "limit": 2
+        }),
+    )
+    .await
+    .expect("open(entry, after) must succeed");
+    let entry_ids: Vec<&str> = opened["items"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter_map(|item| item["entryId"].as_str())
+        .collect();
+    assert_eq!(
+        entry_ids.first().copied(),
+        Some(anchor_entry.as_str()),
+        "after 半段必须包含锚点自身：{opened}"
+    );
+    assert_eq!(entry_ids.len(), 2, "锚点只出现一次并推进一页");
+    assert!(
+        opened["beforeCursor"].is_string(),
+        "锚点之前仍有行时必须暴露更早方向：{opened}"
+    );
+    assert!(
+        opened["afterCursor"].is_null(),
+        "页已到达 durable tail：{opened}"
+    );
 
     task.abort();
 }

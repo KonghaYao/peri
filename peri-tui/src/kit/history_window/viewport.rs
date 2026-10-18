@@ -47,7 +47,7 @@ pub fn publish_window_viewport(window: &HistoryWindow) {
 pub fn clear_window_viewport() {
     crate::kit::atoms::WINDOW_VIEWPORT.set(None);
     clear_window_unit_mappings();
-    crate::kit::atoms::WINDOW_GAP_REQUEST.set(None);
+    crate::kit::atoms::WINDOW_GAP_REQUEST.set(Vec::new());
     crate::kit::history_window::clear_detail_targets();
     crate::kit::atoms::HISTORY_INHERITED_NOTICE.set(None);
 }

@@ -33,6 +33,7 @@ use super::{AcpServerConfig, ContextOwnership, SessionState, SharedSessions};
 
 mod inherited;
 mod state;
+mod visibility;
 mod wire;
 
 /// 票据有效期：短期只读句柄；过期后必须重新 `open`。
@@ -91,6 +92,8 @@ pub(crate) struct PreparedWindowTicket {
     sink: Arc<dyn WindowNotificationSink>,
     oversize_entries:
         Arc<std::sync::Mutex<std::collections::HashSet<peri_acp_types::messages::MessageId>>>,
+    /// 本票据内的受众可见性结论；publish 时随票据转移，revoke 即整体丢弃。
+    visibility: visibility::VisibilityCache,
     inherited_unsupported: bool,
     inherited: Option<HistoryInheritedSnapshot>,
 }
@@ -111,6 +114,8 @@ pub(crate) struct IssuedWindowTicket {
     inherited_unsupported: bool,
     /// 本窗口可见的冻结 inherited 快照（own 窗口也会报告）。
     inherited: Option<HistoryInheritedSnapshot>,
+    /// 本票据内的受众可见性结论；与 ticket 同生命周期。
+    visibility: visibility::VisibilityCache,
 }
 
 impl IssuedWindowTicket {
@@ -125,6 +130,12 @@ impl IssuedWindowTicket {
         if let Ok(mut set) = self.oversize_entries.lock() {
             set.extend(entries.iter().copied());
         }
+    }
+
+    /// 完整受众解析次数；回归测试用它证明分块请求没有重扫全文。
+    #[cfg(test)]
+    pub(crate) fn visibility_full_scans(&self) -> usize {
+        self.visibility.full_scans()
     }
 }
 
@@ -172,6 +183,7 @@ impl HistoryWindowCoordinator {
             metadata,
             sink: Arc::clone(&connection.sink),
             oversize_entries: Arc::new(std::sync::Mutex::new(std::collections::HashSet::new())),
+            visibility: visibility::VisibilityCache::new(),
             inherited_unsupported,
             inherited,
         }
@@ -189,6 +201,7 @@ impl HistoryWindowCoordinator {
             oversize_entries: prepared.oversize_entries,
             inherited_unsupported: prepared.inherited_unsupported,
             inherited: prepared.inherited,
+            visibility: prepared.visibility,
         };
         self.ticket = Some(issued.clone());
         issued
@@ -201,6 +214,14 @@ impl HistoryWindowCoordinator {
     #[cfg(test)]
     pub(crate) fn has_ticket(&self) -> bool {
         self.ticket.is_some()
+    }
+
+    /// 当前票据的完整受众解析次数；没有票据时为 `None`。
+    #[cfg(test)]
+    pub(crate) fn visibility_full_scans(&self) -> Option<usize> {
+        self.ticket
+            .as_ref()
+            .map(IssuedWindowTicket::visibility_full_scans)
     }
 
     /// 撤销当前票据；旧 epoch 的读请求在返回前复核时被拒绝。
@@ -416,7 +437,15 @@ async fn open(
         .load_history_window_page(&ThreadId::from(thread_id.clone()), &page_plan)
         .await
         .map_err(resource_window_error);
-    let rows = wire::filter_rows(cfg, &thread_id, &source, &prepared.opaque, rows).await;
+    let rows = wire::filter_rows(
+        cfg,
+        &thread_id,
+        &source,
+        &prepared.opaque,
+        &prepared.visibility,
+        rows,
+    )
+    .await;
     let oversize = wire::oversize_ids(rows.as_ref().ok());
     let rows = rows?;
     inherited::validate_rows(&source, &rows)?;
@@ -505,6 +534,7 @@ async fn page(
         &thread_id,
         &issued.binding.source,
         &issued.opaque,
+        &issued.visibility,
         result,
     )
     .await;
@@ -602,6 +632,7 @@ async fn seek(
         &thread_id,
         &issued.binding.source,
         &issued.opaque,
+        &issued.visibility,
         result,
     )
     .await;
@@ -789,6 +820,7 @@ pub(crate) async fn handle_body_chunk(
         &source,
         tail.as_ref(),
         &issued.opaque,
+        &issued.visibility,
         entry_id,
     )
     .await?

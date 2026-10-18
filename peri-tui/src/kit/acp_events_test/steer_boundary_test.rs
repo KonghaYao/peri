@@ -12,6 +12,7 @@ use tokio_util::sync::CancellationToken;
 
 use crate::acp_client::{AcpNotification, AcpTuiClient};
 use crate::kit::atoms::{self, ACTIVE_SESSION_ID, BRIDGE_RESET_COUNTER, VIEW_MODELS};
+use crate::kit::steer_queue::SteerItemState;
 use crate::kit::steer_state::{STEERS, SteerCommand, SteerCommandKind, SteerState};
 use crate::kit::tui_render_unit::TuiRenderUnit;
 
@@ -251,9 +252,20 @@ async fn agent_execution_failure_clears_submitting_and_shows_error() {
         !STEERS.state().read().direct_submitting("s", epoch),
         "失败必须结束“正在提交…”"
     );
+    let rows = STEERS.state().read().rows("s");
+    assert_eq!(rows.len(), 1, "结果未知的完整请求必须保持可见");
+    assert_eq!(
+        rows[0].state,
+        SteerItemState::Uncertain,
+        "失败结算后不得继续投影 Submitting"
+    );
     assert!(
-        STEERS.state().read().rows("s").is_empty(),
-        "失败结算后 rows 不得继续投影 Submitting"
+        atoms::NOTIFICATION
+            .state()
+            .read()
+            .as_ref()
+            .is_some_and(|notice| !notice.message.is_empty()),
+        "失败反馈必须说明输入去向"
     );
     let items: Vec<TuiRenderUnit> = VIEW_MODELS.state().read().items.iter().cloned().collect();
     assert!(

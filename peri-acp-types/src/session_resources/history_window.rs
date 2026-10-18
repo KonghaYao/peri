@@ -63,6 +63,9 @@ pub struct HistoryWindowPagePlan {
     pub anchor: Option<MessageId>,
     pub direction: HistoryWindowDirection,
     /// seek/open(entry) 要把锚点自身纳入返回；page 游标已经消费过锚点，不重复返回。
+    ///
+    /// 锚点只返回一次：before 半段存在时由它包含；`before_limit == 0` 时改由 after
+    /// 半段包含（见 [`Self::after_includes_anchor`]）。
     pub include_anchor: bool,
     pub before_limit: usize,
     pub after_limit: usize,
@@ -71,6 +74,14 @@ pub struct HistoryWindowPagePlan {
 }
 
 impl HistoryWindowPagePlan {
+    /// 锚点是否由 after 半段返回。
+    ///
+    /// before 半段优先包含锚点；只有 `before_limit == 0`（`direction = after` 或
+    /// `seek` 只请求更晚方向）时才由 after 半段包含。两者互斥，保证锚点恰好出现一次。
+    pub fn after_includes_anchor(&self) -> bool {
+        self.include_anchor && self.before_limit == 0
+    }
+
     /// 首次 open：没有快照尾界，adapter 读取当前 durable tail。
     pub fn open(
         source: HistorySource,
@@ -199,9 +210,14 @@ pub struct HistoryWindowRows {
     pub inherited_entries: Vec<InheritedHistoryEntry>,
     /// 继承区读取固定到的冻结快照 id；own 读取为 `None`。
     pub inherited_snapshot_id: Option<String>,
-    /// 向更早方向还有内容时，下一次 before 读取的锚点（本页最旧一行）。
+    /// 更早方向存在邻接可读行时，下一次 before 读取的锚点（本页最旧一行）。
+    ///
+    /// 锚点始终是**本页**最旧行；只有该方向确实还有可读行时才铸造。`None` 表示
+    /// 在 fixed snapshot 内更早方向已经没有内容。
     pub before_cursor_anchor: Option<MessageId>,
-    /// 向更晚方向还有内容时，下一次 after 读取的锚点（本页最新一行）。
+    /// 更晚方向存在邻接可读行时，下一次 after 读取的锚点（本页最新一行）。
+    ///
+    /// 与 before 方向对称：两个游标可以同时非空；页到达 durable tail 时 `None`。
     pub after_cursor_anchor: Option<MessageId>,
 }
 

@@ -97,12 +97,15 @@ pub trait EventSink: Send + Sync {
 /// （`session::exec::*`）经本端口发射，不触碰 Controller 实现。
 pub trait EventPublisher: Send + Sync {
     /// 发射一条协议化前事件（携带事件源身份 [`crate::runtime::UnstampedEvent`]）。
+    ///
+    /// 返回发布时补打的 `session_seq`；补打失败返回 `None`（事件仍以
+    /// fallback 身份发出，但不参与交付日志的顺序对齐）。
     fn publish_event(
         &self,
         session_id: &str,
         source: &crate::runtime::UnstampedEvent,
         event: ExecutorEvent,
-    );
+    ) -> Option<crate::identity::SessionSeq>;
 }
 
 /// 事件订阅错误（[`EventSubscriber::recv`] 流语义）。

@@ -129,9 +129,15 @@ BridgeState.committed + CurrentTurn
    清未配对工具结果、选择/焦点与 `WINDOW_UNIT_KEYS` → 递增 `structural_epoch` 并发布局部快照。
    正文与派生缓存释放后先记入 `pending_release`；渲染侧观察到新 `STRUCTURAL_EPOCH`、清空
    受影响 slot 并写回 `RENDER_ACHIEVED_EPOCH` 后，预算才归还。
-6. 释放段变成 `HistoryGap`，保存前后稳定身份与 `beforeCursor/afterCursor`；相邻 gap 合并。
-   翻到 gap 时用游标 page，锚点在中间时用 `seek` 按稳定 `entryId` 重新定位；锚点缺失不跳底。
-7. 视口所在段与其相邻段在 compact 后保留；其余已 durable/sealed 段才可释放。释放不写回
+6. 释放段变成 `HistoryGap`，保存前后稳定身份与内侧邻居游标：`beforeCursor` 取更晚驻留段的
+   `beforeCursor`（page(Before) 从缺口上端回填），`afterCursor` 取更早驻留段的 `afterCursor`
+   （page(After) 从缺口下端回填）；相邻 gap 合并。翻到 gap 时按滚动方向选择 page，锚点在
+   中间时用 `seek` 按稳定 `entryId` 重新定位；锚点缺失不跳底。
+7. 窗口边界游标由**驻留布局两端段**派生（最早段的 `beforeCursor`、最晚段的 `afterCursor`），
+   在每次 admission/release 后重算并写入 consumer；单页响应只推进它负责的那一端。淘汰端段后，
+   新的边缘段游标天然指向被淘汰区间，`request_window_newer_page_if_due` /
+   `request_window_older_page_if_due` 据此继续双向翻页。
+8. 视口所在段与其相邻段在 compact 后保留；其余已 durable/sealed 段才可释放。释放不写回
    存储，不调用工具完成、Todo、审批、workflow 或输入队列 handler，不改变 phase/request/turn 身份。
 
 ### 提交、失效与降级

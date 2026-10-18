@@ -43,6 +43,8 @@ use sqlx::SqliteConnection;
 
 #[path = "session_data/async_task.rs"]
 mod async_task;
+#[path = "session_data/blob_reader.rs"]
+mod blob_reader;
 #[path = "session_data/catalog.rs"]
 mod catalog;
 #[path = "session_data/history.rs"]
@@ -51,6 +53,8 @@ mod history;
 mod history_window;
 #[path = "session_data/inherited_blob.rs"]
 mod inherited_blob;
+#[path = "session_data/inherited_page.rs"]
+mod inherited_page;
 #[path = "session_data/lifecycle.rs"]
 mod lifecycle;
 
@@ -77,3 +81,7 @@ mod history_perf_tests;
 #[cfg(test)]
 #[path = "session_data/history_window_incremental_test.rs"]
 mod history_window_incremental_tests;
+
+#[cfg(test)]
+#[path = "session_data/history_window_layout_test.rs"]
+mod history_window_layout_tests;

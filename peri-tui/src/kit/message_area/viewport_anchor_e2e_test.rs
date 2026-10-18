@@ -168,6 +168,8 @@ fn dispatch_landing_page(state: &mut BridgeState, token: &str, response: History
         state,
         &AcpEventData::HistoryPageLoaded {
             response: Box::new(response),
+            origin: None,
+            refetch: None,
         },
     );
 }

@@ -152,12 +152,21 @@ fn request_pages_after_scroll(
         scroll_throttle,
         follow_bottom,
     );
-    let gap = request_gap_page_after_scroll();
+    // gap 回读需要方向：向上滚填缺口上端，向下滚填缺口下端。
+    let pending_delta = scroll_throttle.read().pending_delta;
+    let gap_direction = match pending_delta {
+        delta if delta < 0 => Some(crate::kit::history_window::GapSeekDirection::Before),
+        delta if delta > 0 => Some(crate::kit::history_window::GapSeekDirection::After),
+        _ => None,
+    };
+    let gap = request_gap_page_after_scroll(gap_direction);
     older || gap
 }
 
 /// 视口没有可映射锚点（gap/淘汰后的占位）时，按桥接发布的 gap 目标重读。
-pub(super) fn request_gap_page_after_scroll() -> bool {
+pub(super) fn request_gap_page_after_scroll(
+    direction: Option<crate::kit::history_window::GapSeekDirection>,
+) -> bool {
     if !crate::kit::history_page_consumer::window_path_enabled() {
         return false;
     }
@@ -169,7 +178,7 @@ pub(super) fn request_gap_page_after_scroll() -> bool {
     if anchored {
         return false;
     }
-    crate::kit::history_page_consumer::request_window_gap_if_due()
+    crate::kit::history_page_consumer::request_window_gap_if_due(direction)
 }
 
 /// 从 `use_event_handler` 闭包提取的鼠标/键盘处理逻辑。

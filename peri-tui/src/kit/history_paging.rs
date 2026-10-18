@@ -80,6 +80,19 @@ pub struct HistorySubItem {
     pub system_reminder: bool,
 }
 
+/// 一次历史页请求的定位信息（不含响应 `nextCursor`）。
+///
+/// 跨页工具结果的正文可能超过内存预算；补读必须回到**结果来源页的请求
+/// cursor**，否则响应 `nextCursor` 已经指向更早一页，补读会错过结果。
+/// 它随 `HistoryPageLoaded` 事件传递，桥接侧不再从进程级队列猜来源。
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct HistoryPageOrigin {
+    pub session_id: String,
+    pub snapshot_token: String,
+    pub cursor: String,
+    pub limit: usize,
+}
+
 /// 一次历史页响应的客户端视图。
 #[derive(Debug, Clone, PartialEq)]
 pub struct HistoryPageResponse {
@@ -175,6 +188,28 @@ pub(crate) enum WindowGapRequest {
     },
 }
 
+impl WindowGapRequest {
+    pub(crate) fn gap_id(&self) -> GapId {
+        match self {
+            Self::Page { gap_id, .. } | Self::Seek { gap_id, .. } => *gap_id,
+        }
+    }
+
+    /// 该候选是否响应指定滚动方向；seek 同时覆盖两侧。
+    pub(crate) fn matches_direction(&self, direction: Option<GapSeekDirection>) -> bool {
+        match self {
+            Self::Seek { .. } => true,
+            Self::Page { cursor, .. } => {
+                let candidate = match cursor {
+                    WindowPageCursor::Before(_) => GapSeekDirection::Before,
+                    WindowPageCursor::After(_) => GapSeekDirection::After,
+                };
+                direction.is_none_or(|wanted| wanted == candidate)
+            }
+        }
+    }
+}
+
 pub(crate) fn window_gap_recovery(window: &HistoryWindow) -> Option<WindowGapRequest> {
     let AnchorRelocation::Gap { gap_id, seek } = window.relocate_anchor() else {
         return None;
@@ -193,9 +228,40 @@ pub(crate) fn window_gap_recovery(window: &HistoryWindow) -> Option<WindowGapReq
     }
 }
 
-/// 桥接锚点落入 gap 时发布重读目标；滚动触发在视口无锚点时消费。
+/// 桥接在 admission/release 后发布全部缺口的重读目标；滚动按方向消费。
+///
+/// 锚点恰好落入某个缺口时优先发布精确目标（中间缺口用 seek）；其余缺口按
+/// **内侧邻居游标**各给一个方向候选：`before_cursor` 用 page(Before) 从缺口上端
+/// 向下补，`after_cursor` 用 page(After) 从缺口下端向上补。
 pub(crate) fn publish_window_gap_request(window: &HistoryWindow) {
-    crate::kit::atoms::WINDOW_GAP_REQUEST.set(window_gap_recovery(window));
+    let mut requests = Vec::new();
+    if let Some(request) = window_gap_recovery(window) {
+        requests.push(request);
+    }
+    let mut gaps: Vec<_> = window.gaps().iter().collect();
+    gaps.sort_by_key(|(gap_id, _)| **gap_id);
+    for (gap_id, gap) in gaps {
+        if requests
+            .iter()
+            .any(|request: &WindowGapRequest| request.gap_id() == *gap_id)
+        {
+            // 锚点缺口已有确定性更好的目标，不再发布按游标的候选。
+            continue;
+        }
+        if let Some(cursor) = &gap.before_cursor {
+            requests.push(WindowGapRequest::Page {
+                gap_id: *gap_id,
+                cursor: WindowPageCursor::Before(cursor.clone()),
+            });
+        }
+        if let Some(cursor) = &gap.after_cursor {
+            requests.push(WindowGapRequest::Page {
+                gap_id: *gap_id,
+                cursor: WindowPageCursor::After(cursor.clone()),
+            });
+        }
+    }
+    crate::kit::atoms::WINDOW_GAP_REQUEST.set(requests);
 }
 
 // ---------------------------------------------------------------------------

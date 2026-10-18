@@ -1,4 +1,5 @@
 use super::*;
+use peri_acp_types::identity::SessionSeq;
 use peri_acp_types::session::MessageQueue;
 
 #[path = "user_input_mailbox_terminal_test.rs"]
@@ -884,6 +885,43 @@ fn test_mailbox_snapshot_exposes_terminal_states_and_deduplicates_delivery() {
     assert!(snapshot.terminal_items.iter().any(|item| {
         item.input_id == withdrawn_input.input_id && item.state == UserInputState::Withdrawn
     }));
+}
+
+/// [回归测试] 交付日志条目在发布时获得事件序号；重复绑定保留首个序号。
+#[test]
+fn test_bind_delivery_sequence_orders_journal_and_is_idempotent() {
+    let (mailbox, inbox) = make_mailbox();
+    mailbox
+        .attach_external_attempt(CancellationToken::new(), false)
+        .unwrap();
+    let input = make_input(&mailbox, "带序号交付");
+    mailbox.enqueue(&input).unwrap();
+    mailbox.enter_idle();
+    let messages = inbox.queue().drain_all();
+    let id = messages[0].message().unwrap().id();
+    mailbox.mark_claimed(&[id]);
+    mailbox.mark_delivered(&[id]);
+
+    let pending = mailbox.pending_delivery_notifications();
+    assert_eq!(pending.len(), 1);
+    assert_eq!(
+        pending[0].session_seq, None,
+        "mark_delivered 时尚未发布事件，序号必须显式为 None"
+    );
+
+    let first = SessionSeq::initial().next();
+    mailbox.bind_delivery_sequence(&input.input_id, first);
+    assert_eq!(
+        mailbox.pending_delivery_notifications()[0].session_seq,
+        Some(first)
+    );
+
+    mailbox.bind_delivery_sequence(&input.input_id, first.next());
+    assert_eq!(
+        mailbox.pending_delivery_notifications()[0].session_seq,
+        Some(first),
+        "重复绑定不得覆盖首个序号"
+    );
 }
 
 /// [回归测试] 终态快照必须有界，避免长会话无限增长。

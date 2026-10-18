@@ -32,6 +32,16 @@ pub struct PendingInteraction<T> {
     pub payload: T,
 }
 
+/// 一次大结果补读的身份：响应只能作用于该 `tool_id`，`request_id` 用于
+/// 只释放本次请求的在途认领（迟到的旧响应不得清掉新请求）。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ToolResultRefetch {
+    pub request_id: u64,
+    pub tool_id: String,
+    /// `Some` = 本次补读失败：卡片显示失败，但暂存来源保留，用户可再次展开重试。
+    pub error: Option<String>,
+}
+
 /// Decoded ACP custom event.
 ///
 /// One variant per event name defined in the ACP protocol section 4
@@ -418,6 +428,11 @@ pub enum AcpEventData {
     /// 串行（REQ-C01、A23）。
     HistoryPageLoaded {
         response: Box<crate::kit::history_paging::HistoryPageResponse>,
+        /// 产出 `response.items` 的那次请求定位；补读合成页为 `None`。
+        /// 与响应同事件传递，避免桥接侧从全局队列误取其它响应的来源。
+        origin: Option<crate::kit::history_paging::HistoryPageOrigin>,
+        /// `Some` = 展开触发的补读响应；force_complete 只作用于该 `tool_id`。
+        refetch: Option<Box<ToolResultRefetch>>,
     },
 
     /// S4 私有通知 `peri/history_committed`：持久提交事实（展示段封印/水位）。

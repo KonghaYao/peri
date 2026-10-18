@@ -693,6 +693,7 @@ impl UserInputMailbox {
                 delivery_journal.push_back(PendingDeliveryNotification {
                     input_id: record.input.input_id.clone(),
                     content: record.input.content.clone(),
+                    session_seq: None,
                 });
                 discard_payload(record);
             }

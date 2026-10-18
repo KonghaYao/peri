@@ -18,7 +18,8 @@ use peri_acp_types::PeriCaps;
 use crate::host::history_page::page_item;
 
 use super::{
-    anchor_unavailable, resource_window_error, AcpError, AcpServerConfig, IssuedWindowTicket,
+    anchor_unavailable, resource_window_error, visibility::VisibilityCache, AcpError,
+    AcpServerConfig, IssuedWindowTicket,
 };
 
 // 在票据登记和 wire descriptor 构造之前过滤；游标仍按存储行推进。
@@ -27,6 +28,7 @@ pub(super) async fn filter_rows(
     thread_id: &str,
     source: &HistorySource,
     ticket: &peri_acp_types::history_window::HistoryReadTicket,
+    cache: &VisibilityCache,
     result: Result<HistoryWindowRows, AcpError>,
 ) -> Result<HistoryWindowRows, AcpError> {
     let mut rows = result?;
@@ -38,6 +40,7 @@ pub(super) async fn filter_rows(
             source,
             rows.committed_tail.as_ref(),
             ticket,
+            cache,
             id,
         )
         .await?
@@ -62,54 +65,73 @@ pub(super) async fn body_visible(
     source: &HistorySource,
     tail: Option<&peri_acp_types::history_window::HistoryCommittedTail>,
     ticket: &peri_acp_types::history_window::HistoryReadTicket,
+    cache: &VisibilityCache,
     entry_id: MessageId,
 ) -> Result<bool, AcpError> {
+    let expected = HistoryEntryId::new(&thread_id.to_owned(), entry_id).encode();
+    let owner = thread_id.to_owned();
+    let source = source.clone();
+    let ticket = ticket.clone();
+    let tail = tail.cloned();
+    let load_chunk = |offset: u64| {
+        let owner = owner.clone();
+        let source = source.clone();
+        let ticket = ticket.clone();
+        let tail = tail.clone();
+        async move {
+            cfg.session_resources
+                .load_history_body_chunk(
+                    &owner,
+                    source,
+                    entry_id,
+                    offset,
+                    HISTORY_WINDOW_DEFAULT_CHUNK_SIZE,
+                    tail.as_ref(),
+                    &ticket,
+                )
+                .await
+        }
+    };
+
+    // 每个请求都先读持久内容的前缀块：缓存只复用结论，不复用「已登记 descriptor」。
+    let first = load_chunk(0).await.map_err(resource_window_error)?;
+    first
+        .validate(&expected, 0, HISTORY_WINDOW_DEFAULT_CHUNK_SIZE)
+        .map_err(super::window_error)?;
+    if let Some(visible) = cache.lookup(entry_id, &first.bytes) {
+        return Ok(visible);
+    }
+    cache.note_full_scan();
+    let prefix = first.bytes.clone();
+
     // 同步 serde reader 在 blocking pool 中消费容量为 1 的通道；不聚合大正文。
+    // 首个已校验块直接作为 reader 的当前缓冲，后续块仍流式送入。
     let (sender, receiver) = tokio::sync::mpsc::channel(1);
     let parsing = tokio::task::spawn_blocking(move || {
         peri_acp_types::history_page::history_body_displayable_to_client(BodyReader {
             receiver,
-            current: std::io::Cursor::new(Vec::new()),
+            current: std::io::Cursor::new(first.bytes),
         })
     });
-    let mut offset = 0;
+    let mut offset = first.next_offset;
     let mut failure = None;
-    loop {
-        let chunk = cfg
-            .session_resources
-            .load_history_body_chunk(
-                &thread_id.to_owned(),
-                source.clone(),
-                entry_id,
-                offset,
-                HISTORY_WINDOW_DEFAULT_CHUNK_SIZE,
-                tail,
-                ticket,
-            )
-            .await
-            .map_err(resource_window_error);
-        let chunk = match chunk {
+    while let Some(next_offset) = offset {
+        let chunk = match load_chunk(next_offset).await.map_err(resource_window_error) {
             Ok(chunk) => chunk,
             Err(error) => {
                 failure = Some(error);
                 break;
             }
         };
-        if let Err(error) = chunk.validate(
-            &HistoryEntryId::new(&thread_id.to_owned(), entry_id).encode(),
-            offset,
-            HISTORY_WINDOW_DEFAULT_CHUNK_SIZE,
-        ) {
+        if let Err(error) =
+            chunk.validate(&expected, next_offset, HISTORY_WINDOW_DEFAULT_CHUNK_SIZE)
+        {
             failure = Some(super::window_error(error));
             break;
         }
-        let next = chunk.next_offset;
+        offset = chunk.next_offset;
         if sender.send(chunk.bytes).await.is_err() {
             break;
-        }
-        match next {
-            Some(next) => offset = next,
-            None => break,
         }
     }
     drop(sender);
@@ -120,10 +142,13 @@ pub(super) async fn body_visible(
     if let Some(error) = failure {
         return Err(error);
     }
-    parsed.map_err(|_| {
+    let visible = parsed.map_err(|_| {
         tracing::warn!("history audience decoding failed");
         anchor_unavailable("history audience could not be verified")
-    })
+    })?;
+    // 解析成功才写缓存；失败不缓存，下一次仍走完整校验。
+    cache.store(entry_id, &prefix, visible);
+    Ok(visible)
 }
 
 struct BodyReader {
