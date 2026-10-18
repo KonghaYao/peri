@@ -85,6 +85,7 @@ fn test_copy_button_hidden_for_user_bubble() {
         content_hash: 4,
         reminder: None,
         source: None,
+        message_id: None,
     });
     let mut cache = crate::kit::markdown::MarkdownRenderCache::default();
     let (lines, btn, _, _) =

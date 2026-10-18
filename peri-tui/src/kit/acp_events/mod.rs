@@ -244,7 +244,12 @@ impl BridgeState {
     /// Put a user prompt after all output already received from the preceding
     /// turn. A live subagent keeps its container in current_turn, so in that
     /// case the prompt joins the same chronological segment stream.
-    fn push_user_bubble(&mut self, text: String, attachments: Vec<UserAttachment>) {
+    fn push_user_bubble(
+        &mut self,
+        text: String,
+        attachments: Vec<UserAttachment>,
+        message_id: Option<String>,
+    ) {
         // A tool result can still arrive after the next prompt is displayed.
         // Preserve its accumulator until ToolEnded; TurnDone retains its normal
         // flush behavior for tools that never emit an end event.
@@ -256,12 +261,14 @@ impl BridgeState {
         if !has_running_tool {
             self.flush_current_turn();
         }
+        let mut bubble = TuiUserBubble::with_attachments(text, attachments);
+        bubble.message_id = message_id;
         if self.current_turn.is_empty() {
-            self.committed.push_back(TuiRenderUnit::TuiUserBubble(
-                TuiUserBubble::with_attachments(text, attachments),
-            ));
+            self.committed
+                .push_back(TuiRenderUnit::TuiUserBubble(bubble));
         } else {
-            self.current_turn.push_user_bubble(text, attachments);
+            self.current_turn
+                .push_user_bubble(bubble.text, bubble.attachments, bubble.message_id);
         }
     }
 
@@ -517,7 +524,7 @@ pub(crate) fn dispatch_for_bridge(
         // ── Unknown / forward-compat ──
         Unknown { .. } => system::handle_unknown(),
         LocalUserBubble { text, attachments } => {
-            turn::handle_local_user_bubble(state, text, attachments.clone())
+            turn::handle_local_user_bubble(state, text, attachments.clone(), None)
         }
         UserInputQueueChanged { snapshot } => {
             crate::kit::steer_state::STEERS
@@ -539,7 +546,7 @@ pub(crate) fn dispatch_for_bridge(
                 .state()
                 .write()
                 .claim_delivery(&state.active_session_id, input_id);
-            turn::handle_local_user_bubble(state, text, Vec::new());
+            turn::handle_local_user_bubble(state, text, Vec::new(), Some(input_id.clone()));
         }
         LocalLoadingReset => turn::handle_loading_reset(state),
         PromptFailed { request_id } => turn::handle_prompt_failed(state, request_id),

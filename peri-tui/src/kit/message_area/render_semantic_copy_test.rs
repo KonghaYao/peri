@@ -94,6 +94,7 @@ fn test_no_role_label_line_rendered() {
         attachments: Vec::new(),
         reminder: None,
         source: None,
+        message_id: None,
         content_hash: 0,
     });
     let ulines = vm_to_lines(&user_vm, &grid);
@@ -374,6 +375,7 @@ fn test_semantic_user_bubble() {
         text: "重构消息流".to_string(),
         attachments: Vec::new(),
         source: None,
+        message_id: None,
         reminder: None,
         content_hash: 0,
     });

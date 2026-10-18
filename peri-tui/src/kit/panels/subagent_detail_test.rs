@@ -244,6 +244,7 @@ fn test_find_selected_subagent_skips_non_subagent_vms() {
             content_hash: 0,
             reminder: None,
             source: None,
+            message_id: None,
         })]),
         generation: 0,
     };

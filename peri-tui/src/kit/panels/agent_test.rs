@@ -63,6 +63,7 @@ fn test_collect_subagents_only_user_bubbles() {
             content_hash: 0,
             reminder: None,
             source: None,
+            message_id: None,
         })]),
         generation: 0,
     };

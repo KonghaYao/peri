@@ -474,6 +474,54 @@ fn detail_visible_text_truncates_at_a_char_boundary_when_prefix_is_evicted() {
 }
 
 #[test]
+fn detail_visible_text_keeps_valid_prefix_when_tail_is_truncated() {
+    // 64 KiB 分块的有效中文正文：块尾落在多字节字符中间。修复前整段正文显示为
+    // UTF-8 错误；修复后应保留有效前缀，等下一块补齐。
+    let body = "中".repeat(64 * 1024);
+    let bytes = body.as_bytes();
+    let first_len = 64 * 1024 - 2;
+    assert_ne!(
+        first_len % 3,
+        0,
+        "fixture must cut inside a three-byte character"
+    );
+    let mut window = HistoryDetailWindow::open(descriptor(bytes.len() as u64)).expect("open");
+    window
+        .apply_chunk(
+            chunk(0, &bytes[..first_len], false, Some(first_len as u64)),
+            256 * 1024,
+        )
+        .expect("first chunk");
+
+    let visible = window
+        .visible_text()
+        .expect("mid-character tail is not corruption");
+    assert_eq!(visible.text.as_bytes(), &bytes[..first_len - 2]);
+    assert_eq!(visible.trailing_fragment_bytes, 2);
+    assert!(!visible.text.is_empty(), "valid prefix must stay visible");
+
+    window
+        .apply_chunk(
+            chunk(first_len as u64, &bytes[first_len..], true, None),
+            256 * 1024,
+        )
+        .expect("second chunk");
+    let visible = window.visible_text().expect("complete text");
+    assert_eq!(visible.text, body);
+    assert_eq!(visible.trailing_fragment_bytes, 0);
+}
+
+#[test]
+fn detail_incomplete_tail_at_eof_is_still_corruption() {
+    let bytes = b"ab\xe4\xb8";
+    let mut window = HistoryDetailWindow::open(descriptor(bytes.len() as u64)).expect("open");
+    window
+        .apply_chunk(chunk(0, bytes, true, None), 256 * 1024)
+        .expect("chunk");
+    assert_eq!(window.visible_text(), Err(DetailError::Utf8));
+}
+
+#[test]
 fn detail_true_corruption_still_reports_utf8() {
     let mut window = HistoryDetailWindow::open(descriptor(9)).expect("open");
     let mut bytes = b"abcde".to_vec();

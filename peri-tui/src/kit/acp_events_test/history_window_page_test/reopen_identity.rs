@@ -54,11 +54,9 @@ fn reopen_with_new_turn_keeps_live_answer_once() {
 
     // open 在途：新 turn 已经 flush 到 committed，current_turn 保持为空。
     let display_generation = state.generation;
-    state
-        .committed
-        .push_back(TuiRenderUnit::TuiUserBubble(TuiUserBubble::new(
-            "answer".to_string(),
-        )));
+    state.committed.push_back(TuiRenderUnit::TuiUserBubble(
+        TuiUserBubble::new("answer".to_string()).with_message_id("m2"),
+    ));
     push_view_models(&mut state);
 
     let identity = WindowIdentity::new("s1", "gen-2", 8, "snap-2");
@@ -116,6 +114,74 @@ fn reopen_with_new_turn_keeps_live_answer_once() {
 
 #[test]
 #[serial]
+fn reopen_adopts_only_entries_actually_retained_by_live_tail() {
+    use crate::kit::tui_render_unit::{TuiAssistantBubble, TuiRenderUnit, TuiUserBubble};
+
+    let (mut state, _guard) = state_with_window();
+    // 旧窗口只驻留 m1；更靠后的 m2 已被预算淘汰——committed 与展示账本都
+    // 不再持有它，但它仍会在重开页里返回。
+    load_page(
+        &mut state,
+        "r1",
+        WindowPagePlacement::Tail,
+        vec![text_item("m1", 10, "one")],
+    );
+
+    // 新 turn 完成：live 尾部持有 user 投递（input id = m3）与 assistant
+    // 回答（messageId = m4）。
+    let display_generation = state.generation;
+    state.committed.push_back(TuiRenderUnit::TuiUserBubble(
+        TuiUserBubble::new("question".to_string()).with_message_id("m3"),
+    ));
+    let mut answer = TuiAssistantBubble {
+        text: "answer".to_string(),
+        reasoning: None,
+        message_id: Some("m4".to_string()),
+        started_at: None,
+        duration_ms: None,
+        content_hash: 0,
+    };
+    answer.recompute_hash();
+    state
+        .committed
+        .push_back(TuiRenderUnit::TuiAssistantBubble(answer.into()));
+    push_view_models(&mut state);
+
+    let identity = WindowIdentity::new("s1", "gen-2", 8, "snap-2");
+    dispatch_open(
+        &mut state,
+        "r-open",
+        identity,
+        display_generation,
+        vec![
+            text_item("m1", 10, "one"),
+            text_item("m2", 20, "evicted page"),
+            text_item("m3", 30, "question"),
+            text_item("m4", 40, "answer"),
+        ],
+    );
+    push_view_models(&mut state);
+
+    assert_eq!(
+        committed_texts(&state),
+        vec!["one", "evicted page", "question", "answer"],
+        "被淘汰的历史条目不得因位置高于水位被误判为已展示"
+    );
+    let evicted = PersistentEntryKey::own("s1:m2");
+    assert!(
+        state.window.index().contains_entry(&evicted),
+        "未被 live 尾部持有的条目必须作为窗口页正文插入"
+    );
+    assert!(
+        state
+            .window
+            .is_entry_displayed(&PersistentEntryKey::own("s1:m4")),
+        "assistant messageId 仍被 live 尾部持有时只登记身份"
+    );
+}
+
+#[test]
+#[serial]
 fn adopt_only_ledger_survives_next_identity_switch() {
     use crate::kit::tui_render_unit::{TuiRenderUnit, TuiUserBubble};
 
@@ -129,11 +195,9 @@ fn adopt_only_ledger_survives_next_identity_switch() {
 
     // 新 turn 已 flush：live 尾部进入 committed。
     let display_generation = state.generation;
-    state
-        .committed
-        .push_back(TuiRenderUnit::TuiUserBubble(TuiUserBubble::new(
-            "answer".to_string(),
-        )));
+    state.committed.push_back(TuiRenderUnit::TuiUserBubble(
+        TuiUserBubble::new("answer".to_string()).with_message_id("m2"),
+    ));
     push_view_models(&mut state);
 
     // 第二个身份只返回已由 live 尾部展示的条目：adopt-only，不建段。
@@ -164,11 +228,9 @@ fn adopt_only_ledger_survives_next_identity_switch() {
     );
 
     // 再来一次 flush 后，第三个身份返回上一轮回答与新回答。
-    state
-        .committed
-        .push_back(TuiRenderUnit::TuiUserBubble(TuiUserBubble::new(
-            "third".to_string(),
-        )));
+    state.committed.push_back(TuiRenderUnit::TuiUserBubble(
+        TuiUserBubble::new("third".to_string()).with_message_id("m3"),
+    ));
     push_view_models(&mut state);
     let display_generation = state.generation;
     let identity = WindowIdentity::new("s1", "gen-3", 9, "snap-3");
@@ -204,11 +266,9 @@ fn adopt_only_reopen_places_older_history_before_live_tail() {
     );
 
     let display_generation = state.generation;
-    state
-        .committed
-        .push_back(TuiRenderUnit::TuiUserBubble(TuiUserBubble::new(
-            "answer".to_string(),
-        )));
+    state.committed.push_back(TuiRenderUnit::TuiUserBubble(
+        TuiUserBubble::new("answer".to_string()).with_message_id("m2"),
+    ));
     push_view_models(&mut state);
 
     let identity = WindowIdentity::new("s1", "gen-2", 8, "snap-2");
@@ -221,11 +281,9 @@ fn adopt_only_reopen_places_older_history_before_live_tail() {
     );
     push_view_models(&mut state);
 
-    state
-        .committed
-        .push_back(TuiRenderUnit::TuiUserBubble(TuiUserBubble::new(
-            "third".to_string(),
-        )));
+    state.committed.push_back(TuiRenderUnit::TuiUserBubble(
+        TuiUserBubble::new("third".to_string()).with_message_id("m3"),
+    ));
     push_view_models(&mut state);
     let display_generation = state.generation;
     let identity = WindowIdentity::new("s1", "gen-3", 9, "snap-3");
@@ -265,11 +323,9 @@ fn streaming_reopen_places_older_history_before_live_tail() {
     );
 
     let display_generation = state.generation;
-    state
-        .committed
-        .push_back(TuiRenderUnit::TuiUserBubble(TuiUserBubble::new(
-            "answer".to_string(),
-        )));
+    state.committed.push_back(TuiRenderUnit::TuiUserBubble(
+        TuiUserBubble::new("answer".to_string()).with_message_id("m2"),
+    ));
     push_view_models(&mut state);
 
     // adopt-only：window 只登记身份，不建段；committed 保留 live 尾部。

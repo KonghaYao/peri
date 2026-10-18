@@ -65,6 +65,7 @@ fn test_content_hash_returns_inner_field_for_each_variant() {
         attachments: Vec::new(),
         reminder: None,
         source: None,
+        message_id: None,
         content_hash: 11,
     });
     assert_eq!(user.content_hash(), 11);
@@ -338,6 +339,7 @@ fn test_user_bubble_partial_eq_ignores_content_hash() {
         attachments: Vec::new(),
         reminder: None,
         source: None,
+        message_id: None,
         content_hash: 1,
     };
     let b = TuiUserBubble {
@@ -345,6 +347,7 @@ fn test_user_bubble_partial_eq_ignores_content_hash() {
         attachments: Vec::new(),
         reminder: None,
         source: None,
+        message_id: None,
         content_hash: 2,
     };
     assert_eq!(a, b, "content_hash 不同但其他字段相同 → 应相等");
@@ -357,6 +360,7 @@ fn test_user_bubble_partial_eq_respects_text() {
         attachments: Vec::new(),
         reminder: None,
         source: None,
+        message_id: None,
         content_hash: 0,
     };
     let b = TuiUserBubble {
@@ -364,6 +368,7 @@ fn test_user_bubble_partial_eq_respects_text() {
         attachments: Vec::new(),
         reminder: None,
         source: None,
+        message_id: None,
         content_hash: 0,
     };
     assert_ne!(a, b, "text 不同 → 应不等");
