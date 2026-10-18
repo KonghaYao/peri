@@ -50,3 +50,22 @@ fn test_resolve_without_overrides_is_all_false() {
     assert!(!flags.is_enabled(FULL_ASYNC_TOOLS));
     assert!(flags.value(FULL_ASYNC_TOOLS).is_none());
 }
+
+/// TUI 本地 beta：默认 false；显式 true 进入投影，且键被 validate 接受。
+#[test]
+fn test_history_window_v1_beta_defaults_false_and_accepts_override() {
+    let default = PeriConfig::default();
+    assert!(!from_merged(&default).is_enabled(HISTORY_WINDOW_V1));
+
+    let mut enabled = PeriConfig::default();
+    enabled.config.betas.set(HISTORY_WINDOW_V1, true);
+    enabled.config.betas.validate();
+    assert_eq!(enabled.config.betas.get(HISTORY_WINDOW_V1), Some(true));
+    assert!(from_merged(&enabled).is_enabled(HISTORY_WINDOW_V1));
+    assert!(is_known(HISTORY_WINDOW_V1));
+
+    let mut disabled = PeriConfig::default();
+    disabled.config.betas.set(HISTORY_WINDOW_V1, false);
+    disabled.config.betas.validate();
+    assert!(!from_merged(&disabled).is_enabled(HISTORY_WINDOW_V1));
+}

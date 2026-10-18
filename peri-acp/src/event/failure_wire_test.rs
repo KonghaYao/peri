@@ -66,18 +66,19 @@ async fn test_subagent_stopped_safe_failure_survives_acp_wire_consumption() {
     )
     .expect("safe failure fixture");
 
-    sink.push_event(
-        "session-1",
-        &ExecutorEvent::SubagentStopped {
-            agent_name: "reviewer".into(),
-            result: "RESULT_SENTINEL".into(),
-            is_error: true,
-            instance_id: "INSTANCE_SENTINEL".into(),
-            subagent_failure: Some(failure),
-        },
-        0,
-    )
-    .await;
+    let _ = sink
+        .push_event(
+            "session-1",
+            &ExecutorEvent::SubagentStopped {
+                agent_name: "reviewer".into(),
+                result: "RESULT_SENTINEL".into(),
+                is_error: true,
+                instance_id: "INSTANCE_SENTINEL".into(),
+                subagent_failure: Some(failure),
+            },
+            0,
+        )
+        .await;
 
     let notifications = transport.notifications.lock().unwrap();
     assert_eq!(

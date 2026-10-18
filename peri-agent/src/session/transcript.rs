@@ -272,6 +272,30 @@ impl MessageTranscript {
             .collect()
     }
 
+    /// 对象级内存快照（只读诊断；不克隆正文）。
+    ///
+    /// `own` / `inherited` 按 [`Self::ancestor_len`] 分开计量；`reserved` 是
+    /// `String` / `Vec` capacity 下界，不是分配器统计。测试与采样共用同一入口。
+    pub fn memory_snapshot(&self) -> crate::session::memory_probe::TranscriptMemorySnapshot {
+        crate::session::memory_probe::transcript_snapshot(
+            &self.entries,
+            self.ancestor_len,
+            &self.flags,
+            self.entries.capacity(),
+            self.id_index.capacity(),
+            self.flags.capacity(),
+            self.staged.as_ref(),
+        )
+    }
+
+    /// DEBUG 未启用时零成本：先检查 target，再构造快照并输出结构化字段。
+    pub fn sample_memory(&self, stage: &'static str, origin: &str) {
+        if !crate::session::memory_probe::observations_enabled() {
+            return;
+        }
+        crate::session::memory_probe::log_transcript(stage, origin, &self.memory_snapshot());
+    }
+
     /// 获取所有**可见**普通消息（跳过 excluded 与 canonical reminder）
     pub fn visible_messages(&self) -> Vec<&BaseMessage> {
         self.entries
@@ -357,6 +381,14 @@ impl MessageTranscript {
     /// 标记 Full Compact 已成功写入持久化存储和内存 transcript。
     pub fn mark_full_compaction_committed(&mut self) {
         self.full_compaction_committed = true;
+    }
+
+    /// 每轮执行开始时清空「本轮已提交 Full Compact」标记。
+    ///
+    /// 该标记是**每轮**事实而不是会话历史：`mark_full_compaction_committed` 之后若不复位，
+    /// 后续普通 append 会被 Host 误当成新的 Full 提交，从而每轮多读一次 storage bounds。
+    pub fn reset_full_compaction_committed(&mut self) {
+        self.full_compaction_committed = false;
     }
 
     /// 按 id 获取条目（O(1)）
@@ -628,7 +660,17 @@ impl MessageTranscript {
         // 的原文不会让内存领先于磁盘事实；反过来先释放再提交则相反——提交失败时原文
         // 已丢，热态只剩「不确定」，重载也自证不了上一份视图。收缩不改持久化事实，也不
         // 触碰不确定态语义，因此插在这里最紧。
+        let memory_before =
+            crate::session::memory_probe::observations_enabled().then(|| self.memory_snapshot());
         self.shrink_after_full_commit();
+        if let Some(before) = memory_before {
+            crate::session::memory_probe::log_transcript_shrink(
+                "full_commit_shrink",
+                self.thread_id.as_deref().unwrap_or(""),
+                &before,
+                &self.memory_snapshot(),
+            );
+        }
         self.compaction_commit_state.mark_committed();
 
         Ok(())

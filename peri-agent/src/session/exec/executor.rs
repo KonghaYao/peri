@@ -169,7 +169,6 @@ pub async fn run_session_loop(ctx: SessionContext, turn: TurnInput) -> PromptRes
         content,
         continuation,
         frozen,
-        history,
         history_payloads,
         incoming_recalls,
         bg_results,
@@ -211,8 +210,14 @@ pub async fn run_session_loop(ctx: SessionContext, turn: TurnInput) -> PromptRes
     // 空历史 + 空 prompt：无内容可继续——直接短路返回，避免跑一轮无意义 LLM 调用。
     // （TUI 侧 handle_keepgoing_submit 已有 has_session 防御；此处防御 stdio 等
     // 其他 transport 对全新 session 发空 prompt 的场景。）
+    //
+    // 判空只看消息投影：canonical reminder 没有 `BaseMessage` 形态，与旧
+    // `TurnInput.history.is_empty()` 口径一致；投影仅在确实短路时构造一次。
+    let has_projected_history = history_payloads
+        .iter()
+        .any(|payload| payload.as_message().is_some());
     if is_keepgoing
-        && history.is_empty()
+        && !has_projected_history
         && !ctx
             .user_input_mailbox
             .as_ref()
@@ -226,9 +231,13 @@ pub async fn run_session_loop(ctx: SessionContext, turn: TurnInput) -> PromptRes
         event_sink
             .push_done(&ctx.session_id, "end_turn", ctx.request_id.as_deref())
             .await;
+        let messages = history_payloads
+            .iter()
+            .filter_map(|payload| payload.as_message().cloned())
+            .collect();
         return PromptResult {
             persisted_payloads: history_payloads,
-            messages: history,
+            messages,
             ok: true,
             stop_reason: PromptStopReason::EndTurn,
             history_replaced_by_compaction: false,
@@ -313,8 +322,7 @@ pub async fn run_session_loop(ctx: SessionContext, turn: TurnInput) -> PromptRes
     //   PassThrough  → 现状 AgentInput::blocks(content)。
     let injected_content = match intercept_immediate_command(InterceptRequest {
         content: &content,
-        history: &history,
-        history_payloads: history_payloads.clone(),
+        history_payloads: std::borrow::Cow::Borrowed(&history_payloads),
         cwd: &ctx.cwd,
         session_id: &ctx.session_id,
         cancel: &ctx.cancel,
@@ -414,6 +422,7 @@ pub async fn run_session_loop(ctx: SessionContext, turn: TurnInput) -> PromptRes
         langfuse_on_turn_start,
         langfuse_on_turn_end,
         request_id: ctx.request_id.clone(),
+        delivery_journal: ctx.user_input_mailbox.clone(),
     });
 
     // 把会 move/借用 的资源直接传入 build_and_execute_agent。
@@ -423,7 +432,6 @@ pub async fn run_session_loop(ctx: SessionContext, turn: TurnInput) -> PromptRes
         &ctx,
         &turn,
         agent_input,
-        history,
         history_payloads,
         &ctx.session_id,
         cached_llm.as_ref(),

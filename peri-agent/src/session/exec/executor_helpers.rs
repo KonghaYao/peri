@@ -98,5 +98,9 @@ pub(crate) fn pending_task_count(
 }
 
 #[cfg(test)]
+#[path = "executor_helpers/event_pump_test.rs"]
+mod event_pump_tests;
+
+#[cfg(test)]
 #[path = "executor_helpers_test.rs"]
 mod tests;

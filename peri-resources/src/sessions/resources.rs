@@ -18,14 +18,17 @@ use async_trait::async_trait;
 use peri_acp_types::history_page::{
     HistoryCursor, HistoryForwardCursor, HistoryPage, HistoryPageBounds, HistorySegment,
 };
+use peri_acp_types::history_window::{
+    HistoryBodyChunk, HistoryCommittedTail, HistoryReadTicket, HistorySource,
+};
 use peri_acp_types::messages::MessageId;
 use peri_acp_types::session_resources::{
     AccessMode, ActiveSessionSnapshot, BindingRecheck, BindingState, ChildResumeClaim,
     ChildSnapshot, CloseSettlement, DataCapabilities, ExecutionAvailability, ForkSnapshot,
-    FrozenSnapshotBytes, FrozenState, NewSession, NewSessionDraft, PersistenceRecovery,
-    RewindBoundary, RewindOutcome, SessionAvailability, SessionInitialization, SessionMetaPatch,
-    SessionResourceError, SessionResourceErrorKind, SessionResourceResult, SessionResources,
-    SessionSnapshot,
+    FrozenSnapshotBytes, FrozenState, HistoryWindowPagePlan, HistoryWindowRows, NewSession,
+    NewSessionDraft, PersistenceRecovery, RewindBoundary, RewindOutcome, SessionAvailability,
+    SessionHistoryWindowBounds, SessionInitialization, SessionMetaPatch, SessionResourceError,
+    SessionResourceErrorKind, SessionResourceResult, SessionResources, SessionSnapshot,
 };
 use peri_acp_types::store::{CompactionChange, MessageFlags, PersistedPayload};
 use peri_acp_types::thread::{AgentStatus, ThreadId, ThreadMeta};
@@ -488,6 +491,69 @@ impl SessionResources for SessionResourcesImpl {
         self.gate
             .data()
             .load_history_segment(id, cursor, limit, byte_budget)
+            .await
+    }
+
+    async fn history_window_bounds(
+        &self,
+        id: &ThreadId,
+    ) -> SessionResourceResult<SessionHistoryWindowBounds> {
+        self.gate.data().history_window_bounds(id).await
+    }
+
+    async fn load_history_window_page(
+        &self,
+        id: &ThreadId,
+        plan: &HistoryWindowPagePlan,
+    ) -> SessionResourceResult<HistoryWindowRows> {
+        self.gate.data().load_history_window_page(id, plan).await
+    }
+
+    async fn seek_history_window(
+        &self,
+        id: &ThreadId,
+        source: HistorySource,
+        anchor: MessageId,
+        before_limit: usize,
+        after_limit: usize,
+        byte_budget: usize,
+        committed_tail: &HistoryCommittedTail,
+    ) -> SessionResourceResult<HistoryWindowRows> {
+        self.gate
+            .data()
+            .seek_history_window(
+                id,
+                source,
+                anchor,
+                before_limit,
+                after_limit,
+                byte_budget,
+                committed_tail,
+            )
+            .await
+    }
+
+    async fn load_history_body_chunk(
+        &self,
+        id: &ThreadId,
+        source: HistorySource,
+        entry_id: MessageId,
+        offset: u64,
+        max_bytes: u32,
+        committed_tail: Option<&HistoryCommittedTail>,
+        read_ticket: &HistoryReadTicket,
+    ) -> SessionResourceResult<HistoryBodyChunk> {
+        self.gate
+            .data()
+            .load_history_body_chunk(
+                id,
+                source,
+                entry_id,
+                offset,
+                max_bytes,
+                committed_tail,
+                read_ticket,
+            )
             .await
     }
 

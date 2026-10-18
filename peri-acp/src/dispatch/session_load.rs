@@ -161,6 +161,10 @@ pub fn history_page_error(error: SessionResourceError) -> AcpError {
             )
             .with_data(serde_json::json!({ "reason": "expired_cursor" }))
         }
+        SessionResourceErrorKind::HistoryWindow(window) => {
+            AcpError::new(i64::from(window.code()), window.to_string())
+                .with_data(serde_json::json!({ "reason": window.reason() }))
+        }
         SessionResourceErrorKind::NotFound => AcpError::new(-32602, "session not found"),
         _ => AcpError::new(-32603, format!("session history page load failed: {error}")),
     }

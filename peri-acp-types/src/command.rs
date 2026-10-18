@@ -310,7 +310,8 @@ mod context_deps_tests {
             _session_id: &str,
             _event: &crate::event::ExecutorEvent,
             _context_window: u32,
-        ) {
+        ) -> Result<(), crate::event::EventSinkError> {
+            Ok(())
         }
         async fn push_done(
             &self,

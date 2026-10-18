@@ -8,6 +8,9 @@ use super::*;
 use crate::kit::history_paging::{self, HistoryPageItem, HistoryPageResponse, HistorySubItem};
 use serde_json::json;
 
+#[path = "history_page_test/over_budget_tool_result.rs"]
+mod over_budget_tool_result;
+
 fn sub(position: u64, update: serde_json::Value) -> HistorySubItem {
     HistorySubItem {
         position,
@@ -443,6 +446,55 @@ fn test_history_page_pairs_tool_end_across_pages() {
     assert_eq!(card.output_summary, "file contents");
     assert!(!card.is_error);
     assert!(!card.is_running);
+}
+
+/// P2：结果与起点跨页时，暂存必须保留**完整输出**（>512 KiB 也不能截成 1 KiB
+/// 摘要），错误详情与尾部哨兵都必须出现在最终卡片上。
+#[test]
+#[serial]
+fn test_history_page_cross_page_tool_result_keeps_full_output() {
+    let mut state = browsing_state("tok");
+    seed_first_screen_own_entry(&mut state, "s1:own-latest", 100);
+    crate::kit::acp_events::history_window::clear_pending_tool_ends();
+
+    let tail = "TAIL-SENTINEL-END";
+    let output = format!("{}{tail}", "x".repeat(600 * 1024));
+    let newer = page(
+        "tok",
+        Some("cursor-2"),
+        vec![(
+            "s1:result",
+            20,
+            vec![sub(0, tool_end("t-big", &output, true))],
+        )],
+    );
+    dispatch_landing_page(&mut state, "tok", newer);
+    let older = page(
+        "tok",
+        None,
+        vec![("s1:call", 10, vec![sub(0, tool_start("t-big", "Bash"))])],
+    );
+    dispatch_landing_page(&mut state, "tok", older);
+
+    let card = state
+        .committed
+        .iter()
+        .find_map(|unit| match unit {
+            TuiRenderUnit::TuiToolCard(card) if card.tool_id == "t-big" => Some(card),
+            _ => None,
+        })
+        .expect("tool card");
+    assert!(card.is_error);
+    assert_eq!(
+        card.output_summary.len(),
+        output.len(),
+        "pending result must keep the complete output"
+    );
+    assert!(
+        card.output_summary.ends_with(tail),
+        "tail (error detail / diff tail) must survive"
+    );
+    history_page::clear_pending_tool_ends_for_tests();
 }
 
 fn reminder_fixture() -> peri_acp_types::system_reminder::SystemReminder {

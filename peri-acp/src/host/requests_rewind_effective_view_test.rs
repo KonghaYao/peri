@@ -76,7 +76,10 @@ async fn test_rewind_reaches_target_archived_by_full_compact() {
         .unwrap();
     assert!(stored.is_empty(), "存储里不应再有 own 历史");
     let state = sessions.get(&sid).unwrap();
-    assert!(state.history.is_empty(), "热态展示投影必须清空");
+    assert!(
+        state.effective_messages().is_empty(),
+        "热态展示投影必须清空"
+    );
     assert!(state.history_payloads.is_empty(), "热态有效集合必须清空");
 }
 
@@ -150,7 +153,7 @@ async fn test_rewind_publishes_the_cold_recovery_view() {
     assert_eq!(hot_ids, cold_ids, "热态有效集合必须等于冷恢复视图");
     assert_eq!(
         state
-            .history
+            .effective_messages()
             .iter()
             .map(peri_acp_types::messages::BaseMessage::id)
             .collect::<Vec<_>>(),
@@ -288,7 +291,11 @@ async fn test_rewind_keeps_still_covered_bodies_archived() {
         )
         .await
         .unwrap();
-    sessions.get_mut(&sid).unwrap().history.push(late.clone());
+    sessions
+        .get_mut(&sid)
+        .unwrap()
+        .history_payloads
+        .push(PersistedPayload::Message(late.clone()));
     let (h1, a1, h2) = archive_prefix_in_storage(&mut sessions, &cfg, &sid).await;
     enable_rewind_cap(&cfg, &sid);
     let target = late.id().as_uuid().to_string();
@@ -390,7 +397,11 @@ async fn test_rewind_completed_event_carries_the_effective_view() {
         )
         .await
         .unwrap();
-    sessions.get_mut(&sid).unwrap().history.push(late.clone());
+    sessions
+        .get_mut(&sid)
+        .unwrap()
+        .history_payloads
+        .push(PersistedPayload::Message(late.clone()));
     let (h1, a1, h2) = archive_prefix_in_storage(&mut sessions, &cfg, &sid).await;
     enable_rewind_and_event_caps(&cfg, &sid);
     let target = late.id().as_uuid().to_string();
@@ -470,7 +481,11 @@ async fn test_rewind_remove_from_drops_the_target_itself() {
     enable_rewind_cap(&cfg, &sid);
     let (h1, a1, h2) = {
         let s = sessions.get(&sid).unwrap();
-        (s.history[0].id(), s.history[1].id(), s.history[2].id())
+        (
+            s.effective_messages()[0].id(),
+            s.effective_messages()[1].id(),
+            s.effective_messages()[2].id(),
+        )
     };
     let ids = vec![h1, a1, h2];
     assert_eq!(

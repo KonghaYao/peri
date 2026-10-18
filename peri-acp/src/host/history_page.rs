@@ -1,9 +1,10 @@
 //! `session/load` 的模式分流与历史页出口（REQ §5.1~§5.3、REQ-H01~H03）。
 //!
-//! `session/load` 保持**唯一**入口：没有 `cursor` 字段 = 初始 load（现有会话装配路径，
-//! 行为不变），有合法非空 `cursor` = 历史页（只读一页，不装配、不广播、不取执行锁）。
+//! `session/load` 保持**唯一**入口：没有 `cursor`/`history` = 初始 load（现有会话装配
+//! 路径，行为不变），有合法非空 `cursor` = 旧历史页（只读一页），有 `history` =
+//! `peri.historyWindowV1` 的 open/page/seek（只读窗口，不装配、不广播、不取执行锁）。
 //! 模式在进入生命周期路由**之前**解析：锁策略与响应后的 setup 都由模式决定，只看方法名
-//! 无法区分两者（REQ §5.1）。
+//! 无法区分三者（REQ §5.1）。旧分页与窗口能力独立协商、互不推导。
 //!
 //! ## 参数规则（唯一，且全部失败关闭）
 //!
@@ -79,12 +80,14 @@ use serde_json::{json, Value};
 use peri_acp_types::history_page::{
     HistoryCursorEnvelope, HistoryCursorError, HistoryPageItem, RangeToken,
 };
+use peri_acp_types::history_window::HistoryWindowRequest;
 use peri_acp_types::thread::ThreadId;
 use peri_acp_types::PeriCaps;
 
 use crate::dispatch::{self, LoadGeneration, ProjectedUpdate};
 use crate::transport::types::AcpError;
 
+use super::history_window::window_error;
 use super::{AcpServerConfig, SharedSessions};
 
 /// 单页默认条数（REQ-H03：每页 50 条、最大 100 条，按完整展示封装计）。
@@ -98,13 +101,18 @@ pub(crate) const PAGE_BYTE_BUDGET: usize = 512 * 1024;
 /// 存储契约看不见投影与预算，所以这半截身份只能由 ACP 铸（[`browsing_snapshot_token`]）。
 const HISTORY_SNAPSHOT_VERSION: u16 = 1;
 
-/// `session/load` 的两种模式（REQ §5.1）。
-#[derive(Clone, Debug, PartialEq, Eq)]
+/// `session/load` 的模式（REQ §5.1）。
+#[derive(Clone, Debug)]
 pub(crate) enum SessionLoadMode {
     /// 无 `cursor` 字段：恢复会话及当前有效 Transcript 的展示。
     InitialLoad,
     /// 有合法非空 `cursor`：只读获取更早历史。
     HistoryPage(HistoryPageRequest),
+    /// `peri.historyWindowV1` 的 open/page/seek：只读窗口请求。
+    HistoryWindow {
+        session_id: String,
+        request: HistoryWindowRequest,
+    },
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -119,9 +127,37 @@ const SETUP_PARAMS: [&str; 2] = ["cwd", "mcpServers"];
 
 /// 解析 `session/load` 的模式。
 ///
-/// `pagination` 是**当前连接**协商出的分页能力。未协商却带分页字段是明确拒绝，
-/// 不降级为初始 load（REQ §5.2/§5.3 与验收 A25）。
-pub(crate) fn classify(params: &Value, pagination: bool) -> Result<SessionLoadMode, AcpError> {
+/// `pagination` / `window_v1` 是**当前连接**分别协商出的旧分页与 `historyWindowV1`
+/// 能力。未协商却带对应字段是明确拒绝，不降级为初始 load（REQ §5.2/§5.3 与验收 A25）。
+pub(crate) fn classify(
+    params: &Value,
+    pagination: bool,
+    window_v1: bool,
+) -> Result<SessionLoadMode, AcpError> {
+    // `history` 存在即进入 V1 分类：格式错误/未知 kind/未知字段直接拒绝，绝不按
+    // 「没有 history」处理。它与旧顶层 cursor/limit/setup 字段互斥。
+    if let Some(raw) = params.get("history") {
+        if !window_v1 {
+            return Err(window_error(
+                peri_acp_types::history_window::HistoryWindowError::NotNegotiated,
+            ));
+        }
+        for key in ["cursor", "limit", "loadGeneration", "cwd", "mcpServers"] {
+            if params.get(key).is_some() {
+                return Err(window_error(
+                    peri_acp_types::history_window::HistoryWindowError::invalid_request(format!(
+                        "{key} is mutually exclusive with history"
+                    )),
+                ));
+            }
+        }
+        let session_id = session_id(params)?;
+        let request = HistoryWindowRequest::decode(raw).map_err(window_error)?;
+        return Ok(SessionLoadMode::HistoryWindow {
+            session_id,
+            request,
+        });
+    }
     match params.get("cursor") {
         None => {
             if params.get("limit").is_some() {
@@ -322,7 +358,7 @@ pub(crate) async fn attach_initial_cursor(
 /// `entryId` 走 [`dispatch::entry_id`]（回放出口的同一份格式）：历史页与回放必须给出
 /// **同一个**身份字符串，去重与区间合并才成立。`marks` 传 `None`：历史页响应不属于任何一次
 /// load 代次，也不重复打回放戳（身份由本函数的 `entryId` 字段给出）。
-fn page_item(item: &HistoryPageItem, thread_id: &str, caps: &PeriCaps) -> Option<Value> {
+pub(crate) fn page_item(item: &HistoryPageItem, thread_id: &str, caps: &PeriCaps) -> Option<Value> {
     let sub_items: Vec<Value> = dispatch::project_payload_updates(&item.payload, caps, None)
         .into_iter()
         .enumerate()

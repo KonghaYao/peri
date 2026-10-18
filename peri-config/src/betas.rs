@@ -13,6 +13,15 @@ use crate::app::PeriConfig;
 
 pub use peri_acp_types::beta_flags::{BetaFlagOrigin, BetaFlagValue, BetaFlags};
 
+/// TUI 本地 beta：历史窗口 V1。默认 false；仍需服务端 `peri.historyWindowV1`
+/// 协商能力同时为真。键使用现有 kebab-case 风格。
+pub const HISTORY_WINDOW_V1: &str = "history-window-v1";
+
+/// beta 键是否被接受：ACP 注册表 + 本 crate 的 TUI 本地 beta。
+pub fn is_known(id: &str) -> bool {
+    id == HISTORY_WINDOW_V1 || peri_acp_types::beta_flags::find(id).is_some()
+}
+
 /// 由合并后 settings 派生有效值，并标注每个覆盖的**来源层**（诊断用）。
 ///
 /// `global` 是同一 scope 的 global 层：值与 global 相同的键归属 Global，其余

@@ -24,20 +24,27 @@ use std::sync::Arc;
 use async_trait::async_trait;
 
 use crate::history_page::{
-    HistoryCursor, HistoryCursorError, HistoryForwardCursor, HistoryPage, HistoryPageBounds,
-    HistorySegment,
+    HistoryCursor, HistoryForwardCursor, HistoryPage, HistoryPageBounds, HistorySegment,
+};
+use crate::history_window::{
+    HistoryBodyChunk, HistoryCommittedTail, HistoryReadTicket, HistorySource,
 };
 use crate::messages::MessageId;
 use crate::store::{CompactionChange, InheritedContext, MessageFlags, PersistedPayload};
 use crate::system_reminder::TrustedSystemReminder;
 use crate::thread::{AgentStatus, CancelPolicy, ThreadId, ThreadMeta};
-use crate::workspace::{
-    ResolvedWorkspace, ScopedThreadPage, ScopedThreadQuery, SessionBinding, WorkspaceError,
-};
+use crate::workspace::{ResolvedWorkspace, ScopedThreadPage, ScopedThreadQuery, SessionBinding};
 
 // 历史读取视图与 rewind 契约类型按职责拆入子模块 `history`（见该模块文档）；
 // `pub use` 重导出保持既有公开路径 `crate::session_resources::X` 可用。
 pub mod history;
+
+// `peri.historyWindowV1` 的存储端口类型：边界、双向计划与有界结果。
+pub mod history_window;
+pub use history_window::{
+    HistoryWindowEntry, HistoryWindowPagePlan, HistoryWindowReadIntent, HistoryWindowRows,
+    HistoryWindowTailExpectation, InheritedHistoryEntry, SessionHistoryWindowBounds,
+};
 
 // ─── 能力与准入 ────────────────────────────────────────────────────────────────
 
@@ -279,180 +286,11 @@ pub enum MutationOutcome {
     Unknown,
 }
 
-/// 失败原因。不携带 SQL、token、事务 ID 或连接细节。
-#[derive(Debug)]
-pub enum SessionResourceErrorKind {
-    InvalidInput {
-        detail: String,
-    },
-    NotFound,
-    /// 后端能力面不支持该行为（含只读能力面下的 mutation）。
-    Unsupported,
-    /// 本次打开只有读权限。
-    ReadOnlyStore,
-    /// 本机 workspace / binding 语义，保持 [`WorkspaceError`] 的分类。
-    Workspace(WorkspaceError),
-    /// 记录存在但无法解释（损坏、格式不可读）。
-    Corrupt {
-        detail: String,
-    },
-    /// 后端暂不可用（网络、锁、IO）：可重试，但不代表没生效。
-    Unavailable {
-        detail: String,
-    },
-    Timeout,
-    /// 无法证明上一次写入的终态；携带可定位的 session/root 关联。
-    PersistenceUncertain {
-        thread_id: Option<ThreadId>,
-    },
+mod error;
 
-    /// 数据已完整保存，但执行准入失败：不是「确定未创建」。
-    SavedButNotAdmitted {
-        thread_id: ThreadId,
-    },
-    /// 现有状态与本次请求冲突（一次性提交重复调用、对已定稿草稿撤销、清理判据不成立）。
-    ///
-    /// 与 [`Self::InvalidInput`] 分开：输入本身合法，冲突来自存储里已经成立的事实，
-    /// 调用方据此知道「不要重试，先重读」。
-    Conflict {
-        detail: String,
-    },
-    /// 历史分页游标不能用于本次读取：分类见 [`HistoryCursorError`]。
-    ///
-    /// 单独一类是为了让出口把「坏游标」映射成参数错误、把「失效游标」映射成需要重新
-    /// 开始的错误；两者都不得降级成首屏或空页。
-    Cursor(HistoryCursorError),
-    Internal {
-        detail: String,
-    },
-}
-
-/// 会话行为失败：原因 + 效果确定性。
-///
-/// `effect` 由构造器从 `kind` 派生，调用方无法拼出互相矛盾的组合：
-/// `Unknown` 只对应未决持久化，`Applied` 只对应「已保存但准入失败」。
-#[derive(Debug)]
-pub struct SessionResourceError {
-    kind: SessionResourceErrorKind,
-    effect: MutationOutcome,
-}
-
-/// 会话行为的统一返回类型。
-pub type SessionResourceResult<T> = std::result::Result<T, SessionResourceError>;
-
-/// Readback of an uncertain close-intent removal.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum CloseSettlement {
-    Pending,
-    Finished,
-    Unknown,
-}
-
-impl SessionResourceError {
-    pub fn new(kind: SessionResourceErrorKind) -> Self {
-        let effect = match &kind {
-            SessionResourceErrorKind::PersistenceUncertain { .. } => MutationOutcome::Unknown,
-            SessionResourceErrorKind::SavedButNotAdmitted { .. } => MutationOutcome::Applied,
-            _ => MutationOutcome::NotApplied,
-        };
-        Self { kind, effect }
-    }
-
-    /// 无法证明写入终态：门面据此使热态失效并阻塞续写/clean。
-    pub fn persistence_uncertain(thread_id: Option<ThreadId>) -> Self {
-        Self::new(SessionResourceErrorKind::PersistenceUncertain { thread_id })
-    }
-
-    /// 数据已完整保存，但执行准入失败；包含可定位的 session identity。
-    pub fn saved_but_not_admitted(thread_id: ThreadId) -> Self {
-        Self::new(SessionResourceErrorKind::SavedButNotAdmitted { thread_id })
-    }
-
-    /// 本次请求与已成立的存储事实冲突（不覆盖、不删除、不重试）。
-    pub fn conflict(detail: impl Into<String>) -> Self {
-        Self::new(SessionResourceErrorKind::Conflict {
-            detail: detail.into(),
-        })
-    }
-
-    pub fn kind(&self) -> &SessionResourceErrorKind {
-        &self.kind
-    }
-
-    pub fn effect(&self) -> MutationOutcome {
-        self.effect
-    }
-
-    pub fn is_persistence_uncertain(&self) -> bool {
-        matches!(
-            self.kind,
-            SessionResourceErrorKind::PersistenceUncertain { .. }
-        )
-    }
-
-    /// 仅当失败来源于本机 workspace 语义时给出原错误，供只读降级等既有映射使用。
-    pub fn workspace_error(&self) -> Option<&WorkspaceError> {
-        match &self.kind {
-            SessionResourceErrorKind::Workspace(error) => Some(error),
-            _ => None,
-        }
-    }
-}
-
-impl From<WorkspaceError> for SessionResourceError {
-    fn from(error: WorkspaceError) -> Self {
-        Self::new(SessionResourceErrorKind::Workspace(error))
-    }
-}
-
-impl std::fmt::Display for SessionResourceError {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        let (reason, detail) = match &self.kind {
-            SessionResourceErrorKind::InvalidInput { detail } => ("invalid input", detail.as_str()),
-            SessionResourceErrorKind::NotFound => ("session not found", ""),
-            SessionResourceErrorKind::Unsupported => ("behavior is unsupported here", ""),
-            SessionResourceErrorKind::ReadOnlyStore => ("session store is read-only", ""),
-            SessionResourceErrorKind::Workspace(_) => ("workspace check failed", ""),
-            SessionResourceErrorKind::Corrupt { detail } => {
-                ("session data is corrupt", detail.as_str())
-            }
-            SessionResourceErrorKind::Unavailable { detail } => {
-                ("store is unavailable", detail.as_str())
-            }
-            SessionResourceErrorKind::Timeout => ("store operation timed out", ""),
-            SessionResourceErrorKind::PersistenceUncertain { .. } => {
-                ("persistence outcome is unknown; reload the session", "")
-            }
-            SessionResourceErrorKind::SavedButNotAdmitted { .. } => {
-                ("session data was saved but execution admission failed", "")
-            }
-            SessionResourceErrorKind::Conflict { detail } => {
-                ("state conflicts with request", detail.as_str())
-            }
-            SessionResourceErrorKind::Cursor(_) => ("history cursor is unusable", ""),
-            SessionResourceErrorKind::Internal { detail } => {
-                ("internal storage error", detail.as_str())
-            }
-        };
-        match &self.kind {
-            SessionResourceErrorKind::Workspace(error) => write!(f, "{reason}: {error}"),
-            SessionResourceErrorKind::Cursor(error) => write!(f, "{reason}: {error}"),
-            _ if detail.is_empty() => {
-                write!(f, "{reason} ({:?})", self.effect)
-            }
-            _ => write!(f, "{reason}: {detail}"),
-        }
-    }
-}
-
-impl std::error::Error for SessionResourceError {
-    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
-        match &self.kind {
-            SessionResourceErrorKind::Workspace(error) => Some(error),
-            _ => None,
-        }
-    }
-}
+pub use error::{
+    CloseSettlement, SessionResourceError, SessionResourceErrorKind, SessionResourceResult,
+};
 
 // ─── 门面 ──────────────────────────────────────────────────────────────────────
 
@@ -501,6 +339,7 @@ pub trait ChildResumeClaim: Send + Sync {
 /// - mutation 先检查访问权限与未决持久化，再落盘；
 /// - `AccessMode::ReadOnly` 下所有 mutation 返回 [`SessionResourceErrorKind::ReadOnlyStore`]；
 /// - 结果不确定时返回 [`SessionResourceError::persistence_uncertain`]，不得重试后伪装成功。
+#[allow(clippy::too_many_arguments)] // 历史窗口读取参数为跨层固定契约，逐项显式传递，不包结构体
 #[async_trait]
 pub trait SessionResources: Send + Sync {
     fn oauth_credentials(
@@ -772,6 +611,95 @@ pub trait SessionResources: Send + Sync {
         &self,
         _id: &ThreadId,
     ) -> SessionResourceResult<HistoryPageBounds> {
+        Err(SessionResourceError::new(
+            SessionResourceErrorKind::Unsupported,
+        ))
+    }
+
+    /// 有界读取 `peri.historyWindowV1` 的边界事实：own 最旧/最新稳定身份、durable tail、
+    /// 可重建 checkpoint 与冻结前缀状态；**不读任何正文**。
+    ///
+    /// 默认实现失败（`Unsupported`）：空边界会被出口读成「没有历史」，没有实现这条读取的
+    /// 后端不能拿它冒充；`open` 必须显式失败。
+    async fn history_window_bounds(
+        &self,
+        _id: &ThreadId,
+    ) -> SessionResourceResult<SessionHistoryWindowBounds> {
+        Err(SessionResourceError::new(
+            SessionResourceErrorKind::Unsupported,
+        ))
+    }
+
+    /// 只读计划指定的有界 keyset 区间（before/after 双向），返回候选行/指定正文。
+    ///
+    /// 实现必须：
+    ///
+    /// - 在 SQL/存储条件里限制区间与固定 tail，不得扫描全历史后在 Rust 过滤；
+    /// - 只取本页选中行的正文，lookahead 候选行正文不得出库；
+    /// - `excluded` 归档区可按明确区间读取，但不得把它放回有效上下文；
+    /// - tail 身份/位置不匹配时返回 [`crate::history_window::HistoryWindowError`]，
+    ///   不得降级成空页。
+    ///
+    /// 默认实现失败（`Unsupported`）：空页在窗口契约里是合法结果，不能用它冒充未实现。
+    async fn load_history_window_page(
+        &self,
+        _id: &ThreadId,
+        _plan: &HistoryWindowPagePlan,
+    ) -> SessionResourceResult<HistoryWindowRows> {
+        Err(SessionResourceError::new(
+            SessionResourceErrorKind::Unsupported,
+        ))
+    }
+
+    /// 按稳定条目身份在固定 tail 内重新定位；内部复用双向 keyset 计划。
+    ///
+    /// 默认实现只把请求转成 [`HistoryWindowPagePlan::seek`] 再调用
+    /// [`Self::load_history_window_page`]：后者未实现时同样 fail-closed；实现 page 的
+    /// 生产后端不需要再写一份 seek 读取。
+    async fn seek_history_window(
+        &self,
+        id: &ThreadId,
+        source: HistorySource,
+        anchor: MessageId,
+        before_limit: usize,
+        after_limit: usize,
+        byte_budget: usize,
+        committed_tail: &HistoryCommittedTail,
+    ) -> SessionResourceResult<HistoryWindowRows> {
+        let plan = HistoryWindowPagePlan::seek(
+            source,
+            anchor,
+            before_limit,
+            after_limit,
+            byte_budget,
+            committed_tail.clone(),
+        );
+        self.load_history_window_page(id, &plan).await
+    }
+
+    /// 有界读取超大条目的正文块（原始字节）。
+    ///
+    /// 实现必须使用驱动/存储层的有界读取（如 SQLite `substr`），不得先取出完整正文再
+    /// 在 Rust 切片；驱动无法保证有界块时返回 `Unsupported`，不得退回
+    /// [`Self::load_session_history`]。
+    ///
+    /// `committed_tail` 是 open 时固定的持久尾界：存储层必须拒绝 `rowid/position` 超出该
+    /// 尾界的正文行，不得只按 `message_id` 读取。
+    ///
+    /// `read_ticket` 对 adapter 是**不透明上下文**：它不构成访问授权，Host 必须在调用前
+    /// 完成票据/会话/删除状态校验。adapter 不得记录或解释票据内容。
+    ///
+    /// 默认实现失败（`Unsupported`）。
+    async fn load_history_body_chunk(
+        &self,
+        _id: &ThreadId,
+        _source: HistorySource,
+        _entry_id: MessageId,
+        _offset: u64,
+        _max_bytes: u32,
+        _committed_tail: Option<&HistoryCommittedTail>,
+        _read_ticket: &HistoryReadTicket,
+    ) -> SessionResourceResult<HistoryBodyChunk> {
         Err(SessionResourceError::new(
             SessionResourceErrorKind::Unsupported,
         ))

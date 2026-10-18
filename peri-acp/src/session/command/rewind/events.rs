@@ -18,10 +18,14 @@ pub async fn emit_rewind_completed(
     summary: String,
     messages: Vec<BaseMessage>,
 ) {
-    sink.push_event(
-        session_id,
-        &ExecutorEvent::RewindCompleted { summary, messages },
-        0,
-    )
-    .await;
+    if let Err(error) = sink
+        .push_event(
+            session_id,
+            &ExecutorEvent::RewindCompleted { summary, messages },
+            0,
+        )
+        .await
+    {
+        tracing::warn!(session_id, error = %error, "rewind completed event send failed");
+    }
 }

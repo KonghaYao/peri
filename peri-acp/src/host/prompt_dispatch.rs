@@ -140,8 +140,9 @@ pub(crate) async fn dispatch_prompt_turn_with_input(
             .clone()
     };
 
-    // Serialize prompts per session: wait for any in-flight prompt to finish
-    // so that state.history is up-to-date when this prompt reads it.
+    // Serialize prompts per session: wait for any in-flight prompt to finish so the next
+    // turn sees the adopted effective history (or ReloadRequired) instead of a HandedOff
+    // empty container.
     let _guard = prompt_lock.lock().await;
     {
         let sessions = sessions.lock().await;
@@ -311,7 +312,7 @@ pub(crate) mod admission_gate {
         gate
     }
 
-    pub(super) async fn wait(session_id: &str) {
+    pub(in crate::host) async fn wait(session_id: &str) {
         let gate = GATES.lock().unwrap().remove(session_id);
         if let Some(gate) = gate {
             gate.entered.notify_one();

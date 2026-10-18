@@ -685,6 +685,12 @@ mod history_tests;
 #[path = "session_history_page_test.rs"]
 mod history_page_tests;
 
+#[path = "session_history_window_test.rs"]
+mod history_window_tests;
+
+#[path = "session_history_inherited_test.rs"]
+mod history_inherited_tests;
+
 #[path = "session_history_segment_test.rs"]
 mod history_segment_tests;
 

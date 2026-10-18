@@ -305,6 +305,10 @@ pub(super) fn apply_fold_toggle(
     // 应用到当帧快照（COW set + 重算 hash）
     let mut updated = snapshot.items[idx].clone();
     apply_fold_override(&mut updated, next);
+    // 展开/打开工具卡片：若该跨页结果超出内存预算，按来源页定位补读完整正文。
+    if next != FoldState::Collapsed {
+        let _ = crate::kit::acp_events::history_window::maybe_request_tool_result(&updated);
+    }
     snapshot.items.set(idx, updated);
     snapshot.generation = snapshot.generation.wrapping_add(1);
     EventResult::Consumed

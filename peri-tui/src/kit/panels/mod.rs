@@ -30,6 +30,7 @@ pub mod ask_user;
 pub mod config;
 pub mod cron;
 pub mod goal;
+pub mod history_detail;
 pub mod hooks;
 pub mod login;
 pub mod mcp;

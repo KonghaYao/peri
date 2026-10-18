@@ -1,7 +1,7 @@
 //! 用户待发区与执行准入的会话级 owner，普通待办在 idle 时逐条交接给 MQ。
 
 use std::{
-    collections::{HashMap, HashSet},
+    collections::{HashMap, HashSet, VecDeque},
     hash::{Hash, Hasher},
     sync::Arc,
 };
@@ -14,10 +14,19 @@ use peri_acp_types::{
     session::{
         DispatchUserInputsRequest, EnqueueUserInputRequest, MessageSource, QueuedMessage,
         SessionInbox, TakeBackUserInputRequest, TurnId, UserInput, UserInputItemResult,
-        UserInputQueueItem, UserInputQueueReceipt, UserInputQueueSnapshot, UserInputState,
+        UserInputQueueItem, UserInputQueueReceipt, UserInputQueueSnapshot,
+        UserInputQueueTerminalItem, UserInputState,
     },
 };
 use tokio_util::sync::CancellationToken;
+
+mod window;
+#[cfg(test)]
+use window::TERMINAL_CAPACITY;
+use window::{
+    prune_terminal_records, reserved_delivery_slots, retain_terminal, PendingDeliveryNotification,
+    TerminalDisplay, TerminalIdentity, DELIVERY_JOURNAL_CAPACITY,
+};
 
 const PENDING_CAPACITY: usize = 32;
 
@@ -70,6 +79,9 @@ struct InputRecord {
     fingerprint: u64,
     state: UserInputState,
     handed_off: bool,
+    /// 交付日志槽位在 enqueue 时预留；交付时转为日志条目，撤回时释放。
+    /// 这样 `mark_delivered` 永远不会在消息已写入 transcript 后才因容量失败。
+    delivery_reserved: bool,
 }
 
 struct CommandReceipt {
@@ -81,6 +93,17 @@ struct CommandReceipt {
 struct MailboxState {
     revision: u64,
     records: Vec<InputRecord>,
+    // generation 内的终态身份不可淘汰，否则同 ID 会重新获得执行资格。
+    //
+    // 生命周期：只随 generation 结束（会话重载/进程重建）回收。客户端可以在
+    // 同一 generation 内无限期重提任一旧 ID，因此不存在不破坏幂等的回收时点；
+    // 有界 LRU 会让被淘汰的 ID 重新可执行，不能采用。
+    //
+    // 空间：input_id 已是规范 UUID，这里用 16B UUID 作为紧凑身份键（而不是
+    // 36B 字符串 + 堆分配）。每条记录约 16B key + 8B fingerprint + 1B state，
+    // 加 HashMap 开销约 40-56B；100 万条输入约 40-56 MiB。这是精确幂等的代价。
+    terminal_identities: HashMap<uuid::Uuid, TerminalIdentity>,
+    terminal_display: Vec<TerminalDisplay>,
     ready: Vec<String>,
     commands: HashMap<String, CommandReceipt>,
     active: Option<ActiveRun>,
@@ -88,6 +111,7 @@ struct MailboxState {
     suspended: bool,
     valid: bool,
     delivered_notifications: HashSet<String>,
+    delivery_journal: VecDeque<PendingDeliveryNotification>,
 }
 
 /// 由宿主持有跨 turn 实例，Agent 独占队列状态、取消原因和执行准入判定。
@@ -114,6 +138,8 @@ impl UserInputMailbox {
             state: Mutex::new(MailboxState {
                 revision: 0,
                 records: Vec::new(),
+                terminal_identities: HashMap::new(),
+                terminal_display: Vec::new(),
                 ready: Vec::new(),
                 commands: HashMap::new(),
                 active: None,
@@ -121,6 +147,7 @@ impl UserInputMailbox {
                 suspended: false,
                 valid: true,
                 delivered_notifications: HashSet::new(),
+                delivery_journal: VecDeque::new(),
             }),
             emit,
             control_turn: TurnId::new(),
@@ -168,6 +195,8 @@ impl UserInputMailbox {
             return Ok(receipt);
         }
         validate_input_id(&request.input_id)?;
+        let input_uuid =
+            uuid::Uuid::parse_str(&request.input_id).expect("input id was validated above");
         if request.content.is_empty() {
             return Err(UserInputQueueError::EmptyContent);
         }
@@ -185,6 +214,10 @@ impl UserInputMailbox {
             if record.fingerprint != input_fingerprint {
                 return Err(UserInputQueueError::IdentityConflict);
             }
+        } else if let Some(identity) = state.terminal_identities.get(&input_uuid) {
+            if identity.fingerprint != input_fingerprint {
+                return Err(UserInputQueueError::IdentityConflict);
+            }
         } else {
             if state
                 .records
@@ -192,6 +225,8 @@ impl UserInputMailbox {
                 .filter(|record| is_pending(record.state))
                 .count()
                 >= PENDING_CAPACITY
+                || state.delivery_journal.len() + reserved_delivery_slots(&state)
+                    >= DELIVERY_JOURNAL_CAPACITY
             {
                 return Err(UserInputQueueError::Capacity);
             }
@@ -200,14 +235,15 @@ impl UserInputMailbox {
                 fingerprint: input_fingerprint,
                 state: UserInputState::Queued,
                 handed_off: false,
+                delivery_reserved: true,
             });
             state.revision += 1;
             if state.active.is_none() || state.paused {
                 state.paused = false;
                 promote_next(&mut state);
-            } else {
-                self.wake_suspended_locked(&mut state);
             }
+            // 已 ready 的输入不再走 promotion；这里必须允许直接交接给当前挂起执行。
+            self.wake_suspended_locked(&mut state);
         }
         let results = results_for(&state, std::slice::from_ref(&request.input_id));
         let receipt = self.remember(&mut state, &request.command_id, fingerprint, results, None);
@@ -284,12 +320,16 @@ impl UserInputMailbox {
             })
             .map(|record| {
                 record.state = UserInputState::Withdrawn;
+                // 未交付即撤回：释放 enqueue 时预留的日志槽位。
+                record.delivery_reserved = false;
                 let input = record.input.clone();
                 discard_payload(record);
                 input
             });
         if taken_back.is_some() {
             state.revision += 1;
+            retain_terminal(&mut state, &request.input_id);
+            prune_terminal_records(&mut state);
         }
         let results = results_for(&state, std::slice::from_ref(&request.input_id));
         let receipt = self.remember(
@@ -552,8 +592,12 @@ impl UserInputMailbox {
                         .as_ref()
                         .is_some_and(|cancel| !cancel.is_cancelled())
             })
-            || !promote_next(state)
         {
+            return false;
+        }
+        // ready 可能在 enqueue 与 idle 之间已经完成 promotion；不能因未再次
+        // promote 而跳过交接，否则输入会停在 ready 且当前执行收不到。
+        if state.ready.is_empty() && !promote_next(state) {
             return false;
         }
         // 交接即占用本次 idle，后续 enqueue 不能在 Receive 开始前追加第二条。
@@ -582,8 +626,30 @@ impl UserInputMailbox {
     }
 
     /// 返回本次首次接纳的注册输入 ID，调用方在本轮 render FIFO 发聊天事件。
+    ///
+    /// 日志槽位在 enqueue 时已预留，因此这里不会因容量在 transcript 写入后
+    /// 失败；预留随日志条目转移，泵确认后才释放。
     pub(crate) fn mark_delivered(&self, ids: &[MessageId]) -> Vec<String> {
         self.mark_delivery_notifications(ids)
+    }
+
+    /// 事件泵的补发来源：按 Receive 实际交付顺序返回尚未推送的确认。
+    ///
+    /// 调用方必须先推送、再 [`Self::ack_delivery_notification`]；本方法只复制，
+    /// 不持有锁等待 UI。进程内日志不持久化，重启后不承诺恢复展示。
+    pub(crate) fn pending_delivery_notifications(&self) -> Vec<PendingDeliveryNotification> {
+        self.state.lock().delivery_journal.iter().cloned().collect()
+    }
+
+    pub(crate) fn ack_delivery_notification(&self, input_id: &str) {
+        let mut state = self.state.lock();
+        if let Some(index) = state
+            .delivery_journal
+            .iter()
+            .position(|item| item.input_id == input_id)
+        {
+            state.delivery_journal.remove(index);
+        }
     }
 
     fn mark_delivery_notifications(&self, ids: &[MessageId]) -> Vec<String> {
@@ -595,17 +661,39 @@ impl UserInputMailbox {
         let MailboxState {
             records,
             delivered_notifications,
+            delivery_journal,
             ..
         } = &mut *state;
-        for record in records {
+        // Receive 的 ids 是 MQ 实际消费顺序，不可按 enqueue 的 records 顺序补确认。
+        for id in ids {
+            let Some(record) = records.iter_mut().find(|record| matches_id(record, &[*id])) else {
+                continue;
+            };
             if matches!(
                 record.state,
                 UserInputState::Claimed | UserInputState::Delivered
-            ) && matches_id(record, ids)
-                && delivered_notifications.insert(record.input.input_id.clone())
+            ) && delivered_notifications.insert(record.input.input_id.clone())
             {
+                debug_assert!(
+                    record.delivery_reserved,
+                    "accepted input must hold a delivery journal slot"
+                );
+                if !record.delivery_reserved && delivery_journal.len() >= DELIVERY_JOURNAL_CAPACITY
+                {
+                    tracing::error!(
+                        input_id = %record.input.input_id,
+                        "delivery reservation invariant broken; journal temporarily over capacity"
+                    );
+                }
                 record.state = UserInputState::Delivered;
+                record.delivery_reserved = false;
                 delivered.push(record.input.input_id.clone());
+                // 正文在 discard_payload 之前进入有序日志：事件通道即使丢掉
+                // UserInputDelivered，事件泵仍能在后续 assistant 输出之前补发。
+                delivery_journal.push_back(PendingDeliveryNotification {
+                    input_id: record.input.input_id.clone(),
+                    content: record.input.content.clone(),
+                });
                 discard_payload(record);
             }
         }
@@ -613,6 +701,10 @@ impl UserInputMailbox {
             return delivered;
         }
         state.revision += 1;
+        for id in &delivered {
+            retain_terminal(&mut state, id);
+        }
+        prune_terminal_records(&mut state);
         let snapshot = self.snapshot_locked(&state);
         drop(state);
         self.publish(snapshot);
@@ -717,6 +809,19 @@ impl UserInputMailbox {
                     state: record.state,
                 })
                 .collect(),
+            // 终态不随 pending 项消失：客户端据此补齐丢失的交付确认。
+            terminal_items: state
+                .terminal_display
+                .iter()
+                .filter_map(|item| {
+                    let input_uuid = uuid::Uuid::parse_str(&item.input_id).ok()?;
+                    let identity = state.terminal_identities.get(&input_uuid)?;
+                    Some(UserInputQueueTerminalItem {
+                        input_id: item.input_id.clone(),
+                        state: identity.state,
+                    })
+                })
+                .collect(),
         }
     }
 
@@ -763,11 +868,25 @@ impl UserInputMailbox {
     }
 
     fn publish(&self, snapshot: UserInputQueueSnapshot) {
+        let ids: HashSet<_> = snapshot
+            .terminal_items
+            .iter()
+            .map(|item| item.input_id.clone())
+            .collect();
         (self.emit)(StateEvent::UserInputQueueChanged {
             turn_id: self.control_turn,
             agent_id: self.control_agent,
             snapshot,
         });
+        // 先发布再允许淘汰；这里只保证进入发布边界，不保证慢客户端收到。
+        // 并发发布期间窗口可暂时超过容量，避免尚未发布的新终态被挤掉。
+        let mut state = self.state.lock();
+        for item in &mut state.terminal_display {
+            if ids.contains(&item.input_id) {
+                item.published = true;
+            }
+        }
+        prune_terminal_records(&mut state);
     }
 }
 
@@ -848,6 +967,12 @@ fn results_for(state: &MailboxState, ids: &[String]) -> Vec<UserInputItemResult>
                 .iter()
                 .find(|record| record.input.input_id == *id)
                 .map(|record| record.state)
+                .or_else(|| {
+                    uuid::Uuid::parse_str(id)
+                        .ok()
+                        .and_then(|input_uuid| state.terminal_identities.get(&input_uuid))
+                        .map(|identity| identity.state)
+                })
                 .unwrap_or(UserInputState::Unknown),
         })
         .collect()

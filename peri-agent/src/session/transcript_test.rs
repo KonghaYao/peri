@@ -29,5 +29,11 @@ mod persistence_tests;
 #[path = "transcript_memory_test.rs"]
 mod memory_tests;
 
+#[path = "transcript_memory_probe_test.rs"]
+mod memory_probe_tests;
+
+#[path = "p_matrix_test.rs"]
+mod p_matrix_tests;
+
 #[path = "transcript_reminder_test.rs"]
 mod reminder_tests;

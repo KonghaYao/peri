@@ -235,3 +235,22 @@ fn test_ui_commands_roundtrip() {
     let caps = PeriCaps::from_client_meta(meta.as_object().unwrap());
     assert!(caps.ui_commands.is_empty());
 }
+
+#[test]
+fn test_history_window_v1_requires_explicit_negotiation() {
+    for value in [
+        serde_json::json!({}),
+        serde_json::json!({"peri.historyWindowV1": "true"}),
+        serde_json::json!({"peri.historyWindowV1": false}),
+    ] {
+        assert!(
+            !PeriCaps::from_client_meta(value.as_object().unwrap()).history_window_v1,
+            "only an explicit boolean true negotiates V1: {value}"
+        );
+    }
+    let value = serde_json::json!({"peri.historyWindowV1": true});
+    let caps = PeriCaps::from_client_meta(value.as_object().unwrap());
+    assert!(caps.history_window_v1);
+    assert_eq!(caps.to_agent_meta()["peri.historyWindowV1"], true);
+    assert!(PeriCaps::all_enabled().history_window_v1);
+}

@@ -40,7 +40,7 @@ async fn archive_prefix_in_storage(
 ) {
     let (h1, a1) = {
         let s = sessions.get(sid).unwrap();
-        (s.history[0].id(), s.history[1].id())
+        (s.history_payloads[0].id(), s.history_payloads[1].id())
     };
     let excluded = peri_acp_types::store::MessageFlags {
         excluded: true,
@@ -54,19 +54,18 @@ async fn archive_prefix_in_storage(
         .await
         .unwrap();
     let state = sessions.get_mut(sid).unwrap();
-    let summary = state.history[2].clone();
-    state.history = vec![summary.clone()];
-    state.history_payloads = vec![PersistedPayload::Message(summary)];
-    (h1, a1, state.history[0].id())
+    let summary = state.history_payloads[2].clone();
+    state.history_payloads = vec![summary];
+    (h1, a1, state.history_payloads[0].id())
 }
 
 fn history_ids(sessions: &HashMap<String, SessionState>, sid: &str) -> Vec<String> {
     sessions
         .get(sid)
         .unwrap()
-        .history
+        .history_payloads
         .iter()
-        .map(|message| message.id().as_uuid().to_string())
+        .map(|payload| payload.id().as_uuid().to_string())
         .collect()
 }
 

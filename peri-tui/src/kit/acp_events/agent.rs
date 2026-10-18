@@ -10,6 +10,10 @@ pub(super) fn handle_agent_execution_failed(state: &mut BridgeState, message: &s
     state.pending_cache_usage = None;
     state.phase = SessionPhase::Idle;
     state.current_turn.deactivate();
+    crate::kit::steer_state::STEERS
+        .state()
+        .write()
+        .fail_session_submissions(&state.active_session_id);
     let text = i18n::tr_args(
         "app-note-agent-failed",
         &[("message".into(), FluentValue::from(message))],

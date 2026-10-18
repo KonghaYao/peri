@@ -15,14 +15,21 @@
 use std::sync::Arc;
 
 use super::*;
-use peri_acp_types::event::{EventSink, ExecutorEvent};
+use peri_acp_types::event::{EventSink, EventSinkError, ExecutorEvent};
 use peri_acp_types::plugin::{CommandEntry, CommandSource as PluginCommandSource};
 
 struct NoopEventSink;
 
 #[async_trait::async_trait]
 impl EventSink for NoopEventSink {
-    async fn push_event(&self, _session_id: &str, _event: &ExecutorEvent, _context_window: u32) {}
+    async fn push_event(
+        &self,
+        _session_id: &str,
+        _event: &ExecutorEvent,
+        _context_window: u32,
+    ) -> Result<(), EventSinkError> {
+        Ok(())
+    }
 
     async fn push_done(&self, _session_id: &str, _stop_reason: &str, _request_id: Option<&str>) {}
 }

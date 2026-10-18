@@ -24,6 +24,10 @@ use std::sync::Mutex;
 /// 3. todo 进度摘要行（§6.9：TODO_ITEMS 派生，插在最终回答前）；
 /// 4. `group_successful_tools`（§7：相邻成功工具压成 `TuiCollapsedGroup`）。
 pub(crate) fn push_view_models(state: &mut BridgeState) {
+    state
+        .window
+        .ack_release_epoch(crate::kit::atoms::RENDER_ACHIEVED_EPOCH.get());
+    crate::kit::atoms::HISTORY_WINDOW_STATS.set(state.window.diagnostics());
     // running child 可以阻止归档，但主 turn 的终态时长仍只冻结一次。
     if state.phase != SessionPhase::PromptRunning {
         state.current_turn.freeze_trailing();
@@ -157,7 +161,13 @@ pub(crate) fn push_view_models(state: &mut BridgeState) {
         },
     });
     let mut previous = TRANSCRIPT_HISTORY.lock().unwrap();
-    *previous = Some((history, active_start, state.generation));
+    if history.len() > 1024 {
+        let mut seen = crate::kit::retained_bytes::SeenAllocations::default();
+        let bytes = crate::kit::retained_bytes::retained_units_bytes(history.iter(), &mut seen);
+        *previous = (bytes <= 8 * 1024 * 1024).then_some((history, active_start, state.generation));
+    } else {
+        *previous = Some((history, active_start, state.generation));
+    }
     drop(previous);
     *crate::kit::atoms::TRANSCRIPT_PUBLICATION.state().write() =
         crate::kit::atoms::TranscriptPublication {
@@ -177,6 +187,7 @@ pub(crate) fn push_view_models(state: &mut BridgeState) {
         peri_time::elapsed_since(__t).as_nanos() as u64,
     );
     tracing::trace!(target: "frozen_diag", "bridge: wrote VIEW_MODELS");
+    super::history_window::settle_after_publication(state);
 }
 
 /// [PERF] insert_todo_summary 摘要文本缓存——键 = (TODO_ITEMS 指纹, LANG_VERSION)。
@@ -209,6 +220,14 @@ fn decorated_history(history: &im::Vector<TuiRenderUnit>) -> (im::Vector<TuiRend
     }
     let mut decorated = history.clone();
     let has_prompt = insert_turn_dividers(&mut decorated, 0, false);
+    if history.len() > 1024 {
+        let mut seen = crate::kit::retained_bytes::SeenAllocations::default();
+        let bytes = crate::kit::retained_bytes::retained_units_bytes(history.iter(), &mut seen);
+        if bytes > 6 * 1024 * 1024 {
+            *cache = None;
+            return (decorated, has_prompt);
+        }
+    }
     *cache = Some(DividerHistoryCache {
         raw: history.clone(),
         decorated: decorated.clone(),
@@ -367,6 +386,35 @@ enum CutAnchor {
 const GROUP_CUT_CAP: usize = 512;
 
 static TOOL_GROUP_CACHE: Mutex<Option<ToolGroupCache>> = Mutex::new(None);
+
+/// 结构性释放：丢弃所有持有旧 `committed` 节点的投影/分组缓存。
+pub(crate) fn invalidate_structural_caches() {
+    *TRANSCRIPT_HISTORY.lock().unwrap_or_else(|e| e.into_inner()) = None;
+    *DIVIDER_HISTORY.lock().unwrap_or_else(|e| e.into_inner()) = None;
+    *TOOL_GROUP_CACHE.lock().unwrap_or_else(|e| e.into_inner()) = None;
+    *TODO_SUMMARY_CACHE.lock().unwrap_or_else(|e| e.into_inner()) = None;
+}
+
+#[cfg(test)]
+pub(crate) fn debug_cache_lengths() -> (Option<usize>, Option<usize>, Option<usize>) {
+    (
+        TRANSCRIPT_HISTORY
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .as_ref()
+            .map(|(history, _, _)| history.len()),
+        DIVIDER_HISTORY
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .as_ref()
+            .map(|cache| cache.raw.len()),
+        TOOL_GROUP_CACHE
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .as_ref()
+            .map(|cache| cache.input.len()),
+    )
+}
 
 /// 清空分组缓存（测试用——全局单例缓存会跨用例残留）。
 #[cfg(test)]
@@ -703,7 +751,7 @@ fn group_successful_tools_from(
         {
             copied_units += run_len as u64;
         }
-        grouped.push_back(build_collapsed_group(&run, failed_count));
+        grouped.push_back(build_collapsed_group(run, failed_count));
         // 组收口处的稳定切点（见 [`CutAnchor::AfterGroup`]）——长会话最常见的
         // 切点：末组之后新增内容时，前缀（含本组）可直接复用。
         cuts.push(GroupCut {
@@ -759,11 +807,10 @@ fn group_successful_tools_from(
 }
 
 /// 由一段相邻可合并工具卡构造折叠组（§7 标题聚合 `Read 3 · Glob 2`）。
-fn build_collapsed_group(run: &im::Vector<TuiRenderUnit>, failed_count: u32) -> TuiRenderUnit {
+fn build_collapsed_group(run: im::Vector<TuiRenderUnit>, failed_count: u32) -> TuiRenderUnit {
     use crate::kit::tui_render_unit::TuiCollapsedGroup;
 
     let mut names: Vec<(String, u32)> = Vec::new();
-    let mut hidden_vms: Vec<TuiRenderUnit> = Vec::with_capacity(run.len());
     for vm in run.iter() {
         if let TuiRenderUnit::TuiToolCard(t) = vm {
             let display = crate::kit::tool_display::format_tool_name(&t.tool_name);
@@ -772,13 +819,14 @@ fn build_collapsed_group(run: &im::Vector<TuiRenderUnit>, failed_count: u32) -> 
                 None => names.push((display, 1)),
             }
         }
-        hidden_vms.push(vm.clone());
     }
     let title = names
         .into_iter()
         .map(|(name, count)| format!("{name} {count}"))
         .collect::<Vec<_>>()
         .join(" \u{b7} ");
+    let count = run.len() as u32;
+    let hidden_vms: Vec<TuiRenderUnit> = run.into_iter().collect();
     let group_key = FoldKey::Group(
         hidden_vms
             .iter()
@@ -796,7 +844,7 @@ fn build_collapsed_group(run: &im::Vector<TuiRenderUnit>, failed_count: u32) -> 
         .unwrap_or(FoldState::Collapsed);
     let mut group = TuiCollapsedGroup {
         title,
-        count: run.len() as u32,
+        count,
         failed_count,
         view_models: hidden_vms,
         fold,

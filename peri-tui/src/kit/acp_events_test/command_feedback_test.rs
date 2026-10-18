@@ -30,6 +30,7 @@ fn test_command_feedback_injects_system_note() {
         pending_cache_usage: None,
         publication_intent: Default::default(),
         folded_history: Default::default(),
+        window: Default::default(),
     };
 
     // Info（UiOnly 通道）

@@ -38,6 +38,14 @@ mod rewind_tests;
 #[path = "history_page_caps_test.rs"]
 mod caps_tests;
 
+/// `peri.historyWindowV1`：open/page/seek、二次校验、fixed tail、descriptor 与分块。
+#[path = "history_page_window_test.rs"]
+mod window_tests;
+
+/// G5：session/load 不在全局 sessions 锁内做资源/DB I/O。
+#[path = "history_page_window_lock_test.rs"]
+mod window_lock_tests;
+
 /// 真实 SQLite 门面 + 已注册会话（`register_session_with_history`：3 条 own 条目）。
 ///
 /// `cfg` 是 `Arc`：分页用例既要把配置交给 `ServerLoop`（它按请求逐个派发），又要在运行期
@@ -232,7 +240,7 @@ async fn session_facts(
     let states = sessions.lock().await;
     let state = states.get(sid).expect("会话必须仍在集合里");
     (
-        state.history.len(),
+        state.effective_messages().len(),
         state.history_payloads.len(),
         state.structure_version,
         state.environment.is_none(),

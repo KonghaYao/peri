@@ -26,7 +26,15 @@ use std::collections::BTreeMap;
 use serde_json::Value;
 
 use crate::kit::atoms;
+use crate::kit::history_window::{
+    AnchorRelocation, GapId, GapSeek, GapSeekDirection, HistoryWindow, PersistentEntryKey,
+    RegionKey,
+};
 use crate::kit::tui_render_unit::TuiRenderUnit;
+
+pub mod window;
+#[allow(unused_imports)] // S5.4 接入 open/page/seek 前由测试覆盖
+pub(crate) use window::*;
 
 /// 单页条数（服务端 `1..=100`，默认 50；见 REQ-H03）。
 pub(crate) const PAGE_LIMIT: usize = 50;
@@ -151,6 +159,46 @@ pub(crate) fn decode_session_cursor(value: &Value) -> (Option<String>, Option<St
 }
 
 // ---------------------------------------------------------------------------
+// S5.6 gap 恢复
+// ---------------------------------------------------------------------------
+
+/// 锚点落在缺口时的重读目标；消费端据此发 page（单边缺口）或 seek（中间缺口）。
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) enum WindowGapRequest {
+    Page {
+        gap_id: GapId,
+        cursor: WindowPageCursor,
+    },
+    Seek {
+        gap_id: GapId,
+        anchor: PersistentEntryKey,
+    },
+}
+
+pub(crate) fn window_gap_recovery(window: &HistoryWindow) -> Option<WindowGapRequest> {
+    let AnchorRelocation::Gap { gap_id, seek } = window.relocate_anchor() else {
+        return None;
+    };
+    match seek? {
+        GapSeek::Page {
+            direction, cursor, ..
+        } => Some(WindowGapRequest::Page {
+            gap_id,
+            cursor: match direction {
+                GapSeekDirection::Before => WindowPageCursor::Before(cursor),
+                GapSeekDirection::After => WindowPageCursor::After(cursor),
+            },
+        }),
+        GapSeek::Seek { anchor, .. } => Some(WindowGapRequest::Seek { gap_id, anchor }),
+    }
+}
+
+/// 桥接锚点落入 gap 时发布重读目标；滚动触发在视口无锚点时消费。
+pub(crate) fn publish_window_gap_request(window: &HistoryWindow) {
+    crate::kit::atoms::WINDOW_GAP_REQUEST.set(window_gap_recovery(window));
+}
+
+// ---------------------------------------------------------------------------
 // 区间合并
 // ---------------------------------------------------------------------------
 
@@ -244,6 +292,45 @@ impl HistorySpans {
 
     pub(crate) fn clear(&mut self) {
         self.spans.clear();
+    }
+
+    /// 从窗口驻留段派生 legacy 区间索引（S5 适配层）。
+    ///
+    /// 只登记自有来源且带 `position` 的条目；槽位取自 `ResidentIndex` 的前缀和。
+    /// 旧 `HistorySpans` 的写入路径保持不变，开关关闭时不会调用本函数。
+    pub(crate) fn from_resident_window(window: &HistoryWindow) -> Self {
+        let mut spans = Self::new();
+        for region in window.layout() {
+            let RegionKey::Resident(segment_key) = *region else {
+                continue;
+            };
+            let Some(segment) = window.segment(segment_key) else {
+                continue;
+            };
+            for entry in &segment.entries {
+                if !entry.key.source.is_own() {
+                    continue;
+                }
+                let Some(position) = entry.position else {
+                    continue;
+                };
+                if spans.contains(&entry.key.entry_id) {
+                    continue;
+                }
+                let Some(locator) = window.index().locate_entry(&entry.key) else {
+                    continue;
+                };
+                spans.spans.insert(
+                    position,
+                    HistorySpan {
+                        entry_id: entry.key.entry_id.clone(),
+                        slot: locator.slot_start,
+                        len: entry.unit_count,
+                    },
+                );
+            }
+        }
+        spans
     }
 }
 
@@ -460,6 +547,12 @@ pub(crate) fn with_spans<R>(f: impl FnOnce(&mut HistorySpans) -> R) -> R {
     f(&mut spans)
 }
 
+/// 窗口路径合并后，把全局区间索引同步为驻留索引的派生视图。
+pub(crate) fn sync_spans_from_window(window: &HistoryWindow) {
+    let derived = HistorySpans::from_resident_window(window);
+    with_spans(|spans| *spans = derived);
+}
+
 /// 视口是否已经贴到**向前边界**（已载入窗口的最早一行）——REQ-C01-1 的触发判据。
 ///
 /// - 浏览态（`follow_bottom == false`）：视口顶端落在最早一行附近
@@ -482,6 +575,26 @@ pub(crate) fn viewport_at_forward_boundary(
     let content_fits = total_visual_rows <= vis_height;
     let browsing = !follow_bottom;
     (browsing || content_fits) && (scroll_y <= FETCH_MARGIN_LINES || content_fits)
+}
+
+/// 向后边界：接近已载入窗口最底部（含内容不足一屏/跟随态）。
+pub(crate) fn viewport_at_backward_boundary(
+    follow_bottom: bool,
+    scroll_y: usize,
+    total_visual_rows: usize,
+    vis_height: usize,
+) -> bool {
+    if vis_height == 0 || total_visual_rows == 0 {
+        return false;
+    }
+    let content_fits = total_visual_rows <= vis_height;
+    if content_fits || follow_bottom {
+        return true;
+    }
+    scroll_y
+        .saturating_add(vis_height)
+        .saturating_add(FETCH_MARGIN_LINES)
+        >= total_visual_rows
 }
 
 /// 触发口：视口贴向前边界就请求更早一页，返回本次是否真的派发。
@@ -516,6 +629,10 @@ pub(crate) fn request_older_page_at_boundary(
 /// 返回 `true` 表示本次真的派发了请求。相同 cursor + 相同 limit 已在途时**合并**
 /// 为一个请求（不重复派发，REQ-C01-2）；未协商 / 没有下一页 / 退避窗口内都是 no-op。
 pub(crate) fn request_older_page_if_due(near_forward_boundary: bool) -> bool {
+    if crate::kit::history_page_consumer::window_path_enabled() {
+        return near_forward_boundary
+            && crate::kit::history_page_consumer::request_window_older_page_if_due();
+    }
     if !near_forward_boundary {
         return false;
     }

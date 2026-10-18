@@ -30,12 +30,26 @@ async fn run_manual_compact(ctx: SessionContext, sessions: SharedSessions) -> se
     if result.stop_reason == PromptStopReason::EndTurn {
         assert!(
             result.history_replaced_by_compaction,
-            "成功命令必须确认摘要提交"
+            "成功命令必须确认摘要提交: ok={} stop={:?} failure={:?} messages={:?}",
+            result.ok,
+            result.stop_reason,
+            result.failure,
+            result
+                .messages
+                .iter()
+                .map(|message| message.content())
+                .collect::<Vec<_>>()
         );
     }
-    let response = finish_prompt_turn(&sessions, &ctx.session_id, false, result)
-        .await
-        .unwrap();
+    let response = finish_prompt_turn(
+        &sessions,
+        &ctx.session_id,
+        false,
+        result,
+        ctx.session_resources.clone(),
+    )
+    .await
+    .unwrap();
     // 使用真实 EventSink + MPSC wire，避免只在记录型 sink 上验证映射。
     loop {
         let notification = tokio::time::timeout(std::time::Duration::from_secs(5), client.recv())
@@ -106,9 +120,15 @@ async fn test_auto_full_then_manual_compact_through_host() {
     let turn = make_compact_turn(&ctx, &sessions, true).await;
     let result = run_session_loop(ctx.clone(), turn).await;
     assert!(result.history_replaced_by_compaction);
-    finish_prompt_turn(&sessions, &ctx.session_id, false, result)
-        .await
-        .unwrap();
+    finish_prompt_turn(
+        &sessions,
+        &ctx.session_id,
+        false,
+        result,
+        ctx.session_resources.clone(),
+    )
+    .await
+    .unwrap();
     run_manual_compact(ctx.clone(), sessions.clone()).await;
     assert_eq!(store.compact_commits.load(Ordering::SeqCst), 2);
     assert_next_turn_sees_summary(ctx, &sessions).await;
@@ -134,7 +154,13 @@ async fn test_cold_snapshot_then_manual_compact_through_host() {
         .await
         .unwrap();
     assert!(snapshot.flags.values().any(|flags| flags.excluded));
-    let restored = make_host_sessions(&ctx, snapshot.payloads);
+    // 热态只持有有效集合（excluded 原文留在 canonical 存储）：用 active 快照
+    // 重建 Host，和 session/resume 的冷恢复一致。
+    let active = reader
+        .load_active_snapshot(ctx.thread_id.as_ref().unwrap())
+        .await
+        .unwrap();
+    let restored = make_host_sessions(&ctx, active.payloads);
     run_manual_compact(ctx.clone(), restored.clone()).await;
     assert_eq!(store.compact_commits.load(Ordering::SeqCst), 2);
     assert_next_turn_sees_summary(ctx, &restored).await;
@@ -181,4 +207,135 @@ async fn test_manual_compact_model_cancel_has_consistent_wire_and_preserves_hist
     assert!(sessions.lock().await[&ctx.session_id]
         .cancel_token
         .is_none());
+}
+
+/// [S1 原生复现] Full 提交后 Host 只采纳有效集合，对象级快照下降。
+///
+/// 真实临时 SQLite + 受控摘要模型；断言不依赖 RSS，也不承诺固定降幅。
+#[tokio::test]
+#[serial]
+async fn test_finish_prompt_turn_adopts_only_active_set_and_reports_memory_shrink() {
+    let dir = tempfile::tempdir().unwrap();
+    let _home = HomeGuard::set(dir.path());
+    let (mut ctx, store, sessions) = make_compact_context(&dir, Arc::new(SummaryModel)).await;
+    enable_compact_command(&mut ctx, Arc::new(SummaryModel));
+    let thread_id = ctx.thread_id.clone().unwrap();
+
+    // 扩大归档正文，使“摘要取代旧正文”的字节变化可观测；不改变 compact 语义。
+    let extra: Vec<PersistedPayload> = (0..32)
+        .map(|index| {
+            PersistedPayload::Message(BaseMessage::human(format!(
+                "OLD-EXTRA-{index:02}-{}",
+                "z".repeat(512)
+            )))
+        })
+        .collect();
+    store.append_history(&thread_id, &extra).await.unwrap();
+    {
+        let mut sessions = sessions.lock().await;
+        sessions
+            .get_mut(&ctx.session_id)
+            .unwrap()
+            .history_payloads
+            .extend(extra);
+    }
+
+    let before = {
+        let sessions = sessions.lock().await;
+        sessions[&ctx.session_id].history_memory_snapshot()
+    };
+    let response = run_manual_compact(ctx.clone(), sessions.clone()).await;
+    assert_eq!(response["stopReason"], "end_turn");
+    let after = {
+        let sessions = sessions.lock().await;
+        sessions[&ctx.session_id].history_memory_snapshot()
+    };
+    println!("Host adopt T1=[{before:?}] T2=[{after:?}]");
+
+    // Host 旧正文副本被有效集合替换：条目、正文与容器槽位都下降。
+    assert!(after.entries < before.entries);
+    assert!(after.bytes.body < before.bytes.body);
+    assert!(after.container_bytes < before.container_bytes);
+
+    // Host 热态与存储的 active 快照逐 id 一致。
+    let active = store.inner.load_active_snapshot(&thread_id).await.unwrap();
+    assert_eq!(after.entries, active.payloads.len());
+    let sessions = sessions.lock().await;
+    let host = &sessions[&ctx.session_id];
+    assert_eq!(
+        host.context_ownership,
+        crate::host::ContextOwnership::Resident
+    );
+    assert_eq!(
+        host.history_payloads
+            .iter()
+            .map(PersistedPayload::id)
+            .collect::<Vec<_>>(),
+        active
+            .payloads
+            .iter()
+            .map(PersistedPayload::id)
+            .collect::<Vec<_>>()
+    );
+    let host_text = host
+        .effective_messages()
+        .iter()
+        .map(|message| message.content())
+        .collect::<Vec<_>>()
+        .join("\n");
+    assert!(host_text.contains(SUMMARY), "Host 必须持有已提交摘要");
+    assert!(!host_text.contains(OLD), "Host 不得继续持有被排除正文");
+    drop(sessions);
+
+    // 权威存储仍保留归档正文：释放的是热态副本。
+    let stored = store.load_payloads(&thread_id).await.unwrap();
+    assert!(stored
+        .iter()
+        .filter_map(PersistedPayload::as_message)
+        .any(|message| message.content() == OLD));
+}
+
+/// Full compact 的 checkpoint/tail 只能来自 durable commit 之后的存储事实。
+#[tokio::test]
+#[serial]
+async fn test_manual_compact_publishes_history_window_checkpoint() {
+    let dir = tempfile::tempdir().unwrap();
+    let _home = HomeGuard::set(dir.path());
+    let (mut ctx, store, sessions) = make_compact_context(&dir, Arc::new(SummaryModel)).await;
+    enable_compact_command(&mut ctx, Arc::new(SummaryModel));
+
+    run_manual_compact(ctx.clone(), sessions.clone()).await;
+
+    let thread_id = ctx
+        .thread_id
+        .clone()
+        .expect("compact fixture binds a thread");
+    let snapshot = store.inner.load_session_snapshot(&thread_id).await.unwrap();
+    let summary = snapshot
+        .payloads
+        .iter()
+        .find(|payload| {
+            payload
+                .as_message()
+                .is_some_and(|message| message.content().contains(SUMMARY))
+        })
+        .expect("durable compact must append the summary payload");
+    let expected =
+        peri_acp_types::history_window::HistoryEntryId::new(&thread_id, summary.id()).encode();
+
+    let states = sessions.lock().await;
+    let state = states.get(&ctx.session_id).expect("session remains live");
+    assert_eq!(
+        state.history_window.checkpoint_id.as_deref(),
+        Some(expected.as_str()),
+        "checkpointId must be the durable summary entry identity"
+    );
+    assert_eq!(
+        state.history_window.summary_entry_id.as_deref(),
+        Some(expected.as_str())
+    );
+    assert!(
+        state.history_window.committed_tail.is_some(),
+        "compact must publish a committed tail"
+    );
 }

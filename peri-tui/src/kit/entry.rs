@@ -76,6 +76,21 @@ pub async fn run_kit_fullscreen(
     //     App::new 时一次性确定）。TUI 面板保存经 save_effective 走此句柄，
     //     ACP host 的 persist_config 与它共享同一 Arc——两处写回不可能分叉。
     let _ = atoms::CONFIG_SOURCE_HANDLE.set(app.config_source.clone());
+    // S7.5：TUI 本地 beta 默认 false；仅写启动时一次。服务端能力协商仍独立。
+    let history_window_beta = app
+        .config_source
+        .snapshot()
+        .map(|snapshot| {
+            snapshot
+                .flags()
+                .is_enabled(peri_config::betas::HISTORY_WINDOW_V1)
+        })
+        .unwrap_or_else(|| {
+            crate::kit::history_window::history_window_beta_enabled(
+                &app.services.peri_config.read(),
+            )
+        });
+    crate::kit::history_window::apply_history_window_beta(history_window_beta);
     // 2b0. 从 AppConfig.extra 提取旧 TUI 键初始化 TuiConfig（向后兼容）
     {
         let cfg = app.services.peri_config.read();
@@ -367,6 +382,16 @@ pub async fn run_kit_fullscreen(
             history_pages_rx,
             shutdown.clone(),
         );
+
+        // 4b2b. HISTORY_WINDOW channel：S5.4 窗口 open/page/seek（默认开关关闭）。
+        let (history_window_tx, history_window_rx) = mpsc::unbounded_channel();
+        let _ = atoms::HISTORY_WINDOW_TX.set(history_window_tx);
+        let _history_window_consumer =
+            crate::kit::history_page_consumer::spawn_history_window_consumer(
+                client.clone(),
+                history_window_rx,
+                shutdown.clone(),
+            );
 
         // 4a2. CANCEL channel：event_handlers Ctrl+C → cancel_consumer
         let (cancel_tx, cancel_rx) = mpsc::unbounded_channel::<()>();

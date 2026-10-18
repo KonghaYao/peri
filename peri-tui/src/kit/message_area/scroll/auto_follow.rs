@@ -26,6 +26,9 @@ pub(super) fn update_follow_on_scroll(
     offset_y: usize,
 ) {
     *follow_bottom.write_no_update() = should_follow_after_user_scroll(max_scroll, offset_y);
+    if crate::kit::history_page_consumer::window_path_enabled() {
+        crate::kit::history_window::update_window_viewport_follow(*follow_bottom.read());
+    }
 }
 
 /// §8.1 `↓ New output` 指示器判定：浏览态（用户滚离底部，follow=false）且
@@ -275,6 +278,10 @@ pub(in crate::kit::message_area) fn run_auto_follow(ctx: &AutoFollowCtx) {
         ctx.total_visual_rows,
         ctx.vis_height as usize,
     );
+    // 跟随态在底部：窗口模式按 after_cursor 拉取更新的一页；consumer 自己合并/退避。
+    if !browsing {
+        crate::kit::history_page_consumer::request_window_newer_page_if_due();
+    }
 
     // ── 粘性跟随 guard ──
     // [Why] 用户一旦向上滚动（offset < max_scroll，update_follow_on_scroll 已置

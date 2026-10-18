@@ -23,9 +23,11 @@ fn cursor_for(thread: &str) -> String {
 }
 
 fn classify_page(params: Value, pagination: bool) -> Result<HistoryPageRequest, AcpError> {
-    match classify(&params, pagination) {
+    match classify(&params, pagination, false) {
         Ok(SessionLoadMode::HistoryPage(request)) => Ok(request),
-        Ok(SessionLoadMode::InitialLoad) => panic!("request degraded into an initial load"),
+        Ok(SessionLoadMode::InitialLoad | SessionLoadMode::HistoryWindow { .. }) => {
+            panic!("request degraded into an initial load")
+        }
         Err(error) => Err(error),
     }
 }
@@ -53,17 +55,17 @@ fn cursor_with_optional_limit_selects_the_history_page_mode() {
 
 #[test]
 fn absent_cursor_field_is_an_initial_load_and_limit_alone_is_rejected() {
-    assert_eq!(
-        classify(&json!({ "sessionId": SESSION }), true).unwrap(),
+    assert!(matches!(
+        classify(&json!({ "sessionId": SESSION }), true, false).unwrap(),
         SessionLoadMode::InitialLoad
-    );
+    ));
     // 未协商分页能力的连接，只要不带分页字段，初始 load 照常（REQ §5.3）。
-    assert_eq!(
-        classify(&json!({ "sessionId": SESSION }), false).unwrap(),
+    assert!(matches!(
+        classify(&json!({ "sessionId": SESSION }), false, false).unwrap(),
         SessionLoadMode::InitialLoad
-    );
+    ));
     // limit 只属于历史页：单独出现在初始 load 上是坏请求，不静默忽略。
-    let error = classify(&json!({ "sessionId": SESSION, "limit": 10 }), true).unwrap_err();
+    let error = classify(&json!({ "sessionId": SESSION, "limit": 10 }), true, false).unwrap_err();
     assert_eq!(error.code, -32602);
 }
 
@@ -138,6 +140,7 @@ fn load_generation_is_accepted_only_on_the_initial_load_as_a_non_empty_string() 
         let error = classify(
             &json!({ "sessionId": SESSION, "loadGeneration": bad }),
             true,
+            false,
         )
         .unwrap_err();
         assert_eq!(error.code, -32602, "loadGeneration {bad} 必须拒绝");

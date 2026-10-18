@@ -1,19 +1,36 @@
 use std::collections::{BTreeMap, BTreeSet};
 
 use peri_acp_types::messages::BaseMessage;
+use peri_acp_types::store::PersistedPayload;
 
 pub(super) const PREDICTION_HISTORY_WINDOW: usize = 10;
+
+/// 直接从有效 payload 投影 Prediction 上下文：只在命中窗口时克隆选中的消息，
+/// 不为整段历史建立 `BaseMessage` 副本。
+pub(super) fn project_prediction_payloads(payloads: &[PersistedPayload]) -> Vec<BaseMessage> {
+    let messages: Vec<&BaseMessage> = payloads
+        .iter()
+        .filter_map(PersistedPayload::as_message)
+        .filter(|message| !message.is_system())
+        .collect();
+    project_message_refs(&messages)
+}
 
 /// 投影 Prediction 上下文，并把 tool-call batch 作为原子组处理。
 ///
 /// 窗口采用软上限：若最近消息中的 Tool result 对应窗口外的 Ai tool_calls，
 /// 则向前扩展并保留该 Ai 声明及同批全部结果。历史本身不完整时，整组丢弃；
 /// 孤立 Tool result 也丢弃。最终的 model bridge 仍负责请求前的契约校验。
+#[cfg(test)]
 pub(super) fn project_prediction_history(history: &[BaseMessage]) -> Vec<BaseMessage> {
     let messages: Vec<&BaseMessage> = history
         .iter()
         .filter(|message| !message.is_system())
         .collect();
+    project_message_refs(&messages)
+}
+
+fn project_message_refs(messages: &[&BaseMessage]) -> Vec<BaseMessage> {
     let mut selected: BTreeSet<usize> =
         (messages.len().saturating_sub(PREDICTION_HISTORY_WINDOW)..messages.len()).collect();
 

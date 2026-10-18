@@ -193,9 +193,18 @@ impl EntryRenderCache {
     }
 
     pub(crate) fn retained_bytes(&self) -> usize {
+        let mut seen = crate::kit::retained_bytes::SeenAllocations::default();
+        self.retained_bytes_with(&mut seen)
+    }
+
+    #[allow(dead_code)]
+    pub(crate) fn retained_bytes_with(
+        &self,
+        seen: &mut crate::kit::retained_bytes::SeenAllocations,
+    ) -> usize {
         self.markdown.retained_bytes()
-            + retained_lines_bytes(&self.lines)
-            + self.markdown_lines.retained_bytes()
+            + crate::kit::retained_bytes::retained_arc_lines_bytes(&self.lines, seen)
+            + self.markdown_lines.retained_bytes_with(seen)
             + self.image_lines.capacity() * std::mem::size_of::<ImageLineInfo>()
             + self
                 .image_lines
@@ -211,25 +220,6 @@ impl EntryRenderCache {
                 })
                 .unwrap_or(0)
     }
-}
-
-pub(crate) fn retained_lines_bytes(lines: &Vec<Line<'static>>) -> usize {
-    lines.capacity() * std::mem::size_of::<Line<'static>>()
-        + lines
-            .iter()
-            .map(|line| {
-                line.spans.capacity()
-                    * std::mem::size_of::<ratatui_kit::ratatui::text::Span<'static>>()
-                    + line
-                        .spans
-                        .iter()
-                        .map(|span| match &span.content {
-                            std::borrow::Cow::Owned(text) => text.capacity(),
-                            std::borrow::Cow::Borrowed(_) => 0,
-                        })
-                        .sum::<usize>()
-            })
-            .sum::<usize>()
 }
 
 #[derive(Clone)]
@@ -345,14 +335,20 @@ impl MarkdownLineCache {
         (visual_rows + tail_rows, result)
     }
 
+    #[allow(dead_code)]
     fn retained_bytes(&self) -> usize {
+        let mut seen = crate::kit::retained_bytes::SeenAllocations::default();
+        self.retained_bytes_with(&mut seen)
+    }
+
+    fn retained_bytes_with(&self, seen: &mut crate::kit::retained_bytes::SeenAllocations) -> usize {
         self.stable.capacity() * std::mem::size_of::<MarkdownLineChunk>()
             + self.prefix.capacity() * std::mem::size_of::<usize>()
             + self
                 .stable
                 .iter()
                 .map(|chunk| {
-                    retained_lines_bytes(&chunk.lines)
+                    crate::kit::retained_bytes::retained_arc_lines_bytes(&chunk.lines, seen)
                         + chunk.wrap_map.capacity() * std::mem::size_of::<WrappedLineInfo>()
                 })
                 .sum::<usize>()

@@ -32,6 +32,7 @@ use crate::{event::activity::map_agent_activity, event::map_event, transport::Ac
 
 /// EventSink 契约（L5：事实源 peri-acp-types::event）。
 pub use peri_acp_types::event::EventSink;
+use peri_acp_types::event::EventSinkError;
 
 /// Receives [`ExecutorEvent`]s produced during agent execution and routes them
 /// to the appropriate transport.
@@ -160,7 +161,7 @@ impl EventSink for TransportEventSink {
         reminder: &peri_acp_types::system_reminder::SystemReminder,
         replay: bool,
         source_agent_id: Option<&str>,
-    ) {
+    ) -> Result<(), EventSinkError> {
         // H8：客户端出口必须先按目标受众过滤；结构化事件与文本 fallback 使用
         // 同一条规则，fallback 不得绕过过滤下发 Model-only 内容。
         if !peri_acp_types::system_reminder::reminder_egress_allowed(
@@ -175,7 +176,7 @@ impl EventSink for TransportEventSink {
                 replay,
                 "system reminder is not addressed to the client audience; nothing is sent"
             );
-            return;
+            return Ok(());
         }
         let caps = self
             .caps_registry
@@ -195,24 +196,29 @@ impl EventSink for TransportEventSink {
                 json!({ "text": reminder.summary.as_deref().unwrap_or(&reminder.body), "replay": replay, "legacy": true }),
             )
         };
-        let _ = self
-            .transport
+        self.transport
             .send_notification(
                 "peri/unstable_event",
                 json!({ "sessionId": session_id, "event": event, "data": data }),
             )
-            .await;
+            .await
+            .map_err(|error| EventSinkError::new(format!("system reminder send failed: {error}")))
     }
 
-    async fn push_event(&self, session_id: &str, event: &ExecutorEvent, context_window: u32) {
+    async fn push_event(
+        &self,
+        session_id: &str,
+        event: &ExecutorEvent,
+        context_window: u32,
+    ) -> Result<(), EventSinkError> {
         if let ExecutorEvent::SystemReminder {
             reminder,
             source_agent_id,
         } = event
         {
             self.push_system_reminder(session_id, reminder, false, source_agent_id.as_deref())
-                .await;
-            return;
+                .await?;
+            return Ok(());
         }
         let caps = self
             .caps_registry
@@ -236,9 +242,9 @@ impl EventSink for TransportEventSink {
                 .get(session_id)
                 .is_some_and(|caps| caps.user_input_queue)
             {
-                self.push_legacy_event(session_id, event).await;
+                self.push_legacy_event(session_id, event).await?;
             }
-            return;
+            return Ok(());
         }
         tracing::debug!(
             target: "acp.event_sink",
@@ -255,7 +261,9 @@ impl EventSink for TransportEventSink {
                     Ok(p) => p,
                     Err(e) => {
                         error!(error = %e, "EventSink: serialize SessionUpdate failed");
-                        continue;
+                        return Err(EventSinkError::new(format!(
+                            "serialize session update failed: {e}"
+                        )));
                     }
                 };
                 // Wrap in {"update": ..., "sessionId": ...} format expected by
@@ -283,10 +291,12 @@ impl EventSink for TransportEventSink {
                         );
                     }
                 }
-                let _ = self
-                    .transport
+                self.transport
                     .send_notification("session/update", payload)
-                    .await;
+                    .await
+                    .map_err(|error| {
+                        EventSinkError::new(format!("session/update send failed: {error}"))
+                    })?;
             }
         }
 
@@ -313,8 +323,9 @@ impl EventSink for TransportEventSink {
         // SubagentStarted/SubagentStopped 等事件不产生 SessionUpdate，
         // 但必须通过 peri/agent_event 通道送达 TUI 以创建/销毁 SubAgentGroup 容器。
         if caps.agent_event {
-            self.push_legacy_event(session_id, event).await;
+            self.push_legacy_event(session_id, event).await?;
         }
+        Ok(())
     }
 
     // 设计决策：ACP v1 无 turn_done SessionUpdate tag，TurnDone 信号通过

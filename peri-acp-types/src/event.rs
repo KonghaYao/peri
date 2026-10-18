@@ -5,6 +5,28 @@
 //! [`crate::event_v2`]，随 ExecutorEvent 全量退役（`2026-07-18-executor-event-retirement.md`）
 //! 一起删除。
 
+/// 事件 sink 的发送结果。只有 transport 确认写出后才允许调用方确认交付。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct EventSinkError {
+    pub message: String,
+}
+
+impl EventSinkError {
+    pub fn new(message: impl Into<String>) -> Self {
+        Self {
+            message: message.into(),
+        }
+    }
+}
+
+impl std::fmt::Display for EventSinkError {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str(&self.message)
+    }
+}
+
+impl std::error::Error for EventSinkError {}
+
 /// 事件发射端口（L5：自 `peri-acp/src/session/event_sink.rs` 迁入）。
 ///
 /// 接收 [`ExecutorEvent`] 并路由到对应 transport。实现方为 ACP 协议面
@@ -16,7 +38,14 @@
 #[async_trait::async_trait]
 pub trait EventSink: Send + Sync {
     /// Push a single executor event. Called from the background pump task.
-    async fn push_event(&self, session_id: &str, event: &ExecutorEvent, context_window: u32);
+    ///
+    /// `Err` 表示 transport 未确认写出；调用方不得删除尚未确认的交付日志。
+    async fn push_event(
+        &self,
+        session_id: &str,
+        event: &ExecutorEvent,
+        context_window: u32,
+    ) -> Result<(), EventSinkError>;
 
     /// Push a canonical System Reminder. Implementations capability-gate the rich DTO and
     /// must never serialize trusted provenance.
@@ -29,7 +58,8 @@ pub trait EventSink: Send + Sync {
         _reminder: &crate::system_reminder::SystemReminder,
         _replay: bool,
         _source_agent_id: Option<&str>,
-    ) {
+    ) -> Result<(), EventSinkError> {
+        Ok(())
     }
 
     /// Signal that the agent execution stream has ended (no more events).

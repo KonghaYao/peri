@@ -352,7 +352,9 @@ impl ReplayFixture {
 
     async fn load_with_pagination(&mut self, history_pagination: bool) -> Result<Value, AcpError> {
         let facts = ConnectionFacts {
+            connection_id: "unnegotiated-test".into(),
             history_pagination,
+            history_window_v1: false,
             caps: self.connection_caps.clone(),
         };
         self.request("session/load", facts).await

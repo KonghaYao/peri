@@ -27,6 +27,8 @@ pub enum PanelKind {
     ShellDetail,
     /// 当前 session 的 Goal 只读详情（由状态栏 goal 段点击打开）。
     Goal,
+    /// 超大历史条目详情（占位 note 焦点/点击后 Enter 打开）。
+    HistoryDetail,
 }
 
 // ─── EventResult ────────────────────────────────────────────────────────────

@@ -2,7 +2,7 @@
 
 use super::TransportEventSink;
 use crate::event::AcpEvent;
-use peri_acp_types::event::ExecutorEvent;
+use peri_acp_types::event::{EventSinkError, ExecutorEvent};
 use serde_json::json;
 use tracing::error;
 
@@ -18,7 +18,11 @@ fn to_serde_str<T: serde::Serialize>(value: &T) -> String {
 }
 
 impl TransportEventSink {
-    pub(super) async fn push_legacy_event(&self, session_id: &str, event: &ExecutorEvent) {
+    pub(super) async fn push_legacy_event(
+        &self,
+        session_id: &str,
+        event: &ExecutorEvent,
+    ) -> Result<(), EventSinkError> {
         let acp_event = match event {
             ExecutorEvent::UserInputRunStarted {
                 generation,
@@ -80,7 +84,9 @@ impl TransportEventSink {
                     Ok(json) => json,
                     Err(e) => {
                         error!(error = %e, "EventSink: serialize CompactCompleted messages failed");
-                        return;
+                        return Err(EventSinkError::new(format!(
+                            "serialize compact messages failed: {e}"
+                        )));
                     }
                 };
                 Some(AcpEvent::CompactCompleted {
@@ -113,7 +119,9 @@ impl TransportEventSink {
                     Ok(json) => json,
                     Err(e) => {
                         error!(error = %e, "EventSink: serialize RewindCompleted messages failed");
-                        return;
+                        return Err(EventSinkError::new(format!(
+                            "serialize rewind messages failed: {e}"
+                        )));
                     }
                 };
                 Some(AcpEvent::RewindCompleted {
@@ -227,11 +235,12 @@ impl TransportEventSink {
                 Ok(json) => json,
                 Err(e) => {
                     error!(error = %e, "EventSink: serialize AcpEvent failed");
-                    return;
+                    return Err(EventSinkError::new(format!(
+                        "serialize agent event failed: {e}"
+                    )));
                 }
             };
-            let _ = self
-                .transport
+            self.transport
                 .send_notification(
                     "peri/agent_event",
                     json!({
@@ -239,7 +248,11 @@ impl TransportEventSink {
                         "event_json": event_json,
                     }),
                 )
-                .await;
+                .await
+                .map_err(|error| {
+                    EventSinkError::new(format!("peri/agent_event send failed: {error}"))
+                })?;
         }
+        Ok(())
     }
 }

@@ -88,6 +88,90 @@ fn request_older_page_after_scroll(
     )
 }
 
+/// 接近最底部时请求 after 页；与 before 共用单在途/单待合并约束。
+pub(super) fn request_newer_page_at_scroll_facts(
+    follow_bottom: bool,
+    offset: usize,
+    pending_delta: i32,
+    content_length: usize,
+    viewport_length: usize,
+) -> bool {
+    use crate::kit::history_paging::viewport_at_backward_boundary;
+    let at_boundary =
+        viewport_at_backward_boundary(follow_bottom, offset, content_length, viewport_length) || {
+            let (landed_offset, landed_follow) = super::project_viewport_after_pending(
+                offset,
+                pending_delta,
+                content_length,
+                viewport_length,
+            );
+            viewport_at_backward_boundary(
+                landed_follow,
+                landed_offset,
+                content_length,
+                viewport_length,
+            )
+        };
+    at_boundary && crate::kit::history_page_consumer::request_window_newer_page_if_due()
+}
+
+fn request_newer_page_after_scroll(
+    scroll_state: &State<ScrollPos>,
+    scrollbar_fields: &State<ScrollbarFields>,
+    scroll_throttle: &State<ScrollThrottle>,
+    follow_bottom: &State<bool>,
+) -> bool {
+    let fields = *scrollbar_fields.read();
+    request_newer_page_at_scroll_facts(
+        *follow_bottom.read(),
+        scroll_state.read().offset(),
+        scroll_throttle.read().pending_delta,
+        fields.content_length,
+        fields.viewport_length,
+    )
+}
+
+fn request_pages_after_scroll(
+    scroll_state: &State<ScrollPos>,
+    scrollbar_fields: &State<ScrollbarFields>,
+    scroll_throttle: &State<ScrollThrottle>,
+    follow_bottom: &State<bool>,
+) -> bool {
+    let newer = request_newer_page_after_scroll(
+        scroll_state,
+        scrollbar_fields,
+        scroll_throttle,
+        follow_bottom,
+    );
+    if newer {
+        return true;
+    }
+    let older = request_older_page_after_scroll(
+        scroll_state,
+        scrollbar_fields,
+        scroll_throttle,
+        follow_bottom,
+    );
+    let gap = request_gap_page_after_scroll();
+    older || gap
+}
+
+/// 视口没有可映射锚点（gap/淘汰后的占位）时，按桥接发布的 gap 目标重读。
+pub(super) fn request_gap_page_after_scroll() -> bool {
+    if !crate::kit::history_page_consumer::window_path_enabled() {
+        return false;
+    }
+    let anchored = crate::kit::atoms::WINDOW_VIEWPORT
+        .state()
+        .read()
+        .as_ref()
+        .is_some_and(|viewport| viewport.anchor.is_some());
+    if anchored {
+        return false;
+    }
+    crate::kit::history_page_consumer::request_window_gap_if_due()
+}
+
 /// 从 `use_event_handler` 闭包提取的鼠标/键盘处理逻辑。
 /// 包含：鼠标滚轮节流、文本拖拽选中（Down/Drag/Up）、键盘滚动、
 /// PERI_DISABLE_DRAG_SELECT 分支、parking_lot 死锁规避。
@@ -178,7 +262,7 @@ pub(in crate::kit::message_area) fn handle_event(
                             if mouse.row == sb_area.y {
                                 scroll_state.write_no_update().set_offset(0);
                                 update_follow_on_scroll(follow_bottom, max_scroll, 0);
-                                request_older_page_after_scroll(
+                                request_pages_after_scroll(
                                     scroll_state,
                                     scrollbar_fields,
                                     scroll_throttle,
@@ -221,7 +305,7 @@ pub(in crate::kit::message_area) fn handle_event(
                                 scroll_state.write_no_update().set_offset(target);
                                 update_follow_on_scroll(follow_bottom, max_scroll, target);
                                 // 轨道点击可能落在已载入窗口顶端（REQ-C01-1）。
-                                request_older_page_after_scroll(
+                                request_pages_after_scroll(
                                     scroll_state,
                                     scrollbar_fields,
                                     scroll_throttle,
@@ -264,7 +348,7 @@ pub(in crate::kit::message_area) fn handle_event(
                             scroll_state.write_no_update().set_offset(target);
                             update_follow_on_scroll(follow_bottom, max_scroll, target);
                             // 拖到顶端同样是「滚动贴边」（REQ-C01-1）。
-                            request_older_page_after_scroll(
+                            request_pages_after_scroll(
                                 scroll_state,
                                 scrollbar_fields,
                                 scroll_throttle,
@@ -483,7 +567,7 @@ pub(in crate::kit::message_area) fn handle_event(
                         scrollbar_fields,
                         follow_bottom,
                     );
-                    request_older_page_after_scroll(
+                    request_pages_after_scroll(
                         scroll_state,
                         scrollbar_fields,
                         scroll_throttle,
@@ -498,7 +582,7 @@ pub(in crate::kit::message_area) fn handle_event(
                         scrollbar_fields,
                         follow_bottom,
                     );
-                    request_older_page_after_scroll(
+                    request_pages_after_scroll(
                         scroll_state,
                         scrollbar_fields,
                         scroll_throttle,
@@ -544,7 +628,7 @@ pub(in crate::kit::message_area) fn handle_event(
         // [TRAP] read+write 同 state 同线程冲突——write guard 已 drop 再 read。
         update_follow_on_scroll(follow_bottom, max_scroll, scroll_state.read().offset());
         // Ctrl+Up/Home 可以一路滚到已载入窗口顶端（REQ-C01-1）。
-        request_older_page_after_scroll(
+        request_pages_after_scroll(
             scroll_state,
             scrollbar_fields,
             scroll_throttle,

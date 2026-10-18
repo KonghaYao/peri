@@ -212,6 +212,7 @@ fn immutable_render_snapshot_allows_publication_before_derivation() {
         pending_cache_usage: None,
         publication_intent: Default::default(),
         folded_history: Default::default(),
+        window: Default::default(),
     };
     push_view_models(&mut bridge);
     let (captured, publication) = read_render_snapshot();
@@ -409,6 +410,7 @@ fn bridge_publication_after_local_fold_updates_resident_and_appended_entries() {
         pending_cache_usage: None,
         publication_intent: Default::default(),
         folded_history: Default::default(),
+        window: Default::default(),
     };
     let grid = GridSpec::grid_for(80);
     let mut transcript = Transcript::default();

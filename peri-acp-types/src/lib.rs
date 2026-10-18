@@ -60,6 +60,7 @@ pub mod event_v2;
 pub mod frozen;
 pub mod goal;
 pub mod history_page;
+pub mod history_window;
 pub mod hooks;
 pub mod identity;
 pub mod interaction;

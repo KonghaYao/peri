@@ -20,6 +20,10 @@ pub fn project_session_boundary(target_session_id: Option<&str>) {
     // 历史分页浏览与 committed 同生命周期：边界清空浏览器状态与区间索引，上一会话
     // 在途的页响应因此在消费侧与桥接侧都被判为过期（REQ-C01-5、A11）。
     crate::kit::history_paging::reset_browsing_state();
+    crate::kit::history_page_consumer::reset_window_paging_state();
+    crate::kit::history_window::clear_window_viewport();
+    atoms::FOCUSED_ENTRY.set(None);
+    atoms::HISTORY_DETAIL.set(None);
     acp_events::push_view_models_for_reset();
     {
         let state = atoms::ACP_STATE.state();

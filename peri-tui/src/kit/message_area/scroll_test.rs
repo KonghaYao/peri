@@ -724,6 +724,86 @@ fn test_scroll_lands_at_top_dispatches_older_page_request() {
 }
 
 /// 离开向前边界时不触发（避免滚动事件路径无谓发请求）。
+/// 向下滚动到最底部：窗口模式派发 after 页；到达末尾/在途时停止。
+#[test]
+#[serial]
+fn test_scroll_at_bottom_dispatches_window_after_page_and_stops() {
+    use crate::kit::history_page_consumer::WindowConsumerRequest;
+    use crate::kit::history_paging::WindowPageCursor;
+    use crate::kit::history_window::WindowIdentity;
+
+    crate::kit::atoms::init_atoms();
+    crate::kit::atoms::HISTORY_WINDOW_V1.set(true);
+    crate::kit::atoms::HISTORY_WINDOW_CAPABLE.set(true);
+    crate::kit::history_page_consumer::reset_window_paging_state();
+    crate::kit::atoms::HISTORY_WINDOW_GENERATION.set(1);
+    {
+        let handle = crate::kit::atoms::HISTORY_WINDOW_PAGING.state();
+        let mut state = handle.write();
+        state.session_id = "s1".into();
+        state.identity = Some(WindowIdentity::new("s1", "gen-1", 7, "snap-1"));
+        state.window_generation = 1;
+        state.read_ticket = Some("ticket-1".into());
+        state.after_cursor = Some("after-1".into());
+    }
+    let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+    assert!(crate::kit::atoms::HISTORY_WINDOW_TX.set(tx).is_ok());
+
+    assert!(event::request_newer_page_at_scroll_facts(
+        false, 80, 0, 100, 20
+    ));
+    let request = rx.try_recv().expect("after page request");
+    let request_id = match &request {
+        WindowConsumerRequest::Page {
+            context, cursor, ..
+        } => {
+            assert_eq!(cursor, &WindowPageCursor::After("after-1".into()));
+            context.request_id.clone()
+        }
+        other => panic!("expected after page, got {other:?}"),
+    };
+    assert!(
+        !event::request_newer_page_at_scroll_facts(false, 80, 0, 100, 20),
+        "same in-flight window page must merge"
+    );
+    assert!(rx.try_recv().is_err());
+
+    crate::kit::history_page_consumer::fail_window_request(&request_id, "test done", false);
+    crate::kit::atoms::HISTORY_WINDOW_PAGING
+        .state()
+        .write()
+        .after_cursor = None;
+    assert!(!event::request_newer_page_at_scroll_facts(
+        false, 80, 0, 100, 20
+    ));
+
+    // 视口无锚点 + 桥接发布 gap 目标：滚动触发 seek，内容返回前不跳底。
+    crate::kit::atoms::WINDOW_VIEWPORT.set(None);
+    crate::kit::atoms::WINDOW_GAP_REQUEST.set(Some(
+        crate::kit::history_paging::WindowGapRequest::Seek {
+            gap_id: crate::kit::history_window::GapId(1),
+            anchor: crate::kit::history_window::PersistentEntryKey::own("s1:missing"),
+        },
+    ));
+    assert!(event::request_gap_page_after_scroll());
+    let gap_request = rx.try_recv().expect("gap request");
+    assert!(matches!(
+        gap_request,
+        WindowConsumerRequest::Seek { anchor, .. }
+            if anchor == crate::kit::history_window::PersistentEntryKey::own("s1:missing")
+    ));
+    assert!(
+        crate::kit::atoms::WINDOW_GAP_REQUEST
+            .state()
+            .read()
+            .is_none()
+    );
+
+    crate::kit::atoms::HISTORY_WINDOW_V1.set(false);
+    crate::kit::atoms::HISTORY_WINDOW_CAPABLE.set(false);
+    crate::kit::history_page_consumer::reset_window_paging_state();
+}
+
 #[test]
 #[serial]
 fn test_scroll_away_from_top_does_not_dispatch() {

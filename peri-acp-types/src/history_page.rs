@@ -78,6 +78,10 @@
 //!   会把它的 `rowid` 复用给新插入的行，这类新行 `rowid <= tail` 因而会被本次遍历读到，而被
 //!   删行的内容静默消失（实测见 `.recon/S9-boundedness.md` 第 3.4 节第 6 点与第 6 节 R1）。
 
+#[path = "history_page_visibility.rs"]
+mod visibility;
+pub use visibility::history_body_displayable_to_client;
+
 use serde::{Deserialize, Serialize};
 
 use crate::messages::MessageId;
@@ -576,17 +580,28 @@ impl HistoryPageCandidate {
 ///    给出游标——否则大条目之后的历史永远读不到。
 /// 4. 页内顺序与展示性在阶段二（[`Self::materialize`]）决定：不可展示行不进入 `items`，
 ///    但位置照常推进。
+///
+/// 候选行的给入顺序：同一条预算规则，两个方向。
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum PlanOrder {
+    /// 存储序降序（最靠近最新一行在前）：旧分页的「更早」方向。
+    NewestFirst,
+    /// 存储序升序（最靠近锚点一行在前）：窗口的「更晚」方向。
+    OldestFirst,
+}
+
 #[derive(Clone, Debug)]
 pub struct HistoryPagePlan {
     thread_id: ThreadId,
     range_token: RangeToken,
     byte_budget: usize,
-    /// 本页推进的行（降序存储序），也是阶段二**唯一**允许取正文的集合。
+    /// 本页推进的行，也是阶段二**唯一**允许取正文的集合。
     entries: Vec<HistoryPageCandidate>,
     /// 游标锚点 = 本页推进的最后一行；没有推进任何行时为 `None`。
     anchor: Option<MessageId>,
-    /// 更早方向是否还有内容（`false` ⇒ `nextCursor = None`）。
-    has_older: bool,
+    /// 对应方向是否还有内容（`false` ⇒ `nextCursor = None`）。
+    has_more: bool,
+    order: PlanOrder,
 }
 
 impl HistoryPagePlan {
@@ -600,6 +615,45 @@ impl HistoryPagePlan {
         candidates: Vec<HistoryPageCandidate>,
         limit: usize,
         byte_budget: usize,
+    ) -> Self {
+        Self::plan_ordered(
+            thread_id,
+            range_token,
+            candidates,
+            limit,
+            byte_budget,
+            PlanOrder::NewestFirst,
+        )
+    }
+
+    /// 窗口「更晚」方向的页计划（同一份长度预算规则，方向相反）。
+    ///
+    /// `candidates` 必须按存储序**升序**给入（离锚点最近的一行在前），最多 `limit + 1`
+    /// 行；多出的那一条只用于判断「更晚方向还有没有内容」。页内顺序仍是历史正序。
+    pub fn plan_after(
+        thread_id: &ThreadId,
+        range_token: &str,
+        candidates: Vec<HistoryPageCandidate>,
+        limit: usize,
+        byte_budget: usize,
+    ) -> Self {
+        Self::plan_ordered(
+            thread_id,
+            range_token,
+            candidates,
+            limit,
+            byte_budget,
+            PlanOrder::OldestFirst,
+        )
+    }
+
+    fn plan_ordered(
+        thread_id: &ThreadId,
+        range_token: &str,
+        candidates: Vec<HistoryPageCandidate>,
+        limit: usize,
+        byte_budget: usize,
+        order: PlanOrder,
     ) -> Self {
         let mut entries: Vec<HistoryPageCandidate> = Vec::new();
         let mut remaining = byte_budget;
@@ -616,7 +670,7 @@ impl HistoryPagePlan {
             entries.push(*candidate);
         }
         let anchor = entries.last().map(|entry| entry.message_id);
-        // 只有「候选行全部推进完」且「没有多出来的那一条」才表示更早方向确实没有内容。
+        // 只有「候选行全部推进完」且「没有多出来的那一条」才表示该方向确实没有内容。
         let exhausted = entries.len() == candidates.len() && candidates.len() <= limit;
         Self {
             thread_id: thread_id.clone(),
@@ -624,13 +678,29 @@ impl HistoryPagePlan {
             byte_budget,
             entries,
             anchor,
-            has_older: !exhausted,
+            has_more: !exhausted,
+            order,
         }
     }
 
-    /// 本页推进的行（降序存储序），含不可展示行。
+    /// 本页推进的行（按候选给入顺序），含不可展示行。
     pub fn entries(&self) -> &[HistoryPageCandidate] {
         &self.entries
+    }
+
+    /// 本页在对应方向上的推进锚点（最后一条被推进的行）。
+    pub fn anchor(&self) -> Option<MessageId> {
+        self.anchor
+    }
+
+    /// 对应方向是否还有内容。
+    pub fn has_more(&self) -> bool {
+        self.has_more
+    }
+
+    /// 本页使用的字节预算（窗口据此区分 descriptor 条目）。
+    pub fn byte_budget(&self) -> usize {
+        self.byte_budget
     }
 
     /// 阶段二**唯一**允许取正文的条目集合：就是本页那些行的 id。
@@ -646,13 +716,48 @@ impl HistoryPagePlan {
     /// 取行）。集合或顺序不符即损坏：把少读/多读的行静默装配成一页，等于把一次不完整读取
     /// 当成正常页返回。长度与位置取阶段一的事实（页面预算当初就是按它判定的）。
     pub fn materialize(self, rows: Vec<HistoryPageRow>) -> SessionResourceResult<HistoryPage> {
-        if rows.len() != self.entries.len() {
+        let (page, _) = self.materialize_selected(rows, false)?;
+        Ok(page)
+    }
+
+    /// 窗口装配：超预算的条目**不取正文**，原样作为 descriptor 候选返回。
+    ///
+    /// 返回值第二项是被省略的条目（`encoded_bytes > byte_budget`），调用方据此签发
+    /// [`crate::history_window::HistoryBodyDescriptor`]；不得先把完整正文取回再切片。
+    pub fn materialize_omitting_oversize(
+        self,
+        rows: Vec<HistoryPageRow>,
+    ) -> SessionResourceResult<(HistoryPage, Vec<HistoryPageCandidate>)> {
+        self.materialize_selected(rows, true)
+    }
+
+    fn materialize_selected(
+        self,
+        rows: Vec<HistoryPageRow>,
+        omit_oversize: bool,
+    ) -> SessionResourceResult<(HistoryPage, Vec<HistoryPageCandidate>)> {
+        let selected: Vec<(HistoryPageCandidate, bool)> = self
+            .entries
+            .iter()
+            .map(|entry| {
+                (
+                    *entry,
+                    omit_oversize && entry.encoded_bytes > self.byte_budget,
+                )
+            })
+            .collect();
+        let loaded: Vec<HistoryPageCandidate> = selected
+            .iter()
+            .filter(|(_, omitted)| !omitted)
+            .map(|(entry, _)| *entry)
+            .collect();
+        if rows.len() != loaded.len() {
             return Err(corrupt(
                 "history page bodies do not match the planned page size",
             ));
         }
         let mut items = Vec::new();
-        for (row, planned) in rows.iter().zip(self.entries.iter()) {
+        for (row, planned) in rows.iter().zip(loaded.iter()) {
             if row.message_id != planned.message_id {
                 return Err(corrupt(
                     "history page bodies are not the planned page entries",
@@ -670,14 +775,22 @@ impl HistoryPagePlan {
                 });
             }
         }
-        // 候选行按存储序降序进入（更靠近锚点的在前），返回前反转成历史正序。
-        items.reverse();
+        // 旧分页按存储序降序进入（更靠近最新一行的在前），返回前反转成历史正序；
+        // 窗口的「更晚」计划已经按升序给入，保持原序。
+        if self.order == PlanOrder::NewestFirst {
+            items.reverse();
+        }
         let next_cursor = self.anchor.and_then(|anchor| {
-            self.has_older.then(|| {
+            self.has_more.then(|| {
                 HistoryCursor::new(self.thread_id.clone(), anchor, self.range_token.clone())
             })
         });
-        Ok(HistoryPage { items, next_cursor })
+        let omitted = selected
+            .into_iter()
+            .filter(|(_, omitted)| *omitted)
+            .map(|(entry, _)| entry)
+            .collect();
+        Ok((HistoryPage { items, next_cursor }, omitted))
     }
 }
 
@@ -838,3 +951,15 @@ fn invalid_input(detail: &str) -> SessionResourceError {
 #[cfg(test)]
 #[path = "history_page_test.rs"]
 mod tests;
+
+// V1 窗口协议按职责拆在 `history_window`；这里保持既有公开模块路径的可用性，
+// 让消费方既能从 `history_page` 找到分页/窗口的关联类型，也不改变旧类型语义。
+pub use crate::history_window::{
+    HistoryBodyChunk, HistoryBodyDescriptor, HistoryCheckpoint, HistoryCommitMetadata,
+    HistoryCommittedTail, HistoryEntryId, HistoryInheritedSnapshot, HistoryInheritedWindow,
+    HistoryReadTicket, HistoryReadTicketBinding, HistoryRewindInvalidation, HistoryRewindStatus,
+    HistorySource, HistoryWindowAnchor, HistoryWindowCursor, HistoryWindowDirection,
+    HistoryWindowError, HistoryWindowMetadata, HistoryWindowOpenPlan, HistoryWindowOpenRequest,
+    HistoryWindowPage, HistoryWindowPageRequest, HistoryWindowRequest, HistoryWindowSeekAnchor,
+    HistoryWindowSeekRequest,
+};

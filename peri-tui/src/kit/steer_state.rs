@@ -42,22 +42,61 @@ struct SessionSteers {
     delivered: HashSet<String>,
     // 仅影响待发送区展示；正式聊天气泡仍由 Delivered 确认。
     direct_submissions: HashSet<String>,
+    // 致命执行失败后已结算但结果未知的输入身份；只用于对账，不再投影为 Submitting。
+    failed_unknown: HashSet<String>,
 }
 
 impl SessionSteers {
     fn reconcile_direct_submissions(&mut self) {
-        if let Some(snapshot) = &self.snapshot {
-            for item in &snapshot.items {
-                if item.state == UserInputState::Queued
-                    && !self.pending.iter().any(|command| {
-                        matches!(&command.kind, SteerCommandKind::Enqueue(input)
-                            if input.input_id == item.input_id)
-                    })
-                {
-                    self.direct_submissions.remove(&item.input_id);
-                }
+        let Some(snapshot) = &self.snapshot else {
+            return;
+        };
+        for item in &snapshot.items {
+            if item.state == UserInputState::Queued
+                && !self.pending.iter().any(|command| {
+                    matches!(&command.kind, SteerCommandKind::Enqueue(input)
+                        if input.input_id == item.input_id)
+                })
+            {
+                self.direct_submissions.remove(&item.input_id);
             }
         }
+        // 终态是正面事实：Delivered 表示输入已进入执行，Withdrawn 表示输入确定未执行。
+        // 只有快照中缺失 ID 才保持未知，不能据此推断成功。
+        let terminal: Vec<(String, UserInputState)> = snapshot
+            .terminal_items
+            .iter()
+            .map(|item| (item.input_id.clone(), item.state))
+            .collect();
+        for (input_id, state) in &terminal {
+            if matches!(state, UserInputState::Delivered | UserInputState::Withdrawn) {
+                self.direct_submissions.remove(input_id);
+                self.failed_unknown.remove(input_id);
+            }
+        }
+        // 终态已经回答了 Enqueue 命令的结果；丢失的回执不应继续显示 Submitting 或重试。
+        let terminal_ids: HashSet<&str> = terminal
+            .iter()
+            .map(|(input_id, _)| input_id.as_str())
+            .collect();
+        let settled_commands: Vec<String> = self
+            .pending
+            .iter()
+            .filter(|command| {
+                matches!(&command.kind, SteerCommandKind::Enqueue(input)
+                    if terminal_ids.contains(input.input_id.as_str()))
+            })
+            .map(|command| command.command_id.clone())
+            .collect();
+        self.pending.retain(|command| {
+            !matches!(&command.kind, SteerCommandKind::Enqueue(input)
+                if terminal_ids.contains(input.input_id.as_str()))
+        });
+        for command_id in settled_commands {
+            self.queued_at.remove(&command_id);
+        }
+        // Delivered 的气泡只由事件泵按有序交付日志推送；终态快照只清除提交反馈。
+        // 这里合成气泡会绕过 assistant 输出所在 FIFO，无法证明插入位置。
     }
 }
 
@@ -98,6 +137,7 @@ impl SteerState {
         session.snapshot = None;
         session.queued_at.clear();
         session.direct_submissions.clear();
+        session.failed_unknown.clear();
         for recovered in &mut session.recovered {
             recovered.epoch = epoch;
         }
@@ -287,10 +327,39 @@ impl SteerState {
         // 结果不明确时仍保留原请求和输入身份；不改走旧 prompt 或重新生成 ID。
     }
 
+    /// 致命执行失败（含交付日志溢出）必须结束本地提交反馈，避免用户停留在
+    /// “正在提交…”而看不到显式错误；真正的气泡仍不会被伪造。
+    ///
+    /// pending Enqueue 的结果已不可知：从投影中移除并保留 input_id 供后续
+    /// 终态快照对账，不自动重发，也不生成气泡。
+    pub(crate) fn fail_session_submissions(&mut self, session_id: &str) {
+        if let Some(session) = self.sessions.get_mut(session_id) {
+            session.direct_submissions.clear();
+            let settled: Vec<(String, String)> = session
+                .pending
+                .iter()
+                .filter_map(|command| match &command.kind {
+                    SteerCommandKind::Enqueue(input) => {
+                        Some((command.command_id.clone(), input.input_id.clone()))
+                    }
+                    _ => None,
+                })
+                .collect();
+            session
+                .pending
+                .retain(|command| !matches!(command.kind, SteerCommandKind::Enqueue(_)));
+            for (command_id, input_id) in settled {
+                session.queued_at.remove(&command_id);
+                session.failed_unknown.insert(input_id);
+            }
+        }
+    }
+
     pub(crate) fn claim_delivery(&mut self, session_id: &str, input_id: &str) -> bool {
         let session = self.sessions.entry(session_id.to_owned()).or_default();
         let inserted = session.delivered.insert(input_id.to_owned());
         session.direct_submissions.remove(input_id);
+        session.failed_unknown.remove(input_id);
         session.pending.retain(|command| {
             !matches!(&command.kind, SteerCommandKind::Enqueue(input) if input.input_id == input_id)
         });

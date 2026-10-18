@@ -336,11 +336,33 @@ async fn run_prompt_attempt(
             )
             .await?;
     }
+    // 上一轮提交结果不确定时，热态只有会话身份。下一次使用前从权威存储恢复
+    // 有效上下文；恢复失败保持 ReloadRequired，不用空集合冒充“空会话”。
+    //
+    // 放在 start/run-started 之后：续跑没有请求作用域响应，提前失败也必须由
+    // `finish_early` 发出终止通知，否则调度器与 TUI 永远等不到本轮结束。
+    ensure_resident_context(
+        sessions,
+        &session_id,
+        controller,
+        session_resources.as_ref(),
+    )
+    .await?;
+    // activation 监听器必须在移交正文**之前**建立：它是可失败的启动步骤，
+    // 失败时 Host 仍持有有效上下文，下一次使用不受影响。
+    if let Some(sender) = &cont_tx {
+        if !continuation || managed_input {
+            if let Some(runtime) = session_manager.get_session(&session_id) {
+                runtime.activation.allow();
+            }
+        }
+        super::activation::ensure_listener(&session_id, sessions, deployment, sender)?;
+    }
     // Read session data under lock, then release immediately.
     let (
         cwd,
         history_payloads,
-        is_empty,
+        _handoff_guard,
         thread_id,
         frozen,
         incoming_recalls,
@@ -348,15 +370,27 @@ async fn run_prompt_attempt(
         interaction_gate,
         interaction_router,
     ) = {
-        let mut sessions = sessions.lock().await;
-        let state = sessions
+        let mut states = sessions.lock().await;
+        let state = states
             .get_mut(&session_id)
             .ok_or_else(|| AcpError::new(-32602, "session not found"))?;
+        // 冻结输入是执行前置条件，必须在移交正文所有权**之前**验证：
+        // 否则缺少 frozen 的会话会停在 Host 空手、执行器未启动的状态。
+        if state.frozen.is_none() {
+            return Err(AcpError::new(
+                -32603,
+                "Session has no frozen snapshot; refusing to rebuild it from the current state",
+            ));
+        }
         state.cancel_token = Some(cancel.clone());
+        // 正文所有权在短锁内移交给执行器：Host 不再保留一份“以防万一”的全文。
+        // 期间其他请求必须把 HandedOff 视为“上下文在途”，不能把空集合当空会话。
+        let (history_payloads, handoff_guard) =
+            super::ownership::begin_handoff(state, sessions, &session_id);
         (
             state.cwd.clone(),
-            state.history_payloads.clone(),
-            state.history_payloads.is_empty(),
+            history_payloads,
+            handoff_guard,
             state.thread_id.clone(),
             state.frozen.clone(),
             // 后台 continuation 保留 recall；队列承载的新用户输入仍消费 recall。
@@ -372,18 +406,11 @@ async fn run_prompt_attempt(
                 .map(|env| Arc::clone(env.interaction_router())),
         )
     };
-    let history = history_payloads
-        .iter()
-        .filter_map(|payload| payload.as_message().cloned())
-        .collect::<Vec<_>>();
-    if let Some(sender) = &cont_tx {
-        if !continuation || managed_input {
-            if let Some(runtime) = session_manager.get_session(&session_id) {
-                runtime.activation.allow();
-            }
-        }
-        super::activation::ensure_listener(&session_id, sessions, deployment, sender)?;
-    }
+    #[cfg(test)]
+    super::prompt_dispatch::admission_gate::wait(&format!("{session_id}:handed-off")).await;
+    // 不再预构整段 `BaseMessage` 投影：执行器只在 keepgoing 短路或命中
+    // slash 命令时按需派生（S2 命令识别前置）。
+    let is_empty = history_payloads.is_empty();
     // 交互 endpoint：session 级路由按**本轮正在使用的 transport** 发布当前轮
     // endpoint（guard 在轮末 / 提前返回时清除）；没有 session 环境（无工作区
     // 装配的退化会话）时才回落到本轮固定 broker。
@@ -412,7 +439,11 @@ async fn run_prompt_attempt(
     // 带有创建/恢复时定格的 frozen。缺失时 **fail-closed** —— 既不按当前配置/目录重冻
     // （那会把本轮的目录状态冒充成历史冻结输入），也不带着空冻结继续跑；宿主必须显式
     // 修复这条会话（重新 load 或删除），而不是让一次静默降级改掉系统提示词。
+    //
+    // 正常路径已在移交正文前验证过 frozen；这里保留防御分支，并保证即使
+    // 状态在锁外被改坏也不会把已移走的正文当作仍驻留 Host。
     let Some(frozen) = frozen else {
+        mark_reload_required(sessions, &session_id).await;
         return Err(AcpError::new(
             -32603,
             "Session has no frozen snapshot; refusing to rebuild it from the current state",
@@ -577,8 +608,7 @@ async fn run_prompt_attempt(
         content,
         continuation,
         frozen: Some(frozen),
-        history,
-        history_payloads: history_payloads.clone(),
+        history_payloads,
         incoming_recalls,
         bg_results,
         langfuse: langfuse_hooks,
@@ -593,10 +623,17 @@ async fn run_prompt_attempt(
     // L5：执行体固定为 `run_session_loop`（句柄内部直接调用，无需 runner 注入）。
     let handle = Arc::new(crate::host::prompt_handle::PromptHandle::new(ctx, turn));
     controller.register_session(&session_id, Arc::clone(&handle));
-    controller
-        .run_session(&session_id)
-        .await
-        .map_err(|e| AcpError::new(-32603, format!("run_session failed: {e}")))?;
+    #[cfg(test)]
+    super::prompt_dispatch::admission_gate::wait(&format!("{session_id}:registered")).await;
+    if let Err(error) = controller.run_session(&session_id).await {
+        // 执行发起失败时正文已经随 TurnInput 交给句柄，Host 无法确认是否产生
+        // 持久化副作用；进入 ReloadRequired，下一次使用从存储恢复。
+        mark_reload_required(sessions, &session_id).await;
+        return Err(AcpError::new(
+            -32603,
+            format!("run_session failed: {error}"),
+        ));
+    }
     let result = handle.take_result();
     notifications.mark_terminal();
     if !result.ok || result.failure.is_some() {
@@ -619,13 +656,98 @@ async fn run_prompt_attempt(
     }
     input_attempt_guard.finish(&result);
 
-    finish_prompt_turn(
+    let compact_committed =
+        result.history_replaced_by_compaction && !result.persistence_inconsistent;
+    let response = finish_prompt_turn(
         sessions,
         &session_id,
         continuation && !managed_input,
         result,
+        Some(deployment.session_resources.clone()),
     )
-    .await
+    .await?;
+    if compact_committed {
+        // 幂等轻量通知：只发给仍有活动 V1 window ticket 的会话；失败不影响 durable commit。
+        super::history_window::notify_commit_if_open(sessions, &session_id).await;
+    }
+    Ok(response)
+}
+
+/// ReloadRequired 热态在下次使用前从权威存储恢复有效上下文。
+///
+/// `HandedOff` 表示正文在在途执行器里，Host 不得把它当成空会话，也不能
+/// 同时再装入一份副本；此路径按“会话忙”拒绝。
+pub(super) async fn ensure_resident_context(
+    sessions: &SharedSessions,
+    session_id: &str,
+    controller: &peri_controller::Controller,
+    resources: &dyn peri_acp_types::session_resources::SessionResources,
+) -> Result<(), AcpError> {
+    let (thread_id, needs_reload) = {
+        let mut sessions = sessions.lock().await;
+        let state = sessions
+            .get_mut(session_id)
+            .ok_or_else(|| AcpError::new(-32602, "session not found"))?;
+        super::ownership::mark_stale_if_dead(state);
+        match state.context_ownership {
+            super::ContextOwnership::Resident => (state.thread_id.clone(), false),
+            super::ContextOwnership::ReloadRequired => (state.thread_id.clone(), true),
+            super::ContextOwnership::HandedOff => {
+                return Err(AcpError::new(
+                    -32010,
+                    "Session context is owned by an in-flight prompt",
+                ))
+            }
+        }
+    };
+    // 读取快照不能证明可写：先等待旧 mutation 结清，并检查 gate 的 sticky Unknown。
+    // Resident 也检查，防止其他持久化路径已失效而 Host 尚未收到执行结果。
+    // 不在普通 prompt 中清除 uncertainty；只有显式恢复确认后才允许重新接纳。
+    if let Err(error) = resources.drain_persistence(&thread_id).await {
+        tracing::warn!(session_id, %error, "持久化尚未结清，拒绝开始新一轮执行");
+        mark_reload_required(sessions, session_id).await;
+        return Err(AcpError::new(
+            -32010,
+            format!("Session persistence is not settled; explicit persistence recovery is required before retrying: {error}"),
+        ));
+    }
+    if !needs_reload {
+        return Ok(());
+    }
+    let payloads = crate::dispatch::load_active_session_payloads(controller, &thread_id).await?;
+    let restored_memory = {
+        let mut sessions = sessions.lock().await;
+        let mut restored_memory = None;
+        if let Some(state) = sessions.get_mut(session_id) {
+            if state.context_ownership == super::ContextOwnership::ReloadRequired {
+                if peri_agent::session::memory_probe::observations_enabled() {
+                    restored_memory =
+                        Some(peri_agent::session::memory_probe::payload_set_snapshot(
+                            &payloads,
+                            payloads.capacity(),
+                        ));
+                }
+                state.history_payloads = payloads;
+                state.context_ownership = super::ContextOwnership::Resident;
+            }
+        }
+        restored_memory
+    };
+    if let Some(snapshot) = restored_memory {
+        peri_agent::session::memory_probe::log_payload_set("host_restore", session_id, &snapshot);
+    }
+    Ok(())
+}
+
+/// 执行发起失败后把热态标记为不可继续；正文已被移交，不能凭旧副本伪造成结果。
+async fn mark_reload_required(sessions: &SharedSessions, session_id: &str) {
+    let mut sessions = sessions.lock().await;
+    if let Some(state) = sessions.get_mut(session_id) {
+        state.history_payloads.clear();
+        state.context_ownership = super::ContextOwnership::ReloadRequired;
+        state.cancel_token = None;
+        super::history_window::invalidate(state);
+    }
 }
 
 pub(super) async fn finish_prompt_turn(
@@ -633,36 +755,104 @@ pub(super) async fn finish_prompt_turn(
     session_id: &str,
     continuation: bool,
     result: executor::PromptResult,
+    session_resources: Option<Arc<dyn peri_acp_types::session_resources::SessionResources>>,
 ) -> Result<Value, AcpError> {
-    {
+    let compact_committed =
+        result.history_replaced_by_compaction && !result.persistence_inconsistent;
+    let mut commit_thread = None;
+    let mut commit_generation = None;
+    let mut commit_structure = None;
+    let adoption_memory = {
         let mut sessions = sessions.lock().await;
-        if result.persistence_inconsistent {
-            // A failed barrier leaves only the disk prefix authoritative. Do not allow
-            // another prompt to continue from an unverified in-memory snapshot.
-            sessions.remove(session_id);
-        } else if let Some(state) = sessions.get_mut(session_id) {
-            info!(
-                session_id,
-                payloads = result.persisted_payloads.len(),
-                compact = result.history_replaced_by_compaction,
-                ok = result.ok,
-                "Adopting canonical transcript snapshot"
-            );
-            // The writer barrier completes before PromptResult is built, even on cancel
-            // or model/forwarder failure. Early failures return the previous snapshot.
-            // The snapshot carries the effective payload set only: bodies released by a
-            // successful Full Compact are absent (excluded), and `history` is derived
-            // from the same range. Full canonical history is reconstructed from storage.
-            state.history_payloads = result.persisted_payloads;
-            state.history = state
-                .history_payloads
-                .iter()
-                .filter_map(|payload| payload.as_message().cloned())
-                .collect();
-            if recall_overwrite_allowed(continuation) {
-                state.recall_items = result.recall_items;
+        let mut adoption_memory = None;
+        if let Some(state) = sessions.get_mut(session_id) {
+            if result.persistence_inconsistent {
+                // 提交结果不确定：不保留任何可继续执行的旧正文，也不删除身份。
+                // 下一次 prompt / restore 从权威存储恢复（ReloadRequired）。
+                // 窗口票据立即撤销：旧 snapshot/ticket 不再可信。
+                state.history_payloads.clear();
+                state.context_ownership = super::ContextOwnership::ReloadRequired;
+                state.cancel_token = None;
+                super::history_window::invalidate(state);
+            } else {
+                info!(
+                    session_id,
+                    payloads = result.persisted_payloads.len(),
+                    compact = result.history_replaced_by_compaction,
+                    ok = result.ok,
+                    "Adopting canonical transcript snapshot"
+                );
+                // The writer barrier completes before PromptResult is built, even on cancel
+                // or model/forwarder failure. The snapshot carries the effective payload set
+                // only: bodies released by a successful Full Compact are absent (excluded).
+                // Full canonical history is reconstructed from storage.
+                if peri_agent::session::memory_probe::observations_enabled() {
+                    adoption_memory = Some((
+                        state.history_memory_snapshot(),
+                        peri_agent::session::memory_probe::payload_set_snapshot(
+                            &result.persisted_payloads,
+                            result.persisted_payloads.capacity(),
+                        ),
+                    ));
+                }
+                state.history_payloads = result.persisted_payloads;
+                state.context_ownership = super::ContextOwnership::Resident;
+                if recall_overwrite_allowed(continuation) {
+                    state.recall_items = result.recall_items;
+                }
+                state.cancel_token = None;
+                if compact_committed {
+                    commit_thread = Some(state.thread_id.clone());
+                    commit_generation = Some(state.session_generation);
+                    commit_structure = Some(state.structure_version);
+                }
             }
-            state.cancel_token = None;
+        }
+        adoption_memory
+    };
+    if let Some((before, after)) = adoption_memory {
+        peri_agent::session::memory_probe::log_payload_adoption(session_id, &before, &after);
+    }
+    // Full compact 的 durable 确认已经在 PromptResult 构造前完成；这里只读取**存储事实**
+    // 更新轻量 checkpoint/tail，不由 UI 事件反推提交成功。失败只撤销窗口可信元数据，
+    // 不把已经提交成功的 turn 改成失败。
+    if let (Some(resources), Some(thread_id), Some(generation), Some(structure)) = (
+        session_resources,
+        commit_thread,
+        commit_generation,
+        commit_structure,
+    ) {
+        match resources
+            .history_window_bounds(&peri_acp_types::thread::ThreadId::from(thread_id))
+            .await
+        {
+            Ok(bounds) => {
+                let mut sessions = sessions.lock().await;
+                if let Some(state) = sessions.get_mut(session_id) {
+                    if state.session_generation == generation
+                        && state.structure_version == structure
+                        && !state.history_window.rewind_in_progress
+                    {
+                        super::history_window::publish_commit(
+                            state,
+                            bounds.checkpoint.as_ref(),
+                            bounds.own_latest.as_ref(),
+                        );
+                    } else {
+                        tracing::debug!(
+                            session_id,
+                            "discarding compact metadata read across a concurrent rewind"
+                        );
+                    }
+                }
+            }
+            Err(error) => {
+                tracing::warn!(session_id, error = %error, "history window commit metadata read failed");
+                let mut sessions = sessions.lock().await;
+                if let Some(state) = sessions.get_mut(session_id) {
+                    super::history_window::revoke(state);
+                }
+            }
         }
     }
     // Fatal failures still use the standard JSON-RPC error; cancellation/max-iterations

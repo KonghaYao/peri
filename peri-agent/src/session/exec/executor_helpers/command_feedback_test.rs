@@ -55,9 +55,15 @@ impl MockEventSink {
 
 #[async_trait]
 impl EventSink for MockEventSink {
-    async fn push_event(&self, _session_id: &str, event: &ExecutorEvent, _context_window: u32) {
+    async fn push_event(
+        &self,
+        _session_id: &str,
+        event: &ExecutorEvent,
+        _context_window: u32,
+    ) -> Result<(), peri_acp_types::event::EventSinkError> {
         let json = serde_json::to_string(event).unwrap_or_default();
         self.pushed_events.lock().unwrap().push(json);
+        Ok(())
     }
 
     async fn push_done(&self, _session_id: &str, stop_reason: &str, request_id: Option<&str>) {
@@ -95,12 +101,13 @@ fn make_intercept_request<'a>(
     InterceptRequest {
         mcp_pool: None,
         content,
-        history,
-        history_payloads: history
-            .iter()
-            .cloned()
-            .map(peri_acp_types::store::PersistedPayload::Message)
-            .collect(),
+        history_payloads: std::borrow::Cow::Owned(
+            history
+                .iter()
+                .cloned()
+                .map(peri_acp_types::store::PersistedPayload::Message)
+                .collect(),
+        ),
         cwd: "/tmp",
         session_id,
         cancel,

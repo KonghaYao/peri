@@ -126,6 +126,26 @@ impl SlotLines {
             + self.prefix.capacity() * std::mem::size_of::<usize>()
     }
 
+    /// S6.1：正文行只按共享 `Arc` 指针计一次。
+    #[allow(dead_code)]
+    pub(super) fn retained_bytes_with(
+        &self,
+        seen: &mut crate::kit::retained_bytes::SeenAllocations,
+    ) -> usize {
+        self.retained_metadata_bytes()
+            + self
+                .parts
+                .iter()
+                .map(|part| crate::kit::retained_bytes::retained_arc_lines_bytes(&part.lines, seen))
+                .sum::<usize>()
+    }
+
+    #[allow(dead_code)]
+    pub(super) fn retained_bytes(&self) -> usize {
+        let mut seen = crate::kit::retained_bytes::SeenAllocations::default();
+        self.retained_bytes_with(&mut seen)
+    }
+
     pub(super) fn get(&self, logical: usize) -> Option<&Line<'static>> {
         if logical >= self.len() {
             return None;

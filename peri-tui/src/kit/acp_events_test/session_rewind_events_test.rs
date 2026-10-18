@@ -35,6 +35,7 @@ fn test_rewind_completed_replaces_committed() {
         pending_cache_usage: None,
         publication_intent: Default::default(),
         folded_history: Default::default(),
+        window: Default::default(),
     };
 
     let messages_json = serde_json::json!([
@@ -101,6 +102,7 @@ fn test_rewind_completed_rebuild_preview_strips_reminder() {
         pending_cache_usage: None,
         publication_intent: Default::default(),
         folded_history: Default::default(),
+        window: Default::default(),
     };
     let messages_json = serde_json::json!([
         {
@@ -167,6 +169,7 @@ fn test_rewind_completed_restores_target_text_to_input() {
         pending_cache_usage: None,
         publication_intent: Default::default(),
         folded_history: Default::default(),
+        window: Default::default(),
     };
     let messages_json = serde_json::json!([
         {"role": "user", "id": "msg-1", "content": "历史用户消息"},
@@ -228,6 +231,7 @@ fn test_rewind_completed_without_target_text_no_restore() {
         pending_cache_usage: None,
         publication_intent: Default::default(),
         folded_history: Default::default(),
+        window: Default::default(),
     };
     let messages_json = serde_json::json!([]).to_string();
     dispatch_and_notify(&mut state, &AcpEventData::RewindCompleted { messages_json });
@@ -266,6 +270,7 @@ fn test_multi_turn_reasoning_preserved_in_committed() {
         pending_cache_usage: None,
         publication_intent: Default::default(),
         folded_history: Default::default(),
+        window: Default::default(),
     };
 
     // === Turn 1: user bubble, reasoning + text → TurnDone ===

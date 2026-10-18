@@ -1,6 +1,6 @@
 # 实现蓝图：Full Compact 后 Transcript 收缩与 ACP 历史分页
 
-状态：交付完成（验收报告 `.recon/A-acceptance-report.md`）；两项待裁决已经对抗裁决结案、A05 索引经用户授权并实施、D8 已闭合（取代关系落在既有 `projection` 载荷，无 DDL；见 D17）。基线 `7f0de56e8`（worktree `.worktrees/peri-transcript-history`，分支 `feat/transcript-shrink-history-pagination`）。
+状态：原 REQ-T/H/C 范围交付完成（验收报告 `.recon/A-acceptance-report.md`）；两项待裁决已经对抗裁决结案、A05 索引经用户授权并实施、D8 已闭合（取代关系落在既有 `projection` 载荷，无 DDL；见 D17）。2026-10-17 起 S4–S8 扩展见 §8：窗口协议默认关闭，S7.3 详情与 S7.4 inherited 已交付（限制见 §8.4），S6.3/S6.4/S6.5 与 remote/emscripten 仍未完成。基线 `7f0de56e8`（worktree `.worktrees/peri-transcript-history`，分支 `feat/transcript-shrink-history-pagination`）。
 需求源：`/Users/konghayao/Desktop/peri-transcript-history-requirements.md`。
 现状侦察报告：`.recon/A-core-transcript.md`、`B-acp-host.md`、`C-storage-contract.md`、`D-test-infra.md`、`E-tui-sdk.md`（所有行号基于基线 commit）。
 
@@ -159,8 +159,8 @@ Full Compact 成功后，核心热态 Transcript 真正释放已退出有效上�
 - **D8 rewind 到排除段内部时的「原文与摘要同时有效」= 已知偏差，本轮不修。**
   两轮以上 Full 后回退到前缀内部位置时，`excluded` 连续段无法从现有 flags 判定压缩批次边界（`MessageFlags` 只有 `truncated`/`excluded`/`projection`，后者是 Micro 投影指令）。实现采保守策略：整段清零（内容不丢，但可能旧摘要与其覆盖原文同时有效），与 A19「无原文／摘要重复覆盖」字面不符。
   精确修复需新增「覆盖批次」最小元数据（属 DDL）；按仓库规则（根 CLAUDE.md 原则 12）须用户明确批准，批准前不新增列。记录为已知偏差，授权后另开切片；`peri-acp-types/src/store/history.rs` 的模块文档与 `.recon/rewind-review-findings.md` 已注明。→ **第五版已闭合，且未使用任何 DDL，见 D17.5。**
-- **D9 手动态 Compact 读取 canonical 快照 —— 保留，不视为缺陷。**
-  `compact_pipeline.rs` 从完整快照重建临时 transcript（含归档正文）用于 Compact 执行；Full 的摘要输入取有效视图、assembled 输出取有效视图，归档正文既不进摘要也不回写热态，属读取成本而非语义泄漏（REQ-T03 约束的是恢复路径）。
+- **D9 手动 Compact 读取 canonical 快照 —— 已被 2026-10-17 的 S4/S8 取代。**
+  原判读：`compact_pipeline.rs` 从完整快照重建临时 transcript（含归档正文）用于 Compact 执行；Full 的摘要输入取有效视图、assembled 输出取有效视图，归档正文既不进摘要也不回写热态，属读取成本而非语义泄漏（REQ-T03 约束的是恢复路径）。**现行实现**：`compact_pipeline` 已改用 `load_active_snapshot`，只读有效 own payload + 冻结 inherited 区；归档正文不进入本次读取/解码。调用方仍带回完整历史时，多出的 id 只在有界 flags 确认 `excluded` 后忽略；未知 id/读取失败拒绝。有效集为空用 flags 区分全新 thread 与全归档。旧“读取成本”描述不再成立，保留此条仅作决策历史。
 - **D10 恢复路径的存储触达行数仍是 O(线程行数) —— 实测记录，修复需索引（未授权）。**
   三段实测（10k / 100k / 1M 归档行，`.recon/perf-evidence.md` §4.1/§8）：恢复 cold p50 = 11.109 ms / 98.182 ms / 1081.927 ms，
   解码正文恒为 196 971 B（排除正文解码 0 条）。即「内存与解码字节有界」成立，「工作量不随归档条数线性增长」（A05）**未达成**。
@@ -255,3 +255,75 @@ Full Compact 成功后，核心热态 Transcript 真正释放已退出有效上�
 | `.recon/workflows/s13-revision-round.mjs` | S13 修订（wire 拆分与拒绝持久用例、锁重做、A14 复核、规模治理、WASM 闭环）→ 两份独立复核 | `.recon/S13-*.md`（9 份，含 `S13-verification-size.md`、`S13-verification-behavior.md`） |
 
 D7 的存储契约要点（S9a 落地，供复核对照）：`HistoryForwardCursor{after,tail}` + `HistorySegment{payloads,next_cursor}`；首段返回全部继承区 payload + 最旧若干自有行并同源确定 `tail`；后续段 `rowid > after AND rowid <= tail` 升序推进；不过滤 `excluded`/System；两阶段读取（阶段一 id+rowid+length，阶段二只取本段正文）；锚点消失失败关闭；后端缺席返回 `Unsupported`，ACP 侧显式回退到 `load_session_history` 全量读取并记日志。
+
+## 8. S4–S8 窗口协议与默认关闭（2026-10-17）
+
+### 8.1 状态
+
+| 切片 | 状态 | 说明 |
+| --- | --- | --- |
+| S4 窗口 wire/coordinator | 已实现（默认关闭） | `peri.historyWindowV1`、open/page/seek、body 分块、ticket、`peri/history_committed`；定向验证见 `.peri/plans/s4-verification-round3.md`（PASS，含残余覆盖缺口） |
+| S5/S6 TUI 窗口/预算/释放 | 已实现（默认关闭） | 段模型、页预留、接纳/淘汰、`ReleasePlan`、统一释放、`structural_epoch`/render ack、8/6 MiB 缓存；S6.3/S6.4/S6.5 未完全达成 |
+| S7.1/S7.2 描述符/分块 | 已实现（本机 SQLite） | 服务端 descriptor 与有界 body 分块；TUI 详情面板已交付（S7.3） |
+| S7.4 冻结继承 | 已实现（本机 SQLite，协议默认关闭） | inherited source/冻结读取/父变更隔离；TUI 继承详情已交付；remote/emscripten 未实现 |
+| S7.3 TUI 详情/超大条目/继承 | 已交付（默认关闭） | `PanelKind::HistoryDetail`/`HistoryDetailPanel`、占位 note Enter 打开、Esc/q 关闭、滚动补块、`e` 复制已加载正文、`session/history/body` 分块与 4 MiB 预算、inherited 详情走冻结 snapshot；交互限制见 §8.4 |
+| 配置入口 | 已接通（默认 false） | settings beta `history-window-v1` 启动读取一次并写 `HISTORY_WINDOW_V1`；无热重载；仍需 `peri.historyWindowV1` 协商；Beta 面板未列该键 |
+| S8 文档与契约同步 | 本次完成 | 只改 `docs/**`、`spec/**`；不涉及代码、Cargo、`.peri/**` 或子模块 |
+
+### 8.2 已落地范围
+
+1. **所有权收敛**：Host/Executor 单方持有有效上下文。`SessionState.history` 已删除，保留 `history_payloads` + `ContextOwnership::{Resident,HandedOff,ReloadRequired}`；`HandedOff` 的空集合不是空会话，`ReloadRequired` 从存储冷恢复，`finish_prompt_turn` 不再因 turn 结束移除 session。
+2. **手动 compact 只读有效集**：`compact_pipeline` 使用 `load_active_snapshot`；身份按 inherited+own 有序消息投影校验并拒绝重叠；额外已归档 id 仅在 flags 确认后忽略；有效集为空区分全新 thread 与全归档；提交失败/不确定进入 `ReloadRequired`；磁盘已提交前缀是唯一权威。
+3. **窗口协议**：`session/load` 的 `history`（`open/page/seek`）与旧顶层 `cursor/limit/loadGeneration/cwd/mcpServers` 互斥；响应含 generation/structure/snapshot/tail/checkpoint/readTicket/双向 cursor/items/inherited/rewindInvalidation；oversize 只在 `items[].body` 内联 descriptor；`session/history/body` 有界分块；`peri/history_committed` 私有通知按 checkpointId 幂等且只发持票连接；ticket per-connection、单活动票据、新 open 成功才原子替换、失败保留旧票据；page/seek/body 二次校验；rewind durable 成功恰好 `structureVersion+1` 并撤销 ticket；继承使用 `threads.inherited_context` 冻结列与边界派生 snapshotId。
+4. **TUI 窗口**：窗口模型/预算/接纳/淘汰（`ReleasePlan` 不直接删正文）、段窗口合并进 `committed`、双向滚动/gap、`HistoryCommitted` 封印 durable 段、统一释放事务（DisplayLedger/HistorySpans/ResidentIndex/WINDOW_UNIT_KEYS/FoldedHistory/渲染缓存/pending tool results）、`structural_epoch` + 渲染 ack、8/6 MiB 缓存、对象级 Weak 断言。
+5. **默认关闭**：`PeriCaps::history_window_v1` 与 TUI `HistoryWindowConfig::history_window_v1` / `HISTORY_WINDOW_V1` 默认 false；关闭时旧 `HISTORY_PAGING` 路径行为不变。TUI 的 initialize 仍以 `PeriCaps::all_enabled` 声明能力，但不等于启用窗口模型/淘汰。
+6. **S7.3 详情与配置入口**：TUI 交付 `PanelKind::HistoryDetail` + `HistoryDetailPanel`，占位 note 命中后 Enter 打开，Esc/q 关闭，Up/Down/PageUp/PageDown 滚动并在缺块时请求，`e` 复制已加载正文；`load_history_body` 走 `session/history/body`，支持 UTF-8 跨块重组、4 MiB 预算、关闭释放 chunks。settings beta `history-window-v1`（默认 false）在 TUI 启动读取一次并写 `HISTORY_WINDOW_V1`，无热重载；仍需服务端 `peri.historyWindowV1` 同时为真。
+7. **inherited 对齐**：`HistorySource::Inherited{frozen_snapshot_id, ancestor_thread_id}`、open 响应 `inherited` 对象、inherited 条目 `position:null`、inherited 段固定不释放、详情走冻结 snapshot；`ancestor_thread_id` 来自 `parent_thread_id`（旧数据 None），snapshotId 按边界 SHA-256 派生；`inheritedUnsupported` 显式提示。服务端 SQLite 使用 `json_each` keyset 分页/seek 与 `substr` 分块。
+
+### 8.3 验收映射
+
+对应关系（按 S5/S7 计划）：A12 ← TUI 预算/接纳/淘汰与释放；A13 ← 双向页/seek；A14 ← 二次校验/tail/提交通知/段封印；A15 ← 迟到页；A16 ← rewind；A17 ← 锚点身份重定位；A20 ← 释放/渲染 ack；A22 ← 描述符/分块；A26 ← 继承。A17 的既有验收来自历史分页（`viewport_anchor_e2e_test.rs`），本轮未重跑；A23/A24/A25 未在本次定向验证中单列，不宣称完成。P01/P03 未验证。
+
+| 项 | 证据（真实名称） | 结论 |
+| --- | --- | --- |
+| 窗口协商/请求/响应/错误码 | `peri-acp-types/src/history_window_test.rs`：`open_defaults_to_latest_and_both_sides`、`page_requires_exactly_one_cursor_and_a_valid_limit`、`unknown_fields_and_kinds_are_not_degraded_to_initial_load`、`error_codes_and_reasons_match_the_wire_table`；`peri-acp/src/host/history_page_window_test.rs`：`open_latest_pages_backwards_and_reports_metadata`、`unnegotiated_window_request_is_rejected_without_initial_load`、`initialize_request_controls_history_window_v1` | PASS（默认关闭） |
+| 二次校验/旧票据保留/tail | `second_check_rejects_stale_generation_structure_ticket_and_snapshot`、`failed_open_keeps_the_old_ticket_usable`、`fixed_tail_keeps_later_appends_out_of_an_open_snapshot`、`handed_off_and_reload_required_are_not_empty_history` | PASS |
+| 正文描述符/分块 | `oversize_descriptor_serves_bounded_body_chunks`；`session_history_window_test.rs`：`oversized_entries_become_descriptors_without_decoding_the_body`、`body_chunks_are_bounded_and_reconstruct_the_exact_bytes`、`body_chunk_is_bounded_by_the_snapshot_tail`；TUI `history_detail_test.rs`：`detail_chunks_cross_utf8_boundary_without_garble`、`detail_close_releases_chunk_allocations`、`detail_budget_keeps_at_most_4mib`、`detail_allows_one_in_flight_request` | 服务端/TUI PASS |
+| 详情面板打开/滚动/继承 | `history_detail_test.rs`：`open_close_detail_uses_window_descriptor_and_keeps_slot_state`、`event_layer_opens_detail_from_placeholder_and_clears_on_close`、`detail_scroll_event_path_requests_next_chunk_without_main_viewport_change`、`inherited_detail_request_keeps_frozen_source`、`detail_panel_lines_show_loading_error_and_inherited_notice` | PASS（交互限制见 §8.4） |
+| 提交通知 | `history_commit_notification_is_gated_by_an_open_window_and_idempotent`、`open_after_durable_full_reads_checkpoint_from_storage`、`tickets_and_commit_notifications_are_bound_to_the_opening_connection` | PASS |
+| rewind | `rewind_revokes_the_window_and_advances_structure_once`、`initial_load_refreshes_generation_and_invalidates_old_window`、`rejected_initial_load_keeps_generation_and_ticket` | PASS |
+| 短锁 load/resume/fork | `history_page_window_lock_test.rs`：`live_load_does_not_hold_the_global_sessions_lock_across_io`、`cold_load_does_not_hold_the_global_sessions_lock_across_io`、`resume_does_not_hold_the_global_sessions_lock_across_io`、`fork_does_not_hold_the_global_sessions_lock_across_io`；`connection_test.rs`：`resume_wire_uses_the_shared_preparation_path`、`fork_wire_uses_the_shared_preparation_path` | PASS（残余关闭竞态见 §8.4） |
+| 手动 compact 有效集 | `peri-acp/src/session/command/compact_persistence_test.rs`：`test_compact_pipeline_accepts_effective_only_history_for_second_lifecycle`、`test_compact_pipeline_rejects_incoming_history_that_differs_from_bound_thread`；`compact_command_contract_test.rs`：`test_compact_again_using_host_canonical_history` | PASS（有效集路径） |
+| TUI 预算/接纳/淘汰 | `history_window/admission_test.rs`：`over_budget_admission_evicts_farthest_segment_first_and_reports_plans`、`all_pinned_segments_reject_admission_and_report_reasons`、`stale_page_generation_is_rejected_and_reservation_is_released`、`one_pending_merge_page_blocks_the_next_admission`；`model_test.rs`：`release_target_uses_watermark_and_remaining_capacity`、`disabled_window_does_not_admit_pages` | PASS（模型/账本） |
+| 段封印/保留/迟到页 | `acp_events_test/history_window_commit_test.rs`：`test_history_committed_seals_window_without_touching_execution_state`、`test_compact_completed_does_not_seal_or_release_window_segments`、`test_turn_done_does_not_seal_live_window_segment`、`retention_plan_keeps_viewport_and_one_adjacent_segment`、`open_after_lost_commit_notification_realigns_window`；`history_page_consumer/window_test.rs`：`bidirectional_page_requests_keep_placement_and_cursors`、`stale_or_late_response_is_dropped_and_reservation_released`、`reopen_required_enters_degraded_and_retry_uses_open_not_full_load` | PASS（默认关闭） |
+| 释放/渲染 ack/对象证据 | `acp_events_test/history_window_release_test.rs`：`release_removes_committed_and_invalidates_holders_before_ack`、`release_does_not_touch_live_phase_or_input_queues`、`release_ack_is_idempotent_and_late_ack_does_not_double_credit`、`pending_release_keeps_budget_conservative_until_ack`；`message_area/window_viewport_test.rs`：`structural_epoch_drops_old_slot_lines_and_uses_8mib_to_6mib_budget`、`structural_epoch_with_empty_snapshot_reaches_zero_retained_bytes` | PASS（对象级证据）；S6.3/S6.4 仍有边界 |
+| 继承 | `history_page_window_test/inherited_test.rs`：`inherited_open_page_seek_and_chunks_use_the_frozen_snapshot`、`inherited_absence_and_ancestor_mismatch_are_explicit`、`rewind_invalidates_old_inherited_ticket_but_frozen_prefix_remains_readable`；`session_history_inherited_test.rs`：`inherited_bounds_report_the_frozen_range_and_snapshot_identity`、`inherited_page_seek_and_chunks_are_bounded_and_isolated_from_parent_changes`；TUI `inherited_detail_request_keeps_frozen_source` | 服务端/SQLite/TUI 详情 PASS；remote/emscripten 未实现 |
+| 配置入口 | `peri-config/src/betas_test.rs`：`test_history_window_v1_beta_defaults_false_and_accepts_override`；`peri-tui/src/kit/entry.rs` 启动读取 + `history_window::apply_history_window_beta` | PASS（默认 false；启动只写一次；Beta 面板未列，需手动 settings） |
+| P01/P03 性能曲线 | `session_history_perf_test.rs` 的 `history_perf_tests` 为 `#[ignore]`；本轮未重跑 | 未验证，不宣称 |
+
+### 8.4 未完成/限制
+
+1. **S6.3 折叠组/子 Agent 组未真正惰性化**：当前构造通过 `im::Vector` 结构共享、不深复制正文；释放只 `FoldedHistory::invalidate()` 与整组缓存失效，没有按段惰性物化/精准清理。完成条件：组按段惰性物化与释放，A19 对象级断言通过。
+2. **S6.4 结构性失效清全部 slot**：`Transcript::prepare` 观察到 `STRUCTURAL_EPOCH` 变化时清空全部渲染缓存，尚未按段精准清理。完成条件：按段清理 slot/index 并保留未受影响缓存，Weak 行缓存断言通过。
+3. **S6.5 旧分页 pending 表未迁移**：旧 `HISTORY_PAGING` 路径仍使用轻量静态 `PENDING_TOOL_ENDS`（1 MiB/256 条），未完全迁移到 `ResidentIndex`；窗口路径共享清理入口。完成条件：旧分页也经 `ResidentIndex` 配对，删除静态表并补跨段配对用例。
+4. **详情交互限制（S7.3 已交付）**：鼠标单击只设焦点，需再 Enter 打开；`e` 只复制已加载正文，文件导出/超窗流式导出尚未接入 UI（模型 `export_stream` 已支持分块）；未做 JSON 字段级展示；inherited 段内部不插入独立占位行，使用全局 inherited notice；TUI 仍接受旧顶层 `bodyDescriptors` 兼容输入，服务端已不再发送。完成条件：按需接入文件/流式导出、字段级展示与段内占位，或明确保持当前交互。
+5. **Beta 面板未列 `history-window-v1`**：settings beta 已接通，TUI 启动读取一次并写 `HISTORY_WINDOW_V1`，无热重载；但 ConfigPanel 只列 ACP `BETA_FLAGS`，该键需手动写入 settings。完成条件：把 TUI 本地 beta 纳入面板行模型，或明确保持手动配置。
+6. **remote/emscripten**：未覆写窗口/继承端口，默认 `Unsupported`（出口 `-32603`），不宣称已支持。能力协商是连接级客户端声明，服务端当前不按后端关闭协商；因此“协商成功”不等于该后端可读，实际读取失败必须显式处理。完成条件：adapter 覆写端口并通过 open/page/seek/body/inherited 契约测试。
+7. **ticket 无密码学签名**：进程内 opaque 值 + 精确匹配，绑定 connection/session/generation/structure/snapshot/source/tail/投影版本/时间/nonce；不是访问授权。当前票据只在进程内使用；若未来跨进程/网络读取，需另行设计签名/认证，不能沿用当前 opaque ticket。
+8. **rewind uncertain 依赖文本 marker**：`PERSISTENCE_UNCERTAIN_MARKER` 集中于 `host/requests/rewind.rs`，尚无 typed mutation outcome。完成条件：存储/门面返回 typed outcome，删除字符串 marker 判定并补失败路径用例。
+9. **规模存量**：`peri-resources/src/sessions/sqlite_store/schema_test.rs` 1038 行超出 `STD-SIZE-001`，不属本次变更。完成条件：另立拆分任务，保持断言与公开路径不变。
+10. **遗留验证缺口**：S4 open 的 bounds 读取失败/页读取失败/发布前 generation/structure/epoch 失败缺少端到端用例；fork 在 environment shutdown 未确认时不撤销目标；load 回放与 close 并发仍有竞态；`bodyDescriptors` 负向与 descriptor 字段断言不完整。详见 `.peri/plans/s4-verification-round3.md` §3。完成条件：补齐对应失败路径与竞态回归。
+11. **旧分页语义未改**：初始 load 后补写 `nextCursor`/`snapshotToken` 及迟到 cursor attach 的既有行为保持不变；V1 不回灌旧 SDK。
+
+### 8.5 旧断言改写清单
+
+以下“compact 后必须保留全部已加载正文/恢复完整 payload”的旧描述已改写：
+
+1. `docs/design/micro-compact.md` §6.3：手动 `/compact` 从“恢复完整 payload”改为“只读有效集 + 归档正文不入读取/摘要”。
+2. `docs/standards/architecture-contracts.md` `ARC-COMPACT-001` Rule：同步为有效集语义，并补充窗口默认关闭条件。
+3. `docs/code-index/peri-tui.md` “改 compact 信息展示”：从“已加载窗口与翻页进度原样保留”改为“默认关闭时保留旧行为；窗口启用时 `CompactCompleted` 只提示、`HistoryCommitted` 封印并预算释放”。
+4. `docs/code-index/peri-ts-sdk.md` 实时 Yjs 投影行：把“完成只更新 compaction 元数据并保留窗口与游标”限定为旧分页路径，并注明 SDK 尚未接入 `HistoryCommitted`/段释放。
+5. `docs/code-index/peri-agent.md` “/compact 命令路径”行：从“从完整快照恢复 payload（含 reminder）”改为“`load_active_snapshot` 有效集 + 有界 flags 确认额外已归档 id”。
+6. `spec/issues/2026-10-13-transcript-shrink-history-pagination.md` D9：标记为已取代，补记 `load_active_snapshot` 现行实现。
+
+代码测试 `peri-tui/src/kit/acp_events_test/session_compact_events_test.rs::test_compact_turndone_keeps_window_without_reload` 仍保留“默认关闭路径不重载、旧消息仍在”的断言；窗口启用时的“未收提交回执不淘汰、收到后按预算释放”由 `history_window_commit_test.rs` 覆盖。该旧测试的窗口分支改写属测试变更，不在本次仅文档范围。

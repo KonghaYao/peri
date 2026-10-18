@@ -516,3 +516,59 @@ async fn a_page_request_for_a_closing_session_is_rejected_without_a_replay() {
     );
     task.abort();
 }
+
+/// A09：协商分页连接的**初始 load** 遇到 `HandedOff`（正文在在途执行器里）时必须
+/// 返回 `-32010`，绝不能把空的 `history_payloads` 当成空会话回放并返回成功。
+///
+/// `prepare_existing` 对 `HandedOff` 刻意不动热态，因此判定必须发生在回放分支。
+/// 真实在途 prompt 由执行锁挡住、走不到这里；用例直接构造该热态（所有权 + 空集合），
+/// 断言拒绝面：错误码 / 措辞、**零回放通知**、热态未被回填或改写。
+#[tokio::test]
+#[serial]
+async fn a_paginated_initial_load_for_a_handed_off_session_is_rejected_without_replay() {
+    let tmp = tempfile::TempDir::new().unwrap();
+    let fixture = PageFixture::new(&tmp).await;
+    let sid = fixture.sid.clone();
+
+    let cfg = Arc::clone(&fixture.cfg);
+    let (client, sessions, task) =
+        spawn_loop(Arc::clone(&cfg), fixture.sessions, Some(pagination_caps())).await;
+    {
+        let mut states = sessions.lock().await;
+        let state = states.get_mut(&sid).expect("夹具会话必须仍在热态集合里");
+        state.context_ownership = crate::host::ContextOwnership::HandedOff;
+        state.history_payloads.clear();
+    }
+
+    let error = client
+        .send_request("session/load", json!({ "sessionId": sid }))
+        .await
+        .err()
+        .unwrap_or_else(|| panic!("HandedOff 会话的初始 load 必须被拒绝，实际返回了成功响应"));
+    assert_eq!(error.code, -32010, "HandedOff：错误码");
+    assert_eq!(
+        error.message, "Session context is owned by an in-flight prompt",
+        "措辞与 ensure_resident_context 对 HandedOff 的拒绝一致，实际：{error}"
+    );
+    assert_eq!(
+        error.data, None,
+        "HandedOff 的拒绝不带 data（没有 data.reason 可分类）：{error}"
+    );
+    assert!(
+        s9c_drain_notifications(&client).await.is_empty(),
+        "拒绝不得发出任何历史回放通知（空历史回放正是 A09 缺陷）"
+    );
+    let states = sessions.lock().await;
+    let state = states.get(&sid).expect("拒绝不得移除会话");
+    assert_eq!(
+        state.context_ownership,
+        crate::host::ContextOwnership::HandedOff,
+        "拒绝不得改写所有权状态"
+    );
+    assert!(
+        state.history_payloads.is_empty(),
+        "拒绝不得把存储快照回填进热态（HandedOff 仍是哨兵）"
+    );
+    drop(states);
+    task.abort();
+}
