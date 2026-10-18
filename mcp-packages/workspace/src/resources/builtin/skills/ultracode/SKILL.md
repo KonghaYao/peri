@@ -40,7 +40,7 @@ Write the brief's required tools next to the resolved target tools for every sta
 | target | runs commands | why |
 | --- | --- | --- |
 | `coder` | yes | 未声明 `tools`，继承基础工具；`disallowedTools` 只移除 `Agent` |
-| `explorer` | yes | 未声明 `tools`，继承基础工具；`disallowedTools` 只移除 `Agent` |
+| `explorer` | no | 显式 `tools: [Read, Grep, Glob]`（只读）；`disallowedTools` 只移除 `Agent` |
 | `general-purpose` | yes | `tools: "*"` |
 | `plan` | yes | 未声明 `tools`，继承基础工具；`disallowedTools` 只移除 `Agent` |
 | `verification` | yes | 未声明 `tools`，继承基础工具；`disallowedTools` 只移除 `Agent` |

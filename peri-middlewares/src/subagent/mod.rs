@@ -431,7 +431,8 @@ pub(crate) fn declared_names_cover(declared: &[String], name: &str) -> bool {
 ///
 /// - 显式工具名：`Bash`（echo > file / rm / git commit）、`Write`、`Edit`、
 ///   `folder_operations`（含 create/delete/move 操作）、`cron_register`
-///   （可定时触发任意 prompt，等价委派执行权）；
+///   （可定时触发任意 prompt，等价委派执行权）、`ExecuteExtraTool`
+///   （可执行 deferred 的外部写工具，无法静态证明只读）；
 /// - 前缀：`mcp__*`（外部能力，无法静态证明只读）。
 ///
 /// **生效名归一（IF-D6 / A4 判定型）**：builtin 一等工具的 effective name 按其
@@ -446,38 +447,23 @@ fn is_mutation_tool(name: &str) -> bool {
     let lower = normalized.to_lowercase();
     matches!(
         lower.as_str(),
-        "bash" | "write" | "edit" | "folder_operations" | "cron_register"
+        "bash" | "write" | "edit" | "folder_operations" | "cron_register" | "executeextratool"
     ) || lower.starts_with("mcp__")
-}
-
-/// 核心写能力工具是否被 disallowed 全部覆盖（Empty / wildcard 继承场景）。
-///
-/// `mcp__*` 无法用精确 disallowed 排除（`filter_tools` 为精确匹配），
-/// 因此本函数只覆盖可精确排除的核心集合；这是已知局限——readonly 标签
-/// 仅是调度提示，不构成安全边界，最终能力由 filter_tools 真裁剪。
-///
-/// disallowed 侧经 [`declared_names_cover`] 归一候选展开：写裸名
-/// （`disallowedTools: [Bash, Write, …]`）与写 effective name
-/// （`mcp__workspace__Bash` …）都命中 `MUTATION_CORE`。
-fn core_mutation_tools_fully_disallowed(disallowed: &[String]) -> bool {
-    const MUTATION_CORE: [&str; 5] = [
-        "bash",
-        "write",
-        "edit",
-        "folder_operations",
-        "cron_register",
-    ];
-    MUTATION_CORE
-        .iter()
-        .all(|tool| declared_names_cover(disallowed, tool))
 }
 
 /// 从 Agent frontmatter 推断运行时能力画像（D5：保守 readonly）。
 ///
 /// 区分三种 tools 语义（`peri_mcp_core::agent_definition::ToolsValue`）：
-/// - `Empty`（字段省略）= 继承父工具（含 Bash）→ 默认 writes；
+/// - `Empty`（字段省略）= 继承父工具（含 Bash 与全部 `mcp__*`）→ writes；
+///   即使 disallow 全部已知核心写工具，继承面仍包含无法静态证明只读的 MCP
+///   工具与 deferred 执行入口，不能据此标 readonly；
 /// - `NoTools`（显式 `tools: []`）= 零工具 → readonly；
-/// - `List` = 白名单，含 `*` 等价继承全部。
+/// - `List` = 白名单，含 `*` 等价继承全部；只有白名单能证明排除写能力时才是
+///   readonly。
+///
+/// 该结论与 `filter_tools` 使用同一份声明语义（allowlist / disallowed /
+/// 大小写归一），因此 `readonly` 不会与解析后的工具集方向相反；实际工具集仍由
+/// `filter_tools` 在注册层真裁剪。
 ///
 /// `model` 经 [`AgentModelSelection::parse`] typed 校验（M2）：未指定/`inherit`
 /// 归一为继承语义，合法档位大小写归一；未知值返回 [`InvalidModelTier`]，
@@ -489,11 +475,9 @@ pub fn infer_agent_capability(
 
     let disallowed = fm.disallowed_tools.to_vec();
     let can_mutate = match &fm.tools {
-        ToolsValue::Empty => !core_mutation_tools_fully_disallowed(&disallowed),
+        ToolsValue::Empty => true,
         ToolsValue::NoTools => false,
-        ToolsValue::List(list) if list.len() == 1 && list[0] == "*" => {
-            !core_mutation_tools_fully_disallowed(&disallowed)
-        }
+        ToolsValue::List(list) if list.len() == 1 && list[0] == "*" => true,
         ToolsValue::List(tools) => tools
             .iter()
             .any(|tool| is_mutation_tool(tool) && !declared_names_cover(&disallowed, tool)),

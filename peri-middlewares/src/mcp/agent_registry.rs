@@ -107,6 +107,7 @@ impl McpAgentMetadata {
             id: self.id.clone(),
             model_tier: self.model_tier,
             can_mutate: self.can_mutate,
+            description: self.description.clone(),
         }
     }
 }
