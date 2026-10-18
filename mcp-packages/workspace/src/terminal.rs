@@ -359,7 +359,9 @@ impl BaseTool for BashTool {
                     "description": "The bash command (and optional arguments) to execute. This can be complex commands that use pipes, &&, or other shell features. For multiple dependent commands, chain them with && rather than making separate calls"
                 },
                 "timeout": {
-                    "type": "number",
+                    "type": "integer",
+                    "minimum": 0,
+                    "maximum": 600000,
                     "description": format!(
                         "Optional timeout in milliseconds. The synchronous path is always bounded: it defaults to 15000ms and is capped at {FOREGROUND_MAX_TIMEOUT_MS}ms (2 minutes) — `timeout: 0` is treated as that maximum instead of disabling the timeout, so no request can produce an unbounded synchronous wait. Foreground timeout returns an error: if background task registration succeeds, the process is promoted and the tool returns a background task receipt carrying its task id (no pid or log paths), without a new timeout; otherwise termination is requested. Background tasks (run_in_background: true) run until completion: omitting `timeout` or setting `0` leaves that background command without a timeout, and a positive `timeout` (up to 600000ms) requests termination when reached. Check the returned process status before retrying; do not duplicate a task that is still running. For builds, installs, or tests, set a longer `timeout` up to the foreground maximum, or use run_in_background: true for work that needs longer."
                     )
@@ -442,7 +444,7 @@ impl BashTool {
             )?);
 
             // timeout 参数解析：未传/显式 0 → 不超时（后台语义：跑完为止）
-            let timeout_opt = parse_background_timeout(&input);
+            let timeout_opt = parse_background_timeout(&input)?;
 
             let command = command.to_string();
             let cwd = self.cwd.clone();
@@ -510,7 +512,7 @@ impl BashTool {
         // ── 同步执行路径 ──
         // 前台执行恒有界：`timeout: 0` 与超过上限的请求都界到前台上限，
         // 不存在禁用超时的同步路径（无 Option，结构上无法表达"不超时"）。
-        let (foreground_timeout_ms, adjusted_timeout) = parse_foreground_timeout(&input);
+        let (foreground_timeout_ms, adjusted_timeout) = parse_foreground_timeout(&input)?;
         let timeout_note = foreground_timeout_note(adjusted_timeout);
         let ownership = self
             .task_manager

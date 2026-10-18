@@ -98,6 +98,24 @@ impl BaseTool for MockTool {
     }
 }
 
+#[test]
+fn test_description_preserves_target_permissions_and_real_examples() {
+    let tool = ExecuteExtraTool::new(build_test_registry());
+    let description = tool.description().to_lowercase();
+    assert!(!description.contains("runs locally with full permissions"));
+    assert!(!description.contains("not a remote or external tool"));
+    assert!(description.contains("delegates execution"));
+    assert!(description.contains("本地工具或远端 mcp 工具"));
+    assert!(description.contains("与直接调用相同的权限和审批规则"));
+    let params = tool.parameters();
+    let example = params["properties"]["tool_name"]["description"]
+        .as_str()
+        .unwrap();
+    assert!(example.contains("mcp__cron__cron_list"));
+    assert!(!example.contains("CronCreate"));
+    assert!(!example.contains("Snip"));
+}
+
 fn build_test_registry() -> Arc<RwLock<BTreeMap<String, Arc<dyn BaseTool>>>> {
     let mut map = BTreeMap::new();
     map.insert(

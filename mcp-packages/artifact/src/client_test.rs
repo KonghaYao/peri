@@ -89,3 +89,108 @@ async fn test_format_output_no_expiry() {
     assert!(output.contains("Artifact uploaded:"));
     assert!(!output.contains("Expires:"));
 }
+
+#[test]
+fn non_success_status_is_an_error_and_prefers_server_error_text() {
+    let error = ArtifactClient::interpret_upload_response(
+        reqwest::StatusCode::INTERNAL_SERVER_ERROR,
+        r#"{"error":"payload_too_large"}"#,
+    )
+    .unwrap_err();
+    let message = error.to_string();
+    assert!(message.starts_with("HTTP 500"), "{message}");
+    assert!(message.contains("payload_too_large"), "{message}");
+}
+
+#[test]
+fn non_success_status_without_json_keeps_truncated_body() {
+    let error = ArtifactClient::interpret_upload_response(
+        reqwest::StatusCode::BAD_GATEWAY,
+        "<html>upstream unavailable</html>",
+    )
+    .unwrap_err();
+    let message = error.to_string();
+    assert!(message.contains("HTTP 502"), "{message}");
+    assert!(message.contains("upstream unavailable"), "{message}");
+}
+
+#[test]
+fn error_body_is_capped_to_keep_model_output_bounded() {
+    let huge_body = "x".repeat(MAX_ERROR_BODY_BYTES * 4);
+    let error = ArtifactClient::interpret_upload_response(
+        reqwest::StatusCode::INTERNAL_SERVER_ERROR,
+        &huge_body,
+    )
+    .unwrap_err();
+    let message = error.to_string();
+    assert!(message.len() < MAX_ERROR_BODY_BYTES + 200, "{message}");
+    assert!(message.contains("truncated"), "{message}");
+}
+
+#[test]
+fn success_status_with_error_field_is_a_failure() {
+    let error = ArtifactClient::interpret_upload_response(
+        reqwest::StatusCode::OK,
+        r#"{"error":"token 无效"}"#,
+    )
+    .unwrap_err();
+    assert!(matches!(error, ArtifactError::Server { .. }));
+    assert!(error.to_string().starts_with("Upload error: token 无效"));
+}
+
+#[test]
+fn malformed_json_is_a_parse_error() {
+    let error =
+        ArtifactClient::interpret_upload_response(reqwest::StatusCode::OK, "<html>not json</html>")
+            .unwrap_err();
+    assert!(matches!(error, ArtifactError::Parse { .. }));
+    let message = error.to_string();
+    assert!(message.starts_with("Failed to parse response"), "{message}");
+    assert!(message.contains("not json"), "{message}");
+}
+
+#[test]
+fn empty_object_is_a_missing_url_error() {
+    let error =
+        ArtifactClient::interpret_upload_response(reqwest::StatusCode::OK, "{}").unwrap_err();
+    assert!(matches!(error, ArtifactError::MissingUrl));
+    assert!(error.to_string().contains("no usable URL"));
+}
+
+#[test]
+fn whitespace_url_is_a_missing_url_error() {
+    let error =
+        ArtifactClient::interpret_upload_response(reqwest::StatusCode::OK, r#"{"url":"   "}"#)
+            .unwrap_err();
+    assert!(matches!(error, ArtifactError::MissingUrl));
+}
+
+#[test]
+fn relative_or_non_http_url_is_invalid() {
+    for url in [
+        "not-a-url",
+        "/relative/path.html",
+        "ftp://example.com/file.html",
+    ] {
+        let body = serde_json::json!({ "url": url }).to_string();
+        let error =
+            ArtifactClient::interpret_upload_response(reqwest::StatusCode::OK, &body).unwrap_err();
+        assert!(
+            matches!(error, ArtifactError::InvalidUrl { .. }),
+            "{url}: {error}"
+        );
+    }
+}
+
+#[test]
+fn valid_success_response_is_accepted() {
+    let response = ArtifactClient::interpret_upload_response(
+        reqwest::StatusCode::OK,
+        r#"{"url":" https://example.com/file.html ","expiresAt":"2026-06-27T12:00:00Z"}"#,
+    )
+    .unwrap();
+    assert_eq!(response.url, "https://example.com/file.html");
+    let output = ArtifactClient::format_output(&response);
+    assert!(output.contains("https://example.com/file.html"));
+    assert!(output.contains("Expires: 2026-06-27T12:00:00Z"));
+}

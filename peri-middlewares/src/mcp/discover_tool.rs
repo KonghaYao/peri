@@ -3,17 +3,21 @@
 //! JSON-RPC 风格入参（`{method, params}`），错误契约 `{error:{code,message}}`
 //! （无 id）：未知 method `-32601`、参数错误 `-32602`、server 不存在/未连接
 //! `-32000`。**只读硬约束**：本文件不调用任何 MCP tools/call、read_resource、
-//! ExecuteExtraTool、build_tool_bridges——数据全部来自 pool 只读快照与
-//! registry。
+//! ExecuteExtraTool、build_tool_bridges——数据全部来自会话工具目录、pool
+//! 只读快照与 registry。
 
-use std::sync::Arc;
+use std::sync::{Arc, Weak};
 
 use async_trait::async_trait;
+use parking_lot::RwLock;
 use peri_acp_types::{
     mcp_skills::McpSkillRegistry,
     skills::{SkillMetadata, SkillOrigin},
 };
-use peri_agent::tools::{BaseTool, ToolContext};
+use peri_agent::{
+    agent::stages::SharedToolMap,
+    tools::{BaseTool, ToolContext},
+};
 use rmcp::model::Tool;
 use serde_json::{json, Value};
 
@@ -36,6 +40,9 @@ pub struct DiscoverMCPTool {
     agent_registry: Option<Arc<McpAgentRegistry>>,
     /// 会话 id：发现面按 ACP 连接归属过滤，`None` = 不过滤（print 模式）。
     session_id: Option<String>,
+    /// 当前会话目录；未发布时仅提供 pool 的诊断快照，不保证可执行。
+    /// 弱引用避免目录包含 DiscoverMCP 时形成所有权环；槽由中间件持有。
+    catalog: Weak<RwLock<Option<SharedToolMap>>>,
 }
 
 impl DiscoverMCPTool {
@@ -45,6 +52,7 @@ impl DiscoverMCPTool {
             registry,
             agent_registry: None,
             session_id: None,
+            catalog: Weak::new(),
         }
     }
 
@@ -57,6 +65,67 @@ impl DiscoverMCPTool {
     pub fn with_agent_registry(mut self, registry: Arc<McpAgentRegistry>) -> Self {
         self.agent_registry = Some(registry);
         self
+    }
+
+    pub(crate) fn with_catalog_slot(
+        mut self,
+        catalog: &Arc<RwLock<Option<SharedToolMap>>>,
+    ) -> Self {
+        self.catalog = Arc::downgrade(catalog);
+        self
+    }
+
+    fn catalog_tools(&self, needle: Option<&str>) -> Option<Vec<Value>> {
+        let slot = self.catalog.upgrade()?;
+        let catalog = slot.read().clone()?;
+        let tools = catalog.read();
+        Some(
+            tools
+                .values()
+                .filter_map(|tool| {
+                    let server = tool.mcp_server_name()?;
+                    if !tool.visible_to_model() {
+                        return None;
+                    }
+                    let original_name = tool.mcp_tool_name()?;
+                    if needle.is_some_and(|needle| {
+                        ![tool.name(), original_name, tool.description()]
+                            .iter()
+                            .any(|text| text.to_lowercase().contains(needle))
+                    }) {
+                        return None;
+                    }
+                    let handle = self
+                        .pool
+                        .get_client_visible_to(server, self.session_id.as_deref());
+                    let raw_tool = handle.as_ref().and_then(|handle| {
+                        handle
+                            .tools
+                            .iter()
+                            .find(|raw| raw.name.as_ref() == original_name)
+                    });
+                    let schema = raw_tool
+                        .map(|raw| {
+                            serde_json::to_value(raw).unwrap_or_else(|_| manual_tool_json(raw))
+                        })
+                        .unwrap_or_else(|| {
+                            json!({
+                                "name": original_name,
+                                "description": tool.description(),
+                                "inputSchema": tool.parameters(),
+                            })
+                        });
+                    Some(json!({
+                        "type": "tool",
+                        "execution_name": tool.name(),
+                        "original_name": original_name,
+                        "server": server,
+                        "direct": tool.is_direct(),
+                        "tool": schema,
+                    }))
+                })
+                .collect(),
+        )
     }
 
     fn search(&self, params: &Value) -> Value {
@@ -99,12 +168,18 @@ impl DiscoverMCPTool {
             }
         }
 
-        // tool / resource：已连接 server 的缓存快照（get_all_clients 只返回 Connected）
+        let catalog_tools = self.catalog_tools(Some(&needle));
+        if let Some(tools) = &catalog_tools {
+            results.extend(tools.iter().cloned());
+        }
+
+        // 无目录槽时保留原始工具快照，仅供诊断，不是可执行目录。
+        // resource 始终来自已连接 server 的缓存快照。
         for handle in self
             .pool
             .get_all_clients_visible_to(self.session_id.as_deref())
         {
-            for tool in &handle.tools {
+            for tool in handle.tools.iter().filter(|_| catalog_tools.is_none()) {
                 let name_hit = tool.name.to_lowercase().contains(&needle);
                 let desc_hit = tool
                     .description
@@ -196,7 +271,17 @@ impl DiscoverMCPTool {
             Some(_) => return err_obj(-32602, "domain 必须是字符串"),
         };
 
-        let tools: Vec<String> = handle.tools.iter().map(|t| t.name.to_string()).collect();
+        let tools: Vec<Value> = match self.catalog_tools(None) {
+            Some(entries) => entries
+                .into_iter()
+                .filter(|entry| entry["server"] == server)
+                .collect(),
+            None => handle
+                .tools
+                .iter()
+                .map(|t| Value::String(t.name.to_string()))
+                .collect(),
+        };
         let resources: Vec<String> = handle.resources.iter().map(|r| r.uri.clone()).collect();
         let skills: Vec<String> = self.skill_names_of(server);
         let agents: Vec<String> = self
@@ -220,7 +305,7 @@ impl DiscoverMCPTool {
                 "skills": skills,
                 "agents": agents,
             }),
-            Some("tools") => Value::Array(tools.into_iter().map(Value::String).collect()),
+            Some("tools") => Value::Array(tools),
             Some("resources") => Value::Array(resources.into_iter().map(Value::String).collect()),
             Some("skills") => Value::Array(skills.into_iter().map(Value::String).collect()),
             Some("agents") => Value::Array(agents.into_iter().map(Value::String).collect()),
@@ -388,20 +473,68 @@ impl BaseTool for DiscoverMCPTool {
 
     fn description(&self) -> &str {
         "只读查询 MCP 域（JSON-RPC 风格，method ∈ search/list/detail）：\
-         search 全域搜索 MCP server/tool/resource/skill（结果带 type 标注，\
-         tool 带完整 JSON Schema）；list 列出指定服务器三域清单；detail 查看\
-         服务器连接状态/协议版本/capabilities/OAuth。不提供任何执行——MCP \
-         工具调用走 ExecuteExtraTool，资源读取走 mcp_read_resource，技能加载走 SkillTool。"
+         search 搜索 MCP server/tool/resource/skill/agent，max_results 默认 5、最多 20；\
+         list 列出指定服务器四域清单（tools/resources/skills/agents）；detail 查看\
+         服务器连接状态/协议版本/capabilities/OAuth。会话目录的 search/list 工具条目\
+         包含 execution_name、original_name、server、direct 和保留完整 JSON Schema 的 tool；\
+         隐藏工具不会出现。direct 工具按 execution_name 直接调用，deferred 工具经\
+         ExecuteExtraTool 调用。未装配目录时返回原始诊断快照，不保证名称可执行。\
+         本工具不执行调用；资源读取走 mcp_read_resource，技能加载走 SkillTool。"
     }
 
     fn parameters(&self) -> Value {
         json!({
             "type": "object",
-            "properties": {
-                "method": { "type": "string", "enum": ["search", "list", "detail"] },
-                "params": { "type": "object" }
-            },
-            "required": ["method"]
+            "oneOf": [
+                {
+                    "type": "object",
+                    "properties": {
+                        "method": { "type": "string", "enum": ["search"] },
+                        "params": {
+                            "type": "object",
+                            "properties": {
+                                "query": { "type": "string" },
+                                "max_results": { "type": "integer", "minimum": 0, "maximum": 20, "default": 5 }
+                            },
+                            "required": ["query"],
+                            "additionalProperties": false
+                        }
+                    },
+                    "required": ["method", "params"],
+                    "additionalProperties": false
+                },
+                {
+                    "type": "object",
+                    "properties": {
+                        "method": { "type": "string", "enum": ["list"] },
+                        "params": {
+                            "type": "object",
+                            "properties": {
+                                "server": { "type": "string" },
+                                "domain": { "type": "string", "enum": ["tools", "resources", "skills", "agents"] }
+                            },
+                            "required": ["server"],
+                            "additionalProperties": false
+                        }
+                    },
+                    "required": ["method", "params"],
+                    "additionalProperties": false
+                },
+                {
+                    "type": "object",
+                    "properties": {
+                        "method": { "type": "string", "enum": ["detail"] },
+                        "params": {
+                            "type": "object",
+                            "properties": { "server": { "type": "string" } },
+                            "required": ["server"],
+                            "additionalProperties": false
+                        }
+                    },
+                    "required": ["method", "params"],
+                    "additionalProperties": false
+                }
+            ]
         })
     }
 

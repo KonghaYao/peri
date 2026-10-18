@@ -13,6 +13,10 @@ pub(crate) const MAX_SAFE_BUDGET_TOTAL: u64 = 9_007_199_254_740_991;
 pub(crate) const MAX_SAFE_INTEGER: u64 = MAX_SAFE_BUDGET_TOTAL;
 pub(crate) const MAX_CONCURRENCY_CAP: u64 = 16;
 
+/// start 与 resume-only 共用的 `strictPreflight` 拒绝文案。
+const STRICT_PREFLIGHT_UNAVAILABLE: &str =
+    "strict preflight is unavailable: workflow primitives and graph cannot be statically validated";
+
 /// `Workflow` 工具的脚本用法说明（schema `script` 字段描述；MCP 工具与旧工具共用）。
 pub const WORKFLOW_SCRIPT_DESCRIPTION: &str = r#"The script is the body of an async function (`new AsyncFunction`), not an ESM module; use JavaScript (TypeScript syntax is not transpiled). It must contain exactly one plain-literal `export const meta = { name, description }`; the engine removes that metadata before executing the body. The body receives these top-level injected primitives directly: `agent()`, `parallel()`, `pipeline()`, `phase()`, `log()`, and `workflow()`, plus `args` and `budget`. Do not use static or dynamic `import`, `export default`, or any other `export`; do not use old `workflow.agent(...)`, `workflow.parallel(...)`, `workflow.pipeline(...)`, `workflow.phase(...)`, or `workflow.log(...)` calls. Return the workflow result with a top-level `return`; without it the body returns undefined. Missing-return validation is advisory and does not prove that a result will be returned. Minimal read-only example:
 
@@ -51,8 +55,10 @@ pub fn start_tool_parameters() -> Value {
                 "description": "Optional arguments passed to the workflow script."
             },
             "maxConcurrency": {
-                "type": "number",
-                "description": "Maximum concurrent agents (default 3).",
+                "type": "integer",
+                "minimum": 1,
+                "maximum": MAX_CONCURRENCY_CAP,
+                "description": "Maximum concurrent agents (1-16, default 3).",
                 "default": 3
             },
             "budgetTotal": {
@@ -81,8 +87,7 @@ pub fn start_tool_parameters() -> Value {
             },
             "resumeFromRunId": {
                 "type": "string",
-                "description": "If provided, resume the workflow from the given run ID. \
-                The journal from the previous run will be loaded for cache-hit."
+                "description": "Resume a previous run. When provided without `script`/`scriptPath`, only this field is accepted: state.json restores args, concurrency, budget, limits and writeIntent, and other start-only fields are rejected. To change inputs, pass a complete `script` (or `scriptPath`) together with `resumeFromRunId`; the previous journal is then reused for cache hits."
             },
             "name": {
                 "type": "string",
@@ -122,12 +127,31 @@ pub fn start_tool_parameters() -> Value {
     })
 }
 
+/// 校验 resume-only 输入（`resumeFromRunId` 且无 `script`/`scriptPath`）。
+///
+/// resume 从 `state.json` 恢复 args / 并发 / budget / limits / writeIntent，同一请求里
+/// 携带的启动期字段不会生效。因此只接受 `resumeFromRunId`；`strictPreflight:false`
+/// 是允许的 no-op，`true` 与 start 路径使用同一拒绝文案；其余非 null 字段显式拒绝，
+/// 改变输入必须携带完整 script（或 scriptPath）+ `resumeFromRunId` 走 journal 重放。
+pub fn validate_resume_only_input(input: &Value) -> Result<(), String> {
+    if input.get("strictPreflight").and_then(Value::as_bool) == Some(true) {
+        return Err(STRICT_PREFLIGHT_UNAVAILABLE.into());
+    }
+    for (key, value) in input.as_object().into_iter().flatten() {
+        if value.is_null() || key == "resumeFromRunId" || key == "strictPreflight" {
+            continue;
+        }
+        return Err(format!(
+            "'{key}' is not accepted in resume-only mode: resume restores args, concurrency, budget, limits and writeIntent from state.json; pass script + resumeFromRunId to start with changed inputs"
+        ));
+    }
+    Ok(())
+}
+
 /// 解析工具入参为 `WorkflowInput`（含 scriptPath 读取、参数校验、preflight）。
 pub(crate) fn parse_start_input(input: &Value, cwd: &str) -> Result<WorkflowInput, String> {
     if input["strictPreflight"].as_bool().unwrap_or(false) {
-        return Err(
-            "strict preflight is unavailable: workflow primitives and graph cannot be statically validated".into(),
-        );
+        return Err(STRICT_PREFLIGHT_UNAVAILABLE.into());
     }
 
     // scriptPath 优先于 inline script（GAP-09 命名 Workflow 支持）

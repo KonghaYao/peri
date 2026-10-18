@@ -278,25 +278,22 @@ async fn test_multi_select_camel_case_input() {
     );
 }
 
-#[tokio::test]
-async fn test_preview_field_ignored() {
-    let tool = make_tool(make_answer(&["选项A"], None));
-    let result = tool
-        .invoke(
-            serde_json::json!({
-                "questions": [{
-                    "question": "What?",
-                    "header": "H1",
-                    "options": [{"label": "选项A", "preview": "some preview"}]
-                }]
-            }),
-            tool_context(),
-        )
-        .await
-        .unwrap();
-    assert_eq!(
-        result, "[问: H1]\n回答: 选项A",
-        "preview field should not cause error"
+/// 路线 A：schema 不得再声明未实现的 `preview` 字段。
+///
+/// 历史上该字段被声明但两处 parser 均静默丢弃；删除声明让契约与实现一致。
+#[test]
+fn test_schema_does_not_declare_preview() {
+    let params = crate::ask_user::ask_user_tool_definition().parameters;
+    let props =
+        &params["properties"]["questions"]["items"]["properties"]["options"]["items"]["properties"];
+    assert!(
+        props.get("preview").is_none(),
+        "schema 不得声明 preview: {params}"
+    );
+    assert!(props.get("label").is_some(), "选项 schema 应保留 label");
+    assert!(
+        props.get("description").is_some(),
+        "选项 schema 应保留 description"
     );
 }
 

@@ -120,9 +120,11 @@ score = keyword_score × 0.4 + tfidf_score × 0.6
 ```
 
 **查询语法**：
-- `select:CronCreate,Snip` —— 按精确名称查找，逗号分隔，直接返回匹配工具
+- `select:mcp__cron__cron_list,mcp__cron__cron_remove` —— 按精确名称查找，逗号分隔，直接返回匹配工具
 - `+slack message` —— `+` 前缀词为必选词（`required`），其余为可选关键词（`optional`）。必选词缺失时该工具硬过滤为 0 分
 - `slack message` —— 纯关键词搜索
+
+无必选词时，仅保留关键词分数 > 1.0 或 TF-IDF 分数非零的工具；零命中返回空数组，不用无关工具补足结果。同分按 canonical name 排序，`select:` 仍保留请求顺序。
 
 **分词策略**（`tokenize`）：
 - CJK 字符逐字分割（每个汉字/日文/韩文字符为独立 token）
@@ -136,7 +138,7 @@ score = keyword_score × 0.4 + tfidf_score × 0.6
 - 子串匹配要求双方长度 ≥ 2
 
 **工具名分词**（用于关键词匹配）：
-- CamelCase 分词：`CronCreate` → `["cron", "create"]`
+- CamelCase 分词：`WorkflowStatus` → `["workflow", "status"]`
 - MCP 前缀拆解：`mcp__slack__send_message` → `["slack", "send_message"]`（跳过 `mcp` 前缀）
 
 **TF-IDF 评分**：

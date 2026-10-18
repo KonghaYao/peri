@@ -842,7 +842,7 @@ async fn test_write_allows_existing_sentinel_without_increase() {
 async fn test_write_draft_rejection_preserves_exact_draft() {
     let dir = tempfile::tempdir().unwrap();
     let tool = WriteFileTool::with_draft(dir.path().to_str().unwrap(), true);
-    let target = super::target_key(dir.path().to_str().unwrap(), "f.txt");
+    let target = super::resolve_path(dir.path().to_str().unwrap(), "f.txt");
     let target_id = target.to_string_lossy().to_string();
     let draft_id = tool.drafts.as_ref().unwrap().lock().unwrap().save(
         &target_id,
@@ -891,6 +891,48 @@ async fn test_write_same_target_concurrent_appends_are_serialized() {
     second.await.unwrap().unwrap();
     let content = std::fs::read_to_string(dir.path().join("f.txt")).unwrap();
     assert!(content == "start\na\nb\n" || content == "start\nb\na\n");
+}
+
+/// [回归测试] 链接加 .. 与真实路径必须共用事务锁和 I/O 目标。
+#[cfg(unix)]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn test_concurrent_writes_via_symlink_and_real_path_are_serialized() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path().canonicalize().unwrap();
+    let workspace = root.join("workspace");
+    let other = root.join("other");
+    std::fs::create_dir(&workspace).unwrap();
+    std::fs::create_dir_all(other.join("child")).unwrap();
+    std::os::unix::fs::symlink(other.join("child"), workspace.join("link")).unwrap();
+    std::fs::write(workspace.join("a.txt"), "sibling\n").unwrap();
+    std::fs::write(other.join("a.txt"), "start\n").unwrap();
+    let barrier = std::sync::Arc::new(tokio::sync::Barrier::new(2));
+    let mut tasks = Vec::new();
+    for (path, content) in [
+        ("link/../a.txt".to_string(), "a\n"),
+        (other.join("a.txt").to_string_lossy().to_string(), "b\n"),
+    ] {
+        let cwd = workspace.to_string_lossy().to_string();
+        let barrier = barrier.clone();
+        tasks.push(tokio::spawn(async move {
+            barrier.wait().await;
+            WriteFileTool::with_draft(cwd, false)
+                .invoke(
+                    serde_json::json!({"file_path": path, "content": content, "append": true}),
+                    peri_agent::tools::ToolContext::new(&[], "."),
+                )
+                .await
+        }));
+    }
+    for task in tasks {
+        task.await.unwrap().unwrap();
+    }
+    let content = std::fs::read_to_string(other.join("a.txt")).unwrap();
+    assert!(content == "start\na\nb\n" || content == "start\nb\na\n");
+    assert_eq!(
+        std::fs::read_to_string(workspace.join("a.txt")).unwrap(),
+        "sibling\n"
+    );
 }
 
 #[tokio::test]

@@ -44,11 +44,12 @@ const UNREACHED_BASE_URL: &str = "http://127.0.0.1:9";
 
 // ─── 夹具 ─────────────────────────────────────────────────────────────────────
 
-/// 本地回环 HTTP 桩：接受一次连接并返回固定 JSON。
+/// 本地回环 HTTP 桩：接受一次连接并返回指定状态码与固定 JSON。
 ///
 /// 返回 `(base_url, 请求头原文句柄)`；句柄的值供断言路径 / `Authorization` / TTL，
 /// **不得**打印（§9 规则 7：不打印 headers）。
 async fn spawn_upload_stub(
+    status: u16,
     body: &'static str,
 ) -> (String, tokio::task::JoinHandle<Option<String>>) {
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
@@ -70,8 +71,12 @@ async fn spawn_upload_stub(
             }
         }
         let head = String::from_utf8_lossy(&received).into_owned();
+        let reason = reqwest::StatusCode::from_u16(status)
+            .ok()
+            .and_then(|code| code.canonical_reason())
+            .unwrap_or("Unknown");
         let response = format!(
-            "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+            "HTTP/1.1 {status} {reason}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
             body.len(),
             body
         );
@@ -256,10 +261,136 @@ async fn artifact_call_tool_missing_file_maps_to_error_result_with_path() {
 }
 
 #[tokio::test]
+async fn artifact_call_tool_upload_connection_failure_maps_to_error_result() {
+    let dir = cwd_with_report();
+    let cwd = dir.path().to_string_lossy().into_owned();
+    let server = ArtifactMcpServer::with_tools(&cwd, vec![artifact_tool(&cwd, UNREACHED_BASE_URL)]);
+
+    let result = complete(
+        invoke_tool_call(
+            server.tools(),
+            &server.cwd,
+            &call("artifact", json!({ "file_path": "report.html" })),
+        )
+        .await
+        .expect("连接失败必须是工具级错误，不是协议错误"),
+    );
+    assert_eq!(result.is_error, Some(true));
+    let text = first_text(&result).expect("错误结果必须有文本块");
+    assert!(
+        text.contains("Upload failed"),
+        "必须保留传输失败前缀: {text}"
+    );
+}
+
+#[tokio::test]
+async fn artifact_call_tool_non_success_status_maps_to_error_result() {
+    let dir = cwd_with_report();
+    let cwd = dir.path().to_string_lossy().into_owned();
+    let (base_url, stub) = spawn_upload_stub(500, r#"{"error":"payload_too_large"}"#).await;
+    let server = ArtifactMcpServer::with_tools(&cwd, vec![artifact_tool(&cwd, &base_url)]);
+
+    let result = complete(
+        invoke_tool_call(
+            server.tools(),
+            &server.cwd,
+            &call("artifact", json!({ "file_path": "report.html" })),
+        )
+        .await
+        .expect("HTTP 失败必须是工具级错误，不是协议错误"),
+    );
+    assert_eq!(result.is_error, Some(true));
+    let text = first_text(&result).expect("错误结果必须有文本块");
+    assert!(text.contains("HTTP 500"), "必须报告 HTTP 状态: {text}");
+    assert!(
+        text.contains("payload_too_large"),
+        "必须保留服务端 error 文本: {text}"
+    );
+    assert!(stub.await.expect("桩任务不得 panic").is_some());
+}
+
+#[tokio::test]
+async fn artifact_call_tool_200_with_error_field_maps_to_error_result() {
+    let dir = cwd_with_report();
+    let cwd = dir.path().to_string_lossy().into_owned();
+    let (base_url, stub) = spawn_upload_stub(200, r#"{"error":"token 无效"}"#).await;
+    let server = ArtifactMcpServer::with_tools(&cwd, vec![artifact_tool(&cwd, &base_url)]);
+
+    let result = complete(
+        invoke_tool_call(
+            server.tools(),
+            &server.cwd,
+            &call("artifact", json!({ "file_path": "report.html" })),
+        )
+        .await
+        .expect("200 + error 必须是工具级错误"),
+    );
+    assert_eq!(result.is_error, Some(true));
+    let text = first_text(&result).expect("错误结果必须有文本块");
+    assert!(
+        text.contains("Upload error: token 无效"),
+        "2xx 不代表成功，必须保留服务端 error: {text}"
+    );
+    assert!(stub.await.expect("桩任务不得 panic").is_some());
+}
+
+#[tokio::test]
+async fn artifact_call_tool_invalid_json_maps_to_error_result() {
+    let dir = cwd_with_report();
+    let cwd = dir.path().to_string_lossy().into_owned();
+    let (base_url, stub) = spawn_upload_stub(200, "<html>not json</html>").await;
+    let server = ArtifactMcpServer::with_tools(&cwd, vec![artifact_tool(&cwd, &base_url)]);
+
+    let result = complete(
+        invoke_tool_call(
+            server.tools(),
+            &server.cwd,
+            &call("artifact", json!({ "file_path": "report.html" })),
+        )
+        .await
+        .expect("非法 JSON 必须是工具级错误"),
+    );
+    assert_eq!(result.is_error, Some(true));
+    let text = first_text(&result).expect("错误结果必须有文本块");
+    assert!(
+        text.contains("Failed to parse response"),
+        "必须保留解析失败前缀: {text}"
+    );
+    assert!(text.contains("not json"), "必须附带 body 片段: {text}");
+    assert!(stub.await.expect("桩任务不得 panic").is_some());
+}
+
+#[tokio::test]
+async fn artifact_call_tool_empty_response_maps_to_error_result() {
+    let dir = cwd_with_report();
+    let cwd = dir.path().to_string_lossy().into_owned();
+    let (base_url, stub) = spawn_upload_stub(200, "{}").await;
+    let server = ArtifactMcpServer::with_tools(&cwd, vec![artifact_tool(&cwd, &base_url)]);
+
+    let result = complete(
+        invoke_tool_call(
+            server.tools(),
+            &server.cwd,
+            &call("artifact", json!({ "file_path": "report.html" })),
+        )
+        .await
+        .expect("空响应必须是工具级错误"),
+    );
+    assert_eq!(result.is_error, Some(true));
+    let text = first_text(&result).expect("错误结果必须有文本块");
+    assert!(
+        text.contains("no usable URL"),
+        "空对象不得渲染成 uploaded: {text}"
+    );
+    assert!(!text.contains("Artifact uploaded:"), "{text}");
+    assert!(stub.await.expect("桩任务不得 panic").is_some());
+}
+
+#[tokio::test]
 async fn artifact_call_tool_upload_success_maps_to_text_content() {
     let dir = cwd_with_report();
     let cwd = dir.path().to_string_lossy().into_owned();
-    let (base_url, stub) = spawn_upload_stub(STUB_UPLOAD_BODY).await;
+    let (base_url, stub) = spawn_upload_stub(200, STUB_UPLOAD_BODY).await;
     let server = ArtifactMcpServer::with_tools(&cwd, vec![artifact_tool(&cwd, &base_url)]);
 
     let response = invoke_tool_call(
@@ -303,7 +434,7 @@ async fn artifact_call_tool_upload_success_maps_to_text_content() {
 #[tokio::test]
 async fn artifact_instance_environment_reaches_upload_request() {
     let dir = cwd_with_report();
-    let (base_url, stub) = spawn_upload_stub(STUB_UPLOAD_BODY).await;
+    let (base_url, stub) = spawn_upload_stub(200, STUB_UPLOAD_BODY).await;
     let env = std::collections::HashMap::from([
         ("PERI_ARTIFACTS_URL".to_owned(), base_url),
         ("PERI_ARTIFACTS_TOKEN".to_owned(), FAKE_TOKEN.to_owned()),
@@ -330,7 +461,7 @@ async fn artifact_instance_environment_reaches_upload_request() {
 async fn artifact_handler_tools_list_and_both_result_forms_round_trip_over_wire() {
     let dir = cwd_with_report();
     let cwd = dir.path().to_string_lossy().into_owned();
-    let (base_url, stub) = spawn_upload_stub(STUB_UPLOAD_BODY).await;
+    let (base_url, stub) = spawn_upload_stub(200, STUB_UPLOAD_BODY).await;
     let server = ArtifactMcpServer::with_tools(&cwd, vec![artifact_tool(&cwd, &base_url)]);
     let pair = connect(server).await;
     let peer = pair.peer();
@@ -368,6 +499,30 @@ async fn artifact_handler_tools_list_and_both_result_forms_round_trip_over_wire(
         stub.await.expect("桩任务不得 panic").is_some(),
         "成功形态必须真的打过一次上传"
     );
+    pair.shutdown().await;
+}
+
+/// 上传失败在**线路**上也必须是 `is_error=true`（不是协议成功文本）。
+#[tokio::test]
+async fn artifact_handler_upload_failure_round_trip_is_error_result() {
+    let dir = cwd_with_report();
+    let cwd = dir.path().to_string_lossy().into_owned();
+    let (base_url, stub) = spawn_upload_stub(500, r#"{"error":"wire failure"}"#).await;
+    let server = ArtifactMcpServer::with_tools(&cwd, vec![artifact_tool(&cwd, &base_url)]);
+    let pair = connect(server).await;
+
+    let failure = complete(
+        pair.peer()
+            .call_tool_once(call("artifact", json!({ "file_path": "report.html" })))
+            .await
+            .expect("工具级失败仍走协议成功（is_error 承载语义）"),
+    );
+    assert_eq!(failure.is_error, Some(true));
+    let text = first_text(&failure).expect("错误结果必须有文本块");
+    assert!(text.contains("HTTP 500"), "{text}");
+    assert!(text.contains("wire failure"), "{text}");
+    assert!(stub.await.expect("桩任务不得 panic").is_some());
+
     pair.shutdown().await;
 }
 

@@ -22,7 +22,7 @@ Model selection (model):
 - Available tiers: `inherit` (use the parent agent's model), `haiku` (fastest/cheapest, best for quick lookups and simple sub-tasks), `sonnet` (balanced default), `opus` (strongest reasoning), `fable` (flagship tier)
 - Unknown tiers are rejected with an error — never silently ignored
 - Does NOT apply to forks: `fork: true` always inherits the parent model, and `model` is ignored
-- Does NOT apply to resume: `resume_thread_id` restores the original execution context, and `model` is ignored
+- resume 不接受模型覆盖：`resume_thread_id` 从当前磁盘上的 Agent 定义及其 frontmatter model 重建模型，不保留先前的 model override，本次 resume 调用的 `model` 参数也被忽略
 
 When to use:
 - For tasks that benefit from independent context isolation (e.g., code review while working on a different feature)

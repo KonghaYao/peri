@@ -62,6 +62,16 @@ fn test_tool_name_is_search_extra_tools() {
 }
 
 #[test]
+fn test_description_uses_real_deferred_examples() {
+    let tool = SearchExtraTools::new(build_test_index());
+    let description = tool.description();
+    assert!(description.contains("select:mcp__cron__cron_list,mcp__cron__cron_remove"));
+    assert!(!description.contains("CronCreate"));
+    assert!(!description.contains("Snip"));
+    assert!(description.contains("没有匹配时返回空数组"));
+}
+
+#[test]
 fn test_parameters_schema() {
     let index = build_test_index();
     let tool = SearchExtraTools::new(index);
@@ -100,15 +110,16 @@ async fn test_invoke_empty_results() {
 
     let result = tool
         .invoke(
-            json!({"query": "nonexistent_tool_xyz"}),
+            // 原查询 nonexistent_tool_xyz 会按既有子串规则命中描述中的 to。
+            json!({"query": "zzznonexistent"}),
             peri_agent::tools::ToolContext::new(&[], "."),
         )
         .await
         .unwrap();
     let parsed: Value = serde_json::from_str(&result).unwrap();
 
-    // TF-IDF may still return results, but total_available should be > 0
-    assert!(parsed["total_available"].as_u64().unwrap() > 0);
+    assert_eq!(parsed["results"], json!([]));
+    assert_eq!(parsed["total_available"], 3);
 }
 
 #[tokio::test]

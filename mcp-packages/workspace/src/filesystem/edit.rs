@@ -2,7 +2,8 @@ use peri_agent::tools::BaseTool;
 use peri_mcp_common::failure::ToolFailure;
 use serde_json::Value;
 
-use super::transaction::{target_key, with_target_lock, CommitError, SENTINEL_REJECTION};
+use super::resolve_path;
+use super::transaction::{with_target_lock, CommitError, SENTINEL_REJECTION};
 
 const EDIT_FILE_DESCRIPTION: &str = include_str!("descriptions/edit.md");
 
@@ -169,7 +170,7 @@ impl BaseTool for EditFileTool {
             .into());
         }
 
-        let resolved = target_key(&self.cwd, file_path);
+        let resolved = resolve_path(&self.cwd, file_path);
 
         with_target_lock(&resolved, |locked| {
             let pre = match locked.read_pre() {

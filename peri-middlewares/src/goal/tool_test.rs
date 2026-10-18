@@ -8,55 +8,117 @@ use peri_model::{
 };
 use tokio_util::sync::CancellationToken;
 
+#[derive(Clone)]
+struct MockGoal {
+    goal_id: String,
+    objective: String,
+    status: GoalStatus,
+}
+
 struct MockController {
-    has_goal: parking_lot::Mutex<bool>,
+    goal: parking_lot::Mutex<Option<MockGoal>>,
+    next_id: std::sync::atomic::AtomicU64,
+    /// `complete_goal_if_current` 收到的身份（按调用顺序记录）。
+    checked_goal_ids: parking_lot::Mutex<Vec<String>>,
 }
 
 impl MockController {
     fn new() -> Self {
         Self {
-            has_goal: parking_lot::Mutex::new(false),
+            goal: parking_lot::Mutex::new(None),
+            next_id: std::sync::atomic::AtomicU64::new(1),
+            checked_goal_ids: parking_lot::Mutex::new(Vec::new()),
         }
+    }
+
+    fn checked_goal_ids(&self) -> Vec<String> {
+        self.checked_goal_ids.lock().clone()
+    }
+
+    fn complete_current(&self) -> Result<(), String> {
+        let mut guard = self.goal.lock();
+        let goal = guard
+            .as_mut()
+            .ok_or_else(|| "无活跃 goal，无法 set_status".to_string())?;
+        if !goal.status.can_transition_to(&GoalStatus::Complete) {
+            return Err(format!("非法状态转换: {:?} → Complete", goal.status));
+        }
+        goal.status = GoalStatus::Complete;
+        Ok(())
     }
 }
 
 #[async_trait]
 impl GoalController for MockController {
     async fn create_goal(&self, objective: String) -> Result<(), String> {
-        let mut guard = self.has_goal.lock();
-        if *guard {
+        let mut guard = self.goal.lock();
+        if guard.is_some() {
             return Err("goal 已存在".to_string());
         }
-        *guard = true;
-        let _ = objective;
+        let id = self
+            .next_id
+            .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        *guard = Some(MockGoal {
+            goal_id: format!("goal-{id}"),
+            objective,
+            status: GoalStatus::Active,
+        });
         Ok(())
     }
 
     async fn complete_goal(&self) -> Result<(), String> {
+        self.complete_current()
+    }
+
+    async fn complete_goal_if_current(&self, expected_goal_id: &str) -> Result<(), String> {
+        self.checked_goal_ids
+            .lock()
+            .push(expected_goal_id.to_string());
+
+        // 身份比对与状态写入在同一锁内，模拟生产 CAS。
+        let mut guard = self.goal.lock();
+        let goal = guard
+            .as_mut()
+            .ok_or_else(|| "无活跃 goal，无法 set_status".to_string())?;
+        if goal.goal_id != expected_goal_id {
+            return Err("goal 已被替换或清除，未完成本次完成请求".to_string());
+        }
+        if !goal.status.can_transition_to(&GoalStatus::Complete) {
+            return Err(format!("非法状态转换: {:?} → Complete", goal.status));
+        }
+        goal.status = GoalStatus::Complete;
         Ok(())
     }
 
     async fn block_goal(&self, _reason: String) -> Result<(), String> {
+        let mut guard = self.goal.lock();
+        let goal = guard
+            .as_mut()
+            .ok_or_else(|| "无活跃 goal，无法 set_status".to_string())?;
+        if !goal.status.can_transition_to(&GoalStatus::Blocked) {
+            return Err(format!("非法状态转换: {:?} → Blocked", goal.status));
+        }
+        goal.status = GoalStatus::Blocked;
         Ok(())
     }
 
     async fn clear_goal(&self) -> Result<(), String> {
-        *self.has_goal.lock() = false;
+        *self.goal.lock() = None;
         Ok(())
     }
 
     fn snapshot(&self) -> GoalViewSnapshot {
-        let guard = self.has_goal.lock();
-        if *guard {
-            GoalViewSnapshot {
-                objective: Some("测试目标".to_string()),
-                status: Some(GoalStatus::Active),
+        let guard = self.goal.lock();
+        match guard.as_ref() {
+            Some(goal) => GoalViewSnapshot {
+                goal_id: Some(goal.goal_id.clone()),
+                objective: Some(goal.objective.clone()),
+                status: Some(goal.status),
                 token_budget: None,
                 tokens_used: 0,
                 ..Default::default()
-            }
-        } else {
-            GoalViewSnapshot::default()
+            },
+            None => GoalViewSnapshot::default(),
         }
     }
 }
@@ -425,4 +487,155 @@ async fn test_goal_clear_no_goal_also_succeeds() {
         .await
         .unwrap();
     assert!(result.contains("Goal cleared"));
+}
+
+// ===== 身份 CAS：验证期间 goal 被替换 =====
+
+/// `ToolContext::new` 的静态空消息输入（供 `tokio::spawn` 持有 `'static` 上下文）。
+const NO_MESSAGES: &[BaseMessage] = &[];
+
+/// 受控屏障模型：`complete` 进入后等待测试释放，稳定复现验证期间的并发状态变更。
+struct GatedModel {
+    entered: Arc<tokio::sync::Notify>,
+    release: Arc<tokio::sync::Notify>,
+}
+
+impl GatedModel {
+    fn new() -> Self {
+        Self {
+            entered: Arc::new(tokio::sync::Notify::new()),
+            release: Arc::new(tokio::sync::Notify::new()),
+        }
+    }
+}
+
+#[async_trait]
+impl Model for GatedModel {
+    fn capabilities(&self) -> ModelCapabilities {
+        ModelCapabilities {
+            supports_tools: false,
+            supports_reasoning: false,
+            supports_vision: false,
+            supports_streaming: false,
+        }
+    }
+
+    async fn stream(
+        &self,
+        _request: ModelRequest,
+        _cancellation: CancellationToken,
+    ) -> ModelResult<ModelStream> {
+        Err(ModelError::cancelled())
+    }
+
+    async fn complete(
+        &self,
+        _request: ModelRequest,
+        _cancellation: CancellationToken,
+    ) -> ModelResult<ModelResponse> {
+        self.entered.notify_one();
+        self.release.notified().await;
+        Ok(ModelResponse::new(
+            ModelMessage::assistant_text(
+                r#"{"achieved": true, "evidence": "验证通过"}"#.to_string(),
+            ),
+            StopReason::EndTurn,
+            None,
+            None,
+        )?)
+    }
+}
+
+/// [回归] 验证 A 期间 clear + create B：A 的验证不得完成 B。
+///
+/// 修复前 `handle_complete` 无参调用 `complete_goal()`，会把当前 goal（B）置为
+/// Complete；本用例在旧实现上失败。
+#[tokio::test]
+async fn test_goal_complete_during_replace_does_not_complete_replacement_goal() {
+    let controller = Arc::new(MockController::new());
+    controller.create_goal("目标 A".to_string()).await.unwrap();
+    let stale_id = controller.snapshot().goal_id.clone().unwrap();
+
+    let gate = Arc::new(GatedModel::new());
+    let tool = Arc::new(GoalTool::new(
+        Arc::clone(&controller) as Arc<dyn GoalController>,
+        Some(Arc::clone(&gate) as Arc<dyn Model>),
+    ));
+
+    let handle = {
+        let tool = Arc::clone(&tool);
+        tokio::spawn(async move {
+            tool.invoke(
+                json!({"action": "complete"}),
+                ToolContext::new(NO_MESSAGES, "."),
+            )
+            .await
+        })
+    };
+
+    // 确认已进入辅助模型 await 窗口。
+    gate.entered.notified().await;
+
+    controller.clear_goal().await.unwrap();
+    controller.create_goal("目标 B".to_string()).await.unwrap();
+    let replacement_id = controller.snapshot().goal_id.clone().unwrap();
+    gate.release.notify_one();
+
+    let result = handle
+        .await
+        .expect("complete 任务不得 panic")
+        .expect("身份漂移必须作为普通结果返回");
+    assert!(
+        result.contains("Goal not completed"),
+        "应明确告知未完成，实际：{result}"
+    );
+    assert!(
+        result.contains("已被替换或清除"),
+        "应说明 goal 已被替换或清除，实际：{result}"
+    );
+
+    let snap = controller.snapshot();
+    assert_eq!(
+        snap.objective.as_deref(),
+        Some("目标 B"),
+        "新 goal 必须保留"
+    );
+    assert_eq!(
+        snap.status,
+        Some(GoalStatus::Active),
+        "B 不得被 A 的验证置为 Complete"
+    );
+    assert_eq!(
+        controller.checked_goal_ids(),
+        vec![stale_id.clone()],
+        "身份 CAS 必须收到验证开始时捕获的 A id"
+    );
+    assert_ne!(stale_id, replacement_id);
+}
+
+/// 同一 goal 的验证通过仍正常完成，并携带捕获的身份做 CAS。
+#[tokio::test]
+async fn test_goal_complete_same_goal_after_verification_completes() {
+    let controller = Arc::new(MockController::new());
+    controller
+        .create_goal("完成重构".to_string())
+        .await
+        .unwrap();
+    let goal_id = controller.snapshot().goal_id.clone().unwrap();
+
+    let tool = GoalTool::new(
+        Arc::clone(&controller) as Arc<dyn GoalController>,
+        Some(Arc::new(MockModel::with_response(
+            r#"{"achieved": true, "evidence": "所有测试通过"}"#,
+        )) as Arc<dyn Model>),
+    );
+
+    let result = tool
+        .invoke(json!({"action": "complete"}), ToolContext::new(&[], "."))
+        .await
+        .unwrap();
+
+    assert!(result.contains("Goal completed"), "实际：{result}");
+    assert_eq!(controller.snapshot().status, Some(GoalStatus::Complete));
+    assert_eq!(controller.checked_goal_ids(), vec![goal_id]);
 }

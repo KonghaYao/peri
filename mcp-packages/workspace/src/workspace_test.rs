@@ -55,6 +55,26 @@ async fn unknown_tool_is_invalid_params() {
     );
 }
 
+/// [回归测试] PDF pages 曾返回成功占位，MCP 必须投影为工具执行失败。
+#[tokio::test]
+async fn read_pdf_pages_is_reported_as_tool_error() {
+    let dir = tempfile::tempdir().unwrap();
+    let server = server_in(&dir);
+    let result = complete(
+        invoke_tool_call(
+            server.tools(),
+            &server.cwd,
+            &request("Read", json!({"file_path": "missing.pdf", "pages": "1-5"})),
+        )
+        .await
+        .expect("工具执行失败仍应返回协议结果"),
+    );
+    assert_eq!(result.is_error, Some(true));
+    let text = first_text(&result).expect("工具错误必须提供文本");
+    assert!(text.contains("tool `Read` failed to execute"));
+    assert!(text.contains("pages") && text.contains("not supported"));
+}
+
 #[tokio::test]
 async fn tool_failures_preserve_diagnostic_error_result() {
     let dir = tempfile::tempdir().expect("临时目录夹具必须可创建");

@@ -1,1 +1,1 @@
-DO NOT CALL. Background task results are injected into your context automatically when tasks complete (as a user message carrying the structured `bgResults` payload). This tool exists only as a type placeholder for the synthetic AgentResult tool_use blocks the system inserts before that user message. Calling it never returns real results—if you reach for it, you are misreading the protocol.
+不要调用。后台任务结果完成后由 AsyncRouter 作为 Defer system reminder 自动投递。本工具仅保留历史 AgentResult tool_use 的注册表身份与客户端显示映射，不查询任务状态，也不返回实际结果。

@@ -518,9 +518,11 @@ async fn skill_tool_activates_mcp_skill_through_registry() {
         )
         .await
         .expect("SkillTool 的 MCP 分支必须经 activation 成功");
+    assert!(!output.contains("mcp__srv__"), "不得伪造工具前缀");
     assert!(output.contains("# Body"), "应含激活正文：{output}");
     assert!(
-        output.contains("This skill is served by MCP server \"srv\""),
+        output.lines().next()
+            == Some("This skill is served by MCP server \"srv\", uri: skill://srv/alpha/SKILL.md."),
         "MCP 来源标注必须保留（与 content::load 同源）：{output}"
     );
     assert_eq!(fx.reads(), 1, "SkillTool 正文恰来自一次 activation 读取");
@@ -674,6 +676,7 @@ mod real_workspace_provider {
             .invoke("mcp__workspace__alpha")
             .await
             .expect("真实 provider 激活应成功");
+        assert!(!out.contains("mcp__workspace__"), "不得伪造工具前缀");
         assert!(out.contains("# Alpha v1"), "应注入 v1 正文：{out}");
         assert!(
             out.contains("This skill is served by MCP server \"workspace\""),

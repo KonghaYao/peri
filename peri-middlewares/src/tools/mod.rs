@@ -1,6 +1,10 @@
 pub mod ask_user_tool;
 pub mod todo;
 
+#[cfg(test)]
+#[path = "wrapper_test.rs"]
+mod wrapper_tests;
+
 use std::sync::Arc;
 
 pub use ask_user_tool::AskUserTool;
@@ -28,6 +32,34 @@ impl BaseTool for BoxToolWrapper {
 
     fn is_direct(&self) -> bool {
         self.0.is_direct()
+    }
+
+    fn visible_to_model(&self) -> bool {
+        self.0.visible_to_model()
+    }
+
+    fn output_char_limit(&self) -> Option<usize> {
+        self.0.output_char_limit()
+    }
+
+    fn prefers_persist(&self) -> bool {
+        self.0.prefers_persist()
+    }
+
+    fn context_retention(&self) -> peri_agent::tools::ContextRetention {
+        self.0.context_retention()
+    }
+
+    fn title(&self) -> Option<&str> {
+        self.0.title()
+    }
+
+    fn namespace(&self) -> Option<&str> {
+        self.0.namespace()
+    }
+
+    fn prompt_declaration(&self) -> Option<String> {
+        self.0.prompt_declaration()
     }
 
     fn description(&self) -> &str {
@@ -93,6 +125,34 @@ impl BaseTool for ArcToolWrapper {
 
     fn is_direct(&self) -> bool {
         self.0.is_direct()
+    }
+
+    fn visible_to_model(&self) -> bool {
+        self.0.visible_to_model()
+    }
+
+    fn output_char_limit(&self) -> Option<usize> {
+        self.0.output_char_limit()
+    }
+
+    fn prefers_persist(&self) -> bool {
+        self.0.prefers_persist()
+    }
+
+    fn context_retention(&self) -> peri_agent::tools::ContextRetention {
+        self.0.context_retention()
+    }
+
+    fn title(&self) -> Option<&str> {
+        self.0.title()
+    }
+
+    fn namespace(&self) -> Option<&str> {
+        self.0.namespace()
+    }
+
+    fn prompt_declaration(&self) -> Option<String> {
+        self.0.prompt_declaration()
     }
 
     fn description(&self) -> &str {

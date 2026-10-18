@@ -10,7 +10,6 @@ use crate::tool_search::core_tools::TOOL_ASK_USER;
 struct InputOption {
     label: String,
     description: Option<String>,
-    _preview: Option<String>,
 }
 
 #[derive(serde::Deserialize)]
@@ -107,10 +106,6 @@ pub fn ask_user_tool_definition() -> peri_agent::tools::ToolDefinition {
                                         "description": {
                                             "type": "string",
                                             "description": "Option explanation, explaining the option's meaning or applicable scenario (optional)"
-                                        },
-                                        "preview": {
-                                            "type": "string",
-                                            "description": "Preview content, showing the effect or example of the option (optional)"
                                         }
                                     },
                                     "required": ["label"]

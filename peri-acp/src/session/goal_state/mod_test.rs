@@ -304,7 +304,7 @@ async fn test_increment_continuation_updates_snapshot() {
 
 // ---- GoalController trait 实现测试 ----
 
-use peri_acp_types::goal::{GoalController, GoalStore};
+use peri_acp_types::goal::{GoalController, GoalStateView, GoalStore};
 
 #[tokio::test]
 async fn test_goal_controller_create_duplicate_errors() {
@@ -531,4 +531,65 @@ async fn test_long_block_reason_is_bounded_in_recovery_reminder() {
     let body = &reminder.as_reminder().body;
     assert!(body.chars().count() < 6_000, "恢复提醒必须限制原因长度");
     assert!(body.contains('…'), "截断必须显式标记");
+}
+
+// ---- complete_goal_if_current：身份 CAS ----
+
+/// clear + create B 后，A 的 identity CAS 必须失败且 B 保持 Active。
+#[tokio::test]
+async fn test_complete_goal_if_current_rejects_stale_id_after_replace() {
+    let state = make_state();
+    state.create_goal("目标 A".to_string()).await.unwrap();
+    let id_a = state.snapshot().goal_id.clone().unwrap();
+
+    state.clear().await.unwrap();
+    state.create_goal("目标 B".to_string()).await.unwrap();
+    let id_b = state.snapshot().goal_id.clone().unwrap();
+    assert_ne!(id_a, id_b, "create 必须生成新身份");
+
+    let err = state
+        .complete_goal_if_current(&id_a)
+        .await
+        .expect_err("stale id 必须被拒绝");
+    assert!(
+        err.contains("已被替换或清除"),
+        "错误须说明身份已变化，实际：{err}"
+    );
+
+    // 契约视图必须暴露身份（工具层据此做 CAS）。
+    let view = GoalStateView::snapshot(&state);
+    assert_eq!(view.goal_id.as_deref(), Some(id_b.as_str()));
+    assert_eq!(view.objective.as_deref(), Some("目标 B"));
+    assert_eq!(view.status, Some(GoalStatus::Active));
+
+    // 当前身份仍可正常完成。
+    state.complete_goal_if_current(&id_b).await.unwrap();
+    assert_eq!(state.snapshot().status, Some(GoalStatus::Complete));
+}
+
+/// 无活跃 goal 时 identity CAS 返回 Err，不 panic。
+#[tokio::test]
+async fn test_complete_goal_if_current_without_goal_errors() {
+    let state = make_state();
+    let err = state
+        .complete_goal_if_current("goal-x")
+        .await
+        .expect_err("无 goal 时必须失败");
+    assert!(err.contains("无活跃 goal"), "实际：{err}");
+}
+
+/// 同一身份已是终态时再次完成返回 Err，状态保持 Complete。
+#[tokio::test]
+async fn test_complete_goal_if_current_terminal_errors() {
+    let state = make_state();
+    state.create_goal("已完成目标".to_string()).await.unwrap();
+    let goal_id = state.snapshot().goal_id.clone().unwrap();
+    state.complete_goal().await.unwrap();
+
+    let err = state
+        .complete_goal_if_current(&goal_id)
+        .await
+        .expect_err("终态不可再次转换");
+    assert!(err.contains("非法状态转换"), "实际：{err}");
+    assert_eq!(state.snapshot().status, Some(GoalStatus::Complete));
 }

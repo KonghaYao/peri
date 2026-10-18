@@ -31,14 +31,15 @@ fn trim_line(content: &str) -> String {
 /// 停止语义（与 glob.rs 的协作取消对齐）：
 /// - `cancelled`：invoke 超时置位。任何模式下立即停止当前文件搜索（返回 false），
 ///   walker 在检查点 `Quit` 终止整个遍历。
-/// - `stopped`：输出预算置位（行数超过 `head_limit+1` 或字节超过 `MAX_OUTPUT_BYTES`）。
+/// - `stopped`：输出预算置位（行数超过 `collection_limit+1` 或字节超过 `MAX_OUTPUT_BYTES`）。
 ///   Default 模式通过预算检查自然停止当前文件；非 Default 模式**忽略** stopped——
 ///   CountOnly 必须数完当前文件才能输出正确计数，FilesWithoutMatch 必须确认文件
 ///   无匹配——由 walker 的文件级检查（grep.rs）停止新文件。
 ///
-/// 行数预算取 `head_limit+1`（多收 1 行）：恰好 N 行匹配时收集 N 行不置位，
+/// 行数预算取 `collection_limit+1`（多收 1 行）：恰好 N 行匹配时收集 N 行不置位，
 /// 输出层按实际行数精确判定——`== N` 不标 truncated，`> N` 才截断标记
-/// （消除"恰好 N 行被误标 truncated"，见 grep.rs 输出层）。
+/// （消除"恰好 N 行被误标 truncated"，见 grep.rs 输出层）。`collection_limit`
+/// 已包含分页 offset（offset + head_limit），因此 offset 不参与输出层的字符串跳过。
 ///
 /// 每文件一个 sink 实例，行先入本地缓冲 `local_lines`（Sink 回调在单文件内
 /// 顺序调用，行序稳定），文件搜索完成后由 grep.rs 批量入共享结果——避免逐行
@@ -65,7 +66,7 @@ impl SearchSink {
     ///
     /// - 行数预算：`total > max_limit + 1` 才置位（多收 1 行用于精确判定），
     ///   `max_limit == 0`（unlimited）时跳过——与 `matched` 的守卫对称，
-    ///   修复 head_limit=0 时第一条 context 行即置 stopped 的 bug。
+    ///   修复 collection_limit=0 时第一条 context 行即置 stopped 的 bug。
     /// - 字节预算：超过 `MAX_OUTPUT_BYTES` 置位；当前行仍 push（收集 ≈ 上限+1 行），
     ///   由输出层按实际字节截断并落盘提示。
     fn push_line(&mut self, line: String) -> Result<bool, std::io::Error> {
@@ -165,7 +166,7 @@ impl Sink for SearchSink {
             format!("{}{}: {}", self.display_path, separator, content)
         };
 
-        // 预算检查与 matched 共用（`max_limit > 0` 守卫：head_limit=0 时 unlimited）
+        // 预算检查与 matched 共用（`max_limit > 0` 守卫：collection_limit=0 时 unlimited）
         self.push_line(line)
     }
 }

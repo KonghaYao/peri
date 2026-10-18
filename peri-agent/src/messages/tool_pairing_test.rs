@@ -17,6 +17,27 @@ fn serialized(messages: &[BaseMessage]) -> serde_json::Value {
     serde_json::to_value(messages).unwrap()
 }
 
+/// [回归测试] 隐藏 AgentResult 不应改变历史调用身份、结果或顺序。
+#[test]
+fn test_historical_agent_result_pairing_is_preserved() {
+    let messages = vec![
+        BaseMessage::ai_with_tool_calls(
+            "",
+            vec![ToolCallRequest::new(
+                "historical-result",
+                "AgentResult",
+                json!({"task_id": "historical-task"}),
+            )],
+        ),
+        BaseMessage::tool_result("historical-result", "已完成的历史结果"),
+        BaseMessage::human("继续"),
+    ];
+    let expected = serialized(&messages);
+    let repaired = repair_model_tool_pairing(messages).unwrap();
+    assert_eq!(serialized(&repaired), expected);
+    assert!(AgentModelBridge::convert_messages(&repaired).is_ok());
+}
+
 #[test]
 fn missing_result_precedes_new_input_and_does_not_claim_execution_failure() {
     let repaired = repair_model_tool_pairing(vec![

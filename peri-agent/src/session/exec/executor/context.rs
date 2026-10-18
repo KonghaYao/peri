@@ -306,7 +306,7 @@ pub struct TurnInput {
     pub history: Vec<BaseMessage>,
     /// 上一轮 recall 注入项。
     pub incoming_recalls: Vec<String>,
-    /// 后台任务结果（注入合成的 AgentResult tool_use/tool_result）。
+    /// 后台任务结果（由 AsyncRouter 作为 Defer system reminder 投递）。
     pub bg_results: Vec<peri_acp_types::event::BackgroundTaskResult>,
     /// Langfuse 遥测注入面（None 表示禁用遥测）。
     pub langfuse: Option<LangfuseHooks>,

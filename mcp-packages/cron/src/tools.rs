@@ -1,11 +1,18 @@
 use std::sync::Arc;
 
 use async_trait::async_trait;
+use chrono::{DateTime, Utc};
 use parking_lot::Mutex;
 use peri_agent::tools::BaseTool;
 use serde_json::Value;
 
 use super::CronScheduler;
+
+/// 注册回执与列表共用的下次触发时间格式（调度与 `next_fire` 均为 UTC）。
+fn format_next_fire(next: Option<DateTime<Utc>>) -> String {
+    next.map(|time| time.format("%Y-%m-%d %H:%M:%S UTC").to_string())
+        .unwrap_or_else(|| "N/A".to_string())
+}
 
 pub struct CronRegisterTool {
     scheduler: Arc<Mutex<CronScheduler>>,
@@ -24,7 +31,7 @@ impl BaseTool for CronRegisterTool {
     }
 
     fn description(&self) -> &str {
-        "Register a scheduled task that will automatically send a user message at the specified cron interval. The task runs in-memory only (lost on restart). Use standard 5-field cron expression."
+        "Register a scheduled task that will automatically send a user message at the specified cron interval. The task runs in-memory only (lost on restart). Use a standard 5-field cron expression. Cron expressions and next fire times are evaluated in UTC."
     }
 
     fn parameters(&self) -> Value {
@@ -33,7 +40,7 @@ impl BaseTool for CronRegisterTool {
             "properties": {
                 "expression": {
                     "type": "string",
-                    "description": "Standard 5-field cron expression (e.g. '*/5 * * * *' for every 5 minutes)"
+                    "description": "Standard 5-field cron expression interpreted in UTC (e.g. '*/5 * * * *' for every 5 minutes)"
                 },
                 "prompt": {
                     "type": "string",
@@ -63,10 +70,16 @@ impl BaseTool for CronRegisterTool {
         let mut scheduler = self.scheduler.lock();
 
         match scheduler.register(expression, prompt) {
-            Ok(id) => Ok(format!(
-                "已注册定时任务 {}（{}），prompt: {}",
-                id, expression, prompt
-            )),
+            Ok(id) => {
+                let next = scheduler.get_task(&id).and_then(|task| task.next_fire);
+                Ok(format!(
+                    "已注册定时任务 {}（{}），下次触发: {} | prompt: {}",
+                    id,
+                    expression,
+                    format_next_fire(next),
+                    prompt
+                ))
+            }
             Err(e) => Err(e.into()),
         }
     }
@@ -89,7 +102,7 @@ impl BaseTool for CronListTool {
     }
 
     fn description(&self) -> &str {
-        "List all registered cron/scheduled tasks with their status, next fire time, and prompt."
+        "List all registered cron/scheduled tasks with their status, next fire time (UTC), and prompt. The first token of each line is the full task ID accepted by cron_remove."
     }
 
     fn parameters(&self) -> Value {
@@ -114,16 +127,12 @@ impl BaseTool for CronListTool {
         let mut lines = Vec::new();
         for task in tasks {
             let status = if task.enabled { "启用" } else { "禁用" };
-            let next = task
-                .next_fire
-                .map(|t| t.format("%Y-%m-%d %H:%M:%S UTC").to_string())
-                .unwrap_or_else(|| "N/A".to_string());
             lines.push(format!(
                 "- {} [{}] {} | 下次触发: {} | prompt: {}",
-                task.id.get(..8).unwrap_or(&task.id),
+                task.id,
                 status,
                 task.expression,
-                next,
+                format_next_fire(task.next_fire),
                 task.prompt
             ));
         }

@@ -148,12 +148,12 @@ async fn releaser_rpc_returns_skill_content_with_annotation() {
             let content = last.content();
             assert!(content.contains("Body of hello."), "应含 skill 全文");
             assert!(
-                content.contains("This skill is served by MCP server \"demo\""),
+                content.lines().next() == Some("This skill is served by MCP server \"demo\", uri: skill://demo/hello/SKILL.md."),
                 "应含来源标注，实际: {content}"
             );
             assert!(
-                content.contains("SearchExtraTools"),
-                "应含工具通路提醒，实际: {content}"
+                !content.contains("mcp__demo__"),
+                "不得根据来源伪造工具前缀，实际: {content}"
             );
             let fb = result.feedback.expect("RPC 命中应有反馈");
             assert_eq!(fb.level, FeedbackLevel::Info);

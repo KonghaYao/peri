@@ -338,6 +338,25 @@ fn test_skills_section_rendered_by_holder() {
     );
 }
 
+/// [回归测试] resume 模型与 description UI 契约必须准确投影到提示词。
+#[test]
+fn test_subagent_resume_model_and_optional_ui_contract() {
+    let result = build_system_prompt(
+        &MetaHarnessState::default(),
+        None,
+        "/tmp",
+        &AgentCatalogProvider::new(),
+        None,
+        None,
+    );
+    assert!(result.contains("当前磁盘上的 Agent 定义"));
+    assert!(result.contains("不保留先前的 model override"));
+    assert!(result.contains("本次 resume 调用的 `model` 参数也被忽略"));
+    assert!(result.contains("仅在省略 `prompt` 时，可选填简短 `description`"));
+    assert!(!result.contains("resumes keep the original execution context"));
+    assert!(!result.contains("Always include a short `description`"));
+}
+
 /// 11_subagent 段落重构守护（设计 §3.5.1 步骤 1）：Agent Selection Guide
 /// 删除具体任务→agent 映射（仓库级调度建议由 catalog id/description 承载），
 /// 通用选择原则保留，但不绑定任何 built-in agent ID。

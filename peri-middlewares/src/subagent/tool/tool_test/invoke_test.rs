@@ -138,7 +138,7 @@ async fn test_tool_agent_not_found() {
             serde_json::json!({
                 "subagent_type": "nonexistent-agent",
                 "prompt": "do something",
-                "cwd": "/tmp"
+                "cwd": dir.path().to_str().unwrap()
             }),
             peri_agent::tools::ToolContext::new(&[], "."),
         )
@@ -182,9 +182,9 @@ async fn test_tool_executes_with_valid_agent_file() {
     );
 }
 
-/// Verify Agent reserved fields (isolation/run_in_background/description/name) don't affect execution
+/// description 用于 UI，未知 name 字段仍被宽容忽略。
 #[tokio::test]
-async fn test_agent_reserved_fields_parsed() {
+async fn test_agent_ui_and_unknown_fields_tolerated() {
     let dir = tempdir().unwrap();
     let host = HostFixture::open_in(dir.path(), "fixture-invoke-reserved").await;
     let agents_dir = dir.path().join(".claude").join("agents");
@@ -203,7 +203,6 @@ async fn test_agent_reserved_fields_parsed() {
                 "subagent_type": "test-agent",
                 "description": "test desc",
                 "name": "test-alias",
-                "isolation": "worktree",
                 "run_in_background": true,
                 "cwd": dir.path().to_str().unwrap()
             }),
@@ -554,11 +553,12 @@ async fn test_agent_invoke_parent_host_masks_fallback_runtime_and_store() {
     // 本次委派的 tool-call 身份（父侧 provenance 来源）。
     let invocation_id = "fixture-mask-invocation";
     let fallback_manager = Arc::new(peri_agent::agent::async_tasks::TaskManager::new());
-    let tool = make_subagent_tool(vec![])
+    let mut tool = make_subagent_tool(vec![])
         .with_session_resources(fallback_store.facade())
         .with_task_manager(fallback_manager.clone())
         .with_parent_thread_id(parent_id.clone())
         .with_parent_session(parent);
+    tool.parent_cwd = cwd.clone();
     let mut ctx = peri_agent::tools::ToolContext::new(&[], &cwd);
     ctx.invocation_id = Some(invocation_id.to_string().into());
     ctx.tool_call_id = Some(invocation_id.to_string().into());
