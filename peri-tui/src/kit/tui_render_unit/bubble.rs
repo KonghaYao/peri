@@ -61,6 +61,10 @@ pub struct TuiUserBubble {
     /// 渲染时 `Some` 才会在 label 追加 muted 来源。身份字段，不进 content_hash
     /// （同 `message_id` 先例），进 partial_eq。
     pub source: Option<String>,
+    /// 持久消息身份——`UserInputDelivered.input_id`（与落库的 `messages.message_id`
+    /// 同一 UUID）。历史窗口重开时据此判断 live 尾部是否已实际持有该条目；
+    /// 不参与 content_hash，进 partial_eq。回放/本地事件无来源时为 `None`。
+    pub message_id: Option<String>,
 }
 
 impl TuiUserBubble {
@@ -88,11 +92,18 @@ impl TuiUserBubble {
             content_hash,
             reminder,
             source: None,
+            message_id: None,
         }
+    }
+
+    /// 绑定持久消息身份（`UserInputDelivered.input_id`）。
+    pub fn with_message_id(mut self, message_id: impl Into<String>) -> Self {
+        self.message_id = Some(message_id.into());
+        self
     }
 }
 
-tui_impl_partial_eq!(TuiUserBubble: text, attachments, reminder, source);
+tui_impl_partial_eq!(TuiUserBubble: text, attachments, reminder, source, message_id);
 
 /// 短回复阈值（字符数，`chars().count()` 口径）：AI 正文**少于**该值时按
 /// 过程区形态渲染（缩进 2 格并入过程带）；user 气泡永远不缩进（§6）。

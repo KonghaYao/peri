@@ -289,15 +289,14 @@ pub(super) fn handle_window_page_loaded(
         views.push((key, item, units, descriptor));
     }
     if open_plan.as_ref().is_some_and(|plan| plan.adopt_enabled) {
-        let watermark = open_plan
-            .as_ref()
-            .and_then(|plan| plan.prior_max_displayed_position);
-        views.retain(|(key, item, _, _)| {
-            let adopt = item.source.is_own()
-                && item
-                    .position
-                    .zip(watermark)
-                    .is_some_and(|(position, watermark)| position > watermark);
+        // adopt 只认「live 尾部实际持有的持久条目」：从 committed 中的消息身份
+        // （user 的 input id / assistant 的 messageId）与工具身份反推。不能用
+        // 「位置大于当前展示水位」推断——已被预算淘汰的历史条目不在 committed、
+        // 也不在账本，但位置仍高于水位；按位置 adopt 会把它们标记为已展示，
+        // 随后被去重逻辑永久跳过（复审 P2-1）。
+        let retained = RetainedLiveEntries::collect(state);
+        views.retain(|(key, item, units, _)| {
+            let adopt = retained.holds(key, units);
             if adopt {
                 // 正文已由 live 尾部持有：只登记展示身份与持久位置，不进入
                 // segments/index，也不再次插入 committed。
@@ -421,9 +420,64 @@ struct OpenDisplayPlan {
     allow_display_merge: bool,
     /// `Some` 覆盖 gap/placement 的正文插入槽位。
     insert_slot: Option<usize>,
-    /// open 页中已由 live 尾部展示的条目：只登记身份，不插入正文。
+    /// open 页中已由 live 尾部实际持有的条目：只登记身份，不插入正文。
     adopt_enabled: bool,
-    prior_max_displayed_position: Option<u64>,
+}
+
+/// live 尾部实际持有的持久条目身份。
+///
+/// 只从 `committed` 的**身份字段**取证：user/assistant 气泡的 `message_id`
+/// （分别为投递 input id 与 ACP `messageId`），以及工具卡片的 `tool_id`（消息
+/// 可能只有工具调用、没有气泡）。位置、内容哈希或到达顺序都不能替代身份。
+struct RetainedLiveEntries {
+    session_id: String,
+    message_ids: HashSet<String>,
+    tool_ids: HashSet<String>,
+}
+
+impl RetainedLiveEntries {
+    fn collect(state: &BridgeState) -> Self {
+        let mut message_ids = HashSet::new();
+        let mut tool_ids = HashSet::new();
+        for unit in &state.committed {
+            match unit {
+                TuiRenderUnit::TuiUserBubble(bubble) => {
+                    if let Some(message_id) = &bubble.message_id {
+                        message_ids.insert(message_id.clone());
+                    }
+                }
+                TuiRenderUnit::TuiAssistantBubble(bubble) => {
+                    if let Some(message_id) = &bubble.message_id {
+                        message_ids.insert(message_id.clone());
+                    }
+                }
+                TuiRenderUnit::TuiToolCard(card) => {
+                    tool_ids.insert(card.tool_id.clone());
+                }
+                _ => {}
+            }
+        }
+        Self {
+            session_id: state.active_session_id.clone(),
+            message_ids,
+            tool_ids,
+        }
+    }
+
+    /// 条目身份（`{session}:{message uuid}`）或它的工具子项是否仍在 committed。
+    fn holds(&self, key: &PersistentEntryKey, units: &[TuiRenderUnit]) -> bool {
+        if !key.source.is_own() {
+            return false;
+        }
+        let Some((session, message_id)) = key.entry_id.rsplit_once(':') else {
+            return false;
+        };
+        (session == self.session_id && self.message_ids.contains(message_id))
+            || units.iter().any(|unit| match unit {
+                TuiRenderUnit::TuiToolCard(card) => self.tool_ids.contains(&card.tool_id),
+                _ => false,
+            })
+    }
 }
 
 /// 展示账本区间与 `committed` 不一致；拒绝猜测性删除。
@@ -456,14 +510,14 @@ fn prepare_open_display(
                 &mut state.committed,
                 &snapshot.displayed_slot_ranges,
             )?);
-            // 摘除后仍有 live 尾部时，open 页中越过旧展示水位的条目已经由 live
-            // 路径展示：只登记身份，阻止后续翻页重复插入。
-            // `live_empty` 必须参与：流式 turn 中 open 页可能包含尚未经 live
-            // 路径渲染的新条目，此时 adopt 会把正文藏起来；宁可让页插入，
-            // 也不丢内容（见 `reopen_after_streaming_turn_does_not_duplicate_prior_page`）。
-            adopt_enabled = live_empty
-                && !state.committed.is_empty()
-                && snapshot.max_displayed_position.is_some();
+            // 摘除后仍有 live 尾部时，open 页中实际仍由 committed 持有的条目
+            // 只登记身份，阻止后续翻页重复插入；是否持有由消息身份判定，不用
+            // 位置水位推断（已被淘汰的历史条目也高于水位）。
+            // adopt 与 live 区域是否为空解耦：`RetainedLiveEntries` 只认
+            // committed 中实际持有的身份，仅存在于流式 turn 的条目不会被采纳，
+            // 仍照常插入；反之，新一轮正在流式时 committed 里已完成的条目也必须
+            // adopt，否则重开页会把它们重复插入。
+            adopt_enabled = !state.committed.is_empty();
             if snapshot.displayed_slot_ranges.is_empty() && !state.committed.is_empty() {
                 // adopt-only：账本没有可摘除的正文，剩余 committed 全是 live 尾部
                 // （无论 live 区域当前是否为空）。本页未被 adopt 的条目属于 live
@@ -517,7 +571,6 @@ fn prepare_open_display(
         allow_display_merge,
         insert_slot,
         adopt_enabled,
-        prior_max_displayed_position: snapshot.max_displayed_position,
     })
 }
 

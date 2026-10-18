@@ -85,8 +85,9 @@ consumer 发现命令已不在本地待结算账本（被致命失败结算、�
 render FIFO，稳定 input ID 用于 live/replay 去重，复用原 `TuiUserBubble`。事件泵在推送
 任何后续事件前，按 mailbox 的进程内交付日志以 Receive 实际顺序补发 `UserInputDelivered`；
 交付日志条目在 `UserInputDelivered` 发布时绑定补打的 `session_seq`，未绑定序号的条目绝不提前补发。
-泵只允许在序号严格更小的当前事件之前补发已绑定交付，其余留到 turn 尾部：气泡可能因 render
-通道丢弃而落在本轮回答之后，但不会越过更早的回答，也不会丢失。交付槽位在 enqueue 准入时预留，
+泵只允许在序号严格更小的当前事件之前补发已绑定交付，其余留到 turn 尾部：交付事件经
+可靠 render FIFO 进入渲染链路（通道满时等待容量、不降级丢弃）；若发布失败或发布后的
+路径丢失，气泡仍会按交付日志在 turn 尾部补发，不会丢失。交付槽位在 enqueue 准入时预留，
 容量不足在消费/Claimed 之前拒绝，不会在消息写入 transcript
 后才失败。sink 未确认写出前不 ack，失败保留日志并有界重试；重试耗尽显式失败，不以普通
 done 收尾。TUI 不从终态快照合成气泡，终态只清除提交反馈。

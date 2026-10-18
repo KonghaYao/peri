@@ -120,6 +120,7 @@ fn user_bubble(text: &str) -> TuiRenderUnit {
         content_hash: 0,
         reminder: None,
         source: None,
+        message_id: None,
     })
 }
 

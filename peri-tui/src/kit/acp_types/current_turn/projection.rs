@@ -287,12 +287,17 @@ impl CurrentTurn {
                             }));
                     }
                 }
-                TurnSegment::UserBubble { text, attachments } => {
+                TurnSegment::UserBubble {
+                    text,
+                    attachments,
+                    message_id,
+                } => {
                     if self.cached_view_models.len() <= i {
+                        let mut bubble =
+                            TuiUserBubble::with_attachments(text.clone(), attachments.clone());
+                        bubble.message_id.clone_from(message_id);
                         self.cached_view_models
-                            .push_back(TuiRenderUnit::TuiUserBubble(
-                                TuiUserBubble::with_attachments(text.clone(), attachments.clone()),
-                            ));
+                            .push_back(TuiRenderUnit::TuiUserBubble(bubble));
                     }
                 }
             }

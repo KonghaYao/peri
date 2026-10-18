@@ -150,11 +150,6 @@ impl DisplayLedger {
         entries
     }
 
-    /// 无 slot 条目的最大持久位置；用于身份切换后的 adopt 水位。
-    pub fn max_position(&self) -> Option<u64> {
-        self.positions.values().copied().max()
-    }
-
     pub fn debug_ranges(&self) -> Vec<(usize, PersistentEntryKey, usize)> {
         self.slots
             .iter()

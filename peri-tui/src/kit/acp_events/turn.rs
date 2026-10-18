@@ -341,6 +341,7 @@ pub(super) fn handle_local_user_bubble(
     state: &mut BridgeState,
     text: &str,
     attachments: Vec<crate::kit::tui_render_unit::UserAttachment>,
+    message_id: Option<String>,
 ) {
     state.last_submitted_text = Some(SubmittedInputRollback {
         text: text.to_owned(),
@@ -350,7 +351,7 @@ pub(super) fn handle_local_user_bubble(
     // 判定的基准（注意 session replay 的 user_message_chunk 也走本变体，但 replay
     // 期间无 turn 运行、无 TurnInterrupted 到达，递增不会造成误判）。
     state.turn_generation = state.turn_generation.wrapping_add(1);
-    state.push_user_bubble(text.to_string(), attachments);
+    state.push_user_bubble(text.to_string(), attachments, message_id);
     state.publish_barrier();
     super::render::push_acp_state(state);
 }
@@ -385,9 +386,12 @@ pub(super) fn handle_user_input_delivered(
     state.last_submitted_text = None;
     state.variant = 1;
     // 投递的时刻才显示气泡：附件展示记录从投递内容还原（图片块只留序号与大小）。
+    // `input_id` 与落库的 `messages.message_id` 是同一 UUID；历史窗口重开时用它
+    // 判断这条消息是否仍由 live 尾部实际持有。
     state.push_user_bubble(
         content.text_content(),
         crate::kit::steer_state::attachment_displays_from_content(content),
+        Some(input_id.to_owned()),
     );
     state.publish_barrier();
     super::render::push_acp_state(state);

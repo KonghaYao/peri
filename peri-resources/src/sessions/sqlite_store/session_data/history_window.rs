@@ -25,8 +25,8 @@ use peri_acp_types::session_resources::{
 };
 use sha2::{Digest, Sha256};
 
-/// `HISTORY_WINDOW_BOUNDS_SQL` 的行形状：(最旧 id, 最新 id, 最新 position, 继承行数)。
-type HistoryWindowBoundsRow = (Option<String>, Option<String>, Option<i64>, i64);
+/// `HISTORY_WINDOW_BOUNDS_SQL` 的行形状：(最旧 id, 最新 id, 最新 position)。
+type HistoryWindowBoundsRow = (Option<String>, Option<String>, Option<i64>);
 
 // ─── 窗口读取（peri.historyWindowV1） ─────────────────────────────────────────
 
@@ -55,7 +55,8 @@ impl SqliteSessionData {
     }
 
     /// 一次有界读取窗口边界：own 最旧/最新身份、durable tail、可重建 checkpoint、
-    /// 冻结前缀存在性。语句不取 `content`；会话不存在是 `NotFound`。
+    /// 冻结前缀事实。边界语句不取 `content`，也不触碰 `inherited_context`
+    /// （由增量 blob 扫描独立给出）；会话不存在是 `NotFound`。
     pub(super) async fn read_history_window_bounds(
         &self,
         id: &ThreadId,
@@ -86,7 +87,7 @@ impl SqliteSessionData {
             .fetch_optional(&mut *tx)
             .await
             .map_err(|error| map_sqlx(&error))?;
-        let (oldest, latest, latest_position, _inherited) = row.ok_or_else(not_found)?;
+        let (oldest, latest, latest_position) = row.ok_or_else(not_found)?;
         let checkpoint: Option<(String, i64)> = sqlx::query_as(HISTORY_WINDOW_CHECKPOINT_FAST_SQL)
             .bind(id.as_str())
             .fetch_optional(&mut *tx)

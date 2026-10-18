@@ -237,17 +237,21 @@ pub(super) async fn run_receive_with_budget(
             for (id, content) in user_inputs {
                 let input_id = id.as_uuid().to_string();
                 if delivered.contains(&input_id) {
+                    // 交付事件走同一条 render FIFO，但只等待容量、不降级丢弃：
+                    // forwarder 按 FIFO 消费时补打 session_seq 并绑定交付日志，
+                    // 事件在后续任意路径丢失时仍能按该序号在水位前补发。
                     input
                         .context
                         .runtime
                         .event_bus
-                        .emit_render(RenderEvent::UserInputDelivered {
+                        .emit_render_reliable(RenderEvent::UserInputDelivered {
                             turn_id: input.context.turn_id(),
                             agent_id: input.context.session.agent_id,
                             generation: mailbox.generation().to_owned(),
                             input_id,
                             content,
-                        });
+                        })
+                        .await;
                 }
             }
         }

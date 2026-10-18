@@ -48,15 +48,18 @@ pub(in crate::sessions) const ACTIVE_ENTRY_POSITIONS_SQL: &str =
 
 // ─── 窗口读取（peri.historyWindowV1，archive 视图） ──────────────────────────
 
-/// 窗口边界：own 最旧/最新稳定身份、最新 durable 位置、冻结前缀是否存在。
+/// 窗口边界：own 最旧/最新稳定身份、最新 durable 位置。
 ///
 /// 不取 `content`，也不做聚合；会话不存在时没有行（`NotFound`）。最新行缺失与位置缺失
 /// 必须同时成立或同时缺失，代码在解码处显式校验，不用 `COALESCE` 兜底。
+///
+/// 冻结前缀是否存在**不在本语句**：`t.inherited_context` 是可能达 MiB 级的 blob 列，
+/// 哪怕只做 `IS NULL OR = ''` 比较也会让 SQLite 物化整列。该事实由增量 blob 扫描
+/// （[`super::inherited_blob`]）独立给出，本语句不得再引用该列。
 pub(in crate::sessions) const HISTORY_WINDOW_BOUNDS_SQL: &str = "SELECT
         (SELECT m.message_id FROM messages m WHERE m.thread_id = t.id ORDER BY m.rowid ASC LIMIT 1),
         (SELECT m.message_id FROM messages m WHERE m.thread_id = t.id ORDER BY m.rowid DESC LIMIT 1),
-        (SELECT m.rowid FROM messages m WHERE m.thread_id = t.id ORDER BY m.rowid DESC LIMIT 1),
-        (SELECT CASE WHEN t.inherited_context IS NULL OR t.inherited_context = '' THEN 0 ELSE 1 END)
+        (SELECT m.rowid FROM messages m WHERE m.thread_id = t.id ORDER BY m.rowid DESC LIMIT 1)
     FROM threads t WHERE t.id = ?1";
 
 /// 最近一次可由现有 canonical 行重建的 Full checkpoint：最新一条被 `superseded_by`

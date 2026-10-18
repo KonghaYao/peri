@@ -61,6 +61,8 @@ pub struct VisibleText {
     pub prefix_evicted: bool,
     /// 首块起点落在多字节字符中间时跳过的字节数（1..=3）。
     pub skipped_fragment_bytes: usize,
+    /// 末尾停在多字节字符中途的字节数（1..=3）：不属于损坏，等下一块补齐。
+    pub trailing_fragment_bytes: usize,
 }
 
 impl HistoryDetailWindow {
@@ -278,8 +280,12 @@ impl HistoryDetailWindow {
     /// 面板展示文本：从**最早驻留块**开始拼接连续区间。
     ///
     /// 超过 4 MiB 预算后首块会被淘汰；此时展示仍必须从首个驻留块开始。块边界可能
-    /// 落在多字节字符中间：只在开头跳过 1..=3 字节的跨块残片，找到可整体解码的
-    /// 起点；4 个起点都失败说明正文真实损坏，仍返回 [`DetailError::Utf8`]。
+    /// 落在多字节字符中间：
+    ///
+    /// - 开头最多跳过 3 个多字节字符的续字节（跨块残片），找到可解码的起点；
+    /// - 末尾若只差后续字节（`Utf8Error::error_len` 为 `None`），保留有效前缀，把
+    ///   未完成残片计入 [`VisibleText::trailing_fragment_bytes`]，等下一块拼接；
+    /// - 只有连续区间已覆盖 EOF、或序列在中间真实非法时才返回 [`DetailError::Utf8`]。
     pub fn visible_text(&self) -> Result<VisibleText, DetailError> {
         let Some((start, _)) = self.chunks.first_key_value() else {
             return Ok(VisibleText::default());
@@ -293,25 +299,37 @@ impl HistoryDetailWindow {
             bytes.extend_from_slice(&chunk.bytes);
             cursor = cursor.saturating_add(chunk.bytes.len() as u64);
         }
-        for skipped in 0..=3usize {
-            if skipped >= bytes.len() {
-                break;
-            }
-            if let Ok(text) = std::str::from_utf8(&bytes[skipped..]) {
-                return Ok(VisibleText {
-                    text: text.to_string(),
-                    prefix_evicted: *start > 0,
-                    skipped_fragment_bytes: skipped,
-                });
-            }
-        }
         if bytes.is_empty() {
             return Ok(VisibleText {
                 prefix_evicted: *start > 0,
                 ..VisibleText::default()
             });
         }
-        Err(DetailError::Utf8)
+        let skipped = bytes
+            .iter()
+            .take(3)
+            .take_while(|byte| (**byte & 0b1100_0000) == 0b1000_0000)
+            .count();
+        let candidate = &bytes[skipped..];
+        let text = match std::str::from_utf8(candidate) {
+            Ok(text) => text,
+            Err(error) => {
+                // `error_len() == None` 只表示输入在末尾提前结束，即末尾停在多字节
+                // 字符中途。连续区间尚未覆盖 EOF 时这是正常的半块，下一块会补齐；
+                // 已到 EOF 仍不完整才是真实损坏。
+                if error.error_len().is_some() || cursor >= self.descriptor.total_bytes {
+                    return Err(DetailError::Utf8);
+                }
+                std::str::from_utf8(&candidate[..error.valid_up_to()])
+                    .map_err(|_| DetailError::Utf8)?
+            }
+        };
+        Ok(VisibleText {
+            text: text.to_string(),
+            prefix_evicted: *start > 0,
+            skipped_fragment_bytes: skipped,
+            trailing_fragment_bytes: candidate.len().saturating_sub(text.len()),
+        })
     }
 
     /// 流式导出：每个块直接交给 sink，不构造完整正文副本。
@@ -602,6 +620,12 @@ pub(crate) fn build_history_detail_lines(
                 lines.push(Line::from(format!(
                     "（前 {} 字节为跨块字符残片，已略过）",
                     visible.skipped_fragment_bytes
+                )));
+            }
+            if visible.trailing_fragment_bytes > 0 {
+                lines.push(Line::from(format!(
+                    "（末尾 {} 字节为未完成字符，待下一块拼接）",
+                    visible.trailing_fragment_bytes
                 )));
             }
             if !visible.text.is_empty() {

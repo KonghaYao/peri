@@ -9,7 +9,7 @@ use peri_acp_types::{
     event_v2::EventHandles,
     frozen::{ChildHandlerFactory, ThreadPersistence},
     goal::GoalController,
-    identity::EventDeliveryClass,
+    identity::{EventDeliveryClass, SessionSeq},
     messages::BaseMessage,
     runtime::UnstampedEvent,
     session::ExecutionFailure,
@@ -28,9 +28,35 @@ use crate::agent::{
 use crate::session::exec::executor::FrozenSessionData;
 use crate::session::exec::stage_builder::{CachedLlmInstances, V2AgentOutput};
 use crate::session::memory_probe;
+use crate::session::user_input_mailbox::UserInputMailbox;
 use crate::session::MessageTranscript;
 
 use super::ExecOutcome;
+
+/// 发布 forwarder 收到的一条事件，并把交付事件的发布序号绑定到交付日志。
+///
+/// 交付事件经可靠 render FIFO 进入 forwarder，因此这里补打的序号就是交付在
+/// 事件流中的真实位置；后续事件即使经订阅/队列丢失，泵也能按该序号在水位前
+/// 补发。无 mailbox 或发布失败（`None`）时只发布、不绑定。
+fn publish_forwarded_event(
+    publisher: &dyn EventPublisher,
+    session_id: &str,
+    source: &UnstampedEvent,
+    exec_ev: ExecutorEvent,
+    mailbox: Option<&UserInputMailbox>,
+) -> Option<SessionSeq> {
+    let delivered_input = match &exec_ev {
+        ExecutorEvent::UserInputDelivered { input_id, .. } => Some(input_id.clone()),
+        _ => None,
+    };
+    let session_seq = publisher.publish_event(session_id, source, exec_ev);
+    if let (Some(input_id), Some(session_seq), Some(mailbox)) =
+        (delivered_input, session_seq, mailbox)
+    {
+        mailbox.bind_delivery_sequence(&input_id, session_seq);
+    }
+    session_seq
+}
 
 /// EventBus forwarder 启动器闭包（ACP 侧持有 Langfuse bridge 构造；
 /// 参数 = event_handles / 主 agent_id / 事件消费闭包）。
@@ -331,20 +357,13 @@ pub async fn build_and_execute_agent_v2(req: V2ExecuteRequest) -> ExecOutcome {
             v2_out.event_handles,
             agent_id,
             Box::new(move |source, exec_ev| {
-                let delivered_input = match &exec_ev {
-                    ExecutorEvent::UserInputDelivered { input_id, .. } => Some(input_id.clone()),
-                    _ => None,
-                };
-                let session_seq = publisher.publish_event(&sid, &source, exec_ev);
-                // 序号在发布时补打；绑定后事件泵可在序号更小的后续事件之前
-                // 补发该交付。render 事件若在 EventBus 有界通道被丢弃，
-                // 本回调不会执行，日志条目保持未绑定，只能在本轮尾部补发：
-                // 气泡不会丢失，但可能落在本轮回答之后（不会越过更早的回答）。
-                if let (Some(input_id), Some(session_seq)) = (delivered_input, session_seq) {
-                    if let Some(mailbox) = delivery_mailbox.as_ref() {
-                        mailbox.bind_delivery_sequence(&input_id, session_seq);
-                    }
-                }
+                publish_forwarded_event(
+                    publisher.as_ref(),
+                    &sid,
+                    &source,
+                    exec_ev,
+                    delivery_mailbox.as_deref(),
+                );
             }),
         )
     };
@@ -831,3 +850,7 @@ fn log_loop_terminal(
 #[cfg(test)]
 #[path = "terminal_diagnostic_test.rs"]
 mod diagnostic_tests;
+
+#[cfg(test)]
+#[path = "v2_execute_test.rs"]
+mod forwarder_tests;

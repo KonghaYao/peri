@@ -20,8 +20,9 @@ pub(crate) struct PendingDeliveryNotification {
     pub(crate) content: MessageContent,
     /// 对应 `UserInputDelivered` 事件发布时补打的序号；绑定前为 `None`。
     ///
-    /// 事件泵只允许在 `session_seq` 严格更小的当前事件之前补发该交付；
-    /// 未绑定的条目只能在尾部补发。
+    /// 交付事件经可靠 render FIFO 由 forwarder 发布，发布成功后立即绑定；
+    /// 泵只允许在 `session_seq` 严格更小的当前事件之前补发该交付，未绑定的
+    /// 条目只能在尾部补发（无 mailbox 或发布失败的降级路径）。
     pub(crate) session_seq: Option<SessionSeq>,
 }
 
