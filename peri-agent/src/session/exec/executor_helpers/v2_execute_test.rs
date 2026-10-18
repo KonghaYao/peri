@@ -1,4 +1,4 @@
-//! forwarder 交付序号复用的单元测试（无 ACP 装配面）。
+//! forwarder 交付序号绑定的单元测试（无 ACP 装配面）。
 
 use std::sync::Arc;
 
@@ -17,25 +17,30 @@ use crate::session::user_input_mailbox::UserInputMailbox;
 use super::publish_forwarded_event;
 
 struct RecordingPublisher {
-    next: Mutex<SessionSeq>,
+    next: Mutex<Option<SessionSeq>>,
     published: Mutex<Vec<String>>,
-    reserved: Mutex<Vec<SessionSeq>>,
 }
 
 impl RecordingPublisher {
     fn new() -> Self {
         Self {
-            next: Mutex::new(SessionSeq::initial()),
+            next: Mutex::new(Some(SessionSeq::initial())),
             published: Mutex::new(Vec::new()),
-            reserved: Mutex::new(Vec::new()),
         }
     }
 
-    fn next_seq(&self) -> SessionSeq {
+    fn unavailable() -> Self {
+        Self {
+            next: Mutex::new(None),
+            published: Mutex::new(Vec::new()),
+        }
+    }
+
+    fn take_seq(&self) -> Option<SessionSeq> {
         let mut next = self.next.lock();
-        let seq = *next;
-        *next = next.next();
-        seq
+        let seq = (*next)?;
+        *next = Some(seq.next());
+        Some(seq)
     }
 }
 
@@ -47,18 +52,7 @@ impl EventPublisher for RecordingPublisher {
         _event: ExecutorEvent,
     ) -> Option<SessionSeq> {
         self.published.lock().push(session_id.to_string());
-        Some(self.next_seq())
-    }
-
-    fn publish_event_with_sequence(
-        &self,
-        _session_id: &str,
-        _source: &UnstampedEvent,
-        _event: ExecutorEvent,
-        session_seq: SessionSeq,
-    ) -> Option<SessionSeq> {
-        self.reserved.lock().push(session_seq);
-        Some(session_seq)
+        self.take_seq()
     }
 }
 
@@ -98,40 +92,16 @@ fn mailbox_with_delivery() -> (Arc<UserInputMailbox>, String) {
     (mailbox, request.input_id)
 }
 
-#[test]
-fn forwarder_reuses_sequence_reserved_before_the_lossy_channel() {
-    let (mailbox, input_id) = mailbox_with_delivery();
-    let reserved = SessionSeq::initial();
-    mailbox.bind_delivery_sequence(&input_id, reserved);
-    let publisher = RecordingPublisher::new();
-
-    let published = publish_forwarded_event(
-        &publisher,
-        "session",
-        &source(),
-        delivery_event(&input_id),
-        Some(mailbox.as_ref()),
-    );
-
-    assert_eq!(published, Some(reserved));
-    assert_eq!(
-        *publisher.reserved.lock(),
-        vec![reserved],
-        "交付事件必须复用进入有损通道前预留的序号"
-    );
-    assert!(
-        publisher.published.lock().is_empty(),
-        "不得为已预留的交付再分配新序号"
-    );
-    assert_eq!(
-        mailbox.delivery_sequence(&input_id),
-        Some(reserved),
-        "重复绑定保留首个序号"
-    );
+fn bound_sequence(mailbox: &UserInputMailbox, input_id: &str) -> Option<SessionSeq> {
+    mailbox
+        .pending_delivery_notifications()
+        .into_iter()
+        .find(|entry| entry.input_id == input_id)
+        .and_then(|entry| entry.session_seq)
 }
 
 #[test]
-fn forwarder_falls_back_when_delivery_was_not_reserved() {
+fn forwarder_binds_the_published_sequence_to_the_delivery_journal() {
     let (mailbox, input_id) = mailbox_with_delivery();
     let publisher = RecordingPublisher::new();
 
@@ -147,10 +117,27 @@ fn forwarder_falls_back_when_delivery_was_not_reserved() {
     assert_eq!(published, Some(allocated));
     assert_eq!(*publisher.published.lock(), vec!["session".to_string()]);
     assert_eq!(
-        mailbox.delivery_sequence(&input_id),
+        bound_sequence(&mailbox, &input_id),
         Some(allocated),
-        "无预留能力时保持发布时补打的旧语义"
+        "交付日志必须记录实际发布序号，供泵在水位前补发"
     );
+}
+
+#[test]
+fn forwarder_does_not_bind_when_publish_returns_no_sequence() {
+    let (mailbox, input_id) = mailbox_with_delivery();
+    let publisher = RecordingPublisher::unavailable();
+
+    let published = publish_forwarded_event(
+        &publisher,
+        "session",
+        &source(),
+        delivery_event(&input_id),
+        Some(mailbox.as_ref()),
+    );
+
+    assert_eq!(published, None);
+    assert_eq!(bound_sequence(&mailbox, &input_id), None);
 }
 
 #[test]
@@ -171,5 +158,11 @@ fn forwarder_does_not_touch_mailbox_for_non_delivery_events() {
     );
 
     assert_eq!(*publisher.published.lock(), vec!["session".to_string()]);
-    assert!(publisher.reserved.lock().is_empty());
+    assert!(
+        mailbox
+            .pending_delivery_notifications()
+            .iter()
+            .all(|entry| entry.session_seq.is_none()),
+        "非交付事件不得改动交付日志"
+    );
 }

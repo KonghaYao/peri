@@ -33,13 +33,11 @@ use crate::session::MessageTranscript;
 
 use super::ExecOutcome;
 
-/// 发布 forwarder 收到的一条事件，并在交付事件上复用 Receive 预留的序号。
+/// 发布 forwarder 收到的一条事件，并把交付事件的发布序号绑定到交付日志。
 ///
-/// 交付事件进入有损 render 通道前，Receive 已把预留序号绑定到交付日志；这里
-/// 必须复用同一条序号发布，避免为同一交付再分配新序号。未预留（无 mailbox /
-/// 无预留能力 / 条目已被泵 ack）时回退为发布时补打。
-///
-/// 返回实际发布序号（降级路径可能为 `None`）；调用方据此维持日志绑定。
+/// 交付事件经可靠 render FIFO 进入 forwarder，因此这里补打的序号就是交付在
+/// 事件流中的真实位置；后续事件即使经订阅/队列丢失，泵也能按该序号在水位前
+/// 补发。无 mailbox 或发布失败（`None`）时只发布、不绑定。
 fn publish_forwarded_event(
     publisher: &dyn EventPublisher,
     session_id: &str,
@@ -51,19 +49,11 @@ fn publish_forwarded_event(
         ExecutorEvent::UserInputDelivered { input_id, .. } => Some(input_id.clone()),
         _ => None,
     };
-    let reserved_seq = delivered_input
-        .as_deref()
-        .and_then(|input_id| mailbox?.delivery_sequence(input_id));
-    let session_seq = match reserved_seq {
-        Some(session_seq) => {
-            publisher.publish_event_with_sequence(session_id, source, exec_ev, session_seq)
-        }
-        None => publisher.publish_event(session_id, source, exec_ev),
-    };
-    if let (Some(input_id), Some(session_seq)) = (delivered_input, session_seq) {
-        if let Some(mailbox) = mailbox {
-            mailbox.bind_delivery_sequence(&input_id, session_seq);
-        }
+    let session_seq = publisher.publish_event(session_id, source, exec_ev);
+    if let (Some(input_id), Some(session_seq), Some(mailbox)) =
+        (delivered_input, session_seq, mailbox)
+    {
+        mailbox.bind_delivery_sequence(&input_id, session_seq);
     }
     session_seq
 }
@@ -255,9 +245,6 @@ pub async fn build_and_execute_agent_v2(req: V2ExecuteRequest) -> ExecOutcome {
         .write()
         .reset_full_compaction_committed();
     v2_out.context.session.user_input_mailbox = req.user_input_mailbox.clone();
-    // 交付事件在 Receive 阶段进入有损 EventBus 前预留序号（见 receive.rs），
-    // 因此阶段上下文需要同一发射端口。
-    v2_out.context.runtime.event_publisher = Some(Arc::clone(&req.publisher));
     if let Some(mailbox) = &req.user_input_mailbox {
         v2_out.session.set_user_input_mailbox(mailbox.clone());
     }

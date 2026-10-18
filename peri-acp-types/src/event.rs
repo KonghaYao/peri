@@ -106,32 +106,6 @@ pub trait EventPublisher: Send + Sync {
         source: &crate::runtime::UnstampedEvent,
         event: ExecutorEvent,
     ) -> Option<crate::identity::SessionSeq>;
-
-    /// 预留一个 `session_seq`（不发布事件）。
-    ///
-    /// 供**必须进入有损通道、但排序位置须在入队前固定**的事件使用（用户输入
-    /// 交付）：先预留并绑定有序日志，再经 [`Self::publish_event_with_sequence`]
-    /// 发布。事件被通道丢弃只会留下序号空洞，日志仍能按预留序号在水位前补发。
-    ///
-    /// 默认实现返回 `None`（该实现不支持预留，调用方回退为发布时补打）。
-    fn reserve_session_seq(&self, _session_id: &str) -> Option<crate::identity::SessionSeq> {
-        None
-    }
-
-    /// 用预留序号发布事件（不再分配新序号）。
-    ///
-    /// 预留序号必须按预留顺序发布；跨 session 复用或乱序发布会破坏消费侧的
-    /// 单调水位。返回不透明：调用方只应把预留序号视为已消费。默认实现忽略
-    /// 预留序号、回退为 [`Self::publish_event`]（不支持预留的实现保持原有语义）。
-    fn publish_event_with_sequence(
-        &self,
-        session_id: &str,
-        source: &crate::runtime::UnstampedEvent,
-        event: ExecutorEvent,
-        _session_seq: crate::identity::SessionSeq,
-    ) -> Option<crate::identity::SessionSeq> {
-        self.publish_event(session_id, source, event)
-    }
 }
 
 /// 事件订阅错误（[`EventSubscriber::recv`] 流语义）。

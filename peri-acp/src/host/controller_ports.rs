@@ -29,21 +29,6 @@ impl EventPublisher for ControllerEventPublisher {
     ) -> Option<SessionSeq> {
         self.0.publish_event(session_id, source, event)
     }
-
-    fn reserve_session_seq(&self, session_id: &str) -> Option<SessionSeq> {
-        self.0.reserve_session_seq(session_id)
-    }
-
-    fn publish_event_with_sequence(
-        &self,
-        session_id: &str,
-        source: &UnstampedEvent,
-        event: ExecutorEvent,
-        session_seq: SessionSeq,
-    ) -> Option<SessionSeq> {
-        self.0
-            .publish_event_with_sequence(session_id, source, event, session_seq)
-    }
 }
 
 /// Controller 订阅 → [`EventSubscriber`] 适配。

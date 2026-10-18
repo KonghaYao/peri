@@ -57,33 +57,9 @@ impl Default for EventClock {
 }
 
 impl EventClock {
-    /// 取下一个序号并推进时钟（不构造 envelope）。
-    ///
-    /// 供必须进入有损通道、但排序位置须在入队前固化的交付事件预留序号。
-    fn reserve(&mut self) -> SessionSeq {
+    fn stamp(&mut self, session_id: &str, event: &UnstampedEvent) -> EventEnvelope {
         let seq = self.seq;
         self.seq = seq.next();
-        seq
-    }
-
-    fn stamp(&mut self, session_id: &str, event: &UnstampedEvent) -> EventEnvelope {
-        let seq = self.reserve();
-        self.envelope(session_id, event, seq)
-    }
-
-    /// 用先前 [`Self::reserve`] 预留的序号构造 envelope（不再推进时钟）。
-    fn stamp_reserved(
-        &self,
-        session_id: &str,
-        event: &UnstampedEvent,
-        seq: SessionSeq,
-    ) -> EventEnvelope {
-        // 预留序号必然小于当前水位；违反说明调用方自行铸造了序号。
-        debug_assert!(seq < self.seq, "reserved session_seq must lag the clock");
-        self.envelope(session_id, event, seq)
-    }
-
-    fn envelope(&self, session_id: &str, event: &UnstampedEvent, seq: SessionSeq) -> EventEnvelope {
         EventEnvelope {
             session_id: session_id.to_string(),
             session_epoch: self.epoch,
@@ -200,45 +176,6 @@ impl Runtime {
             .get(session_id)
             .ok_or_else(|| RuntimeError::UnknownSession(session_id.to_string()))?;
         let envelope = entry.clock.lock().stamp(session_id, event);
-        Ok(envelope)
-    }
-
-    /// 预留一个 `session_seq`（不发布事件，返回的序号不重复使用）。
-    ///
-    /// 用于**必须在进入有损通道前固化排序位置**的事件（如用户输入交付）：
-    /// 调用方先预留序号并把它绑定到交付日志，再经有损通道发送事件；事件即使
-    /// 被丢弃，消费侧仍可按该序号在水位之前补发。预留后未使用会留下序号空洞
-    /// （事件契约只要求单调递增，不要求连续）。
-    ///
-    /// 未注册 session 报 [`RuntimeError::UnknownSession`]。
-    pub fn reserve_seq(&self, session_id: &str) -> Result<SessionSeq, RuntimeError> {
-        let guard = self.sessions.read();
-        let entry = guard
-            .get(session_id)
-            .ok_or_else(|| RuntimeError::UnknownSession(session_id.to_string()))?;
-        let session_seq = entry.clock.lock().reserve();
-        Ok(session_seq)
-    }
-
-    /// 用 [`Runtime::reserve_seq`] 预留的序号补打事件。
-    ///
-    /// 不推进时钟，也不发布事件——发布仍由调用方完成。`session_seq` 必须
-    /// 来自同一 session 的预留，且预留序号必须按预留顺序发布；跨 session、
-    /// 自行铸造或乱序发布都会破坏消费侧的单调水位。
-    pub fn stamp_reserved(
-        &self,
-        session_id: &str,
-        event: &UnstampedEvent,
-        session_seq: SessionSeq,
-    ) -> Result<EventEnvelope, RuntimeError> {
-        let guard = self.sessions.read();
-        let entry = guard
-            .get(session_id)
-            .ok_or_else(|| RuntimeError::UnknownSession(session_id.to_string()))?;
-        let envelope = entry
-            .clock
-            .lock()
-            .stamp_reserved(session_id, event, session_seq);
         Ok(envelope)
     }
 

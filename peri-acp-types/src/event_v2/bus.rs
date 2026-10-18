@@ -77,6 +77,20 @@ impl EventBus {
         }
     }
 
+    /// 发送必须保序、不可丢弃的渲染事件（如用户输入交付）。
+    ///
+    /// 与 [`Self::emit_render`] 共用同一条 FIFO：进入顺序即 forwarder 的消费
+    /// 顺序，`session_seq` 在消费时按该顺序补打。通道满时等待消费者腾出容量，
+    /// 不降级丢弃——交付事件一旦丢失，用户消息可能落到本轮回答之后。
+    pub async fn emit_render_reliable(&self, event: RenderEvent) {
+        if self.render_tx.send(event).await.is_err() {
+            tracing::warn!(
+                event = "render_event_receiver_closed",
+                "渲染层接收端已关闭，可靠渲染事件丢弃"
+            );
+        }
+    }
+
     /// 发送状态层事件（critical，满时降级丢弃）
     pub fn emit_state(&self, event: StateEvent) {
         if self.state_tx.try_send(event).is_err() {

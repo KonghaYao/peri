@@ -431,37 +431,6 @@ impl Controller {
         None
     }
 
-    /// 预留一个 `session_seq`（不发布事件）。
-    ///
-    /// 用于必须进入有损通道、但排序位置须在入队前固定的事件：调用方先预留
-    /// 序号并绑定到自身的有序日志，再经 [`Controller::publish_event_with_sequence`]
-    /// 发布。预留后事件被丢弃只会留下序号空洞（单调性不受影响）。
-    /// 未注册 session 返回 `None`（与 [`Controller::publish_event`] 的降级面一致）。
-    pub fn reserve_session_seq(&self, session_id: &str) -> Option<SessionSeq> {
-        self.runtime.reserve_seq(session_id).ok()
-    }
-
-    /// 用预留序号发布事件（不再分配新序号）。
-    ///
-    /// 未注册 session 无法补打：降级为 [`Controller::publish_event`] 的
-    /// fallback 身份发布，并返回该调用结果（通常为 `None`）。
-    pub fn publish_event_with_sequence(
-        &self,
-        session_id: &str,
-        source: &UnstampedEvent,
-        event: ExecutorEvent,
-        session_seq: SessionSeq,
-    ) -> Option<SessionSeq> {
-        let runtime = Arc::clone(&self.runtime);
-        match runtime.stamp_reserved(session_id, source, session_seq) {
-            Ok(envelope) => {
-                self.publish_message(EventMessage::new(envelope, Some(event)));
-                Some(session_seq)
-            }
-            Err(_) => self.publish_event(session_id, source, event),
-        }
-    }
-
     /// 双投递（弹出队列 + 订阅广播）的内部实现。
     fn publish_message(&self, msg: EventMessage) {
         let _ = self.events_tx.try_send(msg.clone());

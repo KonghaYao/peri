@@ -132,7 +132,7 @@ typed schema、默认值、领域合并、scope/revision/explain/update 归
 | 功能 | 入口/关键点 |
 | --- | --- |
 | 载荷与身份 | `types.rs`：RenderEvent（含 TurnCompleted）、StateEvent、ObserveEvent、Event；身份提取保持穷尽匹配 |
-| 通道 owner | `bus.rs`：EventBus / EventBusConfig / EventHandles；有界 mpsc 与 broadcast 保持原容量、丢弃和 lagging 行为，不新增状态 owner |
+| 通道 owner | `bus.rs`：EventBus / EventBusConfig / EventHandles；有界 mpsc 与 broadcast 保持原容量、丢弃和 lagging 行为，不新增状态 owner。`emit_render` 在通道满时降级丢弃；`emit_render_reliable` 与它共用同一条 render FIFO，满时等待容量、不丢弃（用于用户输入交付） |
 | 协议兼容面 | `executor_mapping.rs`：三个 `*_event_to_executor`；只做纯转换，不复制 envelope、取消或消费者生命周期 |
 | 契约测试 | `types_test.rs` / `bus_test.rs` / `executor_mapping_test.rs`：身份、serde、FIFO、饱和和映射；Agent 的 `events_v2_test.rs` 只保护公共路径与 prelude 类型 identity，无双套测试 |
 
@@ -141,7 +141,7 @@ typed schema、默认值、领域合并、scope/revision/explain/update 归
 | 功能 | 入口/关键点 |
 | --- | --- |
 | v1 协议化载体 | `ExecutorEvent`（:307，仅 ACP 协议序列化面使用，Agent 层禁止构造）；`EventMessage`（:603，envelope + event 包装）；`FnEventHandler`（:635） |
-| 事件发布端口 | `EventPublisher`：`publish_event`；默认方法 `reserve_session_seq`（默认 None）与 `publish_event_with_sequence`（默认回退 `publish_event`）。上层实现可覆盖以支持“先预留序号、经有损通道后再补打”，未覆盖方保持原语义 |
+| 事件发布端口 | `EventPublisher`：仅 `publish_event`；发布成功返回分配到的 `SessionSeq`，未登记或失败返回 `None`。交付序号不再预留，由 forwarder 按 render FIFO 发布时补打并回填交付日志 |
 | 载荷 DTO | `CompactFileInfo`（:143）、`TodoEntry`（:150）、`WorkflowProgressPayload`（:171）、`CompactTrigger`（:253）、`CompactThreshold`（:267）等 |
 
 ### messages（src/messages/）

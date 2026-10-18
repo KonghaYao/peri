@@ -20,9 +20,9 @@ pub(crate) struct PendingDeliveryNotification {
     pub(crate) content: MessageContent,
     /// 对应 `UserInputDelivered` 事件发布时补打的序号；绑定前为 `None`。
     ///
-    /// Receive 在把交付事件放入有损 render 通道前用发射端口预留序号并绑定；
+    /// 交付事件经可靠 render FIFO 由 forwarder 发布，发布成功后立即绑定；
     /// 泵只允许在 `session_seq` 严格更小的当前事件之前补发该交付，未绑定的
-    /// 条目只能在尾部补发（无预留能力的实现/未注册 session 的降级路径）。
+    /// 条目只能在尾部补发（无 mailbox 或发布失败的降级路径）。
     pub(crate) session_seq: Option<SessionSeq>,
 }
 
@@ -42,19 +42,6 @@ impl UserInputMailbox {
                 entry.session_seq = Some(session_seq);
             }
         }
-    }
-
-    /// 查询日志条目已绑定的序号（未入日志或尚未绑定返回 `None`）。
-    ///
-    /// 转发器用它判断交付事件是否已在进入有损通道前固化顺序：已绑定则复用
-    /// 预留序号发布，避免为同一条交付再分配新序号。
-    pub(crate) fn delivery_sequence(&self, input_id: &str) -> Option<SessionSeq> {
-        self.state
-            .lock()
-            .delivery_journal
-            .iter()
-            .find(|entry| entry.input_id == input_id)
-            .and_then(|entry| entry.session_seq)
     }
 }
 
