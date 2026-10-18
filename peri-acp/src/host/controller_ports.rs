@@ -10,6 +10,7 @@ use async_trait::async_trait;
 use peri_acp_types::{
     event::ExecutorEvent,
     event::{EventMessage, EventPublisher, EventSubscriber, SubscriptionError},
+    identity::SessionSeq,
     runtime::UnstampedEvent,
 };
 
@@ -20,8 +21,13 @@ use peri_acp_types::{
 pub struct ControllerEventPublisher(pub Arc<peri_controller::Controller>);
 
 impl EventPublisher for ControllerEventPublisher {
-    fn publish_event(&self, session_id: &str, source: &UnstampedEvent, event: ExecutorEvent) {
-        self.0.publish_event(session_id, source, event);
+    fn publish_event(
+        &self,
+        session_id: &str,
+        source: &UnstampedEvent,
+        event: ExecutorEvent,
+    ) -> Option<SessionSeq> {
+        self.0.publish_event(session_id, source, event)
     }
 }
 

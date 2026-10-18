@@ -689,10 +689,11 @@ impl UserInputMailbox {
                 record.delivery_reserved = false;
                 delivered.push(record.input.input_id.clone());
                 // 正文在 discard_payload 之前进入有序日志：事件通道即使丢掉
-                // UserInputDelivered，事件泵仍能在后续 assistant 输出之前补发。
+                // UserInputDelivered，日志条目仍会在本轮尾部补发，不会静默丢失。
                 delivery_journal.push_back(PendingDeliveryNotification {
                     input_id: record.input.input_id.clone(),
                     content: record.input.content.clone(),
+                    session_seq: None,
                 });
                 discard_payload(record);
             }

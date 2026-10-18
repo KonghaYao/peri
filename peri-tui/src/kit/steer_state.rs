@@ -1,6 +1,7 @@
 use std::collections::{HashMap, HashSet};
 use std::sync::OnceLock;
 
+use fluent_bundle::FluentValue;
 use peri_acp_types::messages::{ContentBlock, ImageSource, MessageContent};
 use peri_acp_types::session::{
     UserInput, UserInputQueueReceipt, UserInputQueueSnapshot, UserInputState,
@@ -42,8 +43,68 @@ struct SessionSteers {
     delivered: HashSet<String>,
     // 仅影响待发送区展示；正式聊天气泡仍由 Delivered 确认。
     direct_submissions: HashSet<String>,
-    // 致命执行失败后已结算但结果未知的输入身份；只用于对账，不再投影为 Submitting。
-    failed_unknown: HashSet<String>,
+    // 致命执行失败后结果未知的完整请求：保留原稿、附件与命令身份，等待服务端
+    // 终态或实例快照对账；不能换 id 重发，也不能把缺失当作已交付。
+    unsettled: Vec<UnsettledInput>,
+}
+
+/// 致命结算时输入所处的发送阶段。
+///
+/// `NotSent` 表示命令尚未进入发送分支（`generation` 仍为空），可安全恢复为
+/// 草稿并按用户操作重新提交；`MaybeSent` 表示请求可能已到达服务端，必须
+/// 保留原 `input_id` 等待正面终态，禁止换身份重发。
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum UnsettledStage {
+    NotSent,
+    MaybeSent,
+}
+
+#[derive(Clone, Debug)]
+struct UnsettledInput {
+    input: UserInput,
+    command_id: String,
+    stage: UnsettledStage,
+    epoch: u64,
+}
+
+/// 致命执行失败的结算报告：用户可见的失败反馈按两类语义分别统计。
+#[derive(Clone, Debug, Default)]
+pub(crate) struct FatalSubmissionReport {
+    /// 确定未发出的输入，已放回原稿恢复队列。
+    pub(crate) not_sent: Vec<UserInput>,
+    /// 结果未知的输入，完整请求仍保留在 `unsettled`。
+    pub(crate) uncertain: Vec<UserInput>,
+}
+
+impl FatalSubmissionReport {
+    /// 测试断言用：报告是否未结算任何输入。
+    #[cfg(test)]
+    pub(crate) fn is_empty(&self) -> bool {
+        self.not_sent.is_empty() && self.uncertain.is_empty()
+    }
+
+    /// 失败反馈文案：失败不能通过清空输入来“结束”，必须说明输入去向。
+    pub(crate) fn notice(&self) -> Option<String> {
+        let count_value = |count: usize| FluentValue::from(count as u64);
+        match (self.not_sent.len(), self.uncertain.len()) {
+            (0, 0) => None,
+            (count, 0) => Some(crate::i18n::tr_args(
+                "steer-fatal-not-sent",
+                &[("count".into(), count_value(count))],
+            )),
+            (0, count) => Some(crate::i18n::tr_args(
+                "steer-fatal-uncertain",
+                &[("count".into(), count_value(count))],
+            )),
+            (not_sent, uncertain) => Some(crate::i18n::tr_args(
+                "steer-fatal-mixed",
+                &[
+                    ("not_sent".into(), count_value(not_sent)),
+                    ("uncertain".into(), count_value(uncertain)),
+                ],
+            )),
+        }
+    }
 }
 
 impl SessionSteers {
@@ -71,9 +132,25 @@ impl SessionSteers {
         for (input_id, state) in &terminal {
             if matches!(state, UserInputState::Delivered | UserInputState::Withdrawn) {
                 self.direct_submissions.remove(input_id);
-                self.failed_unknown.remove(input_id);
             }
         }
+        // 快照 items 出现该 ID，或终态给出 Delivered/Withdrawn，都是服务端正面
+        // 事实；此时本地未知账本交给真实投影，不能继续自行推断。
+        let settled_ids: HashSet<&str> = snapshot
+            .items
+            .iter()
+            .map(|item| item.input_id.as_str())
+            .chain(
+                terminal
+                    .iter()
+                    .filter(|(_, state)| {
+                        matches!(state, UserInputState::Delivered | UserInputState::Withdrawn)
+                    })
+                    .map(|(input_id, _)| input_id.as_str()),
+            )
+            .collect();
+        self.unsettled
+            .retain(|entry| !settled_ids.contains(entry.input.input_id.as_str()));
         // 终态已经回答了 Enqueue 命令的结果；丢失的回执不应继续显示 Submitting 或重试。
         let terminal_ids: HashSet<&str> = terminal
             .iter()
@@ -137,9 +214,13 @@ impl SteerState {
         session.snapshot = None;
         session.queued_at.clear();
         session.direct_submissions.clear();
-        session.failed_unknown.clear();
         for recovered in &mut session.recovered {
             recovered.epoch = epoch;
+        }
+        // 结果未知的完整请求不随会话重载消失：更新 epoch 后继续可见，
+        // 由后续同 generation 快照或终态对账。
+        for unsettled in &mut session.unsettled {
+            unsettled.epoch = epoch;
         }
         // 已确认取回原稿归属会话，可随重载恢复；未确认命令保留旧 epoch，待受信快照确认实例后再恢复。
     }
@@ -215,15 +296,21 @@ impl SteerState {
             .find(|command| command.command_id == command_id)
     }
 
-    pub(crate) fn bind_command_generation(&mut self, command: &SteerCommand) {
-        if let Some(session) = self.sessions.get_mut(&command.session_id)
-            && let Some(pending) = session
-                .pending
-                .iter_mut()
-                .find(|pending| pending.command_id == command.command_id)
-        {
-            pending.generation.clone_from(&command.generation);
-        }
+    /// 把命令绑定的 generation 写回待结算命令；命令已被致命失败结算或
+    /// 会话重置时返回 `false`，调用方不得再发送该请求。
+    pub(crate) fn bind_command_generation(&mut self, command: &SteerCommand) -> bool {
+        let Some(session) = self.sessions.get_mut(&command.session_id) else {
+            return false;
+        };
+        let Some(pending) = session
+            .pending
+            .iter_mut()
+            .find(|pending| pending.command_id == command.command_id)
+        else {
+            return false;
+        };
+        pending.generation.clone_from(&command.generation);
+        true
     }
 
     pub(crate) fn resume_pending(&mut self, session_id: &str, epoch: u64) -> Vec<SteerCommand> {
@@ -308,15 +395,39 @@ impl SteerState {
     pub(crate) fn reject(&mut self, command: &SteerCommand, definitely_rejected: bool) {
         let session = self.sessions.entry(command.session_id.clone()).or_default();
         session.queued_at.remove(&command.command_id);
+        let mut settled_unknown = false;
         if let SteerCommandKind::Enqueue(input) = &command.kind {
             // 超时/未知结果必须重新可见；明确拒绝则交给原稿恢复。
             session.direct_submissions.remove(&input.input_id);
+            if let Some(index) = session.unsettled.iter().position(|entry| {
+                entry.input.input_id == input.input_id && entry.command_id == command.command_id
+            }) {
+                settled_unknown = true;
+                // 已在致命失败中结算为结果未知：只有服务端的明确拒绝才能
+                // 降级为“确定未发出”，恢复原稿且只生成一份。
+                if definitely_rejected {
+                    let mut entry = session.unsettled.remove(index);
+                    entry.stage = UnsettledStage::NotSent;
+                    session.recovered.push(RecoveredInput {
+                        epoch: session.epoch,
+                        input: entry.input,
+                        preserve_if_occupied: true,
+                    });
+                }
+            }
         }
-        if definitely_rejected {
+        if definitely_rejected && !settled_unknown {
             session
                 .pending
                 .retain(|pending| pending.command_id != command.command_id);
-            if let SteerCommandKind::Enqueue(input) = &command.kind {
+            // 明确拒绝只在尚未生成恢复稿时补一份：致命失败已把 `NotSent`
+            // 输入放进 `recovered`，迟到的明确拒绝不得再生成重复草稿。
+            if let SteerCommandKind::Enqueue(input) = &command.kind
+                && !session
+                    .recovered
+                    .iter()
+                    .any(|recovered| recovered.input.input_id == input.input_id)
+            {
                 session.recovered.push(RecoveredInput {
                     epoch: session.epoch,
                     input: input.clone(),
@@ -330,36 +441,94 @@ impl SteerState {
     /// 致命执行失败（含交付日志溢出）必须结束本地提交反馈，避免用户停留在
     /// “正在提交…”而看不到显式错误；真正的气泡仍不会被伪造。
     ///
-    /// pending Enqueue 的结果已不可知：从投影中移除并保留 input_id 供后续
-    /// 终态快照对账，不自动重发，也不生成气泡。
-    pub(crate) fn fail_session_submissions(&mut self, session_id: &str) {
-        if let Some(session) = self.sessions.get_mut(session_id) {
-            session.direct_submissions.clear();
-            let settled: Vec<(String, String)> = session
-                .pending
-                .iter()
-                .filter_map(|command| match &command.kind {
-                    SteerCommandKind::Enqueue(input) => {
-                        Some((command.command_id.clone(), input.input_id.clone()))
+    /// 结算只覆盖当前 epoch 的 Enqueue：
+    /// - `generation` 为空表示请求尚未进入发送分支，按确定未发出恢复完整原稿；
+    /// - `generation` 已绑定表示结果未知，保留完整请求与 `input_id`，等待
+    ///   服务端终态或实例快照对账，不自动重发、不生成气泡。
+    ///
+    /// 旧 epoch 命令留给 `resume_pending` 对账，不能在这里一并删除。
+    pub(crate) fn fail_session_submissions(&mut self, session_id: &str) -> FatalSubmissionReport {
+        let mut report = FatalSubmissionReport::default();
+        let Some(session) = self.sessions.get_mut(session_id) else {
+            return report;
+        };
+        session.direct_submissions.clear();
+        let epoch = session.epoch;
+        // 已出现在当前实例快照 items 中的输入已有正面队列投影，不再进入未知账本。
+        let projected_ids: HashSet<String> = session
+            .snapshot
+            .as_ref()
+            .map(|snapshot| {
+                snapshot
+                    .items
+                    .iter()
+                    .map(|item| item.input_id.clone())
+                    .collect()
+            })
+            .unwrap_or_default();
+        let settled: Vec<SteerCommand> = session
+            .pending
+            .iter()
+            .filter(|command| {
+                command.epoch == epoch && matches!(command.kind, SteerCommandKind::Enqueue(_))
+            })
+            .cloned()
+            .collect();
+        session.pending.retain(|command| {
+            !(command.epoch == epoch && matches!(command.kind, SteerCommandKind::Enqueue(_)))
+        });
+        for command in settled {
+            session.queued_at.remove(&command.command_id);
+            let SteerCommandKind::Enqueue(input) = command.kind else {
+                continue;
+            };
+            let stage = if command.generation.is_none() {
+                UnsettledStage::NotSent
+            } else {
+                UnsettledStage::MaybeSent
+            };
+            let entry = UnsettledInput {
+                input,
+                command_id: command.command_id,
+                stage,
+                epoch,
+            };
+            match entry.stage {
+                UnsettledStage::NotSent => {
+                    session.recovered.push(RecoveredInput {
+                        epoch: session.epoch,
+                        input: entry.input.clone(),
+                        preserve_if_occupied: true,
+                    });
+                    report.not_sent.push(entry.input);
+                }
+                UnsettledStage::MaybeSent => {
+                    if projected_ids.contains(&entry.input.input_id) {
+                        continue;
                     }
-                    _ => None,
-                })
-                .collect();
-            session
-                .pending
-                .retain(|command| !matches!(command.kind, SteerCommandKind::Enqueue(_)));
-            for (command_id, input_id) in settled {
-                session.queued_at.remove(&command_id);
-                session.failed_unknown.insert(input_id);
+                    if let Some(existing) = session
+                        .unsettled
+                        .iter_mut()
+                        .find(|existing| existing.input.input_id == entry.input.input_id)
+                    {
+                        existing.stage = entry.stage;
+                    } else {
+                        report.uncertain.push(entry.input.clone());
+                        session.unsettled.push(entry);
+                    }
+                }
             }
         }
+        report
     }
 
     pub(crate) fn claim_delivery(&mut self, session_id: &str, input_id: &str) -> bool {
         let session = self.sessions.entry(session_id.to_owned()).or_default();
         let inserted = session.delivered.insert(input_id.to_owned());
         session.direct_submissions.remove(input_id);
-        session.failed_unknown.remove(input_id);
+        session
+            .unsettled
+            .retain(|entry| entry.input.input_id != input_id);
         session.pending.retain(|command| {
             !matches!(&command.kind, SteerCommandKind::Enqueue(input) if input.input_id == input_id)
         });
@@ -466,6 +635,21 @@ impl SteerState {
                 }
                 SteerCommandKind::Refresh => {}
             }
+        }
+        for unsettled in session
+            .unsettled
+            .iter()
+            .filter(|entry| entry.epoch == session.epoch)
+            .filter(|entry| !session.delivered.contains(&entry.input.input_id))
+        {
+            if rows.iter().any(|row| row.id == unsettled.input.input_id) {
+                continue;
+            }
+            rows.push(SteerQueueItem {
+                id: unsettled.input.input_id.clone(),
+                text: unsettled.input.original_draft.clone(),
+                state: SteerItemState::Uncertain,
+            });
         }
         for recovered in session
             .recovered
@@ -683,3 +867,7 @@ pub(crate) fn attachments_from_content(content: &MessageContent) -> Vec<PendingA
 #[cfg(test)]
 #[path = "steer_state_test.rs"]
 mod tests;
+
+#[cfg(test)]
+#[path = "steer_state_idle_test.rs"]
+mod idle_tests;

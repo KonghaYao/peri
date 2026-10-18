@@ -28,52 +28,17 @@ use crate::acp_client::AcpTuiClient;
 use crate::kit::acp_types::{AcpEventData, AcpEventWithEpoch};
 use crate::kit::atoms;
 use crate::kit::history_paging::{
-    self, HistoryPageResponse, InFlightPage, MAX_AUTO_CONTINUE_PAGES,
+    self, HistoryPageOrigin, HistoryPageResponse, InFlightPage, MAX_AUTO_CONTINUE_PAGES,
 };
 
-/// 一次历史页请求的定位信息（不含响应 `nextCursor`）。
+/// 一次取页结果：响应本体 + 产出这些 items 的那次请求定位。
 ///
-/// 跨页工具结果的正文可能超过内存预算；补读必须回到**结果来源页的请求
-/// cursor**，否则响应 `nextCursor` 已经指向更早一页，补读会错过结果。
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub(crate) struct HistoryPageOrigin {
-    pub session_id: String,
-    pub snapshot_token: String,
-    pub cursor: String,
-    pub limit: usize,
-}
-
-/// 最近一次成功历史页请求的定位。消费侧写入、桥接侧在 `HistoryPageLoaded`
-/// 处理时取用；按注入顺序排队，避免空页续读把来源 cursor 覆盖掉。
-static PAGE_ORIGINS: parking_lot::Mutex<std::collections::VecDeque<HistoryPageOrigin>> =
-    parking_lot::Mutex::new(std::collections::VecDeque::new());
-
-const PAGE_ORIGINS_LIMIT: usize = 8;
-
-pub(crate) fn note_page_origin(origin: HistoryPageOrigin) {
-    let mut origins = PAGE_ORIGINS.lock();
-    if origins.len() >= PAGE_ORIGINS_LIMIT {
-        origins.pop_front();
-    }
-    origins.push_back(origin);
-}
-
-/// 取走与响应身份匹配的最近一次请求定位；桥接侧每条 `HistoryPageLoaded`
-/// 只取一次，供该页所有条目共享。
-pub(crate) fn take_page_origin(
-    session_id: &str,
-    snapshot_token: &str,
-) -> Option<HistoryPageOrigin> {
-    let mut origins = PAGE_ORIGINS.lock();
-    let position = origins.iter().rposition(|origin| {
-        origin.session_id == session_id && origin.snapshot_token == snapshot_token
-    })?;
-    origins.remove(position)
-}
-
-#[cfg(test)]
-pub(crate) fn clear_page_origins_for_tests() {
-    PAGE_ORIGINS.lock().clear();
+/// 定位随 `HistoryPageLoaded` 事件传递；桥接侧不再维护进程级来源队列
+/// （队列无法与响应一一对应，积压时会张冠李戴）。
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) struct FetchedPage {
+    pub response: HistoryPageResponse,
+    pub origin: Option<HistoryPageOrigin>,
 }
 
 pub mod window;
@@ -125,19 +90,34 @@ pub(crate) struct FetchError {
 /// `in_flight` 认领只在结算时释放：没有这条预算，服务端一次静默就会让认领永久占用，
 /// 该会话的翻页彻底停滞（不崩、不越界，但再也读不到更早历史）。
 ///
+/// 大结果补读复用同一期限（见 `acp_events::history_page`）：补读同样经
+/// `session/load`，同样不能在静默连接上永久悬挂。
+///
 /// 超时按**普通失败**结算（`invalidates: false`）：释放认领、只记原因、保留游标——
 /// 服务端沉默不代表浏览范围失效，退避（`REQUEST_BACKOFF_MS`）之后仍可重试。
 /// 丢弃等待中的 future 会同时释放 transport 侧的 pending 注册，不留悬挂等待。
-const PAGE_FETCH_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
+pub(crate) const PAGE_FETCH_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
 
 /// 拉取一页（必要时连续跳过空页，上限 [`MAX_AUTO_CONTINUE_PAGES`]）。
+///
+/// `origin` 始终指向**产出 items 的那次实际请求**：空页续读会用后续 cursor
+/// 覆盖它；非空页立即返回，因此跨页结果补读能回到正确的来源页。
 pub(crate) async fn fetch_page(
     client: &AcpTuiClient,
     request: &HistoryPageRequest,
-) -> Result<HistoryPageResponse, FetchError> {
+) -> Result<FetchedPage, FetchError> {
     let mut cursor = request.cursor.clone();
     let mut carried: Option<HistoryPageResponse> = None;
+    let mut origin: Option<HistoryPageOrigin> = None;
     for _ in 0..MAX_AUTO_CONTINUE_PAGES {
+        // 记录**实际发出请求**的 cursor/limit。跨页工具结果补读必须回到这里，
+        // 不能用响应 nextCursor（它指向更早一页）。
+        let request_origin = HistoryPageOrigin {
+            session_id: request.session_id.clone(),
+            snapshot_token: request.snapshot_token.clone(),
+            cursor: cursor.clone(),
+            limit: request.limit,
+        };
         let raw = peri_time::timeout(
             PAGE_FETCH_TIMEOUT,
             client.load_history_page(&request.session_id, &cursor, request.limit),
@@ -163,26 +143,28 @@ pub(crate) async fn fetch_page(
                 invalidates: true,
             });
         }
-        // 记录**实际发出请求**的 cursor/limit。跨页工具结果补读必须回到这里，
-        // 不能用响应 nextCursor（它指向更早一页）。
-        note_page_origin(HistoryPageOrigin {
-            session_id: request.session_id.clone(),
-            snapshot_token: request.snapshot_token.clone(),
-            cursor: cursor.clone(),
-            limit: request.limit,
-        });
+        origin = Some(request_origin);
         let Some(next_cursor) = response.next_cursor.clone() else {
-            return Ok(join_pages(carried, response, None));
+            return Ok(FetchedPage {
+                response: join_pages(carried, response, None),
+                origin,
+            });
         };
         let empty = response.items.is_empty();
         carried = Some(join_pages(carried, response, Some(next_cursor.clone())));
         if !empty {
-            return Ok(carried.expect("carried page"));
+            return Ok(FetchedPage {
+                response: carried.expect("carried page"),
+                origin,
+            });
         }
         // 空页 + 前进的游标是合法结果（一整段不可展示条目）：继续往前读。
         cursor = next_cursor;
     }
-    Ok(carried.expect("at least one page fetched"))
+    Ok(FetchedPage {
+        response: carried.expect("at least one page fetched"),
+        origin,
+    })
 }
 
 /// 把连续拉取的多页并成一个响应（游标取最后一页的下一页游标）。
@@ -262,8 +244,8 @@ async fn handle_request(
     }
 
     match fetch_page(client, request).await {
-        Ok(response) => {
-            let next_cursor = response.next_cursor.clone();
+        Ok(fetched) => {
+            let next_cursor = fetched.response.next_cursor.clone();
             // 注入前再核对一次身份：RPC 期间可能已经切会话 / 重新 load。
             let current = atoms::HISTORY_PAGING.state().read().clone();
             if !current.accepts(&request.session_id, &request.snapshot_token) {
@@ -276,7 +258,9 @@ async fn handle_request(
             if let Some(tx) = atoms::LOCAL_EVENT_TX.get() {
                 let _ = tx.send(AcpEventWithEpoch {
                     event: AcpEventData::HistoryPageLoaded {
-                        response: Box::new(response),
+                        response: Box::new(fetched.response),
+                        origin: fetched.origin,
+                        refetch: None,
                     },
                     active_session_id: request.session_id.clone(),
                 });

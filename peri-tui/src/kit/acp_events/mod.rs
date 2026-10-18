@@ -560,9 +560,16 @@ pub(crate) fn dispatch_for_bridge(
         } => tool::handle_replay_tool_ended(state, tool_id, output_summary, *is_error),
         // 历史分页：整页并入窗口（本地事件，非 wire；见 `acp_events::history_page`）。
         // 它只动 committed，不碰执行 / 审批 / Todo / 输入状态（REQ-C01-6、A24）。
-        HistoryPageLoaded { response } => {
-            history_page::handle_history_page_loaded(state, response.as_ref())
-        }
+        HistoryPageLoaded {
+            response,
+            origin,
+            refetch,
+        } => history_page::handle_history_page_loaded(
+            state,
+            response.as_ref(),
+            origin.as_ref(),
+            refetch.as_deref(),
+        ),
         HistoryCommitted(info) => history_window::handle_history_committed(state, info),
         HistoryWindowPageLoaded { context, response } => {
             state.publication_intent = history_window::handle_window_page_loaded(

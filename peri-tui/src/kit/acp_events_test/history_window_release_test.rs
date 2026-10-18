@@ -142,6 +142,127 @@ fn release_removes_committed_and_invalidates_holders_before_ack() {
 
 #[test]
 #[serial]
+fn release_of_newest_segment_recomputes_newer_cursor_from_resident_edge() {
+    let mut state = make_fold_test_state();
+    crate::kit::atoms::HISTORY_WINDOW_V1.set(true);
+    crate::kit::atoms::HISTORY_WINDOW_CAPABLE.set(true);
+    crate::kit::history_page_consumer::reset_window_paging_state();
+    state.active_session_id = "s1".into();
+    state.window = HistoryWindow::new(HistoryWindowConfig::enabled());
+    state
+        .window
+        .begin_window(WindowIdentity::new("s1", "gen-1", 7, "snap-1"));
+    {
+        let handle = crate::kit::atoms::HISTORY_WINDOW_PAGING.state();
+        let mut paging = handle.write();
+        paging.session_id = "s1".into();
+        paging.identity = Some(WindowIdentity::new("s1", "gen-1", 7, "snap-1"));
+        paging.window_generation = state.window.generation();
+        paging.read_ticket = Some("ticket-1".into());
+    }
+
+    let older_key = PersistentEntryKey::own("s1:older");
+    let newer_key = PersistentEntryKey::own("s1:newer");
+    let older_segment = state
+        .window
+        .register_segment(
+            SegmentDraft::new(
+                HistorySource::Own,
+                vec![HistoryEntryView::new(
+                    older_key.clone(),
+                    Some(10),
+                    1,
+                    16,
+                    16,
+                    Vec::new(),
+                )],
+                16,
+                16,
+            )
+            .cursors(Some("before-older".into()), Some("after-older".into())),
+            SegmentPlacement::Tail,
+        )
+        .expect("older segment");
+    let newer_segment = state
+        .window
+        .register_segment(
+            SegmentDraft::new(
+                HistorySource::Own,
+                vec![HistoryEntryView::new(
+                    newer_key,
+                    Some(20),
+                    1,
+                    16,
+                    16,
+                    Vec::new(),
+                )],
+                16,
+                16,
+            )
+            .cursors(Some("before-newer".into()), None),
+            SegmentPlacement::Tail,
+        )
+        .expect("newer segment");
+
+    let segment = state
+        .window
+        .segment(newer_segment)
+        .expect("segment")
+        .clone();
+    let plan = ReleasePlan {
+        segment: newer_segment,
+        source: segment.source.clone(),
+        entries: segment.entry_keys(),
+        unit_count: segment.unit_count,
+        body_bytes: segment.body_bytes,
+        reserved_bytes: segment.reserved_bytes,
+        slot_range: state.window.index().slot_range(newer_segment),
+        before: Some(older_key),
+        after: None,
+        before_cursor: Some("before-newer".into()),
+        after_cursor: None,
+    };
+    let outcome = crate::kit::history_window::release_window_plans(
+        &mut state,
+        vec![plan],
+        ReleaseReason::BudgetPressure,
+    );
+    assert_eq!(outcome.released_entries, 1);
+    assert_eq!(
+        state.window.edge_cursors(),
+        (Some("before-older".into()), Some("after-older".into())),
+        "the resident older edge now points into the evicted range"
+    );
+    let paging = crate::kit::atoms::HISTORY_WINDOW_PAGING
+        .state()
+        .read()
+        .clone();
+    assert_eq!(
+        paging.after_cursor.as_deref(),
+        Some("after-older"),
+        "release must publish the resident edge to the consumer"
+    );
+
+    let request = crate::kit::history_page_consumer::build_window_page_request(
+        crate::kit::history_paging::WindowPageCursor::After("after-older".into()),
+        20,
+    )
+    .expect("newer page request");
+    assert!(matches!(
+        request,
+        crate::kit::history_page_consumer::WindowConsumerRequest::Page {
+            cursor: crate::kit::history_paging::WindowPageCursor::After(_),
+            ..
+        }
+    ));
+    let _ = older_segment;
+    crate::kit::atoms::HISTORY_WINDOW_V1.set(false);
+    crate::kit::atoms::HISTORY_WINDOW_CAPABLE.set(false);
+    crate::kit::history_page_consumer::reset_window_paging_state();
+}
+
+#[test]
+#[serial]
 fn release_does_not_touch_live_phase_or_input_queues() {
     let (mut state, _weak, _key) = release_fixture();
     state.phase = SessionPhase::PromptRunning;

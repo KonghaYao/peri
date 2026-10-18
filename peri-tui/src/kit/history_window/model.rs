@@ -297,7 +297,9 @@ pub struct HistoryGap {
     pub id: GapId,
     pub before: Option<PersistentEntryKey>,
     pub after: Option<PersistentEntryKey>,
+    /// 从缺口上端向下补：更晚邻居段的 `before_cursor`。
     pub before_cursor: Option<String>,
+    /// 从缺口下端向上补：更早邻居段的 `after_cursor`。
     pub after_cursor: Option<String>,
     pub source: HistorySource,
     pub placeholder: GapPlaceholder,
@@ -664,6 +666,9 @@ impl HistoryWindow {
     }
 
     /// 开始/切换窗口身份。身份变化清空段、缺口、索引、预留与锚点并推进代次。
+    ///
+    /// 调用前必须用 `switch_snapshot` 读取旧展示区间并完成 `committed` 协调；
+    /// 本函数会清空 index/display/segments。
     pub fn begin_window(&mut self, identity: WindowIdentity) -> u64 {
         if self.identity.as_ref() == Some(&identity) {
             return self.generation;

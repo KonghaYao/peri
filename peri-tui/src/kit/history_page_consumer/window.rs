@@ -548,9 +548,9 @@ pub fn settle_window_response(
     state.in_flight = None;
     state.identity = Some(response.identity.clone());
     state.read_ticket = Some(response.read_ticket.clone());
-    // 游标按**整个驻留窗口**维护：单页响应只推进它负责的那一端。before 页的
-    // `afterCursor == None` 只表示「该页没有更晚内容」，不能把较新段淘汰后仍需
-    // 向下翻回的 after 游标清空。
+    // 单页响应只推进它负责的那一端：before 页的 `afterCursor` 描述的是该页最新行，
+    // 不代表驻留窗口的更晚边界；反向游标由 bridge 在 admission/release 后按驻留
+    // 边缘段重算（[`note_window_cursors`]）。缺口内的 seek 不触碰窗口外边界。
     match &current.kind {
         WindowInFlightKind::Open { .. } => {
             state.before_cursor = response.before_cursor.clone();
@@ -561,19 +561,14 @@ pub fn settle_window_response(
             ..
         } => {
             state.before_cursor = response.before_cursor.clone();
-            if response.after_cursor.is_some() {
-                state.after_cursor = response.after_cursor.clone();
-            }
         }
         WindowInFlightKind::Page {
             cursor: WindowPageCursor::After(_),
             ..
         } => {
             state.after_cursor = response.after_cursor.clone();
-            if response.before_cursor.is_some() {
-                state.before_cursor = response.before_cursor.clone();
-            }
         }
+        WindowInFlightKind::Seek { .. } if current.context.gap.is_some() => {}
         WindowInFlightKind::Seek { .. } => {
             if response.before_cursor.is_some() {
                 state.before_cursor = response.before_cursor.clone();
@@ -614,6 +609,20 @@ pub fn settle_window_response(
     }
     state.pending_merge = Some(current.clone());
     WindowSettlement::Accepted(Box::new(current))
+}
+
+/// bridge 在 admission/release 后按驻留边缘段重算窗口游标。
+///
+/// 窗口边界不等于单页边界：淘汰端段后，仍驻留的边缘段游标才指向被淘汰区间。
+/// `after` 非空说明下游仍有可读行，旧的“已到末尾”标记必须失效。
+pub(crate) fn note_window_cursors(before: Option<String>, after: Option<String>) {
+    let handle = atoms::HISTORY_WINDOW_PAGING.state();
+    let mut state = handle.write();
+    state.before_cursor = before;
+    state.after_cursor = after.clone();
+    if after.is_some() {
+        state.newer_exhausted = false;
+    }
 }
 
 /// bridge 发布后结算待合并页：归还 consumer 侧预留。

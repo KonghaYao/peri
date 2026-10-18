@@ -10,6 +10,8 @@ use serial_test::serial;
 
 #[path = "history_window_page_test/late_open_and_gap.rs"]
 mod late_open_and_gap;
+#[path = "history_window_page_test/reopen_identity.rs"]
+mod reopen_identity;
 
 struct WindowAtomsGuard;
 
@@ -705,7 +707,11 @@ fn open_with_live_region_does_not_clear_or_merge_display() {
     );
     assert_eq!(committed_texts(&state), vec!["live committed"]);
     assert!(!state.current_turn.is_empty());
-    assert_eq!(state.window.segment_count(), 1);
+    assert_eq!(
+        state.window.segment_count(),
+        0,
+        "live 区域非空时 open 页不接纳，留待后续翻页重新获取"
+    );
     assert_eq!(state.window.displayed_entry_count(), 0);
 }
 

@@ -367,3 +367,161 @@ async fn inherited_prefix_is_not_part_of_own_pages() {
     );
     assert!(own.inherited_entries.is_empty());
 }
+
+fn inherited_ids(
+    rows: &peri_acp_types::session_resources::HistoryWindowRows,
+) -> Vec<peri_acp_types::messages::MessageId> {
+    rows.inherited_entries
+        .iter()
+        .map(InheritedHistoryEntry::entry_id)
+        .collect()
+}
+
+async fn inherited_snapshot_source(
+    data: &SqliteSessionData,
+    id: &str,
+) -> peri_acp_types::history_window::HistorySource {
+    let snapshot = data
+        .history_window_bounds(&id.to_owned())
+        .await
+        .unwrap()
+        .inherited
+        .snapshot()
+        .unwrap()
+        .clone();
+    inherited_source(&snapshot)
+}
+
+#[tokio::test]
+async fn inherited_before_page_exposes_a_later_cursor() {
+    let history = payloads(2);
+    let (store, data, _directory) = session_with_history(&history).await;
+    let id = WINDOW_SESSION.to_owned();
+    let inherited = payloads(4);
+    set_inherited_context(&store, &id, &inherited, "parent-session").await;
+    let source = inherited_snapshot_source(&data, &id).await;
+
+    let opened = data
+        .load_history_window_page(
+            &id,
+            &HistoryWindowPagePlan {
+                intent: HistoryWindowReadIntent::Open,
+                source: source.clone(),
+                anchor: None,
+                direction: HistoryWindowDirection::Before,
+                include_anchor: false,
+                before_limit: 2,
+                after_limit: 0,
+                byte_budget: BUDGET,
+                tail: HistoryWindowTailExpectation::Fixed(None),
+            },
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        inherited_ids(&opened),
+        vec![inherited[2].id(), inherited[3].id()]
+    );
+    assert_eq!(
+        opened.after_cursor_anchor, None,
+        "页已到继承快照末尾：更晚方向没有可读行"
+    );
+
+    let older = data
+        .load_history_window_page(
+            &id,
+            &HistoryWindowPagePlan {
+                intent: HistoryWindowReadIntent::Page,
+                source,
+                anchor: Some(inherited[2].id()),
+                direction: HistoryWindowDirection::Before,
+                include_anchor: false,
+                before_limit: 1,
+                after_limit: 0,
+                byte_budget: BUDGET,
+                tail: HistoryWindowTailExpectation::Fixed(None),
+            },
+        )
+        .await
+        .unwrap();
+    assert_eq!(inherited_ids(&older), vec![inherited[1].id()]);
+    assert_eq!(older.before_cursor_anchor, Some(inherited[1].id()));
+    assert_eq!(
+        older.after_cursor_anchor,
+        Some(inherited[1].id()),
+        "继承区更早页也必须暴露更晚方向的内侧锚点"
+    );
+}
+
+#[tokio::test]
+async fn inherited_open_entry_after_includes_the_anchor() {
+    let history = payloads(2);
+    let (store, data, _directory) = session_with_history(&history).await;
+    let id = WINDOW_SESSION.to_owned();
+    let inherited = payloads(4);
+    set_inherited_context(&store, &id, &inherited, "parent-session").await;
+    let source = inherited_snapshot_source(&data, &id).await;
+
+    let opened = data
+        .load_history_window_page(
+            &id,
+            &HistoryWindowPagePlan {
+                intent: HistoryWindowReadIntent::Open,
+                source,
+                anchor: Some(inherited[1].id()),
+                direction: HistoryWindowDirection::After,
+                include_anchor: true,
+                before_limit: 0,
+                after_limit: 2,
+                byte_budget: BUDGET,
+                tail: HistoryWindowTailExpectation::Fixed(None),
+            },
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        inherited_ids(&opened),
+        vec![inherited[1].id(), inherited[2].id()],
+        "after 半段必须包含锚点自身，且只出现一次"
+    );
+    assert_eq!(opened.before_cursor_anchor, Some(inherited[1].id()));
+    assert_eq!(opened.after_cursor_anchor, Some(inherited[2].id()));
+}
+
+#[tokio::test]
+async fn inherited_after_page_exposes_an_earlier_cursor() {
+    let history = payloads(2);
+    let (store, data, _directory) = session_with_history(&history).await;
+    let id = WINDOW_SESSION.to_owned();
+    let inherited = payloads(4);
+    set_inherited_context(&store, &id, &inherited, "parent-session").await;
+    let source = inherited_snapshot_source(&data, &id).await;
+
+    let newer = data
+        .load_history_window_page(
+            &id,
+            &HistoryWindowPagePlan {
+                intent: HistoryWindowReadIntent::Page,
+                source,
+                anchor: Some(inherited[0].id()),
+                direction: HistoryWindowDirection::After,
+                include_anchor: false,
+                before_limit: 0,
+                after_limit: 2,
+                byte_budget: BUDGET,
+                tail: HistoryWindowTailExpectation::Fixed(None),
+            },
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        inherited_ids(&newer),
+        vec![inherited[1].id(), inherited[2].id()]
+    );
+    assert_eq!(
+        newer.before_cursor_anchor,
+        Some(inherited[1].id()),
+        "继承区更晚页也必须暴露更早方向的内侧锚点"
+    );
+    assert_eq!(newer.after_cursor_anchor, Some(inherited[2].id()));
+}

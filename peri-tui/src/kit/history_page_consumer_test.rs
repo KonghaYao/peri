@@ -101,12 +101,18 @@ async fn test_fetch_page_sends_cursor_and_decodes_items() {
         .await
     });
 
-    let response = fetch_page(&client, &request("c1")).await.expect("page");
+    let fetched = fetch_page(&client, &request("c1")).await.expect("page");
     let params = handle.await.expect("server task");
+    let response = fetched.response;
+    let origin = fetched.origin.expect("origin");
 
     assert_eq!(params.get("sessionId").and_then(Value::as_str), Some("s1"));
     assert_eq!(params.get("cursor").and_then(Value::as_str), Some("c1"));
     assert_eq!(params.get("limit").and_then(Value::as_u64), Some(50));
+    assert_eq!(origin.cursor, "c1");
+    assert_eq!(origin.limit, 50);
+    assert_eq!(origin.session_id, "s1");
+    assert_eq!(origin.snapshot_token, "tok");
     // 历史页不携带 setup 参数（服务端明确拒绝 cwd / mcpServers）。
     assert!(params.get("cwd").is_none());
     assert!(params.get("mcpServers").is_none());
@@ -133,14 +139,20 @@ async fn test_fetch_page_skips_empty_pages_until_content() {
         (first, second)
     });
 
-    let response = fetch_page(&client, &request("c1")).await.expect("page");
+    let fetched = fetch_page(&client, &request("c1")).await.expect("page");
     let (first, second) = handle.await.expect("server task");
+    let response = fetched.response;
 
     assert_eq!(first.get("cursor").and_then(Value::as_str), Some("c1"));
     assert_eq!(
         second.get("cursor").and_then(Value::as_str),
         Some("c2"),
         "空页必须用服务端给的 nextCursor 继续往前读"
+    );
+    assert_eq!(
+        fetched.origin.map(|origin| origin.cursor).as_deref(),
+        Some("c2"),
+        "来源必须是产出 items 的那次请求，而不是被跳过的空页 cursor"
     );
     assert_eq!(response.items.len(), 1);
     assert_eq!(response.items[0].entry_id, "s1:old");
@@ -333,10 +345,19 @@ async fn test_handle_request_injects_page_and_advances_cursor() {
 
     if owns_local_tx {
         let event = local_rx.try_recv().expect("page injected into the bridge");
-        assert!(matches!(
-            event.event,
-            AcpEventData::HistoryPageLoaded { .. }
-        ));
+        match &event.event {
+            AcpEventData::HistoryPageLoaded {
+                origin, refetch, ..
+            } => {
+                assert_eq!(
+                    origin.as_ref().map(|origin| origin.cursor.as_str()),
+                    Some("c1"),
+                    "来源 cursor 必须随响应事件传递"
+                );
+                assert!(refetch.is_none(), "普通页不是补读响应");
+            }
+            other => panic!("unexpected local event: {other:?}"),
+        }
         assert_eq!(event.active_session_id, "s1");
     }
     assert_eq!(

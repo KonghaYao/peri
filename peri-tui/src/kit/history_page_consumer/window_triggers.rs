@@ -8,6 +8,7 @@ use tracing::debug;
 
 use super::*;
 use crate::kit::history_paging::WindowGapRequest;
+use crate::kit::history_window::GapSeekDirection;
 
 pub fn request_window_older_page_if_due() -> bool {
     if !window_path_enabled() {
@@ -132,24 +133,33 @@ pub fn build_window_gap_request(
 }
 
 /// 视口落在 gap（`WINDOW_VIEWPORT.anchor == None`）时的重读触发。
-pub fn request_window_gap_if_due() -> bool {
+///
+/// `direction` 来自本次滚动的落地方向：向上（更早）消费 `Page(Before)`，向下
+/// （更晚）消费 `Page(After)`；`None`（方向未知）接受任一候选。seek 目标同时
+/// 覆盖两侧。发送成功后只移除被消费的候选，另一方向留待反向滚动。
+pub fn request_window_gap_if_due(direction: Option<GapSeekDirection>) -> bool {
     if !window_path_enabled() {
         return false;
     }
     let gap = {
         let handle = atoms::WINDOW_GAP_REQUEST.state();
-        handle.read().clone()
+        let requests = handle.read();
+        let Some(gap) = requests
+            .iter()
+            .find(|request| request.matches_direction(direction))
+            .cloned()
+        else {
+            return false;
+        };
+        gap
     };
-    let Some(gap) = gap else {
-        return false;
-    };
-    let request = match gap {
+    let request = match &gap {
         WindowGapRequest::Page { gap_id, cursor } => {
-            build_window_page_request_for_gap(Some(gap_id), cursor, WINDOW_PAGE_LIMIT)
+            build_window_page_request_for_gap(Some(*gap_id), cursor.clone(), WINDOW_PAGE_LIMIT)
         }
         WindowGapRequest::Seek { gap_id, anchor } => build_window_seek_request_for_gap(
-            Some(gap_id),
-            anchor,
+            Some(*gap_id),
+            anchor.clone(),
             WINDOW_PAGE_LIMIT,
             WINDOW_PAGE_LIMIT,
         ),
@@ -164,7 +174,8 @@ pub fn request_window_gap_if_due() -> bool {
                 .get()
                 .is_some_and(|tx| tx.send(request).is_ok());
             if sent {
-                atoms::WINDOW_GAP_REQUEST.set(None);
+                let handle = atoms::WINDOW_GAP_REQUEST.state();
+                handle.write().retain(|candidate| candidate != &gap);
             } else {
                 fail_window_request(&request_id, "history window gap channel unavailable", false);
             }

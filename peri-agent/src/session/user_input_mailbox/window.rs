@@ -4,10 +4,11 @@
 //! 身份账本随 generation 回收；展示窗口与交付日志有界，但交付槽位在 enqueue
 //! 时预留，因此日志不会在消息写入 transcript 后溢出。
 
+use peri_acp_types::identity::SessionSeq;
 use peri_acp_types::messages::MessageContent;
 use peri_acp_types::session::UserInputState;
 
-use super::MailboxState;
+use super::{MailboxState, UserInputMailbox};
 
 pub(super) const TERMINAL_CAPACITY: usize = 128;
 pub(super) const DELIVERY_JOURNAL_CAPACITY: usize = 128;
@@ -17,6 +18,30 @@ pub(super) const DELIVERY_JOURNAL_CAPACITY: usize = 128;
 pub(crate) struct PendingDeliveryNotification {
     pub(crate) input_id: String,
     pub(crate) content: MessageContent,
+    /// 对应 `UserInputDelivered` 事件发布时补打的序号；绑定前为 `None`。
+    ///
+    /// 事件泵只允许在 `session_seq` 严格更小的当前事件之前补发该交付；
+    /// 未绑定的条目只能在尾部补发。
+    pub(crate) session_seq: Option<SessionSeq>,
+}
+
+impl UserInputMailbox {
+    /// 把交付确认绑定到其事件发布时获得的序号；重复绑定保留首个序号。
+    ///
+    /// 发布与广播之间存在竞态：事件可能先被泵看到，此时 journal 仍未绑定。
+    /// 泵在推送该事件后会按 `input_id` ack，绑定迟到不会造成重复。
+    pub(crate) fn bind_delivery_sequence(&self, input_id: &str, session_seq: SessionSeq) {
+        let mut state = self.state.lock();
+        if let Some(entry) = state
+            .delivery_journal
+            .iter_mut()
+            .find(|entry| entry.input_id == input_id)
+        {
+            if entry.session_seq.is_none() {
+                entry.session_seq = Some(session_seq);
+            }
+        }
+    }
 }
 
 pub(super) struct TerminalIdentity {
