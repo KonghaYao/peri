@@ -142,9 +142,10 @@ fn tool_pairing_crosses_segments_and_keeps_terminal_meta() {
 
 #[test]
 fn unmatched_tool_result_is_reference_only_and_pairs_when_call_arrives() {
-    let mut index = ResidentIndex::new(4 * 1024, 4);
+    let mut index = ResidentIndex::new(8 * 1024, 4);
     let meta = ToolTerminalMeta::new(false, 500_000, "x".repeat(2048));
-    assert!(meta.summary.len() <= ToolTerminalMeta::MAX_SUMMARY_BYTES);
+    assert_eq!(meta.output().len(), 2048, "full output is retained");
+    assert!(meta.summary().len() <= ToolTerminalMeta::MAX_SUMMARY_BYTES);
     assert_eq!(
         index
             .record_tool_result(
@@ -158,8 +159,8 @@ fn unmatched_tool_result_is_reference_only_and_pairs_when_call_arrives() {
     );
     assert_eq!(index.pending_tool_bytes(), meta.retained_bytes());
     assert!(
-        index.pending_tool_bytes() < 2 * 1024,
-        "full output is not retained"
+        index.pending_tool_bytes() >= 2048,
+        "full output, not a 1 KiB summary"
     );
 
     assert_eq!(

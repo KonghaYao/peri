@@ -4,7 +4,7 @@ use serial_test::serial;
 
 #[test]
 #[serial]
-fn pending_tool_ends_are_bounded_and_store_lightweight_summaries() {
+fn pending_tool_ends_are_bounded_and_keep_full_outputs() {
     crate::kit::atoms::init_atoms();
     crate::kit::atoms::ACTIVE_SESSION_ID.state().write().clear();
     crate::kit::acp_events::history_window::clear_pending_tool_ends();
@@ -18,10 +18,10 @@ fn pending_tool_ends_are_bounded_and_store_lightweight_summaries() {
     }
     let (entries, bytes) = crate::kit::acp_events::history_window::pending_tool_ends_fingerprint();
     assert!(entries <= 256, "entry cap exceeded: {entries}");
-    assert!(bytes <= 1024 * 1024, "1 MiB budget exceeded: {bytes}");
+    assert!(bytes <= 8 * 1024 * 1024, "8 MiB budget exceeded: {bytes}");
     assert!(
-        bytes < full_output.len() * entries,
-        "must retain summaries, not full outputs"
+        bytes >= entries * full_output.len(),
+        "must retain complete outputs, not 1 KiB summaries"
     );
     crate::kit::acp_events::history_window::clear_pending_tool_ends();
     assert_eq!(
@@ -36,7 +36,7 @@ fn resident_index_tool_pairing_keeps_pending_budget() {
     use crate::kit::history_window::{
         HistorySource, ResidentIndex, ResultRef, ToolPairRejected, ToolTerminalMeta,
     };
-    let mut index = ResidentIndex::new(4096, 2);
+    let mut index = ResidentIndex::new(16 * 1024, 2);
     let meta = ToolTerminalMeta::new(false, 999_999, "x".repeat(2048));
     for index_id in 0..2 {
         index
@@ -57,5 +57,5 @@ fn resident_index_tool_pairing_keeps_pending_budget() {
         ),
         Err(ToolPairRejected::TooManyPending)
     ));
-    assert!(index.pending_tool_bytes() <= 4096);
+    assert!(index.pending_tool_bytes() <= 16 * 1024);
 }

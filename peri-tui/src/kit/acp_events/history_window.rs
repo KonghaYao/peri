@@ -13,9 +13,43 @@ use crate::kit::history_page_consumer::{self, WindowPagePlacement, WindowRequest
 use crate::kit::history_paging::{HistorySubItem, WindowPageResponse};
 use crate::kit::history_window::{
     HistoryEntryView, HistorySource, PageDraft, PagePlacement, PersistentEntryKey,
-    PersistentSubItemKey, SegmentDraft, SegmentOrigin,
+    PersistentSubItemKey, SegmentDraft, SegmentKey, SegmentOrigin,
 };
 use crate::kit::tui_render_unit::{TuiNoteLevel, TuiRenderUnit, TuiSystemNote};
+
+#[cfg(test)]
+pub(crate) use history_page::ToolResultSource;
+
+/// 用户展开工具卡片时的按需补读入口（`history_page` 是 acp_events 私有模块，
+/// 统一从这里暴露给 message_area 的手势/键盘折叠路径）。
+pub(crate) fn maybe_request_tool_result(
+    unit: &TuiRenderUnit,
+) -> Option<history_page::ToolResultSource> {
+    history_page::maybe_request_tool_result(unit)
+}
+
+#[cfg(test)]
+pub(crate) fn insert_deferred_tool_result_for_tests(
+    tool_id: &str,
+    source: history_page::ToolResultSource,
+) {
+    history_page::insert_deferred_tool_result_for_tests(tool_id, source);
+}
+
+#[cfg(test)]
+pub(crate) fn deferred_tool_result_source_for_tests(
+    tool_id: &str,
+) -> Option<history_page::ToolResultSource> {
+    history_page::deferred_tool_result_source_for_tests(tool_id)
+}
+
+#[cfg(test)]
+pub(crate) fn tool_result_error_response_for_tests(
+    source: &history_page::ToolResultSource,
+    message: &str,
+) -> crate::kit::history_paging::HistoryPageResponse {
+    history_page::tool_result_error_response_for_tests(source, message)
+}
 
 pub(super) fn handle_history_committed(
     state: &mut BridgeState,
@@ -104,23 +138,49 @@ pub(super) fn handle_window_page_loaded(
         return PublicationIntent::None;
     }
     let mut allow_display_merge = true;
+    let mut open_insert_at_prefix = false;
     if context.is_open {
         crate::kit::atoms::HISTORY_INHERITED_NOTICE.set(None);
         crate::kit::history_window::clear_detail_targets();
         let live_empty = live_region_is_empty(state);
+        // 迟到 open：请求发出后本地展示代次已经推进（新气泡或整轮回答已进入
+        // committed）。此时不能整体清空 `committed`，否则旧快照会覆盖新内容。
+        let display_changed = context.display_generation != state.generation;
         allow_display_merge = live_empty;
         let generation = state.window.begin_window(response.identity.clone());
         history_page_consumer::note_window_generation(generation);
-        if live_empty {
-            // 初始 open 采用窗口视图：旧回放内容让位给窗口页，避免同一身份双写。
-            // live/未持久区域不为空时绝不清空。
-            state.committed.clear();
-            crate::kit::history_paging::reset_browsing_state();
-            state.window.clear_displayed_entries();
-            crate::kit::history_paging::sync_spans_from_window(&state.window);
-            crate::kit::history_window::clear_window_unit_mappings();
-            crate::kit::history_window::clear_detail_targets();
-            crate::kit::atoms::HISTORY_INHERITED_NOTICE.set(None);
+        // 已有窗口展示（例如 Degraded 后的 open 重试）时绝不再整体清空：
+        // 重试只合并新页，旧段由窗口模型去重/保留。
+        let window_display_active = state.window.displayed_entry_count() > 0;
+        if live_empty && !window_display_active {
+            let mut replaced_replay = false;
+            if display_changed {
+                // 只有能确认旧回放是严格前缀时才替换它；否则保留全部展示并
+                // 放弃这一页的展示合并（迟到 open 丢弃展示，不覆盖新内容）。
+                match known_replay_prefix_end(state) {
+                    Some(end) => {
+                        state.committed = state.committed.iter().skip(end).cloned().collect();
+                        open_insert_at_prefix = true;
+                        replaced_replay = true;
+                    }
+                    None => {
+                        allow_display_merge = false;
+                    }
+                }
+            } else {
+                // 初始 open 采用窗口视图：旧回放内容让位给窗口页，避免同一身份双写。
+                // live/未持久区域不为空时绝不清空。
+                state.committed.clear();
+                replaced_replay = true;
+            }
+            if replaced_replay {
+                crate::kit::history_paging::reset_browsing_state();
+                state.window.clear_displayed_entries();
+                crate::kit::history_paging::sync_spans_from_window(&state.window);
+                crate::kit::history_window::clear_window_unit_mappings();
+                crate::kit::history_window::clear_detail_targets();
+                crate::kit::atoms::HISTORY_INHERITED_NOTICE.set(None);
+            }
         }
         crate::kit::history_window::publish_window_viewport(&state.window);
         crate::kit::history_paging::publish_window_gap_request(&state.window);
@@ -161,7 +221,7 @@ pub(super) fn handle_window_page_loaded(
         }
     }
     let projection = projection_items(response);
-    let projected = history_page::project_items(state, &projection);
+    let projected = history_page::project_items(state, &projection, None);
     let mut projected_by_key: HashMap<PersistentEntryKey, ProjectedEntry> = projected
         .into_iter()
         .map(|entry| {
@@ -222,21 +282,31 @@ pub(super) fn handle_window_page_loaded(
         views.push((key, item, units, descriptor));
     }
     let segments = build_page_segments(&views, response);
-    let insert_slot = match context.placement {
-        WindowPagePlacement::Tail => state.committed.len(),
-        WindowPagePlacement::BeforeFirst => state
-            .window
-            .index()
-            .entries_in_slot_order()
-            .first()
-            .map_or(0, |(_, slot, _)| *slot),
+    let insert_slot = if open_insert_at_prefix {
+        0
+    } else if let Some(gap_id) = context.gap {
+        gap_insert_slot(state, gap_id)
+    } else {
+        match context.placement {
+            WindowPagePlacement::Tail => state.committed.len(),
+            WindowPagePlacement::BeforeFirst => state
+                .window
+                .index()
+                .entries_in_slot_order()
+                .first()
+                .map_or(0, |(_, slot, _)| *slot),
+        }
     };
-    let placement = match context.placement {
-        WindowPagePlacement::Tail => PagePlacement::Tail,
-        WindowPagePlacement::BeforeFirst => {
-            match state.window.index().entries_in_slot_order().first() {
-                Some((entry, _, _)) => PagePlacement::BeforeEntry(entry.clone()),
-                None => PagePlacement::Tail,
+    let placement = if let Some(gap_id) = context.gap {
+        PagePlacement::FillGap(gap_id)
+    } else {
+        match context.placement {
+            WindowPagePlacement::Tail => PagePlacement::Tail,
+            WindowPagePlacement::BeforeFirst => {
+                match state.window.index().entries_in_slot_order().first() {
+                    Some((entry, _, _)) => PagePlacement::BeforeEntry(entry.clone()),
+                    None => PagePlacement::Tail,
+                }
             }
         }
     };
@@ -437,6 +507,7 @@ fn merge_window_units(
         Option<crate::kit::history_window::DetailDescriptor>,
     )],
 ) {
+    let inserted_before_existing = insert_slot < state.committed.len();
     let mut cursor = insert_slot;
     let mut inserted = 0usize;
     for (_, _, units, _) in views {
@@ -452,7 +523,9 @@ fn merge_window_units(
         .map(|(key, _, units, _)| (key.clone(), units.len()))
         .collect();
     state.window.mark_display_block(&entries, insert_slot);
-    if inserted > 0 && context.placement == WindowPagePlacement::BeforeFirst {
+    if inserted > 0
+        && (context.placement == WindowPagePlacement::BeforeFirst || inserted_before_existing)
+    {
         crate::kit::atoms::HISTORY_PREPEND_EPOCH.set(
             crate::kit::atoms::HISTORY_PREPEND_EPOCH
                 .get()
@@ -474,6 +547,71 @@ fn merge_window_units(
         })
         .collect();
     crate::kit::history_window::publish_window_unit_mappings(mappings);
+}
+/// 旧回放在 `committed` 里的严格前缀末尾。只有「回放区间之后确实还有单元」时
+/// 才返回边界；否则无法区分旧回放与后来追加的 live 内容，调用方必须保守处理。
+fn known_replay_prefix_end(state: &BridgeState) -> Option<usize> {
+    let slots = crate::kit::history_paging::with_spans(|spans| spans.slots());
+    let end = slots
+        .iter()
+        .map(|(slot, len)| slot.saturating_add(*len))
+        .max()?;
+    (end > 0 && end < state.committed.len()).then_some(end)
+}
+
+/// 缺口在 `committed` 中的插入槽位：缺口后首个驻留条目的槽位；缺口在尾部时
+/// 等于当前展示长度。
+fn gap_insert_slot(state: &BridgeState, gap_id: crate::kit::history_window::GapId) -> usize {
+    let layout = state.window.layout();
+    let Some(position) = layout
+        .iter()
+        .position(|region| *region == crate::kit::history_window::RegionKey::Gap(gap_id))
+    else {
+        return state.committed.len();
+    };
+    for region in layout.iter().skip(position + 1) {
+        let crate::kit::history_window::RegionKey::Resident(key) = region else {
+            continue;
+        };
+        if let Some(slot) = segment_start_slot(state, *key) {
+            return slot;
+        }
+    }
+    // 缺口在尾部：插到前一个驻留段之后、live 追加内容之前，而不是盲目
+    // `committed.len()`（否则 live 消息会被新页挤到旧历史之前）。
+    if let Some(key) = layout
+        .iter()
+        .take(position)
+        .rev()
+        .find_map(|region| match region {
+            crate::kit::history_window::RegionKey::Resident(key) => Some(*key),
+            crate::kit::history_window::RegionKey::Gap(_) => None,
+        })
+        && let Some(slot) = segment_end_slot(state, key)
+    {
+        return slot;
+    }
+    0
+}
+
+fn segment_start_slot(state: &BridgeState, key: SegmentKey) -> Option<usize> {
+    let entries = state.window.index().segment_entries(key)?;
+    let first = entries.first()?;
+    state
+        .window
+        .index()
+        .locate_entry(first)
+        .map(|locator| locator.slot_start)
+}
+
+fn segment_end_slot(state: &BridgeState, key: SegmentKey) -> Option<usize> {
+    let entries = state.window.index().segment_entries(key)?;
+    let last = entries.last()?;
+    state
+        .window
+        .index()
+        .locate_entry(last)
+        .map(|locator| locator.slot_start.saturating_add(locator.unit_count))
 }
 fn live_region_is_empty(state: &BridgeState) -> bool {
     state.current_turn.is_empty()

@@ -22,7 +22,7 @@ use crate::kit::history_paging::{
     WindowSeekRequest,
 };
 use crate::kit::history_window::{
-    PageReservation, PersistentEntryKey, WindowIdentity, WindowLimits,
+    GapId, PageReservation, PersistentEntryKey, WindowIdentity, WindowLimits,
 };
 
 #[path = "window_triggers.rs"]
@@ -52,6 +52,11 @@ pub struct WindowRequestContext {
     pub placement: WindowPagePlacement,
     /// Open 响应没有先验 snapshot，跳过 wire 身份比对，只校验 session。
     pub is_open: bool,
+    /// 请求发出时的本地展示代次（`VIEW_MODELS.generation`）。迟到 open 用它与
+    /// 桥接当前代次比较：期间有新消息发布过，就不能整体清空 `committed`。
+    pub display_generation: u64,
+    /// 该请求用于补哪个缺口；响应必须原位填回，不能追加到尾部。
+    pub gap: Option<GapId>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -285,6 +290,15 @@ pub fn build_window_page_request(
     cursor: WindowPageCursor,
     limit: u16,
 ) -> Option<WindowConsumerRequest> {
+    build_window_page_request_for_gap(None, cursor, limit)
+}
+
+/// 为某个缺口生成页请求；`gap` 随响应回到桥接，用于原位换回缺口。
+pub fn build_window_page_request_for_gap(
+    gap: Option<GapId>,
+    cursor: WindowPageCursor,
+    limit: u16,
+) -> Option<WindowConsumerRequest> {
     if !window_path_enabled() {
         return None;
     }
@@ -309,6 +323,8 @@ pub fn build_window_page_request(
             reserved_bytes: WindowLimits::default().page_target_bytes,
             placement,
             is_open: false,
+            display_generation: current_display_generation(),
+            gap,
         },
         cursor,
         limit,
@@ -316,6 +332,16 @@ pub fn build_window_page_request(
 }
 
 pub fn build_window_seek_request(
+    anchor: PersistentEntryKey,
+    before_limit: u16,
+    after_limit: u16,
+) -> Option<WindowConsumerRequest> {
+    build_window_seek_request_for_gap(None, anchor, before_limit, after_limit)
+}
+
+/// 为某个缺口生成 seek 请求；`gap` 随响应回到桥接，用于原位换回缺口。
+pub fn build_window_seek_request_for_gap(
+    gap: Option<GapId>,
     anchor: PersistentEntryKey,
     before_limit: u16,
     after_limit: u16,
@@ -340,6 +366,8 @@ pub fn build_window_seek_request(
             reserved_bytes: WindowLimits::default().page_target_bytes,
             placement: WindowPagePlacement::Tail,
             is_open: false,
+            display_generation: current_display_generation(),
+            gap,
         },
         anchor,
         before_limit,
@@ -360,6 +388,11 @@ fn current_window_generation(state: &WindowPagingState) -> u64 {
     } else {
         state.window_generation
     }
+}
+
+/// 请求发起时的展示代次：桥接每次发布视图快照都会推进 `state.generation`。
+fn current_display_generation() -> u64 {
+    atoms::VIEW_MODELS.state().read().generation
 }
 
 /// S5.6：锚点落在 gap 时先占位，再按 gap 游标/稳定身份生成重读请求。
@@ -411,6 +444,8 @@ pub fn claim_window_request(request: &WindowConsumerRequest) -> WindowClaim {
                 reserved_bytes: reserved,
                 placement: WindowPagePlacement::Tail,
                 is_open: true,
+                display_generation: current_display_generation(),
+                gap: None,
             },
             WindowInFlightKind::Open {
                 direction: *direction,
@@ -513,8 +548,41 @@ pub fn settle_window_response(
     state.in_flight = None;
     state.identity = Some(response.identity.clone());
     state.read_ticket = Some(response.read_ticket.clone());
-    state.before_cursor = response.before_cursor.clone();
-    state.after_cursor = response.after_cursor.clone();
+    // 游标按**整个驻留窗口**维护：单页响应只推进它负责的那一端。before 页的
+    // `afterCursor == None` 只表示「该页没有更晚内容」，不能把较新段淘汰后仍需
+    // 向下翻回的 after 游标清空。
+    match &current.kind {
+        WindowInFlightKind::Open { .. } => {
+            state.before_cursor = response.before_cursor.clone();
+            state.after_cursor = response.after_cursor.clone();
+        }
+        WindowInFlightKind::Page {
+            cursor: WindowPageCursor::Before(_),
+            ..
+        } => {
+            state.before_cursor = response.before_cursor.clone();
+            if response.after_cursor.is_some() {
+                state.after_cursor = response.after_cursor.clone();
+            }
+        }
+        WindowInFlightKind::Page {
+            cursor: WindowPageCursor::After(_),
+            ..
+        } => {
+            state.after_cursor = response.after_cursor.clone();
+            if response.before_cursor.is_some() {
+                state.before_cursor = response.before_cursor.clone();
+            }
+        }
+        WindowInFlightKind::Seek { .. } => {
+            if response.before_cursor.is_some() {
+                state.before_cursor = response.before_cursor.clone();
+            }
+            if response.after_cursor.is_some() {
+                state.after_cursor = response.after_cursor.clone();
+            }
+        }
+    }
     if is_open {
         // 成功的 open 是唯一能把 consumer 从 Degraded 拉回 Ready 的路径。
         state.status = WindowPagingStatus::Ready;

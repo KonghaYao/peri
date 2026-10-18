@@ -56,42 +56,48 @@ impl ResultRef {
     }
 }
 
-/// 工具终态元数据：只保留错误位、输出总长度与 ≤1 KiB 摘要，**不保留完整输出**。
+/// 工具终态元数据：错误位、输出总长度与**完整输出**。
+///
+/// `summary()` 只用于诊断/单行展示，绝不能回填到卡片冒充完整结果。跨页暂存与
+/// 配对恢复都以这里保存的正文为准。
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ToolTerminalMeta {
     pub is_error: bool,
     pub output_bytes: usize,
-    pub summary: String,
+    output: Arc<str>,
 }
 
 impl ToolTerminalMeta {
     pub const MAX_SUMMARY_BYTES: usize = 1024;
 
-    pub fn new(is_error: bool, output_bytes: usize, summary: impl Into<String>) -> Self {
-        let mut summary = summary.into();
-        truncate_utf8(&mut summary, Self::MAX_SUMMARY_BYTES);
+    pub fn new(is_error: bool, output_bytes: usize, output: impl Into<String>) -> Self {
+        let output: String = output.into();
         Self {
             is_error,
             output_bytes,
-            summary,
+            output: Arc::from(output),
         }
     }
 
-    /// 轻量元数据的估算保留字节（摘要正文 + 结构体固定开销）。
-    pub fn retained_bytes(&self) -> usize {
-        self.summary.len() + std::mem::size_of::<Self>()
+    /// 完整输出正文。
+    pub fn output(&self) -> &str {
+        &self.output
     }
-}
 
-fn truncate_utf8(value: &mut String, max_bytes: usize) {
-    if value.len() <= max_bytes {
-        return;
+    /// 单行诊断摘要（最多 1 KiB）；不是可回填的完整结果。
+    pub fn summary(&self) -> &str {
+        let max = Self::MAX_SUMMARY_BYTES.min(self.output.len());
+        let mut end = max;
+        while end > 0 && !self.output.is_char_boundary(end) {
+            end -= 1;
+        }
+        &self.output[..end]
     }
-    let mut end = max_bytes;
-    while end > 0 && !value.is_char_boundary(end) {
-        end -= 1;
+
+    /// 元数据的估算保留字节（完整正文 + 结构体固定开销）。
+    pub fn retained_bytes(&self) -> usize {
+        self.output.len() + std::mem::size_of::<Self>()
     }
-    value.truncate(end);
 }
 
 /// 工具配对键：只按来源 + `toolCallId`，不把调用条目放进键（跨页配对必须成立）。

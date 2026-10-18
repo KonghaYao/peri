@@ -31,6 +31,51 @@ use crate::kit::history_paging::{
     self, HistoryPageResponse, InFlightPage, MAX_AUTO_CONTINUE_PAGES,
 };
 
+/// 一次历史页请求的定位信息（不含响应 `nextCursor`）。
+///
+/// 跨页工具结果的正文可能超过内存预算；补读必须回到**结果来源页的请求
+/// cursor**，否则响应 `nextCursor` 已经指向更早一页，补读会错过结果。
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct HistoryPageOrigin {
+    pub session_id: String,
+    pub snapshot_token: String,
+    pub cursor: String,
+    pub limit: usize,
+}
+
+/// 最近一次成功历史页请求的定位。消费侧写入、桥接侧在 `HistoryPageLoaded`
+/// 处理时取用；按注入顺序排队，避免空页续读把来源 cursor 覆盖掉。
+static PAGE_ORIGINS: parking_lot::Mutex<std::collections::VecDeque<HistoryPageOrigin>> =
+    parking_lot::Mutex::new(std::collections::VecDeque::new());
+
+const PAGE_ORIGINS_LIMIT: usize = 8;
+
+pub(crate) fn note_page_origin(origin: HistoryPageOrigin) {
+    let mut origins = PAGE_ORIGINS.lock();
+    if origins.len() >= PAGE_ORIGINS_LIMIT {
+        origins.pop_front();
+    }
+    origins.push_back(origin);
+}
+
+/// 取走与响应身份匹配的最近一次请求定位；桥接侧每条 `HistoryPageLoaded`
+/// 只取一次，供该页所有条目共享。
+pub(crate) fn take_page_origin(
+    session_id: &str,
+    snapshot_token: &str,
+) -> Option<HistoryPageOrigin> {
+    let mut origins = PAGE_ORIGINS.lock();
+    let position = origins.iter().rposition(|origin| {
+        origin.session_id == session_id && origin.snapshot_token == snapshot_token
+    })?;
+    origins.remove(position)
+}
+
+#[cfg(test)]
+pub(crate) fn clear_page_origins_for_tests() {
+    PAGE_ORIGINS.lock().clear();
+}
+
 pub mod window;
 pub(crate) use window::*;
 
@@ -118,6 +163,14 @@ pub(crate) async fn fetch_page(
                 invalidates: true,
             });
         }
+        // 记录**实际发出请求**的 cursor/limit。跨页工具结果补读必须回到这里，
+        // 不能用响应 nextCursor（它指向更早一页）。
+        note_page_origin(HistoryPageOrigin {
+            session_id: request.session_id.clone(),
+            snapshot_token: request.snapshot_token.clone(),
+            cursor: cursor.clone(),
+            limit: request.limit,
+        });
         let Some(next_cursor) = response.next_cursor.clone() else {
             return Ok(join_pages(carried, response, None));
         };

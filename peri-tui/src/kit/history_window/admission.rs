@@ -9,9 +9,9 @@ use std::collections::HashSet;
 
 use super::anchor::merge_adjacent_gaps;
 use super::model::{
-    GapPlaceholder, HistoryGap, HistoryWindow, PageReservation, PendingMerge, PersistentEntryKey,
-    PinReason, RegionKey, ReleasePlan, SegmentDraft, SegmentKey, SegmentPlacement, WindowIdentity,
-    WindowModelError,
+    GapId, GapPlaceholder, HistoryGap, HistoryWindow, PageReservation, PendingMerge,
+    PersistentEntryKey, PinReason, RegionKey, ReleasePlan, SegmentDraft, SegmentKey,
+    SegmentPlacement, WindowIdentity, WindowModelError,
 };
 
 /// 页在 `committed` 中的插入位置。`BeforeEntry` 由模型解析成所在段。
@@ -20,6 +20,8 @@ pub enum PagePlacement {
     Tail,
     BeforeSegment(SegmentKey),
     BeforeEntry(PersistentEntryKey),
+    /// 原位补回缺口：段落在缺口所在的布局位置，成功后移除该缺口。
+    FillGap(GapId),
 }
 
 /// 一次页接纳的输入。`segments` 已经过投影构造，但尚未登记进窗口索引。
@@ -260,6 +262,10 @@ impl HistoryWindow {
                 reservation_released: true,
             });
         }
+        let fill_gap = match &draft.placement {
+            PagePlacement::FillGap(gap_id) => Some(*gap_id),
+            _ => None,
+        };
         let Some(placement) = self.resolve_placement(&draft.placement) else {
             return AdmissionDecision::Rejected(AdmissionRejection {
                 reason: AdmissionRejectionReason::PlacementUnavailable,
@@ -345,6 +351,18 @@ impl HistoryWindow {
                 }
             }
         }
+        if let Some(gap_id) = fill_gap {
+            // 段已落到缺口位置；缺口不再需要占位。只移除被本次请求补齐的那个缺口。
+            if let Some(position) = self
+                .layout
+                .iter()
+                .position(|region| *region == RegionKey::Gap(gap_id))
+            {
+                self.layout.remove(position);
+            }
+            self.gaps.remove(&gap_id);
+            self.rebuild_slots();
+        }
         self.pending_merge = Some(PendingMerge {
             request_id: draft.request_id,
             body_bytes: incoming_body,
@@ -393,6 +411,7 @@ impl HistoryWindow {
     fn resolve_placement(&self, placement: &PagePlacement) -> Option<SegmentPlacement> {
         match placement {
             PagePlacement::Tail => Some(SegmentPlacement::Tail),
+            PagePlacement::FillGap(gap_id) => self.resolve_gap_placement(*gap_id),
             PagePlacement::BeforeSegment(key) => self
                 .segments()
                 .contains_key(key)
@@ -402,6 +421,39 @@ impl HistoryWindow {
                 Some(SegmentPlacement::BeforeSegment(locator.segment))
             }
         }
+    }
+
+    /// 缺口原位的段插入位置：优先插到缺口后的首个驻留段之前；缺口在尾部时
+    /// 插到前一个驻留段之后；窗口为空时即 Tail。
+    fn resolve_gap_placement(&self, gap_id: GapId) -> Option<SegmentPlacement> {
+        let position = self
+            .layout
+            .iter()
+            .position(|region| *region == RegionKey::Gap(gap_id))?;
+        if let Some(next) = self
+            .layout
+            .iter()
+            .skip(position + 1)
+            .find_map(|region| match region {
+                RegionKey::Resident(key) => Some(*key),
+                RegionKey::Gap(_) => None,
+            })
+        {
+            return Some(SegmentPlacement::BeforeSegment(next));
+        }
+        if let Some(previous) =
+            self.layout
+                .iter()
+                .take(position)
+                .rev()
+                .find_map(|region| match region {
+                    RegionKey::Resident(key) => Some(*key),
+                    RegionKey::Gap(_) => None,
+                })
+        {
+            return Some(SegmentPlacement::AfterSegment(previous));
+        }
+        Some(SegmentPlacement::Tail)
     }
 
     /// 计算淘汰计划，不修改窗口。`needed_body_bytes` 为释放到水位所需的字节。

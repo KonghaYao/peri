@@ -8,10 +8,13 @@ use std::sync::Arc;
 use serde_json::Value;
 
 use super::super::{
-    attach_session_workflow, create_session_workflow_chain, fork_source_error,
-    prewarm_session_mcp_discovery, session_mcp_servers, workflow_face_closed, ForkSessionResponse,
+    fork_source_error, prewarm_session_mcp_discovery, session_mcp_servers, ForkSessionResponse,
     SessionId,
 };
+// 本地 workflow 运行时不在 emscripten 构建面内（wasm 产物不打包 workflow），
+// 对应名称在该目标不存在；调用处已有同条件 cfg。
+#[cfg(not(target_os = "emscripten"))]
+use super::super::{attach_session_workflow, create_session_workflow_chain, workflow_face_closed};
 use super::*;
 use crate::host::notify::send_available_commands_update;
 use crate::host::workspace::SessionEnvironment;

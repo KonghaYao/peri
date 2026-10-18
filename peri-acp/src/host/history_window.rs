@@ -416,6 +416,7 @@ async fn open(
         .load_history_window_page(&ThreadId::from(thread_id.clone()), &page_plan)
         .await
         .map_err(resource_window_error);
+    let rows = wire::filter_rows(cfg, &thread_id, &source, &prepared.opaque, rows).await;
     let oversize = wire::oversize_ids(rows.as_ref().ok());
     let rows = rows?;
     inherited::validate_rows(&source, &rows)?;
@@ -499,6 +500,14 @@ async fn page(
         .load_history_window_page(&ThreadId::from(thread_id.clone()), &page_plan)
         .await
         .map_err(resource_window_error);
+    let result = wire::filter_rows(
+        cfg,
+        &thread_id,
+        &issued.binding.source,
+        &issued.opaque,
+        result,
+    )
+    .await;
     let oversize = wire::oversize_ids(result.as_ref().ok());
     finalize(
         sessions,
@@ -588,6 +597,14 @@ async fn seek(
         .load_history_window_page(&ThreadId::from(thread_id.clone()), &page_plan)
         .await
         .map_err(resource_window_error);
+    let result = wire::filter_rows(
+        cfg,
+        &thread_id,
+        &issued.binding.source,
+        &issued.opaque,
+        result,
+    )
+    .await;
     let oversize = wire::oversize_ids(result.as_ref().ok());
     finalize(
         sessions,
@@ -764,6 +781,19 @@ pub(crate) async fn handle_body_chunk(
         return Err(anchor_unavailable(
             "entry is not an oversize descriptor of this snapshot",
         ));
+    }
+    // 已登记 descriptor 不是受众授权；每次 body 请求都重新检查持久内容。
+    if !wire::body_visible(
+        cfg,
+        &thread_id,
+        &source,
+        tail.as_ref(),
+        &issued.opaque,
+        entry_id,
+    )
+    .await?
+    {
+        return Err(anchor_unavailable("entry is not visible to this client"));
     }
     let result = cfg
         .session_resources

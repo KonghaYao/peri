@@ -163,9 +163,14 @@ async fn a08_abort_after_take_with_lock_contention_recovers_on_next_prompt() {
         ContextOwnership::HandedOff
     );
     // 正常在途 attempt 不得被冷恢复，也不得凭空发布正文。
-    let error = prompt::ensure_resident_context(&sessions, &ctx.session_id, &cfg.controller)
-        .await
-        .unwrap_err();
+    let error = prompt::ensure_resident_context(
+        &sessions,
+        &ctx.session_id,
+        &cfg.controller,
+        cfg.session_resources.as_ref(),
+    )
+    .await
+    .unwrap_err();
     assert_eq!(error.code, -32010);
     // 持 sessions 锁直到 abort 完成，确定性迫使 Drop 的 try_lock 失败。
     let states = sessions.lock().await;
@@ -448,4 +453,242 @@ async fn a06_full_commit_then_flush_failure_preserves_archive_and_restores_only_
     assert!(text.contains(SUMMARY));
     assert!(!text.contains(OLD));
     assert_next_turn_sees_summary(ctx, &sessions).await;
+}
+
+// SQLite 写锁阻止提交；取消真实 append future，让 MutationGate::WriteScope::drop
+// 留下 sticky Unknown。drain 的阻塞证明写入已取得 gate，而非仅在等待调度。
+async fn make_sticky_unknown(dir: &tempfile::TempDir, store: &CompactStore, id: &ThreadId) {
+    use sqlx::Connection;
+    let options =
+        sqlx::sqlite::SqliteConnectOptions::new().filename(dir.path().join("compact-history.db"));
+    let mut blocker = sqlx::SqliteConnection::connect_with(&options)
+        .await
+        .unwrap();
+    sqlx::query("BEGIN IMMEDIATE")
+        .execute(&mut blocker)
+        .await
+        .unwrap();
+    let payloads = [PersistedPayload::Message(BaseMessage::human(
+        "被取消的真实写入",
+    ))];
+    let mut writing = Box::pin(store.append_history(id, &payloads));
+    tokio::time::timeout(Duration::from_secs(5), async {
+        tokio::select! {
+            result = &mut writing => panic!("写锁释放前不得完成: {result:?}"),
+            _ = async {
+                loop {
+                    if tokio::time::timeout(Duration::from_millis(20), store.drain_persistence(id))
+                        .await.is_err()
+                    {
+                        break;
+                    }
+                    tokio::task::yield_now().await;
+                }
+            } => {},
+        }
+    })
+    .await
+    .unwrap();
+    drop(writing);
+    sqlx::query("ROLLBACK").execute(&mut blocker).await.unwrap();
+    assert!(store
+        .drain_persistence(id)
+        .await
+        .unwrap_err()
+        .is_persistence_uncertain());
+    assert!(store
+        .append_history(id, &payloads)
+        .await
+        .unwrap_err()
+        .is_persistence_uncertain());
+    // active snapshot 仍可读取；这不能解除写入不确定性。
+    store.inner.load_active_snapshot(id).await.unwrap();
+    assert!(store
+        .drain_persistence(id)
+        .await
+        .unwrap_err()
+        .is_persistence_uncertain());
+}
+
+struct RecoveryModel(Arc<AtomicUsize>);
+
+#[async_trait]
+impl Model for RecoveryModel {
+    fn capabilities(&self) -> ModelCapabilities {
+        ModelCapabilities {
+            supports_streaming: true,
+            ..Default::default()
+        }
+    }
+
+    async fn stream(
+        &self,
+        _request: ModelRequest,
+        cancellation: AgentCancellationToken,
+    ) -> ModelResult<ModelStream> {
+        let call = self.0.fetch_add(1, Ordering::SeqCst);
+        let (message, stop) = if call == 0 {
+            (
+                ModelMessage::assistant(
+                    vec![],
+                    vec![peri_model::ToolCall::new(
+                        "recovery-call",
+                        "RecoveryProbe",
+                        peri_model::JsonObject::from_value(json!({})).unwrap(),
+                    )],
+                ),
+                StopReason::ToolUse,
+            )
+        } else {
+            (
+                ModelMessage::assistant_text("恢复后正常续聊"),
+                StopReason::EndTurn,
+            )
+        };
+        let response = ModelResponse::new(message, stop, None, None)?;
+        Ok(ModelStream::with_parent_cancellation(
+            stream::iter(vec![Ok(ModelStreamEvent::Completed(response))]),
+            cancellation,
+        ))
+    }
+}
+
+struct RecoveryTool(Arc<AtomicUsize>);
+
+#[async_trait]
+impl peri_agent::tools::BaseTool for RecoveryTool {
+    fn name(&self) -> &str {
+        "RecoveryProbe"
+    }
+    fn description(&self) -> &str {
+        "记录恢复测试中的真实工具执行次数"
+    }
+    fn parameters(&self) -> serde_json::Value {
+        json!({"type": "object", "properties": {}})
+    }
+    fn is_direct(&self) -> bool {
+        true
+    }
+    async fn invoke(
+        &self,
+        _: serde_json::Value,
+        _: peri_acp_types::tools::ToolContext<'_>,
+    ) -> Result<String, Box<dyn std::error::Error + Send + Sync>> {
+        self.0.fetch_add(1, Ordering::SeqCst);
+        Ok("恢复工具已执行".into())
+    }
+}
+
+async fn sticky_unknown_prompt_case(recover: bool) {
+    let dir = tempfile::tempdir().unwrap();
+    let _home = HomeGuard::set(dir.path());
+    let calls = Arc::new(AtomicUsize::new(0));
+    let tools = Arc::new(AtomicUsize::new(0));
+    let model: Arc<dyn Model> = Arc::new(RecoveryModel(calls.clone()));
+    let (ctx, store, sessions) = make_compact_context(&dir, model.clone()).await;
+    let cfg = config(&dir, &ctx, store.clone()).await;
+    cfg.shared_tools.write().insert(
+        "RecoveryProbe".into(),
+        Arc::new(RecoveryTool(tools.clone())),
+    );
+    // 无 historyWindowV1 协商，且 PeriConfig 使用默认 beta 关闭配置。
+    cfg.session_manager
+        .set_pending_caps(peri_acp_types::PeriCaps::default());
+    cfg.session_manager.consume_pending_caps(&ctx.session_id);
+    assert!(
+        !cfg.session_manager
+            .get_caps(&ctx.session_id)
+            .history_window_v1
+    );
+    assert!(!peri_config::betas::from_merged(&cfg.peri_config.read())
+        .is_enabled(peri_config::betas::HISTORY_WINDOW_V1));
+    let pool = Arc::new(parking_lot::Mutex::new(AgentPool::new()));
+    let fingerprint = crate::session::agent_pool::fingerprint(&cfg.provider.read());
+    pool.lock()
+        .subagent_llm_cache
+        .insert(fingerprint.clone(), model.clone());
+    pool.lock()
+        .store_llm(crate::session::agent_pool::CachedLlmInstances {
+            auxiliary_model: model,
+            auto_classifier_model: Arc::new(tokio::sync::Mutex::new(Box::new(RecoveryModel(
+                calls.clone(),
+            )))),
+            fingerprint,
+        });
+    let (_client, server) = mpsc_transport_pair();
+    let transport: Arc<dyn AcpTransport> = Arc::new(server);
+    let id = ctx.thread_id.as_ref().unwrap();
+    make_sticky_unknown(&dir, &store, id).await;
+    // 第一遍覆盖 Resident 未及时收到失效结果；第二遍覆盖审查指出的 ReloadRequired。
+    for _ in 0..2 {
+        let error = prompt::run_prompt(
+            json!({"sessionId": ctx.session_id, "prompt": [{"type": "text", "text": "continue"}]}),
+            &sessions,
+            &cfg,
+            &transport,
+            pool.clone(),
+            None,
+            false,
+            None,
+        )
+        .await
+        .unwrap_err();
+        assert_eq!(error.code, -32010, "{error:?}");
+        assert!(
+            error.message.contains("explicit persistence recovery"),
+            "{error:?}"
+        );
+        assert_reload_required(&sessions, &ctx.session_id).await;
+        assert_eq!(
+            calls.load(Ordering::SeqCst),
+            0,
+            "Unknown 时 provider 调用必须为零"
+        );
+        assert_eq!(
+            tools.load(Ordering::SeqCst),
+            0,
+            "Unknown 时工具执行必须为零"
+        );
+        assert!(store
+            .drain_persistence(id)
+            .await
+            .unwrap_err()
+            .is_persistence_uncertain());
+    }
+    if recover {
+        assert_eq!(
+            store.recover_session_persistence(id).await.unwrap(),
+            PersistenceRecovery::Recovered
+        );
+        store.drain_persistence(id).await.unwrap();
+        let response = prompt::run_prompt(
+            json!({"sessionId": ctx.session_id, "prompt": [{"type": "text", "text": "continue"}]}),
+            &sessions,
+            &cfg,
+            &transport,
+            pool,
+            None,
+            false,
+            None,
+        )
+        .await
+        .unwrap();
+        assert_eq!(response["stopReason"], "end_turn");
+        assert_eq!(calls.load(Ordering::SeqCst), 2);
+        assert_eq!(tools.load(Ordering::SeqCst), 1);
+        assert_active_store_matches(&ctx, &store, &sessions).await;
+        store.drain_persistence(id).await.unwrap();
+    }
+}
+
+#[tokio::test]
+#[serial]
+async fn sticky_unknown_rejects_prompt_before_provider_and_tools_without_beta() {
+    sticky_unknown_prompt_case(false).await;
+}
+
+#[tokio::test]
+#[serial]
+async fn sticky_unknown_explicit_recovery_allows_normal_prompt_without_beta() {
+    sticky_unknown_prompt_case(true).await;
 }

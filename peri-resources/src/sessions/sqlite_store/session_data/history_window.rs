@@ -5,11 +5,15 @@
 
 use super::history::{
     HISTORY_WINDOW_AFTER_SQL, HISTORY_WINDOW_ANCHOR_SQL, HISTORY_WINDOW_BEFORE_SQL,
-    HISTORY_WINDOW_BODY_CHUNK_SQL, HISTORY_WINDOW_BOUNDS_SQL, HISTORY_WINDOW_CHECKPOINT_SQL,
-    HISTORY_WINDOW_INHERITED_AFTER_SQL, HISTORY_WINDOW_INHERITED_ANCHOR_SQL,
-    HISTORY_WINDOW_INHERITED_BEFORE_SQL, HISTORY_WINDOW_INHERITED_BODY_SQL,
-    HISTORY_WINDOW_INHERITED_BOUNDS_SQL, HISTORY_WINDOW_INHERITED_CHUNK_SQL,
+    HISTORY_WINDOW_BODY_CHUNK_SQL, HISTORY_WINDOW_BOUNDS_SQL, HISTORY_WINDOW_CHECKPOINT_FAST_SQL,
+    HISTORY_WINDOW_CHECKPOINT_SQL, HISTORY_WINDOW_INHERITED_AFTER_SQL,
+    HISTORY_WINDOW_INHERITED_ANCHOR_SQL, HISTORY_WINDOW_INHERITED_BEFORE_SQL,
+    HISTORY_WINDOW_INHERITED_BODY_SQL, HISTORY_WINDOW_INHERITED_ROWID_SQL,
     HISTORY_WINDOW_LATEST_SQL, HISTORY_WINDOW_TAIL_CHECK_SQL,
+};
+use super::inherited_blob::{
+    is_transient_blob_error, map_inherited_blob_error, BlobReadError, InheritedFactsRead,
+    InheritedLayout,
 };
 use super::*;
 use peri_acp_types::history_window::{
@@ -26,17 +30,6 @@ use sha2::{Digest, Sha256};
 
 /// `HISTORY_WINDOW_BOUNDS_SQL` 的行形状：(最旧 id, 最新 id, 最新 position, 继承行数)。
 type HistoryWindowBoundsRow = (Option<String>, Option<String>, Option<i64>, i64);
-
-/// `HISTORY_WINDOW_INHERITED_BOUNDS_SQL` 的行形状。
-type InheritedHistoryBoundsRow = (
-    Option<String>,
-    Option<i64>,
-    i64,
-    Option<String>,
-    Option<String>,
-    Option<String>,
-    Option<i64>,
-);
 
 // ─── 窗口读取（peri.historyWindowV1） ─────────────────────────────────────────
 
@@ -76,6 +69,17 @@ impl SqliteSessionData {
             .acquire()
             .await
             .map_err(|error| map_sqlx(&error))?;
+        // inherited 是 write-once 冻结列：事实由增量 blob 扫描给出，不再把首尾 payload
+        // 取回 Rust 反序列化。非 canonical 信封回退原 SQL 路径。
+        let inherited_snapshot = match self
+            .read_inherited_facts_cached(&mut connection, id)
+            .await?
+        {
+            InheritedFactsRead::Facts { snapshot, .. } => snapshot,
+            InheritedFactsRead::Unsupported => {
+                Self::read_inherited_facts_sql(&mut connection, id).await?
+            }
+        };
         let mut tx = sqlx::Connection::begin(&mut *connection)
             .await
             .map_err(|error| map_sqlx(&error))?;
@@ -86,12 +90,20 @@ impl SqliteSessionData {
             .await
             .map_err(|error| map_sqlx(&error))?;
         let (oldest, latest, latest_position, _inherited) = row.ok_or_else(not_found)?;
-        let checkpoint: Option<(String, i64)> = sqlx::query_as(HISTORY_WINDOW_CHECKPOINT_SQL)
+        let checkpoint: Option<(String, i64)> = sqlx::query_as(HISTORY_WINDOW_CHECKPOINT_FAST_SQL)
             .bind(id.as_str())
             .fetch_optional(&mut *tx)
             .await
             .map_err(|error| map_sqlx(&error))?;
-        let inherited_snapshot = Self::read_inherited_facts(&mut tx, id).await?;
+        // 快路径只读最新归档行；它给不出有效指针时（legacy/悬挂/损坏）才回到全归档推导。
+        let checkpoint = match checkpoint {
+            Some(row) => Some(row),
+            None => sqlx::query_as(HISTORY_WINDOW_CHECKPOINT_SQL)
+                .bind(id.as_str())
+                .fetch_optional(&mut *tx)
+                .await
+                .map_err(|error| map_sqlx(&error))?,
+        };
         tx.commit().await.map_err(|error| map_sqlx(&error))?;
 
         let own_oldest = oldest.as_deref().map(message_id_of).transpose()?;
@@ -502,56 +514,6 @@ fn empty_window_page() -> HistoryPage {
 // ─── inherited 冻结前缀读取（S7.4） ──────────────────────────────────────────
 
 impl SqliteSessionData {
-    /// 从 `threads.inherited_context` 读取冻结快照事实；不把整列正文带回 Rust。
-    async fn read_inherited_facts(
-        connection: &mut SqliteConnection,
-        id: &ThreadId,
-    ) -> SessionResourceResult<Option<HistoryInheritedSnapshot>> {
-        let row: Option<InheritedHistoryBoundsRow> =
-            sqlx::query_as(HISTORY_WINDOW_INHERITED_BOUNDS_SQL)
-                .bind(id.as_str())
-                .fetch_optional(&mut *connection)
-                .await
-                .map_err(|error| map_sqlx(&error))?;
-        let Some((parent, bytes, count, first, last, payloads_type, version)) = row else {
-            return Err(not_found());
-        };
-        if count < 0 {
-            return Err(corrupt("inherited context is not valid JSON"));
-        }
-        if count == 0 {
-            return Ok(None);
-        }
-        if payloads_type.as_deref() != Some("array") || version != Some(1) {
-            return Err(corrupt("inherited context has an unsupported shape"));
-        }
-        let first_payload =
-            first.ok_or_else(|| corrupt("inherited context first payload is missing"))?;
-        let last_payload =
-            last.ok_or_else(|| corrupt("inherited context last payload is missing"))?;
-        let first_id = deserialize_persisted_payload(&first_payload)
-            .map_err(|_| corrupt("inherited context first payload is not decodable"))?
-            .id();
-        let last_id = deserialize_persisted_payload(&last_payload)
-            .map_err(|_| corrupt("inherited context last payload is not decodable"))?
-            .id();
-        let snapshot_id = inherited_snapshot_id(
-            id,
-            bytes.unwrap_or(0),
-            count as usize,
-            parent.as_deref(),
-            first_id,
-            last_id,
-        );
-        Ok(Some(HistoryInheritedSnapshot {
-            snapshot_id,
-            ancestor_thread_id: parent,
-            first_entry: Some(first_id),
-            last_entry: Some(last_id),
-            entry_count: count as usize,
-        }))
-    }
-
     async fn read_inherited_history_window_page(
         &self,
         id: &ThreadId,
@@ -574,13 +536,26 @@ impl SqliteSessionData {
             .acquire()
             .await
             .map_err(|error| map_sqlx(&error))?;
-        let mut tx = sqlx::Connection::begin(&mut *connection)
-            .await
-            .map_err(|error| map_sqlx(&error))?;
-        self.require_session(&mut tx, id).await?;
-        let snapshot = Self::read_inherited_facts(&mut tx, id)
+        // 冻结前缀是 write-once：事实先于页读取取得，增量路径不物化首尾正文。
+        let snapshot = match self
+            .read_inherited_facts_cached(&mut connection, id)
             .await?
-            .ok_or_else(|| HistoryWindowError::window_invalidated("inherited prefix is absent"))?;
+        {
+            InheritedFactsRead::Facts {
+                snapshot: Some(snapshot),
+                ..
+            } => snapshot,
+            InheritedFactsRead::Facts { snapshot: None, .. } => {
+                return Err(
+                    HistoryWindowError::window_invalidated("inherited prefix is absent").into(),
+                )
+            }
+            InheritedFactsRead::Unsupported => Self::read_inherited_facts_sql(&mut connection, id)
+                .await?
+                .ok_or_else(|| {
+                    HistoryWindowError::window_invalidated("inherited prefix is absent")
+                })?,
+        };
         if snapshot.snapshot_id != *frozen_snapshot_id {
             return Err(HistoryWindowError::SnapshotMismatch {
                 detail: "inherited snapshot id no longer matches the frozen prefix".into(),
@@ -595,6 +570,10 @@ impl SqliteSessionData {
                 .into());
             }
         }
+        let mut tx = sqlx::Connection::begin(&mut *connection)
+            .await
+            .map_err(|error| map_sqlx(&error))?;
+        self.require_session(&mut tx, id).await?;
 
         let anchor_key = match plan.anchor {
             Some(anchor) => {
@@ -780,83 +759,115 @@ impl SqliteSessionData {
             .acquire()
             .await
             .map_err(|error| map_sqlx(&error))?;
-        let mut tx = sqlx::Connection::begin(&mut *connection)
-            .await
-            .map_err(|error| map_sqlx(&error))?;
-        self.require_session(&mut tx, id).await?;
-        let snapshot = Self::read_inherited_facts(&mut tx, id)
-            .await?
-            .ok_or_else(|| HistoryWindowError::window_invalidated("inherited prefix is absent"))?;
-        if snapshot.snapshot_id != frozen_snapshot_id {
-            return Err(HistoryWindowError::SnapshotMismatch {
-                detail: "inherited snapshot id no longer matches the frozen prefix".into(),
+        let read = self
+            .read_inherited_facts_cached(&mut connection, id)
+            .await?;
+        match read {
+            InheritedFactsRead::Unsupported => {
+                self.read_inherited_body_chunk_sql(
+                    &mut connection,
+                    id,
+                    frozen_snapshot_id,
+                    ancestor_thread_id,
+                    entry_id,
+                    offset,
+                    max_bytes,
+                )
+                .await
             }
-            .into());
-        }
-        if let Some(expected) = ancestor_thread_id {
-            if snapshot.ancestor_thread_id.as_ref() != Some(expected) {
-                return Err(HistoryWindowError::SnapshotMismatch {
-                    detail: "inherited ancestor identity does not match".into(),
+            InheritedFactsRead::Facts { snapshot: None, .. } => {
+                Err(HistoryWindowError::window_invalidated("inherited prefix is absent").into())
+            }
+            InheritedFactsRead::Facts {
+                snapshot: Some(snapshot),
+                layout: Some(layout),
+            } => {
+                if snapshot.snapshot_id != frozen_snapshot_id {
+                    return Err(HistoryWindowError::SnapshotMismatch {
+                        detail: "inherited snapshot id no longer matches the frozen prefix".into(),
+                    }
+                    .into());
                 }
-                .into());
+                if let Some(expected) = ancestor_thread_id {
+                    if snapshot.ancestor_thread_id.as_ref() != Some(expected) {
+                        return Err(HistoryWindowError::SnapshotMismatch {
+                            detail: "inherited ancestor identity does not match".into(),
+                        }
+                        .into());
+                    }
+                }
+                let index = layout.position_of(entry_id).ok_or_else(|| {
+                    HistoryWindowError::anchor_unavailable(
+                        "inherited history entry is not present in this frozen snapshot",
+                    )
+                })?;
+                let blob_offset = u64::try_from(offset)
+                    .map_err(|_| corrupt("inherited history body offset is negative"))?;
+                let chunk = Self::read_inherited_chunk_blob(
+                    &mut connection,
+                    id,
+                    &layout,
+                    index,
+                    blob_offset,
+                    max_bytes,
+                )
+                .await?;
+                let chunk = match chunk {
+                    Ok(chunk) => chunk,
+                    // 并发更新可能让 blob 句柄失效；用 SQL 语义重读，避免把瞬态竞争
+                    // 当成持久损坏。
+                    Err(error) if is_transient_blob_error(&error) => {
+                        return self
+                            .read_inherited_body_chunk_sql(
+                                &mut connection,
+                                id,
+                                frozen_snapshot_id,
+                                ancestor_thread_id,
+                                entry_id,
+                                offset,
+                                max_bytes,
+                            )
+                            .await;
+                    }
+                    Err(error) => return Err(map_inherited_blob_error(error)),
+                };
+                Ok(HistoryBodyChunk {
+                    entry_id: HistoryEntryId::new(id, entry_id).encode(),
+                    offset: chunk.offset,
+                    bytes: chunk.bytes,
+                    next_offset: chunk.next_offset,
+                    complete: chunk.complete,
+                })
             }
+            InheritedFactsRead::Facts {
+                snapshot: Some(_),
+                layout: None,
+            } => Err(corrupt("inherited layout is missing")),
         }
-        let key: Option<(i64,)> = sqlx::query_as(HISTORY_WINDOW_INHERITED_ANCHOR_SQL)
+    }
+
+    /// 增量块读取：只定位 rowid，再从 blob 读取请求区间；总长度由 blob 句柄直接给出，
+    /// 不查询 `length(CAST(...))`（那会物化整列）。
+    async fn read_inherited_chunk_blob(
+        connection: &mut SqliteConnection,
+        id: &ThreadId,
+        layout: &InheritedLayout,
+        index: usize,
+        offset: u64,
+        max_bytes: u32,
+    ) -> SessionResourceResult<Result<super::inherited_blob::PayloadChunk, BlobReadError>> {
+        let row: Option<(i64,)> = sqlx::query_as(HISTORY_WINDOW_INHERITED_ROWID_SQL)
             .bind(id.as_str())
-            .bind(entry_id.as_uuid().to_string())
-            .fetch_optional(&mut *tx)
+            .fetch_optional(&mut *connection)
             .await
             .map_err(|error| map_sqlx(&error))?;
-        let Some((key,)) = key else {
-            return Err(HistoryWindowError::anchor_unavailable(
-                "inherited history entry is not present in this frozen snapshot",
-            )
-            .into());
+        let Some((rowid,)) = row else {
+            return Err(not_found());
         };
-        let row: Option<(i64, Vec<u8>)> = sqlx::query_as(HISTORY_WINDOW_INHERITED_CHUNK_SQL)
-            .bind(id.as_str())
-            .bind(key)
-            .bind(offset)
-            .bind(i64::from(max_bytes))
-            .fetch_optional(&mut *tx)
-            .await
-            .map_err(|error| map_sqlx(&error))?;
-        tx.commit().await.map_err(|error| map_sqlx(&error))?;
-        let Some((total, bytes)) = row else {
-            return Err(HistoryWindowError::anchor_unavailable(
-                "inherited history entry is not present in this frozen snapshot",
-            )
-            .into());
-        };
-        let total = u64::try_from(total)
-            .map_err(|_| corrupt("inherited history body length is negative"))?;
-        let offset = u64::try_from(offset)
-            .map_err(|_| corrupt("inherited history body offset is negative"))?;
-        if offset > total {
-            return Err(HistoryWindowError::invalid_request(
-                "body chunk offset is beyond the entry length",
-            )
-            .into());
-        }
-        let end = offset.checked_add(bytes.len() as u64).ok_or_else(|| {
-            HistoryWindowError::ReadFailed {
-                detail: "body chunk offset overflow".into(),
-            }
-        })?;
-        let complete = end >= total;
-        if !complete && bytes.is_empty() {
-            return Err(HistoryWindowError::ReadFailed {
-                detail: "body chunk made no progress".into(),
-            }
-            .into());
-        }
-        Ok(HistoryBodyChunk {
-            entry_id: HistoryEntryId::new(id, entry_id).encode(),
-            offset,
-            bytes,
-            next_offset: (!complete).then_some(end),
-            complete,
+        Self::inherited_blob_scope(connection, rowid, |reader| {
+            layout.read_chunk(reader, index, offset, max_bytes)
         })
+        .await
     }
 }
 
@@ -873,7 +884,33 @@ fn decode_inherited_candidates(
         .collect()
 }
 
-fn inherited_snapshot_id(
+/// 由布局构造冻结快照事实；条目为空时与 SQL 路径一致地返回 `None`。
+pub(super) fn inherited_snapshot_of(
+    id: &ThreadId,
+    parent: Option<String>,
+    layout: &InheritedLayout,
+) -> Option<HistoryInheritedSnapshot> {
+    let first = layout.first_id()?;
+    let last = layout.last_id()?;
+    let count = layout.len();
+    let snapshot_id = inherited_snapshot_id(
+        id,
+        layout.total_bytes as i64,
+        count,
+        parent.as_deref(),
+        first,
+        last,
+    );
+    Some(HistoryInheritedSnapshot {
+        snapshot_id,
+        ancestor_thread_id: parent,
+        first_entry: Some(first),
+        last_entry: Some(last),
+        entry_count: count,
+    })
+}
+
+pub(super) fn inherited_snapshot_id(
     child: &ThreadId,
     bytes: i64,
     count: usize,

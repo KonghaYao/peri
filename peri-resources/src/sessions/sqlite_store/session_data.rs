@@ -49,6 +49,8 @@ mod catalog;
 mod history;
 #[path = "session_data/history_window.rs"]
 mod history_window;
+#[path = "session_data/inherited_blob.rs"]
+mod inherited_blob;
 #[path = "session_data/lifecycle.rs"]
 mod lifecycle;
 
@@ -71,3 +73,7 @@ pub(super) use helpers::{new_session_draft_row, new_session_row, validate_unboun
 #[cfg(test)]
 #[path = "session_history_perf_test.rs"]
 mod history_perf_tests;
+
+#[cfg(test)]
+#[path = "session_data/history_window_incremental_test.rs"]
+mod history_window_incremental_tests;

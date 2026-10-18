@@ -341,7 +341,13 @@ async fn run_prompt_attempt(
     //
     // 放在 start/run-started 之后：续跑没有请求作用域响应，提前失败也必须由
     // `finish_early` 发出终止通知，否则调度器与 TUI 永远等不到本轮结束。
-    ensure_resident_context(sessions, &session_id, controller).await?;
+    ensure_resident_context(
+        sessions,
+        &session_id,
+        controller,
+        session_resources.as_ref(),
+    )
+    .await?;
     // activation 监听器必须在移交正文**之前**建立：它是可失败的启动步骤，
     // 失败时 Host 仍持有有效上下文，下一次使用不受影响。
     if let Some(sender) = &cont_tx {
@@ -675,16 +681,17 @@ pub(super) async fn ensure_resident_context(
     sessions: &SharedSessions,
     session_id: &str,
     controller: &peri_controller::Controller,
+    resources: &dyn peri_acp_types::session_resources::SessionResources,
 ) -> Result<(), AcpError> {
-    let thread_id = {
+    let (thread_id, needs_reload) = {
         let mut sessions = sessions.lock().await;
         let state = sessions
             .get_mut(session_id)
             .ok_or_else(|| AcpError::new(-32602, "session not found"))?;
         super::ownership::mark_stale_if_dead(state);
         match state.context_ownership {
-            super::ContextOwnership::Resident => return Ok(()),
-            super::ContextOwnership::ReloadRequired => state.thread_id.clone(),
+            super::ContextOwnership::Resident => (state.thread_id.clone(), false),
+            super::ContextOwnership::ReloadRequired => (state.thread_id.clone(), true),
             super::ContextOwnership::HandedOff => {
                 return Err(AcpError::new(
                     -32010,
@@ -693,6 +700,20 @@ pub(super) async fn ensure_resident_context(
             }
         }
     };
+    // 读取快照不能证明可写：先等待旧 mutation 结清，并检查 gate 的 sticky Unknown。
+    // Resident 也检查，防止其他持久化路径已失效而 Host 尚未收到执行结果。
+    // 不在普通 prompt 中清除 uncertainty；只有显式恢复确认后才允许重新接纳。
+    if let Err(error) = resources.drain_persistence(&thread_id).await {
+        tracing::warn!(session_id, %error, "持久化尚未结清，拒绝开始新一轮执行");
+        mark_reload_required(sessions, session_id).await;
+        return Err(AcpError::new(
+            -32010,
+            format!("Session persistence is not settled; explicit persistence recovery is required before retrying: {error}"),
+        ));
+    }
+    if !needs_reload {
+        return Ok(());
+    }
     let payloads = crate::dispatch::load_active_session_payloads(controller, &thread_id).await?;
     let restored_memory = {
         let mut sessions = sessions.lock().await;

@@ -119,12 +119,15 @@ pub fn build_window_gap_request(
     window: &crate::kit::history_window::HistoryWindow,
 ) -> Option<WindowConsumerRequest> {
     match history_paging::window_gap_recovery(window)? {
-        WindowGapRequest::Page { cursor, .. } => {
-            build_window_page_request(cursor, WINDOW_PAGE_LIMIT)
+        WindowGapRequest::Page { gap_id, cursor } => {
+            build_window_page_request_for_gap(Some(gap_id), cursor, WINDOW_PAGE_LIMIT)
         }
-        WindowGapRequest::Seek { anchor, .. } => {
-            build_window_seek_request(anchor, WINDOW_PAGE_LIMIT, WINDOW_PAGE_LIMIT)
-        }
+        WindowGapRequest::Seek { gap_id, anchor } => build_window_seek_request_for_gap(
+            Some(gap_id),
+            anchor,
+            WINDOW_PAGE_LIMIT,
+            WINDOW_PAGE_LIMIT,
+        ),
     }
 }
 
@@ -141,12 +144,15 @@ pub fn request_window_gap_if_due() -> bool {
         return false;
     };
     let request = match gap {
-        WindowGapRequest::Page { cursor, .. } => {
-            build_window_page_request(cursor, WINDOW_PAGE_LIMIT)
+        WindowGapRequest::Page { gap_id, cursor } => {
+            build_window_page_request_for_gap(Some(gap_id), cursor, WINDOW_PAGE_LIMIT)
         }
-        WindowGapRequest::Seek { anchor, .. } => {
-            build_window_seek_request(anchor, WINDOW_PAGE_LIMIT, WINDOW_PAGE_LIMIT)
-        }
+        WindowGapRequest::Seek { gap_id, anchor } => build_window_seek_request_for_gap(
+            Some(gap_id),
+            anchor,
+            WINDOW_PAGE_LIMIT,
+            WINDOW_PAGE_LIMIT,
+        ),
     };
     let Some(request) = request else {
         return false;

@@ -869,3 +869,6 @@ mod connection_tests;
 
 #[path = "history_page_window_test/inherited_test.rs"]
 mod inherited_tests;
+
+#[path = "history_page_window_test/audience_test.rs"]
+mod audience_tests;

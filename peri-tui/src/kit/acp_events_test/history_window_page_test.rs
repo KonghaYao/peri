@@ -8,6 +8,9 @@ use crate::kit::history_paging::{
 use crate::kit::history_window::{HistoryWindow, HistoryWindowConfig, WindowIdentity};
 use serial_test::serial;
 
+#[path = "history_window_page_test/late_open_and_gap.rs"]
+mod late_open_and_gap;
+
 struct WindowAtomsGuard;
 
 impl Drop for WindowAtomsGuard {
@@ -163,6 +166,8 @@ fn context_at(
         reserved_bytes: 1024,
         placement,
         is_open: false,
+        display_generation: 0,
+        gap: None,
     }
 }
 
@@ -287,6 +292,8 @@ fn open_page_begins_window_and_aligns_generation() {
         reserved_bytes: 1024,
         placement: WindowPagePlacement::Tail,
         is_open: true,
+        display_generation: state.generation,
+        gap: None,
     };
     let response = response(identity.clone(), vec![item("m1", Some(10), false)]);
     dispatch_for_bridge(
@@ -686,6 +693,8 @@ fn open_with_live_region_does_not_clear_or_merge_display() {
         reserved_bytes: 1024,
         placement: WindowPagePlacement::Tail,
         is_open: true,
+        display_generation: state.generation,
+        gap: None,
     };
     dispatch_for_bridge(
         &mut state,
@@ -718,6 +727,8 @@ fn open_without_live_region_adopts_window_page_and_clears_replay() {
         reserved_bytes: 1024,
         placement: WindowPagePlacement::Tail,
         is_open: true,
+        display_generation: state.generation,
+        gap: None,
     };
     dispatch_for_bridge(
         &mut state,

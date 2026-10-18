@@ -5,7 +5,7 @@ use super::*;
 use peri_acp_types::history_window::HistoryEntryId;
 use peri_acp_types::store::{serialize_persisted_payload, InheritedContext};
 
-async fn set_inherited(
+pub(super) async fn set_inherited(
     tmp: &tempfile::TempDir,
     sid: &str,
     payloads: &[PersistedPayload],

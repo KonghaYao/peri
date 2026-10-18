@@ -409,6 +409,133 @@ fn gap_request_uses_stable_identity_seek_and_keeps_window_open() {
 
 #[test]
 #[serial]
+fn page_settlement_keeps_the_opposite_window_cursor() {
+    {
+        let _guard = reset_atoms();
+        let request = build_window_page_request(
+            crate::kit::history_paging::WindowPageCursor::Before("before-1".into()),
+            20,
+        )
+        .expect("before page");
+        let in_flight = match claim_window_request(&request) {
+            WindowClaim::Granted(in_flight) => in_flight,
+            other => panic!("expected grant, got {other:?}"),
+        };
+        let mut response = page_response("snap-1", 1);
+        response.before_cursor = Some("before-2".into());
+        response.after_cursor = None;
+        assert!(matches!(
+            settle_window_response(&in_flight, &response),
+            WindowSettlement::Accepted(_)
+        ));
+        let state = atoms::HISTORY_WINDOW_PAGING.state().read().clone();
+        assert_eq!(state.before_cursor.as_deref(), Some("before-2"));
+        assert_eq!(
+            state.after_cursor.as_deref(),
+            Some("after-1"),
+            "a before page must not clear the newer-side cursor"
+        );
+    }
+
+    {
+        let _guard = reset_atoms();
+        let request = build_window_page_request(
+            crate::kit::history_paging::WindowPageCursor::After("after-1".into()),
+            20,
+        )
+        .expect("after page");
+        let in_flight = match claim_window_request(&request) {
+            WindowClaim::Granted(in_flight) => in_flight,
+            other => panic!("expected grant, got {other:?}"),
+        };
+        let mut response = page_response("snap-1", 1);
+        response.before_cursor = None;
+        response.after_cursor = Some("after-2".into());
+        assert!(matches!(
+            settle_window_response(&in_flight, &response),
+            WindowSettlement::Accepted(_)
+        ));
+        let state = atoms::HISTORY_WINDOW_PAGING.state().read().clone();
+        assert_eq!(
+            state.before_cursor.as_deref(),
+            Some("before-1"),
+            "an after page must not clear the older-side cursor"
+        );
+        assert_eq!(state.after_cursor.as_deref(), Some("after-2"));
+    }
+}
+
+#[test]
+#[serial]
+fn gap_request_carries_gap_identity_and_window_generation() {
+    use crate::kit::history_window::{
+        HistoryEntryView, HistorySource, HistoryWindow, HistoryWindowConfig, PersistentEntryKey,
+        ReleasePlan, SegmentDraft, SegmentPlacement,
+    };
+
+    let _guard = reset_atoms();
+    let identity = WindowIdentity::new("s1", "gen-1", 7, "snap-1");
+    let mut window = HistoryWindow::new(HistoryWindowConfig::enabled());
+    window.begin_window(identity);
+    let mut keys = Vec::new();
+    for (id, position) in [("a", 10), ("b", 20)] {
+        let entry = HistoryEntryView::new(
+            PersistentEntryKey::own(format!("s1:{id}")),
+            Some(position),
+            1,
+            10,
+            20,
+            Vec::new(),
+        );
+        keys.push(
+            window
+                .register_segment(
+                    SegmentDraft::new(HistorySource::Own, vec![entry], 10, 20),
+                    SegmentPlacement::Tail,
+                )
+                .expect("segment"),
+        );
+    }
+    let (before, after) = window.neighbor_entries(keys[1]);
+    let segment = window.segment(keys[1]).expect("segment").clone();
+    window
+        .apply_release_plan(&ReleasePlan {
+            segment: keys[1],
+            source: segment.source.clone(),
+            entries: segment.entry_keys(),
+            unit_count: segment.unit_count,
+            body_bytes: segment.body_bytes,
+            reserved_bytes: segment.reserved_bytes,
+            slot_range: window.index().slot_range(keys[1]),
+            before,
+            after,
+            before_cursor: Some("before-b".into()),
+            after_cursor: Some("after-b".into()),
+        })
+        .expect("release b");
+    let anchor = crate::kit::history_window::WindowAnchor::new(
+        PersistentEntryKey::own("s1:b"),
+        None,
+        crate::kit::history_window::WindowAnchorOffset::CharOffset(0),
+    );
+    window.set_anchor(Some(anchor));
+
+    let request = build_window_gap_request(&window).expect("gap seek request");
+    let gap_id = *window.gaps().keys().next().expect("gap");
+    match request {
+        WindowConsumerRequest::Seek { context, .. } => {
+            assert_eq!(context.gap, Some(gap_id));
+            assert_eq!(
+                context.display_generation,
+                atoms::VIEW_MODELS.state().read().generation
+            );
+        }
+        other => panic!("expected seek, got {other:?}"),
+    }
+}
+
+#[test]
+#[serial]
 fn reservation_budget_rejects_before_request_dispatch() {
     let _guard = reset_atoms();
     let identity = WindowIdentity::new("s1", "gen-1", 7, "snap-1");
@@ -421,6 +548,8 @@ fn reservation_budget_rejects_before_request_dispatch() {
             reserved_bytes: crate::kit::history_window::WindowLimits::default().reserved_bytes + 1,
             placement: WindowPagePlacement::Tail,
             is_open: false,
+            display_generation: 0,
+            gap: None,
         },
         cursor: crate::kit::history_paging::WindowPageCursor::Before("c".into()),
         limit: 20,

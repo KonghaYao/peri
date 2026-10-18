@@ -17,7 +17,134 @@ use peri_acp_types::PeriCaps;
 
 use crate::host::history_page::page_item;
 
-use super::IssuedWindowTicket;
+use super::{
+    anchor_unavailable, resource_window_error, AcpError, AcpServerConfig, IssuedWindowTicket,
+};
+
+// 在票据登记和 wire descriptor 构造之前过滤；游标仍按存储行推进。
+pub(super) async fn filter_rows(
+    cfg: &AcpServerConfig,
+    thread_id: &str,
+    source: &HistorySource,
+    ticket: &peri_acp_types::history_window::HistoryReadTicket,
+    result: Result<HistoryWindowRows, AcpError>,
+) -> Result<HistoryWindowRows, AcpError> {
+    let mut rows = result?;
+    let mut visible = Vec::new();
+    for id in oversize_ids(Some(&rows)) {
+        if body_visible(
+            cfg,
+            thread_id,
+            source,
+            rows.committed_tail.as_ref(),
+            ticket,
+            id,
+        )
+        .await?
+        {
+            visible.push(id);
+        }
+    }
+    rows.entries.retain(|entry| match entry {
+        HistoryWindowEntry::Oversized { entry_id, .. } => visible.contains(entry_id),
+        HistoryWindowEntry::Loaded(item) => item.payload.displayable_to_client(),
+    });
+    rows.inherited_entries.retain(|entry| match entry {
+        InheritedHistoryEntry::Oversized { entry_id, .. } => visible.contains(entry_id),
+        InheritedHistoryEntry::Loaded(item) => item.payload.displayable_to_client(),
+    });
+    Ok(rows)
+}
+
+pub(super) async fn body_visible(
+    cfg: &AcpServerConfig,
+    thread_id: &str,
+    source: &HistorySource,
+    tail: Option<&peri_acp_types::history_window::HistoryCommittedTail>,
+    ticket: &peri_acp_types::history_window::HistoryReadTicket,
+    entry_id: MessageId,
+) -> Result<bool, AcpError> {
+    // 同步 serde reader 在 blocking pool 中消费容量为 1 的通道；不聚合大正文。
+    let (sender, receiver) = tokio::sync::mpsc::channel(1);
+    let parsing = tokio::task::spawn_blocking(move || {
+        peri_acp_types::history_page::history_body_displayable_to_client(BodyReader {
+            receiver,
+            current: std::io::Cursor::new(Vec::new()),
+        })
+    });
+    let mut offset = 0;
+    let mut failure = None;
+    loop {
+        let chunk = cfg
+            .session_resources
+            .load_history_body_chunk(
+                &thread_id.to_owned(),
+                source.clone(),
+                entry_id,
+                offset,
+                HISTORY_WINDOW_DEFAULT_CHUNK_SIZE,
+                tail,
+                ticket,
+            )
+            .await
+            .map_err(resource_window_error);
+        let chunk = match chunk {
+            Ok(chunk) => chunk,
+            Err(error) => {
+                failure = Some(error);
+                break;
+            }
+        };
+        if let Err(error) = chunk.validate(
+            &HistoryEntryId::new(&thread_id.to_owned(), entry_id).encode(),
+            offset,
+            HISTORY_WINDOW_DEFAULT_CHUNK_SIZE,
+        ) {
+            failure = Some(super::window_error(error));
+            break;
+        }
+        let next = chunk.next_offset;
+        if sender.send(chunk.bytes).await.is_err() {
+            break;
+        }
+        match next {
+            Some(next) => offset = next,
+            None => break,
+        }
+    }
+    drop(sender);
+    let parsed = parsing.await.map_err(|error| {
+        tracing::error!(%error, "history audience parser failed");
+        anchor_unavailable("history audience could not be verified")
+    })?;
+    if let Some(error) = failure {
+        return Err(error);
+    }
+    parsed.map_err(|_| {
+        tracing::warn!("history audience decoding failed");
+        anchor_unavailable("history audience could not be verified")
+    })
+}
+
+struct BodyReader {
+    receiver: tokio::sync::mpsc::Receiver<Vec<u8>>,
+    current: std::io::Cursor<Vec<u8>>,
+}
+
+impl std::io::Read for BodyReader {
+    fn read(&mut self, buffer: &mut [u8]) -> std::io::Result<usize> {
+        loop {
+            let count = std::io::Read::read(&mut self.current, buffer)?;
+            if count != 0 || buffer.is_empty() {
+                return Ok(count);
+            }
+            match self.receiver.blocking_recv() {
+                Some(bytes) => self.current = std::io::Cursor::new(bytes),
+                None => return Ok(0),
+            }
+        }
+    }
+}
 
 pub(super) fn oversize_ids(rows: Option<&HistoryWindowRows>) -> Vec<MessageId> {
     rows.map(|rows| {

@@ -255,6 +255,105 @@ fn event_layer_opens_detail_from_placeholder_and_clears_on_close() {
 
 #[test]
 #[serial_test::serial]
+fn detail_scroll_event_path_uses_one_registered_request_per_chunk() {
+    crate::kit::atoms::init_atoms();
+    let descriptor = DetailDescriptor::new(
+        HistorySource::Own,
+        "s1:m1",
+        4096,
+        1024,
+        "snap-1",
+        "ticket-1",
+    );
+    crate::kit::atoms::HISTORY_DETAIL
+        .set(Some(HistoryDetailWindow::open(descriptor).expect("open")));
+
+    let first = scroll_detail_request(1).expect("first scroll must request a chunk");
+    assert_eq!(
+        first.offset, 1024,
+        "scroll_to registers the uncovered offset"
+    );
+    {
+        let handle = crate::kit::atoms::HISTORY_DETAIL.state();
+        let detail = handle.read();
+        let detail = detail.as_ref().expect("detail");
+        assert_eq!(
+            detail.pending_offset(),
+            Some(first.offset),
+            "the request returned to the UI is the one pending; no second request"
+        );
+    }
+    // 响应落地后 pending 清空，下一次滚动可以继续登记并发送。
+    crate::kit::atoms::HISTORY_DETAIL
+        .state()
+        .write()
+        .as_mut()
+        .expect("detail")
+        .apply_chunk(chunk(1024, &vec![b'a'; 1024], false, Some(2048)), 1024)
+        .expect("apply first request");
+    let second = scroll_detail_request(1).expect("second scroll must request a chunk");
+    assert_eq!(second.offset, 2048);
+    close_history_detail();
+}
+
+#[test]
+#[serial_test::serial]
+fn detail_visible_text_survives_first_chunk_eviction_and_prefix_refetch() {
+    crate::kit::atoms::init_atoms();
+    let total = 5 * 1024 * 1024u64;
+    let step = 256 * 1024usize;
+    let mut window = HistoryDetailWindow::open(descriptor(total)).expect("open");
+    let block = vec![b'x'; step];
+
+    // 先铺满 4 MiB 预算，再滚到 4 MiB 处加载新块；以视口为锚会淘汰最早块。
+    for offset in (0..4 * 1024 * 1024).step_by(step) {
+        window
+            .apply_chunk(
+                chunk(
+                    offset as u64,
+                    &block,
+                    false,
+                    Some(offset as u64 + step as u64),
+                ),
+                step as u32,
+            )
+            .expect("chunk");
+    }
+    assert_eq!(window.retained_bytes(), DETAIL_WINDOW_MAX_BYTES);
+    let request = window.scroll_to(4 * 1024 * 1024).expect("scroll request");
+    assert_eq!(request.offset, 4 * 1024 * 1024);
+    window
+        .apply_chunk(
+            chunk(
+                4 * 1024 * 1024,
+                &block,
+                false,
+                Some(4 * 1024 * 1024 + step as u64),
+            ),
+            step as u32,
+        )
+        .expect("tail chunk");
+    let (text, prefix_omitted) = window.visible_text().expect("visible text");
+    assert!(
+        !text.is_empty(),
+        "evicting the first chunk must not blank the panel"
+    );
+    assert!(prefix_omitted, "prefix gap is reported to the panel");
+    assert!(window.chunk_arc(0).is_none(), "oldest chunk was evicted");
+
+    // 滚回开头重新请求首块，落地后显示从 0 开始。
+    let request = window.scroll_to(0).expect("prefix request");
+    assert_eq!(request.offset, 0);
+    window
+        .apply_chunk(chunk(0, b"prefix", false, Some(6)), step as u32)
+        .expect("prefix chunk");
+    let (text, prefix_omitted) = window.visible_text().expect("visible text");
+    assert!(text.starts_with("prefix"));
+    assert!(!prefix_omitted);
+}
+
+#[test]
+#[serial_test::serial]
 fn detail_panel_lines_show_loading_error_and_inherited_notice() {
     crate::kit::atoms::init_atoms();
     let theme = peri_theme::atoms::THEME_ATOM.state().read().clone();

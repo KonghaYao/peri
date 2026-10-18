@@ -221,9 +221,9 @@ pub async fn run_pipeline(ctx: CommandContext) -> PipelineOutcome {
         // excluded 原文（D1 transcript shrink），宿主下一轮带回的历史天然只剩有效
         // 条目。两侧按 inherited 与 own 的有序身份序列比较。
         //
-        // 兼容适配入口：旧调用方仍可能带回完整历史（含已归档 id）。多出的 id 只做
-        // 有界 flags 查询确认其确为 excluded；未知 id 与读取失败都保持拒绝，不读取
-        // 这些 id 的正文。
+        // 兼容适配入口：旧调用方仍可能带回完整历史（含已归档 id）。多出的 id 必须
+        // 证明确为 excluded（own 走有界 flags 查询，继承区用同一快照的 flags）；
+        // 未知 id 与读取失败都保持拒绝，不读取这些 id 的正文。
         let inherited_ids: HashSet<MessageId> = snapshot
             .inherited
             .payloads
@@ -241,6 +241,28 @@ pub async fn run_pipeline(ctx: CommandContext) -> PipelineOutcome {
                 message: "compact persistence context mismatch".to_string(),
             };
         }
+        // 继承区按冻结快照原样返回：它同时带着 excluded 原文与标记，而 own 区已由
+        // `load_active_snapshot` 裁掉 excluded。普通 turn 交给调用方的是「继承区 +
+        // own」同一份**有效投影**，因此持久侧身份也必须先按继承区的 excluded flags
+        // 裁剪。否则子会话续聊后，合法的继承上下文会被误判为不一致。
+        let inherited_excluded_ids: HashSet<MessageId> = snapshot
+            .inherited
+            .flags
+            .iter()
+            .filter(|(_, flags)| flags.excluded)
+            .map(|(id, _)| *id)
+            .collect();
+        let excluded_ids: HashSet<MessageId> = inherited_excluded_ids
+            .iter()
+            .copied()
+            .chain(
+                snapshot
+                    .flags
+                    .iter()
+                    .filter(|(_, flags)| flags.excluded)
+                    .map(|(id, _)| *id),
+            )
+            .collect();
         // 命令 history 是普通消息投影；提醒类 payload 不携带 `BaseMessage`，不能参与
         // 身份比较，否则会把提醒数量误当成上下文差异。身份只来自消息投影。
         let persisted_messages: Vec<&BaseMessage> = snapshot
@@ -248,6 +270,7 @@ pub async fn run_pipeline(ctx: CommandContext) -> PipelineOutcome {
             .payloads
             .iter()
             .chain(&snapshot.payloads)
+            .filter(|payload| !excluded_ids.contains(&payload.id()))
             .filter_map(PersistedPayload::as_message)
             .collect();
         let persisted_ids: Vec<MessageId> = persisted_messages
@@ -276,9 +299,12 @@ pub async fn run_pipeline(ctx: CommandContext) -> PipelineOutcome {
                     .load_message_flags(&thread_id, &extra_ids)
                     .await
                 {
-                    Ok(flags) => extra_ids
-                        .iter()
-                        .all(|id| flags.get(id).is_some_and(|entry| entry.excluded)),
+                    // 继承区的 excluded 事实已在同一份快照里，不再按 id 读一次；
+                    // 未知 id 仍然拒绝，不放宽为「长度不同就放行」。
+                    Ok(flags) => extra_ids.iter().all(|id| {
+                        inherited_excluded_ids.contains(id)
+                            || flags.get(id).is_some_and(|entry| entry.excluded)
+                    }),
                     Err(error) => {
                         warn!(error = %format_args!("{error:#}"), "compact: failed to load message flags");
                         return PipelineOutcome::EarlyReturn {
@@ -539,3 +565,7 @@ pub async fn execute_compact(ctx: CommandContext) -> CommandResult {
         },
     }
 }
+
+#[cfg(test)]
+#[path = "compact_pipeline_test.rs"]
+mod tests;

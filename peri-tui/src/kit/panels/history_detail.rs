@@ -182,16 +182,26 @@ impl HistoryDetailWindow {
 
     fn enforce_budget(&mut self) -> Result<(), DetailError> {
         while self.retained_bytes > self.max_bytes {
-            // 顺序加载时以最新块为锚：淘汰最旧块，保持 pending 连续性。
+            // 顺序加载以最新块为锚（保持偏移连续），同时永不淘汰视口所在块：
+            // 向下滚动后预算压力先清远处旧块；滚回开头补读的首块也不会被
+            // 下一轮预算立刻淘汰。
             let anchor = self
                 .chunks
                 .last_key_value()
                 .map(|(offset, chunk)| offset.saturating_add(chunk.bytes.len() as u64))
                 .unwrap_or(self.scroll_offset)
                 .max(self.scroll_offset);
+            let viewport_chunk = self.chunks.iter().find_map(|(offset, chunk)| {
+                let start = *offset;
+                let end = start.saturating_add(chunk.bytes.len() as u64);
+                (start..end)
+                    .contains(&self.scroll_offset)
+                    .then_some(*offset)
+            });
             let farthest = self
                 .chunks
                 .iter()
+                .filter(|(offset, _)| Some(**offset) != viewport_chunk)
                 .max_by_key(|(offset, chunk)| {
                     let start = **offset;
                     let end = start.saturating_add(chunk.bytes.len() as u64);
@@ -241,6 +251,28 @@ impl HistoryDetailWindow {
             cursor = cursor.saturating_add(chunk.bytes.len() as u64);
         }
         String::from_utf8(bytes).map_err(|_| DetailError::Utf8)
+    }
+
+    /// 面板展示文本：从**最早驻留块**开始拼接连续区间。
+    ///
+    /// 超过 4 MiB 预算后首块会被淘汰；此时 `loaded_text` 从 0 起拼会得到空串。
+    /// 展示必须仍能看到已驻留内容，返回的 `bool` 标明前方是否还有未驻留缺口
+    /// （面板据此提示可向上滚动重新加载）。
+    pub fn visible_text(&self) -> Result<(String, bool), DetailError> {
+        let Some((start, _)) = self.chunks.first_key_value() else {
+            return Ok((String::new(), false));
+        };
+        let mut cursor = *start;
+        let mut bytes = Vec::new();
+        for chunk in self.chunks.values() {
+            if chunk.offset != cursor {
+                break;
+            }
+            bytes.extend_from_slice(&chunk.bytes);
+            cursor = cursor.saturating_add(chunk.bytes.len() as u64);
+        }
+        let text = String::from_utf8(bytes).map_err(|_| DetailError::Utf8)?;
+        Ok((text, *start > 0))
     }
 
     /// 流式导出：每个块直接交给 sink，不构造完整正文副本。
@@ -376,12 +408,6 @@ pub fn open_detail_from_slot(slot: usize) -> bool {
 
 /// 拉取/续拉一个块。单在途由详情模型保证；响应只在同一 descriptor 时应用。
 pub fn request_detail_chunk(offset: u64) {
-    let Some(client) = crate::kit::atoms::ACP_CLIENT_HANDLE.get().cloned() else {
-        if let Some(detail) = crate::kit::atoms::HISTORY_DETAIL.state().write().as_mut() {
-            detail.fail("ACP client unavailable");
-        }
-        return;
-    };
     let Some(request) = ({
         let handle = crate::kit::atoms::HISTORY_DETAIL.state();
         let mut guard = handle.write();
@@ -392,6 +418,18 @@ pub fn request_detail_chunk(offset: u64) {
             )
         })
     }) else {
+        return;
+    };
+    spawn_detail_chunk(request);
+}
+
+/// 发送一个**已登记**的详情请求。调用方必须持有 `HistoryDetailWindow::request`
+/// 返回的请求；否则 `pending_offset` 与真实 RPC 会脱节，后续请求被自己阻断。
+fn spawn_detail_chunk(request: HistoryBodyRequest) {
+    let Some(client) = crate::kit::atoms::ACP_CLIENT_HANDLE.get().cloned() else {
+        if let Some(detail) = crate::kit::atoms::HISTORY_DETAIL.state().write().as_mut() {
+            detail.fail("ACP client unavailable");
+        }
         return;
     };
     let session_id = request.entry_id.rsplit_once(':').map_or_else(
@@ -428,25 +466,24 @@ pub fn request_detail_chunk(offset: u64) {
 }
 
 fn scroll_detail(delta: i64) {
-    let handle = crate::kit::atoms::HISTORY_DETAIL.state();
-    let (request_offset, chunk_bytes) = {
-        let mut guard = handle.write();
-        let Some(detail) = guard.as_mut() else {
-            return;
-        };
-        let step = i64::from(detail.descriptor.chunk_size.min(DETAIL_MAX_CHUNK_BYTES));
-        let next = (detail.scroll_offset as i64 + delta.saturating_mul(step))
-            .max(0)
-            .min(detail.descriptor.total_bytes.saturating_sub(1) as i64) as u64;
-        (
-            detail.scroll_to(next).map(|request| request.offset),
-            detail.scroll_offset,
-        )
-    };
-    if let Some(offset) = request_offset {
-        request_detail_chunk(offset);
+    // `scroll_to` 已登记 pending；这里只发送它返回的那一个请求。再调用
+    // `request_detail_chunk` 会因 `pending_offset.is_some()` 被拒绝，第二个 RPC
+    // 根本不会发出。
+    if let Some(request) = scroll_detail_request(delta) {
+        spawn_detail_chunk(request);
     }
-    let _ = chunk_bytes;
+}
+
+/// 计算一次滚动是否触发新块请求（已登记 `pending_offset`）。
+fn scroll_detail_request(delta: i64) -> Option<HistoryBodyRequest> {
+    let handle = crate::kit::atoms::HISTORY_DETAIL.state();
+    let mut guard = handle.write();
+    let detail = guard.as_mut()?;
+    let step = i64::from(detail.descriptor.chunk_size.min(DETAIL_MAX_CHUNK_BYTES));
+    let next = (detail.scroll_offset as i64 + delta.saturating_mul(step))
+        .max(0)
+        .min(detail.descriptor.total_bytes.saturating_sub(1) as i64) as u64;
+    detail.scroll_to(next)
 }
 
 fn export_detail_to_clipboard() {
@@ -503,11 +540,17 @@ pub(crate) fn build_history_detail_lines(
         lines.push(Line::from("↓ 继续加载更多内容"));
     }
     lines.push(Line::from(""));
-    match detail.loaded_text() {
-        Ok(text) if !text.is_empty() => {
-            lines.extend(text.lines().map(|line| Line::from(line.to_string())));
+    match detail.visible_text() {
+        Ok((text, prefix_omitted)) => {
+            if prefix_omitted {
+                lines.push(Line::from("（更早内容已从窗口释放；向上滚动可重新加载）"));
+            }
+            if !text.is_empty() {
+                lines.extend(text.lines().map(|line| Line::from(line.to_string())));
+            } else if !prefix_omitted {
+                lines.push(Line::from("（尚无已加载正文）"));
+            }
         }
-        Ok(_) => lines.push(Line::from("（尚无已加载正文）")),
         Err(_) => lines.push(Line::from("正文片段不是完整 UTF-8；请继续加载相邻块")),
     }
     lines.push(Line::from(""));

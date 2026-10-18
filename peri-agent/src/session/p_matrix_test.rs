@@ -134,19 +134,14 @@ struct ProcessMemory {
     platform: &'static str,
 }
 
-/// 进程 RSS（与 TUI 采样同源：sysinfo）；平台接口不可用时仍可给出 OS 级 RSS。
-#[cfg(not(target_os = "windows"))]
+/// 进程 RSS（与 TUI 采样同源：sysinfo）；仅 macOS 需要：`proc_pid_rusage` 失败时兜底。
+#[cfg(target_os = "macos")]
 fn sysinfo_rss_bytes() -> Option<u64> {
     use sysinfo::{ProcessesToUpdate, System};
     let mut system = System::new();
     let pid = sysinfo::get_current_pid().ok()?;
     system.refresh_processes(ProcessesToUpdate::Some(&[pid]), true);
     system.process(pid).map(sysinfo::Process::memory)
-}
-
-#[cfg(target_os = "windows")]
-fn sysinfo_rss_bytes() -> Option<u64> {
-    None
 }
 
 #[cfg(target_os = "macos")]

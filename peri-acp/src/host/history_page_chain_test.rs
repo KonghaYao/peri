@@ -166,3 +166,99 @@ async fn a_cursor_survives_appends_and_another_full_without_moving_its_page_memb
     assert_eq!(second_again["nextCursor"], second["nextCursor"]);
     task.abort();
 }
+
+#[tokio::test]
+#[serial]
+async fn legacy_pages_keep_complete_cross_page_tool_output_with_window_beta_off() {
+    use peri_acp_types::messages::ToolCallRequest;
+    let tmp = tempfile::TempDir::new().unwrap();
+    let fixture = PageFixture::new(&tmp).await;
+    // 同时覆盖普通结果与超过旧页 512 KiB 预算的单条结果。
+    for size in [8192, 600 * 1024] {
+        let output = format!("{}\nDIFF_ERROR_TAIL", "完整输出".repeat(size / 12));
+        let start = BaseMessage::ai_with_tool_calls(
+            "",
+            vec![ToolCallRequest::new("cross-page", "Read", json!({}))],
+        );
+        let end = BaseMessage::tool_error("cross-page", output.clone());
+        fixture
+            .cfg
+            .session_resources
+            .append_history(
+                &fixture.sid,
+                &[
+                    PersistedPayload::Message(start.clone()),
+                    PersistedPayload::Message(end.clone()),
+                ],
+            )
+            .await
+            .unwrap();
+        let count = fixture.own_ids().await.len();
+        fixture.archive(count).await;
+        let initial = fixture.initial_cursor().await;
+        let caps = pagination_caps();
+        assert!(!caps.history_window_v1);
+        let (client, _, task) = spawn_loop(
+            Arc::clone(&fixture.cfg),
+            Arc::clone(&fixture.sessions),
+            Some(caps),
+        )
+        .await;
+        // 向前翻页先见结果，再见更早的工具起点。
+        let result_page = client
+            .send_request(
+                "session/load",
+                json!({"sessionId":fixture.sid,"cursor":initial["nextCursor"],"limit":1}),
+            )
+            .await
+            .unwrap();
+        let item = &result_page["items"][0];
+        assert_eq!(
+            item["entryId"],
+            format!("{}:{}", fixture.sid, end.id().as_uuid())
+        );
+        let update = item["subItems"][0]["update"].clone();
+        assert_eq!(update["sessionUpdate"], "tool_call_update");
+        assert_eq!(update["content"][0]["content"]["text"], output);
+        assert!(
+            item.get("body").is_none(),
+            "旧分页直接交付完整正文，不依赖 beta body 接口"
+        );
+        let start_page = client
+            .send_request(
+                "session/load",
+                json!({"sessionId":fixture.sid,"cursor":result_page["nextCursor"],"limit":1}),
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            start_page["items"][0]["entryId"],
+            format!("{}:{}", fixture.sid, start.id().as_uuid())
+        );
+        assert!(start_page["items"][0]["subItems"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|item| {
+                item["update"]["sessionUpdate"] == "tool_call"
+                    && item["update"]["toolCallId"] == "cross-page"
+            }));
+        // 起点到达后可按原请求游标补读结果，不需要启用 historyWindowV1。
+        let reread = client
+            .send_request(
+                "session/load",
+                json!({
+                    "sessionId":fixture.sid,"cursor":initial["nextCursor"],"limit":1
+                }),
+            )
+            .await
+            .unwrap();
+        assert_eq!(reread["items"][0]["entryId"], item["entryId"]);
+        assert_eq!(reread["snapshotToken"], result_page["snapshotToken"]);
+        assert_eq!(
+            reread["items"][0]["subItems"][0]["update"]["content"][0]["content"]["text"],
+            output
+        );
+        task.abort();
+    }
+}
