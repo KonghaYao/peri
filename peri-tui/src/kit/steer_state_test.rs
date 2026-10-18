@@ -1,7 +1,7 @@
 use super::*;
 use peri_acp_types::session::{UserInputQueueItem, UserInputQueueTerminalItem};
 
-fn make_input(id: &str) -> UserInput {
+pub(super) fn make_input(id: &str) -> UserInput {
     UserInput {
         input_id: id.to_owned(),
         content: MessageContent::text("  中文\n@image /tmp/test.png\n"),
@@ -9,7 +9,7 @@ fn make_input(id: &str) -> UserInput {
     }
 }
 
-fn make_snapshot(revision: u64) -> UserInputQueueSnapshot {
+pub(super) fn make_snapshot(revision: u64) -> UserInputQueueSnapshot {
     let input = make_input("a");
     UserInputQueueSnapshot {
         session_id: "s".to_owned(),
@@ -26,7 +26,7 @@ fn make_snapshot(revision: u64) -> UserInputQueueSnapshot {
     }
 }
 
-fn make_command(kind: SteerCommandKind) -> SteerCommand {
+pub(super) fn make_command(kind: SteerCommandKind) -> SteerCommand {
     SteerCommand {
         session_id: "s".to_owned(),
         epoch: 1,
@@ -36,10 +36,19 @@ fn make_command(kind: SteerCommandKind) -> SteerCommand {
     }
 }
 
-fn make_state() -> SteerState {
+pub(super) fn make_state() -> SteerState {
     let mut state = SteerState::default();
     state.reset_session("s", 1);
     state.accept_snapshot(make_snapshot(1), 1, true);
+    state
+}
+
+/// 已落定快照的空闲会话：队列为空，后续首次提交走直接投影。
+pub(super) fn make_idle_state() -> SteerState {
+    let mut state = make_state();
+    let mut snapshot = make_snapshot(2);
+    snapshot.items.clear();
+    state.accept_snapshot(snapshot, 1, true);
     state
 }
 
@@ -544,37 +553,318 @@ fn test_steer_idle_submission_skips_queue_until_delivery() {
     assert!(!state.claim_delivery("s", "b"), "重复确认不得重复生成气泡");
 }
 
+fn input_with_attachment(id: &str, draft: &str) -> UserInput {
+    UserInput {
+        input_id: id.to_owned(),
+        content: content_with_attachments(draft, &[PendingAttachment::image("image/png", "AQID")]),
+        original_draft: draft.to_owned(),
+    }
+}
+
+/// [回归测试] 确定未发出的输入必须恢复完整原稿与附件，而不是只留下一个 ID。
 #[test]
-fn fatal_execution_failure_clears_submitting_feedback() {
+fn fatal_execution_failure_restores_unsent_input_as_draft() {
+    let mut state = make_idle_state();
+    let input = input_with_attachment("f", "尚未发出的输入");
+    let mut command = make_command(SteerCommandKind::Enqueue(input.clone()));
+    command.generation = None;
+    state.begin(command);
+    assert!(state.direct_submitting("s", 1));
+
+    let report = state.fail_session_submissions("s");
+    assert_eq!(report.not_sent.len(), 1);
+    assert!(report.uncertain.is_empty());
+    assert_eq!(report.not_sent[0].original_draft, input.original_draft);
+    assert_eq!(
+        report.not_sent[0].content.content_blocks().len(),
+        2,
+        "文本与附件都必须保留"
+    );
+    assert!(!state.direct_submitting("s", 1));
+    assert_eq!(
+        state.pending_recovery_ids("s"),
+        vec![input.input_id.clone()],
+        "已恢复草稿等待回填输入框"
+    );
+    assert!(state.sessions.get("s").unwrap().unsettled.is_empty());
+
+    let recovered = state.recover("s", 1, true).expect("未发出的输入必须可恢复");
+    assert_eq!(recovered.input_id, input.input_id);
+    assert_eq!(recovered.original_draft, input.original_draft);
+    assert_eq!(recovered.content.content_blocks().len(), 2);
+    assert!(state.recover("s", 1, true).is_none());
+}
+
+/// [回归测试] 结果未知的输入必须保留完整请求与身份，且不能换 ID 重发。
+#[test]
+fn fatal_execution_failure_keeps_unknown_input_full_request_visible() {
+    let mut state = make_idle_state();
+    let input = input_with_attachment("f", "可能已发出的输入");
+    let command = make_command(SteerCommandKind::Enqueue(input.clone()));
+    state.begin(command.clone());
+
+    let report = state.fail_session_submissions("s");
+    assert!(report.not_sent.is_empty());
+    assert_eq!(report.uncertain.len(), 1);
+    assert_eq!(report.uncertain[0].original_draft, input.original_draft);
+    assert_eq!(report.uncertain[0].content.content_blocks().len(), 2);
+
+    let session = state.sessions.get("s").unwrap();
+    assert!(session.pending.is_empty(), "命令身份转入未知账本");
+    assert_eq!(session.unsettled.len(), 1);
+    assert_eq!(session.unsettled[0].command_id, command.command_id);
+    assert_eq!(
+        session.unsettled[0].input.original_draft,
+        input.original_draft
+    );
+    assert_eq!(
+        session.unsettled[0].input.content.content_blocks().len(),
+        2,
+        "附件必须随未知请求保留"
+    );
+    assert!(
+        state.pending_recovery_ids("s").is_empty(),
+        "未知请求不得恢复成可用新 ID 重复提交的草稿"
+    );
+    assert_eq!(state.rows("s").len(), 1);
+    assert_eq!(state.rows("s")[0].state, SteerItemState::Uncertain);
+    assert_eq!(state.rows("s")[0].text, input.original_draft);
+}
+
+/// [回归测试] A 执行中提交 B，A 失败后 B 仍是可对账的完整请求；重复投递幂等。
+#[test]
+fn fatal_failure_keeps_concurrent_submission_with_attachment_and_dedupes_delivery() {
+    let mut state = make_state();
+    let mut running = state.snapshot("s", 1).unwrap().clone();
+    running.revision += 1;
+    running.active_request_id = Some("run".into());
+    state.accept_snapshot(running, 1, false);
+
+    let a = make_input("a");
+    let b = input_with_attachment("b", "A 执行中提交的 B");
+    state.begin(make_command(SteerCommandKind::Enqueue(a)));
+    state.begin(make_command(SteerCommandKind::Enqueue(b.clone())));
+
+    let report = state.fail_session_submissions("s");
+    assert!(report.not_sent.is_empty());
+    assert_eq!(
+        report.uncertain.len(),
+        1,
+        "A 已在快照投影中；只有 B 的结果未知"
+    );
+    assert_eq!(report.uncertain[0].input_id, "b");
+    assert_eq!(report.uncertain[0].content.content_blocks().len(), 2);
+
+    assert_eq!(state.rows("s").len(), 2, "A 的真实投影与 B 的未知行并存");
+    let b_row = state
+        .rows("s")
+        .into_iter()
+        .find(|row| row.id == "b")
+        .unwrap();
+    assert_eq!(b_row.state, SteerItemState::Uncertain);
+    assert_eq!(b_row.text, b.original_draft);
+    assert!(
+        state
+            .action_kind(
+                "s",
+                1,
+                SteerQueueAction::Dispatch {
+                    ids: vec!["b".into()]
+                },
+                true
+            )
+            .is_none(),
+        "未知输入不得被再次发送"
+    );
+    assert!(
+        state
+            .action_kind("s", 1, SteerQueueAction::TakeBack { id: "b".into() }, true)
+            .is_none(),
+        "未知输入不得被取回成普通草稿"
+    );
+
+    assert!(state.claim_delivery("s", "b"), "首次确认生成气泡");
+    assert!(!state.claim_delivery("s", "b"), "重复确认必须幂等");
+    assert!(
+        !state.rows("s").iter().any(|row| row.id == "b"),
+        "确认后未知行必须消失"
+    );
+}
+
+/// [回归测试] 快照缺少 ID 不是交付事实：未知状态必须保持。
+#[test]
+fn fatal_execution_failure_never_turns_missing_snapshot_into_delivery() {
     let mut state = make_idle_state();
     let input = make_input("f");
     state.begin(make_command(SteerCommandKind::Enqueue(input.clone())));
-    assert!(state.direct_submitting("s", 1));
-    // direct submission 会隐藏同 ID 的 row；这里直接验证 pending Enqueue 的
-    // Submitting 投影本身，再确认失败结算会移除它。
-    state
-        .sessions
-        .get_mut("s")
-        .unwrap()
-        .direct_submissions
-        .clear();
+    state.fail_session_submissions("s");
+
+    let mut snapshot = make_snapshot(3);
+    snapshot.items.clear();
+    state.accept_snapshot(snapshot, 1, true);
+
+    assert_eq!(state.sessions.get("s").unwrap().unsettled.len(), 1);
+    assert_eq!(state.rows("s")[0].state, SteerItemState::Uncertain);
+    let session = state.sessions.get("s").unwrap();
+    assert!(!session.delivered.contains(&input.input_id));
+    assert!(!state.pending_recovery_ids("s").contains(&input.input_id));
+}
+
+/// [回归测试] 终态 Delivered 只清除未知账本，气泡仍由事件泵生成。
+#[test]
+fn terminal_delivered_reconciles_uncertain_input_without_synthesizing_bubble() {
+    let mut state = make_idle_state();
+    let input = make_input("f");
+    state.begin(make_command(SteerCommandKind::Enqueue(input.clone())));
+    state.fail_session_submissions("s");
+
+    let mut terminal = make_snapshot(3);
+    terminal.items.clear();
+    terminal.terminal_items = vec![UserInputQueueTerminalItem {
+        input_id: input.input_id.clone(),
+        state: UserInputState::Delivered,
+    }];
+    state.accept_snapshot(terminal, 1, true);
+
+    assert!(state.sessions.get("s").unwrap().unsettled.is_empty());
+    assert!(state.rows("s").is_empty());
+    assert!(
+        !state
+            .sessions
+            .get("s")
+            .unwrap()
+            .delivered
+            .contains(&input.input_id),
+        "终态快照不得伪造气泡"
+    );
+}
+
+/// [回归测试] Withdrawn 是确定的未执行终态，清除未知账本但不产生交付。
+#[test]
+fn terminal_withdrawn_clears_uncertain_input_as_not_executed() {
+    let mut state = make_idle_state();
+    let input = make_input("f");
+    state.begin(make_command(SteerCommandKind::Enqueue(input.clone())));
+    state.fail_session_submissions("s");
+
+    let mut terminal = make_snapshot(3);
+    terminal.items.clear();
+    terminal.terminal_items = vec![UserInputQueueTerminalItem {
+        input_id: input.input_id.clone(),
+        state: UserInputState::Withdrawn,
+    }];
+    state.accept_snapshot(terminal, 1, true);
+
+    assert!(state.sessions.get("s").unwrap().unsettled.is_empty());
+    assert!(
+        !state
+            .sessions
+            .get("s")
+            .unwrap()
+            .delivered
+            .contains(&input.input_id)
+    );
+}
+
+/// [回归测试] 会话重载不得清空结果未知的完整请求。
+#[test]
+fn session_reset_preserves_uncertain_input() {
+    let mut state = make_idle_state();
+    let input = make_input("f");
+    state.begin(make_command(SteerCommandKind::Enqueue(input.clone())));
+    state.fail_session_submissions("s");
+
+    state.reset_session("s", 2);
+    let mut snapshot = make_snapshot(1);
+    snapshot.items.clear();
+    state.accept_snapshot(snapshot, 2, true);
+
+    assert_eq!(state.sessions.get("s").unwrap().unsettled.len(), 1);
+    let row = state
+        .rows("s")
+        .into_iter()
+        .find(|row| row.id == input.input_id)
+        .expect("未知输入必须仍可见");
+    assert_eq!(row.state, SteerItemState::Uncertain);
+    assert_eq!(row.text, input.original_draft);
+}
+
+/// 旧 epoch 命令留给 resume_pending 对账，致命结算不得一并删除。
+#[test]
+fn fatal_execution_failure_leaves_old_epoch_commands_for_reconciliation() {
+    let mut state = make_state();
+    let mut command = make_command(SteerCommandKind::Enqueue(make_input("old")));
+    command.epoch = 0;
+    command.generation = Some("g".into());
+    state.begin(command.clone());
+
+    let report = state.fail_session_submissions("s");
+    assert!(report.is_empty());
     assert!(
         state
-            .rows("s")
-            .iter()
-            .any(|row| row.state == SteerItemState::Submitting)
+            .pending_command("s", &command.command_id)
+            .is_some_and(|pending| pending.epoch == 0),
+        "旧 epoch 命令必须保留待对账"
     );
-    state.fail_session_submissions("s");
-    assert!(!state.direct_submitting("s", 1));
+}
+
+/// 致命结算与 generation 绑定共用同一锁：结算先发生则绑定必须失败，
+/// 避免“已恢复成草稿”与“请求仍被发出”同时成立。
+#[test]
+fn generation_binding_fails_after_fatal_settlement() {
+    let mut state = make_idle_state();
+    // 正例：命令仍在待结算账本时可绑定实例。
+    let mut bound = make_command(SteerCommandKind::Enqueue(make_input("bound")));
+    bound.generation = None;
+    state.begin(bound.clone());
+    bound.generation = Some("g".into());
     assert!(
-        state.rows("s").is_empty(),
-        "失败结算后不得继续投影 Submitting"
+        state.bind_command_generation(&bound),
+        "待结算命令可绑定实例"
     );
-    let session = state.sessions.get("s").unwrap();
-    assert!(session.failed_unknown.contains(&input.input_id));
-    assert!(!session.pending.iter().any(|command| {
-        matches!(&command.kind, SteerCommandKind::Enqueue(pending) if pending.input_id == input.input_id)
-    }));
+
+    // 结算先发生：未绑定命令按确定未发出恢复，随后迟到绑定必须失败。
+    let mut unsent = make_command(SteerCommandKind::Enqueue(make_input("unsent")));
+    unsent.command_id = "unsent-command".into();
+    unsent.generation = None;
+    state.begin(unsent.clone());
+    state.fail_session_submissions("s");
+
+    let mut retry = unsent;
+    retry.generation = Some("g".into());
+    assert!(
+        !state.bind_command_generation(&retry),
+        "已结算命令不得再绑定并发出"
+    );
+    assert_eq!(
+        state.pending_recovery_ids("s"),
+        vec!["unsent".to_owned()],
+        "确定未发出的输入只能以恢复稿存在"
+    );
+}
+
+/// 明确拒绝可以把 MaybeSent 降级为 NotSent，并只生成一份恢复稿。
+#[test]
+fn definite_reject_after_fatal_failure_upgrades_unknown_to_recoverable_draft() {
+    let mut state = make_idle_state();
+    let input = input_with_attachment("f", "明确被拒");
+    let command = make_command(SteerCommandKind::Enqueue(input.clone()));
+    state.begin(command.clone());
+    state.fail_session_submissions("s");
+
+    state.reject(&command, false);
+    assert_eq!(
+        state.sessions.get("s").unwrap().unsettled.len(),
+        1,
+        "未知回执不得清除未知账本"
+    );
+
+    state.reject(&command, true);
+    assert!(state.sessions.get("s").unwrap().unsettled.is_empty());
+    assert_eq!(state.sessions.get("s").unwrap().recovered.len(), 1);
+    let recovered = state.recover("s", 1, true).unwrap();
+    assert_eq!(recovered.input_id, input.input_id);
+    assert_eq!(recovered.content.content_blocks().len(), 2);
 }
 
 /// [回归测试] 终态快照只清除提交反馈；气泡必须由有序事件泵的 Delivered 生成。
@@ -643,150 +933,6 @@ fn test_steer_missing_input_does_not_assume_delivery() {
     assert!(state.accept_snapshot(empty, 1, true));
 
     assert!(state.direct_submitting("s", 1), "未知状态不能当作成功交付");
-}
-
-fn make_idle_state() -> SteerState {
-    let mut state = make_state();
-    let mut snapshot = make_snapshot(2);
-    snapshot.items.clear();
-    state.accept_snapshot(snapshot, 1, true);
-    state
-}
-
-#[test]
-fn test_steer_idle_submission_timeout_becomes_visible() {
-    let mut state = make_idle_state();
-    let command = make_command(SteerCommandKind::Enqueue(make_input("b")));
-    state.begin(command.clone());
-    state.reject(&command, false);
-    assert_eq!(state.rows("s")[0].id, "b", "未知回执须保留可见输入");
-    assert!(
-        state.pending_command("s", "c").is_some(),
-        "重试必须保留原命令"
-    );
-    assert!(state.recover("s", 1, true).is_none(), "不能生成重复提交稿");
-}
-
-#[test]
-fn test_steer_idle_submission_rejected_recovers_draft() {
-    let mut state = make_idle_state();
-    let command = make_command(SteerCommandKind::Enqueue(make_input("b")));
-    state.begin(command.clone());
-    state.reject(&command, true);
-    assert_eq!(state.recover("s", 1, true).unwrap().input_id, "b");
-    assert!(state.rows("s").is_empty(), "恢复后不留下队列残影");
-}
-
-#[test]
-fn test_steer_idle_submission_snapshot_without_receipt_stays_direct() {
-    let mut state = make_idle_state();
-    let command = make_command(SteerCommandKind::Enqueue(make_input("a")));
-    state.begin(command.clone());
-    state.accept_snapshot(make_snapshot(3), 1, false);
-    assert!(
-        state.rows("s").is_empty(),
-        "暂存通知不是排队回执，空闲提交不得闪过待发送区"
-    );
-    state.reject(&command, false);
-    assert_eq!(
-        state.rows("s")[0].state,
-        SteerItemState::Submitting,
-        "回执超时后才展示未决输入，且不能撤回或重发"
-    );
-}
-
-#[test]
-fn test_steer_idle_submission_queued_receipt_exposes_real_queue() {
-    let mut state = make_idle_state();
-    let command = make_command(SteerCommandKind::Enqueue(make_input("a")));
-    state.begin(command.clone());
-    state.accept_snapshot(make_snapshot(3), 1, false);
-    state.settle(
-        &command,
-        UserInputQueueReceipt {
-            snapshot: make_snapshot(3),
-            results: Vec::new(),
-            taken_back: None,
-        },
-    );
-    assert_eq!(state.rows("s")[0].state, SteerItemState::Queued);
-    assert!(state.pending_command("s", "c").is_none());
-}
-
-#[test]
-fn test_steer_idle_submission_staged_snapshot_then_dispatch_skips_queue() {
-    let mut state = make_idle_state();
-    let command = make_command(SteerCommandKind::Enqueue(make_input("a")));
-    state.begin(command.clone());
-    state.accept_snapshot(make_snapshot(3), 1, false);
-    assert!(state.rows("s").is_empty());
-    let mut dispatched = make_snapshot(4);
-    dispatched.items[0].state = UserInputState::Dispatching;
-    dispatched.active_request_id = Some("run".into());
-    state.accept_snapshot(dispatched, 1, false);
-    state.settle(
-        &command,
-        UserInputQueueReceipt {
-            snapshot: make_snapshot(3),
-            results: Vec::new(),
-            taken_back: None,
-        },
-    );
-    assert!(state.rows("s").is_empty(), "旧回执不得恢复暂存行");
-    assert!(state.claim_delivery("s", "a"));
-    assert!(!state.claim_delivery("s", "a"));
-}
-
-#[test]
-fn test_steer_second_submission_waits_while_first_is_unconfirmed() {
-    let mut state = make_idle_state();
-    state.begin(make_command(SteerCommandKind::Enqueue(make_input("a"))));
-    let mut second = make_command(SteerCommandKind::Enqueue(make_input("b")));
-    second.command_id = "second".into();
-    state.begin(second);
-    assert_eq!(state.rows("s").len(), 1);
-    assert_eq!(state.rows("s")[0].id, "b", "连续输入仍展示等待中的第二条");
-}
-
-#[test]
-fn test_steer_busy_submission_remains_visible() {
-    let mut state = make_idle_state();
-    let mut snapshot = state.snapshot("s", 1).unwrap().clone();
-    snapshot.revision += 1;
-    snapshot.active_request_id = Some("running".into());
-    state.accept_snapshot(snapshot, 1, false);
-    state.begin(make_command(SteerCommandKind::Enqueue(make_input("b"))));
-    assert_eq!(
-        state.rows("s")[0].id,
-        "b",
-        "运行中追加输入应立即显示在待发送区"
-    );
-}
-
-#[test]
-fn test_steer_initial_submission_keeps_direct_projection_after_session_binding() {
-    let mut state = SteerState::default();
-    let mut command = make_command(SteerCommandKind::Enqueue(make_input("b")));
-    command.session_id.clear();
-    command.generation = None;
-    state.begin(command.clone());
-    assert!(state.rows("").is_empty(), "首次创建会话也不应闪过队列");
-    state.reset_session("s", 2);
-    state.rebind_initial(&command, "s", 2);
-    assert!(state.rows("s").is_empty(), "身份绑定不改变直接发送的展示");
-}
-
-#[test]
-fn test_steer_idle_submission_reload_exposes_unconfirmed_input() {
-    let mut state = make_idle_state();
-    state.begin(make_command(SteerCommandKind::Enqueue(make_input("b"))));
-    state.reset_session("s", 2);
-    state.accept_snapshot(make_snapshot(1), 2, true);
-    assert_eq!(state.resume_pending("s", 2).len(), 1);
-    assert!(
-        state.rows("s").iter().any(|row| row.id == "b"),
-        "重载后未知输入应可见"
-    );
 }
 
 /// 图片-only 提交（空文本 + 附件）不得产出空 text 块——provider 会拒收空

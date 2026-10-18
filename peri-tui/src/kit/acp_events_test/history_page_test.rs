@@ -96,6 +96,16 @@ fn browsing_state(token: &str) -> BridgeState {
 /// 渲染路径的滚动触发）会写同一份状态，页面随之被判为迟到页丢弃——本文件的断言
 /// 会因此变成随机失败。派发前把身份钉回本用例，并在真的丢了身份时明确失败。
 fn dispatch_landing_page(state: &mut BridgeState, token: &str, response: HistoryPageResponse) {
+    dispatch_landing_page_with_origin(state, token, response, None);
+}
+
+/// 派发一页并显式携带来源定位（跨页工具结果的补读定位随事件传递）。
+fn dispatch_landing_page_with_origin(
+    state: &mut BridgeState,
+    token: &str,
+    response: HistoryPageResponse,
+    origin: Option<crate::kit::history_paging::HistoryPageOrigin>,
+) {
     {
         let handle = crate::kit::atoms::HISTORY_PAGING.state();
         let mut paging = handle.write();
@@ -113,6 +123,8 @@ fn dispatch_landing_page(state: &mut BridgeState, token: &str, response: History
         state,
         &AcpEventData::HistoryPageLoaded {
             response: Box::new(response),
+            origin,
+            refetch: None,
         },
     );
 }
@@ -336,6 +348,8 @@ fn test_history_page_drops_page_from_stale_snapshot() {
         &mut state,
         &AcpEventData::HistoryPageLoaded {
             response: Box::new(stale),
+            origin: None,
+            refetch: None,
         },
     );
 
@@ -604,6 +618,8 @@ fn test_history_page_is_dropped_after_same_session_rewind() {
         &mut state,
         &AcpEventData::HistoryPageLoaded {
             response: Box::new(late),
+            origin: None,
+            refetch: None,
         },
     );
 

@@ -333,12 +333,15 @@ fn detail_visible_text_survives_first_chunk_eviction_and_prefix_refetch() {
             step as u32,
         )
         .expect("tail chunk");
-    let (text, prefix_omitted) = window.visible_text().expect("visible text");
+    let visible = window.visible_text().expect("visible text");
     assert!(
-        !text.is_empty(),
+        !visible.text.is_empty(),
         "evicting the first chunk must not blank the panel"
     );
-    assert!(prefix_omitted, "prefix gap is reported to the panel");
+    assert!(
+        visible.prefix_evicted,
+        "prefix gap is reported to the panel"
+    );
     assert!(window.chunk_arc(0).is_none(), "oldest chunk was evicted");
 
     // 滚回开头重新请求首块，落地后显示从 0 开始。
@@ -347,9 +350,9 @@ fn detail_visible_text_survives_first_chunk_eviction_and_prefix_refetch() {
     window
         .apply_chunk(chunk(0, b"prefix", false, Some(6)), step as u32)
         .expect("prefix chunk");
-    let (text, prefix_omitted) = window.visible_text().expect("visible text");
-    assert!(text.starts_with("prefix"));
-    assert!(!prefix_omitted);
+    let visible = window.visible_text().expect("visible text");
+    assert!(visible.text.starts_with("prefix"));
+    assert!(!visible.prefix_evicted);
 }
 
 #[test]
@@ -400,6 +403,113 @@ fn detail_scroll_event_path_requests_next_chunk_without_main_viewport_change() {
     assert_eq!(
         crate::kit::atoms::WINDOW_VIEWPORT.state().read().clone(),
         before
+    );
+    close_history_detail();
+}
+
+#[test]
+fn detail_refetches_evicted_prefix_after_complete() {
+    let total = 5 * 1024 * 1024u64;
+    let step = 256 * 1024usize;
+    let mut window = HistoryDetailWindow::open(descriptor(total)).expect("open");
+    let block = vec![b'x'; step];
+    let last_offset = total - step as u64;
+
+    let mut offset = 0u64;
+    while offset < last_offset {
+        window
+            .apply_chunk(
+                chunk(offset, &block, false, Some(offset + step as u64)),
+                step as u32,
+            )
+            .expect("sequential chunk");
+        offset += step as u64;
+    }
+    // 把视口移到尾部，首块才会在预算压力下被淘汰。
+    let request = window.scroll_to(last_offset).expect("scroll to tail");
+    assert_eq!(request.offset, last_offset);
+    window
+        .apply_chunk(chunk(last_offset, &block, true, None), step as u32)
+        .expect("final chunk");
+    assert!(window.is_complete(), "EOF reached");
+    assert!(
+        window.chunk_arc(0).is_none(),
+        "budget must have evicted the first chunk"
+    );
+
+    // EOF 只表示顺序读到末尾，不表示前缀仍驻留：回读必须重新请求。
+    let request = window.scroll_to(0).expect("evicted prefix must refetch");
+    assert_eq!(request.offset, 0);
+    window
+        .apply_chunk(chunk(0, &block, false, Some(step as u64)), step as u32)
+        .expect("refetched prefix");
+    let visible = window.visible_text().expect("visible text after refetch");
+    assert!(
+        visible.text.starts_with('x'),
+        "refetched prefix must be displayed from offset 0"
+    );
+    assert!(!visible.prefix_evicted);
+    assert!(window.is_complete(), "EOF fact survives prefix refetch");
+}
+
+#[test]
+fn detail_visible_text_truncates_at_a_char_boundary_when_prefix_is_evicted() {
+    let text = "中文".as_bytes();
+    let mut window = HistoryDetailWindow::open(descriptor(text.len() as u64)).expect("open");
+    // 首块从第二个字节开始：起点落在「中」的多字节编码中间。
+    window
+        .request(1, 256 * 1024)
+        .expect("request from a mid-character offset");
+    window
+        .apply_chunk(
+            chunk(1, &text[1..], false, Some(text.len() as u64)),
+            256 * 1024,
+        )
+        .expect("chunk");
+
+    let visible = window.visible_text().expect("fragment is not corruption");
+    assert_eq!(visible.text, "文");
+    assert!(visible.prefix_evicted);
+    assert_eq!(visible.skipped_fragment_bytes, 2);
+}
+
+#[test]
+fn detail_true_corruption_still_reports_utf8() {
+    let mut window = HistoryDetailWindow::open(descriptor(9)).expect("open");
+    let mut bytes = b"abcde".to_vec();
+    bytes.push(0xFF);
+    bytes.extend_from_slice(b"xyz");
+    window
+        .apply_chunk(chunk(0, &bytes, true, None), 256 * 1024)
+        .expect("chunk");
+    assert_eq!(window.visible_text(), Err(DetailError::Utf8));
+}
+
+#[test]
+#[serial_test::serial]
+fn detail_export_reports_prefix_gap_instead_of_copying_empty() {
+    crate::kit::atoms::init_atoms();
+    let mut window = HistoryDetailWindow::open(descriptor(1024)).expect("open");
+    window.request(256, 256 * 1024).expect("evicted prefix");
+    window
+        .apply_chunk(chunk(256, b"tail", false, Some(260)), 256 * 1024)
+        .expect("chunk");
+    assert_eq!(window.loaded_text(), Err(DetailError::ExportGap));
+
+    crate::kit::atoms::HISTORY_DETAIL.set(Some(window));
+    export_detail_to_clipboard();
+    let detail = crate::kit::atoms::HISTORY_DETAIL
+        .state()
+        .read()
+        .clone()
+        .expect("detail");
+    assert!(
+        detail
+            .last_error
+            .as_deref()
+            .is_some_and(|message| message.contains("前缀已释放")),
+        "export must explain the prefix gap: {:?}",
+        detail.last_error
     );
     close_history_detail();
 }

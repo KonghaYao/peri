@@ -326,11 +326,23 @@ pub async fn build_and_execute_agent_v2(req: V2ExecuteRequest) -> ExecOutcome {
         let publisher = Arc::clone(&req.publisher);
         let sid = req.session_id.clone();
         let agent_id = v2_out.context.session.agent_id.to_string();
+        let delivery_mailbox = req.user_input_mailbox.clone();
         (req.forwarder_launcher)(
             v2_out.event_handles,
             agent_id,
             Box::new(move |source, exec_ev| {
-                publisher.publish_event(&sid, &source, exec_ev);
+                let delivered_input = match &exec_ev {
+                    ExecutorEvent::UserInputDelivered { input_id, .. } => Some(input_id.clone()),
+                    _ => None,
+                };
+                let session_seq = publisher.publish_event(&sid, &source, exec_ev);
+                // 序号在发布时补打；绑定后事件泵才能按水位在后续 assistant
+                // 输出之前补发该交付。绑定迟到时事件本身已按序推送，由泵 ack 收敛。
+                if let (Some(input_id), Some(session_seq)) = (delivered_input, session_seq) {
+                    if let Some(mailbox) = delivery_mailbox.as_ref() {
+                        mailbox.bind_delivery_sequence(&input_id, session_seq);
+                    }
+                }
             }),
         )
     };

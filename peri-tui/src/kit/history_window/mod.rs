@@ -22,10 +22,12 @@ mod commit;
 mod detail;
 mod diagnostics;
 mod display;
+mod edge_cursor;
 mod index;
 mod model;
 mod release;
 mod source;
+mod switch;
 mod viewport;
 
 pub use admission::{
@@ -55,6 +57,7 @@ pub use model::{
 };
 pub use release::{ReleaseOutcome, release_window_plans};
 pub use source::{HistorySource, PersistentEntryKey, PersistentSubItemKey};
+pub use switch::WindowSwitchSnapshot;
 pub use viewport::{
     WindowUnitMapping, WindowUnitToken, WindowViewport, clear_window_unit_mappings,
     clear_window_viewport, publish_viewport_from_token, publish_viewport_unanchored,

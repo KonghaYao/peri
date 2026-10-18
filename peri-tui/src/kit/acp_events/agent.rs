@@ -2,6 +2,7 @@
 
 use super::*;
 use crate::i18n;
+use crate::kit::atoms;
 use crate::kit::tui_render_unit::TuiNoteLevel;
 use fluent_bundle::FluentValue;
 
@@ -10,10 +11,17 @@ pub(super) fn handle_agent_execution_failed(state: &mut BridgeState, message: &s
     state.pending_cache_usage = None;
     state.phase = SessionPhase::Idle;
     state.current_turn.deactivate();
-    crate::kit::steer_state::STEERS
+    let report = crate::kit::steer_state::STEERS
         .state()
         .write()
         .fail_session_submissions(&state.active_session_id);
+    // 失败结算必须说明输入去向：未发出的已恢复，结果未知的保留原文待对账。
+    if let Some(notice) = report.notice() {
+        atoms::NOTIFICATION.set(Some(atoms::Notification {
+            message: notice,
+            until: peri_time::monotonic_now() + crate::kit::steer_consumer::FAILURE_NOTICE_DURATION,
+        }));
+    }
     let text = i18n::tr_args(
         "app-note-agent-failed",
         &[("message".into(), FluentValue::from(message))],

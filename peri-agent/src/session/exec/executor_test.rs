@@ -119,7 +119,14 @@ impl UserInteractionBroker for NoopBroker {
 struct NoopEventPublisher;
 
 impl EventPublisher for NoopEventPublisher {
-    fn publish_event(&self, _session_id: &str, _source: &UnstampedEvent, _event: ExecutorEvent) {}
+    fn publish_event(
+        &self,
+        _session_id: &str,
+        _source: &UnstampedEvent,
+        _event: ExecutorEvent,
+    ) -> Option<peri_acp_types::identity::SessionSeq> {
+        None
+    }
 }
 
 struct NoopSubscriber;

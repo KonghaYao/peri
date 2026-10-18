@@ -31,6 +31,8 @@ pub enum SteerItemState {
     Publishing,
     Claimed,
     Withdrawing,
+    /// 执行失败后结果未知：保留原文等待对账，不提供发送或取回操作。
+    Uncertain,
 }
 
 impl SteerItemState {

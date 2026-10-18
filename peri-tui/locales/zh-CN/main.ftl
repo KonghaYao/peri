@@ -1225,6 +1225,10 @@ steer-queue-title = 待发送 { $count }
 steer-input-rejected = 输入未被接收，原稿已保留。
 steer-input-uncertain = 暂未收到输入回执，正在核对并重试。
 steer-session-unavailable = 会话未能建立：{ $error }。原稿已保留。
+steer-fatal-not-sent = 执行失败，{ $count } 条尚未发出的输入已恢复到输入框。
+steer-fatal-uncertain = 执行失败，{ $count } 条输入结果未知，原文已保留在待发送区，正在核对。
+steer-fatal-mixed = 执行失败，{ $not_sent } 条输入已恢复到输入框，{ $uncertain } 条结果未知，原文已保留在待发送区。
+steer-item-uncertain = 未确认
 
 thread-browser-project = 项目
 thread-browser-workspace = 工作区

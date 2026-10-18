@@ -44,6 +44,24 @@ pub(crate) fn deferred_tool_result_source_for_tests(
 }
 
 #[cfg(test)]
+pub(crate) fn claim_deferred_tool_result_for_tests(
+    tool_id: &str,
+    request_id: u64,
+) -> Option<history_page::ToolResultSource> {
+    history_page::claim_deferred_tool_result_for_tests(tool_id, request_id)
+}
+
+#[cfg(test)]
+pub(crate) fn deferred_in_flight_request_for_tests(tool_id: &str) -> Option<u64> {
+    history_page::deferred_in_flight_request_for_tests(tool_id)
+}
+
+#[cfg(test)]
+pub(crate) fn refetch_timeout_for_tests() -> std::time::Duration {
+    history_page::refetch_timeout_for_tests()
+}
+
+#[cfg(test)]
 pub(crate) fn tool_result_error_response_for_tests(
     source: &history_page::ToolResultSource,
     message: &str,
@@ -137,59 +155,48 @@ pub(super) fn handle_window_page_loaded(
         );
         return PublicationIntent::None;
     }
-    let mut allow_display_merge = true;
-    let mut open_insert_at_prefix = false;
-    if context.is_open {
+    let open_plan = if context.is_open {
         crate::kit::atoms::HISTORY_INHERITED_NOTICE.set(None);
         crate::kit::history_window::clear_detail_targets();
-        let live_empty = live_region_is_empty(state);
-        // 迟到 open：请求发出后本地展示代次已经推进（新气泡或整轮回答已进入
-        // committed）。此时不能整体清空 `committed`，否则旧快照会覆盖新内容。
-        let display_changed = context.display_generation != state.generation;
-        allow_display_merge = live_empty;
-        let generation = state.window.begin_window(response.identity.clone());
-        history_page_consumer::note_window_generation(generation);
-        // 已有窗口展示（例如 Degraded 后的 open 重试）时绝不再整体清空：
-        // 重试只合并新页，旧段由窗口模型去重/保留。
-        let window_display_active = state.window.displayed_entry_count() > 0;
-        if live_empty && !window_display_active {
-            let mut replaced_replay = false;
-            if display_changed {
-                // 只有能确认旧回放是严格前缀时才替换它；否则保留全部展示并
-                // 放弃这一页的展示合并（迟到 open 丢弃展示，不覆盖新内容）。
-                match known_replay_prefix_end(state) {
-                    Some(end) => {
-                        state.committed = state.committed.iter().skip(end).cloned().collect();
-                        open_insert_at_prefix = true;
-                        replaced_replay = true;
-                    }
-                    None => {
-                        allow_display_merge = false;
-                    }
-                }
-            } else {
-                // 初始 open 采用窗口视图：旧回放内容让位给窗口页，避免同一身份双写。
-                // live/未持久区域不为空时绝不清空。
-                state.committed.clear();
-                replaced_replay = true;
-            }
-            if replaced_replay {
-                crate::kit::history_paging::reset_browsing_state();
-                state.window.clear_displayed_entries();
-                crate::kit::history_paging::sync_spans_from_window(&state.window);
-                crate::kit::history_window::clear_window_unit_mappings();
-                crate::kit::history_window::clear_detail_targets();
-                crate::kit::atoms::HISTORY_INHERITED_NOTICE.set(None);
+        match prepare_open_display(state, context, response) {
+            Ok(plan) => Some(plan),
+            Err(failure) => {
+                tracing::error!(
+                    ranges = ?failure.ranges,
+                    committed_len = failure.committed_len,
+                    "history_window: display ledger ranges inconsistent with committed; keeping prior window"
+                );
+                state
+                    .window
+                    .set_degraded("history display ledger inconsistent on reopen");
+                history_page_consumer::fail_window_request(
+                    &context.request_id,
+                    "history display ledger inconsistent on reopen",
+                    true,
+                );
+                return PublicationIntent::None;
             }
         }
-        crate::kit::history_window::publish_window_viewport(&state.window);
-        crate::kit::history_paging::publish_window_gap_request(&state.window);
     } else if state.window.identity() != Some(&response.identity)
         || state.window.generation() != context.window_generation
     {
         history_page_consumer::fail_window_request(
             &context.request_id,
             "stale history window page dropped before admission",
+            false,
+        );
+        return PublicationIntent::None;
+    } else {
+        None
+    };
+    if open_plan
+        .as_ref()
+        .is_some_and(|plan| !plan.allow_display_merge)
+    {
+        // 无法安全判定旧展示边界：不预留、不接纳，页面留待后续翻页重新获取。
+        history_page_consumer::fail_window_request(
+            &context.request_id,
+            "history window page cannot be merged safely",
             false,
         );
         return PublicationIntent::None;
@@ -221,7 +228,7 @@ pub(super) fn handle_window_page_loaded(
         }
     }
     let projection = projection_items(response);
-    let projected = history_page::project_items(state, &projection, None);
+    let projected = history_page::project_items(state, &projection, None, None);
     let mut projected_by_key: HashMap<PersistentEntryKey, ProjectedEntry> = projected
         .into_iter()
         .map(|entry| {
@@ -281,9 +288,29 @@ pub(super) fn handle_window_page_loaded(
         }
         views.push((key, item, units, descriptor));
     }
+    if open_plan.as_ref().is_some_and(|plan| plan.adopt_enabled) {
+        let watermark = open_plan
+            .as_ref()
+            .and_then(|plan| plan.prior_max_displayed_position);
+        views.retain(|(key, item, _, _)| {
+            let adopt = item.source.is_own()
+                && item
+                    .position
+                    .zip(watermark)
+                    .is_some_and(|(position, watermark)| position > watermark);
+            if adopt {
+                // 正文已由 live 尾部持有：只登记展示身份与持久位置，不进入
+                // segments/index，也不再次插入 committed。
+                state
+                    .window
+                    .mark_entry_displayed(key.clone(), item.position);
+            }
+            !adopt
+        });
+    }
     let segments = build_page_segments(&views, response);
-    let insert_slot = if open_insert_at_prefix {
-        0
+    let insert_slot = if let Some(slot) = open_plan.as_ref().and_then(|plan| plan.insert_slot) {
+        slot
     } else if let Some(gap_id) = context.gap {
         gap_insert_slot(state, gap_id)
     } else {
@@ -343,9 +370,7 @@ pub(super) fn handle_window_page_loaded(
                         until: peri_time::monotonic_now() + std::time::Duration::from_secs(8),
                     });
             }
-            if allow_display_merge {
-                merge_window_units(state, insert_slot, context, &views);
-            }
+            merge_window_units(state, insert_slot, context, &views);
             let pending = state.window.take_pending_release_plans();
             if !pending.is_empty() {
                 crate::kit::history_window::release_window_plans(
@@ -353,6 +378,12 @@ pub(super) fn handle_window_page_loaded(
                     pending,
                     crate::kit::history_window::ReleaseReason::BudgetPressure,
                 );
+            }
+            // 空页已由 consumer 按方向清空游标（EOF/无更多行）；再按驻留边缘回写会
+            // 把该方向重新“点亮”，导致对同一 cursor 无限重试。
+            if !response.items.is_empty() {
+                let (edge_before, edge_after) = state.window.edge_cursors();
+                history_page_consumer::note_window_cursors(edge_before, edge_after);
             }
             crate::kit::history_window::publish_window_viewport(&state.window);
             crate::kit::history_paging::publish_window_gap_request(&state.window);
@@ -380,6 +411,151 @@ pub(super) fn handle_window_page_loaded(
             PublicationIntent::None
         }
     }
+}
+
+/// open 页对 `committed` 与窗口身份的协调计划。
+struct OpenDisplayPlan {
+    /// `false` 时页面不预留、不接纳，留待后续翻页重新获取。
+    allow_display_merge: bool,
+    /// `Some` 覆盖 gap/placement 的正文插入槽位。
+    insert_slot: Option<usize>,
+    /// open 页中已由 live 尾部展示的条目：只登记身份，不插入正文。
+    adopt_enabled: bool,
+    prior_max_displayed_position: Option<u64>,
+}
+
+/// 展示账本区间与 `committed` 不一致；拒绝猜测性删除。
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct DisplayRangeError {
+    ranges: Vec<(usize, usize)>,
+    committed_len: usize,
+}
+
+/// 先快照判定，再统一应用：身份、展示区间与 `committed` 在同一事务内协调。
+fn prepare_open_display(
+    state: &mut BridgeState,
+    context: &WindowRequestContext,
+    response: &WindowPageResponse,
+) -> Result<OpenDisplayPlan, DisplayRangeError> {
+    let snapshot = state.window.switch_snapshot(&response.identity);
+    let live_empty = live_region_is_empty(state);
+    // 迟到 open：请求发出后本地展示代次已经推进（新气泡或整轮回答已进入
+    // committed）。此时不能整体清空 `committed`，否则旧快照会覆盖新内容。
+    let display_changed = context.display_generation != state.generation;
+
+    let mut allow_display_merge = true;
+    let mut insert_slot = None;
+    let mut adopt_enabled = false;
+    if snapshot.identity_changed {
+        if snapshot.displayed_entry_count > 0 {
+            // 按展示账本精确摘除旧窗口页正文；live 尾部（新 turn 已 flush 的
+            // 内容）不在区间内，原样保留。
+            insert_slot = Some(remove_displayed_ranges(
+                &mut state.committed,
+                &snapshot.displayed_slot_ranges,
+            )?);
+            // 摘除后仍有 live 尾部时，open 页中越过旧展示水位的条目已经由 live
+            // 路径展示：只登记身份，阻止后续翻页重复插入。
+            adopt_enabled = live_empty
+                && !state.committed.is_empty()
+                && snapshot.max_displayed_position.is_some();
+            if adopt_enabled && snapshot.displayed_slot_ranges.is_empty() {
+                // adopt-only：账本没有可摘除的正文，剩余 committed 全是 live 尾部。
+                // 本页未被 adopt 的条目属于 live 之前的历史，必须插到其前面。
+                insert_slot = Some(0);
+            }
+        } else if live_empty {
+            if display_changed {
+                // 只有能确认旧回放是严格前缀时才替换它；否则保留全部展示并
+                // 放弃这一页的展示合并（迟到 open 丢弃展示，不覆盖新内容）。
+                match known_replay_prefix_end(state) {
+                    Some(end) => {
+                        state.committed = state.committed.iter().skip(end).cloned().collect();
+                        insert_slot = Some(0);
+                    }
+                    None => allow_display_merge = false,
+                }
+            } else {
+                // 初始 open 采用窗口视图：旧回放内容让位给窗口页，避免同一身份双写。
+                // live/未持久区域不为空时绝不清空。
+                state.committed.clear();
+                insert_slot = Some(0);
+            }
+        } else {
+            // open 在途期间 live 区域已有新内容：保留 committed，不合并本页。
+            allow_display_merge = false;
+        }
+    }
+
+    let generation = state.window.begin_window(response.identity.clone());
+    // 成功的 open 是唯一能把窗口从 Degraded 拉回 Ready 的路径；同身份重试时
+    // `begin_window` 是 no-op，必须显式恢复。
+    state.window.mark_ready();
+    history_page_consumer::note_window_generation(generation);
+    if snapshot.identity_changed {
+        // begin_window 已清模型；同步清理派生索引、浏览态与渲染身份映射。
+        crate::kit::history_paging::reset_browsing_state();
+        crate::kit::history_paging::sync_spans_from_window(&state.window);
+        crate::kit::history_window::clear_window_unit_mappings();
+        crate::kit::history_window::clear_detail_targets();
+        // adopt 条目的正文仍由保留的 live 尾部持有：在新窗口里延续其展示
+        // 身份与位置，否则下一次 open 会重复插入同一持久条目。
+        for (key, position) in &snapshot.slotless_entries {
+            state.window.mark_entry_displayed(key.clone(), *position);
+        }
+    }
+    crate::kit::history_window::publish_window_viewport(&state.window);
+    crate::kit::history_paging::publish_window_gap_request(&state.window);
+
+    Ok(OpenDisplayPlan {
+        allow_display_merge,
+        insert_slot,
+        adopt_enabled,
+        prior_max_displayed_position: snapshot.max_displayed_position,
+    })
+}
+
+/// 从 `committed` 精确移除窗口展示区间；返回 open 页的插入槽位。
+///
+/// `ranges` 是 `DisplayLedger` 的 (start, len)，必须升序、互不重叠且在边界内。
+/// 校验失败时不修改 `committed`（不猜测删除）。
+fn remove_displayed_ranges(
+    committed: &mut im::Vector<TuiRenderUnit>,
+    ranges: &[(usize, usize)],
+) -> Result<usize, DisplayRangeError> {
+    validate_display_ranges(committed.len(), ranges)?;
+    let insert_at = ranges.first().map_or(committed.len(), |(start, _)| *start);
+    // 逆序保证前面的槽位不因后面的摘除而失效。
+    for (start, len) in ranges.iter().rev() {
+        let end = start.saturating_add(*len);
+        let tail = committed.split_off(end);
+        let removed = committed.split_off(*start);
+        debug_assert_eq!(removed.len(), *len);
+        committed.append(tail);
+    }
+    Ok(insert_at.min(committed.len()))
+}
+
+fn validate_display_ranges(
+    committed_len: usize,
+    ranges: &[(usize, usize)],
+) -> Result<(), DisplayRangeError> {
+    let mut previous_end = 0usize;
+    for (index, (start, len)) in ranges.iter().enumerate() {
+        let valid = *len > 0
+            && start
+                .checked_add(*len)
+                .is_some_and(|end| end <= committed_len)
+            && (index == 0 || *start >= previous_end);
+        if !valid {
+            return Err(DisplayRangeError {
+                ranges: ranges.to_vec(),
+                committed_len,
+            });
+        }
+        previous_end = start.saturating_add(*len);
+    }
+    Ok(())
 }
 
 /// S6.2：释放事务清理未配对工具终点（S6.5 预算化后仍复用此入口）。
@@ -638,3 +814,7 @@ fn sync_window_anchor_from_viewport(state: &mut BridgeState) {
         state.window.set_anchor(Some(anchor));
     }
 }
+
+#[cfg(test)]
+#[path = "history_window_test.rs"]
+mod tests;

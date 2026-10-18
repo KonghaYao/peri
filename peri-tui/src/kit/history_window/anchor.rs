@@ -77,8 +77,10 @@ pub fn merge_adjacent_gaps(
         }
         left.before = left.before.clone().or(right.before);
         left.after = right.after.clone().or(left.after.clone());
-        left.before_cursor = left.before_cursor.clone().or(right.before_cursor);
-        left.after_cursor = right.after_cursor.clone().or(left.after_cursor.clone());
+        // 游标取合并后缺口的**内侧**边界：上端来自更晚 gap 的 before 游标，
+        // 下端保留更早 gap 的 after 游标。外侧游标锚在已被淘汰的段上，无法
+        // 回填合并后的缺口；对应方向没有驻留邻居时保持 None。
+        left.before_cursor = right.before_cursor;
         left.placeholder = left.placeholder.merge(right.placeholder);
         layout.remove(index + 1);
         // 不前进 index：合并后的左 gap 可能与下一个 gap 继续相邻。

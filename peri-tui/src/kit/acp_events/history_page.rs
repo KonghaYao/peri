@@ -25,16 +25,18 @@
 
 use std::collections::{HashMap, VecDeque};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::time::Duration;
 
 use parking_lot::Mutex;
 
 use super::BridgeState;
 use crate::acp_client::AcpTuiClient;
-use crate::kit::acp_types::{AcpEventData, AcpEventWithEpoch};
+use crate::kit::acp_types::{AcpEventData, AcpEventWithEpoch, ToolResultRefetch};
 use crate::kit::atoms;
-use crate::kit::history_page_consumer::{HistoryPageOrigin, take_page_origin};
+use crate::kit::history_page_consumer::PAGE_FETCH_TIMEOUT;
 use crate::kit::history_paging::{
-    self, HistoryPageItem, HistoryPageResponse, HistorySubItem, PageEntry,
+    self, HistoryPageItem, HistoryPageOrigin, HistoryPageResponse, HistorySubItem, PageEntry,
 };
 use crate::kit::history_window::HistorySource;
 use crate::kit::tui_render_unit::{FoldState, TuiRenderUnit, TuiSystemReminder, TuiUserBubble};
@@ -67,8 +69,8 @@ const PENDING_TOOL_ENDS_LIMIT: usize = 256;
 /// 跨页暂存**完整结果**的内存预算。预算内按正文保留；超过预算的条目改为
 /// 保存来源页请求定位，等用户展开时再用 `load_history_page()` 补读，绝不截断正文。
 const PENDING_TOOL_ENDS_BYTES_MAX: usize = 8 * 1024 * 1024;
-const DEFERRED_TOOL_RESULT_TEXT: &str = "结果正文较大，展开后按需加载";
-const UNAVAILABLE_TOOL_RESULT_TEXT: &str = "结果正文较大，无法按需加载";
+pub(crate) const DEFERRED_TOOL_RESULT_TEXT: &str = "结果正文较大，展开后按需加载";
+pub(crate) const UNAVAILABLE_TOOL_RESULT_TEXT: &str = "结果正文较大，无法按需加载";
 
 /// 结果来源页的请求定位。补读必须重放**结果那一页的请求参数**，不能使用响应
 /// `nextCursor`（它已指向更早一页）。
@@ -93,7 +95,8 @@ struct PendingToolEnd {
     /// 用户展开触发的补读结果必须跳过预算再次转引用（一次性正文）。
     force_complete: bool,
     placeholder_applied: bool,
-    in_flight: bool,
+    /// 当前在途补读的请求代次；`Some` 时拒绝重复补读。
+    in_flight_request: Option<u64>,
 }
 
 impl PendingToolEnd {
@@ -117,10 +120,10 @@ impl PendingToolResults {
         output: &str,
         is_error: bool,
         source: Option<ToolResultSource>,
+        force_complete: bool,
     ) {
         let previous = self.remove(&tool_id);
         let source = source.or_else(|| previous.as_ref().and_then(|entry| entry.source.clone()));
-        let force_complete = take_force_complete_tool(&tool_id);
         let output = (force_complete || output.len() <= PENDING_TOOL_ENDS_BYTES_MAX)
             .then(|| Arc::from(output));
         let end = PendingToolEnd {
@@ -129,7 +132,7 @@ impl PendingToolResults {
             source,
             force_complete,
             placeholder_applied: false,
-            in_flight: false,
+            in_flight_request: None,
         };
         self.entries.insert(tool_id.clone(), end);
         self.order.push_back(tool_id);
@@ -194,13 +197,13 @@ impl PendingToolResults {
     }
 
     /// 用户展开卡片：取出来源定位并标记在途；已完整/在途的条目不重复补读。
-    fn deferred_source(&mut self, tool_id: &str) -> Option<ToolResultSource> {
+    fn deferred_source(&mut self, tool_id: &str, request_id: u64) -> Option<ToolResultSource> {
         let entry = self.entries.get_mut(tool_id)?;
-        if entry.output.is_some() || entry.in_flight {
+        if entry.output.is_some() || entry.in_flight_request.is_some() {
             return None;
         }
         let source = entry.source.clone()?;
-        entry.in_flight = true;
+        entry.in_flight_request = Some(request_id);
         Some(source)
     }
 
@@ -216,28 +219,34 @@ impl PendingToolResults {
     }
 }
 
-/// 用户展开触发的补读：下一次 `insert` 允许一次性保留完整正文（即使超过预算）。
-static FORCE_COMPLETE_TOOL: Mutex<Option<String>> = Mutex::new(None);
-
-fn note_force_complete_tool(tool_id: &str) {
-    *FORCE_COMPLETE_TOOL.lock() = Some(tool_id.to_string());
-}
-
-fn take_force_complete_tool(tool_id: &str) -> bool {
-    let mut guard = FORCE_COMPLETE_TOOL.lock();
-    if guard.as_deref() == Some(tool_id) {
-        *guard = None;
-        true
-    } else {
-        false
-    }
-}
-
 static PENDING_TOOL_ENDS: Mutex<Option<(String, PendingToolResults)>> = Mutex::new(None);
 
+/// 大结果补读的请求代次。身份随 `HistoryPageLoaded.refetch` 传递，迟到的旧请求
+/// 只能释放自己（不能清掉新请求的 `in_flight_request`）。
+static NEXT_REFETCH_REQUEST_ID: AtomicU64 = AtomicU64::new(1);
+
+fn next_refetch_request_id() -> u64 {
+    NEXT_REFETCH_REQUEST_ID.fetch_add(1, Ordering::Relaxed)
+}
+
+/// 大结果补读的单次 RPC 预算——与普通翻页共用同一期限（服务端静默时必须终止）。
+const TOOL_RESULT_REFETCH_TIMEOUT: Duration = PAGE_FETCH_TIMEOUT;
+
 /// 并入一页（桥接任务内调用；调用方已保证事件串行）。
-pub(super) fn handle_history_page_loaded(state: &mut BridgeState, response: &HistoryPageResponse) {
+///
+/// `origin` / `refetch` 与响应同事件到达：来源只可能属于本响应，`force_complete`
+/// 也只作用于 `refetch.tool_id`。`refetch.error` 是补读失败：卡片显示失败终态，
+/// 但暂存来源保留，释放在途后用户可再次展开重试。
+pub(super) fn handle_history_page_loaded(
+    state: &mut BridgeState,
+    response: &HistoryPageResponse,
+    origin: Option<&HistoryPageOrigin>,
+    refetch: Option<&ToolResultRefetch>,
+) {
     if !accepts_page(state, response) {
+        if let Some(refetch) = refetch {
+            release_in_flight(&refetch.tool_id, refetch.request_id);
+        }
         tracing::debug!(
             session_id = %response.session_id,
             items = response.items.len(),
@@ -245,8 +254,17 @@ pub(super) fn handle_history_page_loaded(state: &mut BridgeState, response: &His
         );
         return;
     }
-    let origin = take_page_origin(&response.session_id, &response.snapshot_token);
-    let entries = build_entries(state, &response.items, origin.as_ref());
+    if let Some(refetch) = refetch
+        && let Some(message) = refetch.error.as_deref()
+    {
+        // 只有仍持有该请求的条目才接受失败结果：迟到的旧失败不得覆盖新请求。
+        if release_in_flight(&refetch.tool_id, refetch.request_id) {
+            apply_refetch_failure(state, &refetch.tool_id, message);
+        }
+        return;
+    }
+    let force_complete_tool = refetch.map(|refetch| refetch.tool_id.as_str());
+    let entries = build_entries(state, &response.items, origin, force_complete_tool);
     // 并入前先关闭回放区间：生产路径**没有**回放结束通知（`SessionReplayDone` 是
     // 死路径，见 `turn::handle_session_replay_done` 的注释），首屏最后一个自有条目
     // 会一直停留在「打开」状态、不进索引。那时索引可能整段为空——整页更早的历史会
@@ -260,6 +278,11 @@ pub(super) fn handle_history_page_loaded(state: &mut BridgeState, response: &His
         apply_pending_tool_ends(state, spans);
         outcome
     });
+    // 成功 / 无新内容：本次请求都已结束。成功合并时条目已被 `apply_pending_tool_ends`
+    // 移除，这里是 no-op；重复页（没有新单元）也必须释放，否则 `in_flight` 永久占用。
+    if let Some(refetch) = refetch {
+        release_in_flight(&refetch.tool_id, refetch.request_id);
+    }
     if outcome.inserted_units == 0 {
         tracing::debug!(
             session_id = %response.session_id,
@@ -302,6 +325,7 @@ fn build_entries(
     state: &BridgeState,
     items: &[HistoryPageItem],
     origin: Option<&HistoryPageOrigin>,
+    force_complete_tool: Option<&str>,
 ) -> Vec<PageEntry> {
     let projection: Vec<ProjectionItem> = items
         .iter()
@@ -312,7 +336,7 @@ fn build_entries(
             sub_items: item.sub_items.clone(),
         })
         .collect();
-    project_items(state, &projection, origin)
+    project_items(state, &projection, origin, force_complete_tool)
         .into_iter()
         .map(|entry| PageEntry {
             entry_id: entry.entry_id,
@@ -323,10 +347,14 @@ fn build_entries(
 }
 
 /// 复用同一份历史投影语义（reminder/tool/文本），窗口页也只调用这里。
+///
+/// `force_complete_tool` 只由补读响应携带：只有该 `tool_id` 的未配对终点允许
+/// 一次性保留超预算正文；普通页一律按预算决定是否驻留。
 pub(super) fn project_items(
     state: &BridgeState,
     items: &[ProjectionItem],
     origin: Option<&HistoryPageOrigin>,
+    force_complete_tool: Option<&str>,
 ) -> Vec<ProjectedEntry> {
     let mut entries: Vec<ProjectedEntry> = Vec::with_capacity(items.len());
     // 页内 `tool_id` → (条目下标, 单元下标)。
@@ -392,7 +420,8 @@ pub(super) fn project_items(
                             tool_id: tool_id.clone(),
                         });
                         with_pending(|pending| {
-                            pending.insert(tool_id, &output_summary, is_error, source);
+                            let force = force_complete_tool == Some(tool_id.as_str());
+                            pending.insert(tool_id, &output_summary, is_error, source, force);
                         });
                     }
                 }
@@ -444,7 +473,8 @@ fn complete_in_place(
 /// （REQ-H03、A10：不得挂到当前实时 turn）。区间索引只覆盖历史页与回放的自有
 /// 条目，用它限定配对范围即可。
 type CompleteToolResult = (String, Arc<str>, bool, bool);
-type DeferredToolResult = (String, bool);
+/// `(tool_id, is_error, has_source)`：占位也必须保留工具真实成功/失败语义。
+type DeferredToolResult = (String, bool, bool);
 
 pub(super) fn apply_pending_tool_ends(
     state: &mut BridgeState,
@@ -465,7 +495,7 @@ pub(super) fn apply_pending_tool_ends(
                         ));
                     }
                     None if !end.placeholder_applied => {
-                        deferred.push((tool_id.clone(), end.source.is_some()));
+                        deferred.push((tool_id.clone(), end.is_error, end.source.is_some()));
                     }
                     None => {}
                 }
@@ -496,7 +526,7 @@ pub(super) fn apply_pending_tool_ends(
             pending.remove(&tool_id);
         });
     }
-    for (tool_id, has_source) in deferred {
+    for (tool_id, is_error, has_source) in deferred {
         let Some(slot) = tool_card_slot(state, spans, &tool_id) else {
             continue;
         };
@@ -506,7 +536,7 @@ pub(super) fn apply_pending_tool_ends(
             UNAVAILABLE_TOOL_RESULT_TEXT
         };
         let unit = state.committed[slot].clone();
-        let updated = deferred_unit(unit, text);
+        let updated = deferred_unit(unit, text, is_error);
         state.committed = state.committed.update(slot, updated.clone());
         with_pending(|pending| {
             if let Some(entry) = pending.entries.get_mut(&tool_id) {
@@ -543,9 +573,19 @@ fn tool_card_slot(
 ///
 /// 身份核对分两层：响应 `sessionId/snapshotToken` 必须与来源一致；目标条目与
 /// 子项（`entryId` + `subItem.position` + `toolCallId`）必须唯一命中。
+/// 预算内未返回按普通失败处理（不失效浏览身份），调用方负责释放 `in_flight`
+/// 与在卡片上显式呈现失败。
 pub(super) async fn refetch_tool_result(
     client: &AcpTuiClient,
     source: &ToolResultSource,
+) -> Result<HistoryPageResponse, String> {
+    refetch_tool_result_with_budget(client, source, TOOL_RESULT_REFETCH_TIMEOUT).await
+}
+
+pub(super) async fn refetch_tool_result_with_budget(
+    client: &AcpTuiClient,
+    source: &ToolResultSource,
+    budget: Duration,
 ) -> Result<HistoryPageResponse, String> {
     if !atoms::HISTORY_PAGING
         .state()
@@ -554,10 +594,13 @@ pub(super) async fn refetch_tool_result(
     {
         return Err("历史结果补读失败：当前浏览身份已变化".to_string());
     }
-    let raw = client
-        .load_history_page(&source.session_id, &source.cursor, source.limit)
-        .await
-        .map_err(|error| format!("历史结果补读失败：{error}"))?;
+    let raw = peri_time::timeout(
+        budget,
+        client.load_history_page(&source.session_id, &source.cursor, source.limit),
+    )
+    .await
+    .map_err(|_| format!("历史结果补读失败：请求超时（{budget:?}）"))?
+    .map_err(|error| format!("历史结果补读失败：{error}"))?;
     let response = history_paging::decode_page_response(&raw)
         .ok_or_else(|| "历史结果补读失败：响应形状不符".to_string())?;
     if response.session_id != source.session_id || response.snapshot_token != source.snapshot_token
@@ -602,40 +645,53 @@ pub(super) fn maybe_request_tool_result(unit: &TuiRenderUnit) -> Option<ToolResu
     if card.fold == FoldState::Collapsed {
         return None;
     }
-    let source = with_pending(|pending| pending.deferred_source(&card.tool_id))?;
+    let request_id = next_refetch_request_id();
+    let source = with_pending(|pending| pending.deferred_source(&card.tool_id, request_id))?;
     let Some(client) = atoms::ACP_CLIENT_HANDLE.get().cloned() else {
-        release_deferred_source(&card.tool_id);
+        release_in_flight(&card.tool_id, request_id);
         notify_tool_result_failure("历史结果补读失败：ACP client 不可用");
         return Some(source);
     };
     let Ok(handle) = tokio::runtime::Handle::try_current() else {
-        release_deferred_source(&card.tool_id);
+        release_in_flight(&card.tool_id, request_id);
         notify_tool_result_failure("历史结果补读失败：异步运行时不可用");
         return Some(source);
     };
     let task_source = source.clone();
     handle.spawn(async move {
-        let response = match refetch_tool_result(&client, &task_source).await {
-            Ok(response) => {
-                note_force_complete_tool(&task_source.tool_id);
-                response
-            }
+        let (response, error) = match refetch_tool_result(&client, &task_source).await {
+            Ok(response) => (response, None),
             Err(message) => {
                 notify_tool_result_failure(&message);
-                tool_result_error_response(&task_source, &message)
+                // 错误正文仍走同一合成页形状，桥接侧按 `refetch.error` 只更新卡片，
+                // 不消费暂存来源（保留重试能力）。
+                (
+                    tool_result_error_response(&task_source, &message),
+                    Some(message),
+                )
             }
         };
         let Some(tx) = atoms::LOCAL_EVENT_TX.get() else {
-            release_deferred_source(&task_source.tool_id);
+            release_in_flight(&task_source.tool_id, request_id);
             notify_tool_result_failure("历史结果补读失败：本地桥接通道不可用");
             return;
         };
-        let _ = tx.send(AcpEventWithEpoch {
+        let event = AcpEventWithEpoch {
             event: AcpEventData::HistoryPageLoaded {
                 response: Box::new(response),
+                origin: None,
+                refetch: Some(Box::new(ToolResultRefetch {
+                    request_id,
+                    tool_id: task_source.tool_id.clone(),
+                    error,
+                })),
             },
             active_session_id: task_source.session_id,
-        });
+        };
+        if tx.send(event).is_err() {
+            release_in_flight(&task_source.tool_id, request_id);
+            notify_tool_result_failure("历史结果补读失败：本地桥接通道已关闭");
+        }
     });
     Some(source)
 }
@@ -680,19 +736,54 @@ fn notify_tool_result_failure(message: &str) {
     });
 }
 
-fn release_deferred_source(tool_id: &str) {
-    with_pending(|pending| {
-        if let Some(entry) = pending.entries.get_mut(tool_id) {
-            entry.in_flight = false;
-        }
+/// 补读失败：在卡片上显式显示原因（`is_error`），但**不消费**暂存来源——
+/// 释放 `in_flight_request` 后，用户再次展开即可重试。
+fn apply_refetch_failure(state: &mut BridgeState, tool_id: &str, message: &str) {
+    let updated = history_paging::with_spans(|spans| {
+        let Some(slot) = tool_card_slot(state, spans, tool_id) else {
+            // 卡片已被淘汰：来源不再有展示对象，立即释放。
+            with_pending(|pending| {
+                pending.remove(tool_id);
+            });
+            return false;
+        };
+        let unit = state.committed[slot].clone();
+        state.committed = state
+            .committed
+            .update(slot, complete_unit_preserving_fold(unit, message, true));
+        with_pending(|pending| {
+            if let Some(entry) = pending.entries.get_mut(tool_id) {
+                // 失败文案已落地：后续普通页不必再用占位覆盖它；来源仍保留。
+                entry.placeholder_applied = true;
+            }
+        });
+        true
     });
+    if updated {
+        super::render::push_acp_state(state);
+    }
+}
+
+/// 释放该请求的在途认领；只有代次匹配才清空（迟到的旧响应不得清掉新请求）。
+/// 返回本次请求是否真的持有认领。
+fn release_in_flight(tool_id: &str, request_id: u64) -> bool {
+    with_pending(|pending| {
+        let Some(entry) = pending.entries.get_mut(tool_id) else {
+            return false;
+        };
+        if entry.in_flight_request == Some(request_id) {
+            entry.in_flight_request = None;
+            true
+        } else {
+            false
+        }
+    })
 }
 
 /// 未配对终点的上限（超过即丢弃，避免长会话里无界增长）。
 /// 结构性释放：丢弃未配对终点（轻量引用，S6.5 预算化）。
 pub(super) fn clear_pending_tool_ends() {
     *PENDING_TOOL_ENDS.lock() = None;
-    *FORCE_COMPLETE_TOOL.lock() = None;
 }
 
 /// 测试清理：丢弃全部暂存终点。
@@ -712,7 +803,7 @@ pub(crate) fn pending_tool_ends_fingerprint() -> (usize, usize) {
 #[cfg(test)]
 pub(crate) fn insert_pending_tool_end_for_tests(tool_id: &str, output: &str, is_error: bool) {
     with_pending(|pending| {
-        pending.insert(tool_id.to_string(), output, is_error, None);
+        pending.insert(tool_id.to_string(), output, is_error, None, false);
     });
 }
 
@@ -739,16 +830,35 @@ pub(crate) fn insert_deferred_tool_result_for_tests(tool_id: &str, source: ToolR
                 source: Some(source),
                 force_complete: false,
                 placeholder_applied: false,
-                in_flight: false,
+                in_flight_request: None,
             },
         );
         pending.order.push_back(tool_id.to_string());
     });
 }
 
+/// 测试用：认领一次补读（等价于用户展开卡片）。
 #[cfg(test)]
-pub(crate) fn note_force_complete_tool_for_tests(tool_id: &str) {
-    note_force_complete_tool(tool_id);
+pub(crate) fn claim_deferred_tool_result_for_tests(
+    tool_id: &str,
+    request_id: u64,
+) -> Option<ToolResultSource> {
+    with_pending(|pending| pending.deferred_source(tool_id, request_id))
+}
+
+#[cfg(test)]
+pub(crate) fn deferred_in_flight_request_for_tests(tool_id: &str) -> Option<u64> {
+    with_pending(|pending| {
+        pending
+            .entries
+            .get(tool_id)
+            .and_then(|entry| entry.in_flight_request)
+    })
+}
+
+#[cfg(test)]
+pub(crate) fn refetch_timeout_for_tests() -> Duration {
+    TOOL_RESULT_REFETCH_TIMEOUT
 }
 
 #[cfg(test)]
@@ -789,9 +899,9 @@ fn complete_unit_preserving_fold(
     }
 }
 
-/// 超预算占位：不是结果摘要，也不改变用户当前展开态。
-fn deferred_unit(unit: TuiRenderUnit, text: &str) -> TuiRenderUnit {
-    complete_unit_preserving_fold(unit, text, false)
+/// 超预算占位：不是结果摘要，也不改变用户当前展开态；工具成功/失败语义如实保留。
+fn deferred_unit(unit: TuiRenderUnit, text: &str, is_error: bool) -> TuiRenderUnit {
+    complete_unit_preserving_fold(unit, text, is_error)
 }
 
 /// 在未配对终点表上执行一段操作（会话身份与表内容同源：换会话即作废）。

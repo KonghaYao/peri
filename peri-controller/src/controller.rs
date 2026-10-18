@@ -24,7 +24,7 @@ use std::time::Duration;
 
 use parking_lot::Mutex;
 use peri_acp_types::event::{EventMessage, ExecutorEvent};
-use peri_acp_types::identity::{CancelRequest, EventEnvelope};
+use peri_acp_types::identity::{CancelRequest, EventEnvelope, SessionSeq};
 use peri_acp_types::messages::MessageContent;
 use peri_acp_types::runtime::UnstampedEvent;
 use peri_acp_types::session_resources::SessionResources;
@@ -399,10 +399,21 @@ impl Controller {
     /// 交付语义同 [`Controller::publish`]：弹出队列有界满丢弃（Critical 类）；
     /// 订阅广播慢消费者 lagging（Broadcast 类）。未注册 session（迟到事件 /
     /// 销毁后事件）无法补打，降级为发射方提供的身份直接投递（不 panic）。
-    pub fn publish_event(&self, session_id: &str, source: &UnstampedEvent, event: ExecutorEvent) {
+    ///
+    /// 返回实际补打的 `session_seq`；降级投递没有可信序号，返回 `None`。
+    pub fn publish_event(
+        &self,
+        session_id: &str,
+        source: &UnstampedEvent,
+        event: ExecutorEvent,
+    ) -> Option<SessionSeq> {
         let runtime = Arc::clone(&self.runtime);
         let envelope = match runtime.stamp(session_id, source) {
-            Ok(stamped) => stamped,
+            Ok(stamped) => {
+                let session_seq = stamped.session_seq;
+                self.publish_message(EventMessage::new(stamped, Some(event)));
+                return Some(session_seq);
+            }
             Err(_) => {
                 let mut envelope = EventEnvelope::new(
                     session_id.to_string(),
@@ -417,6 +428,7 @@ impl Controller {
             }
         };
         self.publish_message(EventMessage::new(envelope, Some(event)));
+        None
     }
 
     /// 双投递（弹出队列 + 订阅广播）的内部实现。

@@ -212,6 +212,184 @@ async fn open_before_reads_a_bounded_range_and_pages_backwards() {
 }
 
 #[tokio::test]
+async fn before_page_exposes_a_later_cursor() {
+    let history = payloads(7);
+    let (_store, data, _directory) = session_with_history(&history).await;
+    let id = WINDOW_SESSION.to_owned();
+
+    let opened = data
+        .load_history_window_page(
+            &id,
+            &HistoryWindowPagePlan::open(
+                HistorySource::Own,
+                None,
+                HistoryWindowDirection::Before,
+                3,
+                0,
+                BUDGET,
+            ),
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        opened.after_cursor_anchor, None,
+        "页已到 durable tail：更晚方向确实没有可读行，不能再铸造游标"
+    );
+    let tail = opened.committed_tail.clone();
+
+    // 向上翻一页后，本页与 tail 之间仍有可读行：afterCursor 必须指向本页最新行。
+    let older = data
+        .load_history_window_page(
+            &id,
+            &HistoryWindowPagePlan::page(
+                HistorySource::Own,
+                history[4].id(),
+                HistoryWindowDirection::Before,
+                2,
+                BUDGET,
+                tail,
+            ),
+        )
+        .await
+        .unwrap();
+    assert_eq!(loaded_ids(&older), vec![history[2].id(), history[3].id()]);
+    assert_eq!(older.before_cursor_anchor, Some(history[2].id()));
+    assert_eq!(
+        older.after_cursor_anchor,
+        Some(history[3].id()),
+        "更早页仍必须暴露更晚方向的内侧锚点，否则淘汰后无法向下补回"
+    );
+}
+
+#[tokio::test]
+async fn after_page_exposes_an_earlier_cursor() {
+    let history = payloads(7);
+    let (_store, data, _directory) = session_with_history(&history).await;
+    let id = WINDOW_SESSION.to_owned();
+    let opened = data
+        .load_history_window_page(
+            &id,
+            &HistoryWindowPagePlan::open(
+                HistorySource::Own,
+                None,
+                HistoryWindowDirection::Before,
+                1,
+                0,
+                BUDGET,
+            ),
+        )
+        .await
+        .unwrap();
+    let tail = opened.committed_tail.clone();
+
+    let newer = data
+        .load_history_window_page(
+            &id,
+            &HistoryWindowPagePlan::page(
+                HistorySource::Own,
+                history[0].id(),
+                HistoryWindowDirection::After,
+                2,
+                BUDGET,
+                tail,
+            ),
+        )
+        .await
+        .unwrap();
+    assert_eq!(loaded_ids(&newer), vec![history[1].id(), history[2].id()]);
+    assert_eq!(
+        newer.before_cursor_anchor,
+        Some(history[1].id()),
+        "更晚页也必须暴露更早方向的内侧锚点"
+    );
+    assert_eq!(newer.after_cursor_anchor, Some(history[2].id()));
+}
+
+#[tokio::test]
+async fn open_entry_after_includes_the_anchor() {
+    let history = payloads(7);
+    let (_store, data, _directory) = session_with_history(&history).await;
+    let id = WINDOW_SESSION.to_owned();
+
+    let opened = data
+        .load_history_window_page(
+            &id,
+            &HistoryWindowPagePlan::open(
+                HistorySource::Own,
+                Some(history[3].id()),
+                HistoryWindowDirection::After,
+                0,
+                2,
+                BUDGET,
+            ),
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        loaded_ids(&opened),
+        vec![history[3].id(), history[4].id()],
+        "after 半段必须包含锚点自身，且只出现一次"
+    );
+    assert_eq!(opened.before_cursor_anchor, Some(history[3].id()));
+    assert_eq!(opened.after_cursor_anchor, Some(history[4].id()));
+}
+
+#[tokio::test]
+async fn seek_with_zero_before_limit_keeps_the_anchor() {
+    let history = payloads(7);
+    let (_store, data, _directory) = session_with_history(&history).await;
+    let id = WINDOW_SESSION.to_owned();
+    let tail = data
+        .history_window_bounds(&id)
+        .await
+        .unwrap()
+        .own_latest
+        .unwrap();
+
+    let sought = data
+        .load_history_window_page(
+            &id,
+            &HistoryWindowPagePlan::seek(HistorySource::Own, history[3].id(), 0, 2, BUDGET, tail),
+        )
+        .await
+        .unwrap();
+    assert_eq!(loaded_ids(&sought), vec![history[3].id(), history[4].id()]);
+    assert_eq!(sought.before_cursor_anchor, Some(history[3].id()));
+    assert_eq!(sought.after_cursor_anchor, Some(history[4].id()));
+}
+
+#[tokio::test]
+async fn around_open_includes_the_anchor_once() {
+    let history = payloads(7);
+    let (_store, data, _directory) = session_with_history(&history).await;
+    let id = WINDOW_SESSION.to_owned();
+
+    let opened = data
+        .load_history_window_page(
+            &id,
+            &HistoryWindowPagePlan::open(
+                HistorySource::Own,
+                Some(history[3].id()),
+                HistoryWindowDirection::Around,
+                1,
+                2,
+                BUDGET,
+            ),
+        )
+        .await
+        .unwrap();
+    let ids = all_ids(&opened);
+    assert_eq!(ids, vec![history[3].id(), history[4].id(), history[5].id()]);
+    assert_eq!(
+        ids.iter().filter(|id| **id == history[3].id()).count(),
+        1,
+        "锚点只能由 before 半段返回一次"
+    );
+    assert_eq!(opened.before_cursor_anchor, Some(history[3].id()));
+    assert_eq!(opened.after_cursor_anchor, Some(history[5].id()));
+}
+
+#[tokio::test]
 async fn after_reads_only_later_rows_and_appends_stay_outside_the_old_tail() {
     let history = payloads(7);
     let (_store, data, _directory) = session_with_history(&history).await;

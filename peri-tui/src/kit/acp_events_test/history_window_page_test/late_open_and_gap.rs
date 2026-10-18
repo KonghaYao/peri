@@ -103,7 +103,11 @@ fn late_open_without_known_replay_boundary_keeps_display_intact() {
         vec!["legacy replay", "new answer"],
         "无法确认旧回放边界时不得整体清空，也不得把旧页重复铺上去"
     );
-    assert_eq!(state.window.segment_count(), 1);
+    assert_eq!(
+        state.window.segment_count(),
+        0,
+        "无法安全合并的页面不预留、不接纳，留待后续翻页重新获取"
+    );
     assert_eq!(state.window.displayed_entry_count(), 0);
 }
 

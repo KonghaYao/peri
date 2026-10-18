@@ -53,6 +53,16 @@ pub struct ExportReport {
     pub bytes: u64,
 }
 
+/// 面板可见文本与前方缺口说明。
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct VisibleText {
+    pub text: String,
+    /// 最早驻留块不从 0 开始：前方正文已被预算淘汰。
+    pub prefix_evicted: bool,
+    /// 首块起点落在多字节字符中间时跳过的字节数（1..=3）。
+    pub skipped_fragment_bytes: usize,
+}
+
 impl HistoryDetailWindow {
     pub fn open(descriptor: DetailDescriptor) -> Result<Self, DetailError> {
         if descriptor.total_bytes == 0
@@ -98,8 +108,10 @@ impl HistoryDetailWindow {
         self.pending_offset
     }
 
+    /// 登记一次区间请求。`complete` 只表示已顺序读到 EOF，不表示任意区间仍驻留；
+    /// 已淘汰区间仍可重新请求（幂等，服务端按偏移返回）。
     pub fn request(&mut self, offset: u64, max_bytes: u32) -> Option<HistoryBodyRequest> {
-        if self.pending_offset.is_some() || self.complete || offset >= self.descriptor.total_bytes {
+        if self.pending_offset.is_some() || offset >= self.descriptor.total_bytes {
             return None;
         }
         let max_bytes = max_bytes
@@ -240,7 +252,17 @@ impl HistoryDetailWindow {
     }
 
     /// 已加载的连续前缀文本。跨块 UTF-8 在这里整体解码，避免按块截断乱码。
+    ///
+    /// 首块不从 0 开始（或尚未加载任何块）时不存在完整前缀，导出必须显式报
+    /// [`DetailError::ExportGap`]，不能返回空串冒充完整正文。
     pub fn loaded_text(&self) -> Result<String, DetailError> {
+        if self
+            .chunks
+            .first_key_value()
+            .is_none_or(|(offset, _)| *offset != 0)
+        {
+            return Err(DetailError::ExportGap);
+        }
         let mut cursor = 0u64;
         let mut bytes = Vec::new();
         for chunk in self.chunks.values() {
@@ -255,12 +277,12 @@ impl HistoryDetailWindow {
 
     /// 面板展示文本：从**最早驻留块**开始拼接连续区间。
     ///
-    /// 超过 4 MiB 预算后首块会被淘汰；此时 `loaded_text` 从 0 起拼会得到空串。
-    /// 展示必须仍能看到已驻留内容，返回的 `bool` 标明前方是否还有未驻留缺口
-    /// （面板据此提示可向上滚动重新加载）。
-    pub fn visible_text(&self) -> Result<(String, bool), DetailError> {
+    /// 超过 4 MiB 预算后首块会被淘汰；此时展示仍必须从首个驻留块开始。块边界可能
+    /// 落在多字节字符中间：只在开头跳过 1..=3 字节的跨块残片，找到可整体解码的
+    /// 起点；4 个起点都失败说明正文真实损坏，仍返回 [`DetailError::Utf8`]。
+    pub fn visible_text(&self) -> Result<VisibleText, DetailError> {
         let Some((start, _)) = self.chunks.first_key_value() else {
-            return Ok((String::new(), false));
+            return Ok(VisibleText::default());
         };
         let mut cursor = *start;
         let mut bytes = Vec::new();
@@ -271,8 +293,25 @@ impl HistoryDetailWindow {
             bytes.extend_from_slice(&chunk.bytes);
             cursor = cursor.saturating_add(chunk.bytes.len() as u64);
         }
-        let text = String::from_utf8(bytes).map_err(|_| DetailError::Utf8)?;
-        Ok((text, *start > 0))
+        for skipped in 0..=3usize {
+            if skipped >= bytes.len() {
+                break;
+            }
+            if let Ok(text) = std::str::from_utf8(&bytes[skipped..]) {
+                return Ok(VisibleText {
+                    text: text.to_string(),
+                    prefix_evicted: *start > 0,
+                    skipped_fragment_bytes: skipped,
+                });
+            }
+        }
+        if bytes.is_empty() {
+            return Ok(VisibleText {
+                prefix_evicted: *start > 0,
+                ..VisibleText::default()
+            });
+        }
+        Err(DetailError::Utf8)
     }
 
     /// 流式导出：每个块直接交给 sink，不构造完整正文副本。
@@ -487,13 +526,27 @@ fn scroll_detail_request(delta: i64) -> Option<HistoryBodyRequest> {
 }
 
 fn export_detail_to_clipboard() {
-    let text = {
+    let outcome = {
         let handle = crate::kit::atoms::HISTORY_DETAIL.state();
         let guard = handle.read();
-        guard.as_ref().and_then(|detail| detail.loaded_text().ok())
+        guard.as_ref().map(HistoryDetailWindow::loaded_text)
     };
-    if let Some(text) = text {
-        let _ = crate::kit::clipboard::copy_text(&text);
+    match outcome {
+        Some(Ok(text)) => {
+            let _ = crate::kit::clipboard::copy_text(&text);
+        }
+        Some(Err(error)) => {
+            // 前缀缺口不是“空正文”：必须显式失败，不能静默复制空串。
+            let message = match error {
+                DetailError::ExportGap => "正文前缀已释放，无法复制完整内容；请先向上滚动重新加载",
+                _ => "正文不是完整 UTF-8，无法复制",
+            };
+            let handle = crate::kit::atoms::HISTORY_DETAIL.state();
+            if let Some(detail) = handle.write().as_mut() {
+                detail.last_error = Some(message.to_string());
+            }
+        }
+        None => {}
     }
 }
 
@@ -541,13 +594,24 @@ pub(crate) fn build_history_detail_lines(
     }
     lines.push(Line::from(""));
     match detail.visible_text() {
-        Ok((text, prefix_omitted)) => {
-            if prefix_omitted {
+        Ok(visible) => {
+            if visible.prefix_evicted {
                 lines.push(Line::from("（更早内容已从窗口释放；向上滚动可重新加载）"));
             }
-            if !text.is_empty() {
-                lines.extend(text.lines().map(|line| Line::from(line.to_string())));
-            } else if !prefix_omitted {
+            if visible.skipped_fragment_bytes > 0 {
+                lines.push(Line::from(format!(
+                    "（前 {} 字节为跨块字符残片，已略过）",
+                    visible.skipped_fragment_bytes
+                )));
+            }
+            if !visible.text.is_empty() {
+                lines.extend(
+                    visible
+                        .text
+                        .lines()
+                        .map(|line| Line::from(line.to_string())),
+                );
+            } else if !visible.prefix_evicted {
                 lines.push(Line::from("（尚无已加载正文）"));
             }
         }

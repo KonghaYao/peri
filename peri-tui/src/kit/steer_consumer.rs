@@ -18,13 +18,24 @@ const RECONCILE_INTERVAL: Duration = Duration::from_secs(5);
 /// 两个阶段不共用期限：准备慢于回执预算时输入尚未发出，
 /// 按回执结论收尾会把「还没来得及发送」说成输入未被接收。
 const PREPARE_TIMEOUT: Duration = Duration::from_secs(60);
-const FAILURE_NOTICE_DURATION: Duration = Duration::from_secs(6);
+pub(crate) const FAILURE_NOTICE_DURATION: Duration = Duration::from_secs(6);
 
 /// 失败发生的阶段：会话没准备好与输入未被受理，对用户是不同的结论。
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum SteerStage {
     Prepare,
     Admit,
+}
+
+/// 一次准入尝试的结果。
+///
+/// `AlreadySettled` 表示命令已不在本地待结算账本中（被致命失败结算、
+/// 会话重置或实例 generation 变化），consumer 不得把它当作发送成功，
+/// 也不得重试或更换身份。
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum AdmitOutcome {
+    Submitted,
+    AlreadySettled,
 }
 
 /// 用户输入链路的失败，附带失败阶段。
@@ -96,31 +107,39 @@ pub(crate) fn spawn_steer_consumer(
                 _ = shutdown.cancelled() => break,
                 result = execute(&client, &mut command, &cwd) => result,
             };
-            if let Err(failure) = result {
-                let SteerFailure { error, stage } = failure;
-                let rejected = reject_command(&mut command, &error);
-                if let Some(snapshot) = error
-                    .data
-                    .as_ref()
-                    .and_then(|data| data.get("snapshot"))
-                    .and_then(|value| serde_json::from_value(value.clone()).ok())
-                {
-                    STEERS
-                        .state()
-                        .write()
-                        .accept_snapshot(snapshot, command.epoch, false);
+            match result {
+                Ok(AdmitOutcome::Submitted) => {}
+                Ok(AdmitOutcome::AlreadySettled) => {
+                    // 命令已被致命失败或会话边界结算：不重发、不提示成功，
+                    // 完整输入仍保留在 recovered/unsettled 中。
+                    tracing::debug!(command_id = %command.command_id, "user input command already settled");
                 }
-                tracing::warn!(code = error.code, stage = ?stage, command_id = %command.command_id, "user input command failed");
-                if !matches!(command.kind, SteerCommandKind::Refresh)
-                    && warned.insert(command.command_id.clone())
-                {
-                    atoms::NOTIFICATION.set(Some(atoms::Notification {
-                        message: failure_notice(stage, rejected, &error),
-                        until: peri_time::monotonic_now() + FAILURE_NOTICE_DURATION,
-                    }));
-                }
-                if !rejected && atoms::BRIDGE_RESET_COUNTER.get() == command.epoch {
-                    retries.push_back(command);
+                Err(failure) => {
+                    let SteerFailure { error, stage } = failure;
+                    let rejected = reject_command(&mut command, &error);
+                    if let Some(snapshot) = error
+                        .data
+                        .as_ref()
+                        .and_then(|data| data.get("snapshot"))
+                        .and_then(|value| serde_json::from_value(value.clone()).ok())
+                    {
+                        STEERS
+                            .state()
+                            .write()
+                            .accept_snapshot(snapshot, command.epoch, false);
+                    }
+                    tracing::warn!(code = error.code, stage = ?stage, command_id = %command.command_id, "user input command failed");
+                    if !matches!(command.kind, SteerCommandKind::Refresh)
+                        && warned.insert(command.command_id.clone())
+                    {
+                        atoms::NOTIFICATION.set(Some(atoms::Notification {
+                            message: failure_notice(stage, rejected, &error),
+                            until: peri_time::monotonic_now() + FAILURE_NOTICE_DURATION,
+                        }));
+                    }
+                    if !rejected && atoms::BRIDGE_RESET_COUNTER.get() == command.epoch {
+                        retries.push_back(command);
+                    }
                 }
             }
         }
@@ -184,13 +203,12 @@ async fn execute(
     client: &AcpTuiClient,
     command: &mut SteerCommand,
     cwd: &str,
-) -> Result<(), SteerFailure> {
+) -> Result<AdmitOutcome, SteerFailure> {
     let prepare_started = peri_time::monotonic_now();
     let prepared = prepare(client, command, cwd).await;
     tracing::debug!(command_id = %command.command_id, stage = "prepare", elapsed_ms = prepare_started.elapsed().as_millis() as u64, "user input timing");
     prepared?;
-    admit(client, command).await?;
-    Ok(())
+    admit(client, command).await
 }
 
 /// 准备首会话。失败发生在输入受理之前，因此有独立的阶段标记与期限。
@@ -232,7 +250,10 @@ async fn prepare(
 }
 
 /// 核对实例身份后发送请求并落定回执。
-async fn admit(client: &AcpTuiClient, command: &mut SteerCommand) -> Result<(), AcpError> {
+async fn admit(
+    client: &AcpTuiClient,
+    command: &mut SteerCommand,
+) -> Result<AdmitOutcome, SteerFailure> {
     if !matches!(command.kind, SteerCommandKind::Refresh) {
         let pending_epoch = STEERS
             .state()
@@ -240,7 +261,9 @@ async fn admit(client: &AcpTuiClient, command: &mut SteerCommand) -> Result<(), 
             .pending_command(&command.session_id, &command.command_id)
             .map(|pending| pending.epoch);
         let Some(epoch) = pending_epoch else {
-            return Ok(());
+            // 已被致命失败结算或会话重置：输入完整保留在 recovered/unsettled，
+            // 这里既不发送也不得返回“成功”。
+            return Ok(AdmitOutcome::AlreadySettled);
         };
         command.epoch = epoch;
     }
@@ -254,7 +277,8 @@ async fn admit(client: &AcpTuiClient, command: &mut SteerCommand) -> Result<(), 
                 -32602
             },
             "user input session changed before admission",
-        ));
+        )
+        .into());
     }
     let cached_generation = STEERS
         .state()
@@ -269,10 +293,9 @@ async fn admit(client: &AcpTuiClient, command: &mut SteerCommand) -> Result<(), 
             if atoms::ACTIVE_SESSION_ID.state().read().as_str() != command.session_id
                 || atoms::BRIDGE_RESET_COUNTER.get() != command.epoch
             {
-                return Err(AcpError::new(
-                    -32602,
-                    "user input session changed during snapshot",
-                ));
+                return Err(
+                    AcpError::new(-32602, "user input session changed during snapshot").into(),
+                );
             }
             super::steer_state::establish_session_snapshot(snapshot);
             generation
@@ -284,12 +307,18 @@ async fn admit(client: &AcpTuiClient, command: &mut SteerCommand) -> Result<(), 
         .is_some_and(|generation| generation != &current_generation)
     {
         // 旧重试可能仍在 consumer 内；实例改变后保留未知结果，不重投或恢复重复稿。
-        return Ok(());
+        return Ok(AdmitOutcome::AlreadySettled);
     }
     let generation = command.generation.get_or_insert(current_generation).clone();
-    STEERS.state().write().bind_command_generation(command);
+    if !matches!(command.kind, SteerCommandKind::Refresh)
+        && !STEERS.state().write().bind_command_generation(command)
+    {
+        // 快照读取后命令被致命失败结算：此时恢复稿与请求发送不能同时成立。
+        // 已结算命令不得再发出，也不能当作成功。
+        return Ok(AdmitOutcome::AlreadySettled);
+    }
     let receipt = match &command.kind {
-        SteerCommandKind::Refresh => return Ok(()),
+        SteerCommandKind::Refresh => return Ok(AdmitOutcome::Submitted),
         SteerCommandKind::Enqueue(input) => {
             client
                 .enqueue_user_input(&EnqueueUserInputRequest {
@@ -326,15 +355,16 @@ async fn admit(client: &AcpTuiClient, command: &mut SteerCommand) -> Result<(), 
     if atoms::ACTIVE_SESSION_ID.state().read().as_str() != command.session_id
         || atoms::BRIDGE_RESET_COUNTER.get() != command.epoch
     {
-        return Err(AcpError::new(
-            -32603,
-            "user input session changed during receipt",
-        ));
+        return Err(AcpError::new(-32603, "user input session changed during receipt").into());
     }
     STEERS.state().write().settle(command, receipt);
-    Ok(())
+    Ok(AdmitOutcome::Submitted)
 }
 
 #[cfg(test)]
 #[path = "steer_consumer_test.rs"]
 mod tests;
+
+#[cfg(test)]
+#[path = "steer_consumer_preparation_test.rs"]
+mod preparation_tests;

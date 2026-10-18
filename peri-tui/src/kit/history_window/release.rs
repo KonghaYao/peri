@@ -101,6 +101,8 @@ pub fn release_window_plans(
     if detail_key.as_ref().is_some_and(|key| keys.contains(key)) {
         crate::kit::panels::history_detail::close_history_detail();
     }
+    let (edge_before, edge_after) = state.window.edge_cursors();
+    crate::kit::history_page_consumer::note_window_cursors(edge_before, edge_after);
     crate::kit::history_window::publish_window_viewport(&state.window);
     crate::kit::history_paging::publish_window_gap_request(&state.window);
     outcome

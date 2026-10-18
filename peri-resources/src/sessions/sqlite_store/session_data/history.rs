@@ -26,11 +26,13 @@ pub(in crate::sessions) const HISTORY_PAGE_BOUNDS_SQL: &str = "SELECT
 /// `message_id` 定位**（同一条语句内完成，两次语句之间不引入新的时间点），排序才用
 /// `rowid`：删掉尾部行之后新插入的行会复用这些 rowid，rowid 不是稳定的条目身份。
 ///
-/// 长度是**字节数**（`length(CAST(content AS BLOB))`；直接 `length(content)` 数的是字符，
-/// 中文正文会偏小），与页预算和 `content.len()` 同一口径。`rowid` 只作为客户端可见的
+/// 长度是**字节数**，与页预算和 `content.len()` 同一口径；`rowid` 只作为客户端可见的
 /// 不透明位置返回（见 `HistoryPageItem::position`），不参与条目身份。
-pub(in crate::sessions) const HISTORY_PAGE_ROWS_SQL: &str =
-    "SELECT message_id, rowid, length(CAST(content AS BLOB))
+///
+/// 阶段一**不**在 SQL 里计算长度：`length(CAST(content AS BLOB))` 会让 SQLite 物化整条
+/// 正文（16 MiB 行每次多分配约 16 MiB）。身份与存储序先取回，长度逐行由 blob 句柄的
+/// `sqlite3_blob_bytes` 给出（O(1)，不读正文），见 [`read_content_lengths`]。
+pub(in crate::sessions) const HISTORY_PAGE_ROWS_SQL: &str = "SELECT message_id, rowid
     FROM messages
     WHERE thread_id = ?1 AND (?2 IS NULL OR rowid < (
         SELECT m.rowid FROM messages m WHERE m.thread_id = ?1 AND m.message_id = ?2))
@@ -104,26 +106,37 @@ pub(in crate::sessions) const HISTORY_WINDOW_TAIL_CHECK_SQL: &str =
     "SELECT 1 FROM messages WHERE thread_id = ?1 AND message_id = ?2 AND rowid = ?3 LIMIT 1";
 
 /// before 方向候选：`rowid <= tail`，并按锚点身份定位；`?4` 为 1 时包含锚点自身
-/// （seek/open(entry)），为 0 时严格更早（游标翻页）。最多 `limit + 1` 行，不取正文。
-pub(in crate::sessions) const HISTORY_WINDOW_BEFORE_SQL: &str =
-    "SELECT message_id, rowid, length(CAST(content AS BLOB))
+/// （seek/open(entry)），为 0 时严格更早（游标翻页）。最多 `limit + 1` 行，不取正文；
+/// 长度由 blob 句柄逐行给出（理由见 [`HISTORY_PAGE_ROWS_SQL`]）。
+pub(in crate::sessions) const HISTORY_WINDOW_BEFORE_SQL: &str = "SELECT message_id, rowid
     FROM messages
     WHERE thread_id = ?1 AND rowid <= ?2
       AND (?3 IS NULL OR rowid < ?3 OR (?4 <> 0 AND rowid = ?3))
     ORDER BY rowid DESC LIMIT ?5";
 
-/// after 方向候选：`anchor < rowid <= tail`，升序，最多 `limit + 1` 行，不取正文。
-pub(in crate::sessions) const HISTORY_WINDOW_AFTER_SQL: &str =
-    "SELECT message_id, rowid, length(CAST(content AS BLOB))
+/// after 方向候选：`anchor < rowid <= tail`，升序，最多 `limit + 1` 行，不取正文；
+/// 长度由 blob 句柄逐行给出；`?4` 为 1 时包含锚点自身（`open(entry, after)` 且
+/// before 半段不存在），保证锚点恰好返回一次。
+pub(in crate::sessions) const HISTORY_WINDOW_AFTER_SQL: &str = "SELECT message_id, rowid
     FROM messages
-    WHERE thread_id = ?1 AND rowid <= ?2 AND rowid > ?3
-    ORDER BY rowid ASC LIMIT ?4";
+    WHERE thread_id = ?1 AND rowid <= ?2
+      AND (rowid > ?3 OR (?4 <> 0 AND rowid = ?3))
+    ORDER BY rowid ASC LIMIT ?5";
 
-/// 超大条目的有界块读取：长度 + `substr` 原始字节，**不** `SELECT content` 后切片。
-pub(in crate::sessions) const HISTORY_WINDOW_BODY_CHUNK_SQL: &str =
-    "SELECT length(CAST(content AS BLOB)), substr(CAST(content AS BLOB), ?3 + 1, ?4)
-    FROM messages
-    WHERE thread_id = ?1 AND message_id = ?2 AND rowid <= ?5";
+/// 更早方向是否还有可读行（相对给定 rowid）。用于在 `before_limit == 0` 或页到达
+/// 端点时判断是否铸造 `beforeCursor`；不依赖方向游标是否被请求。
+pub(in crate::sessions) const HISTORY_WINDOW_OLDER_EXISTS_SQL: &str =
+    "SELECT 1 FROM messages WHERE thread_id = ?1 AND rowid < ?2 LIMIT 1";
+
+/// 更晚方向是否还有可读行（严格晚于给定 rowid，且不越过 fixed tail）。
+pub(in crate::sessions) const HISTORY_WINDOW_NEWER_EXISTS_SQL: &str =
+    "SELECT 1 FROM messages WHERE thread_id = ?1 AND rowid > ?2 AND rowid <= ?3 LIMIT 1";
+
+/// 超大条目的行定位：只按主键（和固定 tail）取 `rowid`，总长度与请求区间都由
+/// `sqlite3_blob_bytes`/`sqlite3_blob_read` 给出，**不**用 `length(CAST(...))` 或
+/// `substr(CAST(...))` 物化整条正文。
+pub(in crate::sessions) const HISTORY_WINDOW_BODY_ROWID_SQL: &str = "SELECT rowid FROM messages
+    WHERE thread_id = ?1 AND message_id = ?2 AND rowid <= ?3";
 
 // ─── 向前段读取（canonical 完整回放，REQ §5.3） ──────────────────────────────
 
@@ -139,13 +152,12 @@ pub(in crate::sessions) const HISTORY_SEGMENT_TAIL_SQL: &str = "SELECT
         (SELECT MAX(m.rowid) FROM messages m WHERE m.thread_id = t.id)
     FROM threads t WHERE t.id = ?1";
 
-/// 首段候选行（**阶段一**：身份 + 存储序键 + 正文长度，记忆同 [`HISTORY_PAGE_ROWS_SQL`]），
+/// 首段候选行（**阶段一**：身份 + 存储序键，记忆同 [`HISTORY_PAGE_ROWS_SQL`]），
 /// 最多 `limit + 1` 行，**升序**（canonical 完整回放方向），**不取正文**。
 ///
 /// 与非首段同形，只是去掉 `rowid > ?2`，并把上界交给同一条语句内的 `MAX(rowid)` 子查询：
 /// 首段的上界就是这一刻的最大 `rowid`，没有可以预先绑定的值（它由本次读取确定）。
-pub(in crate::sessions) const HISTORY_SEGMENT_HEAD_SQL: &str =
-    "SELECT message_id, rowid, length(CAST(content AS BLOB))
+pub(in crate::sessions) const HISTORY_SEGMENT_HEAD_SQL: &str = "SELECT message_id, rowid
     FROM messages
     WHERE thread_id = ?1 AND rowid <= (
         SELECT MAX(m.rowid) FROM messages m WHERE m.thread_id = ?1)
@@ -163,8 +175,7 @@ pub(in crate::sessions) const HISTORY_SEGMENT_ANCHOR_SQL: &str = "SELECT
 ///
 /// `tail` 是**数值**上界，不是一条要查回来的行：回放期间追加的行 `rowid > tail`，因此不进入
 /// 本次遍历；`tail` 那一行自己被删掉也不影响区间。
-pub(in crate::sessions) const HISTORY_SEGMENT_NEXT_SQL: &str =
-    "SELECT message_id, rowid, length(CAST(content AS BLOB))
+pub(in crate::sessions) const HISTORY_SEGMENT_NEXT_SQL: &str = "SELECT message_id, rowid
     FROM messages
     WHERE thread_id = ?1 AND rowid > ?2 AND rowid <= ?3
     ORDER BY rowid ASC LIMIT ?4";
@@ -285,13 +296,14 @@ impl SqliteSessionData {
         // [`resolve_browsing_range`]）。
         let range_token = resolve_browsing_range(cursor, range_head, anchor_present)?;
         // 阶段一：`limit + 1` 是「多出的那一条候选行」，只用来判断更早方向还有没有内容。
-        let candidates: Vec<(String, i64, i64)> = sqlx::query_as(HISTORY_PAGE_ROWS_SQL)
+        let candidates: Vec<(String, i64)> = sqlx::query_as(HISTORY_PAGE_ROWS_SQL)
             .bind(id.as_str())
             .bind(anchor_target.as_deref())
             .bind(limit.saturating_add(1) as i64)
             .fetch_all(&mut *tx)
             .await
             .map_err(|error| map_sqlx(&error))?;
+        let candidates = read_content_lengths(&mut tx, candidates).await?;
         let candidates = candidates
             .into_iter()
             .map(|(message_id, position, encoded_bytes)| {
@@ -342,12 +354,13 @@ impl SqliteSessionData {
                     .await
                     .map_err(|error| map_sqlx(&error))?
                     .ok_or_else(not_found)?;
-                let rows: Vec<(String, i64, i64)> = sqlx::query_as(HISTORY_SEGMENT_HEAD_SQL)
+                let rows: Vec<(String, i64)> = sqlx::query_as(HISTORY_SEGMENT_HEAD_SQL)
                     .bind(id.as_str())
                     .bind(limit.saturating_add(1) as i64)
                     .fetch_all(&mut *tx)
                     .await
                     .map_err(|error| map_sqlx(&error))?;
+                let rows = read_content_lengths(&mut tx, rows).await?;
                 let inherited = context::load_inherited_context_on(&mut tx, id)
                     .await
                     .map_err(read_failure)?
@@ -367,7 +380,7 @@ impl SqliteSessionData {
                     }
                     .into());
                 }
-                let rows: Vec<(String, i64, i64)> = sqlx::query_as(HISTORY_SEGMENT_NEXT_SQL)
+                let rows: Vec<(String, i64)> = sqlx::query_as(HISTORY_SEGMENT_NEXT_SQL)
                     .bind(id.as_str())
                     .bind(after)
                     .bind(tail)
@@ -375,6 +388,7 @@ impl SqliteSessionData {
                     .fetch_all(&mut *tx)
                     .await
                     .map_err(|error| map_sqlx(&error))?;
+                let rows = read_content_lengths(&mut tx, rows).await?;
                 (Vec::new(), Some(tail), rows)
             }
         };
@@ -419,6 +433,48 @@ impl SqliteSessionData {
             rows.push(HistoryPageRow::new(&expected, content)?);
         }
         Ok(rows)
+    }
+}
+
+/// 为阶段一候选行补齐编码长度：逐行打开 blob 句柄，只取 `sqlite3_blob_bytes`。
+///
+/// 调用方必须与候选行读取处于同一连接/事务，长度与身份来自同一快照。每候选一次
+/// O(1) 打开，不读正文；瞬时失效（并发写/schema 变化）重试一次，仍失败按读取错误上抛。
+pub(super) async fn read_content_lengths(
+    connection: &mut SqliteConnection,
+    rows: Vec<(String, i64)>,
+) -> SessionResourceResult<Vec<(String, i64, i64)>> {
+    let mut measured = Vec::with_capacity(rows.len());
+    for (message_id, rowid) in rows {
+        let total = read_content_length(connection, rowid).await?;
+        let encoded_bytes = i64::try_from(total)
+            .map_err(|_| corrupt("history entry length exceeds the supported range"))?;
+        measured.push((message_id, rowid, encoded_bytes));
+    }
+    Ok(measured)
+}
+
+async fn read_content_length(
+    connection: &mut SqliteConnection,
+    rowid: i64,
+) -> SessionResourceResult<u64> {
+    let mut retried = false;
+    loop {
+        let read = SqliteSessionData::blob_scope(
+            connection,
+            b"messages\0",
+            b"content\0",
+            rowid,
+            |reader| Ok(reader.total()),
+        )
+        .await?;
+        match read {
+            Ok(total) => return Ok(total),
+            Err(error) if !retried && super::blob_reader::is_transient_blob_error(&error) => {
+                retried = true;
+            }
+            Err(error) => return Err(super::inherited_blob::map_inherited_blob_error(error)),
+        }
     }
 }
 
@@ -736,13 +792,14 @@ pub(in crate::sessions) const HISTORY_WINDOW_INHERITED_BEFORE_SQL: &str = "SELEC
     ORDER BY je.key DESC LIMIT ?4";
 
 /// after 候选：key 升序，最多 limit+1 行；只取 id、key、长度，不取正文。
+/// `?3` 为 1 时包含锚点自身（`open(entry, after)` 且 before 半段不存在）。
 pub(in crate::sessions) const HISTORY_WINDOW_INHERITED_AFTER_SQL: &str = "SELECT
         je.key,
         COALESCE(json_extract(je.value, '$.message.id'), json_extract(je.value, '$.id')),
         length(CAST(je.value AS BLOB))
     FROM threads t, json_each(t.inherited_context, '$.payloads') je
-    WHERE t.id = ?1 AND je.key > ?2
-    ORDER BY je.key ASC LIMIT ?3";
+    WHERE t.id = ?1 AND (je.key > ?2 OR (?3 <> 0 AND je.key = ?2))
+    ORDER BY je.key ASC LIMIT ?4";
 
 /// 按数组下标读取一条序列化 payload（阶段二，仅选中行）。
 pub(in crate::sessions) const HISTORY_WINDOW_INHERITED_BODY_SQL: &str = "SELECT je.value

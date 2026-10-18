@@ -409,7 +409,7 @@ fn gap_request_uses_stable_identity_seek_and_keeps_window_open() {
 
 #[test]
 #[serial]
-fn page_settlement_keeps_the_opposite_window_cursor() {
+fn page_settlement_only_advances_the_requested_window_cursor() {
     {
         let _guard = reset_atoms();
         let request = build_window_page_request(
@@ -423,7 +423,7 @@ fn page_settlement_keeps_the_opposite_window_cursor() {
         };
         let mut response = page_response("snap-1", 1);
         response.before_cursor = Some("before-2".into());
-        response.after_cursor = None;
+        response.after_cursor = Some("after-2".into());
         assert!(matches!(
             settle_window_response(&in_flight, &response),
             WindowSettlement::Accepted(_)
@@ -433,7 +433,7 @@ fn page_settlement_keeps_the_opposite_window_cursor() {
         assert_eq!(
             state.after_cursor.as_deref(),
             Some("after-1"),
-            "a before page must not clear the newer-side cursor"
+            "a before page describes its own newest row, not the window's newer edge"
         );
     }
 
@@ -449,7 +449,7 @@ fn page_settlement_keeps_the_opposite_window_cursor() {
             other => panic!("expected grant, got {other:?}"),
         };
         let mut response = page_response("snap-1", 1);
-        response.before_cursor = None;
+        response.before_cursor = Some("before-2".into());
         response.after_cursor = Some("after-2".into());
         assert!(matches!(
             settle_window_response(&in_flight, &response),
@@ -459,10 +459,25 @@ fn page_settlement_keeps_the_opposite_window_cursor() {
         assert_eq!(
             state.before_cursor.as_deref(),
             Some("before-1"),
-            "an after page must not clear the older-side cursor"
+            "an after page describes its own oldest row, not the window's older edge"
         );
         assert_eq!(state.after_cursor.as_deref(), Some("after-2"));
     }
+}
+
+#[test]
+#[serial]
+fn note_window_cursors_recomputes_both_edges_and_reopens_newer_direction() {
+    let _guard = reset_atoms();
+    atoms::HISTORY_WINDOW_PAGING.state().write().newer_exhausted = true;
+    note_window_cursors(Some("before-edge".into()), Some("after-edge".into()));
+    let state = atoms::HISTORY_WINDOW_PAGING.state().read().clone();
+    assert_eq!(state.before_cursor.as_deref(), Some("before-edge"));
+    assert_eq!(state.after_cursor.as_deref(), Some("after-edge"));
+    assert!(
+        !state.newer_exhausted,
+        "an available newer cursor reopens the newer direction"
+    );
 }
 
 #[test]

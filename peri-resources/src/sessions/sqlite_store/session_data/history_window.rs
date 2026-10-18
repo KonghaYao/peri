@@ -3,18 +3,15 @@
 //! SQL 原文与旧分页/段读取同处 `session_data/history.rs`；本文件只做解码、事务编排与
 //! 失败分类。任何读取都不得退化成「先全量取回再过滤」。
 
+use super::blob_reader::{is_transient_blob_error, BlobReadError};
 use super::history::{
-    HISTORY_WINDOW_AFTER_SQL, HISTORY_WINDOW_ANCHOR_SQL, HISTORY_WINDOW_BEFORE_SQL,
-    HISTORY_WINDOW_BODY_CHUNK_SQL, HISTORY_WINDOW_BOUNDS_SQL, HISTORY_WINDOW_CHECKPOINT_FAST_SQL,
-    HISTORY_WINDOW_CHECKPOINT_SQL, HISTORY_WINDOW_INHERITED_AFTER_SQL,
-    HISTORY_WINDOW_INHERITED_ANCHOR_SQL, HISTORY_WINDOW_INHERITED_BEFORE_SQL,
-    HISTORY_WINDOW_INHERITED_BODY_SQL, HISTORY_WINDOW_INHERITED_ROWID_SQL,
-    HISTORY_WINDOW_LATEST_SQL, HISTORY_WINDOW_TAIL_CHECK_SQL,
+    read_content_lengths, HISTORY_WINDOW_AFTER_SQL, HISTORY_WINDOW_ANCHOR_SQL,
+    HISTORY_WINDOW_BEFORE_SQL, HISTORY_WINDOW_BODY_ROWID_SQL, HISTORY_WINDOW_BOUNDS_SQL,
+    HISTORY_WINDOW_CHECKPOINT_FAST_SQL, HISTORY_WINDOW_CHECKPOINT_SQL,
+    HISTORY_WINDOW_INHERITED_ROWID_SQL, HISTORY_WINDOW_LATEST_SQL, HISTORY_WINDOW_NEWER_EXISTS_SQL,
+    HISTORY_WINDOW_OLDER_EXISTS_SQL, HISTORY_WINDOW_TAIL_CHECK_SQL,
 };
-use super::inherited_blob::{
-    is_transient_blob_error, map_inherited_blob_error, BlobReadError, InheritedFactsRead,
-    InheritedLayout,
-};
+use super::inherited_blob::{map_inherited_blob_error, InheritedFactsRead, InheritedLayout};
 use super::*;
 use peri_acp_types::history_window::{
     HistoryBodyChunk, HistoryCheckpoint, HistoryCommittedTail, HistoryEntryId,
@@ -24,7 +21,7 @@ use peri_acp_types::history_window::{
 };
 use peri_acp_types::session_resources::{
     HistoryWindowEntry, HistoryWindowPagePlan, HistoryWindowReadIntent, HistoryWindowRows,
-    HistoryWindowTailExpectation, InheritedHistoryEntry, SessionHistoryWindowBounds,
+    HistoryWindowTailExpectation, SessionHistoryWindowBounds,
 };
 use sha2::{Digest, Sha256};
 
@@ -245,7 +242,7 @@ impl SqliteSessionData {
         let before_plan = if plan.before_limit == 0 {
             None
         } else {
-            let candidates: Vec<(String, i64, i64)> = sqlx::query_as(HISTORY_WINDOW_BEFORE_SQL)
+            let candidates: Vec<(String, i64)> = sqlx::query_as(HISTORY_WINDOW_BEFORE_SQL)
                 .bind(id.as_str())
                 .bind(tail_position)
                 .bind(anchor_position_i64)
@@ -254,6 +251,7 @@ impl SqliteSessionData {
                 .fetch_all(&mut *tx)
                 .await
                 .map_err(|error| map_sqlx(&error))?;
+            let candidates = read_content_lengths(&mut tx, candidates).await?;
             let candidates = decode_window_candidates(candidates)?;
             Some(HistoryPagePlan::plan(
                 id,
@@ -276,14 +274,16 @@ impl SqliteSessionData {
         let after_plan = match (plan.after_limit, anchor_position_i64) {
             (0, _) | (_, None) => None,
             (limit, Some(anchor)) => {
-                let candidates: Vec<(String, i64, i64)> = sqlx::query_as(HISTORY_WINDOW_AFTER_SQL)
+                let candidates: Vec<(String, i64)> = sqlx::query_as(HISTORY_WINDOW_AFTER_SQL)
                     .bind(id.as_str())
                     .bind(tail_position)
                     .bind(anchor)
+                    .bind(i64::from(plan.after_includes_anchor()))
                     .bind((limit + 1) as i64)
                     .fetch_all(&mut *tx)
                     .await
                     .map_err(|error| map_sqlx(&error))?;
+                let candidates = read_content_lengths(&mut tx, candidates).await?;
                 let candidates = decode_window_candidates(candidates)?;
                 Some(HistoryPagePlan::plan_after(
                     id,
@@ -295,12 +295,17 @@ impl SqliteSessionData {
             }
         };
 
-        let before_cursor_anchor = before_plan
-            .as_ref()
-            .and_then(|plan| plan.has_more().then(|| plan.anchor()).flatten());
-        let after_cursor_anchor = after_plan
-            .as_ref()
-            .and_then(|plan| plan.has_more().then(|| plan.anchor()).flatten());
+        // 两个游标都锚定**本页**行集的两端，并由固定 snapshot 内的邻接存在性决定是否
+        // 铸造。不能只看请求方向：更早页也必须暴露更晚方向的内侧锚点，否则淘汰尾段后
+        // 无法向下补回。
+        let (before_cursor_anchor, after_cursor_anchor) = window_boundary_cursors(
+            &mut tx,
+            id,
+            before_plan.as_ref(),
+            after_plan.as_ref(),
+            tail_position,
+        )
+        .await?;
         let before_body_ids = window_body_ids(before_plan.as_ref());
         let after_body_ids = window_body_ids(after_plan.as_ref());
         let before_rows = Self::read_page_bodies(&mut tx, id, &before_body_ids).await?;
@@ -336,7 +341,10 @@ impl SqliteSessionData {
         })
     }
 
-    /// 有界读取超大条目的正文块：`substr` 直接按字节区间取，不先物化完整正文。
+    /// 有界读取超大条目的正文块：先按主键取 `rowid`，再由 blob 句柄读取请求区间。
+    ///
+    /// 总长度只来自 `sqlite3_blob_bytes`，区间只来自 `sqlite3_blob_read`；不在 SQL 里
+    /// `length(CAST(...))`/`substr(CAST(...))`（那会在 SQLite 内物化整条正文）。
     #[allow(clippy::too_many_arguments)] // 与 trait 契约同口径，逐项显式传递
     pub(super) async fn read_history_body_chunk(
         &self,
@@ -370,32 +378,50 @@ impl SqliteSessionData {
                 HistoryWindowError::invalid_request("body chunk size is out of range").into(),
             );
         }
-        let offset = i64::try_from(offset).map_err(|_| {
-            HistoryWindowError::invalid_request("body chunk offset is out of range")
-        })?;
         let committed_tail = committed_tail.ok_or_else(|| {
             HistoryWindowError::invalid_request("own history body requires a committed tail")
         })?;
         let tail_position = i64::try_from(committed_tail.position)
             .map_err(|_| corrupt("history window tail position exceeds the supported range"))?;
-        let row: Option<(i64, Vec<u8>)> = sqlx::query_as(HISTORY_WINDOW_BODY_CHUNK_SQL)
-            .bind(id.as_str())
-            .bind(entry_id.as_uuid().to_string())
-            .bind(offset)
-            .bind(i64::from(max_bytes))
-            .bind(tail_position)
-            .fetch_optional(&self.database.pool)
+        let expected = entry_id.as_uuid().to_string();
+        let mut connection = self
+            .database
+            .pool
+            .acquire()
             .await
             .map_err(|error| map_sqlx(&error))?;
-        let Some((total, bytes)) = row else {
-            return Err(HistoryWindowError::anchor_unavailable(
-                "history body entry is not present in this session",
-            )
-            .into());
+        let mut retried = false;
+        let (total, bytes) = loop {
+            let mut tx = sqlx::Connection::begin(&mut *connection)
+                .await
+                .map_err(|error| map_sqlx(&error))?;
+            let row: Option<(i64,)> = sqlx::query_as(HISTORY_WINDOW_BODY_ROWID_SQL)
+                .bind(id.as_str())
+                .bind(&expected)
+                .bind(tail_position)
+                .fetch_optional(&mut *tx)
+                .await
+                .map_err(|error| map_sqlx(&error))?;
+            let Some((rowid,)) = row else {
+                return Err(HistoryWindowError::anchor_unavailable(
+                    "history body entry is not present in this session",
+                )
+                .into());
+            };
+            let read = Self::blob_scope(&mut tx, b"messages\0", b"content\0", rowid, |reader| {
+                Ok((reader.total(), reader.read(offset, max_bytes as usize)?))
+            })
+            .await?;
+            tx.commit().await.map_err(|error| map_sqlx(&error))?;
+            match read {
+                Ok(read) => break read,
+                // 并发更新可能让句柄失效；重开一次，不把瞬态竞争当持久损坏。
+                Err(error) if !retried && is_transient_blob_error(&error) => {
+                    retried = true;
+                }
+                Err(error) => return Err(map_inherited_blob_error(error)),
+            }
         };
-        let total = u64::try_from(total).map_err(|_| corrupt("history body length is negative"))?;
-        let offset =
-            u64::try_from(offset).map_err(|_| corrupt("history body offset is negative"))?;
         if offset > total {
             return Err(HistoryWindowError::invalid_request(
                 "body chunk offset is beyond the entry length",
@@ -461,7 +487,10 @@ fn validate_history_window_plan(plan: &HistoryWindowPagePlan) -> SessionResource
     Ok(())
 }
 
-fn window_anchor_failure(plan: &HistoryWindowPagePlan, detail: &str) -> HistoryWindowError {
+pub(super) fn window_anchor_failure(
+    plan: &HistoryWindowPagePlan,
+    detail: &str,
+) -> HistoryWindowError {
     match plan.intent {
         HistoryWindowReadIntent::Seek => HistoryWindowError::anchor_unavailable(detail),
         HistoryWindowReadIntent::Open | HistoryWindowReadIntent::Page => {
@@ -479,6 +508,59 @@ fn decode_window_candidates(
             HistoryPageCandidate::new(&message_id, position, encoded_bytes)
         })
         .collect()
+}
+
+/// 由页行集两端与 fixed snapshot 内的邻接存在性计算双侧游标锚点。
+///
+/// `before_cursor_anchor` = 本页最旧行（更早方向还存在可读行时）；
+/// `after_cursor_anchor` = 本页最新行（更晚方向还存在未越过 tail 的可读行时）。
+/// 空页两侧均为 `None`，不铸造无行可锚的游标。
+async fn window_boundary_cursors(
+    connection: &mut SqliteConnection,
+    id: &ThreadId,
+    before_plan: Option<&HistoryPagePlan>,
+    after_plan: Option<&HistoryPagePlan>,
+    tail_position: i64,
+) -> SessionResourceResult<(Option<MessageId>, Option<MessageId>)> {
+    let mut oldest: Option<(u64, MessageId)> = None;
+    let mut newest: Option<(u64, MessageId)> = None;
+    for entry in before_plan
+        .into_iter()
+        .flat_map(HistoryPagePlan::entries)
+        .chain(after_plan.into_iter().flat_map(HistoryPagePlan::entries))
+    {
+        if oldest.is_none_or(|(position, _)| entry.position < position) {
+            oldest = Some((entry.position, entry.message_id));
+        }
+        if newest.is_none_or(|(position, _)| entry.position > position) {
+            newest = Some((entry.position, entry.message_id));
+        }
+    }
+    let (Some((oldest_position, oldest_id)), Some((newest_position, newest_id))) = (oldest, newest)
+    else {
+        return Ok((None, None));
+    };
+    let oldest_position = i64::try_from(oldest_position)
+        .map_err(|_| corrupt("history window position exceeds the supported range"))?;
+    let newest_position = i64::try_from(newest_position)
+        .map_err(|_| corrupt("history window position exceeds the supported range"))?;
+    let has_older: Option<(i64,)> = sqlx::query_as(HISTORY_WINDOW_OLDER_EXISTS_SQL)
+        .bind(id.as_str())
+        .bind(oldest_position)
+        .fetch_optional(&mut *connection)
+        .await
+        .map_err(|error| map_sqlx(&error))?;
+    let has_newer: Option<(i64,)> = sqlx::query_as(HISTORY_WINDOW_NEWER_EXISTS_SQL)
+        .bind(id.as_str())
+        .bind(newest_position)
+        .bind(tail_position)
+        .fetch_optional(&mut *connection)
+        .await
+        .map_err(|error| map_sqlx(&error))?;
+    Ok((
+        has_older.is_some().then_some(oldest_id),
+        has_newer.is_some().then_some(newest_id),
+    ))
 }
 
 fn window_body_ids(plan: Option<&HistoryPagePlan>) -> Vec<MessageId> {
@@ -504,236 +586,14 @@ fn window_oversized_entries(
         })
 }
 
-fn empty_window_page() -> HistoryPage {
+pub(super) fn empty_window_page() -> HistoryPage {
     HistoryPage {
         items: Vec::new(),
         next_cursor: None,
     }
 }
 
-// ─── inherited 冻结前缀读取（S7.4） ──────────────────────────────────────────
-
 impl SqliteSessionData {
-    async fn read_inherited_history_window_page(
-        &self,
-        id: &ThreadId,
-        plan: &HistoryWindowPagePlan,
-    ) -> SessionResourceResult<HistoryWindowRows> {
-        let HistorySource::Inherited {
-            frozen_snapshot_id,
-            ancestor_thread_id,
-        } = &plan.source
-        else {
-            return Err(SessionResourceError::new(
-                SessionResourceErrorKind::InvalidInput {
-                    detail: "inherited reader requires an inherited source".to_owned(),
-                },
-            ));
-        };
-        let mut connection = self
-            .database
-            .pool
-            .acquire()
-            .await
-            .map_err(|error| map_sqlx(&error))?;
-        // 冻结前缀是 write-once：事实先于页读取取得，增量路径不物化首尾正文。
-        let snapshot = match self
-            .read_inherited_facts_cached(&mut connection, id)
-            .await?
-        {
-            InheritedFactsRead::Facts {
-                snapshot: Some(snapshot),
-                ..
-            } => snapshot,
-            InheritedFactsRead::Facts { snapshot: None, .. } => {
-                return Err(
-                    HistoryWindowError::window_invalidated("inherited prefix is absent").into(),
-                )
-            }
-            InheritedFactsRead::Unsupported => Self::read_inherited_facts_sql(&mut connection, id)
-                .await?
-                .ok_or_else(|| {
-                    HistoryWindowError::window_invalidated("inherited prefix is absent")
-                })?,
-        };
-        if snapshot.snapshot_id != *frozen_snapshot_id {
-            return Err(HistoryWindowError::SnapshotMismatch {
-                detail: "inherited snapshot id no longer matches the frozen prefix".into(),
-            }
-            .into());
-        }
-        if let Some(expected) = ancestor_thread_id {
-            if snapshot.ancestor_thread_id.as_ref() != Some(expected) {
-                return Err(HistoryWindowError::SnapshotMismatch {
-                    detail: "inherited ancestor identity does not match".into(),
-                }
-                .into());
-            }
-        }
-        let mut tx = sqlx::Connection::begin(&mut *connection)
-            .await
-            .map_err(|error| map_sqlx(&error))?;
-        self.require_session(&mut tx, id).await?;
-
-        let anchor_key = match plan.anchor {
-            Some(anchor) => {
-                let key: Option<(i64,)> = sqlx::query_as(HISTORY_WINDOW_INHERITED_ANCHOR_SQL)
-                    .bind(id.as_str())
-                    .bind(anchor.as_uuid().to_string())
-                    .fetch_optional(&mut *tx)
-                    .await
-                    .map_err(|error| map_sqlx(&error))?;
-                match key {
-                    Some((key,)) => Some(key),
-                    None => {
-                        return Err(window_anchor_failure(
-                            plan,
-                            "inherited history anchor is not present in this frozen snapshot",
-                        )
-                        .into())
-                    }
-                }
-            }
-            None => None,
-        };
-
-        let before_plan = if plan.before_limit == 0 {
-            None
-        } else {
-            let candidates: Vec<(i64, Option<String>, i64)> =
-                sqlx::query_as(HISTORY_WINDOW_INHERITED_BEFORE_SQL)
-                    .bind(id.as_str())
-                    .bind(anchor_key)
-                    .bind(i64::from(plan.include_anchor))
-                    .bind((plan.before_limit + 1) as i64)
-                    .fetch_all(&mut *tx)
-                    .await
-                    .map_err(|error| map_sqlx(&error))?;
-            let candidates = decode_inherited_candidates(candidates)?;
-            Some(HistoryPagePlan::plan(
-                id,
-                &snapshot.snapshot_id,
-                candidates,
-                plan.before_limit,
-                plan.byte_budget,
-            ))
-        };
-        let before_bytes = before_plan
-            .as_ref()
-            .map(|plan| {
-                plan.entries()
-                    .iter()
-                    .map(|entry| entry.encoded_bytes)
-                    .sum::<usize>()
-            })
-            .unwrap_or(0);
-        let after_budget = plan.byte_budget.saturating_sub(before_bytes);
-        let after_plan = match (plan.after_limit, anchor_key) {
-            (0, _) | (_, None) => None,
-            (limit, Some(anchor)) => {
-                let candidates: Vec<(i64, Option<String>, i64)> =
-                    sqlx::query_as(HISTORY_WINDOW_INHERITED_AFTER_SQL)
-                        .bind(id.as_str())
-                        .bind(anchor)
-                        .bind((limit + 1) as i64)
-                        .fetch_all(&mut *tx)
-                        .await
-                        .map_err(|error| map_sqlx(&error))?;
-                let candidates = decode_inherited_candidates(candidates)?;
-                Some(HistoryPagePlan::plan_after(
-                    id,
-                    &snapshot.snapshot_id,
-                    candidates,
-                    limit,
-                    after_budget,
-                ))
-            }
-        };
-
-        let before_cursor_anchor = before_plan
-            .as_ref()
-            .and_then(|plan| plan.has_more().then(|| plan.anchor()).flatten());
-        let after_cursor_anchor = after_plan
-            .as_ref()
-            .and_then(|plan| plan.has_more().then(|| plan.anchor()).flatten());
-        let before_rows = Self::read_inherited_bodies(&mut tx, id, before_plan.as_ref()).await?;
-        let after_rows = Self::read_inherited_bodies(&mut tx, id, after_plan.as_ref()).await?;
-        tx.commit().await.map_err(|error| map_sqlx(&error))?;
-
-        let (before_page, before_oversized) = match before_plan {
-            Some(plan) => plan.materialize_omitting_oversize(before_rows)?,
-            None => (empty_window_page(), Vec::new()),
-        };
-        let (after_page, after_oversized) = match after_plan {
-            Some(plan) => plan.materialize_omitting_oversize(after_rows)?,
-            None => (empty_window_page(), Vec::new()),
-        };
-        let mut inherited_entries: Vec<InheritedHistoryEntry> = before_page
-            .items
-            .into_iter()
-            .map(InheritedHistoryEntry::Loaded)
-            .collect();
-        inherited_entries.extend(before_oversized.into_iter().map(|entry| {
-            InheritedHistoryEntry::Oversized {
-                entry_id: entry.message_id,
-                total_bytes: entry.encoded_bytes as u64,
-            }
-        }));
-        inherited_entries.extend(
-            after_page
-                .items
-                .into_iter()
-                .map(InheritedHistoryEntry::Loaded),
-        );
-        inherited_entries.extend(after_oversized.into_iter().map(|entry| {
-            InheritedHistoryEntry::Oversized {
-                entry_id: entry.message_id,
-                total_bytes: entry.encoded_bytes as u64,
-            }
-        }));
-        Ok(HistoryWindowRows {
-            committed_tail: None,
-            entries: Vec::new(),
-            inherited_entries,
-            inherited_snapshot_id: Some(snapshot.snapshot_id),
-            before_cursor_anchor,
-            after_cursor_anchor,
-        })
-    }
-
-    async fn read_inherited_bodies(
-        connection: &mut SqliteConnection,
-        id: &ThreadId,
-        plan: Option<&HistoryPagePlan>,
-    ) -> SessionResourceResult<Vec<HistoryPageRow>> {
-        let Some(plan) = plan else {
-            return Ok(Vec::new());
-        };
-        let mut rows = Vec::new();
-        for entry in plan
-            .entries()
-            .iter()
-            .filter(|entry| entry.encoded_bytes <= plan.byte_budget())
-        {
-            let key = i64::try_from(entry.position)
-                .map_err(|_| corrupt("inherited history index exceeds the supported range"))?;
-            let content: Option<(String,)> = sqlx::query_as(HISTORY_WINDOW_INHERITED_BODY_SQL)
-                .bind(id.as_str())
-                .bind(key)
-                .fetch_optional(&mut *connection)
-                .await
-                .map_err(|error| map_sqlx(&error))?;
-            let content = content
-                .map(|(content,)| content)
-                .ok_or_else(|| corrupt("inherited history body is missing"))?;
-            rows.push(HistoryPageRow::new(
-                &entry.message_id.as_uuid().to_string(),
-                content,
-            )?);
-        }
-        Ok(rows)
-    }
-
     #[allow(clippy::too_many_arguments)] // 与 trait 契约同口径，逐项显式传递
     async fn read_inherited_body_chunk(
         &self,
@@ -869,19 +729,6 @@ impl SqliteSessionData {
         })
         .await
     }
-}
-
-fn decode_inherited_candidates(
-    candidates: Vec<(i64, Option<String>, i64)>,
-) -> SessionResourceResult<Vec<HistoryPageCandidate>> {
-    candidates
-        .into_iter()
-        .map(|(position, message_id, encoded_bytes)| {
-            let message_id =
-                message_id.ok_or_else(|| corrupt("inherited history entry id is missing"))?;
-            HistoryPageCandidate::new(&message_id, position, encoded_bytes)
-        })
-        .collect()
 }
 
 /// 由布局构造冻结快照事实；条目为空时与 SQL 路径一致地返回 `None`。

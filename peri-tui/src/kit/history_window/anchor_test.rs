@@ -4,7 +4,7 @@ use super::test_support::*;
 use super::*;
 
 #[test]
-fn adjacent_gaps_merge_outer_boundaries_and_cursors() {
+fn adjacent_gaps_merge_outer_boundaries_and_inner_cursors() {
     let a = PersistentEntryKey::own("s1:a");
     let b = PersistentEntryKey::own("s1:b");
     let c = PersistentEntryKey::own("s1:c");
@@ -41,8 +41,10 @@ fn adjacent_gaps_merge_outer_boundaries_and_cursors() {
     let merged = gaps.get(&GapId(1)).expect("merged gap");
     assert_eq!(merged.before, Some(a));
     assert_eq!(merged.after, Some(c));
-    assert_eq!(merged.before_cursor.as_deref(), Some("before-1"));
-    assert_eq!(merged.after_cursor.as_deref(), Some("after-2"));
+    // 游标取合并后缺口的内侧边界：上端来自更晚 gap 的 before 游标，
+    // 下端来自更早 gap 的 after 游标；外侧游标锚在已被淘汰的段上，无法回填缺口。
+    assert_eq!(merged.before_cursor.as_deref(), Some("before-2"));
+    assert_eq!(merged.after_cursor.as_deref(), Some("after-1"));
     assert_eq!(merged.placeholder, GapPlaceholder::MissingMiddle);
     assert_eq!(gaps.len(), 1);
 }
@@ -191,6 +193,54 @@ fn two_released_segments_coalesce_into_one_gap() {
 }
 
 #[test]
+fn coalesced_gap_keeps_cursors_to_resident_edges() {
+    let mut window = enabled_window(WindowLimits::default());
+    let a = window
+        .register_segment(
+            segment("a", 10, 10, 20).cursors(Some("before-a".into()), Some("after-a".into())),
+            SegmentPlacement::Tail,
+        )
+        .expect("a");
+    let b = window
+        .register_segment(
+            segment("b", 20, 10, 20).cursors(Some("before-b".into()), Some("after-b".into())),
+            SegmentPlacement::Tail,
+        )
+        .expect("b");
+    let c = window
+        .register_segment(
+            segment("c", 30, 10, 20).cursors(Some("before-c".into()), Some("after-c".into())),
+            SegmentPlacement::Tail,
+        )
+        .expect("c");
+    let d = window
+        .register_segment(
+            segment("d", 40, 10, 20).cursors(Some("before-d".into()), Some("after-d".into())),
+            SegmentPlacement::Tail,
+        )
+        .expect("d");
+
+    let plan_b = release_plan_for(&window, b);
+    window.apply_release_plan(&plan_b).expect("release b");
+    let plan_c = release_plan_for(&window, c);
+    window.apply_release_plan(&plan_c).expect("release c");
+
+    assert_eq!(window.gap_count(), 1);
+    let gap = window.gaps().values().next().expect("gap");
+    assert_eq!(
+        gap.before_cursor.as_deref(),
+        Some("before-d"),
+        "缺口上端必须锚在更晚的驻留边缘 D，而不是已淘汰的 B/C"
+    );
+    assert_eq!(
+        gap.after_cursor.as_deref(),
+        Some("after-a"),
+        "缺口下端必须锚在更早的驻留边缘 A，而不是已淘汰的 B/C"
+    );
+    let _ = (a, d);
+}
+
+#[test]
 fn open_ended_gap_prefers_page_cursor_over_seek() {
     let gap = HistoryGap::new(
         GapId(7),
@@ -241,6 +291,45 @@ fn gap_recovery_maps_missing_anchor_to_seek_or_page_request() {
         Some(crate::kit::history_paging::WindowGapRequest::Seek { anchor, .. })
             if anchor == b_entry
     ));
+    let _ = (a, c);
+}
+
+#[test]
+fn gap_uses_inner_neighbor_cursors() {
+    let mut window = enabled_window(WindowLimits::default());
+    let a = window
+        .register_segment(
+            segment("a", 10, 10, 20).cursors(Some("before-a".into()), Some("after-a".into())),
+            SegmentPlacement::Tail,
+        )
+        .expect("a");
+    let b = window
+        .register_segment(
+            segment("b", 20, 10, 20).cursors(Some("before-b".into()), Some("after-b".into())),
+            SegmentPlacement::Tail,
+        )
+        .expect("b");
+    let c = window
+        .register_segment(
+            segment("c", 30, 10, 20).cursors(Some("before-c".into()), Some("after-c".into())),
+            SegmentPlacement::Tail,
+        )
+        .expect("c");
+
+    let plan = release_plan_for(&window, b);
+    window.apply_release_plan(&plan).expect("release b");
+
+    let gap = window.gaps().values().next().expect("gap");
+    assert_eq!(
+        gap.before_cursor.as_deref(),
+        Some("before-c"),
+        "page(Before) must refill from the later resident edge"
+    );
+    assert_eq!(
+        gap.after_cursor.as_deref(),
+        Some("after-a"),
+        "page(After) must refill from the earlier resident edge"
+    );
     let _ = (a, c);
 }
 
@@ -297,7 +386,17 @@ fn gap_request_atom_holds_seek_target_until_content_returns() {
     )));
     crate::kit::history_paging::publish_window_gap_request(&window);
     let handle = crate::kit::atoms::WINDOW_GAP_REQUEST.state();
-    let request = handle.read().clone().expect("gap request");
+    let request = handle
+        .read()
+        .iter()
+        .find(|request| {
+            matches!(
+                request,
+                crate::kit::history_paging::WindowGapRequest::Seek { .. }
+            )
+        })
+        .cloned()
+        .expect("gap request");
     match request {
         crate::kit::history_paging::WindowGapRequest::Seek { anchor, .. } => {
             assert_eq!(anchor, b_entry);
@@ -309,7 +408,7 @@ fn gap_request_atom_holds_seek_target_until_content_returns() {
         crate::kit::atoms::WINDOW_GAP_REQUEST
             .state()
             .read()
-            .is_none()
+            .is_empty()
     );
     let _ = (a, c);
 }

@@ -779,24 +779,85 @@ fn test_scroll_at_bottom_dispatches_window_after_page_and_stops() {
 
     // 视口无锚点 + 桥接发布 gap 目标：滚动触发 seek，内容返回前不跳底。
     crate::kit::atoms::WINDOW_VIEWPORT.set(None);
-    crate::kit::atoms::WINDOW_GAP_REQUEST.set(Some(
+    crate::kit::atoms::WINDOW_GAP_REQUEST.set(vec![
         crate::kit::history_paging::WindowGapRequest::Seek {
             gap_id: crate::kit::history_window::GapId(1),
             anchor: crate::kit::history_window::PersistentEntryKey::own("s1:missing"),
         },
-    ));
-    assert!(event::request_gap_page_after_scroll());
+    ]);
+    assert!(event::request_gap_page_after_scroll(None));
     let gap_request = rx.try_recv().expect("gap request");
     assert!(matches!(
-        gap_request,
+        &gap_request,
         WindowConsumerRequest::Seek { anchor, .. }
-            if anchor == crate::kit::history_window::PersistentEntryKey::own("s1:missing")
+            if anchor == &crate::kit::history_window::PersistentEntryKey::own("s1:missing")
     ));
     assert!(
         crate::kit::atoms::WINDOW_GAP_REQUEST
             .state()
             .read()
-            .is_none()
+            .is_empty()
+    );
+
+    // 双向缺口候选：向下滚只消费 Page(After)，向上滚消费 Page(Before)。
+    crate::kit::history_page_consumer::fail_window_request(
+        match &gap_request {
+            WindowConsumerRequest::Seek { context, .. } => &context.request_id,
+            other => panic!("expected seek, got {other:?}"),
+        },
+        "test done",
+        false,
+    );
+    crate::kit::atoms::WINDOW_GAP_REQUEST.set(vec![
+        crate::kit::history_paging::WindowGapRequest::Page {
+            gap_id: crate::kit::history_window::GapId(2),
+            cursor: WindowPageCursor::Before("before-gap".into()),
+        },
+        crate::kit::history_paging::WindowGapRequest::Page {
+            gap_id: crate::kit::history_window::GapId(2),
+            cursor: WindowPageCursor::After("after-gap".into()),
+        },
+    ]);
+    assert!(event::request_gap_page_after_scroll(Some(
+        crate::kit::history_window::GapSeekDirection::After
+    )));
+    let after_request = rx.try_recv().expect("after gap request");
+    let after_request_id = match &after_request {
+        WindowConsumerRequest::Page {
+            context, cursor, ..
+        } => {
+            assert_eq!(cursor, &WindowPageCursor::After("after-gap".into()));
+            context.request_id.clone()
+        }
+        other => panic!("expected after gap page, got {other:?}"),
+    };
+    assert!(
+        crate::kit::atoms::WINDOW_GAP_REQUEST
+            .state()
+            .read()
+            .iter()
+            .all(|request| request
+                .matches_direction(Some(crate::kit::history_window::GapSeekDirection::Before))),
+        "consuming one direction must keep the other candidate"
+    );
+
+    crate::kit::history_page_consumer::fail_window_request(&after_request_id, "test done", false);
+    assert!(event::request_gap_page_after_scroll(Some(
+        crate::kit::history_window::GapSeekDirection::Before
+    )));
+    let before_request = rx.try_recv().expect("before gap request");
+    assert!(matches!(
+        before_request,
+        WindowConsumerRequest::Page {
+            cursor: WindowPageCursor::Before(ref cursor),
+            ..
+        } if cursor == "before-gap"
+    ));
+    assert!(
+        crate::kit::atoms::WINDOW_GAP_REQUEST
+            .state()
+            .read()
+            .is_empty()
     );
 
     crate::kit::atoms::HISTORY_WINDOW_V1.set(false);

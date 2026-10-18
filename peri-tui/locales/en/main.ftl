@@ -1227,6 +1227,10 @@ steer-queue-title = Pending { $count }
 steer-input-rejected = Input was not accepted. Your draft has been kept.
 steer-input-uncertain = Waiting for the input receipt. Retrying with the same input ID.
 steer-session-unavailable = Session could not be established: { $error }. Your draft has been kept.
+steer-fatal-not-sent = Execution failed. { $count } unsent input(s) restored to the composer.
+steer-fatal-uncertain = Execution failed. The result of { $count } input(s) is unknown; the drafts remain in Pending for reconciliation.
+steer-fatal-mixed = Execution failed. { $not_sent } input(s) restored to the composer; { $uncertain } input(s) have unknown results and remain in Pending.
+steer-item-uncertain = unconfirmed
 
 thread-browser-project = Project
 thread-browser-workspace = Workspace

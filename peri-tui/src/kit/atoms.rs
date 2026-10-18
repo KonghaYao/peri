@@ -528,10 +528,10 @@ pub static WINDOW_VIEWPORT: AtomStatic<Option<crate::kit::history_window::Window
 /// 窗口页合并后发布的渲染单元身份 → 持久条目映射（真实视口发布用）。
 pub static WINDOW_UNIT_KEYS: AtomStatic<Vec<crate::kit::history_window::WindowUnitMapping>> =
     AtomStatic::new(Vec::new);
-/// 锚点落在 gap 时的重读目标（桥接发布；滚动在视口无锚点时可消费）。
+/// 缺口重读候选（桥接发布；滚动按方向消费）。
 pub(crate) static WINDOW_GAP_REQUEST: AtomStatic<
-    Option<crate::kit::history_paging::WindowGapRequest>,
-> = AtomStatic::new(|| None);
+    Vec<crate::kit::history_paging::WindowGapRequest>,
+> = AtomStatic::new(Vec::new);
 /// 结构性释放代次：递增后渲染侧清空 slot/index 缓存。
 pub static STRUCTURAL_EPOCH: AtomStatic<u64> = AtomStatic::new(|| 0);
 /// 渲染侧已处理的结构性代次。

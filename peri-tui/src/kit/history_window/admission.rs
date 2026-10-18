@@ -569,6 +569,10 @@ impl HistoryWindow {
         // 计划里的槽位是决策时快照；同一轮多次释放会移动后面的段，应用时重新取一次。
         let mut applied_plan = plan.clone();
         applied_plan.slot_range = self.index().slot_range(plan.segment);
+        // gap 的回读入口必须取**内侧邻居**的游标：更晚邻居的 before 游标用于从缺口
+        // 上端向下补，更早邻居的 after 游标用于从缺口下端向上补。被淘汰段自己的外侧
+        // 游标指向更远处，无法回填它自身。
+        let (earlier_after, later_before) = self.neighbor_cursors(plan.segment);
         let (segment, position) = self.detach_segment(plan.segment)?;
         let gap_id = self.next_gap_id();
         let placeholder = if plan.before.is_none() {
@@ -580,12 +584,8 @@ impl HistoryWindow {
             gap_id,
             plan.before.clone(),
             plan.after.clone(),
-            plan.before_cursor
-                .clone()
-                .or_else(|| segment.before_cursor.clone()),
-            plan.after_cursor
-                .clone()
-                .or_else(|| segment.after_cursor.clone()),
+            later_before,
+            earlier_after,
             segment.source.clone(),
             placeholder,
         );
