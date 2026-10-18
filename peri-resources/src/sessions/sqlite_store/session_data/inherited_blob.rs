@@ -15,6 +15,10 @@
 //! 任何结构异常都以 [`BlobReadError::Unsupported`] 返回，由调用方回退到原有 SQL 路径：
 //! 这是读取优化，不是第二份 JSON 语义权威。payload 身份仍取序列化原文里的首个 `"id"`，
 //! 与 SQL 路径的 `$.message.id` / `$.id` 口径一致（两类 payload 的 id 都紧跟在 type 之后）。
+//!
+//! 校验边界：布局扫描只验证 canonical 信封结构与身份前缀，**不**解析 payload 正文的 JSON
+//! 语义（不反序列化、不校验正文转义）。正文合法性由消费/解析路径负责；非 canonical 或
+//! 结构异常的信封回退 SQL，后者按原有语义反序列化首尾 payload。
 
 use peri_acp_types::history_window::{HistoryInheritedSnapshot, HistoryWindowError};
 use peri_acp_types::messages::MessageId;

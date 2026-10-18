@@ -11,7 +11,9 @@ use crate::sessions::sqlite_store::SqliteThreadStore;
 use peri_acp_types::history_window::{HistoryReadTicket, HistorySource, HistoryWindowError};
 use peri_acp_types::messages::{BaseMessage, MessageId};
 use peri_acp_types::projection::MessageProjectionDirective;
-use peri_acp_types::session_resources::{FrozenSnapshotBytes, NewSession, NewSessionMeta};
+use peri_acp_types::session_resources::{
+    FrozenSnapshotBytes, NewSession, NewSessionMeta, SessionResourceErrorKind,
+};
 use peri_acp_types::store::{
     serialize_persisted_payload, CompactionChange, InheritedContext, MessageFlags,
     PersistedPayload, ThreadStore,
@@ -791,7 +793,11 @@ async fn absent_and_corrupt_inherited_context_fail_closed() {
     }
 }
 
-/// canonical 信封里 payload 的转义非法（`\q`）：读取失败关闭，不得 panic。
+/// canonical 信封的 payload 字符串里含非法转义（`\q`）：读取失败关闭，不得 panic。
+///
+/// 手工构造信封而不是走 `serde_json::json!`：后者的 Map 实现由 `preserve_order` 特性
+/// 决定（workspace 里的 ACP 依赖会启用它），字段顺序会改变扫描路径。固定 canonical
+/// 顺序才能让本用例在所有构建特性下都覆盖增量解码，而不是偶然回退到 SQL。
 #[tokio::test]
 async fn invalid_escape_in_canonical_payload_fails_closed() {
     let (store, data, directory) = database().await;
@@ -809,22 +815,70 @@ async fn invalid_escape_in_canonical_payload_fails_closed() {
         r#"{{"role":"user","id":"{}","content":"bad\q"}}"#,
         MessageId::new().as_uuid()
     );
-    let envelope = serde_json::to_string(&serde_json::json!({
-        "version": 1,
-        "payloads": [raw_payload],
-        "flags": {},
-    }))
-    .unwrap();
+    // 只转义双引号、保留单个 `\q`：外层 JSON 的转义因此非法，正是解码器要拒绝的形状。
+    let encoded_payload = raw_payload.replace('"', "\\\"");
+    let envelope = format!(r#"{{"version":1,"payloads":["{encoded_payload}"],"flags":{{}}}}"#);
+    assert!(
+        envelope.starts_with(r#"{"version":1,"payloads":["{\"role\":\"user\""#),
+        "fixture must stay in canonical order: {envelope}"
+    );
     sqlx::query("UPDATE threads SET inherited_context = ?1 WHERE id = ?2")
         .bind(envelope)
         .bind(&id)
         .execute(&store.database.pool)
         .await
         .unwrap();
-    assert!(
-        data.history_window_bounds(&id).await.is_err(),
-        "invalid payload escape must fail closed"
+    let error = data.history_window_bounds(&id).await.unwrap_err();
+    match error.kind() {
+        SessionResourceErrorKind::Corrupt { detail } => assert!(
+            detail.contains("invalid escape"),
+            "blob decoder must reject the invalid escape, got: {detail}"
+        ),
+        other => panic!("invalid payload escape must fail closed, got: {other:?}"),
+    }
+}
+
+/// 非 canonical（payloads 在前）信封 + 不可反序列化的 payload：blob 扫描拒绝结构，
+/// SQL 回退在解码首个 payload 时失败关闭。外层 JSON 合法，夹具与 `preserve_order` 无关。
+#[tokio::test]
+async fn non_canonical_envelope_with_undecodable_payload_fails_closed() {
+    let (store, data, directory) = database().await;
+    let workspace = workspace(&store, directory.path()).await;
+    let id = "inherited-bad-payload".to_owned();
+    data.save_new_session(&session(
+        &id,
+        workspace.cwd.to_str().unwrap(),
+        &workspace,
+        frozen(&id),
+    ))
+    .await
+    .unwrap();
+    let raw_payload = format!(
+        r#"{{"role":"user","id":"{}","content":"bad\q"}}"#,
+        MessageId::new().as_uuid()
     );
+    // `serde_json` 会把正文里的 `\` 转义成 `\\`，信封本身是合法 JSON；payloads 在前
+    // 让 canonical 扫描器拒绝结构，强制走 JSON1 SQL 回退。
+    let encoded_payload = serde_json::to_string(&raw_payload).unwrap();
+    let envelope = format!(r#"{{"payloads":[{encoded_payload}],"version":1,"flags":{{}}}}"#);
+    assert!(
+        envelope.starts_with(r#"{"payloads":["{\"role\":\"user\""#),
+        "fixture must keep the non-canonical payloads-first order: {envelope}"
+    );
+    sqlx::query("UPDATE threads SET inherited_context = ?1 WHERE id = ?2")
+        .bind(envelope)
+        .bind(&id)
+        .execute(&store.database.pool)
+        .await
+        .unwrap();
+    let error = data.history_window_bounds(&id).await.unwrap_err();
+    match error.kind() {
+        SessionResourceErrorKind::Corrupt { detail } => assert!(
+            detail.contains("not decodable"),
+            "SQL fallback must reject the undecodable payload, got: {detail}"
+        ),
+        other => panic!("undecodable payload must fail closed, got: {other:?}"),
+    }
 }
 
 /// JSONB 列（BLOB）不是 canonical 文本信封：blob 扫描拒绝后回退 JSON1 SQL，语义不变。
