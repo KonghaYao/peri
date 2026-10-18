@@ -124,6 +124,9 @@ pub(crate) async fn handle_request_for_connection(
         "session/set_config_option" => {
             config_options::handle_set_config_option(params, cfg, sessions, transport).await
         }
+        // 生产 `ServerLoop` 在进入本分派前已把 session/load、session/resume、
+        // session/fork 分流到 `*_shared` 路径；以下三个分支只服务进程内/测试入口，
+        // 因此旧 `prepare_existing` 的锁内 I/O 不在生产路径上。
         // 初始 load 的回放标记与代次戳按**当前连接**的协商结果决定（REQ §5.3）：
         // 分页准入（`history_pagination`）与回放能力集（`caps`）都来自本连接的事实快照。
         "session/load" => {
@@ -329,4 +332,4 @@ pub(super) fn task_snapshot_value(snapshot: peri_acp_types::tasks::TaskSnapshot)
 
 #[cfg(test)]
 #[path = "requests_test.rs"]
-mod tests;
+pub(super) mod tests;

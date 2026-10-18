@@ -1,3 +1,4 @@
+use std::borrow::Cow;
 use std::sync::Arc;
 
 use peri_acp_types::{
@@ -36,9 +37,12 @@ pub type CommandLookupFn = Arc<dyn Fn(&str) -> Option<ResolvedCommand> + Send + 
 pub struct InterceptRequest<'a> {
     // ── 消息上下文 ──
     pub content: &'a MessageContent,
-    pub history: &'a [BaseMessage],
-    /// Canonical history owner; includes reminders that are absent from `history` projection.
-    pub history_payloads: Vec<peri_acp_types::store::PersistedPayload>,
+    /// Canonical effective history (reminders included). The `BaseMessage`
+    /// projection is derived only after a command has been resolved, so ordinary
+    /// prompts pay no full-history copy for command recognition.
+    ///
+    /// 生产调用点传 `Cow::Borrowed`（零拷贝）；测试夹具可传 `Cow::Owned`。
+    pub history_payloads: Cow<'a, [peri_acp_types::store::PersistedPayload]>,
     // ── 会话上下文 ──
     pub cwd: &'a str,
     pub session_id: &'a str,
@@ -65,7 +69,7 @@ pub struct InterceptRequest<'a> {
 
 /// 编排层统一反馈出口（Phase 5 Step 1）：UiOnly/Session 均发射
 /// `CommandFeedback` 事件；channel=Session 额外把 message 以系统消息追加进
-/// `result.messages`（自动落 thread store + state.history 接续）。
+/// `result.messages`（经持久化落 thread store，并由有效集合 / 持久化事实接续）。
 ///
 /// 发射唯一归属本函数——命令只返回 `feedback` 字段，命令内零事件代码
 /// （设计 §80/§89；P1-4）。调用时序：`handler.execute` 之后、`push_done`
@@ -140,9 +144,17 @@ pub async fn intercept_immediate_command(req: InterceptRequest<'_>) -> Intercept
         return InterceptOutcome::PassThrough;
     };
 
+    // 命令识别先于大历史投影构造：普通 prompt 在 resolve 失败时直接透传，
+    // 不构造任何 `BaseMessage` 副本。命中命令后才在短作用域内派生一次。
+    let history = req
+        .history_payloads
+        .iter()
+        .filter_map(|payload| payload.as_message().cloned())
+        .collect::<Vec<_>>();
+
     tracing::debug!(
         command = %resolved.entry.fullname,
-        history_len = req.history.len(),
+        history_len = history.len(),
         "command intercepted"
     );
 
@@ -164,7 +176,7 @@ pub async fn intercept_immediate_command(req: InterceptRequest<'_>) -> Intercept
                     .next()
                     .unwrap_or(&resolved.entry.fullname);
                 let mut result = CommandResult {
-                    messages: req.history.to_vec(),
+                    messages: history,
                     stop_reason: PromptStopReason::EndTurn,
                     feedback: Some(CommandFeedback {
                         level: FeedbackLevel::Error,
@@ -177,7 +189,7 @@ pub async fn intercept_immediate_command(req: InterceptRequest<'_>) -> Intercept
                     .push_done(req.session_id, "end_turn", None)
                     .await;
                 return InterceptOutcome::Handled(Box::new(PromptResult {
-                    persisted_payloads: req.history_payloads.clone(),
+                    persisted_payloads: req.history_payloads.to_vec(),
                     messages: result.messages,
                     ok: true,
                     stop_reason: result.stop_reason,
@@ -206,7 +218,7 @@ pub async fn intercept_immediate_command(req: InterceptRequest<'_>) -> Intercept
     }
     let mut ctx = CommandContext::new(
         req.session_id.to_string(),
-        req.history.to_vec(),
+        history.clone(),
         req.cwd.to_string(),
         req.event_sink.clone(),
         req.cancel.clone(),
@@ -240,7 +252,7 @@ pub async fn intercept_immediate_command(req: InterceptRequest<'_>) -> Intercept
         _ = req.cancel.cancelled() => {
             tracing::info!(session_id = %req.session_id, "command cancelled");
             CommandOutcome::Done(CommandResult {
-                messages: req.history.to_vec(),
+                messages: history,
                 stop_reason: PromptStopReason::Cancelled,
                 feedback: None,
             })
@@ -303,7 +315,7 @@ pub async fn intercept_immediate_command(req: InterceptRequest<'_>) -> Intercept
                 )
                 .await;
             let mut persisted_payloads =
-                committed_payloads.unwrap_or_else(|| req.history_payloads.clone());
+                committed_payloads.unwrap_or_else(|| req.history_payloads.to_vec());
             let existing_ids = persisted_payloads
                 .iter()
                 .map(peri_acp_types::store::PersistedPayload::id)

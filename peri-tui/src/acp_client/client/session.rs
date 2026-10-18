@@ -569,6 +569,11 @@ impl AcpTuiClient {
         let (snapshot_token, next_cursor) =
             crate::kit::history_paging::decode_session_cursor(&loaded);
         crate::kit::history_paging::note_initial_cursor(session_id, snapshot_token, next_cursor);
+        // S5.4：协商过窗口能力且开关开启时，额外建立 V1 窗口（默认关闭时无行为）。
+        crate::kit::history_page_consumer::enqueue_window_open(
+            session_id,
+            crate::kit::history_paging::WindowDirection::Before,
+        );
         self.lifecycle
             .commit_stable(start.generation, session_id.to_string());
         self.finish_session_initialization(start.generation, session_id)

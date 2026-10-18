@@ -7,6 +7,10 @@
 
 use super::*;
 use crate::kit::history_page_consumer::HistoryPageRequest;
+use crate::kit::history_window::{
+    HistoryEntryView, HistorySource, HistoryWindowConfig, PersistentEntryKey, SegmentDraft,
+    SegmentPlacement, WindowIdentity,
+};
 use crate::kit::tui_render_unit::{TuiRenderUnit, TuiUserBubble};
 use serde_json::json;
 use serial_test::serial;
@@ -247,4 +251,536 @@ fn test_invalidate_browsing_stops_paging_for_session() {
     assert_eq!(state.last_error.as_deref(), Some("range expired"));
     // 失效后不再派发（需要下一次初始 load 重建浏览身份）。
     assert!(!request_older_page_if_due(true));
+}
+
+// ---------------------------------------------------------------------------
+// S4 窗口 wire 与 ResidentIndex 派生适配
+// ---------------------------------------------------------------------------
+
+#[test]
+#[serial]
+fn test_window_mode_does_not_claim_legacy_page_channel() {
+    crate::kit::atoms::init_atoms();
+    crate::kit::atoms::HISTORY_WINDOW_V1.set(true);
+    crate::kit::atoms::HISTORY_WINDOW_CAPABLE.set(true);
+    crate::kit::history_page_consumer::reset_window_paging_state();
+    reset_browsing_state();
+    note_initial_cursor("s1", Some("token".into()), Some("legacy-cursor".into()));
+    assert!(!request_older_page_if_due(true));
+    let legacy = atoms::HISTORY_PAGING.state().read().clone();
+    assert!(
+        legacy.in_flight.is_none(),
+        "window mode must not claim legacy page"
+    );
+    reset_browsing_state();
+    crate::kit::atoms::HISTORY_WINDOW_V1.set(false);
+    crate::kit::atoms::HISTORY_WINDOW_CAPABLE.set(false);
+}
+
+#[test]
+fn test_decode_window_page_response_matches_s4_wire() {
+    let raw = json!({
+        "sessionId": "s1",
+        "sessionGeneration": "gen-7",
+        "structureVersion": 12,
+        "snapshotToken": "snap-9",
+        "committedTail": "opaque-tail",
+        "checkpointId": "checkpoint-1",
+        "readTicket": "ticket-1",
+        "beforeCursor": "before-1",
+        "afterCursor": null,
+        "items": [
+            {
+                "entryId": "s1:m1",
+                "source": "own",
+                "position": 42,
+                "oversize": false,
+                "subItems": [
+                    { "position": 0, "update": { "sessionUpdate": "agent_message_chunk" } },
+                    { "position": 1, "systemReminder": { "content": "note" } }
+                ]
+            },
+            {
+                "entryId": "s1:m2",
+                "source": "own",
+                "position": 43,
+                "oversize": true,
+                "body": {
+                    "totalBytes": 2_000_000,
+                    "chunkSize": 32_768,
+                    "readTicket": "inline-ticket-2",
+                    "snapshotToken": "snap-inline"
+                },
+                "subItems": []
+            },
+            {
+                "entryId": "s1:m3",
+                "source": "own",
+                "position": 44,
+                "oversize": false,
+                "subItems": []
+            },
+            {
+                "entryId": "s1:m4",
+                "source": "own",
+                "position": 45,
+                "oversize": true,
+                "body": {
+                    "totalBytes": 999,
+                    "chunkSize": 1,
+                    "readTicket": "inline-ticket-4"
+                },
+                "subItems": []
+            }
+        ],
+        "bodyDescriptors": [
+            {
+                "entryId": "s1:m3",
+                "totalBytes": 4_000_000,
+                "chunkSize": 65_536,
+                "readTicket": "top-ticket-3"
+            },
+            {
+                "entryId": "s1:m4",
+                "totalBytes": 123,
+                "chunkSize": 1,
+                "readTicket": "top-ticket-4",
+                "snapshotToken": "snap-top-4"
+            },
+            {
+                "entryId": "s1:m5",
+                "source": { "inherited": { "frozenSnapshotId": "snap-ancestor" } },
+                "totalBytes": 5_000_000,
+                "chunkSize": 65_536,
+                "readTicket": "ticket-1"
+            }
+        ],
+        "rewindInvalidation": { "status": "active", "reopenRequired": false }
+    });
+    let decoded = decode_window_page_response(&raw).expect("window response");
+    assert_eq!(decoded.session_id, "s1");
+    assert_eq!(decoded.identity.session_generation, "gen-7");
+    assert_eq!(decoded.identity.structure_version, 12);
+    assert_eq!(decoded.identity.snapshot_token, "snap-9");
+    assert_eq!(decoded.committed_tail.as_deref(), Some("opaque-tail"));
+    assert_eq!(decoded.checkpoint_id.as_deref(), Some("checkpoint-1"));
+    assert_eq!(decoded.read_ticket, "ticket-1");
+    assert_eq!(decoded.before_cursor.as_deref(), Some("before-1"));
+    assert_eq!(decoded.after_cursor, None);
+    assert!(!decoded.reopen_required);
+    assert_eq!(decoded.body_descriptors.len(), 3);
+    assert_eq!(decoded.descriptor_only_items, 1);
+    assert_eq!(decoded.items.len(), 5);
+
+    assert_eq!(decoded.items[0].source, HistorySource::Own);
+    assert_eq!(decoded.items[0].position, Some(42));
+    assert_eq!(decoded.items[0].sub_items.len(), 2);
+    assert!(!decoded.items[0].sub_items[0].system_reminder);
+    assert!(decoded.items[0].sub_items[1].system_reminder);
+    assert!(decoded.items[0].descriptor.is_none());
+
+    let inline = &decoded.items[1];
+    assert_eq!(inline.entry_id, "s1:m2");
+    assert!(!inline.descriptor_only);
+    let descriptor = inline.descriptor.as_ref().expect("inline descriptor");
+    assert_eq!(descriptor.total_bytes, 2_000_000);
+    assert_eq!(descriptor.chunk_size, 32_768);
+    assert_eq!(descriptor.read_ticket, "inline-ticket-2");
+    assert_eq!(descriptor.snapshot_token.as_deref(), Some("snap-inline"));
+
+    let top_level = &decoded.items[2];
+    assert_eq!(top_level.entry_id, "s1:m3");
+    assert!(top_level.oversize, "top-level descriptor marks oversize");
+    let descriptor = top_level.descriptor.as_ref().expect("top descriptor");
+    assert_eq!(descriptor.total_bytes, 4_000_000);
+    assert_eq!(descriptor.read_ticket, "top-ticket-3");
+    assert_eq!(descriptor.snapshot_token.as_deref(), Some("snap-9"));
+
+    let conflict = &decoded.items[3];
+    assert_eq!(conflict.entry_id, "s1:m4");
+    let descriptor = conflict.descriptor.as_ref().expect("inline wins");
+    assert_eq!(
+        descriptor.total_bytes, 999,
+        "inline body wins over top-level"
+    );
+    assert_eq!(descriptor.read_ticket, "inline-ticket-4");
+    assert_eq!(descriptor.snapshot_token.as_deref(), Some("snap-9"));
+
+    let orphan = &decoded.items[4];
+    assert_eq!(orphan.entry_id, "s1:m5");
+    assert!(orphan.descriptor_only);
+    assert!(orphan.oversize);
+    assert_eq!(orphan.position, None);
+    assert_eq!(orphan.source, HistorySource::inherited("snap-ancestor"));
+    let orphan_descriptor = orphan.descriptor.as_ref().expect("orphan descriptor");
+    assert_eq!(orphan_descriptor.total_bytes, 5_000_000);
+    assert_eq!(orphan_descriptor.snapshot_token.as_deref(), Some("snap-9"));
+
+    let no_descriptors = json!({
+        "sessionId": "s1",
+        "sessionGeneration": "gen-7",
+        "structureVersion": 12,
+        "snapshotToken": "snap-9",
+        "readTicket": "ticket-1",
+        "items": []
+    });
+    let decoded = decode_window_page_response(&no_descriptors).expect("empty response");
+    assert!(decoded.body_descriptors.is_empty());
+    assert_eq!(decoded.descriptor_only_items, 0);
+    assert!(decoded.items.is_empty());
+
+    let invalid = json!({
+        "sessionId": "s1",
+        "sessionGeneration": "gen-7",
+        "structureVersion": 12,
+        "snapshotToken": "snap-9",
+        "readTicket": "ticket-1",
+        "items": [
+            { "entryId": "s1:missing-position", "source": "own", "subItems": [] }
+        ]
+    });
+    assert!(
+        decode_window_page_response(&invalid).is_none(),
+        "own entries without position are malformed and drop the whole page"
+    );
+}
+
+#[test]
+fn test_decode_inherited_snapshot_and_source() {
+    let raw = json!({
+        "sessionId": "s1",
+        "sessionGeneration": "gen-1",
+        "structureVersion": 1,
+        "snapshotToken": "snap-1",
+        "readTicket": "ticket-1",
+        "inheritedUnsupported": false,
+        "inherited": {
+            "snapshotId": "snap-frozen",
+            "ancestorThreadId": "ancestor-session",
+            "firstEntryId": "s1:a",
+            "lastEntryId": "s1:b",
+            "entryCount": 2,
+            "supported": true
+        },
+        "items": [{
+            "entryId": "s1:a",
+            "source": {"inherited": {
+                "frozenSnapshotId": "snap-frozen",
+                "ancestorThreadId": "ancestor-session"
+            }},
+            "position": null,
+            "subItems": [{
+                "position": 0,
+                "update": {
+                    "sessionUpdate": "agent_message_chunk",
+                    "content": {"type": "text", "text": "frozen"},
+                    "messageId": "a"
+                }
+            }]
+        }]
+    });
+    let decoded = decode_window_page_response(&raw).expect("inherited response");
+    let inherited = decoded.inherited.as_ref().expect("inherited meta");
+    assert_eq!(inherited.snapshot_id, "snap-frozen");
+    assert_eq!(
+        inherited.ancestor_thread_id.as_deref(),
+        Some("ancestor-session")
+    );
+    assert_eq!(inherited.entry_count, 2);
+    assert!(inherited.supported);
+    assert!(!decoded.inherited_unsupported);
+    assert_eq!(decoded.items[0].position, None);
+    assert_eq!(
+        decoded.items[0].source,
+        HistorySource::inherited_with_ancestor("snap-frozen", Some("ancestor-session".into()))
+    );
+    assert_eq!(
+        decoded.items[0].source.ancestor_thread_id(),
+        Some("ancestor-session")
+    );
+}
+
+#[test]
+fn test_window_body_descriptors_use_snake_case_and_reject_duplicates() {
+    let base = json!({
+        "sessionId": "s1",
+        "sessionGeneration": "gen-7",
+        "structureVersion": 12,
+        "snapshotToken": "snap-9",
+        "readTicket": "ticket-1",
+        "items": []
+    });
+    let mut snake = base.clone();
+    snake["body_descriptors"] = json!([
+        {
+            "entryId": "s1:orphan",
+            "totalBytes": 10,
+            "chunkSize": 1,
+            "readTicket": "ticket-1"
+        }
+    ]);
+    let decoded = decode_window_page_response(&snake).expect("snake_case descriptors");
+    assert_eq!(decoded.descriptor_only_items, 1);
+    assert_eq!(decoded.items[0].entry_id, "s1:orphan");
+
+    let mut duplicate = base;
+    duplicate["bodyDescriptors"] = json!([
+        {
+            "entryId": "s1:orphan",
+            "totalBytes": 10,
+            "chunkSize": 1,
+            "readTicket": "ticket-1"
+        },
+        {
+            "entryId": "s1:orphan",
+            "totalBytes": 20,
+            "chunkSize": 1,
+            "readTicket": "ticket-1"
+        }
+    ]);
+    assert!(
+        decode_window_page_response(&duplicate).is_none(),
+        "duplicate descriptors are ambiguous, not silently deduplicated"
+    );
+}
+
+#[test]
+fn test_window_request_encodes_s4_open_page_and_seek_shapes() {
+    let open = WindowRequest::Open(WindowOpenRequest {
+        anchor: WindowRequestAnchor::Latest,
+        direction: WindowDirection::Around,
+        limit: WINDOW_PAGE_LIMIT,
+        before_limit: Some(10),
+        after_limit: Some(20),
+        byte_budget: WINDOW_DEFAULT_BYTE_BUDGET,
+    })
+    .to_value();
+    assert_eq!(open["kind"], "open");
+    assert_eq!(open["anchor"]["kind"], "latest");
+    assert_eq!(open["direction"], "around");
+    assert_eq!(open["limit"], WINDOW_PAGE_LIMIT);
+    assert_eq!(open["beforeLimit"], 10);
+    assert_eq!(open["afterLimit"], 20);
+    assert_eq!(open["byteBudget"], WINDOW_DEFAULT_BYTE_BUDGET);
+    for legacy in ["cursor", "loadGeneration", "cwd", "mcpServers"] {
+        assert!(
+            open.get(legacy).is_none(),
+            "history is mutually exclusive with legacy top-level {legacy}"
+        );
+    }
+
+    let page = WindowRequest::Page(WindowPageRequest {
+        snapshot_token: "snap-9".into(),
+        read_ticket: "ticket-1".into(),
+        cursor: WindowPageCursor::Before("before-1".into()),
+        limit: 20,
+    })
+    .to_value();
+    assert_eq!(page["kind"], "page");
+    assert_eq!(page["beforeCursor"], "before-1");
+    assert!(page.get("afterCursor").is_none());
+    assert_eq!(page["readTicket"], "ticket-1");
+
+    let seek = WindowRequest::Seek(WindowSeekRequest {
+        snapshot_token: "snap-9".into(),
+        read_ticket: "ticket-1".into(),
+        anchor: PersistentEntryKey::own("s1:m1"),
+        before_limit: 10,
+        after_limit: 30,
+    })
+    .to_value();
+    assert_eq!(seek["kind"], "seek");
+    assert_eq!(seek["anchor"]["entryId"], "s1:m1");
+    assert_eq!(seek["anchor"]["source"], "own");
+    assert_eq!(seek["beforeLimit"], 10);
+    assert_eq!(seek["afterLimit"], 30);
+}
+
+#[test]
+fn test_window_source_wire_matches_s4_serde() {
+    use peri_acp_types::history_window::HistorySource as WireHistorySource;
+
+    let own_wire = serde_json::to_value(WireHistorySource::Own).expect("own wire");
+    let inherited_wire =
+        serde_json::to_value(WireHistorySource::inherited("snap-1")).expect("inherited wire");
+    assert_eq!(own_wire, json!("own"));
+    assert_eq!(
+        inherited_wire,
+        json!({ "inherited": { "frozenSnapshotId": "snap-1" } })
+    );
+
+    let raw = json!({
+        "sessionId": "s1",
+        "sessionGeneration": "gen-7",
+        "structureVersion": 12,
+        "snapshotToken": "snap-9",
+        "readTicket": "ticket-1",
+        "items": [
+            { "entryId": "s1:own", "source": own_wire, "position": 1, "subItems": [] },
+            { "entryId": "s1:inherited", "source": inherited_wire, "subItems": [] }
+        ]
+    });
+    let decoded = decode_window_page_response(&raw).expect("response");
+    assert_eq!(decoded.items[0].source, HistorySource::Own);
+    assert_eq!(decoded.items[1].source, HistorySource::inherited("snap-1"));
+
+    let seek = WindowRequest::Seek(WindowSeekRequest {
+        snapshot_token: "snap-9".into(),
+        read_ticket: "ticket-1".into(),
+        anchor: PersistentEntryKey::new(HistorySource::inherited("snap-1"), "s1:inherited"),
+        before_limit: 10,
+        after_limit: 30,
+    })
+    .to_value();
+    assert_eq!(
+        seek["anchor"]["source"],
+        serde_json::to_value(WireHistorySource::inherited("snap-1")).expect("wire")
+    );
+}
+
+#[test]
+fn test_window_request_validation_rejects_bad_shapes() {
+    let base = WindowRequest::Open(WindowOpenRequest {
+        anchor: WindowRequestAnchor::Latest,
+        direction: WindowDirection::Around,
+        limit: 50,
+        before_limit: None,
+        after_limit: None,
+        byte_budget: 1024,
+    });
+    assert!(base.validate().is_ok());
+    let mut invalid = base.clone();
+    if let WindowRequest::Open(request) = &mut invalid {
+        request.limit = 0;
+    }
+    assert!(invalid.validate().is_err());
+    let mut invalid = base;
+    if let WindowRequest::Open(request) = &mut invalid {
+        request.byte_budget = 0;
+    }
+    assert!(invalid.validate().is_err());
+
+    let page = WindowRequest::Page(WindowPageRequest {
+        snapshot_token: String::new(),
+        read_ticket: "ticket".into(),
+        cursor: WindowPageCursor::Before("cursor".into()),
+        limit: 20,
+    });
+    assert!(page.validate().is_err());
+    let seek = WindowRequest::Seek(WindowSeekRequest {
+        snapshot_token: "snap".into(),
+        read_ticket: "ticket".into(),
+        anchor: PersistentEntryKey::own(""),
+        before_limit: 10,
+        after_limit: 10,
+    });
+    assert!(seek.validate().is_err());
+}
+
+#[test]
+fn test_viewport_at_backward_boundary_uses_bottom_margin_and_content_fit() {
+    assert!(!viewport_at_backward_boundary(false, 0, 100, 10));
+    assert!(viewport_at_backward_boundary(false, 88, 100, 10));
+    assert!(viewport_at_backward_boundary(false, 90, 100, 10));
+    assert!(viewport_at_backward_boundary(true, 0, 100, 10));
+    assert!(viewport_at_backward_boundary(false, 0, 5, 10));
+    assert!(!viewport_at_backward_boundary(false, 0, 0, 10));
+    assert!(!viewport_at_backward_boundary(false, 0, 100, 0));
+}
+
+#[test]
+fn test_window_generation_rejects_stale_snapshot_or_generation() {
+    let raw = json!({
+        "sessionId": "s1",
+        "sessionGeneration": "gen-7",
+        "structureVersion": 12,
+        "snapshotToken": "snap-9",
+        "readTicket": "ticket-1",
+        "beforeCursor": null,
+        "afterCursor": null,
+        "items": [],
+    });
+    let response = decode_window_page_response(&raw).expect("response");
+    let current = WindowGeneration {
+        session_id: "s1".into(),
+        session_generation: "gen-7".into(),
+        structure_version: 12,
+        snapshot_token: "snap-9".into(),
+        window_generation: 3,
+        request_id: "req-1".into(),
+    };
+    assert!(current.accepts(&response, 3));
+    assert!(
+        !current.accepts(&response, 4),
+        "local window generation is part of the identity"
+    );
+
+    let mut stale = current.clone();
+    stale.snapshot_token = "snap-other".into();
+    assert!(!stale.accepts(&response, 3));
+    let mut stale = current;
+    stale.structure_version = 13;
+    assert!(!stale.accepts(&response, 3));
+}
+
+#[test]
+fn test_history_spans_derive_slots_from_resident_index() {
+    let mut window = HistoryWindow::new(HistoryWindowConfig::enabled());
+    window.begin_window(WindowIdentity::new("s1", "gen-7", 12, "snap-9"));
+    let entry_a = HistoryEntryView::new(
+        PersistentEntryKey::own("s1:a"),
+        Some(10),
+        2,
+        100,
+        120,
+        Vec::new(),
+    );
+    let entry_b = HistoryEntryView::new(
+        PersistentEntryKey::own("s1:b"),
+        Some(20),
+        1,
+        50,
+        60,
+        Vec::new(),
+    );
+    window
+        .register_segment(
+            SegmentDraft::new(HistorySource::Own, vec![entry_a], 100, 120),
+            SegmentPlacement::Tail,
+        )
+        .expect("segment a");
+    window
+        .register_segment(
+            SegmentDraft::new(HistorySource::Own, vec![entry_b], 50, 60),
+            SegmentPlacement::Tail,
+        )
+        .expect("segment b");
+    let inherited = HistoryEntryView::new(
+        PersistentEntryKey::new(HistorySource::inherited("snap-ancestor"), "ancestor:1"),
+        None,
+        1,
+        30,
+        40,
+        Vec::new(),
+    );
+    window
+        .register_segment(
+            SegmentDraft::new(
+                HistorySource::inherited("snap-ancestor"),
+                vec![inherited],
+                30,
+                40,
+            ),
+            SegmentPlacement::Tail,
+        )
+        .expect("inherited segment");
+
+    let spans = HistorySpans::from_resident_window(&window);
+    assert!(spans.contains("s1:a"));
+    assert!(spans.contains("s1:b"));
+    assert!(
+        !spans.contains("ancestor:1"),
+        "inherited entries have no position and stay outside legacy spans"
+    );
+    assert_eq!(spans.slots(), vec![(0, 2), (2, 1)]);
 }

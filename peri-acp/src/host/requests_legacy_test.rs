@@ -78,7 +78,10 @@ async fn legacy_history_context_then_load_restores_saved_cwd_and_frozen_snapshot
     .await
     .unwrap();
     assert_eq!(Path::new(&sessions[&id].cwd), cwd);
-    assert_eq!(sessions[&id].history[0].content(), "legacy user message");
+    assert_eq!(
+        sessions[&id].effective_messages()[0].content(),
+        "legacy user message"
+    );
     // W5（J2 §3.1）：legacy 首次接纳发生在内容准入之前，没有执行环境 ⇒ 没有
     // workspace 资源面 ⇒ 项目指令不可得（`claude_md` 为空），且**不回落磁盘**
     // （同样的 X4/J5 口径见 W4b 的 legacy 空技能摘要先例）。后半段
@@ -128,7 +131,7 @@ async fn legacy_history_context_then_load_restores_saved_cwd_and_frozen_snapshot
     let fork_id = fork["sessionId"].as_str().unwrap();
     assert_ne!(fork_id, id);
     assert_eq!(
-        sessions[fork_id].history[0].content(),
+        sessions[fork_id].effective_messages()[0].content(),
         "legacy user message"
     );
     handle_request(
@@ -228,7 +231,10 @@ async fn legacy_history_load_ignores_wrong_directory_and_preserves_saved_cwd() {
     .await
     .unwrap();
     assert_eq!(Path::new(&sessions[&id].cwd), saved);
-    assert_eq!(sessions[&id].history[0].content(), "legacy user message");
+    assert_eq!(
+        sessions[&id].effective_messages()[0].content(),
+        "legacy user message"
+    );
     assert_eq!(Path::new(&bridge.load_meta(&id).await.unwrap().cwd), saved);
     assert!(bridge.load_session_binding(&id).await.unwrap().is_some());
     assert!(bridge.load_frozen_snapshot(&id).await.unwrap().is_some());
@@ -927,7 +933,7 @@ async fn legacy_child_session_inherits_the_verified_parent_binding() {
         parent_frozen
     );
     assert_eq!(
-        sessions[&child].history[0].content(),
+        sessions[&child].effective_messages()[0].content(),
         "legacy child message"
     );
     assert!(sessions.contains_key(&parent), "父会话必须已发布");

@@ -31,6 +31,9 @@ use crate::kit::history_paging::{
     self, HistoryPageResponse, InFlightPage, MAX_AUTO_CONTINUE_PAGES,
 };
 
+pub mod window;
+pub(crate) use window::*;
+
 /// 一条历史页请求（触发侧冻结的浏览身份）。
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct HistoryPageRequest {
@@ -258,3 +261,6 @@ async fn handle_request(
 #[cfg(test)]
 #[path = "history_page_consumer_test.rs"]
 mod tests;
+#[cfg(test)]
+#[path = "history_page_consumer/window_test.rs"]
+mod window_tests;

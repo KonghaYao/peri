@@ -8,6 +8,8 @@ mod agent;
 mod compact;
 mod fold;
 mod history_page;
+pub(crate) mod history_window;
+mod memory_probe;
 pub(crate) mod render;
 mod streaming;
 mod subagent;
@@ -129,6 +131,9 @@ pub struct BridgeState {
     pub variant: u8,
     /// 已提交的 TuiRenderUnit 列表——im::Vector 支持 O(1) clone + O(log n) push_back。
     pub committed: im::Vector<TuiRenderUnit>,
+    /// S5：历史窗口模型与账目。默认关闭；关闭时不改变旧渲染/滚动/事件行为。
+    /// `committed` 仍是展示正文的唯一强持有者，窗口只保存持久身份与字节账目。
+    pub window: crate::kit::history_window::HistoryWindow,
     /// 当前轮次的增量数据
     pub current_turn: CurrentTurn,
     /// 当前 session lifecycle 阶段。loading 只由该阶段派生。
@@ -194,6 +199,7 @@ impl BridgeState {
     fn publish_barrier(&mut self) {
         render::push_view_models(self);
         self.publication_intent = PublicationIntent::Published;
+        self.sample_memory("bridge_publish");
     }
 
     /// 将 current_turn 已产出内容 flush 到 committed，然后 reset。
@@ -232,6 +238,7 @@ impl BridgeState {
             }
         }
         self.current_turn.reset();
+        self.sample_memory("bridge_flush");
     }
 
     /// Put a user prompt after all output already received from the preceding
@@ -556,6 +563,17 @@ pub(crate) fn dispatch_for_bridge(
         HistoryPageLoaded { response } => {
             history_page::handle_history_page_loaded(state, response.as_ref())
         }
+        HistoryCommitted(info) => history_window::handle_history_committed(state, info),
+        HistoryWindowPageLoaded { context, response } => {
+            state.publication_intent = history_window::handle_window_page_loaded(
+                state,
+                context.as_ref(),
+                response.as_ref(),
+            );
+        }
+        HistoryWindowDegraded { session_id, reason } => {
+            history_window::handle_window_degraded(state, session_id, reason);
+        }
         // 回放条目位置标记：只登记区间，不产生展示单元。
         ReplayEntryMarked { entry_id, position } => {
             crate::kit::history_paging::mark_own_entry(entry_id, *position)
@@ -623,6 +641,7 @@ pub(crate) fn dispatch_for_bridge(
             | ReplayToolStarted { .. }
             | ReplayToolEnded { .. }
             | HistoryPageLoaded { .. }
+            | HistoryWindowPageLoaded { .. }
     ) {
         PublicationIntent::Deferred
     } else {

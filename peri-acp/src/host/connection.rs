@@ -72,6 +72,18 @@ impl ConnectionContext {
                 .is_some_and(|caps| caps.history_pagination)
     }
 
+    /// `peri.historyWindowV1` 准入：与分页同一套失败关闭规则。
+    ///
+    /// 未 `initialize` 的进程内路径也不默认获得窗口协议；只有当前连接显式声明
+    /// `peri.historyWindowV1=true` 才允许 `session/load` 携带 `history`。
+    pub(crate) fn history_window_v1(&self) -> bool {
+        self.initialized
+            && self
+                .negotiated_caps
+                .as_ref()
+                .is_some_and(|caps| caps.history_window_v1)
+    }
+
     pub(crate) fn apps_enabled(&self) -> bool {
         self.initialized && self.lifecycle == ConnectionLifecycle::Open && self.apps_enabled
     }
@@ -119,7 +131,9 @@ impl ConnectionContext {
     /// 「**当前连接**声明了什么」，不回读进程 / 会话级 caps 注册表。
     pub(crate) fn facts(&self) -> ConnectionFacts {
         ConnectionFacts {
+            connection_id: self.id.clone(),
             history_pagination: self.history_pagination(),
+            history_window_v1: self.history_window_v1(),
             caps: self.caps(),
         }
     }
@@ -128,8 +142,12 @@ impl ConnectionContext {
 /// 请求路由需要的连接事实快照，见 [`ConnectionContext::facts`]。
 #[derive(Clone, Debug)]
 pub(crate) struct ConnectionFacts {
+    /// 连接身份：V1 ticket 绑定到签发它的连接，通知也只投递到该连接。
+    pub(crate) connection_id: String,
     /// 历史分页是否由**当前连接**协商（REQ §5.3、验收 A25）。失败关闭。
     pub(crate) history_pagination: bool,
+    /// `peri.historyWindowV1` 是否由**当前连接**协商。与分页独立、失败关闭。
+    pub(crate) history_window_v1: bool,
     /// **当前连接**的 peri 能力集（[`ConnectionContext::caps`] 的原样取值）。
     ///
     /// 回放标记与代次戳（`periReplay` / `periLoadGeneration`）由它门控：判据必须是本连接
@@ -148,7 +166,9 @@ impl ConnectionFacts {
     #[cfg(test)]
     pub(crate) fn unnegotiated() -> Self {
         Self {
+            connection_id: "unnegotiated-test".into(),
             history_pagination: false,
+            history_window_v1: false,
             caps: PeriCaps::all_enabled(),
         }
     }

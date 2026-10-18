@@ -71,6 +71,14 @@ pub struct PeriCaps {
     /// 门控按**当前连接**的协商结果判定，不继承会话内保存的旧能力（REQ §5.3）。
     #[serde(default)]
     pub history_pagination: bool,
+    /// `peri.historyWindowV1`：`session/load` 的 open/page/seek 双向窗口协议。
+    ///
+    /// 与 [`Self::history_pagination`] 独立、不互相推导：旧 `cursor` 分页保持原语义，
+    /// 只有显式声明本能力（`true`）的连接才允许携带 `history` 字段。默认 false，
+    /// 未协商时窗口请求必须返回 `-32601`，不得降级为初始 load。
+    /// 门控按**当前连接**的协商结果判定。
+    #[serde(default)]
+    pub history_window_v1: bool,
     /// `peri.uiCommands`：TUI 上送的 ui 域命令明细（空 = 不广播 ui 条目）。
     /// 门控语义反转：TUI 声明明细 → ACP 注册为 `ui:*` 条目，而非 ACP 附加
     /// 硬编码列表；旧客户端 bool `true` 由 [`PeriCaps::from_client_meta`]
@@ -102,6 +110,7 @@ impl PeriCaps {
             user_input_queue: meta_bool(meta, "peri.userInputQueue"),
             session_workspace_v1: meta_bool(meta, "peri.sessionWorkspaceV1"),
             history_pagination: meta_bool(meta, "peri.historyPagination"),
+            history_window_v1: meta_bool(meta, "peri.historyWindowV1"),
             ui_commands: Self::meta_ui_commands(meta),
         }
     }
@@ -173,6 +182,10 @@ impl PeriCaps {
             Value::Bool(self.history_pagination),
         );
         m.insert(
+            "peri.historyWindowV1".into(),
+            Value::Bool(self.history_window_v1),
+        );
+        m.insert(
             "peri.uiCommands".into(),
             serde_json::to_value(&self.ui_commands).expect("Vec<UiCommandSpec> 序列化不应失败"),
         );
@@ -198,6 +211,7 @@ impl PeriCaps {
             user_input_queue: true,
             session_workspace_v1: true,
             history_pagination: true,
+            history_window_v1: true,
             ui_commands: default_ui_commands(),
         }
     }

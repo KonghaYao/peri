@@ -42,5 +42,10 @@ async fn test_ui_capability_negotiation_keeps_legacy_oauth_contract() {
     });
     client.register_ui_commands(&[]).await.unwrap();
     server.await.unwrap();
+    assert!(
+        crate::kit::atoms::HISTORY_WINDOW_CAPABLE.get(),
+        "initialize 未回显时按客户端声明保留 V1 能力"
+    );
+    crate::kit::atoms::HISTORY_WINDOW_CAPABLE.set(false);
     client.close();
 }

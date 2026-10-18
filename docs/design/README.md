@@ -25,7 +25,7 @@ draft、proposal、可行性探查、审计报告和未采纳方案不进入本�
 | --- | --- | --- |
 | 总体分层 | [architecture.md](architecture.md) | crate 职责、依赖方向与跨层数据流 |
 | 配置权威面 | [configuration-authority.md](configuration-authority.md) | Peri source adapters、纯 typed 规则、scoped snapshot/revision、解释与 CAS 更新；专属领域仍按能力边界扩展 |
-| ACP wire | [peri-acp-protocol.md](peri-acp-protocol.md) | 方法、事件、transport 与兼容语义 |
+| ACP wire | [peri-acp-protocol.md](peri-acp-protocol.md) | 方法、事件、transport、历史窗口与兼容语义 |
 | Model adapter | [model-adapters.md](model-adapters.md) | provider 无关协议、stream、retry 与观测 |
 | System Prompt | [system-prompt.md](system-prompt.md) | 冻结 base、request-time contribution 与 cache seam |
 | MetaHarness | [meta-harness.md](meta-harness.md) | 段落覆盖、middleware 关闭与冻结语义 |
@@ -33,17 +33,17 @@ draft、proposal、可行性探查、审计报告和未采纳方案不进入本�
 | Middleware | [middleware-system.md](middleware-system.md) | 生产链、hook、工具与 prompt contribution |
 | 工具系统 | [tool-system.md](tool-system.md) | session-local 可见性、ToolSearch 与执行边界 |
 | 交互 broker | [interaction-brokers.md](interaction-brokers.md) | Approval/Questions broker 与 transport 交互 |
-| 消息存储 | [message-transcript.md](message-transcript.md) | Transcript、MessageQueue、staging 与持久化 |
+| 消息存储 | [message-transcript.md](message-transcript.md) | Transcript、MessageQueue、staging 与持久化、有效上下文所有权与历史窗口边界 |
 | 会话身份、工作区归属与恢复 | [session-id-environment.md](session-id-environment.md) | Session ID 与机器归属、工作区发现与登记、执行绑定与恢复入口；进度与验收见 [2026-09 月志](../../spec/history/2026-09.md)（2026-09-30 条目） |
 | 用户待发送队列 | [user-input-queue.md](user-input-queue.md) | Mailbox、单条/全部投递、取回与运行身份 |
-| Compact | [micro-compact.md](micro-compact.md) | 压缩计划与 LLM projection |
+| Compact | [micro-compact.md](micro-compact.md) | 压缩计划与 LLM projection；手动 compact 有效集读取与窗口边界 |
 | Dynamic MCP | [dynamic-mcp.md](dynamic-mcp.md) | session 动态加载、目录发布与关闭 |
 | MCP 适配 v4-part-1 | [mcp-adaptation-v4-part-1.md](mcp-adaptation-v4-part-1.md) | System MCP 启动依赖、工具注入、MCP 隔离与 middleware 归属 |
 | MCP Apps relay | [mcp-multiplexing.md](mcp-multiplexing.md) | stdio Apps profile、binding lease 与多路数据隔离 |
 | Meta 数据访问 | [meta-control.md](meta-control.md) | 只读 session metadata CLI 与持久化边界 |
 | Workflow | [workflow.md](workflow.md) | Node wire、runner、任务与进度、journal/state、resume/kill、TUI 投影与 CLI/artifact 分发；MCP 接入与任务信道归 [workflow-mcp.md](workflow-mcp.md) |
 | Ultra-ADLC | [ultra-adlc.md](ultra-adlc.md) | 超大交付模式的文件协议与编排契约 |
-| TUI 数据流 | [tui-acp-data-flow.md](tui-acp-data-flow.md) | ACP event → Atom → render 链路 |
+| TUI 数据流 | [tui-acp-data-flow.md](tui-acp-data-flow.md) | ACP event → Atom → render 链路；历史窗口、段释放与提交时序 |
 | TUI 流式 Markdown 性能 | [tui-streaming-markdown-performance.md](tui-streaming-markdown-performance.md) | publication scheduler、lazy projection、增量 Markdown 与 slot index |
 | Git Watch 中间件 | [git-watch-middleware.md](git-watch-middleware.md) | 分支/HEAD 变化 Info 注入（异步采样 + 60s 节流） |
 | System Reminder | [system-reminder.md](system-reminder.md) | canonical DTO、可信生产、队列/持久化、ACP/TUI 投影与 legacy fallback |

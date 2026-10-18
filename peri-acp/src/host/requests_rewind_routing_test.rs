@@ -63,7 +63,7 @@ async fn test_rewind_preview_routes_to_dispatch() {
             ..PeriCaps::default()
         },
     );
-    let target_id = sessions.get(&sid).unwrap().history[2]
+    let target_id = sessions.get(&sid).unwrap().effective_messages()[2]
         .id()
         .as_uuid()
         .to_string();
@@ -149,7 +149,7 @@ async fn test_rewind_routes_to_dispatch() {
             ..PeriCaps::default()
         },
     );
-    let target_id = sessions.get(&sid).unwrap().history[0]
+    let target_id = sessions.get(&sid).unwrap().effective_messages()[0]
         .id()
         .as_uuid()
         .to_string();
@@ -179,10 +179,14 @@ async fn test_rewind_routes_to_dispatch() {
 
     assert_eq!(result.unwrap()["status"], "executed");
 
-    // P1：rewind 后 SessionState.history 必须截断——它是后续候选/预算查询的
+    // P1：rewind 后热态有效集合必须截断——它是后续候选/预算查询的
     // 数据源，不写回会导致第二次回退 not found。
     let s = sessions.get(&sid).unwrap();
-    assert_eq!(s.history.len(), 0, "回退到第一条后 history 应为空");
+    assert_eq!(
+        s.effective_messages().len(),
+        0,
+        "回退到第一条后 history 应为空"
+    );
     assert_eq!(
         s.history_payloads.len(),
         0,

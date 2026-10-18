@@ -499,6 +499,11 @@ pub static HISTORY_PAGES_TX: OnceLock<
     UnboundedSender<crate::kit::history_page_consumer::HistoryPageRequest>,
 > = OnceLock::new();
 
+/// S5.4 窗口请求通道（open/page/seek）；与旧分页通道独立。
+pub static HISTORY_WINDOW_TX: OnceLock<
+    UnboundedSender<crate::kit::history_page_consumer::WindowConsumerRequest>,
+> = OnceLock::new();
+
 /// 历史分页浏览状态（快照身份 / 下一游标 / 在途请求）。
 ///
 /// 写入方只有三处：初始 load 响应（`note_initial_cursor`）、触发侧认领在途请求、
@@ -506,6 +511,46 @@ pub static HISTORY_PAGES_TX: OnceLock<
 /// `project_session_boundary` 清空——它同时清空 committed，两者必须同源。
 pub(crate) static HISTORY_PAGING: AtomStatic<crate::kit::history_paging::HistoryPagingState> =
     AtomStatic::new(crate::kit::history_paging::HistoryPagingState::default);
+
+/// S5 窗口开关：默认 false；只有它与连接能力同时为真才走 `historyWindowV1`。
+pub static HISTORY_WINDOW_V1: AtomStatic<bool> = AtomStatic::new(|| false);
+/// 当前连接是否协商 `peri.historyWindowV1`（initialize 响应写入）。
+pub static HISTORY_WINDOW_CAPABLE: AtomStatic<bool> = AtomStatic::new(|| false);
+/// 桥接窗口当前代次；consumer 用它给页请求盖代次。
+pub static HISTORY_WINDOW_GENERATION: AtomStatic<u64> = AtomStatic::new(|| 0);
+/// S5.4 consumer 侧窗口请求/在途/待合并状态。
+pub(crate) static HISTORY_WINDOW_PAGING: AtomStatic<
+    crate::kit::history_page_consumer::WindowPagingState,
+> = AtomStatic::new(crate::kit::history_page_consumer::WindowPagingState::default);
+/// S5.6 窗口视口身份（桥接侧锚点，不按行号补偿）。
+pub static WINDOW_VIEWPORT: AtomStatic<Option<crate::kit::history_window::WindowViewport>> =
+    AtomStatic::new(|| None);
+/// 窗口页合并后发布的渲染单元身份 → 持久条目映射（真实视口发布用）。
+pub static WINDOW_UNIT_KEYS: AtomStatic<Vec<crate::kit::history_window::WindowUnitMapping>> =
+    AtomStatic::new(Vec::new);
+/// 锚点落在 gap 时的重读目标（桥接发布；滚动在视口无锚点时可消费）。
+pub(crate) static WINDOW_GAP_REQUEST: AtomStatic<
+    Option<crate::kit::history_paging::WindowGapRequest>,
+> = AtomStatic::new(|| None);
+/// 结构性释放代次：递增后渲染侧清空 slot/index 缓存。
+pub static STRUCTURAL_EPOCH: AtomStatic<u64> = AtomStatic::new(|| 0);
+/// 渲染侧已处理的结构性代次。
+pub static RENDER_ACHIEVED_EPOCH: AtomStatic<u64> = AtomStatic::new(|| 0);
+/// 渲染侧当前 retained 缓存字节（诊断）。
+pub static TUI_RENDER_CACHE_BYTES: AtomStatic<usize> = AtomStatic::new(|| 0);
+/// 占位 note hash → 详情描述符（由桥接发布；事件层据此打开详情）。
+pub static HISTORY_DETAIL_TARGETS: AtomStatic<
+    Vec<crate::kit::history_window::HistoryDetailTarget>,
+> = AtomStatic::new(Vec::new);
+/// inherited 未分段读取的显式提示（None = 无提示）。
+pub static HISTORY_INHERITED_NOTICE: AtomStatic<Option<String>> = AtomStatic::new(|| None);
+/// S7.3 当前详情窗口（只保留有界 chunks）。
+pub static HISTORY_DETAIL: AtomStatic<
+    Option<crate::kit::panels::history_detail::HistoryDetailWindow>,
+> = AtomStatic::new(|| None);
+/// 窗口诊断（释放/淘汰/预留账目）。
+pub static HISTORY_WINDOW_STATS: AtomStatic<crate::kit::history_window::HistoryWindowDiagnostics> =
+    AtomStatic::new(Default::default);
 
 /// 更早历史并入窗口的代数——桥接任务每次成功并入一页时 +1。
 ///

@@ -171,6 +171,17 @@ fn test_view_revision_advances_on_model_view_mutations() {
         rev,
         "mark_full_compaction_committed 不改视图"
     );
+    assert!(t.full_compaction_committed());
+    t.reset_full_compaction_committed();
+    assert!(
+        !t.full_compaction_committed(),
+        "the Full-commit flag is per turn and must reset without changing the view"
+    );
+    assert_eq!(
+        t.view_revision(),
+        rev,
+        "reset_full_compaction_committed 不改视图"
+    );
 
     // rebuild：整体替换内容，实例身份保留、修订号前进
     let rebuilt = t.rebuild(vec![(make_human("rebuilt"), MessageFlags::default())]);

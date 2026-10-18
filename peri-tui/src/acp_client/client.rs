@@ -79,6 +79,8 @@ pub enum AcpNotification {
         event: String,
         data: Value,
     },
+    /// S4 私有通知 `peri/history_committed`（展示提交事实）。
+    HistoryCommitted { session_id: String, params: Value },
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

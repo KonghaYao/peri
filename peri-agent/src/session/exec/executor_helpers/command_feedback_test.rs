@@ -95,12 +95,13 @@ fn make_intercept_request<'a>(
     InterceptRequest {
         mcp_pool: None,
         content,
-        history,
-        history_payloads: history
-            .iter()
-            .cloned()
-            .map(peri_acp_types::store::PersistedPayload::Message)
-            .collect(),
+        history_payloads: std::borrow::Cow::Owned(
+            history
+                .iter()
+                .cloned()
+                .map(peri_acp_types::store::PersistedPayload::Message)
+                .collect(),
+        ),
         cwd: "/tmp",
         session_id,
         cancel,

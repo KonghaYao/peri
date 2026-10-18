@@ -10,11 +10,15 @@ use async_trait::async_trait;
 use peri_acp_types::history_page::{
     HistoryCursor, HistoryForwardCursor, HistoryPage, HistoryPageBounds, HistorySegment,
 };
+use peri_acp_types::history_window::{
+    HistoryBodyChunk, HistoryCommittedTail, HistoryReadTicket, HistorySource,
+};
 use peri_acp_types::messages::MessageId;
 use peri_acp_types::session_resources::{
     ActiveSessionSnapshot, BindingState, ChildSnapshot, ForkSnapshot, FrozenSnapshotBytes,
-    NewSession, PersistenceRecovery, RewindBoundary, RewindOutcome, SessionMetaPatch,
-    SessionResourceResult, SessionSnapshot,
+    HistoryWindowPagePlan, HistoryWindowRows, NewSession, PersistenceRecovery, RewindBoundary,
+    RewindOutcome, SessionHistoryWindowBounds, SessionMetaPatch, SessionResourceResult,
+    SessionSnapshot,
 };
 use peri_acp_types::store::{CompactionChange, MessageFlags, PersistedPayload};
 use peri_acp_types::system_reminder::TrustedSystemReminder;
@@ -38,6 +42,7 @@ pub struct ChildResumeRecord {
 /// 每个 mutation 的领域后置条件与门面一致；adapter 可以自由选择实现机制
 /// （SQLite 同库塌缩为一个事务、远程 adapter 见其自身原子保证），但不得把
 /// 「未生效」报告成成功，也不得在失败后遗留部分写入。
+#[allow(clippy::too_many_arguments)] // 历史窗口参数为跨层固定契约，逐项显式传递，不包结构体
 #[async_trait]
 pub(crate) trait SessionDataPort: Send + Sync {
     async fn finish_close(&self, id: &ThreadId) -> SessionResourceResult<()>;
@@ -230,6 +235,71 @@ pub(crate) trait SessionDataPort: Send + Sync {
         _limit: usize,
         _byte_budget: usize,
     ) -> SessionResourceResult<HistorySegment> {
+        Err(
+            peri_acp_types::session_resources::SessionResourceError::new(
+                peri_acp_types::session_resources::SessionResourceErrorKind::Unsupported,
+            ),
+        )
+    }
+
+    /// 有界读取 `peri.historyWindowV1` 边界；默认失败，生产后端必须覆写。
+    async fn history_window_bounds(
+        &self,
+        _id: &ThreadId,
+    ) -> SessionResourceResult<SessionHistoryWindowBounds> {
+        Err(
+            peri_acp_types::session_resources::SessionResourceError::new(
+                peri_acp_types::session_resources::SessionResourceErrorKind::Unsupported,
+            ),
+        )
+    }
+
+    /// 有界读取窗口页；默认失败，生产后端必须在存储条件里限制区间与 tail。
+    async fn load_history_window_page(
+        &self,
+        _id: &ThreadId,
+        _plan: &HistoryWindowPagePlan,
+    ) -> SessionResourceResult<HistoryWindowRows> {
+        Err(
+            peri_acp_types::session_resources::SessionResourceError::new(
+                peri_acp_types::session_resources::SessionResourceErrorKind::Unsupported,
+            ),
+        )
+    }
+
+    /// 按稳定身份 seek；默认复用双向计划，page 读取未实现时同样 fail-closed。
+    async fn seek_history_window(
+        &self,
+        id: &ThreadId,
+        source: HistorySource,
+        anchor: MessageId,
+        before_limit: usize,
+        after_limit: usize,
+        byte_budget: usize,
+        committed_tail: &HistoryCommittedTail,
+    ) -> SessionResourceResult<HistoryWindowRows> {
+        let plan = HistoryWindowPagePlan::seek(
+            source,
+            anchor,
+            before_limit,
+            after_limit,
+            byte_budget,
+            committed_tail.clone(),
+        );
+        self.load_history_window_page(id, &plan).await
+    }
+
+    /// 有界正文分块；默认失败，不得退回完整历史读取。
+    async fn load_history_body_chunk(
+        &self,
+        _id: &ThreadId,
+        _source: HistorySource,
+        _entry_id: MessageId,
+        _offset: u64,
+        _max_bytes: u32,
+        _committed_tail: Option<&HistoryCommittedTail>,
+        _read_ticket: &HistoryReadTicket,
+    ) -> SessionResourceResult<HistoryBodyChunk> {
         Err(
             peri_acp_types::session_resources::SessionResourceError::new(
                 peri_acp_types::session_resources::SessionResourceErrorKind::Unsupported,

@@ -102,8 +102,8 @@ pub(super) async fn handle_rewind_preview(
 ///
 /// 失败路径不调用本函数（与 Compact 的提交契约一致：durable 失败不得改内存）。
 fn publish_rewind_view(state: &mut SessionState, effective: Vec<PersistedPayload>) {
-    state.history = message_projection(&effective);
     state.history_payloads = effective;
+    state.context_ownership = super::super::ContextOwnership::Resident;
 }
 
 /// 保留前缀的有效视图（纯计算）：清零集合里的 id 恢复有效，其余仍被排除的条目不在其中。
@@ -237,6 +237,14 @@ impl RewindPlan {
     }
 }
 
+/// 共享执行体把 `SessionResourceError` 折叠成反馈文本；当前授权边界没有 typed
+/// `MutationOutcome` 回传。该判定集中在这里，避免调用点散落字符串匹配。
+const PERSISTENCE_UNCERTAIN_MARKER: &str = "persistence outcome is unknown";
+
+fn is_persistence_uncertain(error: &AcpError) -> bool {
+    error.message.contains(PERSISTENCE_UNCERTAIN_MARKER)
+}
+
 fn require_rewind_cap(caps: &PeriCaps) -> Result<(), AcpError> {
     if caps.rewind {
         Ok(())
@@ -267,6 +275,13 @@ pub(super) async fn handle_rewind(
         if s.closing {
             return Err(AcpError::new(-32010, "Session is closing"));
         }
+        // 正文在在途执行器里时不能从存储重写热态：执行器结束时提交的结果才是权威。
+        if s.context_ownership == super::super::ContextOwnership::HandedOff {
+            return Err(AcpError::new(
+                -32010,
+                "Session context is owned by an in-flight prompt",
+            ));
+        }
         let local = s
             .environment
             .as_ref()
@@ -293,7 +308,11 @@ pub(super) async fn handle_rewind(
             cfg.session_manager.caps_registry(),
         ));
     let peri_config_snapshot = Arc::new(cfg.peri_config.read().clone());
-    let response = dispatch::rewind_execute(
+    if let Some(state) = sessions.get_mut(&session_id) {
+        // 窗口读取进入 mutation gate：新请求显式等待/拒绝，旧票据在结论出来前保留。
+        super::super::history_window::begin_rewind(state);
+    }
+    let commit = dispatch::rewind_execute(
         params,
         history,
         &cwd,
@@ -318,18 +337,39 @@ pub(super) async fn handle_rewind(
             effective_history,
         },
     )
-    .await?;
+    .await;
+    let mut response = match commit {
+        Ok(response) => response,
+        Err(error) => {
+            // 持久化 uncertain 的错误由 `SessionResourceError` 的稳定 Display 进入
+            // 共享执行体的 feedback；这里据此进入既有 ReloadRequired 语义。
+            let uncertain = is_persistence_uncertain(&error);
+            if let Some(state) = sessions.get_mut(&session_id) {
+                super::super::history_window::finish_rewind(state, false);
+                // 失败/未证明的提交不得继续信任旧窗口票据；structureVersion 仍只在
+                // durable 成功分支推进。
+                super::super::history_window::revoke(state);
+                if uncertain {
+                    state.history_payloads.clear();
+                    state.context_ownership = super::super::ContextOwnership::ReloadRequired;
+                    state.cancel_token = None;
+                    super::super::history_window::invalidate(state);
+                }
+            }
+            return Err(error);
+        }
+    };
     // 提交成功之后才重建热态；失败路径已在上面返回（含「边界已不在存储里」的
     // `BoundaryMissing`：存储一行未动，热态不得前进，结构版本也不得递增）。
-    let mut response = response;
     if let Some(state) = sessions.get_mut(&session_id) {
         // 结构版本与热态重建在同一个成功分支里推进：范围已变，已发出的分页游标作废。
         // 这里**只能递增一次**（本函数是 RPC rewind 的唯一成功出口）。
         state.structure_version = state.structure_version.saturating_add(1);
         publish_rewind_view(state, effective);
+        super::super::history_window::finish_rewind(state, true);
         // wire 里的 `history` 与热态投影共用同一份重建结果：执行体看到的是含归档正文的
         // 完整历史，直接把它当结果返回会把已归档的正文重新暴露给调用方。
-        response["history"] = json!(&state.history);
+        response["history"] = json!(state.effective_messages());
     }
     Ok(response)
 }
@@ -490,5 +530,19 @@ mod tests {
         assert!(canonical
             .plan("00000000-0000-0000-0000-000000000000")
             .is_err());
+    }
+
+    #[test]
+    fn persistence_uncertain_marker_is_centralized() {
+        let uncertain = AcpError::new(
+            -32603,
+            "rewind: 持久化提交失败: persistence outcome is unknown; reload the session (Unknown)",
+        );
+        assert!(is_persistence_uncertain(&uncertain));
+
+        let boundary = AcpError::new(-32013, "rewind: boundary is no longer in stored history");
+        assert!(!is_persistence_uncertain(&boundary));
+        let ordinary = AcpError::new(-32603, "rewind: 持久化提交失败: unavailable");
+        assert!(!is_persistence_uncertain(&ordinary));
     }
 }

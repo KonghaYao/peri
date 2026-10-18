@@ -39,7 +39,7 @@ async fn test_cancelled_compact_done_agrees_with_prompt_result() {
     };
     let registry = Arc::new(peri_acp::session::command::CommandRegistry::new());
     peri_acp::session::command::register_builtins(&registry);
-    let history = vec![BaseMessage::human("preserve me")];
+    let history = [BaseMessage::human("preserve me")];
     let ids: Vec<_> = history.iter().map(BaseMessage::id).collect();
     let cancel = CancellationToken::new();
     cancel.cancel();
@@ -51,12 +51,13 @@ async fn test_cancelled_compact_done_agrees_with_prompt_result() {
     let result = intercept_immediate_command(InterceptRequest {
         mcp_pool: None,
         content: &content,
-        history: &history,
-        history_payloads: history
-            .iter()
-            .cloned()
-            .map(PersistedPayload::Message)
-            .collect(),
+        history_payloads: std::borrow::Cow::Owned(
+            history
+                .iter()
+                .cloned()
+                .map(PersistedPayload::Message)
+                .collect(),
+        ),
         cwd: "/tmp",
         session_id: "audit-cancel",
         cancel: &cancel,

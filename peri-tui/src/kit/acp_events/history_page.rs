@@ -23,22 +23,95 @@
 //! 2. 桥接侧：本模块再核对响应自带的 `sessionId` / `snapshotToken` 与当前浏览状态，
 //!    以及桥接自己的 active session（`acp_bridge` 还会按事件携带的 session 过滤一次）。
 
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
 
 use parking_lot::Mutex;
 
 use super::BridgeState;
 use crate::kit::acp_types::AcpEventData;
 use crate::kit::atoms;
-use crate::kit::history_paging::{self, HistoryPageItem, HistoryPageResponse, PageEntry};
+use crate::kit::history_paging::{
+    self, HistoryPageItem, HistoryPageResponse, HistorySubItem, PageEntry,
+};
+use crate::kit::history_window::{HistorySource, ToolTerminalMeta};
 use crate::kit::tui_render_unit::{TuiRenderUnit, TuiSystemReminder, TuiUserBubble};
+
+/// 窗口/旧页共用的投影输入：持久身份 + 投影子项（尚未物化展示单元）。
+#[derive(Clone, Debug)]
+pub(super) struct ProjectionItem {
+    pub entry_id: String,
+    pub source: HistorySource,
+    pub position: Option<u64>,
+    pub sub_items: Vec<HistorySubItem>,
+}
+
+/// 投影结果：保留来源身份，供窗口路径去重与段边界使用。
+#[derive(Clone, Debug)]
+pub(super) struct ProjectedEntry {
+    pub entry_id: String,
+    pub source: HistorySource,
+    pub position: Option<u64>,
+    pub units: Vec<TuiRenderUnit>,
+}
 
 /// 已加载窗口里还没有起点的工具结束事件：`tool_id` → `(会话, 输出, 是否错误)`。
 ///
 /// 页边界会把 `tool_call` 与它的 `tool_call_update` 分到相邻两页，而**更晚**的一页
 /// 先被读到——那时卡片还不存在。留着它，等起点页并进来时补齐；会话一换就作废
 /// （结果不能跨会话错配到同 id 的卡片上）。
-type PendingToolResults = HashMap<String, (String, bool)>;
+const PENDING_TOOL_ENDS_LIMIT: usize = 256;
+const PENDING_TOOL_ENDS_BYTES_MAX: usize = 1024 * 1024;
+
+#[derive(Default)]
+struct PendingToolResults {
+    entries: HashMap<String, ToolTerminalMeta>,
+    order: VecDeque<String>,
+    bytes: usize,
+}
+
+impl PendingToolResults {
+    fn insert(&mut self, tool_id: String, meta: ToolTerminalMeta) {
+        if let Some(previous) = self.entries.remove(&tool_id) {
+            self.bytes = self.bytes.saturating_sub(previous.retained_bytes());
+            self.order.retain(|id| id != &tool_id);
+        }
+        while self.entries.len() >= PENDING_TOOL_ENDS_LIMIT
+            || self.bytes.saturating_add(meta.retained_bytes()) > PENDING_TOOL_ENDS_BYTES_MAX
+        {
+            let Some(oldest) = self.order.pop_front() else {
+                break;
+            };
+            if let Some(removed) = self.entries.remove(&oldest) {
+                self.bytes = self.bytes.saturating_sub(removed.retained_bytes());
+            }
+        }
+        if self.bytes.saturating_add(meta.retained_bytes()) > PENDING_TOOL_ENDS_BYTES_MAX {
+            return;
+        }
+        self.bytes = self.bytes.saturating_add(meta.retained_bytes());
+        self.order.push_back(tool_id.clone());
+        self.entries.insert(tool_id, meta);
+    }
+
+    fn remove(&mut self, tool_id: &str) -> Option<ToolTerminalMeta> {
+        let removed = self.entries.remove(tool_id)?;
+        self.bytes = self.bytes.saturating_sub(removed.retained_bytes());
+        self.order.retain(|id| id != tool_id);
+        Some(removed)
+    }
+
+    fn clear(&mut self) {
+        self.entries.clear();
+        self.order.clear();
+        self.bytes = 0;
+    }
+
+    #[allow(dead_code)]
+    fn len(&self) -> usize {
+        self.entries.len()
+    }
+}
+
 static PENDING_TOOL_ENDS: Mutex<Option<(String, PendingToolResults)>> = Mutex::new(None);
 
 /// 并入一页（桥接任务内调用；调用方已保证事件串行）。
@@ -104,7 +177,28 @@ fn accepts_page(state: &BridgeState, response: &HistoryPageResponse) -> bool {
 /// 工具卡片按 `tool_id` 在一页内配对：起点先到就原地升级成终态；终点先到（起点在更早一页）
 /// 就记进 [`PENDING_TOOL_ENDS`]，等起点页并进来时补齐。
 fn build_entries(state: &BridgeState, items: &[HistoryPageItem]) -> Vec<PageEntry> {
-    let mut entries: Vec<PageEntry> = Vec::with_capacity(items.len());
+    let projection: Vec<ProjectionItem> = items
+        .iter()
+        .map(|item| ProjectionItem {
+            entry_id: item.entry_id.clone(),
+            source: HistorySource::Own,
+            position: Some(item.position),
+            sub_items: item.sub_items.clone(),
+        })
+        .collect();
+    project_items(state, &projection)
+        .into_iter()
+        .map(|entry| PageEntry {
+            entry_id: entry.entry_id,
+            position: entry.position.unwrap_or(0),
+            units: entry.units,
+        })
+        .collect()
+}
+
+/// 复用同一份历史投影语义（reminder/tool/文本），窗口页也只调用这里。
+pub(super) fn project_items(state: &BridgeState, items: &[ProjectionItem]) -> Vec<ProjectedEntry> {
+    let mut entries: Vec<ProjectedEntry> = Vec::with_capacity(items.len());
     // 页内 `tool_id` → (条目下标, 单元下标)。
     let mut tool_slots: HashMap<String, (usize, usize)> = HashMap::new();
     for item in items {
@@ -156,7 +250,14 @@ fn build_entries(state: &BridgeState, items: &[HistoryPageItem]) -> Vec<PageEntr
                     ) {
                         // 起点在更早一页：先记下来，那一页并进来时补齐。
                         with_pending(|pending| {
-                            pending.insert(tool_id, (output_summary, is_error));
+                            pending.insert(
+                                tool_id,
+                                ToolTerminalMeta::new(
+                                    is_error,
+                                    output_summary.len(),
+                                    output_summary,
+                                ),
+                            );
                         });
                     }
                 }
@@ -175,8 +276,9 @@ fn build_entries(state: &BridgeState, items: &[HistoryPageItem]) -> Vec<PageEntr
         if units.is_empty() {
             continue;
         }
-        entries.push(PageEntry {
+        entries.push(ProjectedEntry {
             entry_id: item.entry_id.clone(),
+            source: item.source.clone(),
             position: item.position,
             units,
         });
@@ -186,7 +288,7 @@ fn build_entries(state: &BridgeState, items: &[HistoryPageItem]) -> Vec<PageEntr
 
 /// 页内配对：把已经放进 `entries` 的卡片原地升级成终态。
 fn complete_in_place(
-    entries: &mut [PageEntry],
+    entries: &mut [ProjectedEntry],
     tool_slots: &HashMap<String, (usize, usize)>,
     tool_id: &str,
     output_summary: &str,
@@ -206,11 +308,15 @@ fn complete_in_place(
 /// 历史页「结果先到、起点未到」的暂存结果会被补到同 `tool_id` 的实时卡片上
 /// （REQ-H03、A10：不得挂到当前实时 turn）。区间索引只覆盖历史页与回放的自有
 /// 条目，用它限定配对范围即可。
-fn apply_pending_tool_ends(state: &mut BridgeState, spans: &history_paging::HistorySpans) {
+pub(super) fn apply_pending_tool_ends(
+    state: &mut BridgeState,
+    spans: &history_paging::HistorySpans,
+) {
     let pending: Vec<(String, String, bool)> = with_pending(|pending| {
         pending
+            .entries
             .iter()
-            .map(|(tool_id, (output, is_error))| (tool_id.clone(), output.clone(), *is_error))
+            .map(|(tool_id, meta)| (tool_id.clone(), meta.summary.clone(), meta.is_error))
             .collect()
     });
     if pending.is_empty() {
@@ -237,17 +343,14 @@ fn apply_pending_tool_ends(state: &mut BridgeState, spans: &history_paging::Hist
             pending.remove(&tool_id);
         });
     }
-    with_pending(|pending| {
-        if pending.len() > PENDING_TOOL_ENDS_LIMIT {
-            // 上限只防无界增长（例如一整段终点都落在已加载窗口之前）：超出的先丢掉，
-            // 起点仍以「结果缺失」展示，只是不会错配到别的卡片上。
-            pending.clear();
-        }
-    });
+    // 预算/条数上限在插入时执行；这里不再整表清空。
 }
 
 /// 未配对终点的上限（超过即丢弃，避免长会话里无界增长）。
-const PENDING_TOOL_ENDS_LIMIT: usize = 256;
+/// 结构性释放：丢弃未配对终点（轻量引用，S6.5 预算化）。
+pub(super) fn clear_pending_tool_ends() {
+    *PENDING_TOOL_ENDS.lock() = None;
+}
 
 /// 测试清理：丢弃全部暂存终点。
 ///
@@ -255,7 +358,22 @@ const PENDING_TOOL_ENDS_LIMIT: usize = 256;
 /// （`tool_id` 撞名时）；清理点与写入点是同一份实现。
 #[cfg(test)]
 pub(crate) fn clear_pending_tool_ends_for_tests() {
-    *PENDING_TOOL_ENDS.lock() = None;
+    clear_pending_tool_ends();
+}
+
+#[cfg(test)]
+pub(crate) fn pending_tool_ends_fingerprint() -> (usize, usize) {
+    with_pending(|pending| (pending.len(), pending.bytes))
+}
+
+#[cfg(test)]
+pub(crate) fn insert_pending_tool_end_for_tests(tool_id: &str, output: &str, is_error: bool) {
+    with_pending(|pending| {
+        pending.insert(
+            tool_id.to_string(),
+            ToolTerminalMeta::new(is_error, output.len(), output),
+        );
+    });
 }
 
 /// 用回放路径同一份构造函数把「结果缺失」卡片升级成终态。
@@ -272,7 +390,8 @@ fn complete_unit(unit: TuiRenderUnit, output_summary: &str, is_error: bool) -> T
 fn with_pending<R>(f: impl FnOnce(&mut PendingToolResults) -> R) -> R {
     let session_id = atoms::ACTIVE_SESSION_ID.state().read().clone();
     let mut guard = PENDING_TOOL_ENDS.lock();
-    let (session, pending) = guard.get_or_insert_with(|| (session_id.clone(), HashMap::new()));
+    let (session, pending) =
+        guard.get_or_insert_with(|| (session_id.clone(), PendingToolResults::default()));
     if *session != session_id {
         pending.clear();
         *session = session_id;

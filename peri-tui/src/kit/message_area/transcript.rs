@@ -9,7 +9,8 @@ use crate::kit::atoms::{TranscriptPublication, ViewModelsSnapshot};
 use crate::kit::entry_render_cache::{EntryInvalidation, EntryRenderContext};
 use crate::kit::tui_render_unit::TuiRenderUnit;
 
-const HEAVY_CACHE_BUDGET: usize = 16 * 1024 * 1024;
+const HEAVY_CACHE_BUDGET: usize = 8 * 1024 * 1024;
+const HEAVY_CACHE_TARGET: usize = 6 * 1024 * 1024;
 
 /// entry 在时间轴上的起止列区间（§7）：文本区 = 基准列，过程区 = 右移 `indent`。
 ///
@@ -136,6 +137,7 @@ pub(super) struct Transcript {
     /// 已观测并配对的并入代数（`HISTORY_PREPEND_EPOCH`）——只在观测到**发布变化**
     /// 时推进，因此「epoch 先于发布被读到」不会漏配（见 `viewport_anchor` 模块文档 4.）。
     merge_epoch_seen: u64,
+    structural_epoch_seen: u64,
     pub(super) scanned_slots: usize,
     pub(super) updated_slots: usize,
     pub(super) evictions: usize,
@@ -161,7 +163,22 @@ impl Transcript {
         self.scanned_slots = 0;
         self.updated_slots = 0;
         self.evictions = 0;
-        let global = self.reset != reset
+        let structural_epoch = crate::kit::atoms::STRUCTURAL_EPOCH.get();
+        let structural_changed = structural_epoch != self.structural_epoch_seen;
+        if structural_changed {
+            for cache in caches.iter_mut() {
+                cache.evict();
+            }
+            self.bytes = vec![0; caches.len()];
+            self.stamps = vec![0; caches.len()];
+            self.recency.clear();
+            self.retained_bytes = 0;
+            self.index = Arc::new(SlotIndex::default());
+            self.generation = None;
+            self.structural_epoch_seen = structural_epoch;
+        }
+        let global = structural_changed
+            || self.reset != reset
             || self.grid != Some(grid)
             || self.width != width
             || self.context.as_ref().is_none_or(|previous| {
@@ -322,6 +339,28 @@ impl Transcript {
             self.touch(slot);
         }
         self.enforce_budget(caches, &viewport);
+        crate::kit::atoms::RENDER_ACHIEVED_EPOCH.set(
+            crate::kit::atoms::RENDER_ACHIEVED_EPOCH
+                .get()
+                .max(structural_epoch),
+        );
+        crate::kit::atoms::TUI_RENDER_CACHE_BYTES.set(self.retained_bytes);
+        if crate::kit::history_page_consumer::window_path_enabled() {
+            let handle = crate::kit::atoms::WINDOW_VIEWPORT.state();
+            let follow = handle
+                .read()
+                .as_ref()
+                .is_some_and(|viewport| viewport.follow_bottom);
+            if let Some(anchor) = ViewportAnchor::capture(&self.index, scroll_y) {
+                crate::kit::history_window::publish_viewport_from_token(
+                    anchor.window_token(),
+                    anchor.offset_within_unit(),
+                    follow,
+                );
+            } else {
+                crate::kit::history_window::publish_viewport_unanchored(follow);
+            }
+        }
         self.generation = Some(snapshot.generation);
         self.reset = reset;
         self.grid = Some(grid);
@@ -408,7 +447,14 @@ impl Transcript {
     }
 
     fn enforce_budget(&mut self, caches: &mut [VmCacheSlot], pinned: &std::ops::Range<usize>) {
-        self.evict_to_budget(caches, pinned, HEAVY_CACHE_BUDGET);
+        if self.retained_bytes > HEAVY_CACHE_BUDGET {
+            self.evict_to_budget(caches, pinned, HEAVY_CACHE_TARGET);
+        }
+    }
+
+    #[cfg(test)]
+    pub(super) fn render_cache_budgets() -> (usize, usize) {
+        (HEAVY_CACHE_BUDGET, HEAVY_CACHE_TARGET)
     }
 
     fn evict_to_budget(

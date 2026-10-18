@@ -52,6 +52,7 @@ pub(crate) fn measure_synthetic_wrap(lines: &[Line<'static>], width: u16) {
 mod transcript;
 mod transcript_index;
 mod viewport_anchor;
+pub(crate) use viewport_anchor::window_identity_token;
 mod vm_cache;
 
 #[cfg(test)]
@@ -849,3 +850,11 @@ mod tests;
 #[cfg(test)]
 #[path = "viewport_test.rs"]
 mod viewport_tests;
+
+#[cfg(test)]
+#[path = "window_viewport_test.rs"]
+mod window_viewport_tests;
+
+#[cfg(test)]
+#[path = "p_matrix_tui_test.rs"]
+mod p_matrix_tui_tests;

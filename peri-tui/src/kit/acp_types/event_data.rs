@@ -420,6 +420,23 @@ pub enum AcpEventData {
         response: Box<crate::kit::history_paging::HistoryPageResponse>,
     },
 
+    /// S4 私有通知 `peri/history_committed`：持久提交事实（展示段封印/水位）。
+    ///
+    /// 只更新窗口模型；不触发释放、不改变执行状态，也不作为 compact 完成依据。
+    HistoryCommitted(crate::kit::history_window::HistoryCommitInfo),
+
+    /// S5.4 窗口页响应（consumer 注入桥接任务，本地事件非 wire）。
+    HistoryWindowPageLoaded {
+        context: Box<crate::kit::history_page_consumer::window::WindowRequestContext>,
+        response: Box<crate::kit::history_paging::window::WindowPageResponse>,
+    },
+
+    /// consumer 检测到游标/身份失效：桥接窗口进入 Degraded，停止淘汰并保留可读内容。
+    HistoryWindowDegraded {
+        session_id: String,
+        reason: String,
+    },
+
     /// 回放条目位置标记：从 wire 的 `_meta.periEntryId` / `_meta.periPosition` 解出，
     /// 由 notifier 在实际回放通知**之前**注入桥接任务。
     ///
@@ -453,6 +470,12 @@ impl AcpEventData {
                 AcpEventData::TurnInterrupted { reason, request_id }
             }
             "turn-suspended" => AcpEventData::TurnSuspended,
+            "history-committed" => {
+                match crate::kit::history_window::HistoryCommitInfo::decode(&data) {
+                    Some(info) => AcpEventData::HistoryCommitted(info),
+                    None => AcpEventData::unknown(event, data),
+                }
+            }
 
             // §4.3 Status
             "tool-count" => decode_or_unknown(event, data, AcpEventData::ToolCount),

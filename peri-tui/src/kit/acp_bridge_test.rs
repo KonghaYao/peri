@@ -5,6 +5,8 @@ use serial_test::serial;
 
 #[path = "acp_bridge_cancel_test.rs"]
 mod cancel_tests;
+#[path = "acp_bridge_test/window_test.rs"]
+mod window_test;
 
 pub(super) fn scheduler_state() -> BridgeState {
     crate::kit::atoms::init_atoms();
@@ -30,6 +32,7 @@ pub(super) fn scheduler_state() -> BridgeState {
         pending_cache_usage: None,
         publication_intent: Default::default(),
         folded_history: Default::default(),
+        window: Default::default(),
     }
 }
 

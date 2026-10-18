@@ -1,6 +1,5 @@
 use std::collections::{BTreeMap, HashMap, HashSet};
 
-use peri_acp_types::beta_flags;
 use peri_acp_types::meta_harness::{
     BUILTIN_INSTANCE_POLICY_KEYS, BUILT_IN_SUBAGENTS_KEY, MIDDLEWARE_NAMES, SECTION_IDS,
 };
@@ -143,7 +142,7 @@ impl Profiles {
 
 /// `config.betas`：flag id → bool 的稀疏覆盖表（序列化形状即 `{"<id>": true}`）。
 ///
-/// 键必须在注册表（`peri_acp_types::beta_flags::BETA_FLAGS`）内；未知键在解析后由
+/// 键必须在 ACP 注册表或本 crate 的 TUI 本地 beta 白名单内；未知键在解析后由
 /// [`Self::validate`] 从内存剔除并 warn（不进入快照、投影与面板），磁盘残留键在
 /// 下一次经权威保存路径写回时清理。值必须是 bool：非 bool 使该来源解析失败，
 /// 不静默降级。
@@ -171,7 +170,7 @@ impl BetasConfig {
     /// 未知键剔除（`validate_meta_harness` 同款语义与接入点）。
     pub(crate) fn validate(&mut self) {
         self.overrides.retain(|id, _| {
-            if beta_flags::find(id).is_some() {
+            if crate::betas::is_known(id) {
                 true
             } else {
                 tracing::warn!(flag = %id, "config.betas: unknown flag id ignored");

@@ -45,9 +45,11 @@ async fn test_fork_registers_session_and_copies_history() {
                 .to_owned(),
             environment: None,
             closing: false,
-            history: vec![source_message],
+            context_ownership: crate::host::ContextOwnership::Resident,
             history_payloads: vec![source_payload],
             structure_version: 0,
+            session_generation: crate::host::next_session_generation(),
+            history_window: Default::default(),
             cancel_token: None,
             interaction_gate: Arc::new(tokio::sync::Mutex::new(())),
             host_request_seq: Arc::new(std::sync::atomic::AtomicU64::new(0)),
@@ -91,7 +93,7 @@ async fn test_fork_registers_session_and_copies_history() {
     assert_ne!(forked_message_id, source_message_id);
     assert_eq!(
         forked
-            .history
+            .effective_messages()
             .first()
             .expect("fork history projection")
             .id(),

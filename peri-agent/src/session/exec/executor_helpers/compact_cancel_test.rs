@@ -440,7 +440,7 @@ async fn run_case(mode: CommitMode, pause: HandlerPause, pre_cancel: bool) -> Ca
         &task_manager,
         lookup,
     );
-    req.history_payloads = payloads;
+    req.history_payloads = std::borrow::Cow::Owned(payloads);
     req.cwd = workspace.cwd.to_str().unwrap();
     req.session_resources = Some(store.clone());
     req.thread_id = Some(thread_id.clone());

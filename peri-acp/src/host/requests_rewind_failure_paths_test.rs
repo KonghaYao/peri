@@ -231,14 +231,14 @@ async fn test_rewind_methods_require_explicit_capability() {
     cfg.session_manager
         .caps_registry()
         .insert(sid.clone(), PeriCaps::default());
-    let target = sessions.get(&sid).unwrap().history[0]
+    let target = sessions.get(&sid).unwrap().effective_messages()[0]
         .id()
         .as_uuid()
         .to_string();
     let original: Vec<_> = sessions
         .get(&sid)
         .unwrap()
-        .history
+        .effective_messages()
         .iter()
         .map(|message| (message.id().as_uuid().to_string(), message.content()))
         .collect();
@@ -263,7 +263,7 @@ async fn test_rewind_methods_require_explicit_capability() {
     let current: Vec<_> = sessions
         .get(&sid)
         .unwrap()
-        .history
+        .effective_messages()
         .iter()
         .map(|message| (message.id().as_uuid().to_string(), message.content()))
         .collect();
@@ -292,7 +292,7 @@ async fn test_rewind_rejects_stale_preview_without_mutating_history() {
             ..PeriCaps::default()
         },
     );
-    let target_id = sessions.get(&sid).unwrap().history[0]
+    let target_id = sessions.get(&sid).unwrap().effective_messages()[0]
         .id()
         .as_uuid()
         .to_string();
@@ -317,7 +317,7 @@ async fn test_rewind_rejects_stale_preview_without_mutating_history() {
         )
         .await
         .unwrap();
-    let before = sessions.get(&sid).unwrap().history.len();
+    let before = sessions.get(&sid).unwrap().effective_messages().len();
     let stored_before = cfg
         .controller
         .sessions()
@@ -340,7 +340,10 @@ async fn test_rewind_rejects_stale_preview_without_mutating_history() {
     .unwrap_err();
 
     assert!(error.message.contains("preview is stale"));
-    assert_eq!(sessions.get(&sid).unwrap().history.len(), before);
+    assert_eq!(
+        sessions.get(&sid).unwrap().effective_messages().len(),
+        before
+    );
     assert_eq!(
         cfg.controller
             .sessions()

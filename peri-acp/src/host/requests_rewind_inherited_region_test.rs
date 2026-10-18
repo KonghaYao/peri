@@ -95,10 +95,6 @@ async fn register_child_with_inherited_history(
         .cloned()
         .chain([own_payloads[2].clone(), own_payloads[3].clone()])
         .collect();
-    let history: Vec<BaseMessage> = effective
-        .iter()
-        .filter_map(|payload| payload.as_message().cloned())
-        .collect();
     sessions.insert(
         sid.clone(),
         SessionState {
@@ -107,9 +103,11 @@ async fn register_child_with_inherited_history(
             cwd: workspace.cwd.to_str().unwrap().to_owned(),
             environment: None,
             closing: false,
-            history,
+            context_ownership: crate::host::ContextOwnership::Resident,
             history_payloads: effective,
             structure_version: 0,
+            session_generation: crate::host::next_session_generation(),
+            history_window: Default::default(),
             cancel_token: None,
             interaction_gate: std::sync::Arc::new(tokio::sync::Mutex::new(())),
             host_request_seq: std::sync::Arc::new(std::sync::atomic::AtomicU64::new(0)),

@@ -1,9 +1,7 @@
 use std::sync::Arc;
 
 use peri_acp_types::{
-    interaction::UserInteractionBroker,
-    messages::{BaseMessage, MessageContent},
-    session::SessionAccessPort,
+    interaction::UserInteractionBroker, messages::MessageContent, session::SessionAccessPort,
 };
 use tokio_util::sync::CancellationToken as AgentCancellationToken;
 
@@ -300,10 +298,9 @@ pub struct TurnInput {
     /// 有效集合的持久化历史（`excluded` 正文不在其中）：Phase 5 只据此种入 own 区。
     ///
     /// 喂入已排除正文会把释放的原文重新变成活跃 own 历史——排除标记不在有效 flags 里。
-    /// 完整 canonical 历史只从存储读取，不随执行输入传递。
+    /// 完整 canonical 历史只从存储读取，不随执行输入传递。需要消息投影的消费方
+    /// （keepgoing 判空、slash 命令）按需在短作用域内派生。
     pub history_payloads: Vec<peri_acp_types::store::PersistedPayload>,
-    /// Legacy message projection for compatibility-only consumers.
-    pub history: Vec<BaseMessage>,
     /// 上一轮 recall 注入项。
     pub incoming_recalls: Vec<String>,
     /// 后台任务结果（注入合成的 AgentResult tool_use/tool_result）。

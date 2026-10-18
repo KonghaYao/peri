@@ -221,7 +221,6 @@ async fn streamed_canonical_replay_of_a_live_session_still_reads_storage() {
     {
         let state = fixture.sessions.get_mut(&sid).unwrap();
         state.history_payloads = vec![live_tail];
-        state.history = vec![state.history[2].clone()];
     }
     fixture.reset_reads();
 

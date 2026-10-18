@@ -1274,3 +1274,6 @@ shell-detail-status-unobserved = 状态：未观察到当前执行
 # ---- 退出提示 ----
 
 exit-resume-hint = 恢复本会话：peri -r { $session }
+
+panel-title-history-detail = 历史详情
+panel-desc-history-detail = 超大历史条目详情

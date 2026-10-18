@@ -226,6 +226,7 @@ fn synthetic_scheduler_state() -> BridgeState {
         pending_cache_usage: None,
         publication_intent: Default::default(),
         folded_history: Default::default(),
+        window: Default::default(),
     }
 }
 
@@ -404,6 +405,10 @@ fn apply_bridge_reset(state: &mut BridgeState, last_reset_counter: &mut u64, cou
     *last_reset_counter = counter;
     state.active_session_id = active_session_id;
     state.committed = im::Vector::new();
+    state.window.reset();
+    crate::kit::history_page_consumer::reset_window_paging_state();
+    crate::kit::history_window::clear_window_viewport();
+    crate::kit::atoms::HISTORY_DETAIL.set(None);
     state.current_turn.reset();
     state.folded_history = Default::default();
     state.publication_intent = PublicationIntent::None;
@@ -520,6 +525,12 @@ fn spawn_acp_bridge_inner(
             pending_cache_usage: None,
             publication_intent: Default::default(),
             folded_history: Default::default(),
+            window: crate::kit::history_window::HistoryWindow::new(
+                crate::kit::history_window::HistoryWindowConfig {
+                    history_window_v1: crate::kit::atoms::HISTORY_WINDOW_V1.get(),
+                    ..Default::default()
+                },
+            ),
         };
 
         // 追踪 BRIDGE_RESET_COUNTER——submit_consumer 的 /clear / thread_load

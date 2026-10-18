@@ -41,6 +41,63 @@ pub(in crate::sessions) const HISTORY_PAGE_BODY_SQL: &str =
 pub(in crate::sessions) const ACTIVE_ENTRY_POSITIONS_SQL: &str =
     "SELECT message_id, rowid FROM messages WHERE thread_id = ?1 AND excluded = 0 ORDER BY rowid ASC";
 
+// ─── 窗口读取（peri.historyWindowV1，archive 视图） ──────────────────────────
+
+/// 窗口边界：own 最旧/最新稳定身份、最新 durable 位置、冻结前缀是否存在。
+///
+/// 不取 `content`，也不做聚合；会话不存在时没有行（`NotFound`）。最新行缺失与位置缺失
+/// 必须同时成立或同时缺失，代码在解码处显式校验，不用 `COALESCE` 兜底。
+pub(in crate::sessions) const HISTORY_WINDOW_BOUNDS_SQL: &str = "SELECT
+        (SELECT m.message_id FROM messages m WHERE m.thread_id = t.id ORDER BY m.rowid ASC LIMIT 1),
+        (SELECT m.message_id FROM messages m WHERE m.thread_id = t.id ORDER BY m.rowid DESC LIMIT 1),
+        (SELECT m.rowid FROM messages m WHERE m.thread_id = t.id ORDER BY m.rowid DESC LIMIT 1),
+        (SELECT CASE WHEN t.inherited_context IS NULL OR t.inherited_context = '' THEN 0 ELSE 1 END)
+    FROM threads t WHERE t.id = ?1";
+
+/// 最近一次可由现有 canonical 行重建的 Full checkpoint：最新一条被 `superseded_by`
+/// 指向的摘要行。`json_valid` 让旧版/损坏投影不阻断边界读取；没有匹配即没有 checkpoint。
+pub(in crate::sessions) const HISTORY_WINDOW_CHECKPOINT_SQL: &str = "SELECT s.message_id, s.rowid
+    FROM messages e
+    JOIN messages s ON s.thread_id = e.thread_id
+      AND s.message_id = CASE WHEN json_valid(e.projection)
+          THEN json_extract(e.projection, '$.superseded_by') END
+    WHERE e.thread_id = ?1 AND e.excluded <> 0
+    ORDER BY s.rowid DESC LIMIT 1";
+
+/// 当前 durable tail（最新一行）。
+pub(in crate::sessions) const HISTORY_WINDOW_LATEST_SQL: &str =
+    "SELECT message_id, rowid FROM messages WHERE thread_id = ?1 ORDER BY rowid DESC LIMIT 1";
+
+/// 锚点存在性（游标/seek 的身份是 `message_id`，rowid 只是内部区间键）。
+pub(in crate::sessions) const HISTORY_WINDOW_ANCHOR_SQL: &str =
+    "SELECT rowid FROM messages WHERE thread_id = ?1 AND message_id = ?2";
+
+/// 固定 tail 复核：身份与位置必须同时仍成立；新 append 不影响它。
+pub(in crate::sessions) const HISTORY_WINDOW_TAIL_CHECK_SQL: &str =
+    "SELECT 1 FROM messages WHERE thread_id = ?1 AND message_id = ?2 AND rowid = ?3 LIMIT 1";
+
+/// before 方向候选：`rowid <= tail`，并按锚点身份定位；`?4` 为 1 时包含锚点自身
+/// （seek/open(entry)），为 0 时严格更早（游标翻页）。最多 `limit + 1` 行，不取正文。
+pub(in crate::sessions) const HISTORY_WINDOW_BEFORE_SQL: &str =
+    "SELECT message_id, rowid, length(CAST(content AS BLOB))
+    FROM messages
+    WHERE thread_id = ?1 AND rowid <= ?2
+      AND (?3 IS NULL OR rowid < ?3 OR (?4 <> 0 AND rowid = ?3))
+    ORDER BY rowid DESC LIMIT ?5";
+
+/// after 方向候选：`anchor < rowid <= tail`，升序，最多 `limit + 1` 行，不取正文。
+pub(in crate::sessions) const HISTORY_WINDOW_AFTER_SQL: &str =
+    "SELECT message_id, rowid, length(CAST(content AS BLOB))
+    FROM messages
+    WHERE thread_id = ?1 AND rowid <= ?2 AND rowid > ?3
+    ORDER BY rowid ASC LIMIT ?4";
+
+/// 超大条目的有界块读取：长度 + `substr` 原始字节，**不** `SELECT content` 后切片。
+pub(in crate::sessions) const HISTORY_WINDOW_BODY_CHUNK_SQL: &str =
+    "SELECT length(CAST(content AS BLOB)), substr(CAST(content AS BLOB), ?3 + 1, ?4)
+    FROM messages
+    WHERE thread_id = ?1 AND message_id = ?2 AND rowid <= ?5";
+
 // ─── 向前段读取（canonical 完整回放，REQ §5.3） ──────────────────────────────
 
 /// 段读取的边界事实：会话存在吗 + 本次回放的固定上界（该线程自有行的最大 `rowid`，
@@ -317,7 +374,7 @@ impl SqliteSessionData {
     /// 与 [`Self::read_history_page`] 的调用方同一事务：两阶段必须落在同一个快照上，否则
     /// 「按长度定的页」与「取回的正文」可能来自两个时刻。每个 id 恰好一行、行内 id 必须
     /// 与请求一致，否则是损坏——不完整读取绝不能降级成「这一行没有正文」。
-    async fn read_page_bodies(
+    pub(super) async fn read_page_bodies(
         connection: &mut SqliteConnection,
         id: &ThreadId,
         ids: &[MessageId],
@@ -577,3 +634,78 @@ async fn clear_rewind_excluded(
     }
     Ok(())
 }
+
+// ─── inherited 冻结前缀（S7.4） ───────────────────────────────────────────────
+
+/// 冻结继承快照的边界事实：父会话 id、字节长度、条目数、首尾序列化 payload。
+/// `json_valid` 失败用 -1 表示，调用方按损坏失败关闭；不取整列到 Rust。
+pub(in crate::sessions) const HISTORY_WINDOW_INHERITED_BOUNDS_SQL: &str = "SELECT
+        t.parent_thread_id,
+        length(CAST(t.inherited_context AS BLOB)),
+        CASE
+          WHEN t.inherited_context IS NULL OR t.inherited_context = '' THEN 0
+          WHEN json_valid(t.inherited_context) THEN json_array_length(t.inherited_context, '$.payloads')
+          ELSE -1
+        END,
+        CASE
+          WHEN t.inherited_context IS NULL OR t.inherited_context = '' OR NOT json_valid(t.inherited_context) THEN NULL
+          ELSE json_extract(t.inherited_context, '$.payloads[0]')
+        END,
+        CASE
+          WHEN t.inherited_context IS NULL OR t.inherited_context = '' OR NOT json_valid(t.inherited_context) THEN NULL
+          WHEN json_array_length(t.inherited_context, '$.payloads') = 0 THEN NULL
+          ELSE json_extract(
+            t.inherited_context,
+            '$.payloads[' || (json_array_length(t.inherited_context, '$.payloads') - 1) || ']'
+          )
+        END,
+        CASE
+          WHEN t.inherited_context IS NULL OR t.inherited_context = '' THEN NULL
+          ELSE json_type(t.inherited_context, '$.payloads')
+        END,
+        CASE
+          WHEN t.inherited_context IS NULL OR t.inherited_context = '' THEN NULL
+          ELSE json_extract(t.inherited_context, '$.version')
+        END
+    FROM threads t WHERE t.id = ?1";
+
+/// 按稳定 message id 定位冻结快照中的数组下标。
+pub(in crate::sessions) const HISTORY_WINDOW_INHERITED_ANCHOR_SQL: &str = "SELECT je.key
+    FROM threads t, json_each(t.inherited_context, '$.payloads') je
+    WHERE t.id = ?1
+      AND (
+        json_extract(je.value, '$.message.id') = ?2
+        OR json_extract(je.value, '$.id') = ?2
+      )
+    LIMIT 1";
+
+/// before 候选：key 降序，最多 limit+1 行；只取 id、key、长度，不取正文。
+pub(in crate::sessions) const HISTORY_WINDOW_INHERITED_BEFORE_SQL: &str = "SELECT
+        je.key,
+        COALESCE(json_extract(je.value, '$.message.id'), json_extract(je.value, '$.id')),
+        length(CAST(je.value AS BLOB))
+    FROM threads t, json_each(t.inherited_context, '$.payloads') je
+    WHERE t.id = ?1
+      AND (?2 IS NULL OR je.key < ?2 OR (?3 <> 0 AND je.key = ?2))
+    ORDER BY je.key DESC LIMIT ?4";
+
+/// after 候选：key 升序，最多 limit+1 行；只取 id、key、长度，不取正文。
+pub(in crate::sessions) const HISTORY_WINDOW_INHERITED_AFTER_SQL: &str = "SELECT
+        je.key,
+        COALESCE(json_extract(je.value, '$.message.id'), json_extract(je.value, '$.id')),
+        length(CAST(je.value AS BLOB))
+    FROM threads t, json_each(t.inherited_context, '$.payloads') je
+    WHERE t.id = ?1 AND je.key > ?2
+    ORDER BY je.key ASC LIMIT ?3";
+
+/// 按数组下标读取一条序列化 payload（阶段二，仅选中行）。
+pub(in crate::sessions) const HISTORY_WINDOW_INHERITED_BODY_SQL: &str = "SELECT je.value
+    FROM threads t, json_each(t.inherited_context, '$.payloads') je
+    WHERE t.id = ?1 AND je.key = ?2";
+
+/// 按数组下标读取有界正文块。
+pub(in crate::sessions) const HISTORY_WINDOW_INHERITED_CHUNK_SQL: &str =
+    "SELECT length(CAST(je.value AS BLOB)),
+            substr(CAST(je.value AS BLOB), ?3 + 1, ?4)
+    FROM threads t, json_each(t.inherited_context, '$.payloads') je
+    WHERE t.id = ?1 AND je.key = ?2";

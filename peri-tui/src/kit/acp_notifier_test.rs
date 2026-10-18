@@ -1,5 +1,40 @@
 use super::*;
 use serde_json::json;
+#[test]
+fn test_history_committed_notification_forwards_typed_event() {
+    use peri_acp_types::history_window::HistoryCommittedTail;
+    use peri_acp_types::messages::MessageId;
+    use peri_acp_types::thread::ThreadId;
+
+    let (bridge_tx, mut bridge_rx) = mpsc::unbounded_channel::<AcpEventWithEpoch>();
+    let tail =
+        HistoryCommittedTail::new(&ThreadId::from("s1".to_string()), MessageId::new(), 10).encode();
+    let payload = json!({
+        "sessionId": "s1",
+        "sessionGeneration": "gen-1",
+        "structureVersion": 7,
+        "checkpointId": "cp-1",
+        "summaryEntryId": null,
+        "committedTail": tail,
+        "hint": { "kind": "open", "anchor": { "kind": "latest" } }
+    });
+    let owner = forward_notification(
+        &bridge_tx,
+        AcpNotification::HistoryCommitted {
+            session_id: "s1".into(),
+            params: payload,
+        },
+    );
+    assert!(owner.is_none());
+    let event = bridge_rx.try_recv().expect("commit event");
+    assert_eq!(event.active_session_id, "s1");
+    assert!(matches!(
+        event.event,
+        AcpEventData::HistoryCommitted(info)
+            if info.checkpoint_id == "cp-1" && info.structure_version == 7
+    ));
+}
+
 fn spawn_test_notifier() -> (
     mpsc::UnboundedSender<AcpNotification>,
     mpsc::UnboundedReceiver<AcpEventWithEpoch>,

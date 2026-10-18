@@ -694,7 +694,6 @@ pub(super) fn make_turn_input(
             .cloned()
             .map(peri_acp_types::store::PersistedPayload::Message)
             .collect(),
-        history,
         incoming_recalls: vec![],
         bg_results: vec![],
         langfuse: None,

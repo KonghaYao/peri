@@ -251,6 +251,20 @@ fn forward_notification(
                 warn!(error = %error, "kit ACP notifier: bridge closed, dropping interaction terminal");
             }
         }
+        AcpNotification::HistoryCommitted { session_id, params } => {
+            match crate::kit::history_window::HistoryCommitInfo::decode(&params) {
+                Some(info) => {
+                    let wrapped =
+                        wrap_with_session(AcpEventData::HistoryCommitted(info), session_id);
+                    if let Err(e) = bridge_tx.send(wrapped) {
+                        warn!(error = %e, "kit ACP notifier: bridge_tx closed, dropping history commit");
+                    }
+                }
+                None => {
+                    warn!("kit ACP notifier: history_committed payload is malformed, dropping");
+                }
+            }
+        }
         AcpNotification::Peri { .. } | AcpNotification::Other { .. } => {
             debug!("kit ACP notifier: notification variant not yet handled, dropping");
         }

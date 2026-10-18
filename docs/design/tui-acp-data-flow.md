@@ -84,6 +84,123 @@ BridgeState.committed + CurrentTurn
 固定帧预算内合并连续主 Agent 更新，但首块边界、终态和 reset 必须及时发布。Markdown、wrap
 和 viewport 性能契约见 [TUI 流式 Markdown 性能设计](tui-streaming-markdown-performance.md)。
 
+## 历史窗口与段生命周期（默认关闭）
+
+`peri.historyWindowV1` 复用 `session/load` 的 `history` 字段（`open`/`page`/`seek`），正文分块
+走 `session/history/body`；提交事实经私有通知 `peri/history_committed` 送达。该路径默认关闭：
+连接能力未协商或 TUI `HISTORY_WINDOW_V1` 开关未开启时，旧 `HISTORY_PAGING` 分页与渲染路径
+保持不变，所有已加载历史继续固定、不淘汰。开关只决定是否采用窗口模型，不改变协议协商结果。
+`HISTORY_WINDOW_V1` 由 settings beta `history-window-v1`（默认 false）在启动时读取一次并写入 atom；
+设置变更不热重载，重启后生效。仍要求服务端 `peri.historyWindowV1` 协商同时为真。Beta 设置面板
+仍只列 `peri-acp-types::beta_flags::BETA_FLAGS`，该键需手动写入 settings。
+
+### 请求与通知时序
+
+1. `initialize` 协商 `peri.historyWindowV1`；TUI 启动时已从 beta `history-window-v1` 写入
+   `HISTORY_WINDOW_V1`（只写一次，无热重载），它（默认 false）与服务端协商结果同时为真才走窗口路径。
+2. `history_page_consumer/window.rs` 在发请求前登记 `PageReservation`（目标 512 KiB + 解码开销），
+   受 `in_flight + pending_merge` 上限约束；预算不足先尝试释放，仍不足则不发送请求。
+3. `session/load` 的 `history.open/page/seek` 经 ACP transport 到达 Host；Host 在生命周期路由
+   之前分流，短锁校验 session/ticket 后在锁外读取存储，返回前再次校验并投影为 `items[]`。
+4. consumer 只在响应自带的 `sessionId`、`sessionGeneration`、`snapshotToken`、
+   `windowGeneration`、`requestId` 全部匹配时交给 bridge；bridge 再校验当前浏览身份。
+   迟到页整页丢弃并归还预留，不合并、不留下半页。
+5. bridge 通过一次释放/接纳事务把新段并入 `committed`，登记 `DisplayLedger`、`ResidentIndex`、
+   段边界游标与 `WINDOW_UNIT_KEYS`，随后只发布一次快照。
+6. `peri/history_committed` 到达后按 `checkpointId` 幂等封印 durable 段；通知丢失时下一次
+   `history.open` 的 `committedTail` 是唯一重新对齐入口。
+
+### 窗口模型、预算与释放
+
+1. `BridgeState.committed: im::Vector<TuiRenderUnit>` 仍是展示正文的唯一强持有者。
+   `HistoryWindow` 只保存持久身份（`source + entryId + subItem`）、`SegmentKey`、条目/单元计数、
+   字节账目、`durable/sealed/pins`、gap 与锚点，不复制正文。
+2. 段来源区分 `Replay`、`Page`、`LiveSeal`；`SegmentKey` 是本地生命周期句柄，不进入 wire、
+   不参与锚点或工具配对。窗口换代后旧键全部作废。
+3. 初始预算（实施初值，不是性能结论）：历史展示正文 16 MiB、页预留上限 2 MiB、
+   普通页目标 512 KiB、页条目 50/最多 100、未配对工具结果 1 MiB/256 条、详情窗口 4 MiB、
+   释放水位 75%、预取门槛 8 MiB、渲染缓存 8 MiB 且超限降到 6 MiB。live、运行中、未持久化
+   与继承段计入 `pinned_bytes`（不可淘汰，但仍是 body 占用）；全部固定时接纳显式失败，
+   不能把归档正文长期计为固定。
+4. 接纳先按字节判断再构造展示单元；超预算时按“距锚点最远 → 最久未访问 → 最早创建”生成
+   `ReleasePlan`，跳过所有 pin。全固定时拒绝接纳并记录 `evict_blocked_pinned`，不释放未持久化内容。
+5. 统一释放事务只允许在 bridge 串行链调用。顺序是：移除 `committed` 对应槽位范围 → 清
+   `DisplayLedger`/`HistorySpans`/`ResidentIndex` → 失效折叠历史、装饰历史与分组缓存 →
+   清未配对工具结果、选择/焦点与 `WINDOW_UNIT_KEYS` → 递增 `structural_epoch` 并发布局部快照。
+   正文与派生缓存释放后先记入 `pending_release`；渲染侧观察到新 `STRUCTURAL_EPOCH`、清空
+   受影响 slot 并写回 `RENDER_ACHIEVED_EPOCH` 后，预算才归还。
+6. 释放段变成 `HistoryGap`，保存前后稳定身份与 `beforeCursor/afterCursor`；相邻 gap 合并。
+   翻到 gap 时用游标 page，锚点在中间时用 `seek` 按稳定 `entryId` 重新定位；锚点缺失不跳底。
+7. 视口所在段与其相邻段在 compact 后保留；其余已 durable/sealed 段才可释放。释放不写回
+   存储，不调用工具完成、Todo、审批、workflow 或输入队列 handler，不改变 phase/request/turn 身份。
+
+### 提交、失效与降级
+
+1. `CompactCompleted` 仍只显示提示，不触发段释放，也不作为核心提交依据。`TurnDone` 只把
+   `current_turn` 归档并标记未确认；没有持久身份回执的内容不淘汰。
+2. `peri/history_committed` 只发给当前持票连接，按 `checkpointId` 幂等；它封印位置
+   `<= committedTail` 的段，并把未持久化 pin 升级为 durable。缺口由下一次 `open` 对齐。
+3. 每个 session 只有一个活动 ticket，且绑定发起 open 的连接。新 open 成功才原子替换旧 ticket；
+   open 失败保留旧 ticket/snapshot/generation 继续可用。
+4. `page`/`seek`/`body` 在存储读取前和返回前校验 `sessionGeneration`、`structureVersion`、
+   ticket epoch、`snapshotToken` 与 `committedTail`。rewind durable 成功恰好推进
+   `structureVersion + 1` 并撤销 ticket；失败不推进；持久化不确定撤销票据并进入
+   `ReloadRequired`，旧窗口 fail-closed。
+5. rewind、关闭重开、session 切换或身份不匹配时递增 `window_generation`，取消在途请求，
+   丢弃迟到页；旧页不得合入新窗口。能力缺失、游标失效或通知丢失进入 `Degraded`：停止淘汰、
+   保留可读内容与重试入口，禁止自动回退完整 `session/load`。
+
+### 超大条目与详情（S7.3 已交付）
+
+服务端定义 `items[].body` 内联描述符（`totalBytes`/`chunkSize`/`readTicket`/`snapshotToken`）
+与 `session/history/body` 有界分块（默认 64 KiB、最大 256 KiB，`bytes` 为 JSON 数字数组），
+并受当前 snapshot tail 与 descriptor 白名单约束；非 oversize 条目或越过 tail 的读取返回 `-32016`。
+
+TUI 侧由 `PanelKind::HistoryDetail` + `HistoryDetailPanel`（`kit/panels/history_detail.rs`）承接，
+复用现有 `PanelOverlay`：
+
+1. 占位 note 按 `content_hash` 命中 descriptor，Enter 打开；Esc/q 关闭；Up/Down/PageUp/PageDown
+   滚动，滚动到未加载区间时发 `session/history/body` 请求；`e` 按现有剪贴板惯例复制已加载正文。
+2. `load_history_body` 请求带 `sessionId/entryId/source/snapshotToken/readTicket/offset/maxBytes`，
+   响应 `{entryId, offset, bytes, nextOffset, complete}`；同一 descriptor 单在途请求。
+3. 跨块字节按连续前缀重组，UTF-8 在整体解码时校验；详情窗口预算 4 MiB，超预算淘汰离视口最远的块；
+   关闭面板/session 边界/失败路径清空 chunks，`Weak` 证据见 `detail_close_releases_chunk_allocations`。
+4. inherited 来源使用 `HistorySource::Inherited { frozen_snapshot_id, ancestor_thread_id }`；
+   open 响应 `inherited` 对象、条目 `position:null`；inherited 段固定不释放，详情按冻结 snapshot
+   读取。`inheritedUnsupported=true` 在详情面板与通知中显式提示，不回退父会话当前历史。
+5. 限制：鼠标单击只设焦点，需再 Enter 打开；`e` 是复制已加载正文，文件导出/超窗流式导出尚未接
+   入 UI（模型 `export_stream` 已支持分块）；未做 JSON 字段级展示；inherited 段内部不插入独立
+   占位行，使用全局 inherited notice。TUI 解码仍接受旧顶层 `bodyDescriptors` 兼容输入，服务端已
+   不再发送该形状。
+
+### 对象级证据与已知限制
+
+进度与验收记录见 active spec；本节只固定当前实现边界，避免把目标写成现状。
+
+释放验收不以条目数或 RSS 为唯一证据。`release_removes_committed_and_invalidates_holders_before_ack`
+在释放 + 渲染 ack 后断言 `Weak<TuiAssistantBubble>` 无法升级、各 holder 指纹清空；
+`structural_epoch_drops_old_slot_lines_and_uses_8mib_to_6mib_budget` 与
+`structural_epoch_with_empty_snapshot_reaches_zero_retained_bytes` 断言旧 slot 行缓存被丢弃且
+`retained_bytes() == 0`；`pending_release_keeps_budget_conservative_until_ack` 与
+`release_ack_is_idempotent_and_late_ack_does_not_double_credit` 断言预算结算；页链路由
+`bidirectional_page_requests_keep_placement_and_cursors`、
+`stale_or_late_response_is_dropped_and_reservation_released`、
+`one_in_flight_and_one_pending_merge_are_enforced` 覆盖。
+
+已知未完成项：
+
+- 折叠组/子 Agent 组尚未真正惰性化：构造时 `im::Vector` 结构共享、不深复制正文，但释放只
+  整体失效 `FoldedHistory`/分组缓存，没有按段惰性物化与精准清理。
+- `structural_epoch` 目前清空全部渲染 slot，未按段精准清理。
+- 旧分页路径仍使用轻量静态 `PENDING_TOOL_ENDS`，未完全迁移到 `ResidentIndex`。
+- 详情交互限制：鼠标单击只设焦点，需再 Enter 打开；`e` 复制已加载正文，文件导出/超窗流式
+  导出尚未接入 UI（模型 `export_stream` 已支持分块）；未做 JSON 字段级展示；inherited 段内部
+  不插入独立占位行。
+- beta 设置面板仍只列 `BETA_FLAGS`；`history-window-v1` 需手动写入 settings，且 TUI 只在启动
+  读取一次、无热重载。
+- remote/emscripten adapter 未实现窗口/继承读取，默认 `Unsupported`；readTicket 无密码学签名；
+  rewind 不确定态仍依赖集中文本 marker。
+
 ## 状态模型
 
 ### Transcript
@@ -117,7 +234,8 @@ snapshot/event 重建。
 | tool start/update | 按调用 identity 原地更新 tool activity；历史 replay 走同一语义归约 |
 | plan / usage / context metadata | 更新计划或资源投影，不伪装成普通消息 |
 | turn terminal / suspended / execution failure | 归档、回滚或保留当前回合，并退出 loading |
-| compact / rewind | 显示系统语义或以服务端 snapshot 重建 transcript |
+| compact / rewind | `CompactCompleted` 只显示提示；`peri/history_committed` 按提交水位封印 durable 段并驱动预算释放；rewind 以服务端 snapshot 重建 transcript 并失效旧窗口与游标 |
+| 历史窗口 | `open/page/seek` 响应按稳定身份并入段窗口；gap/seek 恢复被释放区间；`session/history/body` 只读详情分块 |
 | SubAgent | 按 source/instance 归组并更新生命周期 |
 | background task / workflow / plugin | 更新独立 atom、通知或管理面板 snapshot |
 | AskUser / permission / OAuth | 注册 durable interaction owner，再发布对应交互 surface |
@@ -134,7 +252,8 @@ Root cache coverage 只使用当前 root turn 最近一次有效 observation；a
 Bridge 的 session phase 至少区分 idle、prompt running 与 history replay；渲染 variant 不等于
 执行 phase。正常终态、取消、中断、挂起和执行失败必须有明确处理：
 
-- 正常结束：归档 `CurrentTurn`，停止 loading，再按队列策略继续；
+- 正常结束：归档 `CurrentTurn`，停止 loading，再按队列策略继续；窗口路径只有拿到持久提交回执
+  的段才可封印/淘汰；
 - 中断：按 request/session identity 拒绝 stale terminal；有输出时保留可审计内容，无输出时
   才恢复对应输入，不影响更新一代提交；
 - 挂起：归档可见内容并停止 loading，但不把仍存活 Agent 误判为完成，也不提前 drain 输入；
@@ -194,6 +313,10 @@ SubAgent、后台 task、Cron、Workflow 和 plugin 数据不应混入 `CurrentT
    认证、受众授权、限长和终端控制字符处理独立有效。
 9. **增量渲染**：流式更新只失效变化 slot；viewport 外内容不做无界重复 wrap/clone。
 10. **可验证变更**：跨层事件修改同步更新协议、mapper、TUI decoder/reducer、caps 和测试。
+11. **窗口默认关闭**：未协商 `peri.historyWindowV1` 或 TUI 开关未开启时，旧分页/渲染路径不变；
+    窗口失败进入 `Degraded`，不以完整 `session/load` 兜底。
+12. **释放有界**：只有 durable/sealed 且无 pin 的段可释放；正文唯一强持有者是 `committed`，
+    释放必须走统一事务并等待渲染 ack，存储历史不因 UI 淘汰而改变。
 
 ## 事实源
 
@@ -201,6 +324,7 @@ SubAgent、后台 task、Cron、Workflow 和 plugin 数据不应混入 `CurrentT
 - ACP host/session/event：[`docs/code-index/peri-acp.md`](../code-index/peri-acp.md)
 - Agent loop/session：[`docs/code-index/peri-agent.md`](../code-index/peri-agent.md)
 - ACP wire：[peri-acp-protocol.md](peri-acp-protocol.md)
+- 历史窗口/段生命周期：本文「历史窗口与段生命周期」与 [消息存储](message-transcript.md) §2.8
 - transcript 持久化：[message-transcript.md](message-transcript.md)
 - TUI 工具与交互目标：[tui-chat-workbench.md](tui-chat-workbench.md)
 - SubAgent 目标展示：[tui-subagent-activity.md](tui-subagent-activity.md)

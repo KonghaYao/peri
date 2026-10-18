@@ -142,7 +142,7 @@ async fn make_server_config_with_bridge(
     (cfg, Arc::new(bridge))
 }
 
-async fn build_server_config(
+pub(in crate::host) async fn build_server_config(
     peri_config: PeriConfig,
     provider: LlmProvider,
     tmp: &tempfile::TempDir,
@@ -307,7 +307,7 @@ async fn register_session_with_history(
     cwd: &str,
     cfg: &AcpServerConfig,
 ) -> String {
-    let history = vec![
+    let history = [
         peri_acp_types::messages::BaseMessage::human("第一轮用户问题"),
         peri_acp_types::messages::BaseMessage::ai("第一轮回答"),
         peri_acp_types::messages::BaseMessage::human("第二轮用户问题"),
@@ -343,9 +343,11 @@ async fn register_session_with_history(
             cwd: workspace.cwd.to_str().unwrap().to_owned(),
             environment: None,
             closing: false,
-            history,
+            context_ownership: crate::host::ContextOwnership::Resident,
             history_payloads,
             structure_version: 0,
+            session_generation: crate::host::next_session_generation(),
+            history_window: Default::default(),
             cancel_token: None,
             interaction_gate: Arc::new(tokio::sync::Mutex::new(())),
             host_request_seq: Arc::new(std::sync::atomic::AtomicU64::new(0)),
@@ -697,9 +699,11 @@ async fn register_session_with_workflow(
                 .to_owned(),
             environment: None,
             closing: false,
-            history: Vec::new(),
+            context_ownership: crate::host::ContextOwnership::Resident,
             history_payloads: Vec::new(),
             structure_version: 0,
+            session_generation: crate::host::next_session_generation(),
+            history_window: Default::default(),
             cancel_token: None,
             interaction_gate: Arc::new(tokio::sync::Mutex::new(())),
             host_request_seq: Arc::new(std::sync::atomic::AtomicU64::new(0)),

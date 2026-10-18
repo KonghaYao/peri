@@ -28,7 +28,12 @@ use crate::{dispatch, transport::types::AcpError};
 pub(crate) mod restore;
 #[path = "session_apps_capability.rs"]
 mod session_apps_capability;
-pub(crate) use restore::{handle_context, handle_load, handle_metadata, handle_resume};
+#[cfg(test)]
+pub(crate) use restore::cleanup_unpublished_restore;
+pub(crate) use restore::{
+    handle_context, handle_fork_shared, handle_load, handle_load_shared, handle_metadata,
+    handle_resume, handle_resume_shared,
+};
 use restore::{identity_response, prepare_existing, response_identity};
 use session_apps_capability::apps_capability;
 
@@ -451,9 +456,11 @@ pub(crate) async fn new_session_from_prepared(
             cwd: cwd.clone(),
             environment: environment.clone(),
             closing: false,
-            history: Vec::new(),
+            context_ownership: crate::host::ContextOwnership::Resident,
             history_payloads: Vec::new(),
             structure_version: 0,
+            session_generation: crate::host::next_session_generation(),
+            history_window: Default::default(),
             cancel_token: None,
             // session-owned 交互门：环境自带（router 借用同一 Arc，跨轮共享）。
             interaction_gate: super::super::workspace_interaction::session_interaction_gate(
@@ -711,6 +718,8 @@ pub(crate) async fn handle_delete(
         .map_err(super::super::workspace::workspace_error)
 }
 
+/// 进程内/测试入口；生产 `ServerLoop` 使用 [`restore::handle_fork_shared`]
+/// （短锁准备 + 锁外 fork I/O）。
 pub(crate) async fn handle_fork(
     params: &Value,
     cfg: &AcpServerConfig,
@@ -860,12 +869,11 @@ pub(crate) async fn handle_fork(
             cwd: cwd.to_string(),
             environment: environment.clone(),
             closing: false,
-            history: published_payloads
-                .iter()
-                .filter_map(|payload| payload.as_message().cloned())
-                .collect(),
+            context_ownership: crate::host::ContextOwnership::Resident,
             history_payloads: published_payloads,
             structure_version: 0,
+            session_generation: crate::host::next_session_generation(),
+            history_window: Default::default(),
             cancel_token: None,
             // session-owned 交互门：环境自带（router 借用同一 Arc，跨轮共享）。
             interaction_gate: super::super::workspace_interaction::session_interaction_gate(

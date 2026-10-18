@@ -1276,3 +1276,6 @@ shell-detail-status-unobserved = Status: no current execution observed
 # ---- Exit hints ----
 
 exit-resume-hint = To resume this session: peri -r { $session }
+
+panel-title-history-detail = History Detail
+panel-desc-history-detail = Oversized history entry detail

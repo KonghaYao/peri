@@ -2,6 +2,7 @@
 
 use super::*;
 use crate::thread::ThreadId;
+use crate::workspace::WorkspaceError;
 
 fn thread_id() -> ThreadId {
     ThreadId::from("0197f3f0-0000-7000-8000-000000000001".to_string())
@@ -342,4 +343,69 @@ async fn load_history_segment_defaults_to_unsupported() {
         resumed.kind(),
         SessionResourceErrorKind::Unsupported
     ));
+}
+
+/// 没有实现窗口读取的后端必须显式失败：空边界/空页/空块都是合法结果，不能用它们
+/// 冒充「这个会话没有历史」或「已经读完」。
+#[tokio::test]
+async fn history_window_reads_default_to_unsupported() {
+    use crate::history_window::{
+        HistoryCommittedTail, HistoryReadTicket, HistorySource, HistoryWindowDirection,
+    };
+
+    let resources = SegmentlessResources;
+    let id = thread_id();
+    let plan = HistoryWindowPagePlan::open(
+        HistorySource::Own,
+        None,
+        HistoryWindowDirection::Around,
+        8,
+        8,
+        1024,
+    );
+    let tail = HistoryCommittedTail::new(&id, MessageId::new(), 1);
+    let inherited_plan = HistoryWindowPagePlan {
+        intent: HistoryWindowReadIntent::Open,
+        source: HistorySource::inherited("inherited:default"),
+        anchor: None,
+        direction: HistoryWindowDirection::Before,
+        include_anchor: false,
+        before_limit: 8,
+        after_limit: 0,
+        byte_budget: 1024,
+        tail: HistoryWindowTailExpectation::Fixed(None),
+    };
+
+    for error in [
+        resources.history_window_bounds(&id).await.unwrap_err(),
+        resources
+            .load_history_window_page(&id, &plan)
+            .await
+            .unwrap_err(),
+        resources
+            .load_history_window_page(&id, &inherited_plan)
+            .await
+            .unwrap_err(),
+        resources
+            .seek_history_window(&id, HistorySource::Own, MessageId::new(), 8, 8, 1024, &tail)
+            .await
+            .unwrap_err(),
+        resources
+            .load_history_body_chunk(
+                &id,
+                HistorySource::Own,
+                MessageId::new(),
+                0,
+                16,
+                Some(&tail),
+                &HistoryReadTicket::new("ticket"),
+            )
+            .await
+            .unwrap_err(),
+    ] {
+        assert!(matches!(
+            error.kind(),
+            SessionResourceErrorKind::Unsupported
+        ));
+    }
 }
