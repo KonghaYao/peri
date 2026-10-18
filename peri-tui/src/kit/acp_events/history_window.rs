@@ -513,10 +513,11 @@ fn prepare_open_display(
             // 摘除后仍有 live 尾部时，open 页中实际仍由 committed 持有的条目
             // 只登记身份，阻止后续翻页重复插入；是否持有由消息身份判定，不用
             // 位置水位推断（已被淘汰的历史条目也高于水位）。
-            // `live_empty` 必须参与：流式 turn 中 open 页可能包含尚未经 live
-            // 路径渲染的新条目，此时 adopt 会把正文藏起来；宁可让页插入，
-            // 也不丢内容（见 `reopen_after_streaming_turn_does_not_duplicate_prior_page`）。
-            adopt_enabled = live_empty && !state.committed.is_empty();
+            // adopt 与 live 区域是否为空解耦：`RetainedLiveEntries` 只认
+            // committed 中实际持有的身份，仅存在于流式 turn 的条目不会被采纳，
+            // 仍照常插入；反之，新一轮正在流式时 committed 里已完成的条目也必须
+            // adopt，否则重开页会把它们重复插入。
+            adopt_enabled = !state.committed.is_empty();
             if snapshot.displayed_slot_ranges.is_empty() && !state.committed.is_empty() {
                 // adopt-only：账本没有可摘除的正文，剩余 committed 全是 live 尾部
                 // （无论 live 区域当前是否为空）。本页未被 adopt 的条目属于 live

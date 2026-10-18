@@ -182,6 +182,67 @@ fn reopen_adopts_only_entries_actually_retained_by_live_tail() {
 
 #[test]
 #[serial]
+fn reopen_while_streaming_still_adopts_committed_entries() {
+    use crate::kit::tui_render_unit::{TuiRenderUnit, TuiUserBubble};
+
+    let (mut state, _guard) = state_with_window();
+    load_page(
+        &mut state,
+        "r1",
+        WindowPagePlacement::Tail,
+        vec![text_item("m1", 10, "one")],
+    );
+
+    // 上一轮已完成的消息仍在 committed：重开页会再次返回同一持久条目。
+    let display_generation = state.generation;
+    state.committed.push_back(TuiRenderUnit::TuiUserBubble(
+        TuiUserBubble::new("held answer".to_string()).with_message_id("m-held"),
+    ));
+    push_view_models(&mut state);
+    // 新一轮正在流式：live 区域非空。这不应禁用对 committed 已持有条目的
+    // adopt，否则重开页会把它们重复插入（复审 CR-2）。
+    state.current_turn.append_text("streaming", Some("m-live"));
+
+    let identity = WindowIdentity::new("s1", "gen-2", 8, "snap-2");
+    dispatch_open(
+        &mut state,
+        "r-open",
+        identity,
+        display_generation,
+        vec![
+            text_item("m-fresh", 20, "history"),
+            text_item("m-held", 30, "held answer"),
+        ],
+    );
+    push_view_models(&mut state);
+
+    let texts = committed_texts(&state);
+    assert_eq!(
+        texts
+            .iter()
+            .filter(|text| text.as_str() == "held answer")
+            .count(),
+        1,
+        "committed 已持有的条目不得因流式区域非空而重复插入"
+    );
+    assert!(
+        texts.iter().any(|text| text.as_str() == "history"),
+        "未被持有的条目照常插入"
+    );
+    assert!(
+        state
+            .window
+            .is_entry_displayed(&PersistentEntryKey::own("s1:m-held")),
+        "committed 持有条目只登记展示身份"
+    );
+    assert!(
+        state.current_turn.text.contains("streaming"),
+        "窗口切换不得改写正在流式的 live 区域"
+    );
+}
+
+#[test]
+#[serial]
 fn adopt_only_ledger_survives_next_identity_switch() {
     use crate::kit::tui_render_unit::{TuiRenderUnit, TuiUserBubble};
 
