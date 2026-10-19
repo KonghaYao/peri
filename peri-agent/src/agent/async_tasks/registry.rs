@@ -188,7 +188,9 @@ impl Default for BackgroundTaskRegistry {
 }
 
 impl BackgroundTaskRegistry {
-    pub const SHELL_LIMIT: usize = 5;
+    /// 后台 shell 并发上限。多 Agent 会话共享同一实例，5 槽易被长驻任务占满；
+    /// 2026-10-19 按容量决策调整为 20。
+    pub const SHELL_LIMIT: usize = 20;
     pub const WORKFLOW_LIMIT: usize = 3;
 
     /// per-kind 并发上限：`None` = 不限额。
