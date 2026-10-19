@@ -294,6 +294,21 @@ fn hint_prefix(key: &str) -> String {
     i18n::tr(key).chars().take(6).collect()
 }
 
+/// [回归] 60 列窄面板：Agents 表按右栏宽度收缩，末列 Tools 仍落在可视区内。
+///
+/// 旧实现写死 50 列（80 列终端下右栏仅 46 列），Tools 列被裁到面板外。
+#[test]
+#[serial]
+fn agent_table_columns_fit_narrow_panel() {
+    let _guard = WorkflowGuard::install(vec![rich_run("a")], Some("s-test"));
+    let _kill = KillGuard::install();
+
+    let buf = mount_panel_frames(2, |_, _| {});
+    let text = buffer_text(&buf);
+    assert!(text.contains("Tokens"), "Tokens 表头应可见：{text}");
+    assert!(text.contains("Tools"), "Tools 表头应可见：{text}");
+}
+
 // ── 选中身份：run id（不是下标）────────────────────────────────────────
 
 /// [回归] 快照重排后选中项跟随 run id：外部选中 a 之后重排，仍选中 a。
@@ -597,13 +612,84 @@ fn test_selected_run_index_after_snapshot_shrinks() {
 }
 
 #[test]
-fn test_agent_table_header_model_column_aligns_with_row_prefix() {
-    let header = agent_table_header("Model");
-    let model_start = header.find("Model").expect("model header");
+fn test_agent_table_header_columns_align_with_rows() {
+    let columns = AgentTableColumns::for_width(51);
+    let header = agent_table_header("Model", &columns);
     assert_eq!(
-        model_start,
-        super::AGENT_ROW_LEADING_COLS + super::AGENT_NAME_COL_WIDTH
+        UnicodeWidthStr::width(header.as_str()),
+        columns.row_width(),
+        "表头与数据行同宽"
     );
+    assert_eq!(
+        header.find("Model").expect("model header"),
+        AGENT_ROW_LEADING_COLS + AGENT_NAME_COL_WIDTH + 1,
+        "Model 表头与数据行同一列起点"
+    );
+    assert_eq!(
+        header.find("Tokens").expect("tokens header"),
+        AGENT_ROW_LEADING_COLS + AGENT_NAME_COL_WIDTH + 1 + MODEL_COL_WIDTH + 1
+    );
+    assert_eq!(
+        header.find("Tools").expect("tools header"),
+        AGENT_ROW_LEADING_COLS
+            + AGENT_NAME_COL_WIDTH
+            + 1
+            + MODEL_COL_WIDTH
+            + 1
+            + TOKENS_COL_WIDTH
+            + 2
+    );
+}
+
+/// [回归] 列宽随右栏可用宽度收缩：任何宽度下行宽都不越界，且名称列始终保留。
+#[test]
+fn test_agent_table_columns_adapt_to_available_width() {
+    let full = AgentTableColumns::for_width(51);
+    assert_eq!(
+        full,
+        AgentTableColumns {
+            name: 18,
+            model: Some(12),
+            tokens: true,
+            tools: true,
+        }
+    );
+    assert_eq!(full.row_width(), 51);
+
+    // 80 列终端：面板 80 → 左栏 32 + 分隔线 1 → 右栏 47，扣滚动条 1 列 = 46
+    let at_eighty = AgentTableColumns::for_width(46);
+    assert_eq!(
+        at_eighty,
+        AgentTableColumns {
+            name: 18,
+            model: Some(7),
+            tokens: true,
+            tools: true,
+        }
+    );
+    assert_eq!(at_eighty.row_width(), 46);
+
+    // 60 列终端：右栏 35，扣滚动条 = 34 → 名称收缩，Model 隐藏，指标列保留
+    let narrow = AgentTableColumns::for_width(34);
+    assert_eq!(
+        narrow,
+        AgentTableColumns {
+            name: 14,
+            model: None,
+            tokens: true,
+            tools: true,
+        }
+    );
+    assert_eq!(narrow.row_width(), 34);
+
+    for width in 5..=34 {
+        let columns = AgentTableColumns::for_width(width);
+        assert!(
+            columns.row_width() <= width,
+            "width={width} 时表格越界: {columns:?}"
+        );
+        assert!(columns.name >= 1, "名称列不得消失: {columns:?}");
+    }
 }
 
 /// [单测] Model 列 Unicode 宽度截断 helper：ASCII/CJK 均按终端显示宽度

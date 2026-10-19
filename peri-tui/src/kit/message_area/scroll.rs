@@ -19,9 +19,12 @@ pub(super) use self::event::handle_event;
 use self::geometry::round_divide;
 pub(super) use self::geometry::{ScrollbarDragState, is_scrollbar_column};
 use self::geometry::{compute_thumb_geometry, position_to_scroll_y, thumb_start_to_position};
-pub(super) use self::gesture::{DragAction, drag_step, freeze_down_index, settle_up};
+pub(super) use self::gesture::{
+    DragAction, drag_step, freeze_down_index, release_upgrades, settle_up,
+    text_selection_accepts_pointer,
+};
 #[cfg(test)]
-use self::gesture::{entry_click_target, freeze_down, is_click};
+use self::gesture::{entry_click_target, freeze_down, is_click, is_click_for};
 use self::gesture::{selection_bounds_on_release, selection_captures_pointer, selection_position};
 use self::throttle::apply_scroll;
 pub(super) use self::throttle::{
@@ -140,6 +143,10 @@ pub(super) struct AutoFollowCtx {
     /// （结果回写 → 派生扫描不到 → None）后恢复原语义，不强制 follow
     /// （§15「提交后转为只读结果行且不抢回 viewport」）。
     pub anchor_visual_range: Option<(usize, usize)>,
+    /// [F6] 文本拖选手势（Pending/Armed）进行中：暂停**输出增长驱动**的吸底
+    /// 跟随，否则鼠标不动也会被新内容推走、选区意外扩大。用户滚轮/键盘滚动
+    /// 仍照常更新 follow_bottom；手势结束后按原粘性语义继续。
+    pub selection_active: bool,
 }
 
 // ── 测试 ─────────────────────────────────────────────────────────────────

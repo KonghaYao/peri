@@ -4,7 +4,8 @@ use std::time::Duration;
 use crate::kit::focus_router;
 use crate::kit::message_area::props::{ScrollbarFields, mouse_in_area};
 use crate::kit::message_area::selection::{
-    SlotIndex, copy_to_clipboard, extract_visual_range_index,
+    AnchorResolution, SlotIndex, capture_selection_anchor, copy_to_clipboard,
+    extract_visual_range_index, relocate_selection_start,
 };
 use crate::kit::mouse_router;
 use crate::kit::text_selection::TextSelection;
@@ -15,9 +16,9 @@ use ratatui_kit::ratatui::layout::Rect;
 use super::{
     DragAction, DragThrottle, GesturePending, SCROLL_LINES, ScrollPos, ScrollThrottle,
     ScrollbarDragState, apply_scroll, compute_thumb_geometry, drag_step, freeze_down_index,
-    is_scrollbar_column, position_to_scroll_y, scroll_frame_ms, selection_bounds_on_release,
-    selection_captures_pointer, selection_position, settle_up, thumb_start_to_position,
-    update_follow_on_scroll,
+    is_scrollbar_column, position_to_scroll_y, release_upgrades, scroll_frame_ms,
+    selection_bounds_on_release, selection_captures_pointer, selection_position, settle_up,
+    text_selection_accepts_pointer, thumb_start_to_position, update_follow_on_scroll,
 };
 
 // ── 鼠标事件处理 ─────────────────────────────────────────────────────────
@@ -181,6 +182,29 @@ pub(super) fn request_gap_page_after_scroll(
     crate::kit::history_page_consumer::request_window_gap_if_due(direction)
 }
 
+/// 统一取消入口：结束任何未完成/已升级的左键手势，不触发复制或折叠。
+///
+/// [Why 统一] 遮挡、窗口失焦、新的 Left Down 都会让旧的 Up 永远不达；
+/// 若只清其中一部分状态，下一次普通单击会沿用旧起点并误复制（F4）。
+fn cancel_left_gesture(
+    text_sel: &State<TextSelection>,
+    gesture: &State<Option<GesturePending>>,
+    scrollbar_drag: &State<ScrollbarDragState>,
+) {
+    let stale = {
+        let sel = text_sel.read();
+        sel.dragging || sel.start.is_some() || sel.end.is_some() || sel.selected_text.is_some()
+    };
+    if stale {
+        text_sel.write().clear();
+    }
+    *gesture.write_no_update() = None;
+    let scrollbar_active = scrollbar_drag.read().active;
+    if scrollbar_active {
+        scrollbar_drag.write_no_update().active = false;
+    }
+}
+
 /// 从 `use_event_handler` 闭包提取的鼠标/键盘处理逻辑。
 /// 包含：鼠标滚轮节流、文本拖拽选中（Down/Drag/Up）、键盘滚动、
 /// PERI_DISABLE_DRAG_SELECT 分支、parking_lot 死锁规避。
@@ -210,23 +234,27 @@ pub(in crate::kit::message_area) fn handle_event(
         let _ = focus_router::message_accepts_key(key);
     }
 
+    // 窗口失焦会丢失后续 Up（例如切换到其他终端窗口后松开）——与遮挡走同一
+    // 取消入口，明确结束手势且不复制/不折叠。返回 Ignored：其他 handler
+    // （输入区光标等）仍需要处理焦点事件。
+    if matches!(event, Event::FocusLost) {
+        cancel_left_gesture(text_sel, gesture, scrollbar_drag);
+        return EventResult::Ignored;
+    }
+
     if let Event::Mouse(mouse) = &event {
+        // 新的左键按下无条件终结上一轮手势：上一轮 Up 可能因窗口焦点转换等
+        // 原因丢失，旧 starting/dragging 不能泄漏到本次单击（F4）。
+        if matches!(mouse.kind, MouseEventKind::Down(MouseButton::Left)) {
+            cancel_left_gesture(text_sel, gesture, scrollbar_drag);
+        }
         // 弹窗或面板激活时不处理鼠标——放行给前景 handler（如模型快速切换弹窗覆盖
         // 消息区时，点击行必须由弹窗消费，否则这里会先 Consumed 吃掉事件）。
         // [Why] 但拖拽残留状态必须在此清理：遮挡时下方 Up 分支（scrollbar_drag /
         // gesture / text_sel 复位）永远不会执行，拖拽中途弹窗打开会
         // 残留 dragging 状态，弹窗关闭后下一次点击被误判为拖拽（误复制/点击错乱）。
         if mouse_router::is_occluded() {
-            // render 不依赖 active / gesture，用 write_no_update 避免 wake 噪音
-            scrollbar_drag.write_no_update().active = false;
-            *gesture.write_no_update() = None;
-            // [TRAP] 先 copy 出 dragging 再 write——parking_lot 同 thread read+write
-            // 冲突会 panic（与下方 Up 分支同一模式）。
-            if text_sel.read().dragging {
-                // 与正常 Up 分支一致（复制后 clear() 全清 start/end/dragging）；
-                // 用 write() 触发 wake，渲染清除高亮，避免弹窗关闭后选区残留。
-                text_sel.write().clear();
-            }
+            cancel_left_gesture(text_sel, gesture, scrollbar_drag);
             // [弹窗滚轮放行] 居中弹窗（HITL 授权等）只覆盖屏幕中部，弹窗外消息区
             // 仍可见——滚轮事件在弹窗矩形外放行给消息区滚动（审批弹窗打开时
             // 用户仍可滚动 chat 查看上下文）；点击类事件保持遮挡（避免误触发
@@ -405,12 +433,22 @@ pub(in crate::kit::message_area) fn handle_event(
                 .unwrap_or(false);
 
             // ── 文本选中处理（消息区内 Down/Drag/Up）──
-            if (in_area || selection_captured) && !drag_select_disabled {
+            // [F2] Down 的接收范围是收窄前的外框（居中带左右留白也可起拖）；
+            // 后续 Drag/Up 由 Pending/Armed 捕获，或在文本带内接收。
+            let outer_area = scrollbar_rect.unwrap_or(area);
+            let in_outer_area = mouse_in_area(mouse.row, mouse.column, outer_area);
+            let accepts_text_pointer = text_selection_accepts_pointer(
+                in_area,
+                in_outer_area,
+                selection_captured,
+                mouse.kind,
+            );
+            if accepts_text_pointer && !drag_select_disabled {
                 match mouse.kind {
                     MouseEventKind::Down(MouseButton::Left) => {
                         // 记录手势意图（Pending）：冻结屏幕坐标 + 一次性换算的
                         // 内容坐标 + entry header 命中测试。不改任何可视状态——
-                        // 真实拖动（Drag 超容差）才升级为拖拽。
+                        // 真实拖动（越过单击判定）才升级为拖拽。
                         // [TRAP] gesture 只在事件处理器内读写，render 不依赖
                         // 它——用 write_no_update 避免 wake 噪音（render 不需要
                         // 因为这个状态变化而重渲染，后续 Drag 升级才是真正的
@@ -418,13 +456,16 @@ pub(in crate::kit::message_area) fn handle_event(
                         let scroll_y = scroll_state.read().offset();
                         // [usize 视觉行] 滚动偏移 usize 化后，视觉行直接相加——
                         // 超长内容（>65535 视觉行）下选中中间行不再被 u16 clamp 截断错位。
-                        let visual_row = mouse.row.saturating_sub(area.y) as usize + scroll_y;
-                        // 视口裁剪后无边框，visual_col 直接 = mouse.column - area.x
-                        let visual_col = mouse.column.saturating_sub(area.x);
+                        // [F2] 留白起拖时列坐标钳到正文边缘（左 0 / 右 width）。
+                        let (visual_row, visual_col) =
+                            selection_position(area, (mouse.column, mouse.row), scroll_y);
                         let pending = freeze_down_index(
                             (mouse.column, mouse.row),
                             (visual_row, visual_col),
                             slot_index,
+                            // 留白没有文本：不冻结 entry 命中，避免留白单击
+                            // 误触发 header 折叠。
+                            in_area,
                         );
                         *gesture.write_no_update() = Some(pending);
                         return EventResult::Consumed;
@@ -459,7 +500,13 @@ pub(in crate::kit::message_area) fn handle_event(
                                     // start 恒为 Down 冻结的 visual——升级判定
                                     // 前移后 start_drag 只在升级瞬间调用一次
                                     // （不受节流）。
-                                    sel_guard.start_drag(p.visual.0, p.visual.1);
+                                    // [F5] 同时记录起点单元的稳定身份：历史页
+                                    // 前插后按身份重解析，不把旧行号解释成新内容。
+                                    sel_guard.start_drag_anchored(
+                                        p.visual.0,
+                                        p.visual.1,
+                                        capture_selection_anchor(slot_index, p.visual),
+                                    );
                                     sel_guard.update_drag(visual_row, visual_col);
                                 }
                                 // [Armed 表达] 升级后 gesture 复位（None）：
@@ -478,7 +525,19 @@ pub(in crate::kit::message_area) fn handle_event(
                                 let scroll_y = scroll_state.read().offset();
                                 let (visual_row, visual_col) =
                                     selection_position(area, (mouse.column, mouse.row), scroll_y);
-                                text_sel.write().update_drag(visual_row, visual_col);
+                                let mut sel_guard = text_sel.write();
+                                if sel_guard.dragging {
+                                    // [F5] 历史前插后先把起点按身份搬到新索引；
+                                    // 身份失效则明确取消（不复制错误内容）。
+                                    if matches!(
+                                        relocate_selection_start(slot_index, &mut sel_guard),
+                                        AnchorResolution::Lost
+                                    ) {
+                                        sel_guard.clear();
+                                        return EventResult::Consumed;
+                                    }
+                                }
+                                sel_guard.update_drag(visual_row, visual_col);
                                 return EventResult::Consumed;
                             }
                             DragAction::KeepPending => {
@@ -492,26 +551,55 @@ pub(in crate::kit::message_area) fn handle_event(
                     MouseEventKind::Up(MouseButton::Left) => {
                         // 单击结算分工（依赖 dispatch 注册序）：mod.rs 单击 handler
                         // 先消费 Pending 命中（Consumed）；未命中（Ignored）落到这里。
-                        // Armed（dragging）→ 复制流程；Pending 未命中 → 复位 gesture。
-                        // [TRAP] 同 Drag 处理：必须 copy 出 text_sel 状态后再 write，
-                        // 否则 read+write 同 thread 冲突 panic。
-                        let dragging = text_sel.read().dragging;
-                        // 决策提取为纯函数 settle_up（可独立测试）：Pending 未命中
-                        // （gesture 仍为 Some）→ 复位，手势生命周期结束；Armed 时
-                        // gesture 已在升级瞬间复位为 None，无需再写。
-                        if settle_up(dragging, gesture.read().is_some()) {
-                            *gesture.write_no_update() = None;
+                        // [F1] Up 按最终位移补结算：中间 Drag 事件可能丢失，正文
+                        // 只要 Up 坐标与 Down 不同就必须建立选区。header 仍按单击
+                        // 产品规则（它的 Up 已被 entry handler 消费）。
+                        let pending = *gesture.read();
+                        let mut dragging = text_sel.read().dragging;
+                        if !dragging
+                            && let Some(p) = pending
+                            && release_upgrades(&p, (mouse.column, mouse.row))
+                        {
+                            let scroll_y = scroll_state.read().offset();
+                            let (visual_row, visual_col) =
+                                selection_position(area, (mouse.column, mouse.row), scroll_y);
+                            let mut sel_guard = text_sel.write();
+                            sel_guard.start_drag_anchored(
+                                p.visual.0,
+                                p.visual.1,
+                                capture_selection_anchor(slot_index, p.visual),
+                            );
+                            sel_guard.update_drag(visual_row, visual_col);
+                            dragging = true;
                         }
                         if !dragging {
+                            // Pending 未命中（非 entry / 未移动）→ 复位手势，
+                            // 本次不产生选区，也不复制。
+                            if settle_up(false, pending.is_some()) {
+                                *gesture.write_no_update() = None;
+                            }
                             return EventResult::Consumed;
                         }
+                        // Armed 结束时清除任何残留 Pending（正常升级路径已清）。
+                        *gesture.write_no_update() = None;
                         // 先 copy 出 normalized_bounds（owned Option），drop read guard
                         let visual = selection_position(
                             area,
                             (mouse.column, mouse.row),
                             scroll_state.read().offset(),
                         );
-                        let bounds = selection_bounds_on_release(&mut text_sel.write(), visual);
+                        let bounds = {
+                            let mut sel_guard = text_sel.write();
+                            if matches!(
+                                relocate_selection_start(slot_index, &mut sel_guard),
+                                AnchorResolution::Lost
+                            ) {
+                                sel_guard.clear();
+                                None
+                            } else {
+                                selection_bounds_on_release(&mut sel_guard, visual)
+                            }
+                        };
                         let extracted: Option<String> = if let Some(((sr, sc), (er, ec))) = bounds {
                             extract_visual_range_index(
                                 slot_index,

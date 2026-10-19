@@ -167,9 +167,29 @@ fn write_via(
     }
 }
 
+/// 进程级常驻的原生剪贴板句柄。
+///
+/// [Why 不每次创建] arboard 3.6.1 的 X11 实现在**最后一个** `Clipboard` 实例
+/// 释放时让 clipboard manager 接管，然后销毁提供数据的窗口并结束服务线程；
+/// 没有 manager 或接管失败时，`set_text` 虽已返回 Ok，随后却无法粘贴（F9）。
+/// 进程级句柄让 provider 的生命周期覆盖 TUI 使用期。
+fn native_clipboard() -> &'static std::sync::Mutex<Option<arboard::Clipboard>> {
+    static CLIPBOARD: std::sync::OnceLock<std::sync::Mutex<Option<arboard::Clipboard>>> =
+        std::sync::OnceLock::new();
+    CLIPBOARD.get_or_init(|| std::sync::Mutex::new(None))
+}
+
 fn native_set_text(text: &str) -> anyhow::Result<()> {
-    arboard::Clipboard::new()
-        .and_then(|mut clipboard| clipboard.set_text(text))
+    let mut guard = native_clipboard()
+        .lock()
+        .map_err(|_| anyhow::anyhow!("native clipboard lock poisoned"))?;
+    if guard.is_none() {
+        *guard = Some(arboard::Clipboard::new().context("Failed to initialize native clipboard")?);
+    }
+    guard
+        .as_mut()
+        .expect("initialized above")
+        .set_text(text)
         .context("Failed to write native clipboard")
 }
 
@@ -196,11 +216,13 @@ fn osc52(text: &str) -> String {
 
 /// tmux DCS 透传：`ESC P tmux ; <OSC 52> ESC \`。
 ///
-/// [Why 内层 ESC 不双写] tmux 把 `tmux;` 之后的字节原样写给外层终端（[`Multiplexer`]
-/// 模块注释），双写 ESC 会拼出 `ESC ESC` 使外层终端无法识别 OSC；GNU screen 的
-/// `ESC P` 透传才要求双写，本路径不支持 screen 透传。
+/// [Why 内层 ESC 必须双写] tmux 的 passthrough 协议把 `ESC` 当作自身的转义
+/// 字符：客户端内容里的每个 `ESC` 都要写成 `ESC ESC`，tmux 转发时再还原为
+/// 单个 `ESC`（tmux FAQ / input.c 的 DCS 状态表）。不双写会丢掉 OSC 52
+/// 的引导 ESC，外层终端只看到 `]52;…` 文本或直接丢弃（F8）。
 fn tmux_passthrough(text: &str) -> String {
-    format!("\x1bPtmux;{}\x1b\\", osc52(text))
+    let payload = osc52(text).replace('\x1b', "\x1b\x1b");
+    format!("\x1bPtmux;{payload}\x1b\\")
 }
 
 #[cfg(test)]

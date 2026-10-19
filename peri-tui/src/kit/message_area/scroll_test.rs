@@ -1,6 +1,7 @@
 //! Tests
 use super::*;
 use crate::kit::history_paging::tests::{drain_pages_channel, pages_channel};
+use ratatui_kit::crossterm::event::{MouseButton, MouseEventKind};
 use serial_test::serial;
 
 // ── ScrollPos（usize 滚动状态）测试 ───────────────────────────────────
@@ -458,8 +459,9 @@ fn wm_entry(logical: usize, vstart: usize, vend: usize, slot: usize) -> WrappedL
     }
 }
 
-/// 单击判定容差矩阵（屏幕坐标 `(column, row)`）：≤1 行、≤2 列算单击；
-/// 超过视为拖拽意图（Drag 分支升级为文本拖拽）。
+/// 单击判定容差矩阵（屏幕坐标 `(column, row)`）：仅对**有单击动作的 entry
+/// header** 生效，≤1 行、≤2 列算单击；超过视为拖拽意图。普通正文的单击判定
+/// 见 `is_click_for`——任何位移都建立选区（F1）。
 #[test]
 fn test_is_click_tolerance_matrix() {
     let down = (20u16, 10u16); // (column, row)
@@ -471,6 +473,81 @@ fn test_is_click_tolerance_matrix() {
     assert!(!is_click(down, (20, 12)), "2 行 = 拖拽意图");
     assert!(!is_click(down, (23, 10)), "3 列 = 拖拽意图");
     assert!(!is_click(down, (17, 9)), "组合超差");
+}
+
+/// [F1] 正文没有单击动作：1 列 / 1 行位移都必须升级为选区；header 保留手抖容差。
+#[test]
+fn test_click_policy_depends_on_entry_action() {
+    let body = GesturePending {
+        screen: (20, 10),
+        visual: (5, 4),
+        entry_hit: None,
+    };
+    assert!(is_click_for(&body, (20, 10)), "正文原地 = 单击");
+    assert!(!is_click_for(&body, (21, 10)), "正文 +1 列 = 拖拽");
+    assert!(!is_click_for(&body, (20, 11)), "正文 +1 行 = 拖拽");
+    assert_eq!(
+        drag_step(Some(body), (21, 10), true),
+        DragAction::Upgrade(body),
+        "节流窗口内 1 列短拖也必须升级"
+    );
+
+    let header = GesturePending {
+        entry_hit: Some((3, 0)),
+        ..body
+    };
+    assert!(is_click_for(&header, (22, 11)), "header 保留手抖容差");
+    assert!(!is_click_for(&header, (23, 10)), "header 超容差 = 拖拽");
+    assert_eq!(
+        drag_step(Some(header), (21, 10), false),
+        DragAction::KeepPending,
+        "header 容差内保持 Pending（单击结算）"
+    );
+}
+
+/// [F1] Up 按最终位移补结算：中间 Drag 丢失时正文仍能建立选区；
+/// header 的单击规则不受影响。
+#[test]
+fn test_release_upgrades_body_on_final_displacement() {
+    let body = GesturePending {
+        screen: (20, 10),
+        visual: (5, 4),
+        entry_hit: None,
+    };
+    assert!(release_upgrades(&body, (21, 10)), "正文 +1 列");
+    assert!(release_upgrades(&body, (20, 11)), "正文 +1 行");
+    assert!(!release_upgrades(&body, (20, 10)), "正文未移动 = 单击");
+
+    let header = GesturePending {
+        entry_hit: Some((3, 0)),
+        ..body
+    };
+    assert!(!release_upgrades(&header, (30, 20)), "header Up 不算拖选");
+}
+
+/// [F2] Down 接收收窄前的外框（留白可起拖）；其余事件需要文本带或已捕获指针。
+#[test]
+fn test_text_selection_pointer_acceptance() {
+    let down = MouseEventKind::Down(MouseButton::Left);
+    let drag = MouseEventKind::Drag(MouseButton::Left);
+    let up = MouseEventKind::Up(MouseButton::Left);
+
+    assert!(text_selection_accepts_pointer(true, true, false, down));
+    assert!(
+        text_selection_accepts_pointer(false, true, false, down),
+        "留白 Down"
+    );
+    assert!(!text_selection_accepts_pointer(false, false, false, down));
+    assert!(!text_selection_accepts_pointer(false, true, false, drag));
+    assert!(text_selection_accepts_pointer(true, true, false, drag));
+    assert!(
+        text_selection_accepts_pointer(false, false, true, drag),
+        "已捕获"
+    );
+    assert!(
+        text_selection_accepts_pointer(false, false, true, up),
+        "已捕获"
+    );
 }
 
 /// 单击判定坐标空间回归：`is_click` 只比较屏幕坐标（Down 冻结的
@@ -594,14 +671,14 @@ fn test_gesture_down_freeze_with_scroll_and_prefix() {
     assert_eq!(p2.entry_hit, None, "正文行不命中");
 }
 
-/// Drag 容差内（≤1 行 / ≤2 列）：手势保持 Pending——零副作用
-/// （手抖不破坏点击，缺陷 2 修复点）。
+/// Drag 容差内（≤1 行 / ≤2 列）：仅 entry header 保持 Pending——零副作用
+/// （手抖不破坏点击，缺陷 2 修复点）；正文任何位移都会升级（F1）。
 #[test]
 fn test_drag_step_within_tolerance_keeps_pending() {
     let p = GesturePending {
         screen: (10, 5),
         visual: (4, 4),
-        entry_hit: None,
+        entry_hit: Some((3, 0)),
     };
     // 容差内（+1 列）：Pending 原样保留（handle_event 中不触碰 text_sel/gesture）
     assert_eq!(drag_step(Some(p), (11, 5), false), DragAction::KeepPending);
