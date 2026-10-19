@@ -3,9 +3,9 @@
 set -euo pipefail
 
 repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-patch_file="$repo_root/patches/rmcp-3.5.0-task-subscriptions.patch"
-crate_url="https://static.crates.io/crates/rmcp/rmcp-3.5.0.crate"
-crate_sha256="fae7019994ae0fe4ada40b732f798f3ff26f0f04facb1477f1bf37eb4f18a2d3"
+patch_file="$repo_root/patches/rmcp-3.5.1-task-subscriptions.patch"
+crate_url="https://static.crates.io/crates/rmcp/rmcp-3.5.1.crate"
+crate_sha256="ab5023804cbe0304cbe06197ac16e645a0a0d0ffa2953bf735c15c2fa0213350"
 
 if [[ $# -eq 0 ]]; then
     echo "usage: $0 <cargo subcommand> [arguments...]" >&2
@@ -22,7 +22,7 @@ sha256_file() {
 
 patch_sha256="$(sha256_file "$patch_file")"
 cache_dir="$repo_root/target/peri-rmcp-patches/$patch_sha256"
-crate_dir="$cache_dir/rmcp-3.5.0"
+crate_dir="$cache_dir/rmcp-3.5.1"
 config_file="$cache_dir/cargo-config.toml"
 
 if [[ ! -f "$crate_dir/.peri-patch-sha256" ]]; then
@@ -32,27 +32,27 @@ if [[ ! -f "$crate_dir/.peri-patch-sha256" ]]; then
     curl --fail --location --silent --show-error "$crate_url" -o "$staging_dir/rmcp.crate"
     actual_sha256="$(sha256_file "$staging_dir/rmcp.crate")"
     if [[ "$actual_sha256" != "$crate_sha256" ]]; then
-        echo "rmcp 3.5.0 archive checksum mismatch" >&2
+        echo "rmcp 3.5.1 archive checksum mismatch" >&2
         exit 1
     fi
     tar -xzf "$staging_dir/rmcp.crate" -C "$staging_dir"
     if command -v patch >/dev/null 2>&1; then
-        patch --dry-run --batch -p1 -d "$staging_dir/rmcp-3.5.0" < "$patch_file" >/dev/null
-        patch --batch -p1 -d "$staging_dir/rmcp-3.5.0" < "$patch_file"
+        patch --dry-run --batch -p1 -d "$staging_dir/rmcp-3.5.1" < "$patch_file" >/dev/null
+        patch --batch -p1 -d "$staging_dir/rmcp-3.5.1" < "$patch_file"
     else
         # Git Bash may not ship `patch`. A nested temporary repository makes
         # git apply target the extracted crate instead of the Peri repository.
-        git init -q "$staging_dir/rmcp-3.5.0"
-        git -C "$staging_dir/rmcp-3.5.0" apply --check "$patch_file"
-        git -C "$staging_dir/rmcp-3.5.0" apply "$patch_file"
+        git init -q "$staging_dir/rmcp-3.5.1"
+        git -C "$staging_dir/rmcp-3.5.1" apply --check "$patch_file"
+        git -C "$staging_dir/rmcp-3.5.1" apply "$patch_file"
     fi
-    printf '%s\n' "$patch_sha256" > "$staging_dir/rmcp-3.5.0/.peri-patch-sha256"
+    printf '%s\n' "$patch_sha256" > "$staging_dir/rmcp-3.5.1/.peri-patch-sha256"
     if [[ -f "$crate_dir/.peri-patch-sha256" ]]; then
         : # Another invocation finished first; reuse its cache.
     else
         # Replace interrupted or partial caches instead of leaving them in place.
         rm -rf "$crate_dir"
-        mv "$staging_dir/rmcp-3.5.0" "$crate_dir"
+        mv "$staging_dir/rmcp-3.5.1" "$crate_dir"
     fi
     rm -rf "$staging_dir"
     trap - EXIT

@@ -7,7 +7,7 @@
 若锁文件已偏离补丁配置，保留 `dev.sh` 的 `--locked`，通过补丁脚本定向修复，而不是直接运行 `cargo update` 或删除锁文件：
 
 ```bash
-./scripts/cargo-rmcp-patched.sh update --offline -p rmcp --precise 3.5.0
+./scripts/cargo-rmcp-patched.sh update --offline -p rmcp --precise 3.5.1
 ./scripts/cargo-rmcp-patched.sh update --offline -p tokio --precise 1.53.1
 ./scripts/cargo-rmcp-patched.sh update --offline -p mio --precise 1.2.3
 python3 scripts/test-cargo-patches.py
@@ -17,7 +17,7 @@ python3 scripts/test-cargo-patches.py
 
 `--offline` 要求依赖索引与 Git 源码已缓存；首次拉取缺失依赖时可省略它。回归测试在仓库目录和外部工作目录分别对本机与 `wasm32-unknown-emscripten` 执行真实的 `metadata --locked --offline`，核对补丁版本、来源、实际解析图及锁文件未变更；运行环境需要 Python 3.9+、Rust 与两个平台的依赖缓存。
 
-仓库使用 `rmcp 3.5.0`，并通过 [补丁](rmcp-3.5.0-task-subscriptions.patch)补齐 Tasks 扩展的 `taskIds` 订阅和 `notifications/tasks`。补丁不依赖 GitHub fork，也不提交第三方源码。
+仓库使用 `rmcp 3.5.1`，并通过 [补丁](rmcp-3.5.1-task-subscriptions.patch)补齐 Tasks 扩展的 `taskIds` 订阅和 `notifications/tasks`。补丁不依赖 GitHub fork，也不提交第三方源码。
 
 从新 checkout 构建时，用仓库脚本代替直接调用 Cargo：
 

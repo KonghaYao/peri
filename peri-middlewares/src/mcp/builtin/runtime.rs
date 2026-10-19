@@ -9,12 +9,23 @@
 //!   复制判定（映射在 `mcp/initialize.rs` 的 `connect_timeout` / `transport_label`）。
 //! - 每个实例一条**独立** duplex 与一个**独立** task（隔离契约：不得共用 transport）。
 
-use std::sync::Arc;
+use std::{
+    pin::Pin,
+    sync::{
+        atomic::{AtomicBool, Ordering},
+        Arc,
+    },
+    task::{Context, Poll},
+};
 
-use rmcp::{serve_server, service::QuitReason, ServerHandler};
+use rmcp::{
+    serve_server,
+    service::{QuitReason, ServerInitializeError},
+    ServerHandler,
+};
 use thiserror::Error;
 use tokio::{
-    io::{DuplexStream, ReadHalf, WriteHalf},
+    io::{AsyncRead, DuplexStream, ReadBuf, ReadHalf, WriteHalf},
     task::JoinHandle,
 };
 use tokio_util::sync::CancellationToken;
@@ -79,9 +90,13 @@ pub(crate) enum BuiltinSpawnError {
 /// 不把「未进入服务就退出」伪装成正常关闭：握手装配失败与优雅关闭是两件事。
 #[derive(Debug)]
 pub(crate) enum BuiltinServerExit {
-    /// 已进入服务并收敛（正常路径：client 关闭 → 输入流 EOF → `QuitReason::Closed`）。
+    /// 已完成握手并收敛（正常路径：client 关闭 → 输入流 EOF → `QuitReason::Closed`）。
+    ///
+    /// rmcp 3.5.1 的 `server/discover` 是 bootstrap 探测：discover 后 server 仍等待
+    /// `initialize` 或首个非 discover 请求。Auto 生命周期只做 discover 就关闭时，
+    /// server 以 `ConnectionClosed` 退出；此时客户端握手已完成，仍归入正常关闭。
     Quit(QuitReason),
-    /// 尚未进入服务即退出（`serve_server` 装配/握手失败），文本已由 rmcp 脱敏。
+    /// 从未收到任何入站消息就退出（`serve_server` 装配/握手失败），文本已由 rmcp 脱敏。
     NotStarted(String),
     /// 未在等待上界内收敛，已被 `abort`。
     AbortedAfterTimeout,
@@ -348,6 +363,39 @@ impl BuiltinTransport {
     }
 }
 
+/// 记录 server 侧是否读到过入站字节。
+///
+/// rmcp 3.5.1 把 `server/discover` 当作 bootstrap 探测，discover 后仍等待
+/// `initialize` 或首个非 discover 请求。Auto 握手只完成 discover 就关闭时，
+/// `serve_server` 以 `ConnectionClosed` 退出；但此时客户端已握手，不能报成
+/// `NotStarted`。用「是否读过入站字节」区分未握手的直接丢弃，避免匹配错误文本。
+struct ObservedRead<R> {
+    inner: R,
+    saw_inbound: Arc<AtomicBool>,
+}
+
+impl<R> ObservedRead<R> {
+    fn new(inner: R, saw_inbound: Arc<AtomicBool>) -> Self {
+        Self { inner, saw_inbound }
+    }
+}
+
+impl<R: AsyncRead + Unpin> AsyncRead for ObservedRead<R> {
+    fn poll_read(
+        self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+        buf: &mut ReadBuf<'_>,
+    ) -> Poll<std::io::Result<()>> {
+        let this = self.get_mut();
+        let before = buf.filled().len();
+        let poll = Pin::new(&mut this.inner).poll_read(cx, buf);
+        if matches!(&poll, Poll::Ready(Ok(()))) && buf.filled().len() > before {
+            this.saw_inbound.store(true, Ordering::Relaxed);
+        }
+        poll
+    }
+}
+
 /// 装配一条同进程链路：`tokio::io::duplex` 分半 + 真实 `rmcp::serve_server` 在 task 中运行。
 ///
 /// `ServerHandler` 带 `Sized` 约束（`rmcp-3.1.4/src/handler/server.rs:593`），无法用
@@ -380,6 +428,8 @@ where
     let (client_io, server_io) = tokio::io::duplex(BUILTIN_DUPLEX_BUF);
     let (server_read, server_write) = tokio::io::split(server_io);
     let server_read = wrap_server_read(server_read);
+    let saw_inbound = Arc::new(AtomicBool::new(false));
+    let server_read = ObservedRead::new(server_read, Arc::clone(&saw_inbound));
     let task_instance = instance.to_string();
     let handle = tokio::spawn(async move {
         match serve_server(handler, (server_read, server_write)).await {
@@ -388,6 +438,13 @@ where
                 Ok(reason) => BuiltinServerExit::Quit(reason),
                 Err(error) => BuiltinServerExit::TaskFailed(error.to_string()),
             },
+            // 3.5.1 的 discover bootstrap 只应答探测、不进入服务循环；客户端在
+            // discover 后关闭时，把已完成握手的链路归入正常关闭。
+            Err(ServerInitializeError::ConnectionClosed(_))
+                if saw_inbound.load(Ordering::Relaxed) =>
+            {
+                BuiltinServerExit::Quit(QuitReason::Closed)
+            }
             Err(error) => BuiltinServerExit::NotStarted(error.to_string()),
         }
     });
