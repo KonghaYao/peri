@@ -14,13 +14,13 @@
 //! 调用单独发出（`serverId` + `requestId`），`mcp/connect` / `mcp/disconnect`
 //! 已移除，连接生命周期归声明所在会话所有。会话服务是**会话级**的（每个会话
 //! 各持一个 MCP 池，ACP 连接进的是本会话的工具面），而 `mcp/message` 只带
-//! `serverId`：定位承载者是宿主职责，见 [`AcpMcpServerPort::owns_server`]。
+//! `serverId`：定位承载者依赖连接级 [`AcpMcpRegistry`]，不遍历会话猜测归属。
 
 use std::collections::HashMap;
 use std::sync::Arc;
 
 use agent_client_protocol_schema::v1::McpServer;
-use peri_acp_types::acp_mcp::{AcpMcpError, AcpMcpInbound, AcpMcpServerSpec};
+use peri_acp_types::acp_mcp::{AcpMcpError, AcpMcpInbound, AcpMcpRegistry, AcpMcpServerSpec};
 use peri_acp_types::ports::{AcpMcpGatewayPort, AcpMcpServerPort};
 use serde_json::Value;
 use tracing::{debug, warn};
@@ -46,9 +46,14 @@ impl AcpTransportGateway {
 
 #[async_trait::async_trait]
 impl AcpMcpGatewayPort for AcpTransportGateway {
-    async fn request(&self, method: &str, params: Value) -> Result<Value, AcpMcpError> {
+    async fn request(
+        &self,
+        method: &str,
+        params: Value,
+        cancellation: tokio_util::sync::CancellationToken,
+    ) -> Result<Value, AcpMcpError> {
         self.transport
-            .send_request(method, params)
+            .send_cancellable_request(method, params, cancellation)
             .await
             .map_err(transport_error)
     }
@@ -123,6 +128,7 @@ fn parse_acp_servers(params: &Value, session_id: &str) -> Vec<AcpMcpServerSpec> 
 /// 未装配 MCP over ACP 服务的会话（无工作区资源 / bare / print 模式）是无操作：
 /// 这些会话没有 MCP 池可承载声明，登记无处落地。
 pub(crate) fn attach_session_servers(
+    registry: Arc<AcpMcpRegistry>,
     cfg: &AcpServerConfig,
     transport: &Arc<dyn AcpTransport>,
     params: &Value,
@@ -140,21 +146,33 @@ pub(crate) fn attach_session_servers(
         servers = servers.len(),
         "MCP over ACP 声明已受理，后台建连"
     );
-    port.attach(
+    if let Err(error) = port.attach(
+        registry,
         Arc::new(AcpTransportGateway::new(Arc::clone(transport))),
         servers,
-    );
+    ) {
+        warn!(code = error.code, %error, "MCP over ACP 声明被拒绝");
+    }
 }
 
-/// 定位承载 `serverId` 的会话服务（声明与会话的事实都在会话级服务里）。
-///
-/// 只依 `owns_server` 判定，不关心端口从哪来：会话集合的形态是宿主细节，
-/// 判定规则是协议事实。
-fn locate_owner(
-    ports: impl Iterator<Item = Arc<dyn AcpMcpServerPort>>,
-    server_id: &str,
-) -> Option<Arc<dyn AcpMcpServerPort>> {
-    ports.into_iter().find(|port| port.owns_server(server_id))
+/// setup 返回前校验连接级占用；跨会话重名是不可用，不实现共享分流。
+pub(crate) fn validate_declarations(
+    registry: &AcpMcpRegistry,
+    params: &Value,
+    session_id: &str,
+) -> Result<(), AcpError> {
+    for spec in parse_acp_servers(params, session_id) {
+        if registry
+            .owner(&spec.server_id)
+            .is_some_and(|owner| owner != session_id)
+        {
+            return Err(AcpError::new(
+                AcpMcpError::CODE_UNAVAILABLE,
+                format!("MCP-over-ACP serverId 已被另一会话占用: {}", spec.server_id),
+            ));
+        }
+    }
+    Ok(())
 }
 
 /// 反序列化入站 `mcp/message` 载荷。
@@ -193,20 +211,17 @@ fn inbound(params: &Value) -> Result<AcpMcpInbound, AcpError> {
 /// 返回**已克隆的服务句柄**，调用方随即释放会话锁再 await——内层处理时长由
 /// 对端（client 宿主的 MCP server）决定，不得占着会话锁等待。
 pub(crate) fn route_inbound(
+    registry: &AcpMcpRegistry,
     sessions: &HashMap<String, SessionState>,
     params: &Value,
 ) -> Result<(Arc<dyn AcpMcpServerPort>, AcpMcpInbound), AcpError> {
     let inbound = inbound(params)?;
-    let ports = sessions.values().filter_map(|state| {
-        state
-            .environment
-            .as_ref()?
-            .cfg
-            .acp_mcp
-            .as_ref()
-            .map(Arc::clone)
-    });
-    let Some(port) = locate_owner(ports, &inbound.server_id) else {
+    let port = registry
+        .owner(&inbound.server_id)
+        .and_then(|owner| sessions.get(&owner))
+        .and_then(|state| state.environment.as_ref())
+        .and_then(|environment| environment.cfg.acp_mcp.clone());
+    let Some(port) = port else {
         return Err(AcpError::new(
             AcpMcpError::CODE_NOT_FOUND,
             format!("未知或已关闭的 MCP-over-ACP server: {}", inbound.server_id),

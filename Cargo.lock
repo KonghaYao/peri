@@ -3581,6 +3581,7 @@ dependencies = [
 name = "peri-middlewares"
 version = "0.2.0"
 dependencies = [
+ "agent-client-protocol-schema",
  "anyhow",
  "async-trait",
  "base64 0.23.1",

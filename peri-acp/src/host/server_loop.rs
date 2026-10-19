@@ -447,6 +447,25 @@ impl ServerLoop<'_> {
         } else {
             false
         };
+        if matches!(
+            method.as_str(),
+            "session/new" | "session/fork" | "session/load" | "session/resume"
+        ) {
+            let registry = connection.lock().await.acp_mcp.clone();
+            let owner = if matches!(method.as_str(), "session/load" | "session/resume") {
+                params
+                    .get("sessionId")
+                    .and_then(Value::as_str)
+                    .unwrap_or("")
+            } else {
+                ""
+            };
+            if let Err(error) = requests::acp_mcp::validate_declarations(&registry, &params, owner)
+            {
+                let _ = diagnostics.send(transport.as_ref(), Err(error)).await;
+                return;
+            }
+        }
         let lifecycle_lock = if matches!(
             method.as_str(),
             "session/load"
@@ -645,7 +664,14 @@ impl ServerLoop<'_> {
                 }
                 // 会话 setup 声明的 acp 型 MCP server：响应之后才受理，客户端此时
                 // 已拿到会话结果，后续 `mcp/message`（只带 serverId）才有确定的归属方。
-                requests::acp_mcp::attach_session_servers(local, transport, &params, &session_id);
+                let registry = self.connection.lock().await.acp_mcp.clone();
+                requests::acp_mcp::attach_session_servers(
+                    registry,
+                    local,
+                    transport,
+                    &params,
+                    &session_id,
+                );
             }
         }
     }
@@ -659,8 +685,9 @@ impl ServerLoop<'_> {
             // 会话的服务。就地 await（不 spawn）以保住与后续请求的相对次序，但只
             // 在短锁内定位承载者——投递等待由对端决定，不得占着会话锁。
             let routed = {
+                let registry = self.connection.lock().await.acp_mcp.clone();
                 let sessions = sessions.lock().await;
-                requests::acp_mcp::route_inbound(&sessions, &params)
+                requests::acp_mcp::route_inbound(&registry, &sessions, &params)
             };
             match routed {
                 Ok((port, inbound)) => {

@@ -44,7 +44,7 @@
 - builtin MCP 实例上下文须在 `McpClientPool::run_initialize` 前装配，后置注入会被拒绝。生产 Workspace 的后台 Bash 由 MCP 自行持有；会话侧任务投影与取消路由的目标设计见 `../docs/design/session-async-tasks.md`。
 - Cron scheduler 属于会话环境：builtin 工具、宿主端口与 session bridge 使用同一份实例；共享会话注册表时只共享 continuation 入口，不覆盖 scheduler。部署的 tick 开关传入会话池，由 builtin supervisor 唯一驱动并随会话关闭。
 - Host 后台任务由 non-Clone `HostTaskOwner` 持有，config/task 只持 weak `HostTaskSpawner`；MCP concrete owner 属 middlewares，ACP config 只能持 `peri-acp-types::ports::McpTaskOwnerPort`，禁止直接依赖 concrete type。transport EOF 关闭准入后取消并 drain local/manager 会话 ID 并集，再在锁外关闭 MCP。Host drain 或 MCP service-close report 超时必须报告 `Incomplete` 并保持 Closing，不得当作已经 join/Closed（ARC-HOST-SHUTDOWN-001）。
-- 会话 setup（`session/new` / `load` / `resume` / `fork`）里的 `mcpServers` acp 型声明在响应写入后由 `host/requests/acp_mcp.rs` 受理（`attach_session_servers`）；客户端须先拿到会话结果，受理顺序不能提前到响应之前。会话级服务持有声明（每个会话一个 MCP 池），入站 `mcp/message` 通知按 `serverId` 定位承载会话、未知或已关闭的 server 返回 `-32001`，内层 MCP 错误码原样透传；会话终结在 MCP 池关闭前调 `AcpMcpServerPort::close_session`（幂等）。发现是后台的：不阻塞会话建立，失败留在 MCP 池状态面；协议层无 `mcp/connect` / `mcp/disconnect`（ARC-MCP-ACP-001）。
+- 会话 setup（`session/new` / `load` / `resume` / `fork`）里的 `mcpServers` acp 型声明在响应写入后由 `host/requests/acp_mcp.rs` 受理（`attach_session_servers`）；客户端须先拿到会话结果，受理顺序不能提前到响应之前。会话级服务持有声明（每个会话一个 MCP 池），入站 `mcp/message` 通知按连接级 `AcpMcpRegistry` 的唯一归属定位会话，跨会话 serverId 重名在 setup 前以 `CODE_UNAVAILABLE` 拒绝；未知或已关闭的 server 返回 `-32001`，内层 MCP 错误码原样透传；会话终结在 MCP 池关闭前调 `AcpMcpServerPort::close_session`（幂等）。发现是后台的：不阻塞会话建立，失败留在 MCP 池状态面；协议层无 `mcp/connect` / `mcp/disconnect`（ARC-MCP-ACP-001）。
 
 ## 目标命令
 

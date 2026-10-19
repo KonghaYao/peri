@@ -127,6 +127,16 @@ impl MpscClientTransport {
 #[async_trait]
 impl AcpTransport for MpscClientTransport {
     async fn send_request(&self, method: &str, params: Value) -> Result<Value, AcpError> {
+        self.send_cancellable_request(method, params, tokio_util::sync::CancellationToken::new())
+            .await
+    }
+
+    async fn send_cancellable_request(
+        &self,
+        method: &str,
+        params: Value,
+        cancellation: tokio_util::sync::CancellationToken,
+    ) -> Result<Value, AcpError> {
         let pending = self.router.register()?;
         let id = RequestId::Number(pending.id());
 
@@ -140,7 +150,7 @@ impl AcpTransport for MpscClientTransport {
             },
         )?;
 
-        pending.wait().await
+        super::wait_cancellable(self, pending, cancellation).await
     }
 
     async fn send_notification(&self, method: &str, params: Value) -> Result<(), AcpError> {
@@ -202,6 +212,16 @@ impl MpscServerTransport {
 #[async_trait]
 impl AcpTransport for MpscServerTransport {
     async fn send_request(&self, method: &str, params: Value) -> Result<Value, AcpError> {
+        self.send_cancellable_request(method, params, tokio_util::sync::CancellationToken::new())
+            .await
+    }
+
+    async fn send_cancellable_request(
+        &self,
+        method: &str,
+        params: Value,
+        cancellation: tokio_util::sync::CancellationToken,
+    ) -> Result<Value, AcpError> {
         let pending = self.router.register()?;
         let id = RequestId::Number(pending.id());
 
@@ -215,7 +235,7 @@ impl AcpTransport for MpscServerTransport {
             },
         )?;
 
-        pending.wait().await
+        super::wait_cancellable(self, pending, cancellation).await
     }
 
     async fn send_notification(&self, method: &str, params: Value) -> Result<(), AcpError> {

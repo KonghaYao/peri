@@ -15,8 +15,8 @@ use std::sync::Arc;
 use agent_client_protocol_schema::v1::{McpServer, McpServerAcp, McpServerAcpId, McpServerHttp};
 use async_trait::async_trait;
 use parking_lot::Mutex;
-use peri_acp_types::acp_mcp::{AcpMcpError, AcpMcpInbound, AcpMcpServerSpec};
-use peri_acp_types::ports::{AcpMcpGatewayPort, AcpMcpServerPort};
+use peri_acp_types::acp_mcp::AcpMcpError;
+use peri_acp_types::ports::AcpMcpGatewayPort;
 use serde_json::{json, Value};
 
 use super::*;
@@ -96,49 +96,36 @@ fn absent_or_non_array_declarations_are_no_declarations() {
     assert!(parse_acp_servers(&json!({"mcpServers": []}), "s1").is_empty());
 }
 
-/// 只承载一条声明的最小服务假件：路由只依 `owns_server` 判定。
-struct FakePort {
-    owned: Vec<&'static str>,
-}
-
-impl FakePort {
-    fn new(owned: &[&'static str]) -> Self {
-        Self {
-            owned: owned.to_vec(),
-        }
-    }
-}
-
-#[async_trait]
-impl AcpMcpServerPort for FakePort {
-    fn attach(&self, _gateway: Arc<dyn AcpMcpGatewayPort>, _servers: Vec<AcpMcpServerSpec>) {}
-
-    async fn notify(&self, _inbound: AcpMcpInbound) -> Result<(), AcpMcpError> {
-        Err(AcpMcpError::unavailable("测试假件不承载通知"))
-    }
-
-    fn owns_server(&self, server_id: &str) -> bool {
-        self.owned.contains(&server_id)
-    }
-
-    async fn close_session(&self, _session_id: &str) {}
-}
-
 #[test]
-fn routing_picks_the_port_that_owns_the_server() {
-    let first: Arc<dyn AcpMcpServerPort> = Arc::new(FakePort::new(&["srv-a"]));
-    let second: Arc<dyn AcpMcpServerPort> = Arc::new(FakePort::new(&["srv-b"]));
-    let ports = vec![Arc::clone(&first), Arc::clone(&second)];
-
-    let found = locate_owner(ports.iter().cloned(), "srv-b").expect("承载声明的服务");
-    assert!(Arc::ptr_eq(&found, &second));
-    assert!(locate_owner(ports.into_iter(), "srv-unknown").is_none());
+fn connection_registry_rejects_conflicts_and_releases_only_owner() {
+    let registry = AcpMcpRegistry::default();
+    registry.claim("shared-server", "s1").unwrap();
+    registry.claim("shared-server", "s1").unwrap();
+    let params = json!({"mcpServers": [acp_declaration("fixture", "shared-server")]});
+    assert_eq!(
+        validate_declarations(&registry, &params, "s2")
+            .unwrap_err()
+            .code,
+        AcpMcpError::CODE_UNAVAILABLE
+    );
+    assert_eq!(
+        registry.claim("shared-server", "s2").unwrap_err().code,
+        AcpMcpError::CODE_UNAVAILABLE
+    );
+    registry.claim("other-server", "s2").unwrap();
+    registry.release_session("s2");
+    registry.release_session("s2");
+    assert_eq!(registry.owner("shared-server").as_deref(), Some("s1"));
+    assert_eq!(registry.owner("other-server"), None);
+    registry.release_session("s1");
+    registry.claim("shared-server", "s2").unwrap();
 }
 
 #[test]
 fn inbound_routing_rejects_malformed_and_unknown_servers() {
     let sessions = HashMap::new();
-    let reject = |params: &Value| match route_inbound(&sessions, params) {
+    let reject = |params: &Value| match route_inbound(&AcpMcpRegistry::default(), &sessions, params)
+    {
         Err(error) => error,
         Ok(_) => panic!("非法的 mcp/message 载荷不得路由成功: {params}"),
     };
@@ -171,6 +158,15 @@ struct RecordingTransport {
 
 #[async_trait]
 impl crate::transport::AcpTransport for RecordingTransport {
+    async fn send_cancellable_request(
+        &self,
+        method: &str,
+        params: Value,
+        _cancellation: tokio_util::sync::CancellationToken,
+    ) -> Result<Value, AcpError> {
+        self.send_request(method, params).await
+    }
+
     async fn send_request(&self, method: &str, params: Value) -> Result<Value, AcpError> {
         self.requests.lock().push((method.to_string(), params));
         match &self.reply_error {
@@ -206,6 +202,7 @@ async fn gateway_forwards_mcp_message_requests() {
         .request(
             "mcp/message",
             json!({"serverId": "srv-1", "requestId": "r-1", "method": "tools/list"}),
+            tokio_util::sync::CancellationToken::new(),
         )
         .await
         .unwrap();
@@ -217,6 +214,101 @@ async fn gateway_forwards_mcp_message_requests() {
             json!({"serverId": "srv-1", "requestId": "r-1", "method": "tools/list"})
         )]
     );
+}
+
+#[tokio::test]
+async fn acp_mcp_gateway_cancel_targets_outer_request_and_settles_without_reply() {
+    use crate::transport::mpsc::mpsc_transport_pair;
+    use agent_client_protocol_schema::v1::{
+        CancelRequestNotification, PROTOCOL_LEVEL_METHOD_NAMES,
+    };
+    let (client, server) = mpsc_transport_pair();
+    let gateway = AcpTransportGateway::new(Arc::new(server));
+    let cancellation = tokio_util::sync::CancellationToken::new();
+    let request_cancel = cancellation.clone();
+    let request = tokio::spawn(async move {
+        gateway
+            .request(
+                "mcp/message",
+                json!({"serverId": "srv", "requestId": "peri-2", "method": "ping"}),
+                request_cancel,
+            )
+            .await
+    });
+    let IncomingMessage::Request { id, params, .. } = client.recv().await.unwrap() else {
+        panic!("应收到 ACP 请求")
+    };
+    assert_eq!(params["requestId"], "peri-2");
+    cancellation.cancel();
+    let IncomingMessage::Notification { method, params } =
+        tokio::time::timeout(std::time::Duration::from_secs(3), client.recv())
+            .await
+            .unwrap()
+            .unwrap()
+    else {
+        panic!("应收到取消通知")
+    };
+    assert_eq!(method, PROTOCOL_LEVEL_METHOD_NAMES.cancel_request);
+    let notification: CancelRequestNotification = serde_json::from_value(params).unwrap();
+    assert_eq!(
+        serde_json::to_value(notification.request_id).unwrap(),
+        serde_json::to_value(id).unwrap()
+    );
+    assert_eq!(
+        tokio::time::timeout(std::time::Duration::from_secs(3), request)
+            .await
+            .unwrap()
+            .unwrap()
+            .unwrap_err()
+            .code,
+        -32800
+    );
+    client.close();
+}
+
+#[cfg(not(target_os = "emscripten"))]
+#[tokio::test]
+async fn acp_mcp_stdio_cancel_uses_official_envelope() {
+    use agent_client_protocol_schema::v1::{
+        CancelRequestNotification, PROTOCOL_LEVEL_METHOD_NAMES,
+    };
+    use tokio::io::{AsyncBufReadExt, BufReader};
+    let (reader, _client_writer) = tokio::io::duplex(4096);
+    let (writer, client_reader) = tokio::io::duplex(4096);
+    let transport = crate::transport::stdio::StdioTransport::from_reader_writer(reader, writer);
+    let gateway = AcpTransportGateway::new(Arc::new(transport));
+    let cancellation = tokio_util::sync::CancellationToken::new();
+    let request_cancel = cancellation.clone();
+    let request = tokio::spawn(async move {
+        gateway
+            .request(
+                "mcp/message",
+                json!({"serverId": "srv", "requestId": "peri-7", "method": "ping"}),
+                request_cancel,
+            )
+            .await
+    });
+    let mut lines = BufReader::new(client_reader).lines();
+    let wire: Value = serde_json::from_str(&lines.next_line().await.unwrap().unwrap()).unwrap();
+    assert_eq!(wire["params"]["requestId"], "peri-7");
+    cancellation.cancel();
+    let cancel: Value = serde_json::from_str(
+        &tokio::time::timeout(std::time::Duration::from_secs(3), lines.next_line())
+            .await
+            .unwrap()
+            .unwrap()
+            .unwrap(),
+    )
+    .unwrap();
+    assert!(cancel.get("id").is_none());
+    assert_eq!(cancel["method"], PROTOCOL_LEVEL_METHOD_NAMES.cancel_request);
+    let notification: CancelRequestNotification =
+        serde_json::from_value(cancel["params"].clone()).unwrap();
+    assert_eq!(
+        serde_json::to_value(notification.request_id).unwrap(),
+        wire["id"]
+    );
+    assert_eq!(request.await.unwrap().unwrap_err().code, -32800);
 }
 
 #[tokio::test]
@@ -234,6 +326,7 @@ async fn gateway_preserves_inner_mcp_error_codes() {
         .request(
             "mcp/message",
             json!({"serverId": "srv-1", "requestId": "r-1", "method": "server/discover"}),
+            tokio_util::sync::CancellationToken::new(),
         )
         .await
         .unwrap_err();

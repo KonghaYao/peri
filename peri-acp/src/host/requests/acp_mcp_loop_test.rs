@@ -44,6 +44,15 @@ impl FakeClientHost {
 
 #[async_trait]
 impl crate::transport::AcpTransport for FakeClientHost {
+    async fn send_cancellable_request(
+        &self,
+        method: &str,
+        params: Value,
+        _cancellation: tokio_util::sync::CancellationToken,
+    ) -> Result<Value, AcpError> {
+        self.send_request(method, params).await
+    }
+
     async fn send_request(&self, method: &str, params: Value) -> Result<Value, AcpError> {
         self.request_methods
             .lock()
@@ -186,9 +195,11 @@ async fn acp_declared_server_reaches_the_session_tool_face_and_is_cleaned_up_on_
     }
 
     // `ServerLoop` 在 setup 响应写入之后做的事。
+    let registry = Arc::new(peri_acp_types::acp_mcp::AcpMcpRegistry::default());
     {
         let environment_cfg = &sessions[&session_id].environment.as_ref().unwrap().cfg;
         crate::host::requests::acp_mcp::attach_session_servers(
+            registry.clone(),
             environment_cfg,
             &transport,
             &params,
@@ -283,6 +294,7 @@ async fn acp_declared_server_reaches_the_session_tool_face_and_is_cleaned_up_on_
     assert!(port.owns_server("srv-1"));
     assert!(!port.owns_server("srv-2"));
     let Ok((routed, inbound)) = crate::host::requests::acp_mcp::route_inbound(
+        &registry,
         &sessions,
         &json!({
             "serverId": "srv-1",
@@ -297,7 +309,99 @@ async fn acp_declared_server_reaches_the_session_tool_face_and_is_cleaned_up_on_
     routed
         .notify(inbound)
         .await
-        .expect("client 通知应被桥接接收");
+        .expect_err("已完成请求的迟到通知必须被拒绝");
+
+    // 第二条真实会话使用独立 service / pool，但必须共享当前连接的注册表。
+    let created_second = handle_request(
+        "session/new",
+        &json!({"cwd": cwd}),
+        &cfg,
+        &mut sessions,
+        &transport,
+    )
+    .await
+    .unwrap();
+    let second_id = created_second["sessionId"].as_str().unwrap().to_owned();
+    let (_second_owner, second_spawner) = McpTaskOwner::new();
+    let second_pool = Arc::new(McpClientPool::new_pending_with_spawner_and_profile(
+        second_spawner,
+        McpCapabilityProfile::disabled(),
+    ));
+    second_pool.mark_initialized();
+    let second_port: Arc<dyn peri_acp_types::ports::AcpMcpServerPort> =
+        Arc::new(AcpMcpService::new(second_pool.clone()));
+    {
+        let environment = Arc::get_mut(
+            sessions
+                .get_mut(&second_id)
+                .unwrap()
+                .environment
+                .as_mut()
+                .unwrap(),
+        )
+        .unwrap();
+        environment.cfg.mcp_pool = Some(second_pool.clone());
+        environment.cfg.acp_mcp = Some(second_port.clone());
+    }
+    let gateway = Arc::new(crate::host::requests::acp_mcp::AcpTransportGateway::new(
+        transport.clone(),
+    ));
+    let declaration = |server_id: &str| peri_acp_types::acp_mcp::AcpMcpServerSpec {
+        session_id: second_id.clone(),
+        name: "second".into(),
+        server_id: server_id.into(),
+    };
+    let conflict = second_port
+        .attach(
+            registry.clone(),
+            gateway.clone(),
+            vec![declaration("srv-1")],
+        )
+        .unwrap_err();
+    assert_eq!(
+        conflict.code,
+        peri_acp_types::acp_mcp::AcpMcpError::CODE_UNAVAILABLE
+    );
+    second_port
+        .attach(registry.clone(), gateway, vec![declaration("srv-2")])
+        .unwrap();
+    wait_until("第二会话 MCP 就绪", || {
+        second_pool
+            .get_client_visible_to("second", Some(&second_id))
+            .is_some()
+    })
+    .await;
+    for (server_id, expected) in [("srv-1", &port), ("srv-2", &second_port)] {
+        let (routed, _) = crate::host::requests::acp_mcp::route_inbound(&registry, &sessions, &json!({
+            "serverId": server_id, "requestId": "peri-1", "method": "notifications/tools/list_changed"
+        })).unwrap();
+        assert!(Arc::ptr_eq(&routed, expected));
+    }
+    // 相同 peri-1 只能出现在不同 serverId，冲突声明没有发出第二条 srv-1/peri-1。
+    assert_eq!(
+        peer.message_targets
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|(server, request)| server == "srv-1" && request == "peri-1")
+            .count(),
+        1
+    );
+    second_port.close_session(&second_id).await;
+    second_port.close_session(&second_id).await;
+    assert_eq!(
+        registry.owner("srv-1").as_deref(),
+        Some(session_id.as_str())
+    );
+    handle_request(
+        "session/close",
+        &json!({"sessionId": second_id}),
+        &cfg,
+        &mut sessions,
+        &transport,
+    )
+    .await
+    .unwrap();
 
     // 会话关闭：声明与池条目随会话消失，且不再有反向的断开请求。
     handle_request(
@@ -316,6 +420,7 @@ async fn acp_declared_server_reaches_the_session_tool_face_and_is_cleaned_up_on_
     assert!(!port.owns_server("srv-1"));
     // 关闭后再按 serverId 定位必须失败（-32001）。
     let Err(error) = crate::host::requests::acp_mcp::route_inbound(
+        &registry,
         &sessions,
         &json!({
             "serverId": "srv-1",

@@ -10,7 +10,43 @@
 //! 本模块只描述协议载荷与运行时标识，不依赖 rmcp 或具体 transport；连接
 //! 建立、消息路由与池提交归 `peri-middlewares`。
 
+use std::collections::HashMap;
+
+use parking_lot::Mutex;
 use serde_json::{Map, Value};
+
+/// ACP 连接级声明归属；由连接创建并在该连接的会话服务之间共享。
+///
+/// 不共享 server：通知没有 sessionId，跨会话重名无法无歧义分流，故以
+/// CODE_UNAVAILABLE 拒绝占用中的 serverId。同会话重复声明幂等。
+#[derive(Default)]
+pub struct AcpMcpRegistry {
+    owners: Mutex<HashMap<String, String>>,
+}
+
+impl AcpMcpRegistry {
+    pub fn claim(&self, server_id: &str, session_id: &str) -> Result<(), AcpMcpError> {
+        let mut owners = self.owners.lock();
+        if let Some(owner) = owners.get(server_id) {
+            if owner != session_id {
+                return Err(AcpMcpError::unavailable(format!(
+                    "MCP-over-ACP serverId 已被另一会话占用: {server_id}"
+                )));
+            }
+        }
+        owners.insert(server_id.to_owned(), session_id.to_owned());
+        Ok(())
+    }
+
+    pub fn owner(&self, server_id: &str) -> Option<String> {
+        self.owners.lock().get(server_id).cloned()
+    }
+
+    /// 只释放调用会话自己的声明；重复关闭不影响其他会话。
+    pub fn release_session(&self, session_id: &str) {
+        self.owners.lock().retain(|_, owner| owner != session_id);
+    }
+}
 
 /// client 声明的一个 acp 型 MCP server（绑定到具体会话）。
 ///
@@ -28,7 +64,7 @@ pub struct AcpMcpServerSpec {
 ///
 /// schema 1.12 的单向面：client 只能下发通知（provider → consumer 的进度 /
 /// 订阅更新），不再有 client → agent 的请求方向。`request_id` 是 agent 发出
-/// 对应请求时生成的逻辑标识；它不参与宿主路由，仅用于对端输出授权与排障。
+/// 对应请求时生成的逻辑标识；桥接以它校验活跃请求并还原 rmcp 关联 ID。
 #[derive(Debug, Clone, PartialEq)]
 pub struct AcpMcpInbound {
     /// 接收该通知的已声明 ACP MCP server。

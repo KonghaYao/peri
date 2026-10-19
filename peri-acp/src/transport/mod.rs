@@ -38,6 +38,20 @@ pub trait AcpTransport: Send + Sync {
     /// future requests with `AcpError(-32603, "Transport closed")`.
     async fn send_request(&self, method: &str, params: Value) -> Result<Value, AcpError>;
 
+    /// 发送可取消请求；取消必须关联实际外层 JSON-RPC ID，并释放本地 pending。
+    /// 不支持此能力的 transport 必须明确拒绝，不能退化为不可取消请求。
+    async fn send_cancellable_request(
+        &self,
+        _method: &str,
+        _params: Value,
+        _cancellation: tokio_util::sync::CancellationToken,
+    ) -> Result<Value, AcpError> {
+        Err(AcpError::new(
+            -32002,
+            "Transport does not support cancellable requests",
+        ))
+    }
+
     /// Send a notification (fire-and-forget, no response expected).
     async fn send_notification(&self, method: &str, params: Value) -> Result<(), AcpError>;
 
@@ -50,6 +64,33 @@ pub trait AcpTransport: Send + Sync {
         id: RequestId,
         result: Result<Value, AcpError>,
     ) -> Result<(), AcpError>;
+}
+
+/// 等待响应或发送官方取消；不等待不配合取消的对端，pending 的 Drop 负责注销。
+async fn wait_cancellable(
+    transport: &(impl AcpTransport + ?Sized),
+    pending: router::PendingRequest,
+    cancellation: tokio_util::sync::CancellationToken,
+) -> Result<Value, AcpError> {
+    use agent_client_protocol_schema::v1::{
+        CancelRequestNotification, PROTOCOL_LEVEL_METHOD_NAMES,
+    };
+    let notification = CancelRequestNotification::new(
+        agent_client_protocol_schema::v1::RequestId::Number(pending.id()),
+    );
+    tokio::select! {
+        biased;
+        result = pending.wait() => result,
+        () = cancellation.cancelled() => {
+            let params = serde_json::to_value(notification)
+                .map_err(|error| AcpError::new(-32603, error.to_string()))?;
+            // 写端也可能阻塞；取消有界，不能让关闭永远等待 writer。
+            tokio::time::timeout(std::time::Duration::from_secs(1),
+                transport.send_notification(PROTOCOL_LEVEL_METHOD_NAMES.cancel_request, params))
+                .await.map_err(|_| AcpError::new(-32603, "ACP cancel write timed out"))??;
+            Err(AcpError::new(-32800, "request cancelled"))
+        }
+    }
 }
 
 /// Minimal send-only transport contract (server→client request round-trip).

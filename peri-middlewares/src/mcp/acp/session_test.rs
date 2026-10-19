@@ -16,7 +16,7 @@
 use std::sync::Arc;
 use std::time::Duration;
 
-use peri_acp_types::acp_mcp::{AcpMcpError, AcpMcpInbound, AcpMcpServerSpec};
+use peri_acp_types::acp_mcp::{AcpMcpError, AcpMcpInbound, AcpMcpRegistry, AcpMcpServerSpec};
 use peri_acp_types::plugin::ConfigSource;
 use peri_acp_types::ports::{AcpMcpGatewayPort, AcpMcpServerPort};
 use serde_json::{json, Map, Value};
@@ -66,7 +66,12 @@ impl FakeGateway {
 
 #[async_trait::async_trait]
 impl AcpMcpGatewayPort for FakeGateway {
-    async fn request(&self, method: &str, params: Value) -> Result<Value, AcpMcpError> {
+    async fn request(
+        &self,
+        method: &str,
+        params: Value,
+        _cancellation: tokio_util::sync::CancellationToken,
+    ) -> Result<Value, AcpMcpError> {
         assert_eq!(method, "mcp/message", "桥接只发请求作用域的 mcp/message");
         let inner = params
             .get("method")
@@ -122,6 +127,7 @@ impl AcpMcpGatewayPort for FakeGateway {
 }
 
 struct Fixture {
+    registry: Arc<AcpMcpRegistry>,
     pool: Arc<McpClientPool>,
     service: Arc<AcpMcpService>,
     gateway: Arc<FakeGateway>,
@@ -135,6 +141,7 @@ fn fixture(tools: &[&str]) -> Fixture {
         McpCapabilityProfile::disabled(),
     ));
     Fixture {
+        registry: Default::default(),
         service: Arc::new(AcpMcpService::new(Arc::clone(&pool))),
         pool,
         gateway: Arc::new(FakeGateway::with_tools(tools)),
@@ -166,10 +173,14 @@ async fn wait_until(what: &str, mut condition: impl FnMut() -> bool) {
 async fn attach_connects_in_background_and_stays_session_scoped() {
     let fixture = fixture(&["echo"]);
     let pool = Arc::clone(&fixture.pool);
-    fixture.service.attach(
-        Arc::clone(&fixture.gateway) as Arc<dyn AcpMcpGatewayPort>,
-        vec![spec("s1", "acp-srv", "srv-1")],
-    );
+    fixture
+        .service
+        .attach(
+            fixture.registry.clone(),
+            Arc::clone(&fixture.gateway) as Arc<dyn AcpMcpGatewayPort>,
+            vec![spec("s1", "acp-srv", "srv-1")],
+        )
+        .unwrap();
 
     // attach 本身是同步返回的：此处尚未有任何连接证据。
     assert!(pool.get_all_clients_visible_to(Some("s1")).is_empty());
@@ -220,12 +231,16 @@ async fn attach_connects_in_background_and_stays_session_scoped() {
 
 /// 契约 1 续：client 经 `mcp/message` 反向下发的通知打到内层 MCP 连接。
 #[tokio::test]
-async fn inbound_notification_reaches_the_inner_connection() {
+async fn inbound_notification_rejects_finished_requests_and_unknown_servers() {
     let fixture = fixture(&["echo"]);
-    fixture.service.attach(
-        Arc::clone(&fixture.gateway) as Arc<dyn AcpMcpGatewayPort>,
-        vec![spec("s1", "acp-srv", "srv-1")],
-    );
+    fixture
+        .service
+        .attach(
+            fixture.registry.clone(),
+            Arc::clone(&fixture.gateway) as Arc<dyn AcpMcpGatewayPort>,
+            vec![spec("s1", "acp-srv", "srv-1")],
+        )
+        .unwrap();
     let pool = Arc::clone(&fixture.pool);
     wait_until("acp 连接进池", || {
         pool.get_client_visible_to("acp-srv", Some("s1")).is_some()
@@ -244,7 +259,7 @@ async fn inbound_notification_reaches_the_inner_connection() {
             params: Some(params),
         })
         .await
-        .expect("client 通知应被桥接接收");
+        .expect_err("已完成请求的迟到通知必须拒绝");
 
     // 未知 serverId：按契约码 -32001 拒绝，不静默成功。
     let missing = fixture
@@ -271,10 +286,20 @@ async fn attach_is_idempotent_and_cross_session_names_do_not_collide() {
     let gateway = Arc::clone(&fixture.gateway) as Arc<dyn AcpMcpGatewayPort>;
     fixture
         .service
-        .attach(Arc::clone(&gateway), vec![spec("s1", "acp-srv", "srv-1")]);
+        .attach(
+            fixture.registry.clone(),
+            Arc::clone(&gateway),
+            vec![spec("s1", "acp-srv", "srv-1")],
+        )
+        .unwrap();
     fixture
         .service
-        .attach(Arc::clone(&gateway), vec![spec("s1", "acp-srv", "srv-1")]);
+        .attach(
+            fixture.registry.clone(),
+            Arc::clone(&gateway),
+            vec![spec("s1", "acp-srv", "srv-1")],
+        )
+        .unwrap();
     let pool = Arc::clone(&fixture.pool);
     wait_until("首个连接进池", || {
         pool.get_client_visible_to("acp-srv", Some("s1")).is_some()
@@ -285,7 +310,12 @@ async fn attach_is_idempotent_and_cross_session_names_do_not_collide() {
     // 另一会话声明同名 server：连接独立，池内名加后缀，互不覆盖。
     fixture
         .service
-        .attach(Arc::clone(&gateway), vec![spec("s2", "acp-srv", "srv-2")]);
+        .attach(
+            fixture.registry.clone(),
+            Arc::clone(&gateway),
+            vec![spec("s2", "acp-srv", "srv-2")],
+        )
+        .unwrap();
     wait_until("第二会话连接进池", || {
         pool.get_all_clients_visible_to(Some("s2")).len() == 1
     })
@@ -356,10 +386,13 @@ async fn connect_failure_is_recorded_in_the_pool_state_face() {
         fail_discover: true,
         ..FakeGateway::default()
     });
-    service.attach(
-        Arc::clone(&gateway) as Arc<dyn AcpMcpGatewayPort>,
-        vec![spec("s1", "acp-srv", "srv-1")],
-    );
+    service
+        .attach(
+            Arc::new(AcpMcpRegistry::default()),
+            Arc::clone(&gateway) as Arc<dyn AcpMcpGatewayPort>,
+            vec![spec("s1", "acp-srv", "srv-1")],
+        )
+        .unwrap();
 
     wait_until("失败条目落池", || {
         pool.all_server_infos_visible_to(Some("s1"))
@@ -394,10 +427,20 @@ async fn close_session_removes_only_that_sessions_declarations() {
     let pool = Arc::clone(&fixture.pool);
     fixture
         .service
-        .attach(Arc::clone(&gateway), vec![spec("s1", "acp-srv", "srv-1")]);
+        .attach(
+            fixture.registry.clone(),
+            Arc::clone(&gateway),
+            vec![spec("s1", "acp-srv", "srv-1")],
+        )
+        .unwrap();
     fixture
         .service
-        .attach(Arc::clone(&gateway), vec![spec("s2", "acp-srv", "srv-2")]);
+        .attach(
+            fixture.registry.clone(),
+            Arc::clone(&gateway),
+            vec![spec("s2", "acp-srv", "srv-2")],
+        )
+        .unwrap();
     wait_until("两条连接进池", || {
         pool.get_all_clients_visible_to(Some("s1")).len() == 1
             && pool.get_all_clients_visible_to(Some("s2")).len() == 1
@@ -429,6 +472,70 @@ async fn close_session_removes_only_that_sessions_declarations() {
     assert_eq!(fixture.gateway.discovery_count(), 2);
 }
 
+#[tokio::test]
+async fn separate_session_services_share_connection_registry_and_reject_conflicts() {
+    let first = fixture(&["first"]);
+    let second = fixture(&["second"]);
+    let registry = first.registry.clone();
+    first
+        .service
+        .attach(
+            registry.clone(),
+            first.gateway.clone(),
+            vec![spec("s1", "one", "shared-server")],
+        )
+        .unwrap();
+    first
+        .service
+        .attach(
+            registry.clone(),
+            first.gateway.clone(),
+            vec![spec("s1", "one", "shared-server")],
+        )
+        .unwrap();
+    let error = second
+        .service
+        .attach(
+            registry.clone(),
+            second.gateway.clone(),
+            vec![spec("s2", "two", "shared-server")],
+        )
+        .unwrap_err();
+    assert_eq!(error.code, AcpMcpError::CODE_UNAVAILABLE);
+    assert_eq!(second.gateway.discovery_count(), 0);
+    second
+        .service
+        .attach(
+            registry.clone(),
+            second.gateway.clone(),
+            vec![spec("s2", "two", "other-server")],
+        )
+        .unwrap();
+    wait_until("独立会话池都就绪", || {
+        first
+            .pool
+            .get_client_visible_to("one", Some("s1"))
+            .is_some()
+            && second
+                .pool
+                .get_client_visible_to("two", Some("s2"))
+                .is_some()
+    })
+    .await;
+    assert_eq!(first.gateway.discovery_count(), 1);
+    assert_eq!(
+        second.gateway.discoveries.lock().as_slice(),
+        ["other-server"]
+    );
+    second.service.close_session("s1").await;
+    assert_eq!(registry.owner("shared-server").as_deref(), Some("s1"));
+    first.service.close_session("s1").await;
+    first.service.close_session("s1").await;
+    assert_eq!(registry.owner("shared-server"), None);
+    assert_eq!(registry.owner("other-server").as_deref(), Some("s2"));
+    second.service.close_session("s2").await;
+}
+
 /// 契约 5 续：在建连接被会话关闭终止，握手完成后**不得**落池。
 #[tokio::test]
 async fn close_session_aborts_inflight_connect_without_committing() {
@@ -442,10 +549,13 @@ async fn close_session_aborts_inflight_connect_without_committing() {
         handshake_delay: Some(Duration::from_millis(150)),
         ..FakeGateway::with_tools(&["echo"])
     });
-    service.attach(
-        Arc::clone(&gateway) as Arc<dyn AcpMcpGatewayPort>,
-        vec![spec("s1", "acp-srv", "srv-1")],
-    );
+    service
+        .attach(
+            Arc::new(AcpMcpRegistry::default()),
+            Arc::clone(&gateway) as Arc<dyn AcpMcpGatewayPort>,
+            vec![spec("s1", "acp-srv", "srv-1")],
+        )
+        .unwrap();
     // `server/discover` 尚未返回（延迟窗口内关闭会话）。
     service.close_session("s1").await;
     tokio::time::sleep(Duration::from_millis(400)).await;

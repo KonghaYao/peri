@@ -19,6 +19,7 @@ peri-config = { path = "../peri-config" }
 peri-model = { path = "../peri-model" }
 anyhow.workspace = true
 async-trait.workspace = true
+agent-client-protocol-schema = { version = "=1.12.0", features = ["unstable_mcp_over_acp"] }
 serde.workspace = true
 serde_json.workspace = true
 thiserror.workspace = true

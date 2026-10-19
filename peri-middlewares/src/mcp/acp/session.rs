@@ -1,7 +1,7 @@
 //! 会话级 MCP over ACP 声明管理。
 //!
-//! 一个 [`AcpMcpService`] 服务一条 ACP 连接上的全部会话：`attach` 登记 client
-//! 在会话 setup 中声明的 acp 型 server 并后台完成发现；client 经
+//! 每个 [`AcpMcpService`] 持有会话自己的 MCP 池；`attach` 使用 ACP 连接级
+//! 共享注册表登记 client 声明的 acp 型 server 并后台完成发现；client 经
 //! `mcp/message` 反向下发的通知按 `serverId` 路由进对应 rmcp 连接；
 //! `close_session` 移除该会话的全部声明与池条目。
 //!
@@ -23,7 +23,7 @@ use std::collections::{BTreeMap, HashMap};
 use std::sync::Arc;
 
 use parking_lot::Mutex;
-use peri_acp_types::acp_mcp::{AcpMcpError, AcpMcpInbound, AcpMcpServerSpec};
+use peri_acp_types::acp_mcp::{AcpMcpError, AcpMcpInbound, AcpMcpRegistry, AcpMcpServerSpec};
 use peri_acp_types::plugin::ConfigSource;
 use peri_acp_types::ports::{AcpMcpGatewayPort, AcpMcpServerPort};
 use serde_json::Value;
@@ -37,7 +37,7 @@ use crate::mcp::task_scope::McpTaskKey;
 
 /// 会话级 MCP over ACP 服务（`AcpMcpServerPort` 实现）。
 ///
-/// deployment 级单例：构造点持具体类型，host 侧只持
+/// 会话级实例：构造点持具体类型，host 侧只持
 /// `Arc<dyn AcpMcpServerPort>`。内部状态（会话 → 声明 → 连接）与 MCP 池
 /// 分离，池只承担「已建立连接」的登记与工具面投影。
 pub struct AcpMcpService {
@@ -49,13 +49,13 @@ pub struct AcpMcpService {
 ///
 /// `sessions` 用 `BTreeMap` 固定遍历顺序（发现派发顺序可复现）；`servers`
 /// 是 `serverId` → 桥接句柄的索引，入站 `mcp/message` 通知依赖它路由；
-/// `owners` 覆盖「正在发现」与「已就绪」两态，保证 `serverId` 在一条 ACP
-/// 连接内唯一。
+/// 连接级 `registry` 覆盖「正在发现」「已就绪」和「失败待重试」，保证
+/// `serverId` 在会话释放声明前不可被其他会话占用。
 #[derive(Default)]
 struct State {
     sessions: BTreeMap<String, SessionRecord>,
     servers: HashMap<String, ServerRecord>,
-    owners: HashMap<String, String>,
+    registry: Option<Arc<AcpMcpRegistry>>,
 }
 
 struct SessionRecord {
@@ -86,21 +86,22 @@ impl AcpMcpService {
         }
     }
 
-    /// 登记一条声明；返回 `None` 表示无需发现（已在发现 / 已就绪的幂等重复，
-    /// 或 `serverId` 已被另一会话占用）。
-    fn dispatch(&self, spec: AcpMcpServerSpec) -> Option<AcpMcpServerSpec> {
+    /// 连接级注册先于发现；冲突明确返回 CODE_UNAVAILABLE，不静默跳过。
+    fn dispatch(
+        &self,
+        registry: &Arc<AcpMcpRegistry>,
+        spec: AcpMcpServerSpec,
+    ) -> Result<Option<AcpMcpServerSpec>, AcpMcpError> {
         let mut state = self.state.lock();
-        if let Some(owner) = state.owners.get(&spec.server_id) {
-            if owner != &spec.session_id {
-                tracing::warn!(
-                    session_id = %spec.session_id,
-                    server_id = %spec.server_id,
-                    owner = %owner,
-                    "serverId 已在另一会话声明，拒绝重复声明"
-                );
-                return None;
-            }
+        if state
+            .registry
+            .as_ref()
+            .is_some_and(|current| !Arc::ptr_eq(current, registry))
+        {
+            return Err(AcpMcpError::unavailable("MCP 服务已绑定另一条 ACP 连接"));
         }
+        registry.claim(&spec.server_id, &spec.session_id)?;
+        state.registry = Some(registry.clone());
         let record = state
             .sessions
             .entry(spec.session_id.clone())
@@ -108,16 +109,13 @@ impl AcpMcpService {
                 servers: BTreeMap::new(),
             });
         match record.servers.get(&spec.server_id) {
-            Some(ServerPhase::Discovering | ServerPhase::Ready) => None,
+            Some(ServerPhase::Discovering | ServerPhase::Ready) => Ok(None),
             // 失败过的声明允许重试（client 可在后续 session setup 中重发）。
             Some(ServerPhase::Failed) | None => {
                 record
                     .servers
                     .insert(spec.server_id.clone(), ServerPhase::Discovering);
-                state
-                    .owners
-                    .insert(spec.server_id.clone(), spec.session_id.clone());
-                Some(spec)
+                Ok(Some(spec))
             }
         }
     }
@@ -171,9 +169,14 @@ impl AcpMcpService {
 
 #[async_trait::async_trait]
 impl AcpMcpServerPort for AcpMcpService {
-    fn attach(&self, gateway: Arc<dyn AcpMcpGatewayPort>, servers: Vec<AcpMcpServerSpec>) {
+    fn attach(
+        &self,
+        registry: Arc<AcpMcpRegistry>,
+        gateway: Arc<dyn AcpMcpGatewayPort>,
+        servers: Vec<AcpMcpServerSpec>,
+    ) -> Result<(), AcpMcpError> {
         for spec in servers {
-            let Some(spec) = self.dispatch(spec) else {
+            let Some(spec) = self.dispatch(&registry, spec)? else {
                 continue;
             };
             Self::spawn_discover(
@@ -183,12 +186,17 @@ impl AcpMcpServerPort for AcpMcpService {
                 spec,
             );
         }
+        Ok(())
     }
 
     async fn notify(&self, inbound: AcpMcpInbound) -> Result<(), AcpMcpError> {
         let handle = self.route(&inbound.server_id)?;
         handle
-            .notify(&inbound.method, inbound.params.map(Value::Object))
+            .notify(
+                &inbound.request_id,
+                &inbound.method,
+                inbound.params.map(Value::Object),
+            )
             .map_err(|error| AcpMcpError::unavailable(error.message.to_string()))
     }
 
@@ -212,13 +220,14 @@ impl AcpMcpServerPort for AcpMcpService {
                 .collect();
             for (server_id, _) in &connections {
                 state.servers.remove(server_id);
-                state.owners.remove(server_id);
             }
             (record.servers.into_keys().collect::<Vec<_>>(), connections)
         };
 
+        for (_, handle) in &connections {
+            handle.close().await;
+        }
         for server_id in server_ids {
-            self.state.lock().owners.remove(&server_id);
             self.pool
                 .stop_background(&McpTaskKey::Acp {
                     session_id: session_id.to_string(),
@@ -227,8 +236,7 @@ impl AcpMcpServerPort for AcpMcpService {
                 .await;
         }
 
-        for (server_id, handle) in connections {
-            handle.close();
+        for (server_id, _) in connections {
             tracing::debug!(
                 session_id = %session_id,
                 server_id = %server_id,
@@ -236,6 +244,9 @@ impl AcpMcpServerPort for AcpMcpService {
             );
         }
 
+        if let Some(registry) = &self.state.lock().registry {
+            registry.release_session(session_id);
+        }
         let removed = self.pool.remove_acp_servers_for_session(session_id).await;
         if !removed.is_empty() {
             tracing::info!(
@@ -257,11 +268,10 @@ async fn discover_server(
     gateway: Arc<dyn AcpMcpGatewayPort>,
     spec: AcpMcpServerSpec,
 ) {
-    let (transport, handle, runner) = create_bridge(gateway, spec.server_id.clone());
-    tokio::spawn(runner.run());
+    let (transport, handle) = create_bridge(gateway, spec.server_id.clone());
     // 协商期间 client 侧 server 就可能下发通知，入站路由必须早于协商注册。
     if !register_connection(&state, &spec, Arc::clone(&handle)) {
-        handle.close();
+        handle.close().await;
         return;
     }
 
@@ -300,7 +310,7 @@ async fn discover_server(
     if !connection_is_live(&state, &spec.server_id) {
         // 会话在协商 / 发现期间关闭：连接不落池，立即关闭桥接。
         let _ = service.close_with_timeout(SHUTDOWN_TIMEOUT).await;
-        unregister_connection(&state, &spec.server_id);
+        unregister_connection(&state, &spec.server_id).await;
         return;
     }
 
@@ -345,7 +355,7 @@ async fn discover_server(
         Err(mut service) => {
             // 池已关闭：不留任何可被读成成功的证据。
             let _ = service.close_with_timeout(SHUTDOWN_TIMEOUT).await;
-            unregister_connection(&state, &spec.server_id);
+            unregister_connection(&state, &spec.server_id).await;
             mark_failed(&state, &spec.session_id, &spec.server_id);
         }
     }
@@ -373,9 +383,11 @@ fn register_connection(
         return false;
     }
     if state
-        .owners
-        .get(&spec.server_id)
-        .is_some_and(|owner| owner != &spec.session_id)
+        .registry
+        .as_ref()
+        .and_then(|registry| registry.owner(&spec.server_id))
+        .as_deref()
+        != Some(&spec.session_id)
     {
         return false;
     }
@@ -386,16 +398,20 @@ fn register_connection(
             handle,
         },
     );
-    state
-        .owners
-        .insert(spec.server_id.clone(), spec.session_id.clone());
     true
 }
 
-fn unregister_connection(state: &Mutex<State>, server_id: &str) {
-    let mut state = state.lock();
-    state.servers.remove(server_id);
-    state.owners.remove(server_id);
+async fn unregister_connection(state: &Mutex<State>, server_id: &str) {
+    let handle = state
+        .lock()
+        .servers
+        .get(server_id)
+        .map(|connection| connection.handle.clone());
+    if let Some(handle) = handle {
+        // 完成 join 前保留句柄，close_session 即使并发也能等待同一关闭事务。
+        handle.close().await;
+        state.lock().servers.remove(server_id);
+    }
 }
 
 /// 连接是否仍属于存活会话（会话关闭后不得提交进池）。
@@ -416,7 +432,7 @@ async fn fail_connection(
         error = %message,
         "MCP over ACP 连接失败"
     );
-    unregister_connection(state, &spec.server_id);
+    unregister_connection(state, &spec.server_id).await;
     record_failure(
         pool,
         state,
