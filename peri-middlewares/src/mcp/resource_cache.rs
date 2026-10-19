@@ -545,7 +545,13 @@ fn cache_key(origin: &str, method: &str, params: &str) -> String {
 }
 
 fn digest(input: &str) -> String {
-    format!("{:x}", Sha256::digest(input.as_bytes()))
+    let digest = Sha256::digest(input.as_bytes());
+    let mut hex = String::with_capacity(64);
+    for byte in digest {
+        use std::fmt::Write as _;
+        let _ = write!(hex, "{byte:02x}");
+    }
+    hex
 }
 
 fn now_ms() -> u128 {

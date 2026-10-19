@@ -9,7 +9,7 @@ license = "Apache-2.0"
 peri-time = { path = "../../peri-time" }
 async-trait.workspace = true
 chrono.workspace = true
-croner = "3"
+croner = "4"
 parking_lot.workspace = true
 peri-acp-types = { path = "../../peri-acp-types" }
 peri-agent = { path = "../../peri-agent" }

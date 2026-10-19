@@ -13,7 +13,7 @@ name = "peri"
 path = "src/main.rs"
 
 [dev-dependencies]
-ratatui-kit = { version = "0.10.2", features = ["test-util"] }
+ratatui-kit = { version = "0.12.0", features = ["test-util"] }
 tokio = { workspace = true, features = ["test-util"] }
 tempfile.workspace = true
 serial_test.workspace = true
@@ -37,7 +37,7 @@ peri-resources = { path = "../peri-resources" }
 # 必须运行 `cargo test -p peri-tui --lib status_bar_test` 的 ground-truth 差分测试
 # （详见 status_bar.rs `model_click_areas` 的升级护栏注释）。
 ratatui = { version = "0.30.2", features = ["unstable-rendered-line-info", "unstable-widget-ref"] }
-ratatui-kit = { version = "0.10.2", features = ["full"] }
+ratatui-kit = { version = "0.12.0", features = ["full"] }
 ratatui-kit-markdown = { version = "0.3.0", features = ["markdown-highlight"] }
 # ── P1 像素渲染基础（image-p0-p1-spec §6.3 / spike S2）──
 # default-features=false 关闭 chafa-dyn（pkg-config C 库，必须）；不启用

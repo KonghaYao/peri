@@ -112,7 +112,7 @@ dirs = "7.0.0"
 url = "2"
 sqlx = { version = "0.9.0", features = ["runtime-tokio", "sqlite"] }
 sysinfo = "0.39"
-lru = "0.18"
+lru = "0.19"
 
 # --- MCP capability packages ---
 peri-mcp-common = { path = "mcp-packages/common" }
@@ -131,13 +131,13 @@ rmcp = "=3.5.0"
 tempfile = "3"
 
 # --- Allocator ---
-tikv-jemallocator = "0.6"
-tikv-jemalloc-ctl = { version = "0.6", features = ["stats", "use_std"] }
-tikv-jemalloc-sys = "0.6"
+tikv-jemallocator = "0.7"
+tikv-jemalloc-ctl = { version = "0.7", features = ["stats", "use_std"] }
+tikv-jemalloc-sys = "0.7"
 
 clap = { version = "4", features = ["derive", "env"] }
 semver = "1"
-sha2 = "0.10"
+sha2 = "0.11.1"
 
 axum = { version = "0.8.9", features = ["ws"] }
 serial_test = { version = "4.0.1", features = ["async"] }

@@ -40,7 +40,13 @@ fn external_task_id(request: &ExternalTaskRegistration) -> String {
         hasher.update((part.len() as u64).to_be_bytes());
         hasher.update(part.as_bytes());
     }
-    format!("mcp-{:x}", hasher.finalize())
+    let digest = hasher.finalize();
+    let mut hex = String::with_capacity(64);
+    for byte in digest {
+        use std::fmt::Write as _;
+        let _ = write!(hex, "{byte:02x}");
+    }
+    format!("mcp-{hex}")
 }
 
 fn external_started_at(

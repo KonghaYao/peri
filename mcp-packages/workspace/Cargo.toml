@@ -15,7 +15,7 @@ peri-agent = { path = "../../peri-agent" }
 peri-acp-types = { path = "../../peri-acp-types" }
 peri-mcp-common = { path = "../common" }
 async-trait.workspace = true
-base64 = { version = "0.22", features = ["alloc"] }
+base64 = { version = "0.23.1", features = ["alloc"] }
 chrono.workspace = true
 fuzzy-matcher = "0.3"
 grep = "0.4"

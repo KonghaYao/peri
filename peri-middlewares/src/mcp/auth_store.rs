@@ -19,7 +19,13 @@ pub(crate) fn static_credential_key(
         &oauth.scopes,
     ))
     .expect("OAuth credential identity is serializable");
-    format!("static:{:x}", Sha256::digest(identity))
+    let digest = Sha256::digest(identity);
+    let mut hex = String::with_capacity(64);
+    for byte in digest {
+        use std::fmt::Write as _;
+        let _ = write!(hex, "{byte:02x}");
+    }
+    format!("static:{hex}")
 }
 
 pub struct PerServerCredentialStore {

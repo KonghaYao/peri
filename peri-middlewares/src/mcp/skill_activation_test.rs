@@ -26,7 +26,12 @@ fn sha256_hex(text: &str) -> String {
     let mut hasher = Sha256::new();
     hasher.update(text.as_bytes());
     let digest = hasher.finalize();
-    format!("sha256:{:x}", digest)
+    let mut hex = String::with_capacity(64);
+    for byte in digest {
+        use std::fmt::Write as _;
+        let _ = write!(hex, "{byte:02x}");
+    }
+    format!("sha256:{hex}")
 }
 
 fn body(name: &str, description: &str) -> String {

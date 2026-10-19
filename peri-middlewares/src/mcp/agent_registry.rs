@@ -565,7 +565,13 @@ impl McpAgentRegistry {
             normalize_remote_definition(&mut definition)?;
         }
 
-        let digest = format!("sha256:{:x}", Sha256::digest(text.as_bytes()));
+        let digest = Sha256::digest(text.as_bytes());
+        let mut hex = String::with_capacity(64);
+        for byte in digest {
+            use std::fmt::Write as _;
+            let _ = write!(hex, "{byte:02x}");
+        }
+        let digest = format!("sha256:{hex}");
         let activated = ActivatedMcpAgent {
             metadata,
             definition,
