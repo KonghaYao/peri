@@ -207,7 +207,13 @@ pub(crate) async fn handle_request_for_connection(
     result
 }
 
-fn bind_session_tasks(
+/// 把会话 `TaskManager` 与任务事件订阅接到本会话的 MCP 池。
+///
+/// 生产 `session/load` / `session/resume` / `session/fork` 走 `ServerLoop` 的
+/// 分阶段恢复路径，不经过 [`handle_request_for_connection`]；它们同样必须在
+/// 会话发布后调用本函数，否则 MCP 工具调用会被 `begin_external_task_execution`
+/// 以 "session task manager unavailable" 拒绝。
+pub(crate) fn bind_session_tasks(
     session_id: &str,
     cfg: &AcpServerConfig,
     transport: &Arc<dyn crate::transport::AcpTransport>,

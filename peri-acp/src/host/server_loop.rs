@@ -636,6 +636,16 @@ impl ServerLoop<'_> {
         // `session/resume`（`requests/session_restore.rs`）。
         // 注册幂等（同一连接重复注册保留首次纪元），与 `spawn_prompt` 的注册点不冲突。
         if let Some(session_id) = setup_session_id.as_deref() {
+            // `session/load|resume|fork` 走分阶段恢复路径，不经
+            // `handle_request_for_connection`；这里补齐会话任务绑定，否则恢复后
+            // 的 MCP 工具调用会因 "session task manager unavailable" 全部失败。
+            let environment = sessions
+                .lock()
+                .await
+                .get(session_id)
+                .and_then(|state| state.environment.clone());
+            let local = environment.as_ref().map(|env| &env.cfg).unwrap_or(cfg);
+            requests::bind_session_tasks(session_id, local, transport);
             if matches!(
                 method.as_str(),
                 "session/new" | "session/fork" | "session/load" | "session/resume"
