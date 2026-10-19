@@ -921,6 +921,7 @@ impl AgentTableColumns {
     }
 
     /// 该计划下单行占用的终端列数（含列间分隔）。
+    #[cfg(test)]
     fn row_width(&self) -> usize {
         AGENT_ROW_LEADING_COLS
             + self.name
