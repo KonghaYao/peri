@@ -1,4 +1,5 @@
 use super::*;
+use peri_acp_types::plugin::McpSubscriptionsConfig;
 
 // 3.0 批 2 波 2：装配注入端口实现（ACP 侧只持 `Arc<dyn McpPoolPort>`）。
 // M-TUI 收口：`shutdown`（host/shutdown 命令面）与 `snapshot`（mcp/list
@@ -27,6 +28,10 @@ impl peri_acp_types::ports::McpPoolPort for McpClientPool {
             .read()
             .manager(session_id)
             .is_some_and(|manager| manager.has_unsettled_external())
+    }
+
+    fn has_instance(&self, instance: &str) -> bool {
+        McpClientPool::get_client(self, instance).is_some()
     }
 
     fn bind_agent_session(
@@ -250,11 +255,41 @@ impl peri_acp_types::ports::McpPoolPort for McpClientPool {
     }
 }
 
+/// `mcp/list` 单项列表上限：工具、资源、订阅资源各自最多透传 64 条。
+const MCP_LIST_MAX_ENTRIES: usize = 64;
+/// `mcp/list` 文本字段上限（清洗后的字符数）。
+const MCP_LIST_MAX_TEXT: usize = 160;
+
+/// 不可信 MCP 文本清洗：控制字符替换为空格、trim、截断到 160 字符。
+fn sanitize_mcp_text(value: &str) -> String {
+    value
+        .chars()
+        .map(|ch| if ch.is_control() { ' ' } else { ch })
+        .collect::<String>()
+        .trim()
+        .chars()
+        .take(MCP_LIST_MAX_TEXT)
+        .collect()
+}
+
+/// 可选文本清洗：空串归一为 None（描述/名称缺省语义）。
+fn sanitize_mcp_optional(value: Option<String>) -> Option<String> {
+    value
+        .map(|text| sanitize_mcp_text(&text))
+        .filter(|text| !text.is_empty())
+}
+
 /// `mcp/list` 契约投影：暴露面板需要的状态分类与排障字段（有界的
 /// `error_summary`、`url`；摘要已由 `ServerInfo` 侧 trim + 160 字符截断，
 /// 完整错误链不出投影），其余内部字段（source/plugin_source/cache_version
 /// 等）不透传。
+///
+/// 工具/资源/订阅资源同时做条目与文本双重有界：不可信 MCP server 返回的
+/// 名称与描述可能含控制字符或超长正文，进入面板前统一清洗；全量计数仍由
+/// `tool_count`/`resource_count` 承载。
 fn mcp_server_info_projection(info: ServerInfo) -> McpServerInfo {
+    let tool_count = info.tool_count;
+    let resource_count = info.resource_count;
     McpServerInfo {
         name: info.name,
         transport: info.transport_type,
@@ -270,8 +305,45 @@ fn mcp_server_info_projection(info: ServerInfo) -> McpServerInfo {
             OAuthStatus::Authorized => McpServerOAuthStatus::Authorized,
             OAuthStatus::NeedsAuthorization => McpServerOAuthStatus::NeedsAuthorization,
         },
-        tool_count: info.tool_count,
-        resource_count: info.resource_count,
+        tool_count,
+        resource_count,
+        tools: info
+            .tools
+            .into_iter()
+            .take(MCP_LIST_MAX_ENTRIES)
+            .map(|tool| McpToolInfo {
+                name: sanitize_mcp_text(&tool.name),
+                description: sanitize_mcp_optional(tool.description),
+            })
+            .collect(),
+        resources: info
+            .resources
+            .into_iter()
+            .take(MCP_LIST_MAX_ENTRIES)
+            .map(|resource| McpResourceInfo {
+                uri: sanitize_mcp_text(&resource.uri),
+                name: sanitize_mcp_optional(resource.name),
+                description: sanitize_mcp_optional(resource.description),
+            })
+            .collect(),
+        subscriptions: info.subscriptions.map(|subscriptions| {
+            let McpSubscriptionsConfig {
+                resources,
+                tools_list_changed,
+                prompts_list_changed,
+                resources_list_changed,
+            } = subscriptions;
+            McpSubscriptionsConfig {
+                resources: resources
+                    .into_iter()
+                    .take(MCP_LIST_MAX_ENTRIES)
+                    .map(|uri| sanitize_mcp_text(&uri))
+                    .collect(),
+                tools_list_changed,
+                prompts_list_changed,
+                resources_list_changed,
+            }
+        }),
         version: info.version,
         connected_at: info.connected_at,
         protocol_version: info.protocol_version,

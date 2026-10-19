@@ -22,10 +22,10 @@ use peri_acp_types::workspace_resources::{
 };
 use serde_json::{Map, Value};
 
-use super::frontmatter::{frontmatter_json, frontmatter_summary};
 use super::path::{canonical_root, is_text_bytes, safe_read_file};
 use super::scan::{enumerate_skill_files, find_skill_dirs, relative_path_string};
 use super::{ResourceBudget, ResourceError, WorkspaceResourcesInput};
+use peri_mcp_common::agent_definition::frontmatter::{frontmatter_json, frontmatter_summary};
 
 /// 技能条目的存储位置。
 #[derive(Debug)]

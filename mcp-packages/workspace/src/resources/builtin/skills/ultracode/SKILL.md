@@ -46,7 +46,7 @@ Write the brief's required tools next to the resolved target tools for every sta
 | `verification` | yes | 未声明 `tools`，继承基础工具；`disallowedTools` 只移除 `Agent` |
 | `web-researcher` | yes | 未声明 `tools`，继承基础工具；`disallowedTools` 只移除 `Agent` |
 
-The table is a claim about the shipped definitions (`mcp-packages/workspace/src/resources/builtin/agents/*.md`, readable as `agent://<scope>/<id>/agent.md`) and is locked against them by `resources/builtin_skill_capability_test.rs`; change a definition and the table must change with it. 该表只描述定义是否允许 Bash，不保证当前父工具集真的提供 Bash；运行时还会移除不可继承工具。派发前须核对实际可用工具，不能把表格当作完整运行时权限证明。
+The table is a claim about the shipped definitions (`mcp-packages/workspace/src/resources/builtin/agents/*.md` and `mcp-packages/web/src/agents/*.md`, readable as `agent://<scope>/<id>/agent.md`) and is locked against them by `resources/builtin_skill_capability_test.rs`; change a definition and the table must change with it. 该表只描述定义是否允许 Bash，不保证当前父工具集真的提供 Bash；运行时还会移除不可继承工具。派发前须核对实际可用工具，不能把表格当作完整运行时权限证明。
 
 workflow 的 `allowedTools: []` 与省略该字段一样，不收窄工具；这不同于 Agent 定义中的 `tools: []`（零工具）。需要限制 stage 时，显式列出非空工具白名单。必需工具不在有效集合中就是派发错误，例如要求运行命令却设置 `allowedTools: ['Read']`；引擎不会替派发方校验 brief 所需工具，必须在启动前发现缺口。
 

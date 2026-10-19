@@ -37,6 +37,7 @@ sha2.workspace = true
 walkdir = "2.5"
 
 [dev-dependencies]
+peri-mcp-web = { path = "../web" }
 peri-model = { path = "../../peri-model" }
 peri-resources = { path = "../../peri-resources" }
 filetime = "0.2"

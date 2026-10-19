@@ -959,6 +959,23 @@ panel-mcp-cache-disabled-dynamic = 缓存关闭：动态连接
 panel-mcp-cache-pending = 缓存等待初始化
 panel-mcp-cache-live-fetch = 持久化缓存：实时读取
 panel-mcp-cache-none = 持久化缓存：—
+panel-mcp-table-title = { $label } · { $count }
+panel-mcp-table-tools = 工具
+panel-mcp-table-skills = 技能
+panel-mcp-table-agents = 代理
+panel-mcp-table-subscriptions = 订阅
+panel-mcp-table-col-name = 名称
+panel-mcp-table-col-description = 描述
+panel-mcp-table-col-item = 项目
+panel-mcp-table-col-value = 值
+panel-mcp-table-empty = —
+panel-mcp-table-more = … 另有 { $count } 项
+panel-mcp-sub-resources = 资源
+panel-mcp-sub-tools-list-changed = tools/list_changed
+panel-mcp-sub-prompts-list-changed = prompts/list_changed
+panel-mcp-sub-resources-list-changed = resources/list_changed
+panel-mcp-sub-on = 开
+panel-mcp-sub-off = 关
 
 # ---- Memory Panel ----
 panel-memory-stats =   { $count } 个记忆文件在 ~/.claude/memory 中

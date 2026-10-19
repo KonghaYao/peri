@@ -202,6 +202,76 @@ async fn test_server_infos_projects_version_and_connected_at() {
     );
     assert_eq!(projected[0].protocol_version.as_deref(), Some("2026-07-28"));
 }
+
+/// `mcp/list` 投影的不可信文本边界：条目最多 64、控制字符清洗、空描述归一。
+#[test]
+fn test_server_infos_projection_bounds_and_sanitizes_untrusted_text() {
+    let pool = McpClientPool::new_pending();
+    let mut tools = Vec::new();
+    for index in 0..70 {
+        let mut tool = rmcp::model::Tool::default();
+        tool.name = format!("tool-{index}").into();
+        if index == 0 {
+            tool.description = Some("line\nbreak\ttext".into());
+        }
+        if index == 1 {
+            // 超长文本（200 字符）必须截断到 MCP_LIST_MAX_TEXT（160）。
+            tool.description = Some("d".repeat(200).into());
+        }
+        tools.push(tool);
+    }
+    let resources = (0..70)
+        .map(|index| {
+            let resource = rmcp::model::Resource::new(
+                format!("agent://builtin/a{index}/agent.md"),
+                format!("resource-{index}"),
+            );
+            if index == 0 {
+                resource.with_description("")
+            } else {
+                resource
+            }
+        })
+        .collect();
+    let mut handle = (*connected_test_handle("s")).clone();
+    handle.tools = tools;
+    handle.resources = resources;
+    pool.clients.write().insert("s".into(), Arc::new(handle));
+    pool.configs.write().insert(
+        "s".into(),
+        serde_json::from_value(serde_json::json!({
+            "command": "npx",
+            "subscriptions": {
+                "resources": (0..70)
+                    .map(|index| format!("file:///r{index}.md"))
+                    .collect::<Vec<_>>(),
+                "toolsListChanged": true,
+            }
+        }))
+        .expect("测试配置必须可解析"),
+    );
+
+    let projected = peri_acp_types::ports::McpPoolPort::server_infos(&pool).unwrap();
+    let server = &projected[0];
+    // 全量计数保留；投影条目有界。
+    assert_eq!(server.tool_count, 70);
+    assert_eq!(server.resource_count, 70);
+    assert_eq!(server.tools.len(), 64);
+    assert_eq!(server.resources.len(), 64);
+    // 控制字符替换为空格后不再含控制字符；空描述为 None。
+    let description = server.tools[0].description.as_deref().unwrap();
+    assert!(!description.chars().any(char::is_control));
+    assert!(description.contains("line break"));
+    // 超长文本按字符数截断到 160，避免无界载荷进入周期轮询。
+    let truncated = server.tools[1].description.as_deref().unwrap();
+    assert_eq!(truncated.chars().count(), 160, "描述必须截断到 160 字符");
+    assert!(truncated.chars().all(|ch| ch == 'd'));
+    assert_eq!(server.resources[0].description, None);
+    // 订阅资源同样有界；标志位保留。
+    let subscriptions = server.subscriptions.as_ref().unwrap();
+    assert_eq!(subscriptions.resources.len(), 64);
+    assert!(subscriptions.tools_list_changed);
+}
 #[tokio::test]
 async fn test_insert_failed() {
     let pool = Arc::new(McpClientPool::new_pending());

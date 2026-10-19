@@ -46,8 +46,8 @@ use peri_acp_types::{
     mcp::McpSubscriptionPort,
     mcp_skills::McpSkillRegistry,
     ports::{
-        McpBuiltinWorkspaceState, McpOAuthStartDisposition, McpPoolShutdownReport,
-        McpServerConnectionStatus, McpServerInfo, McpServerOAuthStatus,
+        McpBuiltinWorkspaceState, McpOAuthStartDisposition, McpPoolShutdownReport, McpResourceInfo,
+        McpServerConnectionStatus, McpServerInfo, McpServerOAuthStatus, McpToolInfo,
     },
     session::InboxHandle,
     skills::SkillMetadata,

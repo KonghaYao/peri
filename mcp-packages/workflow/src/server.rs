@@ -1,4 +1,4 @@
-//! workflow builtin MCP handler：4 个工具、5 个资源、标准资源订阅。
+//! Workflow builtin MCP handler: model/host tools, resources, and standard subscriptions.
 //!
 //! 设计依据：`docs/design/workflow-mcp.md` §4。三层授权边界：
 //! 1. **发现过滤**（模型面）由注册表 `BuiltinMcpTool.model_visible` 在宿主桥接点
@@ -176,7 +176,7 @@ impl WorkflowMcpServer {
 
     /// 工具声明（顺序即声明段顺序；`Workflow` 的 schema 来自 runtime 的单一权威）。
     fn tools(&self) -> Vec<Tool> {
-        vec![
+        let mut tools = vec![
             Tool::new(
                 "Workflow",
                 peri_workflow::runtime::params::START_TOOL_DESCRIPTION,
@@ -234,7 +234,9 @@ impl WorkflowMcpServer {
                     "required": ["runId", "taskId", "result"]
                 })),
             ),
-        ]
+        ];
+        tools.extend(consumer::tools());
+        tools
     }
 
     /// 工具分派：未知工具与参数结构错误是协议级；业务失败保留工具级文本。
@@ -249,6 +251,11 @@ impl WorkflowMcpServer {
             "WorkflowStatus" => self.call_status(arguments),
             "WorkflowKill" => self.call_kill(arguments).await,
             "WorkflowAgentResult" => self.call_agent_result(arguments, meta),
+            "WorkflowAgentClaim"
+            | "WorkflowTaskObserved"
+            | "WorkflowConsumerReady"
+            | "WorkflowCompletionAck"
+            | "WorkflowClose" => self.call_consumer(name, arguments, meta).await,
             other => DispatchOutcome::invalid_params(format!("unknown workflow tool: {other}")),
         }
     }
@@ -290,7 +297,19 @@ impl WorkflowMcpServer {
             None => runtime.start_run(arguments.clone()).await,
         };
         match outcome {
-            Ok(outcome) => DispatchOutcome::tool_ok(outcome.message()),
+            Ok(outcome) => {
+                if tokio::time::timeout(
+                    std::time::Duration::from_secs(10),
+                    runtime.registry().wait_for_observation(&outcome.run_id),
+                )
+                .await
+                .is_err()
+                {
+                    runtime.kill_run(&outcome.run_id);
+                    return DispatchOutcome::tool_err(format!("Workflow '{}' started but its MCP task projection was not acknowledged; cancellation requested for run {}", outcome.workflow_name, outcome.run_id));
+                }
+                DispatchOutcome::tool_ok(outcome.message())
+            }
             Err(error) => DispatchOutcome::tool_err(error),
         }
     }
@@ -483,6 +502,8 @@ impl WorkflowMcpServer {
     /// 里的条目让宿主在只枚举 resources 时也能看到完整资源面。
     fn resource_listing() -> Vec<Resource> {
         vec![
+            Resource::new("workflow://background-tasks", "Workflow background tasks")
+                .with_mime_type("application/json"),
             Resource::new(resources::RUNS_URI, "Workflow runs")
                 .with_mime_type("application/json")
                 .with_description(
@@ -745,3 +766,6 @@ mod test_fixture;
 #[cfg(test)]
 #[path = "server_test.rs"]
 mod tests;
+
+#[path = "consumer.rs"]
+mod consumer;

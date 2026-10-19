@@ -254,6 +254,31 @@ pub(crate) fn is_workspace_source(source: Option<&ConfigSource>) -> bool {
         || matches!(source, Some(ConfigSource::WorkspaceRemote))
 }
 
+/// 可承载**本地资源面**（project / plugin / builtin 三类资源）的来源。
+///
+/// 判据是 host-assigned 身份，不是 server 自报：宿主绑定的 builtin 实例
+/// （`ConfigSource::Builtin`，不限 `workspace`）与宿主显式选择的远端 Workspace
+/// （`ConfigSource::WorkspaceRemote`）。其他 server 上的同 scheme 资源一律按远端
+/// 处理（`McpServerConfig::source` 不从用户配置反序列化）。
+pub(crate) fn is_local_resource_source(source: Option<&ConfigSource>) -> bool {
+    matches!(
+        source,
+        Some(ConfigSource::Builtin { .. }) | Some(ConfigSource::WorkspaceRemote)
+    )
+}
+
+/// builtin 实例来源是否在 A24 关闭集内（按来源自带的实例身份匹配）。
+///
+/// 与 [`is_closed_source`] 的区别：后者要求调用方给出 server name，适用于
+/// 「按逻辑名判定」的既有面；本函数直接从 host-assigned 来源取实例身份，
+/// 供不绑定单一实例的消费面（Agent registry）使用。
+pub(crate) fn is_closed_builtin_source(
+    source: Option<&ConfigSource>,
+    closed: &BTreeSet<String>,
+) -> bool {
+    matches!(source, Some(ConfigSource::Builtin { instance }) if closed.contains(instance))
+}
+
 /// 默认配置层 overlay（A1：loader step 6.5 的唯一注入点）。
 ///
 /// 七条冻结规则（IF-D3；规则 7 为 Git Watch 下沉新增）：

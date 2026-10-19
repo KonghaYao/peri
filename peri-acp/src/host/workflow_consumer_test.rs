@@ -35,6 +35,7 @@ use super::workflow_consumer::WorkflowTaskConsumer;
 type CallRecord = (String, String, Value, Option<Value>);
 
 struct StubPool {
+    runtime: std::sync::OnceLock<Arc<WorkflowRuntime>>,
     subscribe_fails: bool,
     calls: Mutex<Vec<CallRecord>>,
     tasks_payload: Mutex<String>,
@@ -45,6 +46,7 @@ struct StubPool {
 impl StubPool {
     fn new(subscribe_fails: bool, tasks_payload: &str) -> Self {
         Self {
+            runtime: std::sync::OnceLock::new(),
             subscribe_fails,
             calls: Mutex::new(Vec::new()),
             tasks_payload: Mutex::new(tasks_payload.to_string()),
@@ -84,10 +86,24 @@ impl McpPoolPort for StubPool {
         self.calls.lock().unwrap().push((
             instance.to_string(),
             tool.to_string(),
-            arguments,
+            arguments.clone(),
             request_meta,
         ));
-        Ok("ok".to_string())
+        let runtime = self.runtime.get().unwrap();
+        match tool {
+            "WorkflowConsumerReady" => {
+                runtime.set_consumer_ready(arguments["ready"].as_bool().unwrap());
+                Ok("{}".into())
+            }
+            "WorkflowAgentClaim" => Ok(serde_json::to_string(&runtime.tasks().claim_for_consumer(
+                arguments["runId"].as_str().unwrap(),
+                arguments["taskId"].as_str().unwrap(),
+                arguments["claimId"].as_str().unwrap(),
+                None,
+            ))
+            .unwrap()),
+            _ => Ok("ok".into()),
+        }
     }
 
     async fn read_instance_resource(&self, instance: &str, uri: &str) -> Result<String, String> {
@@ -192,6 +208,7 @@ async fn consumer_readies_then_executes_and_backfills_published_task() {
         calls: Arc::clone(&calls),
     });
     let runtime = runtime_with(Arc::clone(&executor));
+    assert!(pool.runtime.set(runtime.clone()).is_ok());
     let params = AgentRunParams {
         run_id: "run-1".to_string(),
         agent_id: 1,
@@ -209,7 +226,7 @@ async fn consumer_readies_then_executes_and_backfills_published_task() {
 
     let consumer = WorkflowTaskConsumer::start(
         Arc::clone(&pool) as Arc<dyn McpPoolPort>,
-        Arc::clone(&runtime),
+        runtime.bind_consumer_token(),
         Arc::clone(&executor),
         "session-a".to_string(),
     );
@@ -275,9 +292,10 @@ async fn consumer_stays_not_ready_when_subscription_fails() {
         calls: Arc::clone(&calls),
     });
     let runtime = runtime_with(Arc::clone(&executor));
+    assert!(pool.runtime.set(runtime.clone()).is_ok());
     let consumer = WorkflowTaskConsumer::start(
         Arc::clone(&pool) as Arc<dyn McpPoolPort>,
-        Arc::clone(&runtime),
+        runtime.bind_consumer_token(),
         Arc::clone(&executor),
         "session-b".to_string(),
     );
@@ -302,9 +320,10 @@ async fn consumer_stop_returns_and_cancels() {
         calls: Arc::new(AtomicUsize::new(0)),
     });
     let runtime = runtime_with(Arc::clone(&executor));
+    assert!(pool.runtime.set(runtime.clone()).is_ok());
     let consumer = WorkflowTaskConsumer::start(
         Arc::clone(&pool) as Arc<dyn McpPoolPort>,
-        Arc::clone(&runtime),
+        runtime.bind_consumer_token(),
         Arc::clone(&executor),
         "session-c".to_string(),
     );
@@ -356,10 +375,6 @@ impl McpPoolPort for RuntimeWiredPool {
         request_meta: Option<Value>,
     ) -> Result<String, String> {
         assert_eq!(instance, "workflow");
-        assert_eq!(
-            tool, "WorkflowAgentResult",
-            "消费者只允许回填 host-only 工具"
-        );
         let token = request_meta
             .as_ref()
             .and_then(|meta| meta.get(WORKFLOW_CONSUMER_META_KEY))
@@ -368,6 +383,24 @@ impl McpPoolPort for RuntimeWiredPool {
         if !self.runtime.verify_consumer_token(token) {
             return Err("unbound consumer token".to_string());
         }
+        if tool == "WorkflowConsumerReady" {
+            self.runtime
+                .set_consumer_ready(arguments["ready"].as_bool().unwrap());
+            return Ok("{}".into());
+        }
+        if tool == "WorkflowAgentClaim" {
+            return Ok(serde_json::to_string(
+                &self.runtime.tasks().claim_for_consumer(
+                    arguments["runId"].as_str().unwrap(),
+                    arguments["taskId"].as_str().unwrap(),
+                    arguments["claimId"].as_str().unwrap(),
+                    self.runtime
+                        .run_capacity(arguments["runId"].as_str().unwrap()),
+                ),
+            )
+            .unwrap());
+        }
+        assert_eq!(tool, "WorkflowAgentResult");
         let run_id = arguments["runId"]
             .as_str()
             .ok_or("missing runId")?
@@ -494,7 +527,7 @@ async fn cancelled_caller_keeps_completion_owner_with_real_engine() {
     });
     let consumer = WorkflowTaskConsumer::start(
         Arc::clone(&pool) as Arc<dyn McpPoolPort>,
-        Arc::clone(&runtime),
+        runtime.bind_consumer_token(),
         Arc::clone(&executor),
         "session-lifecycle".to_string(),
     );
@@ -576,7 +609,7 @@ async fn simple_workflow_completes_through_host_consumer() {
     });
     let consumer = WorkflowTaskConsumer::start(
         Arc::clone(&pool) as Arc<dyn McpPoolPort>,
-        Arc::clone(&runtime),
+        runtime.bind_consumer_token(),
         Arc::clone(&executor),
         "session-simple".to_string(),
     );

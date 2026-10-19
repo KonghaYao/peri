@@ -92,8 +92,8 @@ const ARTIFACT_TOOLS: &[BuiltinMcpTool] = &[BuiltinMcpTool {
 
 /// `cron` 实例的工具声明（顺序即声明段顺序）。
 ///
-/// 三个工具一律 deferred（`direct: false`）且无提示词声明模板（A4：声明段零变化）；
-/// `cron_register` / `cron_list` / `cron_remove` 的在用执行实现是
+/// Cron 工具一律 deferred（`direct: false`）且无提示词声明模板（A4：声明段零变化）；
+/// `cron_register` / `cron_list` / `cron_remove` / `cron_toggle` 的在用执行实现是
 /// `mcp-packages/cron/src/tools.rs` 的同名 `BaseTool`，由 `CronMcpServer` 映射。
 const CRON_TOOLS: &[BuiltinMcpTool] = &[
     BuiltinMcpTool {
@@ -115,6 +115,20 @@ const CRON_TOOLS: &[BuiltinMcpTool] = &[
         effective_name: "mcp__cron__cron_remove",
         direct: false,
         model_visible: true,
+        prompt_declaration: None,
+    },
+    BuiltinMcpTool {
+        original_name: "cron_toggle",
+        effective_name: "mcp__cron__cron_toggle",
+        direct: false,
+        model_visible: true,
+        prompt_declaration: None,
+    },
+    BuiltinMcpTool {
+        original_name: "cron_acknowledge",
+        effective_name: "mcp__cron__cron_acknowledge",
+        direct: false,
+        model_visible: false,
         prompt_declaration: None,
     },
 ];
@@ -230,6 +244,41 @@ const WORKFLOW_TOOLS: &[BuiltinMcpTool] = &[
     BuiltinMcpTool {
         original_name: "WorkflowAgentResult",
         effective_name: "mcp__workflow__WorkflowAgentResult",
+        direct: false,
+        model_visible: false,
+        prompt_declaration: None,
+    },
+    BuiltinMcpTool {
+        original_name: "WorkflowAgentClaim",
+        effective_name: "mcp__workflow__WorkflowAgentClaim",
+        direct: false,
+        model_visible: false,
+        prompt_declaration: None,
+    },
+    BuiltinMcpTool {
+        original_name: "WorkflowConsumerReady",
+        effective_name: "mcp__workflow__WorkflowConsumerReady",
+        direct: false,
+        model_visible: false,
+        prompt_declaration: None,
+    },
+    BuiltinMcpTool {
+        original_name: "WorkflowCompletionAck",
+        effective_name: "mcp__workflow__WorkflowCompletionAck",
+        direct: false,
+        model_visible: false,
+        prompt_declaration: None,
+    },
+    BuiltinMcpTool {
+        original_name: "WorkflowClose",
+        effective_name: "mcp__workflow__WorkflowClose",
+        direct: false,
+        model_visible: false,
+        prompt_declaration: None,
+    },
+    BuiltinMcpTool {
+        original_name: "WorkflowTaskObserved",
+        effective_name: "mcp__workflow__WorkflowTaskObserved",
         direct: false,
         model_visible: false,
         prompt_declaration: None,

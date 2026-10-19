@@ -52,6 +52,11 @@ impl WorkflowInstanceInput {
 
     /// 绑定运行时（首次为准；结果区分首次 / 幂等重复 / 不同实例冲突，均不替换既有值）。
     pub fn bind(&self, runtime: Arc<WorkflowRuntime>) -> BindOutcome {
+        // The MCP instance owns execution. Never inject the Host task catalog here:
+        // that catalog is a projection reconstructed from MCP resources.
+        if runtime.bg_registry().is_none() {
+            runtime.set_bg_registry(Arc::new(peri_mcp_common::create_local_task_manager()));
+        }
         match self.runtime.set(runtime) {
             Ok(()) => BindOutcome::Bound,
             Err(rejected) => match self.runtime.get() {

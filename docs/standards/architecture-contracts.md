@@ -8,6 +8,12 @@
 - **Rule**：TUI 的用户交互主路径经 ACP transport 调用服务；不得从 TUI 直接驱动 `peri-agent` 或 `peri-middlewares` 的 Agent 运行时。TUI 可在启动和配置层复用相关 crate 的类型与初始化能力，Agent 执行入口仍保持在 ACP 会话路径。
 - **Verify**：人工检查 TUI 的 prompt、cancel、session 等请求经 ACP client/transport；RCRA 循环定义与 cancel 执行权在 Agent 层——循环本体为 `peri-agent/src/agent/stages/mod.rs` 的 `run_react_loop`（Receive 唯一退出口 + cancel 检查，Model 中止由 Agent 发起），子 agent 的 Cascade/Independent 判定与终止执行复用 `peri-acp-types/src/session.rs` 定义的 `cancel_cascade_agents` / `cancel_all_agents`（Agent session runtime 持有和调用；`AgentRuntime`/`CancelPolicy`/`AgentStatus` 的契约类型以 `peri-acp-types` 为事实源）；ACP 仅定位（`SessionManager::cancel_session` / `close_session` 查 session 映射）并传递 active_agents 注册表，经 `peri-agent/src/session/exec/executor_helpers.rs` 的 `build_and_execute_agent_v2` 驱动循环（L5 归位：执行本体在 Agent 层 `session/exec/`，ACP 侧仅协议化薄壳 `peri-acp/src/session/executor.rs` 与装配面宿主 `peri-acp/src/host/stage_builder.rs` 驱动调用）。
 
+### ARC-MCP-DATA-001
+
+- **Scope**：builtin/external MCP、Host、Agent、ACP、TUI。
+- **Rule**：MCP 领域数据先经过标准 MCP `resources/read`、`tools/call` 或已协商的订阅，再由宿主投影到 ACP/其他客户端；同进程部署不构成例外。不得通过共享运行时、任务表、业务广播、downcast 或本地兜底绕过协议。构造期注入依赖/能力令牌和宿主自身的连接状态不属于 MCP 业务数据。模型可见性与调用授权分别校验，宿主专用控制工具不进入模型工具目录。外部任务终态必须先确认接收，再确认服务端待交付记录；断开、失败、重试和会话关闭不得静默丢失结果或伪造清理完成。
+- **Verify**：`scripts/check-mcp-data-boundary.sh`；Cron 和 Workflow 的真实 rmcp wire 测试、ACP 断线无兜底测试、Workflow 终态接收失败/重试测试。源码检查只是回归护栏，新增 MCP 出口仍需沿生产者到客户端追踪数据路径。
+
 ### ARC-WORKSPACE-001
 
 - **Scope**：`peri-acp-types`、`peri-resources`、`peri-process`、ACP session lifecycle、Agent、TUI。

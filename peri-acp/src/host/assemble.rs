@@ -478,7 +478,7 @@ pub(crate) async fn assemble_server_config_with_mcp_profile(
     // ── cron 调度器（迁移前 TUI launch / cli_print 各自构造）──
     //
     // A1/A32：每个会话环境构造一份 scheduler，并以同一 `Arc` 同时喂给
-    // `CronSchedulerPort`（宿主事件面）与 builtin `cron` 实例的
+    // `CronSchedulerPort`（装配能力标识）与 builtin `cron` 实例的
     // `CronInstanceInput`（工具面）。1s tick 的唯一 spawn 点是 pool 建立本代
     // builtin transport 处（`McpClientPool::spawn_builtin_transport`，由
     // `cron.tick_enabled` 决定）；宿主不再 spawn `HostTaskKind::CronTick`
@@ -895,6 +895,7 @@ pub(crate) async fn assemble_server_config_with_mcp_profile(
         // 技能命令面已改由 MCP 发现异步投影，不再经此处）。
         plugin_command_entries.clone(),
     );
+    session_manager.bind_cron_mcp(mcp_pool.clone());
 
     // Langfuse 观测（与迁移前 TUI/stdio/print 一致：环境启用时创建）。
     // 暂存能力的装配（native 端口与启动恢复）在 `host/telemetry.rs`：本处只把配置与

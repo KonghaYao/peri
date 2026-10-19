@@ -42,6 +42,8 @@ pub use peri_acp_types::cron::CronTrigger;
 /// 定时任务调度器（纯内存）
 pub struct CronScheduler {
     tasks: HashMap<String, CronTask>,
+    /// MCP resource outbox: a trigger remains readable until acknowledged.
+    pending_triggers: std::collections::VecDeque<CronTrigger>,
     trigger_tx: mpsc::UnboundedSender<CronTrigger>,
     /// Additional trigger senders (for CronOwner bridge in ACP layer).
     /// Each sender receives a clone of every CronTrigger fired.
@@ -52,6 +54,7 @@ impl CronScheduler {
     pub fn new(trigger_tx: mpsc::UnboundedSender<CronTrigger>) -> Self {
         Self {
             tasks: HashMap::new(),
+            pending_triggers: std::collections::VecDeque::new(),
             trigger_tx,
             extra_trigger_txs: Vec::new(),
         }
@@ -131,12 +134,19 @@ impl CronScheduler {
             }
             if let Some(next) = task.next_fire {
                 if now >= next {
+                    // Backpressure keeps the due firing pending; never advance its
+                    // schedule unless the owner can retain the delivery record.
+                    if self.pending_triggers.len() >= 256 {
+                        warn!(task_id = %task.id, "cron trigger outbox is full; firing deferred");
+                        continue;
+                    }
                     // firing 身份 = 本次计划触发时间（重试复用、新触发必新）。
                     let trigger = CronTrigger {
                         task_id: task.id.clone(),
                         firing_id: next.to_rfc3339(),
                         prompt: task.prompt.clone(),
                     };
+                    self.pending_triggers.push_back(trigger.clone());
                     // Send to primary trigger_tx (TUI polling path)
                     if self.trigger_tx.send(trigger.clone()).is_err() {
                         warn!(
@@ -161,6 +171,15 @@ impl CronScheduler {
                 }
             }
         }
+    }
+
+    pub fn pending_triggers(&self) -> &std::collections::VecDeque<CronTrigger> {
+        &self.pending_triggers
+    }
+
+    pub fn acknowledge_trigger(&mut self, task_id: &str, firing_id: &str) {
+        self.pending_triggers
+            .retain(|trigger| trigger.task_id != task_id || trigger.firing_id != firing_id);
     }
 
     /// 将任务的下次触发时间强制设为过去，使下一次 `tick` 必然触发。
@@ -209,33 +228,6 @@ impl CronScheduler {
 pub struct CronSchedulerPortHandle(pub std::sync::Arc<parking_lot::Mutex<CronScheduler>>);
 
 impl peri_acp_types::cron::CronSchedulerPort for CronSchedulerPortHandle {
-    fn subscribe(&self) -> mpsc::UnboundedReceiver<CronTrigger> {
-        self.0.lock().subscribe()
-    }
-
-    fn list_tasks(&self) -> Vec<peri_acp_types::cron::CronTaskInfo> {
-        self.0
-            .lock()
-            .list_tasks()
-            .into_iter()
-            .map(|t| peri_acp_types::cron::CronTaskInfo {
-                id: t.id.clone(),
-                expression: t.expression.clone(),
-                prompt: t.prompt.clone(),
-                next_fire: t.next_fire,
-                enabled: t.enabled,
-            })
-            .collect()
-    }
-
-    fn toggle(&self, id: &str) -> bool {
-        self.0.lock().toggle(id)
-    }
-
-    fn remove(&self, id: &str) -> bool {
-        self.0.lock().remove(id)
-    }
-
     fn as_any(&self) -> &dyn std::any::Any {
         self
     }

@@ -20,7 +20,7 @@ use super::test_fixture::*;
 use super::WorkflowMcpServer;
 use crate::input::{BindOutcome, WorkflowInstanceInput};
 #[tokio::test]
-async fn wire_declares_four_tools_and_five_resources() {
+async fn wire_declares_model_and_consumer_tools_and_resources() {
     let pair = connect(server(make_runtime())).await;
     let peer = pair.peer();
 
@@ -32,9 +32,14 @@ async fn wire_declares_four_tools_and_five_resources() {
             "Workflow",
             "WorkflowStatus",
             "WorkflowKill",
-            "WorkflowAgentResult"
+            "WorkflowAgentResult",
+            "WorkflowAgentClaim",
+            "WorkflowConsumerReady",
+            "WorkflowCompletionAck",
+            "WorkflowClose",
+            "WorkflowTaskObserved"
         ],
-        "handler 必须恰好声明四条工具（顺序即声明段顺序）"
+        "模型工具和宿主工具必须经 MCP 声明"
     );
     let workflow_tool = &tools[0];
     let properties = workflow_tool
@@ -74,13 +79,14 @@ async fn wire_declares_four_tools_and_five_resources() {
     assert_eq!(
         uris,
         vec![
+            "workflow://background-tasks",
             "workflow://runs",
             "workflow://runs/{runId}",
             "workflow://runs/{runId}/events",
             "workflow://runs/{runId}/tasks",
             "workflow://tasks",
         ],
-        "资源面必须恰好五条"
+        "资源面必须包含后台任务和完成结果"
     );
 
     pair.shutdown().await;
@@ -912,5 +918,72 @@ async fn subscription_listening_before_bind_is_woken_after_binding() {
     );
 
     let _ = subscription.cancel().await;
+    pair.shutdown().await;
+}
+
+#[tokio::test]
+async fn wire_consumer_commands_require_token_and_claim_is_retry_safe() {
+    let runtime = make_runtime();
+    let token = runtime.bind_consumer_token();
+    runtime
+        .tasks()
+        .publish("task-a".into(), task_params("run-a"));
+    let pair = connect(server(runtime.clone())).await;
+    let peer = pair.peer();
+    let claim = json!({"runId":"run-a","taskId":"task-a","claimId":"request-a"});
+    for (name, args) in [
+        ("WorkflowAgentClaim", claim.clone()),
+        ("WorkflowTaskObserved", json!({"runId":"run-a"})),
+        ("WorkflowConsumerReady", json!({"ready":true})),
+        ("WorkflowCompletionAck", json!({"runId":"run-a"})),
+        ("WorkflowClose", json!({})),
+    ] {
+        assert_invalid_params(
+            &call_tool_protocol_error(&peer, name, args.clone(), None).await,
+            name,
+        );
+        assert_invalid_params(
+            &call_tool_protocol_error(&peer, name, args, Some(consumer_meta("wrong"))).await,
+            name,
+        );
+    }
+    let first = call_tool_with_meta(
+        &peer,
+        "WorkflowAgentClaim",
+        claim.clone(),
+        Some(consumer_meta(&token)),
+    )
+    .await;
+    let retry = call_tool_with_meta(
+        &peer,
+        "WorkflowAgentClaim",
+        claim,
+        Some(consumer_meta(&token)),
+    )
+    .await;
+    assert_eq!(first_text(&first), first_text(&retry));
+    assert_eq!(
+        serde_json::from_str::<Value>(&first_text(&first)).unwrap()["taskId"],
+        "task-a"
+    );
+    let other = call_tool_with_meta(
+        &peer,
+        "WorkflowAgentClaim",
+        json!({"runId":"run-a","taskId":"task-a","claimId":"another"}),
+        Some(consumer_meta(&token)),
+    )
+    .await;
+    assert_eq!(first_text(&other), "null");
+    call_tool_with_meta(
+        &peer,
+        "WorkflowConsumerReady",
+        json!({"ready":false}),
+        Some(consumer_meta(&token)),
+    )
+    .await;
+    assert_eq!(
+        runtime.tasks().get("run-a", "task-a").unwrap().state,
+        WorkflowTaskState::Cancelled
+    );
     pair.shutdown().await;
 }

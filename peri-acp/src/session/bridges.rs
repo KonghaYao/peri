@@ -4,6 +4,12 @@ use super::cron_bridge::SessionCronBridge;
 use super::SessionManager;
 
 impl SessionManager {
+    pub(crate) fn bind_cron_mcp(
+        &self,
+        pool: Option<std::sync::Arc<dyn peri_acp_types::ports::McpPoolPort>>,
+    ) {
+        *self.inner.cron_mcp.lock() = pool;
+    }
     /// Host 启动时绑定 cron continuation 入口。既有 bridge 会在下一次 lazy 检查前
     /// 尚未创建，因此只允许首次写入。
     pub fn bind_cron_continuation(
@@ -18,16 +24,18 @@ impl SessionManager {
 
     /// 确保指定 session 的 session 级 cron bridge 已启动（lazy-init，幂等）。
     ///
-    /// 首次调用：`scheduler.subscribe()` 一次 + 用 session 级 inbox handle 启动
+    /// 首次调用：通过会话 MCP 池读取触发 outbox，用 session 级 inbox handle 启动
     /// `SessionCronBridge`。此后每 turn 重复调用均为 no-op（"already set" 检查在
     /// `get_mut` 写锁内，杜绝并发双订阅）。bridge 跨 turn 存活，close_session
     /// 时随 AcpSession drop 而中止。
     ///
     /// session 不存在或 scheduler 未配置时返回 false。
     pub fn cron_bridge_for(&self, session_id: &str) -> bool {
-        let scheduler = match &self.inner.cron_scheduler {
-            Some(s) => s.clone(),
-            None => return false,
+        if self.inner.cron_scheduler.is_none() {
+            return false;
+        }
+        let Some(pool) = self.inner.cron_mcp.lock().clone() else {
+            return false;
         };
         let continuation_tx = match self.inner.cron_continuation_tx.lock().clone() {
             Some(tx) => tx,
@@ -39,7 +47,7 @@ impl SessionManager {
                 return true;
             }
         }
-        // Slow path: bind a session-scoped scheduler subscription to Host continuation.
+        // Slow path: bind a session-scoped MCP resource consumer to Host continuation.
         if self.session_inbox_for(session_id).is_none() {
             return false;
         }
@@ -48,7 +56,7 @@ impl SessionManager {
                 session.cron_bridge = Some(SessionCronBridge::start(
                     session_id.to_string(),
                     session.v2_message_queue.clone(),
-                    &scheduler,
+                    pool,
                     continuation_tx,
                 ));
                 tracing::info!(session_id = %session_id, "session cron bridge started");

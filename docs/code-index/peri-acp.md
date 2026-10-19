@@ -117,8 +117,8 @@ Session ID 恢复与生命周期回归：`src/host/requests_workspace_cases_test
 | 内置命令注册 | session/command/ | `register_builtins`（mod.rs:124）；compact（:26）/clear/rewind；compact pipeline 仅 re-export（compact/pipeline.rs:11） |
 | LLM 实例池 | session/agent_pool.rs | `AgentPool`；`has_valid_cache` / `invalidate`；完整 provider 配置（含 connection/key/options）经进程加盐 SHA256 形成内部指纹，阻止在途旧工厂回填后复用旧连接 |
 | 目标状态 | session/goal_state/mod.rs | `GoalState`（:59，`set_goal` :80 / `snapshot` :167） |
-| cron 桥与生产回归 | session/cron_bridge.rs、host/workspace.rs、host/requests_cron_test.rs | `SessionCronBridge` 跨 turn 存活；会话 scheduler 同时注入 builtin 与 bridge，部署 tick 策略沿 `WorkspaceAssembly` 传递；`cron_deployment_` 用例覆盖公开部署、双会话与真实 continuation |
-| Cron 管理 ACP 请求 | host/requests/cron.rs、host/requests/cron_endpoint_test.rs | cron/list、cron/toggle、cron/remove 校验 session、closing、实际 environment 与持久 workspace scope；只消费会话 CronSchedulerPort，不回退宿主 scheduler |
+| cron 桥与生产回归 | session/cron_bridge.rs、host/workspace.rs、host/requests_cron_test.rs | `SessionCronBridge` 跨 turn 存活；bridge 只持会话 MCP 池；触发通过 `cron://triggers` 读取并经 `cron_acknowledge` 确认，部署 tick 策略沿 `WorkspaceAssembly` 传递；`cron_deployment_` 用例覆盖公开部署、双会话与真实 continuation |
+| Cron 管理 ACP 请求 | host/requests/cron.rs、host/requests/cron_endpoint_test.rs | cron/list、cron/toggle、cron/remove 校验 session、closing、实际 environment 与持久 workspace scope；经会话 MCP 池读取 `cron://jobs` / 调用 `cron_toggle`、`cron_remove`，断线失败，不读取本地 scheduler |
 | 状态构建 | session/state_builders.rs | `parse_permission_mode`（:19）/`apply_profile_effort`（:29）/`build_config_options`（:67） |
 
 ### src/event/（事件映射与转发）
@@ -231,3 +231,12 @@ Session ID 恢复与生命周期回归：`src/host/requests_workspace_cases_test
 - Workspace 资源面宿主 seam（W1/W3-J6/W4b）：`host/requests_skill_resources_test.rs`（模块 `host::requests::tests::skill_resources`）覆盖项目技能进冻结摘要、`disableBundledSkills=true` 隐藏 builtin、关闭实例 ⇒ 技能/指令不可得且**不回落磁盘**、`{cwd}/agents` 第二根接线与同 id 优先级、系统 skill 单一裸名命令及 `SkillsMiddleware` 关闭位撤下该命令；`host/requests_meta_resources_test.rs`（模块 `host::requests::tests::meta_resources`）覆盖段落覆盖经 `peri-meta://` 进入生产 `session/new`、覆盖不可得时保持内置且不读磁盘——命令 `cargo test -p peri-acp --lib -- host::requests::tests::skill_resources` 与 `cargo test -p peri-acp --lib -- host::requests::tests::meta_resources`。
 - 子 Agent 请求面捕获（H1/H2）：`host/executor_flow_child_chain_test.rs`（模块 `host::executor_flow_tests::child_chain_tests`，`executor_flow_test.rs` 挂载）用真实子链装配（`peri_middlewares::subagent::SubagentChainAssemblerImpl::with_registry(会话 MCP skill registry)` + `build_subagent_middlewares` + `ExecuteExtraToolResolver`）、真实 durable 子会话与 `CapturePromptModel` 捕获定义型/fork/前后台/live resume 的最终 `ModelRequest`——命令 `cargo test -p peri-acp --lib -- child_chain_tests`。断言：项目指令/技能摘要/延迟工具目录/子身份各恰一次、父冻结身份与 `Agent`/`AskUserQuestion`/`Workflow` 工具不出现、关闭 AgentsMd/Skills/ToolSearch 后贡献与延迟入口缺席、resume 携带子会话历史与追加指令。装配器由测试夹具**本地构造同型实例**（ACP 层不引用 middlewares 装配入口）：生产接线在 `peri-middlewares/src/assembly.rs` → `subagent/tool/configuration.rs::with_mcp_skills`（宿主只提供会话 skill registry），故「宿主把 registry 接进工具」这一段接线漂移不被本文件捕获。不覆盖进程重启后的子会话执行（本分支无持久执行恢复）与真实 hook/permission。
 - 子 Agent 冷恢复（宿主态重建）验收：本分支**没有**冷执行恢复路径（`host/cold_execution.rs` 随持久执行恢复一并移除），因此不承载该验收；相关覆盖由 `host::executor_flow_tests::child_chain_tests` 的 live resume 用例接续（同一持久 store、父侧新委派身份、子会话历史与追加指令）。
+
+### MCP 业务数据投影
+
+| 功能 | 文件 | 边界 |
+| --- | --- | --- |
+| Workflow 执行消费者 | `src/host/workflow_consumer.rs` | 资源读取 + 订阅发现；鉴权工具领取、就绪、回填；不持运行时/任务表引用；claimId 保证领取请求可重试 |
+| Workflow 会话装配 | `src/host/workspace_workflow.rs` | 绑定实例运行时与消费者令牌；启动 MCP 执行消费者及后台目录投影，实例与 Host 各持独立 TaskManager |
+| Workflow 后台目录与终态 | `src/host/workflow_projection.rs` | `workflow://background-tasks` → Host 外部任务目录；接收终态后 `WorkflowCompletionAck`；取消经 `WorkflowKill`；关闭经 `WorkflowClose` 并确认最终投影 |
+| Cron 触发客户端 | `peri-agent/src/session/cron_events.rs` | Session 与 print 共用 MCP 消费者；失败保留、确认重试不重复本地交付 |

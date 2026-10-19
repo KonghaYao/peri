@@ -90,6 +90,28 @@ pub enum McpServerOAuthStatus {
     NeedsAuthorization,
 }
 
+/// `mcp/list` 暴露的单个工具投影。
+///
+/// 有界投影：`McpServerInfo::tools` 至多 64 条，`name`/`description` 已完成
+/// 控制字符清洗与 160 字符截断；全量计数仍以
+/// [`McpServerInfo::tool_count`] 为准。
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+pub struct McpToolInfo {
+    pub name: String,
+    pub description: Option<String>,
+}
+
+/// `mcp/list` 暴露的单个资源投影。
+///
+/// 有界投影语义同 [`McpToolInfo`]；全量计数以
+/// [`McpServerInfo::resource_count`] 为准。
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+pub struct McpResourceInfo {
+    pub uri: String,
+    pub name: Option<String>,
+    pub description: Option<String>,
+}
+
 /// 单个 MCP 服务器的状态投影（`mcp/list` 命令面数据源）。
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct McpServerInfo {
@@ -99,6 +121,14 @@ pub struct McpServerInfo {
     pub oauth_status: McpServerOAuthStatus,
     pub tool_count: usize,
     pub resource_count: usize,
+    /// 工具的有界投影（至多 64 条、文本 160 字符）；全量计数见
+    /// [`Self::tool_count`]。
+    pub tools: Vec<McpToolInfo>,
+    /// 资源的有界投影（至多 64 条、文本 160 字符）；全量计数见
+    /// [`Self::resource_count`]。
+    pub resources: Vec<McpResourceInfo>,
+    /// 服务器配置声明的订阅项；None = 未配置。
+    pub subscriptions: Option<crate::plugin::McpSubscriptionsConfig>,
     /// server 自报版本（initialize 响应的 `serverInfo.version`）；未知为 None。
     pub version: Option<String>,
     /// 当前连接建立时刻（RFC3339 UTC）；从未成功连接为 None。
@@ -227,6 +257,15 @@ pub trait McpPoolPort: Send + Sync {
     /// Whether this session has MCP Tasks whose terminal notification is pending.
     fn has_active_tasks(&self, _session_id: &str) -> bool {
         false
+    }
+
+    /// 池内是否存在指定实例的注册句柄（仅连接状态，不读取 MCP 业务数据）。
+    ///
+    /// 宿主生命周期（如 workflow 消费者）必须在实例实际装配后才启动。默认
+    /// `true` 保持未声明该能力的替换实现的既有行为；`McpClientPool` 按客户端
+    /// 表精确回答。
+    fn has_instance(&self, _instance: &str) -> bool {
+        true
     }
 
     /// Synchronously close task/callback/commit admission before external task

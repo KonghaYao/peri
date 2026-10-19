@@ -13,8 +13,14 @@
 //!
 //! You are a code reviewer...
 //! ```
+//!
+//! [`frontmatter`] 提供与解析器同源的原文投影（YAML → JSON）：workspace 的
+//! 本地资源与 web 实例的 builtin agent 资源共用它构造 `_meta`，避免两份
+//! frontmatter 规则漂移。
 
 use serde::{de::Error, Deserialize};
+
+pub mod frontmatter;
 
 /// Claude Code Agent YAML frontmatter 定义
 #[derive(Debug, Clone, Deserialize)]

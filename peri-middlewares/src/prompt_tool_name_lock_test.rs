@@ -35,7 +35,7 @@ const MANAGED_PROMPT_FILES: &[&str] = &[
     "mcp-packages/workspace/src/resources/builtin/agents/explorer.md",
     "mcp-packages/workspace/src/resources/builtin/agents/general-purpose.md",
     "mcp-packages/workspace/src/resources/builtin/agents/plan.md",
-    "mcp-packages/workspace/src/resources/builtin/agents/web-researcher.md",
+    "mcp-packages/web/src/agents/web-researcher.md",
     "mcp-packages/workspace/src/filesystem/descriptions/edit.md",
     "mcp-packages/workspace/src/filesystem/descriptions/glob.md",
     "mcp-packages/workspace/src/filesystem/descriptions/grep.md",

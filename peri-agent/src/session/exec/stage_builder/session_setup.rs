@@ -50,48 +50,18 @@ pub(super) fn build_session(
         if let Some(ref launch) = input.launch_cron_bridge {
             launch(session_id);
         }
-    } else if let Some(ref scheduler) = cron_scheduler {
-        // ── 原 AsyncOwners 块原样保留（含 per-turn SessionInbox + subscribe +
-        //    bridge task + CronOwner + set_async_owners）──
-        {
-            let shared_queue_arc = Arc::new(shared_queue.clone());
-            let session_inbox = SessionInbox::new(shared_queue_arc);
+    } else if cron_scheduler.is_some() {
+        if let Some(pool) = input.mcp_pool.clone() {
+            let session_inbox = SessionInbox::new(Arc::new(shared_queue.clone()));
             let inbox_handle = session_inbox.handle();
-
-            let mut trigger_rx = scheduler.subscribe();
-
             let (prompt_tx, prompt_rx) = tokio::sync::mpsc::unbounded_channel();
-            let shutdown = cancel_arc.clone();
-            tokio::spawn(async move {
-                loop {
-                    tokio::select! {
-                        biased;
-                        _ = shutdown.cancelled() => {
-                            break;
-                        }
-                        trigger = trigger_rx.recv() => {
-                            match trigger {
-                                Some(t) => {
-                                    if prompt_tx.send(t.prompt).is_err() {
-                                        tracing::debug!("cron-bridge: prompt_tx closed, stopping");
-                                        break;
-                                    }
-                                }
-                                None => {
-                                    tracing::debug!("cron-bridge: trigger_rx closed, stopping");
-                                    break;
-                                }
-                            }
-                        }
-                    }
-                }
-            });
-
+            crate::session::cron_events::forward_cron_triggers(
+                pool,
+                cancel_arc.as_ref().clone(),
+                move |trigger| prompt_tx.send(trigger.prompt).is_ok(),
+            );
             let mut owner = CronOwner::new();
             owner.start(prompt_rx, inbox_handle, cancel_arc.clone());
-            tracing::info!("CronOwner started (ACP bridge path)");
-
-            // 分支内 scheduler 恒为 Some（else-if 绑定），直接注入
             session.set_async_owners(session_inbox, Some(owner));
         }
     }
