@@ -76,7 +76,7 @@ impl Default for HostCapabilities {
 /// 装配面，准备面不新建越层引用（§0 依赖门边 2）。
 ///
 /// 用户级 `.claude` 在本装配面解析：`peri_middlewares::plugin::claude_home()`
-/// 是 HOME 优先的唯一权威（Windows 的 `dirs_next::home_dir()` 读 Profile
+/// 是 HOME 优先的唯一权威（Windows 的 `dirs::home_dir()` 读 Profile
 /// known-folder、忽略 HOME/USERPROFILE，自带一份解析会与其余插件入口取到
 /// 不同目录）。准备面因此只提供执行目录。
 ///

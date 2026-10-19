@@ -2,6 +2,7 @@
 name = "peri-controller"
 version.workspace = true
 edition.workspace = true
+rust-version.workspace = true
 description = "Controller layer — control plane (lite params / run Session / cancel forward / event pop) + Langfuse bridge (event-stream bypass consumer)"
 
 [dependencies]

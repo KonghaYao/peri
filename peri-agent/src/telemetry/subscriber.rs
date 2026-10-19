@@ -28,7 +28,7 @@ impl Drop for TracingGuard {
 /// 真实路径：空 parent 与无 parent 一律归一为当前目录。
 fn resolve_log_target(log_file: Option<&str>, service_name: &str) -> (PathBuf, String) {
     let Some(path) = log_file else {
-        let directory = dirs_next::home_dir()
+        let directory = dirs::home_dir()
             .map(|home| home.join(".peri").join("logs"))
             .unwrap_or_else(std::env::temp_dir);
         return (directory, service_name.to_string());

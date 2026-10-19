@@ -19,6 +19,7 @@ pub(crate) struct ConnectionContext {
     /// 「**当前连接**声明了什么」。需要按连接分流的判定（历史分页等）读这里。
     negotiated_caps: Option<PeriCaps>,
     apps_enabled: bool,
+    pub(crate) acp_mcp: std::sync::Arc<peri_acp_types::acp_mcp::AcpMcpRegistry>,
     cancellation: tokio_util::sync::CancellationToken,
 }
 
@@ -30,6 +31,7 @@ impl ConnectionContext {
             initialized: false,
             negotiated_caps: None,
             apps_enabled,
+            acp_mcp: Default::default(),
             cancellation: tokio_util::sync::CancellationToken::new(),
         }
     }
@@ -95,6 +97,7 @@ impl ConnectionContext {
             initialized: self.initialized,
             negotiated_caps: self.negotiated_caps.clone(),
             apps_enabled: self.apps_enabled,
+            acp_mcp: self.acp_mcp.clone(),
             cancellation: self.cancellation.clone(),
         }
     }

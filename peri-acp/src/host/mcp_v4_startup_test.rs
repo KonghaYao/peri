@@ -16,7 +16,7 @@
 //! 目录，测试不读取也不启动用户自己的 MCP 配置。
 //!
 //! 平台范围：整组用例只在 unix 运行。隔离靠 `HOME` 重定向（`HomeRedirect`），而全局
-//! `~/.peri/settings.json` 由 `dirs_next::home_dir()` 解析——Windows 上它读 Profile
+//! `~/.peri/settings.json` 由 `dirs::home_dir()` 解析——Windows 上它读 Profile
 //! known-folder 并忽略 `HOME`（见 `host::assemble`），用例会装载运行者自己的 MCP 配置。
 //! 因此平台范围上移到模块级：Windows 上不再留下只被排除用例引用的死代码。
 

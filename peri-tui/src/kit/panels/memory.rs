@@ -234,7 +234,7 @@ fn open_memory_in_editor(rel_path: &str) {
         return;
     }
 
-    let Some(home) = dirs_next::home_dir() else {
+    let Some(home) = dirs::home_dir() else {
         tracing::warn!("open_memory_in_editor: home_dir unknown");
         return;
     };

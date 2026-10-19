@@ -5,21 +5,22 @@
 //! - **声明解析**：会话 setup（`session/new|load|resume|fork`）的 `mcpServers`
 //!   里筛出 acp 型条目，转成契约规格交给该会话的服务
 //!   （[`attach_session_servers`]，由 `ServerLoop` 在 setup 响应写入后调用）；
-//! - **入站消息**：client 经 `mcp/message` 反向下发的请求 / 通知按
-//!   `connectionId` 定位承载它的会话服务（[`route_inbound`]），请求走
-//!   `ServerLoop` 的 spawn 路径、通知在通知分发里就地转发；
-//! - **出站网关**：[`AcpTransportGateway`] 把服务的 `mcp/connect` /
-//!   `mcp/message` / `mcp/disconnect` 落成 ACP 请求 / 通知。
+//! - **入站通知**：client 经 `mcp/message` 反向下发的通知按 `serverId` 定位
+//!   承载它的会话服务（[`route_inbound`]），在通知分发里就地转发；
+//! - **出站网关**：[`AcpTransportGateway`] 把服务的 `mcp/message` 请求落成
+//!   ACP 请求。
 //!
-//! 会话服务是**会话级**的（每个会话各持一个 MCP 池，ACP 连接进的是本会话的
-//! 工具面），而 `mcp/message` 只带 `connectionId`：定位承载者是宿主职责，见
-//! [`AcpMcpServerPort::owns_connection`]。
+//! schema 1.10 起 `mcp/message` 是**请求作用域**的：agent 的每次内层 MCP
+//! 调用单独发出（`serverId` + `requestId`），`mcp/connect` / `mcp/disconnect`
+//! 已移除，连接生命周期归声明所在会话所有。会话服务是**会话级**的（每个会话
+//! 各持一个 MCP 池，ACP 连接进的是本会话的工具面），而 `mcp/message` 只带
+//! `serverId`：定位承载者依赖连接级 [`AcpMcpRegistry`]，不遍历会话猜测归属。
 
 use std::collections::HashMap;
 use std::sync::Arc;
 
 use agent_client_protocol_schema::v1::McpServer;
-use peri_acp_types::acp_mcp::{AcpMcpError, AcpMcpInbound, AcpMcpServerSpec};
+use peri_acp_types::acp_mcp::{AcpMcpError, AcpMcpInbound, AcpMcpRegistry, AcpMcpServerSpec};
 use peri_acp_types::ports::{AcpMcpGatewayPort, AcpMcpServerPort};
 use serde_json::Value;
 use tracing::{debug, warn};
@@ -28,7 +29,7 @@ use super::super::{AcpServerConfig, SessionState};
 use crate::transport::{types::AcpError, AcpTransport};
 
 /// agent → client 的 ACP 发送网关：MCP over ACP 的全部出站消息经它落成
-/// `mcp/connect` / `mcp/message` / `mcp/disconnect` 请求或通知。
+/// `mcp/message` 请求。
 ///
 /// 构造点在 setup 响应写入之后（`ServerLoop` 同时持有会话与
 /// `Arc<dyn AcpTransport>` 的位置）；`mcp/message` 的错误码按协议约定就是内层
@@ -45,16 +46,14 @@ impl AcpTransportGateway {
 
 #[async_trait::async_trait]
 impl AcpMcpGatewayPort for AcpTransportGateway {
-    async fn request(&self, method: &str, params: Value) -> Result<Value, AcpMcpError> {
+    async fn request(
+        &self,
+        method: &str,
+        params: Value,
+        cancellation: tokio_util::sync::CancellationToken,
+    ) -> Result<Value, AcpMcpError> {
         self.transport
-            .send_request(method, params)
-            .await
-            .map_err(transport_error)
-    }
-
-    async fn notify(&self, method: &str, params: Value) -> Result<(), AcpMcpError> {
-        self.transport
-            .send_notification(method, params)
+            .send_cancellable_request(method, params, cancellation)
             .await
             .map_err(transport_error)
     }
@@ -120,15 +119,16 @@ fn parse_acp_servers(params: &Value, session_id: &str) -> Vec<AcpMcpServerSpec> 
         .collect()
 }
 
-/// 登记本次会话 setup 声明的 acp 型 server（非阻塞：只登记并后台建连）。
+/// 登记本次会话 setup 声明的 acp 型 server（非阻塞：只登记并后台发现）。
 ///
 /// 由 `ServerLoop` 在 setup 响应成功写入后调用：客户端此时已拿到会话结果，
-/// `mcp/connect` 只带 client 自己声明的 `serverId`，顺序上先响应再建连，客户端
-/// 不必处理「会话还没告诉我就要求连 MCP」的交错。
+/// 后续 `mcp/message` 只带 client 自己声明的 `serverId`，顺序上先响应再发现，
+/// 客户端不必处理「会话还没告诉我就要求连 MCP」的交错。
 ///
 /// 未装配 MCP over ACP 服务的会话（无工作区资源 / bare / print 模式）是无操作：
-/// 这些会话没有 MCP 池可承载连接，声明无处落地。
+/// 这些会话没有 MCP 池可承载声明，登记无处落地。
 pub(crate) fn attach_session_servers(
+    registry: Arc<AcpMcpRegistry>,
     cfg: &AcpServerConfig,
     transport: &Arc<dyn AcpTransport>,
     params: &Value,
@@ -146,32 +146,47 @@ pub(crate) fn attach_session_servers(
         servers = servers.len(),
         "MCP over ACP 声明已受理，后台建连"
     );
-    port.attach(
+    if let Err(error) = port.attach(
+        registry,
         Arc::new(AcpTransportGateway::new(Arc::clone(transport))),
         servers,
-    );
+    ) {
+        warn!(code = error.code, %error, "MCP over ACP 声明被拒绝");
+    }
 }
 
-/// 定位承载 `connectionId` 的会话服务（连接与会话的事实都在会话级服务里）。
-///
-/// 只依 `owns_connection` 判定，不关心端口从哪来：会话集合的形态是宿主细节，
-/// 判定规则是协议事实。
-fn locate_owner(
-    ports: impl Iterator<Item = Arc<dyn AcpMcpServerPort>>,
-    connection_id: &str,
-) -> Option<Arc<dyn AcpMcpServerPort>> {
-    ports
-        .into_iter()
-        .find(|port| port.owns_connection(connection_id))
+/// setup 返回前校验连接级占用；跨会话重名是不可用，不实现共享分流。
+pub(crate) fn validate_declarations(
+    registry: &AcpMcpRegistry,
+    params: &Value,
+    session_id: &str,
+) -> Result<(), AcpError> {
+    for spec in parse_acp_servers(params, session_id) {
+        if registry
+            .owner(&spec.server_id)
+            .is_some_and(|owner| owner != session_id)
+        {
+            return Err(AcpError::new(
+                AcpMcpError::CODE_UNAVAILABLE,
+                format!("MCP-over-ACP serverId 已被另一会话占用: {}", spec.server_id),
+            ));
+        }
+    }
+    Ok(())
 }
 
 /// 反序列化入站 `mcp/message` 载荷。
 fn inbound(params: &Value) -> Result<AcpMcpInbound, AcpError> {
-    let connection_id = params
-        .get("connectionId")
+    let server_id = params
+        .get("serverId")
         .and_then(Value::as_str)
         .filter(|id| !id.is_empty())
-        .ok_or_else(|| AcpError::new(-32602, "missing connectionId"))?;
+        .ok_or_else(|| AcpError::new(-32602, "missing serverId"))?;
+    let request_id = params
+        .get("requestId")
+        .and_then(Value::as_str)
+        .filter(|id| !id.is_empty())
+        .ok_or_else(|| AcpError::new(-32602, "missing requestId"))?;
     let method = params
         .get("method")
         .and_then(Value::as_str)
@@ -184,7 +199,8 @@ fn inbound(params: &Value) -> Result<AcpMcpInbound, AcpError> {
         Some(_) => return Err(AcpError::new(-32602, "params must be an object")),
     };
     Ok(AcpMcpInbound {
-        connection_id: connection_id.to_string(),
+        server_id: server_id.to_string(),
+        request_id: request_id.to_string(),
         method,
         params,
     })
@@ -195,26 +211,20 @@ fn inbound(params: &Value) -> Result<AcpMcpInbound, AcpError> {
 /// 返回**已克隆的服务句柄**，调用方随即释放会话锁再 await——内层处理时长由
 /// 对端（client 宿主的 MCP server）决定，不得占着会话锁等待。
 pub(crate) fn route_inbound(
+    registry: &AcpMcpRegistry,
     sessions: &HashMap<String, SessionState>,
     params: &Value,
 ) -> Result<(Arc<dyn AcpMcpServerPort>, AcpMcpInbound), AcpError> {
     let inbound = inbound(params)?;
-    let ports = sessions.values().filter_map(|state| {
-        state
-            .environment
-            .as_ref()?
-            .cfg
-            .acp_mcp
-            .as_ref()
-            .map(Arc::clone)
-    });
-    let Some(port) = locate_owner(ports, &inbound.connection_id) else {
+    let port = registry
+        .owner(&inbound.server_id)
+        .and_then(|owner| sessions.get(&owner))
+        .and_then(|state| state.environment.as_ref())
+        .and_then(|environment| environment.cfg.acp_mcp.clone());
+    let Some(port) = port else {
         return Err(AcpError::new(
             AcpMcpError::CODE_NOT_FOUND,
-            format!(
-                "未知或已关闭的 MCP-over-ACP 连接: {}",
-                inbound.connection_id
-            ),
+            format!("未知或已关闭的 MCP-over-ACP server: {}", inbound.server_id),
         ));
     };
     Ok((port, inbound))

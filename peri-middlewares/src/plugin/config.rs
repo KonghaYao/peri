@@ -102,12 +102,12 @@ pub enum PluginConfigError {
     },
 }
 
-/// 返回用户主目录：`$HOME` 优先（且要求绝对路径），否则 `dirs_next::home_dir()`，
+/// 返回用户主目录：`$HOME` 优先（且要求绝对路径），否则 `dirs::home_dir()`，
 /// 都不可得时用当前目录。
 ///
 /// **用户级主目录的唯一权威**：`~/.claude` 下的 settings / skills / hooks /
 /// AGENTS.md 与插件目录全部由本函数派生，各入口不得再拼一份——Windows 的
-/// `dirs_next::home_dir()` 在 2.0.0 读 Profile known-folder
+/// `dirs::home_dir()` 在 7.0.0 读 Profile known-folder
 /// （SHGetKnownFolderPath），完全忽略 HOME/USERPROFILE 环境变量，而跨平台工具
 /// 惯例、git-bash 与 CI/测试注入都依赖 HOME 生效；各拼一份会在 Windows 上取到
 /// 不同目录（插件入口按 HOME、其余入口按 profile）。
@@ -115,7 +115,7 @@ pub fn user_home() -> PathBuf {
     std::env::var_os("HOME")
         .map(PathBuf::from)
         .filter(|p| p.is_absolute())
-        .or_else(dirs_next::home_dir)
+        .or_else(dirs::home_dir)
         .unwrap_or_else(|| PathBuf::from("."))
 }
 

@@ -153,7 +153,13 @@ impl RemoteEndpoint {
     pub(crate) fn locator_digest(&self) -> String {
         let mut hasher = Sha256::new();
         hasher.update(self.canonical_locator().as_bytes());
-        format!("{:x}", hasher.finalize())
+        let digest = hasher.finalize();
+        let mut hex = String::with_capacity(64);
+        for byte in digest {
+            use std::fmt::Write as _;
+            let _ = write!(hex, "{byte:02x}");
+        }
+        hex
     }
 
     /// 诊断用主机家族，不含主机名（主机名含数据库与组织标识）。

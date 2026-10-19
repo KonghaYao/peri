@@ -2,6 +2,7 @@
 name = "peri-workflow"
 version.workspace = true
 edition.workspace = true
+rust-version.workspace = true
 
 [dependencies]
 peri-time = { path = "../peri-time" }
@@ -23,7 +24,7 @@ dashmap = "6"
 indexmap = { version = "2", features = ["serde"] }
 chrono.workspace = true
 tempfile.workspace = true
-dirs-next.workspace = true
+dirs.workspace = true
 
 [dev-dependencies]
 serial_test.workspace = true

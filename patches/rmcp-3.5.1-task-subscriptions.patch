@@ -1,7 +1,43 @@
+diff --git a/src/handler/server.rs b/src/handler/server.rs
+index 4abe9cc..fc3fd81 100644
+--- a/src/handler/server.rs
++++ b/src/handler/server.rs
+@@ -149,6 +149,15 @@ impl<H: ServerHandler> Service<RoleServer> for H {
+                     Err(McpError::method_not_found::<SubscriptionsListenRequestMethod>())
+                 } else {
+                     let requested = request.params.notifications;
++                    if requested.task_ids.is_some()
++                        && !context
++                            .client_capabilities()
++                            .is_some_and(|caps| caps.supports_tasks())
++                    {
++                        return Err(McpError::missing_required_client_capability(
++                            ClientCapabilities::builder().enable_tasks().build(),
++                        ));
++                    }
+                     let Some(candidate) = self.accepted_subscription_filter(&requested) else {
+                         return Err(
+                             McpError::method_not_found::<SubscriptionsListenRequestMethod>(),
+@@ -158,6 +167,14 @@ impl<H: ServerHandler> Service<RoleServer> for H {
+                     let advertised = requested.supported_by(&server_info.capabilities);
+                     let handler_accepted = requested.intersection(&candidate);
+                     let accepted = handler_accepted.intersection(&advertised);
++                    // Reuse tasks/get authorization for every accepted task ID
++                    // before acknowledging the subscription.
++                    if let Some(task_ids) = accepted.task_ids.as_ref() {
++                        for task_id in task_ids {
++                            self.get_task(GetTaskParams::new(task_id), context.clone())
++                                .await?;
++                        }
++                    }
+                     if accepted != handler_accepted {
+                         tracing::debug!(
+                             requested_resource_count = requested
 diff --git a/src/model.rs b/src/model.rs
+index 275d86d..be0e157 100644
 --- a/src/model.rs
 +++ b/src/model.rs
-@@ -2090,6 +2090,10 @@
+@@ -2089,6 +2089,10 @@ pub struct SubscriptionFilter {
      #[serde(default, skip_serializing_if = "Option::is_none")]
      #[cfg_attr(feature = "schemars", schemars(with = "Vec<String>"))]
      pub resource_subscriptions: Option<Vec<String>>,
@@ -12,7 +48,7 @@ diff --git a/src/model.rs b/src/model.rs
  }
  
  impl SubscriptionFilter {
-@@ -2118,6 +2122,19 @@
+@@ -2117,6 +2121,19 @@ impl SubscriptionFilter {
                  })
              })
              .filter(|uris: &Vec<String>| !uris.is_empty());
@@ -32,7 +68,7 @@ diff --git a/src/model.rs b/src/model.rs
          Self {
              tools_list_changed: (self.tools_list_changed == Some(true)
                  && other.tools_list_changed == Some(true))
-@@ -2129,6 +2146,7 @@
+@@ -2128,6 +2145,7 @@ impl SubscriptionFilter {
                  && other.resources_list_changed == Some(true))
              .then_some(true),
              resource_subscriptions,
@@ -40,7 +76,7 @@ diff --git a/src/model.rs b/src/model.rs
          }
      }
  
-@@ -2149,7 +2167,15 @@
+@@ -2148,7 +2166,15 @@ impl SubscriptionFilter {
                      .is_some_and(|requested| requested.contains(uri))
              })
          });
@@ -57,7 +93,7 @@ diff --git a/src/model.rs b/src/model.rs
      }
  
      /// Return the requested notification types advertised by server capabilities.
-@@ -2179,6 +2205,10 @@
+@@ -2178,6 +2204,10 @@ impl SubscriptionFilter {
                  .is_some_and(|resources| resources.subscribe == Some(true))
                  .then(|| self.resource_subscriptions.clone())
                  .flatten(),
@@ -68,13 +104,10 @@ diff --git a/src/model.rs b/src/model.rs
          }
      }
  }
-@@ -2224,6 +2254,18 @@
-             .resource_subscriptions
-             .get_or_insert_default()
-             .push(uri.into());
-+        self
-+    }
-+
+@@ -2226,6 +2256,18 @@ impl SubscriptionFilterBuilder {
+         self
+     }
+ 
 +    /// Opt in to status notifications for all supplied task IDs.
 +    pub fn task_ids(mut self, ids: impl IntoIterator<Item = impl Into<String>>) -> Self {
 +        self.filter.task_ids = Some(ids.into_iter().map(Into::into).collect());
@@ -84,47 +117,38 @@ diff --git a/src/model.rs b/src/model.rs
 +    /// Add one task ID to the status subscription set.
 +    pub fn task_id(mut self, id: impl Into<String>) -> Self {
 +        self.filter.task_ids.get_or_insert_default().push(id.into());
-         self
++        self
++    }
++
+     /// Build the filter.
+     pub fn build(self) -> SubscriptionFilter {
+         self.filter
+diff --git a/src/service/client.rs b/src/service/client.rs
+index 5dad655..89b4e4d 100644
+--- a/src/service/client.rs
++++ b/src/service/client.rs
+@@ -571,11 +571,15 @@ impl Subscription {
+                 .resource_subscriptions
+                 .as_ref()
+                 .is_some_and(|uris| uris.contains(&update.params.uri)),
++            ServerNotification::TaskStatusNotification(update) => self
++                .acknowledged
++                .task_ids
++                .as_ref()
++                .is_some_and(|ids| ids.contains(&update.params.task.task.task_id)),
+             ServerNotification::SubscriptionsAcknowledgedNotification(_)
+             | ServerNotification::CancelledNotification(_)
+             | ServerNotification::ProgressNotification(_)
+             | ServerNotification::LoggingMessageNotification(_)
+-            | ServerNotification::TaskStatusNotification(_)
+             | ServerNotification::CustomNotification(_) => false,
+         }
      }
- 
-diff --git a/src/handler/server.rs b/src/handler/server.rs
---- a/src/handler/server.rs
-+++ b/src/handler/server.rs
-@@ -149,6 +149,15 @@
-                     Err(McpError::method_not_found::<SubscriptionsListenRequestMethod>())
-                 } else {
-                     let requested = request.params.notifications;
-+                    if requested.task_ids.is_some()
-+                        && !context
-+                            .client_capabilities()
-+                            .is_some_and(|caps| caps.supports_tasks())
-+                    {
-+                        return Err(McpError::missing_required_client_capability(
-+                            ClientCapabilities::builder().enable_tasks().build(),
-+                        ));
-+                    }
-                     let Some(candidate) = self.accepted_subscription_filter(&requested) else {
-                         return Err(
-                             McpError::method_not_found::<SubscriptionsListenRequestMethod>(),
-@@ -158,6 +167,14 @@
-                     let advertised = requested.supported_by(&server_info.capabilities);
-                     let handler_accepted = requested.intersection(&candidate);
-                     let accepted = handler_accepted.intersection(&advertised);
-+                    // Reuse tasks/get authorization for every accepted task ID
-+                    // before acknowledging the subscription.
-+                    if let Some(task_ids) = accepted.task_ids.as_ref() {
-+                        for task_id in task_ids {
-+                            self.get_task(GetTaskParams::new(task_id), context.clone())
-+                                .await?;
-+                        }
-+                    }
-                     if accepted != handler_accepted {
-                         tracing::debug!(
-                             requested_resource_count = requested
 diff --git a/src/service/server.rs b/src/service/server.rs
+index 8cb707d..a22a896 100644
 --- a/src/service/server.rs
 +++ b/src/service/server.rs
-@@ -22,7 +22,7 @@
+@@ -22,7 +22,7 @@ use crate::{
          ResourceUpdatedNotification, ResourceUpdatedNotificationParam, ServerConfig,
          ServerNotification, ServerRequest, ServerResult, SubscriptionFilter,
          SubscriptionsAcknowledgedNotification, SubscriptionsAcknowledgedNotificationParams,
@@ -133,7 +157,7 @@ diff --git a/src/service/server.rs b/src/service/server.rs
      },
      transport::DynamicTransportError,
  };
-@@ -236,15 +236,17 @@
+@@ -236,15 +236,17 @@ impl SubscriptionSink {
                      "notifications/message",
                  ));
              }
@@ -160,13 +184,10 @@ diff --git a/src/service/server.rs b/src/service/server.rs
              }
              ServerNotification::CustomNotification(_) => {
                  return Err(SubscriptionSendError::UnsupportedNotification(
-@@ -316,6 +318,17 @@
-     ) -> Result<(), SubscriptionSendError> {
-         self.send(ServerNotification::ResourceUpdatedNotification(
-             ResourceUpdatedNotification::new(ResourceUpdatedNotificationParam::new(uri)),
-+        ))
-+        .await
-+    }
+@@ -319,6 +321,17 @@ impl SubscriptionSink {
+         ))
+         .await
+     }
 +
 +    /// Send the complete current task state to a subscriber for its task ID.
 +    pub async fn notify_task_status(
@@ -175,33 +196,53 @@ diff --git a/src/service/server.rs b/src/service/server.rs
 +    ) -> Result<(), SubscriptionSendError> {
 +        self.send(ServerNotification::TaskStatusNotification(
 +            TaskStatusNotification::new(TaskStatusNotificationParams::new(task)),
-         ))
-         .await
-     }
-diff --git a/src/service/client.rs b/src/service/client.rs
---- a/src/service/client.rs
-+++ b/src/service/client.rs
-@@ -571,11 +571,15 @@
-                 .resource_subscriptions
-                 .as_ref()
-                 .is_some_and(|uris| uris.contains(&update.params.uri)),
-+            ServerNotification::TaskStatusNotification(update) => self
-+                .acknowledged
-+                .task_ids
-+                .as_ref()
-+                .is_some_and(|ids| ids.contains(&update.params.task.task.task_id)),
-             ServerNotification::SubscriptionsAcknowledgedNotification(_)
-             | ServerNotification::CancelledNotification(_)
-             | ServerNotification::ProgressNotification(_)
-             | ServerNotification::LoggingMessageNotification(_)
--            | ServerNotification::TaskStatusNotification(_)
-             | ServerNotification::CustomNotification(_) => false,
++        ))
++        .await
++    }
+ }
+ 
+ /// Context for one established server-side notification subscription.
+diff --git a/tests/test_message_schema/client_json_rpc_message_schema.json b/tests/test_message_schema/client_json_rpc_message_schema.json
+index 760d9e1..abe6378 100644
+--- a/tests/test_message_schema/client_json_rpc_message_schema.json
++++ b/tests/test_message_schema/client_json_rpc_message_schema.json
+@@ -2218,6 +2218,13 @@
+         "resourcesListChanged": {
+           "type": "boolean"
+         },
++        "taskIds": {
++          "description": "Task IDs to receive `notifications/tasks` for (SEP-2663).",
++          "type": "array",
++          "items": {
++            "type": "string"
++          }
++        },
+         "toolsListChanged": {
+           "type": "boolean"
          }
-     }
+diff --git a/tests/test_message_schema/server_json_rpc_message_schema.json b/tests/test_message_schema/server_json_rpc_message_schema.json
+index cebb3ed..4aa6edd 100644
+--- a/tests/test_message_schema/server_json_rpc_message_schema.json
++++ b/tests/test_message_schema/server_json_rpc_message_schema.json
+@@ -3410,6 +3410,13 @@
+         "resourcesListChanged": {
+           "type": "boolean"
+         },
++        "taskIds": {
++          "description": "Task IDs to receive `notifications/tasks` for (SEP-2663).",
++          "type": "array",
++          "items": {
++            "type": "string"
++          }
++        },
+         "toolsListChanged": {
+           "type": "boolean"
+         }
 diff --git a/tests/test_subscriptions.rs b/tests/test_subscriptions.rs
+index 7359530..4a18cc9 100644
 --- a/tests/test_subscriptions.rs
 +++ b/tests/test_subscriptions.rs
-@@ -17,11 +17,12 @@
+@@ -17,11 +17,12 @@ use std::{
  use rmcp::{
      ClientHandler, ClientServiceExt, ServerHandler, ServiceExt,
      model::{
@@ -216,11 +257,10 @@ diff --git a/tests/test_subscriptions.rs b/tests/test_subscriptions.rs
      },
      service::{
          NotificationContext, RequestContext, RoleClient, RoleServer, SubscriptionContext,
-@@ -118,6 +119,62 @@
- }
+@@ -119,6 +120,62 @@ impl ServerHandler for ToolsAndPromptsServer {
  
  struct ResourceSubscriptionServer;
-+
+ 
 +struct TasksSubscriptionServer;
 +
 +fn task_state(id: &str) -> DetailedTask {
@@ -276,10 +316,11 @@ diff --git a/tests/test_subscriptions.rs b/tests/test_subscriptions.rs
 +        Ok(())
 +    }
 +}
- 
++
  impl ServerHandler for ResourceSubscriptionServer {
      fn get_info(&self) -> ServerConfig {
-@@ -400,6 +457,87 @@
+         ServerConfig::new(
+@@ -400,6 +457,87 @@ async fn modern_client<S: ServerHandler>(
      .map_err(Into::into)
  }
  
@@ -368,14 +409,13 @@ diff --git a/tests/test_subscriptions.rs b/tests/test_subscriptions.rs
  async fn listen_exposes_acknowledged_filter_and_graceful_result() -> anyhow::Result<()> {
      let client = modern_client(ToolsOnlyServer).await?;
 diff --git a/tests/test_subscriptions_model.rs b/tests/test_subscriptions_model.rs
+index 8d79fb1..019aa6b 100644
 --- a/tests/test_subscriptions_model.rs
 +++ b/tests/test_subscriptions_model.rs
-@@ -51,6 +51,23 @@
-         serde_json::to_value(requested.intersection(&accepted)).expect("serialize intersection"),
-         json!({})
+@@ -53,6 +53,23 @@ fn subscription_filter_omits_empty_resource_intersection() {
      );
-+}
-+
+ }
+ 
 +#[test]
 +fn task_filter_round_trips_and_intersects_by_id() {
 +    let requested = SubscriptionFilter::builder()
@@ -391,40 +431,8 @@ diff --git a/tests/test_subscriptions_model.rs b/tests/test_subscriptions_model.
 +    let decoded: SubscriptionFilter =
 +        serde_json::from_value(json!({ "taskIds": ["task-2"] })).unwrap();
 +    assert_eq!(decoded, accepted);
- }
- 
++}
++
  #[test]
-diff --git a/tests/test_message_schema/client_json_rpc_message_schema.json b/tests/test_message_schema/client_json_rpc_message_schema.json
---- a/tests/test_message_schema/client_json_rpc_message_schema.json
-+++ b/tests/test_message_schema/client_json_rpc_message_schema.json
-@@ -2218,6 +2218,13 @@
-         "resourcesListChanged": {
-           "type": "boolean"
-         },
-+        "taskIds": {
-+          "description": "Task IDs to receive `notifications/tasks` for (SEP-2663).",
-+          "type": "array",
-+          "items": {
-+            "type": "string"
-+          }
-+        },
-         "toolsListChanged": {
-           "type": "boolean"
-         }
-diff --git a/tests/test_message_schema/server_json_rpc_message_schema.json b/tests/test_message_schema/server_json_rpc_message_schema.json
---- a/tests/test_message_schema/server_json_rpc_message_schema.json
-+++ b/tests/test_message_schema/server_json_rpc_message_schema.json
-@@ -3410,6 +3410,13 @@
-         "resourcesListChanged": {
-           "type": "boolean"
-         },
-+        "taskIds": {
-+          "description": "Task IDs to receive `notifications/tasks` for (SEP-2663).",
-+          "type": "array",
-+          "items": {
-+            "type": "string"
-+          }
-+        },
-         "toolsListChanged": {
-           "type": "boolean"
-         }
+ fn listen_request_round_trips_required_fields_and_arbitrary_metadata() {
+     let mut request = SubscriptionsListenRequest::new(SubscriptionsListenRequestParams::new(

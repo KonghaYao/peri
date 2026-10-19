@@ -80,7 +80,7 @@ fn resource_input(args: &Args, workspace: &std::path::Path) -> Result<WorkspaceR
     let mut input = WorkspaceResourcesInput::new().with_disable_bundled(args.disable_bundled);
     if !args.no_skill_roots {
         if args.skill_roots.is_empty() {
-            if let Some(home) = dirs_next::home_dir() {
+            if let Some(home) = dirs::home_dir() {
                 input = input.with_skill_root(ResourceRoot::new(
                     home.join(".claude/skills"),
                     ResourceScope::User,

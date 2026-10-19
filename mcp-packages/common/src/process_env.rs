@@ -1,16 +1,16 @@
 //! 进程级环境变量互斥：临时改写 `HOME` 的测试与 Bash / git 等子进程测试互斥。
 //!
-//! 使用文件排他锁（`fs2`），可在 async 测试全程持有（`tokio::sync::Mutex` 在 `.await` 时会释放）。
+//! 使用文件排他锁（`fs4`），可在 async 测试全程持有（`tokio::sync::Mutex` 在 `.await` 时会释放）。
 
 use std::{fs::OpenOptions, io, path::PathBuf, sync::OnceLock};
 
-use fs2::FileExt;
+use fs4::FileExt;
 
 pub struct EnvLockFile(std::fs::File);
 
 impl Drop for EnvLockFile {
     fn drop(&mut self) {
-        let _ = self.0.unlock();
+        let _ = FileExt::unlock(&self.0);
     }
 }
 
@@ -28,6 +28,6 @@ pub fn lock() -> Result<EnvLockFile, io::Error> {
         .create(true)
         .truncate(false)
         .open(lock_path())?;
-    file.lock_exclusive()?;
+    FileExt::lock(&file)?;
     Ok(EnvLockFile(file))
 }

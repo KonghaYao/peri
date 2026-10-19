@@ -348,7 +348,7 @@ fn explicit_database_selection_never_falls_back_to_another_database() {
     assert_eq!(value["cwd"], fixture_cwd("/b"));
 }
 
-// 默认库位置由 `dirs_next::home_dir()` 派生，而 Windows 上它读 Profile known-folder、
+// 默认库位置由 `dirs::home_dir()` 派生，而 Windows 上它读 Profile known-folder、
 // 忽略 HOME（同 peri-resources/src/sessions/mod.rs 的默认路径用例）：注入 HOME 无法把
 // 默认库指向沙箱，这条用例在 Windows 上验证不了自己的契约，只在 unix 运行。
 #[cfg(not(windows))]

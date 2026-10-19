@@ -2,6 +2,7 @@
 name = "peri-config"
 version.workspace = true
 edition.workspace = true
+rust-version.workspace = true
 
 [dependencies]
 peri-acp-types = { path = "../peri-acp-types" }
@@ -20,4 +21,4 @@ peri-mcp-config.workspace = true
 
 [target.'cfg(target_os = "emscripten")'.dependencies]
 uuid.workspace = true
-dirs-next.workspace = true
+dirs.workspace = true

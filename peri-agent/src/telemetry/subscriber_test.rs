@@ -62,7 +62,7 @@ fn absolute_log_file_keeps_its_directory_and_stem() {
 fn default_log_target_is_the_peri_home_logs_directory() {
     let (directory, prefix) = resolve_log_target(None, "agent-tui");
     assert!(directory.is_absolute(), "默认日志目录应为绝对路径");
-    match dirs_next::home_dir() {
+    match dirs::home_dir() {
         Some(home) => assert_eq!(
             directory,
             home.join(".peri").join("logs"),

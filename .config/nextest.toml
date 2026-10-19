@@ -31,7 +31,7 @@ default-filter = "not (package(=peri-acp) & test(host::execution_admission_jsonl
 # nextest 是一个测试一个进程，上述进程内状态不再跨测试共享，这类冲突在结构上消失；
 # 仓库中所有 `#[serial]` / `serial_test::serial` 标注保护的都是这一类状态，因此
 # 不需要为它们建组。跨进程共享的资源不受进程隔离保护，但目前的实现是文件排他锁
-# （peri_mcp_common::process_env::lock()，基于 fs2），在 nextest 下依然有效。
+# （peri_mcp_common::process_env::lock()，基于 fs4），在 nextest 下依然有效。
 #
 # 因此这里不下「已经证明无冲突」的结论，而是先复刻迁移前的范围：与迁移前等价、
 # 零回归；同时记录迁移新增的并行面 —— nextest 允许不同测试二进制的用例同时运行

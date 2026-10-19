@@ -43,7 +43,7 @@ class CargoPatchTests(unittest.TestCase):
                     packages = metadata["packages"]
                     resolved_ids = {node["id"] for node in metadata["resolve"]["nodes"]}
                     for name, version in (
-                        ("rmcp", "3.5.0"), ("hyper-util", "0.1.21"),
+                        ("rmcp", "3.5.1"), ("hyper-util", "0.1.21"),
                         ("tokio", "1.53.1"), ("mio", "1.2.3"),
                     ):
                         matches = [package for package in packages if package["name"] == name]

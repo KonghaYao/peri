@@ -19,8 +19,8 @@ use peri_acp_types::PeriCaps;
 /// can verify which extensions the agent will honor.
 ///
 /// `mcpCapabilities.acp` 声明 agent 支持 MCP over ACP（client 在会话 setup 中
-/// 以 `type: "acp"` 声明 server，agent 经 `mcp/connect` 反向建连）。声明是硬
-/// 前置：未声明的 client 不得假定 agent 会处理 `mcp/message`。
+/// 以 `type: "acp"` 声明 server，agent 经请求作用域的 `mcp/message` 调用它）。
+/// 声明是硬前置：未声明的 client 不得假定 agent 会处理 `mcp/message`。
 ///
 /// `apps`（可选）写入同层 `_meta["peri.mcpApps"]`：**只报已实现能力**（未实现
 /// 四项在 `McpAppsFeatures` 上是私有字段，类型层强制）；`None` = 本部署未装配

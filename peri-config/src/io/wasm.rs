@@ -128,7 +128,7 @@ pub fn home_dir() -> Option<PathBuf> {
     std::env::var_os("HOME")
         .map(PathBuf::from)
         .filter(|path| path.is_absolute())
-        .or_else(dirs_next::home_dir)
+        .or_else(dirs::home_dir)
 }
 
 pub fn current_dir() -> io::Result<PathBuf> {

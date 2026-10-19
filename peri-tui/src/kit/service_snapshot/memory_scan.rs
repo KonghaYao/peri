@@ -42,7 +42,7 @@ pub(super) fn scan_memory_dir() -> Vec<MemoryEntry> {
     use std::fs;
     use std::path::PathBuf;
 
-    let Some(home) = dirs_next::home_dir() else {
+    let Some(home) = dirs::home_dir() else {
         return Vec::new();
     };
     let memory_dir: PathBuf = home.join(".claude").join("memory");

@@ -2,6 +2,7 @@
 name = "peri-runtime"
 version.workspace = true
 edition.workspace = true
+rust-version.workspace = true
 description = "Runtime layer — multi-session orchestrator: session_id -> SessionHandle map + event stamping"
 
 [dependencies]

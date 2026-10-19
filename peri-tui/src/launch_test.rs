@@ -33,7 +33,7 @@ async fn attach_acp_rejects_second_attachment_before_spawning_host() {
         assert!(String::from_utf8_lossy(&output.stdout).contains("1 passed"));
         return;
     }
-    // Explicit config redirection also isolates Windows, where dirs_next
+    // Explicit config redirection also isolates Windows, where dirs
     // resolves the system profile independently of the HOME override.
     crate::config::set_global_config_path(Some(temp.path().join("settings.json")));
     let db_path = temp.path().join("threads.db");

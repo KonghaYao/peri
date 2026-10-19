@@ -224,7 +224,7 @@ fn workflow_prefix() -> Option<PathBuf> {
     let home = std::env::var_os("HOME")
         .filter(|value| !value.is_empty())
         .map(PathBuf::from)
-        .or_else(dirs_next::home_dir)?;
+        .or_else(dirs::home_dir)?;
     Some(
         home.join(".peri")
             .join("workflow")
