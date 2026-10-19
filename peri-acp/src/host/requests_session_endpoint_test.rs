@@ -203,6 +203,85 @@ async fn session_load_registers_connection_endpoint_and_scheduled_approval_is_de
     assert_eq!(frames[0]["sessionId"], id, "审批帧必须携带本会话身份");
 }
 
+/// 重启后的 `session/load` 必须把恢复会话的 `TaskManager` 重新绑到会话 MCP 池。
+///
+/// 生产 `session/load|resume|fork` 走分阶段恢复路径，不经过
+/// `handle_request_for_connection` 里的 `bind_session_tasks`；漏绑时首个 MCP 工具
+/// 调用会被 `begin_external_task_execution` 以 `session task manager unavailable`
+/// 拒绝。本用例用**新的** `SessionManager`（同一持久存储）模拟进程重启，只观察
+/// 恢复路径是否完成绑定。
+#[tokio::test]
+#[serial]
+async fn session_load_binds_restored_task_manager() {
+    let fixture = Fixture::new().await;
+    let id = fixture.id.clone();
+    // 新进程：丢弃旧 SessionManager 的运行期状态，重新打开同一存储。
+    let config = make_peri_config_with_provider(make_provider_config(
+        "local",
+        "openai",
+        "fixture-key",
+        "fixture-model",
+    ));
+    let provider = LlmProvider::from_config(&config).unwrap();
+    let mut cfg = make_server_config(config, provider, &fixture.tmp).await;
+    cfg.workspace_assembly = Some(crate::host::assemble::WorkspaceAssembly {
+        startup_cwd: fixture.cwd.to_string_lossy().into_owned(),
+        bare: true,
+        drive_cron_tick: false,
+        mcp_profile: peri_middlewares::mcp::apps::McpCapabilityProfile::disabled(),
+        capabilities: Default::default(),
+    });
+    let cfg = Arc::new(cfg);
+    let sessions: crate::host::SharedSessions = Arc::new(tokio::sync::Mutex::new(HashMap::new()));
+    let transport = ScriptedTransport::new(vec![
+        (
+            RequestId::Number(1),
+            "initialize",
+            json!({"protocolVersion": 1, "clientCapabilities": {"_meta": {}}}),
+        ),
+        (
+            RequestId::Number(2),
+            "session/load",
+            json!({"sessionId": id}),
+        ),
+    ]);
+    let erased: Arc<dyn crate::transport::AcpTransport> =
+        Arc::clone(&transport) as Arc<dyn crate::transport::AcpTransport>;
+
+    let prompt_locks: crate::host::PromptLocks = Arc::new(tokio::sync::Mutex::new(HashMap::new()));
+    let (cont_tx, _cont_rx) = tokio::sync::mpsc::unbounded_channel();
+    let cont_tx = Arc::new(cont_tx);
+    let connection = Arc::new(tokio::sync::Mutex::new(
+        crate::host::connection::ConnectionContext::new(true),
+    ));
+    let cancellation = tokio_util::sync::CancellationToken::new();
+    crate::host::server_loop::ServerLoop {
+        transport: &erased,
+        cfg: &cfg,
+        sessions: &sessions,
+        prompt_locks: &prompt_locks,
+        cont_tx: &cont_tx,
+        connection: &connection,
+        connection_cancellation: &cancellation,
+    }
+    .run()
+    .await;
+
+    transport
+        .response(2)
+        .unwrap_or_else(|error| panic!("session/load 必须返回结果（真实 server loop）：{error}"));
+    let session = cfg
+        .session_manager
+        .get_session(&id)
+        .expect("session/load 必须登记恢复会话");
+    assert!(
+        session
+            .task_events_started
+            .load(std::sync::atomic::Ordering::Acquire),
+        "恢复会话必须在发布后绑定 TaskManager（否则 MCP 工具全部 unavailable）"
+    );
+}
+
 /// 反证（等价于修复前状态）：不经 server loop 建立的会话没有注册 endpoint，
 /// 同一调度归属得到 `NoOnlineEndpoint`（这就是退化后的「未获批准」来源）。
 #[tokio::test]
@@ -337,6 +416,19 @@ async fn session_fork_registers_connection_endpoint_and_scheduled_approval_is_de
         .expect("session/fork 必须返回新会话 id")
         .to_owned();
     assert_ne!(forked_id, source_id, "fork 派生的是新会话");
+    let forked_bound = cfg
+        .session_manager
+        .get_session(&forked_id)
+        .map(|session| {
+            session
+                .task_events_started
+                .load(std::sync::atomic::Ordering::Acquire)
+        })
+        .unwrap_or(false);
+    assert!(
+        forked_bound,
+        "fork 派生会话必须在发布后绑定 TaskManager（否则 MCP 工具全部 unavailable）"
+    );
 
     let environment = {
         let guard = sessions.lock().await;
