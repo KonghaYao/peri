@@ -499,7 +499,7 @@ fn acp_cache_identity_fails_closed_and_excludes_credentials() {
         "acp-srv",
         super::AcpConnectionIdentity {
             session_id: "session-a".to_string(),
-            connection_id: "conn-1".to_string(),
+            server_id: "conn-1".to_string(),
             generation: 0,
         },
     );
@@ -510,7 +510,7 @@ fn acp_cache_identity_fails_closed_and_excludes_credentials() {
         "acp-srv",
         super::AcpConnectionIdentity {
             session_id: "session-b".to_string(),
-            connection_id: "conn-1".to_string(),
+            server_id: "conn-1".to_string(),
             generation: 1,
         },
     );

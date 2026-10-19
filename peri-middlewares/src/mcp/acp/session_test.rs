@@ -2,16 +2,16 @@
 //!
 //! 走真实链路：真实 `AcpMcpGatewayPort` 调用面、真实桥接 transport、真实
 //! `serve_client_auto` 握手与 `tools/list` 发现、真实 MCP 池提交。假件只在
-//! **协议对端**（`mcp/connect` / `mcp/message` 的应答方）——client 在真实部署
-//! 里就扮演这个角色。
+//! **协议对端**（`mcp/message` 请求的应答方）——client 在真实部署里就扮演
+//! 这个角色。
 //!
 //! 断言的行为契约（每条对应一处生产不变量）：
 //! 1. **不阻塞**：`attach` 立即返回，连接在后台完成（deferred 工具面）；
-//! 2. **幂等**：同会话同 `serverId` 重复声明只建一次连接；
+//! 2. **幂等**：同会话同 `serverId` 重复声明只发现一次；
 //! 3. **不跨会话泄漏**：池内条目、工具桥接、状态面均按归属会话过滤；
 //! 4. **失败可见**：建连失败留在本会话可见的池状态面（不 panic、不回抛）；
-//! 5. **关闭即断**：`close_session` 终止在建任务（不落池）、发 `mcp/disconnect`、
-//!    清理池条目，且不误伤其他会话的连接。
+//! 5. **关闭即清理**：`close_session` 终止在建任务（不落池）、撤销该会话的
+//!    `serverId` 路由与池条目，且不误伤其他会话；协议层没有反向断开请求。
 
 use std::sync::Arc;
 use std::time::Duration;
@@ -30,18 +30,14 @@ use crate::mcp::tool_bridge::build_tool_bridges_visible_to;
 /// 假件观测到的协议调用。
 #[derive(Default)]
 struct FakeGateway {
-    /// 收到的 `mcp/connect` 的 `serverId`（按到达顺序）。
-    connects: parking_lot::Mutex<Vec<String>>,
-    /// 收到的 `mcp/disconnect` 的 `connectionId`。
-    disconnects: parking_lot::Mutex<Vec<String>>,
-    /// `mcp/message` 通知的 `method`（内层方法名）。
-    notifications: parking_lot::Mutex<Vec<String>>,
+    /// 收到的 `mcp/message` 请求的 `serverId`（按到达顺序）。
+    discoveries: parking_lot::Mutex<Vec<String>>,
     /// `mcp/message` 请求的内层方法名。
     inner_requests: parking_lot::Mutex<Vec<String>>,
-    /// `mcp/connect` 前的延迟（模拟慢建连）。
-    connect_delay: Option<Duration>,
-    /// `mcp/connect` 直接失败（模拟 client 拒绝该 server）。
-    fail_connect: bool,
+    /// 首个请求前的延迟（模拟慢握手）。
+    handshake_delay: Option<Duration>,
+    /// `server/discover` 直接失败（模拟 client 拒绝该 server）。
+    fail_discover: bool,
     /// 假 server 的 `tools/list` 载荷。
     tools: Vec<Value>,
 }
@@ -63,76 +59,65 @@ impl FakeGateway {
         }
     }
 
-    fn connect_count(&self) -> usize {
-        self.connects.lock().len()
+    fn discovery_count(&self) -> usize {
+        self.discoveries.lock().len()
     }
 }
 
 #[async_trait::async_trait]
 impl AcpMcpGatewayPort for FakeGateway {
     async fn request(&self, method: &str, params: Value) -> Result<Value, AcpMcpError> {
-        match method {
-            "mcp/connect" => {
-                if let Some(delay) = self.connect_delay {
+        assert_eq!(method, "mcp/message", "桥接只发请求作用域的 mcp/message");
+        let inner = params
+            .get("method")
+            .and_then(Value::as_str)
+            .unwrap_or_default()
+            .to_string();
+        let server_id = params
+            .get("serverId")
+            .and_then(Value::as_str)
+            .unwrap_or_default()
+            .to_string();
+        assert!(
+            params
+                .get("requestId")
+                .and_then(Value::as_str)
+                .is_some_and(|id| !id.is_empty()),
+            "每个 mcp/message 请求都必须带 requestId"
+        );
+        self.inner_requests.lock().push(inner.clone());
+        match inner.as_str() {
+            // 请求作用域协议的首个请求：现代 lifecycle 的协商入口。
+            "server/discover" => {
+                self.discoveries.lock().push(server_id);
+                if let Some(delay) = self.handshake_delay {
                     tokio::time::sleep(delay).await;
                 }
-                if self.fail_connect {
-                    return Err(AcpMcpError::unavailable("client 拒绝建连"));
+                if self.fail_discover {
+                    return Err(AcpMcpError::unavailable("client 拒绝声明"));
                 }
-                let server_id = params
-                    .get("serverId")
-                    .and_then(Value::as_str)
-                    .unwrap_or_default()
-                    .to_string();
-                self.connects.lock().push(server_id);
-                let connection_id = format!("conn-{}", self.connects.lock().len());
-                Ok(json!({ "connectionId": connection_id }))
+                Ok(json!({ "result": {
+                    "resultType": "complete",
+                    "supportedVersions": ["2026-07-28"],
+                    "capabilities": { "tools": {} },
+                    "ttlMs": 0,
+                    "cacheScope": "private",
+                    "_meta": {
+                        "io.modelcontextprotocol/serverInfo": {
+                            "name": "acp-fixture",
+                            "version": "1"
+                        }
+                    }
+                } }))
             }
-            "mcp/message" => {
-                let inner = params
-                    .get("method")
-                    .and_then(Value::as_str)
-                    .unwrap_or_default()
-                    .to_string();
-                self.inner_requests.lock().push(inner.clone());
-                match inner.as_str() {
-                    "initialize" => Ok(json!({
-                        "protocolVersion": "2025-11-25",
-                        "capabilities": {},
-                        "serverInfo": { "name": "acp-fixture", "version": "1" }
-                    })),
-                    "tools/list" => Ok(json!({ "tools": self.tools })),
-                    // 未实现方法：按 JSON-RPC 码回错——rmcp 的 lifecycle 协商
-                    // 依赖 -32601 判定 legacy 回退，码值不得被抹平。
-                    other => Err(AcpMcpError {
-                        code: -32601,
-                        message: format!("method not found: {other}"),
-                    }),
-                }
-            }
-            "mcp/disconnect" => {
-                let connection_id = params
-                    .get("connectionId")
-                    .and_then(Value::as_str)
-                    .unwrap_or_default()
-                    .to_string();
-                self.disconnects.lock().push(connection_id);
-                Ok(json!({}))
-            }
-            other => Err(AcpMcpError::not_found(format!("未知方法: {other}"))),
+            "tools/list" => Ok(json!({ "result": { "tools": self.tools } })),
+            // 未实现方法：按内层 MCP 码回错——rmcp 的 lifecycle 协商依赖
+            // -32601 判定 legacy 回退，码值不得被抹平。
+            other => Ok(json!({ "error": {
+                "code": -32601,
+                "message": format!("method not found: {other}")
+            } })),
         }
-    }
-
-    async fn notify(&self, method: &str, params: Value) -> Result<(), AcpMcpError> {
-        if method == "mcp/message" {
-            let inner = params
-                .get("method")
-                .and_then(Value::as_str)
-                .unwrap_or_default()
-                .to_string();
-            self.notifications.lock().push(inner);
-        }
-        Ok(())
     }
 }
 
@@ -206,20 +191,18 @@ async fn attach_connects_in_background_and_stays_session_scoped() {
             .collect::<Vec<_>>(),
         vec!["echo".to_string()]
     );
-    // 内层 MCP 握手走的就是 `mcp/message` 请求；初始化完成的
-    // `notifications/initialized` 走 `mcp/message` 通知。
+    // 发现走的就是请求作用域的 `mcp/message`；首个请求是现代 lifecycle 的
+    // `server/discover`，没有 `mcp/connect`。
+    assert_eq!(
+        fixture.gateway.discoveries.lock().as_slice(),
+        ["srv-1".to_string()]
+    );
     assert!(fixture
         .gateway
         .inner_requests
         .lock()
         .iter()
         .any(|method| method == "tools/list"));
-    assert!(fixture
-        .gateway
-        .notifications
-        .lock()
-        .iter()
-        .any(|method| method == "notifications/initialized"));
 
     // 另一个会话：工具面、状态面、发现面都看不到这条连接。
     assert!(!pool.is_visible_to_session("acp-srv", "s2"));
@@ -235,9 +218,9 @@ async fn attach_connects_in_background_and_stays_session_scoped() {
     assert_eq!(build_tool_bridges_visible_to(&pool, Some("s1")).len(), 1);
 }
 
-/// 契约 1 续：client 经 `mcp/message` 反向下发的请求打到内层 MCP 连接。
+/// 契约 1 续：client 经 `mcp/message` 反向下发的通知打到内层 MCP 连接。
 #[tokio::test]
-async fn inbound_request_reaches_the_inner_connection() {
+async fn inbound_notification_reaches_the_inner_connection() {
     let fixture = fixture(&["echo"]);
     fixture.service.attach(
         Arc::clone(&fixture.gateway) as Arc<dyn AcpMcpGatewayPort>,
@@ -249,41 +232,36 @@ async fn inbound_request_reaches_the_inner_connection() {
     })
     .await;
 
-    // `ping` 由 rmcp 客户端 runtime 应答（默认 handler），因此这里证明的是
-    // 「入站 mcp/message → 桥接 → rmcp → 响应回程」整条路径。
-    let result = fixture
-        .service
-        .request(AcpMcpInbound {
-            connection_id: "conn-1".to_string(),
-            method: "ping".to_string(),
-            params: None,
-        })
-        .await;
-    assert!(result.is_ok(), "入站请求应得到内层响应: {result:?}");
-
-    // 未知 connectionId：按契约码 -32001 拒绝，不静默成功。
-    let missing = fixture
-        .service
-        .request(AcpMcpInbound {
-            connection_id: "conn-missing".to_string(),
-            method: "ping".to_string(),
-            params: None,
-        })
-        .await
-        .expect_err("未知连接必须报错");
-    assert_eq!(missing.code, AcpMcpError::CODE_NOT_FOUND);
-
     let mut params = Map::new();
-    params.insert("anything".to_string(), json!(1));
-    assert!(fixture
+    params.insert("requestId".to_string(), json!("rmcp-1"));
+    params.insert("reason".to_string(), json!("fixture"));
+    fixture
         .service
         .notify(AcpMcpInbound {
-            connection_id: "conn-1".to_string(),
+            server_id: "srv-1".to_string(),
+            request_id: "peri-1".to_string(),
             method: "notifications/cancelled".to_string(),
             params: Some(params),
         })
         .await
-        .is_ok());
+        .expect("client 通知应被桥接接收");
+
+    // 未知 serverId：按契约码 -32001 拒绝，不静默成功。
+    let missing = fixture
+        .service
+        .notify(AcpMcpInbound {
+            server_id: "srv-missing".to_string(),
+            request_id: "peri-2".to_string(),
+            method: "notifications/cancelled".to_string(),
+            params: None,
+        })
+        .await
+        .expect_err("未知 server 必须报错");
+    assert_eq!(missing.code, AcpMcpError::CODE_NOT_FOUND);
+
+    // 桥接只在已知 server 上注册路由。
+    assert!(fixture.service.owns_server("srv-1"));
+    assert!(!fixture.service.owns_server("srv-missing"));
 }
 
 /// 契约 2：同会话同 `serverId` 重复声明幂等；不同会话同名各自建连且池内名不冲突。
@@ -302,7 +280,7 @@ async fn attach_is_idempotent_and_cross_session_names_do_not_collide() {
         pool.get_client_visible_to("acp-srv", Some("s1")).is_some()
     })
     .await;
-    assert_eq!(fixture.gateway.connect_count(), 1, "重复声明不得重复建连");
+    assert_eq!(fixture.gateway.discovery_count(), 1, "重复声明不得重复发现");
 
     // 另一会话声明同名 server：连接独立，池内名加后缀，互不覆盖。
     fixture
@@ -321,7 +299,7 @@ async fn attach_is_idempotent_and_cross_session_names_do_not_collide() {
     // 归属不变：各自只看得到自己那条。
     assert_eq!(build_tool_bridges_visible_to(&pool, Some("s1")).len(), 1);
     assert_eq!(build_tool_bridges_visible_to(&pool, Some("s2")).len(), 1);
-    assert_eq!(fixture.gateway.connect_count(), 2);
+    assert_eq!(fixture.gateway.discovery_count(), 2);
 }
 
 /// 契约 3 续：ACP 连接的上下线不得进入**部署级**通知面。
@@ -375,7 +353,7 @@ async fn connect_failure_is_recorded_in_the_pool_state_face() {
     ));
     let service = AcpMcpService::new(Arc::clone(&pool));
     let gateway = Arc::new(FakeGateway {
-        fail_connect: true,
+        fail_discover: true,
         ..FakeGateway::default()
     });
     service.attach(
@@ -404,12 +382,13 @@ async fn connect_failure_is_recorded_in_the_pool_state_face() {
     // 失败条目没有连接（peer / tools 为空），因此不进工具面。
     assert!(build_tool_bridges_visible_to(&pool, Some("s1")).is_empty());
     assert!(pool.get_client_visible_to("acp-srv", Some("s2")).is_none());
+    assert!(!service.owns_server("srv-1"));
     drop(owner);
 }
 
-/// 契约 5：`close_session` 断开该会话全部连接，其他会话不受影响。
+/// 契约 5：`close_session` 清理该会话全部声明，其他会话不受影响。
 #[tokio::test]
-async fn close_session_disconnects_only_that_session() {
+async fn close_session_removes_only_that_sessions_declarations() {
     let fixture = fixture(&["echo"]);
     let gateway = Arc::clone(&fixture.gateway) as Arc<dyn AcpMcpGatewayPort>;
     let pool = Arc::clone(&fixture.pool);
@@ -429,22 +408,25 @@ async fn close_session_disconnects_only_that_session() {
 
     assert!(pool.get_client_visible_to("acp-srv", Some("s1")).is_none());
     assert!(pool.all_server_infos_visible_to(Some("s1")).is_empty());
-    assert_eq!(fixture.gateway.disconnects.lock().len(), 1);
-    assert_eq!(
-        fixture
-            .gateway
-            .disconnects
-            .lock()
-            .first()
-            .map(String::as_str),
-        Some("conn-1")
-    );
+    assert!(!fixture.service.owns_server("srv-1"));
+    // 关闭后的入站通知按「资源不存在」拒绝。
+    let missing = fixture
+        .service
+        .notify(AcpMcpInbound {
+            server_id: "srv-1".to_string(),
+            request_id: "peri-1".to_string(),
+            method: "notifications/cancelled".to_string(),
+            params: None,
+        })
+        .await
+        .expect_err("会话关闭后不得再接受该 server 的入站通知");
+    assert_eq!(missing.code, AcpMcpError::CODE_NOT_FOUND);
     // s2 的连接仍在，且仍是自己的。
     assert_eq!(pool.get_all_clients_visible_to(Some("s2")).len(), 1);
-    // 幂等：重复关闭不产生额外协议调用。
+    assert!(fixture.service.owns_server("srv-2"));
+    // 幂等：重复关闭不产生额外发现。
     fixture.service.close_session("s1").await;
-    assert_eq!(fixture.gateway.disconnects.lock().len(), 1);
-    assert_eq!(fixture.gateway.connect_count(), 2);
+    assert_eq!(fixture.gateway.discovery_count(), 2);
 }
 
 /// 契约 5 续：在建连接被会话关闭终止，握手完成后**不得**落池。
@@ -457,14 +439,14 @@ async fn close_session_aborts_inflight_connect_without_committing() {
     ));
     let service = AcpMcpService::new(Arc::clone(&pool));
     let gateway = Arc::new(FakeGateway {
-        connect_delay: Some(Duration::from_millis(150)),
+        handshake_delay: Some(Duration::from_millis(150)),
         ..FakeGateway::with_tools(&["echo"])
     });
     service.attach(
         Arc::clone(&gateway) as Arc<dyn AcpMcpGatewayPort>,
         vec![spec("s1", "acp-srv", "srv-1")],
     );
-    // `mcp/connect` 尚未返回（延迟窗口内关闭会话）。
+    // `server/discover` 尚未返回（延迟窗口内关闭会话）。
     service.close_session("s1").await;
     tokio::time::sleep(Duration::from_millis(400)).await;
 

@@ -4,9 +4,9 @@
 //!
 //! 1. **声明解析**：`mcpServers` 的 wire 形状取自 SDK 自身的序列化结果，acp 型
 //!    条目转成规格、其它传输与畸形条目被忽略且不牵连同批；
-//! 2. **入站路由**：`mcp/message` 只带 `connectionId`，宿主必须在各会话服务间
+//! 2. **入站路由**：`mcp/message` 只带 `serverId`，宿主必须在各会话服务间
 //!    定位承载者，错误码按协议约定（`-32601`/`-32602` 之外用 `CODE_NOT_FOUND`）；
-//! 3. **出站网关**：ACP 请求/通知原样透传，错误码不抹平——`mcp/message` 的码值
+//! 3. **出站网关**：ACP 请求原样透传，错误码不抹平——`mcp/message` 的码值
 //!    就是内层 MCP 错误码，抹平会让 rmcp 的 lifecycle 协商不可用。
 
 use std::collections::HashMap;
@@ -96,7 +96,7 @@ fn absent_or_non_array_declarations_are_no_declarations() {
     assert!(parse_acp_servers(&json!({"mcpServers": []}), "s1").is_empty());
 }
 
-/// 只承载一条连接的最小服务假件：路由只依 `owns_connection` 判定。
+/// 只承载一条声明的最小服务假件：路由只依 `owns_server` 判定。
 struct FakePort {
     owned: Vec<&'static str>,
 }
@@ -113,49 +113,52 @@ impl FakePort {
 impl AcpMcpServerPort for FakePort {
     fn attach(&self, _gateway: Arc<dyn AcpMcpGatewayPort>, _servers: Vec<AcpMcpServerSpec>) {}
 
-    async fn request(&self, _inbound: AcpMcpInbound) -> Result<Value, AcpMcpError> {
-        Err(AcpMcpError::unavailable("测试假件不承载请求"))
-    }
-
     async fn notify(&self, _inbound: AcpMcpInbound) -> Result<(), AcpMcpError> {
         Err(AcpMcpError::unavailable("测试假件不承载通知"))
     }
 
-    fn owns_connection(&self, connection_id: &str) -> bool {
-        self.owned.contains(&connection_id)
+    fn owns_server(&self, server_id: &str) -> bool {
+        self.owned.contains(&server_id)
     }
 
     async fn close_session(&self, _session_id: &str) {}
 }
 
 #[test]
-fn routing_picks_the_port_that_owns_the_connection() {
-    let first: Arc<dyn AcpMcpServerPort> = Arc::new(FakePort::new(&["conn-a"]));
-    let second: Arc<dyn AcpMcpServerPort> = Arc::new(FakePort::new(&["conn-b"]));
+fn routing_picks_the_port_that_owns_the_server() {
+    let first: Arc<dyn AcpMcpServerPort> = Arc::new(FakePort::new(&["srv-a"]));
+    let second: Arc<dyn AcpMcpServerPort> = Arc::new(FakePort::new(&["srv-b"]));
     let ports = vec![Arc::clone(&first), Arc::clone(&second)];
 
-    let found = locate_owner(ports.iter().cloned(), "conn-b").expect("承载连接的服务");
+    let found = locate_owner(ports.iter().cloned(), "srv-b").expect("承载声明的服务");
     assert!(Arc::ptr_eq(&found, &second));
-    assert!(locate_owner(ports.into_iter(), "conn-unknown").is_none());
+    assert!(locate_owner(ports.into_iter(), "srv-unknown").is_none());
 }
 
 #[test]
-fn inbound_routing_rejects_malformed_and_unknown_connections() {
+fn inbound_routing_rejects_malformed_and_unknown_servers() {
     let sessions = HashMap::new();
     let reject = |params: &Value| match route_inbound(&sessions, params) {
         Err(error) => error,
         Ok(_) => panic!("非法的 mcp/message 载荷不得路由成功: {params}"),
     };
 
-    let missing_connection = reject(&json!({"method": "tools/list"}));
-    assert_eq!(missing_connection.code, -32602);
+    let missing_server = reject(&json!({"requestId": "r-1", "method": "tools/list"}));
+    assert_eq!(missing_server.code, -32602);
 
-    let missing_method = reject(&json!({"connectionId": "conn-1"}));
+    let missing_request = reject(&json!({"serverId": "srv-1", "method": "tools/list"}));
+    assert_eq!(missing_request.code, -32602);
+
+    let missing_method = reject(&json!({"serverId": "srv-1", "requestId": "r-1"}));
     assert_eq!(missing_method.code, -32602);
 
-    // 未知连接用「资源不存在」而非内部错误：对端据此区分「连接已结束」与
+    // 未知 server 用「资源不存在」而非内部错误：对端据此区分「声明已结束」与
     // 「本节点故障」，与内层 MCP 的 -32601 语义也不混同。
-    let unknown = reject(&json!({"connectionId": "conn-1", "method": "tools/list"}));
+    let unknown = reject(&json!({
+        "serverId": "srv-1",
+        "requestId": "r-1",
+        "method": "tools/list"
+    }));
     assert_eq!(unknown.code, AcpMcpError::CODE_NOT_FOUND);
 }
 
@@ -163,7 +166,6 @@ fn inbound_routing_rejects_malformed_and_unknown_connections() {
 #[derive(Default)]
 struct RecordingTransport {
     requests: Mutex<Vec<(String, Value)>>,
-    notifications: Mutex<Vec<(String, Value)>>,
     reply_error: Option<AcpError>,
 }
 
@@ -173,12 +175,11 @@ impl crate::transport::AcpTransport for RecordingTransport {
         self.requests.lock().push((method.to_string(), params));
         match &self.reply_error {
             Some(error) => Err(error.clone()),
-            None => Ok(json!({"connectionId": "conn-1"})),
+            None => Ok(json!({"result": {"tools": []}})),
         }
     }
 
-    async fn send_notification(&self, method: &str, params: Value) -> Result<(), AcpError> {
-        self.notifications.lock().push((method.to_string(), params));
+    async fn send_notification(&self, _method: &str, _params: Value) -> Result<(), AcpError> {
         Ok(())
     }
 
@@ -196,26 +197,26 @@ impl crate::transport::AcpTransport for RecordingTransport {
 }
 
 #[tokio::test]
-async fn gateway_forwards_acp_requests_and_notifications() {
+async fn gateway_forwards_mcp_message_requests() {
     let transport = Arc::new(RecordingTransport::default());
     let gateway =
         AcpTransportGateway::new(Arc::clone(&transport) as Arc<dyn crate::transport::AcpTransport>);
 
     let connected = gateway
-        .request("mcp/connect", json!({"serverId": "srv-1"}))
+        .request(
+            "mcp/message",
+            json!({"serverId": "srv-1", "requestId": "r-1", "method": "tools/list"}),
+        )
         .await
         .unwrap();
-    assert_eq!(connected, json!({"connectionId": "conn-1"}));
+    assert_eq!(connected, json!({"result": {"tools": []}}));
     assert_eq!(
         transport.requests.lock().as_slice(),
-        &[("mcp/connect".to_string(), json!({"serverId": "srv-1"}))]
+        &[(
+            "mcp/message".to_string(),
+            json!({"serverId": "srv-1", "requestId": "r-1", "method": "tools/list"})
+        )]
     );
-
-    gateway
-        .notify("mcp/message", json!({"connectionId": "conn-1"}))
-        .await
-        .unwrap();
-    assert_eq!(transport.notifications.lock().len(), 1);
 }
 
 #[tokio::test]
@@ -230,7 +231,10 @@ async fn gateway_preserves_inner_mcp_error_codes() {
         AcpTransportGateway::new(Arc::clone(&transport) as Arc<dyn crate::transport::AcpTransport>);
 
     let error = gateway
-        .request("mcp/message", json!({"connectionId": "conn-1"}))
+        .request(
+            "mcp/message",
+            json!({"serverId": "srv-1", "requestId": "r-1", "method": "server/discover"}),
+        )
         .await
         .unwrap_err();
     assert_eq!(

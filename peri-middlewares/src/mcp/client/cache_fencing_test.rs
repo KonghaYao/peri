@@ -59,7 +59,7 @@ fn install_acp(wire: &Wire, pool: &McpClientPool, connection: &str) {
         "server".into(),
         AcpConnectionDeclaration {
             session_id: "session".into(),
-            connection_id: connection.into(),
+            server_id: connection.into(),
         },
     );
 }

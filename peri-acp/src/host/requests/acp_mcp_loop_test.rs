@@ -1,14 +1,14 @@
 //! MCP over ACP 宿主接线的主路径测试：client 在 `session/new` 声明
-//! `type: "acp"` 的 MCP server → 工具进入该会话的工具面 → 会话关闭时断开。
+//! `type: "acp"` 的 MCP server → 工具进入该会话的工具面 → 会话关闭时清理。
 //!
-//! 假件只在**协议对端**（一个实现 `AcpTransport` 的 client 宿主：应答
-//! `mcp/connect`，把 `mcp/message` 交给它承载的那台 MCP server）。宿主侧走
-//! 真实路径：真实 `session/new`、真实宿主网关 `AcpTransportGateway`、真实桥接
+//! 假件只在**协议对端**（一个实现 `AcpTransport` 的 client 宿主：应答请求作用
+//! 域的 `mcp/message`，每次调用自带 `serverId` / `requestId`）。宿主侧走真实
+//! 路径：真实 `session/new`、真实宿主网关 `AcpTransportGateway`、真实桥接
 //! transport、真实 rmcp 握手与 `tools/list` 发现、真实 MCP 池提交与归属过滤。
 //!
 //! 声明的解析与注入点取自生产调用链：`session/new` 的参数形状就是生产形状，
-//! attach 调用点与 `ServerLoop` 在 setup 响应之后的调用同款（`mcp/connect` 只带
-//! `serverId`，必须在客户端拿到会话结果之后才发得出去）。
+//! attach 调用点与 `ServerLoop` 在 setup 响应之后的调用同款（声明在客户端拿到
+//! 会话结果之后才受理）。
 //!
 //! 池与服务的注入理由：非 bare 工作区装配面才会构造 ACP MCP 服务（bare 池仅含 workspace）（`host/assemble.rs`），
 //! 而拉起真实外部 server 不适合测试——这里注入同一份装配产物，装配面自身由
@@ -28,12 +28,12 @@ use crate::transport::types::{IncomingMessage, RequestId};
 /// client 宿主假件：真实部署里 client 就扮演这个角色。
 #[derive(Default)]
 struct FakeClientHost {
-    /// 收到的 `mcp/connect` 的 `serverId`（按到达顺序）。
-    connects: std::sync::Mutex<Vec<String>>,
-    /// 收到的 `mcp/disconnect` 的 `connectionId`。
-    disconnects: std::sync::Mutex<Vec<String>>,
+    /// 收到的 ACP 请求方法名（应当只有 `mcp/message`）。
+    request_methods: std::sync::Mutex<Vec<String>>,
     /// `mcp/message` 承载的内层 MCP 方法名。
     inner_methods: std::sync::Mutex<Vec<String>>,
+    /// 内层 `mcp/message` 请求的 `(serverId, requestId)`。
+    message_targets: std::sync::Mutex<Vec<(String, String)>>,
 }
 
 impl FakeClientHost {
@@ -45,27 +45,11 @@ impl FakeClientHost {
 #[async_trait]
 impl crate::transport::AcpTransport for FakeClientHost {
     async fn send_request(&self, method: &str, params: Value) -> Result<Value, AcpError> {
+        self.request_methods
+            .lock()
+            .unwrap()
+            .push(method.to_string());
         match method {
-            "mcp/connect" => {
-                self.connects.lock().unwrap().push(
-                    params
-                        .get("serverId")
-                        .and_then(Value::as_str)
-                        .unwrap_or_default()
-                        .to_string(),
-                );
-                Ok(json!({ "connectionId": "conn-1" }))
-            }
-            "mcp/disconnect" => {
-                self.disconnects.lock().unwrap().push(
-                    params
-                        .get("connectionId")
-                        .and_then(Value::as_str)
-                        .unwrap_or_default()
-                        .to_string(),
-                );
-                Ok(json!({}))
-            }
             "mcp/message" => {
                 let inner = params
                     .get("method")
@@ -73,21 +57,46 @@ impl crate::transport::AcpTransport for FakeClientHost {
                     .unwrap_or_default()
                     .to_string();
                 self.inner_methods.lock().unwrap().push(inner.clone());
+                self.message_targets.lock().unwrap().push((
+                    params
+                        .get("serverId")
+                        .and_then(Value::as_str)
+                        .unwrap_or_default()
+                        .to_string(),
+                    params
+                        .get("requestId")
+                        .and_then(Value::as_str)
+                        .unwrap_or_default()
+                        .to_string(),
+                ));
+                // 外层 ACP 响应承载 `MessageMcpResponse`：成功分支是 `{ result }`。
                 match inner.as_str() {
-                    "initialize" => Ok(json!({
-                        "protocolVersion": "2025-11-25",
-                        "capabilities": {},
-                        "serverInfo": { "name": "client-hosted-fixture", "version": "1" }
-                    })),
-                    "tools/list" => Ok(json!({ "tools": [{
+                    // 请求作用域协议的首个请求：现代 lifecycle 的协商入口。
+                    "server/discover" => Ok(json!({ "result": {
+                        "resultType": "complete",
+                        "supportedVersions": ["2026-07-28"],
+                        "capabilities": { "tools": {} },
+                        "ttlMs": 0,
+                        "cacheScope": "private",
+                        "_meta": {
+                            "io.modelcontextprotocol/serverInfo": {
+                                "name": "client-hosted-fixture",
+                                "version": "1"
+                            }
+                        }
+                    } })),
+                    "tools/list" => Ok(json!({ "result": { "tools": [{
                         "name": "echo",
                         "description": "fixture echo tool",
                         "inputSchema": { "type": "object", "properties": {} }
-                    }] })),
-                    "ping" => Ok(json!({})),
-                    // 未实现的方法按 JSON-RPC 回错：rmcp 的 lifecycle 协商依赖
+                    }] } })),
+                    "ping" => Ok(json!({ "result": {} })),
+                    // 未实现的方法按内层 MCP 错误回：rmcp 的 lifecycle 协商依赖
                     // -32601 判定 legacy initialize 回退，码值不得被抹平。
-                    other => Err(AcpError::new(-32601, format!("method not found: {other}"))),
+                    other => Ok(json!({ "error": {
+                        "code": -32601,
+                        "message": format!("method not found: {other}")
+                    } })),
                 }
             }
             other => Err(AcpError::new(-32601, format!("unexpected method: {other}"))),
@@ -111,7 +120,7 @@ impl crate::transport::AcpTransport for FakeClientHost {
     }
 }
 
-/// 等待条件成立（建连与工具发现是异步的，没有固定时序）。
+/// 等待条件成立（协议协商与工具发现是异步的，没有固定时序）。
 async fn wait_until(what: &str, mut condition: impl FnMut() -> bool) {
     for _ in 0..600 {
         if condition() {
@@ -123,7 +132,7 @@ async fn wait_until(what: &str, mut condition: impl FnMut() -> bool) {
 }
 
 #[tokio::test]
-async fn acp_declared_server_reaches_the_session_tool_face_and_disconnects_on_close() {
+async fn acp_declared_server_reaches_the_session_tool_face_and_is_cleaned_up_on_close() {
     let tmp = tempfile::TempDir::new().unwrap();
     let config =
         make_peri_config_with_provider(make_provider_config("test", "openai", "key", "model"));
@@ -187,7 +196,7 @@ async fn acp_declared_server_reaches_the_session_tool_face_and_disconnects_on_cl
         );
     }
 
-    wait_until("声明的连接进入本会话的池", || {
+    wait_until("声明的 server 进入本会话的池", || {
         pool.get_client_visible_to("fixture", Some(&session_id))
             .is_some()
     })
@@ -207,14 +216,44 @@ async fn acp_declared_server_reaches_the_session_tool_face_and_disconnects_on_cl
             .collect::<Vec<_>>(),
         vec!["echo".to_string()]
     );
-    // 建连依的是客户端声明的 serverId；工具经内层 tools/list 发现。
+
+    // 发现依的是客户端声明的 serverId；每个内层请求都是独立的 `mcp/message`
+    // 请求（自带 requestId），没有 `mcp/connect` / `mcp/disconnect`。
     assert_eq!(
-        FakeClientHost::recorded(&peer.connects),
-        vec!["srv-1".to_string()]
+        FakeClientHost::recorded(&peer.request_methods)
+            .iter()
+            .collect::<std::collections::BTreeSet<_>>()
+            .into_iter()
+            .cloned()
+            .collect::<Vec<_>>(),
+        vec!["mcp/message".to_string()]
     );
     assert!(FakeClientHost::recorded(&peer.inner_methods)
         .iter()
+        .any(|method| method == "server/discover"));
+    assert!(FakeClientHost::recorded(&peer.inner_methods)
+        .iter()
         .any(|method| method == "tools/list"));
+    let targets = peer.message_targets.lock().unwrap().clone();
+    assert!(
+        targets.iter().all(|(server_id, _)| server_id == "srv-1"),
+        "所有内层请求都必须寻址声明的 serverId: {targets:?}"
+    );
+    assert!(
+        targets
+            .iter()
+            .all(|(_, request_id)| request_id.starts_with("peri-")),
+        "每个内层请求都必须带独立 requestId: {targets:?}"
+    );
+    let unique = targets
+        .iter()
+        .map(|(_, request_id)| request_id.clone())
+        .collect::<std::collections::BTreeSet<_>>();
+    assert_eq!(
+        unique.len(),
+        targets.len(),
+        "requestId 不得复用: {targets:?}"
+    );
 
     // 工具进入该会话的工具面（deferred：`build_tool_bridges_visible_to` 是唯一
     // 会话级构造入口，名字带 server 前缀）。
@@ -232,8 +271,7 @@ async fn acp_declared_server_reaches_the_session_tool_face_and_disconnects_on_cl
         "ACP 工具与其它 MCP 工具一致走 deferred 发现面"
     );
 
-    // 入站：宿主按 connectionId 定位承载会话的服务，`ping` 由 rmcp 客户端
-    // runtime 应答——证明「宿主路由 → 桥接 → rmcp → 响应回程」整条路径。
+    // 入站：宿主按 serverId 定位承载会话的服务，client 通知被桥接接收。
     let port = sessions[&session_id]
         .environment
         .as_ref()
@@ -242,18 +280,26 @@ async fn acp_declared_server_reaches_the_session_tool_face_and_disconnects_on_cl
         .acp_mcp
         .clone()
         .unwrap();
-    assert!(port.owns_connection("conn-1"));
-    assert!(!port.owns_connection("conn-2"));
+    assert!(port.owns_server("srv-1"));
+    assert!(!port.owns_server("srv-2"));
     let Ok((routed, inbound)) = crate::host::requests::acp_mcp::route_inbound(
         &sessions,
-        &json!({ "connectionId": "conn-1", "method": "ping" }),
+        &json!({
+            "serverId": "srv-1",
+            "requestId": "peri-1",
+            "method": "notifications/cancelled",
+            "params": { "requestId": "rmcp-1", "reason": "fixture" }
+        }),
     ) else {
-        panic!("已建立的连接必须能被宿主路由");
+        panic!("已声明的 server 必须能被宿主路由");
     };
     assert!(Arc::ptr_eq(&routed, &port));
-    routed.request(inbound).await.expect("ping 应由 rmcp 应答");
+    routed
+        .notify(inbound)
+        .await
+        .expect("client 通知应被桥接接收");
 
-    // 会话关闭：连接事实随会话消失，且必须先于池关闭完成（否则没有出站通道）。
+    // 会话关闭：声明与池条目随会话消失，且不再有反向的断开请求。
     handle_request(
         "session/close",
         &json!({"sessionId": session_id}),
@@ -263,12 +309,30 @@ async fn acp_declared_server_reaches_the_session_tool_face_and_disconnects_on_cl
     )
     .await
     .unwrap();
-    assert_eq!(
-        FakeClientHost::recorded(&peer.disconnects),
-        vec!["conn-1".to_string()]
-    );
     assert!(pool
         .get_client_visible_to("fixture", Some(&session_id))
         .is_none());
     assert!(build_tool_bridges_visible_to(&pool, Some(&session_id)).is_empty());
+    assert!(!port.owns_server("srv-1"));
+    // 关闭后再按 serverId 定位必须失败（-32001）。
+    let Err(error) = crate::host::requests::acp_mcp::route_inbound(
+        &sessions,
+        &json!({
+            "serverId": "srv-1",
+            "requestId": "peri-3",
+            "method": "notifications/cancelled"
+        }),
+    ) else {
+        panic!("会话关闭后不得再路由到该 server");
+    };
+    assert_eq!(
+        error.code,
+        peri_acp_types::acp_mcp::AcpMcpError::CODE_NOT_FOUND
+    );
+    assert_eq!(
+        FakeClientHost::recorded(&peer.request_methods)
+            .into_iter()
+            .collect::<std::collections::BTreeSet<_>>(),
+        ["mcp/message".to_string()].into_iter().collect()
+    );
 }

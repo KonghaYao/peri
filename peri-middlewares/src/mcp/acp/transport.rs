@@ -1,38 +1,38 @@
 //! MCP over ACP 桥接 transport。
 //!
-//! 把 rmcp 的 JSON-RPC 消息经 ACP `mcp/message` 双向转发：
+//! schema 1.10 起 `mcp/message` 是请求作用域的：agent 的每次内层 MCP 请求都
+//! 落成一条独立 ACP 请求（`serverId` + `requestId` + `method` + `params`），
+//! client 只反向下发通知。本模块保留 rmcp `Transport<RoleClient>` 形态，让
+//! 上层 MCP 池与工具桥接无需感知协议形态：
 //!
-//! - rmcp 发出的请求 / 通知 → ACP 请求 / 通知（`connectionId` 定位连接）；
-//! - rmcp 对 client 请求的响应 → 结算挂起的 ACP 请求；
-//! - client 经 `mcp/message` 反向下发的请求 / 通知 → 注入 rmcp 的接收队列。
+//! - rmcp 请求 → ACP `mcp/message` 请求（每请求生成新的 `requestId`）；
+//! - 成功响应的 `result` / `error` → rmcp 响应 / 内层 MCP 错误；
+//! - client 反向下发的 `mcp/message` 通知 → 注入 rmcp 接收队列。
+//!
+//! rmcp 的 lifecycle 协商（先 `server/discover`，失败回退 `initialize`）原样
+//! 复用：两类方法都是普通请求，桥接不需要特殊分支。consumer → provider 的
+//! 通知在 schema 1.12 没有承载方向（`AgentNotification` 无 `mcp/message`），
+//! 因此丢弃并记 debug；现代 lifecycle 不依赖 `notifications/initialized`。
 //!
 //! 消息以 JSON 载荷中转（`mcp/message` 承载的本就是内层 MCP 消息），不复制
-//! rmcp 的类型层次；内层请求 id 由 rmcp 生成并在本模块内配对。
+//! rmcp 的类型层次；内层请求 id 由 rmcp 生成，ACP `requestId` 与它独立。
 //!
 //! 关闭是单点信号（[`BridgeClose`]）：任一侧触发后，rmcp 的 `receive()` 与
 //! 出站转发任务同时收敛，不会留下悬挂的通道或任务。
 
-use std::collections::HashMap;
 use std::future::Future;
 use std::sync::Arc;
 
-use parking_lot::Mutex;
 use peri_acp_types::acp_mcp::AcpMcpError;
 use peri_acp_types::ports::AcpMcpGatewayPort;
 use rmcp::model::{ErrorCode, ErrorData, NumberOrString, RequestId};
 use rmcp::service::{RoleClient, RxJsonRpcMessage, TxJsonRpcMessage};
 use rmcp::transport::Transport;
 use serde_json::{Map, Value};
-use tokio::sync::{mpsc, oneshot};
+use tokio::sync::mpsc;
 
 /// ACP `mcp/message` 的方法名（协议常量）。
 pub(crate) const MCP_MESSAGE_METHOD: &str = "mcp/message";
-
-/// ACP `mcp/connect` 的方法名：agent → client，返回 `connectionId`。
-pub(crate) const MCP_CONNECT_METHOD: &str = "mcp/connect";
-
-/// ACP `mcp/disconnect` 的方法名：agent → client，关闭一条连接。
-pub(crate) const MCP_DISCONNECT_METHOD: &str = "mcp/disconnect";
 
 /// 桥接 transport 的错误类型（仅表达通道关闭）。
 #[derive(Debug, thiserror::Error)]
@@ -41,7 +41,7 @@ pub(crate) enum AcpBridgeError {
     Closed,
 }
 
-/// 单点关闭信号：`close()` 之后 rmcp 入站、出站转发与句柄注入同时失效。
+/// 单点关闭信号：`close()` 之后 rmcp 入站与出站转发同时失效。
 ///
 /// 用「标志位 + `notify_waiters`」而非直接关通道：tokio 的 mpsc 关闭只能由
 /// 接收端发起，而关闭可能来自任一侧（rmcp 释放 transport、会话关闭、池关闭）。
@@ -124,43 +124,13 @@ impl Transport<RoleClient> for AcpBridgeTransport {
     }
 }
 
-/// 桥接连接句柄：外部（会话管理器 / ACP 面）经它向 rmcp 注入反向下发的消息。
+/// 桥接连接句柄：宿主经它把 client 反向下发的通知注入 rmcp。
 pub(crate) struct AcpBridgeHandle {
     inbound_tx: mpsc::UnboundedSender<RxJsonRpcMessage<RoleClient>>,
-    pending: Arc<Mutex<HashMap<RequestId, oneshot::Sender<Result<Value, ErrorData>>>>>,
-    next_id: std::sync::atomic::AtomicI64,
     close: Arc<BridgeClose>,
 }
 
 impl AcpBridgeHandle {
-    /// client 下发的 `mcp/message` 请求：注入 rmcp 并等待其响应。
-    ///
-    /// 无内置超时：连接静默与调用方的取消语义由 ACP 层持有。
-    pub(crate) async fn request(
-        &self,
-        method: &str,
-        params: Option<Value>,
-    ) -> Result<Value, ErrorData> {
-        if self.close.is_closed() {
-            return Err(connection_closed());
-        }
-        let id = RequestId::Number(
-            self.next_id
-                .fetch_add(1, std::sync::atomic::Ordering::Relaxed),
-        );
-        let message = build_request_message(&id, method, params)?;
-        let (tx, rx) = oneshot::channel();
-        self.pending.lock().insert(id.clone(), tx);
-        if self.inbound_tx.send(message).is_err() {
-            self.pending.lock().remove(&id);
-            return Err(connection_closed());
-        }
-        match rx.await {
-            Ok(result) => result,
-            Err(_) => Err(connection_closed()),
-        }
-    }
-
     /// client 下发的 `mcp/message` 通知：投递后即返回。
     pub(crate) fn notify(&self, method: &str, params: Option<Value>) -> Result<(), ErrorData> {
         if self.close.is_closed() {
@@ -181,12 +151,10 @@ impl AcpBridgeHandle {
 /// 建立一次桥接：返回 rmcp 侧 transport、外部句柄与出站转发任务。
 pub(crate) fn create_bridge(
     gateway: Arc<dyn AcpMcpGatewayPort>,
-    connection_id: String,
+    server_id: String,
 ) -> (AcpBridgeTransport, Arc<AcpBridgeHandle>, BridgeRunner) {
     let (outbound_tx, outbound_rx) = mpsc::unbounded_channel();
     let (inbound_tx, inbound_rx) = mpsc::unbounded_channel();
-    let pending: Arc<Mutex<HashMap<RequestId, oneshot::Sender<Result<Value, ErrorData>>>>> =
-        Arc::new(Mutex::new(HashMap::new()));
     let close = BridgeClose::new();
     let transport = AcpBridgeTransport {
         outbound_tx,
@@ -195,100 +163,95 @@ pub(crate) fn create_bridge(
     };
     let handle = Arc::new(AcpBridgeHandle {
         inbound_tx: inbound_tx.clone(),
-        pending: Arc::clone(&pending),
-        next_id: std::sync::atomic::AtomicI64::new(1),
         close: Arc::clone(&close),
     });
     let runner = BridgeRunner {
         gateway,
-        connection_id,
+        server_id,
+        next_request_id: std::sync::atomic::AtomicU64::new(1),
         outbound_rx,
         inbound_tx,
-        pending,
         close,
     };
     (transport, handle, runner)
 }
 
-/// 出站转发任务：rmcp 发出的消息 → ACP `mcp/message`。
+/// 出站转发任务：rmcp 发出的请求 → ACP `mcp/message`。
 pub(crate) struct BridgeRunner {
     gateway: Arc<dyn AcpMcpGatewayPort>,
-    connection_id: String,
+    server_id: String,
+    next_request_id: std::sync::atomic::AtomicU64,
     outbound_rx: mpsc::UnboundedReceiver<TxJsonRpcMessage<RoleClient>>,
     inbound_tx: mpsc::UnboundedSender<RxJsonRpcMessage<RoleClient>>,
-    pending: Arc<Mutex<HashMap<RequestId, oneshot::Sender<Result<Value, ErrorData>>>>>,
     close: Arc<BridgeClose>,
 }
 
 impl BridgeRunner {
     /// 运行直到关闭信号触发或出站通道关闭（transport 被 rmcp 释放）。
-    pub(crate) async fn run(self) {
-        let Self {
-            gateway,
-            connection_id,
-            mut outbound_rx,
-            inbound_tx,
-            pending,
-            close,
-        } = self;
+    pub(crate) async fn run(mut self) {
         loop {
             let message = tokio::select! {
                 biased;
-                () = close.wait() => break,
-                message = outbound_rx.recv() => match message {
+                () = self.close.wait() => break,
+                message = self.outbound_rx.recv() => match message {
                     Some(message) => message,
                     None => break,
                 },
             };
             let Ok(value) = serde_json::to_value(&message) else {
-                tracing::warn!(connection_id = %connection_id, "MCP over ACP 消息序列化失败");
+                tracing::warn!(server_id = %self.server_id, "MCP over ACP 消息序列化失败");
                 continue;
             };
             let Some(method) = value.get("method").and_then(Value::as_str) else {
-                // 响应 / 错误：结算挂起的 client 请求。
-                settle_pending(&value, &pending);
+                // 响应 / 错误只可能属于 client → agent 请求；该方向已被协议移除。
+                tracing::debug!(
+                    server_id = %self.server_id,
+                    "忽略无方法的 MCP over ACP 出站消息"
+                );
                 continue;
             };
             let method = method.to_owned();
             let params = value.get("params").cloned();
-            match value.get("id").and_then(json_request_id) {
-                // 请求：转发为 ACP 请求，响应回填为 rmcp 的 Response / Error。
-                Some(id) => {
-                    let gateway = Arc::clone(&gateway);
-                    let connection_id = connection_id.clone();
-                    let inbound_tx = inbound_tx.clone();
-                    tokio::spawn(async move {
-                        let result =
-                            forward_request(gateway.as_ref(), &connection_id, &method, params)
-                                .await;
-                        match build_response_message(&id, result) {
-                            Some(message) => {
-                                let _ = inbound_tx.send(message);
-                            }
-                            None => tracing::warn!(
-                                connection_id = %connection_id,
-                                "MCP over ACP 响应回填失败，请求将按取消结算"
-                            ),
-                        }
-                    });
-                }
-                // 通知：无 id，不等待响应。
-                None => {
-                    if let Err(error) = gateway
-                        .notify(
-                            MCP_MESSAGE_METHOD,
-                            message_params(&connection_id, &method, params.map(json_object)),
-                        )
-                        .await
-                    {
+            if value.get("id").and_then(json_request_id).is_none() {
+                // schema 1.12 没有 consumer → provider 通知；现代 lifecycle 也不
+                // 依赖 `notifications/initialized`。丢弃而不是写成反向通知。
+                tracing::debug!(
+                    server_id = %self.server_id,
+                    method,
+                    "MCP over ACP 丢弃 consumer 侧通知"
+                );
+                continue;
+            }
+
+            let request_id = format!(
+                "peri-{}",
+                self.next_request_id
+                    .fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+            );
+            let gateway = Arc::clone(&self.gateway);
+            let server_id = self.server_id.clone();
+            let inbound_tx = self.inbound_tx.clone();
+            let rmcp_id = value.get("id").and_then(json_request_id);
+            tokio::spawn(async move {
+                let result = forward_request(
+                    gateway.as_ref(),
+                    &server_id,
+                    &request_id,
+                    &method,
+                    params.map(json_object),
+                )
+                .await;
+                if let Some(id) = rmcp_id {
+                    if let Some(message) = build_response_message(&id, result) {
+                        let _ = inbound_tx.send(message);
+                    } else {
                         tracing::warn!(
-                            connection_id = %connection_id,
-                            %error,
-                            "MCP over ACP 通知转发失败"
+                            server_id = %server_id,
+                            "MCP over ACP 响应回填失败，请求将按取消结算"
                         );
                     }
                 }
-            }
+            });
         }
     }
 }
@@ -296,37 +259,77 @@ impl BridgeRunner {
 /// 把 rmcp 请求经 ACP `mcp/message` 发出，返回内层 MCP 结果。
 async fn forward_request(
     gateway: &dyn AcpMcpGatewayPort,
-    connection_id: &str,
+    server_id: &str,
+    request_id: &str,
     method: &str,
-    params: Option<Value>,
+    params: Option<Map<String, Value>>,
 ) -> Result<Value, ErrorData> {
-    gateway
+    let response = gateway
         .request(
             MCP_MESSAGE_METHOD,
-            message_params(connection_id, method, params.map(json_object)),
+            message_params(server_id, request_id, method, params),
         )
         .await
-        .map_err(inner_error)
+        .map_err(inner_error)?;
+    parse_message_response(response)
 }
 
-/// ACP 错误 → 内层 MCP 错误。
+/// `MessageMcpResponse` → 内层 MCP 结果。
 ///
-/// `mcp/message` 请求的错误码按协议约定就是内层 JSON-RPC 错误码
-/// （`AcpMcpServerPort::request` 反向同理），因此原样还原码值：rmcp 的
-/// lifecycle 协商依赖 `-32601` 等方法级错误码判定 legacy 回退，抹平成
-/// `-32603` 会让「MCP 方法不存在」与「连接故障」不可区分。码值超出
-/// rmcp 的 `i32` 表示时退回内部错误。
+/// 协议把内层结果与内层错误分成两个互斥分支：`{ result }` 与
+/// `{ error: { code, message, data? } }`。外层 ACP 错误已在
+/// [`forward_request`] 中处理，这里只解析成功的外层响应。
+fn parse_message_response(response: Value) -> Result<Value, ErrorData> {
+    let Value::Object(mut object) = response else {
+        return Err(ErrorData::invalid_request(
+            "mcp/message 响应必须是对象",
+            None,
+        ));
+    };
+    if let Some(error) = object.remove("error") {
+        return Err(parse_inner_error(error));
+    }
+    Ok(object.remove("result").unwrap_or(Value::Null))
+}
+
+fn parse_inner_error(error: Value) -> ErrorData {
+    let code = error
+        .get("code")
+        .and_then(Value::as_i64)
+        .and_then(|code| i32::try_from(code).ok())
+        .unwrap_or(ErrorCode::INTERNAL_ERROR.0);
+    let message = error
+        .get("message")
+        .and_then(Value::as_str)
+        .unwrap_or("MCP 错误载荷缺少 message")
+        .to_string();
+    let data = error.get("data").cloned().filter(|data| !data.is_null());
+    ErrorData::new(ErrorCode(code), message, data)
+}
+
+/// ACP 外层错误 → 内层 MCP 错误。
+///
+/// `mcp/message` 的 ACP 错误码按协议约定就是绑定 / 运行面错误；内层 MCP
+/// 方法级错误走成功响应里的 `error` 分支（[`parse_message_response`]）。
+/// 码值超出 rmcp 的 `i32` 表示时退回内部错误。
 fn inner_error(error: AcpMcpError) -> ErrorData {
     let code = i32::try_from(error.code).unwrap_or(ErrorCode::INTERNAL_ERROR.0);
     ErrorData::new(ErrorCode(code), error.message, None)
 }
 
-/// `mcp/message` 载荷：`{ connectionId, method, params }`（params 缺省省略）。
-fn message_params(connection_id: &str, method: &str, params: Option<Map<String, Value>>) -> Value {
+/// `mcp/message` 载荷：`{ serverId, requestId, method, params }`
+/// （params 缺省省略）。
+fn message_params(
+    server_id: &str,
+    request_id: &str,
+    method: &str,
+    params: Option<Map<String, Value>>,
+) -> Value {
     let mut object = Map::new();
+    object.insert("serverId".to_string(), Value::String(server_id.to_string()));
     object.insert(
-        "connectionId".to_string(),
-        Value::String(connection_id.to_string()),
+        "requestId".to_string(),
+        Value::String(request_id.to_string()),
     );
     object.insert("method".to_string(), Value::String(method.to_string()));
     if let Some(params) = params {
@@ -341,28 +344,6 @@ fn json_object(params: Value) -> Map<String, Value> {
         Value::Object(map) => map,
         _ => Map::new(),
     }
-}
-
-/// 结算挂起的 client 请求：Response → 结果，Error → 错误。
-fn settle_pending(
-    value: &Value,
-    pending: &Mutex<HashMap<RequestId, oneshot::Sender<Result<Value, ErrorData>>>>,
-) {
-    let Some(id) = value.get("id").and_then(json_request_id) else {
-        return;
-    };
-    let Some(sender) = pending.lock().remove(&id) else {
-        return;
-    };
-    let result = match value.get("error") {
-        Some(error) => Err(
-            serde_json::from_value::<ErrorData>(error.clone()).unwrap_or_else(|_| {
-                ErrorData::internal_error("MCP 错误载荷无法解析".to_string(), None)
-            }),
-        ),
-        None => Ok(value.get("result").cloned().unwrap_or(Value::Null)),
-    };
-    let _ = sender.send(result);
 }
 
 /// JSON id → rmcp `RequestId`（数字或字符串）。
@@ -380,22 +361,6 @@ fn connection_closed() -> ErrorData {
 
 fn request_id_value(id: &RequestId) -> Value {
     serde_json::to_value(id).unwrap_or(Value::Null)
-}
-
-/// 构造注入 rmcp 的请求消息。
-fn build_request_message(
-    id: &RequestId,
-    method: &str,
-    params: Option<Value>,
-) -> Result<RxJsonRpcMessage<RoleClient>, ErrorData> {
-    let mut object = Map::new();
-    object.insert("jsonrpc".to_string(), Value::String("2.0".to_string()));
-    object.insert("id".to_string(), request_id_value(id));
-    object.insert("method".to_string(), Value::String(method.to_string()));
-    if let Some(params) = params {
-        object.insert("params".to_string(), params);
-    }
-    parse_inbound(Value::Object(object))
 }
 
 /// 构造注入 rmcp 的通知消息。

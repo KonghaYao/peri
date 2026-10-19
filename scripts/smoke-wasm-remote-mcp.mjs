@@ -76,24 +76,25 @@ function acpClient(port) {
         let result;
         let error;
         const params = frame.params ?? {};
-        if (frame.method === 'mcp/connect') {
+        if (frame.method === 'mcp/message') {
+          // 请求作用域：每个内层 MCP 请求都是一条独立的 ACP 请求。
           assert(params.serverId === 'fixture-server', `wrong MCP server ID: ${raw}`);
-          result = { connectionId: 'fixture-connection' };
-        } else if (frame.method === 'mcp/disconnect') {
-          assert(params.connectionId === 'fixture-connection', `wrong MCP connection ID: ${raw}`);
-          result = {};
-        } else if (frame.method === 'mcp/message') {
-          assert(params.connectionId === 'fixture-connection', `wrong MCP connection ID: ${raw}`);
+          assert(typeof params.requestId === 'string' && params.requestId.length > 0,
+            `missing MCP request ID: ${raw}`);
           mcpMethods.push(params.method);
-          if (params.method === 'initialize') {
-            result = { protocolVersion: '2025-11-25', capabilities: { tools: {} },
-              serverInfo: { name: 'wasm-acp-fixture', version: '1' } };
+          if (params.method === 'server/discover') {
+            result = { result: {
+              resultType: 'complete', supportedVersions: ['2026-07-28'],
+              capabilities: { tools: {} }, ttlMs: 0, cacheScope: 'private',
+              _meta: { 'io.modelcontextprotocol/serverInfo': {
+                name: 'wasm-acp-fixture', version: '1' } },
+            } };
           } else if (params.method === 'tools/list') {
-            result = { tools: [{ name: 'echo', description: 'Echo one string',
-              inputSchema: { type: 'object', properties: { text: { type: 'string' } }, required: ['text'] } }] };
+            result = { result: { tools: [{ name: 'echo', description: 'Echo one string',
+              inputSchema: { type: 'object', properties: { text: { type: 'string' } }, required: ['text'] } }] } };
           } else if (params.method === 'tools/call') {
             toolCalls.push(params.params);
-            result = { content: [{ type: 'text', text: `MCP_ECHO:${params.params?.arguments?.text}` }] };
+            result = { result: { content: [{ type: 'text', text: `MCP_ECHO:${params.params?.arguments?.text}` }] } };
           } else {
             error = { code: -32601, message: `MCP method not found: ${params.method}` };
           }
@@ -200,8 +201,10 @@ try {
   const prompted = await wire.request('session/prompt', { sessionId,
     prompt: [{ type: 'text', text: 'Use the fixture echo tool with from-wasm, then finish.' }] });
   assert(prompted.result?.stopReason === 'end_turn', `session/prompt failed: ${JSON.stringify(prompted)}`);
-  assert(mcpMethods.includes('initialize') && mcpMethods.includes('tools/list'),
+  assert(mcpMethods.includes('server/discover') && mcpMethods.includes('tools/list'),
     `MCP handshake/discovery missing: ${JSON.stringify(mcpMethods)}`);
+  assert(!mcpMethods.includes('initialize'),
+    `request-scoped MCP must not fall back to legacy initialize: ${JSON.stringify(mcpMethods)}`);
   assert(toolCalls.length === 1 && toolCalls[0]?.name === 'echo' &&
     toolCalls[0]?.arguments?.text === 'from-wasm',
   `MCP call did not reach fixture: ${JSON.stringify(toolCalls)}`);

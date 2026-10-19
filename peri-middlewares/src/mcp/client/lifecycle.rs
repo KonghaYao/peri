@@ -159,13 +159,13 @@ impl McpClientPool {
     /// 池内名优先取 client 声明的 `name`；被其他归属（或本会话的上一代）占用时
     /// 追加 `_2`、`_3`…，避免覆盖既有条目。返回值是实际使用的池内名。
     ///
-    /// `connection_id` 与归属会话同批登记为连接的**声明身份**（M7）：持久化
-    /// cache origin 只按「声明会话 + 连接 ID + 当前句柄代号」计算，换代即失效
+    /// `server_id` 与归属会话同批登记为连接的**声明身份**（M7）：持久化
+    /// cache origin 只按「声明会话 + serverId + 当前句柄代号」计算，换代即失效
     /// 且不跨会话命中（凭据不进入该身份）。
     pub(crate) fn commit_acp_connection(
         self: &Arc<Self>,
         session_id: &str,
-        connection_id: &str,
+        server_id: &str,
         preferred_name: &str,
         mut handle: Arc<McpClientHandle>,
         service: McpServiceWrapper,
@@ -183,7 +183,7 @@ impl McpClientPool {
             name.clone(),
             super::AcpConnectionDeclaration {
                 session_id: session_id.to_string(),
-                connection_id: connection_id.to_string(),
+                server_id: server_id.to_string(),
             },
         );
         self.advance_handle_generation(&handle);

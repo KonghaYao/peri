@@ -188,18 +188,18 @@ pub struct McpClientPool {
     /// 无条目的 server 对所有会话可见（配置来源与 dynamic 投影的既有语义）；
     /// 有条目的仅在归属会话内可见（工具桥接与状态面据此过滤）。
     pub(crate) acp_owners: parking_lot::RwLock<HashMap<String, String>>,
-    /// 会话级 ACP 连接的**声明身份**（M7）：池内 server name → 连接 ID + 归属。
+    /// 会话级 ACP 连接的**声明身份**（M7）：池内 server name → `serverId` + 归属。
     /// 与 `acp_owners` 同批写入、同批移除；持久化 cache 只按它 + 当前句柄代号
     /// 计算 origin，凭据从不进入本结构。
     pub(crate) acp_connections: parking_lot::RwLock<HashMap<String, AcpConnectionDeclaration>>,
 }
 
-/// 会话级 ACP 连接的声明事实（非凭据）：`connection_id` 是 ACP `mcp/connect`
-/// 返回的 opaque 连接句柄，随会话关闭失效。
+/// 会话级 ACP 连接的声明事实（非凭据）：`server_id` 是 client 在会话 setup 中
+/// 声明的 `serverId`（`mcp/message` 的寻址依据），随会话关闭失效。
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct AcpConnectionDeclaration {
     pub(crate) session_id: String,
-    pub(crate) connection_id: String,
+    pub(crate) server_id: String,
 }
 
 /// builtin 实例上下文槽（A33）：上下文与「initialize 已开始」标志由**同一短锁**保护
@@ -387,7 +387,7 @@ impl McpClientPool {
     pub(crate) fn install_acp_connection_for_test(
         self: &Arc<Self>,
         session_id: &str,
-        connection_id: &str,
+        server_id: &str,
         name: &str,
     ) -> Arc<McpClientHandle> {
         let handle = Arc::new(McpClientHandle {
@@ -412,7 +412,7 @@ impl McpClientPool {
             name.to_string(),
             AcpConnectionDeclaration {
                 session_id: session_id.to_string(),
-                connection_id: connection_id.to_string(),
+                server_id: server_id.to_string(),
             },
         );
         self.advance_handle_generation(&handle);
