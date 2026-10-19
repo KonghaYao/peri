@@ -297,7 +297,7 @@ fn require_completed(stop_reason: StopReason) -> Result<()> {
 async fn drain_print_notifications(
     acp_client: &AcpTuiClient,
     output: &mut PrintOutput,
-    notification_rx: &mut tokio::sync::mpsc::UnboundedReceiver<AcpNotification>,
+    notification_rx: &mut tokio::sync::mpsc::Receiver<AcpNotification>,
 ) {
     while let Some(notification) = notification_rx.recv().await {
         consume_print_notification(acp_client, output, Some(notification)).await;
@@ -620,6 +620,7 @@ mod tests {
                             session_id: "s1".into(),
                             params: json!({"sessionId": "s1", "update": update}),
                         })
+                        .await
                         .unwrap();
                 }
                 drop(sender);

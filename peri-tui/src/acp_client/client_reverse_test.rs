@@ -60,7 +60,8 @@ async fn test_bridge_publish_and_transition_are_one_operation_gate_order() {
     client.spawn_pump(notification_tx);
     *crate::kit::atoms::ACTIVE_SESSION_ID.state().write() = "s1".into();
     let server = Arc::new(server_transport);
-    let (bridge_tx, bridge_rx) = tokio::sync::mpsc::unbounded_channel();
+    let (bridge_tx, bridge_rx) =
+        tokio::sync::mpsc::channel(crate::kit::acp_bridge::BRIDGE_QUEUE_CAPACITY);
     let (observed_tx, mut observed_rx) = tokio::sync::mpsc::unbounded_channel();
     let shutdown = CancellationToken::new();
     let bridge = spawn_acp_bridge_observed_with_client(
@@ -98,6 +99,7 @@ async fn test_bridge_publish_and_transition_are_one_operation_gate_order() {
             }),
             active_session_id: "s1".into(),
         })
+        .await
         .unwrap();
     assert_eq!(observed_rx.recv().await, Some(true));
     assert_eq!(
@@ -175,6 +177,7 @@ async fn test_bridge_publish_and_transition_are_one_operation_gate_order() {
             }),
             active_session_id: "s1".into(),
         })
+        .await
         .unwrap();
     client.lifecycle.fail_transition(start.generation);
     transition.disarm();
@@ -513,6 +516,7 @@ async fn test_startup_restore_reservation_wins_submit_ensure_both_orders() {
 /// 历史问题：面板只发送 channel 后立即关闭；快速输入可先读取旧 Stable session，
 /// 使首个 OpenAI/Cursor 请求携带错误 history prefix。
 #[tokio::test]
+#[serial]
 async fn test_ordinary_load_reservation_blocks_prompt_until_target_commits() {
     // Arrange
     let (client_transport, server_transport) = mpsc_transport_pair();

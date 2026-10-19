@@ -202,42 +202,139 @@ impl BridgeState {
         self.sample_memory("bridge_publish");
     }
 
-    /// 将 current_turn 已产出内容 flush 到 committed，然后 reset。
+    /// 归档当前轮次中可完成的展示结果。
     ///
-    /// 用于 BgCallbackBubble / TurnDone 两个需要保证时序正确性的位置：
-    /// 在 push 中间气泡或结束当前 turn 之前，必须先将已产出的 AI 内容归档到
-    /// committed，确保消息流时间顺序一致。
-    ///
-    /// 安全守卫：如果 current_turn 中存在正在运行的 SubAgentAccumulator，
-    /// 跳过 flush 以避免清除容器——否则后续工具事件无法路由到已清除的容器，
-    /// 造成 SubAgentGroup 内部卡片空白。
-    ///
-    /// 注意：SystemNote（BudgetWarning/SystemNotification/CommandFeedback/
-    /// AgentExecutionFailed）不再通过 flush-then-push 模式，
-    /// 改为 inject_system_note() 统一注入 current_turn 内部 segment。
-    fn flush_current_turn(&mut self) {
-        if !self.current_turn.committed && !self.current_turn.is_empty() {
-            let has_running_subagent = self.current_turn.subagents.iter().any(|s| s.is_running);
-            if has_running_subagent {
-                tracing::debug!(
-                    running_count = self
-                        .current_turn
-                        .subagents
-                        .iter()
-                        .filter(|s| s.is_running)
-                        .count(),
-                    "flush_current_turn: 跳过 flush——存在正在运行的 SubAgentAccumulator"
-                );
-                return;
+    /// running subagent 存在时先搬走第一个仍会增长的实体之前的稳定前缀，再消费
+    /// 已完成子 Agent；容器保留至剩余子 Agent 完成，避免重复提交仍在增长的容器。
+    fn archive_current_turn(&mut self) {
+        let start = self.committed.len();
+        if self.current_turn.has_running_subagent() {
+            // 运行中 subagent 不应让整轮常驻：它之前的文本/已完成工具/已完成
+            // 子 Agent 都已稳定，先按 segment 顺序交给 committed。
+            for vm in self.current_turn.take_archivable_prefix() {
+                self.committed.push_back(vm);
             }
-            // 与 TurnInterrupted/TurnSuspended 一致：归档前 deactivate，避免
-            // ToolStarted 无 ToolEnded（如工具不存在）时 running 态被写入 committed。
-            self.current_turn.deactivate();
-            for vm in self.current_turn.view_models() {
-                self.committed.push_back(vm.clone());
+            for mut subagent in self.current_turn.take_completed_subagents() {
+                self.committed.push_back(subagent.view_model());
+            }
+        } else {
+            // 整轮归档沿用 segment 顺序，不能先抽走子 Agent 再追加根内容。
+            if !self.current_turn.committed && !self.current_turn.is_empty() {
+                self.current_turn.deactivate();
+                for vm in self.current_turn.view_models() {
+                    self.committed.push_back(vm.clone());
+                }
+            }
+            self.current_turn.take_completed_subagents();
+        }
+        let range = start..self.committed.len();
+        self.register_live_seal_segments(range);
+    }
+
+    fn register_live_seal_segments(&mut self, slots: impl Iterator<Item = usize>) {
+        if !self.window.is_enabled() {
+            return;
+        }
+        use crate::kit::history_window::{
+            HistoryEntryView, HistorySource, PersistentEntryKey, PersistentSubItemKey,
+            SegmentDraft, SegmentOrigin, SegmentPlacement, WindowUnitMapping,
+            publish_window_unit_mappings,
+        };
+
+        // 同一消息可能跨多个 bubble，中间还有无持久身份的工具；只收本次归档槽位。
+        let mut groups: Vec<(PersistentEntryKey, Vec<usize>)> = Vec::new();
+        let mut group_indices = HashMap::new();
+        for slot in slots {
+            let Some(message_id) = live_message_id(&self.committed[slot]) else {
+                continue;
+            };
+            let key = PersistentEntryKey::own(format!("{}:{message_id}", self.active_session_id));
+            let index = *group_indices.entry(key.clone()).or_insert_with(|| {
+                groups.push((key, Vec::new()));
+                groups.len() - 1
+            });
+            groups[index].1.push(slot);
+        }
+        let mut mappings = Vec::new();
+        let mut display_slots = Vec::new();
+        for (key, slots) in groups {
+            if self.window.is_entry_displayed(&key) || self.window.index().contains_entry(&key) {
+                continue;
+            }
+            let mut seen = crate::kit::retained_bytes::SeenAllocations::default();
+            let mut body_bytes = 0usize;
+            let mut reserved_bytes = 0usize;
+            for slot in &slots {
+                let unit = &self.committed[*slot];
+                body_bytes += match unit {
+                    TuiRenderUnit::TuiUserBubble(bubble) => bubble.text.len(),
+                    TuiRenderUnit::TuiAssistantBubble(bubble) => {
+                        bubble.text.len() + bubble.reasoning.as_ref().map_or(0, |r| r.text.len())
+                    }
+                    _ => 0,
+                };
+                reserved_bytes += crate::kit::retained_bytes::retained_unit_bytes(unit, &mut seen);
+            }
+            // live 事件没有持久 sub-item position；不能拿 VM 序号冒充协议子项身份（依赖 S2）。
+            let sub_items: Vec<PersistentSubItemKey> = Vec::new();
+            let entry = HistoryEntryView::new(
+                key.clone(),
+                None,
+                slots.len(),
+                body_bytes,
+                reserved_bytes,
+                sub_items,
+            );
+            let draft =
+                SegmentDraft::new(HistorySource::Own, vec![entry], body_bytes, reserved_bytes)
+                    .durable(false)
+                    .origin(SegmentOrigin::LiveSeal);
+            match self.window.register_segment(draft, SegmentPlacement::Tail) {
+                Ok(_) => {
+                    for slot in slots {
+                        mappings.push(WindowUnitMapping {
+                            token: crate::kit::message_area::window_identity_token(
+                                &self.committed[slot],
+                            ),
+                            entry: key.clone(),
+                        });
+                        display_slots.push((slot, key.clone()));
+                    }
+                }
+                Err(error) => {
+                    tracing::error!(?error, "history_window: live seal registration failed")
+                }
             }
         }
-        self.current_turn.reset();
+        // 按实际槽位递增登记，避免同消息的离散区间把中间其他消息的区间右移。
+        display_slots.sort_by_key(|(slot, _)| *slot);
+        for (slot, key) in display_slots {
+            self.window.mark_display_block(&[(key, 1)], slot);
+        }
+        publish_window_unit_mappings(mappings);
+    }
+
+    /// 将 current_turn 已产出内容 flush 到 committed，然后 reset。
+    ///
+    /// 需要保证时序正确性的位置会调用该入口；running subagent 不会清除 current_turn，
+    /// 但已完成的 subagent 会先从容器消费并归档。
+    fn flush_current_turn(&mut self) {
+        let has_running_subagent = self.current_turn.has_running_subagent();
+        if has_running_subagent {
+            tracing::debug!(
+                running_count = self
+                    .current_turn
+                    .subagents
+                    .iter()
+                    .filter(|subagent| subagent.is_running)
+                    .count(),
+                "flush_current_turn: running subagent retained while completed content is archived"
+            );
+        }
+        self.archive_current_turn();
+        if !has_running_subagent {
+            self.current_turn.reset();
+        }
         self.sample_memory("bridge_flush");
     }
 
@@ -264,8 +361,10 @@ impl BridgeState {
         let mut bubble = TuiUserBubble::with_attachments(text, attachments);
         bubble.message_id = message_id;
         if self.current_turn.is_empty() {
+            let start = self.committed.len();
             self.committed
                 .push_back(TuiRenderUnit::TuiUserBubble(bubble));
+            self.register_live_seal_segments(start..self.committed.len());
         } else {
             self.current_turn
                 .push_user_bubble(bubble.text, bubble.attachments, bubble.message_id);
@@ -688,6 +787,15 @@ pub(crate) fn dispatch_and_notify(state: &mut BridgeState, event: &AcpEventData)
         render::push_view_models(state);
     }
     crate::kit::bg_task_live::publish_pending_streams();
+}
+
+fn live_message_id(unit: &TuiRenderUnit) -> Option<String> {
+    match unit {
+        TuiRenderUnit::TuiUserBubble(bubble) => bubble.message_id.clone(),
+        TuiRenderUnit::TuiAssistantBubble(bubble) => bubble.message_id.clone(),
+        // 工具单元没有持久 message id；不得从 tool_id 推测身份，等 S2 暴露持久关联。
+        _ => None,
+    }
 }
 
 // ---------------------------------------------------------------------------

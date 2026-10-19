@@ -241,7 +241,7 @@ Host 可以共享 transport、全局配置来源与确定可共享的服务；�
 
 ## 8. 存储打开与版本边界
 
-默认读写使用 `~/.peri/threads/threads.db`，`--db-path` 可选择显式路径；schema 版本记录在 `PRAGMA user_version`，当前版本由 `peri-resources/src/sessions/canonical.rs::CURRENT_SCHEMA_VERSION` 定义（压缩后的 11 合并了开发期各代的迁移结果：建立 Machine/Workspace/Session 归属、删除持久执行所有权与执行恢复账本、删除执行登记表并把绑定收敛到归属行；执行恢复表移除与压缩背景见 active spec）。版本与迁移入口见 [Resources 代码索引](../code-index/peri-resources.md)，历史归属设计见 [存储 v2](storage-v2-machine-workspace-session.md)；开发期 12..19 中间代不再被接受，唯一升级来源是正式基线 ≤10（远端 v2 契约的 10|11）。
+默认读写使用 `~/.peri/threads/threads.db`，`--db-path` 可选择显式路径；schema 版本记录在 `PRAGMA user_version`，当前版本由 `peri-resources/src/sessions/canonical.rs::CURRENT_SCHEMA_VERSION` 定义（压缩后的 11 合并了开发期各代的迁移结果：建立 Machine/Workspace/Session 归属、删除持久执行所有权与执行恢复账本、删除执行登记表并把绑定收敛到归属行；当前 12 在 11 上只增 `inherited_snapshot_index`/`inherited_payload_index` 两张派生索引表，可由 `threads.inherited_context` 重建；执行恢复表移除与压缩背景见 active spec）。版本与迁移入口见 [Resources 代码索引](../code-index/peri-resources.md)，历史归属设计见 [存储 v2](storage-v2-machine-workspace-session.md)；开发期 13..19 中间代不再被接受，升级来源是正式基线 ≤10（远端 v2 契约的 10|11）与 11 的当前形状（远端 `v5`，只增派生索引表的增量升级）。
 
 只读 metadata 打开不创建数据库、不升级 schema、不登记或绑定；缺失的默认库按空历史处理，损坏与不兼容 shape 返回错误。启动时写打开失败（schema 锁被占、库文件或 WAL 不可写）降级为只读打开并记 warning：进入与历史浏览不受影响，但降级不假装可写——新会话与目录登记在进入 SQL 前按 `ReadOnlyStore` 失败。写打开走到版本判定时，本构建不认识的 schema 与 `user_version` 返回 `UnsupportedDatabaseSchema` / `UnsupportedSchemaVersion`，且不降级；升级前必须停止所有旧 writer，不支持新旧二进制混用同一库。schema 版本号不是对不遵守协议的旧 writer 或外部 SQLite writer 的访问控制。
 

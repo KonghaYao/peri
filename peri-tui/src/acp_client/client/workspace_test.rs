@@ -30,6 +30,7 @@ fn client() -> (AcpTuiClient, MpscServerTransport) {
 }
 
 #[tokio::test]
+#[serial_test::serial]
 async fn legacy_history_context_without_binding_can_restore_saved_directory() {
     let (client, server) = client();
     let loader = client.clone();
@@ -91,6 +92,7 @@ async fn request(server: &MpscServerTransport, expected: &str) -> (RequestId, Va
 }
 
 #[tokio::test]
+#[serial_test::serial]
 async fn resume_uses_saved_execution_directory_and_commits_it_after_load() {
     let (client, server) = client();
     client.lifecycle.force_stable("old", false);

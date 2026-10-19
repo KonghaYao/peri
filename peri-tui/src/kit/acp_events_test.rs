@@ -53,6 +53,8 @@ mod memory_probe_test;
 mod pending_tool_ends_test;
 #[path = "acp_events_test/perf_probe_test.rs"]
 mod perf_probe_test;
+#[path = "acp_events_test/prefix_archive_test.rs"]
+mod prefix_archive_test;
 #[path = "acp_events_test/render_cache_invalidation_test.rs"]
 mod render_cache_invalidation_test;
 #[path = "acp_events_test/session_events_test.rs"]

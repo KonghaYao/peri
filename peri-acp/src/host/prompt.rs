@@ -369,6 +369,7 @@ async fn run_prompt_attempt(
         workflow_notifications,
         interaction_gate,
         interaction_router,
+        event_health,
     ) = {
         let mut states = sessions.lock().await;
         let state = states
@@ -381,6 +382,9 @@ async fn run_prompt_attempt(
                 -32603,
                 "Session has no frozen snapshot; refusing to rebuild it from the current state",
             ));
+        }
+        if state.event_health().dirty {
+            tracing::warn!(session_id = %session_id, "会话事件视图仍需重同步；开始新轮次不会清除丢失记录");
         }
         state.cancel_token = Some(cancel.clone());
         // 正文所有权在短锁内移交给执行器：Host 不再保留一份“以防万一”的全文。
@@ -404,6 +408,7 @@ async fn run_prompt_attempt(
                 .environment
                 .as_ref()
                 .map(|env| Arc::clone(env.interaction_router())),
+            Arc::clone(&state.event_health),
         )
     };
     #[cfg(test)]
@@ -427,10 +432,15 @@ async fn run_prompt_attempt(
             None,
         ),
     };
-    let event_sink = Arc::new(TransportEventSink::new(
-        Arc::clone(transport),
-        session_manager.caps_registry(),
-    ));
+    let event_sink = Arc::new(
+        TransportEventSink::new(Arc::clone(transport), session_manager.caps_registry())
+            .with_compact_commit_observer(Arc::new(
+                super::history_window::StoreCompactCommitObserver::new(
+                    Arc::clone(sessions),
+                    Arc::clone(&session_resources),
+                ),
+            )),
+    );
 
     let provider_snapshot = provider.read().clone();
     let peri_config_snapshot = Arc::new(peri_config.read().clone());
@@ -484,13 +494,13 @@ async fn run_prompt_attempt(
     let event_publisher: Arc<dyn peri_acp_types::event::EventPublisher> = Arc::new(
         crate::host::controller_ports::ControllerEventPublisher(Arc::clone(controller)),
     );
+    controller.bind_event_health(&session_id, &event_health);
     let subscribe: Arc<dyn Fn() -> Box<dyn peri_acp_types::event::EventSubscriber> + Send + Sync> = {
         let controller = Arc::clone(controller);
         Arc::new(move || {
-            Box::new(
-                crate::host::controller_ports::ControllerSubscriptionAdapter(
-                    controller.subscribe(),
-                ),
+            crate::host::controller_ports::session_subscription(
+                &controller,
+                Arc::clone(&event_health),
             )
         })
     };

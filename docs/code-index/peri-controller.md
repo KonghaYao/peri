@@ -18,6 +18,8 @@ Controller 是控制面宿主：定位 Runtime / Resources、转发会话操作�
 Runtime、Resources 和装配端口只在消费 `self` 的 builder 中替换，发布后按只读字段使用。
 `events_rx` 保留排空队列所需的 mutex；Runtime 自己持有其登记和事件序列的锁。
 
+F09：`publish_message` 显式区分队列 Sent / Dropped / Closed，记录总线健康度及通过 `bind_event_health` 绑定的宿主 session 弱引用；弹出队列失败不阻塞广播。`event_health()` 返回 sticky 诊断快照，不代表端到端交付证明。回归入口 `controller_test.rs::full_pop_queue_records_session_loss_without_blocking_broadcast`；序号补打逻辑不变。
+
 Langfuse 是同一事件分支上的旁路消费者。bridge 负责 v1/v2 转换、句柄配对与诊断计数，
 `LangfuseTracer` 持有单轮观测状态，`SubagentRegistry` 是子 agent 归属与生命周期的唯一 owner。
 子模块通过同一 owner 的借用实现注册、缓存和收尾，不另建注册表。

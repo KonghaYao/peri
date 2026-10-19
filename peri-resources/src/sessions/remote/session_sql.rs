@@ -115,6 +115,9 @@ const SELECT_META_SQL: &str = concat!(
     " FROM threads s WHERE s.id = ?1"
 );
 
+/// 恢复准入的轻量 frozen 读取：只取一列，不拉绑定、继承区或任何正文。
+const SELECT_FROZEN_SQL: &str = "SELECT s.frozen_context FROM threads s WHERE s.id = ?1";
+
 const SELECT_CHILDREN_SQL: &str = concat!(
     "SELECT ",
     meta_columns!(),
@@ -315,6 +318,11 @@ pub(super) fn select_session_statement(id: &str) -> StatementSpec {
 /// 会话 metadata 行（不含大字段）。
 pub(super) fn select_meta_statement(id: &str) -> StatementSpec {
     StatementSpec::new(SELECT_META_SQL, vec![Value::Text(id.to_owned())])
+}
+
+/// 恢复准入的 frozen 单列读取。
+pub(super) fn select_frozen_statement(id: &str) -> StatementSpec {
+    StatementSpec::new(SELECT_FROZEN_SQL, vec![Value::Text(id.to_owned())])
 }
 
 /// 直接子会话 metadata。
@@ -593,6 +601,9 @@ const INSERT_BINDING_SQL: &str =
         (SELECT discovery_snapshot FROM session_bindings WHERE thread_id = ?7)), 'creation_snapshot')";
 
 /// 继承区写入：与本机 child 路径同一份语句（创建行之后单独写一次，INSERT 不多带一列）。
+///
+/// 不在这里写 `inherited_*_index` 派生行：远端读取一次性取完整列，从不查询派生索引；
+/// 索引缺行是合法状态（本地读取会回退扫描并按需回填）。
 const UPDATE_INHERITED_SQL: &str = "UPDATE threads SET inherited_context = ?1 WHERE id = ?2";
 
 /// 历史行插入：列清单与本机 `messages` 一致（含 `role`），顺序由 `rowid` 承载。

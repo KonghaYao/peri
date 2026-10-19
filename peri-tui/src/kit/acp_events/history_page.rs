@@ -23,7 +23,7 @@
 //! 2. 桥接侧：本模块再核对响应自带的 `sessionId` / `snapshotToken` 与当前浏览状态，
 //!    以及桥接自己的 active session（`acp_bridge` 还会按事件携带的 session 过滤一次）。
 
-use std::collections::{HashMap, VecDeque};
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;
@@ -38,7 +38,9 @@ use crate::kit::history_page_consumer::PAGE_FETCH_TIMEOUT;
 use crate::kit::history_paging::{
     self, HistoryPageItem, HistoryPageOrigin, HistoryPageResponse, HistorySubItem, PageEntry,
 };
-use crate::kit::history_window::HistorySource;
+use crate::kit::history_window::{
+    HistorySource, PENDING_TOOL_ENDS_BYTES_MAX, PENDING_TOOL_ENDS_LIMIT, PersistentEntryKey,
+};
 use crate::kit::tui_render_unit::{FoldState, TuiRenderUnit, TuiSystemReminder, TuiUserBubble};
 
 /// 窗口/旧页共用的投影输入：持久身份 + 投影子项（尚未物化展示单元）。
@@ -65,10 +67,9 @@ pub(super) struct ProjectedEntry {
 /// 页边界会把 `tool_call` 与它的 `tool_call_update` 分到相邻两页，而**更晚**的一页
 /// 先被读到——那时卡片还不存在。留着它，等起点页并进来时补齐；会话一换就作废
 /// （结果不能跨会话错配到同 id 的卡片上）。
-const PENDING_TOOL_ENDS_LIMIT: usize = 256;
-/// 跨页暂存**完整结果**的内存预算。预算内按正文保留；超过预算的条目改为
-/// 保存来源页请求定位，等用户展开时再用 `load_history_page()` 补读，绝不截断正文。
-const PENDING_TOOL_ENDS_BYTES_MAX: usize = 8 * 1024 * 1024;
+///
+/// 条数/字节上限的权威值在 [`super::super::history_window::budget`]（与窗口预算
+/// 同源），这里不再维护第二份常量。
 pub(crate) const DEFERRED_TOOL_RESULT_TEXT: &str = "结果正文较大，展开后按需加载";
 pub(crate) const UNAVAILABLE_TOOL_RESULT_TEXT: &str = "结果正文较大，无法按需加载";
 
@@ -89,6 +90,9 @@ pub(crate) struct ToolResultSource {
 #[derive(Clone, Debug)]
 struct PendingToolEnd {
     is_error: bool,
+    /// 结果事件所在的持久条目身份。释放事务必须用它与释放计划条目精确配对；
+    /// 它来自投影输入本身，不由 `tool_id` 反推 message id。
+    entry: PersistentEntryKey,
     /// `None` = 超出内存预算，保留来源定位等待按需补读。
     output: Option<Arc<str>>,
     source: Option<ToolResultSource>,
@@ -117,6 +121,7 @@ impl PendingToolResults {
     fn insert(
         &mut self,
         tool_id: String,
+        entry: PersistentEntryKey,
         output: &str,
         is_error: bool,
         source: Option<ToolResultSource>,
@@ -128,6 +133,7 @@ impl PendingToolResults {
             .then(|| Arc::from(output));
         let end = PendingToolEnd {
             is_error,
+            entry,
             output,
             source,
             force_complete,
@@ -191,9 +197,33 @@ impl PendingToolResults {
 
     fn remove(&mut self, tool_id: &str) -> Option<PendingToolEnd> {
         let removed = self.entries.remove(tool_id)?;
-        self.bytes = self.bytes.saturating_sub(removed.retained_bytes());
+        if !removed.force_complete {
+            // `bytes` 只统计非 force_complete 正文；补读正文是一次性完整结果，
+            // 不占预算，删除时也不能从预算里扣。
+            self.bytes = self.bytes.saturating_sub(removed.retained_bytes());
+        }
         self.order.retain(|id| id != tool_id);
         Some(removed)
+    }
+
+    /// 按释放计划里的持久条目身份精准移除暂存终点；返回移除条数。
+    ///
+    /// 只删除结果条目本身在释放集合中的条目。其他段的暂存终点原样保留，
+    /// 因此释放一个段不会清掉别段等待配对的工具结果。
+    fn remove_entries(&mut self, entries: &HashSet<PersistentEntryKey>) -> usize {
+        if entries.is_empty() {
+            return 0;
+        }
+        let matched: Vec<String> = self
+            .entries
+            .iter()
+            .filter(|(_, end)| entries.contains(&end.entry))
+            .map(|(tool_id, _)| tool_id.clone())
+            .collect();
+        for tool_id in &matched {
+            self.remove(tool_id);
+        }
+        matched.len()
     }
 
     /// 用户展开卡片：取出来源定位并标记在途；已完整/在途的条目不重复补读。
@@ -213,7 +243,7 @@ impl PendingToolResults {
         self.bytes = 0;
     }
 
-    #[allow(dead_code)]
+    #[cfg(test)]
     fn len(&self) -> usize {
         self.entries.len()
     }
@@ -421,7 +451,16 @@ pub(super) fn project_items(
                         });
                         with_pending(|pending| {
                             let force = force_complete_tool == Some(tool_id.as_str());
-                            pending.insert(tool_id, &output_summary, is_error, source, force);
+                            let entry =
+                                PersistentEntryKey::new(item.source.clone(), item.entry_id.clone());
+                            pending.insert(
+                                tool_id,
+                                entry,
+                                &output_summary,
+                                is_error,
+                                source,
+                                force,
+                            );
                         });
                     }
                 }
@@ -780,8 +819,17 @@ fn release_in_flight(tool_id: &str, request_id: u64) -> bool {
     })
 }
 
-/// 未配对终点的上限（超过即丢弃，避免长会话里无界增长）。
-/// 结构性释放：丢弃未配对终点（轻量引用，S6.5 预算化）。
+/// 按本次释放的持久条目身份精准清理暂存终点，返回移除条数。
+///
+/// 每条暂存终点在写入时记录了结果条目身份（[`PendingToolEnd::entry`]），因此这里
+/// 只删除释放集合覆盖的条目；其他段等待配对的工具结果继续保留。生产写入路径
+/// 不存在无身份条目，无需回退到全局清空。
+pub(super) fn remove_pending_tool_ends_for_entries(entries: &HashSet<PersistentEntryKey>) -> usize {
+    with_pending(|pending| pending.remove_entries(entries))
+}
+
+/// 测试清理：丢弃全部暂存终点（生产释放走按条目精准清理）。
+#[cfg(test)]
 pub(super) fn clear_pending_tool_ends() {
     *PENDING_TOOL_ENDS.lock() = None;
 }
@@ -801,9 +849,29 @@ pub(crate) fn pending_tool_ends_fingerprint() -> (usize, usize) {
 }
 
 #[cfg(test)]
-pub(crate) fn insert_pending_tool_end_for_tests(tool_id: &str, output: &str, is_error: bool) {
+pub(crate) fn pending_tool_ends_limits_for_tests() -> (usize, usize) {
+    (PENDING_TOOL_ENDS_LIMIT, PENDING_TOOL_ENDS_BYTES_MAX)
+}
+
+#[cfg(test)]
+pub(crate) fn pending_tool_end_entry_for_tests(tool_id: &str) -> Option<PersistentEntryKey> {
     with_pending(|pending| {
-        pending.insert(tool_id.to_string(), output, is_error, None, false);
+        pending
+            .entries
+            .get(tool_id)
+            .map(|entry| entry.entry.clone())
+    })
+}
+
+#[cfg(test)]
+pub(crate) fn insert_pending_tool_end_for_tests(
+    tool_id: &str,
+    entry: PersistentEntryKey,
+    output: &str,
+    is_error: bool,
+) {
+    with_pending(|pending| {
+        pending.insert(tool_id.to_string(), entry, output, is_error, None, false);
     });
 }
 
@@ -826,6 +894,7 @@ pub(crate) fn insert_deferred_tool_result_for_tests(tool_id: &str, source: ToolR
             tool_id.to_string(),
             PendingToolEnd {
                 is_error: false,
+                entry: PersistentEntryKey::own(source.entry_id.clone()),
                 output: None,
                 source: Some(source),
                 force_complete: false,

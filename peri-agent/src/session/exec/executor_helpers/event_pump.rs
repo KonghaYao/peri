@@ -3,6 +3,7 @@ use std::sync::Arc;
 use peri_acp_types::{
     command::PromptStopReason,
     event::{EventSink, EventSinkError, EventSubscriber, ExecutorEvent, SubscriptionError},
+    event_v2::{BusHealth, EmitOutcome},
     identity::SessionSeq,
     session::TurnTelemetryOutcome,
 };
@@ -333,6 +334,27 @@ async fn flush_trailing_with_retries(
     Err(last_failure.expect("at least one retry attempt"))
 }
 
+/// 广播已丢失的事件类别和 session 无法还原，保守标记当前订阅需要重同步。
+/// 邮箱快照只修复队列投影；不伪造终态或交付回执，也不清除 sticky dirty。
+async fn recover_lag(ctx: &PumpSinkContext<'_>, health: &BusHealth, skipped: u64) {
+    health.record_state(EmitOutcome::Lagging, skipped);
+    tracing::warn!(session_id = %ctx.session_id, skipped, "事件订阅落后，会话需要重同步");
+    if let Some(mailbox) = ctx.delivery_journal {
+        let snapshot = mailbox.snapshot();
+        if let Err(error) = ctx
+            .sink
+            .push_event(
+                ctx.session_id,
+                &ExecutorEvent::UserInputQueueChanged(snapshot),
+                ctx.effective_context_window,
+            )
+            .await
+        {
+            tracing::warn!(session_id = %ctx.session_id, error = %error, "落后后的队列快照补发失败");
+        }
+    }
+}
+
 /// 启动主事件泵任务。
 ///
 /// 任务循环（事件三层化：发射点 → [`EventPublisher`] → 本泵订阅）：
@@ -354,6 +376,7 @@ pub fn spawn_event_pump(req: SpawnPumpRequest) -> PumpHandle {
         delivery_journal,
     } = req;
 
+    let health = subscription.health_handle().unwrap_or_default();
     let (pump_done_tx, pump_done_rx) = oneshot::channel();
 
     if langfuse_on_turn_end.is_some() {
@@ -400,7 +423,7 @@ pub fn spawn_event_pump(req: SpawnPumpRequest) -> PumpHandle {
                             }
                         }
                         Err(SubscriptionError::Lagged(n)) => {
-                            tracing::warn!(n, "event subscription lagged, events dropped");
+                            recover_lag(&ctx, &health, n).await;
                         }
                         Err(SubscriptionError::Closed) => break,
                     }
@@ -445,8 +468,9 @@ pub fn spawn_event_pump(req: SpawnPumpRequest) -> PumpHandle {
                                     Ok(Some(_)) => {}
                                     Ok(None) => break,
                                     Err(SubscriptionError::Lagged(n)) => {
-                                        tracing::warn!(n, "event subscription lagged, events dropped");
-                                        break;
+                                        recover_lag(&ctx, &health, n).await;
+                                        // Lagged 已推进游标，继续排干仍保留的终态。
+                                        continue;
                                     }
                                     Err(SubscriptionError::Closed) => break,
                                 }

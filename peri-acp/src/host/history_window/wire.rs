@@ -5,14 +5,17 @@
 use serde_json::{json, Value};
 
 use peri_acp_types::history_window::{
-    HistoryBodyChunk, HistoryBodyDescriptor, HistoryEntryId, HistoryInheritedSnapshot,
-    HistorySource, HistoryWindowCursor, HistoryWindowDirection, HistoryWindowMetadata,
-    HISTORY_WINDOW_DEFAULT_CHUNK_SIZE, HISTORY_WINDOW_PROJECTION_VERSION,
+    HistoryBodyChunk, HistoryBodyDescriptor, HistoryCommittedTail, HistoryEntryId,
+    HistoryInheritedSnapshot, HistorySource, HistoryWindowCursor, HistoryWindowDirection,
+    HistoryWindowMetadata, HISTORY_WINDOW_DEFAULT_BYTE_BUDGET, HISTORY_WINDOW_DEFAULT_CHUNK_SIZE,
+    HISTORY_WINDOW_PROJECTION_VERSION,
 };
 use peri_acp_types::messages::MessageId;
 use peri_acp_types::session_resources::{
-    HistoryWindowEntry, HistoryWindowRows, InheritedHistoryEntry,
+    HistoryWindowEntry, HistoryWindowPagePlan, HistoryWindowReadIntent, HistoryWindowRows,
+    HistoryWindowTailExpectation, InheritedHistoryEntry,
 };
+use peri_acp_types::thread::ThreadId;
 use peri_acp_types::PeriCaps;
 
 use crate::host::history_page::page_item;
@@ -172,26 +175,85 @@ impl std::io::Read for BodyReader {
 }
 
 pub(super) fn oversize_ids(rows: Option<&HistoryWindowRows>) -> Vec<MessageId> {
+    oversize_descriptors(rows)
+        .into_iter()
+        .map(|(entry_id, _)| entry_id)
+        .collect()
+}
+
+/// 本页将向客户端暴露的 descriptor 身份与正文总字节数（票据预算按此扣减）。
+pub(super) fn oversize_descriptors(rows: Option<&HistoryWindowRows>) -> Vec<(MessageId, u64)> {
     rows.map(|rows| {
-        let mut ids: Vec<MessageId> = rows
+        let mut descriptors: Vec<(MessageId, u64)> = rows
             .entries
             .iter()
             .filter_map(|entry| match entry {
-                HistoryWindowEntry::Oversized { entry_id, .. } => Some(*entry_id),
+                HistoryWindowEntry::Oversized {
+                    entry_id,
+                    total_bytes,
+                    ..
+                } => Some((*entry_id, *total_bytes)),
                 HistoryWindowEntry::Loaded(_) => None,
             })
             .collect();
-        ids.extend(
+        descriptors.extend(
             rows.inherited_entries
                 .iter()
                 .filter_map(|entry| match entry {
-                    InheritedHistoryEntry::Oversized { entry_id, .. } => Some(*entry_id),
+                    InheritedHistoryEntry::Oversized {
+                        entry_id,
+                        total_bytes,
+                    } => Some((*entry_id, *total_bytes)),
                     InheritedHistoryEntry::Loaded(_) => None,
                 }),
         );
-        ids
+        descriptors
     })
     .unwrap_or_default()
+}
+
+/// 按稳定 `entryId` 在固定 snapshot 内重取锚点，确认它仍是 oversize descriptor。
+///
+/// 只在票据记忆溢出后使用：集合已不可作为权威，不能凭位置/索引猜身份。
+/// `before_limit = 0` + `include_anchor` 时锚点由 after 半段包含，`after_limit = 1`
+/// 只取锚点本身（不多读邻近正文）。判定口径与 `page` 相同：默认页字节预算下
+/// Store 仍把该条目标为 `Oversized`。
+pub(super) async fn is_oversize_descriptor(
+    cfg: &AcpServerConfig,
+    thread_id: &str,
+    source: &HistorySource,
+    tail: Option<&HistoryCommittedTail>,
+    entry_id: MessageId,
+) -> Result<bool, AcpError> {
+    let plan = HistoryWindowPagePlan {
+        intent: HistoryWindowReadIntent::Seek,
+        source: source.clone(),
+        anchor: Some(entry_id),
+        direction: HistoryWindowDirection::After,
+        include_anchor: true,
+        before_limit: 0,
+        after_limit: 1,
+        byte_budget: HISTORY_WINDOW_DEFAULT_BYTE_BUDGET as usize,
+        tail: HistoryWindowTailExpectation::Fixed(tail.cloned()),
+    };
+    let rows = cfg
+        .session_resources
+        .load_history_window_page(&ThreadId::from(thread_id.to_owned()), &plan)
+        .await
+        .map_err(resource_window_error)?;
+    let own = rows.entries.iter().any(|entry| {
+        matches!(
+            entry,
+            HistoryWindowEntry::Oversized { entry_id: found, .. } if *found == entry_id
+        )
+    });
+    let inherited = rows.inherited_entries.iter().any(|entry| {
+        matches!(
+            entry,
+            InheritedHistoryEntry::Oversized { entry_id: found, .. } if *found == entry_id
+        )
+    });
+    Ok(own || inherited)
 }
 
 pub(super) fn response(

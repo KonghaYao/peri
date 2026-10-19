@@ -15,13 +15,23 @@ pub(crate) const MIB: usize = 1024 * 1024;
 pub const INITIAL_BODY_BYTES: usize = 16 * MIB;
 pub const INITIAL_RESERVED_BYTES: usize = 2 * MIB;
 pub const INITIAL_PAGE_TARGET_BYTES: usize = 512 * 1024;
-pub const INITIAL_PENDING_TOOL_BYTES: usize = MIB;
 pub const INITIAL_DETAIL_BYTES: usize = 4 * MIB;
 pub const INITIAL_RELEASE_WATERMARK_PERCENT: u8 = 75;
 pub const INITIAL_PREFETCH_THRESHOLD_PERCENT: u8 = 50;
 pub const INITIAL_MAX_IN_FLIGHT_PAGES: usize = 1;
 pub const INITIAL_MAX_PENDING_MERGE_PAGES: usize = 1;
-pub const INITIAL_MAX_PENDING_TOOL_RESULTS: usize = 256;
+
+/// 跨页未配对工具终点的条数上限（超过即按旧到新丢弃完整正文条目）。
+pub(crate) const PENDING_TOOL_ENDS_LIMIT: usize = 256;
+
+/// 跨页暂存**完整结果**的内存预算。
+///
+/// 8 MiB 是唯一生产上限（原先 `PENDING_TOOL_ENDS_BYTES_MAX` 与
+/// `WindowLimits.pending_tool_bytes` 存在 8 MiB / 1 MiB 两套值，后者只供已删除的
+/// `ResidentIndex` 配对轨道使用）。单个工具输出可达数百 KiB，8 MiB 能容纳数十个
+/// 完整结果，同时低于窗口驻留正文预算（16 MiB），避免暂存反客为主；超预算条目
+/// 降级为来源定位，等用户展开时补读，绝不截断正文。
+pub(crate) const PENDING_TOOL_ENDS_BYTES_MAX: usize = 8 * MIB;
 
 /// 窗口预算限值。可配置；默认值只表达计划初值。
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -31,11 +41,9 @@ pub struct WindowLimits {
     pub page_target_bytes: usize,
     pub release_watermark_percent: u8,
     pub prefetch_threshold_percent: u8,
-    pub pending_tool_bytes: usize,
     pub detail_bytes: usize,
     pub max_in_flight_pages: usize,
     pub max_pending_merge_pages: usize,
-    pub max_pending_tool_results: usize,
     pub checkpoint_history: usize,
 }
 
@@ -47,11 +55,9 @@ impl Default for WindowLimits {
             page_target_bytes: INITIAL_PAGE_TARGET_BYTES,
             release_watermark_percent: INITIAL_RELEASE_WATERMARK_PERCENT,
             prefetch_threshold_percent: INITIAL_PREFETCH_THRESHOLD_PERCENT,
-            pending_tool_bytes: INITIAL_PENDING_TOOL_BYTES,
             detail_bytes: INITIAL_DETAIL_BYTES,
             max_in_flight_pages: INITIAL_MAX_IN_FLIGHT_PAGES,
             max_pending_merge_pages: INITIAL_MAX_PENDING_MERGE_PAGES,
-            max_pending_tool_results: INITIAL_MAX_PENDING_TOOL_RESULTS,
             checkpoint_history: INITIAL_CHECKPOINT_HISTORY,
         }
     }

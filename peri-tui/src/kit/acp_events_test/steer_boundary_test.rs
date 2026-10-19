@@ -66,7 +66,7 @@ impl Drop for RestoreAtoms {
     }
 }
 
-fn send_delivered(tx: &mpsc::UnboundedSender<AcpNotification>, input_id: &str, text: &str) {
+async fn send_delivered(tx: &mpsc::Sender<AcpNotification>, input_id: &str, text: &str) {
     tx.send(AcpNotification::AgentEvent {
         session_id: "s".into(),
         event: AcpEvent::UserInputDelivered {
@@ -75,10 +75,11 @@ fn send_delivered(tx: &mpsc::UnboundedSender<AcpNotification>, input_id: &str, t
             content: MessageContent::text(text),
         },
     })
+    .await
     .unwrap();
 }
 
-fn send_text(tx: &mpsc::UnboundedSender<AcpNotification>, text: &str) {
+async fn send_text(tx: &mpsc::Sender<AcpNotification>, text: &str) {
     tx.send(AcpNotification::SessionUpdate {
         session_id: "s".into(),
         params: json!({
@@ -90,11 +91,12 @@ fn send_text(tx: &mpsc::UnboundedSender<AcpNotification>, text: &str) {
             }
         }),
     })
+    .await
     .unwrap();
 }
 
 fn spawn_wiring() -> (
-    mpsc::UnboundedSender<AcpNotification>,
+    mpsc::Sender<AcpNotification>,
     mpsc::UnboundedReceiver<bool>,
     CancellationToken,
     tokio::task::JoinHandle<()>,
@@ -104,8 +106,9 @@ fn spawn_wiring() -> (
     let (client_transport, _server) = mpsc_transport_pair();
     let (client, _notification_tx, _notification_rx) = AcpTuiClient::new(client_transport);
     client.force_stable_for_test("s", false);
-    let (notif_tx, notif_rx) = mpsc::unbounded_channel();
-    let (bridge_tx, bridge_rx) = mpsc::unbounded_channel();
+    let (notif_tx, notif_rx) =
+        mpsc::channel(crate::acp_client::client::NOTIFICATION_QUEUE_CAPACITY);
+    let (bridge_tx, bridge_rx) = mpsc::channel(crate::kit::acp_bridge::BRIDGE_QUEUE_CAPACITY);
     let (observed_tx, observed_rx) = mpsc::unbounded_channel();
     let shutdown = CancellationToken::new();
     let notifier =
@@ -145,14 +148,14 @@ async fn delivered_bubbles_precede_assistant_at_real_bridge_boundary() {
     let _restore = RestoreAtoms::new();
     let (notif_tx, mut observed, shutdown, notifier, bridge, _client) = spawn_wiring();
 
-    send_delivered(&notif_tx, "b", "B");
+    send_delivered(&notif_tx, "b", "B").await;
     expect_observed(&mut observed).await;
-    send_delivered(&notif_tx, "a", "A");
+    send_delivered(&notif_tx, "a", "A").await;
     expect_observed(&mut observed).await;
-    send_text(&notif_tx, "回答");
+    send_text(&notif_tx, "回答").await;
     expect_observed(&mut observed).await;
     // 重复交付确认不得再次产生气泡。
-    send_delivered(&notif_tx, "a", "A");
+    send_delivered(&notif_tx, "a", "A").await;
     expect_observed(&mut observed).await;
 
     let items: Vec<TuiRenderUnit> = VIEW_MODELS.state().read().items.iter().cloned().collect();
@@ -178,7 +181,7 @@ async fn terminal_snapshot_after_assistant_output_never_appends_a_bubble() {
     let _restore = RestoreAtoms::new();
     let (notif_tx, mut observed, shutdown, notifier, bridge, _client) = spawn_wiring();
 
-    send_text(&notif_tx, "先输出的回答");
+    send_text(&notif_tx, "先输出的回答").await;
     expect_observed(&mut observed).await;
     let before: Vec<TuiRenderUnit> = VIEW_MODELS.state().read().items.iter().cloned().collect();
 
@@ -199,6 +202,7 @@ async fn terminal_snapshot_after_assistant_output_never_appends_a_bubble() {
                 },
             },
         })
+        .await
         .unwrap();
     expect_observed(&mut observed).await;
 
@@ -246,6 +250,7 @@ async fn agent_execution_failure_clears_submitting_and_shows_error() {
                 message: "delivery journal overflow".into(),
             },
         })
+        .await
         .unwrap();
     expect_observed(&mut observed).await;
     assert!(

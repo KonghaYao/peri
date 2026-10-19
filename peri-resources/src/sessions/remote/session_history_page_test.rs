@@ -12,7 +12,7 @@ use std::sync::Arc;
 use peri_acp_types::history_page::{HistoryCursorError, HistoryPage, HistorySegment};
 use peri_acp_types::messages::{BaseMessage, MessageId};
 use peri_acp_types::session_resources::{
-    FrozenSnapshotBytes, NewSession, NewSessionMeta, SessionResourceErrorKind,
+    FrozenSnapshotBytes, FrozenState, NewSession, NewSessionMeta, SessionResourceErrorKind,
     SessionResourceResult,
 };
 use peri_acp_types::store::{MessageFlags, PersistedPayload};
@@ -109,6 +109,17 @@ fn remote_data(transport: &Arc<SqliteTransport>) -> RemoteSessionData {
 async fn remote_with_history(
     history: &[PersistedPayload],
 ) -> (tempfile::TempDir, RemoteSessionData) {
+    remote_fixture(Some("{}"), history).await
+}
+
+/// 同一条建库 + 建会话路径，但允许指定 `threads.frozen_context` 的原始内容。
+///
+/// `None` 表示 SQL NULL：创建 API 总是写非空值，这里在建会话后用 SQL 改成 NULL，
+/// 模拟尚未持久化快照的 legacy 会话。
+async fn remote_fixture(
+    frozen: Option<&str>,
+    history: &[PersistedPayload],
+) -> (tempfile::TempDir, RemoteSessionData) {
     let directory = tempfile::tempdir().unwrap();
     // 单连接足够：每个测试自己顺序使用这条夹具，不必与全量测试集的并行度抢连接。
     let pool = SqlitePoolOptions::new()
@@ -138,6 +149,8 @@ async fn remote_with_history(
         .execute(&pool)
         .await
         .unwrap();
+    // legacy 夹具在建会话后要直改列：先留一条连接，传输面仍拿到同一个池。
+    let fixture_pool = pool.clone();
     let data = remote_data(&Arc::new(SqliteTransport::for_test(pool)));
     let id: ThreadId = PAGE_SESSION.to_owned();
     let binding = binding();
@@ -154,12 +167,19 @@ async fn remote_with_history(
                 snapshot_at_message_id: None,
             },
             binding: binding.clone(),
-            frozen: FrozenSnapshotBytes::new("{}"),
+            frozen: FrozenSnapshotBytes::new(frozen.unwrap_or("{}")),
         },
         &workspace(&binding),
     )
     .await
     .unwrap();
+    if frozen.is_none() {
+        sqlx::query("UPDATE threads SET frozen_context = NULL WHERE id = ?1")
+            .bind(PAGE_SESSION)
+            .execute(&fixture_pool)
+            .await
+            .unwrap();
+    }
     if !history.is_empty() {
         data.append_history(&id, history).await.unwrap();
     }
@@ -442,6 +462,47 @@ async fn remote_history_segment_fails_closed_when_the_after_row_is_gone() {
     // 会话不存在同样不回答一个空段。
     let error = data
         .load_history_segment(&"missing-session".to_owned(), None, 2, NO_BUDGET_LIMIT)
+        .await
+        .unwrap_err();
+    assert!(matches!(error.kind(), SessionResourceErrorKind::NotFound));
+}
+
+// ─── frozen 三态 ───────────────────────────────────────────────────────────────
+
+/// Present：存储层原样返回，不解析、不改写、不因版本未知丢弃字节。
+#[tokio::test]
+async fn remote_frozen_state_returns_present_bytes_verbatim() {
+    let frozen = r#"{"v":1,"x":"原文"}"#;
+    let (_fixture, data) = remote_fixture(Some(frozen), &[]).await;
+    let id: ThreadId = PAGE_SESSION.to_owned();
+
+    match data.load_frozen_state(&id).await.unwrap() {
+        FrozenState::Present(bytes) => {
+            assert_eq!(bytes.as_str(), frozen, "快照字节必须逐字节一致");
+        }
+        other => panic!("expected Present, got {other:?}"),
+    }
+}
+
+/// LegacyAbsent：`frozen_context IS NULL` 按实现语义是 legacy 缺失，不是 NotFound。
+#[tokio::test]
+async fn remote_frozen_state_reports_sql_null_as_legacy_absent() {
+    let (_fixture, data) = remote_fixture(None, &[]).await;
+    let id: ThreadId = PAGE_SESSION.to_owned();
+
+    assert_eq!(
+        data.load_frozen_state(&id).await.unwrap(),
+        FrozenState::LegacyAbsent
+    );
+}
+
+/// NotFound：没有该线程行时明确失败，不把缺失误报成 LegacyAbsent。
+#[tokio::test]
+async fn remote_frozen_state_rejects_unknown_thread() {
+    let (_fixture, data) = remote_fixture(Some("{}"), &[]).await;
+
+    let error = data
+        .load_frozen_state(&"missing-session".to_owned())
         .await
         .unwrap_err();
     assert!(matches!(error.kind(), SessionResourceErrorKind::NotFound));

@@ -11,7 +11,8 @@ use super::history::{
     HISTORY_WINDOW_INHERITED_ROWID_SQL,
 };
 use super::history_window::{empty_window_page, window_anchor_failure};
-use super::inherited_blob::{map_inherited_blob_error, InheritedFactsRead, InheritedLayout};
+use super::inherited_blob::{map_inherited_blob_error, InheritedFactsRead};
+use super::inherited_facts::InheritedLayout;
 use super::*;
 use peri_acp_types::history_page::HistoryPagePlan;
 use peri_acp_types::history_window::{HistoryInheritedSnapshot, HistorySource, HistoryWindowError};
@@ -44,7 +45,7 @@ impl SqliteSessionData {
             .map_err(|error| map_sqlx(&error))?;
         // 冻结前缀是 write-once：事实先于页读取取得，canonical 路径不物化首尾正文。
         let facts = self
-            .read_inherited_facts_cached(&mut connection, id)
+            .read_inherited_layout_cached(&mut connection, id)
             .await?;
         match facts {
             InheritedFactsRead::Facts {

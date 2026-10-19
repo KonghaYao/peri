@@ -76,14 +76,13 @@ pub async fn run_kit_fullscreen(
     //     App::new 时一次性确定）。TUI 面板保存经 save_effective 走此句柄，
     //     ACP host 的 persist_config 与它共享同一 Arc——两处写回不可能分叉。
     let _ = atoms::CONFIG_SOURCE_HANDLE.set(app.config_source.clone());
-    // S7.5：TUI 本地 beta 默认 false；仅写启动时一次。服务端能力协商仍独立。
+    // S7.5：TUI 本地投影默认开启（未配置 = 开启，显式 false = 关闭）；启动时只写一次。
+    // 本开关与服务端 `peri.historyWindowV1` 协商结果相互独立，后者 fail-closed。
     let history_window_beta = app
         .config_source
         .snapshot()
         .map(|snapshot| {
-            snapshot
-                .flags()
-                .is_enabled(peri_config::betas::HISTORY_WINDOW_V1)
+            crate::kit::history_window::history_window_beta_enabled_from_flags(snapshot.flags())
         })
         .unwrap_or_else(|| {
             crate::kit::history_window::history_window_beta_enabled(
@@ -398,15 +397,19 @@ pub async fn run_kit_fullscreen(
         let _ = atoms::CANCEL_TX.set(cancel_tx);
 
         // 4c. bridge channel：notifier → acp_bridge
-        let (bridge_tx, bridge_rx) = mpsc::unbounded_channel();
+        let (bridge_tx, bridge_rx) = mpsc::channel(crate::kit::acp_bridge::BRIDGE_QUEUE_CAPACITY);
         // LOCAL_EVENT_TX：input_area 本地提交 → acp_bridge
         let (local_event_tx, mut local_event_rx) = mpsc::unbounded_channel::<AcpEventWithEpoch>();
         let _ = atoms::LOCAL_EVENT_TX.set(local_event_tx);
-        // Mini bridge task：转发 local event 到 bridge channel
+        // Mini bridge task：转发 local event 到 bridge channel。local event 由
+        // 用户输入节奏驱动、单任务串行产生，故保留无界入口；写入 bridge 的
+        // 边界仍受 BRIDGE_QUEUE_CAPACITY 约束。
         let bridge_tx_clone = bridge_tx.clone();
         tokio::spawn(async move {
             while let Some(ev) = local_event_rx.recv().await {
-                let _ = bridge_tx_clone.send(ev);
+                if bridge_tx_clone.send(ev).await.is_err() {
+                    break;
+                }
             }
         });
 

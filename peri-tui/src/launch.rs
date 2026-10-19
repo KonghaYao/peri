@@ -40,10 +40,7 @@ pub struct TuiLaunchOptions {
 pub async fn build_app_and_acp(
     opts: &TuiLaunchOptions,
     _panic_notify_rx: Option<mpsc::UnboundedReceiver<String>>,
-) -> Result<(
-    App,
-    Option<(AcpTuiClient, mpsc::UnboundedReceiver<AcpNotification>)>,
-)> {
+) -> Result<(App, Option<(AcpTuiClient, mpsc::Receiver<AcpNotification>)>)> {
     let mut app = App::new(opts.session_store.clone()).await?;
 
     // (I17-D) panic_notify_rx 已退役——ServiceRegistry.panic_notify_rx 字段删除，
@@ -148,9 +145,7 @@ pub async fn build_app_and_acp(
 /// once afterwards. Callers must only invoke this when `app.acp_deployment` is
 /// empty; an already attached deployment is rejected to avoid losing the
 /// notification receiver owned by the original attachment.
-pub async fn attach_acp(
-    app: &mut App,
-) -> Result<(AcpTuiClient, mpsc::UnboundedReceiver<AcpNotification>)> {
+pub async fn attach_acp(app: &mut App) -> Result<(AcpTuiClient, mpsc::Receiver<AcpNotification>)> {
     if app.acp_client.is_some() || app.acp_deployment.is_some() {
         anyhow::bail!("ACP deployment is already attached to this App");
     }

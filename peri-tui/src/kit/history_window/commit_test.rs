@@ -27,6 +27,81 @@ fn commit_info(
 }
 
 #[test]
+fn live_seal_without_position_stays_unsealed_until_page_promotes_it() {
+    let mut window = enabled_window(WindowLimits::default());
+    let key = PersistentEntryKey::own("s1:live");
+    let segment_key = window
+        .register_segment(
+            SegmentDraft::new(
+                HistorySource::Own,
+                vec![HistoryEntryView::new(
+                    key.clone(),
+                    None,
+                    1,
+                    10,
+                    20,
+                    Vec::new(),
+                )],
+                10,
+                20,
+            )
+            .durable(false)
+            .origin(SegmentOrigin::LiveSeal),
+            SegmentPlacement::Tail,
+        )
+        .expect("live seal");
+    assert_eq!(
+        window.apply_commit(&commit_info("cp-before-position", 10, "gen-1", 7)),
+        CommitOutcome::Applied { sealed_segments: 0 }
+    );
+    assert!(!window.segment(segment_key).unwrap().sealed);
+    assert!(!window.segment(segment_key).unwrap().durable);
+    assert!(
+        window
+            .segment(segment_key)
+            .unwrap()
+            .pins
+            .contains(PinReason::Unpersisted)
+    );
+    assert!(window.promote_live_seal_position(&key, 10));
+    assert_eq!(
+        window.segment(segment_key).unwrap().entries[0].position,
+        Some(10)
+    );
+    assert_eq!(
+        window.apply_commit(&commit_info("cp-live", 10, "gen-1", 7)),
+        CommitOutcome::Applied { sealed_segments: 1 }
+    );
+    let segment = window.segment(segment_key).unwrap();
+    assert!(segment.sealed);
+    assert!(segment.durable);
+    assert!(!segment.pins.contains(PinReason::Unpersisted));
+}
+
+#[test]
+fn live_seal_promotion_ignores_unknown_identity() {
+    let mut window = enabled_window(WindowLimits::default());
+    let key = PersistentEntryKey::own("s1:live");
+    let segment_key = window
+        .register_segment(
+            SegmentDraft::new(
+                HistorySource::Own,
+                vec![HistoryEntryView::new(key, None, 1, 10, 20, Vec::new())],
+                10,
+                20,
+            )
+            .durable(false)
+            .origin(SegmentOrigin::LiveSeal),
+            SegmentPlacement::Tail,
+        )
+        .expect("live seal");
+    assert!(!window.promote_live_seal_position(&PersistentEntryKey::own("s1:missing"), 10));
+    assert_eq!(
+        window.segment(segment_key).unwrap().entries[0].position,
+        None
+    );
+}
+#[test]
 fn commit_marks_only_segments_at_or_below_committed_tail() {
     let mut window = enabled_window(WindowLimits::default());
     let sealed_page = window

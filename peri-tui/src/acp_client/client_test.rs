@@ -324,3 +324,35 @@ async fn test_prompt_carries_image_blocks_on_the_wire() {
     server.await.unwrap();
     client.close();
 }
+
+/// [F05] 通知队列满时必须显式关闭连接：不得静默丢弃、也不得让 pump
+/// 在持有 operation gate 时无限等待。
+#[tokio::test]
+async fn notification_queue_overflow_closes_transport() {
+    let (transport, _server) = mpsc_transport_pair();
+    let (tx, _rx) = mpsc::channel(1);
+    assert!(super::pump::deliver_or_close(
+        &transport,
+        &tx,
+        AcpNotification::Other {
+            msg: "first".into()
+        }
+    ));
+    assert!(
+        !super::pump::deliver_or_close(
+            &transport,
+            &tx,
+            AcpNotification::Other {
+                msg: "overflow".into()
+            }
+        ),
+        "满队列必须报告失败"
+    );
+    assert!(
+        transport
+            .send_notification("after/overflow", json!({}))
+            .await
+            .is_err(),
+        "满队列后连接必须关闭"
+    );
+}

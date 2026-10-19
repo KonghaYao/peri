@@ -14,6 +14,8 @@
 //! [`HistoryWindowConfig::history_window_v1`] 默认 `false`。关闭时所有接纳/淘汰入口
 //! 返回 `Disabled` 且不改变账本；旧分页与渲染路径逐字节保持原样。配置对象由调用方
 //! 显式构造（S5 不修改 `peri-config`），后续切片接入设置项时只需替换构造来源。
+//! 注意这里说的是模型对象自身的默认构造；TUI 启动时的本地投影开关默认开启
+//! （见 [`history_window_beta_enabled`]），两者层级不同。
 
 mod admission;
 mod anchor;
@@ -37,6 +39,7 @@ pub use admission::{
 pub use anchor::{
     AnchorRelocation, GapSeek, GapSeekDirection, merge_adjacent_gaps, select_gap_seek,
 };
+pub(crate) use budget::{PENDING_TOOL_ENDS_BYTES_MAX, PENDING_TOOL_ENDS_LIMIT};
 pub use budget::{WindowBudget, WindowLimits};
 pub use commit::{CommitOutcome, HistoryCommitInfo};
 pub use detail::{
@@ -45,10 +48,7 @@ pub use detail::{
 };
 pub use diagnostics::{HistoryWindowDiagnostics, WindowStats};
 pub use display::DisplayLedger;
-pub use index::{
-    AllocationAccount, EntryLocator, ResidentIndex, ResultRef, ToolCallKey, ToolCallState,
-    ToolPairOutcome, ToolPairRejected, ToolTerminalMeta,
-};
+pub use index::{AllocationAccount, EntryLocator, ResidentIndex};
 pub use model::{
     BoundedSet, DurableWatermark, GapId, GapPlaceholder, HistoryEntryView, HistoryGap,
     HistoryWindow, PageReservation, PinReason, PinReasons, RegionKey, ReleasePlan, ReleaseReason,
@@ -101,13 +101,27 @@ mod commit_test;
 #[cfg(test)]
 #[path = "index_test.rs"]
 mod index_test;
-/// 从配置文档读取 TUI 本地 beta（kebab-case `history-window-v1`，默认 false）。
+/// 从配置文档读取 TUI 本地 beta（kebab-case `history-window-v1`）。
+///
+/// 未配置视为**开启**：发布启用绑定 S7，本地投影默认开启；只有用户显式配置
+/// `false` 才关闭。`BetasConfig::get` 保留「未配置」与「显式 false」的区别。
 pub fn history_window_beta_enabled(config: &crate::config::PeriConfig) -> bool {
     config
         .config
         .betas
         .get(peri_config::betas::HISTORY_WINDOW_V1)
-        .unwrap_or(false)
+        .unwrap_or(true)
+}
+
+/// 从合并快照的 beta 投影读取与 [`history_window_beta_enabled`] 相同的语义。
+///
+/// 未覆盖（`BetaFlags::value` 返回 `None`）= 开启；
+/// 显式 `false` = 关闭。启动路径的快照投影与回退配置读取必须共用这一默认值
+/// （发布启用绑定 S7）。
+pub fn history_window_beta_enabled_from_flags(flags: &peri_config::betas::BetaFlags) -> bool {
+    flags
+        .value(peri_config::betas::HISTORY_WINDOW_V1)
+        .is_none_or(|value| value.enabled)
 }
 
 /// 启动时把 beta 配置写入运行开关（只写一次；无热重载）。

@@ -206,6 +206,8 @@ pub(crate) struct SessionState {
     /// `peri.historyWindowV1` 的轻量运行期事实：ticket、committed tail、checkpoint、
     /// rewind 状态。**不保存历史正文**。
     pub(crate) history_window: HistoryWindowCoordinator,
+    /// 仅内存诊断；dirty 表示事件视图需要重同步，局部补快照不清除此标记。
+    event_health: Arc<peri_acp_types::event_v2::BusHealth>,
     pub(crate) cancel_token: Option<CancellationToken>,
     /// **session-owned 交互互斥门**：同一 session 内 Approval / Questions 串行。
     ///
@@ -240,7 +242,16 @@ pub(crate) struct SessionState {
 }
 
 impl SessionState {
-    /// 新 live 实例或显式重新 load：替换 generation 并撤销旧窗口票据。
+    pub(crate) fn event_health(&self) -> peri_acp_types::event_v2::BusHealthSnapshot {
+        self.event_health.snapshot()
+    }
+
+    /// 测试专用：模拟结构/代次变化并撤销窗口票据。
+    ///
+    /// 生产 warm load **不得**调用本方法（那会撤销其他连接的固定读取视图）：
+    /// 冷恢复发布新 `SessionState` 时已自然推进 generation，真实 rewind/delete
+    /// 走各自的票据撤销路径。
+    #[cfg(test)]
     pub(crate) fn refresh_session_generation(&mut self) {
         self.session_generation = next_session_generation();
         self.history_window.revoke_ticket();

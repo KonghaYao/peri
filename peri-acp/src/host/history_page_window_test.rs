@@ -424,48 +424,6 @@ async fn second_check_rejects_stale_generation_structure_ticket_and_snapshot() {
 
 #[tokio::test]
 #[serial]
-async fn handed_off_and_reload_required_are_not_empty_history() {
-    let tmp = tempfile::TempDir::new().unwrap();
-    let fixture = PageFixture::new(&tmp).await;
-    let sid = fixture.sid.clone();
-    let cfg = Arc::clone(&fixture.cfg);
-    let (client, sessions, task) = spawn_loop(cfg, fixture.sessions, Some(window_caps())).await;
-
-    {
-        let mut states = sessions.lock().await;
-        states.get_mut(&sid).unwrap().context_ownership = crate::host::ContextOwnership::HandedOff;
-    }
-    let handed_off = open(
-        &client,
-        &sid,
-        json!({ "kind": "open", "direction": "around" }),
-    )
-    .await
-    .unwrap_err();
-    assert_eq!(handed_off.code, -32010);
-
-    {
-        let mut states = sessions.lock().await;
-        states.get_mut(&sid).unwrap().context_ownership =
-            crate::host::ContextOwnership::ReloadRequired;
-    }
-    let reload = open(
-        &client,
-        &sid,
-        json!({ "kind": "open", "direction": "around" }),
-    )
-    .await
-    .unwrap_err();
-    assert_eq!(reload.code, -32012);
-    assert_eq!(
-        reload.data.as_ref().unwrap()["reason"],
-        "history_window_invalidated"
-    );
-    task.abort();
-}
-
-#[tokio::test]
-#[serial]
 async fn fixed_tail_keeps_later_appends_out_of_an_open_snapshot() {
     let tmp = tempfile::TempDir::new().unwrap();
     let fixture = PageFixture::new(&tmp).await;
@@ -547,7 +505,7 @@ async fn oversize_descriptor_serves_bounded_body_chunks() {
     let fixture = PageFixture::new(&tmp).await;
     let sid = fixture.sid.clone();
     let cfg = Arc::clone(&fixture.cfg);
-    let (client, _sessions, task) = spawn_loop(cfg, fixture.sessions, Some(window_caps())).await;
+    let (client, sessions, task) = spawn_loop(cfg, fixture.sessions, Some(window_caps())).await;
 
     let opened = open(
         &client,
@@ -556,6 +514,11 @@ async fn oversize_descriptor_serves_bounded_body_chunks() {
     )
     .await
     .unwrap();
+    // 只读正文同样不依赖执行上下文驻留。
+    {
+        let mut states = sessions.lock().await;
+        states.get_mut(&sid).unwrap().context_ownership = crate::host::ContextOwnership::HandedOff;
+    }
     let item = &opened["items"][0];
     let body = item
         .get("body")
@@ -599,6 +562,28 @@ async fn oversize_descriptor_serves_bounded_body_chunks() {
     );
     String::from_utf8(collected)
         .expect("chunking must preserve UTF-8 boundaries in the byte stream");
+
+    // ReloadRequired 只要求重新准备执行上下文，不把同一 descriptor 的正文读取关掉。
+    {
+        let mut states = sessions.lock().await;
+        states.get_mut(&sid).unwrap().context_ownership =
+            crate::host::ContextOwnership::ReloadRequired;
+    }
+    let again = client
+        .send_request(
+            "session/history/body",
+            json!({
+                "sessionId": sid,
+                "snapshotToken": opened["snapshotToken"],
+                "readTicket": opened["readTicket"],
+                "entryId": entry_id,
+                "offset": 0,
+                "maxBytes": 7
+            }),
+        )
+        .await
+        .expect("ReloadRequired must allow read-only body");
+    assert!(!again["bytes"].as_array().unwrap().is_empty());
 
     let invalid = client
         .send_request(
@@ -705,7 +690,7 @@ async fn rewind_revokes_the_window_and_advances_structure_once() {
 
 #[tokio::test]
 #[serial]
-async fn initial_load_refreshes_generation_and_invalidates_old_window() {
+async fn warm_load_keeps_generation_and_old_window() {
     let tmp = tempfile::TempDir::new().unwrap();
     let fixture = PageFixture::new(&tmp).await;
     let sid = fixture.sid.clone();
@@ -730,13 +715,13 @@ async fn initial_load_refreshes_generation_and_invalidates_old_window() {
     {
         let states = sessions.lock().await;
         let state = states.get(&sid).unwrap();
-        assert_ne!(
+        assert_eq!(
             state.session_generation.to_string(),
             generation,
-            "a new session/load replaces sessionGeneration"
+            "warm load 只推进本连接 loadGeneration，不替换共享 sessionGeneration"
         );
     }
-    let stale = page(
+    let still_valid = page(
         &client,
         &sid,
         &opened["snapshotToken"],
@@ -746,11 +731,8 @@ async fn initial_load_refreshes_generation_and_invalidates_old_window() {
         1,
     )
     .await
-    .unwrap_err();
-    assert!(
-        stale.code == -32012 || stale.code == -32014,
-        "old window must be invalid after a new load, got {stale:?}"
-    );
+    .expect("warm load must not invalidate another connection's window");
+    assert!(still_valid.get("items").is_some());
     task.abort();
 }
 
@@ -854,7 +836,7 @@ async fn initialize_request_controls_history_window_v1() {
 /// 记录型 transport：只收集 host 通知。
 #[tokio::test]
 #[serial]
-async fn rejected_initial_load_keeps_generation_and_ticket() {
+async fn rejected_initial_load_and_warm_attach_keep_generation_and_ticket() {
     let tmp = tempfile::TempDir::new().unwrap();
     let fixture = PageFixture::new(&tmp).await;
     let sid = fixture.sid.clone();
@@ -910,7 +892,8 @@ async fn rejected_initial_load_keeps_generation_and_ticket() {
     .expect("rejected load must not revoke the old ticket");
     assert!(still_valid.get("items").is_some());
 
-    // 成功的初始 load 才替换 generation，并撤销旧 ticket。
+    // warm load 只推进本连接自己的 loadGeneration：共享 session generation 不变，
+    // 另一连接已发布的固定读取视图继续有效。
     client
         .send_request("session/load", json!({ "sessionId": sid }))
         .await
@@ -918,13 +901,13 @@ async fn rejected_initial_load_keeps_generation_and_ticket() {
     s9c_drain_notifications(&client).await;
     {
         let states = sessions.lock().await;
-        assert_ne!(
+        assert_eq!(
             states.get(&sid).unwrap().session_generation.to_string(),
             generation,
-            "a successful load advances sessionGeneration"
+            "a warm load must not advance the shared sessionGeneration"
         );
     }
-    let stale = page(
+    let still_valid = page(
         &client,
         &sid,
         &opened["snapshotToken"],
@@ -934,11 +917,8 @@ async fn rejected_initial_load_keeps_generation_and_ticket() {
         1,
     )
     .await
-    .unwrap_err();
-    assert!(
-        stale.code == -32012 || stale.code == -32014,
-        "successful load revokes the old ticket, got {stale:?}"
-    );
+    .expect("a warm load must not revoke another connection's ticket");
+    assert!(still_valid.get("items").is_some());
     task.abort();
 }
 
@@ -950,3 +930,13 @@ mod inherited_tests;
 
 #[path = "history_page_window_test/audience_test.rs"]
 mod audience_tests;
+
+#[path = "history_page_window_test/read_gate_test.rs"]
+mod read_gate_tests;
+
+#[path = "history_page_window_test/oversize_overflow_test.rs"]
+mod oversize_overflow_tests;
+
+/// F04：窗口连接的 `session/load` 跳过历史回放，首屏由 open 提供。
+#[path = "history_page_window_test/load_skip_replay_test.rs"]
+mod load_skip_replay_tests;

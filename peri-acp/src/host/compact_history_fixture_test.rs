@@ -125,6 +125,13 @@ impl SessionResources for CompactStore {
         self.inner.load_session_snapshot(id).await
     }
 
+    async fn load_frozen_state(
+        &self,
+        id: &ThreadId,
+    ) -> SessionResourceResult<peri_acp_types::session_resources::FrozenState> {
+        self.inner.load_frozen_state(id).await
+    }
+
     async fn load_session_binding(
         &self,
         id: &ThreadId,
@@ -334,6 +341,7 @@ fn make_host_sessions(ctx: &SessionContext, payloads: Vec<PersistedPayload>) -> 
         structure_version: 0,
         session_generation: crate::host::next_session_generation(),
         history_window: Default::default(),
+        event_health: Default::default(),
         cancel_token: Some(ctx.cancel.clone()),
         interaction_gate: Arc::new(tokio::sync::Mutex::new(())),
         host_request_seq: Arc::new(std::sync::atomic::AtomicU64::new(0)),

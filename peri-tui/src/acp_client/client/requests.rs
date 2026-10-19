@@ -82,7 +82,6 @@ impl AcpTuiClient {
         // 直接拒绝授权码——TUI 的 [ 授权 ] 按钮会因缺 flow_id 被拒且无反馈。
         caps.oauth = false;
         caps.ui_commands = specs.to_vec();
-        let requested_history_window = caps.history_window_v1;
         let params = json!({
             "protocolVersion": 1,
             "clientCapabilities": { "_meta": caps.to_agent_meta() },
@@ -101,10 +100,12 @@ impl AcpTuiClient {
             .unwrap_or(false);
         self.user_input_queue
             .store(supported, std::sync::atomic::Ordering::Release);
+        // fail-closed：只有服务端在 initialize 响应中明确回显 true 才启用。
+        // 客户端请求值不是服务端能力事实，缺失/非布尔一律按不支持处理。
         let history_window = result
             .pointer("/agentCapabilities/_meta/peri.historyWindowV1")
             .and_then(Value::as_bool)
-            .unwrap_or(requested_history_window);
+            .unwrap_or(false);
         crate::kit::atoms::HISTORY_WINDOW_CAPABLE.set(history_window);
         if self.projection_mode == super::ClientProjectionMode::Interactive {
             crate::kit::steer_state::STEERS.state().write().enabled = supported;

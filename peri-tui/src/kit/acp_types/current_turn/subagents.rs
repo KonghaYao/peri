@@ -140,6 +140,61 @@ impl CurrentTurn {
         self.cached_view_models = im::Vector::new();
     }
 
+    /// 取出已经停止且尚未归档的子 Agent；停止事件本身不移除容器，
+    /// 归档入口才消费它们，以保留迟到工具事件的路由窗口。
+    pub fn take_completed_subagents(&mut self) -> Vec<SubAgentAccumulator> {
+        let old_subagents = std::mem::take(&mut self.subagents);
+        let mut completed = Vec::new();
+        let mut kept = Vec::with_capacity(old_subagents.len());
+        let mut remap = Vec::with_capacity(old_subagents.len());
+        for mut subagent in old_subagents {
+            if !subagent.is_running {
+                subagent.archived = true;
+                completed.push(subagent);
+                remap.push(None);
+            } else {
+                remap.push(Some(kept.len()));
+                kept.push(subagent);
+            }
+        }
+        self.subagents = kept;
+        if !completed.is_empty() {
+            self.pending_subagent_groups = self
+                .pending_subagent_groups
+                .drain(..)
+                .filter_map(|pending| {
+                    remap
+                        .get(pending.subagent_idx)
+                        .copied()
+                        .flatten()
+                        .map(|subagent_idx| PendingSubagentGroup {
+                            subagent_idx,
+                            parent_tool_call_id: pending.parent_tool_call_id,
+                        })
+                })
+                .collect();
+            let segments = std::mem::take(&mut self.segments);
+            self.segments = segments
+                .into_iter()
+                .filter_map(|segment| match segment {
+                    TurnSegment::SubAgent { subagent_idx } => remap
+                        .get(subagent_idx)
+                        .copied()
+                        .flatten()
+                        .map(|subagent_idx| TurnSegment::SubAgent { subagent_idx }),
+                    other => Some(other),
+                })
+                .collect();
+            self.cached_view_models = im::Vector::new();
+            self.invalidate_cache();
+        }
+        completed
+    }
+
+    pub fn has_running_subagent(&self) -> bool {
+        self.subagents.iter().any(|subagent| subagent.is_running)
+    }
+
     /// [诊断] 返回当前所有 SubAgentAccumulator 的 agent_id 列表。
     pub fn subagent_ids(&self) -> Vec<&str> {
         self.subagents.iter().map(|s| s.agent_id.as_str()).collect()

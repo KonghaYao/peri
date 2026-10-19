@@ -7,11 +7,12 @@
 //! 普通表的单行事实里（[`STORE_META_TABLE`]）。差异是**载体**，不是版本代数。
 //!
 //! 契约标签 [`STORE_CONTRACT`] 记的是形状代数，形状变化一次推进一代：`v2` 是远端会话表形状的
-//! 上一代（schema 10|11，执行登记独立成表、绑定行指向登记表），`v5` 是当前形状——执行登记并入
-//! `workspaces`、绑定表不再有指向登记表的外键、退役执行对象清空。契约不符的库被 [`acceptance`] /
+//! 上一代（schema 10|11，执行登记独立成表、绑定行指向登记表），`v5` 是上一代当前形状
+//! （schema 11，执行登记已并入 `workspaces`，但没有 inherited 派生索引表），`v6` 是当前形状
+//! （schema 12，新增两张可重建的派生索引表）。契约不符的库被 [`acceptance`] /
 //! [`matches_build`] 判为不认识——这是有意的 fail-closed：不迁移、不覆盖，也不按旧语义读写。
-//! 唯一升级来源是 [`PREVIOUS_STORE_CONTRACT`] 的 v2，由 `schema_upgrade` 一条批次升级到位，
-//! 保留目标与扩展对象并推进版本，store 身份与账本保持不变。
+//! 两条写升级路径：`v2` 由 `schema_upgrade` 一条搬运批次升级到位；`v5` 走只补派生索引表与
+//! canonical 索引集的增量批次。两者都保留目标与扩展对象并推进版本，store 身份与账本保持不变。
 //!
 //! 契约与版本只说「这是哪个代数的库」，**不说**这个库的表真的长成那个样子。打开路径因此在
 //! 身份读取之后再做一次**只读的形状探测**（[`shape_probe`]）：读得动的库必须与契约声明的
@@ -47,13 +48,19 @@ pub(super) const REMOTE_SCHEMA_VERSION: i64 = crate::sessions::canonical::CURREN
 
 /// 远程存储契约标签：形状 + 语义代数，和版本一起决定「这是不是我们认识的那个库」。
 ///
-/// `v5` = 当前形状：执行登记并入 `workspaces`（`(machine_id, path)` 是唯一归属身份），绑定行的
-/// `workspace_id` 收敛到会话归属行，退役执行对象清空；`v2` 是远端会话表形状的上一代
-/// （schema 10|11，执行登记独立成表）。中间的 12..=19 是未发布的开发期形状，本构建一律不认识。
-pub(super) const STORE_CONTRACT: &str = "peri.session.store/v5";
+/// `v6` = 当前形状：在 `v5` 的 canonical 会话表上新增 inherited 派生索引两表（可从 inherited
+/// 列重建）；`v5` 是上一代当前形状（schema 11，没有派生索引表，写打开做一次增量补齐）；
+/// `v2` 是统一前远端会话表形状（schema 10|11，执行登记独立成表）。中间的 13..=19 是
+/// 未发布的开发期形状，本构建一律不认识。
+pub(super) const STORE_CONTRACT: &str = "peri.session.store/v6";
 
-/// 唯一升级来源：远端会话表形状的上一代（schema 10|11），读得懂，写打开先完成一次性升级。
+/// 唯一升级来源（压缩前形状）：远端会话表形状的上一代（schema 10|11），读得懂，
+/// 写打开先完成一次性搬运升级。
 pub(super) const PREVIOUS_STORE_CONTRACT: &str = "peri.session.store/v2";
+
+/// 上一代当前形状（schema 11）：canonical 会话表与本代相同，只缺 inherited 派生索引表。
+/// 读打开直接可用；写打开做一次增量补齐并推进版本与契约。
+pub(super) const PREVIOUS_CURRENT_STORE_CONTRACT: &str = "peri.session.store/v5";
 
 /// 统一之前的远端会话表：出现它们说明这是一个**旧形状的库**（不是空库）。
 ///
@@ -120,11 +127,12 @@ impl StoreSnapshot {
             && matches!(acceptance(self.schema_version), SchemaAcceptance::Accept)
     }
 
-    /// 本构建的读取面是否覆盖这个库：本代直接读，统一前的 v2（10|11）只读可用、写打开走
-    /// 一次性升级。代际之外的形状一律不认识。
+    /// 本构建的读取面是否覆盖这个库：本代直接读；上一代当前形状（`v5` + 11）与统一前的
+    /// `v2`（10|11）只读可用，写打开走各自的升级路径。代际之外的形状一律不认识。
     pub(super) fn readable(&self) -> bool {
         self.matches_build()
             || (self.contract == PREVIOUS_STORE_CONTRACT && matches!(self.schema_version, 10 | 11))
+            || (self.contract == PREVIOUS_CURRENT_STORE_CONTRACT && self.schema_version == 11)
     }
 }
 
@@ -133,7 +141,7 @@ impl StoreSnapshot {
 pub(super) enum SchemaAcceptance {
     /// 本构建可读写。
     Accept,
-    /// 已识别的旧版（10）：只读使用同一组查询，写打开先完成一次性升级。
+    /// 已识别的旧版（10|11）：只读使用同一组查询，写打开按契约走搬运或增量补齐。
     Upgradeable,
     /// 高于本构建：拒绝，不迁移、不降级写入。
     TooNew,
@@ -144,7 +152,7 @@ pub(super) enum SchemaAcceptance {
 pub(super) fn acceptance(version: i64) -> SchemaAcceptance {
     if version == REMOTE_SCHEMA_VERSION {
         SchemaAcceptance::Accept
-    } else if version == 10 {
+    } else if matches!(version, 10 | 11) {
         SchemaAcceptance::Upgradeable
     } else if version > REMOTE_SCHEMA_VERSION {
         SchemaAcceptance::TooNew
@@ -235,7 +243,8 @@ pub(super) fn identity_read_plan() -> Vec<StatementSpec> {
 /// 判定不宽容：读得懂的库其形状必须与契约声明的代数逐项相符。
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(super) enum ShapeProbe {
-    /// 当前形状（`v5` + 11）：8 张 canonical 表逐表严格判定。
+    /// 当前形状（`v6` + 12）：canonical 会话表逐表严格判定；两张 inherited 派生索引表
+    /// 可选（缺表时读取回退扫描），存在时仍逐项相符。
     Current,
     /// 迁移输入形状（`v2` + 10|11）：搬运输入的上下界，外加要删除对象的严格判定。
     Input,
@@ -255,6 +264,14 @@ pub(super) const CURRENT_TABLE_PRAGMAS: &[(&str, &str)] = &[
     (
         "session_close_intents",
         "PRAGMA table_xinfo('session_close_intents')",
+    ),
+    (
+        "inherited_snapshot_index",
+        "PRAGMA table_xinfo('inherited_snapshot_index')",
+    ),
+    (
+        "inherited_payload_index",
+        "PRAGMA table_xinfo('inherited_payload_index')",
     ),
 ];
 
@@ -381,7 +398,9 @@ pub(super) enum StoreShapeRead {
 /// 与 [`StoreSnapshot::readable`] 同一份判据：探测面与读取面永远一致，不会出现「读得动但
 /// 不探测」或「探测了却不读」的库。
 pub(super) fn shape_probe(snapshot: &StoreSnapshot) -> Option<ShapeProbe> {
-    if snapshot.matches_build() {
+    if snapshot.matches_build()
+        || (snapshot.contract == PREVIOUS_CURRENT_STORE_CONTRACT && snapshot.schema_version == 11)
+    {
         Some(ShapeProbe::Current)
     } else if snapshot.readable() {
         Some(ShapeProbe::Input)

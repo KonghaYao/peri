@@ -33,7 +33,7 @@ async fn assert_no_recovery_tables(pool: &sqlx::SqlitePool) {
 }
 
 #[tokio::test]
-async fn current_store_has_eight_business_tables_and_normal_history() {
+async fn current_store_has_ten_business_tables_and_normal_history() {
     let directory = tempfile::tempdir().unwrap();
     let path = directory.path().join("threads.db");
     let store = SqliteThreadStore::new(&path).await.unwrap();
@@ -44,8 +44,8 @@ async fn current_store_has_eight_business_tables_and_normal_history() {
     .fetch_one(&store.database.pool)
     .await
     .unwrap();
-    // 执行登记并入 `workspaces`：新建库只有八张业务表，没有登记表，也没有运行时状态表。
-    assert_eq!(count, 8);
+    // 执行登记并入 `workspaces`：新建库只有八张业务表 + 两张 inherited 派生索引表，没有登记表，也没有运行时状态表。
+    assert_eq!(count, 10);
     let registrations: i64 = sqlx::query_scalar(
         "SELECT COUNT(*) FROM sqlite_schema WHERE type = 'table' AND name = 'legacy_execution_registrations'",
     )
@@ -80,10 +80,10 @@ async fn current_store_has_eight_business_tables_and_normal_history() {
     reopened.close().await;
 }
 
-/// 压缩掉的开发期代数（12..19）一律拒绝：不迁移、不改写，库留在原位由上一版二进制打开。
+/// 压缩掉的开发期代数（13..19）一律拒绝：不迁移、不改写，库留在原位由上一版二进制打开。
 #[tokio::test]
 async fn compressed_dev_generations_are_refused_without_touching_the_database() {
-    for version in 12..=19_i64 {
+    for version in 13..=19_i64 {
         let directory = tempfile::tempdir().unwrap();
         let path = directory.path().join("threads.db");
         let store = SqliteThreadStore::new(&path).await.unwrap();

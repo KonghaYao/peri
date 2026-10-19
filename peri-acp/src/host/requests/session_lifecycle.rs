@@ -136,8 +136,9 @@ pub(crate) fn handle_initialize(params: &Value, cfg: &AcpServerConfig) -> Result
         .unwrap_or(1);
     info!(protocol_version = %version, "ACP initialize");
 
-    // 解析 clientCapabilities._meta 中的 peri 自定义 flag
-    let peri_caps = initialize_peri_caps(params);
+    // 解析 clientCapabilities._meta 中的 peri 自定义 flag，并按后端实际能力收敛：
+    // 客户端声明不能让未实现窗口端口（remote/emscripten）变成端到端可用。
+    let peri_caps = super::session_caps::effective_peri_caps(cfg, params);
 
     // 暂存 caps，session/new 时 consume
     cfg.session_manager.set_pending_caps(peri_caps.clone());
@@ -461,6 +462,7 @@ pub(crate) async fn new_session_from_prepared(
             structure_version: 0,
             session_generation: crate::host::next_session_generation(),
             history_window: Default::default(),
+            event_health: Default::default(),
             cancel_token: None,
             // session-owned 交互门：环境自带（router 借用同一 Arc，跨轮共享）。
             interaction_gate: super::super::workspace_interaction::session_interaction_gate(
@@ -874,6 +876,7 @@ pub(crate) async fn handle_fork(
             structure_version: 0,
             session_generation: crate::host::next_session_generation(),
             history_window: Default::default(),
+            event_health: Default::default(),
             cancel_token: None,
             // session-owned 交互门：环境自带（router 借用同一 Arc，跨轮共享）。
             interaction_gate: super::super::workspace_interaction::session_interaction_gate(

@@ -7,11 +7,11 @@ use tokio::sync::mpsc;
 use tracing::{info, warn};
 
 /// 处理 Elicitation 通知：原子封装 RequestId + AskUser 后推入 bridge。
-pub(super) fn handle_elicitation(
+pub(super) async fn handle_elicitation(
     owner: crate::acp_client::InteractionOwner,
     request_id_json: String,
     params: &Value,
-    bridge_tx: &mpsc::UnboundedSender<AcpEventWithEpoch>,
+    bridge_tx: &mpsc::Sender<AcpEventWithEpoch>,
 ) -> bool {
     // 从 params 中提取 session_id
     let session_id = params
@@ -34,7 +34,7 @@ pub(super) fn handle_elicitation(
 
     info!("kit ACP notifier: forwarding Elicitation as AskUser event");
 
-    bridge_tx.send(wrapped).map_or_else(
+    bridge_tx.send(wrapped).await.map_or_else(
         |e| {
             warn!(error = %e, "kit ACP notifier: bridge_tx closed, rejecting AskUser");
             false
@@ -50,11 +50,11 @@ pub(super) fn handle_elicitation(
 /// {"sessionId": "sess_1", "toolCall": {"title": "Bash", "rawInput": {...}},
 ///  "options": [{"id": "allow_once", ...}, ...]}
 /// ```
-pub(super) fn handle_request_permission(
+pub(super) async fn handle_request_permission(
     owner: crate::acp_client::InteractionOwner,
     request_id_json: String,
     params: &Value,
-    bridge_tx: &mpsc::UnboundedSender<AcpEventWithEpoch>,
+    bridge_tx: &mpsc::Sender<AcpEventWithEpoch>,
 ) -> bool {
     let session_id = params
         .get("sessionId")
@@ -89,7 +89,7 @@ pub(super) fn handle_request_permission(
 
     info!("kit ACP notifier: forwarding RequestPermission as HitlPending event");
 
-    bridge_tx.send(wrapped).map_or_else(
+    bridge_tx.send(wrapped).await.map_or_else(
         |e| {
             warn!(error = %e, "kit ACP notifier: bridge_tx closed, rejecting HitlPending");
             false

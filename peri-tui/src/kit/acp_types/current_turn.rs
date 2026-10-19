@@ -1,5 +1,6 @@
 //! Canonical state and lifecycle for one streaming turn.
 
+mod archive;
 mod projection;
 mod streaming;
 mod subagents;

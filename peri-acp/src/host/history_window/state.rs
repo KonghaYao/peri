@@ -2,8 +2,12 @@
 
 use super::*;
 
-/// 短锁内允许读取窗口的会话状态；`HandedOff`/`ReloadRequired` 都不得解释为空历史。
-pub(super) fn writable_state<'a>(
+/// 短锁内允许读取窗口的会话状态。
+///
+/// 只读窗口不依赖执行上下文驻留：`HandedOff`/`ReloadRequired` 不构成读取拒绝，
+/// 仍从 Store + 合法活跃 owner 读取，不把空 `history_payloads` 当历史。
+/// `closing`、rewind 等写入安全边界继续拒绝，只读允许不解除写入约束。
+pub(super) fn readable_state<'a>(
     sessions: &'a std::collections::HashMap<String, SessionState>,
     session_id: &str,
 ) -> Result<&'a SessionState, AcpError> {
@@ -13,27 +17,15 @@ pub(super) fn writable_state<'a>(
     if state.closing {
         return Err(window_error(HistoryWindowError::SessionClosing));
     }
-    match state.context_ownership {
-        ContextOwnership::Resident => {}
-        ContextOwnership::HandedOff => {
-            return Err(AcpError::new(
-                -32010,
-                "Session context is owned by an in-flight prompt",
-            ))
-        }
-        ContextOwnership::ReloadRequired => {
-            return Err(invalidated(
-                "session hot state requires reload; reopen the history window",
-            ))
-        }
-    }
     if state.history_window.rewind_in_progress {
         return Err(window_error(HistoryWindowError::MutationInProgress));
     }
     Ok(state)
 }
 
-pub(super) fn writable_state_mut<'a>(
+/// `readable_state` 的可变版本；仅用于 Host 内存中的 ticket/oversize 元数据更新，
+/// 不授权任何会话正文写入。
+pub(super) fn readable_state_mut<'a>(
     sessions: &'a mut std::collections::HashMap<String, SessionState>,
     session_id: &str,
 ) -> Result<&'a mut SessionState, AcpError> {
@@ -42,20 +34,6 @@ pub(super) fn writable_state_mut<'a>(
         .ok_or_else(|| window_error(HistoryWindowError::SessionNotFound))?;
     if state.closing {
         return Err(window_error(HistoryWindowError::SessionClosing));
-    }
-    match state.context_ownership {
-        ContextOwnership::Resident => {}
-        ContextOwnership::HandedOff => {
-            return Err(AcpError::new(
-                -32010,
-                "Session context is owned by an in-flight prompt",
-            ))
-        }
-        ContextOwnership::ReloadRequired => {
-            return Err(invalidated(
-                "session hot state requires reload; reopen the history window",
-            ))
-        }
     }
     if state.history_window.rewind_in_progress {
         return Err(window_error(HistoryWindowError::MutationInProgress));

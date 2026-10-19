@@ -22,13 +22,17 @@
 
 use peri_acp_types::history_window::{HistoryInheritedSnapshot, HistoryWindowError};
 use peri_acp_types::messages::MessageId;
-use std::sync::{Arc, OnceLock};
+use std::sync::Arc;
 
 use super::blob_reader::{
     is_transient_blob_error, is_unsupported_blob_error, open_blob, BlobReadError, BlobReader,
 };
 use super::history::HISTORY_WINDOW_INHERITED_HEADER_SQL;
 use super::history_window::inherited_snapshot_of;
+use super::inherited_facts::{
+    scan_layout, scan_summary, CachedInheritedFacts, InheritedCacheLookup, InheritedLayout,
+    InheritedSummary, PayloadSpan,
+};
 use super::*;
 
 /// 扫描/解码窗口。读放大只受 blob 窗口余量约束，与正文总大小无关。
@@ -41,50 +45,7 @@ const BODY_DECODE_CHUNK: u32 = 256 * 1024;
 const ID_PREFIX_LIMIT: usize = 2048;
 const ID_PREFIX_RAW_LIMIT: usize = 8 * 1024;
 
-/// 一条 payload 在列内的转义原文区间（不含两端引号）。
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(super) struct PayloadSpan {
-    pub(super) raw_start: u64,
-    pub(super) raw_len: u64,
-}
-
-/// canonical 信封的布局：payload 顺序、原始区间与稳定身份。
-pub(super) struct InheritedLayout {
-    pub(super) total_bytes: u64,
-    payloads: Vec<LayoutPayload>,
-}
-
-struct LayoutPayload {
-    span: PayloadSpan,
-    id: MessageId,
-    /// 逻辑长度与检查点；只在块读取时按需构建一次。
-    decoded: OnceLock<Arc<PayloadDecoding>>,
-}
-
 impl InheritedLayout {
-    pub(super) fn len(&self) -> usize {
-        self.payloads.len()
-    }
-
-    pub(super) fn first_id(&self) -> Option<MessageId> {
-        self.payloads.first().map(|payload| payload.id)
-    }
-
-    pub(super) fn last_id(&self) -> Option<MessageId> {
-        self.payloads.last().map(|payload| payload.id)
-    }
-
-    pub(super) fn position_of(&self, entry_id: MessageId) -> Option<usize> {
-        self.payloads
-            .iter()
-            .position(|payload| payload.id == entry_id)
-    }
-
-    /// 数组下标处的稳定身份；越界即布局与请求不一致。
-    pub(super) fn id_at(&self, index: usize) -> Option<MessageId> {
-        self.payloads.get(index).map(|payload| payload.id)
-    }
-
     /// 数组下标处 payload 的**逻辑**序列化长度（JSON 解码后的字节数）。
     ///
     /// 与 SQL 路径 `length(CAST(je.value AS BLOB))` 同口径，但只流式扫描该条 payload，
@@ -95,6 +56,16 @@ impl InheritedLayout {
         index: usize,
     ) -> Result<u64, BlobReadError> {
         self.ensure_total(reader)?;
+        let payload = self
+            .payloads
+            .get(index)
+            .ok_or(BlobReadError::Corrupt("inherited payload index is missing"))?;
+        // 派生索引在写入时记录了逻辑长度：读取候选页时不必为每条正文建解码视图。
+        // 索引与列总字节数一致时这一事实随快照 write-once；legacy 回填没有它，
+        // 落到按需解码，口径与全列扫描完全相同。
+        if let Some(len) = payload.indexed_logical_len {
+            return Ok(len);
+        }
         Ok(self.decoding_of(reader, index)?.logical_len)
     }
 
@@ -262,77 +233,8 @@ pub(super) struct PayloadChunk {
     pub(super) complete: bool,
 }
 
-/// 扫描 canonical 信封；不支持的结构返回 `Unsupported`，由调用方回退 SQL。
-pub(super) fn scan_layout(reader: &BlobReader) -> Result<InheritedLayout, BlobReadError> {
-    if reader.total() == 0 {
-        return Err(BlobReadError::Unsupported);
-    }
-    let mut cursor = Cursor::new(reader);
-    cursor.skip_ws()?;
-    cursor.expect(b'{')?;
-    cursor.skip_ws()?;
-    cursor.expect_key(b"version")?;
-    cursor.skip_ws()?;
-    cursor.expect(b':')?;
-    cursor.skip_ws()?;
-    if cursor.take_number()? != Some(1) {
-        return Err(BlobReadError::Unsupported);
-    }
-    cursor.skip_ws()?;
-    cursor.expect(b',')?;
-    cursor.skip_ws()?;
-    cursor.expect_key(b"payloads")?;
-    cursor.skip_ws()?;
-    cursor.expect(b':')?;
-    cursor.skip_ws()?;
-    cursor.expect(b'[')?;
-
-    let mut spans = Vec::new();
-    cursor.skip_ws()?;
-    if cursor.peek()? == Some(b']') {
-        cursor.expect(b']')?;
-    } else {
-        loop {
-            cursor.skip_ws()?;
-            cursor.expect(b'"')?;
-            let raw_start = cursor.position();
-            cursor.skip_string_content()?;
-            let raw_end = cursor.position();
-            spans.push(PayloadSpan {
-                raw_start,
-                raw_len: raw_end.saturating_sub(raw_start),
-            });
-            cursor.expect(b'"')?;
-            cursor.skip_ws()?;
-            match cursor.take()? {
-                Some(b',') => continue,
-                Some(b']') => break,
-                _ => return Err(BlobReadError::Unsupported),
-            }
-        }
-    }
-    // 数组之后仍必须是合法的顶层对象尾部：截断/损坏不得被当成可用快照。
-    cursor.verify_document_tail()?;
-
-    let mut payloads = Vec::with_capacity(spans.len());
-    for span in spans {
-        let Some(id) = read_payload_id(reader, span)? else {
-            return Err(BlobReadError::Unsupported);
-        };
-        payloads.push(LayoutPayload {
-            span,
-            id,
-            decoded: OnceLock::new(),
-        });
-    }
-    Ok(InheritedLayout {
-        total_bytes: reader.total(),
-        payloads,
-    })
-}
-
 /// 从 payload 原文的前缀里取首个 `"id":"..."`（两类 payload 的 id 都在正文之前）。
-fn read_payload_id(
+pub(super) fn read_payload_id(
     reader: &BlobReader,
     span: PayloadSpan,
 ) -> Result<Option<MessageId>, BlobReadError> {
@@ -548,7 +450,7 @@ fn encode_utf8(scalar: u32, out: &mut [u8; 4]) -> Option<usize> {
 }
 
 /// 顺序扫描列内容的小游标；每次只保留一个窗口。
-struct Cursor<'a> {
+pub(super) struct Cursor<'a> {
     reader: &'a BlobReader,
     window: Vec<u8>,
     window_start: u64,
@@ -557,7 +459,7 @@ struct Cursor<'a> {
 }
 
 impl<'a> Cursor<'a> {
-    fn new(reader: &'a BlobReader) -> Self {
+    pub(super) fn new(reader: &'a BlobReader) -> Self {
         Self {
             reader,
             window: Vec::new(),
@@ -568,7 +470,7 @@ impl<'a> Cursor<'a> {
     }
 
     /// 下一次 `take()` 会返回的字节的绝对偏移。
-    fn position(&self) -> u64 {
+    pub(super) fn position(&self) -> u64 {
         let base = self.window_start + self.pos as u64;
         if self.pushback.is_some() {
             base.saturating_sub(1)
@@ -592,7 +494,7 @@ impl<'a> Cursor<'a> {
         Ok(!self.window.is_empty())
     }
 
-    fn peek(&mut self) -> Result<Option<u8>, BlobReadError> {
+    pub(super) fn peek(&mut self) -> Result<Option<u8>, BlobReadError> {
         if let Some(byte) = self.pushback {
             return Ok(Some(byte));
         }
@@ -602,7 +504,7 @@ impl<'a> Cursor<'a> {
         Ok(Some(self.window[self.pos]))
     }
 
-    fn take(&mut self) -> Result<Option<u8>, BlobReadError> {
+    pub(super) fn take(&mut self) -> Result<Option<u8>, BlobReadError> {
         if let Some(byte) = self.pushback.take() {
             return Ok(Some(byte));
         }
@@ -614,14 +516,14 @@ impl<'a> Cursor<'a> {
         Ok(Some(byte))
     }
 
-    fn expect(&mut self, expected: u8) -> Result<(), BlobReadError> {
+    pub(super) fn expect(&mut self, expected: u8) -> Result<(), BlobReadError> {
         match self.take()? {
             Some(byte) if byte == expected => Ok(()),
             _ => Err(BlobReadError::Unsupported),
         }
     }
 
-    fn skip_ws(&mut self) -> Result<(), BlobReadError> {
+    pub(super) fn skip_ws(&mut self) -> Result<(), BlobReadError> {
         while let Some(byte) = self.peek()? {
             if !byte.is_ascii_whitespace() {
                 break;
@@ -631,7 +533,7 @@ impl<'a> Cursor<'a> {
         Ok(())
     }
 
-    fn expect_key(&mut self, key: &[u8]) -> Result<(), BlobReadError> {
+    pub(super) fn expect_key(&mut self, key: &[u8]) -> Result<(), BlobReadError> {
         self.expect(b'"')?;
         for &expected in key {
             if self.take()? != Some(expected) {
@@ -641,7 +543,7 @@ impl<'a> Cursor<'a> {
         self.expect(b'"')
     }
 
-    fn take_number(&mut self) -> Result<Option<u64>, BlobReadError> {
+    pub(super) fn take_number(&mut self) -> Result<Option<u64>, BlobReadError> {
         let mut value: Option<u64> = None;
         while let Some(byte) = self.peek()? {
             if !byte.is_ascii_digit() {
@@ -659,7 +561,7 @@ impl<'a> Cursor<'a> {
     }
 
     /// 跳过一个 JSON 字符串的内容，停在结束引号之前；正确处理 `\"`/`\\`。
-    fn skip_string_content(&mut self) -> Result<(), BlobReadError> {
+    pub(super) fn skip_string_content(&mut self) -> Result<(), BlobReadError> {
         let mut escaped = false;
         while let Some(byte) = self.take()? {
             if escaped {
@@ -679,7 +581,7 @@ impl<'a> Cursor<'a> {
     }
 
     /// 数组之后：验证剩余部分是平衡的对象尾部并到达文档末尾。
-    fn verify_document_tail(&mut self) -> Result<(), BlobReadError> {
+    pub(super) fn verify_document_tail(&mut self) -> Result<(), BlobReadError> {
         let mut depth = 1i32; // 顶层对象尚未闭合
         let mut in_string = false;
         let mut escaped = false;
@@ -720,14 +622,15 @@ impl<'a> Cursor<'a> {
     }
 }
 
-/// 缓存条目：按线程记住已解析的布局；`Unsupported` 也缓存，避免每次读取都重复扫描。
-#[derive(Clone)]
-pub(super) enum CachedInheritedLayout {
-    Parsed(Arc<InheritedLayout>),
-    Unsupported { total_bytes: u64 },
+/// summary 读取结果：`Unsupported` 表示信封不是 canonical 形状，调用方回退 SQL。
+pub(super) enum InheritedSummaryRead {
+    Facts {
+        snapshot: Option<HistoryInheritedSnapshot>,
+    },
+    Unsupported,
 }
 
-/// inherited 事实读取结果：`Unsupported` 表示信封不是 canonical 形状，调用方回退 SQL。
+/// 全量布局读取结果：`Unsupported` 表示信封不是 canonical 形状，调用方回退 SQL。
 pub(super) enum InheritedFactsRead {
     Facts {
         snapshot: Option<HistoryInheritedSnapshot>,
@@ -737,9 +640,16 @@ pub(super) enum InheritedFactsRead {
 }
 
 /// 定位与打开 blob 之间只做一次缓存判定/扫描，结果交给外层分类。
-enum InheritedProbe {
+enum SummaryProbe {
     Absent,
-    Cached(CachedInheritedLayout),
+    Cached(Arc<InheritedSummary>),
+    Parsed(Arc<InheritedSummary>),
+    Unsupported,
+}
+
+enum LayoutProbe {
+    Absent,
+    Cached(Arc<InheritedLayout>),
     Parsed(Arc<InheritedLayout>),
     Unsupported,
 }
@@ -764,30 +674,43 @@ pub(super) fn map_inherited_blob_error(error: BlobReadError) -> SessionResourceE
 }
 
 impl SqliteSessionData {
-    fn cached_inherited_layout(&self, id: &ThreadId, total: u64) -> Option<CachedInheritedLayout> {
-        let cache = match self.inherited_layouts.lock() {
+    fn inherited_cache_lookup(&self, id: &ThreadId, total: u64) -> InheritedCacheLookup {
+        let mut cache = match self.inherited_facts.lock() {
             Ok(cache) => cache,
             Err(poisoned) => poisoned.into_inner(),
         };
-        match cache.get(id) {
-            Some(CachedInheritedLayout::Parsed(layout)) if layout.total_bytes == total => {
-                Some(CachedInheritedLayout::Parsed(Arc::clone(layout)))
-            }
-            Some(CachedInheritedLayout::Unsupported { total_bytes }) if *total_bytes == total => {
-                Some(CachedInheritedLayout::Unsupported {
-                    total_bytes: *total_bytes,
-                })
-            }
-            _ => None,
-        }
+        cache.lookup(id, total)
     }
 
-    fn store_inherited_layout(&self, id: &ThreadId, entry: CachedInheritedLayout) {
-        let mut cache = match self.inherited_layouts.lock() {
+    fn store_inherited_facts(&self, id: &ThreadId, entry: CachedInheritedFacts) {
+        let mut cache = match self.inherited_facts.lock() {
             Ok(cache) => cache,
             Err(poisoned) => poisoned.into_inner(),
         };
-        cache.insert(id.clone(), entry);
+        cache.store(id, entry);
+    }
+
+    /// 定位 inherited 列；SQL NULL 返回 `None`，行不存在是 `NotFound`。
+    ///
+    /// 不在这里取列长度：总长度由 blob 句柄给出，避免 `length(CAST(...))` 物化整列。
+    async fn inherited_header(
+        connection: &mut SqliteConnection,
+        id: &ThreadId,
+    ) -> SessionResourceResult<Option<(i64, Option<String>)>> {
+        let row: Option<(i64, Option<String>, String)> =
+            sqlx::query_as(HISTORY_WINDOW_INHERITED_HEADER_SQL)
+                .bind(id.as_str())
+                .fetch_optional(&mut *connection)
+                .await
+                .map_err(|error| map_sqlx(&error))?;
+        let Some((rowid, parent, value_type)) = row else {
+            return Err(not_found());
+        };
+        // NULL 列没有可读取的值；空 TEXT/BLOB 由 blob 句柄报告 0 字节。
+        if value_type == "null" {
+            return Ok(None);
+        }
+        Ok(Some((rowid, parent)))
     }
 
     /// 在已锁定的连接上执行一次同步 blob 读取；锁在返回前释放。
@@ -829,78 +752,174 @@ impl SqliteSessionData {
         .await
     }
 
-    /// 优先用增量 blob 读取 inherited 事实；不可增量读取时返回 `Unsupported`。
+    /// 读取 inherited 轻量摘要；bounds 只需要首尾身份，不构造全量布局。
     ///
-    /// 布局按 `(thread id, 列总字节数)` 缓存：`inherited_context` 由本 store 的写入入口
-    /// 保证 write-once（创建时写入，`WHERE inherited_context IS NULL`），总字节数变化即
-    /// 视为新快照并重新扫描。该不变量由 API 维持、数据库没有触发器兜底：绕过 store 的
-    /// 同长度改写不会被识别（见 owner 报告的风险项）。这里不解析 JSON、不取正文。
+    /// 缓存按 `(thread id, 列总字节数)` 有界保存：`inherited_context` 由本 store 的写入
+    /// 入口保证 write-once（创建时写入，`WHERE inherited_context IS NULL`），总字节数变化
+    /// 即视为新快照并重新扫描。该不变量由 API 维持、数据库没有触发器兜底：绕过 store 的
+    /// 同长度改写不会被识别。
+    ///
+    /// 派生索引命中时只读快照行与首尾身份，不做全列扫描；索引缺失、损坏或列总字节数
+    /// 不符时回退 [`scan_summary`]，行为与引入索引前相同。
     ///
     /// 总长度由 `sqlite3_blob_bytes` 给出，**不**查询 `length(CAST(...))`：后者会让
     /// SQLite 把整列读进内存，16 MiB 前缀每次读取都会多分配一份正文。
-    pub(super) async fn read_inherited_facts_cached(
+    pub(super) async fn read_inherited_summary_cached(
         &self,
         connection: &mut SqliteConnection,
         id: &ThreadId,
-    ) -> SessionResourceResult<InheritedFactsRead> {
-        let row: Option<(i64, Option<String>, String)> =
-            sqlx::query_as(HISTORY_WINDOW_INHERITED_HEADER_SQL)
-                .bind(id.as_str())
-                .fetch_optional(&mut *connection)
-                .await
-                .map_err(|error| map_sqlx(&error))?;
-        let Some((rowid, parent, value_type)) = row else {
-            return Err(not_found());
+    ) -> SessionResourceResult<InheritedSummaryRead> {
+        let Some((rowid, parent)) = Self::inherited_header(connection, id).await? else {
+            return Ok(InheritedSummaryRead::Facts { snapshot: None });
         };
-        // NULL 列没有可读取的值；空 TEXT/BLOB 由 blob 句柄报告 0 字节。
-        if value_type == "null" {
-            return Ok(InheritedFactsRead::Facts {
-                snapshot: None,
-                layout: None,
-            });
-        }
+        // 索引查询先于 blob 打开：两者都是点查，索引命中后不再接触 payload 正文。
+        let indexed = super::inherited_index::read(connection, id).await?;
         let probed = Self::inherited_blob_scope(connection, rowid, |reader| {
             let total = reader.total();
             if total == 0 {
-                return Ok(InheritedProbe::Absent);
+                return Ok(SummaryProbe::Absent);
             }
-            if let Some(cached) = self.cached_inherited_layout(id, total) {
-                return Ok(InheritedProbe::Cached(cached));
+            match self.inherited_cache_lookup(id, total) {
+                InheritedCacheLookup::Unsupported => {
+                    return Ok(SummaryProbe::Unsupported);
+                }
+                InheritedCacheLookup::Summary(summary) => {
+                    return Ok(SummaryProbe::Cached(summary));
+                }
+                InheritedCacheLookup::Layout(layout) => {
+                    return Ok(SummaryProbe::Cached(Arc::new(layout.summary())));
+                }
+                InheritedCacheLookup::Miss => {}
             }
-            match scan_layout(reader) {
-                Ok(layout) => {
-                    let layout = Arc::new(layout);
-                    self.store_inherited_layout(
+            if let Some(indexed) = indexed
+                .as_ref()
+                .filter(|indexed| indexed.validate(id, parent.as_deref(), total))
+            {
+                let summary = Arc::new(indexed.summary());
+                self.store_inherited_facts(id, CachedInheritedFacts::Summary(Arc::clone(&summary)));
+                return Ok(SummaryProbe::Cached(summary));
+            }
+            match scan_summary(reader) {
+                Ok(summary) => {
+                    let summary = Arc::new(summary);
+                    self.store_inherited_facts(
                         id,
-                        CachedInheritedLayout::Parsed(Arc::clone(&layout)),
+                        CachedInheritedFacts::Summary(Arc::clone(&summary)),
                     );
-                    Ok(InheritedProbe::Parsed(layout))
+                    Ok(SummaryProbe::Parsed(summary))
                 }
                 Err(BlobReadError::Unsupported) => {
-                    self.store_inherited_layout(
+                    self.store_inherited_facts(
                         id,
-                        CachedInheritedLayout::Unsupported { total_bytes: total },
+                        CachedInheritedFacts::Unsupported { total_bytes: total },
                     );
-                    Ok(InheritedProbe::Unsupported)
+                    Ok(SummaryProbe::Unsupported)
                 }
                 Err(error) => Err(error),
             }
         })
         .await?;
         match probed {
-            Ok(InheritedProbe::Absent) => Ok(InheritedFactsRead::Facts {
+            Ok(SummaryProbe::Absent) => Ok(InheritedSummaryRead::Facts { snapshot: None }),
+            Ok(SummaryProbe::Cached(summary)) | Ok(SummaryProbe::Parsed(summary)) => {
+                Ok(InheritedSummaryRead::Facts {
+                    snapshot: inherited_snapshot_of(id, parent, &summary),
+                })
+            }
+            Ok(SummaryProbe::Unsupported) => Ok(InheritedSummaryRead::Unsupported),
+            // 打开失败（类型不是 TEXT/BLOB、行在定位后消失）或扫描期间 blob 失效：
+            // 交给 SQL 语义解释。瞬态错误不写缓存，避免一次竞争永久停用增量路径。
+            Err(error) if is_unsupported_blob_error(&error) || is_transient_blob_error(&error) => {
+                Ok(InheritedSummaryRead::Unsupported)
+            }
+            Err(error) => Err(map_inherited_blob_error(error)),
+        }
+    }
+
+    /// 读取全量布局；只有需要位置/分页/正文时才走这里。
+    ///
+    /// 缓存语义与 summary 相同；已有 layout 直接复用，已有 summary 则改走派生索引或
+    /// 重新扫描。索引缺失时按本次扫描结果回填一次（只作用于当前快照，不启动后台任务）。
+    pub(super) async fn read_inherited_layout_cached(
+        &self,
+        connection: &mut SqliteConnection,
+        id: &ThreadId,
+    ) -> SessionResourceResult<InheritedFactsRead> {
+        let Some((rowid, parent)) = Self::inherited_header(connection, id).await? else {
+            return Ok(InheritedFactsRead::Facts {
+                snapshot: None,
+                layout: None,
+            });
+        };
+        let indexed = super::inherited_index::read(connection, id).await?;
+        let probed = Self::inherited_blob_scope(connection, rowid, |reader| {
+            let total = reader.total();
+            if total == 0 {
+                return Ok(LayoutProbe::Absent);
+            }
+            match self.inherited_cache_lookup(id, total) {
+                InheritedCacheLookup::Unsupported => {
+                    return Ok(LayoutProbe::Unsupported);
+                }
+                InheritedCacheLookup::Layout(layout) => {
+                    return Ok(LayoutProbe::Cached(layout));
+                }
+                // summary 不含数组顺序，必须走索引或重新扫描成完整布局。
+                InheritedCacheLookup::Summary(_) | InheritedCacheLookup::Miss => {}
+            }
+            if let Some(indexed) = indexed
+                .as_ref()
+                .filter(|indexed| indexed.validate(id, parent.as_deref(), total))
+            {
+                let layout = Arc::new(indexed.to_layout());
+                self.store_inherited_facts(id, CachedInheritedFacts::Layout(Arc::clone(&layout)));
+                return Ok(LayoutProbe::Cached(layout));
+            }
+            match scan_layout(reader) {
+                Ok(layout) => {
+                    let layout = Arc::new(layout);
+                    self.store_inherited_facts(
+                        id,
+                        CachedInheritedFacts::Layout(Arc::clone(&layout)),
+                    );
+                    Ok(LayoutProbe::Parsed(layout))
+                }
+                Err(BlobReadError::Unsupported) => {
+                    self.store_inherited_facts(
+                        id,
+                        CachedInheritedFacts::Unsupported { total_bytes: total },
+                    );
+                    Ok(LayoutProbe::Unsupported)
+                }
+                Err(error) => Err(error),
+            }
+        })
+        .await?;
+        // legacy 回填：扫描已经付出 O(列总字节) 的代价，这里只把结果落成派生事实；
+        // 只读库不写，索引写入失败也不改变本次读取结果。
+        if let Ok(LayoutProbe::Parsed(layout)) = &probed {
+            if !self.database.is_read_only() {
+                super::inherited_index::backfill_from_layout(
+                    connection,
+                    id,
+                    parent.as_deref(),
+                    layout,
+                )
+                .await;
+            }
+        }
+        match probed {
+            Ok(LayoutProbe::Absent) => Ok(InheritedFactsRead::Facts {
                 snapshot: None,
                 layout: None,
             }),
-            Ok(InheritedProbe::Cached(CachedInheritedLayout::Parsed(layout)))
-            | Ok(InheritedProbe::Parsed(layout)) => Ok(InheritedFactsRead::Facts {
-                snapshot: inherited_snapshot_of(id, parent, &layout),
-                layout: Some(layout),
-            }),
-            Ok(InheritedProbe::Cached(CachedInheritedLayout::Unsupported { .. }))
-            | Ok(InheritedProbe::Unsupported) => Ok(InheritedFactsRead::Unsupported),
-            // 打开失败（类型不是 TEXT/BLOB、行在定位后消失）或扫描期间 blob 失效：
-            // 交给 SQL 语义解释。瞬态错误不写缓存，避免一次竞争永久停用增量路径。
+            Ok(LayoutProbe::Cached(layout)) | Ok(LayoutProbe::Parsed(layout)) => {
+                Ok(InheritedFactsRead::Facts {
+                    snapshot: inherited_snapshot_of(id, parent, &layout.summary()),
+                    layout: Some(layout),
+                })
+            }
+            Ok(LayoutProbe::Unsupported) => Ok(InheritedFactsRead::Unsupported),
             Err(error) if is_unsupported_blob_error(&error) || is_transient_blob_error(&error) => {
                 Ok(InheritedFactsRead::Unsupported)
             }

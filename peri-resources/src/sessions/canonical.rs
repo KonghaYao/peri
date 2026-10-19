@@ -29,7 +29,13 @@ use peri_acp_types::{messages::BaseMessage, store::PersistedPayload};
 /// agent-v3.18.0 = 6）。合并进 main 时收敛为**紧接正式基线 10 的一代 11**：外部库只有
 /// 「≤10 的正式形状」与「10|11 的正式存储契约」两种输入，中间代形状不再被接受，
 /// 也不再有中间代对象与迁移代码（见 `spec/issues/2026-10-10-schema-generation-compression.md`）。
-pub(super) const CURRENT_SCHEMA_VERSION: i64 = 11;
+///
+/// 12 是 inherited 派生索引这一代：只新增两张**派生**表（可从 inherited 信封重建），
+/// 11 的 canonical 形状与数据原样保留。
+pub(super) const CURRENT_SCHEMA_VERSION: i64 = 12;
+
+/// 压缩前登记形状使用的版本号（历史事实，不随当前版本推进）。
+pub(super) const LEGACY_REGISTRATION_SCHEMA_VERSION: i64 = 11;
 
 /// 会话事实表。
 pub(super) const THREADS_TABLE: &str = "threads";
@@ -51,6 +57,12 @@ pub(super) const SESSION_BINDINGS_TABLE: &str = "session_bindings";
 
 /// 会话关闭意图。
 pub(super) const SESSION_CLOSE_INTENTS_TABLE: &str = "session_close_intents";
+
+/// inherited 派生索引的每快照事实（写入时派生，可从 inherited 列重建）。
+pub(super) const INHERITED_SNAPSHOT_INDEX_TABLE: &str = "inherited_snapshot_index";
+
+/// inherited 派生索引的逐 payload 定位。
+pub(super) const INHERITED_PAYLOAD_INDEX_TABLE: &str = "inherited_payload_index";
 
 /// 压缩前形状独有的执行环境表；当前形状不再有它（迁移完成后删除）。
 pub(super) const SESSION_ENVIRONMENTS_TABLE: &str = "session_environments";
@@ -76,6 +88,8 @@ pub(super) const CANONICAL_TABLES: &[&str] = &[
     SESSION_BINDINGS_TABLE,
     OAUTH_CREDENTIALS_TABLE,
     SESSION_CLOSE_INTENTS_TABLE,
+    INHERITED_SNAPSHOT_INDEX_TABLE,
+    INHERITED_PAYLOAD_INDEX_TABLE,
 ];
 
 /// 迁移输入形状（正式基线 ≤10）的表清单：建表预检与补齐按它判定。
@@ -235,6 +249,8 @@ pub(super) const CREATE_TABLES: &[&str] = &[
     CREATE_BINDINGS_TABLE_SQL,
     CREATE_OAUTH_CREDENTIALS_TABLE_SQL,
     CREATE_SESSION_CLOSE_INTENTS_TABLE_SQL,
+    CREATE_INHERITED_SNAPSHOT_INDEX_TABLE_SQL,
+    CREATE_INHERITED_PAYLOAD_INDEX_TABLE_SQL,
 ];
 
 /// 显式关闭已接纳的持久事实；不保存异步任务目录。
@@ -243,6 +259,39 @@ pub(super) const CREATE_SESSION_CLOSE_INTENTS_TABLE_SQL: &str =
     thread_id TEXT PRIMARY KEY REFERENCES threads(id) ON DELETE CASCADE,
     requested_at TEXT NOT NULL
 )";
+
+/// inherited 派生索引的每快照事实：绑定 `snapshot_id` 的容量与身份。
+///
+/// 这是**派生**对象：内容全部可从 `threads.inherited_context` 重建，缺失时读取回退
+/// 全列扫描；因此不进 `schema_shape` 的必需表，也不承载任何独占事实。
+pub(super) const CREATE_INHERITED_SNAPSHOT_INDEX_TABLE_SQL: &str =
+    "CREATE TABLE IF NOT EXISTS inherited_snapshot_index (
+    snapshot_id TEXT PRIMARY KEY,
+    thread_id TEXT NOT NULL,
+    payload_bytes INTEGER NOT NULL,
+    entry_count INTEGER NOT NULL,
+    prepared_at TEXT NOT NULL
+)";
+
+/// inherited 派生索引的逐 payload 定位：原始转义区间与解码后逻辑长度。
+pub(super) const CREATE_INHERITED_PAYLOAD_INDEX_TABLE_SQL: &str =
+    "CREATE TABLE IF NOT EXISTS inherited_payload_index (
+    snapshot_id TEXT NOT NULL,
+    ordinal INTEGER NOT NULL,
+    entry_id TEXT NOT NULL,
+    raw_start INTEGER NOT NULL,
+    raw_len INTEGER NOT NULL,
+    logical_len INTEGER,
+    PRIMARY KEY(snapshot_id, ordinal),
+    UNIQUE(snapshot_id, entry_id)
+)";
+
+/// inherited 派生索引的两张表：可从 inherited 列重建，缺失时读取回退扫描。
+pub(super) const CREATE_INHERITED_INDEX_TABLES: &[&str] = &[
+    CREATE_INHERITED_SNAPSHOT_INDEX_TABLE_SQL,
+    CREATE_INHERITED_PAYLOAD_INDEX_TABLE_SQL,
+];
+
 /// 索引语句：必须在建表**与旧库补列之后**执行（`idx_threads_updated` 引用后补的列）。
 pub(super) const CREATE_INDEXES: &[&str] = &[
     "CREATE INDEX IF NOT EXISTS idx_messages_thread_id ON messages(thread_id)",
@@ -257,6 +306,8 @@ pub(super) const CREATE_INDEXES: &[&str] = &[
     // `SEARCH messages USING INDEX idx_messages_active (thread_id=? AND excluded=?)`。
     // 两个索引并存：`idx_messages_thread_id` 仍是只按线程取全部行的路径（`ORDER BY rowid` 扫描）。
     "CREATE INDEX IF NOT EXISTS idx_messages_active ON messages(thread_id, excluded)",
+    // 派生索引按线程定位快照；payload 行的查询键 `(snapshot_id, ordinal)` 由主键覆盖。
+    "CREATE INDEX IF NOT EXISTS idx_inherited_snapshot_thread ON inherited_snapshot_index(thread_id)",
 ];
 
 /// 迁移期重建 `threads` 的暂存表（`threads_rebuild`）：`workspace_id` 必须落在 **NOT NULL**

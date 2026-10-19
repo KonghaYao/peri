@@ -23,6 +23,7 @@ fn retain_failed_assembly(
             structure_version: 0,
             session_generation: crate::host::next_session_generation(),
             history_window: Default::default(),
+            event_health: Default::default(),
             cancel_token: None,
             interaction_gate: Arc::new(tokio::sync::Mutex::new(())),
             host_request_seq: Arc::new(std::sync::atomic::AtomicU64::new(0)),
