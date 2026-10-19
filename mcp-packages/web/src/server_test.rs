@@ -19,7 +19,10 @@ use async_trait::async_trait;
 use peri_acp_types::builtin_mcp::find;
 use peri_agent::tools::{BaseTool, ToolContext};
 use rmcp::{
-    model::{CallToolRequestParams, CallToolResponse, CallToolResult, ErrorCode},
+    model::{
+        CallToolRequestParams, CallToolResponse, CallToolResult, ErrorCode,
+        ReadResourceRequestParams, ReadResourceResult, ResourceContents,
+    },
     service::{Peer, QuitReason, RunningService},
     ClientLifecycleMode, RoleClient, ServerHandler, ServiceError,
 };
@@ -175,6 +178,20 @@ fn complete(response: CallToolResponse) -> CallToolResult {
     }
 }
 
+/// 取出 MCP 协议错误（资源面失败必须是协议错误，不是空结果）。
+fn mcp_error(error: ServiceError) -> rmcp::model::ErrorData {
+    match error {
+        ServiceError::McpError(data) => data,
+        other => panic!("期望 MCP 协议错误，实际：{other:?}"),
+    }
+}
+
+/// 单条 contents（web 资源面恒返回单条）。
+fn single_contents(result: ReadResourceResult) -> ResourceContents {
+    assert_eq!(result.contents.len(), 1, "web 资源读取恒返回单条 contents");
+    result.contents.into_iter().next().expect("非空")
+}
+
 fn tool_names(result: &rmcp::model::ListToolsResult) -> Vec<&str> {
     result.tools.iter().map(|tool| tool.name.as_ref()).collect()
 }
@@ -182,11 +199,15 @@ fn tool_names(result: &rmcp::model::ListToolsResult) -> Vec<&str> {
 // ─── 声明面 ───────────────────────────────────────────────────────────────────
 
 #[test]
-fn web_server_info_declares_tools_capability_and_instance_name() {
+fn web_server_info_declares_tools_and_resources_capability_and_instance_name() {
     let info = WebMcpServer::new().get_info();
     assert!(
         info.capabilities.tools.is_some(),
         "必须声明 tools 能力，否则 tools/list 不可达"
+    );
+    assert!(
+        info.capabilities.resources.is_some(),
+        "必须声明 resources 能力，否则宿主发现不到 web-researcher 定义"
     );
     let implementation = &info.server_info;
     assert_eq!(implementation.name, "peri-web-mcp");
@@ -563,6 +584,106 @@ async fn web_handler_with_instance_env_routes_tools_to_configured_endpoints() {
         fetch_text.contains("stub extract content from local loopback stub"),
         "抓取结果必须来自实例 env 注入的端点：{fetch_text}"
     );
+
+    pair.shutdown().await;
+}
+
+// ─── 资源面（web-researcher 定义）的 wire 证据 ───────────────────────────────
+
+/// `resources/list` 发现 `web-researcher` 定义，`resources/read` 逐字返回正文
+/// 与 `_meta`——宿主 Agent registry 的发现与激活两条路径都经真实 wire。
+#[tokio::test]
+async fn web_handler_resources_list_and_read_round_trip_over_wire() {
+    use peri_acp_types::workspace_resources::{
+        META_KEY_FRONTMATTER, META_KEY_SCOPE, MIME_MARKDOWN,
+    };
+
+    let pair = connect(WebMcpServer::new()).await;
+    let peer = pair.peer();
+
+    let listed = peer.list_resources(None).await.expect("resources/list");
+    assert_eq!(listed.resources.len(), 1, "web 实例只发布一条定义");
+    let resource = &listed.resources[0];
+    assert_eq!(resource.uri, "agent://builtin/web-researcher/agent.md");
+    assert_eq!(resource.name, "web-researcher");
+    assert_eq!(resource.mime_type.as_deref(), Some(MIME_MARKDOWN));
+    let meta = resource.meta.as_ref().expect("资源必须带 _meta");
+    assert_eq!(
+        meta.0.get(META_KEY_SCOPE).and_then(|value| value.as_str()),
+        Some("builtin"),
+        "宿主只把 builtin scope 的本地来源纳入目录"
+    );
+    assert!(
+        meta.0.contains_key(META_KEY_FRONTMATTER),
+        "目录渲染依赖 frontmatter 投影"
+    );
+
+    let result = peer
+        .read_resource(ReadResourceRequestParams::new(resource.uri.clone()))
+        .await
+        .expect("resources/read");
+    match single_contents(result) {
+        ResourceContents::TextResourceContents {
+            text,
+            mime_type,
+            meta,
+            ..
+        } => {
+            assert!(
+                text.contains("name: web-researcher"),
+                "读取必须返回定义原文：{text:.80}"
+            );
+            assert!(
+                text.contains("Web research specialist"),
+                "frontmatter description 必须在正文中"
+            );
+            assert_eq!(mime_type.as_deref(), Some(MIME_MARKDOWN));
+            let meta = meta.expect("读取面同样投影 _meta");
+            assert_eq!(
+                meta.0.get(META_KEY_SCOPE).and_then(|value| value.as_str()),
+                Some("builtin")
+            );
+            assert!(meta.0.contains_key(META_KEY_FRONTMATTER));
+        }
+        other => panic!("agent 定义必须是文本内容：{other:?}"),
+    }
+
+    pair.shutdown().await;
+}
+
+/// 读取错误的协议分类：非 agent URI 与「形状合法但未发布」都映射为 `-32602`
+/// （SEP-2164 在新协议下把 `-32002` 升级为 `-32602`），靠 message 区分。
+#[tokio::test]
+async fn web_handler_resource_read_errors_distinguish_invalid_and_missing() {
+    let pair = connect(WebMcpServer::new()).await;
+    let peer = pair.peer();
+
+    let invalid = mcp_error(
+        peer.read_resource(ReadResourceRequestParams::new("https://example.test/x"))
+            .await
+            .expect_err("非 agent URI 必须失败"),
+    );
+    assert_eq!(invalid.code.0, ErrorCode::INVALID_PARAMS.0);
+    assert!(
+        invalid.message.starts_with("unknown resource:"),
+        "非法 URI 由 handler 直接分类：{}",
+        invalid.message
+    );
+
+    let missing = mcp_error(
+        peer.read_resource(ReadResourceRequestParams::new(
+            "agent://builtin/not-shipped/agent.md",
+        ))
+        .await
+        .expect_err("未发布的定义必须失败"),
+    );
+    assert_eq!(
+        missing.code.0,
+        ErrorCode::INVALID_PARAMS.0,
+        "SEP-2164：新协议版本下资源不存在升级为 -32602；message: {}",
+        missing.message
+    );
+    assert_eq!(missing.message.as_ref(), "resource not found");
 
     pair.shutdown().await;
 }

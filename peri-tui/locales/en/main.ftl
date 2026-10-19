@@ -961,6 +961,23 @@ panel-mcp-cache-disabled-dynamic = CACHE off: dynamic connection
 panel-mcp-cache-pending = CACHE pending initialization
 panel-mcp-cache-live-fetch = Persistent cache: live fetch
 panel-mcp-cache-none = Persistent cache: —
+panel-mcp-table-title = { $label } · { $count }
+panel-mcp-table-tools = Tools
+panel-mcp-table-skills = Skills
+panel-mcp-table-agents = Agents
+panel-mcp-table-subscriptions = Subscriptions
+panel-mcp-table-col-name = Name
+panel-mcp-table-col-description = Description
+panel-mcp-table-col-item = Item
+panel-mcp-table-col-value = Value
+panel-mcp-table-empty = —
+panel-mcp-table-more = … { $count } more
+panel-mcp-sub-resources = Resources
+panel-mcp-sub-tools-list-changed = tools/list_changed
+panel-mcp-sub-prompts-list-changed = prompts/list_changed
+panel-mcp-sub-resources-list-changed = resources/list_changed
+panel-mcp-sub-on = on
+panel-mcp-sub-off = off
 
 # ---- Memory Panel ----
 panel-memory-stats =   { $count } memory files in ~/.claude/memory

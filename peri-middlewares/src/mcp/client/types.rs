@@ -60,6 +60,12 @@ pub struct ServerInfo {
     pub cache_status: Option<String>,
     pub tool_count: usize,
     pub resource_count: usize,
+    /// 工具/资源的有界投影（`mcp/list` 面板数据源）；全量计数仍是
+    /// `tool_count`/`resource_count`。
+    pub tools: Vec<peri_acp_types::ports::McpToolInfo>,
+    pub resources: Vec<peri_acp_types::ports::McpResourceInfo>,
+    /// 配置声明的订阅项；None = 未配置。
+    pub subscriptions: Option<peri_acp_types::plugin::McpSubscriptionsConfig>,
     /// OAuth 授权状态
     pub oauth_status: OAuthStatus,
     /// 配置来源

@@ -30,10 +30,10 @@ use peri_acp_types::workspace_resources::{
     META_KEY_FRONTMATTER,
 };
 
-use super::frontmatter::frontmatter_json;
 use super::path::{canonical_root, is_text_bytes};
 use super::scan::is_regular_file;
 use super::{ResourceBudget, ResourceError, WorkspaceResourcesInput};
+use peri_mcp_common::agent_definition::frontmatter::frontmatter_json;
 
 /// agent 定义的存储位置。
 #[derive(Debug, Clone)]

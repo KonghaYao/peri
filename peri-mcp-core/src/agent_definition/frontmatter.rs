@@ -1,4 +1,8 @@
-//! SKILL.md / agent.md 的 YAML frontmatter 解析（W1 provider 面）。
+//! SKILL.md / agent.md 的 YAML frontmatter 解析（共享纯函数）。
+//!
+//! 归属：workspace 资源面（技能/本地 agent）与 web 实例（builtin agent）共用
+//! 同一份解析规则，故下沉到 `peri-mcp-core` 的 Agent 定义格式层；本模块不做
+//! 文件 I/O、不扫描目录、不解释来源信任。
 //!
 //! 口径：
 //! - 只接受 `---` 分隔的 YAML frontmatter（与本仓库既有 `gray_matter::<YAML>`
@@ -15,7 +19,7 @@
 ///
 /// 规则：忽略开头 BOM；首行必须是 `---`（允许行尾空白）；其后第一个
 /// `---` 行为结束标记；结束标记之后（含换行）是正文。未闭合时返回 `None`。
-pub(crate) fn split_frontmatter(content: &str) -> Option<(&str, &str)> {
+pub fn split_frontmatter(content: &str) -> Option<(&str, &str)> {
     let content = content.strip_prefix('\u{feff}').unwrap_or(content);
     let mut lines = content.split_inclusive('\n');
     let first = lines.next()?;
@@ -36,9 +40,7 @@ pub(crate) fn split_frontmatter(content: &str) -> Option<(&str, &str)> {
 }
 
 /// 解析 frontmatter 为 JSON object（顶层必须是 YAML mapping）。
-pub(crate) fn frontmatter_json(
-    content: &str,
-) -> Option<serde_json::Map<String, serde_json::Value>> {
+pub fn frontmatter_json(content: &str) -> Option<serde_json::Map<String, serde_json::Value>> {
     let (frontmatter, _) = split_frontmatter(content)?;
     let value: serde_yaml::Value = serde_yaml::from_str(frontmatter).ok()?;
     let json = yaml_to_json(value)?;
@@ -52,7 +54,7 @@ pub(crate) fn frontmatter_json(
 ///
 /// `description` 已 trim（资源 metadata 投影口径）；`name` 原样（含 `:` 等字符
 /// 由契约层的段校验决定是否公开，本函数不改写）。
-pub(crate) fn frontmatter_summary(
+pub fn frontmatter_summary(
     frontmatter: &serde_json::Map<String, serde_json::Value>,
 ) -> Option<(String, String)> {
     let name = frontmatter.get("name")?.as_str()?;
