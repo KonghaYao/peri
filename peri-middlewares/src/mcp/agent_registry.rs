@@ -734,7 +734,7 @@ fn normalize_remote_definition(definition: &mut ClaudeAgent) -> Result<(), Strin
     // MCPP v1：这些本地扩展字段具有执行/持久化语义，远端配置默认忽略。
     definition.frontmatter.permission_mode = None;
     definition.frontmatter.mcp_servers.clear();
-    definition.frontmatter.hooks = serde_yaml::Value::Null;
+    definition.frontmatter.hooks = serde_norway::Value::Null;
     definition.frontmatter.memory = None;
     definition.frontmatter.background = false;
     definition.frontmatter.isolation = None;
@@ -869,7 +869,7 @@ mod tests {
 
         assert!(definition.frontmatter.permission_mode.is_none());
         assert!(definition.frontmatter.mcp_servers.is_empty());
-        assert_eq!(definition.frontmatter.hooks, serde_yaml::Value::Null);
+        assert_eq!(definition.frontmatter.hooks, serde_norway::Value::Null);
         assert!(definition.frontmatter.memory.is_none());
         assert!(!definition.frontmatter.background);
         assert!(definition.frontmatter.isolation.is_none());

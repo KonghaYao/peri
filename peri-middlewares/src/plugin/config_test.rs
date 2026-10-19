@@ -262,7 +262,7 @@ fn test_plugins_dir_uses_claude_home() {
     assert!(path_str.contains("plugins"));
 }
 
-/// `claude_home()` 的 HOME 优先契约：Windows 的 `dirs_next::home_dir()` 走 Profile
+/// `claude_home()` 的 HOME 优先契约：Windows 的 `dirs::home_dir()` 走 Profile
 /// known-folder，不读 HOME/USERPROFILE，只有 HOME 维度能重定向 `~/.claude`；插件目录
 /// 解析依赖这一点（各入口各拼一份 home 会在 Windows 上分叉），故在此钉住——
 /// 断言跨平台可复现，不必等到 Windows CI。

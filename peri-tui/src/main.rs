@@ -337,7 +337,7 @@ fn inject_env_from_settings() {
 /// 此函数在 Peri 自身配置加载后调用，确保即使 Peri 尚未配置也能接入已配置的
 /// Claude Code 凭据。进程环境变量和 Peri 配置中的 env 优先级更高（不会被覆盖）。
 fn inject_env_from_claude_settings() {
-    let path = dirs_next::home_dir()
+    let path = dirs::home_dir()
         .unwrap_or_else(|| std::path::PathBuf::from("."))
         .join(".claude")
         .join("settings.json");
@@ -897,7 +897,7 @@ fn main() -> Result<()> {
                         TrustAction::Status => cli_plugin::run_plugin_trust_status(),
                     },
                     PluginAction::Cleanup => {
-                        let claude_dir = dirs_next::home_dir()
+                        let claude_dir = dirs::home_dir()
                             .unwrap_or_else(|| std::path::PathBuf::from("."))
                             .join(".claude");
                         cli_plugin::run_plugin_cleanup(&claude_dir).await

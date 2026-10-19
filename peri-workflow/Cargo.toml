@@ -23,7 +23,7 @@ dashmap = "6"
 indexmap = { version = "2", features = ["serde"] }
 chrono.workspace = true
 tempfile.workspace = true
-dirs-next.workspace = true
+dirs.workspace = true
 
 [dev-dependencies]
 serial_test.workspace = true

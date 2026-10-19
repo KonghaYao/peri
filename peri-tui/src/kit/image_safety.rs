@@ -136,7 +136,7 @@ pub enum ImageSafetyError {
 /// （base64 直进 `PENDING_ATTACHMENTS`，不落盘，见 `input_area/paste.rs`），
 /// 因此新粘贴的图片不会出现在这里，也没有需要清理的临时文件。
 pub fn managed_images_root() -> PathBuf {
-    dirs_next::home_dir()
+    dirs::home_dir()
         .unwrap_or_else(|| PathBuf::from("."))
         .join(".peri")
         .join("images")

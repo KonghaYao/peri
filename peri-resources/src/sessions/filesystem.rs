@@ -83,7 +83,7 @@ impl FilesystemThreadStore {
 
     /// 使用默认路径 `~/.peri/threads/` 创建
     pub fn default_path() -> Result<Self> {
-        let dir = dirs_next::home_dir()
+        let dir = dirs::home_dir()
             .context("无法获取 home 目录")?
             .join(".peri")
             .join("threads");

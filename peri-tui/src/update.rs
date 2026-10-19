@@ -97,7 +97,7 @@ async fn stream_output(child: &mut tokio::process::Child) -> Result<()> {
 }
 
 fn read_installed_version() -> Result<String> {
-    let version_file = dirs_next::home_dir()
+    let version_file = dirs::home_dir()
         .unwrap_or_else(|| std::path::PathBuf::from("."))
         .join(".peri")
         .join("current-version.txt");

@@ -90,7 +90,7 @@ use crate::{
 // ── 夹具 1：HOME 重定向（进程级 env ⇒ 必须 `#[serial]`）────────────────────────
 
 /// 把 `HOME` 重定向到临时目录：`config_path()`（`~/.peri/settings.json`）、
-/// `dirs_next::home_dir()` 的插件目录都跟随 `HOME`，否则用例会读开发者本机配置。
+/// `dirs::home_dir()` 的插件目录都跟随 `HOME`，否则用例会读开发者本机配置。
 ///
 /// 与 wave 1 夹具（`WireHomeRedirect`）同形但不共享（那个是私有类型）；两者都要求
 /// 调用方标 `#[serial]`——HOME 是进程全局状态，`serial_test` 保证带该属性的用例

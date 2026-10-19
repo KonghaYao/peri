@@ -28,8 +28,8 @@ tokio.workspace = true
 tokio-util = { workspace = true }
 glob = "0.3"
 gray_matter = "0.3"
-dirs-next.workspace = true
-serde_yaml.workspace = true
+dirs.workspace = true
+serde_norway.workspace = true
 chrono.workspace = true
 uuid.workspace = true
 tracing.workspace = true

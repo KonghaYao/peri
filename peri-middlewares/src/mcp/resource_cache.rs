@@ -103,7 +103,7 @@ struct CacheEntry {
 
 impl McpResourceCache {
     pub(crate) fn new() -> Self {
-        let base = dirs_next::home_dir().unwrap_or_else(std::env::temp_dir);
+        let base = dirs::home_dir().unwrap_or_else(std::env::temp_dir);
         Self::from_root(base.join(".peri").join("cache").join("mcp").join("v2"))
     }
 

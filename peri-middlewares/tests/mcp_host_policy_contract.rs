@@ -27,7 +27,7 @@
 //!    归 **D-02**（crate 内 `mcp_v4_seam_test.rs`）与 **B-07**（`peri-acp` host seam）。
 //! 2. **`run_initialize` 驱动的配置 → 提升接线**在本层不可用：它是唯一会发布
 //!    `SystemMcpManifest::Loaded` + system 依赖的 public 入口，但内部按
-//!    `dirs_next::home_dir()/.peri/settings.json` 解析全局配置，没有可注入 seam
+//!    `dirs::home_dir()/.peri/settings.json` 解析全局配置，没有可注入 seam
 //!    （`load_merged_config_full_with_paths` 不对外）。在进程内跑它等于读开发机上
 //!    真实的 MCP 配置并连真实 server（含凭据），因此本文件**不**调用它。该接线证据
 //!    同样归 **B-07** 的隔离 HOME host 场景；本文件记录为 BLOCKED。

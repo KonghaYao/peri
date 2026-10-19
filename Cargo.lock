@@ -1114,15 +1114,6 @@ dependencies = [
  "dirs-sys",
 ]
 [[package]]
-name = "dirs-next"
-version = "2.0.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "b98cf8ebf19c3d1b223e151f99a4f9f0690dca41414773390fc824184ac833e1"
-dependencies = [
- "cfg-if",
- "dirs-sys-next",
-]
-[[package]]
 name = "dirs-sys"
 version = "0.5.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1130,18 +1121,8 @@ checksum = "e01a3366d27ee9890022452ee61b2b63a67e6f13f58900b651ff5665f0bb1fab"
 dependencies = [
  "libc 0.2.189",
  "option-ext",
- "redox_users 0.5.2",
- "windows-sys 0.59.0",
-]
-[[package]]
-name = "dirs-sys-next"
-version = "0.1.2"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "4ebda144c4fe02d1f7ea1a7d9641b6fc6b580adcfa024ae48797ecdeb6825b4d"
-dependencies = [
- "libc 0.2.189",
- "redox_users 0.4.6",
- "winapi",
+ "redox_users",
+ "windows-sys 0.60.2",
 ]
 [[package]]
 name = "dispatch2"
@@ -1412,15 +1393,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "cb4cb245038516f5f85277875cdaa4f7d2c9a0fa0468de06ed190163b1581fcf"
 dependencies = [
  "percent-encoding",
-]
-[[package]]
-name = "fs2"
-version = "0.4.3"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "9564fc758e15025b46aa6643b1b77d047d1a56a1aea6e01002ac0c7026876213"
-dependencies = [
- "libc 0.2.189",
- "winapi",
 ]
 [[package]]
 name = "fs_extra"
@@ -2348,7 +2320,7 @@ dependencies = [
  "bytes",
  "chrono",
  "flate2",
- "fs2",
+ "fs4",
  "futures",
  "mockito",
  "peri-time",
@@ -2914,7 +2886,7 @@ dependencies = [
  "async-trait",
  "chrono",
  "dashmap",
- "dirs-next",
+ "dirs 7.0.0",
  "futures",
  "langfuse-client",
  "mockito",
@@ -2975,7 +2947,7 @@ dependencies = [
  "anyhow",
  "async-trait",
  "chrono",
- "dirs-next",
+ "dirs 7.0.0",
  "futures",
  "libc 0.2.189",
  "parking_lot",
@@ -3001,7 +2973,7 @@ dependencies = [
 name = "peri-config"
 version = "0.2.0"
 dependencies = [
- "dirs-next",
+ "dirs 7.0.0",
  "peri-acp-types",
  "peri-mcp-config",
  "serde",
@@ -3075,7 +3047,7 @@ version = "0.2.0"
 dependencies = [
  "base64 0.22.1",
  "chrono",
- "fs2",
+ "fs4",
  "futures",
  "libc 0.2.189",
  "parking_lot",
@@ -3087,7 +3059,7 @@ dependencies = [
  "rmcp",
  "serde",
  "serde_json",
- "serde_yaml",
+ "serde_norway",
  "tempfile",
  "thiserror 2.0.20",
  "tokio",
@@ -3099,8 +3071,8 @@ dependencies = [
 name = "peri-mcp-config"
 version = "0.2.0"
 dependencies = [
- "dirs-next",
- "fs2",
+ "dirs 7.0.0",
+ "fs4",
  "peri-acp-types",
  "peri-time",
  "rmcp",
@@ -3119,7 +3091,7 @@ dependencies = [
  "rmcp",
  "serde",
  "serde_json",
- "serde_yaml",
+ "serde_norway",
  "tracing",
  "uuid",
 ]
@@ -3200,7 +3172,7 @@ dependencies = [
  "base64 0.22.1",
  "chrono",
  "clap",
- "dirs-next",
+ "dirs 7.0.0",
  "filetime",
  "futures",
  "fuzzy-matcher",
@@ -3220,7 +3192,7 @@ dependencies = [
  "rmcp",
  "serde",
  "serde_json",
- "serde_yaml",
+ "serde_norway",
  "serial_test",
  "sha2 0.10.9",
  "tempfile",
@@ -3240,7 +3212,7 @@ dependencies = [
  "base64 0.23.1",
  "cacache",
  "chrono",
- "dirs-next",
+ "dirs 7.0.0",
  "filetime",
  "flate2",
  "futures",
@@ -3271,7 +3243,7 @@ dependencies = [
  "rmcp",
  "serde",
  "serde_json",
- "serde_yaml",
+ "serde_norway",
  "serial_test",
  "sha2 0.10.9",
  "shellexpand",
@@ -3320,7 +3292,7 @@ dependencies = [
  "anyhow",
  "async-trait",
  "chrono",
- "dirs-next",
+ "dirs 7.0.0",
  "js-sys",
  "peri-acp-types",
  "peri-process",
@@ -3386,7 +3358,7 @@ dependencies = [
  "base64 0.23.1",
  "chrono",
  "clap",
- "dirs-next",
+ "dirs 7.0.0",
  "fluent",
  "fluent-bundle",
  "fuzzy-matcher",
@@ -3452,7 +3424,7 @@ dependencies = [
  "async-trait",
  "chrono",
  "dashmap",
- "dirs-next",
+ "dirs 7.0.0",
  "futures",
  "indexmap 2.14.0",
  "parking_lot",
@@ -4075,16 +4047,6 @@ dependencies = [
 ]
 [[package]]
 name = "redox_users"
-version = "0.4.6"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "ba009ff324d1fc1b900bd1fdb31564febe58a8ccc8a6fdbb93b543d33b13ca43"
-dependencies = [
- "getrandom 0.2.17",
- "libredox",
- "thiserror 1.0.69",
-]
-[[package]]
-name = "redox_users"
 version = "0.5.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "a4e608c6638b9c18977b00b475ac1f28d14e84b27d8d42f70e0bf1e3dec127ac"
@@ -4562,18 +4524,6 @@ dependencies = [
  "syn 2.0.119",
 ]
 [[package]]
-name = "serde_yaml"
-version = "0.9.34+deprecated"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "6a8b1a1a2ebf674015cc02edccce75287f1a0130d394307b36743c2f5d504b47"
-dependencies = [
- "indexmap 2.14.0",
- "itoa",
- "ryu",
- "serde",
- "unsafe-libyaml",
-]
-[[package]]
 name = "serial_test"
 version = "4.0.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -4660,7 +4610,7 @@ version = "3.1.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "32824fab5e16e6c4d86dc1ba84489390419a39f97699852b66480bb87d297ed8"
 dependencies = [
- "dirs",
+ "dirs 6.0.0",
 ]
 [[package]]
 name = "shlex"
@@ -5799,11 +5749,6 @@ version = "0.2.6"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "ebc1c04c71510c7f702b52b7c350734c9ff1295c464a03335b00bb84fc54f853"
 [[package]]
-name = "unsafe-libyaml"
-version = "0.2.11"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "673aac59facbab8a9007c7f6108d11f63b603f7cabff99fabf650fea5c32b861"
-[[package]]
 name = "untrusted"
 version = "0.9.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -6595,3 +6540,37 @@ checksum = "27bc9d5b815bc103f142aa054f561d9187d191692ec7c2d1e2b4737f8dbd7296"
 dependencies = [
  "zune-core",
 ]
+[[package]]
+name = "dirs"
+version = "7.0.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "8d57d423b3c82e89b9a24ca3091fee61f456a26edbd28d26c65906f4bc1dcd8f"
+dependencies = [
+ "dirs-sys",
+]
+[[package]]
+name = "fs4"
+version = "1.1.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "7e72ed92b67c146290f88e9c89d60ca163ea417a446f61ffd7b72df3e7f1dfd5"
+dependencies = [
+ "rustix 1.1.4",
+ "windows-sys 0.61.2",
+]
+[[package]]
+name = "serde_norway"
+version = "0.9.42"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "e408f29489b5fd500fab51ff1484fc859bb655f32c671f307dcd733b72e8168c"
+dependencies = [
+ "indexmap 2.14.0",
+ "itoa",
+ "ryu",
+ "serde",
+ "unsafe-libyaml-norway",
+]
+[[package]]
+name = "unsafe-libyaml-norway"
+version = "0.2.15"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "b39abd59bf32521c7f2301b52d05a6a2c975b6003521cbd0c6dc1582f0a22104"

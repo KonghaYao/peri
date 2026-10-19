@@ -61,7 +61,7 @@ uuid.workspace = true
 chrono.workspace = true
 dashmap = "6"
 tokio-util.workspace = true
-dirs-next.workspace = true
+dirs.workspace = true
 url.workspace = true
 sha2.workspace = true
 

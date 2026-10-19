@@ -32,7 +32,7 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use fs2::FileExt;
+use fs4::FileExt;
 
 use crate::spool::error::SpoolError;
 use crate::spool::sealed;
@@ -270,13 +270,16 @@ fn ensure_layout(inner: &NativeInner) -> SpoolResult<()> {
 fn probe_durable_io(inner: &NativeInner) -> SpoolResult<()> {
     let probe =
         create_private_file(&inner.domain_lock_path()).map_err(|_| SpoolError::Unavailable)?;
-    match probe.try_lock_exclusive() {
+    match FileExt::try_lock(&probe) {
         Ok(()) => {}
-        Err(error) if is_lock_contention(&error) => {}
-        Err(_) => return Err(SpoolError::Unavailable),
+        Err(error) => {
+            if !is_lock_contention(&io::Error::from(error)) {
+                return Err(SpoolError::Unavailable);
+            }
+        }
     }
     probe.sync_all().map_err(|_| SpoolError::Unavailable)?;
-    let _ = probe.unlock();
+    let _ = FileExt::unlock(&probe);
     Ok(())
 }
 
@@ -370,10 +373,16 @@ pub(crate) fn try_lock_file(path: &Path) -> io::Result<LockAttempt> {
         Err(error) if is_concurrent_dir_removal(&error) => return Ok(LockAttempt::Gone),
         Err(error) => return Err(error),
     };
-    match file.try_lock_exclusive() {
+    match FileExt::try_lock(&file) {
         Ok(()) => Ok(LockAttempt::Free(file)),
-        Err(error) if is_lock_contention(&error) => Ok(LockAttempt::Held),
-        Err(error) => Err(error),
+        Err(error) => {
+            let error = io::Error::from(error);
+            if is_lock_contention(&error) {
+                Ok(LockAttempt::Held)
+            } else {
+                Err(error)
+            }
+        }
     }
 }
 

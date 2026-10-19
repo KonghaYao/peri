@@ -40,7 +40,7 @@ pub(crate) fn frontmatter_json(
     content: &str,
 ) -> Option<serde_json::Map<String, serde_json::Value>> {
     let (frontmatter, _) = split_frontmatter(content)?;
-    let value: serde_yaml::Value = serde_yaml::from_str(frontmatter).ok()?;
+    let value: serde_norway::Value = serde_norway::from_str(frontmatter).ok()?;
     let json = yaml_to_json(value)?;
     match json {
         serde_json::Value::Object(map) => Some(map),
@@ -63,17 +63,17 @@ pub(crate) fn frontmatter_summary(
     Some((name.to_string(), description.trim().to_string()))
 }
 
-/// `serde_yaml::Value` → `serde_json::Value`。
+/// `serde_norway::Value` → `serde_json::Value`。
 ///
 /// - 非字符串 mapping key 仅接受标量（String / Number / Bool）并转为字符串，
 ///   其他形态的 key 丢弃该 entry（JSON 无法表达；不影响 `name`/`description`
 ///   等标量字段的常规用法）；
 /// - `Tagged`（`!tag value`）取内部值，不保留 tag 名（JSON 无对应语义）。
-fn yaml_to_json(value: serde_yaml::Value) -> Option<serde_json::Value> {
+fn yaml_to_json(value: serde_norway::Value) -> Option<serde_json::Value> {
     Some(match value {
-        serde_yaml::Value::Null => serde_json::Value::Null,
-        serde_yaml::Value::Bool(b) => serde_json::Value::Bool(b),
-        serde_yaml::Value::Number(number) => {
+        serde_norway::Value::Null => serde_json::Value::Null,
+        serde_norway::Value::Bool(b) => serde_json::Value::Bool(b),
+        serde_norway::Value::Number(number) => {
             if let Some(i) = number.as_i64() {
                 serde_json::Value::Number(i.into())
             } else if let Some(u) = number.as_u64() {
@@ -83,27 +83,27 @@ fn yaml_to_json(value: serde_yaml::Value) -> Option<serde_json::Value> {
                 serde_json::Number::from_f64(f).map(serde_json::Value::Number)?
             }
         }
-        serde_yaml::Value::String(s) => serde_json::Value::String(s),
-        serde_yaml::Value::Sequence(items) => serde_json::Value::Array(
+        serde_norway::Value::String(s) => serde_json::Value::String(s),
+        serde_norway::Value::Sequence(items) => serde_json::Value::Array(
             items
                 .into_iter()
                 .map(yaml_to_json)
                 .collect::<Option<Vec<_>>>()?,
         ),
-        serde_yaml::Value::Mapping(mapping) => {
+        serde_norway::Value::Mapping(mapping) => {
             let mut object = serde_json::Map::with_capacity(mapping.len());
             for (key, item) in mapping {
                 let key = match key {
-                    serde_yaml::Value::String(s) => s,
-                    serde_yaml::Value::Number(n) => n.to_string(),
-                    serde_yaml::Value::Bool(b) => b.to_string(),
+                    serde_norway::Value::String(s) => s,
+                    serde_norway::Value::Number(n) => n.to_string(),
+                    serde_norway::Value::Bool(b) => b.to_string(),
                     _ => continue,
                 };
                 object.insert(key, yaml_to_json(item)?);
             }
             serde_json::Value::Object(object)
         }
-        serde_yaml::Value::Tagged(tagged) => yaml_to_json(tagged.value)?,
+        serde_norway::Value::Tagged(tagged) => yaml_to_json(tagged.value)?,
     })
 }
 
