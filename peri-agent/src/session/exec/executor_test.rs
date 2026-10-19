@@ -254,7 +254,6 @@ fn make_session_context(session_id: &str) -> SessionContext {
         tool_search_index: Arc::new(NoopToolSearch),
         shared_tools: Arc::new(parking_lot::RwLock::new(Default::default())),
         agent_catalog: Arc::new(NoopSkills),
-        workflow_notifications: None,
         event_publisher: Arc::new(NoopEventPublisher),
         subscribe: Arc::new(|| Box::new(NoopSubscriber)),
         command_lookup: Arc::new(|_| None),

@@ -3886,7 +3886,6 @@ dependencies = [
  "peri-acp",
  "peri-acp-types",
  "peri-config",
- "peri-mcp-cron",
  "peri-middlewares",
  "peri-resources",
  "peri-theme",

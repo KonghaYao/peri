@@ -51,6 +51,23 @@ async fn production_startup_path_connects_both_builtin_instances() {
             "{} 的 live tools/list 必须按声明顺序返回注册表工具",
             instance.name
         );
+        let bridges: Vec<_> = build_typed_tool_bridges(&pool)
+            .into_iter()
+            .filter(|tool| tool.builtin_mcp_instance() == Some(instance.name))
+            .collect();
+        assert_eq!(bridges.len(), instance.tools.len());
+        for bridge in bridges {
+            let declaration = instance
+                .tools
+                .iter()
+                .find(|tool| tool.effective_name == bridge.name())
+                .unwrap();
+            assert_eq!(
+                bridge.visible_to_model(),
+                declaration.model_visible,
+                "真实 MCP 连接的宿主工具可见性必须与注册表一致"
+            );
+        }
         assert!(
             matches!(handle.source, Some(ConfigSource::Builtin { .. })),
             "{} 的句柄必须保留 builtin 身份",

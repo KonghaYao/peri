@@ -3,7 +3,6 @@
 use std::collections::HashMap;
 
 use thiserror::Error;
-use tracing::warn;
 
 // 3.0 批 2 波 1：协议类型迁入契约层 `peri_acp_types::workflow`
 // （`WorkflowRunStatus` / `WorkflowTaskResult`）；本模块保留 re-export 保兼容。
@@ -34,6 +33,9 @@ pub struct WorkflowTaskRegistry {
     runs: parking_lot::Mutex<HashMap<String, WorkflowRun>>,
     notification_tx: tokio::sync::broadcast::Sender<WorkflowTaskResult>,
     max_concurrent: usize,
+    observed: parking_lot::Mutex<std::collections::HashSet<String>>,
+    observed_changed: tokio::sync::Notify,
+    completions: parking_lot::Mutex<HashMap<String, WorkflowTaskResult>>,
 }
 
 impl WorkflowTaskRegistry {
@@ -43,6 +45,9 @@ impl WorkflowTaskRegistry {
             runs: parking_lot::Mutex::new(HashMap::new()),
             notification_tx,
             max_concurrent: 3,
+            observed: parking_lot::Mutex::new(std::collections::HashSet::new()),
+            observed_changed: tokio::sync::Notify::new(),
+            completions: parking_lot::Mutex::new(HashMap::new()),
         }
     }
 
@@ -100,9 +105,39 @@ impl WorkflowTaskRegistry {
         if let Some(run) = runs.get_mut(run_id) {
             run.status = result.status;
         }
-        if let Err(e) = self.notification_tx.send(result) {
-            warn!(target: "workflow", run_id = %run_id, error = %e, "registry: notification send failed (no subscribers)");
+        self.completions
+            .lock()
+            .insert(run_id.to_owned(), result.clone());
+        // Optional in-owner observers are wakeups; the retained MCP outbox is authoritative.
+        let _ = self.notification_tx.send(result);
+    }
+
+    pub fn acknowledge_observation(&self, run_id: &str) {
+        self.observed.lock().insert(run_id.to_owned());
+        self.observed_changed.notify_waiters();
+    }
+
+    /// Do not report a background start until the MCP consumer owns its projection.
+    pub async fn wait_for_observation(&self, run_id: &str) {
+        loop {
+            let changed = self.observed_changed.notified();
+            tokio::pin!(changed);
+            changed.as_mut().enable();
+            if self.observed.lock().contains(run_id) {
+                return;
+            }
+            changed.await;
         }
+    }
+
+    /// Retained until the MCP consumer confirms terminal delivery; broadcast is only an internal wakeup.
+    pub fn pending_completions(&self) -> Vec<WorkflowTaskResult> {
+        self.completions.lock().values().cloned().collect()
+    }
+
+    pub fn acknowledge_completion(&self, run_id: &str) {
+        self.acknowledge_observation(run_id);
+        self.completions.lock().remove(run_id);
     }
 
     /// 终止指定 workflow，移除记录并发送 kill 信号。

@@ -5,7 +5,6 @@ use peri_acp_types::permission::SharedPermissionMode;
 use peri_acp_types::plugin::PluginLoadResult;
 use peri_acp_types::session_resources::SessionResources;
 
-use super::cron_state::CronState;
 use crate::config::PeriConfig;
 
 /// `ServiceRegistry` 中共享的配置类型：单一来源（Single Source of Truth）。
@@ -141,7 +140,6 @@ pub struct ServiceRegistry {
     pub permission_mode: Arc<SharedPermissionMode>,
     /// 会话资源门面：Agent transcript/subagent、middleware 与协议面的唯一会话行为入口。
     pub session_resources: Arc<dyn SessionResources>,
-    pub cron: CronState,
     pub plugin_data: Option<PluginLoadResult>,
     /// 进程内存监控（2s 刷新）
     pub resource_monitor: parking_lot::Mutex<ProcessResourceMonitor>,

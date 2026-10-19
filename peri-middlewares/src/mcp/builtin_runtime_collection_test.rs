@@ -67,10 +67,15 @@ fn pool_with_builtin_instances() -> Arc<McpClientPool> {
         "artifact".to_string(),
         connected_handle("artifact", &["artifact"]),
     );
-    pool.clients.write().insert(
-        "cron".to_string(),
-        connected_handle("cron", &["cron_register", "cron_list", "cron_remove"]),
-    );
+    let cron_tools: Vec<&str> = peri_acp_types::builtin_mcp::find("cron")
+        .unwrap()
+        .tools
+        .iter()
+        .map(|tool| tool.original_name)
+        .collect();
+    pool.clients
+        .write()
+        .insert("cron".to_string(), connected_handle("cron", &cron_tools));
     let workspace_tools: Vec<&str> = peri_acp_types::builtin_mcp::find("workspace")
         .expect("workspace 已实现（wave 3）")
         .tools
@@ -137,6 +142,15 @@ fn builtin_tools_are_collected_with_declared_direct() {
                 Some(declaration.direct),
                 "{} 的 direct 必须等于注册表声明（IF-D13）",
                 declaration.effective_name
+            );
+            assert_eq!(
+                tools
+                    .iter()
+                    .find(|tool| tool.name() == declaration.effective_name)
+                    .unwrap()
+                    .visible_to_model(),
+                declaration.model_visible,
+                "宿主专用工具不得进入模型可见目录"
             );
         }
     }

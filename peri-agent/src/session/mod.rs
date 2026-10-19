@@ -25,6 +25,7 @@
 pub mod async_router;
 pub mod bg_complete;
 pub mod config;
+pub mod cron_events;
 pub mod exec;
 pub mod factory;
 /// 对象级内存计量与诊断采样（S1）；只读诊断，不参与业务语义。
@@ -43,7 +44,6 @@ pub mod transcript;
 pub(crate) mod test_resources;
 pub mod turn;
 pub mod user_input_mailbox;
-pub mod workflow_completion;
 
 pub use config::{PermissionMode, SessionConfig, ThinkingConfig};
 /// MessageFlags 已下沉 peri-acp-types（store 契约），此处 re-export 保持兼容。

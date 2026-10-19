@@ -435,8 +435,6 @@ pub async fn run_session_loop(ctx: SessionContext, turn: TurnInput) -> PromptRes
         history_payloads,
         &ctx.session_id,
         cached_llm.as_ref(),
-        async_router.clone(),
-        task_manager_for_cmd,
         continuation,
         stage_build,
         forwarder_launcher,

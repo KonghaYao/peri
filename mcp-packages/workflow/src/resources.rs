@@ -28,6 +28,7 @@ const RUNS_PREFIX: &str = "workflow://runs/";
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum WorkflowResource {
     Runs,
+    BackgroundTasks,
     Run { run_id: String },
     RunEvents { run_id: String },
     RunTasks { run_id: String },
@@ -38,6 +39,9 @@ pub enum WorkflowResource {
 ///
 /// 只做形状解析，不校验 run 是否存在（存在性由读取正文时裁决）。
 pub fn parse_uri(uri: &str) -> Option<WorkflowResource> {
+    if uri == "workflow://background-tasks" {
+        return Some(WorkflowResource::BackgroundTasks);
+    }
     let path = uri.split('?').next().unwrap_or(uri);
     if path == RUNS_URI {
         return Some(WorkflowResource::Runs);
@@ -106,6 +110,10 @@ pub fn read_payload(runtime: &WorkflowRuntime, uri: &str) -> Result<Value, Resou
         return Err(ResourceReadError::NotSupported(uri.to_string()));
     };
     match resource {
+        WorkflowResource::BackgroundTasks => Ok(json!({
+            "snapshot": runtime.bg_registry().map(|manager| manager.snapshot()),
+            "completions": runtime.registry().pending_completions(),
+        })),
         WorkflowResource::Runs => {
             Ok(serde_json::to_value(runtime.runs_snapshot()).unwrap_or_else(|_| json!([])))
         }

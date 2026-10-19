@@ -111,6 +111,7 @@ impl ServerHandler for BuiltinServerHandler {
     ) -> Result<ListResourcesResult, McpError> {
         match self {
             Self::Web(server) => server.list_resources(request, context).await,
+            Self::Cron(server) => server.list_resources(request, context).await,
             Self::Workspace(server) => server.list_resources(request, context).await,
             #[cfg(not(target_os = "emscripten"))]
             Self::Workflow(server) => server.list_resources(request, context).await,
@@ -138,6 +139,7 @@ impl ServerHandler for BuiltinServerHandler {
     ) -> Result<ReadResourceResponse, McpError> {
         match self {
             Self::Web(server) => server.read_resource(request, context).await,
+            Self::Cron(server) => server.read_resource(request, context).await,
             Self::Workspace(server) => server.read_resource(request, context).await,
             #[cfg(not(target_os = "emscripten"))]
             Self::Workflow(server) => server.read_resource(request, context).await,

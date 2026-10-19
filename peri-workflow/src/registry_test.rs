@@ -72,6 +72,17 @@ async fn test_complete_sends_notification() {
     let result = rx.recv().await.unwrap();
     assert_eq!(result.run_id, "r1");
     assert!(result.success);
+    assert_eq!(
+        reg.pending_completions().len(),
+        1,
+        "broadcast receipt must not acknowledge MCP delivery"
+    );
+    assert_eq!(reg.pending_completions()[0].run_id, "r1");
+    reg.acknowledge_completion("unrelated");
+    assert_eq!(reg.pending_completions().len(), 1);
+    reg.acknowledge_completion("r1");
+    reg.acknowledge_completion("r1");
+    assert!(reg.pending_completions().is_empty());
 }
 
 #[tokio::test]
@@ -348,4 +359,17 @@ async fn cancellation_before_child_attachment_keeps_cleanup_running() {
         .await
         .unwrap()
         .expect("the removed row must not abort its cleanup owner");
+}
+
+#[tokio::test]
+async fn background_start_waits_for_mcp_projection_receipt() {
+    let (registry, _) = make_registry();
+    let mut pending = Box::pin(registry.wait_for_observation("run-a"));
+    assert!(futures::poll!(&mut pending).is_pending());
+    registry.acknowledge_observation("other-run");
+    assert!(futures::poll!(&mut pending).is_pending());
+    registry.acknowledge_observation("run-a");
+    pending.await;
+    // Reconnect retries may observe an acknowledgement before starting their wait.
+    registry.wait_for_observation("run-a").await;
 }

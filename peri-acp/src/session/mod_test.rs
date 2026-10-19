@@ -18,6 +18,9 @@ use crate::provider::{
 use crate::session::{SessionManager, TaskManagerFactory};
 use peri_middlewares::prelude::{PermissionMode, SharedPermissionMode};
 
+#[path = "cron_mcp_test_fixture.rs"]
+mod cron_mcp_fixture;
+
 // ── 辅助函数 ──────────────────────────────────────────────────────────────────
 
 fn make_provider_config(id: &str, model: &str) -> ProviderConfig {
@@ -40,8 +43,7 @@ async fn make_session_manager(tmp: &tempfile::TempDir) -> SessionManager {
 
 /// 构造带 cron scheduler 的 SessionManager（session 级 cron bridge 测试用）。
 ///
-/// scheduler 的 primary tx 直接丢弃（同 TUI `cron_state.rs:13` 模式）——
-/// 本测试路径不消费 primary trigger 通道，只验证 extra_trigger_txs（bridge）路径。
+/// Bridge reads a real rmcp connection; it never subscribes to scheduler channels.
 async fn make_session_manager_with_cron(
     tmp: &tempfile::TempDir,
 ) -> (
@@ -53,6 +55,7 @@ async fn make_session_manager_with_cron(
         tokio::sync::mpsc::unbounded_channel().0,
     )));
     let manager = make_manager_with_cron_option(tmp, Some(scheduler.clone())).await;
+    manager.bind_cron_mcp(Some(cron_mcp_fixture::connect(scheduler.clone()).await));
     let (continuation_tx, continuation_rx) = tokio::sync::mpsc::unbounded_channel();
     manager.bind_cron_continuation(continuation_tx);
     (manager, scheduler, continuation_rx)

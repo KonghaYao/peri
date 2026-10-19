@@ -136,7 +136,17 @@ impl RunCompletion {
             if let Some(registry) = self.registry.upgrade() {
                 registry.complete(&self.run_id, result.clone());
             }
-            // Defer delivery / bg active count remain the session consumer's responsibility.
+            // The MCP owner settles after retaining the result in its outbox. Host
+            // reminder delivery is acknowledged separately through tools/call.
+            if let Some(manager) = &completion_manager {
+                if let Err(error) = manager.settle_completed(
+                    &self.run_id,
+                    result.background_result(),
+                    Arc::new(|_, _| Ok(())),
+                ) {
+                    tracing::error!(%error, run_id = %self.run_id, "workflow owner settlement failed");
+                }
+            }
             let _ = completed_tx.send(Some(CompletedRun {
                 result,
                 stderr_tail,

@@ -8,7 +8,7 @@ use std::collections::HashMap;
 use std::sync::Arc;
 
 use parking_lot::Mutex;
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use tokio::sync::broadcast;
 use tokio_util::sync::CancellationToken;
 use tracing::warn;
@@ -41,7 +41,7 @@ pub struct TaskBaseline {
 }
 
 /// 任务状态机：`published → executing → completed | failed | cancelled`。
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum WorkflowTaskState {
     Published,
@@ -58,7 +58,7 @@ impl WorkflowTaskState {
 }
 
 /// 任务记录：发布参数 + 当前状态 + 终态结果。
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct WorkflowTaskRecord {
     pub task_id: String,
@@ -130,7 +130,7 @@ pub enum SettleOutcome {
 }
 
 /// 任务事件类型（`workflow://tasks` 与 `workflow://runs/{runId}/tasks`）。
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum WorkflowTaskEventKind {
     Published,
@@ -205,6 +205,7 @@ struct WorkflowTaskEntry {
     record: WorkflowTaskRecord,
     /// 执行中取消句柄（消费者经 [`WorkflowTaskTable::mark_executing`] 登记）。
     cancel: Option<CancellationToken>,
+    claim_id: Option<String>,
     /// 进入终态的时刻（wall clock 毫秒；仅用于保留窗口淘汰，不序列化）。
     terminal_at_ms: Option<i64>,
 }
@@ -298,6 +299,7 @@ impl WorkflowTaskTable {
             WorkflowTaskEntry {
                 record: record.clone(),
                 cancel: None,
+                claim_id: None,
                 terminal_at_ms: None,
             },
         );
@@ -346,6 +348,47 @@ impl WorkflowTaskTable {
             WorkflowTaskState::Executing => ClaimOutcome::AlreadyExecuting(entry.record.clone()),
             _ => ClaimOutcome::AlreadyTerminal(entry.record.clone()),
         }
+    }
+
+    /// Atomic, retry-safe MCP claim. Capacity and state are decided by the owner.
+    pub fn claim_for_consumer(
+        &self,
+        run_id: &str,
+        task_id: &str,
+        claim_id: &str,
+        capacity: Option<u32>,
+    ) -> Option<WorkflowTaskRecord> {
+        let mut inner = self.inner.lock();
+        let key = (run_id.to_owned(), task_id.to_owned());
+        let entry = inner.tasks.get(&key)?;
+        if entry.record.state == WorkflowTaskState::Executing
+            && entry.claim_id.as_deref() == Some(claim_id)
+        {
+            return Some(entry.record.clone());
+        }
+        if entry.record.state != WorkflowTaskState::Published {
+            return None;
+        }
+        if capacity.is_some_and(|limit| {
+            inner
+                .tasks
+                .values()
+                .filter(|entry| {
+                    entry.record.run_id == run_id
+                        && entry.record.state == WorkflowTaskState::Executing
+                })
+                .count()
+                >= limit as usize
+        }) {
+            return None;
+        }
+        let entry = inner.tasks.get_mut(&key)?;
+        entry.record.state = WorkflowTaskState::Executing;
+        entry.claim_id = Some(claim_id.to_owned());
+        entry.cancel = Some(CancellationToken::new());
+        let record = entry.record.clone();
+        self.commit_locked(&mut inner, WorkflowTaskEventKind::Executing, &record);
+        Some(record)
     }
 
     /// 单次终态提交（CAS）：只允许一次进入终态，重复提交返回既有终态。
