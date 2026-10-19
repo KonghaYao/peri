@@ -371,7 +371,6 @@ fn base_context() -> AssemblyContext {
         session_id: "session-contract-test".to_string(),
         tool_search_index: Arc::new(ToolSearchIndex::new()),
         shared_tools,
-        workflow_notifications: None,
         event_handler: Arc::new(FakeEventHandler),
         task_manager: Arc::new(TaskManager::new()),
         bg_event_tx,

@@ -344,10 +344,6 @@ pub struct AssemblyContext {
     pub tool_search_index: Arc<dyn ToolSearchPort>,
     /// 共享工具注册表（deferred tools；AskUserTool 插入、snapshot 构造）
     pub shared_tools: Arc<RwLock<BTreeMap<String, Arc<dyn BaseTool>>>>,
-    /// 会话级 workflow 完成通知源（P5：替代旧链 `WorkflowMiddlewarePort`；
-    /// 运行时状态与执行依赖归 builtin `workflow` 实例，本句柄只承载完成
-    /// 通知的订阅与单次消费门）。
-    pub workflow_notifications: Option<Arc<peri_acp_types::workflow::WorkflowNotifications>>,
     // ── 事件 / 后台 ──
     /// 事件 handler（子 agent 事件转发）
     pub event_handler: Arc<dyn AgentEventHandler>,

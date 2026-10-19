@@ -174,11 +174,11 @@ fn mw_projection_tools(pool: &Arc<McpClientPool>, disabled: &[&str]) -> Vec<Box<
         .collect_tools("/tmp/mw-projection")
 }
 
-/// 投影里某实例前缀（`mcp__{instance}__`）的工具名。
+/// 投影里某实例对模型可见的工具名；宿主工具仍可在 MCP tools/list 中发现。
 fn mw_instance_tools(tools: &[Box<dyn BaseTool>], instance: &str) -> Vec<String> {
     tools
         .iter()
-        .filter(|tool| tool.builtin_mcp_instance() == Some(instance))
+        .filter(|tool| tool.builtin_mcp_instance() == Some(instance) && tool.visible_to_model())
         .map(|tool| tool.name().to_string())
         .collect()
 }

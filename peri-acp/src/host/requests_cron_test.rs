@@ -376,20 +376,14 @@ async fn cron_deployment_registration_and_tick_are_session_scoped() {
     assert!(!cron_tool(&env_b, &b, &cwd, "cron_list", json!({}))
         .await
         .contains("session-a-marker"));
-    let visible = env_a.cfg.cron_scheduler.as_ref().unwrap().list_tasks();
+    let visible = cron_jobs(&env_a).await;
     assert_eq!(
         visible.len(),
         1,
         "MCP registration must reach the scheduler used by the session bridge: {registered}"
     );
     let task_a = visible[0].id.clone();
-    assert!(env_b
-        .cfg
-        .cron_scheduler
-        .as_ref()
-        .unwrap()
-        .list_tasks()
-        .is_empty());
+    assert!(cron_jobs(&env_b).await.is_empty());
     let sched_a = scheduler(&env_a);
     let sched_b = scheduler(&env_b);
     assert!(!Arc::ptr_eq(&sched_a, &sched_b));
@@ -451,13 +445,7 @@ async fn cron_deployment_registration_and_tick_are_session_scoped() {
 
     // Deleting a registered task prevents later ticks; closing A stops its generation.
     cron_tool(&env_a, &a, &cwd, "cron_remove", json!({"id": task_a})).await;
-    assert!(env_a
-        .cfg
-        .cron_scheduler
-        .as_ref()
-        .unwrap()
-        .list_tasks()
-        .is_empty());
+    assert!(cron_jobs(&env_a).await.is_empty());
     assert!(!sched_a.lock().force_next_fire_to_past(&task_a));
     cron_tool(
         &env_a,
@@ -467,9 +455,7 @@ async fn cron_deployment_registration_and_tick_are_session_scoped() {
         json!({"expression":"0 0 1 1 *", "prompt":"closed-marker"}),
     )
     .await;
-    let closed_task = env_a.cfg.cron_scheduler.as_ref().unwrap().list_tasks()[0]
-        .id
-        .clone();
+    let closed_task = cron_jobs(&env_a).await[0].id.clone();
     let mut observer = sched_a.lock().subscribe();
     handle_request(
         "session/close",
@@ -497,16 +483,7 @@ async fn cron_deployment_registration_and_tick_are_session_scoped() {
         json!({"expression":"0 0 1 1 *", "prompt":"session-b-marker"}),
     )
     .await;
-    assert_eq!(
-        env_b
-            .cfg
-            .cron_scheduler
-            .as_ref()
-            .unwrap()
-            .list_tasks()
-            .len(),
-        1
-    );
+    assert_eq!(cron_jobs(&env_b).await.len(), 1);
     handle_request(
         "session/close",
         &json!({"sessionId":b}),
@@ -546,7 +523,7 @@ async fn cron_deployment_without_tick_retains_manual_schedule_policy() {
         json!({"expression":"0 0 1 1 *", "prompt":"manual-marker"}),
     )
     .await;
-    let visible = env.cfg.cron_scheduler.as_ref().unwrap().list_tasks();
+    let visible = cron_jobs(&env).await;
     assert_eq!(visible.len(), 1);
     assert!(scheduler(&env)
         .lock()
@@ -563,4 +540,19 @@ async fn cron_deployment_without_tick_retains_manual_schedule_policy() {
     )
     .await
     .unwrap();
+}
+
+async fn cron_jobs(
+    env: &crate::host::workspace::SessionEnvironment,
+) -> Vec<peri_acp_types::cron::CronTaskInfo> {
+    let text = env
+        .cfg
+        .mcp_pool
+        .as_ref()
+        .unwrap()
+        .read_instance_resource("cron", "cron://jobs")
+        .await
+        .unwrap();
+    let value: serde_json::Value = serde_json::from_str(&text).unwrap();
+    serde_json::from_value(value["jobs"].clone()).unwrap()
 }

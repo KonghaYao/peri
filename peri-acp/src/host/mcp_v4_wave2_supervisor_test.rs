@@ -53,7 +53,7 @@ async fn reconnect_has_single_tick_driver() {
         .register(W2_EVERY_SECOND_CRON, TICK_PROBE_PROMPT)
         .expect("1s 粒度 cron 表达式必须被接受（计数观测的前提）");
     let cron_tools = wave2_tools("cron").to_vec();
-    let mut triggers = fixture.cron_port().subscribe();
+    let mut triggers = scheduler.lock().subscribe();
     let force_window = std::time::Duration::from_millis(FORCE_WINDOW_MS);
 
     // ── ① gen1：驱动存在（逐轮计数）──────────────────────────────────────────
@@ -152,7 +152,7 @@ async fn lifecycle_state_matrix() {
         .lock()
         .register(W2_EVERY_SECOND_CRON, LIFECYCLE_PROBE_PROMPT)
         .expect("夹具 cron 任务注册");
-    let mut triggers = fixture.cron_port().subscribe();
+    let mut triggers = scheduler.lock().subscribe();
     let AssembledHostFixture {
         dirs,
         mut cfg,

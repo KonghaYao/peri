@@ -408,46 +408,6 @@ pub struct WorkflowTaskResult {
     pub attempts: Vec<WorkflowAttempt>,
 }
 
-/// 会话级 workflow 完成通知源（P5：替代旧链 `WorkflowMiddlewarePort` 的通知面）。
-///
-/// 事实源是 `WorkflowRuntime` 持有的 broadcast 发送端（构造期由宿主注入同一
-/// 通道）；会话装配点创建本句柄并随会话状态传递：
-///
-/// - `subscribe`：执行装配（`agent_build`）订阅完成通知，把终态 run 翻译成
-///   唤醒主循环的 Defer（`apply_workflow_task_result`）；
-/// - `claim_consumer`：通知消费者**单次 spawn 门**（会话级；每会话只有一个
-///   订阅消费者，避免 broadcast 扇出造成重复投递）。
-///
-/// 本类型是数据面句柄（不承担控制面语义）：kill / resume / 状态查询一律经
-/// builtin `workflow` 实例的 MCP 面（`mcp__workflow__*` 与 `McpPoolPort`），
-/// 不再有 middleware 端口。
-pub struct WorkflowNotifications {
-    sender: tokio::sync::broadcast::Sender<WorkflowTaskResult>,
-    consumer_spawned: std::sync::atomic::AtomicBool,
-}
-
-impl WorkflowNotifications {
-    /// 以完成通知发送端构造（发送端由 `WorkflowRuntime` 与宿主共享）。
-    pub fn new(sender: tokio::sync::broadcast::Sender<WorkflowTaskResult>) -> Self {
-        Self {
-            sender,
-            consumer_spawned: std::sync::atomic::AtomicBool::new(false),
-        }
-    }
-
-    /// 订阅完成通知（每 run 一条 `WorkflowTaskResult`）。
-    pub fn subscribe(&self) -> tokio::sync::broadcast::Receiver<WorkflowTaskResult> {
-        self.sender.subscribe()
-    }
-
-    /// 通知消费者单次 spawn 门：首次调用返回 true（此后恒 false）。
-    pub fn claim_consumer(&self) -> bool {
-        !self
-            .consumer_spawned
-            .swap(true, std::sync::atomic::Ordering::SeqCst)
-    }
-}
-
 fn escape_reminder_text(input: &str) -> String {
     input
         .replace('&', "&amp;")
@@ -511,6 +471,32 @@ fn delivery_status_word(status: DeliveryStatus) -> &'static str {
 pub const LONGTEXT_EXTRACT_THRESHOLD_BYTES: usize = 200;
 
 impl WorkflowTaskResult {
+    /// Canonical background task projection, shared by owner and MCP consumer.
+    pub fn background_result(&self) -> crate::event::BackgroundTaskResult {
+        crate::event::BackgroundTaskResult {
+            task_id: self.run_id.clone(),
+            agent_name: format!("workflow:{}", self.workflow_name),
+            prompt_summary: self.workflow_name.clone(),
+            success: self.agent_facing_success(),
+            output: format!(
+                "Workflow '{}' finished with status {:?} ({}ms, {} agents, {} tool calls). \
+             Results in .claude/workflow-runs/{}/state.json",
+                self.workflow_name,
+                self.status,
+                self.duration_ms,
+                self.agent_count,
+                self.tool_calls_count,
+                self.run_id
+            ),
+            tool_calls_count: self.tool_calls_count,
+            duration_ms: self.duration_ms,
+            child_thread_id: None,
+            timed_out: false,
+            subagent_failure: None,
+            shell_output: None,
+        }
+    }
+
     /// 主 Agent 是否应把 workflow 视为「成功交付」（非仅 engine 跑完）。
     pub fn agent_facing_success(&self) -> bool {
         self.status == WorkflowRunStatus::Completed

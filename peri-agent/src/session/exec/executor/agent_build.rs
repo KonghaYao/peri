@@ -3,11 +3,10 @@ use std::sync::Arc;
 use peri_acp_types::{
     event::{AgentEventHandler, BackgroundTaskResult, ExecutorEvent},
     frozen::ThreadPersistence,
-    tasks::{BgTaskKind, TaskManager},
+    tasks::BgTaskKind,
 };
 
 use crate::agent::react::AgentInput;
-use crate::session::async_router::AsyncRouter;
 use crate::session::exec::executor_helpers::{
     build_and_execute_agent_v2, ExecOutcome, ForwarderLauncherFn, StageBuildFn, V2ExecuteRequest,
 };
@@ -34,8 +33,6 @@ pub(super) async fn build_and_execute_agent(
     history_payloads: Vec<peri_acp_types::store::PersistedPayload>,
     session_id: &str,
     cached_llm: Option<&CachedLlmInstances>,
-    async_router: AsyncRouter,
-    task_manager: Arc<dyn TaskManager>,
     continuation: bool,
     stage_build: StageBuildFn,
     forwarder_launcher: ForwarderLauncherFn,
@@ -110,50 +107,6 @@ pub(super) async fn build_and_execute_agent(
                 publisher.publish_event(&sid, &source, event);
             }
         }));
-
-    // Session 级 workflow 完成通知消费者（单次 spawn）。
-    // 单路径：
-    //   Path B (Agent): 通过 AsyncRouter → InboxHandle → push_defer（Defer kind）→ End 阶段唤醒新 turn。
-    // TUI 侧通知由 registry 通道提供（registry.complete → BgRegistryEvent::Completed →
-    // bg-task-completed unstable event），不再经 EventSink 直推 BackgroundTaskCompleted——
-    // 该映射在 event_sink 是死路径（S5.1，issue 2026-08-05-background-task-completed-event-dead-path）。
-    //
-    // P5：通知源改为契约层句柄 [`peri_acp_types::workflow::WorkflowNotifications`]
-    //（旧链 `WorkflowMiddlewarePort` 已删除；bg registry 注入移到宿主会话装配点，
-    // 与运行时创建同一处）。`claim_consumer()` 是会话级 set-once 门：每 session
-    // 只 spawn 一个消费者，避免 broadcast 扇出造成重复 Defer。
-    if let Some(notifications) = ctx.workflow_notifications.as_ref() {
-        if notifications.claim_consumer() {
-            let mut rx = notifications.subscribe();
-            let wf_router = async_router.clone();
-            // task_manager 用于在 Defer 入队后递减 active_count，消除竞态窗口
-            let notify_bg = task_manager.clone();
-            tokio::spawn(async move {
-                loop {
-                    match rx.recv().await {
-                        Ok(task_result) => {
-                            if let Err(error) =
-                                crate::session::workflow_completion::apply_workflow_task_result(
-                                    &task_result,
-                                    &wf_router,
-                                    notify_bg.as_ref(),
-                                )
-                            {
-                                tracing::error!(run_id = %task_result.run_id, %error, "workflow terminal delivery is pending");
-                            }
-                        }
-                        Err(tokio::sync::broadcast::error::RecvError::Lagged(n)) => {
-                            tracing::warn!("WF notification consumer lagged by {} messages", n);
-                            continue;
-                        }
-                        Err(tokio::sync::broadcast::error::RecvError::Closed) => {
-                            break; // session 结束，自然退出
-                        }
-                    }
-                }
-            });
-        }
-    }
 
     // 从 session_access 获取 goal_state（实现 GoalController trait）
     let goal_controller: Option<Arc<dyn peri_acp_types::goal::GoalController>> = ctx

@@ -62,7 +62,7 @@ async fn wave2_ready_gate_matrix() {
             faces.direct
         );
     }
-    for name in declared_effective_names("cron") {
+    for name in declared_model_visible_effective_names("cron") {
         assert!(
             faces.searched.iter().any(|tool| tool == name),
             "cron 在 1R 前 ready ⇒ `{name}` 必须落在搜索面: {:?}",

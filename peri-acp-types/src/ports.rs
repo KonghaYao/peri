@@ -259,6 +259,15 @@ pub trait McpPoolPort: Send + Sync {
         false
     }
 
+    /// 池内是否存在指定实例的注册句柄（仅连接状态，不读取 MCP 业务数据）。
+    ///
+    /// 宿主生命周期（如 workflow 消费者）必须在实例实际装配后才启动。默认
+    /// `true` 保持未声明该能力的替换实现的既有行为；`McpClientPool` 按客户端
+    /// 表精确回答。
+    fn has_instance(&self, _instance: &str) -> bool {
+        true
+    }
+
     /// Synchronously close task/callback/commit admission before external task
     /// owners are joined. Idempotent.
     fn begin_shutdown(&self) {}

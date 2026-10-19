@@ -14,9 +14,6 @@ pub use panel_types::PanelKind;
 
 pub mod setup_wizard;
 
-mod cron_state;
-pub use cron_state::CronState;
-
 // ── Services ───────────────────────────────────────────────────────────────────
 mod provider;
 
@@ -94,10 +91,6 @@ impl App {
         // 业务句柄进服务注册表，部署关闭权留在 App（non-Clone），由宿主装配消费。
         let (session_resources, session_store_shutdown) = resources.into_parts();
 
-        // 初始化 cron state + spawn tick task
-        let (cron_state, scheduler_arc) = CronState::new();
-        CronState::spawn_tick_task(scheduler_arc);
-
         let permission_mode = peri_acp_types::permission::SharedPermissionMode::new(
             peri_acp_types::permission::PermissionMode::Bypass,
         );
@@ -109,7 +102,6 @@ impl App {
             provider_name: provider_name.clone(),
             permission_mode: permission_mode.clone(),
             session_resources: session_resources.clone(),
-            cron: cron_state,
             plugin_data: None,
             resource_monitor: parking_lot::Mutex::new(
                 service_registry::ProcessResourceMonitor::new(),

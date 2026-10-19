@@ -154,7 +154,6 @@ where
         tool_search_index: Arc::clone(&cfg.tool_search_index),
         shared_tools: Arc::clone(&cfg.shared_tools),
         // workflow 完成通知只服务 workflow 工具面（不在蓝本内）。
-        workflow_notifications: None,
         event_handler: Arc::new(FnEventHandler(|_event| {})),
         // 会话级管理器（与 `SessionEnvironment::task_manager` 同一实例）：
         // 后台 hook 因此进入会话任务作用域，随会话关闭 drain。

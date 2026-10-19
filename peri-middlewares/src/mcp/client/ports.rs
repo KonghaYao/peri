@@ -30,6 +30,10 @@ impl peri_acp_types::ports::McpPoolPort for McpClientPool {
             .is_some_and(|manager| manager.has_unsettled_external())
     }
 
+    fn has_instance(&self, instance: &str) -> bool {
+        McpClientPool::get_client(self, instance).is_some()
+    }
+
     fn bind_agent_session(
         &self,
         session_id: &str,

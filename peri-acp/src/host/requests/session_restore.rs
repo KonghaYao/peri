@@ -260,12 +260,6 @@ pub(crate) async fn prepare_existing(
                 recall_items: Vec::new(),
                 agent_pool: crate::session::agent_pool::AgentPool::new(),
                 // Emscripten：无本地 workflow 运行时 ⇒ 无完成通知源。
-                #[cfg(not(target_os = "emscripten"))]
-                workflow_notifications: workflow_chain
-                    .as_ref()
-                    .map(|chain| Arc::clone(&chain.notifications)),
-                #[cfg(target_os = "emscripten")]
-                workflow_notifications: None,
                 title: None,
                 tags: Vec::new(),
             }),

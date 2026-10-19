@@ -80,7 +80,7 @@ Workflow 是目前唯一仍以「middleware 槽位 + 私有 wire 协议」接入
 
 `peri-acp-types/src/builtin_mcp.rs` 新增：
 
-- `WORKFLOW_TOOLS`：4 个工具声明（3 个模型面 `direct: false` + 1 个 host-only）。
+- `WORKFLOW_TOOLS`：9 个工具声明（3 个模型面 `direct: false` + 6 个鉴权 host-only）。
 - `BUILTIN_MCP_INSTANCES` 条目：`name = "workflow"`、`policy_key = "WorkflowMiddleware"`（沿用现有键，用户配置兼容）。
 - `BUILTIN_RESERVED_INSTANCE_NAMES` 增 `"workflow"`。
 - `BuiltinMcpTool` 新增 `model_visible: bool`（host-only 支持；现表内其余实例默认 `true`）。
@@ -147,7 +147,7 @@ published ──► executing ──► completed | failed | cancelled
 
 1. Node 引擎 `agent()` 调用发布任务：`agent/task`（通知，`{ taskId, runId, agentId, prompt, schema, model, maxTokens, agentType, isolation, allowedTools, label, phase }`）。
 2. `WorkflowRuntime` 登记任务（taskId 唯一）→ 状态 `published` → 追加 `workflow://tasks` 与 `workflow://runs/{runId}/tasks` 事件 → 发 `resources/updated`。
-3. 消费者收到唤醒 → read → 逐任务进入 `executing`：用会话执行依赖运行 `WorkflowAgentExecutor`（保留 workflow capability 投影、skill 预载、agent definition 解析、过滤链）→ 调 `WorkflowAgentResult` 回填。
+3. 消费者收到唤醒 → read → 经 `WorkflowAgentClaim`（稳定 claimId，同一临界区容量判定）逐任务进入 `executing`：用会话执行依赖运行 `WorkflowAgentExecutor`（保留 workflow capability 投影、skill 预载、agent definition 解析、过滤链）→ 调 `WorkflowAgentResult` 回填。
 4. `WorkflowRuntime` 提交终态 → 追加任务事件 → 将 `AgentRunResult` 投递回 Node 等待方（`agent/result`）。
 5. 并发：消费者**有界并发**（与 run `maxConcurrency`/limits 同一执行权威，不另立计数）；排队任务在达到上限时不进入 `executing`，取消可作用于排队或执行中任务。
 
@@ -224,3 +224,13 @@ published ──► executing ──► completed | failed | cancelled
 
 - journal 落盘归属（工作区工具环境 vs Session Store）：保持现状，独立裁决（`2026-10-11-module-dependency-boundary-audit.md` 第 2 项）。
 - Node 引擎独立分发为外部 MCP server：本设计在同语义上保留升级路径（`agent/task`/`agent/result` ↔ 标准资源/工具），不在本范围实施。
+
+## MCP 数据边界收口（2026-10-19）
+
+- `WorkflowInstanceInput` 为实例绑定独立执行管理器；Host 任务目录不注入内核。
+- Host 通过 `workflow://background-tasks` 读取后台任务快照与待确认完成结果，重建外部任务投影。完成结果先交付会话，再调用鉴权的 `WorkflowCompletionAck`；断线与拒收不确认，重复扫描沿稳定终态身份去重。不再共享业务 broadcast。
+- `WorkflowAgentClaim`、`WorkflowConsumerReady`、`WorkflowCompletionAck`、`WorkflowClose` 与 `WorkflowAgentResult` 采用同一消费者 `_meta` 能力令牌。领取、就绪、取消、完成和关闭均经过 MCP，不通过进程内任务表接口。
+- `WorkflowClose` 密封准入并等待实例执行管理器清理；Host 在协议确认成功、补读终态后停止投影与消费者，最后释放 MCP 池。失败返回未完成，保留重试能力。
+- 待确认结果为当前实例内存状态，服务端进程崩溃后的恢复不在本变更保证范围内。
+
+- 后台启动响应须等待 `WorkflowTaskObserved`（运行中已登记）或完成确认（终态已交付）；协议确认前不向主循环宣称后台工作已移交。等待超时显式报错并请求取消，保留实际 run 身份。

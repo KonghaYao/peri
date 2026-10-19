@@ -187,6 +187,7 @@ fn declared_effective_names(instance: &BuiltinMcpInstance) -> Vec<String> {
     instance
         .tools
         .iter()
+        .filter(|tool| tool.model_visible)
         .map(|tool| tool.effective_name.to_string())
         .collect()
 }

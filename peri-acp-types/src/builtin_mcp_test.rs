@@ -240,8 +240,8 @@ fn find_hits_only_implemented_instances() {
     assert_eq!(cron.name, "cron");
     assert_eq!(
         cron.tools.len(),
-        3,
-        "cron_register / cron_list / cron_remove"
+        5,
+        "cron_register / cron_list / cron_remove / cron_toggle / cron_acknowledge"
     );
     let workspace = find("workspace").expect("workspace 是已实现实例（AW3-06）");
     assert_eq!(workspace.name, "workspace");
@@ -440,4 +440,23 @@ fn builtin_source_cannot_be_forged_from_wire() {
         "source 是运行时标记，不得进入 wire: {json}"
     );
     assert_eq!(json["command"], serde_json::json!("npx"));
+}
+
+#[test]
+fn completion_and_consumer_commands_never_enter_model_tool_catalog() {
+    for instance in BUILTIN_MCP_INSTANCES {
+        for tool in instance.tools {
+            if matches!(
+                tool.original_name,
+                "cron_acknowledge"
+                    | "WorkflowTaskObserved"
+                    | "WorkflowAgentClaim"
+                    | "WorkflowConsumerReady"
+                    | "WorkflowCompletionAck"
+                    | "WorkflowClose"
+            ) {
+                assert!(!tool.model_visible && !tool.direct);
+            }
+        }
+    }
 }

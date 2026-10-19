@@ -294,7 +294,6 @@ async fn test_stage_completion_reminders_share_assembled_task_manager() {
                 dynamic_mcp_projection: Arc::new(parking_lot::Mutex::new(None)),
                 tool_search_index: Arc::new(ToolSearchIndex::new()),
                 shared_tools: Arc::new(RwLock::new(BTreeMap::new())),
-                workflow_notifications: None,
                 session_resources: None,
                 thread_id: None,
                 model_name: "test".into(),

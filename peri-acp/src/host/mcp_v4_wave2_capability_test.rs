@@ -172,7 +172,13 @@ async fn off_has_zero_builtin_injection() {
     assert_instance_ready(
         &fixture.pool,
         "cron",
-        &["cron_register", "cron_list", "cron_remove"],
+        &[
+            "cron_register",
+            "cron_list",
+            "cron_remove",
+            "cron_toggle",
+            "cron_acknowledge",
+        ],
     );
     let observed = collect_triggers(&mut triggers, std::time::Duration::from_secs(3)).await;
     assert!(

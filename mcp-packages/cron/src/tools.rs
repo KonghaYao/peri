@@ -192,6 +192,100 @@ impl BaseTool for CronRemoveTool {
     }
 }
 
+/// The same state transition is used by MCP callers and the ACP cron panel.
+pub struct CronToggleTool {
+    scheduler: Arc<Mutex<CronScheduler>>,
+}
+
+impl CronToggleTool {
+    pub fn new(scheduler: Arc<Mutex<CronScheduler>>) -> Self {
+        Self { scheduler }
+    }
+}
+
+#[async_trait]
+impl BaseTool for CronToggleTool {
+    fn name(&self) -> &str {
+        "cron_toggle"
+    }
+
+    fn description(&self) -> &str {
+        "Toggle a registered cron task between enabled and disabled by its ID."
+    }
+
+    fn parameters(&self) -> Value {
+        serde_json::json!({
+            "type": "object",
+            "properties": {"id": {"type": "string", "minLength": 1}},
+            "required": ["id"]
+        })
+    }
+
+    async fn invoke(
+        &self,
+        input: Value,
+        _ctx: peri_agent::tools::ToolContext<'_>,
+    ) -> Result<String, Box<dyn std::error::Error + Send + Sync>> {
+        let id = input["id"]
+            .as_str()
+            .filter(|id| !id.is_empty())
+            .ok_or("missing id field")?;
+        let mut scheduler = self.scheduler.lock();
+        if !scheduler.toggle(id) {
+            return Err(format!("Scheduled task {id} not found").into());
+        }
+        Ok(format!("Toggled scheduled task {id}"))
+    }
+}
+
 #[cfg(test)]
 #[path = "tools_test.rs"]
 mod tests;
+
+pub(crate) struct CronAcknowledgeTool {
+    scheduler: Arc<Mutex<CronScheduler>>,
+}
+
+impl CronAcknowledgeTool {
+    pub(crate) fn new(scheduler: Arc<Mutex<CronScheduler>>) -> Self {
+        Self { scheduler }
+    }
+}
+
+#[async_trait]
+impl BaseTool for CronAcknowledgeTool {
+    fn name(&self) -> &str {
+        "cron_acknowledge"
+    }
+
+    fn description(&self) -> &str {
+        "Acknowledge delivery of one pending scheduled firing. Used by the host continuation consumer."
+    }
+
+    fn parameters(&self) -> Value {
+        serde_json::json!({
+            "type":"object",
+            "properties": {"task_id":{"type":"string"}, "firing_id":{"type":"string"}},
+            "required":["task_id","firing_id"]
+        })
+    }
+
+    async fn invoke(
+        &self,
+        input: Value,
+        _ctx: peri_agent::tools::ToolContext<'_>,
+    ) -> Result<String, Box<dyn std::error::Error + Send + Sync>> {
+        let task_id = input["task_id"]
+            .as_str()
+            .filter(|id| !id.is_empty())
+            .ok_or("missing task_id")?;
+        let firing_id = input["firing_id"]
+            .as_str()
+            .filter(|id| !id.is_empty())
+            .ok_or("missing firing_id")?;
+        self.scheduler
+            .lock()
+            .acknowledge_trigger(task_id, firing_id);
+        Ok("Acknowledged".into())
+    }
+}

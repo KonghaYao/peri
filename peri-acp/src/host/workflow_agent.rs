@@ -206,23 +206,22 @@ pub(crate) fn project_workflow_system_prompt(
     template.render(&env, agent_catalog)
 }
 
-/// 会话 workflow 装配结果：运行时 + 执行依赖 + 完成通知句柄。
+/// 会话 workflow 装配结果：运行时与执行依赖。
 ///
 /// 执行依赖（executor）是该会话 workflow agent 的唯一执行入口
 /// （消费者 `WorkflowTaskConsumer` 经运行时消费任务并调用它，design §5.5）；
 /// `runtime` 绑定进 builtin `workflow` 实例槽位，MCP 工具/资源面与消费者共享同一份
-/// 状态；`notifications` 随会话状态进入执行装配（完成通知 → Defer 唤醒主循环）。
+/// 状态；完成结果通过 MCP 资源投影为 Defer 唤醒主循环。
 pub(crate) struct SessionWorkflowChain {
     pub(crate) runtime: Arc<peri_mcp_workflow::WorkflowRuntime>,
     pub(crate) executor: Arc<dyn AgentExecutor>,
-    pub(crate) notifications: Arc<peri_acp_types::workflow::WorkflowNotifications>,
 }
 
 /// 创建 session 级 workflow 装配链（session/new / load / resume 共用，GAP-05）。
 ///
 /// 编排：构造 executor（`WorkflowAgentContext` 注入面）+ progress 通道 +
 /// `WorkflowRuntime`（领域控制面，P5 起是唯一权威；旧链 middleware 已删除）。
-/// 返回链路（运行时 + 执行依赖 + 完成通知句柄）；调用方随后经
+/// 返回链路（运行时与执行依赖）；调用方随后经
 /// `attach_session_workflow` 绑定实例槽位并启动消费者。
 ///
 /// 事件发布：session 级路径与迁移前一致（`controller: None`），不启用事件
@@ -315,21 +314,17 @@ pub(crate) fn create_session_workflow_chain(
         meta_harness_disabled: frozen_data.meta_harness().disabled_middlewares.clone(),
     });
     let (notification_tx, _) = tokio::sync::broadcast::channel(32);
-    // P5：运行时是会话的权威控制面（MCP 实例绑定它、消费者消费它）。
-    // 通知发送端与运行时共享同一通道：`WorkflowNotifications` 句柄随会话状态
-    // 传递，执行装配据此订阅完成通知（bg registry 注入在 attach 处完成）。
+    // Runtime business broadcasts stay inside the MCP owner. The Host reads
+    // retained completion results through workflow://background-tasks.
     let runtime = Arc::new(peri_mcp_workflow::WorkflowRuntime::new(
         Arc::clone(&wf_executor),
         cwd,
-        notification_tx.clone(),
+        notification_tx,
         Some(progress_rx),
     ));
     SessionWorkflowChain {
         runtime,
         executor: wf_executor,
-        notifications: Arc::new(peri_acp_types::workflow::WorkflowNotifications::new(
-            notification_tx,
-        )),
     }
 }
 
