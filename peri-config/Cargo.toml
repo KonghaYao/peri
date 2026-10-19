@@ -2,6 +2,7 @@
 name = "peri-config"
 version.workspace = true
 edition.workspace = true
+rust-version.workspace = true
 
 [dependencies]
 peri-acp-types = { path = "../peri-acp-types" }

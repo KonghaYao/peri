@@ -2,6 +2,7 @@
 name = "peri-theme"
 version.workspace = true
 edition = "2024"
+rust-version.workspace = true
 description = "统一主题系统 — 类型定义、内置主题、JSON loader、bridge、Atom"
 
 [dependencies]

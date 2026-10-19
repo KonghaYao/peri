@@ -2,6 +2,7 @@
 name = "peri-mcp-common"
 version.workspace = true
 edition.workspace = true
+rust-version.workspace = true
 description = "Shared behavior for Peri builtin MCP instances"
 license = "Apache-2.0"
 

@@ -73,7 +73,7 @@ jobs:
             - name: Install Rust toolchain
               uses: dtolnay/rust-toolchain@master
               with:
-                  toolchain: stable
+                  toolchain: 1.99.0
                   targets: ${{ matrix.target }}
                   components: clippy
 

@@ -2,6 +2,7 @@
 name = "peri-acp"
 version.workspace = true
 edition.workspace = true
+rust-version.workspace = true
 description = "ACP Agent service layer — Session management, Agent construction, Middleware chain, Transport abstraction"
 
 [lib]

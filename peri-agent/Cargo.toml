@@ -2,6 +2,7 @@
 name = "peri-agent"
 version.workspace = true
 edition.workspace = true
+rust-version.workspace = true
 description = "Rust Agent framework with middleware system, aligned with @langgraph-js/standard-agent"
 license = "Apache-2.0"
 

@@ -2,6 +2,7 @@
 name = "peri-mcp-workspace"
 version.workspace = true
 edition.workspace = true
+rust-version.workspace = true
 description = "Workspace filesystem and terminal builtin MCP instance"
 license = "Apache-2.0"
 

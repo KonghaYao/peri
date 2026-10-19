@@ -2,6 +2,7 @@
 name = "peri-wasm"
 version.workspace = true
 edition.workspace = true
+rust-version.workspace = true
 description = "Emscripten ACP Host deployment"
 
 [features]

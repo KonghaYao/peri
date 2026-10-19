@@ -2,6 +2,7 @@
 name = "peri-tui"
 version.workspace = true
 edition = "2024"
+rust-version.workspace = true
 description = "TUI interface for Rust Agent - interactive terminal playground"
 
 [lib]

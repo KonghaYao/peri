@@ -2,6 +2,7 @@
 name = "peri-resources"
 version.workspace = true
 edition.workspace = true
+rust-version.workspace = true
 description = "Resources layer: external system facade (peri-config / peri-sessions / context)"
 
 [dependencies]

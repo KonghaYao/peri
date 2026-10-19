@@ -2,6 +2,7 @@
 name = "peri-mcp-config"
 version.workspace = true
 edition.workspace = true
+rust-version.workspace = true
 description = "Configuration data plane and bootstrap MCP client"
 license = "Apache-2.0"
 
