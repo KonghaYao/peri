@@ -262,6 +262,10 @@ use ratatui_kit::ratatui::style::{Color, Style};
 
 const TEST_BG: Color = Color::Rgb(1, 2, 3);
 
+fn test_style() -> Style {
+    Style::default().bg(TEST_BG)
+}
+
 /// 提取 line 中带 `bg` 背景的 span 内容拼接，用于断言"实际被高亮的字符"。
 fn highlighted_text(line: &Line<'_>, bg: Color) -> String {
     line.spans
@@ -282,7 +286,7 @@ fn test_highlight_ascii_same_row_partial() {
         visual_start: 0,
         visual_end: 1,
     };
-    let highlighted = highlight_line_in_selection(&line, &entry, 0, 0, 1, 3, 10, TEST_BG);
+    let highlighted = highlight_line_in_selection(&line, &entry, 0, 0, 1, 3, 10, test_style());
     assert_eq!(highlighted_text(&highlighted, TEST_BG), "bc");
 }
 
@@ -298,7 +302,7 @@ fn test_highlight_cjk_same_visual_row_double_width_right_half() {
         visual_start: 0,
         visual_end: 2,
     };
-    let highlighted = highlight_line_in_selection(&line, &entry, 1, 1, 0, 3, 5, TEST_BG);
+    let highlighted = highlight_line_in_selection(&line, &entry, 1, 1, 0, 3, 5, test_style());
     assert_eq!(highlighted_text(&highlighted, TEST_BG), "好你");
 }
 
@@ -314,7 +318,7 @@ fn test_highlight_cjk_cross_visual_row_first_and_last_same_logical() {
         visual_start: 0,
         visual_end: 2,
     };
-    let highlighted = highlight_line_in_selection(&line, &entry, 0, 1, 4, 1, 5, TEST_BG);
+    let highlighted = highlight_line_in_selection(&line, &entry, 0, 1, 4, 1, 5, test_style());
     assert_eq!(highlighted_text(&highlighted, TEST_BG), "你好");
 }
 
@@ -329,7 +333,7 @@ fn test_highlight_first_logical_only_partial_to_end() {
         visual_start: 0,
         visual_end: 1,
     };
-    let highlighted = highlight_line_in_selection(&line, &entry, 0, 1, 1, 2, 10, TEST_BG);
+    let highlighted = highlight_line_in_selection(&line, &entry, 0, 1, 1, 2, 10, test_style());
     assert_eq!(highlighted_text(&highlighted, TEST_BG), "bc");
 }
 
@@ -345,7 +349,7 @@ fn test_highlight_last_logical_only_start_to_col() {
         visual_start: 1,
         visual_end: 2,
     };
-    let highlighted = highlight_line_in_selection(&line, &entry, 0, 1, 1, 2, 10, TEST_BG);
+    let highlighted = highlight_line_in_selection(&line, &entry, 0, 1, 1, 2, 10, test_style());
     assert_eq!(highlighted_text(&highlighted, TEST_BG), "de");
 }
 
@@ -360,7 +364,7 @@ fn test_highlight_middle_logical_full_line() {
         visual_start: 1,
         visual_end: 2,
     };
-    let highlighted = highlight_line_in_selection(&line, &entry, 0, 2, 0, 0, 10, TEST_BG);
+    let highlighted = highlight_line_in_selection(&line, &entry, 0, 2, 0, 0, 10, test_style());
     assert_eq!(highlighted_text(&highlighted, TEST_BG), "def");
 }
 
@@ -378,7 +382,7 @@ fn test_highlight_multi_span_partial_overlap_splits_span() {
         visual_start: 0,
         visual_end: 1,
     };
-    let highlighted = highlight_line_in_selection(&line, &entry, 0, 0, 3, 7, 20, TEST_BG);
+    let highlighted = highlight_line_in_selection(&line, &entry, 0, 0, 3, 7, 20, test_style());
     assert_eq!(highlighted_text(&highlighted, TEST_BG), "lowo");
     // 完整文本保留原顺序
     let full: String = highlighted
@@ -400,7 +404,7 @@ fn test_highlight_empty_byte_range_returns_original() {
         visual_start: 0,
         visual_end: 1,
     };
-    let highlighted = highlight_line_in_selection(&line, &entry, 0, 0, 1, 1, 10, TEST_BG);
+    let highlighted = highlight_line_in_selection(&line, &entry, 0, 0, 1, 1, 10, test_style());
     // 无 span 高亮
     assert_eq!(highlighted_text(&highlighted, TEST_BG), "");
     // 完整文本仍为 "abcdef"
@@ -427,7 +431,7 @@ fn test_highlight_preserves_existing_span_style() {
         visual_start: 0,
         visual_end: 1,
     };
-    let highlighted = highlight_line_in_selection(&line, &entry, 0, 0, 0, 2, 10, TEST_BG);
+    let highlighted = highlight_line_in_selection(&line, &entry, 0, 0, 0, 2, 10, test_style());
     // 高亮部分 "ab" 应同时保留 fg=Red + bg=TEST_BG
     let highlighted_span = highlighted
         .spans
@@ -909,5 +913,55 @@ fn test_slot_index_scales_by_slots_not_logical_lines() {
         let index = slot_index_fixture(slots, 20);
         assert_eq!(index.slot_count(), slots);
         assert_eq!(index.total_logical(), slots * 20);
+    }
+}
+
+// ── [F3] NO_COLOR：选区在最终 Buffer 上仍可辨识 ─────────────────────────
+
+#[test]
+fn test_selection_reversed_modifier_survives_no_color_strip() {
+    use ratatui_kit::ratatui::buffer::Buffer;
+    use ratatui_kit::ratatui::layout::Rect;
+    use ratatui_kit::ratatui::style::Modifier;
+    use ratatui_kit::ratatui::widgets::Widget;
+
+    let line = make_line("abcdef");
+    let entry = WrappedLineInfo {
+        slot_index: 0,
+        logical_idx: 0,
+        visual_start: 0,
+        visual_end: 1,
+    };
+    let highlighted = highlight_line_in_selection(
+        &line,
+        &entry,
+        0,
+        0,
+        1,
+        3,
+        10,
+        Style::default().add_modifier(Modifier::REVERSED),
+    );
+    let stripped = super::super::no_color::strip_line_colors(&highlighted);
+    assert!(
+        stripped.spans.iter().all(|s| s.style.bg.is_none()),
+        "NO_COLOR pass 必须剥离背景色"
+    );
+
+    let area = Rect::new(0, 0, 10, 1);
+    let mut buffer = Buffer::empty(area);
+    stripped.render(area, &mut buffer);
+    for x in 1..3 {
+        let cell = buffer.cell((x, 0)).unwrap();
+        let expected = "abcdef".chars().nth(x as usize).unwrap().to_string();
+        assert_eq!(cell.symbol(), expected);
+        assert!(
+            cell.modifier.contains(Modifier::REVERSED),
+            "选区列 {x} 必须保留 REVERSED（最终 Buffer）"
+        );
+    }
+    for x in [0u16, 3, 4, 5] {
+        let cell = buffer.cell((x, 0)).unwrap();
+        assert!(!cell.modifier.contains(Modifier::REVERSED), "选区外列 {x}");
     }
 }

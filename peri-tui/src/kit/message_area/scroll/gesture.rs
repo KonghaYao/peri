@@ -41,17 +41,63 @@ pub(in crate::kit::message_area) fn selection_bounds_on_release(
     selection.normalized_bounds()
 }
 
-/// 单击判定：Down 与 Drag/Up 屏幕坐标差 ≤1 行、≤2 列（手抖容差）。
+/// 单击判定（**仅用于有单击动作的 entry header**）：Down 与 Drag/Up 屏幕坐标差
+/// ≤1 行、≤2 列（手抖容差）。
 ///
-/// [Why] crossterm 按下后移动会发 `Drag` 事件，因此"无 Drag"本身已表明
-/// 未移动；容差是对事件丢失/平台差异的防御，超过即视为拖拽意图（升级为
-/// 文本拖拽，不触发点击动作）。
-/// 只比较屏幕坐标（`(column, row)`）——Down/Drag 天然都是屏幕坐标，判定
-/// 不再经过视觉换算，滚动偏移/网格前缀的坐标空间问题在判定路径上不复存在。
-/// 判定时机在 Drag 分支（升级判定先于节流闸门）；Up 结算不做坐标比较，
-/// 只看手势是否仍为 Pending（是否升级过）。
+/// [Why 只对 header 生效] header 的单击会折叠/展开 entry，需要防抖；普通正文
+/// 没有单击动作，1–2 列的短拖或相邻行同列拖选必须立即建立选区（F1）。
+/// 正文的单击判定见 [`is_click_for`]（只有完全未移动才算单击）。
+///
+/// [Why 屏幕坐标] 只比较屏幕坐标（`(column, row)`）——Down/Drag 天然都是屏幕
+/// 坐标，判定不再经过视觉换算，滚动偏移/网格前缀的坐标空间问题在判定路径上
+/// 不复存在。判定时机在 Drag 分支（升级判定先于节流闸门）。
 pub(in crate::kit::message_area) fn is_click(down: (u16, u16), cur: (u16, u16)) -> bool {
     cur.0.abs_diff(down.0) <= 2 && cur.1.abs_diff(down.1) <= 1
+}
+
+/// 按手势类型选择单击容差：entry header 保留防抖，正文任何位移都算拖拽意图。
+pub(in crate::kit::message_area) fn is_click_for(
+    pending: &GesturePending,
+    cur: (u16, u16),
+) -> bool {
+    if pending.entry_hit.is_some() {
+        is_click(pending.screen, cur)
+    } else {
+        pending.screen == cur
+    }
+}
+
+/// Up 时按**最终位移**补结算：没有收到中间 Drag 的正文拖选也能建立选区。
+/// 仅正文（无 entry 点击动作）生效；header 的单击语义保持不变。
+pub(in crate::kit::message_area) fn release_upgrades(
+    pending: &GesturePending,
+    up_screen: (u16, u16),
+) -> bool {
+    pending.entry_hit.is_none() && pending.screen != up_screen
+}
+
+/// 文本拖选是否接收该鼠标事件。
+///
+/// - 已捕获指针（Pending/Armed 的 Drag/Up）→ 接收（即使移出消息区）；
+/// - Left Down → 接收范围是**收窄前的外框**：居中带左右留白也能建立锚点，
+///   列坐标由 `selection_position` 钳到正文边缘（F2）；
+/// - 其余 Drag/Up 只有落在文本带内才接收。
+pub(in crate::kit::message_area) fn text_selection_accepts_pointer(
+    in_text_area: bool,
+    in_outer_area: bool,
+    captured: bool,
+    kind: MouseEventKind,
+) -> bool {
+    if captured {
+        return true;
+    }
+    match kind {
+        MouseEventKind::Down(MouseButton::Left) => in_outer_area,
+        MouseEventKind::Drag(MouseButton::Left) | MouseEventKind::Up(MouseButton::Left) => {
+            in_text_area
+        }
+        _ => false,
+    }
 }
 
 /// entry 单击命中解析：视觉行 → `(slot_index, local_idx)`；仅当该行属于
@@ -93,13 +139,18 @@ pub(in crate::kit::message_area) fn freeze_down_index(
     screen: (u16, u16),
     visual: (usize, u16),
     index: &SlotIndex,
+    allow_entry_hit: bool,
 ) -> GesturePending {
     // [冻结命中] entry 命中在 Down 时反查冻结——Up 结算直接消费，不再二次
     // 换算（滚动/网格前缀的坐标正确性由此时保证）。
+    // 居中带左右留白上的 Down 不参与 entry 点击（`allow_entry_hit=false`）：
+    // 留白没有文本，不应触发折叠动作。
     GesturePending {
         screen,
         visual,
-        entry_hit: entry_click_target_index(index, visual.0),
+        entry_hit: allow_entry_hit
+            .then(|| entry_click_target_index(index, visual.0))
+            .flatten(),
     }
 }
 
@@ -120,7 +171,7 @@ pub(in crate::kit::message_area) fn freeze_down(
 /// Drag 分支决策结果（纯函数 `drag_step` 的输出）。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(in crate::kit::message_area) enum DragAction {
-    /// 超容差 → 升级为拖拽（Armed）：`start_drag(pending.visual)` +
+    /// 越过单击判定 → 升级为拖拽（Armed）：`start_drag(pending.visual)` +
     /// `update_drag(当前视觉坐标)` + gesture → None。**升级瞬间不受节流**。
     Upgrade(GesturePending),
     /// 节流窗口内且未升级：零副作用（Pending 原样保留；事件丢失的
@@ -144,7 +195,7 @@ pub(in crate::kit::message_area) fn drag_step(
     within_throttle_window: bool,
 ) -> DragAction {
     match pending {
-        Some(p) if !is_click(p.screen, drag_screen) => DragAction::Upgrade(p),
+        Some(p) if !is_click_for(&p, drag_screen) => DragAction::Upgrade(p),
         Some(_) if within_throttle_window => DragAction::Throttled,
         Some(_) => DragAction::KeepPending,
         None if within_throttle_window => DragAction::Throttled,

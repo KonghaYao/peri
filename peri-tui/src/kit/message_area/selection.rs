@@ -7,9 +7,12 @@ use std::time::Duration;
 
 use crate::kit::atoms::{COPY_CHAR_COUNT, COPY_MESSAGE_UNTIL};
 use crate::kit::message_area::grid::GridSpec;
-use crate::kit::text_selection;
+use crate::kit::text_selection::{self, SelectionAnchor, TextSelection};
+use ratatui_kit::ratatui::style::Style;
 use ratatui_kit::ratatui::text::Line;
 use ratatui_kit::ratatui::widgets::{Paragraph, Wrap};
+use unicode_segmentation::UnicodeSegmentation;
+use unicode_width::UnicodeWidthStr;
 
 // ── wrap_map 类型 ──────────────────────────────────────────────────────────
 
@@ -294,24 +297,24 @@ fn wrap_byte_starts(line: &Line<'_>, plain: &str, width: u16) -> Vec<usize> {
         .wrap(Wrap { trim: false })
         .render(area, &mut buf);
 
-    // 预计算 plain 的 char_index → byte_offset 表
-    let mut char_byte: Vec<usize> = Vec::with_capacity(plain.chars().count() + 1);
-    char_byte.push(0);
+    // 预计算字素簇的 byte 偏移表（与 ratatui 渲染/折行同一字素边界口径）。
+    let graphemes: Vec<&str> = plain.graphemes(true).collect();
+    let mut grapheme_bytes: Vec<usize> = Vec::with_capacity(graphemes.len() + 1);
+    grapheme_bytes.push(0);
     let mut byte_off = 0usize;
-    for ch in plain.chars() {
-        byte_off += ch.len_utf8();
-        char_byte.push(byte_off);
+    for grapheme in &graphemes {
+        byte_off += grapheme.len();
+        grapheme_bytes.push(byte_off);
     }
 
     let mut starts: Vec<usize> = Vec::with_capacity(line_count + 1);
     starts.push(0);
-    let mut chars_consumed = 0usize;
-    let total_chars = plain.chars().count();
-    let mut chars = plain.chars();
+    let mut consumed = 0usize;
+    let total = graphemes.len();
 
     for row in 0..height.saturating_sub(1) {
         for col in 0..width {
-            if chars_consumed >= total_chars {
+            if consumed >= total {
                 break;
             }
             let Some(cell) = buf.cell((col, row)) else {
@@ -319,50 +322,47 @@ fn wrap_byte_starts(line: &Line<'_>, plain: &str, width: u16) -> Vec<usize> {
             };
             let sym = cell.symbol();
             if sym.is_empty() {
-                continue; // 双宽字符的 continuation cell
+                continue; // 双宽字素的 continuation cell
             }
-            let sym_first = sym.chars().next();
-            let next_plain = chars.clone().next();
-            if sym_first == next_plain {
-                chars.next();
-                chars_consumed += 1;
-            } else if sym == " " && next_plain == Some(' ') {
-                // trim:false 保留的 leading whitespace
-                chars.next();
-                chars_consumed += 1;
+            let next = graphemes[consumed];
+            if sym == next {
+                consumed += 1;
+            } else if !sym.chars().all(char::is_whitespace) && next.starts_with(sym) {
+                // 某些渲染路径只把字素首标量写入 cell；宽度仍按整个字素消费，
+                // 不能在 ZWJ/组合标记内部切断。
+                consumed += 1;
             }
             // 否则是 trailing padding 空格，跳过
         }
-        starts.push(*char_byte.get(chars_consumed).unwrap_or(&plain.len()));
+        starts.push(*grapheme_bytes.get(consumed).unwrap_or(&plain.len()));
     }
     starts.push(plain.len());
     starts
 }
 
 fn wrap_byte_starts_large_line(plain: &str, width: usize) -> Vec<usize> {
-    use unicode_width::UnicodeWidthChar;
-
     let mut starts = vec![0];
     let mut row_width = 0usize;
-    for (byte, ch) in plain.char_indices() {
-        let char_width = ch.width().unwrap_or(0);
-        if row_width > 0 && row_width.saturating_add(char_width) > width {
+    for (byte, grapheme) in plain.grapheme_indices(true) {
+        let grapheme_width = UnicodeWidthStr::width(grapheme);
+        if row_width > 0 && row_width.saturating_add(grapheme_width) > width {
             starts.push(byte);
             row_width = 0;
         }
-        row_width = row_width.saturating_add(char_width);
+        row_width = row_width.saturating_add(grapheme_width);
     }
     starts.push(plain.len());
     starts
 }
 
-/// 选区**起点** byte 偏移：target_col 落在字符占的列范围 [col, col+cw) 内时，
-/// 总是返回该字符起点（含字符本身）。
+/// 选区**起点** byte 偏移：target_col 落在字素簇占的列范围 [col, col+cw) 内时，
+/// 总是返回该字素起点（含字素本身）。字素边界与渲染/折行口径一致，避免在
+/// ZWJ 序列或组合标记内部切断。
 fn row_start_byte(plain: &str, row_start_byte: usize, col_in_row: u16) -> usize {
     let head = plain.split_at(row_start_byte).1;
     let mut col = 0u16;
-    for (i, ch) in head.char_indices() {
-        let cw = unicode_width::UnicodeWidthChar::width(ch).unwrap_or(0) as u16;
+    for (i, grapheme) in head.grapheme_indices(true) {
+        let cw = UnicodeWidthStr::width(grapheme) as u16;
         if cw > 0 && col_in_row < col + cw {
             return row_start_byte + i;
         }
@@ -378,6 +378,97 @@ fn row_end_byte(plain: &str, row_start_byte: usize, col_in_row: u16) -> usize {
     row_start_byte + text_selection::visual_col_to_byte_offset(head, col_in_row)
 }
 
+// ── 选区起点的稳定身份（历史前插后重定位）────────────────────────────────
+
+/// 记录选区起点所在渲染单元的稳定 token + 单元内偏移。
+///
+/// 索引没有 canonical items（测试索引 / 首帧）或起点落在 footer 时返回 `None`：
+/// 此时退回纯视觉坐标，结构变化无法保护。
+pub(super) fn capture_selection_anchor(
+    index: &SlotIndex,
+    visual: (usize, u16),
+) -> Option<SelectionAnchor> {
+    let items = index.canonical_items()?;
+    let lookup = index.visual_lookup(visual.0)?;
+    let vm = items.get(lookup.slot_index)?;
+    let start = index.slot_visual_start(lookup.slot_index)?;
+    let token = super::window_identity_token(vm);
+    Some(SelectionAnchor {
+        unit_kind: token.kind,
+        unit_hash: token.hash,
+        row_offset: visual.0.saturating_sub(start),
+        column: visual.1,
+    })
+}
+
+/// 按稳定身份在新索引里解析选区起点视觉行。
+///
+/// 身份不存在 / 出现多次（歧义）/ 单元变矮导致偏移越界 → `None`（明确取消，
+/// 不把旧行号解释成新内容）。
+pub(super) fn resolve_selection_anchor(
+    index: &SlotIndex,
+    anchor: &SelectionAnchor,
+) -> Option<usize> {
+    let items = index.canonical_items()?;
+    let mut hit: Option<usize> = None;
+    for (slot, vm) in items.iter().enumerate() {
+        let token = super::window_identity_token(vm);
+        if token.kind == anchor.unit_kind && token.hash == anchor.unit_hash {
+            if hit.is_some() {
+                return None;
+            }
+            hit = Some(slot);
+        }
+    }
+    let (start, end) = index.slot_visual_range(hit?)?;
+    let row = start.checked_add(anchor.row_offset)?;
+    (row < end).then_some(row)
+}
+
+/// 拖拽/释放时把带身份的起点重定位到当前索引。
+pub(super) enum AnchorResolution {
+    /// 没有稳定身份：保持纯视觉坐标。
+    NotAnchored,
+    /// 已按身份写回 `selection.start`。
+    Resolved,
+    /// 身份在新窗口里认不出：选区应明确取消。
+    Lost,
+}
+
+pub(super) fn relocate_selection_start(
+    index: &SlotIndex,
+    selection: &mut TextSelection,
+) -> AnchorResolution {
+    let Some(anchor) = selection.anchor.clone() else {
+        return AnchorResolution::NotAnchored;
+    };
+    match resolve_selection_anchor(index, &anchor) {
+        Some(row) => {
+            selection.start = Some((row, anchor.column));
+            AnchorResolution::Resolved
+        }
+        None => AnchorResolution::Lost,
+    }
+}
+
+/// 渲染/提取共用的选区边界：起点优先按稳定身份解析，终点保持视觉坐标。
+pub(super) fn resolved_bounds(
+    index: &SlotIndex,
+    selection: &TextSelection,
+) -> Option<((usize, u16), (usize, u16))> {
+    let (sr, sc) = match (&selection.anchor, selection.start) {
+        (Some(anchor), _) => (resolve_selection_anchor(index, anchor)?, anchor.column),
+        (None, Some(start)) => start,
+        (None, None) => return None,
+    };
+    let (er, ec) = selection.end?;
+    Some(if (sr, sc) <= (er, ec) {
+        ((sr, sc), (er, ec))
+    } else {
+        ((er, ec), (sr, sc))
+    })
+}
+
 // ── 字符级高亮 ────────────────────────────────────────────────────────────
 
 /// 根据选区高亮单条逻辑行（字符级精度）。
@@ -385,12 +476,15 @@ fn row_end_byte(plain: &str, row_start_byte: usize, col_in_row: u16) -> usize {
 /// 调用方已经确保该逻辑行 `li` 在选区 `[first_logical, last_logical]` 内，
 /// 通过 `wrap_map.get(li)` 取该行的 `WrappedLineInfo`（含 visual_start/visual_end）。
 /// 函数计算该行被选中的 byte 范围 `[b_start, b_end)`，按 byte 范围拆分 spans，
-/// 对落在范围内的字符 span 加 `sel_bg` 背景。
+/// 对落在范围内的字符 span 追加 `sel_style`。
 ///
 /// - **首行**（sel_sr 落在该行视觉范围内）：起始 byte = sr_off 行内 col sc
 /// - **末行**（sel_er 落在该行视觉范围内）：结束 byte = er_off 行内 col ec
 /// - **中间行**（既不是首行也不是末行）：整行高亮 byte = [0, plain.len())
 /// - **首+末同行**：byte 范围 = [sr_off 行内 sc, er_off 行内 ec]
+///
+/// [Why style 而非固定背景色] NO_COLOR 模式会在最终视口 pass 剥离所有颜色；
+/// 选区必须能改用 `REVERSED` 等非颜色 modifier（F3）。
 ///
 /// [Why] 旧实现是整逻辑行高亮（粗粒度），与字符级复制提取不一致——用户看到的高亮
 /// 范围比实际复制内容大。改为字符级后高亮范围 = 复制范围，与终端鼠标拖拽选择一致。
@@ -404,7 +498,7 @@ pub(super) fn highlight_line_in_selection(
     sel_sc: u16,
     sel_ec: u16,
     width: u16,
-    sel_bg: ratatui_kit::ratatui::style::Color,
+    sel_style: Style,
 ) -> Line<'static> {
     let plain = text_selection::line_to_plain_text(line);
     let row_starts = wrap_byte_starts(line, &plain, width);
@@ -438,20 +532,20 @@ pub(super) fn highlight_line_in_selection(
     if b_start >= b_end {
         return line.clone();
     }
-    split_line_spans_by_byte_range(line, b_start, b_end, sel_bg)
+    split_line_spans_by_byte_range(line, b_start, b_end, sel_style)
 }
 
-/// 按字节范围 `[b_start, b_end)` 拆分 line 的 spans，对落在范围内的字符追加 `sel_bg` 背景。
+/// 按字节范围 `[b_start, b_end)` 拆分 line 的 spans，对落在范围内的字符追加 `sel_style`。
 ///
 /// 该函数处理三种情况：
 /// - span 完全在范围外：原样保留
-/// - span 完全在范围内：整个 span 加 sel_bg
-/// - span 部分重叠：拆成前/中/后三段，仅中间段加 sel_bg
+/// - span 完全在范围内：整个 span 应用 sel_style
+/// - span 部分重叠：拆成前/中/后三段，仅中间段应用 sel_style
 fn split_line_spans_by_byte_range(
     line: &Line<'static>,
     b_start: usize,
     b_end: usize,
-    sel_bg: ratatui_kit::ratatui::style::Color,
+    sel_style: Style,
 ) -> Line<'static> {
     use ratatui_kit::ratatui::text::Span;
 
@@ -470,7 +564,7 @@ fn split_line_spans_by_byte_range(
             if overlap_start >= overlap_end {
                 vec![Span::styled(s.content.clone(), s.style)]
             } else if overlap_start == base && overlap_end == end {
-                vec![Span::styled(s.content.clone(), s.style.bg(sel_bg))]
+                vec![Span::styled(s.content.clone(), s.style.patch(sel_style))]
             } else {
                 let mut parts: Vec<Span<'static>> = Vec::new();
                 let raw: &str = s.content.as_ref();
@@ -484,7 +578,7 @@ fn split_line_spans_by_byte_range(
                 let mid_end = overlap_end - base;
                 parts.push(Span::styled(
                     raw[mid_start..mid_end].to_string(),
-                    s.style.bg(sel_bg),
+                    s.style.patch(sel_style),
                 ));
                 if overlap_end < end {
                     parts.push(Span::styled(raw[mid_end..].to_string(), s.style));
@@ -720,3 +814,11 @@ fn map_slice_to_semantic(
 #[cfg(test)]
 #[path = "selection_test.rs"]
 mod tests;
+
+#[cfg(test)]
+#[path = "selection_grapheme_test.rs"]
+mod grapheme_tests;
+
+#[cfg(test)]
+#[path = "selection_anchor_test.rs"]
+mod anchor_tests;
