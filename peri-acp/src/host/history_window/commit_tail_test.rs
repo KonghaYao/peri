@@ -172,7 +172,6 @@ fn state_with(
         frozen: None,
         recall_items: vec![],
         agent_pool: AgentPool::new(),
-        workflow_notifications: None,
         title: None,
         tags: vec![],
     }

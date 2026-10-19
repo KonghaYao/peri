@@ -10,7 +10,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
-use fs2::FileExt;
+use fs4::FileExt;
 use sha2::{Digest, Sha256};
 
 use super::super::{
@@ -256,7 +256,7 @@ fn peer_holding_the_domain_lock_is_contention_not_unavailability() {
         .truncate(false)
         .open(inner.domain_lock_path())
         .expect("peer opens domain lock");
-    peer.lock_exclusive().expect("peer holds domain lock");
+    FileExt::lock(&peer).expect("peer holds domain lock");
     assert!(
         probe_durable_io(&inner).is_ok(),
         "对端持锁只是竞争，不得判定为卷不支持持久化"

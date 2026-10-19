@@ -147,6 +147,21 @@ pub fn WorkflowPanel(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
     // 面板上一帧区域（分隔线高度与滚轮仲裁注册共用）——hook 前置，渲染段不再调用 hook
     let previous_size = hooks.use_previous_size();
 
+    // 双栏可用宽度：左栏 Percentage(40)，右侧剩余减去分隔线；ScrollView 滚动条自动
+    // 显示时再占 1 列。首帧尚未测量（width=0）按 80 列兜底，次帧收敛到实测值。
+    let panel_width = if previous_size.width == 0 {
+        FALLBACK_PANEL_WIDTH
+    } else {
+        usize::from(previous_size.width)
+    };
+    let phase_pane_width = panel_width * usize::from(PHASE_PANE_PERCENT) / 100;
+    let phase_text_width = phase_pane_width.saturating_sub(AGENT_SCROLLBAR_COLS);
+    let agent_pane_width = panel_width
+        .saturating_sub(phase_pane_width)
+        .saturating_sub(DIVIDER_COLS);
+    let agent_table_width = agent_pane_width.saturating_sub(AGENT_SCROLLBAR_COLS);
+    let table_columns = AgentTableColumns::for_width(agent_table_width);
+
     // 事件闭包另持一份 run 身份副本（与渲染端共用同一 atom 快照）
     hooks.use_event_handler(EventScope::Current, EventPriority::Normal, {
         let run_ids_for_events = run_ids.clone();
@@ -241,7 +256,6 @@ pub fn WorkflowPanel(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
             status_emoji_for_phase(&phase.status).to_string()
         };
         let emoji_color = phase_status_color(&phase.status, &theme);
-        let name = &phase.title;
         let name_style = if is_sel {
             Style::new().fg(theme.component.panel.title).bold()
         } else {
@@ -258,11 +272,16 @@ pub fn WorkflowPanel(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
             String::new()
         };
         let tag_style = Style::new().fg(theme.semantic.text.muted);
+        // 按左栏可用宽度截断（Unicode 显示宽度），避免长标题被布局硬裁
+        let name_width = phase_text_width
+            .saturating_sub(AGENT_ROW_LEADING_COLS + UnicodeWidthStr::width(agent_tag.as_str()))
+            .max(1);
+        let name = truncate_to_width(&phase.title, name_width);
 
         phase_lines.push(Line::from(vec![
             Span::styled(arrow, arrow_style),
             Span::styled(format!(" {emoji} "), emoji_color),
-            Span::styled(name.chars().take(28).collect::<String>(), name_style),
+            Span::styled(name, name_style),
             Span::styled(agent_tag, tag_style),
         ]));
     }
@@ -297,26 +316,11 @@ pub fn WorkflowPanel(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
             status_emoji_for_agent(&agent.status).to_string()
         };
         let emoji_color = agent_status_color(&agent.status, &theme);
-        let name = agent
-            .label
-            .as_deref()
-            .unwrap_or("?")
-            .chars()
-            .take(18)
-            .collect::<String>();
-        // 使用 unicode_width 计算终端列宽，而非 Rust char 计数
+        // 名称按当前列宽截断并补齐：既避免 CJK 字符按码点计数撑破列宽，
+        // 也保证后续指标列在窄终端上仍落在可视区内。
+        let name = truncate_to_width(agent.label.as_deref().unwrap_or("?"), table_columns.name);
         let name_display_width = UnicodeWidthStr::width(name.as_str());
-        let name_pad = if name_display_width < 18 {
-            " ".repeat(18 - name_display_width)
-        } else {
-            String::new()
-        };
-        let tokens_padded = format!("{:>8}", abbreviate_count(agent.token_count.unwrap_or(0)));
-        let tools_padded = format!("{:>4}", agent.tool_count.unwrap_or(0));
-        let model_cell_text = model_cell(
-            agent.model_tier.as_deref().or(agent.model.as_deref()),
-            MODEL_COL_WIDTH,
-        );
+        let name_pad = " ".repeat(table_columns.name.saturating_sub(name_display_width));
         let name_style = if is_sel {
             Style::new().fg(theme.component.panel.title).bold()
         } else {
@@ -324,14 +328,44 @@ pub fn WorkflowPanel(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
         };
         let dim_style = Style::new().fg(theme.semantic.text.dim);
 
-        agent_lines.push(Line::from(vec![
+        let mut spans: Vec<Span<'_>> = vec![
             Span::styled(arrow, arrow_style),
             Span::styled(format!(" {emoji} "), emoji_color),
             Span::styled(format!("{name}{name_pad}"), name_style),
-            Span::styled(format!(" {model_cell_text}"), dim_style),
-            Span::styled(format!(" {tokens_padded}"), dim_style),
-            Span::styled(format!("  {tools_padded}"), dim_style),
-        ]));
+        ];
+        if let Some(model_width) = table_columns.model {
+            spans.push(Span::styled(
+                format!(
+                    " {}",
+                    model_cell(
+                        agent.model_tier.as_deref().or(agent.model.as_deref()),
+                        model_width,
+                    )
+                ),
+                dim_style,
+            ));
+        }
+        if table_columns.tokens {
+            spans.push(Span::styled(
+                format!(
+                    " {:>width$}",
+                    abbreviate_count(agent.token_count.unwrap_or(0)),
+                    width = TOKENS_COL_WIDTH,
+                ),
+                dim_style,
+            ));
+        }
+        if table_columns.tools {
+            spans.push(Span::styled(
+                format!(
+                    "  {:>width$}",
+                    agent.tool_count.unwrap_or(0),
+                    width = TOOLS_COL_WIDTH,
+                ),
+                dim_style,
+            ));
+        }
+        agent_lines.push(Line::from(spans));
     }
     if filtered_agents.is_empty() {
         agent_lines.push(Line::from(vec![Span::styled(
@@ -377,7 +411,7 @@ pub fn WorkflowPanel(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
     let mut agent_text: Vec<Line<'_>> = Vec::new();
     let model_header = i18n::tr("workflow-model-header");
     agent_text.push(Line::from(Span::styled(
-        agent_table_header(&model_header),
+        agent_table_header(&model_header, &table_columns),
         Style::new().fg(theme.semantic.text.muted).bold(),
     )));
     agent_text.extend(
@@ -801,23 +835,124 @@ fn abbreviate_count(n: u64) -> String {
 /// Model 列显示宽度（终端列）。
 const MODEL_COL_WIDTH: usize = 12;
 
-/// Agent 名列显示宽度（与行内 `take(18)` / padding 一致）。
+/// Agent 名列最大显示宽度（终端按可用空间收缩时仍以本值为上限）。
 const AGENT_NAME_COL_WIDTH: usize = 18;
+
+/// Agent 名列最小显示宽度——再窄就依次舍弃指标列。
+const AGENT_NAME_MIN_WIDTH: usize = 6;
+
+/// Model 列最小显示宽度——不足时整列隐藏。
+const MODEL_COL_MIN_WIDTH: usize = 4;
+
+/// Tokens 列显示宽度（与 `{:>8}` 对齐）。
+const TOKENS_COL_WIDTH: usize = 8;
+
+/// Tools 列显示宽度（与 `{:>5}` 对齐；表头 "Tools" 本身占 5 列）。
+const TOOLS_COL_WIDTH: usize = 5;
 
 /// 数据行在 name 列之前的终端列数（`>` + ` {emoji} `）。
 const AGENT_ROW_LEADING_COLS: usize = 4;
 
-/// Agents 表头：列位置与数据行 `arrow + emoji + name` 对齐。
-fn agent_table_header(model_header: &str) -> String {
-    let mut out = String::from(' ');
-    out.push_str("Agents");
-    let used = 1 + UnicodeWidthStr::width("Agents");
-    let pad_to_model = AGENT_ROW_LEADING_COLS + AGENT_NAME_COL_WIDTH;
-    if pad_to_model > used {
-        out.push_str(&" ".repeat(pad_to_model - used));
+/// 双栏之间的分隔线列数。
+const DIVIDER_COLS: usize = 1;
+
+/// 左栏 Phases 占面板宽度的百分比（与布局 `Constraint::Percentage` 同源）。
+const PHASE_PANE_PERCENT: u16 = 40;
+
+/// ScrollView 纵向滚动条自动显示时占用的列数——表宽始终预留，避免末列被滚动条覆盖。
+const AGENT_SCROLLBAR_COLS: usize = 1;
+
+/// 首帧 `use_previous_size` 返回 width=0 时的面板宽度兜底（与 ModelPanel 同一退守）。
+const FALLBACK_PANEL_WIDTH: usize = 80;
+
+/// 右栏 Agents 表的列宽计划——按可用宽度伸缩，保证任何终端宽度下表格不越界。
+///
+/// 优先级：名称（最多 18 列）> Tokens / Tools > Model。空间不足时先收缩名称，
+/// 再隐藏 Model，最后依次舍弃 Tools、Tokens；名称本身始终保留至少 1 列。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct AgentTableColumns {
+    name: usize,
+    model: Option<usize>,
+    tokens: bool,
+    tools: bool,
+}
+
+impl AgentTableColumns {
+    fn for_width(width: usize) -> Self {
+        const LEADING: usize = AGENT_ROW_LEADING_COLS;
+        const NAME_MIN: usize = AGENT_NAME_MIN_WIDTH;
+        const NAME_MAX: usize = AGENT_NAME_COL_WIDTH;
+        const TOKENS_PART: usize = 1 + TOKENS_COL_WIDTH;
+        const TOOLS_PART: usize = 2 + TOOLS_COL_WIDTH;
+        const MODEL_PART_MIN: usize = 1 + MODEL_COL_MIN_WIDTH;
+
+        let metrics = TOKENS_PART + TOOLS_PART;
+        if width >= LEADING + NAME_MAX + metrics + MODEL_PART_MIN {
+            let model = MODEL_COL_WIDTH.min(width - LEADING - NAME_MAX - metrics - 1);
+            return Self {
+                name: NAME_MAX,
+                model: Some(model),
+                tokens: true,
+                tools: true,
+            };
+        }
+        if width >= LEADING + NAME_MIN + metrics {
+            return Self {
+                name: NAME_MAX.min(width - LEADING - metrics),
+                model: None,
+                tokens: true,
+                tools: true,
+            };
+        }
+        if width >= LEADING + NAME_MIN + TOKENS_PART {
+            return Self {
+                name: NAME_MAX.min(width - LEADING - TOKENS_PART),
+                model: None,
+                tokens: true,
+                tools: false,
+            };
+        }
+        Self {
+            name: width.saturating_sub(LEADING).max(1),
+            model: None,
+            tokens: false,
+            tools: false,
+        }
     }
-    out.push_str(&model_cell(Some(model_header), MODEL_COL_WIDTH));
-    out.push_str("  Tokens    Tools");
+
+    /// 该计划下单行占用的终端列数（含列间分隔）。
+    #[cfg(test)]
+    fn row_width(&self) -> usize {
+        AGENT_ROW_LEADING_COLS
+            + self.name
+            + self.model.map_or(0, |width| 1 + width)
+            + if self.tokens { 1 + TOKENS_COL_WIDTH } else { 0 }
+            + if self.tools { 2 + TOOLS_COL_WIDTH } else { 0 }
+    }
+}
+
+/// Agents 表头：列位置与数据行（`arrow + emoji + name` + 可选指标列）逐列对齐。
+fn agent_table_header(model_header: &str, columns: &AgentTableColumns) -> String {
+    let label = truncate_to_width("Agents", columns.name);
+    let mut out = String::from(' ');
+    out.push_str(&label);
+    let used = 1 + UnicodeWidthStr::width(label.as_str());
+    let name_end = AGENT_ROW_LEADING_COLS + columns.name;
+    if used < name_end {
+        out.push_str(&" ".repeat(name_end - used));
+    }
+    if let Some(width) = columns.model {
+        out.push(' ');
+        out.push_str(&model_cell(Some(model_header), width));
+    }
+    if columns.tokens {
+        out.push(' ');
+        out.push_str(&format!("{:<width$}", "Tokens", width = TOKENS_COL_WIDTH));
+    }
+    if columns.tools {
+        out.push_str("  ");
+        out.push_str(&format!("{:<width$}", "Tools", width = TOOLS_COL_WIDTH));
+    }
     out
 }
 

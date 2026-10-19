@@ -359,7 +359,6 @@ async fn register_session_with_history(
             frozen: None,
             recall_items: Vec::new(),
             agent_pool: crate::session::agent_pool::AgentPool::new(),
-            workflow_notifications: None,
             title: None,
             tags: Vec::new(),
         },
@@ -374,7 +373,7 @@ async fn register_session_with_history(
 /// 两个平台都被本重定向覆盖；`refresh_plugin_command_entries` 经真实
 /// `load_enabled_plugins` 重载）；Drop 时还原。进程级 env 态 →
 /// 本组用例全部 `#[serial]`（与 store_test 同组互斥）。Windows 一并设置
-/// `USERPROFILE`（与 `HOME` 同源；`dirs_next::home_dir()` 在该平台走 Profile
+/// `USERPROFILE`（与 `HOME` 同源；`dirs::home_dir()` 在该平台走 Profile
 /// known-folder，不读环境变量，故不构成隔离手段）。
 struct HomeDirGuard {
     home: Option<std::ffi::OsString>,
@@ -716,7 +715,6 @@ async fn register_session_with_workflow(
             frozen: None,
             recall_items: Vec::new(),
             agent_pool: crate::session::agent_pool::AgentPool::new(),
-            workflow_notifications: None,
             title: None,
             tags: Vec::new(),
         },

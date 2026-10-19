@@ -90,7 +90,7 @@ use crate::{
 // ── 夹具 1：HOME 重定向（进程级 env ⇒ 必须 `#[serial]`）────────────────────────
 
 /// 把 `HOME` 重定向到临时目录：`config_path()`（`~/.peri/settings.json`）、
-/// `dirs_next::home_dir()` 的插件目录都跟随 `HOME`，否则用例会读开发者本机配置。
+/// `dirs::home_dir()` 的插件目录都跟随 `HOME`，否则用例会读开发者本机配置。
 ///
 /// 与 wave 1 夹具（`WireHomeRedirect`）同形但不共享（那个是私有类型）；两者都要求
 /// 调用方标 `#[serial]`——HOME 是进程全局状态，`serial_test` 保证带该属性的用例
@@ -489,6 +489,17 @@ fn declared_effective_names(instance: &str) -> Vec<&'static str> {
         .collect()
 }
 
+/// 注册表声明的、模型可见的 effective name；host-only 工具不进入模型面。
+fn declared_model_visible_effective_names(instance: &str) -> Vec<&'static str> {
+    find_builtin_instance(instance)
+        .unwrap_or_else(|| panic!("{instance} 必须在 builtin 注册表内"))
+        .tools
+        .iter()
+        .filter(|tool| tool.model_visible)
+        .map(|tool| tool.effective_name)
+        .collect()
+}
+
 /// 注册表声明为 `direct: true` 的 effective name。
 fn declared_direct_effective_names(instance: &str) -> Vec<&'static str> {
     find_builtin_instance(instance)
@@ -630,7 +641,16 @@ fn assert_no_ready_evidence(pool: &McpClientPool, instance: &str, expect_reason:
 const WAVE2_INSTANCES: [(&str, &[&str]); 4] = [
     ("web", &["WebSearch", "WebFetch"]),
     ("artifact", &["artifact"]),
-    ("cron", &["cron_register", "cron_list", "cron_remove"]),
+    (
+        "cron",
+        &[
+            "cron_register",
+            "cron_list",
+            "cron_remove",
+            "cron_toggle",
+            "cron_acknowledge",
+        ],
+    ),
     (
         "workspace",
         &[

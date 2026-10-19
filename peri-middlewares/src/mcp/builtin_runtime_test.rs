@@ -113,7 +113,7 @@ const LARGE_INPUT_BYTES: usize = 200 * 1024;
 
 /// `HOME` / `USERPROFILE` / `PERI_MCP_BUILTIN` 的显式隔离 guard（drop 时还原）。
 ///
-/// 生产 loader 的全局配置路径由 `dirs_next::home_dir()` 推导（`mcp/config.rs` 的
+/// 生产 loader 的全局配置路径由 `dirs::home_dir()` 推导（`mcp/config.rs` 的
 /// `load_merged_config_full`）：不重定向就会读到运行者本机的 `~/.peri/settings.json`
 /// ——用例会变成环境依赖（本机装了同名 server 时还会触发 A3 的保留名 typed error）。
 /// `PERI_MCP_BUILTIN` 同时置空：默认层注入语义 = 缺省（注入全部已实现实例）。
@@ -187,6 +187,7 @@ fn declared_effective_names(instance: &BuiltinMcpInstance) -> Vec<String> {
     instance
         .tools
         .iter()
+        .filter(|tool| tool.model_visible)
         .map(|tool| tool.effective_name.to_string())
         .collect()
 }

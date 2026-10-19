@@ -86,7 +86,7 @@ impl McpClientPool {
         }
         AcpCacheScope::Identified(crate::mcp::client::AcpConnectionIdentity {
             session_id: declaration.session_id,
-            connection_id: declaration.connection_id,
+            server_id: declaration.server_id,
             generation,
         })
     }

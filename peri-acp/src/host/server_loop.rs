@@ -30,7 +30,6 @@ impl ServerLoop<'_> {
             match msg {
                 IncomingMessage::Request { id, method, params } => match method.as_str() {
                     "session/prompt" => self.spawn_prompt(id, params).await,
-                    "mcp/message" => self.spawn_acp_mcp_request(id, params).await,
                     "session/input/snapshot" => {
                         self.spawn_session_io(id, method, params).await;
                     }
@@ -362,52 +361,6 @@ impl ServerLoop<'_> {
         }
     }
 
-    /// `mcp/message`：client 宿主的 MCP server 反向下发的请求。
-    ///
-    /// 与 `session/prompt` / `peri/mcp/*` 同列 spawn 路径：内层处理时长由对端
-    /// 决定，不在请求循环里等。定位承载会话只需一次短锁（连接事实分散在各会话
-    /// 的会话级 MCP 池，`mcp/message` 只带 `connectionId`）。
-    async fn spawn_acp_mcp_request(&self, id: RequestId, params: Value) {
-        let diagnostics = ResponseDiagnostics::new(id, "mcp/message", &params);
-        let transport = Arc::clone(self.transport);
-        let connection_cancellation = self.connection_cancellation.clone();
-        let routed = {
-            let sessions = self.sessions.lock().await;
-            requests::acp_mcp::route_inbound(&sessions, &params)
-        };
-        let spawner = self.cfg.host_task_spawner.clone();
-        let rejected_transport = Arc::clone(&transport);
-        let rejected_diagnostics = diagnostics.clone();
-        let spawn_result = spawner.spawn(
-            task_scope::HostTaskOwnerKind::Session,
-            task_scope::HostTaskKind::McpOverAcp,
-            async move {
-                let result = match routed {
-                    Ok((port, inbound)) => tokio::select! {
-                        _ = connection_cancellation.cancelled() => Err(
-                            crate::transport::types::AcpError::new(-32800, "request cancelled"),
-                        ),
-                        result = port.request(inbound) => result
-                            .map_err(|error| crate::transport::types::AcpError::new(error.code, error.message)),
-                    },
-                    Err(error) => Err(error),
-                };
-                let _ = diagnostics.send(transport.as_ref(), result).await;
-            },
-        );
-        if spawn_result.is_err() {
-            let _ = rejected_diagnostics
-                .send(
-                    rejected_transport.as_ref(),
-                    Err(crate::transport::types::AcpError::new(
-                        -32800,
-                        "request cancelled",
-                    )),
-                )
-                .await;
-        }
-    }
-
     async fn dispatch_request(&self, id: RequestId, method: String, params: Value) {
         let diagnostics = ResponseDiagnostics::new(id, &method, &params);
         let transport = self.transport;
@@ -494,6 +447,25 @@ impl ServerLoop<'_> {
         } else {
             false
         };
+        if matches!(
+            method.as_str(),
+            "session/new" | "session/fork" | "session/load" | "session/resume"
+        ) {
+            let registry = connection.lock().await.acp_mcp.clone();
+            let owner = if matches!(method.as_str(), "session/load" | "session/resume") {
+                params
+                    .get("sessionId")
+                    .and_then(Value::as_str)
+                    .unwrap_or("")
+            } else {
+                ""
+            };
+            if let Err(error) = requests::acp_mcp::validate_declarations(&registry, &params, owner)
+            {
+                let _ = diagnostics.send(transport.as_ref(), Err(error)).await;
+                return;
+            }
+        }
         let lifecycle_lock = if matches!(
             method.as_str(),
             "session/load"
@@ -664,6 +636,16 @@ impl ServerLoop<'_> {
         // `session/resume`（`requests/session_restore.rs`）。
         // 注册幂等（同一连接重复注册保留首次纪元），与 `spawn_prompt` 的注册点不冲突。
         if let Some(session_id) = setup_session_id.as_deref() {
+            // `session/load|resume|fork` 走分阶段恢复路径，不经
+            // `handle_request_for_connection`；这里补齐会话任务绑定，否则恢复后
+            // 的 MCP 工具调用会因 "session task manager unavailable" 全部失败。
+            let environment = sessions
+                .lock()
+                .await
+                .get(session_id)
+                .and_then(|state| state.environment.clone());
+            let local = environment.as_ref().map(|env| &env.cfg).unwrap_or(cfg);
+            requests::bind_session_tasks(session_id, local, transport);
             if matches!(
                 method.as_str(),
                 "session/new" | "session/fork" | "session/load" | "session/resume"
@@ -691,8 +673,15 @@ impl ServerLoop<'_> {
                         .await;
                 }
                 // 会话 setup 声明的 acp 型 MCP server：响应之后才受理，客户端此时
-                // 已拿到会话结果，`mcp/connect`（只带 serverId）才有确定的归属方。
-                requests::acp_mcp::attach_session_servers(local, transport, &params, &session_id);
+                // 已拿到会话结果，后续 `mcp/message`（只带 serverId）才有确定的归属方。
+                let registry = self.connection.lock().await.acp_mcp.clone();
+                requests::acp_mcp::attach_session_servers(
+                    registry,
+                    local,
+                    transport,
+                    &params,
+                    &session_id,
+                );
             }
         }
     }
@@ -702,12 +691,13 @@ impl ServerLoop<'_> {
         let sessions = self.sessions;
         let cont_tx = self.cont_tx;
         if method == "mcp/message" {
-            // client 宿主的 MCP server 反向下发的通知：按 connectionId 路由到承载
+            // client 宿主的 MCP server 反向下发的通知：按 serverId 路由到承载
             // 会话的服务。就地 await（不 spawn）以保住与后续请求的相对次序，但只
             // 在短锁内定位承载者——投递等待由对端决定，不得占着会话锁。
             let routed = {
+                let registry = self.connection.lock().await.acp_mcp.clone();
                 let sessions = sessions.lock().await;
-                requests::acp_mcp::route_inbound(&sessions, &params)
+                requests::acp_mcp::route_inbound(&registry, &sessions, &params)
             };
             match routed {
                 Ok((port, inbound)) => {

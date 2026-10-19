@@ -131,6 +131,8 @@ pub(crate) mod workflow_consumer;
 #[cfg(all(test, not(target_os = "emscripten")))]
 #[path = "workflow_consumer_test.rs"]
 mod workflow_consumer_tests;
+#[cfg(not(target_os = "emscripten"))]
+mod workflow_projection;
 // wave 3（AW3-11 session 级 seam）**发送端**用例：会话环境装配产出的 per-session
 // `TaskManager` + session 级 `on_bg_complete` 送进 builtin `workspace` 实例上下文，
 // 并在会话登记处保持同一 `Arc`；回调经 inbox 把 Shell 完成投为 `Defer` 并唤醒。
@@ -231,9 +233,6 @@ pub(crate) struct SessionState {
     pub(crate) recall_items: Vec<String>,
     /// Session-scoped agent component pool for reusing heavy objects across prompts.
     pub(crate) agent_pool: crate::session::agent_pool::AgentPool,
-    /// Session 级 workflow 完成通知源（P5：替代旧链 middleware 端口；
-    /// 运行时归 builtin `workflow` 实例，本句柄只承载完成通知订阅）。
-    pub(crate) workflow_notifications: Option<Arc<peri_acp_types::workflow::WorkflowNotifications>>,
     // ── Prediction 写入的会话元数据（MVP：仅存储，不展示）──
     /// 预测生成的会话标题（未来 /rename 与标题栏显示使用）。
     pub(crate) title: Option<String>,

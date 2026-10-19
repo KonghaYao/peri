@@ -2,6 +2,7 @@
 name = "peri-mcp-workflow"
 version.workspace = true
 edition.workspace = true
+rust-version.workspace = true
 description = "Builtin workflow orchestration MCP instance for Peri"
 license = "Apache-2.0"
 

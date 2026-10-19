@@ -4,6 +4,21 @@
 //! 新 kit 架构无 wrap_map，直接基于已换行的 `Line<'static>` 做字符级文本提取。
 
 use ratatui::text::{Line, Span};
+use unicode_segmentation::UnicodeSegmentation;
+use unicode_width::UnicodeWidthStr;
+
+/// 选区起点的稳定身份：渲染单元 token + 单元内视觉行偏移 + 列。
+///
+/// [Why] 历史页前插会改变视觉行号，但原单元的内容身份不变。选区起点必须按
+/// 身份重新解析，不能把旧行号直接解释成前插后的新内容（F5）。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SelectionAnchor {
+    pub unit_kind: u8,
+    pub unit_hash: u64,
+    /// 起点相对单元视觉首行的偏移（≥ 0）。
+    pub row_offset: usize,
+    pub column: u16,
+}
 
 /// 文本选区状态（消息区用）
 #[derive(Debug, Clone)]
@@ -17,6 +32,8 @@ pub struct TextSelection {
     pub dragging: bool,
     /// 选区对应的纯文本内容（松开鼠标后计算）
     pub selected_text: Option<String>,
+    /// 起点单元的稳定身份；结构变化（历史前插）后按它重解析起点。
+    pub anchor: Option<SelectionAnchor>,
 }
 
 impl Default for TextSelection {
@@ -32,15 +49,22 @@ impl TextSelection {
             end: None,
             dragging: false,
             selected_text: None,
+            anchor: None,
         }
     }
 
     /// 开始拖拽：记录起始坐标，清除旧选区
     pub fn start_drag(&mut self, row: usize, col: u16) {
+        self.start_drag_anchored(row, col, None);
+    }
+
+    /// 开始拖拽，并记录起点的稳定身份（无身份时传 `None`，退回纯视觉坐标）。
+    pub fn start_drag_anchored(&mut self, row: usize, col: u16, anchor: Option<SelectionAnchor>) {
         self.start = Some((row, col));
         self.end = Some((row, col));
         self.dragging = true;
         self.selected_text = None;
+        self.anchor = anchor;
     }
 
     /// 更新拖拽：更新结束坐标
@@ -66,6 +90,7 @@ impl TextSelection {
         self.end = None;
         self.dragging = false;
         self.selected_text = None;
+        self.anchor = None;
     }
 
     /// 是否有活跃的选区（正在拖拽或已选中文字）
@@ -99,6 +124,10 @@ pub fn line_to_plain_text(line: &Line) -> String {
 /// 在纯文本 text 中，将 visual_col 转换为 byte 偏移量。
 /// visual_col 是 Unicode 显示宽度列号。CJK 字符占 2 列。
 ///
+/// [字素边界] 按字素簇（grapheme cluster）遍历，宽度取整个字素簇的显示宽度——
+/// 与 ratatui 的渲染口径一致。ZWJ 组合 emoji（家庭/职业等）逐标量计宽会得到
+/// 远大于 2 的宽度，导致列→字节映射落到字素内部（F7）。
+///
 /// [半字符规则] 鼠标拖拽时终端报告的列号可能落在双宽字符（CJK / emoji）的左右半
 /// 任一列上。光标在字符左半 → 不含该字符；光标在字符右半 → 已越过该字符，应包含。
 /// 例如 '你' 占 col 2-3：target_col=2 不含、target_col=3 含。
@@ -106,17 +135,17 @@ pub fn line_to_plain_text(line: &Line) -> String {
 /// 用户拖到双宽字符右半时复制结果少一个字符，与终端显示的高亮范围不一致。
 pub fn visual_col_to_byte_offset(text: &str, target_col: u16) -> usize {
     let mut col = 0u16;
-    for (i, ch) in text.char_indices() {
-        let cw = unicode_width::UnicodeWidthChar::width(ch).unwrap_or(0) as u16;
+    for (i, grapheme) in text.grapheme_indices(true) {
+        let cw = UnicodeWidthStr::width(grapheme) as u16;
         if cw > 0 && target_col < col + cw {
-            // target_col 落在 ch 占据的列范围 [col, col+cw)
+            // target_col 落在 grapheme 占据的列范围 [col, col+cw)
             // 用 ceil(cw/2) 作为半字符分界：cw=2 → half=col+1，cw=3 → half=col+2
             let half = col + cw.div_ceil(2);
             if target_col >= half {
-                // 右半：光标已越过 ch → 含 ch，返回下一字符起点
-                return i + ch.len_utf8();
+                // 右半：光标已越过 grapheme → 含，返回下一字素起点
+                return i + grapheme.len();
             } else {
-                // 左半：光标在 ch 之前 → 不含
+                // 左半：光标在 grapheme 之前 → 不含
                 return i;
             }
         }

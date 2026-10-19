@@ -2,6 +2,7 @@
 name = "peri-agent"
 version.workspace = true
 edition.workspace = true
+rust-version.workspace = true
 description = "Rust Agent framework with middleware system, aligned with @langgraph-js/standard-agent"
 license = "Apache-2.0"
 
@@ -10,7 +11,7 @@ peri-time = { path = "../peri-time" }
 anyhow.workspace = true
 async-trait.workspace = true
 chrono.workspace = true
-dirs-next.workspace = true
+dirs.workspace = true
 serde.workspace = true
 serde_json = { workspace = true, features = ["raw_value"] }
 thiserror.workspace = true

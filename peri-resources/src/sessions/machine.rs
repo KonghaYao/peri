@@ -42,7 +42,7 @@ pub(crate) async fn initialize() -> Result<&'static str> {
                 .context("PERI_MACHINE_ID must be a UUID")?
                 .to_string());
         }
-        let home = dirs_next::home_dir().context("machine identity requires a home directory")?;
+        let home = dirs::home_dir().context("machine identity requires a home directory")?;
         load_or_create(&home.join(".peri/machine-id"))
     })
     .await??;
@@ -113,7 +113,7 @@ pub fn adopt_file_identity(expected: &str, target: &str) -> Result<()> {
     let target = Uuid::parse_str(target)
         .context("target Machine ID must be a UUID")?
         .to_string();
-    let home = dirs_next::home_dir().context("machine identity requires a home directory")?;
+    let home = dirs::home_dir().context("machine identity requires a home directory")?;
     let path = home.join(".peri/machine-id");
     adopt_identity_at(&path, &expected, &target)
 }

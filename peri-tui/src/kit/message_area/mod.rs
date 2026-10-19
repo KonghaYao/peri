@@ -393,6 +393,10 @@ pub fn MessageArea(props: &MessageAreaProps, mut hooks: Hooks) -> impl Into<AnyE
     let prev_loading_epoch = hooks.use_state(|| loading_epoch);
     let bridge_reset_counter = BRIDGE_RESET_COUNTER.get();
     let prev_reset_counter = hooks.use_state(|| bridge_reset_counter);
+    // [F6] Pending（Down 已记录）或 Armed（已升级拖拽）期间暂停输出驱动的吸底。
+    // 每帧从 State 读最新值；effect 在内容增长导致 deps 变化时运行，闭包携带
+    // 的是当帧值（Down/Drag 事件后 dispatch 会强制重渲染）。
+    let selection_active = gesture.read().is_some() || text_sel.read().dragging;
     hooks.use_effect(
         {
             move || {
@@ -419,6 +423,8 @@ pub fn MessageArea(props: &MessageAreaProps, mut hooks: Hooks) -> impl Into<AnyE
                     // （每帧派生值；effect 依赖不含它——block 完成时 generation
                     // 变化触发 effect，用当帧最新值）。
                     anchor_visual_range,
+                    // [F6] 文本拖选中：暂停输出增长驱动的吸底跟随。
+                    selection_active,
                 })
             }
         },
@@ -614,7 +620,9 @@ pub fn MessageArea(props: &MessageAreaProps, mut hooks: Hooks) -> impl Into<AnyE
     // sr/er 为视觉行（usize，内容可超 65535 视觉行），sc/ec 为视觉列（u16）。
     let sel_bounds: Option<(usize, usize, usize, u16, usize, u16)> = if !no_highlight {
         let sel = text_sel.read();
-        if let Some(((sr, sc), (er, ec))) = sel.normalized_bounds() {
+        // [F5] 起点优先按稳定身份解析（历史前插后视觉行号改变，内容身份不变）；
+        // 身份认不出时不显示过期高亮，下一次事件会明确取消选区。
+        if let Some(((sr, sc), (er, ec))) = selection::resolved_bounds(&slot_index, &sel) {
             // Clamp sr/er 到 wrap_map 视觉范围内（footer 区域无 wrap_map）
             let max_visual = slot_index.total_visual().saturating_sub(1);
             let sr_c = sr.min(max_visual);
@@ -657,6 +665,14 @@ pub fn MessageArea(props: &MessageAreaProps, mut hooks: Hooks) -> impl Into<AnyE
 
     // 构建 viewport_lines：clone + highlight 视口内的 core 行，必要时附加 footer
     let sel_bg = THEME_ATOM.state().read().semantic.surface.selection;
+    // [F3] NO_COLOR 最终 pass 会剥离背景色；选区必须保留非颜色标记。
+    // 有颜色时用主题 selection 背景；无色时用 REVERSED（strip_line_colors
+    // 保留 modifier，仍可在最终 Buffer 上辨识）。
+    let selection_style = if strip_color {
+        Style::default().add_modifier(Modifier::REVERSED)
+    } else {
+        Style::default().bg(sel_bg)
+    };
     // [T4 §4] hover 状态读副本（每帧一次）：视口 post-pass 据此把命中的
     // @image meta 行替换为绝对路径 + accent 高亮（G3 视口级，不写缓存）。
     // 陈旧校验：hover 的 vm_hash 与当帧 slot 的 content_hash 不一致
@@ -711,7 +727,16 @@ pub fn MessageArea(props: &MessageAreaProps, mut hooks: Hooks) -> impl Into<AnyE
                 let line = materialized.as_ref().unwrap().1.line(local_idx).unwrap();
                 let mut out = if in_sel {
                     let (_, _, sr, sc, er, ec) = sel_bounds.unwrap();
-                    highlight_line_in_selection(line, &entry, sr, er, sc, ec, vis_width, sel_bg)
+                    highlight_line_in_selection(
+                        line,
+                        &entry,
+                        sr,
+                        er,
+                        sc,
+                        ec,
+                        vis_width,
+                        selection_style,
+                    )
                 } else {
                     line.clone()
                 };

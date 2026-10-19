@@ -101,7 +101,7 @@ pub async fn build_app_and_acp(
 
     // 加载已启用插件数据
     {
-        let claude_dir = dirs_next::home_dir()
+        let claude_dir = dirs::home_dir()
             .unwrap_or_else(|| std::path::PathBuf::from("."))
             .join(".claude");
         app.services.plugin_data = Some(peri_middlewares::plugin::load_enabled_plugins_aggregated(

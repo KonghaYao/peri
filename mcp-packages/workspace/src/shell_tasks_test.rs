@@ -475,8 +475,10 @@ async fn concurrent_limit_rejection_is_reported_as_backpressure_not_launch_failu
         .spawn_scoped("sleep 30".into(), cwd.clone(), None, Some("capacity"))
         .await
         .expect_err("over-limit launch must be rejected");
+    let limit = BackgroundTaskRegistry::SHELL_LIMIT;
     assert!(
-        error.message.contains("concurrency limit reached") && error.message.contains("5/5"),
+        error.message.contains("concurrency limit reached")
+            && error.message.contains(&format!("shell {limit}/{limit}")),
         "limit rejection must keep kind/current/limit facts, got: {}",
         error.message
     );
@@ -492,8 +494,8 @@ async fn concurrent_limit_rejection_is_reported_as_backpressure_not_launch_failu
     );
     assert_eq!(
         BackgroundTaskRegistry::SHELL_LIMIT,
-        5,
-        "shell 并发上限是背压契约，本项不改变它"
+        20,
+        "shell 并发上限按容量决策固定为 20"
     );
     settle_shell_capacity(&owner).await;
     assert!(

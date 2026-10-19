@@ -6,7 +6,7 @@ use std::{
     sync::{Arc, Mutex, MutexGuard},
 };
 
-use fs2::FileExt;
+use fs4::FileExt;
 use peri_acp_types::configuration::{
     ConfigurationErrorKind, ConfigurationFailure, ConfigurationPaths, ConfigurationRequest,
     ConfigurationResponse, ConfigurationValue, CONFIGURATION_METHOD,
@@ -99,7 +99,7 @@ impl ConfigurationMcpServer {
                 let home = std::env::var_os("HOME")
                     .map(PathBuf::from)
                     .filter(|path| path.is_absolute())
-                    .or_else(dirs_next::home_dir);
+                    .or_else(dirs::home_dir);
                 let global_settings = self
                     .global_path
                     .lock()
@@ -207,7 +207,7 @@ fn write_lock(path: &Path) -> io::Result<WriteLockGuard> {
         options.mode(0o600);
     }
     let lock_file = options.open(lock_path)?;
-    FileExt::lock_exclusive(&lock_file)?;
+    FileExt::lock(&lock_file)?;
     Ok(WriteLockGuard {
         _process: guard,
         _file: lock_file,

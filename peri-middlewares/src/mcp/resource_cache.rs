@@ -103,7 +103,7 @@ struct CacheEntry {
 
 impl McpResourceCache {
     pub(crate) fn new() -> Self {
-        let base = dirs_next::home_dir().unwrap_or_else(std::env::temp_dir);
+        let base = dirs::home_dir().unwrap_or_else(std::env::temp_dir);
         Self::from_root(base.join(".peri").join("cache").join("mcp").join("v2"))
     }
 
@@ -545,7 +545,13 @@ fn cache_key(origin: &str, method: &str, params: &str) -> String {
 }
 
 fn digest(input: &str) -> String {
-    format!("{:x}", Sha256::digest(input.as_bytes()))
+    let digest = Sha256::digest(input.as_bytes());
+    let mut hex = String::with_capacity(64);
+    for byte in digest {
+        use std::fmt::Write as _;
+        let _ = write!(hex, "{byte:02x}");
+    }
+    hex
 }
 
 fn now_ms() -> u128 {

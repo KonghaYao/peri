@@ -79,7 +79,6 @@ fn make_parity_context(
         session_id: "session-parity-test".to_string(),
         tool_search_index: Arc::new(ToolSearchIndex::new()),
         shared_tools,
-        workflow_notifications: None,
         event_handler: Arc::new(ParityFakeEventHandler),
         task_manager: Arc::new(TaskManager::new()),
         bg_event_tx,

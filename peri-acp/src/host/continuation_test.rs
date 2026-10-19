@@ -102,7 +102,6 @@ fn make_session_state(armed: bool, epoch: u64) -> SessionState {
         frozen: None,
         recall_items: vec![],
         agent_pool: crate::session::agent_pool::AgentPool::new(),
-        workflow_notifications: None,
         title: None,
         tags: vec![],
         continuation_armed: armed,

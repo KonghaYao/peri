@@ -2,6 +2,63 @@ use super::*;
 
 #[tokio::test]
 #[serial]
+async fn cron_endpoint_does_not_fall_back_to_local_scheduler_when_mcp_is_closed() {
+    let tmp = tempfile::tempdir().unwrap();
+    let _home = HomeDirGuard::set(tmp.path());
+    let cfg = deployment(&tmp, false).await;
+    let transport: Arc<dyn crate::transport::AcpTransport> = Arc::new(MockTransport::default());
+    let cwd = tmp
+        .path()
+        .canonicalize()
+        .unwrap()
+        .to_string_lossy()
+        .into_owned();
+    let mut sessions = HashMap::new();
+    let id = new_session(&cfg, &mut sessions, &transport, &cwd).await;
+    let environment = sessions[&id].environment.clone().unwrap();
+    cron_tool(
+        &environment,
+        &id,
+        &cwd,
+        "cron_register",
+        json!({
+            "expression":"*/5 * * * *", "prompt":"must-not-bypass-mcp"
+        }),
+    )
+    .await;
+    let local = scheduler(&environment);
+    let job_id = local.lock().list_tasks()[0].id.clone();
+    let before = handle_request(
+        "cron/list",
+        &json!({"sessionId":id}),
+        &cfg,
+        &mut sessions,
+        &transport,
+    )
+    .await
+    .unwrap();
+    assert_eq!(before["jobs"][0]["id"], job_id);
+    environment.cfg.mcp_pool.as_ref().unwrap().shutdown().await;
+    for method in ["cron/list", "cron/toggle", "cron/remove"] {
+        assert!(
+            handle_request(
+                method,
+                &json!({"sessionId":id,"id":job_id}),
+                &cfg,
+                &mut sessions,
+                &transport
+            )
+            .await
+            .is_err(),
+            "{method} must fail when the MCP owner is unavailable"
+        );
+    }
+    assert!(local.lock().list_tasks()[0].enabled);
+    assert_eq!(local.lock().list_tasks().len(), 1);
+}
+
+#[tokio::test]
+#[serial]
 async fn cron_endpoint_uses_session_scheduler_and_rejects_cross_session_jobs() {
     let tmp = tempfile::tempdir().unwrap();
     let _home = HomeDirGuard::set(tmp.path());
@@ -16,6 +73,16 @@ async fn cron_endpoint_uses_session_scheduler_and_rejects_cross_session_jobs() {
     let mut sessions = HashMap::new();
     let first = new_session(&cfg, &mut sessions, &transport, &cwd).await;
     let second = new_session(&cfg, &mut sessions, &transport, &cwd).await;
+    for id in [&first, &second] {
+        cron_tool(
+            sessions[id].environment.as_ref().unwrap(),
+            id,
+            &cwd,
+            "cron_list",
+            json!({}),
+        )
+        .await;
+    }
     let first_scheduler = scheduler(sessions[&first].environment.as_ref().unwrap());
     let second_scheduler = scheduler(sessions[&second].environment.as_ref().unwrap());
     let job = first_scheduler
@@ -53,7 +120,11 @@ async fn cron_endpoint_uses_session_scheduler_and_rejects_cross_session_jobs() {
         )
         .await
         .unwrap_err();
-        assert_eq!(error.code, -32602);
+        assert_eq!(error.code, -32603);
+        assert!(
+            !error.message.is_empty(),
+            "MCP tool failure must remain observable"
+        );
     }
     assert!(first_scheduler.lock().list_tasks()[0].enabled);
     assert!(second_scheduler.lock().list_tasks().is_empty());

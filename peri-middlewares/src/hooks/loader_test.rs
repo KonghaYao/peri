@@ -483,7 +483,7 @@ fn write_hooks_settings(dir: &Path) {
 /// hooks 会注册成 global 与 project 两组而执行两次。子目录仍按项目级加载。
 ///
 /// 主目录经配置数据面（HOME 优先）解析，`HomeGuard` 注入的临时 `~`
-/// 在两个平台都生效（旧实现走 `dirs_next::home_dir()`，Windows 上读 Profile
+/// 在两个平台都生效（旧实现走 `dirs::home_dir()`，Windows 上读 Profile
 /// known-folder 而不读环境变量，该平台只能跳过）。
 #[test]
 fn test_project_hooks_skipped_when_cwd_is_home() {

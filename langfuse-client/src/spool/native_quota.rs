@@ -18,7 +18,7 @@ use std::io;
 use std::path::Path;
 use std::sync::Arc;
 
-use fs2::FileExt;
+use fs4::FileExt;
 use serde::{Deserialize, Serialize};
 use tracing::warn;
 
@@ -50,15 +50,14 @@ pub(crate) struct DomainLock {
 
 impl Drop for DomainLock {
     fn drop(&mut self) {
-        let _ = self.file.unlock();
+        let _ = FileExt::unlock(&self.file);
     }
 }
 
 fn acquire_domain_lock(inner: &NativeInner) -> SpoolResult<DomainLock> {
     let file = create_private_file(&inner.domain_lock_path())
         .map_err(|error| io_error("open spool domain lock", error))?;
-    file.lock_exclusive()
-        .map_err(|error| io_error("lock spool domain", error))?;
+    FileExt::lock(&file).map_err(|error| io_error("lock spool domain", error))?;
     Ok(DomainLock { file })
 }
 
@@ -251,7 +250,7 @@ impl QuotaReservation for NativeReservation {
 impl Drop for NativeReservation {
     fn drop(&mut self) {
         // 只回收未写预留：已写字节必须在确认删除后由 publish/abort 结算，不由 Drop 声称已清理。
-        let _ = self.lock.unlock();
+        let _ = FileExt::unlock(&self.lock);
         let _ = fs::remove_file(self.inner.quota_lock_path(&self.reservation));
     }
 }

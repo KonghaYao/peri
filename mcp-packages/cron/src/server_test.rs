@@ -4,7 +4,7 @@
 //! - **声明面**：`list_tools` 的三条 `rmcp::model::Tool` 与既有 `CronRegisterTool` /
 //!   `CronListTool` / `CronRemoveTool` 的 `BaseTool::definition()` 逐字相等（期望值由
 //!   既有工具生成，本文件不硬编码第三份 schema）。
-//! - **路由**：三条工具打到**同一** scheduler（经 `list_tasks` / `get_task` 与工具
+//! - **路由**：全部工具打到**同一** scheduler（经 `list_tasks` / `get_task` 与工具
 //!   返回文本观察）；未知工具名 → `invalid_params`。
 //! - **IF-D14 映射**：失败 → `Ok(Complete(error 结果))`，文本等于 `invoke_tool_call`
 //!   的诊断文本（保留实际错误）；成功 → 工具返回文本。
@@ -30,7 +30,9 @@ use serde_json::{json, Value};
 use tokio::sync::mpsc;
 
 use super::CronMcpServer;
-use crate::{CronListTool, CronRegisterTool, CronRemoveTool, CronScheduler, CronTrigger};
+use crate::{
+    CronListTool, CronRegisterTool, CronRemoveTool, CronScheduler, CronToggleTool, CronTrigger,
+};
 use peri_mcp_common::{invoke_tool_call, list_tools_of};
 
 /// 门禁用例的注册参数（`cron_register` 的必填两项）。
@@ -196,6 +198,72 @@ fn complete(response: CallToolResponse) -> CallToolResult {
     }
 }
 
+async fn jobs(peer: &Peer<RoleClient>) -> Value {
+    let result = peer
+        .read_resource(rmcp::model::ReadResourceRequestParams::new(
+            crate::CRON_JOBS_URI,
+        ))
+        .await
+        .unwrap();
+    let rmcp::model::ResourceContents::TextResourceContents { text, .. } = &result.contents[0]
+    else {
+        panic!("cron jobs must be JSON text");
+    };
+    serde_json::from_str(text).unwrap()
+}
+
+#[tokio::test]
+async fn cron_panel_data_and_mutations_cross_standard_mcp_wire() {
+    let (scheduler, _triggers) = scheduler_fixture();
+    let pair = connect(CronMcpServer::new(scheduler)).await;
+    let peer = pair.peer();
+    let resources = peer.list_all_resources().await.unwrap();
+    assert!(resources
+        .iter()
+        .any(|resource| resource.uri == crate::CRON_JOBS_URI));
+    let created = peer
+        .call_tool(call(
+            "cron_register",
+            json!({
+                "expression": "*/5 * * * *", "prompt": "wire-only-job"
+            }),
+        ))
+        .await
+        .unwrap();
+    assert_ne!(created.is_error, Some(true));
+    let initial = jobs(&peer).await;
+    let id = initial["jobs"][0]["id"].as_str().unwrap();
+    assert_eq!(initial["jobs"][0]["enabled"], true);
+    let toggled = peer
+        .call_tool(call("cron_toggle", json!({"id":id})))
+        .await
+        .unwrap();
+    assert_ne!(toggled.is_error, Some(true));
+    assert_eq!(jobs(&peer).await["jobs"][0]["enabled"], false);
+    assert_ne!(
+        peer.call_tool(call("cron_remove", json!({"id":id})))
+            .await
+            .unwrap()
+            .is_error,
+        Some(true)
+    );
+    assert_eq!(jobs(&peer).await["jobs"], json!([]));
+    assert_eq!(
+        peer.call_tool(call("cron_toggle", json!({"id":id})))
+            .await
+            .unwrap()
+            .is_error,
+        Some(true)
+    );
+    assert!(peer
+        .read_resource(rmcp::model::ReadResourceRequestParams::new(
+            "cron://missing"
+        ))
+        .await
+        .is_err());
+    pair.shutdown().await;
+}
+
 // ─── 声明面 ───────────────────────────────────────────────────────────────────
 
 #[test]
@@ -220,13 +288,17 @@ fn list_tools_uses_existing_cron_definitions() {
         Arc::new(CronRegisterTool::new(Arc::clone(&scheduler))),
         Arc::new(CronListTool::new(Arc::clone(&scheduler))),
         Arc::new(CronRemoveTool::new(Arc::clone(&scheduler))),
+        Arc::new(CronToggleTool::new(Arc::clone(&scheduler))),
+        Arc::new(crate::tools::CronAcknowledgeTool::new(Arc::clone(
+            &scheduler,
+        ))),
     ];
 
     let listed = list_tools_of(server.tools());
     assert_eq!(
         listed.tools.len(),
         expected.len(),
-        "handler 必须恰好声明三条工具"
+        "handler 必须恰好声明全部工具"
     );
     for (mapped, tool) in listed.tools.iter().zip(expected.iter()) {
         let definition = tool.definition();
@@ -250,7 +322,7 @@ fn list_tools_uses_existing_cron_definitions() {
     }
 }
 
-// ─── 门禁：三条工具 + 同一 scheduler + 不驱动 tick（A32） ──────────────────────
+// ─── 门禁：全部工具 + 同一 scheduler + 不驱动 tick（A32） ──────────────────────
 
 #[tokio::test]
 async fn cron_server_maps_three_tools_without_tick() {
@@ -266,11 +338,17 @@ async fn cron_server_maps_three_tools_without_tick() {
     let names: Vec<&str> = listed.iter().map(|tool| tool.name.as_ref()).collect();
     assert_eq!(
         names,
-        vec!["cron_register", "cron_list", "cron_remove"],
-        "handler 必须恰好声明三条工具，且顺序与注册表声明一致"
+        vec![
+            "cron_register",
+            "cron_list",
+            "cron_remove",
+            "cron_toggle",
+            "cron_acknowledge"
+        ],
+        "handler 必须恰好声明全部工具，且顺序与注册表声明一致"
     );
 
-    // ② 三条工具打到**同一** scheduler（写 → 读都由 scheduler 侧的观察点确认）。
+    // ② 全部工具打到**同一** scheduler（写 → 读都由 scheduler 侧的观察点确认）。
     let registered = complete(
         peer.call_tool_once(call(
             "cron_register",
@@ -553,12 +631,12 @@ async fn tick_disabled_has_no_driver_but_tools_work() {
     // 不 spawn 任何 TickGuard：这一代没有 tick 驱动。
     let server = CronMcpServer::new(Arc::clone(&scheduler));
 
-    // ① 声明面照常：三条工具。
+    // ① 声明面照常：全部工具。
     let listed = list_tools_of(server.tools());
     assert_eq!(
         listed.tools.len(),
-        3,
-        "tick 关闭不影响 tools/list 的三条声明"
+        5,
+        "tick 关闭不影响 tools/list 的全部声明"
     );
 
     // ② `cron_register` 走真实映射路径（register → list → remove 至少一遍）。
@@ -619,4 +697,61 @@ async fn tick_disabled_has_no_driver_but_tools_work() {
         scheduler.lock().get_task(&task_id).is_none(),
         "cron_remove 必须删掉同一 scheduler 上的任务"
     );
+}
+
+#[tokio::test]
+async fn cron_trigger_outbox_survives_wire_disconnect_until_acknowledged() {
+    let (scheduler, _triggers) = scheduler_fixture();
+    let id = scheduler
+        .lock()
+        .register("* * * * *", "retained firing")
+        .unwrap();
+    scheduler.lock().force_next_fire_to_past(&id);
+    scheduler.lock().tick();
+    let pair = connect(CronMcpServer::new(scheduler.clone())).await;
+    let uri = "cron://triggers";
+    let read = pair
+        .peer()
+        .read_resource(rmcp::model::ReadResourceRequestParams::new(uri))
+        .await
+        .unwrap();
+    let rmcp::model::ResourceContents::TextResourceContents { text, .. } = &read.contents[0] else {
+        panic!("JSON expected")
+    };
+    let initial: Value = serde_json::from_str(text).unwrap();
+    assert_eq!(initial["triggers"].as_array().unwrap().len(), 1);
+    pair.shutdown().await;
+    let pair = connect(CronMcpServer::new(scheduler)).await;
+    let peer = pair.peer();
+    let retained = peer
+        .read_resource(rmcp::model::ReadResourceRequestParams::new(uri))
+        .await
+        .unwrap();
+    let rmcp::model::ResourceContents::TextResourceContents { text, .. } = &retained.contents[0]
+    else {
+        panic!("JSON expected")
+    };
+    assert_eq!(serde_json::from_str::<Value>(text).unwrap(), initial);
+    let ack = json!({"task_id":id,"firing_id":initial["triggers"][0]["firing_id"]});
+    for _ in 0..2 {
+        assert_ne!(
+            peer.call_tool(call("cron_acknowledge", ack.clone()))
+                .await
+                .unwrap()
+                .is_error,
+            Some(true)
+        );
+    }
+    let read = peer
+        .read_resource(rmcp::model::ReadResourceRequestParams::new(uri))
+        .await
+        .unwrap();
+    let rmcp::model::ResourceContents::TextResourceContents { text, .. } = &read.contents[0] else {
+        panic!("JSON expected")
+    };
+    assert_eq!(
+        serde_json::from_str::<Value>(text).unwrap()["triggers"],
+        json!([])
+    );
+    pair.shutdown().await;
 }

@@ -443,7 +443,6 @@ pub(super) async fn make_session_context(session_id: &str) -> SessionContext {
         tool_search_index: Arc::new(ToolSearchIndex::default()),
         shared_tools: Arc::new(parking_lot::RwLock::new(Default::default())),
         agent_catalog: Arc::new(AgentCatalogProvider::new()),
-        workflow_notifications: None,
         event_publisher: Arc::new(crate::host::controller_ports::ControllerEventPublisher(
             controller.clone(),
         )),

@@ -354,7 +354,7 @@ mod tests {
         }
     }
 
-    /// R21（IF-P3-10）：cron 三工具不得进入 [`MIDDLEWARE_TOOL_NAMES`]（middleware
+    /// R21（IF-P3-10）：cron 工具不得进入 [`MIDDLEWARE_TOOL_NAMES`]（middleware
     /// 静态工具的防御剔除面）；其原始名与 effective name 逐字由 builtin 注册表
     /// （`crate::builtin_mcp` 的 `CRON_TOOLS`）声明。
     ///
@@ -365,14 +365,14 @@ mod tests {
     ///   `build_session_tool_view` 的剔除结果：遍历 `BUILTIN_MCP_INSTANCES`，断言每个
     ///   工具的 **`original_name`** 不在本表内，并用 `NamedTool` 桩证明裸名不再被剔除
     ///   ——回答「剔除谓词是否按裸名放行」。
-    /// - 本用例在**契约常量级**断言 **`effective_name`**（`mcp__cron__*` 三枚）
+    /// - 本用例在**契约常量级**断言 **`effective_name`**（`mcp__cron__*` 五枚）
     ///   不在本表内。谓词按 `name.as_str()` 精确匹配，而模型面看到
     ///   的是 effective name：effective name 一旦混进本表，迁移后的
     ///   `mcp__cron__cron_register` 会被当作 middleware 静态工具剔除（「裸名 XOR
     ///   effective name」的重命名映射随之破坏）。
     ///
     /// 原始名不在本表内已由上述谓词级用例覆盖，此处不重复；`CRON_TOOLS` 是 cron
-    /// 三工具名字的**唯一声明处**，逐字声明在此钉住（字面量与
+    /// 工具名字的**唯一声明处**，逐字声明在此钉住（字面量与
     /// `mcp::builtin::effective_tool_name()` 输出的等价另由
     /// `cargo test -p peri-middlewares --lib -- mcp::builtin::tests` 锁定）。
     #[test]
@@ -384,21 +384,29 @@ mod tests {
             cron.tools.iter().map(|tool| tool.effective_name).collect();
         assert_eq!(
             declared_originals,
-            ["cron_register", "cron_list", "cron_remove"]
-                .into_iter()
-                .collect::<std::collections::HashSet<&str>>(),
-            "cron 三工具的原始名必须逐字由注册表 CRON_TOOLS 声明"
+            [
+                "cron_register",
+                "cron_list",
+                "cron_remove",
+                "cron_toggle",
+                "cron_acknowledge"
+            ]
+            .into_iter()
+            .collect::<std::collections::HashSet<&str>>(),
+            "cron 工具的原始名必须逐字由注册表 CRON_TOOLS 声明"
         );
         assert_eq!(
             declared_effectives,
             [
                 "mcp__cron__cron_register",
                 "mcp__cron__cron_list",
-                "mcp__cron__cron_remove"
+                "mcp__cron__cron_remove",
+                "mcp__cron__cron_toggle",
+                "mcp__cron__cron_acknowledge"
             ]
             .into_iter()
             .collect::<std::collections::HashSet<&str>>(),
-            "cron 三工具的 effective name 必须逐字由注册表 CRON_TOOLS 声明"
+            "cron 工具的 effective name 必须逐字由注册表 CRON_TOOLS 声明"
         );
         for tool in cron.tools {
             assert_eq!(

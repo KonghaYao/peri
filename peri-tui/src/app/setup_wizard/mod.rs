@@ -632,7 +632,7 @@ pub fn migrate_from_claude_code(
     home_dir_override: Option<std::path::PathBuf>,
 ) -> bool {
     let home = home_dir_override
-        .or_else(dirs_next::home_dir)
+        .or_else(dirs::home_dir)
         .unwrap_or_else(|| std::path::PathBuf::from("."));
     let claude_dir = home.join(".claude");
     let settings_path = claude_dir.join("settings.json");

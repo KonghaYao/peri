@@ -2,6 +2,7 @@
 name = "peri-time"
 version.workspace = true
 edition.workspace = true
+rust-version.workspace = true
 description = "Platform time boundary for Peri"
 
 [dependencies]

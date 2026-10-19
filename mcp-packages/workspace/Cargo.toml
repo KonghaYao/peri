@@ -2,6 +2,7 @@
 name = "peri-mcp-workspace"
 version.workspace = true
 edition.workspace = true
+rust-version.workspace = true
 description = "Workspace filesystem and terminal builtin MCP instance"
 license = "Apache-2.0"
 
@@ -10,12 +11,12 @@ peri-time = { path = "../../peri-time" }
 anyhow.workspace = true
 axum.workspace = true
 clap = { version = "4", features = ["derive"] }
-dirs-next.workspace = true
+dirs.workspace = true
 peri-agent = { path = "../../peri-agent" }
 peri-acp-types = { path = "../../peri-acp-types" }
 peri-mcp-common = { path = "../common" }
 async-trait.workspace = true
-base64 = { version = "0.22", features = ["alloc"] }
+base64 = { version = "0.23.1", features = ["alloc"] }
 chrono.workspace = true
 fuzzy-matcher = "0.3"
 grep = "0.4"
@@ -26,7 +27,7 @@ parking_lot.workspace = true
 rmcp = { workspace = true, features = ["transport-streamable-http-server"] }
 serde.workspace = true
 serde_json.workspace = true
-serde_yaml.workspace = true
+serde_norway.workspace = true
 thiserror.workspace = true
 tokio.workspace = true
 tokio-util.workspace = true

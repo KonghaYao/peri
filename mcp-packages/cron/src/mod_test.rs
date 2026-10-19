@@ -1,3 +1,4 @@
+use chrono::Timelike;
 use tokio::sync::mpsc;
 
 use super::*;
@@ -171,4 +172,88 @@ fn test_cron_scheduler_port_downcast_restores_concrete() {
         Arc::ptr_eq(&handle, &restored),
         "还原实例必须是原 Arc（工具/订阅/tick 共享同一 scheduler）"
     );
+}
+
+fn fixed_after() -> DateTime<Utc> {
+    DateTime::parse_from_rfc3339("2026-01-01T00:00:00Z")
+        .unwrap()
+        .with_timezone(&Utc)
+}
+
+/// [回归测试] croner 4.x 默认拒绝 3.x 接受的简写步进 `5/5`，
+/// 共享 helper 必须开启 `sloppy_ranges` 恢复兼容。
+#[test]
+fn test_parse_cron_accepts_sloppy_step_range() {
+    let cron = parse_cron("5/5 * * * *").expect("5/5 简写步进应可解析");
+    let next = cron
+        .iter_after(fixed_after())
+        .next()
+        .expect("5/5 应能计算下次触发");
+    assert_eq!(
+        next,
+        DateTime::parse_from_rfc3339("2026-01-01T00:05:00Z")
+            .unwrap()
+            .with_timezone(&Utc)
+    );
+}
+
+/// 注册路径（`register` 的校验解析）必须接受简写步进。
+#[test]
+fn test_register_accepts_sloppy_step_range() {
+    let (mut sched, _rx) = new_scheduler();
+    let id = sched
+        .register("5/5 * * * *", "sloppy")
+        .expect("注册路径应接受 5/5 简写步进");
+    let task = sched.get_task(&id).unwrap();
+    let next = task.next_fire.expect("注册时应计算下次触发");
+    assert!(next > Utc::now());
+    assert_eq!(next.minute() % 5, 0);
+    assert_ne!(next.minute(), 0, "5/5 的分钟取值从 5 开始");
+}
+
+/// 下次触发计算路径（`calculate_next_fire`）必须接受简写步进。
+#[test]
+fn test_calculate_next_fire_accepts_sloppy_step_range() {
+    let next = CronScheduler::calculate_next_fire("5/5 * * * *", fixed_after())
+        .expect("下次触发计算路径应接受 5/5 简写步进");
+    assert_eq!(
+        next,
+        DateTime::parse_from_rfc3339("2026-01-01T00:05:00Z")
+            .unwrap()
+            .with_timezone(&Utc)
+    );
+}
+
+/// 标准 5/6 段表达式的解析与 next-trigger 行为保持不变。
+#[test]
+fn test_parse_cron_standard_expressions_unchanged() {
+    let cases = [
+        ("*/5 * * * *", "2026-01-01T00:05:00Z"),
+        ("0 0 1 1 *", "2027-01-01T00:00:00Z"),
+        ("0 */5 * * * *", "2026-01-01T00:05:00Z"),
+    ];
+    for (expression, expected) in cases {
+        let cron = parse_cron(expression).unwrap_or_else(|e| panic!("{expression} 应可解析: {e}"));
+        let next = cron
+            .iter_after(fixed_after())
+            .next()
+            .unwrap_or_else(|| panic!("{expression} 应能计算下次触发"));
+        assert_eq!(
+            next,
+            DateTime::parse_from_rfc3339(expected)
+                .unwrap()
+                .with_timezone(&Utc),
+            "{expression}"
+        );
+    }
+}
+
+/// 放宽简写步进不应放行非法表达式。
+#[test]
+fn test_parse_cron_rejects_invalid_expression() {
+    let err = parse_cron("invalid").unwrap_err();
+    assert!(matches!(err, CronError::InvalidExpression(_)));
+    assert!(err.to_string().contains("cron 表达式无效"));
+
+    assert!(parse_cron("61 * * * *").is_err(), "越界分钟必须被拒绝");
 }

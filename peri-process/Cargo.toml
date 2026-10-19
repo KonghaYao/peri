@@ -2,6 +2,7 @@
 name = "peri-process"
 version.workspace = true
 edition.workspace = true
+rust-version.workspace = true
 description = "Local subprocess tree ownership and cleanup evidence"
 
 [dependencies]

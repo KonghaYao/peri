@@ -1,5 +1,9 @@
 //! A session owns one verified execution environment and its resource lifetime.
 
+#[cfg(not(target_os = "emscripten"))]
+#[path = "workspace_workflow.rs"]
+mod workflow;
+
 use std::sync::Arc;
 
 use super::{assemble, task_scope, AcpServerConfig};
@@ -69,6 +73,9 @@ pub(crate) struct SessionEnvironment {
     #[cfg(not(target_os = "emscripten"))]
     workflow_consumer:
         parking_lot::Mutex<Option<crate::host::workflow_consumer::WorkflowTaskConsumer>>,
+    #[cfg(not(target_os = "emscripten"))]
+    workflow_projection:
+        parking_lot::Mutex<Option<crate::host::workflow_projection::WorkflowProjection>>,
 }
 
 /// 测试观察面：会话环境 shutdown 事件（session_id）。
@@ -605,6 +612,8 @@ impl SessionEnvironment {
             workflow_input: Some(workflow_input),
             #[cfg(not(target_os = "emscripten"))]
             workflow_consumer: parking_lot::Mutex::new(None),
+            #[cfg(not(target_os = "emscripten"))]
+            workflow_projection: parking_lot::Mutex::new(None),
         })))
     }
 
@@ -678,74 +687,6 @@ impl SessionEnvironment {
         Arc::clone(&self.task_manager)
     }
 
-    /// 把会话级 `WorkflowRuntime` 绑定进 builtin `workflow` 实例槽位（P5：运行时
-    /// 由宿主创建，不再经旧链 middleware 端口），两条面共享同一份状态。
-    ///
-    /// 返回 `None`：本环境未注入 workflow 实例槽位（该部署形态没有 builtin 实例面）。
-    /// 返回 `Some` 时由调用方按 [`peri_mcp_workflow::BindOutcome`] 裁决：`Conflict`
-    /// 是装配异常，按会话初始化失败处理（design §6.2），不降级为警告。
-    ///
-    /// 同点把 session 级 `TaskManager` 注入运行时（bg registry：workflow run 的
-    /// 取消面），与运行时创建同一处收口（旧链时期在每次执行的装配里注入）。
-    #[cfg(not(target_os = "emscripten"))]
-    pub(crate) fn bind_workflow_runtime(
-        &self,
-        runtime: &Arc<peri_mcp_workflow::WorkflowRuntime>,
-    ) -> Option<peri_mcp_workflow::BindOutcome> {
-        let input = self.workflow_input.as_ref()?;
-        runtime.set_bg_registry(self.task_manager());
-        Some(input.bind(Arc::clone(runtime)))
-    }
-
-    /// 槽位绑定的 `WorkflowRuntime`（双轨期由会话旧链构造并绑定；`None` = 未绑定）。
-    #[cfg(not(target_os = "emscripten"))]
-    pub(crate) fn workflow_runtime(&self) -> Option<Arc<peri_mcp_workflow::WorkflowRuntime>> {
-        self.workflow_input
-            .as_ref()
-            .and_then(|input| input.runtime())
-            .cloned()
-    }
-
-    /// 启动宿主侧 workflow 任务消费者（design §5.5；P3 就绪与订阅接线）。
-    ///
-    /// 前置：槽位已绑定（[`Self::bind_workflow_runtime`] 成功）。消费者在后台
-    /// 建立 `workflow://tasks` 订阅并完成基线读取后才置 `consumer_ready`；就绪前
-    /// `Workflow` 工具拒绝新启动（就绪屏障），订阅失败回落 not-ready 而非带病放行。
-    ///
-    /// 返回 `false`：本部署形态没有 workflow 实例面（无池 / 未注入槽位 / 未绑定），
-    /// 无需消费者，不是失败。
-    #[cfg(not(target_os = "emscripten"))]
-    pub(crate) fn start_workflow_consumer(
-        &self,
-        executor: Arc<dyn peri_acp_types::workflow::AgentExecutor>,
-    ) -> bool {
-        let Some(pool) = self.cfg.mcp_pool.clone() else {
-            return false;
-        };
-        let Some(runtime) = self.workflow_runtime() else {
-            return false;
-        };
-        let consumer = crate::host::workflow_consumer::WorkflowTaskConsumer::start(
-            pool,
-            runtime,
-            executor,
-            self.session_id.clone(),
-        );
-        // 重复调用（异常路径）时旧消费者随赋值 drop → 取消，不残留双消费者。
-        *self.workflow_consumer.lock() = Some(consumer);
-        true
-    }
-
-    /// 停止消费者：取消订阅与在飞执行并有界等待收口（会话关闭路径；幂等）。
-    #[cfg(not(target_os = "emscripten"))]
-    async fn stop_workflow_consumer(&self) {
-        // 锁在本语句内收口（guard 不跨 await），返回后 await 收口。
-        let consumer = self.workflow_consumer.lock().take();
-        if let Some(consumer) = consumer {
-            consumer.stop().await;
-        }
-    }
-
     /// 本环境装配时派生的 A24 关闭集（订阅建立门的唯一输入）。
     ///
     /// `cfg(test)`：这是**测试观察面**——验证关闭集来自哪份 frozen（而不是当轮配置）。
@@ -783,9 +724,9 @@ impl SessionEnvironment {
         if let Some(facade) = self.cfg.mcp_apps_facade.as_ref() {
             facade.on_session_closing();
         }
-        // 会话终结即断开本会话声明的 MCP-over-ACP 连接：连接由 client 侧的
-        // ACP 通道承载，会话不再存活后既没有归属也不会有入站消息；处置必须在
-        // 池关闭之前完成，否则 `mcp/disconnect` 已无出站通道可用。实现幂等，
+        // 会话终结即撤销本会话声明的 MCP-over-ACP 路由与池条目：声明只在该
+        // 会话存续期间有效，会话不再存活后既没有归属也不会有入站消息；处置必须
+        // 在池关闭之前完成，否则 close_session 已无出站通道可用。实现幂等，
         // 关闭重试重复调用是安全的。
         if let Some(port) = self.cfg.acp_mcp.as_ref() {
             port.close_session(&self.session_id).await;
@@ -799,10 +740,19 @@ impl SessionEnvironment {
         // 池关闭与订阅释放（④⑤由下方 task_owner / pool 关闭承担）。
         #[cfg(not(target_os = "emscripten"))]
         {
-            if let Some(runtime) = self.workflow_runtime() {
-                runtime.mark_closed();
+            let projection = self
+                .workflow_projection
+                .lock()
+                .as_ref()
+                .map(|projection| projection.client.clone());
+            if let Some(projection) = projection {
+                if let Err(error) = projection.close().await {
+                    tracing::error!(%error, "workflow MCP shutdown has not been confirmed");
+                    return false;
+                }
             }
             self.stop_workflow_consumer().await;
+            self.workflow_projection.lock().take();
         }
         let mut tasks = self.task_owner.lock().await;
         tasks.begin_shutdown();

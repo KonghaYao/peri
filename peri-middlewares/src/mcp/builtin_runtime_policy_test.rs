@@ -51,7 +51,7 @@ async fn policy_close_dimensions() {
     let cron_declared = mw_declared_tool_count("cron");
     let web_declared = mw_declared_tool_count("web");
     let artifact_declared = mw_declared_tool_count("artifact");
-    assert_eq!(cron_declared, 3, "用例前提（真值表数字）：cron 三工具");
+    assert_eq!(cron_declared, 4, "cron 包含启停工具");
 
     let mut cells = 0usize;
     for cron_open in [true, false] {

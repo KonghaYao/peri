@@ -331,6 +331,16 @@ impl StdioTransport {
 #[async_trait]
 impl AcpTransport for StdioTransport {
     async fn send_request(&self, method: &str, params: Value) -> Result<Value, AcpError> {
+        self.send_cancellable_request(method, params, tokio_util::sync::CancellationToken::new())
+            .await
+    }
+
+    async fn send_cancellable_request(
+        &self,
+        method: &str,
+        params: Value,
+        cancellation: tokio_util::sync::CancellationToken,
+    ) -> Result<Value, AcpError> {
         let pending = self.router.register()?;
 
         let envelope = JsonRpcEnvelope {
@@ -343,7 +353,7 @@ impl AcpTransport for StdioTransport {
         };
         write_envelope(&self.writer, &self.router, &envelope).await?;
 
-        pending.wait().await
+        super::wait_cancellable(self, pending, cancellation).await
     }
 
     async fn send_notification(&self, method: &str, params: Value) -> Result<(), AcpError> {

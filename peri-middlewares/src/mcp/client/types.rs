@@ -136,23 +136,23 @@ pub(crate) enum McpConnectionKey {
 
 /// 会话级 ACP 连接的持久化 cache 身份（M7）。
 ///
-/// 三个字段都是**非凭据**的 opaque 值：`connection_id` 是 ACP `mcp/connect`
-/// 返回的连接句柄，`generation` 是池内的句柄代号。凭据（token / header / env）
+/// 三个字段都是**非凭据**的 opaque 值：`server_id` 是 client 在会话 setup 中
+/// 声明的 `serverId`，`generation` 是池内的句柄代号。凭据（token / header / env）
 /// 从不进入本结构，也不写入日志或 cache 键。
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub(crate) struct AcpConnectionIdentity {
     pub(crate) session_id: String,
-    pub(crate) connection_id: String,
+    pub(crate) server_id: String,
     pub(crate) generation: u64,
 }
 
 impl AcpConnectionIdentity {
     /// cache origin 的连接段：换代（generation 变化）或更换声明（session /
-    /// connection 变化）都会得到不同 origin，旧缓存自然 miss。
+    /// serverId 变化）都会得到不同 origin，旧缓存自然 miss。
     pub(crate) fn cache_origin_segment(&self) -> String {
         format!(
             "acp:{}:{}:{}",
-            self.session_id, self.connection_id, self.generation
+            self.session_id, self.server_id, self.generation
         )
     }
 }

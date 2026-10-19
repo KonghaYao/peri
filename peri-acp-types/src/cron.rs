@@ -1,16 +1,13 @@
 //! Cron 契约（触发事件 + 调度器端口）。
 //!
-//! `CronTrigger` 自 `peri-middlewares/src/cron/mod.rs` 迁入（3.0 批 2 波 1）；
-//! `CronSchedulerPort` 为装配注入端口（波 2）：宿主装配点构造具体
-//! `CronScheduler` 后 upcast 注入，ACP 侧只持端口接口。middlewares 的
-//! `CronScheduler` 实现该端口（`impl CronSchedulerPort for Mutex<CronScheduler>`）。
+//! `CronSchedulerPort` 只在装配时标识是否提供能力；业务读取、修改和触发
+//! 都走会话 MCP 连接。`CronTrigger` 是资源正文的序列化契约。
 
 use std::any::Any;
 use std::sync::Arc;
 
 use chrono::{DateTime, Utc};
 use sha2::{Digest, Sha256};
-use tokio::sync::mpsc;
 
 /// 单条 cron 触发提醒可承载的 prompt 预算（UTF-8 字节）。
 ///
@@ -24,7 +21,7 @@ pub const MAX_CRON_PROMPT_BYTES: usize =
 const MAX_CRON_PROMPT_ENVELOPE_BYTES: usize = 4 * 1024;
 
 /// 触发事件（由 CronScheduler 发送到 App）
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct CronTrigger {
     pub task_id: String,
     /// 本次 firing 的稳定身份（调度器按计划触发时间派生）。
@@ -169,18 +166,6 @@ pub struct CronContinuationRequest {
 /// 由宿主装配点构造。订阅语义与 `CronScheduler::subscribe` 一致：
 /// 返回的接收端收到每次触发的 clone。
 pub trait CronSchedulerPort: Send + Sync {
-    /// 订阅 cron 触发事件（每触发一次收到一条 `CronTrigger`）。
-    fn subscribe(&self) -> mpsc::UnboundedReceiver<CronTrigger>;
-
-    /// 全部任务快照（cron/list 命令面数据源；TUI 面板经 ACP 拿数据）。
-    fn list_tasks(&self) -> Vec<CronTaskInfo>;
-
-    /// 切换任务启用状态（返回是否命中）。
-    fn toggle(&self, id: &str) -> bool;
-
-    /// 移除任务（返回是否命中）。
-    fn remove(&self, id: &str) -> bool;
-
     /// 还原具体实现（downcast 还原点，供 middlewares 装配面与装配面宿主使用）。
     fn as_any(&self) -> &dyn Any;
 }

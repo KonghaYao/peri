@@ -170,12 +170,6 @@ pub(crate) async fn handle_fork_shared(
         frozen: Some(frozen_data),
         recall_items: Vec::new(),
         agent_pool: crate::session::agent_pool::AgentPool::new(),
-        #[cfg(not(target_os = "emscripten"))]
-        workflow_notifications: workflow_chain
-            .as_ref()
-            .map(|chain| Arc::clone(&chain.notifications)),
-        #[cfg(target_os = "emscripten")]
-        workflow_notifications: None,
         title: None,
         tags: Vec::new(),
     };

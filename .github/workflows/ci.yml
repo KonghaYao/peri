@@ -70,10 +70,14 @@ jobs:
               if: runner.os == 'Linux'
               run: bash scripts/check-layer-imports.sh
 
+            - name: Check MCP data boundary
+              if: runner.os == 'Linux'
+              run: bash scripts/check-mcp-data-boundary.sh
+
             - name: Install Rust toolchain
               uses: dtolnay/rust-toolchain@master
               with:
-                  toolchain: stable
+                  toolchain: 1.99.0
                   targets: ${{ matrix.target }}
                   components: clippy
 

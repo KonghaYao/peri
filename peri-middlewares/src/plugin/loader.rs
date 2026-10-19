@@ -66,7 +66,7 @@ pub struct CommandFrontmatter {
     #[serde(default)]
     description: Option<String>,
     #[serde(default)]
-    args: Option<serde_yaml::Value>,
+    args: Option<serde_norway::Value>,
 }
 
 pub fn parse_command_md(path: &Path) -> Option<(CommandFrontmatter, String)> {

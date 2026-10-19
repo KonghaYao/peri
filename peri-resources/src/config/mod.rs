@@ -7,7 +7,7 @@ use std::path::PathBuf;
 
 /// 全局配置目录 `~/.peri`
 pub fn peri_dir() -> Option<PathBuf> {
-    dirs_next::home_dir().map(|home| home.join(".peri"))
+    dirs::home_dir().map(|home| home.join(".peri"))
 }
 
 /// 全局配置文件 `~/.peri/settings.json`

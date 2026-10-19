@@ -164,6 +164,7 @@ struct SessionManagerInner {
     pub caps_registry: Arc<DashMap<String, PeriCaps>>,
     /// 全局 CronScheduler（TUI/stdio 进程共享）。None = 不启用 cron 注入。
     pub cron_scheduler: Option<Arc<dyn peri_acp_types::cron::CronSchedulerPort>>,
+    pub cron_mcp: parking_lot::Mutex<Option<Arc<dyn peri_acp_types::ports::McpPoolPort>>>,
     /// Host 统一 continuation scheduler 的 cron 入口；server 启动后绑定。
     pub cron_continuation_tx: parking_lot::Mutex<
         Option<tokio::sync::mpsc::UnboundedSender<peri_acp_types::cron::CronContinuationRequest>>,
@@ -247,6 +248,7 @@ impl SessionManager {
                 pending_caps: parking_lot::Mutex::new(None),
                 caps_registry: Arc::new(DashMap::new()),
                 cron_scheduler,
+                cron_mcp: parking_lot::Mutex::new(None),
                 cron_continuation_tx: parking_lot::Mutex::new(None),
                 mcp_subscription,
                 dynamic_mcp,

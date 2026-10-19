@@ -1,5 +1,4 @@
 use std::collections::HashMap;
-use std::str::FromStr;
 
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
@@ -39,9 +38,24 @@ pub struct CronTask {
 // 3.0 批 2 波 1：协议类型归契约层（`peri_acp_types::cron::CronTrigger`）。
 pub use peri_acp_types::cron::CronTrigger;
 
+/// 解析 cron 表达式（注册校验与下次触发计算共用）。
+///
+/// croner 4.x 默认按 OCPS/vixie-cron 严格模式拒绝简写步进（如 `5/5`），
+/// 3.x 曾接受。显式开启 `sloppy_ranges` 保持既有表达式兼容；标准 5/6 段
+/// 表达式的解析与 next-trigger 语义不受影响。
+fn parse_cron(expression: &str) -> Result<croner::Cron, CronError> {
+    croner::parser::CronParser::builder()
+        .sloppy_ranges(true)
+        .build()
+        .parse(expression)
+        .map_err(|e| CronError::InvalidExpression(e.to_string()))
+}
+
 /// 定时任务调度器（纯内存）
 pub struct CronScheduler {
     tasks: HashMap<String, CronTask>,
+    /// MCP resource outbox: a trigger remains readable until acknowledged.
+    pending_triggers: std::collections::VecDeque<CronTrigger>,
     trigger_tx: mpsc::UnboundedSender<CronTrigger>,
     /// Additional trigger senders (for CronOwner bridge in ACP layer).
     /// Each sender receives a clone of every CronTrigger fired.
@@ -52,6 +66,7 @@ impl CronScheduler {
     pub fn new(trigger_tx: mpsc::UnboundedSender<CronTrigger>) -> Self {
         Self {
             tasks: HashMap::new(),
+            pending_triggers: std::collections::VecDeque::new(),
             trigger_tx,
             extra_trigger_txs: Vec::new(),
         }
@@ -74,8 +89,7 @@ impl CronScheduler {
     /// 限制，不允许"创建成功、触发时才失败"。
     pub fn register(&mut self, expression: &str, prompt: &str) -> Result<String, CronError> {
         // 解析 cron 表达式（验证）
-        let _cron = croner::Cron::from_str(expression)
-            .map_err(|e| CronError::InvalidExpression(e.to_string()))?;
+        parse_cron(expression)?;
 
         // 承载预算准入（与触发消费端同一常量）
         peri_acp_types::cron::validate_cron_prompt(prompt)?;
@@ -131,12 +145,19 @@ impl CronScheduler {
             }
             if let Some(next) = task.next_fire {
                 if now >= next {
+                    // Backpressure keeps the due firing pending; never advance its
+                    // schedule unless the owner can retain the delivery record.
+                    if self.pending_triggers.len() >= 256 {
+                        warn!(task_id = %task.id, "cron trigger outbox is full; firing deferred");
+                        continue;
+                    }
                     // firing 身份 = 本次计划触发时间（重试复用、新触发必新）。
                     let trigger = CronTrigger {
                         task_id: task.id.clone(),
                         firing_id: next.to_rfc3339(),
                         prompt: task.prompt.clone(),
                     };
+                    self.pending_triggers.push_back(trigger.clone());
                     // Send to primary trigger_tx (TUI polling path)
                     if self.trigger_tx.send(trigger.clone()).is_err() {
                         warn!(
@@ -161,6 +182,15 @@ impl CronScheduler {
                 }
             }
         }
+    }
+
+    pub fn pending_triggers(&self) -> &std::collections::VecDeque<CronTrigger> {
+        &self.pending_triggers
+    }
+
+    pub fn acknowledge_trigger(&mut self, task_id: &str, firing_id: &str) {
+        self.pending_triggers
+            .retain(|trigger| trigger.task_id != task_id || trigger.firing_id != firing_id);
     }
 
     /// 将任务的下次触发时间强制设为过去，使下一次 `tick` 必然触发。
@@ -194,7 +224,7 @@ impl CronScheduler {
 
     /// 计算下次触发时间
     fn calculate_next_fire(expression: &str, after: DateTime<Utc>) -> Option<DateTime<Utc>> {
-        let cron = croner::Cron::from_str(expression).ok()?;
+        let cron = parse_cron(expression).ok()?;
         cron.iter_after(after).next()
     }
 }
@@ -209,33 +239,6 @@ impl CronScheduler {
 pub struct CronSchedulerPortHandle(pub std::sync::Arc<parking_lot::Mutex<CronScheduler>>);
 
 impl peri_acp_types::cron::CronSchedulerPort for CronSchedulerPortHandle {
-    fn subscribe(&self) -> mpsc::UnboundedReceiver<CronTrigger> {
-        self.0.lock().subscribe()
-    }
-
-    fn list_tasks(&self) -> Vec<peri_acp_types::cron::CronTaskInfo> {
-        self.0
-            .lock()
-            .list_tasks()
-            .into_iter()
-            .map(|t| peri_acp_types::cron::CronTaskInfo {
-                id: t.id.clone(),
-                expression: t.expression.clone(),
-                prompt: t.prompt.clone(),
-                next_fire: t.next_fire,
-                enabled: t.enabled,
-            })
-            .collect()
-    }
-
-    fn toggle(&self, id: &str) -> bool {
-        self.0.lock().toggle(id)
-    }
-
-    fn remove(&self, id: &str) -> bool {
-        self.0.lock().remove(id)
-    }
-
     fn as_any(&self) -> &dyn std::any::Any {
         self
     }

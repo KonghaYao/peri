@@ -46,7 +46,7 @@ struct PluginListEntry {
 }
 
 fn load_plugins() -> Vec<PluginListEntry> {
-    let claude_dir = dirs_next::home_dir()
+    let claude_dir = dirs::home_dir()
         .unwrap_or_else(|| std::path::PathBuf::from("."))
         .join(".claude");
     let plugins_path = claude_dir.join("plugins").join("installed_plugins.json");
@@ -108,7 +108,7 @@ pub fn run_plugin_list(json: bool) -> Result<()> {
 
 pub async fn run_plugin_install(plugin_name: &str, scope_str: &str) -> Result<()> {
     let context = plugin_scope_context(Some(scope_str), std::env::current_dir)?;
-    let claude_dir = dirs_next::home_dir()
+    let claude_dir = dirs::home_dir()
         .unwrap_or_else(|| std::path::PathBuf::from("."))
         .join(".claude");
     let cache_dir = peri_middlewares::plugin::config::marketplaces_cache_dir();
@@ -142,7 +142,7 @@ pub async fn run_plugin_install(plugin_name: &str, scope_str: &str) -> Result<()
 
 pub async fn run_plugin_uninstall(plugin_id: &str, scope_str: Option<&str>) -> Result<()> {
     let context = plugin_scope_context(scope_str, std::env::current_dir)?;
-    let claude_dir = dirs_next::home_dir()
+    let claude_dir = dirs::home_dir()
         .unwrap_or_else(|| std::path::PathBuf::from("."))
         .join(".claude");
 
@@ -315,7 +315,7 @@ pub async fn run_marketplace_update(name: &str) -> Result<()> {
 
 pub fn run_plugin_enable(plugin_id: &str, scope_str: &str) -> Result<()> {
     let context = plugin_scope_context(Some(scope_str), std::env::current_dir)?;
-    let claude_dir = dirs_next::home_dir()
+    let claude_dir = dirs::home_dir()
         .unwrap_or_else(|| std::path::PathBuf::from("."))
         .join(".claude");
 
@@ -335,7 +335,7 @@ pub fn run_plugin_enable(plugin_id: &str, scope_str: &str) -> Result<()> {
 
 pub fn run_plugin_disable(plugin_id: &str, scope_str: &str) -> Result<()> {
     let context = plugin_scope_context(Some(scope_str), std::env::current_dir)?;
-    let claude_dir = dirs_next::home_dir()
+    let claude_dir = dirs::home_dir()
         .unwrap_or_else(|| std::path::PathBuf::from("."))
         .join(".claude");
 
@@ -355,7 +355,7 @@ pub fn run_plugin_disable(plugin_id: &str, scope_str: &str) -> Result<()> {
 
 pub async fn run_plugin_update(plugin_id: &str, scope_str: &str) -> Result<()> {
     let context = plugin_scope_context(Some(scope_str), std::env::current_dir)?;
-    let claude_dir = dirs_next::home_dir()
+    let claude_dir = dirs::home_dir()
         .unwrap_or_else(|| std::path::PathBuf::from("."))
         .join(".claude");
     let cache_dir = peri_middlewares::plugin::config::marketplaces_cache_dir();
@@ -388,7 +388,7 @@ pub async fn run_plugin_update(plugin_id: &str, scope_str: &str) -> Result<()> {
 // ── plugin info ─────────────────────────────────────────────────────────
 
 pub fn run_plugin_info(plugin_id: &str) -> Result<()> {
-    let claude_dir = dirs_next::home_dir()
+    let claude_dir = dirs::home_dir()
         .unwrap_or_else(|| std::path::PathBuf::from("."))
         .join(".claude");
     let plugins_path = claude_dir.join("plugins").join("installed_plugins.json");

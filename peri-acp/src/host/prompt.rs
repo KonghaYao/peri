@@ -366,7 +366,6 @@ async fn run_prompt_attempt(
         thread_id,
         frozen,
         incoming_recalls,
-        workflow_notifications,
         interaction_gate,
         interaction_router,
         event_health,
@@ -399,7 +398,6 @@ async fn run_prompt_attempt(
             state.frozen.clone(),
             // 后台 continuation 保留 recall；队列承载的新用户输入仍消费 recall。
             take_recall_for_turn(&mut state.recall_items, continuation && !managed_input),
-            state.workflow_notifications.clone(),
             // session-owned 交互互斥门：本轮 broker 借用，不重建（跨轮互斥）。
             Arc::clone(&state.interaction_gate),
             // session-owned 交互路由（同一门）：本轮只发布 / 清除 endpoint，
@@ -577,7 +575,6 @@ async fn run_prompt_attempt(
         tool_search_index,
         agent_catalog,
         shared_tools,
-        workflow_notifications,
         event_publisher,
         subscribe,
         command_lookup,

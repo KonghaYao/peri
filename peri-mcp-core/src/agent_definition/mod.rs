@@ -56,10 +56,10 @@ pub struct ClaudeAgentFrontmatter {
     pub skills: Vec<String>,
     /// MCP servers 配置
     #[serde(default)]
-    pub mcp_servers: Vec<serde_yaml::Value>,
+    pub mcp_servers: Vec<serde_norway::Value>,
     /// Hooks 配置
     #[serde(default)]
-    pub hooks: serde_yaml::Value,
+    pub hooks: serde_norway::Value,
     /// 持久内存范围：user、project 或 local
     #[serde(default)]
     pub memory: Option<String>,
@@ -93,9 +93,9 @@ impl<'de> Deserialize<'de> for ToolsValue {
     where
         D: serde::Deserializer<'de>,
     {
-        let value = serde_yaml::Value::deserialize(deserializer)?;
+        let value = serde_norway::Value::deserialize(deserializer)?;
         match value {
-            serde_yaml::Value::String(s) => {
+            serde_norway::Value::String(s) => {
                 // 解析逗号分隔的字符串
                 let tools: Vec<String> = s
                     .split(',')
@@ -108,7 +108,7 @@ impl<'de> Deserialize<'de> for ToolsValue {
                     Ok(ToolsValue::List(tools))
                 }
             }
-            serde_yaml::Value::Sequence(arr) => {
+            serde_norway::Value::Sequence(arr) => {
                 let tools = arr
                     .iter()
                     .map(|value| {
@@ -127,7 +127,7 @@ impl<'de> Deserialize<'de> for ToolsValue {
                     Ok(ToolsValue::List(tools))
                 }
             }
-            serde_yaml::Value::Null => Ok(ToolsValue::NoTools),
+            serde_norway::Value::Null => Ok(ToolsValue::NoTools),
             value => Err(D::Error::custom(format!(
                 "tools 必须是逗号分隔字符串或字符串数组，收到 {value:?}"
             ))),
@@ -207,7 +207,7 @@ fn parse_agent_file_inner(content: &str) -> Result<ClaudeAgent, String> {
     let yaml_content = &after_open[..close_pos.saturating_sub(4)]; // 减去 "---\n"
     let markdown_content = after_open[close_pos..].trim();
 
-    let frontmatter: ClaudeAgentFrontmatter = serde_yaml::from_str(yaml_content)
+    let frontmatter: ClaudeAgentFrontmatter = serde_norway::from_str(yaml_content)
         .map_err(|e| format!("YAML frontmatter 解析失败: {e}"))?;
 
     Ok(ClaudeAgent {

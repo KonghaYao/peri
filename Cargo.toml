@@ -26,11 +26,12 @@ members = [
     "peri-workflow",
     "peri-wasm",
 ]
-resolver = "2"
+resolver = "3"
 
 [workspace.package]
 version = "0.2.0"
 edition = "2021"
+rust-version = "1.95"
 
 [profile.release]
 # NOTE: "symbols" not "true" — Apple strip doesn't behave like GNU strip.
@@ -77,7 +78,7 @@ async-trait = "0.1"
 # --- Serde ecosystem ---
 serde = { version = "1.0", features = ["derive", "rc"] }
 serde_json = "1.0"
-serde_yaml = "0.9"
+serde_norway = "0.9.42"
 
 # --- HTTP ---
 reqwest = { version = "=0.13.4", default-features = false, features = [
@@ -108,11 +109,11 @@ uuid = { version = "1", features = ["v4", "v7", "serde"] }
 # `MappedSendGuard`/`send_guard`（grep 全 workspace 无引用）；无跨 await 持锁
 # 告警（clippy -D warnings 验证）。
 parking_lot = "0.12"
-dirs-next = "2"
+dirs = "7.0.0"
 url = "2"
 sqlx = { version = "0.9.0", features = ["runtime-tokio", "sqlite"] }
 sysinfo = "0.39"
-lru = "0.18"
+lru = "0.19"
 
 # --- MCP capability packages ---
 peri-mcp-common = { path = "mcp-packages/common" }
@@ -124,20 +125,20 @@ peri-mcp-artifact = { path = "mcp-packages/artifact" }
 peri-mcp-cron = { path = "mcp-packages/cron" }
 peri-mcp-workspace = { path = "mcp-packages/workspace" }
 peri-mcp-workflow = { path = "mcp-packages/workflow" }
-# Apply patches/rmcp-3.5.0-task-subscriptions.patch via scripts/cargo-rmcp-patched.sh.
-rmcp = "=3.5.0"
+# Apply patches/rmcp-3.5.1-task-subscriptions.patch via scripts/cargo-rmcp-patched.sh.
+rmcp = "=3.5.1"
 
 # --- Build ---
 tempfile = "3"
 
 # --- Allocator ---
-tikv-jemallocator = "0.6"
-tikv-jemalloc-ctl = { version = "0.6", features = ["stats", "use_std"] }
-tikv-jemalloc-sys = "0.6"
+tikv-jemallocator = "0.7"
+tikv-jemalloc-ctl = { version = "0.7", features = ["stats", "use_std"] }
+tikv-jemalloc-sys = "0.7"
 
 clap = { version = "4", features = ["derive", "env"] }
 semver = "1"
-sha2 = "0.10"
+sha2 = "0.11.1"
 
 axum = { version = "0.8.9", features = ["ws"] }
 serial_test = { version = "4.0.1", features = ["async"] }

@@ -3,7 +3,9 @@ use std::io::{self, Write};
 
 use base64::Engine;
 
-use super::{Channel, Multiplexer, copy_with, select_channel, write_osc52, write_terminal};
+use super::{
+    Channel, Multiplexer, copy_with, select_channel, tmux_passthrough, write_osc52, write_terminal,
+};
 
 /// 环境读取面替身：只认给出的键值对。
 fn env_of(pairs: &[(&str, &str)]) -> impl Fn(&str) -> Option<String> {
@@ -140,11 +142,42 @@ fn tmux_emits_native_sequence_plus_dcs_passthrough_copy() {
     let mut output = Vec::new();
     write_terminal(&mut output, "hello", Multiplexer::Tmux).unwrap();
     // 原生 OSC 52（tmux `set-clipboard on` + 客户端 terminfo `Ms`）在先，
-    // 透传副本（tmux `allow-passthrough on`）在后；内层 ESC 不双写。
+    // 透传副本（tmux `allow-passthrough on`）在后；透传内部 ESC 必须双写，
+    // tmux 转发时还原为单个 ESC（F8）。
     assert_eq!(
         output,
-        b"\x1b]52;c;aGVsbG8=\x07\x1bPtmux;\x1b]52;c;aGVsbG8=\x07\x1b\\"
+        b"\x1b]52;c;aGVsbG8=\x07\x1bPtmux;\x1b\x1b]52;c;aGVsbG8=\x07\x1b\\"
     );
+}
+
+/// 按 tmux passthrough 的解码规则还原客户端 payload：剥掉
+/// `ESC P tmux ;` 与结尾 `ESC \`，再把成对的 `ESC ESC` 还原为单个 `ESC`。
+fn decode_tmux_passthrough(wrapped: &str) -> Vec<u8> {
+    let body = wrapped
+        .strip_prefix("\x1bPtmux;")
+        .expect("DCS passthrough prefix")
+        .strip_suffix("\x1b\\")
+        .expect("DCS passthrough suffix");
+    let mut decoded = Vec::new();
+    let mut chars = body.chars();
+    while let Some(ch) = chars.next() {
+        decoded.extend_from_slice(ch.to_string().as_bytes());
+        if ch == '\x1b' {
+            assert_eq!(chars.next(), Some('\x1b'), "内部 ESC 必须双写");
+        }
+    }
+    decoded
+}
+
+#[test]
+fn tmux_passthrough_decodes_back_to_the_osc52_sequence() {
+    let decoded = decode_tmux_passthrough(&tmux_passthrough("hello"));
+    assert_eq!(decoded, b"\x1b]52;c;aGVsbG8=\x07");
+
+    // 解码后仍是一条完整 OSC 52：外层终端能识别引导 ESC 与 BEL 终止符。
+    let decoded_text = String::from_utf8(decoded).unwrap();
+    assert!(decoded_text.starts_with("\x1b]52;c;"));
+    assert!(decoded_text.ends_with('\x07'));
 }
 
 struct ClipboardWriter {

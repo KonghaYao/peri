@@ -12,7 +12,7 @@ use sha2::{Digest, Sha256};
 use super::legacy_scan::is_skill_scheme;
 
 /// 纯函数：gray_matter 解析 frontmatter 为 verbatim JSON map（loader.rs
-/// 同款；YAML→JSON 值渲染由 serde_yaml 完成——数字 42 → Number、字符串
+/// 同款；YAML→JSON 值渲染由 serde_norway 完成——数字 42 → Number、字符串
 /// "42" → String）。YAML 非法 / 无 frontmatter → None。
 pub(crate) fn parse_skill_frontmatter_map(
     content: &str,

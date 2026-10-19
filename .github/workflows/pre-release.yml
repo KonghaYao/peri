@@ -56,8 +56,9 @@ jobs:
               uses: actions/checkout@v7
 
             - name: Install Rust toolchain
-              uses: dtolnay/rust-toolchain@stable
+              uses: dtolnay/rust-toolchain@master
               with:
+                  toolchain: 1.99.0
                   targets: ${{ matrix.target }}
 
             # 注册表缓存 key 取根 Cargo.lock（依赖集的真实输入）；`**/Cargo.lock` 会连带
@@ -177,10 +178,8 @@ jobs:
             # mise 二进制自身由 action 用发布签名校验和验证后才执行。
             # 身份三要素：
             #   1. runner 镜像与架构（本 job 固定在 ubuntu-24.04）；
-            #   2. mise 配置哈希 —— mise.wasm.toml 里 emsdk 6.0.10、python 3.12、
-            #      wasm-bindgen-cli 0.2.129 都是钉死版本，改版本即换 key；`rust = stable`
-            #      不进身份，因为 rustup 的工具链状态在 mise 数据目录之外，不会被缓存固定，
-            #      stable 更新仍会被解析到（rust-cache 的 rustc 哈希随之变化）；
+            #   2. mise 配置哈希 —— mise.wasm.toml 里 rust 1.99.0、emsdk 6.0.10、
+            #      python 3.12、wasm-bindgen-cli 0.2.129 都是钉死版本，改版本即换 key；
             #   3. Emscripten 补丁集摘要。
             # 保存时机：本 workflow 钉在 jdx/mise-action@v4，缓存的是 mise 数据目录
             # （默认 ~/.local/share/mise），该版本没有 post 步骤，`mise install` 之后立即

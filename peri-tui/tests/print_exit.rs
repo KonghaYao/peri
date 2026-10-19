@@ -270,7 +270,7 @@ async fn run_print_with_args(
         .current_dir(fixture.path())
         .args(["--print", "Reply briefly", "--output-format", format])
         .args(extra_args)
-        // Windows 的 dirs_next::home_dir 不受 HOME/USERPROFILE 覆盖，
+        // Windows 的 dirs::home_dir 不受 HOME/USERPROFILE 覆盖，
         // 启动期的全局配置读取也必须显式指向 fixture。
         .arg("--config-file")
         .arg(&settings)

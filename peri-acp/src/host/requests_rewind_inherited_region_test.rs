@@ -119,7 +119,6 @@ async fn register_child_with_inherited_history(
             frozen: None,
             recall_items: Vec::new(),
             agent_pool: crate::session::agent_pool::AgentPool::new(),
-            workflow_notifications: None,
             title: None,
             tags: Vec::new(),
         },

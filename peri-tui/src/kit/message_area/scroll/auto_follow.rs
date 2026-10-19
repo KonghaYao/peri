@@ -215,7 +215,8 @@ pub(in crate::kit::message_area) fn run_auto_follow(ctx: &AutoFollowCtx) {
     // block 完成（pending=false → 派生扫描不到 → None）后恢复原语义，不强制
     // follow（§15）。[Fix] 浏览态下每帧被拉回 block 底部会打断用户阅读——
     // 与 §8.1「浏览态新内容不得移动 viewport」相悖，改为浏览态跳过锚定。
-    if *ctx.follow_bottom.read()
+    if !ctx.selection_active
+        && *ctx.follow_bottom.read()
         && let Some((_anchor_start, anchor_end)) = ctx.anchor_visual_range
     {
         let max_scroll = ctx
@@ -263,6 +264,19 @@ pub(in crate::kit::message_area) fn run_auto_follow(ctx: &AutoFollowCtx) {
             "auto_follow: history page prepended → relocate viewport onto the anchored unit",
         );
         ctx.scroll_state.write().set_offset(target);
+    }
+    // [F6] 拖选进行中：暂停输出增长驱动的吸底跟随。暂停点放在历史前插
+    // 重定位之后——结构变化时视口仍要按身份补偿，否则鼠标下的内容会跳走；
+    // 但 loading/growth 分支的 `scroll_to_bottom` 必须跳过，鼠标不动时
+    // 选区不能被新输出推着扩大。手势结束后 follow_bottom 原值保持，粘性
+    // 吸底语义自然恢复。
+    if ctx.selection_active {
+        tracing::trace!(
+            target: "msg_scroll_diag",
+            scroll_y = ctx.scroll_state.read().offset(),
+            "auto_follow: text selection in progress → pause output-driven follow",
+        );
+        return;
     }
     // 向前边界：视口顶端贴着已载入窗口的最早一行。内容不足一屏时同样算贴边——
     // 稀疏首屏的旧历史空缺正是这种形态（REQ-C01-1）。相同 cursor 的并发触发在
