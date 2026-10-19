@@ -1,5 +1,4 @@
 use std::collections::HashMap;
-use std::str::FromStr;
 
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
@@ -39,6 +38,19 @@ pub struct CronTask {
 // 3.0 批 2 波 1：协议类型归契约层（`peri_acp_types::cron::CronTrigger`）。
 pub use peri_acp_types::cron::CronTrigger;
 
+/// 解析 cron 表达式（注册校验与下次触发计算共用）。
+///
+/// croner 4.x 默认按 OCPS/vixie-cron 严格模式拒绝简写步进（如 `5/5`），
+/// 3.x 曾接受。显式开启 `sloppy_ranges` 保持既有表达式兼容；标准 5/6 段
+/// 表达式的解析与 next-trigger 语义不受影响。
+fn parse_cron(expression: &str) -> Result<croner::Cron, CronError> {
+    croner::parser::CronParser::builder()
+        .sloppy_ranges(true)
+        .build()
+        .parse(expression)
+        .map_err(|e| CronError::InvalidExpression(e.to_string()))
+}
+
 /// 定时任务调度器（纯内存）
 pub struct CronScheduler {
     tasks: HashMap<String, CronTask>,
@@ -77,8 +89,7 @@ impl CronScheduler {
     /// 限制，不允许"创建成功、触发时才失败"。
     pub fn register(&mut self, expression: &str, prompt: &str) -> Result<String, CronError> {
         // 解析 cron 表达式（验证）
-        let _cron = croner::Cron::from_str(expression)
-            .map_err(|e| CronError::InvalidExpression(e.to_string()))?;
+        parse_cron(expression)?;
 
         // 承载预算准入（与触发消费端同一常量）
         peri_acp_types::cron::validate_cron_prompt(prompt)?;
@@ -213,7 +224,7 @@ impl CronScheduler {
 
     /// 计算下次触发时间
     fn calculate_next_fire(expression: &str, after: DateTime<Utc>) -> Option<DateTime<Utc>> {
-        let cron = croner::Cron::from_str(expression).ok()?;
+        let cron = parse_cron(expression).ok()?;
         cron.iter_after(after).next()
     }
 }
