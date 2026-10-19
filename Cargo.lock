@@ -3535,6 +3535,7 @@ dependencies = [
  "serde",
  "serde_json",
  "tempfile",
+ "thiserror 2.0.20",
  "tokio",
 ]
 
@@ -3647,6 +3648,7 @@ dependencies = [
  "serde_json",
  "tempfile",
  "tokio",
+ "tracing",
 ]
 
 [[package]]
@@ -3688,6 +3690,7 @@ dependencies = [
  "peri-acp-types",
  "peri-agent",
  "peri-mcp-common",
+ "peri-mcp-web",
  "peri-model",
  "peri-resources",
  "peri-time",

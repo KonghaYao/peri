@@ -20,14 +20,17 @@ argumentHint: "[objective description]"
 1. Call the `goal` tool with action=create and a specific, verifiable objective
 2. Work continuously until the goal is achieved
 3. Achieved → `goal` tool, action=complete
-4. Blocked by something unsolvable → `goal` tool, action=block, reason=why you're blocked
-5. Need to abandon/reset the goal → `goal` tool, action=clear (releases the singleton slot, works on terminal states)
+4. Blocked by something you cannot resolve now → `goal` tool, action=block, reason=why you're blocked
+   - The session reopens the goal and wakes you for a recovery attempt every 3 minutes.
+   - When woken, re-check the blocker: if it is resolved, continue working; if not, call `goal(block, reason)` again.
+5. Need to abandon/reset the goal → `goal` tool, action=clear (releases the singleton slot, works on terminal states, and stops automatic recovery)
 6. Check current goal status anytime with action=get
 
 ## Important Constraints
 
 - **Objectives must be specific and verifiable**: "improve code" is bad, "raise test coverage to 80%" is good
 - **complete is verified**: The system uses an auxiliary LLM to check if you actually achieved the goal. If verification fails, you'll get the reason back
-- **block is a distress signal**: Only use when truly unable to continue (missing permissions, missing dependencies)
+- **block is a distress signal**: Only use when truly unable to continue right now (missing permissions, missing dependencies, network outage). Do not use it to end a goal you no longer want—use `clear`
+- **Blocked goals are retried automatically**: the system wakes you every 3 minutes until the goal completes, is cleared, or the user cancels. Do not create a second goal to bypass a blocked one
 - **Self-driven after creation**: Once a goal is created, you'll receive a reminder after each turn. You must decide: continue / complete / block / clear
 - **Singleton**: Only one goal at a time. Use action=clear to release the slot before creating a new one

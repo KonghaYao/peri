@@ -35,7 +35,16 @@ fn test_grep_cancelled_skips_walk() {
         max_depth: None,
     };
     let cancelled = Arc::new(AtomicBool::new(true));
-    let result = execute_search(&parsed, dir.path().to_str().unwrap(), 250, cancelled).unwrap();
+    let result = execute_search(
+        &parsed,
+        &[],
+        dir.path().to_str().unwrap(),
+        250,
+        250,
+        0,
+        cancelled,
+    )
+    .unwrap();
     assert!(
         result.contains("No matches found"),
         "cancelled 预置应跳过整个遍历: {result}"
@@ -274,6 +283,32 @@ async fn test_grep_files_mode_head_limit() {
     for line in &content {
         assert!(line.ends_with(".txt"), "应输出文件路径而非内容: {line}");
     }
+}
+
+/// [回归测试] 文件级 offset 也必须先分页后格式化：第二页返回下 N 个文件，
+/// 不能把截断提示当成结果行跳过。
+#[tokio::test]
+async fn test_grep_files_mode_offset_paginates_files() {
+    let dir = tempfile::tempdir().unwrap();
+    for i in 0..4 {
+        std::fs::write(dir.path().join(format!("f{i:02}.txt")), "needle").unwrap();
+    }
+    let tool = GrepTool::new(dir.path().to_str().unwrap());
+    let result = tool
+        .invoke(
+            serde_json::json!({
+                "pattern": "needle",
+                "output_mode": "files_with_matches",
+                "path": "./",
+                "offset": 2,
+                "head_limit": 2
+            }),
+            peri_agent::tools::ToolContext::new(&[], "."),
+        )
+        .await
+        .unwrap();
+    let lines: Vec<&str> = result.lines().collect();
+    assert_eq!(lines, vec!["f02.txt", "f03.txt"], "{result}");
 }
 
 /// P1-3b：CountOnly 数完当前文件（忽略 stopped），计数不被其他线程的预算

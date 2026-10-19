@@ -19,11 +19,15 @@ use std::sync::Mutex;
 /// generation 每次调用递增+1。
 ///
 /// 快照后处理流水线（均为纯视觉变换，不触碰 segment↔cache 对齐）：
-/// 1. turn 边界 `TuiDivider`（§6.6：committed 与 current_turn 之间）；
-/// 2. `apply_fold_pass`（spec §7 表 + FOLD_OVERRIDES）；
+/// 1. `apply_fold_pass`（spec §7 表 + FOLD_OVERRIDES）；
+/// 2. 按完整消息顺序投影 turn 分隔线（随下一条用户 prompt 保留）；
 /// 3. todo 进度摘要行（§6.9：TODO_ITEMS 派生，插在最终回答前）；
 /// 4. `group_successful_tools`（§7：相邻成功工具压成 `TuiCollapsedGroup`）。
 pub(crate) fn push_view_models(state: &mut BridgeState) {
+    state
+        .window
+        .ack_release_epoch(crate::kit::atoms::RENDER_ACHIEVED_EPOCH.get());
+    crate::kit::atoms::HISTORY_WINDOW_STATS.set(state.window.diagnostics());
     // running child 可以阻止归档，但主 turn 的终态时长仍只冻结一次。
     if state.phase != SessionPhase::PromptRunning {
         state.current_turn.freeze_trailing();
@@ -56,7 +60,7 @@ pub(crate) fn push_view_models(state: &mut BridgeState) {
 
     let overrides_state = FOLD_OVERRIDES.state();
     let overrides = overrides_state.read();
-    let mut items = state
+    let items = state
         .folded_history
         .project(&state.committed, state.phase, &overrides);
 
@@ -74,28 +78,8 @@ pub(crate) fn push_view_models(state: &mut BridgeState) {
         __t = peri_time::monotonic_now();
     }
 
-    // [§6.6] turn 边界 divider：committed 末尾是**新 turn 的用户 prompt**（≥2 项，
-    // 说明存在上一 turn 内容）且 current_turn 有内容时，在 prompt 之前插一条
-    // 无 label 分隔线——committed|current_turn 边界本身通常是「prompt ↔ 回复」
-    // 的同一 turn 内部，不能直接用它；以「末项为 user bubble」判定新 turn 起点。
     let history = items.clone();
     let active_start = history.len().saturating_sub(1);
-    if items.len() >= 2
-        && matches!(items.back(), Some(TuiRenderUnit::TuiUserBubble(_)))
-        && !state.current_turn.is_empty()
-        && !matches!(
-            items.get(items.len() - 2),
-            Some(TuiRenderUnit::TuiDivider(_))
-        )
-    {
-        items.insert(
-            items.len() - 1,
-            TuiRenderUnit::TuiDivider(TuiDivider {
-                label: None,
-                content_hash: 0,
-            }),
-        );
-    }
     let previous_generation = VIEW_MODELS.state().read().generation;
     let confirmed_prefix =
         TRANSCRIPT_HISTORY
@@ -111,7 +95,16 @@ pub(crate) fn push_view_models(state: &mut BridgeState) {
                     0
                 }
             });
+    let preceding_prompts = history
+        .iter()
+        .take(confirmed_prefix)
+        .filter(|vm| is_visible_user_prompt(vm))
+        .count();
+    let confirmed_prefix = confirmed_prefix + preceding_prompts.saturating_sub(1);
+    let (mut items, has_history_prompt) = decorated_history(&history);
+    let visual_active_start = items.len();
     join_into(&mut items, active);
+    insert_turn_dividers(&mut items, visual_active_start, has_history_prompt);
     #[cfg(test)]
     {
         crate::kit::acp_bridge::observe_perf(
@@ -168,7 +161,13 @@ pub(crate) fn push_view_models(state: &mut BridgeState) {
         },
     });
     let mut previous = TRANSCRIPT_HISTORY.lock().unwrap();
-    *previous = Some((history, active_start, state.generation));
+    if history.len() > 1024 {
+        let mut seen = crate::kit::retained_bytes::SeenAllocations::default();
+        let bytes = crate::kit::retained_bytes::retained_units_bytes(history.iter(), &mut seen);
+        *previous = (bytes <= 8 * 1024 * 1024).then_some((history, active_start, state.generation));
+    } else {
+        *previous = Some((history, active_start, state.generation));
+    }
     drop(previous);
     *crate::kit::atoms::TRANSCRIPT_PUBLICATION.state().write() =
         crate::kit::atoms::TranscriptPublication {
@@ -188,6 +187,7 @@ pub(crate) fn push_view_models(state: &mut BridgeState) {
         peri_time::elapsed_since(__t).as_nanos() as u64,
     );
     tracing::trace!(target: "frozen_diag", "bridge: wrote VIEW_MODELS");
+    super::history_window::settle_after_publication(state);
 }
 
 /// [PERF] insert_todo_summary 摘要文本缓存——键 = (TODO_ITEMS 指纹, LANG_VERSION)。
@@ -197,6 +197,73 @@ static TODO_SUMMARY_CACHE: Mutex<Option<(u64, u64, String)>> = Mutex::new(None);
 
 static TRANSCRIPT_HISTORY: Mutex<Option<(im::Vector<TuiRenderUnit>, usize, u64)>> =
     Mutex::new(None);
+struct DividerHistoryCache {
+    raw: im::Vector<TuiRenderUnit>,
+    decorated: im::Vector<TuiRenderUnit>,
+    has_prompt: bool,
+}
+
+static DIVIDER_HISTORY: Mutex<Option<DividerHistoryCache>> = Mutex::new(None);
+
+fn is_visible_user_prompt(vm: &TuiRenderUnit) -> bool {
+    matches!(vm, TuiRenderUnit::TuiUserBubble(user) if !user.text.is_empty() || !user.attachments.is_empty())
+}
+
+/// History is immutable during a streaming turn. Reuse its decorated tree so
+/// each token only inserts dividers for newly appended active entries.
+fn decorated_history(history: &im::Vector<TuiRenderUnit>) -> (im::Vector<TuiRenderUnit>, bool) {
+    let mut cache = DIVIDER_HISTORY.lock().unwrap();
+    if let Some(cached) = cache.as_ref()
+        && (cached.raw.ptr_eq(history) || (history.is_inline() && &cached.raw == history))
+    {
+        return (cached.decorated.clone(), cached.has_prompt);
+    }
+    let mut decorated = history.clone();
+    let has_prompt = insert_turn_dividers(&mut decorated, 0, false);
+    if history.len() > 1024 {
+        let mut seen = crate::kit::retained_bytes::SeenAllocations::default();
+        let bytes = crate::kit::retained_bytes::retained_units_bytes(history.iter(), &mut seen);
+        if bytes > 6 * 1024 * 1024 {
+            *cache = None;
+            return (decorated, has_prompt);
+        }
+    }
+    *cache = Some(DividerHistoryCache {
+        raw: history.clone(),
+        decorated: decorated.clone(),
+        has_prompt,
+    });
+    (decorated, has_prompt)
+}
+
+/// Put the rule immediately before every user prompt after the first one.
+/// This projection depends only on transcript order, so completion and replay
+/// cannot remove a rule that was already visible. Keep `committed` free of
+/// presentation rows, since cancellation and replay address its real messages.
+fn insert_turn_dividers(
+    items: &mut im::Vector<TuiRenderUnit>,
+    start: usize,
+    mut seen_prompt: bool,
+) -> bool {
+    let mut index = start;
+    while index < items.len() {
+        if is_visible_user_prompt(&items[index]) {
+            if seen_prompt {
+                items.insert(
+                    index,
+                    TuiRenderUnit::TuiDivider(TuiDivider {
+                        label: None,
+                        content_hash: 0,
+                    }),
+                );
+                index += 1;
+            }
+            seen_prompt = true;
+        }
+        index += 1;
+    }
+    seen_prompt
+}
 
 /// [§6.9] 从 `TODO_ITEMS` 派生活动 turn 的 todo 进度摘要行。
 ///
@@ -319,6 +386,35 @@ enum CutAnchor {
 const GROUP_CUT_CAP: usize = 512;
 
 static TOOL_GROUP_CACHE: Mutex<Option<ToolGroupCache>> = Mutex::new(None);
+
+/// 结构性释放：丢弃所有持有旧 `committed` 节点的投影/分组缓存。
+pub(crate) fn invalidate_structural_caches() {
+    *TRANSCRIPT_HISTORY.lock().unwrap_or_else(|e| e.into_inner()) = None;
+    *DIVIDER_HISTORY.lock().unwrap_or_else(|e| e.into_inner()) = None;
+    *TOOL_GROUP_CACHE.lock().unwrap_or_else(|e| e.into_inner()) = None;
+    *TODO_SUMMARY_CACHE.lock().unwrap_or_else(|e| e.into_inner()) = None;
+}
+
+#[cfg(test)]
+pub(crate) fn debug_cache_lengths() -> (Option<usize>, Option<usize>, Option<usize>) {
+    (
+        TRANSCRIPT_HISTORY
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .as_ref()
+            .map(|(history, _, _)| history.len()),
+        DIVIDER_HISTORY
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .as_ref()
+            .map(|cache| cache.raw.len()),
+        TOOL_GROUP_CACHE
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .as_ref()
+            .map(|cache| cache.input.len()),
+    )
+}
 
 /// 清空分组缓存（测试用——全局单例缓存会跨用例残留）。
 #[cfg(test)]
@@ -655,7 +751,7 @@ fn group_successful_tools_from(
         {
             copied_units += run_len as u64;
         }
-        grouped.push_back(build_collapsed_group(&run, failed_count));
+        grouped.push_back(build_collapsed_group(run, failed_count));
         // 组收口处的稳定切点（见 [`CutAnchor::AfterGroup`]）——长会话最常见的
         // 切点：末组之后新增内容时，前缀（含本组）可直接复用。
         cuts.push(GroupCut {
@@ -711,11 +807,10 @@ fn group_successful_tools_from(
 }
 
 /// 由一段相邻可合并工具卡构造折叠组（§7 标题聚合 `Read 3 · Glob 2`）。
-fn build_collapsed_group(run: &im::Vector<TuiRenderUnit>, failed_count: u32) -> TuiRenderUnit {
+fn build_collapsed_group(run: im::Vector<TuiRenderUnit>, failed_count: u32) -> TuiRenderUnit {
     use crate::kit::tui_render_unit::TuiCollapsedGroup;
 
     let mut names: Vec<(String, u32)> = Vec::new();
-    let mut hidden_vms: Vec<TuiRenderUnit> = Vec::with_capacity(run.len());
     for vm in run.iter() {
         if let TuiRenderUnit::TuiToolCard(t) = vm {
             let display = crate::kit::tool_display::format_tool_name(&t.tool_name);
@@ -724,13 +819,14 @@ fn build_collapsed_group(run: &im::Vector<TuiRenderUnit>, failed_count: u32) -> 
                 None => names.push((display, 1)),
             }
         }
-        hidden_vms.push(vm.clone());
     }
     let title = names
         .into_iter()
         .map(|(name, count)| format!("{name} {count}"))
         .collect::<Vec<_>>()
         .join(" \u{b7} ");
+    let count = run.len() as u32;
+    let hidden_vms: Vec<TuiRenderUnit> = run.into_iter().collect();
     let group_key = FoldKey::Group(
         hidden_vms
             .iter()
@@ -748,7 +844,7 @@ fn build_collapsed_group(run: &im::Vector<TuiRenderUnit>, failed_count: u32) -> 
         .unwrap_or(FoldState::Collapsed);
     let mut group = TuiCollapsedGroup {
         title,
-        count: run.len() as u32,
+        count,
         failed_count,
         view_models: hidden_vms,
         fold,

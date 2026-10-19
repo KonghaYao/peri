@@ -250,6 +250,13 @@ pub(super) const CREATE_INDEXES: &[&str] = &[
     "CREATE INDEX IF NOT EXISTS idx_bindings_workspace ON session_bindings(workspace_id, relative_cwd, thread_id)",
     "CREATE INDEX IF NOT EXISTS idx_threads_updated ON threads(updated_at DESC, id DESC) WHERE hidden = 0 AND message_count > 0",
     "CREATE INDEX IF NOT EXISTS idx_threads_workspace_archived ON threads(workspace_id, archived, updated_at DESC, id DESC) WHERE parent_thread_id IS NULL AND message_count > 0",
+    // 有效范围读取（`thread_id = ? AND excluded = 0`，见 `sqlite_store::context`）只靠
+    // `idx_messages_thread_id` 时要逐行过滤 `excluded`：触达行数 = 线程全部消息数（含归档段）。
+    // 加上 `excluded` 这一列后，命中的行数与「有效条数」同阶——A2 实测：20 万行的线程上，
+    // 恢复查询的触达行数从 200 003 降到 3，`EXPLAIN QUERY PLAN` 走
+    // `SEARCH messages USING INDEX idx_messages_active (thread_id=? AND excluded=?)`。
+    // 两个索引并存：`idx_messages_thread_id` 仍是只按线程取全部行的路径（`ORDER BY rowid` 扫描）。
+    "CREATE INDEX IF NOT EXISTS idx_messages_active ON messages(thread_id, excluded)",
 ];
 
 /// 迁移期重建 `threads` 的暂存表（`threads_rebuild`）：`workspace_id` 必须落在 **NOT NULL**

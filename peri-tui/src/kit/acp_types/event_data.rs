@@ -32,6 +32,16 @@ pub struct PendingInteraction<T> {
     pub payload: T,
 }
 
+/// 一次大结果补读的身份：响应只能作用于该 `tool_id`，`request_id` 用于
+/// 只释放本次请求的在途认领（迟到的旧响应不得清掉新请求）。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ToolResultRefetch {
+    pub request_id: u64,
+    pub tool_id: String,
+    /// `Some` = 本次补读失败：卡片显示失败，但暂存来源保留，用户可再次展开重试。
+    pub error: Option<String>,
+}
+
 /// Decoded ACP custom event.
 ///
 /// One variant per event name defined in the ACP protocol section 4
@@ -409,6 +419,49 @@ pub enum AcpEventData {
     PluginActionResult(PluginActionResult),
     /// `"plugin-search-result"` — Discover 搜索返回。
     PluginSearchResult(PluginSearchResult),
+
+    // -- 本地事件（不来自 wire）--------------------------------------------
+    /// 历史页响应（`session/load` + cursor 的响应体）经消费者注入桥接任务。
+    ///
+    /// 它不是 wire 事件：`history_page_consumer` 在 RPC 之后构造它，走
+    /// `LOCAL_EVENT_TX` 与本地提交同一入口，从而与 `committed` 的其它写入者
+    /// 串行（REQ-C01、A23）。
+    HistoryPageLoaded {
+        response: Box<crate::kit::history_paging::HistoryPageResponse>,
+        /// 产出 `response.items` 的那次请求定位；补读合成页为 `None`。
+        /// 与响应同事件传递，避免桥接侧从全局队列误取其它响应的来源。
+        origin: Option<crate::kit::history_paging::HistoryPageOrigin>,
+        /// `Some` = 展开触发的补读响应；force_complete 只作用于该 `tool_id`。
+        refetch: Option<Box<ToolResultRefetch>>,
+    },
+
+    /// S4 私有通知 `peri/history_committed`：持久提交事实（展示段封印/水位）。
+    ///
+    /// 只更新窗口模型；不触发释放、不改变执行状态，也不作为 compact 完成依据。
+    HistoryCommitted(crate::kit::history_window::HistoryCommitInfo),
+
+    /// S5.4 窗口页响应（consumer 注入桥接任务，本地事件非 wire）。
+    HistoryWindowPageLoaded {
+        context: Box<crate::kit::history_page_consumer::window::WindowRequestContext>,
+        response: Box<crate::kit::history_paging::window::WindowPageResponse>,
+    },
+
+    /// consumer 检测到游标/身份失效：桥接窗口进入 Degraded，停止淘汰并保留可读内容。
+    HistoryWindowDegraded {
+        session_id: String,
+        reason: String,
+    },
+
+    /// 回放条目位置标记：从 wire 的 `_meta.periEntryId` / `_meta.periPosition` 解出，
+    /// 由 notifier 在实际回放通知**之前**注入桥接任务。
+    ///
+    /// 它让客户端知道「本条目的展示单元从哪个槽位开始」——首屏的区间索引据此建立，
+    /// 之后的更早历史才能插到正确区间（REQ-H01-6、A20），并按 `entryId` 与首屏去重。
+    /// 继承区条目没有 position，因此不会有本事件。
+    ReplayEntryMarked {
+        entry_id: String,
+        position: u64,
+    },
 }
 
 impl AcpEventData {
@@ -432,6 +485,12 @@ impl AcpEventData {
                 AcpEventData::TurnInterrupted { reason, request_id }
             }
             "turn-suspended" => AcpEventData::TurnSuspended,
+            "history-committed" => {
+                match crate::kit::history_window::HistoryCommitInfo::decode(&data) {
+                    Some(info) => AcpEventData::HistoryCommitted(info),
+                    None => AcpEventData::unknown(event, data),
+                }
+            }
 
             // §4.3 Status
             "tool-count" => decode_or_unknown(event, data, AcpEventData::ToolCount),

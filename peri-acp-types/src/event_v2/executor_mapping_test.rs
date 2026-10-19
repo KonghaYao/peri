@@ -51,6 +51,7 @@ fn test_user_input_queue_snapshot_maps_without_losing_revision() {
             revision: 42,
             active_request_id: None,
             items: vec![],
+            terminal_items: vec![],
         },
     };
     assert_eq!(event.turn_id(), turn_id, "会话控制事件也有稳定身份");

@@ -10,14 +10,15 @@ use super::{close_panel, discover::DiscoverState};
 #[allow(clippy::too_many_arguments)]
 pub(super) fn handle_search_event(
     event: Event,
+    event_scope: &crate::application::operations::OperationScope,
     area: Option<Rect>,
     active_tab: State<PluginViewTab>,
     discover: State<DiscoverState>,
-    detail_plugin_idx: State<Option<usize>>,
-    marketplace_detail: State<Option<usize>>,
+    detail_plugin: State<Option<super::InstalledIdentity>>,
+    marketplace_detail: State<Option<super::MarketplaceIdentity>>,
     marketplace_detail_action: State<usize>,
     confirm_action: State<Option<String>>,
-    operation_loading: State<Option<String>>,
+    marketplace_confirmation: State<Option<super::MarketplaceIdentity>>,
     operation: State<super::operation::OperationState>,
     add_marketplace_input: State<TextAreaState>,
     add_marketplace_active: State<bool>,
@@ -29,13 +30,25 @@ pub(super) fn handle_search_event(
         return EventResult::Ignored;
     }
 
+    if event_scope != &super::current_scope() {
+        return EventResult::Consumed;
+    }
+    if super::identity::reconcile_details(
+        detail_plugin,
+        marketplace_detail,
+        marketplace_confirmation,
+        confirm_action,
+        operation,
+    ) {
+        return EventResult::Consumed;
+    }
     if super::operation::handle_pending_event(&event, operation) {
         return EventResult::Consumed;
     }
     // 鼠标：add_marketplace 输入与 Discover tab（click as enter）
     if let Event::Mouse(mouse) = event {
         // 详情/confirm 模式由 Normal handler 负责命中
-        if detail_plugin_idx.read().is_some()
+        if detail_plugin.read().is_some()
             || marketplace_detail.read().is_some()
             || confirm_action.read().is_some()
         {
@@ -70,22 +83,18 @@ pub(super) fn handle_search_event(
     }
 
     if *active_tab.read() == PluginViewTab::Discover
-        && detail_plugin_idx.read().is_none()
+        && detail_plugin.read().is_none()
         && marketplace_detail.read().is_none()
         && confirm_action.read().is_none()
         && !*add_marketplace_active.read()
     {
-        // Existing operation-loading cleanup remains owned by Normal handler.
-        if operation_loading.read().is_some() {
-            return EventResult::Ignored;
-        }
         return super::discover_handler::handle_event(event, area, discover, operation);
     }
 
     // ── ESC handling: detail exit / confirm cancel / close panel ──
     if key.code == KeyCode::Esc {
-        if detail_plugin_idx.read().is_some() {
-            *detail_plugin_idx.write() = None;
+        if detail_plugin.read().is_some() {
+            *detail_plugin.write() = None;
             return EventResult::Consumed;
         }
         if marketplace_detail.read().is_some() {
@@ -95,14 +104,14 @@ pub(super) fn handle_search_event(
         }
         if confirm_action.read().is_some() {
             *confirm_action.write() = None;
-            *operation_loading.write() = None;
+            *marketplace_confirmation.write() = None;
             return EventResult::Consumed;
         }
         close_panel();
         return EventResult::Consumed;
     }
 
-    let in_detail = detail_plugin_idx.read().is_some();
+    let in_detail = detail_plugin.read().is_some();
     let in_marketplace_detail = marketplace_detail.read().is_some();
     if in_detail || in_marketplace_detail || confirm_action.read().is_some() {
         return EventResult::Ignored;

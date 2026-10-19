@@ -437,7 +437,7 @@ async fn cron_deployment_registration_and_tick_are_session_scoped() {
                 .lock()
                 .iter()
                 .any(|prompt| prompt.contains("session-a-marker"))
-                && !shared.lock().await[&a].history.is_empty()
+                && !shared.lock().await[&a].history_payloads.is_empty()
             {
                 break;
             }
@@ -446,7 +446,7 @@ async fn cron_deployment_registration_and_tick_are_session_scoped() {
     })
     .await
     .expect("scheduled continuation must execute on the current session");
-    assert!(shared.lock().await[&b].history.is_empty());
+    assert!(shared.lock().await[&b].history_payloads.is_empty());
     let completed_prompts = model.prompts.lock().len();
 
     // Deleting a registered task prevents later ticks; closing A stops its generation.

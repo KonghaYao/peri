@@ -246,7 +246,10 @@ async fn test_full_report_only_history_and_successive_snapshots() {
     assert!(!second.contains("FIRST_REPORT"));
     assert!(second.contains("LATER_REPORT"));
     assert!(second.contains("REPORT_DECISION"));
-    assert!(transcript.flags(first).excluded && transcript.flags(later).excluded);
+    assert!(
+        transcript.get(first).is_none() && transcript.get(later).is_none(),
+        "Full 提交后已排除报告必须从热态释放（持久化事实仍带 excluded）"
+    );
     assert_eq!(transcript.visible_model_messages().unwrap().len(), 1);
 }
 
@@ -407,7 +410,10 @@ async fn test_full_report_inherited_context_preserves_ancestor_ownership() {
     let body = serde_json::to_string(&model.requests.lock().unwrap()[0]).unwrap();
     assert!(body.contains("ANCESTOR_REPORT") && body.contains("OWN_REPORT"));
     assert!(!transcript.flags(ancestor).excluded);
-    assert!(transcript.flags(own).excluded);
+    assert!(
+        transcript.get(own).is_none(),
+        "own 报告必须从热态释放，ancestor 保留"
+    );
     let stored = bound
         .resources
         .load_session_snapshot(&bound.thread_id)
@@ -442,7 +448,10 @@ async fn test_full_report_arriving_during_summary_stays_available() {
     assert!(!request.contains("REPORT_ARRIVED_DURING_FULL"));
     crate::agent::stages::append_messages_to_transcript(&mut transcript, queue.drain_all());
     transcript.flush_persistence().await.unwrap();
-    assert!(transcript.flags(old).excluded);
+    assert!(
+        transcript.get(old).is_none(),
+        "Full 已排除的旧报告必须从热态释放"
+    );
     let visible = transcript.visible_model_messages().unwrap();
     assert_eq!(visible.len(), 2);
     assert!(visible[0].content().contains("REPORT_DECISION"));

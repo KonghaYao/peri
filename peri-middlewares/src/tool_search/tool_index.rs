@@ -243,7 +243,7 @@ impl ToolSearchIndex {
     /// 混合搜索
     ///
     /// 查询语法：
-    /// - `select:CronCreate,Snip` — 按精确名称查找，逗号分隔
+    /// - `select:mcp__cron__cron_list,mcp__cron__cron_remove` — 按精确名称查找，逗号分隔
     /// - `+slack message` — `+` 前缀词为必选，其余为可选关键词
     /// - `slack message` — 纯关键词搜索
     ///
@@ -304,6 +304,11 @@ impl ToolSearchIndex {
                 0.0
             };
 
+            // 无必选词时，基础分不代表命中；没有关键词或 TF-IDF 命中就跳过。
+            if required.is_empty() && kw_score <= 1.0 && tfidf_score == 0.0 {
+                continue;
+            }
+
             // 混合分数
             let score = kw_score * 0.4 + tfidf_score * 0.6;
 
@@ -319,6 +324,7 @@ impl ToolSearchIndex {
             b.score
                 .partial_cmp(&a.score)
                 .unwrap_or(std::cmp::Ordering::Equal)
+                .then_with(|| a.name.cmp(&b.name))
         });
         results.truncate(limit);
         results

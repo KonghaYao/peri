@@ -26,6 +26,9 @@ pub(super) fn update_follow_on_scroll(
     offset_y: usize,
 ) {
     *follow_bottom.write_no_update() = should_follow_after_user_scroll(max_scroll, offset_y);
+    if crate::kit::history_page_consumer::window_path_enabled() {
+        crate::kit::history_window::update_window_viewport_follow(*follow_bottom.read());
+    }
 }
 
 /// §8.1 `↓ New output` 指示器判定：浏览态（用户滚离底部，follow=false）且
@@ -233,6 +236,51 @@ pub(in crate::kit::message_area) fn run_auto_follow(ctx: &AutoFollowCtx) {
             *ctx.last_scrolled_at.write_no_update() = ctx.total_visual_rows;
         }
         return;
+    }
+
+    // ── [REQ-C01-3 / A20] 历史翻页：阅读锚点重定位 + 接近向前边界拉一页 ──
+    // 两件事都只作用于**浏览态**（跟随态看的是尾部，插入发生在其上方，吸底跟随自会
+    // 处理；内容不足一屏时没有「尾部」可言，按同样口径处理）。翻页 loading 与执行
+    // 状态完全分离——这里不碰 ACP_STATE / LOADING_EPOCH / is_loading。
+    //
+    // 重定位是**身份重定位**而不是几何补偿：目标偏移在 `Transcript::prepare` 里用
+    // 「发布前视口顶行所在单元的身份 + 该单元内位移」在**发布后**的新索引里重查得出
+    // （`ctx.prepend_relocation`，语义与身份口径见 `viewport_anchor` 模块文档）；
+    // 这里只负责在浏览态把它落到 offset 上。身份认不出（单元被替换 / 被并入折叠组 /
+    // 新窗口里出现多次）时 `prepend_relocation` 为 `None` → **不补偿**（安全方向：
+    // 宁可少补一次，也不把视口推到窗口底部）。
+    let browsing = !*ctx.follow_bottom.read();
+    let scroll_y = ctx.scroll_state.read().offset();
+    if let Some(relocation) = ctx.prepend_relocation
+        && let Some(target) = relocation.target_for(!browsing, scroll_y)
+    {
+        // usize::MAX 是「跟随到底」哨兵，不参与偏移换算（`target_for` 已排除）。
+        tracing::trace!(
+            target: "msg_scroll_diag",
+            from = relocation.from_offset,
+            to = relocation.target_offset,
+            scroll_y,
+            "auto_follow: history page prepended → relocate viewport onto the anchored unit",
+        );
+        ctx.scroll_state.write().set_offset(target);
+    }
+    // 向前边界：视口顶端贴着已载入窗口的最早一行。内容不足一屏时同样算贴边——
+    // 稀疏首屏的旧历史空缺正是这种形态（REQ-C01-1）。相同 cursor 的并发触发在
+    // 认领处合并，退避窗口内的重复触发是 no-op（REQ-C01-2）。
+    //
+    // 这里只覆盖「内容变化驱动的触发」（含稀疏首屏自动续读）；**空闲会话**里
+    // 用户滚到顶端由滚动事件路径触发（`scroll/event.rs` 的
+    // `request_older_page_at_scroll_facts`，见 `history_paging::request_older_page_at_boundary`
+    // 的调用路径说明）。
+    crate::kit::history_paging::request_older_page_at_boundary(
+        !browsing,
+        scroll_y,
+        ctx.total_visual_rows,
+        ctx.vis_height as usize,
+    );
+    // 跟随态在底部：窗口模式按 after_cursor 拉取更新的一页；consumer 自己合并/退避。
+    if !browsing {
+        crate::kit::history_page_consumer::request_window_newer_page_if_due();
     }
 
     // ── 粘性跟随 guard ──

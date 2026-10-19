@@ -226,6 +226,7 @@ fn synthetic_scheduler_state() -> BridgeState {
         pending_cache_usage: None,
         publication_intent: Default::default(),
         folded_history: Default::default(),
+        window: Default::default(),
     }
 }
 
@@ -387,10 +388,11 @@ impl PublicationScheduler {
 /// 清 INPUT_BUFFER、push_view_models_for_reset。
 fn apply_bridge_reset(state: &mut BridgeState, last_reset_counter: &mut u64, counter: u64) -> u64 {
     let old = *last_reset_counter;
-    // A manual compact schedules a same-session replay.  Keep its UI-only note
-    // across the reset, regardless of which bridge branch observed the counter
-    // first.  A regular thread switch must consume the pending note instead:
-    // otherwise a compact completion from the old thread leaks into the new one.
+    // 同会话 reset 边界保留 compact 完成提示，无论计数器由哪条 bridge 分支先观察到。
+    // 变量名沿史（replay 路径已随 REQ-C02 / A12 移除，语义只剩「active session 未变」）：
+    // manual compact 之后不再有同会话 replay，提示的正常去处是当前视图（TurnDone
+    // 消费清空），这里只在 reset 边界搬运、不丢提示。线程切换必须消费掉待重建提示：
+    // 否则旧线程的完成提示会串到新线程。
     let replay_session_id = state.active_session_id.clone();
     let active_session_id = atoms::ACTIVE_SESSION_ID.state().read().clone();
     let same_session_replay =
@@ -403,6 +405,10 @@ fn apply_bridge_reset(state: &mut BridgeState, last_reset_counter: &mut u64, cou
     *last_reset_counter = counter;
     state.active_session_id = active_session_id;
     state.committed = im::Vector::new();
+    state.window.reset();
+    crate::kit::history_page_consumer::reset_window_paging_state();
+    crate::kit::history_window::clear_window_viewport();
+    crate::kit::atoms::HISTORY_DETAIL.set(None);
     state.current_turn.reset();
     state.folded_history = Default::default();
     state.publication_intent = PublicationIntent::None;
@@ -428,8 +434,7 @@ fn apply_bridge_reset(state: &mut BridgeState, last_reset_counter: &mut u64, cou
             .push_system_note(text.clone(), TuiNoteLevel::Info, tui_hash_str(&text));
         atoms::PENDING_COMPACT_NOTE.set(None);
     } else if !same_session_replay {
-        // The note belongs to a completed compact in another session and must
-        // never be replayed after a normal thread switch.
+        // 提示属于另一个会话里已完成的 compact，普通线程切换后绝不能重现。
         atoms::PENDING_COMPACT_NOTE.set(None);
     }
     acp_events::push_view_models_for_reset();
@@ -520,6 +525,12 @@ fn spawn_acp_bridge_inner(
             pending_cache_usage: None,
             publication_intent: Default::default(),
             folded_history: Default::default(),
+            window: crate::kit::history_window::HistoryWindow::new(
+                crate::kit::history_window::HistoryWindowConfig {
+                    history_window_v1: crate::kit::atoms::HISTORY_WINDOW_V1.get(),
+                    ..Default::default()
+                },
+            ),
         };
 
         // 追踪 BRIDGE_RESET_COUNTER——submit_consumer 的 /clear / thread_load

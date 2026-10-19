@@ -26,10 +26,11 @@ use crate::i18n;
 use crate::kit::atoms::{ACTIVE_PANEL, OPEN_PANELS};
 use crate::kit::panels::{
     agent::AgentPanel, ask_user::AskUserPanel, config::ConfigPanel, cron::CronPanel,
-    goal::GoalPanel, hooks::HooksPanel, login::LoginPanel, mcp::McpPanel, memory::MemoryPanel,
-    model::ModelPanel, plugin::PluginPanel, shell_detail::ShellDetailPanel, status::StatusPanel,
-    subagent_detail::SubAgentDetailPanel, tasks::TasksPanel, theme::ThemePanel,
-    thread_browser::ThreadBrowserPanel, workflow::WorkflowPanel,
+    goal::GoalPanel, history_detail::HistoryDetailPanel, hooks::HooksPanel, login::LoginPanel,
+    mcp::McpPanel, memory::MemoryPanel, model::ModelPanel, plugin::PluginPanel,
+    shell_detail::ShellDetailPanel, status::StatusPanel, subagent_detail::SubAgentDetailPanel,
+    tasks::TasksPanel, theme::ThemePanel, thread_browser::ThreadBrowserPanel,
+    workflow::WorkflowPanel,
 };
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -154,6 +155,10 @@ fn render_shell_detail_panel() -> AnyElement<'static> {
 
 fn render_goal_panel() -> AnyElement<'static> {
     element!(GoalPanel()).into()
+}
+
+fn render_history_detail_panel() -> AnyElement<'static> {
+    element!(HistoryDetailPanel()).into()
 }
 
 /// 所有面板的元数据。
@@ -389,6 +394,18 @@ pub const PANELS: &[PanelMeta] = &[
         layout: PanelLayout::fixed(70, 18),
         render: render_goal_panel,
     },
+    PanelMeta {
+        kind: PanelKind::HistoryDetail,
+        title: "History Detail",
+        shortcut_letter: '\0',
+        slash_command: "",
+        description: "Oversized history entry detail",
+        priority: 18,
+        mutex_group: MutexGroup::Info,
+        scope: PanelScope::Session,
+        layout: PanelLayout::fixed(80, 24),
+        render: render_history_detail_panel,
+    },
 ];
 
 pub fn panel_title(kind: PanelKind) -> String {
@@ -411,6 +428,7 @@ pub fn panel_title(kind: PanelKind) -> String {
         PanelKind::SubAgentDetail => "panel-title-subagent-detail",
         PanelKind::ShellDetail => "panel-title-shell-detail",
         PanelKind::Goal => "panel-title-goal",
+        PanelKind::HistoryDetail => "panel-title-history-detail",
     };
     if matches!(
         kind,
@@ -460,6 +478,7 @@ pub fn panel_description(kind: PanelKind) -> String {
         PanelKind::SubAgentDetail => "panel-desc-subagent-detail",
         PanelKind::ShellDetail => "panel-desc-shell-detail",
         PanelKind::Goal => "panel-desc-goal",
+        PanelKind::HistoryDetail => "panel-desc-history-detail",
     };
     i18n::tr(key)
 }

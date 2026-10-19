@@ -14,3 +14,6 @@ mod aliases_tests;
 
 #[path = "grep_guard_test.rs"]
 mod guard_tests;
+
+#[path = "grep_glob_filter_test.rs"]
+mod glob_filter_tests;

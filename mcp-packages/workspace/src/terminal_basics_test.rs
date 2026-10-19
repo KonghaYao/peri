@@ -183,7 +183,8 @@ async fn test_bash_oversized_timeout_is_capped_by_foreground_maximum() {
     assert_eq!(
         peri_agent::agent::async_tasks::parse_foreground_timeout(
             &serde_json::json!({"timeout": 600000})
-        ),
+        )
+        .expect("valid timeout"),
         (FOREGROUND_MAX_TIMEOUT_MS, Some(600_000)),
         "超过前台上限的请求必须界到上限"
     );
@@ -208,12 +209,14 @@ async fn test_bash_sync_timeout_zero_is_bounded_by_foreground_maximum() {
     assert_eq!(
         peri_agent::agent::async_tasks::parse_foreground_timeout(
             &serde_json::json!({"timeout": 0})
-        ),
+        )
+        .expect("valid timeout"),
         (FOREGROUND_MAX_TIMEOUT_MS, Some(0)),
         "timeout: 0 必须界到前台上限，不能表示不超时"
     );
     assert_eq!(
-        peri_agent::agent::async_tasks::parse_foreground_timeout(&serde_json::json!({})),
+        peri_agent::agent::async_tasks::parse_foreground_timeout(&serde_json::json!({}))
+            .expect("missing timeout"),
         (
             peri_agent::agent::async_tasks::FOREGROUND_DEFAULT_TIMEOUT_MS,
             None
@@ -304,7 +307,11 @@ fn test_foreground_timeout_note_explains_bounded_sync_requests() {
 #[test]
 fn test_bash_timeout_description_matches_implementation() {
     let tool = BashTool::new(std::env::temp_dir().to_str().unwrap());
-    let schema = tool.parameters()["properties"]["timeout"]["description"]
+    let timeout_schema = &tool.parameters()["properties"]["timeout"];
+    assert_eq!(timeout_schema["type"].as_str(), Some("integer"));
+    assert_eq!(timeout_schema["minimum"].as_u64(), Some(0));
+    assert_eq!(timeout_schema["maximum"].as_u64(), Some(600_000));
+    let schema = timeout_schema["description"]
         .as_str()
         .expect("timeout 参数描述")
         .to_string();

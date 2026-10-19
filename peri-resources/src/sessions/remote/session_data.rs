@@ -30,7 +30,7 @@
 //!
 //! 打开的两种访问模式：
 //!
-//! - 可写打开：读回身份（未初始化则先建身份），再执行一次幂等 DDL 补齐会话表形状；
+//! - 可写打开：读回身份（未初始化则先建身份），只在缺表或缺必要索引时补齐 schema；
 //! - 只读打开：只读回身份，不写任何东西；若 store 尚无本任务 schema（身份或会话表缺失），
 //!   直接 `Unsupported`——没有 schema 就没有会话事实可读，也不越权建表。
 //!
@@ -44,17 +44,20 @@ use super::credentials::SessionStoreCredential;
 use super::endpoint::RemoteEndpoint;
 use super::generation::{ConnectionFactory, ConnectionGate, RemoteConnectionFactory};
 use super::mutation::{RemoteStore, StoreAccess};
-use super::schema::{StoreId, StoreIdentityRead};
+use super::schema::{StoreId, StoreIdentityRead, StoreShapeRead};
 use super::schema_upgrade;
 use super::session_schema;
 use super::sql::StatementSpec;
 use crate::sessions::data::{ChildResumeRecord, SessionDataPort};
 use async_trait::async_trait;
+use peri_acp_types::history_page::{
+    HistoryCursor, HistoryForwardCursor, HistoryPage, HistoryPageBounds, HistorySegment,
+};
 use peri_acp_types::messages::MessageId;
 use peri_acp_types::session_resources::{
-    BindingState, ChildSnapshot, ForkSnapshot, FrozenSnapshotBytes, NewSession,
-    PersistenceRecovery, RewindBoundary, SessionMetaPatch, SessionResourceError,
-    SessionResourceErrorKind, SessionResourceResult, SessionSnapshot,
+    ActiveSessionSnapshot, BindingState, ChildSnapshot, ForkSnapshot, FrozenSnapshotBytes,
+    NewSession, PersistenceRecovery, RewindBoundary, RewindOutcome, SessionMetaPatch,
+    SessionResourceError, SessionResourceErrorKind, SessionResourceResult, SessionSnapshot,
 };
 use peri_acp_types::store::{CompactionChange, MessageFlags, PersistedPayload};
 use peri_acp_types::system_reminder::TrustedSystemReminder;
@@ -86,7 +89,9 @@ pub(super) enum StoreInitialization {
 
 #[path = "session_open.rs"]
 mod session_open;
-pub(super) use session_open::{open_step, open_verdict, probe_shape, OpenStep};
+pub(super) use session_open::{
+    open_step, open_verdict, probe_shape, verify_legacy_open_identity, OpenStep,
+};
 use session_open::{refuse_legacy_shape, resolve_open_machine_id};
 
 /// 远端会话数据 adapter：一个已初始化（或已读回身份）的远程 store 上的会话行为。
@@ -150,11 +155,17 @@ impl RemoteSessionData {
             Arc::clone(&gate),
         ));
         let store = factory.connect().await?;
-        // 打开路径的两份只读事实：身份（版本 + 契约 + store id）与**会话表形状**。后者按契约
-        // 声明的代数探测（只发 SELECT），读得动的库必须相符——形状不符即拒绝，不下发任何读写。
+        // 打开路径的两份只读事实：身份（版本 + 契约 + store id）与会话表形状。
+        // 后者连同必要索引在一次只读批中探测；列形状不符即拒绝。
         let read = store.read_identity().await?;
         let shape = probe_shape(&store, &read).await?;
-        let (store_id, initialization) = match open_step(read, shape, access)? {
+        let schema_work = shape.clone();
+        let legacy_shape = matches!(&read, StoreIdentityRead::Present(snapshot) if !snapshot.matches_build())
+            && access == StoreAccess::ReadOnly;
+        let legacy_open_identity = legacy_shape.then(|| read.clone());
+        let step = open_step(read, shape, access)?;
+        let upgraded = matches!(step, OpenStep::Upgrade(_));
+        let (store_id, initialization) = match step {
             OpenStep::Existing(store_id) => (store_id, StoreInitialization::Existing),
             OpenStep::Upgrade(snapshot) => {
                 schema_upgrade::upgrade(&store, &snapshot).await?;
@@ -169,31 +180,44 @@ impl RemoteSessionData {
             }
         };
         let machine_id = resolve_open_machine_id(supplied_machine_id, access).await?;
-        // 可写打开时补齐本构建的会话表形状：DDL 全部 `IF NOT EXISTS`，既有对象不改写、
-        // 不覆盖，已初始化的 store 上是一次幂等的空操作。这一步不能只在「身份刚建立」时
-        // 跑——身份早于会话表建立的 store（例如只做过机制实测的库）同样需要补齐。
+        // 健康的当前库已通过严格列形状与必要索引检查，无须每次重放 DDL。
+        // 身份早于会话表建立的库仍需补齐；缺索引时只补索引。
         if access == StoreAccess::ReadWrite {
             // 父行检查先归位：canonical 形状里的外键在远端没有可满足的父行（见方法文档）。
             store.force_parent_checks_off().await?;
-            store
-                .apply_schema(session_schema::initialization_plan())
-                .await?;
-            store
+            if !upgraded {
+                let plan = match schema_work {
+                    Some(StoreShapeRead::NeedsCurrentRepair {
+                        missing_indexes,
+                        missing_close_intents,
+                    }) => session_schema::repair_plan(missing_indexes, missing_close_intents),
+                    Some(StoreShapeRead::Unbuilt) | None => session_schema::initialization_plan(),
+                    Some(StoreShapeRead::Consistent | StoreShapeRead::Drifted(_)) => Vec::new(),
+                };
+                if !plan.is_empty() {
+                    store.apply_schema(plan).await?;
+                }
+            }
+            let machine_exists = store
+                .fetch_row(&StatementSpec::new(
+                    "SELECT id FROM machines WHERE id = ?1",
+                    vec![Value::Text(machine_id.clone())],
+                ))
+                .await?
+                .is_some();
+            if !machine_exists {
+                store
                 .apply_schema(vec![StatementSpec::new(
                     "INSERT OR IGNORE INTO machines(id, name, identity_kind) VALUES (?1, '我的电脑', 'known')",
                     vec![Value::Text(machine_id.clone())],
                 )])
                 .await?;
-        }
-        let legacy_shape = match store.read_identity().await? {
-            // 只读打开不升级：压缩前的形状（v2 契约）此后按各自的读法服务。
-            StoreIdentityRead::Present(snapshot) => !snapshot.matches_build(),
-            _ => {
-                return Err(unsupported_behavior(
-                    "remote store identity missing after initialization",
-                ));
             }
-        };
+        }
+        // 旧形状只读打开可能与另一实例的原子升级竞争；不可带过期的读法返回。
+        if let Some(initial) = legacy_open_identity {
+            verify_legacy_open_identity(&initial, &store.read_identity().await?)?;
+        }
         Ok((
             Self {
                 machine_id,
@@ -244,6 +268,15 @@ impl RemoteSessionData {
             return Err(retired_connection());
         }
         Ok(store)
+    }
+
+    /// 只读打开的访问意图下，先于任何「读前置事实」拒绝写入。
+    ///
+    /// mutation 层自己也会拒绝只读写入，但那发生在**发起写入**时：读前置事实之后提前
+    /// 返回成功的路径（如「未知边界 = 无变更」）会绕过它，让只读请求以成功收场。
+    /// 本机 adapter 的同类路径先 `writable()` 再读边界，这里保持同一顺序。
+    pub(super) async fn ensure_writable(&self) -> SessionResourceResult<()> {
+        self.store().await?.access().ensure_writable()
     }
 
     /// 失效代际的重建：建立新连接、重核实身份、替换槽位、关闭退场连接。
@@ -620,6 +653,28 @@ impl SessionDataPort for RemoteSessionData {
         self.read_snapshot(id).await
     }
 
+    async fn load_active_snapshot(
+        &self,
+        id: &ThreadId,
+    ) -> SessionResourceResult<ActiveSessionSnapshot> {
+        self.read_active_snapshot(id).await
+    }
+
+    async fn load_message_flags(
+        &self,
+        id: &ThreadId,
+        ids: &[MessageId],
+    ) -> SessionResourceResult<HashMap<MessageId, MessageFlags>> {
+        self.read_message_flags(id, ids).await
+    }
+
+    async fn load_entry_positions(
+        &self,
+        id: &ThreadId,
+    ) -> SessionResourceResult<HashMap<MessageId, u64>> {
+        self.read_active_entry_positions(id).await
+    }
+
     async fn load_binding(&self, id: &ThreadId) -> SessionResourceResult<BindingState> {
         self.read_binding_state(id).await
     }
@@ -629,6 +684,31 @@ impl SessionDataPort for RemoteSessionData {
         id: &ThreadId,
     ) -> SessionResourceResult<Vec<PersistedPayload>> {
         self.read_history(id).await
+    }
+
+    async fn load_history_page(
+        &self,
+        id: &ThreadId,
+        cursor: Option<&HistoryCursor>,
+        limit: usize,
+        byte_budget: usize,
+    ) -> SessionResourceResult<HistoryPage> {
+        self.read_history_page(id, cursor, limit, byte_budget).await
+    }
+
+    async fn history_page_bounds(&self, id: &ThreadId) -> SessionResourceResult<HistoryPageBounds> {
+        self.read_history_page_bounds(id).await
+    }
+
+    async fn load_history_segment(
+        &self,
+        id: &ThreadId,
+        cursor: Option<&HistoryForwardCursor>,
+        limit: usize,
+        byte_budget: usize,
+    ) -> SessionResourceResult<HistorySegment> {
+        self.read_history_segment(id, cursor, limit, byte_budget)
+            .await
     }
 
     async fn load_meta(&self, id: &ThreadId) -> SessionResourceResult<ThreadMeta> {
@@ -784,8 +864,9 @@ impl SessionDataPort for RemoteSessionData {
         &self,
         id: &ThreadId,
         boundary: RewindBoundary,
-    ) -> SessionResourceResult<()> {
-        self.write_rewind(id, boundary).await
+        clear_excluded: &[MessageId],
+    ) -> SessionResourceResult<RewindOutcome> {
+        self.write_rewind(id, boundary, clear_excluded).await
     }
 
     async fn remove_history_entries(

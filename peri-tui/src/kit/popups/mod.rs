@@ -33,7 +33,6 @@ macro_rules! popup_text_shell {
     }};
 }
 
-pub mod ask_user_popup;
 pub mod confirm_popup;
 pub mod download_progress;
 pub mod hitl_popup;

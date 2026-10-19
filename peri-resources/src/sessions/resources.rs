@@ -7,6 +7,7 @@ mod gate;
 mod lifecycle;
 mod oauth_credentials;
 
+use std::collections::HashMap;
 use std::path::Path;
 #[cfg(not(target_os = "emscripten"))]
 use std::path::PathBuf;
@@ -14,13 +15,20 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use async_trait::async_trait;
+use peri_acp_types::history_page::{
+    HistoryCursor, HistoryForwardCursor, HistoryPage, HistoryPageBounds, HistorySegment,
+};
+use peri_acp_types::history_window::{
+    HistoryBodyChunk, HistoryCommittedTail, HistoryReadTicket, HistorySource,
+};
 use peri_acp_types::messages::MessageId;
 use peri_acp_types::session_resources::{
-    AccessMode, BindingRecheck, BindingState, ChildResumeClaim, ChildSnapshot, CloseSettlement,
-    DataCapabilities, ExecutionAvailability, ForkSnapshot, FrozenSnapshotBytes, FrozenState,
-    NewSession, NewSessionDraft, PersistenceRecovery, RewindBoundary, SessionAvailability,
-    SessionInitialization, SessionMetaPatch, SessionResourceError, SessionResourceErrorKind,
-    SessionResourceResult, SessionResources, SessionSnapshot,
+    AccessMode, ActiveSessionSnapshot, BindingRecheck, BindingState, ChildResumeClaim,
+    ChildSnapshot, CloseSettlement, DataCapabilities, ExecutionAvailability, ForkSnapshot,
+    FrozenSnapshotBytes, FrozenState, HistoryWindowPagePlan, HistoryWindowRows, NewSession,
+    NewSessionDraft, PersistenceRecovery, RewindBoundary, RewindOutcome, SessionAvailability,
+    SessionHistoryWindowBounds, SessionInitialization, SessionMetaPatch, SessionResourceError,
+    SessionResourceErrorKind, SessionResourceResult, SessionResources, SessionSnapshot,
 };
 use peri_acp_types::store::{CompactionChange, MessageFlags, PersistedPayload};
 use peri_acp_types::thread::{AgentStatus, ThreadId, ThreadMeta};
@@ -411,10 +419,27 @@ impl SessionResources for SessionResourcesImpl {
             .await
     }
 
+    async fn relink_unbound_session(
+        &self,
+        id: &ThreadId,
+    ) -> SessionResourceResult<ResolvedWorkspace> {
+        SessionResourcesImpl::relink_unbound_session(self, id).await
+    }
+
     // ── 读取 ──
 
     async fn load_session_snapshot(&self, id: &ThreadId) -> SessionResourceResult<SessionSnapshot> {
         let mut snapshot = self.gate.data().load_snapshot(id).await?;
+        snapshot.binding = self.classify_binding(id, snapshot.binding).await?;
+        Ok(snapshot)
+    }
+
+    async fn load_active_snapshot(
+        &self,
+        id: &ThreadId,
+    ) -> SessionResourceResult<ActiveSessionSnapshot> {
+        // 与完整快照同一条分类规则：数据端只回答绑定事实，`LegacyConfirmed` 由门面判定。
+        let mut snapshot = self.gate.data().load_active_snapshot(id).await?;
         snapshot.binding = self.classify_binding(id, snapshot.binding).await?;
         Ok(snapshot)
     }
@@ -437,6 +462,114 @@ impl SessionResources for SessionResourcesImpl {
         id: &ThreadId,
     ) -> SessionResourceResult<Vec<PersistedPayload>> {
         self.gate.data().load_session_history(id).await
+    }
+
+    async fn load_history_page(
+        &self,
+        id: &ThreadId,
+        cursor: Option<&HistoryCursor>,
+        limit: usize,
+        byte_budget: usize,
+    ) -> SessionResourceResult<HistoryPage> {
+        self.gate
+            .data()
+            .load_history_page(id, cursor, limit, byte_budget)
+            .await
+    }
+
+    async fn history_page_bounds(&self, id: &ThreadId) -> SessionResourceResult<HistoryPageBounds> {
+        self.gate.data().history_page_bounds(id).await
+    }
+
+    async fn load_history_segment(
+        &self,
+        id: &ThreadId,
+        cursor: Option<&HistoryForwardCursor>,
+        limit: usize,
+        byte_budget: usize,
+    ) -> SessionResourceResult<HistorySegment> {
+        self.gate
+            .data()
+            .load_history_segment(id, cursor, limit, byte_budget)
+            .await
+    }
+
+    async fn history_window_bounds(
+        &self,
+        id: &ThreadId,
+    ) -> SessionResourceResult<SessionHistoryWindowBounds> {
+        self.gate.data().history_window_bounds(id).await
+    }
+
+    async fn load_history_window_page(
+        &self,
+        id: &ThreadId,
+        plan: &HistoryWindowPagePlan,
+    ) -> SessionResourceResult<HistoryWindowRows> {
+        self.gate.data().load_history_window_page(id, plan).await
+    }
+
+    async fn seek_history_window(
+        &self,
+        id: &ThreadId,
+        source: HistorySource,
+        anchor: MessageId,
+        before_limit: usize,
+        after_limit: usize,
+        byte_budget: usize,
+        committed_tail: &HistoryCommittedTail,
+    ) -> SessionResourceResult<HistoryWindowRows> {
+        self.gate
+            .data()
+            .seek_history_window(
+                id,
+                source,
+                anchor,
+                before_limit,
+                after_limit,
+                byte_budget,
+                committed_tail,
+            )
+            .await
+    }
+
+    async fn load_history_body_chunk(
+        &self,
+        id: &ThreadId,
+        source: HistorySource,
+        entry_id: MessageId,
+        offset: u64,
+        max_bytes: u32,
+        committed_tail: Option<&HistoryCommittedTail>,
+        read_ticket: &HistoryReadTicket,
+    ) -> SessionResourceResult<HistoryBodyChunk> {
+        self.gate
+            .data()
+            .load_history_body_chunk(
+                id,
+                source,
+                entry_id,
+                offset,
+                max_bytes,
+                committed_tail,
+                read_ticket,
+            )
+            .await
+    }
+
+    async fn load_entry_positions(
+        &self,
+        id: &ThreadId,
+    ) -> SessionResourceResult<HashMap<MessageId, u64>> {
+        self.gate.data().load_entry_positions(id).await
+    }
+
+    async fn load_message_flags(
+        &self,
+        id: &ThreadId,
+        ids: &[MessageId],
+    ) -> SessionResourceResult<HashMap<MessageId, MessageFlags>> {
+        self.gate.data().load_message_flags(id, ids).await
     }
 
     async fn load_session_meta(&self, id: &ThreadId) -> SessionResourceResult<ThreadMeta> {
@@ -634,9 +767,14 @@ impl SessionResources for SessionResourcesImpl {
         &self,
         id: &ThreadId,
         boundary: RewindBoundary,
-    ) -> SessionResourceResult<()> {
+        clear_excluded: &[MessageId],
+    ) -> SessionResourceResult<RewindOutcome> {
         self.gate
-            .with_mutation(id, || self.gate.data().rewind_history(id, boundary))
+            .with_mutation(id, || {
+                self.gate
+                    .data()
+                    .rewind_history(id, boundary, clear_excluded)
+            })
             .await
     }
 

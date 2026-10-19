@@ -271,3 +271,6 @@ mod fork;
 
 #[path = "resources_composition_test.rs"]
 mod composition;
+
+#[path = "resources_legacy_relink_test.rs"]
+mod legacy_relink;

@@ -4,15 +4,14 @@
 //!
 //! **P5.1 重构**：旧版本通过 `SubAgentBuilder.build()` 构造 v1 Agent，
 //! 现在直接产出 v2 字段。L3：建 thread / cancel token / 事件 / 运行收尾
-//! 全部移入 [`SessionFactory::spawn_subagent`](peri_agent::session::subagent::SessionFactory::spawn_subagent)，本模块只保留 agent_def 解析、工具过滤与
-//! SandboxWrite 注入等 middlewares 能力。
+//! 全部移入 [`SessionFactory::spawn_subagent`](peri_agent::session::subagent::SessionFactory::spawn_subagent)，本模块只保留 agent_def 解析与
+//! 工具过滤等 middlewares 能力。
 
 use peri_agent::{
     session::subagent::{SubagentCancelPolicy, SubagentLlmSource},
     tools::BaseTool,
 };
 
-use super::super::fork::allows_injected_tools;
 use peri_mcp_core::agent_definition::ClaudeAgent;
 
 /// Agent 工具 `model` 参数可用档位（契约层单一事实源 `peri_acp_types::agents::MODEL_TIERS`；
@@ -57,50 +56,10 @@ impl super::SubAgentTool {
         model_override: Option<&str>,
     ) -> Result<AgentBuildResult, Box<dyn std::error::Error + Send + Sync>> {
         // 1. Filter tools
-        let mut filtered_tools = self.filter_tools(
+        let filtered_tools = self.filter_tools(
             &agent_def.frontmatter.tools,
             &agent_def.frontmatter.disallowed_tools,
         );
-
-        // 显式 `tools: []` 是严格的零工具边界，禁止 WriteSandbox 等后注入工具。
-        #[cfg(not(target_os = "emscripten"))]
-        let allowed_write_dirs = &agent_def.frontmatter.allowed_write_dirs;
-        #[cfg(not(target_os = "emscripten"))]
-        if allows_injected_tools(&agent_def.frontmatter.tools) && !allowed_write_dirs.is_empty() {
-            let disallowed_list = agent_def.frontmatter.disallowed_tools.to_vec();
-            let is_disallowed = disallowed_list.iter().any(|n| {
-                let n = n.to_lowercase();
-                n == "sandboxwrite" || n == "writesandbox"
-            });
-            if is_disallowed {
-                tracing::debug!(
-                    agent_id = %agent_name,
-                    "SandboxWrite 被 disallowedTools 否决，跳过注入"
-                );
-            } else {
-                match peri_mcp_workspace::filesystem::WriteSandboxTool::new(
-                    cwd.to_string(),
-                    allowed_write_dirs.clone(),
-                ) {
-                    Ok(tool) => {
-                        filtered_tools.push(Box::new(tool));
-                        tracing::debug!(
-                            agent_id = %agent_name,
-                            sandbox_dirs = ?allowed_write_dirs,
-                            "SandboxWrite 工具已注入"
-                        );
-                    }
-                    Err(e) => {
-                        tracing::warn!(
-                            agent_id = %agent_name,
-                            error = %e,
-                            sandbox_dirs = ?allowed_write_dirs,
-                            "SandboxWrite 构造失败，跳过注入"
-                        );
-                    }
-                }
-            }
-        }
 
         tracing::debug!(
             agent_id = %agent_name,
@@ -111,6 +70,21 @@ impl super::SubAgentTool {
             disallowed = ?agent_def.frontmatter.disallowed_tools,
             "build_agent_from_def: tool filter results"
         );
+
+        // 白名单声明非空却被父工具集裁剪成空集 = 静默失能；`tools: []` 是
+        // 显式零工具，不在此告警。只记录不改变行为（裁剪语义不变）。
+        if let peri_mcp_core::agent_definition::ToolsValue::List(names) =
+            &agent_def.frontmatter.tools
+        {
+            if !names.is_empty() && filtered_tools.is_empty() {
+                tracing::warn!(
+                    agent_id = %agent_name,
+                    allowed = ?names,
+                    parent_count = self.parent_tools.len(),
+                    "agent allowlist resolved to an empty tool set"
+                );
+            }
+        }
 
         // 2. Model alias → LLM factory
         // 工具参数覆盖（model_override）优先于 frontmatter；档位大小写不敏感

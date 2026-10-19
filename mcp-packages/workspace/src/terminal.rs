@@ -359,7 +359,9 @@ impl BaseTool for BashTool {
                     "description": "The bash command (and optional arguments) to execute. This can be complex commands that use pipes, &&, or other shell features. For multiple dependent commands, chain them with && rather than making separate calls"
                 },
                 "timeout": {
-                    "type": "number",
+                    "type": "integer",
+                    "minimum": 0,
+                    "maximum": 600000,
                     "description": format!(
                         "Optional timeout in milliseconds. The synchronous path is always bounded: it defaults to 15000ms and is capped at {FOREGROUND_MAX_TIMEOUT_MS}ms (2 minutes) — `timeout: 0` is treated as that maximum instead of disabling the timeout, so no request can produce an unbounded synchronous wait. Foreground timeout returns an error: if background task registration succeeds, the process is promoted and the tool returns a background task receipt carrying its task id (no pid or log paths), without a new timeout; otherwise termination is requested. Background tasks (run_in_background: true) run until completion: omitting `timeout` or setting `0` leaves that background command without a timeout, and a positive `timeout` (up to 600000ms) requests termination when reached. Check the returned process status before retrying; do not duplicate a task that is still running. For builds, installs, or tests, set a longer `timeout` up to the foreground maximum, or use run_in_background: true for work that needs longer."
                     )
@@ -442,7 +444,7 @@ impl BashTool {
             )?);
 
             // timeout 参数解析：未传/显式 0 → 不超时（后台语义：跑完为止）
-            let timeout_opt = parse_background_timeout(&input);
+            let timeout_opt = parse_background_timeout(&input)?;
 
             let command = command.to_string();
             let cwd = self.cwd.clone();
@@ -510,7 +512,7 @@ impl BashTool {
         // ── 同步执行路径 ──
         // 前台执行恒有界：`timeout: 0` 与超过上限的请求都界到前台上限，
         // 不存在禁用超时的同步路径（无 Option，结构上无法表达"不超时"）。
-        let (foreground_timeout_ms, adjusted_timeout) = parse_foreground_timeout(&input);
+        let (foreground_timeout_ms, adjusted_timeout) = parse_foreground_timeout(&input)?;
         let timeout_note = foreground_timeout_note(adjusted_timeout);
         let ownership = self
             .task_manager
@@ -785,9 +787,20 @@ impl BashTool {
                     Ok(g) => g.clone(),
                     Err(poisoned) => poisoned.into_inner().clone(),
                 };
-                let mut output = merge_output(&stdout, &stderr, status.code());
+                // 整组是否仍有成员的观测必须先于清理动作落地：后面的
+                // confirm_stopped / release_unmanaged 会改写守卫状态，之后无法再回答
+                // 「刚才是否有子进程脱离」。这是进程组的真实观测（ESRCH / job 状态），
+                // 不能用 `command.contains('&')` 之类的命令文本启发式代替——`&&` 与
+                // `2>&1` 都不产生脱离的进程。
+                let group_still_alive = !execution.is_stopped();
+                let exit_code = if group_still_alive {
+                    None
+                } else {
+                    status.code()
+                };
+                let mut output = merge_output(&stdout, &stderr, exit_code);
                 let mut background_task_id = None;
-                if execution.is_stopped() {
+                if !group_still_alive {
                     execution.confirm_stopped();
                     output_capture.cleanup().await;
                 } else if let Some(manager) = &self.task_manager {
@@ -838,10 +851,10 @@ impl BashTool {
                     text.push_str(&hint);
                 }
                 let execution_status = if background_task_id.is_some() {
+                    // 整组活着并由任务所有者持有：前台 shell 的退出码不属于整组。
                     ToolExecutionStatus::Running
-                } else if command.contains('&') && status.success() {
-                    // Without a task manager we cannot account for children
-                    // left behind by shell background syntax.
+                } else if group_still_alive {
+                    // 无任务管理器时无法登记脱离的子进程，其外部副作用不可核对。
                     ToolExecutionStatus::Unknown
                 } else if status.success() {
                     ToolExecutionStatus::Completed
@@ -854,7 +867,7 @@ impl BashTool {
                     text,
                     ToolExecutionEvidence {
                         status: execution_status,
-                        exit_code: status.code(),
+                        exit_code,
                         output_truncated,
                         output_ref,
                         task_id: background_task_id,

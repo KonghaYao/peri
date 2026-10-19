@@ -28,8 +28,9 @@ impl WorkflowExecution {
             .session_id
             .as_ref()
             .ok_or("Blocked: workflow initiating session identity unavailable")?;
+        // 准入只消费 meta/binding/frozen：读有效视图，不加载 own 正文。
         let snapshot = resources
-            .load_session_snapshot(parent_id)
+            .load_active_snapshot(parent_id)
             .await
             .map_err(|error| error.to_string())?;
         let BindingState::Bound(binding) = snapshot.binding else {
@@ -48,7 +49,7 @@ impl WorkflowExecution {
                 return Err("Blocked: workflow parent session ancestry is cyclic".into());
             }
             let ancestor = resources
-                .load_session_snapshot(&root_id)
+                .load_active_snapshot(&root_id)
                 .await
                 .map_err(|error| error.to_string())?;
             match ancestor.meta.parent_thread_id {

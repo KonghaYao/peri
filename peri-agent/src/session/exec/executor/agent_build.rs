@@ -3,7 +3,6 @@ use std::sync::Arc;
 use peri_acp_types::{
     event::{AgentEventHandler, BackgroundTaskResult, ExecutorEvent},
     frozen::ThreadPersistence,
-    messages::BaseMessage,
     tasks::{BgTaskKind, TaskManager},
 };
 
@@ -32,7 +31,6 @@ pub(super) async fn build_and_execute_agent(
     ctx: &SessionContext,
     turn: &TurnConfig<'_>,
     agent_input: AgentInput,
-    history: Vec<BaseMessage>,
     history_payloads: Vec<peri_acp_types::store::PersistedPayload>,
     session_id: &str,
     cached_llm: Option<&CachedLlmInstances>,
@@ -222,7 +220,6 @@ pub(super) async fn build_and_execute_agent(
         thread_id: ctx.thread_id.clone(),
         agent_input,
         history_payloads,
-        history,
         cached_llm: cached_llm.cloned(),
         task_manager: task_manager_opt,
         continuation,

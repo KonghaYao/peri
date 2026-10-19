@@ -56,6 +56,20 @@ fn test_user_bubble_attachments_join_content_hash() {
         one.content_hash, two.content_hash,
         "附件数量/大小不同 → 哈希不同"
     );
+
+    // 同字节数、不同载荷：预览身份必须进入缓存 key，否则记录行会复用
+    // 旧 `payload_id`，hover 到别的图片。
+    let same_bytes_other_payload = TuiUserBubble::with_attachments(
+        "hi".into(),
+        vec![UserAttachment {
+            bytes: 45,
+            payload_id: 8,
+        }],
+    );
+    assert_ne!(
+        one.content_hash, same_bytes_other_payload.content_hash,
+        "载荷身份不同 → 哈希不同"
+    );
 }
 
 /// 附件是内容的一部分：进 partial_eq（附件不同 → 气泡不等）。
@@ -98,6 +112,7 @@ fn test_content_hash_returns_inner_field_for_each_variant() {
         attachments: Vec::new(),
         reminder: None,
         source: None,
+        message_id: None,
         content_hash: 11,
     });
     assert_eq!(user.content_hash(), 11);
@@ -371,6 +386,7 @@ fn test_user_bubble_partial_eq_ignores_content_hash() {
         attachments: Vec::new(),
         reminder: None,
         source: None,
+        message_id: None,
         content_hash: 1,
     };
     let b = TuiUserBubble {
@@ -378,6 +394,7 @@ fn test_user_bubble_partial_eq_ignores_content_hash() {
         attachments: Vec::new(),
         reminder: None,
         source: None,
+        message_id: None,
         content_hash: 2,
     };
     assert_eq!(a, b, "content_hash 不同但其他字段相同 → 应相等");
@@ -390,6 +407,7 @@ fn test_user_bubble_partial_eq_respects_text() {
         attachments: Vec::new(),
         reminder: None,
         source: None,
+        message_id: None,
         content_hash: 0,
     };
     let b = TuiUserBubble {
@@ -397,6 +415,7 @@ fn test_user_bubble_partial_eq_respects_text() {
         attachments: Vec::new(),
         reminder: None,
         source: None,
+        message_id: None,
         content_hash: 0,
     };
     assert_ne!(a, b, "text 不同 → 应不等");

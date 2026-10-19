@@ -98,6 +98,12 @@ pub(super) fn handle_list(_params: &Value, cfg: &AcpServerConfig) -> Result<Valu
                 "activeFlowId": pool.active_oauth_flow(&server.name),
                 "toolsCount": server.tool_count,
                 "resourcesCount": server.resource_count,
+                // 面板详情表格数据：均为有界投影（至多 64 条、文本 160 字符），
+                // 全量计数仍以 toolsCount/resourcesCount 为准；subscriptions
+                // 由 McpSubscriptionsConfig 自带 camelCase 字段名。
+                "tools": server.tools,
+                "resources": server.resources,
+                "subscriptions": server.subscriptions,
                 "version": server.version,
                 "connectedAt": server.connected_at,
                 "protocolVersion": server.protocol_version,

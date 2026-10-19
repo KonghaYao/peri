@@ -217,6 +217,57 @@ pub(super) fn render_choose_step(
     ("setup-welcome-title".to_string(), lines)
 }
 
+pub(super) fn render_preset_step(
+    state: &SetupWizardState,
+    dim: Color,
+    accent: Color,
+    cursor_color: Color,
+    text_color: Color,
+) -> (String, Vec<Line<'static>>) {
+    let mut lines = vec![
+        Line::from(""),
+        Line::from(Span::styled(
+            i18n::tr("setup-preset-prompt"),
+            Style::default().fg(dim),
+        )),
+        Line::from(""),
+    ];
+
+    // 每预设 1 行：光标前缀 + 名称 + 两空格 + 摘要
+    for (idx, preset) in PROVIDER_PRESETS.iter().enumerate() {
+        let is_cursor = idx == state.preset_cursor;
+        let cursor = if is_cursor { "❯" } else { " " };
+        let name_style = if is_cursor {
+            Style::default().fg(accent).add_modifier(Modifier::BOLD)
+        } else {
+            Style::default().fg(text_color)
+        };
+        let summary_style = if is_cursor {
+            Style::default().fg(accent)
+        } else {
+            Style::default().fg(dim)
+        };
+        lines.push(Line::from(vec![
+            Span::styled(format!("{} ", cursor), Style::default().fg(cursor_color)),
+            Span::styled(format!("{}  ", preset.name), name_style),
+            Span::styled(preset.summary, summary_style),
+        ]));
+    }
+
+    lines.push(Line::from(""));
+    lines.push(make_hint_line(
+        vec![
+            ("Enter".to_string(), i18n::tr("setup-key-confirm")),
+            ("↑/↓".to_string(), i18n::tr("setup-key-select")),
+            ("Esc".to_string(), i18n::tr("setup-key-back")),
+        ],
+        dim,
+        accent,
+    ));
+
+    ("setup-preset-title".to_string(), lines)
+}
+
 pub(super) fn render_form_step(
     state: &SetupWizardState,
     dim: Color,

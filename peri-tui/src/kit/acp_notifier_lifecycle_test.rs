@@ -208,3 +208,43 @@ async fn test_real_wiring_transport_death_resets_loading() {
     );
     shutdown.cancel();
 }
+
+/// 失败事件本身不可达（transport 已死）时，TUI 不依赖该事件收敛：
+/// notifier 的通知通道关闭路径复位 loading、清空排队输入并提示断连。
+/// 执行泵侧由 `unreachable_failure_event_does_not_hang_pump_and_is_bounded`
+/// 证明不会永久等待。
+#[tokio::test]
+#[serial]
+async fn unreachable_failure_event_converges_via_notification_close() {
+    crate::kit::atoms::init_atoms();
+    ACP_STATE.state().write().is_loading = true;
+    INPUT_BUFFER
+        .state()
+        .write()
+        .push_back(BufferedInput::text("queued-before-transport-death"));
+    *NOTIFICATION.state().write() = None;
+    let hb_before = *RENDER_HEARTBEAT.state().read();
+
+    let (notif_tx, notif_rx) = mpsc::unbounded_channel();
+    let (bridge_tx, _bridge_rx) = mpsc::unbounded_channel();
+    let shutdown = CancellationToken::new();
+    let handle = spawn_kit_notifier(notif_rx, bridge_tx, shutdown.clone());
+    // 不发送 AgentExecutionFailed；直接模拟 transport 关闭。
+    drop(notif_tx);
+
+    peri_time::timeout(std::time::Duration::from_secs(2), handle)
+        .await
+        .expect("notifier must exit on channel close")
+        .expect("notifier task");
+    assert!(!ACP_STATE.state().read().is_loading, "loading 必须复位");
+    assert!(INPUT_BUFFER.state().read().is_empty(), "排队输入必须清空");
+    assert!(
+        NOTIFICATION.state().read().is_some(),
+        "必须提示断连（app-agent-disconnected）"
+    );
+    assert!(
+        *RENDER_HEARTBEAT.state().read() > hb_before,
+        "断连提示应触发重渲染心跳"
+    );
+    shutdown.cancel();
+}

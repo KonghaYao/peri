@@ -637,6 +637,16 @@ pub(super) fn register_keyboard_nav(hooks: &mut Hooks, interaction_option: State
             }
             KeyCode::Enter | KeyCode::Char(' ') => {
                 let next_is_preview = key.code == KeyCode::Char(' ');
+                // S7.3：焦点在超大历史占位 note 上时，Enter 打开详情面板。
+                // 仅读取焦点与快照，不持 VIEW_MODELS 写锁，避免与后续折叠路径冲突。
+                if key.code == KeyCode::Enter {
+                    let focused_slot = FOCUSED_ENTRY.state().read().as_ref().map(|f| f.slot);
+                    if let Some(slot) = focused_slot
+                        && crate::kit::panels::history_detail::open_detail_from_slot(slot)
+                    {
+                        return EventResult::Consumed;
+                    }
+                }
                 // 读当前快照：对焦点 entry 应用切换。持 VIEW_MODELS 写锁期间
                 // 不再读其他可能被同一帧写入的 atom（FOLD_OVERRIDES 是独立锁）。
                 // [TRAP] state() 必须绑定变量——临时值在语句末释放会导致

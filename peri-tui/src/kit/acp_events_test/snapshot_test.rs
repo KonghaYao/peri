@@ -108,13 +108,21 @@ fn p0_new_prompt_preserves_running_tool_result() {
         .position(|vm| matches!(vm, TuiRenderUnit::TuiUserBubble(b) if b.text == "q2"));
     assert!(tool.is_some(), "completed tool result must remain visible");
     assert!(tool < prompt, "new prompt must follow the previous tool");
+    assert!(
+        matches!(
+            prompt
+                .and_then(|index| index.checked_sub(1))
+                .and_then(|index| items.get(index)),
+            Some(TuiRenderUnit::TuiDivider(_))
+        ),
+        "运行中的工具阻止归档时，分隔线仍应紧贴下一条 prompt"
+    );
 }
 
 // ── Slice 3：快照后处理流水线（turn divider / todo 摘要 / 工具分组）─────────
 
-/// §6.6 turn 边界 divider：上一 turn 结束后，新 turn 的 prompt 位于 committed
-/// 末尾——divider 插在 prompt 之前（committed|current_turn 边界本身是
-/// prompt↔回复 的同一 turn 内部，不能用）。
+/// [回归测试] 旧 divider 依赖 current_turn 非空，回合结束后会消失并造成闪动。
+/// 现在分隔线与下一条 user prompt 一起进入时间轴，完成后仍保留。
 #[test]
 #[serial]
 fn test_snapshot_turn_divider_before_new_user_prompt() {
@@ -167,10 +175,11 @@ fn test_snapshot_turn_divider_before_new_user_prompt() {
         "divider 应在新 prompt 之前"
     );
 
-    // TurnDone 后 current_turn 清空 → divider 消失（仅流式期间存在）
+    // TurnDone 后 divider 仍随 user2 保留，避免横线闪动。
     dispatch_and_notify(&mut state, &AcpEventData::TurnDone);
     let snap = VIEW_MODELS.state().read().clone();
-    assert_eq!(snap.items.len(), 4, "turn 完成后无 divider");
+    assert_eq!(snap.items.len(), 5, "turn 完成后分隔线仍在");
+    assert!(matches!(snap.items[2], TuiRenderUnit::TuiDivider(_)));
 }
 
 /// 首轮（committed 仅 1 个 prompt）不插 divider；同一 turn 内 prompt↔回复

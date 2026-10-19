@@ -146,3 +146,6 @@ mod background_tests;
 
 #[path = "terminal_diagnostics_test.rs"]
 mod diagnostics_tests;
+
+#[path = "terminal_process_group_test.rs"]
+mod process_group_tests;

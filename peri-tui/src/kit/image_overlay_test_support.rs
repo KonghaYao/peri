@@ -37,6 +37,16 @@ pub(super) fn reset_atoms() {
     *POPUP_KIND.state().write() = None;
     *ACTIVE_PANEL.state().write() = None;
     *crate::kit::atoms::VIEW_MODELS.state().write() = ViewModelsSnapshot::default();
+    // 第四触发源与附件保留层是同级全局状态：不清理会被其它 serial 用例
+    // （如 submit 的「控制请求保留附件」）遗留，导致仲裁断言串味。
+    crate::kit::atoms::PENDING_ATTACHMENTS
+        .state()
+        .write()
+        .clear();
+    crate::kit::atoms::RETAINED_ATTACHMENTS
+        .state()
+        .write()
+        .clear();
 }
 
 /// 轮询 IMAGE_PREVIEW_STATE 直至谓词成立；超时返回 false。

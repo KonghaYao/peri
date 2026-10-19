@@ -403,6 +403,54 @@ async fn test_resume_thread_id_ignores_model_field() {
     );
 }
 
+/// [回归测试] 首次覆盖不持久化；resume 使用当前定义并忽略本次 model。
+#[tokio::test]
+async fn test_resume_rebuilds_current_definition_after_initial_override() {
+    let dir = tempdir().unwrap();
+    write_test_agent_with_model(&dir, "opus");
+    let aliases = Arc::default();
+    let host = HostFixture::open_in(dir.path(), "fixture-resume-model-contract").await;
+    let tool = host.bind(
+        with_agent_face(
+            make_recording_subagent_tool(vec![], Arc::clone(&aliases)),
+            dir.path(),
+        )
+        .await,
+    );
+    let first = tool
+        .invoke(
+            serde_json::json!({
+                "subagent_type": "test-agent", "prompt": "首次", "model": "haiku",
+            }),
+            host.context(&[]),
+        )
+        .await
+        .unwrap();
+    let id = first
+        .strip_prefix("child_thread_id: ")
+        .unwrap()
+        .split_whitespace()
+        .next()
+        .unwrap();
+    write_test_agent_with_model(&dir, "sonnet");
+    // 重接资源面，模拟续聊时已刷新到当前磁盘定义的目录。
+    let tool = with_agent_face(tool, dir.path()).await;
+    let resumed = tool
+        .invoke(
+            serde_json::json!({
+                "resume_thread_id": id, "prompt": "继续", "model": "opus",
+            }),
+            host.context_with(&[], host.fresh_tool_call_id("resume")),
+        )
+        .await
+        .unwrap();
+    assert!(resumed.contains(&format!("child_thread_id: {id}")));
+    assert_eq!(
+        *aliases.lock().unwrap(),
+        vec![Some("haiku".into()), Some("sonnet".into())]
+    );
+}
+
 /// 后台定义型路径应用 model 覆盖（execute_bg.rs 透传）
 #[tokio::test]
 async fn test_agent_model_override_applies_to_background() {
@@ -491,7 +539,7 @@ async fn test_agent_invoke_wrong_optional_types_keep_definition_and_parent_cwd()
                 "run_in_background": "true",
                 "name": {"ignored": true},
                 "description": ["ignored"],
-                "isolation": 1
+                "isolation": null
             }),
             host.context(&[]),
         )

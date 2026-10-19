@@ -4,10 +4,14 @@
 //! - **MessageId 寻址**：内部维护 `HashMap<MessageId, usize>` 索引表，O(1) 查找
 //! - **只追加优先**：正常 ReAct 循环中消息仅尾部追加，禁止 prepend/中间插入
 //! - **Staging 两阶段写入**：AI 消息 + ToolResult 原子提交
-//! - **标记代替删除**：`truncated` / `excluded` 标记用于 Compact，消息本体不变
+//! - **标记代替删除**：Compact 先以 `truncated` / `excluded` 标记表达失效，消息本体不变；
+//!   Full Compact 在 store 确认提交后才释放被排除的 own 条目（见 `shrink_after_full_commit`）
 //! - **异步持久化**：append 后通过 unbounded_channel 异步触发 ThreadStore 写入
+//!
+//! 模块结构：条目与暂存模型见 `entry`，持久化接线（前台）见 `persistence_port`，
+//! 后台 writer 见 `persistence`；`MessageTranscript` 的内存模型、标记与压缩生命周期留在本模块。
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::{
     atomic::{AtomicU8, Ordering},
     Arc,
@@ -16,17 +20,20 @@ use std::sync::{
 use anyhow::anyhow;
 
 use crate::agent::compact_v2::projection::MessageProjectionDirective;
-use crate::messages::{BaseMessage, MessageContent, MessageId};
+use crate::messages::{BaseMessage, MessageId};
 use crate::thread::ThreadId;
 
 use peri_acp_types::session_resources::{RewindBoundary, SessionResources};
 use peri_acp_types::store::history;
 use peri_acp_types::store::{MessageFlags, PersistedPayload};
-use peri_acp_types::system_reminder::{
-    encode_system_reminder, reminder_egress_allowed, ReminderAudience, TrustedSystemReminder,
-};
+use peri_acp_types::system_reminder::{ReminderAudience, TrustedSystemReminder};
 
 use persistence::{PersistenceBudget, Reservation};
+
+#[path = "transcript_view.rs"]
+mod view;
+
+pub use view::TranscriptRevision;
 
 /// 待持久化积压默认上限（条数）。
 ///
@@ -58,102 +65,6 @@ impl CompactionCommitState {
     fn mark_committed(&self) {
         self.0.store(2, Ordering::SeqCst);
     }
-}
-
-// ─── TranscriptEntry ──────────────────────────────────────────────────────────
-
-/// Transcript 中的单条逻辑条目。Reminder 不是伪造的空 Human message。
-#[derive(Debug, Clone)]
-pub enum TranscriptEntry {
-    Message(BaseMessage),
-    Reminder {
-        id: MessageId,
-        reminder: TrustedSystemReminder,
-    },
-}
-
-impl TranscriptEntry {
-    pub fn id(&self) -> MessageId {
-        match self {
-            Self::Message(message) => message.id(),
-            Self::Reminder { id, .. } => *id,
-        }
-    }
-
-    pub fn as_message(&self) -> Option<&BaseMessage> {
-        match self {
-            Self::Message(message) => Some(message),
-            Self::Reminder { .. } => None,
-        }
-    }
-
-    pub fn message(&self) -> &BaseMessage {
-        self.as_message()
-            .expect("canonical reminder has no stored BaseMessage")
-    }
-
-    /// 该条目是否应向目标受众投递。
-    ///
-    /// 普通消息恒可见；canonical reminder 一律经 [`reminder_egress_allowed`] 的单一
-    /// 投递规则判定（`Required` 只在声明受众内不可被屏蔽，`DiagnosticOnly`
-    /// 默认只进 Diagnostics）。持久化保留 canonical reminder，过滤只发生在出口。
-    pub fn visible_to(&self, audience: ReminderAudience) -> bool {
-        match self {
-            Self::Message(_) => true,
-            Self::Reminder { reminder, .. } => {
-                reminder_egress_allowed(reminder.as_reminder(), audience)
-            }
-        }
-    }
-
-    /// Canonical model projection shared by normal Reason and compact rendering.
-    /// 转为 canonical 持久化载荷（与 `persisted_payloads` 同一映射，不另立格式）。
-    pub fn into_payload(self) -> PersistedPayload {
-        match self {
-            Self::Message(message) => PersistedPayload::Message(message),
-            Self::Reminder { id, reminder } => PersistedPayload::SystemReminder { id, reminder },
-        }
-    }
-
-    pub fn project_message(&self) -> anyhow::Result<BaseMessage> {
-        match self {
-            Self::Message(message) => {
-                let reminders = peri_acp_types::compact_reminder::legacy_compact_reminders(message);
-                if reminders.is_empty() {
-                    return Ok(message.clone());
-                }
-                let encoded = reminders
-                    .iter()
-                    .map(|reminder| {
-                        peri_acp_types::system_reminder::encode_legacy_system_reminder(
-                            &reminder.body,
-                        )
-                    })
-                    .collect::<Result<Vec<_>, _>>()?
-                    .join("\n");
-                Ok(BaseMessage::Human {
-                    id: message.id(),
-                    content: MessageContent::text(encoded),
-                })
-            }
-            Self::Reminder { id, reminder } => Ok(BaseMessage::Human {
-                id: *id,
-                content: MessageContent::text(encode_system_reminder(reminder)?),
-            }),
-        }
-    }
-}
-
-// ─── StagedData ───────────────────────────────────────────────────────────────
-
-/// 两阶段写入的暂存数据
-///
-/// AI 消息（含 tool_calls）先暂存，Act 阶段收集 ToolResult 后原子提交。
-/// 提交前这些消息对 LLM 请求不可见。
-#[derive(Debug, Clone)]
-pub struct StagedData {
-    pub ai_message: BaseMessage,
-    pub tool_results: Vec<BaseMessage>,
 }
 
 // ─── PersistOp ────────────────────────────────────────────────────────────────
@@ -191,7 +102,11 @@ pub enum PersistOp {
     Shutdown,
 }
 
+mod entry;
 mod persistence;
+mod persistence_port;
+
+pub use entry::{StagedData, TranscriptEntry};
 
 // ─── MessageTranscript ────────────────────────────────────────────────────────
 
@@ -228,6 +143,10 @@ pub struct MessageTranscript {
     session_resources: Option<Arc<dyn SessionResources>>,
     /// 待持久化预算（与 writer 共享）：条数/字节有界，预留失败即 sticky 失败。
     budget: Option<Arc<PersistenceBudget>>,
+    /// 实例身份（见 [`TranscriptRevision`]）
+    view_instance: u64,
+    /// 内容修订号（见 [`TranscriptRevision`]）
+    view_revision: u64,
 }
 
 impl std::fmt::Debug for MessageTranscript {
@@ -272,6 +191,8 @@ impl MessageTranscript {
             compaction_commit_state: CompactionCommitState::default(),
             session_resources: None,
             budget: None,
+            view_instance: view::next_instance_id(),
+            view_revision: 0,
         }
     }
 
@@ -284,6 +205,7 @@ impl MessageTranscript {
         };
         self.id_index.insert(entry.id(), self.entries.len());
         self.entries.push(entry);
+        self.bump_view_revision();
     }
 
     /// 装载主 Agent 已持久化的历史，保持为可压缩的自有消息。
@@ -320,64 +242,8 @@ impl MessageTranscript {
             self.entries.push(TranscriptEntry::Message(msg.clone()));
         }
         self.ancestor_len = len;
+        self.bump_view_revision();
         self
-    }
-
-    /// 绑定会话资源门面
-    ///
-    /// 绑定后 append / rewind / 投影变更自动异步写入门面（FIFO 单一 writer）。
-    /// 积压有界性由 [`PersistenceBudget`] 保证：追加在持锁时同步预留，writer 在
-    /// 效果确定后归还；预留失败即 sticky 失败（[`Self::persistence_failure`]），
-    /// 调用方据此停止后续工作并重载会话。
-    pub fn with_persistence(self, store: Arc<dyn SessionResources>, thread_id: ThreadId) -> Self {
-        let budget = PersistenceBudget::new(DEFAULT_PENDING_MAX_ITEMS, DEFAULT_PENDING_MAX_BYTES);
-        self.bind_persistence(store, thread_id, budget)
-    }
-
-    /// 绑定持久化后端并显式指定待持久化预算（测试与阈值测量入口）。
-    pub fn with_persistence_budget(
-        self,
-        store: Arc<dyn SessionResources>,
-        thread_id: ThreadId,
-        budget: Arc<PersistenceBudget>,
-    ) -> Self {
-        self.bind_persistence(store, thread_id, budget)
-    }
-
-    fn bind_persistence(
-        mut self,
-        store: Arc<dyn SessionResources>,
-        thread_id: ThreadId,
-        budget: Arc<PersistenceBudget>,
-    ) -> Self {
-        let (tx, rx) = tokio::sync::mpsc::unbounded_channel::<PersistOp>();
-        self.persist_tx = Some(Arc::new(tx));
-        self.thread_id = Some(thread_id.clone());
-        self.session_resources = Some(store.clone());
-        self.budget = Some(Arc::clone(&budget));
-
-        let handle = tokio::spawn(persistence::run_writer(store, thread_id, budget, rx));
-        self.persist_handle = Some(handle.abort_handle());
-
-        self
-    }
-
-    /// 待持久化失败原因（sticky）：预算耗尽、writer 终态失败或写通道关闭。
-    ///
-    /// 非 `None` 表示热态已不可信：数据可能已进内存但未落盘，调用方必须停止后续
-    /// 模型/工具工作并让会话走冷重载，不得把当前快照当作已保存。
-    pub fn persistence_failure(&self) -> Option<String> {
-        self.budget.as_ref().and_then(|budget| budget.failure())
-    }
-
-    /// 是否已进入 sticky 持久化失败。
-    pub fn has_persistence_failure(&self) -> bool {
-        self.persistence_failure().is_some()
-    }
-
-    /// 预算句柄（测试断言积压上界用）。
-    pub fn persistence_budget(&self) -> Option<Arc<PersistenceBudget>> {
-        self.budget.clone()
     }
 
     // ── 查询 ──────────────────────────────────────────────────────────────────
@@ -387,10 +253,15 @@ impl MessageTranscript {
         &self.entries
     }
 
-    /// Canonical persistence snapshot preserving message/reminder discriminants and stable IDs.
-    pub fn persisted_payloads(&self) -> Vec<PersistedPayload> {
+    /// 热态当前**有效**（未排除）的 canonical 载荷快照。
+    ///
+    /// 只覆盖热 transcript 里仍然有效的条目：Full Compact 提交成功后，被排除的 own
+    /// 历史已经释放，不再出现在这里。需要**完整历史**（含已排除正文）时必须读存储，
+    /// 走 [`SessionResources::load_session_history`]，不从热态导出。
+    pub fn active_payloads(&self) -> Vec<PersistedPayload> {
         self.entries
             .iter()
+            .filter(|entry| !self.flags(entry.id()).excluded)
             .cloned()
             .map(|entry| match entry {
                 TranscriptEntry::Message(message) => PersistedPayload::Message(message),
@@ -399,6 +270,30 @@ impl MessageTranscript {
                 }
             })
             .collect()
+    }
+
+    /// 对象级内存快照（只读诊断；不克隆正文）。
+    ///
+    /// `own` / `inherited` 按 [`Self::ancestor_len`] 分开计量；`reserved` 是
+    /// `String` / `Vec` capacity 下界，不是分配器统计。测试与采样共用同一入口。
+    pub fn memory_snapshot(&self) -> crate::session::memory_probe::TranscriptMemorySnapshot {
+        crate::session::memory_probe::transcript_snapshot(
+            &self.entries,
+            self.ancestor_len,
+            &self.flags,
+            self.entries.capacity(),
+            self.id_index.capacity(),
+            self.flags.capacity(),
+            self.staged.as_ref(),
+        )
+    }
+
+    /// DEBUG 未启用时零成本：先检查 target，再构造快照并输出结构化字段。
+    pub fn sample_memory(&self, stage: &'static str, origin: &str) {
+        if !crate::session::memory_probe::observations_enabled() {
+            return;
+        }
+        crate::session::memory_probe::log_transcript(stage, origin, &self.memory_snapshot());
     }
 
     /// 获取所有**可见**普通消息（跳过 excluded 与 canonical reminder）
@@ -429,6 +324,7 @@ impl MessageTranscript {
         self.id_index.insert(id, idx);
         self.entries
             .push(TranscriptEntry::Reminder { id, reminder });
+        self.bump_view_revision();
         self.persist_appended_entry(self.entries[idx].clone());
         id
     }
@@ -448,6 +344,7 @@ impl MessageTranscript {
         self.id_index.insert(id, idx);
         self.entries
             .push(TranscriptEntry::Reminder { id, reminder });
+        self.bump_view_revision();
         true
     }
 
@@ -465,33 +362,6 @@ impl MessageTranscript {
             self.thread_id.as_ref()?.clone(),
             self.persist_tx_handle(),
         ))
-    }
-
-    /// 获取所有**可见**消息的 owned Arc 快照（跳过 excluded 标记的消息）
-    ///
-    /// 用于在事件边界（如 `RenderEvent::TurnCompleted`）向 TUI/ACP 消费方传递
-    /// 权威 transcript 快照。这是客户端出口：只有声明
-    /// [`ReminderAudience::Tui`] 的 canonical reminder 进入快照，Model-only 内容
-    /// （如 recall）不得出现在客户端 wire 上。
-    ///
-    /// **注意**：构建快照时仍会逐条深拷贝消息本体（需要过滤 excluded 并取得
-    /// 独立所有权，无法与内部 `entries` 直接共享）；Arc 只保证快照在后续
-    /// 事件管道多级传递时不再被重复深拷贝。
-    pub fn visible_snapshot(&self) -> Arc<Vec<BaseMessage>> {
-        let filtered: Vec<BaseMessage> = self
-            .entries
-            .iter()
-            .filter(|entry| {
-                let f = self.flags.get(&entry.id());
-                match f {
-                    None => true,
-                    Some(flags) => !flags.excluded,
-                }
-            })
-            .filter(|entry| entry.visible_to(ReminderAudience::Tui))
-            .map(|entry| entry.project_message().expect("validated transcript entry"))
-            .collect();
-        Arc::new(filtered)
     }
 
     pub fn with_compaction_commit_state(mut self, state: CompactionCommitState) -> Self {
@@ -513,23 +383,25 @@ impl MessageTranscript {
         self.full_compaction_committed = true;
     }
 
+    /// 每轮执行开始时清空「本轮已提交 Full Compact」标记。
+    ///
+    /// 该标记是**每轮**事实而不是会话历史：`mark_full_compaction_committed` 之后若不复位，
+    /// 后续普通 append 会被 Host 误当成新的 Full 提交，从而每轮多读一次 storage bounds。
+    pub fn reset_full_compaction_committed(&mut self) {
+        self.full_compaction_committed = false;
+    }
+
     /// 按 id 获取条目（O(1)）
     pub fn get(&self, id: MessageId) -> Option<&TranscriptEntry> {
         self.id_index.get(&id).map(|&idx| &self.entries[idx])
     }
 
-    /// 获取消息标记（无标记时返回默认值）
-    pub fn flags(&self, id: MessageId) -> MessageFlags {
-        self.flags.get(&id).cloned().unwrap_or_default()
-    }
-
-    /// 按 id 获取消息标记，消息不存在时返回 None
+    /// 该 id 之后（时间线更晚）的条目切片；id 已不在 transcript 时返回 `None`。
     ///
-    /// 与 `flags()` 不同：此方法先确认 id 存在于索引表中，
-    /// 不存在则返回 `None`（而非返回默认标记）。
-    pub fn get_flags(&self, id: MessageId) -> Option<MessageFlags> {
-        self.id_index.get(&id)?;
-        Some(self.flags(id))
+    /// 供以稳定身份锚定时间线位置的消费者使用（收缩/重排后位置不再可比）。
+    pub fn entries_after(&self, id: MessageId) -> Option<&[TranscriptEntry]> {
+        let idx = *self.id_index.get(&id)?;
+        Some(&self.entries[idx + 1..])
     }
 
     /// 祖先消息数量
@@ -558,6 +430,7 @@ impl MessageTranscript {
         let idx = self.entries.len();
         self.id_index.insert(id, idx);
         self.entries.push(TranscriptEntry::Message(message));
+        self.bump_view_revision();
         // 异步持久化（先同步预留额度；无法预留时只留 sticky 失败，不假装已保存）
         self.persist_appended_entry(self.entries[idx].clone());
         id
@@ -574,6 +447,9 @@ impl MessageTranscript {
             ids.push(id);
             self.persist_appended_entry(self.entries[idx].clone());
         }
+        if !ids.is_empty() {
+            self.bump_view_revision();
+        }
         ids
     }
 
@@ -584,6 +460,8 @@ impl MessageTranscript {
     pub fn replace_by_id(&mut self, message: BaseMessage) {
         if let Some(&idx) = self.id_index.get(&message.id()) {
             self.entries[idx] = TranscriptEntry::Message(message);
+            // 同长度替换同样改变模型可见内容，必须递增修订号
+            self.bump_view_revision();
         }
     }
 
@@ -634,6 +512,7 @@ impl MessageTranscript {
             self.entries.push(TranscriptEntry::Message(tool_result));
             self.persist_appended_entry(self.entries[idx].clone());
         }
+        self.bump_view_revision();
     }
 
     /// 丢弃暂存数据（Cancel/Error 时调用）
@@ -665,6 +544,7 @@ impl MessageTranscript {
             return;
         }
         self.flags.entry(id).or_default().truncated = value;
+        self.bump_view_revision();
         let flags = self.flags[&id].clone();
         self.persist_flags(id, flags);
     }
@@ -675,6 +555,7 @@ impl MessageTranscript {
             return;
         }
         self.flags.entry(id).or_default().excluded = value;
+        self.bump_view_revision();
         let flags = self.flags[&id].clone();
         self.persist_flags(id, flags);
     }
@@ -691,6 +572,7 @@ impl MessageTranscript {
         let existing = self.flags.get(&id).cloned().unwrap_or_default();
         let flags = history::flags_with_projection(&existing, directive);
         self.flags.insert(id, flags.clone());
+        self.bump_view_revision();
         self.persist_flags(id, flags);
     }
 
@@ -700,6 +582,7 @@ impl MessageTranscript {
             return;
         }
         self.flags.remove(&id);
+        self.bump_view_revision();
         self.persist_flags(id, MessageFlags::default());
     }
 
@@ -707,10 +590,15 @@ impl MessageTranscript {
     ///
     /// 仅插入非默认标记，不触发持久化（持久化已有完整 flags 数据）。
     pub fn set_flags_batch(&mut self, batch: std::collections::HashMap<MessageId, MessageFlags>) {
+        let mut changed = false;
         for (id, flags) in batch {
             if flags != MessageFlags::default() {
                 self.flags.insert(id, flags);
+                changed = true;
             }
+        }
+        if changed {
+            self.bump_view_revision();
         }
     }
 
@@ -767,9 +655,79 @@ impl MessageTranscript {
             ));
         }
         self.apply_compaction_lifecycle_memory(&lifecycle);
+        // 收缩夹在「内存标记已应用」与 `mark_committed` 之间：上一行的 store 调用已是
+        // 本次 compaction 的 durable commit 点（失败在前直接返回），此刻释放被排除条目
+        // 的原文不会让内存领先于磁盘事实；反过来先释放再提交则相反——提交失败时原文
+        // 已丢，热态只剩「不确定」，重载也自证不了上一份视图。收缩不改持久化事实，也不
+        // 触碰不确定态语义，因此插在这里最紧。
+        let memory_before =
+            crate::session::memory_probe::observations_enabled().then(|| self.memory_snapshot());
+        self.shrink_after_full_commit();
+        if let Some(before) = memory_before {
+            crate::session::memory_probe::log_transcript_shrink(
+                "full_commit_shrink",
+                self.thread_id.as_deref().unwrap_or(""),
+                &before,
+                &self.memory_snapshot(),
+            );
+        }
         self.compaction_commit_state.mark_committed();
 
         Ok(())
+    }
+
+    /// 释放被本次 Full 排除的 own 条目，连同其 id 索引与 flags。
+    ///
+    /// 只由 [`Self::commit_compaction_lifecycle`] 在 store 确认提交后调用。祖先区
+    /// （`entries[..ancestor_len]`）的语义与容量由父会话/冻结继承决定，这里整体不动；
+    /// `staged`、持久化句柄与配置字段同样保持原样。System 条目即使带 `excluded` 也保留：
+    /// 当前 Full 不排除它们（见 `compact_v2/full.rs` 的 flag 采集），这里不为「删除
+    /// 会话身份/协议载体」背书。剩余条目按原顺序重建三个容器，旧容量随之释放。
+    fn shrink_after_full_commit(&mut self) {
+        if self.ancestor_len >= self.entries.len() {
+            return;
+        }
+        let mut keep_count = self.ancestor_len;
+        let mut released: Vec<MessageId> = Vec::new();
+        for entry in self.entries.iter().skip(self.ancestor_len) {
+            let excluded = self
+                .flags
+                .get(&entry.id())
+                .is_some_and(|flags| flags.excluded);
+            if excluded && !matches!(entry.as_message(), Some(BaseMessage::System { .. })) {
+                released.push(entry.id());
+            } else {
+                keep_count += 1;
+            }
+        }
+        if released.is_empty() {
+            return;
+        }
+        let released: HashSet<MessageId> = released.into_iter().collect();
+
+        let mut entries = Vec::with_capacity(keep_count);
+        let mut id_index = HashMap::with_capacity(keep_count);
+        for entry in std::mem::take(&mut self.entries) {
+            let id = entry.id();
+            if released.contains(&id) {
+                continue;
+            }
+            id_index.insert(id, entries.len());
+            entries.push(entry);
+        }
+        self.entries = entries;
+        self.id_index = id_index;
+
+        // 只随被释放条目一起丢掉它们的标记；其余标记（truncated / projection 等）
+        // 原样保留，收缩不得顺手改写未排除条目的可见性。
+        let mut flags = HashMap::with_capacity(self.flags.len().saturating_sub(released.len()));
+        for (id, value) in std::mem::take(&mut self.flags) {
+            if released.contains(&id) {
+                continue;
+            }
+            flags.insert(id, value);
+        }
+        self.flags = flags;
     }
 
     /// 应用已成功持久化的 compaction lifecycle，不发送普通 PersistOp。
@@ -782,6 +740,7 @@ impl MessageTranscript {
             self.id_index.insert(id, idx);
             self.entries.push(TranscriptEntry::Message(message.clone()));
         }
+        self.bump_view_revision();
     }
 
     // ── 重建 ──────────────────────────────────────────────────────────────────
@@ -818,6 +777,9 @@ impl MessageTranscript {
             compaction_commit_state: self.compaction_commit_state.clone(),
             session_resources: self.session_resources.take(),
             budget: self.budget.take(),
+            view_instance: self.view_instance,
+            // 重建整体替换内容：修订号必须前进（旧视图一律失效）
+            view_revision: self.view_revision.wrapping_add(1),
         }
     }
 
@@ -858,6 +820,7 @@ impl MessageTranscript {
             self.id_index.remove(rid);
             self.flags.remove(rid);
         }
+        self.bump_view_revision();
 
         // 异步持久化 rewind（保留目标本身的 KeepThrough 边界）
         if let Some(reserved) = self.reserve_persistence(Reservation::marker(1)) {
@@ -865,117 +828,6 @@ impl MessageTranscript {
         }
 
         Ok(())
-    }
-
-    // ── 内部辅助 ────────────────────────────────────────────────────────────────
-
-    /// 等待此前已排队的持久化操作完成。
-    ///
-    /// 同一 writer 按 FIFO 处理 barrier，因此收到确认时，所有此前操作都已调用 store。
-    /// 首个持久化错误会保持为终态失败；后续 barrier 继续返回该错误，不消费或重试。
-    pub async fn flush_persistence(&self) -> anyhow::Result<()> {
-        let Some(tx) = self.persist_tx_handle() else {
-            return Ok(());
-        };
-        Self::flush_via_tx(&tx).await
-    }
-
-    /// 同步取出持久化 writer 通道句柄（owned `Arc<Sender>`，Send）。
-    ///
-    /// 用途：调用方持有 `Arc<RwLock<MessageTranscript>>` 时，先在 guard 作用域内
-    /// 同步提取句柄、释放 guard，再调用 [`flush_via_tx`] 异步等待——避免
-    /// parking_lot guard 跨 await 存活（`!Send`，会令整个调用链 future 不满足
-    /// `Send`，`tokio::spawn` 编译失败）。
-    pub fn persist_tx_handle(&self) -> Option<Arc<tokio::sync::mpsc::UnboundedSender<PersistOp>>> {
-        self.persist_tx.clone()
-    }
-
-    /// barrier 等待逻辑（基于 owned sender，Send 安全）
-    pub async fn flush_via_tx(
-        tx: &tokio::sync::mpsc::UnboundedSender<PersistOp>,
-    ) -> anyhow::Result<()> {
-        let (ack_tx, ack_rx) = tokio::sync::oneshot::channel();
-        tx.send(PersistOp::Barrier(ack_tx))
-            .map_err(|_| anyhow!("transcript persistence writer channel closed"))?;
-        ack_rx
-            .await
-            .map_err(|_| anyhow!("transcript persistence writer dropped barrier acknowledgement"))?
-    }
-
-    /// 预留一笔待持久化额度：持锁期间同步完成，不 await。
-    ///
-    /// 预算耗尽时**不发送**该操作并留下 sticky 失败——数据已进 canonical 内存但
-    /// 没有落盘名额，调用方只能据 [`Self::persistence_failure`] 停止后续工作。
-    fn reserve_persistence(&self, reservation: Reservation) -> Option<Reservation> {
-        let budget = self.budget.as_ref()?;
-        match budget.try_reserve(reservation) {
-            Ok(()) => Some(reservation),
-            Err(reason) => {
-                tracing::error!(
-                    items = reservation.items,
-                    bytes = reservation.bytes,
-                    "transcript persistence backlog limit reached: {reason}"
-                );
-                None
-            }
-        }
-    }
-
-    /// 追加条目落盘：按 canonical payload 编码长度预留额度后投递。
-    fn persist_appended_entry(&self, entry: TranscriptEntry) {
-        let payload = entry.into_payload();
-        let Some(reserved) = self.reserve_persistence(Reservation::for_payload(&payload)) else {
-            return;
-        };
-        self.send_persist(PersistOp::Append { payload, reserved });
-    }
-
-    /// 投影/flags 变更落盘：队列里只有 id 与标记，按条数预留。
-    fn persist_flags(&self, id: MessageId, flags: MessageFlags) {
-        let Some(reserved) = self.reserve_persistence(Reservation::marker(1)) else {
-            return;
-        };
-        self.send_persist(PersistOp::UpdateFlags {
-            id,
-            flags,
-            reserved,
-        });
-    }
-
-    /// 发送持久化操作到 writer task（额度已在调用点预留）
-    fn send_persist(&self, op: PersistOp) {
-        if let Some(ref tx) = self.persist_tx {
-            if let Err(e) = tx.send(op) {
-                // 通道关闭 = 写入不会发生：与预算耗尽同样是 sticky 失败。
-                if let Some(budget) = self.budget.as_ref() {
-                    budget.mark_failed(&format!(
-                        "transcript persistence writer channel closed: {e}"
-                    ));
-                }
-                tracing::warn!("transcript persist send failed (channel closed): {e}");
-            }
-        }
-    }
-
-    /// 优雅关闭持久化 writer task：发送 `Shutdown` 信号，writer flush 剩余积压后自行退出。
-    ///
-    /// 不调用 `abort()`：abort 会立即取消任务，导致 `pending_appends` 和通道中未处理的
-    /// 消息被直接丢弃（参照 `langfuse-client/src/batcher.rs` 的 Shutdown 模式）。
-    /// Drop 是同步的无法 await，因此不等待 writer 完成：writer 持有 store 的独立 Arc
-    /// （`with_persistence` 中 clone），detached 收尾安全。
-    pub fn shutdown_persistence(&self) {
-        if let Some(ref tx) = self.persist_tx {
-            if let Err(e) = tx.send(PersistOp::Shutdown) {
-                // writer 已退出（channel closed）时无需处理：退出前已 flush 剩余积压
-                tracing::debug!("transcript persist shutdown send failed (channel closed): {e}");
-            }
-        }
-    }
-}
-
-impl Drop for MessageTranscript {
-    fn drop(&mut self) {
-        self.shutdown_persistence();
     }
 }
 

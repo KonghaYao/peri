@@ -5,6 +5,9 @@
 //! 1. 按 message_id 分组 action entries，构造 per-message `MessageProjectionDirective`
 //! 2. 通过 `set_flags_projection` 持久化 directive（同时设置 truncated）
 //!
+//! 计划与应用分离：`plan_micro` 只规划一次，`apply_micro_plan` 复用该计划落地，
+//! 调用方持有计划时不得再走 `micro_compact` 二次规划。
+//!
 //! 关键约束：
 //! - planner 只能读取 transcript + config，绝不调用 set_truncated 等副作用 API
 //! - per-call 粒度：同一 AI message 中不同 tool_call_id 独立决策
@@ -16,14 +19,16 @@ use crate::agent::compact_v2::config::CompactConfig;
 use crate::messages::MessageId;
 use crate::session::transcript::MessageTranscript;
 
-use super::projection::{MessageProjectionDirective, ProjectionActionEntry};
+use super::projection::{MessageProjectionDirective, MicroCompactPlan, ProjectionActionEntry};
 
-/// Micro Compact：调用 plan_micro 生成计划，然后持久化 per-message projection directive
+/// 应用已生成的 Micro 计划：分组写 per-message projection directive
 ///
-/// 返回被标记的消息数量。
-pub fn micro_compact(transcript: &mut MessageTranscript, config: &CompactConfig) -> usize {
-    let plan = super::planner::plan_micro(transcript, config, true);
-
+/// 按 message_id 分组 action entries——同一消息的多个 action 合并进同一条
+/// directive，避免后写覆盖先写而丢 entries。`policy_version` 取自计划本身，
+/// 保证持久化 directive 与计划生成时的判定版本一致。
+///
+/// 返回去重 message_id 数量，与 [`MicroCompactPlan::changed_messages`] 恒等。
+pub fn apply_micro_plan(transcript: &mut MessageTranscript, plan: &MicroCompactPlan) -> usize {
     // 按 message_id 分组 action entries，每个消息对应一个 MessageProjectionDirective
     let mut directives_by_msg: HashMap<MessageId, Vec<ProjectionActionEntry>> = HashMap::new();
     for action in &plan.actions {
@@ -34,6 +39,10 @@ pub fn micro_compact(transcript: &mut MessageTranscript, config: &CompactConfig)
     }
 
     let affected = directives_by_msg.len();
+    debug_assert_eq!(
+        affected, plan.changed_messages,
+        "去重 message_id 数应等于计划统计的 changed_messages"
+    );
 
     // 对每组消息写入 projection directive（set_flags_projection 同时设置 truncated=true）
     for (msg_id, entries) in directives_by_msg {
@@ -42,6 +51,7 @@ pub fn micro_compact(transcript: &mut MessageTranscript, config: &CompactConfig)
             MessageProjectionDirective {
                 policy_version: plan.policy_version,
                 entries,
+                superseded_by: None,
             },
         );
     }
@@ -54,6 +64,17 @@ pub fn micro_compact(transcript: &mut MessageTranscript, config: &CompactConfig)
     }
 
     affected
+}
+
+/// Micro Compact：调用 plan_micro 生成计划，然后持久化 per-message projection directive
+///
+/// 返回被标记的消息数量。
+///
+/// 调用方若已持有计划（如 run_compact 的 dry-run 结果），应直接调用
+/// [`apply_micro_plan`]，不要二次规划。
+pub fn micro_compact(transcript: &mut MessageTranscript, config: &CompactConfig) -> usize {
+    let plan = super::planner::plan_micro(transcript, config, true);
+    apply_micro_plan(transcript, &plan)
 }
 
 #[cfg(test)]

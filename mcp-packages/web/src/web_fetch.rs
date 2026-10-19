@@ -22,6 +22,12 @@ const MAX_CONTENT_LINES: usize = 2000;
 /// 内容字节数上限（兜底：行数未超限但总字节过大时触发）
 const MAX_CONTENT_CHARS: usize = 100_000;
 
+/// 提取 API 响应体上限（客户端强制；与源网页实际大小无关）。
+const MAX_RESPONSE_BYTES: u64 = 10 * 1024 * 1024;
+
+/// 非 2xx 错误正文进入工具结果的显示上限。
+const MAX_ERROR_BODY_DISPLAY_BYTES: usize = 4 * 1024;
+
 /// Tavily /extract 响应结构
 #[derive(Deserialize)]
 struct TavilyExtractResponse {
@@ -125,6 +131,47 @@ fn truncate_content(content: &str, max_lines: usize) -> String {
     content.to_string()
 }
 
+/// 校验并解析模型传入的 URL：只允许 http/https。
+///
+/// 该检查只约束客户端发给提取后端的 URL scheme，不涉及重定向、DNS 或
+/// 私网访问策略——源网页访问策略由提取服务负责。
+fn parse_allowed_url(url: &str) -> Result<reqwest::Url, String> {
+    let parsed = reqwest::Url::parse(url).map_err(|e| format!("Invalid URL: {e}"))?;
+    match parsed.scheme() {
+        "http" | "https" => Ok(parsed),
+        scheme => Err(format!(
+            "Unsupported URL scheme '{scheme}': only http and https are allowed"
+        )),
+    }
+}
+
+/// 读取响应体并强制 `cap` 字节上限。
+///
+/// `Content-Length` 预检只是快速失败；该字段可能缺失（压缩传输）或不可信，
+/// 流式累计才是权威上限。成功与非 2xx 分支共用本函数。
+async fn read_body_capped(mut resp: reqwest::Response, cap: u64) -> Result<Vec<u8>, String> {
+    if let Some(len) = resp.content_length() {
+        if len > cap {
+            return Err(format!(
+                "Extract response exceeds {cap} byte limit (Content-Length: {len})"
+            ));
+        }
+    }
+
+    let mut body = Vec::new();
+    while let Some(chunk) = resp
+        .chunk()
+        .await
+        .map_err(|e| format!("Failed to read extract response: {e}"))?
+    {
+        if body.len() as u64 + chunk.len() as u64 > cap {
+            return Err(format!("Extract response exceeds {cap} byte limit"));
+        }
+        body.extend_from_slice(&chunk);
+    }
+    Ok(body)
+}
+
 #[async_trait]
 impl BaseTool for WebFetchTool {
     fn name(&self) -> &str {
@@ -176,6 +223,7 @@ impl BaseTool for WebFetchTool {
         _ctx: peri_agent::tools::ToolContext<'_>,
     ) -> Result<String, Box<dyn std::error::Error + Send + Sync>> {
         let url = input["url"].as_str().ok_or("Missing url parameter")?;
+        let parsed_url = parse_allowed_url(url)?;
         let prompt = input["prompt"].as_str();
 
         let client = reqwest::Client::builder()
@@ -184,7 +232,7 @@ impl BaseTool for WebFetchTool {
             .map_err(|e| format!("Failed to build HTTP client: {e}"))?;
 
         let body = serde_json::json!({
-            "urls": [url]
+            "urls": [parsed_url.as_str()]
         });
 
         let mut request = client
@@ -201,13 +249,14 @@ impl BaseTool for WebFetchTool {
 
         if !resp.status().is_success() {
             let status = resp.status();
-            let text = resp.text().await.unwrap_or_default();
+            let body = read_body_capped(resp, MAX_RESPONSE_BYTES).await?;
+            let text = String::from_utf8_lossy(&body);
+            let text = truncate_bytes(&text, MAX_ERROR_BODY_DISPLAY_BYTES);
             return Err(format!("Extract API returned HTTP {status}: {text}").into());
         }
 
-        let tavily: TavilyExtractResponse = resp
-            .json()
-            .await
+        let body = read_body_capped(resp, MAX_RESPONSE_BYTES).await?;
+        let tavily: TavilyExtractResponse = serde_json::from_slice(&body)
             .map_err(|e| format!("Failed to parse extract response: {e}"))?;
 
         // 检查 failed_results

@@ -125,11 +125,11 @@ impl BaseTool for SubAgentTool {
                 },
                 "resume_thread_id": {
                     "type": "string",
-                    "description": "目标 subagent 的 child_thread_id（UUID）；不填即新建。非 UUID 的非空值（例如后台 task_id `bg-...`）会被明确拒绝，而不是忽略后新建。active 后台执行：将非空 prompt 作为 Defer 入队并立即返回 action: send / status: queued，不中断、不恢复，在后续 Receive 驱动推理，run_in_background 被忽略。非 active：从磁盘恢复，prompt 可省略以隐式继续，run_in_background 决定恢复模式。两种行为均优先于 subagent_type / fork。active 但当前会话没有可投递运行实例时明确报错"
+                    "description": "目标 subagent 的 child_thread_id（UUID，即回执/通知中 `child_thread_id: ...` 标注的值）；不填即新建。它不是 task id：后台 task id 形如 `bg-<uuid>`，去掉 `bg-` 前缀后的 UUID 仍不是线程身份（形态合法但查无此线程，会以 thread not found 拒绝）。非 UUID 的非空值（例如后台 task_id `bg-...`）一样被明确拒绝，而不是忽略后新建。active 后台执行：将非空 prompt 作为 Defer 入队并立即返回 action: send / status: queued，不中断、不恢复，在后续 Receive 驱动推理，run_in_background 被忽略。非 active：从磁盘恢复，prompt 可省略以隐式继续，run_in_background 决定恢复模式。两种行为均优先于 subagent_type / fork。active 但当前会话没有可投递运行实例时明确报错"
                 },
                 "description": {
                     "type": "string",
-                    "description": "A short description of the task (3-5 words), used for UI display and logging"
+                    "description": "可选的客户端 UI 显示摘要，仅在省略 prompt 时作为 fallback；不参与执行语义或服务端日志"
                 },
                 "subagent_type": {
                     "type": "string",
@@ -137,15 +137,7 @@ impl BaseTool for SubAgentTool {
                 },
                 "model": {
                     "type": "string",
-                    "description": "Optional model tier override, only applies to NEW defined-type sub-agents (subagent_type path): overrides the `model` declared in the agent definition frontmatter; when omitted, the definition's model is used. Available tiers: 'inherit' (use the parent agent's model), 'haiku' (fastest/cheapest, best for quick lookups), 'sonnet' (balanced default), 'opus' (strongest reasoning), 'fable' (flagship tier). Within the defined-type path, unknown values are rejected with an error — never silently ignored. Ignored (not validated) when fork=true (forks always inherit the parent model) and when resume_thread_id is provided (resume keeps the original execution context)"
-                },
-                "name": {
-                    "type": "string",
-                    "description": "A short alias for the sub-agent, used for UI identification"
-                },
-                "isolation": {
-                    "type": "string",
-                    "description": "Isolation mode for the sub-agent. Use 'worktree' to create an isolated git worktree. Currently reserved for future use"
+                    "description": "Optional model tier override, only applies to NEW defined-type sub-agents (subagent_type path): overrides the `model` declared in the agent definition frontmatter; when omitted, the definition's model is used. Available tiers: 'inherit' (use the parent agent's model), 'haiku' (fastest/cheapest, best for quick lookups), 'sonnet' (balanced default), 'opus' (strongest reasoning), 'fable' (flagship tier). Within the defined-type path, unknown values are rejected with an error — never silently ignored. Ignored (not validated) when fork=true (forks always inherit the parent model) and when resume_thread_id is provided (resume 从当前磁盘上的 Agent 定义重建模型，不保留先前的 model override，本次 resume 调用的 model 参数也被忽略)"
                 },
                 "run_in_background": {
                     "type": "boolean",
@@ -158,7 +150,7 @@ impl BaseTool for SubAgentTool {
                 },
                 "cwd": {
                     "type": "string",
-                    "description": "The working directory for the sub-agent. Defaults to inheriting the parent agent's current working directory if not specified"
+                    "description": "默认继承父 Agent 的 cwd。显式路径必须存在，且 canonicalization 后与父 cwd 相同（允许 symlink、dotdot、尾部斜杠等价路径）；不同目录会被拒绝，包括 resume 调用。不支持独立子 Workspace 重绑定"
                 },
                 "fork": {
                     "type": "boolean",
@@ -189,7 +181,8 @@ impl BaseTool for SubAgentTool {
             run_in_background,
             cwd,
             is_fork,
-        } = InvocationArgs::parse(&input, &self.parent_cwd)?;
+        } = InvocationArgs::parse(&input)?;
+        let cwd = self.validate_cwd(cwd.as_deref()).await?;
 
         // 父侧模型 tool-call ID 传给子 agent 配置（配置层仍是字符串形状）。
         let parent_tool_call_id = ctx

@@ -404,9 +404,17 @@ async fn assert_usable_summary_commits(raw: &'static str) {
     let transcript = std::mem::take(&mut *ctx.session.transcript.write());
     transcript.flush_persistence().await.unwrap();
     assert!(result.compacted);
-    assert!(transcript.flags(id).excluded, "有效摘要允许替换旧模型视图");
+    // Full 提交成功后热态已释放被排除原文（D1 shrink），canonical 原文与其标记
+    // 只能从存储读取——热态不得再留副本。
+    assert!(transcript.get(id).is_none(), "被替换的原文不得留在热态");
+    let snapshot = bound
+        .resources
+        .load_session_snapshot(&bound.thread_id)
+        .await
+        .unwrap();
+    assert!(snapshot.flags[&id].excluded, "有效摘要允许替换旧模型视图");
     assert!(
-        transcript.entries().iter().any(|entry| entry.id() == id),
+        snapshot.payloads.iter().any(|payload| payload.id() == id),
         "canonical 原文仍保留"
     );
     let visible = transcript.visible_messages();

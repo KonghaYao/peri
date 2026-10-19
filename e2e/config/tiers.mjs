@@ -27,6 +27,7 @@ export const TIERS = {
       "tests/panels/plugin-uninstall-no-freeze.test.ts",
       "tests/tool-cards/first-tool-stuck-running.test.ts",
       "tests/tool-cards/edit-diff.test.ts",
+      "tests/subagent/delegation-policy-prompt.test.ts",
     ],
     parallel: 1,
     retry: 0,

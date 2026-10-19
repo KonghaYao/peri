@@ -69,6 +69,10 @@ pub struct TuiUserBubble {
     /// 渲染时 `Some` 才会在 label 追加 muted 来源。身份字段，不进 content_hash
     /// （同 `message_id` 先例），进 partial_eq。
     pub source: Option<String>,
+    /// 持久消息身份——`UserInputDelivered.input_id`（与落库的 `messages.message_id`
+    /// 同一 UUID）。历史窗口重开时据此判断 live 尾部是否已实际持有该条目；
+    /// 不参与 content_hash，进 partial_eq。回放/本地事件无来源时为 `None`。
+    pub message_id: Option<String>,
 }
 
 impl TuiUserBubble {
@@ -85,6 +89,10 @@ impl TuiUserBubble {
         let mut content_hash = tui_hash_str(&text);
         for attachment in &attachments {
             content_hash = tui_hash_combine(content_hash, attachment.bytes as u64);
+            // 载荷身份参与哈希：渲染缓存命中时 `ImageLineInfo` 会连同
+            // `payload_id` 一起复用；若两张图字节数相同但内容不同，
+            // 只按 bytes 哈希会让记录行命中旧身份、hover 预览到别的图。
+            content_hash = tui_hash_combine(content_hash, attachment.payload_id);
         }
         if !attachments.is_empty() {
             content_hash = tui_hash_combine(content_hash, attachments.len() as u64);
@@ -96,11 +104,26 @@ impl TuiUserBubble {
             content_hash,
             reminder,
             source: None,
+            message_id: None,
         }
+    }
+
+    /// 绑定持久消息身份（`UserInputDelivered.input_id`）。
+    pub fn with_message_id(mut self, message_id: impl Into<String>) -> Self {
+        self.message_id = Some(message_id.into());
+        self
     }
 }
 
-tui_impl_partial_eq!(TuiUserBubble: text, attachments, reminder, source);
+tui_impl_partial_eq!(TuiUserBubble: text, attachments, reminder, source, message_id);
+
+/// 短回复阈值（字符数，`chars().count()` 口径）：AI 正文**少于**该值时按
+/// 过程区形态渲染（缩进 2 格并入过程带）；user 气泡永远不缩进（§6）。
+///
+/// 取值 120：本机会话全量统计（43.17 万条 assistant 消息中 6.8 万条有可见文本）
+/// 显示正文长度 P50 = 68 / P75 = 157 / P90 = 649，分布无天然双峰谷底——120 是
+/// 落在 P50 与 P75 之间的产品取舍，不是数据断点。
+pub const BRIEF_REPLY_MAX_CHARS: usize = 120;
 
 /// Agent reply bubble -- left-aligned markdown with optional reasoning block.
 ///
@@ -244,6 +267,14 @@ impl TuiAssistantBubble {
             // 不含 duration_code——时变，不属于身份。
         }
         h
+    }
+
+    /// 是否短回复（`text` 字符数 < [`BRIEF_REPLY_MAX_CHARS`]）——文本区/过程区
+    /// 形态判定：zone 归属（`transcript::start_zone`/`end_zone`）与渲染前缀
+    /// （`render.rs` 正文行）共用，单一权威。空 text（纯 reasoning / 工具轮）
+    /// 恒为 true——渲染上无正文可缩进，zone 由 reasoning 分支决定。
+    pub fn is_brief(&self) -> bool {
+        self.text.chars().count() < BRIEF_REPLY_MAX_CHARS
     }
 }
 

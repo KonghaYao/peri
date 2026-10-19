@@ -14,13 +14,9 @@ fn test_user_long_prompt_capped_at_six_lines() {
     let vm = TuiRenderUnit::TuiUserBubble(crate::kit::tui_render_unit::TuiUserBubble::new(text));
     let lines = vm_to_lines(&vm, &grid);
 
-    // 1 空行 + 6 正文 + 1 `… +6 lines` + 1 尾部空行（无 role label 行）
-    assert_eq!(lines.len(), 9, "6 行上限 + 省略行 + 尾部空行，其余截断");
-    assert!(
-        lines.last().is_some_and(is_rail_blank),
-        "尾部空行（turn 节拍对称，带竖线前缀）"
-    );
-    let last = line_text(&lines[lines.len() - 2]);
+    // 6 正文 + 1 `… +6 lines`（Wide 无节拍空行，台阶承担块分隔；无 role label 行）
+    assert_eq!(lines.len(), 7, "6 行上限 + 省略行，其余截断");
+    let last = line_text(&lines[lines.len() - 1]);
     assert!(
         last.contains("+6 lines"),
         "省略行格式 `… +N lines`，实际 {last:?}"
@@ -46,7 +42,7 @@ fn test_user_slash_at_emphasis() {
         "run /build and ping @matt".into(),
     ));
     let lines = vm_to_lines(&vm, &grid);
-    let body = &lines[1];
+    let body = &lines[0];
     let emphasized = body
         .spans
         .iter()
@@ -218,7 +214,7 @@ fn test_user_image_line_negative_cases() {
         let lines = vm_to_lines(&vm, &grid);
         // 剥离网格前缀列（outer 空 / │ / gap）后应与输入完全一致——
         // 走原 emphasize_user_line 路径，无 meta 替换。
-        let body = strip_visual_prefix(&lines[1], &line_text(&lines[1]), &grid, 1);
+        let body = strip_visual_prefix(&lines[0], &line_text(&lines[0]), &grid, 0);
         assert_eq!(
             body, text,
             "非图片行原样渲染，实际 {body:?}（输入 {text:?}）"
@@ -308,7 +304,7 @@ fn test_user_image_line_info_collected() {
     let (lines, _, _, image_lines) = super::vm_to_lines_cached(&vm, &grid, &mut cache, true);
     assert_eq!(image_lines.len(), 1, "仅 @image 行产生映射信息");
     let info = &image_lines[0];
-    assert_eq!(info.logical_idx, 1, "首行是 turn 节拍空行，meta 行在索引 1");
+    assert_eq!(info.logical_idx, 0, "Wide 无前导空行，meta 行在索引 0");
     let crate::kit::message_area::ImageLineIdentity::Path { path, managed } = &info.identity else {
         panic!("路径 meta 行应产出 Path 身份: {:?}", info.identity);
     };
@@ -435,7 +431,7 @@ fn test_user_bubble_image_only_renders_attachment_record() {
         }],
     ));
     let lines = vm_to_lines(&vm, &grid);
-    assert_eq!(lines.len(), 3, "leading 空行 + 附件记录 + 尾部空行");
+    assert_eq!(lines.len(), 1, "Wide 仅附件记录行（无节拍空行）");
     let text = all_text(&lines);
     assert!(
         text.contains(&expected_attachment_record(1, "2.0 KB")),
@@ -500,8 +496,8 @@ fn test_attachment_records_keep_image_line_hit_mapping() {
     let (lines, _, _, image_lines) = super::vm_to_lines_cached(&vm, &grid, &mut cache, true);
 
     assert_eq!(image_lines.len(), 2, "附件记录行与 @image 行各一条命中");
-    // 行序：节拍空行(0) → 附件记录(1) → @image meta(2)。
-    assert_eq!(image_lines[0].logical_idx, 1, "附件记录行索引不移位");
+    // 行序：附件记录(0) → @image meta(1)（Wide 无前导节拍空行）。
+    assert_eq!(image_lines[0].logical_idx, 0, "附件记录行索引不移位");
     match &image_lines[0].identity {
         crate::kit::message_area::ImageLineIdentity::Attachment { name, payload_id } => {
             // 展示名随当前语言本地化，断言与同一来源比较（避免测试间语言污染）。
@@ -516,7 +512,7 @@ fn test_attachment_records_keep_image_line_hit_mapping() {
     }
     assert_eq!(image_lines[0].size_text, "45 B");
 
-    assert_eq!(image_lines[1].logical_idx, 2, "@image 行索引随附件行顺移");
+    assert_eq!(image_lines[1].logical_idx, 1, "@image 行索引随附件行顺移");
     match &image_lines[1].identity {
         crate::kit::message_area::ImageLineIdentity::Path { path, .. } => assert_eq!(
             path,
@@ -539,7 +535,7 @@ fn test_user_bubble_file_mention_unaffected_by_attachment_record() {
     let grid = GridSpec::grid_for(120);
     let vm = TuiRenderUnit::TuiUserBubble(TuiUserBubble::new("read @src/main.rs please".into()));
     let lines = vm_to_lines(&vm, &grid);
-    assert_eq!(lines.len(), 3, "leading 空行 + 正文 + 尾部空行");
+    assert_eq!(lines.len(), 1, "Wide 仅正文行（无节拍空行）");
     let text = all_text(&lines);
     assert!(
         text.contains("@src/main.rs"),

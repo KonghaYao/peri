@@ -5,7 +5,7 @@
 //! 像素区经 T6 窄接口（[`crate::kit::image_preview`]）渲染（Kitty 协议，占位符
 //! 从 buffer 消失即自动清理，S2 §7）。
 //!
-//! 三态触发仲裁（§7.3）：优先级 **稳定 hover > cursor > focus**；任一来源清空 →
+//! 四态触发仲裁（§7.3）：优先级 **稳定 hover → cursor → 待发送附件 → focus**；任一来源清空 →
 //! `Idle`（隐藏清理）。消息区链接先即时高亮，只有鼠标稳定停留 300ms 后才进入
 //! hover 预览源；遮挡（`mouse_router::is_occluded`）→ `Idle`（§7.5）。
 //!
@@ -711,7 +711,7 @@ fn overlay_clear_rect(rect: Option<Rect>, state: &ImagePreviewState) -> Option<R
     }
 }
 
-/// 上下文 overlay 预览组件（§7 T7）：订阅三态触发源，仲裁后经 effect 请求
+/// 上下文 overlay 预览组件（§7 T7）：订阅四态触发源，仲裁后经 effect 请求
 /// 预览；几何与绘制在 [`OverlayDrawHook`]。渲染为空 `Positioned`（绝对坐标，
 /// 不参与 flex）——实际内容由 hook 绘制。
 #[component]
@@ -731,7 +731,7 @@ pub fn ImageOverlay(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
     let _panel = hooks.use_atom(&crate::kit::atoms::ACTIVE_PANEL);
     let (term_w, term_h) = hooks.use_terminal_size();
 
-    // 三态触发仲裁（§7.3；优先级稳定 hover > cursor > focus；遮挡 → None）。
+    // 四态触发仲裁（§7.3；优先级稳定 hover → cursor → 待发送附件 → focus；遮挡 → None）。
     let target = resolve_preview_target();
     // 请求流程（use_effect = effect 边界，非 render body——TUI-RENDER-001）。
     // 闭包捕获 target 副本；deps 用原值做变化比较（use_effect 只比较不消费）。

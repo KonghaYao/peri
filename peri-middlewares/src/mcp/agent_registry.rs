@@ -6,15 +6,17 @@
 //!
 //! ## 来源判定（host-assigned，plan §6.2 / X3 / X6）
 //!
-//! - **本地来源**（project / plugin / builtin 三类）只认**宿主绑定的** builtin
-//!   `workspace` 实例（`ConfigSource::Builtin { instance: "workspace" }` 且
-//!   `Connected`，且未被 A24 关闭集关闭）——来源描述取自该实例资源 `_meta` 的
-//!   `io.peri/scope` / `io.peri/plugin`，**不信任任何 server 的文本自称**：其他
-//!   server（含占用同名 `workspace` 的实例）上的同 scheme 资源一律按远端处理。
+//! - **本地来源**（project / plugin / builtin 三类）只认宿主绑定的资源来源：
+//!   `ConfigSource::Builtin { instance }` 且 `Connected`、未被 A24 关闭集关闭的
+//!   任一 builtin 实例（不限 `workspace`；web 实例发布的 `web-researcher` 即属此列），
+//!   以及宿主显式选择的 `ConfigSource::WorkspaceRemote`。来源描述取自该实例资源
+//!   `_meta` 的 `io.peri/scope` / `io.peri/plugin`，**不信任任何 server 的文本
+//!   自称**：其他 server（含占用同名 `workspace` 的实例）上的同 scheme 资源一律
+//!   按远端处理。
 //! - **远端来源**：id = `mcp__{server}__{name}`，激活走严格 v1 规范化
 //!   （本地扩展字段清空、模型/轮数校验）与内容绑定批准。
-//! - **本地 id 保持裸名**（`coder`、`explorer` …）：`subagent_type` 的既有取值
-//!   不变；同名跨来源并存，选择优先级（E13 project → builtin → plugin）由
+//! - **本地 id 保持裸名**（`coder`、`web-researcher` …）：`subagent_type` 的既有
+//!   取值不变；同名跨来源并存，选择优先级（E13 project → builtin → plugin）由
 //!   [`McpAgentRegistry::resolve_local`] 表达，**不做跨来源覆盖**。
 //!
 //! ## 会话 / 关闭过滤（W5 第 1 步）
@@ -60,7 +62,7 @@ fn local_priority(scope: ResourceScope) -> u8 {
 /// Agent 来源描述（host-assigned；不信任 server 自报）。
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum AgentSource {
-    /// 宿主绑定的 builtin `workspace` 实例提供的本地来源。
+    /// 宿主绑定的资源来源（builtin 实例或显式选择的远端 Workspace）。
     Local {
         scope: ResourceScope,
         plugin_name: Option<String>,
@@ -107,6 +109,7 @@ impl McpAgentMetadata {
             id: self.id.clone(),
             model_tier: self.model_tier,
             can_mutate: self.can_mutate,
+            description: self.description.clone(),
         }
     }
 }
@@ -215,11 +218,11 @@ impl McpAgentRegistry {
             .pool
             .get_all_clients_visible_to(self.session_id.as_deref())
         {
-            // F8（关闭语义）：宿主绑定的 builtin `workspace` 句柄**永远不是远端来源**。
+            // F8（关闭语义）：宿主绑定的资源来源句柄**永远不是远端来源**。
             // 链槽关闭 / A24 关闭集命中 / 断连时该句柄的本地面不可用 ⇒ 整体跳过，
-            // 不得把同一批资源投影成 `mcp__workspace__*` 远端条目（X4/J5：关闭 ⇒
+            // 不得把同一批资源投影成 `mcp__{instance}__*` 远端条目（X4/J5：关闭 ⇒
             // 不可发现；否则模型仍能经 `definitions.rs` 加载被关闭的本地定义）。
-            if Self::is_builtin_workspace_handle(&handle) && !self.is_local_handle(&handle) {
+            if Self::is_local_source_handle(&handle) && !self.is_local_handle(&handle) {
                 continue;
             }
             let local_handle = self.is_local_handle(&handle);
@@ -302,9 +305,9 @@ impl McpAgentRegistry {
         (entries, rejected)
     }
 
-    /// 该句柄是否是**宿主绑定的** builtin `workspace` 实例（身份判定，不含关闭位）。
-    fn is_builtin_workspace_handle(handle: &Arc<McpClientHandle>) -> bool {
-        super::builtin::is_workspace_source(handle.source.as_ref())
+    /// 该句柄是否是**宿主绑定的**资源来源（身份判定，不含关闭位）。
+    fn is_local_source_handle(handle: &Arc<McpClientHandle>) -> bool {
+        super::builtin::is_local_resource_source(handle.source.as_ref())
     }
 
     /// 本地来源判定（host-assigned 信任锚 + 关闭位）。
@@ -315,7 +318,7 @@ impl McpAgentRegistry {
         if !matches!(handle.status, ClientStatus::Connected) {
             return false;
         }
-        if !super::builtin::is_workspace_source(handle.source.as_ref()) {
+        if !super::builtin::is_local_resource_source(handle.source.as_ref()) {
             return false;
         }
         let closed = self
@@ -323,9 +326,10 @@ impl McpAgentRegistry {
             .builtin_instance_context()
             .map(|context| context.closed.clone())
             .unwrap_or_default();
-        if super::builtin::is_closed_source("workspace", handle.source.as_ref(), &closed) {
+        if super::builtin::is_closed_builtin_source(handle.source.as_ref(), &closed) {
             tracing::debug!(
-                "agents: builtin workspace is closed; local agent sources are unavailable"
+                instance = %handle.name,
+                "agents: builtin instance is closed; its local agent sources are unavailable"
             );
             return false;
         }
@@ -737,7 +741,6 @@ fn normalize_remote_definition(definition: &mut ClaudeAgent) -> Result<(), Strin
     definition.frontmatter.memory = None;
     definition.frontmatter.background = false;
     definition.frontmatter.isolation = None;
-    definition.frontmatter.allowed_write_dirs.clear();
     definition.frontmatter.tone = None;
     definition.frontmatter.proactiveness = None;
     definition.frontmatter.prompt_mode = None;
@@ -861,7 +864,7 @@ mod tests {
     #[test]
     fn strips_host_local_fields_from_remote_definition() {
         let mut definition = parse_agent_file(
-            "---\nname: reviewer\ndescription: review\npermissionMode: bypassPermissions\nmcpServers:\n  - arbitrary\nhooks:\n  PreToolUse: []\nmemory: project\nbackground: true\nisolation: worktree\nallowedWriteDirs: [tmp]\nskills: [skill://review/SKILL.md]\n---\nReview code.",
+            "---\nname: reviewer\ndescription: review\npermissionMode: bypassPermissions\nmcpServers:\n  - arbitrary\nhooks:\n  PreToolUse: []\nmemory: project\nbackground: true\nisolation: worktree\nskills: [skill://review/SKILL.md]\n---\nReview code.",
         )
         .unwrap();
 
@@ -873,7 +876,6 @@ mod tests {
         assert!(definition.frontmatter.memory.is_none());
         assert!(!definition.frontmatter.background);
         assert!(definition.frontmatter.isolation.is_none());
-        assert!(definition.frontmatter.allowed_write_dirs.is_empty());
         // F3（安全）：远端 `skills` 清空——技能级批准面不存在，声明不构成隐式授权。
         assert!(definition.frontmatter.skills.is_empty());
     }

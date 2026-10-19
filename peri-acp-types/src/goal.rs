@@ -115,6 +115,21 @@ impl ThreadGoal {
             .filter(|&b| b > 0)
             .map(|b| self.accounting.tokens_used as f32 / b as f32)
     }
+
+    /// 为一次系统恢复尝试重新打开 blocked goal。
+    ///
+    /// `Blocked` 对公开状态机仍是终态（[`GoalStatus::can_transition_to`] 不变）；
+    /// 只有会话级恢复调度器可以调用本方法，给 agent 一次处理瞬时阻断的机会。
+    /// 非 `Blocked` 状态返回 false。
+    pub fn reopen_for_recovery(&mut self, at: SystemTime) -> bool {
+        if self.status != GoalStatus::Blocked {
+            return false;
+        }
+        self.status = GoalStatus::Active;
+        self.blocked_reason = None;
+        self.updated_at = at.into();
+        true
+    }
 }
 
 // ─── store ─────────────────────────────────────────────────────────────────────
@@ -188,6 +203,16 @@ pub trait GoalController: Send + Sync {
     /// 声明完成。状态转换非法时返回 Err。
     async fn complete_goal(&self) -> Result<(), String>;
 
+    /// 仅当当前 goal 的身份仍为 `expected_goal_id` 时完成。
+    ///
+    /// 默认实现退化为 [`Self::complete_goal`]，保持第三方/测试控制器可用；
+    /// 该退化不具备身份校验，验证期间 goal 被替换后仍可能完成新 goal。
+    /// 需要 race-proof 语义的实现（生产 `GoalState`）必须覆盖本方法，
+    /// 在同一个写锁内完成身份比对与状态写入。
+    async fn complete_goal_if_current(&self, _expected_goal_id: &str) -> Result<(), String> {
+        self.complete_goal().await
+    }
+
     /// 声明阻塞。reason 必填。状态转换非法时返回 Err。
     async fn block_goal(&self, reason: String) -> Result<(), String>;
 
@@ -200,6 +225,17 @@ pub trait GoalController: Send + Sync {
     async fn increment_continuation(&self) -> Result<(), String> {
         Ok(())
     }
+
+    /// 一次恢复轮次已成功运行，停止周期重试。
+    ///
+    /// 默认 no-op 保持第三方/测试控制器兼容。
+    async fn acknowledge_recovery(&self) {}
+
+    /// 一次可恢复的终态错误结束了当前 turn，但 goal 仍为 Active。
+    ///
+    /// `reason` 是稳定的短标签（如 `model_error` / `compact_failed`），
+    /// 调度器据此安排下一轮恢复尝试。默认 no-op。
+    async fn recover_after_error(&self, _reason: &str) {}
 
     /// 只读快照（get action + after_agent 判断用）
     fn snapshot(&self) -> GoalViewSnapshot;
@@ -215,6 +251,8 @@ pub fn is_active(snap: &GoalViewSnapshot) -> bool {
 /// 只读快照（与 GoalSnapshot 平行，但定义在契约层避免依赖）
 #[derive(Debug, Clone, Default)]
 pub struct GoalViewSnapshot {
+    /// 当前 goal 的身份；`None` = 无 goal 或第三方控制器未提供
+    pub goal_id: Option<String>,
     pub objective: Option<String>,
     pub status: Option<GoalStatus>,
     pub token_budget: Option<u64>,

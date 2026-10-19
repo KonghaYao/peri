@@ -32,7 +32,7 @@ fn agent_catalog_fixture(meta_harness: &str) -> (tempfile::TempDir, String, Stri
     std::fs::write(
         agents.join(format!("{AGENT_ID}.md")),
         format!(
-            "---\nname: {AGENT_ID}\ndescription: Frozen catalog probe\nmodel: haiku\ndisallowedTools: [Write, Edit, Bash, folder_operations, cron_register]\n---\n\nProbe.\n"
+            "---\nname: {AGENT_ID}\ndescription: Frozen catalog probe\nmodel: haiku\ntools: [Read, Grep]\ndisallowedTools: [Agent]\n---\n\nProbe.\n"
         ),
     )
     .unwrap();

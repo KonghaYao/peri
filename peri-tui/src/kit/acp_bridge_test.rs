@@ -5,6 +5,8 @@ use serial_test::serial;
 
 #[path = "acp_bridge_cancel_test.rs"]
 mod cancel_tests;
+#[path = "acp_bridge_test/window_test.rs"]
+mod window_test;
 
 pub(super) fn scheduler_state() -> BridgeState {
     crate::kit::atoms::init_atoms();
@@ -30,6 +32,7 @@ pub(super) fn scheduler_state() -> BridgeState {
         pending_cache_usage: None,
         publication_intent: Default::default(),
         folded_history: Default::default(),
+        window: Default::default(),
     }
 }
 
@@ -94,6 +97,7 @@ async fn test_replay_persisted_history_publishes_final_assistant_in_order() {
             _session_id: &str,
             _reminder: &peri_acp_types::system_reminder::SystemReminder,
             _caps: &PeriCaps,
+            _marks: &peri_acp::dispatch::EntryMarks<'_>,
         ) -> Result<(), ReplayError> {
             // 本 fixture 只走标准 SessionUpdate 通道（历史里没有 canonical reminder）。
             Ok(())
@@ -165,6 +169,8 @@ async fn test_replay_persisted_history_publishes_final_assistant_in_order() {
         let shutdown = CancellationToken::new();
         let notifier =
             crate::kit::acp_notifier::spawn_kit_notifier(notif_rx, bridge_tx, shutdown.clone());
+        // 本 fixture 演的是标准客户端（不协商分页）：回放不带条目位置戳。
+        let generation = peri_acp::dispatch::LoadGeneration::from_client("tui-bridge-test");
         replay_persisted_session_history(
             &id,
             &payloads,
@@ -173,6 +179,7 @@ async fn test_replay_persisted_history_publishes_final_assistant_in_order() {
                 replay: true,
                 ..Default::default()
             },
+            &peri_acp::dispatch::ReplayMarks::without_entry_marks(&generation, &id),
         )
         .await
         .unwrap();
@@ -203,9 +210,10 @@ async fn test_replay_persisted_history_publishes_final_assistant_in_order() {
         let actual: Vec<_> = snapshot
             .items
             .iter()
-            .map(|item| match item {
-                TuiRenderUnit::TuiUserBubble(bubble) => (true, bubble.text.clone()),
-                TuiRenderUnit::TuiAssistantBubble(bubble) => (false, bubble.text.clone()),
+            .filter_map(|item| match item {
+                TuiRenderUnit::TuiUserBubble(bubble) => Some((true, bubble.text.clone())),
+                TuiRenderUnit::TuiAssistantBubble(bubble) => Some((false, bubble.text.clone())),
+                TuiRenderUnit::TuiDivider(_) => None,
                 other => panic!("非预期回放条目：{other:?}"),
             })
             .collect();

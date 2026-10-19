@@ -35,7 +35,7 @@ Receive 与 Stop 在 Store 原子裁决领取/撤出，MQ 仅投影已确认结�
 ## 交互与投递
 
 - 标题为“待发送”（英文 Pending）；空队列完全隐藏，一条一行，无左侧序号；默认最多展示 5 条，可展开其余条目。
-- 空闲且无其他待发输入时，本地直接提交不展示待发送行，输入框顶边立即显示“正在提交…”；收到 Delivered 后显示原聊天气泡并结束提交反馈，拒绝、未知回执或会话边界变化按实际状态恢复反馈与原稿。首次会话绑定保持此展示。服务端确认 Queued、回执失败或会话重载时恢复可见投影，未确认请求与原稿仍按既有规则保留。Submitting 仅是本地投递反馈，不代表正式交付；该展示区分不改变服务端准入与聊天确认边界。
+- 空闲且无其他待发输入时，本地直接提交不展示待发送行，输入框顶边立即显示“正在提交…”；收到 Delivered 后显示原聊天气泡并结束提交反馈，拒绝、未知回执或会话边界变化按实际状态恢复反馈与原稿。致命执行失败时，尚未进入发送分支（未绑定 generation）的输入按确定未发出恢复完整原稿；已绑定 generation 的输入结果未知，保留完整正文、附件与稳定 `input_id`，以“未确认”行继续可见，等待服务端终态或快照对账，不自动重发、不换身份。首次会话绑定保持此展示。服务端确认 Queued、回执失败或会话重载时恢复可见投影，未确认请求与原稿仍按既有规则保留。Submitting 仅是本地投递反馈，不代表正式交付；该展示区分不改变服务端准入与聊天确认边界。
 - 队列透明背景，仅使用输入框既有主题上边线；统一字符 `↑` 单发、`⇈` 全发、`↶` 取回，
   ASCII 环境使用相应降级符号，不使用 emoji。
 - 单发 B 允许越过 A；随后再发 A 时按 B、A 接收，其余等待项保持相对顺序。
@@ -69,6 +69,8 @@ transcript flush 与事件 forwarder 收尾，确认自然成功；同一 attemp
 
 变更请求绑定 session ID、generation 与 command ID。回执和事件按 revision 合并，
 迟到响应不能覆盖新状态；响应不明确时只在相同会话实例中以同一身份重试，不能改走旧 prompt 重复投递。
+consumer 发现命令已不在本地待结算账本（被致命失败结算、会话重置或实例 generation 变化）时，
+只能报告“已结算”：不得当作发送成功，也不得重试或改换 input ID。
 首次输入的准备阶段（工作区发现、服务端建会话、初次快照）与已发出请求的受理回执各自计时：
 准备慢不按回执超时收尾，准备失败发生在发送之前，按确定未受理恢复完整原稿；准备期限保持有界，
 不把输入留在无法撤回的状态。准备期间状态栏给出明确状态（`SESSION_PREPARING`，文案
@@ -80,7 +82,22 @@ transcript flush 与事件 forwarder 收尾，确认自然成功；同一 attemp
 
 队列快照、运行开始及投递结果均由 Agent 发 canonical v2 事件，经 Controller、ACP 映射与
 能力门控到达 TUI，不进入公开 activity 摘要。Delivered 与随后 assistant 输出处于本轮同一
-render FIFO，稳定 input ID 用于 live/replay 去重，复用原 `TuiUserBubble`。
+render FIFO，稳定 input ID 用于 live/replay 去重，复用原 `TuiUserBubble`。事件泵在推送
+任何后续事件前，按 mailbox 的进程内交付日志以 Receive 实际顺序补发 `UserInputDelivered`；
+交付日志条目在 `UserInputDelivered` 发布时绑定补打的 `session_seq`，未绑定序号的条目绝不提前补发。
+泵只允许在序号严格更小的当前事件之前补发已绑定交付，其余留到 turn 尾部：交付事件经
+可靠 render FIFO 进入渲染链路（通道满时等待容量、不降级丢弃）；若发布失败或发布后的
+路径丢失，气泡仍会按交付日志在 turn 尾部补发，不会丢失。交付槽位在 enqueue 准入时预留，
+容量不足在消费/Claimed 之前拒绝，不会在消息写入 transcript
+后才失败。sink 未确认写出前不 ack，失败保留日志并有界重试；重试耗尽显式失败，不以普通
+done 收尾。TUI 不从终态快照合成气泡，终态只清除提交反馈。
+
+投递语义是 **at-least-once**：sink 返回错误不证明客户端未收到；未 ack 的 Delivered 可能重复
+投递，消费端必须按稳定 input ID 幂等去重。客户端事件重试有界；耗尽后发送
+`AgentExecutionFailed`（该通知本身复用同一有界重试）并跳过正常 done。若连失败通知也不可达，
+TUI 依赖通知通道关闭路径收敛（`ACP_STATE.is_loading=false`、清空排队输入、显示断连提示），
+执行泵仍会发送 `pump_done` 释放 prompt；该恢复不依赖失败事件被送达，前提是 transport 关闭
+能够被 notifier 观察到。
 
 运行开始的服务端 request ID 与 done 配对，客户端据此建立权限确认和 AskUser 的运行 owner。
 新建/加载会话在同一个 operation gate 内绑定队列 generation 并恢复实际运行身份，之后才

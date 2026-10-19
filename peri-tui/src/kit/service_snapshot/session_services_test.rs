@@ -22,7 +22,7 @@ async fn successful_projection_then_partial_failure_preserves_last_good_and_repo
                         json!({"hooks":[{"event":"PreToolUse","plugin_name":"first","command":"echo","matcher":null}],"plugins":[]}),
                     ),
                     (0, "mcp/list") => Ok(json!({"servers":[
-                        {"name":"first","transport":"stdio","connectionStatus":"connected","oauthStatus":"none","toolsCount":1,"version":"1.2.3","connectedAt":"2026-10-11T06:32:05Z","protocolVersion":"2026-07-28","url":"http://127.0.0.1:8080/mcp"},
+                        {"name":"first","transport":"stdio","connectionStatus":"connected","oauthStatus":"none","toolsCount":1,"resourcesCount":1,"tools":[{"name":"search","description":"Find things"}],"resources":[{"uri":"agent://builtin/reviewer/agent.md","name":"reviewer","description":"Review code"}],"subscriptions":{"resources":["file:///a.md"],"toolsListChanged":true,"promptsListChanged":false,"resourcesListChanged":true},"version":"1.2.3","connectedAt":"2026-10-11T06:32:05Z","protocolVersion":"2026-07-28","url":"http://127.0.0.1:8080/mcp"},
                         {"name":"second","transport":"http","connectionStatus":"failed","oauthStatus":"none","toolsCount":0,"errorSummary":"connect error: Connection refused (os error 61)","url":"http://127.0.0.1:9/mcp"}
                     ]})),
                     (0, "cron/list") => Ok(
@@ -65,6 +65,35 @@ async fn successful_projection_then_partial_failure_preserves_last_good_and_repo
         services.mcp_servers[1].url.as_deref(),
         Some("http://127.0.0.1:9/mcp")
     );
+    // 详情表格数据映射：tools / resources / resourcesCount / subscriptions。
+    assert_eq!(services.mcp_servers[0].tools.len(), 1);
+    assert_eq!(services.mcp_servers[0].tools[0].name, "search");
+    assert_eq!(
+        services.mcp_servers[0].tools[0].description.as_deref(),
+        Some("Find things")
+    );
+    assert_eq!(
+        services.mcp_servers[0].resources[0].uri,
+        "agent://builtin/reviewer/agent.md"
+    );
+    assert_eq!(
+        services.mcp_servers[0].resources[0].name.as_deref(),
+        Some("reviewer")
+    );
+    assert_eq!(services.mcp_servers[0].resources_count, 1);
+    let subscriptions = services.mcp_servers[0]
+        .subscriptions
+        .as_ref()
+        .expect("subscriptions 必须映射");
+    assert_eq!(subscriptions.resources, vec!["file:///a.md".to_string()]);
+    assert!(subscriptions.tools_list_changed);
+    assert!(!subscriptions.prompts_list_changed);
+    assert!(subscriptions.resources_list_changed);
+    // 旧 host 缺字段：serde(default) 保持可用缺省（不丢整条记录）。
+    assert!(services.mcp_servers[1].tools.is_empty());
+    assert!(services.mcp_servers[1].resources.is_empty());
+    assert_eq!(services.mcp_servers[1].resources_count, 0);
+    assert!(services.mcp_servers[1].subscriptions.is_none());
     assert_eq!(services.cron_jobs[0].id, "job-a");
     let error = query(&client, "session-a", &mut services).await.unwrap();
     assert!(!error.is_empty());

@@ -58,12 +58,18 @@ impl MockEventSink {
 
 #[async_trait]
 impl crate::session::event_sink::EventSink for MockEventSink {
-    async fn push_event(&self, session_id: &str, event: &ExecutorEvent, _context_window: u32) {
+    async fn push_event(
+        &self,
+        session_id: &str,
+        event: &ExecutorEvent,
+        _context_window: u32,
+    ) -> Result<(), peri_acp_types::event::EventSinkError> {
         let json = serde_json::to_string(event).unwrap_or_default();
         self.events
             .lock()
             .unwrap()
             .push((session_id.to_string(), json));
+        Ok(())
     }
 
     async fn push_done(&self, _session_id: &str, _stop_reason: &str, _request_id: Option<&str>) {
@@ -235,6 +241,19 @@ impl BoundSession {
     async fn stored_messages(&self) -> Vec<BaseMessage> {
         self.snapshot()
             .await
+            .payloads
+            .iter()
+            .filter_map(|payload| payload.as_message().cloned())
+            .collect()
+    }
+
+    /// 磁盘上的**有效**消息（未排除 own 条目）：Full Compact 提交后宿主热态的形状
+    /// （D1 收缩 + `active_payloads`）。完整历史仍含被排除原文。
+    async fn active_messages(&self) -> Vec<BaseMessage> {
+        self.resources
+            .load_active_snapshot(&self.thread_id)
+            .await
+            .expect("加载有效视图失败")
             .payloads
             .iter()
             .filter_map(|payload| payload.as_message().cloned())

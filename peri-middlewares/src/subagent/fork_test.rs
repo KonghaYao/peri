@@ -61,6 +61,125 @@ fn make_external_mcp_tool(name: &'static str) -> Arc<dyn BaseTool> {
     Arc::new(ExternalTool(name))
 }
 
+/// [回归测试] 定义型过滤保留隐藏工具供宿主使用，但包装后不能对模型重新暴露。
+#[tokio::test]
+async fn test_filter_tools_preserves_hidden_catalog_and_model_policy() {
+    let parent_tools: Vec<Arc<dyn BaseTool>> = vec![
+        Arc::new(crate::subagent::AgentResultTool::new()),
+        make_tool("Read"),
+    ];
+    let filtered = filter_tools(&parent_tools, &ToolsValue::Empty, &ToolsValue::Empty);
+    assert_eq!(filtered.len(), 2);
+    let hidden = filtered
+        .iter()
+        .find(|tool| tool.name() == "AgentResult")
+        .unwrap();
+    assert!(!hidden.visible_to_model());
+    assert!(filtered
+        .iter()
+        .find(|tool| tool.name() == "Read")
+        .unwrap()
+        .visible_to_model());
+    let text = hidden
+        .invoke(
+            serde_json::json!({}),
+            peri_agent::tools::ToolContext::new(&[], "."),
+        )
+        .await
+        .unwrap();
+    assert!(text.contains("does not query task state"));
+    assert!(!text.contains("still running"));
+    assert!(hidden.parameters()["properties"].get("task_id").is_some());
+}
+
+/// [回归测试] app-only MCP 经定义型 filter_tools 包装后保留宿主调用面。
+#[tokio::test]
+async fn test_filter_tools_hidden_mcp_cannot_be_searched_or_executed() {
+    use peri_agent::middleware::r#trait::Middleware;
+    use peri_agent::tools::ToolContext;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    struct AppOnlyTool(Arc<AtomicUsize>);
+    #[async_trait::async_trait]
+    impl BaseTool for AppOnlyTool {
+        fn name(&self) -> &str {
+            "mcp__late__hidden"
+        }
+        fn description(&self) -> &str {
+            "仅供 App 使用"
+        }
+        fn parameters(&self) -> serde_json::Value {
+            serde_json::json!({})
+        }
+        fn visible_to_model(&self) -> bool {
+            false
+        }
+        fn mcp_server_name(&self) -> Option<&str> {
+            Some("late")
+        }
+        async fn invoke(
+            &self,
+            _: serde_json::Value,
+            _: ToolContext<'_>,
+        ) -> Result<String, Box<dyn std::error::Error + Send + Sync>> {
+            self.0.fetch_add(1, Ordering::SeqCst);
+            Ok("宿主调用成功".into())
+        }
+    }
+    let calls = Arc::new(AtomicUsize::new(0));
+    let parent: Vec<Arc<dyn BaseTool>> = vec![
+        Arc::new(AppOnlyTool(Arc::clone(&calls))),
+        make_external_mcp_tool("mcp__external__visible"),
+    ];
+    let filtered = filter_tools(&parent, &ToolsValue::Empty, &ToolsValue::Empty);
+    let tools = Arc::new(parking_lot::RwLock::new(
+        filtered
+            .into_iter()
+            .map(|tool| (tool.name().to_string(), Arc::<dyn BaseTool>::from(tool)))
+            .collect(),
+    ));
+    let index = Arc::new(crate::tool_search::ToolSearchIndex::new());
+    let mw = crate::tool_search::ToolSearchMiddleware::new(Arc::clone(&index), Arc::clone(&tools));
+    mw.before_agent(&mut peri_agent::agent::state::AgentState::new("/tmp"))
+        .await
+        .unwrap();
+    assert!(tools.read().contains_key("mcp__late__hidden"));
+    assert!(index.search("select:mcp__late__hidden", 10).is_empty());
+    assert!(!index.search("select:mcp__external__visible", 10).is_empty());
+    // 仅 MCP deferred 工具时可没有文本贡献；若存在，也不得泄露隐藏名称。
+    if let Some(prompt) = mw.prompt_contribution() {
+        assert!(!prompt.contains("mcp__late__hidden"));
+    }
+    let execute = crate::tool_search::ExecuteExtraTool::new(Arc::clone(&tools));
+    let error = execute
+        .invoke(
+            serde_json::json!({"tool_name": "mcp__late__hidden", "params": {}}),
+            ToolContext::new(&[], "/tmp"),
+        )
+        .await
+        .unwrap_err();
+    assert!(error.to_string().contains("not available to the model"));
+    assert_eq!(calls.load(Ordering::SeqCst), 0);
+    assert_eq!(
+        execute
+            .invoke(
+                serde_json::json!({"tool_name": "mcp__external__visible", "params": {}}),
+                ToolContext::new(&[], "/tmp")
+            )
+            .await
+            .unwrap(),
+        "ok"
+    );
+    let hidden = tools.read()["mcp__late__hidden"].clone();
+    assert_eq!(
+        hidden
+            .invoke(serde_json::json!({}), ToolContext::new(&[], "/tmp"))
+            .await
+            .unwrap(),
+        "宿主调用成功"
+    );
+    assert_eq!(calls.load(Ordering::SeqCst), 1);
+}
+
 // ─── filter_tools tests ─────────────────────────────────────────────────
 
 #[test]
@@ -88,15 +207,6 @@ fn test_filter_explicit_zero_tools() {
         filtered.is_empty(),
         "tools: [] must not inherit parent tools"
     );
-}
-
-/// [回归测试] 显式 `tools: []` 也必须禁止 build_agent_from_def 后注入的工具。
-///
-/// 历史背景：WriteSandbox 不走父工具继承；若它在零工具 agent 上仍被注入，
-/// `tools: []` 就不再代表严格的零工具边界。
-#[test]
-fn test_explicit_zero_tools_rejects_injected_tools() {
-    assert!(!allows_injected_tools(&ToolsValue::NoTools));
 }
 
 #[test]
@@ -305,10 +415,12 @@ fn list(names: &[&str]) -> ToolsValue {
     ToolsValue::List(names.iter().map(|s| s.to_string()).collect())
 }
 
-/// [安全回归] explorer.md 的 `disallowedTools` 是裸名
-/// （`[Agent, Write, Edit, Bash, folder_operations, cron_register]`），而迁移后
-/// 父工具集的名字是模型面 effective name（`mcp__workspace__*`）。精确比较裸名会
-/// 静默不命中 ⇒ explorer 的只读保证被绕过；本用例锁定归一后的真裁剪。
+/// [安全回归] 声明侧 `disallowedTools` 写裸名（`Write` / `Bash` …），而父工具集的
+/// 名字是模型面 effective name（`mcp__workspace__*`）。精确比较裸名会静默不命中
+/// ⇒ 声明侧的 disallow 失效；本用例锁定归一后的真裁剪。
+///
+/// 夹具是合成裸名清单：builtin agent 现只在 `disallowedTools` 保留 `Agent`，不再
+/// disallow 读写类工具，因此该清单不对应任一 builtin agent 的当前声明。
 #[test]
 fn explorer_disallow_matches_workspace_effective_name() {
     let mut parent: Vec<Arc<dyn BaseTool>> = peri_acp_types::builtin_mcp::find("workspace")
@@ -339,7 +451,7 @@ fn explorer_disallow_matches_workspace_effective_name() {
         let effective = effective_name_of("workspace", original);
         assert!(
             !names.contains(&effective),
-            "裸名 `{original}` 必须归一命中 `{effective}`（explorer 只读保证），实际保留：{names:?}"
+            "裸名 `{original}` 必须归一命中 `{effective}`（声明侧 disallow 生效），实际保留：{names:?}"
         );
     }
     assert!(

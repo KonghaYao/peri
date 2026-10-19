@@ -317,7 +317,7 @@ async fn recover_flow(context: &ChildContext, target: &CloudTarget) -> Result<Ve
         "cold read must return the saved history",
     )?;
     facade
-        .rewind_history(&root, RewindBoundary::KeepThrough(history[0].id()))
+        .rewind_history(&root, RewindBoundary::KeepThrough(history[0].id()), &[])
         .await
         .map_err(failure)?;
     let rewound = facade.load_session_history(&root).await.map_err(failure)?;

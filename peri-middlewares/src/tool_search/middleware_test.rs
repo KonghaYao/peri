@@ -119,6 +119,32 @@ fn build_test_components() -> (
     (index, Arc::new(RwLock::new(shared)))
 }
 
+/// [回归测试] AgentResult 保留注册身份，但不能被搜索或 ExecuteExtraTool 调用。
+#[tokio::test]
+async fn test_agent_result_hidden_from_tool_search_and_execution() {
+    let (index, shared) = build_test_components();
+    shared.write().insert(
+        "AgentResult".into(),
+        Arc::new(crate::subagent::AgentResultTool::new()),
+    );
+    let mw = ToolSearchMiddleware::new(Arc::clone(&index), Arc::clone(&shared));
+    let mut state = peri_agent::agent::state::AgentState::new("/tmp");
+    mw.before_agent(&mut state).await.unwrap();
+    assert!(shared.read().contains_key("AgentResult"));
+    assert!(index.search("select:AgentResult", 10).is_empty());
+    let prompt = contribution(&mw).unwrap();
+    assert!(!prompt.contains("AgentResult"));
+    assert!(prompt.contains("CronRegister"));
+    let error = crate::tool_search::ExecuteExtraTool::new(shared)
+        .invoke(
+            serde_json::json!({"tool_name": "AgentResult", "params": {}}),
+            peri_agent::tools::ToolContext::new(&[], "/tmp"),
+        )
+        .await
+        .unwrap_err();
+    assert!(error.to_string().contains("not available to the model"));
+}
+
 #[test]
 fn test_collect_tools_returns_meta_tools() {
     let (index, shared) = build_test_components();

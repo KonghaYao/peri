@@ -179,6 +179,14 @@ mod initialization_tests;
 mod session_shape_tests;
 
 #[cfg(test)]
+#[path = "session_history_page_test.rs"]
+mod session_history_page_tests;
+
+#[cfg(test)]
+#[path = "session_history_rewind_test.rs"]
+mod session_history_rewind_tests;
+
+#[cfg(test)]
 #[path = "session_child_guard_test.rs"]
 mod session_child_guard_tests;
 

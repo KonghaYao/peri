@@ -1,3 +1,8 @@
+//! 会话服务协调器：查询 Plugin、MCP 和 Cron，并隔离各服务的本次错误。
+//!
+//! 同一 session-generation 保留 last-good；代次变化由 reset_services 清理缓存。
+//! 无可查询会话时只允许带启动提示的静态 hooks/plugins，不直接发布任何 atom。
+
 use serde::Deserialize;
 use serde_json::json;
 
@@ -32,6 +37,51 @@ impl Default for SessionServices {
     }
 }
 
+pub(super) struct ServiceObservation {
+    pub hooks: Vec<HookSummary>,
+    pub plugins: Vec<PluginSummary>,
+    pub error: Option<String>,
+}
+
+impl SessionServices {
+    pub(super) async fn refresh(
+        &mut self,
+        source: &super::SnapshotSource,
+        session_id: &str,
+        identity: &Option<(String, u64)>,
+    ) -> ServiceObservation {
+        if let Some(client) = &source.client
+            && !session_id.is_empty()
+            && identity.as_ref().is_some_and(|owner| owner.0 == session_id)
+        {
+            let error = query(client, session_id, self).await;
+            return ServiceObservation {
+                hooks: self.hooks.clone(),
+                plugins: self.plugins.clone(),
+                error,
+            };
+        }
+        *self = Self::default();
+        let error = Some(crate::i18n::tr(if session_id.is_empty() {
+            "service-projection-startup"
+        } else if source.client.is_none() {
+            "service-projection-no-client"
+        } else {
+            "service-projection-session-unavailable"
+        }));
+        let (hooks, plugins) = if session_id.is_empty() {
+            (source.hooks.clone(), source.plugins.clone())
+        } else {
+            (Vec::new(), Vec::new())
+        };
+        ServiceObservation {
+            hooks,
+            plugins,
+            error,
+        }
+    }
+}
+
 #[derive(Deserialize)]
 struct Plugins {
     hooks: Vec<HookSummary>,
@@ -56,6 +106,18 @@ struct McpServer {
     connection_status: String,
     oauth_status: String,
     tools_count: usize,
+    /// 工具有界投影；旧 host 不返回时为空（计数仍由 toolsCount 承载）。
+    #[serde(default)]
+    tools: Vec<McpToolWire>,
+    /// 资源有界投影；旧 host 不返回时为空。
+    #[serde(default)]
+    resources: Vec<McpResourceWire>,
+    /// 资源全量计数；旧 host 缺省为 0。
+    #[serde(default)]
+    resources_count: usize,
+    /// 订阅配置；旧 host 不返回时为 None。
+    #[serde(default)]
+    subscriptions: Option<McpSubscriptionsWire>,
     #[serde(default)]
     version: Option<String>,
     #[serde(default)]
@@ -68,6 +130,37 @@ struct McpServer {
     /// 服务器 URL（HTTP 传输）；详情视图展示。
     #[serde(default)]
     url: Option<String>,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct McpToolWire {
+    name: String,
+    #[serde(default)]
+    description: Option<String>,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct McpResourceWire {
+    uri: String,
+    #[serde(default)]
+    name: Option<String>,
+    #[serde(default)]
+    description: Option<String>,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct McpSubscriptionsWire {
+    #[serde(default)]
+    resources: Vec<String>,
+    #[serde(default)]
+    tools_list_changed: bool,
+    #[serde(default)]
+    prompts_list_changed: bool,
+    #[serde(default)]
+    resources_list_changed: bool,
 }
 
 pub(super) async fn query(
@@ -125,6 +218,32 @@ pub(super) async fn query(
                     status: server.connection_status,
                     needs_auth: server.oauth_status == "needs_authorization",
                     tools_count: server.tools_count,
+                    tools: server
+                        .tools
+                        .into_iter()
+                        .map(|tool| crate::kit::atoms::McpToolSummary {
+                            name: tool.name,
+                            description: tool.description,
+                        })
+                        .collect(),
+                    resources: server
+                        .resources
+                        .into_iter()
+                        .map(|resource| crate::kit::atoms::McpResourceSummary {
+                            uri: resource.uri,
+                            name: resource.name,
+                            description: resource.description,
+                        })
+                        .collect(),
+                    resources_count: server.resources_count,
+                    subscriptions: server.subscriptions.map(|subscriptions| {
+                        crate::kit::atoms::McpSubscriptionsSummary {
+                            resources: subscriptions.resources,
+                            tools_list_changed: subscriptions.tools_list_changed,
+                            prompts_list_changed: subscriptions.prompts_list_changed,
+                            resources_list_changed: subscriptions.resources_list_changed,
+                        }
+                    }),
                     error_summary: server.error_summary,
                     url: server.url,
                     ..McpServerSummary::default()

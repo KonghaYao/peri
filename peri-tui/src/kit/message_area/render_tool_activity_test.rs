@@ -276,16 +276,21 @@ fn test_system_note_levels() {
     let grid = GridSpec::grid_for(80);
     let sem = THEME_ATOM.state().read().semantic;
 
-    // Info → divider 线
+    // Info → 过程行注记 `│ label`（[用户定案 2026-10-14] 不画 `── label ──` 横线）
     let info_vm = TuiRenderUnit::TuiSystemNote(TuiSystemNote {
         text: "Context compacted \u{273b} 18k \u{2192} 7k".to_string(),
         level: TuiNoteLevel::Info,
         content_hash: 200,
     });
     let info_lines = vm_to_lines(&info_vm, &grid);
-    assert_eq!(info_lines.len(), 1, "Info 单行 divider");
+    assert_eq!(info_lines.len(), 1, "Info 单行注记");
     let text = line_text(&info_lines[0]);
-    assert!(text.contains("\u{2500}"), "divider 线，实际 {text:?}");
+    assert!(!text.contains('\u{2500}'), "注记不画横线，实际 {text:?}");
+    assert_eq!(
+        info_lines[0].spans[2].content.as_ref(),
+        "\u{2502}",
+        "左缘标记列 = 竖线"
+    );
     assert!(text.contains("Context compacted"), "来源文本可见");
 
     // Warning → `!` + warning accent 首行
@@ -297,9 +302,17 @@ fn test_system_note_levels() {
     let warn_lines = vm_to_lines(&warn_vm, &grid);
     let header = header_of(&warn_lines);
     assert!(header.contains('!'), "warning 符号 !，实际 {header:?}");
-    assert!(
-        warn_lines[0].spans[1].style.fg == Some(sem.status.warning),
-        "warning accent 色"
+    // 符号在过程区左缘标记列（§3）——按内容定位符号 span，别按列下标猜。
+    let symbol_span = warn_lines[0]
+        .spans
+        .iter()
+        .find(|sp| sp.content.contains('!'))
+        .expect("warning 符号 span");
+    assert_eq!(
+        symbol_span.style.fg,
+        Some(sem.status.warning),
+        "warning 符号用 warning accent 色，实际 {:?}",
+        symbol_span.style
     );
 
     // Error → `×` + error accent 首行；正文 muted

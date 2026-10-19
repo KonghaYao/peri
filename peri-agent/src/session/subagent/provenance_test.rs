@@ -54,6 +54,7 @@ fn directive(id: MessageId) -> MessageProjectionDirective {
                 preserve_recovery_handle: false,
             },
         }],
+        superseded_by: None,
     }
 }
 
@@ -124,6 +125,7 @@ async fn compact(session: &Arc<Session>, cwd: &str) {
         true,
         &mut 0,
         cwd,
+        None,
     )
     .await;
     *transcript.write() = owned;
@@ -272,7 +274,7 @@ async fn test_sqlite_subagent_spawn_full_micro_cold_resume_preserves_provenance(
     let resumed = SessionFactory::resume_subagent(Some(&parent), config)
         .await
         .unwrap();
-    {
+    let archived_ids = {
         let arc = resumed.session.transcript();
         let transcript = arc.read();
         assert_eq!(transcript.ancestor_len(), parent_messages.len());
@@ -284,8 +286,45 @@ async fn test_sqlite_subagent_spawn_full_micro_cold_resume_preserves_provenance(
             transcript.flags(parent_tool.id()).projection,
             Some(directive(parent_tool.id()))
         );
-        for (id, flags) in child_flags {
-            assert_eq!(transcript.flags(id), flags, "当前 child own flags 必须恢复");
+        // 冷恢复只重建有效视图：有效 own 条目的标记必须逐项还原。
+        for (id, flags) in child_flags.iter().filter(|(_, flags)| !flags.excluded) {
+            assert_eq!(
+                transcript.flags(*id),
+                *flags,
+                "当前 child own flags 必须恢复"
+            );
+        }
+        // 已被 child Full 排除的 own 条目不属于有效视图：恢复不得把正文或标记带回热态
+        // （排除标记本身也不在有效集合里）。
+        let archived_ids = child_flags
+            .iter()
+            .filter(|(_, flags)| flags.excluded)
+            .map(|(id, _)| *id)
+            .collect::<Vec<_>>();
+        for id in &archived_ids {
+            assert!(
+                transcript.get(*id).is_none(),
+                "已排除 own 条目不得回到有效视图"
+            );
+            assert!(
+                !transcript.flags(*id).excluded,
+                "有效视图不携带归档条目的排除标记"
+            );
+        }
+        archived_ids
+    };
+    {
+        // 归档原文仍在存储里可读：收缩是「不再由核心热态持有」，不是物理删除。
+        let archived = reopened
+            .load_session_history(&peri_acp_types::thread::ThreadId::from(child_id.clone()))
+            .await
+            .unwrap();
+        let archived = archived
+            .iter()
+            .map(PersistedPayload::id)
+            .collect::<Vec<_>>();
+        for id in &archived_ids {
+            assert!(archived.contains(id), "已排除 own 原文必须仍可从存储读取");
         }
     }
     {

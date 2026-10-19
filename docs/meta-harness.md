@@ -46,9 +46,8 @@ MetaHarness 是 Peri 的一项配置能力：一个 `settings.json` kv 字段（
   `folder_operations` / `Bash`）。这 7 个工具全部是 direct，因此关闭面是三个真实面
   （首个模型请求 tools、subagent `parent_tools`、workflow agent 工具列表）；deferred
   目录与检索面本来就不含 direct 工具（平凡成立）。关闭后链上不再提供任何文件系统与
-  shell 工具（该实例之外：外部 MCP server 与 subagent 的
-  `WriteSandbox` 不在此关闭范围）。实例、handler 与 pool 级连接状态保留（策略关闭不是
-  物理销毁）。
+  shell 工具（该实例之外：外部 MCP server 不在此关闭范围）。实例、handler 与 pool 级
+  连接状态保留（策略关闭不是物理销毁）。
 
 ## 段落 ID 清单
 

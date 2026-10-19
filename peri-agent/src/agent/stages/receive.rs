@@ -131,20 +131,59 @@ pub(super) async fn run_receive_with_budget(
                     (present, transcript.idempotent_reminder_port())
                 };
                 if already_present {
+                    // 已安装（同一 ID 同内容）：不重复发射，也不重复安装。
                     newly_committed = false;
-                } else {
-                    if let Some((resources, thread_id, writer)) = port {
-                        let committed = async {
-                            if let Some(writer) = writer {
-                                crate::session::MessageTranscript::flush_via_tx(&writer).await?;
-                            }
-                            resources
-                                .append_reminder_if_absent(&thread_id, delivery_id, reminder)
-                                .await
-                                .map_err(anyhow::Error::from)
+                } else if let Some((resources, thread_id, writer)) = port {
+                    let committed = async {
+                        if let Some(writer) = writer {
+                            crate::session::MessageTranscript::flush_via_tx(&writer).await?;
                         }
-                        .await;
-                        if let Err(error) = committed {
+                        resources
+                            .append_reminder_if_absent(&thread_id, delivery_id, reminder)
+                            .await
+                            .map_err(anyhow::Error::from)
+                    }
+                    .await;
+                    match committed {
+                        // (a) 本次提交成功：安装并作为新交付发射。
+                        Ok(true) => {
+                            newly_committed = input
+                                .context
+                                .session
+                                .transcript
+                                .write()
+                                .mirror_committed_reminder(delivery_id, reminder.clone());
+                        }
+                        // 持久化事实已存在但热态没有（如 Full Compact 收缩释放了它）：
+                        // (b) 仍有效 → 补安装，不作为新交付发射；(c) 已排除 → 两者都不做。
+                        Ok(false) => {
+                            newly_committed = false;
+                            let flags = resources
+                                .load_message_flags(&thread_id, &[delivery_id])
+                                .await;
+                            let flags = match flags {
+                                Ok(flags) => flags,
+                                Err(error) => {
+                                    input
+                                        .context
+                                        .session
+                                        .queue
+                                        .push_batch(consumed[index..].to_vec());
+                                    return Err(anyhow::Error::from(error).into());
+                                }
+                            };
+                            // 该 ID 刚被证明已提交，缺席只表示后端没有记录排除事实；
+                            // 只有读到的 excluded 才阻止补安装（归档原文不得回灌热态）。
+                            if !flags.get(&delivery_id).is_some_and(|flags| flags.excluded) {
+                                input
+                                    .context
+                                    .session
+                                    .transcript
+                                    .write()
+                                    .mirror_committed_reminder(delivery_id, reminder.clone());
+                            }
+                        }
+                        Err(error) => {
                             input
                                 .context
                                 .session
@@ -153,6 +192,7 @@ pub(super) async fn run_receive_with_budget(
                             return Err(error.into());
                         }
                     }
+                } else {
                     newly_committed = input
                         .context
                         .session
@@ -197,17 +237,21 @@ pub(super) async fn run_receive_with_budget(
             for (id, content) in user_inputs {
                 let input_id = id.as_uuid().to_string();
                 if delivered.contains(&input_id) {
+                    // 交付事件走同一条 render FIFO，但只等待容量、不降级丢弃：
+                    // forwarder 按 FIFO 消费时补打 session_seq 并绑定交付日志，
+                    // 事件在后续任意路径丢失时仍能按该序号在水位前补发。
                     input
                         .context
                         .runtime
                         .event_bus
-                        .emit_render(RenderEvent::UserInputDelivered {
+                        .emit_render_reliable(RenderEvent::UserInputDelivered {
                             turn_id: input.context.turn_id(),
                             agent_id: input.context.session.agent_id,
                             generation: mailbox.generation().to_owned(),
                             input_id,
                             content,
-                        });
+                        })
+                        .await;
                 }
             }
         }

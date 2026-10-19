@@ -30,6 +30,10 @@ mod oauth_tests;
 #[path = "cache_policy_initialize_test.rs"]
 mod cache_policy_tests;
 
+#[cfg(test)]
+#[path = "subscription_timeout_test.rs"]
+mod subscription_timeout_tests;
+
 /// 三分类超时选择（IF-D1）：由传输形态决定，**禁止**再写成「http / 否则 stdio」的二元
 /// 判定——那会让 builtin 复用 stdio 超时，并把失败日志的 `transport` 字段写成事实错误。
 pub(super) fn connect_timeout(kind: TransportKind) -> std::time::Duration {

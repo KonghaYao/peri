@@ -133,6 +133,85 @@ impl SessionResourcesImpl {
         self.gate.recheck_binding_of(id, full).await
     }
 
+    /// 无绑定会话的执行归属重建：幂等、可重跑，legacy 接纳与批量修复共用这一个入口。
+    ///
+    /// 只修本机 legacy 来源证据成立的历史会话（无父会话、无 frozen、保存的 cwd 落在
+    /// 本机已知归属路径内，与绑定分类同一判据）；已有绑定时只按既有事实复核，不改写。
+    /// 没有绑定时按保存的 cwd 在本机重新观测：观测出的归属与原归属行不同时，只有原
+    /// 归属行**从未被本机观测过**（迁移期按保存 cwd 归组、没有执行证据的历史行）才
+    /// 允许把会话归属收敛过去——行上已有证据会静默改绑本机认识的历史记录，此时按
+    /// [`WorkspaceError::UnverifiedLegacyOwner`] 失败，历史仍按 ID 可读。
+    pub(super) async fn relink_unbound_session(
+        &self,
+        id: &ThreadId,
+    ) -> SessionResourceResult<ResolvedWorkspace> {
+        self.gate.ensure_session_write()?;
+        if matches!(self.home, SessionDataHome::RemoteStore) {
+            return Err(SessionResourceError::new(
+                SessionResourceErrorKind::Unsupported,
+            ));
+        }
+        if self.gate.data().binding_of(id).await?.is_some() {
+            return self.recheck_binding_of(id, false).await;
+        }
+        // 只修「本机 legacy 来源证据成立」的历史会话：同一判据（无父会话、无 frozen、
+        // 保存的 cwd 落在本机已知归属路径内）已经用于分类，这里不另立一套。
+        if !self
+            .gate
+            .local()
+            .legacy_confirmed(id)
+            .await
+            .map_err(execution_failure)?
+        {
+            return Err(Self::unverified_legacy_owner());
+        }
+        let meta = self.gate.data().load_meta(id).await?;
+        let local = self.gate.local();
+        if !local.directory_available(Path::new(&meta.cwd)).await {
+            return Err(Self::unverified_legacy_owner());
+        }
+        let foreign_machine = self
+            .gate
+            .data()
+            .machine_id_of(id)
+            .await?
+            .is_some_and(|machine| {
+                local
+                    .machine_id()
+                    .map_or(true, |current| machine != current)
+            });
+        if foreign_machine {
+            return Err(Self::unverified_legacy_owner());
+        }
+        let resolved = match local.resolve_workspace(Path::new(&meta.cwd)).await {
+            Ok(resolved) => resolved,
+            Err(error) => match error.downcast_ref::<WorkspaceError>() {
+                // 观测不到这个目录：不是「绑定向哪里」的问题，按历史归属不可核实回答。
+                Some(WorkspaceError::Unavailable) => return Err(Self::unverified_legacy_owner()),
+                _ => return Err(execution_failure(error)),
+            },
+        };
+        let owner = self
+            .gate
+            .data()
+            .workspace_id_of(id)
+            .await?
+            .ok_or_else(not_found)?;
+        if owner != resolved.workspace_id {
+            local
+                .relink_unbound_ownership(id, &resolved)
+                .await
+                .map_err(execution_failure)?;
+        }
+        Ok(resolved)
+    }
+
+    fn unverified_legacy_owner() -> SessionResourceError {
+        SessionResourceError::new(SessionResourceErrorKind::Workspace(
+            WorkspaceError::UnverifiedLegacyOwner,
+        ))
+    }
+
     /// `Missing` 与 `LegacyConfirmed` 的差别是本机来源证据：无绑定、无父会话、无 frozen，
     /// 且保存的绝对 cwd 落在本机已登记工作区内，才表达为 legacy 历史；其余的无
     /// 绑定状态（外来会话、登记缺失）不冒充 legacy。

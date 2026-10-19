@@ -12,6 +12,18 @@ pub(crate) struct FoldedHistory {
 }
 
 impl FoldedHistory {
+    /// S6.2：段释放/结构变化时丢弃旧源与折叠结果；覆盖表保留（用户状态）。
+    pub(crate) fn invalidate(&mut self) {
+        self.source = None;
+        self.folded = im::Vector::new();
+        self.phase = None;
+    }
+
+    #[cfg(test)]
+    pub(super) fn debug_cached_len(&self) -> usize {
+        self.source.as_ref().map_or(0, im::Vector::len) + self.folded.len()
+    }
+
     pub(super) fn project(
         &mut self,
         source: &im::Vector<TuiRenderUnit>,

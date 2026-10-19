@@ -194,7 +194,7 @@ for (const loadResponse of [{}, { _meta: { "peri.sessionWorkspaceV1": { read_onl
     await agent.session.start("existing");
     expect(agent.session.path).toBe("/persisted/workspace");
     expect(transport.calls.find((call) => call.method === "session/load")?.params).toEqual({
-      cwd: "/persisted/workspace", mcpServers: [], sessionId: "existing",
+      cwd: "/persisted/workspace", mcpServers: [], sessionId: "existing", loadGeneration: expect.any(String),
     });
     await agent.close();
   });

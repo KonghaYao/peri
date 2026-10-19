@@ -2,6 +2,7 @@ pub(crate) mod draft;
 pub mod edit;
 pub mod folder;
 pub mod glob;
+pub(crate) mod glob_patterns;
 pub mod grep;
 pub(crate) mod grep_args;
 pub(crate) mod grep_format;
@@ -9,9 +10,8 @@ pub(crate) mod path_hints;
 pub mod read;
 pub(crate) mod transaction;
 pub mod write;
-pub mod write_sandbox;
 
-use std::path::{Path, PathBuf};
+use std::path::{Component, Path, PathBuf};
 
 pub use edit::EditFileTool;
 pub use folder::FolderOperationsTool;
@@ -19,12 +19,11 @@ pub use glob::GlobFilesTool;
 pub use grep::GrepTool;
 pub use read::ReadFileTool;
 pub use write::WriteFileTool;
-pub use write_sandbox::WriteSandboxTool;
 
 /// 统一路径解析：相对路径基于 cwd，绝对路径直接使用。
 ///
 /// 通过 `canonicalize` 解析 `..`、`.`、symlinks，使 HITL 审批时显示真实路径，
-/// 防止路径遍历攻击被用户忽略。对于尚不存在的文件，规范化父目录 + 文件名。
+/// 防止路径遍历攻击被用户忽略。对于尚不存在的文件，逐组件解析已有祖先并保留缺失后缀。
 pub fn resolve_path(cwd: &str, file_path: &str) -> PathBuf {
     let raw = if Path::new(file_path).is_absolute() {
         Path::new(file_path).to_path_buf()
@@ -35,13 +34,23 @@ pub fn resolve_path(cwd: &str, file_path: &str) -> PathBuf {
     if raw.exists() {
         return raw.canonicalize().unwrap_or(raw);
     }
-    // 路径不存在（新文件）：canonicalize 父目录 + 保留文件名
-    if let (Some(parent), Some(file_name)) = (raw.parent(), raw.file_name()) {
-        if let Ok(canon_parent) = parent.canonicalize() {
-            return canon_parent.join(file_name);
+    // 路径不存在：逐组件解析已有祖先，先跟随链接再处理 ..，保留缺失后缀。
+    let mut resolved = PathBuf::new();
+    for component in raw.components() {
+        match component {
+            Component::CurDir => {}
+            Component::ParentDir => {
+                resolved.pop();
+            }
+            other => {
+                resolved.push(other.as_os_str());
+                if let Ok(canonical) = resolved.canonicalize() {
+                    resolved = canonical;
+                }
+            }
         }
     }
-    raw
+    resolved
 }
 
 /// 将输入字符串解析为 JSON Value，失败时原样返回为字符串

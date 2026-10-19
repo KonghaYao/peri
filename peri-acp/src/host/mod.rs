@@ -27,6 +27,7 @@ use peri_acp_types::ports::{AgentCatalogPort, McpPoolPort, McpTaskOwnerPort, Too
 use tokio_util::sync::CancellationToken;
 
 use crate::provider::{LlmProvider, PeriConfig};
+use history_window::HistoryWindowCoordinator;
 
 pub mod assemble;
 pub(crate) mod compact_config;
@@ -51,6 +52,9 @@ mod execution;
 #[cfg(test)]
 #[path = "executor_flow_test.rs"]
 mod executor_flow_tests;
+mod history_page;
+/// `peri.historyWindowV1` 的 Host coordinator 与 open/page/seek 路由。
+mod history_window;
 /// session-owned 交互路由（按可信归属选审批 endpoint；投递失败原因的诚实产出点：
 /// `NoOnlineEndpoint` / `OwnerUnmatched` / `AttachmentDetached`，见 `interaction_router.rs`）。
 mod interaction_router;
@@ -92,6 +96,7 @@ mod mcp_v4_wire_fixture;
 mod mcp_v4_wave2;
 mod notify;
 mod oauth_delivery;
+mod ownership;
 mod prediction;
 mod prediction_projection;
 mod prepared;
@@ -140,7 +145,7 @@ pub(crate) use continuation::{
 pub(crate) use notify::{extract_session_id, handle_notification, send_session_info_update};
 pub(crate) use prompt::run_prompt;
 pub(crate) use prompt_dispatch::{dispatch_prompt_turn, PromptOrigin};
-pub(crate) use requests::handle_request;
+pub(crate) use requests::handle_request_for_connection;
 
 // ── Session state ────────────────────────────────────────────────────────────
 
@@ -149,6 +154,29 @@ pub(crate) use requests::handle_request;
 /// 与 [`peri_acp_types::tool_invocation::InvocationOrigin::Host`] 同族（Host 入口
 /// 命名空间）；交互归属用它 + session 级单调序号定位一次 Host 请求。
 pub(crate) const SCHEDULED_TRIGGER_NAMESPACE: &str = "peri/cron/scheduled-trigger";
+
+/// live session 代次来源：进程内单调，不复用 `LoadGeneration`。
+static NEXT_SESSION_GENERATION: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
+
+/// 为一次新的 live session 发布生成代次。
+pub(crate) fn next_session_generation() -> u64 {
+    NEXT_SESSION_GENERATION.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+}
+
+/// 有效上下文在 Host 与执行器之间的所有权状态。
+///
+/// 同一时刻正文只有一个执行期所有者：Host 持有（Resident）时执行器不得另有
+/// 副本；移交后（HandedOff）Host 的 `history_payloads` 为空，**不能**据此判断
+/// 会话为空。持久化结果不确定时必须进入 ReloadRequired，从权威存储冷恢复。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum ContextOwnership {
+    /// 有效上下文驻留 Host，可读、可派生展示投影。
+    Resident,
+    /// 已随本轮执行移交给执行器；Host 不持有正文。
+    HandedOff,
+    /// 热态不可继续（提交结果不确定），下一次使用前必须从存储恢复。
+    ReloadRequired,
+}
 
 pub(crate) struct SessionState {
     // 以下字段 stdio 路径的 typed handler（host::stdio）需要读写，批 1 起
@@ -159,9 +187,25 @@ pub(crate) struct SessionState {
     pub(crate) cwd: String,
     pub(crate) environment: Option<Arc<workspace::SessionEnvironment>>,
     pub(crate) closing: bool,
-    pub(crate) history: Vec<BaseMessage>,
-    /// Canonical persisted history; `history` is a compatibility projection for legacy commands.
+    /// 有效上下文的执行期所有权（S2 所有权收敛）。
+    pub(crate) context_ownership: ContextOwnership,
+    /// 当前**有效**的持久化历史（excluded 正文不在其中）。这是 Host 唯一持有的
+    /// 正文容器；命令与展示所需的 `BaseMessage` 投影按需短暂派生。
+    /// 完整 canonical 历史（含 excluded 原文）只从存储读取。
     pub(crate) history_payloads: Vec<peri_acp_types::store::PersistedPayload>,
+    /// 会话结构版本：**破坏历史范围**的提交（rewind / 精确删除）成功一次即 `+1`
+    /// （REQ-T04 末段、验收 A19「旧 cursor 失效」）。
+    ///
+    /// 内存计数器，不落盘：本仓不加 DDL，且它保护的正是「本次运行内已发出的游标」。
+    /// 进程重启后归零——重启后的旧游标仍要过存储那一关（锚点/范围身份查表）。
+    /// **追加消息与 Full/Smart compact 不推进它**：REQ-H02 要求一次在途浏览不被它们打断。
+    pub(crate) structure_version: u64,
+    /// live session 实例代次：每次发布新 `SessionState` 或显式 `session/load` 重新对齐时
+    /// 生成。与既有 `LoadGeneration` 无关（后者只标记一次初始回放）。
+    pub(crate) session_generation: u64,
+    /// `peri.historyWindowV1` 的轻量运行期事实：ticket、committed tail、checkpoint、
+    /// rewind 状态。**不保存历史正文**。
+    pub(crate) history_window: HistoryWindowCoordinator,
     pub(crate) cancel_token: Option<CancellationToken>,
     /// **session-owned 交互互斥门**：同一 session 内 Approval / Questions 串行。
     ///
@@ -193,6 +237,42 @@ pub(crate) struct SessionState {
     pub(crate) title: Option<String>,
     /// 预测生成的会话标签（未来按标签检索使用）。
     pub(crate) tags: Vec<String>,
+}
+
+impl SessionState {
+    /// 新 live 实例或显式重新 load：替换 generation 并撤销旧窗口票据。
+    pub(crate) fn refresh_session_generation(&mut self) {
+        self.session_generation = next_session_generation();
+        self.history_window.revoke_ticket();
+        self.history_window.committed_tail = None;
+        self.history_window.checkpoint_id = None;
+        self.history_window.summary_entry_id = None;
+        self.history_window.last_notified_checkpoint = None;
+    }
+
+    /// 派生当前有效消息投影（提醒等无消息形态的条目不在此列）。
+    pub(crate) fn effective_messages(&self) -> Vec<BaseMessage> {
+        self.history_payloads
+            .iter()
+            .filter_map(|payload| payload.as_message().cloned())
+            .collect()
+    }
+
+    /// Host 侧有效上下文的对象级快照（只读诊断；不克隆正文）。
+    pub(crate) fn history_memory_snapshot(
+        &self,
+    ) -> peri_agent::session::memory_probe::PayloadSetSnapshot {
+        peri_agent::session::memory_probe::payload_set_snapshot(
+            &self.history_payloads,
+            self.history_payloads.capacity(),
+        )
+    }
+
+    /// Host 是否持有可读的有效上下文。`HandedOff`/`ReloadRequired` 时不能把空
+    /// `history_payloads` 解释为空会话。
+    pub(crate) fn owns_effective_context(&self) -> bool {
+        self.context_ownership == ContextOwnership::Resident
+    }
 }
 
 // ── Server config ────────────────────────────────────────────────────────────
@@ -373,8 +453,9 @@ async fn run_acp_server_inner(
     let cfg = Arc::new(cfg);
     oauth_delivery::spawn_oauth_consumer(oauth_event_rx, &transport, &cfg);
     let sessions: SharedSessions = sessions;
-    // Per-session prompt serialization lock: ensures that when a prompt completes
-    // (state.history updated) the next prompt for the same session sees the updated history.
+    // Per-session prompt serialization lock: the next prompt for the same session only
+    // starts after the previous turn has adopted its effective history (or marked
+    // ReloadRequired); HandedOff means the body is owned by the in-flight executor, not empty.
     let prompt_locks: PromptLocks = Arc::new(tokio::sync::Mutex::new(HashMap::new()));
 
     // 内部 continuation 通知通道：executor on_bg_complete 闭包 → scheduler。

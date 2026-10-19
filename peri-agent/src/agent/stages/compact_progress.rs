@@ -3,7 +3,7 @@
 use crate::agent::compact_v2::config::CompactConfig;
 use crate::agent::token::ContextBudget;
 use crate::error::{AgentError, AgentResult};
-use crate::messages::BaseMessage;
+use crate::messages::{BaseMessage, MessageId};
 use crate::session::MessageTranscript;
 use peri_model::TokenUsage;
 
@@ -23,35 +23,52 @@ pub(crate) struct CompactBudgetRecovery {
     full_generation: u64,
     request_generation: u64,
     pending_generation: Option<u64>,
-    full_end: usize,
+    /// 上次 Full 提交后末尾摘要消息的 id：稳定身份水印，代替「提交时的条目数」。
+    /// 收缩会释放条目，位置不再可比；水印丢失（rewind/重建）等价于旧边界失效。
+    full_watermark: Option<MessageId>,
     unrecovered_observations: u32,
 }
 
 impl CompactBudgetRecovery {
+    /// 记录一次已成功的 Full。
+    ///
+    /// `new_work_before_full` 必须在 Full 改动 transcript **之前**采集（见
+    /// [`Self::new_work_since_full`]）：Full 自己追加的摘要不是新工作，而收缩后
+    /// 位置不再可比，事后只能由调用方在提交前判定。
     pub(crate) fn record_full_applied(
         &mut self,
         transcript: &MessageTranscript,
-        before_entries_len: usize,
+        new_work_before_full: bool,
     ) {
-        // 此时 Full 已排除旧消息；新 work 检查保留这些刚被压缩的原消息，
-        // 但不计入 Full 自己追加的摘要。
-        if self.has_new_work(transcript, before_entries_len, false) {
+        if new_work_before_full {
             self.unrecovered_observations = 0;
         }
-        self.full_end = transcript.len();
+        // 水印取末尾条目：它覆盖 Full 本次追加的摘要（及同批尾部条目），
+        // 使这些生成内容不参与后续「新工作」判定。
+        self.full_watermark = transcript.entries().last().map(|entry| entry.id());
         self.full_generation = self.full_generation.saturating_add(1);
         self.pending_generation = Some(self.full_generation);
+    }
+
+    /// 自上次 Full 以来是否出现真正的新工作（非空 Human / Tool 消息）。
+    ///
+    /// 用稳定身份定位上次 Full 的末尾水印，只看其后的条目——语义等价于
+    /// 「`full_end..len`」但对收缩鲁棒。水印不在 transcript 里（rewind/重建释放了
+    /// 它）等价于旧实现的 `end < full_end`：旧边界失效，按有新工作处理。
+    pub(crate) fn new_work_since_full(&self, transcript: &MessageTranscript) -> bool {
+        self.has_new_work(transcript, false)
     }
 
     pub(crate) fn begin_request(
         &mut self,
         transcript: &MessageTranscript,
     ) -> Option<FullBudgetProbe> {
-        if self.has_new_work(transcript, transcript.len(), true) {
+        if self.has_new_work(transcript, true) {
             // Full 后、请求前又注入可压缩内容：该请求已不代表 Full 的结果。
             self.unrecovered_observations = 0;
             self.pending_generation = None;
-            self.full_end = transcript.len();
+            // 水印前移吞掉这批新工作：下个 epoch 从当前末尾重新起算。
+            self.full_watermark = transcript.entries().last().map(|entry| entry.id());
         }
         let full_generation = self.pending_generation?;
         self.request_generation = self.request_generation.saturating_add(1);
@@ -106,13 +123,16 @@ impl CompactBudgetRecovery {
         })
     }
 
-    fn has_new_work(&self, transcript: &MessageTranscript, end: usize, visible_only: bool) -> bool {
-        // Rewind/rebuild 后旧边界不再有效，允许重新压缩恢复后的工作。
-        if end < self.full_end {
+    fn has_new_work(&self, transcript: &MessageTranscript, visible_only: bool) -> bool {
+        // 水印缺席有两种含义，都按「旧边界失效，允许重新压缩」处理：从未发生过 Full，
+        // 或 rewind/重建释放了水印条目（祖先区不受影响——水印是 own 条目）。
+        let Some(watermark) = self.full_watermark else {
             return true;
-        }
-        transcript.entries()[self.full_end.max(transcript.ancestor_len()).min(end)..end]
-            .iter()
+        };
+        let Some(rest) = transcript.entries_after(watermark) else {
+            return true;
+        };
+        rest.iter()
             .filter(|entry| !visible_only || !transcript.flags(entry.id()).excluded)
             .filter_map(|entry| entry.as_message())
             .any(|message| {

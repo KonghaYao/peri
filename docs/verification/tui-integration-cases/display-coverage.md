@@ -45,7 +45,7 @@
 | `Download` | P1-16 |
 | `ModelQuickSwitch` | P1-17 |
 
-`PopupKind` 当前共 7 个变体。旧 AskUser popup 文件的存在不等于生产入口仍显示该弹窗。
+`PopupKind` 当前共 7 个变体。旧 AskUser popup 的实现文件与其清理入口已随 TUI 面板架构重构删除（`popups/ask_user_popup.rs`、`close_ask_user_popup_*`），AskUser 只经 Panel 交互。
 
 ## 其他可见区域与状态
 

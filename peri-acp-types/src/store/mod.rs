@@ -25,7 +25,7 @@ use serde::{Deserialize, Serialize};
 use crate::messages::{BaseMessage, MessageId};
 use crate::projection::MessageProjectionDirective;
 use crate::system_reminder::{
-    decode_system_reminder_json, SystemReminder, TrustedSystemReminder,
+    decode_system_reminder_json, reminder_egress_allowed, SystemReminder, TrustedSystemReminder,
     TrustedSystemReminderFactory,
 };
 use crate::thread::{ThreadId, ThreadListEntry, ThreadMeta};
@@ -55,6 +55,21 @@ impl PersistedPayload {
         match self {
             Self::Message(message) => Some(message),
             Self::SystemReminder { .. } => None,
+        }
+    }
+
+    /// 客户端可展示性：System 条目与 Model-only reminder 没有客户端渲染形式。
+    ///
+    /// 与回放出口的过滤同源（`dispatch::session_replay` 的 `!is_system()` 与
+    /// `TransportEventSink::push_system_reminder` 的受众判定）。历史分页据此跳过这类行，
+    /// 但**不影响它的读取位置**：位置按行推进，展示按本条规则过滤。
+    pub fn displayable_to_client(&self) -> bool {
+        match self {
+            Self::Message(message) => !message.is_system(),
+            Self::SystemReminder { reminder, .. } => reminder_egress_allowed(
+                reminder.as_reminder(),
+                crate::system_reminder::ReminderAudience::Tui,
+            ),
         }
     }
 }
@@ -213,8 +228,25 @@ pub struct MessageFlags {
     pub excluded: bool,
     /// 投影指令（v2）。None 表示旧版 flag 或未 compact。
     /// 旧 JSON（无此字段）反序列化后为 None。
+    ///
+    /// 它同时是 flags 的持久化载荷：Full Compact 归档时写入的取代关系
+    /// （[`MessageProjectionDirective::superseded_by`]）也经这里往来，
+    /// 读取请用 [`MessageFlags::superseded_by`]。
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub projection: Option<MessageProjectionDirective>,
+}
+
+impl MessageFlags {
+    /// 取代本条的摘要消息 id（Full Compact 归档时写入）。
+    ///
+    /// 只有 `excluded` 为真时才有意义：它是「本条被哪条摘要取代」这条事实的读取口，
+    /// 供 rewind 精确判定排除是否仍有依据（[`history::rewind_clear_excluded_ids`]）。
+    /// 未记录（本字段落地前归档的历史）返回 `None`，调用方在该情形下沿用保守判定。
+    pub fn superseded_by(&self) -> Option<MessageId> {
+        self.projection
+            .as_ref()
+            .and_then(|directive| directive.superseded_by)
+    }
 }
 
 #[async_trait]

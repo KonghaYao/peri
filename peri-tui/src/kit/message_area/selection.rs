@@ -126,6 +126,26 @@ impl SlotLines {
             + self.prefix.capacity() * std::mem::size_of::<usize>()
     }
 
+    /// S6.1：正文行只按共享 `Arc` 指针计一次。
+    #[allow(dead_code)]
+    pub(super) fn retained_bytes_with(
+        &self,
+        seen: &mut crate::kit::retained_bytes::SeenAllocations,
+    ) -> usize {
+        self.retained_metadata_bytes()
+            + self
+                .parts
+                .iter()
+                .map(|part| crate::kit::retained_bytes::retained_arc_lines_bytes(&part.lines, seen))
+                .sum::<usize>()
+    }
+
+    #[allow(dead_code)]
+    pub(super) fn retained_bytes(&self) -> usize {
+        let mut seen = crate::kit::retained_bytes::SeenAllocations::default();
+        self.retained_bytes_with(&mut seen)
+    }
+
     pub(super) fn get(&self, logical: usize) -> Option<&Line<'static>> {
         if logical >= self.len() {
             return None;
@@ -553,13 +573,34 @@ pub(super) fn extract_visual_range_index(
         }
         let line = materialized.as_ref()?.1.line(local_idx)?;
         let plain = text_selection::line_to_plain_text(line);
+        // 台阶行（§6 ` ╰─╮` / ` ╭─╯`）是纯结构 chrome——整行跳过，既不进入
+        // 复制文本也不为其保留空行。
+        if super::render::is_step_row(line) {
+            continue;
+        }
+        // 过程区转场台阶由 render 层插入 slot 行首（§6）：其后各行的语义索引
+        // 顺延 1——`semantic_line_text` 的变体分派按「VM 自身行序」定位
+        // tool header / 子 agent 工具行。
+        let step_offset = usize::from(
+            materialized
+                .as_ref()
+                .and_then(|(_, lines)| lines.line(0))
+                .is_some_and(super::render::is_step_row),
+        );
         // [D3 §9] 语义文本（无 UI chrome）——仅提取层替换，列模拟仍基于 plain。
         // [Fix §15] 传入已渲染行而非重渲染 VM：slot 行与渲染缓存同源，
         // 避免 N 行选区 × N 次全量 markdown 解析（旧实现每行新建缓存重渲染）。
         let semantic: Option<(String, usize)> = view_models
             .and_then(|vms| vms.get(entry.slot_index))
             .and_then(|vm| {
-                grid.and_then(|g| super::render::semantic_line_text(vm, local_idx, line, &g))
+                grid.and_then(|g| {
+                    super::render::semantic_line_text(
+                        vm,
+                        local_idx.saturating_sub(step_offset),
+                        line,
+                        &g,
+                    )
+                })
             })
             .map(|sem| {
                 // 语义文本在 plain 中的定位（重建行如 tool header 可能不是

@@ -26,6 +26,43 @@ async fn test_event_bus_emit_and_receive_render() {
 }
 
 #[tokio::test]
+async fn test_emit_render_reliable_waits_instead_of_dropping_when_full() {
+    let (bus, mut handles) = EventBus::new(EventBusConfig {
+        render_capacity: 1,
+        ..Default::default()
+    });
+    let (turn_id, agent_id) = make_ids();
+
+    bus.emit_render(RenderEvent::TextChunk {
+        turn_id,
+        agent_id,
+        message_id: MessageId::new(),
+        chunk: "first".to_string(),
+    });
+
+    // 通道已满：可靠发送必须等待容量，而不是像 emit_render 一样丢弃。
+    let sender = tokio::spawn(async move {
+        bus.emit_render_reliable(RenderEvent::TextChunk {
+            turn_id,
+            agent_id,
+            message_id: MessageId::new(),
+            chunk: "delivery".to_string(),
+        })
+        .await;
+    });
+    tokio::task::yield_now().await;
+
+    let first = handles.render_rx.recv().await.expect("first event");
+    let second = tokio::time::timeout(std::time::Duration::from_secs(1), handles.render_rx.recv())
+        .await
+        .expect("reliable send must not be dropped")
+        .expect("second event");
+    assert!(matches!(first, RenderEvent::TextChunk { chunk, .. } if chunk == "first"));
+    assert!(matches!(second, RenderEvent::TextChunk { chunk, .. } if chunk == "delivery"));
+    sender.await.expect("sender task");
+}
+
+#[tokio::test]
 async fn test_event_bus_emit_and_receive_state() {
     let (bus, mut handles) = EventBus::new(EventBusConfig::default());
     let (turn_id, agent_id) = make_ids();

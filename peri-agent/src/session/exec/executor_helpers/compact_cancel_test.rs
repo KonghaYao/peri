@@ -5,10 +5,10 @@ use crate::session::test_resources::git_repository;
 use crate::thread::{ThreadId, ThreadMeta};
 use peri_acp_types::messages::MessageId;
 use peri_acp_types::session_resources::{
-    BindingRecheck, BindingState, ChildResumeClaim, ChildSnapshot, ForkSnapshot,
-    FrozenSnapshotBytes, NewSession, NewSessionMeta, PersistenceRecovery, RewindBoundary,
-    SessionAvailability, SessionMetaPatch, SessionResourceError, SessionResourceErrorKind,
-    SessionResourceResult, SessionResources, SessionSnapshot,
+    ActiveSessionSnapshot, BindingRecheck, BindingState, ChildResumeClaim, ChildSnapshot,
+    ForkSnapshot, FrozenSnapshotBytes, NewSession, NewSessionMeta, PersistenceRecovery,
+    RewindBoundary, RewindOutcome, SessionAvailability, SessionMetaPatch, SessionResourceError,
+    SessionResourceErrorKind, SessionResourceResult, SessionResources, SessionSnapshot,
 };
 use peri_acp_types::store::{CompactionChange, PersistedPayload};
 use peri_acp_types::workspace::{
@@ -239,8 +239,11 @@ impl SessionResources for ControlledStore {
         &self,
         id: &ThreadId,
         boundary: RewindBoundary,
-    ) -> SessionResourceResult<()> {
-        self.inner.rewind_history(id, boundary).await
+        clear_excluded: &[MessageId],
+    ) -> SessionResourceResult<RewindOutcome> {
+        self.inner
+            .rewind_history(id, boundary, clear_excluded)
+            .await
     }
 
     async fn remove_history_entries(
@@ -437,7 +440,7 @@ async fn run_case(mode: CommitMode, pause: HandlerPause, pre_cancel: bool) -> Ca
         &task_manager,
         lookup,
     );
-    req.history_payloads = payloads;
+    req.history_payloads = std::borrow::Cow::Owned(payloads);
     req.cwd = workspace.cwd.to_str().unwrap();
     req.session_resources = Some(store.clone());
     req.thread_id = Some(thread_id.clone());
@@ -473,6 +476,16 @@ async fn stored_snapshot(case: &Case) -> SessionSnapshot {
     case.store
         .inner
         .load_session_snapshot(&case.thread_id)
+        .await
+        .unwrap()
+}
+
+/// 磁盘上的**有效**视图（未排除 own 条目）：与 `stored_snapshot` 同一真实门面，
+/// 差别只在范围。用于核对「重载出来的热态快照」——它就该等于这份有效集合。
+async fn active_snapshot(case: &Case) -> ActiveSessionSnapshot {
+    case.store
+        .inner
+        .load_active_snapshot(&case.thread_id)
         .await
         .unwrap()
 }
@@ -556,7 +569,9 @@ async fn test_manual_compact_cancel_after_confirmed_pipeline_restores_canonical_
     assert!(case.result.messages[0]
         .content()
         .contains("manual committed summary"));
-    let stored = stored_snapshot(&case).await.payloads;
+    // 重载产物是「有效集合」：与磁盘上的有效视图逐 id 对齐（被排除原文仍在存储里，
+    // 但既不进热态快照，也不作为重载结果返回）。
+    let stored = active_snapshot(&case).await.payloads;
     assert_eq!(
         case.result
             .persisted_payloads

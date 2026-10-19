@@ -29,24 +29,30 @@ pub(super) fn spawn_prediction(
         task_scope::HostTaskKind::Prediction,
         async move {
             tracing::debug!("Prediction task started");
-            // 从 session 获取最新历史与当前标题
-            let (history, cwd, current_title) = {
+            // 从有效 payload 直接投影：不克隆 Host 的整段消息投影，也不把
+            // HandedOff/ReloadRequired 的空集合误当作空会话。
+            let (recent, cwd, current_title) = {
                 let Some(sessions) = lock_or_shutdown(&pred_sessions, &pred_shutdown).await else {
                     tracing::debug!("Prediction: host scope shutting down, dropping prediction");
                     return;
                 };
-                match sessions.get(&pred_session_id) {
-                    Some(s) => (s.history.clone(), s.cwd.clone(), s.title.clone()),
-                    None => {
-                        tracing::debug!("Prediction: session not found");
-                        return;
-                    }
+                let Some(state) = sessions.get(&pred_session_id) else {
+                    tracing::debug!("Prediction: session not found");
+                    return;
+                };
+                if !state.owns_effective_context() {
+                    tracing::debug!(
+                        ownership = ?state.context_ownership,
+                        "Prediction: effective context is not resident, dropping prediction"
+                    );
+                    return;
                 }
+                (
+                    prediction_projection::project_prediction_payloads(&state.history_payloads),
+                    state.cwd.clone(),
+                    state.title.clone(),
+                )
             };
-
-            // 最近 10 条非 System 消息是软窗口；工具调用 batch 会完整扩展，
-            // 历史中本就不完整的 batch 则整组丢弃。
-            let recent = prediction_projection::project_prediction_history(&history);
 
             if recent.is_empty() {
                 tracing::debug!("Prediction: no recent messages");

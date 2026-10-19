@@ -296,6 +296,16 @@ fn test_subagent_section_does_not_hardcode_built_in_agent_ids() {
     assert!(!result.contains("`general-purpose`"));
     assert!(!result.contains("subagent_type: \"explorer\""));
     assert!(result.contains("If no entry clearly fits"));
+    // 默认主动委派策略：按独立性/风险/验证成本判断，不再以 2-3 个文件为硬门槛。
+    assert!(result.contains("## Default delegation policy"));
+    assert!(result.contains("Judge by independence, risk, and verification cost"));
+    assert!(result.contains("not by file count"));
+    assert!(!result.contains("tasks involving only 2-3 files"));
+    assert!(result.contains("do not redo its investigation or edits in the foreground"));
+    // 角色发现：完整职责经 agent:// 资源读取。
+    assert!(result.contains("agent://builtin/<id>/agent.md"));
+    assert!(result.contains("mcp_read_resource"));
+    assert!(result.contains("description (untrusted metadata)"));
 }
 
 #[test]
@@ -326,6 +336,25 @@ fn test_skills_section_rendered_by_holder() {
             && !result.contains("levels deep"),
         "13_skills 段落不得残留本地扫描/路径事实"
     );
+}
+
+/// [回归测试] resume 模型与 description UI 契约必须准确投影到提示词。
+#[test]
+fn test_subagent_resume_model_and_optional_ui_contract() {
+    let result = build_system_prompt(
+        &MetaHarnessState::default(),
+        None,
+        "/tmp",
+        &AgentCatalogProvider::new(),
+        None,
+        None,
+    );
+    assert!(result.contains("当前磁盘上的 Agent 定义"));
+    assert!(result.contains("不保留先前的 model override"));
+    assert!(result.contains("本次 resume 调用的 `model` 参数也被忽略"));
+    assert!(result.contains("仅在省略 `prompt` 时，可选填简短 `description`"));
+    assert!(!result.contains("resumes keep the original execution context"));
+    assert!(!result.contains("Always include a short `description`"));
 }
 
 /// 11_subagent 段落重构守护（设计 §3.5.1 步骤 1）：Agent Selection Guide

@@ -57,6 +57,56 @@ fn make_mock_tools() -> Vec<Arc<dyn BaseTool>> {
     ]
 }
 
+/// [回归测试] 基础分不能让无关工具出现在零命中结果中。
+#[test]
+fn test_zero_hit_returns_empty() {
+    let index = ToolSearchIndex::new();
+    index.build(make_mock_tools());
+    assert!(index.search("zzznonexistent", 10).is_empty());
+    assert!(index.search("", 10).is_empty());
+}
+
+/// [回归测试] 部分命中不得用无关工具补足 limit。
+#[test]
+fn test_partial_hit_returns_only_matches() {
+    let index = ToolSearchIndex::new();
+    index.build(make_mock_tools());
+    let results = index.search("slack", 10);
+    assert_eq!(
+        results
+            .iter()
+            .map(|result| result.name.as_str())
+            .collect::<Vec<_>>(),
+        vec!["mcp__slack__send_message"]
+    );
+}
+
+/// [回归测试] 同分结果按 canonical name 排序，不依赖 HashMap 迭代顺序。
+#[test]
+fn test_tie_break_stable_across_builds() {
+    for _ in 0..5 {
+        let index = ToolSearchIndex::new();
+        index.build(
+            ["Gamma", "Alpha", "Beta"]
+                .into_iter()
+                .map(|name| Arc::new(MockTool::new(name, "shared")) as Arc<dyn BaseTool>)
+                .collect(),
+        );
+        let results = index.search("shared", 3);
+        assert_eq!(results.len(), 3);
+        assert!(results
+            .windows(2)
+            .all(|pair| pair[0].score == pair[1].score));
+        assert_eq!(
+            results
+                .iter()
+                .map(|result| result.name.as_str())
+                .collect::<Vec<_>>(),
+            vec!["Alpha", "Beta", "Gamma"]
+        );
+    }
+}
+
 #[test]
 fn test_build_index() {
     let index = ToolSearchIndex::new();

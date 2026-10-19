@@ -1,5 +1,6 @@
 //! 从 receive.rs 分离的测试模块
 use super::*;
+use crate::agent::events_v2::EventHandles;
 use crate::agent::stages::StageContext;
 use crate::messages::{BaseMessage, MessageContent};
 use crate::session::queue::MessageSource;
@@ -44,6 +45,19 @@ fn make_context() -> StageContext {
     let session = Session::new(cwd, frozen, None);
     let turn = session.start_turn();
     StageContext::new(turn, session.transcript(), session.queue().clone())
+}
+
+/// 排空本轮发射的 `SystemReminder` 事件并计数（交付去重的可观察出口）。
+fn drain_system_reminder_events(handles: &mut EventHandles) -> usize {
+    let mut count = 0;
+    while let Some(event) = handles.try_state() {
+        if let StateEvent::ProtocolEvent { event, .. } = event {
+            if matches!(event.as_ref(), ExecutorEvent::SystemReminder { .. }) {
+                count += 1;
+            }
+        }
+    }
+    count
 }
 
 #[tokio::test]
@@ -159,7 +173,7 @@ async fn stable_terminal_delivery_id_is_recorded_once_across_receive_runs() {
     }
     {
         let transcript = context.session.transcript.read();
-        assert_eq!(transcript.persisted_payloads().len(), 1);
+        assert_eq!(transcript.active_payloads().len(), 1);
         assert!(transcript.get(delivery_id).is_some());
     }
     let mut conflicting = reminder.into_inner();
@@ -181,10 +195,7 @@ async fn stable_terminal_delivery_id_is_recorded_once_across_receive_runs() {
     })
     .await
     .is_err());
-    assert_eq!(
-        context.session.transcript.read().persisted_payloads().len(),
-        1
-    );
+    assert_eq!(context.session.transcript.read().active_payloads().len(), 1);
 }
 
 #[tokio::test]
@@ -264,16 +275,275 @@ async fn durable_terminal_delivery_preserves_order_and_dedups_after_exclusion() 
     .await
     .unwrap();
     assert_eq!(output.wake_up_count, 1);
-    assert_eq!(
-        context.session.transcript.read().persisted_payloads().len(),
-        2
-    );
+    // 断言「没有追加第三条条目」：这里数的是热态全部条目（含被排除的 delivery），
+    // 不是 `active_payloads` 的有效集合——已排除条目仍然留在 transcript 里用于查重。
+    assert_eq!(context.session.transcript.read().len(), 2);
     let history = bound
         .resources()
         .load_session_history(&bound.thread_id())
         .await
         .unwrap();
     assert_eq!(history.len(), 2);
+}
+
+// REQ-T02 (b)：持久化事实已提交、热态因重建/收缩丢失该条目而条目仍有效时，
+// Receive 只把提醒补装回热态，不把它当作新交付重复发射、也不重复入账。
+#[tokio::test]
+async fn committed_delivery_missing_from_hot_state_is_restored_without_reemitting() {
+    use crate::agent::events_v2::EventBus;
+    use crate::session::test_resources::TestSession;
+    use crate::session::transcript::MessageTranscript;
+    use peri_acp_types::system_reminder::{
+        ReminderAudience, ReminderAudiences, ReminderCategory, ReminderDelivery, ReminderSeverity,
+        ReminderSource, SystemReminder, TrustedSystemReminderFactory, SYSTEM_REMINDER_VERSION,
+    };
+
+    let bound = TestSession::open().await;
+    let mut context = make_context();
+    *context.session.transcript.write() =
+        MessageTranscript::new().with_persistence(bound.resources(), bound.thread_id());
+    let reminder = TrustedSystemReminderFactory::for_producer()
+        .construct(SystemReminder {
+            version: SYSTEM_REMINDER_VERSION,
+            category: ReminderCategory::Task,
+            source: ReminderSource("mcp".into()),
+            kind: "completed".into(),
+            severity: ReminderSeverity::Info,
+            delivery: ReminderDelivery::Configurable,
+            audiences: ReminderAudiences(vec![ReminderAudience::Model]),
+            body: "owner result".into(),
+            summary: None,
+            metadata: serde_json::json!({}),
+        })
+        .unwrap();
+    let delivery_id = crate::messages::MessageId::new();
+    let (bus, mut handles) = EventBus::new(Default::default());
+    context.runtime.event_bus = Arc::new(bus);
+    context
+        .session
+        .queue
+        .push(QueuedMessage::system_reminder_with_delivery_id(
+            MessageKind::Defer,
+            MessageSource::DynamicMcpNotification,
+            reminder.clone(),
+            delivery_id,
+        ));
+    run_receive(ReceiveInput {
+        context: context.clone(),
+    })
+    .await
+    .unwrap();
+    assert_eq!(
+        drain_system_reminder_events(&mut handles),
+        1,
+        "首次交付是新交付，必须发射"
+    );
+
+    // 模拟热态重建（如收缩释放后重新装载）：同一存储上换一份空热态，条目仍在且未排除。
+    *context.session.transcript.write() =
+        MessageTranscript::new().with_persistence(bound.resources(), bound.thread_id());
+    context
+        .session
+        .queue
+        .push(QueuedMessage::system_reminder_with_delivery_id(
+            MessageKind::Defer,
+            MessageSource::DynamicMcpNotification,
+            reminder,
+            delivery_id,
+        ));
+    let output = run_receive(ReceiveInput {
+        context: context.clone(),
+    })
+    .await
+    .unwrap();
+    assert_eq!(output.wake_up_count, 1, "已提交提醒仍驱动一次模型调用");
+    assert!(
+        context.session.transcript.read().get(delivery_id).is_some(),
+        "仍有效的已提交提醒必须补装回热态"
+    );
+    assert_eq!(
+        context.session.transcript.read().len(),
+        1,
+        "补装是恢复既有条目，不是重复追加"
+    );
+    assert_eq!(
+        drain_system_reminder_events(&mut handles),
+        0,
+        "补装不得作为新交付重复发射"
+    );
+    let history = bound
+        .resources()
+        .load_session_history(&bound.thread_id())
+        .await
+        .unwrap();
+    assert_eq!(history.len(), 1, "存储不重复入账");
+}
+
+// REQ-T02 (c)：持久化事实已提交且**已被排除**（原文归档）、热态又因收缩/重建没有该条目时，
+// Receive 既不补装（归档原文不得回灌热态），也不把它当作新交付重复发射。
+#[tokio::test]
+async fn excluded_committed_delivery_is_neither_restored_nor_reemitted() {
+    use crate::agent::events_v2::EventBus;
+    use crate::session::test_resources::TestSession;
+    use crate::session::transcript::MessageTranscript;
+    use peri_acp_types::system_reminder::{
+        ReminderAudience, ReminderAudiences, ReminderCategory, ReminderDelivery, ReminderSeverity,
+        ReminderSource, SystemReminder, TrustedSystemReminderFactory, SYSTEM_REMINDER_VERSION,
+    };
+
+    let bound = TestSession::open().await;
+    let mut context = make_context();
+    *context.session.transcript.write() =
+        MessageTranscript::new().with_persistence(bound.resources(), bound.thread_id());
+    let reminder = TrustedSystemReminderFactory::for_producer()
+        .construct(SystemReminder {
+            version: SYSTEM_REMINDER_VERSION,
+            category: ReminderCategory::Task,
+            source: ReminderSource("mcp".into()),
+            kind: "completed".into(),
+            severity: ReminderSeverity::Info,
+            delivery: ReminderDelivery::Configurable,
+            audiences: ReminderAudiences(vec![ReminderAudience::Model]),
+            body: "owner result".into(),
+            summary: None,
+            metadata: serde_json::json!({}),
+        })
+        .unwrap();
+    let delivery_id = crate::messages::MessageId::new();
+    let (bus, mut handles) = EventBus::new(Default::default());
+    context.runtime.event_bus = Arc::new(bus);
+    context
+        .session
+        .queue
+        .push(QueuedMessage::system_reminder_with_delivery_id(
+            MessageKind::Defer,
+            MessageSource::DynamicMcpNotification,
+            reminder.clone(),
+            delivery_id,
+        ));
+    run_receive(ReceiveInput {
+        context: context.clone(),
+    })
+    .await
+    .unwrap();
+    assert_eq!(
+        drain_system_reminder_events(&mut handles),
+        1,
+        "首次交付是新交付，必须发射"
+    );
+
+    // 归档：条目被排除（Full Compact 提交后的持久化事实），随后由收缩从热态释放。
+    {
+        let mut released = std::mem::take(&mut *context.session.transcript.write());
+        released.set_excluded(delivery_id, true);
+        released.flush_persistence().await.unwrap();
+    }
+    let flags = bound
+        .resources()
+        .load_message_flags(&bound.thread_id(), &[delivery_id])
+        .await
+        .unwrap();
+    assert!(
+        flags.get(&delivery_id).is_some_and(|flags| flags.excluded),
+        "排除事实必须已落库"
+    );
+    let active = bound
+        .resources()
+        .load_active_snapshot(&bound.thread_id())
+        .await
+        .unwrap();
+    assert!(
+        active
+            .payloads
+            .iter()
+            .all(|payload| payload.id() != delivery_id),
+        "已排除条目必须离开有效视图"
+    );
+    // 模拟收缩释放热态条目：同一存储上换一份空热态。
+    *context.session.transcript.write() =
+        MessageTranscript::new().with_persistence(bound.resources(), bound.thread_id());
+    context
+        .session
+        .queue
+        .push(QueuedMessage::system_reminder_with_delivery_id(
+            MessageKind::Defer,
+            MessageSource::DynamicMcpNotification,
+            reminder,
+            delivery_id,
+        ));
+    let output = run_receive(ReceiveInput {
+        context: context.clone(),
+    })
+    .await
+    .unwrap();
+    assert_eq!(output.wake_up_count, 1, "已提交交付仍被消费一次");
+    assert!(
+        context.session.transcript.read().get(delivery_id).is_none(),
+        "已排除的已提交交付不得回灌热态"
+    );
+    assert_eq!(
+        drain_system_reminder_events(&mut handles),
+        0,
+        "已排除的已提交交付不得作为新交付重复发射"
+    );
+    let history = bound
+        .resources()
+        .load_session_history(&bound.thread_id())
+        .await
+        .unwrap();
+    assert_eq!(history.len(), 1, "存储不重复入账");
+}
+
+#[tokio::test]
+async fn delivery_journal_admission_precedes_receive_and_recovers_after_ack() {
+    use crate::session::user_input_mailbox::{UserInputMailbox, UserInputQueueError};
+    use peri_acp_types::session::{EnqueueUserInputRequest, SessionInbox};
+    use tokio_util::sync::CancellationToken;
+
+    let context = make_context();
+    let inbox = Arc::new(SessionInbox::new(Arc::new(context.session.queue.clone())));
+    let mailbox = UserInputMailbox::new("session".into(), inbox.clone(), Arc::new(|_| {}));
+    mailbox
+        .attach_external_attempt(CancellationToken::new(), false)
+        .unwrap();
+    let enqueue = |text: &str| EnqueueUserInputRequest {
+        session_id: "session".into(),
+        generation: mailbox.generation().into(),
+        command_id: uuid::Uuid::now_v7().to_string(),
+        input_id: uuid::Uuid::now_v7().to_string(),
+        content: MessageContent::text(text),
+        original_draft: text.into(),
+    };
+
+    for _ in 0..128 {
+        let request = enqueue("填充");
+        mailbox.enqueue(&request).unwrap();
+        mailbox.enter_idle();
+        let messages = inbox.queue().drain_all();
+        let id = messages[0].message().unwrap().id();
+        mailbox.mark_claimed(&[id]);
+        mailbox.mark_delivered(&[id]);
+    }
+
+    // 容量准入在 enqueue/claim 之前：日志满时拒绝，不产生 Claimed，也不写入 MQ。
+    let rejected = enqueue("先拒绝后恢复");
+    assert_eq!(
+        mailbox.enqueue(&rejected).unwrap_err(),
+        UserInputQueueError::Capacity
+    );
+    assert!(context.session.queue.is_empty(), "拒绝输入不得进入消费队列");
+
+    // 泵确认旧日志后释放槽位；同一输入重新准入后走真实 Receive 并交付。
+    for item in mailbox.pending_delivery_notifications() {
+        mailbox.ack_delivery_notification(&item.input_id);
+    }
+    mailbox.enqueue(&rejected).unwrap();
+    mailbox.enter_idle();
+    let mut context = context;
+    context.session.user_input_mailbox = Some(mailbox.clone());
+    run_receive(ReceiveInput { context }).await.unwrap();
+    assert!(mailbox.snapshot().items.is_empty());
+    assert_eq!(mailbox.pending_delivery_notifications().len(), 1);
 }
 
 #[tokio::test]
@@ -374,6 +644,86 @@ async fn test_receive_user_input_delivery_keeps_identity_order_and_render_fifo()
         "顺序不按历史队列位置重排"
     );
     assert!(mailbox.snapshot().items.is_empty(), "写入后从待发送区移除");
+}
+
+#[tokio::test]
+async fn test_receive_enters_reliable_render_fifo_without_reserving_sequence() {
+    use crate::agent::events_v2::{EventBus, EventBusConfig, RenderEvent};
+    use crate::session::user_input_mailbox::UserInputMailbox;
+    use peri_acp_types::session::{EnqueueUserInputRequest, SessionInbox};
+    use tokio_util::sync::CancellationToken;
+
+    let mut context = make_context();
+    // 生产 stage builder 会写入 canonical session 身份；测试构造器为空，显式补齐。
+    context
+        .session
+        .session_context
+        .write()
+        .insert("session_id".into(), "session".into());
+    let inbox = Arc::new(SessionInbox::new(Arc::new(context.session.queue.clone())));
+    let mailbox = UserInputMailbox::new("session".into(), inbox, Arc::new(|_| {}));
+    mailbox
+        .attach_external_attempt(CancellationToken::new(), false)
+        .unwrap();
+    let request = EnqueueUserInputRequest {
+        session_id: "session".into(),
+        generation: mailbox.generation().into(),
+        command_id: "enqueue-first".into(),
+        input_id: uuid::Uuid::now_v7().to_string(),
+        content: MessageContent::text("问题"),
+        original_draft: "问题".into(),
+    };
+    mailbox.enqueue(&request).unwrap();
+    mailbox.enter_idle();
+    context.session.user_input_mailbox = Some(mailbox.clone());
+
+    // 容量 1：先占满 render 通道，证明交付事件等待容量而不是降级丢弃。
+    let (bus, mut handles) = EventBus::new(EventBusConfig {
+        render_capacity: 1,
+        ..Default::default()
+    });
+    context.runtime.event_bus = Arc::new(bus);
+    context
+        .runtime
+        .event_bus
+        .emit_render(RenderEvent::TextChunk {
+            turn_id: context.turn_id(),
+            agent_id: context.session.agent_id,
+            message_id: crate::messages::MessageId::new(),
+            chunk: "occupied".into(),
+        });
+
+    let receive = run_receive(ReceiveInput {
+        context: context.clone(),
+    });
+    tokio::pin!(receive);
+    assert!(
+        tokio::time::timeout(std::time::Duration::from_millis(100), &mut receive)
+            .await
+            .is_err(),
+        "render 通道满时 Receive 必须等待容量，不得丢弃交付事件"
+    );
+    assert!(
+        matches!(
+            handles.render_rx.recv().await.unwrap(),
+            RenderEvent::TextChunk { .. }
+        ),
+        "先释放占位事件"
+    );
+    receive.await.unwrap();
+
+    let RenderEvent::UserInputDelivered { input_id, .. } = handles.render_rx.recv().await.unwrap()
+    else {
+        panic!("交付事件必须进入同一条 render FIFO");
+    };
+    assert_eq!(input_id, request.input_id, "交付事件与输入身份一致");
+    assert!(
+        mailbox
+            .pending_delivery_notifications()
+            .iter()
+            .all(|entry| entry.session_seq.is_none()),
+        "发布前不得由 Receive 预留序号，序号由 forwarder 发布成功后绑定"
+    );
 }
 
 #[tokio::test]

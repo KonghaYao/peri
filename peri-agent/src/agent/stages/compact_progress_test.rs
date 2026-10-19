@@ -15,13 +15,13 @@ fn make_usage(input_tokens: u32) -> TokenUsage {
 }
 
 fn append_full_result(state: &mut CompactBudgetRecovery, transcript: &mut MessageTranscript) {
-    let before_len = transcript.len();
-    // 模拟Full lifecycle的追加边界：摘要和reinject具有全新ID，但不是新work。
+    // 模拟Full lifecycle：新工作判定发生在追加之前（摘要和reinject具有全新ID，但不是新work）。
+    let new_work = state.new_work_since_full(transcript);
     transcript.append(BaseMessage::human("new summary"));
     transcript.append(BaseMessage::human(
         "[激活的 Skill 指令: /skills/a/SKILL.md]",
     ));
-    state.record_full_applied(transcript, before_len);
+    state.record_full_applied(transcript, new_work);
 }
 
 fn append_reminder(transcript: &mut MessageTranscript) {
@@ -183,6 +183,51 @@ fn test_budget_recovery_missing_and_zero_usage_never_borrow_stale_pressure() {
     assert_eq!(state.unrecovered_observations, 1);
     observe(&mut state, &transcript, 40_000).unwrap();
     assert_eq!(state.unrecovered_observations, 0);
+}
+
+/// [回归测试] 新工作判定按稳定身份（末尾摘要 id）定位，不按条目位置：收缩释放
+/// 水印之前的已排除条目会让位置整体前移，但「Full 之后没有新工作」的结论不变；
+/// 水印缺席（rewind/重建）等价于旧实现的 `end < full_end`，按有新工作处理。
+#[test]
+fn test_budget_recovery_watermark_survives_shrink_and_missing_watermark_is_new_work() {
+    let prior = BaseMessage::human("prior work");
+    let summary = BaseMessage::human("new summary");
+    let summary_id = summary.id();
+    let mut before_shrink = MessageTranscript::new();
+    before_shrink.append(prior.clone());
+    before_shrink.append(summary.clone());
+    let mut state = CompactBudgetRecovery::default();
+    state.record_full_applied(&before_shrink, true);
+    assert_eq!(
+        state.full_watermark,
+        Some(summary_id),
+        "水印取提交后末尾条目"
+    );
+
+    // 收缩：水印之前的已排除条目被释放（位置前移），水印本身保留。
+    let mut after_shrink = MessageTranscript::new();
+    after_shrink.append(summary.clone());
+    assert!(
+        !state.new_work_since_full(&after_shrink),
+        "位置前移不得被当成新工作"
+    );
+
+    // 水印之后确有新工作时仍判为新工作。
+    let mut with_new_work = MessageTranscript::new();
+    with_new_work.append(summary.clone());
+    with_new_work.append(BaseMessage::tool_result(
+        "new-tool",
+        MessageContent::text("x"),
+    ));
+    assert!(state.new_work_since_full(&with_new_work));
+
+    // 水印条目被 rewind/重建释放：旧边界失效，按有新工作处理。
+    let mut rebuilt = MessageTranscript::new();
+    rebuilt.append(prior);
+    assert!(
+        state.new_work_since_full(&rebuilt),
+        "水印缺席必须按有新工作处理"
+    );
 }
 
 #[test]

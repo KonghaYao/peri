@@ -173,6 +173,84 @@ async fn test_compact_pipeline_reuses_canonical_history_for_second_bound_sqlite_
     );
 }
 
+// 宿主热态在 Full Compact 提交后只剩**有效集合**（D1 收缩 + `active_payloads`）：
+// 第二次 compact 必须按有效集合通过身份校验，而不是拿全量 persisted 历史判成不匹配。
+// 校验通过后仍从完整快照恢复 canonical 原文（含被排除条目与 reminder）。
+#[tokio::test]
+async fn test_compact_pipeline_accepts_effective_only_history_for_second_lifecycle() {
+    let session = BoundSession::open("compact-effective-second-lifecycle.db").await;
+    let history = vec![
+        BaseMessage::system("persistent system prompt"),
+        BaseMessage::human("effective-only first request"),
+        BaseMessage::ai("effective-only first response"),
+    ];
+    session.append(&history).await;
+
+    let first = execute_compact(
+        &CompactCommand,
+        make_ctx_with_model_and_thread(
+            Arc::new(MockEventSink::new()),
+            history.clone(),
+            session.cwd.clone(),
+            Arc::new(MockSummaryModel::new(
+                "<summary>FIRST_EFFECTIVE_LIFECYCLE_SUMMARY</summary>",
+            )),
+            Some(session.resources()),
+            Some(session.thread_id.clone()),
+        ),
+    )
+    .await;
+    assert!(
+        first.messages.iter().any(|message| message
+            .content()
+            .contains("FIRST_EFFECTIVE_LIFECYCLE_SUMMARY")),
+        "首次 compact 必须成功产生 summary"
+    );
+
+    let effective = session.active_messages().await;
+    assert!(
+        effective.len() < session.stored_messages().await.len(),
+        "fixture 前提：Full Compact 后有效集合必须少于完整历史"
+    );
+    assert!(
+        !effective
+            .iter()
+            .any(|message| message.id() == history[1].id()),
+        "被压缩的原文必须不在有效集合里"
+    );
+
+    let second = execute_compact(
+        &CompactCommand,
+        make_ctx_with_model_and_thread(
+            Arc::new(MockEventSink::new()),
+            effective,
+            session.cwd.clone(),
+            Arc::new(MockSummaryModel::new(
+                "<summary>SECOND_EFFECTIVE_LIFECYCLE_SUMMARY</summary>",
+            )),
+            Some(session.resources()),
+            Some(session.thread_id.clone()),
+        ),
+    )
+    .await;
+
+    assert_ne!(
+        second
+            .feedback
+            .as_ref()
+            .map(|feedback| feedback.message.as_str()),
+        Some("compact persistence context mismatch"),
+        "有效集合必须通过身份校验，不得被判为持久化 context 不匹配"
+    );
+    assert_eq!(second.stop_reason, PromptStopReason::EndTurn);
+    assert!(
+        second.messages.iter().any(|message| message
+            .content()
+            .contains("SECOND_EFFECTIVE_LIFECYCLE_SUMMARY")),
+        "第二次 compact 必须成功产生新的 summary"
+    );
+}
+
 #[tokio::test]
 async fn test_compact_pipeline_history_read_only_lifecycle_failure_preserves_durable_message_ids() {
     // 迁前本测试用 FilesystemThreadStore（能力面 = 只读历史）。新契约下等价的能力面

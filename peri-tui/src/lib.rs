@@ -14,6 +14,7 @@
 pub mod acp_client;
 pub mod alloc_config;
 pub mod app;
+pub(crate) mod application;
 pub mod components;
 pub mod config;
 pub mod i18n;

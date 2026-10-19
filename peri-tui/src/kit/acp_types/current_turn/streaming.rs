@@ -180,10 +180,14 @@ impl CurrentTurn {
         &mut self,
         text: String,
         attachments: Vec<crate::kit::tui_render_unit::UserAttachment>,
+        message_id: Option<String>,
     ) {
         self.flush_text_segment();
-        self.segments
-            .push(TurnSegment::UserBubble { text, attachments });
+        self.segments.push(TurnSegment::UserBubble {
+            text,
+            attachments,
+            message_id,
+        });
         self.active = true;
         self.invalidate_cache();
     }

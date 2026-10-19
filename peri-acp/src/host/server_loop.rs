@@ -8,8 +8,8 @@ use tokio_util::sync::CancellationToken;
 use super::diagnostics::ResponseDiagnostics;
 use super::{
     connection::ConnectionContext, dispatch_prompt_turn, extract_session_id, handle_notification,
-    handle_request, mcp_apps, requests, send_session_info_update, task_scope, AcpServerConfig,
-    PromptLocks, SharedSessions,
+    handle_request_for_connection, history_page, history_window, mcp_apps, requests,
+    send_session_info_update, task_scope, AcpServerConfig, PromptLocks, SharedSessions,
 };
 use crate::transport::types::{IncomingMessage, RequestId};
 
@@ -414,9 +414,86 @@ impl ServerLoop<'_> {
         let cfg = self.cfg;
         let sessions = self.sessions;
         let connection = self.connection;
+        // 本连接的协商事实：一次请求取一份（短锁，不跨派发持锁），路由里按连接分流的判定
+        // 只读它——`caps()` 是展示判据、注册表是进程/会话级的，都不能回答「当前连接声明了
+        // 什么」（REQ §5.3）。
+        let connection_facts = connection.lock().await.facts();
+        // `session/history/body`：V1 正文分块，不进入生命周期路由。
+        if method == "session/history/body" {
+            let result = if !connection_facts.history_window_v1 {
+                Err(history_window::window_error(
+                    peri_acp_types::history_window::HistoryWindowError::NotNegotiated,
+                ))
+            } else {
+                tokio::select! {
+                    biased;
+                    _ = self.connection_cancellation.cancelled() => Err(
+                        crate::transport::types::AcpError::new(-32800, "request cancelled"),
+                    ),
+                    result = history_window::handle_body_chunk(
+                        cfg,
+                        sessions,
+                        &params,
+                        &connection_facts.connection_id,
+                    ) => result,
+                }
+            };
+            let _ = diagnostics.send(transport.as_ref(), result).await;
+            return;
+        }
         let closed_session_id = matches!(method.as_str(), "session/close" | "session/delete")
             .then(|| extract_session_id(&params, "").to_string())
             .filter(|session_id| !session_id.is_empty());
+        // 历史分页：模式在进入生命周期路由**之前**解析（REQ §5.1）。带 cursor 的 load 是
+        // 只读浏览——不取执行生命周期锁、不装配、不广播；非法参数与未协商能力都在这里
+        // 明确拒绝，绝不降级成初始 load。
+        let load_initial_cursor = if method == "session/load" {
+            // 分页/窗口准入按**当前连接**的协商结果（REQ §5.3）：`caps()` 对从未
+            // `initialize` 的连接是兜底能力集，不能用来放行分页或窗口语义。
+            let caps = connection_facts.caps.clone();
+            match history_page::classify(
+                &params,
+                connection_facts.history_pagination,
+                connection_facts.history_window_v1,
+            ) {
+                Ok(history_page::SessionLoadMode::HistoryPage(request)) => {
+                    let result = history_page::handle_page(cfg, sessions, &caps, &request).await;
+                    let _ = diagnostics.send(transport.as_ref(), result).await;
+                    return;
+                }
+                Ok(history_page::SessionLoadMode::HistoryWindow {
+                    session_id,
+                    request,
+                }) => {
+                    let window_connection = history_window::WindowConnection::new(
+                        connection_facts.connection_id.clone(),
+                        Arc::new(history_window::TransportWindowSink::new(Arc::clone(
+                            self.transport,
+                        ))),
+                    );
+                    let result = tokio::select! {
+                        biased;
+                        _ = self.connection_cancellation.cancelled() => Err(
+                            crate::transport::types::AcpError::new(-32800, "request cancelled"),
+                        ),
+                        result = history_window::handle(
+                            cfg, sessions, &caps, &session_id, request, &window_connection,
+                        ) => result,
+                    };
+                    let _ = diagnostics.send(transport.as_ref(), result).await;
+                    return;
+                }
+                Ok(history_page::SessionLoadMode::InitialLoad) => {
+                    connection_facts.history_pagination
+                }
+                Err(error) => {
+                    let _ = diagnostics.send(transport.as_ref(), Err(error)).await;
+                    return;
+                }
+            }
+        } else {
+            false
+        };
         let lifecycle_lock = if matches!(
             method.as_str(),
             "session/load"
@@ -481,7 +558,7 @@ impl ServerLoop<'_> {
         } else {
             None
         };
-        let result = if requests::session_io::handles(&method) {
+        let mut result = if requests::session_io::handles(&method) {
             let prepared = {
                 let sessions = sessions.lock().await;
                 requests::session_io::prepare(&method, &params, &sessions)
@@ -496,11 +573,50 @@ impl ServerLoop<'_> {
                 }
                 Err(error) => Err(error),
             }
+        } else if method == "session/load" {
+            // 分阶段 load：DB/资源 I/O 在全局 sessions 锁之外；内部只做短锁读写。
+            requests::session_lifecycle::handle_load_shared(
+                &params,
+                cfg,
+                sessions,
+                transport,
+                connection_facts.clone(),
+            )
+            .await
+        } else if method == "session/resume" {
+            requests::session_lifecycle::handle_resume_shared(&params, cfg, sessions, transport)
+                .await
+        } else if method == "session/fork" {
+            requests::session_lifecycle::handle_fork_shared(&params, cfg, sessions, transport).await
         } else {
             let mut sessions = sessions.lock().await;
-            handle_request(&method, &params, cfg, &mut sessions, transport).await
+            handle_request_for_connection(
+                &method,
+                &params,
+                cfg,
+                &mut sessions,
+                transport,
+                connection_facts,
+            )
+            .await
         };
         drop(lifecycle_lock);
+        // 初始 load 的分页身份：只对协商了分页能力的当前连接附加（REQ §5.3）。
+        // 放在执行锁之外：这是初始 load 路径上的有界读取，不必占着生命周期锁。
+        if load_initial_cursor && result.is_ok() {
+            let session_id = extract_session_id(&params, "").to_string();
+            let failure = match result.as_mut() {
+                Ok(response) if !session_id.is_empty() => {
+                    history_page::attach_initial_cursor(cfg, sessions, &session_id, response)
+                        .await
+                        .err()
+                }
+                _ => None,
+            };
+            if let Some(error) = failure {
+                result = Err(error);
+            }
+        }
         if result.is_ok() && super::user_input::starts_execution(&method) {
             if let Some(session_id) = params.get("sessionId").and_then(Value::as_str) {
                 super::user_input::schedule_mailbox(
@@ -514,7 +630,10 @@ impl ServerLoop<'_> {
             }
         }
         if method == "initialize" && result.is_ok() {
-            connection.lock().await.commit_initialize();
+            // 协商值同时落到**本连接**：进程级 pending_caps 会被下一个连接覆盖，
+            // 会话级 registry 会把旧连接的能力带给重连的同一会话。
+            let caps = requests::session_lifecycle::initialize_peri_caps(&params);
+            connection.lock().await.commit_initialize(caps);
         }
         if result.is_ok() {
             // 会话级拆除（`session/close` / `session/delete`）：撤销本会话全部 App

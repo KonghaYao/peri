@@ -123,10 +123,18 @@ impl super::SubAgentTool {
             .clone()
             .unwrap_or_else(|| "bg-unknown".to_string());
         if session_resources.is_some() {
+            // 回执直接给出可复用的线程身份：规范句与 bg 完成通知（peri-acp-types
+            // event.rs）逐字同形，模型无需从两个裸 UUID 里推测哪个能 resume；
+            // task_id 保留（取消/状态查询用），但不带 `(thread: …)` 这类无指引标注
+            // ——task 身份（`bg-{uuid}`）与 child thread 身份是两次独立生成的 v7 UUID，
+            // 前缀相同，去掉 `bg-` 仍不是线程身份（resume 会以 thread not found 拒绝）。
             Ok(format!(
-                "Background task {} started (thread: {}). You will be notified when it completes. \
-                 You can continue with other tasks in the meantime.",
-                task_id, spawned.child_thread_id
+                "Background task {} started. You will be notified when it completes. \
+                 You can continue with other tasks in the meantime.\n\
+                 child_thread_id: {} (resume with Agent(resume_thread_id: {}))\n\
+                 While active, include a non-empty prompt to send supplemental instructions; \
+                 omit prompt only when resuming a non-active thread.",
+                task_id, spawned.child_thread_id, spawned.child_thread_id
             ))
         } else {
             Ok(format!(

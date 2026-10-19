@@ -87,34 +87,35 @@ pub struct ApplyReport {
 // ─── TurnGroup / ToolExchange ──────────────────────────────────────────────────
 
 /// 一次人类交流（从 Human 消息开始，到下一条 Human 前结束）
+///
+/// 只借用 transcript 条目，不持有消息正文副本：`MessageContent` 是 String/Vec，
+/// clone 即整段正文字节复制。借用生存期限制在 `plan_micro` 内，不外泄给调用方。
 #[derive(Debug, Clone)]
-pub struct TurnGroup {
-    /// 该组内 Human 消息
-    pub human_entry: TranscriptEntry,
-    /// AI 消息及其位置
-    pub ai_entries: Vec<(usize, TranscriptEntry)>,
-    /// ToolResult 消息及其位置（按 tool_call_id 索引）
-    pub tool_results: HashMap<String, (usize, TranscriptEntry)>,
+pub struct TurnGroup<'a> {
+    /// 该组内 AI 消息（借用 transcript 条目）
+    pub ai_entries: Vec<&'a TranscriptEntry>,
+    /// ToolResult 消息（按 tool_call_id 索引，借用 transcript 条目）
+    pub tool_results: HashMap<String, &'a TranscriptEntry>,
 }
 
 /// 工具调用交换（AI tool_use + 对应所有 ToolResult）
 #[derive(Debug, Clone)]
-pub struct ToolExchange {
+pub struct ToolExchange<'a> {
     pub tool_call_id: String,
     pub tool_name: String,
-    pub tool_input: serde_json::Value,
     pub ai_message_id: MessageId,
-    pub tool_result_entries: Vec<(usize, TranscriptEntry)>,
+    /// 对应的 ToolResult 条目（借用 transcript 条目）
+    pub tool_result_entries: Vec<&'a TranscriptEntry>,
 }
 
-impl TurnGroup {
+impl<'a> TurnGroup<'a> {
     /// 从 transcript 自有消息中构建 TurnGroup 列表
     ///
     /// 跳过只读祖先和 excluded 消息，仅以当前可见自有消息计算轮次。
     /// 每个 TurnGroup 以 Human 消息开头。
-    pub fn collect(transcript: &MessageTranscript) -> Vec<TurnGroup> {
+    pub fn collect(transcript: &'a MessageTranscript) -> Vec<TurnGroup<'a>> {
         let mut groups = Vec::new();
-        let mut current: Option<TurnGroup> = None;
+        let mut current: Option<TurnGroup<'a>> = None;
 
         for (i, entry) in transcript.entries().iter().enumerate() {
             if i < transcript.ancestor_len() || transcript.flags(entry.id()).excluded {
@@ -130,20 +131,18 @@ impl TurnGroup {
                         groups.push(g);
                     }
                     current = Some(TurnGroup {
-                        human_entry: entry.clone(),
                         ai_entries: Vec::new(),
                         tool_results: HashMap::new(),
                     });
                 }
                 BaseMessage::Ai { .. } => {
                     if let Some(ref mut g) = current {
-                        g.ai_entries.push((i, entry.clone()));
+                        g.ai_entries.push(entry);
                     }
                 }
                 BaseMessage::Tool { tool_call_id, .. } => {
                     if let Some(ref mut g) = current {
-                        g.tool_results
-                            .insert(tool_call_id.clone(), (i, entry.clone()));
+                        g.tool_results.insert(tool_call_id.clone(), entry);
                     }
                 }
                 _ => {}
@@ -156,20 +155,16 @@ impl TurnGroup {
     }
 
     /// 从本组中提取所有 ToolExchange
-    pub fn tool_exchanges(&self) -> Vec<ToolExchange> {
+    pub fn tool_exchanges(&self) -> Vec<ToolExchange<'a>> {
         let mut exchanges = Vec::new();
-        for (_, ai_entry) in &self.ai_entries {
+        for ai_entry in &self.ai_entries {
             if let BaseMessage::Ai { tool_calls, .. } = ai_entry.message() {
                 for tc in tool_calls {
-                    let result_entries: Vec<_> = self
-                        .tool_results
-                        .get(&tc.id)
-                        .map(|(pos, e)| vec![(*pos, e.clone())])
-                        .unwrap_or_default();
+                    let result_entries: Vec<&'a TranscriptEntry> =
+                        self.tool_results.get(&tc.id).copied().into_iter().collect();
                     exchanges.push(ToolExchange {
                         tool_call_id: tc.id.clone(),
                         tool_name: tc.name.clone(),
-                        tool_input: tc.arguments.clone(),
                         ai_message_id: ai_entry.id(),
                         tool_result_entries: result_entries,
                     });
@@ -212,6 +207,33 @@ fn should_preserve_tool(tool_name: &str, config: &CompactConfig) -> bool {
     false
 }
 
+// ─── 测试专用调用计数 ───────────────────────────────────────────────────────────
+//
+// 按线程隔离，避免 cargo test 并发执行时测试之间互相污染计数；
+// 计划复用（一次规划 + 多次应用）由 trigger_test 断言调用次数恒为 1。
+
+#[cfg(test)]
+thread_local! {
+    static PLAN_MICRO_CALLS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
+/// 重置当前线程的 `plan_micro` 调用计数（测试专用）。
+#[cfg(test)]
+pub fn reset_plan_micro_calls() {
+    PLAN_MICRO_CALLS.with(|calls| calls.set(0));
+}
+
+/// 读取当前线程的 `plan_micro` 调用次数（测试专用）。
+#[cfg(test)]
+pub fn plan_micro_call_count() -> usize {
+    PLAN_MICRO_CALLS.with(std::cell::Cell::get)
+}
+
+#[cfg(test)]
+fn count_plan_micro_call() {
+    PLAN_MICRO_CALLS.with(|calls| calls.set(calls.get() + 1));
+}
+
 /// 生成 Micro Compact 计划（纯数据，零副作用）
 ///
 /// 遍历 TurnGroup，跳过最近 `micro_compact_stale_steps` 轮，对每个 tool exchange
@@ -228,6 +250,9 @@ pub fn plan_micro(
     config: &CompactConfig,
     skip_existing_truncated: bool,
 ) -> MicroCompactPlan {
+    #[cfg(test)]
+    count_plan_micro_call();
+
     let groups = TurnGroup::collect(transcript);
 
     let total_groups = groups.len();
@@ -271,7 +296,7 @@ pub fn plan_micro(
 
             // 仅压缩超过阈值的成功 ToolResult；错误结果保留诊断信息。
             if config.has_valid_micro_field_limits() {
-                for (_, result_entry) in &exchange.tool_result_entries {
+                for result_entry in &exchange.tool_result_entries {
                     if skip_existing_truncated
                         && transcript.flags(result_entry.id()).truncated
                         && transcript

@@ -1,5 +1,6 @@
 use super::*;
 use peri_acp_types::messages::BaseMessage;
+use peri_acp_types::store::{CompactionChange, MessageFlags};
 use peri_acp_types::PeriCaps;
 
 async fn binding_state(cfg: &AcpServerConfig, id: &str) -> BindingState {
@@ -91,7 +92,10 @@ impl Fixture {
     fn assert_restored_history(&self, id: &str) {
         let state = &self.sessions[id];
         assert_eq!(Path::new(&state.cwd), self.cwd);
-        assert_eq!(state.history[0].content(), "preserved session history");
+        assert_eq!(
+            state.effective_messages()[0].content(),
+            "preserved session history"
+        );
         assert!(state.frozen.is_some());
     }
 }
@@ -195,6 +199,67 @@ async fn load_and_resume_after_runtime_loss_preserve_session_history() {
 
 #[tokio::test]
 #[serial]
+async fn cold_load_publishes_effective_history_only() {
+    let mut fixture = Fixture::new().await;
+    let id = fixture.id.clone();
+    // Full Compact 的持久化事实：既有原文被排除，摘要成为唯一有效条目。
+    let snapshot = fixture
+        .cfg
+        .session_resources
+        .load_session_snapshot(&id)
+        .await
+        .unwrap();
+    let released_id = snapshot.payloads[0].id();
+    fixture
+        .cfg
+        .session_resources
+        .apply_compaction(
+            &id,
+            &CompactionChange {
+                flag_updates: vec![(
+                    released_id,
+                    MessageFlags {
+                        excluded: true,
+                        ..Default::default()
+                    },
+                )],
+                appended_messages: vec![BaseMessage::ai("compacted summary")],
+            },
+        )
+        .await
+        .unwrap();
+    fixture.close(&id).await;
+    fixture.sessions.clear();
+
+    fixture
+        .request("session/load", &json!({"sessionId":id}))
+        .await
+        .unwrap();
+
+    let state = &fixture.sessions[&id];
+    assert_eq!(state.history_payloads.len(), 1, "冷恢复只发布有效集合");
+    assert!(
+        state
+            .history_payloads
+            .iter()
+            .all(|payload| payload.id() != released_id),
+        "Full Compact 释放的正文不得回到内存会话状态"
+    );
+    assert_eq!(state.effective_messages().len(), 1);
+    assert_eq!(state.effective_messages()[0].content(), "compacted summary");
+    // 已排除正文只留在存储侧：完整 canonical 历史仍可读。
+    let full = fixture
+        .cfg
+        .session_resources
+        .load_session_history(&id)
+        .await
+        .unwrap();
+    assert_eq!(full.len(), 2);
+    assert!(full.iter().any(|payload| payload.id() == released_id));
+}
+
+#[tokio::test]
+#[serial]
 async fn another_host_handle_can_restore_without_peri_execution_exclusion() {
     let mut fixture = Fixture::new().await;
     let id = fixture.id.clone();
@@ -217,7 +282,7 @@ async fn another_host_handle_can_restore_without_peri_execution_exclusion() {
     .unwrap();
     assert!(other_sessions[&id].frozen.is_some());
     assert_eq!(
-        other_sessions[&id].history[0].content(),
+        other_sessions[&id].effective_messages()[0].content(),
         "preserved session history"
     );
     assert!(fixture.sessions.contains_key(&id));

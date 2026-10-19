@@ -123,10 +123,16 @@ impl MockEventSink {
 
 #[async_trait]
 impl EventSink for MockEventSink {
-    async fn push_event(&self, _session_id: &str, event: &ExecutorEvent, _context_window: u32) {
+    async fn push_event(
+        &self,
+        _session_id: &str,
+        event: &ExecutorEvent,
+        _context_window: u32,
+    ) -> Result<(), peri_acp_types::event::EventSinkError> {
         let json = serde_json::to_string(event).unwrap_or_default();
         self.pushed_events.lock().unwrap().push(json.clone());
         self.operations.lock().unwrap().push(json);
+        Ok(())
     }
 
     async fn push_done(&self, _session_id: &str, stop_reason: &str, _request_id: Option<&str>) {
@@ -694,7 +700,6 @@ pub(super) fn make_turn_input(
             .cloned()
             .map(peri_acp_types::store::PersistedPayload::Message)
             .collect(),
-        history,
         incoming_recalls: vec![],
         bg_results: vec![],
         langfuse: None,

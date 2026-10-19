@@ -442,6 +442,7 @@ fn test_plan_micro_skip_true_excludes_already_truncated() {
             MessageProjectionDirective {
                 policy_version: PROJECTION_POLICY_VERSION,
                 entries: vec![],
+                superseded_by: None,
             },
         );
     }

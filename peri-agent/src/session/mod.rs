@@ -27,6 +27,8 @@ pub mod bg_complete;
 pub mod config;
 pub mod exec;
 pub mod factory;
+/// 对象级内存计量与诊断采样（S1）；只读诊断，不参与业务语义。
+pub mod memory_probe;
 pub mod producer_reminders;
 pub mod queue;
 pub mod retry_events;

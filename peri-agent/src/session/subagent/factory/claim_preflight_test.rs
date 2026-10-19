@@ -191,8 +191,11 @@ impl SessionResources for ClaimResources {
         &self,
         id: &ThreadId,
         boundary: RewindBoundary,
-    ) -> SessionResourceResult<()> {
-        self.inner.rewind_history(id, boundary).await
+        clear_excluded: &[MessageId],
+    ) -> SessionResourceResult<RewindOutcome> {
+        self.inner
+            .rewind_history(id, boundary, clear_excluded)
+            .await
     }
     async fn remove_history_entries(
         &self,

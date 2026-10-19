@@ -5,7 +5,7 @@ use peri_theme::theme::ThemeDefinition;
 use ratatui_kit::ratatui::text::Line;
 
 use crate::kit::markdown::MarkdownRenderCache;
-use crate::kit::message_area::grid::GridSpec;
+use crate::kit::message_area::grid::{GridSpec, ZoneTransition};
 use crate::kit::message_area::render::{
     CopyButtonInfo, ImageLineInfo, InteractionLayout, vm_to_lines_cached_with_layout,
 };
@@ -39,6 +39,7 @@ pub(crate) struct EntryRenderCache {
     hash: Option<u64>,
     variant: Option<Discriminant<TuiRenderUnit>>,
     grid: Option<GridSpec>,
+    transition: Option<ZoneTransition>,
     context: Option<EntryRenderContext>,
     frame: u64,
     markdown: MarkdownRenderCache,
@@ -56,6 +57,7 @@ impl EntryRenderCache {
         grid: &GridSpec,
         context: EntryRenderContext,
         frame: u64,
+        transition: ZoneTransition,
     ) -> EntryInvalidation {
         let variant = std::mem::discriminant(vm);
         let identity_changed = self.variant != Some(variant)
@@ -63,7 +65,10 @@ impl EntryRenderCache {
                 previous.occurrence != context.occurrence || previous.surface != context.surface
             });
         let content_changed = identity_changed || self.hash != Some(vm.content_hash());
+        // 转场翻转（相邻 entry 的起止 zone 变化，§6）改变本 slot 的入口台阶行——
+        // 按 Layout 级重渲染本 slot，不牵动其他 slot 的缓存。
         let layout_changed = self.grid != Some(*grid)
+            || self.transition != Some(transition)
             || self.context.as_ref().is_none_or(|previous| {
                 previous.language != context.language
                     || !Arc::ptr_eq(&previous.theme, &context.theme)
@@ -88,9 +93,14 @@ impl EntryRenderCache {
         if invalidation == EntryInvalidation::Animation {
             if let TuiRenderUnit::TuiAssistantBubble(bubble) = vm {
                 if let Some(reasoning) = bubble.reasoning.as_ref().filter(|entry| entry.is_running)
-                    && let Some(first) = Arc::make_mut(&mut self.lines).first_mut()
+                    // 入口台阶（§6）占 lines[0] 时 running header 在 lines[1]——
+                    // 按台阶字形判定，替换目标不因转场形态漂移。
+                    && let Some(header_index) = crate::kit::message_area::render::running_header_index(
+                        &self.lines,
+                    )
+                    && let Some(header) = Arc::make_mut(&mut self.lines).get_mut(header_index)
                 {
-                    *first = crate::kit::message_area::render::render_running_reasoning_header(
+                    *header = crate::kit::message_area::render::render_running_reasoning_header(
                         reasoning, grid,
                     );
                 }
@@ -101,6 +111,7 @@ impl EntryRenderCache {
                     &mut self.markdown,
                     None,
                     context.surface == EntrySurface::Message,
+                    transition,
                 );
                 self.lines = Arc::new(lines);
                 self.copy_button = copy_button;
@@ -115,6 +126,7 @@ impl EntryRenderCache {
                 &mut self.markdown,
                 Some(&mut self.markdown_lines),
                 context.surface == EntrySurface::Message,
+                transition,
             );
             self.lines = Arc::new(lines);
             self.copy_button = copy_button;
@@ -124,6 +136,7 @@ impl EntryRenderCache {
         self.hash = Some(vm.content_hash());
         self.variant = Some(variant);
         self.grid = Some(*grid);
+        self.transition = Some(transition);
         self.context = Some(context);
         self.frame = frame;
         invalidation
@@ -131,6 +144,11 @@ impl EntryRenderCache {
 
     pub(crate) fn lines(&self) -> &Arc<Vec<Line<'static>>> {
         &self.lines
+    }
+
+    /// 上次渲染所用的过程区转场形态——transcript 据此判断转场翻转（§6）。
+    pub(crate) fn transition(&self) -> Option<ZoneTransition> {
+        self.transition
     }
 
     pub(crate) fn markdown_lines(&self) -> &MarkdownLineCache {
@@ -175,9 +193,18 @@ impl EntryRenderCache {
     }
 
     pub(crate) fn retained_bytes(&self) -> usize {
+        let mut seen = crate::kit::retained_bytes::SeenAllocations::default();
+        self.retained_bytes_with(&mut seen)
+    }
+
+    #[allow(dead_code)]
+    pub(crate) fn retained_bytes_with(
+        &self,
+        seen: &mut crate::kit::retained_bytes::SeenAllocations,
+    ) -> usize {
         self.markdown.retained_bytes()
-            + retained_lines_bytes(&self.lines)
-            + self.markdown_lines.retained_bytes()
+            + crate::kit::retained_bytes::retained_arc_lines_bytes(&self.lines, seen)
+            + self.markdown_lines.retained_bytes_with(seen)
             + self.image_lines.capacity() * std::mem::size_of::<ImageLineInfo>()
             + self
                 .image_lines
@@ -203,25 +230,6 @@ impl EntryRenderCache {
                 })
                 .unwrap_or(0)
     }
-}
-
-pub(crate) fn retained_lines_bytes(lines: &Vec<Line<'static>>) -> usize {
-    lines.capacity() * std::mem::size_of::<Line<'static>>()
-        + lines
-            .iter()
-            .map(|line| {
-                line.spans.capacity()
-                    * std::mem::size_of::<ratatui_kit::ratatui::text::Span<'static>>()
-                    + line
-                        .spans
-                        .iter()
-                        .map(|span| match &span.content {
-                            std::borrow::Cow::Owned(text) => text.capacity(),
-                            std::borrow::Cow::Borrowed(_) => 0,
-                        })
-                        .sum::<usize>()
-            })
-            .sum::<usize>()
 }
 
 #[derive(Clone)]
@@ -337,14 +345,20 @@ impl MarkdownLineCache {
         (visual_rows + tail_rows, result)
     }
 
+    #[allow(dead_code)]
     fn retained_bytes(&self) -> usize {
+        let mut seen = crate::kit::retained_bytes::SeenAllocations::default();
+        self.retained_bytes_with(&mut seen)
+    }
+
+    fn retained_bytes_with(&self, seen: &mut crate::kit::retained_bytes::SeenAllocations) -> usize {
         self.stable.capacity() * std::mem::size_of::<MarkdownLineChunk>()
             + self.prefix.capacity() * std::mem::size_of::<usize>()
             + self
                 .stable
                 .iter()
                 .map(|chunk| {
-                    retained_lines_bytes(&chunk.lines)
+                    crate::kit::retained_bytes::retained_arc_lines_bytes(&chunk.lines, seen)
                         + chunk.wrap_map.capacity() * std::mem::size_of::<WrappedLineInfo>()
                 })
                 .sum::<usize>()

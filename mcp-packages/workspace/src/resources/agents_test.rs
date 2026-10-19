@@ -177,8 +177,7 @@ fn builtin_agents_are_public_and_locatable() {
             "explorer",
             "general-purpose",
             "plan",
-            "verification",
-            "web-researcher"
+            "verification"
         ]
     );
     let coder = builtin

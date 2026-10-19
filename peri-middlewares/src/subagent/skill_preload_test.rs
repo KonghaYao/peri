@@ -216,9 +216,13 @@ async fn test_preload_mcp_skill_injects_annotated_content() {
 
     assert_eq!(state.messages().len(), 3, "registry 命中应注入 Ai + Tool");
     let tool_content = state.messages()[2].content();
+    assert!(!tool_content.contains("mcp__demo__"), "不得伪造工具前缀");
     assert!(tool_content.contains("Body of hello."), "应含正文");
     assert!(
-        tool_content.contains("This skill is served by MCP server \"demo\""),
+        tool_content.lines().next()
+            == Some(
+                "This skill is served by MCP server \"demo\", uri: skill://demo/hello/SKILL.md."
+            ),
         "应含来源标注 server 名，实际: {tool_content}"
     );
     assert!(

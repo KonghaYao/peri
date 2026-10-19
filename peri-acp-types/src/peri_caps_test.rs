@@ -16,6 +16,22 @@ fn test_session_workspace_v1_requires_explicit_negotiation() {
 }
 
 #[test]
+fn test_history_pagination_requires_explicit_negotiation() {
+    for value in [
+        serde_json::json!({}),
+        serde_json::json!({"peri.historyPagination":"true"}),
+        serde_json::json!({"peri.historyPagination":false}),
+    ] {
+        assert!(!PeriCaps::from_client_meta(value.as_object().unwrap()).history_pagination);
+    }
+    let value = serde_json::json!({"peri.historyPagination":true});
+    let caps = PeriCaps::from_client_meta(value.as_object().unwrap());
+    assert!(caps.history_pagination);
+    assert_eq!(caps.to_agent_meta()["peri.historyPagination"], true);
+    assert!(PeriCaps::all_enabled().history_pagination);
+}
+
+#[test]
 fn test_user_input_queue_cap_is_opt_in_and_echoed() {
     let empty = serde_json::Map::new();
     assert!(
@@ -218,4 +234,23 @@ fn test_ui_commands_roundtrip() {
     let meta = serde_json::json!({ "peri.uiCommands": "help" });
     let caps = PeriCaps::from_client_meta(meta.as_object().unwrap());
     assert!(caps.ui_commands.is_empty());
+}
+
+#[test]
+fn test_history_window_v1_requires_explicit_negotiation() {
+    for value in [
+        serde_json::json!({}),
+        serde_json::json!({"peri.historyWindowV1": "true"}),
+        serde_json::json!({"peri.historyWindowV1": false}),
+    ] {
+        assert!(
+            !PeriCaps::from_client_meta(value.as_object().unwrap()).history_window_v1,
+            "only an explicit boolean true negotiates V1: {value}"
+        );
+    }
+    let value = serde_json::json!({"peri.historyWindowV1": true});
+    let caps = PeriCaps::from_client_meta(value.as_object().unwrap());
+    assert!(caps.history_window_v1);
+    assert_eq!(caps.to_agent_meta()["peri.historyWindowV1"], true);
+    assert!(PeriCaps::all_enabled().history_window_v1);
 }

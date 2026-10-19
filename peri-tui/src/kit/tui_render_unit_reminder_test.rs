@@ -178,6 +178,7 @@ mod cases {
                 summary: "x".into(),
             }),
             source: None,
+            message_id: None,
             content_hash: 0,
         };
         let b = TuiUserBubble {
@@ -185,6 +186,7 @@ mod cases {
             attachments: Vec::new(),
             reminder: None,
             source: None,
+            message_id: None,
             content_hash: 0,
         };
         assert_ne!(a, b, "reminder 不同 → 应不等");
@@ -199,6 +201,7 @@ mod cases {
             attachments: Vec::new(),
             reminder: None,
             source: None,
+            message_id: None,
             content_hash: 0,
         };
         let b = TuiUserBubble {
@@ -206,6 +209,7 @@ mod cases {
             attachments: Vec::new(),
             reminder: None,
             source: Some("channel".into()),
+            message_id: None,
             content_hash: 0,
         };
         assert_ne!(a, b, "source 不同 → 应不等（身份字段）");

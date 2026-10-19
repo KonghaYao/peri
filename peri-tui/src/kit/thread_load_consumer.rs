@@ -34,15 +34,9 @@ pub struct ThreadLoadRequest {
     _reservation: SessionLoadReservation,
 }
 
-impl ThreadLoadRequest {
-    #[cfg(test)]
-    pub(crate) fn thread_id(&self) -> &str {
-        &self.thread_id
-    }
-}
-
-/// Synchronous producer boundary shared by browser, confirm popup, and compact
-/// replay. Reserving here avoids relying on async consumer scheduling order.
+/// Synchronous producer boundary shared by the thread browser and the confirm
+/// popup (manual compact no longer schedules a replay, REQ-C02 / A12).
+/// Reserving here avoids relying on async consumer scheduling order.
 #[derive(Clone)]
 pub struct ThreadLoadDispatcher {
     tx: mpsc::UnboundedSender<ThreadLoadRequest>,
@@ -99,16 +93,16 @@ pub fn spawn_thread_load_consumer(
                                     let wf_c = bg_tasks.iter().filter(|t| t.kind == "workflow").count();
 
                                     *atoms::CONFIRM_PAYLOAD.state().write() =
-                                        Some(atoms::ConfirmPayload {
-                                            title: i18n::tr("thread-switch-confirm-title"),
-                                            message: i18n::tr_args(
+                                        Some(atoms::ConfirmPayload::new(
+                                            i18n::tr("thread-switch-confirm-title"),
+                                            i18n::tr_args(
                                                 "thread-switch-bg-tasks-message",
                                                 &[(
                                                     "count".into(),
                                                     FluentValue::from(bg_tasks.len() as i64),
                                                 )],
                                             ),
-                                            details: vec![
+                                            vec![
                                                 i18n::tr_args(
                                                     "thread-switch-task-counts",
                                                     &[
@@ -119,10 +113,8 @@ pub fn spawn_thread_load_consumer(
                                                 ),
                                                 i18n::tr("thread-switch-bg-note"),
                                             ],
-                                            pending_action: atoms::ConfirmAction::ThreadSwitch(
-                                                thread_id.clone(),
-                                            ),
-                                        });
+                                            atoms::ConfirmAction::ThreadSwitch(thread_id.clone()),
+                                        ));
                                     *atoms::POPUP_KIND.state().write() = Some(atoms::PopupKind::Confirm);
                                     true
                                 } else {

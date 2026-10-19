@@ -86,7 +86,7 @@ impl ExecuteExtraTool {
         direct_tool_names: impl IntoIterator<Item = &'a str>,
     ) -> Self {
         let description = format!(
-            "ExecuteExtraTool — a directly available meta tool in this session. Runs locally with full permissions — NOT a remote or external tool. You do NOT need to search for it.\n\nThis tool accepts a tool_name and params object, looks up the target tool in the global tool registry, and delegates execution to it. The target tool runs with the same permissions and capabilities as if it were called directly.\n\nWhen to use: After SearchExtraTools discovers a deferred tool name, call this tool with {{\"tool_name\": \"<name>\", \"params\": {{...}}}} to invoke it immediately.\nWhen NOT to use: For tools already in your tool list. {}",
+            "ExecuteExtraTool — a directly available meta tool in this session. 仅解析目标工具名称并委托执行，不增加权限或绕过审批。 You do NOT need to search for it.\n\nThis tool accepts a tool_name and params object, looks up the target tool in the current session's tool registry, and delegates execution to it. 目标工具可以是本地工具或远端 MCP 工具，保持与直接调用相同的权限和审批规则。\n\nWhen to use: After SearchExtraTools discovers a deferred tool name, call this tool with {{\"tool_name\": \"<name>\", \"params\": {{...}}}} to invoke it immediately.\nWhen NOT to use: For tools already in your tool list. {}",
             direct_tools_description(direct_tool_names)
         );
         Self {
@@ -132,7 +132,7 @@ impl BaseTool for ExecuteExtraTool {
             "properties": {
                 "tool_name": {
                     "type": "string",
-                    "description": "A registered target tool name, case variation, or declared alias (e.g., \"CronCreate\", \"mcp__server__action\")"
+                    "description": "已注册的目标工具名称、大小写变体或声明的别名（例如 mcp__cron__cron_list）；以当前会话目录为准"
                 },
                 "params": {
                     "type": "object",

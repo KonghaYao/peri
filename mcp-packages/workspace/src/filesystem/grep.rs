@@ -57,15 +57,22 @@ use peri_mcp_common::shell::persist_truncated_output;
 
 /// 核心搜索函数（同步，在 spawn_blocking 中运行）。
 ///
+/// `glob_filters`：invoke 已校验并编译的 `-g`/`type` 过滤器（空切片 = 不过滤）。
 /// `cancelled`：invoke 超时置位。置位后 sink 立即停止当前文件搜索、walker 在
 /// 检查点（walk 闭包开头、文件完成后）`Quit` 终止整个遍历。`stopped`（sink 与
 /// walker 共享）由输出预算（行数/字节）置位，语义详见 grep_format.rs SearchSink
 /// 文档——两者分离：超时无条件立即退出（含非 Default 模式），预算让非 Default
 /// 模式数完当前文件再停（保证计数正确）。
+///
+/// `collection_limit` 是 offset 与 head_limit 合并后的收集上限（0 = 不限）：
+/// 分页在结构化结果上完成，因此必须先收集到 offset+head_limit 才能定位窗口。
 fn execute_search(
     parsed: &ParsedArgs,
+    glob_filters: &[glob::Pattern],
     cwd: &str,
+    collection_limit: usize,
     head_limit: usize,
+    offset: usize,
     cancelled: Arc<AtomicBool>,
 ) -> Result<String, Box<dyn std::error::Error + Send + Sync>> {
     // 构建搜索路径
@@ -130,12 +137,9 @@ fn execute_search(
         builder.max_depth(Some(depth));
     }
 
-    // 预编译 glob 过滤器
-    let glob_filters: Vec<glob::Pattern> = parsed
-        .glob_filters
-        .iter()
-        .filter_map(|g| glob::Pattern::new(g).ok())
-        .collect();
+    // `-g` glob 过滤器与 type 映射已在 invoke 中编译校验一次，
+    // 这里只按文件名词法匹配（语法错误在调用前即报错，不进入遍历）。
+    let glob_filters = glob_filters.to_vec();
 
     // 共享状态
     // `results` 存 (排序 key=display_path, 输出行)：并行遍历下 push 顺序 = 线程调度
@@ -214,7 +218,7 @@ fn execute_search(
                     local_lines: Vec::new(),
                     total_lines: Arc::clone(&total_lines),
                     total_bytes: Arc::clone(&total_bytes),
-                    max_limit: head_limit,
+                    max_limit: collection_limit,
                     cancelled: Arc::clone(&cancelled),
                     stopped: Arc::clone(&stopped),
                     display_path: display_path.clone(),
@@ -244,7 +248,7 @@ fn execute_search(
                 }
 
                 // FilesOnly / CountOnly / FilesWithoutMatch 模式在搜索完成后处理，
-                // 每文件恰 1 行输出（head_limit 语义 = 前 N 个文件）
+                // 每文件恰 1 行输出（收集上限语义 = 前 N 个文件）
                 let file_line = if parsed.output_mode == OutputMode::FilesOnly
                     && sink.has_match.get()
                 {
@@ -269,11 +273,11 @@ fn execute_search(
                     }
                 }
 
-                // 文件级预算检查：输出行数达到 head_limit 则停新文件（所有模式统一）。
-                // Default 模式 sink 预算保证单文件 ≤ head_limit+1，此处负责跨文件
+                // 文件级预算检查：输出行数达到收集上限则停新文件（所有模式统一）。
+                // Default 模式 sink 预算保证单文件 ≤ collection_limit+1，此处负责跨文件
                 // 精确停止；非 Default 模式 sink 忽略 stopped（数完当前文件），
                 // 由这里停新文件。
-                if head_limit > 0 && total_lines.load(Ordering::Relaxed) >= head_limit {
+                if collection_limit > 0 && total_lines.load(Ordering::Relaxed) >= collection_limit {
                     stopped.store(true, Ordering::Relaxed);
                 }
 
@@ -294,19 +298,39 @@ fn execute_search(
     if guard.is_empty() {
         return Ok("No matches found.".to_string());
     }
-    let lines: Vec<String> = guard.iter().map(|(_, l)| l.clone()).collect();
+    // 分页在结构化结果上完成：先丢弃前 offset 条，再对窗口应用 head_limit。
+    // 提示行/落盘提示只属于格式化阶段，绝不参与 offset 计数。
+    let lines: Vec<String> = guard.drain(..).skip(offset).map(|(_, line)| line).collect();
     // 排序/取数后尽早释放锁，join/落盘在锁外进行
     drop(guard);
 
+    if lines.is_empty() {
+        return Ok(if stopped.load(Ordering::Relaxed) {
+            format!(
+                "No matches found after offset {offset} in the collected output (search stopped at the output limit)."
+            )
+        } else {
+            format!("No matches found after offset {offset}.")
+        });
+    }
+
     let joined = lines.join("\n");
-    let count_note = if stopped.load(Ordering::Relaxed) {
-        format!("{} output lines collected; total unknown", lines.len())
+    let offset_note = if offset > 0 {
+        format!(" after offset {offset}")
     } else {
-        format!("{} output lines total", lines.len())
+        String::new()
+    };
+    let count_note = if stopped.load(Ordering::Relaxed) {
+        format!(
+            "{} output lines collected{offset_note}; total unknown",
+            lines.len()
+        )
+    } else {
+        format!("{} output lines total{offset_note}", lines.len())
     };
 
     // 行数精确截断：恰好 head_limit 行不标 truncated，超过才截断标记
-    // （收集阶段预算 head_limit+1，多收 1 行使"恰好 N"与"N+1"可区分）
+    // （收集阶段预算 collection_limit+1，多收 1 行使"恰好 N"与"N+1"可区分）
     let mut output = joined.clone();
     let mut line_note = String::new();
     if head_limit > 0 && lines.len() > head_limit {
@@ -584,7 +608,28 @@ impl BaseTool for GrepTool {
             Err(e) => return Err(ToolFailure::new("Invalid output_mode. Use content, files_with_matches, count, or files_without_matches.", format!("Error: {e}")).into()),
         };
 
+        // glob 语法在遍历前校验一次：非法过滤器报错，不退化成「搜索全部文件」，
+        // 也不在 walker 热循环里重复编译（`*.{ts,tsx}` 在这里展开成多个 pattern）。
+        let glob_filters = match super::glob_patterns::compile_glob_filters(&parsed.glob_filters) {
+            Ok(filters) => filters,
+            Err(e) => {
+                return Err(ToolFailure::new(
+                    "Invalid glob pattern. Close character classes and comma-separated alternation groups; supported glob syntax is `*`, `?`, `[abc]` and `{a,b}` alternation (e.g. \"*.{ts,tsx}\", \"*.rs\").",
+                    format!("Error: {e}"),
+                )
+                .into());
+            }
+        };
+
         let head_limit = grep_input.head_limit;
+        let offset = grep_input.offset.unwrap_or(0);
+        // offset 与 head_limit 在结构化结果上分页：必须先收集到窗口末尾。
+        // head_limit == 0 表示不限，收集也不设上限（仍受 MAX_OUTPUT_BYTES 约束）。
+        let collection_limit = if head_limit == 0 {
+            0
+        } else {
+            offset.saturating_add(head_limit)
+        };
 
         let cwd = self.cwd.clone();
         // 协作取消标志：超时置位后，spawn_blocking 内的 walker 在检查点尽快退出
@@ -595,12 +640,21 @@ impl BaseTool for GrepTool {
             SEARCH_TIMEOUT,
             tokio::task::spawn_blocking({
                 let cancelled = Arc::clone(&cancelled);
-                move || execute_search(&parsed, &cwd, head_limit, cancelled)
+                move || {
+                    execute_search(
+                        &parsed,
+                        &glob_filters,
+                        &cwd,
+                        collection_limit,
+                        head_limit,
+                        offset,
+                        cancelled,
+                    )
+                }
             }),
         )
         .await;
 
-        // offset 后处理（在超时/结果后应用）
         let output = match result {
             Err(_) => {
                 cancelled.store(true, Ordering::Relaxed);
@@ -618,20 +672,7 @@ impl BaseTool for GrepTool {
             Ok(Ok(Err(e))) => return Err(e),
         };
 
-        // 应用 offset：跳过前 N 行
-        let final_output = if let Some(offset) = grep_input.offset {
-            if offset > 0 {
-                let lines: Vec<&str> = output.split('\n').collect();
-                let skipped: Vec<&str> = lines.into_iter().skip(offset).collect();
-                skipped.join("\n")
-            } else {
-                output
-            }
-        } else {
-            output
-        };
-
-        Ok(final_output)
+        Ok(output)
     }
 }
 

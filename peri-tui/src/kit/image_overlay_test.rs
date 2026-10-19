@@ -1,6 +1,6 @@
 //! Tests for kit::image_overlay（image-p0-p1-spec §7.6 验收断言）。
 //!
-//! 覆盖：触发仲裁（hover > cursor > focus、遮挡）、cursor/focus 路径提取、
+//! 覆盖：触发仲裁（hover → cursor → 待发送附件 → focus、遮挡）、cursor/focus 路径提取、
 //! 几何、分级降级（Managed → Loading → Ready / Manual → Degraded / 校验失败
 //! → Error）、陈旧解码结果丢弃、隐藏清理（Idle）、渲染（TestBackend：Ready
 //! 含 `\x1b_G` transmit；Degraded/Idle 无 escape）。

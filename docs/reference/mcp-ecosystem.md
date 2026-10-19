@@ -721,7 +721,7 @@ peri 自带的 Web / Artifact / Cron / Workspace 能力不是 middleware 提供�
 | 操作 | 工具可见性 | cron tick | readiness | 物理生命周期 |
 | --- | --- | --- | --- | --- |
 | `CronMiddleware: false` | cron 三工具关闭 | 保持运行 | 保持 1R ready | 不销毁实例 / scheduler / supervisor |
-| `WorkspaceMiddleware: false` | 该实例的 7 个文件/终端工具从模型面消失（不覆盖 外部 MCP server 与 subagent 的 `WriteSandbox`） | 不适用 | 保持 1R ready | 不销毁实例 / handler |
+| `WorkspaceMiddleware: false` | 该实例的 7 个文件/终端工具从模型面消失（不覆盖 外部 MCP server） | 不适用 | 保持 1R ready | 不销毁实例 / handler |
 | `FilesystemMiddleware` / `TerminalMiddleware` | **无效**（wave 3 后不是已知键 ⇒ warn 后丢弃） | 不适用 | 不变 | 不变 |
 | MCP 配置 `{"<实例>": {"disabled": true}}` | 该实例不连接 | 不 spawn | 不参与 readiness | 注册为 `Disabled` |
 | `PERI_MCP_BUILTIN=off` | 四实例零注入 | 不 spawn | 无 builtin ready 要求 | 无 builtin 对象 |

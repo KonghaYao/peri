@@ -88,11 +88,6 @@ fn scheduler_fixture() -> (Arc<Mutex<CronScheduler>>, Triggers) {
     )
 }
 
-/// `CronListTool` 只打印 id 的前 8 字符（`task.id.get(..8)`）——断言按同一口径取前缀。
-fn id_prefix(id: &str) -> &str {
-    id.get(..8).unwrap_or(id)
-}
-
 /// `handler.call_tool` 的同一路径（`invoke_tool_call(server.tools(), "", request)`）。
 async fn route(server: &CronMcpServer, name: &str, arguments: Value) -> CallToolResponse {
     invoke_tool_call(server.tools(), "", &call(name, arguments))
@@ -312,7 +307,7 @@ async fn cron_server_maps_three_tools_without_tick() {
     ))
     .expect("成功结果必须有文本块");
     assert!(
-        list_text.contains(id_prefix(&task_id)),
+        list_text.contains(&task_id),
         "cron_list 必须看到 cron_register 写下的任务：{list_text}"
     );
 
@@ -370,7 +365,7 @@ async fn cron_server_maps_three_tools_without_tick() {
     ))
     .expect("成功结果必须有文本块");
     assert!(
-        !after_remove.contains(id_prefix(&task_id)),
+        !after_remove.contains(&task_id),
         "删除后 cron_list 不得再包含该任务：{after_remove}"
     );
 
@@ -423,7 +418,7 @@ async fn call_tool_routes_each_name_to_shared_base_tool() {
     let listed = first_text(&complete(route(&server, "cron_list", json!({})).await))
         .expect("成功结果必须有文本块");
     assert!(
-        listed.contains(id_prefix(&task_id)),
+        listed.contains(&task_id),
         "cron_list 必须读到同一 scheduler 上的任务：{listed}"
     );
 
@@ -615,7 +610,7 @@ async fn tick_disabled_has_no_driver_but_tools_work() {
     let list_text = first_text(&complete(route(&server, "cron_list", json!({})).await))
         .expect("成功结果必须有文本块");
     assert!(
-        list_text.contains(id_prefix(&task_id)),
+        list_text.contains(&task_id),
         "cron_list 必须看到 cron_register 写下的任务：{list_text}"
     );
     let removed = complete(route(&server, "cron_remove", json!({ "id": task_id.clone() })).await);

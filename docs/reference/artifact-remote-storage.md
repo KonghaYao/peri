@@ -79,13 +79,13 @@ X-TTL: 7d
 <文件内容：UTF-8 文本；.md 已转成 HTML>
 ```
 
-**响应**：必须返回 JSON。HTTP 状态码不作判据——错误写在 body 里：
+**响应**：成功必须是 2xx，并返回 JSON。Peri 先检查 HTTP 状态：非 2xx 一律按失败处理；2xx 的 body 里若出现 `error` 字段也按失败处理（兼容永远返回 200 的托管平台）：
 
 ```jsonc
 // 成功
 { "url": "https://artifacts.example.internal/a/9f3c.html", "expiresAt": "2026-10-03T12:00:00Z" }
 
-// 失败
+// 失败（HTTP 状态可以是 200、4xx 或 5xx）
 { "error": "token 无效" }
 ```
 
@@ -93,9 +93,9 @@ X-TTL: 7d
 
 | 字段 | 要求 |
 | --- | --- |
-| `url` | 成功时必填，原样展示给用户 |
+| `url` | 成功时必填，必须是非空的绝对 `http` / `https` URL，原样展示给用户 |
 | `expiresAt` | 可选（也接受 `expires_at`），展示为链接过期时间 |
-| `error` | 失败时填。**不要只靠 HTTP 状态码**：有些托管平台永远返回 200，Peri 只看 body |
+| `error` | 失败时填。非 2xx 时 Peri 优先展示该字段；2xx 时只要出现该字段就按失败处理 |
 | `id` | 可以返回，会被忽略 |
 
 其他约定：
@@ -153,7 +153,7 @@ curl -sS -X POST "$PERI_ARTIFACTS_URL/upload" \
 | 成功输出 | `Artifact uploaded: <url>`，服务返回过期时间时追加 `Expires: <时间>` |
 | 输出格式 | 纯文本 URL。终端里的可点击链接由界面渲染，工具输出本身不含控制序列 |
 
-失败时返回一行文本，前缀标明失败发生在哪一步：
+失败时返回一行文本（工具结果标记 `isError=true`），前缀标明失败发生在哪一步：
 
 | 前缀 | 含义 |
 | --- | --- |
@@ -161,18 +161,24 @@ curl -sS -X POST "$PERI_ARTIFACTS_URL/upload" \
 | `Only HTML or Markdown files are supported` | 扩展名不在白名单 |
 | `File too large` | 超过 10 MB |
 | `Upload failed` | 连不上服务：地址写错、DNS、超时、网络不通 |
-| `Upload error` | 你的服务在 JSON 里返回了 `error` |
-| `Failed to parse response` | 响应不是合法 JSON（会附带 body 片段） |
+| `HTTP <status>` | 服务返回非 2xx；优先附带 body 中的 `error`，否则附带截断后的 body |
+| `Upload error` | HTTP 2xx 但 JSON 里返回了 `error`（非 2xx 走 `HTTP <status>`） |
+| `Failed to parse response` | 响应不是合法 JSON（会附带截断后的 body 片段） |
 | `Failed to read response` | 响应体读取失败（例如被压缩编码噎住） |
+| `Artifact response has no usable URL` | 2xx 但 `url` 缺失或为空白 |
+| `Artifact response URL is invalid` | `url` 不是绝对 `http` / `https` 地址 |
+
+错误文本（响应 body 或 2xx 响应的 `error` 字段）最多保留 4 KiB，超出部分会被截断，避免超大响应淹没工具输出。
 
 ## 6. 排查
 
 | 现象 | 先查什么 |
 | --- | --- |
 | `Upload failed` | `PERI_ARTIFACTS_URL` 是否只写到基地址、服务是否在监听、本机能否访问该地址 |
+| `HTTP <status>` | 服务返回了非 2xx；按 §4 让成功响应为 2xx，并在 body 里补 `{"error": "..."}` 以获得具体诊断 |
 | `Upload error: ...` | 服务返回的错误文本；常见是 token 不匹配、超限、内容被策略拒绝 |
 | `Failed to parse response` | 服务返回了 HTML 错误页或空 body；按 §4 返回 JSON，并检查是否压缩了响应 |
-| 服务返回 401/403 但 Peri 没报错 | Peri 只看 body；请在 body 里写 `{"error": "..."}` |
+| `Artifact response has no usable URL` / `... URL is invalid` | 成功响应缺少 `url`，或 `url` 不是非空绝对 `http` / `https` 地址 |
 | 改了环境变量没变化 | 变量在建立实例连接时读取：重启 Peri；并确认配的是 `mcpServers.artifact.env`（§3），不是只 export 到 shell |
 | 上传成功但链接打不开 | `url` 由你的服务给出，Peri 不做代理也不托管内容；确认该地址真的对外可访问 |
 

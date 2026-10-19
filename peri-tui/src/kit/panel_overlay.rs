@@ -62,14 +62,12 @@ pub fn PanelOverlay(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
 /// 预留 MessageArea 的最小行数
 const MESSAGE_RESERVE: u16 = 4;
 
-/// 包裹面板——动态高度自适应终端尺寸，水平居中显示面板内容。
-fn render_panel(
-    kind: crate::app::panel_types::PanelKind,
-    panel: AnyElement<'static>,
-    term_h: u16,
-) -> AnyElement<'static> {
-    let _layout = panel_registry::panel_layout(kind);
-
+/// 面板绘制高度——终端高度与主题上下限的唯一权威。
+///
+/// `PanelOverlay` 按此高度分配区域；面板组件在首帧尚未测量到自身区域时，
+/// 也按此值预测内容行数（`panels::shared::list::content_rows`），
+/// 避免首帧把列表渲染成空。
+pub(crate) fn panel_height(term_h: u16) -> u16 {
     let theme_guard = THEME_ATOM.state();
     let theme = theme_guard.read();
     let max_h = theme.component.panel.max_height;
@@ -78,7 +76,22 @@ fn render_panel(
     let _ = theme_guard;
 
     let available = term_h.saturating_sub(MESSAGE_RESERVE);
-    let height = max_h.min(available).max(min_h.min(available));
+    max_h.min(available).max(min_h.min(available))
+}
+
+/// 面板内容区行数（不含 `panel_shell!` 的上下边框）——与鼠标命中的区域口径一致。
+pub(crate) fn panel_content_rows(term_h: u16) -> u16 {
+    panel_height(term_h).saturating_sub(2)
+}
+
+/// 包裹面板——动态高度自适应终端尺寸，水平居中显示面板内容。
+fn render_panel(
+    kind: crate::app::panel_types::PanelKind,
+    panel: AnyElement<'static>,
+    term_h: u16,
+) -> AnyElement<'static> {
+    let _layout = panel_registry::panel_layout(kind);
+    let height = panel_height(term_h);
 
     element!(
         View(

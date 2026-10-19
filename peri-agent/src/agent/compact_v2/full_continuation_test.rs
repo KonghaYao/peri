@@ -117,7 +117,10 @@ async fn full_continuation_preserves_chunks_and_commits_complete_summary() {
         .summary
         .unwrap()
         .ends_with("保留决策，继续未完成工作。"));
-    assert!(transcript.flags(original).excluded);
+    assert!(
+        transcript.get(original).is_none(),
+        "Full 提交后原历史已从热态释放（持久化事实仍带 excluded）"
+    );
     {
         let requests = model.requests.lock().unwrap();
         assert_eq!(requests.len(), 2);
@@ -191,7 +194,10 @@ async fn full_continuation_accepts_closed_summary_at_output_limit() {
         .unwrap();
         assert!(result.summary.unwrap().ends_with("保留工作状态。"));
         assert_eq!(model.requests.lock().unwrap().len(), expected_requests);
-        assert!(transcript.flags(original).excluded);
+        assert!(
+            transcript.get(original).is_none(),
+            "Full 提交后原历史已从热态释放（持久化事实仍带 excluded）"
+        );
         let stored = bound
             .resources
             .load_session_snapshot(&bound.thread_id)
@@ -281,7 +287,10 @@ async fn full_continuation_resumes_after_unclosed_end_turn() {
     .unwrap();
     assert!(result.summary.unwrap().ends_with("first second third"));
     assert_eq!(model.requests.lock().unwrap().len(), 3);
-    assert!(transcript.flags(original).excluded);
+    assert!(
+        transcript.get(original).is_none(),
+        "Full 提交后原历史已从热态释放（持久化事实仍带 excluded）"
+    );
     let stored = bound
         .resources
         .load_session_snapshot(&bound.thread_id)
@@ -318,7 +327,10 @@ async fn full_continuation_keeps_draft_across_empty_continuation() {
         vec!["<summary>first".to_owned()],
         "空续写不得丢弃或重放已有草稿"
     );
-    assert!(transcript.flags(original).excluded);
+    assert!(
+        transcript.get(original).is_none(),
+        "Full 提交后原历史已从热态释放（持久化事实仍带 excluded）"
+    );
 }
 
 /// [回归测试] 只产生隐藏思考的首轮没有可用正文：允许一次重新生成，且不注入空 assistant。
@@ -368,7 +380,10 @@ async fn full_continuation_regenerates_after_reasoning_only_truncation() {
         requests[1].max_tokens, requests[0].max_tokens,
         "provider 输出上限不变"
     );
-    assert!(transcript.flags(original).excluded);
+    assert!(
+        transcript.get(original).is_none(),
+        "Full 提交后原历史已从热态释放（持久化事实仍带 excluded）"
+    );
 }
 
 /// [回归测试] 重新生成仍无可用正文：提前结束，保留原历史。
@@ -773,7 +788,10 @@ async fn summary_request_over_window_budget_is_still_sent_and_merged() {
         2,
         "装不下的请求必须照发并续写，不能在启动前拒绝"
     );
-    assert!(transcript.flags(original).excluded);
+    assert!(
+        transcript.get(original).is_none(),
+        "Full 提交后原历史已从热态释放（持久化事实仍带 excluded）"
+    );
 }
 
 /// [回归测试] 摘要元数据无法解析时显式跳过检查，不冒用主模型窗口、不伪造限额。
@@ -802,7 +820,10 @@ async fn summary_request_with_unknown_metadata_keeps_provider_defaults() {
     .unwrap();
     assert!(result.summary.unwrap().ends_with("first and last"));
     assert_eq!(model.requests.lock().unwrap().len(), 2);
-    assert!(transcript.flags(original).excluded);
+    assert!(
+        transcript.get(original).is_none(),
+        "Full 提交后原历史已从热态释放（持久化事实仍带 excluded）"
+    );
 }
 
 /// [回归测试] provider 拒绝摘要请求时保留既有 Full 错误语义，不无限重试。

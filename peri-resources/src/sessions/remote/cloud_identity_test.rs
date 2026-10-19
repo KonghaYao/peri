@@ -122,7 +122,7 @@ async fn identity_flow(target: &CloudTarget, run: &str) -> Result<(), String> {
         .map_err(failure)?;
     let boundary = RewindBoundary::KeepThrough(first.id());
     writer
-        .rewind_history(&root_id, boundary)
+        .rewind_history(&root_id, boundary, &[])
         .await
         .map_err(failure)?;
     let third = PersistedPayload::Message(BaseMessage::human("identity third"));
@@ -131,7 +131,7 @@ async fn identity_flow(target: &CloudTarget, run: &str) -> Result<(), String> {
         .await
         .map_err(failure)?;
     writer
-        .rewind_history(&root_id, boundary)
+        .rewind_history(&root_id, boundary, &[])
         .await
         .map_err(failure)?;
 

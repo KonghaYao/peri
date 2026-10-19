@@ -8,13 +8,16 @@
 //! - builtin 技能无附件文件（清单只含 `SKILL.md`，digest 按嵌入字节计算）；
 //! - builtin Agent 恒以 `agent://builtin/{id}/agent.md` 公开（W5）：**是否可用**
 //!   由宿主按会话冻结开关（`built_in_subagents_enabled`）判定——provider 只提供
-//!   静态资产，不做启用/关闭策略（§5.1「server 不持策略」）。
+//!   静态资产，不做启用/关闭策略（§5.1「server 不持策略」）；
+//! - `web-researcher` 的定义归属 web 实例（`mcp-packages/web/src/agents/`），
+//!   不在本表；宿主把宿主绑定的任何 builtin 实例都视为本地来源，两者在目录面
+//!   同形（`AgentSource::Local` + scope = builtin）。
 
 use peri_acp_types::workspace_resources::{
     digest_bytes, is_valid_uri_segment, ResourceScope, SKILL_ENTRY_FILE,
 };
+use peri_mcp_common::agent_definition::frontmatter::{frontmatter_json, frontmatter_summary};
 
-use super::frontmatter::{frontmatter_json, frontmatter_summary};
 use super::skills::{SkillFileRecord, SkillRecord, SkillStore};
 use super::ResourceBudget;
 
@@ -94,10 +97,6 @@ pub static BUILTIN_AGENTS: &[BuiltinAgent] = &[
         id: "verification",
         content: include_str!("builtin/agents/verification.md"),
     },
-    BuiltinAgent {
-        id: "web-researcher",
-        content: include_str!("builtin/agents/web-researcher.md"),
-    },
 ];
 
 /// builtin Agent 定义的原始字节（`agents::AgentStore::Builtin` 的静态读取路径）。
@@ -162,3 +161,8 @@ pub(crate) fn builtin_skill_records(budget: &ResourceBudget) -> Vec<SkillRecord>
 #[cfg(test)]
 #[path = "builtin_test.rs"]
 mod tests;
+
+/// 派发 Skill 的能力预检契约（表格 vs 定义、预检正负例）。
+#[cfg(test)]
+#[path = "builtin_skill_capability_test.rs"]
+mod builtin_skill_capability_tests;

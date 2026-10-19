@@ -13,7 +13,8 @@ use std::sync::Arc;
 #[cfg(test)]
 use crate::kit::atoms::FocusedEntry;
 use crate::kit::atoms::{
-    BRIDGE_RESET_COUNTER, FOCUSED_ENTRY, IMAGE_HOVER, LANG_VERSION, LOADING_EPOCH, VIEW_MODELS,
+    BRIDGE_RESET_COUNTER, FOCUSED_ENTRY, HISTORY_PREPEND_EPOCH, IMAGE_HOVER, LANG_VERSION,
+    LOADING_EPOCH, VIEW_MODELS,
 };
 use crate::kit::layout::CenterBandHook;
 use crate::kit::text_selection::TextSelection;
@@ -50,6 +51,8 @@ pub(crate) fn measure_synthetic_wrap(lines: &[Line<'static>], width: u16) {
 }
 mod transcript;
 mod transcript_index;
+mod viewport_anchor;
+pub(crate) use viewport_anchor::window_identity_token;
 mod vm_cache;
 
 #[cfg(test)]
@@ -237,6 +240,12 @@ pub fn MessageArea(props: &MessageAreaProps, mut hooks: Hooks) -> impl Into<AnyE
         frame_t0,
         Some("body-before-prepare-including-vm-read"),
     );
+    // [REQ-C01-3 / A20] 历史翻页代数（`HISTORY_PREPEND_EPOCH`，桥接任务每并入一页 +1）
+    // 在 prepare **之前**读，且**必须晚于上面的 `read_render_snapshot()`**：桥接侧先推
+    // 代数再发布，所以「快照里看得到并入 = 代数也看得到」；反过来（代数读在前、快照读在
+    // 后）会漏配一整次并入——它是本处读序的唯一理由，见 `viewport_anchor` 模块文档 4.。
+    // epoch 只是「并合发生过」这个事实，不承载任何桥接槽位语义。
+    let prepend_epoch = HISTORY_PREPEND_EPOCH.get();
     let prepare_wait = peri_time::monotonic_now();
     let mut transcript_guard = transcript.write_no_update();
     let mut caches_guard = vm_caches.write_no_update();
@@ -258,9 +267,13 @@ pub fn MessageArea(props: &MessageAreaProps, mut hooks: Hooks) -> impl Into<AnyE
         BRIDGE_RESET_COUNTER.get(),
         scroll_state.read().offset(),
         vis_height as usize,
+        prepend_epoch,
     );
     let prepare_end = peri_time::monotonic_now();
     *anchor_slot_state.write_no_update() = transcript_guard.anchor();
+    // [REQ-C01-3 / A20] 本次发布的重定位结果（一次性；`prepare` 内完成身份重定位，
+    // 见 `viewport_anchor`）。取走后交给并入分支消费。
+    let prepend_relocation = transcript_guard.take_prepend_relocation();
     drop(caches_guard);
     drop(transcript_guard);
     let t_rebuild = peri_time::monotonic_now();
@@ -398,6 +411,10 @@ pub fn MessageArea(props: &MessageAreaProps, mut hooks: Hooks) -> impl Into<AnyE
                     prev_loading_epoch,
                     bridge_reset_counter,
                     prev_reset_counter,
+                    // [REQ-C01-3 / A20] 更早历史并入的重定位结果：`prepare` 内用
+                    // 「发布前锚点身份 + 发布后新索引」换算完成，effect 只消费
+                    // （一次性取值见上方 `take_prepend_relocation` 调用点）。
+                    prepend_relocation,
                     // [Slice 4 §6.8] pending interaction block 锚定范围
                     // （每帧派生值；effect 依赖不含它——block 完成时 generation
                     // 变化触发 effect，用当帧最新值）。
@@ -500,6 +517,10 @@ pub fn MessageArea(props: &MessageAreaProps, mut hooks: Hooks) -> impl Into<AnyE
     // 到达时，残留 pending_delta 在任意后续渲染帧（鼠标移动/内容更新/其他事件）
     // 落地，消除「滚动停止不到位」；反向抵消已由 apply_scroll 先行处理。
     // write_no_update 不触发 wake，无自激重渲染。
+    //
+    // [REQ-C01-1] 历史翻页触发**不在这里**：render body 写 atom 被 TUI-RENDER-001
+    // 禁止，触发点放在滚动事件边界（`scroll/event.rs`），并按 `apply_pending` 的
+    // 同一口径预判节流窗口内 pending 落地后的视口事实，不依赖本帧 flush 的顺序。
     scroll::flush_scroll_if_due(
         &scroll_throttle,
         &scroll_state,
@@ -829,3 +850,11 @@ mod tests;
 #[cfg(test)]
 #[path = "viewport_test.rs"]
 mod viewport_tests;
+
+#[cfg(test)]
+#[path = "window_viewport_test.rs"]
+mod window_viewport_tests;
+
+#[cfg(test)]
+#[path = "p_matrix_tui_test.rs"]
+mod p_matrix_tui_tests;

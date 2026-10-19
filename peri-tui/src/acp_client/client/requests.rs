@@ -7,6 +7,9 @@ use serde_json::{Value, json};
 
 use super::AcpTuiClient;
 
+/// 配置类 RPC 的本地回执上限；持锁等待无界会连带阻塞后续输入提交。
+const CONFIG_REQUEST_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
+
 #[cfg(test)]
 #[path = "cancel_test.rs"]
 mod cancel_tests;
@@ -18,6 +21,10 @@ mod caps_tests;
 #[cfg(test)]
 #[path = "session_request_test.rs"]
 mod session_request_tests;
+
+#[cfg(test)]
+#[path = "steer_config_timeout_test.rs"]
+mod steer_config_timeout_tests;
 
 impl AcpTuiClient {
     pub(crate) fn stable_session_identity(&self) -> Option<(String, u64)> {
@@ -55,9 +62,9 @@ impl AcpTuiClient {
     /// 上送 ui 域命令明细（设计 §88 / Phase 3 caps 通道：`clientCapabilities._meta.
     /// peri.uiCommands` 明细数组）。
     ///
-    /// TUI 内部 Mpsc 路径无协议 initialize 握手，host 默认以
-    /// [`PeriCaps::all_enabled`] 兜底（含 11 条旧兜底 ui 明细）。本方法显式协商
-    /// caps：以 all_enabled 为基座、关闭 TUI 不消费的 `peri.oauth` 专用通道、
+    /// TUI 走进程内 MPSC 传输，没有传输层握手，但同样显式发 initialize——本方法就是那次
+    /// 协商；在它之前 host 请求面以 [`PeriCaps::all_enabled`] 兜底（含 11 条旧兜底 ui 明细）。
+    /// 本方法以 all_enabled 为基座、关闭 TUI 不消费的 `peri.oauth` 专用通道、
     /// 替换 `ui_commands` 为 TUI 实时明细，经 initialize 请求送达 host
     /// （`handle_request` "initialize" 分支 → `set_pending_caps`
     /// → 首个 session/new 的 `ensure_session_caps` 取协商值 → `send_available_commands_update`
@@ -75,6 +82,7 @@ impl AcpTuiClient {
         // 直接拒绝授权码——TUI 的 [ 授权 ] 按钮会因缺 flow_id 被拒且无反馈。
         caps.oauth = false;
         caps.ui_commands = specs.to_vec();
+        let requested_history_window = caps.history_window_v1;
         let params = json!({
             "protocolVersion": 1,
             "clientCapabilities": { "_meta": caps.to_agent_meta() },
@@ -93,6 +101,11 @@ impl AcpTuiClient {
             .unwrap_or(false);
         self.user_input_queue
             .store(supported, std::sync::atomic::Ordering::Release);
+        let history_window = result
+            .pointer("/agentCapabilities/_meta/peri.historyWindowV1")
+            .and_then(Value::as_bool)
+            .unwrap_or(requested_history_window);
+        crate::kit::atoms::HISTORY_WINDOW_CAPABLE.set(history_window);
         if self.projection_mode == super::ClientProjectionMode::Interactive {
             crate::kit::steer_state::STEERS.state().write().enabled = supported;
         }
@@ -198,10 +211,13 @@ impl AcpTuiClient {
             .current_session_id()
             .ok_or_else(|| AcpError::new(-32603, "no active session"))?;
         let params = json!({ "sessionId": session_id, "configId": "model", "value": alias });
-        let _ = self
-            .transport
-            .send_request("session/set_config_option", params)
-            .await?;
+        peri_time::timeout(
+            CONFIG_REQUEST_TIMEOUT,
+            self.transport
+                .send_request("session/set_config_option", params),
+        )
+        .await
+        .map_err(|_| AcpError::new(-32603, "set model timed out"))??;
         Ok(())
     }
 
@@ -219,10 +235,12 @@ impl AcpTuiClient {
             mode => mode,
         };
         let params = json!({ "sessionId": session_id, "modeId": wire_mode });
-        let _ = self
-            .transport
-            .send_request("session/set_mode", params)
-            .await?;
+        peri_time::timeout(
+            CONFIG_REQUEST_TIMEOUT,
+            self.transport.send_request("session/set_mode", params),
+        )
+        .await
+        .map_err(|_| AcpError::new(-32603, "set mode timed out"))??;
         if self.projection_mode == super::ClientProjectionMode::Interactive {
             crate::kit::atoms::SERVICE_SNAPSHOT
                 .state()

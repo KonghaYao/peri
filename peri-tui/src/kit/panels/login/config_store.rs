@@ -3,7 +3,6 @@ use crate::kit::atoms::{
     ACP_CLIENT_HANDLE, NOTIFICATION, Notification, PERI_CONFIG_HANDLE, PROVIDER_LIST,
     ProviderSummary,
 };
-use fluent_bundle::FluentValue;
 use peri_acp::provider::config::{ProviderConfig, ProviderModels};
 use std::time::Duration;
 
@@ -90,17 +89,7 @@ pub(super) fn save_login_edit(es: &LoginEditState) -> bool {
     };
 
     // 先持久化：失败则不发布任何变更（handle / PROVIDER_LIST / ACP 均不动）
-    if let Err(e) = crate::config::save_effective(&snap) {
-        *NOTIFICATION.state().write() = Some(Notification {
-            message: i18n::tr_args(
-                "config-save-failed",
-                &[(
-                    "error".to_string(),
-                    FluentValue::from(e.to_string().as_str()),
-                )],
-            ),
-            until: peri_time::monotonic_now() + Duration::from_secs(2),
-        });
+    if !crate::kit::config_service::persist_candidate(&snap) {
         return false;
     }
 
@@ -115,11 +104,6 @@ pub(super) fn save_login_edit(es: &LoginEditState) -> bool {
             }
         });
     }
-
-    *NOTIFICATION.state().write() = Some(Notification {
-        message: i18n::tr("config-saved").to_string(),
-        until: peri_time::monotonic_now() + Duration::from_secs(1),
-    });
 
     if is_new {
         tracing::info!(
@@ -170,71 +154,54 @@ fn refresh_provider_list() {
     *PROVIDER_LIST.state().write() = updated_providers;
 }
 
-/// 持久化 PeriConfig 快照并显示通知
-fn persist_and_notify(snap: &crate::config::PeriConfig) {
-    match crate::config::save_effective(snap) {
-        Ok(()) => {
-            *NOTIFICATION.state().write() = Some(Notification {
-                message: i18n::tr("config-saved").to_string(),
-                until: peri_time::monotonic_now() + Duration::from_secs(1),
-            });
-        }
-        Err(e) => {
-            *NOTIFICATION.state().write() = Some(Notification {
-                message: i18n::tr_args(
-                    "config-save-failed",
-                    &[(
-                        "error".to_string(),
-                        FluentValue::from(e.to_string().as_str()),
-                    )],
-                ),
-                until: peri_time::monotonic_now() + Duration::from_secs(2),
-            });
-        }
-    }
+/// 删除候选：在副本上移除目标身份，不改内存。
+///
+/// 返回 `None` 表示目标已不在配置里——调用方据此跳过落盘，重复删除不产生写入。
+pub(super) fn delete_candidate(
+    cfg: &crate::config::PeriConfig,
+    provider_id: &str,
+) -> Option<crate::config::PeriConfig> {
+    let mut snap = cfg.clone();
+    let len_before = snap.config.providers.len();
+    snap.config.providers.retain(|p| p.id != provider_id);
+    (snap.config.providers.len() < len_before).then_some(snap)
 }
 
-/// 删除当前选中的 provider：从 PERI_CONFIG_HANDLE 移除 + 刷新 + 持久化 + 推送 ACP
-pub(super) fn delete_provider(selected_index: usize) {
+/// 删除指定身份的 provider：落盘成功后，才从 PERI_CONFIG_HANDLE 移除 + 刷新 + 推送 ACP。
+///
+/// 身份（provider id）由调用方在确认门下冻结，这里不再按列表下标重取目标——列表每 tick
+/// 重派生，按下标重取会在确认期间漂移到另一个 provider（删除不可逆）。
+///
+/// 与 [`save_login_edit`] 同一约定：落盘失败时可见列表仍是已持久化的 provider 集合
+/// （删除不可逆，不能让界面显示一个重启后复活的删除结果）。
+pub(super) fn delete_provider(provider_id: &str) {
     let Some(handle) = PERI_CONFIG_HANDLE.get() else {
         return;
     };
 
-    let provider_id = {
-        let provider_state = PROVIDER_LIST.state();
-        let store_read = provider_state.read();
-        match store_read.get(selected_index) {
-            Some(p) => p.id.clone(),
+    let candidate = {
+        let cfg = handle.read();
+        match delete_candidate(&cfg, provider_id) {
+            Some(candidate) => candidate,
             None => return,
         }
     };
 
-    let removed = {
-        let mut cfg = handle.write();
-        let len_before = cfg.config.providers.len();
-        cfg.config.providers.retain(|p| p.id != provider_id);
-        let removed = cfg.config.providers.len() < len_before;
-        let snap = cfg.clone();
-        drop(cfg);
-
-        if removed {
-            refresh_provider_list();
-            persist_and_notify(&snap);
-
-            // 推送 ACP
-            if let Some(client) = ACP_CLIENT_HANDLE.get() {
-                tokio::spawn(async move {
-                    if let Err(e) = client.update_config(&snap).await {
-                        tracing::warn!(error = %e, "LoginPanel: update_config push failed after delete");
-                    }
-                });
-            }
-        }
-
-        removed
-    };
-
-    if removed {
-        tracing::info!(provider_id = %provider_id, "LoginPanel: provider deleted");
+    if !crate::kit::config_service::persist_candidate(&candidate) {
+        return;
     }
+
+    *handle.write() = candidate.clone();
+    refresh_provider_list();
+
+    // 推送 ACP
+    if let Some(client) = ACP_CLIENT_HANDLE.get() {
+        tokio::spawn(async move {
+            if let Err(e) = client.update_config(&candidate).await {
+                tracing::warn!(error = %e, "LoginPanel: update_config push failed after delete");
+            }
+        });
+    }
+
+    tracing::info!(provider_id = %provider_id, "LoginPanel: provider deleted");
 }

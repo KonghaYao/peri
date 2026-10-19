@@ -17,18 +17,22 @@ pub const COMPACT_CONTEXT_WINDOW: u32 = 0;
 
 /// 发出 `CompactStarted` 事件。
 pub async fn emit_compact_started(sink: &Arc<dyn EventSink>, session_id: &str) {
-    sink.push_event(
-        session_id,
-        &ExecutorEvent::CompactStarted {
-            turn_id: String::new(),
-            agent_id: String::new(),
-            step: 0,
-            strategy: CompactStrategy::Full,
-            trigger: CompactTrigger::Manual,
-        },
-        COMPACT_CONTEXT_WINDOW,
-    )
-    .await;
+    if let Err(error) = sink
+        .push_event(
+            session_id,
+            &ExecutorEvent::CompactStarted {
+                turn_id: String::new(),
+                agent_id: String::new(),
+                step: 0,
+                strategy: CompactStrategy::Full,
+                trigger: CompactTrigger::Manual,
+            },
+            COMPACT_CONTEXT_WINDOW,
+        )
+        .await
+    {
+        tracing::warn!(session_id, error = %error, "compact started event send failed");
+    }
 }
 
 /// 发出 `CompactCompleted` 事件（状态重建信号 + 展示/观测计数）。
@@ -48,19 +52,23 @@ pub async fn emit_compact_completed(
     files: Vec<peri_acp_types::event::CompactFileInfo>,
     skills: Vec<String>,
 ) {
-    sink.push_event(
-        session_id,
-        &ExecutorEvent::CompactCompleted {
-            summary,
-            messages,
-            trigger,
-            strategy,
-            affected_count,
-            estimated_tokens_saved,
-            files,
-            skills,
-        },
-        COMPACT_CONTEXT_WINDOW,
-    )
-    .await;
+    if let Err(error) = sink
+        .push_event(
+            session_id,
+            &ExecutorEvent::CompactCompleted {
+                summary,
+                messages,
+                trigger,
+                strategy,
+                affected_count,
+                estimated_tokens_saved,
+                files,
+                skills,
+            },
+            COMPACT_CONTEXT_WINDOW,
+        )
+        .await
+    {
+        tracing::warn!(session_id, error = %error, "compact completed event send failed");
+    }
 }

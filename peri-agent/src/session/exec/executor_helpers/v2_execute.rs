@@ -9,7 +9,7 @@ use peri_acp_types::{
     event_v2::EventHandles,
     frozen::{ChildHandlerFactory, ThreadPersistence},
     goal::GoalController,
-    identity::EventDeliveryClass,
+    identity::{EventDeliveryClass, SessionSeq},
     messages::BaseMessage,
     runtime::UnstampedEvent,
     session::ExecutionFailure,
@@ -27,9 +27,36 @@ use crate::agent::{
 };
 use crate::session::exec::executor::FrozenSessionData;
 use crate::session::exec::stage_builder::{CachedLlmInstances, V2AgentOutput};
+use crate::session::memory_probe;
+use crate::session::user_input_mailbox::UserInputMailbox;
 use crate::session::MessageTranscript;
 
 use super::ExecOutcome;
+
+/// 发布 forwarder 收到的一条事件，并把交付事件的发布序号绑定到交付日志。
+///
+/// 交付事件经可靠 render FIFO 进入 forwarder，因此这里补打的序号就是交付在
+/// 事件流中的真实位置；后续事件即使经订阅/队列丢失，泵也能按该序号在水位前
+/// 补发。无 mailbox 或发布失败（`None`）时只发布、不绑定。
+fn publish_forwarded_event(
+    publisher: &dyn EventPublisher,
+    session_id: &str,
+    source: &UnstampedEvent,
+    exec_ev: ExecutorEvent,
+    mailbox: Option<&UserInputMailbox>,
+) -> Option<SessionSeq> {
+    let delivered_input = match &exec_ev {
+        ExecutorEvent::UserInputDelivered { input_id, .. } => Some(input_id.clone()),
+        _ => None,
+    };
+    let session_seq = publisher.publish_event(session_id, source, exec_ev);
+    if let (Some(input_id), Some(session_seq), Some(mailbox)) =
+        (delivered_input, session_seq, mailbox)
+    {
+        mailbox.bind_delivery_sequence(&input_id, session_seq);
+    }
+    session_seq
+}
 
 /// EventBus forwarder 启动器闭包（ACP 侧持有 Langfuse bridge 构造；
 /// 参数 = event_handles / 主 agent_id / 事件消费闭包）。
@@ -89,8 +116,8 @@ pub struct V2ExecuteRequest {
     pub session_resources: Option<Arc<dyn SessionResources>>,
     pub thread_id: Option<String>,
     pub agent_input: AgentInput,
+    /// 有效集合的持久化历史（同 `TurnInput::history_payloads`）：已排除正文不在此列。
     pub history_payloads: Vec<peri_acp_types::store::PersistedPayload>,
-    pub history: Vec<BaseMessage>,
     pub cached_llm: Option<CachedLlmInstances>,
     pub task_manager: Option<Arc<dyn TaskManager>>,
     pub continuation: bool,
@@ -146,9 +173,10 @@ pub async fn build_and_execute_agent_v2(req: V2ExecuteRequest) -> ExecOutcome {
                 Default::default(),
             ));
         };
-        // 一次一致快照：继承区与 flags 同一次读取，避免跨时刻拼接。
+        // 一次一致快照：继承区与 flags 同一次读取，避免跨时刻拼接。启动只消费
+        // 执行关键的有效视图（继承区 + flags），已排除 own 正文不进入内存。
         let snapshot = store
-            .load_session_snapshot(tid)
+            .load_active_snapshot(tid)
             .await
             .map_err(|error| anyhow::anyhow!("{error}"))?;
         Ok((snapshot.inherited, snapshot.flags))
@@ -209,6 +237,13 @@ pub async fn build_and_execute_agent_v2(req: V2ExecuteRequest) -> ExecOutcome {
             };
         }
     };
+    // 该标记只描述**本轮**是否提交过 Full；跨轮重置，避免一次 Full 后每个普通
+    // append turn 都被 Host 当成新提交（并触发一次 bounds 读取）。
+    v2_out
+        .session
+        .transcript()
+        .write()
+        .reset_full_compaction_committed();
     v2_out.context.session.user_input_mailbox = req.user_input_mailbox.clone();
     if let Some(mailbox) = &req.user_input_mailbox {
         v2_out.session.set_user_input_mailbox(mailbox.clone());
@@ -317,11 +352,18 @@ pub async fn build_and_execute_agent_v2(req: V2ExecuteRequest) -> ExecOutcome {
         let publisher = Arc::clone(&req.publisher);
         let sid = req.session_id.clone();
         let agent_id = v2_out.context.session.agent_id.to_string();
+        let delivery_mailbox = req.user_input_mailbox.clone();
         (req.forwarder_launcher)(
             v2_out.event_handles,
             agent_id,
             Box::new(move |source, exec_ev| {
-                publisher.publish_event(&sid, &source, exec_ev);
+                publish_forwarded_event(
+                    publisher.as_ref(),
+                    &sid,
+                    &source,
+                    exec_ev,
+                    delivery_mailbox.as_deref(),
+                );
             }),
         )
     };
@@ -334,7 +376,18 @@ pub async fn build_and_execute_agent_v2(req: V2ExecuteRequest) -> ExecOutcome {
                 .user_input_mailbox
                 .as_ref()
                 .is_some_and(|mailbox| mailbox.has_handed_off_inputs()));
-    let history_payloads_snapshot = req.history_payloads.clone();
+    // 交接临时副本：TurnInput / V2ExecuteRequest 持有的有效集合在进入 transcript
+    // 前计量；随后 move 进 transcript，局部副本不再存在（S2 已移除回退快照）。
+    if memory_probe::observations_enabled() {
+        memory_probe::log_payload_set(
+            "executor_handoff",
+            &req.session_id,
+            &memory_probe::payload_set_snapshot(
+                &req.history_payloads,
+                req.history_payloads.capacity(),
+            ),
+        );
+    }
     {
         let transcript_arc = v2_out.session.transcript();
         let mut transcript = transcript_arc.write();
@@ -363,6 +416,14 @@ pub async fn build_and_execute_agent_v2(req: V2ExecuteRequest) -> ExecOutcome {
                 .filter(|(id, _)| own_ids.contains(id))
                 .collect(),
         );
+    }
+    // transcript 恢复后（继承区 + 自有区已装配）的基线。
+    if memory_probe::observations_enabled() {
+        v2_out
+            .session
+            .transcript()
+            .read()
+            .sample_memory("transcript_restored", &req.session_id);
     }
 
     // Phase 6: push 用户输入到 v2 queue（Receive 阶段消费）
@@ -403,6 +464,15 @@ pub async fn build_and_execute_agent_v2(req: V2ExecuteRequest) -> ExecOutcome {
     // Phase 7: 运行 v2 ReAct 循环
     // langfuse v2: capture turn_id before move, emit TurnStarted
     let loop_turn_id = v2_out.context.turn_id().to_string();
+    let goal_controller = v2_out.context.goal_controller.clone();
+    let loop_turn = Arc::clone(&v2_out.context.session.turn);
+    if memory_probe::observations_enabled() {
+        v2_out
+            .session
+            .transcript()
+            .read()
+            .sample_memory("turn_start", &req.session_id);
+    }
     {
         // TurnStarted 是事件流的一部分，发射点统一经 EventPublisher
         // （v1 直发路径的身份：turn_id 取自 v2 循环，agent_id 为空降级）。
@@ -422,6 +492,18 @@ pub async fn build_and_execute_agent_v2(req: V2ExecuteRequest) -> ExecOutcome {
         );
     }
     let loop_result = run_react_loop(v2_out.context, DEFAULT_AGENT_MAX_ITERATIONS).await;
+
+    // 终止错误也要让 active goal 有机会恢复：模型/流/compact/工具等失败结束
+    // 当前 turn 后，GoalState 按恢复间隔重新投递 Required 消息；用户取消、
+    // 预算耗尽与确定性配置错误由 `goal_recovery_reason` 排除。
+    if let LoopResult::Error(error) = &loop_result {
+        crate::goal::schedule_goal_recovery_after_error(
+            goal_controller.as_ref(),
+            error,
+            loop_turn.is_cancelled(),
+        )
+        .await;
+    }
 
     if matches!(&loop_result, LoopResult::Completed) {
         let queue = v2_out.session.queue();
@@ -498,11 +580,9 @@ pub async fn build_and_execute_agent_v2(req: V2ExecuteRequest) -> ExecOutcome {
     };
     let (messages, persisted_payloads, history_replaced_by_compaction) =
         if persistence_failure.is_some() {
-            let messages = history_payloads_snapshot
-                .iter()
-                .filter_map(|payload| payload.as_message().cloned())
-                .collect();
-            (messages, history_payloads_snapshot, false)
+            // 提交结果不确定时，磁盘前缀是唯一权威。不得把本轮开始前的完整正文
+            // 伪装成可继续结果返回；宿主会据此进入 ReloadRequired 并从存储恢复。
+            (Vec::new(), Vec::new(), false)
         } else {
             let transcript = v2_out.session.transcript();
             let transcript = transcript.read();
@@ -510,10 +590,27 @@ pub async fn build_and_execute_agent_v2(req: V2ExecuteRequest) -> ExecOutcome {
                 transcript.visible_messages().into_iter().cloned().collect();
             (
                 messages,
-                transcript.persisted_payloads(),
+                // 跨 turn 快照只携带当前有效集合（与上面的 visible 出口同一范围）：
+                // 被 Full Compact 释放的 own 历史不在其中，完整历史走存储读取。
+                transcript.active_payloads(),
                 transcript.full_compaction_committed(),
             )
         };
+    // 结果交接临时副本：Host 采纳的 payload 集与 AgentState 消息投影分别计量。
+    if memory_probe::observations_enabled() {
+        let transcript = v2_out.session.transcript();
+        transcript.read().sample_memory("turn_end", &req.session_id);
+        memory_probe::log_payload_set(
+            "executor_result",
+            &req.session_id,
+            &memory_probe::payload_set_snapshot(&persisted_payloads, persisted_payloads.capacity()),
+        );
+        memory_probe::log_message_set(
+            "executor_agent_state",
+            &req.session_id,
+            &memory_probe::message_set_snapshot(&messages, messages.capacity()),
+        );
+    }
     let mut agent_state = AgentState::with_messages(req.cwd.clone(), messages);
     agent_state.set_context("session_id", &req.session_id);
     agent_state.set_context("run_id", uuid::Uuid::now_v7().to_string());
@@ -753,3 +850,7 @@ fn log_loop_terminal(
 #[cfg(test)]
 #[path = "terminal_diagnostic_test.rs"]
 mod diagnostic_tests;
+
+#[cfg(test)]
+#[path = "v2_execute_test.rs"]
+mod forwarder_tests;

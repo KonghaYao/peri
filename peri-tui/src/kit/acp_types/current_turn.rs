@@ -198,6 +198,8 @@ enum TurnSegment {
         text: String,
         /// 附件展示记录（不含载荷），随投递内容一次冻结。
         attachments: Vec<crate::kit::tui_render_unit::UserAttachment>,
+        /// 持久消息身份（投递的 input id）；普通本地气泡无此来源。
+        message_id: Option<String>,
     },
 }
 

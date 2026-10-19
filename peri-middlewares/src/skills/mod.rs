@@ -24,16 +24,14 @@ pub use crate::settings::{
     global_config_path, load_disable_bundled_skills, load_disable_bundled_skills_from_path,
 };
 
-/// MCP 来源内容包装来源标注（提示注入防御：声明内容边界；文档 3.1：
-/// 附加「来源 server + 工具通路」提醒——MCP 工具经 SearchExtraTools
-/// 发现（工具名前缀 `mcp__{server}__`，sanitize 见 tool_bridge.rs）、
-/// ExecuteExtraTool 执行）。
+/// MCP 来源内容包装来源标注（提示注入防御：声明内容边界）。
+/// 工具名称与调用方式以当前会话目录为准，不从技能来源推断。
 pub fn annotate_mcp_content(meta: &SkillMetadata, content: &str) -> String {
     match &meta.origin {
         Some(SkillOrigin::Mcp { server, uri }) => {
             format!(
                 "This skill is served by MCP server \"{server}\", uri: {uri}.\n\n\
-                 该 Skill 来自 {server} MCP server；如需工具，用 SearchExtraTools 搜索 mcp__{server} 取工具定义（工具名前缀 mcp__{server}__），ExecuteExtraTool 执行。\n\n{content}"
+                 该 Skill 来自 {server} MCP server。需要工具时，以当前会话实际工具目录为准：direct 工具按目录名称直接调用；deferred 工具应先搜索其实际名称。\n\n{content}"
             )
         }
         _ => content.to_string(),

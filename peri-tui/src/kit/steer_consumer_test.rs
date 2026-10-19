@@ -11,7 +11,7 @@ use peri_acp_types::{
 };
 use serde_json::json;
 
-const RECEIPT_TIMEOUT: Duration = AcpTuiClient::USER_INPUT_RECEIPT_TIMEOUT;
+pub(super) const RECEIPT_TIMEOUT: Duration = AcpTuiClient::USER_INPUT_RECEIPT_TIMEOUT;
 
 async fn expect_rpc(
     server: &MpscServerTransport,
@@ -48,6 +48,7 @@ async fn test_slow_refresh_does_not_queue_new_enqueue() {
             revision: 1,
             active_request_id: None,
             items: vec![],
+            terminal_items: vec![],
         },
         7,
         true,
@@ -132,10 +133,10 @@ async fn test_slow_refresh_does_not_queue_new_enqueue() {
     client.close();
 }
 
-struct RestoreProjection {
-    steers: SteerState,
-    session: String,
-    epoch: u64,
+pub(super) struct RestoreProjection {
+    pub(super) steers: SteerState,
+    pub(super) session: String,
+    pub(super) epoch: u64,
 }
 
 impl Drop for RestoreProjection {
@@ -165,6 +166,7 @@ async fn test_steer_uncertain_receipt_retries_identical_command_and_input() {
             revision: 1,
             active_request_id: None,
             items: vec![],
+            terminal_items: vec![],
         },
         7,
         true,
@@ -252,6 +254,7 @@ async fn test_steer_uncertain_receipt_retries_identical_command_and_input() {
                 revision: 1,
                 active_request_id: None,
                 items: vec![],
+                terminal_items: vec![],
             },
             8,
             true,
@@ -272,6 +275,103 @@ async fn test_steer_uncertain_receipt_retries_identical_command_and_input() {
         "确认后才开放动作"
     );
     server.await.unwrap();
+    client.close();
+}
+
+/// [回归测试] A 执行中提交 B：A 失败后 B 仍完整保留（含附件），consumer
+/// 不得因 pending 被结算而把 B 当作发送成功，也不得悄悄重发。
+#[tokio::test]
+#[serial_test::serial]
+async fn fatal_failure_keeps_queued_b_recoverable_with_attachments_and_does_not_resend() {
+    let _restore = RestoreProjection {
+        steers: STEERS.state().read().clone(),
+        session: atoms::ACTIVE_SESSION_ID.state().read().clone(),
+        epoch: atoms::BRIDGE_RESET_COUNTER.get(),
+    };
+    atoms::ACTIVE_SESSION_ID.set("s".into());
+    atoms::BRIDGE_RESET_COUNTER.set(7);
+    let mut projection = SteerState::default();
+    projection.reset_session("s", 7);
+    projection.accept_snapshot(
+        UserInputQueueSnapshot {
+            session_id: "s".into(),
+            generation: "g".into(),
+            revision: 1,
+            active_request_id: Some("run".into()),
+            items: vec![],
+            terminal_items: vec![],
+        },
+        7,
+        true,
+    );
+    let a_command = SteerCommand {
+        session_id: "s".into(),
+        epoch: 7,
+        command_id: "a-command".into(),
+        generation: Some("g".into()),
+        kind: SteerCommandKind::Enqueue(UserInput {
+            input_id: "a".into(),
+            original_draft: "正在执行的 A".into(),
+            content: MessageContent::text("正在执行的 A"),
+        }),
+    };
+    let b_input = UserInput {
+        input_id: "b".into(),
+        original_draft: "B 的完整原稿".into(),
+        content: MessageContent::blocks(vec![
+            peri_acp_types::messages::ContentBlock::text("B 的完整原稿"),
+            peri_acp_types::messages::ContentBlock::image_base64("image/png", "AQID"),
+        ]),
+    };
+    let mut b_command = SteerCommand {
+        session_id: "s".into(),
+        epoch: 7,
+        command_id: "b-command".into(),
+        generation: None,
+        kind: SteerCommandKind::Enqueue(b_input.clone()),
+    };
+    projection.begin(a_command);
+    projection.begin(b_command.clone());
+    let report = projection.fail_session_submissions("s");
+    assert_eq!(report.not_sent.len(), 1, "B 尚未发出，应恢复为草稿");
+    assert_eq!(report.not_sent[0].input_id, "b");
+    assert_eq!(report.uncertain.len(), 1, "A 可能已发出，应保留待对账");
+    STEERS.set(projection);
+
+    let (client_transport, server_transport) = mpsc_transport_pair();
+    let (client, _, _) = AcpTuiClient::new(client_transport);
+    let outcome = execute(&client, &mut b_command, "/tmp").await.unwrap();
+    assert_eq!(
+        outcome,
+        AdmitOutcome::AlreadySettled,
+        "已结算命令只能报告已结算，不能当作成功"
+    );
+    assert!(
+        tokio::time::timeout(Duration::from_millis(50), server_transport.recv())
+            .await
+            .is_err(),
+        "已结算命令不得使用原身份或新身份重发"
+    );
+
+    let rows = STEERS.state().read().rows("s");
+    assert!(
+        rows.iter()
+            .any(|row| row.id == "a"
+                && row.state == crate::kit::steer_queue::SteerItemState::Uncertain),
+        "A 的未知结果必须保持可见"
+    );
+    let recovered = STEERS
+        .state()
+        .write()
+        .recover("s", 7, true)
+        .expect("B 必须恢复为完整草稿");
+    assert_eq!(recovered.input_id, b_input.input_id);
+    assert_eq!(recovered.original_draft, b_input.original_draft);
+    assert_eq!(
+        recovered.content.content_blocks().len(),
+        2,
+        "B 的文本与附件都必须保留"
+    );
     client.close();
 }
 
@@ -470,6 +570,7 @@ async fn test_steer_queued_retry_never_replays_into_a_new_server_generation() {
         revision: 1,
         active_request_id: None,
         items: vec![],
+        terminal_items: vec![],
     };
     let mut projection = SteerState::default();
     projection.reset_session("s", 7);
@@ -565,7 +666,7 @@ async fn test_steer_queued_retry_never_replays_into_a_new_server_generation() {
 }
 
 /// 应答能力协商；返回后 `ensure_session` 才会发起 `session/new`。
-async fn answer_initialize(server: &MpscServerTransport) {
+pub(super) async fn answer_initialize(server: &MpscServerTransport) {
     let IncomingMessage::Request { id, method, .. } = server.recv().await.unwrap() else {
         panic!("应协商能力");
     };
@@ -580,7 +681,7 @@ async fn answer_initialize(server: &MpscServerTransport) {
 }
 
 /// 接收 `session/new`；应答时机由调用方决定（慢应答或不应答）。
-async fn expect_session_new(server: &MpscServerTransport) -> RequestId {
+pub(super) async fn expect_session_new(server: &MpscServerTransport) -> RequestId {
     let IncomingMessage::Request { id, method, .. } = server.recv().await.unwrap() else {
         panic!("应创建首会话");
     };
@@ -589,7 +690,7 @@ async fn expect_session_new(server: &MpscServerTransport) -> RequestId {
 }
 
 /// 以真实 consumer 驱动输入链路，返回发送端与关闭句柄。
-fn start_consumer(
+pub(super) fn start_consumer(
     client: &AcpTuiClient,
 ) -> (
     tokio::sync::mpsc::UnboundedSender<SteerCommand>,
@@ -603,7 +704,12 @@ fn start_consumer(
 }
 
 /// 首会话之前提交的输入：session ID 尚未确定。
-fn first_input_command(epoch: u64, command_id: &str, input_id: &str, draft: &str) -> SteerCommand {
+pub(super) fn first_input_command(
+    epoch: u64,
+    command_id: &str,
+    input_id: &str,
+    draft: &str,
+) -> SteerCommand {
     SteerCommand {
         session_id: String::new(),
         epoch,
@@ -617,14 +723,14 @@ fn first_input_command(epoch: u64, command_id: &str, input_id: &str, draft: &str
     }
 }
 
-fn original_draft(command: &SteerCommand) -> String {
+pub(super) fn original_draft(command: &SteerCommand) -> String {
     match &command.kind {
         SteerCommandKind::Enqueue(input) => input.original_draft.clone(),
         other => panic!("期望入队命令：{other:?}"),
     }
 }
 
-fn notice_text() -> Option<String> {
+pub(super) fn notice_text() -> Option<String> {
     atoms::NOTIFICATION
         .state()
         .read()
@@ -633,7 +739,7 @@ fn notice_text() -> Option<String> {
 }
 
 /// 通知不可 Clone；按原消息重新发布，避免测试清掉其它用例留下的状态。
-fn restore_notice(previous: Option<String>) {
+pub(super) fn restore_notice(previous: Option<String>) {
     atoms::NOTIFICATION.set(previous.map(|message| atoms::Notification {
         message,
         until: std::time::Instant::now() + FAILURE_NOTICE_DURATION,
@@ -778,145 +884,6 @@ async fn test_slow_session_preparation_is_not_capped_by_receipt_deadline() {
     );
     shutdown.cancel();
     handle.await.unwrap();
-    restore_notice(previous_notice);
-    client.close();
-}
-
-/// 准备超时按准备阶段报告并恢复原稿：输入从未发出，不能表述为「输入未被接收」。
-#[tokio::test(start_paused = true)]
-#[serial_test::serial]
-async fn test_session_preparation_timeout_recovers_draft_without_admission() {
-    let _restore = RestoreProjection {
-        steers: STEERS.state().read().clone(),
-        session: atoms::ACTIVE_SESSION_ID.state().read().clone(),
-        epoch: atoms::BRIDGE_RESET_COUNTER.get(),
-    };
-    let previous_notice = notice_text();
-    atoms::NOTIFICATION.set(None);
-    atoms::ACTIVE_SESSION_ID.set(String::new());
-    atoms::BRIDGE_RESET_COUNTER.set(32);
-    STEERS.set(SteerState::default());
-    let input_id = uuid::Uuid::now_v7().to_string();
-    let raw = "  准备超时的输入\n@image /tmp/a.png\n";
-    let command = first_input_command(32, "prepare-timeout", &input_id, raw);
-    STEERS.state().write().begin(command.clone());
-
-    let (client_transport, server_transport) = mpsc_transport_pair();
-    let (client, notifications, _) = AcpTuiClient::new_interactive(client_transport);
-    client.spawn_pump(notifications);
-    let server = tokio::spawn(async move {
-        answer_initialize(&server_transport).await;
-        let _create = expect_session_new(&server_transport).await;
-        // 服务端始终不回答建会话：只有准备阶段自己的期限可以作出结论。
-        assert!(
-            tokio::time::timeout(
-                PREPARE_TIMEOUT + Duration::from_secs(5),
-                server_transport.recv()
-            )
-            .await
-            .is_err(),
-            "准备超时不得发送任何入队请求"
-        );
-    });
-    client.register_ui_commands(&[]).await.unwrap();
-    let (tx, shutdown, handle) = start_consumer(&client);
-    tx.send(command).unwrap();
-    let recovered = tokio::time::timeout(PREPARE_TIMEOUT + Duration::from_secs(5), async {
-        loop {
-            if !STEERS.state().read().pending_recovery_ids("").is_empty() {
-                break;
-            }
-            tokio::time::sleep(Duration::from_millis(100)).await;
-        }
-    })
-    .await;
-    assert!(recovered.is_ok(), "准备超时后必须恢复未发送原稿");
-    assert!(
-        !atoms::SESSION_PREPARING.get(),
-        "准备超时后不得把状态栏留在「正在准备会话」"
-    );
-    let notice = notice_text().expect("准备超时必须给出提示");
-    assert!(
-        notice.contains("timed out") && notice != crate::i18n::tr("steer-input-rejected"),
-        "准备超时不得表述为输入被拒：{notice}"
-    );
-    assert_eq!(
-        STEERS
-            .state()
-            .write()
-            .recover("", atoms::BRIDGE_RESET_COUNTER.get(), true)
-            .expect("恢复原稿")
-            .original_draft,
-        raw,
-        "准备超时仍须完整恢复多行及图片引用"
-    );
-    shutdown.cancel();
-    handle.await.unwrap();
-    server.await.unwrap();
-    restore_notice(previous_notice);
-    client.close();
-}
-
-/// 准备期间取消：未受理的输入保持未决身份，不得变成已发送或重复投递。
-#[tokio::test(start_paused = true)]
-#[serial_test::serial]
-async fn test_shutdown_during_preparation_keeps_unadmitted_input_identity() {
-    let _restore = RestoreProjection {
-        steers: STEERS.state().read().clone(),
-        session: atoms::ACTIVE_SESSION_ID.state().read().clone(),
-        epoch: atoms::BRIDGE_RESET_COUNTER.get(),
-    };
-    let previous_notice = notice_text();
-    atoms::NOTIFICATION.set(None);
-    atoms::ACTIVE_SESSION_ID.set(String::new());
-    atoms::BRIDGE_RESET_COUNTER.set(33);
-    STEERS.set(SteerState::default());
-    let input_id = uuid::Uuid::now_v7().to_string();
-    let command = first_input_command(33, "cancelled-prepare", &input_id, "取消前的输入");
-    STEERS.state().write().begin(command.clone());
-
-    let (client_transport, server_transport) = mpsc_transport_pair();
-    let (client, notifications, _) = AcpTuiClient::new_interactive(client_transport);
-    client.spawn_pump(notifications);
-    let server = tokio::spawn(async move {
-        answer_initialize(&server_transport).await;
-        let _create = expect_session_new(&server_transport).await;
-        assert!(
-            tokio::time::timeout(Duration::from_secs(30), server_transport.recv())
-                .await
-                .is_err(),
-            "取消后不得发送入队请求"
-        );
-    });
-    client.register_ui_commands(&[]).await.unwrap();
-    let (tx, shutdown, handle) = start_consumer(&client);
-    tx.send(command).unwrap();
-    // 超过受理回执预算：准备仍在进行，输入既未被拒也没有提示。
-    tokio::time::sleep(RECEIPT_TIMEOUT + Duration::from_secs(1)).await;
-    assert_eq!(
-        notice_text(),
-        None,
-        "准备期间不得提前宣告失败：{:?}",
-        notice_text()
-    );
-    assert!(
-        atoms::SESSION_PREPARING.get(),
-        "准备尚未返回时必须保持可见状态"
-    );
-    shutdown.cancel();
-    handle.await.unwrap();
-    assert!(
-        !atoms::SESSION_PREPARING.get(),
-        "应用关闭丢弃准备中的 future 后，可见状态必须被清除（Drop 而非逐分支清理）"
-    );
-    let pending = STEERS
-        .state()
-        .read()
-        .pending_command("", "cancelled-prepare")
-        .cloned()
-        .expect("取消不得丢弃未受理输入的身份");
-    assert_eq!(original_draft(&pending), "取消前的输入", "取消不得改写原稿");
-    server.await.unwrap();
     restore_notice(previous_notice);
     client.close();
 }

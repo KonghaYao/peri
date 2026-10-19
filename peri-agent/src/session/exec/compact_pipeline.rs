@@ -25,6 +25,7 @@
 //! 以 `compact_config` 投影（ACP 装配点按 `load_compact_config` 语义预填，
 //! env overrides 每轮重新应用，语义保持）。
 
+use std::collections::HashSet;
 use std::sync::Arc;
 
 use peri_acp_types::command::{
@@ -33,8 +34,9 @@ use peri_acp_types::command::{
 };
 use peri_acp_types::compact::CompactConfig;
 use peri_acp_types::event::CompactTrigger;
-use peri_acp_types::messages::BaseMessage;
+use peri_acp_types::messages::{BaseMessage, MessageId};
 use peri_acp_types::session_resources::DataCapabilities;
+use peri_acp_types::store::PersistedPayload;
 use tokio_util::sync::CancellationToken as AgentCancellationToken;
 use tracing::{info, warn};
 
@@ -153,10 +155,12 @@ pub async fn run_pipeline(ctx: CommandContext) -> PipelineOutcome {
         }
     }
 
-    // 阶段 5: 已存在的 thread 从一次一致快照重建。Host 跨 turn 保留 canonical
-    // history（含 excluded 原文），先核对完整消息身份与顺序，再恢复 flags 供 Full
-    // 选择可见内容；不能拿 visible view 与 canonical 输入比较。
-    let snapshot = match session_resources.load_session_snapshot(&thread_id).await {
+    // 阶段 5: 已存在的 thread 从一次一致**有效**快照重建。先核对消息身份与顺序，
+    // 再恢复 flags 供 Full 选择可见内容；不能拿 visible view 与 canonical 输入比较。
+    //
+    // 读取范围只含未排除的 own 条目与冻结继承区：已归档正文既不进入摘要输入，也不
+    // 在本次重建中解码。归档规模因此不影响手动 compact 的正文读取量（REQ-F03）。
+    let snapshot = match session_resources.load_active_snapshot(&thread_id).await {
         Ok(snapshot) => snapshot,
         Err(error) => {
             warn!(error = %format_args!("{error:#}"), "compact: failed to load persisted history");
@@ -167,17 +171,33 @@ pub async fn run_pipeline(ctx: CommandContext) -> PipelineOutcome {
             };
         }
     };
-    // 仅用普通消息投影校验调用方身份；真正的摘要输入恢复完整 payload。
-    let persisted_history: Vec<BaseMessage> = snapshot
-        .inherited
-        .payloads
-        .iter()
-        .chain(&snapshot.payloads)
-        .filter_map(|payload| payload.as_message().cloned())
-        .collect();
     let mut transcript = MessageTranscript::new().with_compaction_commit_state(commit_state);
     if snapshot.payloads.is_empty() && snapshot.inherited.payloads.is_empty() {
-        if history.is_empty() {
+        // 有效集合为空有两种来源：全新 thread（历史尚未落库），或全部 own 条目都已
+        // 被之前的 Full 归档。后者没有可压缩内容；用有界 flags 查询区分，不读取
+        // 任何归档正文。
+        let excluded_only = if history.is_empty() {
+            false
+        } else {
+            let ids: Vec<MessageId> = history.iter().map(BaseMessage::id).collect();
+            match session_resources.load_message_flags(&thread_id, &ids).await {
+                Ok(flags) => {
+                    !ids.is_empty()
+                        && ids
+                            .iter()
+                            .all(|id| flags.get(id).is_some_and(|entry| entry.excluded))
+                }
+                Err(error) => {
+                    warn!(error = %format_args!("{error:#}"), "compact: failed to load message flags");
+                    return PipelineOutcome::EarlyReturn {
+                        history,
+                        stop_reason: PromptStopReason::EndTurn,
+                        message: format!("compact persistence failed: {error:#}"),
+                    };
+                }
+            }
+        };
+        if history.is_empty() || excluded_only {
             return PipelineOutcome::EarlyReturn {
                 history,
                 stop_reason: PromptStopReason::EndTurn,
@@ -197,19 +217,124 @@ pub async fn run_pipeline(ctx: CommandContext) -> PipelineOutcome {
             };
         }
     } else {
-        let history_matches = persisted_history.len() == history.len()
-            && persisted_history
-                .iter()
-                .zip(&history)
-                .all(|(persisted, incoming)| persisted.id() == incoming.id());
-        if !history_matches {
-            warn!("compact: persisted canonical history does not match command history");
+        // 调用方身份只按**有效集合**校验（spec D3）：成功 Full 提交会释放热态里的
+        // excluded 原文（D1 transcript shrink），宿主下一轮带回的历史天然只剩有效
+        // 条目。两侧按 inherited 与 own 的有序身份序列比较。
+        //
+        // 兼容适配入口：旧调用方仍可能带回完整历史（含已归档 id）。多出的 id 必须
+        // 证明确为 excluded（own 走有界 flags 查询，继承区用同一快照的 flags）；
+        // 未知 id 与读取失败都保持拒绝，不读取这些 id 的正文。
+        let inherited_ids: HashSet<MessageId> = snapshot
+            .inherited
+            .payloads
+            .iter()
+            .map(PersistedPayload::id)
+            .collect();
+        let own_ids: HashSet<MessageId> =
+            snapshot.payloads.iter().map(PersistedPayload::id).collect();
+        let overlap = inherited_ids.intersection(&own_ids).next().copied();
+        if let Some(id) = overlap {
+            warn!(?id, "compact: inherited and own history overlap");
             return PipelineOutcome::EarlyReturn {
                 history,
                 stop_reason: PromptStopReason::EndTurn,
                 message: "compact persistence context mismatch".to_string(),
             };
         }
+        // 继承区按冻结快照原样返回：它同时带着 excluded 原文与标记，而 own 区已由
+        // `load_active_snapshot` 裁掉 excluded。普通 turn 交给调用方的是「继承区 +
+        // own」同一份**有效投影**，因此持久侧身份也必须先按继承区的 excluded flags
+        // 裁剪。否则子会话续聊后，合法的继承上下文会被误判为不一致。
+        let inherited_excluded_ids: HashSet<MessageId> = snapshot
+            .inherited
+            .flags
+            .iter()
+            .filter(|(_, flags)| flags.excluded)
+            .map(|(id, _)| *id)
+            .collect();
+        let excluded_ids: HashSet<MessageId> = inherited_excluded_ids
+            .iter()
+            .copied()
+            .chain(
+                snapshot
+                    .flags
+                    .iter()
+                    .filter(|(_, flags)| flags.excluded)
+                    .map(|(id, _)| *id),
+            )
+            .collect();
+        // 命令 history 是普通消息投影；提醒类 payload 不携带 `BaseMessage`，不能参与
+        // 身份比较，否则会把提醒数量误当成上下文差异。身份只来自消息投影。
+        let persisted_messages: Vec<&BaseMessage> = snapshot
+            .inherited
+            .payloads
+            .iter()
+            .chain(&snapshot.payloads)
+            .filter(|payload| !excluded_ids.contains(&payload.id()))
+            .filter_map(PersistedPayload::as_message)
+            .collect();
+        let persisted_ids: Vec<MessageId> = persisted_messages
+            .iter()
+            .map(|message| message.id())
+            .collect();
+        let active_ids: HashSet<MessageId> = persisted_ids.iter().copied().collect();
+        let mut command_history: Vec<&BaseMessage> = history.iter().collect();
+        let command_matches = |history: &[&BaseMessage]| {
+            history.len() == persisted_ids.len()
+                && history
+                    .iter()
+                    .zip(&persisted_ids)
+                    .all(|(incoming, persisted)| incoming.id() == *persisted)
+        };
+        if !command_matches(&command_history) {
+            let extra_ids: Vec<MessageId> = history
+                .iter()
+                .map(BaseMessage::id)
+                .filter(|id| !active_ids.contains(id))
+                .collect();
+            let known_excluded = if extra_ids.is_empty() {
+                false
+            } else {
+                match session_resources
+                    .load_message_flags(&thread_id, &extra_ids)
+                    .await
+                {
+                    // 继承区的 excluded 事实已在同一份快照里，不再按 id 读一次；
+                    // 未知 id 仍然拒绝，不放宽为「长度不同就放行」。
+                    Ok(flags) => extra_ids.iter().all(|id| {
+                        inherited_excluded_ids.contains(id)
+                            || flags.get(id).is_some_and(|entry| entry.excluded)
+                    }),
+                    Err(error) => {
+                        warn!(error = %format_args!("{error:#}"), "compact: failed to load message flags");
+                        return PipelineOutcome::EarlyReturn {
+                            history,
+                            stop_reason: PromptStopReason::EndTurn,
+                            message: format!("compact persistence failed: {error:#}"),
+                        };
+                    }
+                }
+            };
+            if !known_excluded {
+                warn!("compact: persisted active history does not match command history");
+                return PipelineOutcome::EarlyReturn {
+                    history,
+                    stop_reason: PromptStopReason::EndTurn,
+                    message: "compact persistence context mismatch".to_string(),
+                };
+            }
+            command_history.retain(|message| active_ids.contains(&message.id()));
+            if !command_matches(&command_history) {
+                warn!("compact: persisted active history does not match command history");
+                return PipelineOutcome::EarlyReturn {
+                    history,
+                    stop_reason: PromptStopReason::EndTurn,
+                    message: "compact persistence context mismatch".to_string(),
+                };
+            }
+        }
+        // 校验通过后从**有效快照**重建。excluded 原文留在存储中，Full 只对当前
+        // 有效条目落 flags；本 transcript 不再承载归档正文。
         transcript = transcript
             .with_ancestor_payloads(snapshot.inherited.payloads)
             .with_own_payloads(snapshot.payloads);
@@ -319,6 +444,7 @@ async fn run_v2_compact_with_cancel(
             true,
             consecutive_failures,
             cwd,
+            None,
         ) => r,
     };
 
@@ -439,3 +565,7 @@ pub async fn execute_compact(ctx: CommandContext) -> CommandResult {
         },
     }
 }
+
+#[cfg(test)]
+#[path = "compact_pipeline_test.rs"]
+mod tests;

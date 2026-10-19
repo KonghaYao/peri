@@ -44,6 +44,7 @@ fn test_plan_from_persisted_directives_version_mismatch_is_invalid() {
         MessageProjectionDirective {
             policy_version: PROJECTION_POLICY_VERSION + 1,
             entries: vec![],
+            superseded_by: None,
         },
     );
 
@@ -62,6 +63,7 @@ fn excluded_legacy_directive_does_not_invalidate_visible_history() {
         MessageProjectionDirective {
             policy_version: PROJECTION_POLICY_VERSION + 1,
             entries: vec![],
+            superseded_by: None,
         },
     );
     transcript.set_excluded(excluded, true);
@@ -71,12 +73,7 @@ fn excluded_legacy_directive_does_not_invalidate_visible_history() {
         super::projection::plan_from_persisted_directives(&transcript, PROJECTION_POLICY_VERSION),
         PersistedDirectiveRestore::Absent
     ));
-    let projected = render_llm_view(
-        &transcript,
-        &super::projection::MicroCompactPlan::default(),
-        &ProviderCapabilities::default(),
-    )
-    .unwrap();
+    let projected = render_llm_view(&transcript, &[], &ProviderCapabilities::default()).unwrap();
     assert_eq!(projected.len(), 1);
     assert_eq!(projected[0].id(), visible);
     assert_eq!(projected[0].content(), "visible message");
@@ -116,6 +113,7 @@ fn test_plan_from_persisted_directives_wrong_message_id_is_invalid() {
                     preserve_recovery_handle: false,
                 },
             }],
+            superseded_by: None,
         },
     );
 
@@ -177,6 +175,7 @@ fn test_persisted_restore_keeps_only_independent_tool_result_action() {
                     action: ProjectionAction::CompactText { max_chars: 1 },
                 },
             ],
+            superseded_by: None,
         },
     );
     transcript.set_flags_projection(
@@ -192,6 +191,7 @@ fn test_persisted_restore_keeps_only_independent_tool_result_action() {
                     preserve_recovery_handle: false,
                 },
             }],
+            superseded_by: None,
         },
     );
 
@@ -209,7 +209,7 @@ fn test_persisted_restore_keeps_only_independent_tool_result_action() {
         }] if *message_id == result_id
     ));
 
-    let projected = render_llm_view(&transcript, &plan, &ProviderCapabilities::default())
+    let projected = render_llm_view(&transcript, &plan.actions, &ProviderCapabilities::default())
         .expect("安全子集应可渲染");
     let BaseMessage::Ai {
         content,
@@ -246,6 +246,7 @@ fn test_render_llm_view_from_persisted_tool_result_directive() {
                     preserve_recovery_handle: false,
                 },
             }],
+            superseded_by: None,
         },
     );
 
@@ -254,7 +255,52 @@ fn test_render_llm_view_from_persisted_tool_result_directive() {
     else {
         panic!("应恢复 ToolResult action");
     };
-    let projected = render_llm_view(&transcript, &plan, &ProviderCapabilities::default())
+    let projected = render_llm_view(&transcript, &plan.actions, &ProviderCapabilities::default())
         .expect("render_llm_view 应成功");
     assert!(projected[1].content().contains("字符已省略"));
+}
+
+/// 验收（OPT-01）：纯恢复路径只读已提交 directive，不得调用字符估算。
+///
+/// 估算只属于规划路径（`plan_micro` 决定是否达回收目标）；恢复路径若重新估算，
+/// 长会话每次 Reason 都会为已提交 directive 再扫一遍正文。
+#[test]
+fn test_plan_from_persisted_directives_does_not_estimate_chars() {
+    let mut transcript = transcript_with_tool_exchange(
+        "tc_no_estimate",
+        serde_json::json!({"prompt": "x".repeat(600)}),
+        &"R".repeat(4_000),
+        false,
+    );
+    let result_id = transcript.visible_messages()[1].id();
+    transcript.set_flags_projection(
+        result_id,
+        MessageProjectionDirective {
+            policy_version: PROJECTION_POLICY_VERSION,
+            entries: vec![ProjectionActionEntry {
+                message_id: result_id,
+                target: ProjectionTarget::Message,
+                action: ProjectionAction::CompactToolResult {
+                    keep_head: 200,
+                    keep_tail: 100,
+                    preserve_recovery_handle: false,
+                },
+            }],
+            superseded_by: None,
+        },
+    );
+
+    super::projection::reset_estimate_calls();
+    let restored =
+        super::projection::plan_from_persisted_directives(&transcript, PROJECTION_POLICY_VERSION);
+
+    assert!(
+        matches!(restored, PersistedDirectiveRestore::Valid(_)),
+        "已提交且版本匹配的 directive 应可直接恢复"
+    );
+    assert_eq!(
+        super::projection::estimate_call_count(),
+        0,
+        "纯恢复路径不得调用字符估算"
+    );
 }

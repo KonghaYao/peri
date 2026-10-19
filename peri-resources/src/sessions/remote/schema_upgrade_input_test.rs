@@ -13,6 +13,21 @@ use super::schema::{self, StoreShapeRead};
 use super::schema_upgrade;
 use super::schema_upgrade_tests::{Fixture, DISCOVERY};
 
+#[tokio::test]
+async fn upgrade_reads_legacy_columns_without_table_valued_pragmas() {
+    let fixture = Fixture::new().await;
+    schema_upgrade::upgrade(&fixture.store(StoreAccess::ReadWrite), &fixture.snapshot)
+        .await
+        .unwrap();
+
+    assert_eq!(fixture.version().await, schema::REMOTE_SCHEMA_VERSION);
+    assert_eq!(fixture.contract().await, schema::STORE_CONTRACT);
+    assert_eq!(
+        fixture.shape_verdict(schema::ShapeProbe::Current).await,
+        StoreShapeRead::Consistent
+    );
+}
+
 /// v2 库没有 `session_environments` 表（正式基线 10 的库可能整表缺席）：
 /// 会话的机器归属按缺行处理，升级照常完成——删除语句对缺表幂等，不因 no such table 失败。
 ///

@@ -35,8 +35,8 @@ impl GoalTool {
         "Long-running goal tracking tool. Use the action parameter to select an operation:\n\
 - create: Create a goal (objective required). Only one goal per session.\n\
 - complete: Declare the goal complete (verified by an auxiliary LLM; returns reason if not met)\n\
-- block: Declare an unsolvable blocker (reason required)\n\
-- clear: Clear the current goal (releases the singleton slot, works on terminal states too)\n\
+- block: Declare a blocker preventing progress (reason required). The session automatically retries the goal every 3 minutes until it completes or is cleared\n\
+- clear: Clear the current goal (releases the singleton slot, works on terminal states too; also stops automatic recovery)\n\
 - get: Query current goal status";
 
     async fn handle_create(
@@ -67,6 +67,8 @@ impl GoalTool {
             Some(o) => o.clone(),
             None => return Ok("No active goal to complete".to_string()),
         };
+        // 验证可能持续数秒；捕获身份，避免验证期间 goal 被替换后误完成新 goal。
+        let expected_goal_id = snap.goal_id.clone();
 
         // auxiliary_model 为 None 时跳过验证
         if let Some(model) = &self.auxiliary_model {
@@ -88,33 +90,51 @@ impl GoalTool {
                     verdict.missing
                 ));
             }
-            // 验证通过：尝试转换状态。若期间状态已漂移到终态（如被 block），
-            // 不作为 error 传播——LLM 验证已通过，agent 无需重试 complete
-            match self.controller.complete_goal().await {
+            // 验证通过：尝试按捕获的身份转换状态。若期间 goal 被替换/清除或
+            // 状态已漂移到终态（如被 block），不作为 error 传播——LLM 验证
+            // 已通过，agent 无需重试 complete。
+            match self
+                .complete_verified_goal(expected_goal_id.as_deref())
+                .await
+            {
                 Ok(()) => Ok(format!(
                     "Goal completed. Verification evidence: {}",
                     verdict.evidence
                 )),
                 Err(e) => {
-                    tracing::warn!(error = %e, "goal complete: 状态漂移到终态");
+                    tracing::warn!(error = %e, "goal complete: 状态或身份已变化");
                     Ok(format!(
-                        "Goal is already in a terminal state ({e}). Verification evidence: {}",
+                        "Goal not completed: {e}. Verification evidence: {}",
                         verdict.evidence
                     ))
                 }
             }
         } else {
             // 无 auxiliary_model，跳过验证直接完成
-            match self.controller.complete_goal().await {
+            match self
+                .complete_verified_goal(expected_goal_id.as_deref())
+                .await
+            {
                 Ok(()) => Ok(
                     "Goal completed (verification skipped, no auxiliary LLM configured)."
                         .to_string(),
                 ),
                 Err(e) => {
-                    tracing::warn!(error = %e, "goal complete: 状态漂移到终态");
-                    Ok(format!("Goal is already in a terminal state ({e})."))
+                    tracing::warn!(error = %e, "goal complete: 状态或身份已变化");
+                    Ok(format!("Goal not completed: {e}"))
                 }
             }
+        }
+    }
+
+    /// 按验证开始时捕获的身份完成 goal。
+    ///
+    /// 第三方控制器可能不提供 `goal_id`；此时退化为旧的
+    /// [`GoalController::complete_goal`] 行为（无身份校验）。
+    async fn complete_verified_goal(&self, expected_goal_id: Option<&str>) -> Result<(), String> {
+        match expected_goal_id {
+            Some(id) => self.controller.complete_goal_if_current(id).await,
+            None => self.controller.complete_goal().await,
         }
     }
 
@@ -126,7 +146,11 @@ impl GoalTool {
             .block_goal(reason.to_string())
             .await
             .map_err(|e| -> Box<dyn std::error::Error + Send + Sync> { e.into() })?;
-        Ok(format!("Goal marked as blocked: {reason}"))
+        Ok(format!(
+            "Goal marked as blocked: {reason}\n\
+             The session will retry the goal in 3 minutes. When woken, re-check the \
+             blocker: continue if it is resolved, or call goal(block, reason) again."
+        ))
     }
 
     async fn handle_clear(&self) -> Result<String, Box<dyn std::error::Error + Send + Sync>> {

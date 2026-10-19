@@ -66,7 +66,7 @@ fn test_plugin_list_footer_describes_details_not_close() {
         .and_then(|rest| rest.split("(false, false, KeyCode::").next())
         .expect("列表模式 Enter 分支存在");
     assert!(
-        list_enter_arm.contains("detail_plugin_idx.write()"),
+        list_enter_arm.contains("detail_plugin.write()"),
         "Plugin 列表 Enter 的真实动作是进详情；动作语义变化须同步提示与该用例"
     );
     assert!(

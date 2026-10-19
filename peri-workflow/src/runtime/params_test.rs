@@ -32,7 +32,13 @@ fn missing_script_surfaces_required_field_error() {
 fn max_concurrency_bounds_reject_over_cap_and_zero() {
     let tmp = temp_cwd();
     let cwd = tmp.path().to_str().unwrap();
-    for invalid in [0, MAX_CONCURRENCY_CAP + 1] {
+    for invalid in [
+        serde_json::json!(0),
+        serde_json::json!(MAX_CONCURRENCY_CAP + 1),
+        serde_json::json!(1.5),
+        serde_json::json!(2.5),
+        serde_json::json!("3"),
+    ] {
         let error = parse_start_input(
             &serde_json::json!({ "script": SCRIPT, "maxConcurrency": invalid }),
             cwd,
@@ -49,6 +55,78 @@ fn max_concurrency_bounds_reject_over_cap_and_zero() {
     // 缺省为 3（schema default 与解析一致）。
     let defaulted = parse_start_input(&serde_json::json!({ "script": SCRIPT }), cwd).unwrap();
     assert_eq!(defaulted.max_concurrency, 3);
+}
+
+#[test]
+fn max_concurrency_schema_matches_runtime_bounds() {
+    let schema = start_tool_parameters();
+    let field = &schema["properties"]["maxConcurrency"];
+    assert_eq!(field["type"], "integer");
+    assert_eq!(field["minimum"].as_u64(), Some(1));
+    assert_eq!(field["maximum"].as_u64(), Some(MAX_CONCURRENCY_CAP));
+    assert_eq!(field["default"].as_u64(), Some(3));
+}
+
+#[test]
+fn resume_only_accepts_run_id_and_false_strict_preflight() {
+    let run_id = uuid::Uuid::now_v7().to_string();
+    validate_resume_only_input(&serde_json::json!({
+        "resumeFromRunId": run_id,
+        "strictPreflight": false
+    }))
+    .unwrap();
+    // 显式 null 视为未提供，不是覆盖请求。
+    validate_resume_only_input(&serde_json::json!({
+        "resumeFromRunId": uuid::Uuid::now_v7().to_string(),
+        "maxAgents": null,
+        "args": null
+    }))
+    .unwrap();
+}
+
+#[test]
+fn resume_only_rejects_every_start_only_field() {
+    let run_id = uuid::Uuid::now_v7().to_string();
+    let rejected = [
+        ("args", serde_json::json!({"changed": true})),
+        ("maxConcurrency", serde_json::json!(2)),
+        ("budgetTotal", serde_json::json!(1000)),
+        ("maxAgents", serde_json::json!(1)),
+        ("maxToolCalls", serde_json::json!(1)),
+        ("maxElapsedMs", serde_json::json!(1000)),
+        ("name", serde_json::json!("changed")),
+        ("writeIntent", serde_json::json!({"kind": "read_only"})),
+        ("script", serde_json::json!("return 1")),
+        ("scriptPath", serde_json::json!("changed.js")),
+        ("script", serde_json::json!(42)),
+    ];
+    for (field, value) in rejected {
+        let input = serde_json::json!({ "resumeFromRunId": run_id, (field): value });
+        let error = validate_resume_only_input(&input).unwrap_err();
+        assert!(error.contains(field), "{field}: {error}");
+        assert!(error.contains("resume-only"), "{field}: {error}");
+        assert!(
+            error.contains("script + resumeFromRunId"),
+            "{field}: {error}"
+        );
+    }
+}
+
+#[test]
+fn resume_only_rejects_strict_preflight_true_with_start_message() {
+    let tmp = temp_cwd();
+    let start_error = parse_start_input(
+        &serde_json::json!({ "script": SCRIPT, "strictPreflight": true }),
+        tmp.path().to_str().unwrap(),
+    )
+    .unwrap_err();
+    let resume_error = validate_resume_only_input(&serde_json::json!({
+        "resumeFromRunId": uuid::Uuid::now_v7().to_string(),
+        "strictPreflight": true
+    }))
+    .unwrap_err();
+    assert_eq!(resume_error, start_error);
+    assert!(resume_error.contains("strict preflight"), "{resume_error}");
 }
 
 #[test]

@@ -9,7 +9,8 @@ use peri_acp_types::thread::ThreadId;
 use serde_json::Value;
 
 use crate::dispatch::config_update::make_config_options;
-use crate::dispatch::ReplaySender;
+use crate::dispatch::{LoadGeneration, ReplaySender};
+use crate::host::connection::ConnectionFacts;
 use crate::host::notify::{send_available_commands_update, send_config_option_update};
 use crate::host::prepared::PreparedSessionInputs;
 use crate::host::workspace::{workspace_error, BindingCheck};
@@ -24,6 +25,15 @@ use super::{attach_session_workflow, create_session_workflow_chain, workflow_fac
 
 #[path = "legacy_session.rs"]
 mod legacy_session;
+
+#[path = "session_restore/fork_shared.rs"]
+mod fork_shared;
+#[path = "session_restore/load_shared.rs"]
+mod load_shared;
+pub(crate) use fork_shared::handle_fork_shared;
+#[cfg(test)]
+pub(crate) use load_shared::cleanup_unpublished_restore;
+pub(crate) use load_shared::{handle_load_shared, handle_resume_shared};
 
 async fn reject_closing_session(params: &Value, cfg: &AcpServerConfig) -> Result<(), AcpError> {
     let id = params
@@ -49,9 +59,10 @@ async fn reject_closing_session(params: &Value, cfg: &AcpServerConfig) -> Result
 /// 快照缺 frozen 是错误（bound 会话必须有），本构建读不懂也是错误——两者都不是
 /// 「没有 frozen，可以重建」：重建会把已发布的冻结输入换成当前目录/日期。
 async fn load_frozen_bytes(cfg: &AcpServerConfig, session_id: &str) -> Result<String, AcpError> {
+    // 恢复路径只消费 frozen：读有效视图，不把已排除 own 正文带进内存。
     let snapshot = cfg
         .session_resources
-        .load_session_snapshot(&session_id.to_owned())
+        .load_active_snapshot(&session_id.to_owned())
         .await
         .map_err(crate::host::workspace::resource_error)?;
     match snapshot.frozen {
@@ -69,6 +80,9 @@ pub(crate) struct PreparedSession {
     pub(super) identity: Option<Value>,
 }
 
+/// 进程内/测试入口：调用方持有的是本地 map 引用，不是生产 `SharedSessions` 锁。
+/// 生产 `ServerLoop` 的 `session/load` 走 [`load_shared::handle_load_shared`]
+/// （短锁读取 → 锁外 I/O → 短锁写回），不得从生产路径调用本函数。
 pub(crate) async fn prepare_existing(
     params: &Value,
     cfg: &AcpServerConfig,
@@ -134,17 +148,31 @@ pub(crate) async fn prepare_existing(
             if state.closing {
                 return Err(AcpError::new(-32010, "Session is closing"));
             }
-            if state.history_payloads.is_empty() {
-                let payloads = dispatch::load_session_payloads(cfg.controller.as_ref(), id).await?;
-                state.history = payloads
-                    .iter()
-                    .filter_map(|payload| payload.as_message().cloned())
-                    .collect();
-                state.history_payloads = payloads;
+            crate::host::ownership::mark_stale_if_dead(state);
+            match state.context_ownership {
+                // 内存会话状态只发布有效集合：已排除正文只留在存储侧。
+                crate::host::ContextOwnership::ReloadRequired => {
+                    let payloads =
+                        dispatch::load_active_session_payloads(cfg.controller.as_ref(), id).await?;
+                    state.history_payloads = payloads;
+                    state.context_ownership = crate::host::ContextOwnership::Resident;
+                }
+                // 空驻留会话是唯一允许与存储重新对齐的 Resident 状态：新建会话
+                // 可能尚未观察到后来写入的 canonical 历史。非空 Resident 已有本轮
+                // 事实，不用存储覆盖；HandedOff 的正文在在途执行器里，不能再装入
+                // 第二份副本，也不能据此判断会话为空。
+                crate::host::ContextOwnership::Resident if state.history_payloads.is_empty() => {
+                    let payloads =
+                        dispatch::load_active_session_payloads(cfg.controller.as_ref(), id).await?;
+                    state.history_payloads = payloads;
+                }
+                crate::host::ContextOwnership::Resident
+                | crate::host::ContextOwnership::HandedOff => {}
             }
             return Ok(RestoreOutcome::AlreadyLive { identity });
         }
-        let payloads = dispatch::load_session_payloads(cfg.controller.as_ref(), id).await?;
+        // 冷恢复同样只发布有效集合：完整 canonical 历史按需从存储读取。
+        let payloads = dispatch::load_active_session_payloads(cfg.controller.as_ref(), id).await?;
         let cwd = workspace
             .cwd
             .to_str()
@@ -216,11 +244,11 @@ pub(crate) async fn prepare_existing(
                 ),
                 environment,
                 closing: false,
-                history: payloads
-                    .iter()
-                    .filter_map(|p| p.as_message().cloned())
-                    .collect(),
+                context_ownership: crate::host::ContextOwnership::Resident,
                 history_payloads: payloads,
+                structure_version: 0,
+                session_generation: crate::host::next_session_generation(),
+                history_window: Default::default(),
                 cancel_token: None,
                 // 本分支无持久执行恢复：恢复准入一律以「无续跑」状态发布。
                 continuation_armed: false,
@@ -494,11 +522,32 @@ pub(crate) async fn handle_metadata(
     Ok(response)
 }
 
+/// 初始 load。`connection` 是**当前连接**的事实快照
+/// （[`crate::host::connection::ConnectionFacts`]），两个字段各管一处：
+///
+/// - `history_pagination`：本次交付的**分流判据**，决定拿哪一种历史、打不打条目位置戳
+///   （REQ §5.2、REQ §5.3、REQ-H01~H04）。
+///   - 协商（`true`）：行为完全不变——热态**有效集合**回放 + 条目身份 / 位置戳
+///     （`entryId`/`position`）+ 响应里的代次与首游标。
+///   - 未协商（`false`）：canonical **完整历史**的流式交付
+///     （[`dispatch::replay_canonical_history_streamed`]）：从存储按向前段逐段读取，逐段投影成
+///     标准 `session/update`。**不读** `state.history_payloads`（那只是有效集合，会丢 Full
+///     归档原文），也不引入任何分页私有字段。会话已在内存（`AlreadyLive`）时同样从存储流式
+///     读取：交付来源由连接事实决定，不由热态是否恰好有一份快照决定。
+/// - `caps`：本次回放的**标记门**（`periReplay` / `periLoadGeneration`，两者同一门
+///   `caps.replay`，见 [`dispatch::replay_meta`]）。判据只能是本连接 `initialize` 的协商
+///   结果：会话级 `caps_registry`（[`crate::session::SessionManager::ensure_session_caps`]）
+///   会把先前 peri 连接的能力留给重连的同一会话，未协商的标准连接因此会继承到 Peri 私有
+///   字段（REQ §5.3、验收 A25）。
+///
+/// 进程内/测试入口；生产 `ServerLoop` 使用 [`load_shared::handle_load_shared`]，
+/// 后者不在 `SharedSessions` 全局锁内做 DB/资源 I/O。
 pub(crate) async fn handle_load(
     params: &Value,
     cfg: &AcpServerConfig,
     sessions: &mut HashMap<String, SessionState>,
     transport: &Arc<dyn crate::transport::AcpTransport>,
+    connection: ConnectionFacts,
 ) -> Result<Value, AcpError> {
     reject_incomplete_local_close(params, sessions)?;
     let already_loaded = params
@@ -513,22 +562,115 @@ pub(crate) async fn handle_load(
     let state = sessions.get(req_session_id).expect("prepared session");
     let environment = state.environment.clone();
     let cfg = environment.as_ref().map(|env| &env.cfg).unwrap_or(cfg);
-    let history_payloads = state.history_payloads.clone();
-    let caps = cfg.session_manager.ensure_session_caps(req_session_id);
+    // 回放标记 / 代次戳的门是**当前连接**的协商结果（REQ §5.3）：本连接没声明 `peri.replay`
+    // 时，本次交付的响应与全部回放通知都不带 Peri 私有字段——即使会话级注册表里存着先前
+    // peri 连接写下的全能力值（`ensure_session_caps` 命中旧值就直接返回，见 session/caps.rs）。
+    let connection_caps = &connection.caps;
+    // 命令表广播仍走**会话级**注册表（`ui_commands` 明细在会话创建时已注册进命令表，
+    // 见 `send_available_commands_update` / `register_ui_entries`）：那是另一个功能面，
+    // 与回放标记刻意不同源，不得为了让两者一致而改成连接 caps。
+    let session_caps = cfg.session_manager.ensure_session_caps(req_session_id);
+    // 本次 load 的代次（REQ §5.2 `loadGeneration`、REQ-H04）：客户端可显式指定（重试复用
+    // 同一代次），缺省由服务端生成。形状在**任何状态被改动之前**就已校验
+    // （`history_page::classify` 与本行共用同一 helper）。
+    let generation = crate::host::history_page::initial_load_generation(params)?
+        .unwrap_or_else(LoadGeneration::generate);
 
     // ── ACP v1 spec: replay history via session/update BEFORE responding ──
     let replay_sender = TuiReplaySender {
         transport: transport.as_ref(),
     };
-    if let Err(e) = dispatch::replay_persisted_session_history(
-        req_session_id,
-        &history_payloads,
-        &replay_sender,
-        &caps,
-    )
-    .await
-    {
-        tracing::warn!(session_id = %req_session_id, error = %e, "session/load: history replay failed, continuing");
+    // 条目位置戳（REQ §5.2 的 `entryId`/`position` 行）：只对**本连接**协商过分页的初始 load
+    // 打——准入判据与 `history_page::classify` 同源。位置来自一次「只读 id + 存储序键」的
+    // 有界读取（不读正文）；继承区条目在本线程没有行，因此只拿身份、没有位置。
+    //
+    // 读失败即本次 load 失败：位置戳是分页扩展契约的一部分，静默降级会让客户端按一份缺
+    // 位置的稀疏首屏去合并，比一次可见的失败更难查（REQ §5.1 的失败关闭）。
+    let positions = if connection.history_pagination {
+        Some(
+            cfg.session_resources
+                .load_entry_positions(&ThreadId::from(req_session_id.to_owned()))
+                .await
+                .map_err(crate::host::workspace::resource_error)?,
+        )
+    } else {
+        None
+    };
+    let replay_marks = match positions.as_ref() {
+        Some(positions) => dispatch::ReplayMarks::new(&generation, req_session_id, positions),
+        None => dispatch::ReplayMarks::without_entry_marks(&generation, req_session_id),
+    };
+    // 回放失败**必须**让这次 load 失败（REQ-H04）：只告警再回一个成功响应，客户端会把
+    // 半份首屏当成完整恢复，然后带着一个假 cursor 继续。
+    //
+    // 失败时**不拆除**已发布的会话状态：那一份是完整的（装配、绑定、frozen 与有效集合
+    // 都已定稿），失败的只是「本次交付」。下一次 load 命中 `AlreadyLive` 分支，重新交付
+    // 同一份事实（协商连接重放有效集合；未协商连接重新从存储流式读取 canonical 历史）
+    // 即修复；重试不会重复安装，本代次也没有任何东西落到客户端（通知没有完整边界，见
+    // REQ-H04 的客户端侧）。
+    let replay = if connection.history_pagination {
+        // 分页回放读热态前必须看所有权：`HandedOff` 的空 `history_payloads` 是
+        // 「正文在在途执行器里」的哨兵，不是空会话；回放它等于向客户端交付一份
+        // 假历史并返回成功（A09）。`ReloadRequired` 正常已由 `prepare_existing`
+        // 转为 `Resident`，这里仍按只读存储快照交付本次回放，不回填热态。
+        let ownership = sessions
+            .get(req_session_id)
+            .expect("prepared session")
+            .context_ownership;
+        let history_payloads = match ownership {
+            crate::host::ContextOwnership::Resident => sessions
+                .get(req_session_id)
+                .expect("prepared session")
+                .history_payloads
+                .clone(),
+            crate::host::ContextOwnership::HandedOff => {
+                return Err(AcpError::new(
+                    -32010,
+                    "Session context is owned by an in-flight prompt",
+                ));
+            }
+            crate::host::ContextOwnership::ReloadRequired => {
+                // 防御性分支（契约上不可达）：只读存储的有效集合，绝不修改热态字段。
+                dispatch::load_active_session_payloads(cfg.controller.as_ref(), req_session_id)
+                    .await?
+            }
+        };
+        dispatch::replay_persisted_session_history(
+            req_session_id,
+            &history_payloads,
+            &replay_sender,
+            connection_caps,
+            &replay_marks,
+        )
+        .await
+    } else {
+        // 标准 ACP 完整回放：存储是唯一来源（热态只有有效集合，用它会把归档原文漏掉）。
+        dispatch::replay_canonical_history_streamed(
+            cfg.controller.as_ref(),
+            req_session_id,
+            &replay_sender,
+            connection_caps,
+            &generation,
+        )
+        .await
+    };
+    replay.map_err(|error| {
+        tracing::error!(
+            session_id = %req_session_id,
+            error = %error,
+            "session/load: history replay failed"
+        );
+        AcpError::new(
+            -32603,
+            format!("session/load: history replay failed: {error}"),
+        )
+    })?;
+    // 只有回放成功、本次 load 确实要发布响应时才替换 generation/撤销旧窗口。
+    // HandedOff 拒绝或回放失败必须保持旧 ticket/generation 可用（失败不拆除已发布状态）。
+    if already_loaded {
+        if let Some(state) = sessions.get_mut(req_session_id) {
+            state.refresh_session_generation();
+        }
     }
 
     // modes/configOptions sent both via notification AND in response body
@@ -546,10 +688,15 @@ pub(crate) async fn handle_load(
         .config_options(config_options);
     // Push AvailableCommandsUpdate notification（Phase 6 A4：投影 =
     // 注册表 snapshot；本地 skills / ui / 插件条目已在会话创建时注册）
+    //
+    // 这里的 caps 刻意仍是**会话级**（`session_caps`）：命令表是会话级注册表语义
+    // （`ui_commands` 明细在会话创建时按当时声明的能力注册进表，之后按会话复用），
+    // 与「本次回放标记按当前连接门控」不是同一个功能面。不要为了让两处一致而改成连接 caps：
+    // 那会改变命令表在重连 / 换连接时的既有语义（本需求范围之外）。
     send_available_commands_update(
         transport,
         req_session_id,
-        &caps,
+        &session_caps,
         cfg.session_manager.command_registry_for(req_session_id),
         cfg.stdio_command_filter,
     )
@@ -560,12 +707,21 @@ pub(crate) async fn handle_load(
     // on_change 重发）。幂等（Started 去重）；pool/registry 缺失或
     // 连接中 → 空跑，由首 turn 装配与连接完成事件兜底。
     prewarm_session_mcp_discovery(cfg, req_session_id);
-    identity_response(
+    let mut response = identity_response(
         serde_json::to_value(resp).map_err(|e| AcpError::new(-32603, e.to_string()))?,
         identity,
-    )
+    )?;
+    // 代次回带（与回放通知上的 `periLoadGeneration` 同名，见 `dispatch::replay_meta`）：
+    // 客户端按它确认「这批通知属于我刚拿到的那次响应」（REQ-H04）。门与回放通知同一个
+    // ——**当前连接**的 `caps.replay`：未协商回放标记的标准客户端不引入 Peri 私有字段。
+    if connection_caps.replay {
+        response["_meta"]["periLoadGeneration"] = Value::String(generation.as_str().to_owned());
+    }
+    Ok(response)
 }
 
+/// 进程内/测试入口；生产 `ServerLoop` 使用 [`load_shared::handle_resume_shared`]
+/// （短锁准备 + 锁外 I/O）。
 pub(crate) async fn handle_resume(
     params: &Value,
     cfg: &AcpServerConfig,
@@ -701,13 +857,12 @@ impl ReplaySender for TuiReplaySender<'_> {
         session_id: &str,
         reminder: &peri_acp_types::system_reminder::SystemReminder,
         caps: &peri_acp_types::PeriCaps,
+        marks: &crate::dispatch::EntryMarks<'_>,
     ) -> Result<(), crate::dispatch::ReplayError> {
         // H8：replay 与 live 共用同一条受众投递规则；未声明客户端受众的
         // reminder（例如 Model-only recall）不得因回放而出现在 wire 上。
-        if !peri_acp_types::system_reminder::reminder_egress_allowed(
-            reminder,
-            peri_acp_types::system_reminder::ReminderAudience::Tui,
-        ) {
+        // 判据与历史页出口同源（`dispatch::reminder_visible_to_client`）。
+        if !crate::dispatch::reminder_visible_to_client(reminder) {
             tracing::debug!(
                 session_id = %session_id,
                 source = %reminder.source,
@@ -717,7 +872,7 @@ impl ReplaySender for TuiReplaySender<'_> {
             );
             return Ok(());
         }
-        let (event, data) = if caps.system_reminder {
+        let (event, mut data) = if caps.system_reminder {
             (
                 "system-reminder",
                 serde_json::json!({ "reminder": reminder, "replay": true }),
@@ -732,6 +887,23 @@ impl ReplaySender for TuiReplaySender<'_> {
                 }),
             )
         };
+        // 代次与 `session/update` 出口**同一个门**（协商过回放标记的连接，见
+        // `dispatch::replay_meta`）：客户端按它把本次 load 的通知与那次成功响应配对
+        // （REQ-H04）。未协商的标准客户端不引入 Peri 私有字段。
+        //
+        // 条目位置戳（`periEntryId` / `periPosition`）与 `session/update` 出口**同一份拼装**
+        // （`dispatch::write_entry_marks`）：客户端要能用同一套身份把 reminder 与页/首屏合并。
+        let mut stamp = serde_json::Map::new();
+        if caps.replay {
+            stamp.insert(
+                "periLoadGeneration".to_owned(),
+                serde_json::json!(marks.generation().as_str()),
+            );
+        }
+        crate::dispatch::write_entry_marks(marks, &mut stamp);
+        if let Some(data) = data.as_object_mut() {
+            data.extend(stamp);
+        }
         self.transport
             .send_notification(
                 "peri/unstable_event",

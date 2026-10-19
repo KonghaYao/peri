@@ -15,6 +15,7 @@ use crate::transport::types::AcpError;
 use peri_acp_types::PeriCaps;
 
 use super::{AcpServerConfig, SessionState};
+use crate::host::connection::ConnectionFacts;
 
 pub(crate) mod acp_mcp;
 pub(crate) mod config_options;
@@ -28,12 +29,43 @@ mod storage_v2;
 mod user_input;
 mod workflow;
 
+/// 无连接上下文的请求入口：进程内直接调用与单测。
+///
+/// 连接级准入判定一律按**未协商**处理（见 [`ConnectionFacts::unnegotiated`]）：这类调用方
+/// 没有连接，也就没有可继承的协商事实（REQ §5.3）。宿主路径（`server_loop`）必须走
+/// [`handle_request_for_connection`]，否则「当前连接声明了什么」会被静默忽略。
+///
+/// 只在测试编译里存在：非测试构建里生产入口只有一份，不会出现两条并行路由。
+#[cfg(test)]
 pub(crate) async fn handle_request(
     method: &str,
     params: &Value,
     cfg: &AcpServerConfig,
     sessions: &mut HashMap<String, SessionState>,
     transport: &Arc<dyn crate::transport::AcpTransport>,
+) -> Result<Value, AcpError> {
+    handle_request_for_connection(
+        method,
+        params,
+        cfg,
+        sessions,
+        transport,
+        ConnectionFacts::unnegotiated(),
+    )
+    .await
+}
+
+/// 宿主请求入口：带上**本连接**的协商事实快照（[`ConnectionFacts`]）。
+///
+/// 按连接分流的判定只能读 `connection`，不得回读进程级 / 会话级 caps 注册表——那两者会把
+/// 别的连接（或旧连接）的协商值带给当前连接（REQ §5.3、验收 A25）。
+pub(crate) async fn handle_request_for_connection(
+    method: &str,
+    params: &Value,
+    cfg: &AcpServerConfig,
+    sessions: &mut HashMap<String, SessionState>,
+    transport: &Arc<dyn crate::transport::AcpTransport>,
+    connection: ConnectionFacts,
 ) -> Result<Value, AcpError> {
     let session_id = params
         .get("sessionId")
@@ -92,7 +124,14 @@ pub(crate) async fn handle_request(
         "session/set_config_option" => {
             config_options::handle_set_config_option(params, cfg, sessions, transport).await
         }
-        "session/load" => session_lifecycle::handle_load(params, cfg, sessions, transport).await,
+        // 生产 `ServerLoop` 在进入本分派前已把 session/load、session/resume、
+        // session/fork 分流到 `*_shared` 路径；以下三个分支只服务进程内/测试入口，
+        // 因此旧 `prepare_existing` 的锁内 I/O 不在生产路径上。
+        // 初始 load 的回放标记与代次戳按**当前连接**的协商结果决定（REQ §5.3）：
+        // 分页准入（`history_pagination`）与回放能力集（`caps`）都来自本连接的事实快照。
+        "session/load" => {
+            session_lifecycle::handle_load(params, cfg, sessions, transport, connection).await
+        }
         "session/list" => session_lifecycle::handle_list(params, cfg).await,
         "peri/machines/list" => storage_v2::machines(cfg).await,
         "peri/workspaces/list" => storage_v2::workspaces(params, cfg).await,
@@ -130,7 +169,9 @@ pub(crate) async fn handle_request(
         "plugin/list" => plugin::handle_session_snapshot(cfg),
         "plugin/update" => plugin::handle_update(params, cfg, sessions, transport).await,
         "session/rename" => session_lifecycle::handle_rename(params, cfg, transport).await,
-        "session/rewind-candidates" => rewind::handle_rewind_candidates(params, cfg, sessions),
+        "session/rewind-candidates" => {
+            rewind::handle_rewind_candidates(params, cfg, sessions).await
+        }
         "session/rewind-preview" => rewind::handle_rewind_preview(params, cfg, sessions).await,
         "session/rewind" => rewind::handle_rewind(params, cfg, sessions, transport).await,
         "marketplace/add" => plugin::handle_marketplace_add(params, cfg).await,
@@ -291,4 +332,4 @@ pub(super) fn task_snapshot_value(snapshot: peri_acp_types::tasks::TaskSnapshot)
 
 #[cfg(test)]
 #[path = "requests_test.rs"]
-mod tests;
+pub(super) mod tests;

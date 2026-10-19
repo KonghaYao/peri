@@ -46,6 +46,25 @@ async fn wire_declares_four_tools_and_five_resources() {
         properties.contains_key("script") && properties.contains_key("writeIntent"),
         "Workflow 参数 schema 必须与 runtime 的单一权威一致"
     );
+    let max_concurrency = &properties["maxConcurrency"];
+    assert_eq!(
+        max_concurrency.get("type").and_then(Value::as_str),
+        Some("integer"),
+        "maxConcurrency 在 wire 上必须是整数（与运行时解析一致）"
+    );
+    assert_eq!(
+        max_concurrency.get("minimum").and_then(Value::as_u64),
+        Some(1)
+    );
+    assert_eq!(
+        max_concurrency.get("maximum").and_then(Value::as_u64),
+        Some(16),
+        "wire 上限必须与运行时 MAX_CONCURRENCY_CAP 一致"
+    );
+    assert_eq!(
+        max_concurrency.get("default").and_then(Value::as_u64),
+        Some(3)
+    );
 
     let resources = peer
         .list_resources(None)
@@ -168,6 +187,74 @@ async fn workflow_resume_only_routes_to_kernel_resume() {
     assert!(
         runtime.runs_snapshot().is_empty(),
         "失败的 resume 不得留下 run 记录"
+    );
+
+    pair.shutdown().await;
+}
+
+/// F11：resume-only 不得静默忽略启动期覆盖参数——只接受 `resumeFromRunId`。
+#[tokio::test]
+async fn workflow_resume_only_rejects_new_limits_instead_of_ignoring() {
+    let runtime = make_runtime();
+    runtime.set_consumer_ready(true);
+    let pair = connect(server(Arc::clone(&runtime))).await;
+    let peer = pair.peer();
+
+    let result = call_tool(
+        &peer,
+        "Workflow",
+        json!({
+            "resumeFromRunId": uuid::Uuid::now_v7().to_string(),
+            "maxAgents": 1
+        }),
+    )
+    .await;
+    assert_eq!(result.is_error, Some(true), "覆盖参数必须显式拒绝");
+    let text = first_text(&result);
+    assert!(text.contains("maxAgents"), "错误必须点名字段: {text}");
+    assert!(text.contains("resume-only"), "{text}");
+    assert!(
+        text.contains("script + resumeFromRunId"),
+        "错误必须给出改变输入的路径: {text}"
+    );
+    assert!(
+        !text.contains("Failed to read workflow state"),
+        "拒绝必须发生在 state 读取前，不能被静默忽略: {text}"
+    );
+    assert!(
+        runtime.runs_snapshot().is_empty(),
+        "被拒的 resume 不得留下 run 记录"
+    );
+
+    pair.shutdown().await;
+}
+
+/// `strictPreflight:true` 在 resume-only 与 start 路径使用同一拒绝文案。
+#[tokio::test]
+async fn workflow_resume_only_rejects_strict_preflight_like_start() {
+    let runtime = make_runtime();
+    runtime.set_consumer_ready(true);
+    let pair = connect(server(Arc::clone(&runtime))).await;
+    let peer = pair.peer();
+
+    let result = call_tool(
+        &peer,
+        "Workflow",
+        json!({
+            "resumeFromRunId": uuid::Uuid::now_v7().to_string(),
+            "strictPreflight": true
+        }),
+    )
+    .await;
+    assert_eq!(result.is_error, Some(true));
+    let text = first_text(&result);
+    assert!(
+        text.contains("strict preflight is unavailable"),
+        "resume-only 必须拒绝 strictPreflight:true: {text}"
+    );
+    assert!(
+        runtime.runs_snapshot().is_empty(),
+        "被拒的 resume 不得留下 run 记录"
     );
 
     pair.shutdown().await;

@@ -1,5 +1,9 @@
 use super::*;
+use peri_acp_types::identity::SessionSeq;
 use peri_acp_types::session::MessageQueue;
+
+#[path = "user_input_mailbox_terminal_test.rs"]
+mod terminal_tests;
 
 fn make_mailbox() -> (Arc<UserInputMailbox>, Arc<SessionInbox>) {
     let inbox = Arc::new(SessionInbox::new(Arc::new(MessageQueue::new())));
@@ -755,4 +759,196 @@ fn test_mailbox_stop_then_late_suspend_waits_for_fresh_attempt() {
         "新输入保留在原待办之后"
     );
     assert_eq!(mailbox.snapshot().items[1].state, UserInputState::Queued);
+}
+
+/// [回归测试] Stop 完成后，新的后台 continuation 仍继承 paused；新输入必须
+/// 解除暂停并交接给这个仍有效、未取消的当前执行。
+#[test]
+fn test_mailbox_new_input_wakes_background_attempt_after_finished_stop() {
+    let (mailbox, inbox) = make_mailbox();
+    let old = mailbox
+        .attach_external_attempt(CancellationToken::new(), false)
+        .unwrap();
+    mailbox.stop();
+    mailbox.finish_attempt(&old, UserInputAttemptOutcome::Interrupted);
+
+    let background = mailbox
+        .attach_external_attempt(CancellationToken::new(), false)
+        .unwrap();
+    mailbox.enter_idle();
+
+    let input = make_input(&mailbox, "停止后重新发送");
+    mailbox.enqueue(&input).unwrap();
+
+    assert_eq!(mailbox.active_run_ticket(), Some(background));
+    assert!(
+        mailbox.reserve_run().is_none(),
+        "已有执行时不能启动第二个执行"
+    );
+    let received = inbox.queue().drain_all();
+    assert_eq!(received.len(), 1, "应交接给当前未取消的后台执行");
+    assert_eq!(
+        received[0].message().unwrap().id().as_uuid().to_string(),
+        input.input_id
+    );
+}
+
+/// [回归测试] 输入先于新后台执行的 idle 边界完成 promotion；enter_idle 必须
+/// 交接已存在的 ready，而不是要求本次调用重新 promote。
+#[test]
+fn test_mailbox_ready_input_is_handed_off_when_external_attempt_enters_idle() {
+    let (mailbox, inbox) = make_mailbox();
+    let input = make_input(&mailbox, "已经进入 ready");
+    mailbox.enqueue(&input).unwrap();
+
+    let background = mailbox
+        .attach_external_attempt(CancellationToken::new(), false)
+        .unwrap();
+
+    assert!(mailbox.reserve_run().is_none());
+    mailbox.enter_idle();
+
+    assert_eq!(mailbox.active_run_ticket(), Some(background));
+    let received = inbox.queue().drain_all();
+    assert_eq!(received.len(), 1, "已有 ready 不能因未再次 promote 被跳过");
+    assert_eq!(
+        received[0].message().unwrap().id().as_uuid().to_string(),
+        input.input_id
+    );
+}
+
+/// [回归测试] enqueue 先完成 promotion、随后后台执行才 attach 的竞争：
+/// reserve 被拒后，现有执行进入 idle 仍要消费已 ready 的输入。
+#[test]
+fn test_mailbox_ready_input_survives_attach_before_idle() {
+    let (mailbox, inbox) = make_mailbox();
+    let old = mailbox
+        .attach_external_attempt(CancellationToken::new(), false)
+        .unwrap();
+    mailbox.stop();
+    mailbox.finish_attempt(&old, UserInputAttemptOutcome::Interrupted);
+
+    let input = make_input(&mailbox, "attach 前已 ready");
+    mailbox.enqueue(&input).unwrap();
+    let background = mailbox
+        .attach_external_attempt(CancellationToken::new(), false)
+        .unwrap();
+
+    assert!(mailbox.reserve_run().is_none(), "当前执行仍持有准入");
+    mailbox.enter_idle();
+
+    assert_eq!(mailbox.active_run_ticket(), Some(background));
+    let received = inbox.queue().drain_all();
+    assert_eq!(received.len(), 1);
+    assert_eq!(
+        received[0].message().unwrap().id().as_uuid().to_string(),
+        input.input_id
+    );
+}
+
+/// [回归测试] Delivered / Withdrawn 是可查询的终态，不能只从 pending 列表消失；
+/// 重复确认必须幂等。
+#[test]
+fn test_mailbox_snapshot_exposes_terminal_states_and_deduplicates_delivery() {
+    let (mailbox, inbox) = make_mailbox();
+    mailbox
+        .attach_external_attempt(CancellationToken::new(), false)
+        .unwrap();
+    let delivered_input = make_input(&mailbox, "已交付");
+    mailbox.enqueue(&delivered_input).unwrap();
+    mailbox.enter_idle();
+    let messages = inbox.queue().drain_all();
+    let delivered_id = messages[0].message().unwrap().id();
+    mailbox.mark_claimed(&[delivered_id]);
+    assert_eq!(mailbox.mark_delivered(&[delivered_id]).len(), 1);
+    assert!(
+        mailbox.mark_delivered(&[delivered_id]).is_empty(),
+        "重复交付确认不得重复通知"
+    );
+
+    let withdrawn_input = make_input(&mailbox, "已撤回");
+    mailbox.enqueue(&withdrawn_input).unwrap();
+    mailbox
+        .take_back(&TakeBackUserInputRequest {
+            session_id: "session".into(),
+            generation: mailbox.generation().into(),
+            command_id: "withdraw-terminal".into(),
+            input_id: withdrawn_input.input_id.clone(),
+        })
+        .unwrap();
+
+    let snapshot = mailbox.snapshot();
+    assert!(snapshot.items.is_empty(), "终态不应继续出现在待发列表");
+    assert!(snapshot.terminal_items.iter().any(|item| {
+        item.input_id == delivered_input.input_id && item.state == UserInputState::Delivered
+    }));
+    assert!(snapshot.terminal_items.iter().any(|item| {
+        item.input_id == withdrawn_input.input_id && item.state == UserInputState::Withdrawn
+    }));
+}
+
+/// [回归测试] 交付日志条目在发布时获得事件序号；重复绑定保留首个序号。
+#[test]
+fn test_bind_delivery_sequence_orders_journal_and_is_idempotent() {
+    let (mailbox, inbox) = make_mailbox();
+    mailbox
+        .attach_external_attempt(CancellationToken::new(), false)
+        .unwrap();
+    let input = make_input(&mailbox, "带序号交付");
+    mailbox.enqueue(&input).unwrap();
+    mailbox.enter_idle();
+    let messages = inbox.queue().drain_all();
+    let id = messages[0].message().unwrap().id();
+    mailbox.mark_claimed(&[id]);
+    mailbox.mark_delivered(&[id]);
+
+    let pending = mailbox.pending_delivery_notifications();
+    assert_eq!(pending.len(), 1);
+    assert_eq!(
+        pending[0].session_seq, None,
+        "mark_delivered 时尚未发布事件，序号必须显式为 None"
+    );
+
+    let first = SessionSeq::initial().next();
+    mailbox.bind_delivery_sequence(&input.input_id, first);
+    assert_eq!(
+        mailbox.pending_delivery_notifications()[0].session_seq,
+        Some(first)
+    );
+
+    mailbox.bind_delivery_sequence(&input.input_id, first.next());
+    assert_eq!(
+        mailbox.pending_delivery_notifications()[0].session_seq,
+        Some(first),
+        "重复绑定不得覆盖首个序号"
+    );
+}
+
+/// [回归测试] 终态快照必须有界，避免长会话无限增长。
+#[test]
+fn test_mailbox_terminal_snapshot_is_bounded() {
+    let (mailbox, inbox) = make_mailbox();
+    mailbox
+        .attach_external_attempt(CancellationToken::new(), false)
+        .unwrap();
+    for index in 0..(TERMINAL_CAPACITY + 2) {
+        let input = make_input(&mailbox, &format!("终态输入 {index}"));
+        mailbox.enqueue(&input).unwrap();
+        mailbox.enter_idle();
+        let messages = inbox.queue().drain_all();
+        assert_eq!(messages.len(), 1);
+        let id = messages[0].message().unwrap().id();
+        mailbox.mark_claimed(&[id]);
+        mailbox.mark_delivered(&[id]);
+        // 本测试只验证终态展示有界；模拟事件泵立即确认交付日志。
+        mailbox.ack_delivery_notification(&input.input_id);
+    }
+
+    let snapshot = mailbox.snapshot();
+    assert!(snapshot.items.is_empty());
+    assert_eq!(snapshot.terminal_items.len(), TERMINAL_CAPACITY);
+    assert!(snapshot
+        .terminal_items
+        .iter()
+        .all(|item| item.state == UserInputState::Delivered));
 }

@@ -223,18 +223,24 @@ impl BackgroundTaskRegistry {
         }
     }
 
+    /// 取任务投影快照。
+    ///
+    /// `revision` 与记录副本在同一锁区取出，保证两者来自同一时点；排序在锁外
+    /// 进行，避免持锁期间做 O(n log n) 排序阻塞注册 / 完成路径。
     pub fn snapshot(&self) -> TaskSnapshot {
-        let projection = self.projection.lock();
-        let mut tasks: Vec<TaskRecord> = projection.records.values().cloned().collect();
+        let (revision, mut tasks): (u64, Vec<TaskRecord>) = {
+            let projection = self.projection.lock();
+            (
+                projection.revision,
+                projection.records.values().cloned().collect(),
+            )
+        };
         tasks.sort_by(|a, b| {
             a.started_at
                 .cmp(&b.started_at)
                 .then_with(|| a.task_id.cmp(&b.task_id))
         });
-        TaskSnapshot {
-            revision: projection.revision,
-            tasks,
-        }
+        TaskSnapshot { revision, tasks }
     }
 
     pub(super) fn projection_status(&self, task_id: &str) -> Option<String> {
@@ -580,6 +586,13 @@ impl BackgroundTaskRegistry {
                 duration_ms: 0,
                 output_preview: None,
                 initiator_session_id: task.initiator_session_id.clone(),
+                // 线程身份的事实源是注册时的 live inbox；取快照进投影，终态回收
+                // inbox（complete 时 close、active 条目 retain 移除）后机器消费者
+                // 仍能拿真实身份，不必按到达顺序猜测或由 `bg-` 前缀推导。
+                child_thread_id: task
+                    .agent_inbox
+                    .as_ref()
+                    .map(|inbox| inbox.thread_id.clone()),
             },
         );
         tasks.insert(task.id.clone(), task);

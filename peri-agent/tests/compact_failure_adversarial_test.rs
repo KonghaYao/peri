@@ -735,6 +735,7 @@ async fn test_manual_force_still_applies_full_when_shadow_enabled() {
         true,
         &mut failures,
         bound.repo.path().to_str().unwrap(),
+        None,
     )
     .await;
     assert!(result.outcome().is_full_applied());
@@ -790,6 +791,7 @@ async fn test_force_with_zero_retry_budget_reports_exhaustion_without_model_call
         true,
         &mut failures,
         bound.repo.path().to_str().unwrap(),
+        None,
     )
     .await;
     assert!(matches!(
@@ -831,6 +833,7 @@ async fn test_exhausted_full_budget_does_not_fail_low_pressure_disabled_or_shado
             false,
             &mut failures,
             bound.repo.path().to_str().unwrap(),
+            None,
         )
         .await;
         assert!(

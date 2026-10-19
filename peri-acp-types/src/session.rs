@@ -35,7 +35,7 @@ pub use runtime::{
 pub use user_input::{
     DispatchUserInputsRequest, EnqueueUserInputRequest, TakeBackUserInputRequest, UserInput,
     UserInputItemResult, UserInputQueueItem, UserInputQueueReceipt, UserInputQueueSnapshot,
-    UserInputQueueSnapshotRequest, UserInputState,
+    UserInputQueueSnapshotRequest, UserInputQueueTerminalItem, UserInputState,
 };
 
 // ─── TurnId ──────────────────────────────────────────────────────────────────

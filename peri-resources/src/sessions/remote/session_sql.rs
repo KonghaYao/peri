@@ -26,10 +26,15 @@ use super::sql::StatementSpec;
 use crate::sessions::canonical;
 
 /// 会话行投影的公共前缀：一列一行，顺序即解码下标。
+///
+/// `content_size` 没有落列，也没有生产消费者；此前的 `SUM(LENGTH(content))` 相关子查询
+/// 每次读取都要聚合整份历史（恢复热路径与列表都受影响，随历史增长而变慢）。这里保留
+/// 列位（别名 + 常量 0）以维持行形状与解码下标，不做聚合；需要真实字节数时应另设
+/// 按需读取，不把全历史聚合塞回这条投影。
 macro_rules! meta_columns {
     () => {
         "s.id, s.title, s.cwd, s.created_at, s.updated_at, s.message_count,
-    (SELECT COALESCE(SUM(LENGTH(m.content)), 0) FROM messages m WHERE m.thread_id = s.id),
+    0 as content_size,
     s.parent_thread_id, s.snapshot_at_message_id, s.hidden, s.cancel_policy, s.config, s.agent_status"
     };
 }
@@ -133,6 +138,115 @@ const SELECT_MESSAGES_SQL: &str =
     "SELECT m.message_id, m.content, m.truncated, m.excluded, m.projection
     FROM messages m WHERE m.thread_id = ?1 ORDER BY m.rowid ASC";
 
+/// 有效范围的自有 payload 行：`excluded = 0` 是读取条件的一部分，已排除正文不出库、
+/// 不进入内存；顺序仍是 canonical 插入序（`rowid`）。
+const SELECT_ACTIVE_MESSAGES_SQL: &str =
+    "SELECT m.message_id, m.content, m.truncated, m.excluded, m.projection
+    FROM messages m WHERE m.thread_id = ?1 AND m.excluded = 0 ORDER BY m.rowid ASC";
+
+/// 浏览范围的边界事实（分页读取与初始 load 共用的**唯一**一条边界语句）：会话存在吗、
+/// 浏览范围起点是谁、锚点行在不在。
+///
+/// 会话不存在时**没有行**（`NotFound`）；起点缺失为 NULL，锚点列只是**存在性判据**
+/// （`NULL` = 锚点已不在；边界读取固定传 NULL，只取起点一列）。刻意不写
+/// `COALESCE(..., MAX(rowid)+1)` 这类兜底：锚点消失必须失败关闭，不能悄悄把它变成
+/// 「从最新一页开始」。
+const SELECT_HISTORY_PAGE_BOUNDS_SQL: &str = "SELECT
+        (SELECT m.message_id FROM messages m WHERE m.thread_id = t.id ORDER BY m.rowid ASC LIMIT 1),
+        (SELECT m.rowid FROM messages m WHERE m.thread_id = t.id AND m.message_id = ?2)
+    FROM threads t WHERE t.id = ?1";
+
+/// 一页候选行的**阶段一**读取：（身份 + 存储序键 + 正文长度），keyset 遍历，最多
+/// `limit + 1` 行，**不取正文**。
+///
+/// `?2` 为空 = 首屏，从最新一行开始——只有首屏允许这条路径：带游标时锚点行的存在性已由
+/// [`SELECT_HISTORY_PAGE_BOUNDS_SQL`] 证明，`NULL` 在那里已经变成失败。锚点用**子查询按
+/// `message_id` 定位**（同一条语句内完成，两次语句之间不引入新的时间点），排序才用
+/// `rowid`：删掉尾部行之后新插入的行会复用这些 rowid，rowid 不是稳定的条目身份。
+///
+/// 长度是**字节数**（`length(CAST(content AS BLOB))`；直接 `length(content)` 数的是字符），
+/// 与页预算同一口径。
+const SELECT_HISTORY_PAGE_ROWS_SQL: &str = "SELECT s.message_id, s.rowid,
+        length(CAST(s.content AS BLOB))
+    FROM messages s
+    WHERE s.thread_id = ?1 AND (?2 IS NULL OR s.rowid < (
+        SELECT m.rowid FROM messages m WHERE m.thread_id = ?1 AND m.message_id = ?2))
+    ORDER BY s.rowid DESC LIMIT ?3";
+
+/// 页内一条条目的正文：**阶段二**只按本页那些行的 id 取，一条语句一个 id，同一批次读出。
+///
+/// 批内 `LIMIT 1` 与唯一约束共同保证「一个 id 至多一行」：多行即回复形状不符（调用方
+/// 按损坏失败），绝不取第一行。
+const SELECT_HISTORY_PAGE_BODY_SQL: &str =
+    "SELECT s.content FROM messages s WHERE s.thread_id = ?1 AND s.message_id = ?2 LIMIT 1";
+
+/// 自有**有效**条目的存储序键（`message_id → rowid`）：不读正文、不做全历史扫描。
+///
+/// 读取条件与有效视图一致（`excluded = 0`）：归档正文连行都不必返回，客户端要的只是
+/// 「这一条自有有效条目排在哪儿」（初始 load 回放的位置戳）。
+const SELECT_ACTIVE_ENTRY_POSITIONS_SQL: &str =
+    "SELECT m.message_id, m.rowid FROM messages m WHERE m.thread_id = ?1 AND m.excluded = 0
+    ORDER BY m.rowid ASC";
+
+// ─── 向前段读取（canonical 完整回放，REQ §5.3） ──────────────────────────────
+
+/// 段读取的边界事实：会话存在吗 + 本次回放的固定上界（该线程自有行的最大 `rowid`，
+/// 没有自有行时为 NULL）。
+///
+/// 与 [`SELECT_HISTORY_PAGE_BOUNDS_SQL`] 同形（`threads` 单行 + 子查询）：会话不存在时
+/// **没有行**（`NotFound`）。上界在这里读出来交给游标，行则由
+/// [`SELECT_HISTORY_SEGMENT_HEAD_SQL`] 在同一批次内再算一次 `MAX(rowid)` 作谓词——两条语句
+/// 落在同一个只读批次里，区间与行同源。
+const SELECT_HISTORY_SEGMENT_TAIL_SQL: &str = "SELECT
+        (SELECT MAX(m.rowid) FROM messages m WHERE m.thread_id = t.id)
+    FROM threads t WHERE t.id = ?1";
+
+/// 首段候选行（**阶段一**：身份 + 存储序键 + 正文长度），最多 `limit + 1` 行，**升序**
+/// （canonical 完整回放方向），**不取正文**。
+///
+/// 与非首段同形，只是去掉 `rowid > ?2`，并把上界交给同一条语句内的 `MAX(rowid)` 子查询：
+/// 首段的上界就是这一刻的最大 `rowid`，没有可以预先绑定的值（它由本次读取确定）。
+const SELECT_HISTORY_SEGMENT_HEAD_SQL: &str = "SELECT s.message_id, s.rowid,
+        length(CAST(s.content AS BLOB))
+    FROM messages s
+    WHERE s.thread_id = ?1 AND s.rowid <= (
+        SELECT MAX(m.rowid) FROM messages m WHERE m.thread_id = ?1)
+    ORDER BY s.rowid ASC LIMIT ?2";
+
+/// 锚点存在性 + 会话存在性（一次单行读取）：`rowid = ?2` 的那一行就是游标的 `after`。
+///
+/// `NULL` = 锚点已不在（游标失效）；一条行都没有 = 会话不存在（`NotFound`）。刻意不写
+/// `COALESCE(..., 0)` 这类兜底：锚点消失必须失败关闭，不能悄悄退化成一个从头开始的区间。
+const SELECT_HISTORY_SEGMENT_ANCHOR_SQL: &str = "SELECT
+        (SELECT m.rowid FROM messages m WHERE m.thread_id = t.id AND m.rowid = ?2)
+    FROM threads t WHERE t.id = ?1";
+
+/// 非首段候选行：`rowid > after` 且 `rowid <= tail`，升序，最多 `limit + 1` 行。
+///
+/// `tail` 是**数值**上界，不是一条要查回来的行：回放期间追加的行 `rowid > tail`，因此不进入
+/// 本次遍历；`tail` 那一行自己被删掉也不影响区间。
+const SELECT_HISTORY_SEGMENT_NEXT_SQL: &str = "SELECT s.message_id, s.rowid,
+        length(CAST(s.content AS BLOB))
+    FROM messages s
+    WHERE s.thread_id = ?1 AND s.rowid > ?2 AND s.rowid <= ?3
+    ORDER BY s.rowid ASC LIMIT ?4";
+
+/// 首段要放在最前面的继承区快照（`threads.inherited_context` 单行）：一列，与本地
+/// `INHERITED_CONTEXT_SQL` 说同一件事。
+///
+/// 不借会话事实行（`SELECT_SESSION_SQL`）来读它：那条语句还会拉上绑定四列与 frozen 正文，
+/// 而首段只要继承区 payload。
+const SELECT_INHERITED_CONTEXT_SQL: &str =
+    "SELECT s.inherited_context FROM threads s WHERE s.id = ?1";
+
+/// 有界 flags 读取的单条语句：`?1` 是会话、`?2` 是条目。
+///
+/// 范围由调用方给出的 id 集合决定（一条语句一个 id，同一批次读出），不做全历史扫描；
+/// 与全量 flags 视图同一规则：只返回非默认标记。
+const SELECT_MESSAGE_FLAGS_SQL: &str = "SELECT message_id, truncated, excluded, projection
+    FROM messages WHERE thread_id = ?1 AND message_id = ?2
+      AND (truncated = 1 OR excluded = 1 OR projection IS NOT NULL)";
+
 /// 沿父链上溯到的根（含自身即根的情形）；链上没有根时不返回行，由调用方判为事实不完整。
 const SELECT_ROOT_SQL: &str = "WITH RECURSIVE a AS (
     SELECT s.id, s.parent_thread_id FROM threads s WHERE s.id = ?1
@@ -216,6 +330,125 @@ pub(super) fn select_tree_statement(root: &str) -> StatementSpec {
 /// 自有 payload 行（按 canonical 插入序，即 `rowid`）。
 pub(super) fn select_messages_statement(id: &str) -> StatementSpec {
     StatementSpec::new(SELECT_MESSAGES_SQL, vec![Value::Text(id.to_owned())])
+}
+
+/// 有效范围的自有 payload 行（同一顺序，读取条件带未排除约束）。
+pub(super) fn select_active_messages_statement(id: &str) -> StatementSpec {
+    StatementSpec::new(SELECT_ACTIVE_MESSAGES_SQL, vec![Value::Text(id.to_owned())])
+}
+
+/// 分页读取的边界事实：`anchor` 为 `None` 时锚点列恒为 NULL（首屏）。
+pub(super) fn history_page_bounds_statement(id: &str, anchor: Option<&str>) -> StatementSpec {
+    StatementSpec::new(
+        SELECT_HISTORY_PAGE_BOUNDS_SQL,
+        vec![
+            Value::Text(id.to_owned()),
+            match anchor {
+                Some(anchor) => Value::Text(anchor.to_owned()),
+                None => Value::Null,
+            },
+        ],
+    )
+}
+
+/// 一页候选行（阶段一：身份 + 存储序键 + 正文长度）：`anchor` 为 `None` 时取最新
+/// `limit + 1` 行（只有首屏会这样调用）。
+pub(super) fn history_page_rows_statement(
+    id: &str,
+    anchor: Option<&str>,
+    limit: i64,
+) -> StatementSpec {
+    StatementSpec::new(
+        SELECT_HISTORY_PAGE_ROWS_SQL,
+        vec![
+            Value::Text(id.to_owned()),
+            match anchor {
+                Some(anchor) => Value::Text(anchor.to_owned()),
+                None => Value::Null,
+            },
+            Value::Integer(limit),
+        ],
+    )
+}
+
+/// 阶段二：一条语句取**一个**本页条目的正文（一条语句一个 id，调用方按同一批次一起发）。
+pub(super) fn history_page_body_statement(id: &str, message_id: &str) -> StatementSpec {
+    StatementSpec::new(
+        SELECT_HISTORY_PAGE_BODY_SQL,
+        vec![
+            Value::Text(id.to_owned()),
+            Value::Text(message_id.to_owned()),
+        ],
+    )
+}
+
+/// 自有有效条目的存储序键（一次有界读取，不读正文）。
+pub(super) fn active_entry_positions_statement(id: &str) -> StatementSpec {
+    StatementSpec::new(
+        SELECT_ACTIVE_ENTRY_POSITIONS_SQL,
+        vec![Value::Text(id.to_owned())],
+    )
+}
+
+/// 段读取的边界事实（会话存在吗 + 固定上界）。
+pub(super) fn history_segment_tail_statement(id: &str) -> StatementSpec {
+    StatementSpec::new(
+        SELECT_HISTORY_SEGMENT_TAIL_SQL,
+        vec![Value::Text(id.to_owned())],
+    )
+}
+
+/// 首段候选行（阶段一：身份 + 存储序键 + 正文长度，最多 `limit + 1` 行）。
+pub(super) fn history_segment_head_statement(id: &str, limit: i64) -> StatementSpec {
+    StatementSpec::new(
+        SELECT_HISTORY_SEGMENT_HEAD_SQL,
+        vec![Value::Text(id.to_owned()), Value::Integer(limit)],
+    )
+}
+
+/// 锚点存在性（游标的 `after` 行的 `rowid`；`NULL` = 已不在）。
+pub(super) fn history_segment_anchor_statement(id: &str, after: i64) -> StatementSpec {
+    StatementSpec::new(
+        SELECT_HISTORY_SEGMENT_ANCHOR_SQL,
+        vec![Value::Text(id.to_owned()), Value::Integer(after)],
+    )
+}
+
+/// 非首段候选行（`rowid > after AND rowid <= tail`，升序，最多 `limit + 1` 行）。
+pub(super) fn history_segment_next_statement(
+    id: &str,
+    after: i64,
+    tail: i64,
+    limit: i64,
+) -> StatementSpec {
+    StatementSpec::new(
+        SELECT_HISTORY_SEGMENT_NEXT_SQL,
+        vec![
+            Value::Text(id.to_owned()),
+            Value::Integer(after),
+            Value::Integer(tail),
+            Value::Integer(limit),
+        ],
+    )
+}
+
+/// 首段的继承区快照（单行一列）。
+pub(super) fn inherited_context_statement(id: &str) -> StatementSpec {
+    StatementSpec::new(
+        SELECT_INHERITED_CONTEXT_SQL,
+        vec![Value::Text(id.to_owned())],
+    )
+}
+
+/// 单个条目的 flags（有界读取的一条语句；调用方按 id 集合组成同一批次）。
+pub(super) fn select_message_flags_statement(id: &str, message_id: &str) -> StatementSpec {
+    StatementSpec::new(
+        SELECT_MESSAGE_FLAGS_SQL,
+        vec![
+            Value::Text(id.to_owned()),
+            Value::Text(message_id.to_owned()),
+        ],
+    )
 }
 
 /// 分页列举语句；scope 里的相对路径必须能作为文本绑定，否则拒绝（不猜路径相等，

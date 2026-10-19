@@ -46,8 +46,8 @@ use peri_acp_types::{
     mcp::McpSubscriptionPort,
     mcp_skills::McpSkillRegistry,
     ports::{
-        McpBuiltinWorkspaceState, McpOAuthStartDisposition, McpPoolShutdownReport,
-        McpServerConnectionStatus, McpServerInfo, McpServerOAuthStatus,
+        McpBuiltinWorkspaceState, McpOAuthStartDisposition, McpPoolShutdownReport, McpResourceInfo,
+        McpServerConnectionStatus, McpServerInfo, McpServerOAuthStatus, McpToolInfo,
     },
     session::InboxHandle,
     skills::SkillMetadata,
@@ -219,6 +219,9 @@ pub(crate) struct BuiltinContextSlot {
 pub(crate) const STDIO_CONNECT_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
 pub(crate) const HTTP_CONNECT_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
 pub(crate) const SHUTDOWN_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(5);
+/// Subscription handshakes are best-effort; a slow server must not block connection readiness.
+pub(crate) const SUBSCRIPTION_LISTEN_TIMEOUT: std::time::Duration =
+    std::time::Duration::from_secs(10);
 
 /// 有界重采集（M9，list→read TOCTOU）：首次采集失败后**只**重采集一次。
 ///

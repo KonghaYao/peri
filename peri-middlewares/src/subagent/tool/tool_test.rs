@@ -215,7 +215,8 @@ thread_local! {
 ///
 /// 目录投影（`resources/list`）与正文激活（`resources/read`）都走生产链路
 /// （`AgentFaceFixture`：真实 handler + 生产池句柄），不使用测试替身。
-pub(crate) async fn with_agent_face(tool: SubAgentTool, dir: &std::path::Path) -> SubAgentTool {
+pub(crate) async fn with_agent_face(mut tool: SubAgentTool, dir: &std::path::Path) -> SubAgentTool {
+    tool.parent_cwd = dir.to_string_lossy().into_owned();
     let fixture = crate::mcp::agent_face_fixture::AgentFaceFixture::connect(dir).await;
     let registry = std::sync::Arc::clone(&fixture.registry);
     AGENT_FACE_FIXTURES.with(|fixtures| fixtures.borrow_mut().push(fixture));
@@ -357,9 +358,8 @@ fn agent_suggestions_come_from_the_registry_catalog() {
 async fn invoke_resolves_agent_from_argument_cwd_before_starting_factory() {
     use std::sync::atomic::{AtomicUsize, Ordering};
 
-    // W5：Agent 定义来源是**会话绑定的资源面**（builtin `workspace` 实例），
-    // 调用参数 `cwd` 只影响子代理的执行目录，**不影响定义来源**。本用例保留
-    // 原有「失败不启动 factory」断言（锁 failed-before-spawn 顺序）。
+    // W5：Agent 定义来源是会话绑定的资源面；显式 cwd 只能是父目录的等价路径。
+    // 本用例保留「失败不启动 factory」断言（锁 failed-before-spawn 顺序）。
     let dir = tempdir().unwrap();
     let agents_dir = dir.path().join(".claude").join("agents");
     std::fs::create_dir_all(&agents_dir).unwrap();
@@ -391,7 +391,7 @@ async fn invoke_resolves_agent_from_argument_cwd_before_starting_factory() {
     );
     let cwd = dir.path().to_str().unwrap();
 
-    // 1) 资源面命中的定义：即使 `cwd` 参数指向别处也能解析（来源由会话绑定）。
+    // 1) 同 cwd 调用命中会话资源面的定义。
     let result = tool
         .invoke(
             serde_json::json!({
@@ -828,6 +828,8 @@ mod dynamic_mcp_subagent_test;
 mod events_contract_test;
 #[path = "tool_test/fork_test.rs"]
 mod fork_test;
+#[path = "tool_test/input_contract_test.rs"]
+mod input_contract_test;
 #[path = "tool_test/integration_v2_test.rs"]
 mod integration_v2_test;
 #[path = "tool_test/invoke_test.rs"]
@@ -840,6 +842,8 @@ mod mock_model;
 mod model_tier_test;
 #[path = "tool_test/resume_failure_test.rs"]
 mod resume_failure_test;
+#[path = "tool_test/resume_identity_test.rs"]
+mod resume_identity_test;
 #[path = "tool_test/resume_integration_test.rs"]
 mod resume_integration_test;
 #[path = "tool_test/resume_test.rs"]

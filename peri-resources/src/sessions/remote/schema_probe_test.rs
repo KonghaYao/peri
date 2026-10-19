@@ -17,7 +17,7 @@ use super::schema_upgrade::{
     GUARD_UNASSIGNED_THREADS_SQL,
 };
 use super::schema_upgrade_tests::{probed_shape, Fixture};
-use super::session_data::{open_step, probe_shape, OpenStep};
+use super::session_data::{open_step, probe_shape, verify_legacy_open_identity, OpenStep};
 use crate::sessions::canonical::{CREATE_INDEXES, CREATE_REBUILD_THREADS_TABLE_SQL};
 
 /// 批次形状：canonical 索引集在**末尾**一次性重放（版本推进之前），每条只出现一次；
@@ -117,7 +117,8 @@ async fn upgrade_guards_registrations_written_after_its_snapshot() {
     *fixture.transport.before_batch.lock().unwrap() = Some(
         "INSERT INTO workspaces (id, project_id, root, root_identity, discovery) VALUES
          ('22222222-2222-4222-8222-222222222222', 'project', '/concurrent', 'concurrent identity',
-          '{\"root\":\"/concurrent\",\"common_dir\":null,\"private_dir\":null}')",
+          '{\"root\":\"/concurrent\",\"common_dir\":null,\"private_dir\":null}')"
+            .to_owned(),
     );
     assert!(
         schema_upgrade::upgrade(&fixture.store(StoreAccess::ReadWrite), &fixture.snapshot)
@@ -248,6 +249,131 @@ async fn open_probe_refuses_a_current_store_with_drifted_threads() {
         error.kind(),
         SessionResourceErrorKind::Unsupported
     ));
+}
+
+/// [回归测试] 健康库的列与索引探测在一个远端只读批中完成；缺索引可单独补齐。
+#[tokio::test]
+async fn current_open_probe_batches_shape_and_repairs_missing_index() {
+    let fixture = Fixture::new().await;
+    schema_upgrade::upgrade(&fixture.store(StoreAccess::ReadWrite), &fixture.snapshot)
+        .await
+        .unwrap();
+    let store = fixture.store(StoreAccess::ReadWrite);
+    let read = store.read_identity().await.unwrap();
+    let before = fixture.transport.read_batches.load(Ordering::SeqCst);
+    assert_eq!(
+        probe_shape(&store, &read).await.unwrap(),
+        Some(StoreShapeRead::Consistent)
+    );
+    assert_eq!(
+        fixture.transport.read_batches.load(Ordering::SeqCst) - before,
+        1
+    );
+
+    sqlx::query("DROP INDEX idx_messages_thread_id")
+        .execute(&fixture.transport.pool)
+        .await
+        .unwrap();
+    assert_eq!(
+        probe_shape(&store, &read).await.unwrap(),
+        Some(StoreShapeRead::NeedsCurrentRepair {
+            missing_indexes: true,
+            missing_close_intents: false,
+        })
+    );
+    store
+        .apply_schema(super::session_schema::repair_plan(true, false))
+        .await
+        .unwrap();
+    assert_eq!(
+        probe_shape(&store, &read).await.unwrap(),
+        Some(StoreShapeRead::Consistent)
+    );
+}
+
+/// [回归测试] 可选关闭意图表在写打开时必须补齐，不可被健康判定跳过。
+#[tokio::test]
+async fn current_open_probe_repairs_missing_close_intents_only() {
+    let fixture = Fixture::new().await;
+    schema_upgrade::upgrade(&fixture.store(StoreAccess::ReadWrite), &fixture.snapshot)
+        .await
+        .unwrap();
+    sqlx::query("DROP TABLE session_close_intents")
+        .execute(&fixture.transport.pool)
+        .await
+        .unwrap();
+    sqlx::query("DROP TABLE mcp_oauth_credentials")
+        .execute(&fixture.transport.pool)
+        .await
+        .unwrap();
+    let store = fixture.store(StoreAccess::ReadWrite);
+    let read = store.read_identity().await.unwrap();
+    assert_eq!(
+        probe_shape(&store, &read).await.unwrap(),
+        Some(StoreShapeRead::NeedsCurrentRepair {
+            missing_indexes: false,
+            missing_close_intents: true,
+        })
+    );
+    store
+        .apply_schema(super::session_schema::repair_plan(false, true))
+        .await
+        .unwrap();
+    assert_eq!(
+        probe_shape(&store, &read).await.unwrap(),
+        Some(StoreShapeRead::Consistent)
+    );
+    assert_eq!(
+        fixture
+            .count(
+                "SELECT COUNT(*) FROM sqlite_master WHERE name = 'mcp_oauth_credentials'"
+                    .to_owned()
+            )
+            .await,
+        0,
+        "凭证能力缺表不应被启动修复悄悄创建"
+    );
+}
+
+/// [回归测试] 同名异形索引不可被当作健康库，也不能靠 IF NOT EXISTS 假装修复。
+#[tokio::test]
+async fn current_open_probe_refuses_wrong_index_definition() {
+    let fixture = Fixture::new().await;
+    schema_upgrade::upgrade(&fixture.store(StoreAccess::ReadWrite), &fixture.snapshot)
+        .await
+        .unwrap();
+    sqlx::raw_sql(
+        "DROP INDEX idx_messages_thread_id;
+         CREATE INDEX idx_messages_thread_id ON messages(role)",
+    )
+    .execute(&fixture.transport.pool)
+    .await
+    .unwrap();
+    let store = fixture.store(StoreAccess::ReadWrite);
+    let read = store.read_identity().await.unwrap();
+    let shape = probe_shape(&store, &read).await.unwrap();
+    assert!(
+        matches!(&shape, Some(StoreShapeRead::Drifted(detail)) if detail.contains("idx_messages_thread_id")),
+        "{shape:?}"
+    );
+    assert!(open_step(read, shape, StoreAccess::ReadWrite).is_err());
+}
+
+/// [回归测试] 只读 v2 打开期间被另一实例升级后，旧版读法不得交付。
+#[tokio::test]
+async fn read_only_legacy_open_refuses_concurrent_upgrade() {
+    let fixture = Fixture::new().await;
+    let read_only = fixture.store(StoreAccess::ReadOnly);
+    let initial = read_only.read_identity().await.unwrap();
+    assert_eq!(
+        probe_shape(&read_only, &initial).await.unwrap(),
+        Some(StoreShapeRead::Consistent)
+    );
+    schema_upgrade::upgrade(&fixture.store(StoreAccess::ReadWrite), &fixture.snapshot)
+        .await
+        .unwrap();
+    let final_read = read_only.read_identity().await.unwrap();
+    assert!(verify_legacy_open_identity(&initial, &final_read).is_err());
 }
 
 /// 身份先于会话表建立的库（只有 meta 与账本）：探测结论是「形状还没建立」——不是漂移。

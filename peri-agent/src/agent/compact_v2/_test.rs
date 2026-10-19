@@ -67,6 +67,7 @@ async fn test_run_compact_low_budget_skips() {
         false,
         &mut failures,
         "/tmp",
+        None,
     )
     .await;
     assert_eq!(result.affected_count, 0, "低预算应跳过");
@@ -94,6 +95,7 @@ async fn test_run_compact_micro_threshold() {
         false,
         &mut failures,
         "/tmp",
+        None,
     )
     .await;
     assert_eq!(result.strategy, CompactStrategy::Micro);
@@ -118,6 +120,7 @@ async fn test_run_compact_full_no_llm_fails_gracefully() {
         true,
         &mut failures,
         "/tmp",
+        None,
     )
     .await;
     assert_eq!(result.strategy, CompactStrategy::Full);
@@ -141,6 +144,7 @@ async fn test_run_compact_consecutive_failure_degradation() {
         true,
         &mut failures,
         "/tmp",
+        None,
     )
     .await;
     assert_eq!(result.affected_count, 0, "连续失败超限应跳过");
@@ -167,6 +171,7 @@ async fn test_run_compact_micro_resets_failures() {
         false,
         &mut failures,
         "/tmp",
+        None,
     )
     .await;
     assert_eq!(result.strategy, CompactStrategy::Micro);
@@ -198,6 +203,7 @@ async fn test_run_compact_rerun_clears_stale_excluded_flags() {
         true,
         &mut failures,
         "/tmp",
+        None,
     )
     .await;
 
@@ -235,6 +241,7 @@ async fn test_run_compact_first_run_does_not_clear_flags() {
         true,
         &mut failures,
         "/tmp",
+        None,
     )
     .await;
 
@@ -267,6 +274,7 @@ async fn test_run_compact_rerun_only_clears_excluded_not_truncated() {
         true,
         &mut failures,
         "/tmp",
+        None,
     )
     .await;
 
@@ -309,6 +317,7 @@ async fn test_compact_result_economy_fields_populated() {
         false,
         &mut failures,
         "/tmp",
+        None,
     )
     .await;
 
@@ -341,6 +350,7 @@ async fn test_full_compact_escalation_reason_preserved() {
         true,
         &mut failures,
         "/tmp",
+        None,
     )
     .await;
 
@@ -430,6 +440,7 @@ async fn test_run_compact_preserves_ancestor_flags_after_micro() {
         false,
         &mut failures,
         "/tmp",
+        None,
     )
     .await;
 

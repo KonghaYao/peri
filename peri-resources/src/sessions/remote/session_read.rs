@@ -12,22 +12,28 @@
 use std::collections::HashMap;
 use std::path::PathBuf;
 
+use peri_acp_types::history_page::{
+    message_id_of, resolve_browsing_range, HistoryCursor, HistoryCursorError, HistoryForwardCursor,
+    HistoryPage, HistoryPageBounds, HistoryPageCandidate, HistoryPagePlan, HistoryPageRow,
+    HistorySegment, HistorySegmentPlan,
+};
 use peri_acp_types::messages::MessageId;
 use peri_acp_types::session_resources::{
-    BindingState, FrozenSnapshotBytes, FrozenState, SessionResourceResult, SessionSnapshot,
+    ActiveSessionSnapshot, BindingState, FrozenSnapshotBytes, FrozenState, SessionResourceResult,
+    SessionSnapshot,
 };
-use peri_acp_types::store::{MessageFlags, PersistedPayload};
+use peri_acp_types::store::{InheritedContext, MessageFlags, PersistedPayload};
 use peri_acp_types::thread::{ThreadId, ThreadListEntry, ThreadMeta};
 use peri_acp_types::workspace::{
     ScopedThreadEntry, ScopedThreadPage, ScopedThreadQuery, SessionBinding, ThreadListCursor,
 };
 use turso_serverless::Value;
 
-use super::mutation::sole_row;
+use super::mutation::{incomplete_reply, sole_row};
 use super::session_codec as codec;
 use super::session_data::{not_found, RemoteSessionData};
 use super::session_sql::{self, PAGE_BINDING_VERSION};
-use super::sql::text_at;
+use super::sql::{int_at, text_at};
 
 impl RemoteSessionData {
     /// 一致读取：会话事实行与自有 payload 在同一只读事务里取出。
@@ -43,23 +49,77 @@ impl RemoteSessionData {
             )
             .await?;
         let facts = sole_row(facts)?.ok_or_else(not_found)?;
-        let meta = codec::decode_meta(&facts)?;
-        let binding = codec::decode_binding(&facts, session_sql::FACT_BINDING_VERSION)?;
-        let frozen = match text_at(&facts, session_sql::FACT_FROZEN) {
-            Some(bytes) => FrozenState::Present(FrozenSnapshotBytes::new(bytes)),
-            // 远端没有 legacy 历史：没有快照就是没有，不猜来源。
-            None => FrozenState::LegacyAbsent,
-        };
-        let inherited = codec::decode_inherited(text_at(&facts, session_sql::FACT_INHERITED))?;
+        let facts = decode_session_facts(&facts)?;
         let (payloads, flags) = decode_history(&messages)?;
         Ok(SessionSnapshot {
-            meta,
-            binding: classify_binding(binding, &facts),
-            frozen,
+            meta: facts.meta,
+            binding: facts.binding,
+            frozen: facts.frozen,
             payloads,
             flags,
-            inherited,
+            inherited: facts.inherited,
         })
+    }
+
+    /// 一致读取有效视图：与 [`Self::read_snapshot`] 同一次读取，但自有 payload 的读取
+    /// 条件带 `excluded = 0`——已排除正文不出库，也不在这里二次过滤。
+    pub(super) async fn read_active_snapshot(
+        &self,
+        id: &ThreadId,
+    ) -> SessionResourceResult<ActiveSessionSnapshot> {
+        let store = self.store().await?;
+        let (facts, messages) = store
+            .read_pair(
+                session_sql::select_session_statement(id),
+                session_sql::select_active_messages_statement(id),
+            )
+            .await?;
+        let facts = sole_row(facts)?.ok_or_else(not_found)?;
+        let facts = decode_session_facts(&facts)?;
+        let (payloads, flags) = decode_history(&messages)?;
+        Ok(ActiveSessionSnapshot {
+            meta: facts.meta,
+            binding: facts.binding,
+            frozen: facts.frozen,
+            inherited: facts.inherited,
+            payloads,
+            flags,
+        })
+    }
+
+    /// 有界 flags 读取：只问给定的 id（一条语句一个 id，同一批次读出），
+    /// 不做全历史扫描。回复形状不完整在 [`super::mutation::RemoteStore::read_batch`]
+    /// 处已经是错误；行内 ID 与请求 ID 不一致同样按损坏失败。
+    pub(super) async fn read_message_flags(
+        &self,
+        id: &ThreadId,
+        ids: &[MessageId],
+    ) -> SessionResourceResult<HashMap<MessageId, MessageFlags>> {
+        if ids.is_empty() {
+            return Ok(HashMap::new());
+        }
+        let store = self.store().await?;
+        let statements = ids
+            .iter()
+            .map(|message_id| {
+                session_sql::select_message_flags_statement(
+                    id.as_str(),
+                    &message_id.as_uuid().to_string(),
+                )
+            })
+            .collect();
+        let results = store.read_batch(statements).await?;
+        let mut flags = HashMap::new();
+        for (requested, rows) in ids.iter().zip(results) {
+            for row in &rows {
+                let (row_id, row_flags) = codec::decode_flag_row(row)?;
+                if row_id != *requested {
+                    return Err(codec::corrupt("message flags row does not match its id"));
+                }
+                flags.insert(row_id, row_flags);
+            }
+        }
+        Ok(flags)
     }
 
     /// 轻量绑定分类（只读会话事实行，不加载历史）。
@@ -97,7 +157,248 @@ impl RemoteSessionData {
         Ok(payloads)
     }
 
-    /// 小型 metadata 投影（不含 frozen/继承区正文）。
+    /// 有界读取一页历史（更早方向），分两阶段：
+    ///
+    /// 1. 边界事实 + 候选行（身份 + 存储序键 + 正文长度，最多 `limit + 1` 行）走**同一次**
+    ///    一致读取（`read_batch` 已保证结果集数量与请求一致，回复不完整即错误）。
+    /// 2. 正文只按 [`HistoryPagePlan::body_ids`] 取：一条语句一个 id，同一批次读出，
+    ///    因此多读的那一条候选行的正文**永不出库**（REQ-H03）。
+    ///
+    /// 阶段二单独一批是执行器的形状决定的：批次内的语句必须在发出请求**之前**就定好，
+    /// 拿不到阶段一的输出。两阶段的固定范围由游标锚点（keyset）与**按 id 取值**保证：
+    /// 阶段二只问「本页那些 id」，追加上来的行不影响它，被并发删掉/换掉的行在
+    /// [`decode_page_bodies`] 处失败关闭，不会悄悄变成另一页。
+    ///
+    /// 与 SQLite adapter 共用同一份页规则（[`HistoryPagePlan`]），差别只有执行器。
+    pub(super) async fn read_history_page(
+        &self,
+        id: &ThreadId,
+        cursor: Option<&HistoryCursor>,
+        limit: usize,
+        byte_budget: usize,
+    ) -> SessionResourceResult<HistoryPage> {
+        if let Some(cursor) = cursor {
+            if cursor.thread_id != *id {
+                return Err(HistoryCursorError::CrossSession {
+                    expected: id.clone(),
+                    cursor: cursor.thread_id.clone(),
+                }
+                .into());
+            }
+        }
+        let anchor = cursor.map(|cursor| cursor.anchor.as_uuid().to_string());
+        let store = self.store().await?;
+        let mut batches = store
+            .read_batch(vec![
+                session_sql::history_page_bounds_statement(id.as_str(), anchor.as_deref()),
+                session_sql::history_page_rows_statement(
+                    id.as_str(),
+                    anchor.as_deref(),
+                    limit.saturating_add(1) as i64,
+                ),
+            ])
+            .await?
+            .into_iter();
+        let bounds = batches
+            .next()
+            .ok_or_else(|| incomplete_reply("expected 2 result sets, got 1"))?;
+        let rows = batches
+            .next()
+            .ok_or_else(|| incomplete_reply("expected 2 result sets, got 1"))?;
+        // 会话不存在：边界语句一行都没有（与只读快照同一分类）。
+        let bounds = sole_row(bounds)?.ok_or_else(not_found)?;
+        // 锚点行在不在：rowid 只作存在性判据，游标身份始终是 message_id（游标身份规则见
+        // [`resolve_browsing_range`]）。
+        let (range_head, anchor_present) = decode_page_bounds(&bounds);
+        let range_token = resolve_browsing_range(cursor, range_head, anchor_present)?;
+        let candidates = rows
+            .iter()
+            .map(|row| decode_page_row(row))
+            .collect::<SessionResourceResult<Vec<_>>>()?;
+        let plan = HistoryPagePlan::plan(id, &range_token, candidates, limit, byte_budget);
+        let body_ids = plan.body_ids();
+        if body_ids.is_empty() {
+            // 本页没有要推进的行（空会话或 limit 为 0）：阶段二没有可问的 id，
+            // 不发空批次（空批次会被执行器当作形状不符）。
+            return plan.materialize(Vec::new());
+        }
+        let statements = body_ids
+            .iter()
+            .map(|message_id| {
+                session_sql::history_page_body_statement(
+                    id.as_str(),
+                    &message_id.as_uuid().to_string(),
+                )
+            })
+            .collect();
+        let bodies = store.read_batch(statements).await?;
+        let rows = decode_page_bodies(&body_ids, bodies)?;
+        plan.materialize(rows)
+    }
+
+    /// 有界读取**一段** canonical 完整历史（向前方向），分两阶段：
+    ///
+    /// 1. 边界事实 + 候选行（身份 + 存储序键 + 正文长度，最多 `limit + 1` 行，**升序**）
+    ///    走**同一次**一致读取（`read_batch` 已保证结果集数量与请求一致，回复不完整即错误）；
+    ///    首段还要多读一列继承区快照——它与上界、候选行同批，因此是同一个快照。
+    /// 2. 正文只按 [`HistorySegmentPlan::body_ids`] 取：一条语句一个 id，同一批次读出，
+    ///    因此多读的那一条候选行的正文**永不出库**。
+    ///
+    /// 游标（`after`/`tail`）是**数值**存储序键：两个后端绑定同一份语句文本，坏游标在发请求
+    /// 之前就失败（形式校验见 [`HistoryForwardCursor::rowid_bounds`]），不会把文本形式的键
+    /// 送进 SQL 变成一次没有意义的比较。
+    ///
+    /// 锚点行不在了即 `Expired`（锚点列只有存在性判据的用途）：不回退成首段，也不用空段
+    /// 冒充回放结束。与 SQLite adapter 共用同一份段规则（[`HistorySegmentPlan`]），差别只有
+    /// 执行器。
+    pub(super) async fn read_history_segment(
+        &self,
+        id: &ThreadId,
+        cursor: Option<&HistoryForwardCursor>,
+        limit: usize,
+        byte_budget: usize,
+    ) -> SessionResourceResult<HistorySegment> {
+        let bounds = cursor.map(HistoryForwardCursor::rowid_bounds).transpose()?;
+        let store = self.store().await?;
+        let (inherited, tail, candidates) = match bounds {
+            None => {
+                let mut batches = store
+                    .read_batch(vec![
+                        session_sql::history_segment_tail_statement(id.as_str()),
+                        session_sql::history_segment_head_statement(
+                            id.as_str(),
+                            limit.saturating_add(1) as i64,
+                        ),
+                        session_sql::inherited_context_statement(id.as_str()),
+                    ])
+                    .await?
+                    .into_iter();
+                let tail = batches
+                    .next()
+                    .ok_or_else(|| incomplete_reply("expected 3 result sets, got 2"))?;
+                let rows = batches
+                    .next()
+                    .ok_or_else(|| incomplete_reply("expected 3 result sets, got 2"))?;
+                let inherited = batches
+                    .next()
+                    .ok_or_else(|| incomplete_reply("expected 3 result sets, got 2"))?;
+                // 会话不存在：边界语句一行都没有（与只读快照同一分类）。
+                let tail = sole_row(tail)?.ok_or_else(not_found)?;
+                let tail = int_at(&tail, 0);
+                let inherited = sole_row(inherited)?.ok_or_else(not_found)?;
+                let inherited = codec::decode_inherited(text_at(&inherited, 0))?.payloads;
+                let candidates = rows
+                    .iter()
+                    .map(|row| decode_page_row(row))
+                    .collect::<SessionResourceResult<Vec<_>>>()?;
+                (inherited, tail, candidates)
+            }
+            Some((after, tail)) => {
+                let mut batches = store
+                    .read_batch(vec![
+                        session_sql::history_segment_anchor_statement(id.as_str(), after),
+                        session_sql::history_segment_next_statement(
+                            id.as_str(),
+                            after,
+                            tail,
+                            limit.saturating_add(1) as i64,
+                        ),
+                    ])
+                    .await?
+                    .into_iter();
+                let anchor = batches
+                    .next()
+                    .ok_or_else(|| incomplete_reply("expected 2 result sets, got 1"))?;
+                let rows = batches
+                    .next()
+                    .ok_or_else(|| incomplete_reply("expected 2 result sets, got 1"))?;
+                let anchor = sole_row(anchor)?.ok_or_else(not_found)?;
+                if int_at(&anchor, 0).is_none() {
+                    return Err(HistoryCursorError::Expired {
+                        thread_id: id.clone(),
+                    }
+                    .into());
+                }
+                let candidates = rows
+                    .iter()
+                    .map(|row| decode_page_row(row))
+                    .collect::<SessionResourceResult<Vec<_>>>()?;
+                (Vec::new(), Some(tail), candidates)
+            }
+        };
+        let plan = HistorySegmentPlan::plan(candidates, limit, byte_budget);
+        let body_ids = plan.body_ids();
+        if body_ids.is_empty() {
+            // 本段没有要推进的行（空会话或 limit 为 0）：阶段二没有可问的 id，
+            // 不发空批次（空批次会被执行器当作形状不符）。
+            return plan.materialize(
+                inherited,
+                tail.map(|tail| tail.to_string()).as_deref(),
+                Vec::new(),
+            );
+        }
+        let statements = body_ids
+            .iter()
+            .map(|message_id| {
+                session_sql::history_page_body_statement(
+                    id.as_str(),
+                    &message_id.as_uuid().to_string(),
+                )
+            })
+            .collect();
+        let bodies = store.read_batch(statements).await?;
+        let rows = decode_page_bodies(&body_ids, bodies)?;
+        plan.materialize(
+            inherited,
+            tail.map(|tail| tail.to_string()).as_deref(),
+            rows,
+        )
+    }
+
+    /// 一次有界单行读取：浏览范围边界（见 [`HistoryPageBounds`]）。
+    ///
+    /// 与 [`Self::read_history_page`] 共用同一条边界语句与同一份解码
+    /// （[`decode_page_bounds`]）：「有没有更早内容」与页读取的起点在远端只有一份口径。
+    /// 会话不存在时边界语句没有行（`NotFound`）；回复出现多行是**不完整回复**，不是「取第一行」。
+    pub(super) async fn read_history_page_bounds(
+        &self,
+        id: &ThreadId,
+    ) -> SessionResourceResult<HistoryPageBounds> {
+        let store = self.store().await?;
+        // 锚点这一档固定为空：调用方还没有游标，也不在这里模拟一次带锚点的读取。
+        let bounds = store
+            .fetch_rows(&session_sql::history_page_bounds_statement(
+                id.as_str(),
+                None,
+            ))
+            .await?;
+        let bounds = sole_row(bounds)?.ok_or_else(not_found)?;
+        let (range_head, _) = decode_page_bounds(&bounds);
+        HistoryPageBounds::new(range_head.as_deref())
+    }
+
+    /// 自有**有效**条目的存储序键（`message_id → rowid`）：一次有界读取，**不读正文**。
+    ///
+    /// 只服务初始 load 回放的位置戳（REQ-H01-3）：读取条件与有效视图一致（`excluded = 0`），
+    /// 归档正文不会进入内存。会话不存在（没有行）与「会话没有自有条目」在存储上同形，
+    /// 这里不区分——调用方（回放）只按 id 查表，两种情形都表现为「没有位置」。
+    pub(super) async fn read_active_entry_positions(
+        &self,
+        id: &ThreadId,
+    ) -> SessionResourceResult<HashMap<MessageId, u64>> {
+        let store = self.store().await?;
+        let rows = store
+            .fetch_rows(&session_sql::active_entry_positions_statement(id.as_str()))
+            .await?;
+        let mut positions = HashMap::with_capacity(rows.len());
+        for row in &rows {
+            let (message_id, position) = decode_entry_position(row)?;
+            positions.insert(message_id, position);
+        }
+        Ok(positions)
+    }
+
+    /// 轻量 metadata 投影（不含 frozen/继承区正文）。
     pub(super) async fn read_meta(&self, id: &ThreadId) -> SessionResourceResult<ThreadMeta> {
         let store = self.store().await?;
         let row = store
@@ -242,6 +543,31 @@ impl RemoteSessionData {
     }
 }
 
+/// 会话事实行 → 快照里的非历史部分。
+struct SessionFacts {
+    meta: ThreadMeta,
+    binding: BindingState,
+    frozen: FrozenState,
+    inherited: InheritedContext,
+}
+
+/// 事实行的唯一解码口：完整快照与有效视图用同一份解读，避免两条读路径漂移。
+fn decode_session_facts(facts: &[Value]) -> SessionResourceResult<SessionFacts> {
+    Ok(SessionFacts {
+        meta: codec::decode_meta(facts)?,
+        binding: {
+            let binding = codec::decode_binding(facts, session_sql::FACT_BINDING_VERSION)?;
+            classify_binding(binding, facts)
+        },
+        frozen: match text_at(facts, session_sql::FACT_FROZEN) {
+            Some(bytes) => FrozenState::Present(FrozenSnapshotBytes::new(bytes)),
+            // 远端没有 legacy 历史：没有快照就是没有，不猜来源。
+            None => FrozenState::LegacyAbsent,
+        },
+        inherited: codec::decode_inherited(text_at(facts, session_sql::FACT_INHERITED))?,
+    })
+}
+
 /// 消息行 → payload + 非默认 flags（flags 是派生视图，默认值不入映射）。
 fn decode_history(
     rows: &[Vec<Value>],
@@ -257,6 +583,64 @@ fn decode_history(
         payloads.push(payload);
     }
     Ok((payloads, flags))
+}
+
+/// 一页候选行：`(message_id, content)` 两列，形状不符或缺列即损坏
+/// （不猜、不用默认值顶替，也不静默丢行）。
+/// 阶段一候选行的解码（**唯一**一处）：身份 + 存储序键 + 正文长度。
+///
+/// 三列都必须存在：少一列即回复形状不符——用默认值兜底会把「少读了一列」变成
+/// 「这一页的长度未知」，页预算就失去了依据。
+fn decode_page_row(row: &[Value]) -> SessionResourceResult<HistoryPageCandidate> {
+    let message_id = text_at(row, 0).ok_or_else(|| codec::corrupt("history page row has no id"))?;
+    let position =
+        int_at(row, 1).ok_or_else(|| codec::corrupt("history page row has no position"))?;
+    let encoded_bytes =
+        int_at(row, 2).ok_or_else(|| codec::corrupt("history page row has no length"))?;
+    HistoryPageCandidate::new(message_id, position, encoded_bytes)
+}
+
+/// 阶段二正文回复的解码：请求了几个 id 就要**恰好**几行，且行内正文与原 id 对应。
+///
+/// 一个 id 一行。`read_batch` 已在出口校验结果集数量；这里仍逐段核对「恰好一行」：少一行
+/// 可能是并发删除，多一行意味着语句没有按 id 收敛。两者都不能降级成短页或取第一行。
+fn decode_page_bodies(
+    ids: &[MessageId],
+    bodies: Vec<Vec<Vec<Value>>>,
+) -> SessionResourceResult<Vec<HistoryPageRow>> {
+    let mut rows = Vec::with_capacity(ids.len());
+    for (message_id, batch) in ids.iter().zip(bodies) {
+        let content =
+            sole_row(batch)?.ok_or_else(|| codec::corrupt("history page body is missing"))?;
+        let content = text_at(&content, 0)
+            .ok_or_else(|| codec::corrupt("history page body has no content"))?;
+        rows.push(HistoryPageRow::new(
+            &message_id.as_uuid().to_string(),
+            content.to_owned(),
+        )?);
+    }
+    Ok(rows)
+}
+
+/// 存储序键一行的解码：id + `rowid` 两列都必须存在（少一列即回复形状不符）。
+fn decode_entry_position(row: &[Value]) -> SessionResourceResult<(MessageId, u64)> {
+    let message_id = text_at(row, 0).ok_or_else(|| codec::corrupt("history row has no id"))?;
+    let position = int_at(row, 1).ok_or_else(|| codec::corrupt("history row has no position"))?;
+    Ok((
+        message_id_of(message_id)?,
+        u64::try_from(position).map_err(|_| codec::corrupt("history row position is negative"))?,
+    ))
+}
+
+/// 边界事实的解码（**唯一**一处）：浏览范围起点文本 + 锚点行存在性。
+///
+/// 页读取与边界读取共用它，两条路径不会各自解释一次边界行。锚点列只是存在性判据：
+/// 缺失即 `false`，由调用方按游标规则判 `Expired`。
+fn decode_page_bounds(bounds: &[Value]) -> (Option<String>, bool) {
+    (
+        text_at(bounds, 0).map(str::to_owned),
+        int_at(bounds, 1).is_some(),
+    )
 }
 
 /// 绑定列 + 父关系 → 绑定分类。

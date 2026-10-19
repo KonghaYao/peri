@@ -31,20 +31,36 @@ mod diff_grouping_test;
 mod fold_test;
 #[path = "acp_events_test/group_incremental_test.rs"]
 mod group_incremental_test;
+#[path = "acp_events_test/history_page_test.rs"]
+mod history_page_test;
 #[path = "acp_events_test/history_runtime_test.rs"]
 mod history_runtime_test;
+#[path = "acp_events_test/history_window_commit_test.rs"]
+mod history_window_commit_test;
+#[path = "acp_events_test/history_window_page_test.rs"]
+mod history_window_page_test;
+#[path = "acp_events_test/history_window_release_test.rs"]
+mod history_window_release_test;
 #[path = "acp_events_test/input_buffer_test.rs"]
 mod input_buffer_test;
 #[path = "acp_events_test/interaction_test.rs"]
 mod interaction_test;
 #[path = "acp_events_test/legacy_group_probe_test.rs"]
 mod legacy_group_probe_test;
+#[path = "acp_events_test/memory_probe_test.rs"]
+mod memory_probe_test;
+#[path = "acp_events_test/pending_tool_ends_test.rs"]
+mod pending_tool_ends_test;
 #[path = "acp_events_test/perf_probe_test.rs"]
 mod perf_probe_test;
+#[path = "acp_events_test/render_cache_invalidation_test.rs"]
+mod render_cache_invalidation_test;
 #[path = "acp_events_test/session_events_test.rs"]
 mod session_events_test;
 #[path = "acp_events_test/snapshot_test.rs"]
 mod snapshot_test;
+#[path = "acp_events_test/steer_boundary_test.rs"]
+mod steer_boundary_test;
 #[path = "acp_events_test/steer_test.rs"]
 mod steer_test;
 #[path = "acp_events_test/streaming_test.rs"]
@@ -87,7 +103,7 @@ fn ensure_cache_warning_enabled_for_tests() {
 }
 
 // 此 fixture 会清空全局 TODO_ITEMS / VIEW_MODELS 等 atom，调用测试必须使用 #[serial]。
-fn make_fold_test_state() -> BridgeState {
+pub(crate) fn make_fold_test_state() -> BridgeState {
     crate::kit::atoms::init_atoms();
     ensure_cache_warning_enabled_for_tests();
     *FOLD_OVERRIDES.state().write() = std::collections::HashMap::new();
@@ -115,6 +131,7 @@ fn make_fold_test_state() -> BridgeState {
         pending_cache_usage: None,
         publication_intent: Default::default(),
         folded_history: Default::default(),
+        window: Default::default(),
     }
 }
 

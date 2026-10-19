@@ -15,6 +15,7 @@ use peri_acp_types::{
     event::BackgroundTaskResult,
     tasks::{BgShellHandle, BgTaskKind, OnBgCompleteFn, TaskManager, TaskShutdownReport},
 };
+use peri_agent::agent::async_tasks::BackgroundRegistryError;
 use rmcp::{
     model::{
         CallToolResult, ContentBlock, DetailedTask, GetTaskResult, Task, TaskPayload, TaskStatus,
@@ -314,8 +315,8 @@ impl ShellTasks {
             manager.spawn_shell(command, cwd, timeout_ms, Some(callback))
         })
         .await
-        .map_err(|_| McpError::internal_error("shell task launch failed", None))?
-        .map_err(|_| McpError::internal_error("shell task launch failed", None))?;
+        .map_err(shell_launch_worker_error)?
+        .map_err(shell_launch_registration_error)?;
         let now = peri_time::now_utc_rfc3339();
         let mut record = DetailedTask::new(
             Task::new(&handle.task_id, TaskStatus::Working, &now, &now)
@@ -629,6 +630,104 @@ impl ShellTasks {
     pub(crate) async fn shutdown(&self) -> TaskShutdownReport {
         self.manager.shutdown().await
     }
+}
+
+/// 后台 shell 启动失败分类。
+///
+/// 执行环境的自由文本错误可能包含命令、环境变量或 panic payload。
+/// 模型响应与此处 tracing 均只使用结构化分类，不重复输出这些原始内容。
+enum ShellLaunchFailure {
+    WorkerPanicked,
+    WorkerCancelled,
+    WorkerStopped,
+    ConcurrentLimit {
+        kind: String,
+        current: usize,
+        limit: usize,
+    },
+    Unclassified,
+}
+
+impl ShellLaunchFailure {
+    fn of_join_error(error: &tokio::task::JoinError) -> Self {
+        if error.is_panic() {
+            Self::WorkerPanicked
+        } else if error.is_cancelled() {
+            Self::WorkerCancelled
+        } else {
+            Self::WorkerStopped
+        }
+    }
+
+    /// `KindConcurrentLimit` is the only launch error with structural
+    /// backpressure facts today; other variants stay opaque rather than having
+    /// their free-form fields echoed to the model.
+    fn of_registration_error(error: &(dyn std::error::Error + Send + Sync + 'static)) -> Self {
+        match error.downcast_ref::<BackgroundRegistryError>() {
+            Some(BackgroundRegistryError::KindConcurrentLimit {
+                kind,
+                current,
+                limit,
+            }) => Self::ConcurrentLimit {
+                kind: kind.clone(),
+                current: *current,
+                limit: *limit,
+            },
+            _ => Self::Unclassified,
+        }
+    }
+
+    fn class(&self) -> &'static str {
+        match self {
+            Self::WorkerPanicked => "worker_panicked",
+            Self::WorkerCancelled => "worker_cancelled",
+            Self::WorkerStopped => "worker_stopped",
+            Self::ConcurrentLimit { .. } => "concurrent_limit",
+            Self::Unclassified => "unclassified",
+        }
+    }
+
+    fn message(&self) -> String {
+        match self {
+            Self::WorkerPanicked => {
+                "background shell task launch worker panicked before registration".to_owned()
+            }
+            Self::WorkerCancelled => {
+                "background shell task launch worker was cancelled before registration".to_owned()
+            }
+            Self::WorkerStopped => {
+                "background shell task launch worker stopped before registration".to_owned()
+            }
+            Self::ConcurrentLimit {
+                kind,
+                current,
+                limit,
+            } => format!(
+                "background shell concurrency limit reached ({kind} {current}/{limit}); cancel a running background shell task or wait for one to finish before retrying"
+            ),
+            Self::Unclassified => {
+                "background shell task could not be started; failure class: unclassified".to_owned()
+            }
+        }
+    }
+}
+
+fn shell_launch_worker_error(error: tokio::task::JoinError) -> McpError {
+    let failure = ShellLaunchFailure::of_join_error(&error);
+    tracing::error!(
+        failure_class = failure.class(),
+        "background shell launch worker did not return"
+    );
+    McpError::internal_error(failure.message(), None)
+}
+
+fn shell_launch_registration_error(error: Box<dyn std::error::Error + Send + Sync>) -> McpError {
+    let failure = ShellLaunchFailure::of_registration_error(error.as_ref());
+    tracing::error!(
+        failure_class = failure.class(),
+        "background shell task launch failed before registration"
+    );
+    McpError::internal_error(failure.message(), None)
 }
 
 pub(crate) struct ScopeAdmission {

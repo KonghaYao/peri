@@ -56,10 +56,11 @@ test("caller mutation cannot alter inline or external payloads after projection"
     docs.destroy();
 });
 
-test("canonical history uses the same bounded payload structure and preserves full content", () => {
+// Compact 不再整表替换（REQ-C02）；窗口刷新是 rewind 的语义。
+test("canonical rewind uses the same bounded payload structure and preserves full content", () => {
     const docs = new SessionDocs(); const text = "result".repeat(3000);
     docs.accept({ jsonrpc: "2.0", method: "peri/agent_event", params: { sessionId: "s1", event_json: JSON.stringify({
-        type: "compact_completed", value: { messages_json: JSON.stringify([
+        type: "rewind_completed", value: { messages_json: JSON.stringify([
             { id: "u", role: "user", content: "read" },
             { id: "a", role: "assistant", content: [{ type: "tool_use", id: "call", name: "Read", input: { key: "x".repeat(5000) } }] },
             { id: "t", role: "tool", tool_call_id: "call", content: text },
@@ -69,10 +70,10 @@ test("canonical history uses the same bounded payload structure and preserves fu
     expect(card(docs).status).toBe("completed"); docs.destroy();
 });
 
-test("canonical tool call arrays preserve order while deduplicating content-block identities", () => {
+test("canonical rewind tool call arrays preserve order while deduplicating content-block identities", () => {
     const docs = new SessionDocs();
     docs.accept({ jsonrpc: "2.0", method: "peri/agent_event", params: { event_json: JSON.stringify({
-        type: "compact_completed", value: { messages_json: JSON.stringify([
+        type: "rewind_completed", value: { messages_json: JSON.stringify([
             { id: "u", role: "user", content: "read" },
             { id: "a", role: "assistant", content: [{ type: "tool_use", id: "first", name: "Read" }],
                 tool_calls: [{ id: "first", name: "duplicate" }, { id: "second", name: "Bash" }, { id: "second", name: "duplicate" }] },

@@ -51,7 +51,7 @@ graph TB
     DECISION --> VIEW
 ```
 
-整个流程中唯一有副作用的步骤是 `micro_compact()`——它修改 Transcript 的 flags，并异步写数据库。`plan_micro()` 和 `render_llm_view()` 都是纯函数。
+整个流程中唯一有副作用的步骤是 `apply_micro_plan()`——它修改 Transcript 的 flags，并异步写数据库（`micro_compact()` 是其「plan + apply」包装；`run_compact` 直接复用 dry-run 计划调用前者，不再二次规划）。`plan_micro()` 和 `render_llm_view()` 都是纯函数。
 
 ### 2.1 模块关系
 
@@ -60,7 +60,7 @@ graph TB
 | `compact_v2/planner.rs` | `plan_micro()`——生成压缩计划（纯函数）。还包含 `TurnGroup` 分组逻辑和 `ContextPressure`。 |
 | `compact_v2/projection.rs` | `render_llm_view()`——根据计划把 Transcript 渲染成 LLM 可见的消息列表（纯函数）。 |
 | `compact_v2/mod.rs` | `run_compact()`——串联 planner + 决策 + 应用。 |
-| `compact_v2/micro.rs` | `micro_compact()`——调用 planner 生成计划，然后应用 `truncated` 标记。只有 ~20 行。 |
+| `compact_v2/micro.rs` | `apply_micro_plan()`——把已生成的计划按 message_id 分组落地为 `truncated` 标记 + projection directive；`micro_compact()` 是其「调 planner + apply」的薄包装。计划只规划一次：`run_compact` 的 dry-run 结果直接交给 `apply_micro_plan`。 |
 | `compact_v2/smart.rs` | `smart_compact()`——规则驱动的消息保留策略，同样通过 planner 生成计划。已收缩为 `plan_micro` 兼容入口（带 deprecation warning，趋向 Micro Compact）。 |
 | `compact_v2/config.rs` | `CompactConfig` 纯数据契约已归位 `peri-acp-types::compact`（配置来源为外部配置文件，跨层共享），本文件仅保留 re-export 保兼容。 |
 | `stages/reason.rs` | Reason 阶段——调用 `render_llm_view()` 获取压缩后的消息列表，替代旧版 `truncated_content(100)`。 |
@@ -241,7 +241,7 @@ sequenceDiagram
 ```mermaid
 flowchart TD
     PM["plan_micro() · dry run"] --> Q1{"estimated_tokens_saved<br/>≥ reclaim_target ?"}
-    Q1 -->|"✅ 够用了"| APPLY["micro_compact() 应用"]
+    Q1 -->|"✅ 够用了"| APPLY["apply_micro_plan() 应用"]
     Q1 -->|"❌ 不够"| Q2{"预算逼近上限<br/>budget ≥ auto_compact_threshold ?"}
     Q2 -->|"是"| FULL["提交有效 Micro<br/>再尝试 Full Compact"]
     Q2 -->|"否"| PARTIAL["虽然不够，聊胜于无<br/>应用 Micro"]
@@ -255,11 +255,11 @@ flowchart TD
 
 ### 6.3 Full 的上下文快照与报告替换
 
-Full 与 Reason 共用 `render_persisted_llm_view` 恢复已提交的模型视图，包括 canonical reminder；派生摘要请求保留消息角色、工具配对与完整可见正文，不再使用每条 2000 字符、工具结果前三行或关键参数预览。已有 Micro 投影仍生效，避免 Full 重新展开已经隐藏的工具输出。摘要请求不开放可执行工具；冻结 prompt 与父会话的继承快照不被改写。
+Full 与 Reason 共用 `render_persisted_llm_view` 恢复已提交的模型视图，包括 canonical reminder；派生摘要请求保留消息角色、工具配对与完整可见正文，不再使用每条 2000 字符、工具结果前三行或关键参数预览。已有 Micro 投影仍生效，避免 Full 重新展开已经隐藏的工具输出。摘要请求不开放可执行工具；冻结 prompt 与父会话的继承快照不被改写。摘要视图是 Compact 检查复用槽之外的另一份整份历史正文，因此在**确实要构造摘要视图之前**必须释放该复用槽：`compact_v2::run_compact` 的 `FullSummaryNotice` 只在 `run_full_or_degrade` 进入摘要渲染时触发一次，否则整个摘要请求期间会多驻留一份历史正文。Micro/Smart 未落地、shadow、空计划未达 Full 阈值等不渲染摘要视图的路径不触发通知，缓存照常供 Reason 复用（无变化范围内仍只构建一次视图）。
 
 子 Agent 报告与后台任务结果参与摘要，摘要指令要求保留结论、约束与未完成工作并按通知来源归因。摘要只输出交接正文，长度目标是 `min(summary_max_tokens, 当前模型已解析的单次输出上限)` 的一半，给模型输出留余量；请求预算与目标同源——沿用同一已解析上限，不用 `summary_max_tokens` 覆写 provider 输出上限（零值或解析出零上限是显式配置错误，不是「不限」，也不代填常量）；不要求分析块、所有消息清单或完整代码副本。未完成的摘要在同一次 Full 内按**有界恢复循环**补齐：首轮与所有恢复共用 `summary_max_requests`（默认 3）这**一个**逻辑生成计数器，达到上限即返回 `CompactRecoveryExhausted`（携带实际次数与最后原因），绝不发起第 N+1 次请求。截断或未闭合时保留片段，把已生成的正文按原顺序回填进派生请求（不插分隔符，不重放隐藏思考或工具），下一轮续写，最后一轮改用收尾提示。从未取得正文时只允许一次带减半目标的重新生成（改写提示，不注入空 assistant），重新生成仍无正文则提前结束。每次生成前**不做**窗口前置拦截：摘要输入就是历史本身，装不下时照常发出请求并由 provider 结果（截断或未闭合）驱动恢复循环续写，不裁剪上下文或工具配对，也不冒用主模型窗口。只有正常完成且后处理后非空的摘要可以提交；没有可续接正文、恢复耗尽、恢复中协议错误或仅含 analysis 时保留原历史；嵌套的分析标签与残留结束标签不能充当有效摘要；思考块之外已闭合的 `<summary>` 正文按普通文本保留，其中讨论的标签字面量不得再次被剥除。提交时将快照内 own region 的普通历史与 reminder 一起标 excluded，摘要与标记使用同一持久化事务；System 和 ancestor 不在排除集合。原文留在 canonical 存储供回查，后续模型请求及冷恢复不再发送已排除报告全文。
 
-手动 `/compact` 从一次一致快照恢复完整 payload、flags 和 ancestor/own 边界；普通消息 ID 校验仅用于调用方一致性检查，不再决定摘要输入范围。仅有 reminder 的会话也可压缩。摘要期间新到达的 inbox 结果在后续 Receive 处理，不属于旧快照的排除集合。
+手动 `/compact` 不再恢复完整 payload：`compact_pipeline` 用 `load_active_snapshot` 读取当前有效 own 条目（存储侧 `excluded = 0` 过滤）与冻结 inherited 区，按有序消息投影核对身份后从有效快照重建临时 transcript；已归档正文不进入本次读取、不重新解码。调用方仍带回完整历史（含已归档 id）时，多出的 id 只在有界 flags 查询确认其为 `excluded` 后被忽略；未知 id 或读取失败保持拒绝。有效集为空时用 flags 区分全新 thread 与全归档，后者返回 `no history to compact`。仅有 reminder 的会话也可压缩。摘要期间新到达的 inbox 结果在后续 Receive 处理，不属于旧快照的排除集合。完整历史仍保留在 canonical 存储；窗口启用后，展示侧通过历史窗口按需读取。该契约在 `peri.historyWindowV1` 与 TUI 开关启用时生效，默认关闭时保留旧行为。
 
 恢复耗尽前不进入 Reason，不重复应用 Micro，并保留取消边界；取消、配置错误、provider 重试耗尽与持久化失败都不在这里重开预算，失败后没有后台自动重试。传输错误的重试归 provider，持久化错误不在这里重试。外层组合不再重试空摘要——空响应重新生成已经并入上面这一个计数器，避免内外层次数相乘；`max_consecutive_failures` 只作跨 Full 调用的失败计数。自动 Compact 达到 Full 阈值时，必要的 Full 失败会阻止后续 Reason：恢复耗尽返回 `CompactRecoveryExhausted`，跨 Full 失败预算耗尽返回 `CompactRetriesExhausted`，缺失模型、非正常完成的摘要及 provider 错误保留各自类型。已提交的 Micro 仍保留。手动 `/compact` 通过同一结果携带安全诊断，并在错误映射前检查取消。未产生变更的尝试以 `CompactEnded` 闭合观测，只有实际变更才发出 `MessagesCompacted`。
 
@@ -294,6 +294,8 @@ MessageFlags {
 ```
 
 `MessageProjectionDirective` 包含 `policy_version`（策略版本）和 `entries`（仅含本消息的 action 列表）。不包含 BaseMessage 内容或 Base64——可以安全序列化到 SQLite。
+
+该载荷同时承载一项渲染之外的事实：`superseded_by: Option<MessageId>`（`#[serde(default)]`，`Full Compact` 归档时写入）= **取代本条的摘要消息 id**。写入时 `entries` 为空，因此它不产生任何渲染动作，只在 `excluded` 为真时被读取；rewind 的「清零哪些 `excluded`」据此逐条精确判定（取代它的摘要仍在保留前缀 ⇒ 排除依旧有依据，否则原文重新有效）。没有这条记录的历史行（该字段落地前归档）回退到原有的排除前缀结构判定。清零 `excluded` 的存储路径（本机 `clear_rewind_excluded`、远端 `CLEAR_EXCLUDED_SQL`）会把整条载荷一并清掉，恢复正文的条目不会残留取代记录；字段新增没有改变 `messages` 表形状（仍是同一列、同一代数），旧行反序列化为 `None`、旧构建忽略未知字段。
 
 ### 7.2 批量写入
 
@@ -373,7 +375,7 @@ SQLite 的 `projection TEXT` 列通过幂等迁移添加。恢复时 `load_messa
 
 1. **Planner 纯函数**：`plan_micro()` 零副作用。这是 dry-run、Skip-Micro-when-Full、shadow mode 的前提。如果不纯，每一步决策都可能产生不可逆的副作用。
 
-2. **Micro 收缩为 thin wrapper**：核心逻辑在 planner 和 projection。`micro_compact()` 只有 ~20 行——调 planner、应用 flag。Smart 同样通过 planner 兼容入口。保持代码焦点集中。
+2. **Micro 收缩为 thin wrapper**：核心逻辑在 planner 和 projection。`micro_compact()` 只有 ~20 行——调 planner、应用 flag。Smart 同样通过 planner 兼容入口。保持代码焦点集中。计划与应用分离：同一轮 dry-run 的计划只规划一次，落地走 `apply_micro_plan()`（同一消息的多个 action 合并进同一条 directive，按 message_id 分组）。
 
 3. **默认 Preserve**：`ContextRetention` 默认值是 `Preserve`——没有显式声明的工具一律不压缩。旧版黑名单默认是空的（全部压缩），过于激进。
 
