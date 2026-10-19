@@ -485,13 +485,13 @@ async fn test_count_by_kind_works() {
 async fn test_register_with_kind_shell_limit() {
     let registry = make_registry();
 
-    for i in 0..5 {
+    for i in 0..BackgroundTaskRegistry::SHELL_LIMIT {
         let mut task = make_task(&format!("bg-shell-{}", i));
         task.kind = BgTaskKind::Shell;
         registry.register_with_kind(task).unwrap();
     }
 
-    // 第 6 个应被拒绝
+    // 超限的第一个应被拒绝
     let mut task = make_task("bg-shell-over");
     task.kind = BgTaskKind::Shell;
     let result = registry.register_with_kind(task);
