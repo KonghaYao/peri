@@ -10,7 +10,7 @@ use peri_acp_types::{
 };
 
 use super::super::Session;
-use super::types::{ChildHandoffReason, ChildHandoffReceipt, ChildRunOutcome};
+use super::types::{ChildHandoffFailure, ChildHandoffReason, ChildHandoffReceipt, ChildRunOutcome};
 use super::ParkedChildOwner;
 use crate::agent::async_tasks::handoff::ChildSettlementWindow;
 use crate::agent::async_tasks::{BackgroundTaskStatus, BgTaskInfo};
@@ -73,22 +73,23 @@ async fn commit_handoff(
     Ok(receipt)
 }
 
-fn capability_failure(reason: &str) -> ChildRunOutcome {
-    ChildRunOutcome::Failed {
-        error: crate::error::AgentError::Other(anyhow::anyhow!(reason.to_string())),
-        residual: None,
+fn handoff_failure(
+    cause: Option<crate::error::AgentError>,
+    error: crate::agent::async_tasks::handoff::HandoffCommitError,
+    receipt: Option<ChildHandoffReceipt>,
+) -> ChildRunOutcome {
+    ChildRunOutcome::HandoffFailed {
+        cause,
+        failure: ChildHandoffFailure { error, receipt },
     }
 }
 
-fn persistence_failure(
-    error: &crate::agent::async_tasks::handoff::HandoffCommitError,
-) -> ChildRunOutcome {
-    ChildRunOutcome::Failed {
-        error: crate::error::AgentError::Other(anyhow::anyhow!(
-            "handoff_persistence_failed: {error}"
-        )),
-        residual: None,
-    }
+fn missing_handoff_owner() -> ChildRunOutcome {
+    handoff_failure(
+        None,
+        crate::agent::async_tasks::handoff::HandoffCommitError::MissingCapability,
+        None,
+    )
 }
 
 /// Keep the current child run responsible for its own task directory after a
@@ -114,7 +115,7 @@ pub(super) async fn run_child_with_handoff_signal(
     else {
         return match run_react_loop(context, max_iterations).await {
             LoopResult::Completed => ChildRunOutcome::Settled,
-            LoopResult::SettlementDue => capability_failure("handoff_capability_unavailable"),
+            LoopResult::SettlementDue => missing_handoff_owner(),
             LoopResult::Interrupted => ChildRunOutcome::Interrupted,
             LoopResult::Error(error) => ChildRunOutcome::Failed {
                 error,
@@ -122,7 +123,11 @@ pub(super) async fn run_child_with_handoff_signal(
             },
         };
     };
-    let window = Arc::new(ChildSettlementWindow::default());
+    let window = context
+        .async_ctx
+        .child_settlement
+        .clone()
+        .unwrap_or_else(|| Arc::new(ChildSettlementWindow::default()));
     context.async_ctx.child_settlement = Some(Arc::clone(&window));
     let mut activity = manager.registry().subscribe_activity();
     let execution = context.session.turn.execution_binding();
@@ -163,7 +168,7 @@ pub(super) async fn run_child_with_handoff_signal(
                         child_thread_id = %context.session.agent_id,
                         "handoff_capability_unavailable"
                     );
-                    return capability_failure("handoff_capability_unavailable");
+                    return missing_handoff_owner();
                 };
                 return match commit_handoff(
                     &context,
@@ -176,7 +181,7 @@ pub(super) async fn run_child_with_handoff_signal(
                     Ok(receipt) => ChildRunOutcome::HandedOff { receipt },
                     Err(error) => {
                         tracing::error!(%error, "child handoff persistence failed");
-                        persistence_failure(&error)
+                        handoff_failure(None, error, owner.pending_receipt())
                     }
                 };
             }
@@ -190,24 +195,30 @@ pub(super) async fn run_child_with_handoff_signal(
                         residual: None,
                     };
                 }
-                let residual = match owner_of(session) {
-                    Some(owner) => match commit_handoff(
-                        &context,
-                        &owner,
-                        ChildHandoffReason::ExecutionFailed,
-                        &mut handoff_start,
-                    )
-                    .await
-                    {
-                        Ok(receipt) => Some(receipt),
-                        Err(commit_error) => {
-                            tracing::error!(%commit_error, %error, "child handoff after failure was not committed");
-                            None
-                        }
-                    },
-                    None => None,
+                let Some(owner) = owner_of(session) else {
+                    return handoff_failure(
+                        Some(error),
+                        crate::agent::async_tasks::handoff::HandoffCommitError::MissingCapability,
+                        None,
+                    );
                 };
-                return ChildRunOutcome::Failed { error, residual };
+                return match commit_handoff(
+                    &context,
+                    &owner,
+                    ChildHandoffReason::ExecutionFailed,
+                    &mut handoff_start,
+                )
+                .await
+                {
+                    Ok(receipt) => ChildRunOutcome::Failed {
+                        error,
+                        residual: Some(receipt),
+                    },
+                    Err(commit_error) => {
+                        tracing::error!(%commit_error, %error, "child handoff after failure was not committed");
+                        handoff_failure(Some(error), commit_error, owner.pending_receipt())
+                    }
+                };
             }
             LoopResult::Completed => {}
         }
@@ -226,7 +237,7 @@ pub(super) async fn run_child_with_handoff_signal(
         }
         if window.expired() && obligations {
             let Some(owner) = owner_of(session) else {
-                return capability_failure("handoff_capability_unavailable");
+                return missing_handoff_owner();
             };
             let reason = if stopped_by_hook {
                 ChildHandoffReason::HookStop
@@ -237,7 +248,7 @@ pub(super) async fn run_child_with_handoff_signal(
                 Ok(receipt) => ChildRunOutcome::HandedOff { receipt },
                 Err(error) => {
                     tracing::error!(%error, "child settlement handoff persistence failed");
-                    persistence_failure(&error)
+                    handoff_failure(None, error, owner.pending_receipt())
                 }
             };
         }
@@ -323,7 +334,7 @@ pub(super) async fn run_child_with_handoff_signal(
             }
             _ = tokio::time::sleep_until(deadline) => {
                 let Some(owner) = owner_of(session) else {
-                    return capability_failure("handoff_capability_unavailable");
+                    return missing_handoff_owner();
                 };
                 let reason = if stopped_by_hook {
                     ChildHandoffReason::HookStop
@@ -334,7 +345,7 @@ pub(super) async fn run_child_with_handoff_signal(
                     Ok(receipt) => ChildRunOutcome::HandedOff { receipt },
                     Err(error) => {
                         tracing::error!(%error, "child settlement handoff persistence failed");
-                        persistence_failure(&error)
+                        handoff_failure(None, error, owner.pending_receipt())
                     }
                 };
             }

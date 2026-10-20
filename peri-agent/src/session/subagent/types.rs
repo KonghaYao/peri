@@ -28,6 +28,17 @@ pub enum ChildRunOutcome {
         error: crate::error::AgentError,
         residual: Option<ChildHandoffReceipt>,
     },
+    /// 交接写入失败：保留原执行错误（若有）与结构化提交失败/身份。
+    HandoffFailed {
+        cause: Option<crate::error::AgentError>,
+        failure: ChildHandoffFailure,
+    },
+}
+
+#[derive(Debug)]
+pub struct ChildHandoffFailure {
+    pub error: crate::agent::async_tasks::handoff::HandoffCommitError,
+    pub receipt: Option<ChildHandoffReceipt>,
 }
 
 /// 一次执行的冻结交接记录；只有 canonical 提交确认后才能返回 HandedOff。
@@ -415,12 +426,14 @@ pub struct SubagentFailure {
     execution_finished: bool,
     reason: SubagentFailureReason,
     handoff: Option<ChildHandoffReceipt>,
+    handoff_failure: Option<String>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SubagentFailureReason {
     ExecutionFailed,
     ChildTasksHandedOff,
+    HandoffUnconfirmed,
 }
 
 impl SubagentFailure {
@@ -436,6 +449,7 @@ impl SubagentFailure {
             execution_finished: false,
             reason: SubagentFailureReason::ExecutionFailed,
             handoff: None,
+            handoff_failure: None,
         }
     }
 
@@ -466,6 +480,7 @@ impl SubagentFailure {
             execution_finished: true,
             reason: SubagentFailureReason::ChildTasksHandedOff,
             handoff: Some(receipt),
+            handoff_failure: None,
         }
     }
 
@@ -488,6 +503,38 @@ impl SubagentFailure {
 
     pub fn handoff(&self) -> Option<&ChildHandoffReceipt> {
         self.handoff.as_ref()
+    }
+
+    pub fn handoff_failure(&self) -> Option<&str> {
+        self.handoff_failure.as_deref()
+    }
+
+    /// 执行（可选）失败且交接写入未确认：原错误与提交失败同时可见。
+    pub fn handoff_failed(
+        child_thread_id: impl Into<String>,
+        agent_name: impl Into<String>,
+        cause: Option<crate::error::AgentError>,
+        failure: &ChildHandoffFailure,
+    ) -> Self {
+        let has_cause = cause.is_some();
+        let error =
+            cause.unwrap_or_else(|| crate::error::AgentError::ChildHandoffPersistenceFailed {
+                reason: failure.error.to_string(),
+            });
+        let reason = if has_cause {
+            SubagentFailureReason::ExecutionFailed
+        } else {
+            SubagentFailureReason::HandoffUnconfirmed
+        };
+        Self {
+            child_thread_id: child_thread_id.into(),
+            agent_name: agent_name.into(),
+            error,
+            execution_finished: true,
+            reason,
+            handoff: failure.receipt.clone(),
+            handoff_failure: Some(failure.error.to_string()),
+        }
     }
 
     pub(crate) fn execution_finished(&self) -> bool {
@@ -530,7 +577,13 @@ impl SubagentFailure {
     }
 
     pub fn public_message(&self) -> String {
-        self.error.user_facing_message()
+        match &self.handoff_failure {
+            Some(failure) => format!(
+                "{}; handoff_persistence_failed: {failure}",
+                self.error.user_facing_message()
+            ),
+            None => self.error.user_facing_message(),
+        }
     }
 }
 
@@ -540,6 +593,7 @@ impl std::fmt::Display for SubagentFailure {
         let outcome = match self.reason {
             SubagentFailureReason::ExecutionFailed => "execution failed",
             SubagentFailureReason::ChildTasksHandedOff => "execution incomplete",
+            SubagentFailureReason::HandoffUnconfirmed => "handoff unconfirmed",
         };
         write!(
             formatter,

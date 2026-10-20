@@ -6,8 +6,6 @@
 
 use std::sync::Arc;
 
-use anyhow::anyhow;
-
 use peri_acp_types::session_resources::SessionResources;
 use peri_acp_types::store::MessageFlags;
 
@@ -19,6 +17,16 @@ use super::{
     MessageTranscript, PersistOp, TranscriptEntry, DEFAULT_PENDING_MAX_BYTES,
     DEFAULT_PENDING_MAX_ITEMS,
 };
+
+#[derive(Debug, thiserror::Error)]
+pub(crate) enum FlushError {
+    /// session 释放后 writer 正常结束；不表示存在未确认写入。
+    #[error("transcript persistence writer closed")]
+    WriterClosed,
+    /// writer 已确认失败；调用方不得宣称持久化成功。
+    #[error("transcript persistence failed: {0}")]
+    Persistence(#[from] anyhow::Error),
+}
 
 impl MessageTranscript {
     /// 绑定会话资源门面
@@ -105,12 +113,23 @@ impl MessageTranscript {
     pub async fn flush_via_tx(
         tx: &tokio::sync::mpsc::UnboundedSender<PersistOp>,
     ) -> anyhow::Result<()> {
+        Self::flush_via_tx_typed(tx)
+            .await
+            .map_err(|error| anyhow::anyhow!(error))
+    }
+
+    /// 区分 writer 正常关闭（session 已释放）与真实持久化失败。
+    pub(crate) async fn flush_via_tx_typed(
+        tx: &tokio::sync::mpsc::UnboundedSender<PersistOp>,
+    ) -> Result<(), FlushError> {
         let (ack_tx, ack_rx) = tokio::sync::oneshot::channel();
         tx.send(PersistOp::Barrier(ack_tx))
-            .map_err(|_| anyhow!("transcript persistence writer channel closed"))?;
-        ack_rx
-            .await
-            .map_err(|_| anyhow!("transcript persistence writer dropped barrier acknowledgement"))?
+            .map_err(|_| FlushError::WriterClosed)?;
+        match ack_rx.await {
+            Ok(Ok(())) => Ok(()),
+            Ok(Err(error)) => Err(FlushError::Persistence(error)),
+            Err(_) => Err(FlushError::WriterClosed),
+        }
     }
 
     /// 预留一笔待持久化额度：持锁期间同步完成，不 await。

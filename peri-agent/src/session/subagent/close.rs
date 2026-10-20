@@ -63,6 +63,15 @@ impl SubagentCloseState {
         self.sync_delivery.lock().remove(task_id);
     }
 
+    #[cfg(test)]
+    pub(super) fn sync_delivery_errors(&self) -> Vec<String> {
+        self.sync_delivery
+            .lock()
+            .values()
+            .filter_map(|error| error.clone())
+            .collect()
+    }
+
     async fn wait_sync_workers(&self) -> CloseResult {
         loop {
             let changed = self.sync_delivery_changed.notified();

@@ -151,7 +151,11 @@ where
             let delivery_task_id = worker_task_id.clone();
             let confirmed: OnBgCompleteFn = Arc::new(move |result, kind| {
                 match delivery(result, kind) {
-                    Ok(()) => Ok(()),
+                    Ok(()) => {
+                        // 成功回执（含 registry 重试后的成功）清除此前失败记录。
+                        delivery_close_state.settle_sync_delivery(&delivery_task_id);
+                        Ok(())
+                    }
                     Err(error) => {
                         delivery_close_state
                             .record_sync_delivery_failure(&delivery_task_id, &error);
@@ -242,6 +246,28 @@ fn parent_result(
                 ),
                 failure,
             )
+        }
+        Ok(ChildRunOutcome::HandoffFailed { cause, failure }) => {
+            let mut output = String::new();
+            if let Some(cause) = cause {
+                output.push_str(&cause.user_facing_message());
+                output.push_str("\n\n");
+            }
+            output.push_str(&format!("handoff_persistence_failed: {}", failure.error));
+            if let Some(receipt) = &failure.receipt {
+                output.push_str("\n\n");
+                output.push_str(&format_handoff_notice(receipt));
+            }
+            let safe = match cause {
+                Some(cause) => SubagentFailure::safe_failure_from_error(child_thread_id, cause),
+                None => {
+                    let error = crate::error::AgentError::ChildHandoffPersistenceFailed {
+                        reason: failure.error.to_string(),
+                    };
+                    SubagentFailure::safe_failure_from_error(child_thread_id, &error)
+                }
+            };
+            (false, output, safe)
         }
         Err(error) => {
             let failure = error
@@ -558,6 +584,8 @@ pub(super) async fn run_sync_subagent(
         .and_then(|host| host.child_owner.clone());
     let permit_result = if let Some(error) = settlement_error.as_ref() {
         Err(error.to_string())
+    } else if matches!(outcome, ChildRunOutcome::HandoffFailed { .. }) {
+        Err("child handoff persistence is unconfirmed".into())
     } else if matches!(outcome, ChildRunOutcome::Failed { .. })
         && owner
             .as_ref()
@@ -590,6 +618,9 @@ pub(super) async fn run_sync_subagent(
             };
             Err(Box::new(failure))
         }
+        ChildRunOutcome::HandoffFailed { cause, failure } => Err(Box::new(
+            SubagentFailure::handoff_failed(child_thread_id, &agent_name, cause, &failure),
+        )),
         other => Ok(other),
     }
 }
@@ -634,5 +665,28 @@ fn stop_projection(
             true,
             SubagentFailure::safe_failure_from_error(child_thread_id, error),
         ),
+        ChildRunOutcome::HandoffFailed { cause, failure } => {
+            let message = match cause {
+                Some(cause) => format!(
+                    "{agent_name} execution failed: {}; handoff_persistence_failed: {}",
+                    cause.user_facing_message(),
+                    failure.error
+                ),
+                None => format!(
+                    "delegation incomplete: handoff_persistence_failed: {}",
+                    failure.error
+                ),
+            };
+            let safe = match cause {
+                Some(cause) => SubagentFailure::safe_failure_from_error(child_thread_id, cause),
+                None => {
+                    let error = crate::error::AgentError::ChildHandoffPersistenceFailed {
+                        reason: failure.error.to_string(),
+                    };
+                    SubagentFailure::safe_failure_from_error(child_thread_id, &error)
+                }
+            };
+            (message.chars().take(500).collect(), true, safe)
+        }
     }
 }

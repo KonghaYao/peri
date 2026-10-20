@@ -270,6 +270,7 @@ pub(super) async fn spawn_background_subagent(
             &outcome,
             ChildRunOutcome::Settled | ChildRunOutcome::Interrupted
         );
+        let mut drain_failure: Option<String> = None;
         let (text, mut output_summary, mut status, success, failure) = match &outcome {
             ChildRunOutcome::Settled => {
                 let text = extract_last_ai_text(&session);
@@ -311,6 +312,31 @@ pub(super) async fn spawn_background_subagent(
                 let summary = output.chars().take(500).collect::<String>();
                 (output, summary, AgentStatus::Error, false, failure)
             }
+            ChildRunOutcome::HandoffFailed { cause, failure } => {
+                let mut output = String::new();
+                if let Some(cause) = cause {
+                    output.push_str(&cause.user_facing_message());
+                    output.push_str("\n\n");
+                }
+                output.push_str(&format!("handoff_persistence_failed: {}", failure.error));
+                if let Some(receipt) = &failure.receipt {
+                    output.push_str("\n\n");
+                    output.push_str(&format_handoff_notice(receipt));
+                }
+                let safe = match cause {
+                    Some(cause) => {
+                        SubagentFailure::safe_failure_from_error(&child_thread_id_for_task, cause)
+                    }
+                    None => {
+                        let error = crate::error::AgentError::ChildHandoffPersistenceFailed {
+                            reason: failure.error.to_string(),
+                        };
+                        SubagentFailure::safe_failure_from_error(&child_thread_id_for_task, &error)
+                    }
+                };
+                let summary = output.chars().take(500).collect::<String>();
+                (output, summary, AgentStatus::Error, false, safe)
+            }
         };
         let output = match &outcome {
             ChildRunOutcome::HandedOff { receipt } => {
@@ -350,6 +376,7 @@ pub(super) async fn spawn_background_subagent(
             drain_subagent_events(event_bus_for_emit, forwarder_handle, langfuse_bridge).await
         {
             tracing::error!(thread_id = %child_thread_id_for_task, error = %error.user_facing_message(), causes = ?error.cause_chain(), "child event forwarding barrier incomplete");
+            drain_failure = Some(error.to_string());
             if result.success {
                 let failure =
                     SubagentFailure::new(&child_thread_id_for_task, &agent_name_for_task, error);
@@ -421,6 +448,10 @@ pub(super) async fn spawn_background_subagent(
             .and_then(|host| host.child_owner.clone());
         let permit_result = if !terminal_persisted {
             Err("terminal_status_persist_failed".to_string())
+        } else if let Some(error) = drain_failure.as_ref() {
+            Err(format!("child event drain failed: {error}"))
+        } else if matches!(outcome, ChildRunOutcome::HandoffFailed { .. }) {
+            Err("child handoff persistence is unconfirmed".to_string())
         } else if matches!(outcome, ChildRunOutcome::Failed { .. })
             && owner
                 .as_ref()

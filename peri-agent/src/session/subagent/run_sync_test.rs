@@ -55,6 +55,40 @@ fn bound_child(manager: Arc<TaskManager>) -> (Arc<Session>, Arc<ParkedChildOwner
 
 struct AnswerLlm(&'static str);
 
+struct ProbeLlm(Arc<()>);
+
+#[async_trait::async_trait]
+impl ReactLLM for ProbeLlm {
+    async fn generate_reasoning(
+        &self,
+        _messages: &[crate::messages::BaseMessage],
+        _tools: &[&dyn BaseTool],
+        _streaming: Option<StreamingContext>,
+    ) -> crate::error::AgentResult<Reasoning> {
+        let _keep_alive = &self.0;
+        Ok(Reasoning::with_answer("", "probe answer"))
+    }
+}
+
+fn probe_context(session: &Arc<Session>, marker: Arc<()>) -> V2SubagentContext {
+    let id = session.store().thread_id.clone().unwrap();
+    build_v2_subagent_context(
+        Some(session.clone()),
+        Box::new(ProbeLlm(marker)),
+        Arc::new(MiddlewareChain::new()),
+        Vec::new(),
+        Arc::new(|_| true),
+        None,
+        "/tmp",
+        session.config().cancel_token.as_ref().clone(),
+        None,
+        None,
+        None,
+        None,
+        Some(agent_id_from_child_thread(&id)),
+    )
+}
+
 #[async_trait::async_trait]
 impl ReactLLM for AnswerLlm {
     async fn generate_reasoning(
@@ -198,7 +232,7 @@ async fn handoff_sync_child_returns_pending_and_registry_retries_delivery() {
     let (delivered_tx, delivered_rx) = tokio::sync::oneshot::channel();
     let delivered_tx = parking_lot::Mutex::new(Some(delivered_tx));
     let delivery: OnBgCompleteFn = Arc::new(move |result, _| {
-        if callback_attempts.fetch_add(1, Ordering::SeqCst) == 0 {
+        if callback_attempts.fetch_add(1, Ordering::SeqCst) < 2 {
             return Err("transient parent rejection".into());
         }
         if let Some(sender) = delivered_tx.lock().take() {
@@ -259,7 +293,7 @@ async fn handoff_sync_child_returns_pending_and_registry_retries_delivery() {
         Some(child_id.as_str())
     );
     assert!(delivered.output.contains("status: incomplete"));
-    assert_eq!(attempts.load(Ordering::SeqCst), 2);
+    assert_eq!(attempts.load(Ordering::SeqCst), 3);
     tokio::time::timeout(Duration::from_secs(2), async {
         while sync_state.sync_workers.len() != 0 {
             peri_time::sleep(Duration::from_millis(10)).await;
@@ -267,6 +301,10 @@ async fn handoff_sync_child_returns_pending_and_registry_retries_delivery() {
     })
     .await
     .expect("wrapper must release its session worker after registry takeover");
+    assert!(
+        sync_state.sync_delivery_errors().is_empty(),
+        "成功重试必须清除此前 delivery 失败记录"
+    );
 }
 
 /// 没有父投递宿主：不制造幽灵 parent task，等待 typed outcome 后同步返回未完成。
@@ -334,6 +372,7 @@ async fn parent_close_retains_unconfirmed_delivery_and_reports_incomplete() {
     ));
     let built = context(&session, "child answer");
     let child_id = session.store().thread_id.clone().unwrap();
+    let sync_state = session.subagent_host().unwrap().close_state.clone();
     let task_id = new_sync_task_id();
     let run_id = child_id.clone();
     let call = tokio::spawn(run_sync_with_registered_handoff(
@@ -377,6 +416,13 @@ async fn parent_close_retains_unconfirmed_delivery_and_reports_incomplete() {
     })
     .await
     .expect("registry must retain the rejected result");
+    tokio::time::timeout(Duration::from_secs(2), async {
+        while sync_state.sync_delivery_errors().is_empty() {
+            peri_time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .expect("持续失败必须保留 delivery 记录");
     parent_manager.begin_session_close();
     assert!(!parent_manager.wait_session_close().await);
     assert!(parent_manager.has_pending_delivery(&task_id));
@@ -523,6 +569,88 @@ async fn handoff_with_empty_task_list_keeps_retained_messages() {
     assert!(!delivered.success);
     assert!(!delivered.timed_out);
     assert_eq!(delivered.task_id, task_id);
+}
+
+/// worker 必须释放完整计算对象，而不只是 TaskTracker 计数归零。
+#[tokio::test(start_paused = true)]
+async fn sync_worker_releases_session_llm_and_context_after_takeover() {
+    let manager = Arc::new(TaskManager::new());
+    let parent_manager = Arc::new(TaskManager::new());
+    let (session, _owner) = bound_child(manager.clone());
+    shell_task(&manager, "shell-task");
+    session.queue().push(QueuedMessage::prompt(
+        MessageSource::UserInput,
+        crate::messages::BaseMessage::human("run shell"),
+    ));
+    let marker = Arc::new(());
+    let weak = Arc::downgrade(&marker);
+    let built = probe_context(&session, marker);
+    let child_id = session.store().thread_id.clone().unwrap();
+    let sync_state = session.subagent_host().unwrap().close_state.clone();
+    let task_id = new_sync_task_id();
+    let (delivered_tx, delivered_rx) = tokio::sync::oneshot::channel();
+    let delivered_tx = parking_lot::Mutex::new(Some(delivered_tx));
+    let run_id = child_id.clone();
+    let call = tokio::spawn(run_sync_with_registered_handoff(
+        session.clone(),
+        child_id.clone(),
+        "fixture".into(),
+        Some(parent_manager),
+        Some(task_id.clone()),
+        Some(Arc::new(
+            move |result: &peri_acp_types::event::BackgroundTaskResult, _| {
+                if let Some(sender) = delivered_tx.lock().take() {
+                    let _ = sender.send(result.clone());
+                }
+                Ok(())
+            },
+        )),
+        move |handoff, _| async move {
+            run_sync_subagent(
+                &run_id,
+                "fixture",
+                "/tmp",
+                10,
+                None,
+                None,
+                None,
+                None,
+                None,
+                None,
+                None,
+                None,
+                None,
+                built,
+                session,
+                None,
+                Some(handoff),
+            )
+            .await
+        },
+    ));
+    assert!(matches!(
+        call.await.unwrap().unwrap(),
+        SyncCompletion::Pending(_)
+    ));
+    let delivered = tokio::time::timeout(Duration::from_secs(5), delivered_rx)
+        .await
+        .expect("parent result must be delivered")
+        .unwrap();
+    assert!(!delivered.success);
+    tokio::time::timeout(Duration::from_secs(2), async {
+        while sync_state.sync_workers.len() != 0 {
+            peri_time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .expect("worker must end");
+    tokio::time::timeout(Duration::from_secs(2), async {
+        while weak.upgrade().is_some() {
+            peri_time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .expect("LLM/StageContext 必须随 worker 释放");
 }
 
 /// 关闭失败必须保留诊断，不因同步 worker 结束而宣称成功。

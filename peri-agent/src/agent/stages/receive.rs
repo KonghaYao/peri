@@ -62,18 +62,6 @@ pub(super) async fn run_receive_with_budget(
         mailbox.mark_claimed(&user_ids);
     }
     let count = consumed.len();
-    if crate::agent::stages::settlement_due(&input.context) {
-        input
-            .context
-            .async_ctx
-            .received_after_deadline
-            .lock()
-            .extend(consumed.iter().filter_map(|message| {
-                message
-                    .delivery_id
-                    .or_else(|| message.message().map(crate::messages::BaseMessage::id))
-            }));
-    }
     let wake_up_count = consumed
         .iter()
         .filter(|message| message.policy.disposition(&execution) == MessageDisposition::Process)
@@ -272,6 +260,28 @@ pub(super) async fn run_receive_with_budget(
             count,
             "Receive 阶段消费消息"
         );
+    }
+
+    // 提交阶段可能跨过 D。只有已完成 canonical 提交、且本来会驱动语义迭代的
+    // 消息才登记为未推理义务；不能让 flush/append 之后的到期被误判为 Settled。
+    if crate::agent::stages::settlement_due(&input.context) {
+        input
+            .context
+            .async_ctx
+            .received_after_deadline
+            .lock()
+            .extend(
+                consumed
+                    .iter()
+                    .filter(|message| {
+                        message.policy.disposition(&execution) == MessageDisposition::Process
+                    })
+                    .filter_map(|message| {
+                        message
+                            .delivery_id
+                            .or_else(|| message.message().map(crate::messages::BaseMessage::id))
+                    }),
+            );
     }
 
     Ok(ReceiveOutput {

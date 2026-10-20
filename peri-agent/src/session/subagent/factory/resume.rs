@@ -382,6 +382,14 @@ pub(super) async fn resume_subagent_impl(
                         error,
                     )))
                 }
+                SyncCompletion::Finished(ChildRunOutcome::HandoffFailed { cause, failure }) => {
+                    return Err(Box::new(SubagentFailure::handoff_failed(
+                        thread_id.clone(),
+                        agent_name.clone(),
+                        cause,
+                        &failure,
+                    )))
+                }
                 SyncCompletion::Pending(pending) => (
                     false,
                     pending.pending_tasks,

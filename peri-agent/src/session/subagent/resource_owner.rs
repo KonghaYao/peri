@@ -152,6 +152,11 @@ impl ParkedChildOwner {
         self.state.lock().receipt.clone()
     }
 
+    /// 已冻结但尚未确认 canonical 提交的交接身份；用于失败报告。
+    pub fn pending_receipt(&self) -> Option<ChildHandoffReceipt> {
+        self.state.lock().pending_receipt.clone()
+    }
+
     pub fn failure(&self) -> Option<String> {
         self.state.lock().failure.clone()
     }
@@ -273,14 +278,23 @@ impl ParkedChildOwner {
         };
         let writer = self.writer.lock().clone();
         if let Some(writer) = writer {
-            if let Err(error) = MessageTranscript::flush_via_tx(writer.as_ref()).await {
-                // 计算 session 已释放时 writer 可能已关闭；终态路径已执行过
-                // flush，close 自己的 canonical append 仍是可靠提交事实。
-                tracing::error!(
-                    child_thread_id = %self.child_thread_id,
-                    %error,
-                    "child history flush unavailable before close settlement"
-                );
+            match MessageTranscript::flush_via_tx_typed(writer.as_ref()).await {
+                Ok(()) => {}
+                Err(crate::session::transcript::FlushError::WriterClosed) => {
+                    // session 已释放，writer 正常结束；终态路径已执行过 flush，
+                    // close 自己的 canonical append 仍是可靠提交事实。
+                    tracing::info!(
+                        child_thread_id = %self.child_thread_id,
+                        "child history writer already closed before close settlement"
+                    );
+                }
+                Err(crate::session::transcript::FlushError::Persistence(error)) => {
+                    let message =
+                        format!("Incomplete: child history persistence unconfirmed: {error}");
+                    self.state.lock().failure = Some(message.clone());
+                    tracing::error!(child_thread_id = %self.child_thread_id, %error, "child close history flush failed");
+                    return Err(message);
+                }
             }
         }
         loop {

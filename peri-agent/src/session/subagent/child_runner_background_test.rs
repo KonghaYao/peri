@@ -174,6 +174,77 @@ async fn background_child_cancellation_reports_interrupted_terminal() {
 }
 
 /// 交接 canonical 写入失败：显式 Failed，不返回 HandedOff 或成功。
+struct PanicOnStopBridge;
+
+impl crate::agent::LangfuseBridgeLike for PanicOnStopBridge {
+    fn process_render_event(&self, _event: &crate::agent::events_v2::RenderEvent) {}
+    fn process_observe_event(&self, event: &crate::agent::events_v2::ObserveEvent) {
+        if matches!(
+            event,
+            crate::agent::events_v2::ObserveEvent::SubagentStop { .. }
+        ) {
+            panic!("terminal bridge fixture panic");
+        }
+    }
+}
+
+/// 后台排空失败必须进入 owner 准入，阻止 resume，而不是只改结果文本。
+#[tokio::test(start_paused = true)]
+async fn background_drain_failure_blocks_resume() {
+    let (child, _manager, built, _) = child_with_shell_task(true);
+    let child_id = child.store().thread_id.clone().unwrap();
+    let parent_manager = Arc::new(TaskManager::new());
+    let (tx, rx) = tokio::sync::oneshot::channel();
+    let tx = parking_lot::Mutex::new(Some(tx));
+    crate::session::subagent::background::spawn_background_subagent(
+        "parent-task".into(),
+        child_id,
+        "fixture".into(),
+        "run shell".into(),
+        "/tmp".into(),
+        10,
+        None,
+        Some(parent_manager),
+        Some(Arc::new(move |result: &BackgroundTaskResult, _| {
+            if let Some(sender) = tx.lock().take() {
+                let _ = sender.send(result.clone());
+            }
+            Ok(())
+        })),
+        Some(Arc::new(PanicOnStopBridge)),
+        None,
+        None,
+        None,
+        None,
+        None,
+        Some(peri_acp_types::identity::AgentId::new()),
+        None,
+        child.config().cancel_token.as_ref().clone(),
+        built,
+        None,
+    )
+    .await
+    .unwrap();
+    let result = tokio::time::timeout(Duration::from_secs(10), rx)
+        .await
+        .expect("background child must settle")
+        .unwrap();
+    assert!(
+        !result.success,
+        "drain failure must fail the parent result; output={:?} failure={:?}",
+        result.output, result.subagent_failure
+    );
+    assert!(result.output.contains("event drain failed") || result.output.contains("forwarding"));
+    let owner = child
+        .subagent_host()
+        .and_then(|host| host.child_owner.clone())
+        .expect("owner retained");
+    assert!(
+        owner.check_resume().is_err(),
+        "排空失败后不得开放新 run 准入"
+    );
+}
+
 #[test]
 fn sync_handoff_routes_late_events_to_background_pump() {
     use crate::agent::events::{AgentEventHandler, ExecutorEvent, FnEventHandler};

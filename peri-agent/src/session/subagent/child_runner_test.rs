@@ -435,7 +435,23 @@ async fn activity_and_new_tasks_do_not_reset_deadline() {
     for _ in 0..10 {
         tokio::task::yield_now().await;
     }
-    tokio::time::advance(Duration::from_secs(119)).await;
+    // 连续每秒注入 activity/新任务，D 仍按首次收尾起算。
+    for index in 0..5 {
+        tokio::time::advance(Duration::from_secs(1)).await;
+        TaskManagerPort::register(
+            manager.as_ref(),
+            BgTaskRegistration {
+                task_id: format!("shell-storm-{index}"),
+                kind: BgTaskKind::Shell,
+                summary: "per-second activity".into(),
+                pid: None,
+                kill: Some(Box::new(|| {})),
+            },
+        )
+        .unwrap();
+        tokio::task::yield_now().await;
+    }
+    tokio::time::advance(Duration::from_secs(114)).await;
     TaskManagerPort::register(
         manager.as_ref(),
         BgTaskRegistration {
@@ -449,7 +465,7 @@ async fn activity_and_new_tasks_do_not_reset_deadline() {
     .unwrap();
     let outcome = tokio::time::timeout(Duration::from_secs(5), &mut owner)
         .await
-        .expect("D must not move when another task is added")
+        .expect("activity storm must not move D")
         .unwrap();
     let ChildRunOutcome::HandedOff { receipt } = outcome else {
         panic!("expected handoff: {outcome:?}");
@@ -458,7 +474,11 @@ async fn activity_and_new_tasks_do_not_reset_deadline() {
         .tasks
         .iter()
         .any(|task| task.task_id == "shell-late"));
-    assert_eq!(manager.active_count(), 2, "两个 Shell 都保持真实状态");
+    assert!(receipt
+        .tasks
+        .iter()
+        .any(|task| task.task_id == "shell-storm-4"));
+    assert_eq!(manager.active_count(), 7, "所有 Shell 都保持真实状态");
 }
 
 /// task 已终态但结果未消费：active=0 不能证明委派完成。
@@ -803,15 +823,16 @@ async fn missing_owner_reports_capability_failure() {
     )
     .await
     .expect("missing owner must not wait beyond D");
-    let ChildRunOutcome::Failed { error, .. } = outcome else {
+    let ChildRunOutcome::HandoffFailed { failure, .. } = outcome else {
         panic!("expected capability failure: {outcome:?}");
     };
-    assert!(error
-        .user_facing_message()
+    assert!(failure
+        .error
+        .to_string()
         .contains("handoff_capability_unavailable"));
 }
 
-/// 后台永久 Shell：D 后父结果失败、timed_out=false、Stop 一次。
+/// 交接 canonical 写入失败：结构化 HandoffFailed，不返回 HandedOff 或成功。
 #[tokio::test(start_paused = true)]
 async fn handoff_persistence_failure_is_not_reported_as_handed_off() {
     let manager = Arc::new(TaskManager::new());
@@ -871,13 +892,21 @@ async fn handoff_persistence_failure_is_not_reported_as_handed_off() {
     if let Some(permit) = permit {
         permit.finish(Err("handoff persistence failed".into()));
     }
-    let ChildRunOutcome::Failed { error, .. } = outcome else {
+    let ChildRunOutcome::HandoffFailed { failure, .. } = outcome else {
         panic!("持久化失败不得伪装成交接: {outcome:?}");
     };
-    assert!(error
-        .user_facing_message()
-        .contains("handoff_persistence_failed"));
-    assert!(owner.receipt().is_none(), "未提交的交接不得留 receipt");
+    assert!(
+        failure.error.to_string().contains("persistence")
+            || failure
+                .error
+                .to_string()
+                .contains("handoff_capability_unavailable")
+    );
+    assert!(
+        owner.receipt().is_none(),
+        "未提交的交接不得留 committed receipt"
+    );
+    assert!(owner.pending_receipt().is_some(), "冻结身份必须保留供重试");
     assert_eq!(manager.active_count(), 1);
 }
 
@@ -934,5 +963,9 @@ fn transcript_contains(session: &Session, needle: &str) -> bool {
 
 #[path = "child_runner_background_test.rs"]
 mod background;
+#[path = "child_runner_deadline_test.rs"]
+mod deadline;
 #[path = "child_runner_nested_test.rs"]
 mod nested;
+#[path = "child_runner_process_test.rs"]
+mod process;

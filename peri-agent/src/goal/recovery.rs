@@ -27,7 +27,8 @@ pub fn goal_recovery_reason(error: &AgentError) -> Option<&'static str> {
         | AgentError::CompactNoLlm
         | AgentError::CompactSummaryBudgetInvalid { .. }
         | AgentError::CompactBudgetUnrecovered { .. }
-        | AgentError::ChildTasksHandedOff { .. } => None,
+        | AgentError::ChildTasksHandedOff { .. }
+        | AgentError::ChildHandoffPersistenceFailed { .. } => None,
         AgentError::LlmError(_) | AgentError::LlmHttpError { .. } | AgentError::ModelError(_) => {
             Some("model_error")
         }

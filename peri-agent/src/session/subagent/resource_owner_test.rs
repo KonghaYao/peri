@@ -194,6 +194,93 @@ async fn test_close_without_canonical_port_refuses_to_drop_required_input() {
     assert!(child.queue.has_required(), "缺 canonical 能力时不得清空");
 }
 
+/// root 可在真实三层 owner 树中查询、取消、关闭任意后代资源。
+#[tokio::test]
+async fn test_root_queries_cancels_and_closes_nested_owner_tree() {
+    let root = Arc::new(TaskManager::new());
+    let b_manager = Arc::new(TaskManager::new());
+    let c_manager = Arc::new(TaskManager::new());
+    let b = ParkedChildOwner::new(
+        "b".into(),
+        "root".into(),
+        b_manager.clone(),
+        MessageQueue::new(),
+        Some(crate::session::test_resources::mock::MockSessionResources::new()),
+        None,
+    );
+    let c = ParkedChildOwner::new(
+        "c".into(),
+        "b".into(),
+        c_manager.clone(),
+        MessageQueue::new(),
+        Some(crate::session::test_resources::mock::MockSessionResources::new()),
+        None,
+    );
+    b_manager.register_child_owner(c.clone()).unwrap();
+    root.register_child_owner(b.clone()).unwrap();
+    c_manager
+        .register(peri_acp_types::tasks::BgTaskRegistration {
+            task_id: "c-shell".into(),
+            kind: peri_acp_types::tasks::BgTaskKind::Shell,
+            summary: "nested shell".into(),
+            pid: None,
+            kill: Some(Box::new(|| {})),
+        })
+        .unwrap();
+    assert!(Arc::ptr_eq(&root.child_owner("c").unwrap(), &c));
+    let c_from_root = root.child_task_manager("c").unwrap();
+    assert_eq!(c_from_root.active_count(), 1);
+    c_from_root.cancel_async("c-shell").await.unwrap();
+    assert_eq!(c_manager.active_count(), 0);
+    // 模拟执行环境确认 kill 已生效；真实 ShellExecutor 由完成回调确认。
+    c_manager.registry().confirm_external_stopped("c-shell");
+    root.close_child_resources().await.unwrap();
+    assert!(root.child_owner("b").is_none());
+    assert!(root.child_owner("c").is_none());
+}
+
+use crate::messages::BaseMessage;
+use crate::session::{FrozenContext, MessageTranscript, Session};
+
+#[tokio::test]
+async fn test_close_with_unconfirmed_history_flush_keeps_owner() {
+    let manager = Arc::new(TaskManager::new());
+    let parent = Arc::new(TaskManager::new());
+    let session = Session::new(
+        Arc::from("/tmp"),
+        FrozenContext::builder().build(),
+        Some("child".into()),
+    );
+    let store = crate::session::test_resources::mock::MockSessionResources::new();
+    *session.transcript().write() =
+        MessageTranscript::new().with_persistence(store.clone(), "child".into());
+    let owner = ParkedChildOwner::new(
+        "child".into(),
+        "root".into(),
+        manager.clone(),
+        session.queue().clone(),
+        Some(store.clone()),
+        None,
+    );
+    owner.set_writer(session.transcript().read().persist_tx_handle());
+    parent.register_child_owner(owner.clone()).unwrap();
+    store.restrict_to_history_read_only();
+    session
+        .transcript()
+        .write()
+        .append(BaseMessage::human("unflushed history"));
+    let error = owner.close().await.unwrap_err();
+    assert!(
+        error.contains("persistence unconfirmed"),
+        "真实 barrier 失败必须 Incomplete: {error}"
+    );
+    assert!(owner.failure().is_some());
+    assert!(
+        parent.child_owner("child").is_some(),
+        "失败时不得释放 owner/binding"
+    );
+}
+
 #[tokio::test]
 async fn test_close_rejects_active_execution_until_it_ends() {
     let child = owner("root", "child");
