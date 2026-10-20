@@ -28,10 +28,6 @@ impl SubagentCloseState {
         self.attempt.lock().is_some()
     }
 
-    pub(super) fn closing_token(&self) -> CancellationToken {
-        self.closing_cancel.clone()
-    }
-
     pub(super) fn spawn_sync_worker<F>(
         self: &Arc<Self>,
         task_id: String,
@@ -154,6 +150,9 @@ async fn drain_child_scope(session: Arc<Session>) -> CloseResult {
     let host = session
         .subagent_host()
         .ok_or("Incomplete: child session host unavailable")?;
+    if let Some(owner) = &host.child_owner {
+        return owner.close().await;
+    }
     let manager = host
         .task_manager
         .as_ref()

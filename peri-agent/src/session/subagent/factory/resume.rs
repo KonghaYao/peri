@@ -9,7 +9,9 @@ use super::super::run_sync::{
     handoff_event_handler, new_sync_task_id, run_sync_subagent, run_sync_with_registered_handoff,
     SyncCompletion,
 };
-use super::super::types::{SubagentResumeConfig, SubagentRunMode, SubagentSpawned};
+use super::super::types::{
+    ChildRunOutcome, SubagentFailure, SubagentResumeConfig, SubagentRunMode, SubagentSpawned,
+};
 use super::super::v2_bridge::agent_id_from_child_thread;
 use super::claim::ResumeClaim;
 use super::context::{build_subagent_session_v2, derive_cancel_token, inherited_frozen_context};
@@ -130,7 +132,7 @@ pub(super) async fn resume_subagent_impl(
             return Err("bound subagent belongs to another root session execution owner".into());
         }
     }
-    let _preparation = parent
+    let preparation = parent
         .and_then(|session| session.subagent_host())
         .and_then(|host| {
             host.task_manager
@@ -301,6 +303,7 @@ pub(super) async fn resume_subagent_impl(
             cancel_token,
             interrupted: true,
             pending_tasks: Vec::new(),
+            handoff: None,
         });
     }
 
@@ -314,6 +317,9 @@ pub(super) async fn resume_subagent_impl(
     ));
 
     // 8. 执行（run mode 由本次调用决定，issue 决策 8）
+    // 认领已写入 Active；准备门在进入执行前释放，避免与本次 run 的
+    // 执行 permit 互斥（并发的第二次 resume 由 claim/status 拒绝）。
+    drop(preparation);
     match run_mode {
         SubagentRunMode::Sync => {
             let run_thread_id = thread_id.clone();
@@ -354,9 +360,34 @@ pub(super) async fn resume_subagent_impl(
                 },
             )
             .await?;
-            let (interrupted, pending_tasks, pending_task_id) = match completion {
-                SyncCompletion::Finished(interrupted) => (interrupted, Vec::new(), None),
-                SyncCompletion::Pending(tasks) => (false, tasks, Some(sync_task_id)),
+            let (interrupted, pending_tasks, pending_task_id, handoff) = match completion {
+                SyncCompletion::Finished(ChildRunOutcome::Settled) => {
+                    (false, Vec::new(), None, None)
+                }
+                SyncCompletion::Finished(ChildRunOutcome::Interrupted) => {
+                    (true, Vec::new(), None, None)
+                }
+                SyncCompletion::Finished(ChildRunOutcome::HandedOff { receipt }) => {
+                    let tasks = receipt
+                        .tasks
+                        .iter()
+                        .map(|task| task.task_id.clone())
+                        .collect();
+                    (false, tasks, None, Some(receipt))
+                }
+                SyncCompletion::Finished(ChildRunOutcome::Failed { error, .. }) => {
+                    return Err(Box::new(SubagentFailure::new(
+                        thread_id.clone(),
+                        agent_name.clone(),
+                        error,
+                    )))
+                }
+                SyncCompletion::Pending(pending) => (
+                    false,
+                    pending.pending_tasks,
+                    Some(sync_task_id),
+                    Some(pending.receipt),
+                ),
             };
             Ok(SubagentSpawned {
                 child_thread_id: thread_id,
@@ -365,6 +396,7 @@ pub(super) async fn resume_subagent_impl(
                 cancel_token,
                 interrupted,
                 pending_tasks,
+                handoff,
             })
         }
         SubagentRunMode::Background => {
@@ -416,6 +448,7 @@ pub(super) async fn resume_subagent_impl(
                 cancel_token,
                 interrupted: false,
                 pending_tasks: Vec::new(),
+                handoff: None,
             })
         }
     }

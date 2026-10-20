@@ -187,6 +187,12 @@ pub enum AgentError {
         full_attempts: u32,
     },
 
+    #[error("Child {child_thread_id} ended this delegation without completing it; unsettled tasks were handed to the child resource owner: {tasks}. Shell tasks keep their real state. Resume explicitly with Agent(resume_thread_id: {child_thread_id}) after inspecting them.")]
+    ChildTasksHandedOff {
+        child_thread_id: String,
+        tasks: String,
+    },
+
     #[error(transparent)]
     Other(anyhow::Error),
 }
@@ -562,6 +568,7 @@ impl AgentError {
             Self::CompactRecoveryExhausted { .. } => "compact_recovery_exhausted",
             Self::CompactRetriesExhausted { .. } => "compact_retries_exhausted",
             Self::CompactBudgetUnrecovered { .. } => "compact_budget_unrecovered",
+            Self::ChildTasksHandedOff { .. } => "child_tasks_handed_off",
             Self::Other(_) => "other",
         }
     }

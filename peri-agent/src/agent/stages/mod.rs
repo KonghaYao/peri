@@ -58,6 +58,8 @@ pub type SharedToolMap = Arc<RwLock<BTreeMap<String, Arc<dyn BaseTool>>>>;
 pub enum LoopResult {
     /// 正常结束（无更多消息）
     Completed,
+    /// 本次 child 收尾窗口到期，不再准入新语义迭代；由 runner 交接资源。
+    SettlementDue,
     /// 被中断
     Interrupted,
     /// 错误
@@ -207,6 +209,8 @@ impl StageContext {
                 budget_recovery: Arc::new(parking_lot::Mutex::new(Default::default())),
             },
             async_ctx: AsyncContext {
+                child_settlement: None,
+                received_after_deadline: Arc::default(),
                 idle_wait_enabled: false,
                 idle_should_wait: None,
                 pending_handoff: None,
@@ -259,6 +263,8 @@ impl StageContext {
                 budget_recovery: Arc::new(parking_lot::Mutex::new(Default::default())),
             },
             async_ctx: AsyncContext {
+                child_settlement: None,
+                received_after_deadline: Arc::default(),
                 idle_wait_enabled: false,
                 idle_should_wait: None,
                 pending_handoff: None,
@@ -514,6 +520,15 @@ where
 /// 控制流：Receive → Compact → Reason → Act → (回 Receive)。
 /// Receive 是循环入口，也是退出判断点。
 /// 返回循环最终结果（Completed / Interrupted / Error）。
+/// child 收尾截止：到期后不再消费新输入或准入新语义迭代。
+pub(crate) fn settlement_due(context: &StageContext) -> bool {
+    context
+        .async_ctx
+        .child_settlement
+        .as_ref()
+        .is_some_and(|window| window.expired())
+}
+
 pub async fn run_react_loop(context: StageContext, max_iterations: usize) -> LoopResult {
     let mut loop_state = LoopState::default();
     let mut semantic_iterations = 0usize;
@@ -530,6 +545,9 @@ pub async fn run_react_loop(context: StageContext, max_iterations: usize) -> Loo
             // 检查 cancel
             if context.session.turn.is_cancelled() {
                 return LoopResult::Interrupted;
+            }
+            if settlement_due(&context) {
+                return LoopResult::SettlementDue;
             }
 
             // ── Receive（循环入口，也是退出判断点）──
@@ -559,6 +577,11 @@ pub async fn run_react_loop(context: StageContext, max_iterations: usize) -> Loo
                     "Receive: hook stop intent consumed; exiting run without further model request"
                 );
                 return LoopResult::Completed;
+            }
+
+            // Receive 的持久化等待可能跨过 D：已落库结果保留，但不再准入新语义迭代。
+            if settlement_due(&context) {
+                return LoopResult::SettlementDue;
             }
 
             // 退出判断：本轮没有可唤醒消息且上一轮无工具调用 → 检查是否该退出。

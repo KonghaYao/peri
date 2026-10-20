@@ -128,8 +128,10 @@ impl peri_acp_types::tasks::TaskManager for TaskManager {
         &self,
     ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<(), String>> + Send + '_>> {
         Box::pin(async move {
-            for owner in self.child_owners() {
+            let owners = self.child_owners();
+            for owner in owners {
                 owner.close().await?;
+                self.release_child_owner(&owner.child_thread_id);
             }
             Ok(())
         })
@@ -405,11 +407,26 @@ impl TaskManager {
         self.child_owners.read().values().cloned().collect()
     }
 
+    /// 只在 owner 已完成消息与资源结算后调用。
+    pub fn release_child_owner(&self, child_id: &str) -> bool {
+        self.child_owners.write().remove(child_id).is_some()
+    }
+
+    /// 父结果是否已由 registry 的单一 retry worker 接管。
+    pub fn has_pending_delivery(&self, task_id: &str) -> bool {
+        self.registry.has_pending_delivery(task_id)
+    }
+
+    pub fn has_pending_deliveries(&self) -> bool {
+        self.registry.has_pending_deliveries()
+    }
+
     pub(crate) fn register_child_owner(
-        &self,
+        self: &Arc<Self>,
         owner: Arc<crate::session::subagent::ParkedChildOwner>,
     ) -> Result<(), String> {
         let _admission = self.registry.scope.admit()?;
+        owner.attach_parent(self);
         let mut children = self.child_owners.write();
         if children.contains_key(&owner.child_thread_id) {
             return Err("child resource owner is already registered".into());

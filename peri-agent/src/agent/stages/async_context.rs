@@ -5,6 +5,10 @@ use super::StageContextBuilder;
 /// 异步传输控制（run_react_loop idle 等待及完成提醒的只读后台活动判断）
 #[derive(Clone)]
 pub struct AsyncContext {
+    /// 本次 child 执行唯一收尾窗口；None 表示通用会话（主会话/工作流）。
+    pub child_settlement: Option<Arc<crate::session::subagent::ChildSettlementWindow>>,
+    /// 截止后才被 Receive 落库、尚未推理的消息（交接 receipt 的处理义务）。
+    pub received_after_deadline: Arc<parking_lot::Mutex<Vec<peri_acp_types::messages::MessageId>>>,
     pub idle_wait_enabled: bool,
     pub idle_should_wait: Option<Arc<dyn Fn() -> bool + Send + Sync>>,
     /// 有界等待到期且仍有未结算任务时返回交接快照（只返回一次）。

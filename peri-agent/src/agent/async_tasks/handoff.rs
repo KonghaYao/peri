@@ -45,6 +45,10 @@ impl ChildSettlementWindow {
         *self.deadline.lock()
     }
 
+    pub fn is_started(&self) -> bool {
+        self.deadline.lock().is_some()
+    }
+
     pub fn expired(&self) -> bool {
         self.deadline()
             .is_some_and(|deadline| Instant::now() >= deadline)
@@ -280,6 +284,9 @@ pub async fn commit_child_handoff(
         .transcript
         .write()
         .mirror_committed_reminder(receipt.canonical_message_id, reminder);
+    owner
+        .retain_receipt(receipt.clone())
+        .map_err(|error| HandoffCommitError::Persistence(anyhow::anyhow!(error)))?;
     Ok(receipt)
 }
 

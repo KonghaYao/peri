@@ -358,18 +358,49 @@ pub struct SubagentSpawned {
     pub interrupted: bool,
     /// 同步子 Agent 的运行中任务，移交给当前进程的子会话 worker 后才填写。
     pub pending_tasks: Vec<String>,
+    /// 本次执行冻结的交接记录；Some 表示委派未完成且资源已有 owner。
+    pub handoff: Option<ChildHandoffReceipt>,
 }
 
 impl SubagentSpawned {
     pub fn pending_message(&self) -> Option<String> {
+        if let Some(receipt) = &self.handoff {
+            let task_id = self
+                .task_id
+                .as_deref()
+                .unwrap_or("none (handoff committed before sync task registration)");
+            let pending = if receipt.tasks.is_empty() {
+                "none (retained queue messages are recorded in the handoff reminder)".to_string()
+            } else {
+                receipt
+                    .tasks
+                    .iter()
+                    .map(|task| task.task_id.as_str())
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            };
+            let produced = super::util::extract_last_ai_text(&self.session);
+            return Some(format!(
+                "child_thread_id: {}\nstatus: incomplete\ntask_id: {}\nPending tasks: {}\nResource owner: {}\n\
+                 This sub-agent's current run has ended; the delegation is incomplete. Background work \
+                 exceeded the settlement window and remains owned by the child session. Shell tasks keep \
+                 their real state and are not cancelled automatically. Late results stay in the child queue \
+                 and do not resume the old run. Query/cancel the tasks or explicitly resume with \
+                 Agent(resume_thread_id: {}, prompt: ...).\nProduced output:\n{}\n\
+                 The output above is from this run and does not mean the pending tasks completed.",
+                self.child_thread_id, task_id, pending, receipt.owner_session_id,
+                self.child_thread_id, produced
+            ));
+        }
         (!self.pending_tasks.is_empty()).then(|| {
             format!(
-                "child_thread_id: {}\nstatus: pending\ntask_id: {}\nPending tasks: {}. \
-                 This sub-agent remains active under its session owner; its final result will \
-                 be delivered when the pending tasks settle. Do not resume this thread while active.",
+                "child_thread_id: {}\nstatus: incomplete\ntask_id: {}\nPending tasks: {}. \
+                 The current run has ended; the delegation is incomplete. Results stay in the child \
+                 queue and do not resume the old run. Explicitly resume with Agent(resume_thread_id: {}).",
                 self.child_thread_id,
-                self.task_id.as_deref().expect("pending handoff has registered task ID"),
-                self.pending_tasks.join(", ")
+                self.task_id.as_deref().unwrap_or("none"),
+                self.pending_tasks.join(", "),
+                self.child_thread_id
             )
         })
     }
@@ -382,6 +413,14 @@ pub struct SubagentFailure {
     agent_name: String,
     error: crate::error::AgentError,
     execution_finished: bool,
+    reason: SubagentFailureReason,
+    handoff: Option<ChildHandoffReceipt>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SubagentFailureReason {
+    ExecutionFailed,
+    ChildTasksHandedOff,
 }
 
 impl SubagentFailure {
@@ -395,17 +434,60 @@ impl SubagentFailure {
             agent_name: agent_name.into(),
             error,
             execution_finished: false,
+            reason: SubagentFailureReason::ExecutionFailed,
+            handoff: None,
         }
     }
 
-    pub(super) fn completed(
+    /// 计算已结束但委派未完成；父结果必须 success=false 且保留待处理引用。
+    pub fn handed_off(
+        child_thread_id: impl Into<String>,
+        agent_name: impl Into<String>,
+        receipt: ChildHandoffReceipt,
+    ) -> Self {
+        let child_thread_id = child_thread_id.into();
+        let tasks = if receipt.tasks.is_empty() {
+            "retained queue messages".to_string()
+        } else {
+            receipt
+                .tasks
+                .iter()
+                .map(|task| task.task_id.as_str())
+                .collect::<Vec<_>>()
+                .join(", ")
+        };
+        Self {
+            error: crate::error::AgentError::ChildTasksHandedOff {
+                child_thread_id: child_thread_id.clone(),
+                tasks,
+            },
+            child_thread_id,
+            agent_name: agent_name.into(),
+            execution_finished: true,
+            reason: SubagentFailureReason::ChildTasksHandedOff,
+            handoff: Some(receipt),
+        }
+    }
+
+    pub fn reason(&self) -> SubagentFailureReason {
+        self.reason
+    }
+
+    /// 失败同时保留已提交的交接记录；父结果仍以原错误为主。
+    pub fn failed_with_handoff(
         child_thread_id: impl Into<String>,
         agent_name: impl Into<String>,
         error: crate::error::AgentError,
+        receipt: ChildHandoffReceipt,
     ) -> Self {
         let mut failure = Self::new(child_thread_id, agent_name, error);
         failure.execution_finished = true;
+        failure.handoff = Some(receipt);
         failure
+    }
+
+    pub fn handoff(&self) -> Option<&ChildHandoffReceipt> {
+        self.handoff.as_ref()
     }
 
     pub(crate) fn execution_finished(&self) -> bool {
@@ -455,9 +537,13 @@ impl SubagentFailure {
 impl std::fmt::Display for SubagentFailure {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         let message = self.public_message();
+        let outcome = match self.reason {
+            SubagentFailureReason::ExecutionFailed => "execution failed",
+            SubagentFailureReason::ChildTasksHandedOff => "execution incomplete",
+        };
         write!(
             formatter,
-            "child_thread_id: {}\n{} execution failed: {}",
+            "child_thread_id: {}\n{} {outcome}: {}",
             self.child_thread_id, self.agent_name, message
         )
     }

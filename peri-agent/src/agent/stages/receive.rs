@@ -62,6 +62,18 @@ pub(super) async fn run_receive_with_budget(
         mailbox.mark_claimed(&user_ids);
     }
     let count = consumed.len();
+    if crate::agent::stages::settlement_due(&input.context) {
+        input
+            .context
+            .async_ctx
+            .received_after_deadline
+            .lock()
+            .extend(consumed.iter().filter_map(|message| {
+                message
+                    .delivery_id
+                    .or_else(|| message.message().map(crate::messages::BaseMessage::id))
+            }));
+    }
     let wake_up_count = consumed
         .iter()
         .filter(|message| message.policy.disposition(&execution) == MessageDisposition::Process)
