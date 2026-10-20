@@ -139,11 +139,17 @@ pub(super) async fn run_receive_with_budget(
             let mut newly_committed = true;
             if let Some(delivery_id) = msg.delivery_id {
                 let QueuedPayload::SystemReminder(reminder) = &msg.payload else {
+                    // 确定性错误：重放同一条消息只会再次失败并阻塞后续输入。
+                    tracing::warn!(
+                        delivery_id = %delivery_id.as_uuid(),
+                        "terminal delivery without canonical reminder suppressed"
+                    );
+                    input.context.session.queue.suppress(msg.clone());
                     input
                         .context
                         .session
                         .queue
-                        .push_batch(consumed[index..].to_vec());
+                        .push_batch(consumed[index + 1..].to_vec());
                     return Err(anyhow::anyhow!("delivery ID requires a canonical reminder").into());
                 };
                 let (already_present, port) = {
@@ -155,11 +161,19 @@ pub(super) async fn run_receive_with_budget(
                             ..
                         }) if stored.as_reminder() == reminder.as_reminder() => true,
                         Some(_) => {
+                            // 身份冲突是确定性的：同一 ID 的不同内容无法共存，
+                            // 重放只会反复失败并阻塞后续输入。保留已有规范项，
+                            // 把冲突消息送入 suppressed 诊断记录后继续推进。
+                            tracing::warn!(
+                                delivery_id = %delivery_id.as_uuid(),
+                                "conflicting canonical terminal delivery ID suppressed"
+                            );
+                            input.context.session.queue.suppress(msg.clone());
                             input
                                 .context
                                 .session
                                 .queue
-                                .push_batch(consumed[index..].to_vec());
+                                .push_batch(consumed[index + 1..].to_vec());
                             return Err(anyhow::anyhow!(
                                 "conflicting canonical terminal delivery ID"
                             )
@@ -273,11 +287,19 @@ pub(super) async fn run_receive_with_budget(
                             msg.admission_sequence,
                         )
                     {
+                        // 身份冲突是确定性的：重放同一消息只会再次失败并阻塞
+                        // 后续输入。已提交的规范项保持不变，冲突消息落诊断。
+                        tracing::warn!(
+                            delivery_id = %delivery_id.as_uuid(),
+                            error = %error,
+                            "conflicting canonical terminal delivery identity suppressed"
+                        );
+                        input.context.session.queue.suppress(msg.clone());
                         input
                             .context
                             .session
                             .queue
-                            .push_batch(consumed[index..].to_vec());
+                            .push_batch(consumed[index + 1..].to_vec());
                         return Err(anyhow::anyhow!(error).into());
                     }
                 }
