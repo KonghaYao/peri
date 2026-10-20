@@ -58,6 +58,7 @@ async fn commit_handoff(
     context: &StageContext,
     owner: &Arc<ParkedChildOwner>,
     reason: ChildHandoffReason,
+    unprocessed_tool_calls: Vec<String>,
     handoff_start: &mut Option<tokio::sync::oneshot::Sender<ChildHandoffReceipt>>,
 ) -> Result<ChildHandoffReceipt, crate::agent::async_tasks::handoff::HandoffCommitError> {
     let receipt = super::commit_child_handoff(
@@ -65,6 +66,7 @@ async fn commit_handoff(
         owner,
         reason,
         received_after_deadline(context),
+        unprocessed_tool_calls,
     )
     .await?;
     if let Some(sender) = handoff_start.take() {
@@ -80,7 +82,11 @@ fn handoff_failure(
 ) -> ChildRunOutcome {
     ChildRunOutcome::HandoffFailed {
         cause,
-        failure: ChildHandoffFailure { error, receipt },
+        failure: ChildHandoffFailure {
+            error,
+            receipt,
+            flush_error: None,
+        },
     }
 }
 
@@ -115,7 +121,7 @@ pub(super) async fn run_child_with_handoff_signal(
     else {
         return match run_react_loop(context, max_iterations).await {
             LoopResult::Completed => ChildRunOutcome::Settled,
-            LoopResult::SettlementDue => missing_handoff_owner(),
+            LoopResult::SettlementDue { .. } => missing_handoff_owner(),
             LoopResult::Interrupted => ChildRunOutcome::Interrupted,
             LoopResult::Error(error) => ChildRunOutcome::Failed {
                 error,
@@ -159,8 +165,12 @@ pub(super) async fn run_child_with_handoff_signal(
         }
         match result {
             LoopResult::Interrupted => return ChildRunOutcome::Interrupted,
-            LoopResult::SettlementDue => {
-                if !has_obligations(&manager, &context, &execution) {
+            LoopResult::SettlementDue {
+                unprocessed_tool_calls,
+            } => {
+                if unprocessed_tool_calls.is_empty()
+                    && !has_obligations(&manager, &context, &execution)
+                {
                     return ChildRunOutcome::Settled;
                 }
                 let Some(owner) = owner_of(session) else {
@@ -174,6 +184,7 @@ pub(super) async fn run_child_with_handoff_signal(
                     &context,
                     &owner,
                     ChildHandoffReason::SettlementDeadline,
+                    unprocessed_tool_calls,
                     &mut handoff_start,
                 )
                 .await
@@ -206,6 +217,7 @@ pub(super) async fn run_child_with_handoff_signal(
                     &context,
                     &owner,
                     ChildHandoffReason::ExecutionFailed,
+                    Vec::new(),
                     &mut handoff_start,
                 )
                 .await
@@ -244,7 +256,9 @@ pub(super) async fn run_child_with_handoff_signal(
             } else {
                 ChildHandoffReason::SettlementDeadline
             };
-            return match commit_handoff(&context, &owner, reason, &mut handoff_start).await {
+            return match commit_handoff(&context, &owner, reason, Vec::new(), &mut handoff_start)
+                .await
+            {
                 Ok(receipt) => ChildRunOutcome::HandedOff { receipt },
                 Err(error) => {
                     tracing::error!(%error, "child settlement handoff persistence failed");
@@ -341,7 +355,15 @@ pub(super) async fn run_child_with_handoff_signal(
                 } else {
                     ChildHandoffReason::SettlementDeadline
                 };
-                return match commit_handoff(&context, &owner, reason, &mut handoff_start).await {
+                return match commit_handoff(
+                &context,
+                &owner,
+                reason,
+                Vec::new(),
+                &mut handoff_start,
+            )
+            .await
+            {
                     Ok(receipt) => ChildRunOutcome::HandedOff { receipt },
                     Err(error) => {
                         tracing::error!(%error, "child settlement handoff persistence failed");

@@ -58,6 +58,7 @@ pub fn format_handoff_notice(receipt: &super::types::ChildHandoffReceipt) -> Str
     format!(
         "child_thread_id: {child}\nstatus: incomplete\npending_tasks: {tasks}\n\
          resource_owner: {owner}\nretained_messages: {messages}\n\
+         unprocessed_tool_calls: {tool_calls}\n\
          The current run has ended and the delegation is incomplete. Shell tasks keep their real \
          state and are not cancelled automatically. Late results stay in the child queue and do not \
          resume the old run. Query or cancel the tasks, or explicitly resume with \
@@ -66,6 +67,7 @@ pub fn format_handoff_notice(receipt: &super::types::ChildHandoffReceipt) -> Str
         owner = receipt.owner_session_id,
         messages = receipt.message_ids.len(),
         tasks = tasks,
+        tool_calls = receipt.unprocessed_tool_calls.join(", "),
     )
 }
 

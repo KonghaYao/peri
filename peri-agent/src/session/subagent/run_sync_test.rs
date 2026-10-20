@@ -731,15 +731,26 @@ async fn run_sync_handoff_failure_preserves_error_and_receipt() {
     );
     let handoff_failure = failure.handoff_failure().expect("结构化交接失败");
     assert!(
-        handoff_failure.contains("persistence") || handoff_failure.contains("append_history"),
+        handoff_failure.contains("handoff_persistence_failed"),
         "{handoff_failure}"
     );
+    let flush_failure = failure
+        .handoff_flush_failure()
+        .expect("flush 失败必须附加到结构化失败");
+    assert!(
+        flush_failure.contains("append_history") || flush_failure.contains("persistence"),
+        "{flush_failure}"
+    );
+    assert!(failure
+        .public_message()
+        .contains("handoff history flush failed"));
     let receipt = failure.handoff().expect("冻结 receipt");
     assert_eq!(receipt.child_thread_id, child_id);
     assert!(receipt
         .tasks
         .iter()
         .any(|task| task.task_id == "shell-task"));
+    assert!(receipt.unprocessed_tool_calls.is_empty());
     assert!(owner.pending_receipt().is_some());
     assert!(owner.check_resume().is_err(), "未确认交接必须拒绝 resume");
 }

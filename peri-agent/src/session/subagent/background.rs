@@ -214,6 +214,8 @@ pub(super) async fn spawn_background_subagent(
                         %error,
                         "background child history flush failed after unconfirmed handoff; retaining structured failure"
                     );
+                    let mut failure = failure;
+                    failure.flush_error = Some(error.to_string());
                     ChildRunOutcome::HandoffFailed { cause, failure }
                 }
                 _ => ChildRunOutcome::Failed {
@@ -325,7 +327,14 @@ pub(super) async fn spawn_background_subagent(
                     output.push_str(&cause.user_facing_message());
                     output.push_str("\n\n");
                 }
-                output.push_str(&format!("handoff_persistence_failed: {}", failure.error));
+                output.push_str(&format!(
+                    "{}: {}",
+                    super::types::handoff_failure_label(failure),
+                    failure.error
+                ));
+                if let Some(flush) = &failure.flush_error {
+                    output.push_str(&format!("\nhandoff history flush failed: {flush}"));
+                }
                 if let Some(receipt) = &failure.receipt {
                     output.push_str("\n\n");
                     output.push_str(&format_handoff_notice(receipt));

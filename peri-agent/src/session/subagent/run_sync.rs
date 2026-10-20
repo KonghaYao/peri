@@ -253,7 +253,14 @@ fn parent_result(
                 output.push_str(&cause.user_facing_message());
                 output.push_str("\n\n");
             }
-            output.push_str(&format!("handoff_persistence_failed: {}", failure.error));
+            output.push_str(&format!(
+                "{}: {}",
+                super::types::handoff_failure_label(failure),
+                failure.error
+            ));
+            if let Some(flush) = &failure.flush_error {
+                output.push_str(&format!("\nhandoff history flush failed: {flush}"));
+            }
             if let Some(receipt) = &failure.receipt {
                 output.push_str("\n\n");
                 output.push_str(&format_handoff_notice(receipt));
@@ -426,6 +433,8 @@ pub(super) async fn run_sync_subagent(
                     %error,
                     "sync child history flush failed after unconfirmed handoff; retaining structured failure"
                 );
+                let mut failure = failure;
+                failure.flush_error = Some(error.to_string());
                 ChildRunOutcome::HandoffFailed { cause, failure }
             }
             _ => ChildRunOutcome::Failed {
@@ -679,16 +688,19 @@ fn stop_projection(
             SubagentFailure::safe_failure_from_error(child_thread_id, error),
         ),
         ChildRunOutcome::HandoffFailed { cause, failure } => {
+            let label = super::types::handoff_failure_label(failure);
+            let flush = failure
+                .flush_error
+                .as_ref()
+                .map(|error| format!("; handoff history flush failed: {error}"))
+                .unwrap_or_default();
             let message = match cause {
                 Some(cause) => format!(
-                    "{agent_name} execution failed: {}; handoff_persistence_failed: {}",
+                    "{agent_name} execution failed: {}; {label}: {}{flush}",
                     cause.user_facing_message(),
                     failure.error
                 ),
-                None => format!(
-                    "delegation incomplete: handoff_persistence_failed: {}",
-                    failure.error
-                ),
+                None => format!("delegation incomplete: {label}: {}{flush}", failure.error),
             };
             let safe = match cause {
                 Some(cause) => SubagentFailure::safe_failure_from_error(child_thread_id, cause),

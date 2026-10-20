@@ -112,6 +112,7 @@ async fn test_handoff_commit_reuses_frozen_execution_snapshot() {
         &owner,
         super::super::ChildHandoffReason::SettlementDeadline,
         vec![],
+        vec![],
     )
     .await
     .unwrap();
@@ -119,6 +120,7 @@ async fn test_handoff_commit_reuses_frozen_execution_snapshot() {
         &context.session,
         &owner,
         super::super::ChildHandoffReason::SettlementDeadline,
+        vec![],
         vec![],
     )
     .await
@@ -266,6 +268,7 @@ async fn test_unconfirmed_failure_and_pending_receipt_count_as_obligations() {
         tasks: Vec::new(),
         message_ids: Vec::new(),
         message_sequences: Vec::new(),
+        unprocessed_tool_calls: Vec::new(),
         canonical_message_id: peri_acp_types::messages::MessageId::new(),
     };
     child.freeze_receipt(receipt).unwrap();
@@ -335,20 +338,31 @@ fn test_missing_handoff_capability_is_not_classified_as_persistence_failure() {
     let missing = ChildHandoffFailure {
         error: HandoffCommitError::MissingCapability,
         receipt: None,
+        flush_error: None,
     };
     let failure = SubagentFailure::handoff_failed("child", "agent", None, &missing);
     assert_eq!(
         failure.error().category_name(),
         "child_handoff_capability_unavailable"
     );
+    assert!(failure
+        .public_message()
+        .contains("handoff_capability_unavailable"));
+    assert!(!failure
+        .public_message()
+        .contains("handoff_persistence_failed"));
 
     let persistence = ChildHandoffFailure {
         error: HandoffCommitError::Persistence(anyhow::anyhow!("append failed")),
         receipt: None,
+        flush_error: None,
     };
     let failure = SubagentFailure::handoff_failed("child", "agent", None, &persistence);
     assert_eq!(
         failure.error().category_name(),
         "child_handoff_persistence_failed"
     );
+    assert!(failure
+        .public_message()
+        .contains("handoff_persistence_failed"));
 }

@@ -222,6 +222,7 @@ pub async fn commit_child_handoff(
     owner: &crate::session::subagent::ParkedChildOwner,
     reason: crate::session::subagent::ChildHandoffReason,
     received_messages: Vec<peri_acp_types::messages::MessageId>,
+    unprocessed_tool_calls: Vec<String>,
 ) -> Result<crate::session::subagent::ChildHandoffReceipt, HandoffCommitError> {
     use crate::session::subagent::ChildHandoffReceipt;
     let execution = session.turn.execution_binding();
@@ -244,15 +245,17 @@ pub async fn commit_child_handoff(
                 .iter()
                 .filter_map(|message| message.admission_sequence)
                 .collect(),
+            unprocessed_tool_calls,
             canonical_message_id: peri_acp_types::messages::MessageId::new(),
         })
         .map_err(|error| HandoffCommitError::Persistence(anyhow::anyhow!(error)))?;
     let reminder = crate::session::producer_reminders::try_trusted_reminder(
         ReminderCategory::Task, "subagent_task_lifecycle", "child_tasks_handed_off",
         ReminderSeverity::Error, ReminderDelivery::Required,
-        format!("子 Agent 本次委派未完成，计算已结束。child_thread_id: {}；资源 owner: {}；未结任务: {}。Shell 状态未改变。结果留在原 child 队列，不自动恢复旧 run；需要显式 Agent(resume_thread_id, prompt) 继续分析。",
+        format!("子 Agent 本次委派未完成，计算已结束。child_thread_id: {}；资源 owner: {}；未结任务: {}；未推理 tool calls: {}。Shell 状态未改变。结果留在原 child 队列，不自动恢复旧 run；需要显式 Agent(resume_thread_id, prompt) 继续分析。",
             receipt.child_thread_id, receipt.owner_session_id,
-            receipt.tasks.iter().map(|task| task.task_id.as_str()).collect::<Vec<_>>().join(", ")),
+            receipt.tasks.iter().map(|task| task.task_id.as_str()).collect::<Vec<_>>().join(", "),
+            receipt.unprocessed_tool_calls.join(", ")),
         Some("本次委派未完成，资源已保留".into()),
         serde_json::json!({
             "child_thread_id": receipt.child_thread_id,
@@ -262,6 +265,7 @@ pub async fn commit_child_handoff(
             "task_ids": receipt.tasks.iter().map(|task| &task.task_id).collect::<Vec<_>>(),
             "message_ids": receipt.message_ids,
             "message_sequences": receipt.message_sequences,
+            "unprocessed_tool_calls": receipt.unprocessed_tool_calls,
         }),
     ).map_err(|error| HandoffCommitError::Persistence(anyhow::anyhow!(error)))?;
     let port = session.transcript.read().idempotent_reminder_port();

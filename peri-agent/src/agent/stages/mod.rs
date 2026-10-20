@@ -18,6 +18,7 @@ mod null_llm;
 mod queue_to_transcript;
 pub mod reason;
 pub mod receive;
+pub use receive::{ReceiveInput, ReceiveOutput};
 pub mod tool_dispatch;
 pub use invocation_context::{
     ExecutionEntryOrigin, InvocationContext, ModelTurnFacts, PostHookSkipSink,
@@ -59,7 +60,9 @@ pub enum LoopResult {
     /// 正常结束（无更多消息）
     Completed,
     /// 本次 child 收尾窗口到期，不再准入新语义迭代；由 runner 交接资源。
-    SettlementDue,
+    /// `unprocessed_tool_calls` 是已准入 Act 产生、尚未被下一次 Reason 读取的
+    /// tool call 身份；它们只存在于 transcript，不在 MQ。
+    SettlementDue { unprocessed_tool_calls: Vec<String> },
     /// 被中断
     Interrupted,
     /// 错误
@@ -328,31 +331,6 @@ pub struct CompactOutput {
     pub compacted: bool,
 }
 
-// ─── Receive 阶段类型 ────────────────────────────────────────────────────────
-
-/// Receive 阶段输入
-pub struct ReceiveInput {
-    pub context: StageContext,
-}
-
-/// Receive 阶段输出
-pub struct ReceiveOutput {
-    /// 本轮消费的消息数量（含不唤醒循环的 Info）
-    pub consumed_count: usize,
-    /// 本轮消费的可驱动语义续跑消息数量（Prompt / Defer）
-    pub wake_up_count: usize,
-    /// 预算不足而保留在队列中的后续新增 EnsureProcessing 输入数量。
-    pub budget_deferred_count: usize,
-    /// 本次消费的非空用户 Human 消息身份，供首次输入准备精准处理。
-    pub input_message_ids: Vec<crate::messages::MessageId>,
-    /// 本轮已 canonical 提交、且本应驱动语义迭代的消息身份；由 loop 在
-    /// 判定收尾截止时统一登记为未推理义务，避免 Receive 内部 check-then-check 竞态。
-    pub process_message_ids: Vec<crate::messages::MessageId>,
-    /// 本轮消费到 hook 的显式停止意图（`continue:false`）：循环必须经 Receive
-    /// 唯一退出口结束，不得再发起额外模型请求。
-    pub stop_requested: bool,
-}
-
 // ─── Reason 阶段类型 ─────────────────────────────────────────────────────────
 
 /// Reason 阶段输入
@@ -403,6 +381,8 @@ pub use queue_to_transcript::append_messages_to_transcript;
 struct LoopState {
     /// 上一轮 Act 是否产出了 tool_calls
     has_tool_calls: bool,
+    /// 已准入 Act 产出、尚未被 Reason 读取的 tool call 身份。
+    unprocessed_tool_calls: Vec<String>,
     /// before_agent hooks 是否已执行（首次 Receive 后执行一次）
     before_agent_has_run: bool,
     /// 启动闸门 hook 是否已通过（首批 before_agent 后执行一次，成功才置位）
@@ -550,7 +530,9 @@ pub async fn run_react_loop(context: StageContext, max_iterations: usize) -> Loo
                 return LoopResult::Interrupted;
             }
             if settlement_due(&context) {
-                return LoopResult::SettlementDue;
+                return LoopResult::SettlementDue {
+                    unprocessed_tool_calls: loop_state.unprocessed_tool_calls.clone(),
+                };
             }
 
             // ── Receive（循环入口，也是退出判断点）──
@@ -595,7 +577,9 @@ pub async fn run_react_loop(context: StageContext, max_iterations: usize) -> Loo
                     .received_after_deadline
                     .lock()
                     .extend(receive_out.process_message_ids.clone());
-                return LoopResult::SettlementDue;
+                return LoopResult::SettlementDue {
+                    unprocessed_tool_calls: loop_state.unprocessed_tool_calls.clone(),
+                };
             }
 
             // 退出判断：本轮没有可唤醒消息且上一轮无工具调用 → 检查是否该退出。
@@ -896,6 +880,12 @@ pub async fn run_react_loop(context: StageContext, max_iterations: usize) -> Loo
                 .filter(|_| !reason_out.reasoning.needs_tool_call());
 
             // ── Act ──
+            let unprocessed_tool_calls: Vec<String> = reason_out
+                .reasoning
+                .tool_calls
+                .iter()
+                .map(|call| call.id.clone())
+                .collect();
             let act_out = match run_stage(&context, Stage::Act, || async {
                 act::run_act(ActInput {
                     context: context.clone(),
@@ -911,6 +901,11 @@ pub async fn run_react_loop(context: StageContext, max_iterations: usize) -> Loo
             };
 
             loop_state.has_tool_calls = act_out.has_tool_calls;
+            loop_state.unprocessed_tool_calls = if act_out.has_tool_calls {
+                unprocessed_tool_calls
+            } else {
+                Vec::new()
+            };
             if let Some(interruption) = stream_interruption {
                 if context.session.turn.is_cancelled() {
                     return LoopResult::Interrupted;

@@ -130,3 +130,146 @@ async fn cancel_just_after_deadline_hands_off_without_cancelling_shell() {
     );
     assert_eq!(manager.active_count(), 1, "普通 deadline 不取消 Shell");
 }
+
+/// 已准入 Act 的 tool result 只存在于 transcript；D 到期时 runner 必须交接而非 Settled。
+#[tokio::test(start_paused = true)]
+async fn admitted_act_tool_result_hands_off_instead_of_settled() {
+    let manager = Arc::new(TaskManager::new());
+    let child = make_child(manager.clone(), true);
+    child.queue().push(QueuedMessage::prompt(
+        MessageSource::UserInput,
+        crate::messages::BaseMessage::human("use a tool"),
+    ));
+    let calls = Arc::new(AtomicUsize::new(0));
+    let mut built = build_v2_subagent_context(
+        Some(child.clone()),
+        Box::new(ToolThenExpireLlm {
+            calls: calls.clone(),
+        }),
+        Arc::new(MiddlewareChain::new()),
+        Vec::new(),
+        Arc::new(|_| true),
+        None,
+        "/tmp",
+        child.config().cancel_token.as_ref().clone(),
+        None,
+        None,
+        None,
+        None,
+        Some(agent_id_from_child_thread(
+            &child.store().thread_id.clone().unwrap(),
+        )),
+    );
+    let window = Arc::new(ChildSettlementWindow::default());
+    window.start();
+    built.context.async_ctx.child_settlement = Some(window);
+    let permit = permit_for(&child, &built.context);
+    let outcome = tokio::time::timeout(
+        Duration::from_secs(200),
+        run_child_until_terminal(built.context, 10, &child),
+    )
+    .await
+    .expect("runner must finish after admitted Act");
+    if let Some(permit) = permit {
+        permit.finish(Ok(()));
+    }
+    let ChildRunOutcome::HandedOff { receipt } = outcome else {
+        panic!("tool result must hand off, not settle: {outcome:?}");
+    };
+    assert!(receipt.tasks.is_empty());
+    assert_eq!(receipt.unprocessed_tool_calls, vec!["call-1"]);
+    assert_eq!(calls.load(Ordering::SeqCst), 1);
+}
+
+/// 父级映射：已准入 Act tool result 的交接必须 success=false。
+#[tokio::test(start_paused = true)]
+async fn admitted_act_tool_result_parent_result_is_failure() {
+    let manager = Arc::new(TaskManager::new());
+    let parent_manager = Arc::new(TaskManager::new());
+    let child = make_child(manager, true);
+    child.queue().push(QueuedMessage::prompt(
+        MessageSource::UserInput,
+        crate::messages::BaseMessage::human("use a tool"),
+    ));
+    let calls = Arc::new(AtomicUsize::new(0));
+    let mut built = build_v2_subagent_context(
+        Some(child.clone()),
+        Box::new(ToolThenExpireLlm {
+            calls: calls.clone(),
+        }),
+        Arc::new(MiddlewareChain::new()),
+        Vec::new(),
+        Arc::new(|_| true),
+        None,
+        "/tmp",
+        child.config().cancel_token.as_ref().clone(),
+        None,
+        None,
+        None,
+        None,
+        Some(agent_id_from_child_thread(
+            &child.store().thread_id.clone().unwrap(),
+        )),
+    );
+    let window = Arc::new(ChildSettlementWindow::default());
+    window.start();
+    built.context.async_ctx.child_settlement = Some(window);
+    let child_id = child.store().thread_id.clone().unwrap();
+    let task_id = crate::session::subagent::run_sync::new_sync_task_id();
+    let (delivered_tx, delivered_rx) = tokio::sync::oneshot::channel();
+    let delivered_tx = parking_lot::Mutex::new(Some(delivered_tx));
+    let run_id = child_id.clone();
+    let run_session = child.clone();
+    let call = tokio::spawn(
+        crate::session::subagent::run_sync::run_sync_with_registered_handoff(
+            child.clone(),
+            child_id.clone(),
+            "fixture".into(),
+            Some(parent_manager),
+            Some(task_id),
+            Some(Arc::new(
+                move |result: &crate::agent::events::BackgroundTaskResult, _| {
+                    if let Some(sender) = delivered_tx.lock().take() {
+                        let _ = sender.send(result.clone());
+                    }
+                    Ok(())
+                },
+            )),
+            move |handoff, _| async move {
+                crate::session::subagent::run_sync::run_sync_subagent(
+                    &run_id,
+                    "fixture",
+                    "/tmp",
+                    10,
+                    None,
+                    None,
+                    None,
+                    None,
+                    None,
+                    None,
+                    None,
+                    None,
+                    None,
+                    built,
+                    run_session,
+                    None,
+                    Some(handoff),
+                )
+                .await
+            },
+        ),
+    );
+    let completion = call.await.unwrap().unwrap();
+    let crate::session::subagent::run_sync::SyncCompletion::Pending(pending) = completion else {
+        panic!("admitted Act tool result must detach as Pending");
+    };
+    assert_eq!(pending.receipt.unprocessed_tool_calls, vec!["call-1"]);
+    let delivered = tokio::time::timeout(Duration::from_secs(5), delivered_rx)
+        .await
+        .expect("parent result must be delivered")
+        .unwrap();
+    assert!(!delivered.success);
+    assert!(!delivered.timed_out);
+    assert!(delivered.output.contains("status: incomplete"));
+    assert!(delivered.output.contains("call-1"));
+}

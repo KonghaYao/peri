@@ -4,10 +4,36 @@
 //! RCRA 重构后，Receive 是循环入口和唯一消息消费点，不再有 End 阶段单独消费 Defer。
 
 use crate::agent::events_v2::{ObserveEvent, RenderEvent, StateEvent};
-use crate::agent::stages::{append_messages_to_transcript, ReceiveInput, ReceiveOutput};
+use crate::agent::stages::append_messages_to_transcript;
+use crate::agent::stages::StageContext;
 use crate::session::{MessageKind, MessageSource, QueuedMessage, QueuedPayload};
 use peri_acp_types::event::ExecutorEvent;
 use peri_acp_types::session::MessageDisposition;
+
+// ─── Receive 阶段类型 ────────────────────────────────────────────────────────
+
+/// Receive 阶段输入
+pub struct ReceiveInput {
+    pub context: StageContext,
+}
+
+/// Receive 阶段输出
+pub struct ReceiveOutput {
+    /// 本轮消费的消息数量（含不唤醒循环的 Info）
+    pub consumed_count: usize,
+    /// 本轮消费的可驱动语义续跑消息数量（Prompt / Defer）
+    pub wake_up_count: usize,
+    /// 预算不足而保留在队列中的后续新增 EnsureProcessing 输入数量。
+    pub budget_deferred_count: usize,
+    /// 本次消费的非空用户 Human 消息身份，供首次输入准备精准处理。
+    pub input_message_ids: Vec<crate::messages::MessageId>,
+    /// 本轮已 canonical 提交、且本应驱动语义迭代的消息身份；由 loop 在
+    /// 判定收尾截止时统一登记为未推理义务，避免 Receive 内部 check-then-check 竞态。
+    pub process_message_ids: Vec<crate::messages::MessageId>,
+    /// 本轮消费到 hook 的显式停止意图（`continue:false`）：循环必须经 Receive
+    /// 唯一退出口结束，不得再发起额外模型请求。
+    pub stop_requested: bool,
+}
 
 fn synthetic_defer_text(message: &QueuedMessage) -> Option<String> {
     match (&message.kind, &message.payload) {

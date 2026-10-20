@@ -76,7 +76,7 @@ pub(super) fn project_run_result(
                 failure: None,
             }
         }
-        LoopResult::SettlementDue => {
+        LoopResult::SettlementDue { .. } => {
             debug!("Workflow agent: settlement window expired");
             ProjectedResult {
                 result: AgentRunResult::Dead {

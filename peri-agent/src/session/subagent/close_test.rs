@@ -212,3 +212,22 @@ async fn close_rejects_late_worker_registration() {
         .unwrap_err();
     assert!(error.contains("registered after session close began"));
 }
+
+#[test]
+fn close_failure_classification_allows_only_unconfirmed_settlement() {
+    assert!(close_failure_allows_terminal_finalization(
+        "Incomplete: child settlement is unconfirmed (x); resources closed"
+    ));
+    assert!(close_failure_allows_terminal_finalization(
+        "Incomplete: child handoff is unconfirmed"
+    ));
+    assert!(!close_failure_allows_terminal_finalization(
+        "Incomplete: child history persistence unconfirmed: append failed"
+    ));
+    assert!(!close_failure_allows_terminal_finalization(
+        "Incomplete: child MCP resource owner unavailable"
+    ));
+    assert!(!close_failure_allows_terminal_finalization(
+        "Incomplete: child resources remain unsettled"
+    ));
+}

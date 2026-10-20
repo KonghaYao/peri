@@ -108,6 +108,10 @@ impl SubagentCloseState {
 
 /// close 已关闭真实资源、但因未确认交接/执行保留 owner 的错误。
 /// 此时调用方仍可先结清认领与持久终态，再报告关闭错误。
+///
+/// 仅限“settlement/handoff unconfirmed”两类：真实资源关闭失败和
+/// `child history persistence unconfirmed` 属于持久化/资源未确认，必须保持
+/// Active，不能借取消认领写入 Cancelled。
 pub(crate) fn close_failure_allows_terminal_finalization(error: &str) -> bool {
     error.starts_with("Incomplete: child handoff is unconfirmed")
         || error.starts_with("Incomplete: child settlement is unconfirmed")

@@ -39,6 +39,18 @@ pub enum ChildRunOutcome {
 pub struct ChildHandoffFailure {
     pub error: crate::agent::async_tasks::handoff::HandoffCommitError,
     pub receipt: Option<ChildHandoffReceipt>,
+    /// 交接提交后 history flush 的附加失败；保留用于父级诊断。
+    pub flush_error: Option<String>,
+}
+
+/// 父级可见的交接失败标签；缺能力与持久化失败必须区分。
+pub(crate) fn handoff_failure_label(failure: &ChildHandoffFailure) -> &'static str {
+    match &failure.error {
+        crate::agent::async_tasks::handoff::HandoffCommitError::MissingCapability => {
+            "handoff_capability_unavailable"
+        }
+        _ => "handoff_persistence_failed",
+    }
 }
 
 /// 将交接提交失败投影为父级可分类错误；缺能力不得混入持久化失败。
@@ -67,6 +79,8 @@ pub struct ChildHandoffReceipt {
     pub tasks: Vec<crate::agent::async_tasks::handoff::PendingHandoffTask>,
     pub message_ids: Vec<peri_acp_types::messages::MessageId>,
     pub message_sequences: Vec<u64>,
+    /// 已准入 Act 产生、尚未被 Reason 读取的 tool call 身份。
+    pub unprocessed_tool_calls: Vec<String>,
     pub canonical_message_id: peri_acp_types::messages::MessageId,
 }
 
@@ -443,6 +457,7 @@ pub struct SubagentFailure {
     reason: SubagentFailureReason,
     handoff: Option<ChildHandoffReceipt>,
     handoff_failure: Option<String>,
+    handoff_flush_failure: Option<String>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -466,6 +481,7 @@ impl SubagentFailure {
             reason: SubagentFailureReason::ExecutionFailed,
             handoff: None,
             handoff_failure: None,
+            handoff_flush_failure: None,
         }
     }
 
@@ -497,6 +513,7 @@ impl SubagentFailure {
             reason: SubagentFailureReason::ChildTasksHandedOff,
             handoff: Some(receipt),
             handoff_failure: None,
+            handoff_flush_failure: None,
         }
     }
 
@@ -525,6 +542,10 @@ impl SubagentFailure {
         self.handoff_failure.as_deref()
     }
 
+    pub fn handoff_flush_failure(&self) -> Option<&str> {
+        self.handoff_flush_failure.as_deref()
+    }
+
     /// 执行（可选）失败且交接写入未确认：原错误与提交失败同时可见。
     pub fn handoff_failed(
         child_thread_id: impl Into<String>,
@@ -546,7 +567,12 @@ impl SubagentFailure {
             execution_finished: true,
             reason,
             handoff: failure.receipt.clone(),
-            handoff_failure: Some(failure.error.to_string()),
+            handoff_failure: Some(format!(
+                "{}: {}",
+                handoff_failure_label(failure),
+                failure.error
+            )),
+            handoff_flush_failure: failure.flush_error.clone(),
         }
     }
 
@@ -590,13 +616,14 @@ impl SubagentFailure {
     }
 
     pub fn public_message(&self) -> String {
-        match &self.handoff_failure {
-            Some(failure) => format!(
-                "{}; handoff_persistence_failed: {failure}",
-                self.error.user_facing_message()
-            ),
-            None => self.error.user_facing_message(),
+        let mut message = self.error.user_facing_message();
+        if let Some(failure) = &self.handoff_failure {
+            message.push_str(&format!("; {failure}"));
         }
+        if let Some(failure) = &self.handoff_flush_failure {
+            message.push_str(&format!("; handoff history flush failed: {failure}"));
+        }
+        message
     }
 }
 

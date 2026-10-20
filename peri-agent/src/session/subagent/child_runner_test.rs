@@ -581,7 +581,7 @@ async fn deadline_before_receive_does_not_consume_new_input() {
         .queue()
         .push(QueuedMessage::prompt(MessageSource::UserInput, message));
     let outcome = run_react_loop(built.context.clone(), 10).await;
-    assert!(matches!(outcome, LoopResult::SettlementDue));
+    assert!(matches!(outcome, LoopResult::SettlementDue { .. }));
     assert!(child.queue().snapshot().iter().any(|message| message
         .message()
         .is_some_and(|message| message.id() == message_id)));
@@ -646,7 +646,13 @@ async fn admitted_reason_completes_act_after_deadline() {
     window.start();
     built.context.async_ctx.child_settlement = Some(window);
     let outcome = run_react_loop(built.context, 10).await;
-    assert!(matches!(outcome, LoopResult::SettlementDue), "{outcome:?}");
+    let LoopResult::SettlementDue {
+        unprocessed_tool_calls,
+    } = outcome
+    else {
+        panic!("expected SettlementDue: {outcome:?}");
+    };
+    assert_eq!(unprocessed_tool_calls, vec!["call-1"]);
     assert_eq!(calls.load(Ordering::SeqCst), 1, "截止后不得发起新模型请求");
     let transcript = child.transcript();
     let entries = transcript.read();
