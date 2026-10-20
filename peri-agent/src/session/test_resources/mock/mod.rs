@@ -134,6 +134,13 @@ pub(crate) struct MockSessionResources {
     pub(crate) inherited_load_gate: Mutex<Option<ResumeLoadGate>>,
     pub(crate) flags_load_gate: Mutex<Option<ResumeLoadGate>>,
     pub(crate) active_write_gate: Mutex<Option<ResumeLoadGate>>,
+    /// 下一次 canonical reminder 提交的阶段门：进入后等待用例放行。
+    reminder_append_gate: Mutex<
+        Option<(
+            tokio::sync::oneshot::Sender<()>,
+            tokio::sync::oneshot::Receiver<()>,
+        )>,
+    >,
     /// 认领事实：`claim_child_resume` 成功返回后置位，结清时复位。
     ///
     /// 阶段门（[`ResumeLoadGate`]）只在**认领后**的快照读取生效：resume 的第一次读取是
@@ -165,6 +172,7 @@ impl MockSessionResources {
             inherited_load_gate: Mutex::new(None),
             flags_load_gate: Mutex::new(None),
             active_write_gate: Mutex::new(None),
+            reminder_append_gate: Mutex::new(None),
             claimed: Arc::new(AtomicBool::new(false)),
             fail_snapshot_at: AtomicUsize::new(0),
             snapshot_reads: AtomicUsize::new(0),
@@ -262,6 +270,19 @@ impl MockSessionResources {
             id,
             status,
         );
+    }
+
+    /// 下一次 canonical reminder 提交进入后暂停，返回 (entered, release)。
+    pub(crate) fn gate_next_reminder_append(
+        &self,
+    ) -> (
+        tokio::sync::oneshot::Receiver<()>,
+        tokio::sync::oneshot::Sender<()>,
+    ) {
+        let (entered_tx, entered_rx) = tokio::sync::oneshot::channel();
+        let (release_tx, release_rx) = tokio::sync::oneshot::channel();
+        *self.reminder_append_gate.lock().unwrap() = Some((entered_tx, release_rx));
+        (entered_rx, release_tx)
     }
 
     /// 切换为只读能力面（测试后端能力差异用）。

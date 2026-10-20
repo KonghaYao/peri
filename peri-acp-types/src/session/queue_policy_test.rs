@@ -32,6 +32,24 @@ fn properties_not_kind_or_severity_decide_activation() {
 }
 
 #[test]
+fn stop_intent_is_bound_to_its_own_execution() {
+    let current = execution();
+    let stop = message(MessagePolicy::stop_current_run(current.clone()));
+    assert_eq!(
+        stop.policy.disposition(&current),
+        MessageDisposition::ProjectOnly,
+        "同一执行的 Stop 不驱动语义续跑，但仍必须可被 Receive 识别"
+    );
+    assert_eq!(
+        stop.policy.disposition(&execution()),
+        MessageDisposition::Suppressed,
+        "旧执行的 Stop 不得影响新执行"
+    );
+    assert!(!stop.policy.ensures_processing());
+    assert!(!stop.policy.notifies_execution());
+}
+
+#[test]
 fn expired_guidance_is_explicitly_suppressed() {
     let queue = MessageQueue::new();
     let guidance = message(MessagePolicy::continue_current_run(execution()));

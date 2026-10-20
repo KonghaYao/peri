@@ -11,6 +11,12 @@ impl peri_acp_types::ports::McpPoolPort for McpClientPool {
             .read()
             .verify_environment_close(root_session_id)
     }
+
+    fn release_agent_session(&self, session_id: &str) -> Result<(), String> {
+        self.session_bindings.write().release(session_id);
+        self.task_scope_tokens.write().remove(session_id);
+        Ok(())
+    }
     fn as_any(&self) -> &dyn std::any::Any {
         self
     }

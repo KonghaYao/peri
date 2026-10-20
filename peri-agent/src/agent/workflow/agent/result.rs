@@ -53,7 +53,7 @@ pub(super) fn project_run_result(
         };
     }
     match loop_result {
-        LoopResult::Completed => {
+        LoopResult::Completed | LoopResult::HookStopped { .. } => {
             let output = crate::session::subagent::extract_last_ai_text(session);
             ProjectedResult {
                 result: completed_result(
@@ -72,6 +72,19 @@ pub(super) fn project_run_result(
                 result: AgentRunResult::Dead {
                     reason: Some("interrupted".into()),
                     detail: Some("Workflow agent execution was interrupted".into()),
+                },
+                failure: None,
+            }
+        }
+        LoopResult::SettlementDue { .. } => {
+            debug!("Workflow agent: settlement window expired");
+            ProjectedResult {
+                result: AgentRunResult::Dead {
+                    reason: Some("settlement-due".into()),
+                    detail: Some(
+                        "Workflow agent stopped admitting new iterations at its settlement deadline"
+                            .into(),
+                    ),
                 },
                 failure: None,
             }

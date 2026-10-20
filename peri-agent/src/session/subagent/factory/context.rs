@@ -63,10 +63,24 @@ pub(super) async fn build_subagent_session_v2(
     let legacy_embedded_instructions = frozen.legacy_embedded_instructions;
     let cancel_arc: Arc<CancellationToken> = Arc::new(cancel_token.clone());
     let mut host = parent_host.as_deref().cloned().unwrap_or_default();
-    let binding = host
-        .mcp_pool
+    let parent_manager = host.task_manager.clone();
+    let existing_owner = parent_manager
         .as_ref()
-        .and_then(|pool| pool.agent_session_binding(&child_thread_id));
+        .and_then(|manager| manager.child_owner(&child_thread_id));
+    let binding = existing_owner
+        .as_ref()
+        .map(|owner| {
+            let inbox = peri_acp_types::session::SessionInbox::new(Arc::new(owner.queue.clone()));
+            (
+                inbox.handle(),
+                owner.manager.clone() as Arc<dyn peri_acp_types::tasks::TaskManager>,
+            )
+        })
+        .or_else(|| {
+            host.mcp_pool
+                .as_ref()
+                .and_then(|pool| pool.agent_session_binding(&child_thread_id))
+        });
     let queue = binding
         .as_ref()
         .map(|(inbox, _)| inbox.queue().clone())
@@ -88,6 +102,32 @@ pub(super) async fn build_subagent_session_v2(
         }
         None => Arc::new(crate::agent::async_tasks::TaskManager::new()),
     });
+    host.child_owner = match existing_owner {
+        Some(owner) => Some(owner),
+        None => match &host.task_manager {
+            Some(manager) => {
+                let parent_id = host
+                    .parent_thread_id
+                    .clone()
+                    .unwrap_or_else(|| child_thread_id.clone());
+                let owner = super::super::resource_owner::ParkedChildOwner::new(
+                    child_thread_id.clone(),
+                    parent_id,
+                    manager.clone(),
+                    session.queue().clone(),
+                    session_resources.clone(),
+                    host.mcp_pool.as_ref().map(Arc::downgrade),
+                );
+                // 父宿主可寻址即登记；嵌入/无父路径仍由 child host 自身持有 owner，
+                // 关闭时可取消资源并显式报告缺失的 canonical 能力。
+                if let Some(parent) = &parent_manager {
+                    parent.register_child_owner(owner.clone())?;
+                }
+                Some(owner)
+            }
+            None => None,
+        },
+    };
     host.parent_thread_id = Some(child_thread_id.clone());
     host.on_bg_complete = Some(crate::session::bg_complete::task_bg_complete_callback(
         crate::agent::async_tasks::delivery::SessionTerminalDelivery::for_queue(
@@ -98,7 +138,6 @@ pub(super) async fn build_subagent_session_v2(
         let inbox = peri_acp_types::session::SessionInbox::new(Arc::new(session.queue().clone()));
         pool.bind_agent_session(&child_thread_id, inbox.handle(), manager.clone());
     }
-    session.set_subagent_host(host);
 
     // transcript 绑定（ancestor 先于 with_persistence，顺序不可反）
     {
@@ -116,6 +155,12 @@ pub(super) async fn build_subagent_session_v2(
             None => with_ancestor,
         };
     }
+
+    if let Some(owner) = &host.child_owner {
+        let writer = session.transcript().read().persist_tx_handle();
+        owner.set_writer(writer);
+    }
+    session.set_subagent_host(host);
 
     // 子链装配（frozen 数据注入链上下文；链序由 assembler 实现方保持）。
     // meta_harness_disabled 从 frozen 状态投影（spawn/resume 两条路径都复制

@@ -18,6 +18,7 @@ mod null_llm;
 mod queue_to_transcript;
 pub mod reason;
 pub mod receive;
+pub use receive::{ReceiveInput, ReceiveOutput};
 pub mod tool_dispatch;
 pub use invocation_context::{
     ExecutionEntryOrigin, InvocationContext, ModelTurnFacts, PostHookSkipSink,
@@ -58,6 +59,13 @@ pub type SharedToolMap = Arc<RwLock<BTreeMap<String, Arc<dyn BaseTool>>>>;
 pub enum LoopResult {
     /// 正常结束（无更多消息）
     Completed,
+    /// 本次 child 收尾窗口到期，不再准入新语义迭代；由 runner 交接资源。
+    /// `unprocessed_tool_calls` 是已准入 Act 产生、尚未被下一次 Reason 读取的
+    /// tool call 身份；它们只存在于 transcript，不在 MQ。
+    SettlementDue { unprocessed_tool_calls: Vec<String> },
+    /// hook 显式停止（PostToolBatch `continue:false`）：不再发起模型请求。
+    /// 已准入 Act 的 tool call 只存在于 transcript，必须随结果交给 runner。
+    HookStopped { unprocessed_tool_calls: Vec<String> },
     /// 被中断
     Interrupted,
     /// 错误
@@ -207,6 +215,9 @@ impl StageContext {
                 budget_recovery: Arc::new(parking_lot::Mutex::new(Default::default())),
             },
             async_ctx: AsyncContext {
+                child_settlement: None,
+                received_after_deadline: Arc::default(),
+                unprocessed_tool_calls: Arc::default(),
                 idle_wait_enabled: false,
                 idle_should_wait: None,
                 pending_handoff: None,
@@ -259,6 +270,9 @@ impl StageContext {
                 budget_recovery: Arc::new(parking_lot::Mutex::new(Default::default())),
             },
             async_ctx: AsyncContext {
+                child_settlement: None,
+                received_after_deadline: Arc::default(),
+                unprocessed_tool_calls: Arc::default(),
                 idle_wait_enabled: false,
                 idle_should_wait: None,
                 pending_handoff: None,
@@ -320,28 +334,6 @@ pub struct CompactInput {
 pub struct CompactOutput {
     /// 是否执行了 compact（用于事件追踪）
     pub compacted: bool,
-}
-
-// ─── Receive 阶段类型 ────────────────────────────────────────────────────────
-
-/// Receive 阶段输入
-pub struct ReceiveInput {
-    pub context: StageContext,
-}
-
-/// Receive 阶段输出
-pub struct ReceiveOutput {
-    /// 本轮消费的消息数量（含不唤醒循环的 Info）
-    pub consumed_count: usize,
-    /// 本轮消费的可驱动语义续跑消息数量（Prompt / Defer）
-    pub wake_up_count: usize,
-    /// 预算不足而保留在队列中的后续新增 EnsureProcessing 输入数量。
-    pub budget_deferred_count: usize,
-    /// 本次消费的非空用户 Human 消息身份，供首次输入准备精准处理。
-    pub input_message_ids: Vec<crate::messages::MessageId>,
-    /// 本轮消费到 hook 的显式停止意图（`continue:false`）：循环必须经 Receive
-    /// 唯一退出口结束，不得再发起额外模型请求。
-    pub stop_requested: bool,
 }
 
 // ─── Reason 阶段类型 ─────────────────────────────────────────────────────────
@@ -514,6 +506,15 @@ where
 /// 控制流：Receive → Compact → Reason → Act → (回 Receive)。
 /// Receive 是循环入口，也是退出判断点。
 /// 返回循环最终结果（Completed / Interrupted / Error）。
+/// child 收尾截止：到期后不再消费新输入或准入新语义迭代。
+pub(crate) fn settlement_due(context: &StageContext) -> bool {
+    context
+        .async_ctx
+        .child_settlement
+        .as_ref()
+        .is_some_and(|window| window.expired())
+}
+
 pub async fn run_react_loop(context: StageContext, max_iterations: usize) -> LoopResult {
     let mut loop_state = LoopState::default();
     let mut semantic_iterations = 0usize;
@@ -530,6 +531,11 @@ pub async fn run_react_loop(context: StageContext, max_iterations: usize) -> Loo
             // 检查 cancel
             if context.session.turn.is_cancelled() {
                 return LoopResult::Interrupted;
+            }
+            if settlement_due(&context) {
+                return LoopResult::SettlementDue {
+                    unprocessed_tool_calls: context.async_ctx.unprocessed_tool_calls.lock().clone(),
+                };
             }
 
             // ── Receive（循环入口，也是退出判断点）──
@@ -549,8 +555,16 @@ pub async fn run_react_loop(context: StageContext, max_iterations: usize) -> Loo
             };
 
             // Hook 显式停止意图（PostToolBatch `continue:false`）：Receive 是循环的
-            // 唯一退出口；消费到停止意图直接以 Completed 结束，不再发起模型请求。
+            // 唯一退出口；消费到停止意图返回 `HookStopped`，不再发起模型请求。
+            // 子 Agent 由 runner 按未推理义务交接；主会话由 executor 映射为正常
+            // Done。停止意图已绑定执行身份，旧 run 的 Stop 不会终止新执行。
             if receive_out.stop_requested {
+                // 同批已提交但不会推理的消息保留为交接义务。
+                context
+                    .async_ctx
+                    .received_after_deadline
+                    .lock()
+                    .extend(receive_out.process_message_ids.clone());
                 if let Some(flag) = &context.async_ctx.hook_stop_requested {
                     flag.store(true, Ordering::Release);
                 }
@@ -558,7 +572,21 @@ pub async fn run_react_loop(context: StageContext, max_iterations: usize) -> Loo
                     consumed = receive_out.consumed_count,
                     "Receive: hook stop intent consumed; exiting run without further model request"
                 );
-                return LoopResult::Completed;
+                return LoopResult::HookStopped {
+                    unprocessed_tool_calls: context.async_ctx.unprocessed_tool_calls.lock().clone(),
+                };
+            }
+
+            // Receive 的持久化等待可能跨过 D：已落库结果保留，但不再准入新语义迭代。
+            if settlement_due(&context) {
+                context
+                    .async_ctx
+                    .received_after_deadline
+                    .lock()
+                    .extend(receive_out.process_message_ids.clone());
+                return LoopResult::SettlementDue {
+                    unprocessed_tool_calls: context.async_ctx.unprocessed_tool_calls.lock().clone(),
+                };
             }
 
             // 退出判断：本轮没有可唤醒消息且上一轮无工具调用 → 检查是否该退出。
@@ -748,11 +776,14 @@ pub async fn run_react_loop(context: StageContext, max_iterations: usize) -> Loo
                     .as_ref()
                     .and_then(|probe| probe())
                 {
-                    crate::agent::async_tasks::handoff::write_pending_handoff(
+                    if let Err(error) = crate::agent::async_tasks::handoff::write_pending_handoff(
                         &context.session,
                         &handoff,
                     )
-                    .await;
+                    .await
+                    {
+                        return LoopResult::Error(anyhow::anyhow!(error).into());
+                    }
                 }
                 break 'rcra;
             }
@@ -849,6 +880,9 @@ pub async fn run_react_loop(context: StageContext, max_iterations: usize) -> Loo
                 Err(e) => return e,
             };
 
+            // Reason 成功后上一批义务已被读取；失败时仍保留供 runner 交接。
+            context.async_ctx.unprocessed_tool_calls.lock().clear();
+
             // 完整工具仍照常执行；无工具截断必须与自然完成区分，不能靠空队列判成功。
             let truncated_without_tools = reason_out.reasoning.stop_reason
                 == peri_model::StopReason::MaxTokens
@@ -861,6 +895,12 @@ pub async fn run_react_loop(context: StageContext, max_iterations: usize) -> Loo
                 .filter(|_| !reason_out.reasoning.needs_tool_call());
 
             // ── Act ──
+            let unprocessed_tool_calls: Vec<String> = reason_out
+                .reasoning
+                .tool_calls
+                .iter()
+                .map(|call| call.id.clone())
+                .collect();
             let act_out = match run_stage(&context, Stage::Act, || async {
                 act::run_act(ActInput {
                     context: context.clone(),
@@ -876,6 +916,11 @@ pub async fn run_react_loop(context: StageContext, max_iterations: usize) -> Loo
             };
 
             loop_state.has_tool_calls = act_out.has_tool_calls;
+            *context.async_ctx.unprocessed_tool_calls.lock() = if act_out.has_tool_calls {
+                unprocessed_tool_calls
+            } else {
+                Vec::new()
+            };
             if let Some(interruption) = stream_interruption {
                 if context.session.turn.is_cancelled() {
                     return LoopResult::Interrupted;

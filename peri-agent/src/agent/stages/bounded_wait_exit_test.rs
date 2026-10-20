@@ -19,8 +19,11 @@ fn parked_context(
     let session = crate::session::Session::new(
         Arc::from("/tmp/bounded-wait-exit"),
         crate::session::FrozenContext::builder().build(),
-        None,
+        Some("bounded-wait-root".into()),
     );
+    let store = crate::session::test_resources::mock::MockSessionResources::new();
+    *session.transcript().write() = crate::session::MessageTranscript::new()
+        .with_persistence(store, "bounded-wait-root".into());
     let wait = std::sync::Arc::clone(&bounded);
     let handoff = std::sync::Arc::clone(&bounded);
     let deadline = std::sync::Arc::clone(&bounded);

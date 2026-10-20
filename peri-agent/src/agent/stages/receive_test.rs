@@ -878,6 +878,67 @@ async fn hook_stop_intent_requests_stop_without_waking_the_run() {
     );
 }
 
+fn bound_stop(execution: peri_acp_types::session::ExecutionBinding) -> QueuedMessage {
+    use peri_acp_types::system_reminder::{ReminderCategory, ReminderDelivery, ReminderSeverity};
+    let reminder = crate::session::producer_reminders::trusted_reminder(
+        ReminderCategory::Lifecycle,
+        "hook",
+        "post_tool_batch_stop",
+        ReminderSeverity::Info,
+        ReminderDelivery::Configurable,
+        "hook requested stop".into(),
+        None,
+        serde_json::json!({}),
+    );
+    QueuedMessage::system_reminder(MessageKind::Info, MessageSource::HookStopIntent, reminder)
+        .with_policy(peri_acp_types::session::MessagePolicy::stop_current_run(
+            execution,
+        ))
+}
+
+/// 同一执行的 Stop 仍经 Receive 唯一退出口生效。
+#[tokio::test]
+async fn stop_intent_bound_to_current_execution_stops() {
+    let context = make_context();
+    let execution = context.session.turn.execution_binding();
+    context.session.queue.push(bound_stop(execution));
+
+    let output = run_receive(ReceiveInput {
+        context: context.clone(),
+    })
+    .await
+    .unwrap();
+
+    assert!(output.stop_requested);
+    assert_eq!(output.consumed_count, 1);
+    assert_eq!(output.wake_up_count, 0);
+    assert!(
+        context.session.queue.suppressed_messages().is_empty(),
+        "当前执行的 Stop 不得被当作过期消息"
+    );
+}
+
+/// resume 后新执行收到旧 Stop：抑制、不停新 run、不写 transcript。
+#[tokio::test]
+async fn stop_intent_from_previous_execution_is_suppressed() {
+    let previous = make_context().session.turn.execution_binding();
+    let context = make_context();
+    assert_ne!(context.session.turn.execution_binding(), previous);
+    context.session.queue.push(bound_stop(previous));
+
+    let output = run_receive(ReceiveInput {
+        context: context.clone(),
+    })
+    .await
+    .unwrap();
+
+    assert!(!output.stop_requested, "旧 Stop 不得终止新执行");
+    assert_eq!(output.consumed_count, 1);
+    assert_eq!(output.wake_up_count, 0);
+    assert_eq!(context.session.queue.suppressed_messages().len(), 1);
+    assert!(context.session.transcript.read().is_empty());
+}
+
 #[tokio::test]
 async fn receive_protocol_event_waits_when_state_channel_is_full() {
     use crate::agent::events_v2::{EventBus, EventBusConfig};

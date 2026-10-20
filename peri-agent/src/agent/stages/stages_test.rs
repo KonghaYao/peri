@@ -63,6 +63,7 @@ fn test_receive_input_output_contract() {
         wake_up_count: 0,
         budget_deferred_count: 0,
         input_message_ids: Vec::new(),
+        process_message_ids: Vec::new(),
         stop_requested: false,
     };
     assert_eq!(output.consumed_count, 0);
@@ -274,3 +275,6 @@ mod startup_gate_tests;
 
 #[path = "compaction_loop_test.rs"]
 mod compaction_loop_tests;
+
+#[path = "stop_intent_test.rs"]
+mod stop_intent_tests;

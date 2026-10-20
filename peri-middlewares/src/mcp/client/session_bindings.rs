@@ -84,4 +84,9 @@ impl SessionBindings {
             binding.registered = false;
         }
     }
+
+    /// 已确认任务与消息结清后的子会话释放。
+    pub(crate) fn release(&mut self, session: &str) {
+        self.current.remove(session);
+    }
 }

@@ -117,17 +117,21 @@ async fn subagent_terminal_write_failure_logs_and_background_reports_failure() {
                 Ok(())
             }));
         }
-        let spawned = SessionFactory::spawn_subagent(None, config)
-            .await
-            .expect("终态状态 patch 失败不能中断原流程");
-        if background {
+        let spawned = SessionFactory::spawn_subagent(None, config).await;
+        let line = if background {
+            let spawned = spawned.expect("后台注册应成功，终态失败经结果交付");
             wait_execution_idle(&manager).await;
             assert_eq!(*delivered.lock(), vec![false]);
             assert_eq!(manager.snapshot().tasks[0].status, "failed");
-        }
-        let line = matching_log(&logs, "subagent terminal status write failed");
-        assert!(line.contains(if background { "ERROR" } else { "WARN" }));
-        assert!(line.contains(&format!("thread_id={}", spawned.child_thread_id)));
+            let line = matching_log(&logs, "subagent terminal status write failed");
+            assert!(line.contains(&format!("thread_id={}", spawned.child_thread_id)));
+            line
+        } else {
+            let error = spawned.err().expect("同步终态写入失败必须返回错误");
+            assert!(error.to_string().contains("terminal_status_persist_failed"));
+            matching_log(&logs, "terminal_status_persist_failed")
+        };
+        assert!(line.contains("ERROR"));
         let error = peri_acp_types::session_resources::SessionResourceError::new(
             peri_acp_types::session_resources::SessionResourceErrorKind::Unsupported,
         );

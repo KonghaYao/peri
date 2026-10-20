@@ -105,6 +105,7 @@ pub enum PersistOp {
 mod entry;
 mod persistence;
 mod persistence_port;
+pub(crate) use persistence_port::FlushError;
 
 pub use entry::{StagedData, TranscriptEntry};
 

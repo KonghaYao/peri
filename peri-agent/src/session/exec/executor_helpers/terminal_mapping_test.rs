@@ -145,6 +145,41 @@ fn completed_maps_to_success_no_failure() {
 }
 
 #[test]
+fn hook_stopped_maps_to_success_no_failure() {
+    let terminal = classify_loop_terminal(
+        &LoopResult::HookStopped {
+            unprocessed_tool_calls: vec!["call-1".into()],
+        },
+        false,
+    );
+    assert!(terminal.ok, "主会话 HookStop 是正常结束，不是失败");
+    assert_eq!(terminal.stop_reason, PromptStopReason::EndTurn);
+    assert_eq!(terminal.turn_status, TurnStatus::Done);
+    assert_eq!(terminal.turn_error_kind, None);
+    assert!(
+        terminal.failure.is_none(),
+        "HookStop 不得升级为 fatal failure"
+    );
+}
+
+#[test]
+fn settlement_due_is_defensive_failure_not_panic() {
+    let terminal = classify_loop_terminal(
+        &LoopResult::SettlementDue {
+            unprocessed_tool_calls: Vec::new(),
+        },
+        false,
+    );
+    assert!(!terminal.ok, "主 executor 不得把 child 收尾结果当成功");
+    assert_eq!(terminal.turn_status, TurnStatus::Error);
+    assert_eq!(terminal.turn_error_kind, Some(TurnErrorKind::Internal));
+    assert!(
+        terminal.failure.is_some(),
+        "混用边界必须显式报告，而不是 panic 或静默完成"
+    );
+}
+
+#[test]
 fn completed_after_late_cancel_remains_committed_success() {
     let terminal = classify_loop_terminal(&LoopResult::Completed, true);
     assert!(terminal.ok);

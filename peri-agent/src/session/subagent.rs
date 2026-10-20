@@ -25,12 +25,17 @@ mod close;
 mod directives;
 mod factory;
 mod lifecycle;
+mod resource_owner;
 pub use close::{close_subagent_session_scope, SubagentCloseState};
+pub use resource_owner::{ChildExecutionPermit, ParkedChildOwner};
 mod run_sync;
 mod types;
 mod util;
 mod v2_bridge;
 
+pub use crate::agent::async_tasks::handoff::{
+    commit_child_handoff, ChildSettlementWindow, HandoffCommitError,
+};
 pub use directives::{build_bg_fork_directive, build_fork_directive, build_prediction_directive};
 pub use factory::SessionFactory;
 pub(crate) use lifecycle::flush_session_history;
@@ -38,6 +43,7 @@ pub(crate) use lifecycle::{
     on_subagent_stop_handler, BgCleanupGuard, BgStopEmitV2, DeregisterGuard,
 };
 pub use types::{
+    ChildHandoffFailure, ChildHandoffReason, ChildHandoffReceipt, ChildRunOutcome,
     ForkDirectiveKind, SubagentCancelPolicy, SubagentChainAssembler, SubagentChainContext,
     SubagentFailure, SubagentHost, SubagentLifecycleStart, SubagentLifecycleStop,
     SubagentLlmSource, SubagentResumeConfig, SubagentRunMode, SubagentSpawnConfig, SubagentSpawned,

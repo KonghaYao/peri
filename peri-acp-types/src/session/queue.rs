@@ -200,6 +200,11 @@ impl Default for MessageQueue {
 }
 
 impl MessageQueue {
+    /// 冻结交接引用，不消费消息、不改变唤醒或接纳序号。
+    pub fn snapshot(&self) -> Vec<QueuedMessage> {
+        self.state.messages.lock().iter().cloned().collect()
+    }
+
     /// 创建空队列
     pub fn new() -> Self {
         Self {
