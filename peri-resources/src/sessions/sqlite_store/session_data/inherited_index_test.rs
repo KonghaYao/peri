@@ -514,3 +514,79 @@ async fn duplicate_payload_ids_are_rejected_before_writing() {
         .unwrap();
     assert_eq!(written, 0);
 }
+
+/// [回归测试 R07] 内存缓存命中时不得再读派生索引。
+///
+/// 先把 layout 读进缓存，再把 payload 索引表换成坏形状：缓存命中路径若仍执行
+/// `inherited_index::read`，`PAYLOADS_SQL` 会因缺列失败；正确实现应在读索引之前
+/// 返回缓存，因此两条读取都必须成功。
+#[tokio::test]
+async fn hot_cache_hit_does_not_read_payload_index() {
+    let tmp = tempfile::tempdir().unwrap();
+    let store = store(&tmp).await;
+    let payloads = payloads(4);
+    let cwd = tmp.path().to_string_lossy().into_owned();
+    let (child, _parent) = child_thread(&store, &cwd).await;
+    store
+        .store_inherited_context(&child, &context(&payloads))
+        .await
+        .unwrap();
+
+    let data = SqliteSessionData::new(Arc::clone(&store.database));
+    let mut connection = data.database.pool.acquire().await.unwrap();
+    let warm = match data
+        .read_inherited_layout_cached(&mut connection, &child)
+        .await
+        .unwrap()
+    {
+        InheritedFactsRead::Facts {
+            layout: Some(layout),
+            ..
+        } => layout,
+        _ => panic!("首次读取必须建立布局缓存"),
+    };
+
+    // 只破坏 payload 索引：snapshot 行仍可读，旧的“先读索引”顺序会在 fetch_all 失败。
+    sqlx::raw_sql(
+        "DROP TABLE inherited_payload_index;
+         CREATE TABLE inherited_payload_index (bogus INTEGER);",
+    )
+    .execute(&store.database.pool)
+    .await
+    .unwrap();
+
+    let summary = match data
+        .read_inherited_summary_cached(&mut connection, &child)
+        .await
+        .unwrap()
+    {
+        InheritedSummaryRead::Facts {
+            snapshot: Some(snapshot),
+        } => snapshot,
+        _ => panic!("热缓存命中不得因索引表损坏而失败"),
+    };
+    assert_eq!(summary.entry_count, payloads.len());
+    let layout = match data
+        .read_inherited_layout_cached(&mut connection, &child)
+        .await
+        .unwrap()
+    {
+        InheritedFactsRead::Facts {
+            layout: Some(layout),
+            ..
+        } => layout,
+        _ => panic!("热缓存命中不得因索引表损坏而失败"),
+    };
+    assert_eq!(layout.len(), warm.len());
+    assert_eq!(
+        layout
+            .payloads
+            .iter()
+            .map(|payload| payload.id)
+            .collect::<Vec<_>>(),
+        warm.payloads
+            .iter()
+            .map(|payload| payload.id)
+            .collect::<Vec<_>>()
+    );
+}

@@ -74,7 +74,8 @@ pub(super) const COUNT_LEGACY_TABLES_SQL: &str = "SELECT COUNT(*) FROM sqlite_ma
 /// 单行元数据表：`singleton` 固定 0，主键即身份竞争的同一唯一键空间。
 pub(super) const STORE_META_TABLE: &str = "peri_store_meta";
 
-const TABLE_EXISTS_SQL: &str = "SELECT name FROM sqlite_master WHERE type = 'table' AND name = ?1";
+pub(super) const TABLE_EXISTS_SQL: &str =
+    "SELECT name FROM sqlite_master WHERE type = 'table' AND name = ?1";
 
 const SELECT_META_SQL: &str =
     "SELECT schema_version, store_id, contract FROM peri_store_meta WHERE singleton = 0";

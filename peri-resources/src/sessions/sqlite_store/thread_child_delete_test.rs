@@ -16,13 +16,13 @@
 //! 安全网。删掉显式删除语句，本机外键打开时照样全绿，只有这里会红。
 
 use peri_acp_types::session_resources::{FrozenSnapshotBytes, NewSession, NewSessionMeta};
-use peri_acp_types::store::PersistedPayload;
+use peri_acp_types::store::{InheritedContext, PersistedPayload};
 use peri_acp_types::workspace::{ResolvedWorkspace, SessionBinding};
 use sqlx::sqlite::{SqliteConnectOptions, SqlitePoolOptions};
 use sqlx::SqlitePool;
 use tempfile::TempDir;
 
-use super::session_rows::THREAD_CHILD_DELETES;
+use super::session_rows::{THREAD_CHILD_DELETES, THREAD_DERIVED_DELETES};
 use super::*;
 use crate::sessions::data::SessionDataPort;
 
@@ -114,6 +114,21 @@ async fn seed(fixture: &NoCascade, id: &str, parent: Option<&str>) {
         )
         .await
         .unwrap();
+    // inherited 派生索引没有 threads 外键；删除路径仍必须清理（R08）。
+    fixture
+        .store
+        .database
+        .store_inherited_context(
+            &id.to_owned(),
+            &InheritedContext {
+                payloads: vec![PersistedPayload::Message(BaseMessage::human(format!(
+                    "{id} inherited"
+                )))],
+                flags: Default::default(),
+            },
+        )
+        .await
+        .unwrap();
 }
 
 // ─── 期望集合：从真实 schema 派生，不从生产语句反推 ───────────────────────────
@@ -185,7 +200,115 @@ async fn assert_no_orphans(pool: &SqlitePool, tables: &[(String, String)], ids: 
     }
 }
 
+/// 一条 thread 的 inherited snapshot id。
+///
+/// payload 行只带 `snapshot_id`；snapshot 行删掉后再按线程反查 payload 会得到空集，
+/// 因此必须在删除前记录 id，删除后按 id 直接核对，才能发现无主 payload 行。
+async fn inherited_snapshot_ids(pool: &SqlitePool, id: &str) -> Vec<String> {
+    let rows: Vec<(String,)> =
+        sqlx::query_as("SELECT snapshot_id FROM inherited_snapshot_index WHERE thread_id = ?1")
+            .bind(id)
+            .fetch_all(pool)
+            .await
+            .unwrap();
+    rows.into_iter().map(|(snapshot_id,)| snapshot_id).collect()
+}
+
+async fn inherited_payload_count(pool: &SqlitePool, snapshot_id: &str) -> i64 {
+    let (payloads,): (i64,) =
+        sqlx::query_as("SELECT COUNT(*) FROM inherited_payload_index WHERE snapshot_id = ?1")
+            .bind(snapshot_id)
+            .fetch_one(pool)
+            .await
+            .unwrap();
+    payloads
+}
+
+/// 夹具自证并返回 thread 的 snapshot id（删除后仍要按这些 id 查 payload）。
+async fn assert_inherited_rows_present(pool: &SqlitePool, ids: &[&str]) -> Vec<String> {
+    let mut snapshots = Vec::new();
+    for id in ids {
+        let thread_snapshots = inherited_snapshot_ids(pool, id).await;
+        let payloads = {
+            let mut total = 0;
+            for snapshot_id in &thread_snapshots {
+                total += inherited_payload_count(pool, snapshot_id).await;
+            }
+            total
+        };
+        assert!(
+            !thread_snapshots.is_empty() && payloads > 0,
+            "夹具必须让 {id} 有 inherited 派生索引行（snapshot={}, payload={payloads}）",
+            thread_snapshots.len()
+        );
+        snapshots.extend(thread_snapshots);
+    }
+    snapshots
+}
+
+async fn assert_inherited_rows_absent(pool: &SqlitePool, ids: &[&str], snapshots: &[String]) {
+    for id in ids {
+        let (snapshots_for_thread,): (i64,) =
+            sqlx::query_as("SELECT COUNT(*) FROM inherited_snapshot_index WHERE thread_id = ?1")
+                .bind(id)
+                .fetch_one(pool)
+                .await
+                .unwrap();
+        assert_eq!(
+            snapshots_for_thread, 0,
+            "{id} 删除后仍留下 inherited snapshot 索引行（R08）"
+        );
+    }
+    for snapshot_id in snapshots {
+        assert_eq!(
+            inherited_payload_count(pool, snapshot_id).await,
+            0,
+            "{snapshot_id} 的 inherited payload 索引行未随会话删除（R08）"
+        );
+    }
+}
+
 // ─── 期望集合 vs 生产语句 ─────────────────────────────────────────────────────
+
+/// 派生索引表不参与 `THREAD_CHILD_DELETES` 的外键契约，但删除路径必须显式清理。
+#[tokio::test]
+async fn test_derived_index_tables_are_deleted_explicitly() {
+    let fixture = without_cascade().await;
+    let tables: Vec<(String,)> = sqlx::query_as(
+        "SELECT name FROM sqlite_master WHERE type = 'table'
+         AND name IN ('inherited_snapshot_index', 'inherited_payload_index')",
+    )
+    .fetch_all(&fixture.store.database.pool)
+    .await
+    .unwrap();
+    assert_eq!(
+        tables.len(),
+        2,
+        "当前 schema 必须包含两张 inherited 派生索引表"
+    );
+    for (table, statement) in THREAD_DERIVED_DELETES {
+        assert!(
+            tables.iter().any(|(name,)| name == table),
+            "THREAD_DERIVED_DELETES 里的 {table} 不在 schema 中：表名写错"
+        );
+        assert!(
+            statement.contains(table),
+            "声明了 {table}，语句却删的是别的表：{statement}"
+        );
+    }
+    let payload_position = THREAD_DERIVED_DELETES
+        .iter()
+        .position(|(table, _)| *table == "inherited_payload_index")
+        .expect("THREAD_DERIVED_DELETES 必须显式声明 inherited_payload_index");
+    let snapshot_position = THREAD_DERIVED_DELETES
+        .iter()
+        .position(|(table, _)| *table == "inherited_snapshot_index")
+        .expect("THREAD_DERIVED_DELETES 必须显式声明 inherited_snapshot_index");
+    assert!(
+        payload_position < snapshot_position,
+        "payload 索引必须先于 snapshot 索引删除"
+    );
+}
 
 #[tokio::test]
 async fn test_every_thread_referencing_table_is_deleted_explicitly() {
@@ -236,13 +359,33 @@ async fn test_data_delete_tree_leaves_no_orphans_without_cascade() {
     let pool = fixture.store.database.pool.clone();
     let tables = schema_child_tables(&pool).await;
     assert_child_rows_present(&pool, &tables, &[parent, child]).await;
+    let inherited_snapshots = assert_inherited_rows_present(&pool, &[parent, child]).await;
 
     fixture.data.delete_tree(&parent.to_owned()).await.unwrap();
 
     assert_no_orphans(&pool, &tables, &[parent, child]).await;
+    assert_inherited_rows_absent(&pool, &[parent, child], &inherited_snapshots).await;
     for id in [parent, child] {
         assert_eq!(rows_for(&pool, "threads", "id", id).await, 0, "{id} 未删除");
     }
+}
+
+/// 可选派生表缺失（旧库/手工删表）：删除路径不得因缺表失败。
+#[tokio::test]
+async fn test_delete_tree_tolerates_missing_optional_index_tables() {
+    let fixture = without_cascade().await;
+    let id = "s-missing-derived";
+    seed(&fixture, id, None).await;
+    sqlx::raw_sql("DROP TABLE inherited_payload_index; DROP TABLE inherited_snapshot_index")
+        .execute(&fixture.store.database.pool)
+        .await
+        .unwrap();
+
+    fixture.data.delete_tree(&id.to_owned()).await.unwrap();
+    assert_eq!(
+        rows_for(&fixture.store.database.pool, "threads", "id", id).await,
+        0
+    );
 }
 
 /// 数据面 `revoke_unpublished_session`（单条未发布会话）。
@@ -263,6 +406,7 @@ async fn test_revoke_unpublished_session_leaves_no_orphans_without_cascade() {
     let pool = fixture.store.database.pool.clone();
     let tables = schema_child_tables(&pool).await;
     assert_child_rows_present(&pool, &tables, &[id]).await;
+    let inherited_snapshots = assert_inherited_rows_present(&pool, &[id]).await;
 
     fixture
         .data
@@ -271,6 +415,7 @@ async fn test_revoke_unpublished_session_leaves_no_orphans_without_cascade() {
         .unwrap();
 
     assert_no_orphans(&pool, &tables, &[id]).await;
+    assert_inherited_rows_absent(&pool, &[id], &inherited_snapshots).await;
     assert_eq!(rows_for(&pool, "threads", "id", id).await, 0, "{id} 未删除");
 }
 
@@ -283,9 +428,11 @@ async fn test_bridge_delete_thread_leaves_no_orphans_without_cascade() {
     let pool = fixture.store.database.pool.clone();
     let tables = schema_child_tables(&pool).await;
     assert_child_rows_present(&pool, &tables, &[id]).await;
+    let inherited_snapshots = assert_inherited_rows_present(&pool, &[id]).await;
 
     fixture.store.delete_thread(&id.to_owned()).await.unwrap();
 
     assert_no_orphans(&pool, &tables, &[id]).await;
+    assert_inherited_rows_absent(&pool, &[id], &inherited_snapshots).await;
     assert_eq!(rows_for(&pool, "threads", "id", id).await, 0, "{id} 未删除");
 }

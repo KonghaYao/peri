@@ -204,18 +204,18 @@ impl BridgeState {
 
     /// 归档当前轮次中可完成的展示结果。
     ///
-    /// running subagent 存在时先搬走第一个仍会增长的实体之前的稳定前缀，再消费
-    /// 已完成子 Agent；容器保留至剩余子 Agent 完成，避免重复提交仍在增长的容器。
+    /// running subagent 存在时只搬走第一个仍会增长的实体之前的稳定前缀。已完成但位于
+    /// 运行中分组之后的子 Agent **不能**单独抽到 committed：committed 整段渲染在
+    /// current_turn 之前，抽走会让它跨越仍在运行的分组，破坏原时间线顺序（R05）。
     fn archive_current_turn(&mut self) {
         let start = self.committed.len();
         if self.current_turn.has_running_subagent() {
-            // 运行中 subagent 不应让整轮常驻：它之前的文本/已完成工具/已完成
-            // 子 Agent 都已稳定，先按 segment 顺序交给 committed。
+            // 运行中 subagent 不应让整轮常驻：只把第一个仍会增长的实体之前的稳定
+            // 前缀按 segment 顺序交给 committed——文本、已完成工具，以及已停止且已
+            // 与父卡片配对的子 Agent。前缀之后的内容仍保留在容器里，等运行中的分组
+            // 结束后按原顺序整体归档。
             for vm in self.current_turn.take_archivable_prefix() {
                 self.committed.push_back(vm);
-            }
-            for mut subagent in self.current_turn.take_completed_subagents() {
-                self.committed.push_back(subagent.view_model());
             }
         } else {
             // 整轮归档沿用 segment 顺序，不能先抽走子 Agent 再追加根内容。
@@ -317,7 +317,7 @@ impl BridgeState {
     /// 将 current_turn 已产出内容 flush 到 committed，然后 reset。
     ///
     /// 需要保证时序正确性的位置会调用该入口；running subagent 不会清除 current_turn，
-    /// 但已完成的 subagent 会先从容器消费并归档。
+    /// 只归档它之前的稳定前缀，其余内容保留到分组结束后按原顺序整体提交。
     fn flush_current_turn(&mut self) {
         let has_running_subagent = self.current_turn.has_running_subagent();
         if has_running_subagent {

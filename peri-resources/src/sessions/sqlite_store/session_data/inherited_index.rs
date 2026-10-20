@@ -29,9 +29,10 @@ pub(super) const SNAPSHOT_SQL: &str = "SELECT snapshot_id, payload_bytes, entry_
     FROM inherited_snapshot_index WHERE thread_id = ?1 ORDER BY rowid DESC LIMIT 1";
 pub(super) const PAYLOADS_SQL: &str = "SELECT entry_id, raw_start, raw_len, logical_len
     FROM inherited_payload_index WHERE snapshot_id = ?1 ORDER BY ordinal";
-const DELETE_PAYLOADS_SQL: &str = "DELETE FROM inherited_payload_index WHERE snapshot_id IN
-    (SELECT snapshot_id FROM inherited_snapshot_index WHERE thread_id = ?1)";
-const DELETE_SNAPSHOT_SQL: &str = "DELETE FROM inherited_snapshot_index WHERE thread_id = ?1";
+const DELETE_PAYLOADS_SQL: &str =
+    crate::sessions::canonical::DELETE_INHERITED_PAYLOADS_BY_THREAD_SQL;
+const DELETE_SNAPSHOT_SQL: &str =
+    crate::sessions::canonical::DELETE_INHERITED_SNAPSHOT_BY_THREAD_SQL;
 const INSERT_SNAPSHOT_SQL: &str = "INSERT INTO inherited_snapshot_index
     (snapshot_id, thread_id, payload_bytes, entry_count, prepared_at)
     VALUES (?1, ?2, ?3, ?4, ?5)";

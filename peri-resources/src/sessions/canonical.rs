@@ -357,6 +357,35 @@ pub(super) const THREAD_CHILD_DELETES: &[(&str, &str)] = &[
     ),
 ];
 
+/// 删除一条 `threads` 行之前清理的**派生**表：子表名 + 语句。
+///
+/// 这两张表没有 `REFERENCES threads(...)`：内容全部可从 `threads.inherited_context`
+/// 重建，读取在缺表/坏索引时回退全列扫描。它们因此不能进入
+/// [`THREAD_CHILD_DELETES`] 的「必须有 threads 外键」契约，但删除路径仍须显式清理，
+/// 否则长期创建/删除 fork 会累积无主派生元数据（R08）。
+///
+/// 顺序有意义：payload 行按 `snapshot_id` 关联 snapshot 行，必须先删 payload、再删
+/// snapshot、最后删 `threads` 行。调用方负责处理可选表缺失。
+pub(super) const THREAD_DERIVED_DELETES: &[(&str, &str)] = &[
+    (
+        INHERITED_PAYLOAD_INDEX_TABLE,
+        DELETE_INHERITED_PAYLOADS_BY_THREAD_SQL,
+    ),
+    (
+        INHERITED_SNAPSHOT_INDEX_TABLE,
+        DELETE_INHERITED_SNAPSHOT_BY_THREAD_SQL,
+    ),
+];
+
+/// 删除线程的全部 inherited payload 索引行（依赖 snapshot 索引定位线程）。
+pub(super) const DELETE_INHERITED_PAYLOADS_BY_THREAD_SQL: &str =
+    "DELETE FROM inherited_payload_index WHERE snapshot_id IN \
+     (SELECT snapshot_id FROM inherited_snapshot_index WHERE thread_id = ?1)";
+
+/// 删除线程的 inherited snapshot 索引行。
+pub(super) const DELETE_INHERITED_SNAPSHOT_BY_THREAD_SQL: &str =
+    "DELETE FROM inherited_snapshot_index WHERE thread_id = ?1";
+
 /// 删除一个会话的全部历史行。
 pub(super) const DELETE_MESSAGES_BY_THREAD_SQL: &str = "DELETE FROM messages WHERE thread_id = ?1";
 

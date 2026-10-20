@@ -752,6 +752,17 @@ impl SqliteSessionData {
         .await
     }
 
+    /// 只取 inherited 列总字节数；blob 句柄在这次调用结束时释放。
+    ///
+    /// 热路径用它先查内存缓存：命中时完全不碰派生索引，避免为一次缓存命中
+    /// 读出该快照的全部 `inherited_payload_index` 行（R07）。
+    async fn inherited_blob_total(
+        connection: &mut SqliteConnection,
+        rowid: i64,
+    ) -> SessionResourceResult<Result<u64, BlobReadError>> {
+        Self::inherited_blob_scope(connection, rowid, |reader| Ok(reader.total())).await
+    }
+
     /// 读取 inherited 轻量摘要；bounds 只需要首尾身份，不构造全量布局。
     ///
     /// 缓存按 `(thread id, 列总字节数)` 有界保存：`inherited_context` 由本 store 的写入
@@ -761,6 +772,10 @@ impl SqliteSessionData {
     ///
     /// 派生索引命中时只读快照行与首尾身份，不做全列扫描；索引缺失、损坏或列总字节数
     /// 不符时回退 [`scan_summary`]，行为与引入索引前相同。
+    ///
+    /// 读取顺序是**先缓存、后索引**：blob 句柄存活期间不能执行其它 SQL，因此先用一次
+    /// blob 打开取总字节数并查缓存，命中立即返回；miss 后释放句柄，再读索引并重新打开
+    /// blob 复核长度。索引行不参与缓存命中路径。
     ///
     /// 总长度由 `sqlite3_blob_bytes` 给出，**不**查询 `length(CAST(...))`：后者会让
     /// SQLite 把整列读进内存，16 MiB 前缀每次读取都会多分配一份正文。
@@ -772,13 +787,38 @@ impl SqliteSessionData {
         let Some((rowid, parent)) = Self::inherited_header(connection, id).await? else {
             return Ok(InheritedSummaryRead::Facts { snapshot: None });
         };
-        // 索引查询先于 blob 打开：两者都是点查，索引命中后不再接触 payload 正文。
+        let total = match Self::inherited_blob_total(connection, rowid).await? {
+            Ok(total) => total,
+            Err(error) if is_unsupported_blob_error(&error) || is_transient_blob_error(&error) => {
+                return Ok(InheritedSummaryRead::Unsupported);
+            }
+            Err(error) => return Err(map_inherited_blob_error(error)),
+        };
+        if total == 0 {
+            return Ok(InheritedSummaryRead::Facts { snapshot: None });
+        }
+        match self.inherited_cache_lookup(id, total) {
+            InheritedCacheLookup::Unsupported => return Ok(InheritedSummaryRead::Unsupported),
+            InheritedCacheLookup::Summary(summary) => {
+                return Ok(InheritedSummaryRead::Facts {
+                    snapshot: inherited_snapshot_of(id, parent, &summary),
+                });
+            }
+            InheritedCacheLookup::Layout(layout) => {
+                return Ok(InheritedSummaryRead::Facts {
+                    snapshot: inherited_snapshot_of(id, parent, &layout.summary()),
+                });
+            }
+            InheritedCacheLookup::Miss => {}
+        }
+        // 缓存 miss 才读派生索引；此时首个 blob 句柄已经释放。
         let indexed = super::inherited_index::read(connection, id).await?;
         let probed = Self::inherited_blob_scope(connection, rowid, |reader| {
             let total = reader.total();
             if total == 0 {
                 return Ok(SummaryProbe::Absent);
             }
+            // 两次打开之间快照可能变化：按本次长度复核缓存，命中就不再使用索引。
             match self.inherited_cache_lookup(id, total) {
                 InheritedCacheLookup::Unsupported => {
                     return Ok(SummaryProbe::Unsupported);
@@ -840,6 +880,7 @@ impl SqliteSessionData {
     ///
     /// 缓存语义与 summary 相同；已有 layout 直接复用，已有 summary 则改走派生索引或
     /// 重新扫描。索引缺失时按本次扫描结果回填一次（只作用于当前快照，不启动后台任务）。
+    /// 读取顺序同样是先查缓存、miss 后才读派生索引（R07）。
     pub(super) async fn read_inherited_layout_cached(
         &self,
         connection: &mut SqliteConnection,
@@ -851,12 +892,38 @@ impl SqliteSessionData {
                 layout: None,
             });
         };
+        let total = match Self::inherited_blob_total(connection, rowid).await? {
+            Ok(total) => total,
+            Err(error) if is_unsupported_blob_error(&error) || is_transient_blob_error(&error) => {
+                return Ok(InheritedFactsRead::Unsupported);
+            }
+            Err(error) => return Err(map_inherited_blob_error(error)),
+        };
+        if total == 0 {
+            return Ok(InheritedFactsRead::Facts {
+                snapshot: None,
+                layout: None,
+            });
+        }
+        match self.inherited_cache_lookup(id, total) {
+            InheritedCacheLookup::Unsupported => return Ok(InheritedFactsRead::Unsupported),
+            InheritedCacheLookup::Layout(layout) => {
+                return Ok(InheritedFactsRead::Facts {
+                    snapshot: inherited_snapshot_of(id, parent, &layout.summary()),
+                    layout: Some(layout),
+                });
+            }
+            // summary 不含数组顺序，必须走索引或重新扫描成完整布局。
+            InheritedCacheLookup::Summary(_) | InheritedCacheLookup::Miss => {}
+        }
+        // 缓存 miss（或只有 summary）才读派生索引；此时首个 blob 句柄已经释放。
         let indexed = super::inherited_index::read(connection, id).await?;
         let probed = Self::inherited_blob_scope(connection, rowid, |reader| {
             let total = reader.total();
             if total == 0 {
                 return Ok(LayoutProbe::Absent);
             }
+            // 两次打开之间快照可能变化：按本次长度复核缓存。
             match self.inherited_cache_lookup(id, total) {
                 InheritedCacheLookup::Unsupported => {
                     return Ok(LayoutProbe::Unsupported);

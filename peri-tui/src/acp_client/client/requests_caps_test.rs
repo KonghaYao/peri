@@ -4,9 +4,9 @@ use serde_json::json;
 
 /// 走一次真实 initialize 协商，返回写入 atom 的窗口能力。
 ///
-/// 客户端仍以 `PeriCaps::all_enabled` 显式声明请求能力；服务端能力事实只来自
-/// 响应的 `agentCapabilities._meta.peri.historyWindowV1` 回显，未回显一律
-/// fail-closed。
+/// 客户端在**本地 beta 开启**时以 `PeriCaps::all_enabled` 为基座显式声明请求能力；
+/// 服务端能力事实只来自响应的 `agentCapabilities._meta.peri.historyWindowV1` 回显，
+/// 未回显一律 fail-closed。
 async fn negotiate_history_window(agent_capabilities: serde_json::Value) -> bool {
     let (client_transport, server_transport) = mpsc_transport_pair();
     let (client, notification_tx, _) = AcpTuiClient::new(client_transport);
@@ -21,19 +21,69 @@ async fn negotiate_history_window(agent_capabilities: serde_json::Value) -> bool
         assert_eq!(
             params["clientCapabilities"]["_meta"]["peri.historyWindowV1"],
             json!(true),
-            "TUI 仍显式请求窗口能力（协商输入，不是能力事实）"
+            "本地 beta 开启时 TUI 仍显式请求窗口能力（协商输入，不是能力事实）"
         );
         server_transport
             .send_response(id, Ok(json!({"agentCapabilities": agent_capabilities})))
             .await
             .unwrap();
     });
+    crate::kit::atoms::HISTORY_WINDOW_V1.set(true);
     crate::kit::atoms::HISTORY_WINDOW_CAPABLE.set(false);
     client.register_ui_commands(&[]).await.unwrap();
     server.await.unwrap();
     let capable = crate::kit::atoms::HISTORY_WINDOW_CAPABLE.get();
+    crate::kit::atoms::HISTORY_WINDOW_V1.set(false);
     client.close();
     capable
+}
+
+/// 本地 beta 关闭时必须声明 `peri.historyWindowV1=false`。
+///
+/// host 以该声明判断「首屏由窗口 open 交付」，声明 true 却因本地开关不发 open
+/// 会让 `session/load` 跳过回放，恢复会话首屏历史缺失（R01）。
+#[tokio::test]
+#[serial_test::serial]
+async fn local_disabled_beta_does_not_declare_history_window() {
+    let (client_transport, server_transport) = mpsc_transport_pair();
+    let (client, notification_tx, _) = AcpTuiClient::new(client_transport);
+    client.spawn_pump(notification_tx);
+    let server = tokio::spawn(async move {
+        let IncomingMessage::Request { id, method, params } =
+            server_transport.recv().await.unwrap()
+        else {
+            panic!("应收到 initialize");
+        };
+        assert_eq!(method, "initialize");
+        assert_eq!(
+            params["clientCapabilities"]["_meta"]["peri.historyWindowV1"],
+            json!(false),
+            "本地 beta 关闭时不得声明窗口能力，否则 host 会跳过历史回放"
+        );
+        server_transport
+            .send_response(
+                id,
+                Ok(json!({
+                    "agentCapabilities": {"_meta": {"peri.historyWindowV1": true}}
+                })),
+            )
+            .await
+            .unwrap();
+    });
+    crate::kit::atoms::HISTORY_WINDOW_V1.set(false);
+    crate::kit::atoms::HISTORY_WINDOW_CAPABLE.set(false);
+    client.register_ui_commands(&[]).await.unwrap();
+    server.await.unwrap();
+    assert!(
+        crate::kit::atoms::HISTORY_WINDOW_CAPABLE.get(),
+        "服务端回显的事实仍应记录，是否走窗口由本地开关与能力共同决定"
+    );
+    assert!(
+        !crate::kit::history_page_consumer::window_path_enabled(),
+        "本地 beta 关闭时窗口路径必须保持关闭"
+    );
+    crate::kit::atoms::HISTORY_WINDOW_CAPABLE.set(false);
+    client.close();
 }
 
 /// TUI 的 MCP OAuth 走 legacy 契约：initialize 必须关闭 `peri.oauth`。

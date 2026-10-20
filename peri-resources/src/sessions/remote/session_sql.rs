@@ -802,6 +802,55 @@ pub(super) fn revoke_draft_statements(id: &str) -> Vec<StatementSpec> {
     .collect()
 }
 
+/// 草稿撤销的 inherited 索引删除：与三条 canonical 删除共用同一 `frozen_context IS NULL`
+/// 判据，payload 先于 snapshot（R08）。
+const DELETE_DRAFT_INHERITED_PAYLOADS_SQL: &str =
+    "DELETE FROM inherited_payload_index WHERE snapshot_id IN
+    (SELECT snapshot_id FROM inherited_snapshot_index WHERE thread_id = ?1)
+    AND EXISTS (SELECT 1 FROM threads WHERE id = ?1 AND frozen_context IS NULL)";
+const DELETE_DRAFT_INHERITED_SNAPSHOT_SQL: &str = "DELETE FROM inherited_snapshot_index
+    WHERE thread_id = ?1 AND EXISTS (SELECT 1 FROM threads WHERE id = ?1 AND frozen_context IS NULL)";
+
+/// 把 inherited 派生索引删除插入撤销批次中**线程删除之前**。
+///
+/// `has_snapshot`/`has_payload` 由调用方探测可选表；缺表时跳过，旧库删除不因此失败。
+/// payload 行只能经 snapshot 的 `snapshot_id` 定位，所以缺 snapshot 表时两者都跳过。
+pub(super) fn with_inherited_index_deletes(
+    mut effects: Vec<StatementSpec>,
+    id: &str,
+    has_snapshot: bool,
+    has_payload: bool,
+    draft_guard: bool,
+) -> Vec<StatementSpec> {
+    if !has_snapshot {
+        return effects;
+    }
+    let mut derived = Vec::with_capacity(2);
+    if has_payload {
+        derived.push(StatementSpec::new(
+            if draft_guard {
+                DELETE_DRAFT_INHERITED_PAYLOADS_SQL
+            } else {
+                canonical::DELETE_INHERITED_PAYLOADS_BY_THREAD_SQL
+            },
+            vec![Value::Text(id.to_owned())],
+        ));
+    }
+    derived.push(StatementSpec::new(
+        if draft_guard {
+            DELETE_DRAFT_INHERITED_SNAPSHOT_SQL
+        } else {
+            canonical::DELETE_INHERITED_SNAPSHOT_BY_THREAD_SQL
+        },
+        vec![Value::Text(id.to_owned())],
+    ));
+    // 批次最后一条必须是线程删除（撤销流程用 `counts.last()` 判断判据是否成立）。
+    let thread_delete = effects.pop();
+    effects.extend(derived);
+    effects.extend(thread_delete);
+    effects
+}
+
 /// 历史行的插入语句：flags 与内容一次写入（fork 目标由门面完成 ID 重映射，本层不重跑算法）。
 pub(super) fn insert_message_statement(
     thread_id: &str,
@@ -907,5 +956,52 @@ mod tests {
                 statement.sql
             );
         }
+    }
+
+    /// inherited 派生索引删除必须排在会话行删除之前；缺表时跳过，不改变原有撤销语句。
+    #[test]
+    fn inherited_index_deletes_precede_thread_row_deletion() {
+        let effects =
+            with_inherited_index_deletes(revoke_session_statements("s"), "s", true, true, false);
+        let sqls: Vec<&str> = effects.iter().map(|statement| statement.sql).collect();
+        assert_eq!(effects.len(), 5);
+        assert_eq!(
+            sqls[2],
+            crate::sessions::canonical::DELETE_INHERITED_PAYLOADS_BY_THREAD_SQL
+        );
+        assert_eq!(
+            sqls[3],
+            crate::sessions::canonical::DELETE_INHERITED_SNAPSHOT_BY_THREAD_SQL
+        );
+        assert_eq!(sqls[4], DELETE_SESSION_SQL);
+
+        let draft =
+            with_inherited_index_deletes(revoke_draft_statements("s"), "s", true, true, true);
+        for statement in &draft[2..4] {
+            assert!(
+                statement.sql.contains("frozen_context IS NULL"),
+                "草稿撤销的派生索引删除必须与线程删除共用未提交判据: {}",
+                statement.sql
+            );
+        }
+        assert!(
+            draft.last().unwrap().sql.starts_with("DELETE FROM threads"),
+            "线程删除必须留在批次末尾（撤销流程按 counts.last() 判定）"
+        );
+
+        assert_eq!(
+            with_inherited_index_deletes(revoke_session_statements("s"), "s", false, true, false)
+                .len(),
+            3,
+            "缺 snapshot 表时不能插入任何派生删除"
+        );
+        let snapshot_only =
+            with_inherited_index_deletes(revoke_session_statements("s"), "s", true, false, false);
+        assert_eq!(snapshot_only.len(), 4);
+        assert_eq!(
+            snapshot_only[2].sql,
+            crate::sessions::canonical::DELETE_INHERITED_SNAPSHOT_BY_THREAD_SQL
+        );
+        assert_eq!(snapshot_only[3].sql, DELETE_SESSION_SQL);
     }
 }
