@@ -73,16 +73,40 @@ impl GoalTool {
         // auxiliary_model 为 None 时跳过验证
         if let Some(model) = &self.auxiliary_model {
             let user_content = Self::build_verify_prompt(&objective, ctx.messages);
+            // 验证请求继承 auxiliary model 的输出预算，不用请求级 max_tokens
+            // 压小它：reasoning 模型的 thinking 与正文共享输出预算，上限过小
+            // 时 thinking 会先耗尽预算，正文为空，验证必然解析失败。
             let request = ModelRequest::new(vec![
                 ModelMessage::system_text(Self::VERIFY_SYSTEM_PROMPT),
                 ModelMessage::user_text(user_content),
-            ])
-            .with_max_tokens(1024);
+            ]);
 
             let response = model.complete(request, CancellationToken::new()).await?;
             let raw = response.assistant_text().unwrap_or_default();
 
+            if raw.trim().is_empty() {
+                // 验证器没有正文：报告真实停止原因，避免把输出预算故障
+                // 伪装成 JSON 解析失败。
+                let stop_reason = response.stop_reason();
+                tracing::warn!(
+                    ?stop_reason,
+                    usage = ?response.usage(),
+                    "goal verifier returned empty text"
+                );
+                return Ok(format!(
+                    "Goal not yet achieved: verifier returned no text \
+                     (stop reason: {stop_reason:?}). This is a verifier output-budget \
+                     failure, not a delivery gap; retry goal(complete)."
+                ));
+            }
+
             let verdict = Self::parse_verdict(&raw);
+            if verdict.missing == Self::UNPARSEABLE_OUTPUT {
+                tracing::warn!(
+                    raw_len = raw.len(),
+                    "goal verifier output was not valid JSON"
+                );
+            }
             if !verdict.achieved {
                 // 验证失败：goal 保持 Active
                 return Ok(format!(
@@ -214,6 +238,9 @@ impl GoalTool {
         )
     }
 
+    /// 解析失败时的固定原因；调用方据此识别"非 JSON"与"空输出"。
+    const UNPARSEABLE_OUTPUT: &'static str = "Failed to parse verifier LLM output";
+
     fn parse_verdict(raw: &str) -> GoalVerdict {
         // 宽松解析：找第一个 { 到最后一个 }
         let start = raw.find('{');
@@ -239,7 +266,7 @@ impl GoalTool {
         GoalVerdict {
             achieved: false,
             evidence: String::new(),
-            missing: "Failed to parse verifier LLM output".to_string(),
+            missing: Self::UNPARSEABLE_OUTPUT.to_string(),
         }
     }
 }

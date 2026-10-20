@@ -34,6 +34,9 @@ impl BuiltAnthropicRequest {
     }
 }
 
+/// Anthropic 协议允许的最小 extended-thinking 预算。
+const MIN_THINKING_BUDGET: u32 = 1_024;
+
 pub(super) fn build_request(
     config: &AnthropicConfig,
     request: &ModelRequest,
@@ -44,9 +47,10 @@ pub(super) fn build_request(
         cache::apply_cache_to_messages(&mut messages);
     }
 
+    let max_tokens = request.max_tokens.unwrap_or(config.max_tokens);
     let mut body = json!({
         "model": config.model,
-        "max_tokens": request.max_tokens.unwrap_or(config.max_tokens),
+        "max_tokens": max_tokens,
         "messages": messages,
         "stream": true,
     });
@@ -73,11 +77,17 @@ pub(super) fn build_request(
         body["temperature"] = json!(temperature);
     }
     if config.extended_thinking {
-        body["thinking"] = json!({
-            "type": "enabled",
-            "budget_tokens": config.thinking_budget,
-        });
-        body["output_config"] = json!({ "effort": config.thinking_effort });
+        // 协议约束：budget_tokens 必须小于 max_tokens，且不低于最小预算。
+        // 请求级 max_tokens 覆盖（验证器、分类器等派生请求）可能小于模型
+        // 构造时的思考预算；此时收缩预算，无法合法启用则不发送 thinking。
+        let thinking_budget = config.thinking_budget.min(max_tokens.saturating_sub(1));
+        if thinking_budget >= MIN_THINKING_BUDGET {
+            body["thinking"] = json!({
+                "type": "enabled",
+                "budget_tokens": thinking_budget,
+            });
+            body["output_config"] = json!({ "effort": config.thinking_effort });
+        }
     }
 
     Ok(BuiltAnthropicRequest {
