@@ -172,3 +172,37 @@ async fn test_act_tool_path_cancel_emits_turn_completed() {
     }
     assert!(found, "工具路径 cancel 必须 emit TurnCompleted");
 }
+
+#[tokio::test]
+async fn turn_completed_waits_for_capacity_in_production_emitter() {
+    let mut ctx = make_context();
+    let (bus, mut handles) = EventBus::new(crate::agent::events_v2::EventBusConfig {
+        render_capacity: 1,
+        ..Default::default()
+    });
+    ctx.runtime.event_bus = Arc::new(bus);
+    ctx.runtime
+        .event_bus
+        .emit_render(RenderEvent::TurnSuspended {
+            turn_id: ctx.turn_id(),
+            agent_id: ctx.session.agent_id,
+        });
+    let send = emit_turn_completed(&ctx);
+    tokio::pin!(send);
+    assert!(
+        std::future::poll_fn(|cx| {
+            std::task::Poll::Ready(std::future::Future::poll(send.as_mut(), cx).is_pending())
+        })
+        .await
+    );
+    assert!(!ctx.runtime.event_bus.health().dirty);
+    handles.render_rx.recv().await.unwrap();
+    tokio::time::timeout(std::time::Duration::from_secs(1), send)
+        .await
+        .unwrap();
+    assert!(matches!(
+        handles.try_render(),
+        Some(RenderEvent::TurnCompleted { .. })
+    ));
+    assert!(!ctx.runtime.event_bus.health().dirty);
+}

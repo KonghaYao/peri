@@ -1,6 +1,6 @@
 //! ACP 事件 → Atom 桥接后台 task。
 //!
-//! 从 mpsc::UnboundedReceiver 接收已解码的 ACP 事件，
+//! 从 mpsc::Receiver 接收已解码的 ACP 事件，
 //! 经 acp_events::dispatch_for_bridge 处理后写入全局 Atom。
 //! Phase 2 完整实现——main_loop fan-out 后独立消费。
 
@@ -12,6 +12,10 @@ use crate::kit::acp_types::{AcpEventData, AcpEventWithEpoch, CurrentTurn};
 use crate::kit::atoms;
 use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
+
+/// notifier → bridge 队列容量。桥接消费落后时由有界队列限制内存；
+/// notifier 以 `.await` 等待空位，从而把背压传回 notification 队列。
+pub(crate) const BRIDGE_QUEUE_CAPACITY: usize = 4096;
 
 #[cfg(test)]
 use std::cell::RefCell;
@@ -485,11 +489,11 @@ fn accepts_event_session(
 
 /// 启动 ACP 事件桥接后台任务。
 ///
-/// 从独立的 mpsc::UnboundedReceiver 读取 ACP 事件（main_loop 会 fan-out），
+/// 从独立的 mpsc::Receiver 读取 ACP 事件（main_loop 会 fan-out），
 /// 维护 BridgeState 内部状态，每次事件后写入 VIEW_MODELS / ACP_STATE Atom，
 /// 触发 ratatui-kit 组件重渲染。
 pub fn spawn_acp_bridge(
-    rx: mpsc::UnboundedReceiver<AcpEventWithEpoch>,
+    rx: mpsc::Receiver<AcpEventWithEpoch>,
     shutdown: CancellationToken,
     client: AcpTuiClient,
 ) -> tokio::task::JoinHandle<()> {
@@ -497,7 +501,7 @@ pub fn spawn_acp_bridge(
 }
 
 fn spawn_acp_bridge_inner(
-    mut rx: mpsc::UnboundedReceiver<AcpEventWithEpoch>,
+    mut rx: mpsc::Receiver<AcpEventWithEpoch>,
     shutdown: CancellationToken,
     client: Option<AcpTuiClient>,
     observed: Option<mpsc::UnboundedSender<bool>>,
@@ -664,7 +668,7 @@ fn spawn_acp_bridge_inner(
 
 #[cfg(test)]
 fn spawn_acp_bridge_observed(
-    rx: mpsc::UnboundedReceiver<AcpEventWithEpoch>,
+    rx: mpsc::Receiver<AcpEventWithEpoch>,
     shutdown: CancellationToken,
     observed: mpsc::UnboundedSender<bool>,
 ) -> tokio::task::JoinHandle<()> {
@@ -673,7 +677,7 @@ fn spawn_acp_bridge_observed(
 
 #[cfg(test)]
 pub(crate) fn spawn_acp_bridge_observed_with_client(
-    rx: mpsc::UnboundedReceiver<AcpEventWithEpoch>,
+    rx: mpsc::Receiver<AcpEventWithEpoch>,
     shutdown: CancellationToken,
     client: AcpTuiClient,
     observed: mpsc::UnboundedSender<bool>,

@@ -3,8 +3,8 @@
 use super::*;
 
 use crate::kit::history_window::{
-    HistoryEntryView, PersistentEntryKey, ReleasePlan, ReleaseReason, ResidentIndex, ResultRef,
-    SegmentDraft, SegmentPlacement, ToolTerminalMeta, release_window_plans,
+    PENDING_TOOL_ENDS_BYTES_MAX, PENDING_TOOL_ENDS_LIMIT, PersistentEntryKey, ReleasePlan,
+    ReleaseReason, release_window_plans,
 };
 use crate::kit::tui_render_unit::{FoldKey, FoldState};
 
@@ -45,13 +45,13 @@ fn tool_end_item(entry_id: &str, position: u64, tool_id: &str, output: &str) -> 
 const P05_PAGES: usize = 60;
 const P05_TOOL_OUTPUT: usize = 256 * 1024;
 const P05_BODY_LIMIT: usize = 2 * 1024 * 1024;
-const P05_PENDING_TOOL_BYTES: usize = 1024 * 1024;
-const P05_PENDING_TOOL_RESULTS: usize = 256;
+const P05_PENDING_TOOL_BYTES: usize = PENDING_TOOL_ENDS_BYTES_MAX;
+const P05_PENDING_TOOL_RESULTS: usize = PENDING_TOOL_ENDS_LIMIT;
 
 /// P05：60 页长工具输出 + 每页折叠切换；跨页工具终点由轻量摘要承接。
 ///
-/// 记录历史正文、渲染缓存、折叠投影与 PENDING_TOOL_ENDS 的峰值；淘汰/释放后
-/// 未配对终点被清空。另用真实 `ResidentIndex` 验证跨页配对预算与段释放剪枝。
+/// 记录历史正文、渲染缓存、折叠投影与 PENDING_TOOL_ENDS 的峰值；释放只精准
+/// 清理被释放条目对应的未配对终点，其他段的结果保留（受统一预算约束）。
 #[test]
 #[ignore = "P 矩阵测量（频繁折叠/长工具输出/跨页配对）"]
 #[serial]
@@ -60,8 +60,6 @@ fn p05_fold_and_long_tool_outputs_reclaim_caches_and_pairing() {
         body_bytes: P05_BODY_LIMIT,
         reserved_bytes: 1024 * 1024,
         page_target_bytes: 256 * 1024,
-        pending_tool_bytes: P05_PENDING_TOOL_BYTES,
-        max_pending_tool_results: P05_PENDING_TOOL_RESULTS,
         ..Default::default()
     };
     let (mut state, _guard) = setup_window(window_limits);
@@ -179,11 +177,12 @@ fn p05_fold_and_long_tool_outputs_reclaim_caches_and_pairing() {
         ));
     }
 
-    // 强制一次淘汰（纯文本大页，不新增未配对终点），验证释放事务清空配对暂存。
-    // 同时把未配对终点压到固定上限（256 条 / 1 MiB，与桥接常量同源）。
+    // 强制一次淘汰（纯文本大页，不新增未配对终点），验证释放事务按条目清理。
+    // 未配对终点压到固定上限（条数/字节均由 history_window::budget 统一）。
     for slot in 0..400 {
         crate::kit::acp_events::history_window::insert_pending_tool_end_for_tests(
             &format!("stress-tool-{slot:03}"),
+            PersistentEntryKey::own(format!("{SESSION}:stress-{slot:03}")),
             &"q".repeat(4096),
             false,
         );
@@ -219,10 +218,23 @@ fn p05_fold_and_long_tool_outputs_reclaim_caches_and_pairing() {
     dispatch_page(&mut state, &context, response(text_items));
     push_view_models(&mut state);
     // 无论最后一次接纳是否因“单页过大”被阻塞，都走同一条统一释放事务移除一个
-    // 驻留段（真实业务路径，不是测试后门），验证配对暂存随释放归零。
+    // 驻留段（真实业务路径，不是测试后门）。释放只清理该段条目对应的暂存终点，
+    // 其他段/未驻留条目的终点必须保留。
     state.window.set_anchor(None);
     if let Some(segment_key) = state.window.segments().keys().next().copied() {
         let segment = state.window.segment(segment_key).expect("segment").clone();
+        let bound_key = segment
+            .entries
+            .first()
+            .expect("segment has entries")
+            .key
+            .clone();
+        crate::kit::acp_events::history_window::insert_pending_tool_end_for_tests(
+            "p05-bound-tool",
+            bound_key,
+            &"b".repeat(64),
+            false,
+        );
         let plan = ReleasePlan {
             segment: segment_key,
             source: segment.source.clone(),
@@ -238,10 +250,21 @@ fn p05_fold_and_long_tool_outputs_reclaim_caches_and_pairing() {
         };
         let outcome = release_window_plans(&mut state, vec![plan], ReleaseReason::BudgetPressure);
         assert!(outcome.released_entries > 0, "统一释放事务必须释放驻留段");
+        assert!(
+            crate::kit::acp_events::history_window::pending_tool_end_entry_for_tests(
+                "p05-bound-tool"
+            )
+            .is_none(),
+            "被释放段的暂存终点必须精准清理"
+        );
         push_view_models(&mut state);
     }
     let (pending_after_release_entries, pending_after_release_bytes) =
         crate::kit::acp_events::history_window::pending_tool_ends_fingerprint();
+    assert!(
+        pending_after_release_entries > 0,
+        "其他段/未驻留条目的暂存终点不能被释放事务误清"
+    );
     let resident_after_release = state.window.budget().resident_body_bytes;
 
     println!("== P05 采样（每 10 页；峰值另列） ==");
@@ -291,10 +314,15 @@ fn p05_fold_and_long_tool_outputs_reclaim_caches_and_pairing() {
         max_pending_bytes,
         P05_PENDING_TOOL_BYTES,
     );
-    assert_eq!(
-        (pending_after_release_entries, pending_after_release_bytes),
-        (0, 0),
-        "释放事务必须清空未配对工具终点"
+    assert_budget(
+        "pending_after_release_entries",
+        pending_after_release_entries,
+        P05_PENDING_TOOL_RESULTS,
+    );
+    assert_budget(
+        "pending_after_release_bytes",
+        pending_after_release_bytes,
+        P05_PENDING_TOOL_BYTES,
     );
     assert_budget(
         "resident_after_release",
@@ -319,100 +347,5 @@ fn p05_fold_and_long_tool_outputs_reclaim_caches_and_pairing() {
     assert_budget("tail_resident", tail_max_resident, P05_BODY_LIMIT);
     assert_budget("tail_render", tail_max_render, render_budget);
 
-    // ── 真实 ResidentIndex：跨页配对预算 + 段释放剪枝 ──────────────────────
-    let mut index = ResidentIndex::new(P05_PENDING_TOOL_BYTES, P05_PENDING_TOOL_RESULTS);
-    let mut accepted = 0usize;
-    let mut rejected = 0usize;
-    for slot in 0..(P05_PENDING_TOOL_RESULTS * 4) {
-        let result = index.record_tool_result(
-            HistorySource::Own,
-            format!("pair-{slot:04}"),
-            ResultRef::new(
-                HistorySource::Own,
-                format!("{SESSION}:result-{slot:04}"),
-                "rev",
-            ),
-            ToolTerminalMeta::new(false, 64 * 1024, "s".repeat(1024)),
-        );
-        match result {
-            Ok(_) => accepted += 1,
-            Err(_) => rejected += 1,
-        }
-    }
-    let pairing_bytes = index.pending_tool_bytes();
-    println!(
-        "P05 ResidentIndex：result_only accepted={accepted} rejected={rejected} \
-         pending_bytes={pairing_bytes}B (limit {P05_PENDING_TOOL_BYTES}B)"
-    );
-    assert!(rejected > 0, "超出预算的跨页配对必须被拒绝");
-    assert_budget(
-        "resident_index_pending",
-        pairing_bytes,
-        P05_PENDING_TOOL_BYTES,
-    );
-
-    // 段释放后，指向被释放条目的 ResultOnly 配对必须一起消失。
-    let mut window = HistoryWindow::new(HistoryWindowConfig {
-        history_window_v1: true,
-        limits: WindowLimits {
-            pending_tool_bytes: P05_PENDING_TOOL_BYTES,
-            max_pending_tool_results: P05_PENDING_TOOL_RESULTS,
-            ..Default::default()
-        },
-    });
-    window.begin_window(identity());
-    let entries: Vec<HistoryEntryView> = (0..8)
-        .map(|slot| {
-            HistoryEntryView::new(
-                PersistentEntryKey::own(format!("{SESSION}:pair-{slot:04}")),
-                Some(slot as u64),
-                1,
-                1024,
-                1024,
-                Vec::new(),
-            )
-        })
-        .collect();
-    let segment_key = window
-        .register_segment(
-            SegmentDraft::new(HistorySource::Own, entries, 8 * 1024, 8 * 1024),
-            SegmentPlacement::Tail,
-        )
-        .expect("segment");
-    for slot in 0..8 {
-        window
-            .index
-            .record_tool_result(
-                HistorySource::Own,
-                format!("pair-{slot:04}"),
-                ResultRef::new(
-                    HistorySource::Own,
-                    format!("{SESSION}:pair-{slot:04}"),
-                    "rev",
-                ),
-                ToolTerminalMeta::new(false, 64 * 1024, "p".repeat(1024)),
-            )
-            .expect("within budget");
-    }
-    let before_release = window.index.pending_tool_bytes();
-    let segment = window.segment(segment_key).expect("segment").clone();
-    let plan = ReleasePlan {
-        segment: segment_key,
-        source: segment.source.clone(),
-        entries: segment.entry_keys(),
-        unit_count: segment.unit_count,
-        body_bytes: segment.body_bytes,
-        reserved_bytes: segment.reserved_bytes,
-        slot_range: window.index().slot_range(segment_key),
-        before: None,
-        after: None,
-        before_cursor: None,
-        after_cursor: None,
-    };
-    window.apply_release_plan(&plan).expect("release");
-    let after_release = window.index.pending_tool_bytes();
-    println!("P05 ResidentIndex 段释放：before={before_release}B after={after_release}B");
-    assert!(before_release > 0);
-    assert_eq!(after_release, 0, "段释放必须剪枝跨页配对元数据");
     print_process("process(end)");
 }

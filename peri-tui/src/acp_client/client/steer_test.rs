@@ -7,6 +7,7 @@ fn make_snapshot() -> serde_json::Value {
 }
 
 #[tokio::test]
+#[serial_test::serial]
 async fn test_user_input_capability_requires_explicit_server_support() {
     let (client_transport, server_transport) = mpsc_transport_pair();
     let (client, notification_tx, _) = AcpTuiClient::new(client_transport);
@@ -35,6 +36,7 @@ async fn test_user_input_capability_requires_explicit_server_support() {
 }
 
 #[tokio::test]
+#[serial_test::serial]
 async fn test_user_input_old_server_keeps_legacy_path() {
     let (client_transport, server_transport) = mpsc_transport_pair();
     let (client, notification_tx, _) = AcpTuiClient::new(client_transport);
@@ -168,6 +170,7 @@ async fn test_user_input_command_does_not_migrate_to_new_session() {
 }
 
 #[tokio::test]
+#[serial_test::serial]
 async fn test_user_input_load_binds_snapshot_before_live_delivery() {
     let (client_transport, server_transport) = mpsc_transport_pair();
     let (client, notification_tx, mut notifications) = AcpTuiClient::new(client_transport);

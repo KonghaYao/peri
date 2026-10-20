@@ -8,9 +8,10 @@ use std::sync::Arc;
 
 use peri_acp_types::session_resources::{
     BindingRecheck, BindingState, ChildResumeClaim, ChildSnapshot, CloseSettlement, ForkSnapshot,
-    FrozenSnapshotBytes, NewSession, NewSessionDraft, PersistenceRecovery, RewindBoundary,
-    RewindOutcome, SessionAvailability, SessionInitialization, SessionResourceError,
-    SessionResourceErrorKind, SessionResourceResult, SessionResources, SessionSnapshot,
+    FrozenSnapshotBytes, FrozenState, NewSession, NewSessionDraft, PersistenceRecovery,
+    RewindBoundary, RewindOutcome, SessionAvailability, SessionInitialization,
+    SessionResourceError, SessionResourceErrorKind, SessionResourceResult, SessionResources,
+    SessionSnapshot,
 };
 use peri_acp_types::thread::{ThreadId, ThreadMeta};
 use peri_acp_types::workspace::{ResolvedWorkspace, ScopedThreadPage, ScopedThreadQuery};
@@ -84,6 +85,9 @@ impl SessionResources for BlockingResources {
         &self,
         _id: &ThreadId,
     ) -> SessionResourceResult<SessionSnapshot> {
+        unimplemented!()
+    }
+    async fn load_frozen_state(&self, _id: &ThreadId) -> SessionResourceResult<FrozenState> {
         unimplemented!()
     }
     async fn load_session_binding(&self, _id: &ThreadId) -> SessionResourceResult<BindingState> {

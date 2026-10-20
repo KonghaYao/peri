@@ -117,20 +117,21 @@ flowchart LR
 
 ## TUI 本地 beta：history-window-v1
 
-`history-window-v1` 是 TUI 历史窗口的本地 beta，键定义在 `peri-config/src/betas.rs`，
-默认 false。它由 `is_known` 接受并进入 `BetaFlags` 投影，但不在
-`peri-acp-types::beta_flags::BETA_FLAGS`，因此 ConfigPanel 的 beta 区块不列出，需手动写入
-settings：
+`history-window-v1` 是 TUI 历史窗口的本地 beta，键定义在 `peri-config/src/betas.rs`。
+发布启用绑定 S7：**未配置视为开启**，只有用户显式配置 `false` 才关闭。它由 `is_known` 接受并
+进入 `BetaFlags` 投影，但不在 `peri-acp-types::beta_flags::BETA_FLAGS`，因此 ConfigPanel 的
+beta 区块不列出，需手动写入 settings：
 
 ```json
-{ "config": { "betas": { "history-window-v1": true } } }
+{ "config": { "betas": { "history-window-v1": false } } }
 ```
 
 TUI 启动时（`peri-tui/src/kit/entry.rs`）读取一次快照 flags，调用
 `kit/history_window::apply_history_window_beta` 写入 `HISTORY_WINDOW_V1` atom；设置变更需重启，
-无热重载。该开关只决定 TUI 是否采用窗口模型，仍需服务端 `peri.historyWindowV1` 协商同时为真；
-两者之一为 false 时保留旧 `HISTORY_PAGING` 行为。Beta 面板未列出该键是当前限制；在把它纳入
-面板前，键的定义与消费仍以 `peri-config::betas` 和 TUI 启动路径为准。
+无热重载。该开关只决定 TUI 是否采用窗口模型，仍需服务端 `peri.historyWindowV1` 在 initialize
+响应中明确回显 `true`（未回显一律 fail-closed）；两者之一为 false 时保留旧 `HISTORY_PAGING`
+行为。Beta 面板未列出该键是当前限制；在把它纳入面板前，键的定义与消费仍以
+`peri-config::betas` 和 TUI 启动路径为准。
 
 ## ACP 首个 flag：full-async-tools
 

@@ -68,7 +68,11 @@ impl AcpTuiClient {
         if let Some(weak) = weak
             && let Some(tx) = weak.upgrade()
         {
-            let _ = tx.send(AcpNotification::InteractionTerminal { owner, outcome });
+            super::pump::deliver_or_close(
+                &self.transport,
+                &tx,
+                AcpNotification::InteractionTerminal { owner, outcome },
+            );
         }
     }
 

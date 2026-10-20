@@ -1,5 +1,7 @@
 # peri-agent 代码索引
 
+F09 事件健康度：共享 `peri-acp-types/src/event_v2/bus.rs` 提供 `BusHealth` / `EmitOutcome`。`agent/stages/{act,mod,receive}.rs` 的 TurnCompleted、TurnSuspended、ProtocolEvent 生产发送点等待原 FIFO 容量，普通事件保持 try_send。`session/exec/executor_helpers/event_pump.rs` 的运行中与尾部 lag 均记录 sticky dirty、补真实邮箱队列快照，尾部继续 drain；混合广播跳过数不能精确归属 session，保守标记当前订阅。测试入口为 `event_v2/bus_test.rs`、`stages/{act,receive,loop_lifecycle}_test.rs`、`event_pump_health_test.rs`；新增测试尚待运行。局部快照不恢复全部终态，也不清除 dirty。
+
 
 输入交付回归：`session/user_input_mailbox/delivery_notification_test.rs` 覆盖 Claim 后快照抢先投影、重复 Receive、publication generation、恢复与失效。Mailbox 的通知去重身份独立于状态投影；`mark_committed_deliveries` 核对实际 delivery，恢复仍由已持久事实重放，不新增持久“客户端已收到”记录。`user_input_mailbox.rs` 的 `pending_delivery_notifications`/`ack_delivery_notification` 保存有界进程内交付日志；交付槽位在 enqueue 时预留，容量不足在 Claim 前拒绝（`user_input_mailbox/window.rs` 承担展示/账本/日志存储辅助，`bind_delivery_sequence` 幂等绑定发布序号）。Receive 把 `UserInputDelivered` 经 `EventBus::emit_render_reliable` 放进与普通渲染事件同一条 FIFO，只等待容量、不降级丢弃；forwarder 按 FIFO 消费时补打 `session_seq`，`publish_forwarded_event` 在发布成功后把该序号幂等绑定到交付日志。事件在渲染通道之外的后续路径丢失时，泵仍可按已发布序号在水位前补发，用户消息不会排到自己的回答之后。`session/exec/executor_helpers/event_pump.rs` 在推送任何后续事件前按 Receive 顺序补发 Delivered：只提前补发 `session_seq` 严格小于当前事件且已绑定的条目，未绑定条目留到尾部；sink 确认后才 ack，失败保留日志并有界重试，耗尽后发 `AgentExecutionFailed` 且跳过正常 done。`event_pump_test.rs` 覆盖 B→A、带序号事件前补发、迟到绑定重放、未绑定尾部补发、重复抑制、mid-turn 并发交付、assistant 文本重试、尾部失败与后台尾事件先于后续气泡；`v2_execute_test.rs` 覆盖发布后绑定、发布无序号不绑定与非交付事件不触碰邮箱，`event_v2/bus_test.rs` 覆盖可靠发送在通道满时等待容量。
 

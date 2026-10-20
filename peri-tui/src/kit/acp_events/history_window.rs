@@ -1,8 +1,8 @@
 //! 历史窗口桥接事件：`peri/history_committed` 与窗口页接纳。
 //!
-//! 这里只更新 `BridgeState.window` 与窗口账目，不调用工具完成、Todo、审批、输入或
+//! 更新窗口账目、展示正文并经统一事务释放段，不调用工具完成、Todo、审批、输入或
 //! steer handler；也不修改 `phase`/`current_request_id`/`turn_generation`/
-//! `last_successful_todos`。段释放留给 S6.2。
+//! `last_successful_todos`。
 
 use std::collections::{HashMap, HashSet};
 
@@ -83,6 +83,20 @@ pub(super) fn handle_history_committed(
                 sealed_segments,
                 "history_window: commit sealed display segments"
             );
+            if state.window.anchor().is_some() {
+                let plans = state.window.retention_plan_after_commit();
+                crate::kit::history_window::release_window_plans(
+                    state,
+                    plans,
+                    crate::kit::history_window::ReleaseReason::Commit,
+                );
+            } else {
+                // 无视口锚点时不可释放：无法证明当前可见页边界，淘汰可能移除整页。
+                tracing::debug!(
+                    checkpoint_id = %info.checkpoint_id,
+                    "history_window: commit release skipped without viewport anchor"
+                );
+            }
         }
         crate::kit::history_window::CommitOutcome::Duplicate => {
             tracing::debug!(
@@ -320,11 +334,32 @@ pub(super) fn handle_window_page_loaded(
                 .index()
                 .entries_in_slot_order()
                 .first()
-                .map_or(0, |(_, slot, _)| *slot),
+                .and_then(|(key, _, _)| state.window.displayed_range(key))
+                .map_or(0, |(slot, _)| slot),
         }
     };
     let placement = if let Some(gap_id) = context.gap {
         PagePlacement::FillGap(gap_id)
+    } else if open_plan
+        .as_ref()
+        .and_then(|plan| plan.insert_slot)
+        .is_some()
+    {
+        // open 页插在保留 live 前面时，模型顺序必须与 committed 同步。
+        state
+            .window
+            .index()
+            .entries_in_slot_order()
+            .into_iter()
+            .find(|(key, _, _)| {
+                state
+                    .window
+                    .displayed_range(key)
+                    .is_some_and(|(slot, _)| slot >= insert_slot)
+            })
+            .map_or(PagePlacement::Tail, |(key, _, _)| {
+                PagePlacement::BeforeEntry(key)
+            })
     } else {
         match context.placement {
             WindowPagePlacement::Tail => PagePlacement::Tail,
@@ -345,6 +380,13 @@ pub(super) fn handle_window_page_loaded(
     });
     match decision {
         crate::kit::history_window::AdmissionDecision::Accepted { .. } => {
+            // 去重后的 views 不含 live 条目；只在整页采纳后按响应的持久身份提升。
+            for item in &response.items {
+                if let Some(position) = item.position {
+                    let key = PersistentEntryKey::new(item.source.clone(), item.entry_id.clone());
+                    state.window.promote_live_seal_position(&key, position);
+                }
+            }
             let mut targets = Vec::new();
             for (key, _, _, descriptor) in &views {
                 if let Some(descriptor) = descriptor {
@@ -493,7 +535,28 @@ fn prepare_open_display(
     context: &WindowRequestContext,
     response: &WindowPageResponse,
 ) -> Result<OpenDisplayPlan, DisplayRangeError> {
-    let snapshot = state.window.switch_snapshot(&response.identity);
+    let mut snapshot = state.window.switch_snapshot(&response.identity);
+    let live_ranges = if snapshot.identity_changed {
+        state.window.live_seal_display_ranges()
+    } else {
+        Vec::new()
+    };
+    let live_range_set: HashSet<_> = live_ranges.iter().copied().collect();
+    snapshot
+        .displayed_slot_ranges
+        .retain(|range| !live_range_set.contains(range));
+    let live_slots: Vec<_> = live_ranges
+        .iter()
+        .flat_map(|(start, len)| {
+            let shift: usize = snapshot
+                .displayed_slot_ranges
+                .iter()
+                .filter(|(page_start, _)| page_start < start)
+                .map(|(_, len)| *len)
+                .sum();
+            start.saturating_sub(shift)..start.saturating_sub(shift).saturating_add(*len)
+        })
+        .collect();
     let live_empty = live_region_is_empty(state);
     // 迟到 open：请求发出后本地展示代次已经推进（新气泡或整轮回答已进入
     // committed）。此时不能整体清空 `committed`，否则旧快照会覆盖新内容。
@@ -558,6 +621,8 @@ fn prepare_open_display(
         crate::kit::history_paging::sync_spans_from_window(&state.window);
         crate::kit::history_window::clear_window_unit_mappings();
         crate::kit::history_window::clear_detail_targets();
+        // 仅重登记旧窗口明确持有的 live 槽位；position/durable 待新身份的页与提交确认。
+        state.register_live_seal_segments(live_slots.into_iter());
         // adopt 条目的正文仍由保留的 live 尾部持有：在新窗口里延续其展示
         // 身份与位置，否则下一次 open 会重复插入同一持久条目。
         for (key, position) in &snapshot.slotless_entries {
@@ -617,7 +682,13 @@ fn validate_display_ranges(
     Ok(())
 }
 
-/// S6.2：释放事务清理未配对工具终点（S6.5 预算化后仍复用此入口）。
+/// S6.2：释放事务按本次释放的持久条目身份精准清理未配对工具终点。
+pub(crate) fn remove_pending_tool_ends_for_entries(entries: &HashSet<PersistentEntryKey>) -> usize {
+    history_page::remove_pending_tool_ends_for_entries(entries)
+}
+
+/// 测试清理：丢弃全部未配对工具终点（生产释放走按条目精准清理）。
+#[cfg(test)]
 pub(crate) fn clear_pending_tool_ends() {
     history_page::clear_pending_tool_ends();
 }
@@ -628,8 +699,23 @@ pub(crate) fn pending_tool_ends_fingerprint() -> (usize, usize) {
 }
 
 #[cfg(test)]
-pub(crate) fn insert_pending_tool_end_for_tests(tool_id: &str, output: &str, is_error: bool) {
-    history_page::insert_pending_tool_end_for_tests(tool_id, output, is_error);
+pub(crate) fn pending_tool_ends_limits_for_tests() -> (usize, usize) {
+    history_page::pending_tool_ends_limits_for_tests()
+}
+
+#[cfg(test)]
+pub(crate) fn pending_tool_end_entry_for_tests(tool_id: &str) -> Option<PersistentEntryKey> {
+    history_page::pending_tool_end_entry_for_tests(tool_id)
+}
+
+#[cfg(test)]
+pub(crate) fn insert_pending_tool_end_for_tests(
+    tool_id: &str,
+    entry: PersistentEntryKey,
+    output: &str,
+    is_error: bool,
+) {
+    history_page::insert_pending_tool_end_for_tests(tool_id, entry, output, is_error);
 }
 
 /// 发布后结算待合并页：窗口账本与 consumer 预留同时归还。
@@ -830,23 +916,14 @@ fn gap_insert_slot(state: &BridgeState, gap_id: crate::kit::history_window::GapI
 }
 
 fn segment_start_slot(state: &BridgeState, key: SegmentKey) -> Option<usize> {
-    let entries = state.window.index().segment_entries(key)?;
-    let first = entries.first()?;
     state
         .window
-        .index()
-        .locate_entry(first)
-        .map(|locator| locator.slot_start)
+        .segment_display_bounds(key)
+        .map(|(start, _)| start)
 }
 
 fn segment_end_slot(state: &BridgeState, key: SegmentKey) -> Option<usize> {
-    let entries = state.window.index().segment_entries(key)?;
-    let last = entries.last()?;
-    state
-        .window
-        .index()
-        .locate_entry(last)
-        .map(|locator| locator.slot_start.saturating_add(locator.unit_count))
+    state.window.segment_display_bounds(key).map(|(_, end)| end)
 }
 fn live_region_is_empty(state: &BridgeState) -> bool {
     state.current_turn.is_empty()

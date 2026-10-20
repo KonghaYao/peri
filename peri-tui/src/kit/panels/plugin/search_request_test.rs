@@ -74,7 +74,7 @@ async fn completed_search_view(fail: bool) -> String {
     client.force_stable_for_test("plugin-search-session", true);
     client.spawn_pump(notification_tx);
     let shutdown = CancellationToken::new();
-    let (bridge_tx, bridge_rx) = mpsc::unbounded_channel();
+    let (bridge_tx, bridge_rx) = mpsc::channel(crate::kit::acp_bridge::BRIDGE_QUEUE_CAPACITY);
     let notifier =
         crate::kit::acp_notifier::spawn_kit_notifier(notification_rx, bridge_tx, shutdown.clone());
     let (observed_tx, mut observed_rx) = mpsc::unbounded_channel();

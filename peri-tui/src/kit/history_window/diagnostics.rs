@@ -18,7 +18,6 @@ pub struct HistoryWindowDiagnostics {
     pub tui_pinned_bytes: usize,
     pub history_page_reserved_bytes: usize,
     pub history_page_pending_bytes: usize,
-    pub unmatched_tool_result_bytes: usize,
     pub detail_window_bytes: usize,
     pub resident_segments: usize,
     pub gap_count: usize,

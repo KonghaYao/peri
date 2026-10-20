@@ -12,8 +12,13 @@ use super::model::{PersistentEntryKey, ReleasePlan, ReleaseReason};
 pub fn release_window_plans(
     state: &mut crate::kit::acp_events::BridgeState,
     mut plans: Vec<ReleasePlan>,
-    _reason: ReleaseReason,
+    reason: ReleaseReason,
 ) -> ReleaseOutcome {
+    tracing::debug!(
+        ?reason,
+        plan_count = plans.len(),
+        "history_window: consume release plans"
+    );
     let anchor_entry = state.window.anchor().map(|anchor| anchor.entry.clone());
     let mut keys = HashSet::new();
     let mut outcome = ReleaseOutcome::default();
@@ -67,7 +72,14 @@ pub fn release_window_plans(
     crate::kit::history_window::remove_window_unit_mappings(&keys);
     crate::kit::history_window::remove_detail_targets(&keys);
     crate::kit::history_paging::sync_spans_from_window(&state.window);
-    crate::kit::acp_events::history_window::clear_pending_tool_ends();
+    // 只清理本次释放集合覆盖的暂存终点：写入时记录了结果条目身份，映射可靠；
+    // 不做全局清空，避免释放一个段时误删其他段等待配对的工具结果。
+    let removed_pending_tool_ends =
+        crate::kit::acp_events::history_window::remove_pending_tool_ends_for_entries(&keys);
+    tracing::debug!(
+        removed_pending_tool_ends,
+        "history_window: pruned pending tool ends for released entries"
+    );
     let focus = {
         let handle = crate::kit::atoms::FOCUSED_ENTRY.state();
         handle.read().clone()

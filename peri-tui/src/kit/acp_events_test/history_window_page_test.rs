@@ -816,3 +816,117 @@ fn empty_page_accepts_without_pending_merge() {
     assert_eq!(consumer.reserved_bytes, 0);
     assert!(!consumer.is_degraded());
 }
+
+#[test]
+#[serial]
+fn accepted_page_promotes_live_archive_without_duplicate_body() {
+    use crate::kit::history_window::{
+        CommitOutcome, HistoryCommitInfo, PersistentEntryKey, PinReason, SegmentOrigin,
+    };
+    use peri_acp_types::{
+        history_window::HistoryCommittedTail, messages::MessageId, thread::ThreadId,
+    };
+
+    let (mut state, _guard) = state_with_window();
+    state.current_turn.append_text("live body", Some("live"));
+    dispatch_and_notify(&mut state, &AcpEventData::TurnDone);
+    let key = PersistentEntryKey::own("s1:live");
+    let segment_key = state.window.index().locate_entry(&key).unwrap().segment;
+    let segment = state.window.segment(segment_key).unwrap();
+    assert_eq!(segment.origin, SegmentOrigin::LiveSeal);
+    assert_eq!(segment.entries[0].position, None);
+    assert!(!segment.durable);
+    assert!(segment.pins.contains(PinReason::Unpersisted));
+    let identity = state.window.identity().cloned().unwrap();
+    let context = context("live-page", state.window.generation());
+    let page = response(identity, vec![text_item("live", 10, "live body")]);
+    dispatch_and_notify(
+        &mut state,
+        &AcpEventData::HistoryWindowPageLoaded {
+            context: Box::new(context),
+            response: Box::new(page),
+        },
+    );
+    assert_eq!(state.committed.len(), 1);
+    assert_eq!(state.window.segment_count(), 1);
+    assert_eq!(
+        state.window.segment(segment_key).unwrap().entries[0].position,
+        Some(10)
+    );
+    let info = HistoryCommitInfo {
+        session_id: "s1".into(),
+        session_generation: "gen-1".into(),
+        structure_version: 7,
+        checkpoint_id: "live-cp".into(),
+        summary_entry_id: None,
+        committed_tail: HistoryCommittedTail::new(
+            &ThreadId::from("s1".to_string()),
+            MessageId::new(),
+            10,
+        )
+        .encode(),
+    };
+    assert_eq!(
+        state.window.apply_commit(&info),
+        CommitOutcome::Applied { sealed_segments: 1 }
+    );
+    let segment = state.window.segment(segment_key).unwrap();
+    assert!(segment.sealed && segment.durable);
+    assert!(!segment.pins.contains(PinReason::Unpersisted));
+}
+
+#[test]
+#[serial]
+fn rejected_page_does_not_promote_live_archive() {
+    let (mut state, _guard) = state_with_window();
+    state.current_turn.append_text("live body", Some("live"));
+    dispatch_and_notify(&mut state, &AcpEventData::TurnDone);
+    let key = crate::kit::history_window::PersistentEntryKey::own("s1:live");
+    let segment_key = state.window.index().locate_entry(&key).unwrap().segment;
+    let identity = state.window.identity().cloned().unwrap();
+    // 无法定位的 gap 在 admit_page 阶段拒绝，不能预先提升响应中的 live 身份。
+    let mut context = context("bad-gap", state.window.generation());
+    context.gap = Some(crate::kit::history_window::GapId(999));
+    let page = response(identity, vec![text_item("live", 10, "live body")]);
+    dispatch_and_notify(
+        &mut state,
+        &AcpEventData::HistoryWindowPageLoaded {
+            context: Box::new(context),
+            response: Box::new(page),
+        },
+    );
+    assert_eq!(
+        state.window.segment(segment_key).unwrap().entries[0].position,
+        None
+    );
+    assert_eq!(state.committed.len(), 1);
+}
+
+#[test]
+#[serial]
+fn reopen_keeps_live_archive_outside_new_page() {
+    let (mut state, _guard) = state_with_window();
+    state.current_turn.append_text("live body", Some("live"));
+    dispatch_and_notify(&mut state, &AcpEventData::TurnDone);
+    let mut identity = state.window.identity().cloned().unwrap();
+    identity.snapshot_token = "snap-2".into();
+    let mut context = context("reopen-live", state.window.generation());
+    context.is_open = true;
+    context.display_generation = state.generation;
+    let page = response(identity, vec![text_item("older", 5, "older body")]);
+    dispatch_and_notify(
+        &mut state,
+        &AcpEventData::HistoryWindowPageLoaded {
+            context: Box::new(context),
+            response: Box::new(page),
+        },
+    );
+    assert_eq!(state.committed.len(), 2);
+    assert!(matches!(
+        &state.committed[1],
+        TuiRenderUnit::TuiAssistantBubble(b) if b.text == "live body"
+    ));
+    let key = crate::kit::history_window::PersistentEntryKey::own("s1:live");
+    assert!(state.window.index().contains_entry(&key));
+    assert_eq!(state.window.displayed_range(&key), Some((1, 1)));
+}

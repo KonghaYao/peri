@@ -556,9 +556,10 @@ pub static HISTORY_WINDOW_TX: OnceLock<
 pub(crate) static HISTORY_PAGING: AtomStatic<crate::kit::history_paging::HistoryPagingState> =
     AtomStatic::new(crate::kit::history_paging::HistoryPagingState::default);
 
-/// S5 窗口开关：默认 false；只有它与连接能力同时为真才走 `historyWindowV1`。
+/// S5 窗口开关：atom 初值 false；启动时由 beta 读取写入（未配置视为开启，显式 false 关闭）。
+/// 只有它与连接能力同时为真才走 `historyWindowV1`。
 pub static HISTORY_WINDOW_V1: AtomStatic<bool> = AtomStatic::new(|| false);
-/// 当前连接是否协商 `peri.historyWindowV1`（initialize 响应写入）。
+/// 当前连接是否协商 `peri.historyWindowV1`（initialize 响应写入；未回显一律 fail-closed）。
 pub static HISTORY_WINDOW_CAPABLE: AtomStatic<bool> = AtomStatic::new(|| false);
 /// 桥接窗口当前代次；consumer 用它给页请求盖代次。
 pub static HISTORY_WINDOW_GENERATION: AtomStatic<u64> = AtomStatic::new(|| 0);

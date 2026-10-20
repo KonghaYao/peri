@@ -220,7 +220,7 @@ async fn open_probe_refuses_a_previous_store_missing_its_bindings_table() {
     );
 }
 
-/// 打开路径的形状探测（R3）：本代库（v5 + 11）的 `threads` 漂移，同样在打开时就拒绝。
+/// 打开路径的形状探测（R3）：本代库（v6 + 12）的 `threads` 漂移，同样在打开时就拒绝。
 #[tokio::test]
 async fn open_probe_refuses_a_current_store_with_drifted_threads() {
     let fixture = Fixture::new().await;

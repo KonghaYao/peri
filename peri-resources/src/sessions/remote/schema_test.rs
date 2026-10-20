@@ -9,8 +9,8 @@ use super::mutation::StoreAccess;
 use super::schema::{
     acceptance, decode_identity, identity_read_plan, initialization_plan, shape_probe,
     SchemaAcceptance, ShapeProbe, StoreId, StoreIdentityRead, StoreShapeRead, StoreSnapshot,
-    META_INSERT_INDEX, PREVIOUS_STORE_CONTRACT, REMOTE_SCHEMA_VERSION, STORE_CONTRACT,
-    STORE_META_TABLE,
+    META_INSERT_INDEX, PREVIOUS_CURRENT_STORE_CONTRACT, PREVIOUS_STORE_CONTRACT,
+    REMOTE_SCHEMA_VERSION, STORE_CONTRACT, STORE_META_TABLE,
 };
 use super::session_data::{open_step, OpenStep};
 use super::sql::StatementSpec;
@@ -74,8 +74,9 @@ fn identity_read_plan_is_read_only() {
 fn acceptance_rejects_unknown_versions() {
     assert_eq!(acceptance(REMOTE_SCHEMA_VERSION), SchemaAcceptance::Accept);
     assert_eq!(acceptance(10), SchemaAcceptance::Upgradeable);
-    // 未发布的中间代（12..19）：都是「比本构建新」，不迁移也不降级写入。
-    for version in 12..=19 {
+    assert_eq!(acceptance(11), SchemaAcceptance::Upgradeable);
+    // 未发布的中间代（13..19）：都是「比本构建新」，不迁移也不降级写入。
+    for version in 13..=19 {
         assert_eq!(
             acceptance(version),
             SchemaAcceptance::TooNew,
@@ -87,14 +88,19 @@ fn acceptance_rejects_unknown_versions() {
     assert_eq!(acceptance(-1), SchemaAcceptance::Unusable);
 }
 
-/// 读取面只有两个代数：本代（`v5` + 11）与统一前的 `v2`（10|11）。其余一律不认识。
+/// 读取面只有三个代数：本代（`v6` + 12）、上一代当前形状（`v5` + 11）与统一前的 `v2`
+/// （10|11）。其余一律不认识。
 #[test]
 fn only_the_compatible_contract_and_generation_are_readable() {
     assert!(snapshot(REMOTE_SCHEMA_VERSION, STORE_CONTRACT).readable());
+    assert!(snapshot(11, PREVIOUS_CURRENT_STORE_CONTRACT).readable());
     assert!(snapshot(10, PREVIOUS_STORE_CONTRACT).readable());
     assert!(snapshot(11, PREVIOUS_STORE_CONTRACT).readable());
-    // 版本与契约必须互相匹配：`v5` 不是 10 的当前代数，`v2` 也不覆盖 12 之后的形状。
+    // 版本与契约必须互相匹配：`v6` 只覆盖 12，`v5` 只覆盖 11，`v2` 只覆盖 10|11。
     assert!(!snapshot(10, STORE_CONTRACT).readable());
+    assert!(!snapshot(11, STORE_CONTRACT).readable());
+    assert!(!snapshot(REMOTE_SCHEMA_VERSION, PREVIOUS_CURRENT_STORE_CONTRACT).readable());
+    assert!(!snapshot(REMOTE_SCHEMA_VERSION, PREVIOUS_STORE_CONTRACT).readable());
     assert!(!snapshot(REMOTE_SCHEMA_VERSION, PREVIOUS_STORE_CONTRACT).matches_build());
     for version in [9, 12, 13, 14, 15, 16, 17, 18, 19] {
         assert!(
@@ -133,6 +139,8 @@ fn open_step_refuses_unreadable_stores() {
         (10, "peri.session.store/v3"),
         (11, "peri.session.store/v4"),
         (10, STORE_CONTRACT),
+        (11, STORE_CONTRACT),
+        (REMOTE_SCHEMA_VERSION, PREVIOUS_CURRENT_STORE_CONTRACT),
         (REMOTE_SCHEMA_VERSION, "unknown-contract"),
     ] {
         let read = StoreIdentityRead::Present(snapshot(version, contract));
@@ -153,6 +161,14 @@ fn shape_probe_follows_the_readable_surface() {
         shape_probe(&snapshot(REMOTE_SCHEMA_VERSION, STORE_CONTRACT)),
         Some(ShapeProbe::Current)
     );
+    assert_eq!(
+        shape_probe(&snapshot(
+            11,
+            super::schema::PREVIOUS_CURRENT_STORE_CONTRACT
+        )),
+        Some(ShapeProbe::Current),
+        "上一代当前形状与本代同形（只缺派生索引表），按当前形状探测"
+    );
     for version in [10, 11] {
         assert_eq!(
             shape_probe(&snapshot(version, PREVIOUS_STORE_CONTRACT)),
@@ -164,6 +180,7 @@ fn shape_probe_follows_the_readable_surface() {
         (10, STORE_CONTRACT),
         (9, PREVIOUS_STORE_CONTRACT),
         (12, PREVIOUS_STORE_CONTRACT),
+        (12, super::schema::PREVIOUS_CURRENT_STORE_CONTRACT),
         (19, PREVIOUS_STORE_CONTRACT),
         (11, "peri.session.store/v3"),
         (11, "peri.session.store/v4"),

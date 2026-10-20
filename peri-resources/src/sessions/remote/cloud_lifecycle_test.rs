@@ -198,6 +198,47 @@ async fn lifecycle_flow(target: &CloudTarget, run: &str) -> Result<(), String> {
         "rejected adoption must preserve the existing frozen snapshot",
     )?;
 
+    // inherited 派生索引必须随树消失（R08）；child 由 save_child 写入过 inherited。
+    // 删除前先记录快照 id：删除后 snapshot 行已不在，无法再反查 payload 行。
+    let inherited_snapshots = {
+        let store = writer.store().await.map_err(failure)?;
+        // 远端写路径不落 inherited 派生索引；这里显式造一行，验证删除会清掉历史元数据。
+        let seeded_snapshot = format!("{run}-lc-inherited");
+        seed_inherited_index(&store, run, child.as_str(), &seeded_snapshot).await?;
+        let rows = store
+            .fetch_rows(&StatementSpec::new(
+                "SELECT snapshot_id FROM inherited_snapshot_index WHERE thread_id IN (?1, ?2)",
+                vec![
+                    Value::Text(root.as_str().to_owned()),
+                    Value::Text(child.as_str().to_owned()),
+                ],
+            ))
+            .await
+            .map_err(failure)?;
+        let snapshots: Vec<String> = rows
+            .into_iter()
+            .filter_map(|row| match row.into_iter().next() {
+                Some(Value::Text(snapshot_id)) => Some(snapshot_id),
+                _ => None,
+            })
+            .collect();
+        let payloads = scalar(
+            &store,
+            "SELECT COUNT(*) FROM inherited_payload_index WHERE snapshot_id IN
+             (SELECT snapshot_id FROM inherited_snapshot_index WHERE thread_id IN (?1, ?2))",
+            vec![
+                Value::Text(root.as_str().to_owned()),
+                Value::Text(child.as_str().to_owned()),
+            ],
+        )
+        .await?;
+        check(
+            !snapshots.is_empty() && payloads > 0,
+            "fixture must write inherited index rows for the deleted tree",
+        )?;
+        snapshots
+    };
+
     // 删树：整棵子树（含根）消失；根不存在时是 NotFound，不是「成功但没删」。
     writer.delete_tree(&root).await.map_err(failure)?;
     for gone in [&root, &child] {
@@ -218,6 +259,34 @@ async fn lifecycle_flow(target: &CloudTarget, run: &str) -> Result<(), String> {
         matches!(second_delete.kind(), SessionResourceErrorKind::NotFound),
         "deleting an absent session must be NotFound, not a silent success",
     )?;
+    {
+        let store = writer.store().await.map_err(failure)?;
+        let remaining = scalar(
+            &store,
+            "SELECT COUNT(*) FROM inherited_snapshot_index WHERE thread_id IN (?1, ?2)",
+            vec![
+                Value::Text(root.as_str().to_owned()),
+                Value::Text(child.as_str().to_owned()),
+            ],
+        )
+        .await?;
+        check(
+            remaining == 0,
+            "deleted session tree must not leave inherited snapshot index rows",
+        )?;
+        for snapshot_id in inherited_snapshots {
+            let remaining = scalar(
+                &store,
+                "SELECT COUNT(*) FROM inherited_payload_index WHERE snapshot_id = ?1",
+                vec![Value::Text(snapshot_id)],
+            )
+            .await?;
+            check(
+                remaining == 0,
+                "deleted session tree must not leave inherited payload index rows",
+            )?;
+        }
+    }
 
     // 撤销：有子会话 → 拒绝且一行都不删；子会话清掉后 → 成功。
     let published = writer
@@ -394,6 +463,52 @@ async fn guard_flow(target: &CloudTarget, run: &str) -> Result<(), String> {
             counts.sessions, counts.messages, counts.ledger
         ),
     )
+}
+
+/// 造一行 inherited 派生索引：远端正常写路径不写这两张表，但旧数据/迁移数据可能带行，
+/// 删除路径仍须清理（R08）。语句走正常托管 mutation，不和测试清理共用裸 SQL 口径。
+async fn seed_inherited_index(
+    store: &RemoteStore,
+    run: &str,
+    thread_id: &str,
+    snapshot_id: &str,
+) -> Result<(), String> {
+    let kind = "seed_inherited_index";
+    let identity = OperationIdentity::new(OperationId::scoped(run, kind), kind, &[run]);
+    store
+        .apply_qualified(&QualifiedMutation {
+            identity,
+            effects: vec![
+                StatementSpec::new(
+                    "INSERT INTO inherited_snapshot_index
+                     (snapshot_id, thread_id, payload_bytes, entry_count, prepared_at)
+                     VALUES (?1, ?2, ?3, ?4, ?5)",
+                    vec![
+                        Value::Text(snapshot_id.to_owned()),
+                        Value::Text(thread_id.to_owned()),
+                        Value::Integer(2),
+                        Value::Integer(1),
+                        Value::Text(chrono::Utc::now().to_rfc3339()),
+                    ],
+                ),
+                StatementSpec::new(
+                    "INSERT INTO inherited_payload_index
+                     (snapshot_id, ordinal, entry_id, raw_start, raw_len, logical_len)
+                     VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+                    vec![
+                        Value::Text(snapshot_id.to_owned()),
+                        Value::Integer(0),
+                        Value::Text(format!("{snapshot_id}-entry")),
+                        Value::Integer(0),
+                        Value::Integer(1),
+                        Value::Integer(1),
+                    ],
+                ),
+            ],
+        })
+        .await
+        .map_err(failure)?;
+    Ok(())
 }
 
 /// 一个托管事务批：生产守卫语句 + 一条效果语句（flags 改写）。

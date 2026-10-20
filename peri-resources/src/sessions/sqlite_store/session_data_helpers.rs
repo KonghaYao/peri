@@ -122,6 +122,23 @@ pub(in crate::sessions) async fn frozen_bytes_on(
     }
 }
 
+/// 恢复准入的 frozen 状态：单列读取，并区分「行缺失」与「列从未保存」。
+pub(in crate::sessions) async fn frozen_state_on(
+    connection: &mut SqliteConnection,
+    id: &ThreadId,
+) -> SessionResourceResult<FrozenState> {
+    let row: Option<(Option<String>,)> = sqlx::query_as(FROZEN_CONTEXT_SQL)
+        .bind(id.as_str())
+        .fetch_optional(&mut *connection)
+        .await
+        .map_err(|error| map_sqlx(&error))?;
+    match row {
+        Some((Some(bytes),)) => Ok(FrozenState::Present(FrozenSnapshotBytes::new(bytes))),
+        Some((None,)) => Ok(FrozenState::LegacyAbsent),
+        None => Err(not_found()),
+    }
+}
+
 /// `NewSession` 的 `threads` 行插入参数（创建路径与 fork/child 共用同一列形状）。
 pub(in crate::sessions) fn new_session_row<'a>(
     input: &'a NewSession,

@@ -5,6 +5,7 @@
 //! host loop and request router used by native clients retain protocol ownership.
 
 use std::sync::Arc;
+use std::time::Duration;
 
 use serde_json::{json, Value};
 use tokio::sync::{mpsc, Mutex};
@@ -15,11 +16,16 @@ use super::{
     AcpTransport,
 };
 
+/// 出站 JSON-RPC 帧队列容量。外部宿主不读时有限等待，超时关闭桥接，
+/// 不静默丢帧、也不无限增长。
+const WIRE_QUEUE_CAPACITY: usize = 256;
+const WIRE_SEND_TIMEOUT: Duration = Duration::from_millis(500);
+
 /// Client-side wire adapter for an existing [`MpscClientTransport`].
 pub struct WireBridge {
     client: Arc<MpscClientTransport>,
-    outgoing: Mutex<mpsc::UnboundedReceiver<Value>>,
-    sender: Mutex<Option<mpsc::UnboundedSender<Value>>>,
+    outgoing: Mutex<mpsc::Receiver<Value>>,
+    sender: Mutex<Option<mpsc::Sender<Value>>>,
 }
 
 impl Drop for WireBridge {
@@ -33,7 +39,7 @@ impl WireBridge {
     /// Must be called within the same Tokio runtime as `mpsc_transport_pair`.
     pub fn new(client: MpscClientTransport) -> Self {
         let client = Arc::new(client);
-        let (sender, outgoing) = mpsc::unbounded_channel();
+        let (sender, outgoing) = mpsc::channel(WIRE_QUEUE_CAPACITY);
         let reader = Arc::clone(&client);
         let writer = sender.clone();
         tokio::spawn(async move {
@@ -47,8 +53,17 @@ impl WireBridge {
                     }
                     IncomingMessage::Response { id, result } => response_frame(id, result),
                 };
-                if writer.send(frame).is_err() {
-                    break;
+                match tokio::time::timeout(WIRE_SEND_TIMEOUT, writer.send(frame)).await {
+                    Ok(Ok(())) => {}
+                    Ok(Err(_)) => break,
+                    Err(_) => {
+                        tracing::warn!(
+                            event = "acp_wire_backpressure",
+                            "外部宿主未在期限内消费 JSON-RPC 帧，关闭桥接"
+                        );
+                        reader.close();
+                        break;
+                    }
                 }
             }
         });
@@ -92,7 +107,22 @@ impl WireBridge {
                 let method = method.to_owned();
                 tokio::spawn(async move {
                     let result = client.send_request(&method, params).await;
-                    let _ = sender.send(response_frame(id, result));
+                    match tokio::time::timeout(
+                        WIRE_SEND_TIMEOUT,
+                        sender.send(response_frame(id, result)),
+                    )
+                    .await
+                    {
+                        Ok(Ok(())) => {}
+                        Ok(Err(_)) => client.close(),
+                        Err(_) => {
+                            tracing::warn!(
+                                event = "acp_wire_backpressure",
+                                "响应帧出站队列已满，关闭桥接"
+                            );
+                            client.close();
+                        }
+                    }
                 });
                 Ok(())
             } else {

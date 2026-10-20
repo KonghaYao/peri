@@ -22,7 +22,7 @@ pub use agent_client_protocol::{
 };
 use async_trait::async_trait;
 use dashmap::DashMap;
-use peri_acp_types::event::ExecutorEvent;
+use peri_acp_types::event::{CompactStrategy, ExecutorEvent};
 use peri_acp_types::PeriCaps;
 use serde_json::json;
 use std::sync::Arc;
@@ -33,6 +33,18 @@ use crate::{event::activity::map_agent_activity, event::map_event, transport::Ac
 /// EventSink 契约（L5：事实源 peri-acp-types::event）。
 pub use peri_acp_types::event::EventSink;
 use peri_acp_types::event::EventSinkError;
+
+/// Compact 提交事实的宿主观察者。
+///
+/// `CompactCompleted` 只表示“提交已发生、事件已产生”，不携带存储水位。窗口通知
+/// 需要读取 Store 的精确边界并在 Host 侧发布，因此由宿主注入这个窄回调；事件
+/// 序列化路径本身不查询存储。
+///
+/// 只有 Full 策略会触发回调：Micro/Smart 的投影变化不伪造 Full 检查点。
+#[async_trait]
+pub trait CompactCommitObserver: Send + Sync {
+    async fn on_compact_committed(&self, session_id: &str);
+}
 
 /// Receives [`ExecutorEvent`]s produced during agent execution and routes them
 /// to the appropriate transport.
@@ -52,6 +64,8 @@ use peri_acp_types::event::EventSinkError;
 pub struct TransportEventSink {
     transport: std::sync::Arc<dyn AcpTransport>,
     caps_registry: Arc<DashMap<String, PeriCaps>>,
+    /// 宿主注入的 Full Compact 提交观察者；None 时保持纯事件转发。
+    compact_commit_observer: Option<Arc<dyn CompactCommitObserver>>,
 }
 
 impl TransportEventSink {
@@ -126,7 +140,18 @@ impl TransportEventSink {
         Self {
             transport,
             caps_registry,
+            compact_commit_observer: None,
         }
+    }
+
+    /// 注入 Full Compact 提交观察者。仅宿主装配路径使用；测试/轻量 sink 不注入时
+    /// 行为与原来完全一致。
+    pub fn with_compact_commit_observer(
+        mut self,
+        observer: Arc<dyn CompactCommitObserver>,
+    ) -> Self {
+        self.compact_commit_observer = Some(observer);
+        self
     }
 
     /// Push a `{event, data}` custom event through `peri/unstable_event` channel.
@@ -219,6 +244,15 @@ impl EventSink for TransportEventSink {
             self.push_system_reminder(session_id, reminder, false, source_agent_id.as_deref())
                 .await?;
             return Ok(());
+        }
+        // Full Compact 的 durable 提交事实不能等 prompt 收尾，也不能依赖后续
+        // 展示事件是否送达。仅在策略为 Full 时触发；Micro/Smart 不伪造检查点。
+        if let ExecutorEvent::CompactCompleted { strategy, .. } = event {
+            if *strategy == CompactStrategy::Full {
+                if let Some(observer) = &self.compact_commit_observer {
+                    observer.on_compact_committed(session_id).await;
+                }
+            }
         }
         let caps = self
             .caps_registry
@@ -410,3 +444,7 @@ impl EventSink for TransportEventSink {
 #[cfg(test)]
 #[path = "event_sink_test.rs"]
 mod tests;
+
+#[cfg(test)]
+#[path = "event_sink/compact_observer_test.rs"]
+mod compact_observer_tests;

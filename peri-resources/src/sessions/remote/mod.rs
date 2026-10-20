@@ -124,6 +124,10 @@ mod schema_upgrade;
 mod schema_upgrade_tests;
 
 #[cfg(test)]
+#[path = "schema_upgrade_additive_test.rs"]
+mod schema_upgrade_additive_tests;
+
+#[cfg(test)]
 #[path = "schema_probe_test.rs"]
 mod schema_probe_tests;
 

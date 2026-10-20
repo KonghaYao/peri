@@ -1,9 +1,10 @@
-//! 本机 schema 的压缩后单条迁移：压缩前形状（`V10`，正式基线 ≤10）→ 当前形状（11）。
+//! 本机 schema 的压缩后单条迁移：压缩前形状（`V10`，正式基线 ≤10）→ 当前形状（12）。
 //!
 //! 两种输入都走**同一条**搬运：正式发布的 ≤10 库（调用方先在本事务补齐到 V10 形状）与
 //! β 内部停在 11 的登记形状库（形状已经是 V10）。搬运把登记的 `workspaces` 与引用它的
 //! 绑定表整体换成当前形状，并把 `threads` 重建到 canonical 形状（`workspace_id NOT NULL`，
-//! 不只是加一个可空列——两种形状并存的库会让后续判定与读取各自漂移）：
+//! 不只是加一个可空列——两种形状并存的库会让后续判定与读取各自漂移）；终点同时建立
+//! inherited 派生索引两表（可从 `threads.inherited_context` 重建）：
 //!
 //! - 归属行按 `(machine_id, path)` 收敛，id 沿用旧登记 UUID（空闲时），旧登记的证据三列
 //!   随行搬过去；没有会话引用但登记仍存在的路径也保留一行（否则登记行会凭空消失）。
@@ -37,7 +38,7 @@ pub(super) async fn migrate_local_v11(connection: &mut SqliteConnection) -> Resu
     let (version,): (i64,) = sqlx::query_as("PRAGMA user_version")
         .fetch_one(&mut *connection)
         .await?;
-    if version != canonical::CURRENT_SCHEMA_VERSION {
+    if version != canonical::LEGACY_REGISTRATION_SCHEMA_VERSION {
         bail!("storage v11 migration requires schema 11");
     }
     sqlx::query("PRAGMA foreign_keys = OFF")
@@ -199,6 +200,14 @@ pub(super) async fn migrate_shape(connection: &mut SqliteConnection) -> Result<(
     sqlx::query(canonical::CREATE_SESSION_CLOSE_INTENTS_TABLE_SQL)
         .execute(&mut *connection)
         .await?;
+    // 派生索引表不是搬运输入的一部分：迁移终点按 canonical DDL 幂等建齐，读取路径
+    // 在索引缺失时本来就回退扫描，因此这里不阻塞升级。
+    for statement in canonical::CREATE_INHERITED_INDEX_TABLES {
+        // 语句文本来自 `canonical` 的静态清单，不含外部输入。
+        sqlx::query(sqlx::AssertSqlSafe((*statement).to_owned()))
+            .execute(&mut *connection)
+            .await?;
+    }
     // 迁移终点必须带齐 canonical 索引集：`DROP TABLE` 会把旧表上的索引一并删掉，而输入库
     // 也可能本来就缺索引（`user_version` 已是 11 的开发期库）。整表重放一次是幂等的，
     // 也是「一个 schema、两种执行器」在索引上的同一份语句（远端批次末尾同样整表重放）。
@@ -233,9 +242,12 @@ pub(super) async fn migrate_shape(connection: &mut SqliteConnection) -> Result<(
              they stay readable and are re-linked on demand from the saved directory evidence"
         );
     }
-    sqlx::query("PRAGMA user_version = 11")
-        .execute(&mut *connection)
-        .await?;
+    sqlx::query(sqlx::AssertSqlSafe(format!(
+        "PRAGMA user_version = {}",
+        canonical::CURRENT_SCHEMA_VERSION
+    )))
+    .execute(&mut *connection)
+    .await?;
     Ok(())
 }
 

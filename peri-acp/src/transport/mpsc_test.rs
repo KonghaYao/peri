@@ -294,3 +294,39 @@ async fn test_explicit_close_rejects_both_pending_directions_and_delivers_eof() 
         .is_none());
     assert_transport_closed(client.send_request("late", json!({})).await.unwrap_err());
 }
+
+/// 队列满且对端不消费时，写端不得无限等待：有限等待后关闭连接并返回
+/// 显式背压错误（内存有界优先于伪装成“仍在运行”）。
+#[tokio::test(start_paused = true)]
+async fn test_send_or_close_times_out_and_closes_connection_when_peer_stalls() {
+    let (tx, _rx) = mpsc::channel(1);
+    let router = RequestRouter::new();
+    tx.send(ChannelMessage::Notification {
+        method: "fill".to_string(),
+        params: json!({}),
+    })
+    .await
+    .unwrap();
+
+    let error = send_or_close(
+        &tx,
+        &router,
+        ChannelMessage::Notification {
+            method: "blocked".to_string(),
+            params: json!({}),
+        },
+    )
+    .await
+    .expect_err("满队列必须显式失败，不能无限 await");
+
+    assert_eq!(error.code, TRANSPORT_BACKPRESSURE_CODE);
+    assert!(
+        error.message.contains("backpressure"),
+        "错误语义必须可观测: {}",
+        error.message
+    );
+    assert!(
+        router.ensure_open().is_err(),
+        "等待超时后连接必须关闭，避免后续写入继续排队"
+    );
+}

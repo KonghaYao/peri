@@ -13,12 +13,8 @@ pub(crate) struct SqliteSessionData {
     pub(super) database: Arc<SqliteSessionDatabase>,
     /// 端口关闭后不再接受新写入；读取不受影响（历史仍可解释）。
     pub(super) closed: Arc<AtomicBool>,
-    /// inherited 冻结前缀的增量读取布局；按线程缓存，内容变化（总字节数）即失效。
-    pub(super) inherited_layouts: Arc<
-        std::sync::Mutex<
-            std::collections::HashMap<ThreadId, super::inherited_blob::CachedInheritedLayout>,
-        >,
-    >,
+    /// inherited 冻结前缀的增量读取布局/摘要；按线程有界缓存，内容变化（总字节数）即失效。
+    pub(super) inherited_facts: Arc<std::sync::Mutex<super::inherited_facts::InheritedFactsCache>>,
 }
 
 impl SqliteSessionData {
@@ -26,7 +22,9 @@ impl SqliteSessionData {
         Self {
             database,
             closed: Arc::new(AtomicBool::new(false)),
-            inherited_layouts: Arc::new(std::sync::Mutex::new(std::collections::HashMap::new())),
+            inherited_facts: Arc::new(std::sync::Mutex::new(
+                super::inherited_facts::InheritedFactsCache::new(),
+            )),
         }
     }
 }

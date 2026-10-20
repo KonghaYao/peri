@@ -5,12 +5,13 @@ use peri_acp::transport::{AcpTransport, mpsc::mpsc_transport_pair};
 use serde_json::json;
 use serial_test::serial;
 fn spawn_test_notifier() -> (
-    mpsc::UnboundedSender<AcpNotification>,
-    mpsc::UnboundedReceiver<AcpEventWithEpoch>,
+    mpsc::Sender<AcpNotification>,
+    mpsc::Receiver<AcpEventWithEpoch>,
     CancellationToken,
 ) {
-    let (notif_tx, notif_rx) = mpsc::unbounded_channel::<AcpNotification>();
-    let (bridge_tx, bridge_rx) = mpsc::unbounded_channel::<AcpEventWithEpoch>();
+    let (notif_tx, notif_rx) =
+        mpsc::channel(crate::acp_client::client::NOTIFICATION_QUEUE_CAPACITY);
+    let (bridge_tx, bridge_rx) = mpsc::channel(crate::kit::acp_bridge::BRIDGE_QUEUE_CAPACITY);
     let shutdown = CancellationToken::new();
     let _handle = spawn_kit_notifier(notif_rx, bridge_tx, shutdown.clone());
     (notif_tx, bridge_rx, shutdown)
@@ -23,7 +24,7 @@ async fn bridge_delivery_failure_claims_and_settles_registered_interaction() {
     client.force_stable_for_test("s1", true);
     client.spawn_pump(notification_tx);
 
-    let (bridge_tx, bridge_rx) = mpsc::unbounded_channel();
+    let (bridge_tx, bridge_rx) = mpsc::channel(crate::kit::acp_bridge::BRIDGE_QUEUE_CAPACITY);
     drop(bridge_rx);
     let shutdown = CancellationToken::new();
     let _notifier =
@@ -58,6 +59,7 @@ async fn test_agent_done_forwards_turn_done_to_bridges() {
             stop_reason: "end_turn".into(),
             request_id: None,
         })
+        .await
         .unwrap();
 
     let bridge_event = bridge_rx.recv().await.expect("bridge 应收到 TurnDone");
@@ -78,6 +80,7 @@ async fn test_agent_done_cancelled_forwards_request_id_to_turn_interrupted() {
             stop_reason: "cancelled".into(),
             request_id: Some("rid-1".into()),
         })
+        .await
         .unwrap();
 
     let bridge_event = bridge_rx
@@ -176,7 +179,7 @@ async fn test_real_wiring_transport_death_resets_loading() {
     let (client_transport, server_transport) = mpsc_transport_pair();
     let (client, notification_tx, notification_rx) = AcpTuiClient::new(client_transport);
     client.spawn_pump(notification_tx);
-    let (bridge_tx, _bridge_rx) = mpsc::unbounded_channel();
+    let (bridge_tx, _bridge_rx) = mpsc::channel(crate::kit::acp_bridge::BRIDGE_QUEUE_CAPACITY);
     let shutdown = CancellationToken::new();
     let _h = spawn_kit_notifier(notification_rx, bridge_tx, shutdown.clone());
 
@@ -225,8 +228,9 @@ async fn unreachable_failure_event_converges_via_notification_close() {
     *NOTIFICATION.state().write() = None;
     let hb_before = *RENDER_HEARTBEAT.state().read();
 
-    let (notif_tx, notif_rx) = mpsc::unbounded_channel();
-    let (bridge_tx, _bridge_rx) = mpsc::unbounded_channel();
+    let (notif_tx, notif_rx) =
+        mpsc::channel(crate::acp_client::client::NOTIFICATION_QUEUE_CAPACITY);
+    let (bridge_tx, _bridge_rx) = mpsc::channel(crate::kit::acp_bridge::BRIDGE_QUEUE_CAPACITY);
     let shutdown = CancellationToken::new();
     let handle = spawn_kit_notifier(notif_rx, bridge_tx, shutdown.clone());
     // 不发送 AgentExecutionFailed；直接模拟 transport 关闭。

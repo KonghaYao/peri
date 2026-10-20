@@ -47,7 +47,8 @@ async fn test_drop_settlement_worker_settles_real_wire_and_expires_owner() {
     };
     let (settlement_tx, settlement_rx) = tokio::sync::mpsc::unbounded_channel();
     lifecycle.install_drop_settlement_sender(settlement_tx);
-    let (notification_tx, mut notification_rx) = tokio::sync::mpsc::unbounded_channel();
+    let (notification_tx, mut notification_rx) =
+        tokio::sync::mpsc::channel(crate::acp_client::client::NOTIFICATION_QUEUE_CAPACITY);
     let weak_notification = Arc::new(Mutex::new(Some(notification_tx.downgrade())));
     spawn_settlement_worker(Arc::downgrade(&transport), settlement_rx, weak_notification);
 

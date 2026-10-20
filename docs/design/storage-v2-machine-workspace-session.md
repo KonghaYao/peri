@@ -1,6 +1,7 @@
 # 存储 v2：Machine → Workspace → Session
 
-> 状态：已批准目标设计；压缩后的 schema 11 已接入，真实远端验收待执行。当前行为以代码、契约测试和
+> 状态：已批准目标设计；压缩后的 schema 11 已接入，当前 schema 12（在 11 上只增 inherited
+> 派生索引表）已接入，真实远端验收待执行。当前行为以代码、契约测试和
 > [Session ID / 机器环境设计](session-id-environment.md)为准。实施与验收记录见
 > 进度与验收记录：[2026-10 月志](../../spec/history/2026-10.md)（2026-10-02 条目）。
 >
@@ -12,6 +13,12 @@
 > 10|11）；下文的「执行登记 UUID」「两个 id 不同」读作压缩前形状的历史形态，现行语义见
 > [Session ID / 机器环境设计](session-id-environment.md) §3.2 与
 > [active plan](../../spec/issues/2026-10-08-remove-legacy-execution-registrations-plan.md)。
+>
+> 后续变更（2026-10-19）：F12b 在 schema 11 上新增 `inherited_snapshot_index` /
+> `inherited_payload_index` 两张派生索引表，当前版本推进到 **schema 12**（存储契约
+> `peri.session.store/v6`）。11 的当前形状（canonical 会话表齐全、只缺派生索引表）
+> 走只增对象的增量批次；v2 的 10|11 仍经搬运后到达 12。派生索引可从
+> `threads.inherited_context` 重建，缺表、缺行或校验不过时读取回退全列扫描。
 >
 > Scope：会话数据的机器分区、工作区身份、会话归属与归档。本文是 v2 数据结构的
 > 目标权威；不改变按 Session ID 读取历史与执行准入分离的现行原则。Session
@@ -258,7 +265,7 @@ Workspace，也不得由首次访问的 thread 隐式认领。v2 迁移在事务
 可独立修改的机器归属。原 `session_bindings` 中的 Project/worktree 信息若仍服务
 执行准入，应保留为执行事实，不再充当 Session 的归属权威。v2 保留
 `threads`、`messages.thread_id` 和现有 Session ID；不做表名与协议的无关重命名。
-v2 使用当前形状（schema 11）；旧库形状升级路径和远端事务能力见 §6.2。
+v2 使用当前形状（schema 12；11 可增量升级）；旧库形状升级路径和远端事务能力见 §6.2。
 
 迁移不读文件系统，因此无法为「没有旧绑定、也没有可引用的旧登记证据」的历史会话建出
 绑定所需的归属事实（`session_bindings.project_id` 非空，不伪造过去的快照）。这类会话
@@ -328,10 +335,12 @@ canonical DDL 在 `peri-resources/src/sessions/canonical.rs` 保持一份，本�
 | `mcp_oauth_credentials` | machine_id 改为 workspace_id | 主键 `(principal_id,workspace_id,server_key)`；不能通过 machine_id 或 server 名兜底查找 |
 
 迁移版本从压缩前形状（正式基线 ≤10；本机先补齐到 V10 形状）推进到当前
-schema 11；远端 `peri_store_meta.schema_version` 取同一版本常量，存储契约标签
-从 `peri.session.store/v2`（10|11）推进到 `v5`。开发期曾分多代推进（schema 12
-建立存储归属、14 移除执行账本、19 删除执行登记表并把绑定收敛到归属行），
-合并进 main 时压缩为**一条**迁移，中间代 12..19 不再被接受。远端升级是一条
+schema 12；远端 `peri_store_meta.schema_version` 取同一版本常量，存储契约标签
+从 `peri.session.store/v2`（10|11）或上一代当前形状 `v5`（11）推进到 `v6`。
+开发期曾分多代推进（schema 12 建立存储归属、14 移除执行账本、19 删除执行登记表
+并把绑定收敛到归属行），合并进 main 时压缩为**一条**迁移；中间代 13..19 不再
+被接受（12 后来用于 F12b 的派生索引）。11 的当前形状只缺派生索引表，走只增
+派生对象的增量批次；11 的压缩前登记形状与 ≤10 仍走搬运。远端升级是一条
 受管原子批：在旧 schema/contract/store 身份与对象 SQL 快照守卫下搬运全部历史
 行、重建受影响表、清理旧凭证，最后把版本与 contract 同批推进。远端批结果
 未知时重读身份、形状和数据验收摘要，不能把超时当成功。新 writer 不接受旧

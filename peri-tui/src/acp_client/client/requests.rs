@@ -73,6 +73,11 @@ impl AcpTuiClient {
     /// **时序契约**：必须在首个 `session/new` 之前调用（initialize 是进程级
     /// 一次性协商）；失败仅 warn 不阻断——host 回退 all_enabled 兜底明细，
     /// 首 session 仍可用（R2 双写窗口防御）。
+    ///
+    /// `peri.historyWindowV1` 按 TUI 本地 beta 开关声明：host 把该声明当作
+    /// 「首屏由窗口 open 交付」的连接契约，声明 true 却因本地开关关闭而不发 open
+    /// 会让 `session/load` 跳过回放、恢复会话首屏缺失。因此本地关闭时必须声明
+    /// false，让 host 走原来的历史回放路径。
     pub async fn register_ui_commands(&self, specs: &[UiCommandSpec]) -> Result<(), AcpError> {
         let mut caps = PeriCaps::all_enabled();
         // TUI 的 MCP OAuth 交互走 legacy `peri/agent_event` 通道
@@ -81,8 +86,8 @@ impl AcpTuiClient {
         // safe 契约：`mcp/oauth_start` 强制要求 flow_id、`mcp/oauth_callback`
         // 直接拒绝授权码——TUI 的 [ 授权 ] 按钮会因缺 flow_id 被拒且无反馈。
         caps.oauth = false;
+        caps.history_window_v1 = crate::kit::atoms::HISTORY_WINDOW_V1.get();
         caps.ui_commands = specs.to_vec();
-        let requested_history_window = caps.history_window_v1;
         let params = json!({
             "protocolVersion": 1,
             "clientCapabilities": { "_meta": caps.to_agent_meta() },
@@ -101,10 +106,12 @@ impl AcpTuiClient {
             .unwrap_or(false);
         self.user_input_queue
             .store(supported, std::sync::atomic::Ordering::Release);
+        // fail-closed：只有服务端在 initialize 响应中明确回显 true 才启用。
+        // 客户端请求值不是服务端能力事实，缺失/非布尔一律按不支持处理。
         let history_window = result
             .pointer("/agentCapabilities/_meta/peri.historyWindowV1")
             .and_then(Value::as_bool)
-            .unwrap_or(requested_history_window);
+            .unwrap_or(false);
         crate::kit::atoms::HISTORY_WINDOW_CAPABLE.set(history_window);
         if self.projection_mode == super::ClientProjectionMode::Interactive {
             crate::kit::steer_state::STEERS.state().write().enabled = supported;

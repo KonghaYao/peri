@@ -317,3 +317,48 @@ async fn test_e2e_empty_queue_completes_immediately() {
         "expected empty transcript on immediate exit"
     );
 }
+
+#[tokio::test]
+async fn idle_suspension_waits_for_render_capacity() {
+    use crate::agent::events_v2::{EventBus, EventBusConfig, RenderEvent};
+    let mut context = make_stage_context();
+    let (bus, mut handles) = EventBus::new(EventBusConfig {
+        render_capacity: 1,
+        ..Default::default()
+    });
+    let bus = Arc::new(bus);
+    context.runtime.event_bus = bus.clone();
+    context.async_ctx.idle_wait_enabled = true;
+    context.async_ctx.idle_should_wait = Some(Arc::new(|| true));
+    let cancel = context.session.turn.cancel_token.clone();
+    bus.emit_render(RenderEvent::TurnSuspended {
+        turn_id: context.turn_id(),
+        agent_id: context.session.agent_id,
+    });
+    let running = run_react_loop(context, 1);
+    tokio::pin!(running);
+    assert!(
+        std::future::poll_fn(|cx| {
+            std::task::Poll::Ready(std::future::Future::poll(running.as_mut(), cx).is_pending())
+        })
+        .await
+    );
+    assert!(!bus.health().dirty);
+    handles.render_rx.recv().await.unwrap();
+    assert!(
+        std::future::poll_fn(|cx| {
+            std::task::Poll::Ready(std::future::Future::poll(running.as_mut(), cx).is_pending())
+        })
+        .await
+    );
+    assert!(matches!(
+        handles.try_render(),
+        Some(RenderEvent::TurnSuspended { .. })
+    ));
+    assert!(!bus.health().dirty);
+    cancel.cancel();
+    let result = tokio::time::timeout(std::time::Duration::from_secs(1), running)
+        .await
+        .unwrap();
+    assert!(matches!(result, LoopResult::Interrupted));
+}

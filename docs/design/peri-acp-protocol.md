@@ -27,7 +27,7 @@ TUI 的所有主动行为通过标准 ACP JSON-RPC 方法调用。不定义自�
 | 方法 | 参数 | 返回值 | 语义 |
 |------|------|--------|------|
 | `session/new` | `{ cwd?, mcpServers? }` | `{ sessionId, ... }` | 创建新会话；可返回 modes、models、configOptions 等协商字段 |
-| `session/load` | `{ sessionId, cwd?, mcpServers? }`；分页时 `{ sessionId, cursor, limit? }`；窗口时 `{ sessionId, history: { kind: "open" \| "page" \| "seek", ... } }` | `{ ... }` | 加载指定会话并重放历史；响应可含 modes、models、configOptions，不创建新身份。带 `cursor` 时是旧历史页模式，带 `history` 时是 `peri.historyWindowV1` 只读窗口模式（两者互斥，见 §2.1.1） |
+| `session/load` | `{ sessionId, cwd?, mcpServers? }`；分页时 `{ sessionId, cursor, limit? }`；窗口时 `{ sessionId, history: { kind: "open" \| "page" \| "seek", ... } }` | `{ ... }` | 加载指定会话并重放历史；响应可含 modes、models、configOptions，不创建新身份。带 `cursor` 时是旧历史页模式，带 `history` 时是 `peri.historyWindowV1` 只读窗口模式（两者互斥，见 §2.1.1）。声明窗口能力的连接不带 `history` 的 load **不回放历史**，首屏由 `history.open` 提供 |
 | `session/resume` | `{ sessionId, cwd? }` | `{}` | 复用已有 session_id 继续会话；经统一 host lifecycle handler 处理 |
 | `session/close` | `{ sessionId }` | `{}` | 关闭会话 |
 | `session/fork` | `{ sessionId, cwd?, mcpServers? }` | `{ sessionId, ... }` | 指定源会话并复制到新线程；返回值中的 sessionId 是新身份 |
@@ -73,8 +73,13 @@ reminder 出口），客户端据此把通知与那次 load 配对；历史页�
 窗口协议是 `session/load` 上的只读扩展，用于双向浏览与按需回读；它与旧 `cursor` 分页是两套
 独立语义。`PeriCaps::history_window_v1` 的 wire key 为 `peri.historyWindowV1`，只接受显式
 `true`，缺省/非布尔值为 false；准入按**当前连接**判定，失败关闭。TUI 另以内部开关
-`HISTORY_WINDOW_V1`（默认 false，来自 settings beta `history-window-v1`）决定是否采用窗口模型；
+`HISTORY_WINDOW_V1`（来自 settings beta `history-window-v1`；未配置视为开启、显式 false 关闭）决定是否采用窗口模型；
 协议协商成功不等于启用淘汰。旧 `historyPagination` 路径不因本能力改变。
+
+**load 不回放**：声明 `peri.historyWindowV1` 的连接，`session/load`（不带 `history`）只装配
+会话，不产生任何历史回放；首屏由随后的一次 `history.open` 提供。这是协议契约而非可选优化：
+客户端声明能力却不 open 会看到空首屏。`historyPagination` 与本能力独立、不能互相替代——
+是否跳过回放只看本连接的 `historyWindowV1` 协商结果。
 
 **请求分流**
 
@@ -181,8 +186,9 @@ UTF-8 边界裁剪（只允许跳过开头 1–3 字节的跨块残片并显式�
 - `page`/`seek`/`body` 在进入存储前和返回前校验 `sessionGeneration`、`structureVersion`、
   ticket epoch、`snapshotToken` 与 `committedTail`；任一变化丢弃已读正文。
 - rewind/精确删除 durable 成功恰好推进 `structureVersion + 1` 并撤销 ticket；失败不推进；
-  持久化结果不确定撤销 ticket 并进入 `ReloadRequired`，窗口只读请求 fail-closed。关闭后重新
-  load 必须改变 `sessionGeneration`，旧 ticket/window/事件全部丢弃。
+  持久化结果不确定撤销 ticket 并进入 `ReloadRequired`：旧 ticket 不再续用，但只读的
+  `open`/`page`/`seek`/`body` 仍按 Store 事实服务（`HandedOff` 同样不因执行上下文不驻留而
+  拒绝只读）。关闭后重新 load 必须改变 `sessionGeneration`，旧 ticket/window/事件全部丢弃。
 - ticket 是进程内不透明值 + 精确匹配，绑定 connection/session/generation/structure/snapshot/
   source/tail/投影版本/时间/nonce；没有密码学签名，也不是访问授权。
 

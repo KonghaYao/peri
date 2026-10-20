@@ -25,13 +25,11 @@ fn default_window_budget_matches_plan_initial_values() {
     assert_eq!(limits.body_bytes, 16 * 1024 * 1024);
     assert_eq!(limits.reserved_bytes, 2 * 1024 * 1024);
     assert_eq!(limits.page_target_bytes, 512 * 1024);
-    assert_eq!(limits.pending_tool_bytes, 1024 * 1024);
     assert_eq!(limits.detail_bytes, 4 * 1024 * 1024);
     assert_eq!(limits.release_watermark_percent, 75);
     assert_eq!(limits.prefetch_threshold_percent, 50);
     assert_eq!(limits.max_in_flight_pages, 1);
     assert_eq!(limits.max_pending_merge_pages, 1);
-    assert_eq!(limits.max_pending_tool_results, 256);
 }
 
 #[test]
@@ -119,24 +117,45 @@ fn disabled_window_does_not_admit_pages() {
 
 #[test]
 #[serial_test::serial]
-fn history_window_beta_defaults_false_and_writes_atom_once() {
+fn history_window_beta_defaults_true_and_only_explicit_false_disables() {
     crate::kit::atoms::init_atoms();
     let mut config = crate::config::PeriConfig::default();
+
+    // 未配置 = 开启（S7 发布启用）：快照投影与回退配置读取必须一致。
+    assert!(history_window_beta_enabled(&config));
+    assert!(history_window_beta_enabled_from_flags(
+        &peri_config::betas::from_merged(&config)
+    ));
+    apply_history_window_beta(history_window_beta_enabled(&config));
+    assert!(crate::kit::atoms::HISTORY_WINDOW_V1.get());
+
+    // 显式 false 仍关闭。
+    config
+        .config
+        .betas
+        .set(peri_config::betas::HISTORY_WINDOW_V1, false);
     assert!(!history_window_beta_enabled(&config));
+    assert!(!history_window_beta_enabled_from_flags(
+        &peri_config::betas::from_merged(&config)
+    ));
     apply_history_window_beta(false);
     assert!(!crate::kit::atoms::HISTORY_WINDOW_V1.get());
 
+    // 显式 true 开启。
     config
         .config
         .betas
         .set(peri_config::betas::HISTORY_WINDOW_V1, true);
     assert!(history_window_beta_enabled(&config));
+    assert!(history_window_beta_enabled_from_flags(
+        &peri_config::betas::from_merged(&config)
+    ));
     apply_history_window_beta(true);
     assert!(crate::kit::atoms::HISTORY_WINDOW_V1.get());
     assert!(
         !(crate::kit::atoms::HISTORY_WINDOW_V1.get()
             && crate::kit::atoms::HISTORY_WINDOW_CAPABLE.get()),
-        "config alone must not force the window path without server capability"
+        "local projection alone must not force the window path without server capability"
     );
     apply_history_window_beta(false);
 }

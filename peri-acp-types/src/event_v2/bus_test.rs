@@ -372,3 +372,163 @@ async fn test_event_bus_turn_completed_in_render_channel_preserves_cross_iter_or
         "TurnCompleted 已迁移到 render_tx，state_rx 应为空"
     );
 }
+
+fn health_state() -> StateEvent {
+    let (turn_id, agent_id) = make_ids();
+    StateEvent::ProtocolEvent {
+        turn_id,
+        agent_id,
+        event: Box::new(crate::event::ExecutorEvent::TurnSuspended {
+            turn_id: turn_id.to_string(),
+            agent_id: agent_id.to_string(),
+        }),
+    }
+}
+
+fn health_render() -> RenderEvent {
+    let (turn_id, agent_id) = make_ids();
+    RenderEvent::TurnSuspended { turn_id, agent_id }
+}
+
+#[tokio::test]
+async fn full_channels_report_dropped_and_sticky_health() {
+    let (bus, mut handles) = EventBus::new(EventBusConfig {
+        render_capacity: 1,
+        state_capacity: 1,
+        ..Default::default()
+    });
+    let health = bus.health_handle();
+    assert_eq!(bus.health(), BusHealthSnapshot::default());
+    assert_eq!(bus.emit_render(health_render()), EmitOutcome::Sent);
+    assert_eq!(bus.emit_state(health_state()), EmitOutcome::Sent);
+    assert_eq!(bus.emit_render(health_render()), EmitOutcome::Dropped);
+    assert_eq!(bus.emit_state(health_state()), EmitOutcome::Dropped);
+    assert_eq!(
+        health.snapshot(),
+        BusHealthSnapshot {
+            render_dropped: 1,
+            state_dropped: 1,
+            dirty: true,
+        }
+    );
+    assert!(handles.try_render().is_some());
+    assert!(handles.try_state().is_some());
+    assert_eq!(bus.emit_render(health_render()), EmitOutcome::Sent);
+    assert_eq!(bus.emit_state(health_state()), EmitOutcome::Sent);
+    assert_eq!(bus.health(), health.snapshot());
+    assert!(bus.health().dirty, "成功发送不能抹去先前丢失");
+    health.record_state(EmitOutcome::Lagging, 3);
+    assert_eq!(bus.health().state_dropped, 4);
+}
+
+#[tokio::test]
+async fn state_reliable_waits_and_preserves_protocol_event() {
+    let (bus, mut handles) = EventBus::new(EventBusConfig {
+        state_capacity: 1,
+        ..Default::default()
+    });
+    assert_eq!(bus.emit_state(health_state()), EmitOutcome::Sent);
+    let event = health_state();
+    let expected_turn = event.turn_id();
+    let send = bus.emit_state_reliable(event);
+    tokio::pin!(send);
+    // 显式 poll 到 Pending；不依赖 sleep 或任务调度碰巧先执行。
+    assert!(
+        std::future::poll_fn(|cx| {
+            std::task::Poll::Ready(std::future::Future::poll(send.as_mut(), cx).is_pending())
+        })
+        .await
+    );
+    assert_eq!(bus.health(), BusHealthSnapshot::default());
+    handles.state_rx.recv().await.unwrap();
+    assert_eq!(send.await, EmitOutcome::Sent);
+    let received = handles.state_rx.recv().await.unwrap();
+    assert_eq!(received.turn_id(), expected_turn);
+    assert!(matches!(received, StateEvent::ProtocolEvent { .. }));
+    assert!(!bus.health().dirty);
+}
+
+#[tokio::test]
+async fn render_terminals_wait_on_the_same_fifo() {
+    for completed in [true, false] {
+        let (bus, mut handles) = EventBus::new(EventBusConfig {
+            render_capacity: 1,
+            ..Default::default()
+        });
+        bus.emit_render(health_render());
+        let (turn_id, agent_id) = make_ids();
+        let terminal = if completed {
+            RenderEvent::TurnCompleted {
+                turn_id,
+                agent_id,
+                steps: 1,
+                elapsed_secs: 0.0,
+                finalized_messages: Arc::new(vec![]),
+            }
+        } else {
+            RenderEvent::TurnSuspended { turn_id, agent_id }
+        };
+        let send = bus.emit_render_reliable(terminal);
+        tokio::pin!(send);
+        assert!(
+            std::future::poll_fn(|cx| {
+                std::task::Poll::Ready(std::future::Future::poll(send.as_mut(), cx).is_pending())
+            })
+            .await
+        );
+        handles.render_rx.recv().await.unwrap();
+        assert_eq!(send.await, EmitOutcome::Sent);
+        let received = handles.render_rx.recv().await.unwrap();
+        assert_eq!(received.turn_id(), turn_id);
+        assert_eq!(
+            matches!(received, RenderEvent::TurnCompleted { .. }),
+            completed
+        );
+        assert!(!bus.health().dirty);
+    }
+}
+
+#[tokio::test]
+async fn closed_channels_report_closed_and_record_loss() {
+    let (bus, handles) = EventBus::new(EventBusConfig::default());
+    drop(handles);
+    assert_eq!(bus.emit_render(health_render()), EmitOutcome::Closed);
+    assert_eq!(bus.emit_state(health_state()), EmitOutcome::Closed);
+    assert_eq!(
+        bus.emit_render_reliable(health_render()).await,
+        EmitOutcome::Closed
+    );
+    assert_eq!(
+        bus.emit_state_reliable(health_state()).await,
+        EmitOutcome::Closed
+    );
+    assert_eq!(
+        bus.health(),
+        BusHealthSnapshot {
+            render_dropped: 2,
+            state_dropped: 2,
+            dirty: true,
+        }
+    );
+}
+
+#[tokio::test]
+async fn reliable_state_waiter_reports_receiver_closed() {
+    let (bus, mut handles) = EventBus::new(EventBusConfig {
+        state_capacity: 1,
+        ..Default::default()
+    });
+    bus.emit_state(health_state());
+    let send = bus.emit_state_reliable(health_state());
+    tokio::pin!(send);
+    assert!(
+        std::future::poll_fn(|cx| {
+            std::task::Poll::Ready(std::future::Future::poll(send.as_mut(), cx).is_pending())
+        })
+        .await
+    );
+    handles.state_rx.close();
+    assert_eq!(send.await, EmitOutcome::Closed);
+    assert_eq!(bus.health().state_dropped, 1);
+    assert!(bus.health().dirty);
+}

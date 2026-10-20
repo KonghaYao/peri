@@ -11,7 +11,8 @@ use super::history::{
     HISTORY_WINDOW_INHERITED_ROWID_SQL, HISTORY_WINDOW_LATEST_SQL, HISTORY_WINDOW_NEWER_EXISTS_SQL,
     HISTORY_WINDOW_OLDER_EXISTS_SQL, HISTORY_WINDOW_TAIL_CHECK_SQL,
 };
-use super::inherited_blob::{map_inherited_blob_error, InheritedFactsRead, InheritedLayout};
+use super::inherited_blob::{map_inherited_blob_error, InheritedFactsRead, InheritedSummaryRead};
+use super::inherited_facts::{InheritedLayout, InheritedSummary};
 use super::*;
 use peri_acp_types::history_window::{
     HistoryBodyChunk, HistoryCheckpoint, HistoryCommittedTail, HistoryEntryId,
@@ -67,14 +68,14 @@ impl SqliteSessionData {
             .acquire()
             .await
             .map_err(|error| map_sqlx(&error))?;
-        // inherited 是 write-once 冻结列：事实由增量 blob 扫描给出，不再把首尾 payload
-        // 取回 Rust 反序列化。非 canonical 信封回退原 SQL 路径。
+        // inherited 是 write-once 冻结列：bounds 只需要轻量摘要（首尾身份/计数/字节），
+        // 不构造全量布局。非 canonical 信封回退原 SQL 路径。
         let inherited_snapshot = match self
-            .read_inherited_facts_cached(&mut connection, id)
+            .read_inherited_summary_cached(&mut connection, id)
             .await?
         {
-            InheritedFactsRead::Facts { snapshot, .. } => snapshot,
-            InheritedFactsRead::Unsupported => {
+            InheritedSummaryRead::Facts { snapshot } => snapshot,
+            InheritedSummaryRead::Unsupported => {
                 Self::read_inherited_facts_sql(&mut connection, id).await?
             }
         };
@@ -621,7 +622,7 @@ impl SqliteSessionData {
             .await
             .map_err(|error| map_sqlx(&error))?;
         let read = self
-            .read_inherited_facts_cached(&mut connection, id)
+            .read_inherited_layout_cached(&mut connection, id)
             .await?;
         match read {
             InheritedFactsRead::Unsupported => {
@@ -732,18 +733,18 @@ impl SqliteSessionData {
     }
 }
 
-/// 由布局构造冻结快照事实；条目为空时与 SQL 路径一致地返回 `None`。
+/// 由摘要构造冻结快照事实；条目为空时与 SQL 路径一致地返回 `None`。
 pub(super) fn inherited_snapshot_of(
     id: &ThreadId,
     parent: Option<String>,
-    layout: &InheritedLayout,
+    summary: &InheritedSummary,
 ) -> Option<HistoryInheritedSnapshot> {
-    let first = layout.first_id()?;
-    let last = layout.last_id()?;
-    let count = layout.len();
+    let first = summary.first_id?;
+    let last = summary.last_id?;
+    let count = summary.count;
     let snapshot_id = inherited_snapshot_id(
         id,
-        layout.total_bytes as i64,
+        summary.total_bytes as i64,
         count,
         parent.as_deref(),
         first,

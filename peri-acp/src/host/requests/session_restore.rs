@@ -59,13 +59,13 @@ async fn reject_closing_session(params: &Value, cfg: &AcpServerConfig) -> Result
 /// 快照缺 frozen 是错误（bound 会话必须有），本构建读不懂也是错误——两者都不是
 /// 「没有 frozen，可以重建」：重建会把已发布的冻结输入换成当前目录/日期。
 async fn load_frozen_bytes(cfg: &AcpServerConfig, session_id: &str) -> Result<String, AcpError> {
-    // 恢复路径只消费 frozen：读有效视图，不把已排除 own 正文带进内存。
-    let snapshot = cfg
+    // 恢复准入只消费 frozen：单列读取，不把 own 正文、flags 或 inherited 带进内存。
+    let frozen = cfg
         .session_resources
-        .load_active_snapshot(&session_id.to_owned())
+        .load_frozen_state(&session_id.to_owned())
         .await
         .map_err(crate::host::workspace::resource_error)?;
-    match snapshot.frozen {
+    match frozen {
         FrozenState::Present(bytes) => Ok(bytes.into_string()),
         FrozenState::LegacyAbsent => Err(AcpError::new(
             -32603,
@@ -249,6 +249,7 @@ pub(crate) async fn prepare_existing(
                 structure_version: 0,
                 session_generation: crate::host::next_session_generation(),
                 history_window: Default::default(),
+                event_health: Default::default(),
                 cancel_token: None,
                 // 本分支无持久执行恢复：恢复准入一律以「无续跑」状态发布。
                 continuation_armed: false,
@@ -659,13 +660,9 @@ pub(crate) async fn handle_load(
             format!("session/load: history replay failed: {error}"),
         )
     })?;
-    // 只有回放成功、本次 load 确实要发布响应时才替换 generation/撤销旧窗口。
-    // HandedOff 拒绝或回放失败必须保持旧 ticket/generation 可用（失败不拆除已发布状态）。
-    if already_loaded {
-        if let Some(state) = sessions.get_mut(req_session_id) {
-            state.refresh_session_generation();
-        }
-    }
+    // 回放成功也不刷新共享 session generation：warm load 只推进本连接自己的
+    // loadGeneration，另一连接的固定读取视图不能被重新 attach 撤销。真实
+    // rewind/delete 才使受影响结构失效。
 
     // modes/configOptions sent both via notification AND in response body
     // (notification for async update, response body for immediate availability)

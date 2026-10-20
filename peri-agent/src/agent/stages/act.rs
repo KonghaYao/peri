@@ -13,17 +13,22 @@ use crate::error::AgentResult;
 /// emit TurnCompleted（迭代边界提交信号）：从 transcript 读快照，供成功/失败路径共用，
 /// 保证 TUI committed 视图与 transcript 一致（S5.3：run_after_agent / dispatch_tools
 /// 失败时最终回答或工具结果可能已写入 transcript，必须提交迭代边界再传播错误）。
-fn emit_turn_completed(ctx: &StageContext) {
+async fn emit_turn_completed(ctx: &StageContext) {
     let finalized_messages = ctx.session.transcript.read().visible_snapshot();
-    ctx.runtime
+    let outcome = ctx
+        .runtime
         .event_bus
-        .emit_render(RenderEvent::TurnCompleted {
+        .emit_render_reliable(RenderEvent::TurnCompleted {
             turn_id: ctx.turn_id(),
             agent_id: ctx.session.agent_id,
             steps: ctx.session.turn.current_step(),
             elapsed_secs: 0.0,
             finalized_messages,
-        });
+        })
+        .await;
+    if outcome == peri_acp_types::event_v2::EmitOutcome::Closed {
+        tracing::warn!(turn_id = %ctx.turn_id(), "TurnCompleted 接收端关闭；总线已记录需重同步");
+    }
 }
 
 fn emit_goal_snapshot(ctx: &StageContext) {
@@ -93,7 +98,7 @@ pub async fn run_act(input: ActInput) -> AgentResult<ActOutput> {
                 // 镜像修复（S5.3）：dispatch 失败（cancel / middleware 错误）时
                 // transcript 可能已含本轮消息（阶段 B 提交后），先 emit TurnCompleted
                 // 再传播错误，保持 TUI committed 视图与 transcript 一致。
-                emit_turn_completed(ctx);
+                emit_turn_completed(ctx).await;
                 emit_goal_snapshot(ctx);
                 return Err(e);
             }
@@ -104,12 +109,12 @@ pub async fn run_act(input: ActInput) -> AgentResult<ActOutput> {
         // 迭代边界提交信号：emit TurnCompleted 携带 transcript 快照，让 TUI 同步规范状态
         // （避免下一次迭代文本渲染在本次工具调用之前）
         //
-        // 必须用 emit_render（而非 emit_state）——TurnCompleted 与同迭代的
+        // 必须用 emit_render_reliable（而非 state 通道）——TurnCompleted 与同迭代的
         // TextChunk/ToolStarted/ToolEnded 共享 render_tx 通道，FIFO 保证顺序。
         // 若放到 state_tx 独立通道，TUI forwarder 的 biased select! 会优先消费
         // 下一迭代的 TextChunk，把本轮 TurnCompleted 拖到后面，导致 partial 混合
         // 两轮内容，渲染出"新文本在旧工具之前"的顺序错乱（详见 RenderEvent::TurnCompleted）。
-        emit_turn_completed(ctx);
+        emit_turn_completed(ctx).await;
         emit_goal_snapshot(ctx);
 
         Ok(ActOutput {
@@ -153,7 +158,7 @@ pub async fn run_act(input: ActInput) -> AgentResult<ActOutput> {
         if input.reasoning.stop_reason == peri_model::StopReason::MaxTokens
             || input.reasoning.stream_interruption.is_some()
         {
-            emit_turn_completed(ctx);
+            emit_turn_completed(ctx).await;
             emit_goal_snapshot(ctx);
             return Ok(ActOutput {
                 has_tool_calls: false,
@@ -184,7 +189,7 @@ pub async fn run_act(input: ActInput) -> AgentResult<ActOutput> {
                 // S5.3：最终回答已 append 到 transcript（:97），先 emit TurnCompleted
                 // （从 transcript 读快照，RwLock 无死锁风险——append 已释放锁），
                 // 再传播错误，避免 TUI committed 视图与 transcript/持久化不一致。
-                emit_turn_completed(ctx);
+                emit_turn_completed(ctx).await;
                 emit_goal_snapshot(ctx);
                 return Err(e);
             }
@@ -192,8 +197,8 @@ pub async fn run_act(input: ActInput) -> AgentResult<ActOutput> {
 
         // 迭代边界提交信号：emit TurnCompleted 携带 transcript 快照（含本轮最终回答）
         //
-        // 必须用 emit_render（详见上方工具路径 同款注释）——保证与同迭代 Render 事件 FIFO。
-        emit_turn_completed(ctx);
+        // 必须走可靠 render FIFO（详见上方工具路径注释），不能迁到独立 state 通道。
+        emit_turn_completed(ctx).await;
         emit_goal_snapshot(ctx);
 
         Ok(ActOutput {

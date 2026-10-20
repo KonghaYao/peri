@@ -569,15 +569,18 @@ impl AcpTuiClient {
         let (snapshot_token, next_cursor) =
             crate::kit::history_paging::decode_session_cursor(&loaded);
         crate::kit::history_paging::note_initial_cursor(session_id, snapshot_token, next_cursor);
-        // S5.4：协商过窗口能力且开关开启时，额外建立 V1 窗口（默认关闭时无行为）。
-        crate::kit::history_page_consumer::enqueue_window_open(
-            session_id,
-            crate::kit::history_paging::WindowDirection::Before,
-        );
         self.lifecycle
             .commit_stable(start.generation, session_id.to_string());
         self.finish_session_initialization(start.generation, session_id)
             .await?;
+        // S5.4：协商过窗口能力且开关开启时，额外建立 V1 窗口（默认关闭时无行为）。
+        //
+        // 必须在初始化成功之后：服务端对声明 `peri.historyWindowV1` 的连接不再回放历史，
+        // 首屏由这次 open 提供；初始化失败会关闭会话，此时 open 没有可交付的首屏。
+        crate::kit::history_page_consumer::enqueue_window_open(
+            session_id,
+            crate::kit::history_paging::WindowDirection::Before,
+        );
         self.project_execution_cwd(Some(effective_cwd));
         *self.restore_error.lock().unwrap() = None;
         projection.committed = true;

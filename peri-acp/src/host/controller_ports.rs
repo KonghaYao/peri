@@ -37,6 +37,37 @@ impl EventPublisher for ControllerEventPublisher {
 /// peri-controller 源码零改动。
 pub struct ControllerSubscriptionAdapter(pub peri_controller::Subscription);
 
+/// prompt 专用订阅：健康度绑定当前 SessionState，跨轮保留 sticky dirty。
+struct SessionSubscription {
+    inner: ControllerSubscriptionAdapter,
+    health: Arc<peri_acp_types::event_v2::BusHealth>,
+}
+
+pub(super) fn session_subscription(
+    controller: &peri_controller::Controller,
+    health: Arc<peri_acp_types::event_v2::BusHealth>,
+) -> Box<dyn EventSubscriber> {
+    Box::new(SessionSubscription {
+        inner: ControllerSubscriptionAdapter(controller.subscribe()),
+        health,
+    })
+}
+
+#[async_trait]
+impl EventSubscriber for SessionSubscription {
+    fn health_handle(&self) -> Option<Arc<peri_acp_types::event_v2::BusHealth>> {
+        Some(Arc::clone(&self.health))
+    }
+
+    async fn recv(&mut self) -> Result<EventMessage, SubscriptionError> {
+        self.inner.recv().await
+    }
+
+    fn try_recv(&mut self) -> Result<Option<EventMessage>, SubscriptionError> {
+        self.inner.try_recv()
+    }
+}
+
 #[async_trait]
 impl EventSubscriber for ControllerSubscriptionAdapter {
     async fn recv(&mut self) -> Result<EventMessage, SubscriptionError> {

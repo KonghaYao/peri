@@ -87,6 +87,26 @@ impl RemoteSessionData {
         })
     }
 
+    /// 轻量 frozen 读取：只问一列，不拉绑定、继承区或正文。
+    pub(super) async fn read_frozen_state(
+        &self,
+        id: &ThreadId,
+    ) -> SessionResourceResult<FrozenState> {
+        let store = self.store().await?;
+        let mut batches = store
+            .read_batch(vec![session_sql::select_frozen_statement(id.as_str())])
+            .await?
+            .into_iter();
+        let rows = batches
+            .next()
+            .ok_or_else(|| incomplete_reply("expected 1 result set, got 0"))?;
+        let row = sole_row(rows)?.ok_or_else(not_found)?;
+        Ok(match text_at(&row, 0) {
+            Some(bytes) => FrozenState::Present(FrozenSnapshotBytes::new(bytes)),
+            None => FrozenState::LegacyAbsent,
+        })
+    }
+
     /// 有界 flags 读取：只问给定的 id（一条语句一个 id，同一批次读出），
     /// 不做全历史扫描。回复形状不完整在 [`super::mutation::RemoteStore::read_batch`]
     /// 处已经是错误；行内 ID 与请求 ID 不一致同样按损坏失败。

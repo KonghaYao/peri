@@ -28,9 +28,13 @@ pub(super) enum SchemaState {
     Version8,
     Version9,
     Version10,
-    /// `user_version` 已是当前版本，但形状还是压缩前的登记形状（v4 内部用过）。
-    /// 名字取版本号：它与 [`Current`](Self::Current) 的差别是**形状**，不是代数。
-    Version11,
+    /// `user_version` 是上一代当前形状（11）：列形状与本代相同，只是还没有 inherited
+    /// 派生索引表；写打开做一次增量补齐，不搬运任何会话事实。
+    PreviousCurrent,
+    /// `user_version` 已是上一代版本，但形状还是压缩前的登记形状（v4 内部用过）。
+    /// 名字取形状而不是版本号：它与 [`PreviousCurrent`](Self::PreviousCurrent) 的差别是
+    /// **形状**，不是代数。
+    RegistrationShape,
     /// 当前形状。
     Current,
 }
@@ -51,6 +55,11 @@ pub(super) async fn inspect(connection: &mut SqliteConnection) -> Result<SchemaS
         .await?;
     match version {
         v if v == CURRENT_SCHEMA_VERSION => return current_shape(connection).await,
+        // 11 既可能是上一代 canonical 形状（只缺派生索引表），也可能是压缩前的登记形状；
+        // 两者都只做一次幂等升级，但走不同的路径。
+        canonical::LEGACY_REGISTRATION_SCHEMA_VERSION => {
+            return previous_shape(connection).await;
+        }
         10 => return Ok(SchemaState::Version10),
         9 => return Ok(SchemaState::Version9),
         8 => return Ok(SchemaState::Version8),
@@ -62,7 +71,7 @@ pub(super) async fn inspect(connection: &mut SqliteConnection) -> Result<SchemaS
         2 => return Ok(SchemaState::Version2),
         0 => {}
         // 拒绝时复述实际版本：报错要能回答「为什么不支持」，而不是只给结论。
-        // 压缩掉的 12..19 中间代（v4 内部用过、从未正式发布）也落在这里。
+        // 压缩掉的 13..19 中间代（v4 内部用过、从未正式发布）也落在这里。
         other => {
             return Err(WorkspaceError::UnsupportedSchemaVersion {
                 found: other,
@@ -112,15 +121,34 @@ pub(super) async fn inspect(connection: &mut SqliteConnection) -> Result<SchemaS
 }
 
 /// 版本已是当前版本时的形状判定（fail-closed）：与 `sessions::schema_shape` 的同一份声明
-/// 逐项比对（远端只读探测与远端迁移批次用的是同一份声明）——当前形状直接可用，压缩前的
-/// 登记形状（搬运输入）走单条搬运，两者都不是就拒绝。不猜形状，也不把读不懂当成可用。
-/// 可选表（凭证、关闭意图）缺表不算漂移：前者保持缺失，后者由写打开幂等补齐。
+/// 逐项比对（远端只读探测与远端迁移批次用的是同一份声明）。当前版本只接受当前形状：
+/// 版本 12 配上搬运输入形状不是合法的升级来源，不猜形状，也不把读不懂当成可用。
 async fn current_shape(connection: &mut SqliteConnection) -> Result<SchemaState> {
     let tables =
         schema_shape::read_local_columns(&mut *connection, schema_shape::CURRENT_COLUMNS_SQL)
             .await?;
+    match schema_shape::check_current_shape(&tables) {
+        Ok(()) => Ok(SchemaState::Current),
+        Err(reason) => {
+            // 拒绝的原因要能回答「为什么」：错误类型本身不携带形状诊断（协议层只有分类），
+            // 因此把逐项漂移写进日志，而不是让它只活在代码里。
+            tracing::warn!(
+                current = %reason,
+                "session database shape is not supported by this build"
+            );
+            Err(WorkspaceError::UnsupportedDatabaseSchema.into())
+        }
+    }
+}
+
+/// 版本 11 的形状判定：先看上一代 canonical 形状（只缺派生索引表），再看压缩前的
+/// 登记形状（搬运输入）。两者都不是就拒绝——版本 11 只服务这两种已知输入。
+async fn previous_shape(connection: &mut SqliteConnection) -> Result<SchemaState> {
+    let tables =
+        schema_shape::read_local_columns(&mut *connection, schema_shape::CURRENT_COLUMNS_SQL)
+            .await?;
     let current_reason = match schema_shape::check_current_shape(&tables) {
-        Ok(()) => return Ok(SchemaState::Current),
+        Ok(()) => return Ok(SchemaState::PreviousCurrent),
         Err(reason) => reason,
     };
     let tables =
@@ -128,10 +156,8 @@ async fn current_shape(connection: &mut SqliteConnection) -> Result<SchemaState>
     let input_reason = schema_shape::check_input_shape(&tables)
         .and_then(|()| schema_shape::check_dropped_shape(&tables));
     if input_reason.is_ok() {
-        return Ok(SchemaState::Version11);
+        return Ok(SchemaState::RegistrationShape);
     }
-    // 拒绝的原因要能回答「为什么」：错误类型本身不携带形状诊断（协议层只有分类），
-    // 因此把逐项漂移写进日志，而不是让它只活在代码里。
     tracing::warn!(
         current = %current_reason,
         input = %input_reason.unwrap_err(),
@@ -183,6 +209,11 @@ impl SqliteSessionDatabase {
             // 形状判定只覆盖表与列，索引不在其中：`CREATE_INDEXES` 会随后续构建演进，
             // 当前形状的库同样要按清单幂等补齐（`IF NOT EXISTS`），否则升级上来的库
             // 永远拿不到新索引。语句文本来自 `canonical` 的静态清单，不含外部输入。
+            for statement in canonical::CREATE_INHERITED_INDEX_TABLES {
+                sqlx::raw_sql(AssertSqlSafe((*statement).to_owned()))
+                    .execute(&mut *connection)
+                    .await?;
+            }
             for statement in canonical::CREATE_INDEXES {
                 sqlx::raw_sql(AssertSqlSafe((*statement).to_owned()))
                     .execute(&mut *connection)
@@ -200,7 +231,11 @@ impl SqliteSessionDatabase {
         if state == SchemaState::Empty {
             return Self::create_current_schema(&mut connection).await;
         }
-        if state == SchemaState::Version11 {
+        if state == SchemaState::PreviousCurrent {
+            // 上一代 canonical 形状只缺派生索引表：增量补齐，不搬运任何会话事实。
+            return Self::upgrade_previous_current(&mut connection).await;
+        }
+        if state == SchemaState::RegistrationShape {
             // 压缩前的登记形状：形状本身就是搬运输入，直接走单条搬运。
             return super::storage_v11_migration::migrate_local_v11(&mut connection).await;
         }
@@ -243,9 +278,41 @@ impl SqliteSessionDatabase {
             .bind(crate::sessions::machine::current()?)
             .execute(&mut *tx)
             .await?;
-        sqlx::query("PRAGMA user_version = 11")
+        sqlx::query(AssertSqlSafe(format!(
+            "PRAGMA user_version = {CURRENT_SCHEMA_VERSION}"
+        )))
+        .execute(&mut *tx)
+        .await?;
+        tx.commit().await?;
+        Ok(())
+    }
+
+    /// 上一代 canonical 形状（版本 11）→ 当前形状：只补派生索引表与 canonical 索引集，
+    /// 不改写任何会话事实。整段一个事务，失败时库保持版本 11，旧二进制仍可打开。
+    async fn upgrade_previous_current(connection: &mut SqliteConnection) -> Result<()> {
+        ensure_canonical_names_hold_tables(connection, canonical::CREATE_INHERITED_INDEX_TABLES)
+            .await?;
+        let mut tx = connection.begin_with("BEGIN IMMEDIATE").await?;
+        for statement in canonical::CREATE_INHERITED_INDEX_TABLES {
+            // 语句文本来自 `canonical` 的静态清单，不含外部输入。
+            sqlx::raw_sql(AssertSqlSafe((*statement).to_owned()))
+                .execute(&mut *tx)
+                .await?;
+        }
+        for statement in canonical::CREATE_INDEXES {
+            sqlx::raw_sql(AssertSqlSafe((*statement).to_owned()))
+                .execute(&mut *tx)
+                .await?;
+        }
+        sqlx::query(canonical::INSERT_CURRENT_MACHINE_SQL)
+            .bind(crate::sessions::machine::current()?)
             .execute(&mut *tx)
             .await?;
+        sqlx::query(AssertSqlSafe(format!(
+            "PRAGMA user_version = {CURRENT_SCHEMA_VERSION}"
+        )))
+        .execute(&mut *tx)
+        .await?;
         tx.commit().await?;
         Ok(())
     }

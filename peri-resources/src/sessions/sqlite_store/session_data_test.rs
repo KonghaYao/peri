@@ -565,6 +565,16 @@ async fn test_save_child_uses_root_frozen_bytes_and_enforces_relationships() {
     let loaded = data.load_snapshot(&"s-child".to_owned()).await.unwrap();
     assert_eq!(loaded.meta.parent_thread_id.as_deref(), Some("s-root"));
     assert_eq!(loaded.inherited.payloads.len(), 1);
+    // 创建路径必须同时落下派生索引：命中从第一次读取就可用，逻辑长度来自写时序列化。
+    let indexed: (i64, Option<i64>) = sqlx::query_as(
+        "SELECT COUNT(*), MAX(logical_len) FROM inherited_payload_index
+         WHERE snapshot_id IN (SELECT snapshot_id FROM inherited_snapshot_index)",
+    )
+    .fetch_one(&store.database.pool)
+    .await
+    .unwrap();
+    assert_eq!(indexed.0, 1);
+    assert!(indexed.1.is_some());
     assert_eq!(
         loaded.frozen,
         FrozenState::Present(FrozenSnapshotBytes::new(r#"{"version":1,"marker":"root"}"#))

@@ -88,6 +88,7 @@ fn release_removes_committed_and_invalidates_holders_before_ack() {
         .set(Some(crate::kit::atoms::FocusedEntry { slot: 0, key: None }));
     crate::kit::acp_events::history_window::insert_pending_tool_end_for_tests(
         "released-tool",
+        key.clone(),
         &"x".repeat(4096),
         false,
     );
@@ -318,4 +319,94 @@ fn pending_release_keeps_budget_conservative_until_ack() {
     window.ack_release_epoch(1);
     assert_eq!(window.pending_release_bytes(), 0);
     assert!(window.budget().has_body_capacity_for(1));
+}
+
+/// F07-b：释放一个段只清理该段的未配对工具终点，别段等待配对的结果保留。
+#[test]
+#[serial]
+fn release_prunes_only_pending_tool_ends_of_released_entries() {
+    crate::kit::atoms::init_atoms();
+    crate::kit::acp_events::render::invalidate_structural_caches();
+    crate::kit::atoms::STRUCTURAL_EPOCH.set(0);
+    crate::kit::atoms::RENDER_ACHIEVED_EPOCH.set(0);
+    crate::kit::acp_events::history_window::clear_pending_tool_ends();
+
+    let mut state = make_fold_test_state();
+    state.active_session_id = "s1".into();
+    state.window = HistoryWindow::new(HistoryWindowConfig::enabled());
+    state
+        .window
+        .begin_window(WindowIdentity::new("s1", "gen-1", 7, "snap-1"));
+
+    let released_key = PersistentEntryKey::own("s1:older");
+    let kept_key = PersistentEntryKey::own("s1:newer");
+    let mut plans = Vec::new();
+    for (slot, key) in [released_key.clone(), kept_key.clone()]
+        .into_iter()
+        .enumerate()
+    {
+        let entry = HistoryEntryView::new(key.clone(), Some(slot as u64), 1, 128, 128, Vec::new());
+        let segment_key = state
+            .window
+            .register_segment(
+                SegmentDraft::new(HistorySource::Own, vec![entry], 128, 128),
+                SegmentPlacement::Tail,
+            )
+            .expect("segment");
+        state.window.mark_display_block(&[(key, 1)], slot);
+        state
+            .committed
+            .push_back(TuiRenderUnit::TuiAssistantBubble(bubble("body")));
+        let segment = state.window.segment(segment_key).expect("segment").clone();
+        plans.push(ReleasePlan {
+            segment: segment_key,
+            source: segment.source.clone(),
+            entries: segment.entry_keys(),
+            unit_count: segment.unit_count,
+            body_bytes: segment.body_bytes,
+            reserved_bytes: segment.reserved_bytes,
+            slot_range: state.window.index().slot_range(segment_key),
+            before: None,
+            after: None,
+            before_cursor: None,
+            after_cursor: None,
+        });
+    }
+
+    crate::kit::acp_events::history_window::insert_pending_tool_end_for_tests(
+        "tool-released",
+        released_key.clone(),
+        &"x".repeat(64),
+        false,
+    );
+    crate::kit::acp_events::history_window::insert_pending_tool_end_for_tests(
+        "tool-kept",
+        kept_key.clone(),
+        &"y".repeat(32),
+        false,
+    );
+
+    let kept_segment = plans[1].segment;
+    let released = plans.remove(0);
+    let outcome = crate::kit::history_window::release_window_plans(
+        &mut state,
+        vec![released],
+        ReleaseReason::BudgetPressure,
+    );
+    assert_eq!(outcome.released_entries, 1);
+    assert!(
+        crate::kit::acp_events::history_window::pending_tool_end_entry_for_tests("tool-released")
+            .is_none()
+    );
+    assert_eq!(
+        crate::kit::acp_events::history_window::pending_tool_end_entry_for_tests("tool-kept"),
+        Some(kept_key),
+        "未参与释放的段不能丢失等待配对的工具结果"
+    );
+    assert_eq!(
+        crate::kit::acp_events::history_window::pending_tool_ends_fingerprint().0,
+        1
+    );
+    assert!(state.window.segment(kept_segment).is_some());
+    crate::kit::acp_events::history_window::clear_pending_tool_ends();
 }

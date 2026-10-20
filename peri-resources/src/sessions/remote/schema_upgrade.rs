@@ -1,4 +1,5 @@
-//! 压缩后的远端单条迁移：压缩前的存储契约（`v2`，版本 10|11）→ 当前契约（`v5`，版本 11）。
+//! 压缩后的远端单条迁移：压缩前的存储契约（`v2`，版本 10|11）→ 当前契约（`v6`，版本 12）；
+//! 上一代当前形状（`v5`，版本 11）走只补派生对象的增量批次。
 //!
 //! 远端与本地共用同一份搬运**规则**（`sessions::storage_v2_plan`）与同一份目标 DDL
 //! （`sessions::canonical`），差别只在执行器：远端把整段迁移作为**一次受管批次**下发。
@@ -67,7 +68,7 @@ const GUARD_OBJECT_COUNT_SQL: &str = "INSERT INTO peri_store_meta(singleton) SEL
     (SELECT COUNT(*) FROM sqlite_master WHERE substr(lower(name), 1, 7) <> 'sqlite_') <> ?1";
 const GUARD_OBJECT_SQL: &str = "INSERT INTO peri_store_meta(singleton) SELECT 0 WHERE NOT EXISTS
     (SELECT 1 FROM sqlite_master WHERE type = ?1 AND name = ?2 AND tbl_name = ?3 AND sql IS ?4)";
-const GUARD_META_SQL: &str = "INSERT INTO peri_store_meta(singleton) SELECT 0 WHERE NOT EXISTS
+pub(super) const GUARD_META_SQL: &str = "INSERT INTO peri_store_meta(singleton) SELECT 0 WHERE NOT EXISTS
     (SELECT 1 FROM peri_store_meta WHERE singleton = 0 AND schema_version = ?1 AND store_id = ?2 AND contract = ?3)";
 const GUARD_THREAD_COUNT_SQL: &str =
     "INSERT INTO peri_store_meta(singleton) SELECT 0 WHERE (SELECT COUNT(*) FROM threads) <> ?1";
@@ -204,24 +205,64 @@ pub(super) async fn upgrade(
     store: &RemoteStore,
     snapshot: &StoreSnapshot,
 ) -> SessionResourceResult<()> {
-    if !matches!(snapshot.schema_version, 10 | 11)
-        || snapshot.contract != schema::PREVIOUS_STORE_CONTRACT
-    {
-        return Err(unsupported());
-    }
-    let read = read_input(store).await?;
     // 当前 Machine 也要在批次里立起来（与本机迁移同一条语句）。写打开在此之前从不需要
     // 本机身份，所以这里显式初始化一次：拿不到身份就不发批次。
     crate::sessions::machine::initialize()
         .await
         .map_err(|_| unsupported())?;
     let current_machine = crate::sessions::machine::current().map_err(|_| unsupported())?;
+    if snapshot.contract == schema::PREVIOUS_CURRENT_STORE_CONTRACT && snapshot.schema_version == 11
+    {
+        // 上一代当前形状只缺派生索引表：增量补齐，不搬运、不删除任何会话事实。
+        return store
+            .apply_schema_upgrade(additive_upgrade_plan(snapshot, current_machine)?)
+            .await;
+    }
+    if !matches!(snapshot.schema_version, 10 | 11)
+        || snapshot.contract != schema::PREVIOUS_STORE_CONTRACT
+    {
+        return Err(unsupported());
+    }
+    let read = read_input(store).await?;
     // 批次里有 `DROP TABLE threads`（重建归属列）：服务端的 `foreign_keys` 是跨连接共享的
     // 可变状态，若被别的连接打开，隐式删除会级联清掉 `messages`。写打开与这里一样先归位。
     store.force_parent_checks_off().await?;
     store
         .apply_schema_upgrade(upgrade_plan(snapshot, &read, current_machine)?)
         .await
+}
+
+/// 上一代当前形状（`v5` + 11）的升级批次：补派生索引表与 canonical 索引集，
+/// 末尾推进版本与契约。整批仍是受管批次，守卫与推进语义与搬运路径一致。
+pub(super) fn additive_upgrade_plan(
+    snapshot: &StoreSnapshot,
+    current_machine: &str,
+) -> SessionResourceResult<Vec<StatementSpec>> {
+    if snapshot.contract != schema::PREVIOUS_CURRENT_STORE_CONTRACT || snapshot.schema_version != 11
+    {
+        return Err(unsupported());
+    }
+    let mut statements = vec![StatementSpec::new(
+        GUARD_META_SQL,
+        vec![
+            Value::Integer(snapshot.schema_version),
+            Value::Text(snapshot.store_id.as_str().to_owned()),
+            Value::Text(snapshot.contract.clone()),
+        ],
+    )];
+    statements.extend(
+        canonical::CREATE_INHERITED_INDEX_TABLES
+            .iter()
+            .map(|sql| StatementSpec::bare(sql)),
+    );
+    statements.extend(
+        canonical::CREATE_INDEXES
+            .iter()
+            .map(|sql| StatementSpec::bare(sql)),
+    );
+    statements.push(current_machine_statement(current_machine));
+    statements.push(advance_version(snapshot));
+    Ok(statements)
 }
 
 /// 迁移输入的一致读取：形状一批（对象定义与列清单，任何库都读得动），有会话表时再读一批
@@ -559,6 +600,12 @@ pub(super) fn upgrade_plan(
     statements.push(StatementSpec::bare(
         canonical::CREATE_SESSION_CLOSE_INTENTS_TABLE_SQL,
     ));
+    // 派生索引表必须在索引重放之前建齐（索引依赖表）；`IF NOT EXISTS` 幂等。
+    statements.extend(
+        canonical::CREATE_INHERITED_INDEX_TABLES
+            .iter()
+            .map(|sql| StatementSpec::bare(sql)),
+    );
     // 索引重放：`DROP TABLE` 把被重建的表（`threads` / `session_bindings`）上的索引一并删掉，
     // 批次末尾把 canonical 的**整份**索引集一次性重放，升级终点因此天然带齐索引——
     // 按表分组、逐表补索引会漏掉「某张表被重建而那张表的清单没跟上」这种漂移。

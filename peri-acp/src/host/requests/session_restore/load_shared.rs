@@ -31,7 +31,11 @@ pub(crate) async fn handle_load_shared(
 ) -> Result<Value, AcpError> {
     let generation = crate::host::history_page::initial_load_generation(params)?
         .unwrap_or_else(LoadGeneration::generate);
-    let PreparedShared { prepared, was_live } = prepare_shared(params, cfg, sessions).await?;
+    let prepared = prepare_shared(params, cfg, sessions).await?.prepared;
+    // 窗口连接的首屏不是 load 响应里的回放：声明 `peri.historyWindowV1` 后，
+    // `session/load` 只装配会话，历史由随后的 `history.open` 提供。判据取本连接
+    // 的协商事实，不能用 `history_pagination` 代替——两者独立。
+    let skip_replay = connection.history_window_v1;
     let environment = replay_after_load(
         cfg,
         sessions,
@@ -39,7 +43,7 @@ pub(crate) async fn handle_load_shared(
         transport,
         &connection,
         &generation,
-        was_live,
+        skip_replay,
     )
     .await?;
     let cfg = environment.as_ref().map(|env| &env.cfg).unwrap_or(cfg);
@@ -57,8 +61,6 @@ pub(crate) async fn handle_load_shared(
 /// 共享的“确保会话已 live”阶段：load/resume/fork 复用，不包含回放或具体响应语义。
 pub(super) struct PreparedShared {
     pub(super) prepared: PreparedSession,
-    /// `true` = 准备时已在 live 表；`false` = 本次冷恢复发布。
-    pub(super) was_live: bool,
 }
 
 pub(super) async fn prepare_shared(
@@ -75,17 +77,12 @@ pub(super) async fn prepare_shared(
             .and_then(|id| states.get(id))
             .is_some()
     };
-    if already_loaded {
-        Ok(PreparedShared {
-            prepared: prepare_live_shared(params, cfg, sessions).await?,
-            was_live: true,
-        })
+    let prepared = if already_loaded {
+        prepare_live_shared(params, cfg, sessions).await?
     } else {
-        Ok(PreparedShared {
-            prepared: prepare_cold_shared(params, cfg, sessions).await?,
-            was_live: false,
-        })
-    }
+        prepare_cold_shared(params, cfg, sessions).await?
+    };
+    Ok(PreparedShared { prepared })
 }
 
 /// 冷恢复：复用 `prepare_existing` 完成装配，但只在**局部 scratch map** 上操作；
@@ -270,6 +267,10 @@ async fn prepare_live_shared(
 }
 
 /// 回放（锁外读热态快照）；成功后 live 路径才刷新 generation（G3）。
+///
+/// `skip_replay` 为窗口连接的协议契约：load 只装配会话、不交付历史，首屏由随后
+/// 的 `session/load history.open` 窗口页提供。**声明能力后必须 open，否则首屏为空**；
+/// 这不是可选优化。跳过回放不等于跳过所有权检查：`HandedOff` 仍必须拒绝。
 async fn replay_after_load(
     cfg: &AcpServerConfig,
     sessions: &SharedSessions,
@@ -277,8 +278,28 @@ async fn replay_after_load(
     transport: &Arc<dyn crate::transport::AcpTransport>,
     connection: &ConnectionFacts,
     generation: &LoadGeneration,
-    already_live: bool,
+    skip_replay: bool,
 ) -> Result<Option<Arc<crate::host::workspace::SessionEnvironment>>, AcpError> {
+    if skip_replay {
+        // 所有权检查与回放内容无关，不能因跳过回放而绕过：
+        // - `HandedOff`：正文在在途执行器里，load 必须失败（-32010）；
+        // - `ReloadRequired`：窗口读取以存储为事实源，这里不回填热态，直接返回
+        //   environment（与分页回放的防御性分支同口径）。
+        let (environment, ownership) = {
+            let states = sessions.lock().await;
+            let state = states
+                .get(session_id)
+                .ok_or_else(|| AcpError::new(-32602, "session not found"))?;
+            (state.environment.clone(), state.context_ownership)
+        };
+        if ownership == crate::host::ContextOwnership::HandedOff {
+            return Err(AcpError::new(
+                -32010,
+                "Session context is owned by an in-flight prompt",
+            ));
+        }
+        return Ok(environment);
+    }
     let replay_sender = TuiReplaySender {
         transport: transport.as_ref(),
     };
@@ -352,12 +373,9 @@ async fn replay_after_load(
             format!("session/load: history replay failed: {error}"),
         )
     })?;
-    if already_live {
-        let mut states = sessions.lock().await;
-        if let Some(state) = states.get_mut(session_id) {
-            state.refresh_session_generation();
-        }
-    }
+    // warm load 只推进该连接自己的 loadGeneration（由调用方持有），不得刷新共享
+    // session generation：票据绑定的是 open 时的固定视图，另一连接的读取不能被
+    // 一次重新 attach 撤销。只有真实 rewind/delete 才使受影响结构失效。
     Ok(environment)
 }
 

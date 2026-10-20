@@ -16,9 +16,9 @@ use peri_acp_types::history_window::{
 use peri_acp_types::messages::MessageId;
 use peri_acp_types::session_resources::{
     ActiveSessionSnapshot, BindingState, ChildSnapshot, ForkSnapshot, FrozenSnapshotBytes,
-    HistoryWindowPagePlan, HistoryWindowRows, NewSession, PersistenceRecovery, RewindBoundary,
-    RewindOutcome, SessionHistoryWindowBounds, SessionMetaPatch, SessionResourceResult,
-    SessionSnapshot,
+    FrozenState, HistoryWindowPagePlan, HistoryWindowRows, NewSession, PersistenceRecovery,
+    RewindBoundary, RewindOutcome, SessionHistoryWindowBounds, SessionMetaPatch,
+    SessionResourceResult, SessionSnapshot,
 };
 use peri_acp_types::store::{CompactionChange, MessageFlags, PersistedPayload};
 use peri_acp_types::system_reminder::TrustedSystemReminder;
@@ -159,6 +159,22 @@ pub(crate) trait SessionDataPort: Send + Sync {
         &self,
         id: &ThreadId,
     ) -> SessionResourceResult<ActiveSessionSnapshot>;
+
+    /// 轻量读取 frozen 原字节，不分页、不装入任何正文。
+    ///
+    /// 默认拒绝；生产后端必须覆写为单列读取，不得退化成完整/有效快照读取。
+    async fn load_frozen_state(&self, _id: &ThreadId) -> SessionResourceResult<FrozenState> {
+        Err(
+            peri_acp_types::session_resources::SessionResourceError::new(
+                peri_acp_types::session_resources::SessionResourceErrorKind::Unsupported,
+            ),
+        )
+    }
+
+    /// 后端是否实现窗口读取端口；默认 false，覆写者与窗口读取实现保持同一判据。
+    fn supports_history_window(&self) -> bool {
+        false
+    }
 
     /// 轻量绑定分类（不加载历史）：记录事实三种——绑定与本机登记一致、绑定指向的登记
     /// 已不存在（含子会话没有绑定行）、无绑定行。`LegacyConfirmed` 由门面按本机来源

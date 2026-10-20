@@ -14,7 +14,7 @@ use peri_acp_types::history_page::{HistoryForwardCursor, HistorySegment};
 use peri_acp_types::messages::{BaseMessage, ContentBlock, MessageId, ToolCallRequest};
 use peri_acp_types::session_resources::{
     ActiveSessionSnapshot, BindingRecheck, BindingState, ChildResumeClaim, ChildSnapshot,
-    CloseSettlement, ForkSnapshot, FrozenSnapshotBytes, NewSession, NewSessionDraft,
+    CloseSettlement, ForkSnapshot, FrozenSnapshotBytes, FrozenState, NewSession, NewSessionDraft,
     PersistenceRecovery, RewindBoundary, RewindOutcome, SessionAvailability, SessionInitialization,
     SessionMetaPatch, SessionResourceError, SessionResourceErrorKind, SessionResourceResult,
     SessionResources, SessionSnapshot,
@@ -124,6 +124,7 @@ impl_session_resources_with_segment_hooks! {
     adopt_legacy_session(id: &ThreadId, saved_cwd: &str, workspace: &ResolvedWorkspace, frozen: &FrozenSnapshotBytes) -> ();
     load_session_snapshot(id: &ThreadId) -> SessionSnapshot;
     load_active_snapshot(id: &ThreadId) -> ActiveSessionSnapshot;
+    load_frozen_state(id: &ThreadId) -> FrozenState;
     load_session_binding(id: &ThreadId) -> BindingState;
     validate_bound_workspace(id: &ThreadId, check: BindingRecheck) -> ResolvedWorkspace;
     load_session_meta(id: &ThreadId) -> ThreadMeta;
