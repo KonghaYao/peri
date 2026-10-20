@@ -9,6 +9,8 @@ pub struct AsyncContext {
     pub child_settlement: Option<Arc<crate::session::subagent::ChildSettlementWindow>>,
     /// 截止后才被 Receive 落库、尚未推理的消息（交接 receipt 的处理义务）。
     pub received_after_deadline: Arc<parking_lot::Mutex<Vec<peri_acp_types::messages::MessageId>>>,
+    /// 已准入 Act 产生、尚未被 Reason 读取的 tool call 身份。
+    pub unprocessed_tool_calls: Arc<parking_lot::Mutex<Vec<String>>>,
     pub idle_wait_enabled: bool,
     pub idle_should_wait: Option<Arc<dyn Fn() -> bool + Send + Sync>>,
     /// 有界等待到期且仍有未结算任务时返回交接快照（只返回一次）。

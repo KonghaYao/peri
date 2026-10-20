@@ -1,6 +1,6 @@
 # P1：子 Agent 无界收尾
 
-状态：A′ 已实现；B1–B6、第三轮复审与第四轮主阻塞（已准入 Act tool result 误报 Settled）已修复并补回归。真实 MCP wire、TUI 手测与自有重启 fixture 未覆盖。日期：2026-10-20。
+状态：A′ 已实现；本轮补修 HookStop 丢失已准入 Act 身份、max_iterations 残留交接，并补 close 状态及 canonical reminder 断言。独立验收仍待复核；真实 MCP wire、TUI 手测与自有重启 fixture 未覆盖。日期：2026-10-20。
 
 ## 故障与证据
 
@@ -63,7 +63,7 @@
 
 | 项 | 修复 | 回归证据 |
 | --- | --- | --- |
-| B1 Receive 跨 D 误报 Settled | Receive 无条件返回已提交且 disposition=Process 的消息身份；loop 在判定 `SettlementDue`/HookStop 时统一登记为未推理义务，消除 Receive 内 check-then-check | `receive_commit_crossing_deadline_hands_off_unprocessed_result`（真实 append barrier；D 在 append 期间届满，断言 HandedOff、tasks 为空、receipt 含 delivery ID） |
+| B1 Receive 跨 D 误报 Settled | Receive 无条件返回已提交且 disposition=Process 的消息身份；loop 消费 HookStopIntent 时先登记该批 Process 身份，再返回携带 Act 身份的 `HookStopped`；Receive 后判定 D 到期则登记 Process 身份并返回 `SettlementDue`。两条路径都不新增 Reason | `receive_commit_crossing_deadline_hands_off_unprocessed_result`（真实 append barrier；D 在 append 期间届满，断言 HandedOff、tasks 为空、receipt 含 delivery ID） |
 | B2 执行错误 + 交接写失败只留日志 | 新增 `ChildRunOutcome::HandoffFailed { cause, failure }`；保留原错误、`HandoffCommitError`、冻结 receipt 与 flush 附加失败 | `execution_error_with_handoff_write_failure_keeps_both_causes`；经真实 `run_sync_subagent` 的 `run_sync_handoff_failure_preserves_error_and_receipt` 断言父级同时看到原 model 错误、handoff_persistence_failed、flush 失败与 receipt，且 resume 被拒 |
 | B3 成功回执不清旧失败 | `confirmed` 成功时 `settle_sync_delivery` 清除旧记录；失败继续记录 | `handoff_sync_child...` 拒绝×2→成功后 `sync_delivery_errors` 为空，并显式 `close_subagent_session_scope` 成功；`parent_close...` 持续失败保留记录 |
 | B4 close 吞 flush 失败 | typed `FlushError::{WriterClosed, Persistence}`；真实持久化失败返回 Incomplete、保留 owner/binding；failure/pending receipt 计入未结义务，acquire 拒绝未确认交接 | `test_close_with_unconfirmed_history_flush_keeps_owner`、`test_unconfirmed_failure_and_pending_receipt_count_as_obligations` |
@@ -81,6 +81,14 @@
 
 补充覆盖：连续每秒 activity、D 边界前后 1ms 的完成/cancel 两种调度方向、真实 factory/claim resume、worker 释放 LLM/StageContext（Weak）、root 三层 owner 查询/取消/关闭、真实进程组（父 `sh` + 子 `sleep`）在 D 后存活并由正式取消清理整个进程组与输出管道。精确同刻调度无法由 tokio 定时器确定性注入，使用 ±1ms 边界夹逼并在报告注明。
 
+## 本轮收口证据
+
+1. HookStop：旧行为只返回 Completed、丢弃 Act 身份，空任务/空 MQ 时误报 Settled。`HookStopped` 现在携带身份，runner 无条件交接非空列表，window 到期路径也透传列表。故障注入恢复旧语义后，`post_tool_batch_stop_preserves_act_receipt` 实际失败为 Settled；恢复修复后通过。`hook_stop_after_act_hands_off_tool_result_and_parent_fails` 经 PostToolBatch middleware 与 sync wrapper 断言父 success=false、timed_out=false、模型仅调用一次。
+2. max_iterations：旧行为保留错误但 residual=None，或交接 receipt 不含 Act 身份。身份由 AsyncContext 单一持有，Reason 成功才清除；runner 错误分支保留残留身份。故障注入丢弃身份后，`budget_exhaustion_preserves_act_receipt` 实际失败为 MaxIterationsExceeded(1)、residual=None；恢复修复后通过。
+3. close 分类：原测试仅检查分类函数，不能证明 meta 状态。`cancel_running_claim_finalizes_only_after_resource_close_is_confirmed` 走真实 ResumeClaim/close worker：独立 history Store flush 失败而 meta Store 可写时仍保持 Active；资源关闭但执行结算未确认时写 Cancelled。此项补测试，不改生产分类规则。
+4. canonical 交接：原测试未锁定 tool call 字段。上述两个直接 runner 用例断言实际执行一个工具、无其他义务，并按 canonical_message_id 查落库提醒，核对 receipt、正文、metadata、父级 notice 的 call-1 一致。此项补测试，不改 reminder 格式。
+5. 遗留改动：保留五个文件的有效实现；修正 LoopState 与 AsyncContext 重复保存身份、HookStopped 分支的移动问题；测试从工具直接注入停止消息改为 after_tools_batch 窄能力投递。新增 fixture 的字段/导出路径编译错误、重复设置 host 与取消 token 断言错误已修正，最终结果见下。
+
 ## 实现记录
 
 - `412386e90`：阶段 1，定义 outcome/receipt、一次性窗口及目标契约。
@@ -92,20 +100,19 @@
 
 ## 实际验证
 
-所有命令在指定 worktree 内执行，统一前缀 `./scripts/cargo-rmcp-patched.sh`。
+所有命令在指定 worktree 内执行，统一前缀 `./scripts/cargo-rmcp-patched.sh`。以下为本轮重跑结果；定向集合存在重叠，不相加作为独立用例数。
 
-- `test --locked -p peri-agent --lib -- session::subagent::child_runner::tests`：31 passed，0 failed（含 background/nested/deadline/process 子模块；paused-time）。
-- `test --locked -p peri-agent --lib -- session::subagent::run_sync::tests`：9 passed，0 failed（含真实 run_sync_subagent 的 HandoffFailed 端到端用例）。
-- `test --locked -p peri-agent --lib -- agent::async_tasks::handoff::tests`：6 passed，0 failed。
-- `test --locked -p peri-agent --lib -- session::subagent::resource_owner::tests`：11 passed，0 failed。
-- `test --locked -p peri-agent --lib -- session::subagent::`：149 passed，0 failed。
-- `test --locked -p peri-agent --lib`：1199 passed，0 failed，3 ignored。并行运行时 `agent::stages::receive::tests::committed_delivery_missing_from_hot_state_is_restored_without_reemitting` 曾因共享 git fixture 失败一次，单测与复跑均通过；该用例不涉及本修复路径。
+- `test --locked -p peri-agent --lib -- child_runner`：34 passed，0 failed（含 background/nested/deadline/process 子模块）。
+- `test --locked -p peri-agent --lib -- run_sync`：9 passed，0 failed。
+- `test --locked -p peri-agent --lib -- handoff`：27 passed，0 failed；精确 `agent::async_tasks::handoff::tests`：6 passed，0 failed。
+- `test --locked -p peri-agent --lib -- resource_owner`：11 passed，0 failed。
+- `test --locked -p peri-agent --lib -- session::subagent`：153 passed，0 failed。
+- `test --locked -p peri-agent --lib`：1203 passed，0 failed，3 ignored。
 - `test --locked -p peri-acp-types --lib`：660 passed，0 failed。
-- `build --locked -p peri-agent -p peri-acp`：通过，退出码 0。
-- `clippy --locked -p peri-agent -p peri-acp --lib -- -D warnings`：通过，退出码 0。
+- `build --locked -p peri-agent -p peri-acp`：退出码 0。
+- `clippy --locked -p peri-agent -p peri-acp --lib -- -D warnings`：退出码 0。
 - `test --locked -p peri-agent --doc`：15 passed，0 failed。
-- `test --locked -p peri-acp-types --doc`：6 passed，0 failed，2 ignored。
-- `test --locked -p peri-acp --lib`：1039 passed，0 failed，1 ignored（含 live resume child chain 用例）。
-- `wc -l`：`session_lifecycle.rs` 945、`resume_cases_test.rs` 990、`resume_owner_reuse_test.rs` 61、`agent/stages/mod.rs` 985、`child_runner_test.rs` 979；本轮修改的 .rs 均 ≤1000。
-- 环境：磁盘曾满，清理生成态 `target/debug/incremental` 并重建损坏的 patched rmcp 缓存；最终构建使用 `CARGO_INCREMENTAL=0`。
+- `test --locked -p peri-acp --lib`：1039 passed，0 failed，1 ignored。
+- `wc -l`：分支相对 main 的变更 Rust 文件均 ≤1000；最大 `agent/stages/mod.rs` 993 行。新增修改的 `loop_iteration_test.rs` 956、`claim_preflight_test.rs` 482 行亦满足上限。
+- 故障注入：HookStop 和预算身份丢失各复现 1 个失败，恢复修复后均通过；这两次预期失败不计入最终回归结果。初轮 fixture 编译和断言问题见上文，已修正。
 - 未覆盖：真实 MCP wire producer barrier 叠加 ACP 根关闭、TUI 手测、自有进程重启用例。真实进程组（父 `sh` + 子 `sleep`）与输出管道清理已由 `real_blocking_shell_tree_survives_deadline_then_cancel_cleans_tree` 覆盖；Windows 仅做 `#[cfg(unix)]` 门控，本机无法执行 Windows。

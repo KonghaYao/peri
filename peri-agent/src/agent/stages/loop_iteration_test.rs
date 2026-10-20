@@ -98,7 +98,7 @@ async fn hook_stop_in_budget_boundary_batch_wins_without_followup_activation() {
         .build();
         assert!(matches!(
             run_react_loop(context, 1).await,
-            LoopResult::Completed
+            LoopResult::HookStopped { unprocessed_tool_calls } if unprocessed_tool_calls.is_empty()
         ));
         assert_eq!(calls.load(Ordering::SeqCst), 1);
         assert!(session.queue().is_empty());

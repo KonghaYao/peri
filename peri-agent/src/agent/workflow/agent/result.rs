@@ -53,7 +53,7 @@ pub(super) fn project_run_result(
         };
     }
     match loop_result {
-        LoopResult::Completed => {
+        LoopResult::Completed | LoopResult::HookStopped { .. } => {
             let output = crate::session::subagent::extract_last_ai_text(session);
             ProjectedResult {
                 result: completed_result(

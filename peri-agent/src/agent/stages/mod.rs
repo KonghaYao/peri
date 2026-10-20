@@ -63,6 +63,9 @@ pub enum LoopResult {
     /// `unprocessed_tool_calls` 是已准入 Act 产生、尚未被下一次 Reason 读取的
     /// tool call 身份；它们只存在于 transcript，不在 MQ。
     SettlementDue { unprocessed_tool_calls: Vec<String> },
+    /// hook 显式停止（PostToolBatch `continue:false`）：不再发起模型请求。
+    /// 已准入 Act 的 tool call 只存在于 transcript，必须随结果交给 runner。
+    HookStopped { unprocessed_tool_calls: Vec<String> },
     /// 被中断
     Interrupted,
     /// 错误
@@ -214,6 +217,7 @@ impl StageContext {
             async_ctx: AsyncContext {
                 child_settlement: None,
                 received_after_deadline: Arc::default(),
+                unprocessed_tool_calls: Arc::default(),
                 idle_wait_enabled: false,
                 idle_should_wait: None,
                 pending_handoff: None,
@@ -268,6 +272,7 @@ impl StageContext {
             async_ctx: AsyncContext {
                 child_settlement: None,
                 received_after_deadline: Arc::default(),
+                unprocessed_tool_calls: Arc::default(),
                 idle_wait_enabled: false,
                 idle_should_wait: None,
                 pending_handoff: None,
@@ -381,8 +386,6 @@ pub use queue_to_transcript::append_messages_to_transcript;
 struct LoopState {
     /// 上一轮 Act 是否产出了 tool_calls
     has_tool_calls: bool,
-    /// 已准入 Act 产出、尚未被 Reason 读取的 tool call 身份。
-    unprocessed_tool_calls: Vec<String>,
     /// before_agent hooks 是否已执行（首次 Receive 后执行一次）
     before_agent_has_run: bool,
     /// 启动闸门 hook 是否已通过（首批 before_agent 后执行一次，成功才置位）
@@ -531,7 +534,7 @@ pub async fn run_react_loop(context: StageContext, max_iterations: usize) -> Loo
             }
             if settlement_due(&context) {
                 return LoopResult::SettlementDue {
-                    unprocessed_tool_calls: loop_state.unprocessed_tool_calls.clone(),
+                    unprocessed_tool_calls: context.async_ctx.unprocessed_tool_calls.lock().clone(),
                 };
             }
 
@@ -567,7 +570,9 @@ pub async fn run_react_loop(context: StageContext, max_iterations: usize) -> Loo
                     consumed = receive_out.consumed_count,
                     "Receive: hook stop intent consumed; exiting run without further model request"
                 );
-                return LoopResult::Completed;
+                return LoopResult::HookStopped {
+                    unprocessed_tool_calls: context.async_ctx.unprocessed_tool_calls.lock().clone(),
+                };
             }
 
             // Receive 的持久化等待可能跨过 D：已落库结果保留，但不再准入新语义迭代。
@@ -578,7 +583,7 @@ pub async fn run_react_loop(context: StageContext, max_iterations: usize) -> Loo
                     .lock()
                     .extend(receive_out.process_message_ids.clone());
                 return LoopResult::SettlementDue {
-                    unprocessed_tool_calls: loop_state.unprocessed_tool_calls.clone(),
+                    unprocessed_tool_calls: context.async_ctx.unprocessed_tool_calls.lock().clone(),
                 };
             }
 
@@ -868,6 +873,9 @@ pub async fn run_react_loop(context: StageContext, max_iterations: usize) -> Loo
                 Err(e) => return e,
             };
 
+            // Reason 成功后上一批义务已被读取；失败时仍保留供 runner 交接。
+            context.async_ctx.unprocessed_tool_calls.lock().clear();
+
             // 完整工具仍照常执行；无工具截断必须与自然完成区分，不能靠空队列判成功。
             let truncated_without_tools = reason_out.reasoning.stop_reason
                 == peri_model::StopReason::MaxTokens
@@ -901,7 +909,7 @@ pub async fn run_react_loop(context: StageContext, max_iterations: usize) -> Loo
             };
 
             loop_state.has_tool_calls = act_out.has_tool_calls;
-            loop_state.unprocessed_tool_calls = if act_out.has_tool_calls {
+            *context.async_ctx.unprocessed_tool_calls.lock() = if act_out.has_tool_calls {
                 unprocessed_tool_calls
             } else {
                 Vec::new()

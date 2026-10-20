@@ -48,10 +48,15 @@ fn has_obligations(
         || manager.has_pending_deliveries()
         || context.session.queue.has_required_for_run(execution)
         || !context.async_ctx.received_after_deadline.lock().is_empty()
+        || !context.async_ctx.unprocessed_tool_calls.lock().is_empty()
 }
 
 fn received_after_deadline(context: &StageContext) -> Vec<peri_acp_types::messages::MessageId> {
     context.async_ctx.received_after_deadline.lock().clone()
+}
+
+fn pending_act_tool_calls(context: &StageContext) -> Vec<String> {
+    context.async_ctx.unprocessed_tool_calls.lock().clone()
 }
 
 async fn commit_handoff(
@@ -122,6 +127,15 @@ pub(super) async fn run_child_with_handoff_signal(
         return match run_react_loop(context, max_iterations).await {
             LoopResult::Completed => ChildRunOutcome::Settled,
             LoopResult::SettlementDue { .. } => missing_handoff_owner(),
+            LoopResult::HookStopped {
+                unprocessed_tool_calls,
+            } => {
+                if unprocessed_tool_calls.is_empty() {
+                    ChildRunOutcome::Settled
+                } else {
+                    missing_handoff_owner()
+                }
+            }
             LoopResult::Interrupted => ChildRunOutcome::Interrupted,
             LoopResult::Error(error) => ChildRunOutcome::Failed {
                 error,
@@ -163,6 +177,7 @@ pub(super) async fn run_child_with_handoff_signal(
         if stopped_by_hook {
             shell_reminded.store(true, Ordering::Release);
         }
+        let mut hook_stopped_tool_calls: Option<Vec<String>> = None;
         match result {
             LoopResult::Interrupted => return ChildRunOutcome::Interrupted,
             LoopResult::SettlementDue {
@@ -200,7 +215,9 @@ pub(super) async fn run_child_with_handoff_signal(
                 if matches!(error, crate::error::AgentError::Interrupted) {
                     return ChildRunOutcome::Interrupted;
                 }
-                if !has_obligations(&manager, &context, &execution) {
+                let pending_tool_calls = pending_act_tool_calls(&context);
+                if pending_tool_calls.is_empty() && !has_obligations(&manager, &context, &execution)
+                {
                     return ChildRunOutcome::Failed {
                         error,
                         residual: None,
@@ -217,7 +234,7 @@ pub(super) async fn run_child_with_handoff_signal(
                     &context,
                     &owner,
                     ChildHandoffReason::ExecutionFailed,
-                    Vec::new(),
+                    pending_tool_calls,
                     &mut handoff_start,
                 )
                 .await
@@ -232,7 +249,35 @@ pub(super) async fn run_child_with_handoff_signal(
                     }
                 };
             }
+            LoopResult::HookStopped {
+                ref unprocessed_tool_calls,
+            } => {
+                if !unprocessed_tool_calls.is_empty() {
+                    hook_stopped_tool_calls = Some(unprocessed_tool_calls.clone());
+                }
+            }
             LoopResult::Completed => {}
+        }
+
+        if let Some(unprocessed_tool_calls) = hook_stopped_tool_calls {
+            let Some(owner) = owner_of(session) else {
+                return missing_handoff_owner();
+            };
+            return match commit_handoff(
+                &context,
+                &owner,
+                ChildHandoffReason::HookStop,
+                unprocessed_tool_calls,
+                &mut handoff_start,
+            )
+            .await
+            {
+                Ok(receipt) => ChildRunOutcome::HandedOff { receipt },
+                Err(error) => {
+                    tracing::error!(%error, "child hook-stop handoff persistence failed");
+                    handoff_failure(None, error, owner.pending_receipt())
+                }
+            };
         }
 
         let obligations = has_obligations(&manager, &context, &execution);
@@ -256,8 +301,14 @@ pub(super) async fn run_child_with_handoff_signal(
             } else {
                 ChildHandoffReason::SettlementDeadline
             };
-            return match commit_handoff(&context, &owner, reason, Vec::new(), &mut handoff_start)
-                .await
+            return match commit_handoff(
+                &context,
+                &owner,
+                reason,
+                pending_act_tool_calls(&context),
+                &mut handoff_start,
+            )
+            .await
             {
                 Ok(receipt) => ChildRunOutcome::HandedOff { receipt },
                 Err(error) => {
@@ -359,7 +410,7 @@ pub(super) async fn run_child_with_handoff_signal(
                 &context,
                 &owner,
                 reason,
-                Vec::new(),
+                pending_act_tool_calls(&context),
                 &mut handoff_start,
             )
             .await
