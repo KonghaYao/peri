@@ -74,7 +74,7 @@
 - `test --locked -p peri-agent --lib -- session::subagent::run_sync::tests`：7 passed，0 failed。
 - `test --locked -p peri-agent --lib -- agent::async_tasks::handoff::tests`：6 passed，0 failed。
 - `test --locked -p peri-agent --lib -- session::subagent::resource_owner::tests`：7 passed，0 failed。
-- `test --locked -p peri-agent --lib -- session::subagent::`：129 passed，0 failed。
+- `test --locked -p peri-agent --lib -- session::subagent::`：131 passed，0 failed。
 - `test --locked -p peri-agent --lib`：1181 passed，0 failed，3 ignored。并行运行时 `agent::stages::receive::tests::committed_delivery_missing_from_hot_state_is_restored_without_reemitting` 曾因共享 git fixture 失败一次，单测与复跑均通过；该用例不涉及本修复路径。
 - `test --locked -p peri-acp-types --lib`：660 passed，0 failed。
 - `build --locked -p peri-agent -p peri-acp`：通过，退出码 0。
