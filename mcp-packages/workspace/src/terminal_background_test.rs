@@ -44,8 +44,12 @@ async fn test_bg_explicit_timeout_kills_process_group() {
         .expect("bg 超时后应触发 on_bg_complete 回调");
     assert!(!notif.success, "超时结果应为失败");
     assert!(
-        notif.to_notification().contains("超时被终止"),
+        notif.to_notification().contains("state: timed_out"),
         "通知必须区分终止和仍在后台运行"
+    );
+    assert!(
+        !notif.to_notification().contains("state: succeeded"),
+        "超时不得投影为成功"
     );
     assert!(notif.timed_out, "超时结果应标记 timed_out");
 
@@ -88,6 +92,20 @@ async fn test_bg_shell_registered_while_running() {
         "应返回 pid 行: {result}"
     );
     assert!(result.contains("kill"), "应说明 kill 方式: {result}");
+    // 启动回执只承诺当前进程内的活跃期投递：不得提前声称已写入 transcript，
+    // 也不得承诺重启后恢复后台执行。
+    assert!(
+        result.contains("result will be delivered to this session when it finishes"),
+        "启动回执必须说明结果投递到发起会话: {result}"
+    );
+    assert!(
+        !result.to_lowercase().contains("transcript"),
+        "队列接受前不得声称已写入 transcript: {result}"
+    );
+    assert!(
+        !result.to_lowercase().contains("restart"),
+        "不得承诺重启后恢复后台执行: {result}"
+    );
     let task_id = result
         .lines()
         .find(|l| l.starts_with("task_id: "))
@@ -215,7 +233,7 @@ async fn test_sync_timeout_promotes_to_background() {
     let err = tool
         .invoke(
             serde_json::json!({
-                "command": "sh -c 'sleep 2; echo done'",
+                "command": "sh -c 'sleep 2; expr 40 + 2'",
                 "timeout": 200,
             }),
             peri_agent::tools::ToolContext::new(&[], "."),
@@ -228,6 +246,10 @@ async fn test_sync_timeout_promotes_to_background() {
     assert!(
         err.contains("background task"),
         "Err 应说明已转后台续跑: {err}"
+    );
+    assert!(
+        err.contains("result will be delivered to this session"),
+        "超时转后台回执必须与最终投递路径一致: {err}"
     );
     assert!(
         err.lines().any(|l| l.starts_with("pid: ")),
@@ -279,14 +301,13 @@ async fn test_sync_timeout_promotes_to_background() {
     assert_eq!(files.exit_code, Some(0));
     assert!(std::fs::read_to_string(files.stdout_path.as_ref().unwrap())
         .unwrap()
-        .contains("done"));
+        .contains("42"));
     assert!(
-        std::fs::read_to_string(&stdout_log)
-            .unwrap()
-            .contains("done"),
+        std::fs::read_to_string(&stdout_log).unwrap().contains("42"),
         "promote 续跑的输出应写入回传的同一日志文件: {stdout_log}"
     );
-    assert!(!notif.to_notification().contains("done"));
+    // 通知只携带命令摘要与文件引用，不内联命令输出正文（独立行上的 42）。
+    assert!(!notif.to_notification().contains("\n42"));
     assert!(!notif.timed_out, "正常完成不应标记 timed_out");
 
     // complete() 清理后 active_count 归零

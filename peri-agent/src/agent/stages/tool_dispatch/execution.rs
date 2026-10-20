@@ -472,11 +472,21 @@ async fn dispatch_concurrent(
                     ctx_param.session_resources = session_resources;
                     // 投递归属 = 直接发起会话（本 session）；路由取自该会话的
                     // canonical 持久化句柄，不接受模型参数。
-                    ctx_param = ctx_param.with_task_terminal_delivery(
-                        crate::agent::async_tasks::delivery::SessionTerminalDelivery::for_queue(
-                            dispatch_context.queue().queue().clone(),
-                        ),
-                    );
+                    ctx_param = ctx_param.with_task_terminal_delivery(match dispatch_context
+                        .async_result_mailbox()
+                    {
+                        Some(mailbox) => {
+                            crate::agent::async_tasks::delivery::SessionTerminalDelivery::
+                                for_queue_with_mailbox(
+                                    dispatch_context.queue().queue().clone(),
+                                    Arc::clone(mailbox),
+                                )
+                        }
+                        // idle App / Host 入口没有会话 mailbox：投递仍入队，只是
+                        // 不参与会话级处理责任跟踪。
+                        None => crate::agent::async_tasks::delivery::SessionTerminalDelivery::
+                            for_queue(dispatch_context.queue().queue().clone()),
+                    });
                     match tool {
                         Some(t) => t
                             .invoke_output(input, ctx_param)

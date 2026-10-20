@@ -41,7 +41,10 @@ async fn internal_execution_announces_identity_and_matching_terminal() {
     harness.complete_child("identity-child");
     let response = crate::host::dispatch_prompt_turn(
         json!({"sessionId": harness.session_id, "message":{"role":"user", "content":[]}}),
-        crate::host::PromptOrigin::Continuation { mq_steering: true },
+        crate::host::PromptOrigin::Continuation {
+            mq_steering: true,
+            pending_result: false,
+        },
         Some(0),
         &harness.sessions,
         &harness.locks,
@@ -80,7 +83,10 @@ async fn failed_execution_assembly_closes_the_announced_identity_once() {
         .frozen = None;
     let error = crate::host::dispatch_prompt_turn(
         json!({"sessionId": harness.session_id, "message":{"role":"user", "content":[]}}),
-        crate::host::PromptOrigin::Continuation { mq_steering: true },
+        crate::host::PromptOrigin::Continuation {
+            mq_steering: true,
+            pending_result: false,
+        },
         Some(0),
         &harness.sessions,
         &harness.locks,

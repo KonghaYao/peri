@@ -49,6 +49,46 @@ fn emit_goal_snapshot(ctx: &StageContext) {
     });
 }
 
+/// 有效响应提交后结清本次请求的后台结果。
+///
+/// 先等待持久化 barrier：只有正文确实落盘，主模型响应才算有效提交。barrier 失败
+/// 时保留处理责任（Blocked）并把本次执行判失败，不得把未落盘内容当成已覆盖。
+async fn settle_result_receipt(
+    ctx: &StageContext,
+    receipt: Option<&crate::session::async_result_mailbox::RequestReceipt>,
+    response_id: Option<crate::messages::MessageId>,
+) -> AgentResult<()> {
+    let Some(receipt) = receipt else {
+        return Ok(());
+    };
+    let flush_tx = ctx.session.transcript.read().persist_tx_handle();
+    if let Some(tx) = flush_tx {
+        if let Err(error) = crate::session::MessageTranscript::flush_via_tx(&tx).await {
+            ctx.session.async_result_mailbox.block_attempt(
+                receipt,
+                "act",
+                &format!("transcript persistence barrier failed: {error:#}"),
+            );
+            return Err(crate::error::AgentError::Other(anyhow::anyhow!(
+                "transcript persistence barrier failed after model response: {error:#}"
+            )));
+        }
+    }
+    if let Err(error) = ctx
+        .session
+        .async_result_mailbox
+        .cover_after_commit(receipt, response_id)
+    {
+        // Stop/挂起或另一个 attempt 已接管：责任不由本次响应结清，本轮也不因此失败。
+        tracing::warn!(
+            request_id = %receipt.request_id(),
+            error = %error,
+            "async result receipt is no longer current; coverage deferred"
+        );
+    }
+    Ok(())
+}
+
 /// 运行 Act 阶段
 pub async fn run_act(input: ActInput) -> AgentResult<ActOutput> {
     let ctx = &input.context;
@@ -116,6 +156,7 @@ pub async fn run_act(input: ActInput) -> AgentResult<ActOutput> {
         // 两轮内容，渲染出"新文本在旧工具之前"的顺序错乱（详见 RenderEvent::TurnCompleted）。
         emit_turn_completed(ctx).await;
         emit_goal_snapshot(ctx);
+        settle_result_receipt(ctx, input.receipt.as_ref(), None).await?;
 
         Ok(ActOutput {
             has_tool_calls: true,
@@ -139,8 +180,16 @@ pub async fn run_act(input: ActInput) -> AgentResult<ActOutput> {
         // 空内容不写入规范历史：中断无正文时只保留续跑提醒，不制造空 assistant
         // 消息——空 text block 会被 provider 拒绝（Anthropic 400），使本可续跑的
         // 断流变成下一轮硬失败。判空沿用 `MessageContent::is_empty()`（不 trim）。
-        if !ai_msg.message_content().is_empty() {
+        let committed = !ai_msg.message_content().is_empty();
+        if committed {
             ctx.session.transcript.write().append(ai_msg);
+        } else if let Some(receipt) = input.receipt.as_ref() {
+            // 空回复没有有效提交：保留责任并显式阻塞，不能让 InFlight 永久占用。
+            ctx.session.async_result_mailbox.block_attempt(
+                receipt,
+                "act",
+                "empty final response was not committed",
+            );
         }
 
         // 非流式时 emit TextChunk（流式由 LLM 适配器直接 emit）
@@ -200,6 +249,11 @@ pub async fn run_act(input: ActInput) -> AgentResult<ActOutput> {
         // 必须走可靠 render FIFO（详见上方工具路径注释），不能迁到独立 state 通道。
         emit_turn_completed(ctx).await;
         emit_goal_snapshot(ctx);
+
+        // 只有真正写入正文的最终回答才是有效提交；空响应、截断与中断都不结清。
+        if committed {
+            settle_result_receipt(ctx, input.receipt.as_ref(), Some(ai_msg_id)).await?;
+        }
 
         Ok(ActOutput {
             has_tool_calls: false,

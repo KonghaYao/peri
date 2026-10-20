@@ -23,7 +23,7 @@ use std::sync::Arc;
 
 use parking_lot::Mutex;
 
-use crate::agent::compact_v2::projection::{render_persisted_llm_view, ProviderCapabilities};
+use crate::agent::compact_v2::projection::ProviderCapabilities;
 use crate::error::AgentResult;
 use crate::messages::BaseMessage;
 use crate::session::transcript::{MessageTranscript, TranscriptRevision};
@@ -32,6 +32,8 @@ use crate::session::transcript::{MessageTranscript, TranscriptRevision};
 struct CachedModelView {
     revision: TranscriptRevision,
     capabilities: ProviderCapabilities,
+    /// 保护集合/诊断版本；与 transcript 修订共同决定是否可复用。
+    protected_version: u64,
     messages: Arc<Vec<BaseMessage>>,
     /// 测试观察点：本项持有一份整份正文，随缓存项一起释放（只需析构副作用）。
     #[cfg(test)]
@@ -102,21 +104,58 @@ impl ModelViewScope {
     ///
     /// 键不匹配时旧视图已经不可复用，必须先把它移出槽再渲染：否则旧正文会一直存活
     /// 到新视图渲染结束，重建期间两份整份正文同时驻留。
+    #[cfg(test)]
     pub(crate) fn view(
         &self,
         transcript: &MessageTranscript,
         capabilities: &ProviderCapabilities,
     ) -> AgentResult<Arc<Vec<BaseMessage>>> {
-        let revision = transcript.view_revision();
+        self.view_inner(
+            transcript,
+            capabilities,
+            &crate::session::async_result_mailbox::ProtectedResults::default(),
+        )
+    }
 
-        if let Some(hit) = self.take_matching(revision, capabilities) {
+    /// 带待处理结果保护集合的视图；保护/诊断版本参与缓存键，canonical 修订
+    /// 未变但 Ready/Blocked/Covered 切换时也必须重建。
+    pub(crate) fn view_with_protected(
+        &self,
+        transcript: &MessageTranscript,
+        capabilities: &ProviderCapabilities,
+        protected: &crate::session::async_result_mailbox::ProtectedResults,
+    ) -> AgentResult<Arc<Vec<BaseMessage>>> {
+        self.view_inner(transcript, capabilities, protected)
+    }
+
+    fn view_inner(
+        &self,
+        transcript: &MessageTranscript,
+        capabilities: &ProviderCapabilities,
+        protected: &crate::session::async_result_mailbox::ProtectedResults,
+    ) -> AgentResult<Arc<Vec<BaseMessage>>> {
+        let revision = transcript.view_revision();
+        let protected_version = protected.version;
+
+        if let Some(hit) = self.take_matching(revision, capabilities, protected_version) {
             return Ok(hit);
         }
 
-        let messages = Arc::new(render_persisted_llm_view(transcript, capabilities)?);
+        let messages = Arc::new(
+            crate::agent::compact_v2::projection::render_persisted_llm_view_with_protected(
+                transcript,
+                capabilities,
+                protected,
+            )?,
+        );
         #[cfg(test)]
         self.renders.fetch_add(1, Ordering::Relaxed);
-        self.store(revision, capabilities.clone(), Arc::clone(&messages));
+        self.store(
+            revision,
+            capabilities.clone(),
+            protected_version,
+            Arc::clone(&messages),
+        );
         Ok(messages)
     }
 
@@ -163,10 +202,15 @@ impl ModelViewScope {
         &self,
         revision: TranscriptRevision,
         capabilities: &ProviderCapabilities,
+        protected_version: u64,
     ) -> Option<Arc<Vec<BaseMessage>>> {
         let mut cached = self.cached.lock();
         match cached.as_ref() {
-            Some(entry) if entry.revision == revision && entry.capabilities == *capabilities => {
+            Some(entry)
+                if entry.revision == revision
+                    && entry.capabilities == *capabilities
+                    && entry.protected_version == protected_version =>
+            {
                 Some(Arc::clone(&entry.messages))
             }
             _ => {
@@ -181,6 +225,7 @@ impl ModelViewScope {
         &self,
         revision: TranscriptRevision,
         capabilities: ProviderCapabilities,
+        protected_version: u64,
         messages: Arc<Vec<BaseMessage>>,
     ) {
         #[cfg(test)]
@@ -188,6 +233,7 @@ impl ModelViewScope {
         *self.cached.lock() = Some(CachedModelView {
             revision,
             capabilities,
+            protected_version,
             messages,
             #[cfg(test)]
             _live: live,

@@ -256,6 +256,7 @@ async fn assembly_failure_blocks_old_watermark_and_automatically_processes_new_e
                 session_id: harness.session_id.clone(),
                 kind: BgTaskKind::Agent,
                 mq_steering: true,
+                pending_result: false,
             })
             .unwrap();
     }

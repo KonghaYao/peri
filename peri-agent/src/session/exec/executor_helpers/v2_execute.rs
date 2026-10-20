@@ -111,6 +111,8 @@ pub struct V2ExecuteRequest {
     // ── 会话数据 ──
     pub session_id: String,
     pub user_input_mailbox: Option<Arc<crate::session::user_input_mailbox::UserInputMailbox>>,
+    /// 会话级后台结果处理责任 owner；None 时本次执行创建本地 owner。
+    pub async_result_mailbox: Option<Arc<crate::session::async_result_mailbox::AsyncResultMailbox>>,
     pub cwd: String,
     pub cancel: CancellationToken,
     pub session_resources: Option<Arc<dyn SessionResources>>,
@@ -247,6 +249,20 @@ pub async fn build_and_execute_agent_v2(req: V2ExecuteRequest) -> ExecOutcome {
     v2_out.context.session.user_input_mailbox = req.user_input_mailbox.clone();
     if let Some(mailbox) = &req.user_input_mailbox {
         v2_out.session.set_user_input_mailbox(mailbox.clone());
+    }
+    if let Some(mailbox) = &req.async_result_mailbox {
+        v2_out.session.set_async_result_mailbox(Arc::clone(mailbox));
+        v2_out.context.session.async_result_mailbox = Arc::clone(mailbox);
+        // 显式用户继续（非自动 continuation，或队列交接的用户输入）恢复被 Stop
+        // 暂停或被阶段失败阻塞的处理责任。
+        let explicit_continue = !req.continuation
+            || req
+                .user_input_mailbox
+                .as_ref()
+                .is_some_and(|mailbox| mailbox.has_handed_off_inputs());
+        if explicit_continue {
+            mailbox.resume_scope();
+        }
     }
     if let Some(cache) = new_cache {
         (req.store_llm)(cache);
@@ -513,6 +529,7 @@ pub async fn build_and_execute_agent_v2(req: V2ExecuteRequest) -> ExecOutcome {
                     session_id: req.session_id.clone(),
                     kind: BgTaskKind::Agent,
                     mq_steering: true,
+                    pending_result: false,
                 });
                 tracing::debug!(
                     session_id = %req.session_id,

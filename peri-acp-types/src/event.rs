@@ -185,31 +185,78 @@ pub struct ShellOutput {
     pub exit_code: Option<i32>,
 }
 
+/// `abandon_external` 写入 `output` 的放弃标记（owner 不可观测，终态未解析）。
+///
+/// 见 `peri-agent/src/agent/async_tasks/manager.rs::abandon_external`。
+const UNRESOLVED_OUTPUT_MARKER: &str = "abandoned as unresolved";
+/// 取消/中断收尾写入 `output` 的标记。
+///
+/// - shell：`settle_completed` 的取消清理；
+/// - subagent：`background.rs` 的 `LoopResult::Interrupted`。
+const CANCELLED_OUTPUT_MARKERS: &[&str] = &[
+    "Shell command cancelled",
+    "Background sub-agent was interrupted",
+];
+
+/// 命令/提示摘要上界（字符数）。超出时截断并显式标注。
+const NOTIFICATION_SUMMARY_LIMIT: usize = 200;
+/// 诊断上界（字符数）。超出时截断并显式标注。
+const NOTIFICATION_DIAGNOSTIC_LIMIT: usize = 400;
+
 impl BackgroundTaskResult {
-    /// 格式化为注入到 LLM 消息流的通知文本
+    /// 终态标签：通知正文与提醒标题的单一权威。
+    ///
+    /// 映射顺序固定，避免失败/超时被投影成成功：
+    /// `success && !timed_out` → `succeeded`；显式放弃标记 → `unresolved`；
+    /// `timed_out` → `timed_out`；显式取消标记 → `cancelled`；其余 → `failed`。
+    /// 取消收尾不携带 `timed_out`，因此取消标记在超时判定之后仍能命中。
+    ///
+    /// 本 DTO 尚无显式终态字段：`unresolved`（外部 owner 不可观测后放弃）与
+    /// `cancelled`（用户取消后的收尾）由 peri-agent 的终态产出点写入 `output`。
+    /// 这里只投影这两个既有标记；DTO 增加显式终态字段后删除标记匹配。
+    pub fn outcome_label(&self) -> &'static str {
+        if self.success && !self.timed_out {
+            return "succeeded";
+        }
+        if self.output.contains(UNRESOLVED_OUTPUT_MARKER) {
+            return "unresolved";
+        }
+        if self.timed_out {
+            return "timed_out";
+        }
+        if CANCELLED_OUTPUT_MARKERS
+            .iter()
+            .any(|marker| self.output.contains(marker))
+        {
+            return "cancelled";
+        }
+        "failed"
+    }
+
+    /// 格式化为注入到 LLM 消息流的自足通知文本。
+    ///
+    /// 关联线索不依赖原始启动工具调用仍在上下文：完整公开 `task_id`、有界命令
+    /// 摘要、终态、已知 `exit_code`、stdout/stderr 引用全部内联。完整 ID、状态、
+    /// 已知退出码与输出引用不截断；命令和诊断过长时截断并标注。
     pub fn to_notification(&self) -> String {
-        let short_id: String = self.task_id.chars().take(8).collect();
-        let mut text = if let Some(shell) = &self.shell_output {
-            let state = if self.timed_out {
-                "超时被终止"
-            } else if self.success {
-                "已完成"
-            } else {
-                "执行失败"
-            };
-            let exit = shell
-                .exit_code
-                .map_or_else(|| "退出码未知".to_string(), |code| format!("退出码 {code}"));
-            let mut text = format!(
-                "[后台任务 {short_id} {state}] Agent: {} | {exit}",
-                self.agent_name
-            );
-            if let Some(path) = &shell.stdout_path {
-                text.push_str(&format!("\nstdout 输出文件：{path}"));
-            }
-            if let Some(path) = &shell.stderr_path {
-                text.push_str(&format!("\nstderr 输出文件：{path}"));
-            }
+        let state = self.outcome_label();
+        let mut text = String::from("后台任务结果");
+        text.push_str(&format!("\ntask_id: {}", self.task_id));
+        text.push_str(&format!("\nagent: {}", self.agent_name));
+        if self.is_shell_task() {
+            text.push_str(&format!(
+                "\ncommand: {}",
+                bounded_notification_field(&self.prompt_summary, NOTIFICATION_SUMMARY_LIMIT)
+            ));
+        }
+        text.push_str(&format!("\nstate: {state}"));
+        text.push_str(&format!("\nexit_code: {}", self.exit_code_label()));
+        text.push_str(&format!("\nstdout: {}", self.stdout_reference()));
+        text.push_str(&format!("\nstderr: {}", self.stderr_reference()));
+        if let Some(diagnostic) = self.notification_diagnostic(state) {
+            text.push_str(&format!("\ndiagnostic: {diagnostic}"));
+        }
+        if let Some(shell) = &self.shell_output {
             if shell.complete {
                 // 指引指代 builtin 文件工具时必须用**模型面名字**（裸名已无提供面）；
                 // 查表未命中的兜底不含工具名，不得回落到裸名。
@@ -223,27 +270,12 @@ impl BackgroundTaskResult {
             } else {
                 text.push_str("\n输出文件不完整或不可用，请检查文件路径和错误信息后再读取。");
             }
-            if let Some(error) = &shell.error {
-                text.push_str(&format!("\n落盘诊断：{error}"));
-            }
-            text
         } else if self.success {
-            format!(
-                "[后台任务 {} 已完成] Agent: {} | 工具调用: {} | 耗时: {}ms\n结果:\n{}",
-                short_id, self.agent_name, self.tool_calls_count, self.duration_ms, self.output,
-            )
-        } else if self.timed_out {
-            format!(
-                "[后台任务 {} 超时被终止]（进程组已终止，逃逸子进程可能存活） Agent: {}\n错误:\n{}",
-                short_id, self.agent_name, self.output,
-            )
-        } else {
-            format!(
-                "[后台任务 {} 执行失败] Agent: {}\n错误:\n{}",
-                short_id, self.agent_name, self.output,
-            )
-        };
-        // child_thread_id 存在时追加恢复提示行（success/timed_out/failure 三分支统一）：
+            // 非 shell 任务（subagent 等）没有输出文件，结果正文是唯一交付。
+            text.push_str("\nresult:\n");
+            text.push_str(&self.output);
+        }
+        // child_thread_id 存在时追加恢复提示行：
         // 主 agent 从 bg 完成/失败通知中得知被中断的 subagent 可凭 thread_id 恢复
         if let Some(id) = &self.child_thread_id {
             text.push_str(&format!(
@@ -257,6 +289,77 @@ impl BackgroundTaskResult {
         }
         text
     }
+
+    fn is_shell_task(&self) -> bool {
+        self.shell_output.is_some() || self.agent_name == "bg-shell"
+    }
+
+    fn exit_code_label(&self) -> String {
+        // `None` 表示信号终止或等待失败；绝不从 success 反推数值。
+        self.shell_output
+            .as_ref()
+            .and_then(|shell| shell.exit_code)
+            .map_or_else(|| "unknown".to_string(), |code| code.to_string())
+    }
+
+    fn stdout_reference(&self) -> &str {
+        self.shell_output
+            .as_ref()
+            .and_then(|shell| shell.stdout_path.as_deref())
+            .unwrap_or("unknown")
+    }
+
+    fn stderr_reference(&self) -> &str {
+        self.shell_output
+            .as_ref()
+            .and_then(|shell| shell.stderr_path.as_deref())
+            .unwrap_or("unknown")
+    }
+
+    fn notification_diagnostic(&self, state: &str) -> Option<String> {
+        let mut parts = Vec::new();
+        match state {
+            "unresolved" => parts.push(
+                "结果未知：任务终态不可观测，远端副作用未知；不要假定远端已停止，需要时直接检查 owner。"
+                    .to_string(),
+            ),
+            "cancelled" => parts.push("任务已取消，未按正常完成交付。".to_string()),
+            "timed_out" if self.shell_output.is_some() => parts
+                .push("超时被终止；进程组已终止，逃逸子进程可能存活。".to_string()),
+            "timed_out" => parts.push("任务超时终止。".to_string()),
+            "failed" => parts.push(bounded_notification_field(
+                &self.output,
+                NOTIFICATION_DIAGNOSTIC_LIMIT,
+            )),
+            _ => {}
+        }
+        if let Some(error) = self
+            .shell_output
+            .as_ref()
+            .and_then(|shell| shell.error.as_deref())
+        {
+            parts.push(format!(
+                "落盘诊断：{}",
+                bounded_notification_field(error, NOTIFICATION_DIAGNOSTIC_LIMIT)
+            ));
+        }
+        (!parts.is_empty()).then(|| parts.join("；"))
+    }
+}
+
+/// 单行化并按字符数截断字段；空值显示 `unknown`，截断显式标注。
+fn bounded_notification_field(text: &str, limit: usize) -> String {
+    let normalized = text.replace(['\r', '\n'], " ");
+    let trimmed = normalized.trim();
+    if trimmed.is_empty() {
+        return "unknown".to_string();
+    }
+    if trimmed.chars().count() <= limit {
+        return trimmed.to_string();
+    }
+    let mut bounded: String = trimmed.chars().take(limit).collect();
+    bounded.push_str("…[truncated]");
+    bounded
 }
 
 /// Compact 保留的文件信息摘要
@@ -269,6 +372,36 @@ pub struct CompactFileInfo {
 #[cfg(test)]
 mod tests {
     use super::{BackgroundTaskResult, ShellOutput};
+
+    fn shell_result(
+        task_id: &str,
+        command: &str,
+        success: bool,
+        timed_out: bool,
+        exit_code: Option<i32>,
+        stdout_path: Option<&str>,
+        stderr_path: Option<&str>,
+    ) -> BackgroundTaskResult {
+        BackgroundTaskResult {
+            task_id: task_id.into(),
+            agent_name: "bg-shell".into(),
+            prompt_summary: command.into(),
+            success,
+            output: "Shell command failed; read the output files as needed.".into(),
+            tool_calls_count: 0,
+            duration_ms: 3,
+            timed_out,
+            child_thread_id: None,
+            subagent_failure: None,
+            shell_output: Some(Box::new(ShellOutput {
+                stdout_path: stdout_path.map(str::to_string),
+                stderr_path: stderr_path.map(str::to_string),
+                complete: true,
+                error: None,
+                exit_code,
+            })),
+        }
+    }
 
     #[test]
     fn background_failure_notification_contains_safe_model_facts() {
@@ -301,29 +434,27 @@ mod tests {
 
     #[test]
     fn shell_notification_is_short_and_serde_compatible() {
-        let result = BackgroundTaskResult {
-            task_id: "shell-123456789".into(),
-            agent_name: "bg-shell".into(),
-            prompt_summary: "printf secret".into(),
-            success: true,
-            output: "x".repeat(200_000),
-            tool_calls_count: 0,
-            duration_ms: 3,
-            timed_out: false,
-            child_thread_id: None,
-            subagent_failure: None,
-            shell_output: Some(Box::new(ShellOutput {
-                stdout_path: Some("/tmp/stdout.log".into()),
-                stderr_path: Some("/tmp/stderr.log".into()),
-                complete: true,
-                error: None,
-                exit_code: Some(0),
-            })),
-        };
+        let result = shell_result(
+            "shell-123456789",
+            "printf hello",
+            true,
+            false,
+            Some(0),
+            Some("/tmp/stdout.log"),
+            Some("/tmp/stderr.log"),
+        );
+        let mut result = result;
+        result.output = "x".repeat(200_000);
         let notification = result.to_notification();
         assert!(notification.len() < 2_000);
-        assert!(!notification.contains("secret"));
         assert!(!notification.contains(&"x".repeat(1_000)));
+        // 自足关联字段：完整公开 id、命令、终态、退出码与输出引用都必须内联。
+        assert!(notification.contains("task_id: shell-123456789"));
+        assert!(notification.contains("command: printf hello"));
+        assert!(notification.contains("state: succeeded"));
+        assert!(notification.contains("exit_code: 0"));
+        assert!(notification.contains("stdout: /tmp/stdout.log"));
+        assert!(notification.contains("stderr: /tmp/stderr.log"));
         // 读取指引必须指**模型面名字**（裸名已无提供面）：逐字断言冻结字面量，
         // 不用查表派生期望值（与实现同源派生会在「归一改坏」时自洽通过）。
         assert!(
@@ -337,6 +468,204 @@ mod tests {
             .remove("shell_output");
         let decoded: BackgroundTaskResult = serde_json::from_value(legacy).expect("legacy decode");
         assert!(decoded.shell_output.is_none());
+    }
+
+    // T16：两个前 8 位相同的任务 id 必须各自按完整 id 关联命令与输出路径，
+    // 不得用短 id 导致通知互相串线。
+    #[test]
+    fn async_result_notification_keeps_full_task_identity_for_similar_ids() {
+        let first = shell_result(
+            "shell-01a2b3c4d5e6f7a8",
+            "printf alpha",
+            true,
+            false,
+            Some(0),
+            Some("/tmp/alpha.stdout.log"),
+            Some("/tmp/alpha.stderr.log"),
+        );
+        let second = shell_result(
+            "shell-01a2b3c4d5e6f7a9",
+            "printf beta",
+            false,
+            false,
+            Some(1),
+            Some("/tmp/beta.stdout.log"),
+            Some("/tmp/beta.stderr.log"),
+        );
+        assert_eq!(
+            first.task_id.chars().take(8).collect::<String>(),
+            second.task_id.chars().take(8).collect::<String>(),
+            "夹具必须让短 id 冲突，才能覆盖回归"
+        );
+
+        let first_notification = first.to_notification();
+        assert!(first_notification.contains("task_id: shell-01a2b3c4d5e6f7a8"));
+        assert!(!first_notification.contains("shell-01a2b3c4d5e6f7a9"));
+        assert!(first_notification.contains("command: printf alpha"));
+        assert!(first_notification.contains("stdout: /tmp/alpha.stdout.log"));
+        assert!(!first_notification.contains("/tmp/beta.stdout.log"));
+
+        let second_notification = second.to_notification();
+        assert!(second_notification.contains("task_id: shell-01a2b3c4d5e6f7a9"));
+        assert!(!second_notification.contains("shell-01a2b3c4d5e6f7a8"));
+        assert!(second_notification.contains("command: printf beta"));
+        assert!(second_notification.contains("stdout: /tmp/beta.stdout.log"));
+        assert!(!second_notification.contains("/tmp/alpha.stdout.log"));
+    }
+
+    // T17：状态、exit_code 与输出引用必须准确；失败/超时不得投影为成功，
+    // 未知退出码不得猜值。
+    #[test]
+    fn async_result_notification_maps_terminal_state_and_evidence() {
+        let succeeded = shell_result(
+            "shell-ok",
+            "printf ok",
+            true,
+            false,
+            Some(0),
+            Some("/tmp/ok.stdout.log"),
+            Some("/tmp/ok.stderr.log"),
+        )
+        .to_notification();
+        assert!(succeeded.contains("state: succeeded"));
+        assert!(succeeded.contains("exit_code: 0"));
+
+        let failed = shell_result(
+            "shell-failed",
+            "false",
+            false,
+            false,
+            Some(7),
+            Some("/tmp/failed.stdout.log"),
+            Some("/tmp/failed.stderr.log"),
+        )
+        .to_notification();
+        assert!(failed.contains("state: failed"));
+        assert!(!failed.contains("state: succeeded"));
+        assert!(failed.contains("exit_code: 7"));
+        assert!(failed.contains("stdout: /tmp/failed.stdout.log"));
+        assert!(failed.contains("stderr: /tmp/failed.stderr.log"));
+
+        let timed_out = shell_result(
+            "shell-timeout",
+            "sleep 60",
+            false,
+            true,
+            None,
+            Some("/tmp/timeout.stdout.log"),
+            None,
+        )
+        .to_notification();
+        assert!(timed_out.contains("state: timed_out"));
+        assert!(!timed_out.contains("state: succeeded"));
+        assert!(timed_out.contains("exit_code: unknown"));
+        assert!(timed_out.contains("stderr: unknown"));
+
+        // shell 结果缺失（无文件证据）也不得猜退出码。
+        let no_evidence = BackgroundTaskResult {
+            task_id: "shell-no-evidence".into(),
+            agent_name: "bg-shell".into(),
+            prompt_summary: "missing evidence".into(),
+            success: false,
+            output: "Shell command failed; read the output files as needed.".into(),
+            tool_calls_count: 0,
+            duration_ms: 1,
+            timed_out: false,
+            child_thread_id: None,
+            subagent_failure: None,
+            shell_output: None,
+        }
+        .to_notification();
+        assert!(no_evidence.contains("state: failed"));
+        assert!(no_evidence.contains("exit_code: unknown"));
+        assert!(no_evidence.contains("stdout: unknown"));
+        assert!(no_evidence.contains("stderr: unknown"));
+    }
+
+    // 超长命令安全截断并标注；完整 id 与状态不截断。
+    #[test]
+    fn async_result_notification_bounds_command_and_marks_truncation() {
+        let notification = shell_result(
+            "shell-bounded-command-0123456789",
+            &"x".repeat(5_000),
+            true,
+            false,
+            Some(0),
+            Some("/tmp/bounded.stdout.log"),
+            None,
+        )
+        .to_notification();
+        assert!(notification.len() < 2_000);
+        assert!(notification.contains("…[truncated]"));
+        assert!(notification.contains("task_id: shell-bounded-command-0123456789"));
+        assert!(notification.contains("state: succeeded"));
+        assert!(notification.contains("stdout: /tmp/bounded.stdout.log"));
+    }
+
+    // unresolved 不得伪装成 timed_out/failed，也不得声称远端已停止。
+    #[test]
+    fn async_result_notification_marks_unresolved_without_claiming_stop() {
+        let notification = BackgroundTaskResult {
+            task_id: "mcp-01a2b3c4d5e6f7a8".into(),
+            agent_name: "mcp".into(),
+            prompt_summary: "unobservable task owner".into(),
+            success: false,
+            output: "The task owner stayed unobservable for the whole bounded retry window and \
+                     the task was abandoned as unresolved. Its remote side effects are unknown; \
+                     check the owner directly before assuming it stopped."
+                .into(),
+            tool_calls_count: 0,
+            duration_ms: 0,
+            timed_out: true,
+            child_thread_id: None,
+            subagent_failure: None,
+            shell_output: None,
+        }
+        .to_notification();
+        assert!(notification.contains("task_id: mcp-01a2b3c4d5e6f7a8"));
+        assert!(notification.contains("state: unresolved"));
+        assert!(notification.contains("结果未知"));
+        assert!(notification.contains("副作用未知"));
+        assert!(!notification.contains("state: timed_out"));
+        assert!(!notification.contains("state: failed"));
+        assert!(!notification.contains("进程组已终止"));
+    }
+
+    // 取消是独立终态，不能被归为普通失败。
+    #[test]
+    fn async_result_notification_marks_cancelled_distinct_from_failure() {
+        let mut result = shell_result(
+            "shell-cancelled",
+            "sleep 60",
+            false,
+            false,
+            None,
+            Some("/tmp/cancelled.stdout.log"),
+            None,
+        );
+        result.output = "Shell command cancelled; read the output files as needed.".into();
+        let notification = result.to_notification();
+        assert!(notification.contains("state: cancelled"));
+        assert!(notification.contains("任务已取消"));
+        assert!(!notification.contains("state: failed"));
+
+        let subagent = BackgroundTaskResult {
+            task_id: "task-interrupted".into(),
+            agent_name: "worker".into(),
+            prompt_summary: "prompt".into(),
+            success: false,
+            output: "Background sub-agent was interrupted".into(),
+            tool_calls_count: 0,
+            duration_ms: 1,
+            timed_out: false,
+            child_thread_id: None,
+            subagent_failure: None,
+            shell_output: None,
+        }
+        .to_notification();
+        assert!(subagent.contains("state: cancelled"));
+        assert!(!subagent.contains("state: failed"));
+        assert!(!subagent.contains("state: succeeded"));
     }
 }
 

@@ -27,6 +27,18 @@ pub(super) fn build_session(
         shared_queue.clone(),
     );
 
+    // 会话级结果处理责任 owner：宿主注入的实例跨 prompt 复用；无宿主时建立
+    // 本地 owner（与本次执行的 delivery 共用同一实例）。
+    let async_result_mailbox = input.async_result_mailbox.clone().unwrap_or_else(|| {
+        Arc::new(
+            crate::session::async_result_mailbox::AsyncResultMailbox::new(
+                session_id,
+                input.thread_id.clone().unwrap_or_default(),
+            ),
+        )
+    });
+    session.set_async_result_mailbox(async_result_mailbox);
+
     // 激活 transcript persistence（compact flags 跨 prompt 持久化）
     if let (Some(store), Some(tid)) = (input.session_resources.as_ref(), input.thread_id.as_ref()) {
         let transcript_arc = session.transcript();

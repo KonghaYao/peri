@@ -896,6 +896,12 @@ shell-detail-status-cancelled = 状态：已取消
 bg-task-unknown-kind = 未知的后台任务类型 — 未打开抽屉。
 bg-task-status-lost = 连接中断
 bg-task-status-reconciling = 正在重连
+bg-task-status-running = 运行中
+bg-task-status-pending-delivery = 待投递
+bg-task-status-completed = 已完成
+bg-task-status-failed = 失败
+bg-task-status-cancelled = 已取消
+bg-task-status-unknown = 未知
 workflow-run-not-synced = 所选 Workflow 运行不在当前快照中（可能已结束或尚未同步）。
 
 

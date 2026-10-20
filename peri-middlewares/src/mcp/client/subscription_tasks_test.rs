@@ -182,6 +182,129 @@ async fn workspace_shell_reminder_uses_file_references() {
     assert!(!reminder.as_reminder().body.contains("structuredContent"));
 }
 
+// T16/T17：提醒正文必须自足关联完整公开 id、命令、终态与输出证据；
+// 远端 id 只能留在 metadata，不得替换公开 id。
+#[tokio::test]
+async fn async_result_shell_reminder_body_keeps_full_identity_and_evidence() {
+    let pool = McpClientPool::new_pending();
+    let inbox = SessionInbox::new(Arc::new(MessageQueue::new()));
+    pool.register_inbox("session", inbox.handle());
+    let mut result = shell_result();
+    result.task_id = "mcp-01a2b3c4d5e6f7a8".into();
+    result.success = false;
+    result.shell_output = Some(Box::new(ShellOutput {
+        stdout_path: Some("/tmp/failed.stdout.log".into()),
+        stderr_path: Some("/tmp/failed.stderr.log".into()),
+        complete: true,
+        error: None,
+        exit_code: Some(7),
+    }));
+    pool.deliver_task_reminder(
+        "session",
+        "session",
+        "workspace",
+        &result,
+        BgTaskKind::Shell,
+        MessageId::new(),
+        None,
+        "shell-remote",
+    )
+    .await
+    .unwrap();
+    let messages = inbox.queue().drain_all();
+    let QueuedPayload::SystemReminder(reminder) = &messages[0].payload else {
+        panic!("reminder")
+    };
+    let reminder = reminder.as_reminder();
+    assert!(reminder.body.contains("task_id: mcp-01a2b3c4d5e6f7a8"));
+    assert!(
+        !reminder.body.contains("shell-remote"),
+        "公开正文不得用远端 id 替换会话侧 id: {}",
+        reminder.body
+    );
+    assert!(reminder.body.contains("command: sleep 1"));
+    assert!(reminder.body.contains("state: failed"));
+    assert!(reminder.body.contains("exit_code: 7"));
+    assert!(reminder.body.contains("stdout: /tmp/failed.stdout.log"));
+    assert!(reminder.body.contains("stderr: /tmp/failed.stderr.log"));
+    assert_eq!(reminder.summary.as_deref(), Some("Shell task failed"));
+    assert_eq!(
+        reminder.metadata["remote_task_id"].as_str(),
+        Some("shell-remote")
+    );
+}
+
+// unresolved：body 与标题都不得声称成功或远端已停止。
+#[tokio::test]
+async fn async_result_unresolved_reminder_reports_unknown_side_effects() {
+    let pool = McpClientPool::new_pending();
+    let inbox = SessionInbox::new(Arc::new(MessageQueue::new()));
+    pool.register_inbox("session", inbox.handle());
+    let mut result = shell_result();
+    result.success = false;
+    result.timed_out = true;
+    result.shell_output = None;
+    result.output = "The task owner stayed unobservable and the task was abandoned as \
+                     unresolved. Its remote side effects are unknown; check the owner directly \
+                     before assuming it stopped."
+        .into();
+    pool.deliver_task_reminder(
+        "session",
+        "session",
+        "workspace",
+        &result,
+        BgTaskKind::Shell,
+        MessageId::new(),
+        None,
+        "shell-remote",
+    )
+    .await
+    .unwrap();
+    let messages = inbox.queue().drain_all();
+    let QueuedPayload::SystemReminder(reminder) = &messages[0].payload else {
+        panic!("reminder")
+    };
+    let reminder = reminder.as_reminder();
+    assert!(reminder.body.contains("state: unresolved"));
+    assert!(reminder.body.contains("结果未知"));
+    assert!(reminder.body.contains("副作用未知"));
+    assert!(!reminder.body.contains("进程组已终止"));
+    assert!(!reminder.body.contains("state: succeeded"));
+    assert_eq!(reminder.summary.as_deref(), Some("Shell task unresolved"));
+}
+
+// 非 shell 失败同样不得用 "completed" 标题投影成功。
+#[tokio::test]
+async fn async_result_failed_mcp_reminder_is_not_projected_as_completed() {
+    let pool = McpClientPool::new_pending();
+    let inbox = SessionInbox::new(Arc::new(MessageQueue::new()));
+    pool.register_inbox("session", inbox.handle());
+    let mut result = shell_result();
+    result.agent_name = "mcp".into();
+    result.success = false;
+    result.shell_output = None;
+    result.output = "remote task failed".into();
+    pool.deliver_task_reminder(
+        "session",
+        "session",
+        "remote",
+        &result,
+        BgTaskKind::Mcp,
+        MessageId::new(),
+        None,
+        "remote-task",
+    )
+    .await
+    .unwrap();
+    let messages = inbox.queue().drain_all();
+    let QueuedPayload::SystemReminder(reminder) = &messages[0].payload else {
+        panic!("reminder")
+    };
+    let reminder = reminder.as_reminder();
+    assert_eq!(reminder.summary.as_deref(), Some("MCP task failed"));
+    assert!(!reminder.body.contains("completed"));
+}
+
 // [回归测试] 完成提醒必须沿用启动回执的会话侧公共 id（`mcp-...`），
 // 不能被远端原始 id（`shell-...`）覆盖；否则任务面板/回执与完成通知无法对应。
 #[tokio::test]

@@ -211,6 +211,7 @@ pub(crate) async fn run_prompt(
             (
                 Arc::clone(&runtime.activation),
                 runtime.v2_message_queue.admission_watermark(),
+                runtime.async_result_mailbox.admission_watermark(),
             )
         });
     let result = run_prompt_attempt(
@@ -227,8 +228,9 @@ pub(crate) async fn run_prompt(
     )
     .await;
     if result.is_err() {
-        if let Some((activation, watermark)) = &attempt_activation {
+        if let Some((activation, watermark, result_watermark)) = &attempt_activation {
             activation.record_failed_attempt(*watermark);
+            activation.record_failed_result_watermark(*result_watermark);
         }
         notifications
             .finish_early(&session_id, "error", deployment, transport)
@@ -248,7 +250,7 @@ async fn run_prompt_attempt(
     continuation: bool,
     input_ticket: Option<super::user_input::UserInputRun>,
     notifications: &super::execution::ExecutionNotifications,
-    attempt_activation: Option<&(Arc<crate::session::SessionActivation>, u64)>,
+    attempt_activation: Option<&(Arc<crate::session::SessionActivation>, u64, u64)>,
 ) -> Result<Value, AcpError> {
     // Borrow deployment services; turn-owned callbacks clone only their existing handles.
     // Provider/config snapshots remain below, after the session snapshot is captured.
@@ -589,6 +591,9 @@ async fn run_prompt_attempt(
         allow_await_wake: true,
         continuation_notify: cont_tx,
         user_input_mailbox: Some(Arc::clone(&user_input_mailbox)),
+        async_result_mailbox: session_manager
+            .get_session(&session_id)
+            .map(|session| Arc::clone(&session.async_result_mailbox)),
         frozen_fallback_builder,
     };
 
@@ -644,11 +649,28 @@ async fn run_prompt_attempt(
     let result = handle.take_result();
     notifications.mark_terminal();
     if !result.ok || result.failure.is_some() {
-        if let Some((activation, watermark)) = attempt_activation {
+        if let Some((activation, watermark, result_watermark)) = attempt_activation {
             if result.stop_reason == executor::PromptStopReason::Cancelled {
                 activation.suppress();
+                // Stop 优先：未覆盖结果暂停，新完成通知也不能绕过显式继续。
+                if let Some(runtime) = deployment.session_manager.get_session(&session_id) {
+                    runtime.async_result_mailbox.suspend_scope("cancelled");
+                }
             } else {
                 activation.record_failed_attempt(*watermark);
+                activation.record_failed_result_watermark(*result_watermark);
+                // 阶段内部已按阶段记录；这里是未进入阶段或早退失败的兜底：未覆盖
+                // 结果保留为 Blocked，不自动重试。
+                if let Some(runtime) = deployment.session_manager.get_session(&session_id) {
+                    let summary = result
+                        .failure
+                        .as_ref()
+                        .map(|failure| failure.public_message.clone())
+                        .unwrap_or_else(|| format!("{:?}", result.stop_reason));
+                    runtime
+                        .async_result_mailbox
+                        .block_uncovered("prompt", &summary);
+                }
             }
         }
     }

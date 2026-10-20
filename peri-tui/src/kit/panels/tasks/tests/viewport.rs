@@ -151,6 +151,39 @@ fn selection_clamps_within_frame() {
     );
 }
 
+/// 终态不再提供取消；lost / 未知状态仍可请求远端取消。
+#[test]
+fn cancel_action_rejects_terminal_states_and_keeps_lost_cancelable() {
+    let counts = SegmentCounts {
+        background: 5,
+        ..SegmentCounts::default()
+    };
+    let viewport = TasksViewport::for_content_rows(16, counts, 0);
+    let mut snapshot: Vec<_> = (0..5).map(|i| bg_task(&format!("bg{i}"))).collect();
+    snapshot[0].status = Some("completed".into());
+    snapshot[1].status = Some("failed".into());
+    snapshot[2].status = Some("cancelled".into());
+    snapshot[3].status = Some("lost".into());
+    snapshot[4].status = Some("future_status".into());
+
+    for (index, status) in ["completed", "failed", "cancelled"].into_iter().enumerate() {
+        assert_eq!(
+            viewport.cancel_action(index, &snapshot),
+            CancelAction::NotCancelable,
+            "{status} 是终态，不得再发取消请求"
+        );
+    }
+    for (index, status) in [(3, "lost"), (4, "future_status")] {
+        assert!(
+            matches!(
+                viewport.cancel_action(index, &snapshot),
+                CancelAction::Cancel(CancelTarget { ref task_id, .. }) if task_id == &format!("bg{index}")
+            ),
+            "{status} 仍可请求远端取消"
+        );
+    }
+}
+
 /// 取消动作只对后台任务段的行成立；身份取自传入的当帧快照。
 #[test]
 fn cancel_action_only_for_background_rows() {

@@ -60,6 +60,7 @@ async fn test_act_no_tool_calls_writes_answer() {
         context: ctx.clone(),
         reasoning,
         catalog: ctx.runtime.tool_catalog.snapshot(),
+        receipt: None,
     };
     let output = run_act(input).await.unwrap();
     assert!(!output.has_tool_calls);
@@ -86,6 +87,7 @@ async fn test_act_with_tool_calls_dispatches() {
         context: ctx.clone(),
         reasoning,
         catalog: ctx.runtime.tool_catalog.snapshot(),
+        receipt: None,
     };
     let output = run_act(input).await.unwrap();
     assert!(output.has_tool_calls, "有 tool_calls 时应标记");
@@ -124,6 +126,7 @@ async fn test_act_after_agent_failure_emits_turn_completed() {
         context: ctx.clone(),
         reasoning,
         catalog: ctx.runtime.tool_catalog.snapshot(),
+        receipt: None,
     })
     .await;
     assert!(result.is_err(), "run_after_agent 失败应传播错误");
@@ -157,6 +160,7 @@ async fn test_act_tool_path_cancel_emits_turn_completed() {
         context: ctx.clone(),
         reasoning,
         catalog: ctx.runtime.tool_catalog.snapshot(),
+        receipt: None,
     })
     .await;
     assert!(
@@ -205,4 +209,107 @@ async fn turn_completed_waits_for_capacity_in_production_emitter() {
         Some(RenderEvent::TurnCompleted { .. })
     ));
     assert!(!ctx.runtime.event_bus.health().dirty);
+}
+
+// ─── 有效提交与后台结果覆盖（T01/T07）───────────────────────────────────────────
+
+fn terminal_result(
+    mailbox: &crate::session::async_result_mailbox::AsyncResultMailbox,
+) -> (
+    crate::messages::MessageId,
+    crate::session::async_result_mailbox::RequestReceipt,
+) {
+    use peri_acp_types::session::MessageSource;
+    use peri_acp_types::system_reminder::{
+        ReminderAudience, ReminderAudiences, ReminderCategory, ReminderDelivery, ReminderSeverity,
+        ReminderSource, SystemReminder, TrustedSystemReminderFactory, SYSTEM_REMINDER_VERSION,
+    };
+    let id = crate::messages::MessageId::new();
+    let reminder = TrustedSystemReminderFactory::for_producer()
+        .construct(SystemReminder {
+            version: SYSTEM_REMINDER_VERSION,
+            category: ReminderCategory::Task,
+            source: ReminderSource("shell".into()),
+            kind: "terminal".into(),
+            severity: ReminderSeverity::Info,
+            delivery: ReminderDelivery::Configurable,
+            audiences: ReminderAudiences(vec![ReminderAudience::Model]),
+            body: "task shell-act completed exit_code: 0".into(),
+            summary: None,
+            metadata: serde_json::json!({ "task_id": "shell-act" }),
+        })
+        .unwrap();
+    mailbox
+        .accept(id, &reminder, MessageSource::ShellComplete)
+        .unwrap();
+    mailbox
+        .mark_canonical_ready(id, &reminder, MessageSource::ShellComplete, None)
+        .unwrap();
+    let receipt = mailbox
+        .capture_request("attempt-act", "request-act", &[id])
+        .expect("request must capture the ready result");
+    (id, receipt)
+}
+
+/// [T01] 最终回答有效写入并完成持久化 barrier 后，本次 receipt 才 Covered。
+#[tokio::test]
+async fn async_result_act_commit_covers_requested_result() {
+    let ctx = make_context();
+    let (id, receipt) = terminal_result(&ctx.session.async_result_mailbox);
+    let reasoning = Reasoning::with_answer("thinking", "final answer");
+    run_act(ActInput {
+        context: ctx.clone(),
+        reasoning,
+        catalog: ctx.runtime.tool_catalog.snapshot(),
+        receipt: Some(receipt),
+    })
+    .await
+    .unwrap();
+
+    assert_eq!(
+        ctx.session.async_result_mailbox.pending_count(),
+        0,
+        "有效提交后本次请求的结果必须 Covered"
+    );
+    assert!(
+        ctx.session
+            .async_result_mailbox
+            .protected_snapshot()
+            .is_empty(),
+        "{id:?} 不应再进入下一次请求"
+    );
+}
+
+/// [T07] 空最终回答不是有效提交：保留责任并 Blocked，不能提前 Covered。
+#[tokio::test]
+async fn async_result_act_empty_response_keeps_responsibility() {
+    let ctx = make_context();
+    let (id, receipt) = terminal_result(&ctx.session.async_result_mailbox);
+    let reasoning = Reasoning::with_answer("thinking", "");
+    run_act(ActInput {
+        context: ctx.clone(),
+        reasoning,
+        catalog: ctx.runtime.tool_catalog.snapshot(),
+        receipt: Some(receipt),
+    })
+    .await
+    .unwrap();
+
+    assert_eq!(
+        ctx.session.async_result_mailbox.pending_count(),
+        1,
+        "空回复不得结清处理责任"
+    );
+    let snapshot = ctx.session.async_result_mailbox.protected_snapshot();
+    assert_eq!(snapshot.items.len(), 1);
+    assert_eq!(snapshot.items[0].delivery_id, id);
+    assert_eq!(
+        snapshot.items[0].state,
+        crate::session::async_result_mailbox::AsyncResultState::Blocked
+    );
+    assert_eq!(
+        snapshot.items[0].diagnostic.as_ref().unwrap().stage,
+        "act",
+        "诊断必须指出失败阶段"
+    );
 }

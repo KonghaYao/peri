@@ -125,9 +125,12 @@ impl SessionAccessPort for SessionManager {
         if session.cancel_token.is_cancelled() {
             return None;
         }
-        Some(peri_agent::session::bg_complete::queue_terminal_delivery(
-            session.v2_message_queue.clone(),
-        ))
+        Some(
+            peri_agent::session::bg_complete::queue_terminal_delivery_with_mailbox(
+                session.v2_message_queue.clone(),
+                Arc::clone(&session.async_result_mailbox),
+            ),
+        )
     }
 
     fn v2_message_queue(&self, session_id: &str) -> Option<peri_acp_types::session::MessageQueue> {

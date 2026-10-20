@@ -469,6 +469,7 @@ pub(super) async fn make_session_context(session_id: &str) -> SessionContext {
         allow_await_wake: false,
         continuation_notify: None,
         user_input_mailbox: None,
+        async_result_mailbox: None,
         frozen_fallback_builder: None,
     };
     execution_fixture::initialize_runtime(&mut context, Some(directory));

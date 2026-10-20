@@ -210,6 +210,10 @@ async fn compact_core(input: CompactInput) -> (crate::error::AgentResult<Compact
         // 落地、shadow、空计划未达 Full 阈值等路径没有第二份正文，缓存继续供 Reason 复用。
         let before_full_summary = || ctx.model_view.release();
 
+        // 未结清的后台结果不参与归档：Full 只摘要可归档历史，未覆盖通知继续由
+        // mailbox 负责并在随后请求中重新投影。
+        let protected = ctx.session.async_result_mailbox.protected_snapshot();
+
         // 包在 select! biased 中：cancel 优先，避免 Full Compact 的长 LLM 调用阻塞中断。
         // 注：run_compact 内部不感知 turn cancel_token，必须在此层显式 select。
         let mut result = tokio::select! {
@@ -282,7 +286,7 @@ async fn compact_core(input: CompactInput) -> (crate::error::AgentResult<Compact
                 );
                 break 'compact_core Err(crate::error::AgentError::Interrupted);
             }
-            r = crate::agent::compact_v2::run_compact(
+            r = crate::agent::compact_v2::run_compact_with_protected(
                 &mut transcript_owned,
                 compact_llm_ref,
                 &config_clone,
@@ -291,6 +295,7 @@ async fn compact_core(input: CompactInput) -> (crate::error::AgentResult<Compact
                 &mut consecutive,
                 ctx.cwd(),
                 Some(&before_full_summary),
+                &protected,
             ) => r,
         };
 

@@ -78,6 +78,13 @@ pub(super) async fn build_subagent_session_v2(
         cancel_arc,
         queue,
     );
+    // 子 agent 拥有独立作用域：共享 TaskManager 不代表共享结果消费确认。
+    session.set_async_result_mailbox(Arc::new(
+        crate::session::async_result_mailbox::AsyncResultMailbox::new(
+            child_thread_id.clone(),
+            child_thread_id.clone(),
+        ),
+    ));
     host.session_resources = session_resources.clone();
     host.close_state = Arc::default();
     host.task_manager = Some(match binding {
@@ -90,8 +97,9 @@ pub(super) async fn build_subagent_session_v2(
     });
     host.parent_thread_id = Some(child_thread_id.clone());
     host.on_bg_complete = Some(crate::session::bg_complete::task_bg_complete_callback(
-        crate::agent::async_tasks::delivery::SessionTerminalDelivery::for_queue(
+        crate::agent::async_tasks::delivery::SessionTerminalDelivery::for_queue_with_mailbox(
             session.queue().clone(),
+            session.async_result_mailbox(),
         ),
     ));
     if let (Some(pool), Some(manager)) = (&host.mcp_pool, &host.task_manager) {

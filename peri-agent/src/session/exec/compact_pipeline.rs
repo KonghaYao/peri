@@ -41,6 +41,7 @@ use tokio_util::sync::CancellationToken as AgentCancellationToken;
 use tracing::{info, warn};
 
 use crate::agent::compact_v2;
+use crate::session::async_result_mailbox::AsyncResultMailbox;
 use crate::session::transcript::{CompactionCommitState, MessageTranscript};
 
 use super::events::{emit_compact_completed, emit_compact_started};
@@ -79,6 +80,12 @@ pub async fn run_pipeline(ctx: CommandContext) -> PipelineOutcome {
     let commit_state = ctx
         .dep::<CompactionCommitState>()
         .map(|state| (*state).clone())
+        .unwrap_or_default();
+    // 手动压缩同样不得归档尚未被主模型响应覆盖的终态通知：保护集合来自会话
+    // mailbox，Summary 只读取可归档历史。
+    let protected = ctx
+        .dep::<AsyncResultMailbox>()
+        .map(|mailbox| mailbox.protected_snapshot())
         .unwrap_or_default();
     let CommandContext {
         session_id,
@@ -355,6 +362,7 @@ pub async fn run_pipeline(ctx: CommandContext) -> PipelineOutcome {
         &cancel_token,
         &session_id,
         &mut consecutive_failures,
+        &protected,
     )
     .await
     {
@@ -422,6 +430,7 @@ async fn run_v2_compact_with_cancel(
     cancel_token: &AgentCancellationToken,
     session_id: &str,
     consecutive_failures: &mut u32,
+    protected: &crate::session::async_result_mailbox::ProtectedResults,
 ) -> Result<compact_v2::CompactResult, CancelOrError> {
     let result = tokio::select! {
         biased;
@@ -429,7 +438,7 @@ async fn run_v2_compact_with_cancel(
             tracing::info!(session_id = %session_id, "compact cancelled by user");
             return Err(CancelOrError::Cancelled);
         }
-        r = compact_v2::run_compact(
+        r = compact_v2::run_compact_with_protected(
             transcript,
             Some(model),
             config,
@@ -445,6 +454,7 @@ async fn run_v2_compact_with_cancel(
             consecutive_failures,
             cwd,
             None,
+            protected,
         ) => r,
     };
 

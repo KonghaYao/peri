@@ -17,6 +17,16 @@ pub fn queue_terminal_delivery(queue: MessageQueue) -> Arc<dyn TaskTerminalDeliv
     crate::agent::async_tasks::delivery::SessionTerminalDelivery::for_queue(queue)
 }
 
+/// 绑定会话级结果处理责任 owner 的终态投递路由。
+pub fn queue_terminal_delivery_with_mailbox(
+    queue: MessageQueue,
+    mailbox: Arc<crate::session::async_result_mailbox::AsyncResultMailbox>,
+) -> Arc<dyn TaskTerminalDelivery> {
+    crate::agent::async_tasks::delivery::SessionTerminalDelivery::for_queue_with_mailbox(
+        queue, mailbox,
+    )
+}
+
 /// 由 `(SessionAccessPort, session_id)` 构造 **session 级** `on_bg_complete` 回调。
 ///
 /// 构造时冻结可靠投递路由；缺失路由不得转到未来生命周期。

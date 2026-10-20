@@ -477,14 +477,21 @@ async fn bridge_accepts_workspace_owned_task_handle() {
         .expect("shell output evidence")
         .stdout_path
         .expect("readable stdout path");
-    let mut read = call("Read", json!({"file_path":output_path}));
+    let mut read = call("Read", json!({"file_path": &output_path}));
     read.meta = pool.task_scope_meta_for("workspace", "task-session");
     let output = complete(peer.call_tool_once(read).await.expect("read task stdout"));
     assert_eq!(output.is_error, Some(false));
     assert!(first_text(&output)
         .expect("stdout text")
         .contains("bridge-ok"));
-    assert!(reminder.as_reminder().body.contains("stdout 输出文件"));
+    assert!(
+        reminder
+            .as_reminder()
+            .body
+            .contains(&format!("stdout: {output_path}")),
+        "提醒正文必须内联可读取的 stdout 引用: {}",
+        reminder.as_reminder().body
+    );
     assert!(!reminder.as_reminder().body.contains("Task details:"));
     pair.shutdown().await;
     let _ = owner.shutdown().await;

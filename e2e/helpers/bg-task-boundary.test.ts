@@ -90,7 +90,7 @@ describe("background completion canonical evidence", () => {
     const stdout = path.join(home, "stdout.txt");
     writeFileSync(stdout, "BG_OUTPUT");
     append("delivery", "system_reminder", {
-      ...reminder("shell", `退出码 0\n完整输出已保存到文件系统\nstdout 输出文件：${stdout}`),
+      ...reminder("shell", `state: succeeded\nexit_code: 0\n完整输出已保存到文件系统\nstdout: ${stdout}`),
       metadata: { task_id: "task", server: "workspace", initiator: "parent" },
     });
     append("response", "message", "BG_PROCESSED");

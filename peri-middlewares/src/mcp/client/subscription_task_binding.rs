@@ -35,6 +35,15 @@ impl McpClientPool {
         remote_task_id: &str,
     ) -> Result<(), String> {
         let is_shell = kind == BgTaskKind::Shell;
+        let outcome = result.outcome_label();
+        // 标题与正文共用同一终态标签：失败/超时/unresolved 不得显示为已完成。
+        let summary = if is_shell {
+            format!("Shell task {outcome}")
+        } else if outcome == "succeeded" {
+            "MCP task completed".to_string()
+        } else {
+            format!("MCP task {outcome}")
+        };
         let source = if is_shell {
             MessageSource::ShellComplete
         } else {
@@ -75,7 +84,7 @@ impl McpClientPool {
                 } else {
                     result.output.clone()
                 },
-                summary: Some("MCP task completed".into()),
+                summary: Some(summary),
                 metadata: json!({
                     "server": server,
                     "task_id": result.task_id,

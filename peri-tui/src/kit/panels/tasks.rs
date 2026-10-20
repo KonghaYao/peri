@@ -21,6 +21,7 @@ use crate::kit::atoms::{
     ACP_CLIENT_HANDLE, ACTIVE_SESSION_ID, BG_TASKS, BRIDGE_RESET_COUNTER, BgTaskEntry, CRON_JOBS,
     CronJobSummary, LANG_VERSION, NOTIFICATION, Notification, VIEW_MODELS,
 };
+use crate::kit::bg_task_status::BgTaskStatus;
 use crate::kit::list_nav::{next_selection, previous_selection};
 use crate::kit::panel_mouse::{AreaTracker, is_scrollbar_column};
 use crate::kit::panels::shared::list::content_rows;
@@ -491,7 +492,7 @@ fn item_line(
     }
 }
 
-/// 后台任务行：光标、类型标记、任务 id 与详情（shell 任务只显示 pid）。
+/// 后台任务行：光标、类型标记、任务 id、文本状态标签与详情（shell 任务只显示 pid）。
 fn background_task_line(
     task: &BgTaskEntry,
     selected: bool,
@@ -503,6 +504,7 @@ fn background_task_line(
         "workflow" => i18n::tr("panel-tasks-kind-wf"),
         _ => i18n::tr("panel-tasks-kind-unknown"),
     };
+    let status = BgTaskStatus::classify(task.status.as_deref());
     // shell 任务的 summary 是脚本本身，无展示意义 → 只显示 pid
     let is_shell = task.kind.as_str() == "shell";
     let pid_str = task
@@ -534,8 +536,25 @@ fn background_task_line(
             format!(" {} ", task.task_id),
             row_name_style(selected, theme),
         ),
+        Span::styled(
+            format!("[{}] ", status.label()),
+            Style::new().fg(bg_task_status_color(status, theme)),
+        ),
         Span::styled(detail, Style::new().fg(theme.semantic.text.muted)),
     ])
+}
+
+/// 状态标签颜色——仅辅助，文本标签本身独立可读。
+fn bg_task_status_color(status: BgTaskStatus, theme: &ThemeDefinition) -> ratatui::style::Color {
+    match status {
+        BgTaskStatus::Running => theme.semantic.status.running,
+        BgTaskStatus::Completed => theme.semantic.status.success,
+        BgTaskStatus::Failed | BgTaskStatus::Cancelled => theme.semantic.status.error,
+        BgTaskStatus::Lost
+        | BgTaskStatus::Reconciling
+        | BgTaskStatus::PendingDelivery
+        | BgTaskStatus::Unknown => theme.semantic.status.warning,
+    }
 }
 
 /// Cron 任务行：光标、启用状态、表达式、提示词预览与下次触发时间。

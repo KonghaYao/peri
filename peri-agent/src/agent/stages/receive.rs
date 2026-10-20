@@ -181,6 +181,14 @@ pub(super) async fn run_receive_with_budget(
                                     .transcript
                                     .write()
                                     .mirror_committed_reminder(delivery_id, reminder.clone());
+                            } else {
+                                // 保护约束被破坏：该结果仍在 mailbox 中，派生模型视图
+                                // 会按记录重新投影；这里留下可关联诊断，不回灌全部历史。
+                                tracing::warn!(
+                                    delivery_id = %delivery_id.as_uuid(),
+                                    "protected async result canonical reminder is excluded; \
+                                     derived model view will re-append it"
+                                );
                             }
                         }
                         Err(error) => {
@@ -203,6 +211,38 @@ pub(super) async fn run_receive_with_budget(
             } else {
                 let mut transcript = input.context.session.transcript.write();
                 append_messages_to_transcript(&mut transcript, vec![msg.clone()]);
+            }
+            // 只有正式终态结果才建立处理责任；cron 等带 delivery_id 的普通输入
+            // 仍由队列与既有激活规则负责，不能混入结果保护集合。
+            // 只有规范写入成功（或匹配到同一待处理记录）后才进入 Ready。
+            let terminal_result = matches!(
+                msg.source,
+                MessageSource::ShellComplete
+                    | MessageSource::SubAgentComplete
+                    | MessageSource::WorkflowComplete
+                    | MessageSource::DynamicMcpNotification
+            );
+            if let Some(delivery_id) = msg.delivery_id.filter(|_| terminal_result) {
+                if let QueuedPayload::SystemReminder(reminder) = &msg.payload {
+                    if let Err(error) = input
+                        .context
+                        .session
+                        .async_result_mailbox
+                        .mark_canonical_ready(
+                            delivery_id,
+                            reminder,
+                            msg.source.clone(),
+                            msg.admission_sequence,
+                        )
+                    {
+                        input
+                            .context
+                            .session
+                            .queue
+                            .push_batch(consumed[index..].to_vec());
+                        return Err(anyhow::anyhow!(error).into());
+                    }
+                }
             }
             if !newly_committed {
                 continue;

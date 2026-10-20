@@ -58,9 +58,9 @@ function text(content: unknown): string {
 
 function containsOutput(reminder: Reminder, source: "shell" | "subagent", marker: string): boolean {
   if (source === "subagent") return reminder.body.includes(marker);
-  const stdout = /^stdout 输出文件：(.+)$/m.exec(reminder.body)?.[1];
+  const stdout = /^stdout: (.+)$/m.exec(reminder.body)?.[1];
   return stdout !== undefined && path.isAbsolute(stdout) && existsSync(stdout)
-    && reminder.body.includes("退出码 0")
+    && reminder.body.includes("exit_code: 0")
     && reminder.body.includes("完整输出已保存到文件系统")
     && readFileSync(stdout, "utf8").includes(marker);
 }

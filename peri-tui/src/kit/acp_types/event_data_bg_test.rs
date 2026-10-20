@@ -1,4 +1,4 @@
-use crate::kit::acp_types::AcpEventData;
+use crate::kit::acp_types::{AcpEventData, BgTaskSnapshotSource};
 
 #[test]
 fn test_bg_task_completed_decodes_output_preview() {
@@ -54,10 +54,55 @@ fn test_bg_task_snapshot_accepts_session_envelope() {
         }),
     );
     match ev {
-        AcpEventData::BgTaskSnapshot { tasks, revision } => {
+        AcpEventData::BgTaskSnapshot {
+            tasks,
+            revision,
+            source,
+        } => {
             assert_eq!(tasks.len(), 1);
             assert_eq!(tasks[0].task_id, "t3");
             assert_eq!(revision, Some(7));
+            assert_eq!(
+                source,
+                BgTaskSnapshotSource::Live,
+                "旧 wire 无 source 字段时按当前 live 快照兼容解码"
+            );
+        }
+        other => panic!("unexpected variant {other:?}"),
+    }
+}
+
+#[test]
+fn test_bg_task_snapshot_decodes_explicit_historical_source() {
+    let ev = AcpEventData::decode(
+        "bg-task-snapshot",
+        serde_json::json!({
+            "revision": 8,
+            "source": "historical",
+            "tasks": [],
+        }),
+    );
+    match ev {
+        AcpEventData::BgTaskSnapshot { source, .. } => {
+            assert_eq!(source, BgTaskSnapshotSource::Historical);
+        }
+        other => panic!("unexpected variant {other:?}"),
+    }
+}
+
+#[test]
+fn test_bg_task_snapshot_unknown_source_stays_read_only() {
+    let ev = AcpEventData::decode(
+        "bg-task-snapshot",
+        serde_json::json!({
+            "revision": 9,
+            "source": "future-source",
+            "tasks": [],
+        }),
+    );
+    match ev {
+        AcpEventData::BgTaskSnapshot { source, .. } => {
+            assert_eq!(source, BgTaskSnapshotSource::Historical);
         }
         other => panic!("unexpected variant {other:?}"),
     }

@@ -126,6 +126,15 @@ pub(super) async fn build_and_execute_agent(
         .as_ref()
         .and_then(|sa| sa.task_manager(session_id));
 
+    let async_result_mailbox = ctx.async_result_mailbox.clone().unwrap_or_else(|| {
+        Arc::new(
+            crate::session::async_result_mailbox::AsyncResultMailbox::new(
+                ctx.session_id.clone(),
+                ctx.thread_id.clone().unwrap_or_default(),
+            ),
+        )
+    });
+
     let on_bg_complete = Some({
         match (
             &ctx.session_resources,
@@ -134,7 +143,10 @@ pub(super) async fn build_and_execute_agent(
                 .and_then(|access| access.v2_message_queue(session_id)),
         ) {
             (Some(_), Some(queue)) => crate::session::bg_complete::task_bg_complete_callback(
-                crate::agent::async_tasks::delivery::SessionTerminalDelivery::for_queue(queue),
+                crate::agent::async_tasks::delivery::SessionTerminalDelivery::for_queue_with_mailbox(
+                    queue,
+                    Arc::clone(&async_result_mailbox),
+                ),
             ),
             _ => Arc::new(|_: &BackgroundTaskResult, _: BgTaskKind| {
                 Err("required terminal publication route unavailable".into())
@@ -167,6 +179,7 @@ pub(super) async fn build_and_execute_agent(
     build_and_execute_agent_v2(V2ExecuteRequest {
         session_id: ctx.session_id.clone(),
         user_input_mailbox: ctx.user_input_mailbox.clone(),
+        async_result_mailbox: Some(async_result_mailbox),
         cwd: ctx.cwd.clone(),
         cancel: ctx.cancel.clone(),
         session_resources: ctx.session_resources.clone(),

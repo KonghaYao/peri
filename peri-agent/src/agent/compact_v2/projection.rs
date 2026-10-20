@@ -312,6 +312,49 @@ fn effective_tool_result_action<'a>(
     effective
 }
 
+/// Reason 专用：在归档视图之后追加未处理结果事实。
+///
+/// 受保护条目的 canonical 位置不变（不改写 ID、不重复落库）；这里只把它们的
+/// 模型投影从原位置移到历史/摘要之后，确保摘要遗漏终态时主模型仍能看到。
+pub(crate) fn render_persisted_llm_view_with_protected(
+    transcript: &MessageTranscript,
+    caps: &ProviderCapabilities,
+    protected: &crate::session::async_result_mailbox::ProtectedResults,
+) -> AgentResult<Vec<BaseMessage>> {
+    if protected.is_empty() {
+        return render_persisted_llm_view(transcript, caps);
+    }
+    let mut messages = render_persisted_llm_view(transcript, caps)?;
+    let protected_ids: HashSet<MessageId> = protected
+        .items
+        .iter()
+        .map(|item| item.delivery_id)
+        .collect();
+    messages.retain(|message| !protected_ids.contains(&message.id()));
+    for item in &protected.items {
+        let mut body =
+            peri_acp_types::system_reminder::encode_system_reminder(item.reminder.as_ref())
+                .map_err(|error| crate::error::AgentError::Other(anyhow::Error::new(error)))?;
+        if let Some(diagnostic) = &item.diagnostic {
+            body.push_str(&format!(
+                "\n\n[处理诊断] stage: {}; {}{}",
+                diagnostic.stage,
+                diagnostic.summary,
+                if diagnostic.auto_recovery_allowed {
+                    ""
+                } else {
+                    "；需要用户继续或新的外部输入后重试"
+                }
+            ));
+        }
+        messages.push(BaseMessage::Human {
+            id: item.delivery_id,
+            content: MessageContent::text(body),
+        });
+    }
+    crate::messages::tool_pairing::repair_model_tool_pairing(messages)
+}
+
 /// Reason 与 Full 共用的已提交模型视图；无效投影保留 canonical 内容。
 pub(crate) fn render_persisted_llm_view(
     transcript: &MessageTranscript,

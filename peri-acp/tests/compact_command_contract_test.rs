@@ -56,6 +56,7 @@ async fn test_cancelled_compact_done_agrees_with_prompt_result() {
     let content = MessageContent::text("/compact");
     let result = intercept_immediate_command(InterceptRequest {
         mcp_pool: None,
+        async_result_mailbox: None,
         content: &content,
         history_payloads: std::borrow::Cow::Owned(
             history

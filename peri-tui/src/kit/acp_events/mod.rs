@@ -693,9 +693,11 @@ pub(crate) fn dispatch_for_bridge(
         }
 
         // ── §4.7 Background Tasks ──
-        BgTaskSnapshot { tasks, revision } => {
-            system::handle_bg_task_snapshot(state, tasks, *revision)
-        }
+        BgTaskSnapshot {
+            tasks,
+            revision,
+            source,
+        } => system::handle_bg_task_snapshot(state, tasks, *revision, *source),
         BgTaskStarted(entry) => system::handle_bg_task_started(state, entry),
         // kind payload 保留（bg task UI 展示 / 未来扩展）；内部续跑由 ACP
         // server 的 continuation scheduler 承担，TUI bridge 不触发 KeepGoing。

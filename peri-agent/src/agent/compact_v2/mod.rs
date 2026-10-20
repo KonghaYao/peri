@@ -148,6 +148,36 @@ pub async fn run_compact(
     cwd: &str,
     before_full_summary: Option<FullSummaryNotice<'_>>,
 ) -> CompactResult {
+    run_compact_with_protected(
+        transcript,
+        llm,
+        config,
+        pressure,
+        force,
+        consecutive_failures,
+        cwd,
+        before_full_summary,
+        &crate::session::async_result_mailbox::ProtectedResults::default(),
+    )
+    .await
+}
+
+/// 带后台结果保护集合的 Compact。
+///
+/// 生产路径必须使用本入口：Full Compact 不得归档尚未被主模型响应有效覆盖的
+/// 终态通知。测试与无会话路径经 [`run_compact`] 使用空保护集合。
+#[allow(clippy::too_many_arguments)]
+pub async fn run_compact_with_protected(
+    transcript: &mut MessageTranscript,
+    llm: Option<&dyn peri_model::Model>,
+    config: &CompactConfig,
+    pressure: &ContextPressure,
+    force: bool,
+    consecutive_failures: &mut u32,
+    cwd: &str,
+    before_full_summary: Option<FullSummaryNotice<'_>>,
+    protected: &crate::session::async_result_mailbox::ProtectedResults,
+) -> CompactResult {
     let before_visible_len = transcript.visible_messages().len();
 
     // 自动关闭不影响显式手动 force。
@@ -179,6 +209,7 @@ pub async fn run_compact(
             cwd,
             FullEscalationReason::ManualForce,
             before_full_summary,
+            protected,
         )
         .await;
     }
@@ -285,6 +316,7 @@ pub async fn run_compact(
                         cwd,
                         FullEscalationReason::ForceThresholdExceeded,
                         before_full_summary,
+                        protected,
                     )
                     .await;
                 }
@@ -356,6 +388,7 @@ pub async fn run_compact(
                     cwd,
                     FullEscalationReason::InsufficientReclaim,
                     before_full_summary,
+                    protected,
                 )
                 .await;
                 // Full 成功时，其 excluded transition 已覆盖 Micro affected messages；
@@ -451,6 +484,7 @@ pub async fn run_compact(
                         cwd,
                         FullEscalationReason::ForceThresholdExceeded,
                         before_full_summary,
+                        protected,
                     )
                     .await;
                 }
@@ -485,6 +519,7 @@ pub async fn run_compact(
                         cwd,
                         FullEscalationReason::ForceThresholdExceeded,
                         before_full_summary,
+                        protected,
                     )
                     .await;
                     // Full 成功时，其 excluded transition 已覆盖 Smart affected messages；
@@ -532,6 +567,7 @@ pub async fn run_compact(
                     cwd,
                     FullEscalationReason::InsufficientReclaim,
                     before_full_summary,
+                    protected,
                 )
                 .await;
                 // Smart 已在 Full 前实际应用；无论 Full 成功与否，指标都必须
@@ -567,6 +603,7 @@ async fn run_full_or_degrade(
     cwd: &str,
     escalation_reason: FullEscalationReason,
     before_full_summary: Option<FullSummaryNotice<'_>>,
+    protected: &crate::session::async_result_mailbox::ProtectedResults,
 ) -> CompactResult {
     let before_visible_len = transcript.visible_messages().len();
     let error = if *consecutive_failures >= config.max_consecutive_failures {
@@ -580,7 +617,8 @@ async fn run_full_or_degrade(
         if let Some(notice) = before_full_summary {
             notice();
         }
-        match full::full_compact_inner(transcript, llm, config, cwd).await {
+        match full::full_compact_inner_with_protected(transcript, llm, config, cwd, protected).await
+        {
             Ok(mut result) => {
                 *consecutive_failures = 0;
                 result.full_escalation_reason = Some(escalation_reason);

@@ -14,7 +14,11 @@ use crate::transport::types::AcpError;
 pub(crate) enum PromptOrigin {
     User,
     QueuedUser,
-    Continuation { mq_steering: bool },
+    Continuation {
+        mq_steering: bool,
+        /// 由「已规范提交但未覆盖的 Ready 结果」触发的续跑。
+        pending_result: bool,
+    },
     Scheduled,
 }
 
@@ -175,7 +179,7 @@ pub(crate) async fn dispatch_prompt_turn_with_input(
                 {
                     return false;
                 }
-                let (has_subagent, has_mq) = cfg
+                let (has_subagent, has_mq, has_ready_result) = cfg
                     .session_manager
                     .get_session(&prompt_session_id)
                     .map(|session| {
@@ -184,12 +188,24 @@ pub(crate) async fn dispatch_prompt_turn_with_input(
                                 &peri_acp_types::session::MessageSource::SubAgentComplete,
                             ),
                             session.v2_message_queue.needs_mq_continuation(),
+                            session.async_result_mailbox.has_ready(),
                         )
                     })
-                    .unwrap_or((false, false));
+                    .unwrap_or((false, false, false));
                 let mq_steering = matches!(
                     origin,
-                    PromptOrigin::Scheduled | PromptOrigin::Continuation { mq_steering: true }
+                    PromptOrigin::Scheduled
+                        | PromptOrigin::Continuation {
+                            mq_steering: true,
+                            ..
+                        }
+                );
+                let pending_result = matches!(
+                    origin,
+                    PromptOrigin::Continuation {
+                        pending_result: true,
+                        ..
+                    }
                 );
                 let dispatchable =
                     continuation::continuation_dispatchable(
@@ -198,8 +214,17 @@ pub(crate) async fn dispatch_prompt_turn_with_input(
                         has_subagent,
                         has_mq,
                         mq_steering,
-                    ) && (!matches!(origin, PromptOrigin::Continuation { mq_steering: true })
-                        || super::activation::mq_allowed(cfg, &prompt_session_id));
+                        pending_result,
+                        has_ready_result,
+                    ) && (!matches!(
+                        origin,
+                        PromptOrigin::Continuation {
+                            mq_steering: true,
+                            ..
+                        }
+                    ) || super::activation::mq_allowed(cfg, &prompt_session_id))
+                        && (!pending_result
+                            || super::activation::result_allowed(cfg, &prompt_session_id));
                 if dispatchable {
                     state.continuation_in_flight = true;
                     state.continuation_mq_steering_pending = false;
@@ -272,11 +297,13 @@ pub(crate) async fn dispatch_prompt_turn_with_input(
         sessions.get_mut(&prompt_session_id).and_then(|state| {
             state.continuation_mq_steering_pending = false;
             let queue = cfg.session_manager.v2_queue_for(&prompt_session_id)?;
+            let runtime = cfg.session_manager.get_session(&prompt_session_id)?;
             super::activation::pending_request(
                 &prompt_session_id,
                 state,
                 &queue,
-                super::activation::mq_allowed(cfg, &prompt_session_id),
+                &runtime.activation,
+                &runtime.async_result_mailbox,
             )
         })
     };

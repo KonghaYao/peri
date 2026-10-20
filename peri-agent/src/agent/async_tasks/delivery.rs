@@ -5,6 +5,7 @@ use peri_acp_types::system_reminder::TrustedSystemReminder;
 use peri_acp_types::tasks::TaskTerminalDelivery;
 use sha2::{Digest, Sha256};
 
+use crate::session::async_result_mailbox::{AcceptOutcome, AsyncResultMailbox};
 use crate::session::MessageQueue;
 
 pub(crate) fn terminal_delivery_id(
@@ -26,16 +27,21 @@ pub(crate) fn terminal_delivery_id(
 
 pub(crate) struct SessionTerminalDelivery {
     queue: MessageQueue,
-    accepted:
-        parking_lot::Mutex<std::collections::HashMap<peri_acp_types::messages::MessageId, String>>,
+    mailbox: Arc<AsyncResultMailbox>,
 }
 
 impl SessionTerminalDelivery {
+    /// 仅测试/无宿主回退：使用一次性 mailbox，不跨会话共享保护状态。
     pub(crate) fn for_queue(queue: MessageQueue) -> Arc<dyn TaskTerminalDelivery> {
-        Arc::new(Self {
-            queue,
-            accepted: parking_lot::Mutex::new(std::collections::HashMap::new()),
-        })
+        Self::for_queue_with_mailbox(queue, Arc::new(AsyncResultMailbox::default()))
+    }
+
+    /// 生产路径：投递责任与模型确认共用同一个会话级 owner。
+    pub(crate) fn for_queue_with_mailbox(
+        queue: MessageQueue,
+        mailbox: Arc<AsyncResultMailbox>,
+    ) -> Arc<dyn TaskTerminalDelivery> {
+        Arc::new(Self { queue, mailbox })
     }
 }
 
@@ -46,25 +52,21 @@ impl TaskTerminalDelivery for SessionTerminalDelivery {
         reminder: &TrustedSystemReminder,
         source: MessageSource,
     ) -> Result<(), String> {
-        let fingerprint = serde_json::to_string(&(reminder.as_reminder(), &source))
-            .map_err(|error| error.to_string())?;
-        let mut accepted = self.accepted.lock();
-        if let Some(prior) = accepted.get(&delivery_id) {
-            return if prior == &fingerprint {
+        // 先建立 Queued 责任，再让队列消息可见：消费者不可能看到一条
+        // “已入队但 mailbox 尚未登记”的终态通知。锁不跨 await。
+        match self.mailbox.accept(delivery_id, reminder, source.clone())? {
+            AcceptOutcome::Accepted => {
+                self.queue
+                    .push(QueuedMessage::system_reminder_with_delivery_id(
+                        MessageKind::Defer,
+                        source,
+                        reminder.clone(),
+                        delivery_id,
+                    ));
                 Ok(())
-            } else {
-                Err("conflicting terminal queue acceptance identity".into())
-            };
+            }
+            AcceptOutcome::Duplicate => Ok(()),
         }
-        self.queue
-            .push(QueuedMessage::system_reminder_with_delivery_id(
-                MessageKind::Defer,
-                source,
-                reminder.clone(),
-                delivery_id,
-            ));
-        accepted.insert(delivery_id, fingerprint);
-        Ok(())
     }
 
     fn deliver<'a>(

@@ -120,6 +120,7 @@ fn test_mq_steering_during_in_flight_sets_pending() {
         session_id: "session-1".to_string(),
         kind: BgTaskKind::Agent,
         mq_steering: true,
+        pending_result: false,
     };
     assert!(
         take_continuation_for_request(&mut state, &req).is_none(),
@@ -258,20 +259,28 @@ fn test_cancel_schedule_race_eligibility() {
 fn test_continuation_dispatchable_requires_pending_defer() {
     let state = make_session_state(false, 3);
     // 代际有效 + Defer 在队 → 可 dispatch
-    assert!(continuation_dispatchable(&state, 3, true, false, false));
+    assert!(continuation_dispatchable(
+        &state, 3, true, false, false, false, false
+    ));
     // 代际有效但 Defer 已被消费 → 跳过（空跑无意义）
-    assert!(!continuation_dispatchable(&state, 3, false, false, false));
+    assert!(!continuation_dispatchable(
+        &state, 3, false, false, false, false, false
+    ));
     // 代际失效（用户新 prompt）→ 跳过
     assert!(!continuation_dispatchable(
         &state,
         3 + 1,
         true,
         false,
+        false,
+        false,
         false
     ));
     assert!(!continuation_dispatchable(
         &state,
         3 + 1,
+        false,
+        false,
         false,
         false,
         false

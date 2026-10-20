@@ -434,6 +434,48 @@ fn expected_identity(index: usize) -> String {
 
 // ── 绘制与命中同源（挂载）──────────────────────────────────────────────
 
+/// 每行都有独立、明确的文本状态标签；颜色不是唯一信息载体。
+#[test]
+fn background_task_rows_render_explicit_status_labels() {
+    let theme = peri_theme::builtin::dark_theme();
+    let cases = [
+        (None, "bg-task-status-running"),
+        (Some("running"), "bg-task-status-running"),
+        (Some("lost"), "bg-task-status-lost"),
+        (Some("reconciling"), "bg-task-status-reconciling"),
+        (Some("pending_delivery"), "bg-task-status-pending-delivery"),
+        (Some("delivery_pending"), "bg-task-status-pending-delivery"),
+        (Some("completed"), "bg-task-status-completed"),
+        (Some("failed"), "bg-task-status-failed"),
+        (Some("cancelled"), "bg-task-status-cancelled"),
+        (Some("future_status"), "bg-task-status-unknown"),
+    ];
+    let mut seen = std::collections::HashSet::new();
+    for (status, key) in cases {
+        let mut task = bg_task("bg-status");
+        task.status = status.map(str::to_string);
+        let rendered: String = background_task_line(&task, false, &theme)
+            .spans
+            .iter()
+            .map(|span| span.content.as_ref())
+            .collect();
+        let label = crate::i18n::tr(key);
+        assert!(
+            rendered.contains(&format!("[{label}]")),
+            "状态 {status:?} 必须有文本标签 [{label}]：{rendered}"
+        );
+        assert!(
+            rendered.contains("bg-status"),
+            "完整 task_id 必须可定位：{rendered}"
+        );
+        seen.insert(label);
+    }
+    assert!(
+        seen.len() >= 7,
+        "不同状态必须产生不同标签（颜色仅辅助）：{seen:?}"
+    );
+}
+
 /// 绘制窗口与鼠标命中同源：点中的行号命中的就是缓冲区里显示的那一项。
 #[test]
 #[serial]

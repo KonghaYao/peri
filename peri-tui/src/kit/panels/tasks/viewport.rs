@@ -15,6 +15,7 @@ use ratatui_kit::crossterm::event::MouseEvent;
 use ratatui_kit::ratatui::layout::Rect;
 
 use crate::kit::atoms::BgTaskEntry;
+use crate::kit::bg_task_status::BgTaskStatus;
 use crate::kit::list_nav::{clamp_selection, scroll_start_for_selected};
 use crate::kit::panel_mouse::left_down;
 
@@ -195,6 +196,10 @@ impl TasksViewport {
             return CancelAction::NotCancelable;
         }
         match bg_tasks.get(index) {
+            // 终态是已结算事实，不再提供取消；lost/运行中/未知仍可请求远端取消。
+            Some(task) if BgTaskStatus::classify(task.status.as_deref()).is_terminal() => {
+                CancelAction::NotCancelable
+            }
             Some(task) => CancelAction::Cancel(CancelTarget {
                 task_id: task.task_id.clone(),
                 kind: task.kind.clone(),

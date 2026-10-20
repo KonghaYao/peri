@@ -640,3 +640,85 @@ async fn test_shadow_mode_keeps_cached_view_for_reason() {
         "shadow 路径上 Compact 检查 + Reason 快照合计只应渲染一次"
     );
 }
+
+// ─── T21：保护集合变化必须使模型视图缓存失效 ────────────────────────────────────
+
+/// [T21] canonical 修订不变、只有 Ready→InFlight→Covered 切换时，模型视图
+/// 仍然必须反映新的保护集合：未覆盖事实始终在请求中，Covered 后立即消失。
+#[test]
+fn async_result_view_cache_tracks_protected_state_without_transcript_change() {
+    use crate::messages::MessageId;
+    use crate::session::async_result_mailbox::AsyncResultMailbox;
+    use peri_acp_types::session::MessageSource;
+    use peri_acp_types::system_reminder::{
+        ReminderAudience, ReminderAudiences, ReminderCategory, ReminderDelivery, ReminderSeverity,
+        ReminderSource, SystemReminder, TrustedSystemReminderFactory, SYSTEM_REMINDER_VERSION,
+    };
+
+    let scope = ModelViewScope::default();
+    let mut transcript = MessageTranscript::new();
+    transcript.append(human("background task started"));
+    let caps = ProviderCapabilities::anthropic();
+
+    let mailbox = AsyncResultMailbox::new("session-t21", "thread-t21");
+    let id = MessageId::new();
+    let terminal = TrustedSystemReminderFactory::for_producer()
+        .construct(SystemReminder {
+            version: SYSTEM_REMINDER_VERSION,
+            category: ReminderCategory::Task,
+            source: ReminderSource("shell".into()),
+            kind: "terminal".into(),
+            severity: ReminderSeverity::Info,
+            delivery: ReminderDelivery::Configurable,
+            audiences: ReminderAudiences(vec![ReminderAudience::Model]),
+            body: "task shell-T21 finished with exit_code: 0".into(),
+            summary: None,
+            metadata: serde_json::json!({"task_id": "shell-T21"}),
+        })
+        .unwrap();
+    mailbox
+        .accept(id, &terminal, MessageSource::ShellComplete)
+        .unwrap();
+    mailbox
+        .mark_canonical_ready(id, &terminal, MessageSource::ShellComplete, Some(1))
+        .unwrap();
+
+    // 前提：transcript 本身不变，变更只发生在 mailbox。
+    let ready = scope
+        .view_with_protected(&transcript, &caps, &mailbox.protected_snapshot())
+        .expect("Ready 视图");
+    assert_eq!(scope.render_count(), 1);
+    assert!(ready
+        .iter()
+        .any(|message| message.content().contains("shell-T21")));
+
+    let receipt = mailbox
+        .capture_request("attempt-t21", "request-t21", &[id])
+        .expect("请求必须记录 receipt");
+    let inflight = scope
+        .view_with_protected(&transcript, &caps, &mailbox.protected_snapshot())
+        .expect("InFlight 视图");
+    assert_eq!(
+        scope.render_count(),
+        2,
+        "保护版本变化必须使缓存失效，不能复用 Ready 视图"
+    );
+    assert!(
+        inflight
+            .iter()
+            .any(|message| message.content().contains("shell-T21")),
+        "请求进行中仍必须携带未提交的终态事实"
+    );
+
+    mailbox.cover_after_commit(&receipt, None).unwrap();
+    let covered = scope
+        .view_with_protected(&transcript, &caps, &mailbox.protected_snapshot())
+        .expect("Covered 视图");
+    assert_eq!(scope.render_count(), 3);
+    assert!(
+        !covered
+            .iter()
+            .any(|message| message.content().contains("shell-T21")),
+        "Covered 后不再重复投影该提醒"
+    );
+}

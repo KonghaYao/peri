@@ -500,14 +500,15 @@ impl BaseTool for McpToolBridge {
                                 }));
                     }
                 }
-                // 回执只承诺可达的投递：有 canonical 路由 = 持久送达
-                // （resume 后仍可见）；否则只声称活跃期送达。
+                // 回执只承诺可达的投递：有 canonical 路由 = 结果到达时持久记录；
+                // 否则只声称活跃期送达。结果尚未产生，不得提前声称已写入 transcript，
+                // 也不承诺进程重启后恢复后台执行。
                 let delivery_note = if delivery.is_some() {
-                    "Its completion reminder is committed to the initiating session's \
-                             transcript and stays visible after resume."
+                    "Its completion result will be delivered to the initiating session when it \
+                     arrives; the delivered result is recorded at that point."
                 } else {
-                    "Its completion reminder is delivered to the initiating session \
-                             while that session is live."
+                    "Its completion result will be delivered to the initiating session \
+                     while that session is live."
                 };
                 return Ok(peri_agent::tools::ToolOutput::from_legacy(format!(
                     "Background task started: {public_id}. {delivery_note}"

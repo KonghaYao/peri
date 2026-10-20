@@ -197,6 +197,9 @@ pub struct SessionContext {
     // ── session: session identity & transport ──────────────────────────────
     pub session_id: String,
     pub user_input_mailbox: Option<Arc<crate::session::user_input_mailbox::UserInputMailbox>>,
+    /// 会话级后台结果处理责任 owner（ACP 宿主跨 prompt 注入；None 时由本次执行
+    /// 建立本地 owner，保证无宿主路径也有等价语义）。
+    pub async_result_mailbox: Option<Arc<crate::session::async_result_mailbox::AsyncResultMailbox>>,
     pub cancel: AgentCancellationToken,
     pub broker: Arc<dyn UserInteractionBroker>,
     pub permission_mode: Arc<peri_acp_types::permission::SharedPermissionMode>,
