@@ -44,14 +44,15 @@
 - [x] active=0 但消息未消费仍交接；Receive 跨 D 保留历史；Reason 跨 D 的 Act 完成配对，不开下一轮（`terminal_result_without_consumption...`、`receive_across_deadline...`、`admitted_reason_completes_act_after_deadline`）。
 - [x] MaxIterations 保留原错误与残留交接；HookStop 不追加模型提醒；cancel 先于 D 生效（`max_iterations_keeps_reason...`、`terminal_result_without_consumption...`、`cancelled_child...`）。
 - [x] sync/bg × 新建；resume 复用 owner/MQ 并由显式 prompt 驱动（`late_result_after_deadline_requires_explicit_resume`、现有 resume 回归）。
-- [ ] 父 `sync-*` 注册与 child 终态同刻的两种调度顺序：代码经 biased select + 已提交 receipt 处理；未构造确定性同刻调度用例。
+- [x] 父 `sync-*` 注册与 child 终态竞争：无父宿主、父已 closing、正常注册三条分支均返回 typed 结果；同刻调度本身未做确定性注入（`handoff_without_parent_owner...`、`handoff_with_closing_parent...`、`handoff_sync_child...`）。
 - [x] callback 拒绝后由 registry 单一 retry worker 接管，wrapper 释放完整 session（`handoff_sync_child_returns_pending_and_registry_retries_delivery`）。
 - [x] 无父投递宿主/缺 owner/closing 显式失败，不制造幽灵任务（`handoff_without_parent_owner...`、`missing_owner...`、`test_close_rejects_active_execution...`）。
 - [x] handoff append/status write 失败不误报交接或可 resume（`handoff_persistence_failure...`、`subagent_terminal_write_failure...`）。
 - [x] late result 后显式 resume 复用原 MQ/manager、新执行身份（`late_result_after_deadline_requires_explicit_resume`）。
 - [x] 不 resume 关闭：终态按原 ID 落库、其他输入记录为 `child_retained_input_unprocessed`、失败保留 owner 并返回 Incomplete（`test_close_settles_terminal...`、`parent_close_retains...`）。
+- [x] D 时 pending 列表为空但仍有保留消息：wrapper 仍交接，不因空列表 abort（`handoff_with_empty_task_list_keeps_retained_messages`）。
 - [x] 旧 ContinueCurrentRun 消息被抑制；A→B→C 结果仅归直接父（`old_bound_control_message...`、`nested_a_b_c...`）。
-- [ ] 重启仅加载历史：沿用既有 history/resume 回归；未新增独立 paused-time 重启用例。
+- [~] 重启仅加载历史：沿用既有 cold-resume/history 回归（全库通过），未新增独立重启 fixture；不承诺未落库 MQ 恢复。
 - [ ] 真实受控阻塞进程在 D 后仍存活、正式取消接口确认进程树与输出管道清理：未实现真实进程 fixture。本任务未改动 Shell promote/执行期限，不能由单元测试替代该证据。
 
 时间用例使用 paused-time 且实际运行非零目标用例。真实 wire/进程验收不可由静态检查替代。
@@ -70,11 +71,11 @@
 所有命令在指定 worktree 内执行，统一前缀 `./scripts/cargo-rmcp-patched.sh`。
 
 - `test --locked -p peri-agent --lib -- session::subagent::child_runner::tests`：21 passed，0 failed（含 background/nested 子模块；paused-time）。
-- `test --locked -p peri-agent --lib -- session::subagent::run_sync::tests`：5 passed，0 failed。
+- `test --locked -p peri-agent --lib -- session::subagent::run_sync::tests`：7 passed，0 failed。
 - `test --locked -p peri-agent --lib -- agent::async_tasks::handoff::tests`：6 passed，0 failed。
 - `test --locked -p peri-agent --lib -- session::subagent::resource_owner::tests`：7 passed，0 failed。
 - `test --locked -p peri-agent --lib -- session::subagent::`：129 passed，0 failed。
-- `test --locked -p peri-agent --lib`：1179 passed，0 failed，3 ignored。并行运行时 `agent::stages::receive::tests::committed_delivery_missing_from_hot_state_is_restored_without_reemitting` 曾因共享 git fixture 失败一次，单测与复跑均通过；该用例不涉及本修复路径。
+- `test --locked -p peri-agent --lib`：1181 passed，0 failed，3 ignored。并行运行时 `agent::stages::receive::tests::committed_delivery_missing_from_hot_state_is_restored_without_reemitting` 曾因共享 git fixture 失败一次，单测与复跑均通过；该用例不涉及本修复路径。
 - `test --locked -p peri-acp-types --lib`：660 passed，0 failed。
 - `build --locked -p peri-agent -p peri-acp`：通过，退出码 0。
 - `clippy --locked -p peri-agent -p peri-acp --lib -- -D warnings`：通过，退出码 0。
