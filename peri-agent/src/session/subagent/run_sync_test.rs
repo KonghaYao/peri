@@ -382,6 +382,149 @@ async fn parent_close_retains_unconfirmed_delivery_and_reports_incomplete() {
     assert!(parent_manager.has_pending_delivery(&task_id));
 }
 
+/// 父注册失败/已 closing：不制造幽灵 sync task，返回 typed 未完成。
+#[tokio::test(start_paused = true)]
+async fn handoff_with_closing_parent_finishes_incomplete_without_registration() {
+    let manager = Arc::new(TaskManager::new());
+    let parent_manager = Arc::new(TaskManager::new());
+    parent_manager.begin_session_close();
+    let (session, _owner) = bound_child(manager.clone());
+    shell_task(&manager, "shell-task");
+    session.queue().push(QueuedMessage::prompt(
+        MessageSource::UserInput,
+        crate::messages::BaseMessage::human("run shell"),
+    ));
+    let built = context(&session, "child answer");
+    let child_id = session.store().thread_id.clone().unwrap();
+    let run_id = child_id.clone();
+    let completion = run_sync_with_registered_handoff(
+        session.clone(),
+        child_id.clone(),
+        "fixture".into(),
+        Some(parent_manager.clone()),
+        Some(new_sync_task_id()),
+        Some(Arc::new(|_, _| Ok(()))),
+        move |handoff, _| async move {
+            run_sync_subagent(
+                &run_id,
+                "fixture",
+                "/tmp",
+                10,
+                None,
+                None,
+                None,
+                None,
+                None,
+                None,
+                None,
+                None,
+                None,
+                built,
+                session,
+                None,
+                Some(handoff),
+            )
+            .await
+        },
+    )
+    .await
+    .unwrap();
+    let SyncCompletion::Finished(ChildRunOutcome::HandedOff { receipt }) = completion else {
+        panic!("closing parent must return typed incomplete outcome");
+    };
+    assert_eq!(receipt.child_thread_id, child_id);
+    assert!(receipt
+        .tasks
+        .iter()
+        .any(|task| task.task_id == "shell-task"));
+    assert_eq!(parent_manager.active_count(), 0, "不得留下幽灵 sync task");
+}
+
+/// pending 任务列表为空但仍有未消费消息：wrapper 仍以 receipt 交接，不因空列表 abort。
+#[tokio::test(start_paused = true)]
+async fn handoff_with_empty_task_list_keeps_retained_messages() {
+    let manager = Arc::new(TaskManager::new());
+    let parent_manager = Arc::new(TaskManager::new());
+    let (session, _owner) = bound_child(manager.clone());
+    shell_task(&manager, "shell-task");
+    session.queue().push(QueuedMessage::info(
+        MessageSource::HookStopIntent,
+        crate::messages::BaseMessage::human("stop"),
+    ));
+    session.queue().push(QueuedMessage::prompt(
+        MessageSource::UserInput,
+        crate::messages::BaseMessage::human("run shell"),
+    ));
+    let built = context(&session, "child answer");
+    let child_id = session.store().thread_id.clone().unwrap();
+    let task_id = new_sync_task_id();
+    let run_id = child_id.clone();
+    let run_session = session.clone();
+    let (delivered_tx, delivered_rx) = tokio::sync::oneshot::channel();
+    let delivered_tx = parking_lot::Mutex::new(Some(delivered_tx));
+    let call = tokio::spawn(run_sync_with_registered_handoff(
+        session.clone(),
+        child_id.clone(),
+        "fixture".into(),
+        Some(parent_manager.clone()),
+        Some(task_id.clone()),
+        Some(Arc::new(
+            move |result: &peri_acp_types::event::BackgroundTaskResult, _| {
+                if let Some(sender) = delivered_tx.lock().take() {
+                    let _ = sender.send(result.clone());
+                }
+                Ok(())
+            },
+        )),
+        move |handoff, _| async move {
+            run_sync_subagent(
+                &run_id,
+                "fixture",
+                "/tmp",
+                10,
+                None,
+                None,
+                None,
+                None,
+                None,
+                None,
+                None,
+                None,
+                None,
+                built,
+                run_session,
+                None,
+                Some(handoff),
+            )
+            .await
+        },
+    ));
+    tokio::time::advance(Duration::from_secs(1)).await;
+    let delivery = crate::session::bg_complete::task_bg_complete_callback(
+        crate::agent::async_tasks::delivery::SessionTerminalDelivery::for_queue(
+            session.queue().clone(),
+        ),
+    );
+    let mut result = shell_result("shell-task");
+    result.agent_name = "shell".into();
+    assert!(manager
+        .settle_completed("shell-task", result, delivery)
+        .unwrap());
+    let completion = call.await.unwrap().unwrap();
+    let SyncCompletion::Pending(pending) = completion else {
+        panic!("retained message must hand off even with empty task list");
+    };
+    assert!(pending.receipt.tasks.is_empty());
+    assert!(!pending.receipt.message_ids.is_empty());
+    let delivered = tokio::time::timeout(Duration::from_secs(5), delivered_rx)
+        .await
+        .expect("parent result must be delivered")
+        .unwrap();
+    assert!(!delivered.success);
+    assert!(!delivered.timed_out);
+    assert_eq!(delivered.task_id, task_id);
+}
+
 /// 关闭失败必须保留诊断，不因同步 worker 结束而宣称成功。
 #[tokio::test]
 async fn explicit_close_reports_failed_sync_delivery() {
