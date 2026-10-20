@@ -1,4 +1,6 @@
 use super::*;
+use peri_acp_types::store::PersistedPayload;
+use peri_acp_types::system_reminder::{ReminderCategory, ReminderDelivery, ReminderSeverity};
 
 fn owner(parent: &str, child: &str) -> Arc<ParkedChildOwner> {
     ParkedChildOwner::new(
@@ -6,7 +8,7 @@ fn owner(parent: &str, child: &str) -> Arc<ParkedChildOwner> {
         parent.into(),
         Arc::new(TaskManager::new()),
         MessageQueue::new(),
-        crate::session::test_resources::mock::MockSessionResources::new(),
+        Some(crate::session::test_resources::mock::MockSessionResources::new()),
         None,
     )
 }
@@ -20,7 +22,7 @@ fn execution() -> ExecutionBinding {
 
 #[tokio::test]
 async fn test_owner_retains_resources_without_computation() {
-    let root = TaskManager::new();
+    let root = Arc::new(TaskManager::new());
     let child = owner("root", "child");
     let weak = Arc::downgrade(&child);
     root.register_child_owner(child.clone()).unwrap();
@@ -65,7 +67,7 @@ async fn test_abandoned_execution_blocks_resume_without_cancelling_resources() {
 
 #[tokio::test]
 async fn test_nested_owner_lookup_and_closing_host_rejection() {
-    let root = TaskManager::new();
+    let root = Arc::new(TaskManager::new());
     let child = owner("root", "child");
     let nested = owner("child", "nested");
     child.manager.register_child_owner(nested.clone()).unwrap();
@@ -93,7 +95,7 @@ async fn test_handoff_commit_reuses_frozen_execution_snapshot() {
         "root".into(),
         Arc::new(TaskManager::new()),
         session.queue().clone(),
-        resources.clone(),
+        Some(resources.clone()),
         None,
     );
     let context = crate::agent::stages::StageContext::builder(
@@ -127,16 +129,76 @@ async fn test_handoff_commit_reuses_frozen_execution_snapshot() {
 }
 
 #[tokio::test]
-async fn test_close_retains_unprocessed_required_input() {
-    let child = owner("root", "child");
+async fn test_close_settles_terminal_and_records_retained_input() {
+    let resources = crate::session::test_resources::mock::MockSessionResources::new();
+    let child = ParkedChildOwner::new(
+        "child".into(),
+        "root".into(),
+        Arc::new(TaskManager::new()),
+        MessageQueue::new(),
+        Some(resources.clone()),
+        None,
+    );
+    let terminal_id = peri_acp_types::messages::MessageId::new();
+    let terminal = crate::session::producer_reminders::trusted_reminder(
+        ReminderCategory::Task,
+        "subagent_task_lifecycle",
+        "terminal_result",
+        ReminderSeverity::Info,
+        ReminderDelivery::Required,
+        "terminal result".into(),
+        None,
+        serde_json::json!({}),
+    );
+    child.queue.push(
+        crate::session::QueuedMessage::system_reminder_with_delivery_id(
+            crate::session::MessageKind::Defer,
+            crate::session::MessageSource::SystemInjected,
+            terminal,
+            terminal_id,
+        ),
+    );
     child.queue.push(crate::session::QueuedMessage::prompt(
         crate::session::MessageSource::UserInput,
         crate::messages::BaseMessage::human("追加输入"),
     ));
-    assert!(child
-        .close()
-        .await
-        .unwrap_err()
-        .contains("messages require canonical settlement"));
-    assert!(child.queue.has_required(), "尚未结算的输入不得清空");
+    child.close().await.unwrap();
+    assert!(!child.queue.has_required(), "已结算输入不得残留 Required");
+    let payloads = resources.payloads();
+    assert_eq!(payloads.len(), 2, "终态按原 ID 落库，未处理输入单独记录");
+    assert!(payloads.iter().any(|payload| {
+        matches!(payload, PersistedPayload::SystemReminder { reminder, .. }
+            if reminder.as_reminder().kind == "terminal_result")
+    }));
+    assert!(payloads.iter().any(|payload| {
+        matches!(payload, PersistedPayload::SystemReminder { reminder, .. }
+            if reminder.as_reminder().kind == "child_retained_input_unprocessed")
+    }));
+}
+
+#[tokio::test]
+async fn test_close_without_canonical_port_refuses_to_drop_required_input() {
+    let child = ParkedChildOwner::new(
+        "child".into(),
+        "root".into(),
+        Arc::new(TaskManager::new()),
+        MessageQueue::new(),
+        None,
+        None,
+    );
+    child.queue.push(crate::session::QueuedMessage::prompt(
+        crate::session::MessageSource::UserInput,
+        crate::messages::BaseMessage::human("追加输入"),
+    ));
+    assert!(child.close().await.unwrap_err().contains("canonical"));
+    assert!(child.queue.has_required(), "缺 canonical 能力时不得清空");
+}
+
+#[tokio::test]
+async fn test_close_rejects_active_execution_until_it_ends() {
+    let child = owner("root", "child");
+    let permit = child.acquire(execution()).unwrap();
+    assert!(child.close().await.unwrap_err().contains("active"));
+    drop(permit);
+    child.close().await.unwrap();
 }
