@@ -9,7 +9,7 @@ use async_trait::async_trait;
 use peri_agent::goal::GoalController;
 use peri_agent::messages::BaseMessage;
 use peri_agent::tools::{BaseTool, ToolContext};
-use peri_model::{ModelMessage, ModelRequest};
+use peri_model::{ModelMessage, ModelRequest, StopReason};
 use serde_json::{json, Value};
 use tokio_util::sync::CancellationToken;
 
@@ -85,17 +85,22 @@ impl GoalTool {
             let raw = response.assistant_text().unwrap_or_default();
 
             if raw.trim().is_empty() {
-                // 验证器没有正文：报告真实停止原因，避免把输出预算故障
-                // 伪装成 JSON 解析失败。
+                // 验证器没有正文：报告真实停止原因。只有 max_tokens 才是
+                // 输出预算故障，其他停止原因不能伪装成预算问题。
                 let stop_reason = response.stop_reason();
                 tracing::warn!(
                     ?stop_reason,
                     usage = ?response.usage(),
                     "goal verifier returned empty text"
                 );
+                let diagnosis = if *stop_reason == StopReason::MaxTokens {
+                    "output budget was exhausted"
+                } else {
+                    "verifier returned an empty response"
+                };
                 return Ok(format!(
                     "Goal not yet achieved: verifier returned no text \
-                     (stop reason: {stop_reason:?}). This is a verifier output-budget \
+                     (stop reason: {stop_reason:?}); {diagnosis}. This is a verifier \
                      failure, not a delivery gap; retry goal(complete)."
                 ));
             }

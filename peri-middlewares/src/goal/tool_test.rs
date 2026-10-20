@@ -398,6 +398,32 @@ async fn test_goal_complete_model_空输出_报告停止原因() {
     );
 }
 
+#[tokio::test]
+async fn test_goal_complete_model_空输出_非预算原因不误报() {
+    // EndTurn 下的空响应不是输出预算故障，不能给出预算诊断。
+    let (tool, _controller) = make_tool_with_model(MockModel::with_response(""));
+
+    tool.invoke(
+        json!({"action": "create", "objective": "完成重构"}),
+        ToolContext::new(&[], "."),
+    )
+    .await
+    .unwrap();
+
+    let result = tool
+        .invoke(json!({"action": "complete"}), ToolContext::new(&[], "."))
+        .await
+        .unwrap();
+    assert!(
+        result.contains("empty response"),
+        "应报告空响应，实际：{result}"
+    );
+    assert!(
+        !result.contains("output budget was exhausted"),
+        "非 MaxTokens 不应诊断为预算故障，实际：{result}"
+    );
+}
+
 /// 断言验证请求不覆盖 auxiliary model 的输出预算。
 struct BudgetCheckingModel;
 

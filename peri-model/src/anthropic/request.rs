@@ -36,6 +36,8 @@ impl BuiltAnthropicRequest {
 
 /// Anthropic 协议允许的最小 extended-thinking 预算。
 const MIN_THINKING_BUDGET: u32 = 1_024;
+/// 启用 thinking 时至少为正文保留的输出预算；thinking 与正文共享输出上限。
+const MIN_RESPONSE_RESERVE: u32 = 1_024;
 
 pub(super) fn build_request(
     config: &AnthropicConfig,
@@ -78,9 +80,11 @@ pub(super) fn build_request(
     }
     if config.extended_thinking {
         // 协议约束：budget_tokens 必须小于 max_tokens，且不低于最小预算。
-        // 请求级 max_tokens 覆盖（验证器、分类器等派生请求）可能小于模型
-        // 构造时的思考预算；此时收缩预算，无法合法启用则不发送 thinking。
-        let thinking_budget = config.thinking_budget.min(max_tokens.saturating_sub(1));
+        // thinking 与正文共享输出上限，因此还要为正文预留 MIN_RESPONSE_RESERVE；
+        // 请求级 max_tokens 覆盖（验证器、分类器等派生请求）可能放不下
+        // 最小思考预算 + 正文预留，此时不发送 thinking。
+        let available_thinking = max_tokens.saturating_sub(MIN_RESPONSE_RESERVE);
+        let thinking_budget = config.thinking_budget.min(available_thinking);
         if thinking_budget >= MIN_THINKING_BUDGET {
             body["thinking"] = json!({
                 "type": "enabled",

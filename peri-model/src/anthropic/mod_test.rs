@@ -103,17 +103,28 @@ fn request_budget_below_thinking_minimum_disables_thinking() {
     assert!(body.get("output_config").is_none());
 }
 
-/// thinking 预算必须小于 max_tokens；请求级覆盖后按上限收缩。
+/// thinking 预算要为正文预留空间；请求上限不足时按可用额度收缩。
 #[test]
-fn request_budget_shrinks_thinking_budget_below_max_tokens() {
+fn request_budget_shrinks_thinking_budget_to_reserve_response() {
     let body = body_for_test(
         &config().with_extended_thinking(10_000, "max"),
         &request().with_max_tokens(2_048),
     );
     assert_eq!(
         body["thinking"],
-        json!({ "type": "enabled", "budget_tokens": 2_047 })
+        json!({ "type": "enabled", "budget_tokens": 1_024 })
     );
+}
+
+/// 最小思考预算加正文预留放不下时，不发送 thinking。
+#[test]
+fn request_budget_below_thinking_plus_reserve_disables_thinking() {
+    let body = body_for_test(
+        &config().with_extended_thinking(10_000, "max"),
+        &request().with_max_tokens(1_536),
+    );
+    assert!(body.get("thinking").is_none());
+    assert!(body.get("output_config").is_none());
 }
 
 /// [回归测试] 连续工具轮次必须把 prompt cache 断点推进到最新 tool_result；
