@@ -63,10 +63,24 @@ pub(super) async fn build_subagent_session_v2(
     let legacy_embedded_instructions = frozen.legacy_embedded_instructions;
     let cancel_arc: Arc<CancellationToken> = Arc::new(cancel_token.clone());
     let mut host = parent_host.as_deref().cloned().unwrap_or_default();
-    let binding = host
-        .mcp_pool
+    let parent_manager = host.task_manager.clone();
+    let existing_owner = parent_manager
         .as_ref()
-        .and_then(|pool| pool.agent_session_binding(&child_thread_id));
+        .and_then(|manager| manager.child_owner(&child_thread_id));
+    let binding = existing_owner
+        .as_ref()
+        .map(|owner| {
+            let inbox = peri_acp_types::session::SessionInbox::new(Arc::new(owner.queue.clone()));
+            (
+                inbox.handle(),
+                owner.manager.clone() as Arc<dyn peri_acp_types::tasks::TaskManager>,
+            )
+        })
+        .or_else(|| {
+            host.mcp_pool
+                .as_ref()
+                .and_then(|pool| pool.agent_session_binding(&child_thread_id))
+        });
     let queue = binding
         .as_ref()
         .map(|(inbox, _)| inbox.queue().clone())
@@ -88,6 +102,29 @@ pub(super) async fn build_subagent_session_v2(
         }
         None => Arc::new(crate::agent::async_tasks::TaskManager::new()),
     });
+    host.child_owner = match existing_owner {
+        Some(owner) => Some(owner),
+        None => match (
+            &parent_manager,
+            &host.parent_thread_id,
+            &session_resources,
+            &host.task_manager,
+        ) {
+            (Some(parent), Some(parent_id), Some(resources), Some(manager)) => {
+                let owner = super::super::resource_owner::ParkedChildOwner::new(
+                    child_thread_id.clone(),
+                    parent_id.clone(),
+                    manager.clone(),
+                    session.queue().clone(),
+                    resources.clone(),
+                    host.mcp_pool.as_ref().map(Arc::downgrade),
+                );
+                parent.register_child_owner(owner.clone())?;
+                Some(owner)
+            }
+            _ => None,
+        },
+    };
     host.parent_thread_id = Some(child_thread_id.clone());
     host.on_bg_complete = Some(crate::session::bg_complete::task_bg_complete_callback(
         crate::agent::async_tasks::delivery::SessionTerminalDelivery::for_queue(

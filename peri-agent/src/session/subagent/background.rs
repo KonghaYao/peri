@@ -54,6 +54,12 @@ pub(super) async fn spawn_background_subagent(
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     let task_manager =
         task_manager.ok_or("Background tasks not available: no task manager configured")?;
+    let permit = v2_ctx
+        .session
+        .subagent_host()
+        .and_then(|host| host.child_owner.clone())
+        .map(|owner| owner.acquire(v2_ctx.context.session.turn.execution_binding()))
+        .transpose()?;
     let task_manager_spawn = Arc::clone(&task_manager);
     let agent_inbox = BackgroundAgentInbox::new(
         child_thread_id.clone(),
@@ -292,14 +298,14 @@ pub(super) async fn spawn_background_subagent(
                 !result.success,
             );
         }
-        if !persist_background_terminal(
+        let terminal_persisted = persist_background_terminal(
             session_resources.as_deref(),
             &child_thread_id_for_task,
             status,
             &mut result,
         )
-        .await
-        {
+        .await;
+        if !terminal_persisted {
             publish_completed = false;
             output_summary = result.output.chars().take(500).collect();
         }
@@ -330,6 +336,13 @@ pub(super) async fn spawn_background_subagent(
             }
         }
         settle_background_terminal(&task_manager_spawn, result, on_bg_complete);
+        if let Some(permit) = permit {
+            permit.finish(if terminal_persisted {
+                Ok(())
+            } else {
+                Err("terminal_status_persist_failed".into())
+            });
+        }
         // deregister 由 cleanup_guard drop 统一执行（正常/abort/panic 三路）
     };
     let join_handle = peri_acp_types::tasks::TaskManager::spawn_owned(

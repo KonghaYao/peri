@@ -28,6 +28,9 @@ pub struct TaskManager {
     registry: Arc<BackgroundTaskRegistry>,
     shell_executor: Option<Arc<dyn ShellExecutor>>,
     external_registration: parking_lot::Mutex<()>,
+    child_owners: parking_lot::RwLock<
+        std::collections::HashMap<String, Arc<crate::session::subagent::ParkedChildOwner>>,
+    >,
 }
 
 fn external_task_id(request: &ExternalTaskRegistration) -> String {
@@ -113,6 +116,24 @@ impl Default for TaskManager {
 }
 
 impl peri_acp_types::tasks::TaskManager for TaskManager {
+    fn child_task_manager(
+        &self,
+        child_id: &str,
+    ) -> Option<Arc<dyn peri_acp_types::tasks::TaskManager>> {
+        self.child_owner(child_id)
+            .map(|owner| owner.manager.clone() as Arc<dyn peri_acp_types::tasks::TaskManager>)
+    }
+
+    fn close_child_resources(
+        &self,
+    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<(), String>> + Send + '_>> {
+        Box::pin(async move {
+            for owner in self.child_owners() {
+                owner.close().await?;
+            }
+            Ok(())
+        })
+    }
     fn restore_external_terminal(
         &self,
         request: ExternalTaskRegistration,
@@ -364,6 +385,39 @@ impl peri_acp_types::tasks::TaskManager for TaskManager {
 }
 
 impl TaskManager {
+    pub fn child_owner(
+        &self,
+        child_id: &str,
+    ) -> Option<Arc<crate::session::subagent::ParkedChildOwner>> {
+        let children: Vec<_> = self.child_owners.read().values().cloned().collect();
+        for child in children {
+            if child.child_thread_id == child_id {
+                return Some(child);
+            }
+            if let Some(descendant) = child.manager.child_owner(child_id) {
+                return Some(descendant);
+            }
+        }
+        None
+    }
+
+    pub fn child_owners(&self) -> Vec<Arc<crate::session::subagent::ParkedChildOwner>> {
+        self.child_owners.read().values().cloned().collect()
+    }
+
+    pub(crate) fn register_child_owner(
+        &self,
+        owner: Arc<crate::session::subagent::ParkedChildOwner>,
+    ) -> Result<(), String> {
+        let _admission = self.registry.scope.admit()?;
+        let mut children = self.child_owners.write();
+        if children.contains_key(&owner.child_thread_id) {
+            return Err("child resource owner is already registered".into());
+        }
+        children.insert(owner.child_thread_id.clone(), owner);
+        Ok(())
+    }
+
     pub(crate) fn begin_session_close(&self) {
         self.registry.scope.close();
     }
@@ -602,6 +656,7 @@ impl TaskManager {
             registry: Arc::new(BackgroundTaskRegistry::new()),
             shell_executor: None,
             external_registration: parking_lot::Mutex::new(()),
+            child_owners: parking_lot::RwLock::default(),
         }
     }
 

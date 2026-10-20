@@ -47,6 +47,7 @@ pub(super) fn attach_subagent_host(
     {
         let host = SubagentHost {
             close_state: Arc::default(),
+            child_owner: None,
             mcp_pool: input.mcp_pool.clone(),
             session_resources: thread_persistence.session_resources.clone(),
             task_manager: Some(task_manager.clone()),

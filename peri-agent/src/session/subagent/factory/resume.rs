@@ -130,6 +130,15 @@ pub(super) async fn resume_subagent_impl(
             return Err("bound subagent belongs to another root session execution owner".into());
         }
     }
+    let _preparation = parent
+        .and_then(|session| session.subagent_host())
+        .and_then(|host| {
+            host.task_manager
+                .as_ref()
+                .and_then(|manager| manager.child_owner(&thread_id))
+        })
+        .map(|owner| owner.prepare_resume())
+        .transpose()?;
     let ownership = task_manager
         .as_ref()
         .map(|manager| {

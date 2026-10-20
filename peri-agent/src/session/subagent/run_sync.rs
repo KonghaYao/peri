@@ -339,6 +339,11 @@ pub(super) async fn run_sync_subagent(
     mut resume_claim: Option<ResumeClaim>,
     handoff_start: Option<tokio::sync::oneshot::Sender<()>>,
 ) -> Result<bool, Box<dyn std::error::Error + Send + Sync>> {
+    let permit = session
+        .subagent_host()
+        .and_then(|host| host.child_owner.clone())
+        .map(|owner| owner.acquire(v2_ctx.context.session.turn.execution_binding()))
+        .transpose()?;
     let agent_name = agent_name.to_string();
     let cwd = cwd.to_string();
 
@@ -560,6 +565,9 @@ pub(super) async fn run_sync_subagent(
                     .finish(peri_acp_types::thread::AgentStatus::Error)
                     .await?;
             }
+            if let Some(permit) = permit {
+                permit.finish(Ok(()));
+            }
             return Err(Box::new(failure));
         }
     };
@@ -589,5 +597,8 @@ pub(super) async fn run_sync_subagent(
             .await?;
     }
 
+    if let Some(permit) = permit {
+        permit.finish(Ok(()));
+    }
     Ok(interrupted)
 }

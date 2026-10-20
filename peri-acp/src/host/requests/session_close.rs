@@ -99,6 +99,16 @@ pub(in crate::host::requests) async fn close_session(
             ));
         }
     }
+    let child_manager = local
+        .session_manager
+        .get_session(session_id)
+        .map(|session| session.task_manager.clone());
+    if let Some(manager) = child_manager {
+        manager
+            .close_child_resources()
+            .await
+            .map_err(|error| AcpError::new(-32010, format!("Session close incomplete: {error}")))?;
+    }
     if let Some(pool) = local.mcp_pool.as_ref() {
         if sessions.contains_key(session_id) {
             Arc::clone(pool)

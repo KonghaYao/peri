@@ -660,6 +660,16 @@ pub(super) async fn handle_cancel_bg_task(
         .ok_or_else(|| AcpError::new(-32602, format!("session not found: {req_session_id}")))?;
     let manager = Arc::clone(&session.task_manager);
     drop(session);
+    let manager = if let Some(child_id) = params.get("childThreadId").and_then(Value::as_str) {
+        manager.child_task_manager(child_id).ok_or_else(|| {
+            AcpError::new(
+                -32602,
+                "child resource owner is outside owning session tree",
+            )
+        })?
+    } else {
+        manager
+    };
     manager
         .cancel_async(task_id)
         .await
@@ -677,7 +687,20 @@ pub(super) fn handle_bg_tasks(params: &Value, cfg: &AcpServerConfig) -> Result<V
         .session_manager
         .get_session(session_id)
         .ok_or_else(|| AcpError::new(-32602, "session not found"))?;
-    Ok(super::task_snapshot_value(session.task_manager.snapshot()))
+    let manager = if let Some(child_id) = params.get("childThreadId").and_then(Value::as_str) {
+        session
+            .task_manager
+            .child_task_manager(child_id)
+            .ok_or_else(|| {
+                AcpError::new(
+                    -32602,
+                    "child resource owner is outside owning session tree",
+                )
+            })?
+    } else {
+        session.task_manager.clone()
+    };
+    Ok(super::task_snapshot_value(manager.snapshot()))
 }
 
 #[path = "session_close.rs"]
