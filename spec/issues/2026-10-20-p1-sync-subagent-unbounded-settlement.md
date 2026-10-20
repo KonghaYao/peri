@@ -1,6 +1,6 @@
 # P1：子 Agent 无界收尾
 
-状态：A′ 已实现并通过定向与全库回归；真实进程/TUI 手测未覆盖。日期：2026-10-20。
+状态：A′ 已实现；独立验收 B1–B6 已修复并补回归。真实 MCP wire、TUI 手测与自有重启 fixture 未覆盖。日期：2026-10-20。
 
 ## 故障与证据
 
@@ -39,23 +39,38 @@
 
 ## 验收清单
 
-- [x] 永久 Working 无通知、activity/任务新增：D 不重置，计算退出但 Shell 仍 Working（`permanent_shell_hands_off_at_deadline_without_notifications`、`activity_and_new_tasks_do_not_reset_deadline`）。
-- [x] 无任务正常退出；D 内完成由旧 child 正常处理；D 后终态与 Stop 恰一次（`child_without_active_tasks_settles_immediately`、`settled_sync_child...`、`background_child_...`）。
-- [x] active=0 但消息未消费仍交接；Receive 跨 D 保留历史；Reason 跨 D 的 Act 完成配对，不开下一轮（`terminal_result_without_consumption...`、`receive_across_deadline...`、`admitted_reason_completes_act_after_deadline`）。
+- [x] 永久 Working 无通知、每秒 activity/任务新增：D 不重置，计算退出但 Shell 仍 Working（`permanent_shell...`、`activity_and_new_tasks...` 连续 5 次每秒注入）。
+- [x] 无任务正常退出；D 内完成由旧 child 正常处理；D 后终态与 Stop 恰一次（`child_without_active_tasks...`、`settled_sync_child...`、`background_child_...`）。
+- [x] active=0 但消息未消费仍交接；Receive 提交跨 D 后才登记义务；Reason 跨 D 的 Act 完成配对（`terminal_result_without_consumption...`、`receive_commit_crossing_deadline...`、`admitted_reason...`）。
 - [x] MaxIterations 保留原错误与残留交接；HookStop 不追加模型提醒；cancel 先于 D 生效（`max_iterations_keeps_reason...`、`terminal_result_without_consumption...`、`cancelled_child...`）。
-- [x] sync/bg × 新建；resume 复用 owner/MQ 并由显式 prompt 驱动（`late_result_after_deadline_requires_explicit_resume`、现有 resume 回归）。
-- [x] 父 `sync-*` 注册与 child 终态竞争：无父宿主、父已 closing、正常注册三条分支均返回 typed 结果；同刻调度本身未做确定性注入（`handoff_without_parent_owner...`、`handoff_with_closing_parent...`、`handoff_sync_child...`）。
-- [x] callback 拒绝后由 registry 单一 retry worker 接管，wrapper 释放完整 session（`handoff_sync_child_returns_pending_and_registry_retries_delivery`）。
-- [x] 无父投递宿主/缺 owner/closing 显式失败，不制造幽灵任务（`handoff_without_parent_owner...`、`missing_owner...`、`test_close_rejects_active_execution...`）。
-- [x] handoff append/status write 失败不误报交接或可 resume（`handoff_persistence_failure...`、`subagent_terminal_write_failure...`）。
-- [x] late result 后显式 resume 复用原 MQ/manager、新执行身份（`late_result_after_deadline_requires_explicit_resume`）。
-- [x] 不 resume 关闭：终态按原 ID 落库、其他输入记录为 `child_retained_input_unprocessed`、失败保留 owner 并返回 Incomplete（`test_close_settles_terminal...`、`parent_close_retains...`）。
-- [x] D 时 pending 列表为空但仍有保留消息：wrapper 仍交接，不因空列表 abort（`handoff_with_empty_task_list_keeps_retained_messages`）。
-- [x] 旧 ContinueCurrentRun 消息被抑制；A→B→C 结果仅归直接父（`old_bound_control_message...`、`nested_a_b_c...`）。
+- [x] sync/bg × 新建；真实 `SessionFactory::resume_subagent`/claim 复用 owner 的原队列与 manager（`test_resume_factory_reuses_handoff_owner_queue_and_manager`、ACP live resume）。
+- [x] 父 `sync-*` 注册与 child 终态竞争：无父宿主、父已 closing、正常注册三分支；边界 1ms 前后覆盖调度方向，精确同刻调度无法由 tokio 定时器注入。
+- [x] callback 拒绝→拒绝→成功后 close 成功率；持续失败保留 delivery 记录（`handoff_sync_child...`、`parent_close_retains...`）。
+- [x] 无父投递宿主/缺 owner/closing 显式失败，不制造幽灵任务。
+- [x] handoff append/status write 失败不误报交接或可 resume；执行错误 + 交接写失败返回 `HandoffFailed` 并保留原错误/冻结 receipt（`execution_error_with_handoff_write_failure...`、`handoff_persistence_failure...`）。
+- [x] late result 后显式 resume 复用原 MQ/manager、新执行身份。
+- [x] 不 resume 关闭：终态按原 ID 落库、其他输入记录为 `child_retained_input_unprocessed`；真实 barrier 失败保留 owner/binding 并返回 Incomplete（`test_close_with_unconfirmed_history_flush_keeps_owner`）。
+- [x] D 时 pending 列表为空但仍有保留消息：wrapper 仍交接，不因空列表 abort。
+- [x] 旧 ContinueCurrentRun 消息被抑制；A→B→C 结果仅归直接父；root 可在真实三层 owner 树查询/取消/关闭（`test_root_queries_cancels_and_closes_nested_owner_tree`）。
 - [~] 重启仅加载历史：沿用既有 cold-resume/history 回归（全库通过），未新增独立重启 fixture；不承诺未落库 MQ 恢复。
-- [ ] 真实受控阻塞进程在 D 后仍存活、正式取消接口确认进程树与输出管道清理：未实现真实进程 fixture。本任务未改动 Shell promote/执行期限，不能由单元测试替代该证据。
+- [~] 旧 Stop/旧 cancel 晚到：旧 bound 消息有专测；Stop/cancel 由 permit 在排空后释放保证，未单独注入迟到 Stop/cancel。
+- [x] 真实受控阻塞进程：D 后仍存活，正式取消接口杀死进程并回收输出管道（`real_blocking_shell_survives_deadline_then_cancel_cleans_process`）。
+- [~] ACP 根关闭 + 真实 MCP producer barrier、TUI 与真实 MCP wire：owner/root close 已覆盖；ACP 全库通过，但未构造“late result + 真实 MCP producer”与 TUI 手测。
 
 时间用例使用 paused-time 且实际运行非零目标用例。真实 wire/进程验收不可由静态检查替代。
+
+## 独立验收 B1–B6 修复
+
+| 项 | 修复 | 回归证据 |
+| --- | --- | --- |
+| B1 Receive 跨 D 误报 Settled | Receive 在 canonical flush/append **完成后**重新检查 D，只登记已提交且 disposition=Process 的未推理消息；runner 以该引用判定交接 | `receive_commit_crossing_deadline_hands_off_unprocessed_result`（真实 append barrier；D 在 append 期间届满，断言 HandedOff、tasks 为空、receipt 含 delivery ID） |
+| B2 执行错误 + 交接写失败只留日志 | 新增 `ChildRunOutcome::HandoffFailed { cause, failure }`；保留原错误、`HandoffCommitError` 与冻结 receipt；parent/runner 映射为 failed | `execution_error_with_handoff_write_failure_keeps_both_causes`（真实受限 store；断言原 model 错误、persistence 错误与 receipt 同时存在） |
+| B3 成功回执不清旧失败 | `confirmed` 成功时 `settle_sync_delivery` 清除旧记录；失败继续记录 | `handoff_sync_child...` 拒绝×2→成功，断言 `sync_delivery_errors` 为空；`parent_close...` 持续失败保留记录 |
+| B4 close 吞 flush 失败 | 新增 typed `FlushError::{WriterClosed, Persistence}`；真实持久化失败设置 owner failure、返回 Incomplete，不释放 owner/binding；仅 writer 正常关闭可继续 | `test_close_with_unconfirmed_history_flush_keeps_owner`（受限 store、空队列；断言 Incomplete、owner 仍在 parent 树） |
+| B5 background 排空失败不阻断准入 | `drain_failure` 进入 `permit.finish(Err)`，与 sync 一致 | `background_drain_failure_blocks_resume`（真实 SubagentStop bridge panic；断言父结果失败且 `check_resume` 拒绝） |
+| B6 文件超 1000 行 | 查询/取消 handler 拆到 `peri-acp/src/host/requests/session_tasks.rs`；`session_lifecycle.rs` 945 行并 re-export | `wc -l`；peri-acp 全库通过 |
+
+补充覆盖：连续每秒 activity、D 边界前后 1ms 的完成/cancel 两种调度方向、真实 factory/claim resume、worker 释放 LLM/StageContext（Weak）、root 三层 owner 查询/取消/关闭、真实阻塞进程取消与输出管道清理。精确同刻调度无法由 tokio 定时器确定性注入，使用 ±1ms 边界夹逼并在报告注明。
 
 ## 实现记录
 
@@ -64,22 +79,23 @@
 - `da969a92c`：阶段 3，冻结交接快照、flush + 幂等 append、区分缺能力/写失败；同步状态提交失败显式返回，先提交再 Stop，事件排空失败阻止 owner resume。
 - 后续提交：接入共享 D、loop/Receive 准入门、typed outcome 四条路径、wrapper retry 移交、owner close 消息结算、binding 释放、旧消息抑制及验收测试。
 
-剩余风险：同刻调度未穷举；真实进程与 TUI 手测未执行；`close_subagent_session_scope` 的 owner.close 会取消运行中 Shell（沿用显式关闭策略），与截止交接的“不取消 Shell”是不同触发路径。
+剩余风险：真实 MCP wire producer barrier、ACP 根关闭叠加 late result、TUI 手测与自有重启 fixture 未覆盖；精确同刻调度用 ±1ms 边界夹逼而非同一 tick 注入；`close_subagent_session_scope` 的 owner.close 会取消运行中 Shell（沿用显式关闭策略），与截止交接的“不取消 Shell”是不同触发路径。
 
 ## 实际验证
 
 所有命令在指定 worktree 内执行，统一前缀 `./scripts/cargo-rmcp-patched.sh`。
 
-- `test --locked -p peri-agent --lib -- session::subagent::child_runner::tests`：21 passed，0 failed（含 background/nested 子模块；paused-time）。
-- `test --locked -p peri-agent --lib -- session::subagent::run_sync::tests`：7 passed，0 failed。
+- `test --locked -p peri-agent --lib -- session::subagent::child_runner::tests`：29 passed，0 failed（含 background/nested/deadline/process 子模块；paused-time）。
+- `test --locked -p peri-agent --lib -- session::subagent::run_sync::tests`：8 passed，0 failed。
 - `test --locked -p peri-agent --lib -- agent::async_tasks::handoff::tests`：6 passed，0 failed。
-- `test --locked -p peri-agent --lib -- session::subagent::resource_owner::tests`：7 passed，0 failed。
-- `test --locked -p peri-agent --lib -- session::subagent::`：131 passed，0 failed。
-- `test --locked -p peri-agent --lib`：1181 passed，0 failed，3 ignored。并行运行时 `agent::stages::receive::tests::committed_delivery_missing_from_hot_state_is_restored_without_reemitting` 曾因共享 git fixture 失败一次，单测与复跑均通过；该用例不涉及本修复路径。
+- `test --locked -p peri-agent --lib -- session::subagent::resource_owner::tests`：9 passed，0 failed。
+- `test --locked -p peri-agent --lib -- session::subagent::`：143 passed，0 failed。
+- `test --locked -p peri-agent --lib`：1193 passed，0 failed，3 ignored。并行运行时 `agent::stages::receive::tests::committed_delivery_missing_from_hot_state_is_restored_without_reemitting` 曾因共享 git fixture 失败一次，单测与复跑均通过；该用例不涉及本修复路径。
 - `test --locked -p peri-acp-types --lib`：660 passed，0 failed。
 - `build --locked -p peri-agent -p peri-acp`：通过，退出码 0。
 - `clippy --locked -p peri-agent -p peri-acp --lib -- -D warnings`：通过，退出码 0。
 - `test --locked -p peri-agent --doc`：15 passed，0 failed。
 - `test --locked -p peri-acp-types --doc`：6 passed，0 failed，2 ignored。
 - `test --locked -p peri-acp --lib`：1039 passed，0 failed，1 ignored（含 live resume child chain 用例）。
-- 未执行：真实 MCP wire、受控阻塞进程与进程树清理、TUI 手测。理由是实现范围未包含这些 fixture；不能由静态检查或单元测试替代。
+- `wc -l peri-acp/src/host/requests/session_lifecycle.rs`：945（拆分后 < 1000）。
+- 未覆盖：真实 MCP wire producer barrier 叠加 ACP 根关闭、TUI 手测、自有进程重启用例。真实受控阻塞进程与进程树/输出管道清理已由 `real_blocking_shell_survives_deadline_then_cancel_cleans_process` 覆盖。
