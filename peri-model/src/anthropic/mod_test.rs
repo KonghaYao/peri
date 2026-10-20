@@ -60,7 +60,10 @@ fn request() -> ModelRequest {
 
 #[test]
 fn request_contract_preserves_system_cache_thinking_and_tool_result_order() {
-    let body = body_for_test(&config().with_extended_thinking(456, "high"), &request());
+    let body = body_for_test(
+        &config().with_extended_thinking(1_024, "high"),
+        &request().with_max_tokens(2_048),
+    );
     let system = body["system"].as_array().expect("cached system blocks");
     assert_eq!(system[0]["text"], "static");
     assert_eq!(system[0]["cache_control"]["type"], "ephemeral");
@@ -71,7 +74,7 @@ fn request_contract_preserves_system_cache_thinking_and_tool_result_order() {
     assert!(system[1].get("cache_control").is_none());
     assert_eq!(
         body["thinking"],
-        json!({ "type": "enabled", "budget_tokens": 456 })
+        json!({ "type": "enabled", "budget_tokens": 1_024 })
     );
     assert_eq!(body["output_config"], json!({ "effort": "high" }));
     assert_eq!(
@@ -86,6 +89,42 @@ fn request_contract_preserves_system_cache_thinking_and_tool_result_order() {
     assert_eq!(results[0]["tool_use_id"], "call-a");
     assert_eq!(results[1]["tool_use_id"], "call-b");
     assert_eq!(results[1]["is_error"], true);
+}
+
+/// 请求级 max_tokens 小于最小思考预算时，不能发送非法的 thinking 配置。
+#[test]
+fn request_budget_below_thinking_minimum_disables_thinking() {
+    let body = body_for_test(
+        &config().with_extended_thinking(10_000, "max"),
+        &request().with_max_tokens(1_024),
+    );
+    assert_eq!(body["max_tokens"], 1_024);
+    assert!(body.get("thinking").is_none());
+    assert!(body.get("output_config").is_none());
+}
+
+/// thinking 预算要为正文预留空间；请求上限不足时按可用额度收缩。
+#[test]
+fn request_budget_shrinks_thinking_budget_to_reserve_response() {
+    let body = body_for_test(
+        &config().with_extended_thinking(10_000, "max"),
+        &request().with_max_tokens(2_048),
+    );
+    assert_eq!(
+        body["thinking"],
+        json!({ "type": "enabled", "budget_tokens": 1_024 })
+    );
+}
+
+/// 最小思考预算加正文预留放不下时，不发送 thinking。
+#[test]
+fn request_budget_below_thinking_plus_reserve_disables_thinking() {
+    let body = body_for_test(
+        &config().with_extended_thinking(10_000, "max"),
+        &request().with_max_tokens(1_536),
+    );
+    assert!(body.get("thinking").is_none());
+    assert!(body.get("output_config").is_none());
 }
 
 /// [回归测试] 连续工具轮次必须把 prompt cache 断点推进到最新 tool_result；
