@@ -68,7 +68,7 @@ loop 在 cancel 检查后、Receive 前检查 D；Receive 之后、新语义迭�
 
 sync wrapper 只在收到已提交 receipt 后 detach；无父投递宿主时等待 typed outcome 并同步返回未完成，不制造幽灵任务。父结果投递失败由 registry `pending_deliveries` 的单一 retry worker 接管，wrapper 释放完整 child session，不再自建轮询；重试成功回执清除此前的 delivery 失败记录。background 与 sync 一致：事件排空失败进入执行 permit，阻止新 run 准入，而不只是改写结果文本。执行/交接已失败后的 history flush 失败不得把 `HandoffFailed` 替换成无 receipt 的 `Failed`；保留原错误、结构化提交失败与冻结身份，并把 flush 失败附加到结构化失败供父级诊断。
 
-截止后的结果仍投直接 child 的 MQ；不隐式复活旧执行。新的模型分析需要显式 `Agent(resume_thread_id, prompt)`，这是长任务超过窗口的已接受代价。旧执行的 ContinueCurrentRun 控制消息在新 run 中被抑制；旧 Stop 在 owner 开放下一次准入前排空。
+截止后的结果仍投直接 child 的 MQ；不隐式复活旧执行。新的模型分析需要显式 `Agent(resume_thread_id, prompt)`，这是长任务超过窗口的已接受代价。旧执行的 ContinueCurrentRun 控制消息在新 run 中被抑制；旧 Stop 绑定产生它的执行身份，在新执行中同样按过期控制消息抑制，不终止新 run。同一执行内的 Stop 仍经 Receive 唯一退出口生效；主会话映射为正常结束，子 Agent 由 runner 完成未推理义务交接。
 
 不 resume 而关闭时，owner 先阻断 resume，取消/结清真实资源，再由非模型路径将停驻 MQ 中的终态按原 delivery ID 写入 child canonical；其他未处理输入记录为 `child_retained_input_unprocessed`，不静默清空。失败保留可查询 owner 并返回 Incomplete，不释放 binding，不宣称 Closed。
 

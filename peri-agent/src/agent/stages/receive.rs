@@ -59,9 +59,12 @@ pub(super) async fn run_receive_with_budget(
 ) -> crate::error::AgentResult<ReceiveOutput> {
     let execution = input.context.session.turn.execution_binding();
     let consumed = input.context.session.queue.drain_batch(64);
-    let stop_requested = consumed
-        .iter()
-        .any(|message| message.source == MessageSource::HookStopIntent);
+    // 停止意图只在产生它的执行中生效；resume 后新执行看到的旧 Stop 按
+    // Suppressed 处理（下方统一移入 suppressed，不写 transcript，也不停新 run）。
+    let stop_requested = consumed.iter().any(|message| {
+        message.source == MessageSource::HookStopIntent
+            && message.policy.disposition(&execution) != MessageDisposition::Suppressed
+    });
     let (deferred, consumed): (Vec<_>, Vec<_>) = consumed.into_iter().partition(|message| {
         !stop_requested
             && exhausted_after.is_some_and(|watermark| {

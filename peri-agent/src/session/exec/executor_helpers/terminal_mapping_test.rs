@@ -145,6 +145,24 @@ fn completed_maps_to_success_no_failure() {
 }
 
 #[test]
+fn hook_stopped_maps_to_success_no_failure() {
+    let terminal = classify_loop_terminal(
+        &LoopResult::HookStopped {
+            unprocessed_tool_calls: vec!["call-1".into()],
+        },
+        false,
+    );
+    assert!(terminal.ok, "主会话 HookStop 是正常结束，不是失败");
+    assert_eq!(terminal.stop_reason, PromptStopReason::EndTurn);
+    assert_eq!(terminal.turn_status, TurnStatus::Done);
+    assert_eq!(terminal.turn_error_kind, None);
+    assert!(
+        terminal.failure.is_none(),
+        "HookStop 不得升级为 fatal failure"
+    );
+}
+
+#[test]
 fn completed_after_late_cancel_remains_committed_success() {
     let terminal = classify_loop_terminal(&LoopResult::Completed, true);
     assert!(terminal.ok);

@@ -1,6 +1,6 @@
 # P1：子 Agent 无界收尾
 
-状态：A′ 已实现；本轮补修 HookStop 丢失已准入 Act 身份、max_iterations 残留交接，并补 close 状态及 canonical reminder 断言。独立验收仍待复核；真实 MCP wire、TUI 手测与自有重启 fixture 未覆盖。日期：2026-10-20。
+状态：A′ 已实现；第五轮复审的主会话 HookStopped panic 与旧 Stop 污染新 run 已修复并补回归；独立验收仍待复核。真实 MCP wire、TUI 手测与自有重启 fixture 未覆盖。日期：2026-10-20。
 
 ## 故障与证据
 
@@ -88,6 +88,22 @@
 3. close 分类：原测试仅检查分类函数，不能证明 meta 状态。`cancel_running_claim_finalizes_only_after_resource_close_is_confirmed` 走真实 ResumeClaim/close worker：独立 history Store flush 失败而 meta Store 可写时仍保持 Active；资源关闭但执行结算未确认时写 Cancelled。此项补测试，不改生产分类规则。
 4. canonical 交接：原测试未锁定 tool call 字段。上述两个直接 runner 用例断言实际执行一个工具、无其他义务，并按 canonical_message_id 查落库提醒，核对 receipt、正文、metadata、父级 notice 的 call-1 一致。此项补测试，不改 reminder 格式。
 5. 遗留改动：保留五个文件的有效实现；修正 LoopState 与 AsyncContext 重复保存身份、HookStopped 分支的移动问题；测试从工具直接注入停止消息改为 after_tools_batch 窄能力投递。新增 fixture 的字段/导出路径编译错误、重复设置 host 与取消 token 断言错误已修正，最终结果见下。
+
+## 第五轮复审收口
+
+1. 主会话 HookStopped panic：`classify_loop_terminal` 旧逻辑只识别 `Completed`，`HookStopped` 落入 `unreachable!`。现在分类器把 `HookStopped` 映射为 Done/EndTurn/无 failure，MQ steering continuation 与 `Completed` 同条件。故障注入恢复旧分类后，`main_executor_hook_stop_finishes_done_without_panic` 实际以 `unreachable!` panic 失败；恢复修复后通过。`terminal_mapping_tests::hook_stopped_maps_to_success_no_failure` 覆盖纯分类。
+2. 旧 HookStopIntent 污染新 run：新增 `MessageActivation::StopCurrentRun` / `MessagePolicy::stop_current_run`，`enqueue_stop_intent` 绑定当前执行；Receive 只把非 `Suppressed` 的 Stop 置为 `stop_requested`，旧执行 Stop 与旧 ContinueCurrentRun 一样显式抑制且不写 transcript。故障注入恢复“只按来源判断”后，`stale_stop_intent_does_not_stop_new_execution` 与真实 resume 用例均失败（后者 LLM 调用 0 次、等待 120 秒后失败）；恢复修复后均通过。`deadline_left_stop_intent_does_not_stop_resumed_execution` 覆盖 D 先到期留下 Stop、下一执行继续推理、同执行 Stop 仍返回 HookStopped。
+3. 文档：design 的“旧 Stop 在 owner 开放下一次准入前排空”改为与实际一致的执行绑定/抑制描述；`mod.rs` 的 Completed 注释同步为 HookStopped 及主/子分流。
+
+## 第五轮实际验证
+
+- `test --locked -p peri-agent --lib`：1211 passed，0 failed，3 ignored。
+- `test --locked -p peri-acp-types --lib`：661 passed，0 failed；`--doc`：6 passed，0 failed，2 ignored。
+- `test --locked -p peri-acp --lib`：首轮 1038 passed、1 failed（`test_update_config_切换provider后cfg_provider更新`，`Failed to persist config`）；单测复跑通过，全量复跑 1039 passed、0 failed、1 ignored。该失败不涉及本次路径，按环境/并行持久化竞争记录，不宣称一次全绿。
+- 定向：child_runner 34、run_sync 9、handoff 27、resource_owner 11、session::subagent 154、agent::stages 208、executor_helpers 60，均 0 failed。
+- `build --locked -p peri-agent -p peri-acp`、`clippy --locked -p peri-agent -p peri-acp --lib -- -D warnings`：退出码 0。
+- `peri-agent --doc`：15 passed，0 failed。
+- `wc -l`：分支相对 main 的变更 Rust 文件最大 `agent/stages/mod.rs` 999 行，其余 ≤979；全部 ≤1000。
 
 ## 实现记录
 

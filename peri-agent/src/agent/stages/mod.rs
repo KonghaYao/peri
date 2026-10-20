@@ -555,7 +555,9 @@ pub async fn run_react_loop(context: StageContext, max_iterations: usize) -> Loo
             };
 
             // Hook 显式停止意图（PostToolBatch `continue:false`）：Receive 是循环的
-            // 唯一退出口；消费到停止意图直接以 Completed 结束，不再发起模型请求。
+            // 唯一退出口；消费到停止意图返回 `HookStopped`，不再发起模型请求。
+            // 子 Agent 由 runner 按未推理义务交接；主会话由 executor 映射为正常
+            // Done。停止意图已绑定执行身份，旧 run 的 Stop 不会终止新执行。
             if receive_out.stop_requested {
                 // 同批已提交但不会推理的消息保留为交接义务。
                 context
@@ -991,3 +993,7 @@ mod bounded_wait_exit_tests;
 #[cfg(test)]
 #[path = "model_view_test.rs"]
 mod model_view_tests;
+
+#[cfg(test)]
+#[path = "stop_intent_test.rs"]
+mod stop_intent_tests;
