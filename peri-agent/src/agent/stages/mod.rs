@@ -588,6 +588,11 @@ pub async fn run_react_loop(context: StageContext, max_iterations: usize) -> Loo
             // Hook 显式停止意图（PostToolBatch `continue:false`）：Receive 是循环的
             // 唯一退出口；消费到停止意图直接以 Completed 结束，不再发起模型请求。
             if receive_out.stop_requested {
+                // Stop 优先：未处理结果进入 Suspended，不得保留 Ready 触发自动续跑。
+                context
+                    .session
+                    .async_result_mailbox
+                    .suspend_scope("hook stop");
                 if let Some(flag) = &context.async_ctx.hook_stop_requested {
                     flag.store(true, Ordering::Release);
                 }
@@ -605,6 +610,9 @@ pub async fn run_react_loop(context: StageContext, max_iterations: usize) -> Loo
             if receive_out.wake_up_count == 0
                 && receive_out.budget_deferred_count == 0
                 && !loop_state.has_tool_calls
+                // 续跑请求可能没有队列消息：Ready 结果必须进入本次请求处理，
+                // 不能以“队列为空”为由提前退出并留下自动续跑候选。
+                && !context.session.async_result_mailbox.has_ready()
             {
                 // 竞态保护：退出前再检查一次队列是否有新消息到达
                 if context.session.queue.has_required_for_run(&execution) {

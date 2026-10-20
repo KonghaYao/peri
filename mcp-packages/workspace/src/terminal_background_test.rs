@@ -147,7 +147,7 @@ async fn test_bg_shell_log_file_tee() {
     let result = tool
         .invoke(
             serde_json::json!({
-                "command": "printf 'first\\n'; sleep 1.5; printf 'second\\n'",
+                "command": "printf 'first\\n'; sleep 1.5; printf '%s\\n' second-$((1+1))",
                 "run_in_background": true,
             }),
             peri_agent::tools::ToolContext::new(&[], "."),
@@ -197,7 +197,12 @@ async fn test_bg_shell_log_file_tee() {
     assert!(files.complete);
     assert_eq!(files.stdout_path.as_deref(), Some(log_path.as_str()));
     assert_eq!(files.exit_code, Some(0));
-    assert!(!notif.to_notification().contains("second"));
+    // 命令文本本身会出现 "second"；用只在输出展开后出现的 "second-2" 断言正文未内联。
+    assert!(
+        !notif.to_notification().contains("second-2"),
+        "通知不能内联输出正文: {}",
+        notif.to_notification()
+    );
     // 完成通知的读取指引逐字断言完整短语，避免只匹配工具名。
     assert!(
         notif
