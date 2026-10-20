@@ -261,9 +261,7 @@ fn parent_result(
             let safe = match cause {
                 Some(cause) => SubagentFailure::safe_failure_from_error(child_thread_id, cause),
                 None => {
-                    let error = crate::error::AgentError::ChildHandoffPersistenceFailed {
-                        reason: failure.error.to_string(),
-                    };
+                    let error = super::types::handoff_failure_agent_error(failure);
                     SubagentFailure::safe_failure_from_error(child_thread_id, &error)
                 }
             };
@@ -695,9 +693,7 @@ fn stop_projection(
             let safe = match cause {
                 Some(cause) => SubagentFailure::safe_failure_from_error(child_thread_id, cause),
                 None => {
-                    let error = crate::error::AgentError::ChildHandoffPersistenceFailed {
-                        reason: failure.error.to_string(),
-                    };
+                    let error = super::types::handoff_failure_agent_error(failure);
                     SubagentFailure::safe_failure_from_error(child_thread_id, &error)
                 }
             };

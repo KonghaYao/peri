@@ -335,9 +335,7 @@ pub(super) async fn spawn_background_subagent(
                         SubagentFailure::safe_failure_from_error(&child_thread_id_for_task, cause)
                     }
                     None => {
-                        let error = crate::error::AgentError::ChildHandoffPersistenceFailed {
-                            reason: failure.error.to_string(),
-                        };
+                        let error = super::types::handoff_failure_agent_error(failure);
                         SubagentFailure::safe_failure_from_error(&child_thread_id_for_task, &error)
                     }
                 };

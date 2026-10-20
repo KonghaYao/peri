@@ -41,6 +41,22 @@ pub struct ChildHandoffFailure {
     pub receipt: Option<ChildHandoffReceipt>,
 }
 
+/// 将交接提交失败投影为父级可分类错误；缺能力不得混入持久化失败。
+pub(crate) fn handoff_failure_agent_error(
+    failure: &ChildHandoffFailure,
+) -> crate::error::AgentError {
+    match &failure.error {
+        crate::agent::async_tasks::handoff::HandoffCommitError::MissingCapability => {
+            crate::error::AgentError::ChildHandoffCapabilityUnavailable {
+                reason: failure.error.to_string(),
+            }
+        }
+        _ => crate::error::AgentError::ChildHandoffPersistenceFailed {
+            reason: failure.error.to_string(),
+        },
+    }
+}
+
 /// 一次执行的冻结交接记录；只有 canonical 提交确认后才能返回 HandedOff。
 #[derive(Debug, Clone)]
 pub struct ChildHandoffReceipt {
@@ -517,10 +533,7 @@ impl SubagentFailure {
         failure: &ChildHandoffFailure,
     ) -> Self {
         let has_cause = cause.is_some();
-        let error =
-            cause.unwrap_or_else(|| crate::error::AgentError::ChildHandoffPersistenceFailed {
-                reason: failure.error.to_string(),
-            });
+        let error = cause.unwrap_or_else(|| handoff_failure_agent_error(failure));
         let reason = if has_cause {
             SubagentFailureReason::ExecutionFailed
         } else {

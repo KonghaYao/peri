@@ -72,6 +72,8 @@
 | 第三轮 #1 HandoffFailed 降级 | flush 失败不再把 `HandoffFailed` 替换为 `Failed { residual: None }`；`has_unsettled_obligations` 计入 failure/pending receipt；close 先关资源、再拒绝未确认交接；取消认领先写 Cancelled 再报告资源错误 | 上述真实 run_sync 用例；`close_lifecycle`/`resume_dispatch` 回归 |
 | 第三轮 #2 resume 测试超限 | 新用例拆到 `resume_owner_reuse_test.rs`（61 行），`resume_cases_test.rs` 990 行 | `wc -l` |
 | 第三轮 #3 Windows 可移植 | 进程树测试模块 `#[cfg(unix)]`，Windows 不编译/不运行该 fixture | 配置检查；本机无法执行 Windows |
+| 建议 #8 缺能力分类 | 新增 `AgentError::ChildHandoffCapabilityUnavailable`；`MissingCapability` 不再归类为 persistence 失败 | `test_missing_handoff_capability_is_not_classified_as_persistence_failure` |
+| 建议 #8 缺能力分类 | 新增 `AgentError::ChildHandoffCapabilityUnavailable`；`MissingCapability` 不再归类为 persistence 失败 | `test_missing_handoff_capability_is_not_classified_as_persistence_failure` |
 
 补充覆盖：连续每秒 activity、D 边界前后 1ms 的完成/cancel 两种调度方向、真实 factory/claim resume、worker 释放 LLM/StageContext（Weak）、root 三层 owner 查询/取消/关闭、真实进程组（父 `sh` + 子 `sleep`）在 D 后存活并由正式取消清理整个进程组与输出管道。精确同刻调度无法由 tokio 定时器确定性注入，使用 ±1ms 边界夹逼并在报告注明。
 
@@ -91,9 +93,9 @@
 - `test --locked -p peri-agent --lib -- session::subagent::child_runner::tests`：29 passed，0 failed（含 background/nested/deadline/process 子模块；paused-time）。
 - `test --locked -p peri-agent --lib -- session::subagent::run_sync::tests`：9 passed，0 failed（含真实 run_sync_subagent 的 HandoffFailed 端到端用例）。
 - `test --locked -p peri-agent --lib -- agent::async_tasks::handoff::tests`：6 passed，0 failed。
-- `test --locked -p peri-agent --lib -- session::subagent::resource_owner::tests`：10 passed，0 failed。
-- `test --locked -p peri-agent --lib -- session::subagent::`：145 passed，0 failed。
-- `test --locked -p peri-agent --lib`：1195 passed，0 failed，3 ignored。并行运行时 `agent::stages::receive::tests::committed_delivery_missing_from_hot_state_is_restored_without_reemitting` 曾因共享 git fixture 失败一次，单测与复跑均通过；该用例不涉及本修复路径。
+- `test --locked -p peri-agent --lib -- session::subagent::resource_owner::tests`：11 passed，0 failed。
+- `test --locked -p peri-agent --lib -- session::subagent::`：146 passed，0 failed。
+- `test --locked -p peri-agent --lib`：1196 passed，0 failed，3 ignored。并行运行时 `agent::stages::receive::tests::committed_delivery_missing_from_hot_state_is_restored_without_reemitting` 曾因共享 git fixture 失败一次，单测与复跑均通过；该用例不涉及本修复路径。
 - `test --locked -p peri-acp-types --lib`：660 passed，0 failed。
 - `build --locked -p peri-agent -p peri-acp`：通过，退出码 0。
 - `clippy --locked -p peri-agent -p peri-acp --lib -- -D warnings`：通过，退出码 0。

@@ -326,3 +326,29 @@ async fn test_close_rejects_active_execution_until_it_ends() {
     permit.finish(Ok(()));
     child.close().await.unwrap();
 }
+
+#[test]
+fn test_missing_handoff_capability_is_not_classified_as_persistence_failure() {
+    use crate::agent::async_tasks::handoff::HandoffCommitError;
+    use crate::session::subagent::{ChildHandoffFailure, SubagentFailure};
+
+    let missing = ChildHandoffFailure {
+        error: HandoffCommitError::MissingCapability,
+        receipt: None,
+    };
+    let failure = SubagentFailure::handoff_failed("child", "agent", None, &missing);
+    assert_eq!(
+        failure.error().category_name(),
+        "child_handoff_capability_unavailable"
+    );
+
+    let persistence = ChildHandoffFailure {
+        error: HandoffCommitError::Persistence(anyhow::anyhow!("append failed")),
+        receipt: None,
+    };
+    let failure = SubagentFailure::handoff_failed("child", "agent", None, &persistence);
+    assert_eq!(
+        failure.error().category_name(),
+        "child_handoff_persistence_failed"
+    );
+}

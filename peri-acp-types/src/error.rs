@@ -196,6 +196,9 @@ pub enum AgentError {
     #[error("Child handoff persistence failed: {reason}")]
     ChildHandoffPersistenceFailed { reason: String },
 
+    #[error("Child handoff capability unavailable: {reason}")]
+    ChildHandoffCapabilityUnavailable { reason: String },
+
     #[error(transparent)]
     Other(anyhow::Error),
 }
@@ -573,6 +576,9 @@ impl AgentError {
             Self::CompactBudgetUnrecovered { .. } => "compact_budget_unrecovered",
             Self::ChildTasksHandedOff { .. } => "child_tasks_handed_off",
             Self::ChildHandoffPersistenceFailed { .. } => "child_handoff_persistence_failed",
+            Self::ChildHandoffCapabilityUnavailable { .. } => {
+                "child_handoff_capability_unavailable"
+            }
             Self::Other(_) => "other",
         }
     }
