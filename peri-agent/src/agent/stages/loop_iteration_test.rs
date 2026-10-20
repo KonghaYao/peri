@@ -954,3 +954,129 @@ async fn test_run_react_loop_idle_wake_does_not_consume_iteration_budget() {
     assert_eq!(events.llm_end_steps, vec![1]);
     assert_single_turn_completed(&mut handles, 1);
 }
+
+fn async_result_reminder(task_id: &str) -> peri_acp_types::system_reminder::TrustedSystemReminder {
+    use peri_acp_types::system_reminder::{
+        ReminderAudience, ReminderAudiences, ReminderCategory, ReminderDelivery, ReminderSeverity,
+        ReminderSource as CanonicalSource, SystemReminder, TrustedSystemReminderFactory,
+        SYSTEM_REMINDER_VERSION,
+    };
+    TrustedSystemReminderFactory::for_producer()
+        .construct(SystemReminder {
+            version: SYSTEM_REMINDER_VERSION,
+            category: ReminderCategory::Task,
+            source: CanonicalSource("shell".into()),
+            kind: "terminal".into(),
+            severity: ReminderSeverity::Info,
+            delivery: ReminderDelivery::Configurable,
+            audiences: ReminderAudiences(vec![ReminderAudience::Model]),
+            body: format!("后台任务已结束\ntask_id: {task_id}\nstate: succeeded"),
+            summary: None,
+            metadata: serde_json::json!({"task_id": task_id}),
+        })
+        .unwrap()
+}
+
+fn ready_result(context: &StageContext, task_id: &str) -> crate::messages::MessageId {
+    let id = crate::messages::MessageId::new();
+    let reminder = async_result_reminder(task_id);
+    let mailbox = &context.session.async_result_mailbox;
+    mailbox
+        .accept(
+            id,
+            &reminder,
+            peri_acp_types::session::MessageSource::ShellComplete,
+        )
+        .unwrap();
+    mailbox
+        .mark_canonical_ready(
+            id,
+            &reminder,
+            peri_acp_types::session::MessageSource::ShellComplete,
+            None,
+        )
+        .unwrap();
+    id
+}
+
+/// 队列为空但 mailbox 仍有 Ready 结果时，循环必须进入本次请求处理，
+/// 不能以“没有可唤醒消息”为由退出并留下自动续跑候选。
+#[tokio::test]
+async fn async_result_ready_without_queue_work_runs_followup() {
+    let session = Session::new(
+        Arc::from("/tmp/async-ready-no-queue"),
+        FrozenContext::builder().build(),
+        None,
+    );
+    let calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let context = StageContext::builder(
+        session.start_turn(),
+        session.transcript(),
+        session.queue().clone(),
+    )
+    .with_llm(Arc::new(CountingFinalAnswerLLM {
+        calls: calls.clone(),
+        answer: "done",
+    }))
+    .build();
+
+    let _id = ready_result(&context, "shell-no-queue");
+    assert!(context.session.async_result_mailbox.has_ready());
+    assert!(session.queue().is_empty());
+
+    let result = run_react_loop(context.clone(), 5).await;
+    assert!(matches!(result, LoopResult::Completed));
+    assert_eq!(
+        calls.load(Ordering::SeqCst),
+        1,
+        "Ready 结果必须触发一次真实主模型请求"
+    );
+    assert_eq!(
+        context.session.async_result_mailbox.pending_count(),
+        0,
+        "处理完成后结果应 Covered"
+    );
+    assert!(!context.session.async_result_mailbox.has_ready());
+}
+
+/// [T12] Hook stop 必须在退出前挂起未处理结果：不能保持 Ready 触发自动续跑，
+/// 也不得伪造 Covered。
+#[tokio::test]
+async fn async_result_hook_stop_suspends_ready_result() {
+    let session = Session::new(
+        Arc::from("/tmp/async-result-hook-stop"),
+        FrozenContext::builder().build(),
+        None,
+    );
+    let calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let context = StageContext::builder(
+        session.start_turn(),
+        session.transcript(),
+        session.queue().clone(),
+    )
+    .with_llm(Arc::new(CountingFinalAnswerLLM {
+        calls: calls.clone(),
+        answer: "done",
+    }))
+    .build();
+
+    let id = ready_result(&context, "shell-stop");
+    session.queue().push(QueuedMessage::info(
+        MessageSource::HookStopIntent,
+        BaseMessage::human("stop"),
+    ));
+
+    let result = run_react_loop(context.clone(), 5).await;
+    assert!(
+        matches!(result, LoopResult::HookStopped { .. }),
+        "Hook stop 必须经唯一退出口返回 HookStopped，实际 {result:?}"
+    );
+    assert_eq!(calls.load(Ordering::SeqCst), 0, "Stop 之后不得发起模型请求");
+    assert_eq!(
+        context.session.async_result_mailbox.state_of(&id),
+        Some(crate::session::async_result_mailbox::AsyncResultState::Suspended),
+        "未处理结果必须挂起，而不是保持 Ready 或伪装 Covered"
+    );
+    assert!(!context.session.async_result_mailbox.has_ready());
+    assert_eq!(context.session.async_result_mailbox.pending_count(), 1);
+}

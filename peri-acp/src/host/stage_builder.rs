@@ -235,6 +235,7 @@ pub(crate) fn build_stage_context(
         shared_tools: Arc::clone(&ctx.shared_tools),
         session_resources: ctx.session_resources.clone(),
         thread_id: ctx.thread_id.clone(),
+        async_result_mailbox: ctx.async_result_mailbox.clone(),
         // 注入面
         model_name: ctx.provider_model_name.clone(),
         provider_name: ctx.provider_name.clone(),

@@ -296,6 +296,7 @@ async fn test_stage_completion_reminders_share_assembled_task_manager() {
                 shared_tools: Arc::new(RwLock::new(BTreeMap::new())),
                 session_resources: None,
                 thread_id: None,
+                async_result_mailbox: None,
                 model_name: "test".into(),
                 provider_name: "test".into(),
                 context_window: 128_000,

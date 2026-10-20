@@ -5,22 +5,28 @@
 
 use super::*;
 use crate::i18n;
-use crate::kit::acp_types::BgTaskEntry;
+use crate::kit::acp_types::{BgTaskEntry, BgTaskSnapshotSource};
 use crate::kit::atoms::{
-    ACP_CLIENT_HANDLE, ACTIVE_SESSION_ID, BG_DISPLAY, BG_TASK_REVISION, BG_TASKS, NOTIFICATION,
+    ACP_CLIENT_HANDLE, ACTIVE_SESSION_ID, BG_DISPLAY, BG_LIVE_DETAIL, BG_TASK_REVISION, BG_TASKS,
+    NOTIFICATION,
 };
 use crate::kit::bg_task_identity::upsert_identity_from_started;
 use crate::kit::bg_task_live::{
-    mark_task_cancelled, mark_task_completed, seed_live_from_started,
-    seed_live_from_terminal_snapshot, seed_unobserved_snapshot,
+    mark_task_cancelled, mark_task_completed, seed_live_from_running_snapshot,
+    seed_live_from_started, seed_live_from_terminal_snapshot, seed_unobserved_snapshot,
 };
+use crate::kit::bg_task_status::BgTaskStatus;
 use fluent_bundle::FluentValue;
 use serde_json::Value;
 use std::time::Duration;
 
 // ── §4.7 Background Tasks ──
 
-pub(crate) fn apply_bg_task_snapshot(tasks: &[BgTaskEntry], revision: Option<u64>) -> bool {
+pub(crate) fn apply_bg_task_snapshot(
+    tasks: &[BgTaskEntry],
+    revision: Option<u64>,
+    source: BgTaskSnapshotSource,
+) -> bool {
     if let (Some(incoming), Some(current)) = (revision, *BG_TASK_REVISION.state().read())
         && incoming < current
     {
@@ -30,19 +36,24 @@ pub(crate) fn apply_bg_task_snapshot(tasks: &[BgTaskEntry], revision: Option<u64
     let tasks_vec: Vec<BgTaskEntry> = tasks.to_vec();
     BG_TASKS.state().write().clone_from(&tasks_vec);
     let previous_display = BG_DISPLAY.state().read().clone();
-    let observed_live = crate::kit::atoms::BG_LIVE_DETAIL.state().read().clone();
+    let live_source = source == BgTaskSnapshotSource::Live;
+    // 当前权威 live 快照是活动证据：running/None 可以创建（漏 Started）或恢复
+    // （lost 后）live detail。历史回放只建立只读事实，不赋予活动。
+    if live_source {
+        for task in tasks {
+            if BgTaskStatus::classify(task.status.as_deref()).is_active() {
+                seed_live_from_running_snapshot(&task.task_id, &task.kind, &task.summary, task.pid);
+            }
+        }
+    }
     // 从快照全量构造 BG_DISPLAY 条目
     let entries: Vec<crate::kit::atoms::BgDisplayEntry> = tasks
         .iter()
         .filter_map(|t| {
-            let terminal = bg_task_terminal(t.status.as_deref());
+            let status = BgTaskStatus::classify(t.status.as_deref());
             let previous = previous_display.iter().find(|row| row.id == t.task_id);
-            let active = matches!(t.status.as_deref(), None | Some("running"))
-                && previous.is_some_and(|row| row.is_active)
-                && observed_live.get(&t.task_id).is_some_and(|detail| {
-                    detail.status == crate::kit::atoms::BgLiveStatus::Running
-                });
-            if !terminal && !active {
+            let active = live_source && status.is_active();
+            if !status.is_terminal() && !active {
                 return None;
             }
             Some(crate::kit::atoms::BgDisplayEntry {
@@ -51,53 +62,63 @@ pub(crate) fn apply_bg_task_snapshot(tasks: &[BgTaskEntry], revision: Option<u64
                 agent_type: t.kind.clone(),
                 desc: bg_task_description(&t.summary, t.status.as_deref()),
                 is_active: active,
-                is_error: matches!(t.status.as_deref(), Some("failed" | "cancelled")),
+                is_error: matches!(status, BgTaskStatus::Failed | BgTaskStatus::Cancelled),
                 current_tool: previous.and_then(|row| row.current_tool.clone()),
                 tool_count: previous.map_or(0, |row| row.tool_count),
                 created_at: previous.map_or_else(peri_time::monotonic_now, |row| row.created_at),
-                completed_at: terminal.then(peri_time::monotonic_now),
+                completed_at: status.is_terminal().then(peri_time::monotonic_now),
             })
         })
         .collect();
-    BG_DISPLAY.state().write().clone_from(&entries);
+    if live_source {
+        BG_DISPLAY.state().write().clone_from(&entries);
+    }
     for t in tasks {
         upsert_identity_from_started(&t.task_id, &t.kind, &t.summary, t.pid);
-        if let Some(status) = t
-            .status
-            .as_deref()
-            .filter(|status| bg_task_terminal(Some(status)))
-        {
-            seed_live_from_terminal_snapshot(&t.task_id, &t.kind, &t.summary, t.pid, status);
-        } else if !entries
-            .iter()
-            .any(|row| row.id == t.task_id && row.is_active)
-        {
+        let status = BgTaskStatus::classify(t.status.as_deref());
+        if status.is_terminal() {
+            // 历史回放不得覆盖当前 live 明细；缺失时才补只读终态事实。
+            if live_source || !has_live_detail(&t.task_id) {
+                seed_live_from_terminal_snapshot(
+                    &t.task_id,
+                    &t.kind,
+                    &t.summary,
+                    t.pid,
+                    t.status.as_deref().unwrap_or_default(),
+                );
+            }
+        } else if live_source {
+            if !status.is_active() {
+                seed_unobserved_snapshot(&t.task_id, &t.kind, &t.summary, t.pid);
+            }
+        } else if !has_live_detail(&t.task_id) {
             seed_unobserved_snapshot(&t.task_id, &t.kind, &t.summary, t.pid);
         }
     }
     true
 }
 
+fn has_live_detail(task_id: &str) -> bool {
+    BG_LIVE_DETAIL.state().read().contains_key(task_id)
+}
+
 fn bg_task_description(summary: &str, status: Option<&str>) -> String {
-    match status {
-        Some("lost") => format!("{summary} · {}", i18n::tr("bg-task-status-lost")),
-        Some("reconciling") => {
+    match BgTaskStatus::classify(status) {
+        BgTaskStatus::Lost => format!("{summary} · {}", i18n::tr("bg-task-status-lost")),
+        BgTaskStatus::Reconciling => {
             format!("{summary} · {}", i18n::tr("bg-task-status-reconciling"))
         }
         _ => summary.to_owned(),
     }
 }
 
-fn bg_task_terminal(status: Option<&str>) -> bool {
-    matches!(status, Some("completed" | "failed" | "cancelled"))
-}
-
 pub(crate) fn handle_bg_task_snapshot(
     state: &mut BridgeState,
     tasks: &[BgTaskEntry],
     revision: Option<u64>,
+    source: BgTaskSnapshotSource,
 ) {
-    if !apply_bg_task_snapshot(tasks, revision) {
+    if !apply_bg_task_snapshot(tasks, revision, source) {
         return;
     }
     crate::kit::acp_events::render::push_acp_state(state);
@@ -129,7 +150,7 @@ pub(crate) fn request_bg_task_snapshot() {
             return;
         };
         if let Ok(tasks) = serde_json::from_value::<Vec<BgTaskEntry>>(tasks) {
-            apply_bg_task_snapshot(&tasks, revision);
+            apply_bg_task_snapshot(&tasks, revision, BgTaskSnapshotSource::Live);
         }
     });
 }
@@ -157,12 +178,10 @@ pub(crate) fn handle_bg_task_started(_state: &mut BridgeState, entry: &BgTaskEnt
     }
     // A snapshot can arrive before a buffered started event. Keep one row per
     // task and do not resurrect a task that has already reached a terminal state.
-    if BG_TASKS
-        .state()
-        .read()
-        .iter()
-        .any(|task| task.task_id == entry.task_id && bg_task_terminal(task.status.as_deref()))
-    {
+    if BG_TASKS.state().read().iter().any(|task| {
+        task.task_id == entry.task_id
+            && BgTaskStatus::classify(task.status.as_deref()).is_terminal()
+    }) {
         return;
     }
     {
@@ -290,5 +309,5 @@ pub(crate) fn handle_bg_task_updated(task_id: &str, status: &str, revision: Opti
     }
     let snapshot = tasks.clone();
     drop(tasks);
-    apply_bg_task_snapshot(&snapshot, revision);
+    apply_bg_task_snapshot(&snapshot, revision, BgTaskSnapshotSource::Live);
 }

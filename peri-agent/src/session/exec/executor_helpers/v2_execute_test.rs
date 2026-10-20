@@ -326,6 +326,7 @@ async fn main_executor_hook_stop_finishes_done_without_panic() {
     let outcome = super::build_and_execute_agent_v2(super::V2ExecuteRequest {
         session_id: "main-hook-stop".into(),
         user_input_mailbox: None,
+        async_result_mailbox: None,
         cwd: "/tmp".into(),
         cancel: CancellationToken::new(),
         session_resources: None,

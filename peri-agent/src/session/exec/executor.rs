@@ -110,6 +110,8 @@ pub struct ContinuationRequest {
     pub kind: BgTaskKind,
     /// loop 自然结束后队列仍有 steering/bg Defer 待消费（不依赖 cancel armed）。
     pub mq_steering: bool,
+    /// 已规范提交但尚未被主模型响应覆盖的后台结果构成的工作来源。
+    pub pending_result: bool,
 }
 
 /// Result of prompt execution.
@@ -345,6 +347,7 @@ pub async fn run_session_loop(ctx: SessionContext, turn: TurnInput) -> PromptRes
         auxiliary_model: &auxiliary_model,
         task_manager: &task_manager_for_cmd,
         mcp_pool: ctx.mcp_pool.clone(),
+        async_result_mailbox: ctx.async_result_mailbox.clone(),
         command_lookup,
         compact_config_loader,
     })

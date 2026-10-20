@@ -60,6 +60,7 @@ async fn test_act_no_tool_calls_writes_answer() {
         context: ctx.clone(),
         reasoning,
         catalog: ctx.runtime.tool_catalog.snapshot(),
+        receipt: None,
     };
     let output = run_act(input).await.unwrap();
     assert!(!output.has_tool_calls);
@@ -86,6 +87,7 @@ async fn test_act_with_tool_calls_dispatches() {
         context: ctx.clone(),
         reasoning,
         catalog: ctx.runtime.tool_catalog.snapshot(),
+        receipt: None,
     };
     let output = run_act(input).await.unwrap();
     assert!(output.has_tool_calls, "有 tool_calls 时应标记");
@@ -124,6 +126,7 @@ async fn test_act_after_agent_failure_emits_turn_completed() {
         context: ctx.clone(),
         reasoning,
         catalog: ctx.runtime.tool_catalog.snapshot(),
+        receipt: None,
     })
     .await;
     assert!(result.is_err(), "run_after_agent 失败应传播错误");
@@ -157,6 +160,7 @@ async fn test_act_tool_path_cancel_emits_turn_completed() {
         context: ctx.clone(),
         reasoning,
         catalog: ctx.runtime.tool_catalog.snapshot(),
+        receipt: None,
     })
     .await;
     assert!(
@@ -205,4 +209,221 @@ async fn turn_completed_waits_for_capacity_in_production_emitter() {
         Some(RenderEvent::TurnCompleted { .. })
     ));
     assert!(!ctx.runtime.event_bus.health().dirty);
+}
+
+// ─── 有效提交与后台结果覆盖（T01/T07）───────────────────────────────────────────
+
+fn terminal_result(
+    mailbox: &crate::session::async_result_mailbox::AsyncResultMailbox,
+) -> (
+    crate::messages::MessageId,
+    crate::session::async_result_mailbox::RequestReceipt,
+) {
+    use peri_acp_types::session::MessageSource;
+    use peri_acp_types::system_reminder::{
+        ReminderAudience, ReminderAudiences, ReminderCategory, ReminderDelivery, ReminderSeverity,
+        ReminderSource, SystemReminder, TrustedSystemReminderFactory, SYSTEM_REMINDER_VERSION,
+    };
+    let id = crate::messages::MessageId::new();
+    let reminder = TrustedSystemReminderFactory::for_producer()
+        .construct(SystemReminder {
+            version: SYSTEM_REMINDER_VERSION,
+            category: ReminderCategory::Task,
+            source: ReminderSource("shell".into()),
+            kind: "terminal".into(),
+            severity: ReminderSeverity::Info,
+            delivery: ReminderDelivery::Configurable,
+            audiences: ReminderAudiences(vec![ReminderAudience::Model]),
+            body: "task shell-act completed exit_code: 0".into(),
+            summary: None,
+            metadata: serde_json::json!({ "task_id": "shell-act" }),
+        })
+        .unwrap();
+    mailbox
+        .accept(id, &reminder, MessageSource::ShellComplete)
+        .unwrap();
+    mailbox
+        .mark_canonical_ready(id, &reminder, MessageSource::ShellComplete, None)
+        .unwrap();
+    let receipt = mailbox
+        .capture_request("attempt-act", "request-act", &[id])
+        .expect("request must capture the ready result");
+    (id, receipt)
+}
+
+/// [T01] 最终回答有效写入并完成持久化 barrier 后，本次 receipt 才 Covered。
+#[tokio::test]
+async fn async_result_act_commit_covers_requested_result() {
+    let ctx = make_context();
+    let (id, receipt) = terminal_result(&ctx.session.async_result_mailbox);
+    let reasoning = Reasoning::with_answer("thinking", "final answer");
+    run_act(ActInput {
+        context: ctx.clone(),
+        reasoning,
+        catalog: ctx.runtime.tool_catalog.snapshot(),
+        receipt: Some(receipt),
+    })
+    .await
+    .unwrap();
+
+    assert_eq!(
+        ctx.session.async_result_mailbox.pending_count(),
+        0,
+        "有效提交后本次请求的结果必须 Covered"
+    );
+    assert!(
+        ctx.session
+            .async_result_mailbox
+            .protected_snapshot()
+            .is_empty(),
+        "{id:?} 不应再进入下一次请求"
+    );
+}
+
+/// [T07] 空最终回答不是有效提交：保留责任并 Blocked，不能提前 Covered。
+#[tokio::test]
+async fn async_result_act_empty_response_keeps_responsibility() {
+    let ctx = make_context();
+    let (id, receipt) = terminal_result(&ctx.session.async_result_mailbox);
+    let reasoning = Reasoning::with_answer("thinking", "");
+    run_act(ActInput {
+        context: ctx.clone(),
+        reasoning,
+        catalog: ctx.runtime.tool_catalog.snapshot(),
+        receipt: Some(receipt),
+    })
+    .await
+    .unwrap();
+
+    assert_eq!(
+        ctx.session.async_result_mailbox.pending_count(),
+        1,
+        "空回复不得结清处理责任"
+    );
+    let snapshot = ctx.session.async_result_mailbox.protected_snapshot();
+    assert_eq!(snapshot.items.len(), 1);
+    assert_eq!(snapshot.items[0].delivery_id, id);
+    assert_eq!(
+        snapshot.items[0].state,
+        crate::session::async_result_mailbox::AsyncResultState::Blocked
+    );
+    assert_eq!(
+        snapshot.items[0].diagnostic.as_ref().unwrap().stage,
+        "act",
+        "诊断必须指出失败阶段"
+    );
+}
+
+/// [T18] 工具调用回答按“AI 消息 + 工具结果配对提交”结算：配对提交后
+/// 才算有效处理；工具执行中断时保留责任，恢复只能基于已提交历史。
+#[tokio::test]
+async fn async_result_act_tool_call_settles_after_pair_commit_or_keeps_on_failure() {
+    // 1) 配对提交成功：工具结果已落盘，本次处理责任才算结清。
+    let ctx = make_context();
+    let (_id, receipt) = terminal_result(&ctx.session.async_result_mailbox);
+    let tool_call = ToolCall::new("call_1", "Read", serde_json::json!({"path": "/tmp"}));
+    let reasoning = Reasoning::with_tools("need to read file", vec![tool_call]);
+    run_act(ActInput {
+        context: ctx.clone(),
+        reasoning,
+        catalog: ctx.runtime.tool_catalog.snapshot(),
+        receipt: Some(receipt),
+    })
+    .await
+    .unwrap();
+
+    assert_eq!(
+        ctx.session.async_result_mailbox.pending_count(),
+        0,
+        "配对提交完成后本次责任可以结清"
+    );
+    let messages: Vec<_> = {
+        let guard = ctx.session.transcript.read();
+        guard.visible_messages().into_iter().cloned().collect()
+    };
+    assert!(
+        messages.len() >= 2,
+        "AI 工具调用消息与工具结果都必须保留，实际 {} 条",
+        messages.len()
+    );
+
+    // 2) 工具执行中断：没有配对提交，责任保留且不伪造 Covered。
+    let ctx = make_context();
+    let (id, receipt) = terminal_result(&ctx.session.async_result_mailbox);
+    ctx.session.turn.cancel_token.cancel();
+    let tool_call = ToolCall::new("call_2", "Read", serde_json::json!({"path": "/tmp"}));
+    let reasoning = Reasoning::with_tools("need to read file", vec![tool_call]);
+    let outcome = run_act(ActInput {
+        context: ctx.clone(),
+        reasoning,
+        catalog: ctx.runtime.tool_catalog.snapshot(),
+        receipt: Some(receipt),
+    })
+    .await;
+    assert!(outcome.is_err(), "中断必须向调用方传播");
+
+    assert_eq!(
+        ctx.session.async_result_mailbox.pending_count(),
+        1,
+        "未完成配对提交时不得清空处理责任"
+    );
+    assert_eq!(
+        ctx.session.async_result_mailbox.state_of(&id),
+        Some(crate::session::async_result_mailbox::AsyncResultState::InFlight),
+        "结果仍停留在本次请求内，等待后续有效提交"
+    );
+    assert!(
+        ctx.session.async_result_mailbox.retains_body(&id),
+        "未覆盖时提醒正文必须保留，供后续请求重投影"
+    );
+}
+
+/// [T06] 持久化 barrier 失败：正文没有确认落盘时不得 Covered；
+/// 本次执行失败、责任转为可诊断的 Blocked，等待显式恢复。
+#[tokio::test]
+async fn async_result_act_barrier_failure_keeps_blocked() {
+    use crate::session::test_resources::mock::MockSessionResources;
+    use crate::session::transcript::MessageTranscript;
+
+    let ctx = make_context();
+    let (id, receipt) = terminal_result(&ctx.session.async_result_mailbox);
+
+    let store = MockSessionResources::new();
+    store.register_bound_session("thread-barrier", "/tmp/test");
+    // 后端拒绝写入：canonical append 进入 sticky 失败，barrier 必须报错。
+    store.restrict_to_history_read_only();
+    *ctx.session.transcript.write() =
+        MessageTranscript::new().with_persistence(store, "thread-barrier".to_string());
+
+    let reasoning = Reasoning::with_answer("thinking", "final answer");
+    let outcome = run_act(ActInput {
+        context: ctx.clone(),
+        reasoning,
+        catalog: ctx.runtime.tool_catalog.snapshot(),
+        receipt: Some(receipt),
+    })
+    .await;
+    assert!(outcome.is_err(), "barrier 失败必须让本次执行失败");
+
+    assert_eq!(
+        ctx.session.async_result_mailbox.pending_count(),
+        1,
+        "未确认落盘前不得清空处理责任"
+    );
+    assert_eq!(
+        ctx.session.async_result_mailbox.state_of(&id),
+        Some(crate::session::async_result_mailbox::AsyncResultState::Blocked),
+        "barrier 失败必须转为 Blocked，而不是 Covered"
+    );
+    let snapshot = ctx.session.async_result_mailbox.protected_snapshot();
+    let diagnostic = snapshot.items[0]
+        .diagnostic
+        .as_ref()
+        .expect("Blocked 必须带诊断");
+    assert_eq!(diagnostic.stage, "act");
+    assert!(
+        diagnostic.summary.contains("persistence barrier"),
+        "诊断需指出 barrier 失败：{}",
+        diagnostic.summary
+    );
 }

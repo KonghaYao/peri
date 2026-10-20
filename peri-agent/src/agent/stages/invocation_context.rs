@@ -143,6 +143,9 @@ pub struct InvocationContext {
     context_usage: Option<ContextUsage>,
     /// 会话资源端口（idempotent reminder 等）。
     session_resources: Option<Arc<dyn SessionResources>>,
+    /// 会话级后台结果处理责任 owner；`None` = 本入口没有可关联的会话 mailbox
+    /// （idle App / Host 入口），终态投递退回一次性实例。
+    async_result_mailbox: Option<Arc<crate::session::async_result_mailbox::AsyncResultMailbox>>,
     /// canonical 目标解析端口：嵌套 / App 调用用 pinned catalog 走同一解析路径。
     resolver: Arc<dyn ToolInvocationResolver>,
     /// middleware chain 端口：canonical 执行独占 before_tools_batch /
@@ -247,6 +250,7 @@ impl InvocationContext {
             messages: Arc::new(stage.visible_messages()),
             context_usage,
             session_resources,
+            async_result_mailbox: Some(Arc::clone(&stage.session.async_result_mailbox)),
             resolver: Arc::clone(&stage.runtime.tool_invocation_resolver),
             chain: Arc::clone(&stage.runtime.middleware_chain),
             entry_origin,
@@ -393,6 +397,13 @@ impl InvocationContext {
         self.session_resources.as_ref()
     }
 
+    /// 会话级后台结果处理责任 owner；idle 入口没有时可回退到一次性实例。
+    pub(crate) fn async_result_mailbox(
+        &self,
+    ) -> Option<&Arc<crate::session::async_result_mailbox::AsyncResultMailbox>> {
+        self.async_result_mailbox.as_ref()
+    }
+
     pub(crate) fn resolver(&self) -> &Arc<dyn ToolInvocationResolver> {
         &self.resolver
     }
@@ -465,6 +476,7 @@ impl InvocationContext {
                 .unwrap_or_else(|| Arc::new(Vec::<BaseMessage>::new())),
             context_usage: source.context_usage,
             session_resources: source.session_resources,
+            async_result_mailbox: None,
             resolver: source.resolver,
             chain: source.chain,
             entry_origin: ExecutionEntryOrigin::Single(source.origin),

@@ -60,6 +60,8 @@ pub struct InterceptRequest<'a> {
     // ── 异步服务 ──
     pub task_manager: &'a Arc<dyn TaskManager>,
     pub mcp_pool: Option<Arc<dyn peri_acp_types::ports::McpPoolPort>>,
+    /// 会话级后台结果处理责任；`/compact` 必须据此保护未覆盖的终态通知。
+    pub async_result_mailbox: Option<Arc<crate::session::async_result_mailbox::AsyncResultMailbox>>,
     // ── 注入面（L5 依赖反转）──
     /// 命令注册表查找（ACP 协议面注册表；`None` = 未注册，fall-through）。
     pub command_lookup: CommandLookupFn,
@@ -218,6 +220,12 @@ pub async fn intercept_immediate_command(req: InterceptRequest<'_>) -> Intercept
         deps.insert(
             std::any::TypeId::of::<Arc<dyn peri_acp_types::ports::McpPoolPort>>(),
             Arc::new(pool),
+        );
+    }
+    if let Some(mailbox) = req.async_result_mailbox.clone() {
+        deps.insert(
+            std::any::TypeId::of::<crate::session::async_result_mailbox::AsyncResultMailbox>(),
+            mailbox,
         );
     }
     let mut ctx = CommandContext::new(

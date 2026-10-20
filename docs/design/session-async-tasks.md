@@ -1,6 +1,6 @@
 # Session 异步任务
 
-- 状态：**执行恢复已剥离，当前任务生命周期保留**；验证范围见剥离计划。Child 有界收尾 A′ 已实现并通过定向/全库回归；真实 MCP wire、TUI 手测与进程重启自有 fixture 仍未覆盖，见 [active spec](../../spec/issues/2026-10-20-p1-sync-subagent-unbounded-settlement.md)。
+- 状态：**执行恢复已剥离，当前任务生命周期保留；结果处理责任由会话级 mailbox 持有**；验证范围见剥离计划。Child 有界收尾 A′ 已实现并通过定向/全库回归；真实 MCP wire、TUI 手测与进程重启自有 fixture 仍未覆盖，见 [active spec](../../spec/issues/2026-10-20-p1-sync-subagent-unbounded-settlement.md)。
 - 消息与运行生命周期服从 [RCRA 权威](rcra-message-activation.md)；实施状态见[剥离计划](../../spec/issues/2026-10-07-remove-execution-recovery-plan.md)。
 
 ## 1. 归属与当前运行
@@ -29,13 +29,27 @@ MQ pending 标记是后续处理提示，不作为排队请求的准入锁。重
 
 续跑在 prompt lock 内持有同一个 sessions 临界区，复核 epoch、closing、runtime、队列和 activation 后，同时提交 in-flight 与取消令牌。先到的用户输入使旧代际请求失效；已准入的续跑令牌可立即被 Stop 取消，不能在实际执行时换成新令牌。尚无执行令牌的 Stop 仍撤销排队代际并抑制激活。
 
-## 3. 移除冷恢复
+## 3. 结果处理责任：入队、历史提交与请求覆盖
+
+后台终态结果的处理责任由会话级 `AsyncResultMailbox` 持有；执行状态仍归 TaskManager。三种边界必须分开，不能用「队列已空」「摘要已生成」「底栏已隐藏」互相代替：
+
+1. **入队**：投递方在 push 队列前 `accept(delivery_id, reminder)`。同一 ID 相同指纹幂等，不同内容明确冲突。此时状态为 Queued，不算模型可见历史，也不进入 Full 保护集合。
+2. **历史提交**：Receive 成功写入或确认 canonical reminder 后 `mark_canonical_ready`。Ready 表示事实已在 transcript 中，但仍未被主模型响应覆盖。
+3. **请求覆盖**：Reason 按最终请求实际投影的 ID 生成不可变 receipt；Act 只在响应有效写入且既有持久化 barrier 成功后 `cover_after_commit`。摘要、分类器等辅助模型调用不产生 receipt，也不确认消费。空响应、截断、断流、持久化失败均不覆盖。
+
+未覆盖的 Ready／InFlight／Blocked／Suspended 结果受 Full Compact 保护：`flag_updates` 排除这些 ID，摘要请求不包含它们，最终模型视图在压缩后的历史／摘要之后按接收顺序重新投影一次，不改写 canonical ID、不重复落库。只剩 System 与受保护结果时返回明确 no-op；Covered 之后恢复普通历史压缩资格，不存在永久 pin。自动 Full、强制 Full、Smart 升级 Full 与手动 `/compact` 使用同一保护规则。
+
+阶段失败把未覆盖结果转为 Blocked，并记录有界诊断（失败阶段 + 摘要，不随重试堆叠全文）；用户 Stop 转为 Suspended。两者都不进入自动续跑候选：失败记录不能自我激活，Stop 之后的新完成通知也不能绕过暂停。只有显式继续（用户新 prompt，或宿主允许的显式激活）才恢复 Ready。
+
+该 mailbox 只存在于当前会话进程，不提供跨进程恢复保证：进程重启后不重建 mailbox、不扫描旧提醒，也不接管旧执行；当前进程内的处理责任跨 prompt 保留。
+
+## 4. 移除冷恢复
 
 不在 session/load/resume、新输入或进程重启时扫描旧 task scope、重建旧 invocation、接管 owner 或自动续跑 child。缺少旧 callback/任务身份不写 Work quarantine，不阻塞新的普通执行。
 
 历史状态可显示，但不是当前 running。重启后不保证外部后台结果再次送达；外部任务可能继续存在，显式工具查询或人工处理不等于恢复旧 Agent 执行。
 
-## 4. 取消与关闭
+## 5. 取消与关闭
 
 当前进程保留 Cascade/Independent 策略、取消 token、MCP owner 关闭顺序和有界排空。清理未结清明确报错，不假称已停止。
 
@@ -43,7 +57,7 @@ MQ pending 标记是后续处理提示，不作为排队请求的准入锁。重
 
 显式会话关闭意图可以独立保存；它不保存旧 Agent 阶段或恢复任务目录。关闭历史会话不自动发现/接管其旧外部资源。
 
-## 4. 当前进程执行链
+## 6. 当前进程执行链
 
 当前实现由 child runner、宿主 execution 通知及 TUI lifecycle 共同履行以下契约；定向验证范围与待完成的真实使用验收见 `spec/issues/2026-10-08-async-execution-chain-fixes.md`。
 
@@ -54,9 +68,9 @@ MQ pending 标记是后续处理提示，不作为排队请求的准入锁。重
 - 输入回滚文本绑定其提交请求，不绑定当前显示的 execution；审批或内部续跑的终态不能删除或恢复另一个待执行请求的输入。只有 managed 输入的 Stop 携带 mailbox 票据身份，external execution 仍走宿主普通取消入口。
 - 验证从完整行为出发：嵌套 child 晚到结果、forwarder 失败、内部续跑首步 HITL、空闲定时审批、suspend/wake 事件交错和跨会话迟到提交错误。
 
-120 秒仍是一轮 RCRA 的 idle bound，不是 Task 工具的整任务 wall-clock timeout；child 另有 §5 的单次执行收尾窗口。当前进程的 child owner 保留结果消费责任，取消、关闭与累计语义迭代预算仍约束该执行。
+120 秒仍是一轮 RCRA 的 idle bound，不是 Task 工具的整任务 wall-clock timeout；child 另有 §7 的单次执行收尾窗口。当前进程的 child owner 保留结果消费责任，取消、关闭与累计语义迭代预算仍约束该执行。
 
-## 5. Child 有界收尾
+## 7. Child 有界收尾
 
 同一次 child 执行在首次 RCRA 推进结束且仍有任务或消息处理义务（active task、pending delivery、未消费 Required 结果）时启动唯一窗口，`D = t0 + HANDOFF_MAX_WAIT`（120 秒）。activity、结果到达、短暂空闲、任务新增和 loop 重入均不重置 D；同一 `ChildSettlementWindow` 由 loop、runner 与 sync wrapper 共用。显式新 run（resume）创建新窗口。
 
@@ -74,7 +88,7 @@ sync wrapper 只在收到已提交 receipt 后 detach；无父投递宿主时等
 
 不新增 DB 表、持久状态枚举或 ACK 账本；不扩张 late result 即时落库保证。进程重启仅加载已保存历史，不恢复旧执行或尚未持久化的内存结果。
 
-## 6. 验收
+## 8. 验收
 
 覆盖当前任务结果/进度/取消、父子消息路由与展示身份、连接关闭失败和新输入处理。覆盖历史加载不触发任务发现或旧副作用；不再验收冷恢复、永久 terminal ACK 和跨进程处理义务。
 

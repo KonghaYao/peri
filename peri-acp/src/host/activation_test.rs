@@ -315,6 +315,7 @@ async fn empty_queued_continuation_does_not_block_the_next_child_result() {
         session_id: harness.session_id.clone(),
         kind: BgTaskKind::Agent,
         mq_steering: true,
+        pending_result: false,
     };
     let epoch = {
         let mut sessions = harness.sessions.lock().await;
@@ -329,7 +330,10 @@ async fn empty_queued_continuation_does_not_block_the_next_child_result() {
         json!({"sessionId": harness.session_id, "message": {"role": "user", "content": []}});
     let empty = crate::host::dispatch_prompt_turn(
         params.clone(),
-        crate::host::PromptOrigin::Continuation { mq_steering: true },
+        crate::host::PromptOrigin::Continuation {
+            mq_steering: true,
+            pending_result: false,
+        },
         Some(epoch),
         &harness.sessions,
         &harness.locks,
@@ -351,7 +355,10 @@ async fn empty_queued_continuation_does_not_block_the_next_child_result() {
     assert_eq!(next_epoch, Some(epoch), "空跑不能永久占用下一次续跑准入");
     let response = crate::host::dispatch_prompt_turn(
         params,
-        crate::host::PromptOrigin::Continuation { mq_steering: true },
+        crate::host::PromptOrigin::Continuation {
+            mq_steering: true,
+            pending_result: false,
+        },
         next_epoch,
         &harness.sessions,
         &harness.locks,
@@ -503,7 +510,10 @@ async fn approved_schedule_runs_without_reenabling_suppressed_passive_results() 
         json!({"sessionId": harness.session_id, "message": {"role": "user", "content": []}});
     let suppressed = crate::host::dispatch_prompt_turn(
         params.clone(),
-        crate::host::PromptOrigin::Continuation { mq_steering: true },
+        crate::host::PromptOrigin::Continuation {
+            mq_steering: true,
+            pending_result: false,
+        },
         Some(0),
         &harness.sessions,
         &harness.locks,

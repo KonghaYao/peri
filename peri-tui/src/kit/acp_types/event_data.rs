@@ -326,9 +326,13 @@ pub enum AcpEventData {
     },
 
     /// `"bg-task-snapshot"` -- full list of active background tasks.
+    ///
+    /// `source` 显式区分当前权威快照与历史回放；旧 wire 不带该字段时按
+    /// [`BgTaskSnapshotSource::Live`] 解码，保持兼容。
     BgTaskSnapshot {
         tasks: Vec<BgTaskEntry>,
         revision: Option<u64>,
+        source: BgTaskSnapshotSource,
     },
 
     // -- §4.8 Agent Event Extensions (P1-5) ----------------------------------
@@ -603,10 +607,12 @@ impl AcpEventData {
             }),
             "bg-task-snapshot" => {
                 let revision = data.get("revision").and_then(serde_json::Value::as_u64);
+                let source = decode_bg_task_snapshot_source(data.get("source"));
                 let tasks = data.get("tasks").cloned().unwrap_or(data);
                 decode_or_unknown(event, tasks, |tasks| AcpEventData::BgTaskSnapshot {
                     tasks,
                     revision,
+                    source,
                 })
             }
 
@@ -682,6 +688,29 @@ pub struct BgTaskEntry {
     pub revision: Option<u64>,
     #[serde(default)]
     pub status: Option<String>,
+}
+
+/// `bg-task-snapshot` 的来源。
+///
+/// [Why] 快照内容本身无法区分「当前权威快照」与「历史回放」：两者都可能携带
+/// `running`，但只有前者可以作为当前执行的活动证据。来源必须由传输/回放边界显式
+/// 标记，不能靠状态文字猜测。
+///
+/// 旧 wire 没有 `source` 字段，按 [`Default`] 的 [`Self::Live`] 解码以保持兼容；
+/// 无法识别的显式来源按 [`Self::Historical`] 处理（不赋予活动）。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum BgTaskSnapshotSource {
+    #[default]
+    Live,
+    Historical,
+}
+
+fn decode_bg_task_snapshot_source(value: Option<&Value>) -> BgTaskSnapshotSource {
+    let Some(value) = value else {
+        return BgTaskSnapshotSource::default();
+    };
+    serde_json::from_value(value.clone()).unwrap_or(BgTaskSnapshotSource::Historical)
 }
 
 /// Deserialization helper for `bg-task-completed` payload.

@@ -118,6 +118,8 @@ pub struct StageBuildInput {
     pub session_resources: Option<Arc<dyn SessionResources>>,
     /// 当前会话 thread ID
     pub thread_id: Option<String>,
+    /// 会话级后台结果处理责任 owner（ACP 宿主跨 prompt 注入；None 时本地新建）。
+    pub async_result_mailbox: Option<Arc<crate::session::async_result_mailbox::AsyncResultMailbox>>,
     // ── 注入面（原 ACP 特有构造）──
     /// 模型名称（GitAttribution / hook 注入用）
     pub model_name: String,
@@ -428,6 +430,7 @@ pub fn build_stage_context(
     let turn = session.start_turn();
     let transcript = session.transcript();
     let queue = session.queue().clone();
+    let async_result_mailbox = session.async_result_mailbox();
 
     // 创建 EventBus
     let (event_bus, event_handles) = EventBus::new(EventBusConfig::default());
@@ -483,6 +486,7 @@ pub fn build_stage_context(
     // collect_tools 借用后被 move 进 builder，顺序不可调换）
     let builder = StageContext::builder(turn, transcript, queue)
         .with_agent_id(main_agent_id)
+        .with_async_result_mailbox(async_result_mailbox)
         .with_llm(react_llm)
         .with_tools(session_tools)
         .with_tool_catalog(tool_catalog)

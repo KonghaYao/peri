@@ -305,6 +305,7 @@ pub fn build_v2_subagent_context(
 
     let mut builder = StageContext::builder(turn, transcript, queue_clone)
         .with_agent_id(resolved_agent_id)
+        .with_async_result_mailbox(session.async_result_mailbox())
         .with_llm(v2_llm)
         .with_tools(combined_shared_tools)
         .with_tool_catalog(tool_catalog)

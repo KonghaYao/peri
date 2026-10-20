@@ -119,7 +119,7 @@ async fn test_redirected_background_process_reports_unknown_exit_code() {
         std::fs::remove_file(path).unwrap();
     }
     assert_eq!(files.exit_code, None, "descendant status was never waited");
-    assert!(result.to_notification().contains("退出码未知"));
+    assert!(result.to_notification().contains("exit_code: unknown"));
 }
 
 #[cfg(unix)]

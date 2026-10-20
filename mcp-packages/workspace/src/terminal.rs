@@ -457,7 +457,9 @@ impl BashTool {
             .await??;
 
             let mut msg = format!(
-                "Background shell task started.\ntask_id: {}\nThe command is running in the background.",
+                "Background shell task started.\ntask_id: {}\n\
+                 The task is now running in the background of this process; its result will be \
+                 delivered to this session when it finishes. Do not start a duplicate while it is active.",
                 handle.task_id
             );
             match handle.pid {
@@ -694,12 +696,12 @@ impl BashTool {
                             let cleanup_hint = background_cleanup_hint(pid, std::env::consts::OS);
                             let log_hint = foreground_log_hint(&output_capture);
                             let recovery = format!(
-                                "Command timed out. The process is still running and has been promoted to a background task.\ntask_id: {task_id}\npid: {pid}{log_hint}\n{cleanup_hint}{timeout_note}\nDo not rerun the command while it is active; check the Tasks panel or read its live logs."
+                                "Command timed out. The process is still running and has been promoted to a background task.\ntask_id: {task_id}\npid: {pid}{log_hint}\n{cleanup_hint}{timeout_note}\nDo not rerun the command while it is active; its result will be delivered to this session when it finishes. Check the Tasks panel or read its live logs."
                             );
                             if has_output {
                                 // 有部分输出：进程在产生进展，续跑是合理的
                                 return Ok(BashOutput::with_execution(format!(
-                                    "Command timed out after {:.1}s. The process is still running and has been promoted to a background task (it was producing output, so it is likely progressing).\ntask_id: {task_id}\npid: {pid}\n{ps_line}\n- It continues running in the background; you will be notified when it completes.{log_hint}\n{cleanup_hint}\n{timeout_note}\n{partial_hint}\nCommand that timed out: {command}",
+                                    "Command timed out after {:.1}s. The process is still running and has been promoted to a background task (it was producing output, so it is likely progressing).\ntask_id: {task_id}\npid: {pid}\n{ps_line}\n- It continues running in the background; its result will be delivered to this session when it finishes.{log_hint}\n{cleanup_hint}\n{timeout_note}\n{partial_hint}\nCommand that timed out: {command}",
                                     foreground_timeout_ms as f64 / 1000.0
                                 ), ToolExecutionEvidence {
                                     status: ToolExecutionStatus::RunningAfterTimeout,
@@ -712,7 +714,7 @@ impl BashTool {
                             // 无输出：进程可能挂起（等输入/资源）而非正常变慢——
                             // 仍 promote（避免误杀静默启动的慢任务），但如实说明不确定性
                             return Ok(BashOutput::with_execution(format!(
-                                "Command timed out after {:.1}s with no output produced. The process is still running and has been promoted to a background task, but it may never complete on its own.\ntask_id: {task_id}\npid: {pid}\n{ps_line}\nLikely causes:\n- The command is waiting for input or for a resource (network, lock, another process) that will never arrive.\n- It is a long-running service/daemon; it should have been started with run_in_background: true.\n- It is a slow command still in a silent startup phase (e.g. compile/install with no output yet).{log_hint}\n{cleanup_hint}\n{timeout_note}\n{partial_hint}\nCommand that timed out: {command}",
+                                "Command timed out after {:.1}s with no output produced. The process is still running and has been promoted to a background task, but it may never complete on its own. If it finishes, its result will be delivered to this session.\ntask_id: {task_id}\npid: {pid}\n{ps_line}\nLikely causes:\n- The command is waiting for input or for a resource (network, lock, another process) that will never arrive.\n- It is a long-running service/daemon; it should have been started with run_in_background: true.\n- It is a slow command still in a silent startup phase (e.g. compile/install with no output yet).{log_hint}\n{cleanup_hint}\n{timeout_note}\n{partial_hint}\nCommand that timed out: {command}",
                                 foreground_timeout_ms as f64 / 1000.0
                             ), ToolExecutionEvidence {
                                 status: ToolExecutionStatus::RunningAfterTimeout,

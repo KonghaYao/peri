@@ -22,6 +22,7 @@
 //! cron 主路径由 `AcpSession.cron_bridge`（session 级）持有，跨 turn 存活；
 //! `set_async_owners` 仅 print fallback 使用。
 
+pub mod async_result_mailbox;
 pub mod async_router;
 pub mod bg_complete;
 pub mod config;
@@ -85,6 +86,8 @@ pub struct Session {
     /// 收件箱（独立于 Transcript，会话内持续可变）
     queue: MessageQueue,
     user_input_mailbox: RwLock<Option<Arc<user_input_mailbox::UserInputMailbox>>>,
+    /// 会话级后台结果处理责任 owner；跨 prompt 复用，由宿主装配注入。
+    async_result_mailbox: RwLock<Arc<async_result_mailbox::AsyncResultMailbox>>,
     /// 可变配置（Arc 共享，外部写入，循环读取）
     config: Arc<SessionConfig>,
     /// 异步 owner 容器（set-once，RwLock 保护）。
@@ -114,6 +117,9 @@ impl Session {
             transcript,
             queue,
             user_input_mailbox: RwLock::new(None),
+            async_result_mailbox: RwLock::new(Arc::new(
+                async_result_mailbox::AsyncResultMailbox::default(),
+            )),
             config,
             async_owners: None,
             subagent_host: parking_lot::RwLock::new(None),
@@ -142,6 +148,9 @@ impl Session {
             transcript,
             queue,
             user_input_mailbox: RwLock::new(None),
+            async_result_mailbox: RwLock::new(Arc::new(
+                async_result_mailbox::AsyncResultMailbox::default(),
+            )),
             config,
             async_owners: None,
             subagent_host: parking_lot::RwLock::new(None),
@@ -178,6 +187,9 @@ impl Session {
             transcript,
             queue,
             user_input_mailbox: RwLock::new(None),
+            async_result_mailbox: RwLock::new(Arc::new(
+                async_result_mailbox::AsyncResultMailbox::default(),
+            )),
             config,
             // v2 路径启用 async owner 容器（RwLock，允许后续 set_async_owners 注入）
             async_owners: Some(parking_lot::RwLock::new(None)),
@@ -202,6 +214,16 @@ impl Session {
 
     pub fn set_user_input_mailbox(&self, mailbox: Arc<user_input_mailbox::UserInputMailbox>) {
         *self.user_input_mailbox.write() = Some(mailbox);
+    }
+
+    /// 绑定会话级结果处理责任 owner（跨 prompt 复用）。
+    pub fn set_async_result_mailbox(&self, mailbox: Arc<async_result_mailbox::AsyncResultMailbox>) {
+        *self.async_result_mailbox.write() = mailbox;
+    }
+
+    /// 会话级结果处理责任 owner。
+    pub fn async_result_mailbox(&self) -> Arc<async_result_mailbox::AsyncResultMailbox> {
+        Arc::clone(&self.async_result_mailbox.read())
     }
 
     /// 子 agent 运行时宿主（L3）。executor/builder 在主 session 创建后注入；

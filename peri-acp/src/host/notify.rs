@@ -102,6 +102,7 @@ pub(crate) fn handle_notification(
                         session_id: session_id.to_string(),
                         kind: BgTaskKind::Agent,
                         mq_steering: false,
+                        pending_result: false,
                     });
                 }
             }

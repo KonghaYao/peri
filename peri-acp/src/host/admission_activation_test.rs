@@ -61,7 +61,10 @@ async fn user_input_between_continuation_validation_and_commit_revokes_old_turn(
     let gate = crate::host::prompt_dispatch::admission_gate::install(&harness.session_id);
     let continuation = dispatch(
         &harness,
-        crate::host::PromptOrigin::Continuation { mq_steering: true },
+        crate::host::PromptOrigin::Continuation {
+            mq_steering: true,
+            pending_result: false,
+        },
         Some(0),
     );
     tokio::time::timeout(Duration::from_secs(10), gate.entered.notified())
@@ -121,7 +124,10 @@ async fn revoke_before_commit(closing: bool) {
     let gate = crate::host::prompt_dispatch::admission_gate::install(&harness.session_id);
     let continuation = dispatch(
         &harness,
-        crate::host::PromptOrigin::Continuation { mq_steering: true },
+        crate::host::PromptOrigin::Continuation {
+            mq_steering: true,
+            pending_result: false,
+        },
         Some(0),
     );
     tokio::time::timeout(Duration::from_secs(10), gate.entered.notified())
@@ -200,7 +206,10 @@ async fn stop_after_atomic_admission_cancels_registered_token_before_model_start
     ));
     let continuation = dispatch(
         &harness,
-        crate::host::PromptOrigin::Continuation { mq_steering: true },
+        crate::host::PromptOrigin::Continuation {
+            mq_steering: true,
+            pending_result: false,
+        },
         Some(0),
     );
     tokio::time::timeout(Duration::from_secs(10), gate.entered.notified())
@@ -271,7 +280,10 @@ async fn user_input_after_atomic_admission_waits_for_the_committed_turn() {
     ));
     let continuation = dispatch(
         &harness,
-        crate::host::PromptOrigin::Continuation { mq_steering: true },
+        crate::host::PromptOrigin::Continuation {
+            mq_steering: true,
+            pending_result: false,
+        },
         Some(0),
     );
     tokio::time::timeout(Duration::from_secs(10), gate.entered.notified())

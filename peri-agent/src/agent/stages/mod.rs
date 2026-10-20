@@ -81,6 +81,8 @@ pub struct SessionHandle {
     pub transcript: Arc<RwLock<MessageTranscript>>,
     pub queue: MessageQueue,
     pub user_input_mailbox: Option<Arc<crate::session::user_input_mailbox::UserInputMailbox>>,
+    /// 会话级后台结果处理责任 owner（与 SessionTerminalDelivery 共用同一实例）。
+    pub async_result_mailbox: Arc<crate::session::async_result_mailbox::AsyncResultMailbox>,
     pub agent_id: AgentId,
     /// metrics/tracing 用键值对（不作为 middleware hook 的隐式共享协议）
     pub session_context: Arc<RwLock<HashMap<String, String>>>,
@@ -191,6 +193,9 @@ impl StageContext {
                 transcript,
                 queue,
                 user_input_mailbox: None,
+                async_result_mailbox: Arc::new(
+                    crate::session::async_result_mailbox::AsyncResultMailbox::default(),
+                ),
                 agent_id: AgentId::new(),
                 session_context: sctx,
             },
@@ -244,6 +249,9 @@ impl StageContext {
                 transcript,
                 queue,
                 user_input_mailbox: None,
+                async_result_mailbox: Arc::new(
+                    crate::session::async_result_mailbox::AsyncResultMailbox::default(),
+                ),
                 agent_id: AgentId::new(),
                 session_context: Arc::new(RwLock::new(std::collections::HashMap::new())),
             },
@@ -354,6 +362,8 @@ pub struct ReasonOutput {
     pub catalog: Arc<SessionToolCatalogSnapshot>,
     /// LLM 请求使用的消息快照（用于调试/追踪；Arc 共享，避免传递时再拷贝）
     pub messages_snapshot: std::sync::Arc<Vec<BaseMessage>>,
+    /// 本次请求实际投影到的后台结果；提交成功后由 Act 结清。
+    pub receipt: Option<crate::session::async_result_mailbox::RequestReceipt>,
 }
 
 // ─── Act 阶段类型 ────────────────────────────────────────────────────────────
@@ -365,6 +375,8 @@ pub struct ActInput {
     pub reasoning: crate::agent::react::Reasoning,
     /// Exact catalog pinned by Reason.
     pub catalog: Arc<SessionToolCatalogSnapshot>,
+    /// Reason 记录的请求覆盖范围；只有有效提交后才能结清。
+    pub receipt: Option<crate::session::async_result_mailbox::RequestReceipt>,
 }
 
 /// Act 阶段输出
@@ -442,6 +454,35 @@ fn enqueue_truncation_continuation(context: &StageContext) {
                 ),
             ),
     );
+}
+
+/// 阶段失败时保留后台结果的处理责任：用户 Stop 进入 Suspended，其它失败进入
+/// Blocked，等待显式继续。这里不自动重试，也不把未覆盖当成已交付。
+fn record_stage_failure(context: &StageContext, stage: &str, failure: &LoopResult) {
+    match failure {
+        LoopResult::Interrupted => context
+            .session
+            .async_result_mailbox
+            .suspend_scope("cancelled"),
+        LoopResult::Error(error) => context
+            .session
+            .async_result_mailbox
+            .block_uncovered(stage, &error.to_string()),
+        // 非失败出口：Hook stop 已在退出点挂起，结算到期由 child runner 交接，
+        // 都不在这里改写处理责任。
+        LoopResult::Completed
+        | LoopResult::SettlementDue { .. }
+        | LoopResult::HookStopped { .. } => {}
+    }
+}
+
+/// 用户中断的唯一出口：先挂起未结清责任，再返回 Interrupted。
+fn interrupted(context: &StageContext) -> LoopResult {
+    context
+        .session
+        .async_result_mailbox
+        .suspend_scope("cancelled");
+    LoopResult::Interrupted
 }
 
 /// 执行单个 ReAct 阶段：emit StageStarted → 调用阶段函数 → emit StageEnded → Ok/Err 分发。
@@ -530,7 +571,7 @@ pub async fn run_react_loop(context: StageContext, max_iterations: usize) -> Loo
         'rcra: loop {
             // 检查 cancel
             if context.session.turn.is_cancelled() {
-                return LoopResult::Interrupted;
+                return interrupted(&context);
             }
             if settlement_due(&context) {
                 return LoopResult::SettlementDue {
@@ -559,6 +600,11 @@ pub async fn run_react_loop(context: StageContext, max_iterations: usize) -> Loo
             // 子 Agent 由 runner 按未推理义务交接；主会话由 executor 映射为正常
             // Done。停止意图已绑定执行身份，旧 run 的 Stop 不会终止新执行。
             if receive_out.stop_requested {
+                // Stop 优先：未处理结果进入 Suspended，不得保留 Ready 触发自动续跑。
+                context
+                    .session
+                    .async_result_mailbox
+                    .suspend_scope("hook stop");
                 // 同批已提交但不会推理的消息保留为交接义务。
                 context
                     .async_ctx
@@ -596,6 +642,9 @@ pub async fn run_react_loop(context: StageContext, max_iterations: usize) -> Loo
             if receive_out.wake_up_count == 0
                 && receive_out.budget_deferred_count == 0
                 && !loop_state.has_tool_calls
+                // 续跑请求可能没有队列消息：Ready 结果必须进入本次请求处理，
+                // 不能以“队列为空”为由提前退出并留下自动续跑候选。
+                && !context.session.async_result_mailbox.has_ready()
             {
                 // 竞态保护：退出前再检查一次队列是否有新消息到达
                 if context.session.queue.has_required_for_run(&execution) {
@@ -691,7 +740,7 @@ pub async fn run_react_loop(context: StageContext, max_iterations: usize) -> Loo
                             if let Some(mailbox) = &context.session.user_input_mailbox {
                                 mailbox.leave_idle();
                             }
-                            return LoopResult::Interrupted;
+                            return interrupted(&context);
                         }
                         _ = context.session.queue.await_wake_for_run(&execution) => {
                             // 醒来：无论由注入 prompt 还是 bg Defer 触发，先复位
@@ -703,7 +752,7 @@ pub async fn run_react_loop(context: StageContext, max_iterations: usize) -> Loo
                                 mailbox.leave_idle();
                             }
                             if context.session.turn.is_cancelled() {
-                                return LoopResult::Interrupted;
+                                return interrupted(&context);
                             }
                             tracing::debug!(
                                 turn_id = %context.session.turn.turn_id(),
@@ -799,9 +848,11 @@ pub async fn run_react_loop(context: StageContext, max_iterations: usize) -> Loo
                     initial_input_watermark,
                     "ReAct v2 循环达到最大语义迭代次数"
                 );
-                return LoopResult::Error(crate::error::AgentError::MaxIterationsExceeded(
+                let failure = LoopResult::Error(crate::error::AgentError::MaxIterationsExceeded(
                     max_iterations,
                 ));
+                record_stage_failure(&context, "max_iterations", &failure);
+                return failure;
             }
             semantic_iterations += 1;
             context.session.turn.advance_step();
@@ -818,7 +869,7 @@ pub async fn run_react_loop(context: StageContext, max_iterations: usize) -> Loo
                         .await
                 {
                     if matches!(e, crate::error::AgentError::Interrupted) {
-                        return LoopResult::Interrupted;
+                        return interrupted(&context);
                     }
                     tracing::warn!(error = %e, "[v2] before_agent hook failed");
                 }
@@ -826,9 +877,11 @@ pub async fn run_react_loop(context: StageContext, max_iterations: usize) -> Loo
                 middleware_runner::run_before_input(&context, &receive_out.input_message_ids).await
             {
                 if matches!(error, crate::error::AgentError::Interrupted) {
-                    return LoopResult::Interrupted;
+                    return interrupted(&context);
                 }
-                return LoopResult::Error(error);
+                let failure = LoopResult::Error(error);
+                record_stage_failure(&context, "before_input", &failure);
+                return failure;
             }
 
             // ── 启动闸门 hook（首批输入准备完成后、Compact 前执行一次）──
@@ -838,10 +891,12 @@ pub async fn run_react_loop(context: StageContext, max_iterations: usize) -> Loo
             if !loop_state.react_start_has_run {
                 match middleware_runner::run_before_react_start(&context).await {
                     Ok(()) => loop_state.react_start_has_run = true,
-                    Err(crate::error::AgentError::Interrupted) => return LoopResult::Interrupted,
+                    Err(crate::error::AgentError::Interrupted) => return interrupted(&context),
                     Err(error) => {
                         tracing::warn!(error = %error, "[v2] before_react_start hook failed");
-                        return LoopResult::Error(error);
+                        let failure = LoopResult::Error(error);
+                        record_stage_failure(&context, "before_react_start", &failure);
+                        return failure;
                     }
                 }
             }
@@ -863,6 +918,7 @@ pub async fn run_react_loop(context: StageContext, max_iterations: usize) -> Loo
             })
             .await
             {
+                record_stage_failure(&context, "compact", &e);
                 return e;
             }
 
@@ -877,7 +933,10 @@ pub async fn run_react_loop(context: StageContext, max_iterations: usize) -> Loo
             .await
             {
                 Ok(out) => out,
-                Err(e) => return e,
+                Err(e) => {
+                    record_stage_failure(&context, "reason", &e);
+                    return e;
+                }
             };
 
             // Reason 成功后上一批义务已被读取；失败时仍保留供 runner 交接。
@@ -906,13 +965,17 @@ pub async fn run_react_loop(context: StageContext, max_iterations: usize) -> Loo
                     context: context.clone(),
                     reasoning: reason_out.reasoning,
                     catalog: reason_out.catalog,
+                    receipt: reason_out.receipt,
                 })
                 .await
             })
             .await
             {
                 Ok(out) => out,
-                Err(e) => return e,
+                Err(e) => {
+                    record_stage_failure(&context, "act", &e);
+                    return e;
+                }
             };
 
             loop_state.has_tool_calls = act_out.has_tool_calls;
@@ -923,14 +986,17 @@ pub async fn run_react_loop(context: StageContext, max_iterations: usize) -> Loo
             };
             if let Some(interruption) = stream_interruption {
                 if context.session.turn.is_cancelled() {
-                    return LoopResult::Interrupted;
+                    return interrupted(&context);
                 }
                 loop_state.stream_recoveries += 1;
                 if loop_state.stream_recoveries >= interruption.max_attempts as usize {
-                    return LoopResult::Error(crate::error::AgentError::StreamRecoveryExhausted {
-                        attempts: loop_state.stream_recoveries,
-                        source: interruption.error,
-                    });
+                    let failure =
+                        LoopResult::Error(crate::error::AgentError::StreamRecoveryExhausted {
+                            attempts: loop_state.stream_recoveries,
+                            source: interruption.error,
+                        });
+                    record_stage_failure(&context, "stream_recovery", &failure);
+                    return failure;
                 }
                 enqueue_stream_interruption_continuation(&context);
             }
@@ -945,9 +1011,11 @@ pub async fn run_react_loop(context: StageContext, max_iterations: usize) -> Loo
                         model = %context.runtime.llm.model_name(),
                         "连续无工具截断耗尽续跑预算，终止本轮"
                     );
-                    return LoopResult::Error(crate::error::AgentError::OutputTruncated {
+                    let failure = LoopResult::Error(crate::error::AgentError::OutputTruncated {
                         attempts: loop_state.consecutive_truncations,
                     });
+                    record_stage_failure(&context, "output_truncated", &failure);
+                    return failure;
                 }
                 enqueue_truncation_continuation(&context);
             } else {

@@ -82,6 +82,7 @@ fn test_reason_input_output_contract() {
         reasoning,
         catalog: ctx.runtime.tool_catalog.snapshot(),
         messages_snapshot: std::sync::Arc::new(vec![]),
+        receipt: None,
     };
     assert!(!output.reasoning.needs_tool_call());
     assert!(output.messages_snapshot.is_empty());
@@ -95,6 +96,7 @@ fn test_act_input_output_contract() {
         context: ctx.clone(),
         reasoning,
         catalog: ctx.runtime.tool_catalog.snapshot(),
+        receipt: None,
     };
 
     let output_with_tools = ActOutput {

@@ -178,7 +178,7 @@ fn test_route_shell_output_only_injects_file_references() {
     assert!(reminder.body.contains("/tmp/fixture.stdout.log"));
     assert!(reminder.body.contains("/tmp/fixture.stderr.log"));
     assert!(reminder.body.contains("Read"));
-    assert!(reminder.body.contains("退出码 1"));
+    assert!(reminder.body.contains("exit_code: 1"));
     assert_eq!(reminder.severity, ReminderSeverity::Error);
 }
 

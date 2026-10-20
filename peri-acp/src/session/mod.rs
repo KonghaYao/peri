@@ -115,6 +115,9 @@ pub struct AcpSession {
     /// Agent-owned user input lifecycle, shared across prompt attempts.
     pub(crate) user_input_mailbox:
         Option<Arc<peri_agent::session::user_input_mailbox::UserInputMailbox>>,
+    /// 会话级后台结果处理责任 owner（跨 prompt 复用；关闭会话即释放）。
+    pub(crate) async_result_mailbox:
+        Arc<peri_agent::session::async_result_mailbox::AsyncResultMailbox>,
     pub(crate) user_input_events_cancel: CancellationToken,
     /// Session 级 cron bridge（lazy-init，跨 turn 存活；close_session 时随本结构 drop）。
     pub cron_bridge: Option<crate::session::cron_bridge::SessionCronBridge>,

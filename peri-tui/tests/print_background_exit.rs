@@ -208,7 +208,7 @@ async fn assert_background_output_exits(explicit_background: bool, bare: bool) {
                         "通知必须明确说明如何读取文件: {messages}"
                     );
                     assert!(
-                        messages.contains("执行失败") && messages.contains("退出码 1"),
+                        messages.contains("state: failed") && messages.contains("exit_code: 1"),
                         "通知必须保留真实失败状态与退出码"
                     );
                     // 输出文件独立于原始 fixture；随后只能从持久化产物读取结果。

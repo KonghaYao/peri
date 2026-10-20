@@ -244,6 +244,32 @@ pub fn seed_live_from_started(task_id: &str, kind: &str, summary: &str, pid: Opt
     });
 }
 
+/// 当前权威 live 快照显示 running 时建立/恢复 live 证据。
+///
+/// [Why] 快照会周期性到达，已是 Running 的 detail 不重置 stream——否则正在流式输出的
+/// 文本会被切成多段。Unobserved（lost 删除后）或缺失的 detail 则重建为 Running；
+/// 既有 tool_cards / nested_units 保留并重新同步，恢复后未完成的工具重新显示为运行中。
+pub(crate) fn seed_live_from_running_snapshot(
+    task_id: &str,
+    kind: &str,
+    summary: &str,
+    pid: Option<u32>,
+) {
+    let live = BG_LIVE_DETAIL.state();
+    let mut map = live.write();
+    let detail = map.entry(task_id.to_string()).or_default();
+    detail.kind = kind.to_string();
+    detail.summary = summary.to_string();
+    detail.pid = pid;
+    if detail.status == BgLiveStatus::Running {
+        return;
+    }
+    flush_detail(detail);
+    detail.stream = None;
+    detail.status = BgLiveStatus::Running;
+    sync_tool_units(detail);
+}
+
 pub fn seed_live_from_terminal_snapshot(
     task_id: &str,
     kind: &str,

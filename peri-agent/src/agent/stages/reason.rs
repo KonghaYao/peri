@@ -80,13 +80,32 @@ pub async fn run_reason(input: ReasonInput) -> AgentResult<ReasonOutput> {
     // 直接构建为 Arc<Vec>：LlmCallStart 与 LLM 调用共享同一份，避免二次深拷贝。
     // 修订未变时复用准备阶段已渲染的视图（同一次 Reason 内只渲染一次）。
     // 快照取出后立即释放缓存槽：正文副本不跨 Act 常驻（错误路径由入口的作用域守卫兜底）。
-    let messages_snapshot: std::sync::Arc<Vec<crate::messages::BaseMessage>> = {
+    //
+    // 未结清的后台结果由保护集合重新投影到请求末尾；receipt 必须从这次实际投影
+    // 推导，不能按“全部 pending”猜测，也不能靠正文扫描识别。
+    let (messages_snapshot, protected) = {
         let guard = ctx.session.transcript.read();
         let capabilities = ctx.runtime.llm.provider_capabilities();
-        let view = ctx.model_view.view(&guard, &capabilities);
+        let protected = ctx.session.async_result_mailbox.protected_snapshot();
+        let view = ctx
+            .model_view
+            .view_with_protected(&guard, &capabilities, &protected);
         ctx.model_view.release();
-        view?
+        (view?, protected)
     };
+    // receipt 只绑定最终请求里实际存在的受保护消息：投影或配对修复若丢弃了某条，
+    // 它就没有被本次响应消费，不能进入 included_ids。
+    let included: Vec<_> = protected
+        .items
+        .iter()
+        .map(|item| item.delivery_id)
+        .filter(|id| messages_snapshot.iter().any(|message| message.id() == *id))
+        .collect();
+    let receipt = ctx.session.async_result_mailbox.capture_request(
+        format!("{}:{step}", ctx.session.turn.execution_binding().attempt_id),
+        format!("{turn_id}:{step}"),
+        &included,
+    );
 
     let tools_owned: Vec<std::sync::Arc<dyn crate::tools::BaseTool>> = catalog
         .tools
@@ -315,6 +334,7 @@ pub async fn run_reason(input: ReasonInput) -> AgentResult<ReasonOutput> {
         reasoning,
         catalog,
         messages_snapshot,
+        receipt,
     })
 }
 

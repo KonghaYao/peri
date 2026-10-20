@@ -77,14 +77,18 @@ pub(crate) fn take_continuation_for_request(
     state: &mut SessionState,
     req: &ContinuationRequest,
 ) -> Option<u64> {
-    if req.mq_steering {
+    if req.mq_steering || req.pending_result {
         if state.continuation_in_flight {
-            // 续跑执行中：不立即调度，但保留 pending，待 in_flight 清除后由
-            // dispatch_prompt_turn 尾端补发 ContinuationRequest。
-            state.continuation_mq_steering_pending = true;
+            // 续跑执行中：不立即调度。mq steering 保留 pending 供 dispatch 尾端
+            // 补发；Ready 结果由尾端的 pending_request 重新观察，无需额外标记。
+            if req.mq_steering {
+                state.continuation_mq_steering_pending = true;
+            }
             return None;
         }
-        state.continuation_mq_steering_pending = true;
+        if req.mq_steering {
+            state.continuation_mq_steering_pending = true;
+        }
         return Some(state.continuation_epoch);
     }
     take_continuation_if_armed(state, req.kind)
@@ -132,12 +136,17 @@ pub(crate) fn continuation_dispatchable(
     has_pending_subagent_defer: bool,
     has_pending_mq: bool,
     mq_steering: bool,
+    pending_result: bool,
+    has_ready_result: bool,
 ) -> bool {
     if !continuation_still_valid(state, epoch) {
         return false;
     }
     if mq_steering {
         return has_pending_mq;
+    }
+    if pending_result {
+        return has_ready_result;
     }
     has_pending_subagent_defer
 }
@@ -395,6 +404,8 @@ pub(crate) async fn run_continuation_scheduler(
                     if state.closing
                         || (req.mq_steering
                             && !super::activation::mq_allowed(local, &req.session_id))
+                        || (req.pending_result
+                            && !super::activation::result_allowed(local, &req.session_id))
                     {
                         None
                     } else {
@@ -410,6 +421,7 @@ pub(crate) async fn run_continuation_scheduler(
         info!(
             session_id = %req.session_id,
             mq_steering = req.mq_steering,
+            pending_result = req.pending_result,
             "continuation: scheduling AsyncContinuation"
         );
 
@@ -433,6 +445,7 @@ pub(crate) async fn run_continuation_scheduler(
                     params,
                     super::PromptOrigin::Continuation {
                         mq_steering: req.mq_steering,
+                        pending_result: req.pending_result,
                     },
                     Some(epoch),
                     &sessions2,

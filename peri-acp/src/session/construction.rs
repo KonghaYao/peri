@@ -78,6 +78,9 @@ impl SessionManager {
         // Session-level queue is shared by the executor and the blocked-goal
         // recovery scheduler; build it before GoalState so both hold the same handle.
         let v2_message_queue = peri_acp_types::session::MessageQueue::new();
+        // Mailbox 的 scope 需要在结构体字段初始化时使用 thread_id，
+        // 而 `thread_id` 本身会被移动进 `AcpSession`，这里先固化标签。
+        let thread_scope = thread_id.to_string();
 
         AcpSession {
             session_id: session_id.to_string(),
@@ -107,6 +110,12 @@ impl SessionManager {
             activation: Arc::new(super::SessionActivation::default()),
             session_inbox: None,
             user_input_mailbox: None,
+            async_result_mailbox: Arc::new(
+                peri_agent::session::async_result_mailbox::AsyncResultMailbox::new(
+                    session_id,
+                    thread_scope,
+                ),
+            ),
             user_input_events_cancel: CancellationToken::new(),
             cron_bridge: None,
             task_manager,

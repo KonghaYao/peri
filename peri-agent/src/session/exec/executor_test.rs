@@ -237,6 +237,7 @@ fn make_session_context(session_id: &str) -> SessionContext {
         subagent_llm_factory: None,
         session_id: session_id.to_string(),
         user_input_mailbox: None,
+        async_result_mailbox: None,
         cancel: AgentCancellationToken::new(),
         broker: Arc::new(NoopBroker),
         permission_mode: SharedPermissionMode::new(PermissionMode::Bypass),

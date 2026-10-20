@@ -196,6 +196,75 @@ async fn stable_terminal_delivery_id_is_recorded_once_across_receive_runs() {
     .await
     .is_err());
     assert_eq!(context.session.transcript.read().active_payloads().len(), 1);
+    // 冲突消息进入 suppressed 诊断，不得重新入队形成死循环。
+    assert_eq!(context.session.queue.suppressed_messages().len(), 1);
+    run_receive(ReceiveInput {
+        context: context.clone(),
+    })
+    .await
+    .unwrap();
+}
+
+#[tokio::test]
+async fn mailbox_identity_conflict_is_suppressed_without_blocking_later_inputs() {
+    use peri_acp_types::system_reminder::{
+        ReminderAudience, ReminderAudiences, ReminderCategory, ReminderDelivery, ReminderSeverity,
+        ReminderSource, SystemReminder, TrustedSystemReminderFactory, SYSTEM_REMINDER_VERSION,
+    };
+    let reminder = TrustedSystemReminderFactory::for_producer()
+        .construct(SystemReminder {
+            version: SYSTEM_REMINDER_VERSION,
+            category: ReminderCategory::Task,
+            source: ReminderSource("mcp".into()),
+            kind: "completed".into(),
+            severity: ReminderSeverity::Info,
+            delivery: ReminderDelivery::Configurable,
+            audiences: ReminderAudiences(vec![ReminderAudience::Model]),
+            body: "completed".into(),
+            summary: None,
+            metadata: serde_json::json!({}),
+        })
+        .unwrap();
+    let context = make_context();
+    let delivery_id = crate::messages::MessageId::new();
+    // 提醒正文相同、来源不同：transcript 去重通过，但 mailbox 指纹冲突。
+    for source in [
+        MessageSource::DynamicMcpNotification,
+        MessageSource::ShellComplete,
+    ] {
+        context
+            .session
+            .queue
+            .push(QueuedMessage::system_reminder_with_delivery_id(
+                MessageKind::Defer,
+                source,
+                reminder.clone(),
+                delivery_id,
+            ));
+    }
+    assert!(run_receive(ReceiveInput {
+        context: context.clone()
+    })
+    .await
+    .is_err());
+    assert_eq!(context.session.transcript.read().active_payloads().len(), 1);
+    assert_eq!(context.session.queue.suppressed_messages().len(), 1);
+    // 同一 ID 同内容重放仍幂等；冲突消息已被隔离，后续 Receive 不再失败。
+    context
+        .session
+        .queue
+        .push(QueuedMessage::system_reminder_with_delivery_id(
+            MessageKind::Defer,
+            MessageSource::DynamicMcpNotification,
+            reminder.clone(),
+            delivery_id,
+        ));
+    run_receive(ReceiveInput {
+        context: context.clone(),
+    })
+    .await
+    .unwrap();
+    assert_eq!(context.session.transcript.read().active_payloads().len(), 1);
 }
 
 #[tokio::test]

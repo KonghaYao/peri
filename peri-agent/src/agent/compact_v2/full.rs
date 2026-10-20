@@ -75,19 +75,54 @@ the instructions above and close the summary within the reduced target. Do not c
 ///
 /// 排除与取代关系必须在**同一次原子提交**里落地：只写排除会让 rewind 失去逐条依据，
 /// 只写取代关系则原文仍然可见。
+#[cfg(test)]
 pub(super) async fn full_compact_inner(
     transcript: &mut MessageTranscript,
     llm: Option<&dyn peri_model::Model>,
     config: &CompactConfig,
+    cwd: &str,
+) -> AgentResult<super::CompactResult> {
+    full_compact_inner_with_protected(
+        transcript,
+        llm,
+        config,
+        cwd,
+        &crate::session::async_result_mailbox::ProtectedResults::default(),
+    )
+    .await
+}
+
+/// 带后台结果保护集合的 Full Compact 实现（生产入口）。
+///
+/// 受保护结果不进入摘要请求，也不被归档；它们由派生模型视图在摘要之后按接收
+/// 顺序重新投影。只有会话路径传入非空保护集合。
+pub(super) async fn full_compact_inner_with_protected(
+    transcript: &mut MessageTranscript,
+    llm: Option<&dyn peri_model::Model>,
+    config: &CompactConfig,
     _cwd: &str,
+    protected: &crate::session::async_result_mailbox::ProtectedResults,
 ) -> AgentResult<super::CompactResult> {
     let llm = llm.ok_or(crate::error::AgentError::CompactNoLlm)?;
     // Full 和 Reason 读取同一已提交视图。按摘要 provider 的协议保护 reasoning；恢复器只接受
     // 与工具输入/思考独立的 ToolResult 投影，不为摘要另做有损预览。
-    let visible = super::projection::render_persisted_llm_view(
+    //
+    // 尚未被主模型响应覆盖的终态通知即使已进入 canonical transcript，也不属于
+    // 本次可归档历史：摘要模型不承担消费确认。这里先按保护集合移除（Reason 会在
+    // 摘要之后按接收顺序重新投影一次），既不把它们交给摘要模型，也不归档。
+    let protected_ids: std::collections::HashSet<MessageId> = protected
+        .items
+        .iter()
+        .map(|item| item.delivery_id)
+        .collect();
+    let mut visible = super::projection::render_persisted_llm_view_with_protected(
         transcript,
         &AgentModelBridge::projection_capabilities(llm),
+        protected,
     )?;
+    if !protected_ids.is_empty() {
+        visible.retain(|message| !protected_ids.contains(&message.id()));
+    }
     let before_visible_len = visible.len();
     // 先固定本次快照的 own IDs；await 期间到达 inbox 的新结果不属于本次摘要。
     // ancestor 与 System 仍由各自 owner 管理；canonical reminder 不是豁免历史。
@@ -100,6 +135,7 @@ pub(super) async fn full_compact_inner(
         .skip(transcript.ancestor_len())
         .filter(|entry| !transcript.flags(entry.id()).excluded)
         .filter(|entry| !matches!(entry.as_message(), Some(BaseMessage::System { .. })))
+        .filter(|entry| !protected_ids.contains(&entry.id()))
         .map(|entry| {
             (
                 entry.id(),
@@ -123,6 +159,33 @@ pub(super) async fn full_compact_inner(
         && visible
             .iter()
             .any(|message| !matches!(message, BaseMessage::System { .. }));
+    // 只剩 System 与受保护结果时，没有可归档历史：不调用摘要模型、不追加摘要、
+    // 不写任何 flags。处理责任仍在 mailbox，下一次请求继续附带。
+    if !protected.is_empty()
+        && flag_updates.is_empty()
+        && !visible
+            .iter()
+            .any(|message| !matches!(message, BaseMessage::System { .. }))
+    {
+        debug!(
+            protected = protected.items.len(),
+            "Full Compact: 仅 System 与受保护结果，跳过归档"
+        );
+        return Ok(super::CompactResult {
+            strategy: CompactStrategy::Full,
+            affected_count: 0,
+            estimated_tokens_saved: 0,
+            before_visible_len,
+            after_visible_len: transcript.visible_messages().len(),
+            summary: None,
+            full_escalation_reason: None,
+            outcome: CompactOutcome::Skipped,
+            failure: None,
+            changed_messages: 0,
+            changed_fields: 0,
+            no_op_candidates: 0,
+        });
+    }
     let summary = if has_history {
         let budget = SummaryBudget::resolve(llm, config)?;
         // 保留历史的角色、工具配对和完整正文；摘要指令只追加到派生请求，

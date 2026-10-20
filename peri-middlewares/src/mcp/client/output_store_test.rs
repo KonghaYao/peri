@@ -522,8 +522,9 @@ async fn child_initiated_task_receipt_delivers_to_the_child_not_root() {
         .with_task_terminal_delivery(delivery.clone());
     let output = bridge.invoke(serde_json::json!({}), context).await.unwrap();
     assert!(
-        output.contains("committed to the initiating session's transcript"),
-        "回执必须只承诺可达的持久投递: {output}"
+        output.contains("delivered to the initiating session when it arrives")
+            && output.contains("recorded at that point"),
+        "回执只能承诺结果到达时的投递与记录: {output}"
     );
     let task_id = manager.snapshot().tasks[0].task_id.clone();
     let mut result = peri_acp_types::event::BackgroundTaskResult {

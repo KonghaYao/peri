@@ -100,6 +100,7 @@ fn make_intercept_request<'a>(
         Arc::new(CompactConfig::default);
     InterceptRequest {
         mcp_pool: None,
+        async_result_mailbox: None,
         content,
         history_payloads: std::borrow::Cow::Owned(
             history

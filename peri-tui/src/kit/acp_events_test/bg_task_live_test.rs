@@ -1,5 +1,5 @@
 use super::*;
-use crate::kit::acp_types::AcpEventData;
+use crate::kit::acp_types::{AcpEventData, BgTaskSnapshotSource};
 use crate::kit::atoms::{BG_DISPLAY, BG_LIVE_DETAIL, BG_TASK_REVISION, BgLiveStatus};
 use crate::kit::stream_data::{TuiTextChunk, TuiToolEnded, TuiToolStarted};
 use crate::kit::tui_render_unit::TuiRenderUnit;
@@ -83,7 +83,7 @@ fn background_started_does_not_restore_parent_loading() {
 
 #[test]
 #[serial]
-fn live_lost_update_revokes_activity_without_snapshot_resurrection() {
+fn live_lost_update_hides_activity_until_authoritative_running_snapshot() {
     let _restore = RestoreSnapshotAtoms::empty();
     let mut state = make_fold_test_state();
     dispatch_and_notify(
@@ -105,11 +105,88 @@ fn live_lost_update_revokes_activity_without_snapshot_resurrection() {
         BG_LIVE_DETAIL.state().read()["lost-worker"].status,
         BgLiveStatus::Unobserved
     );
+    assert_eq!(
+        crate::kit::atoms::BG_TASKS.state().read()[0]
+            .status
+            .as_deref(),
+        Some("lost"),
+        "lost 事实仍需保留在 Tasks 面板列表"
+    );
+    // 当前 owner 的 running 增量是恢复活动行的权威证据。
     super::super::system::handle_bg_task_updated("lost-worker", "running", Some(3));
-    assert!(BG_DISPLAY.state().read().is_empty());
+    let display_store = BG_DISPLAY.state();
+    let display = display_store.read();
+    assert_eq!(display.len(), 1);
+    assert!(display[0].is_active);
+    assert_eq!(display[0].id, "lost-worker");
+    drop(display);
     assert_eq!(
         BG_LIVE_DETAIL.state().read()["lost-worker"].status,
-        BgLiveStatus::Unobserved
+        BgLiveStatus::Running
+    );
+
+    // 同样的恢复必须成立在“lost 快照删除底栏行 → running 快照”路径上。
+    super::super::system::apply_bg_task_snapshot(
+        &[crate::kit::acp_types::BgTaskEntry {
+            task_id: "lost-worker".into(),
+            kind: "agent".into(),
+            summary: "current worker".into(),
+            started_at: String::new(),
+            pid: None,
+            revision: Some(4),
+            status: Some("lost".into()),
+        }],
+        Some(4),
+        BgTaskSnapshotSource::Live,
+    );
+    assert!(BG_DISPLAY.state().read().is_empty());
+    super::super::system::apply_bg_task_snapshot(
+        &[crate::kit::acp_types::BgTaskEntry {
+            task_id: "lost-worker".into(),
+            kind: "agent".into(),
+            summary: "current worker".into(),
+            started_at: String::new(),
+            pid: None,
+            revision: Some(5),
+            status: Some("running".into()),
+        }],
+        Some(5),
+        BgTaskSnapshotSource::Live,
+    );
+    assert!(BG_DISPLAY.state().read()[0].is_active);
+    assert_eq!(
+        BG_LIVE_DETAIL.state().read()["lost-worker"].status,
+        BgLiveStatus::Running
+    );
+}
+
+#[test]
+#[serial]
+fn live_running_snapshot_recovers_activity_without_started_event() {
+    let _restore = RestoreSnapshotAtoms::empty();
+    let task = crate::kit::acp_types::BgTaskEntry {
+        task_id: "late-snapshot".into(),
+        kind: "shell".into(),
+        summary: "sleep 1".into(),
+        started_at: String::new(),
+        pid: Some(7),
+        revision: Some(1),
+        status: Some("running".into()),
+    };
+    assert!(super::super::system::apply_bg_task_snapshot(
+        std::slice::from_ref(&task),
+        Some(1),
+        BgTaskSnapshotSource::Live,
+    ));
+    let display_store = BG_DISPLAY.state();
+    let display = display_store.read();
+    assert_eq!(display.len(), 1, "漏 Started 时当前快照应补齐活动行");
+    assert!(display[0].is_active);
+    assert_eq!(display[0].id, task.task_id);
+    drop(display);
+    assert_eq!(
+        BG_LIVE_DETAIL.state().read()[&task.task_id].status,
+        BgLiveStatus::Running
     );
 }
 
@@ -140,6 +217,7 @@ fn historical_nonterminal_snapshots_do_not_create_live_activity() {
         assert!(super::super::system::apply_bg_task_snapshot(
             std::slice::from_ref(&task),
             Some(revision as u64),
+            BgTaskSnapshotSource::Historical,
         ));
         assert!(BG_DISPLAY.state().read().is_empty());
         assert_eq!(
@@ -155,7 +233,7 @@ fn historical_nonterminal_snapshots_do_not_create_live_activity() {
 
 #[test]
 #[serial]
-fn live_started_event_remains_active_but_snapshot_cannot_resurrect_it() {
+fn historical_snapshot_cannot_resurrect_lost_task_but_live_snapshot_can() {
     let _restore = RestoreSnapshotAtoms::empty();
     let mut state = make_fold_test_state();
     let mut task = crate::kit::acp_types::BgTaskEntry {
@@ -169,7 +247,8 @@ fn live_started_event_remains_active_but_snapshot_cannot_resurrect_it() {
     };
     assert!(super::super::system::apply_bg_task_snapshot(
         &[task.clone()],
-        Some(1)
+        Some(1),
+        BgTaskSnapshotSource::Historical,
     ));
     assert!(BG_DISPLAY.state().read().is_empty());
     task.revision = Some(2);
@@ -190,7 +269,8 @@ fn live_started_event_remains_active_but_snapshot_cannot_resurrect_it() {
         ));
     assert!(super::super::system::apply_bg_task_snapshot(
         &[task.clone()],
-        Some(3)
+        Some(3),
+        BgTaskSnapshotSource::Live,
     ));
     assert!(BG_DISPLAY.state().read()[0].is_active);
     assert_eq!(BG_DISPLAY.state().read()[0].created_at, started_at);
@@ -201,7 +281,8 @@ fn live_started_event_remains_active_but_snapshot_cannot_resurrect_it() {
     task.status = Some("lost".into());
     assert!(super::super::system::apply_bg_task_snapshot(
         &[task.clone()],
-        Some(4)
+        Some(4),
+        BgTaskSnapshotSource::Live,
     ));
     assert!(BG_DISPLAY.state().read().is_empty());
     assert_eq!(
@@ -218,12 +299,31 @@ fn live_started_event_remains_active_but_snapshot_cannot_resurrect_it() {
         card.output_summary,
         crate::i18n::tr("shell-detail-status-unobserved")
     );
+    // 历史回放只读：即使状态文字是 running，也不能复活当前活动行。
     task.status = Some("running".into());
+    task.revision = Some(5);
     assert!(super::super::system::apply_bg_task_snapshot(
-        &[task],
-        Some(5)
+        &[task.clone()],
+        Some(5),
+        BgTaskSnapshotSource::Historical,
     ));
     assert!(BG_DISPLAY.state().read().is_empty());
+    assert_eq!(
+        BG_LIVE_DETAIL.state().read()[&task.task_id].status,
+        BgLiveStatus::Unobserved
+    );
+    // 当前权威 live 快照可以恢复同一任务的活动行。
+    task.revision = Some(6);
+    assert!(super::super::system::apply_bg_task_snapshot(
+        &[task],
+        Some(6),
+        BgTaskSnapshotSource::Live,
+    ));
+    assert!(BG_DISPLAY.state().read()[0].is_active);
+    assert_eq!(
+        BG_LIVE_DETAIL.state().read()["observed-shell"].status,
+        BgLiveStatus::Running
+    );
 }
 
 #[test]
@@ -318,6 +418,7 @@ fn terminal_snapshot_does_not_resurrect_a_running_task() {
             status: Some("completed".into()),
         }],
         Some(42),
+        BgTaskSnapshotSource::Live,
     ));
     let entries = BG_DISPLAY.state();
     let entries = entries.read();
@@ -346,6 +447,7 @@ fn terminal_snapshot_does_not_resurrect_a_running_task() {
             status: Some("completed".into()),
         }],
         Some(43),
+        BgTaskSnapshotSource::Live,
     ));
     let live = BG_LIVE_DETAIL.state();
     let details = live.read();
@@ -410,6 +512,7 @@ fn snapshot_watermark_rejects_late_started_event() {
         &AcpEventData::BgTaskSnapshot {
             revision: Some(3),
             tasks: vec![],
+            source: BgTaskSnapshotSource::Live,
         },
     );
     dispatch_and_notify(
