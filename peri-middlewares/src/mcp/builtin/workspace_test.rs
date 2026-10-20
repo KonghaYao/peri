@@ -449,24 +449,28 @@ async fn bridge_accepts_workspace_owned_task_handle() {
     let QueuedPayload::SystemReminder(reminder) = &notifications[0].payload else {
         panic!("expected task reminder")
     };
-    let owner_task_id = reminder.as_reminder().metadata["task_id"]
+    let session_task_id = reminder.as_reminder().metadata["task_id"]
+        .as_str()
+        .expect("completion carries the session task identity");
+    assert_eq!(session_task_id, task_id);
+    let remote_task_id = reminder.as_reminder().metadata["remote_task_id"]
         .as_str()
         .expect("completion carries the actionable Workspace task identity");
-    assert!(owner_task_id.starts_with("shell-"));
+    assert!(remote_task_id.starts_with("shell-"));
     assert!(reminder
         .as_reminder()
         .body
-        .contains(&owner_task_id.chars().take(8).collect::<String>()));
-    let mut params = rmcp::model::GetTaskParams::new(owner_task_id);
+        .contains(&session_task_id.chars().take(8).collect::<String>()));
+    let mut params = rmcp::model::GetTaskParams::new(remote_task_id);
     params.meta = pool.task_scope_meta_for("workspace", "task-session");
     let task = peer.get_task(params).await.expect("query owned task").task;
-    assert_eq!(task.task.task_id, owner_task_id);
+    assert_eq!(task.task.task_id, remote_task_id);
     let rmcp::model::TaskPayload::Completed { result } = task.payload else {
         panic!("completion reminder must identify a completed task")
     };
     let result: BackgroundTaskResult =
         serde_json::from_value(result["structuredContent"].clone()).expect("shell result");
-    assert_eq!(result.task_id, owner_task_id);
+    assert_eq!(result.task_id, remote_task_id);
     assert!(result.success);
     let output_path = result
         .shell_output
