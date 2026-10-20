@@ -1,6 +1,6 @@
 //! Session 生命周期命令 handler：initialize / new / load / list /
-//! cancel-bg-task / close / delete / resume / fork / rename（自 requests.rs
-//! 拆出，请求分发见 `host/requests.rs`）。
+//! close / delete / resume / fork / rename（自 requests.rs 拆出，请求分发见
+//! `host/requests.rs`）。后台任务查询/取消在 [`session_tasks`]。
 
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -640,68 +640,9 @@ pub(crate) async fn handle_list(params: &Value, cfg: &AcpServerConfig) -> Result
     serde_json::to_value(resp).map_err(|e| AcpError::new(-32603, format!("Serialize failed: {e}")))
 }
 
-pub(super) async fn handle_cancel_bg_task(
-    params: &Value,
-    cfg: &AcpServerConfig,
-) -> Result<Value, AcpError> {
-    let req_session_id = params
-        .get("sessionId")
-        .and_then(|v| v.as_str())
-        .ok_or_else(|| AcpError::new(-32602, "missing sessionId"))?;
-    let task_id = params
-        .get("taskId")
-        .and_then(|v| v.as_str())
-        .ok_or_else(|| AcpError::new(-32602, "missing taskId"))?;
-
-    // 会话不存在时如实报错（此前静默返回 success，掩盖取消未生效）
-    let session = cfg
-        .session_manager
-        .get_session(req_session_id)
-        .ok_or_else(|| AcpError::new(-32602, format!("session not found: {req_session_id}")))?;
-    let manager = Arc::clone(&session.task_manager);
-    drop(session);
-    let manager = if let Some(child_id) = params.get("childThreadId").and_then(Value::as_str) {
-        manager.child_task_manager(child_id).ok_or_else(|| {
-            AcpError::new(
-                -32602,
-                "child resource owner is outside owning session tree",
-            )
-        })?
-    } else {
-        manager
-    };
-    manager
-        .cancel_async(task_id)
-        .await
-        .map_err(|e| AcpError::new(-32603, e.to_string()))?;
-    info!(session_id = %req_session_id, task_id = %task_id, "Background task cancelled via ACP");
-    Ok(serde_json::json!({ "success": true }))
-}
-
-pub(super) fn handle_bg_tasks(params: &Value, cfg: &AcpServerConfig) -> Result<Value, AcpError> {
-    let session_id = params
-        .get("sessionId")
-        .and_then(Value::as_str)
-        .ok_or_else(|| AcpError::new(-32602, "missing sessionId"))?;
-    let session = cfg
-        .session_manager
-        .get_session(session_id)
-        .ok_or_else(|| AcpError::new(-32602, "session not found"))?;
-    let manager = if let Some(child_id) = params.get("childThreadId").and_then(Value::as_str) {
-        session
-            .task_manager
-            .child_task_manager(child_id)
-            .ok_or_else(|| {
-                AcpError::new(
-                    -32602,
-                    "child resource owner is outside owning session tree",
-                )
-            })?
-    } else {
-        session.task_manager.clone()
-    };
-    Ok(super::task_snapshot_value(manager.snapshot()))
-}
+#[path = "session_tasks.rs"]
+mod session_tasks;
+pub(super) use session_tasks::{handle_bg_tasks, handle_cancel_bg_task};
 
 #[path = "session_close.rs"]
 mod close;

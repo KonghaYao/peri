@@ -1,5 +1,7 @@
 # peri-acp 代码索引
 
+后台任务查询/取消 handler 在 `host/requests/session_tasks.rs`；`session_lifecycle.rs` 仅 re-export，已满足 STD-SIZE-001。`childThreadId` 只在 owning 会话的任务 owner 子树内解析，不把任意 child ID 当作授权。
+
 Legacy 首次接纳在 `host/requests/legacy_session.rs` 消费
 `PreparedSessionInputs.legacy.saved_cwd` 作为保存目录事实源；无 frozen 的无绑定历史会话
 在接纳前先经 `SessionResources::relink_unbound_session` 按当前观测重建归属（幂等、
