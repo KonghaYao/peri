@@ -313,3 +313,67 @@ async fn async_result_act_empty_response_keeps_responsibility() {
         "诊断必须指出失败阶段"
     );
 }
+
+/// [T18] 工具调用回答按“AI 消息 + 工具结果配对提交”结算：配对提交后
+/// 才算有效处理；工具执行中断时保留责任，恢复只能基于已提交历史。
+#[tokio::test]
+async fn async_result_act_tool_call_settles_after_pair_commit_or_keeps_on_failure() {
+    // 1) 配对提交成功：工具结果已落盘，本次处理责任才算结清。
+    let ctx = make_context();
+    let (id, receipt) = terminal_result(&ctx.session.async_result_mailbox);
+    let tool_call = ToolCall::new("call_1", "Read", serde_json::json!({"path": "/tmp"}));
+    let reasoning = Reasoning::with_tools("need to read file", vec![tool_call]);
+    run_act(ActInput {
+        context: ctx.clone(),
+        reasoning,
+        catalog: ctx.runtime.tool_catalog.snapshot(),
+        receipt: Some(receipt),
+    })
+    .await
+    .unwrap();
+
+    assert_eq!(
+        ctx.session.async_result_mailbox.pending_count(),
+        0,
+        "配对提交完成后本次责任可以结清"
+    );
+    let messages: Vec<_> = {
+        let guard = ctx.session.transcript.read();
+        guard.visible_messages().into_iter().cloned().collect()
+    };
+    assert!(
+        messages.len() >= 2,
+        "AI 工具调用消息与工具结果都必须保留，实际 {} 条",
+        messages.len()
+    );
+
+    // 2) 工具执行中断：没有配对提交，责任保留且不伪造 Covered。
+    let ctx = make_context();
+    let (id, receipt) = terminal_result(&ctx.session.async_result_mailbox);
+    ctx.session.turn.cancel_token.cancel();
+    let tool_call = ToolCall::new("call_2", "Read", serde_json::json!({"path": "/tmp"}));
+    let reasoning = Reasoning::with_tools("need to read file", vec![tool_call]);
+    let outcome = run_act(ActInput {
+        context: ctx.clone(),
+        reasoning,
+        catalog: ctx.runtime.tool_catalog.snapshot(),
+        receipt: Some(receipt),
+    })
+    .await;
+    assert!(outcome.is_err(), "中断必须向调用方传播");
+
+    assert_eq!(
+        ctx.session.async_result_mailbox.pending_count(),
+        1,
+        "未完成配对提交时不得清空处理责任"
+    );
+    assert_eq!(
+        ctx.session.async_result_mailbox.state_of(&id),
+        Some(crate::session::async_result_mailbox::AsyncResultState::InFlight),
+        "结果仍停留在本次请求内，等待后续有效提交"
+    );
+    assert!(
+        ctx.session.async_result_mailbox.retains_body(&id),
+        "未覆盖时提醒正文必须保留，供后续请求重投影"
+    );
+}
