@@ -32,23 +32,55 @@ impl SessionEnvironment {
     /// 建立 `workflow://tasks` 订阅并完成基线读取后才置 `consumer_ready`；就绪前
     /// `Workflow` 工具拒绝新启动（就绪屏障），订阅失败回落 not-ready 而非带病放行。
     ///
-    /// 返回 `false`：本部署形态没有 workflow 实例面（无池 / 实例未装配 / 未注入
-    /// 槽位 / 未绑定），无需消费者，不是失败。
-    pub(crate) fn start_workflow_consumer(
+    /// 返回 `false`：无池 / 无槽位，或初始化完成后确实没有 workflow 实例。
+    /// 初始化中的句柄缺席不是能力缺席；失败、超时或缺少运行时绑定必须上报。
+    pub(crate) async fn start_workflow_consumer(
         &self,
         executor: Arc<dyn peri_acp_types::workflow::AgentExecutor>,
-    ) -> bool {
+    ) -> Result<bool, String> {
         let Some(pool) = self.cfg.mcp_pool.clone() else {
-            return false;
+            return Ok(false);
         };
-        // bare / 未装配 workflow 实例的部署不启动消费者：实例不存在时协议关闭
-        // 无法确认，也不能用进程内状态冒充 MCP 数据面。
-        if !pool.has_instance("workflow") {
-            return false;
+        if self.workflow_input.is_none() {
+            return Ok(false);
         }
-        let Some(runtime) = self.workflow_runtime() else {
-            return false;
-        };
+        // MCP 在 activate 后后台初始化，不能用一次瞬时查询永久跳过消费者。
+        // 只等待宿主连接状态；任务、就绪和关闭仍经 MCP 协议消费。
+        let deadline = peri_time::monotonic_now() + std::time::Duration::from_secs(10);
+        while !pool.has_instance("workflow") {
+            let snapshot = pool.snapshot();
+            match snapshot["initPhase"].as_str() {
+                Some("ready") => {
+                    // 终态快照可能晚于循环条件读取；再次确认，避免漏掉刚注册的实例。
+                    if !pool.has_instance("workflow") {
+                        return Ok(false);
+                    }
+                    break;
+                }
+                Some("failed") => {
+                    return Err(
+                        "workflow consumer setup failed: MCP pool initialization failed".into(),
+                    );
+                }
+                Some("pending" | "initializing") => {}
+                _ => {
+                    return Err(
+                        "workflow consumer setup failed: unknown MCP initialization state".into(),
+                    )
+                }
+            }
+            if peri_time::monotonic_now() >= deadline {
+                return Err(
+                    "workflow consumer setup timed out waiting for MCP instance registration"
+                        .into(),
+                );
+            }
+            peri_time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+        let runtime = self.workflow_runtime().ok_or_else(|| {
+            "workflow consumer setup failed: instance exists but runtime slot is not bound"
+                .to_string()
+        })?;
         // Composition injects only an opaque capability. Runtime data is read over MCP.
         let token = runtime.bind_consumer_token();
         let session_id = self.session_id.clone();
@@ -80,7 +112,7 @@ impl SessionEnvironment {
         );
         // 重复调用（异常路径）时旧消费者随赋值 drop → 取消，不残留双消费者。
         *self.workflow_consumer.lock() = Some(consumer);
-        true
+        Ok(true)
     }
 
     /// 停止消费者：取消订阅与在飞执行并有界等待收口（会话关闭路径；幂等）。

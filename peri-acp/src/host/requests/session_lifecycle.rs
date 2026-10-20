@@ -109,7 +109,7 @@ pub(super) fn workflow_face_closed(
 /// `not(emscripten)`：本地 workflow 运行时不在构建面内，该目标没有链可绑定
 /// （调用点随之不产生链，不会调用本函数）。
 #[cfg(not(target_os = "emscripten"))]
-pub(super) fn attach_session_workflow(
+pub(super) async fn attach_session_workflow(
     environment: Option<&Arc<super::super::workspace::SessionEnvironment>>,
     chain: &crate::host::workflow_agent::SessionWorkflowChain,
 ) -> Result<(), AcpError> {
@@ -124,7 +124,13 @@ pub(super) fn attach_session_workflow(
         }
         // 消费者在发布之前接线（订阅在后台建立）；就绪屏障保证订阅就绪前
         // `Workflow` 工具拒绝新启动。
-        environment.start_workflow_consumer(Arc::clone(&chain.executor));
+        environment
+            .start_workflow_consumer(Arc::clone(&chain.executor))
+            .await
+            .map_err(|error| {
+                tracing::error!(%error, "workflow consumer setup failed");
+                AcpError::new(-32603, error)
+            })?;
     }
     Ok(())
 }
@@ -440,7 +446,7 @@ pub(crate) async fn new_session_from_prepared(
     // （design §6.2）：先排空已起环境、再撤销未发布的创建，不发布半可用会话。
     #[cfg(not(target_os = "emscripten"))]
     if let Some(chain) = workflow_chain.as_ref() {
-        if let Err(error) = attach_session_workflow(environment.as_ref(), chain) {
+        if let Err(error) = attach_session_workflow(environment.as_ref(), chain).await {
             drain_and_abandon(environment.as_ref(), &initialization).await?;
             return Err(error);
         }
@@ -803,7 +809,7 @@ pub(crate) async fn handle_fork(
     // 才撤销未发布的创建（顺序不变量），不发布半可用会话。
     #[cfg(not(target_os = "emscripten"))]
     if let Some(chain) = workflow_chain.as_ref() {
-        if let Err(error) = attach_session_workflow(environment.as_ref(), chain) {
+        if let Err(error) = attach_session_workflow(environment.as_ref(), chain).await {
             if let Some(environment) = &environment {
                 if !environment.shutdown().await {
                     return Err(AcpError::new(

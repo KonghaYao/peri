@@ -37,7 +37,7 @@ async fn seam_fixture() -> SeamFixture {
             .unwrap();
     let config_source = Arc::new(
         ConfigSource::load_at(
-            &tmp.path().join("empty-cwd"),
+            std::path::Path::new(&cwd),
             tmp.path().join("test_config.json"),
         )
         .expect("夹具配置源"),
@@ -77,6 +77,186 @@ async fn seam_fixture() -> SeamFixture {
         cwd,
         _tmp: tmp,
     }
+}
+
+struct WorkflowExecutor;
+
+#[async_trait::async_trait]
+impl peri_acp_types::workflow::AgentExecutor for WorkflowExecutor {
+    async fn execute(
+        &self,
+        _params: peri_acp_types::workflow::AgentRunParams,
+    ) -> peri_acp_types::workflow::AgentRunResult {
+        peri_acp_types::workflow::AgentRunResult::Ok {
+            output: serde_json::json!("dispatched"),
+            usage: peri_acp_types::workflow::Usage { output_tokens: 1 },
+            model: None,
+            tool_count: None,
+            token_count: None,
+            phase: None,
+            duration_ms: None,
+        }
+    }
+}
+
+#[tokio::test]
+#[serial_test::serial(mcp_env)]
+async fn workflow_consumer_waits_for_instance_registration_then_dispatches() {
+    let mut fixture = seam_fixture().await;
+    fixture.cfg.workspace_assembly.as_mut().unwrap().bare = false;
+    let sid = "workflow-delayed-init";
+    let environment = SessionEnvironment::assemble(&fixture.cfg, &fixture.cwd, sid)
+        .await
+        .unwrap()
+        .unwrap();
+    environment
+        .cfg
+        .session_manager
+        .ensure_session_with_task_manager(sid, &fixture.cwd, Some(environment.task_manager()));
+    let pool = environment.cfg.mcp_pool.as_ref().unwrap();
+    assert!(!pool.has_instance("workflow"));
+    let executor: Arc<dyn peri_acp_types::workflow::AgentExecutor> = Arc::new(WorkflowExecutor);
+    let (tx, _rx) = tokio::sync::broadcast::channel(8);
+    let runtime = Arc::new(peri_mcp_workflow::WorkflowRuntime::new(
+        executor.clone(),
+        &fixture.cwd,
+        tx,
+        None,
+    ));
+    environment.bind_workflow_runtime(&runtime).unwrap();
+    let start = environment.start_workflow_consumer(executor);
+    tokio::pin!(start);
+    // 激活闸门保证连接尚未开始：旧实现会立即返回 false，确定性复现竞态。
+    assert!(
+        tokio::time::timeout(std::time::Duration::from_millis(50), &mut start)
+            .await
+            .is_err(),
+        "初始化中不得把暂缺句柄当成能力缺席"
+    );
+    environment.activate();
+    assert!(start.await.unwrap());
+    tokio::time::timeout(std::time::Duration::from_secs(10), async {
+        while !runtime.consumer_ready() {
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .unwrap();
+    // 就绪后必须进入参数校验，不再让两种用户调用都卡在接线错误。
+    for arguments in [
+        serde_json::json!({"name": "factory-dispatch-audit"}),
+        serde_json::json!({"maxAgents": 1}),
+    ] {
+        let error = pool
+            .call_instance_tool("workflow", "Workflow", arguments, None)
+            .await
+            .unwrap_err();
+        assert!(
+            error.contains("missing 'script' or 'scriptPath' field"),
+            "{error}"
+        );
+    }
+    // 真 MCP 订阅、claim 和回填；只替换模型执行边界。
+    let params = serde_json::from_value(serde_json::json!({
+        "runId": "delayed-run", "agentId": 1, "prompt": "dispatch"
+    }))
+    .unwrap();
+    runtime.tasks().publish("delayed-task".into(), params);
+    tokio::time::timeout(std::time::Duration::from_secs(10), async {
+        loop {
+            let page = pool
+                .read_instance_resource("workflow", "workflow://tasks")
+                .await
+                .unwrap();
+            let page: serde_json::Value = serde_json::from_str(&page).unwrap();
+            if page["activeTasks"].as_array().unwrap().is_empty() {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .unwrap();
+    let record = runtime.tasks().get("delayed-run", "delayed-task").unwrap();
+    assert_eq!(
+        record.state,
+        peri_mcp_workflow::WorkflowTaskState::Completed
+    );
+    assert!(environment.shutdown().await);
+}
+
+#[tokio::test]
+async fn workflow_consumer_skips_absent_instance_after_bare_initialization() {
+    let fixture = seam_fixture().await;
+    let environment = SessionEnvironment::assemble(&fixture.cfg, &fixture.cwd, "workflow-bare")
+        .await
+        .unwrap()
+        .unwrap();
+    let executor: Arc<dyn peri_acp_types::workflow::AgentExecutor> = Arc::new(WorkflowExecutor);
+    let (tx, _rx) = tokio::sync::broadcast::channel(8);
+    let runtime = Arc::new(peri_mcp_workflow::WorkflowRuntime::new(
+        executor.clone(),
+        &fixture.cwd,
+        tx,
+        None,
+    ));
+    environment.bind_workflow_runtime(&runtime).unwrap();
+    environment.activate();
+    assert!(!environment.start_workflow_consumer(executor).await.unwrap());
+    assert!(!runtime.consumer_bound());
+    assert!(environment.shutdown().await);
+}
+
+struct WorkflowSetupPool {
+    phase: &'static str,
+    present: bool,
+}
+
+#[async_trait::async_trait]
+impl peri_acp_types::ports::McpPoolPort for WorkflowSetupPool {
+    fn as_any(&self) -> &dyn std::any::Any {
+        self
+    }
+
+    fn has_instance(&self, _instance: &str) -> bool {
+        self.present
+    }
+
+    fn snapshot(&self) -> serde_json::Value {
+        serde_json::json!({"initPhase": self.phase})
+    }
+
+    async fn shutdown(&self) -> peri_acp_types::ports::McpPoolShutdownReport {
+        peri_acp_types::ports::McpPoolShutdownReport::Complete {
+            settled_services: 0,
+            failed_services: 0,
+        }
+    }
+}
+
+#[tokio::test]
+async fn workflow_consumer_reports_setup_failures_without_binding_consumer() {
+    let fixture = seam_fixture().await;
+    let mut environment =
+        SessionEnvironment::assemble(&fixture.cfg, &fixture.cwd, "workflow-failure")
+            .await
+            .unwrap()
+            .unwrap();
+    for (phase, present, expected) in [
+        ("failed", false, "MCP pool initialization failed"),
+        ("unknown", false, "unknown MCP initialization state"),
+        ("ready", true, "runtime slot is not bound"),
+        ("pending", false, "timed out"),
+    ] {
+        Arc::get_mut(&mut environment).unwrap().cfg.mcp_pool =
+            Some(Arc::new(WorkflowSetupPool { phase, present }));
+        let error = environment
+            .start_workflow_consumer(Arc::new(WorkflowExecutor))
+            .await
+            .unwrap_err();
+        assert!(error.contains(expected), "{error}");
+    }
+    assert!(environment.shutdown().await);
 }
 
 fn make_provider_config() -> ProviderConfig {
