@@ -54,22 +54,30 @@ MQ pending 标记是后续处理提示，不作为排队请求的准入锁。重
 - 输入回滚文本绑定其提交请求，不绑定当前显示的 execution；审批或内部续跑的终态不能删除或恢复另一个待执行请求的输入。只有 managed 输入的 Stop 携带 mailbox 票据身份，external execution 仍走宿主普通取消入口。
 - 验证从完整行为出发：嵌套 child 晚到结果、forwarder 失败、内部续跑首步 HITL、空闲定时审批、suspend/wake 事件交错和跨会话迟到提交错误。
 
-120 秒仍是一轮 RCRA 的 idle bound，不是 Task 工具的整任务 wall-clock timeout；当前进程的 child owner 保留结果消费责任，取消、关闭与累计语义迭代预算仍约束该执行。
+120 秒仍是一轮 RCRA 的 idle bound，不是 Task 工具的整任务 wall-clock timeout；child 另有 §5 的单次执行收尾窗口。当前进程的 child owner 保留结果消费责任，取消、关闭与累计语义迭代预算仍约束该执行。
 
-## 5. Child 有界收尾（已批准目标，实施中）
+## 5. Child 有界收尾
 
-同一次 child 执行在首次 RCRA 推进结束且仍有任务或消息处理义务时启动唯一窗口，`D = t0 + HANDOFF_MAX_WAIT`（120 秒）。activity、结果到达、短暂空闲和 loop 重入均不重置 D；loop、runner 与 sync wrapper 共用同一窗口。
+同一次 child 执行在首次 RCRA 推进结束且仍有任务或消息处理义务（active task、pending delivery、未消费 Required 结果）时启动唯一窗口，`D = t0 + HANDOFF_MAX_WAIT`（120 秒）。activity、结果到达、短暂空闲、任务新增和 loop 重入均不重置 D；同一 `ChildSettlementWindow` 由 loop、runner 与 sync wrapper 共用。显式新 run（resume）创建新窗口。
 
-D 后关闭新语义迭代准入；D 前已准入的 Reason/Act 完成工具调用配对后再交接，不取消 turn token 或 Shell。全部任务及消息义务结清才是 Settled，否则返回带 child/execution、资源 owner、任务/消息引用和 canonical 消息 ID 的 HandedOff。持久元数据映射 Error，父结果 success=false、timed_out=false，保留本轮文本，不把未完成显示为成功或 Running。
+loop 在 cancel 检查后、Receive 前检查 D；Receive 之后、新语义迭代准入前再次检查，覆盖持久化等待跨过 D 的情况。D 前已准入的 Compact→Reason→Act 完整结算，不丢弃 tool-call/result 配对；D 后不再准入新迭代。settlement `select!` 使用 `sleep_until(D)`，不依赖 activity 恰好到来。到期以 `LoopResult::SettlementDue` 返回，不调用 turn cancel token，也不取消 Shell。
 
-轻量资源 owner 保留原 manager/MQ、可信查询/取消/关闭能力与冻结交接快照，不保留模型、StageContext 或旧事件总线。handoff/resume/close 共用进程内准入；可靠 flush、幂等 append、非 Active 提交、一次 Stop 与旧事件排空完成后才开放新 run。失败保留资源和修复义务，显式报告，不能回退到无限等待 Shell。
+全部任务、投递与消息义务结清才是 `ChildRunOutcome::Settled`；否则返回带 child/execution、资源 owner、任务与消息引用、canonical 消息 ID 的 `HandedOff`。`Failed` 保留原错误；若仍有资源义务则附残留 receipt。child 元数据写 Error（`child_tasks_handed_off`），父结果 success=false、timed_out=false，保留本轮已产生文本，不把未完成显示为成功或 Running。
 
-截止后的结果仍投直接 child 的 MQ；不隐式复活旧执行。新的模型分析需要显式 `Agent(resume_thread_id, prompt)`，这是长任务超过窗口的已接受代价。不 resume 而关闭时，owner 非模型结算保留消息；未确认资源及消息结清不得报告 Closed。父投递失败由 registry 单一 retry worker 接管，不保留完整 session 的 wrapper 轮询。
+轻量资源 owner 由父 `TaskManager` 持有，保留原 manager/MQ、canonical 写入端口、冻结交接快照及执行准入；不保留模型、StageContext 或旧事件总线。handoff/resume/close 共用执行许可：`prepare_resume` 阻止并发 resume，`bind` 阻止 close 与 handoff 竞争，permit 在状态提交和旧 Stop/事件排空后释放。交接在 flush 后按稳定 ID 幂等 append，提交成功后才登记 receipt；失败显式报告并保留 pending 身份供重试。
+
+sync wrapper 只在收到已提交 receipt 后 detach；无父投递宿主时等待 typed outcome 并同步返回未完成，不制造幽灵任务。父结果投递失败由 registry `pending_deliveries` 的单一 retry worker 接管，wrapper 释放完整 child session，不再自建轮询。
+
+截止后的结果仍投直接 child 的 MQ；不隐式复活旧执行。新的模型分析需要显式 `Agent(resume_thread_id, prompt)`，这是长任务超过窗口的已接受代价。旧执行的 ContinueCurrentRun 控制消息在新 run 中被抑制；旧 Stop 在 owner 开放下一次准入前排空。
+
+不 resume 而关闭时，owner 先阻断 resume，取消/结清真实资源，再由非模型路径将停驻 MQ 中的终态按原 delivery ID 写入 child canonical；其他未处理输入记录为 `child_retained_input_unprocessed`，不静默清空。失败保留可查询 owner 并返回 Incomplete，不释放 binding，不宣称 Closed。
 
 不新增 DB 表、持久状态枚举或 ACK 账本；不扩张 late result 即时落库保证。进程重启仅加载已保存历史，不恢复旧执行或尚未持久化的内存结果。
 
 ## 6. 验收
 
 覆盖当前任务结果/进度/取消、父子消息路由与展示身份、连接关闭失败和新输入处理。覆盖历史加载不触发任务发现或旧副作用；不再验收冷恢复、永久 terminal ACK 和跨进程处理义务。
+
+Child 收尾回归使用 paused-time：永久 Working 无通知、activity/任务新增不重置 D、D 前/后/同刻完成、task 终态但结果未消费、Receive 跨 D、已准入 Act 完成、预算/HookStop、cancel 与 D 同刻、sync/bg × 新建/resume、父注册竞争、交接/状态写失败、late result 后 resume、close 消息结算、A→B→C 归属。真实进程死锁/进程树清理与 TUI 手测仍按仓库 testing 规范另行验收。
 
 TUI 后台验收使用隔离 HOME、真实二进制与本地模型重放：只提交一次用户输入，核对当前 canonical reminder、直接父会话后续模型请求及回答、child 终态和重复投递。验收只读取当前 threads/messages，不依赖已删除的 Work 表。

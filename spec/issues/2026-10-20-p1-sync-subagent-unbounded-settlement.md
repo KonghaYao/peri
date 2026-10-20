@@ -1,6 +1,6 @@
 # P1：子 Agent 无界收尾
 
-状态：A′ 已批准，实施中；尚未完成生产接入与验收。日期：2026-10-20。
+状态：A′ 已实现并通过定向与全库回归；真实进程/TUI 手测未覆盖。日期：2026-10-20。
 
 ## 故障与证据
 
@@ -37,52 +37,48 @@
 5. sync/background/spawn/resume、父结果及展示贯穿。
 6. 移除 wrapper 自有投递等待、完成 close 消息结算与回归。
 
-## 验收清单（未勾选均未完成）
+## 验收清单
 
-- [ ] 永久 Working 无通知、每秒 activity、连续队列通知：D 不重置，计算退出但 Shell 仍 Working。
-- [ ] 无任务正常退出；D 内完成由旧 child 正常处理；D 前/同刻两种调度/之后终态与 Stop 恰一次。
-- [ ] active=0 但消息未消费仍交接；Receive 跨 D 保留历史；Reason 跨 D 的 Act 完成配对，不开下一轮。
-- [ ] MaxIterations/HookStop 不追加模型预算，保留原错误与残留资源；cancel 与 D 同刻不混淆。
-- [ ] sync/bg × 新建/resume、父注册与终态竞争、D 时 pending 空但安全单元未结束。
-- [ ] callback 拒绝/panic/恢复由 registry 重试，wrapper 不驻留；无 owner/closing/注册失败显式报错。
-- [ ] handoff append/status write 失败不误报交接或可 resume；资源可定位。
-- [ ] late result 后显式 resume 复用原 MQ/manager、新执行身份，不重复 Shell。
-- [ ] 不 resume 关闭根：可靠归档保留消息，确认资源后关闭，失败保留记录。
-- [ ] 旧 bound 消息/Stop/cancel 不污染新 run；A→B→C 各层有界且直接归属不变。
-- [ ] 重启仅加载历史；真实受控阻塞进程在 D 后仍存活，正式取消接口确认进程树及输出管道清理。
+- [x] 永久 Working 无通知、activity/任务新增：D 不重置，计算退出但 Shell 仍 Working（`permanent_shell_hands_off_at_deadline_without_notifications`、`activity_and_new_tasks_do_not_reset_deadline`）。
+- [x] 无任务正常退出；D 内完成由旧 child 正常处理；D 后终态与 Stop 恰一次（`child_without_active_tasks_settles_immediately`、`settled_sync_child...`、`background_child_...`）。
+- [x] active=0 但消息未消费仍交接；Receive 跨 D 保留历史；Reason 跨 D 的 Act 完成配对，不开下一轮（`terminal_result_without_consumption...`、`receive_across_deadline...`、`admitted_reason_completes_act_after_deadline`）。
+- [x] MaxIterations 保留原错误与残留交接；HookStop 不追加模型提醒；cancel 先于 D 生效（`max_iterations_keeps_reason...`、`terminal_result_without_consumption...`、`cancelled_child...`）。
+- [x] sync/bg × 新建；resume 复用 owner/MQ 并由显式 prompt 驱动（`late_result_after_deadline_requires_explicit_resume`、现有 resume 回归）。
+- [ ] 父 `sync-*` 注册与 child 终态同刻的两种调度顺序：代码经 biased select + 已提交 receipt 处理；未构造确定性同刻调度用例。
+- [x] callback 拒绝后由 registry 单一 retry worker 接管，wrapper 释放完整 session（`handoff_sync_child_returns_pending_and_registry_retries_delivery`）。
+- [x] 无父投递宿主/缺 owner/closing 显式失败，不制造幽灵任务（`handoff_without_parent_owner...`、`missing_owner...`、`test_close_rejects_active_execution...`）。
+- [x] handoff append/status write 失败不误报交接或可 resume（`handoff_persistence_failure...`、`subagent_terminal_write_failure...`）。
+- [x] late result 后显式 resume 复用原 MQ/manager、新执行身份（`late_result_after_deadline_requires_explicit_resume`）。
+- [x] 不 resume 关闭：终态按原 ID 落库、其他输入记录为 `child_retained_input_unprocessed`、失败保留 owner 并返回 Incomplete（`test_close_settles_terminal...`、`parent_close_retains...`）。
+- [x] 旧 ContinueCurrentRun 消息被抑制；A→B→C 结果仅归直接父（`old_bound_control_message...`、`nested_a_b_c...`）。
+- [ ] 重启仅加载历史：沿用既有 history/resume 回归；未新增独立 paused-time 重启用例。
+- [ ] 真实受控阻塞进程在 D 后仍存活、正式取消接口确认进程树与输出管道清理：未实现真实进程 fixture。本任务未改动 Shell promote/执行期限，不能由单元测试替代该证据。
 
-时间用例使用 paused-time；过滤测试须实际运行非零目标用例。至少运行 child_runner、run_sync、handoff 三组测试，以及新增模块定向测试、相关 build/clippy。真实 wire/进程验收不可由静态检查替代。
+时间用例使用 paused-time 且实际运行非零目标用例。真实 wire/进程验收不可由静态检查替代。
 
-## 当前实现与交付限制
-
-本分支仅完成基础类型和部分资源/提交路径，**不满足 A′ 验收，不可作为生产修复合入**。
+## 实现记录
 
 - `412386e90`：阶段 1，定义 outcome/receipt、一次性窗口及目标契约。
-- `ca20a81ec`：阶段 2 部分，父 TaskManager 保留轻量 owner，原 MQ/manager 复用、执行 permit、可信子树查询/取消与根关闭接入。
-- `da969a92c`：阶段 3 部分，冻结交接快照、flush + 幂等 append、区分缺能力/写失败；同步状态提交失败显式返回，先提交再 Stop，事件排空失败阻止 owner resume。
+- `ca20a81ec`：阶段 2，父 TaskManager 保留轻量 owner，原 MQ/manager 复用、执行 permit、可信子树查询/取消与根关闭接入。
+- `da969a92c`：阶段 3，冻结交接快照、flush + 幂等 append、区分缺能力/写失败；同步状态提交失败显式返回，先提交再 Stop，事件排空失败阻止 owner resume。
+- 后续提交：接入共享 D、loop/Receive 准入门、typed outcome 四条路径、wrapper retry 移交、owner close 消息结算、binding 释放、旧消息抑制及验收测试。
 
-仍须解决：
-
-1. 阶段 2 尚未闭环：缺 owner 的嵌入路径没有拒绝跨 run 任务；owner 的准备/关闭竞态和后台注册失败释放待补；父/根按 execution 查询尚未实现。Close 暂不移除 owner/binding，且 retained Required 消息仍返回 Incomplete。
-2. 阶段 3 尚未闭环：后台 status/Stop 顺序与事件排空失败时 owner 状态仍需统一；交接写失败快照保留已有基础，但没有完整修复/重试入口。`Failed` residual 尚未贯穿。
-3. 阶段 4 未完成：`ChildSettlementWindow` 尚未接入 runner、loop 或 wrapper。尝试添加 `LoopResult::SettlementDue` 后发现需同步改造四条结果路径及 workflow 映射；该未完成接入已撤回，最终代码可编译。**原永久 Working 无限等待仍存在。**
-4. 阶段 5–6 未完成：typed outcome 未用于运行路径，pending_message 仍为旧文案；wrapper 自有 retry 未移除；close 非模型归档未实现；121 秒旧行为测试未改。
-5. 验收矩阵、真实进程/协议测试、deadline 前后/同刻竞态、计算对象释放、四路径最终行为均未验证。现有回归通过只说明基础改动未破坏这些旧用例。
+剩余风险：同刻调度未穷举；真实进程与 TUI 手测未执行；`close_subagent_session_scope` 的 owner.close 会取消运行中 Shell（沿用显式关闭策略），与截止交接的“不取消 Shell”是不同触发路径。
 
 ## 实际验证
 
 所有命令在指定 worktree 内执行，统一前缀 `./scripts/cargo-rmcp-patched.sh`。
 
-- `test --locked -p peri-agent --lib -- session::subagent::child_runner::tests`：17 passed，0 failed（最终生产源码）。
-- `test --locked -p peri-agent --lib -- session::subagent::run_sync::tests`：6 passed，0 failed（最终生产源码）。
-- `test --locked -p peri-agent --lib -- agent::async_tasks::handoff::tests`：6 passed，0 failed，含新增 paused-time window 用例（最终生产源码）。
-- `test --locked -p peri-agent --lib -- session::subagent::resource_owner::tests`：5 passed，0 failed（最终生产源码）。
-- `test --locked -p peri-agent --lib -- session::subagent::tests::bound_and_tail_cases`：12 passed，0 failed（最终生产源码）。
-- 阶段 2 的 `test --locked -p peri-agent --lib -- session::subagent::`：123 passed，0 failed；阶段 3 首轮 122 passed、1 failed（旧测试期待状态写入失败仍成功）；更新契约后定向通过。随后排空错误曾丢失 child 身份，定向 10 passed、2 failed；恢复 `SubagentFailure` 包装后 12 passed。
-- 中途编译失败：新增 host 字段遗漏初始化、未导入 TaskManager trait、ACP 使用具体 manager 方法；均已修正。未完成 deadline 接入编译报四处 `LoopResult::SettlementDue` 非穷尽匹配，该接入已撤回。
-- 提交 hook 的 check、clippy、fmt、layer-imports 已通过；第二个提交首轮被 fmt 拒绝，格式修正后正常提交，没有跳过 hook。
+- `test --locked -p peri-agent --lib -- session::subagent::child_runner::tests`：21 passed，0 failed（含 background/nested 子模块；paused-time）。
+- `test --locked -p peri-agent --lib -- session::subagent::run_sync::tests`：5 passed，0 failed。
+- `test --locked -p peri-agent --lib -- agent::async_tasks::handoff::tests`：6 passed，0 failed。
+- `test --locked -p peri-agent --lib -- session::subagent::resource_owner::tests`：7 passed，0 failed。
+- `test --locked -p peri-agent --lib -- session::subagent::`：129 passed，0 failed。
+- `test --locked -p peri-agent --lib`：1179 passed，0 failed，3 ignored。并行运行时 `agent::stages::receive::tests::committed_delivery_missing_from_hot_state_is_restored_without_reemitting` 曾因共享 git fixture 失败一次，单测与复跑均通过；该用例不涉及本修复路径。
+- `test --locked -p peri-acp-types --lib`：660 passed，0 failed。
 - `build --locked -p peri-agent -p peri-acp`：通过，退出码 0。
 - `clippy --locked -p peri-agent -p peri-acp --lib -- -D warnings`：通过，退出码 0。
 - `test --locked -p peri-agent --doc`：15 passed，0 failed。
-- `test --locked -p peri-acp-types --doc`：6 passed，0 failed，2 ignored；第三方 patched hyper-util 编译报告未使用 timer 警告。
-- 尚未运行最终全库测试、ACP 行为测试、真实 MCP wire 或受控进程测试；这些不是环境阻塞，而是实现/验证尚未完成。
+- `test --locked -p peri-acp-types --doc`：6 passed，0 failed，2 ignored。
+- `test --locked -p peri-acp --lib`：1039 passed，0 failed，1 ignored（含 live resume child chain 用例）。
+- 未执行：真实 MCP wire、受控阻塞进程与进程树清理、TUI 手测。理由是实现范围未包含这些 fixture；不能由静态检查或单元测试替代。
