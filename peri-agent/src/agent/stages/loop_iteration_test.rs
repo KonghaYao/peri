@@ -98,7 +98,7 @@ async fn hook_stop_in_budget_boundary_batch_wins_without_followup_activation() {
         .build();
         assert!(matches!(
             run_react_loop(context, 1).await,
-            LoopResult::Completed
+            LoopResult::HookStopped { unprocessed_tool_calls } if unprocessed_tool_calls.is_empty()
         ));
         assert_eq!(calls.load(Ordering::SeqCst), 1);
         assert!(session.queue().is_empty());
@@ -1067,7 +1067,10 @@ async fn async_result_hook_stop_suspends_ready_result() {
     ));
 
     let result = run_react_loop(context.clone(), 5).await;
-    assert!(matches!(result, LoopResult::Completed));
+    assert!(
+        matches!(result, LoopResult::HookStopped { .. }),
+        "Hook stop 必须经唯一退出口返回 HookStopped，实际 {result:?}"
+    );
     assert_eq!(calls.load(Ordering::SeqCst), 0, "Stop 之后不得发起模型请求");
     assert_eq!(
         context.session.async_result_mailbox.state_of(&id),

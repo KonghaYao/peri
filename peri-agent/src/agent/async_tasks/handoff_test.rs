@@ -1,6 +1,23 @@
 use super::*;
 use peri_acp_types::tasks::BgTaskKind;
 
+#[tokio::test(start_paused = true)]
+async fn test_child_window_starts_once_and_expires_without_activity() {
+    let window = ChildSettlementWindow::default();
+    assert_eq!(window.deadline(), None, "正常执行尚未进入收尾");
+    let deadline = window.start();
+    for _ in 0..119 {
+        tokio::time::advance(Duration::from_secs(1)).await;
+        assert_eq!(window.start(), deadline, "唤醒不得续期");
+        assert!(!window.expired());
+    }
+    tokio::time::advance(Duration::from_secs(1)).await;
+    assert!(window.expired(), "无外部活动也必须到期");
+    assert_eq!(window.start(), deadline, "到期后再次启动也不能重置");
+    let resumed = ChildSettlementWindow::default();
+    assert!(resumed.start() > deadline, "显式新 run 有独立窗口");
+}
+
 fn task(id: &str, owner: Option<&str>) -> PendingHandoffTask {
     PendingHandoffTask {
         task_id: id.into(),

@@ -42,6 +42,35 @@ pub fn count_tool_calls_from_session(session: &Arc<Session>) -> usize {
         .count()
 }
 
+/// Parent-visible notice for a bounded handoff: identity, retained obligations and
+/// the explicit resume path. Never claims the pending work completed.
+pub fn format_handoff_notice(receipt: &super::types::ChildHandoffReceipt) -> String {
+    let tasks = if receipt.tasks.is_empty() {
+        "none (retained queue messages are recorded in the handoff reminder)".to_string()
+    } else {
+        receipt
+            .tasks
+            .iter()
+            .map(|task| task.task_id.as_str())
+            .collect::<Vec<_>>()
+            .join(", ")
+    };
+    format!(
+        "child_thread_id: {child}\nstatus: incomplete\npending_tasks: {tasks}\n\
+         resource_owner: {owner}\nretained_messages: {messages}\n\
+         unprocessed_tool_calls: {tool_calls}\n\
+         The current run has ended and the delegation is incomplete. Shell tasks keep their real \
+         state and are not cancelled automatically. Late results stay in the child queue and do not \
+         resume the old run. Query or cancel the tasks, or explicitly resume with \
+         Agent(resume_thread_id: {child}, prompt: ...).",
+        child = receipt.child_thread_id,
+        owner = receipt.owner_session_id,
+        messages = receipt.message_ids.len(),
+        tasks = tasks,
+        tool_calls = receipt.unprocessed_tool_calls.join(", "),
+    )
+}
+
 /// Format sub-agent execution result as a summary string returned to the parent agent.
 pub fn format_subagent_result(output: &AgentOutput) -> String {
     if output.tool_calls.is_empty() {

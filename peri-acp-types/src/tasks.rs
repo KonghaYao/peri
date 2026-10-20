@@ -209,6 +209,16 @@ pub struct BgShellHandle {
 /// `TaskManager`；shell 执行与输出由注入的执行环境承担。本 trait 只承载跨层操作，
 /// `Arc<dyn TaskManager>` 由 Agent 层实现、经装配注入到 ACP / middlewares。
 pub trait TaskManager: std::any::Any + Send + Sync {
+    /// 只在当前 owning 会话子树中解析资源，不接受任意会话身份作为授权。
+    fn child_task_manager(&self, _child_id: &str) -> Option<Arc<dyn TaskManager>> {
+        None
+    }
+
+    fn close_child_resources(
+        &self,
+    ) -> Pin<Box<dyn Future<Output = Result<(), String>> + Send + '_>> {
+        Box::pin(async { Ok(()) })
+    }
     fn restore_external_terminal(
         &self,
         _request: ExternalTaskRegistration,

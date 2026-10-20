@@ -246,6 +246,93 @@ async fn acquire_error(
     }
 }
 
+#[tokio::test]
+async fn cancel_running_claim_finalizes_only_after_resource_close_is_confirmed() {
+    use crate::session::subagent::{ParkedChildOwner, SubagentHost};
+    use crate::session::{FrozenContext, MessageTranscript, Session};
+
+    for persistence_failure in [true, false] {
+        let store = MockSessionResources::new();
+        store
+            .update_thread_status(&CHILD.into(), "done")
+            .await
+            .unwrap();
+        let (_, mut claim) = ResumeClaim::acquire(store.clone(), CHILD.into(), CHILD.into(), None)
+            .await
+            .unwrap();
+        assert_eq!(
+            store
+                .load_session_meta(&CHILD.into())
+                .await
+                .unwrap()
+                .agent_status,
+            AgentStatus::Active
+        );
+        let session = Session::new(
+            Arc::from("/tmp"),
+            FrozenContext::builder().build(),
+            Some(CHILD.into()),
+        );
+        let history = MockSessionResources::new();
+        *session.transcript().write() =
+            MessageTranscript::new().with_persistence(history.clone(), CHILD.into());
+        let manager = Arc::new(crate::agent::async_tasks::TaskManager::new());
+        let owner = ParkedChildOwner::new(
+            CHILD.into(),
+            CHILD.into(),
+            manager.clone(),
+            session.queue().clone(),
+            Some(history.clone()),
+            None,
+        );
+        owner.set_writer(session.transcript().read().persist_tx_handle());
+        session.set_subagent_host(SubagentHost {
+            task_manager: Some(manager),
+            child_owner: Some(owner.clone()),
+            ..Default::default()
+        });
+        if persistence_failure {
+            // 只令 transcript 写失败；meta 仍可写，避免把 Active 误归因于状态写失败。
+            history.restrict_to_history_read_only();
+            session
+                .transcript()
+                .write()
+                .append(crate::messages::BaseMessage::human("未确认历史"));
+        } else {
+            let permit = owner
+                .acquire(session.start_turn().execution_binding())
+                .unwrap();
+            permit.finish(Err("执行结算未确认".into()));
+        }
+        claim.mark_running(session.clone());
+        claim.decide(ClaimDecision::CancelRunning(session.clone()));
+        let error = (&mut claim.worker).await.unwrap().unwrap_err();
+        assert!(session.subagent_host().unwrap().close_state.is_closing());
+        assert!(owner.failure().is_some());
+        let expected = if persistence_failure {
+            assert!(
+                error.starts_with("Incomplete: child history persistence unconfirmed"),
+                "{error}"
+            );
+            AgentStatus::Active
+        } else {
+            assert!(
+                error.starts_with("Incomplete: child settlement is unconfirmed"),
+                "{error}"
+            );
+            AgentStatus::Cancelled
+        };
+        assert_eq!(
+            store
+                .load_session_meta(&CHILD.into())
+                .await
+                .unwrap()
+                .agent_status,
+            expected
+        );
+    }
+}
+
 const CHILD: &str = "00000000-0000-0000-0000-000000000000";
 
 #[tokio::test]

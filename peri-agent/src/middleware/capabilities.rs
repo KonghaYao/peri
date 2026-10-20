@@ -361,6 +361,12 @@ impl<T: MiddlewareState + ?Sized> AfterToolsBatchState for T {
         &mut self,
         reminder: peri_acp_types::system_reminder::TrustedSystemReminder,
     ) {
+        // 绑定产生停止意图的执行：旧 Stop 在 resume 后的新执行中按过期控制
+        // 消息抑制；没有执行事实的 legacy 适配器保持 passive 原语义。
+        let policy = match MiddlewareState::execution_binding(self) {
+            Some(execution) => MessagePolicy::stop_current_run(execution),
+            None => MessagePolicy::passive(),
+        };
         MiddlewareState::enqueue_v2_message(
             self,
             QueuedMessage::system_reminder(
@@ -368,7 +374,7 @@ impl<T: MiddlewareState + ?Sized> AfterToolsBatchState for T {
                 MessageSource::HookStopIntent,
                 reminder,
             )
-            .with_policy(MessagePolicy::passive()),
+            .with_policy(policy),
         );
     }
 }

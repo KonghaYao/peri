@@ -11,7 +11,8 @@ use super::super::run_sync::{
     SyncCompletion,
 };
 use super::super::types::{
-    ForkDirectiveKind, SubagentRunMode, SubagentSpawnConfig, SubagentSpawned,
+    ChildRunOutcome, ForkDirectiveKind, SubagentFailure, SubagentRunMode, SubagentSpawnConfig,
+    SubagentSpawned,
 };
 use super::super::v2_bridge::agent_id_from_child_thread;
 use super::context::{build_subagent_session_v2, derive_cancel_token, inherited_frozen_context};
@@ -404,9 +405,42 @@ pub(super) async fn spawn_subagent_impl(
                 },
             )
             .await?;
-            let (interrupted, pending_tasks, pending_task_id) = match completion {
-                SyncCompletion::Finished(interrupted) => (interrupted, Vec::new(), None),
-                SyncCompletion::Pending(tasks) => (false, tasks, Some(sync_task_id)),
+            let (interrupted, pending_tasks, pending_task_id, handoff) = match completion {
+                SyncCompletion::Finished(ChildRunOutcome::Settled) => {
+                    (false, Vec::new(), None, None)
+                }
+                SyncCompletion::Finished(ChildRunOutcome::Interrupted) => {
+                    (true, Vec::new(), None, None)
+                }
+                SyncCompletion::Finished(ChildRunOutcome::HandedOff { receipt }) => {
+                    let tasks = receipt
+                        .tasks
+                        .iter()
+                        .map(|task| task.task_id.clone())
+                        .collect();
+                    (false, tasks, None, Some(receipt))
+                }
+                SyncCompletion::Finished(ChildRunOutcome::Failed { error, .. }) => {
+                    return Err(Box::new(SubagentFailure::new(
+                        child_thread_id.clone(),
+                        agent_name.clone(),
+                        error,
+                    )))
+                }
+                SyncCompletion::Finished(ChildRunOutcome::HandoffFailed { cause, failure }) => {
+                    return Err(Box::new(SubagentFailure::handoff_failed(
+                        child_thread_id.clone(),
+                        agent_name.clone(),
+                        cause,
+                        &failure,
+                    )))
+                }
+                SyncCompletion::Pending(pending) => (
+                    false,
+                    pending.pending_tasks,
+                    Some(sync_task_id),
+                    Some(pending.receipt),
+                ),
             };
             Ok(SubagentSpawned {
                 child_thread_id,
@@ -415,6 +449,7 @@ pub(super) async fn spawn_subagent_impl(
                 cancel_token,
                 interrupted,
                 pending_tasks,
+                handoff,
             })
         }
         SubagentRunMode::Background => {
@@ -449,6 +484,7 @@ pub(super) async fn spawn_subagent_impl(
                 cancel_token,
                 interrupted: false,
                 pending_tasks: Vec::new(),
+                handoff: None,
             })
         }
     }

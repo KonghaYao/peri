@@ -7,8 +7,10 @@ use peri_acp_types::identity::AgentId;
 use tokio_util::sync::CancellationToken;
 
 use super::lifecycle::drain_subagent_events;
-use super::types::{SubagentFailure, SubagentLifecycleStart, SubagentLifecycleStop};
-use super::util::{count_tool_calls_from_session, extract_last_ai_text};
+use super::types::{
+    ChildRunOutcome, SubagentFailure, SubagentLifecycleStart, SubagentLifecycleStop,
+};
+use super::util::{count_tool_calls_from_session, extract_last_ai_text, format_handoff_notice};
 use super::v2_bridge::{forward_subagent_start_v1, forward_subagent_stop_v1, V2SubagentContext};
 use super::{
     build_subagent_start_v2, build_subagent_stop_v2_with_failure, emit_subagent_start_v2,
@@ -19,7 +21,6 @@ use crate::agent::async_tasks::{
     BgCancelHandle, BgTaskKind, TaskManager,
 };
 use crate::agent::events::{AgentEventHandler, ExecutorEvent};
-use crate::agent::stages::LoopResult;
 use crate::agent::subagent_event_forwarder::spawn_subagent_event_forwarder_for_completion;
 use crate::agent::LangfuseBridgeLike;
 use crate::session::factory::{DeregisterRuntimeFn, RegisterRuntimeFn};
@@ -54,6 +55,14 @@ pub(super) async fn spawn_background_subagent(
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     let task_manager =
         task_manager.ok_or("Background tasks not available: no task manager configured")?;
+    let permit = v2_ctx
+        .session
+        .subagent_host()
+        .and_then(|host| host.child_owner.clone())
+        .map(|owner| owner.acquire(v2_ctx.context.session.turn.execution_binding()))
+        .transpose()?;
+    let permit_slot = Arc::new(parking_lot::Mutex::new(permit));
+    let execution_permit = Arc::clone(&permit_slot);
     let task_manager_spawn = Arc::clone(&task_manager);
     let agent_inbox = BackgroundAgentInbox::new(
         child_thread_id.clone(),
@@ -97,10 +106,17 @@ pub(super) async fn spawn_background_subagent(
     let execution = async move {
         let mut cleanup_guard = cleanup_guard;
         let inbox_guard = inbox_guard;
+        let mut permit = execution_permit.lock().take();
         // S3.1 门控：注册结果（失败时调用方已发 Err；sender 被 drop 同样返回）
         match reg_rx.await {
             Ok(Ok(())) => {}
-            _ => return,
+            _ => {
+                // 未开始执行：释放准入，不留下永久 unconfirmed 状态。
+                if let Some(permit) = permit.take() {
+                    permit.finish(Ok(()));
+                }
+                return;
+            }
         }
 
         let started_at = peri_time::monotonic_now();
@@ -175,12 +191,40 @@ pub(super) async fn spawn_background_subagent(
             child_thread_id_for_task.clone(),
         );
 
-        let mut loop_result =
+        let mut outcome =
             super::child_runner::run_child_until_terminal(context, max_iterations, &session).await;
         if let Err(error) = super::lifecycle::flush_session_history(&session).await {
-            loop_result = LoopResult::Error(error);
+            outcome = match outcome {
+                ChildRunOutcome::HandedOff { receipt } => ChildRunOutcome::Failed {
+                    error,
+                    residual: Some(receipt),
+                },
+                ChildRunOutcome::Failed {
+                    error: original,
+                    residual,
+                } => {
+                    tracing::error!(%error, %original, "background child history flush failed after execution failure");
+                    ChildRunOutcome::Failed {
+                        error: original,
+                        residual,
+                    }
+                }
+                ChildRunOutcome::HandoffFailed { cause, failure } => {
+                    tracing::error!(
+                        %error,
+                        "background child history flush failed after unconfirmed handoff; retaining structured failure"
+                    );
+                    let mut failure = failure;
+                    failure.flush_error = Some(error.to_string());
+                    ChildRunOutcome::HandoffFailed { cause, failure }
+                }
+                _ => ChildRunOutcome::Failed {
+                    error,
+                    residual: None,
+                },
+            };
         }
-        if let LoopResult::Error(error) = &loop_result {
+        if let ChildRunOutcome::Failed { error, .. } = &outcome {
             if !execution_turn.cancel_token.is_cancelled()
                 && !matches!(error, crate::error::AgentError::Interrupted)
             {
@@ -195,12 +239,32 @@ pub(super) async fn spawn_background_subagent(
                 );
             }
         }
-        if let Err(error) = super::close::settle_explicit_close(
-            &session,
-            matches!(&loop_result, LoopResult::Interrupted),
-        )
-        .await
-        {
+        let interrupted = matches!(outcome, ChildRunOutcome::Interrupted);
+        let explicit_close = interrupted
+            || session.config().cancel_token.is_cancelled()
+            || session
+                .subagent_host()
+                .is_some_and(|host| host.close_state.is_closing());
+        if explicit_close {
+            if let Some(owner) = session
+                .subagent_host()
+                .and_then(|host| host.child_owner.clone())
+            {
+                if let Err(error) = owner.begin_close_from_execution() {
+                    tracing::error!(thread_id = %child_thread_id_for_task, %error, "child close intent registration failed");
+                    cleanup_guard.deregister = None;
+                    cleanup_guard.disarm_stop();
+                    if let Some(permit) = permit.take() {
+                        permit.finish(Err(error));
+                    }
+                    return;
+                }
+            }
+            if let Some(permit) = permit.take() {
+                permit.finish(Ok(()));
+            }
+        }
+        if let Err(error) = super::close::settle_explicit_close(&session, interrupted).await {
             tracing::error!(thread_id = %child_thread_id_for_task, %error, "child close incomplete; delegation terminal withheld");
             cleanup_guard.deregister = None;
             cleanup_guard.disarm_stop();
@@ -209,35 +273,90 @@ pub(super) async fn spawn_background_subagent(
         // Stop accepting messages before any async terminal work or notifications.
         drop(inbox_guard);
 
-        // Errors report their terminal result through the callback/TaskManager;
-        // only successful completion and cooperative cancellation emit Completed.
-        let mut publish_completed = !matches!(&loop_result, LoopResult::Error(_));
-        let (output, mut output_summary, mut status, success, failure) = match loop_result {
-            LoopResult::Completed => {
+        // Successful settlement and cooperative cancellation publish the terminal
+        // result; handoff/failure paths report through the delivery callback only.
+        let mut publish_completed = matches!(
+            &outcome,
+            ChildRunOutcome::Settled | ChildRunOutcome::Interrupted
+        );
+        let mut drain_failure: Option<String> = None;
+        let (text, mut output_summary, mut status, success, failure) = match &outcome {
+            ChildRunOutcome::Settled => {
                 let text = extract_last_ai_text(&session);
                 let summary = text.chars().take(500).collect::<String>();
                 (text, summary, AgentStatus::Done, true, None)
             }
-            LoopResult::Interrupted => (
+            ChildRunOutcome::Interrupted => (
                 "Background sub-agent was interrupted".to_string(),
                 "interrupted".to_string(),
                 AgentStatus::Cancelled,
                 false,
                 None,
             ),
-            LoopResult::Error(error) => {
-                let failure =
-                    SubagentFailure::new(&child_thread_id_for_task, &agent_name_for_task, error);
-                let output = format!("Background sub-agent failed: {}", failure.public_message());
-                let summary = output.chars().take(500).collect::<String>();
+            ChildRunOutcome::HandedOff { receipt } => {
+                let failure = SubagentFailure::handed_off(
+                    &child_thread_id_for_task,
+                    &agent_name_for_task,
+                    receipt.clone(),
+                );
                 (
-                    output,
-                    summary,
+                    extract_last_ai_text(&session),
+                    "delegation incomplete: pending tasks handed off".to_string(),
                     AgentStatus::Error,
                     false,
                     failure.safe_failure(),
                 )
             }
+            ChildRunOutcome::Failed { error, residual } => {
+                let failure =
+                    SubagentFailure::safe_failure_from_error(&child_thread_id_for_task, error);
+                let mut output = format!(
+                    "Background sub-agent failed: {}",
+                    error.user_facing_message()
+                );
+                if let Some(receipt) = residual {
+                    output.push_str("\n\n");
+                    output.push_str(&format_handoff_notice(receipt));
+                }
+                let summary = output.chars().take(500).collect::<String>();
+                (output, summary, AgentStatus::Error, false, failure)
+            }
+            ChildRunOutcome::HandoffFailed { cause, failure } => {
+                let mut output = String::new();
+                if let Some(cause) = cause {
+                    output.push_str(&cause.user_facing_message());
+                    output.push_str("\n\n");
+                }
+                output.push_str(&format!(
+                    "{}: {}",
+                    super::types::handoff_failure_label(failure),
+                    failure.error
+                ));
+                if let Some(flush) = &failure.flush_error {
+                    output.push_str(&format!("\nhandoff history flush failed: {flush}"));
+                }
+                if let Some(receipt) = &failure.receipt {
+                    output.push_str("\n\n");
+                    output.push_str(&format_handoff_notice(receipt));
+                }
+                let safe = match cause {
+                    Some(cause) => {
+                        SubagentFailure::safe_failure_from_error(&child_thread_id_for_task, cause)
+                    }
+                    None => {
+                        let error = super::types::handoff_failure_agent_error(failure);
+                        SubagentFailure::safe_failure_from_error(&child_thread_id_for_task, &error)
+                    }
+                };
+                let summary = output.chars().take(500).collect::<String>();
+                (output, summary, AgentStatus::Error, false, safe)
+            }
+        };
+        let output = match &outcome {
+            ChildRunOutcome::HandedOff { receipt } => {
+                format!("{text}\n\n{}", format_handoff_notice(receipt))
+            }
+            _ => text,
         };
         let mut result = crate::agent::events::BackgroundTaskResult {
             task_id: task_id_for_task.clone(),
@@ -271,6 +390,7 @@ pub(super) async fn spawn_background_subagent(
             drain_subagent_events(event_bus_for_emit, forwarder_handle, langfuse_bridge).await
         {
             tracing::error!(thread_id = %child_thread_id_for_task, error = %error.user_facing_message(), causes = ?error.cause_chain(), "child event forwarding barrier incomplete");
+            drain_failure = Some(error.to_string());
             if result.success {
                 let failure =
                     SubagentFailure::new(&child_thread_id_for_task, &agent_name_for_task, error);
@@ -281,6 +401,13 @@ pub(super) async fn spawn_background_subagent(
                 result.success = false;
                 publish_completed = false;
                 status = AgentStatus::Error;
+            } else {
+                result.output = format!(
+                    "{}\n\nchild event drain failed: {}",
+                    result.output,
+                    error.user_facing_message()
+                );
+                output_summary = result.output.chars().take(500).collect();
             }
         }
         if let Some(ref on_stop) = on_subagent_stop {
@@ -292,14 +419,14 @@ pub(super) async fn spawn_background_subagent(
                 !result.success,
             );
         }
-        if !persist_background_terminal(
+        let terminal_persisted = persist_background_terminal(
             session_resources.as_deref(),
             &child_thread_id_for_task,
             status,
             &mut result,
         )
-        .await
-        {
+        .await;
+        if !terminal_persisted {
             publish_completed = false;
             output_summary = result.output.chars().take(500).collect();
         }
@@ -330,9 +457,30 @@ pub(super) async fn spawn_background_subagent(
             }
         }
         settle_background_terminal(&task_manager_spawn, result, on_bg_complete);
+        let owner = session
+            .subagent_host()
+            .and_then(|host| host.child_owner.clone());
+        let permit_result = if !terminal_persisted {
+            Err("terminal_status_persist_failed".to_string())
+        } else if let Some(error) = drain_failure.as_ref() {
+            Err(format!("child event drain failed: {error}"))
+        } else if matches!(outcome, ChildRunOutcome::HandoffFailed { .. }) {
+            Err("child handoff persistence is unconfirmed".to_string())
+        } else if matches!(outcome, ChildRunOutcome::Failed { .. })
+            && owner
+                .as_ref()
+                .is_some_and(|owner| owner.has_unsettled_obligations())
+        {
+            Err("child settlement is unconfirmed after execution failure".to_string())
+        } else {
+            Ok(())
+        };
+        if let Some(permit) = permit {
+            permit.finish(permit_result);
+        }
         // deregister 由 cleanup_guard drop 统一执行（正常/abort/panic 三路）
     };
-    let join_handle = peri_acp_types::tasks::TaskManager::spawn_owned(
+    let join_handle = match peri_acp_types::tasks::TaskManager::spawn_owned(
         task_manager.as_ref(),
         Box::pin(async move {
             let started_at = peri_time::monotonic_now();
@@ -372,7 +520,15 @@ pub(super) async fn spawn_background_subagent(
             }
             // panic 已在边界内收敛；正常返回让 spawn_owned 确认执行已停止。
         }),
-    )?;
+    ) {
+        Ok(handle) => handle,
+        Err(error) => {
+            if let Some(permit) = permit_slot.lock().take() {
+                permit.finish(Ok(()));
+            }
+            return Err(error.into());
+        }
+    };
 
     // 注册到 BackgroundTaskRegistry
     let bg_task = BackgroundTask {

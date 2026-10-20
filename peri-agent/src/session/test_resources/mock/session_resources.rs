@@ -231,6 +231,11 @@ impl SessionResources for MockSessionResources {
         reminder: &peri_acp_types::system_reminder::TrustedSystemReminder,
     ) -> SessionResourceResult<bool> {
         self.ensure_writable()?;
+        let gate = self.reminder_append_gate.lock().unwrap().take();
+        if let Some((entered, release)) = gate {
+            let _ = entered.send(());
+            let _ = release.await;
+        }
         self.with_region(id, |region| {
             if let Some(existing) = region
                 .payloads

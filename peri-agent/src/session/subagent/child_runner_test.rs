@@ -1,19 +1,79 @@
+use super::super::run_sync::run_sync_subagent;
 use super::*;
+use crate::agent::async_tasks::handoff::ChildSettlementWindow;
 use crate::agent::async_tasks::TaskManager;
 use crate::agent::events::BackgroundTaskResult;
-use crate::agent::react::{ReactLLM, Reasoning, StreamingContext};
+use crate::agent::react::{ReactLLM, Reasoning, StreamingContext, ToolCall};
+use crate::agent::stages::receive::run_receive;
+use crate::agent::stages::{run_react_loop, LoopResult, ReceiveInput};
 use crate::middleware::chain::MiddlewareChain;
 use crate::session::queue::{MessageSource, QueuedMessage};
 use crate::session::subagent::{
-    agent_id_from_child_thread, build_v2_subagent_context, SubagentHost, V2SubagentContext,
+    agent_id_from_child_thread, build_v2_subagent_context, ChildExecutionPermit,
+    ChildHandoffReason, ChildRunOutcome, ParkedChildOwner, SubagentHost, V2SubagentContext,
 };
-use crate::session::FrozenContext;
+use crate::session::{FrozenContext, MessageTranscript};
 use crate::tools::BaseTool;
-use peri_acp_types::tasks::{
-    BgTaskKind, BgTaskRegistration, ExternalTaskRegistration, TaskManager as TaskManagerPort,
-};
+use peri_acp_types::tasks::{BgTaskKind, BgTaskRegistration, TaskManager as TaskManagerPort};
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::Duration;
+
+fn bind_owner_store(
+    child: &Arc<Session>,
+    manager: &Arc<TaskManager>,
+) -> (
+    Arc<ParkedChildOwner>,
+    Arc<crate::session::test_resources::mock::MockSessionResources>,
+) {
+    let id = child.store().thread_id.clone().unwrap();
+    let store = crate::session::test_resources::mock::MockSessionResources::new();
+    *child.transcript().write() =
+        MessageTranscript::new().with_persistence(store.clone(), id.clone());
+    let owner = ParkedChildOwner::new(
+        id.clone(),
+        id,
+        manager.clone(),
+        child.queue().clone(),
+        Some(store.clone()),
+        None,
+    );
+    owner.set_writer(child.transcript().read().persist_tx_handle());
+    (owner, store)
+}
+
+fn bind_owner(child: &Arc<Session>, manager: &Arc<TaskManager>) -> Arc<ParkedChildOwner> {
+    bind_owner_store(child, manager).0
+}
+
+fn permit_for(
+    child: &Arc<Session>,
+    context: &crate::agent::stages::StageContext,
+) -> Option<ChildExecutionPermit> {
+    child
+        .subagent_host()
+        .and_then(|host| host.child_owner.clone())
+        .map(|owner| {
+            owner
+                .acquire(context.session.turn.execution_binding())
+                .unwrap()
+        })
+}
+
+fn make_child(manager: Arc<TaskManager>, with_owner: bool) -> Arc<Session> {
+    let child_id = uuid::Uuid::now_v7().to_string();
+    let child = Session::new(
+        Arc::from("/tmp"),
+        FrozenContext::builder().build(),
+        Some(child_id.clone()),
+    );
+    let owner = with_owner.then(|| bind_owner(&child, &manager));
+    child.set_subagent_host(SubagentHost {
+        task_manager: Some(manager),
+        child_owner: owner,
+        ..Default::default()
+    });
+    child
+}
 
 struct ShellReminderLlm {
     manager: Arc<TaskManager>,
@@ -54,23 +114,14 @@ fn child_with_shell_task(
     V2SubagentContext,
     Arc<AtomicUsize>,
 ) {
-    let child_id = uuid::Uuid::now_v7().to_string();
-    let child = Session::new(
-        Arc::from("/tmp"),
-        FrozenContext::builder().build(),
-        Some(child_id.clone()),
-    );
     let manager = Arc::new(TaskManager::new());
-    child.set_subagent_host(SubagentHost {
-        task_manager: Some(manager.clone()),
-        ..Default::default()
-    });
+    let child = make_child(manager.clone(), true);
     TaskManagerPort::register(
         manager.as_ref(),
         BgTaskRegistration {
             task_id: "shell-task".into(),
             kind: BgTaskKind::Shell,
-            summary: "sleep 180".into(),
+            summary: "sleep 300".into(),
             pid: None,
             kill: Some(Box::new(|| {})),
         },
@@ -98,112 +149,11 @@ fn child_with_shell_task(
         None,
         None,
         None,
-        Some(agent_id_from_child_thread(&child_id)),
+        Some(agent_id_from_child_thread(
+            &child.store().thread_id.clone().unwrap(),
+        )),
     );
     (child, manager, built, reminder_calls)
-}
-
-#[tokio::test(start_paused = true)]
-async fn active_child_shell_reminds_before_bounded_wait_and_can_settle() {
-    let (child, manager, built, reminder_calls) = child_with_shell_task(true);
-    let result = tokio::time::timeout(
-        Duration::from_secs(1),
-        run_child_until_terminal(built.context, 10, &child),
-    )
-    .await
-    .expect("shell reminder must bypass the 120-second idle wait");
-    assert!(matches!(result, LoopResult::Completed), "{result:?}");
-    assert_eq!(reminder_calls.load(Ordering::SeqCst), 1);
-    assert_eq!(manager.active_count(), 0);
-    assert!(child.transcript().read().entries().iter().any(|entry| {
-        matches!(entry, crate::session::TranscriptEntry::Reminder { reminder, .. }
-            if reminder.as_reminder().body.contains("shell-task (running)")
-                && reminder.as_reminder().body.contains("任务 ID 不是进程 PID"))
-    }));
-    assert_eq!(
-        child
-            .transcript()
-            .read()
-            .entries()
-            .iter()
-            .filter(|entry| {
-                matches!(entry, crate::session::TranscriptEntry::Reminder { reminder, .. }
-                    if reminder.as_reminder().kind == "active_background_shell_before_submit")
-            })
-            .count(),
-        1
-    );
-}
-
-#[tokio::test(start_paused = true)]
-async fn ignored_child_shell_reminder_keeps_existing_child_ownership() {
-    let (child, manager, built, reminder_calls) = child_with_shell_task(false);
-    let owner_child = child.clone();
-    let mut owner =
-        tokio::spawn(
-            async move { run_child_until_terminal(built.context, 10, &owner_child).await },
-        );
-    assert!(tokio::time::timeout(Duration::from_secs(1), &mut owner)
-        .await
-        .is_err());
-    assert_eq!(reminder_calls.load(Ordering::SeqCst), 1);
-    assert_eq!(manager.active_count(), 1);
-    let mut result = nested_result();
-    result.task_id = "shell-task".into();
-    assert!(manager.complete("shell-task", result));
-    assert!(matches!(owner.await.unwrap(), LoopResult::Completed));
-    assert_eq!(reminder_calls.load(Ordering::SeqCst), 1);
-}
-
-#[tokio::test(start_paused = true)]
-async fn child_shell_with_exhausted_budget_waits_without_unprocessable_reminder() {
-    let (child, manager, built, reminder_calls) = child_with_shell_task(false);
-    let owner_child = child.clone();
-    let mut owner =
-        tokio::spawn(async move { run_child_until_terminal(built.context, 1, &owner_child).await });
-    assert!(tokio::time::timeout(Duration::from_secs(1), &mut owner)
-        .await
-        .is_err());
-    assert_eq!(reminder_calls.load(Ordering::SeqCst), 0);
-    assert_eq!(manager.active_count(), 1);
-    let mut result = nested_result();
-    result.task_id = "shell-task".into();
-    assert!(manager.complete("shell-task", result));
-    assert!(matches!(owner.await.unwrap(), LoopResult::Completed));
-}
-
-#[tokio::test(start_paused = true)]
-async fn cancelled_child_shell_does_not_emit_submit_reminder() {
-    let (child, _manager, built, reminder_calls) = child_with_shell_task(false);
-    child.config().cancel_token.cancel();
-    assert!(matches!(
-        run_child_until_terminal(built.context, 10, &child).await,
-        LoopResult::Interrupted
-    ));
-    assert_eq!(reminder_calls.load(Ordering::SeqCst), 0);
-}
-
-#[tokio::test(start_paused = true)]
-async fn hook_stopped_child_keeps_waiting_without_model_reminder() {
-    let (child, manager, built, reminder_calls) = child_with_shell_task(false);
-    child.queue().push(QueuedMessage::info(
-        MessageSource::HookStopIntent,
-        crate::messages::BaseMessage::human("stop"),
-    ));
-    let owner_child = child.clone();
-    let mut owner =
-        tokio::spawn(
-            async move { run_child_until_terminal(built.context, 10, &owner_child).await },
-        );
-    assert!(tokio::time::timeout(Duration::from_secs(1), &mut owner)
-        .await
-        .is_err());
-    assert_eq!(reminder_calls.load(Ordering::SeqCst), 0);
-    assert_eq!(manager.active_count(), 1);
-    let mut result = nested_result();
-    result.task_id = "shell-task".into();
-    assert!(manager.complete("shell-task", result));
-    assert!(matches!(owner.await.unwrap(), LoopResult::Completed));
 }
 
 struct NestedResultLlm {
@@ -239,67 +189,40 @@ fn child_with_nested_task() -> (
     Arc<AtomicUsize>,
     Arc<AtomicUsize>,
 ) {
-    child_with_nested_task_kind(BgTaskKind::Agent)
-}
-
-fn child_with_nested_task_kind(
-    kind: BgTaskKind,
-) -> (
-    Arc<Session>,
-    Arc<TaskManager>,
-    V2SubagentContext,
-    Arc<AtomicUsize>,
-    Arc<AtomicUsize>,
-) {
-    let child_id = uuid::Uuid::now_v7().to_string();
-    let child = Session::new(
-        Arc::from("/tmp"),
-        FrozenContext::builder().build(),
-        Some(child_id.clone()),
-    );
     let manager = Arc::new(TaskManager::new());
-    child.set_subagent_host(SubagentHost {
-        task_manager: Some(manager.clone()),
-        ..Default::default()
-    });
-    if kind == BgTaskKind::Mcp {
-        manager
-            .register_external(ExternalTaskRegistration {
-                session_id: child_id.clone(),
-                initiator_session_id: Some(child_id.clone()),
-                owner_identity: "fixture".into(),
-                owner_task_id: "nested-task".into(),
-                kind,
-                summary: "nested work".into(),
-                started_at: None,
-                cancel: Arc::new(|| Box::pin(async { Ok(()) })),
-                on_terminal: Arc::new(|_, _| Box::pin(async { Ok(()) })),
-            })
-            .unwrap();
-    } else {
-        TaskManagerPort::register(
-            manager.as_ref(),
-            BgTaskRegistration {
-                task_id: "nested-task".into(),
-                kind,
-                summary: "nested work".into(),
-                pid: None,
-                kill: Some(Box::new(|| {})),
-            },
-        )
-        .unwrap();
-    }
+    let child = make_child(manager.clone(), true);
+    TaskManagerPort::register(
+        manager.as_ref(),
+        BgTaskRegistration {
+            task_id: "nested-task".into(),
+            kind: BgTaskKind::Agent,
+            summary: "nested work".into(),
+            pid: None,
+            kill: Some(Box::new(|| {})),
+        },
+    )
+    .unwrap();
     child.queue().push(QueuedMessage::prompt(
         MessageSource::UserInput,
         crate::messages::BaseMessage::human("initial child work"),
     ));
     let initial_calls = Arc::new(AtomicUsize::new(0));
     let result_calls = Arc::new(AtomicUsize::new(0));
-    let built = build_v2_subagent_context(
+    let built = nested_context(&child, initial_calls.clone(), result_calls.clone());
+    (child, manager, built, initial_calls, result_calls)
+}
+
+fn nested_context(
+    child: &Arc<Session>,
+    initial_calls: Arc<AtomicUsize>,
+    result_calls: Arc<AtomicUsize>,
+) -> V2SubagentContext {
+    let child_id = child.store().thread_id.clone().unwrap();
+    build_v2_subagent_context(
         Some(child.clone()),
         Box::new(NestedResultLlm {
-            initial_calls: initial_calls.clone(),
-            result_calls: result_calls.clone(),
+            initial_calls,
+            result_calls,
         }),
         Arc::new(MiddlewareChain::new()),
         Vec::new(),
@@ -312,143 +235,7 @@ fn child_with_nested_task_kind(
         None,
         None,
         Some(agent_id_from_child_thread(&child_id)),
-    );
-    (child, manager, built, initial_calls, result_calls)
-}
-
-#[tokio::test(start_paused = true)]
-async fn active_agent_and_mcp_child_tasks_enter_settlement_without_idle_wait() {
-    for kind in [BgTaskKind::Agent, BgTaskKind::Mcp] {
-        let (child, manager, built, initial_calls, result_calls) =
-            child_with_nested_task_kind(kind);
-        let (handoff_sender, handoff_ready) = tokio::sync::oneshot::channel();
-        let owner_child = child.clone();
-        let owner = tokio::spawn(async move {
-            run_child_with_handoff_signal(built.context, 10, &owner_child, Some(handoff_sender))
-                .await
-        });
-        tokio::time::timeout(Duration::from_secs(1), handoff_ready)
-            .await
-            .expect("child must skip the first 120-second idle wait")
-            .unwrap();
-        assert_eq!(initial_calls.load(Ordering::SeqCst), 1);
-        assert!(!owner.is_finished());
-
-        if kind == BgTaskKind::Mcp {
-            let task_id = manager.pending_handoff_tasks()[0].task_id.clone();
-            let mut result = nested_result();
-            result.task_id = task_id.clone();
-            manager
-                .settle_external(&task_id, "terminal", result)
-                .await
-                .unwrap();
-        } else {
-            settle_nested_task(&child, &manager);
-        }
-        assert!(matches!(owner.await.unwrap(), LoopResult::Completed));
-        assert_eq!(
-            result_calls.load(Ordering::SeqCst),
-            usize::from(kind == BgTaskKind::Agent)
-        );
-    }
-}
-
-#[tokio::test(start_paused = true)]
-async fn child_without_active_tasks_keeps_original_idle_exit() {
-    let (child, manager, built, initial_calls, result_calls) = child_with_nested_task();
-    settle_nested_task(&child, &manager);
-    let result = tokio::time::timeout(
-        Duration::from_secs(1),
-        run_child_until_terminal(built.context, 10, &child),
     )
-    .await
-    .expect("no active tasks must not trigger a settlement wait");
-    assert!(matches!(result, LoopResult::Completed));
-    assert_eq!(initial_calls.load(Ordering::SeqCst), 0);
-    assert_eq!(result_calls.load(Ordering::SeqCst), 1);
-}
-
-#[tokio::test(start_paused = true)]
-async fn sync_child_agent_and_mcp_tasks_handoff_within_one_bound() {
-    for kind in [BgTaskKind::Agent, BgTaskKind::Mcp] {
-        let (child, manager, built, initial_calls, result_calls) =
-            child_with_nested_task_kind(kind);
-        let child_id = child.store().thread_id.clone().unwrap();
-        let (delivered_sender, delivered_receiver) = tokio::sync::oneshot::channel();
-        let delivered_sender = parking_lot::Mutex::new(Some(delivered_sender));
-        let delivery: peri_acp_types::tasks::OnBgCompleteFn = Arc::new(move |result, _| {
-            if let Some(sender) = delivered_sender.lock().take() {
-                let _ = sender.send(result.clone());
-            }
-            Ok(())
-        });
-        let worker_child = child.clone();
-        let run_id = child_id.clone();
-        let call = tokio::spawn(super::super::run_sync::run_sync_with_handoff(
-            child.clone(),
-            child_id,
-            "fixture".into(),
-            Some(delivery),
-            move |handoff_start, _handed_off| async move {
-                super::super::run_sync::run_sync_subagent(
-                    &run_id,
-                    "fixture",
-                    "/tmp",
-                    10,
-                    None,
-                    None,
-                    None,
-                    None,
-                    None,
-                    None,
-                    None,
-                    None,
-                    None,
-                    built,
-                    worker_child,
-                    None,
-                    Some(handoff_start),
-                )
-                .await
-            },
-        ));
-
-        while initial_calls.load(Ordering::SeqCst) == 0 {
-            tokio::task::yield_now().await;
-        }
-        for _ in 0..10 {
-            tokio::task::yield_now().await;
-        }
-        tokio::time::advance(Duration::from_secs(119)).await;
-        tokio::task::yield_now().await;
-        assert!(
-            !call.is_finished(),
-            "{kind:?} handed off before 120 seconds"
-        );
-        tokio::time::advance(Duration::from_secs(2)).await;
-        let pending = call.await.unwrap().unwrap();
-        let super::super::run_sync::SyncCompletion::Pending(tasks) = pending else {
-            panic!("{kind:?} did not hand off by 121 seconds");
-        };
-        let task_id = manager.pending_handoff_tasks()[0].task_id.clone();
-        assert!(tasks.iter().any(|task| task.contains(&task_id)));
-        assert_eq!(manager.active_count(), 1);
-        if kind == BgTaskKind::Mcp {
-            let mut result = nested_result();
-            result.task_id = task_id.clone();
-            manager
-                .settle_external(&task_id, "terminal", result)
-                .await
-                .unwrap();
-        } else {
-            settle_nested_task(&child, &manager);
-        }
-        assert!(delivered_receiver.await.unwrap().success);
-        assert_eq!(
-            result_calls.load(Ordering::SeqCst),
-            usize::from(kind == BgTaskKind::Agent)
-        );
-    }
 }
 
 fn settle_nested_task(child: &Session, manager: &TaskManager) {
@@ -471,418 +258,720 @@ fn nested_result() -> BackgroundTaskResult {
         output: "nested-result".into(),
         tool_calls_count: 0,
         duration_ms: 1,
-        child_thread_id: None,
         timed_out: false,
+        child_thread_id: None,
         subagent_failure: None,
         shell_output: None,
     }
 }
 
+/// 无未结任务：不启动收尾窗口，正常立即结束。
 #[tokio::test(start_paused = true)]
-async fn child_budget_is_not_reset_after_bounded_idle_handoff() {
+async fn child_without_active_tasks_settles_immediately() {
     let (child, manager, built, initial_calls, result_calls) = child_with_nested_task();
-    let owner_child = child.clone();
-    let turn = built.context.session.turn.clone();
-    let mut owner =
-        tokio::spawn(async move { run_child_until_terminal(built.context, 1, &owner_child).await });
-    assert!(tokio::time::timeout(Duration::from_secs(121), &mut owner)
-        .await
-        .is_err());
-    assert_eq!(initial_calls.load(Ordering::SeqCst), 1);
     settle_nested_task(&child, &manager);
-    assert!(matches!(
-        owner.await.unwrap(),
-        LoopResult::Error(crate::error::AgentError::MaxIterationsExceeded(0))
-    ));
-    assert_eq!(turn.current_step(), 1);
-    assert_eq!(initial_calls.load(Ordering::SeqCst), 1);
-    assert_eq!(result_calls.load(Ordering::SeqCst), 0);
-    assert_eq!(manager.active_count(), 0);
-}
-
-#[tokio::test(start_paused = true)]
-async fn nested_child_late_result_is_processed_before_delegation_completes() {
-    let (child, manager, built, initial_calls, result_calls) = child_with_nested_task();
-    let owner_child = child.clone();
-    let mut owner =
-        tokio::spawn(
-            async move { run_child_until_terminal(built.context, 10, &owner_child).await },
-        );
-
-    assert!(
-        tokio::time::timeout(Duration::from_secs(121), &mut owner)
-            .await
-            .is_err(),
-        "bounded RCRA wait must leave a live child owner"
-    );
-    assert_eq!(initial_calls.load(Ordering::SeqCst), 1);
-    assert_eq!(result_calls.load(Ordering::SeqCst), 0);
-
-    settle_nested_task(&child, &manager);
-    assert!(matches!(owner.await.unwrap(), LoopResult::Completed));
-    assert_eq!(manager.active_count(), 0);
-    assert_eq!(initial_calls.load(Ordering::SeqCst), 1);
+    let permit = permit_for(&child, &built.context);
+    let outcome = tokio::time::timeout(
+        Duration::from_secs(1),
+        run_child_until_terminal(built.context, 10, &child),
+    )
+    .await
+    .expect("no active tasks must not trigger a settlement wait");
+    if let Some(permit) = permit {
+        permit.finish(Ok(()));
+    }
+    assert!(matches!(outcome, ChildRunOutcome::Settled), "{outcome:?}");
+    assert_eq!(initial_calls.load(Ordering::SeqCst), 0);
     assert_eq!(result_calls.load(Ordering::SeqCst), 1);
-    assert!(super::super::util::extract_last_ai_text(&child).contains("processed nested result"));
 }
 
-/// [回归测试] child 已经过 bounded wait 且无人输入时，投递暂时失败仍能自动继续。
+/// 截止前 shell 提醒被消费并结算：正常 Settled，不多发提醒。
 #[tokio::test(start_paused = true)]
-async fn nested_child_recovers_pending_delivery_without_input() {
-    let (child, manager, built, initial_calls, result_calls) = child_with_nested_task();
-    let owner_child = child.clone();
-    let mut owner =
-        tokio::spawn(
-            async move { run_child_until_terminal(built.context, 10, &owner_child).await },
-        );
-    assert!(tokio::time::timeout(Duration::from_secs(121), &mut owner)
+async fn shell_reminder_settles_before_deadline() {
+    let (child, manager, built, reminder_calls) = child_with_shell_task(true);
+    let permit = permit_for(&child, &built.context);
+    let result = tokio::time::timeout(
+        Duration::from_secs(5),
+        run_child_until_terminal(built.context, 10, &child),
+    )
+    .await
+    .expect("settling on the reminder must not wait for the deadline");
+    if let Some(permit) = permit {
+        permit.finish(Ok(()));
+    }
+    assert!(matches!(result, ChildRunOutcome::Settled), "{result:?}");
+    assert_eq!(reminder_calls.load(Ordering::SeqCst), 1);
+    assert_eq!(manager.active_count(), 0);
+    assert_eq!(
+        child
+            .transcript()
+            .read()
+            .entries()
+            .iter()
+            .filter(|entry| {
+                matches!(entry, crate::session::TranscriptEntry::Reminder { reminder, .. }
+                    if reminder.as_reminder().kind == "active_background_shell_before_submit")
+            })
+            .count(),
+        1
+    );
+}
+
+/// 忽略提醒但在 D 前完成：Settled，不产生交接记录。
+#[tokio::test(start_paused = true)]
+async fn ignored_shell_reminder_settles_when_task_finishes_before_deadline() {
+    let (child, manager, built, reminder_calls) = child_with_shell_task(false);
+    let permit = permit_for(&child, &built.context);
+    let owner = tokio::spawn(async move {
+        let outcome = run_child_until_terminal(built.context, 10, &child).await;
+        if let Some(permit) = permit {
+            permit.finish(Ok(()));
+        }
+        outcome
+    });
+    tokio::time::advance(Duration::from_secs(1)).await;
+    assert!(manager.complete("shell-task", nested_result()));
+    let result = owner.await.unwrap();
+    assert!(matches!(result, ChildRunOutcome::Settled), "{result:?}");
+    assert_eq!(reminder_calls.load(Ordering::SeqCst), 1);
+}
+
+/// 预算耗尽但任务在 D 前结算：保留 MaxIterations 原因，不附加残留交接。
+#[tokio::test(start_paused = true)]
+async fn exhausted_budget_settles_without_unprocessable_reminder() {
+    let (child, manager, built, reminder_calls) = child_with_shell_task(false);
+    let turn = built.context.session.turn.clone();
+    let child_for_run = child.clone();
+    let permit = permit_for(&child, &built.context);
+    let owner = tokio::spawn(async move {
+        let outcome = run_child_until_terminal(built.context, 1, &child_for_run).await;
+        if let Some(permit) = permit {
+            permit.finish(Ok(()));
+        }
+        outcome
+    });
+    tokio::time::advance(Duration::from_secs(1)).await;
+    settle_task(&manager, &child, "shell-task");
+    let outcome = owner.await.unwrap();
+    assert!(
+        matches!(
+            outcome,
+            ChildRunOutcome::Failed {
+                error: crate::error::AgentError::MaxIterationsExceeded(_),
+                residual: None,
+            }
+        ),
+        "{outcome:?}"
+    );
+    assert_eq!(turn.current_step(), 1);
+    assert_eq!(reminder_calls.load(Ordering::SeqCst), 0);
+}
+
+#[tokio::test(start_paused = true)]
+async fn cancelled_child_does_not_emit_shell_reminder() {
+    let (child, _manager, built, reminder_calls) = child_with_shell_task(false);
+    child.config().cancel_token.cancel();
+    let permit = permit_for(&child, &built.context);
+    let outcome = run_child_until_terminal(built.context, 10, &child).await;
+    if let Some(permit) = permit {
+        permit.finish(Ok(()));
+    }
+    assert!(matches!(outcome, ChildRunOutcome::Interrupted));
+    assert_eq!(reminder_calls.load(Ordering::SeqCst), 0);
+}
+
+/// 永久 Working 且无通知：D 后交接一次，Shell 保持真实 Running。
+#[tokio::test(start_paused = true)]
+async fn permanent_shell_hands_off_at_deadline_without_notifications() {
+    let (child, manager, built, _) = child_with_shell_task(false);
+    let permit = permit_for(&child, &built.context);
+    let started = tokio::time::Instant::now();
+    let outcome = tokio::time::timeout(
+        Duration::from_secs(125),
+        run_child_until_terminal(built.context, 10, &child),
+    )
+    .await
+    .expect("deadline must close the settlement wait");
+    if let Some(permit) = permit {
+        permit.finish(Ok(()));
+    }
+    let elapsed = started.elapsed();
+    let ChildRunOutcome::HandedOff { receipt } = outcome else {
+        panic!("permanent shell must hand off: {outcome:?}");
+    };
+    assert!(elapsed >= Duration::from_secs(120), "{elapsed:?}");
+    assert!(elapsed < Duration::from_secs(125), "{elapsed:?}");
+    assert_eq!(receipt.reason, ChildHandoffReason::SettlementDeadline);
+    assert!(receipt
+        .tasks
+        .iter()
+        .any(|task| task.task_id == "shell-task"));
+    assert_eq!(manager.active_count(), 1, "交接不得取消或标记 Shell 成功");
+    assert!(child.transcript().read().entries().iter().any(|entry| {
+        matches!(entry, crate::session::TranscriptEntry::Reminder { reminder, .. }
+            if reminder.as_reminder().kind == "child_tasks_handed_off")
+    }));
+}
+
+/// activity 风暴/任务新增不重置同一个绝对 D。
+#[tokio::test(start_paused = true)]
+async fn activity_and_new_tasks_do_not_reset_deadline() {
+    let (child, manager, built, _) = child_with_shell_task(false);
+    let child_for_run = child.clone();
+    let permit = permit_for(&child, &built.context);
+    let mut owner = tokio::spawn(async move {
+        let outcome = run_child_until_terminal(built.context, 10, &child_for_run).await;
+        if let Some(permit) = permit {
+            permit.finish(Ok(()));
+        }
+        outcome
+    });
+    while !child.transcript().read().entries().iter().any(|entry| {
+        matches!(entry, crate::session::TranscriptEntry::Reminder { reminder, .. }
+            if reminder.as_reminder().kind == "active_background_shell_before_submit")
+    }) {
+        tokio::task::yield_now().await;
+    }
+    for _ in 0..10 {
+        tokio::task::yield_now().await;
+    }
+    // 连续每秒注入 activity/新任务，D 仍按首次收尾起算。
+    for index in 0..5 {
+        tokio::time::advance(Duration::from_secs(1)).await;
+        TaskManagerPort::register(
+            manager.as_ref(),
+            BgTaskRegistration {
+                task_id: format!("shell-storm-{index}"),
+                kind: BgTaskKind::Shell,
+                summary: "per-second activity".into(),
+                pid: None,
+                kill: Some(Box::new(|| {})),
+            },
+        )
+        .unwrap();
+        tokio::task::yield_now().await;
+    }
+    tokio::time::advance(Duration::from_secs(114)).await;
+    TaskManagerPort::register(
+        manager.as_ref(),
+        BgTaskRegistration {
+            task_id: "shell-late".into(),
+            kind: BgTaskKind::Shell,
+            summary: "added at 119s".into(),
+            pid: None,
+            kill: Some(Box::new(|| {})),
+        },
+    )
+    .unwrap();
+    let outcome = tokio::time::timeout(Duration::from_secs(5), &mut owner)
         .await
-        .is_err());
+        .expect("activity storm must not move D")
+        .unwrap();
+    let ChildRunOutcome::HandedOff { receipt } = outcome else {
+        panic!("expected handoff: {outcome:?}");
+    };
+    assert!(receipt
+        .tasks
+        .iter()
+        .any(|task| task.task_id == "shell-late"));
+    assert!(receipt
+        .tasks
+        .iter()
+        .any(|task| task.task_id == "shell-storm-4"));
+    assert_eq!(manager.active_count(), 7, "所有 Shell 都保持真实状态");
+}
+
+/// task 已终态但结果未消费：active=0 不能证明委派完成。
+#[tokio::test(start_paused = true)]
+async fn terminal_result_without_consumption_still_hands_off() {
+    let (child, manager, built, reminder_calls) = child_with_shell_task(false);
+    child.queue().push(QueuedMessage::info(
+        MessageSource::HookStopIntent,
+        crate::messages::BaseMessage::human("stop"),
+    ));
+    let run_child = child.clone();
+    let permit = permit_for(&child, &built.context);
+    let mut owner = tokio::spawn(async move {
+        let outcome = run_child_until_terminal(built.context, 10, &run_child).await;
+        if let Some(permit) = permit {
+            permit.finish(Ok(()));
+        }
+        outcome
+    });
+    tokio::time::advance(Duration::from_secs(1)).await;
+    settle_task(&manager, &child, "shell-task");
+    let outcome = tokio::time::timeout(Duration::from_secs(125), &mut owner)
+        .await
+        .expect("unconsumed result must keep the bounded settlement obligation")
+        .unwrap();
+    let ChildRunOutcome::HandedOff { receipt } = outcome else {
+        panic!("expected handoff: {outcome:?}");
+    };
+    assert_eq!(receipt.reason, ChildHandoffReason::HookStop);
+    assert!(receipt.tasks.is_empty(), "task 已终态，不得列入任务引用");
+    assert!(!receipt.message_ids.is_empty(), "未消费结果必须有消息引用");
+    assert_eq!(reminder_calls.load(Ordering::SeqCst), 0);
+}
+
+fn settle_task(manager: &TaskManager, child: &Session, task_id: &str) {
     let delivery = crate::session::bg_complete::task_bg_complete_callback(
         crate::agent::async_tasks::delivery::SessionTerminalDelivery::for_queue(
             child.queue().clone(),
         ),
     );
-    let attempts = Arc::new(AtomicUsize::new(0));
-    let called = attempts.clone();
-    assert!(manager
-        .settle_completed(
-            "nested-task",
-            nested_result(),
-            Arc::new(move |result, kind| {
-                if called.fetch_add(1, Ordering::SeqCst) == 0 {
-                    Err("temporary queue acceptance failure".into())
-                } else {
-                    delivery(result, kind)
-                }
-            })
-        )
-        .is_err());
-    assert_eq!(manager.snapshot().tasks[0].status, "delivery_pending");
-    assert!(matches!(
-        tokio::time::timeout(Duration::from_secs(1), owner)
-            .await
-            .unwrap()
-            .unwrap(),
-        LoopResult::Completed
+    let mut result = nested_result();
+    result.task_id = task_id.to_string();
+    assert!(manager.settle_completed(task_id, result, delivery).unwrap());
+}
+
+/// Receive 期间跨过 D：消息已落库并记录引用，但不再准入推理。
+#[tokio::test(start_paused = true)]
+async fn receive_across_deadline_preserves_committed_result() {
+    let manager = Arc::new(TaskManager::new());
+    let child = make_child(manager.clone(), true);
+    let (initial_calls, result_calls) =
+        (Arc::new(AtomicUsize::new(0)), Arc::new(AtomicUsize::new(0)));
+    let mut built = nested_context(&child, initial_calls.clone(), result_calls.clone());
+    let window = Arc::new(ChildSettlementWindow::default());
+    window.start();
+    tokio::time::advance(Duration::from_secs(121)).await;
+    built.context.async_ctx.child_settlement = Some(window);
+    let message = crate::messages::BaseMessage::human("late prompt");
+    let message_id = message.id();
+    child
+        .queue()
+        .push(QueuedMessage::prompt(MessageSource::UserInput, message));
+    let received = run_receive(ReceiveInput {
+        context: built.context.clone(),
+    })
+    .await
+    .unwrap();
+    assert_eq!(received.consumed_count, 1);
+    assert!(child.transcript().read().entries().iter().any(|entry| entry
+        .as_message()
+        .is_some_and(|message| message.id() == message_id)));
+    assert_eq!(received.process_message_ids, vec![message_id]);
+    assert!(
+        built
+            .context
+            .async_ctx
+            .received_after_deadline
+            .lock()
+            .is_empty(),
+        "Receive 只返回身份；登记由 loop 在判定 SettlementDue 时统一完成"
+    );
+    assert_eq!(initial_calls.load(Ordering::SeqCst), 0);
+}
+
+/// D 已在 Receive 前到期：不消费新输入，直接由循环退出原因结束。
+#[tokio::test(start_paused = true)]
+async fn deadline_before_receive_does_not_consume_new_input() {
+    let manager = Arc::new(TaskManager::new());
+    let child = make_child(manager.clone(), true);
+    let (initial_calls, result_calls) =
+        (Arc::new(AtomicUsize::new(0)), Arc::new(AtomicUsize::new(0)));
+    let mut built = nested_context(&child, initial_calls.clone(), result_calls.clone());
+    let window = Arc::new(ChildSettlementWindow::default());
+    window.start();
+    tokio::time::advance(Duration::from_secs(121)).await;
+    built.context.async_ctx.child_settlement = Some(window);
+    let message = crate::messages::BaseMessage::human("must not be consumed");
+    let message_id = message.id();
+    child
+        .queue()
+        .push(QueuedMessage::prompt(MessageSource::UserInput, message));
+    let outcome = run_react_loop(built.context.clone(), 10).await;
+    assert!(matches!(outcome, LoopResult::SettlementDue { .. }));
+    assert!(child.queue().snapshot().iter().any(|message| message
+        .message()
+        .is_some_and(|message| message.id() == message_id)));
+    assert_eq!(initial_calls.load(Ordering::SeqCst), 0);
+}
+
+struct ToolThenExpireLlm {
+    calls: Arc<AtomicUsize>,
+}
+
+#[async_trait::async_trait]
+impl ReactLLM for ToolThenExpireLlm {
+    async fn generate_reasoning(
+        &self,
+        _messages: &[crate::messages::BaseMessage],
+        _tools: &[&dyn BaseTool],
+        _streaming: Option<StreamingContext>,
+    ) -> crate::error::AgentResult<Reasoning> {
+        assert_eq!(self.calls.fetch_add(1, Ordering::SeqCst), 0);
+        tokio::time::advance(Duration::from_secs(121)).await;
+        Ok(Reasoning::with_tools(
+            "call the tool",
+            vec![ToolCall::new(
+                "call-1",
+                "MissingTool",
+                serde_json::json!({}),
+            )],
+        ))
+    }
+}
+
+/// D 前已准入的 Reason 在 D 后产生 tool-call：完成 Act 结算，不开下一轮。
+#[tokio::test(start_paused = true)]
+async fn admitted_reason_completes_act_after_deadline() {
+    let manager = Arc::new(TaskManager::new());
+    let child = make_child(manager.clone(), true);
+    child.queue().push(QueuedMessage::prompt(
+        MessageSource::UserInput,
+        crate::messages::BaseMessage::human("use a tool"),
     ));
-    assert_eq!(attempts.load(Ordering::SeqCst), 2);
-    assert_eq!(initial_calls.load(Ordering::SeqCst), 1);
-    assert_eq!(result_calls.load(Ordering::SeqCst), 1);
-    assert_eq!(manager.active_count(), 0);
+    let calls = Arc::new(AtomicUsize::new(0));
+    let mut built = build_v2_subagent_context(
+        Some(child.clone()),
+        Box::new(ToolThenExpireLlm {
+            calls: calls.clone(),
+        }),
+        Arc::new(MiddlewareChain::new()),
+        Vec::new(),
+        Arc::new(|_| true),
+        None,
+        "/tmp",
+        child.config().cancel_token.as_ref().clone(),
+        None,
+        None,
+        None,
+        None,
+        Some(agent_id_from_child_thread(
+            &child.store().thread_id.clone().unwrap(),
+        )),
+    );
+    let window = Arc::new(ChildSettlementWindow::default());
+    window.start();
+    built.context.async_ctx.child_settlement = Some(window);
+    let outcome = run_react_loop(built.context, 10).await;
+    let LoopResult::SettlementDue {
+        unprocessed_tool_calls,
+    } = outcome
+    else {
+        panic!("expected SettlementDue: {outcome:?}");
+    };
+    assert_eq!(unprocessed_tool_calls, vec!["call-1"]);
+    assert_eq!(calls.load(Ordering::SeqCst), 1, "截止后不得发起新模型请求");
+    let transcript = child.transcript();
+    let entries = transcript.read();
+    let has_tool_result = entries
+        .visible_messages()
+        .iter()
+        .any(|message| matches!(message, crate::messages::BaseMessage::Tool { .. }));
+    assert!(has_tool_result, "已准入 Act 必须结算 tool result");
 }
 
+/// 预算耗尽时仍有未结任务：保留原错误并附残留交接。
 #[tokio::test(start_paused = true)]
-async fn nested_child_owner_stops_on_cancel_after_bounded_wait() {
-    let (child, _manager, built, initial_calls, result_calls) = child_with_nested_task();
-    let cancel = child.config().cancel_token.clone();
-    let mut owner =
-        tokio::spawn(async move { run_child_until_terminal(built.context, 10, &child).await });
-
-    assert!(tokio::time::timeout(Duration::from_secs(121), &mut owner)
+async fn max_iterations_keeps_reason_and_residual_handoff() {
+    let (child, manager, built, _) = child_with_shell_task(false);
+    TaskManagerPort::register(
+        manager.as_ref(),
+        BgTaskRegistration {
+            task_id: "shell-permanent".into(),
+            kind: BgTaskKind::Shell,
+            summary: "permanent".into(),
+            pid: None,
+            kill: Some(Box::new(|| {})),
+        },
+    )
+    .unwrap();
+    let run_child = child.clone();
+    let permit = permit_for(&child, &built.context);
+    let mut owner = tokio::spawn(async move {
+        let outcome = run_child_until_terminal(built.context, 1, &run_child).await;
+        if let Some(permit) = permit {
+            permit.finish(Ok(()));
+        }
+        outcome
+    });
+    tokio::time::advance(Duration::from_secs(1)).await;
+    let delivery = crate::session::bg_complete::task_bg_complete_callback(
+        crate::agent::async_tasks::delivery::SessionTerminalDelivery::for_queue(
+            child.queue().clone(),
+        ),
+    );
+    let mut result = nested_result();
+    result.task_id = "shell-task".into();
+    assert!(manager
+        .settle_completed("shell-task", result, delivery)
+        .unwrap());
+    let outcome = tokio::time::timeout(Duration::from_secs(5), &mut owner)
         .await
-        .is_err());
-    cancel.cancel();
-    assert!(matches!(owner.await.unwrap(), LoopResult::Interrupted));
-    assert_eq!(initial_calls.load(Ordering::SeqCst), 1);
-    assert_eq!(result_calls.load(Ordering::SeqCst), 0);
+        .expect("budget error must not wait for D")
+        .unwrap();
+    let ChildRunOutcome::Failed { error, residual } = outcome else {
+        panic!("expected typed failure: {outcome:?}");
+    };
+    assert!(matches!(
+        error,
+        crate::error::AgentError::MaxIterationsExceeded(_)
+    ));
+    let receipt = residual.expect("unsettled shell must be handed off");
+    assert!(receipt
+        .tasks
+        .iter()
+        .any(|task| task.task_id == "shell-permanent"));
 }
 
+/// 截止后的晚结果不自动复活旧 run；显式 resume 读取同一队列并推理。
 #[tokio::test(start_paused = true)]
-async fn foreground_child_waits_for_nested_result_before_returning() {
+async fn late_result_after_deadline_requires_explicit_resume() {
     let (child, manager, built, initial_calls, result_calls) = child_with_nested_task();
     let child_id = child.store().thread_id.clone().unwrap();
-    let owner_child = child.clone();
-    let mut owner = tokio::spawn(async move {
-        super::super::run_sync::run_sync_subagent(
-            &child_id,
-            "fixture",
-            "/tmp",
-            10,
-            None,
-            None,
-            None,
-            None,
-            None,
-            None,
-            None,
-            None,
-            None,
-            built,
-            owner_child,
-            None,
-            None,
-        )
-        .await
-    });
-
-    assert!(tokio::time::timeout(Duration::from_secs(121), &mut owner)
-        .await
-        .is_err());
-    assert_eq!(initial_calls.load(Ordering::SeqCst), 1);
-    assert_eq!(result_calls.load(Ordering::SeqCst), 0);
+    let first = run_sync_subagent(
+        &child_id,
+        "fixture",
+        "/tmp",
+        10,
+        None,
+        None,
+        None,
+        None,
+        None,
+        None,
+        None,
+        None,
+        None,
+        built,
+        child.clone(),
+        None,
+        None,
+    )
+    .await
+    .unwrap();
+    assert!(
+        matches!(first, ChildRunOutcome::HandedOff { .. }),
+        "{first:?}"
+    );
     settle_nested_task(&child, &manager);
-    assert!(!owner.await.unwrap().unwrap());
+    tokio::time::advance(Duration::from_secs(1)).await;
+    assert_eq!(
+        result_calls.load(Ordering::SeqCst),
+        0,
+        "旧 run 不得自动消费截止后的结果"
+    );
+    child.queue().push(QueuedMessage::prompt(
+        MessageSource::UserInput,
+        crate::messages::BaseMessage::human("continue explicitly"),
+    ));
+    let resumed = nested_context(&child, initial_calls.clone(), result_calls.clone());
+    let second = run_sync_subagent(
+        &child_id,
+        "fixture",
+        "/tmp",
+        10,
+        None,
+        None,
+        None,
+        None,
+        None,
+        None,
+        None,
+        None,
+        None,
+        resumed,
+        child.clone(),
+        None,
+        None,
+    )
+    .await
+    .unwrap();
+    assert!(matches!(second, ChildRunOutcome::Settled), "{second:?}");
     assert_eq!(result_calls.load(Ordering::SeqCst), 1);
     assert!(super::super::util::extract_last_ai_text(&child).contains("processed nested result"));
 }
 
+/// 无 owner 的嵌入路径在 D 后显式失败，不无限等待。
 #[tokio::test(start_paused = true)]
-async fn sync_child_handoff_returns_pending_and_delivers_late_result() {
-    let (child, manager, built, reminder_calls) = child_with_shell_task(false);
-    let child_id = child.store().thread_id.clone().unwrap();
-    let (delivered_sender, delivered_receiver) = tokio::sync::oneshot::channel();
-    let delivered_sender = parking_lot::Mutex::new(Some(delivered_sender));
-    let delivery_attempts = Arc::new(AtomicUsize::new(0));
-    let attempts = Arc::clone(&delivery_attempts);
-    let delivery: peri_acp_types::tasks::OnBgCompleteFn = Arc::new(move |result, kind| {
-        assert_eq!(kind, BgTaskKind::Agent);
-        if attempts.fetch_add(1, Ordering::SeqCst) == 0 {
-            return Err("transient delivery rejection".into());
-        }
-        if let Some(sender) = delivered_sender.lock().take() {
-            let _ = sender.send(result.clone());
-        }
-        Ok(())
-    });
-    let worker_child = child.clone();
-    let run_id = child_id.clone();
-    let mut call = tokio::spawn(super::super::run_sync::run_sync_with_handoff(
-        child.clone(),
-        child_id.clone(),
-        "fixture".into(),
-        Some(delivery),
-        move |handoff_start, _handed_off| async move {
-            super::super::run_sync::run_sync_subagent(
-                &run_id,
-                "fixture",
-                "/tmp",
-                10,
-                None,
-                None,
-                None,
-                None,
-                None,
-                None,
-                None,
-                None,
-                None,
-                built,
-                worker_child,
-                None,
-                Some(handoff_start),
-            )
-            .await
+async fn missing_owner_reports_capability_failure() {
+    let manager = Arc::new(TaskManager::new());
+    let child = make_child(manager.clone(), false);
+    TaskManagerPort::register(
+        manager.as_ref(),
+        BgTaskRegistration {
+            task_id: "shell-task".into(),
+            kind: BgTaskKind::Shell,
+            summary: "permanent".into(),
+            pid: None,
+            kill: Some(Box::new(|| {})),
         },
+    )
+    .unwrap();
+    child.queue().push(QueuedMessage::prompt(
+        MessageSource::UserInput,
+        crate::messages::BaseMessage::human("run shell"),
     ));
-
-    let pending = tokio::time::timeout(Duration::from_secs(121), &mut call)
-        .await
-        .expect("parent call must return after the approved bound")
-        .unwrap()
-        .unwrap();
-    let super::super::run_sync::SyncCompletion::Pending(tasks) = pending else {
-        panic!("live shell must be handed off to the session worker");
-    };
-    assert!(tasks.iter().any(|task| task.contains("shell-task")));
-    assert_eq!(reminder_calls.load(Ordering::SeqCst), 1);
-    assert_eq!(manager.active_count(), 1);
-
-    let mut shell_result = nested_result();
-    shell_result.task_id = "shell-task".into();
-    assert!(manager.complete("shell-task", shell_result));
-    let delivered = tokio::time::timeout(Duration::from_secs(8), delivered_receiver)
-        .await
-        .expect("owned child worker must deliver the late result")
-        .unwrap();
-    assert_eq!(
-        delivered.child_thread_id.as_deref(),
-        Some(child_id.as_str())
-    );
-    assert!(delivered.success);
-    assert_eq!(delivered.output, "child answer");
-    assert_eq!(delivery_attempts.load(Ordering::SeqCst), 2);
-    assert_eq!(
-        child
-            .subagent_host()
-            .unwrap()
-            .close_state
-            .sync_workers
-            .len(),
-        0
-    );
-}
-
-#[test]
-fn sync_handoff_routes_late_events_to_background_pump() {
-    use crate::agent::events::{AgentEventHandler, ExecutorEvent, FnEventHandler};
-    use std::sync::atomic::AtomicBool;
-
-    let foreground = Arc::new(AtomicUsize::new(0));
-    let observed = Arc::clone(&foreground);
-    let handler: Arc<dyn AgentEventHandler> = Arc::new(FnEventHandler(move |_| {
-        observed.fetch_add(1, Ordering::SeqCst);
-    }));
-    let (sender, mut receiver) = tokio::sync::mpsc::unbounded_channel();
-    let handed_off = Arc::new(AtomicBool::new(false));
-    let routed = super::super::run_sync::handoff_event_handler(
-        Some(handler),
-        Some(sender),
-        Arc::clone(&handed_off),
-    )
-    .unwrap();
-    let event = || ExecutorEvent::SubagentStarted {
-        agent_name: "fixture".into(),
-        instance_id: "child".into(),
-        parent_tool_call_id: None,
-        is_background: false,
-    };
-    routed.on_event(event());
-    assert_eq!(foreground.load(Ordering::SeqCst), 1);
-    assert!(receiver.try_recv().is_err());
-    handed_off.store(true, Ordering::Release);
-    routed.on_event(event());
-    assert!(receiver.try_recv().is_ok());
-    assert_eq!(foreground.load(Ordering::SeqCst), 1);
-}
-
-#[tokio::test(start_paused = true)]
-async fn background_child_reports_parent_completion_after_nested_result() {
-    let (child, nested_manager, built, initial_calls, result_calls) = child_with_nested_task();
-    let parent_manager = Arc::new(TaskManager::new());
-    let child_id = child.store().thread_id.clone().unwrap();
-    let (completed_tx, mut completed_rx) = tokio::sync::oneshot::channel();
-    let completed_tx = parking_lot::Mutex::new(Some(completed_tx));
-    let deliveries = Arc::new(AtomicUsize::new(0));
-    let delivery_count = deliveries.clone();
-    super::super::background::spawn_background_subagent(
-        "parent-task".into(),
-        child_id,
-        "fixture".into(),
-        "initial child work".into(),
-        "/tmp".into(),
-        10,
+    let built = build_v2_subagent_context(
+        Some(child.clone()),
+        Box::new(NestedResultLlm {
+            initial_calls: Arc::new(AtomicUsize::new(0)),
+            result_calls: Arc::new(AtomicUsize::new(0)),
+        }),
+        Arc::new(MiddlewareChain::new()),
+        Vec::new(),
+        Arc::new(|_| true),
         None,
-        Some(parent_manager.clone()),
-        Some(Arc::new(move |result: &BackgroundTaskResult, _| {
-            delivery_count.fetch_add(1, Ordering::SeqCst);
-            completed_tx
-                .lock()
-                .take()
-                .unwrap()
-                .send(result.clone())
-                .unwrap();
-            Ok(())
-        })),
-        None,
-        None,
-        None,
-        None,
-        None,
-        None,
-        None,
-        None,
+        "/tmp",
         child.config().cancel_token.as_ref().clone(),
-        built,
         None,
+        None,
+        None,
+        None,
+        Some(agent_id_from_child_thread(
+            &child.store().thread_id.clone().unwrap(),
+        )),
+    );
+    let outcome = tokio::time::timeout(
+        Duration::from_secs(125),
+        run_child_until_terminal(built.context, 10, &child),
     )
     .await
-    .unwrap();
-
-    assert!(
-        tokio::time::timeout(Duration::from_secs(121), &mut completed_rx)
-            .await
-            .is_err(),
-        "parent must not receive success at the child's bounded wait"
-    );
-    assert_eq!(parent_manager.active_count(), 1);
-    assert_eq!(initial_calls.load(Ordering::SeqCst), 1);
-    assert_eq!(result_calls.load(Ordering::SeqCst), 0);
-    settle_nested_task(&child, &nested_manager);
-    let result = completed_rx.await.unwrap();
-    assert!(result.success);
-    assert!(result.output.contains("processed nested result"));
-    assert_eq!(result_calls.load(Ordering::SeqCst), 1);
-    assert_eq!(deliveries.load(Ordering::SeqCst), 1);
+    .expect("missing owner must not wait beyond D");
+    let ChildRunOutcome::HandoffFailed { failure, .. } = outcome else {
+        panic!("expected capability failure: {outcome:?}");
+    };
+    assert!(failure
+        .error
+        .to_string()
+        .contains("handoff_capability_unavailable"));
 }
 
-/// [回归测试] session/cancel-bg-task 的协作取消必须给直接父队列投递一次原身份终态。
+/// 交接 canonical 写入失败：结构化 HandoffFailed，不返回 HandedOff 或成功。
 #[tokio::test(start_paused = true)]
-async fn background_child_cancellation_delivers_original_terminal_to_parent_queue() {
-    let (child, nested_manager, built, initial_calls, _result_calls) = child_with_nested_task();
-    let parent_manager = Arc::new(TaskManager::new());
-    let parent = Session::new(Arc::from("/tmp"), FrozenContext::builder().build(), None);
-    let deliveries = Arc::new(AtomicUsize::new(0));
-    let called = deliveries.clone();
-    let recorded = Arc::new(parking_lot::Mutex::new(None));
-    let record = recorded.clone();
-    let callback = crate::session::bg_complete::task_bg_complete_callback(
-        crate::agent::async_tasks::delivery::SessionTerminalDelivery::for_queue(
-            parent.queue().clone(),
-        ),
+async fn handoff_persistence_failure_is_not_reported_as_handed_off() {
+    let manager = Arc::new(TaskManager::new());
+    let child_id = uuid::Uuid::now_v7().to_string();
+    let child = Session::new(
+        Arc::from("/tmp"),
+        FrozenContext::builder().build(),
+        Some(child_id.clone()),
     );
-    let callback: peri_acp_types::tasks::OnBgCompleteFn = Arc::new(move |result, kind| {
-        called.fetch_add(1, Ordering::SeqCst);
-        *record.lock() = Some(result.clone());
-        callback(result, kind)
+    let (owner, store) = bind_owner_store(&child, &manager);
+    child.set_subagent_host(SubagentHost {
+        task_manager: Some(manager.clone()),
+        child_owner: Some(owner.clone()),
+        ..Default::default()
     });
-    let mut events = parent_manager.subscribe_events();
-    super::super::background::spawn_background_subagent(
-        "parent-task".into(),
-        child.store().thread_id.clone().unwrap(),
-        "fixture".into(),
-        "initial child work".into(),
-        "/tmp".into(),
-        10,
+    store.restrict_to_history_read_only();
+    TaskManagerPort::register(
+        manager.as_ref(),
+        BgTaskRegistration {
+            task_id: "shell-task".into(),
+            kind: BgTaskKind::Shell,
+            summary: "permanent".into(),
+            pid: None,
+            kill: Some(Box::new(|| {})),
+        },
+    )
+    .unwrap();
+    child.queue().push(QueuedMessage::prompt(
+        MessageSource::UserInput,
+        crate::messages::BaseMessage::human("run shell"),
+    ));
+    let built = build_v2_subagent_context(
+        Some(child.clone()),
+        Box::new(NestedResultLlm {
+            initial_calls: Arc::new(AtomicUsize::new(0)),
+            result_calls: Arc::new(AtomicUsize::new(0)),
+        }),
+        Arc::new(MiddlewareChain::new()),
+        Vec::new(),
+        Arc::new(|_| true),
         None,
-        Some(parent_manager.clone()),
-        Some(callback.clone()),
-        None,
-        None,
-        None,
-        None,
-        None,
-        None,
-        None,
-        None,
+        "/tmp",
         child.config().cancel_token.as_ref().clone(),
-        built,
         None,
+        None,
+        None,
+        None,
+        Some(agent_id_from_child_thread(&child_id)),
+    );
+    let permit = permit_for(&child, &built.context);
+    let outcome = tokio::time::timeout(
+        Duration::from_secs(125),
+        run_child_until_terminal(built.context, 10, &child),
     )
     .await
-    .unwrap();
-    tokio::time::sleep(Duration::from_secs(121)).await;
-    assert_eq!(initial_calls.load(Ordering::SeqCst), 1);
-    assert!(nested_manager.complete("nested-task", nested_result()));
-    parent_manager.cancel_async("parent-task").await.unwrap();
-    assert!(tokio::time::timeout(Duration::from_secs(4), async {
-        while deliveries.load(Ordering::SeqCst) == 0 {
-            tokio::time::sleep(Duration::from_millis(10)).await;
-        }
-    })
-    .await
-    .is_ok());
-    let result = recorded.lock().clone().unwrap();
-    assert_eq!(result.task_id, "parent-task");
-    assert_eq!(result.child_thread_id, child.store().thread_id);
-    assert!(!result.success);
-    assert_eq!(parent.queue().len(), 1);
-    assert!(!parent_manager
-        .settle_completed("parent-task", result, callback)
-        .unwrap());
-    assert_eq!(deliveries.load(Ordering::SeqCst), 1);
-    assert_eq!(parent_manager.snapshot().tasks[0].status, "cancelled");
-    let mut cancelled = 0;
-    while let Ok(change) = events.try_recv() {
-        match change.event {
-            peri_acp_types::tasks::BgRegistryEvent::Cancelled { .. } => cancelled += 1,
-            peri_acp_types::tasks::BgRegistryEvent::Completed { .. } => panic!("ghost terminal"),
-            _ => {}
-        }
+    .expect("persistence failure must not wait beyond D");
+    if let Some(permit) = permit {
+        permit.finish(Err("handoff persistence failed".into()));
     }
-    assert_eq!(cancelled, 1);
-    assert_eq!(
-        TaskManagerPort::shutdown(parent_manager.as_ref()).await,
-        peri_acp_types::tasks::TaskShutdownReport::Complete
+    let ChildRunOutcome::HandoffFailed { failure, .. } = outcome else {
+        panic!("持久化失败不得伪装成交接: {outcome:?}");
+    };
+    assert!(
+        failure.error.to_string().contains("persistence")
+            || failure
+                .error
+                .to_string()
+                .contains("handoff_capability_unavailable")
     );
+    assert!(
+        owner.receipt().is_none(),
+        "未提交的交接不得留 committed receipt"
+    );
+    assert!(owner.pending_receipt().is_some(), "冻结身份必须保留供重试");
+    assert_eq!(manager.active_count(), 1);
 }
+
+struct FixedLlm(&'static str);
+
+#[async_trait::async_trait]
+impl ReactLLM for FixedLlm {
+    async fn generate_reasoning(
+        &self,
+        _messages: &[crate::messages::BaseMessage],
+        _tools: &[&dyn BaseTool],
+        _streaming: Option<StreamingContext>,
+    ) -> crate::error::AgentResult<Reasoning> {
+        Ok(Reasoning::with_answer("", self.0))
+    }
+}
+
+/// 旧执行的 ContinueCurrentRun 控制消息不得驱动新 run。
+fn fixed_context(session: &Arc<Session>, answer: &'static str) -> V2SubagentContext {
+    let id = session.store().thread_id.clone().unwrap();
+    build_v2_subagent_context(
+        Some(session.clone()),
+        Box::new(FixedLlm(answer)),
+        Arc::new(MiddlewareChain::new()),
+        Vec::new(),
+        Arc::new(|_| true),
+        None,
+        "/tmp",
+        session.config().cancel_token.as_ref().clone(),
+        None,
+        None,
+        None,
+        None,
+        Some(agent_id_from_child_thread(&id)),
+    )
+}
+
+fn transcript_contains(session: &Session, needle: &str) -> bool {
+    session
+        .transcript()
+        .read()
+        .entries()
+        .iter()
+        .any(|entry| match entry {
+            crate::session::TranscriptEntry::Message(message) => message.content().contains(needle),
+            crate::session::TranscriptEntry::Reminder { reminder, .. } => {
+                reminder.as_reminder().body.contains(needle)
+                    || reminder.as_reminder().metadata.to_string().contains(needle)
+            }
+        })
+}
+
+#[path = "child_runner_background_test.rs"]
+mod background;
+#[path = "child_runner_deadline_test.rs"]
+mod deadline;
+#[path = "child_runner_nested_test.rs"]
+mod nested;
+#[cfg(unix)]
+#[path = "child_runner_process_test.rs"]
+mod process;
