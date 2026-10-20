@@ -16,6 +16,40 @@ use crate::session::Session;
 use crate::tools::{BaseTool, ToolInvocationResolver};
 use peri_acp_types::session_resources::SessionResources;
 
+/// 本次计算的终态；资源交接不代表委派成功，也不代表 Shell 超时。
+#[derive(Debug)]
+pub enum ChildRunOutcome {
+    Settled,
+    HandedOff {
+        receipt: ChildHandoffReceipt,
+    },
+    Interrupted,
+    Failed {
+        error: crate::error::AgentError,
+        residual: Option<ChildHandoffReceipt>,
+    },
+}
+
+/// 一次执行的冻结交接记录；只有 canonical 提交确认后才能返回 HandedOff。
+#[derive(Debug, Clone)]
+pub struct ChildHandoffReceipt {
+    pub child_thread_id: String,
+    pub execution: peri_acp_types::session::ExecutionBinding,
+    pub owner_session_id: String,
+    pub reason: ChildHandoffReason,
+    pub tasks: Vec<crate::agent::async_tasks::handoff::PendingHandoffTask>,
+    pub message_ids: Vec<peri_acp_types::messages::MessageId>,
+    pub canonical_message_id: peri_acp_types::messages::MessageId,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ChildHandoffReason {
+    SettlementDeadline,
+    IterationBudget,
+    HookStop,
+    ExecutionFailed,
+}
+
 // ─── 意图类型 ────────────────────────────────────────────────────────────────
 
 /// 子 Agent 模型来源（H1）：ACP 模型工厂只负责模型解析与创建。

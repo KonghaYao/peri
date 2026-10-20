@@ -31,6 +31,7 @@ mod types;
 mod util;
 mod v2_bridge;
 
+pub use crate::agent::async_tasks::handoff::ChildSettlementWindow;
 pub use directives::{build_bg_fork_directive, build_fork_directive, build_prediction_directive};
 pub use factory::SessionFactory;
 pub(crate) use lifecycle::flush_session_history;
@@ -38,9 +39,10 @@ pub(crate) use lifecycle::{
     on_subagent_stop_handler, BgCleanupGuard, BgStopEmitV2, DeregisterGuard,
 };
 pub use types::{
-    ForkDirectiveKind, SubagentCancelPolicy, SubagentChainAssembler, SubagentChainContext,
-    SubagentFailure, SubagentHost, SubagentLifecycleStart, SubagentLifecycleStop,
-    SubagentLlmSource, SubagentResumeConfig, SubagentRunMode, SubagentSpawnConfig, SubagentSpawned,
+    ChildHandoffReason, ChildHandoffReceipt, ChildRunOutcome, ForkDirectiveKind,
+    SubagentCancelPolicy, SubagentChainAssembler, SubagentChainContext, SubagentFailure,
+    SubagentHost, SubagentLifecycleStart, SubagentLifecycleStop, SubagentLlmSource,
+    SubagentResumeConfig, SubagentRunMode, SubagentSpawnConfig, SubagentSpawned,
 };
 pub use util::{count_tool_calls_from_session, extract_last_ai_text, format_subagent_result};
 pub use v2_bridge::{

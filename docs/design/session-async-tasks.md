@@ -1,6 +1,6 @@
 # Session 异步任务
 
-- 状态：**执行恢复已剥离，当前任务生命周期保留**；验证范围见剥离计划。
+- 状态：**执行恢复已剥离，当前任务生命周期保留**；验证范围见剥离计划。Child 收尾 A′ 已批准、实施中，未完成项见 [active spec](../../spec/issues/2026-10-20-p1-sync-subagent-unbounded-settlement.md)。
 - 消息与运行生命周期服从 [RCRA 权威](rcra-message-activation.md)；实施状态见[剥离计划](../../spec/issues/2026-10-07-remove-execution-recovery-plan.md)。
 
 ## 1. 归属与当前运行
@@ -56,7 +56,19 @@ MQ pending 标记是后续处理提示，不作为排队请求的准入锁。重
 
 120 秒仍是一轮 RCRA 的 idle bound，不是 Task 工具的整任务 wall-clock timeout；当前进程的 child owner 保留结果消费责任，取消、关闭与累计语义迭代预算仍约束该执行。
 
-## 5. 验收
+## 5. Child 有界收尾（已批准目标，实施中）
+
+同一次 child 执行在首次 RCRA 推进结束且仍有任务或消息处理义务时启动唯一窗口，`D = t0 + HANDOFF_MAX_WAIT`（120 秒）。activity、结果到达、短暂空闲和 loop 重入均不重置 D；loop、runner 与 sync wrapper 共用同一窗口。
+
+D 后关闭新语义迭代准入；D 前已准入的 Reason/Act 完成工具调用配对后再交接，不取消 turn token 或 Shell。全部任务及消息义务结清才是 Settled，否则返回带 child/execution、资源 owner、任务/消息引用和 canonical 消息 ID 的 HandedOff。持久元数据映射 Error，父结果 success=false、timed_out=false，保留本轮文本，不把未完成显示为成功或 Running。
+
+轻量资源 owner 保留原 manager/MQ、可信查询/取消/关闭能力与冻结交接快照，不保留模型、StageContext 或旧事件总线。handoff/resume/close 共用进程内准入；可靠 flush、幂等 append、非 Active 提交、一次 Stop 与旧事件排空完成后才开放新 run。失败保留资源和修复义务，显式报告，不能回退到无限等待 Shell。
+
+截止后的结果仍投直接 child 的 MQ；不隐式复活旧执行。新的模型分析需要显式 `Agent(resume_thread_id, prompt)`，这是长任务超过窗口的已接受代价。不 resume 而关闭时，owner 非模型结算保留消息；未确认资源及消息结清不得报告 Closed。父投递失败由 registry 单一 retry worker 接管，不保留完整 session 的 wrapper 轮询。
+
+不新增 DB 表、持久状态枚举或 ACK 账本；不扩张 late result 即时落库保证。进程重启仅加载已保存历史，不恢复旧执行或尚未持久化的内存结果。
+
+## 6. 验收
 
 覆盖当前任务结果/进度/取消、父子消息路由与展示身份、连接关闭失败和新输入处理。覆盖历史加载不触发任务发现或旧副作用；不再验收冷恢复、永久 terminal ACK 和跨进程处理义务。
 

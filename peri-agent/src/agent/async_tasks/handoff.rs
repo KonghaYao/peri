@@ -27,6 +27,30 @@ use crate::session::transcript::MessageTranscript;
 /// bounded external MCP call deadline).
 pub(crate) const HANDOFF_MAX_WAIT: Duration = Duration::from_secs(120);
 
+/// 单次 child 执行的收尾窗口；启动后永不重置，不限制已准入迭代的 I/O。
+#[derive(Debug, Default)]
+pub struct ChildSettlementWindow {
+    deadline: parking_lot::Mutex<Option<Instant>>,
+}
+
+impl ChildSettlementWindow {
+    pub fn start(&self) -> Instant {
+        *self
+            .deadline
+            .lock()
+            .get_or_insert_with(|| Instant::now() + HANDOFF_MAX_WAIT)
+    }
+
+    pub fn deadline(&self) -> Option<Instant> {
+        *self.deadline.lock()
+    }
+
+    pub fn expired(&self) -> bool {
+        self.deadline()
+            .is_some_and(|deadline| Instant::now() >= deadline)
+    }
+}
+
 /// One unsettled task as recorded in the handoff.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PendingHandoffTask {
