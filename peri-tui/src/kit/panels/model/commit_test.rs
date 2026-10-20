@@ -76,7 +76,7 @@ struct Fixture {
     config: Arc<parking_lot::RwLock<PeriConfig>>,
     client: Arc<AcpTuiClient>,
     server: MpscServerTransport,
-    notifications: tokio::sync::mpsc::UnboundedReceiver<AcpNotification>,
+    notifications: tokio::sync::mpsc::Receiver<AcpNotification>,
 }
 
 impl Fixture {

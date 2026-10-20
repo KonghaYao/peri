@@ -106,6 +106,29 @@ pub(super) fn plan_reverse_request(
     Some(lifecycle.register_reverse(kind, id, session_id.as_deref(), params))
 }
 
+/// 非阻塞投递。队列满意味着 UI 已无法在固定保留内消费：关闭连接并记录
+/// 告警，而不是静默丢事件或让 pump 无限等待（后者会在持有 operation gate
+/// 时与 bridge 的权限发布互相等待）。
+pub(super) fn deliver_or_close(
+    transport: &MpscClientTransport,
+    notification_tx: &mpsc::Sender<AcpNotification>,
+    notification: AcpNotification,
+) -> bool {
+    match notification_tx.try_send(notification) {
+        Ok(()) => true,
+        Err(mpsc::error::TrySendError::Full(_)) => {
+            error!(
+                event = "acp_client_notification_backpressure",
+                capacity = super::NOTIFICATION_QUEUE_CAPACITY,
+                "客户端通知队列已满，关闭连接以避免无界增长"
+            );
+            transport.close();
+            false
+        }
+        Err(mpsc::error::TrySendError::Closed(_)) => false,
+    }
+}
+
 impl AcpTuiClient {
     /// Spawn the notification pump as a tokio task. Consumes the notification
     /// sender and clones of transport/session state.
@@ -113,7 +136,7 @@ impl AcpTuiClient {
     /// `notification_tx` 由 pump task 独占持有：禁止克隆到 struct/全局/任何
     /// 长生命周期对象，否则 channel 不再随 pump 退出关闭，notifier 的
     /// recv-None 兜底失效（Issue 2）。从 client 主动发通知走显式参数传递。
-    pub fn spawn_pump(&self, notification_tx: mpsc::UnboundedSender<AcpNotification>) {
+    pub fn spawn_pump(&self, notification_tx: mpsc::Sender<AcpNotification>) {
         let transport = self.transport.clone();
         let lifecycle = self.lifecycle.clone();
         let user_input_queue = self.user_input_queue.clone();
@@ -131,13 +154,14 @@ impl AcpTuiClient {
     /// 已删除会话（黑名单）一律返回 `false`——优先级高于 None 放行语义（M3）。
     fn deliver_ordinary(
         lifecycle: &InteractionLifecycle,
-        notification_tx: &mpsc::UnboundedSender<AcpNotification>,
+        transport: &MpscClientTransport,
+        notification_tx: &mpsc::Sender<AcpNotification>,
         session_id: String,
         notification: AcpNotification,
     ) {
         match lifecycle.route_ordinary(session_id, notification) {
             OrdinaryDecision::Forward(notification) => {
-                let _ = notification_tx.send(*notification);
+                deliver_or_close(transport, notification_tx, *notification);
             }
             OrdinaryDecision::Buffered | OrdinaryDecision::Drop => {}
         }
@@ -148,7 +172,7 @@ impl AcpTuiClient {
     /// Background task that polls the transport and dispatches notifications.
     async fn run_pump(
         transport: Arc<MpscClientTransport>,
-        notification_tx: mpsc::UnboundedSender<AcpNotification>,
+        notification_tx: mpsc::Sender<AcpNotification>,
         lifecycle: InteractionLifecycle,
         user_input_queue: Arc<std::sync::atomic::AtomicBool>,
     ) {
@@ -186,10 +210,11 @@ impl AcpTuiClient {
                                         && lifecycle
                                             .matches_user_input_generation(&session_id, generation)
                                     {
-                                        let _ = notification_tx.send(AcpNotification::AgentEvent {
-                                            session_id,
-                                            event,
-                                        });
+                                        deliver_or_close(
+                                            &transport,
+                                            &notification_tx,
+                                            AcpNotification::AgentEvent { session_id, event },
+                                        );
                                     }
                                     continue;
                                 }
@@ -250,6 +275,7 @@ impl AcpTuiClient {
                                     Self::settle_claims(&transport, &notification_tx, claims).await;
                                     Self::deliver_ordinary(
                                         &lifecycle,
+                                        &transport,
                                         &notification_tx,
                                         session_id.clone(),
                                         AcpNotification::AgentEvent { session_id, event },
@@ -263,6 +289,7 @@ impl AcpTuiClient {
                                 );
                                 Self::deliver_ordinary(
                                     &lifecycle,
+                                    &transport,
                                     &notification_tx,
                                     session_id.clone(),
                                     AcpNotification::AgentEvent { session_id, event },
@@ -274,9 +301,13 @@ impl AcpTuiClient {
                                     error = %e,
                                     "ACP client pump: failed to parse AcpEvent — event LOST"
                                 );
-                                let _ = notification_tx.send(AcpNotification::Other {
-                                    msg: format!("failed to parse AcpEvent: {e}"),
-                                });
+                                deliver_or_close(
+                                    &transport,
+                                    &notification_tx,
+                                    AcpNotification::Other {
+                                        msg: format!("failed to parse AcpEvent: {e}"),
+                                    },
+                                );
                             }
                         }
                     } else if method == "peri/history_committed" {
@@ -291,6 +322,7 @@ impl AcpTuiClient {
                         );
                         Self::deliver_ordinary(
                             &lifecycle,
+                            &transport,
                             &notification_tx,
                             session_id.clone(),
                             AcpNotification::HistoryCommitted { session_id, params },
@@ -308,6 +340,7 @@ impl AcpTuiClient {
                             .to_string();
                         Self::deliver_ordinary(
                             &lifecycle,
+                            &transport,
                             &notification_tx,
                             session_id.clone(),
                             AcpNotification::SessionUpdate { session_id, params },
@@ -331,6 +364,7 @@ impl AcpTuiClient {
                         );
                         Self::deliver_ordinary(
                             &lifecycle,
+                            &transport,
                             &notification_tx,
                             session_id.clone(),
                             AcpNotification::UnstableEvent {
@@ -372,6 +406,7 @@ impl AcpTuiClient {
                             Self::settle_claims(&transport, &notification_tx, claims).await;
                             Self::deliver_ordinary(
                                 &lifecycle,
+                                &transport,
                                 &notification_tx,
                                 session_id.clone(),
                                 AcpNotification::AgentDone {
@@ -401,6 +436,7 @@ impl AcpTuiClient {
                         if !actions.is_empty() || !text.is_empty() {
                             Self::deliver_ordinary(
                                 &lifecycle,
+                                &transport,
                                 &notification_tx,
                                 session_id.clone(),
                                 AcpNotification::PredictionReady {
@@ -418,6 +454,7 @@ impl AcpTuiClient {
                             .to_string();
                         Self::deliver_ordinary(
                             &lifecycle,
+                            &transport,
                             &notification_tx,
                             session_id.clone(),
                             AcpNotification::Peri {
@@ -427,9 +464,13 @@ impl AcpTuiClient {
                             },
                         );
                     } else {
-                        let _ = notification_tx.send(AcpNotification::Other {
-                            msg: format!("notification: {method}"),
-                        });
+                        deliver_or_close(
+                            &transport,
+                            &notification_tx,
+                            AcpNotification::Other {
+                                msg: format!("notification: {method}"),
+                            },
+                        );
                     }
                 }
                 Some(IncomingMessage::Request { id, method, params }) => {
@@ -445,24 +486,29 @@ impl AcpTuiClient {
                         Some(RegisterDecision::Forward(registered)) => {
                             let owner = registered.owner.clone();
                             let kind = owner.kind;
-                            if notification_tx
-                                .send(kind.notification(
+                            if !deliver_or_close(
+                                &transport,
+                                &notification_tx,
+                                kind.notification(
                                     registered.owner,
                                     registered.request_id_json,
                                     registered.params,
-                                ))
-                                .is_err()
-                                && let Some(claimed) =
-                                    lifecycle.claim(&owner, ClaimCause::BridgeReject)
+                                ),
+                            ) && let Some(claimed) =
+                                lifecycle.claim(&owner, ClaimCause::BridgeReject)
                             {
                                 Self::settle_claims(&transport, &notification_tx, vec![claimed])
                                     .await;
                             }
                         }
                         None => {
-                            let _ = notification_tx.send(AcpNotification::Other {
-                                msg: format!("request: {method}"),
-                            });
+                            deliver_or_close(
+                                &transport,
+                                &notification_tx,
+                                AcpNotification::Other {
+                                    msg: format!("request: {method}"),
+                                },
+                            );
                         }
                     }
                 }
@@ -472,12 +518,16 @@ impl AcpTuiClient {
                     let _operation = lifecycle.operation_gate().lock().await;
                     let claims = lifecycle.transport_terminal();
                     for claim in claims {
-                        let _ = notification_tx.send(AcpNotification::InteractionTerminal {
-                            owner: claim.owner,
-                            outcome: InteractionUiOutcome::Expired {
-                                reason: InteractionExpiryReason::TransportTerminal,
+                        deliver_or_close(
+                            &transport,
+                            &notification_tx,
+                            AcpNotification::InteractionTerminal {
+                                owner: claim.owner,
+                                outcome: InteractionUiOutcome::Expired {
+                                    reason: InteractionExpiryReason::TransportTerminal,
+                                },
                             },
-                        });
+                        );
                     }
                     break;
                 }
@@ -504,7 +554,7 @@ impl AcpTuiClient {
 
     async fn settle_claims(
         transport: &MpscClientTransport,
-        notification_tx: &mpsc::UnboundedSender<AcpNotification>,
+        notification_tx: &mpsc::Sender<AcpNotification>,
         claims: Vec<ClaimedInteraction>,
     ) {
         for claim in claims {
@@ -526,10 +576,14 @@ impl AcpTuiClient {
                     }
                 }
             };
-            let _ = notification_tx.send(AcpNotification::InteractionTerminal {
-                owner: claim.owner,
-                outcome,
-            });
+            deliver_or_close(
+                transport,
+                notification_tx,
+                AcpNotification::InteractionTerminal {
+                    owner: claim.owner,
+                    outcome,
+                },
+            );
         }
     }
 
@@ -539,7 +593,9 @@ impl AcpTuiClient {
             && let Some(tx) = weak.upgrade()
         {
             for notification in notifications {
-                let _ = tx.send(notification);
+                if !deliver_or_close(&self.transport, &tx, notification) {
+                    break;
+                }
             }
         }
     }

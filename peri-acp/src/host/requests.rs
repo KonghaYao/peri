@@ -23,6 +23,7 @@ mod cron;
 mod mcp_oauth;
 mod plugin;
 mod rewind;
+pub(super) mod session_caps;
 pub(super) mod session_io;
 pub(crate) mod session_lifecycle;
 mod storage_v2;

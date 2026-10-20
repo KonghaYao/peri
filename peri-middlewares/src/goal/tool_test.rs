@@ -212,6 +212,8 @@ struct MockModel {
     response_text: String,
     /// 若为 true，complete 返回 Err（模拟 LLM 调用失败）
     should_error: bool,
+    /// complete 返回的停止原因
+    stop_reason: StopReason,
 }
 
 impl MockModel {
@@ -219,6 +221,15 @@ impl MockModel {
         Self {
             response_text: text.into(),
             should_error: false,
+            stop_reason: StopReason::EndTurn,
+        }
+    }
+
+    fn with_response_and_stop(text: impl Into<String>, stop_reason: StopReason) -> Self {
+        Self {
+            response_text: text.into(),
+            should_error: false,
+            stop_reason,
         }
     }
 
@@ -226,6 +237,7 @@ impl MockModel {
         Self {
             response_text: String::new(),
             should_error: true,
+            stop_reason: StopReason::EndTurn,
         }
     }
 }
@@ -260,7 +272,7 @@ impl Model for MockModel {
         }
         Ok(ModelResponse::new(
             ModelMessage::assistant_text(self.response_text.clone()),
-            StopReason::EndTurn,
+            self.stop_reason.clone(),
             None,
             None,
         )?)
@@ -356,6 +368,124 @@ async fn test_goal_complete_model_返回非法_json_默认未达成() {
     assert!(
         result.contains("Failed to parse verifier LLM output"),
         "应提示解析失败原因，实际：{result}"
+    );
+}
+
+#[tokio::test]
+async fn test_goal_complete_model_空输出_报告停止原因() {
+    // 复现 reasoning 模型耗尽输出预算：只有 thinking，没有正文。
+    let (tool, _controller) =
+        make_tool_with_model(MockModel::with_response_and_stop("", StopReason::MaxTokens));
+
+    tool.invoke(
+        json!({"action": "create", "objective": "完成重构"}),
+        ToolContext::new(&[], "."),
+    )
+    .await
+    .unwrap();
+
+    let result = tool
+        .invoke(json!({"action": "complete"}), ToolContext::new(&[], "."))
+        .await
+        .unwrap();
+    assert!(
+        result.contains("verifier returned no text"),
+        "空输出应报告真实故障，实际：{result}"
+    );
+    assert!(
+        result.contains("MaxTokens"),
+        "应包含停止原因，实际：{result}"
+    );
+}
+
+#[tokio::test]
+async fn test_goal_complete_model_空输出_非预算原因不误报() {
+    // EndTurn 下的空响应不是输出预算故障，不能给出预算诊断。
+    let (tool, _controller) = make_tool_with_model(MockModel::with_response(""));
+
+    tool.invoke(
+        json!({"action": "create", "objective": "完成重构"}),
+        ToolContext::new(&[], "."),
+    )
+    .await
+    .unwrap();
+
+    let result = tool
+        .invoke(json!({"action": "complete"}), ToolContext::new(&[], "."))
+        .await
+        .unwrap();
+    assert!(
+        result.contains("empty response"),
+        "应报告空响应，实际：{result}"
+    );
+    assert!(
+        !result.contains("output budget was exhausted"),
+        "非 MaxTokens 不应诊断为预算故障，实际：{result}"
+    );
+}
+
+/// 断言验证请求不覆盖 auxiliary model 的输出预算。
+struct BudgetCheckingModel;
+
+#[async_trait]
+impl Model for BudgetCheckingModel {
+    fn capabilities(&self) -> ModelCapabilities {
+        ModelCapabilities {
+            supports_tools: false,
+            supports_reasoning: true,
+            supports_vision: false,
+            supports_streaming: true,
+        }
+    }
+
+    async fn stream(
+        &self,
+        _request: ModelRequest,
+        _cancellation: CancellationToken,
+    ) -> ModelResult<ModelStream> {
+        Err(ModelError::cancelled())
+    }
+
+    async fn complete(
+        &self,
+        request: ModelRequest,
+        _cancellation: CancellationToken,
+    ) -> ModelResult<ModelResponse> {
+        assert!(
+            request.max_tokens.is_none(),
+            "goal 验证请求必须继承 auxiliary model 的输出预算"
+        );
+        Ok(ModelResponse::new(
+            ModelMessage::assistant_text(r#"{"achieved": true, "evidence": "ok"}"#),
+            StopReason::EndTurn,
+            None,
+            None,
+        )?)
+    }
+}
+
+#[tokio::test]
+async fn test_goal_complete_model_继承辅助模型输出预算() {
+    let controller = Arc::new(MockController::new()) as Arc<dyn GoalController>;
+    let tool = GoalTool::new(
+        controller,
+        Some(Arc::new(BudgetCheckingModel) as Arc<dyn peri_model::Model>),
+    );
+
+    tool.invoke(
+        json!({"action": "create", "objective": "完成重构"}),
+        ToolContext::new(&[], "."),
+    )
+    .await
+    .unwrap();
+
+    let result = tool
+        .invoke(json!({"action": "complete"}), ToolContext::new(&[], "."))
+        .await
+        .unwrap();
+    assert!(
+        result.contains("Goal completed"),
+        "验证通过应返回完成消息，实际：{result}"
     );
 }
 

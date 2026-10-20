@@ -938,3 +938,63 @@ async fn stop_intent_from_previous_execution_is_suppressed() {
     assert_eq!(context.session.queue.suppressed_messages().len(), 1);
     assert!(context.session.transcript.read().is_empty());
 }
+
+#[tokio::test]
+async fn receive_protocol_event_waits_when_state_channel_is_full() {
+    use crate::agent::events_v2::{EventBus, EventBusConfig};
+    use peri_acp_types::system_reminder::{
+        ReminderAudience, ReminderAudiences, ReminderCategory, ReminderDelivery, ReminderSeverity,
+        ReminderSource, SystemReminder, TrustedSystemReminderFactory, SYSTEM_REMINDER_VERSION,
+    };
+    let mut context = make_context();
+    let (bus, mut handles) = EventBus::new(EventBusConfig {
+        state_capacity: 1,
+        ..Default::default()
+    });
+    context.runtime.event_bus = Arc::new(bus);
+    context
+        .runtime
+        .event_bus
+        .emit_state(StateEvent::SyntheticUserMessage {
+            turn_id: context.turn_id(),
+            agent_id: context.session.agent_id,
+            text: "占用容量".into(),
+        });
+    let reminder = TrustedSystemReminderFactory::for_producer()
+        .construct(SystemReminder {
+            version: SYSTEM_REMINDER_VERSION,
+            category: ReminderCategory::Task,
+            source: ReminderSource("receive_test".into()),
+            kind: "done".into(),
+            severity: ReminderSeverity::Info,
+            delivery: ReminderDelivery::Configurable,
+            audiences: ReminderAudiences(vec![ReminderAudience::Model]),
+            body: "任务完成".into(),
+            summary: None,
+            metadata: serde_json::json!({}),
+        })
+        .unwrap();
+    context.session.queue.push(QueuedMessage::system_reminder(
+        MessageKind::Defer,
+        MessageSource::SystemInjected,
+        reminder,
+    ));
+    let receive = run_receive(ReceiveInput {
+        context: context.clone(),
+    });
+    tokio::pin!(receive);
+    assert!(
+        std::future::poll_fn(|cx| {
+            std::task::Poll::Ready(std::future::Future::poll(receive.as_mut(), cx).is_pending())
+        })
+        .await
+    );
+    assert!(!context.runtime.event_bus.health().dirty);
+    handles.state_rx.recv().await.unwrap();
+    tokio::time::timeout(std::time::Duration::from_secs(1), receive)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(drain_system_reminder_events(&mut handles), 1);
+    assert!(!context.runtime.event_bus.health().dirty);
+}

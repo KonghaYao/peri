@@ -275,3 +275,6 @@ mod startup_gate_tests;
 
 #[path = "compaction_loop_test.rs"]
 mod compaction_loop_tests;
+
+#[path = "stop_intent_test.rs"]
+mod stop_intent_tests;

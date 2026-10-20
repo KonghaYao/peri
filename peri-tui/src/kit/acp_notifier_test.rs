@@ -1,12 +1,12 @@
 use super::*;
 use serde_json::json;
-#[test]
-fn test_history_committed_notification_forwards_typed_event() {
+#[tokio::test]
+async fn test_history_committed_notification_forwards_typed_event() {
     use peri_acp_types::history_window::HistoryCommittedTail;
     use peri_acp_types::messages::MessageId;
     use peri_acp_types::thread::ThreadId;
 
-    let (bridge_tx, mut bridge_rx) = mpsc::unbounded_channel::<AcpEventWithEpoch>();
+    let (bridge_tx, mut bridge_rx) = mpsc::channel(crate::kit::acp_bridge::BRIDGE_QUEUE_CAPACITY);
     let tail =
         HistoryCommittedTail::new(&ThreadId::from("s1".to_string()), MessageId::new(), 10).encode();
     let payload = json!({
@@ -24,7 +24,8 @@ fn test_history_committed_notification_forwards_typed_event() {
             session_id: "s1".into(),
             params: payload,
         },
-    );
+    )
+    .await;
     assert!(owner.is_none());
     let event = bridge_rx.try_recv().expect("commit event");
     assert_eq!(event.active_session_id, "s1");
@@ -36,20 +37,21 @@ fn test_history_committed_notification_forwards_typed_event() {
 }
 
 fn spawn_test_notifier() -> (
-    mpsc::UnboundedSender<AcpNotification>,
-    mpsc::UnboundedReceiver<AcpEventWithEpoch>,
+    mpsc::Sender<AcpNotification>,
+    mpsc::Receiver<AcpEventWithEpoch>,
     CancellationToken,
 ) {
-    let (notif_tx, notif_rx) = mpsc::unbounded_channel::<AcpNotification>();
-    let (bridge_tx, bridge_rx) = mpsc::unbounded_channel::<AcpEventWithEpoch>();
+    let (notif_tx, notif_rx) =
+        mpsc::channel(crate::acp_client::client::NOTIFICATION_QUEUE_CAPACITY);
+    let (bridge_tx, bridge_rx) = mpsc::channel(crate::kit::acp_bridge::BRIDGE_QUEUE_CAPACITY);
     let shutdown = CancellationToken::new();
     let _handle = spawn_kit_notifier(notif_rx, bridge_tx, shutdown.clone());
     (notif_tx, bridge_rx, shutdown)
 }
 
 async fn assert_notifier_reached_barrier(
-    notifications: &mpsc::UnboundedSender<AcpNotification>,
-    events: &mut mpsc::UnboundedReceiver<AcpEventWithEpoch>,
+    notifications: &mpsc::Sender<AcpNotification>,
+    events: &mut mpsc::Receiver<AcpEventWithEpoch>,
 ) {
     notifications
         .send(AcpNotification::AgentDone {
@@ -57,6 +59,7 @@ async fn assert_notifier_reached_barrier(
             stop_reason: "end_turn".into(),
             request_id: None,
         })
+        .await
         .unwrap();
     let event = tokio::time::timeout(std::time::Duration::from_secs(2), events.recv())
         .await
@@ -84,6 +87,7 @@ async fn test_session_update_agent_message_chunk_to_text_chunk() {
                 }
             }),
         })
+        .await
         .unwrap();
 
     let ev = bridge_rx.recv().await.expect("expected one event");
@@ -118,6 +122,7 @@ async fn interleaved_sessions_keep_stream_identity_and_payload_together() {
                     }
                 }),
             })
+            .await
             .unwrap();
     }
     for (session, child, text) in inputs {
@@ -150,6 +155,7 @@ async fn test_session_update_agent_thought_chunk() {
                 }
             }),
         })
+        .await
         .unwrap();
 
     let ev = bridge_rx.recv().await.expect("expected one event");
@@ -181,6 +187,7 @@ async fn test_session_update_tool_call_to_tool_started() {
                 }
             }),
         })
+        .await
         .unwrap();
 
     let ev = bridge_rx.recv().await.expect("expected one event");
@@ -215,6 +222,7 @@ async fn test_session_update_tool_call_update_flattened_format() {
                 }
             }),
         })
+        .await
         .unwrap();
 
     let ev = bridge_rx.recv().await.expect("expected one event");
@@ -251,6 +259,7 @@ async fn test_session_update_tool_call_update_nested_fields_fallback() {
                 }
             }),
         })
+        .await
         .unwrap();
 
     let ev = bridge_rx.recv().await.expect("expected one event");
@@ -282,6 +291,7 @@ async fn test_session_replay_agent_message_chunk_to_committed_assistant_text() {
                 }
             }),
         })
+        .await
         .unwrap();
 
     let ev = bridge_rx.recv().await.expect("expected one event");
@@ -309,6 +319,7 @@ async fn test_unstable_event_unknown_dropped() {
             event: "future-event".into(),
             data: json!({"x": 1}),
         })
+        .await
         .unwrap();
 
     assert_notifier_reached_barrier(&notif_tx, &mut bridge_rx).await;
@@ -334,6 +345,7 @@ async fn test_session_replay_tool_call_retains_raw_input_for_semantic_card() {
                 }
             }),
         })
+        .await
         .unwrap();
 
     let event = bridge_rx.recv().await.expect("expected replay event");
@@ -361,6 +373,7 @@ async fn test_non_terminal_tool_update_is_not_forwarded_as_tool_end() {
                 }
             }),
         })
+        .await
         .unwrap();
 
     assert_notifier_reached_barrier(&notif_tx, &mut bridge_rx).await;
@@ -396,6 +409,7 @@ async fn test_unstable_event_reminder_entry_marks_precede_content() {
                 "periPosition": 42
             }),
         })
+        .await
         .unwrap();
 
     let mark = bridge_rx

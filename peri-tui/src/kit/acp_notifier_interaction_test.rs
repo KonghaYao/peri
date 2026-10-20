@@ -2,12 +2,13 @@ use super::*;
 use serde_json::json;
 use serial_test::serial;
 fn spawn_test_notifier() -> (
-    mpsc::UnboundedSender<AcpNotification>,
-    mpsc::UnboundedReceiver<AcpEventWithEpoch>,
+    mpsc::Sender<AcpNotification>,
+    mpsc::Receiver<AcpEventWithEpoch>,
     CancellationToken,
 ) {
-    let (notif_tx, notif_rx) = mpsc::unbounded_channel::<AcpNotification>();
-    let (bridge_tx, bridge_rx) = mpsc::unbounded_channel::<AcpEventWithEpoch>();
+    let (notif_tx, notif_rx) =
+        mpsc::channel(crate::acp_client::client::NOTIFICATION_QUEUE_CAPACITY);
+    let (bridge_tx, bridge_rx) = mpsc::channel(crate::kit::acp_bridge::BRIDGE_QUEUE_CAPACITY);
     let shutdown = CancellationToken::new();
     let _handle = spawn_kit_notifier(notif_rx, bridge_tx, shutdown.clone());
     (notif_tx, bridge_rx, shutdown)
@@ -33,6 +34,7 @@ async fn test_request_permission_forwards_hitl_pending_event() {
                 "options": []
             }),
         })
+        .await
         .unwrap();
 
     let bridge_event = bridge_rx.recv().await.expect("bridge 应收到 HitlPending");
@@ -69,6 +71,7 @@ async fn test_request_permission_queued_events_keep_number_and_string_ids_atomic
                     "options": []
                 }),
             })
+            .await
             .unwrap();
     }
     let a = bridge_rx.recv().await.expect("应收到 A");
@@ -115,6 +118,7 @@ async fn test_elicitation_queued_events_keep_number_and_string_ids_atomic() {
                     }}
                 }),
             })
+            .await
             .unwrap();
     }
     let a = bridge_rx.recv().await.expect("应收到 A");
@@ -171,6 +175,7 @@ async fn test_interaction_notifier_has_no_pending_atom_side_effect() {
             request_id_json: "1".into(),
             params: json!({"sessionId":"s1","toolCall":{"title":"new","rawInput":null}}),
         })
+        .await
         .unwrap();
     bridge_rx.recv().await.expect("应完成 notifier conversion");
     notif_tx
@@ -182,6 +187,7 @@ async fn test_interaction_notifier_has_no_pending_atom_side_effect() {
             request_id_json: "2".into(),
             params: json!({"sessionId":"s1","requestedSchema":{"type":"object","properties":{}}}),
         })
+        .await
         .unwrap();
     bridge_rx
         .recv()

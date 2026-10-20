@@ -261,7 +261,10 @@ async fn upgrades_the_registration_shape_preserving_execution_evidence() {
 
     migrate_local_v11(&mut connection).await.unwrap();
 
-    assert_eq!(version_of(&mut connection).await, 11);
+    assert_eq!(
+        version_of(&mut connection).await,
+        crate::sessions::canonical::CURRENT_SCHEMA_VERSION
+    );
     assert_current_shape(&mut connection).await;
     assert!(!table_exists(&mut connection, "session_environments").await);
     assert!(!table_exists(&mut connection, "legacy_execution_registrations").await);
@@ -553,7 +556,7 @@ async fn released_schema_10_database_upgrades_through_the_store_once() {
         .fetch_one(&store.database.pool)
         .await
         .unwrap();
-    assert_eq!(version, 11);
+    assert_eq!(version, crate::sessions::canonical::CURRENT_SCHEMA_VERSION);
     let mut connection = store.database.pool.acquire().await.unwrap();
     assert_current_shape(&mut connection).await;
     drop(connection);
@@ -586,6 +589,6 @@ async fn released_schema_10_database_upgrades_through_the_store_once() {
         .fetch_one(&reopened.database.pool)
         .await
         .unwrap();
-    assert_eq!(version, 11);
+    assert_eq!(version, crate::sessions::canonical::CURRENT_SCHEMA_VERSION);
     reopened.close().await;
 }

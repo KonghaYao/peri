@@ -444,6 +444,14 @@ impl SessionResources for SessionResourcesImpl {
         Ok(snapshot)
     }
 
+    async fn load_frozen_state(&self, id: &ThreadId) -> SessionResourceResult<FrozenState> {
+        self.gate.data().load_frozen_state(id).await
+    }
+
+    fn supports_history_window(&self) -> bool {
+        self.gate.data().supports_history_window()
+    }
+
     async fn load_session_binding(&self, id: &ThreadId) -> SessionResourceResult<BindingState> {
         let state = self.gate.data().load_binding(id).await?;
         self.classify_binding(id, state).await

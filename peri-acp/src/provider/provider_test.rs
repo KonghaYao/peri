@@ -187,9 +187,10 @@ fn workflow_output_limit_clamps_anthropic_thinking_below_total_limit() {
         .clone();
 
     assert_eq!(body["max_tokens"], serde_json::json!(4_096));
+    // thinking 与正文共享输出上限：为正文预留 1024 后，思考预算为 3072。
     assert_eq!(
         body["thinking"],
-        serde_json::json!({ "type": "enabled", "budget_tokens": 4_095 })
+        serde_json::json!({ "type": "enabled", "budget_tokens": 3_072 })
     );
 }
 

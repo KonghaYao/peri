@@ -931,3 +931,6 @@ async fn unreachable_failure_event_does_not_hang_pump_and_is_bounded() {
         "失败通知不可达时不得作为正常 done 完成"
     );
 }
+
+#[path = "event_pump_health_test.rs"]
+mod health_tests;

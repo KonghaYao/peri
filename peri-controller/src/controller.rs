@@ -24,6 +24,7 @@ use std::time::Duration;
 
 use parking_lot::Mutex;
 use peri_acp_types::event::{EventMessage, ExecutorEvent};
+use peri_acp_types::event_v2::{BusHealth, BusHealthSnapshot, EmitOutcome};
 use peri_acp_types::identity::{CancelRequest, EventEnvelope, SessionSeq};
 use peri_acp_types::messages::MessageContent;
 use peri_acp_types::runtime::UnstampedEvent;
@@ -182,6 +183,9 @@ pub struct Controller {
     events_rx: Mutex<mpsc::Receiver<EventMessage>>,
     /// 订阅广播（subscribe 分发；慢消费者 lagging）。
     subscribers: broadcast::Sender<EventMessage>,
+    event_health: Arc<BusHealth>,
+    /// 宿主拥有 session 生命周期；弱引用不会延长 SessionState 存活时间。
+    session_health: Mutex<std::collections::HashMap<String, std::sync::Weak<BusHealth>>>,
 }
 
 impl Controller {
@@ -201,6 +205,8 @@ impl Controller {
             events_tx,
             events_rx: Mutex::new(events_rx),
             subscribers,
+            event_health: Arc::new(BusHealth::default()),
+            session_health: Mutex::new(std::collections::HashMap::new()),
         }
     }
 
@@ -431,9 +437,37 @@ impl Controller {
         None
     }
 
+    /// 绑定宿主当前 session 实例的健康度，不改变事件序号或持久状态。
+    pub fn bind_event_health(&self, session_id: &str, health: &Arc<BusHealth>) {
+        let mut sessions = self.session_health.lock();
+        sessions.retain(|_, health| health.strong_count() != 0);
+        sessions.insert(session_id.to_owned(), Arc::downgrade(health));
+    }
+
+    pub fn event_health(&self) -> BusHealthSnapshot {
+        self.event_health.snapshot()
+    }
+
     /// 双投递（弹出队列 + 订阅广播）的内部实现。
     fn publish_message(&self, msg: EventMessage) {
-        let _ = self.events_tx.try_send(msg.clone());
+        let outcome = match self.events_tx.try_send(msg.clone()) {
+            Ok(()) => EmitOutcome::Sent,
+            Err(mpsc::error::TrySendError::Full(_)) => EmitOutcome::Dropped,
+            Err(mpsc::error::TrySendError::Closed(_)) => EmitOutcome::Closed,
+        };
+        if outcome != EmitOutcome::Sent {
+            self.event_health.record_state(outcome, 1);
+            if let Some(health) = self
+                .session_health
+                .lock()
+                .get(&msg.envelope.session_id)
+                .and_then(std::sync::Weak::upgrade)
+            {
+                health.record_state(outcome, 1);
+            }
+            tracing::warn!(session_id = %msg.envelope.session_id, ?outcome, "控制面弹出队列事件未投递");
+        }
+        // 广播仍独立投递；弹出队列背压不得阻塞 ACP 消费链。
         let _ = self.subscribers.send(msg);
     }
 

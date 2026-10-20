@@ -18,7 +18,8 @@
 
 use super::sql::StatementSpec;
 use crate::sessions::canonical::{
-    CREATE_INDEXES, CREATE_SESSION_CLOSE_INTENTS_TABLE_SQL, CREATE_TABLES,
+    CREATE_INDEXES, CREATE_INHERITED_INDEX_TABLES, CREATE_SESSION_CLOSE_INTENTS_TABLE_SQL,
+    CREATE_TABLES,
 };
 
 /// 初始化本任务 schema 的语句集：建表段 + 索引段，**一条语句一个 spec**。
@@ -43,6 +44,12 @@ pub(super) fn repair_plan(
         plan.push(StatementSpec::bare(CREATE_SESSION_CLOSE_INTENTS_TABLE_SQL));
     }
     if missing_indexes {
+        // 派生索引表也可能一起缺席（索引依赖表）；`IF NOT EXISTS` 让补齐幂等。
+        plan.extend(
+            CREATE_INHERITED_INDEX_TABLES
+                .iter()
+                .map(|sql| StatementSpec::bare(sql)),
+        );
         plan.extend(CREATE_INDEXES.iter().map(|sql| StatementSpec::bare(sql)));
     }
     plan

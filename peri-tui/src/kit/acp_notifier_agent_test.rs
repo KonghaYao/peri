@@ -5,12 +5,13 @@ use peri_acp_types::event_data::PredictionAction;
 use serde_json::json;
 use serial_test::serial;
 fn spawn_test_notifier() -> (
-    mpsc::UnboundedSender<AcpNotification>,
-    mpsc::UnboundedReceiver<AcpEventWithEpoch>,
+    mpsc::Sender<AcpNotification>,
+    mpsc::Receiver<AcpEventWithEpoch>,
     CancellationToken,
 ) {
-    let (notif_tx, notif_rx) = mpsc::unbounded_channel::<AcpNotification>();
-    let (bridge_tx, bridge_rx) = mpsc::unbounded_channel::<AcpEventWithEpoch>();
+    let (notif_tx, notif_rx) =
+        mpsc::channel(crate::acp_client::client::NOTIFICATION_QUEUE_CAPACITY);
+    let (bridge_tx, bridge_rx) = mpsc::channel(crate::kit::acp_bridge::BRIDGE_QUEUE_CAPACITY);
     let shutdown = CancellationToken::new();
     let _handle = spawn_kit_notifier(notif_rx, bridge_tx, shutdown.clone());
     (notif_tx, bridge_rx, shutdown)
@@ -32,6 +33,7 @@ async fn test_agent_event_forwards_subagent_started() {
                 parent_tool_call_id: Some("tool-7".into()),
             },
         })
+        .await
         .unwrap();
 
     let bridge_event = bridge_rx
@@ -75,6 +77,7 @@ async fn test_agent_event_forwards_llm_retrying() {
                 diagnostic: None,
             },
         })
+        .await
         .unwrap();
 
     let bridge_event = bridge_rx.recv().await.expect("bridge 应收到 LlmRetrying");
@@ -115,6 +118,7 @@ async fn test_agent_event_forwards_subagent_stopped() {
                 subagent_failure: None,
             },
         })
+        .await
         .unwrap();
     let bridge_event = bridge_rx
         .recv()
@@ -145,6 +149,7 @@ async fn test_agent_event_forwards_subagent_stopped() {
                 subagent_failure: None,
             },
         })
+        .await
         .unwrap();
     let bridge_event = bridge_rx
         .recv()
@@ -183,6 +188,7 @@ async fn test_agent_event_unknown_variant_dropped() {
                 context_total_tokens: None,
             },
         })
+        .await
         .unwrap();
 
     notif_tx
@@ -191,6 +197,7 @@ async fn test_agent_event_unknown_variant_dropped() {
             stop_reason: "end_turn".into(),
             request_id: None,
         })
+        .await
         .unwrap();
     let event = tokio::time::timeout(std::time::Duration::from_secs(2), bridge_rx.recv())
         .await
@@ -223,6 +230,7 @@ async fn test_goal_snapshot_forwards_to_session_owned_bridge() {
                 blocked_reason: None,
             },
         })
+        .await
         .unwrap();
 
     let bridge_event = bridge_rx.recv().await.expect("bridge should receive goal");
@@ -258,6 +266,7 @@ async fn test_agent_event_forwards_system_notification() {
                 level: "info".into(),
             },
         })
+        .await
         .unwrap();
 
     let bridge_event = bridge_rx
@@ -292,6 +301,7 @@ async fn test_agent_event_parses_command_feedback() {
                 channel: "uiOnly".into(),
             },
         })
+        .await
         .unwrap();
 
     let bridge_event = bridge_rx
@@ -325,6 +335,7 @@ async fn test_agent_event_command_feedback_session_channel_and_fallback() {
                 channel: "session".into(),
             },
         })
+        .await
         .unwrap();
 
     let bridge_event = bridge_rx
@@ -349,6 +360,7 @@ async fn test_agent_event_command_feedback_session_channel_and_fallback() {
                 channel: "broadcast".into(),
             },
         })
+        .await
         .unwrap();
 
     let bridge_event = bridge_rx
@@ -385,6 +397,7 @@ async fn test_prediction_ready_forwards_prediction_event() {
                 text: "修了 typo".into(),
             }],
         })
+        .await
         .unwrap();
 
     let bridge_event = bridge_rx.recv().await.expect("bridge 应收到 Prediction");

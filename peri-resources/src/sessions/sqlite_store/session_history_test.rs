@@ -638,5 +638,36 @@ async fn test_message_flags_read_is_bounded_to_the_given_ids() {
         .is_empty());
 }
 
+#[tokio::test]
+async fn frozen_state_is_a_single_fact_read_for_restore_admission() {
+    let (store, data, directory) = database().await;
+    let workspace = workspace(&store, directory.path()).await;
+    let cwd = workspace.cwd.to_string_lossy().into_owned();
+    let bytes = frozen("restore");
+    data.save_new_session(&session("s-frozen", &cwd, &workspace, bytes.clone()))
+        .await
+        .unwrap();
+
+    assert_eq!(
+        data.load_frozen_state(&"s-frozen".to_owned())
+            .await
+            .unwrap(),
+        FrozenState::Present(bytes),
+        "恢复准入读取的是持久 frozen 原文，不依赖有效快照"
+    );
+
+    let missing = data
+        .load_frozen_state(&"s-missing".to_owned())
+        .await
+        .unwrap_err();
+    assert!(
+        matches!(
+            missing.kind(),
+            peri_acp_types::session_resources::SessionResourceErrorKind::NotFound
+        ),
+        "不存在的会话是 NotFound，不是 LegacyAbsent：{missing:?}"
+    );
+}
+
 #[path = "session_history_rewind_test.rs"]
 mod rewind_tests;

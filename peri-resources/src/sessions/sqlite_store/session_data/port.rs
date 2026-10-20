@@ -368,6 +368,22 @@ impl SessionDataPort for SqliteSessionData {
         })
     }
 
+    async fn load_frozen_state(&self, id: &ThreadId) -> SessionResourceResult<FrozenState> {
+        // 单列读取：恢复准入只需要 frozen 原文，不触碰 payload/flags/inherited。
+        let mut connection = self
+            .database
+            .pool
+            .acquire()
+            .await
+            .map_err(|error| map_sqlx(&error))?;
+        frozen_state_on(&mut connection, id).await
+    }
+
+    fn supports_history_window(&self) -> bool {
+        // 本机 SQLite 覆写了 bounds/page/body 全部窗口读取端口。
+        true
+    }
+
     async fn load_binding(&self, id: &ThreadId) -> SessionResourceResult<BindingState> {
         // 与 `load_snapshot` 同一条分类规则、同一次读取视图，只是不读历史与 frozen。
         let mut connection = self
@@ -705,10 +721,10 @@ impl SessionDataPort for SqliteSessionData {
             .map(|id| id.as_uuid().to_string());
         let inherited = child
             .inherited
-            .to_json()
+            .to_json_with_spans()
             .map_err(|_| corrupt("inherited context is not serializable"))?;
         // 发布前校验引用边界，损坏的继承区不能落库。
-        InheritedContext::from_json(&inherited)
+        InheritedContext::from_json(&inherited.json)
             .map_err(|_| corrupt("inherited context has invalid message references"))?;
         let mut tx = self
             .database
@@ -763,11 +779,22 @@ impl SessionDataPort for SqliteSessionData {
             .await
             .map_err(write_failure)?;
         sqlx::query("UPDATE threads SET inherited_context = ?1 WHERE id = ?2")
-            .bind(&inherited)
+            .bind(&inherited.json)
             .bind(child.target.thread_id.as_str())
             .execute(&mut *tx)
             .await
             .map_err(|error| map_sqlx(&error))?;
+        // 列文本与派生索引同事务：命中路径从创建时就可用，不必等第一次布局扫描回填。
+        if let Some(write) = super::inherited_index::SnapshotWrite::from_serialization(
+            &child.target.thread_id,
+            Some(child.parent_id.as_str()),
+            &inherited,
+        ) {
+            write
+                .replace(&mut tx)
+                .await
+                .map_err(|error| map_sqlx(&error))?;
+        }
         tx.commit()
             .await
             .map_err(|_| commit_failure(Some(child.target.thread_id.clone())))?;

@@ -154,7 +154,7 @@ Compact 保留消息本体，通过标记改变可见性或模型投影；Micro 
 
 ### 2.8 有效上下文所有权、手动 Compact 与历史窗口（2026-10-17）
 
-本节描述已落地的所有权收敛与窗口边界。`PeriCaps::history_window_v1` 默认 false（只接受显式 `true`）；TUI 的 `HISTORY_WINDOW_V1` 窗口开关由 settings beta `history-window-v1`（默认 false）在启动时读取一次，设置变更需重启生效。TUI 的 initialize 以 `PeriCaps::all_enabled` 声明能力，因此其连接会协商为 true，但未打开开关时仍走旧 `HISTORY_PAGING` 路径。关闭时旧分页/渲染行为不变。窗口与段释放的 TUI 细节见 [TUI 与 ACP 数据流](tui-acp-data-flow.md)，wire 字段见 [peri-acp 协议](peri-acp-protocol.md)。
+本节描述已落地的所有权收敛与窗口边界。`PeriCaps::history_window_v1` 默认 false（只接受显式 `true`），TUI 只把服务端 initialize 响应中明确回显的 `true` 视为连接能力，未回显一律 fail-closed；TUI 的 `HISTORY_WINDOW_V1` 窗口开关由 settings beta `history-window-v1` 在启动时读取一次（未配置视为开启，显式 `false` 关闭），设置变更需重启生效。TUI 的 initialize 以 `PeriCaps::all_enabled` 声明能力，但客户端请求值不替代服务端能力事实。关闭时旧 `HISTORY_PAGING` 路径不变。窗口与段释放的 TUI 细节见 [TUI 与 ACP 数据流](tui-acp-data-flow.md)，wire 字段见 [peri-acp 协议](peri-acp-protocol.md)。
 
 #### 2.8.1 执行期所有权
 
@@ -170,7 +170,7 @@ Compact 保留消息本体，通过标记改变可见性或模型投影；Micro 
 2. 身份校验按**有序消息投影**比较 inherited + own 的 id 序列，并拒绝 inherited 与 own 的 id 重叠。调用方仍带回完整历史（含已归档 id）时，多出的 id 只有在有界 `load_message_flags` 查询确认全部为 `excluded` 后才被忽略；未知 id 或 flags 读取失败保持拒绝，并返回 `compact persistence context mismatch`。
 3. 有效集为空时用 flags 区分两种来源：全新 thread（历史尚未落库）与全部 own 条目已被之前的 Full 归档；后者返回 `no history to compact`，不读取任何归档正文。
 4. 手动 Compact 的提交与自动 Full 共用 `commit_compaction_lifecycle`：存储确认后才收缩热态并发布摘要；提交失败或不确定沿用 `ReloadRequired`，不把已提交摘要当脏数据删除。**磁盘已提交前缀是身份与恢复的唯一权威**，热态不是第二份审计源。
-5. 这是已获批的契约变更：手动 `/compact` 不再“恢复完整 payload”，而是“只读有效集 + 历史窗口按需读取”。生效条件是 `peri.historyWindowV1` 与 TUI 开关实际启用；默认关闭时保留旧行为。
+5. 这是已获批的契约变更：手动 `/compact` 不再“恢复完整 payload”，而是“只读有效集 + 历史窗口按需读取”。生效条件是服务端明确回显 `peri.historyWindowV1: true` 且 TUI 本地开关启用（未配置默认开启、显式 false 关闭）；任一条件不满足时保留旧行为。
 
 #### 2.8.3 历史窗口与展示段
 
@@ -201,4 +201,4 @@ Compact 保留消息本体，通过标记改变可见性或模型投影；Micro 
 - remote/emscripten adapter 未覆写窗口/继承读取端口，默认返回 `Unsupported`（出口 `-32603`），不能宣称这些后端已支持窗口。
 - `readTicket` 是进程内不透明值与精确匹配，没有密码学签名；它绑定 connection/session/generation/structure/snapshot/source/tail/投影版本/时间/nonce，但不是访问授权。
 - rewind 的持久化不确定仍由集中后的文本 marker 判定（`PERSISTENCE_UNCERTAIN_MARKER`），尚无 typed mutation outcome；`schema_test.rs` 的存量 1038 行超限不属本次变更。
-- beta 设置面板仍只列 `BETA_FLAGS`；`history-window-v1` 需手动写入 settings，TUI 启动只读一次、无热重载。
+- beta 设置面板仍只列 `BETA_FLAGS`；`history-window-v1` 未配置默认开启，如需关闭须手动写入 settings `false`，TUI 启动只读一次、无热重载。

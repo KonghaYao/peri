@@ -53,7 +53,8 @@
 - [x] D 时 pending 列表为空但仍有保留消息：wrapper 仍交接，不因空列表 abort。
 - [x] 旧 ContinueCurrentRun 消息被抑制；A→B→C 结果仅归直接父；root 可在真实三层 owner 树查询/取消/关闭（`test_root_queries_cancels_and_closes_nested_owner_tree`）。
 - [~] 重启仅加载历史：沿用既有 cold-resume/history 回归（全库通过），未新增独立重启 fixture；不承诺未落库 MQ 恢复。
-- [~] 旧 Stop/旧 cancel 晚到：旧 bound 消息有专测；Stop/cancel 由 permit 在排空后释放保证，未单独注入迟到 Stop/cancel。
+- [x] 旧 Stop 晚到：绑定旧执行身份的 Stop 在真实 resume 与新执行中被抑制，同执行 Stop 仍生效（`test_resume_suppresses_stop_intent_from_previous_execution`、`stale_stop_intent_does_not_stop_new_execution`、`deadline_left_stop_intent_does_not_stop_resumed_execution`）。
+- [~] 旧 cancel 晚到：由 permit 在排空后释放保证，未单独注入迟到 cancel。
 - [x] 真实受控阻塞进程组：D 后父/子进程仍存活，正式取消接口杀死整个进程组并回收输出管道（`real_blocking_shell_tree_survives_deadline_then_cancel_cleans_tree`）。
 - [~] ACP 根关闭 + 真实 MCP producer barrier、TUI 与真实 MCP wire：owner/root close 已覆盖；ACP 全库通过，但未构造“late result + 真实 MCP producer”与 TUI 手测。
 

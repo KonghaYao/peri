@@ -495,6 +495,26 @@ pub trait SessionResources: Send + Sync {
         })
     }
 
+    /// 轻量读取恢复所需的 frozen 原字节，不分页、不装入任何正文。
+    ///
+    /// 恢复准入只需要 frozen 这一项不可变事实；默认实现拒绝，生产后端必须覆写为
+    /// 单列读取，**不得**用 [`Self::load_active_snapshot`] 作为捷径（那会把 own 有效
+    /// payload、flags 与 inherited 一并读入内存）。会话不存在是 `NotFound`，行存在但
+    /// 从未保存 frozen 是 [`FrozenState::LegacyAbsent`]。
+    async fn load_frozen_state(&self, _id: &ThreadId) -> SessionResourceResult<FrozenState> {
+        Err(SessionResourceError::new(
+            SessionResourceErrorKind::Unsupported,
+        ))
+    }
+
+    /// 后端是否实现 `peri.historyWindowV1` 的边界/页/正文读取端口。
+    ///
+    /// 协商必须反映**端到端**可用：客户端声明不能把未实现的后端变成可用。默认 false；
+    /// 覆写了窗口读取端口的后端必须同时覆写本方法。
+    fn supports_history_window(&self) -> bool {
+        false
+    }
+
     /// 轻量绑定分类：只回答本机能否验证这条会话的绑定，不加载历史、不启动发现。
     ///
     /// 与 [`Self::load_session_snapshot`] 的同一套分类规则，供只关心绑定/workspace 的

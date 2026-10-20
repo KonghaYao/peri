@@ -128,6 +128,11 @@ pub enum SubscriptionError {
 /// 阻塞接收 / `try_recv` 排干在途事件，两态语义对齐 §9 事件契约 Broadcast 类。
 #[async_trait::async_trait]
 pub trait EventSubscriber: Send + Sync {
+    /// 当前订阅所属会话的内存健康度；无宿主绑定时由泵自行维护。
+    fn health_handle(&self) -> Option<std::sync::Arc<crate::event_v2::BusHealth>> {
+        None
+    }
+
     /// 接收下一条事件。
     async fn recv(&mut self) -> Result<EventMessage, SubscriptionError>;
 

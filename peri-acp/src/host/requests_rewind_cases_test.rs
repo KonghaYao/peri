@@ -3,8 +3,8 @@ use async_trait::async_trait;
 use peri_acp_types::messages::MessageId;
 use peri_acp_types::session_resources::{
     BindingRecheck, BindingState, ChildResumeClaim, ChildSnapshot, CloseSettlement, ForkSnapshot,
-    FrozenSnapshotBytes, NewSession, NewSessionDraft, PersistenceRecovery, RewindBoundary,
-    RewindOutcome, SessionAvailability, SessionInitialization, SessionMetaPatch,
+    FrozenSnapshotBytes, FrozenState, NewSession, NewSessionDraft, PersistenceRecovery,
+    RewindBoundary, RewindOutcome, SessionAvailability, SessionInitialization, SessionMetaPatch,
     SessionResourceError, SessionResourceResult, SessionResources, SessionSnapshot,
 };
 use peri_acp_types::store::{CompactionChange, InheritedContext, MessageFlags, PersistedPayload};
@@ -196,6 +196,7 @@ forward_session_resources_except_rewind! {
     discard_incomplete_initialization(id: &ThreadId) -> ();
     adopt_legacy_session(id: &ThreadId, saved_cwd: &str, workspace: &ResolvedWorkspace, frozen: &FrozenSnapshotBytes) -> ();
     load_session_snapshot(id: &ThreadId) -> SessionSnapshot;
+    load_frozen_state(id: &ThreadId) -> FrozenState;
     load_session_history(id: &ThreadId) -> Vec<PersistedPayload>;
     load_session_binding(id: &ThreadId) -> BindingState;
     validate_bound_workspace(id: &ThreadId, check: BindingRecheck) -> ResolvedWorkspace;

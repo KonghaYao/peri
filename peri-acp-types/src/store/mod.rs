@@ -164,6 +164,25 @@ struct InheritedContextEnvelope {
     flags: HashMap<MessageId, MessageFlags>,
 }
 
+/// 一条 payload 在 inherited 列序列化文本中的定位事实。
+///
+/// `raw_start` / `raw_len` 指向信封里转义后的字符串内容（不含两端引号），与
+/// `peri-resources` 的 blob 扫描同一口径；`logical_len` 是解码后的 UTF-8 字节数。
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct InheritedPayloadSpan {
+    pub id: MessageId,
+    pub raw_start: u64,
+    pub raw_len: u64,
+    pub logical_len: u64,
+}
+
+/// [`InheritedContext::to_json_with_spans`] 的结果：序列化文本与逐 payload 定位。
+#[derive(Clone, Debug)]
+pub struct InheritedSerialization {
+    pub json: String,
+    pub payloads: Vec<InheritedPayloadSpan>,
+}
+
 impl InheritedContext {
     pub fn to_json(&self) -> Result<String> {
         Ok(serde_json::to_string(&InheritedContextEnvelope {
@@ -175,6 +194,63 @@ impl InheritedContext {
                 .collect::<Result<_>>()?,
             flags: self.flags.clone(),
         })?)
+    }
+
+    /// 序列化同时给出每条 payload 在列内的定位事实（写时派生索引的输入）。
+    ///
+    /// 信封布局是 `serde_json` 的紧凑输出：`{"version":1,"payloads":["...",...],"flags":{...}}`。
+    /// 这里逐条重新转义并与实际输出逐字节核对；布局与 canonical 形状不一致时返回错误，
+    /// 而不是产出不可验证的区间。
+    pub fn to_json_with_spans(&self) -> Result<InheritedSerialization> {
+        let payloads: Vec<String> = self
+            .payloads
+            .iter()
+            .map(serialize_persisted_payload)
+            .collect::<Result<_>>()?;
+        let json = serde_json::to_string(&InheritedContextEnvelope {
+            version: 1,
+            payloads: payloads.clone(),
+            flags: self.flags.clone(),
+        })?;
+        const PREFIX: &[u8] = br#"{"version":1,"payloads":["#;
+        let bytes = json.as_bytes();
+        if !bytes.starts_with(PREFIX) {
+            anyhow::bail!("inherited context serialization is not canonical");
+        }
+        let mut cursor = PREFIX.len();
+        let mut spans = Vec::with_capacity(payloads.len());
+        for (index, payload) in payloads.iter().enumerate() {
+            let escaped = serde_json::to_string(payload)?;
+            let Some(content) = escaped.as_bytes().get(1..escaped.len().saturating_sub(1)) else {
+                anyhow::bail!("inherited payload serialization is not a JSON string");
+            };
+            if bytes.get(cursor) != Some(&b'"')
+                || bytes.get(cursor + 1..cursor + 1 + content.len()) != Some(content)
+                || bytes.get(cursor + 1 + content.len()) != Some(&b'"')
+            {
+                anyhow::bail!("inherited context serialization does not match its payloads");
+            }
+            spans.push(InheritedPayloadSpan {
+                id: self.payloads[index].id(),
+                raw_start: (cursor + 1) as u64,
+                raw_len: content.len() as u64,
+                logical_len: payload.len() as u64,
+            });
+            cursor += escaped.len();
+            if index + 1 < payloads.len() {
+                if bytes.get(cursor) != Some(&b',') {
+                    anyhow::bail!("inherited context payload separator drifted");
+                }
+                cursor += 1;
+            }
+        }
+        if bytes.get(cursor) != Some(&b']') {
+            anyhow::bail!("inherited context payload array is not terminated");
+        }
+        Ok(InheritedSerialization {
+            json,
+            payloads: spans,
+        })
     }
 
     pub fn from_json(json: &str) -> Result<Self> {
@@ -559,5 +635,69 @@ mod persisted_payload_tests {
         future["version"] = serde_json::json!(PERSISTED_PAYLOAD_VERSION);
         future["reminder"]["body"] = serde_json::json!({"not": "text"});
         assert!(deserialize_persisted_payload(&future.to_string()).is_err());
+    }
+}
+
+#[cfg(test)]
+mod inherited_serialization_tests {
+    use super::*;
+
+    fn escaped_payloads() -> Vec<PersistedPayload> {
+        [
+            "plain",
+            "quotes \" and backslash \\ inside",
+            "line\nbreak\tand \u{1} control",
+            "中文与 emoji 🚀",
+            "",
+        ]
+        .into_iter()
+        .map(|content| PersistedPayload::Message(BaseMessage::human(content)))
+        .collect()
+    }
+
+    /// 区间指向列文本里**转义后**的 payload 内容；逐条解码必须还原原始序列化。
+    #[test]
+    fn spans_point_at_escaped_bytes_and_round_trip() {
+        let payloads = escaped_payloads();
+        let context = InheritedContext {
+            flags: std::collections::HashMap::from([(payloads[0].id(), MessageFlags::default())]),
+            payloads,
+        };
+        let serialization = context.to_json_with_spans().unwrap();
+        assert_eq!(serialization.payloads.len(), context.payloads.len());
+        assert_eq!(serialization.json, context.to_json().unwrap());
+        for (span, payload) in serialization.payloads.iter().zip(&context.payloads) {
+            assert_eq!(span.id, payload.id());
+            let serialized = serialize_persisted_payload(payload).unwrap();
+            let start = usize::try_from(span.raw_start).unwrap();
+            let len = usize::try_from(span.raw_len).unwrap();
+            let end = start.checked_add(len).unwrap();
+            assert!(end <= serialization.json.len());
+            // 两端引号之间的内容就是重新转义后的 payload。
+            let quoted = &serialization.json.as_bytes()[start - 1..end + 1];
+            let decoded: String = serde_json::from_slice(quoted).unwrap();
+            assert_eq!(decoded, serialized);
+            assert_eq!(span.logical_len, serialized.len() as u64);
+        }
+        let decoded = InheritedContext::from_json(&serialization.json).unwrap();
+        assert_eq!(
+            decoded
+                .payloads
+                .iter()
+                .map(PersistedPayload::id)
+                .collect::<Vec<_>>(),
+            context
+                .payloads
+                .iter()
+                .map(PersistedPayload::id)
+                .collect::<Vec<_>>()
+        );
+    }
+
+    #[test]
+    fn empty_payloads_have_no_spans() {
+        let serialization = InheritedContext::default().to_json_with_spans().unwrap();
+        assert!(serialization.payloads.is_empty());
+        assert!(serialization.json.contains(r#""payloads":[]"#));
     }
 }

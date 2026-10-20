@@ -813,6 +813,13 @@ pub(crate) fn classify_loop_terminal(
             turn_error_kind: Some(TurnErrorKind::LlmFailure),
         };
     }
+    // `SettlementDue` 只应由 child loop 产生并由 child runner 消费；主 executor
+    // 若收到它，说明调用边界被混用。显式失败而不是 panic，也不伪装成正常结束。
+    if matches!(loop_result, LoopResult::SettlementDue { .. }) {
+        return internal_failure_terminal(ExecutionFailure::internal(
+            "child settlement result reached the main executor",
+        ));
+    }
     let LoopResult::Error(error) = loop_result else {
         unreachable!("Completed, HookStopped, Interrupted and classified errors were handled above")
     };

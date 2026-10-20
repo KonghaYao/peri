@@ -95,6 +95,7 @@ fn make_session_state(armed: bool, epoch: u64) -> SessionState {
         structure_version: 0,
         session_generation: crate::host::next_session_generation(),
         history_window: Default::default(),
+        event_health: Default::default(),
         cancel_token: None,
         interaction_gate: Arc::new(tokio::sync::Mutex::new(())),
         host_request_seq: Arc::new(std::sync::atomic::AtomicU64::new(0)),
@@ -413,4 +414,19 @@ async fn oversized_historical_cron_trigger_fails_observably_without_truncated_ex
         peri_acp_types::system_reminder::ReminderAudience::Tui
     ));
     assert_eq!(notice.metadata["prompt_bytes"], prompt.len());
+}
+
+#[test]
+fn session_event_health_is_sticky_and_instance_scoped() {
+    use peri_acp_types::event_v2::EmitOutcome;
+    let state = make_session_state(false, 0);
+    let other = make_session_state(false, 0);
+    assert!(!state.event_health().dirty);
+    state.event_health.record_state(EmitOutcome::Lagging, 3);
+    let snapshot = state.event_health();
+    assert!(snapshot.dirty);
+    assert_eq!(snapshot.state_dropped, 3);
+    state.event_health.record_state(EmitOutcome::Sent, 1);
+    assert_eq!(state.event_health(), snapshot);
+    assert!(!other.event_health().dirty);
 }

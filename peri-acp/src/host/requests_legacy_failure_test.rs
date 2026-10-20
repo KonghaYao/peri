@@ -1,4 +1,5 @@
 use super::*;
+use peri_acp_types::session_resources::FrozenState;
 
 /// M5 缺陷 2：接纳成功但后续 load（history 读取）失败时，也必须排空已激活环境；
 /// 写一次接纳本身不回滚。
@@ -109,6 +110,7 @@ forward_session_resources_except_history! {
     discard_incomplete_initialization(id: &ThreadId) -> ();
     adopt_legacy_session(id: &ThreadId, saved_cwd: &str, workspace: &ResolvedWorkspace, frozen: &FrozenSnapshotBytes) -> ();
     load_session_snapshot(id: &ThreadId) -> SessionSnapshot;
+    load_frozen_state(id: &ThreadId) -> FrozenState;
     load_session_history(id: &ThreadId) -> Vec<PersistedPayload>;
     load_session_binding(id: &ThreadId) -> BindingState;
     validate_bound_workspace(id: &ThreadId, check: BindingRecheck) -> ResolvedWorkspace;

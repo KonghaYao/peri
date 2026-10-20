@@ -168,6 +168,7 @@ async fn workspace_shell_reminder_uses_file_references() {
         BgTaskKind::Shell,
         MessageId::new(),
         None,
+        "shell-remote",
     )
     .await
     .unwrap();
@@ -179,6 +180,63 @@ async fn workspace_shell_reminder_uses_file_references() {
     };
     assert!(reminder.as_reminder().body.contains("/tmp/stdout.log"));
     assert!(!reminder.as_reminder().body.contains("structuredContent"));
+}
+
+// [回归测试] 完成提醒必须沿用启动回执的会话侧公共 id（`mcp-...`），
+// 不能被远端原始 id（`shell-...`）覆盖；否则任务面板/回执与完成通知无法对应。
+#[tokio::test]
+async fn terminal_reminder_keeps_the_public_task_id_instead_of_the_remote_shell_id() {
+    let pool = Arc::new(McpClientPool::new_pending());
+    pool.clients.write().insert(
+        "workspace".into(),
+        Arc::new(crate::mcp::client::McpClientHandle {
+            name: "workspace".into(),
+            version: None,
+            connected_at: None,
+            protocol_version: None,
+            cache_version: None,
+            peer: None,
+            tools: vec![],
+            resources: vec![],
+            status: crate::mcp::client::ClientStatus::Connected,
+            oauth_status: Default::default(),
+            source: None,
+            url: None,
+            skills_capable: false,
+        }),
+    );
+    let manager: Arc<dyn peri_acp_types::tasks::TaskManager> =
+        Arc::new(peri_agent::agent::async_tasks::TaskManager::new());
+    pool.bind_session_task_manager("session", &manager);
+
+    let delivery = RecordingDelivery::new();
+    let (manager, request) = pool
+        .external_task_registration(
+            "session",
+            Some("session"),
+            Some(delivery.clone() as Arc<dyn TaskTerminalDelivery>),
+            "workspace",
+            "shell-remote",
+            BgTaskKind::Shell,
+            "sleep 1",
+            false,
+            "2026-10-19T00:00:00Z",
+        )
+        .unwrap();
+    let on_terminal = Arc::clone(&request.on_terminal);
+    let public_id = manager.register_external(request).unwrap();
+    assert!(public_id.starts_with("mcp-"), "{public_id}");
+
+    // `settle_external` 的契约：回调收到的 result 已带会话侧公共 id。
+    let mut result = shell_result();
+    result.task_id = public_id.clone();
+    on_terminal(&result, MessageId::new()).await.unwrap();
+
+    let delivered = delivery.delivered.lock();
+    assert_eq!(delivered.len(), 1);
+    let metadata = &delivered[0].1.as_reminder().metadata;
+    assert_eq!(metadata["task_id"].as_str(), Some(public_id.as_str()));
+    assert_eq!(metadata["remote_task_id"].as_str(), Some("shell-remote"));
 }
 
 // [回归测试] 子会话发起的任务，终态提醒必须投给发起者而不是 root；
@@ -197,6 +255,7 @@ async fn terminal_reminder_is_delivered_to_the_initiator_not_the_task_owner() {
         BgTaskKind::Shell,
         MessageId::new(),
         Some(&(delivery.clone() as Arc<dyn TaskTerminalDelivery>)),
+        "shell-remote",
     )
     .await
     .unwrap();
@@ -244,6 +303,7 @@ async fn undeliverable_terminal_reminder_reports_failure() {
             BgTaskKind::Shell,
             MessageId::new(),
             None,
+            "shell-remote",
         )
         .await
         .unwrap_err();
@@ -279,6 +339,7 @@ async fn failed_canonical_commit_does_not_enqueue_the_reminder() {
             BgTaskKind::Shell,
             MessageId::new(),
             Some(&(Arc::new(FailingDelivery) as Arc<dyn TaskTerminalDelivery>)),
+            "shell-remote",
         )
         .await
         .unwrap_err();

@@ -404,6 +404,7 @@ pub struct ReleasePlan {
 pub enum ReleaseReason {
     BudgetPressure,
     Reset,
+    Commit,
 }
 
 /// 有界集合：最近 N 个 checkpointId。超出容量按插入顺序淘汰最旧值。
@@ -545,7 +546,7 @@ impl HistoryWindow {
     pub fn new(config: HistoryWindowConfig) -> Self {
         let limits = config.limits;
         let checkpoints_seen = BoundedSet::new(limits.checkpoint_history);
-        let index = ResidentIndex::new(limits.pending_tool_bytes, limits.max_pending_tool_results);
+        let index = ResidentIndex::new();
         Self {
             enabled: config.history_window_v1,
             identity: None,
@@ -690,10 +691,7 @@ impl HistoryWindow {
         self.layout.clear();
         self.segments.clear();
         self.gaps.clear();
-        self.index = ResidentIndex::new(
-            self.budget.limits.pending_tool_bytes,
-            self.budget.limits.max_pending_tool_results,
-        );
+        self.index = ResidentIndex::new();
         self.display.clear();
         self.detail_descriptors.clear();
         self.budget = WindowBudget::new(self.budget.limits.clone());
@@ -713,6 +711,52 @@ impl HistoryWindow {
 
     pub fn segment(&self, key: SegmentKey) -> Option<&ResidentSegment> {
         self.segments.get(&key)
+    }
+
+    /// committed 可夹有未登记工具；插页坐标以展示账本而非 resident 前缀和为准。
+    pub fn segment_display_bounds(&self, segment: SegmentKey) -> Option<(usize, usize)> {
+        self.display
+            .debug_ranges()
+            .into_iter()
+            .filter(|(_, key, _)| {
+                self.index
+                    .locate_entry(key)
+                    .is_some_and(|locator| locator.segment == segment)
+            })
+            .map(|(start, _, len)| (start, start.saturating_add(len)))
+            .reduce(|(start, end), (next_start, next_end)| {
+                (start.min(next_start), end.max(next_end))
+            })
+    }
+
+    /// 身份切换时仍须保留的 live 展示槽位，不把它们当成旧页摘除。
+    pub fn live_seal_display_ranges(&self) -> Vec<(usize, usize)> {
+        self.display
+            .debug_ranges()
+            .into_iter()
+            .filter_map(|(start, key, len)| {
+                let locator = self.index.locate_entry(&key)?;
+                let segment = self.segments.get(&locator.segment)?;
+                (segment.origin == SegmentOrigin::LiveSeal).then_some((start, len))
+            })
+            .collect()
+    }
+
+    /// 将页响应中同一持久身份的 LiveSeal 条目对齐到真实持久位置。
+    /// 匹配不到时不改变账本；未提交前仍保持非 durable。
+    pub fn promote_live_seal_position(&mut self, key: &PersistentEntryKey, position: u64) -> bool {
+        let Some(locator) = self.index.locate_entry(key).copied() else {
+            return false;
+        };
+        let Some(segment) = self.segments.get_mut(&locator.segment) else {
+            return false;
+        };
+        if segment.origin != SegmentOrigin::LiveSeal {
+            return false;
+        }
+        segment.entries[locator.ordinal].position = Some(position);
+        self.display.insert(key.clone(), Some(position));
+        true
     }
 
     pub fn region_index_of_segment(&self, key: SegmentKey) -> Option<usize> {
@@ -927,7 +971,6 @@ impl HistoryWindow {
             tui_pinned_bytes: self.budget.pinned_body_bytes,
             history_page_reserved_bytes: self.budget.page_reserved_bytes,
             history_page_pending_bytes: self.budget.pending_merge_bytes,
-            unmatched_tool_result_bytes: self.index.pending_tool_bytes(),
             detail_window_bytes: self.budget.detail_bytes,
             resident_segments: self.segments.len(),
             gap_count: self.gaps.len(),

@@ -309,24 +309,44 @@ async fn load_payloads_up_to_on(
 
 impl SqliteSessionDatabase {
     /// 保存 child 的继承区：只在缺失时写入，已有值不被覆盖。
+    ///
+    /// 列文本与其派生索引在同一事务内落库：索引行不是事实源，写失败会连同列一起回滚，
+    /// 不会留下「列已发布、索引描述旧值」的中间状态。
     pub(super) async fn store_inherited_context(
         &self,
         thread_id: &ThreadId,
         context: &InheritedContext,
     ) -> Result<()> {
-        let snapshot = context.to_json()?;
+        let serialization = context.to_json_with_spans()?;
         // Validate before publishing, including the message/flag reference boundary.
-        InheritedContext::from_json(&snapshot)?;
+        InheritedContext::from_json(&serialization.json)?;
+        let mut tx = self.pool.begin().await?;
+        let parent: Option<(Option<String>,)> =
+            sqlx::query_as("SELECT parent_thread_id FROM threads WHERE id = ?1")
+                .bind(thread_id.as_str())
+                .fetch_optional(&mut *tx)
+                .await?;
+        let Some((parent,)) = parent else {
+            anyhow::bail!("thread is missing");
+        };
         let result = sqlx::query(
             "UPDATE threads SET inherited_context = ?1 WHERE id = ?2 AND inherited_context IS NULL",
         )
-        .bind(snapshot)
+        .bind(&serialization.json)
         .bind(thread_id)
-        .execute(&self.pool)
+        .execute(&mut *tx)
         .await?;
         if result.rows_affected() != 1 {
-            anyhow::bail!("inherited context already exists or thread is missing");
+            anyhow::bail!("inherited context already exists");
         }
+        if let Some(write) = super::session_data::inherited_index::SnapshotWrite::from_serialization(
+            thread_id,
+            parent.as_deref(),
+            &serialization,
+        ) {
+            write.replace(&mut tx).await?;
+        }
+        tx.commit().await?;
         Ok(())
     }
 }

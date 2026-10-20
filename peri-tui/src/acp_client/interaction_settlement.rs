@@ -15,7 +15,7 @@ use super::interaction_response::{elicitation_cancel_response, permission_cancel
 pub fn spawn_settlement_worker(
     transport: Weak<MpscClientTransport>,
     mut rx: mpsc::UnboundedReceiver<ClaimedInteraction>,
-    notification_tx: Arc<std::sync::Mutex<Option<mpsc::WeakUnboundedSender<AcpNotification>>>>,
+    notification_tx: Arc<std::sync::Mutex<Option<mpsc::WeakSender<AcpNotification>>>>,
 ) {
     tokio::spawn(async move {
         while let Some(claimed) = rx.recv().await {
@@ -50,10 +50,22 @@ pub fn spawn_settlement_worker(
             if let Some(tx) = notification_tx.lock().unwrap().as_ref()
                 && let Some(tx) = tx.upgrade()
             {
-                let _ = tx.send(AcpNotification::InteractionTerminal {
+                match tx.try_send(AcpNotification::InteractionTerminal {
                     owner: claimed.owner,
                     outcome,
-                });
+                }) {
+                    Ok(()) => {}
+                    Err(mpsc::error::TrySendError::Full(_)) => {
+                        tracing::error!(
+                            event = "acp_client_notification_backpressure",
+                            "结算通知队列已满，关闭连接以避免无界增长"
+                        );
+                        if let Some(transport) = transport.upgrade() {
+                            transport.close();
+                        }
+                    }
+                    Err(mpsc::error::TrySendError::Closed(_)) => {}
+                }
             }
         }
     });

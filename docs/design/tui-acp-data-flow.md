@@ -84,20 +84,27 @@ BridgeState.committed + CurrentTurn
 固定帧预算内合并连续主 Agent 更新，但首块边界、终态和 reset 必须及时发布。Markdown、wrap
 和 viewport 性能契约见 [TUI 流式 Markdown 性能设计](tui-streaming-markdown-performance.md)。
 
-## 历史窗口与段生命周期（默认关闭）
+## 历史窗口与段生命周期（服务端能力门控）
 
 `peri.historyWindowV1` 复用 `session/load` 的 `history` 字段（`open`/`page`/`seek`），正文分块
-走 `session/history/body`；提交事实经私有通知 `peri/history_committed` 送达。该路径默认关闭：
-连接能力未协商或 TUI `HISTORY_WINDOW_V1` 开关未开启时，旧 `HISTORY_PAGING` 分页与渲染路径
-保持不变，所有已加载历史继续固定、不淘汰。开关只决定是否采用窗口模型，不改变协议协商结果。
-`HISTORY_WINDOW_V1` 由 settings beta `history-window-v1`（默认 false）在启动时读取一次并写入 atom；
-设置变更不热重载，重启后生效。仍要求服务端 `peri.historyWindowV1` 协商同时为真。Beta 设置面板
-仍只列 `peri-acp-types::beta_flags::BETA_FLAGS`，该键需手动写入 settings。
+走 `session/history/body`；提交事实经私有通知 `peri/history_committed` 送达。该路径由服务端能力
+门控：`initialize` 响应未明确回显 `peri.historyWindowV1: true` 时一律 fail-closed，客户端请求值
+不能替代服务端能力事实。TUI 本地投影开关未开启时，旧 `HISTORY_PAGING` 分页与渲染路径保持不变，
+所有已加载历史继续固定、不淘汰。开关只决定是否采用窗口模型，不改变协议协商结果。
+`HISTORY_WINDOW_V1` 由 settings beta `history-window-v1` 在启动时读取一次并写入 atom；未配置视为
+开启（发布启用绑定 S7），只有显式配置 `false` 才关闭。设置变更不热重载，重启后生效。仍要求
+服务端明确回显 `peri.historyWindowV1: true`。Beta 设置面板仍只列
+`peri-acp-types::beta_flags::BETA_FLAGS`，该键需手动写入 settings。
+
+声明 `peri.historyWindowV1` 的连接，其 `session/load` **不回放历史**；TUI 在 load 响应后先完成
+用户输入快照等本地初始化，成功后才 `enqueue_window_open`，初始化失败不得 open。首屏因此完全
+由随后的 `history.open` 提供；第三方客户端声明能力却不 open 会看到空首屏。
 
 ### 请求与通知时序
 
-1. `initialize` 协商 `peri.historyWindowV1`；TUI 启动时已从 beta `history-window-v1` 写入
-   `HISTORY_WINDOW_V1`（只写一次，无热重载），它（默认 false）与服务端协商结果同时为真才走窗口路径。
+1. `initialize` 协商 `peri.historyWindowV1`（响应未回显一律按不支持处理）；TUI 启动时已从 beta
+   `history-window-v1` 写入 `HISTORY_WINDOW_V1`（只写一次，无热重载），它（未配置默认开启、
+   显式 false 关闭）与服务端协商结果同时为真才走窗口路径。
 2. `history_page_consumer/window.rs` 在发请求前登记 `PageReservation`（目标 512 KiB + 解码开销），
    受 `in_flight + pending_merge` 上限约束；预算不足先尝试释放，仍不足则不发送请求。
 3. `session/load` 的 `history.open/page/seek` 经 ACP transport 到达 Host；Host 在生命周期路由
@@ -151,7 +158,8 @@ BridgeState.committed + CurrentTurn
 4. `page`/`seek`/`body` 在存储读取前和返回前校验 `sessionGeneration`、`structureVersion`、
    ticket epoch、`snapshotToken` 与 `committedTail`。rewind durable 成功恰好推进
    `structureVersion + 1` 并撤销 ticket；失败不推进；持久化不确定撤销票据并进入
-   `ReloadRequired`，旧窗口 fail-closed。
+   `ReloadRequired`：旧 ticket 不再续用，但只读的 `open`/`page`/`seek`/`body` 仍按 Store
+   事实服务（`HandedOff` 同样不拒绝只读）。
 5. rewind、关闭重开、session 切换或身份不匹配时递增 `window_generation`，取消在途请求，
    丢弃迟到页；旧页不得合入新窗口。能力缺失、游标失效或通知丢失进入 `Degraded`：停止淘汰、
    保留可读内容与重试入口，禁止自动回退完整 `session/load`。
@@ -202,8 +210,7 @@ TUI 侧由 `PanelKind::HistoryDetail` + `HistoryDetailPanel`（`kit/panels/histo
 - 详情交互限制：鼠标单击只设焦点，需再 Enter 打开；`e` 复制已加载正文，文件导出/超窗流式
   导出尚未接入 UI（模型 `export_stream` 已支持分块）；未做 JSON 字段级展示；inherited 段内部
   不插入独立占位行。
-- beta 设置面板仍只列 `BETA_FLAGS`；`history-window-v1` 需手动写入 settings，且 TUI 只在启动
-  读取一次、无热重载。
+- beta 设置面板仍只列 `BETA_FLAGS`；`history-window-v1` 未配置默认开启，如需关闭须手动写入 settings `false`，且 TUI 只在启动读取一次、无热重载。
 - remote/emscripten adapter 未实现窗口/继承读取，默认 `Unsupported`；readTicket 无密码学签名；
   rewind 不确定态仍依赖集中文本 marker。
 
@@ -319,7 +326,8 @@ SubAgent、后台 task、Cron、Workflow 和 plugin 数据不应混入 `CurrentT
    认证、受众授权、限长和终端控制字符处理独立有效。
 9. **增量渲染**：流式更新只失效变化 slot；viewport 外内容不做无界重复 wrap/clone。
 10. **可验证变更**：跨层事件修改同步更新协议、mapper、TUI decoder/reducer、caps 和测试。
-11. **窗口默认关闭**：未协商 `peri.historyWindowV1` 或 TUI 开关未开启时，旧分页/渲染路径不变；
+11. **服务端能力门控**：服务端未明确回显 `peri.historyWindowV1: true` 或 TUI 本地开关显式关闭时，
+    旧分页/渲染路径不变；
     窗口失败进入 `Degraded`，不以完整 `session/load` 兜底。
 12. **释放有界**：只有 durable/sealed 且无 pin 的段可释放；正文唯一强持有者是 `committed`，
     释放必须走统一事务并等待渲染 ack，存储历史不因 UI 淘汰而改变。

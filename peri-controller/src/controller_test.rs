@@ -529,3 +529,47 @@ async fn subscription_register_and_unsubscribe() {
     );
     assert_eq!(controller.pop_events().len(), 2, "弹出队列独立于订阅者");
 }
+
+#[tokio::test]
+async fn full_pop_queue_records_session_loss_without_blocking_broadcast() {
+    use peri_acp_types::event_v2::BusHealth;
+    let controller = Controller::new(temp_facade().await);
+    let health = Arc::new(BusHealth::default());
+    let other = Arc::new(BusHealth::default());
+    controller.bind_event_health("s1", &health);
+    controller.bind_event_health("s2", &other);
+    let env = EventEnvelope::new(
+        "s1",
+        SessionEpoch::initial(),
+        "t1",
+        "a1",
+        SessionSeq::initial(),
+        EventDeliveryClass::Critical,
+    );
+    for _ in 0..super::EVENT_CHANNEL_CAPACITY {
+        controller.publish(env.clone());
+    }
+    assert!(!health.snapshot().dirty);
+    let mut sub = controller.subscribe();
+    controller.publish(env.clone());
+    assert_eq!(sub.recv().await.unwrap().envelope, env);
+    assert_eq!(controller.pop_events().len(), super::EVENT_CHANNEL_CAPACITY);
+    assert_eq!(health.snapshot().state_dropped, 1);
+    assert!(health.snapshot().dirty);
+    assert_eq!(controller.event_health(), health.snapshot());
+    assert!(!other.snapshot().dirty);
+    controller.publish(env);
+    assert_eq!(health.snapshot().state_dropped, 1, "成功不清除丢失记录");
+    controller.events_rx.lock().close();
+    controller.publish(EventEnvelope::new(
+        "s2",
+        SessionEpoch::initial(),
+        "t2",
+        "a2",
+        SessionSeq::initial(),
+        EventDeliveryClass::Critical,
+    ));
+    assert_eq!(other.snapshot().state_dropped, 1);
+    assert!(other.snapshot().dirty);
+    assert_eq!(controller.event_health().state_dropped, 2);
+}

@@ -638,12 +638,17 @@ pub async fn run_react_loop(context: StageContext, max_iterations: usize) -> Loo
                     if let Some(flag) = &context.async_ctx.idle_suspended_flag {
                         flag.store(true, Ordering::Release);
                     }
-                    context.runtime.event_bus.emit_render(
-                        crate::agent::events_v2::RenderEvent::TurnSuspended {
+                    let outcome = context
+                        .runtime
+                        .event_bus
+                        .emit_render_reliable(crate::agent::events_v2::RenderEvent::TurnSuspended {
                             turn_id: context.turn_id(),
                             agent_id: context.session.agent_id,
-                        },
-                    );
+                        })
+                        .await;
+                    if outcome == peri_acp_types::event_v2::EmitOutcome::Closed {
+                        tracing::warn!(turn_id = %context.turn_id(), "TurnSuspended 接收端关闭；总线已记录需重同步");
+                    }
                     let cancel_fut = context.session.turn.cancel_token.cancelled();
                     tokio::pin!(cancel_fut);
                     // 有界等待：界本身必须能唤醒挂起的 loop，否则只有偶发
@@ -993,7 +998,3 @@ mod bounded_wait_exit_tests;
 #[cfg(test)]
 #[path = "model_view_test.rs"]
 mod model_view_tests;
-
-#[cfg(test)]
-#[path = "stop_intent_test.rs"]
-mod stop_intent_tests;

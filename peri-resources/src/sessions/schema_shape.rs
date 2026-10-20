@@ -130,8 +130,23 @@ const OAUTH_COLUMNS: &[&str] = &[
     "updated_at",
 ];
 const CLOSE_INTENTS_COLUMNS: &[&str] = &["thread_id", "requested_at"];
+const INHERITED_SNAPSHOT_INDEX_COLUMNS: &[&str] = &[
+    "snapshot_id",
+    "thread_id",
+    "payload_bytes",
+    "entry_count",
+    "prepared_at",
+];
+const INHERITED_PAYLOAD_INDEX_COLUMNS: &[&str] = &[
+    "snapshot_id",
+    "ordinal",
+    "entry_id",
+    "raw_start",
+    "raw_len",
+    "logical_len",
+];
 
-/// 当前形状（canonical 8 张表）的逐表声明。顺序与 `canonical::CANONICAL_TABLES` 一致。
+/// 当前形状（canonical 10 张表）的逐表声明。顺序与 `canonical::CANONICAL_TABLES` 一致。
 pub(super) const CURRENT_TABLES: &[TableShape] = &[
     TableShape {
         name: "machines",
@@ -213,6 +228,24 @@ pub(super) const CURRENT_TABLES: &[TableShape] = &[
         columns: CLOSE_INTENTS_COLUMNS,
         not_null: &["requested_at"],
         primary_key: &["thread_id"],
+    },
+    TableShape {
+        name: "inherited_snapshot_index",
+        // 可选：派生索引。缺表只意味着读取回退全列扫描，不影响 inherited 事实本身；
+        // 写打开按 canonical DDL 幂等补齐，存在时必须同形。
+        optional: true,
+        columns: INHERITED_SNAPSHOT_INDEX_COLUMNS,
+        not_null: &["thread_id", "payload_bytes", "entry_count", "prepared_at"],
+        primary_key: &["snapshot_id"],
+    },
+    TableShape {
+        name: "inherited_payload_index",
+        // 可选：同 `inherited_snapshot_index`。`logical_len` 允许为 NULL（legacy 回填
+        // 未解码正文，读取时按需解码）。
+        optional: true,
+        columns: INHERITED_PAYLOAD_INDEX_COLUMNS,
+        not_null: &["snapshot_id", "ordinal", "entry_id", "raw_start", "raw_len"],
+        primary_key: &["snapshot_id", "ordinal"],
     },
 ];
 
@@ -380,6 +413,8 @@ pub(super) const CURRENT_COLUMNS_SQL: &str = "SELECT 'machines' AS t, name, \"no
     UNION ALL SELECT 'session_bindings', name, \"notnull\", pk, cid FROM pragma_table_xinfo('session_bindings')
     UNION ALL SELECT 'mcp_oauth_credentials', name, \"notnull\", pk, cid FROM pragma_table_xinfo('mcp_oauth_credentials')
     UNION ALL SELECT 'session_close_intents', name, \"notnull\", pk, cid FROM pragma_table_xinfo('session_close_intents')
+    UNION ALL SELECT 'inherited_snapshot_index', name, \"notnull\", pk, cid FROM pragma_table_xinfo('inherited_snapshot_index')
+    UNION ALL SELECT 'inherited_payload_index', name, \"notnull\", pk, cid FROM pragma_table_xinfo('inherited_payload_index')
     ORDER BY 1, 5";
 
 /// 读回迁移输入形状的全部列形状（缺表在结果里没有行，由[`check_input`]判定）。

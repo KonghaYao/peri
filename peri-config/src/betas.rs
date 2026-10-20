@@ -13,8 +13,9 @@ use crate::app::PeriConfig;
 
 pub use peri_acp_types::beta_flags::{BetaFlagOrigin, BetaFlagValue, BetaFlags};
 
-/// TUI 本地 beta：历史窗口 V1。默认 false；仍需服务端 `peri.historyWindowV1`
-/// 协商能力同时为真。键使用现有 kebab-case 风格。
+/// TUI 本地 beta：历史窗口 V1。`BetaFlags` 投影不改变「未覆盖 = false」的注册表语义；
+/// TUI 启动读取按发布启用绑定 S7 把**未配置视为开启**，只有显式 `false` 关闭。
+/// 仍需服务端 `peri.historyWindowV1` 协商能力同时为真。键使用现有 kebab-case 风格。
 pub const HISTORY_WINDOW_V1: &str = "history-window-v1";
 
 /// beta 键是否被接受：ACP 注册表 + 本 crate 的 TUI 本地 beta。

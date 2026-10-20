@@ -246,18 +246,22 @@ pub(super) async fn run_receive_with_budget(
                 continue;
             }
             if let QueuedPayload::SystemReminder(reminder) = &msg.payload {
-                input
+                let outcome = input
                     .context
                     .runtime
                     .event_bus
-                    .emit_state(StateEvent::ProtocolEvent {
+                    .emit_state_reliable(StateEvent::ProtocolEvent {
                         turn_id: input.context.turn_id(),
                         agent_id: input.context.session.agent_id,
                         event: Box::new(ExecutorEvent::SystemReminder {
                             reminder: reminder.as_reminder().clone(),
                             source_agent_id: None,
                         }),
-                    });
+                    })
+                    .await;
+                if outcome == peri_acp_types::event_v2::EmitOutcome::Closed {
+                    tracing::warn!(turn_id = %input.context.turn_id(), "ProtocolEvent 接收端关闭；总线已记录需重同步");
+                }
             } else if let Some(text) = synthetic_defer_text(msg) {
                 input
                     .context

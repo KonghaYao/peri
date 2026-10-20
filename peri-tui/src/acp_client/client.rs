@@ -89,6 +89,10 @@ pub enum ClientProjectionMode {
     Headless,
 }
 
+/// 客户端通知队列容量。TUI 消费落后时内存上限由此固定；pump 使用
+/// `try_send`，满队列视为持续不可消费并显式关闭连接，避免静默丢弃或无限增长。
+pub(crate) const NOTIFICATION_QUEUE_CAPACITY: usize = 4096;
+
 /// TUI-side client that owns the ACP transport and routes notifications.
 ///
 /// Uses one mutex-protected routing state so current/deleted decisions are
@@ -102,7 +106,7 @@ pub struct AcpTuiClient {
     transport: Arc<MpscClientTransport>,
     lifecycle: InteractionLifecycle,
     projection_mode: ClientProjectionMode,
-    notification_weak: Arc<Mutex<Option<mpsc::WeakUnboundedSender<AcpNotification>>>>,
+    notification_weak: Arc<Mutex<Option<mpsc::WeakSender<AcpNotification>>>>,
     /// Startup restore is reserved before submit consumers become reachable.
     /// `ensure_session` observes this flag under the same operation gate used by
     /// new/load and waits for the reserved load to settle instead of competing
@@ -141,8 +145,8 @@ impl AcpTuiClient {
         transport: MpscClientTransport,
     ) -> (
         Self,
-        mpsc::UnboundedSender<AcpNotification>,
-        mpsc::UnboundedReceiver<AcpNotification>,
+        mpsc::Sender<AcpNotification>,
+        mpsc::Receiver<AcpNotification>,
     ) {
         Self::new_with_mode(transport, ClientProjectionMode::Headless)
     }
@@ -151,8 +155,8 @@ impl AcpTuiClient {
         transport: MpscClientTransport,
     ) -> (
         Self,
-        mpsc::UnboundedSender<AcpNotification>,
-        mpsc::UnboundedReceiver<AcpNotification>,
+        mpsc::Sender<AcpNotification>,
+        mpsc::Receiver<AcpNotification>,
     ) {
         Self::new_with_mode(transport, ClientProjectionMode::Interactive)
     }
@@ -162,10 +166,10 @@ impl AcpTuiClient {
         projection_mode: ClientProjectionMode,
     ) -> (
         Self,
-        mpsc::UnboundedSender<AcpNotification>,
-        mpsc::UnboundedReceiver<AcpNotification>,
+        mpsc::Sender<AcpNotification>,
+        mpsc::Receiver<AcpNotification>,
     ) {
-        let (notification_tx, notification_rx) = mpsc::unbounded_channel();
+        let (notification_tx, notification_rx) = mpsc::channel(NOTIFICATION_QUEUE_CAPACITY);
         let transport = Arc::new(transport);
         let lifecycle = InteractionLifecycle::new();
         let notification_weak = Arc::new(Mutex::new(None));

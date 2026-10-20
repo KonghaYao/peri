@@ -29,12 +29,19 @@ use peri_acp_types::PeriCaps;
 
 use crate::transport::types::AcpError;
 
-use super::{AcpServerConfig, ContextOwnership, SessionState, SharedSessions};
+use super::{AcpServerConfig, SessionState, SharedSessions};
 
+mod commit_observer;
 mod inherited;
+mod oversize;
 mod state;
 mod visibility;
 mod wire;
+
+#[cfg(test)]
+mod commit_tail_test;
+
+pub(crate) use commit_observer::StoreCompactCommitObserver;
 
 /// 票据有效期：短期只读句柄；过期后必须重新 `open`。
 const TICKET_TTL_MS: i64 = 5 * 60 * 1000;
@@ -90,8 +97,8 @@ pub(crate) struct PreparedWindowTicket {
     binding: HistoryReadTicketBinding,
     metadata: HistoryWindowMetadata,
     sink: Arc<dyn WindowNotificationSink>,
-    oversize_entries:
-        Arc<std::sync::Mutex<std::collections::HashSet<peri_acp_types::messages::MessageId>>>,
+    /// 本票据已暴露的 oversize descriptor 身份与票据级预算；publish 时随票据转移。
+    oversize_entries: Arc<std::sync::Mutex<oversize::OversizeMemory>>,
     /// 本票据内的受众可见性结论；publish 时随票据转移，revoke 即整体丢弃。
     visibility: visibility::VisibilityCache,
     inherited_unsupported: bool,
@@ -108,8 +115,7 @@ pub(crate) struct IssuedWindowTicket {
     /// 该 ticket 所属连接的通知 seam；只用于定向投递，不授权任何读取。
     sink: Arc<dyn WindowNotificationSink>,
     /// 本 snapshot 已向客户端暴露的 oversize descriptor 集合；body 只允许读取这些条目。
-    oversize_entries:
-        Arc<std::sync::Mutex<std::collections::HashSet<peri_acp_types::messages::MessageId>>>,
+    oversize_entries: Arc<std::sync::Mutex<oversize::OversizeMemory>>,
     /// 会话存在冻结 inherited 前缀，但本实现未分段读取；响应必须显式告知客户端。
     inherited_unsupported: bool,
     /// 本窗口可见的冻结 inherited 快照（own 窗口也会报告）。
@@ -122,13 +128,29 @@ impl IssuedWindowTicket {
     fn remembers_oversize(&self, entry_id: peri_acp_types::messages::MessageId) -> bool {
         self.oversize_entries
             .lock()
-            .map(|set| set.contains(&entry_id))
-            .unwrap_or(false)
+            .map(|memory| memory.remembers(entry_id))
+            // 锁中毒时记忆不可信：按 overflowed 处理，强制回存储重取校验。
+            .unwrap_or(true)
     }
 
-    fn remember_oversize(&self, entries: &[peri_acp_types::messages::MessageId]) {
-        if let Ok(mut set) = self.oversize_entries.lock() {
-            set.extend(entries.iter().copied());
+    fn remember_oversize(&self, entries: &[(peri_acp_types::messages::MessageId, u64)]) {
+        if let Ok(mut memory) = self.oversize_entries.lock() {
+            memory.remember(entries);
+        }
+    }
+
+    /// 集合已溢出：body 不能只凭身份集合判定，必须按稳定身份重新校验。
+    fn oversize_overflowed(&self) -> bool {
+        self.oversize_entries
+            .lock()
+            .map(|memory| memory.overflowed())
+            .unwrap_or(true)
+    }
+
+    #[cfg(test)]
+    fn force_oversize_overflow(&self) {
+        if let Ok(mut memory) = self.oversize_entries.lock() {
+            memory.force_overflow();
         }
     }
 
@@ -182,7 +204,7 @@ impl HistoryWindowCoordinator {
             binding,
             metadata,
             sink: Arc::clone(&connection.sink),
-            oversize_entries: Arc::new(std::sync::Mutex::new(std::collections::HashSet::new())),
+            oversize_entries: Arc::new(std::sync::Mutex::new(oversize::OversizeMemory::new())),
             visibility: visibility::VisibilityCache::new(),
             inherited_unsupported,
             inherited,
@@ -224,6 +246,14 @@ impl HistoryWindowCoordinator {
             .map(IssuedWindowTicket::visibility_full_scans)
     }
 
+    /// 测试专用：把当前票据的 oversize 记忆推进到溢出态。
+    #[cfg(test)]
+    pub(crate) fn force_oversize_overflow(&mut self) {
+        if let Some(ticket) = self.ticket.as_ref() {
+            ticket.force_oversize_overflow();
+        }
+    }
+
     /// 撤销当前票据；旧 epoch 的读请求在返回前复核时被拒绝。
     pub(crate) fn revoke_ticket(&mut self) {
         self.ticket = None;
@@ -257,12 +287,25 @@ impl HistoryWindowCoordinator {
         self.last_notified_checkpoint = None;
     }
 
-    /// 发布一次已确认提交的轻量事实；同 checkpoint 幂等，tail 在同一 rewind 代次内单调。
+    /// 发布一次已确认提交的轻量事实；同 checkpoint 幂等，tail 全局单调（回退整体拒绝）。
     pub(crate) fn publish_commit(
         &mut self,
         checkpoint: Option<&HistoryCheckpoint>,
         tail: Option<&HistoryCommittedTail>,
     ) {
+        // 单调整体守卫：已发布 tail 与下一事实都存在时只接受前进/相等。
+        // 回退整体拒绝（checkpoint/tail 都不动），不区分是否同一 checkpoint，
+        // 避免两套规则。已知的清空路径先走 finish_rewind/invalidate。
+        if let (Some(previous), Some(next)) = (self.committed_tail.as_ref(), tail) {
+            if next.position < previous.position {
+                tracing::warn!(
+                    previous = previous.position,
+                    next = next.position,
+                    "history window: refusing a non-monotonic committed tail"
+                );
+                return;
+            }
+        }
         if let Some(checkpoint) = checkpoint {
             if self.checkpoint_id.as_deref() == Some(checkpoint.checkpoint_id.as_str()) {
                 // 同一 checkpoint 去重，但 tail 仍要随之后的 append 前进。
@@ -270,16 +313,6 @@ impl HistoryWindowCoordinator {
                     self.committed_tail = tail.cloned();
                 }
                 return;
-            }
-            if let (Some(previous), Some(next)) = (self.committed_tail.as_ref(), tail) {
-                if next.position < previous.position {
-                    tracing::warn!(
-                        previous = previous.position,
-                        next = next.position,
-                        "history window: refusing a non-monotonic committed tail"
-                    );
-                    return;
-                }
             }
             self.checkpoint_id = Some(checkpoint.checkpoint_id.clone());
             self.summary_entry_id = Some(checkpoint.checkpoint_id.clone());
@@ -380,7 +413,7 @@ async fn open(
 
     let (wire_session_id, thread_id, generation, structure_version, expected_epoch) = {
         let states = sessions.lock().await;
-        let state = state::writable_state(&states, session_id)?;
+        let state = state::readable_state(&states, session_id)?;
         (
             state.session_id.clone(),
             state.thread_id.clone(),
@@ -446,13 +479,13 @@ async fn open(
         rows,
     )
     .await;
-    let oversize = wire::oversize_ids(rows.as_ref().ok());
+    let oversize = wire::oversize_descriptors(rows.as_ref().ok());
     let rows = rows?;
     inherited::validate_rows(&source, &rows)?;
     // 所有读取与校验成功后才原子替换 ticket；旧 ticket 在此刻之前一直有效。
     let issued = {
         let mut states = sessions.lock().await;
-        let state = state::writable_state_mut(&mut states, session_id)?;
+        let state = state::readable_state_mut(&mut states, session_id)?;
         if state.session_generation != generation || state.structure_version != structure_version {
             return Err(invalidated(
                 "session generation or structure version changed",
@@ -538,7 +571,7 @@ async fn page(
         result,
     )
     .await;
-    let oversize = wire::oversize_ids(result.as_ref().ok());
+    let oversize = wire::oversize_descriptors(result.as_ref().ok());
     finalize(
         sessions,
         session_id,
@@ -636,7 +669,7 @@ async fn seek(
         result,
     )
     .await;
-    let oversize = wire::oversize_ids(result.as_ref().ok());
+    let oversize = wire::oversize_descriptors(result.as_ref().ok());
     finalize(
         sessions,
         session_id,
@@ -668,7 +701,7 @@ async fn prepare_ticket_read(
     read_ticket: &str,
 ) -> Result<(String, u64, u64, IssuedWindowTicket), AcpError> {
     let mut states = sessions.lock().await;
-    let state = state::writable_state_mut(&mut states, session_id)?;
+    let state = state::readable_state_mut(&mut states, session_id)?;
     let issued = state
         .history_window
         .current()
@@ -715,9 +748,8 @@ async fn finalize(
     generation: u64,
     structure_version: u64,
     issued: &IssuedWindowTicket,
-    oversize_entries: &[peri_acp_types::messages::MessageId],
+    oversize_entries: &[(peri_acp_types::messages::MessageId, u64)],
 ) -> Result<(), AcpError> {
-    issued.remember_oversize(oversize_entries);
     let mut states = sessions.lock().await;
     let state = match states.get_mut(session_id) {
         Some(state) => state,
@@ -748,6 +780,8 @@ async fn finalize(
             "history read ticket changed during the read",
         ));
     }
+    // 所有校验通过后才登记 descriptor；失败不得污染票据记忆。
+    issued.remember_oversize(oversize_entries);
     Ok(())
 }
 
@@ -809,6 +843,15 @@ pub(crate) async fn handle_body_chunk(
         return Err(anchor_unavailable("snapshot has no committed rows"));
     }
     if !issued.remembers_oversize(entry_id) {
+        return Err(anchor_unavailable(
+            "entry is not an oversize descriptor of this snapshot",
+        ));
+    }
+    // 记忆溢出后身份集合不再是权威：按稳定 entryId 在固定 snapshot 内重取一页，
+    // 只接受 Store 仍判定为 oversized 的条目；不得用位置/索引猜身份。
+    if issued.oversize_overflowed()
+        && !wire::is_oversize_descriptor(cfg, &thread_id, &source, tail.as_ref(), entry_id).await?
+    {
         return Err(anchor_unavailable(
             "entry is not an oversize descriptor of this snapshot",
         ));
@@ -906,7 +949,8 @@ pub(crate) async fn notify_commit_if_open(sessions: &SharedSessions, session_id:
     }
 }
 
-/// 供 `finish_prompt_turn` 在 durable compact 确认后更新轻量提交事实。
+/// 供 `finish_prompt_turn` / Compact 提交观察者在 durable compact 确认后更新
+/// 轻量提交事实。
 pub(crate) fn publish_commit(
     state: &mut SessionState,
     checkpoint: Option<&HistoryCheckpoint>,

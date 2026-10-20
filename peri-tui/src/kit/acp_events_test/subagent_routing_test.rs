@@ -136,6 +136,138 @@ fn test_subagent_stopped_freezes_child_trailing_bubble() {
     );
 }
 
+#[test]
+#[serial]
+fn test_flush_retains_unpaired_completed_subagent_until_running_group_finishes() {
+    crate::kit::atoms::init_atoms();
+    *VIEW_MODELS.state().write() = ViewModelsSnapshot::default();
+    let mut state = make_state(SessionPhase::PromptRunning, 0);
+    for (agent_id, text) in [("completed", "done"), ("running", "still running")] {
+        dispatch_and_notify(
+            &mut state,
+            &AcpEventData::SubagentStarted {
+                agent_id: agent_id.into(),
+                agent_name: agent_id.into(),
+                is_background: false,
+                parent_tool_call_id: None,
+            },
+        );
+        dispatch_and_notify(
+            &mut state,
+            &AcpEventData::TextChunk(crate::kit::stream_data::TuiTextChunk {
+                text: text.into(),
+                message_id: Some(agent_id.into()),
+                agent_id: Some(agent_id.into()),
+            }),
+        );
+        if agent_id == "completed" {
+            dispatch_and_notify(
+                &mut state,
+                &AcpEventData::SubagentStopped {
+                    agent_id: agent_id.into(),
+                    result: String::new(),
+                    is_error: false,
+                },
+            );
+        }
+    }
+    dispatch_and_notify(&mut state, &AcpEventData::TurnDone);
+    assert!(state.current_turn.has_running_subagent());
+    assert_eq!(
+        state.current_turn.subagents.len(),
+        2,
+        "未配对的已完成子 Agent 不能越过仍在运行的分组单独归档（R05）"
+    );
+    assert!(
+        !state.committed.iter().any(|unit| {
+            matches!(unit, TuiRenderUnit::TuiSubAgentGroup(group) if group.agent_id == "completed")
+        }),
+        "committed 渲染在 current_turn 之前，提前归档会打乱分组顺序"
+    );
+    let archived_len = state.committed.len();
+    dispatch_and_notify(&mut state, &AcpEventData::TurnDone);
+    assert_eq!(state.committed.len(), archived_len, "重复 flush 不重复归档");
+    // 移除 index 0 后，剩余容器与待配对表都必须指向新的 index 0。
+    state
+        .current_turn
+        .start_tool(crate::kit::acp_types::ToolCardAccumulator::new(
+            "late-launcher".into(),
+            "Agent".into(),
+            String::new(),
+        ));
+    assert!(
+        state
+            .current_turn
+            .append_subagent_text("running", " continued")
+    );
+    let units = state.current_turn.view_models();
+    let group = units
+        .iter()
+        .find_map(|unit| match unit {
+            TuiRenderUnit::TuiSubAgentGroup(group) if group.agent_id == "running" => Some(group),
+            _ => None,
+        })
+        .expect("运行中的分组必须仍在容器里");
+    assert_eq!(group.agent_id, "running");
+    assert!(group.view_models.iter().any(|unit| {
+        matches!(unit, TuiRenderUnit::TuiAssistantBubble(b) if b.text.ends_with(" continued"))
+    }));
+    state.current_turn.stop_subagent("running", false, "");
+    dispatch_and_notify(&mut state, &AcpEventData::TurnDone);
+    assert!(state.current_turn.is_empty());
+    assert_eq!(
+        state
+            .committed
+            .iter()
+            .filter(|unit| { matches!(unit, TuiRenderUnit::TuiSubAgentGroup(_)) })
+            .count(),
+        2
+    );
+}
+
+#[test]
+#[serial]
+fn test_flush_resets_after_completed_subagent_is_archived() {
+    crate::kit::atoms::init_atoms();
+    *VIEW_MODELS.state().write() = ViewModelsSnapshot::default();
+    let mut state = make_state(SessionPhase::PromptRunning, 0);
+    state
+        .current_turn
+        .append_text("before child", Some("root-before"));
+    dispatch_and_notify(
+        &mut state,
+        &AcpEventData::SubagentStarted {
+            agent_id: "done-agent".into(),
+            agent_name: "done-agent".into(),
+            is_background: false,
+            parent_tool_call_id: None,
+        },
+    );
+    dispatch_and_notify(
+        &mut state,
+        &AcpEventData::SubagentStopped {
+            agent_id: "done-agent".into(),
+            result: String::new(),
+            is_error: false,
+        },
+    );
+    state
+        .current_turn
+        .append_text("after child", Some("root-after"));
+    dispatch_and_notify(&mut state, &AcpEventData::TurnDone);
+    assert!(state.current_turn.is_empty());
+    assert_eq!(state.committed.len(), 3);
+    assert!(
+        matches!(&state.committed[0], TuiRenderUnit::TuiAssistantBubble(b) if b.text == "before child")
+    );
+    assert!(
+        matches!(&state.committed[1], TuiRenderUnit::TuiSubAgentGroup(group) if group.agent_id == "done-agent")
+    );
+    assert!(
+        matches!(&state.committed[2], TuiRenderUnit::TuiAssistantBubble(b) if b.text == "after child")
+    );
+}
+
 /// 同步 sub-agent 的 ToolStarted/ToolEnded 事件应路由到 SubAgentAccumulator，
 /// 并反映在当前 turn 的 TuiSubAgentGroup 中。
 #[test]
@@ -364,5 +496,123 @@ fn test_concurrent_agent_calls_pair_by_parent_tool_call_id() {
             "group:child-2",
         ],
         "身份配对：并发批次里子分组必须落在自己的 Agent 调用之下，不得按到达顺序互换"
+    );
+}
+
+#[test]
+fn completed_subagent_is_consumed_only_at_archive_boundary() {
+    let mut turn = crate::kit::acp_types::CurrentTurn::new();
+    turn.start_subagent("done".into(), "done".into(), None);
+    turn.start_subagent("running".into(), "running".into(), None);
+    assert!(turn.subagents.iter().all(|subagent| !subagent.archived));
+    turn.stop_subagent("done", false, "");
+    assert_eq!(turn.subagents.len(), 2, "stop 本身保留路由窗口");
+    let completed = turn.take_completed_subagents();
+    assert_eq!(completed.len(), 1);
+    assert_eq!(completed[0].agent_id, "done");
+    assert!(completed[0].archived);
+    assert!(!completed[0].is_running);
+    assert_eq!(turn.subagents.len(), 1);
+    assert!(turn.has_running_subagent());
+    assert!(turn.take_completed_subagents().is_empty());
+}
+
+/// [回归测试 R05] 运行中的 A 分组之后的已完成 B 分组不得被单独抽到 committed。
+///
+/// committed 整段渲染在 current_turn 之前；若把 B 分组（位于 A 分组之后）独立
+/// 归档，B 会跨越仍在运行的 A 分组移到它前面，用户看到的时间线变成
+/// `A 调用卡 → B 分组 → A 分组 → B 调用卡`。
+#[test]
+#[serial]
+fn test_flush_does_not_reorder_completed_subagent_after_running_group() {
+    crate::kit::atoms::init_atoms();
+    *VIEW_MODELS.state().write() = ViewModelsSnapshot::default();
+    let mut state = make_state(SessionPhase::PromptRunning, 0);
+
+    // A：后台子 Agent，启动卡已完成，分组仍运行。
+    // B：同步子 Agent，卡片与分组都已完成，但其分组位于 A 分组之后。
+    for (tool_id, agent_id, stop) in [
+        ("agent-call-a", "agent-a", false),
+        ("agent-call-b", "agent-b", true),
+    ] {
+        dispatch_and_notify(
+            &mut state,
+            &AcpEventData::ToolStarted(crate::kit::stream_data::TuiToolStarted {
+                agent_id: None,
+                tool_name: "Agent".into(),
+                tool_id: tool_id.into(),
+                input_summary: format!("start {agent_id}"),
+                raw_input: serde_json::json!({ "prompt": agent_id }),
+            }),
+        );
+        dispatch_and_notify(
+            &mut state,
+            &AcpEventData::ToolEnded(crate::kit::stream_data::TuiToolEnded {
+                agent_id: None,
+                tool_id: tool_id.into(),
+                output_summary: "started".into(),
+                is_error: false,
+            }),
+        );
+        dispatch_and_notify(
+            &mut state,
+            &AcpEventData::SubagentStarted {
+                agent_id: agent_id.into(),
+                agent_name: agent_id.into(),
+                is_background: agent_id == "agent-a",
+                parent_tool_call_id: Some(tool_id.into()),
+            },
+        );
+        if stop {
+            dispatch_and_notify(
+                &mut state,
+                &AcpEventData::TextChunk(crate::kit::stream_data::TuiTextChunk {
+                    text: "done".into(),
+                    message_id: Some(format!("{agent_id}-msg")),
+                    agent_id: Some(agent_id.into()),
+                }),
+            );
+            dispatch_and_notify(
+                &mut state,
+                &AcpEventData::SubagentStopped {
+                    agent_id: agent_id.into(),
+                    result: String::new(),
+                    is_error: false,
+                },
+            );
+        }
+    }
+
+    dispatch_and_notify(&mut state, &AcpEventData::TurnDone);
+    assert!(
+        state.current_turn.has_running_subagent(),
+        "A 分组仍在运行，turn 不得整体 reset"
+    );
+
+    let layout: Vec<String> = state
+        .committed
+        .iter()
+        .chain(state.current_turn.view_models().iter())
+        .map(|vm| match vm {
+            TuiRenderUnit::TuiToolCard(card) => format!("card:{}", card.tool_id),
+            TuiRenderUnit::TuiSubAgentGroup(group) => format!("group:{}", group.agent_id),
+            other => format!("other:{other:?}"),
+        })
+        .collect();
+    assert_eq!(
+        layout,
+        vec![
+            "card:agent-call-a",
+            "group:agent-a",
+            "card:agent-call-b",
+            "group:agent-b",
+        ],
+        "运行中分组之后的已完成分组不得越过它被提前归档"
+    );
+    assert!(
+        !state.committed.iter().any(
+            |vm| matches!(vm, TuiRenderUnit::TuiSubAgentGroup(group) if group.agent_id == "agent-b")
+        ),
+        "B 分组必须留在容器里等待 A 分组结束"
     );
 }

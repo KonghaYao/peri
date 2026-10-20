@@ -79,7 +79,7 @@ async fn test_replay_persisted_history_publishes_final_assistant_in_order() {
         thread::ThreadMeta,
     };
     use peri_resources::sessions::SqliteThreadStore;
-    struct WireSender(mpsc::UnboundedSender<AcpNotification>);
+    struct WireSender(mpsc::Sender<AcpNotification>);
     #[async_trait::async_trait]
     impl ReplaySender for WireSender {
         async fn send(&self, notif: SessionNotification) -> Result<(), ReplayError> {
@@ -88,6 +88,7 @@ async fn test_replay_persisted_history_publishes_final_assistant_in_order() {
                     session_id: notif.session_id.to_string(),
                     params: serde_json::to_value(notif).unwrap(),
                 })
+                .await
                 .unwrap();
             Ok(())
         }
@@ -164,8 +165,10 @@ async fn test_replay_persisted_history_publishes_final_assistant_in_order() {
         let reopened = SqliteThreadStore::new(&path).await.unwrap();
         let payloads = reopened.load_context_payloads(&id).await.unwrap();
         assert_eq!(payloads.len(), messages.len(), "磁盘重载不得按角色截断");
-        let (notif_tx, notif_rx) = mpsc::unbounded_channel();
-        let (bridge_tx, mut bridge_rx) = mpsc::unbounded_channel();
+        let (notif_tx, notif_rx) =
+            mpsc::channel(crate::acp_client::client::NOTIFICATION_QUEUE_CAPACITY);
+        let (bridge_tx, mut bridge_rx) =
+            mpsc::channel(crate::kit::acp_bridge::BRIDGE_QUEUE_CAPACITY);
         let shutdown = CancellationToken::new();
         let notifier =
             crate::kit::acp_notifier::spawn_kit_notifier(notif_rx, bridge_tx, shutdown.clone());
@@ -636,7 +639,7 @@ async fn test_goal_snapshot_bridge_accepts_current_session_and_drops_stale_sessi
     *GOAL_SNAPSHOT.state().write() = None;
     BRIDGE_RESET_COUNTER.set(old_reset.wrapping_add(1));
 
-    let (tx, rx) = mpsc::unbounded_channel();
+    let (tx, rx) = mpsc::channel(crate::kit::acp_bridge::BRIDGE_QUEUE_CAPACITY);
     let (observed_tx, mut observed_rx) = mpsc::unbounded_channel();
     let shutdown = CancellationToken::new();
     let handle = spawn_acp_bridge_observed(rx, shutdown.clone(), observed_tx);
@@ -645,6 +648,7 @@ async fn test_goal_snapshot_bridge_accepts_current_session_and_drops_stale_sessi
         event: goal_snapshot("current", 2),
         active_session_id: "s1".into(),
     })
+    .await
     .unwrap();
     assert_eq!(observed_rx.recv().await, Some(true));
     assert_eq!(
@@ -660,6 +664,7 @@ async fn test_goal_snapshot_bridge_accepts_current_session_and_drops_stale_sessi
         event: goal_snapshot("stale", 99),
         active_session_id: "s0".into(),
     })
+    .await
     .unwrap();
     assert_eq!(observed_rx.recv().await, Some(false));
     let projected = GOAL_SNAPSHOT.state().read().clone().unwrap();
@@ -684,7 +689,7 @@ async fn test_late_prompt_failure_from_previous_session_does_not_reset_loading()
     let old_reset = BRIDGE_RESET_COUNTER.get();
     *ACTIVE_SESSION_ID.state().write() = "s2".into();
     BRIDGE_RESET_COUNTER.set(old_reset.wrapping_add(1));
-    let (tx, rx) = mpsc::unbounded_channel();
+    let (tx, rx) = mpsc::channel(crate::kit::acp_bridge::BRIDGE_QUEUE_CAPACITY);
     let (observed_tx, mut observed_rx) = mpsc::unbounded_channel();
     let shutdown = CancellationToken::new();
     let handle = spawn_acp_bridge_observed(rx, shutdown.clone(), observed_tx);
@@ -694,6 +699,7 @@ async fn test_late_prompt_failure_from_previous_session_does_not_reset_loading()
         },
         active_session_id: "s2".into(),
     })
+    .await
     .unwrap();
     assert_eq!(observed_rx.recv().await, Some(true));
     assert!(ACP_STATE.state().read().is_loading);
@@ -703,6 +709,7 @@ async fn test_late_prompt_failure_from_previous_session_does_not_reset_loading()
         },
         active_session_id: "s1".into(),
     })
+    .await
     .unwrap();
     assert_eq!(observed_rx.recv().await, Some(false));
     assert!(ACP_STATE.state().read().is_loading);
@@ -733,7 +740,7 @@ async fn test_hitl_bridge_drops_unowned_events_before_all_side_effects() {
     let old_view = VIEW_MODELS.state().read().clone();
     *ACTIVE_SESSION_ID.state().write() = String::new();
     BRIDGE_RESET_COUNTER.set(old_reset.wrapping_add(1));
-    let (tx, rx) = mpsc::unbounded_channel();
+    let (tx, rx) = mpsc::channel(crate::kit::acp_bridge::BRIDGE_QUEUE_CAPACITY);
     let (observed_tx, mut observed_rx) = mpsc::unbounded_channel();
     let shutdown = CancellationToken::new();
     let handle = spawn_acp_bridge_observed(rx, shutdown.clone(), observed_tx);
@@ -741,6 +748,7 @@ async fn test_hitl_bridge_drops_unowned_events_before_all_side_effects() {
         event: AcpEventData::PromptStarted,
         active_session_id: String::new(),
     })
+    .await
     .unwrap();
     assert_eq!(observed_rx.recv().await, Some(true));
     *HITL_PENDING.state().write() = Some(PendingInteraction {
@@ -758,6 +766,7 @@ async fn test_hitl_bridge_drops_unowned_events_before_all_side_effects() {
         event: hitl(),
         active_session_id: "s1".into(),
     })
+    .await
     .unwrap();
     assert_eq!(observed_rx.recv().await, Some(false));
     assert_eq!(
@@ -780,6 +789,7 @@ async fn test_hitl_bridge_drops_unowned_events_before_all_side_effects() {
         event: AcpEventData::PromptStarted,
         active_session_id: "s1".into(),
     })
+    .await
     .unwrap();
     assert_eq!(observed_rx.recv().await, Some(true));
     *HITL_PENDING.state().write() = Some(PendingInteraction {
@@ -796,6 +806,7 @@ async fn test_hitl_bridge_drops_unowned_events_before_all_side_effects() {
         event: hitl(),
         active_session_id: "stale".into(),
     })
+    .await
     .unwrap();
     assert_eq!(observed_rx.recv().await, Some(false));
     assert_eq!(
@@ -812,6 +823,7 @@ async fn test_hitl_bridge_drops_unowned_events_before_all_side_effects() {
         event: hitl(),
         active_session_id: "s1".into(),
     })
+    .await
     .unwrap();
     assert_eq!(observed_rx.recv().await, Some(true));
     assert_eq!(
@@ -863,7 +875,7 @@ async fn test_ask_user_bridge_drops_unowned_events_before_all_side_effects() {
     let old_view = VIEW_MODELS.state().read().clone();
     *ACTIVE_SESSION_ID.state().write() = String::new();
     BRIDGE_RESET_COUNTER.set(old_reset.wrapping_add(1));
-    let (tx, rx) = mpsc::unbounded_channel();
+    let (tx, rx) = mpsc::channel(crate::kit::acp_bridge::BRIDGE_QUEUE_CAPACITY);
     let (observed_tx, mut observed_rx) = mpsc::unbounded_channel();
     let shutdown = CancellationToken::new();
     let handle = spawn_acp_bridge_observed(rx, shutdown.clone(), observed_tx);
@@ -871,6 +883,7 @@ async fn test_ask_user_bridge_drops_unowned_events_before_all_side_effects() {
         event: AcpEventData::PromptStarted,
         active_session_id: String::new(),
     })
+    .await
     .unwrap();
     assert_eq!(observed_rx.recv().await, Some(true));
     *ASK_USER_PENDING.state().write() = Some(PendingInteraction {
@@ -885,6 +898,7 @@ async fn test_ask_user_bridge_drops_unowned_events_before_all_side_effects() {
         event: ask_user(),
         active_session_id: "s1".into(),
     })
+    .await
     .unwrap();
     assert_eq!(observed_rx.recv().await, Some(false));
     assert_eq!(
@@ -907,6 +921,7 @@ async fn test_ask_user_bridge_drops_unowned_events_before_all_side_effects() {
         event: AcpEventData::PromptStarted,
         active_session_id: "s1".into(),
     })
+    .await
     .unwrap();
     assert_eq!(observed_rx.recv().await, Some(true));
     *ASK_USER_PENDING.state().write() = Some(PendingInteraction {
@@ -920,6 +935,7 @@ async fn test_ask_user_bridge_drops_unowned_events_before_all_side_effects() {
         event: ask_user(),
         active_session_id: "stale".into(),
     })
+    .await
     .unwrap();
     assert_eq!(observed_rx.recv().await, Some(false));
     assert_eq!(
@@ -936,6 +952,7 @@ async fn test_ask_user_bridge_drops_unowned_events_before_all_side_effects() {
         event: ask_user(),
         active_session_id: "s1".into(),
     })
+    .await
     .unwrap();
     assert_eq!(observed_rx.recv().await, Some(true));
     assert_eq!(

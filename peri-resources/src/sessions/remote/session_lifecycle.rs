@@ -24,11 +24,13 @@ use peri_acp_types::session_resources::{SessionResourceError, SessionResourceRes
 use peri_acp_types::thread::{AgentStatus, ThreadId};
 use turso_serverless::Value;
 
-use super::mutation::incomplete_reply;
+use super::mutation::{incomplete_reply, RemoteStore};
+use super::schema;
 use super::session_codec as codec;
 use super::session_data::{invalid_input, not_found, RemoteSessionData};
 use super::session_sql::{self, DELETE_SESSION_SQL};
 use super::sql::{int_at, text_at, StatementSpec};
+use crate::sessions::canonical;
 use crate::sessions::data::ChildResumeRecord;
 
 // ─── 批内守卫 ─────────────────────────────────────────────────────────────────
@@ -53,6 +55,28 @@ const UPDATE_AGENT_STATUS_SQL: &str =
     "UPDATE threads SET agent_status = ?1, updated_at = ?2 WHERE id = ?3";
 
 const SELECT_AGENT_STATUS_SQL: &str = "SELECT agent_status FROM threads WHERE id = ?1";
+
+/// 两张 inherited 派生索引表是否存在。它们是可选表，旧库/损坏页可能缺表；
+/// 删除路径必须先探测，再把删除语句放进托管批（R08）。
+async fn inherited_index_tables(store: &RemoteStore) -> SessionResourceResult<(bool, bool)> {
+    let results = store
+        .read_batch(vec![
+            StatementSpec::new(
+                schema::TABLE_EXISTS_SQL,
+                vec![Value::Text(
+                    canonical::INHERITED_SNAPSHOT_INDEX_TABLE.to_owned(),
+                )],
+            ),
+            StatementSpec::new(
+                schema::TABLE_EXISTS_SQL,
+                vec![Value::Text(
+                    canonical::INHERITED_PAYLOAD_INDEX_TABLE.to_owned(),
+                )],
+            ),
+        ])
+        .await?;
+    Ok((!results[0].is_empty(), !results[1].is_empty()))
+}
 
 impl RemoteSessionData {
     pub(super) async fn write_close_intent(&self, id: &ThreadId) -> SessionResourceResult<()> {
@@ -98,7 +122,17 @@ impl RemoteSessionData {
     /// 远端不留 `creation_intent` 锚点：那本机事实用于判定「同一 identity 不被复活」，
     /// 远端没有第二个副本，也就没有需要锚定的复活路径。
     pub(super) async fn revoke_unpublished(&self, id: &ThreadId) -> SessionResourceResult<()> {
-        let effects = session_sql::revoke_session_statements(id.as_str());
+        let (has_snapshot, has_payload) = {
+            let store = self.store().await?;
+            inherited_index_tables(&store).await?
+        };
+        let effects = session_sql::with_inherited_index_deletes(
+            session_sql::revoke_session_statements(id.as_str()),
+            id.as_str(),
+            has_snapshot,
+            has_payload,
+            false,
+        );
         self.commit_revocation("revoke_unpublished_session", id, effects)
             .await
     }
@@ -112,7 +146,17 @@ impl RemoteSessionData {
         &self,
         id: &ThreadId,
     ) -> SessionResourceResult<()> {
-        let effects = session_sql::revoke_draft_statements(id.as_str());
+        let (has_snapshot, has_payload) = {
+            let store = self.store().await?;
+            inherited_index_tables(&store).await?
+        };
+        let effects = session_sql::with_inherited_index_deletes(
+            session_sql::revoke_draft_statements(id.as_str()),
+            id.as_str(),
+            has_snapshot,
+            has_payload,
+            true,
+        );
         let counts = self
             .commit_revocation_counts("revoke_unpublished_draft", id, effects)
             .await?;
@@ -181,17 +225,34 @@ impl RemoteSessionData {
                 vec![Value::Text(id.as_str().to_owned())],
             ))
             .await?;
+        let (has_snapshot, has_payload) = inherited_index_tables(&store).await?;
         // 树上的 id 读完再写：借用不跨到后面的写入路径（见上）。
         drop(store);
         let tree = tree_ids(&rows)?;
         // 删除不新增墓碑：树上的每个会话先清子行（messages → session_bindings，
-        // 与 `canonical::THREAD_CHILD_DELETES` 同一份语句与顺序）再清会话行，
-        // 全部在同一个批里。
-        let mut effects = Vec::with_capacity(tree.len() * 4);
+        // 与 `canonical::THREAD_CHILD_DELETES` 同一份语句与顺序），再清 inherited
+        // 派生索引（payload → snapshot，可选表先探测），最后清会话行，全部在同一个批里。
+        let mut effects = Vec::with_capacity(tree.len() * 6);
         for (_, statement) in crate::sessions::canonical::THREAD_CHILD_DELETES {
             for thread in &tree {
                 effects.push(StatementSpec::new(
                     statement,
+                    vec![Value::Text(thread.clone())],
+                ));
+            }
+        }
+        if has_snapshot {
+            if has_payload {
+                for thread in &tree {
+                    effects.push(StatementSpec::new(
+                        canonical::DELETE_INHERITED_PAYLOADS_BY_THREAD_SQL,
+                        vec![Value::Text(thread.clone())],
+                    ));
+                }
+            }
+            for thread in &tree {
+                effects.push(StatementSpec::new(
+                    canonical::DELETE_INHERITED_SNAPSHOT_BY_THREAD_SQL,
                     vec![Value::Text(thread.clone())],
                 ));
             }

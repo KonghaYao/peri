@@ -191,6 +191,8 @@ pub struct SubAgentAccumulator {
     pub agent_id: String,
     pub agent_name: String,
     pub is_running: bool,
+    /// 已从父 turn 消费并交给归档入口，不再接受该轮次的事件路由。
+    pub archived: bool,
     /// Parent 终态唯一事实源——由 `SubagentStopped.is_error` 写入；
     /// nested child tool error 不参与。
     pub is_error: bool,
@@ -213,6 +215,7 @@ impl SubAgentAccumulator {
             agent_id,
             agent_name,
             is_running: true,
+            archived: false,
             is_error: false,
             error_reason: None,
             child_turn,

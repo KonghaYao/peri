@@ -119,11 +119,31 @@ pub(super) async fn insert_binding_row(
 /// 之前，不要删除清单里的任何一项。
 pub(super) const THREAD_CHILD_DELETES: &[(&str, &str)] = canonical::THREAD_CHILD_DELETES;
 
+/// 删除 `threads` 行之前清理的派生表（无 threads 外键，可从 `inherited_context` 重建）。
+pub(super) const THREAD_DERIVED_DELETES: &[(&str, &str)] = canonical::THREAD_DERIVED_DELETES;
+
 /// 删除 `threads` 行本身的语句；只在 [`delete_thread_child_rows`] 之后执行（先子后父，
 /// 与远端 `session_lifecycle` 的 messages → session_bindings → threads 顺序一致）。
 pub(super) const DELETE_THREAD_SQL: &str = canonical::DELETE_THREAD_ROW_SQL;
 
-/// 显式删除一条 `threads` 行的全部子行（[`THREAD_CHILD_DELETES`] 逐条执行）。
+/// 表存在性探测：派生索引表是可选对象，旧库或手工删表后删除路径不得因此失败。
+async fn table_exists(
+    connection: &mut SqliteConnection,
+    table: &str,
+) -> std::result::Result<bool, sqlx::Error> {
+    let row: Option<(String,)> =
+        sqlx::query_as("SELECT name FROM sqlite_master WHERE type = 'table' AND name = ?1")
+            .bind(table)
+            .fetch_optional(&mut *connection)
+            .await?;
+    Ok(row.is_some())
+}
+
+/// 显式删除一条 `threads` 行的全部子行（[`THREAD_CHILD_DELETES`] 与
+/// [`THREAD_DERIVED_DELETES`] 逐条执行）。
+///
+/// 派生索引没有 `threads` 外键，缺 snapshot 表时 payload 行也无法按线程定位；
+/// 两张可选表都按实际存在性跳过，旧库与损坏夹具不会让删除失败。
 ///
 /// 调用方负责随后用 [`DELETE_THREAD_SQL`] 删父行，并与本调用处于同一事务。返回
 /// `sqlx::Error` 而不是 `anyhow::Error`：调用点按 [`super::failure::map_sqlx`] 分类
@@ -137,6 +157,20 @@ pub(super) async fn delete_thread_child_rows(
             .bind(thread_id)
             .execute(&mut *connection)
             .await?;
+    }
+    let has_snapshot =
+        table_exists(&mut *connection, canonical::INHERITED_SNAPSHOT_INDEX_TABLE).await?;
+    for (table, statement) in THREAD_DERIVED_DELETES {
+        // payload 删除依赖 snapshot 子查询；缺 snapshot 表时无法定位线程的 payload 行。
+        let present = has_snapshot
+            && (*table != canonical::INHERITED_PAYLOAD_INDEX_TABLE
+                || table_exists(&mut *connection, table).await?);
+        if present {
+            sqlx::query(*statement)
+                .bind(thread_id)
+                .execute(&mut *connection)
+                .await?;
+        }
     }
     Ok(())
 }

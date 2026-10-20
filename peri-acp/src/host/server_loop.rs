@@ -604,7 +604,7 @@ impl ServerLoop<'_> {
         if method == "initialize" && result.is_ok() {
             // 协商值同时落到**本连接**：进程级 pending_caps 会被下一个连接覆盖，
             // 会话级 registry 会把旧连接的能力带给重连的同一会话。
-            let caps = requests::session_lifecycle::initialize_peri_caps(&params);
+            let caps = requests::session_caps::effective_peri_caps(self.cfg, &params);
             connection.lock().await.commit_initialize(caps);
         }
         if result.is_ok() {

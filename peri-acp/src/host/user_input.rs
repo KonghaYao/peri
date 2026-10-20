@@ -141,7 +141,9 @@ pub(super) fn ensure_mailbox(
     let mailbox = UserInputMailbox::new(
         session_id.to_string(),
         inbox,
-        Arc::new(move |event| bus.emit_state(event)),
+        Arc::new(move |event| {
+            bus.emit_state(event);
+        }),
     );
     let controller = Arc::downgrade(&cfg.controller);
     let sid = session_id.to_string();

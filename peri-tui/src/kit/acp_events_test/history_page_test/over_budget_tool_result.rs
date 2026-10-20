@@ -6,6 +6,7 @@ use crate::kit::acp_events::history_page::{
 };
 use crate::kit::acp_types::ToolResultRefetch;
 use crate::kit::history_paging::HistoryPageOrigin;
+use crate::kit::history_window::PersistentEntryKey;
 
 fn source(tool_id: &str, token: &str, cursor: &str) -> history_page::ToolResultSource {
     history_page::ToolResultSource {
@@ -259,7 +260,12 @@ fn test_history_page_over_budget_no_source_error_result_keeps_error_placeholder(
             vec![("s1:call", 10, vec![sub(0, tool_start("t-big", "Bash"))])],
         ),
     );
-    history_page::insert_pending_tool_end_for_tests("t-big", &"x".repeat(9 * 1024 * 1024), true);
+    history_page::insert_pending_tool_end_for_tests(
+        "t-big",
+        PersistentEntryKey::own("s1:end-t-big"),
+        &"x".repeat(9 * 1024 * 1024),
+        true,
+    );
     history_paging::with_spans(|spans| {
         history_page::apply_pending_tool_ends(&mut state, spans);
     });

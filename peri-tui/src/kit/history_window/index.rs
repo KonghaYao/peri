@@ -1,10 +1,9 @@
-//! 驻留索引：条目/子项身份、段槽位前缀和、跨段工具配对与共享分配计量。
+//! 驻留索引：条目/子项身份、段槽位前缀和与共享分配计量。
 
 use std::collections::{HashMap, HashSet};
 use std::ops::Range;
 use std::sync::Arc;
 
-use super::HistorySource;
 use super::model::{
     PersistentEntryKey, PersistentSubItemKey, ResidentSegment, SegmentKey, WindowModelError,
 };
@@ -28,135 +27,6 @@ struct SegmentSlot {
 struct SegmentMeta {
     body_bytes: usize,
     pinned: bool,
-}
-
-/// 工具结果引用：身份 + 内容修订，不含正文。
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct ResultRef {
-    pub source: HistorySource,
-    pub entry_id: String,
-    pub content_revision: String,
-}
-
-impl ResultRef {
-    pub fn new(
-        source: HistorySource,
-        entry_id: impl Into<String>,
-        content_revision: impl Into<String>,
-    ) -> Self {
-        Self {
-            source,
-            entry_id: entry_id.into(),
-            content_revision: content_revision.into(),
-        }
-    }
-
-    fn entry_key(&self) -> PersistentEntryKey {
-        PersistentEntryKey::new(self.source.clone(), self.entry_id.clone())
-    }
-}
-
-/// 工具终态元数据：错误位、输出总长度与**完整输出**。
-///
-/// `summary()` 只用于诊断/单行展示，绝不能回填到卡片冒充完整结果。跨页暂存与
-/// 配对恢复都以这里保存的正文为准。
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct ToolTerminalMeta {
-    pub is_error: bool,
-    pub output_bytes: usize,
-    output: Arc<str>,
-}
-
-impl ToolTerminalMeta {
-    pub const MAX_SUMMARY_BYTES: usize = 1024;
-
-    pub fn new(is_error: bool, output_bytes: usize, output: impl Into<String>) -> Self {
-        let output: String = output.into();
-        Self {
-            is_error,
-            output_bytes,
-            output: Arc::from(output),
-        }
-    }
-
-    /// 完整输出正文。
-    pub fn output(&self) -> &str {
-        &self.output
-    }
-
-    /// 单行诊断摘要（最多 1 KiB）；不是可回填的完整结果。
-    pub fn summary(&self) -> &str {
-        let max = Self::MAX_SUMMARY_BYTES.min(self.output.len());
-        let mut end = max;
-        while end > 0 && !self.output.is_char_boundary(end) {
-            end -= 1;
-        }
-        &self.output[..end]
-    }
-
-    /// 元数据的估算保留字节（完整正文 + 结构体固定开销）。
-    pub fn retained_bytes(&self) -> usize {
-        self.output.len() + std::mem::size_of::<Self>()
-    }
-}
-
-/// 工具配对键：只按来源 + `toolCallId`，不把调用条目放进键（跨页配对必须成立）。
-#[derive(Clone, Debug, PartialEq, Eq, Hash)]
-pub struct ToolCallKey {
-    pub source: HistorySource,
-    pub tool_call_id: String,
-}
-
-impl ToolCallKey {
-    pub fn new(source: HistorySource, tool_call_id: impl Into<String>) -> Self {
-        Self {
-            source,
-            tool_call_id: tool_call_id.into(),
-        }
-    }
-}
-
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub enum ToolCallState {
-    Started {
-        entry: PersistentEntryKey,
-        sub_item: u32,
-    },
-    ResultOnly {
-        result_ref: ResultRef,
-        terminal: ToolTerminalMeta,
-    },
-    Terminal {
-        call_ref: PersistentEntryKey,
-        result_ref: Option<ResultRef>,
-        meta: ToolTerminalMeta,
-    },
-}
-
-impl ToolCallState {
-    fn pending_meta(&self) -> Option<&ToolTerminalMeta> {
-        match self {
-            Self::ResultOnly { terminal, .. } => Some(terminal),
-            Self::Started { .. } | Self::Terminal { .. } => None,
-        }
-    }
-}
-
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub enum ToolPairOutcome {
-    CallOnly,
-    ResultOnly,
-    Paired,
-    TerminalUpdated,
-    DuplicateCall,
-}
-
-#[derive(Clone, Debug, PartialEq, Eq, thiserror::Error)]
-pub enum ToolPairRejected {
-    #[error("unmatched tool result count limit reached")]
-    TooManyPending,
-    #[error("unmatched tool result byte budget would be exceeded")]
-    PendingBudgetExceeded,
 }
 
 /// 共享 `Arc` 分配去重账本。同一个指针只计一次；`forget` 只在最后一份受管理引用
@@ -220,7 +90,6 @@ impl AllocationAccount {
 pub struct ResidentIndex {
     entries: HashMap<PersistentEntryKey, EntryLocator>,
     sub_items: HashSet<PersistentSubItemKey>,
-    tool_calls: HashMap<ToolCallKey, ToolCallState>,
     by_segment: HashMap<SegmentKey, Vec<PersistentEntryKey>>,
     segment_meta: HashMap<SegmentKey, SegmentMeta>,
     slots: HashMap<SegmentKey, SegmentSlot>,
@@ -228,18 +97,14 @@ pub struct ResidentIndex {
     total_units: usize,
     body_bytes: usize,
     pinned_bytes: usize,
-    pending_tool_bytes: usize,
     allocations: AllocationAccount,
-    max_pending_tool_bytes: usize,
-    max_pending_tool_results: usize,
 }
 
 impl ResidentIndex {
-    pub fn new(max_pending_tool_bytes: usize, max_pending_tool_results: usize) -> Self {
+    pub fn new() -> Self {
         Self {
             entries: HashMap::new(),
             sub_items: HashSet::new(),
-            tool_calls: HashMap::new(),
             by_segment: HashMap::new(),
             segment_meta: HashMap::new(),
             slots: HashMap::new(),
@@ -247,10 +112,7 @@ impl ResidentIndex {
             total_units: 0,
             body_bytes: 0,
             pinned_bytes: 0,
-            pending_tool_bytes: 0,
             allocations: AllocationAccount::default(),
-            max_pending_tool_bytes,
-            max_pending_tool_results,
         }
     }
 
@@ -268,10 +130,6 @@ impl ResidentIndex {
 
     pub fn pinned_bytes(&self) -> usize {
         self.pinned_bytes
-    }
-
-    pub fn pending_tool_bytes(&self) -> usize {
-        self.pending_tool_bytes
     }
 
     pub fn total_units(&self) -> usize {
@@ -308,10 +166,6 @@ impl ResidentIndex {
         self.slots
             .get(&key)
             .map(|slot| slot.start..slot.start + slot.unit_count)
-    }
-
-    pub fn tool_call(&self, key: &ToolCallKey) -> Option<&ToolCallState> {
-        self.tool_calls.get(key)
     }
 
     pub fn allocations(&self) -> &AllocationAccount {
@@ -390,22 +244,6 @@ impl ResidentIndex {
         }
         self.slots.remove(&key);
         self.segment_order.retain(|segment| *segment != key);
-        self.tool_calls.retain(|_, state| match state {
-            ToolCallState::Started { entry, .. } => self.entries.contains_key(entry),
-            ToolCallState::ResultOnly { result_ref, .. } => {
-                self.entries.contains_key(&result_ref.entry_key())
-            }
-            ToolCallState::Terminal {
-                call_ref,
-                result_ref,
-                ..
-            } => {
-                self.entries.contains_key(call_ref)
-                    || result_ref
-                        .as_ref()
-                        .is_some_and(|result| self.entries.contains_key(&result.entry_key()))
-            }
-        });
         self.recompute_totals();
         removed.len()
     }
@@ -466,163 +304,11 @@ impl ResidentIndex {
             .filter_map(|key| self.slots.get(key))
             .map(|slot| slot.unit_count)
             .sum();
-        self.pending_tool_bytes = self
-            .tool_calls
-            .values()
-            .filter_map(ToolCallState::pending_meta)
-            .map(ToolTerminalMeta::retained_bytes)
-            .sum();
-    }
-
-    fn recompute_pending_tool_bytes(&mut self) {
-        self.pending_tool_bytes = self
-            .tool_calls
-            .values()
-            .filter_map(ToolCallState::pending_meta)
-            .map(ToolTerminalMeta::retained_bytes)
-            .sum();
-    }
-
-    fn pending_result_count(&self) -> usize {
-        self.tool_calls
-            .values()
-            .filter(|state| matches!(state, ToolCallState::ResultOnly { .. }))
-            .count()
-    }
-
-    pub fn record_tool_started(
-        &mut self,
-        source: HistorySource,
-        tool_call_id: impl Into<String>,
-        entry: PersistentEntryKey,
-        sub_item: u32,
-    ) -> ToolPairOutcome {
-        let key = ToolCallKey::new(source, tool_call_id);
-        match self.tool_calls.remove(&key) {
-            Some(ToolCallState::ResultOnly {
-                result_ref,
-                terminal,
-            }) => {
-                self.tool_calls.insert(
-                    key,
-                    ToolCallState::Terminal {
-                        call_ref: entry,
-                        result_ref: Some(result_ref),
-                        meta: terminal,
-                    },
-                );
-                self.recompute_pending_tool_bytes();
-                ToolPairOutcome::Paired
-            }
-            Some(previous @ ToolCallState::Started { .. }) => {
-                // 同一调用重复开始：保留第一次身份，不制造第二张卡。
-                self.tool_calls.insert(key, previous);
-                ToolPairOutcome::DuplicateCall
-            }
-            Some(existing @ ToolCallState::Terminal { .. }) => {
-                self.tool_calls.insert(key, existing);
-                ToolPairOutcome::DuplicateCall
-            }
-            None => {
-                self.tool_calls
-                    .insert(key, ToolCallState::Started { entry, sub_item });
-                ToolPairOutcome::CallOnly
-            }
-        }
-    }
-
-    pub fn record_tool_result(
-        &mut self,
-        source: HistorySource,
-        tool_call_id: impl Into<String>,
-        result_ref: ResultRef,
-        terminal: ToolTerminalMeta,
-    ) -> Result<ToolPairOutcome, ToolPairRejected> {
-        let key = ToolCallKey::new(source, tool_call_id);
-        match self.tool_calls.remove(&key) {
-            Some(ToolCallState::Started { entry, .. }) => {
-                self.tool_calls.insert(
-                    key,
-                    ToolCallState::Terminal {
-                        call_ref: entry,
-                        result_ref: Some(result_ref),
-                        meta: terminal,
-                    },
-                );
-                self.recompute_pending_tool_bytes();
-                Ok(ToolPairOutcome::Paired)
-            }
-            Some(ToolCallState::Terminal {
-                call_ref,
-                result_ref: previous,
-                ..
-            }) => {
-                self.tool_calls.insert(
-                    key,
-                    ToolCallState::Terminal {
-                        call_ref,
-                        result_ref: Some(result_ref),
-                        meta: terminal,
-                    },
-                );
-                let _ = previous;
-                Ok(ToolPairOutcome::TerminalUpdated)
-            }
-            Some(previous @ ToolCallState::ResultOnly { .. }) => {
-                let additional = terminal.retained_bytes();
-                let previous_bytes = previous
-                    .pending_meta()
-                    .map(ToolTerminalMeta::retained_bytes)
-                    .unwrap_or(0);
-                if self
-                    .pending_tool_bytes
-                    .saturating_sub(previous_bytes)
-                    .saturating_add(additional)
-                    > self.max_pending_tool_bytes
-                {
-                    self.tool_calls.insert(key, previous);
-                    return Err(ToolPairRejected::PendingBudgetExceeded);
-                }
-                self.tool_calls.insert(
-                    key,
-                    ToolCallState::ResultOnly {
-                        result_ref,
-                        terminal,
-                    },
-                );
-                self.recompute_pending_tool_bytes();
-                Ok(ToolPairOutcome::ResultOnly)
-            }
-            None => {
-                if self.pending_result_count() >= self.max_pending_tool_results {
-                    return Err(ToolPairRejected::TooManyPending);
-                }
-                if self
-                    .pending_tool_bytes
-                    .saturating_add(terminal.retained_bytes())
-                    > self.max_pending_tool_bytes
-                {
-                    return Err(ToolPairRejected::PendingBudgetExceeded);
-                }
-                self.tool_calls.insert(
-                    key,
-                    ToolCallState::ResultOnly {
-                        result_ref,
-                        terminal,
-                    },
-                );
-                self.recompute_pending_tool_bytes();
-                Ok(ToolPairOutcome::ResultOnly)
-            }
-        }
     }
 }
 
 impl Default for ResidentIndex {
     fn default() -> Self {
-        Self::new(
-            super::budget::INITIAL_PENDING_TOOL_BYTES,
-            super::budget::INITIAL_MAX_PENDING_TOOL_RESULTS,
-        )
+        Self::new()
     }
 }

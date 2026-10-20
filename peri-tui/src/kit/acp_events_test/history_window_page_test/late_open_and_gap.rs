@@ -165,6 +165,14 @@ fn gap_seek_response_fills_the_gap_in_place_without_reordering() {
             "b".to_string(),
         )));
 
+    // 桥接插入正文时同步登记展示账本；模型索引不代表 committed 的真实槽位。
+    state.window.mark_display_block(
+        &[
+            (PersistentEntryKey::own("s1:a"), 1),
+            (entry_b.key.clone(), 1),
+        ],
+        0,
+    );
     let (before, after) = state.window.neighbor_entries(key_b);
     let segment = state.window.segment(key_b).expect("segment b").clone();
     let plan = ReleasePlan {
@@ -180,11 +188,12 @@ fn gap_seek_response_fills_the_gap_in_place_without_reordering() {
         before_cursor: Some("before-b".into()),
         after_cursor: Some("after-b".into()),
     };
-    state.window.apply_release_plan(&plan).expect("release b");
-    // 测试直接应用了模型释放，没有经过桥接释放事务；清掉待消费计划，
-    // 避免下一次接纳把它当成预算压力再次释放。
-    let _ = state.window.take_pending_release_plans();
-    state.committed.remove(1);
+    let released = crate::kit::history_window::release_window_plans(
+        &mut state,
+        vec![plan],
+        crate::kit::history_window::ReleaseReason::BudgetPressure,
+    );
+    assert_eq!(released.released_units, 1);
     // 缺口之后还有 live 追加内容：补缺口必须插在 live 之前，而不是追加到尾部。
     state
         .committed
