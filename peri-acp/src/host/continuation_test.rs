@@ -287,6 +287,35 @@ fn test_continuation_dispatchable_requires_pending_defer() {
     ));
 }
 
+/// [T01] 后台结果续跑不依赖 SubAgentComplete Defer：只在 mailbox 仍有
+/// Ready 结果时 dispatch，Covered 或 Stop 后不得空转唤醒主模型。
+#[test]
+fn async_result_continuation_requires_ready_result() {
+    let state = make_session_state(false, 3);
+    // 无 Defer，但 mailbox 有 Ready 结果 → 可续跑一次。
+    assert!(continuation_dispatchable(
+        &state, 3, false, false, false, true, true
+    ));
+    // 结果已被覆盖 / 从未 Ready → 跳过。
+    assert!(!continuation_dispatchable(
+        &state, 3, false, false, false, true, false
+    ));
+    // 用户新 prompt 使代际失效 → 即使有 Ready 结果也不续跑。
+    assert!(!continuation_dispatchable(
+        &state,
+        3 + 1,
+        false,
+        false,
+        false,
+        true,
+        true
+    ));
+    // mq_steering 分支优先，结果续跑不能绕过 steering 队列。
+    assert!(!continuation_dispatchable(
+        &state, 3, false, false, true, true, true
+    ));
+}
+
 #[tokio::test]
 async fn test_scheduler_exits_on_host_shutdown_even_if_continuation_ingress_still_exists() {
     let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<ContinuationRequest>();

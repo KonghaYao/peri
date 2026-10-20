@@ -320,7 +320,7 @@ async fn async_result_act_empty_response_keeps_responsibility() {
 async fn async_result_act_tool_call_settles_after_pair_commit_or_keeps_on_failure() {
     // 1) 配对提交成功：工具结果已落盘，本次处理责任才算结清。
     let ctx = make_context();
-    let (id, receipt) = terminal_result(&ctx.session.async_result_mailbox);
+    let (_id, receipt) = terminal_result(&ctx.session.async_result_mailbox);
     let tool_call = ToolCall::new("call_1", "Read", serde_json::json!({"path": "/tmp"}));
     let reasoning = Reasoning::with_tools("need to read file", vec![tool_call]);
     run_act(ActInput {
@@ -375,5 +375,55 @@ async fn async_result_act_tool_call_settles_after_pair_commit_or_keeps_on_failur
     assert!(
         ctx.session.async_result_mailbox.retains_body(&id),
         "未覆盖时提醒正文必须保留，供后续请求重投影"
+    );
+}
+
+/// [T06] 持久化 barrier 失败：正文没有确认落盘时不得 Covered；
+/// 本次执行失败、责任转为可诊断的 Blocked，等待显式恢复。
+#[tokio::test]
+async fn async_result_act_barrier_failure_keeps_blocked() {
+    use crate::session::test_resources::mock::MockSessionResources;
+    use crate::session::transcript::MessageTranscript;
+
+    let ctx = make_context();
+    let (id, receipt) = terminal_result(&ctx.session.async_result_mailbox);
+
+    let store = MockSessionResources::new();
+    store.register_bound_session("thread-barrier", "/tmp/test");
+    // 后端拒绝写入：canonical append 进入 sticky 失败，barrier 必须报错。
+    store.restrict_to_history_read_only();
+    *ctx.session.transcript.write() =
+        MessageTranscript::new().with_persistence(store, "thread-barrier".to_string());
+
+    let reasoning = Reasoning::with_answer("thinking", "final answer");
+    let outcome = run_act(ActInput {
+        context: ctx.clone(),
+        reasoning,
+        catalog: ctx.runtime.tool_catalog.snapshot(),
+        receipt: Some(receipt),
+    })
+    .await;
+    assert!(outcome.is_err(), "barrier 失败必须让本次执行失败");
+
+    assert_eq!(
+        ctx.session.async_result_mailbox.pending_count(),
+        1,
+        "未确认落盘前不得清空处理责任"
+    );
+    assert_eq!(
+        ctx.session.async_result_mailbox.state_of(&id),
+        Some(crate::session::async_result_mailbox::AsyncResultState::Blocked),
+        "barrier 失败必须转为 Blocked，而不是 Covered"
+    );
+    let snapshot = ctx.session.async_result_mailbox.protected_snapshot();
+    let diagnostic = snapshot.items[0]
+        .diagnostic
+        .as_ref()
+        .expect("Blocked 必须带诊断");
+    assert_eq!(diagnostic.stage, "act");
+    assert!(
+        diagnostic.summary.contains("persistence barrier"),
+        "诊断需指出 barrier 失败：{}",
+        diagnostic.summary
     );
 }
