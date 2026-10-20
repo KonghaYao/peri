@@ -327,10 +327,18 @@ impl BackgroundTaskResult {
             "timed_out" if self.shell_output.is_some() => parts
                 .push("超时被终止；进程组已终止，逃逸子进程可能存活。".to_string()),
             "timed_out" => parts.push("任务超时终止。".to_string()),
-            "failed" => parts.push(bounded_notification_field(
-                &self.output,
-                NOTIFICATION_DIAGNOSTIC_LIMIT,
-            )),
+            "failed" => {
+                if self.shell_output.is_some() {
+                    // shell 输出只留在文件：正文重复原文会突破通知大小边界，
+                    // 也违背“通知只携带状态/命令/输出位置”的约束。
+                    parts.push("任务失败；请结合 exit_code 与 stderr 输出文件诊断。".to_string());
+                } else {
+                    parts.push(bounded_notification_field(
+                        &self.output,
+                        NOTIFICATION_DIAGNOSTIC_LIMIT,
+                    ));
+                }
+            }
             _ => {}
         }
         if let Some(error) = self
