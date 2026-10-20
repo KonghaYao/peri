@@ -58,9 +58,14 @@ impl SessionEnvironment {
                     break;
                 }
                 Some("failed") => {
-                    return Err(
-                        "workflow consumer setup failed: MCP pool initialization failed".into(),
+                    // 终态且没有 workflow 实例：可能是无关 server 失败或部署未提供该
+                    // 实例。会话本身仍可用，不把 Workflow 不可用升级为 session 失败。
+                    tracing::warn!(
+                        target: "workflow.consumer",
+                        "MCP pool initialization failed without a workflow instance; \
+                         skipping workflow consumer wiring"
                     );
+                    return Ok(false);
                 }
                 Some("pending" | "initializing") => {}
                 _ => {

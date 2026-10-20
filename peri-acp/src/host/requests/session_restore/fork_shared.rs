@@ -128,6 +128,11 @@ pub(crate) async fn handle_fork_shared(
     };
     #[cfg(not(target_os = "emscripten"))]
     if let Some(chain) = workflow_chain.as_ref() {
+        // 消费者接线等待 MCP 初始化终态；激活必须先于 attach（与 session/new
+        // 同序），否则池初始化永远等不到 activation。
+        if let Some(environment) = &environment {
+            environment.activate();
+        }
         if let Err(error) = attach_session_workflow(environment.as_ref(), chain).await {
             if let Some(environment) = &environment {
                 if !environment.shutdown().await {

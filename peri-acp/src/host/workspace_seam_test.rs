@@ -243,7 +243,6 @@ async fn workflow_consumer_reports_setup_failures_without_binding_consumer() {
             .unwrap()
             .unwrap();
     for (phase, present, expected) in [
-        ("failed", false, "MCP pool initialization failed"),
         ("unknown", false, "unknown MCP initialization state"),
         ("ready", true, "runtime slot is not bound"),
         ("pending", false, "timed out"),
@@ -256,6 +255,15 @@ async fn workflow_consumer_reports_setup_failures_without_binding_consumer() {
             .unwrap_err();
         assert!(error.contains(expected), "{error}");
     }
+    // 初始化失败是终态；缺少 workflow 实例时只跳过接线，不影响会话可用性。
+    Arc::get_mut(&mut environment).unwrap().cfg.mcp_pool = Some(Arc::new(WorkflowSetupPool {
+        phase: "failed",
+        present: false,
+    }));
+    assert!(!environment
+        .start_workflow_consumer(Arc::new(WorkflowExecutor))
+        .await
+        .unwrap());
     assert!(environment.shutdown().await);
 }
 
