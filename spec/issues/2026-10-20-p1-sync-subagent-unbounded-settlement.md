@@ -53,7 +53,36 @@
 
 时间用例使用 paused-time；过滤测试须实际运行非零目标用例。至少运行 child_runner、run_sync、handoff 三组测试，以及新增模块定向测试、相关 build/clippy。真实 wire/进程验收不可由静态检查替代。
 
-## 当前证据
+## 当前实现与交付限制
 
-- 基线 `agent::async_tasks::handoff::tests`：5 passed，0 failed；这是旧行为基线，不证明修复。
-- 尚未接入生产 deadline；原无界等待问题仍存在。后续阶段不得将类型定义或窗口单测称为完整修复。
+本分支仅完成基础类型和部分资源/提交路径，**不满足 A′ 验收，不可作为生产修复合入**。
+
+- `412386e90`：阶段 1，定义 outcome/receipt、一次性窗口及目标契约。
+- `ca20a81ec`：阶段 2 部分，父 TaskManager 保留轻量 owner，原 MQ/manager 复用、执行 permit、可信子树查询/取消与根关闭接入。
+- `da969a92c`：阶段 3 部分，冻结交接快照、flush + 幂等 append、区分缺能力/写失败；同步状态提交失败显式返回，先提交再 Stop，事件排空失败阻止 owner resume。
+
+仍须解决：
+
+1. 阶段 2 尚未闭环：缺 owner 的嵌入路径没有拒绝跨 run 任务；owner 的准备/关闭竞态和后台注册失败释放待补；父/根按 execution 查询尚未实现。Close 暂不移除 owner/binding，且 retained Required 消息仍返回 Incomplete。
+2. 阶段 3 尚未闭环：后台 status/Stop 顺序与事件排空失败时 owner 状态仍需统一；交接写失败快照保留已有基础，但没有完整修复/重试入口。`Failed` residual 尚未贯穿。
+3. 阶段 4 未完成：`ChildSettlementWindow` 尚未接入 runner、loop 或 wrapper。尝试添加 `LoopResult::SettlementDue` 后发现需同步改造四条结果路径及 workflow 映射；该未完成接入已撤回，最终代码可编译。**原永久 Working 无限等待仍存在。**
+4. 阶段 5–6 未完成：typed outcome 未用于运行路径，pending_message 仍为旧文案；wrapper 自有 retry 未移除；close 非模型归档未实现；121 秒旧行为测试未改。
+5. 验收矩阵、真实进程/协议测试、deadline 前后/同刻竞态、计算对象释放、四路径最终行为均未验证。现有回归通过只说明基础改动未破坏这些旧用例。
+
+## 实际验证
+
+所有命令在指定 worktree 内执行，统一前缀 `./scripts/cargo-rmcp-patched.sh`。
+
+- `test --locked -p peri-agent --lib -- session::subagent::child_runner::tests`：17 passed，0 failed（最终生产源码）。
+- `test --locked -p peri-agent --lib -- session::subagent::run_sync::tests`：6 passed，0 failed（最终生产源码）。
+- `test --locked -p peri-agent --lib -- agent::async_tasks::handoff::tests`：6 passed，0 failed，含新增 paused-time window 用例（最终生产源码）。
+- `test --locked -p peri-agent --lib -- session::subagent::resource_owner::tests`：5 passed，0 failed（最终生产源码）。
+- `test --locked -p peri-agent --lib -- session::subagent::tests::bound_and_tail_cases`：12 passed，0 failed（最终生产源码）。
+- 阶段 2 的 `test --locked -p peri-agent --lib -- session::subagent::`：123 passed，0 failed；阶段 3 首轮 122 passed、1 failed（旧测试期待状态写入失败仍成功）；更新契约后定向通过。随后排空错误曾丢失 child 身份，定向 10 passed、2 failed；恢复 `SubagentFailure` 包装后 12 passed。
+- 中途编译失败：新增 host 字段遗漏初始化、未导入 TaskManager trait、ACP 使用具体 manager 方法；均已修正。未完成 deadline 接入编译报四处 `LoopResult::SettlementDue` 非穷尽匹配，该接入已撤回。
+- 提交 hook 的 check、clippy、fmt、layer-imports 已通过；第二个提交首轮被 fmt 拒绝，格式修正后正常提交，没有跳过 hook。
+- `build --locked -p peri-agent -p peri-acp`：通过，退出码 0。
+- `clippy --locked -p peri-agent -p peri-acp --lib -- -D warnings`：通过，退出码 0。
+- `test --locked -p peri-agent --doc`：15 passed，0 failed。
+- `test --locked -p peri-acp-types --doc`：6 passed，0 failed，2 ignored；第三方 patched hyper-util 编译报告未使用 timer 警告。
+- 尚未运行最终全库测试、ACP 行为测试、真实 MCP wire 或受控进程测试；这些不是环境阻塞，而是实现/验证尚未完成。
