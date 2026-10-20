@@ -966,8 +966,6 @@ fn transcript_contains(session: &Session, needle: &str) -> bool {
         })
 }
 
-/// A→B→C：C 的未完成结果归属直接父 B，A 不接收 C 的身份；各层均有界结束。
-
 #[path = "child_runner_background_test.rs"]
 mod background;
 #[path = "child_runner_deadline_test.rs"]

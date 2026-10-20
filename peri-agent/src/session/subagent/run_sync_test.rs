@@ -321,7 +321,7 @@ async fn handoff_sync_child_returns_pending_and_registry_retries_delivery() {
     assert!(delivered.output.contains("status: incomplete"));
     assert_eq!(attempts.load(Ordering::SeqCst), 3);
     tokio::time::timeout(Duration::from_secs(2), async {
-        while sync_state.sync_workers.len() != 0 {
+        while !sync_state.sync_workers.is_empty() {
             peri_time::sleep(Duration::from_millis(10)).await;
         }
     })
@@ -668,7 +668,7 @@ async fn sync_worker_releases_session_llm_and_context_after_takeover() {
         .unwrap();
     assert!(!delivered.success);
     tokio::time::timeout(Duration::from_secs(2), async {
-        while sync_state.sync_workers.len() != 0 {
+        while !sync_state.sync_workers.is_empty() {
             peri_time::sleep(Duration::from_millis(10)).await;
         }
     })

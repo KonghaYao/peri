@@ -226,6 +226,7 @@ async fn receive_commit_crossing_deadline_hands_off_unprocessed_result() {
     assert_eq!(manager.active_count(), 0);
 }
 
+/// A→B→C：C 的未完成结果归属直接父 B，A 不接收 C 的身份；各层均有界结束。
 #[tokio::test(start_paused = true)]
 async fn nested_a_b_c_reports_incomplete_only_to_direct_parent() {
     let c_manager = Arc::new(TaskManager::new());
