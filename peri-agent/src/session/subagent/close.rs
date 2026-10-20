@@ -106,6 +106,13 @@ impl SubagentCloseState {
     }
 }
 
+/// close 已关闭真实资源、但因未确认交接/执行保留 owner 的错误。
+/// 此时调用方仍可先结清认领与持久终态，再报告关闭错误。
+pub(crate) fn close_failure_allows_terminal_finalization(error: &str) -> bool {
+    error.starts_with("Incomplete: child handoff is unconfirmed")
+        || error.starts_with("Incomplete: child settlement is unconfirmed")
+}
+
 pub async fn close_subagent_session_scope(session: Arc<Session>) -> CloseResult {
     let host = session
         .subagent_host()

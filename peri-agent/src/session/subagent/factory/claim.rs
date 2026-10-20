@@ -226,21 +226,33 @@ async fn own_claim(
                 .map_err(|error| format!("resume terminal status write failed: {error}"))?;
         }
         Ok(ClaimDecision::CancelRunning(session)) => {
-            super::super::close::close_subagent_session_scope(session).await?;
-            handle
-                .mark_terminated()
-                .await
-                .map_err(|error| error.to_string())?;
-            store
-                .update_session_meta(
-                    &thread_id,
-                    &SessionMetaPatch {
-                        status: Some(AgentStatus::Cancelled),
-                        ..Default::default()
-                    },
-                )
-                .await
-                .map_err(|error| error.to_string())?;
+            // 资源关闭可能因未确认交接返回 Incomplete；此时仍须先结清认领并
+            // 写入 Cancelled，避免线程永久停留 Active。真实资源关闭失败则保留
+            // Active，由资源和持久层继续暴露未结清事实。
+            let close_result = super::super::close::close_subagent_session_scope(session).await;
+            let finalize = match &close_result {
+                Ok(()) => true,
+                Err(error) => {
+                    super::super::close::close_failure_allows_terminal_finalization(error)
+                }
+            };
+            if finalize {
+                handle
+                    .mark_terminated()
+                    .await
+                    .map_err(|error| error.to_string())?;
+                store
+                    .update_session_meta(
+                        &thread_id,
+                        &SessionMetaPatch {
+                            status: Some(AgentStatus::Cancelled),
+                            ..Default::default()
+                        },
+                    )
+                    .await
+                    .map_err(|error| error.to_string())?;
+            }
+            close_result?;
         }
         // 准备阶段调用方消失：恢复到认领前的状态，不留 active 残留。
         Err(_) => {

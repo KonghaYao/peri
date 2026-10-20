@@ -112,6 +112,11 @@ impl ParkedChildOwner {
         if state.execution.is_some() {
             return Err("child execution or terminal event drain is still active".into());
         }
+        if state.pending_receipt.is_some() {
+            return Err(
+                "child handoff is unconfirmed; resume and receipt clearing are refused".into(),
+            );
+        }
         // 新执行拥有新的交接身份；旧执行的 receipt 不跨 run 复用。
         state.receipt = None;
         state.pending_receipt = None;
@@ -163,7 +168,12 @@ impl ParkedChildOwner {
 
     /// 用于状态提交后判断 owner 是否仍有未确认的委托义务。
     pub fn has_unsettled_obligations(&self) -> bool {
-        self.manager.active_count() > 0
+        let unconfirmed = {
+            let state = self.state.lock();
+            state.failure.is_some() || state.pending_receipt.is_some()
+        };
+        unconfirmed
+            || self.manager.active_count() > 0
             || self.manager.has_pending_deliveries()
             || self.queue.has_required()
     }
@@ -227,6 +237,14 @@ impl ParkedChildOwner {
     /// 非模型关闭：结算保留消息、取消真实资源，确认后才释放 binding。
     pub async fn close(&self) -> Result<(), String> {
         self.begin_close()?;
+        let unconfirmed = {
+            let state = self.state.lock();
+            state
+                .pending_receipt
+                .as_ref()
+                .map(|_| "child handoff is unconfirmed".to_string())
+                .or_else(|| state.failure.clone())
+        };
         for child in self.manager.child_owners() {
             if child.child_thread_id == self.child_thread_id {
                 continue;
@@ -252,6 +270,11 @@ impl ParkedChildOwner {
         }
         if !self.manager.wait_session_close().await {
             return Err("Incomplete: child resources remain unsettled".into());
+        }
+        if let Some(reason) = unconfirmed {
+            return Err(format!(
+                "Incomplete: child settlement is unconfirmed ({reason}); resources closed but owner and frozen state retained"
+            ));
         }
         self.settle_retained_messages().await?;
         if self.queue.has_required() {

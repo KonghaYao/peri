@@ -209,6 +209,13 @@ pub(super) async fn spawn_background_subagent(
                         residual,
                     }
                 }
+                ChildRunOutcome::HandoffFailed { cause, failure } => {
+                    tracing::error!(
+                        %error,
+                        "background child history flush failed after unconfirmed handoff; retaining structured failure"
+                    );
+                    ChildRunOutcome::HandoffFailed { cause, failure }
+                }
                 _ => ChildRunOutcome::Failed {
                     error,
                     residual: None,

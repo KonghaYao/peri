@@ -66,6 +66,15 @@ pub(super) async fn run_receive_with_budget(
         .iter()
         .filter(|message| message.policy.disposition(&execution) == MessageDisposition::Process)
         .count();
+    let process_message_ids: Vec<_> = consumed
+        .iter()
+        .filter(|message| message.policy.disposition(&execution) == MessageDisposition::Process)
+        .filter_map(|message| {
+            message
+                .delivery_id
+                .or_else(|| message.message().map(crate::messages::BaseMessage::id))
+        })
+        .collect();
 
     // emit MessageQueueDrained（langfuse v2 遥测）
     {
@@ -262,33 +271,12 @@ pub(super) async fn run_receive_with_budget(
         );
     }
 
-    // 提交阶段可能跨过 D。只有已完成 canonical 提交、且本来会驱动语义迭代的
-    // 消息才登记为未推理义务；不能让 flush/append 之后的到期被误判为 Settled。
-    if crate::agent::stages::settlement_due(&input.context) {
-        input
-            .context
-            .async_ctx
-            .received_after_deadline
-            .lock()
-            .extend(
-                consumed
-                    .iter()
-                    .filter(|message| {
-                        message.policy.disposition(&execution) == MessageDisposition::Process
-                    })
-                    .filter_map(|message| {
-                        message
-                            .delivery_id
-                            .or_else(|| message.message().map(crate::messages::BaseMessage::id))
-                    }),
-            );
-    }
-
     Ok(ReceiveOutput {
         consumed_count: count,
         wake_up_count,
         budget_deferred_count,
         input_message_ids: user_ids,
+        process_message_ids,
         // hook 的显式停止意图：本轮消费到就必须经 Receive 唯一退出口结束。
         stop_requested,
     })

@@ -243,6 +243,43 @@ use crate::messages::BaseMessage;
 use crate::session::{FrozenContext, MessageTranscript, Session};
 
 #[tokio::test]
+async fn test_unconfirmed_failure_and_pending_receipt_count_as_obligations() {
+    let child = owner("root", "child");
+    let permit = child.acquire(execution()).unwrap();
+    permit.finish(Err("handoff persistence failed".into()));
+    assert!(child.has_unsettled_obligations());
+    assert!(child.check_resume().is_err());
+    assert!(child
+        .acquire(execution())
+        .err()
+        .unwrap()
+        .contains("unconfirmed"));
+
+    let child = owner("root", "child");
+    let binding = execution();
+    let permit = child.acquire(binding.clone()).unwrap();
+    let receipt = super::super::ChildHandoffReceipt {
+        child_thread_id: "child".into(),
+        execution: binding,
+        owner_session_id: "child".into(),
+        reason: super::super::ChildHandoffReason::SettlementDeadline,
+        tasks: Vec::new(),
+        message_ids: Vec::new(),
+        message_sequences: Vec::new(),
+        canonical_message_id: peri_acp_types::messages::MessageId::new(),
+    };
+    child.freeze_receipt(receipt).unwrap();
+    permit.finish(Ok(()));
+    assert!(child.has_unsettled_obligations());
+    let error = child.acquire(execution()).err().unwrap();
+    assert!(
+        error.contains("unconfirmed") || error.contains("pending"),
+        "{error}"
+    );
+    assert!(child.close().await.unwrap_err().contains("unconfirmed"));
+}
+
+#[tokio::test]
 async fn test_close_with_unconfirmed_history_flush_keeps_owner() {
     let manager = Arc::new(TaskManager::new());
     let parent = Arc::new(TaskManager::new());
@@ -286,6 +323,6 @@ async fn test_close_rejects_active_execution_until_it_ends() {
     let child = owner("root", "child");
     let permit = child.acquire(execution()).unwrap();
     assert!(child.close().await.unwrap_err().contains("active"));
-    drop(permit);
+    permit.finish(Ok(()));
     child.close().await.unwrap();
 }

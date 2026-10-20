@@ -834,6 +834,8 @@ mod bound_and_tail_cases;
 mod resume_cases;
 #[path = "subagent/resume_dispatch_test.rs"]
 mod resume_dispatch_cases;
+#[path = "subagent/resume_owner_reuse_test.rs"]
+mod resume_owner_reuse;
 
 #[path = "subagent/close_lifecycle_test.rs"]
 mod close_lifecycle_cases;

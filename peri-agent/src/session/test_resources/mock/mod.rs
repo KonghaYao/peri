@@ -272,7 +272,6 @@ impl MockSessionResources {
         );
     }
 
-    /// 切换为只读能力面（测试后端能力差异用）。
     /// 下一次 canonical reminder 提交进入后暂停，返回 (entered, release)。
     pub(crate) fn gate_next_reminder_append(
         &self,
@@ -286,6 +285,7 @@ impl MockSessionResources {
         (entered_rx, release_tx)
     }
 
+    /// 切换为只读能力面（测试后端能力差异用）。
     pub(crate) fn restrict_to_history_read_only(&self) {
         self.history_read_only.store(true, Ordering::SeqCst);
     }

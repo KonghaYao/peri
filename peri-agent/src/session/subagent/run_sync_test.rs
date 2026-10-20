@@ -26,6 +26,17 @@ fn child(manager: Arc<TaskManager>) -> Arc<Session> {
 }
 
 fn bound_child(manager: Arc<TaskManager>) -> (Arc<Session>, Arc<ParkedChildOwner>) {
+    let (session, owner, _) = bound_child_with_store(manager);
+    (session, owner)
+}
+
+fn bound_child_with_store(
+    manager: Arc<TaskManager>,
+) -> (
+    Arc<Session>,
+    Arc<ParkedChildOwner>,
+    Arc<crate::session::test_resources::mock::MockSessionResources>,
+) {
     let child_id = uuid::Uuid::now_v7().to_string();
     let session = Session::new(
         Arc::from("/tmp"),
@@ -40,7 +51,7 @@ fn bound_child(manager: Arc<TaskManager>) -> (Arc<Session>, Arc<ParkedChildOwner
         child_id.clone(),
         manager.clone(),
         session.queue().clone(),
-        Some(store),
+        Some(store.clone()),
         None,
     );
     owner.set_writer(session.transcript().read().persist_tx_handle());
@@ -50,10 +61,24 @@ fn bound_child(manager: Arc<TaskManager>) -> (Arc<Session>, Arc<ParkedChildOwner
         child_owner: Some(owner.clone()),
         ..Default::default()
     });
-    (session, owner)
+    (session, owner, store)
 }
 
 struct AnswerLlm(&'static str);
+
+struct FailingLlm;
+
+#[async_trait::async_trait]
+impl ReactLLM for FailingLlm {
+    async fn generate_reasoning(
+        &self,
+        _messages: &[crate::messages::BaseMessage],
+        _tools: &[&dyn BaseTool],
+        _streaming: Option<StreamingContext>,
+    ) -> crate::error::AgentResult<Reasoning> {
+        Err(anyhow::anyhow!("model failed").into())
+    }
+}
 
 struct ProbeLlm(Arc<()>);
 
@@ -226,6 +251,7 @@ async fn handoff_sync_child_returns_pending_and_registry_retries_delivery() {
     let built = context(&session, "child answer");
     let child_id = session.store().thread_id.clone().unwrap();
     let sync_state = session.subagent_host().unwrap().close_state.clone();
+    let close_session = session.clone();
     let task_id = new_sync_task_id();
     let attempts = Arc::new(AtomicUsize::new(0));
     let callback_attempts = attempts.clone();
@@ -305,6 +331,10 @@ async fn handoff_sync_child_returns_pending_and_registry_retries_delivery() {
         sync_state.sync_delivery_errors().is_empty(),
         "成功重试必须清除此前 delivery 失败记录"
     );
+    assert!(manager.complete("shell-task", shell_result("shell-task")));
+    crate::session::subagent::close_subagent_session_scope(close_session)
+        .await
+        .expect("成功回执后显式 close 必须成功");
 }
 
 /// 没有父投递宿主：不制造幽灵 parent task，等待 typed outcome 后同步返回未完成。
@@ -651,6 +681,67 @@ async fn sync_worker_releases_session_llm_and_context_after_takeover() {
     })
     .await
     .expect("LLM/StageContext 必须随 worker 释放");
+}
+
+/// 真实 run_sync_subagent：执行错误 + handoff flush 失败时父级保留完整证据。
+#[tokio::test(start_paused = true)]
+async fn run_sync_handoff_failure_preserves_error_and_receipt() {
+    use crate::session::subagent::SubagentFailure;
+
+    let manager = Arc::new(TaskManager::new());
+    let (session, owner, store) = bound_child_with_store(manager.clone());
+    shell_task(&manager, "shell-task");
+    session.queue().push(QueuedMessage::prompt(
+        MessageSource::UserInput,
+        crate::messages::BaseMessage::human("run shell"),
+    ));
+    let child_id = session.store().thread_id.clone().unwrap();
+    let built = build_v2_subagent_context(
+        Some(session.clone()),
+        Box::new(FailingLlm),
+        Arc::new(MiddlewareChain::new()),
+        Vec::new(),
+        Arc::new(|_| true),
+        None,
+        "/tmp",
+        session.config().cancel_token.as_ref().clone(),
+        None,
+        None,
+        None,
+        None,
+        Some(agent_id_from_child_thread(&child_id)),
+    );
+    store.restrict_to_history_read_only();
+    let error = run_sync_subagent(
+        &child_id, "fixture", "/tmp", 10, None, None, None, None, None, None, None, None, None,
+        built, session, None, None,
+    )
+    .await
+    .expect_err("model + handoff write failure must return a typed error");
+    let failure = error
+        .downcast_ref::<SubagentFailure>()
+        .expect("typed SubagentFailure");
+    assert!(
+        failure
+            .error()
+            .user_facing_message()
+            .contains("model failed"),
+        "原执行错误必须保留: {}",
+        failure.error().user_facing_message()
+    );
+    let handoff_failure = failure.handoff_failure().expect("结构化交接失败");
+    assert!(
+        handoff_failure.contains("persistence") || handoff_failure.contains("append_history"),
+        "{handoff_failure}"
+    );
+    let receipt = failure.handoff().expect("冻结 receipt");
+    assert_eq!(receipt.child_thread_id, child_id);
+    assert!(receipt
+        .tasks
+        .iter()
+        .any(|task| task.task_id == "shell-task"));
+    assert!(owner.pending_receipt().is_some());
+    assert!(owner.check_resume().is_err(), "未确认交接必须拒绝 resume");
 }
 
 /// 关闭失败必须保留诊断，不因同步 worker 结束而宣称成功。

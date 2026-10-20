@@ -550,14 +550,15 @@ async fn receive_across_deadline_preserves_committed_result() {
     assert!(child.transcript().read().entries().iter().any(|entry| entry
         .as_message()
         .is_some_and(|message| message.id() == message_id)));
-    assert_eq!(
+    assert_eq!(received.process_message_ids, vec![message_id]);
+    assert!(
         built
             .context
             .async_ctx
             .received_after_deadline
             .lock()
-            .as_slice(),
-        &[message_id]
+            .is_empty(),
+        "Receive 只返回身份；登记由 loop 在判定 SettlementDue 时统一完成"
     );
     assert_eq!(initial_calls.load(Ordering::SeqCst), 0);
 }
@@ -967,5 +968,6 @@ mod background;
 mod deadline;
 #[path = "child_runner_nested_test.rs"]
 mod nested;
+#[cfg(unix)]
 #[path = "child_runner_process_test.rs"]
 mod process;

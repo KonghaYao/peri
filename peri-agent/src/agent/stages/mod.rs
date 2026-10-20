@@ -345,6 +345,9 @@ pub struct ReceiveOutput {
     pub budget_deferred_count: usize,
     /// 本次消费的非空用户 Human 消息身份，供首次输入准备精准处理。
     pub input_message_ids: Vec<crate::messages::MessageId>,
+    /// 本轮已 canonical 提交、且本应驱动语义迭代的消息身份；由 loop 在
+    /// 判定收尾截止时统一登记为未推理义务，避免 Receive 内部 check-then-check 竞态。
+    pub process_message_ids: Vec<crate::messages::MessageId>,
     /// 本轮消费到 hook 的显式停止意图（`continue:false`）：循环必须经 Receive
     /// 唯一退出口结束，不得再发起额外模型请求。
     pub stop_requested: bool,
@@ -569,6 +572,12 @@ pub async fn run_react_loop(context: StageContext, max_iterations: usize) -> Loo
             // Hook 显式停止意图（PostToolBatch `continue:false`）：Receive 是循环的
             // 唯一退出口；消费到停止意图直接以 Completed 结束，不再发起模型请求。
             if receive_out.stop_requested {
+                // 同批已提交但不会推理的消息保留为交接义务。
+                context
+                    .async_ctx
+                    .received_after_deadline
+                    .lock()
+                    .extend(receive_out.process_message_ids.clone());
                 if let Some(flag) = &context.async_ctx.hook_stop_requested {
                     flag.store(true, Ordering::Release);
                 }
@@ -581,6 +590,11 @@ pub async fn run_react_loop(context: StageContext, max_iterations: usize) -> Loo
 
             // Receive 的持久化等待可能跨过 D：已落库结果保留，但不再准入新语义迭代。
             if settlement_due(&context) {
+                context
+                    .async_ctx
+                    .received_after_deadline
+                    .lock()
+                    .extend(receive_out.process_message_ids.clone());
                 return LoopResult::SettlementDue;
             }
 

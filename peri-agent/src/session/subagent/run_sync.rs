@@ -339,7 +339,7 @@ pub(super) async fn run_sync_subagent(
             "cascade".into(),
         );
     }
-    let mut deregister_guard = DeregisterGuard {
+    let _deregister_guard = DeregisterGuard {
         thread_id: child_thread_id.to_string(),
         deregister: deregister_runtime,
     };
@@ -423,6 +423,13 @@ pub(super) async fn run_sync_subagent(
                     residual,
                 }
             }
+            ChildRunOutcome::HandoffFailed { cause, failure } => {
+                tracing::error!(
+                    %error,
+                    "sync child history flush failed after unconfirmed handoff; retaining structured failure"
+                );
+                ChildRunOutcome::HandoffFailed { cause, failure }
+            }
             _ => ChildRunOutcome::Failed {
                 error,
                 residual: None,
@@ -467,19 +474,22 @@ pub(super) async fn run_sync_subagent(
             permit.finish(Ok(()));
         }
     }
-    if let Err(error) = super::close::settle_explicit_close(&session, interrupted).await {
-        deregister_guard.deregister = None;
-        if let Some(mut claim) = resume_claim.take() {
-            claim.release().await?.accept()?;
-        }
-        if let Some(permit) = permit.take() {
-            permit.finish(Err(error.to_string()));
-        }
-        return Err(error.into());
+    let close_error = super::close::settle_explicit_close(&session, interrupted)
+        .await
+        .err();
+    if let Some(error) = &close_error {
+        tracing::error!(thread_id = %child_thread_id, %error, "child close incomplete; finalizing terminal while retaining evidence");
     }
 
     let (mut stop_result, mut stop_is_error, mut stop_failure) =
         stop_projection(&outcome, &agent_name, child_thread_id, &session);
+    if let Some(error) = &close_error {
+        let error: crate::error::AgentError =
+            anyhow::anyhow!("child close incomplete: {error}").into();
+        stop_result = error.to_string();
+        stop_is_error = true;
+        stop_failure = SubagentFailure::safe_failure_from_error(child_thread_id, &error);
+    }
     let mut settlement_error = on_subagent_stop_handler(
         &on_subagent_stop,
         &stop_resources,
@@ -491,6 +501,11 @@ pub(super) async fn run_sync_subagent(
     )
     .await
     .err();
+    if settlement_error.is_none() {
+        if let Some(error) = close_error {
+            settlement_error = Some(anyhow::anyhow!("child close incomplete: {error}").into());
+        }
+    }
     if let Some(claim) = resume_claim.take() {
         let status = if stop_is_error {
             peri_acp_types::thread::AgentStatus::Error
