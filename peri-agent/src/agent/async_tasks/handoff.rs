@@ -126,31 +126,40 @@ impl BoundedWait {
     }
 }
 
-/// Write the bounded-wait handoff into the session's canonical transcript and
-/// mirror it into the in-memory view. Returns how many pending tasks were
-/// recorded (0 when the session has no persisted transcript).
-///
-/// The record is idempotent: the delivery ID is derived from the pending task
-/// set, so a repeated handoff for the same set converges on one entry. The queue
-/// is not woken on purpose — this record belongs to the next turn / resume, not
-/// to a new iteration of the turn that is ending.
+/// 将有界等待交接写入 canonical 并镜像热态；无任务、缺能力、写失败分别返回。
+/// 同一 pending 集合沿用稳定 delivery ID，不唤醒正在结束的执行。
+#[derive(Debug, thiserror::Error)]
+pub enum HandoffCommitError {
+    #[error("handoff_capability_unavailable")]
+    MissingCapability,
+    #[error("handoff_persistence_failed: {0}")]
+    Persistence(#[from] anyhow::Error),
+}
+
+#[derive(Debug, PartialEq, Eq)]
+pub enum HandoffCommit {
+    NoObligations,
+    Committed(peri_acp_types::messages::MessageId),
+}
+
 pub(crate) async fn write_pending_handoff(
     session: &SessionHandle,
     handoff: &PendingHandoff,
-) -> usize {
+) -> Result<HandoffCommit, HandoffCommitError> {
     if handoff.tasks.is_empty() {
-        return 0;
+        return Ok(HandoffCommit::NoObligations);
     }
     let Some((resources, thread_id, writer)) = session.transcript.read().idempotent_reminder_port()
     else {
-        return 0;
+        tracing::error!("handoff canonical capability unavailable");
+        return Err(HandoffCommitError::MissingCapability);
     };
     let delivery_id = handoff_delivery_id(&handoff.tasks);
     let reminder = match handoff_reminder(handoff) {
         Ok(reminder) => reminder,
         Err(error) => {
-            tracing::warn!(%error, "bounded-wait handoff reminder rejected");
-            return 0;
+            tracing::error!(%error, "bounded-wait handoff reminder rejected");
+            return Err(HandoffCommitError::Persistence(anyhow::anyhow!(error)));
         }
     };
     let committed = async {
@@ -186,12 +195,14 @@ pub(crate) async fn write_pending_handoff(
                         .mirror_committed_reminder(delivery_id, reminder);
                 }
             }
-            // 读不到排除事实时保守跳过补安装；记录本身已提交，仍计入返回值。
-            Err(error) => tracing::warn!(%error, "bounded-wait handoff flag lookup failed"),
+            Err(error) => {
+                tracing::error!(%error, "bounded-wait handoff flag lookup failed");
+                return Err(HandoffCommitError::Persistence(error.into()));
+            }
         },
         Err(error) => {
-            tracing::warn!(%error, "bounded-wait handoff persistence failed");
-            return 0;
+            tracing::error!(%error, "bounded-wait handoff persistence failed");
+            return Err(HandoffCommitError::Persistence(error));
         }
     }
     tracing::warn!(
@@ -199,7 +210,77 @@ pub(crate) async fn write_pending_handoff(
         waited_ms = handoff.waited.as_millis() as u64,
         "bounded wait expired; pending task handoff recorded"
     );
-    handoff.tasks.len()
+    Ok(HandoffCommit::Committed(delivery_id))
+}
+
+pub async fn commit_child_handoff(
+    session: &SessionHandle,
+    owner: &crate::session::subagent::ParkedChildOwner,
+    reason: crate::session::subagent::ChildHandoffReason,
+    received_messages: Vec<peri_acp_types::messages::MessageId>,
+) -> Result<crate::session::subagent::ChildHandoffReceipt, HandoffCommitError> {
+    use crate::session::subagent::ChildHandoffReceipt;
+    let execution = session.turn.execution_binding();
+    let queued = owner.queue.snapshot();
+    let mut message_ids = received_messages;
+    message_ids.extend(queued.iter().filter_map(|message| {
+        message
+            .delivery_id
+            .or_else(|| message.message().map(crate::messages::BaseMessage::id))
+    }));
+    let receipt = owner
+        .freeze_receipt(ChildHandoffReceipt {
+            child_thread_id: owner.child_thread_id.clone(),
+            execution,
+            owner_session_id: owner.child_thread_id.clone(),
+            reason,
+            tasks: owner.manager.pending_handoff_tasks(),
+            message_ids,
+            message_sequences: queued
+                .iter()
+                .filter_map(|message| message.admission_sequence)
+                .collect(),
+            canonical_message_id: peri_acp_types::messages::MessageId::new(),
+        })
+        .map_err(|error| HandoffCommitError::Persistence(anyhow::anyhow!(error)))?;
+    let reminder = crate::session::producer_reminders::try_trusted_reminder(
+        ReminderCategory::Task, "subagent_task_lifecycle", "child_tasks_handed_off",
+        ReminderSeverity::Error, ReminderDelivery::Required,
+        format!("子 Agent 本次委派未完成，计算已结束。child_thread_id: {}；资源 owner: {}；未结任务: {}。Shell 状态未改变。结果留在原 child 队列，不自动恢复旧 run；需要显式 Agent(resume_thread_id, prompt) 继续分析。",
+            receipt.child_thread_id, receipt.owner_session_id,
+            receipt.tasks.iter().map(|task| task.task_id.as_str()).collect::<Vec<_>>().join(", ")),
+        Some("本次委派未完成，资源已保留".into()),
+        serde_json::json!({
+            "child_thread_id": receipt.child_thread_id,
+            "execution": receipt.execution,
+            "owner_session_id": receipt.owner_session_id,
+            "reason": format!("{:?}", receipt.reason),
+            "task_ids": receipt.tasks.iter().map(|task| &task.task_id).collect::<Vec<_>>(),
+            "message_ids": receipt.message_ids,
+            "message_sequences": receipt.message_sequences,
+        }),
+    ).map_err(|error| HandoffCommitError::Persistence(anyhow::anyhow!(error)))?;
+    let port = session.transcript.read().idempotent_reminder_port();
+    let (resources, thread_id, writer) = port.ok_or(HandoffCommitError::MissingCapability)?;
+    let result = async {
+        if let Some(writer) = writer {
+            MessageTranscript::flush_via_tx(&writer).await?;
+        }
+        resources
+            .append_reminder_if_absent(&thread_id, receipt.canonical_message_id, &reminder)
+            .await?;
+        Ok::<_, anyhow::Error>(())
+    }
+    .await;
+    if let Err(error) = result {
+        tracing::error!(child_thread_id = %receipt.child_thread_id, %error, "handoff_persistence_failed");
+        return Err(HandoffCommitError::Persistence(error));
+    }
+    session
+        .transcript
+        .write()
+        .mirror_committed_reminder(receipt.canonical_message_id, reminder);
+    Ok(receipt)
 }
 
 /// Build the handoff reminder (pure: content is the observable contract).

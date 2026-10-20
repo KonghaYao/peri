@@ -33,7 +33,9 @@ mod types;
 mod util;
 mod v2_bridge;
 
-pub use crate::agent::async_tasks::handoff::ChildSettlementWindow;
+pub use crate::agent::async_tasks::handoff::{
+    commit_child_handoff, ChildSettlementWindow, HandoffCommitError,
+};
 pub use directives::{build_bg_fork_directive, build_fork_directive, build_prediction_directive};
 pub use factory::SessionFactory;
 pub(crate) use lifecycle::flush_session_history;

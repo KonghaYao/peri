@@ -155,7 +155,7 @@ pub(crate) async fn on_subagent_stop_handler(
     output_summary: &str,
     is_error: bool,
     cwd: &str,
-) {
+) -> crate::error::AgentResult<()> {
     // 1. lifecycle hook（闭包由 middlewares 构造，内部触发 RegisteredHook）
     if let Some(ref on_stop) = on_subagent_stop {
         on_stop(child_thread_id, agent_id, cwd, output_summary, is_error);
@@ -177,9 +177,11 @@ pub(crate) async fn on_subagent_stop_handler(
             )
             .await
         {
-            tracing::warn!(thread_id = %child_thread_id, %error, "subagent terminal status write failed");
+            tracing::error!(thread_id = %child_thread_id, %error, "terminal_status_persist_failed");
+            return Err(anyhow::anyhow!("terminal_status_persist_failed: {error}").into());
         }
     }
+    Ok(())
 }
 
 #[cfg(test)]

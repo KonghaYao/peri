@@ -743,11 +743,14 @@ pub async fn run_react_loop(context: StageContext, max_iterations: usize) -> Loo
                     .as_ref()
                     .and_then(|probe| probe())
                 {
-                    crate::agent::async_tasks::handoff::write_pending_handoff(
+                    if let Err(error) = crate::agent::async_tasks::handoff::write_pending_handoff(
                         &context.session,
                         &handoff,
                     )
-                    .await;
+                    .await
+                    {
+                        return LoopResult::Error(anyhow::anyhow!(error).into());
+                    }
                 }
                 break 'rcra;
             }

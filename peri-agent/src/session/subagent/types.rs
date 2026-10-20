@@ -39,6 +39,7 @@ pub struct ChildHandoffReceipt {
     pub reason: ChildHandoffReason,
     pub tasks: Vec<crate::agent::async_tasks::handoff::PendingHandoffTask>,
     pub message_ids: Vec<peri_acp_types::messages::MessageId>,
+    pub message_sequences: Vec<u64>,
     pub canonical_message_id: peri_acp_types::messages::MessageId,
 }
 

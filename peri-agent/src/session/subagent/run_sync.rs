@@ -365,6 +365,7 @@ pub(super) async fn run_sync_subagent(
     if let Some(claim) = &mut resume_claim {
         claim.mark_running(session.clone());
     }
+    let terminal_resources = session_resources.clone();
     let stop_resources = if resume_claim.is_some() {
         None // 认领持有终态写入（finish 内定向写状态），此处不重复写。
     } else {
@@ -482,6 +483,33 @@ pub(super) async fn run_sync_subagent(
             true,
         ),
     };
+    let mut settlement_error = on_subagent_stop_handler(
+        &on_subagent_stop,
+        &stop_resources,
+        &agent_name,
+        child_thread_id,
+        &stop_result,
+        stop_is_error,
+        &cwd,
+    )
+    .await
+    .err();
+    if let Some(claim) = resume_claim.take() {
+        let status = if stop_is_error {
+            peri_acp_types::thread::AgentStatus::Error
+        } else {
+            peri_acp_types::thread::AgentStatus::Done
+        };
+        if let Err(error) = claim.finish(status).await {
+            settlement_error =
+                Some(anyhow::anyhow!("terminal_status_persist_failed: {error}").into());
+        }
+    }
+    if let Some(error) = settlement_error.as_ref() {
+        stop_result = error.to_string();
+        stop_is_error = true;
+        stop_failure = SubagentFailure::safe_failure_from_error(child_thread_id, error);
+    }
     // v2 SubagentStop（C3）：一个 emit 点覆盖 Completed / Interrupted / Error 三路。
     // 恢复路径复用本 Stop 发射点（R-L4）：stop_result 不含 child_thread_id——
     // issue 验收仅要求工具返回文本与 bg 通知文本携带 thread_id，事件侧不加。
@@ -504,6 +532,20 @@ pub(super) async fn run_sync_subagent(
     // before the synchronous v1 stop reaches the parent handler.
     if let Err(error) = drain_subagent_events(event_bus, forwarder_handle, langfuse_bridge).await {
         tracing::error!(thread_id = %child_thread_id, error = %error.user_facing_message(), causes = ?error.cause_chain(), "sync child event forwarding barrier incomplete");
+        settlement_error = Some(anyhow::anyhow!("child event drain failed: {error}").into());
+        if let Err(status_error) = on_subagent_stop_handler(
+            &None,
+            &terminal_resources,
+            &agent_name,
+            child_thread_id,
+            "child event drain failed",
+            true,
+            &cwd,
+        )
+        .await
+        {
+            settlement_error = Some(status_error);
+        }
         if matches!(loop_result, LoopResult::Completed) {
             stop_result = format!(
                 "{agent_name} execution failed: {}",
@@ -535,70 +577,27 @@ pub(super) async fn run_sync_subagent(
         );
     }
 
-    let (final_text, interrupted) = match loop_result {
-        LoopResult::Completed => {
-            let text = extract_last_ai_text(&session);
-            (text, false)
-        }
-        LoopResult::Interrupted => (String::new(), true),
-        LoopResult::Error(e) => {
-            // child_thread_id 前缀：错误路径（LLM 网络错误等）必须可恢复——主 agent
-            // 凭返回值中的 thread_id 找回执行现场（与 define.rs 成功路径
-            // `child_thread_id: {id}\n{result}` 格式一致，多行展示）
-            let failure = SubagentFailure::completed(child_thread_id, &agent_name, e);
-            let error_summary = failure.to_string();
-            let error_result: String = error_summary.chars().take(500).collect();
-            // 统一后处理（hook + thread_store；v1 协议化直发已在 emit_subagent_stop_v2
-            // 之后经 forward_subagent_stop_v1 发出）
-            on_subagent_stop_handler(
-                &on_subagent_stop,
-                &stop_resources,
-                &agent_name,
-                child_thread_id,
-                &error_result,
-                true,
-                &cwd,
-            )
-            .await;
-            if let Some(claim) = resume_claim.take() {
-                claim
-                    .finish(peri_acp_types::thread::AgentStatus::Error)
-                    .await?;
-            }
-            if let Some(permit) = permit {
-                permit.finish(Ok(()));
-            }
-            return Err(Box::new(failure));
-        }
+    let outcome = match loop_result {
+        LoopResult::Completed => Ok(false),
+        LoopResult::Interrupted => Ok(true),
+        LoopResult::Error(error) => Err(Box::new(SubagentFailure::completed(
+            child_thread_id,
+            &agent_name,
+            error,
+        )) as Box<dyn std::error::Error + Send + Sync>),
     };
-
-    let output_summary: String = if interrupted {
-        "interrupted".to_string()
-    } else {
-        final_text.chars().take(500).collect()
-    };
-    on_subagent_stop_handler(
-        &on_subagent_stop,
-        &stop_resources,
-        &agent_name,
-        child_thread_id,
-        &output_summary,
-        interrupted,
-        &cwd,
-    )
-    .await;
-    if let Some(claim) = resume_claim.take() {
-        claim
-            .finish(if interrupted {
-                peri_acp_types::thread::AgentStatus::Error
-            } else {
-                peri_acp_types::thread::AgentStatus::Done
-            })
-            .await?;
+    if let Some(error) = settlement_error {
+        if let Some(permit) = permit {
+            permit.finish(Err(error.to_string()));
+        }
+        return Err(Box::new(SubagentFailure::new(
+            child_thread_id,
+            &agent_name,
+            error,
+        )));
     }
-
     if let Some(permit) = permit {
         permit.finish(Ok(()));
     }
-    Ok(interrupted)
+    outcome
 }

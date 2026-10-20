@@ -79,6 +79,54 @@ async fn test_nested_owner_lookup_and_closing_host_rejection() {
 }
 
 #[tokio::test]
+async fn test_handoff_commit_reuses_frozen_execution_snapshot() {
+    let resources = crate::session::test_resources::mock::MockSessionResources::new();
+    let session = crate::session::Session::new(
+        Arc::from("/tmp"),
+        crate::session::FrozenContext::builder().build(),
+        Some("child".into()),
+    );
+    *session.transcript().write() = crate::session::MessageTranscript::new()
+        .with_persistence(resources.clone(), "child".into());
+    let owner = ParkedChildOwner::new(
+        "child".into(),
+        "root".into(),
+        Arc::new(TaskManager::new()),
+        session.queue().clone(),
+        resources.clone(),
+        None,
+    );
+    let context = crate::agent::stages::StageContext::builder(
+        session.start_turn(),
+        session.transcript(),
+        session.queue().clone(),
+    )
+    .build();
+    let permit = owner
+        .acquire(context.session.turn.execution_binding())
+        .unwrap();
+    let first = super::super::commit_child_handoff(
+        &context.session,
+        &owner,
+        super::super::ChildHandoffReason::SettlementDeadline,
+        vec![],
+    )
+    .await
+    .unwrap();
+    let second = super::super::commit_child_handoff(
+        &context.session,
+        &owner,
+        super::super::ChildHandoffReason::SettlementDeadline,
+        vec![],
+    )
+    .await
+    .unwrap();
+    assert_eq!(first.canonical_message_id, second.canonical_message_id);
+    assert_eq!(resources.payloads().len(), 1, "重复提交不得产生第二条交接");
+    permit.finish(Ok(()));
+}
+
+#[tokio::test]
 async fn test_close_retains_unprocessed_required_input() {
     let child = owner("root", "child");
     child.queue.push(crate::session::QueuedMessage::prompt(

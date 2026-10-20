@@ -120,13 +120,21 @@ impl ParkedChildOwner {
         self.state.lock().failure.clone()
     }
 
-    pub fn retain_receipt(&self, receipt: ChildHandoffReceipt) -> Result<(), String> {
+    pub fn freeze_receipt(
+        &self,
+        receipt: ChildHandoffReceipt,
+    ) -> Result<ChildHandoffReceipt, String> {
         let mut state = self.state.lock();
         if state.execution.as_ref() != Some(&receipt.execution) {
             return Err("child handoff execution does not own admission".into());
         }
-        state.receipt = Some(receipt);
-        Ok(())
+        if let Some(existing) = &state.receipt {
+            if existing.execution == receipt.execution {
+                return Ok(existing.clone());
+            }
+        }
+        state.receipt = Some(receipt.clone());
+        Ok(receipt)
     }
 
     pub fn begin_close(&self) -> Result<(), String> {
