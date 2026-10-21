@@ -189,13 +189,13 @@ pub(super) struct ProjectionAtoms {
 }
 
 pub(super) enum ProjectionUpdate {
-    All(ProjectionAtoms),
+    All(Box<ProjectionAtoms>),
     Mcp(Vec<McpServerSummary>),
 }
 
 impl From<ProjectionAtoms> for ProjectionUpdate {
     fn from(atoms: ProjectionAtoms) -> Self {
-        Self::All(atoms)
+        Self::All(Box::new(atoms))
     }
 }
 
@@ -272,7 +272,7 @@ pub(super) fn commit_projection(
             write_if_changed(&MCP_SERVERS.state(), servers);
             return true;
         }
-        ProjectionUpdate::All(atoms) => atoms,
+        ProjectionUpdate::All(atoms) => *atoms,
     };
     write_if_changed(&CURRENT_SESSION_TITLE.state(), atoms.title);
     write_if_changed(&SERVICE_PROJECTION_ERROR.state(), atoms.projection_error);
