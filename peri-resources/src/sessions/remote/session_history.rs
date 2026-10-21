@@ -136,12 +136,14 @@ impl RemoteSessionData {
         };
         let content = payload_content(&payload)?;
         if let Some(existing) = self.read_reminder_row(message_id).await? {
-            return check_reminder_row(id, &content, existing).map(|()| false);
+            return check_reminder_row(id, message_id, &content, existing).map(|()| false);
         }
         match self.write_history_append(id, &[payload]).await {
             Ok(()) => Ok(true),
             Err(error) => match self.read_reminder_row(message_id).await? {
-                Some(existing) => check_reminder_row(id, &content, existing).map(|()| false),
+                Some(existing) => {
+                    check_reminder_row(id, message_id, &content, existing).map(|()| false)
+                }
                 None => Err(error),
             },
         }
@@ -538,15 +540,17 @@ impl RemoteSessionData {
 
 fn check_reminder_row(
     id: &ThreadId,
+    message_id: MessageId,
     content: &str,
     existing: (String, String),
 ) -> SessionResourceResult<()> {
     if existing.0 == id.as_str() && existing.1 == content {
         Ok(())
     } else {
-        Err(invalid_input(
-            "reminder id conflicts with another history entry",
-        ))
+        Err(invalid_input(&format!(
+            "reminder id {} conflicts with another history entry",
+            message_id.as_uuid()
+        )))
     }
 }
 

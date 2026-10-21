@@ -34,9 +34,10 @@ impl SqliteSessionData {
                 .map_err(|error| map_sqlx(&error))?;
         if let Some((owner, saved)) = existing {
             if owner != id.as_str() || saved != content {
-                return Err(invalid_input(
-                    "reminder id conflicts with another history entry",
-                ));
+                return Err(invalid_input(&format!(
+                    "reminder id {} conflicts with another history entry",
+                    message_id.as_uuid()
+                )));
             }
             tx.commit()
                 .await
