@@ -5,15 +5,12 @@
 
 use std::collections::{HashMap, HashSet};
 
-use crate::messages::{BaseMessage, MessageId};
-use crate::session::transcript::{MessageTranscript, TranscriptEntry};
+use crate::messages::MessageId;
+use crate::session::transcript::MessageTranscript;
 use crate::tools::ContextRetention;
 
 use super::config::CompactConfig;
-use super::projection::{
-    estimate_projection_chars, MicroCompactPlan, ProjectionAction, ProjectionActionEntry,
-    ProjectionTarget, PROJECTION_POLICY_VERSION,
-};
+use super::projection::{MicroCompactPlan, PROJECTION_POLICY_VERSION};
 
 /// 上下文压力 — 用于决定是否需要 compact 及回收目标
 #[derive(Debug, Clone)]
@@ -84,311 +81,114 @@ pub struct ApplyReport {
     pub persistence_batch_size: usize,
 }
 
-// ─── TurnGroup / ToolExchange ──────────────────────────────────────────────────
+#[path = "planner/catalogs.rs"]
+mod catalogs;
+#[path = "planner/costs.rs"]
+mod costs;
+#[path = "planner/index.rs"]
+pub(crate) mod index;
+#[path = "planner/planning.rs"]
+mod planning;
+#[path = "planner/sources.rs"]
+mod sources;
 
-/// 一次人类交流（从 Human 消息开始，到下一条 Human 前结束）
-///
-/// 只借用 transcript 条目，不持有消息正文副本：`MessageContent` 是 String/Vec，
-/// clone 即整段正文字节复制。借用生存期限制在 `plan_micro` 内，不外泄给调用方。
+pub use planning::plan_micro_with_facts;
+
+/// Inputs are snapshots of current-run facts, never reconstructed from message age.
+#[derive(Debug, Default, Clone)]
+pub struct MicroPlanningFacts {
+    pub exposed_message_ids: HashSet<MessageId>,
+    pub protected_message_ids: HashSet<MessageId>,
+    pub closed_call_ids: HashSet<String>,
+    pub tool_retention: HashMap<String, ContextRetention>,
+    pub archive_scope: Option<ArchivePlanningScope>,
+    pub fixed_view_tokens: u64,
+}
+
 #[derive(Debug, Clone)]
-pub struct TurnGroup<'a> {
-    /// 该组内 AI 消息（借用 transcript 条目）
-    pub ai_entries: Vec<&'a TranscriptEntry>,
-    /// ToolResult 消息（按 tool_call_id 索引，借用 transcript 条目）
-    pub tool_results: HashMap<String, &'a TranscriptEntry>,
+pub struct ArchivePlanningScope {
+    pub thread_id: String,
+    pub committed_tail: MessageId,
 }
 
-/// 工具调用交换（AI tool_use + 对应所有 ToolResult）
-#[derive(Debug, Clone)]
-pub struct ToolExchange<'a> {
-    pub tool_call_id: String,
-    pub tool_name: String,
-    pub ai_message_id: MessageId,
-    /// 对应的 ToolResult 条目（借用 transcript 条目）
-    pub tool_result_entries: Vec<&'a TranscriptEntry>,
+#[derive(Debug, Default, Clone)]
+pub struct PlanningDiagnostics {
+    pub trigger_pressure_tokens: u64,
+    pub desired_view_tokens: u64,
+    pub soft_recent_budget_tokens: u64,
+    pub receipt_budget_tokens: u64,
+    pub protected_tokens_by_reason: std::collections::BTreeMap<String, u64>,
+    pub remaining_tokens_by_kind: std::collections::BTreeMap<String, u64>,
+    pub unhandled_by_reason: std::collections::BTreeMap<String, u64>,
+    pub candidate_count: usize,
+    pub preview_count: usize,
+    pub receipt_count: usize,
+    pub archived_exchange_count: usize,
+    pub zero_gain_count: usize,
+    pub scanned_messages: usize,
+    pub preview_catalog_source_scans: usize,
+    pub target_shortfall_tokens: u64,
 }
 
-impl<'a> TurnGroup<'a> {
-    /// 从 transcript 自有消息中构建 TurnGroup 列表
-    ///
-    /// 跳过只读祖先和 excluded 消息，仅以当前可见自有消息计算轮次。
-    /// 每个 TurnGroup 以 Human 消息开头。
-    pub fn collect(transcript: &'a MessageTranscript) -> Vec<TurnGroup<'a>> {
-        let mut groups = Vec::new();
-        let mut current: Option<TurnGroup<'a>> = None;
-
-        for (i, entry) in transcript.entries().iter().enumerate() {
-            if i < transcript.ancestor_len() || transcript.flags(entry.id()).excluded {
-                continue;
-            }
-            let Some(message) = entry.as_message() else {
-                // Canonical reminders are control entries, not Human turn boundaries.
-                continue;
-            };
-            match message {
-                BaseMessage::Human { .. } => {
-                    if let Some(g) = current.take() {
-                        groups.push(g);
-                    }
-                    current = Some(TurnGroup {
-                        ai_entries: Vec::new(),
-                        tool_results: HashMap::new(),
-                    });
-                }
-                BaseMessage::Ai { .. } => {
-                    if let Some(ref mut g) = current {
-                        g.ai_entries.push(entry);
-                    }
-                }
-                BaseMessage::Tool { tool_call_id, .. } => {
-                    if let Some(ref mut g) = current {
-                        g.tool_results.insert(tool_call_id.clone(), entry);
-                    }
-                }
-                _ => {}
-            }
-        }
-        if let Some(g) = current.take() {
-            groups.push(g);
-        }
-        groups
+impl PlanningDiagnostics {
+    pub(crate) fn protect(&mut self, reason: &str, tokens: u64) {
+        *self
+            .protected_tokens_by_reason
+            .entry(reason.into())
+            .or_default() += tokens;
     }
-
-    /// 从本组中提取所有 ToolExchange
-    pub fn tool_exchanges(&self) -> Vec<ToolExchange<'a>> {
-        let mut exchanges = Vec::new();
-        for ai_entry in &self.ai_entries {
-            if let BaseMessage::Ai { tool_calls, .. } = ai_entry.message() {
-                for tc in tool_calls {
-                    let result_entries: Vec<&'a TranscriptEntry> =
-                        self.tool_results.get(&tc.id).copied().into_iter().collect();
-                    exchanges.push(ToolExchange {
-                        tool_call_id: tc.id.clone(),
-                        tool_name: tc.name.clone(),
-                        ai_message_id: ai_entry.id(),
-                        tool_result_entries: result_entries,
-                    });
-                }
-            }
-        }
-        exchanges
+    pub(crate) fn unhandled(&mut self, reason: &str, tokens: u64) {
+        *self.unhandled_by_reason.entry(reason.into()).or_default() += tokens;
     }
 }
-
-// ─── plan_micro ────────────────────────────────────────────────────────────────
-
-/// 判断是否应保留完整的工具调用（不压缩）
-///
-/// 优先级：
-/// 1. 先查 `config.tool_retention_map`（新 metadata-based 方法）
-/// 2. Fallback 到 `config.micro_excluded_tools`（旧黑名单）
-/// 3. 默认：非 Preserve → 可压缩
-fn should_preserve_tool(tool_name: &str, config: &CompactConfig) -> bool {
-    // 1. 先查 retention_map
-    let name_lower = tool_name.to_lowercase();
-    if let Some(retention) = config.tool_retention_map.get(&name_lower) {
-        return matches!(
-            retention,
-            ContextRetention::Preserve | ContextRetention::StateBearing
-        );
-    }
-
-    // 2. Fallback 到旧黑名单
-    let is_excluded = config
-        .micro_excluded_tools
-        .iter()
-        .any(|e| e.eq_ignore_ascii_case(tool_name));
-
-    if is_excluded {
-        return true; // 旧黑名单中的工具 → 保留
-    }
-
-    // 3. 默认：非 Preserve → 可压缩
-    false
-}
-
-// ─── 测试专用调用计数 ───────────────────────────────────────────────────────────
-//
-// 按线程隔离，避免 cargo test 并发执行时测试之间互相污染计数；
-// 计划复用（一次规划 + 多次应用）由 trigger_test 断言调用次数恒为 1。
 
 #[cfg(test)]
 thread_local! {
     static PLAN_MICRO_CALLS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
 }
 
-/// 重置当前线程的 `plan_micro` 调用计数（测试专用）。
 #[cfg(test)]
 pub fn reset_plan_micro_calls() {
     PLAN_MICRO_CALLS.with(|calls| calls.set(0));
 }
 
-/// 读取当前线程的 `plan_micro` 调用次数（测试专用）。
 #[cfg(test)]
 pub fn plan_micro_call_count() -> usize {
     PLAN_MICRO_CALLS.with(std::cell::Cell::get)
 }
 
-#[cfg(test)]
-fn count_plan_micro_call() {
-    PLAN_MICRO_CALLS.with(|calls| calls.set(calls.get() + 1));
-}
-
-/// 生成 Micro Compact 计划（纯数据，零副作用）
-///
-/// 遍历 TurnGroup，跳过最近 `micro_compact_stale_steps` 轮，对每个 tool exchange
-/// 按 context retention 和 safety 规则生成 ProjectionAction。
-///
-/// # 规则
-/// - 跳过最近 N 轮（`stale_steps`）
-/// - 已 truncated 的消息 → 当 `skip_existing_truncated` 时跳过
-/// - 受保护工具（`micro_excluded_tools`）→ 跳过
-/// - 错误 ToolResult → 跳过 ToolResult 的 compact
-/// - 安全可压缩的工具 → 仅生成 CompactToolResult；ToolCall/ToolUse input 永远保留
+/// A caller without current-run consumption evidence cannot newly project history.
+/// Use `plan_micro_with_facts` in the Compact stage after the existing pressure gate.
 pub fn plan_micro(
     transcript: &MessageTranscript,
     config: &CompactConfig,
-    skip_existing_truncated: bool,
+    _skip_existing_truncated: bool,
 ) -> MicroCompactPlan {
-    #[cfg(test)]
-    count_plan_micro_call();
-
-    let groups = TurnGroup::collect(transcript);
-
-    let total_groups = groups.len();
-    let stale_limit = total_groups.saturating_sub(config.micro_compact_stale_steps);
-
-    let mut actions = Vec::new();
-    let mut no_op_candidates: usize = 0;
-
-    for (gi, group) in groups.iter().enumerate() {
-        // 跳过最近 N 轮
-        if gi >= stale_limit {
-            continue;
-        }
-
-        for exchange in group.tool_exchanges() {
-            // 跳过已有 truncated flag 且 directive 版本一致的消息（避免重复）
-            // Compact 阶段跳过（skip_existing_truncated=true）；false 只供显式
-            // 计划检查，Reason 从已提交 directive 恢复，不自行规划。
-            // v1 directive 被视为脏数据，不跳过，允许重新规划为 v2
-            if skip_existing_truncated
-                && transcript.flags(exchange.ai_message_id).truncated
-                && transcript
-                    .get_flags(exchange.ai_message_id)
-                    .and_then(|f| f.projection)
-                    .is_some_and(|d| {
-                        d.policy_version == super::projection::PROJECTION_POLICY_VERSION
-                    })
-            {
-                continue;
-            }
-            // 受保护工具 → 跳过（per-call 粒度）
-            // 优先使用 retention_map（新），fallback 到 micro_excluded_tools（旧）
-            let is_protected = should_preserve_tool(&exchange.tool_name, config);
-            if is_protected {
-                continue;
-            }
-
-            let mut has_any_action = false;
-
-            // ToolCall/ToolUse input 是 canonical execution data，Micro planner 永不投影。
-
-            // 仅压缩超过阈值的成功 ToolResult；错误结果保留诊断信息。
-            if config.has_valid_micro_field_limits() {
-                for result_entry in &exchange.tool_result_entries {
-                    if skip_existing_truncated
-                        && transcript.flags(result_entry.id()).truncated
-                        && transcript
-                            .get_flags(result_entry.id())
-                            .and_then(|f| f.projection)
-                            .is_some_and(|d| {
-                                d.policy_version == super::projection::PROJECTION_POLICY_VERSION
-                            })
-                    {
-                        continue;
-                    }
-                    let BaseMessage::Tool {
-                        content, is_error, ..
-                    } = result_entry.message()
-                    else {
-                        continue;
-                    };
-                    if *is_error
-                        || content.text_content().chars().count()
-                            <= config.micro_field_threshold_chars
-                    {
-                        continue;
-                    }
-                    has_any_action = true;
-                    actions.push(ProjectionActionEntry {
-                        message_id: result_entry.id(),
-                        target: ProjectionTarget::Message,
-                        action: ProjectionAction::CompactToolResult {
-                            keep_head: config.micro_field_keep_head_chars,
-                            keep_tail: config.micro_field_keep_tail_chars,
-                            preserve_recovery_handle: true,
-                        },
-                    });
-                }
-            }
-
-            if !has_any_action {
-                no_op_candidates += 1;
+    let pressure = ContextPressure {
+        estimated_tokens: 0,
+        context_window: 0,
+        output_reserve: 0,
+        predicted_tool_growth: 0,
+        safety_buffer: 0,
+        cache_hit_rate: 0.0,
+    };
+    match plan_micro_with_facts(
+        transcript,
+        config,
+        &pressure,
+        &MicroPlanningFacts::default(),
+        &super::projection::ProviderCapabilities::default(),
+    ) {
+        Ok(plan) => plan,
+        Err(error) => {
+            // Legacy convenience entry points cannot return errors. They produce no mutation;
+            // production uses the fallible entry point and blocks the unsafe request.
+            tracing::error!(%error, "micro planning rejected history without runtime facts");
+            MicroCompactPlan {
+                policy_version: PROJECTION_POLICY_VERSION,
+                ..Default::default()
             }
         }
-    }
-
-    // 无 action → 提前返回，避免不必要的 token 估算
-    if actions.is_empty() {
-        return MicroCompactPlan {
-            policy_version: PROJECTION_POLICY_VERSION,
-            target_reclaim_tokens: config.target_headroom_tokens,
-            actions,
-            estimated_before_tokens: 0,
-            estimated_after_tokens: 0,
-            estimated_tokens_saved: 0,
-            changed_messages: 0,
-            changed_fields: 0,
-            no_op_candidates,
-        };
-    }
-
-    // 统计：去重 message_id 数量
-    let changed_messages: usize = actions
-        .iter()
-        .map(|a| a.message_id)
-        .collect::<HashSet<_>>()
-        .len();
-    // 统计：CompactToolInput 中的所有字段总数
-    let changed_fields: usize = actions
-        .iter()
-        .filter_map(|a| match &a.action {
-            ProjectionAction::CompactToolInput { fields, .. } => Some(fields.len()),
-            _ => None,
-        })
-        .sum();
-
-    // 估算投影前后 token 数量
-    let (before_chars, after_chars) = estimate_projection_chars(transcript, &actions);
-    debug_assert!(
-        after_chars <= before_chars,
-        "投影后字符数不应大于投影前: after={after_chars} > before={before_chars}"
-    );
-    let before = before_chars / 4;
-    let after = after_chars / 4;
-    let estimated_tokens_saved = before_chars.saturating_sub(after_chars) / 4;
-
-    MicroCompactPlan {
-        policy_version: PROJECTION_POLICY_VERSION,
-        target_reclaim_tokens: config.target_headroom_tokens,
-        actions,
-        estimated_before_tokens: before,
-        estimated_after_tokens: after,
-        estimated_tokens_saved,
-        changed_messages,
-        changed_fields,
-        no_op_candidates,
     }
 }
 

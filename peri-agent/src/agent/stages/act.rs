@@ -57,23 +57,27 @@ async fn settle_result_receipt(
     ctx: &StageContext,
     receipt: Option<&crate::session::async_result_mailbox::RequestReceipt>,
     response_id: Option<crate::messages::MessageId>,
+    exposure: &crate::agent::compact_v2::exposure::RequestExposure,
 ) -> AgentResult<()> {
-    let Some(receipt) = receipt else {
-        return Ok(());
-    };
     let flush_tx = ctx.session.transcript.read().persist_tx_handle();
     if let Some(tx) = flush_tx {
         if let Err(error) = crate::session::MessageTranscript::flush_via_tx(&tx).await {
-            ctx.session.async_result_mailbox.block_attempt(
-                receipt,
-                "act",
-                &format!("transcript persistence barrier failed: {error:#}"),
-            );
+            if let Some(receipt) = receipt {
+                ctx.session.async_result_mailbox.block_attempt(
+                    receipt,
+                    "act",
+                    &format!("transcript persistence barrier failed: {error:#}"),
+                );
+            }
             return Err(crate::error::AgentError::Other(anyhow::anyhow!(
                 "transcript persistence barrier failed after model response: {error:#}"
             )));
         }
     }
+    ctx.compact.exposure.lock().confirm(exposure);
+    let Some(receipt) = receipt else {
+        return Ok(());
+    };
     if let Err(error) = ctx
         .session
         .async_result_mailbox
@@ -156,7 +160,13 @@ pub async fn run_act(input: ActInput) -> AgentResult<ActOutput> {
         // 两轮内容，渲染出"新文本在旧工具之前"的顺序错乱（详见 RenderEvent::TurnCompleted）。
         emit_turn_completed(ctx).await;
         emit_goal_snapshot(ctx);
-        settle_result_receipt(ctx, input.receipt.as_ref(), None).await?;
+        if input.reasoning.stream_interruption.is_none() {
+            settle_result_receipt(ctx, input.receipt.as_ref(), None, &input.exposure).await?;
+            ctx.compact
+                .exposure
+                .lock()
+                .confirm_closed(closed_calls(&outcome.results));
+        }
 
         Ok(ActOutput {
             has_tool_calls: true,
@@ -252,7 +262,13 @@ pub async fn run_act(input: ActInput) -> AgentResult<ActOutput> {
 
         // 只有真正写入正文的最终回答才是有效提交；空响应、截断与中断都不结清。
         if committed {
-            settle_result_receipt(ctx, input.receipt.as_ref(), Some(ai_msg_id)).await?;
+            settle_result_receipt(
+                ctx,
+                input.receipt.as_ref(),
+                Some(ai_msg_id),
+                &input.exposure,
+            )
+            .await?;
         }
 
         Ok(ActOutput {
@@ -267,3 +283,34 @@ pub async fn run_act(input: ActInput) -> AgentResult<ActOutput> {
 #[cfg(test)]
 #[path = "act_test.rs"]
 mod tests;
+
+// Retention controls reuse, never completion. Only typed terminal evidence closes a call.
+fn closed_calls(
+    results: &[(
+        crate::agent::react::ToolCall,
+        crate::agent::react::ToolResult,
+    )],
+) -> Vec<String> {
+    use crate::tools::ToolExecutionStatus;
+    results
+        .iter()
+        .filter_map(|(call, result)| {
+            if result.effective_error_code.is_some() || result.rejection_cause.is_some() {
+                return None;
+            }
+            result
+                .execution
+                .as_ref()
+                .filter(|evidence| {
+                    evidence.task_id.is_none()
+                        && matches!(
+                            evidence.status,
+                            ToolExecutionStatus::Completed
+                                | ToolExecutionStatus::Failed
+                                | ToolExecutionStatus::Cancelled
+                        )
+                })
+                .map(|_| call.id.clone())
+        })
+        .collect()
+}

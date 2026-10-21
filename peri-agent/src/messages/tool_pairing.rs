@@ -39,6 +39,7 @@ fn repair(mut messages: Vec<BaseMessage>) -> AgentResult<Vec<BaseMessage>> {
     let mut calls = HashMap::new();
     let mut results = HashMap::new();
     let mut inline_results = HashMap::new();
+    let mut inline_result_only = HashMap::new();
     for (index, message) in messages.iter_mut().enumerate() {
         if let BaseMessage::Ai {
             content,
@@ -90,16 +91,38 @@ fn repair(mut messages: Vec<BaseMessage>) -> AgentResult<Vec<BaseMessage>> {
                 return Err(invalid(format!("duplicate result for {tool_call_id}")));
             }
         }
-        if let BaseMessage::Human {
-            content: MessageContent::Blocks(blocks),
-            ..
-        } = message
-        {
-            for block in blocks {
-                if let ContentBlock::ToolResult { tool_use_id, .. } = block {
-                    if inline_results.insert(tool_use_id.clone(), index).is_some() {
-                        return Err(invalid(format!("duplicate result for {tool_use_id}")));
-                    }
+        if let BaseMessage::Human { content, .. } = message {
+            let result_only = only_inline_results(content);
+            let ids = match content {
+                MessageContent::Blocks(blocks) => blocks
+                    .iter()
+                    .filter_map(|block| match block {
+                        ContentBlock::ToolResult { tool_use_id, .. } => {
+                            Some(Ok(tool_use_id.as_str()))
+                        }
+                        _ => None,
+                    })
+                    .collect::<AgentResult<Vec<_>>>()?,
+                MessageContent::Raw(blocks) => blocks
+                    .iter()
+                    .filter(|block| block["type"] == "tool_result")
+                    .map(|block| {
+                        block["tool_use_id"]
+                            .as_str()
+                            .filter(|id| !id.is_empty())
+                            .ok_or_else(|| invalid("raw tool_result lacks ID"))
+                    })
+                    .collect::<AgentResult<Vec<_>>>()?,
+                MessageContent::Text(_) => Vec::new(),
+            };
+            if !ids.is_empty() {
+                inline_result_only.insert(index, result_only);
+            }
+            for id in ids {
+                if id.is_empty() || inline_results.insert(id.to_string(), index).is_some() {
+                    return Err(invalid(format!(
+                        "empty or duplicate inline result for {id}"
+                    )));
                 }
             }
         }
@@ -112,6 +135,8 @@ fn repair(mut messages: Vec<BaseMessage>) -> AgentResult<Vec<BaseMessage>> {
             return Err(invalid(format!("result precedes call: {tool_call_id}")));
         }
     }
+    let mut inline_owners = HashMap::new();
+    let mut checked_batches = HashSet::new();
     for (tool_call_id, result_index) in &inline_results {
         let call_index = calls
             .get(tool_call_id)
@@ -119,15 +144,25 @@ fn repair(mut messages: Vec<BaseMessage>) -> AgentResult<Vec<BaseMessage>> {
         if results.contains_key(tool_call_id) {
             return Err(invalid(format!("duplicate result for {tool_call_id}")));
         }
-        if *result_index != call_index + 1 {
-            return Err(invalid(format!(
-                "inline result is not adjacent to call: {tool_call_id}"
-            )));
+        if result_index <= call_index {
+            return Err(invalid(format!("result precedes call: {tool_call_id}")));
         }
-        if messages[*call_index]
-            .tool_calls()
-            .iter()
-            .any(|call| inline_results.get(&call.id) != Some(result_index))
+        if inline_owners
+            .insert(*result_index, *call_index)
+            .is_some_and(|owner| owner != *call_index)
+        {
+            return Err(invalid(
+                "protocol_dependency: inline result message spans multiple assistant call batches",
+            ));
+        }
+        if *result_index != call_index + 1 && !inline_result_only[result_index] {
+            return Err(invalid(format!("protocol_dependency: relocating mixed inline result would reorder user content: {tool_call_id}")));
+        }
+        if checked_batches.insert(*call_index)
+            && messages[*call_index]
+                .tool_calls()
+                .iter()
+                .any(|call| inline_results.get(&call.id) != Some(result_index))
         {
             return Err(invalid(format!(
                 "incomplete inline results for {tool_call_id}"
@@ -137,29 +172,17 @@ fn repair(mut messages: Vec<BaseMessage>) -> AgentResult<Vec<BaseMessage>> {
 
     if !inline_results.is_empty() {
         for message in &mut messages {
-            if let BaseMessage::Human {
-                id,
-                content: MessageContent::Blocks(blocks),
-            } = message
-            {
-                let result_count = blocks
-                    .iter()
-                    .filter(|block| matches!(block, ContentBlock::ToolResult { .. }))
-                    .count();
-                if blocks[..result_count]
-                    .iter()
-                    .any(|block| !matches!(block, ContentBlock::ToolResult { .. }))
-                {
-                    let mut result_blocks = Vec::with_capacity(result_count);
-                    let mut other_blocks = Vec::with_capacity(blocks.len() - result_count);
-                    for block in std::mem::take(blocks) {
-                        match block {
-                            ContentBlock::ToolResult { .. } => result_blocks.push(block),
-                            _ => other_blocks.push(block),
-                        }
+            if let BaseMessage::Human { id, content } = message {
+                let reordered = match content {
+                    MessageContent::Blocks(blocks) => results_first(blocks, |block| {
+                        matches!(block, ContentBlock::ToolResult { .. })
+                    }),
+                    MessageContent::Raw(blocks) => {
+                        results_first(blocks, |block| block["type"] == "tool_result")
                     }
-                    result_blocks.extend(other_blocks);
-                    *blocks = result_blocks;
+                    MessageContent::Text(_) => false,
+                };
+                if reordered {
                     tracing::warn!(message_id = ?id, "moving inline tool results before other user content in model view only");
                 }
             }
@@ -167,8 +190,8 @@ fn repair(mut messages: Vec<BaseMessage>) -> AgentResult<Vec<BaseMessage>> {
     }
 
     let needs_repair = calls.iter().any(|(tool_call_id, call_index)| {
-        if inline_results.contains_key(tool_call_id) {
-            return false;
+        if let Some(result_index) = inline_results.get(tool_call_id) {
+            return *result_index != call_index + 1;
         }
         results.get(tool_call_id).is_none_or(|result_index| {
             *result_index > call_index + messages[*call_index].tool_calls().len()
@@ -179,8 +202,14 @@ fn repair(mut messages: Vec<BaseMessage>) -> AgentResult<Vec<BaseMessage>> {
     }
 
     let mut tool_results = HashMap::with_capacity(results.len());
+    let inline_positions: HashSet<usize> = inline_results.values().copied().collect();
+    let mut inline_messages = HashMap::new();
     let mut ordinary = Vec::with_capacity(messages.len());
     for (index, message) in messages.into_iter().enumerate() {
+        if inline_positions.contains(&index) {
+            inline_messages.insert(index, message);
+            continue;
+        }
         match message {
             BaseMessage::Tool {
                 ref tool_call_id, ..
@@ -194,6 +223,11 @@ fn repair(mut messages: Vec<BaseMessage>) -> AgentResult<Vec<BaseMessage>> {
     for (index, message) in ordinary {
         let mut actual = Vec::new();
         let mut missing = Vec::new();
+        let inline_message_index = message
+            .tool_calls()
+            .iter()
+            .find_map(|call| inline_results.get(&call.id))
+            .copied();
         for call in message.tool_calls() {
             if inline_results.contains_key(&call.id) {
                 continue;
@@ -215,10 +249,42 @@ fn repair(mut messages: Vec<BaseMessage>) -> AgentResult<Vec<BaseMessage>> {
             tracing::warn!(message_id = ?message.id(), "moving misplaced tool results next to their call in model view only");
         }
         repaired.push(message);
+        if let Some(result_index) = inline_message_index {
+            if let Some(result_message) = inline_messages.remove(&result_index) {
+                repaired.push(result_message);
+            }
+        }
         repaired.extend(actual.into_iter().map(|(_, result)| result));
         repaired.extend(missing);
     }
     Ok(repaired)
+}
+
+fn only_inline_results(content: &MessageContent) -> bool {
+    match content {
+        MessageContent::Blocks(blocks) => {
+            !blocks.is_empty()
+                && blocks
+                    .iter()
+                    .all(|block| matches!(block, ContentBlock::ToolResult { .. }))
+        }
+        MessageContent::Raw(blocks) => {
+            !blocks.is_empty() && blocks.iter().all(|block| block["type"] == "tool_result")
+        }
+        MessageContent::Text(_) => false,
+    }
+}
+
+fn results_first<T>(blocks: &mut Vec<T>, is_result: impl Fn(&T) -> bool) -> bool {
+    let result_count = blocks.iter().filter(|block| is_result(block)).count();
+    if blocks[..result_count].iter().all(&is_result) {
+        return false;
+    }
+    let (mut results, rest): (Vec<_>, Vec<_>) =
+        std::mem::take(blocks).into_iter().partition(&is_result);
+    results.extend(rest);
+    *blocks = results;
+    true
 }
 
 #[cfg(test)]

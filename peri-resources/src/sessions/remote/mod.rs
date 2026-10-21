@@ -134,6 +134,7 @@ mod schema_probe_tests;
 #[cfg(test)]
 #[path = "schema_upgrade_input_test.rs"]
 mod schema_upgrade_input_tests;
+mod session_archive;
 mod session_catalog;
 mod session_codec;
 mod session_data;

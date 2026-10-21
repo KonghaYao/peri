@@ -360,9 +360,9 @@ async fn test_run_react_loop_successful_full_replaces_history_without_file_re_re
 }
 
 /// Characterization：每次 Reason 都返回新的 provider usage generation 时，已消费样本 guard
-/// 会重新 arm；绑定真实持久化后验证 Full → Micro → Full，不依赖吞掉 Full 提交失败。
+/// 会重新 arm；缺少恢复能力/消费证据时中间 Micro 不修改历史，两次 Full 仍各自触发。
 #[tokio::test]
-async fn test_run_react_loop_new_high_usage_generations_continue_full_micro_churn() {
+async fn test_run_react_loop_new_high_usage_generations_preserve_unexposed_history() {
     let reason_calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
     let reason_requests = Arc::new(std::sync::Mutex::new(Vec::new()));
     let compact_calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
@@ -441,23 +441,17 @@ async fn test_run_react_loop_new_high_usage_generations_continue_full_micro_chur
             (
                 crate::agent::events::CompactStrategy::Full,
                 96_082,
-                Some(crate::agent::compact_v2::planner::FullEscalationReason::InsufficientReclaim),
+                Some(crate::agent::compact_v2::planner::FullEscalationReason::ForceThresholdExceeded),
                 crate::agent::compact_v2::CompactOutcome::FullApplied,
-            ),
-            (
-                crate::agent::events::CompactStrategy::Micro,
-                80_081,
-                None,
-                crate::agent::compact_v2::CompactOutcome::MicroApplied,
             ),
             (
                 crate::agent::events::CompactStrategy::Full,
                 97_082,
-                Some(crate::agent::compact_v2::planner::FullEscalationReason::InsufficientReclaim),
+                Some(crate::agent::compact_v2::planner::FullEscalationReason::ForceThresholdExceeded),
                 crate::agent::compact_v2::CompactOutcome::FullApplied,
             ),
         ],
-        "每个新的非零高位 usage generation 都会再次触发；Full 区间会升级尝试，Micro 区间只执行 Micro"
+        "每个新的非零高位 usage generation 都会再次触发；Full 区间会升级尝试；无消费和恢复证据的 Micro 保持原文"
     );
     assert_eq!(
         compact_calls.load(Ordering::SeqCst),

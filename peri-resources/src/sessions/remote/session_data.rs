@@ -664,6 +664,30 @@ impl SessionDataPort for RemoteSessionData {
         self.read_frozen_state(id).await
     }
 
+    async fn inherited_archive_root(
+        &self,
+        id: &ThreadId,
+        source: &ThreadId,
+        anchor: MessageId,
+    ) -> SessionResourceResult<peri_acp_types::context_archive::ArchiveRoot> {
+        self.read_inherited_archive_root(id, source, anchor).await
+    }
+
+    async fn read_archive_metadata(
+        &self,
+        id: &ThreadId,
+        query: &peri_acp_types::context_archive::ArchiveMetadataQuery,
+    ) -> SessionResourceResult<peri_acp_types::context_archive::ArchiveMetadataPage> {
+        self.read_archive_metadata_page(id, query).await
+    }
+    async fn read_archive_chunk(
+        &self,
+        id: &ThreadId,
+        query: &peri_acp_types::context_archive::ArchiveChunkQuery,
+    ) -> SessionResourceResult<peri_acp_types::context_archive::ArchiveChunk> {
+        self.read_archive_body_chunk(id, query).await
+    }
+
     async fn load_message_flags(
         &self,
         id: &ThreadId,

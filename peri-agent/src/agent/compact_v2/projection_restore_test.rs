@@ -45,6 +45,7 @@ fn test_plan_from_persisted_directives_version_mismatch_is_invalid() {
             policy_version: PROJECTION_POLICY_VERSION + 1,
             entries: vec![],
             superseded_by: None,
+            ..Default::default()
         },
     );
 
@@ -64,6 +65,7 @@ fn excluded_legacy_directive_does_not_invalidate_visible_history() {
             policy_version: PROJECTION_POLICY_VERSION + 1,
             entries: vec![],
             superseded_by: None,
+            ..Default::default()
         },
     );
     transcript.set_excluded(excluded, true);
@@ -114,6 +116,7 @@ fn test_plan_from_persisted_directives_wrong_message_id_is_invalid() {
                 },
             }],
             superseded_by: None,
+            ..Default::default()
         },
     );
 
@@ -151,7 +154,7 @@ fn test_persisted_restore_keeps_only_independent_tool_result_action() {
     transcript.set_flags_projection(
         ai_id,
         MessageProjectionDirective {
-            policy_version: PROJECTION_POLICY_VERSION,
+            policy_version: 2,
             entries: vec![
                 ProjectionActionEntry {
                     message_id: ai_id,
@@ -176,12 +179,13 @@ fn test_persisted_restore_keeps_only_independent_tool_result_action() {
                 },
             ],
             superseded_by: None,
+            ..Default::default()
         },
     );
     transcript.set_flags_projection(
         result_id,
         MessageProjectionDirective {
-            policy_version: PROJECTION_POLICY_VERSION,
+            policy_version: 2,
             entries: vec![ProjectionActionEntry {
                 message_id: result_id,
                 target: ProjectionTarget::Message,
@@ -192,6 +196,7 @@ fn test_persisted_restore_keeps_only_independent_tool_result_action() {
                 },
             }],
             superseded_by: None,
+            ..Default::default()
         },
     );
 
@@ -247,6 +252,7 @@ fn test_render_llm_view_from_persisted_tool_result_directive() {
                 },
             }],
             superseded_by: None,
+            ..Default::default()
         },
     );
 
@@ -287,6 +293,7 @@ fn test_plan_from_persisted_directives_does_not_estimate_chars() {
                 },
             }],
             superseded_by: None,
+            ..Default::default()
         },
     );
 
@@ -303,4 +310,129 @@ fn test_plan_from_persisted_directives_does_not_estimate_chars() {
         0,
         "纯恢复路径不得调用字符估算"
     );
+}
+
+fn append_model_reminder(transcript: &mut MessageTranscript) -> MessageId {
+    use peri_acp_types::system_reminder::{
+        ReminderAudience, ReminderAudiences, ReminderCategory, ReminderDelivery, ReminderSeverity,
+        ReminderSource, SystemReminder, TrustedSystemReminderFactory, SYSTEM_REMINDER_VERSION,
+    };
+    let reminder = TrustedSystemReminderFactory::for_producer()
+        .construct(SystemReminder {
+            version: SYSTEM_REMINDER_VERSION,
+            category: ReminderCategory::Task,
+            source: ReminderSource("projection_restore_test".into()),
+            kind: "status".into(),
+            severity: ReminderSeverity::Info,
+            delivery: ReminderDelivery::Configurable,
+            audiences: ReminderAudiences(vec![ReminderAudience::Model]),
+            body: "canonical reminder must not leak through invalid projection".into(),
+            summary: None,
+            metadata: serde_json::json!({}),
+        })
+        .unwrap();
+    transcript.append_system_reminder(reminder)
+}
+
+#[test]
+fn persisted_reminder_metadata_is_validated_before_rendering() {
+    for case in [
+        "format",
+        "policy",
+        "missing",
+        "action",
+        "legacy_action",
+        "identity",
+    ] {
+        let mut transcript = MessageTranscript::new();
+        let id = append_model_reminder(&mut transcript);
+        transcript.set_truncated(id, true);
+        if case != "missing" {
+            let mut directive = MessageProjectionDirective {
+                policy_version: PROJECTION_POLICY_VERSION,
+                ..Default::default()
+            };
+            match case {
+                "format" => directive.format_version += 1,
+                "policy" => directive.policy_version += 1,
+                _ => {
+                    if case == "legacy_action" {
+                        directive.policy_version = 2;
+                    }
+                    directive.entries.push(ProjectionActionEntry {
+                        message_id: if case == "identity" {
+                            MessageId::new()
+                        } else {
+                            id
+                        },
+                        target: ProjectionTarget::Message,
+                        action: ProjectionAction::CompactText { max_chars: 1 },
+                    });
+                }
+            }
+            transcript.set_flags_projection(id, directive);
+        }
+        assert!(
+            matches!(
+                super::projection::plan_from_persisted_directives(
+                    &transcript,
+                    PROJECTION_POLICY_VERSION
+                ),
+                PersistedDirectiveRestore::Invalid
+            ),
+            "invalid reminder metadata must fail closed: {case}"
+        );
+        assert!(
+            super::projection::render_persisted_llm_view(
+                &transcript,
+                &ProviderCapabilities::default(),
+            )
+            .is_err(),
+            "invalid reminder must never fall back to its full body: {case}"
+        );
+    }
+}
+
+#[test]
+fn excluded_reminder_metadata_is_ignored_and_empty_visible_metadata_is_preserved() {
+    let mut transcript = MessageTranscript::new();
+    let hidden = append_model_reminder(&mut transcript);
+    transcript.set_flags_projection(
+        hidden,
+        MessageProjectionDirective {
+            format_version: 99,
+            policy_version: 99,
+            ..Default::default()
+        },
+    );
+    transcript.set_truncated(hidden, true);
+    transcript.set_excluded(hidden, true);
+    let hidden_without_directive = append_model_reminder(&mut transcript);
+    transcript.set_truncated(hidden_without_directive, true);
+    transcript.set_excluded(hidden_without_directive, true);
+    let visible = append_model_reminder(&mut transcript);
+    let canonical = transcript.visible_model_messages().unwrap();
+    transcript.set_flags_projection(
+        visible,
+        MessageProjectionDirective {
+            policy_version: PROJECTION_POLICY_VERSION,
+            ..Default::default()
+        },
+    );
+
+    let PersistedDirectiveRestore::Valid(restored) =
+        super::projection::plan_from_persisted_directives(&transcript, PROJECTION_POLICY_VERSION)
+    else {
+        panic!("valid empty reminder metadata must restore despite excluded corrupt history");
+    };
+    assert!(restored.actions.is_empty());
+    let rendered =
+        super::projection::render_persisted_llm_view(&transcript, &ProviderCapabilities::default())
+            .unwrap();
+    assert_eq!(
+        serde_json::to_value(&rendered).unwrap(),
+        serde_json::to_value(&canonical).unwrap()
+    );
+    assert_eq!(rendered.len(), 1);
+    assert_eq!(rendered[0].id(), visible);
 }

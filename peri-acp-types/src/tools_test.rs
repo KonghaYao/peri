@@ -397,3 +397,44 @@ fn test_tool_output_exact_summary_is_not_appended_twice() {
     let output = ToolOutput::with_execution(format!("head\n{summary}"), evidence);
     assert_eq!(output.projected_text(None), output.text);
 }
+
+#[test]
+fn test_retention_uses_bound_builtin_identity_not_public_name() {
+    struct DeclaredTool {
+        builtin: bool,
+    }
+    #[async_trait::async_trait]
+    impl super::BaseTool for DeclaredTool {
+        fn name(&self) -> &str {
+            "Write"
+        }
+        fn description(&self) -> &str {
+            "fixture"
+        }
+        fn parameters(&self) -> serde_json::Value {
+            serde_json::json!({})
+        }
+        fn builtin_mcp_instance(&self) -> Option<&str> {
+            self.builtin.then_some("workspace")
+        }
+        fn mcp_tool_name(&self) -> Option<&str> {
+            Some("Write")
+        }
+        async fn invoke(
+            &self,
+            _: serde_json::Value,
+            _: super::ToolContext<'_>,
+        ) -> Result<String, Box<dyn std::error::Error + Send + Sync>> {
+            Ok(String::new())
+        }
+    }
+    use super::BaseTool;
+    assert_eq!(
+        DeclaredTool { builtin: true }.context_retention(),
+        super::ContextRetention::SideEffectReceipt
+    );
+    assert_eq!(
+        DeclaredTool { builtin: false }.context_retention(),
+        super::ContextRetention::PreviewOnly
+    );
+}

@@ -74,6 +74,7 @@ pub mod model;
 pub mod oauth_credentials;
 pub mod peri_caps;
 pub use peri_caps::PeriCaps;
+pub mod context_archive;
 pub mod permission;
 pub mod plugin;
 pub mod plugin_scope;

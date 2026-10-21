@@ -46,6 +46,70 @@ fn append_compactable_history(ctx: &StageContext) {
     }
 }
 
+struct CompactFixtureTool(&'static str, crate::tools::ContextRetention);
+
+#[async_trait::async_trait]
+impl crate::tools::BaseTool for CompactFixtureTool {
+    fn name(&self) -> &str {
+        self.0
+    }
+    fn description(&self) -> &str {
+        "fixture policy"
+    }
+    fn parameters(&self) -> serde_json::Value {
+        serde_json::json!({"type":"object"})
+    }
+    fn context_retention(&self) -> crate::tools::ContextRetention {
+        self.1
+    }
+    async fn invoke(
+        &self,
+        _: serde_json::Value,
+        _: crate::tools::ToolContext<'_>,
+    ) -> Result<String, Box<dyn std::error::Error + Send + Sync>> {
+        panic!("compact must not execute historical calls")
+    }
+}
+
+async fn confirm_fixture_exposure(
+    ctx: &StageContext,
+) -> crate::session::test_resources::TestSession {
+    use crate::agent::compact_v2::exposure::RequestExposure;
+    use crate::tools::ContextRetention;
+    let bound = crate::session::test_resources::TestSession::open().await;
+    let original = std::mem::take(&mut *ctx.session.transcript.write());
+    let mut transcript = crate::session::MessageTranscript::new()
+        .with_persistence(bound.resources(), bound.thread_id.clone());
+    for entry in original.entries() {
+        transcript.append(entry.message().clone());
+    }
+    transcript.flush_persistence().await.unwrap();
+    let request: Vec<_> = transcript.visible_messages().into_iter().cloned().collect();
+    let exposure = RequestExposure::capture(&request, &transcript).unwrap();
+    let closed = request
+        .iter()
+        .flat_map(|message| message.tool_calls().iter().map(|call| call.id.clone()))
+        .collect::<Vec<_>>();
+    *ctx.session.transcript.write() = transcript;
+    let mut ledger = ctx.compact.exposure.lock();
+    ledger.confirm_closed(closed);
+    ledger.confirm(&exposure);
+    drop(ledger);
+    let mut tools = ctx.runtime.tools.write();
+    tools.insert(
+        "Bash".into(),
+        Arc::new(CompactFixtureTool("Bash", ContextRetention::Recomputable)),
+    );
+    tools.insert(
+        "ReadContextArchive".into(),
+        Arc::new(CompactFixtureTool(
+            "ReadContextArchive",
+            ContextRetention::ArchiveRead,
+        )),
+    );
+    bound
+}
+
 fn observe_events(handles: &mut EventHandles) -> Vec<ObserveEvent> {
     std::iter::from_fn(|| handles.try_observe()).collect()
 }
@@ -73,6 +137,7 @@ async fn test_micro_applied_then_full_failure_does_not_reset_token_tracker() {
             ));
         }
     }
+    let _bound = confirm_fixture_exposure(&ctx).await;
     ctx.compact.context_budget = Some(ContextBudget::new(200_000));
     ctx.compact.compact_config = Some(CompactConfig {
         micro_compact_stale_steps: 1,
@@ -136,6 +201,7 @@ async fn test_compact_stage_smart_applied_then_full_failure_stops_without_tracke
             ));
         }
     }
+    let _bound = confirm_fixture_exposure(&ctx).await;
     ctx.compact.context_budget = Some(ContextBudget::new(200_000));
     ctx.compact.compact_config = Some(CompactConfig {
         smart_compact_enabled: true,
@@ -366,6 +432,7 @@ async fn test_compact_stage_failure_limit_emits_no_messages_compacted() {
 async fn test_compact_stage_applied_mixed_emits_one_messages_compacted_with_snapshot() {
     let (mut ctx, mut handles) = make_context_with_observe();
     append_compactable_history(&ctx);
+    let _bound = confirm_fixture_exposure(&ctx).await;
     ctx.compact.context_budget = Some(ContextBudget::new(200_000));
     ctx.compact.compact_config = Some(CompactConfig {
         micro_compact_stale_steps: 1,
@@ -429,6 +496,7 @@ async fn test_compact_stage_applied_mixed_emits_one_messages_compacted_with_snap
 async fn test_auto_compact_consumes_each_pressure_sample_once() {
     let (mut ctx, mut handles) = make_context_with_observe();
     append_compactable_history(&ctx);
+    let _bound = confirm_fixture_exposure(&ctx).await;
     ctx.compact.context_budget = Some(ContextBudget::new(200_000));
     ctx.compact.compact_config = Some(CompactConfig {
         micro_compact_stale_steps: 1,
@@ -575,4 +643,188 @@ async fn test_compact_stage_cancel_without_commit_emits_compact_ended() {
         vec![crate::agent::compact_v2::CompactOutcome::Interrupted],
         "cancel 未提交应恰好 emit 一次 CompactEnded(Interrupted)"
     );
+}
+
+/// The unchanged trigger uses provider usage when available and the request estimator otherwise.
+#[tokio::test]
+async fn test_auto_gate_7499_7500_7501_with_and_without_usage() {
+    struct FixedEstimate(u64);
+    #[async_trait::async_trait]
+    impl crate::agent::react::ReactLLM for FixedEstimate {
+        fn estimate_request_tokens(
+            &self,
+            _: &[BaseMessage],
+            _: &[&dyn crate::tools::BaseTool],
+        ) -> u64 {
+            self.0
+        }
+        async fn generate_reasoning(
+            &self,
+            _: &[BaseMessage],
+            _: &[&dyn crate::tools::BaseTool],
+            _: Option<crate::agent::react::StreamingContext>,
+        ) -> crate::error::AgentResult<crate::agent::react::Reasoning> {
+            panic!("shadow compaction must not invoke a model")
+        }
+    }
+    for with_usage in [false, true] {
+        for tokens in [74_990_u32, 75_000, 75_010] {
+            let (mut ctx, mut handles) = make_context_with_observe();
+            ctx.session
+                .transcript
+                .write()
+                .append(BaseMessage::human("current requirement"));
+            ctx.compact.context_budget = Some(ContextBudget::new(100_000));
+            ctx.compact.compact_config = Some(CompactConfig {
+                shadow_mode_enabled: true,
+                ..Default::default()
+            });
+            ctx.runtime.llm = Arc::new(FixedEstimate(if with_usage {
+                1000
+            } else {
+                u64::from(tokens)
+            }));
+            if with_usage {
+                ctx.compact.token_tracker.write().accumulate(&TokenUsage {
+                    input_tokens: tokens,
+                    output_tokens: 0,
+                    cache_creation_input_tokens: None,
+                    cache_read_input_tokens: None,
+                });
+            }
+            let outcome = run_compact(CompactInput {
+                context: ctx.clone(),
+                has_tool_calls: false,
+            })
+            .await
+            .unwrap();
+            assert!(!outcome.compacted, "shadow mode never commits");
+            assert_eq!(
+                ctx.compact.token_tracker.read().estimated_context_tokens(),
+                Some(u64::from(tokens))
+            );
+            let started = observe_events(&mut handles)
+                .iter()
+                .filter(|event| matches!(event, ObserveEvent::CompactStarted { .. }))
+                .count();
+            assert_eq!(
+                started,
+                usize::from(tokens >= 75_000),
+                "usage={with_usage}, tokens={tokens}"
+            );
+            assert!(ctx
+                .session
+                .transcript
+                .read()
+                .entries()
+                .iter()
+                .all(|entry| ctx
+                    .session
+                    .transcript
+                    .read()
+                    .projection_ref(entry.id())
+                    .is_none()));
+        }
+    }
+}
+
+#[tokio::test]
+async fn test_archive_probe_cancel_and_failure_restore_history_and_close_events() {
+    use crate::agent::compact_v2::CompactOutcome;
+    use crate::session::test_resources::mock::{MockSessionResources, ResumeLoadGate};
+    use std::sync::atomic::{AtomicBool, Ordering};
+
+    for cancel in [true, false] {
+        let (mut ctx, mut handles) = make_context_with_observe();
+        let store = MockSessionResources::new();
+        let (entered_tx, entered) = tokio::sync::oneshot::channel();
+        let (release, released) = tokio::sync::oneshot::channel();
+        let dropped = Arc::new(AtomicBool::new(false));
+        *store.archive_probe_gate.lock().unwrap() = Some(ResumeLoadGate {
+            entered: entered_tx,
+            release: released,
+            dropped: dropped.clone(),
+        });
+        let source = BaseMessage::human("Preserve my canonical instruction.");
+        let mut transcript = crate::session::MessageTranscript::new()
+            .with_persistence(store, "archive-probe".into());
+        transcript.append(source.clone());
+        transcript.flush_persistence().await.unwrap();
+        *ctx.session.transcript.write() = transcript;
+        ctx.runtime.tools.write().insert(
+            "ReadContextArchive".into(),
+            Arc::new(CompactFixtureTool(
+                "ReadContextArchive",
+                crate::tools::ContextRetention::ArchiveRead,
+            )),
+        );
+        ctx.compact.context_budget = Some(ContextBudget::new(100_000));
+        ctx.compact.compact_config = Some(CompactConfig::default());
+        ctx.compact.token_tracker.write().accumulate(&TokenUsage {
+            input_tokens: 75_000,
+            output_tokens: 0,
+            cache_creation_input_tokens: None,
+            cache_read_input_tokens: None,
+        });
+        let context = ctx.clone();
+        let run = tokio::spawn(async move {
+            run_compact(CompactInput {
+                context,
+                has_tool_calls: false,
+            })
+            .await
+        });
+        entered.await.unwrap();
+        if cancel {
+            ctx.session.turn.cancel_token.cancel();
+        } else {
+            release.send(()).unwrap();
+        }
+        let error = tokio::time::timeout(std::time::Duration::from_secs(2), run)
+            .await
+            .expect("archive probing must not delay cancellation")
+            .unwrap()
+            .err()
+            .expect("cancelled or failed archive probe must fail compaction");
+        if cancel {
+            assert!(matches!(error, crate::error::AgentError::Interrupted));
+        } else {
+            assert!(error
+                .to_string()
+                .contains("archive capability probe failed"));
+        }
+        assert!(dropped.load(Ordering::SeqCst));
+        let transcript = ctx.session.transcript.read();
+        assert_eq!(transcript.entries().len(), 1);
+        assert_eq!(
+            serde_json::to_value(transcript.get(source.id()).unwrap().message()).unwrap(),
+            serde_json::to_value(source).unwrap()
+        );
+        let events = observe_events(&mut handles);
+        assert_eq!(
+            events
+                .iter()
+                .filter(|event| matches!(event, ObserveEvent::CompactStarted { .. }))
+                .count(),
+            1
+        );
+        assert!(!events
+            .iter()
+            .any(|event| matches!(event, ObserveEvent::MessagesCompacted { .. })));
+        let ended = events
+            .iter()
+            .filter_map(|event| match event {
+                ObserveEvent::CompactEnded { outcome, .. } => Some(*outcome),
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(
+            ended,
+            vec![if cancel {
+                CompactOutcome::Interrupted
+            } else {
+                CompactOutcome::MicroFailed
+            }]
+        );
+    }
 }

@@ -348,6 +348,7 @@ fn projection_directive() -> MessageProjectionDirective {
             action: ProjectionAction::CompactText { max_chars: 120 },
         }],
         superseded_by: None,
+        ..Default::default()
     }
 }
 

@@ -476,6 +476,40 @@ impl BaseTool for ShortWork {
     }
 }
 
+struct ArchiveReadTool;
+#[async_trait]
+impl BaseTool for ArchiveReadTool {
+    fn name(&self) -> &str {
+        "ReadContextArchive"
+    }
+    fn description(&self) -> &str {
+        "Read bounded canonical archive data"
+    }
+    fn parameters(&self) -> serde_json::Value {
+        serde_json::json!({"type":"object"})
+    }
+    fn is_direct(&self) -> bool {
+        true
+    }
+    fn context_retention(&self) -> peri_agent::tools::ContextRetention {
+        peri_agent::tools::ContextRetention::ArchiveRead
+    }
+    async fn invoke(
+        &self,
+        input: serde_json::Value,
+        ctx: peri_agent::tools::ToolContext<'_>,
+    ) -> Result<String, Box<dyn std::error::Error + Send + Sync>> {
+        use peri_acp_types::context_archive::ContextArchiveReadPort;
+        let reader = peri_agent::context_archive::ContextArchiveReader::new(
+            ctx.session_resources.unwrap(),
+            ctx.session_id.unwrap(),
+        );
+        Ok(serde_json::to_string(
+            &reader.read(serde_json::from_value(input)?).await?,
+        )?)
+    }
+}
+
 struct AppendAfterMicro(AtomicUsize);
 
 #[async_trait]
@@ -541,10 +575,13 @@ async fn test_compact_session_micro_shrink_does_not_hide_new_before_model_growth
     .with_middleware_chain(Arc::new(chain))
     .with_event_bus(Arc::new(bus))
     .with_tools(Arc::new(parking_lot::RwLock::new(
-        std::collections::BTreeMap::from([(
-            "Work".into(),
-            Arc::new(ShortWork) as Arc<dyn BaseTool>,
-        )]),
+        std::collections::BTreeMap::from([
+            ("Work".into(), Arc::new(ShortWork) as Arc<dyn BaseTool>),
+            (
+                "ReadContextArchive".into(),
+                Arc::new(ArchiveReadTool) as Arc<dyn BaseTool>,
+            ),
+        ]),
     )))
     .build();
     session.queue().push(QueuedMessage::prompt(
@@ -719,10 +756,28 @@ async fn test_compact_session_repeated_micro_view_does_not_add_pressure() {
         micro_compact_stale_steps: 0,
         ..Default::default()
     })
+    .with_tools(Arc::new(parking_lot::RwLock::new(
+        std::collections::BTreeMap::from([
+            ("Work".into(), Arc::new(ShortWork) as Arc<dyn BaseTool>),
+            (
+                "ReadContextArchive".into(),
+                Arc::new(ArchiveReadTool) as Arc<dyn BaseTool>,
+            ),
+        ]),
+    )))
     .build();
-    reason::run_reason(ReasonInput {
+    let reasoned = reason::run_reason(ReasonInput {
         context: context.clone(),
         has_tool_calls: false,
+    })
+    .await
+    .unwrap();
+    peri_agent::agent::stages::act::run_act(peri_agent::agent::stages::ActInput {
+        context: context.clone(),
+        reasoning: reasoned.reasoning,
+        catalog: reasoned.catalog,
+        receipt: reasoned.receipt,
+        exposure: reasoned.exposure,
     })
     .await
     .unwrap();
@@ -735,6 +790,13 @@ async fn test_compact_session_repeated_micro_view_does_not_add_pressure() {
         .unwrap()
         .compacted
     );
+    let committed_pressure = context
+        .compact
+        .token_tracker
+        .read()
+        .estimated_context_tokens()
+        .unwrap();
+    assert!(committed_pressure >= 90_000, "真实新增结果仍计正增长");
     for _ in 0..3 {
         assert!(
             !compact::run_compact(CompactInput {
@@ -752,7 +814,7 @@ async fn test_compact_session_repeated_micro_view_does_not_add_pressure() {
             .token_tracker
             .read()
             .estimated_context_tokens(),
-        Some(90_000),
+        Some(committed_pressure),
         "投影缩减后重复评估不能扣权威 usage，也不能重计增长"
     );
 }

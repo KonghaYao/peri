@@ -218,11 +218,9 @@ impl SessionResources for ControlledStore {
                 self.cancel.cancel();
                 std::future::pending().await
             }
-            CommitMode::ErrorAfter => Err(SessionResourceError::new(
-                SessionResourceErrorKind::Unavailable {
-                    detail: "injected lost COMMIT acknowledgment".to_owned(),
-                },
-            )),
+            CommitMode::ErrorAfter => Err(SessionResourceError::persistence_uncertain(Some(
+                id.clone(),
+            ))),
             _ => result,
         }
     }

@@ -8,6 +8,10 @@ impl MockSessionResources {
         self.fail_snapshot_at.store(nth, Ordering::SeqCst);
     }
 
+    pub(crate) fn uncertain_compaction(self: &Arc<Self>) {
+        self.injection.lock().unwrap().uncertain_compaction = true;
+    }
+
     pub(crate) fn fail_compaction(self: &Arc<Self>) {
         self.injection.lock().unwrap().fail_compaction = true;
     }

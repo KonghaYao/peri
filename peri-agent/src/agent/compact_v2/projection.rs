@@ -19,7 +19,10 @@ pub use peri_acp_types::projection::{
     MessageProjectionDirective, ProjectionAction, ProjectionActionEntry, ProjectionTarget,
 };
 
-pub const PROJECTION_POLICY_VERSION: u32 = 2;
+pub const PROJECTION_POLICY_VERSION: u32 = 3;
+
+#[path = "projection_archive.rs"]
+mod archive;
 
 /// Provider 消息协议类型
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -68,6 +71,13 @@ impl ProviderCapabilities {
 #[derive(Debug, Default, Clone)]
 pub struct MicroCompactPlan {
     pub policy_version: u32,
+    /// Existing source flags used to reject a stale plan while allowing tail appends.
+    pub source_flags: Vec<(MessageId, peri_acp_types::store::MessageFlags)>,
+    pub source_content: Vec<(MessageId, [u8; 32])>,
+    pub catalogs: Vec<peri_acp_types::context_archive::ArchiveCatalog>,
+    pub archive_roots: Vec<peri_acp_types::context_archive::ArchiveRoot>,
+    pub receipt_budget_tokens: u64,
+    pub diagnostics: super::planner::PlanningDiagnostics,
     pub target_reclaim_tokens: u64,
     /// 按 transcript 位置稳定排序的 action 列表
     pub actions: Vec<ProjectionActionEntry>,
@@ -119,7 +129,7 @@ pub enum PersistedDirectiveRestore {
 ///
 /// 只表达恢复结果本身，**不携带收益估算指标**：普通 Reason、上下文压力检查与
 /// 恢复视图入口都不参与 Compact 决策，不应为估算付出正文扫描与复制成本。
-/// 需要收益口径时走 [`estimate_projection_chars`]（Compact 决策路径）。
+/// 候选收益由 planner 对当前与候选视图使用同一估算器计算。
 #[derive(Debug, Clone, Default)]
 pub struct RestoredProjectionDirectives {
     pub policy_version: u32,
@@ -149,12 +159,14 @@ pub fn plan_from_persisted_directives(
     transcript: &MessageTranscript,
     expected_version: u32,
 ) -> PersistedDirectiveRestore {
-    let visible = transcript.visible_messages();
     let mut actions = Vec::new();
     let mut has_any_directive = false;
 
-    for msg in &visible {
-        let id = msg.id();
+    for source in transcript.entries() {
+        let id = source.id();
+        if transcript.is_excluded(id) {
+            continue;
+        }
         // 只读查询：不克隆 projection directive 本体
         let projection = transcript.projection_ref(id);
         let truncated = transcript.is_truncated(id);
@@ -162,7 +174,9 @@ pub fn plan_from_persisted_directives(
         match projection {
             Some(directive) => {
                 has_any_directive = true;
-                if directive.policy_version != expected_version {
+                if directive.format_version != 1
+                    || ![2, expected_version].contains(&directive.policy_version)
+                {
                     return PersistedDirectiveRestore::Invalid;
                 }
                 // 当前可解码 legacy entry 只有可证明与 ToolCall/ToolUse 独立的
@@ -171,15 +185,26 @@ pub fn plan_from_persisted_directives(
                     if entry.message_id != id {
                         return PersistedDirectiveRestore::Invalid;
                     }
-                    if is_safe_projection_action(msg, entry) {
+                    // Reminder metadata participates in restoration checks, but no
+                    // projection action is allowed to rewrite its canonical payload.
+                    let Some(msg) = source.as_message() else {
+                        return PersistedDirectiveRestore::Invalid;
+                    };
+                    if directive.policy_version == 2 {
+                        if is_safe_projection_action(msg, entry) {
+                            actions.push(entry.clone());
+                        }
+                    } else if archive::safe_action(msg, entry) {
                         actions.push(entry.clone());
+                    } else {
+                        return PersistedDirectiveRestore::Invalid;
                     }
                 }
             }
             None => {
                 // G1: fail-closed on unknown directives
                 // truncated=true + projection=None + not excluded = corrupted state
-                // （visible_messages() 已过滤 excluded，此处消息必然非 excluded）
+                // 前面的 entry 级筛选已跳过 excluded，包括 canonical Reminder。
                 if truncated {
                     return PersistedDirectiveRestore::Invalid;
                 }
@@ -232,6 +257,7 @@ fn count_estimate_call() {
 /// 找不到目标、不符合类型或 helper 不会缩短时均不计入。
 ///
 /// 匹配用一次性构建的 message_id 索引（预期 O(M+A)），正文只做字符统计不复制。
+#[cfg(test)]
 pub(crate) fn estimate_projection_chars(
     transcript: &MessageTranscript,
     actions: &[ProjectionActionEntry],
@@ -324,6 +350,15 @@ pub(crate) fn render_persisted_llm_view_with_protected(
     if protected.is_empty() {
         return render_persisted_llm_view(transcript, caps);
     }
+    if protected.items.iter().any(|item| {
+        transcript
+            .projection_ref(item.delivery_id)
+            .is_some_and(|directive| !directive.entries.is_empty())
+    }) {
+        return Err(crate::error::AgentError::LlmError(
+            "protected result cannot carry a context projection".into(),
+        ));
+    }
     let mut messages = render_persisted_llm_view(transcript, caps)?;
     let protected_ids: HashSet<MessageId> = protected
         .items
@@ -355,24 +390,28 @@ pub(crate) fn render_persisted_llm_view_with_protected(
     crate::messages::tool_pairing::repair_model_tool_pairing(messages)
 }
 
-/// Reason 与 Full 共用的已提交模型视图；无效投影保留 canonical 内容。
-pub(crate) fn render_persisted_llm_view(
+/// Reason 与 Full 共用的已提交模型视图；无效投影明确失败，禁止全文回灌。
+pub fn render_persisted_llm_view(
     transcript: &MessageTranscript,
     caps: &ProviderCapabilities,
 ) -> AgentResult<Vec<BaseMessage>> {
     match plan_from_persisted_directives(transcript, PROJECTION_POLICY_VERSION) {
         PersistedDirectiveRestore::Valid(restored) => {
-            match render_llm_view(transcript, &restored.actions, caps) {
-                Ok(view) => return crate::messages::tool_pairing::repair_model_tool_pairing(view),
-                Err(error) => tracing::warn!(%error, "已提交投影渲染失败，保留 canonical 内容"),
-            }
+            let view = render_llm_view(transcript, &restored.actions, caps)?;
+            crate::messages::tool_pairing::repair_model_tool_pairing(view)
         }
         PersistedDirectiveRestore::Invalid => {
-            tracing::warn!("持久化 directive 无效；保留 canonical 内容，不重新规划");
+            tracing::error!("持久化投影无效；拒绝构建请求，要求重载或修复");
+            Err(crate::error::AgentError::LlmError(
+                "invalid persisted context projection; reload or repair the session".into(),
+            ))
         }
-        PersistedDirectiveRestore::Absent => {}
+        PersistedDirectiveRestore::Absent => {
+            crate::messages::tool_pairing::repair_model_tool_pairing(
+                transcript.visible_model_messages()?,
+            )
+        }
     }
-    crate::messages::tool_pairing::repair_model_tool_pairing(transcript.visible_model_messages()?)
 }
 
 // ─── render_llm_view ──────────────────────────────────────────────────────────
@@ -386,30 +425,45 @@ pub fn render_llm_view(
     actions: &[ProjectionActionEntry],
     caps: &ProviderCapabilities,
 ) -> AgentResult<Vec<BaseMessage>> {
-    // 1. 使用与 normal Reason 相同的 canonical projection，确保 reminder 恰好一次且非空。
-    let visible = transcript.visible_model_messages()?;
+    archive::render(transcript, actions, &[], &[], None, caps)
+}
 
-    // 2. 消费 owned 消息：无 action 的消息直接移动，不做第二次正文复制。
-    let mut actions_by_id: HashMap<MessageId, Vec<&ProjectionActionEntry>> = HashMap::new();
-    for action in actions {
-        actions_by_id
-            .entry(action.message_id)
-            .or_default()
-            .push(action);
-    }
-
-    let mut projected = Vec::with_capacity(visible.len());
-    for msg in visible {
-        match actions_by_id.get(&msg.id()) {
-            Some(entries) => projected.push(project_message(msg, entries, caps)),
-            None => projected.push(msg),
+/// Render a candidate with its not-yet-committed catalogs using the same recovery renderer.
+pub fn render_micro_plan(
+    transcript: &MessageTranscript,
+    plan: &MicroCompactPlan,
+    caps: &ProviderCapabilities,
+) -> AgentResult<Vec<BaseMessage>> {
+    let mut actions = match plan_from_persisted_directives(transcript, PROJECTION_POLICY_VERSION) {
+        PersistedDirectiveRestore::Valid(restored) => restored.actions,
+        PersistedDirectiveRestore::Absent => Vec::new(),
+        PersistedDirectiveRestore::Invalid => {
+            return Err(crate::error::AgentError::LlmError(
+                "invalid persisted projection".into(),
+            ))
         }
-    }
-
-    // 3. 验证
-    validate_projected_view(&projected, caps)?;
-
-    Ok(projected)
+    };
+    let key = |action: &ProjectionActionEntry| {
+        (
+            action.message_id,
+            match &action.target {
+                ProjectionTarget::Message => (0, 0, String::new()),
+                ProjectionTarget::ContentBlock { index } => (1, *index, String::new()),
+                ProjectionTarget::ToolCall { tool_call_id } => (2, 0, tool_call_id.clone()),
+            },
+        )
+    };
+    let replaced: HashSet<_> = plan.actions.iter().map(key).collect();
+    actions.retain(|old| !replaced.contains(&key(old)));
+    actions.extend(plan.actions.iter().cloned());
+    archive::render(
+        transcript,
+        &actions,
+        &plan.catalogs,
+        &plan.archive_roots,
+        Some(plan.receipt_budget_tokens),
+        caps,
+    )
 }
 
 // ─── project_message ──────────────────────────────────────────────────────────
@@ -487,15 +541,24 @@ fn project_message(
             execution,
             subagent_failure,
         } => {
-            // 消息级 action 只作用于成功结果；错误结果保持不变。
-            let content = if is_error {
-                content
-            } else {
+            // 错误与成功结果均按已验证动作逐块预览。
+            let content = {
                 // Message 与 block 0 是同一逻辑 ToolResult 文本；重复或冲突时
                 // fail-closed，不执行任何投影。estimator 复用同一选择函数。
                 let content_action =
                     effective_tool_result_action(entries).unwrap_or(&ProjectionAction::Keep);
-                project_tool_result_content(content, content_action)
+                let projected = project_tool_result_content(content, content_action);
+                // Message/block 0 的 CompactToolResult 已统一处理，不能在冲突时
+                // 又通过 block 路径执行，更不能对正常动作重复裁剪。
+                block_actions.retain(|index, entry| {
+                    !(*index == 0
+                        && matches!(entry.action, ProjectionAction::CompactToolResult { .. }))
+                });
+                if block_actions.is_empty() {
+                    projected
+                } else {
+                    project_content(&projected, &block_actions, caps)
+                }
             };
 
             BaseMessage::Tool {
@@ -573,13 +636,35 @@ fn project_tool_result_content(
             Some(projected) => MessageContent::text(projected),
             None => MessageContent::Text(text),
         },
-        other => {
-            let text = other.text_content();
-            match apply_head_tail(&text, *keep_head, *keep_tail) {
-                Some(projected) => MessageContent::text(projected),
-                None => other,
-            }
-        }
+        MessageContent::Blocks(blocks) => MessageContent::Blocks(
+            blocks
+                .into_iter()
+                .map(|block| match block {
+                    ContentBlock::Text { text } => ContentBlock::Text {
+                        text: apply_head_tail(&text, *keep_head, *keep_tail).unwrap_or(text),
+                    },
+                    ContentBlock::ToolResult {
+                        id,
+                        tool_use_id,
+                        content,
+                        is_error,
+                    } => ContentBlock::ToolResult {
+                        id,
+                        tool_use_id,
+                        content: match project_tool_result_content(
+                            MessageContent::Blocks(content),
+                            action,
+                        ) {
+                            MessageContent::Blocks(blocks) => blocks,
+                            _ => unreachable!(),
+                        },
+                        is_error,
+                    },
+                    other => other,
+                })
+                .collect(),
+        ),
+        raw @ MessageContent::Raw(_) => raw,
     }
 }
 
@@ -623,7 +708,23 @@ fn project_block(
             ContentBlock::Text { text } => apply_head_tail(text, *keep_head, *keep_tail)
                 .map(|text| ContentBlock::Text { text })
                 .unwrap_or_else(|| block.clone()),
-            // Image/Document 在 tool result 中不常见，保留原样
+            ContentBlock::ToolResult {
+                id,
+                tool_use_id,
+                content,
+                is_error,
+            } => ContentBlock::ToolResult {
+                id: id.clone(),
+                tool_use_id: tool_use_id.clone(),
+                content: match project_tool_result_content(
+                    MessageContent::Blocks(content.clone()),
+                    action.unwrap(),
+                ) {
+                    MessageContent::Blocks(blocks) => blocks,
+                    _ => unreachable!(),
+                },
+                is_error: *is_error,
+            },
             _ => block.clone(),
         },
 
@@ -715,24 +816,33 @@ fn head_tail_geometry(
     (projected < total).then_some((total, projected))
 }
 
-/// 统计消息正文中参与 tool result 投影的字符数（不复制正文）。
-///
-/// 与 [`apply_head_tail`] 的输入口径一致：`Text` 直接计数，`Blocks` / `Raw`
-/// 按 text block 拼接后计数（拼接结果只用于计数，不驻留）。
-fn projected_text_char_count(content: &MessageContent) -> usize {
-    match content {
-        MessageContent::Text(text) => text.chars().count(),
-        other => other.text_content().chars().count(),
-    }
-}
-
-/// 单条 tool result 的投影字符数 `(before, after)`；`None` 表示投影不缩短。
+/// 测试辅助：与逐块 renderer 使用同一几何，未知块和媒体不参与文本裁剪。
+#[cfg(test)]
 fn projection_char_counts(
     content: &MessageContent,
     head_chars: usize,
     tail_chars: usize,
 ) -> Option<(usize, usize)> {
-    head_tail_geometry(projected_text_char_count(content), head_chars, tail_chars)
+    fn blocks_count(blocks: &[ContentBlock], head: usize, tail: usize) -> (usize, usize) {
+        blocks
+            .iter()
+            .map(|block| match block {
+                ContentBlock::Text { text } => {
+                    head_tail_geometry(text.chars().count(), head, tail).unwrap_or_default()
+                }
+                ContentBlock::ToolResult { content, .. } => blocks_count(content, head, tail),
+                _ => (0, 0),
+            })
+            .fold((0, 0), |a, b| (a.0 + b.0, a.1 + b.1))
+    }
+    let counts = match content {
+        MessageContent::Text(text) => {
+            head_tail_geometry(text.chars().count(), head_chars, tail_chars)?
+        }
+        MessageContent::Blocks(blocks) => blocks_count(blocks, head_chars, tail_chars),
+        MessageContent::Raw(_) => (0, 0),
+    };
+    (counts.0 > counts.1).then_some(counts)
 }
 
 // ─── validate_projected_view ──────────────────────────────────────────────────

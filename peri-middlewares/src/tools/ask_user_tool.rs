@@ -78,6 +78,10 @@ fn parse_questions(
 
 #[async_trait]
 impl BaseTool for AskUserTool {
+    fn context_retention(&self) -> peri_agent::tools::ContextRetention {
+        peri_agent::tools::ContextRetention::Preserve
+    }
+
     fn name(&self) -> &str {
         "AskUserQuestion"
     }

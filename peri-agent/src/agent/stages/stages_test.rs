@@ -79,6 +79,7 @@ fn test_reason_input_output_contract() {
     };
     let reasoning = crate::agent::react::Reasoning::with_answer("thinking", "answer");
     let output = ReasonOutput {
+        exposure: Default::default(),
         reasoning,
         catalog: ctx.runtime.tool_catalog.snapshot(),
         messages_snapshot: std::sync::Arc::new(vec![]),
@@ -93,6 +94,7 @@ fn test_act_input_output_contract() {
     let ctx = make_stage_context();
     let reasoning = crate::agent::react::Reasoning::with_answer("thinking", "done");
     let _input = ActInput {
+        exposure: Default::default(),
         context: ctx.clone(),
         reasoning,
         catalog: ctx.runtime.tool_catalog.snapshot(),

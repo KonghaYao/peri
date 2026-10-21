@@ -132,6 +132,7 @@ async fn open_after_durable_full_reads_checkpoint_from_storage() {
                                         policy_version: 1,
                                         entries: Vec::new(),
                                         superseded_by: Some(summary_id),
+                                        ..Default::default()
                                     },
                                 ),
                                 ..Default::default()

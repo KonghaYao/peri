@@ -454,6 +454,16 @@ pub trait SessionResources: Send + Sync {
     /// 一次一致读取：metadata、binding 分类、frozen 状态、own payload/flags、inherited。
     async fn load_session_snapshot(&self, id: &ThreadId) -> SessionResourceResult<SessionSnapshot>;
 
+    /// Explicit independent-fork read: flatten the frozen inherited context and own
+    /// history, and materialize only archives authorized by those frozen roots.
+    /// Archived bodies remain excluded. Implementations must preserve the frozen
+    /// source tail and verify catalog/member identities before returning this view.
+    async fn load_fork_snapshot(&self, _id: &ThreadId) -> SessionResourceResult<SessionSnapshot> {
+        Err(SessionResourceError::new(
+            SessionResourceErrorKind::Unsupported,
+        ))
+    }
+
     /// 一次一致读取的执行关键有效视图：同一份 metadata/binding/frozen/inherited，
     /// 但 `payloads` 只含未排除的 own 条目、`flags` 只含活跃 id。
     ///
@@ -744,6 +754,40 @@ pub trait SessionResources: Send + Sync {
         Ok(HashMap::new())
     }
 
+    /// Resolve a frozen inherited archive grant. Source IDs/references are never credentials.
+    async fn inherited_archive_root(
+        &self,
+        _id: &ThreadId,
+        _source: &ThreadId,
+        _anchor: MessageId,
+    ) -> SessionResourceResult<crate::context_archive::ArchiveRoot> {
+        Err(crate::session_resources::SessionResourceError::new(
+            crate::session_resources::SessionResourceErrorKind::Unsupported,
+        ))
+    }
+
+    /// Bounded archive metadata access, including excluded anchors. Unsupported adapters fail closed.
+    async fn read_archive_metadata(
+        &self,
+        _id: &ThreadId,
+        _query: &crate::context_archive::ArchiveMetadataQuery,
+    ) -> SessionResourceResult<crate::context_archive::ArchiveMetadataPage> {
+        Err(crate::session_resources::SessionResourceError::new(
+            crate::session_resources::SessionResourceErrorKind::Unsupported,
+        ))
+    }
+
+    /// Read only the requested canonical byte interval below a stable committed tail.
+    async fn read_archive_chunk(
+        &self,
+        _id: &ThreadId,
+        _query: &crate::context_archive::ArchiveChunkQuery,
+    ) -> SessionResourceResult<crate::context_archive::ArchiveChunk> {
+        Err(crate::session_resources::SessionResourceError::new(
+            crate::session_resources::SessionResourceErrorKind::Unsupported,
+        ))
+    }
+
     /// 按给定 id 集合读取 flags，范围有界：只回答这些 id 的标记，不做全历史扫描。
     ///
     /// 默认实现返回空 map（非生产后端的回退，不满足分页路径的读取范围要求；
@@ -889,9 +933,8 @@ pub trait SessionResources: Send + Sync {
     /// `clear_excluded` 是保留前缀里必须清零 `excluded` 的 id，由调用方从一致读取的完整
     /// own 历史算出（[`crate::store::history::rewind_clear_excluded_ids`] 是唯一规则实现）：
     /// 边界删除与 flags 清零要么都生效、要么都不生效，只生效一半会让热态与随后的冷恢复
-    /// 看到两份不同的历史。清零同时把整条 `projection` 载荷一并清掉（恢复正文的条目不再
-    /// 携带 `superseded_by` 这类只在 `excluded` 为真时才有意义的投影记录），`truncated`
-    /// 保持原样。
+    /// 看到两份不同的历史。清零同时撤销 `superseded_by`；仍有效的 archive catalog
+    /// 保留身份，丢失锚点、成员或替代依据的整组省略动作与入口在同一事务撤销。
     ///
     /// 未知边界保持「无变更」语义，但**必须如实回报** [`RewindOutcome::BoundaryMissing`]：
     /// 调用方（如 ACP rewind handler）不能把「什么都没做」当成「已按边界重建」，

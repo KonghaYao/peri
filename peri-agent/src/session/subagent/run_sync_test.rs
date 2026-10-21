@@ -237,6 +237,71 @@ async fn settled_sync_child_returns_finished_without_parent_task() {
         .all(|task| matches!(task.status.as_str(), "completed" | "failed")));
 }
 
+#[tokio::test]
+async fn failed_receipt_before_cleanup_preserves_typed_failure_without_detaching() {
+    let session = child(Arc::new(TaskManager::new()));
+    let parent_manager = Arc::new(TaskManager::new());
+    let child_id = session.store().thread_id.clone().unwrap();
+    let receipt = ChildHandoffReceipt {
+        child_thread_id: child_id.clone(),
+        execution: session.start_turn().execution_binding(),
+        owner_session_id: child_id.clone(),
+        reason: ChildHandoffReason::ExecutionFailed,
+        tasks: Vec::new(),
+        message_ids: Vec::new(),
+        message_sequences: Vec::new(),
+        unprocessed_tool_calls: vec!["last-act-call".into()],
+        canonical_message_id: peri_acp_types::messages::MessageId::new(),
+    };
+    let expected_receipt_id = receipt.canonical_message_id;
+    let deliveries = Arc::new(AtomicUsize::new(0));
+    let observed_deliveries = deliveries.clone();
+    let (cleanup_done, cleanup_ready) = oneshot::channel();
+    let run_child_id = child_id.clone();
+    let mut completion = Box::pin(run_sync_with_registered_handoff(
+        session,
+        child_id.clone(),
+        "fixture".into(),
+        Some(parent_manager.clone()),
+        Some(new_sync_task_id()),
+        Some(Arc::new(move |_, _| {
+            observed_deliveries.fetch_add(1, Ordering::SeqCst);
+            Ok(())
+        })),
+        move |handoff, _| async move {
+            handoff.send(receipt.clone()).unwrap();
+            cleanup_ready.await.unwrap();
+            Err(Box::new(SubagentFailure::failed_with_handoff(
+                run_child_id,
+                "fixture",
+                crate::error::AgentError::MaxIterationsExceeded(400),
+                receipt,
+            )) as Box<dyn std::error::Error + Send + Sync>)
+        },
+    ));
+
+    // Poll through receipt delivery while lifecycle cleanup is deliberately
+    // blocked. The transport must not turn an already-known failure into Ok.
+    assert!(futures::poll!(completion.as_mut()).is_pending());
+    assert!(parent_manager.snapshot().tasks.is_empty());
+    cleanup_done.send(()).unwrap();
+    let error = match completion.await {
+        Err(error) => error,
+        Ok(_) => panic!("failed execution must retain its original error"),
+    };
+    let failure = error.downcast_ref::<SubagentFailure>().unwrap();
+    assert_eq!(failure.child_thread_id(), child_id);
+    assert!(matches!(
+        failure.error(),
+        crate::error::AgentError::MaxIterationsExceeded(400)
+    ));
+    let residual = failure.handoff().unwrap();
+    assert_eq!(residual.canonical_message_id, expected_receipt_id);
+    assert_eq!(residual.unprocessed_tool_calls, ["last-act-call"]);
+    assert!(parent_manager.snapshot().tasks.is_empty());
+    assert_eq!(deliveries.load(Ordering::SeqCst), 0);
+}
+
 /// 截止后交接：父结果 failed、保留 child/task 引用，registry 接管受阻交付。
 #[tokio::test(start_paused = true)]
 async fn handoff_sync_child_returns_pending_and_registry_retries_delivery() {

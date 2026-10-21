@@ -590,6 +590,7 @@ impl Middleware for McpMiddleware {
         // 整批替换初始 Vec（不是 append）：System 依赖就绪时 prepared 集合已包含
         // 全部静态 bridge（必需项 direct），再 extend 会重复注册同一工具。
         let mut tools = self.static_tool_bridges();
+        tools.push(Box::new(super::context_archive::ReadContextArchiveTool));
 
         let resource_tool = McpResourceTool::new(
             Arc::clone(&self.pool),

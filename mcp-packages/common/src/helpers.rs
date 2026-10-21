@@ -54,10 +54,17 @@ pub async fn invoke_tool_call(
     };
 
     let input = Value::Object(request.arguments.clone().unwrap_or_default());
-    match tool.invoke(input, ToolContext::new(&[], cwd)).await {
-        Ok(text) => Ok(CallToolResponse::Complete(CallToolResult::success(vec![
-            ContentBlock::text(text),
-        ]))),
+    match tool.invoke_output(input, ToolContext::new(&[], cwd)).await {
+        Ok(output) => Ok(CallToolResponse::Complete(
+            crate::result_mapping::with_execution(
+                if output.is_error() == Some(true) {
+                    CallToolResult::error(vec![ContentBlock::text(output.text)])
+                } else {
+                    CallToolResult::success(vec![ContentBlock::text(output.text)])
+                },
+                output.execution.as_ref(),
+            ),
+        )),
         Err(error) => {
             let text = crate::result_mapping::failure_text(tool.name(), error.as_ref());
             tracing::warn!(tool = tool.name(), diagnostic = %text, "MCP tool call failed");

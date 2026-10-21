@@ -72,8 +72,8 @@ fn assert_revision_advanced(
 }
 
 /// 失效覆盖表：每个改变模型视图的写入入口都必须推进修订号。
-#[test]
-fn test_view_revision_advances_on_model_view_mutations() {
+#[tokio::test]
+async fn test_view_revision_advances_on_model_view_mutations() {
     use peri_acp_types::system_reminder::{ReminderAudience, ReminderDelivery};
 
     let mut t = MessageTranscript::new();
@@ -130,6 +130,7 @@ fn test_view_revision_advances_on_model_view_mutations() {
             policy_version: 2,
             entries: vec![],
             superseded_by: None,
+            ..Default::default()
         },
     );
     rev = assert_revision_advanced(&t, rev, "set_flags_projection");
@@ -192,7 +193,7 @@ fn test_view_revision_advances_on_model_view_mutations() {
     let keep = rebuilt.append(make_human("keep"));
     rebuilt.append(make_human("drop"));
     let before_rewind = rebuilt.view_revision();
-    rebuilt.rewind_to(keep).unwrap();
+    rebuilt.rewind_to(keep).await.unwrap();
     assert_revision_advanced(&rebuilt, before_rewind, "rewind_to");
 }
 

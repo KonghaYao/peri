@@ -11,15 +11,14 @@ fn test_default_values() {
     assert!(config.auto_compact_enabled);
     assert!((config.auto_compact_threshold - 0.95).abs() < 0.001);
     assert!((config.micro_compact_threshold - 0.75).abs() < 0.001);
-    assert_eq!(config.micro_compact_stale_steps, 3);
+    assert_eq!(config.micro_compact_stale_steps, 2);
     assert_eq!(config.micro_field_threshold_chars, 500);
     assert_eq!(config.micro_field_keep_head_chars, 350);
     assert_eq!(config.micro_field_keep_tail_chars, 100);
     assert!(config.has_valid_micro_field_limits());
-    assert_eq!(
-        config.micro_excluded_tools.len(),
-        4,
-        "黑名单默认 4 个工具（Agent/AskUserQuestion/goal/TodoWrite）"
+    assert!(
+        config.micro_excluded_tools.is_empty(),
+        "工具目录提供语义保护，不按名字永久豁免"
     );
     assert_eq!(config.summary_max_tokens, 16000);
     assert_eq!(config.summary_max_requests, 3);
@@ -101,32 +100,11 @@ fn test_apply_env_overrides_on_custom_config() {
 }
 
 #[test]
-fn test_excluded_tools_default_non_empty() {
-    let config = CompactConfig::default();
-    assert!(
-        !config.micro_excluded_tools.is_empty(),
-        "黑名单默认应包含 Agent/AskUserQuestion/goal/TodoWrite"
-    );
-    assert!(
-        config.micro_excluded_tools.contains(&"Agent".to_string()),
-        "默认应包含 Agent"
-    );
-    assert!(
-        config
-            .micro_excluded_tools
-            .contains(&"AskUserQuestion".to_string()),
-        "默认应包含 AskUserQuestion"
-    );
-    assert!(
-        config.micro_excluded_tools.contains(&"goal".to_string()),
-        "默认应包含 goal"
-    );
-    assert!(
-        config
-            .micro_excluded_tools
-            .contains(&"TodoWrite".to_string()),
-        "默认应包含 TodoWrite"
-    );
+fn test_excluded_tools_are_explicit_additional_protection() {
+    let config: CompactConfig =
+        serde_json::from_str(r#"{"micro_excluded_tools":["CustomTool"]}"#).unwrap();
+    assert_eq!(config.micro_excluded_tools, vec!["CustomTool"]);
+    assert!(CompactConfig::default().micro_excluded_tools.is_empty());
 }
 
 #[test]

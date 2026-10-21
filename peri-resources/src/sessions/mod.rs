@@ -5,6 +5,8 @@
 //! 契约类型（`ThreadStore` trait / `ThreadMeta` / `BaseMessage` / `MessageFlags`）位于
 //! peri-acp-types（接口契约归 peri-acp-types），本模块仅实现，不解释业务语义。
 
+mod archive;
+mod archive_fork;
 mod canonical;
 mod data;
 #[cfg(not(target_os = "emscripten"))]

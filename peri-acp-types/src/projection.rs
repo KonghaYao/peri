@@ -5,7 +5,12 @@
 
 use serde::{Deserialize, Serialize};
 
+use crate::context_archive::{ArchiveCatalog, ArchiveRoot};
 use crate::messages::MessageId;
+
+fn default_format_version() -> u32 {
+    1
+}
 
 const fn default_compact_tool_input_keep_head() -> usize {
     350
@@ -50,6 +55,23 @@ pub enum ProjectionAction {
         placeholder: String,
     },
     Exclude,
+    /// Reuse the original archive identity instead of creating a recursive archive chain.
+    PreviewArchiveRead {
+        archive_ref: String,
+        keep_head: usize,
+        keep_tail: usize,
+    },
+    /// Omit every representation of a completed exchange; canonical bytes remain unchanged.
+    OmitToolExchange {
+        anchor_message_id: MessageId,
+        group_id: String,
+        tool_call_ids: Vec<String>,
+    },
+    /// Replace an exposed result with the factual receipt stored at its catalog anchor.
+    ResultReceipt {
+        anchor_message_id: MessageId,
+        group_id: String,
+    },
 }
 
 /// 单个投影条目：消息 id → 目标 → 动作
@@ -67,6 +89,16 @@ pub struct ProjectionActionEntry {
 /// 事实——[`Self::superseded_by`] 的 Full Compact 取代关系。
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct MessageProjectionDirective {
+    #[serde(default = "default_format_version")]
+    pub format_version: u32,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub archive_catalog: Option<ArchiveCatalog>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub archive_group: Option<ArchiveGroupLink>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub archive_roots: Vec<ArchiveRoot>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub archive_receipt_budget_tokens: Option<u64>,
     pub policy_version: u32,
     /// 仅含本消息的 action entries，不含 BaseMessage 内容或 Base64
     #[serde(default)]
@@ -78,10 +110,30 @@ pub struct MessageProjectionDirective {
     /// rewind 用它精确判定「排除是否仍有依据」（见
     /// [`crate::store::history::rewind_clear_excluded_ids`]）。
     ///
-    /// 清零 `excluded` 的存储路径把整条载荷一并清掉（本机 `clear_rewind_excluded`、
-    /// 远端 `session_history::CLEAR_EXCLUDED_SQL`），所以它不会残留在已恢复正文的条目上。旧行没有
-    /// 这个字段（`None`），旧构建读到它也不认识——serde 默认忽略未知字段，两侧都不会因此
-    /// 拒绝历史。
+    /// rewind 清零 `excluded` 时只撤销失效取代关系；仍完整的 archive catalog
+    /// 保持原有身份，已发布引用继续读取同一 canonical 内容。
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub superseded_by: Option<MessageId>,
+}
+
+/// A member points to its sole durable catalog; the member table is never duplicated.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ArchiveGroupLink {
+    pub group_id: String,
+    pub anchor_message_id: MessageId,
+}
+
+impl Default for MessageProjectionDirective {
+    fn default() -> Self {
+        Self {
+            format_version: 1,
+            policy_version: 0,
+            entries: Vec::new(),
+            superseded_by: None,
+            archive_catalog: None,
+            archive_group: None,
+            archive_roots: Vec::new(),
+            archive_receipt_budget_tokens: None,
+        }
+    }
 }

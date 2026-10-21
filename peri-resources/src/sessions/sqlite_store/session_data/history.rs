@@ -604,7 +604,7 @@ impl SqliteSessionData {
                     .await
                     .map_err(|error| map_sqlx(&error))?;
                 // 边界删除与有效视图重建同属这一事务：任何一半生效都会让热态与冷恢复分叉。
-                clear_rewind_excluded(&mut tx, id, clear_excluded).await?;
+                super::history_projection::reconcile_rewind(&mut tx, id, clear_excluded).await?;
                 refresh_history_derivations(&mut tx, id).await?;
                 RewindOutcome::Applied
             }
@@ -664,61 +664,6 @@ impl SqliteSessionData {
             .map_err(|_| commit_failure(Some(id.clone())))?;
         Ok(())
     }
-}
-
-/// rewind 保留前缀的有效视图重建：把给定 id 的 `excluded` 清零，并**把整条 `projection`
-/// 载荷一并清掉**（置 NULL）；`truncated` 保持原样。
-///
-/// 载荷必须随清零一起消失：`projection` 列是 flags 的持久化载荷，其中的 `superseded_by`
-/// （`MessageProjectionDirective::superseded_by`）只在 `excluded` 为真时被读取——一条正文已
-/// 恢复的条目却留着「我被某摘要取代」的记录，下游读到它就会拿到一份与有效视图矛盾的投影
-/// 指令。清掉它不丢任何仍然有效的渲染信息：生产里 `excluded: true` 的唯一写入点是
-/// Full Compact（`peri-agent/src/agent/compact_v2/full.rs`），它写 flags 时用
-/// `..Default::default()` **整体覆盖**，所以被排除的行本来就不带渲染指令。
-///
-/// 占位符个数随 id 数量生成，值全部走绑定参数（语句里不出现任何 id 文本）；语句在调用方
-/// 的同一事务内执行。任一 id 不是本会话的历史条目即整体失败：清零集合来自同一次一致读取，
-/// 命中不到行说明视图已与那次读取分叉，不能静默留下「一半恢复」的有效视图。
-async fn clear_rewind_excluded(
-    tx: &mut SqliteConnection,
-    id: &ThreadId,
-    clear_excluded: &[MessageId],
-) -> SessionResourceResult<()> {
-    if clear_excluded.is_empty() {
-        return Ok(());
-    }
-    let unique: Vec<MessageId> = {
-        let mut seen = HashSet::with_capacity(clear_excluded.len());
-        clear_excluded
-            .iter()
-            .copied()
-            .filter(|message| seen.insert(*message))
-            .collect()
-    };
-    let placeholders = (2..=unique.len() + 1)
-        .map(|position| format!("?{position}"))
-        .collect::<Vec<_>>()
-        .join(", ");
-    // `projection = NULL`：整条载荷随清零一并消失，不留 `superseded_by` 这类只在 `excluded`
-    // 为真时才有意义的记录（理由见函数文档）。`truncated` 不在 SET 里，保持原值。
-    let mut query = sqlx::query(sqlx::AssertSqlSafe(format!(
-        "UPDATE messages SET excluded = 0, projection = NULL \
-             WHERE thread_id = ?1 AND message_id IN ({placeholders})"
-    )))
-    .bind(id.as_str());
-    for message in &unique {
-        query = query.bind(message.as_uuid().to_string());
-    }
-    let updated = query
-        .execute(&mut *tx)
-        .await
-        .map_err(|error| map_sqlx(&error))?;
-    if updated.rows_affected() != unique.len() as u64 {
-        return Err(invalid_input(
-            "rewind flag target is not a history entry of this session",
-        ));
-    }
-    Ok(())
 }
 
 // ─── inherited 冻结前缀（S7.4） ───────────────────────────────────────────────

@@ -421,7 +421,8 @@ fn test_capability_whitelist_execute_extra_tool_is_writes() {
 /// explorer 的只读白名单是工具级裁剪：解析结果非空，且与 capability 标签一致。
 #[test]
 fn test_explorer_readonly_allowlist_resolves_to_read_tools() {
-    let content = "---\nname: explorer\ndescription: d\ntools: [Read, Grep, Glob]\ndisallowedTools: [Agent]\n---\n\nbody\n";
+    let content =
+        include_str!("../../../mcp-packages/workspace/src/resources/builtin/agents/explorer.md");
     let agent = parse_agent_file(content).expect("explorer fixture 必须可解析");
     let capability = infer_agent_capability(&agent.frontmatter).expect("档位合法");
     assert!(!capability.can_mutate, "只读白名单必须标 readonly");
@@ -430,6 +431,7 @@ fn test_explorer_readonly_allowlist_resolves_to_read_tools() {
         "Read",
         "Grep",
         "Glob",
+        "ReadContextArchive",
         "Bash",
         "Write",
         "Edit",
@@ -468,8 +470,18 @@ fn test_explorer_readonly_allowlist_resolves_to_read_tools() {
     let names: Vec<&str> = filtered.iter().map(|tool| tool.name()).collect();
     assert_eq!(
         names,
-        vec!["Read", "Grep", "Glob"],
+        vec!["Read", "Grep", "Glob", "ReadContextArchive"],
         "explorer 只保留只读工具（silent trimming 不得产出空集）"
+    );
+    let strict = crate::subagent::fork::filter_tools(
+        &parent_tools,
+        &peri_mcp_core::agent_definition::ToolsValue::List(vec!["Read".into()]),
+        &peri_mcp_core::agent_definition::ToolsValue::Empty,
+    );
+    assert_eq!(
+        strict.iter().map(|tool| tool.name()).collect::<Vec<_>>(),
+        vec!["Read"],
+        "custom allowlists must not inherit archive access implicitly"
     );
 }
 

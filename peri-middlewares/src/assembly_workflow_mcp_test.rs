@@ -401,7 +401,10 @@ async fn test_workflow_mcp_sync_web_search_uses_agent_session_owner() {
         bound_sessions: &[ROOT],
     })
     .await;
-    assert_eq!(outcome.output, SYNC_OUTPUT);
+    assert_eq!(
+        outcome.output,
+        format!("{SYNC_OUTPUT}\n[Execution status: completed]")
+    );
     assert_eq!(outcome.calls.len(), 1);
     assert_eq!(outcome.calls[0].name, "WebSearch");
     assert!(
@@ -442,7 +445,10 @@ async fn test_workflow_mcp_unregistered_root_does_not_own_agent_admission() {
         bound_sessions: &[SPOOFED],
     })
     .await;
-    assert_eq!(outcome.output, SYNC_OUTPUT);
+    assert_eq!(
+        outcome.output,
+        format!("{SYNC_OUTPUT}\n[Execution status: completed]")
+    );
     assert_eq!(outcome.calls.len(), 1);
     let token = scope_token_of(&outcome.calls[0].meta).unwrap();
     assert_eq!(

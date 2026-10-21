@@ -41,6 +41,8 @@ use peri_acp_types::workspace::{
 };
 use sqlx::SqliteConnection;
 
+#[path = "session_data/archive.rs"]
+mod archive;
 #[path = "session_data/async_task.rs"]
 mod async_task;
 #[path = "session_data/blob_reader.rs"]
@@ -49,6 +51,8 @@ mod blob_reader;
 mod catalog;
 #[path = "session_data/history.rs"]
 mod history;
+#[path = "session_data/history_projection.rs"]
+mod history_projection;
 #[path = "session_data/history_window.rs"]
 mod history_window;
 #[path = "session_data/inherited_blob.rs"]

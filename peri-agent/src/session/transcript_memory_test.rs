@@ -29,6 +29,7 @@ fn test_ancestor_flags_can_restore_but_cannot_mutate() {
             policy_version: 2,
             entries: vec![],
             superseded_by: None,
+            ..Default::default()
         },
     );
     transcript.clear_flags(ancestor_id);
@@ -314,22 +315,22 @@ fn test_ancestor_boundary_is_readonly_concept() {
 
 // ── Rewind ──────────────────────────────────────────────────────────────────
 
-#[test]
-fn test_rewind_to_truncates_correctly() {
+#[tokio::test]
+async fn test_rewind_to_truncates_correctly() {
     let mut t = MessageTranscript::new();
     let id1 = t.append(make_human("keep-1"));
     let id2 = t.append(make_human("keep-2"));
     let _id3 = t.append(make_human("will-remove-1"));
     let _id4 = t.append(make_human("will-remove-2"));
 
-    t.rewind_to(id2).unwrap();
+    t.rewind_to(id2).await.unwrap();
     assert_eq!(t.len(), 2, "rewind 后应只保留 id1 + id2");
     assert!(t.get(id1).is_some());
     assert!(t.get(id2).is_some());
 }
 
-#[test]
-fn test_rewind_clears_staging() {
+#[tokio::test]
+async fn test_rewind_clears_staging() {
     let mut t = MessageTranscript::new();
     let id = t.append(make_human("target"));
     t.append(make_human("after"));
@@ -337,28 +338,28 @@ fn test_rewind_clears_staging() {
     t.stage_ai_message(make_ai("staged ai"));
     assert!(t.has_staged());
 
-    t.rewind_to(id).unwrap();
+    t.rewind_to(id).await.unwrap();
     assert!(!t.has_staged(), "rewind 应清空 staging");
     assert_eq!(t.len(), 1);
 }
 
-#[test]
-fn test_rewind_nonexistent_id_returns_error() {
+#[tokio::test]
+async fn test_rewind_nonexistent_id_returns_error() {
     let mut t = MessageTranscript::new();
     t.append(make_human("only msg"));
     let ghost_id = MessageId::new();
 
-    let result = t.rewind_to(ghost_id);
+    let result = t.rewind_to(ghost_id).await;
     assert!(result.is_err(), "rewind 不存在的 id 应返回错误");
 }
 
-#[test]
-fn test_rewind_into_ancestor_returns_error() {
+#[tokio::test]
+async fn test_rewind_into_ancestor_returns_error() {
     let a1 = make_human("ancestor");
     let mut t = MessageTranscript::new().with_ancestor(vec![a1.clone()]);
     t.append(make_human("own"));
 
-    let result = t.rewind_to(a1.id());
+    let result = t.rewind_to(a1.id()).await;
     assert!(result.is_err(), "rewind 到祖先区域应返回错误");
 }
 
@@ -496,6 +497,7 @@ fn test_projection_directive_persists_roundtrip() {
             action: ProjectionAction::CompactText { max_chars: 100 },
         }],
         superseded_by: None,
+        ..Default::default()
     };
 
     let mut batch = HashMap::new();

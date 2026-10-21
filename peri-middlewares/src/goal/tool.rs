@@ -284,6 +284,10 @@ struct GoalVerdict {
 
 #[async_trait]
 impl BaseTool for GoalTool {
+    fn context_retention(&self) -> peri_agent::tools::ContextRetention {
+        peri_agent::tools::ContextRetention::StateBearing
+    }
+
     fn name(&self) -> &str {
         "goal"
     }

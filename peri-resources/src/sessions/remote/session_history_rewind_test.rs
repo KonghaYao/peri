@@ -45,6 +45,24 @@ const EXCLUDED_OF_SQL: &str =
 const FLAGS_OF_SQL: &str = "SELECT truncated, excluded, projection FROM messages
     WHERE thread_id = ?1 AND message_id = ?2";
 
+#[tokio::test]
+async fn repeated_rewind_of_same_boundary_removes_the_new_suffix() {
+    let history = messages(2);
+    let (_directory, transport, data) = remote_with_history(&history).await;
+    let id = REWIND_SESSION.to_string();
+    let boundary = RewindBoundary::KeepThrough(history[0].id());
+    data.rewind_history(&id, boundary, &[]).await.unwrap();
+    let later = PersistedPayload::Message(BaseMessage::human("later suffix"));
+    data.append_history(&id, &[later]).await.unwrap();
+    data.rewind_history(&id, boundary, &[]).await.unwrap();
+    let count: i64 = sqlx::query_scalar(COUNT_ROWS_SQL)
+        .bind(&id)
+        .fetch_one(&transport.pool)
+        .await
+        .unwrap();
+    assert_eq!(count, 1, "a new tail is a new rewind operation");
+}
+
 /// 夹具消费历史行：按顺序给出可观察的消息。
 fn messages(count: usize) -> Vec<PersistedPayload> {
     (0..count)
@@ -354,6 +372,7 @@ async fn remote_rewind_clears_the_whole_projection_payload_of_cleared_rows() {
             policy_version: 2,
             entries: Vec::new(),
             superseded_by: Some(summary),
+            ..Default::default()
         }),
     };
     let first_summary = BaseMessage::human("summary one");
@@ -496,5 +515,133 @@ async fn remote_read_only_store_refuses_rewind_with_an_unknown_boundary() {
         count_rows(&transport.pool, &id).await,
         2,
         "只读路径什么都不写"
+    );
+}
+
+#[tokio::test]
+async fn remote_rewind_revokes_micro_group_and_keeps_canonical_prefix() {
+    use peri_acp_types::context_archive::build_catalog;
+    use peri_acp_types::projection::{
+        ArchiveGroupLink, ProjectionAction, ProjectionActionEntry, ProjectionTarget,
+    };
+    let history = messages(2);
+    let (_fixture, transport, data) = remote_with_history(&history).await;
+    let id: ThreadId = REWIND_SESSION.into();
+    let anchor = history[1].id();
+    let catalog = build_catalog(
+        id.clone(),
+        "group".into(),
+        anchor,
+        &history,
+        "Historical data".into(),
+    )
+    .unwrap();
+    let updates = history
+        .iter()
+        .map(|p| {
+            (
+                p.id(),
+                MessageFlags {
+                    truncated: true,
+                    projection: Some(MessageProjectionDirective {
+                        policy_version: 3,
+                        archive_catalog: (p.id() == anchor).then(|| catalog.clone()),
+                        archive_group: Some(ArchiveGroupLink {
+                            group_id: "group".into(),
+                            anchor_message_id: anchor,
+                        }),
+                        entries: vec![ProjectionActionEntry {
+                            message_id: p.id(),
+                            target: ProjectionTarget::Message,
+                            action: ProjectionAction::OmitToolExchange {
+                                anchor_message_id: anchor,
+                                group_id: "group".into(),
+                                tool_call_ids: vec!["call".into()],
+                            },
+                        }],
+                        ..Default::default()
+                    }),
+                    ..Default::default()
+                },
+            )
+        })
+        .collect();
+    data.apply_compaction(
+        &id,
+        &CompactionChange {
+            flag_updates: updates,
+            appended_messages: vec![],
+        },
+    )
+    .await
+    .unwrap();
+    data.rewind_history(&id, RewindBoundary::KeepThrough(history[0].id()), &[])
+        .await
+        .unwrap();
+    assert_eq!(count_rows(&transport.pool, &id).await, 1);
+    let (_, _, raw) = row_flags(&transport.pool, &id, history[0].id()).await;
+    let projection: MessageProjectionDirective = serde_json::from_str(&raw.unwrap()).unwrap();
+    assert!(projection.entries.is_empty());
+    assert!(projection.archive_group.is_none());
+}
+
+#[tokio::test]
+async fn remote_compaction_appended_root_and_projection_upgrade_are_atomic() {
+    use peri_acp_types::projection::{ProjectionAction, ProjectionActionEntry, ProjectionTarget};
+    let history = messages(1);
+    let (_fixture, transport, data) = remote_with_history(&history).await;
+    let id: ThreadId = REWIND_SESSION.into();
+    let summary = BaseMessage::human("Summary without IDs");
+    let first = MessageFlags {
+        truncated: true,
+        projection: Some(MessageProjectionDirective {
+            policy_version: 3,
+            entries: vec![ProjectionActionEntry {
+                message_id: history[0].id(),
+                target: ProjectionTarget::Message,
+                action: ProjectionAction::CompactToolResult {
+                    keep_head: 100,
+                    keep_tail: 0,
+                    preserve_recovery_handle: true,
+                },
+            }],
+            ..Default::default()
+        }),
+        ..Default::default()
+    };
+    let mut change = CompactionChange {
+        flag_updates: vec![
+            (history[0].id(), first.clone()),
+            (summary.id(), first.clone()),
+            (MessageId::new(), MessageFlags::default()),
+        ],
+        appended_messages: vec![summary.clone()],
+    };
+    data.apply_compaction(&id, &change).await.unwrap_err();
+    assert_eq!(count_rows(&transport.pool, &id).await, 1);
+    assert_eq!(
+        row_flags(&transport.pool, &id, history[0].id()).await,
+        (0, 0, None)
+    );
+    change.flag_updates.pop();
+    data.apply_compaction(&id, &change).await.unwrap();
+    assert_eq!(count_rows(&transport.pool, &id).await, 2);
+    let mut stronger = first.clone();
+    stronger.projection.as_mut().unwrap().entries[0].action = ProjectionAction::CompactToolResult {
+        keep_head: 10,
+        keep_tail: 0,
+        preserve_recovery_handle: true,
+    };
+    data.apply_message_projections(&id, &[(history[0].id(), first)])
+        .await
+        .unwrap();
+    data.apply_message_projections(&id, &[(history[0].id(), stronger.clone())])
+        .await
+        .unwrap();
+    let (_, _, raw) = row_flags(&transport.pool, &id, history[0].id()).await;
+    assert_eq!(
+        serde_json::from_str::<MessageProjectionDirective>(&raw.unwrap()).unwrap(),
+        stronger.projection.unwrap(),
+        "不同等级不能因相同flags bits误当重放"
     );
 }

@@ -488,7 +488,49 @@ async fn test_full_report_uses_committed_micro_view() {
     }
     transcript.append_system_reminder(report("UNTRUNCATED_REPORT"));
     let config = CompactConfig::default();
-    assert!(crate::agent::compact_v2::micro_compact(&mut transcript, &config) > 0);
+    use crate::agent::compact_v2::planner::{
+        plan_micro_with_facts, ArchivePlanningScope, ContextPressure, MicroPlanningFacts,
+    };
+    let mut facts = MicroPlanningFacts {
+        archive_scope: Some(ArchivePlanningScope {
+            thread_id: bound.thread_id.clone(),
+            committed_tail: transcript.entries().last().unwrap().id(),
+        }),
+        ..Default::default()
+    };
+    for entry in transcript.entries() {
+        facts.exposed_message_ids.insert(entry.id());
+        if let Some(message) = entry.as_message() {
+            for call in message.tool_calls() {
+                facts.closed_call_ids.insert(call.id.clone());
+                facts.tool_retention.insert(
+                    call.name.to_lowercase(),
+                    crate::tools::ContextRetention::PreviewOnly,
+                );
+            }
+        }
+    }
+    let plan = plan_micro_with_facts(
+        &transcript,
+        &config,
+        &ContextPressure {
+            estimated_tokens: 150_000,
+            context_window: 200_000,
+            output_reserve: 8000,
+            predicted_tool_growth: 0,
+            safety_buffer: 0,
+            cache_hit_rate: 0.0,
+        },
+        &facts,
+        &super::super::projection::ProviderCapabilities::default(),
+    )
+    .unwrap();
+    assert!(
+        crate::agent::compact_v2::micro::apply_micro_plan(&mut transcript, &plan)
+            .await
+            .unwrap()
+            > 0
+    );
     let view = super::super::projection::render_persisted_llm_view(
         &transcript,
         &super::super::projection::ProviderCapabilities::default(),

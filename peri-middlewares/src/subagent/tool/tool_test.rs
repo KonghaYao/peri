@@ -393,7 +393,7 @@ async fn invoke_resolves_agent_from_argument_cwd_before_starting_factory() {
 
     // 1) 同 cwd 调用命中会话资源面的定义。
     let result = tool
-        .invoke(
+        .invoke_output(
             serde_json::json!({
                 "subagent_type": "actual-agent",
                 "prompt": "from bound face",
@@ -403,7 +403,12 @@ async fn invoke_resolves_agent_from_argument_cwd_before_starting_factory() {
         )
         .await
         .unwrap();
-    assert!(result.contains("echo: from bound face"));
+    assert!(result.text.contains("echo: from bound face"));
+    assert_eq!(
+        result.execution.as_ref().unwrap().status,
+        peri_agent::tools::ToolExecutionStatus::Completed
+    );
+    assert!(result.execution.as_ref().unwrap().task_id.is_none());
     assert_eq!(factory_calls.load(Ordering::SeqCst), 1);
 
     // 2) 未命中：失败且**不启动 factory**（顺序契约不变）。
@@ -474,7 +479,7 @@ async fn background_invoke_uses_argument_cwd_for_loader_failure() {
     );
 
     let result = tool
-        .invoke(
+        .invoke_output(
             serde_json::json!({
                 "subagent_type": "background-agent",
                 "prompt": "bg",
@@ -486,8 +491,16 @@ async fn background_invoke_uses_argument_cwd_for_loader_failure() {
         .await
         .unwrap();
     assert!(
-        result.contains("Background") || result.contains("task_id") || result.contains("echo: bg"),
-        "资源面命中的定义必须可执行（无 task_manager 时同步回退）: {result}"
+        result.text.contains("Background")
+            || result.text.contains("task_id")
+            || result.text.contains("echo: bg"),
+        "资源面命中的定义必须可执行（无 task_manager 时同步回退）: {result:?}"
+    );
+    assert!(
+        result.execution.as_ref().is_none_or(
+            |execution| execution.status != peri_agent::tools::ToolExecutionStatus::Completed
+        ),
+        "后台启动不能伪造完成事实"
     );
     assert_eq!(factory_calls.load(Ordering::SeqCst), 1);
 

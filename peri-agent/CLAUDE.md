@@ -21,6 +21,7 @@
 | Rust、async、文本宽度、doc tests | `../docs/standards/rust.md` |
 | 测试位置与覆盖要求 | `../docs/standards/testing.md` |
 | compact 阈值与环境覆盖 | `src/agent/compact_v2/config.rs` 的 `CompactConfig` |
+| Micro 投影、原文回查与恢复 | `docs/design/micro-compact.md`；`src/agent/compact_v2/`；`src/context_archive.rs`；`docs/code-index/peri-agent.md` |
 
 不通过导入扩展默认上下文；需规则时按表显式读取。
 

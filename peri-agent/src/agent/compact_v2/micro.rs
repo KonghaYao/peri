@@ -1,80 +1,182 @@
-//! Micro Compact 实现
-//!
-//! 零 LLM 调用，对符合条件的旧消息标 `truncated`（不改内容）。
-//! 计划生成由 planner 完成，本模块负责：
-//! 1. 按 message_id 分组 action entries，构造 per-message `MessageProjectionDirective`
-//! 2. 通过 `set_flags_projection` 持久化 directive（同时设置 truncated）
-//!
-//! 计划与应用分离：`plan_micro` 只规划一次，`apply_micro_plan` 复用该计划落地，
-//! 调用方持有计划时不得再走 `micro_compact` 二次规划。
-//!
-//! 关键约束：
-//! - planner 只能读取 transcript + config，绝不调用 set_truncated 等副作用 API
-//! - per-call 粒度：同一 AI message 中不同 tool_call_id 独立决策
+//! Micro plans commit as one durable unit. Canonical payloads cross the writer barrier
+//! before catalog/member flags; the hot view advances only after acknowledgement.
 
 use std::collections::HashMap;
-use tracing::debug;
 
 use crate::agent::compact_v2::config::CompactConfig;
+use crate::error::AgentResult;
 use crate::messages::MessageId;
 use crate::session::transcript::MessageTranscript;
+use peri_acp_types::context_archive::{validate_projection_metadata, ArchiveError};
+use peri_acp_types::projection::ArchiveGroupLink;
+use peri_acp_types::store::{CompactionChange, MessageFlags};
 
-use super::projection::{MessageProjectionDirective, MicroCompactPlan, ProjectionActionEntry};
+use super::projection::{MessageProjectionDirective, MicroCompactPlan};
 
-/// 应用已生成的 Micro 计划：分组写 per-message projection directive
-///
-/// 按 message_id 分组 action entries——同一消息的多个 action 合并进同一条
-/// directive，避免后写覆盖先写而丢 entries。`policy_version` 取自计划本身，
-/// 保证持久化 directive 与计划生成时的判定版本一致。
-///
-/// 返回去重 message_id 数量，与 [`MicroCompactPlan::changed_messages`] 恒等。
-pub fn apply_micro_plan(transcript: &mut MessageTranscript, plan: &MicroCompactPlan) -> usize {
-    // 按 message_id 分组 action entries，每个消息对应一个 MessageProjectionDirective
-    let mut directives_by_msg: HashMap<MessageId, Vec<ProjectionActionEntry>> = HashMap::new();
-    for action in &plan.actions {
-        directives_by_msg
-            .entry(action.message_id)
-            .or_default()
-            .push(action.clone());
+/// Persist a single already validated plan without replanning or publishing early.
+pub async fn apply_micro_plan(
+    transcript: &mut MessageTranscript,
+    plan: &MicroCompactPlan,
+) -> AgentResult<usize> {
+    if plan.actions.is_empty() && plan.catalogs.is_empty() {
+        return Ok(0);
     }
-
-    let affected = directives_by_msg.len();
-    debug_assert_eq!(
-        affected, plan.changed_messages,
-        "去重 message_id 数应等于计划统计的 changed_messages"
+    validate_source_flags(transcript, plan)?;
+    validate_plan_metadata(transcript, plan)
+        .map_err(|error| anyhow::anyhow!("recovery_unavailable: {error}"))?;
+    let mut committed_tails = HashMap::new();
+    if !plan.catalogs.is_empty() {
+        transcript.flush_persistence().await?;
+        let (resources, session_id, _) = transcript
+            .idempotent_reminder_port()
+            .ok_or_else(|| anyhow::anyhow!("recovery_unavailable: archive requires persistence"))?;
+        let reader = crate::context_archive::ContextArchiveReader::new(resources, session_id);
+        for catalog in &plan.catalogs {
+            if transcript
+                .projection_ref(catalog.anchor_message_id)
+                .and_then(|directive| directive.archive_catalog.as_ref())
+                .is_some_and(|existing| existing != catalog)
+            {
+                return Err(
+                    anyhow::anyhow!("archive catalog identity cannot be overwritten").into(),
+                );
+            }
+            let tail = reader
+                .verify_catalog(catalog)
+                .await
+                .map_err(|error| anyhow::anyhow!("recovery_unavailable: {error}"))?;
+            committed_tails.insert(catalog.source_thread_id.clone(), tail);
+        }
+    }
+    validate_source_flags(transcript, plan)?;
+    let flag_updates = prepare_updates(transcript, plan, &committed_tails)
+        .map_err(|error| anyhow::anyhow!("recovery_unavailable: {error}"))?;
+    let affected = flag_updates.len();
+    transcript
+        .commit_compaction_lifecycle(CompactionChange {
+            flag_updates,
+            appended_messages: Vec::new(),
+        })
+        .await?;
+    tracing::debug!(
+        affected,
+        policy_version = plan.policy_version,
+        "Micro projection committed"
     );
-
-    // 对每组消息写入 projection directive（set_flags_projection 同时设置 truncated=true）
-    for (msg_id, entries) in directives_by_msg {
-        transcript.set_flags_projection(
-            msg_id,
-            MessageProjectionDirective {
-                policy_version: plan.policy_version,
-                entries,
-                superseded_by: None,
-            },
-        );
-    }
-
-    if affected > 0 {
-        debug!(
-            affected,
-            "Micro Compact: 持久化 projection directive + truncated 标记"
-        );
-    }
-
-    affected
+    Ok(affected)
 }
 
-/// Micro Compact：调用 plan_micro 生成计划，然后持久化 per-message projection directive
-///
-/// 返回被标记的消息数量。
-///
-/// 调用方若已持有计划（如 run_compact 的 dry-run 结果），应直接调用
-/// [`apply_micro_plan`]，不要二次规划。
-pub fn micro_compact(transcript: &mut MessageTranscript, config: &CompactConfig) -> usize {
+/// Check the exact persisted shape without I/O, using the same assembly as commit.
+pub(super) fn validate_plan_metadata(
+    transcript: &MessageTranscript,
+    plan: &MicroCompactPlan,
+) -> Result<(), ArchiveError> {
+    prepare_updates(transcript, plan, &HashMap::new()).map(|_| ())
+}
+
+fn prepare_updates(
+    transcript: &MessageTranscript,
+    plan: &MicroCompactPlan,
+    committed_tails: &HashMap<String, MessageId>,
+) -> Result<Vec<(MessageId, MessageFlags)>, ArchiveError> {
+    let mut directives: HashMap<MessageId, MessageProjectionDirective> = HashMap::new();
+    for action in &plan.actions {
+        let directive = directives.entry(action.message_id).or_insert_with(|| {
+            transcript
+                .projection_ref(action.message_id)
+                .cloned()
+                .unwrap_or_default()
+        });
+        directive.policy_version = plan.policy_version;
+        // A later level replaces its own target, leaving other calls and prior catalogs intact.
+        directive.entries.retain(|old| old.target != action.target);
+        directive.entries.push(action.clone());
+    }
+    for catalog in &plan.catalogs {
+        for member in &catalog.members {
+            let directive = directives.entry(member.message_id).or_insert_with(|| {
+                transcript
+                    .projection_ref(member.message_id)
+                    .cloned()
+                    .unwrap_or_default()
+            });
+            directive.policy_version = plan.policy_version;
+            directive.archive_group = Some(ArchiveGroupLink {
+                group_id: catalog.group_id.clone(),
+                anchor_message_id: catalog.anchor_message_id,
+            });
+        }
+        let directive = directives
+            .entry(catalog.anchor_message_id)
+            .or_insert_with(|| {
+                transcript
+                    .projection_ref(catalog.anchor_message_id)
+                    .cloned()
+                    .unwrap_or_default()
+            });
+        directive.policy_version = plan.policy_version;
+        directive.archive_catalog = Some(catalog.clone());
+    }
+    // Roots are attached once, to the newest catalog anchor. Full transfers their range.
+    if let Some(catalog) = plan.catalogs.last() {
+        let directive = directives.entry(catalog.anchor_message_id).or_default();
+        directive.archive_roots = plan.archive_roots.clone();
+        for root in &mut directive.archive_roots {
+            if let Some(tail) = committed_tails.get(&root.source_thread_id) {
+                root.committed_tail = *tail;
+            }
+        }
+        directive.archive_receipt_budget_tokens = Some(plan.receipt_budget_tokens);
+    }
+    let mut flag_updates: Vec<_> = directives
+        .into_iter()
+        .map(|(id, directive)| {
+            validate_projection_metadata(&directive)?;
+            let mut flags: MessageFlags = transcript.flags(id);
+            flags.truncated = true;
+            flags.projection = Some(directive);
+            Ok((id, flags))
+        })
+        .collect::<Result<Vec<_>, ArchiveError>>()?;
+    flag_updates.sort_by_key(|(id, _)| id.as_uuid().as_u128());
+    Ok(flag_updates)
+}
+
+/// A new tail is independent of the planned sources; a changed source is a conflict.
+fn validate_source_flags(
+    transcript: &MessageTranscript,
+    plan: &MicroCompactPlan,
+) -> AgentResult<()> {
+    for (id, expected) in &plan.source_flags {
+        if transcript.get(*id).is_none() || transcript.flags(*id) != *expected {
+            return Err(anyhow::anyhow!(
+                "micro plan source changed; discard plan before commit: {id:?}"
+            )
+            .into());
+        }
+    }
+    for (id, expected) in &plan.source_content {
+        let actual = transcript.get(*id).and_then(|entry| entry.as_message());
+        if match actual {
+            Some(message) => super::exposure::fingerprint(message)? != *expected,
+            None => true,
+        } {
+            return Err(anyhow::anyhow!(
+                "micro plan source changed; discard plan before commit: {id:?}"
+            )
+            .into());
+        }
+    }
+    Ok(())
+}
+
+/// Convenience entry for callers that have not already planned a Micro pass.
+pub async fn micro_compact(
+    transcript: &mut MessageTranscript,
+    config: &CompactConfig,
+) -> AgentResult<usize> {
     let plan = super::planner::plan_micro(transcript, config, true);
-    apply_micro_plan(transcript, &plan)
+    apply_micro_plan(transcript, &plan).await
 }
 
 #[cfg(test)]

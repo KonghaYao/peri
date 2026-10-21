@@ -25,6 +25,10 @@ impl AgentResultTool {
 
 #[async_trait]
 impl BaseTool for AgentResultTool {
+    fn context_retention(&self) -> peri_agent::tools::ContextRetention {
+        peri_agent::tools::ContextRetention::Report
+    }
+
     fn name(&self) -> &str {
         "AgentResult"
     }

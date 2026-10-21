@@ -138,7 +138,7 @@ async fn test_projection_and_rewind_use_single_behaviors() {
     transcript.flush_persistence().await.unwrap();
     assert!(store.flags(&first).excluded);
 
-    transcript.rewind_to(first).unwrap();
+    transcript.rewind_to(first).await.unwrap();
     transcript.flush_persistence().await.unwrap();
     let messages = persisted_messages(&store);
     assert_eq!(messages.len(), 1, "rewind 保留目标本身（KeepThrough）");
@@ -147,10 +147,53 @@ async fn test_projection_and_rewind_use_single_behaviors() {
     assert_eq!(store.rewind_calls(), 1);
 }
 
-/// compaction 生命周期：一次完整行为提交（摘要、flags、追加消息），成功才改内存；
-/// 失败时磁盘事实保留、内存视图不前进，热态标记为不确定（必须冷重载）。
 #[tokio::test]
-async fn test_commit_compaction_lifecycle_is_atomic_or_uncertain() {
+async fn test_rewind_known_failure_preserves_prefix_suffix_and_revision() {
+    let bound = TestSession::open().await;
+    let messages = vec![make_human("keep"), make_ai("suffix")];
+    let keep = messages[0].id();
+    bound
+        .resources()
+        .append_history(
+            &bound.thread_id,
+            &messages
+                .iter()
+                .cloned()
+                .map(PersistedPayload::Message)
+                .collect::<Vec<_>>(),
+        )
+        .await
+        .unwrap();
+    let mut transcript = MessageTranscript::new()
+        .with_own_payloads(
+            messages
+                .into_iter()
+                .map(PersistedPayload::Message)
+                .collect(),
+        )
+        .with_persistence(bound.read_only_resources().await, bound.thread_id.clone());
+    let revision = transcript.view_revision();
+    let error = transcript.rewind_to(keep).await.unwrap_err();
+    assert!(!error.to_string().is_empty());
+    assert_eq!(transcript.len(), 2);
+    assert_eq!(transcript.view_revision(), revision);
+    assert!(!transcript.compaction_commit_state().is_uncertain());
+    assert_eq!(
+        bound
+            .resources()
+            .load_session_snapshot(&bound.thread_id)
+            .await
+            .unwrap()
+            .payloads
+            .len(),
+        2
+    );
+}
+
+/// compaction 生命周期：一次完整行为提交（摘要、flags、追加消息），成功才改内存；
+/// 明确失败时磁盘事实保留、内存视图不前进；未知终态由独立用例要求冷重载。
+#[tokio::test]
+async fn test_commit_compaction_lifecycle_known_failure_retains_old_view() {
     let store = mock_store();
     let mut transcript =
         MessageTranscript::new().with_persistence(store.clone(), "lifecycle".to_string());
@@ -208,8 +251,8 @@ async fn test_commit_compaction_lifecycle_is_atomic_or_uncertain() {
         .all(|message| message.id() != extra_id));
     assert!(failing.get(extra_id).is_none(), "失败时内存不得前进");
     assert!(
-        failing.compaction_commit_state().is_uncertain(),
-        "失败后热态必须失效（冷重载才能恢复）"
+        !failing.compaction_commit_state().is_uncertain(),
+        "明确未提交必须保留上一份完整视图"
     );
 }
 
@@ -433,4 +476,41 @@ async fn test_drop_flushes_pending_appends_to_store() {
 #[tokio::test]
 async fn test_drop_without_persistence_is_noop() {
     drop(MessageTranscript::new());
+}
+
+/// 提交终态未知时不发布任何候选修订，也不允许下一次 compact 假装回滚成功。
+#[tokio::test]
+async fn test_compaction_unknown_outcome_requires_reload() {
+    let store = mock_store();
+    let mut transcript = MessageTranscript::new().with_persistence(store.clone(), "unknown".into());
+    let id = transcript.append(make_human("old committed view"));
+    transcript.flush_persistence().await.unwrap();
+    let revision = transcript.view_revision();
+    store.uncertain_compaction();
+    let error = transcript
+        .commit_compaction_lifecycle(CompactionChange {
+            flag_updates: vec![(
+                id,
+                MessageFlags {
+                    truncated: true,
+                    ..Default::default()
+                },
+            )],
+            appended_messages: Vec::new(),
+        })
+        .await
+        .unwrap_err();
+    assert!(error.to_string().contains("unknown"));
+    assert_eq!(transcript.view_revision(), revision);
+    assert!(!transcript.flags(id).truncated);
+    assert!(transcript.compaction_commit_state().is_uncertain());
+    let error = transcript
+        .commit_compaction_lifecycle(CompactionChange {
+            flag_updates: Vec::new(),
+            appended_messages: Vec::new(),
+        })
+        .await
+        .unwrap_err();
+    assert!(error.to_string().contains("reload"));
+    assert_eq!(store.compaction_calls(), 1);
 }

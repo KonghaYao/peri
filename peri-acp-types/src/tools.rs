@@ -9,6 +9,9 @@ use crate::interaction::UnansweredCause;
 use crate::messages::BaseMessage;
 use crate::tool_outcome::{RawToolResult, RemoteToolError};
 
+/// Private builtin MCP metadata key; consumers must validate the builtin source.
+pub const TOOL_EXECUTION_META_KEY: &str = "peri.dev/tool-execution-v1";
+
 /// Stable execution state carried alongside a tool's bounded display text.
 ///
 /// `None` on [`ToolOutput::execution`] means that the legacy tool contract did
@@ -452,13 +455,19 @@ pub fn derive_title_from_name(name: &str) -> String {
 /// `peri-agent::tools::ContextRetention` 保留 re-export）。
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum ContextRetention {
+    /// 未知语义：仅在已暴露且原文可回查时允许结果预览，不允许整组省略。
+    PreviewOnly,
+    /// 回查结果复用原历史引用，禁止创建“回查的回查”目录链。
+    ArchiveRead,
+    /// 任务报告：终态与消费均确认后可做不完整预览，自由正文不伪装成结论摘要。
+    Report,
     /// 必须完整保留（用户回答、目标、任务状态工具）
     Preserve,
     /// 后续控制流依赖的状态（后续可能降级但不是现在）
     StateBearing,
-    /// 副作用已完成的收据（只需保留摘要/状态）
+    /// 副作用收据；此策略不证明已完成，强压缩另需 typed 终态。
     SideEffectReceipt,
-    /// 可从磁盘/网络重新获取
+    /// 可从磁盘/网络重新获取；此策略不证明同步返回或执行终态。
     Recomputable,
 }
 
@@ -836,9 +845,17 @@ pub trait BaseTool: Send + Sync {
 
     /// 工具在上下文压缩中的保留策略。
     ///
-    /// 默认返回 `ContextRetention::Preserve`——未显式标注的工具绝对不会被压缩。
+    /// 默认只允许有回查保证的结果预览；未知副作用禁止整组退场。
     fn context_retention(&self) -> ContextRetention {
-        ContextRetention::Preserve
+        self.builtin_mcp_instance()
+            .and_then(crate::builtin_mcp::find)
+            .and_then(|instance| {
+                instance
+                    .tools
+                    .iter()
+                    .find(|tool| Some(tool.original_name) == self.mcp_tool_name())
+            })
+            .map_or(ContextRetention::PreviewOnly, |tool| tool.context_retention)
     }
 
     /// 是否直接出现在 LLM 的 tools 参数中（无需经过 SearchExtraTools 发现）。

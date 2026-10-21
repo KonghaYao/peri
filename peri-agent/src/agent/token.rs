@@ -250,7 +250,7 @@ pub(crate) fn estimate_request_tokens(
     chars.div_ceil(4)
 }
 
-fn estimate_block_chars(
+pub(crate) fn estimate_block_chars(
     block: &crate::messages::ContentBlock,
     canonical_calls: &[crate::messages::ToolCallRequest],
 ) -> u64 {

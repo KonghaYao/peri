@@ -4,10 +4,38 @@
 
 use crate::agent::compact_v2::config::CompactConfig;
 use crate::agent::compact_v2::planner::ContextPressure;
+use crate::agent::compact_v2::planner::{ArchivePlanningScope, MicroPlanningFacts};
 use crate::agent::compact_v2::run_compact;
 use crate::agent::events::CompactStrategy;
 use crate::messages::{BaseMessage, MessageContent};
+use crate::session::test_resources::TestSession;
 use crate::session::transcript::MessageTranscript;
+
+fn exposed_facts(transcript: &MessageTranscript, session_id: &str) -> MicroPlanningFacts {
+    let mut facts = MicroPlanningFacts {
+        archive_scope: transcript
+            .entries()
+            .last()
+            .map(|entry| ArchivePlanningScope {
+                thread_id: session_id.into(),
+                committed_tail: entry.id(),
+            }),
+        ..Default::default()
+    };
+    for entry in transcript.entries().iter().skip(transcript.ancestor_len()) {
+        facts.exposed_message_ids.insert(entry.id());
+        if let Some(message) = entry.as_message() {
+            for call in message.tool_calls() {
+                facts.closed_call_ids.insert(call.id.clone());
+                facts.tool_retention.insert(
+                    call.name.to_lowercase(),
+                    crate::tools::ContextRetention::Recomputable,
+                );
+            }
+        }
+    }
+    facts
+}
 
 fn make_human(text: &str) -> BaseMessage {
     BaseMessage::human(MessageContent::text(text.to_string()))
@@ -31,7 +59,7 @@ fn make_ai_with_tool(text: &str, tool_name: &str, tool_id: &str) -> BaseMessage 
 fn make_tool_result(tool_call_id: &str, _text: &str) -> BaseMessage {
     BaseMessage::tool_result(
         tool_call_id.to_string(),
-        MessageContent::text("x".repeat(501)),
+        MessageContent::text("x".repeat(8000)),
     )
 }
 
@@ -75,7 +103,9 @@ async fn test_run_compact_low_budget_skips() {
 
 #[tokio::test]
 async fn test_run_compact_micro_threshold() {
-    let mut t = MessageTranscript::new();
+    let bound = TestSession::open().await;
+    let mut t =
+        MessageTranscript::new().with_persistence(bound.resources(), bound.thread_id.clone());
     // 构造足够多的轮次以触发 micro
     for i in 0..8 {
         t.append(make_human(&format!("q {}", i)));
@@ -87,7 +117,8 @@ async fn test_run_compact_micro_threshold() {
     let mut failures = 0u32;
     // budget = 0.80 → ≥ 0.75 → Micro
     let pressure = pressure_from_budget(0.80);
-    let result = run_compact(
+    let facts = exposed_facts(&t, &bound.thread_id);
+    let result = crate::agent::compact_v2::run_compact_with_facts(
         &mut t,
         None,
         &config,
@@ -96,6 +127,9 @@ async fn test_run_compact_micro_threshold() {
         &mut failures,
         "/tmp",
         None,
+        &crate::session::async_result_mailbox::ProtectedResults::default(),
+        &facts,
+        &crate::agent::compact_v2::ProviderCapabilities::openai(),
     )
     .await;
     assert_eq!(result.strategy, CompactStrategy::Micro);
@@ -152,7 +186,9 @@ async fn test_run_compact_consecutive_failure_degradation() {
 
 #[tokio::test]
 async fn test_run_compact_micro_resets_failures() {
-    let mut t = MessageTranscript::new();
+    let bound = TestSession::open().await;
+    let mut t =
+        MessageTranscript::new().with_persistence(bound.resources(), bound.thread_id.clone());
     // 构造足够多的轮次
     for i in 0..8 {
         t.append(make_human(&format!("q {}", i)));
@@ -163,7 +199,8 @@ async fn test_run_compact_micro_resets_failures() {
     let config = CompactConfig::default();
     let mut failures = 2u32;
     let pressure = pressure_from_budget(0.80);
-    let result = run_compact(
+    let facts = exposed_facts(&t, &bound.thread_id);
+    let result = crate::agent::compact_v2::run_compact_with_facts(
         &mut t,
         None,
         &config,
@@ -172,6 +209,9 @@ async fn test_run_compact_micro_resets_failures() {
         &mut failures,
         "/tmp",
         None,
+        &crate::session::async_result_mailbox::ProtectedResults::default(),
+        &facts,
+        &crate::agent::compact_v2::ProviderCapabilities::openai(),
     )
     .await;
     assert_eq!(result.strategy, CompactStrategy::Micro);
@@ -291,7 +331,9 @@ use crate::agent::compact_v2::planner::{plan_micro, FullEscalationReason};
 async fn test_compact_result_economy_fields_populated() {
     // Micro Compact 后 CompactResult 应包含非零 economy 字段
     // 使用足够长的内容保证 token 估算 > 0
-    let mut t = MessageTranscript::new();
+    let bound = TestSession::open().await;
+    let mut t =
+        MessageTranscript::new().with_persistence(bound.resources(), bound.thread_id.clone());
     let long_output = "x".repeat(2000);
     for i in 0..8 {
         t.append(make_human(&format!("question {}", i)));
@@ -309,7 +351,8 @@ async fn test_compact_result_economy_fields_populated() {
     };
     let mut failures = 0u32;
     let pressure = pressure_from_budget(0.80);
-    let result = run_compact(
+    let facts = exposed_facts(&t, &bound.thread_id);
+    let result = crate::agent::compact_v2::run_compact_with_facts(
         &mut t,
         None,
         &config,
@@ -318,6 +361,9 @@ async fn test_compact_result_economy_fields_populated() {
         &mut failures,
         "/tmp",
         None,
+        &crate::session::async_result_mailbox::ProtectedResults::default(),
+        &facts,
+        &crate::agent::compact_v2::ProviderCapabilities::openai(),
     )
     .await;
 
@@ -378,7 +424,7 @@ fn test_compact_plan_empty_no_projection_side_effects() {
 }
 
 #[test]
-fn test_compact_plan_has_changes_with_enough_rounds() {
+fn test_compact_plan_age_alone_cannot_authorize_projection() {
     // 足够的轮次应产生非空 plan
     // 与 planner_test.rs 中的 test_token_estimation_produces_nonzero_savings 对齐
     let mut t = MessageTranscript::new();
@@ -399,9 +445,9 @@ fn test_compact_plan_has_changes_with_enough_rounds() {
     };
     let plan = plan_micro(&t, &config, false);
 
-    assert!(plan.has_changes(), "多轮 transcript 应有非空 plan");
-    assert!(plan.estimated_tokens_saved > 0, "应估算非零 token 节省");
-    assert!(!plan.actions.is_empty(), "应有至少一个 action");
+    assert!(!plan.has_changes(), "没有暴露事实，历史年龄不能授权压缩");
+    assert_eq!(plan.estimated_tokens_saved, 0);
+    assert!(plan.actions.is_empty());
 }
 
 // ── Ancestor 恢复测试：compact 后 ancestor flags 正确保留 ─────────────────
@@ -411,7 +457,10 @@ async fn test_run_compact_preserves_ancestor_flags_after_micro() {
     // compact 后通过 selector 恢复路径（visible_messages）确认 ancestor flags 不变
     let ancestor1 = make_human("ancestor question");
     let ancestor2 = make_ai("ancestor answer");
-    let mut t = MessageTranscript::new().with_ancestor(vec![ancestor1, ancestor2]);
+    let bound = TestSession::open().await;
+    let mut t = MessageTranscript::new()
+        .with_ancestor(vec![ancestor1, ancestor2])
+        .with_persistence(bound.resources(), bound.thread_id.clone());
 
     // 添加自有消息构成足够轮次触发 micro
     for i in 0..8 {
@@ -432,7 +481,8 @@ async fn test_run_compact_preserves_ancestor_flags_after_micro() {
     let config = CompactConfig::default();
     let mut failures = 0u32;
     let pressure = pressure_from_budget(0.80);
-    let result = run_compact(
+    let facts = exposed_facts(&t, &bound.thread_id);
+    let result = crate::agent::compact_v2::run_compact_with_facts(
         &mut t,
         None,
         &config,
@@ -441,6 +491,9 @@ async fn test_run_compact_preserves_ancestor_flags_after_micro() {
         &mut failures,
         "/tmp",
         None,
+        &crate::session::async_result_mailbox::ProtectedResults::default(),
+        &facts,
+        &crate::agent::compact_v2::ProviderCapabilities::openai(),
     )
     .await;
 

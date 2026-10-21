@@ -10,16 +10,24 @@
 
 use std::collections::{HashMap, HashSet};
 
+use crate::context_archive::{content_digest, validate_projection_metadata, ARCHIVE_CHUNK_BYTES};
+#[path = "history_projection.rs"]
+mod projection_lifecycle;
+pub use projection_lifecycle::rewind_projection_updates;
+
 use crate::messages::{BaseMessage, MessageId};
-use crate::projection::MessageProjectionDirective;
+use crate::projection::{MessageProjectionDirective, ProjectionAction};
 use crate::session_resources::RewindBoundary;
 use crate::store::{CompactionChange, MessageFlags, PersistedPayload};
+use crate::thread::ThreadId;
 
 /// 纯变换的输入无法解释，或与既有历史冲突。
 ///
 /// 调用方必须在产生任何副作用之前处理这些错误：它们都表示「没做任何事」。
 #[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
 pub enum HistoryError {
+    #[error("archive dependencies for {id:?} are missing or inconsistent")]
+    InvalidArchive { id: MessageId },
     /// rewind/删除的边界目标不在给定历史中。
     #[error("history target {id:?} is not present")]
     TargetMissing { id: MessageId },
@@ -69,10 +77,12 @@ pub struct RewoundHistory {
 ///   `superseded_by` 取代关系）一并改写到新 ID，否则目标会话会引用 source 的消息。
 /// - source 只读，本函数不修改任何输入。
 pub fn remap_fork_history(
+    target: &ThreadId,
     source_payloads: &[PersistedPayload],
     source_flags: &HashMap<MessageId, MessageFlags>,
     mut allocate_id: impl FnMut() -> MessageId,
-) -> ForkedHistory {
+) -> Result<ForkedHistory, HistoryError> {
+    validate_fork_archive_sources(source_payloads, source_flags)?;
     let mut payloads = Vec::with_capacity(source_payloads.len());
     let mut id_map: HashMap<MessageId, MessageId> = HashMap::with_capacity(source_payloads.len());
     for source in source_payloads {
@@ -89,16 +99,62 @@ pub fn remap_fork_history(
         id_map.insert(source_id, forked.id());
         payloads.push(forked);
     }
+    let remapped_payloads: HashMap<_, _> = payloads.iter().map(|p| (p.id(), p.clone())).collect();
     let flags = source_payloads
         .iter()
         .filter_map(|source| {
             let source_id = source.id();
             let flags = source_flags.get(&source_id)?.clone();
             let forked_id = id_map[&source_id];
-            Some((forked_id, remap_projection_references(flags, &id_map)))
+            Some(
+                remap_projection_references(flags, &id_map, target, &remapped_payloads, forked_id)
+                    .map(|flags| (forked_id, flags)),
+            )
         })
+        .collect::<Result<_, _>>()?;
+    Ok(ForkedHistory { payloads, flags })
+}
+
+/// Reissuing target identities must not make corrupt or unknown source archives valid.
+/// Check original IDs and bytes before allocating IDs or recalculating target digests.
+fn validate_fork_archive_sources(
+    payloads: &[PersistedPayload],
+    flags: &HashMap<MessageId, MessageFlags>,
+) -> Result<(), HistoryError> {
+    let sources: HashMap<_, _> = payloads
+        .iter()
+        .map(|payload| (payload.id(), payload))
         .collect();
-    ForkedHistory { payloads, flags }
+    for source in payloads {
+        let Some(catalog) = flags
+            .get(&source.id())
+            .and_then(|flags| flags.projection.as_ref())
+            .and_then(|projection| projection.archive_catalog.as_ref())
+        else {
+            continue;
+        };
+        let invalid = || HistoryError::InvalidArchive { id: source.id() };
+        catalog.validate().map_err(|_| invalid())?;
+        if catalog.anchor_message_id != source.id() {
+            return Err(invalid());
+        }
+        for member in &catalog.members {
+            let payload = sources.get(&member.message_id).ok_or_else(invalid)?;
+            let canonical = super::serialize_persisted_payload(payload).map_err(|_| invalid())?;
+            let bytes = canonical.as_bytes();
+            if member.canonical_bytes != bytes.len() as u64
+                || member.content_digest != content_digest(bytes)
+                || !member
+                    .chunk_digests
+                    .iter()
+                    .zip(bytes.chunks(ARCHIVE_CHUNK_BYTES))
+                    .all(|(expected, chunk)| *expected == content_digest(chunk))
+            {
+                return Err(invalid());
+            }
+        }
+    }
+    Ok(())
 }
 
 /// 投影 flag 规则：设置 directive 的同时标记 `truncated`（Micro compact 语义）。
@@ -172,8 +228,7 @@ pub type RewindFlagEntry = (MessageId, MessageFlags, bool);
 ///
 /// 输入是 rewind 后**保留的前缀**（canonical 顺序）与它的长度 `keep_len`；输出只列
 /// `excluded` 要从 `true` 改回 `false` 的 id。本函数不读也不写 `truncated` 与 `projection`
-/// 载荷：清零是否连带清掉载荷由存储路径决定（两侧都会清，见
-/// [`crate::projection::MessageProjectionDirective::superseded_by`]），调用方不得把
+/// 载荷：目录与渲染组依赖由 [`rewind_projection_updates`] 一起处理，调用方不得把
 /// 其余 flag 位当成「无标记」覆盖回去。
 ///
 /// # 依据：每条排除的取代关系
@@ -273,6 +328,12 @@ pub fn apply_compaction_change(
     {
         let known: HashSet<MessageId> = payloads.iter().map(PersistedPayload::id).collect();
         ensure_distinct_ids(&appended, |id| known.contains(&id))?;
+        let appended_ids: HashSet<_> = appended.iter().map(PersistedPayload::id).collect();
+        for (id, _) in &change.flag_updates {
+            if !known.contains(id) && !appended_ids.contains(id) {
+                return Err(HistoryError::TargetMissing { id: *id });
+            }
+        }
     }
     apply_flag_updates(flags, &change.flag_updates);
     payloads.extend(appended);
@@ -286,20 +347,83 @@ pub fn apply_compaction_change(
 fn remap_projection_references(
     mut flags: MessageFlags,
     id_map: &HashMap<MessageId, MessageId>,
-) -> MessageFlags {
+    target: &ThreadId,
+    payloads: &HashMap<MessageId, PersistedPayload>,
+    target_message_id: MessageId,
+) -> Result<MessageFlags, HistoryError> {
     if let Some(projection) = flags.projection.as_mut() {
+        // Fork does not carry authority for literal references in historical tool inputs.
+        // Restore only this preview; target catalog roots expose freshly scoped references.
+        projection
+            .entries
+            .retain(|entry| !matches!(entry.action, ProjectionAction::PreviewArchiveRead { .. }));
         for entry in &mut projection.entries {
-            if let Some(remapped) = id_map.get(&entry.message_id) {
-                entry.message_id = *remapped;
+            match &mut entry.action {
+                ProjectionAction::OmitToolExchange {
+                    anchor_message_id, ..
+                }
+                | ProjectionAction::ResultReceipt {
+                    anchor_message_id, ..
+                } => {
+                    *anchor_message_id =
+                        *id_map
+                            .get(anchor_message_id)
+                            .ok_or(HistoryError::InvalidArchive {
+                                id: *anchor_message_id,
+                            })?;
+                }
+                _ => {}
             }
+            entry.message_id =
+                *id_map
+                    .get(&entry.message_id)
+                    .ok_or(HistoryError::InvalidArchive {
+                        id: entry.message_id,
+                    })?;
         }
         if let Some(summary) = projection.superseded_by.as_mut() {
-            if let Some(remapped) = id_map.get(summary) {
-                *summary = *remapped;
+            *summary = *id_map
+                .get(summary)
+                .ok_or(HistoryError::InvalidArchive { id: *summary })?;
+        }
+        if let Some(catalog) = projection.archive_catalog.as_mut() {
+            *catalog = catalog
+                .remap(target.clone(), id_map, payloads)
+                .map_err(|_| HistoryError::InvalidArchive {
+                    id: catalog.anchor_message_id,
+                })?;
+        }
+        if let Some(group) = projection.archive_group.as_mut() {
+            group.anchor_message_id =
+                *id_map
+                    .get(&group.anchor_message_id)
+                    .ok_or(HistoryError::InvalidArchive {
+                        id: group.anchor_message_id,
+                    })?;
+        }
+        for root in &mut projection.archive_roots {
+            root.source_thread_id = target.clone();
+            for id in [
+                &mut root.first_anchor,
+                &mut root.last_anchor,
+                &mut root.committed_tail,
+            ] {
+                *id = *id_map
+                    .get(id)
+                    .ok_or(HistoryError::InvalidArchive { id: *id })?;
             }
         }
+        // A longer target scope can overflow a source directive that fit its read budget.
+        if projection.archive_catalog.is_some()
+            || projection.archive_group.is_some()
+            || !projection.archive_roots.is_empty()
+        {
+            validate_projection_metadata(projection).map_err(|_| HistoryError::InvalidArchive {
+                id: target_message_id,
+            })?;
+        }
     }
-    flags
+    Ok(flags)
 }
 
 /// 追加消息的 canonical payload 形式（供只需要 payload 视图的调用方复用）。
@@ -313,3 +437,7 @@ pub fn appended_payloads(messages: &[BaseMessage]) -> Vec<PersistedPayload> {
 #[cfg(test)]
 #[path = "history_test.rs"]
 mod tests;
+
+#[cfg(test)]
+#[path = "history_archive_test.rs"]
+mod archive_tests;
