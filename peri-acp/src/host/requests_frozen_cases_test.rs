@@ -125,7 +125,10 @@ async fn test_session_load_cold_host_restores_original_frozen_prompt() {
         .environment_prompt
         .clone()
         .expect("新会话必须独立冻结环境正文");
-    assert!(original_environment.contains(tmp.path().to_str().unwrap()));
+    let expected_cwd = format!("Working directory: {}", sessions[&session_id].cwd);
+    assert!(original_environment
+        .lines()
+        .any(|line| line == expected_cwd));
     assert!(
         !original_environment.contains(&session_id),
         "owner 快照不得冻结执行会话 ID"
