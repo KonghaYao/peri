@@ -264,8 +264,8 @@ pub(crate) fn run_ensure_discovery(
     };
     for (name, handle_token) in projection.to_discover {
         // 仅置位者 spawn（审查 M1）：装配后立即 / 连接完成事件 / before_agent
-        // 三个挂点可并发执行，`mark_discovery_started` 返回 false（覆盖已有
-        // Started）时跳过 spawn，防重复发现任务与命令面重复回写。
+        // 三个挂点可并发执行，同代已 Started 时跳过 spawn；换代立即独立发现，
+        // 不等待旧代任务结束。注册表按 handle token 拒绝旧代回写。
         if !registry.mark_discovery_started(&name, handle_token.clone()) {
             continue;
         }
@@ -298,6 +298,7 @@ pub(crate) fn run_ensure_discovery(
             server: name.clone(),
             session: session_id.unwrap_or_default().into(),
             registry: Arc::as_ptr(registry) as usize,
+            handle: Arc::as_ptr(&handle) as usize,
         };
         let rollback_token = handle_token.clone();
         let rollback_name = name.clone();

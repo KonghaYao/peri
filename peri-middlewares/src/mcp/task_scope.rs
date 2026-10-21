@@ -45,6 +45,8 @@ pub enum McpTaskKey {
         server: String,
         session: String,
         registry: usize,
+        /// Concrete connection identity; the task retains its Arc until joined.
+        handle: usize,
     },
     Control(String),
 }

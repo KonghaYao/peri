@@ -176,7 +176,7 @@ impl GateFixture {
         let service = self.pool.retain_service(service);
         let peer = service.peer().clone();
         let handle = Arc::new(McpClientHandle {
-                call_gate: Default::default(),
+            call_gate: Default::default(),
             name: name.to_string(),
             version: None,
             connected_at: None,
@@ -695,7 +695,7 @@ async fn collect_tools_waits_for_zero_tool_system_server_discovery() {
 /// 也不自行触发发现；`before_agent` 仍按原语义触发（幂等增量挂点保留）。
 #[tokio::test]
 async fn successful_gate_preserves_discovery_and_status_notifications() {
-    let pool = Arc::new(McpClientPool::new_empty());
+    let (mut owner, pool) = owned_discovery_pool();
     insert_skill_handle(
         &pool,
         "srv",
@@ -743,6 +743,10 @@ async fn successful_gate_preserves_discovery_and_status_notifications() {
         reg.all_skills().is_empty(),
         "真实空目录 peer 必须收尾为合法空目录"
     );
+    pool.begin_shutdown();
+    owner.begin_shutdown();
+    owner.shutdown().await;
+    assert!(pool.shutdown().await.is_complete());
 }
 
 /// 失败不留下可复用的半成品：同一 middleware 连续两次准入，第二次按当次句柄

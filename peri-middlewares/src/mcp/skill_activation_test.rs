@@ -192,7 +192,7 @@ impl Fixture {
 }
 
 /// 装配：duplex 原始 server + 真客户端 peer + registry Discovered（handle =
-/// 真实 `McpClientHandle`，激活经 `peer_of` downcast 解析当前代 peer）。
+/// 真实 `McpClientHandle`，激活经 `connection_of` 解析当前代连接）。
 async fn fixture(
     body: String,
     entry: serde_json::Value,
@@ -356,16 +356,16 @@ async fn activation_frontmatter_mismatch_is_not_retried() {
 async fn activation_without_binding_uses_discovery_time_content() {
     let text = body("alpha", "Alpha skill");
     let digest = sha256_hex(&text);
-    let fx = fixture(
-        text.clone(),
-        entry_json(&digest, fm_json("alpha", "Alpha skill")),
-        Vec::new(),
-    )
-    .await;
     // legacy 条目：无 resources 绑定、正文在发现期已校验并缓存。
     let mut legacy = bound_meta(&digest, fm_json("alpha", "Alpha skill"));
     legacy.resources.clear();
     legacy.content = Some(text.clone());
+    let fx = fixture(
+        text.clone(),
+        entry_json(&digest, fm_json("alpha", "Alpha skill")),
+        vec![legacy.clone()],
+    )
+    .await;
 
     let content = activate(&fx.registry, &legacy, None)
         .await
@@ -375,10 +375,122 @@ async fn activation_without_binding_uses_discovery_time_content() {
 
     // 无绑定且无缓存正文 → 显式缺口（不静默返回空）。
     legacy.content = None;
+    let token: HandleToken = fx.handle();
+    fx.registry
+        .refresh_entries(SERVER, &token, vec![legacy.clone()]);
     assert_eq!(
         activate(&fx.registry, &legacy, None).await.unwrap_err(),
         ActivationError::MissingBinding
     );
+}
+
+#[tokio::test]
+async fn legacy_cached_content_requires_connected_open_handle() {
+    let mut legacy = bound_meta("unused", fm_json("alpha", "Alpha skill"));
+    legacy.resources.clear();
+    legacy.content = Some("verified at discovery".into());
+    let fx = fixture(String::new(), serde_json::Value::Null, vec![legacy.clone()]).await;
+    // 缓存正文不需要 peer，但仍须持有当前连接的调用许可。
+    let mut client = (*fx.handle()).clone();
+    client.peer = None;
+    let handle = Arc::new(client.clone());
+    let token: HandleToken = handle.clone();
+    fx.registry.mark_discovery_started(SERVER, token.clone());
+    fx.registry
+        .mark_discovery_completed(SERVER, token, vec![legacy.clone()]);
+    assert_eq!(
+        activate(&fx.registry, &legacy, None).await.unwrap(),
+        "verified at discovery"
+    );
+    handle.call_gate.revoke();
+    assert_eq!(
+        activate(&fx.registry, &legacy, None).await.unwrap_err(),
+        ActivationError::Unreachable
+    );
+    handle.call_gate.drain().await;
+
+    client.call_gate = Default::default();
+    client.status = ClientStatus::Disconnected;
+    let token: HandleToken = Arc::new(client);
+    fx.registry.mark_discovery_started(SERVER, token.clone());
+    fx.registry
+        .mark_discovery_completed(SERVER, token, vec![legacy.clone()]);
+    assert_eq!(
+        activate(&fx.registry, &legacy, None).await.unwrap_err(),
+        ActivationError::Unreachable
+    );
+    assert_eq!(fx.reads(), 0);
+}
+
+#[tokio::test]
+async fn legacy_cached_content_requires_current_discovered_entry() {
+    let mut legacy = bound_meta("unused", fm_json("alpha", "Alpha skill"));
+    legacy.resources.clear();
+    legacy.content = Some("old verified content".into());
+    let fx = fixture(String::new(), serde_json::Value::Null, vec![legacy.clone()]).await;
+    let token: HandleToken = Arc::new((*fx.handle()).clone());
+    fx.registry.mark_discovery_started(SERVER, token.clone());
+    assert_eq!(
+        activate(&fx.registry, &legacy, None).await.unwrap_err(),
+        ActivationError::Unreachable,
+        "重连尚在发现期间不得激活旧缓存"
+    );
+    let mut current = legacy.clone();
+    current.content = Some("new verified content".into());
+    fx.registry
+        .mark_discovery_completed(SERVER, token, vec![current.clone()]);
+    assert_eq!(
+        activate(&fx.registry, &legacy, None).await.unwrap_err(),
+        ActivationError::Unreachable,
+        "旧快照不得借用新连接激活旧缓存"
+    );
+    assert_eq!(
+        activate(&fx.registry, &current, None).await.unwrap(),
+        "new verified content"
+    );
+    fx.registry.project_connected(&[]);
+    assert_eq!(
+        activate(&fx.registry, &current, None).await.unwrap_err(),
+        ActivationError::Unreachable
+    );
+    assert_eq!(fx.reads(), 0);
+}
+
+#[tokio::test]
+async fn bound_entry_cannot_fall_back_to_cached_content() {
+    let mut bound = bound_meta("unused", fm_json("alpha", "Alpha skill"));
+    bound.content = Some("cached content must not bypass binding checks".into());
+    let fx = fixture(String::new(), serde_json::Value::Null, vec![bound.clone()]).await;
+    let mut client = (*fx.handle()).clone();
+    client.peer = None;
+    let token: HandleToken = Arc::new(client);
+    fx.registry.mark_discovery_started(SERVER, token.clone());
+    fx.registry
+        .mark_discovery_completed(SERVER, token.clone(), vec![bound.clone()]);
+    assert_eq!(
+        activate(&fx.registry, &bound, None).await.unwrap_err(),
+        ActivationError::Unreachable,
+        "绑定正文仍需当前 peer"
+    );
+    let mut incomplete = bound.clone();
+    incomplete.frontmatter = None;
+    fx.registry
+        .refresh_entries(SERVER, &token, vec![incomplete.clone()]);
+    assert_eq!(
+        activate(&fx.registry, &incomplete, None).await.unwrap_err(),
+        ActivationError::MissingBinding,
+        "缺失 frontmatter 不得回落缓存正文"
+    );
+    incomplete = bound;
+    incomplete.resources[0].uri = "skill://srv/other/SKILL.md".into();
+    fx.registry
+        .refresh_entries(SERVER, &token, vec![incomplete.clone()]);
+    assert_eq!(
+        activate(&fx.registry, &incomplete, None).await.unwrap_err(),
+        ActivationError::MissingBinding,
+        "未包含当前技能的资源绑定不得回落缓存正文"
+    );
+    assert_eq!(fx.reads(), 0);
 }
 
 #[tokio::test]

@@ -84,9 +84,9 @@ stdio 注册使用同一 action，`args`、`env` 缺省为空；执行目录由�
 ## 5. 能力目录与可观察性
 
 1. pool 是唯一 MCP 连接事实源；工具/资源/skill/command 投影从当前可调用 handle 推导。
-2. 下一次 Reason 刷新 MCP 目录，原子发布工具与 ToolSearch 索引；本次 Reason 的 dispatch 固定同一快照。关闭后旧快照的 bridge 也必须拒绝新调用；App/host 工具、resource/skill 激活等入口共用该连接调用 gate，不能绕过撤销。
+2. 下一次 Reason 刷新 MCP 目录，原子发布工具与 ToolSearch 索引；本次 Reason 的 dispatch 固定同一快照。关闭后旧快照的 bridge 也必须拒绝新调用；App/host 工具、resource/skill 激活等入口共用该连接调用 gate，不能绕过撤销。skill 激活须匹配当前 `Discovered` 条目及 `Connected` handle；legacy 已校验的缓存正文无需 RPC peer，但仍须通过同一校验，重连发现中、条目撤销或缓存快照变更后拒绝旧内容。
 3. 保留通用 Reason 目录刷新、固定快照与 allowlist/disallowlist。删除仅服务旧 Dynamic MCP 的 overlay 与静态遮蔽/恢复。普通订阅、Git Watch 与任务通知迁移为通用 `McpNotification` 消息源，保持原有 Info/Defer 与持久化历史可读语义。
-4. stop/restart 在成功返回前撤销该 server 的资源、skill、command、agent 投影；discovery 任务键绑定 session/registry 身份，避免共享环境的重复键冲突；恢复后重新发现，迟到提交不能复活旧数据。frozen prompt 不重建。
+4. stop/restart 在成功返回前撤销该 server 的资源、skill、command、agent 投影；discovery 任务键绑定 session、registry 与具体连接身份，避免共享环境或重连代次的重复键冲突；同一连接仅启动一次发现，新连接独立启动，按 server 关闭时须 join 所有代次；恢复后重新发现，迟到提交不能复活旧数据。frozen prompt 不重建。
 5. 运行状态通过既有 `mcp/list` 查询；TUI 操作结束刷新当前会话快照，失败可见，不依赖通知证明动作完成。
 
 ## 6. TUI

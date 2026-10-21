@@ -94,11 +94,31 @@ impl peri_agent::middleware::state::MiddlewareState for BatchState {
     }
 }
 
+/// 已连接的 legacy 句柄；正文已在发现期校验，激活无需 RPC peer。
+fn connected_token(server: &str) -> HandleToken {
+    Arc::new(crate::mcp::client::McpClientHandle {
+        call_gate: Default::default(),
+        name: server.to_string(),
+        version: None,
+        cache_version: None,
+        connected_at: None,
+        protocol_version: None,
+        peer: None,
+        tools: vec![],
+        resources: vec![],
+        status: crate::mcp::client::ClientStatus::Connected,
+        oauth_status: Default::default(),
+        source: None,
+        url: None,
+        skills_capable: false,
+    })
+}
+
 /// seed registry：同一 server 下多个技能（Started + Completed 造 Discovered 条目，
 /// 模拟发现任务完成态）。条目无 resources 绑定 ⇒ activation 走 legacy 正文路径。
 fn seed_registry_with_skills(server: &str, skills: &[&str]) -> Arc<McpSkillRegistry> {
     let reg = Arc::new(McpSkillRegistry::new());
-    let handle: HandleToken = Arc::new(1u32);
+    let handle = connected_token(server);
     let metas = skills
         .iter()
         .map(|skill| SkillMetadata {
@@ -284,7 +304,7 @@ async fn test_explicit_system_skill_name_keeps_preload_semantics() {
 async fn test_preload_injects_multiple_skills_in_input_order() {
     let dir = tempdir().unwrap();
     let reg = Arc::new(McpSkillRegistry::new());
-    let handle: HandleToken = Arc::new("demo".to_string());
+    let handle = connected_token("demo");
     reg.mark_discovery_started("demo", handle.clone());
     reg.mark_discovery_completed(
         "demo",
@@ -425,7 +445,7 @@ async fn test_preload_ambiguous_origin_rejects_injection() {
     let dir = tempdir().unwrap();
     let reg = Arc::new(McpSkillRegistry::new());
     for server in ["a:srv", "b:srv"] {
-        let handle: HandleToken = Arc::new(1u32);
+        let handle = connected_token(server);
         let meta = SkillMetadata {
             name: mcp_skill_name(server, "beta"),
             aliases: Vec::new(),
@@ -559,7 +579,7 @@ async fn test_explicit_list_path_ambiguous_receipt_lists_candidates() {
     let dir = tempdir().unwrap();
     let reg = Arc::new(McpSkillRegistry::new());
     for server in ["a:srv", "b:srv"] {
-        let handle: HandleToken = Arc::new(1u32);
+        let handle = connected_token(server);
         let meta = SkillMetadata {
             name: mcp_skill_name(server, "beta"),
             aliases: Vec::new(),
@@ -643,7 +663,7 @@ async fn test_explicit_list_path_mixed_hits_and_gaps_keep_declaration_order() {
 async fn test_explicit_list_path_activation_failure_receipt_carries_reason() {
     let dir = tempdir().unwrap();
     let reg = Arc::new(McpSkillRegistry::new());
-    let handle: HandleToken = Arc::new(1u32);
+    let handle = connected_token("demo");
     let meta = SkillMetadata {
         name: mcp_skill_name("demo", "detached"),
         aliases: Vec::new(),
@@ -686,7 +706,7 @@ async fn test_explicit_list_path_activation_failure_receipt_carries_reason() {
 async fn test_explicit_list_path_dedupes_same_canonical_skill() {
     let dir = tempdir().unwrap();
     let reg = Arc::new(McpSkillRegistry::new());
-    let handle: HandleToken = Arc::new(1u32);
+    let handle = connected_token("demo");
     let meta = SkillMetadata {
         name: mcp_skill_name("demo", "alpha"),
         aliases: vec!["alpha".to_string()],
@@ -756,7 +776,7 @@ async fn test_explicit_list_path_item_budget_yields_paired_gap_receipts() {
 async fn test_explicit_list_path_item_bytes_yield_gap_receipt() {
     let dir = tempdir().unwrap();
     let reg = Arc::new(McpSkillRegistry::new());
-    let handle: HandleToken = Arc::new(1u32);
+    let handle = connected_token("demo");
     let meta = SkillMetadata {
         name: mcp_skill_name("demo", "huge"),
         aliases: Vec::new(),

@@ -532,45 +532,72 @@ async fn before_agent_disconnect_removes_entry_and_fires_on_change() {
     assert_eq!(state.messages().len(), 0, "断连清理静默");
 }
 
-/// 重连（新 Arc handle → token 变化）：before_agent 重新置 Started。
+/// 旧任务尚未调度时立即换代：显式断连或直接替换均独立发现，停止会 join 全部代次。
 #[tokio::test]
 async fn before_agent_reconnect_new_handle_rescans() {
-    let (_mcp_owner, pool) = owned_discovery_pool();
-    let reg = Arc::new(McpSkillRegistry::new());
-    let mw = McpMiddleware::new(Arc::clone(&pool))
-        .with_skill_discovery(Some(Arc::clone(&reg)), AgentCancellationToken::new());
-    let mut state = AgentState::new("/tmp");
+    for observe_disconnect in [false, true] {
+        let (mut owner, pool) = owned_discovery_pool();
+        let reg = Arc::new(McpSkillRegistry::new());
+        let mw = McpMiddleware::new(Arc::clone(&pool))
+            .with_skill_discovery(Some(Arc::clone(&reg)), AgentCancellationToken::new());
+        let mut state = AgentState::new("/tmp");
 
-    let h1 = insert_skill_handle(&pool, "srv", vec![]);
-    Middleware::before_agent(&mw, &mut state).await.unwrap();
-    let h1_token: HandleToken = h1.clone();
-    match reg.discovery_state("srv") {
-        Some(ServerDiscoveryState::Started { handle }) => {
-            assert!(Arc::ptr_eq(&handle, &h1_token));
+        let h1 = insert_skill_handle(&pool, "srv", vec![]);
+        Middleware::before_agent(&mw, &mut state).await.unwrap();
+        let h1_token: HandleToken = h1.clone();
+        match reg.discovery_state("srv") {
+            Some(ServerDiscoveryState::Started { handle }) => {
+                assert!(Arc::ptr_eq(&handle, &h1_token));
+            }
+            other => panic!("应 Started: {other:?}"),
         }
-        other => panic!("应 Started: {other:?}"),
-    }
+        assert_eq!(owner.active_count(), 1);
 
-    // 断连移除
-    pool.clients.write().remove("srv");
-    Middleware::before_agent(&mw, &mut state).await.unwrap();
-    assert!(reg.discovery_state("srv").is_none());
-
-    // 重连：新 Arc handle（token 变）→ 重新 Started
-    let h2 = insert_skill_handle(&pool, "srv", vec![]);
-    Middleware::before_agent(&mw, &mut state).await.unwrap();
-    let h2_token: HandleToken = h2.clone();
-    match reg.discovery_state("srv") {
-        Some(ServerDiscoveryState::Started { handle }) => {
-            assert!(Arc::ptr_eq(&handle, &h2_token), "重连后应持新 handle");
-            assert!(
-                !Arc::ptr_eq(&handle, &h1_token),
-                "新 handle 不应与旧 handle 同址"
-            );
+        if observe_disconnect {
+            pool.clients.write().remove("srv");
+            Middleware::before_agent(&mw, &mut state).await.unwrap();
+            assert!(reg.discovery_state("srv").is_none());
         }
-        other => panic!("应重新 Started: {other:?}"),
+
+        // 本测试运行于 current_thread；上述钩子没有让出执行权，旧任务尚未
+        // 首次 poll。新代不能依赖旧任务完成、轮询重试或时间延迟才能注册。
+        let h2 = insert_skill_handle(&pool, "srv", vec![]);
+        Middleware::before_agent(&mw, &mut state).await.unwrap();
+        let h2_token: HandleToken = h2.clone();
+        match reg.discovery_state("srv") {
+            Some(ServerDiscoveryState::Started { handle }) => {
+                assert!(Arc::ptr_eq(&handle, &h2_token), "重连后应持新 handle");
+                assert!(!Arc::ptr_eq(&handle, &h1_token));
+            }
+            other => panic!("应重新 Started: {other:?}"),
+        }
+        assert_eq!(owner.active_count(), 2, "两代发现任务均由 owner 持有");
+
+        reg.mark_discovery_completed(
+            "srv",
+            h1_token,
+            vec![SkillMetadata {
+                name: "mcp__srv__stale".into(),
+                ..SkillMetadata::default()
+            }],
+        );
+        assert!(matches!(reg.discovery_state("srv"),
+            Some(ServerDiscoveryState::Started { handle }) if Arc::ptr_eq(&handle, &h2_token)));
+        assert!(reg.all_skills().is_empty(), "旧代回写不得发布陈旧技能");
+        assert_eq!(state.messages().len(), 0);
+
+        pool.close_server_connection("srv", true).await.unwrap();
+        assert_eq!(
+            owner.active_count(),
+            0,
+            "停止必须 join 该 server 的全部代次"
+        );
+        assert!(reg.discovery_state("srv").is_none());
+        pool.begin_shutdown();
+        owner.begin_shutdown();
+        owner.shutdown().await;
+        assert!(pool.shutdown().await.is_complete());
     }
-    assert_eq!(state.messages().len(), 0);
 }
 
 /// cancel token 已触发 → before_agent 零动作（不投影、不置位）。

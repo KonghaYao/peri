@@ -62,7 +62,7 @@ for line in sys.stdin:
         session_id: "s1".into(),
         server_name: name.into(),
         config: McpRegistrationConfig::Stdio {
-            command: "python3".into(),
+            command: if cfg!(windows) { "python" } else { "python3" }.into(),
             args: vec!["-u".into(), "-c".into(), script.into()],
             env: HashMap::new(),
         },

@@ -571,8 +571,8 @@ async fn empty_tools_list_is_success_not_failure() {
 ///
 /// 持久缓存命中只证明「过去某个版本列过这些工具」，不能作为本次启动的
 /// transport/能力协商健康证据；普通 MCP 保持既有 cache 策略（版本命中级跳过网络）。
-/// 两轮初始化共用同一 pool 与同一隔离缓存根：普通 server 第二轮命中磁盘缓存，
-/// System server 第二轮仍必须打到 fixture。
+/// 两次真实启动使用独立的 pool / task owner，共用 workspace 身份与磁盘缓存根；
+/// 第一轮完整关闭后再启动第二轮，普通 server 命中磁盘缓存，System server 仍须 live。
 #[tokio::test]
 async fn system_discovery_is_live_while_ordinary_server_uses_cache() {
     let fixture = tempfile::tempdir().unwrap();
@@ -596,14 +596,17 @@ async fn system_discovery_is_live_while_ordinary_server_uses_cache() {
         }
     }))
     .unwrap();
-    let (mut tasks, spawner) = super::super::task_scope::McpTaskOwner::new();
-    let mut pool = McpClientPool::new_pending_with_spawner(spawner);
-    pool.resource_cache = crate::mcp::resource_cache::McpResourceCache::isolated_for_test();
-    pool.bind_workspace_scope(peri_acp_types::workspace::WorkspaceId::new())
-        .unwrap();
-    let pool = Arc::new(pool);
-
+    let workspace = peri_acp_types::workspace::WorkspaceId::new();
+    let cache_root = fixture.path().join("mcp-cache");
     for round in 1..=2 {
+        // Reinitializing an already connected pool does not start new servers.
+        // A fresh pool/cache object proves that round two reuses disk state,
+        // while system discovery still obtains evidence from its new transport.
+        let (mut tasks, spawner) = super::super::task_scope::McpTaskOwner::new();
+        let mut pool = McpClientPool::new_pending_with_spawner(spawner);
+        pool.resource_cache = crate::mcp::resource_cache::McpResourceCache::at(cache_root.clone());
+        pool.bind_workspace_scope(workspace).unwrap();
+        let pool = Arc::new(pool);
         let (status_tx, _status_rx) = tokio::sync::watch::channel(McpInitStatus::Pending);
         McpClientPool::initialize_config(
             pool.clone(),
@@ -640,6 +643,18 @@ async fn system_discovery_is_live_while_ordinary_server_uses_cache() {
                 "第 {round} 轮 {name} 的证据必须绑定当前句柄的代际"
             );
         }
+        assert!(
+            matches!(&*pool.init_status.read(), McpInitStatus::Ready { total: 2 }),
+            "第 {round} 轮必须完成两个新连接的启动，实际: {:?}",
+            *pool.init_status.read()
+        );
+        pool.begin_shutdown();
+        tasks.begin_shutdown();
+        assert_eq!(
+            tasks.shutdown().await,
+            super::super::task_scope::McpTaskShutdownReport::Complete
+        );
+        assert!(pool.shutdown().await.is_complete());
     }
 
     assert_eq!(
@@ -653,11 +668,6 @@ async fn system_discovery_is_live_while_ordinary_server_uses_cache() {
         1,
         "普通 MCP 第二轮必须命中持久缓存（保持既有 cache 策略，不被 System 严格化波及）"
     );
-
-    pool.begin_shutdown();
-    tasks.begin_shutdown();
-    let _ = tasks.shutdown().await;
-    assert!(pool.shutdown().await.is_complete());
 }
 
 /// 重连必须换掉发现证据：旧代的成功证据不得被新代复用。
