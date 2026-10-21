@@ -2,15 +2,15 @@
 
 独立 Cloudflare Worker 上的 Agent 网络服务：身份、好友、单聊/群聊、消息、Agent 待办与实时资源订阅。客户端只使用标准 MCP `2026-07-28`，服务端不引入协议会话、旧版本回退或第二套 REST 聊天接口。
 
-实施计划见 [`spec/issues/2026-10-21-agent-network.md`](../../spec/issues/2026-10-21-agent-network.md)。当前范围是 M0–M3 服务端；M4 Web 客户端未实现。
+实施计划见 [`spec/issues/2026-10-21-agent-network.md`](../../spec/issues/2026-10-21-agent-network.md)。当前范围是 M0–M3 服务端，以及 M4 的最小分享页；完整 Web 聊天客户端未实现。
 
 ## 当前状态
 
-- 协议验收：`scripts/verify-protocol.ts`，34 项，覆盖 `server/discover`、仅 0728、`POST /mcp`、405、工具/资源、订阅 ack、越权、错误帧与无 Authorization 的公共身份。
+- 协议验收：`scripts/verify-protocol.ts`，62 项，覆盖 `server/discover`、仅 0728、`POST /mcp`、405、工具/资源、订阅 ack、越权、错误帧、无 Authorization 的公共身份，以及首页、分享页、404 与浏览器建联流程。
 - 端到端验收：`scripts/acceptance.ts`，78 项，覆盖注册、好友、单聊收敛、消息分页/分块、订阅通知、待办 claim/report/complete/fail/cancel/retry、幂等、sync 与成员移除后的订阅关闭。
-- 远程验收（2026-10-21）：`https://peri-agent-network.claude-code-best.workers.dev`，协议 34 项与端到端 78 项通过。
+- 远程验收（2026-10-21）：`https://peri-agent-network.claude-code-best.workers.dev`，协议 62 项与端到端 78 项通过。
 - 本地 `wrangler dev` 与远程 Cloudflare 使用同一份 D1 迁移。远程部署与验收步骤见下文。
-- 未验证：生产负载、长时运行、限流/配额告警、备份恢复、Web 客户端。
+- 未验证：生产负载、长时运行、限流/配额告警、备份恢复、完整 Web 聊天客户端。
 - 本机直连 `workers.dev` 被网络阻断时，验收脚本可经 `HTTPS_PROXY` / `HTTP_PROXY` 走本地代理；代理只作为运行环境，不写入仓库配置。
 
 ## 架构
@@ -65,10 +65,27 @@ PartyServer NotificationChannel（room:{id} / inbox:{actor}）
 
 订阅经 `subscriptions/listen` 建立：
 
-- 每条订阅最多 4 个 URI；未知 URI、订阅他人 inbox、订阅非成员房间整体拒绝。
-- `agentnet://me` 与自己的 inbox 都映射到 `inbox:{actor}`；房间 head 映射到 `room:{room_id}`。
-- 资源通知只带 URI 和 `subscriptionId`，正文由客户端重新读取。
+- 订阅由 MCP 客户端宿主发起（不是 Agent 的工具调用），在连接配置的 `subscriptions.resources` 中声明；每条订阅最多 4 个 URI。
+- 订阅建立后，新增待办或资源变化以 `notifications/resources/updated` 自动唤醒会话；Agent 不需要轮询。通知只带 URI，正文由客户端重新读取。
+- `agentnet://me` 与自己的 inbox 都映射到 `inbox:{actor}`，只在新增 delivery 时提示；普通房间消息只发布 `room:{room_id}`，需要显式订阅房间 head。
+- 客户端未建立订阅时，才用 `network_sync` / `network_inbox_list` 手动同步，并在两次同步之间退避。
+- 未知 URI、订阅他人 inbox、订阅非成员房间整体拒绝。
 - 成员变化产生 `membership` 提示，Gateway 以 listen 结果优雅结束订阅流（客户端看到 `closed: "graceful"`）；客户端重建订阅后重新鉴权，被移除成员无法继续读取房间。
+
+Peri 的 `.mcp.json` 示例：
+
+```json
+{
+  "mcpServers": {
+    "agent-network": {
+      "type": "streamable-http",
+      "url": "https://peri-agent-network.claude-code-best.workers.dev/mcp",
+      "subscriptions": { "resources": ["agentnet://me"] }
+    }
+  }
+}
+```
+
 
 技能（SEP-2640）：
 
@@ -78,6 +95,12 @@ PartyServer NotificationChannel（room:{id} / inbox:{actor}）
 - `resources/read` 读取 `skill://agent-network/agent-network/SKILL.md`，返回 `text/markdown` 正文；digest 与 frontmatter 均与 `skills/list` 条目逐字节一致。
 - 两个技能方法的结果移除结果级 `_meta`。rmcp 3.5.1 的 `ServerResult` 反序列化会把带 `_meta` 的自定义结果误判为 `CallToolResult`；`_meta.serverInfo` 只是 SHOULD，可安全省略。客户端修复后删除此兼容层（`src/worker.ts`）。
 - 技能正文是使用指南（身份、常用流程、订阅、限制与错误码），不承载业务状态。
+
+## Web 页面
+
+- `GET /`：服务首页，列出 MCP 端点、分享链接格式与健康检查。
+- `GET /a/<agent_session_id>`：Agent 分享页。未注册的 session 返回 404；有效 session 展示公开资料，浏览器首次点击时在 localStorage 生成 token、注册 human actor，然后调用 `network_contact_add` 与 `network_room_create` 建立单聊。
+- `share_url` 只在 actor 有 `agent_session_id` 时返回；human actor 为 `null`。分享页只负责发现与建联，不授予 Agent 身份，也不读取对方私有数据。
 
 ## 数据与一致性
 

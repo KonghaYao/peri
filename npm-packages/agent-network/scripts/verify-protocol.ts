@@ -160,6 +160,121 @@ async function main(): Promise<void> {
     -32602,
   );
 
+  const shareSession = `sess_share_${crypto.randomUUID().replaceAll('-', '')}`;
+  const shareToken = newToken();
+  const shareRegister = await rawRpc(
+    'tools/call',
+    {
+      name: 'network_register',
+      arguments: {
+        request_id: `reg_${crypto.randomUUID().replaceAll('-', '')}`,
+        kind: 'agent',
+        name: '分享页检查',
+        agent_session_id: shareSession,
+      },
+    },
+    { token: shareToken },
+  );
+  const shareIdentity = (
+    shareRegister.body.result as
+      | { structuredContent?: { actor_id?: string; share_url?: string | null } }
+      | undefined
+  )?.structuredContent;
+  check(
+    '注册返回指向 /a/<session> 的 share_url',
+    typeof shareIdentity?.share_url === 'string' &&
+      shareIdentity.share_url.endsWith(`/a/${encodeURIComponent(shareSession)}`),
+    shareIdentity?.share_url,
+  );
+  const sharePath = shareIdentity?.share_url
+    ? new URL(shareIdentity.share_url).pathname
+    : '/a/missing';
+  const sharePage = await fetch(`${baseUrl()}${sharePath}`);
+  checkEqual('分享页 GET 返回 200', sharePage.status, 200);
+  check(
+    '分享页 Content-Type 为 text/html',
+    (sharePage.headers.get('content-type') ?? '').includes('text/html'),
+    sharePage.headers.get('content-type'),
+  );
+  const shareHtml = await sharePage.text();
+  check('分享页包含 actor_id', shareHtml.includes(shareIdentity?.actor_id ?? '\u0000'));
+  check('分享页包含 agent_session_id', shareHtml.includes(shareSession));
+
+  const missingShare = await fetch(
+    `${baseUrl()}/a/${encodeURIComponent(`missing_${crypto.randomUUID().replaceAll('-', '')}`)}`,
+  );
+  checkEqual('未知分享 session 返回 404', missingShare.status, 404);
+  check(
+    '未知分享 session 返回 HTML',
+    (missingShare.headers.get('content-type') ?? '').includes('text/html'),
+    missingShare.headers.get('content-type'),
+  );
+
+  const home = await fetch(`${baseUrl()}/`);
+  checkEqual('GET / 返回 200', home.status, 200);
+  check(
+    '首页 Content-Type 为 text/html',
+    (home.headers.get('content-type') ?? '').includes('text/html'),
+    home.headers.get('content-type'),
+  );
+
+  const browserToken = newToken();
+  const browserRegister = await rawRpc(
+    'tools/call',
+    {
+      name: 'network_register',
+      arguments: {
+        request_id: `web_reg_${crypto.randomUUID().replaceAll('-', '')}`,
+        kind: 'human',
+        name: '网页访客检查',
+      },
+    },
+    { token: browserToken },
+  );
+  const browserIdentity = (
+    browserRegister.body.result as
+      | { structuredContent?: { actor_id?: string; share_url?: string | null } }
+      | undefined
+  )?.structuredContent;
+  checkEqual('human actor 不生成 share_url', browserIdentity?.share_url, null);
+  const browserContact = await rawRpc(
+    'tools/call',
+    {
+      name: 'network_contact_add',
+      arguments: {
+        request_id: `web_contact_${crypto.randomUUID().replaceAll('-', '')}`,
+        agent_session_id: shareSession,
+      },
+    },
+    { token: browserToken },
+  );
+  const contactResult = (
+    browserContact.body.result as
+      | { structuredContent?: { contact?: { actor_id?: string } } }
+      | undefined
+  )?.structuredContent;
+  checkEqual(
+    '浏览器身份可按 agent_session_id 添加好友',
+    contactResult?.contact?.actor_id,
+    shareIdentity?.actor_id,
+  );
+  const browserRoom = await rawRpc(
+    'tools/call',
+    {
+      name: 'network_room_create',
+      arguments: {
+        request_id: `web_room_${crypto.randomUUID().replaceAll('-', '')}`,
+        kind: 'direct',
+        members: [shareIdentity?.actor_id],
+      },
+    },
+    { token: browserToken },
+  );
+  const roomResult = (
+    browserRoom.body.result as { structuredContent?: { room?: { kind?: string } } } | undefined
+  )?.structuredContent;
+  checkEqual('浏览器身份可建立单聊', roomResult?.room?.kind, 'direct');
+
   const getResponse = await fetch(`${baseUrl()}/mcp`);
   checkEqual('GET /mcp 返回 405', getResponse.status, 405);
   check('GET /mcp 声明 Allow: POST', (getResponse.headers.get('allow') ?? '').includes('POST'), getResponse.headers.get('allow'));

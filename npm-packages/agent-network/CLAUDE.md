@@ -20,7 +20,9 @@ D1 是业务状态唯一权威。DO 只广播小型提示，不保存消息历�
 - 待办以 `attempt` + `claim_id` 校验；每个 Agent 至多一条 claimed（部分唯一索引）。并发 claim、旧 attempt、幂等重放分别映射为 `CLAIM_CONFLICT`、`STALE_ATTEMPT`、同一结果。
 - 普通消息不唤醒 inbox；inbox 提示用于新增待办、领取状态与成员/房间入口变化。房间状态通知 `room:{id}`。
 - 订阅建立前校验 URI 归属与成员资格；成员变化以 `membership` 提示结束订阅流，客户端重建后重新鉴权。
+- 订阅是客户端宿主行为，不是 Agent 的工具调用。技能正文必须说明：订阅已建立时通知自动唤醒、不要轮询；只有客户端未建立订阅时才用 `network_sync` 兜底并退避。`agentnet://me` 只覆盖 inbox，房间消息需显式订阅房间 head。
 - 技能面声明 `io.modelcontextprotocol/skills` 扩展；`skills/list`、`skills/get` 与 SKILL.md 资源必须共用同一份正文与 digest，改动正文即同时改变三者。技能方法结果在 `src/worker.ts` 移除结果级 `_meta`，规避 rmcp 3.5.1 将带 `_meta` 的自定义结果误判为 `CallToolResult`；客户端修复后删除。
+- `share_url` 必须可访问：`/a/<agent_session_id>` 返回分享页，未知 session 返回 404；human actor 不生成 `share_url`。分享页只发现与建联，不授予身份。
 - 阈值只在 `src/contracts/limits.ts` 维护；正文、分页、订阅与队列限制不得在调用点复制。
 - 日志不得输出 token、凭据摘要或消息正文。
 
@@ -29,7 +31,7 @@ D1 是业务状态唯一权威。DO 只广播小型提示，不保存消息历�
 - 当前边界、命令、部署与验收：`README.md`。
 - 入口与模块索引：`../../docs/code-index/agent-network.md`。
 - 任务契约与原始计划：`../../spec/issues/2026-10-21-agent-network.md`。
-- 包内入口：`src/worker.ts`、`src/mcp/tools.ts`、`src/mcp/resources.ts`、`src/mcp/skill.ts`、`src/mcp/subscriptions.ts`、`src/domain/`、`src/storage/transactions/runner.ts`、`src/realtime/outbox.ts`。
+- 包内入口：`src/worker.ts`、`src/mcp/tools.ts`、`src/mcp/resources.ts`、`src/mcp/skill.ts`、`src/mcp/subscriptions.ts`、`src/web/share.ts`、`src/domain/`、`src/storage/transactions/runner.ts`、`src/realtime/outbox.ts`。
 
 ## 命令
 
