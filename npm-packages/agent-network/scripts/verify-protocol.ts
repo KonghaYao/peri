@@ -4,6 +4,8 @@
  * 这些断言直接发 HTTP/JSON-RPC，确保服务端边界不依赖客户端 SDK 的兼容层。
  */
 
+import { Client, StreamableHTTPClientTransport } from '@modelcontextprotocol/client';
+
 import {
   baseUrl,
   callTool,
@@ -15,6 +17,12 @@ import {
   newToken,
   rawRpc,
 } from './lib/harness';
+
+interface SkillEntry {
+  uri: string;
+  frontmatter: { name: string; description: string };
+  resources?: { uri: string; digest: string }[];
+}
 
 async function main(): Promise<void> {
   console.log(`协议验收: ${baseUrl()}`);
@@ -31,6 +39,14 @@ async function main(): Promise<void> {
   checkEqual('discover resultType 为 complete', discoverResult?.resultType, 'complete');
   checkEqual('discover ttlMs 为 0', discoverResult?.ttlMs, 0);
   checkEqual('discover cacheScope 为 private', discoverResult?.cacheScope, 'private');
+  const discoverCapabilities = discoverResult?.capabilities as
+    | { extensions?: Record<string, unknown> }
+    | undefined;
+  check(
+    'server/discover 声明 Skills 扩展',
+    discoverCapabilities?.extensions?.['io.modelcontextprotocol/skills'] !== undefined,
+    discoverCapabilities?.extensions,
+  );
 
   const inconsistent = await rawRpc('initialize', {
     protocolVersion: '2025-06-18',
@@ -75,6 +91,75 @@ async function main(): Promise<void> {
     check(`工具 ${required} 已注册`, toolNames.includes(required), toolNames);
   }
 
+  const skills = await rawRpc('skills/list');
+  const skillEntries =
+    (skills.body.result as { skills?: SkillEntry[] } | undefined)?.skills ?? [];
+  checkEqual('skills/list 返回 1 个技能', skillEntries.length, 1);
+  const skill = skillEntries[0];
+  checkEqual('技能 frontmatter.name 为 agent-network', skill?.frontmatter.name, 'agent-network');
+  check(
+    '技能 frontmatter.description 为非空字符串',
+    typeof skill?.frontmatter.description === 'string' && skill.frontmatter.description.length > 0,
+    skill?.frontmatter,
+  );
+  checkEqual('技能 URI 最终段与 name 一致', skill?.uri, 'skill://agent-network/agent-network/SKILL.md');
+  checkEqual(
+    'skills/list 结果不含 _meta（rmcp 兼容）',
+    (skills.body.result as Record<string, unknown> | undefined)?._meta,
+    undefined,
+  );
+  checkEqual(
+    'skills/list 结果保留 resultType',
+    (skills.body.result as Record<string, unknown> | undefined)?.resultType,
+    'complete',
+  );
+  const skillResource = skill?.resources?.find((resource) => resource.uri === skill?.uri);
+  check('技能 resources 含 SKILL.md 自身条目', skillResource !== undefined, skill?.resources);
+  check(
+    '技能 digest 格式为 sha256:<64 位小写 hex>',
+    typeof skillResource?.digest === 'string' && /^sha256:[0-9a-f]{64}$/u.test(skillResource.digest),
+    skillResource?.digest,
+  );
+
+  const skillRead = await rawRpc(
+    'resources/read',
+    { uri: skill?.uri },
+    { headers: { 'mcp-name': skill?.uri ?? '' } },
+  );
+  const readContents =
+    (skillRead.body.result as
+      | { contents?: { uri: string; mimeType?: string; text?: string }[] }
+      | undefined)?.contents ?? [];
+  const skillText = readContents[0]?.text ?? '';
+  checkEqual('resources/read 返回技能正文', readContents[0]?.uri, skill?.uri);
+  checkEqual('技能正文 mimeType 为 text/markdown', readContents[0]?.mimeType, 'text/markdown');
+  const actualDigest = new Bun.CryptoHasher('sha256').update(skillText).digest('hex');
+  checkEqual('技能正文 digest 与条目一致', `sha256:${actualDigest}`, skillResource?.digest);
+  check(
+    '技能正文含与条目一致的 frontmatter',
+    skillText.startsWith(`---\nname: ${skill?.frontmatter.name}\ndescription: ${skill?.frontmatter.description}\n---\n`),
+    skillText.slice(0, 160),
+  );
+
+  const skillGet = await rawRpc('skills/get', { uri: skill?.uri ?? '' });
+  const gotSkill = (skillGet.body.result as { skill?: SkillEntry } | undefined)?.skill;
+  checkEqual(
+    'skills/get 结果不含 _meta（rmcp 兼容）',
+    (skillGet.body.result as Record<string, unknown> | undefined)?._meta,
+    undefined,
+  );
+  check(
+    'skills/get 返回同一技能快照',
+    JSON.stringify(gotSkill) === JSON.stringify(skill),
+    { gotSkill, skill },
+  );
+  const missingSkill = await rawRpc('skills/get', { uri: 'skill://unknown/unknown/SKILL.md' });
+  checkEqual(
+    'skills/get 未知 URI 返回 -32602',
+    (missingSkill.body.error as Record<string, unknown> | undefined)?.code,
+    -32602,
+  );
+
   const getResponse = await fetch(`${baseUrl()}/mcp`);
   checkEqual('GET /mcp 返回 405', getResponse.status, 405);
   check('GET /mcp 声明 Allow: POST', (getResponse.headers.get('allow') ?? '').includes('POST'), getResponse.headers.get('allow'));
@@ -108,6 +193,18 @@ async function main(): Promise<void> {
     checkEqual('未注册身份订阅 inbox 被拒绝', roomListenError?.code, -32602);
   } finally {
     await connection.close();
+  }
+
+  const anonymous = new Client(
+    { name: 'protocol-anonymous', version: '0.0.0' },
+    { versionNegotiation: { mode: { pin: '2026-07-28' } } },
+  );
+  await anonymous.connect(new StreamableHTTPClientTransport(new URL(`${baseUrl()}/mcp`)));
+  try {
+    const me = await callTool<{ actor_id: string }>(anonymous, 'network_me');
+    checkEqual('无 Authorization 使用公共 actor', me.actor_id, 'agt_public');
+  } finally {
+    await anonymous.close();
   }
 
   console.log(`协议验收通过: ${checksPassed()} 项`);

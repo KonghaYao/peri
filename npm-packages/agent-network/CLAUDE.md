@@ -13,13 +13,14 @@ D1 是业务状态唯一权威。DO 只广播小型提示，不保存消息历�
 ## 稳定不变量
 
 - 只接受 MCP `2026-07-28`，单一 `POST /mcp`；没有协议 session、GET SSE 或旧版回退。非 POST 的 `/mcp` 返回 `405` 与 `Allow: POST`。
-- 每个独立 Agent 会话使用自己的 Bearer token；服务端只保存带域分隔前缀的 SHA-256 摘要。未注册凭据只能调用注册与恢复兑换。
+- 携带 Bearer 时 token 决定 actor；服务端只保存带域分隔前缀的 SHA-256 摘要。无 Authorization 时使用迁移 `0003_public_actor.sql` 创建的 `agt_public`；显式无效或已撤销 Bearer 不降级到公共身份。公共身份共享 inbox 与待办，只用于测试或新项目。
 - 所有幂等写入经 `runIdempotent`：`operations` 取得所有权，业务写入与条件闸门在同一 `db.batch()` 中全有或全无。禁止 `INSERT OR IGNORE` 后无条件继续写。
 - 闸门表只接受 `x = 0`；迁移 `0002_named_guards.sql` 的命名约束是错误分类依据，新增闸门必须同时更新 `GUARD_TABLES`、迁移和错误映射。
 - `pending_count` 只随 inbox 事件在 `inboxHeadStatement` 中变更；同一事务不得再手写增减。
 - 待办以 `attempt` + `claim_id` 校验；每个 Agent 至多一条 claimed（部分唯一索引）。并发 claim、旧 attempt、幂等重放分别映射为 `CLAIM_CONFLICT`、`STALE_ATTEMPT`、同一结果。
 - 普通消息不唤醒 inbox；inbox 提示用于新增待办、领取状态与成员/房间入口变化。房间状态通知 `room:{id}`。
 - 订阅建立前校验 URI 归属与成员资格；成员变化以 `membership` 提示结束订阅流，客户端重建后重新鉴权。
+- 技能面声明 `io.modelcontextprotocol/skills` 扩展；`skills/list`、`skills/get` 与 SKILL.md 资源必须共用同一份正文与 digest，改动正文即同时改变三者。技能方法结果在 `src/worker.ts` 移除结果级 `_meta`，规避 rmcp 3.5.1 将带 `_meta` 的自定义结果误判为 `CallToolResult`；客户端修复后删除。
 - 阈值只在 `src/contracts/limits.ts` 维护；正文、分页、订阅与队列限制不得在调用点复制。
 - 日志不得输出 token、凭据摘要或消息正文。
 
@@ -28,7 +29,7 @@ D1 是业务状态唯一权威。DO 只广播小型提示，不保存消息历�
 - 当前边界、命令、部署与验收：`README.md`。
 - 入口与模块索引：`../../docs/code-index/agent-network.md`。
 - 任务契约与原始计划：`../../spec/issues/2026-10-21-agent-network.md`。
-- 包内入口：`src/worker.ts`、`src/mcp/tools.ts`、`src/mcp/resources.ts`、`src/mcp/subscriptions.ts`、`src/domain/`、`src/storage/transactions/runner.ts`、`src/realtime/outbox.ts`。
+- 包内入口：`src/worker.ts`、`src/mcp/tools.ts`、`src/mcp/resources.ts`、`src/mcp/skill.ts`、`src/mcp/subscriptions.ts`、`src/domain/`、`src/storage/transactions/runner.ts`、`src/realtime/outbox.ts`。
 
 ## 命令
 

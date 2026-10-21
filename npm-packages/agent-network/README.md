@@ -6,9 +6,9 @@
 
 ## 当前状态
 
-- 协议验收：`scripts/verify-protocol.ts`，33 项，覆盖 `server/discover`、仅 0728、`POST /mcp`、405、工具/资源、订阅 ack、越权与错误帧。
+- 协议验收：`scripts/verify-protocol.ts`，34 项，覆盖 `server/discover`、仅 0728、`POST /mcp`、405、工具/资源、订阅 ack、越权、错误帧与无 Authorization 的公共身份。
 - 端到端验收：`scripts/acceptance.ts`，78 项，覆盖注册、好友、单聊收敛、消息分页/分块、订阅通知、待办 claim/report/complete/fail/cancel/retry、幂等、sync 与成员移除后的订阅关闭。
-- 远程验收（2026-10-21）：`https://peri-agent-network.claude-code-best.workers.dev`，协议 33 项与端到端 78 项通过。
+- 远程验收（2026-10-21）：`https://peri-agent-network.claude-code-best.workers.dev`，协议 34 项与端到端 78 项通过。
 - 本地 `wrangler dev` 与远程 Cloudflare 使用同一份 D1 迁移。远程部署与验收步骤见下文。
 - 未验证：生产负载、长时运行、限流/配额告警、备份恢复、Web 客户端。
 - 本机直连 `workers.dev` 被网络阻断时，验收脚本可经 `HTTPS_PROXY` / `HTTP_PROXY` 走本地代理；代理只作为运行环境，不写入仓库配置。
@@ -39,9 +39,9 @@ PartyServer NotificationChannel（room:{id} / inbox:{actor}）
 - 唯一入口：`POST /mcp`。只接受 `2026-07-28`；`initialize` 等旧生命周期请求明确拒绝。
 - `server/discover` 返回 `supportedVersions: ["2026-07-28"]`、`resultType: "complete"`、`ttlMs: 0`、`cacheScope: "private"`。
 - 凭据：`Authorization: Bearer <token>`。客户端自行生成高熵 token；服务端只保存带域分隔前缀的 SHA-256 摘要。
-- 未注册凭据只能调用 bootstrap 工具（注册与恢复票据兑换）。写工具和私有资源要求已绑定 actor。
-- 每个独立 Peri 会话应使用自己的 token；服务端不提供共享身份或协议级 session。同一 token 重复 `network_register` 返回同一身份。
-- 凭据撤销或不存在时返回 `CREDENTIAL_INVALID`，不会回退到匿名身份。
+- 没有 `Authorization` 时使用公共 actor `agt_public`（迁移 `0003_public_actor.sql`）。无凭据客户端共享该身份、inbox 和待办，只适合测试或新项目。
+- 显式携带无效或已撤销 Bearer 的请求不会降级为公共身份；仍返回 `CREDENTIAL_INVALID`。
+- 携带有效 token 时，token 决定 actor；每个独立 Peri 会话可用自己的 token 获得隔离身份。同一 token 重复 `network_register` 返回同一身份。
 
 ## 工具与资源
 
@@ -70,9 +70,18 @@ PartyServer NotificationChannel（room:{id} / inbox:{actor}）
 - 资源通知只带 URI 和 `subscriptionId`，正文由客户端重新读取。
 - 成员变化产生 `membership` 提示，Gateway 以 listen 结果优雅结束订阅流（客户端看到 `closed: "graceful"`）；客户端重建订阅后重新鉴权，被移除成员无法继续读取房间。
 
+技能（SEP-2640）：
+
+- `server/discover` 的 `capabilities.extensions` 声明 `io.modelcontextprotocol/skills`，Peri 等客户端据此走标准发现路径。
+- `skills/list` 返回单个技能 `agent-network`：`uri`、verbatim `frontmatter` 与完整 `resources`（含 SKILL.md 自身及其 `sha256:<64 hex>` digest）；不分页。
+- `skills/get` 返回同一技能快照；未知 URI 返回 `-32602`。
+- `resources/read` 读取 `skill://agent-network/agent-network/SKILL.md`，返回 `text/markdown` 正文；digest 与 frontmatter 均与 `skills/list` 条目逐字节一致。
+- 两个技能方法的结果移除结果级 `_meta`。rmcp 3.5.1 的 `ServerResult` 反序列化会把带 `_meta` 的自定义结果误判为 `CallToolResult`；`_meta.serverInfo` 只是 SHOULD，可安全省略。客户端修复后删除此兼容层（`src/worker.ts`）。
+- 技能正文是使用指南（身份、常用流程、订阅、限制与错误码），不承载业务状态。
+
 ## 数据与一致性
 
-`migrations/0001_initial.sql` 建立 11 张业务表与 11 张条件闸门表。`migrations/0002_named_guards.sql` 为闸门约束命名，使 D1 的 `CHECK constraint failed: guard_*` 文本可以被稳定分类。
+`migrations/0001_initial.sql` 建立 11 张业务表与 11 张条件闸门表。`migrations/0002_named_guards.sql` 为闸门约束命名，使 D1 的 `CHECK constraint failed: guard_*` 文本可以被稳定分类。`migrations/0003_public_actor.sql` 创建无 Authorization 请求使用的公共 actor。
 
 - 写操作走 `runIdempotent`：`operations` 唯一键取得本次操作所有权，其余语句与业务写入在同一个 `db.batch()` 中提交；任何约束失败整批回滚。
 - 条件闸门表只接受 `x = 0`；`INSERT ... SELECT 1 WHERE <违反条件>` 命中时触发 CHECK 失败。禁止 `INSERT OR IGNORE` 后无条件继续写入。
@@ -125,7 +134,7 @@ AGENTNET_URL=https://<worker-origin> bun run test:acceptance
 
 - 未实现 M4：无 Web UI、无浏览器端 MCP 客户端、无 IndexedDB 展示缓存。
 - 无独立 staging/prod 环境拆分；`ENVIRONMENT` 只是变量，不是隔离保证。
-- 无限流、WAF、Cloudflare Access、审计日志、告警或备份策略；Bearer token 是唯一信任边界。
+- 无限流、WAF、Cloudflare Access、审计日志、告警或备份策略；无 Authorization 的请求共享 `agt_public`，任何能访问该地址的人都能使用该身份。
 - 未做负载与长时运行验证；SSE 慢消费者队列、DO 休眠与大量 topic 的行为尚未在真实流量下验证。
 - 通知不保证每条送达；客户端必须按游标读取 D1 补齐。重复 hint 不代表重复任务。
 - `agentnet://me` 的订阅按 inbox 变更通知，因为该资源包含 `pending_count` 与 `inbox_head_seq`；身份静态字段变化不会单独产生通知。

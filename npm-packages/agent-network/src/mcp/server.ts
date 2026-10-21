@@ -3,6 +3,7 @@ import { McpServer } from '@modelcontextprotocol/server';
 import type { Env } from '../env';
 import type { Principal } from '../domain/principal';
 import { registerResources } from './resources';
+import { registerSkill } from './skill';
 import { registerTools } from './tools';
 
 const INSTRUCTIONS = [
@@ -23,11 +24,17 @@ export function buildServer(env: Env, principal: Principal): McpServer {
   const server = new McpServer(
     { name: 'peri-agent-network', version: '0.1.0' },
     {
-      capabilities: { tools: {}, resources: { subscribe: true } },
+      capabilities: {
+        tools: {},
+        resources: { subscribe: true },
+        // SEP-2640：声明 Skills 扩展后，客户端才走 skills/list 发现路径。
+        extensions: { 'io.modelcontextprotocol/skills': {} },
+      },
       instructions: INSTRUCTIONS,
     },
   );
   registerTools(server, env, principal);
   registerResources(server, env, principal);
+  registerSkill(server);
   return server;
 }

@@ -10,7 +10,8 @@
 
 - 写操作全部经 `src/storage/transactions/runner.ts` 的 `runIdempotent`；`operations` 唯一键取得所有权，业务写入与 `src/storage/guards.ts` 条件闸门在同一 `db.batch()` 中提交。
 - 闸门表在 `migrations/0001_initial.sql` 建立，`0002_named_guards.sql` 为约束命名，使 D1 CHECK 错误文本可映射为业务错误。
-- 身份凭据只存摘要；每个独立 Agent 会话使用独立 Bearer token。订阅在 `src/mcp/subscriptions.ts` 建立前校验归属，成员变化由 `TopicEventBus` 结束流。
+- 身份凭据只存摘要；携带 Bearer 时 token 决定 actor，无 Authorization 时映射到迁移 `0003_public_actor.sql` 创建的 `agt_public`，显式无效 Bearer 不降级。每个独立 Agent 会话可用独立 token 隔离身份。订阅在 `src/mcp/subscriptions.ts` 建立前校验归属，成员变化由 `TopicEventBus` 结束流。
+- 技能面：`capabilities.extensions` 声明 `io.modelcontextprotocol/skills`；`skills/list`、`skills/get` 与 `resources/read` 共用 `src/mcp/skill.ts` 的同一份正文与 digest。`src/worker.ts` 为两个技能方法移除结果级 `_meta`，规避 rmcp 3.5.1 的自定义结果误判。
 - 限制只在 `src/contracts/limits.ts` 维护；错误码与可重试语义在 `src/contracts/errors.ts`。
 
 ## 入口
@@ -20,6 +21,7 @@
 | Worker 路由、health、405、Cron | `npm-packages/agent-network/src/worker.ts` |
 | MCP 工具注册与错误投影 | `src/mcp/tools.ts` |
 | 资源与私有缓存 | `src/mcp/resources.ts` |
+| SEP-2640 技能（`skills/list`、`skills/get`、SKILL.md 资源） | `src/mcp/skill.ts` |
 | 订阅 URI 校验与 topic 映射 | `src/mcp/subscriptions.ts` |
 | Bearer 鉴权与 actor 绑定 | `src/mcp/auth.ts` |
 | 身份、好友、房间、消息、待办、sync | `src/domain/` |
@@ -29,7 +31,7 @@
 | MCP 流到 DO topic 的桥 | `src/realtime/bus.ts` |
 | Durable Object 广播 | `src/realtime/channel.ts` |
 | 留存与新序号下界 | `src/maintenance.ts` |
-| D1 schema | `migrations/0001_initial.sql`、`0002_named_guards.sql` |
+| D1 schema | `migrations/0001_initial.sql`、`0002_named_guards.sql`、`0003_public_actor.sql` |
 | 部署绑定与 Cron | `wrangler.jsonc` |
 | 协议验收 | `scripts/verify-protocol.ts` |
 | 端到端验收 | `scripts/acceptance.ts` |

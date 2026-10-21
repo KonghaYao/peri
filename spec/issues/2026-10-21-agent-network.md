@@ -7,7 +7,7 @@
 
 本文是开发任务、接口和数据模型的完整计划，不代表功能已经实现或性能已经验证。数据模型是待实施的 schema 草案；本次不执行迁移、提交或部署。
 
-> 实施状态（2026-10-21）：M0–M3 服务端已实现；本地与远程 Cloudflare 的协议验收（33 项）和端到端验收（78 项）均通过。M4 Web 未实现，`npm-packages/agent-network/` 的 README 记录当前边界、命令与实施差异。
+> 实施状态（2026-10-21）：M0–M3 服务端已实现；本地与远程 Cloudflare 的协议验收（34 项）和端到端验收（78 项）均通过。M4 Web 未实现，`npm-packages/agent-network/` 的 README 记录当前边界、命令与实施差异。
 
 ## 1. 已确定的方案
 
@@ -201,6 +201,7 @@ Peri 默认订阅自己的 inbox。Web 默认订阅自己的 inbox 和当前打�
 | 发现 | 实现 `server/discover`；客户端可直接调用其他方法 |
 | 工具 | `tools/list`、`tools/call` |
 | 资源 | `resources/list`、`resources/read`；需要模板时再开放模板目录 |
+| 技能 | SEP-2640：`skills/list`、`skills/get`、SKILL.md 资源；`capabilities.extensions` 声明 `io.modelcontextprotocol/skills` |
 | 通知 | `subscriptions/listen`，订阅当前身份允许的 resource URI |
 | 普通响应 | JSON；成功结果包含 `resultType: "complete"` |
 | 订阅响应 | 当前 POST 请求的 SSE 流 |
@@ -208,7 +209,7 @@ Peri 默认订阅自己的 inbox。Web 默认订阅自己的 inbox 和当前打�
 
 每次请求携带版本、方法及标准 `_meta`。具体映射与错误编码遵循官方 0728 transport、versioning、subscriptions 规范，不复制旧版 initialize 示例。
 
-`server/discover` 只声明实际能力：`tools: {}` 和 `resources: { subscribe: true }`，支持版本数组仅含 0728。固定工具目录不发送 list_changed。服务端可以共享不可变的工具注册表，但不维护按客户端划分的 MCP server/session map；本次订阅的连接资源在请求结束时释放。
+`server/discover` 只声明实际能力：`tools: {}`、`resources: { subscribe: true }` 与 `extensions: { "io.modelcontextprotocol/skills": {} }`，支持版本数组仅含 0728。固定工具目录不发送 list_changed。服务端可以共享不可变的工具注册表，但不维护按客户端划分的 MCP server/session map；本次订阅的连接资源在请求结束时释放。
 
 必须落实的协议规则：
 
@@ -421,6 +422,8 @@ Web 调用 MCP 并不要求用户看到 MCP 的名称或字段。用户界面显
 | `agentnet://rooms/{room_id}/head` | head_seq、成员版本、最近变更摘要 | 正在查看该房间的 Web |
 
 资源只读，写入走工具。目录只提供有限入口，不枚举每条历史消息。与身份相关的结果使用私有缓存范围；实时 head/inbox 不以长 TTL 缓存。
+
+技能资源 `skill://agent-network/agent-network/SKILL.md` 通过 SEP-2640 面下发，不参与业务订阅；其 digest 与 frontmatter 必须和 `skills/list` 条目一致。技能方法结果不带结果级 `_meta`：rmcp 3.5.1 会把带 `_meta` 的自定义结果误判为 `CallToolResult`，而 `_meta.serverInfo` 是 SHOULD。
 
 标准资源通知只提示 URI 更新；事件类型、消息引用、具体版本通过有界的 resource read 或 sync 获取。不要把完整历史塞进通知字段。
 

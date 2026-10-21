@@ -24,6 +24,42 @@ interface ListenBody {
 const PROTOCOL_VERSION_META = 'io.modelcontextprotocol/protocolVersion';
 const MODERN_VERSION = '2026-07-28';
 
+/**
+ * 需要移除结果级 `_meta` 的自定义方法。
+ *
+ * rmcp 3.5.1（Peri 当前客户端）用 untagged union 反序列化 `ServerResult`，
+ * 其中 `CallToolResult` 的 known-field 判别包含 `_meta`：任何带结果级
+ * `_meta` 的自定义结果都会被误判为 `CallToolResult`，`skills/list` 随即以
+ * “非预期响应类型”失败。2026-07-28 中 `_meta.serverInfo` 是 SHOULD 而非
+ * MUST，因此这里对技能方法去掉结果级 `_meta`，保留 `resultType` 与业务
+ * 字段。客户端不再用 `_meta` 判别 `CallToolResult` 后可删除此兼容层。
+ */
+const CUSTOM_METHODS_WITHOUT_RESULT_META = new Set(['skills/list', 'skills/get']);
+
+async function stripResultMeta(response: Response): Promise<Response> {
+  const contentType = response.headers.get('content-type') ?? '';
+  if (!contentType.includes('application/json')) return response;
+  const text = await response.text();
+  let message: Record<string, unknown>;
+  try {
+    message = JSON.parse(text) as Record<string, unknown>;
+  } catch {
+    return new Response(text, response);
+  }
+  const result = message.result;
+  if (result === null || typeof result !== 'object') {
+    return new Response(text, response);
+  }
+  delete (result as Record<string, unknown>)._meta;
+  const headers = new Headers(response.headers);
+  headers.delete('content-length');
+  return new Response(JSON.stringify(message), {
+    status: response.status,
+    statusText: response.statusText,
+    headers,
+  });
+}
+
 function jsonRpcError(
   id: string | number | null | undefined,
   code: number,
@@ -117,6 +153,13 @@ async function handleMcp(
 
   const handler = handlerFor(env, principal);
   const response = await handler.fetch(request);
+  const finalResponse =
+    body !== null &&
+    !Array.isArray(body) &&
+    typeof body.method === 'string' &&
+    CUSTOM_METHODS_WITHOUT_RESULT_META.has(body.method)
+      ? await stripResultMeta(response)
+      : response;
   if (body?.method === 'tools/call') {
     ctx.waitUntil(
       drainOutbox(env).catch((error) => {
@@ -124,7 +167,7 @@ async function handleMcp(
       }),
     );
   }
-  return response;
+  return finalResponse;
 }
 
 const app = new Hono<{ Bindings: Env }>();
