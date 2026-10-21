@@ -296,9 +296,9 @@ fn test_subagent_section_does_not_hardcode_built_in_agent_ids() {
     assert!(!result.contains("`general-purpose`"));
     assert!(!result.contains("subagent_type: \"explorer\""));
     assert!(result.contains("If no entry clearly fits"));
-    // 默认主动委派策略：按独立性/风险/验证成本判断，不再以 2-3 个文件为硬门槛。
+    // 默认主动委派策略：按范围/不确定性/风险/验证成本判断，不以文件数为硬门槛。
     assert!(result.contains("## Default delegation policy"));
-    assert!(result.contains("Judge by independence, risk, and verification cost"));
+    assert!(result.contains("Judge by scope, uncertainty, risk, and verification cost"));
     assert!(result.contains("not by file count"));
     assert!(!result.contains("tasks involving only 2-3 files"));
     assert!(result.contains("do not redo its investigation or edits in the foreground"));

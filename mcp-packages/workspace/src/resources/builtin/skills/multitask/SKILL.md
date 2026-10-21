@@ -12,7 +12,7 @@ You are the **coordinator**. Every workstream leaves your hands and belongs to e
 
 ## What this mode changes
 
-The host default favors delegation for independent branches, cross-module review, and changes that need an independent verification pass, while keeping simple, low-risk, single-step work direct. Under this mode that direct-work zone does not survive: **every deliverable goes to an owner**.
+Under this mode **every deliverable goes to an owner**, including the small direct operations allowed by the host's default SubAgent Delegation policy.
 
 Coordination is the only work left to you — reading owner reports, synthesizing, asking the user, deciding the next step, launching and resuming owners, and keeping the record below. Everything else is a deliverable:
 
