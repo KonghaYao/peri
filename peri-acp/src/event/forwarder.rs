@@ -52,8 +52,8 @@ fn extract_message_id(event: &ExecutorEvent) -> Option<String> {
 /// **事件三层化（3.0 M-event-chain）**：闭包签名携带 `UnstampedEvent`（事件源
 /// 身份：turn_id / agent_id / message_id / delivery_class）与 v1 payload；
 /// 调用方（ACP 发射点）应把两者交给 Controller（`Controller::publish_event`）
-/// 统一发射——Controller 经 Runtime 补打 session_id / session_seq 后扇出，
-/// ACP 协议化消费侧从 `Controller::subscribe` / `pop_events` 订阅（不再直连
+/// 统一发射——Controller 经 Runtime 补打 session_id / session_seq 后广播，
+/// ACP 协议化消费侧从 `Controller::subscribe` 订阅（不再直连
 /// Agent EventBus）。
 ///
 /// v2_tx 双轨（v2 事件直连 TUI）已随

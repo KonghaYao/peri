@@ -2,10 +2,10 @@
 //!
 //! 当前承载：
 //! - `controller` — 控制面宿主（`docs/top-level.md` §6）：
-//!   lite params → pick Resources → pick Runtime → run Session → pop events；
+//!   lite params → pick Resources → pick Runtime → run Session → 消费事件（订阅）；
 //!   会话生命周期面（join / 销毁 / 枚举）、消息/工具注入面（submit_input）；
 //!   cancel 按 (session_id, turn_id, attempt_id) 三元组定位并转发（§9）；
-//!   事件协议化前分支（`subscribe` / `pop_events`）供 ACP 协议化与旁路观测
+//!   事件协议化前分支（`subscribe`）供 ACP 协议化与旁路观测
 //! - `error` — 边界错误（ControllerError / SubscriptionError，thiserror 枚举，
 //!   包 Runtime context）
 //! - `langfuse` — 观测实现（自 peri-acp 迁入）：bridge 是事件流旁路消费者，

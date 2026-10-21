@@ -25,7 +25,7 @@ peri-resources 的 `sessions/resources_legacy_relink_test.rs`。
 
 ## 架构速览
 
-F09：`SessionState.event_health` 仅保存在内存，`event_health()` 提供只读快照；`prompt.rs` 将同一 session-owned 句柄绑定 Controller 并经 `controller_ports.rs::session_subscription` 传入 Agent 事件泵。Controller 队列失败与 pump lag 更新该句柄，跨 prompt 保留 sticky dirty；不序列化、不改数据库或 ACP 协议，也不将新轮次/局部快照视作完整重同步。源端 EventBus 健康度独立保留在各 bus 的 `health()` 中。
+F09：`SessionState.event_health` 仅保存在内存，`event_health()` 提供只读快照；`prompt.rs` 将同一 session-owned 句柄经 `controller_ports.rs::session_subscription` 传入 Agent 事件泵。pump lag 更新该句柄，跨 prompt 保留 sticky dirty；不序列化、不改数据库或 ACP 协议，也不将新轮次/局部快照视作完整重同步。源端 EventBus 健康度独立保留在各 bus 的 `health()` 中。
 
 当前进程内部执行的交互身份由 `host/execution.rs` 与 `host/prompt.rs` 管理，`ExecutionStarted` 经 `session/event_sink.rs` 可靠发送，正常终态及装配早退匹配同一 request ID。定时审批持有同一会话 prompt lock，在独立交互作用域内批准、拒绝、取消并收尾；之后实际执行不复用审批身份。完整宿主测试在 `activation_tests::execution_tests`，挂起/恢复 FIFO 验证在 `event::forwarder_test`；批次范围与验证见 `spec/issues/2026-10-08-async-execution-chain-fixes.md`。
 
