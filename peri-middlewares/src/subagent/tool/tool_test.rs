@@ -915,3 +915,6 @@ async fn closed_agent_face_hides_and_blocks_activation_without_disk_fallback() {
     );
     let _ = ResourceScope::Project;
 }
+
+#[path = "tool_test/resume_archive_test.rs"]
+mod resume_archive_test;

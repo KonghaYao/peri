@@ -118,6 +118,9 @@ pub struct AcpSession {
     /// 会话级后台结果处理责任 owner（跨 prompt 复用；关闭会话即释放）。
     pub(crate) async_result_mailbox:
         Arc<peri_agent::session::async_result_mailbox::AsyncResultMailbox>,
+    /// Bounded runtime evidence, retained across normal prompts and dropped on cold load.
+    pub(crate) compact_exposure:
+        Arc<parking_lot::Mutex<peri_agent::agent::compact_v2::exposure::ExposureLedger>>,
     pub(crate) user_input_events_cancel: CancellationToken,
     /// Session 级 cron bridge（lazy-init，跨 turn 存活；close_session 时随本结构 drop）。
     pub cron_bridge: Option<crate::session::cron_bridge::SessionCronBridge>,

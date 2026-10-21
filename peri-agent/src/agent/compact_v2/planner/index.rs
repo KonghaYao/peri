@@ -221,6 +221,7 @@ impl<'a> HistoryIndex<'a> {
                 tool_call_id,
                 content,
                 is_error,
+                execution,
                 ..
             } = message
             {
@@ -230,7 +231,17 @@ impl<'a> HistoryIndex<'a> {
                         ResultLocation {
                             entry,
                             target: ProjectionTarget::Message,
-                            is_error: *is_error,
+                            // Completion proves settlement, not success. ToolOutput may
+                            // report typed failure without an is_error outcome flag.
+                            is_error: *is_error
+                                || execution.as_ref().is_some_and(|evidence| {
+                                    matches!(
+                                        evidence.status,
+                                        crate::tools::ToolExecutionStatus::Failed
+                                            | crate::tools::ToolExecutionStatus::Cancelled
+                                            | crate::tools::ToolExecutionStatus::TimedOut
+                                    )
+                                }),
                             content: ResultContent::Message(content),
                         },
                     )

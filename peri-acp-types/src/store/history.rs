@@ -126,6 +126,12 @@ fn validate_fork_archive_sources(
         .map(|payload| (payload.id(), payload))
         .collect();
     for source in payloads {
+        if flags
+            .get(&source.id())
+            .is_some_and(|flags| flags.is_recovery_only() && !flags.excluded)
+        {
+            return Err(HistoryError::InvalidArchive { id: source.id() });
+        }
         let Some(catalog) = flags
             .get(&source.id())
             .and_then(|flags| flags.projection.as_ref())
@@ -261,6 +267,7 @@ pub type RewindFlagEntry = (MessageId, MessageFlags, bool);
 ///
 /// `keep_len` 必须不超过 `entries.len()`：调用方由 [`rewind_keep_len`] 在同一份历史上取得，
 /// 越界即调用方违约（切片越界会直接暴露），这里不静默截断。
+/// `recovery_only` 行仅承载授权归档碎片，不参加前缀或摘要恢复判定，始终排除。
 pub fn rewind_clear_excluded_ids(entries: &[RewindFlagEntry], keep_len: usize) -> Vec<MessageId> {
     let retained = &entries[..keep_len];
     let retained_ids: HashSet<MessageId> = retained.iter().map(|(id, _, _)| *id).collect();
@@ -269,7 +276,7 @@ pub fn rewind_clear_excluded_ids(entries: &[RewindFlagEntry], keep_len: usize) -
     let mut covered = 0usize;
     let mut summary_survives = false;
     for (_, flags, is_system) in retained {
-        if *is_system {
+        if *is_system || flags.is_recovery_only() {
             continue;
         }
         if !flags.excluded {
@@ -281,7 +288,7 @@ pub fn rewind_clear_excluded_ids(entries: &[RewindFlagEntry], keep_len: usize) -
     let mut clear = Vec::new();
     let mut own_position = 0usize;
     for (id, flags, is_system) in retained {
-        if *is_system {
+        if *is_system || flags.is_recovery_only() {
             continue;
         }
         if flags.excluded {

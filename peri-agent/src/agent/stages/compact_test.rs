@@ -62,6 +62,9 @@ impl crate::tools::BaseTool for CompactFixtureTool {
     fn context_retention(&self) -> crate::tools::ContextRetention {
         self.1
     }
+    fn is_direct(&self) -> bool {
+        true
+    }
     async fn invoke(
         &self,
         _: serde_json::Value,

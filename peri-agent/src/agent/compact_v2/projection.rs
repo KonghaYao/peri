@@ -173,6 +173,9 @@ pub fn plan_from_persisted_directives(
 
         match projection {
             Some(directive) => {
+                if directive.recovery_only {
+                    return PersistedDirectiveRestore::Invalid;
+                }
                 has_any_directive = true;
                 if directive.format_version != 1
                     || ![2, expected_version].contains(&directive.policy_version)

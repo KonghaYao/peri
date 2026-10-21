@@ -7,6 +7,7 @@
 //! Receive 是循环入口，也是退出判断点：队列空 + 无 idle 等待时退出。
 
 pub mod act;
+mod archive_capability;
 mod async_context;
 pub mod compact;
 mod compact_progress;
@@ -822,3 +823,7 @@ mod model_view_tests;
 #[cfg(test)]
 #[path = "micro_exposure_test.rs"]
 mod micro_exposure_tests;
+
+#[cfg(test)]
+#[path = "micro_turn_exposure_test.rs"]
+mod micro_turn_exposure_tests;

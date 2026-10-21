@@ -11,6 +11,10 @@ use crate::{
     thread::ThreadId,
 };
 
+#[path = "context_archive/batch.rs"]
+mod batch;
+pub use batch::{ArchiveChunkBatch, ARCHIVE_CHUNKS_PER_BATCH};
+
 pub const ARCHIVE_FORMAT_VERSION: u32 = 1;
 pub const ARCHIVE_CHUNK_BYTES: usize = 4096;
 pub const ARCHIVE_MAX_METADATA_BYTES: usize = 65_536;
@@ -26,6 +30,7 @@ pub struct ArchiveMember {
     pub chunk_digests: Vec<String>,
     /// The serialized canonical envelope preserves all block types and tool inputs/results.
     pub kind: String,
+    /// Distinct block kinds present; canonical bytes retain per-block order and detail.
     #[serde(default)]
     pub block_types: Vec<String>,
 }
@@ -486,6 +491,13 @@ fn recoverable_content(content: &crate::messages::MessageContent) -> bool {
 }
 
 fn block_types(content: &crate::messages::MessageContent) -> Vec<String> {
+    let mut types = content_block_types(content);
+    types.sort_unstable();
+    types.dedup();
+    types
+}
+
+fn content_block_types(content: &crate::messages::MessageContent) -> Vec<String> {
     use crate::messages::{ContentBlock, MessageContent};
     match content {
         MessageContent::Text(_) => vec!["text".into()],

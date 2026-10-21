@@ -456,8 +456,8 @@ pub trait SessionResources: Send + Sync {
 
     /// Explicit independent-fork read: flatten the frozen inherited context and own
     /// history, and materialize only archives authorized by those frozen roots.
-    /// Archived bodies remain excluded. Implementations must preserve the frozen
-    /// source tail and verify catalog/member identities before returning this view.
+    /// Added archive bodies are recovery_only and stay excluded through rewind/refork.
+    /// Preserve the frozen source tail and verify catalog/member identities before returning.
     async fn load_fork_snapshot(&self, _id: &ThreadId) -> SessionResourceResult<SessionSnapshot> {
         Err(SessionResourceError::new(
             SessionResourceErrorKind::Unsupported,
@@ -786,6 +786,19 @@ pub trait SessionResources: Send + Sync {
         Err(crate::session_resources::SessionResourceError::new(
             crate::session_resources::SessionResourceErrorKind::Unsupported,
         ))
+    }
+
+    /// Read a bounded batch in request order. Adapters may combine it into one I/O.
+    async fn read_archive_chunks(
+        &self,
+        id: &ThreadId,
+        batch: &crate::context_archive::ArchiveChunkBatch,
+    ) -> SessionResourceResult<Vec<crate::context_archive::ArchiveChunk>> {
+        let mut chunks = Vec::with_capacity(batch.queries().len());
+        for query in batch.queries() {
+            chunks.push(self.read_archive_chunk(id, query).await?);
+        }
+        Ok(chunks)
     }
 
     /// 按给定 id 集合读取 flags，范围有界：只回答这些 id 的标记，不做全历史扫描。

@@ -371,3 +371,6 @@ async fn test_micro_rejects_full_directive_overflow_without_partial_commit_or_lo
         serialize_persisted_payload(&small_payload).unwrap()
     );
 }
+
+#[path = "micro_block_budget_test.rs"]
+mod block_budget;

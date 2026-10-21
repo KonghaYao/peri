@@ -313,6 +313,13 @@ pub struct MessageFlags {
 }
 
 impl MessageFlags {
+    /// Whether this row is recovery storage rather than executable history.
+    pub fn is_recovery_only(&self) -> bool {
+        self.projection
+            .as_ref()
+            .is_some_and(|directive| directive.recovery_only)
+    }
+
     /// 取代本条的摘要消息 id（Full Compact 归档时写入）。
     ///
     /// 只有 `excluded` 为真时才有意义：它是「本条被哪条摘要取代」这条事实的读取口，

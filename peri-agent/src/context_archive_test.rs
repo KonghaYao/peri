@@ -443,3 +443,48 @@ async fn archive_recovers_original_tool_arguments_and_embedded_media_not_mutable
         Err(ArchiveError::Unsupported)
     ));
 }
+
+/// [回归测试] 超大固定元数据必须在发布有损投影前被拒绝。
+#[tokio::test]
+async fn archive_verification_rejects_metadata_that_cannot_return_one_fragment() {
+    let (session, _, mut catalog) = committed_archive("original body").await;
+    catalog.members[0].kind = "x".repeat(20_000);
+    catalog.validate().unwrap();
+    let reader = ContextArchiveReader::new(session.resources(), session.thread_id());
+    assert!(matches!(
+        reader.verify_catalog(&catalog).await,
+        Err(ArchiveError::Unsupported)
+    ));
+}
+
+/// [回归测试] 已落盘的重复block类型在响应中归一化，不能阻断旧引用回查。
+#[tokio::test]
+async fn archive_legacy_repeated_block_kinds_still_fit_response_budget() {
+    let (session, payload, mut catalog) = committed_archive("original body").await;
+    catalog.members[0].block_types = vec!["text".into(); 2500];
+    session
+        .resources
+        .apply_message_projections(
+            &session.thread_id(),
+            &[(
+                payload.id(),
+                MessageFlags {
+                    truncated: true,
+                    excluded: false,
+                    projection: Some(MessageProjectionDirective {
+                        archive_catalog: Some(catalog.clone()),
+                        ..Default::default()
+                    }),
+                },
+            )],
+        )
+        .await
+        .unwrap();
+    let reader = ContextArchiveReader::new(session.resources(), session.thread_id());
+    reader.verify_catalog(&catalog).await.unwrap();
+    let recovered = collect(&reader, catalog.member_ref(0).unwrap(), 4096).await;
+    assert_eq!(
+        recovered,
+        serialize_persisted_payload(&payload).unwrap().as_bytes()
+    );
+}

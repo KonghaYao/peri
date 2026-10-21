@@ -8,6 +8,35 @@ use peri_acp_types::projection::{
 use peri_acp_types::session_resources::{SessionResources, SessionStoreShutdownPort};
 use peri_acp_types::store::PersistedPayload;
 
+// The provenance scenario retains lossy directives and therefore grants recovery
+// explicitly, just as the production permission-filtered tool catalog must.
+struct RecoveryTool;
+#[async_trait::async_trait]
+impl crate::tools::BaseTool for RecoveryTool {
+    fn name(&self) -> &str {
+        "ReadContextArchive"
+    }
+    fn description(&self) -> &str {
+        "fixture archive recovery"
+    }
+    fn parameters(&self) -> serde_json::Value {
+        serde_json::json!({})
+    }
+    fn is_direct(&self) -> bool {
+        true
+    }
+    fn context_retention(&self) -> crate::tools::ContextRetention {
+        crate::tools::ContextRetention::ArchiveRead
+    }
+    async fn invoke(
+        &self,
+        _: serde_json::Value,
+        _: crate::tools::ToolContext<'_>,
+    ) -> Result<String, Box<dyn std::error::Error + Send + Sync>> {
+        panic!("provenance fixture must not execute recovery")
+    }
+}
+
 struct SummaryModel;
 #[async_trait::async_trait]
 impl peri_model::Model for SummaryModel {
@@ -76,7 +105,7 @@ fn spawn_config(
             "fixture-scripted",
         ),
         chain_assembler: Arc::new(EmptyChainAssembler),
-        tools: vec![],
+        tools: vec![Arc::new(RecoveryTool)],
         tool_filter: Arc::new(|_| true),
         system_prompt: None,
         tool_invocation_resolver: None,
@@ -253,7 +282,7 @@ async fn test_sqlite_subagent_spawn_full_micro_cold_resume_preserves_provenance(
     let (reopened, reopened_shutdown) = reopened_resources.into_parts();
     let recording = RecordingLLM::new();
     let received = recording.received.clone();
-    let config = resume_config_with(
+    let mut config = resume_config_with(
         Arc::clone(&reopened),
         child_id.clone(),
         crate::session::test_resources::mock::model::fixture_source(
@@ -264,6 +293,7 @@ async fn test_sqlite_subagent_spawn_full_micro_cold_resume_preserves_provenance(
         None,
         None,
     );
+    config.tools.push(Arc::new(RecoveryTool));
     let resumed = SessionFactory::resume_subagent(Some(&parent), config)
         .await
         .unwrap();

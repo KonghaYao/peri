@@ -238,6 +238,7 @@ fn make_session_context(session_id: &str) -> SessionContext {
         session_id: session_id.to_string(),
         user_input_mailbox: None,
         async_result_mailbox: None,
+        compact_exposure: Arc::default(),
         cancel: AgentCancellationToken::new(),
         broker: Arc::new(NoopBroker),
         permission_mode: SharedPermissionMode::new(PermissionMode::Bypass),

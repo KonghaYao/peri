@@ -363,6 +363,19 @@ pub(crate) trait SessionDataPort: Send + Sync {
         )
     }
 
+    /// Read a bounded batch in request order. Adapters may combine it into one I/O.
+    async fn read_archive_chunks(
+        &self,
+        id: &ThreadId,
+        batch: &peri_acp_types::context_archive::ArchiveChunkBatch,
+    ) -> SessionResourceResult<Vec<peri_acp_types::context_archive::ArchiveChunk>> {
+        let mut chunks = Vec::with_capacity(batch.queries().len());
+        for query in batch.queries() {
+            chunks.push(self.read_archive_chunk(id, query).await?);
+        }
+        Ok(chunks)
+    }
+
     /// 按给定 id 集合读取 flags（有界）：只查这些 id，不做全历史扫描。
     ///
     /// 与 [`Self::load_session_history`] 同一条派生视图规则：只返回非默认标记；

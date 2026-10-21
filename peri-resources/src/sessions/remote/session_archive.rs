@@ -88,33 +88,55 @@ impl RemoteSessionData {
         plan: &ArchiveChunkQuery,
     ) -> SessionResourceResult<ArchiveChunk> {
         query::validate_chunk(plan)?;
+        let batch = ArchiveChunkBatch::new(vec![plan.clone()])
+            .map_err(|_| query::invalid("invalid archive chunk bounds"))?;
+        self.read_archive_body_chunks(id, &batch)
+            .await?
+            .pop()
+            .ok_or_else(not_found)
+    }
+
+    pub(super) async fn read_archive_body_chunks(
+        &self,
+        id: &ThreadId,
+        batch: &ArchiveChunkBatch,
+    ) -> SessionResourceResult<Vec<ArchiveChunk>> {
+        let statements = batch
+            .queries()
+            .iter()
+            .map(|plan| {
+                StatementSpec::new(
+                    query::CHUNK_SQL,
+                    vec![
+                        Value::Text(id.to_string()),
+                        optional_id(Some(plan.message_id)),
+                        optional_id(Some(plan.committed_tail)),
+                        Value::Integer(plan.offset as i64),
+                        Value::Integer(i64::from(plan.max_bytes)),
+                    ],
+                )
+            })
+            .collect();
         let store = self.store().await?;
-        let rows = store
-            .read_batch(vec![StatementSpec::new(
-                query::CHUNK_SQL,
-                vec![
-                    Value::Text(id.to_string()),
-                    optional_id(Some(plan.message_id)),
-                    optional_id(Some(plan.committed_tail)),
-                    Value::Integer(plan.offset as i64),
-                    Value::Integer(i64::from(plan.max_bytes)),
-                ],
-            )])
-            .await?;
-        let row =
-            sole_row(rows.into_iter().next().ok_or_else(not_found)?)?.ok_or_else(not_found)?;
-        let bytes = match row.first() {
-            Some(Value::Blob(bytes)) => bytes.clone(),
-            _ => return Err(query::invalid("archive body chunk is not bytes")),
-        };
-        let total = int_at(&row, 1).ok_or_else(not_found)?;
-        if total < 0 || plan.offset > total as u64 {
-            return Err(query::invalid("archive offset exceeds canonical body"));
-        }
-        Ok(ArchiveChunk {
-            bytes,
-            total_bytes: total as u64,
-        })
+        let rows = store.read_batch(statements).await?;
+        rows.into_iter()
+            .zip(batch.queries())
+            .map(|(rows, plan)| {
+                let row = sole_row(rows)?.ok_or_else(not_found)?;
+                let total = int_at(&row, 1).ok_or_else(not_found)?;
+                if total < 0 || plan.offset > total as u64 {
+                    return Err(query::invalid("archive offset exceeds canonical body"));
+                }
+                let bytes = match row.into_iter().next() {
+                    Some(Value::Blob(bytes)) if bytes.len() <= plan.max_bytes as usize => bytes,
+                    _ => return Err(query::invalid("archive body chunk exceeds its byte bound")),
+                };
+                Ok(ArchiveChunk {
+                    bytes,
+                    total_bytes: total as u64,
+                })
+            })
+            .collect()
     }
 }
 

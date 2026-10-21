@@ -120,6 +120,9 @@ pub struct StageBuildInput {
     pub thread_id: Option<String>,
     /// 会话级后台结果处理责任 owner（ACP 宿主跨 prompt 注入；None 时本地新建）。
     pub async_result_mailbox: Option<Arc<crate::session::async_result_mailbox::AsyncResultMailbox>>,
+    /// Host-owned bounded consumption ledger, shared across ordinary user turns.
+    pub compact_exposure:
+        Arc<parking_lot::Mutex<crate::agent::compact_v2::exposure::ExposureLedger>>,
     // ── 注入面（原 ACP 特有构造）──
     /// 模型名称（GitAttribution / hook 注入用）
     pub model_name: String,
@@ -487,6 +490,7 @@ pub fn build_stage_context(
     let builder = StageContext::builder(turn, transcript, queue)
         .with_agent_id(main_agent_id)
         .with_async_result_mailbox(async_result_mailbox)
+        .with_compact_exposure(session.compact_exposure())
         .with_llm(react_llm)
         .with_tools(session_tools)
         .with_tool_catalog(tool_catalog)

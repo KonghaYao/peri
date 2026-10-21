@@ -30,7 +30,8 @@ pub async fn apply_micro_plan(
         let (resources, session_id, _) = transcript
             .idempotent_reminder_port()
             .ok_or_else(|| anyhow::anyhow!("recovery_unavailable: archive requires persistence"))?;
-        let reader = crate::context_archive::ContextArchiveReader::new(resources, session_id);
+        let reader =
+            crate::context_archive::ContextArchiveReader::new(resources, session_id.clone());
         for catalog in &plan.catalogs {
             if transcript
                 .projection_ref(catalog.anchor_message_id)
@@ -41,12 +42,12 @@ pub async fn apply_micro_plan(
                     anyhow::anyhow!("archive catalog identity cannot be overwritten").into(),
                 );
             }
-            let tail = reader
-                .verify_catalog(catalog)
-                .await
-                .map_err(|error| anyhow::anyhow!("recovery_unavailable: {error}"))?;
-            committed_tails.insert(catalog.source_thread_id.clone(), tail);
         }
+        let tail = reader
+            .verify_catalogs(&plan.catalogs)
+            .await
+            .map_err(|error| anyhow::anyhow!("recovery_unavailable: {error}"))?;
+        committed_tails.insert(session_id, tail);
     }
     validate_source_flags(transcript, plan)?;
     let flag_updates = prepare_updates(transcript, plan, &committed_tails)
@@ -182,3 +183,7 @@ pub async fn micro_compact(
 #[cfg(test)]
 #[path = "micro_test.rs"]
 mod tests;
+
+#[cfg(test)]
+#[path = "micro_batch_test.rs"]
+mod batch_tests;

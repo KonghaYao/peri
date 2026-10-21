@@ -46,7 +46,7 @@ pub(crate) async fn load_fork_source(
     let snapshot = resources.load_fork_snapshot(&thread_id).await?;
     let binding = bound_binding(&snapshot)?;
     let frozen = source_frozen(&snapshot)?;
-    let payloads = ensure_complete_tool_calls(snapshot.payloads)?;
+    let payloads = ensure_complete_tool_calls(snapshot.payloads, &snapshot.flags)?;
     Ok(ForkSource {
         thread_id,
         binding,
@@ -132,9 +132,23 @@ fn source_frozen(snapshot: &SessionSnapshot) -> Result<FrozenSnapshotBytes> {
 }
 
 /// 工具调用闭合校验：未闭合的调用不能复制进一条独立可执行的历史。
-fn ensure_complete_tool_calls(payloads: Vec<PersistedPayload>) -> Result<Vec<PersistedPayload>> {
+fn ensure_complete_tool_calls(
+    payloads: Vec<PersistedPayload>,
+    flags: &HashMap<MessageId, MessageFlags>,
+) -> Result<Vec<PersistedPayload>> {
     let mut pending = HashSet::new();
-    for message in payloads.iter().filter_map(PersistedPayload::as_message) {
+    for payload in &payloads {
+        if let Some(flags) = flags.get(&payload.id()) {
+            if flags.is_recovery_only() {
+                if !flags.excluded {
+                    bail!("Cannot fork active recovery-only archive payload");
+                }
+                continue;
+            }
+        }
+        let Some(message) = payload.as_message() else {
+            continue;
+        };
         for call in message.tool_calls() {
             pending.insert(call.id.clone());
         }

@@ -1,4 +1,4 @@
-//! Snapshot only the current run's consumption and the published tool policy.
+//! Snapshot the live session's confirmed consumption and the published tool policy.
 use super::StageContext;
 use crate::agent::compact_v2::planner::{ArchivePlanningScope, MicroPlanningFacts};
 use crate::error::AgentResult;
@@ -37,10 +37,10 @@ pub(super) async fn snapshot(
             .collect(),
         ..Default::default()
     };
-    if !tools.iter().any(|tool| {
-        tool.context_retention() == crate::tools::ContextRetention::ArchiveRead
-            && tool.visible_to_model()
-    }) {
+    if !tools
+        .iter()
+        .any(|tool| super::archive_capability::available(tool.as_ref()))
+    {
         return Ok(facts);
     }
     let Some((resources, thread_id, _)) = transcript.idempotent_reminder_port() else {

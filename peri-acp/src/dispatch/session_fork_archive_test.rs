@@ -112,11 +112,27 @@ async fn own_fork_rejects_unknown_catalog_or_changed_body_without_creating_targe
 
 #[tokio::test]
 async fn child_full_fork_materializes_only_frozen_authorized_archives_into_target_scope() {
+    child_archive_fork_lifecycle("complete").await;
+}
+
+/// [回归测试] 只授权 AI 批次的一个 exchange 时，归档副本不构成可执行批次。
+#[tokio::test]
+async fn child_full_fork_mixed_batch_archive_stays_recovery_only() {
+    child_archive_fork_lifecycle("mixed").await;
+}
+
+/// [回归测试] L1 result-only 目录不能因删除摘要而复活为孤立 Tool 消息。
+#[tokio::test]
+async fn child_full_fork_result_preview_survives_cold_rewind_and_refork() {
+    child_archive_fork_lifecycle("preview").await;
+}
+
+async fn child_archive_fork_lifecycle(mode: &str) {
     let temp = tempfile::tempdir().unwrap();
     let resources = open_facade(&temp).await;
     create_source(&resources, SOURCE, &temp.path().to_string_lossy()).await;
     let source_id = SOURCE.to_string();
-    let pair = vec![
+    let mut pair = vec![
         PersistedPayload::Message(BaseMessage::ai_with_tool_calls(
             "",
             vec![ToolCallRequest::new(
@@ -127,16 +143,42 @@ async fn child_full_fork_materializes_only_frozen_authorized_archives_into_targe
         )),
         PersistedPayload::Message(BaseMessage::tool_result("read-old", "immutable old result")),
     ];
+    if mode == "mixed" {
+        let Some(BaseMessage::Ai { tool_calls, .. }) = pair[0].as_message().cloned() else {
+            unreachable!()
+        };
+        let mut calls = tool_calls;
+        calls.push(ToolCallRequest::new(
+            "preserve",
+            "StateBearing",
+            serde_json::json!({}),
+        ));
+        pair[0] = PersistedPayload::Message(BaseMessage::ai_with_tool_calls("", calls));
+        pair.push(PersistedPayload::Message(BaseMessage::tool_result(
+            "preserve",
+            "UNAUTHORIZED_PRESERVED_RESULT",
+        )));
+    }
     resources.append_history(&source_id, &pair).await.unwrap();
     let anchor = pair[1].id();
+    let archived = if mode == "preview" {
+        &pair[1..2]
+    } else {
+        &pair[..2]
+    };
     let catalog = build_catalog(
         source_id.clone(),
         "parent-group".into(),
         anchor,
-        &pair,
+        archived,
         "Closed historical read.".into(),
     )
     .unwrap();
+    let expected_fragment = if mode == "preview" {
+        "immutable old result"
+    } else {
+        "immutable old input"
+    };
     let original_ref = catalog.member_ref(0).unwrap();
     let root = ArchiveRoot {
         source_thread_id: source_id.clone(),
@@ -220,6 +262,33 @@ async fn child_full_fork_materializes_only_frozen_authorized_archives_into_targe
         })
         .await
         .unwrap();
+    // 仅继承归档时，当前会话没有 own 行；回查能力仍应按冻结授权可用。
+    let own_probe = resources
+        .read_archive_metadata(
+            &child,
+            &peri_acp_types::context_archive::ArchiveMetadataQuery {
+                limit: 1,
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap_err();
+    assert!(matches!(
+        own_probe.kind(),
+        SessionResourceErrorKind::NotFound
+    ));
+    let inherited_page = ContextArchiveReader::new(resources.clone(), child.clone())
+        .read(ArchiveReadRequest {
+            archive_ref: original_ref.clone(),
+            cursor: None,
+            budget_tokens: None,
+        })
+        .await
+        .unwrap();
+    assert!(inherited_page
+        .entries
+        .iter()
+        .any(|entry| entry.data.contains(expected_fragment)));
     let question = BaseMessage::human("Child work.");
     resources
         .append_history(&child, &[PersistedPayload::Message(question.clone())])
@@ -293,11 +362,21 @@ async fn child_full_fork_materializes_only_frozen_authorized_archives_into_targe
         .members
         .iter()
         .all(|member| fork.flags[&member.message_id].excluded));
+    assert!(copied_catalog
+        .members
+        .iter()
+        .all(|member| fork.flags[&member.message_id].is_recovery_only()));
+    assert!(fork
+        .payloads
+        .iter()
+        .filter_map(PersistedPayload::as_message)
+        .all(|message| !message.content().contains("UNAUTHORIZED_PRESERVED_RESULT")));
     assert!(fork
         .flags
         .values()
         .flat_map(|flags| flags.projection.iter().flat_map(|p| &p.archive_roots))
         .all(|root| root.source_thread_id == target));
+    let target_ref = copied_catalog.member_ref(0).unwrap();
     let reader = ContextArchiveReader::new(resources.clone(), target.clone());
     let recovered = reader
         .read(ArchiveReadRequest {
@@ -310,7 +389,7 @@ async fn child_full_fork_materializes_only_frozen_authorized_archives_into_targe
     assert!(recovered
         .entries
         .iter()
-        .any(|entry| entry.data.contains("immutable old input")));
+        .any(|entry| entry.data.contains(expected_fragment)));
     assert!(matches!(
         reader
             .read(ArchiveReadRequest {
@@ -326,5 +405,183 @@ async fn child_full_fork_materializes_only_frozen_authorized_archives_into_targe
         original_child.inherited.payloads[0].id(),
         parent_summary.id(),
         "source frozen identity remains unchanged"
+    );
+    assert_executable_view(&fork);
+    drop(reader);
+    drop(resources);
+    let resources = open_facade(&temp).await;
+    let cold = resources.load_session_snapshot(&target).await.unwrap();
+    assert_executable_view(&cold);
+    // 第二次 Full 只能替代有效历史，不能改变仅恢复副本的所有权。
+    let summary = BaseMessage::human("Fork second Full summary");
+    let active_ids: Vec<_> = cold
+        .payloads
+        .iter()
+        .filter(|payload| {
+            !cold
+                .flags
+                .get(&payload.id())
+                .is_some_and(|flags| flags.excluded)
+        })
+        .map(PersistedPayload::id)
+        .collect();
+    let roots = cold
+        .flags
+        .values()
+        .flat_map(|flags| {
+            flags
+                .projection
+                .iter()
+                .flat_map(|directive| directive.archive_roots.iter().cloned())
+        })
+        .collect();
+    let mut updates: Vec<_> = active_ids
+        .into_iter()
+        .map(|id| {
+            (
+                id,
+                MessageFlags {
+                    excluded: true,
+                    projection: Some(MessageProjectionDirective {
+                        policy_version: 3,
+                        superseded_by: Some(summary.id()),
+                        ..Default::default()
+                    }),
+                    ..Default::default()
+                },
+            )
+        })
+        .collect();
+    updates.push((
+        summary.id(),
+        MessageFlags {
+            projection: Some(MessageProjectionDirective {
+                policy_version: 3,
+                archive_roots: roots,
+                ..Default::default()
+            }),
+            ..Default::default()
+        },
+    ));
+    resources
+        .apply_compaction(
+            &target,
+            &CompactionChange {
+                flag_updates: updates,
+                appended_messages: vec![summary],
+            },
+        )
+        .await
+        .unwrap();
+    let after_full = resources.load_session_snapshot(&target).await.unwrap();
+    assert_executable_view(&after_full);
+    // 让正常 rewind 计算摘要失效，再验证即使调用方多传 clear 也不能激活归档碎片。
+    let boundary = after_full
+        .payloads
+        .iter()
+        .find(|payload| {
+            !after_full
+                .flags
+                .get(&payload.id())
+                .is_some_and(MessageFlags::is_recovery_only)
+        })
+        .unwrap()
+        .id();
+    let kept: Vec<_> = after_full
+        .payloads
+        .iter()
+        .take_while(|payload| payload.id() != boundary)
+        .map(|payload| {
+            (
+                payload.id(),
+                after_full
+                    .flags
+                    .get(&payload.id())
+                    .cloned()
+                    .unwrap_or_default(),
+                false,
+            )
+        })
+        .collect();
+    let normal_clear = peri_acp_types::store::history::rewind_clear_excluded_ids(&kept, kept.len());
+    assert!(normal_clear.is_empty(), "仅恢复副本不参加摘要恢复判定");
+    let attempted_clear: Vec<_> = kept.iter().map(|(id, _, _)| *id).collect();
+    resources
+        .rewind_history(
+            &target,
+            peri_acp_types::session_resources::RewindBoundary::RemoveFrom(boundary),
+            &attempted_clear,
+        )
+        .await
+        .unwrap();
+    let rewound = resources.load_session_snapshot(&target).await.unwrap();
+    assert!(rewound
+        .payloads
+        .iter()
+        .all(|payload| rewound.flags[&payload.id()].excluded));
+    assert_executable_view(&rewound);
+    assert!(resources
+        .load_active_snapshot(&target)
+        .await
+        .unwrap()
+        .payloads
+        .is_empty());
+    let recovered = ContextArchiveReader::new(resources.clone(), target.clone())
+        .read(ArchiveReadRequest {
+            archive_ref: target_ref,
+            cursor: None,
+            budget_tokens: None,
+        })
+        .await
+        .unwrap();
+    assert!(recovered
+        .entries
+        .iter()
+        .any(|entry| entry.data.contains(expected_fragment)));
+    let source = load_fork_source(&resources, &target).await.unwrap();
+    let workspace = resources.resolve_workspace(temp.path()).await.unwrap();
+    let (reforked, active) = fork_bound_session(
+        &resources,
+        &source,
+        &workspace,
+        chrono::Utc::now().to_rfc3339(),
+    )
+    .await
+    .unwrap();
+    assert!(active.is_empty());
+    let reforked = resources.load_session_snapshot(&reforked).await.unwrap();
+    assert_executable_view(&reforked);
+    assert!(reforked.flags.values().all(MessageFlags::is_recovery_only));
+    let catalog = reforked
+        .flags
+        .values()
+        .find_map(|flags| flags.projection.as_ref()?.archive_catalog.as_ref())
+        .unwrap();
+    let recovered = ContextArchiveReader::new(resources, catalog.source_thread_id.clone())
+        .read(ArchiveReadRequest {
+            archive_ref: catalog.member_ref(0).unwrap(),
+            cursor: None,
+            budget_tokens: None,
+        })
+        .await
+        .unwrap();
+    assert!(recovered
+        .entries
+        .iter()
+        .any(|entry| entry.data.contains(expected_fragment)));
+}
+
+fn assert_executable_view(snapshot: &peri_acp_types::session_resources::SessionSnapshot) {
+    use peri_agent::{
+        agent::compact_v2::projection::{render_persisted_llm_view, ProviderCapabilities},
+        session::MessageTranscript,
+    };
+    let mut transcript = MessageTranscript::new().with_own_payloads(snapshot.payloads.clone());
+    transcript.set_flags_batch(snapshot.flags.clone());
+    let view = render_persisted_llm_view(&transcript, &ProviderCapabilities::openai()).unwrap();
+    assert!(
+        view.iter().all(|message| message.tool_calls().is_empty()
+            && !matches!(message, BaseMessage::Tool { .. })),
+        "仅恢复副本不得进入请求"
     );
 }

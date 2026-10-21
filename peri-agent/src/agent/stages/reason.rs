@@ -47,6 +47,10 @@ pub async fn run_reason(input: ReasonInput) -> AgentResult<ReasonOutput> {
             .map_err(|error| AgentError::Other(anyhow::Error::new(error)))?
     };
 
+    // Validate restored recovery dependencies against the final permission-filtered catalog,
+    // even below the Micro trigger. Never replay canonical bodies to bypass a removed tool.
+    super::archive_capability::validate(ctx, &catalog).await?;
+
     // before_model 和动态工具发布在常规 Compact 之后。只有准备阶段确实新增
     // 压力且达到 Full 阈值时补检一次；不重复运行模型/compact hooks。
     let prepared_input_grew = super::compact::context_pressure::refresh(ctx)?;

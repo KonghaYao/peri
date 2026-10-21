@@ -1,4 +1,4 @@
-//! 当前 run 的消费证据。只有实际请求的成功响应跨过持久化 barrier 后才记账。
+//! 当前会话运行期的消费证据。只有实际请求的成功响应跨过持久化 barrier 后才记账。
 
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::io::Write;
@@ -14,6 +14,7 @@ const MAX_EXPOSED_MESSAGES: usize = 32_768;
 #[derive(Debug, Default)]
 pub struct RequestExposure {
     members: Vec<(MessageId, [u8; 32])>,
+    synchronous_terminal_calls: Vec<String>,
 }
 
 impl RequestExposure {
@@ -21,7 +22,7 @@ impl RequestExposure {
         messages: &[BaseMessage],
         transcript: &MessageTranscript,
     ) -> AgentResult<Self> {
-        let members = messages
+        let canonical: Vec<_> = messages
             .iter()
             .rev()
             .take(MAX_EXPOSED_MESSAGES)
@@ -34,9 +35,37 @@ impl RequestExposure {
                             && source.tool_calls() == message.tool_calls()
                     })
             })
+            .collect();
+        let members = canonical
+            .iter()
             .map(|message| Ok((message.id(), fingerprint(message)?)))
             .collect::<AgentResult<_>>()?;
-        Ok(Self { members })
+        // Cold history becomes eligible only after a successful request actually exposes
+        // its exact canonical result. Persisted typed synchronous terminal evidence is
+        // sufficient; task-bearing results still require their live owner settlement.
+        let synchronous_terminal_calls = canonical
+            .iter()
+            .rev()
+            .filter_map(|message| {
+                match transcript
+                    .get(message.id())
+                    .and_then(|entry| entry.as_message())
+                {
+                    Some(BaseMessage::Tool {
+                        tool_call_id,
+                        execution: Some(evidence),
+                        ..
+                    }) if evidence.task_id.is_none() && is_terminal(evidence.status) => {
+                        Some(tool_call_id.clone())
+                    }
+                    _ => None,
+                }
+            })
+            .collect();
+        Ok(Self {
+            members,
+            synchronous_terminal_calls,
+        })
     }
 }
 
@@ -51,6 +80,7 @@ pub struct ExposureLedger {
 
 impl ExposureLedger {
     pub(crate) fn confirm(&mut self, receipt: &RequestExposure) {
+        self.confirm_closed(receipt.synchronous_terminal_calls.iter().cloned());
         for &(id, digest) in receipt.members.iter().rev() {
             if self.messages.insert(id, digest).is_none() {
                 self.order.push_back(id);
@@ -97,6 +127,15 @@ impl ExposureLedger {
     pub(crate) fn closed_calls(&self) -> HashSet<String> {
         self.closed_calls.clone()
     }
+}
+
+fn is_terminal(status: crate::tools::ToolExecutionStatus) -> bool {
+    matches!(
+        status,
+        crate::tools::ToolExecutionStatus::Completed
+            | crate::tools::ToolExecutionStatus::Failed
+            | crate::tools::ToolExecutionStatus::Cancelled
+    )
 }
 
 pub(crate) fn fingerprint(message: &BaseMessage) -> AgentResult<[u8; 32]> {

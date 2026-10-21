@@ -73,6 +73,14 @@ impl StageContextBuilder {
         self
     }
 
+    pub fn with_compact_exposure(
+        mut self,
+        exposure: Arc<parking_lot::Mutex<crate::agent::compact_v2::exposure::ExposureLedger>>,
+    ) -> Self {
+        self.compact.exposure = exposure;
+        self
+    }
+
     pub fn with_session_context(mut self, ctx: Arc<RwLock<HashMap<String, String>>>) -> Self {
         self.session.session_context = ctx;
         self

@@ -297,6 +297,7 @@ async fn test_stage_completion_reminders_share_assembled_task_manager() {
                 session_resources: None,
                 thread_id: None,
                 async_result_mailbox: None,
+                compact_exposure: Arc::default(),
                 model_name: "test".into(),
                 provider_name: "test".into(),
                 context_window: 128_000,
