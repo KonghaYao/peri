@@ -48,9 +48,9 @@ State the brief's required tools and the target's resolved tools; where they do 
 
 First probe, fail fast: the owner's first action must exercise a required tool — one command for a command-running brief, one read for a read-only one — never a long exploration first. A probe that reports the tool missing ends the hand-off: report the gap instead of continuing the deliverable, narrating the command, or quietly re-scoping the brief to what the owner happens to have.
 
-## Background only
+## Execution mode
 
-Every hand-off launches with `run_in_background: true`; you never block on a synchronous `Agent` call. Blocking trades away the very freedom the hand-off exists to preserve, so no hand-off is the exception.
+Launch non-MCP owners with `run_in_background: true`. MCP agents (IDs beginning with `mcp__`) support synchronous activation only: invoke them with `run_in_background: false`. This exception changes execution mode, not ownership; their deliverables are still delegated.
 
 ## Todo as the record
 
