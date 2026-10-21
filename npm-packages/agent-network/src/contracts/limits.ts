@@ -48,6 +48,11 @@ export const LIMITS = {
   rotationMs: 15 * 60_000,
   /** 同 URI 通知合并窗口（毫秒）。 */
   notifyMergeMs: 250,
+  /**
+   * claimed 超过该时长没有 report/complete 时，网页提示“处理中未更新”。
+   * 仅前端展示阈值，不轮询、不改变 delivery 状态。
+   */
+  claimedStaleMs: 2 * 60_000,
   /** 恢复 ticket 有效期（毫秒）。 */
   recoveryTicketMs: 3 * 60_000,
   /** 幂等窗口（毫秒）。 */

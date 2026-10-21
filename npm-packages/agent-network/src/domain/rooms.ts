@@ -59,6 +59,13 @@ export interface MemberView {
   joined_seq: string;
   joined_at: string;
   last_read_seq: string;
+  /**
+   * Agent 的在线快照；`null` 表示未知。
+   *
+   * 域层不访问 Durable Object，默认 `null`；`network_room_get` 出口再按需
+   * 补充。人类成员恒为 `null`，页面不展示在线状态。
+   */
+  online: boolean | null;
 }
 
 export interface RoomDetail {
@@ -138,6 +145,7 @@ async function loadMembers(db: D1Database, roomId: string): Promise<MemberView[]
     joined_seq: String(row.joined_seq),
     joined_at: String(row.joined_at),
     last_read_seq: String(row.last_read_seq),
+    online: null,
   }));
 }
 

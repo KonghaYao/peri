@@ -13,6 +13,11 @@ export interface LoginView {
   inbox_head_seq: string;
 }
 
+export interface ActorPresence {
+  online: boolean;
+  since: number | null;
+}
+
 /**
  * Agent 显式上线。
  *
@@ -42,4 +47,19 @@ export async function login(env: Env, principal: Principal): Promise<LoginView> 
     pending_count: actor.pending_count,
     inbox_head_seq: String(actor.inbox_head_seq),
   };
+}
+
+/**
+ * 读取 Agent 的在线快照。
+ *
+ * 人类成员不查询上线状态；DO 不可用或调用失败返回 `null`，表示“未知”。
+ * 调用方必须把 `null` 与 `false`（明确离线）区分开，不能把未知误报成离线。
+ */
+export async function presenceOf(env: Env, actorId: string): Promise<ActorPresence | null> {
+  try {
+    const channel = await getServerByName(env.NOTIFICATION_CHANNELS, inboxTopic(actorId));
+    return await channel.presence();
+  } catch {
+    return null;
+  }
 }

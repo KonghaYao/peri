@@ -61,10 +61,11 @@ import {
   roomLeave,
   roomMembersUpdate,
   roomsList,
+  type RoomDetail,
 } from '../domain/rooms';
 import { sync } from '../domain/sync';
 import type { Env } from '../env';
-import { login } from '../realtime/presence';
+import { login, presenceOf } from '../realtime/presence';
 import { requireActor } from './auth';
 import {
   agentRenameResultSchema,
@@ -162,6 +163,23 @@ export function registerTools(
 ): void {
   const db = env.DB;
   const origin = env.PUBLIC_ORIGIN;
+
+  /**
+   * 为 Agent 成员补充在线快照；人类保持 null。
+   *
+   * 只在 room_get 出口查询，域层继续只读 D1；DO 失败时 presenceOf 返回
+   * null，页面显示“未知”而不是误报离线。
+   */
+  async function withPresence(detail: RoomDetail): Promise<RoomDetail> {
+    const members = await Promise.all(
+      detail.members.map(async (member) => {
+        if (member.kind !== 'agent') return member;
+        const presence = await presenceOf(env, member.actor_id);
+        return { ...member, online: presence ? presence.online : null };
+      }),
+    );
+    return { room: detail.room, members };
+  }
 
   register(
     server,
@@ -294,12 +312,12 @@ export function registerTools(
   register(
     server,
     'network_room_get',
-    '读取房间摘要与当前有效成员。',
+    '读取房间摘要与当前有效成员；Agent 成员的 online 来自上线状态，null 表示未知，人类成员恒为 null。',
     roomGetSchema,
     roomDetailSchema,
     async (input) => {
       requireActor(principal);
-      return roomGet(db, principal, input.room_id);
+      return withPresence(await roomGet(db, principal, input.room_id));
     },
   );
 
@@ -330,7 +348,7 @@ export function registerTools(
   register(
     server,
     'network_message_send',
-    '向房间发送消息，并为 invoke 中每个 Agent 成员创建一条 delivery。普通回复不要填写 invoke。',
+    '向房间发送消息，并为 invoke 中每个 Agent 成员创建一条 delivery。普通回复不要填写 invoke。claim 参数只把回复挂到当前领取，不改变投递状态；回复不等于完成。',
     messageSendSchema,
     sendResultSchema,
     async (input) => {
@@ -390,7 +408,7 @@ export function registerTools(
   register(
     server,
     'network_inbox_list',
-    '分页读取自己的待办与领取记录；默认返回 pending 和 claimed。',
+    '分页读取自己的待办与领取记录；默认返回 pending 和 claimed。claimed_delivery_id 非空时先 complete/fail 该投递，或由接收者 retry 后继续。',
     inboxListSchema,
     inboxPageSchema,
     async (input) => {
@@ -402,7 +420,7 @@ export function registerTools(
   register(
     server,
     'network_delivery_claim',
-    '原子领取一条交付；每个 Agent 同时最多一条 claimed。重试同一 request_id 返回同一 claim_id。',
+    '原子领取一条交付；claim 只是接手，不会结束投递。回复不等于完成，仍需 complete/fail。每个 Agent 同时最多一条 claimed；重试同一 request_id 返回同一 claim_id。',
     deliveryClaimSchema,
     deliverySchema,
     async (input) => {
@@ -414,7 +432,7 @@ export function registerTools(
   register(
     server,
     'network_delivery_report',
-    '上报当前 attempt 的阶段状态；这不是自动心跳。',
+    '上报当前 attempt 的阶段状态；这不是自动心跳，也不会结束投递。需要持续回复用户时用 network_message_send 发阶段性消息。',
     deliveryReportSchema,
     progressResultSchema,
     async (input) => {
@@ -426,7 +444,7 @@ export function registerTools(
   register(
     server,
     'network_delivery_complete',
-    '用有效 claim 原子完成交付，可同时发布最终答复消息。',
+    '用有效 claim 原子完成交付，可同时发布最终答复消息；只有 complete 才结束 claimed 状态。',
     deliveryCompleteSchema,
     completeResultSchema,
     async (input) => {
@@ -438,7 +456,7 @@ export function registerTools(
   register(
     server,
     'network_delivery_fail',
-    '用有效 claim 显式标记交付失败。',
+    '用有效 claim 显式标记交付失败；失败后可由请求者或接收者 retry 重新入队。',
     deliveryFailSchema,
     deliverySchema,
     async (input) => {
@@ -462,7 +480,7 @@ export function registerTools(
   register(
     server,
     'network_delivery_retry',
-    '请求者或房间 owner 显式创建下一次尝试；expected_attempt 必须匹配。旧的 claim 随即失效。',
+    '请求者、房间 owner 或接收者显式创建下一次尝试；expected_attempt 必须匹配。旧的 claim 随即失效，接收者可用它把卡住的 claimed 放回 pending。',
     deliveryRetrySchema,
     deliverySchema,
     async (input) => {

@@ -94,8 +94,15 @@ export const APP_STYLE = `
   .unread { position: absolute; top: -1px; right: -1px; width: 9px; height: 9px;
     border-radius: 50%; background: var(--wx-unread); box-sizing: content-box;
     border: 2px solid var(--wx-sidebar); }
-  .room-item:hover .unread { border-color: var(--wx-hover); }
-  .room-item.active .unread { border-color: var(--wx-active); }
+  /* Agent 在线状态点：与未读点分居右下/右上，人类会话不渲染。 */
+  .presence-dot { position: absolute; right: -1px; bottom: -1px; width: 9px; height: 9px;
+    border-radius: 50%; box-sizing: content-box; background: var(--wx-muted);
+    border: 2px solid var(--wx-sidebar); }
+  .presence-dot.online { background: var(--wx-green); }
+  .presence-dot.offline { background: var(--wx-muted); }
+  .presence-dot.unknown { background: transparent; border-color: var(--wx-muted); }
+  .room-item:hover .unread, .room-item:hover .presence-dot { border-color: var(--wx-hover); }
+  .room-item.active .unread, .room-item.active .presence-dot { border-color: var(--wx-active); }
   .list-hint { margin: 0; padding: 32px 20px; color: var(--wx-muted); font-size: 13px;
     line-height: 1.7; text-align: center; overflow-wrap: anywhere; }
   .list-hint[hidden] { display: none; }
@@ -175,6 +182,8 @@ export const APP_STYLE = `
   .msg .expand { margin-top: 4px; border: 0; background: none; padding: 0;
     color: var(--wx-link); font-size: 12px; }
   .msg-receipt { margin-top: 3px; font-size: 11px; color: var(--wx-muted); text-align: right; }
+  /* claimed 超时是提醒而非错误，用暖色但不使用失败红。 */
+  .msg-receipt.stale { color: #b26a00; }
 
   .mention-picker { position: absolute; left: 16px; bottom: 74px; z-index: 5;
     min-width: 190px; max-width: min(320px, calc(100% - 32px)); max-height: 220px;

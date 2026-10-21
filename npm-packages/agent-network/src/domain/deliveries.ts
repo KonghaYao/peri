@@ -191,6 +191,14 @@ async function requireOwnedDelivery(
   return delivery;
 }
 
+/**
+ * 写入 recipient 自己的 inbox 状态事件。
+ *
+ * `notify` 决定是否写 `inbox:{actor}` outbox：claim/report/complete/fail 是
+ * recipient 自己发起的变更，再唤醒自己会形成“claim → 唤醒 → 再读/再 claim”
+ * 的回环，因此这些动作只更新事件与 `pending_count`，不产生提示。
+ * 新增待办、取消与重试重新入队仍需要提示接收方，保持 `notify = true`。
+ */
 function inboxEventStatements(
   db: D1Database,
   actor: string,
@@ -200,6 +208,7 @@ function inboxEventStatements(
   at: number,
   pendingDelta: number,
   metadata: Record<string, unknown>,
+  notify: boolean,
 ): D1PreparedStatement[] {
   return [
     eventStatement(
@@ -214,7 +223,7 @@ function inboxEventStatements(
       },
       at,
     ),
-    outboxStatement(db, { topic: inboxTopic(actor), eventKey }, at),
+    ...(notify ? [outboxStatement(db, { topic: inboxTopic(actor), eventKey }, at)] : []),
     inboxHeadStatement(db, actor, eventKey, at, pendingDelta),
   ];
 }
@@ -326,6 +335,7 @@ export async function deliveryClaim(
           at,
           -1,
           { message_id: delivery.message_id, room_id: delivery.room_id },
+          false,
         ),
         ...roomDeliveryEventStatements(
           db,
@@ -381,6 +391,7 @@ export async function deliveryReport(
         at,
         0,
         { status: input.status, attempt: input.attempt },
+        false,
       ),
       ...roomDeliveryEventStatements(
         db,
@@ -458,6 +469,7 @@ export async function deliveryComplete(
         at,
         0,
         { message_id: delivery.message_id, attempt: input.attempt },
+        false,
       ),
       ...roomDeliveryEventStatements(
         db,
@@ -515,6 +527,7 @@ export async function deliveryFail(
         at,
         0,
         { attempt: input.attempt },
+        false,
       ),
       ...roomDeliveryEventStatements(
         db,
@@ -607,6 +620,7 @@ export async function deliveryCancel(
         at,
         0,
         { reason: input.reason },
+        true,
       ),
       ...roomDeliveryEventStatements(
         db,
@@ -673,6 +687,7 @@ export async function deliveryRetry(
         at,
         1,
         { attempt: input.expected_attempt },
+        true,
       ),
       ...roomDeliveryEventStatements(
         db,

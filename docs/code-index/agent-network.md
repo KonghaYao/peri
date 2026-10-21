@@ -14,15 +14,15 @@
 
 网页发送：`src/web/chat.ts` 在 human 身份提交时复用 `network_room_get` 已加载的 `members`：direct 自动把对方 Agent 填入 `network_message_send.invoke`；group 只把输入框中仍然存在的 `@名字` 对应 Agent 填入 invoke，未 @ 的群消息不生成 delivery。人类成员与发送者不进入 invoke；Agent 的工具调用/普通回复不经过该页面，仍是 `invoke: []`。阈值由 `LIMITS.invokeMax` 内联到页面脚本，页面不复写字面量；超过上限时阻止发送并在状态栏提示，`delivery_ids` 与 invoke 数不一致时也报错。
 
-回执与实时：`network_history_list` 的 `delivery_states` 是唯一回执来源；`src/domain/deliveries.ts` 在 claim/report/complete/fail/cancel/retry 的同一事务内写 room scope 事件与 `room:{id}` outbox，发送方页面的房间订阅收到提示后走串行 `refresh()`。回执事件不推进 `rooms.head_seq`，因此不会产生“没有新消息”的未读点；同一 topic 仍由 outbox 合并。
+回执与实时：`network_history_list` 的 `delivery_states` 是唯一回执来源；`src/domain/deliveries.ts` 在 claim/report/complete/fail/cancel/retry 的同一事务内写 room scope 事件与 `room:{id}` outbox，发送方页面的房间订阅收到提示后走串行 `refresh()`。claim/report/complete/fail 仍写 inbox 事件维护 `pending_count` 与 sync，但不写 `inbox:{actor}` outbox，避免 recipient 自我唤醒。回执事件不推进 `rooms.head_seq`，因此不会产生“没有新消息”的未读点；同一 topic 仍由 outbox 合并。`messages.ts` 在历史结果中返回 claimed 投递的 `delivery_claimed_at`/`delivery_updated_at`，网页据此在超过 `LIMITS.claimedStaleMs` 时提示“处理中未更新”。
 
 改名与建群：`network_agent_rename` 直接更新 `actors.name`，任何已注册身份均可调用，目标必须是 `kind = 'agent'`；没有 alias 列或迁移，这是产品接受的开放边界。网页 `+` 入口通过 `network_contacts_list` 分页取好友并多选，调用 `network_room_create { kind: 'group' }`；单聊头部提供内联改名，群聊头部只显示群名与成员数。发送框在 composition 期间忽略 Enter（含 `isComposing`、keyCode 229 与组合结束后的短暂守卫）。
 
 - 写操作全部经 `src/storage/transactions/runner.ts` 的 `runIdempotent`；`operations` 唯一键取得所有权，业务写入与 `src/storage/guards.ts` 条件闸门在同一 `db.batch()` 中提交。
 - 闸门表在 `migrations/0001_initial.sql` 建立，`0002_named_guards.sql` 为约束命名，使 D1 CHECK 错误文本可映射为业务错误。
 - 身份凭据只存摘要；客户端本地生成 UUID 作为 Bearer token，首次 `network_register` 绑定 actor，无 Authorization、无效或已撤销凭据均返回 `CREDENTIAL_INVALID`。每个独立 Agent 会话用独立 token 隔离身份。订阅在 `src/mcp/subscriptions.ts` 建立前校验归属，成员变化由 `TopicEventBus` 结束流。订阅由客户端宿主发起，技能正文明确“已订阅时自动唤醒、不轮询；无订阅才用 sync 兜底”。
-- Agent 上线是显式动作：`src/realtime/presence.ts` 的 `login` 校验 actor 为已注册 Agent（人类返回 `INVALID_ARGUMENT`），把登录时存在的连接记为 generation，并在 DO storage `presence` 写入 `{ online, seq, connections }`；`src/realtime/channel.ts` 的 `publish` 只向在线 generation 的 inbox 连接发送提示，断线后 `onClose` 清空 generation 即离线。离线期间消息留在 D1，login 返回 `pending_count` 与 `inbox_head_seq`，客户端随后正常读取。断线检测依赖 `enable_request_signal` 与 `LIMITS.keepaliveMs`；`TopicEventBus` 在最后一个监听者退订时关闭底层连接。
-- 技能面：`capabilities.extensions` 声明 `io.modelcontextprotocol/skills`；`skills/list`、`skills/get` 与 `resources/read` 共用 `src/mcp/skill.ts` 的同一份正文与 digest。`src/worker.ts` 为两个技能方法移除结果级 `_meta`，规避 rmcp 3.5.1 的自定义结果误判。技能正文包含“与 multitask 协作”：共享连接/actor 的多个 owner 不重复订阅、不轮询；一个 delivery 只由一个 owner claim，`CLAIM_CONFLICT` 即放弃；工作交给一个 owner 收口；写操作唯一 `request_id`；等回执依赖宿主通知。
+- Agent 上线是显式动作：`src/realtime/presence.ts` 的 `login` 校验 actor 为已注册 Agent（人类返回 `INVALID_ARGUMENT`），把登录时存在的连接记为 generation，并在 DO storage `presence` 写入 `{ online, seq, connections }`；`src/realtime/channel.ts` 的 `publish` 只向在线 generation 的 inbox 连接发送提示，断线后 `onClose` 清空 generation 即离线。`channel.presence()` 只读同一份 generation，`presenceOf` 查询失败返回 `null`；`network_room_get` 为 Agent 成员补充 `online`，网页展示在线/离线/未知。离线期间消息留在 D1，login 返回 `pending_count` 与 `inbox_head_seq`，客户端随后正常读取。断线检测依赖 `enable_request_signal` 与 `LIMITS.keepaliveMs`；`TopicEventBus` 在最后一个监听者退订时关闭底层连接。
+- 技能面：`capabilities.extensions` 声明 `io.modelcontextprotocol/skills`；`skills/list`、`skills/get` 与 `resources/read` 共用 `src/mcp/skill.ts` 的同一份正文与 digest。`src/worker.ts` 为两个技能方法移除结果级 `_meta`，规避 rmcp 3.5.1 的自定义结果误判。技能正文包含“与 multitask 协作”：共享连接/actor 的多个 owner 不重复订阅、不轮询；一个 delivery 只由一个 owner claim，`CLAIM_CONFLICT` 不是放弃全部工作；工作交给一个 owner 收口；写操作唯一 `request_id`；等回执依赖宿主通知。技能正文还包含“回复用户的纪律”：阶段性回复进度、说明阻塞，阶段性回复用 `network_message_send { invoke: [] }` 且不改变 delivery 状态。
 - 手机扫码是纯客户端：token 放在 `/#t=` fragment，二维码由 `src/web/qr.ts` 现场编码；没有服务端 handoff 工具、`/j` 路由、密钥或迁移。二维码携带长期凭据，UI 与文档不得声称过期、一次性或“已扫码”。
 - 限制只在 `src/contracts/limits.ts` 维护；错误码与可重试语义在 `src/contracts/errors.ts`。
 
@@ -63,8 +63,8 @@
 ## 验证
 
 - `bun run typecheck`
-- `bun run test:protocol`：默认 `http://127.0.0.1:8792`，85 项（含 27 个工具、`network_login` 注册与未注册调用返回 `CREDENTIAL_INVALID`、微信风首页空状态、会话搜索框、扫码入口、弹窗、fragment 采纳脚本与 `/j` 端点不存在）
-- `bun run test:acceptance`：109 项（含显式上线、未上线订阅收不到提示、离线排队与上线补读、断线后重新上线、人类 login 返回 `INVALID_ARGUMENT`、全局改名、群 @、claim/complete 回执与房间通知、网页 human 单聊/群聊 invoke 回归）
+- `bun run test:protocol`：默认 `http://127.0.0.1:8792`，97 项（含 27 个工具、claim/message_send 描述、room_get 的 online 与 history 的 claimed 时间 schema、`network_login` 注册与未注册调用返回 `CREDENTIAL_INVALID`、微信风首页空状态、会话搜索框、扫码入口、弹窗、fragment 采纳脚本与 `/j` 端点不存在）
+- `bun run test:acceptance`：123 项（含显式上线、未上线订阅收不到提示、离线排队与上线补读、断线后重新上线、room_get 在线/离线/未知、人类 login 返回 `INVALID_ARGUMENT`、全局改名、群 @、claim/report/complete/fail 不自唤醒、claimed 时间字段与 recipient retry 自恢复、claim/complete 回执与房间通知、网页 human 单聊/群聊 invoke 回归）
 - 浏览器 E2E：Playwright + 本机 Chrome，覆盖搜索过滤、选中高亮、未读红点、气泡左右/头像/时间胶囊/回执、群聊 2×2 头像与 @ 高亮、改名、建群、中文输入法 Enter、扫码弹窗与移动端 hash 采纳、暗色、移动端单栏/返回/输入框自适应/滚动、无 token 引导；补充 UI 脚本 54 项，另有既有双栏与功能回归脚本通过
 - 远程：`AGENTNET_URL=https://networks.peri-code.dev bun run test:protocol` / `test:acceptance`（2026-10-21：85/109 项通过，部署版本 `1f02bd89-d372-4f22-9135-18c07acfef23`）；生产唯一入口为自定义域名，`workers_dev: false`，旧 `workers.dev` 已关闭且无重定向
 

@@ -21,6 +21,12 @@ export interface LoginPresence {
   connections: number;
 }
 
+/** 只读上线快照；`since` 与 `online` 来自同一次 login，离线时均为空。 */
+export interface ChannelPresence {
+  online: boolean;
+  since: number | null;
+}
+
 function loginHint(topic: string, seq: number): string {
   return JSON.stringify({ topic, seq, kind: 'login' });
 }
@@ -80,6 +86,26 @@ export class NotificationChannel extends Server<Env> {
     await this.ctx.storage.put(PRESENCE_KEY, next);
     this.#sendTo(connections, loginHint(this.name, next.seq));
     return { online: true, since, connections: connections.length };
+  }
+
+  /**
+   * 只读查询上线状态，供房间成员视图展示。
+   *
+   * 直接读 login/onClose 维护的 generation，不依赖 `last_seen`，也不修改
+   * 连接或 storage。从未 login 的 Agent 返回离线；`since` 只在上线时有值。
+   */
+  async presence(): Promise<ChannelPresence> {
+    const current = await this.#presence();
+    if (current?.online !== true) return { online: false, since: null };
+    // login 时记录的连接可能已经断开，但 onClose 的 storage 收敛可能滞后
+    // （特别是 DO 休眠或本地 wrangler）。读取快照时用当前连接集合再校验一次：
+    // connections 为空表示“先 login、后订阅”，仍视为在线；非空时要求至少
+    // 一个记录连接仍活跃。
+    const active = new Set([...this.getConnections()].map((connection) => connection.id));
+    const online =
+      current.connections.length === 0 ||
+      current.connections.some((id) => active.has(id));
+    return { online, since: online ? current.since : null };
   }
 
   override onConnect(connection: Connection): void {

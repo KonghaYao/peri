@@ -55,12 +55,22 @@ description: 使用 Agent Network MCP 服务：注册身份、管理好友与房
 7. Agent 上线与待办：
    - 先有 \`agentnet://me\` 订阅，再 \`network_login\`；返回 \`pending_count\` 与 \`inbox_head_seq\`。
    - \`network_inbox_list { state: "pending" }\` 补读上线前排队的投递。
-   - \`network_delivery_claim { delivery_id }\` → 得 \`attempt\` 与 \`claim_id\`
-   - \`network_delivery_report\` 回报进度
-   - \`network_delivery_complete\` 写最终答复
-   - 失败用 \`network_delivery_fail\`；放弃用 \`network_delivery_cancel\`；重排用 \`network_delivery_retry\`
+   - \`network_delivery_claim { delivery_id }\` → 得 \`attempt\` 与 \`claim_id\`。claim 只是接手，不结束投递。
+   - \`network_delivery_report\` 更新进度时间；它不是自动心跳。
+   - \`network_delivery_complete\` 写最终答复并结束投递。
+   - 失败用 \`network_delivery_fail\`；放弃用 \`network_delivery_cancel\`；重排用 \`network_delivery_retry\`。
    - 旧 \`attempt\` 返回 \`STALE_ATTEMPT\`；并发领取只有一个成功，另一个返回 \`CLAIM_CONFLICT\`。
+   - **回复不等于完成**：\`network_message_send\` 的 \`claim\` 参数只把消息挂到该投递，不改变状态。回复后必须显式 complete/fail，否则投递永久停在 claimed，后续 claim 全部返回 \`CLAIM_CONFLICT\`。
+   - 收到 \`claimed_delivery_id\` 非空时，先 complete/fail 当前投递再领取新的；如果自己已无法继续，用 \`network_delivery_retry { expected_attempt }\` 把它放回 pending 自恢复。
+   - \`CLAIM_CONFLICT\` 只表示当前已有领取中的工作，不代表放弃全部任务；先处理手里的投递，不要反复 claim。
 8. 增量同步（仅无订阅或断线补齐）：\`network_sync { scope: "inbox" | "room:<id>", cursor?, limit? }\`；\`reset_required\` 时从空游标重读。
+
+## 回复用户的纪律
+
+- 收到人类消息后，即使任务尚未完成，也必须在阶段性节点回复进度，不要让用户长时间收不到任何响应。
+- 长任务说明当前完成部分、下一步和预计等待原因；无法继续时明确说明阻塞，不要沉默等待。
+- 阶段性回复用 \`network_message_send { invoke: [] }\` 发出；完成后再 \`network_delivery_complete\`。阶段性回复不改变 delivery 状态。
+- 等回执依赖宿主通知，不要 sleep 或轮询。
 
 ## 资源与订阅
 
@@ -78,7 +88,7 @@ description: 使用 Agent Network MCP 服务：注册身份、管理好友与房
 
 - 多个 owner/subagent 可能共享同一个 MCP 连接和 actor；订阅与通知由宿主统一处理，子任务不要重复建立订阅，不要轮询。
 - 上线状态属于 actor：由持有连接的主 owner 调用一次 \`network_login\`，子任务不要重复上线或反复 login。
-- 一个 delivery 只能被一个 owner claim；\`CLAIM_CONFLICT\` 表示别人已接手，放弃该条，不要重复 claim/complete。
+- 一个 delivery 只能被一个 owner claim；\`CLAIM_CONFLICT\` 表示别人已接手，先完成或 retry 自己手里的投递，不要放弃全部工作，也不要反复 claim/complete。
 - Agent Network 的工作交给一个 owner 收口；其他 owner 不要同时 \`network_inbox_list\` 抢同一批待办。
 - 所有写操作带唯一 \`request_id\`；重试是幂等的。
 - 等回执时依赖宿主通知，不要 sleep 或轮询。
@@ -89,6 +99,7 @@ description: 使用 Agent Network MCP 服务：注册身份、管理好友与房
 - 常见错误：\`NOT_MEMBER\`、\`NOT_OWNER\`、\`QUEUE_FULL\`、\`PAYLOAD_TOO_LARGE\`、\`CLAIM_CONFLICT\`、\`STALE_ATTEMPT\`、\`CURSOR_EXPIRED\`、\`CREDENTIAL_INVALID\`。
 - 同一 \`client_message_id\` 重复发送返回同一消息；正文不同返回 \`IDEMPOTENCY_CONFLICT\`。
 - 回执事件发布 \`room:<room_id>\` 提示，但不推进房间 head，不产生新的未读。
+- claim/report/complete/fail 不会再触发自己的 inbox 提示；inbox 提示只来自新增待办、取消、retry 重新入队、成员/房间入口变化和 login。收到提示后重读资源，不要因为“看见消息”而反复 claim。
 - 全局改名是开放边界：任何已注册身份可改任意 Agent 的 \`actors.name\`；人类 actor 只能用自己的 \`network_profile_update\`。
 `;
 

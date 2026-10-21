@@ -5,8 +5,6 @@
  * 通过 AGENTNET_URL 可对本地 wrangler dev 或部署后的 Cloudflare 服务运行。
  */
 
-import type { McpSubscription } from '@modelcontextprotocol/client';
-
 import {
   baseUrl,
   callTool,
@@ -24,150 +22,20 @@ import {
   sleep,
   subscriptionIdOf,
   waitUntil,
-  type McpConnection,
 } from './lib/harness';
-
-interface Identity {
-  actor_id: string;
-  kind: string;
-  name: string;
-  pending_count: number;
-  resources: string[];
-}
-
-interface Delivery {
-  delivery_id: string;
-  recipient_id: string;
-  message_id: string;
-  room_id: string;
-  state: 'pending' | 'claimed' | 'completed' | 'failed' | 'cancelled';
-  attempt: number;
-  claim_id: string | null;
-  result_message_id: string | null;
-}
-
-interface InboxPage {
-  items: Delivery[];
-  next_cursor: string | null;
-  has_more: boolean;
-  pending_count: number;
-  claimed_delivery_id: string | null;
-}
-
-interface MessageView {
-  message_id: string;
-  sender_id: string;
-  created_seq: string;
-  preview: string;
-  body_bytes: number;
-  reply_to: string | null;
-  root_id: string | null;
-  hop: number;
-  delivery_states: Record<string, number>;
-}
-
-interface HistoryPage {
-  items: MessageView[];
-  next_cursor: string | null;
-  has_more: boolean;
-  snapshot: string;
-  head_seq: string;
-}
-
-interface SendResult {
-  message: MessageView;
-  delivery_ids: string[];
-}
-
-interface RoomDetail {
-  room: {
-    room_id: string;
-    kind: string;
-    owner_id: string | null;
-    head_seq: string;
-    member_count: number;
-    my_role: string;
-    last_message: { message_id: string; preview: string } | null;
-  };
-  members: { actor_id: string; role: string; kind: string }[];
-}
-
-interface ReadChunk {
-  chunk: string;
-  next_cursor: string | null;
-  eof: boolean;
-  body_bytes: number;
-}
-
-interface LoginResult {
-  actor_id: string;
-  online: true;
-  logged_in_at: string;
-  pending_count: number;
-  inbox_head_seq: string;
-}
-
-async function registerIdentity(
-  connection: McpConnection,
-  input: { kind: 'human' | 'agent'; name: string; sessionId?: string },
-): Promise<Identity> {
-  return callTool<Identity>(connection.client, 'network_register', {
-    request_id: newRequestId('reg'),
-    kind: input.kind,
-    name: input.name,
-    ...(input.sessionId ? { agent_session_id: input.sessionId } : {}),
-  });
-}
-
-async function sendMessage(
-  connection: McpConnection,
-  roomId: string,
-  body: string,
-  options: { invoke?: string[]; clientMessageId?: string; requestId?: string } = {},
-): Promise<SendResult> {
-  return callTool<SendResult>(connection.client, 'network_message_send', {
-    request_id: options.requestId ?? newRequestId('send'),
-    client_message_id: options.clientMessageId ?? `cm_${crypto.randomUUID()}`,
-    room_id: roomId,
-    body,
-    ...(options.invoke ? { invoke: options.invoke } : {}),
-  });
-}
-
-async function inbox(
-  connection: McpConnection,
-  state: 'pending' | 'claimed' | 'completed' | 'cancelled' | 'all' = 'all',
-): Promise<InboxPage> {
-  return callTool<InboxPage>(connection.client, 'network_inbox_list', { state });
-}
-
-async function readWholeMessage(
-  connection: McpConnection,
-  messageId: string,
-): Promise<string> {
-  let cursor: string | null = null;
-  let text = '';
-  for (let round = 0; round < 20; round += 1) {
-    const chunk: ReadChunk = await callTool<ReadChunk>(connection.client, 'network_message_read', {
-      message_id: messageId,
-      ...(cursor ? { chunk_cursor: cursor } : {}),
-    });
-    text += chunk.chunk;
-    if (!chunk.next_cursor) {
-      check(`分块读取在第 ${round + 1} 块结束`, chunk.eof, chunk);
-      return text;
-    }
-    cursor = chunk.next_cursor;
-  }
-  throw new Error('消息分块读取超过 20 轮');
-}
-
-async function waitClosed(subscription: McpSubscription, timeoutMs = 15_000): Promise<string> {
-  return Promise.race([
-    subscription.closed,
-    sleep(timeoutMs).then(() => 'timeout' as const),
-  ]);
-}
+import {
+  inbox,
+  readWholeMessage,
+  registerIdentity,
+  sendMessage,
+  waitClosed,
+  type Delivery,
+  type HistoryPage,
+  type Identity,
+  type LoginResult,
+  type MessageView,
+  type RoomDetail,
+} from './lib/acceptance-helpers';
 
 async function main(): Promise<void> {
   console.log(`端到端验收: ${baseUrl()}`);
@@ -296,6 +164,17 @@ async function main(): Promise<void> {
     checkEqual('单聊没有 owner', directA.room.owner_id, null);
     checkEqual('单聊参与者为两人', directA.members.length, 2);
 
+    const presenceBeforeLogin = await callTool<RoomDetail>(agentA.client, 'network_room_get', {
+      room_id: roomId,
+    });
+    check(
+      '未 login 的 Agent 成员显示离线',
+      presenceBeforeLogin.members
+        .filter((member) => member.kind === 'agent')
+        .every((member) => member.online === false),
+      presenceBeforeLogin.members,
+    );
+
     await expectToolError(
       '非成员读取房间返回 NOT_MEMBER',
       callTool(humanC.client, 'network_room_get', { room_id: roomId }),
@@ -401,6 +280,14 @@ async function main(): Promise<void> {
     const login = await callTool<LoginResult>(agentB.client, 'network_login');
     checkEqual('Agent 显式上线成功', login.online, true);
     checkEqual('上线返回自己的 actor_id', login.actor_id, b.actor_id);
+    const presenceAfterLogin = await callTool<RoomDetail>(agentA.client, 'network_room_get', {
+      room_id: roomId,
+    });
+    checkEqual(
+      'login 后其他成员能看到 Agent 在线',
+      presenceAfterLogin.members.find((member) => member.actor_id === b.actor_id)?.online,
+      true,
+    );
     await collector.waitFor(
       (event) => event.params.uri === 'agentnet://me',
       '等待上线提示',
@@ -451,6 +338,8 @@ async function main(): Promise<void> {
     check('pending_count 与列表一致', pendingInbox.pending_count >= 1, pendingInbox.pending_count);
 
     const claimRequest = newRequestId('claim');
+    // claim/report/complete/fail 只通知发送方房间，不再唤醒 recipient 自己。
+    collector.reset();
     const claimed = await callTool<Delivery>(agentB.client, 'network_delivery_claim', {
       request_id: claimRequest,
       delivery_id: deliveryId,
@@ -470,12 +359,29 @@ async function main(): Promise<void> {
     });
     const claimedRow = claimedHistory.items.find((item) => item.message_id === invoke.message.message_id);
     checkEqual('claim 后发送方 history 显示 claimed 回执', claimedRow?.delivery_states.claimed, 1);
+    check(
+      'history 返回 claimed 领取时间供超时提示',
+      typeof claimedRow?.delivery_claimed_at === 'string' && Number(claimedRow.delivery_claimed_at) > 0,
+      claimedRow,
+    );
+    check(
+      'history 返回 claimed 更新时间供超时提示',
+      typeof claimedRow?.delivery_updated_at === 'string' && Number(claimedRow.delivery_updated_at) > 0,
+      claimedRow,
+    );
     await senderCollector.waitFor(
       (event) => event.params.uri === senderRoomUri,
       '等待 claim 回执房间通知',
     );
     check('claim 回执通过房间订阅推送', senderCollector.events.length > 0);
+    await sleep(1000);
+    check(
+      'claim 不再向 recipient 自己发 inbox 提示',
+      collector.events.every((event) => event.params.uri !== 'agentnet://me'),
+      collector.events,
+    );
 
+    collector.reset();
     const report = await callTool<{ delivery_id: string; attempt: number; progress_at: string }>(
       agentB.client,
       'network_delivery_report',
@@ -489,6 +395,23 @@ async function main(): Promise<void> {
     );
     checkEqual('report 记录当前 attempt', report.attempt, 1);
     await sleep(500);
+    check(
+      'report 不再向 recipient 自己发 inbox 提示',
+      collector.events.every((event) => event.params.uri !== 'agentnet://me'),
+      collector.events,
+    );
+    const reportedHistory = await callTool<HistoryPage>(agentA.client, 'network_history_list', {
+      room_id: roomId,
+      limit: 20,
+    });
+    const reportedRow = reportedHistory.items.find(
+      (item) => item.message_id === invoke.message.message_id,
+    );
+    check(
+      'report 刷新 claimed 更新时间',
+      Number(reportedRow?.delivery_updated_at) >= Number(reportedRow?.delivery_claimed_at),
+      reportedRow,
+    );
     const notificationsBeforeComplete = senderCollector.events.length;
 
     const inboxResource = await readResourceJson<{ pending: unknown[]; claimed: { delivery_id: string } | null }>(
@@ -497,6 +420,7 @@ async function main(): Promise<void> {
     );
     checkEqual('inbox 资源显示当前 claimed', inboxResource.claimed?.delivery_id, deliveryId);
 
+    collector.reset();
     const completed = await callTool<{ delivery: Delivery; message: MessageView | null }>(
       agentB.client,
       'network_delivery_complete',
@@ -522,6 +446,18 @@ async function main(): Promise<void> {
     await waitUntil(
       '等待 complete 回执房间通知',
       () => senderCollector.events.length > notificationsBeforeComplete,
+    );
+    await sleep(800);
+    check(
+      'complete 不再向 recipient 自己发 inbox 提示',
+      collector.events.every((event) => event.params.uri !== 'agentnet://me'),
+      collector.events,
+    );
+    const completedInboxState = await inbox(agentB, 'all');
+    checkEqual(
+      'complete 后没有 claimed 粘滞',
+      completedInboxState.claimed_delivery_id,
+      null,
     );
     await senderRoomSubscription.close();
 
@@ -556,6 +492,46 @@ async function main(): Promise<void> {
       completedInbox.items.some((item) => item.delivery_id === deliveryId),
       completedInbox.items,
     );
+
+    // 接收者被卡在 claimed 时，fail 不自我唤醒，retry 可把投递放回 pending 自恢复。
+    const stuckSend = await sendMessage(agentA, roomId, 'recipient-recovery', {
+      invoke: [b.actor_id],
+    });
+    const stuckDeliveryId = stuckSend.delivery_ids[0] as string;
+    const stuckClaim = await callTool<Delivery>(agentB.client, 'network_delivery_claim', {
+      request_id: newRequestId('claim'),
+      delivery_id: stuckDeliveryId,
+    });
+    collector.reset();
+    const stuckFailed = await callTool<Delivery>(agentB.client, 'network_delivery_fail', {
+      request_id: newRequestId('fail'),
+      delivery_id: stuckDeliveryId,
+      attempt: stuckClaim.attempt,
+      claim_id: stuckClaim.claim_id,
+      error: '阶段性阻塞，先放回队列',
+    });
+    checkEqual('fail 后状态为 failed', stuckFailed.state, 'failed');
+    await sleep(800);
+    check(
+      'fail 不再向 recipient 自己发 inbox 提示',
+      collector.events.every((event) => event.params.uri !== 'agentnet://me'),
+      collector.events,
+    );
+    const recipientRetry = await callTool<Delivery>(agentB.client, 'network_delivery_retry', {
+      request_id: newRequestId('retry'),
+      delivery_id: stuckDeliveryId,
+      expected_attempt: stuckClaim.attempt,
+    });
+    checkEqual('recipient 可 retry 自己的 claimed 投递自恢复', recipientRetry.state, 'pending');
+    await collector.waitFor(
+      (event) => event.params.uri === 'agentnet://me',
+      '等待 retry 重新入队提示',
+    );
+    await callTool(agentA.client, 'network_delivery_cancel', {
+      request_id: newRequestId('cancel'),
+      delivery_id: stuckDeliveryId,
+      reason: '自恢复验收结束',
+    });
 
     const concurrentA = await sendMessage(agentA, roomId, 'task-race-1', { invoke: [b.actor_id] });
     const concurrentB = await sendMessage(agentA, roomId, 'task-race-2', { invoke: [b.actor_id] });
@@ -733,6 +709,13 @@ async function main(): Promise<void> {
     await subscription.close();
     checkEqual('主动关闭订阅标记为 local', await waitClosed(subscription, 5000), 'local');
     await sleep(1000);
+    // 本地 wrangler dev 的 WebSocket 关闭事件比生产环境慢，给 DO 收敛留出余量。
+    await waitUntil('关闭最后一个连接后成员显示离线', async () => {
+      const detail = await callTool<RoomDetail>(agentA.client, 'network_room_get', {
+        room_id: roomId,
+      });
+      return detail.members.find((member) => member.actor_id === b.actor_id)?.online === false;
+    }, 30_000);
     const offlineCollector = notificationCollector(agentB.client);
     const resubscribed = await openSubscription(agentB.client, ['agentnet://me']);
     checkEqual(
@@ -797,6 +780,19 @@ async function main(): Promise<void> {
       members: [b.actor_id],
     });
     const webRoomId = webRoom.room.room_id;
+    const webPresence = await callTool<RoomDetail>(humanC.client, 'network_room_get', {
+      room_id: webRoomId,
+    });
+    checkEqual(
+      'room_get 为 Agent 成员返回在线',
+      webPresence.members.find((member) => member.actor_id === b.actor_id)?.online,
+      true,
+    );
+    checkEqual(
+      '人类成员不返回在线状态',
+      webPresence.members.find((member) => member.actor_id === c.actor_id)?.online,
+      null,
+    );
     check(
       '网页人类单聊成员包含 human 与 agent 类型',
       webRoom.members.some((member) => member.actor_id === c.actor_id && member.kind === 'human') &&

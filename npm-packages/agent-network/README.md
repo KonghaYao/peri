@@ -6,8 +6,8 @@
 
 ## 当前状态
 
-- 协议验收：`scripts/verify-protocol.ts`，85 项，覆盖 `server/discover`、仅 0728、`POST /mcp`、405、27 个工具、资源、订阅 ack、越权、错误帧、客户端 UUID 凭据，以及微信风首页空状态、会话搜索框、新建群聊入口、分享页、双栏单聊页、改名/@ 入口、手机扫码入口与 fragment 采纳脚本、404 与浏览器建联流程。
-- 端到端验收：`scripts/acceptance.ts`，109 项，覆盖注册、好友、全局改名、单聊收敛、消息分页/分块、订阅通知、Agent 显式上线与未上线不推送、待办 claim/report/complete/fail/cancel/retry、claim/complete 回执的房间通知、幂等、sync、成员移除后的订阅关闭，以及网页人类单聊/群聊发送与群 @ 的 delivery 回归。
+- 协议验收：`scripts/verify-protocol.ts`，97 项，覆盖 `server/discover`、仅 0728、`POST /mcp`、405、27 个工具、claim/message_send 描述、room_get/history 输出 schema、资源、订阅 ack、越权、错误帧、客户端 UUID 凭据，以及微信风首页空状态、会话搜索框、新建群聊入口、分享页、双栏单聊页、改名/@ 入口、在线状态、claimed 超时提示、手机扫码入口与 fragment 采纳脚本、404 与浏览器建联流程。
+- 端到端验收：`scripts/acceptance.ts`，123 项，覆盖注册、好友、全局改名、单聊收敛、消息分页/分块、订阅通知、Agent 显式上线与未上线不推送、room_get 在线/离线/未知、待办 claim/report/complete/fail/cancel/retry、claim/report/complete/fail 不自唤醒、claimed 时间字段与 recipient retry 自恢复、claim/complete 回执的房间通知、幂等、sync、成员移除后的订阅关闭，以及网页人类单聊/群聊发送与群 @ 的 delivery 回归。
 - 微信风 UI 重构（2026-10-21）：会话搜索、64px 会话项、群聊 2×2 头像、未读红点、居中时间胶囊、左右气泡与 36px 头像、群聊发送者、@ 高亮、1–4 行输入框、暗色、移动端单栏与 safe-area、分享页卡片。桌面 1280×900 与移动 390×844 的补充 UI E2E 54 项通过，另有既有双栏/功能 E2E 回归通过；本地与远程结果一致。
 - 手机扫码（2026-10-21）：桌面左下角生成纯客户端二维码，token 位于 `/#t=` fragment；手机打开后写入 `localStorage['agent-network-token']`、清除 hash，并以同一 actor 进入首页会话列表。没有服务端 handoff 工具、`/j` 兑换端点、签名密钥或迁移。
 - 远程验收（2026-10-21）：生产域名为 `https://networks.peri-code.dev`，协议 85 项与端到端 109 项通过；部署版本 `1f02bd89-d372-4f22-9135-18c07acfef23`。浏览器 E2E 确认改名、建群、群 @、回执、手机扫码、移动端入口、中文输入法 Enter 与微信风视觉在线上可用。生产环境另验证了显式上线、未上线不推送、断线后离线、重连需重新上线与离线补投。旧 `workers.dev` 地址已关闭，不做重定向。
@@ -71,9 +71,9 @@ PartyServer NotificationChannel（room:{id} / inbox:{actor}）
 
 - 订阅由 MCP 客户端宿主发起（不是 Agent 的工具调用），在连接配置的 `subscriptions.resources` 中声明；每条订阅最多 4 个 URI。
 - 订阅建立后，新增待办或资源变化以 `notifications/resources/updated` 自动唤醒会话；Agent 不需要轮询。通知只带 URI，正文由客户端重新读取。
-- `agentnet://me` 与自己的 inbox 都映射到 `inbox:{actor}`，只在新增 delivery 时提示；普通房间消息只发布 `room:{room_id}`，需要显式订阅房间 head。网页人类发送时，direct 自动把对方 Agent 填入 `invoke`，group 只把被 @ 的 Agent 填入 `invoke`；因此单聊和群 @ 会生成 delivery 并触发 inbox 提示，未 @ 的群消息不生成 delivery。Agent 的普通回复仍不填 `invoke`。
-- Agent 必须先调用 `network_login` 才会收到 inbox 提示；只建立订阅不算上线。上线状态绑定 login 时的连接代次：这些连接全部断开即离线，重连后需要再次 login。断线期间的 delivery 保留在 D1，重新上线会触发一条 inbox 提示，由 `network_inbox_list` 补读。人类 actor 不需要上线，订阅提示始终广播。
-- delivery 的 claim/report/complete/fail/cancel/retry 也会发布 `room:{room_id}` 提示，让发送方页面刷新状态回执。回执事件不推进房间 head，避免产生没有新消息的未读点；同一 topic 的提示仍由 outbox 合并。
+- `agentnet://me` 与自己的 inbox 都映射到 `inbox:{actor}`，只在新增待办、取消、retry 重新入队和 login 时提示；claim/report/complete/fail 不写自己的 inbox outbox，避免被自己的状态变更反复唤醒。普通房间消息只发布 `room:{room_id}`，需要显式订阅房间 head。网页人类发送时，direct 自动把对方 Agent 填入 `invoke`，group 只把被 @ 的 Agent 填入 `invoke`；因此单聊和群 @ 会生成 delivery 并触发 inbox 提示，未 @ 的群消息不生成 delivery。Agent 的普通回复仍不填 `invoke`。
+- Agent 必须先调用 `network_login` 才会收到 inbox 提示；只建立订阅不算上线。上线状态绑定 login 时的连接代次：这些连接全部断开即离线，重连后需要再次 login。断线期间的 delivery 保留在 D1，重新上线会触发一条 inbox 提示，由 `network_inbox_list` 补读。人类 actor 不需要上线，订阅提示始终广播。`network_room_get` 为 Agent 成员返回 `online`（只读 DO 的 login generation，`null` 表示未知，人类成员恒为 `null`）；网页 direct 头部显示在线/离线/未知，会话列表头像右下角显示状态点。
+- delivery 的 claim/report/complete/fail/cancel/retry 也会发布 `room:{room_id}` 提示，让发送方页面刷新状态回执；claim/report/complete/fail 只通知发送方/房间，不再唤醒 recipient 自己。回执事件不推进房间 head，避免产生没有新消息的未读点；同一 topic 的提示仍由 outbox 合并。
 - 客户端未建立订阅时，才用 `network_sync` / `network_inbox_list` 手动同步，并在两次同步之间退避。
 - 未知 URI、订阅他人 inbox、订阅非成员房间整体拒绝。
 - 成员变化产生 `membership` 提示，Gateway 以 listen 结果优雅结束订阅流（客户端看到 `closed: "graceful"`）；客户端重建订阅后重新鉴权，被移除成员无法继续读取房间。
@@ -109,8 +109,8 @@ Peri 的 `.mcp.json` 示例：
 - 手机扫码：点击后由 `src/web/qr.ts` 在 canvas 现场编码 `location.origin + '/#t=' + encodeURIComponent(token)`，不调用任何二维码 API。弹窗是微信式白色圆角对话框，二维码保持白底；明确提示“二维码包含当前身份的完整登录凭据，请勿截图或分享”，不显示“已扫码”状态。手机打开该 URL 后，`src/web/handoff.ts` 的早执行脚本读取 `#t=`、写入 `localStorage['agent-network-token']`、用 `history.replaceState` 清除 hash，然后进入 `/`；手机因此得到与桌面完全相同的 actor、权限和房间列表。二维码没有过期或一次性语义，在凭据被撤销前一直可用；token 在 fragment 中，不随文档请求发送。
 - `GET /a/<agent_session_id>`：Agent 分享页。未注册的 session 返回 404；有效 session 使用微信风简洁卡片（首字头像、名称、绿色主按钮），浏览器首次点击时在 localStorage 生成 UUID token、注册 human actor，然后调用 `network_contact_add` 与 `network_room_create` 建立单聊，成功后跳转 `/c/<room_id>`。
 - `GET /c/<room_id>`：与首页同一套双栏布局；左侧列表高亮当前会话，右侧为微信式气泡聊天区：页面背景 `#ededed`、自己右侧 `#95ec69` 绿气泡（深色文字）、对方左侧白色气泡（暗色 `#2c2c2c`）、气泡最大宽度约 60%、消息头像 36px、连续消息间隔超过 5 分钟显示居中时间胶囊。群聊对方消息在气泡上方显示发送者名字；`@名字` 以链接色高亮。历史分页、加载更早、消息分块展开、发送、SSE 订阅 `agentnet://rooms/<room_id>/head`、mark_read 与串行合并刷新不变。移动端只显示聊天区，头部返回箭头回到 `/`，输入区计入 `safe-area-inset-bottom`。页面只渲染空壳，不校验成员资格；加载后用浏览器 token 调用 `network_room_get` 取得房间与成员。成员资格与正文读取始终由工具层校验。
-- 单聊头部 Agent 名称旁有“改名”按钮：内联编辑后调用 `network_agent_rename`，成功后立即更新标题、当前会话列表项与消息署名；失败在状态栏显示可读错误。群聊头部显示群名与“群聊 · N 人”，不在这里改 Agent 名。改名是全局的，其他人在刷新后看到新名字，不是本地备注。
-- 自己发送的气泡下显示状态回执，数据来自 `network_history_list.delivery_states`：无 delivery 为“已发送”，pending 为“已送达”，claimed 为“Agent 已接收”，completed 为“已处理”，failed/cancelled 为“发送失败/已取消”；多 Agent 时按状态计数聚合（例如 `2/3 已送达 · 1 已处理`）。这是状态回执，不新增已读字段。
+- 单聊头部 Agent 名称旁显示“在线/离线/未知”，会话列表头像右下角显示同一状态；状态来自 `network_room_get` 的成员 `online`，人类成员不显示。未知只表示服务端暂时无法确认，不当作离线。Agent 名称旁有“改名”按钮：内联编辑后调用 `network_agent_rename`，成功后立即更新标题、当前会话列表项与消息署名；失败在状态栏显示可读错误。群聊头部显示群名与“群聊 · N 人”，不在这里改 Agent 名。改名是全局的，其他人在刷新后看到新名字，不是本地备注。
+- 自己发送的气泡下显示状态回执，数据来自 `network_history_list.delivery_states`：无 delivery 为“已发送”，pending 为“已送达”，claimed 为“Agent 已接收”，completed 为“已处理”，failed/cancelled 为“发送失败/已取消”；多 Agent 时按状态计数聚合（例如 `2/3 已送达 · 1 已处理`）。claimed 超过 `LIMITS.claimedStaleMs`（2 分钟）没有 report/complete 时追加“处理中未更新”，时间取自 `delivery_claimed_at`/`delivery_updated_at`；只做前端本地重绘，不新增已读字段，也不轮询服务端。这是状态回执，不新增已读字段。
 - 群聊输入 `@` 弹出当前房间成员选择器（排除自己，显示 Agent/人类标识），插入 `@名字 ` 并记录 actor_id；删除对应文本后不再作为 invoke 目标。发送时 direct 自动唤醒对方 Agent，group 只唤醒被 @ 的 Agent；未 @ 的群消息不生成 delivery。被 @ 的人类不产生 delivery，正文照常广播。超过 `invokeMax` 时状态栏明确提示减少 @，不静默截断。
 - 发送框支持中文输入法：`compositionstart` 到 `compositionend` 期间（含 `isComposing`、keyCode 229 与组合结束后的短暂守卫）Enter 只确认候选词，不提交；Shift+Enter 换行，组合结束后的普通 Enter 才发送。textarea 随内容在 1–4 行之间自适应，超过 4 行内部滚动。
 - `share_url` 只在 actor 有 `agent_session_id` 时返回；human actor 为 `null`。分享页只负责发现与建联，不授予 Agent 身份，也不读取对方私有数据。
@@ -123,9 +123,9 @@ Peri 的 `.mcp.json` 示例：
 - 条件闸门表只接受 `x = 0`；`INSERT ... SELECT 1 WHERE <违反条件>` 命中时触发 CHECK 失败。禁止 `INSERT OR IGNORE` 后无条件继续写入。
 - 消息以 `(sender_id, client_message_id)` 长期去重；重复请求返回同一消息，正文不同返回 `IDEMPOTENCY_CONFLICT`。
 - 单聊房间 ID 由排序后的 actor 对哈希确定；并发创建由唯一约束收敛到同一 room。
-- 待办：每个 `(recipient_id, message_id)` 一条 delivery；每个 Agent 至多一条 `claimed`（部分唯一索引 `idx_deliveries_one_claimed`）；并发 claim 只有一个成功，另一个返回 `CLAIM_CONFLICT`。
-- `attempt` + `claim_id` 校验 report/complete/fail/retry；旧 attempt 返回 `STALE_ATTEMPT`。
-- `pending_count` 只在 `inboxHeadStatement` 中随 inbox 事件变更，避免同一事务重复增减。
+- 待办：每个 `(recipient_id, message_id)` 一条 delivery；每个 Agent 至多一条 `claimed`（部分唯一索引 `idx_deliveries_one_claimed`）；并发 claim 只有一个成功，另一个返回 `CLAIM_CONFLICT`。claim 只是接手，`network_message_send.claim` 只挂接回复、不改变状态；回复不等于完成，必须显式 complete/fail，否则投递会一直停在 claimed。recipient 可用 `network_delivery_retry { expected_attempt }` 把自己的 claimed 放回 pending。
+- `attempt` + `claim_id` 校验 report/complete/fail/retry；旧 attempt 返回 `STALE_ATTEMPT`。`CLAIM_CONFLICT` 表示当前已有领取中的工作，不代表放弃全部任务。
+- `pending_count` 只在 `inboxHeadStatement` 中随 inbox 事件变更，避免同一事务重复增减；claim/report/complete/fail 不再写 inbox outbox，但仍通过 inbox 事件维护计数与 sync 语义。
 - outbox 使用 30 秒租约、按 topic 合并最高 event_seq、失败指数退避；成员事件单独以 `membership` 提示发送，不参与版本合并。
 - 留存任务推进 `events_min_seq` / `inbox_min_seq`，过期游标返回 `reset_required`。
 

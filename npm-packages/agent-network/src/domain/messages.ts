@@ -47,6 +47,10 @@ export interface MessageView extends MessagePreviewView {
   root_id: string | null;
   hop: number;
   delivery_states: Record<string, number>;
+  /** 该消息当前 claimed 投递中最早的领取时间；无 claimed 时为 null。 */
+  delivery_claimed_at: string | null;
+  /** 该消息 claimed 投递最近一次 claim/report 的更新时间；无 claimed 时为 null。 */
+  delivery_updated_at: string | null;
 }
 
 export interface MessagePage {
@@ -81,16 +85,61 @@ export interface MessageCore {
   at: number;
 }
 
+interface DeliveryStateRow {
+  message_id?: string;
+  state: string;
+  n: number;
+  max_claimed_at: number | null;
+  max_updated_at: number | null;
+}
+
+interface DeliveryStateSummary {
+  states: Record<string, number>;
+  claimedAt: number | null;
+  updatedAt: number | null;
+}
+
+function nullableString(value: number | null): string | null {
+  return value === null ? null : String(value);
+}
+
+/**
+ * 聚合 delivery 状态与 claimed 时间。
+ *
+ * 网页用 claimed_at/updated_at 判断“处理中未更新”，不新增 DB 字段；
+ * 取所有 claimed 投递中的最早领取与最近更新，兼容多条 Agent 投递。
+ */
+function summarizeDeliveryStates(rows: DeliveryStateRow[]): DeliveryStateSummary {
+  const states: Record<string, number> = {};
+  let claimedAt: number | null = null;
+  let updatedAt: number | null = null;
+  for (const row of rows) {
+    states[row.state] = row.n;
+    if (row.state !== 'claimed') continue;
+    if (row.max_claimed_at !== null) {
+      claimedAt = claimedAt === null ? row.max_claimed_at : Math.min(claimedAt, row.max_claimed_at);
+    }
+    if (row.max_updated_at !== null) {
+      updatedAt = updatedAt === null ? row.max_updated_at : Math.max(updatedAt, row.max_updated_at);
+    }
+  }
+  return { states, claimedAt, updatedAt };
+}
+
 export async function messageView(
   db: D1Database,
   row: MessageRow,
 ): Promise<MessageView> {
   const states = await db
-    .prepare('SELECT state, COUNT(*) AS n FROM deliveries WHERE message_id = ? GROUP BY state')
+    .prepare(
+      `SELECT state, COUNT(*) AS n,
+              MAX(CASE WHEN state = 'claimed' THEN claimed_at END) AS max_claimed_at,
+              MAX(CASE WHEN state = 'claimed' THEN updated_at END) AS max_updated_at
+         FROM deliveries WHERE message_id = ? GROUP BY state`,
+    )
     .bind(row.message_id)
-    .all<{ state: string; n: number }>();
-  const deliveryStates: Record<string, number> = {};
-  for (const item of states.results) deliveryStates[item.state] = item.n;
+    .all<DeliveryStateRow>();
+  const summary = summarizeDeliveryStates(states.results);
   return {
     message_id: row.message_id,
     room_id: row.room_id,
@@ -102,7 +151,9 @@ export async function messageView(
     reply_to: row.reply_to,
     root_id: row.root_id,
     hop: row.hop,
-    delivery_states: deliveryStates,
+    delivery_states: summary.states,
+    delivery_claimed_at: nullableString(summary.claimedAt),
+    delivery_updated_at: nullableString(summary.updatedAt),
   };
 }
 
@@ -497,22 +548,27 @@ export async function finalMessagePlan(
 async function deliveryStatesFor(
   db: D1Database,
   messageIds: string[],
-): Promise<Map<string, Record<string, number>>> {
+): Promise<Map<string, DeliveryStateSummary>> {
   if (messageIds.length === 0) return new Map();
   const placeholders = messageIds.map(() => '?').join(',');
   const rows = await db
     .prepare(
-      `SELECT message_id, state, COUNT(*) AS n FROM deliveries
+      `SELECT message_id, state, COUNT(*) AS n,
+              MAX(CASE WHEN state = 'claimed' THEN claimed_at END) AS max_claimed_at,
+              MAX(CASE WHEN state = 'claimed' THEN updated_at END) AS max_updated_at
+         FROM deliveries
         WHERE message_id IN (${placeholders}) GROUP BY message_id, state`,
     )
     .bind(...messageIds)
-    .all<{ message_id: string; state: string; n: number }>();
-  const map = new Map<string, Record<string, number>>();
+    .all<DeliveryStateRow & { message_id: string }>();
+  const grouped = new Map<string, DeliveryStateRow[]>();
   for (const row of rows.results) {
-    const entry = map.get(row.message_id) ?? {};
-    entry[row.state] = row.n;
-    map.set(row.message_id, entry);
+    const list = grouped.get(row.message_id) ?? [];
+    list.push(row);
+    grouped.set(row.message_id, list);
   }
+  const map = new Map<string, DeliveryStateSummary>();
+  for (const [messageId, list] of grouped) map.set(messageId, summarizeDeliveryStates(list));
   return map;
 }
 
@@ -570,19 +626,24 @@ export async function historyList(
     page.map((row) => row.message_id),
   );
 
-  const items = page.map((row) => ({
-    message_id: row.message_id,
-    room_id: row.room_id,
-    sender_id: row.sender_id,
-    created_seq: String(row.created_seq),
-    preview: row.preview,
-    body_bytes: row.body_bytes,
-    created_at: String(row.created_at),
-    reply_to: row.reply_to,
-    root_id: row.root_id,
-    hop: row.hop,
-    delivery_states: states.get(row.message_id) ?? {},
-  }));
+  const items = page.map((row) => {
+    const summary = states.get(row.message_id);
+    return {
+      message_id: row.message_id,
+      room_id: row.room_id,
+      sender_id: row.sender_id,
+      created_seq: String(row.created_seq),
+      preview: row.preview,
+      body_bytes: row.body_bytes,
+      created_at: String(row.created_at),
+      reply_to: row.reply_to,
+      root_id: row.root_id,
+      hop: row.hop,
+      delivery_states: summary?.states ?? {},
+      delivery_claimed_at: nullableString(summary?.claimedAt ?? null),
+      delivery_updated_at: nullableString(summary?.updatedAt ?? null),
+    };
+  });
 
   return {
     items,

@@ -22,6 +22,13 @@ function firstChar(name) {
   return chars.length > 0 ? chars[0] : '聊';
 }
 
+/** 在线状态文案；true 在线、false 离线、null 表示服务端暂时无法确认。 */
+function presenceLabel(online) {
+  if (online === true) return '在线';
+  if (online === false) return '离线';
+  return '未知';
+}
+
 /** 会话列表圆形头像；群聊为 2×2 首字色块，避免所有群共用同一个字。 */
 function avatarElement(name, kind, className) {
   const element = document.createElement('span');
@@ -132,6 +139,14 @@ function renderRooms() {
     const avatarWrap = document.createElement('span');
     avatarWrap.className = 'avatar-wrap';
     avatarWrap.append(avatar);
+    if (entry.kind === 'direct' && entry.peer_kind === 'agent') {
+      const presence = document.createElement('span');
+      const state = entry.peer_online === true ? 'online' : entry.peer_online === false ? 'offline' : 'unknown';
+      presence.className = 'presence-dot ' + state;
+      presence.setAttribute('aria-label', 'Agent ' + presenceLabel(entry.peer_online));
+      presence.title = presenceLabel(entry.peer_online);
+      avatarWrap.append(presence);
+    }
     if (entry.my_last_read_seq !== entry.head_seq) {
       const dot = document.createElement('span');
       dot.className = 'unread';
@@ -177,13 +192,20 @@ async function loadRooms() {
     const page = await callTool('network_rooms_list', { limit: 50 });
     const entries = await Promise.all(page.items.map(async function (entry) {
       let name = entry.kind === 'direct' ? '单聊' : entry.title || '群聊';
+      let peerKind = null;
+      let peerOnline = null;
       if (entry.kind === 'direct') {
         try {
           const detail = await callTool('network_room_get', { room_id: entry.room_id });
-          const others = detail.members
-            .filter(function (member) { return member.actor_id !== me.actor_id; })
-            .map(function (member) { return member.name; });
-          if (others.length > 0) name = others.join('、');
+          const others = detail.members.filter(function (member) {
+            return member.actor_id !== me.actor_id;
+          });
+          if (others.length > 0) name = others.map(function (member) { return member.name; }).join('、');
+          if (others.length === 1) {
+            peerKind = others[0].kind;
+            // 人类成员没有在线概念，保持 null 且不渲染状态点。
+            peerOnline = others[0].kind === 'agent' ? others[0].online : null;
+          }
         } catch (error) {
           // 房间不可读时保留占位名称，列表仍可展示。
         }
@@ -195,7 +217,9 @@ async function loadRooms() {
         head_seq: entry.head_seq,
         my_last_read_seq: entry.my_last_read_seq,
         last_message: entry.last_message,
-        updated_at: entry.updated_at
+        updated_at: entry.updated_at,
+        peer_kind: peerKind,
+        peer_online: peerOnline
       };
     }));
     roomEntries = sortRooms(entries);

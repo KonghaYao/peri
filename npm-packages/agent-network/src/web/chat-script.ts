@@ -21,6 +21,8 @@ const MAX_CHUNKS = 8;
 // 服务端 LIMITS.invokeMax 的内联值：阈值只在 limits.ts 维护，页面不复制字面量。
 const INVOKE_MAX = ${LIMITS.invokeMax};
 const ACTOR_NAME_MAX = ${LIMITS.actorNameMax};
+// claimed 超过该时长未更新时显示提示；只做本地重绘，不轮询服务端。
+const CLAIM_STALE_MS = ${LIMITS.claimedStaleMs};
 const roomListElement = document.getElementById('room-list');
 const listStatusElement = document.getElementById('room-list-status');
 const searchInput = document.getElementById('room-search');
@@ -434,9 +436,21 @@ async function doRefresh(forceScroll) {
     .filter(function (member) { return member.actor_id !== identity.actor_id; })
     .map(function (member) { return member.name; });
   if (room.kind === 'direct') {
+    const peer = directPeer();
     titleElement.textContent = others.join('、') || '单聊';
-    subtitleElement.textContent = '';
-    subtitleElement.hidden = true;
+    if (peer && peer.kind === 'agent') {
+      subtitleElement.textContent = presenceLabel(peer.online);
+      subtitleElement.hidden = false;
+    } else {
+      subtitleElement.textContent = '';
+      subtitleElement.hidden = true;
+    }
+    const entry = roomEntries.find(function (item) { return item.room_id === roomId; });
+    if (entry) {
+      entry.peer_kind = peer ? peer.kind : null;
+      entry.peer_online = peer && peer.kind === 'agent' ? peer.online : null;
+      renderRooms();
+    }
   } else {
     titleElement.textContent = room.title || '群聊';
     subtitleElement.textContent = '群聊 · ' + detail.members.length + ' 人';

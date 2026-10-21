@@ -72,7 +72,15 @@ async function main(): Promise<void> {
   checkEqual('旧协议头错误码为 -32020', oldHeaderError?.code, -32020);
 
   const list = await rawRpc('tools/list');
-  const listed = list.body.result as { tools?: { name: string }[] } | undefined;
+  const listed = list.body.result as
+    | {
+        tools?: {
+          name: string;
+          description?: string;
+          outputSchema?: unknown;
+        }[];
+      }
+    | undefined;
   const toolNames = listed?.tools?.map((tool) => tool.name) ?? [];
   check('tools/list 返回 27 个工具', toolNames.length === 27, toolNames.length);
   for (const required of [
@@ -92,6 +100,35 @@ async function main(): Promise<void> {
   ]) {
     check(`工具 ${required} 已注册`, toolNames.includes(required), toolNames);
   }
+
+  const claimTool = listed?.tools?.find((tool) => tool.name === 'network_delivery_claim');
+  check(
+    'claim 工具描述声明只是接手且回复不等于完成',
+    typeof claimTool?.description === 'string' &&
+      claimTool.description.includes('只是接手') &&
+      claimTool.description.includes('回复不等于完成'),
+    claimTool?.description,
+  );
+  const sendTool = listed?.tools?.find((tool) => tool.name === 'network_message_send');
+  check(
+    'message_send 描述声明 claim 不改变投递状态',
+    typeof sendTool?.description === 'string' &&
+      sendTool.description.includes('不改变投递状态'),
+    sendTool?.description,
+  );
+  const roomGetTool = listed?.tools?.find((tool) => tool.name === 'network_room_get');
+  check(
+    'room_get 输出 schema 包含成员 online',
+    JSON.stringify(roomGetTool?.outputSchema ?? {}).includes('"online"'),
+    roomGetTool?.outputSchema,
+  );
+  const historyTool = listed?.tools?.find((tool) => tool.name === 'network_history_list');
+  const historySchema = JSON.stringify(historyTool?.outputSchema ?? {});
+  check(
+    'history 输出 schema 包含 claimed 时间字段',
+    historySchema.includes('"delivery_claimed_at"') && historySchema.includes('"delivery_updated_at"'),
+    historyTool?.outputSchema,
+  );
 
   const skills = await rawRpc('skills/list');
   const skillEntries =
@@ -141,6 +178,26 @@ async function main(): Promise<void> {
     '技能正文含与条目一致的 frontmatter',
     skillText.startsWith(`---\nname: ${skill?.frontmatter.name}\ndescription: ${skill?.frontmatter.description}\n---\n`),
     skillText.slice(0, 160),
+  );
+  check(
+    '技能正文声明回复不等于完成',
+    skillText.includes('回复不等于完成') && skillText.includes('claim 只是接手'),
+    skillText.slice(0, 200),
+  );
+  check(
+    '技能正文要求阶段性回复进度',
+    skillText.includes('阶段性节点回复进度') && skillText.includes('阶段性回复不改变 delivery 状态'),
+    skillText.slice(0, 200),
+  );
+  check(
+    '技能正文说明 CLAIM_CONFLICT 不代表放弃全部工作',
+    skillText.includes('CLAIM_CONFLICT') && skillText.includes('不代表放弃全部任务'),
+    skillText.slice(0, 200),
+  );
+  check(
+    '技能正文说明状态变更不自我唤醒',
+    skillText.includes('claim/report/complete/fail 不会再触发自己的 inbox 提示'),
+    skillText.slice(0, 200),
   );
 
   const skillGet = await rawRpc('skills/get', { uri: skill?.uri ?? '' });
@@ -241,6 +298,17 @@ async function main(): Promise<void> {
     '首页服务信息收在折叠区',
     homeHtml.includes('<details') && homeHtml.includes('/a/&lt;agent_session_id&gt;'),
   );
+  check(
+    '首页脚本内联 claimed 超时提示与阈值',
+    homeHtml.includes('CLAIM_STALE_MS') && homeHtml.includes('处理中未更新'),
+  );
+  check(
+    '首页包含 Agent 在线状态点与在线/离线/未知文案',
+    homeHtml.includes('presence-dot') &&
+      homeHtml.includes('在线') &&
+      homeHtml.includes('离线') &&
+      homeHtml.includes('未知'),
+  );
 
   const browserToken = newToken();
   const browserRegister = await rawRpc(
@@ -316,6 +384,14 @@ async function main(): Promise<void> {
   check('单聊页包含 @ 成员选择器', chatHtml.includes('id="mention-picker"'));
   check('单聊页包含手机扫码入口', chatHtml.includes('id="device-handoff"'));
   check('单聊页订阅房间 head', chatHtml.includes('agentnet://rooms/'));
+  check(
+    '单聊页头部按成员 online 渲染在线状态',
+    chatHtml.includes('presenceLabel(peer.online)'),
+  );
+  check(
+    '单聊页回执包含 claimed 超时提示',
+    chatHtml.includes('CLAIM_STALE_MS') && chatHtml.includes('处理中未更新'),
+  );
 
   const getResponse = await fetch(`${baseUrl()}/mcp`);
   checkEqual('GET /mcp 返回 405', getResponse.status, 405);

@@ -64,6 +64,39 @@ function receiptText(states) {
   return parts.join(' · ');
 }
 
+/**
+ * claimed 超过阈值未 report/complete 时提示“处理中未更新”。
+ *
+ * 时间来自 history_list 的 delivery_claimed_at / delivery_updated_at，
+ * 不新增数据库字段；只读已返回数据，不轮询服务端。
+ */
+function claimStale(item) {
+  const states = item.delivery_states || {};
+  if (!Number(states.claimed || 0)) return false;
+  const last = Number(item.delivery_updated_at || item.delivery_claimed_at || 0);
+  return last > 0 && Date.now() - last >= CLAIM_STALE_MS;
+}
+
+function applyReceipt(receipt, item) {
+  const states = item.delivery_states || {};
+  const stale = claimStale(item);
+  receipt.textContent = receiptText(states) + (stale ? ' · 处理中未更新' : '');
+  receipt.classList.toggle('stale', stale);
+}
+
+/** 未到阈值时用一次性本地定时器补上提示，页面刷新会重新计算。 */
+function scheduleReceipt(receipt, item) {
+  const states = item.delivery_states || {};
+  if (!Number(states.claimed || 0)) return;
+  const last = Number(item.delivery_updated_at || item.delivery_claimed_at || 0);
+  if (!last) return;
+  const delay = last + CLAIM_STALE_MS - Date.now();
+  if (delay <= 0) return;
+  setTimeout(function () {
+    if (receipt.isConnected) applyReceipt(receipt, item);
+  }, delay + 50);
+}
+
 function mentionNames() {
   const names = [];
   for (const member of members.values()) {
@@ -154,7 +187,8 @@ function messageItem(item) {
   if (mine) {
     const receipt = document.createElement('div');
     receipt.className = 'msg-receipt';
-    receipt.textContent = receiptText(item.delivery_states || {});
+    applyReceipt(receipt, item);
+    scheduleReceipt(receipt, item);
     content.append(receipt);
   }
   element.append(avatar, content);

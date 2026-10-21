@@ -28,6 +28,9 @@ export const messageSchema = messagePreviewSchema.extend({
   root_id: z.string().nullable(),
   hop: z.number(),
   delivery_states: z.record(z.string(), z.number()),
+  /** claimed 投递的领取时间与最近更新时间；用于网页“处理中未更新”提示。 */
+  delivery_claimed_at: z.string().nullable(),
+  delivery_updated_at: z.string().nullable(),
 });
 
 export const memberSchema = z.object({
@@ -39,6 +42,8 @@ export const memberSchema = z.object({
   joined_seq: z.string(),
   joined_at: z.string(),
   last_read_seq: z.string(),
+  /** Agent 在线状态；null 表示未知，人类成员恒为 null。 */
+  online: z.boolean().nullable(),
 });
 
 export const roomSchema = z.object({
