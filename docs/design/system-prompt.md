@@ -9,7 +9,7 @@
 ## 1. 设计边界
 
 System Prompt 由内部冻结 base、可选的会话级外部系统指令，以及每次模型请求读取的
-middleware contribution 组成。三者有独立来源；外部指令与 contribution 不得作为
+middleware contribution、最终环境块组成。各自保留独立来源；外部指令与 contribution 不得作为
 普通消息写入 Transcript。
 
 - base prompt 在 `session/new` 时随日期、运行环境快照（platform / OS 版本 /
@@ -61,6 +61,9 @@ flowchart LR
     BASE --> COMBINE[combine_system_prompt_with_dynamic]
     EXTERNAL --> COMBINE
     CONTRIB --> COMBINE
+    FREEZE --> ENV_BODY[frozen environment body]
+    ENV_BODY --> COMBINE
+    SESSION_ID[current execution session ID] --> COMBINE
     COMBINE --> REQUEST[ModelRequest]
 ```
 
@@ -71,16 +74,18 @@ fork 继承 source snapshot 的精确字节，不能以当前磁盘内容重新�
 外部正文仅在新会话准入：缺席或空字符串为无扩展；非字符串、超过 64 KiB 或包含
 `SYSTEM_PROMPT_DYNAMIC_BOUNDARY` 完整控制字须以 invalid-params 拒绝，不能创建
 可用 thread。接受后按字面值冻结，花括号、标签、空白与换行不作模板、导入或段落
-解析。V2 frozen snapshot 显式保存 `external_instructions` 字段（可为 `null`，缺失
+解析。V2 及后续 frozen snapshot 显式保存 `external_instructions` 字段（可为 `null`，缺失
 视为损坏）；冷 load/resume、普通 fork 与子 Agent 从同一份 owner snapshot 继承，
 不从现有 prompt 文本反解析。
 
 模型请求的唯一组合顺序是：**内部静态段 → 唯一缓存分界 → 内部动态段 → 外部
-指令段 → 逐请求 contribution**。外部段的固定标签保护正文边缘空白；正文在
+指令段 → 逐请求 contribution → env**。外部段的固定标签保护正文边缘空白；正文在
 provider JSON 的 system text 中作为连续子串恰好出现一次，transport 控制字不进
 wire。内部模板为空、没有 contribution 时，也须在外部段之前生成分界。主 Agent
 override、子 Agent 和 workflow 各自按能力投影内部身份，随后由模型桥接层附加
 同一外部字段；子身份持久历史只存内部身份，Compact/继承历史不复制外部正文。
+
+env 正文由 `DefaultSystemPromptMiddleware` 的 `env` 段声明，经 `PromptTemplate::render_environment` 独立冻结到 V3 的 `environment_prompt` 字段（必需，可为 `null`），支持 `.peri/meta/env.md` 覆盖。关闭持有者时环境段也消失。模型桥接层在最后包装 `<env>` 并加入当前执行 session ID；主会话、普通 fork、子 Agent、workflow 均使用各自身份，不能把父 ID 冻结进正文。cwd、日期、平台等继续消费 owner 快照。同配置会话的环境差异只影响末尾，不打断此前的公共前缀；这不保证 provider 实际缓存命中。旧 V1/V2 快照保留原正文、不提取或搬移旧 env，新布局须新建会话。
 
 V1 冻结快照没有独立来源字段。普通主 Agent 保留旧 prompt 原字节；若其中有
 `<agent_instructions>` 开始标记，需要重渲染的 override、子 Agent 或 workflow

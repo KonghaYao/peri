@@ -151,6 +151,7 @@ pub(crate) fn build_agent(
     let mut base_llm = AgentModelBridge::new(base_model)
         .with_system(system_prompt)
         .with_external_instructions(frozen.external_instructions.clone())
+        .with_environment_prompt(frozen.environment_prompt.clone())
         .with_legacy_prompt_provenance(
             frozen.legacy_embedded_instructions,
             agent_overrides.is_some(),

@@ -54,10 +54,12 @@ impl std::fmt::Display for SessionId {
 /// System Prompt。
 #[derive(Debug, Clone)]
 pub struct FrozenContext {
-    /// 完整 System Prompt（静态 + 动态占位符填充后）
+    /// 内部 System Prompt（不含独立的 external instructions 与最终 env）
     pub system_prompt: Arc<str>,
     /// ACP 客户端提供的会话级 System 扩展，独立于内部提示词保存。
     pub external_instructions: Option<Arc<str>>,
+    /// Frozen environment body, appended last with the executing session's ID.
+    pub environment_prompt: Option<Arc<str>>,
     /// V1 快照含不可分离的旧外部指令；派生身份必须拒绝重渲染。
     pub legacy_embedded_instructions: bool,
     /// CLAUDE.md 内容（项目级 + 用户级合并后）
@@ -102,6 +104,7 @@ impl FrozenContext {
 pub struct FrozenContextBuilder {
     system_prompt: Option<String>,
     external_instructions: Option<String>,
+    environment_prompt: Option<String>,
     claude_md: Option<String>,
     skill_summary: Option<String>,
     date: Option<String>,
@@ -124,6 +127,11 @@ impl FrozenContextBuilder {
 
     pub fn claude_md(mut self, s: impl Into<String>) -> Self {
         self.claude_md = Some(s.into());
+        self
+    }
+
+    pub fn environment_prompt(mut self, body: impl Into<String>) -> Self {
+        self.environment_prompt = Some(body.into());
         self
     }
 
@@ -164,6 +172,7 @@ impl FrozenContextBuilder {
         FrozenContext {
             system_prompt: self.system_prompt.unwrap_or_default().into(),
             external_instructions: self.external_instructions.map(Into::into),
+            environment_prompt: self.environment_prompt.map(Into::into),
             legacy_embedded_instructions: false,
             claude_md: self.claude_md.unwrap_or_default().into(),
             skill_summary: self.skill_summary.unwrap_or_default().into(),

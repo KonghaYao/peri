@@ -193,9 +193,10 @@ pub(super) async fn build_subagent_session_v2(
     // `Prebuilt`（嵌入/测试已装配 ReactLLM）原样透传。
     let chain = Arc::new(chain);
     let contribution_chain = Arc::clone(&chain);
-    let llm = llm.into_react_llm(
+    let llm = llm.with_session_id(child_thread_id.clone()).into_react_llm(
         &identity_system,
         external_instructions,
+        session.store().frozen.environment_prompt.clone(),
         legacy_embedded_instructions,
         Arc::new(move || contribution_chain.collect_prompt_contributions()),
         // 归一化：身份 System 随 transcript 持久化（spawn 6b 写入；旧会话的历史
@@ -247,6 +248,7 @@ pub(super) fn inherited_frozen_context(
     FrozenContext {
         system_prompt: identity_system.map(Arc::from).unwrap_or_default(),
         external_instructions: parent.and_then(|p| p.store().frozen.external_instructions.clone()),
+        environment_prompt: parent.and_then(|p| p.store().frozen.environment_prompt.clone()),
         legacy_embedded_instructions: parent
             .is_some_and(|p| p.store().frozen.legacy_embedded_instructions),
         claude_md: frozen_claude_md

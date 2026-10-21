@@ -117,6 +117,19 @@ async fn test_session_load_cold_host_restores_original_frozen_prompt() {
         .system_prompt()
         .to_string();
     assert!(!original_prompt.contains("CUSTOM_AGENT_INSTRUCTIONS_V1"));
+    let original_environment = sessions[&session_id]
+        .frozen
+        .as_ref()
+        .unwrap()
+        .v2_frozen()
+        .environment_prompt
+        .clone()
+        .expect("新会话必须独立冻结环境正文");
+    assert!(original_environment.contains(tmp.path().to_str().unwrap()));
+    assert!(
+        !original_environment.contains(&session_id),
+        "owner 快照不得冻结执行会话 ID"
+    );
     assert_eq!(
         sessions[&session_id]
             .frozen
@@ -184,6 +197,16 @@ async fn test_session_load_cold_host_restores_original_frozen_prompt() {
     assert_eq!(
         restored_prompt, original_prompt,
         "冷恢复逐字复用 frozen prompt"
+    );
+    assert_eq!(
+        restored_sessions[&session_id]
+            .frozen
+            .as_ref()
+            .unwrap()
+            .v2_frozen()
+            .environment_prompt
+            .as_deref(),
+        Some(original_environment.as_ref())
     );
     assert_eq!(
         restored_sessions[&session_id]
