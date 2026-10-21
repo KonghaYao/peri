@@ -177,7 +177,10 @@ async fn worktree_binding_hot_cold_resume_ignore_caller_cwd_and_keep_saved_facts
         .frozen
         .as_ref()
         .unwrap()
-        .system_prompt()
+        .v2_frozen()
+        .environment_prompt
+        .as_deref()
+        .expect("restored frozen environment")
         .contains(original_cwd.to_str().unwrap()));
     handle_request(
         "session/close",
