@@ -877,6 +877,43 @@ fn accepted_page_promotes_live_archive_without_duplicate_body() {
 
 #[test]
 #[serial]
+fn accepted_page_with_commit_receipt_seals_immediately() {
+    use crate::kit::history_window::{PersistentEntryKey, PinReason};
+    use peri_acp_types::{
+        history_window::HistoryCommittedTail, messages::MessageId, thread::ThreadId,
+    };
+
+    let (mut state, _guard) = state_with_window();
+    state.current_turn.append_text("live body", Some("live"));
+    dispatch_and_notify(&mut state, &AcpEventData::TurnDone);
+    let key = PersistentEntryKey::own("s1:live");
+    let segment_key = state.window.index().locate_entry(&key).unwrap().segment;
+    let identity = state.window.identity().cloned().unwrap();
+    let context = context("live-page-commit", state.window.generation());
+    let mut page = response(identity, vec![text_item("live", 10, "live body")]);
+    // 页响应自带持久回执：接纳后应立即封印，而不是等下一次 Full Compact。
+    page.committed_tail = Some(
+        HistoryCommittedTail::new(&ThreadId::from("s1".to_string()), MessageId::new(), 10).encode(),
+    );
+    page.checkpoint_id = Some("live-page-cp".into());
+    dispatch_and_notify(
+        &mut state,
+        &AcpEventData::HistoryWindowPageLoaded {
+            context: Box::new(context),
+            response: Box::new(page),
+        },
+    );
+    let segment = state.window.segment(segment_key).unwrap();
+    assert!(
+        segment.sealed,
+        "page receipt must seal promoted live segment"
+    );
+    assert!(segment.durable);
+    assert!(!segment.pins.contains(PinReason::Unpersisted));
+}
+
+#[test]
+#[serial]
 fn rejected_page_does_not_promote_live_archive() {
     let (mut state, _guard) = state_with_window();
     state.current_turn.append_text("live body", Some("live"));

@@ -140,6 +140,87 @@ async fn failed_session_initialization_does_not_enqueue_window_open() {
     client.close();
 }
 
+/// 新建会话与恢复会话统一：初始化成功后恰好 enqueue 一次 `history.open`。
+#[tokio::test]
+#[serial]
+async fn new_session_enqueues_window_open_after_initialization_succeeds() {
+    let _guard = enable_window_path();
+    let (transport, server) = mpsc_transport_pair();
+    let (client, _, _) = AcpTuiClient::new(transport);
+    client.user_input_queue.store(true, Ordering::Release);
+    let creator = client.clone();
+    let create = tokio::spawn(async move { creator.new_session("/tmp", None).await });
+
+    let (id, method, _) = next_request(&server).await;
+    assert_eq!(method, "session/new");
+    server
+        .send_response(id, Ok(json!({ "sessionId": WINDOW_SESSION })))
+        .await
+        .unwrap();
+
+    let (id, method, _) = next_request(&server).await;
+    assert_eq!(method, "session/input/snapshot");
+    assert_eq!(
+        window_state(),
+        (WINDOW_SENTINEL_SESSION.to_owned(), WINDOW_SENTINEL_SEQ),
+        "用户输入快照完成前不得 enqueue 窗口 open"
+    );
+    server
+        .send_response(id, Ok(snapshot_payload()))
+        .await
+        .unwrap();
+
+    assert_eq!(create.await.unwrap().unwrap(), WINDOW_SESSION);
+    assert_eq!(
+        window_state(),
+        (WINDOW_SESSION.to_owned(), 1),
+        "新建会话初始化成功后恰好 enqueue 一次 open"
+    );
+    client.close();
+}
+
+/// 新建会话初始化失败同样不得 enqueue，保持哨兵状态。
+#[tokio::test]
+#[serial]
+async fn failed_new_session_does_not_enqueue_window_open() {
+    let _guard = enable_window_path();
+    let (transport, server) = mpsc_transport_pair();
+    let (client, _, _) = AcpTuiClient::new(transport);
+    client.user_input_queue.store(true, Ordering::Release);
+    let creator = client.clone();
+    let create = tokio::spawn(async move { creator.new_session("/tmp", None).await });
+
+    let (id, method, _) = next_request(&server).await;
+    assert_eq!(method, "session/new");
+    server
+        .send_response(id, Ok(json!({ "sessionId": WINDOW_SESSION })))
+        .await
+        .unwrap();
+
+    let (id, method, _) = next_request(&server).await;
+    assert_eq!(method, "session/input/snapshot");
+    server
+        .send_response(id, Err(AcpError::new(-32603, "snapshot failed")))
+        .await
+        .unwrap();
+
+    let (id, method, _) = next_request(&server).await;
+    assert_eq!(method, "session/close");
+    server.send_response(id, Ok(json!({}))).await.unwrap();
+
+    let error = create
+        .await
+        .unwrap()
+        .expect_err("initialization failure must fail the new session");
+    assert_eq!(error.code, -32603);
+    assert_eq!(
+        window_state(),
+        (WINDOW_SENTINEL_SESSION.to_owned(), WINDOW_SENTINEL_SEQ),
+        "新建会话初始化失败不得 enqueue 窗口 open"
+    );
+    client.close();
+}
+
 #[tokio::test]
 async fn session_request_does_not_hold_operation_gate_while_waiting_for_wire_response() {
     let (transport, server) = mpsc_transport_pair();

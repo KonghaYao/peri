@@ -227,6 +227,12 @@ impl AcpTuiClient {
             .commit_stable(start.generation, session_id.clone());
         self.finish_session_initialization(start.generation, &session_id)
             .await?;
+        // S5.4：新建与恢复统一建立窗口。服务端只向持有 window ticket 的连接发送
+        // `peri/history_committed`；新会话不 open 会让实时段永远停在 position=None。
+        crate::kit::history_page_consumer::enqueue_window_open(
+            &session_id,
+            crate::kit::history_paging::WindowDirection::Before,
+        );
         self.project_execution_cwd(Some(effective_cwd));
         *self.restore_error.lock().unwrap() = None;
         projection.committed = true;

@@ -605,6 +605,15 @@ impl HistoryWindow {
         &self.budget
     }
 
+    /// 记录本次归档中尚无持久身份的实时单元正文。
+    ///
+    /// 这些单元没有 `PersistentEntryKey`，不能进入可淘汰段；但它们的正文仍驻留
+    /// 在 `committed`，必须计入总预算，避免预算账目低估真实驻留量。
+    pub fn note_unattributed_live_bytes(&mut self, bytes: usize) {
+        self.budget.unattributed_live_bytes =
+            self.budget.unattributed_live_bytes.saturating_add(bytes);
+    }
+
     pub fn anchor(&self) -> Option<&WindowAnchor> {
         self.anchor.as_ref()
     }
@@ -967,6 +976,7 @@ impl HistoryWindow {
     pub fn diagnostics(&self) -> HistoryWindowDiagnostics {
         HistoryWindowDiagnostics {
             tui_history_body_bytes: self.budget.resident_body_bytes,
+            tui_unattributed_live_bytes: self.budget.unattributed_live_bytes,
             tui_history_reserved_bytes: self.budget.resident_reserved_bytes,
             tui_pinned_bytes: self.budget.pinned_body_bytes,
             history_page_reserved_bytes: self.budget.page_reserved_bytes,

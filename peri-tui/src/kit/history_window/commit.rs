@@ -10,7 +10,7 @@ use serde_json::Value;
 use super::model::{
     DurableWatermark, HistoryWindow, PinReason, RegionKey, ReleasePlan, WindowIdentity,
 };
-use super::{AnchorRelocation, SegmentKey};
+use super::{AnchorRelocation, PersistentEntryKey, SegmentKey};
 use peri_acp_types::history_window::HistoryCommittedTail;
 use peri_acp_types::thread::ThreadId;
 
@@ -80,10 +80,16 @@ impl HistoryWindow {
         let Ok(tail) = HistoryCommittedTail::decode(&info.committed_tail, &thread) else {
             return CommitOutcome::InvalidTail;
         };
-        if !self.note_checkpoint(info.checkpoint_id.clone()) {
+        let duplicate_checkpoint = !self.note_checkpoint(info.checkpoint_id.clone());
+        // checkpoint 去重只用于记账，不能提前返回：页响应可能在同一 checkpoint
+        // 下才补齐旧实时条目的 position，此时仍必须封印并解除 Unpersisted。
+        let tail_key =
+            PersistentEntryKey::own(format!("{}:{}", info.session_id, tail.entry_id.as_uuid()));
+        self.promote_live_seal_position(&tail_key, tail.position);
+        let (sealed_segments, newly_durable) = self.seal_through_position(tail.position);
+        if duplicate_checkpoint && newly_durable == 0 {
             return CommitOutcome::Duplicate;
         }
-        let sealed_segments = self.seal_through_position(tail.position);
         self.set_durable_watermark(DurableWatermark {
             checkpoint_id: Some(info.checkpoint_id.clone()),
             committed_tail: Some(info.committed_tail.clone()),
@@ -94,8 +100,8 @@ impl HistoryWindow {
     /// 标记所有条目位置 `<= position` 的段为 durable + sealed。
     ///
     /// 没有 `position` 的 live/未确认条目永远不满足条件，因此不会被 turn 结束或
-    /// compact 完成本身误封印。
-    fn seal_through_position(&mut self, position: u64) -> usize {
+    /// compact 完成本身误封印。返回（满足条件的段数，本次新转为 durable 的段数）。
+    fn seal_through_position(&mut self, position: u64) -> (usize, usize) {
         let mut sealed = 0usize;
         let mut promoted = Vec::new();
         for (key, segment) in self.segments.iter_mut() {
@@ -114,11 +120,12 @@ impl HistoryWindow {
             }
             sealed += 1;
         }
+        let newly_durable = promoted.len();
         for key in promoted {
             // 未持久化 pin 在 durable 确认后解除；其余 pin（viewport/running 等）保留。
             self.unpin(key, PinReason::Unpersisted);
         }
-        sealed
+        (sealed, newly_durable)
     }
 
     pub fn sealed_segment_count(&self) -> usize {

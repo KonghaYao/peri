@@ -79,6 +79,112 @@ fn live_seal_without_position_stays_unsealed_until_page_promotes_it() {
 }
 
 #[test]
+fn commit_tail_promotes_matching_live_entry_without_page() {
+    let mut window = enabled_window(WindowLimits::default());
+    let message_id = MessageId::new();
+    let key = PersistentEntryKey::own(format!("s1:{}", message_id.as_uuid()));
+    let segment_key = window
+        .register_segment(
+            SegmentDraft::new(
+                HistorySource::Own,
+                vec![HistoryEntryView::new(
+                    key.clone(),
+                    None,
+                    1,
+                    10,
+                    20,
+                    Vec::new(),
+                )],
+                10,
+                20,
+            )
+            .durable(false)
+            .origin(SegmentOrigin::LiveSeal),
+            SegmentPlacement::Tail,
+        )
+        .expect("live seal");
+    let tail =
+        HistoryCommittedTail::new(&ThreadId::from("s1".to_string()), message_id, 10).encode();
+    let info = HistoryCommitInfo {
+        session_id: "s1".into(),
+        session_generation: "gen-1".into(),
+        structure_version: 7,
+        checkpoint_id: "cp-tail-promotes-live".into(),
+        summary_entry_id: None,
+        committed_tail: tail,
+    };
+    assert_eq!(
+        window.apply_commit(&info),
+        CommitOutcome::Applied { sealed_segments: 1 }
+    );
+    let segment = window.segment(segment_key).unwrap();
+    assert!(segment.sealed);
+    assert!(segment.durable);
+    assert!(!segment.pins.contains(PinReason::Unpersisted));
+}
+
+#[test]
+fn same_checkpoint_seals_after_late_position_promotion() {
+    let mut window = enabled_window(WindowLimits::default());
+    let message_id = MessageId::new();
+    let key = PersistentEntryKey::own(format!("s1:{}", message_id.as_uuid()));
+    let segment_key = window
+        .register_segment(
+            SegmentDraft::new(
+                HistorySource::Own,
+                vec![HistoryEntryView::new(
+                    key.clone(),
+                    None,
+                    1,
+                    10,
+                    20,
+                    Vec::new(),
+                )],
+                10,
+                20,
+            )
+            .durable(false)
+            .origin(SegmentOrigin::LiveSeal),
+            SegmentPlacement::Tail,
+        )
+        .expect("live seal");
+    let tail_message_id = MessageId::new();
+    let tail =
+        HistoryCommittedTail::new(&ThreadId::from("s1".to_string()), tail_message_id, 10).encode();
+    let info = HistoryCommitInfo {
+        session_id: "s1".into(),
+        session_generation: "gen-1".into(),
+        structure_version: 7,
+        checkpoint_id: "cp-late-position".into(),
+        summary_entry_id: None,
+        committed_tail: tail,
+    };
+
+    // 1. 提交通知先到：checkpoint 被记录，但实时条目还没有 position。
+    assert_eq!(
+        window.apply_commit(&info),
+        CommitOutcome::Applied { sealed_segments: 0 }
+    );
+    assert!(!window.segment(segment_key).unwrap().sealed);
+
+    // 2. 页响应随后补齐 position（真实路径由 handle_window_page_loaded 完成）。
+    window.promote_live_seal_position(&key, 10);
+
+    // 3. 同一 checkpoint 再次到达：不得因 Duplicate 跳过封印与解除 pin。
+    assert_eq!(
+        window.apply_commit(&info),
+        CommitOutcome::Applied { sealed_segments: 1 }
+    );
+    let segment = window.segment(segment_key).unwrap();
+    assert!(segment.sealed);
+    assert!(segment.durable);
+    assert!(!segment.pins.contains(PinReason::Unpersisted));
+
+    // 4. 没有新增 durable 段时仍保持幂等。
+    assert_eq!(window.apply_commit(&info), CommitOutcome::Duplicate);
+}
+
+#[test]
 fn live_seal_promotion_ignores_unknown_identity() {
     let mut window = enabled_window(WindowLimits::default());
     let key = PersistentEntryKey::own("s1:live");

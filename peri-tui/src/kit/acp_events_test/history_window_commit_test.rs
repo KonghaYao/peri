@@ -138,7 +138,7 @@ fn test_commit_does_not_release_without_viewport_anchor() {
 
 #[test]
 #[serial]
-fn test_tool_only_archive_does_not_register_live_segment_without_message_id() {
+fn test_tool_only_archive_counts_toward_budget_without_live_segment() {
     let mut state = make_fold_test_state();
     state.active_session_id = "s1".into();
     state.window = HistoryWindow::new(HistoryWindowConfig::enabled());
@@ -156,7 +156,16 @@ fn test_tool_only_archive_does_not_register_live_segment_without_message_id() {
         }),
     );
     dispatch_and_notify(&mut state, &AcpEventData::TurnDone);
+    // 没有持久身份不能伪造可淘汰段，但正文必须计入总预算。
     assert_eq!(state.window.segment_count(), 0);
+    assert!(
+        state.window.budget().unattributed_live_bytes > 0,
+        "tool-only archive must be counted in resident budget"
+    );
+    assert_eq!(
+        state.window.diagnostics().tui_unattributed_live_bytes,
+        state.window.budget().unattributed_live_bytes
+    );
 }
 
 #[test]

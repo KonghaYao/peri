@@ -244,8 +244,16 @@ impl BridgeState {
         // 同一消息可能跨多个 bubble，中间还有无持久身份的工具；只收本次归档槽位。
         let mut groups: Vec<(PersistentEntryKey, Vec<usize>)> = Vec::new();
         let mut group_indices = HashMap::new();
+        let mut unattributed_bytes = 0usize;
+        let mut unattributed_seen = crate::kit::retained_bytes::SeenAllocations::default();
         for slot in slots {
             let Some(message_id) = live_message_id(&self.committed[slot]) else {
+                // 工具卡、子 Agent 等没有持久身份：不能建可淘汰段，但正文确实驻留，
+                // 必须计入同一预算，避免账目低估。
+                unattributed_bytes += crate::kit::retained_bytes::retained_unit_bytes(
+                    &self.committed[slot],
+                    &mut unattributed_seen,
+                );
                 continue;
             };
             let key = PersistentEntryKey::own(format!("{}:{message_id}", self.active_session_id));
@@ -254,6 +262,9 @@ impl BridgeState {
                 groups.len() - 1
             });
             groups[index].1.push(slot);
+        }
+        if unattributed_bytes > 0 {
+            self.window.note_unattributed_live_bytes(unattributed_bytes);
         }
         let mut mappings = Vec::new();
         let mut display_slots = Vec::new();
