@@ -10,6 +10,7 @@ import { maintain } from './maintenance';
 import { TopicEventBus } from './realtime/bus';
 import { drainOutbox } from './realtime/outbox';
 import { getActorBySession } from './storage/queries';
+import { renderChatPage } from './web/chat';
 import { renderHomePage, renderInvalidSharePage, renderSharePage } from './web/share';
 import type { Env } from './env';
 
@@ -176,7 +177,7 @@ const app = new Hono<{ Bindings: Env }>();
 
 app.get('/health', (c) => c.json({ ok: true, env: c.env.ENVIRONMENT }));
 app.get('/', (c) =>
-  c.html(renderHomePage(c.env.PUBLIC_ORIGIN), 200, { 'cache-control': 'no-store' }),
+  c.html(renderHomePage(), 200, { 'cache-control': 'no-store' }),
 );
 app.get('/a/:sessionId', async (c) => {
   const actor = await getActorBySession(c.env.DB, c.req.param('sessionId'));
@@ -185,6 +186,9 @@ app.get('/a/:sessionId', async (c) => {
   }
   return c.html(renderSharePage(actor), 200, { 'cache-control': 'no-store' });
 });
+app.get('/c/:roomId', (c) =>
+  c.html(renderChatPage(c.req.param('roomId')), 200, { 'cache-control': 'no-store' }),
+);
 app.all('/mcp', async (c) => {
   try {
     return await handleMcp(c.req.raw, c.env, c.executionCtx);

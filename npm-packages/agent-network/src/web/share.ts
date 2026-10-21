@@ -1,79 +1,6 @@
 import type { ActorRow } from '../storage/rows';
-
-const PAGE_STYLE = `
-  :root { color-scheme: light dark; }
-  * { box-sizing: border-box; }
-  body { margin: 0; min-height: 100vh; display: grid; place-items: center; padding: 24px;
-    font: 16px/1.6 ui-sans-serif, system-ui, -apple-system, "Segoe UI", sans-serif;
-    background: #f6f7f9; color: #1c1e21; }
-  main { width: min(560px, 100%); background: #fff; border: 1px solid #e3e5e8; border-radius: 16px;
-    padding: 28px; box-shadow: 0 8px 28px rgb(0 0 0 / 6%); }
-  h1 { margin: 0 0 4px; font-size: 24px; line-height: 1.3; }
-  .muted { color: #6b7280; margin: 0 0 18px; }
-  dl { display: grid; grid-template-columns: auto 1fr; gap: 8px 12px; margin: 0 0 20px; }
-  dt { color: #6b7280; }
-  dd { margin: 0; overflow-wrap: anywhere; }
-  code { font: 13px/1.5 ui-monospace, SFMono-Regular, Menlo, monospace;
-    background: #f2f4f7; border-radius: 6px; padding: 2px 6px; }
-  button { font: inherit; border-radius: 10px; border: 1px solid #d0d4da; background: #fff;
-    padding: 9px 14px; cursor: pointer; }
-  button.primary { background: #1c64f2; border-color: #1c64f2; color: #fff; }
-  button:disabled { opacity: .55; cursor: not-allowed; }
-  .row { display: flex; gap: 10px; flex-wrap: wrap; align-items: center; }
-  #status { min-height: 1.6em; margin: 14px 0 0; overflow-wrap: anywhere; }
-  details { margin-top: 18px; color: #4b5563; }
-  pre { overflow-x: auto; background: #f2f4f7; border-radius: 8px; padding: 10px; font-size: 13px; }
-  @media (prefers-color-scheme: dark) {
-    body { background: #111315; color: #e8eaed; }
-    main { background: #191c1f; border-color: #2a2f34; box-shadow: none; }
-    .muted, dt, details { color: #9aa1a9; }
-    code, pre { background: #22272c; }
-    button { background: #22272c; border-color: #3a4148; color: #e8eaed; }
-    button.primary { background: #3b82f6; border-color: #3b82f6; color: #fff; }
-  }
-`;
-
-function escapeHtml(value: string): string {
-  return value.replace(/[&<>"']/gu, (char) => {
-    switch (char) {
-      case '&':
-        return '&amp;';
-      case '<':
-        return '&lt;';
-      case '>':
-        return '&gt;';
-      case '"':
-        return '&quot;';
-      default:
-        return '&#39;';
-    }
-  });
-}
-
-/** 内联到 `<script>` 的 JSON 必须转义 HTML 敏感字符与行分隔符。 */
-function jsonForScript(value: unknown): string {
-  return JSON.stringify(value)
-    .replaceAll('<', '\\u003c')
-    .replaceAll('>', '\\u003e')
-    .replaceAll('&', '\\u0026')
-    .replaceAll('\u2028', '\\u2028')
-    .replaceAll('\u2029', '\\u2029');
-}
-
-function layout(title: string, body: string): string {
-  return `<!doctype html>
-<html lang="zh-CN">
-<head>
-<meta charset="utf-8">
-<meta name="viewport" content="width=device-width, initial-scale=1">
-<title>${escapeHtml(title)}</title>
-<style>${PAGE_STYLE}</style>
-</head>
-<body>
-<main>${body}</main>
-</body>
-</html>`;
-}
+import { renderAppPage } from './chat';
+import { escapeHtml, jsonForScript, layout } from './layout';
 
 /**
  * 分享页：把 `agent_session_id` 解析为 Agent 公开资料，并允许浏览器访客一键添加好友、建立单聊。
@@ -185,7 +112,8 @@ addButton.addEventListener('click', async function () {
       kind: 'direct',
       members: [contact.contact.actor_id]
     });
-    statusElement.textContent = '已添加为好友，单聊已创建（' + room.room.room_id + '）。Agent 会在待办与消息中看到你。';
+    statusElement.textContent = '已添加为好友，正在进入单聊…';
+    location.href = '/c/' + encodeURIComponent(room.room.room_id);
   } catch (error) {
     statusElement.textContent = '添加失败：' + (error && error.message ? error.message : String(error));
     addButton.disabled = false;
@@ -214,16 +142,6 @@ export function renderInvalidSharePage(): string {
   );
 }
 
-export function renderHomePage(origin: string): string {
-  return layout(
-    'Agent Network',
-    `<h1>Agent Network</h1>
-<p class="muted">面向 Agent 协作的 MCP 服务。工具、资源与订阅统一走 <code>${escapeHtml(origin)}/mcp</code>（MCP 2026-07-28）。</p>
-<dl>
-  <dt>MCP 端点</dt><dd><code>/mcp</code></dd>
-  <dt>分享链接</dt><dd><code>/a/&lt;agent_session_id&gt;</code></dd>
-  <dt>健康检查</dt><dd><code>/health</code></dd>
-</dl>
-<p>在 Peri 或其他 MCP 客户端中连接该端点即可注册身份、添加好友、收发消息。</p>`,
-  );
+export function renderHomePage(): string {
+  return renderAppPage(null);
 }

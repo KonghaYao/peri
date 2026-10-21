@@ -89,7 +89,7 @@ interface RoomDetail {
     my_role: string;
     last_message: { message_id: string; preview: string } | null;
   };
-  members: { actor_id: string; role: string }[];
+  members: { actor_id: string; role: string; kind: string }[];
 }
 
 interface ReadChunk {
@@ -637,6 +637,89 @@ async function main(): Promise<void> {
       'agentnet://me',
     );
     await resubscribed.close();
+
+    // 网页人类发送回归：页面把房间内 Agent 成员填入 invoke，人类成员不产生 delivery。
+    const webCollector = notificationCollector(agentB.client);
+    const webSubscription = await openSubscription(agentB.client, ['agentnet://me']);
+    await waitUntil('等待网页回归订阅建立', () =>
+      Boolean(webSubscription.honoredFilter.resourceSubscriptions?.length),
+    );
+    const webRoom = await callTool<RoomDetail>(humanC.client, 'network_room_create', {
+      request_id: newRequestId('room'),
+      kind: 'direct',
+      members: [b.actor_id],
+    });
+    const webRoomId = webRoom.room.room_id;
+    check(
+      '网页人类单聊成员包含 human 与 agent 类型',
+      webRoom.members.some((member) => member.actor_id === c.actor_id && member.kind === 'human') &&
+        webRoom.members.some((member) => member.actor_id === b.actor_id && member.kind === 'agent'),
+      webRoom.members,
+    );
+    const inboxBeforeWeb = await inbox(agentB, 'pending');
+    const webSend = await sendMessage(humanC, webRoomId, 'web-human-hello', {
+      invoke: [b.actor_id],
+    });
+    checkEqual('网页人类发送为 Agent 创建 delivery', webSend.delivery_ids.length, 1);
+    const webEvent = await webCollector.waitFor(
+      (event) => event.params.uri === 'agentnet://me',
+      '等待网页消息触发 agentnet://me 通知',
+    );
+    check(
+      '网页消息触发 agentnet://me 通知',
+      Boolean(subscriptionIdOf(webEvent.params)),
+      webEvent.params,
+    );
+    const inboxAfterWeb = await inbox(agentB, 'pending');
+    check(
+      'Agent inbox 出现网页消息 delivery',
+      inboxAfterWeb.items.some((item) => item.delivery_id === webSend.delivery_ids[0]),
+      inboxAfterWeb.items,
+    );
+    checkEqual(
+      '网页消息使 Agent pending_count 增加 1',
+      inboxAfterWeb.pending_count,
+      inboxBeforeWeb.pending_count + 1,
+    );
+    const humanInbox = await inbox(humanC, 'all');
+    check(
+      '人类发送者没有给自己的 delivery',
+      !humanInbox.items.some((item) => item.message_id === webSend.message.message_id),
+      humanInbox.items,
+    );
+    await expectToolError(
+      '网页人类发送不能 invoke 人类成员',
+      sendMessage(humanC, webRoomId, 'web-human-target', { invoke: [c.actor_id] }),
+      'INVALID_ARGUMENT',
+    );
+    await webSubscription.close();
+
+    // 群聊同一规则：网页人类发送唤醒所有 Agent 成员，人类成员不产生 delivery。
+    const webGroup = await callTool<RoomDetail>(agentA.client, 'network_room_create', {
+      request_id: newRequestId('room'),
+      kind: 'group',
+      members: [b.actor_id, c.actor_id],
+      title: '网页群聊回归',
+    });
+    const webGroupId = webGroup.room.room_id;
+    const groupSend = await sendMessage(humanC, webGroupId, 'web-group-hello', {
+      invoke: [a.actor_id, b.actor_id],
+    });
+    checkEqual('网页群聊为每个 Agent 成员创建 delivery', new Set(groupSend.delivery_ids).size, 2);
+    const groupInboxA = await inbox(agentA, 'pending');
+    const groupInboxB = await inbox(agentB, 'pending');
+    check(
+      '网页群聊唤醒所有 Agent 成员',
+      groupInboxA.items.some((item) => item.message_id === groupSend.message.message_id) &&
+        groupInboxB.items.some((item) => item.message_id === groupSend.message.message_id),
+      { a: groupInboxA.items, b: groupInboxB.items },
+    );
+    const groupHumanInbox = await inbox(humanC, 'all');
+    check(
+      '网页群聊不产生人类成员 delivery',
+      !groupHumanInbox.items.some((item) => item.message_id === groupSend.message.message_id),
+      groupHumanInbox.items,
+    );
 
     const resourceMe = await readResourceJson<{ actor_id: string }>(agentB.client, 'agentnet://me');
     checkEqual('resources/read agentnet://me 返回身份', resourceMe.actor_id, b.actor_id);

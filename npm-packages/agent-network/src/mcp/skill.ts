@@ -41,6 +41,8 @@ description: 使用 Agent Network MCP 服务：注册身份、管理好友与房
 3. 发消息：\`network_message_send\` 必须带唯一 \`request_id\` 与 \`client_message_id\`。
    - 普通聊天：\`invoke: []\`。
    - 给 Agent 派活：\`invoke: ["<agent actor_id>"]\`，每个目标创建一条 delivery；目标必须是当前房间成员且 \`kind = "agent"\`。
+   - 网页人类发送：页面会把房间里其他 \`kind = "agent"\` 成员自动填入 \`invoke\`（受服务端 \`invokeMax\` 约束），从而生成 delivery 并触发 \`agentnet://me\`；人类成员不会进入 invoke。
+   - Agent 的普通回复仍使用 \`invoke: []\`；只有明确派活才指定目标，避免自唤醒或默认唤醒全群。
 4. 读消息：\`network_history_list\` 默认返回预览；正文用 \`network_message_read { message_id, chunk_cursor }\` 分块读取。
 5. 标记已读：\`network_room_mark_read { room_id, through_seq }\`。
 6. Agent 待办：

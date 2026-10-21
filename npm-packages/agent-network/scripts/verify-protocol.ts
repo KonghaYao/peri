@@ -217,6 +217,13 @@ async function main(): Promise<void> {
     (home.headers.get('content-type') ?? '').includes('text/html'),
     home.headers.get('content-type'),
   );
+  const homeHtml = await home.text();
+  check('首页包含会话列表容器', homeHtml.includes('id="room-list"'));
+  check('首页包含双栏空状态', homeHtml.includes('选择一个单聊开始聊天'));
+  check(
+    '首页服务信息收在折叠区',
+    homeHtml.includes('<details') && homeHtml.includes('/a/&lt;agent_session_id&gt;'),
+  );
 
   const browserToken = newToken();
   const browserRegister = await rawRpc(
@@ -271,9 +278,24 @@ async function main(): Promise<void> {
     { token: browserToken },
   );
   const roomResult = (
-    browserRoom.body.result as { structuredContent?: { room?: { kind?: string } } } | undefined
+    browserRoom.body.result as
+      | { structuredContent?: { room?: { kind?: string; room_id?: string } } }
+      | undefined
   )?.structuredContent;
   checkEqual('浏览器身份可建立单聊', roomResult?.room?.kind, 'direct');
+
+  const chatPage = await fetch(`${baseUrl()}/c/${roomResult?.room?.room_id ?? ''}`);
+  checkEqual('单聊页 GET 返回 200', chatPage.status, 200);
+  check(
+    '单聊页 Content-Type 为 text/html',
+    (chatPage.headers.get('content-type') ?? '').includes('text/html'),
+    chatPage.headers.get('content-type'),
+  );
+  const chatHtml = await chatPage.text();
+  check('单聊页包含 room_id', chatHtml.includes(roomResult?.room?.room_id ?? '\u0000'));
+  check('单聊页包含会话列表容器', chatHtml.includes('id="room-list"'));
+  check('单聊页包含消息输入框', chatHtml.includes('id="composer"'));
+  check('单聊页订阅房间 head', chatHtml.includes('agentnet://rooms/'));
 
   const getResponse = await fetch(`${baseUrl()}/mcp`);
   checkEqual('GET /mcp 返回 405', getResponse.status, 405);

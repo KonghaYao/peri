@@ -324,7 +324,7 @@ async function resolveRootLink(
 function assertInvoke(invoke: string[] | undefined, sender: string): string[] {
   const list = [...new Set(invoke ?? [])];
   if (list.length > LIMITS.invokeMax) {
-    throw new BusinessError('INVALID_ARGUMENT', '单条消息最多指定 8 个执行目标');
+    throw new BusinessError('INVALID_ARGUMENT', `单条消息最多指定 ${LIMITS.invokeMax} 个执行目标`);
   }
   if (list.includes(sender)) {
     throw new BusinessError('INVALID_ARGUMENT', '不能把消息发送者自己加入 invoke');
