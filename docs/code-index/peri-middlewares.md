@@ -275,7 +275,7 @@ scope 快照携 epoch；`taskClose`/`taskOpen` 按该 epoch 做 owner 端 CAS，
 | 正文来源加载 | **已删除**：`content.rs` 不存在——正文一律经统一 activation（`src/mcp/skill_activation.rs`）读 provider 的 `resources/read` 并做 digest/frontmatter 校验 |
 | 中间件 / 摘要 | mod.rs（`SkillsMiddleware` / `render_frozen_summary` / `build_summary` / `source_label` / `format_discovery_protocol`）；配置读取见 `src/settings.rs` |
 | 工具 | tools.rs（`SkillTool` / `DiscoverSkillsTool`）；builtin 嵌入注册表已删除（静态资产唯一副本在 `mcp-packages/workspace/src/resources/builtin/`） |
-| multitask（协作模式内置技能） | 正文 mcp-packages/workspace/src/resources/builtin/skills/multitask/SKILL.md（W1 迁移后唯一副本；`BUILTIN_SKILLS` 经 `include_str!` 注册，provider 侧 `resources/builtin.rs`——宿主 `src/skills/builtin/` 已随 W4b 删除）；原为项目级 `{cwd}/.claude/skills/multitask`，现下沉为编译期内置，仓库不再保留项目副本，来源标签由 project 变为 builtin（项目级同名副本仍会遮蔽 builtin 版本）；契约测试在 provider 侧 `mcp-packages/workspace/src/resources/builtin_test.rs`（宿主同名用例已删除） |
+| multitask（协作模式内置技能） | 正文 mcp-packages/workspace/src/resources/builtin/skills/multitask/SKILL.md（W1 迁移后唯一副本；`BUILTIN_SKILLS` 经 `include_str!` 注册，provider 侧 `resources/builtin.rs`——宿主 `src/skills/builtin/` 已随 W4b 删除）；计划、执行、校验分别派给只承担一种职责的新 Agent，任务结束后不复用实例或线程，补漏与返工通过产物交接给新 Agent；原为项目级 `{cwd}/.claude/skills/multitask`，现下沉为编译期内置，仓库不再保留项目副本，来源标签由 project 变为 builtin（项目级同名副本仍会遮蔽 builtin 版本）；契约测试在 provider 侧 `mcp-packages/workspace/src/resources/builtin_test.rs`（宿主同名用例已删除） |
 
 ### SubAgent（src/subagent/）
 
