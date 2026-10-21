@@ -217,6 +217,7 @@ async fn fixture(
         None::<rmcp::model::ServerPeerInfo>,
     );
     let handle = Arc::new(McpClientHandle {
+        call_gate: Default::default(),
         name: SERVER.to_string(),
         version: None,
         connected_at: None,
@@ -459,6 +460,7 @@ async fn legacy_templates_only_server_probes_without_error() {
     }));
     // legacy 句柄：skills_capable=false + 无 enrolled 资源
     let legacy = Arc::new(McpClientHandle {
+        call_gate: Default::default(),
         name: SERVER.to_string(),
         version: None,
         connected_at: None,
@@ -600,6 +602,7 @@ mod real_workspace_provider {
             .expect("生产 client 握手不得失败");
 
             let handle = Arc::new(McpClientHandle {
+                call_gate: Default::default(),
                 name: "workspace".to_string(),
                 version: None,
                 connected_at: None,

@@ -23,6 +23,10 @@ impl McpClientPool {
         self: &Arc<Self>,
         server_name: String,
     ) -> Result<(), super::task_scope::McpTaskScopeClosed> {
+        let slot = self.server_slot(&server_name);
+        if slot.stopped.load(Ordering::Acquire) || slot.control_operation.try_lock().is_err() {
+            return Err(super::task_scope::TaskAdmissionError::OwnerClosed);
+        }
         let pool = Arc::clone(self);
         let key = super::task_scope::McpTaskKey::Reconnect(server_name.clone());
         self.spawn_background(key, async move {
@@ -37,6 +41,36 @@ impl McpClientPool {
         server_name: &str,
         oauth_event_callback: Option<Box<dyn Fn(OAuthFlowEvent) + Send + Sync>>,
     ) -> Result<(), McpPoolError> {
+        let slot = self.server_slot(server_name);
+        let _control =
+            slot.control_operation
+                .try_lock()
+                .map_err(|_| McpPoolError::NotConnected {
+                    server: server_name.into(),
+                    status: ClientStatus::Disconnected,
+                })?;
+        if slot.stopped.load(Ordering::Acquire) {
+            return Err(McpPoolError::NotConnected {
+                server: server_name.into(),
+                status: ClientStatus::Disconnected,
+            });
+        }
+        let _operation = slot.operation.clone().try_lock_owned().map_err(|_| {
+            McpPoolError::ConnectionFailed {
+                server: server_name.into(),
+                reason: "MCP server is busy".into(),
+            }
+        })?;
+        drop(_control);
+        self.reconnect_managed(server_name, oauth_event_callback, true)
+            .await
+    }
+    pub(crate) async fn reconnect_managed(
+        self: &Arc<Self>,
+        server_name: &str,
+        oauth_event_callback: Option<Box<dyn Fn(OAuthFlowEvent) + Send + Sync>>,
+        interactive_oauth: bool,
+    ) -> Result<(), McpPoolError> {
         let server_config = self
             .configs
             .read()
@@ -46,27 +80,15 @@ impl McpClientPool {
                 server: server_name.to_string(),
                 status: ClientStatus::Disconnected,
             })?;
-        // 重新发现开始：旧代证据立即作废，等待方按「仍在进行」重新判定
-        // （旧代证据即使保留也不会被接受，但显式清除让等待方立刻重读事实）。
-        self.clear_discovery_evidence(server_name);
-        // Stop and join the old keyed subscription outside pool locks before
-        // replacing its service, so a cancelled caller cannot detach it.
-        self.stop_background(&super::task_scope::McpTaskKey::Subscription(
-            server_name.to_string(),
-        ))
-        .await;
-        // 宿主面资源订阅也必须先于旧 service 关闭：它们同样持有 Subscription 并
-        // 保活连接；换代后旧订阅流不再有意义，由宿主按需要重建。
-        self.task_spawner
-            .stop_instance_resource_subscriptions(server_name)
-            .await;
-        let previous_service = { self.services.lock().remove(server_name) };
-        if let Some(mut svc) = previous_service {
-            let _ = svc.close_with_timeout(SHUTDOWN_TIMEOUT).await;
-        }
-        // builtin 实例：旧同进程 server task 必须在新链路建立前收敛（旧 client service
-        // 已关闭 → server 读半收到 EOF）。非 builtin server 这里是空操作。
-        self.close_builtin_task(server_name).await;
+        self.close_server_connection(server_name, true)
+            .await
+            .map_err(|e| McpPoolError::ConnectionFailed {
+                server: server_name.into(),
+                reason: e.to_string(),
+            })?;
+        self.server_slot(server_name)
+            .stopped
+            .store(false, Ordering::Release);
         // 重连前捕获旧状态：insert 覆盖后由 record_status_change 判定是否
         // 构成上下线变化（Connected→Failed 等）；首次插入（旧状态不存在）
         // 不产生通知（初始化阶段由首 turn 概览覆盖）。
@@ -161,7 +183,7 @@ impl McpClientPool {
                             server: server_name.to_owned(),
                             reason: "MCP execution directory is not initialized".into(),
                         })?;
-                match self.spawn_stdio_transport(command, args, env, cwd) {
+                match self.spawn_stdio_transport(server_name, command, args, env, cwd) {
                     Ok(t) => serve_client_auto(t, &self.capability_profile, timeout).await,
                     Err(e) => {
                         McpClientPool::insert_failed(self, server_name, format!("stdio 失败: {e}"));
@@ -187,6 +209,14 @@ impl McpClientPool {
             } => {
                 let token_store = self.oauth_credentials().ok();
                 if oauth.is_some() && token_store.is_none() {
+                    if !interactive_oauth {
+                        McpClientPool::insert_needs_auth(
+                            self,
+                            server_name,
+                            "OAuth authorization required".into(),
+                        );
+                        return Ok(());
+                    }
                     let reason = "OAuth credentials were not injected".to_string();
                     McpClientPool::insert_failed(self, server_name, reason.clone());
                     commit_discovery_failure(self, server_name, false);
@@ -214,14 +244,18 @@ impl McpClientPool {
                 if let Some(cfg) = oauth_cfg {
                     let token_store = token_store.expect("OAuth path has credential client");
                     let flow_id = uuid::Uuid::now_v7().to_string();
-                    match self.reserve_oauth_flow(server_name, &flow_id) {
-                        OAuthStartDisposition::Started => {}
-                        OAuthStartDisposition::AlreadyActive
-                        | OAuthStartDisposition::Conflict { .. } => {
-                            return Err(McpPoolError::ConnectionFailed {
-                                server: server_name.to_string(),
-                                reason: "OAuth authorization already active".to_string(),
-                            });
+                    // Control already holds exclusive admission. Quick restore never
+                    // publishes a callback or reserves an interactive flow.
+                    if interactive_oauth {
+                        match self.reserve_oauth_flow(server_name, &flow_id) {
+                            OAuthStartDisposition::Started => {}
+                            OAuthStartDisposition::AlreadyActive
+                            | OAuthStartDisposition::Conflict { .. } => {
+                                return Err(McpPoolError::ConnectionFailed {
+                                    server: server_name.to_string(),
+                                    reason: "OAuth authorization already active".to_string(),
+                                });
+                            }
                         }
                     }
                     // callback 可空：优先调用方传入，其次 pool 级回调（host
@@ -231,9 +265,13 @@ impl McpClientPool {
                         .or_else(|| self.oauth_event_callback())
                         .unwrap_or_else(|| Arc::new(|_| {}));
                     let mut mgr = OAuthFlowManager::new_with_arc(token_store, cb);
-                    let oauth_result = mgr
-                        .run_oauth_flow_with_id(&flow_id, server_name, url, &cfg)
-                        .await;
+                    let oauth_result = if interactive_oauth {
+                        mgr.run_oauth_flow_with_id(&flow_id, server_name, url, &cfg)
+                            .await
+                    } else {
+                        mgr.restore_oauth_flow_with_id(&flow_id, server_name, url, &cfg)
+                            .await
+                    };
                     self.release_oauth_flow(server_name, &flow_id);
                     match oauth_result {
                         Ok(()) => {
@@ -267,6 +305,14 @@ impl McpClientPool {
                             }
                         }
                         Err(e) => {
+                            if !interactive_oauth {
+                                McpClientPool::insert_needs_auth(
+                                    self,
+                                    server_name,
+                                    "OAuth authorization required".into(),
+                                );
+                                return Ok(());
+                            }
                             if oauth.is_none() {
                                 tracing::warn!(server = %server_name, error = %e, "OAuth 恢复失败，尝试裸连接");
                                 serve_client_auto(
@@ -299,7 +345,7 @@ impl McpClientPool {
 
         match result {
             Ok(Ok(rs)) => {
-                let rs = self.retain_service(rs);
+                let rs = self.track_server_service(server_name, rs);
                 // 订阅配置存在：按 server 配置重建 subscriptions/listen 长流
                 // （2026-07-28）。失败仅告警——server 可能不支持，连接本身仍可用。
                 // A24 关闭门与 initialize 同源（`pool.subscription_allowed` 唯一判定）。
@@ -362,6 +408,7 @@ impl McpClientPool {
                     OAuthStatus::default()
                 };
                 let handle = Arc::new(McpClientHandle {
+                    call_gate: Default::default(),
                     name: server_name.to_string(),
                     version: peer
                         .peer_info()

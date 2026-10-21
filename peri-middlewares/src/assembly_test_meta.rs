@@ -710,6 +710,7 @@ async fn mcp_slot_derives_discover_agent_face_from_sub_agent_closed_key() {
     pool.clients.write().insert(
         "workspace".to_string(),
         Arc::new(McpClientHandle {
+            call_gate: Default::default(),
             name: "workspace".to_string(),
             version: None,
             connected_at: None,

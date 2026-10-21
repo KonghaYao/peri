@@ -52,6 +52,7 @@ fn handle(
     resources: Vec<Resource>,
 ) -> Arc<McpClientHandle> {
     Arc::new(McpClientHandle {
+        call_gate: Default::default(),
         name: name.to_string(),
         version: None,
         connected_at: None,

@@ -316,7 +316,6 @@ async fn server_config(tmp: &tempfile::TempDir) -> AcpServerConfig {
         None,
         None,
         None,
-        None,
         Some(Arc::new(|| {
             Arc::new(peri_agent::agent::async_tasks::TaskManager::new())
                 as Arc<dyn peri_acp_types::tasks::TaskManager>
@@ -340,7 +339,6 @@ async fn server_config(tmp: &tempfile::TempDir) -> AcpServerConfig {
         mcp_apps_facade: None,
         session_authorization: None,
         acp_mcp: None,
-        dynamic_mcp: None,
         oauth_event_tx: None,
         oauth_event_rx: None,
         plugin_skill_roots: Vec::new(),

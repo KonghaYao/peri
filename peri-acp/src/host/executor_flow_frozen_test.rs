@@ -36,7 +36,6 @@ async fn make_manager(tmp: &tempfile::TempDir) -> SessionManager {
         None,
         None,
         None,
-        None,
         Arc::new(AgentCatalogProvider::new()),
         Vec::new(), // plugin 命令条目（Phase 6 B2；测试无）
     )

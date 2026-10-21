@@ -152,7 +152,6 @@ async fn test_build_frozen_data_applies_meta_harness_state() {
         None,
         None,
         None,
-        None,
         Arc::new(peri_middlewares::host_ports::AgentCatalogProvider::new()),
         Vec::new(), // plugin 命令条目（Phase 6 B2；测试无）
     );
@@ -238,7 +237,6 @@ async fn test_frozen_data_does_not_reread_meta_docs() {
         provider,
         Arc::clone(&config),
         SharedPermissionMode::new(PermissionMode::Bypass),
-        None,
         None,
         None,
         None,

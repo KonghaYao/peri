@@ -754,6 +754,7 @@ fn make_discovery_handle(
     resources: Vec<Resource>,
 ) -> Arc<McpClientHandle> {
     Arc::new(McpClientHandle {
+        call_gate: Default::default(),
         name: "srv".to_string(),
         version: None,
         connected_at: None,
@@ -957,6 +958,7 @@ fn make_spec_handle(
     running: &rmcp::service::RunningService<RoleClient, ()>,
 ) -> Arc<McpClientHandle> {
     Arc::new(McpClientHandle {
+        call_gate: Default::default(),
         name: "srv".to_string(),
         version: None,
         connected_at: None,

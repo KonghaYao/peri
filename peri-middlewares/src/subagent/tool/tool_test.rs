@@ -277,6 +277,7 @@ pub(crate) fn with_agent_catalog(
     pool.clients.write().insert(
         "workspace".to_string(),
         Arc::new(crate::mcp::McpClientHandle {
+            call_gate: Default::default(),
             name: "workspace".to_string(),
             version: None,
             connected_at: None,
@@ -553,6 +554,7 @@ async fn mcp_agent_suggestions_require_activation_and_connection() {
     pool.clients.write().insert(
         "offline".to_string(),
         Arc::new(McpClientHandle {
+            call_gate: Default::default(),
             name: "offline".to_string(),
             version: None,
             connected_at: None,
@@ -835,8 +837,6 @@ mod beta_default_test;
 
 #[path = "tool_test/bg_register_cancel_test.rs"]
 mod bg_register_cancel_test;
-#[path = "tool_test/dynamic_mcp_subagent_test.rs"]
-mod dynamic_mcp_subagent_test;
 #[path = "tool_test/events_contract_test.rs"]
 mod events_contract_test;
 #[path = "tool_test/fork_test.rs"]

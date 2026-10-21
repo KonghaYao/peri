@@ -29,6 +29,7 @@ draft、proposal、可行性探查、审计报告和未采纳方案不进入本�
 | Model adapter | [model-adapters.md](model-adapters.md) | provider 无关协议、stream、retry 与观测 |
 | System Prompt | [system-prompt.md](system-prompt.md) | 冻结 base、request-time contribution 与 cache seam |
 | MetaHarness | [meta-harness.md](meta-harness.md) | 段落覆盖、middleware 关闭与冻结语义 |
+| ACP MCP 运行控制 | [acp-mcp-control.md](acp-mcp-control.md) | ACP 按会话环境注册/重启/关闭普通 MCP，TUI 提供重启/关闭；临时状态与调用、发现及清理生命周期 |
 | MCP 响应缓存 | [mcp-cache.md](mcp-cache.md) | 文件/环境总开关、pool 策略与持久化/SDK 缓存关闭闭包 |
 | Middleware | [middleware-system.md](middleware-system.md) | 生产链、hook、工具与 prompt contribution |
 | 工具系统 | [tool-system.md](tool-system.md) | session-local 可见性、ToolSearch 与执行边界 |
@@ -37,7 +38,6 @@ draft、proposal、可行性探查、审计报告和未采纳方案不进入本�
 | 会话身份、工作区归属与恢复 | [session-id-environment.md](session-id-environment.md) | Session ID 与机器归属、工作区发现与登记、执行绑定与恢复入口；进度与验收见 [2026-09 月志](../../spec/history/2026-09.md)（2026-09-30 条目） |
 | 用户待发送队列 | [user-input-queue.md](user-input-queue.md) | Mailbox、单条/全部投递、取回与运行身份 |
 | Compact | [micro-compact.md](micro-compact.md) | Step/交换投影、原文回查、原子提交与 Full/fork/rewind 生命周期；门控和能力边界 |
-| Dynamic MCP | [dynamic-mcp.md](dynamic-mcp.md) | session 动态加载、目录发布与关闭 |
 | MCP 适配 v4-part-1 | [mcp-adaptation-v4-part-1.md](mcp-adaptation-v4-part-1.md) | System MCP 启动依赖、工具注入、MCP 隔离与 middleware 归属 |
 | MCP Apps relay | [mcp-multiplexing.md](mcp-multiplexing.md) | stdio Apps profile、binding lease 与多路数据隔离 |
 | Meta 数据访问 | [meta-control.md](meta-control.md) | 只读 session metadata CLI 与持久化边界 |

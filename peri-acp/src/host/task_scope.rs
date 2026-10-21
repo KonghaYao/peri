@@ -7,7 +7,7 @@ use std::{
     time::Duration,
 };
 
-use peri_acp_types::{dynamic_mcp::DynamicMcpShutdownReport, ports::McpPoolShutdownReport};
+use peri_acp_types::ports::McpPoolShutdownReport;
 use tokio::task::AbortHandle;
 use tokio_util::{sync::CancellationToken, task::TaskTracker};
 
@@ -35,6 +35,7 @@ pub(crate) enum HostTaskKind {
     Prompt,
     Prediction,
     McpAppsRelay,
+    McpControl,
     UserInputEvents,
     SessionRequest,
     CompactHook,
@@ -129,13 +130,11 @@ pub(crate) struct HostScopeClosed;
 pub(crate) enum HostTerminalShutdownReport {
     Complete {
         host: HostShutdownReport,
-        dynamic_mcp: DynamicMcpShutdownReport,
         mcp_pool: McpPoolShutdownReport,
         session_close_failures: usize,
     },
     Incomplete {
         host: HostShutdownReport,
-        dynamic_mcp: DynamicMcpShutdownReport,
         mcp_pool: McpPoolShutdownReport,
         session_close_failures: usize,
     },
@@ -144,25 +143,21 @@ pub(crate) enum HostTerminalShutdownReport {
 impl HostTerminalShutdownReport {
     pub(crate) fn aggregate(
         host: HostShutdownReport,
-        dynamic_mcp: DynamicMcpShutdownReport,
         mcp_pool: McpPoolShutdownReport,
         session_close_failures: usize,
     ) -> Self {
         let complete = matches!(host, HostShutdownReport::Complete)
-            && matches!(dynamic_mcp, DynamicMcpShutdownReport::Complete)
             && mcp_pool.is_complete()
             && session_close_failures == 0;
         if complete {
             Self::Complete {
                 host,
-                dynamic_mcp,
                 mcp_pool,
                 session_close_failures,
             }
         } else {
             Self::Incomplete {
                 host,
-                dynamic_mcp,
                 mcp_pool,
                 session_close_failures,
             }

@@ -961,7 +961,6 @@ panel-mcp-cache-saved = 缓存已保存
 panel-mcp-cache-ready = 缓存就绪
 panel-mcp-cache-disabled = 缓存已关闭：已认证服务
 panel-mcp-cache-disabled-config = 缓存关闭：配置
-panel-mcp-cache-disabled-dynamic = 缓存关闭：动态连接
 panel-mcp-cache-pending = 缓存等待初始化
 panel-mcp-cache-live-fetch = 持久化缓存：实时读取
 panel-mcp-cache-none = 持久化缓存：—
@@ -1304,3 +1303,21 @@ exit-resume-hint = 恢复本会话：peri -r { $session }
 
 panel-title-history-detail = 历史详情
 panel-desc-history-detail = 超大历史条目详情
+
+# ACP MCP 运行控制
+panel-mcp-detail-btn-restart = 重启
+panel-mcp-detail-btn-stop = 关闭
+panel-mcp-restarting = 正在重启 MCP… Esc 仅停止等待。
+panel-mcp-stopping = 正在关闭 MCP… Esc 仅停止等待。
+panel-mcp-control-connected = MCP 已连接。
+panel-mcp-control-stopped = MCP 已关闭。
+panel-mcp-control-needs-auth = MCP 需要授权，请选择「授权」继续。
+panel-mcp-control-failed = MCP 操作失败：{ $detail }
+panel-mcp-control-unknown = MCP 操作结果未知，请核对刷新后的状态再重试。
+panel-mcp-control-target-unavailable = 此 MCP 服务已不可执行该操作。
+panel-mcp-control-unavailable = MCP 运行控制不可用。
+panel-mcp-control-builtin = 内置 MCP 服务由宿主管理。
+panel-mcp-control-workspace = 工作区连接由宿主管理。
+panel-mcp-control-system = System MCP 服务由宿主管理。
+panel-mcp-control-acp = MCP over ACP 不支持运行控制。
+panel-mcp-control-session-policy = 当前会话已禁用 MCP 运行控制。

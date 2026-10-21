@@ -219,6 +219,7 @@ fn server_handle(peer: &Peer) -> Arc<McpClientHandle> {
         source: None,
         url: None,
         skills_capable: false,
+        call_gate: Default::default(),
     })
 }
 

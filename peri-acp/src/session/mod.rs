@@ -16,7 +16,6 @@ mod caps;
 pub mod command;
 mod construction;
 pub mod cron_bridge;
-mod dynamic_mcp;
 pub mod event_sink;
 pub mod executor;
 mod frozen;
@@ -28,7 +27,6 @@ pub mod state_builders;
 // AsyncRouter（L5：物理迁入 peri-agent，仅依赖契约层；本处 re-export 桥保兼容）。
 pub use peri_agent::session::async_router::AsyncRouter;
 
-pub use dynamic_mcp::SessionDynamicMcpNotificationSink;
 pub(crate) use frozen::{
     build_collected_sections, build_collected_sections_with_capabilities, build_meta_harness_state,
     prepare_derived_environment, subagent_chain_capabilities,
@@ -141,15 +139,6 @@ pub struct AcpSession {
     /// 动态注入条目不因轮次丢失；随本结构 drop 释放，杜绝全局挂点）。
     pub command_registry: Arc<CommandRegistry>,
     pub(crate) mcp_subscription: Option<Arc<dyn peri_acp_types::mcp::McpSubscriptionPort>>,
-    pub(crate) dynamic_mcp_deployment:
-        Option<Arc<dyn peri_acp_types::ports::DynamicMcpDeploymentPort>>,
-    /// Idempotent Dynamic MCP cleanup lease.
-    pub dynamic_mcp_close: Option<Arc<dyn peri_acp_types::ports::SessionCloseRegistration>>,
-    /// Strong owner for the checked session-local MCP projection across stage builds.
-    pub dynamic_mcp_projection:
-        Arc<parking_lot::Mutex<Option<Arc<dyn peri_acp_types::ports::SessionMcpProjectionLease>>>>,
-    /// Strong owner for the checked weak Dynamic MCP notification sink.
-    pub dynamic_mcp_notifications: Option<Arc<SessionDynamicMcpNotificationSink>>,
 }
 
 struct SessionManagerInner {
@@ -178,8 +167,6 @@ struct SessionManagerInner {
     /// MCP subscriptions 桥接端口（装配注入；session 创建时注册 inbox，
     /// close_session 时注销——订阅通知唤醒 agent 的通道，同 cron 模式）。
     pub mcp_subscription: Option<Arc<dyn peri_acp_types::mcp::McpSubscriptionPort>>,
-    /// Deployment-level Dynamic MCP state machine port.
-    pub dynamic_mcp: Option<Arc<dyn peri_acp_types::ports::DynamicMcpDeploymentPort>>,
     /// Skills 扫描端口（装配注入；frozen 数据构建的 agents/skills 扫描经此访问）。
     pub agent_catalog: Arc<dyn peri_acp_types::ports::AgentCatalogPort>,
     /// 插件命令静态条目（Phase 6 B2 预转；会话创建时按
@@ -198,33 +185,15 @@ pub struct SessionManager {
 
 impl AcpSession {
     /// Close the same resources again after Incomplete; no registry guard crosses await.
-    pub(crate) async fn close_resources(
-        &self,
-    ) -> peri_acp_types::dynamic_mcp::DynamicMcpShutdownReport {
+    pub(crate) async fn close_resources(&self) -> bool {
         if let Some(mailbox) = &self.user_input_mailbox {
             mailbox.invalidate();
         }
         self.user_input_events_cancel.cancel();
-
-        if let Some(projection) = self.dynamic_mcp_projection.lock().take() {
-            projection.close();
-        }
-        let report = match &self.dynamic_mcp_close {
-            Some(close) => close.revoke_and_cleanup().await,
-            None => peri_acp_types::dynamic_mcp::DynamicMcpShutdownReport::Complete,
-        };
         peri_acp_types::session::cancel_all_agents(self.active_agents.values());
         self.cancel_token.cancel();
-        let tasks = self.task_manager.shutdown().await;
-        if tasks == peri_acp_types::tasks::TaskShutdownReport::Incomplete
-            || !self.active_agents.is_empty()
-        {
-            peri_acp_types::dynamic_mcp::DynamicMcpShutdownReport::Incomplete {
-                unfinished_instances: 1,
-            }
-        } else {
-            report
-        }
+        self.task_manager.shutdown().await == peri_acp_types::tasks::TaskShutdownReport::Complete
+            && self.active_agents.is_empty()
     }
 }
 
@@ -238,7 +207,6 @@ impl SessionManager {
         agent_overrides: Option<AgentOverrides>,
         cron_scheduler: Option<Arc<dyn peri_acp_types::cron::CronSchedulerPort>>,
         mcp_subscription: Option<Arc<dyn peri_acp_types::mcp::McpSubscriptionPort>>,
-        dynamic_mcp: Option<Arc<dyn peri_acp_types::ports::DynamicMcpDeploymentPort>>,
         task_manager_factory: Option<TaskManagerFactory>,
         agent_catalog: Arc<dyn peri_acp_types::ports::AgentCatalogPort>,
         plugin_command_entries: Vec<RouteEntry>,
@@ -257,7 +225,6 @@ impl SessionManager {
                 cron_mcp: parking_lot::Mutex::new(None),
                 cron_continuation_tx: parking_lot::Mutex::new(None),
                 mcp_subscription,
-                dynamic_mcp,
                 agent_catalog,
                 plugin_command_entries,
                 task_manager_factory,
@@ -308,9 +275,7 @@ impl SessionManager {
             anyhow::bail!("Session close incomplete: background tasks are still active");
         }
         if let Some(session) = self.take_for_close(session_id) {
-            if session.close_resources().await
-                != peri_acp_types::dynamic_mcp::DynamicMcpShutdownReport::Complete
-            {
+            if !session.close_resources().await {
                 self.inner.sessions.insert(session_id.to_owned(), session);
                 anyhow::bail!("Session close incomplete: owned resources are still active");
             }

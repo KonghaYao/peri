@@ -218,6 +218,7 @@ async fn enabled_policy_preserves_versioned_cache_hits_without_rpc() {
     let peer = running.peer();
     peer.set_peer_info(rmcp::model::InitializeResult::default().into());
     let handle = Arc::new(super::McpClientHandle {
+        call_gate: Default::default(),
         name: "server".into(),
         version: None,
         connected_at: None,
@@ -377,6 +378,7 @@ async fn disabled_policy_bypasses_skill_discovery_caches_and_keeps_registry_live
         pool.clients.write().insert(
             "server".into(),
             Arc::new(McpClientHandle {
+                call_gate: Default::default(),
                 name: "server".into(),
                 version: None,
                 connected_at: None,

@@ -634,6 +634,7 @@ fn connected_handle(
     source: Option<peri_acp_types::plugin::ConfigSource>,
 ) -> Arc<McpClientHandle> {
     Arc::new(McpClientHandle {
+        call_gate: Default::default(),
         name: name.to_string(),
         version: None,
         connected_at: None,

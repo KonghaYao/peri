@@ -486,10 +486,6 @@ fn cache_status_labels_are_explicit() {
         Some("panel-mcp-cache-disabled-config")
     );
     assert_eq!(
-        cache_status_label_key(Some("cache_disabled_dynamic")),
-        Some("panel-mcp-cache-disabled-dynamic")
-    );
-    assert_eq!(
         cache_status_label_key(Some("cache_pending")),
         Some("panel-mcp-cache-pending")
     );
@@ -527,6 +523,7 @@ pub(super) struct MountedPanel {
     pub(super) detail_btn: State<usize>,
     /// 面板滚动状态（详情鼠标命中的行号偏移来源）。
     pub(super) sv: State<ScrollViewState>,
+    pub(super) control: State<super::actions::ControlState>,
 }
 
 /// 卸载时清空 visitor：断言 panic 也不把句柄泄漏给同线程的后续用例。
@@ -582,6 +579,8 @@ impl MountedPanel {
                 detail_key: self.detail_key,
                 detail_btn: self.detail_btn,
                 sv: self.sv,
+                control: self.control,
+                control_scope: super::actions::current_scope(),
                 viewport,
                 servers: &servers,
                 skills_by_server: &skills,

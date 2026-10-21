@@ -153,3 +153,40 @@ async fn test_history_window_capability_requires_explicit_server_true() {
     );
     crate::kit::atoms::HISTORY_WINDOW_CAPABLE.set(false);
 }
+
+#[tokio::test]
+#[serial_test::serial]
+async fn test_mcp_control_requires_server_true_and_resets_on_close() {
+    for advertised in [json!(null), json!(false), json!("true"), json!(true)] {
+        let (transport, server) = mpsc_transport_pair();
+        let (client, _, _) = AcpTuiClient::new(transport);
+        assert!(!client.supports_mcp_control(), "initialize 前禁止控制");
+        let supported = advertised == json!(true);
+        let server_task = tokio::spawn(async move {
+            let Some(IncomingMessage::Request { id, method, params }) = server.recv().await else {
+                panic!("应收到 initialize");
+            };
+            assert_eq!(method, "initialize");
+            assert_eq!(
+                params["clientCapabilities"]["_meta"]["peri.mcpControlV1"],
+                json!(true)
+            );
+            server
+                .send_response(
+                    id,
+                    Ok(json!({"agentCapabilities":{"_meta":{"peri.mcpControlV1":advertised}}})),
+                )
+                .await
+                .unwrap();
+        });
+        client.register_ui_commands(&[]).await.unwrap();
+        assert_eq!(
+            client.supports_mcp_control(),
+            supported,
+            "能力只认服务端布尔 true"
+        );
+        client.close();
+        assert!(!client.supports_mcp_control(), "连接关闭后清除能力");
+        server_task.await.unwrap();
+    }
+}

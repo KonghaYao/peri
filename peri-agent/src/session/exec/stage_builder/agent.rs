@@ -265,8 +265,6 @@ fn project_assembly(input: &StageBuildInput, turn: TurnAssembly) -> AssemblyCont
         command_registry: input.command_registry.clone(),
         cron_scheduler: input.cron_scheduler.clone(),
         mcp_pool: input.mcp_pool.clone(),
-        dynamic_mcp: input.dynamic_mcp.clone(),
-        dynamic_mcp_projection: Arc::clone(&input.dynamic_mcp_projection),
         session_id: input.session_id.clone(),
         tool_search_index: input.tool_search_index.clone(),
         shared_tools: input.shared_tools.clone(),

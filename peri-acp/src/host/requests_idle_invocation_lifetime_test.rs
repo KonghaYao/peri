@@ -290,6 +290,7 @@ async fn install_assembly_peer(
         source: None,
         url: None,
         skills_capable: false,
+        call_gate: Default::default(),
     }));
     (
         calls,

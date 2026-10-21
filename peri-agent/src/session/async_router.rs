@@ -140,7 +140,7 @@ impl AsyncRouter {
             BgTaskKind::Agent => MessageSource::SubAgentComplete,
             BgTaskKind::Shell => MessageSource::ShellComplete,
             BgTaskKind::Workflow => MessageSource::WorkflowComplete,
-            BgTaskKind::Mcp => MessageSource::DynamicMcpNotification,
+            BgTaskKind::Mcp => MessageSource::McpNotification,
         };
         let reminder = background_result_reminder(result, kind);
         self.inbox.push(

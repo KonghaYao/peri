@@ -40,6 +40,10 @@ impl PoolMcpAppsRelay {
             .pool
             .get_client(&request.server_id)
             .ok_or_else(|| relay_error(McpAppsErrorKind::UnknownServer))?;
+        let _permit = handle
+            .call_gate
+            .try_acquire()
+            .map_err(|_| relay_error(McpAppsErrorKind::ServerDisconnected))?;
         let tool = handle
             .tools
             .iter()

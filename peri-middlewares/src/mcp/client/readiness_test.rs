@@ -134,6 +134,7 @@ impl SystemFixture {
 
     fn handle(name: &str, peer: Option<rmcp::service::Peer<RoleClient>>) -> Arc<McpClientHandle> {
         Arc::new(McpClientHandle {
+            call_gate: Default::default(),
             name: name.to_string(),
             version: None,
             connected_at: None,

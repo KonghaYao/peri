@@ -114,6 +114,7 @@ fn pool_with_workflow(link: &WorkflowLink) -> (Arc<McpClientPool>, McpTaskOwner)
     pool.clients.write().insert(
         "workflow".to_string(),
         Arc::new(McpClientHandle {
+            call_gate: Default::default(),
             name: "workflow".to_string(),
             version: None,
             connected_at: None,
@@ -351,6 +352,7 @@ async fn instance_face_reports_unknown_and_disconnected_instances() {
     pool.clients.write().insert(
         "stale".to_string(),
         Arc::new(McpClientHandle {
+            call_gate: Default::default(),
             name: "stale".to_string(),
             version: None,
             connected_at: None,

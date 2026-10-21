@@ -37,12 +37,8 @@ const MCP_TOOL_USAGE_HINT: &str = "已直接注入的 system MCP 工具按原始
 /// MCP 中间件 —— 将所有已连接 MCP 服务器的工具和资源注入 ReAct 循环，
 /// 并向模型通报 MCP 连接状态（首 turn 概览 + 运行中上下线变化）。
 pub struct McpMiddleware {
-    /// Session-projected MCP view used by resources, discovery, and status reporting.
+    /// Session connection pool shared by tools, resources, discovery, and status.
     pool: Arc<McpClientPool>,
-    /// Deployment-owned pool used to build static MCP tool bridges. Static bridges must retain
-    /// deployment identity such as handle generations and MCP Apps binding leases; dynamic
-    /// tools are overlaid separately by `SessionToolCatalog`.
-    tool_pool: Arc<McpClientPool>,
     /// 会话级 MCP skill 远端注册表（None = 未装配 session 透传；DiscoverMCP
     /// 的 skill 域查询读它）。
     registry: Option<Arc<McpSkillRegistry>>,
@@ -81,7 +77,7 @@ impl McpMiddleware {
     /// [`McpAdmissionPreparation::new`] 同一条构造路径。
     fn admission(&self) -> McpAdmissionPreparation {
         McpAdmissionPreparation::new(
-            Arc::clone(&self.tool_pool),
+            Arc::clone(&self.pool),
             self.session_id.clone(),
             self.cancel.clone(),
             self.builtin_closures.clone(),
@@ -90,7 +86,6 @@ impl McpMiddleware {
 
     pub fn new(pool: Arc<McpClientPool>) -> Self {
         Self {
-            tool_pool: Arc::clone(&pool),
             pool,
             registry: None,
             command_registry: None,
@@ -110,13 +105,6 @@ impl McpMiddleware {
     /// 注入会话 id（装配槽位调用）：ACP 声明的 server 只对本会话可见。
     pub fn with_session_id(mut self, session_id: impl Into<String>) -> Self {
         self.session_id = Some(session_id.into());
-        self
-    }
-
-    /// Use a deployment-owned pool for static tool bridges while retaining the session-projected
-    /// pool for resources and discovery.
-    pub fn with_tool_pool(mut self, tool_pool: Arc<McpClientPool>) -> Self {
-        self.tool_pool = tool_pool;
         self
     }
 
@@ -194,6 +182,7 @@ pub(crate) fn run_ensure_discovery(
     if cancel.is_cancelled() {
         return;
     }
+    pool.bind_discovery_projection(registry, command_registry, session_id);
     // A24 关闭集：关闭的 builtin 实例既不可发现也不可激活（X4）——技能/命令面
     // 在**来源投影**处整体剔除，因此关闭实例不会留下 registry 条目、命令路由
     // 或可激活句柄（无 FS fallback 的说法在这里落地：关闭后无任何本地来源）。
@@ -268,7 +257,7 @@ pub(crate) fn run_ensure_discovery(
         registry,
         skills_face_closed,
     );
-    let Some(runtime) = tokio::runtime::Handle::try_current().ok() else {
+    let Some(_runtime) = tokio::runtime::Handle::try_current().ok() else {
         // 无 tokio runtime（装配期/纯函数测试）：跳过 spawn，before_agent
         // 幂等兜底（生产路径恒在 runtime 内，不触发本分支）。
         return;
@@ -305,18 +294,30 @@ pub(crate) fn run_ensure_discovery(
         let reg = Arc::clone(registry);
         let cmd_reg = command_registry.cloned();
         let cancel = cancel.clone();
-        runtime.spawn(async move {
-            crate::mcp::skill_discovery::run_discovery_with_cache(
-                reg,
-                cmd_reg,
-                handle,
-                handle_token,
-                cancel,
-                cache,
-                skills_face_closed,
-            )
-            .await;
-        });
+        let key = super::task_scope::McpTaskKey::SkillDiscovery {
+            server: name.clone(),
+            session: session_id.unwrap_or_default().into(),
+            registry: Arc::as_ptr(registry) as usize,
+        };
+        let rollback_token = handle_token.clone();
+        let rollback_name = name.clone();
+        if pool
+            .spawn_background(key, async move {
+                crate::mcp::skill_discovery::run_discovery_with_cache(
+                    reg,
+                    cmd_reg,
+                    handle,
+                    handle_token,
+                    cancel,
+                    cache,
+                    skills_face_closed,
+                )
+                .await;
+            })
+            .is_err()
+        {
+            registry.clear_discovery_started(&rollback_name, rollback_token);
+        }
     }
 }
 
@@ -416,8 +417,8 @@ impl McpMiddleware {
                 // 部分 system server 已连接时不得先抢占同名目录项；等整批
                 // required 工具验证完成后统一按稳定顺序提交。
                 let pending_system: std::collections::BTreeSet<String> =
-                    if self.tool_pool.system_manifest() == SystemMcpManifest::Loaded {
-                        self.tool_pool
+                    if self.pool.system_manifest() == SystemMcpManifest::Loaded {
+                        self.pool
                             .system_requirements()
                             .into_iter()
                             .map(|item| item.server)
@@ -442,14 +443,14 @@ impl McpMiddleware {
     /// `Some(整批 prepared bridge)` 仅当配置清单已完整发布且必需工具校验通过。
     fn prepared_static_bridges(&self) -> Option<Vec<McpToolBridge>> {
         // 清单未发布（Pending / Failed）时 `configs` 不是可信的 System 依赖事实源。
-        if self.tool_pool.system_manifest() != SystemMcpManifest::Loaded {
+        if self.pool.system_manifest() != SystemMcpManifest::Loaded {
             return None;
         }
         // 与准入（`McpAdmissionPreparation`）同一份关闭集判定：一次投影供本函数内
         // 必需工具校验与 bridge 构造共用，不逐项重复投影。
         let admission = self.admission();
         let required: BTreeMap<String, Vec<String>> = self
-            .tool_pool
+            .pool
             .system_requirements()
             .into_iter()
             // 关闭实例不参与必需工具校验（与准入同一份关闭集）。
@@ -464,16 +465,16 @@ impl McpMiddleware {
         // 空 required 数组无法用工具名证明 server 已发现。整批 system server
         // 均具备本代 tools/list 证据后才允许初始目录注入，避免先连接者抢占名字。
         if required.keys().any(|server| {
-            let Some(handle) = self.tool_pool.get_client(server) else {
+            let Some(handle) = self.pool.get_client(server) else {
                 return true;
             };
             !matches!(handle.status, super::client::ClientStatus::Connected)
                 || !self
-                    .tool_pool
+                    .pool
                     .discovery_evidence(server)
                     .is_some_and(|evidence| {
                         evidence.is_complete()
-                            && evidence.generation == self.tool_pool.handle_generation(&handle)
+                            && evidence.generation == self.pool.handle_generation(&handle)
                     })
         }) {
             return None;
@@ -689,6 +690,7 @@ impl Middleware for McpMiddleware {
         state: &mut dyn hook_state::CatalogState,
     ) -> peri_agent::error::AgentResult<()> {
         self.publish_discover_catalog(state);
+        self.ensure_discovery();
         Ok(())
     }
 

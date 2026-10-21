@@ -103,8 +103,8 @@ pub(crate) fn discover_prepared_plugins(
     )
 }
 
-/// Bind session execution identity before static discovery or dynamic load can use the pool.
-/// A host-only pool stays unbound; its dynamic connector must reject implicit execution.
+/// Bind the session execution directory and credentials before MCP discovery.
+/// Host-only assembly does not acquire a session tool environment.
 fn pending_mcp_pool(
     spawner: peri_middlewares::mcp::McpTaskSpawner,
     profile: peri_middlewares::mcp::apps::McpCapabilityProfile,
@@ -328,7 +328,6 @@ pub fn build_session_manager(
     permission_mode: Arc<SharedPermissionMode>,
     cron_scheduler: Option<Arc<dyn CronSchedulerPort>>,
     mcp_subscription: Option<Arc<dyn McpSubscriptionPort>>,
-    dynamic_mcp: Option<Arc<dyn peri_acp_types::ports::DynamicMcpDeploymentPort>>,
     agent_catalog: Arc<dyn AgentCatalogPort>,
     plugin_command_entries: Vec<RouteEntry>,
 ) -> SessionManager {
@@ -341,7 +340,6 @@ pub fn build_session_manager(
         None,
         cron_scheduler,
         mcp_subscription,
-        dynamic_mcp,
         // 装配注入面：Agent 管理 session registry，工具环境提供本地 shell 执行。
         // ACP 协议面只持有契约 `peri_acp_types::tasks::TaskManager`。
         Some(Arc::new(|| {
@@ -617,32 +615,6 @@ pub(crate) async fn assemble_server_config_with_mcp_profile(
             let cb_tx = oauth_event_tx.clone();
             let cb_pool = Arc::downgrade(&pool);
             Some(Box::new(move |event: OAuthFlowEvent| match event {
-                OAuthFlowEvent::DynamicAuthorizationNeeded {
-                    instance,
-                    flow_id,
-                    server_name,
-                    authorization_url,
-                    callback_tx,
-                } => {
-                    let Some(cb_pool) = cb_pool.upgrade() else {
-                        return;
-                    };
-                    if !cb_pool.register_dynamic_oauth_callback(
-                        instance.clone(),
-                        &flow_id,
-                        callback_tx,
-                    ) {
-                        return;
-                    }
-                    let _ = cb_tx.send(
-                        crate::event::oauth::HostOAuthEvent::DynamicAuthorizationNeeded {
-                            instance,
-                            flow_id,
-                            server_name,
-                            authorization_url,
-                        },
-                    );
-                }
                 OAuthFlowEvent::AuthorizationNeeded {
                     flow_id,
                     server_name,
@@ -736,29 +708,6 @@ pub(crate) async fn assemble_server_config_with_mcp_profile(
         });
         Some(pool)
     };
-    let dynamic_mcp_concrete = peri_middlewares::mcp::dynamic::DynamicMcpRegistry::new(
-        mcp_task_spawner.clone(),
-        Arc::new(
-            peri_middlewares::mcp::dynamic::ProductionDynamicMcpConnector::from_environment(
-                mcp_task_spawner.clone(),
-                mcp_pool_concrete.clone().unwrap_or_else(|| {
-                    let pool = pending_mcp_pool(
-                        mcp_task_spawner.clone(),
-                        mcp_profile.clone(),
-                        session_scoped.then_some(std::path::Path::new(&cwd)),
-                        workspace_id,
-                        &session_resources,
-                    );
-                    if let Err(error) = pool.set_stdio_available(capabilities.stdio_mcp) {
-                        tracing::error!(%error, "Dynamic MCP stdio availability binding failed");
-                    }
-                    pool
-                }),
-            ),
-        ),
-    );
-    let dynamic_mcp: Arc<dyn peri_acp_types::ports::DynamicMcpDeploymentPort> =
-        dynamic_mcp_concrete;
     // 订阅端口同源复用：同一 McpClientPool 同时承担 McpPoolPort（命令面）与
     // McpSubscriptionPort（订阅通知 → 会话 inbox 唤醒）两个角色。
     let mcp_pool: Option<Arc<dyn McpPoolPort>> =
@@ -889,7 +838,6 @@ pub(crate) async fn assemble_server_config_with_mcp_profile(
         permission_mode.clone(),
         cron_scheduler.clone(),
         mcp_subscription,
-        Some(Arc::clone(&dynamic_mcp)),
         agent_catalog.clone(),
         // Phase 6 B2：插件静态命令条目注入 session 管理器（会话创建时注册；
         // 技能命令面已改由 MCP 发现异步投影，不再经此处）。
@@ -943,7 +891,6 @@ pub(crate) async fn assemble_server_config_with_mcp_profile(
         // 默认拒绝。SDK / 服务化部署在拿到本返回值后设置该字段即完成注入（字段 pub）。
         session_authorization: None,
         acp_mcp,
-        dynamic_mcp: Some(dynamic_mcp),
         oauth_event_tx: Some(oauth_event_tx),
         oauth_event_rx: Some(oauth_event_rx),
         plugin_skill_roots,

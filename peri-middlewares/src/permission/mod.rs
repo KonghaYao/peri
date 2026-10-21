@@ -74,8 +74,6 @@ fn default_requires_approval_without_builtin(tool_name: &str) -> bool {
         || tool_name == TOOL_WEBFETCH
         || tool_name == TOOL_WEBSEARCH
         || tool_name.starts_with("mcp__")
-        || tool_name == "DynamicMCP.load"
-        || tool_name == "DynamicMCP.unload"
         || tool_name == CRON_REGISTER_TOOL_NAME
 }
 
@@ -160,7 +158,7 @@ fn builtin_tool_effective_name(instance: &str, original_name: &str) -> &'static 
 /// 已不存在的工具）。只列需审批的 workspace 条目：`Read` / `Glob` / `Grep`
 /// 归一后走免审批分支（[`default_requires_approval`] 为假），进清单即与
 /// 「每条目必须判定为敏感」的一致性断言冲突。
-pub fn sensitive_tool_entries() -> [SensitiveToolEntry; 13] {
+pub fn sensitive_tool_entries() -> [SensitiveToolEntry; 11] {
     [
         SensitiveToolEntry {
             name: builtin_tool_effective_name("workspace", TOOL_BASH),
@@ -211,16 +209,6 @@ pub fn sensitive_tool_entries() -> [SensitiveToolEntry; 13] {
             name: "mcp__",
             description: "prefixed MCP server tool; raw external MCP tools also require approval by bound source; builtin first-class capabilities follow their original tool's rule",
             prefix_match: true,
-        },
-        SensitiveToolEntry {
-            name: "DynamicMCP.load",
-            description: "load a session-scoped MCP server",
-            prefix_match: false,
-        },
-        SensitiveToolEntry {
-            name: "DynamicMCP.unload",
-            description: "unload a session-scoped MCP server",
-            prefix_match: false,
         },
         SensitiveToolEntry {
             name: builtin_tool_effective_name("cron", CRON_REGISTER_TOOL_NAME),

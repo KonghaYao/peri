@@ -367,7 +367,7 @@ sequenceDiagram
 
 1. `PERI_MCP_APPS` 只按存在性解释；空串、`0` 等值同样启用。
 2. profile 在进程内通过一次性缓存冻结，并在 MCP pool prewarm 前读取。
-3. 初始连接、OAuth 路径、静态重连和 Dynamic MCP 连接均复用同一 profile，在 MCP `initialize` 中传播 `io.modelcontextprotocol/ui` 与 HTML MIME。
+3. 初始连接、OAuth 路径、重连和 ACP 运行控制注册的连接均复用同一 profile，在 MCP `initialize` 中传播 `io.modelcontextprotocol/ui` 与 HTML MIME。
 4. 环境变量不存在时不传播 extension，stdio Apps relay backend 不装配，Apps methods 返回 `capability_disabled`。
 5. ACP initialize 不解析或回显任何 MCP Apps capability。
 6. tool 无合法 `_meta.ui.resourceUri`、visibility 不含 `app` 或 resource MIME/body 非法时 fail closed；普通模型 MCP 路径保持可用。

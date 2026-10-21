@@ -738,6 +738,7 @@ impl TappedLink {
             .await
             .expect("live tools/list 必须成功");
         let handle = Arc::new(McpClientHandle {
+            call_gate: Default::default(),
             name: instance.name.to_string(),
             version: None,
             connected_at: None,

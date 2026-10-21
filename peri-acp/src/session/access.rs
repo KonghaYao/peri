@@ -223,10 +223,6 @@ impl SessionAccessPort for SessionManager {
         SessionManager::mcp_subscription_for(self, session_id)
     }
 
-    fn dynamic_mcp_notifications_for(&self, session_id: &str) -> bool {
-        SessionManager::dynamic_mcp_notifications_for(self, session_id)
-    }
-
     fn mcp_skill_registry(&self, session_id: &str) -> Option<Arc<McpSkillRegistry>> {
         self.mcp_skill_registry_for(session_id)
     }

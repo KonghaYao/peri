@@ -31,6 +31,7 @@ pub(super) struct ProjectionIdentity {
     /// 分不出批次落在边界哪一侧。`BRIDGE_RESET_COUNTER` 是边界自己的代次，纳入后跨
     /// 边界的批次一律整批放弃；列表面板的回写身份也用同一代次。
     pub(super) bridge_reset: u64,
+    pub(super) mcp_revision: u64,
 }
 
 /// 进程采样字段，只能更新 `memory_mb` 与 `cpu_percent`。
@@ -65,6 +66,7 @@ pub(super) enum SnapshotPatch {
     Process(ProcessSnapshotPatch),
     Session(SessionSnapshotPatch),
     Services(ServiceSnapshotPatch),
+    Mcp(McpStatusSnapshot),
 }
 
 /// 会话运行字段的**部分**更新：`None` 表示本次不改该字段。
@@ -159,6 +161,7 @@ impl SnapshotPatch {
                     && snapshot.effort == session.effort
                     && snapshot.permission_mode == session.permission_mode
             }
+            Self::Mcp(mcp) => snapshot.mcp == *mcp,
             Self::Services(services) => {
                 snapshot.mcp == services.mcp
                     && snapshot.cron_total == services.cron_total
@@ -185,11 +188,22 @@ pub(super) struct ProjectionAtoms {
     pub(super) memory_entries: Vec<MemoryEntry>,
 }
 
+pub(super) enum ProjectionUpdate {
+    All(ProjectionAtoms),
+    Mcp(Vec<McpServerSummary>),
+}
+
+impl From<ProjectionAtoms> for ProjectionUpdate {
+    fn from(atoms: ProjectionAtoms) -> Self {
+        Self::All(atoms)
+    }
+}
+
 pub(super) fn commit_projection(
     src_client: Option<&AcpTuiClient>,
     expected: &ProjectionIdentity,
     patches: &[SnapshotPatch],
-    atoms: ProjectionAtoms,
+    atoms: impl Into<ProjectionUpdate>,
 ) -> bool {
     if !identity_is_current(src_client, expected) {
         return false;
@@ -233,6 +247,11 @@ pub(super) fn commit_projection(
                         snapshot.permission_mode = session.permission_mode.clone();
                     }
                 }
+                SnapshotPatch::Mcp(mcp) => {
+                    if snapshot.mcp != *mcp {
+                        snapshot.mcp = mcp.clone();
+                    }
+                }
                 SnapshotPatch::Services(services) => {
                     if snapshot.mcp != services.mcp {
                         snapshot.mcp = services.mcp.clone();
@@ -248,6 +267,13 @@ pub(super) fn commit_projection(
         }
     }
 
+    let atoms = match atoms.into() {
+        ProjectionUpdate::Mcp(servers) => {
+            write_if_changed(&MCP_SERVERS.state(), servers);
+            return true;
+        }
+        ProjectionUpdate::All(atoms) => atoms,
+    };
     write_if_changed(&CURRENT_SESSION_TITLE.state(), atoms.title);
     write_if_changed(&SERVICE_PROJECTION_ERROR.state(), atoms.projection_error);
     write_if_changed(&THREAD_LIST_ERROR.state(), atoms.thread_error);
@@ -278,6 +304,7 @@ fn identity_is_current(client: Option<&AcpTuiClient>, expected: &ProjectionIdent
         && current_archived == expected.archived
         && current_page_count == expected.page_count
         && current_bridge_reset == expected.bridge_reset
+        && super::mcp_revision() == expected.mcp_revision
 }
 
 fn write_if_changed<T>(state: &Handle<T>, next: T)

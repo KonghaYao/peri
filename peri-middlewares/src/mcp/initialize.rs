@@ -423,12 +423,25 @@ impl McpClientPool {
 
         let mut connected = 0usize;
         for (name, server_config) in ordered {
+            let slot = pool.server_slot(name);
+            let Ok(_operation) = slot.operation.clone().try_lock_owned() else {
+                continue;
+            };
+            if slot.stopped.load(std::sync::atomic::Ordering::Acquire)
+                || pool
+                    .get_client(name)
+                    .is_some_and(|h| h.status == ClientStatus::Connected)
+            {
+                continue;
+            }
+
             // 跳过已禁用的服务器，注册为 Disabled 状态
             if server_config.disabled.unwrap_or(false) {
                 tracing::info!(server = %name, "MCP 服务器已禁用，跳过连接");
                 pool.clients.write().insert(
                     name.clone(),
                     Arc::new(McpClientHandle {
+                        call_gate: Default::default(),
                         name: name.clone(),
                         version: None,
                         connected_at: None,
@@ -538,7 +551,7 @@ impl McpClientPool {
                         continue;
                     }
                     #[cfg(not(target_os = "emscripten"))]
-                    true => match pool.spawn_stdio_transport(command, args, env, cwd) {
+                    true => match pool.spawn_stdio_transport(name, command, args, env, cwd) {
                         Ok(transport) => {
                             serve_client_auto(transport, &pool.capability_profile, timeout).await
                         }
@@ -611,7 +624,7 @@ impl McpClientPool {
 
             match connect_result {
                 Ok(Ok(rs)) => {
-                    let rs = pool.retain_service(rs);
+                    let rs = pool.track_server_service(name, rs);
                     // 订阅配置存在：建立 subscriptions/listen 长流（2026-07-28）。
                     // 失败仅告警——server 可能不支持，连接本身仍可用。
                     // A24 关闭门：关闭集命中的 builtin 实例不建立订阅（订阅是能力的外部
@@ -674,6 +687,7 @@ impl McpClientPool {
                     let oauth_status = OAuthStatus::default();
                     let skills_capable = super::client::peer_declares_skills(&peer);
                     let handle = Arc::new(McpClientHandle {
+                        call_gate: Default::default(),
                         name: name.clone(),
                         version: peer.peer_info().and_then(|info| {
                             info.server_info.as_ref().map(|si| si.version.clone())

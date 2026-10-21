@@ -2,7 +2,7 @@
 //!
 //! H1d（Iteration 14）：从 MCP_SERVERS atom 读取真实 MCP server 列表（由
 //! service_snapshot 经 ACP `mcp/list` 查询派生）。结合 SERVICE_SNAPSHOT.mcp
-//! 显示初始化阶段摘要。只读面板——MCP 配置通过 ~/.claude/settings.json 管理。
+//! 显示初始化阶段摘要。普通 MCP 的重启/关闭经 ACP 会话控制面。
 //!
 //! OAuth 授权入口（详情视图）：列表选中「需要认证」server 按 Enter 进入
 //! 详情视图，详情里选 [ 授权 ] 按钮（Enter/鼠标点击）才触发 mcp/oauth_start
@@ -40,6 +40,7 @@ use ratatui_kit::{
     },
 };
 
+mod actions;
 mod detail;
 use self::detail::{
     DETAIL_FALLBACK_WIDTH, DetailAction, SkillEntry, build_detail_lines, default_detail_btn,
@@ -104,6 +105,13 @@ fn group_mcp_skills(entries: &[SlashCommandEntry]) -> HashMap<String, Vec<SkillE
 pub fn McpPanel(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
     let theme_def = hooks.use_atom(&THEME_ATOM);
     let selected = hooks.use_state(|| 0usize);
+    let control = hooks.use_state(actions::ControlState::default);
+    let control_scope = actions::current_scope();
+    let scope_for_effect = control_scope.clone();
+    hooks.use_effect(
+        move || control.write().reset_scope(scope_for_effect.clone()),
+        (control_scope.clone(),),
+    );
     // 外部滚动状态——面板滚轮仲裁（panel_scroll.rs）驱动，统一 3 行/格 + 节流
     let sv = hooks.use_state(ScrollViewState::default);
     let store = hooks.use_atom(&MCP_SERVERS);
@@ -187,6 +195,8 @@ pub fn McpPanel(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
                     detail_key,
                     detail_btn,
                     sv,
+                    control,
+                    control_scope: control_scope.clone(),
                     viewport,
                     servers: &servers_for_closure,
                     skills_by_server: &skills_for_closure,
@@ -202,6 +212,7 @@ pub fn McpPanel(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
         detail_key,
         detail_btn,
         sv,
+        control,
     });
 
     let sel = *selected.read();
@@ -221,6 +232,17 @@ pub fn McpPanel(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
                 &theme_def.read(),
                 content_width,
             );
+            if !summary.control.restart && !summary.control.stop {
+                lines.push(
+                    Line::from(actions::unavailable_message(
+                        summary.control.unavailable_reason.as_deref(),
+                    ))
+                    .fg(theme_def.read().semantic.text.muted),
+                );
+            }
+            if let Some(message) = control.read().message(&summary.name) {
+                lines.push(Line::from(message).fg(theme_def.read().semantic.status.warning));
+            }
         }
     } else {
         // ── 列表视图 ──
@@ -442,7 +464,15 @@ fn handle_mcp_event(event: Event, ctx: &McpEventCtx<'_>) -> EventResult {
             }
             let x = area.x.saturating_add(button.col);
             if col >= x && col < x.saturating_add(button.hit_width) {
-                activate_detail_btn(button.sel, summary, &ctx.view, &ctx.detail_btn, &ctx.sv);
+                activate_detail_btn(
+                    button.sel,
+                    summary,
+                    &ctx.view,
+                    &ctx.detail_btn,
+                    &ctx.sv,
+                    ctx.control,
+                    &ctx.control_scope,
+                );
                 return EventResult::Consumed;
             }
         }
@@ -460,6 +490,14 @@ fn handle_mcp_event(event: Event, ctx: &McpEventCtx<'_>) -> EventResult {
         // ── 详情视图：←→ 选按钮，Enter 激活，Esc 返回列表 ──
         match key.code {
             KeyCode::Esc => {
+                let target = ctx.detail_key.read().clone();
+                if target
+                    .as_deref()
+                    .is_some_and(|name| ctx.control.write().cancel_wait(name))
+                {
+                    notify(i18n::tr("panel-mcp-control-unknown"));
+                    return EventResult::Consumed;
+                }
                 *ctx.detail_key.write() = None;
                 *ctx.sv.write() = ScrollViewState::default();
                 *ctx.view.write() = McpView::List;
@@ -483,7 +521,15 @@ fn handle_mcp_event(event: Event, ctx: &McpEventCtx<'_>) -> EventResult {
             KeyCode::Enter => {
                 let b = *ctx.detail_btn.read();
                 if let Some(summary) = detail_server(ctx.servers, &ctx.detail_key.read()) {
-                    activate_detail_btn(b, summary, &ctx.view, &ctx.detail_btn, &ctx.sv);
+                    activate_detail_btn(
+                        b,
+                        summary,
+                        &ctx.view,
+                        &ctx.detail_btn,
+                        &ctx.sv,
+                        ctx.control,
+                        &ctx.control_scope,
+                    );
                 }
             }
             _ => {}
@@ -531,6 +577,8 @@ struct McpEventCtx<'a> {
     detail_btn: State<usize>,
     /// 面板滚动状态：详情鼠标命中必须加上 `offset().y`（渲染在 ScrollView 内）。
     sv: State<ScrollViewState>,
+    control: State<actions::ControlState>,
+    control_scope: crate::application::operations::OperationScope,
     viewport: ListViewport,
     servers: &'a [McpServerSummary],
     /// 当前命令面技能快照（详情鼠标命中按 server 域名取行数）。
@@ -546,9 +594,23 @@ fn activate_detail_btn(
     view: &ReactiveHandle<McpView, SingleWaker>,
     detail_btn: &ReactiveHandle<usize, SingleWaker>,
     sv: &ReactiveHandle<ScrollViewState, SingleWaker>,
+    control: State<actions::ControlState>,
+    scope: &crate::application::operations::OperationScope,
 ) {
     match detail_action_at(summary, idx) {
         Some(DetailAction::CopyError) => copy_error_summary(summary),
+        Some(DetailAction::Restart) => actions::dispatch(
+            &summary.name,
+            actions::ControlAction::Restart,
+            scope.clone(),
+            control,
+        ),
+        Some(DetailAction::Stop) => actions::dispatch(
+            &summary.name,
+            actions::ControlAction::Stop,
+            scope.clone(),
+            control,
+        ),
         Some(DetailAction::Auth) => {
             start_oauth(summary.name.clone());
             *detail_btn.write() = 0;

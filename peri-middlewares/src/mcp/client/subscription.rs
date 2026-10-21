@@ -64,11 +64,7 @@ impl McpClientPool {
             })
             .expect("MCP subscription reminder mapping must be valid");
         for handle in handles {
-            handle.push_system_reminder(
-                kind,
-                MessageSource::DynamicMcpNotification,
-                reminder.clone(),
-            );
+            handle.push_system_reminder(kind, MessageSource::McpNotification, reminder.clone());
         }
         tracing::info!(server = %server, uri = %uri, sessions = %self.session_bindings.read().inboxes().len(), "订阅通知已广播到会话 inbox");
     }
@@ -163,11 +159,7 @@ impl McpClientPool {
         let (default_kind, reminder) = git_watch_reminder_from_resource(uri, body);
         let kind = declared_kind.map(Into::into).unwrap_or(default_kind);
         for handle in handles {
-            handle.push_system_reminder(
-                kind,
-                MessageSource::DynamicMcpNotification,
-                reminder.clone(),
-            );
+            handle.push_system_reminder(kind, MessageSource::McpNotification, reminder.clone());
         }
         tracing::info!(server = %server, uri = %uri, sessions = %self.session_bindings.read().inboxes().len(), "git ref 变化已注入会话");
     }

@@ -231,6 +231,13 @@ impl BaseTool for McpResourceTool {
                 status: ClientStatus::Disconnected,
             })?;
 
+        let _permit = handle
+            .call_gate
+            .try_acquire()
+            .map_err(|_| ResourceError::NotConnected {
+                server: server_name.to_owned(),
+                status: ClientStatus::Disconnected,
+            })?;
         let generation = self.client_pool.handle_generation(&handle);
         let owner = self.client_pool.acp_owners.read().get(server_name).cloned();
         let ensure_current = || {

@@ -30,6 +30,7 @@ impl ServerLoop<'_> {
             match msg {
                 IncomingMessage::Request { id, method, params } => match method.as_str() {
                     "session/prompt" => self.spawn_prompt(id, params).await,
+                    "peri/mcp/control" => self.spawn_mcp_control(id, params).await,
                     "session/input/snapshot" => {
                         self.spawn_session_io(id, method, params).await;
                     }
@@ -57,6 +58,47 @@ impl ServerLoop<'_> {
                     // Responses are routed internally by the transport's pending map.
                 }
             }
+        }
+    }
+
+    async fn spawn_mcp_control(&self, id: RequestId, params: Value) {
+        let diagnostics = ResponseDiagnostics::new(id, "peri/mcp/control", &params);
+        let connection = self.connection.lock().await.facts();
+        let prepared = {
+            let sessions = self.sessions.lock().await;
+            requests::mcp_control::prepare(&params, &connection, &sessions)
+        };
+        let prepared = match prepared {
+            Ok(prepared) => prepared,
+            Err(error) => {
+                let _ = diagnostics.send(self.transport.as_ref(), Err(error)).await;
+                return;
+            }
+        };
+        let transport = Arc::clone(self.transport);
+        let rejected_transport = Arc::clone(&transport);
+        let rejected_diagnostics = diagnostics.clone();
+        // The request observer may disappear; cleanup remains owned by the MCP pool.
+        // Do not race this future against transport cancellation and detach its work.
+        let spawned = self.cfg.host_task_spawner.spawn(
+            task_scope::HostTaskOwnerKind::Session,
+            task_scope::HostTaskKind::McpControl,
+            async move {
+                let result = requests::mcp_control::execute(prepared).await;
+                let _ = diagnostics.send(transport.as_ref(), result).await;
+            },
+        );
+        if spawned.is_err() {
+            let _ = rejected_diagnostics
+                .send(
+                    rejected_transport.as_ref(),
+                    Err(requests::mcp_control::error(
+                        -32000,
+                        "pool_closed",
+                        "ACP host is closing",
+                    )),
+                )
+                .await;
         }
     }
 

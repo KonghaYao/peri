@@ -82,7 +82,14 @@ impl ActivationError {
 /// 返回 `(handle, peer)`：handle 用于刷新回写（`refresh_entries` 的代数校验），
 /// peer 用于本次读取。registry 无该 server / 已断连 / handle 非本 crate 的
 /// 客户端类型 → `None`（调用方按 `Unreachable` 处理，不回落磁盘）。
-fn peer_of(registry: &McpSkillRegistry, server: &str) -> Option<(HandleToken, Peer<RoleClient>)> {
+fn peer_of(
+    registry: &McpSkillRegistry,
+    server: &str,
+) -> Option<(
+    HandleToken,
+    Peer<RoleClient>,
+    super::connection_gate::McpCallPermit,
+)> {
     let state = registry.discovery_state(server)?;
     let handle = match &state {
         ServerDiscoveryState::Started { handle }
@@ -90,8 +97,9 @@ fn peer_of(registry: &McpSkillRegistry, server: &str) -> Option<(HandleToken, Pe
         ServerDiscoveryState::Failed { .. } => return None,
     };
     let client = handle.clone().downcast::<McpClientHandle>().ok()?;
+    let permit = client.call_gate.try_acquire().ok()?;
     let peer = client.peer.clone()?;
-    Some((handle, peer))
+    Some((handle, peer, permit))
 }
 
 /// 激活 skill：返回**已校验**的 SKILL.md 正文。
@@ -109,6 +117,9 @@ pub(crate) async fn activate(
     let Some(SkillOrigin::Mcp { server, uri }) = &meta.origin else {
         return Err(ActivationError::NotMcpSourced);
     };
+    let Some((handle, peer, _permit)) = peer_of(registry, server) else {
+        return Err(ActivationError::Unreachable);
+    };
     // 绑定面：条目 resources[] 中 SKILL.md 自身条目 + 发现时 frontmatter 快照。
     let binding = meta
         .resources
@@ -120,9 +131,6 @@ pub(crate) async fn activate(
             Some(content) => Ok(content.clone()),
             None => Err(ActivationError::MissingBinding),
         };
-    };
-    let Some((handle, peer)) = peer_of(registry, server) else {
-        return Err(ActivationError::Unreachable);
     };
     let text = read_text(&peer, server, uri).await?;
     match verify_body(&text, &binding.digest, expected_fm) {

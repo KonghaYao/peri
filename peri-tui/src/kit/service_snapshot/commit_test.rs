@@ -12,6 +12,7 @@ fn reset() -> ProjectionIdentity {
     THREAD_BROWSER_ARCHIVED.set(false);
     THREAD_LIST_PAGE_COUNT.set(1);
     ProjectionIdentity {
+        mcp_revision: super::super::mcp_revision(),
         active_cwd: None,
         session_id: String::new(),
         session_generation: None,
@@ -184,4 +185,54 @@ fn bridge_reset_alone_rejects_a_batch_captured_before_the_boundary() {
     assert_eq!(*SERVICE_SNAPSHOT.state().read(), snapshot_before);
     BRIDGE_RESET_COUNTER.set(before);
     reset();
+}
+
+#[test]
+#[serial]
+fn test_mcp_refresh_preserves_other_projection_owners() {
+    let identity = reset();
+    let original = ServiceSnapshot {
+        model_name: "retained-model".into(),
+        cron_total: 3,
+        ..Default::default()
+    };
+    SERVICE_SNAPSHOT.set(original.clone());
+    CURRENT_SESSION_TITLE.set("retained-title".into());
+    let mcp = McpStatusSnapshot {
+        init_phase: McpInitPhase::Ready,
+        total: 1,
+        connected: 0,
+    };
+    assert!(commit_projection(
+        None,
+        &identity,
+        &[SnapshotPatch::Mcp(mcp.clone())],
+        ProjectionUpdate::Mcp(vec![McpServerSummary {
+            name: "stopped".into(),
+            ..Default::default()
+        }])
+    ));
+    let mut expected = original;
+    expected.mcp = mcp;
+    assert_eq!(*SERVICE_SNAPSHOT.state().read(), expected);
+    assert_eq!(
+        CURRENT_SESSION_TITLE.state().read().as_str(),
+        "retained-title"
+    );
+    assert_eq!(MCP_SERVERS.state().read()[0].name, "stopped");
+}
+
+#[test]
+#[serial]
+fn test_action_refresh_invalidates_older_periodic_projection() {
+    let stale = reset();
+    let current = SERVICE_SNAPSHOT.state().read().clone();
+    super::super::MCP_REVISION.fetch_add(1, std::sync::atomic::Ordering::AcqRel);
+    assert!(!commit_projection(
+        None,
+        &stale,
+        &[SnapshotPatch::Mcp(McpStatusSnapshot::default())],
+        ProjectionUpdate::Mcp(Vec::new())
+    ));
+    assert_eq!(*SERVICE_SNAPSHOT.state().read(), current);
 }

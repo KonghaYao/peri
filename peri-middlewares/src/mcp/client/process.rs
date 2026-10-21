@@ -75,6 +75,7 @@ pub(crate) struct McpStdioTransport {
 }
 
 impl McpStdioTransport {
+    #[cfg(test)]
     pub(crate) fn process_owner(&self) -> Arc<McpProcessOwner> {
         self.owner.clone()
     }
@@ -107,6 +108,7 @@ impl Transport<RoleClient> for McpStdioTransport {
 impl super::McpClientPool {
     pub(crate) fn spawn_stdio_transport(
         &self,
+        server_name: &str,
         command: &str,
         args: &[String],
         env: &HashMap<String, String>,
@@ -115,13 +117,14 @@ impl super::McpClientPool {
         let arg_strs: Vec<_> = args.iter().map(String::as_str).collect();
         let mut cmd = peri_mcp_common::shell::shell_command(command, &arg_strs);
         cmd.envs(env).current_dir(cwd);
-        self.spawn_process_command(cmd, Some(command))
+        self.spawn_process_command(cmd, Some(command), Some(server_name))
     }
 
     pub(crate) fn spawn_process_command(
         &self,
         mut cmd: tokio::process::Command,
         stderr_label: Option<&str>,
+        server_name: Option<&str>,
     ) -> io::Result<McpStdioTransport> {
         let _admission = self.lifecycle_registration.lock();
         if !self.is_open() {
@@ -163,6 +166,9 @@ impl super::McpClientPool {
         let mut processes = self.processes.lock();
         processes.retain(|process| !process.is_stopped());
         processes.push(owner.clone());
+        if let Some(name) = server_name {
+            self.server_slot(name).processes.lock().push(owner.clone());
+        }
         drop(processes);
         if let Err(error) = attached {
             owner.begin_close();

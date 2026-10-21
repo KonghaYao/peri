@@ -43,6 +43,9 @@ mod acp_mcp_loop_tests;
 #[path = "activation_test.rs"]
 mod activation_tests;
 
+#[path = "requests_mcp_control_test.rs"]
+mod mcp_control_tests;
+
 // ── Mock AcpTransport ─────────────────────────────────────────────────────────
 
 /// 记录全部通知的 mock transport（`Mutex<Vec<(method, payload)>>`，Slice 6
@@ -156,7 +159,6 @@ pub(in crate::host) async fn build_server_config(
         None,
         None,
         None,
-        None,
         // 注入真实 TaskManager 工厂：cancel-bg-task 回归测试依赖 registry 簿记
         Some(Arc::new(|| {
             Arc::new(peri_agent::agent::async_tasks::TaskManager::new())
@@ -181,7 +183,6 @@ pub(in crate::host) async fn build_server_config(
         mcp_apps_facade: None,
         session_authorization: None,
         acp_mcp: None,
-        dynamic_mcp: None,
         oauth_event_tx: None,
         oauth_event_rx: None,
         plugin_skill_roots: Vec::new(),

@@ -70,3 +70,24 @@ fn history_pagination_stays_closed_until_this_connection_negotiates_it() {
     negotiated.commit_initialize(PeriCaps::default());
     assert!(negotiated.history_pagination());
 }
+
+#[test]
+fn mcp_control_requires_current_connection_initialize_and_open_lifecycle() {
+    let mut absent = ConnectionContext::new(false);
+    assert!(absent.caps().mcp_control_v1);
+    assert_eq!(absent.admission_caps(), PeriCaps::default());
+    assert!(!absent.mcp_control_v1());
+    absent.commit_initialize(PeriCaps::default());
+    assert!(!absent.mcp_control_v1());
+    let mut enabled = ConnectionContext::new(false);
+    enabled.commit_initialize(PeriCaps {
+        mcp_control_v1: true,
+        ..PeriCaps::default()
+    });
+    assert!(enabled.facts().mcp_control_v1);
+    assert!(enabled.admission_caps().mcp_control_v1);
+    assert!(!ConnectionContext::new(false).mcp_control_v1());
+    enabled.begin_close();
+    assert!(!enabled.facts().mcp_control_v1);
+    assert_eq!(enabled.admission_caps(), PeriCaps::default());
+}

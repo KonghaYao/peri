@@ -115,6 +115,7 @@ pub struct AcpTuiClient {
     session_load_reservations: Arc<SessionLoadReservationState>,
     user_input_queue: Arc<std::sync::atomic::AtomicBool>,
     session_workspace: Arc<std::sync::atomic::AtomicBool>,
+    mcp_control: Arc<std::sync::atomic::AtomicBool>,
     execution_cwd: watch::Sender<Option<String>>,
     restore_error: Arc<Mutex<Option<String>>>,
     /// 关闭旧会话失败（`-32010` incomplete）后仍未完成的切换：旧身份与被打断的
@@ -130,6 +131,8 @@ pub struct AcpTuiClient {
 impl AcpTuiClient {
     /// 部署退出时显式关闭 transport；不依赖 UI/后台消费者释放所有 client 克隆。
     pub fn close(&self) {
+        self.mcp_control
+            .store(false, std::sync::atomic::Ordering::Release);
         self.transport.close();
     }
 
@@ -194,6 +197,7 @@ impl AcpTuiClient {
             }),
             user_input_queue: Arc::new(std::sync::atomic::AtomicBool::new(false)),
             session_workspace: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            mcp_control: Arc::new(std::sync::atomic::AtomicBool::new(false)),
             execution_cwd: watch::channel(None).0,
             restore_error: Arc::new(Mutex::new(None)),
             pending_close: Arc::new(Mutex::new(None)),

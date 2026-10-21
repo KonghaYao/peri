@@ -199,7 +199,6 @@ flowchart LR
 | 23 | `PluginMiddleware` | `peri-middlewares/src/plugin/middleware.rs` | 部分下放 | Plugin manifest 文件可由 Workspace MCP 读取，但来源合并、命名空间、hooks、agents、commands 和生命周期仍由宿主持有。 |
 | 24 | `ToolSearchMiddleware` | `peri-middlewares/src/tool_search/middleware.rs` | 独立 Middleware | deferred tool、MCP、Permission 和 SubAgent 的工具目录属于 Agent 工具编排，不下放到 MCP。 |
 | 25 | `McpMiddleware` | `peri-middlewares/src/mcp/middleware.rs` | 独立 Middleware | 它是统一 MCP 对接核心，并在 1R 阶段等待 `system_mcp` 完成 ready；超时必须报错并阻止 react loop 启动。 |
-| 26 | `DynamicMcpMiddleware` | `peri-middlewares/src/mcp/dynamic/tool.rs` | 独立 Middleware | session-scoped registry、动态工具目录、取消、权限和 projection lease 属于 MCP 对接宿主。 |
 | 27 | `SubAgentMiddleware` | `peri-middlewares/src/subagent/mod.rs` | 独立 Middleware | parent/child session、fork/resume、取消、事件、frozen context、hooks、skills、tools 和 MCP activation 属于 Runtime，不下放到 MCP。 |
 | 28 | `GoalMiddleware` | `peri-middlewares/src/goal/middleware.rs` | 独立 Middleware | controller、Goal tool、system prompt steering 和 session 生命周期属于 Agent/Runtime，不下放到 MCP。 |
 
@@ -209,7 +208,7 @@ flowchart LR
 
 - `WorkflowMiddleware`：`peri-middlewares/src/workflow/mod.rs`，由 `WorkflowMiddlewareAdaptor` 接入链。
 - `CronScheduler`：现位于 `mcp-packages/cron/src/scheduler.rs`；宿主消费 `CronSchedulerPort` 并负责该代 tick task 的监督。
-- `McpClientPool`、`McpTaskOwner`、`DynamicMcpRegistry`：`peri-middlewares/src/mcp/`，由 `McpMiddleware` 和 `DynamicMcpMiddleware` 使用。
+- `McpClientPool`、`McpTaskOwner`：`peri-middlewares/src/mcp/`，由 `McpMiddleware` 使用；运行控制由 ACP 经 pool 端口驱动，见 [ACP MCP 运行控制](acp-mcp-control.md)。
 - `SkillTool`、`DiscoverSkillsTool`、`SubAgentTool`、各类 filesystem/web/terminal 工具：由对应 middleware 的 `collect_tools` 提供，不是单独的 middleware。**两个技能工具保留在宿主**（J3，workspace 不注册同名工具）；W4b 起只消费 MCP 来源（`resources/read` + digest/frontmatter 校验，本地技能同规则），宿主不再有本地技能读取通路。
 - `ProductionChainAssembler`：`peri-middlewares/src/assembly.rs`，是所有 middleware 的组合根，不是 middleware；迁移时应保留为装配层。
 

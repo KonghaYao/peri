@@ -275,7 +275,7 @@ pub(super) async fn resume_subagent_impl(
         tool_filter,
         parent
             .and_then(|session| session.subagent_host())
-            .and_then(|host| host.session_mcp_capability.clone()),
+            .and_then(|host| host.session_mcp_catalog.clone()),
         Vec::new(), // skill_names 恒空（R-H1：恢复不重复注入 SkillPreload）
         frozen_claude_md,
         frozen_claude_local_md_cfg,

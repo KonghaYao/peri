@@ -325,7 +325,6 @@ pub struct AcpServerConfig {
     /// 「这个调用者是否有这个 session 的这项授权」，不是「按 id 取得到哪个对象」。
     pub session_authorization:
         Option<Arc<dyn peri_acp_types::session_authorization::SessionAuthorizationPort>>,
-    pub dynamic_mcp: Option<Arc<dyn peri_acp_types::ports::DynamicMcpDeploymentPort>>,
     /// OAuth 授权事件通道（host 级，跨 session）：装配点创建 (tx, rx) 并注入
     /// tx（MCP 授权回调经此转发 AcpEvent），run_acp_server take rx 后 spawn
     /// 消费者 task，以 `peri/agent_event` notification（sessionId 为空串，
@@ -461,7 +460,15 @@ async fn run_acp_server_inner(
     // legacy TUI 通道分别按 initialize 协商值门控，互不隐式开启。
     let oauth_event_rx = cfg.oauth_event_rx.take();
     let cfg = Arc::new(cfg);
-    oauth_delivery::spawn_oauth_consumer(oauth_event_rx, &transport, &cfg);
+    let connection = Arc::new(tokio::sync::Mutex::new(connection::ConnectionContext::new(
+        cfg.stdio_command_filter
+            && (cfg.mcp_apps_relay.is_some()
+                || cfg
+                    .workspace_assembly
+                    .as_ref()
+                    .is_some_and(|source| source.mcp_profile.apps_enabled())),
+    )));
+    oauth_delivery::spawn_oauth_consumer(oauth_event_rx, &transport, &cfg, &connection);
     let sessions: SharedSessions = sessions;
     // Per-session prompt serialization lock: the next prompt for the same session only
     // starts after the previous turn has adopted its effective history (or marked
@@ -507,14 +514,6 @@ async fn run_acp_server_inner(
         ),
     );
 
-    let connection = Arc::new(tokio::sync::Mutex::new(connection::ConnectionContext::new(
-        cfg.stdio_command_filter
-            && (cfg.mcp_apps_relay.is_some()
-                || cfg
-                    .workspace_assembly
-                    .as_ref()
-                    .is_some_and(|source| source.mcp_profile.apps_enabled())),
-    )));
     let connection_cancellation = connection.lock().await.cancellation();
     server_loop::ServerLoop {
         transport: &transport,

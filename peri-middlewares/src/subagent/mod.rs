@@ -558,12 +558,6 @@ impl Middleware for SubAgentMiddleware {
                     tools
                         .values()
                         .filter(|tool| tool.mcp_server_name().is_some())
-                        .filter(|tool| {
-                            !matches!(
-                                state.tool_source(tool.name()),
-                                Some(peri_agent::session::tool_catalog::ToolSource::DynamicMcp(_))
-                            )
-                        })
                         .cloned(),
                 )
                 .collect(),

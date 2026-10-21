@@ -16,13 +16,13 @@ use rmcp::model::Tool;
 use serde_json::json;
 
 use crate::mcp::client::{ClientStatus, McpClientHandle};
-use crate::mcp::dynamic::admission::DynamicMcpAdmissionGate;
 
 // ─── fixtures ───────────────────────────────────────────────────────────────
 
 /// 纯匹配用句柄：`peer: None` + `Failed`，避免被误读为已完成握手。
 fn fixture_handle(server: &str) -> Arc<McpClientHandle> {
     Arc::new(McpClientHandle {
+        call_gate: Default::default(),
         name: server.to_string(),
         version: None,
         connected_at: None,
@@ -610,33 +610,4 @@ fn test_system_validation_is_all_or_nothing() {
     let prepared = expect_ok(rebuilt, &required(&[("workspace", &["Read"])]));
     assert_eq!(prepared.len(), 2);
     assert_eq!(direct_names(&prepared), vec!["Read".to_string()]);
-}
-
-#[test]
-fn test_system_dynamic_control_remains_deferred() {
-    let tool = fixture_tool(json!({
-        "name": "ShadowTool",
-        "description": "fixture",
-        "inputSchema": read_schema()
-    }));
-    let dynamic = McpToolBridge::new_dynamic(
-        "dynamic",
-        &tool,
-        fixture_handle("dynamic"),
-        DynamicMcpAdmissionGate::new(),
-    )
-    .expect("动态 fixture 名称合法");
-    assert!(!dynamic.is_direct(), "动态 bridge 缺省保持 deferred");
-
-    let prepared = expect_ok(
-        vec![bridge("workspace", "Read"), dynamic],
-        &required(&[("workspace", &["Read"])]),
-    );
-
-    assert_eq!(direct_names(&prepared), vec!["Read".to_string()]);
-    let dynamic = prepared
-        .iter()
-        .find(|bridge| bridge.name() == "mcp__dynamic__ShadowTool")
-        .expect("动态 bridge 仍在集合中");
-    assert!(!dynamic.is_direct(), "动态 gate 路径不得被自动提升");
 }

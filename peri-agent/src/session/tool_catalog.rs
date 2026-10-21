@@ -6,8 +6,8 @@ use std::{
 use parking_lot::RwLock;
 use peri_acp_types::{
     builtin_mcp::{original_tool_name_of_effective, BUILTIN_MCP_INSTANCES},
-    dynamic_mcp::{DynamicMcpCatalogTool, SessionMcpCapabilitySnapshot},
-    ports::SessionMcpCapabilityPort,
+    mcp_control::SessionMcpCatalogSnapshot,
+    ports::SessionMcpCatalogPort,
 };
 
 use crate::tools::{BaseTool, ToolDefinition};
@@ -17,17 +17,14 @@ pub type ToolFilter = Arc<dyn Fn(&dyn BaseTool) -> bool + Send + Sync>;
 
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 pub enum CatalogRefreshError {
-    #[error("dynamic MCP capability snapshot is inconsistent")]
-    InconsistentCapability,
+    #[error("MCP catalog tool `{tool}` has no source identity")]
+    InvalidMcpSource { tool: String },
     #[error("tool alias conflicts with another visible tool")]
     AliasConflict,
     /// 启动候选没有显式 MCP 来源身份。
     #[error("startup tool `{tool}` has no MCP source identity")]
     InvalidStartupSource { tool: String },
-    /// 启动候选要覆盖 core/middleware 或其它 server 的静态条目。
-    #[error("startup tool `{tool}` collides with a non-replaceable catalog entry")]
-    StartupRegistrationRejected { tool: String },
-    /// 启动候选提交后必需工具仍不可直接使用（被策略过滤或动态遮蔽）。
+    /// 启动候选提交后必需工具仍不可直接使用（被策略过滤）。
     #[error("required startup tool `{tool}` of MCP server `{server}` is unavailable")]
     RequiredToolUnavailable { server: String, tool: String },
 }
@@ -67,17 +64,10 @@ impl std::fmt::Debug for StartupToolUpdate {
     }
 }
 
-/// 动态碰撞目录的同步注册回调：静态 base 提交成功后按新目录重验动态注册。
-///
-/// 锁序为 catalog → registration → registry；回调**不得**重入 catalog。
-pub(crate) type StartupCatalogRegistration =
-    Arc<dyn Fn(Vec<DynamicMcpCatalogTool>) -> Result<(), CatalogRefreshError> + Send + Sync>;
-
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ToolSource {
     CoreOrMiddleware,
-    StaticMcp(String),
-    DynamicMcp(peri_acp_types::dynamic_mcp::DynamicMcpInstanceKey),
+    Mcp(String),
 }
 
 #[derive(Clone)]
@@ -214,16 +204,14 @@ struct CatalogState {
 
 pub struct SessionToolCatalog {
     state: RwLock<CatalogState>,
-    capability: Option<Arc<dyn SessionMcpCapabilityPort>>,
+    capability: Option<Arc<dyn SessionMcpCatalogPort>>,
     tool_filter: ToolFilter,
-    /// 动态碰撞目录注册回调；缺省表示本次会话未接入碰撞目录（子 agent 等）。
-    startup_registration: RwLock<Option<StartupCatalogRegistration>>,
 }
 
 impl SessionToolCatalog {
     pub fn new(
         base_tools: BTreeMap<String, Arc<dyn BaseTool>>,
-        capability: Option<Arc<dyn SessionMcpCapabilityPort>>,
+        capability: Option<Arc<dyn SessionMcpCatalogPort>>,
     ) -> Self {
         Self::try_new(base_tools, capability)
             .expect("base tool catalog must not contain conflicting aliases")
@@ -231,14 +219,14 @@ impl SessionToolCatalog {
 
     pub fn try_new(
         base_tools: BTreeMap<String, Arc<dyn BaseTool>>,
-        capability: Option<Arc<dyn SessionMcpCapabilityPort>>,
+        capability: Option<Arc<dyn SessionMcpCatalogPort>>,
     ) -> Result<Self, CatalogRefreshError> {
         Self::try_with_filter(base_tools, capability, Arc::new(|_| true))
     }
 
     pub fn with_filter(
         base_tools: BTreeMap<String, Arc<dyn BaseTool>>,
-        capability: Option<Arc<dyn SessionMcpCapabilityPort>>,
+        capability: Option<Arc<dyn SessionMcpCatalogPort>>,
         tool_filter: ToolFilter,
     ) -> Self {
         Self::try_with_filter(base_tools, capability, tool_filter)
@@ -247,17 +235,24 @@ impl SessionToolCatalog {
 
     pub fn try_with_filter(
         base_tools: BTreeMap<String, Arc<dyn BaseTool>>,
-        capability: Option<Arc<dyn SessionMcpCapabilityPort>>,
+        capability: Option<Arc<dyn SessionMcpCatalogPort>>,
         tool_filter: ToolFilter,
     ) -> Result<Self, CatalogRefreshError> {
         let base_tools = base_tools
             .into_iter()
             .map(|(name, tool)| {
-                let source = base_entry_source(tool.as_ref(), &name);
+                let source = base_entry_source(tool.as_ref());
                 (name, CatalogToolEntry { tool, source })
             })
             .collect::<BTreeMap<_, _>>();
-        let initial = Arc::new(build_published(0, &base_tools, None, tool_filter.as_ref())?);
+        let current = capability.as_ref().map(|port| port.snapshot());
+        let generation = current.as_ref().map_or(0, |snapshot| snapshot.generation);
+        let initial = Arc::new(build_published(
+            generation,
+            &base_tools,
+            current.as_deref(),
+            tool_filter.as_ref(),
+        )?);
         Ok(Self {
             state: RwLock::new(CatalogState {
                 base_tools,
@@ -265,23 +260,7 @@ impl SessionToolCatalog {
             }),
             capability,
             tool_filter,
-            startup_registration: RwLock::new(None),
         })
-    }
-
-    /// 注入动态碰撞目录的同步注册回调（静态 base 提交成功后按新目录重验）。
-    ///
-    /// 调用点归 `session/exec/stage_builder/tools.rs`（捕获 deployment 与
-    /// session_id）；未接线的目录（子 agent 沿用自身 capability）保持 None。
-    pub(crate) fn set_startup_catalog_registration(
-        &self,
-        registration: StartupCatalogRegistration,
-    ) {
-        *self.startup_registration.write() = Some(registration);
-    }
-
-    pub fn dynamic_catalog_tools(&self) -> Vec<peri_acp_types::dynamic_mcp::DynamicMcpCatalogTool> {
-        dynamic_catalog_tools_of(&self.state.read().base_tools)
     }
 
     pub fn snapshot(&self) -> Arc<SessionToolCatalogSnapshot> {
@@ -289,15 +268,20 @@ impl SessionToolCatalog {
     }
 
     pub fn refresh(&self) -> Result<Arc<SessionToolCatalogSnapshot>, CatalogRefreshError> {
-        let capability = self.capability_snapshot();
+        let capability = self.capability.as_ref().map(|port| port.snapshot());
         let mut state = self.state.write();
-        if state.published.generation == capability.generation {
+        let generation = capability
+            .as_ref()
+            .map_or(0, |snapshot| snapshot.generation);
+        if state.published.generation == generation {
             return Ok(Arc::clone(&state.published));
         }
         let next = Arc::new(build_published(
-            capability.generation,
+            capability
+                .as_ref()
+                .map_or(0, |snapshot| snapshot.generation),
             &state.base_tools,
-            Some(&capability),
+            capability.as_deref(),
             self.tool_filter.as_ref(),
         )?);
         state.published = Arc::clone(&next);
@@ -308,17 +292,16 @@ impl SessionToolCatalog {
     ///
     /// 只更新 base：Reason 边界仍完整走 ARC-TOOLS-001 的
     /// `refresh → working map swap → before_reason_catalog → before_model → pin`，
-    /// 本提交不替代 Reason boundary，也不混入 dynamic overlay（overlay 由
-    /// capability 快照在每次发布时重新叠加）。
+    /// 本提交不替代 Reason boundary；后续 refresh 仍从当前 pool 获取完整目录。
     ///
     /// 同步、fallible、先验证后提交：来源、与既有 base 条目的身份冲突、别名
     /// 冲突、必需工具在发布快照中可直达（`is_direct && visible_to_model` 且未被
-    /// `tool_filter`/动态遮蔽吞掉）全部通过后才替换 base 与 published。
+    /// `tool_filter` 过滤）全部通过后才替换 base 与 published。
     pub(crate) fn replace_static_mcp_tools(
         &self,
         update: StartupToolUpdate,
     ) -> Result<Arc<SessionToolCatalogSnapshot>, CatalogRefreshError> {
-        let capability = self.capability_snapshot();
+        let capability = self.capability.as_ref().map(|port| port.snapshot());
         let mut state = self.state.write();
         let mut next_base = state.base_tools.clone();
         let mut skipped = BTreeSet::new();
@@ -335,15 +318,7 @@ impl SessionToolCatalog {
                 tool_names_conflict(existing.tool.as_ref(), entry.tool.as_ref())
                     && (!same_identity(existing) || updated.contains(&name))
             });
-            let dynamic_collision = capability.tools.values().find(|existing| {
-                tool_names_conflict(existing.tool.as_ref(), entry.tool.as_ref())
-                    && existing.instance.logical.server_name
-                        != entry.tool.mcp_server_name().unwrap_or_default()
-            });
-            if let Some(winner) = collision
-                .map(|entry| entry.tool.as_ref())
-                .or_else(|| dynamic_collision.map(|entry| entry.tool.as_ref()))
-            {
+            if let Some(winner) = collision.map(|entry| entry.tool.as_ref()) {
                 warn_tool_collision(winner, entry.tool.as_ref());
                 // A duplicate declaration of the winner is not a shadowed
                 // requirement: its first declaration still must pass visibility.
@@ -362,9 +337,11 @@ impl SessionToolCatalog {
             next_base.insert(name, entry);
         }
         let next = Arc::new(build_published(
-            capability.generation,
+            capability
+                .as_ref()
+                .map_or(0, |snapshot| snapshot.generation),
             &next_base,
-            Some(&capability),
+            capability.as_deref(),
             self.tool_filter.as_ref(),
         )?);
         for required in &update.required {
@@ -385,20 +362,9 @@ impl SessionToolCatalog {
                 });
             }
         }
-        if let Some(registration) = self.startup_registration.read().clone() {
-            // 锁序 catalog → registration → registry；回调不得重入 catalog。
-            registration(dynamic_catalog_tools_of(&next_base))?;
-        }
         state.base_tools = next_base;
         state.published = Arc::clone(&next);
         Ok(next)
-    }
-
-    fn capability_snapshot(&self) -> Arc<SessionMcpCapabilitySnapshot> {
-        self.capability
-            .as_ref()
-            .map(|port| port.snapshot())
-            .unwrap_or_default()
     }
 
     /// Pin the exact request-local working tool objects after middleware has
@@ -430,13 +396,13 @@ impl SessionToolCatalog {
     }
 }
 
-/// 一次发布的完整构造：静态 base → dynamic overlay → session tool_filter。
+/// 一次发布的完整构造：保留 core/middleware，整体替换当前 MCP 目录，再应用会话过滤。
 ///
 /// 单一入口保证 initial / refresh / startup 提交三条路径的可见性语义一致。
 fn build_published(
     generation: u64,
     base: &BTreeMap<String, CatalogToolEntry>,
-    capability: Option<&SessionMcpCapabilitySnapshot>,
+    capability: Option<&SessionMcpCatalogSnapshot>,
     tool_filter: &(dyn Fn(&dyn BaseTool) -> bool + Send + Sync),
 ) -> Result<SessionToolCatalogSnapshot, CatalogRefreshError> {
     let mut tools = build_tools(base, capability)?;
@@ -444,12 +410,11 @@ fn build_published(
     finalize(generation, tools)
 }
 
-/// 既有 base 条目的来源归属：工具自声明优先，其次按 `mcp__{server}__{tool}` 形态推导。
-fn base_entry_source(tool: &dyn BaseTool, name: &str) -> ToolSource {
+/// 工具来源只消费显式身份；名称不授予 MCP 来源。
+fn base_entry_source(tool: &dyn BaseTool) -> ToolSource {
     tool.mcp_server_name()
         .map(str::to_owned)
-        .or_else(|| static_mcp_server(name))
-        .map(ToolSource::StaticMcp)
+        .map(ToolSource::Mcp)
         .unwrap_or(ToolSource::CoreOrMiddleware)
 }
 
@@ -465,59 +430,42 @@ fn startup_entry(
     };
     Ok(CatalogToolEntry {
         tool,
-        source: ToolSource::StaticMcp(server),
+        source: ToolSource::Mcp(server),
     })
-}
-
-fn dynamic_catalog_tools_of(
-    base: &BTreeMap<String, CatalogToolEntry>,
-) -> Vec<DynamicMcpCatalogTool> {
-    base.iter()
-        .map(|(name, entry)| DynamicMcpCatalogTool {
-            name: name.clone(),
-            aliases: entry
-                .tool
-                .aliases()
-                .iter()
-                .map(|alias| (*alias).to_string())
-                .collect(),
-            static_mcp_server: match &entry.source {
-                ToolSource::StaticMcp(server) => Some(server.clone()),
-                ToolSource::CoreOrMiddleware | ToolSource::DynamicMcp(_) => None,
-            },
-        })
-        .collect()
 }
 
 fn build_tools(
     base: &BTreeMap<String, CatalogToolEntry>,
-    capability: Option<&SessionMcpCapabilitySnapshot>,
+    capability: Option<&SessionMcpCatalogSnapshot>,
 ) -> Result<BTreeMap<String, CatalogToolEntry>, CatalogRefreshError> {
-    let mut tools = base.clone();
-    if let Some(capability) = capability {
-        for server in capability.servers.keys() {
-            tools.retain(|_, entry| {
-                !matches!(&entry.source, ToolSource::StaticMcp(source) if source == server)
+    let Some(capability) = capability else {
+        return Ok(base.clone());
+    };
+    let mut tools: BTreeMap<_, _> = base
+        .iter()
+        .filter(|(_, entry)| matches!(entry.source, ToolSource::CoreOrMiddleware))
+        .map(|(name, entry)| (name.clone(), entry.clone()))
+        .collect();
+    for tool in &capability.tools {
+        let Some(server) = tool.mcp_server_name() else {
+            return Err(CatalogRefreshError::InvalidMcpSource {
+                tool: tool.name().into(),
             });
+        };
+        if let Some(winner) = tools
+            .values()
+            .find(|entry| tool_names_conflict(entry.tool.as_ref(), tool.as_ref()))
+        {
+            warn_tool_collision(winner.tool.as_ref(), tool.as_ref());
+            continue;
         }
-        for (name, dynamic_tool) in &capability.tools {
-            let Some(projection) = capability
-                .servers
-                .get(&dynamic_tool.instance.logical.server_name)
-            else {
-                return Err(CatalogRefreshError::InconsistentCapability);
-            };
-            if projection.instance_key != dynamic_tool.instance {
-                return Err(CatalogRefreshError::InconsistentCapability);
-            }
-            tools.insert(
-                name.clone(),
-                CatalogToolEntry {
-                    tool: Arc::clone(&dynamic_tool.tool),
-                    source: ToolSource::DynamicMcp(dynamic_tool.instance.clone()),
-                },
-            );
-        }
+        tools.insert(
+            tool.name().to_string(),
+            CatalogToolEntry {
+                source: ToolSource::Mcp(server.to_string()),
+                tool: Arc::clone(tool),
+            },
+        );
     }
     Ok(tools)
 }
@@ -569,12 +517,6 @@ pub(crate) fn warn_tool_collision(winner: &dyn BaseTool, skipped: &dyn BaseTool)
         skipped_source = skipped.mcp_server_name().unwrap_or("core/middleware"),
         "tool name collision; keeping first admitted tool"
     );
-}
-
-fn static_mcp_server(name: &str) -> Option<String> {
-    let rest = name.strip_prefix("mcp__")?;
-    let (server, _) = rest.split_once("__")?;
-    Some(server.to_string())
 }
 
 #[cfg(test)]

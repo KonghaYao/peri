@@ -17,10 +17,9 @@ use std::sync::Arc;
 use crate::acp_mcp::{AcpMcpError, AcpMcpInbound, AcpMcpRegistry, AcpMcpServerSpec};
 use crate::agents::AgentCatalogEntry;
 use crate::command_registry::CommandRegistry;
-use crate::dynamic_mcp::{
-    CanonicalDynamicMcpAction, DynamicMcpCatalogTool, DynamicMcpFailure, DynamicMcpInstanceKey,
-    DynamicMcpNotification, DynamicMcpResponse, DynamicMcpShutdownReport, ResolvedSecret,
-    SecretRef, SessionMcpCapabilitySnapshot,
+pub use crate::mcp_control::SessionMcpCatalogPort;
+use crate::mcp_control::{
+    McpControlError, McpControlRequest, McpControlResponse, McpServerControl,
 };
 use crate::mcp_skills::McpSkillRegistry;
 use crate::skills::SkillMetadata;
@@ -140,6 +139,7 @@ pub struct McpServerInfo {
     pub error_summary: Option<String>,
     /// 服务器 URL（HTTP 传输）；stdio/builtin 传输为 None。
     pub url: Option<String>,
+    pub control: McpServerControl,
 }
 
 /// `mcp/oauth_start` 的启动结果（与 middlewares 内部
@@ -219,6 +219,25 @@ impl Drop for McpResourceSubscription {
 /// `McpClientPool`，路径不变。
 #[async_trait::async_trait]
 pub trait McpPoolPort: Send + Sync {
+    /// Control a server in this pool after the host has admitted the session request.
+    async fn control_mcp(
+        self: Arc<Self>,
+        _request: McpControlRequest,
+    ) -> Result<McpControlResponse, McpControlError> {
+        Err(McpControlError::unsupported())
+    }
+    /// Current immutable MCP catalog for the given session's visibility scope.
+    fn catalog_source(
+        self: Arc<Self>,
+        _session_id: &str,
+    ) -> Option<Arc<dyn SessionMcpCatalogPort>> {
+        None
+    }
+    /// Cancel an exact active OAuth flow in this pool.
+    fn cancel_oauth_flow(&self, _flow_id: &str) -> Result<bool, String> {
+        Err("MCP OAuth flow unavailable".into())
+    }
+
     /// 还原具体实现（downcast 还原点，供 middlewares 装配面与装配面宿主使用）。
     fn as_any(&self) -> &dyn Any;
 
@@ -328,34 +347,10 @@ pub trait McpPoolPort: Send + Sync {
         Err("MCP OAuth flow unavailable".into())
     }
 
-    /// 以完整 dynamic identity 投递授权码；实现不得退化为裸 server name。
-    ///
-    /// 默认实现返回错误（替换前类型还原失败即报错）。
-    fn deliver_dynamic_oauth_callback(
-        &self,
-        _instance: DynamicMcpInstanceKey,
-        _flow_id: &str,
-        _code: String,
-        _state: String,
-    ) -> Result<(), String> {
-        Err("MCP OAuth flow unavailable".into())
-    }
-
     /// 取消静态 server 的进行中授权（`mcp/oauth_cancel`），返回是否确有取消。
     ///
     /// 默认实现返回错误（替换前类型还原失败即报错）。
     fn cancel_oauth_callback(&self, _server_name: &str) -> Result<bool, String> {
-        Err("MCP OAuth flow unavailable".into())
-    }
-
-    /// 取消指定 dynamic instance 的进行中授权，返回是否确有取消。
-    ///
-    /// 默认实现返回错误（替换前类型还原失败即报错）。
-    fn cancel_dynamic_oauth_flow(
-        &self,
-        _instance: DynamicMcpInstanceKey,
-        _flow_id: &str,
-    ) -> Result<bool, String> {
         Err("MCP OAuth flow unavailable".into())
     }
 
@@ -612,134 +607,6 @@ impl dyn ToolSearchPort {
             }
         }
     }
-}
-
-/// Deployment-scoped Dynamic MCP operation and shutdown port.
-#[async_trait::async_trait]
-pub trait DynamicMcpDeploymentPort: Send + Sync {
-    async fn execute(
-        &self,
-        session_id: &str,
-        action: CanonicalDynamicMcpAction,
-    ) -> Result<DynamicMcpResponse, DynamicMcpFailure>;
-
-    /// Register the canonical session catalog used for pre-commit name collision
-    /// rejection. Registration must happen before any load can be admitted.
-    fn register_catalog(
-        &self,
-        session_id: &str,
-        tools: Vec<DynamicMcpCatalogTool>,
-    ) -> Result<(), DynamicMcpFailure>;
-
-    fn capability(&self, session_id: &str) -> Arc<dyn SessionMcpCapabilityPort>;
-
-    fn close_registration(&self, session_id: &str) -> Arc<dyn SessionCloseRegistration>;
-
-    /// Validate that an opaque Dynamic MCP identity still names the current live
-    /// incarnation. OAuth RPCs must call this before touching scoped flow APIs.
-    fn accepts_instance(&self, _instance: &DynamicMcpInstanceKey) -> bool {
-        false
-    }
-
-    /// Bind a weak, checked notification target for one live session. Rebinding
-    /// replaces the previous lease; dropping the returned sink disables delivery.
-    fn bind_notification_sink(
-        &self,
-        _session_id: &str,
-        _sink: std::sync::Weak<dyn DynamicMcpNotificationSinkPort>,
-    ) -> bool {
-        false
-    }
-
-    /// Deliver an OAuth authorization URL only through the checked sink bound to
-    /// the originating session. Implementations must reject stale instances and
-    /// must never fall back to a deployment-global transport.
-    fn notify_authorization_needed(
-        &self,
-        _instance: &DynamicMcpInstanceKey,
-        _flow_id: &str,
-        _authorization_url: &str,
-    ) -> bool {
-        false
-    }
-
-    fn begin_shutdown(&self);
-
-    async fn close_session(&self, session_id: &str) -> DynamicMcpShutdownReport;
-
-    async fn shutdown(&self) -> DynamicMcpShutdownReport;
-}
-
-/// Session-local immutable capability source shared by the main agent and all
-/// of its subagents.
-pub trait SessionMcpCapabilityPort: Send + Sync {
-    fn snapshot(&self) -> Arc<SessionMcpCapabilitySnapshot>;
-
-    /// Bind the existing session MCP read/discovery registries to this checked
-    /// capability source, preserving the source pool's builtin policy. The
-    /// returned lease owns no parallel capability registry: it only projects
-    /// the effective handles into the existing MCP
-    /// pool, skill registry and command registry.
-    fn bind_projection(
-        &self,
-        _static_pool: Arc<dyn McpPoolPort>,
-        _skill_registry: Arc<crate::mcp_skills::McpSkillRegistry>,
-        _command_registry: Arc<crate::command_registry::CommandRegistry>,
-    ) -> Arc<dyn SessionMcpProjectionLease> {
-        panic!("session MCP capability does not support checked projection")
-    }
-}
-
-/// Incarnation-checked adapter from a session capability view to the existing
-/// MCP tools/resources/skills/commands production registries.
-pub trait SessionMcpProjectionLease: Send + Sync {
-    fn as_any(&self) -> &dyn Any;
-
-    /// Refresh the effective server view. Returns false after session close.
-    fn refresh(&self) -> bool;
-
-    /// Close projection admission and remove every dynamic projection. Idempotent.
-    fn close(&self);
-}
-
-/// Idempotent session-close lease. ACP may call this without understanding the
-/// Dynamic MCP state machine.
-#[async_trait::async_trait]
-pub trait SessionCloseRegistration: Send + Sync {
-    async fn revoke_and_cleanup(&self) -> DynamicMcpShutdownReport;
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
-pub enum SecretResolveError {
-    #[error("secret reference was not found")]
-    NotFound,
-    #[error("secret reference access was denied")]
-    Denied,
-    #[error("secret resolver is unavailable")]
-    Unavailable,
-}
-
-/// Production implementations must resolve opaque references only after HITL.
-#[async_trait::async_trait]
-pub trait SecretResolverPort: Send + Sync {
-    async fn resolve(&self, reference: &SecretRef) -> Result<ResolvedSecret, SecretResolveError>;
-}
-
-/// Checked session-specific Dynamic MCP notification sink. Implementations must
-/// reject stale incarnation writes and must never broadcast as a fallback.
-pub trait DynamicMcpNotificationSinkPort: Send + Sync {
-    fn notify(&self, notification: DynamicMcpNotification) -> bool;
-
-    fn notify_authorization_needed(
-        &self,
-        _instance: &DynamicMcpInstanceKey,
-        _flow_id: &str,
-        _authorization_url: &str,
-    ) -> bool {
-        false
-    }
-
-    fn accepts(&self, instance: &DynamicMcpInstanceKey) -> bool;
 }
 
 /// Agent 候选目录端口：主提示词 `{{available_agents}}` 渲染经此取候选

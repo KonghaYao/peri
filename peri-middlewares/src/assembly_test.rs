@@ -68,93 +68,6 @@ impl UserInteractionBroker for FakeBroker {
     }
 }
 
-struct FakeDynamicDeployment;
-
-#[async_trait]
-impl peri_acp_types::ports::DynamicMcpDeploymentPort for FakeDynamicDeployment {
-    async fn execute(
-        &self,
-        _session_id: &str,
-        _action: peri_acp_types::dynamic_mcp::CanonicalDynamicMcpAction,
-    ) -> Result<
-        peri_acp_types::dynamic_mcp::DynamicMcpResponse,
-        peri_acp_types::dynamic_mcp::DynamicMcpFailure,
-    > {
-        unimplemented!("assembly contract does not execute DynamicMCP")
-    }
-
-    fn register_catalog(
-        &self,
-        _session_id: &str,
-        _tools: Vec<peri_acp_types::dynamic_mcp::DynamicMcpCatalogTool>,
-    ) -> Result<(), peri_acp_types::dynamic_mcp::DynamicMcpFailure> {
-        Ok(())
-    }
-
-    fn capability(
-        &self,
-        _session_id: &str,
-    ) -> Arc<dyn peri_acp_types::ports::SessionMcpCapabilityPort> {
-        struct Empty;
-        impl peri_acp_types::ports::SessionMcpCapabilityPort for Empty {
-            fn snapshot(&self) -> Arc<peri_acp_types::dynamic_mcp::SessionMcpCapabilitySnapshot> {
-                Arc::new(Default::default())
-            }
-
-            fn bind_projection(
-                &self,
-                _static_pool: Arc<dyn peri_acp_types::ports::McpPoolPort>,
-                _skill_registry: Arc<peri_acp_types::mcp_skills::McpSkillRegistry>,
-                _command_registry: Arc<peri_acp_types::command_registry::CommandRegistry>,
-            ) -> Arc<dyn peri_acp_types::ports::SessionMcpProjectionLease> {
-                struct Lease;
-                impl peri_acp_types::ports::SessionMcpProjectionLease for Lease {
-                    fn as_any(&self) -> &dyn std::any::Any {
-                        self
-                    }
-
-                    fn refresh(&self) -> bool {
-                        true
-                    }
-
-                    fn close(&self) {}
-                }
-                Arc::new(Lease)
-            }
-        }
-        Arc::new(Empty)
-    }
-
-    fn close_registration(
-        &self,
-        _session_id: &str,
-    ) -> Arc<dyn peri_acp_types::ports::SessionCloseRegistration> {
-        struct Noop;
-        #[async_trait]
-        impl peri_acp_types::ports::SessionCloseRegistration for Noop {
-            async fn revoke_and_cleanup(
-                &self,
-            ) -> peri_acp_types::dynamic_mcp::DynamicMcpShutdownReport {
-                peri_acp_types::dynamic_mcp::DynamicMcpShutdownReport::Complete
-            }
-        }
-        Arc::new(Noop)
-    }
-
-    fn begin_shutdown(&self) {}
-
-    async fn close_session(
-        &self,
-        _session_id: &str,
-    ) -> peri_acp_types::dynamic_mcp::DynamicMcpShutdownReport {
-        peri_acp_types::dynamic_mcp::DynamicMcpShutdownReport::Complete
-    }
-
-    async fn shutdown(&self) -> peri_acp_types::dynamic_mcp::DynamicMcpShutdownReport {
-        peri_acp_types::dynamic_mcp::DynamicMcpShutdownReport::Complete
-    }
-}
-
 struct FakeEventHandler;
 
 impl AgentEventHandler for FakeEventHandler {
@@ -366,8 +279,6 @@ fn base_context() -> AssemblyContext {
         command_registry: None,
         cron_scheduler: None,
         mcp_pool: None,
-        dynamic_mcp: None,
-        dynamic_mcp_projection: Arc::new(parking_lot::Mutex::new(None)),
         session_id: "session-contract-test".to_string(),
         tool_search_index: Arc::new(ToolSearchIndex::new()),
         shared_tools,
@@ -467,6 +378,7 @@ fn pool_with_builtin_instances() -> Arc<McpClientPool> {
 
 fn make_connected_handle(server: &str, tools: Vec<rmcp::model::Tool>) -> Arc<McpClientHandle> {
     Arc::new(McpClientHandle {
+        call_gate: Default::default(),
         name: server.to_string(),
         version: None,
         connected_at: None,

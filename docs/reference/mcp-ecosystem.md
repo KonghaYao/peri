@@ -1,7 +1,7 @@
 # MCP 生态定位与互通指南（Connector 视角）
 
 > 本文件是生态背景与外部互通参考，不是仓库架构或协议的事实源。Perihelion
-> 的 MCP 设计以 `docs/design/dynamic-mcp.md`、
+> 的 MCP 设计以 `docs/design/acp-mcp-control.md`、
 > `docs/design/mcp-multiplexing.md`、`docs/design/mcp-adaptation-v4-part-1.md`
 > （MCP 迁移范围与验收语义的目标设计）和代码契约测试为准。
 >

@@ -51,6 +51,8 @@ pub(super) struct SkillEntry {
 pub(super) enum DetailAction {
     CopyError,
     Auth,
+    Restart,
+    Stop,
     Back,
 }
 
@@ -59,6 +61,8 @@ impl DetailAction {
         match self {
             Self::CopyError => i18n::tr("panel-mcp-detail-btn-copy"),
             Self::Auth => i18n::tr("panel-mcp-detail-btn-auth"),
+            Self::Restart => i18n::tr("panel-mcp-detail-btn-restart"),
+            Self::Stop => i18n::tr("panel-mcp-detail-btn-stop"),
             Self::Back => i18n::tr("panel-mcp-detail-btn-back"),
         }
     }
@@ -69,7 +73,7 @@ impl DetailAction {
     pub(super) fn text(self, label: &str) -> String {
         match self {
             Self::CopyError => format!(" {label} "),
-            Self::Auth | Self::Back => format!("[ {label} ]"),
+            Self::Auth | Self::Restart | Self::Stop | Self::Back => format!("[ {label} ]"),
         }
     }
 }
@@ -126,7 +130,7 @@ pub(super) fn button_style(
                 style
             }
         }
-        DetailAction::Auth | DetailAction::Back => {
+        DetailAction::Auth | DetailAction::Restart | DetailAction::Stop | DetailAction::Back => {
             let style = Style::default().fg(semantic.text.primary);
             if selected {
                 style
@@ -150,6 +154,12 @@ pub(super) fn detail_actions(s: &McpServerSummary) -> Vec<DetailAction> {
     }
     if s.needs_auth {
         actions.push(DetailAction::Auth);
+    }
+    if s.control.restart {
+        actions.push(DetailAction::Restart);
+    }
+    if s.control.stop {
+        actions.push(DetailAction::Stop);
     }
     actions.push(DetailAction::Back);
     actions
@@ -462,7 +472,6 @@ pub(super) fn cache_status_label_key(status: Option<&str>) -> Option<&'static st
         Some("cache_ready") => Some("panel-mcp-cache-ready"),
         Some("cache_disabled") => Some("panel-mcp-cache-disabled"),
         Some("cache_disabled_by_config") => Some("panel-mcp-cache-disabled-config"),
-        Some("cache_disabled_dynamic") => Some("panel-mcp-cache-disabled-dynamic"),
         Some("cache_pending") => Some("panel-mcp-cache-pending"),
         Some("live_fetch") => Some("panel-mcp-cache-live-fetch"),
         _ => None,
@@ -671,7 +680,7 @@ pub(super) fn build_detail_lines(
 }
 
 pub(super) fn derive_status_style(status: &str) -> (String, ratatui::style::Color) {
-    if status.contains("connected") {
+    if status == "connected" {
         (
             i18n::tr("panel-mcp-icon-connected"),
             THEME_ATOM.state().read().semantic.status.success,

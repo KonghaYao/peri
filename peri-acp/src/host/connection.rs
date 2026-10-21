@@ -54,6 +54,15 @@ impl ConnectionContext {
             .unwrap_or_else(PeriCaps::all_enabled)
     }
 
+    /// Admission and notifications require this open connection's initialize result.
+    pub(crate) fn admission_caps(&self) -> PeriCaps {
+        if self.initialized && self.lifecycle == ConnectionLifecycle::Open {
+            self.negotiated_caps.clone().unwrap_or_default()
+        } else {
+            PeriCaps::default()
+        }
+    }
+
     /// 历史分页能力：**当前连接**是否协商过它（REQ §5.3、验收 A25）。
     ///
     /// 与 [`Self::caps`] 刻意不同：[`Self::caps`] 是「进程内路径保持历史全能力」的展示判据，
@@ -84,6 +93,15 @@ impl ConnectionContext {
                 .negotiated_caps
                 .as_ref()
                 .is_some_and(|caps| caps.history_window_v1)
+    }
+
+    pub(crate) fn mcp_control_v1(&self) -> bool {
+        self.initialized
+            && self.lifecycle == ConnectionLifecycle::Open
+            && self
+                .negotiated_caps
+                .as_ref()
+                .is_some_and(|caps| caps.mcp_control_v1)
     }
 
     pub(crate) fn apps_enabled(&self) -> bool {
@@ -137,7 +155,9 @@ impl ConnectionContext {
             connection_id: self.id.clone(),
             history_pagination: self.history_pagination(),
             history_window_v1: self.history_window_v1(),
+            mcp_control_v1: self.mcp_control_v1(),
             caps: self.caps(),
+            admission_caps: self.admission_caps(),
         }
     }
 }
@@ -151,12 +171,15 @@ pub(crate) struct ConnectionFacts {
     pub(crate) history_pagination: bool,
     /// `peri.historyWindowV1` 是否由**当前连接**协商。与分页独立、失败关闭。
     pub(crate) history_window_v1: bool,
+    pub(crate) mcp_control_v1: bool,
     /// **当前连接**的 peri 能力集（[`ConnectionContext::caps`] 的原样取值）。
     ///
     /// 回放标记与代次戳（`periReplay` / `periLoadGeneration`）由它门控：判据必须是本连接
     /// `initialize` 的协商结果，不得回读会话级 `caps_registry`——后者的旧值会被先前连接写死，
     /// 未协商的标准连接因此可能继承到 Peri 私有字段（REQ §5.3、验收 A25）。
     pub(crate) caps: PeriCaps,
+    /// Explicit negotiation for admission; absent or closed connections have no capabilities.
+    pub(crate) admission_caps: PeriCaps,
 }
 
 impl ConnectionFacts {
@@ -172,7 +195,9 @@ impl ConnectionFacts {
             connection_id: "unnegotiated-test".into(),
             history_pagination: false,
             history_window_v1: false,
+            mcp_control_v1: false,
             caps: PeriCaps::all_enabled(),
+            admission_caps: PeriCaps::default(),
         }
     }
 }

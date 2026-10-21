@@ -88,11 +88,22 @@ impl AcpTuiClient {
         caps.oauth = false;
         caps.history_window_v1 = crate::kit::atoms::HISTORY_WINDOW_V1.get();
         caps.ui_commands = specs.to_vec();
+        self.mcp_control
+            .store(false, std::sync::atomic::Ordering::Release);
+        let mut meta = caps.to_agent_meta();
+        meta.insert("peri.mcpControlV1".into(), Value::Bool(true));
         let params = json!({
             "protocolVersion": 1,
-            "clientCapabilities": { "_meta": caps.to_agent_meta() },
+            "clientCapabilities": { "_meta": meta },
         });
         let result = self.transport.send_request("initialize", params).await?;
+        self.mcp_control.store(
+            result
+                .pointer("/agentCapabilities/_meta/peri.mcpControlV1")
+                .and_then(Value::as_bool)
+                .unwrap_or(false),
+            std::sync::atomic::Ordering::Release,
+        );
         self.session_workspace.store(
             result
                 .pointer("/agentCapabilities/_meta/peri.sessionWorkspaceV1")
@@ -117,6 +128,10 @@ impl AcpTuiClient {
             crate::kit::steer_state::STEERS.state().write().enabled = supported;
         }
         Ok(())
+    }
+
+    pub(crate) fn supports_mcp_control(&self) -> bool {
+        self.mcp_control.load(std::sync::atomic::Ordering::Acquire)
     }
 
     /// Submit a user message to the current session.

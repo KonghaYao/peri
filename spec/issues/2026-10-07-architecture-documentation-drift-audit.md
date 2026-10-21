@@ -19,7 +19,7 @@
 | 主 Agent | architecture、configuration-authority、索引状态、链接与依赖门 |
 | Agent/消息 | meta-harness、message-transcript、micro-compact、rcra-message-activation、model-adapters、system-prompt、system-reminder |
 | ACP/存储 | peri-acp-protocol、session-id-environment、storage-v2-machine-workspace-session、session-async-tasks、interaction-brokers |
-| MCP/工具 | middleware-system、tool-system、dynamic-mcp、mcp-adaptation-v4-part-1、mcp-multiplexing、mcp-cache |
+| MCP/工具 | middleware-system、tool-system、acp-mcp-control、mcp-adaptation-v4-part-1、mcp-multiplexing、mcp-cache |
 | TUI | tui-acp-data-flow、tui-chat-workbench、tui-streaming-markdown-performance、tui-subagent-activity、user-input-queue、command-system |
 | SDK/编排 | workflow、ultra-adlc、serverless-execution-identity、time-runtime、git-watch-middleware、meta-control |
 
@@ -136,8 +136,8 @@
 
 - 处理状态：关键说明已更新；未以文档同步代替相关运行时部署验收。
 - 类型：文档/职责/路由漂移；按适用契约修正文档，不因此改变已批准目标。
-- 文档：`docs/code-index/peri-model.md:83`、`docs/code-index/peri-tui.md:208`、`docs/design/system-reminder.md:304`、`docs/design/tui-acp-data-flow.md:190`、`docs/design/tui-chat-workbench.md:134`、`docs/design/ultra-adlc.md:245`、`docs/design/dynamic-mcp.md:569`、`docs/design/dynamic-mcp.md:616` 仍有绝对不输出 secret 或统一脱敏承诺。
-- 证据：`docs/standards/architecture-contracts.md:159` 和诊断 active issue 已批准运行时诊断不做内容脱敏。`peri-model/src/anthropic/mod.rs:87` 保留 Debug 内容，`peri-tui/src/kit/acp_events/agent.rs:13` 展示实际错误。Reminder `docs/design/system-reminder.md:205` 与 Dynamic MCP `docs/design/dynamic-mcp.md:255` 自身已表达新政策，旧条款造成内部冲突。
+- 文档：`docs/code-index/peri-model.md:83`、`docs/code-index/peri-tui.md:208`、`docs/design/system-reminder.md:304`、`docs/design/tui-acp-data-flow.md:190`、`docs/design/tui-chat-workbench.md:134`、`docs/design/ultra-adlc.md:245`（旧动态 MCP 文档已由 ACP 运行控制设计取代，原证据经 Git 历史检索） 仍有绝对不输出 secret 或统一脱敏承诺。
+- 证据：`docs/standards/architecture-contracts.md:159` 和诊断 active issue 已批准运行时诊断不做内容脱敏。`peri-model/src/anthropic/mod.rs:87` 保留 Debug 内容，`peri-tui/src/kit/acp_events/agent.rs:13` 展示实际错误。Reminder `docs/design/system-reminder.md:205` 自身已表达新政策，旧条款造成内部冲突。
 - 影响/建议：会引导重新遮蔽诊断或错误地将日志当无凭据数据管理。统一诊断、主动收集/交付凭据、模型受众、secretRef 存储和日志访问控制的不同 scope；不得将保真扩大成无条件记录/广播成功业务数据，也不得删除认证、权限、限长或控制字符约束。
 
 ### P2-09. SDK 的执行权威仍被简化为 ManagedAgents KV claim（B10）
@@ -252,8 +252,8 @@
 
 - 处理状态：保留，未处理；P3 不在本次追加授权范围。
 - 类型：文档/职责/路由漂移；按适用契约修正文档，不因此改变已批准目标。
-- 文档：`docs/design/middleware-system.md:132`、`docs/design/middleware-system.md:134` 仅列 MCP before_agent/before_model 和 ToolSearch before_agent，遗漏 Dynamic MCP 实例。
-- 证据：`peri-middlewares/src/assembly/mcp.rs:20` 在 MCP 槽位展开 DynamicMcpMiddleware；`peri-middlewares/src/mcp/middleware.rs:892` 有启动闸门；`peri-middlewares/src/tool_search/middleware.rs:164` 有目录重绑 hook。
+- 文档：`docs/design/middleware-system.md:132`、`docs/design/middleware-system.md:134` 仅列 MCP before_agent/before_model 和 ToolSearch before_agent；原动态实例已由 ACP 控制设计删除，仍需按当前 hook 核对。
+- 证据：`peri-middlewares/src/assembly/mcp.rs` 在 MCP 槽位装配单一池的 McpMiddleware；`peri-middlewares/src/mcp/middleware.rs` 有启动闸门；`peri-middlewares/src/tool_search/middleware.rs:164` 有目录重绑 hook。
 - 影响/建议：无法解释真实准入与 Reason 目录更新。区分槽位和实例，稳定职责链接具体符号，不继续复制易过时的完整 inventory。
 
 ### P3-10. 工具“无状态、并发互不干扰”的普遍承诺不成立（B21）

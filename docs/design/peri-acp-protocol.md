@@ -249,6 +249,8 @@ UTF-8 边界裁剪（只允许跳过开头 1–3 字节的跨块残片并显式�
 | `session/update_config` | `{ sessionId?, config }` | `{ configOptions }` | 完整 `PeriConfig` 替换（校验 providers 非空与 profile→provider 引用），变更后推送 `config_option_update` 并 invalidate LLM 实例 |
 | `session/switch-model` | — | — | 无服务端注册；模型切换走 `session/set_config_option` 的 `configId="model"` 分支；stdio 与 mpsc 共用统一 request dispatch |
 | `session/switch-provider` | — | — | 未实现，无服务端注册 |
+| `peri/mcp/control` | 严格 `{ sessionId, serverName, action, config? }` | `{ sessionId, serverName, action, status }` | 当前连接显式协商 `peri.mcpControlV1`，按会话环境注册/重启/关闭普通 MCP；完整 wire、生命周期与错误见 [ACP MCP 运行控制](acp-mcp-control.md) |
+| `mcp/list` | `{ sessionId }` | `{ servers }` | 精确查询会话池并返回每个服务的 `control`；新控制能力独立允许查询，旧 OAuth/TUI 查询能力保留 |
 
 > **已移除/不存在方法**：`session/approve` 和 `session/answer` 已废弃——HITL 审批经 broker JSON-RPC `session/request_permission` 往返，TUI 通过 `send_response`（JSON-RPC response）回传审批结果（`hitl_response.rs`），AskUser 同理走 `elicitation/create` + `send_response`（`ask_user_action.rs`），均不走 execute-command。`session/query` 和 `session/suggest-files` 未实现——文件补全走本地 `FILE_LIST` atom + `SkimMatcher`。
 

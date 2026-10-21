@@ -6,7 +6,10 @@ fn absent_stdio_rejects_shared_static_and_dynamic_process_entry() {
     let pool = super::super::McpClientPool::new_pending();
     pool.set_stdio_available(false).unwrap();
     let command = tokio::process::Command::new("this-command-must-not-run");
-    let error = pool.spawn_process_command(command, None).err().unwrap();
+    let error = pool
+        .spawn_process_command(command, None, None)
+        .err()
+        .unwrap();
     assert!(error.to_string().contains("unavailable"));
     assert!(pool.processes.lock().is_empty());
 }
@@ -31,7 +34,7 @@ async fn leader_exit_before_pool_close_still_drains_descendants_and_stderr() {
         "(while :; do printf x >> marker; sleep 0.02; done) </dev/null >/dev/null & exit 0",
     ]);
     let transport = pool
-        .spawn_process_command(command, Some("fixture"))
+        .spawn_process_command(command, Some("fixture"), None)
         .unwrap();
     let owner = transport.process_owner();
     wait_for_marker(&cwd.path().join("marker")).await;
@@ -62,7 +65,7 @@ async fn cancelled_handshake_keeps_process_owner_until_pool_cleanup() {
         "(while :; do printf x >> marker; sleep 0.02; done) </dev/null >/dev/null & wait",
     ]);
     let transport = pool
-        .spawn_process_command(command, Some("fixture"))
+        .spawn_process_command(command, Some("fixture"), None)
         .unwrap();
     let owner = transport.process_owner();
     wait_for_marker(&cwd.path().join("marker")).await;

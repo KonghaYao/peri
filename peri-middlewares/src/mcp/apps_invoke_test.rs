@@ -49,6 +49,7 @@ fn insert_server(pool: &McpClientPool, name: &str, tools: Vec<Tool>) {
     pool.clients.write().insert(
         name.to_string(),
         Arc::new(McpClientHandle {
+            call_gate: Default::default(),
             name: name.to_string(),
             version: None,
             connected_at: None,

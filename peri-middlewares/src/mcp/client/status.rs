@@ -107,6 +107,7 @@ impl McpClientPool {
                 .unwrap_or((None, None));
             let old_status = pool.clients.read().get(name).map(|c| c.status.clone());
             let handle = Arc::new(McpClientHandle {
+                call_gate: Default::default(),
                 name: name.to_string(),
                 version: None,
                 connected_at: None,
@@ -123,6 +124,7 @@ impl McpClientPool {
             });
             pool.advance_handle_generation(&handle);
             pool.clients.write().insert(name.to_string(), handle);
+            pool.bump_catalog_generation();
             old_status
         };
         // 新失败代际取代旧证据：等待方立即重读并得到 ConnectionFailed/ToolDiscoveryFailed。
@@ -156,6 +158,7 @@ impl McpClientPool {
                 .unwrap_or((None, None));
             let old_status = pool.clients.read().get(name).map(|c| c.status.clone());
             let handle = Arc::new(McpClientHandle {
+                call_gate: Default::default(),
                 name: name.to_string(),
                 version: None,
                 connected_at: None,
@@ -172,6 +175,7 @@ impl McpClientPool {
             });
             pool.advance_handle_generation(&handle);
             pool.clients.write().insert(name.to_string(), handle);
+            pool.bump_catalog_generation();
             old_status
         };
         // 需要授权是确定事实，不是「连接中」：本代证据失效并唤醒等待方。

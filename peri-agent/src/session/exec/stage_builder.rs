@@ -32,7 +32,7 @@ use peri_acp_types::{
     interaction::UserInteractionBroker,
     mcp_skills::McpSkillRegistry,
     plugin::LoadedPlugin,
-    ports::{McpPoolPort, SessionMcpCapabilityPort, ToolSearchPort},
+    ports::{McpPoolPort, SessionMcpCatalogPort, ToolSearchPort},
     session::{MessageQueue, SessionInbox},
     session_resources::SessionResources,
     skills::SkillRoot,
@@ -103,13 +103,8 @@ pub struct StageBuildInput {
     pub cron_scheduler: Option<Arc<dyn CronSchedulerPort>>,
     /// MCP 连接池端口
     pub mcp_pool: Option<Arc<dyn McpPoolPort>>,
-    /// Deployment-scoped Dynamic MCP operation port.
-    pub dynamic_mcp: Option<Arc<dyn peri_acp_types::ports::DynamicMcpDeploymentPort>>,
-    /// Session-scoped Dynamic MCP capability source.
-    pub session_mcp_capability: Option<Arc<dyn SessionMcpCapabilityPort>>,
-    /// Session-owned checked projection lease holder, shared across stage builds.
-    pub dynamic_mcp_projection:
-        Arc<parking_lot::Mutex<Option<Arc<dyn peri_acp_types::ports::SessionMcpProjectionLease>>>>,
+    /// 当前会话 MCP pool 的只读目录来源。
+    pub session_mcp_catalog: Option<Arc<dyn SessionMcpCatalogPort>>,
     /// 工具搜索索引端口
     pub tool_search_index: Arc<dyn ToolSearchPort>,
     /// 共享工具注册表（deferred tools）
@@ -302,8 +297,6 @@ pub struct V2AgentOutput {
 pub enum StageBuildError {
     #[error("session tool catalog is invalid: {0}")]
     ToolCatalog(#[from] crate::session::tool_catalog::CatalogRefreshError),
-    #[error("dynamic MCP catalog registration failed: {0:?}")]
-    DynamicMcp(peri_acp_types::dynamic_mcp::DynamicMcpFailure),
 }
 
 #[allow(clippy::too_many_arguments)]

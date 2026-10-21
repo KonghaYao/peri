@@ -320,7 +320,7 @@ pub(super) async fn spawn_subagent_impl(
         tool_filter,
         parent
             .and_then(|session| session.subagent_host())
-            .and_then(|host| host.session_mcp_capability.clone()),
+            .and_then(|host| host.session_mcp_catalog.clone()),
         skill_names,
         frozen_claude_md,
         frozen_claude_local_md,

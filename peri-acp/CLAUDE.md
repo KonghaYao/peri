@@ -30,6 +30,7 @@
 - workspace 资源输入使用 `snapshot.resources().disable_bundled_skills`，不重新读取全局关闭位；技能回归 fixture 必须使用与生产 source 一致的选中 global 路径。需要新值时显式 reload 并重新取得 snapshot，旧 pool 固定旧 Arc，没有 hot watcher。lenient 无 authority 仅临时可读，不可写。
 - `ConfigSource::save(expected_revision, &PeriConfig)` 返回 accepted snapshot；持久 configOptions / update_config 必须 candidate → 验证 → 保存成功 → 从 accepted snapshot 发布，失败不更新 live provider / agent cache、不 notify、不返回成功。revision 在编辑开始捕获，不得提交时换成最新版；远程 wire 与延迟 UI draft 的基线 token 仍需审计，见配置 active issue。
 - `SessionManager` 在每条 session/new、load、resume 或 fork 路径注册 session caps；发送扩展事件前按该 session 的 caps 门控。
+- MCP 运行控制统一走 `peri/mcp/control` 与当前连接协商的 `peri.mcpControlV1`；按显式 session 定位已建立环境，禁止未知 session 回落启动池。`mcp/list` 投影服务端可管理性，控制业务与清理 owner 归 pool；不提供模型动态注册工具。契约见 `../docs/design/acp-mcp-control.md`。
 - `session/load` 无 `cursor` = 初始 load、带合法 `cursor` = 历史页：模式在进入生命周期路由前由 `host/history_page.rs::classify` 唯一解析，锁策略与响应后 setup 都由模式决定。历史页不取执行生命周期锁、不做绑定 / MCP 接纳 / 广播 / 续跑，也不在全局 sessions 锁内做存储 I/O；未协商却带分页字段即拒绝，不降级为初始 load。扩展能力按**当前连接**的 `ConnectionContext::caps` 判定，不读会话级 registry（重连后能力重新协商）。
 - `SessionState::structure_version` 只在 rewind 持久化提交**成功**时 `+1`（恰好一次，失败分支不得触碰）：它让已发出的历史游标在存储委派之前失效，客户端处置与「锚点被删」同为 `-32012`。回放投递失败使 `session/load` 整体失败（`-32603`，不返回半回放成功，也不跑成功路径后处理）：已发布的会话态保持完整并留给下次 load 经 `AlreadyLive` 原位修复。初始 load 的代次（客户端可选或服务端生成）经 `_meta.periLoadGeneration` 同时出现在成功响应与本次全部重放（含 reminder 出口），门控仍是 `caps.replay`。
 - 新增 `ExecutorEvent` 或 ACP 扩展事件时，覆盖发射、ACP mapper/forwarder、caps 门控（如适用）和客户端消费；不能只增加枚举或单一发送点。

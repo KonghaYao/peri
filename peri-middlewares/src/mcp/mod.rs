@@ -12,8 +12,9 @@ pub mod callback_server;
 pub mod client;
 pub mod client_oauth;
 pub mod config;
+pub(crate) mod connection_gate;
+pub(crate) mod control;
 pub mod discover_tool;
-pub mod dynamic;
 // ClientInitializeError 来自 rmcp crate（504 bytes），无法修改其定义
 #[allow(clippy::result_large_err)]
 pub mod initialize;
@@ -52,6 +53,7 @@ pub use config::{
     load_merged_config, remove_server_from_config, set_server_disabled, ConfigSource,
     McpConfigError, McpConfigFile, McpServerConfig, OAuthConfig,
 };
+pub use connection_gate::McpCallGate;
 pub use middleware::McpMiddleware;
 pub use oauth_flow::{
     OAuthCallbackResult, OAuthFailureKind, OAuthFlowError, OAuthFlowEvent, OAuthFlowManager,
@@ -59,8 +61,7 @@ pub use oauth_flow::{
 pub use resource_tool::McpResourceTool;
 pub use rmcp::model::{Resource, Tool};
 pub use task_scope::{
-    DynamicMcpTaskKind, McpTaskKey, McpTaskOwner, McpTaskShutdownReport, McpTaskSpawner,
-    TaskAdmissionError,
+    McpTaskKey, McpTaskOwner, McpTaskShutdownReport, McpTaskSpawner, TaskAdmissionError,
 };
 pub use tool_bridge::{build_tool_bridges, McpToolBridge, ToolCallError};
 // D-02：crate 内 seam 测试（主 plan §6 W5）。模块名参与 `cargo test` 过滤，

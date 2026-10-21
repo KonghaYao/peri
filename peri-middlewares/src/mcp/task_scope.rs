@@ -12,20 +12,7 @@ use std::{
 use tokio::{sync::Notify, task::AbortHandle};
 use tokio_util::task::TaskTracker;
 
-use peri_acp_types::dynamic_mcp::{DynamicMcpIncarnationId, DynamicMcpInstanceKey};
-
 pub use peri_acp_types::ports::McpTaskShutdownReport;
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub enum DynamicMcpTaskKind {
-    Connect,
-    OAuth,
-    Reconnect,
-    Subscription,
-    SkillDiscovery,
-    Unload,
-    StagedCleanup,
-}
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub enum McpTaskKey {
@@ -54,40 +41,12 @@ pub enum McpTaskKey {
         session_id: String,
         server_id: String,
     },
-    Dynamic {
-        kind: DynamicMcpTaskKind,
-        session_id: String,
-        incarnation_id: DynamicMcpIncarnationId,
+    SkillDiscovery {
+        server: String,
+        session: String,
+        registry: usize,
     },
-}
-
-impl McpTaskKey {
-    pub fn dynamic(kind: DynamicMcpTaskKind, instance: &DynamicMcpInstanceKey) -> Self {
-        Self::Dynamic {
-            kind,
-            session_id: instance.logical.session_id.clone(),
-            incarnation_id: instance.incarnation_id.clone(),
-        }
-    }
-
-    fn dynamic_instance_matches(&self, instance: &DynamicMcpInstanceKey) -> bool {
-        matches!(
-            self,
-            Self::Dynamic {
-                session_id,
-                incarnation_id,
-                ..
-            } if session_id == &instance.logical.session_id
-                && incarnation_id == &instance.incarnation_id
-        )
-    }
-
-    fn dynamic_kind(&self) -> Option<DynamicMcpTaskKind> {
-        match self {
-            Self::Dynamic { kind, .. } => Some(*kind),
-            _ => None,
-        }
-    }
+    Control(String),
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -299,16 +258,7 @@ impl McpTaskSpawner {
             .upgrade()
             .ok_or(TaskAdmissionError::OwnerClosed)?;
         let mut state = inner.state.lock().expect("MCP task state poisoned");
-        let cleanup_during_shutdown = matches!(
-            key,
-            McpTaskKey::Dynamic {
-                kind: DynamicMcpTaskKind::StagedCleanup,
-                ..
-            }
-        );
-        if state.phase != OwnerPhase::Open
-            && !(state.phase == OwnerPhase::Closing && cleanup_during_shutdown)
-        {
+        if state.phase != OwnerPhase::Open {
             return Err(TaskAdmissionError::OwnerClosed);
         }
         compact_finished(&mut state, &key);
@@ -378,6 +328,23 @@ impl McpTaskSpawner {
     /// 「关闭连接 / 换代」收口它们——与配置驱动订阅循环（[`McpTaskKey::Subscription`]）
     /// 的停止点同序。订阅任务自身在连接关闭时也会自然结束；本方法消除的正是
     /// 「关闭先于订阅收口」的窗口。
+    pub(crate) async fn stop_server_discovery(&self, server: &str) {
+        let Some(inner) = self.inner.upgrade() else {
+            return;
+        };
+        let keys: Vec<_> = inner
+            .state
+            .lock()
+            .expect("MCP task state poisoned")
+            .records
+            .keys()
+            .filter(|key| matches!(key,McpTaskKey::SkillDiscovery{server:name,..} if name==server))
+            .cloned()
+            .collect();
+        for key in keys {
+            self.stop_key(&key).await;
+        }
+    }
     pub(crate) async fn stop_instance_resource_subscriptions(&self, instance: &str) {
         let Some(inner) = self.inner.upgrade() else {
             return;
@@ -399,66 +366,6 @@ impl McpTaskSpawner {
         for key in keys {
             self.stop_key(&key).await;
         }
-    }
-
-    pub async fn stop_instance_kinds(
-        &self,
-        instance: &DynamicMcpInstanceKey,
-        kinds: &[DynamicMcpTaskKind],
-    ) {
-        let Some(inner) = self.inner.upgrade() else {
-            return;
-        };
-        let keys: Vec<McpTaskKey> = inner
-            .state
-            .lock()
-            .expect("MCP task state poisoned")
-            .records
-            .keys()
-            .filter(|key| {
-                key.dynamic_instance_matches(instance)
-                    && key.dynamic_kind().is_some_and(|kind| kinds.contains(&kind))
-            })
-            .cloned()
-            .collect();
-        for key in keys {
-            self.stop_key(&key).await;
-        }
-    }
-
-    pub async fn stop_instance(&self, instance: &DynamicMcpInstanceKey) {
-        self.stop_instance_kinds(
-            instance,
-            &[
-                DynamicMcpTaskKind::Connect,
-                DynamicMcpTaskKind::OAuth,
-                DynamicMcpTaskKind::Reconnect,
-                DynamicMcpTaskKind::Subscription,
-                DynamicMcpTaskKind::SkillDiscovery,
-                DynamicMcpTaskKind::Unload,
-                DynamicMcpTaskKind::StagedCleanup,
-            ],
-        )
-        .await;
-    }
-
-    pub async fn stop_instance_except(
-        &self,
-        instance: &DynamicMcpInstanceKey,
-        excluded: DynamicMcpTaskKind,
-    ) {
-        let kinds = [
-            DynamicMcpTaskKind::Connect,
-            DynamicMcpTaskKind::OAuth,
-            DynamicMcpTaskKind::Reconnect,
-            DynamicMcpTaskKind::Subscription,
-            DynamicMcpTaskKind::SkillDiscovery,
-            DynamicMcpTaskKind::Unload,
-        ]
-        .into_iter()
-        .filter(|kind| *kind != excluded)
-        .collect::<Vec<_>>();
-        self.stop_instance_kinds(instance, &kinds).await;
     }
 }
 

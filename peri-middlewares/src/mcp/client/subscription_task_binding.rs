@@ -47,7 +47,7 @@ impl McpClientPool {
         let source = if is_shell {
             MessageSource::ShellComplete
         } else {
-            MessageSource::DynamicMcpNotification
+            MessageSource::McpNotification
         };
         let reminder = TrustedSystemReminderFactory::for_producer()
             .construct(SystemReminder {

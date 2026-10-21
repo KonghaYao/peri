@@ -215,6 +215,7 @@ fn builtin_direct_bridges() -> Vec<Arc<dyn BaseTool>> {
     /// 已连接的假 MCP client（工具名按注册表声明传入；不含真实连接与凭据）。
     fn connected_handle(server: &str, tools: &[&str]) -> Arc<crate::mcp::McpClientHandle> {
         Arc::new(crate::mcp::McpClientHandle {
+            call_gate: Default::default(),
             name: server.to_string(),
             version: None,
             connected_at: None,
