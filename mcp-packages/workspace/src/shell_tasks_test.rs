@@ -381,8 +381,7 @@ async fn fill_shell_capacity(owner: &ShellTasks, cwd: &str) {
     }
 }
 
-/// 取消占位任务并等待终态，再等待进程清理。失败创建按既有语义让 scope 保持
-/// 未确认结算，所以清理证据取任务终态与 `shutdown` 报告，而不是 scope settled。
+/// 取消占位任务并等待终态与进程清理。调用方另行断言 scope 结算。
 async fn settle_shell_capacity(owner: &ShellTasks) {
     for task in owner.snapshot("capacity").tasks {
         owner
@@ -464,7 +463,8 @@ async fn unclassified_launch_failure_does_not_echo_underlying_error_text() {
 }
 
 /// [回归测试] `KindConcurrentLimit` 是正常背压：拒绝必须报告结构化上限事实，
-/// 不改变上限，也不影响已注册任务。
+/// 不改变上限，也不影响已注册任务。拒绝发生在创建进程之前，不得让 scope
+/// 永久停在未确认结算，否则 ACP close 会超时。
 #[tokio::test]
 async fn concurrent_limit_rejection_is_reported_as_backpressure_not_launch_failure() {
     let directory = tempfile::tempdir().unwrap();
@@ -498,10 +498,26 @@ async fn concurrent_limit_rejection_is_reported_as_backpressure_not_launch_failu
         "shell 并发上限按容量决策固定为 20"
     );
     settle_shell_capacity(&owner).await;
-    assert!(
-        !owner.snapshot("capacity").resources_settled,
-        "被拒绝的创建必须保持未确认结算，不能静默变为已结算"
-    );
+    tokio::time::timeout(Duration::from_secs(5), async {
+        loop {
+            if owner.snapshot("capacity").resources_settled {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+    })
+    .await
+    .expect("deterministic rejection must not block scope settlement");
+    let cursor = owner
+        .close_scope("capacity", 0)
+        .await
+        .expect("settled scope closes");
+    assert!(owner.snapshot("capacity").resources_settled);
+    let opened = owner
+        .open_scope("capacity", 0)
+        .expect("deterministic rejection leaves nothing to settle");
+    assert_eq!(opened.epoch, 1);
+    assert!(opened.cursor >= cursor);
 }
 
 /// [行为边界] spawn 失败与注册失败叠加时底层类型已丢失（执行环境把 io 错误与
