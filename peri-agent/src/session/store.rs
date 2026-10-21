@@ -60,6 +60,9 @@ pub struct FrozenContext {
     pub external_instructions: Option<Arc<str>>,
     /// Frozen environment body, appended last with the executing session's ID.
     pub environment_prompt: Option<Arc<str>>,
+    /// V1/V2 retains its embedded environment in the original main prompt.
+    /// Any separately prepared body is only for derived identities.
+    pub legacy_embedded_environment: bool,
     /// V1 快照含不可分离的旧外部指令；派生身份必须拒绝重渲染。
     pub legacy_embedded_instructions: bool,
     /// CLAUDE.md 内容（项目级 + 用户级合并后）
@@ -174,6 +177,7 @@ impl FrozenContextBuilder {
             external_instructions: self.external_instructions.map(Into::into),
             environment_prompt: self.environment_prompt.map(Into::into),
             legacy_embedded_instructions: false,
+            legacy_embedded_environment: false,
             claude_md: self.claude_md.unwrap_or_default().into(),
             skill_summary: self.skill_summary.unwrap_or_default().into(),
             date: self.date.unwrap_or_default().into(),

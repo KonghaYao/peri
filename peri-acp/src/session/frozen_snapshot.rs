@@ -135,6 +135,21 @@ pub(crate) fn encode_frozen_snapshot(
         // prompt has no external extension and permit unsafe derivative rendering.
         serde_json::to_string(&FrozenSnapshotEnvelope { version: 1, data })
             .map_err(FrozenSnapshotError::Invalid)
+    } else if frozen.v2_frozen().legacy_embedded_environment {
+        // Keep legacy provenance when re-saving a main session. A prepared
+        // derived environment must not be appended to its unchanged main prompt.
+        serde_json::to_string(&FrozenSnapshotEnvelope {
+            version: 2,
+            data: FrozenSnapshotV2 {
+                legacy: data,
+                external_instructions: frozen
+                    .v2_frozen()
+                    .external_instructions
+                    .as_deref()
+                    .map(str::to_owned),
+            },
+        })
+        .map_err(FrozenSnapshotError::Invalid)
     } else {
         serde_json::to_string(&FrozenSnapshotEnvelope {
             version: FROZEN_SNAPSHOT_VERSION,
@@ -243,6 +258,7 @@ pub(crate) fn decode_frozen_snapshot(raw: &str) -> Result<FrozenSessionData, Fro
         system_prompt: Arc::from(data.system_prompt),
         external_instructions,
         environment_prompt,
+        legacy_embedded_environment: version < 3,
         legacy_embedded_instructions,
         claude_md: Arc::from(data.claude_md),
         skill_summary: Arc::from(data.skill_summary),

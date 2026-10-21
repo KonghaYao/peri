@@ -10,6 +10,7 @@ fn make_frozen() -> FrozenSessionData {
         external_instructions: None,
         environment_prompt: Some(Arc::from("Working directory: /frozen")),
         legacy_embedded_instructions: false,
+        legacy_embedded_environment: false,
         claude_md: Arc::from("claude-v1"),
         skill_summary: Arc::from("skills-v1"),
         date: Arc::from("2026-09-01"),

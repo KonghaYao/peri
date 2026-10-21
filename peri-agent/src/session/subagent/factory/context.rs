@@ -249,6 +249,7 @@ pub(super) fn inherited_frozen_context(
         system_prompt: identity_system.map(Arc::from).unwrap_or_default(),
         external_instructions: parent.and_then(|p| p.store().frozen.external_instructions.clone()),
         environment_prompt: parent.and_then(|p| p.store().frozen.environment_prompt.clone()),
+        legacy_embedded_environment: false,
         legacy_embedded_instructions: parent
             .is_some_and(|p| p.store().frozen.legacy_embedded_instructions),
         claude_md: frozen_claude_md

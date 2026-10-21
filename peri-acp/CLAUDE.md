@@ -34,7 +34,7 @@
 - `SessionState::structure_version` 只在 rewind 持久化提交**成功**时 `+1`（恰好一次，失败分支不得触碰）：它让已发出的历史游标在存储委派之前失效，客户端处置与「锚点被删」同为 `-32012`。回放投递失败使 `session/load` 整体失败（`-32603`，不返回半回放成功，也不跑成功路径后处理）：已发布的会话态保持完整并留给下次 load 经 `AlreadyLive` 原位修复。初始 load 的代次（客户端可选或服务端生成）经 `_meta.periLoadGeneration` 同时出现在成功响应与本次全部重放（含 reminder 出口），门控仍是 `caps.replay`。
 - 新增 `ExecutorEvent` 或 ACP 扩展事件时，覆盖发射、ACP mapper/forwarder、caps 门控（如适用）和客户端消费；不能只增加枚举或单一发送点。
 - 给 Hub/Web 的事件投影必须从 canonical event 映射为版本化 allowlist DTO；不得复用包含消息、路径、输出或错误正文的 TUI 私有 `event_json`。`peri.agentActivity` 是该安全摘要面，legacy `peri.agentEvent` wire 保持独立兼容。
-- session 创建时构建并复用 frozen 数据；Prompt 与 SubAgent 不得在会话中途重读导致前缀漂移。`env` 正文独立冻结，模型桥接层在所有 contribution 后追加并填入当前执行 session ID；V3 快照保存该字段，旧快照不改写。
+- session 创建时构建并复用 frozen 数据；Prompt 与 SubAgent 不得在会话中途重读导致前缀漂移。`env` 正文独立冻结，模型桥接层在所有 contribution 后追加并填入当前执行 session ID；V3 快照保存该字段，旧主提示词不改写；旧会话派生执行经 `prepare_derived_environment` 从冻结输入准备 env，V3 显式缺席与 V1 外部指令拒绝边界保持。
 - `{{available_agents}}` 目录行只从资源面投影渲染；`description` 单行化、长度有界并标注 `untrusted metadata`，不得改变系统指令。默认职责交接与直接执行例外由 `11_subagent` 策略定义，支持探索后交接实现的串行委派；`multitask` 加载后升级为全委派。角色完整职责经 `agent://.../agent.md` 资源读取。
 - ACP `peri.instructions` 只在 `session/new` 准入，作为独立 frozen 字段持久化；内部身份重渲染与外部正文组合遵循 `ARC-EXTERNAL-INSTRUCTIONS-001`。
 - 生产中间件顺序以 Agent 层 session 工厂的链序蓝本为事实源（`../peri-agent/src/session/factory.rs` 的 `production_blueprint`），未经完整验证不得重排。

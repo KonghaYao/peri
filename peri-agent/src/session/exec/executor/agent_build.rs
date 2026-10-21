@@ -54,6 +54,7 @@ pub(super) async fn build_and_execute_agent(
                         external_instructions: None,
                         environment_prompt: None,
                         legacy_embedded_instructions: false,
+                        legacy_embedded_environment: false,
                         claude_md: Arc::from(""),
                         skill_summary: Arc::from(""),
                         date: Arc::from(

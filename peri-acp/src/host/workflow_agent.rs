@@ -243,6 +243,9 @@ pub(crate) fn create_session_workflow_chain(
     mcp_skill_registry: Option<Arc<McpSkillRegistry>>,
     session_resources: Arc<dyn peri_acp_types::session_resources::SessionResources>,
 ) -> SessionWorkflowChain {
+    let prepared =
+        crate::session::prepare_derived_environment(frozen_data, cwd, agent_catalog.as_ref());
+    let frozen_data = &prepared;
     let compact_config = super::compact_config::load_compact_config(&peri_config.read());
     let (progress_tx, progress_rx) = tokio::sync::mpsc::unbounded_channel::<ProgressEvent>();
     // H2：workflow agent 链的能力事实——与下面传入的 broker / permission_mode

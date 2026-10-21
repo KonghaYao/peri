@@ -97,6 +97,11 @@ pub(crate) fn build_stage_context(
     (V2AgentOutput, Option<CachedLlmInstances>),
     peri_agent::session::exec::stage_builder::StageBuildError,
 > {
+    let frozen_session = crate::session::prepare_derived_environment(
+        &frozen_session,
+        &ctx.cwd,
+        ctx.agent_catalog.as_ref(),
+    );
     let frozen = frozen_session.v2_frozen();
     // ── 会话级共享变量（原 session_manager 端口化；None = print mode）──
     let session_access = ctx.session_access.clone();

@@ -160,6 +160,7 @@ impl SessionManager {
                 .render_environment(&env, self.inner.agent_catalog.as_ref())
                 .map(Arc::from),
             legacy_embedded_instructions: false,
+            legacy_embedded_environment: false,
             claude_md: claude_md.map(Arc::from).unwrap_or_default(),
             skill_summary: skill_summary.map(Arc::from).unwrap_or_default(),
             date: Arc::from(frozen_date),
@@ -177,6 +178,34 @@ impl SessionManager {
         )
     }
 }
+
+/// Prepare a legacy session's derived environment from frozen inputs only.
+/// The original main prompt and rejected V1 external-instruction provenance stay intact.
+pub(crate) fn prepare_derived_environment(
+    frozen: &crate::session::executor::FrozenSessionData,
+    cwd: &str,
+    agent_catalog: &dyn peri_acp_types::ports::AgentCatalogPort,
+) -> crate::session::executor::FrozenSessionData {
+    let context = frozen.v2_frozen();
+    if !context.legacy_embedded_environment
+        || context.legacy_embedded_instructions
+        || context.environment_prompt.is_some()
+    {
+        return frozen.clone();
+    }
+    let collected = build_collected_sections(frozen.meta_harness(), None, frozen.language());
+    let template = crate::prompt::PromptTemplate::new(frozen.meta_harness(), &collected);
+    let env = crate::prompt::PromptEnv::frozen(cwd, frozen.date(), frozen.runtime_env());
+    let mut context = context.clone();
+    context.environment_prompt = template
+        .render_environment(&env, agent_catalog)
+        .map(Arc::from);
+    crate::session::executor::FrozenSessionData::from_frozen_parts(
+        context,
+        frozen.claude_local_md().map(Arc::from),
+    )
+}
+
 /// 渲染面段落收集：按**执行面能力事实**投影段落集合（H2 单一权威）。
 ///
 /// 全部 `PromptTemplate` 构造点（冻结渲染 / 主重渲染 / SubAgent builder /

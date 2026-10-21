@@ -85,7 +85,7 @@ wire。内部模板为空、没有 contribution 时，也须在外部段之前�
 override、子 Agent 和 workflow 各自按能力投影内部身份，随后由模型桥接层附加
 同一外部字段；子身份持久历史只存内部身份，Compact/继承历史不复制外部正文。
 
-env 正文由 `DefaultSystemPromptMiddleware` 的 `env` 段声明，经 `PromptTemplate::render_environment` 独立冻结到 V3 的 `environment_prompt` 字段（必需，可为 `null`），支持 `.peri/meta/env.md` 覆盖。关闭持有者时环境段也消失。模型桥接层在最后包装 `<env>` 并加入当前执行 session ID；主会话、普通 fork、子 Agent、workflow 均使用各自身份，不能把父 ID 冻结进正文。cwd、日期、平台等继续消费 owner 快照。同配置会话的环境差异只影响末尾，不打断此前的公共前缀；这不保证 provider 实际缓存命中。旧 V1/V2 快照保留原正文、不提取或搬移旧 env，新布局须新建会话。
+env 正文由 `DefaultSystemPromptMiddleware` 的 `env` 段声明，经 `PromptTemplate::render_environment` 独立冻结到 V3 的 `environment_prompt` 字段（必需，可为 `null`），支持 `.peri/meta/env.md` 覆盖。关闭持有者时环境段也消失。模型桥接层在最后包装 `<env>` 并加入当前执行 session ID；主会话、普通 fork、子 Agent、workflow 均使用各自身份，不能把父 ID 冻结进正文。cwd、日期、平台等继续消费 owner 快照。同配置会话的环境差异只影响末尾，不打断此前的公共前缀；这不保证 provider 实际缓存命中。旧 V1/V2 主会话保留原正文、不提取或搬移旧 env；重渲染 override、子 Agent 和 workflow 时，仅从冻结 cwd、日期、运行环境与段落覆盖准备独立 env。`legacy_embedded_environment` 区分旧内嵌布局与 V3 显式空值；旧主会话重存保留旧来源，派生子会话使用独立 env。V1 含不可分离外部指令仍拒绝派生，不生成环境回退。
 
 V1 冻结快照没有独立来源字段。普通主 Agent 保留旧 prompt 原字节；若其中有
 `<agent_instructions>` 开始标记，需要重渲染的 override、子 Agent 或 workflow
