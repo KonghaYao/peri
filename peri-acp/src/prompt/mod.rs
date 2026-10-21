@@ -163,6 +163,7 @@ pub struct PromptTemplate {
     /// 已解析的非缓存区段落（zone=Uncached：persona + 07_runtime + gated +
     /// 收集段 + language，按段内序号升序）。
     uncached_sections: Vec<ResolvedSection>,
+    environment_sections: Vec<ResolvedSection>,
     /// available agents catalog 是否包含 compile-time built-ins（会话冻结）。
     built_in_subagents_enabled: bool,
 }
@@ -307,20 +308,23 @@ impl PromptTemplate {
 
         let mut cached_sections = Vec::new();
         let mut uncached_sections = Vec::new();
+        let mut environment_sections = Vec::new();
         for section in sections {
             match section.zone {
                 PromptSectionZone::Cached => cached_sections.push(section),
                 PromptSectionZone::Uncached => uncached_sections.push(section),
+                PromptSectionZone::Environment => environment_sections.push(section),
             }
         }
         Self {
             cached_sections,
             uncached_sections,
+            environment_sections,
             built_in_subagents_enabled: state.built_in_subagents_enabled,
         }
     }
 
-    /// 渲染完整系统提示词
+    /// 渲染内部系统提示词；环境由 `render_environment` 独立冻结并在请求末尾组合。
     ///
     /// 拼接顺序（固定顺序，persona 是普通收集段，不特判）：
     ///  1. 缓存区段落（zone=Cached：01-06，按段内序号）——任何 override
@@ -365,6 +369,33 @@ impl PromptTemplate {
             (true, true) => String::new(),
         };
 
+        self.render_text(&result, env, agent_catalog)
+    }
+
+    /// Freeze the environment body separately; the request bridge supplies the actual session ID.
+    pub fn render_environment(
+        &self,
+        env: &PromptEnv,
+        agent_catalog: &dyn AgentCatalogPort,
+    ) -> Option<String> {
+        if self.environment_sections.is_empty() {
+            return None;
+        }
+        let body = self
+            .environment_sections
+            .iter()
+            .map(|section| section.content.as_str())
+            .collect::<Vec<_>>()
+            .join("\n\n");
+        Some(self.render_text(&body, env, agent_catalog))
+    }
+
+    fn render_text(
+        &self,
+        text: &str,
+        env: &PromptEnv,
+        agent_catalog: &dyn AgentCatalogPort,
+    ) -> String {
         // 占位符替换：已知占位符表是渲染与覆盖校验的同一事实源
         // （`KNOWN_PLACEHOLDERS`，L3）；字面量转义先落 sentinel，替换后还原。
         if !env.runtime_env_available() {
@@ -374,7 +405,7 @@ impl PromptTemplate {
             );
         }
         let agents = format_available_agents(agent_catalog, self.built_in_subagents_enabled);
-        let escaped = escape_literal_braces(&result);
+        let escaped = escape_literal_braces(text);
         let rendered = render_placeholders_once(&escaped, env, &agents);
         restore_literal_braces(&rendered)
     }

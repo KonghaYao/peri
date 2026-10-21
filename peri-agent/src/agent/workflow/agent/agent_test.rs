@@ -245,6 +245,7 @@ async fn workflow_bridge_reads_contributions_at_request_time() {
         std::sync::Arc::clone(&model) as std::sync::Arc<dyn peri_model::Model>,
         "BASE_SYSTEM".to_string(),
         None,
+        None,
         false,
         std::sync::Arc::clone(&chain),
         "workflow-session",
@@ -322,6 +323,7 @@ async fn workflow_bridge_appends_external_after_each_internal_projection() {
             std::sync::Arc::clone(&model) as std::sync::Arc<dyn peri_model::Model>,
             internal,
             Some(std::sync::Arc::from("WORKFLOW_EXTERNAL")),
+            Some(std::sync::Arc::from("Working directory: /workflow")),
             false,
             chain,
             "workflow-session",
@@ -332,6 +334,9 @@ async fn workflow_bridge_appends_external_after_each_internal_projection() {
             .unwrap();
         let system = model.last_system();
         assert_eq!(system.matches("WORKFLOW_EXTERNAL").count(), 1);
+        assert!(system.ends_with(
+            "<env>\nWorking directory: /workflow\nSession ID: workflow-session\n</env>"
+        ));
         assert!(system.starts_with(expected_internal));
         assert!(
             system

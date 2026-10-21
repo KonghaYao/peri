@@ -67,6 +67,7 @@ pub const SECTION_IDS: &[&str] = &[
     "05_using_tools",
     "06_tone_style",
     "07_runtime",
+    "env",
     "10_hitl",
     "11_subagent",
     "12_ask_user",

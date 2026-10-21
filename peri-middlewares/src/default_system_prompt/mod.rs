@@ -5,7 +5,7 @@
 //! 载体，`prompt_contribution` 通道语义不变）：
 //!
 //! - [`DefaultSystemPromptMiddleware`]：01-06 基础段（Cached 1-6）+
-//!   07_runtime（Uncached 1，07_env 与 14_system_reminder 合并）+ persona
+//!   07_runtime（Uncached 1，运行时规则）+ env（Environment 0）+ persona
 //!   动态段（Uncached 0，full/extend/无 overrides 三态）。关闭它 =
 //!   基础段 + Persona 全部消失（纯净模式清空 persona 覆盖）。
 //! - [`LangMiddleware`]：Language 段（id `language`，Uncached 7，内容 =
@@ -36,8 +36,8 @@ use peri_agent::middleware::{
 
 /// 基础段落声明（ID / 内容 / 位置属性）。
 ///
-/// 01-06 在缓存区（Cached 1-6）；07_runtime 在非缓存区（Uncached 1）。
-const BASE_SECTIONS: [(&str, &str, PromptSectionZone, u16); 7] = [
+/// 01-06 为 Cached；07_runtime 为 Uncached；env 独立冻结并由请求层放在末尾。
+const BASE_SECTIONS: [(&str, &str, PromptSectionZone, u16); 8] = [
     (
         "01_intro",
         include_str!(concat!(
@@ -101,11 +101,20 @@ const BASE_SECTIONS: [(&str, &str, PromptSectionZone, u16); 7] = [
         PromptSectionZone::Uncached,
         1,
     ),
+    (
+        "env",
+        include_str!(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../peri-acp/prompts/sections/env.md"
+        )),
+        PromptSectionZone::Environment,
+        0,
+    ),
 ];
 
 /// 系统提示词基础段持有者（设计 §3.1.1 归属全景 / §3.5 演进 2）。
 ///
-/// 持有 01-06 基础段、07_runtime（07_env + 14_system_reminder 合并段）与
+/// 持有 01-06 基础段、07_runtime 规则、env 环境正文与
 /// persona 动态段（id `persona`：full → agent body；extend →
 /// `build_agent_overrides_block`；无 overrides → 空内容不渲染——现状
 /// render 三态语义保持）。关闭它 = 基础段 + Persona 全部消失。

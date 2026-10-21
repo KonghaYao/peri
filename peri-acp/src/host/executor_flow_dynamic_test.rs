@@ -54,6 +54,9 @@ async fn test_production_first_reason_sees_after_before_agent_dynamic_contributi
     );
     ctx.primary_llm_factory = Some(Arc::new(move || Arc::clone(&model)));
     let frozen = frozen_with_dynamic_prompt_policy("DYNAMIC_BASE_SENTINEL", &[]);
+    let mut context = frozen.v2_frozen().clone();
+    context.environment_prompt = Some(Arc::from("Working directory: /main-frozen-env"));
+    let frozen = FrozenSessionData::from_frozen_parts(context, None);
     let (out, _) = make_stage_build(&ctx)(make_stage_request(frozen, None)).unwrap();
     let parent = Arc::clone(&out.session);
     out.context.session.queue.push(QueuedMessage::new(
@@ -73,6 +76,9 @@ async fn test_production_first_reason_sees_after_before_agent_dynamic_contributi
     let requests = requests.lock().unwrap();
     assert_eq!(requests.len(), 1);
     let system = system_text(&requests[0]);
+    assert!(system.ends_with(
+        "<env>\nWorking directory: /main-frozen-env\nSession ID: dynamic-first-reason\n</env>"
+    ));
     let tool_search_offset = system
         .find("## Deferred Tools")
         .expect("首个 Reason 缺少 ToolSearch contribution");
@@ -331,6 +337,9 @@ async fn test_production_stage_uses_frozen_language_and_keeps_override_out_of_ba
     ctx.language = Some("en-US".into());
     ctx.primary_llm_factory = Some(Arc::new(move || Arc::clone(&model)));
     let sentinel = make_sentinel_frozen();
+    let mut frozen = sentinel.v2_frozen().clone();
+    frozen.environment_prompt = Some(Arc::from("Today's date: 1999-12-31"));
+    let sentinel = FrozenSessionData::from_frozen_parts(frozen, None);
     let stage_build = make_stage_build(&ctx);
     let (out, _) = stage_build(make_stage_request(
         sentinel.clone(),

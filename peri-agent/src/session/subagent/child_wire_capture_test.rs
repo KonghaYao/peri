@@ -275,6 +275,7 @@ async fn child_external_instructions_are_wire_only_across_resume_and_nested_fork
         Arc::from(cwd.as_str()),
         FrozenContext::builder()
             .external_instructions("EXTERNAL_ONLY_SENTINEL")
+            .environment_prompt("Working directory: /frozen-child-env")
             .build(),
         root.store().thread_id.clone(),
     );
@@ -293,6 +294,10 @@ async fn child_external_instructions_are_wire_only_across_resume_and_nested_fork
     )
     .await
     .unwrap();
+    assert!(model.last_system().ends_with(&format!(
+        "<env>\nWorking directory: /frozen-child-env\nSession ID: {}\n</env>",
+        first.child_thread_id
+    )));
     assert_eq!(
         model
             .last_system()
@@ -323,6 +328,10 @@ async fn child_external_instructions_are_wire_only_across_resume_and_nested_fork
     let resumed = SessionFactory::resume_subagent(Some(&parent), resume)
         .await
         .unwrap();
+    assert!(resumed_model.last_system().ends_with(&format!(
+        "<env>\nWorking directory: /frozen-child-env\nSession ID: {}\n</env>",
+        first.child_thread_id
+    )));
     assert_eq!(
         resumed_model
             .last_system()
@@ -359,6 +368,13 @@ async fn child_external_instructions_are_wire_only_across_resume_and_nested_fork
     let second = SessionFactory::spawn_subagent(Some(&resumed.session), grandchild)
         .await
         .unwrap();
+    assert!(grandchild_model.last_system().ends_with(&format!(
+        "<env>\nWorking directory: /frozen-child-env\nSession ID: {}\n</env>",
+        second.child_thread_id
+    )));
+    assert!(!grandchild_model
+        .last_system()
+        .contains(&format!("Session ID: {}", first.child_thread_id)));
     assert_eq!(
         grandchild_model
             .last_system()

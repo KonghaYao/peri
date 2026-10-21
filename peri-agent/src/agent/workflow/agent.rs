@@ -99,6 +99,7 @@ pub struct WorkflowAgentContext {
     pub system_prompt: Option<String>,
     /// Frozen ACP extension, composed only at the model request boundary.
     pub external_instructions: Option<Arc<str>>,
+    pub environment_prompt: Option<Arc<str>>,
     pub legacy_embedded_instructions: bool,
     /// HITL broker + 共享权限模式。两者均 Some 时启用审批；
     /// 任一为 None 时 Bypass（自主后台 agent 默认行为）。
@@ -187,6 +188,7 @@ pub fn create_default_executor(
         cancel: None,
         system_prompt: None,
         external_instructions: None,
+        environment_prompt: None,
         legacy_embedded_instructions: false,
         broker: None,
         permission_mode: None,
@@ -433,6 +435,7 @@ impl AgentExecutor for WorkflowAgentExecutor {
             base_model,
             system_prompt.clone(),
             self.ctx.external_instructions.clone(),
+            self.ctx.environment_prompt.clone(),
             self.ctx.legacy_embedded_instructions,
             Arc::clone(&chain),
             &execution.session_id,
@@ -648,6 +651,7 @@ pub(crate) fn workflow_model_bridge(
     base_model: Arc<dyn peri_model::Model>,
     system_prompt: String,
     external_instructions: Option<Arc<str>>,
+    environment_prompt: Option<Arc<str>>,
     legacy_embedded_instructions: bool,
     chain: Arc<MiddlewareChain>,
     session_id: &str,
@@ -657,6 +661,7 @@ pub(crate) fn workflow_model_bridge(
         AgentModelBridge::from_arc(base_model)
             .with_system(system_prompt)
             .with_external_instructions(external_instructions)
+            .with_environment_prompt(environment_prompt)
             .with_legacy_prompt_provenance(legacy_embedded_instructions, true)
             .with_system_contribution_provider(Arc::new(move || {
                 contribution_chain.collect_prompt_contributions()

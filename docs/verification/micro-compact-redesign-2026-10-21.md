@@ -1,6 +1,6 @@
 # Micro Compact 重设计验证记录
 
-日期：2026-10-21。实现基于 `57d85257159592b3875c5c6aa046a16bbfd42408`，行为契约见 [Micro Compact 设计](../design/micro-compact.md)。本记录只说明此次执行的验证，不替代发布验收。
+日期：2026-10-21。初始实现提交为 `41ee3a8ab`，基于 `57d85257159592b3875c5c6aa046a16bbfd42408`，行为契约见 [Micro Compact 设计](../design/micro-compact.md)。本记录只说明此次执行的验证，不替代发布验收。
 
 ## 行为验证
 
@@ -23,6 +23,8 @@
 | ACP（含 fork） | `test --locked -p peri-acp --lib -- --test-threads=4` | 1,062 通过，1 项既有忽略 |
 
 集成目标为 `compact_authority_projection_test`、`compact_failure_adversarial_test`、`compact_followup_behavior_test`、`compact_pressure_adversarial_test`、`compact_session_adversarial_test`、`compact_session_manual_adversarial_test`、`micro_compact_wire_test`。工作区 doc tests 为 22 通过、5 项既有忽略。交付门包括 `check-changed.sh`、`verify-async.sh` 的 workspace/all-targets check 与严格 Clippy、格式检查、依赖方向检查及 pre-commit；执行结果见 PR 验证说明。
+
+合并主分支 `23e09ef48` 后，重新通过 ACP 1,068 项、Agent 1,265 项、ACP 类型 686 项、Middlewares 1,882 项、MCP workspace 478 项单元测试，以及上述 59 项集成测试、22 项文档测试和完整交付门。两处冲突仅涉及 code-index 与 explorer 资源文案，保留了主分支职责说明和本次归档回查能力。
 
 ## 合成样本测量
 

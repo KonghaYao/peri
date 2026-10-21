@@ -284,12 +284,16 @@ impl ShellTasks {
             let result = owner
                 .spawn_scoped_owned(command, cwd, timeout_ms, scope.as_deref())
                 .await;
-            if result.is_ok() {
-                if let Some(admission) = &mut admission {
-                    admission.creation_unconfirmed = false;
+            if let Some(admission) = &mut admission {
+                match &result {
+                    Ok(_) => admission.creation_unconfirmed = false,
+                    Err(failure) if failure.rejected_before_creation() => {
+                        admission.creation_unconfirmed = false;
+                    }
+                    Err(_) => {}
                 }
             }
-            let _ = reply.send(result);
+            let _ = reply.send(result.map_err(ShellLaunchError::into_mcp_error));
         });
         receive.await.map_err(|_| {
             McpError::internal_error("shell task owner stopped before registration", None)
@@ -302,7 +306,7 @@ impl ShellTasks {
         cwd: String,
         timeout_ms: Option<u64>,
         scope: Option<&str>,
-    ) -> Result<Task, McpError> {
+    ) -> Result<Task, ShellLaunchError> {
         #[cfg(test)]
         if let Some(gate) = &self.spawn_gate {
             gate.notified().await;
@@ -712,22 +716,46 @@ impl ShellLaunchFailure {
     }
 }
 
-fn shell_launch_worker_error(error: tokio::task::JoinError) -> McpError {
+/// 启动失败：保留结构化分类，供准入者判断进程是否可能已被接受。
+///
+/// `McpError` 较大，装箱以避免 `Result` 的错误分支超过 clippy 阈值。
+struct ShellLaunchError {
+    failure: ShellLaunchFailure,
+    error: Box<McpError>,
+}
+
+impl ShellLaunchError {
+    /// 注册表在创建进程前拒绝的确定性背压。没有进程需要结算，scope 可以
+    /// 立即视为已确认；其他失败仍可能已接受进程，不能据此放行 close。
+    fn rejected_before_creation(&self) -> bool {
+        matches!(self.failure, ShellLaunchFailure::ConcurrentLimit { .. })
+    }
+
+    fn into_mcp_error(self) -> McpError {
+        *self.error
+    }
+}
+
+fn shell_launch_worker_error(error: tokio::task::JoinError) -> ShellLaunchError {
     let failure = ShellLaunchFailure::of_join_error(&error);
     tracing::error!(
         failure_class = failure.class(),
         "background shell launch worker did not return"
     );
-    McpError::internal_error(failure.message(), None)
+    let error = Box::new(McpError::internal_error(failure.message(), None));
+    ShellLaunchError { failure, error }
 }
 
-fn shell_launch_registration_error(error: Box<dyn std::error::Error + Send + Sync>) -> McpError {
+fn shell_launch_registration_error(
+    error: Box<dyn std::error::Error + Send + Sync>,
+) -> ShellLaunchError {
     let failure = ShellLaunchFailure::of_registration_error(error.as_ref());
     tracing::error!(
         failure_class = failure.class(),
         "background shell task launch failed before registration"
     );
-    McpError::internal_error(failure.message(), None)
+    let error = Box::new(McpError::internal_error(failure.message(), None));
+    ShellLaunchError { failure, error }
 }
 
 pub(crate) struct ScopeAdmission {

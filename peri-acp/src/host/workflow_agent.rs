@@ -243,6 +243,9 @@ pub(crate) fn create_session_workflow_chain(
     mcp_skill_registry: Option<Arc<McpSkillRegistry>>,
     session_resources: Arc<dyn peri_acp_types::session_resources::SessionResources>,
 ) -> SessionWorkflowChain {
+    let prepared =
+        crate::session::prepare_derived_environment(frozen_data, cwd, agent_catalog.as_ref());
+    let frozen_data = &prepared;
     let compact_config = super::compact_config::load_compact_config(&peri_config.read());
     let (progress_tx, progress_rx) = tokio::sync::mpsc::unbounded_channel::<ProgressEvent>();
     // H2：workflow agent 链的能力事实——与下面传入的 broker / permission_mode
@@ -282,6 +285,7 @@ pub(crate) fn create_session_workflow_chain(
         // H2：按 workflow 能力投影重建的冻结 prompt（不再复制主冻结 prompt）。
         system_prompt: Some(workflow_system_prompt),
         external_instructions: frozen_data.v2_frozen().external_instructions.clone(),
+        environment_prompt: frozen_data.v2_frozen().environment_prompt.clone(),
         legacy_embedded_instructions: frozen_data.v2_frozen().legacy_embedded_instructions,
         broker: workflow_broker,
         permission_mode: workflow_permission_mode,

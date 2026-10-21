@@ -1,4 +1,4 @@
-Launch a sub-agent with an independent context to handle a specialized sub-task. The sub-agent executes based on the configuration defined in .claude/agents/{subagent_type}.md or .claude/agents/{subagent_type}/agent.md.
+Delegate a coherent investigation, implementation, or verification task to a sub-agent with an independent context. Delegation may be sequential: an investigation can inform a later implementation. Follow the system's SubAgent Delegation policy for ownership and direct-work exceptions. Choose an ID from the available catalog or a current loader suggestion; definitions may come from project configuration, enabled plugins, built-in providers, or MCP resources.
 
 Fork mode (fork: true):
 - Inherits the parent's frozen system prompt, a full history snapshot at launch time, and the parent's core tool set (Filesystem, Bash, Web, MCP)
@@ -11,7 +11,7 @@ Fork mode (fork: true):
 
 Usage:
 - Provide a clear, self-contained task description via the prompt parameter. The sub-agent has no access to the parent conversation history
-- **subagent_type is REQUIRED for NEW sub-agents** unless fork=true. Specify an agent ID matching an existing agent definition file. Do NOT omit this parameter unless you intend to fork the current agent — **or resume** (when `resume_thread_id` is provided, `subagent_type` and `fork` are ignored: resume takes priority)
+- **subagent_type is REQUIRED for NEW sub-agents** unless fork=true. Specify an exact ID from the available catalog or a current loader suggestion; the loader resolves its definition from the configured source. Do NOT omit this parameter unless you intend to fork the current agent — **or resume** (when `resume_thread_id` is provided, `subagent_type` and `fork` are ignored: resume takes priority)
 - The sub-agent inherits the parent's tool set by default, excluding Agent itself (to prevent recursion)
 - **Authorization boundary**: approving the `Agent` tool grants the sub-agent the right to execute its inherited tools. Sub-agents do NOT run per-tool HITL approval — internal tool calls (Bash, Write, Edit, WebFetch, MCP, ...) execute without further approval prompts. The transfer is single-level: sub-agents cannot recursively launch further sub-agents
 - Agent definitions may restrict available tools via the tools and disallowedTools fields in frontmatter
@@ -24,11 +24,9 @@ Model selection (model):
 - Does NOT apply to forks: `fork: true` always inherits the parent model, and `model` is ignored
 - resume 不接受模型覆盖：`resume_thread_id` 从当前磁盘上的 Agent 定义及其 frontmatter model 重建模型，不保留先前的 model override，本次 resume 调用的 `model` 参数也被忽略
 
-When to use:
-- For tasks that benefit from independent context isolation (e.g., code review while working on a different feature)
-- For tasks requiring specialized persona or behavior defined in agent configuration files
-- For parallelizable sub-tasks that do not depend on each other's results
-- When you need to break a complex task into smaller, independently executable pieces
+Handoff and follow-up:
+- Include the goal, scope, constraints, decisions, acceptance criteria, and evidence to return. For implementation, pass existing investigation findings and include verification in the assignment.
+- Keep a coherent deliverable with the same child through completion; parallelism is optional.
 - **When an Agent call returns an interrupted/error message, `status: incomplete` (the delegation ended while background tasks remained owned by the child session), or a background launch receipt or completion notification contains `child_thread_id: xxx (resume with Agent(resume_thread_id: xxx))`, and the task still needs to be completed, inspect the named tasks and resume the execution with `Agent(resume_thread_id: xxx)` instead of launching a new sub-agent** — this avoids repeating work already done and losing side effects. An incomplete result does not mean the background tasks completed or that Shell was cancelled. Every receipt that names a `child_thread_id` also prints the exact `resume_thread_id` to pass; copy it from there and never derive it from a task id. 若目标仍 active，必须带非空 `prompt` 才能发送补充指令；只有 non-active 线程续跑时才能省略 `prompt`。
 
 Return format:
