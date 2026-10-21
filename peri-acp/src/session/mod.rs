@@ -31,7 +31,7 @@ pub use peri_agent::session::async_router::AsyncRouter;
 pub use dynamic_mcp::SessionDynamicMcpNotificationSink;
 pub(crate) use frozen::{
     build_collected_sections, build_collected_sections_with_capabilities, build_meta_harness_state,
-    subagent_chain_capabilities,
+    prepare_derived_environment, subagent_chain_capabilities,
 };
 // workflow 链能力事实只服务本地 workflow 装配面（emscripten 不打包 workflow 运行时）。
 #[cfg(not(target_os = "emscripten"))]

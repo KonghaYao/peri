@@ -33,6 +33,7 @@ pub struct AgentModelBridge {
     model: Arc<dyn Model>,
     system: Option<String>,
     external_instructions: Option<Arc<str>>,
+    environment_prompt: Option<Arc<str>>,
     legacy_embedded_instructions: bool,
     derives_system_prompt: bool,
     system_contribution_provider: Option<SystemContributionProvider>,
@@ -55,6 +56,7 @@ impl AgentModelBridge {
             model,
             system: None,
             external_instructions: None,
+            environment_prompt: None,
             legacy_embedded_instructions: false,
             derives_system_prompt: false,
             system_contribution_provider: None,
@@ -76,6 +78,36 @@ impl AgentModelBridge {
     pub fn with_external_instructions(mut self, instructions: Option<Arc<str>>) -> Self {
         self.external_instructions = instructions;
         self
+    }
+
+    /// Frozen environment body; append it after external instructions and middleware contributions.
+    pub fn with_environment_prompt(mut self, body: Option<Arc<str>>) -> Self {
+        self.environment_prompt = body;
+        self
+    }
+
+    fn environment_suffix(&self) -> AgentResult<Option<String>> {
+        let Some(body) = self.environment_prompt.as_deref() else {
+            return Ok(None);
+        };
+        let session_id = self
+            .session_id
+            .as_deref()
+            .filter(|id| !id.is_empty())
+            .ok_or_else(|| {
+                AgentError::LlmError("environment prompt requires the executing session ID".into())
+            })?;
+        if body.contains(SYSTEM_PROMPT_DYNAMIC_BOUNDARY)
+            || session_id.contains(SYSTEM_PROMPT_DYNAMIC_BOUNDARY)
+            || session_id.contains(['\n', '\r', '<', '>'])
+        {
+            return Err(AgentError::LlmError(
+                "invalid environment prompt or session ID".into(),
+            ));
+        }
+        Ok(Some(format!(
+            "<env>\n{body}\nSession ID: {session_id}\n</env>"
+        )))
     }
 
     /// V1 snapshots with an embedded extension can only reuse their original main prompt.
@@ -254,6 +286,12 @@ impl AgentModelBridge {
         let system = match dynamic.as_deref() {
             Some(dynamic) => combine_system_prompt_with_dynamic(base.as_deref(), dynamic),
             None => base,
+        };
+        let system = match self.environment_suffix()? {
+            Some(environment) => {
+                combine_system_prompt_with_dynamic(system.as_deref(), &environment)
+            }
+            None => system,
         };
         if let Some(system) = system {
             messages.insert(0, ModelMessage::system_text(system));
@@ -553,6 +591,23 @@ impl ReactLLM for AgentModelBridge {
         // 只读冻结前缀，不构建 provider 请求，也不第二次调用动态贡献 provider。
         // 冷启动尚未知动态后缀成本；后续有效 usage 会将其纳入权威基线。
         crate::agent::token::estimate_request_tokens(messages, tools)
+            .saturating_add(
+                self.environment_prompt
+                    .as_ref()
+                    .map(|body| {
+                        ((body.chars().count()
+                            + self
+                                .session_id
+                                .as_deref()
+                                .unwrap_or_default()
+                                .chars()
+                                .count()
+                            + "\n\n<env>\nSession ID: \n\n</env>".len())
+                            as u64)
+                            .div_ceil(4)
+                    })
+                    .unwrap_or(0),
+            )
             .saturating_add(
                 self.system
                     .as_ref()

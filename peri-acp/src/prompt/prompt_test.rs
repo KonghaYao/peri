@@ -133,14 +133,18 @@ fn frozen_runtime_env_renders_snapshot_values_not_live_probe() {
     let template = PromptTemplate::new(&state, &collected);
     let catalog = AgentCatalogProvider::new();
 
-    let first = template.render(
-        &PromptEnv::frozen(cwd, "2026-01-01", Some(&snapshot)),
-        &catalog,
-    );
-    let second = template.render(
-        &PromptEnv::frozen(cwd, "2026-01-01", Some(&snapshot)),
-        &catalog,
-    );
+    let first = template
+        .render_environment(
+            &PromptEnv::frozen(cwd, "2026-01-01", Some(&snapshot)),
+            &catalog,
+        )
+        .unwrap();
+    let second = template
+        .render_environment(
+            &PromptEnv::frozen(cwd, "2026-01-01", Some(&snapshot)),
+            &catalog,
+        )
+        .unwrap();
     assert_eq!(first, second, "同一冻结输入两次渲染必须字节相同");
     assert!(
         first.contains("Platform: frozen-platform"),
@@ -162,10 +166,12 @@ fn frozen_runtime_env_renders_snapshot_values_not_live_probe() {
 fn unavailable_runtime_env_renders_explicit_marker() {
     let state = MetaHarnessState::default();
     let collected = crate::session::build_collected_sections(&state, None, None);
-    let rendered = PromptTemplate::new(&state, &collected).render(
-        &PromptEnv::frozen("/tmp", "2026-01-01", None),
-        &AgentCatalogProvider::new(),
-    );
+    let rendered = PromptTemplate::new(&state, &collected)
+        .render_environment(
+            &PromptEnv::frozen("/tmp", "2026-01-01", None),
+            &AgentCatalogProvider::new(),
+        )
+        .unwrap();
     assert!(
         rendered.contains(RUNTIME_ENV_UNAVAILABLE),
         "缺失冻结环境必须显式标记: {rendered}"
@@ -173,5 +179,42 @@ fn unavailable_runtime_env_renders_explicit_marker() {
     assert!(
         !rendered.contains("Platform: macos") && !rendered.contains("Platform: linux"),
         "不得用本地探测值冒充历史环境"
+    );
+}
+
+/// [回归测试] 跨会话环境变化只影响末尾环境正文，公共内部前缀逐字一致。
+#[test]
+fn environment_is_separate_from_shared_prompt_prefix_and_follows_owner_gate() {
+    let state = MetaHarnessState::default();
+    let sections = crate::session::build_collected_sections(&state, None, Some("zh-CN"));
+    let template = PromptTemplate::new(&state, &sections);
+    let catalog = AgentCatalogProvider::new();
+    let first = PromptEnv::frozen("/project-a", "2026-10-20", None);
+    let second = PromptEnv::frozen("/project-b", "2026-10-21", None);
+    assert_eq!(
+        template.render(&first, &catalog),
+        template.render(&second, &catalog)
+    );
+    assert_ne!(
+        template.render_environment(&first, &catalog),
+        template.render_environment(&second, &catalog)
+    );
+
+    let mut disabled = state.clone();
+    disabled
+        .disabled_middlewares
+        .insert("DefaultSystemPromptMiddleware".into());
+    let sections = crate::session::build_collected_sections(&disabled, None, None);
+    assert!(PromptTemplate::new(&disabled, &sections)
+        .render_environment(&first, &catalog)
+        .is_none());
+
+    let customized = override_state("env", "Frozen workspace: {{cwd}}");
+    let sections = crate::session::build_collected_sections(&customized, None, None);
+    assert_eq!(
+        PromptTemplate::new(&customized, &sections)
+            .render_environment(&first, &catalog)
+            .as_deref(),
+        Some("Frozen workspace: /project-a")
     );
 }

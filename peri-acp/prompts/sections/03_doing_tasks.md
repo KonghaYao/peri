@@ -15,7 +15,7 @@ Before implementing:
 
 ## Execution
 
-- Use the available search tools to understand the codebase and the user's query. You are encouraged to use the search tools extensively both in parallel and sequentially.
+- Before starting multi-step work, decide who owns each deliverable under the applicable execution policy. Gather the evidence needed for the next decision; batch independent searches and stop once the question is answered.
 - Carry out authorized work; honor cancellation and scope changes in ongoing and delegated work.
 - Choose checks that cover the user's expected behavior and reported failures, proportionate to the change and risk. Follow repository guidance for test, lint, and build commands; a passing check supports only what it covers.
 - NEVER commit changes unless the user explicitly asks you to.

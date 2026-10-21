@@ -23,10 +23,13 @@ fn test_no_overrides_contains_all_sections() {
         result.contains("Batch independent tool calls"),
         "应包含 05_using_tools 通用工具纪律（工具条目已迁移至声明段）"
     );
-    assert!(result.contains("<env>"), "应包含 07_runtime 段落");
     assert!(
-        result.contains("Working directory"),
-        "应包含 08_env 替换后结果"
+        result.contains("## System Reminders"),
+        "应包含 07_runtime 段落"
+    );
+    assert!(
+        !result.contains("Working directory:"),
+        "环境独立冻结，不进入内部模板"
     );
 }
 
@@ -116,19 +119,22 @@ fn test_placeholders_replaced() {
         None,
     );
     assert!(!result.contains("{{"), "不应包含未替换的占位符");
-    assert!(result.contains("/custom/path"), "cwd 占位符应被替换");
+    assert!(
+        !result.contains("/custom/path"),
+        "环境值不应打断内部公共前缀"
+    );
 }
 
 #[test]
 fn test_env_contains_cwd() {
-    let result = build_system_prompt(
-        &MetaHarnessState::default(),
-        None,
-        "/custom/path",
-        &AgentCatalogProvider::new(),
-        None,
-        None,
-    );
+    let state = MetaHarnessState::default();
+    let sections = crate::session::build_collected_sections(&state, None, None);
+    let result = PromptTemplate::new(&state, &sections)
+        .render_environment(
+            &PromptEnv::frozen("/custom/path", "2026-10-21", None),
+            &AgentCatalogProvider::new(),
+        )
+        .unwrap();
     assert!(result.contains("/custom/path"), "环境信息应包含 cwd");
 }
 
@@ -296,9 +302,9 @@ fn test_subagent_section_does_not_hardcode_built_in_agent_ids() {
     assert!(!result.contains("`general-purpose`"));
     assert!(!result.contains("subagent_type: \"explorer\""));
     assert!(result.contains("If no entry clearly fits"));
-    // 默认主动委派策略：按独立性/风险/验证成本判断，不再以 2-3 个文件为硬门槛。
+    // 默认主动委派策略：按范围/不确定性/风险/验证成本判断，不以文件数为硬门槛。
     assert!(result.contains("## Default delegation policy"));
-    assert!(result.contains("Judge by independence, risk, and verification cost"));
+    assert!(result.contains("Judge by scope, uncertainty, risk, and verification cost"));
     assert!(result.contains("not by file count"));
     assert!(!result.contains("tasks involving only 2-3 files"));
     assert!(result.contains("do not redo its investigation or edits in the foreground"));
@@ -504,7 +510,7 @@ fn test_boundary_marker_before_dynamic_content() {
     // 缓存区段落（01-06）在 transport boundary 和动态内容段（07_runtime）之前。
     let pos_tone = result.find("# Tone and style").unwrap();
     let pos_boundary = result.find(SYSTEM_PROMPT_DYNAMIC_BOUNDARY).unwrap();
-    let pos_runtime = result.find("Working directory").unwrap();
+    let pos_runtime = result.find("## System Reminders").unwrap();
     assert!(
         result[..pos_tone].contains("# Following conventions"),
         "02_system 应在 06_tone_style 之前"

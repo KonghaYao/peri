@@ -23,7 +23,7 @@ use std::collections::{HashMap, HashSet};
 
 use peri_acp_types::meta_harness::SECTION_HOLDER_MIDDLEWARE;
 
-/// 段落位置属性（契约 2）：boundary 前缓存区 / boundary 后非缓存区。
+/// 段落位置属性：缓存区、内部动态区、最终环境正文（由模型桥接层追加）。
 ///
 /// 与渲染生成段（Persona / Language）的相对位置由渲染面固定（现状顺序
 /// 语义保持）；本枚举只承担"段落归属哪个区"的显式标记。
@@ -33,6 +33,8 @@ pub enum PromptSectionZone {
     Cached,
     /// boundary 后：非缓存区（现状 07/14、gated 段落、收集段）。
     Uncached,
+    /// Frozen environment body; the model bridge appends it after all contributions.
+    Environment,
 }
 
 /// 段落内容来源（持有者侧；覆盖合并发生在 `PromptTemplate` 构造期）。

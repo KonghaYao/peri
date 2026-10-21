@@ -1,6 +1,6 @@
 ---
 name: coder
-description: "Code implementation specialist. Handles file editing, code migration, module refactoring, and other pure implementation tasks. Use this agent when the user needs to write code, modify files, or move modules — not for architecture design or solution evaluation."
+description: "Implement an agreed approach: edit code, update affected callers and tests, and verify the change. Own the complete implementation; return changes and evidence. Escalate unresolved design decisions."
 disallowedTools:
   - Agent
 model: sonnet

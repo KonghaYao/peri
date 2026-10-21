@@ -32,6 +32,10 @@ async fn test_external_instructions_model_request_and_provider_wire() {
         }))
         .with_system(internal)
         .with_external_instructions(Some(Arc::from(external)))
+        .with_environment_prompt(Some(Arc::from(
+            "Working directory: /frozen\nToday's date: 2026-10-21",
+        )))
+        .with_session_id("current-session")
         .with_system_contribution_provider(Arc::new(|| Ok("CONTRIBUTION".into())));
         bridge
             .generate_reasoning(&[BaseMessage::human("go")], &[], None)
@@ -39,6 +43,9 @@ async fn test_external_instructions_model_request_and_provider_wire() {
             .unwrap();
         let request = requests.lock().unwrap().pop().unwrap();
         let system = request.messages[0].text_content().unwrap();
+        assert!(system.ends_with("<env>\nWorking directory: /frozen\nToday's date: 2026-10-21\nSession ID: current-session\n</env>"));
+        assert_eq!(system.matches("<env>").count(), 1);
+        assert!(system.find("CONTRIBUTION").unwrap() < system.find("<env>").unwrap());
         assert_eq!(system.matches(SYSTEM_PROMPT_DYNAMIC_BOUNDARY).count(), 1);
         assert_eq!(system.matches(external).count(), 1);
         assert!(
@@ -70,6 +77,8 @@ async fn test_external_instructions_model_request_and_provider_wire() {
             usize::from(!internal.is_empty())
         );
         let dynamic_text = blocks.last().unwrap()["text"].as_str().unwrap();
+        assert!(dynamic_text.ends_with("</env>"));
+        assert!(dynamic_text.contains("Session ID: current-session"));
         assert_eq!(dynamic_text.matches(external).count(), 1);
         if internal.contains("UNCACHED_INTERNAL") {
             assert!(
@@ -94,6 +103,8 @@ async fn test_external_instructions_model_request_and_provider_wire() {
             .as_value()
             .clone();
         let wire = openai_body["messages"][0]["content"].as_str().unwrap();
+        assert!(wire.ends_with("</env>"));
+        assert!(wire.contains("Session ID: current-session"));
         assert_eq!(wire.matches(external).count(), 1);
         if internal.contains("UNCACHED_INTERNAL") {
             assert!(wire.find("UNCACHED_INTERNAL").unwrap() < wire.find(external).unwrap());
@@ -163,4 +174,61 @@ async fn test_external_instructions_create_boundary_without_internal_or_contribu
     assert_eq!(system.matches(SYSTEM_PROMPT_DYNAMIC_BOUNDARY).count(), 1);
     assert!(system.starts_with(SYSTEM_PROMPT_DYNAMIC_BOUNDARY));
     assert!(system.contains("<agent_instructions>\n  literal  \n</agent_instructions>"));
+}
+
+#[test]
+fn test_environment_keeps_shared_prefix_and_uses_request_session_id() {
+    let bridge = |session: &str, body: &str| {
+        AgentModelBridge::from_arc(Arc::new(CaptureSystemModel {
+            streamed_requests: Arc::new(Mutex::new(Vec::new())),
+        }))
+        .with_system("SHARED_BASE")
+        .with_external_instructions(Some(Arc::from("SHARED_EXTERNAL")))
+        .with_system_contribution_provider(Arc::new(|| Ok("SHARED_CONTRIBUTION".into())))
+        .with_environment_prompt(Some(Arc::from(body)))
+        .with_session_id(session)
+    };
+    let first = bridge("session-a", "Working directory: /a")
+        .build_request(&[], &[])
+        .unwrap();
+    let second = bridge("session-b", "Working directory: /b")
+        .build_request(&[], &[])
+        .unwrap();
+    let first_text = first.messages[0].text_content().unwrap();
+    let second_text = second.messages[0].text_content().unwrap();
+    assert_eq!(
+        first_text.split_once("<env>").unwrap().0,
+        second_text.split_once("<env>").unwrap().0
+    );
+    assert!(first_text.contains(&format!("Session ID: {}", first.session_id.unwrap())));
+    assert!(second_text.contains(&format!("Session ID: {}", second.session_id.unwrap())));
+}
+
+#[test]
+fn test_environment_rejects_missing_session_id_and_reserved_boundary() {
+    let bridge = || {
+        AgentModelBridge::from_arc(Arc::new(CaptureSystemModel {
+            streamed_requests: Arc::new(Mutex::new(Vec::new())),
+        }))
+    };
+    assert!(bridge()
+        .with_environment_prompt(Some(Arc::from("environment")))
+        .build_request(&[], &[])
+        .is_err());
+    assert!(bridge()
+        .with_session_id("valid-session")
+        .with_environment_prompt(Some(Arc::from(SYSTEM_PROMPT_DYNAMIC_BOUNDARY)))
+        .build_request(&[], &[])
+        .is_err());
+    assert!(bridge()
+        .with_session_id("bad\n</env>")
+        .with_environment_prompt(Some(Arc::from("environment")))
+        .build_request(&[], &[])
+        .is_err());
+    assert!(bridge()
+        .with_session_id("valid-session")
+        .build_request(&[], &[])
+        .unwrap()
+        .messages
+        .is_empty());
 }

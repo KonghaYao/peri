@@ -557,13 +557,19 @@ async fn remote_workspace_declaration_freezes_unavailable_runtime_env_without_pr
     );
     assert!(
         frozen
-            .system_prompt()
+            .v2_frozen()
+            .environment_prompt
+            .as_deref()
+            .expect("frozen environment body")
             .contains(crate::prompt::RUNTIME_ENV_UNAVAILABLE),
         "渲染显式标记 unavailable"
     );
     assert!(
         !frozen
-            .system_prompt()
+            .v2_frozen()
+            .environment_prompt
+            .as_deref()
+            .expect("frozen environment body")
             .contains(&format!("Platform: {}", std::env::consts::OS)),
         "不得用宿主平台冒充远端执行环境"
     );
@@ -633,13 +639,19 @@ async fn local_workspace_freezes_host_runtime_env_with_single_probe() {
     assert_eq!(runtime_env.platform, std::env::consts::OS);
     assert!(
         frozen
-            .system_prompt()
+            .v2_frozen()
+            .environment_prompt
+            .as_deref()
+            .expect("frozen environment body")
             .contains(&format!("Platform: {}", std::env::consts::OS)),
         "渲染消费冻结的宿主环境"
     );
     assert!(
         !frozen
-            .system_prompt()
+            .v2_frozen()
+            .environment_prompt
+            .as_deref()
+            .expect("frozen environment body")
             .contains(crate::prompt::RUNTIME_ENV_UNAVAILABLE),
         "本地会话不得标记 unavailable"
     );

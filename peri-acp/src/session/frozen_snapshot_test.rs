@@ -8,7 +8,9 @@ fn make_frozen() -> FrozenSessionData {
     let context = peri_agent::session::FrozenContext {
         system_prompt: Arc::from("system-v1"),
         external_instructions: None,
+        environment_prompt: Some(Arc::from("Working directory: /frozen")),
         legacy_embedded_instructions: false,
+        legacy_embedded_environment: false,
         claude_md: Arc::from("claude-v1"),
         skill_summary: Arc::from("skills-v1"),
         date: Arc::from("2026-09-01"),
@@ -44,7 +46,7 @@ fn test_frozen_snapshot_roundtrip_preserves_all_fields() {
     let raw = encode_frozen_snapshot(&original).unwrap();
     assert_eq!(
         serde_json::from_str::<serde_json::Value>(&raw).unwrap()["version"],
-        2
+        3
     );
     assert!(
         serde_json::from_str::<serde_json::Value>(&raw).unwrap()["data"]
@@ -71,6 +73,10 @@ fn test_frozen_snapshot_roundtrip_preserves_all_fields() {
         .is_enabled(peri_acp_types::beta_flags::FULL_ASYNC_TOOLS));
     // H3：运行环境快照逐字段往返（platform / os_version / is_git_repo）。
     assert_eq!(restored.runtime_env(), original.runtime_env());
+    assert_eq!(
+        restored.v2_frozen().environment_prompt,
+        original.v2_frozen().environment_prompt
+    );
 }
 
 /// [回归测试] 客户端扩展必须作为 V2 独立字段逐字往返，不混入内部 prompt。
@@ -158,13 +164,13 @@ fn test_frozen_snapshot_v1_without_runtime_env_decodes_as_unavailable() {
 #[test]
 fn test_frozen_snapshot_future_version_fails_closed() {
     // Arrange
-    let raw = r#"{"version":3,"data":{}}"#;
+    let raw = r#"{"version":4,"data":{}}"#;
     // Act
     let error = decode_frozen_snapshot(raw)
         .err()
         .expect("future versions must fail closed");
     // Assert
-    assert!(matches!(error, FrozenSnapshotError::UnsupportedVersion(3)));
+    assert!(matches!(error, FrozenSnapshotError::UnsupportedVersion(4)));
 }
 
 #[test]
@@ -229,4 +235,29 @@ fn snapshot_over_total_override_budget_is_diagnosed_without_rewrite() {
         re_encoded.contains(&chunk),
         "再编码仍逐字保留原覆盖正文（只诊断不改写）"
     );
+}
+
+#[test]
+fn test_frozen_snapshot_environment_required_in_v3_and_absent_in_v2() {
+    let mut value: serde_json::Value =
+        serde_json::from_str(&encode_frozen_snapshot(&make_frozen()).unwrap()).unwrap();
+    value["data"]
+        .as_object_mut()
+        .unwrap()
+        .remove("environment_prompt");
+    assert!(matches!(
+        decode_frozen_snapshot(&value.to_string()),
+        Err(FrozenSnapshotError::Invalid(_))
+    ));
+    value["version"] = serde_json::json!(2);
+    let restored = decode_frozen_snapshot(&value.to_string()).unwrap();
+    assert!(restored.v2_frozen().environment_prompt.is_none());
+    assert_eq!(restored.system_prompt(), "system-v1");
+    value["version"] = serde_json::json!(3);
+    value["data"]["environment_prompt"] =
+        serde_json::json!(peri_agent::agent::model_bridge::SYSTEM_PROMPT_DYNAMIC_BOUNDARY);
+    assert!(matches!(
+        decode_frozen_snapshot(&value.to_string()),
+        Err(FrozenSnapshotError::Invalid(_))
+    ));
 }

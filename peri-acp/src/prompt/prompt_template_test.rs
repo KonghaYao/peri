@@ -708,7 +708,7 @@ fn test_render_immutable_layer_order() {
     );
     let safety_pos = result.find("Treat secrets").unwrap(); // 02_system（SafetyAuthorization）
     let engineering_pos = result.find("# Doing tasks").unwrap(); // 03_doing_tasks（EngineeringBehavior）
-    let runtime_pos = result.find("<env>").unwrap(); // 07_runtime（RuntimeStateBoundary）
+    let runtime_pos = result.find("## System Reminders").unwrap(); // 07_runtime（RuntimeStateBoundary）
     let gated_pos = result.find("SubAgent Delegation").unwrap(); // 11_subagent（gated）
     assert!(
         safety_pos < engineering_pos,
@@ -733,19 +733,14 @@ fn test_render_full_mode_keeps_env() {
         proactiveness: None,
         mode: Some("full".into()),
     };
-    let result = build_system_prompt(
-        &MetaHarnessState::default(),
-        Some(&overrides),
-        "/custom/project",
-        &AgentCatalogProvider::new(),
-        Some("2026-01-01"),
-        None,
-    );
-    // 动态段 env (07) 应保留
-    assert!(
-        result.contains("<env>"),
-        "full 模式应保留 07_env 环境信息段落"
-    );
+    let state = MetaHarnessState::default();
+    let sections = crate::session::build_collected_sections(&state, Some(&overrides), None);
+    let result = PromptTemplate::new(&state, &sections)
+        .render_environment(
+            &PromptEnv::frozen("/custom/project", "2026-01-01", None),
+            &AgentCatalogProvider::new(),
+        )
+        .expect("full 模式应保留独立 env 环境段落");
     assert!(
         result.contains("/custom/project"),
         "full 模式下 cwd 占位符应被替换"

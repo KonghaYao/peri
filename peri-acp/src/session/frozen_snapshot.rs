@@ -10,7 +10,7 @@ use std::sync::Arc;
 use peri_agent::session::exec::executor::FrozenSessionData;
 use serde::{Deserialize, Serialize};
 
-const FROZEN_SNAPSHOT_VERSION: u64 = 2;
+const FROZEN_SNAPSHOT_VERSION: u64 = 3;
 
 #[derive(Debug, thiserror::Error)]
 pub(crate) enum FrozenSnapshotError {
@@ -24,6 +24,13 @@ pub(crate) enum FrozenSnapshotError {
 struct FrozenSnapshotEnvelope<T> {
     version: u64,
     data: T,
+}
+
+#[derive(Serialize, Deserialize)]
+struct FrozenSnapshotV3 {
+    #[serde(flatten)]
+    previous: FrozenSnapshotV2,
+    environment_prompt: Option<String>,
 }
 
 #[derive(Serialize, Deserialize)]
@@ -128,14 +135,36 @@ pub(crate) fn encode_frozen_snapshot(
         // prompt has no external extension and permit unsafe derivative rendering.
         serde_json::to_string(&FrozenSnapshotEnvelope { version: 1, data })
             .map_err(FrozenSnapshotError::Invalid)
-    } else {
+    } else if frozen.v2_frozen().legacy_embedded_environment {
+        // Keep legacy provenance when re-saving a main session. A prepared
+        // derived environment must not be appended to its unchanged main prompt.
         serde_json::to_string(&FrozenSnapshotEnvelope {
-            version: FROZEN_SNAPSHOT_VERSION,
+            version: 2,
             data: FrozenSnapshotV2 {
                 legacy: data,
                 external_instructions: frozen
                     .v2_frozen()
                     .external_instructions
+                    .as_deref()
+                    .map(str::to_owned),
+            },
+        })
+        .map_err(FrozenSnapshotError::Invalid)
+    } else {
+        serde_json::to_string(&FrozenSnapshotEnvelope {
+            version: FROZEN_SNAPSHOT_VERSION,
+            data: FrozenSnapshotV3 {
+                previous: FrozenSnapshotV2 {
+                    legacy: data,
+                    external_instructions: frozen
+                        .v2_frozen()
+                        .external_instructions
+                        .as_deref()
+                        .map(str::to_owned),
+                },
+                environment_prompt: frozen
+                    .v2_frozen()
+                    .environment_prompt
                     .as_deref()
                     .map(str::to_owned),
             },
@@ -150,46 +179,65 @@ pub(crate) fn decode_frozen_snapshot(raw: &str) -> Result<FrozenSessionData, Fro
         .get("version")
         .and_then(serde_json::Value::as_u64)
         .ok_or_else(|| invalid_snapshot("missing unsigned version"))?;
-    let (data, external_instructions, legacy_embedded_instructions) = match version {
-        1 => {
-            let envelope: FrozenSnapshotEnvelope<FrozenSnapshotV1> = serde_json::from_value(value)?;
-            let legacy = envelope.data.system_prompt.contains("<agent_instructions>");
-            (envelope.data, None, legacy)
-        }
-        2 => {
-            if value
-                .get("data")
-                .and_then(|data| data.get("external_instructions"))
-                .is_none()
-            {
-                return Err(invalid_snapshot("missing external_instructions in V2"));
+    let (data, external_instructions, legacy_embedded_instructions, environment_prompt) =
+        match version {
+            1 => {
+                let envelope: FrozenSnapshotEnvelope<FrozenSnapshotV1> =
+                    serde_json::from_value(value)?;
+                let legacy = envelope.data.system_prompt.contains("<agent_instructions>");
+                (envelope.data, None, legacy, None)
             }
-            let envelope: FrozenSnapshotEnvelope<FrozenSnapshotV2> = serde_json::from_value(value)?;
-            if envelope
-                .data
-                .external_instructions
-                .as_deref()
-                .is_some_and(|text| {
+            2 | 3 => {
+                if value
+                    .get("data")
+                    .and_then(|data| data.get("external_instructions"))
+                    .is_none()
+                {
+                    return Err(invalid_snapshot("missing external_instructions in V2/V3"));
+                }
+                let (data, environment_prompt) = if version == 3 {
+                    if value
+                        .get("data")
+                        .and_then(|data| data.get("environment_prompt"))
+                        .is_none()
+                    {
+                        return Err(invalid_snapshot("missing environment_prompt in V3"));
+                    }
+                    let envelope: FrozenSnapshotEnvelope<FrozenSnapshotV3> =
+                        serde_json::from_value(value)?;
+                    let environment = envelope.data.environment_prompt;
+                    if environment.as_deref().is_some_and(|body| {
+                        body.contains(
+                            peri_agent::agent::model_bridge::SYSTEM_PROMPT_DYNAMIC_BOUNDARY,
+                        )
+                    }) {
+                        return Err(invalid_snapshot("invalid environment_prompt in V3"));
+                    }
+                    (envelope.data.previous, environment.map(Arc::from))
+                } else {
+                    let envelope: FrozenSnapshotEnvelope<FrozenSnapshotV2> =
+                        serde_json::from_value(value)?;
+                    (envelope.data, None)
+                };
+                if data.external_instructions.as_deref().is_some_and(|text| {
                     text.len() > 64 * 1024
                         || text.contains(
                             peri_agent::agent::model_bridge::SYSTEM_PROMPT_DYNAMIC_BOUNDARY,
                         )
-                })
-            {
-                return Err(invalid_snapshot("invalid external_instructions in V2"));
+                }) {
+                    return Err(invalid_snapshot("invalid external_instructions in V2/V3"));
+                }
+                (
+                    data.legacy,
+                    data.external_instructions
+                        .filter(|text| !text.is_empty())
+                        .map(Arc::from),
+                    false,
+                    environment_prompt,
+                )
             }
-            (
-                envelope.data.legacy,
-                envelope
-                    .data
-                    .external_instructions
-                    .filter(|text| !text.is_empty())
-                    .map(Arc::from),
-                false,
-            )
-        }
-        _ => return Err(FrozenSnapshotError::UnsupportedVersion(version)),
-    };
+            _ => return Err(FrozenSnapshotError::UnsupportedVersion(version)),
+        };
     let meta_harness = peri_acp_types::meta_harness::MetaHarnessState {
         section_overrides: data
             .meta_harness
@@ -209,6 +257,8 @@ pub(crate) fn decode_frozen_snapshot(raw: &str) -> Result<FrozenSessionData, Fro
     let frozen = peri_agent::session::FrozenContext {
         system_prompt: Arc::from(data.system_prompt),
         external_instructions,
+        environment_prompt,
+        legacy_embedded_environment: version < 3,
         legacy_embedded_instructions,
         claude_md: Arc::from(data.claude_md),
         skill_summary: Arc::from(data.skill_summary),

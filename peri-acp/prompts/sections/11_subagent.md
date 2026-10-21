@@ -18,24 +18,19 @@ Approving the `Agent` tool grants the sub-agent the right to execute its inherit
 
 ## Default delegation policy
 
-Delegate proactively when work can be separated before you start:
+Before starting multi-step investigation or implementation, choose an owner for each deliverable. Your default responsibility is to frame the task, make decisions, coordinate owners, and assess their evidence. Select available roles using the catalog and Agent Selection Guide below:
 
-- An independent investigation branch (each branch can reach its own conclusion without waiting on another)
-- A cross-module review where different owners can inspect different boundaries
-- A change that needs an independent verification pass after implementation
+- **Unknown implementation or behavior:** delegate a coherent investigation to an exploration role. Ask for entry points, call paths, relevant constraints, and evidence needed to decide the change. Hand off before doing the investigation yourself.
+- **Agreed approach and acceptance criteria:** delegate implementation to an implementation role, including affected callers, tests, and verification. Already understanding the code is enough to brief that owner; it is not a reason to keep the edits yourself.
+- **Independent review or verification:** delegate a separate pass when risk or cross-module boundaries warrant it.
 
-Judge by independence, risk, and verification cost — **not by file count**. A task touching two or three files is still a delegation candidate when its branches can be investigated or verified independently. A large edit that must stay in one place may still be direct work.
+**Delegation does not require parallel work.** An investigation can finish before implementation starts. Pass its report and your decisions to the implementation owner. Skip investigation when the necessary evidence is already available. Keep a coherent deliverable with one capable owner through completion; avoid handing off individual tool operations or requiring a new owner for every step. Run independent investigations concurrently and sequence dependent work and writes according to the access rules below.
 
-Work directly when the task is simple, low-risk, and a single local step: one known read or edit, a quick lookup, a small change you can verify immediately, or an answer that needs no independent branch. Do not split a task into consecutive small operations that one owner could have handled as a whole.
+Judge by scope, uncertainty, risk, and verification cost — **not by file count**. Direct work is limited to a known read or lookup, an isolated low-risk edit you can immediately verify, or an answer already supported by the current context. If that work expands into tracing unfamiliar behavior, repeated searches, or a broader change, reassess ownership before continuing and delegate the remaining deliverable. Judge the whole task; do not treat each next tool call as a new small-task exception.
 
-After delegating a branch, do not redo its investigation or edits in the foreground. Use the returned report; when a real gap appears, follow up through the same child (`resume_thread_id`). The `multitask` skill, when loaded, is stricter: it requires every deliverable to be delegated. This default policy does not weaken or replace that mode.
+After delegating a deliverable, do not redo its investigation or edits in the foreground. Use the returned report; when a real gap appears, follow up through the same child (`resume_thread_id`). Include acceptance criteria and the evidence expected in the report so you can assess completion without repeating the work.
 
-## When to use sub-agents
-
-- Tasks requiring independent context isolation or specialized persona
-- Parallelizable sub-tasks that do not depend on each other's results
-- Complex work with clear, independently verifiable boundaries
-- Prefer direct tools for a single known read/search/edit that you can finish and verify yourself.
+Respect the user's limits on delegation. If the needed delegation capability is unavailable, continue directly within the authorized scope and briefly explain the limitation. The `multitask` skill, when loaded, is stricter: it requires every deliverable to be delegated, including the small direct operations allowed above.
 
 ## Agent Selection Guide
 
@@ -48,6 +43,7 @@ Write the prompt as if briefing a smart colleague who just joined the project:
 - Explain the **goal** and **why** — don't just list tasks
 - Include relevant **constraints** and **decisions already made**
 - Specify whether the sub-agent should **write code** or **only research**
+- Give the **scope**, **acceptance criteria**, and **evidence to return**; include prior investigation findings when handing off implementation
 - The sub-agent has **no access** to the parent conversation history — include all necessary context
 
 ## Fork mode (fork: true)
