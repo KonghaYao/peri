@@ -76,6 +76,18 @@ pub(super) fn handle_history_committed(
     if state.active_session_id != info.session_id {
         return;
     }
+    apply_commit_and_release(state, info);
+}
+
+/// 应用一次提交事实；有视口锚点时立刻消费保留计划并释放正文。
+///
+/// 提交事实有两个来源：`peri/history_committed` 通知，以及窗口页响应自带的
+/// `committedTail`/`checkpointId`。后者让逐条 position 提升后不必等下一次
+/// Full Compact 才封印。
+fn apply_commit_and_release(
+    state: &mut BridgeState,
+    info: &crate::kit::history_window::HistoryCommitInfo,
+) {
     match state.window.apply_commit(info) {
         crate::kit::history_window::CommitOutcome::Applied { sealed_segments } => {
             tracing::debug!(
@@ -419,6 +431,22 @@ pub(super) fn handle_window_page_loaded(
                     pending,
                     crate::kit::history_window::ReleaseReason::BudgetPressure,
                 );
+            }
+            // 页响应自带 durable tail/checkpoint，等于逐条持久回执：提升过的
+            // live 条目可在本次响应内封印并进入释放计划，不必等下一次 Full Compact。
+            if let (Some(committed_tail), Some(checkpoint_id)) = (
+                response.committed_tail.as_ref(),
+                response.checkpoint_id.as_ref(),
+            ) {
+                let info = crate::kit::history_window::HistoryCommitInfo {
+                    session_id: response.session_id.clone(),
+                    session_generation: response.identity.session_generation.clone(),
+                    structure_version: response.identity.structure_version,
+                    checkpoint_id: checkpoint_id.clone(),
+                    summary_entry_id: None,
+                    committed_tail: committed_tail.clone(),
+                };
+                apply_commit_and_release(state, &info);
             }
             // 空页已由 consumer 按方向清空游标（EOF/无更多行）；再按驻留边缘回写会
             // 把该方向重新“点亮”，导致对同一 cursor 无限重试。adopt-only 页同样

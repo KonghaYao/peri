@@ -68,6 +68,11 @@ impl Default for WindowLimits {
 pub struct WindowBudget {
     pub limits: WindowLimits,
     pub resident_body_bytes: usize,
+    /// 已归档但尚无持久身份的实时单元（工具卡、子 Agent 等）正文。
+    ///
+    /// 计入总驻留预算，但不可淘汰：实时协议没有给出这些单元的持久位置，
+    /// 释放后无法按页取回。等协议提供持久关联后才能转入可释放段。
+    pub unattributed_live_bytes: usize,
     pub resident_reserved_bytes: usize,
     pub pinned_body_bytes: usize,
     pub page_reserved_bytes: usize,
@@ -82,6 +87,7 @@ impl WindowBudget {
         Self {
             limits,
             resident_body_bytes: 0,
+            unattributed_live_bytes: 0,
             resident_reserved_bytes: 0,
             pinned_body_bytes: 0,
             page_reserved_bytes: 0,
@@ -94,6 +100,12 @@ impl WindowBudget {
     pub fn evictable_body_bytes(&self) -> usize {
         self.resident_body_bytes
             .saturating_sub(self.pinned_body_bytes)
+    }
+
+    /// 总驻留正文：可淘汰段 + 尚无持久身份、不可淘汰的实时单元。
+    pub fn total_resident_body_bytes(&self) -> usize {
+        self.resident_body_bytes
+            .saturating_add(self.unattributed_live_bytes)
     }
 
     pub fn watermark_bytes(&self) -> usize {
@@ -118,14 +130,15 @@ impl WindowBudget {
 
     pub fn has_body_capacity_for(&self, incoming_body_bytes: usize) -> bool {
         // 已移除但未 ack 的正文仍保守占额，避免渲染侧未释放就重复接纳。
-        self.resident_body_bytes
+        // 无持久身份的实时单元同样占用真实内存，必须计入上限。
+        self.total_resident_body_bytes()
             .saturating_add(self.pending_release_bytes)
             .saturating_add(incoming_body_bytes)
             <= self.limits.body_bytes
     }
 
     pub fn can_prefetch(&self) -> bool {
-        self.resident_body_bytes < self.prefetch_threshold_bytes()
+        self.total_resident_body_bytes() < self.prefetch_threshold_bytes()
             && self.page_reserved_bytes == 0
             && self.pending_merge_bytes == 0
     }

@@ -10,7 +10,7 @@ use serde_json::Value;
 use super::model::{
     DurableWatermark, HistoryWindow, PinReason, RegionKey, ReleasePlan, WindowIdentity,
 };
-use super::{AnchorRelocation, SegmentKey};
+use super::{AnchorRelocation, PersistentEntryKey, SegmentKey};
 use peri_acp_types::history_window::HistoryCommittedTail;
 use peri_acp_types::thread::ThreadId;
 
@@ -83,6 +83,11 @@ impl HistoryWindow {
         if !self.note_checkpoint(info.checkpoint_id.clone()) {
             return CommitOutcome::Duplicate;
         }
+        // 持久回执的 tail 是唯一一条带消息身份的提交事实：先把同身份的实时条目
+        // 对齐到它的 position，再按水位封印。其余实时条目仍等窗口页提供逐条位置。
+        let tail_key =
+            PersistentEntryKey::own(format!("{}:{}", info.session_id, tail.entry_id.as_uuid()));
+        self.promote_live_seal_position(&tail_key, tail.position);
         let sealed_segments = self.seal_through_position(tail.position);
         self.set_durable_watermark(DurableWatermark {
             checkpoint_id: Some(info.checkpoint_id.clone()),

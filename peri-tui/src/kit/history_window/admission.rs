@@ -464,7 +464,7 @@ impl HistoryWindow {
         {
             return EvictionPlan::default();
         }
-        let current = self.budget.resident_body_bytes;
+        let current = self.budget.total_resident_body_bytes();
         let target = self.budget.release_target_bytes(incoming_body_bytes);
         let needed = current
             .saturating_add(incoming_body_bytes)
